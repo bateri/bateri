@@ -461,4 +461,4 @@ sıkı döngüsüne girmesi (alacritty `event_loop.rs:140`).
 - [x] `/code-review` çalıştırıldı, bulgular giderildi
 - [x] `/audit` çalıştırıldı, bulgular giderildi (mercek 1 kapsül; 3 panik yolu — `unwrap` yalnız `// audit:` ile)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [x] Commit: `411415c`
+- [x] Commit: ed1c5a3

@@ -95,7 +95,7 @@ applicationWillTerminate / ChildExit / deadline ── Session::shutdown ── 
 
 | Phase | Durum | Commit |
 |-------|-------|--------|
-| phase-1 | ✅ | `411415c` |
+| phase-1 | ✅ | ed1c5a3 |
 | phase-2 | | |
 | phase-3 | | |
 | phase-4 | | |
