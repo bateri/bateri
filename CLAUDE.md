@@ -14,7 +14,9 @@ bir işe başlamadan önce ilgili bölümüne bakılır, sıfırdan keşfedilmez
 
 İskelet 001 ile kuruldu (workspace, Makefile, shader zinciri, ilk pencere),
 VT motoru 002 ile: `bt-core` shell'i çalıştırır, `bt-gpu` hücre arka planlarını
-çizer. `bt-atlas` hâlâ boş — glyph 003'te. Aşağıdaki sözleşme kod
+çizer, `bt-shell` klavyeyi PTY'ye akıtır ve kapanışta shell'i düzgün bitirir.
+`bt-atlas` hâlâ boş — glyph 003'te, yani yazılan hâlâ görünmez: bugün ekranda
+yalnız renkli hücreler var. Aşağıdaki sözleşme kod
 geldikçe kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse
 ikisinden biri aynı commit'te düzelir.
 
@@ -56,7 +58,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52), komut blokları, seçim, ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek (00X) | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `core-text`, `core-graphics` |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
-| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi | `objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma) |
+| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi | `objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`), `libc` (yalnız bekçinin `write` + `_exit`'i) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -81,6 +83,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **Boşta sıfır kare.** Kirli satır yoksa frame gönderilmez. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
   animasyonu 90 ms'lik solmaya indirir.
+- **Kapanış bloklar ve bunun bir sınırı var.** `Session::shutdown()`
+  `SIGHUP`'tan sonra çocuğu bekler; sinyali yutan bir çocuk (`trap '' HUP`)
+  ana thread'i süresiz bekletir. Duman koşusunda bekçi thread bunu keser
+  (`_exit(70)`), etkileşimli kullanımda **kesen yok** — bilinen borç; kalıcı
+  çözüm `bt-core`'da sınırlı bekleme (`SIGHUP` → süre → `SIGKILL`).
 - **Render yolu bloklanmaz.** PTY okuma ve ayrıştırma kendi thread'inde; AppKit
   çağrıları `MainThreadMarker` ile ana thread'de; renderer `CAMetalDisplayLink`
   ile sürülür.

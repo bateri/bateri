@@ -19,3 +19,9 @@ objc2-app-kit = { workspace = true }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.
 objc2-quartz-core = { workspace = true, features = ["CALayer"] }
+# Ana kuyruk: `Wake::child_exit` okuyucu thread'de gelir ve `terminate:` ana
+# thread'in işidir. Grafta bt-gpu üzerinden zaten vardı; bu iki satır yeni
+# crate çekmez, `Cargo.lock`'a yalnız kenar ekler.
+dispatch2 = { workspace = true }
+# Yalnız bekçi thread'in `write` + `_exit`'i; gerekçesi workspace manifest'inde.
+libc = { workspace = true }
