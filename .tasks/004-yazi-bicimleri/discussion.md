@@ -78,59 +78,90 @@ scrollback'te yaşamıyor, assert'e dokunulmuyor.
 > sınama literalini kırar. `Default` + `..Default::default()` gerekir;
 > `#[non_exhaustive]` **çözüm değil** — `bt-gpu` o zaman `Cell`'i hiç kuramaz.
 
-## Karar 3: Hangi alt çizgi çeşitleri? → **düz + üstü çizili, ayrı renk yok**
+## Karar 3: Hangi alt çizgi çeşitleri? → **beşi de + SGR 58 rengi**
 
-Alacritty beş çeşit alt çizgi (düz, çift, kıvrımlı, noktalı, kesikli) ve
-`cell.underline_color()` ile ayrı bir alt çizgi rengi taşıyor.
+<!-- 2026-09-11: kullanıcı kıvrımlı çizgiyi kapsama aldı; bu bölüm ve Karar 4
+     o karara göre yeniden yazıldı. 1. tur muhakemesi bu yönü görmedi. -->
 
-İlk taslak ayrı rengi (SGR 58) kapsama alıyordu. **Geri alındı** — taslak
-kendi içinde çelişiyordu: sınır tipinde renk alanı yoktu ama Karar 4 ayrı
-geometriyi tam da "ayrı alt çizgi rengi mümkün olsun" diye seçiyordu.
+Alacritty beş çeşit alt çizgi taşıyor ve hepsi tek bayrak kümesinde
+(`cell.rs:29-35`): `UNDERLINE`, `DOUBLE_UNDERLINE`, `UNDERCURL`,
+`DOTTED_UNDERLINE`, `DASHED_UNDERLINE` — ayrıca `STRIKEOUT` ve
+`cell.underline_color()`.
 
-Ayrı renk çıkarıldı çünkü kazancı yok: SGR 58'in gerçek tüketicisi (nvim
-tanı çizgileri) onu **kıvrımlı** çizgiyle birlikte kullanıyor ve kıvrımlı
-zaten kapsam dışı (ayrı shader ister — Metalterm'in `cell_rule` pipeline'ının
-asıl sebebi odur). Düz **ve** renkli alt çizgi tek başına neredeyse hiç
-üretilmiyor. Artakalan görsel fark tartılabilir ve küçük: renkli bir alt
-çizginin bir descender'ın (`g j p q y`) kenar yumuşatma bandını kestiği
-birkaç piksel.
+**Kıvrımlı çizgi kapsama alınınca beşini birden almak setin şeklini
+bozmuyor, düzeltiyor.** Gerekçe: kıvrımlı çizgi zaten bir fragment shader'ı
+zorunlu kılıyor (düz bir dikdörtgen değil, dalga). O shader var olduğunda
+çift / noktalı / kesikli **aynı shader'ın desen dalları**: her biri birkaç
+satır. "Yalnız kıvrımlı" demek, beş kardeşten dördünü keyfî olarak dışarıda
+bırakmak ve `bt-core` sınırına yarım bir enum koymak olurdu.
 
-**Kapsamda:** düz alt çizgi + üstü çizili, rengi **ön plan**.
-**Kapsam dışı, kayda geçer:** çift / kıvrımlı / noktalı / kesikli, SGR 58.
+SGR 58 (ayrı alt çizgi rengi) da **birlikte gelir**: kıvrımlı çizginin tek
+gerçek tüketicisi dil sunucularıdır ve onlar rengi anlam taşımak için
+kullanır — hata kırmızı, uyarı sarı. Renksiz undercurl yarım özelliktir.
 
-## Karar 4: Kural çizgisi glyph mi, ayrı geometri mi? → **ayrı geometri, üçüncü liste**
+```rust
+// bt-core sınırı
+pub enum UnderlineStyle { None, Single, Double, Curl, Dotted, Dashed }
+// Cell: underline: UnderlineStyle,
+//       underline_color: Option<LinearRgba>,   // SGR 58; None → ön plan
+//       strikeout: bool,
+```
 
-Düz bir kural çizgisi renkli bir dikdörtgen; `cell_bg` pipeline'ının
-`Instance { pos, size, rgba }` yapısı zaten tam olarak onu çiziyor ve
-`pos`/`size` piksel cinsinden (`frame.rs:128-133`). Yani **`.metal`
-dosyalarına hiç dokunulmuyor**; `make shader`'ın koşulu doğmuyor.
+**Kapsamda:** beş alt çizgi çeşidi + üstü çizili + SGR 58 rengi.
+**Kapsam dışı, kayda geçer:** üstü çizili için ayrı renk (SGR'de yok).
 
-Atlasta glyph olarak tutmak üç yerde kötü: yuva harcar, kalınlık ve konum
-font metriğinden değil raster'dan gelir, rengi glyph'in rengine bağlanır.
+## Karar 4: Kural çizgisi nasıl çizilir? → **`cell_rule` pipeline'ı, yeni `.metal`**
 
-**Kurallar `bg` listesine yazılamaz, üçüncü bir liste gerekir — ve gerekçe
-imleçtir.** `push_cursor` imleç bloğunu `self.bg`'nin **sonuna** ekliyor
-(`frame.rs:150-158`) ve o blok opak. Kural `bg`'ye girseydi imlecin altındaki
-hücrenin alt çizgisi imleç tarafından örtülürdü. Üçüncü liste glyph'lerden
-**sonra** kodlanır, yani imlecin de üstüne çizilir — ve orada rengi
-`bt-core`'un imleç için zaten tersine çevirdiği ön plandır, yani görünür
-kalması bedava (003'ün glyph için kurduğu mekanizmanın aynısı).
+<!-- 2026-09-11: kıvrımlı çizgi kararıyla yeniden yazıldı. İlk hâli
+     "cell_bg pipeline'ı yeniden kullanılır, .metal değişmez" diyordu; dalga
+     bir fragment hesabı istediği için o yol kapandı. -->
 
-Yan kazanç: kural glyph'ten sonra çizildiği için descender'ları keser, ama
-rengi ön planla aynı olduğundan piksel piksel aynı sonucu verir.
+Düz bir çizgi `cell_bg`'nin `Instance`'ıyla çizilebilirdi, ama **dalga
+çizilemez**: kıvrım fragment başına bir hesap ister. Yani bu set
+`crates/bt-gpu/shaders/cell_rule.metal` ekliyor ve pipeline sayısı üçe
+çıkıyor (`cell_bg`, `cell`, `cell_rule`). Metalterm'in de tam olarak böyle
+ayrı bir `cell_rule` pipeline'ı var (`docs/ARASTIRMA.md`).
 
-`bg_count` **el değmez** → `hucre=K` jetonunun anlamı bit bit korunur ve
-`push`'taki `debug_assert_eq!(bg.len(), bg_count)` bekçisi olduğu gibi kalır.
+**Sonuç: `make shader` bu sette zorunlu kapı.** İlk taslak "koşulu doğmuyor"
+diyordu; artık doğuyor.
 
-> Geometri sorunu: `Frame::push` kural dikdörtgenini kurmak için alt çizginin
-> konum ve kalınlığını bilmeli, ama tek bildiği ölçü `clear()`'dan gelen
-> `cell_px`. `bt_atlas::Metrics`'i `Frame`'e taşımak katman tablosunu
-> bulanıklaştırır — `CellMetrics` bunu zaten açıkça reddediyor
+Instance düzeni — 003'ün hizalama tuzağı burada **yeniden** geçerli:
+
+```rust
+#[repr(C)]
+pub(crate) struct RuleInstance {
+    pos: [f32; 2],    // @0   hücrenin sol üstü, piksel
+    size: [f32; 2],   // @8   kural dikdörtgeni (kıvrımda daha yüksek)
+    rgba: [f32; 4],   // @16  lineer; SGR 58 yoksa ön plan
+    style: u32,       // @32  UnderlineStyle'ın sayısal karşılığı
+    _pad: [u32; 3],   // @36  MSL tarafı 16'ya yuvarlıyor, Rust yuvarlamıyor
+}
+const _: () = assert!(size_of::<RuleInstance>() == 48);
+```
+
+Dolgu **bilinçli ve zorunlu**: MSL struct hizası `float4` yüzünden 16, yani
+`sizeof` 36'dan 48'e yuvarlanır; Rust `#[repr(C)]` yuvarlamaz ve 36'da kalır.
+003 bu tuzağı alan sırasını değiştirerek çözmüştü, burada çözülemiyor
+(`style` gerçekten instance başına) — o yüzden dolgu alanı yazılır ve iki
+tarafa da `static_assert`/`offset_of!` çifti konur, `cell.metal`'daki gibi.
+
+**Üçüncü liste — gerekçe imleç.** `push_cursor` imleç bloğunu `self.bg`'nin
+**sonuna** ekliyor (`frame.rs:150-158`) ve o blok opak. Kural `bg`'ye
+girseydi imlecin altındaki hücrenin alt çizgisi örtülürdü. Ayrı liste
+glyph'lerden **sonra** kodlanır, yani imlecin de üstüne çizilir — ve orada
+rengi `bt-core`'un imleç için zaten tersine çevirdiği ön plandır (SGR 58 yoksa),
+yani görünür kalması bedava.
+
+`bg_count` **el değmez** → `hucre=K` bit bit korunur ve `push`'taki
+`debug_assert_eq!(bg.len(), bg_count)` bekçisi olduğu gibi kalır.
+
+> Geometri sorunu: `Frame::push` kural dikdörtgenini kurmak için çizginin
+> konumunu, kalınlığını ve kıvrım yüksekliğini bilmeli, ama tek bildiği ölçü
+> `clear()`'dan gelen `cell_px`. `bt_atlas::Metrics`'i `Frame`'e taşımak
+> katman tablosunu bulanıklaştırır — `CellMetrics` bunu açıkça reddediyor
 > (`renderer.rs:94-97`), atlas ödüncü de `encode_glyphs`'e hapsedilmiş.
 > **Çözüm var olan örüntü:** kural metriği kare boyunca sabittir, tıpkı
-> `cell_px` gibi → `Frame::clear(cell_px, rule_px)` parametresi olur, alanı
-> değil. `link.rs` değeri `Renderer`'ın **ödünç değil değer** döndüren bir
-> erişimcisinden alır, `atlasi_esitle` ile aynı şekilde.
+> `cell_px` gibi → `Frame::clear(cell_px, rule_px)` parametresi olur.
 
 ## Karar 5: Atlas anahtarı ve font yüzleri
 
@@ -322,3 +353,26 @@ Hiçbir mercek `KIRMIZI` vermedi: yaklaşım ayakta, itirazlar giderildi.
   sıfıra yakın, kaybı gerçek (`bat`, `delta`, markdown, nvim).
 - **`Metrics`'in iki kalınlık alanını tek alanda birleştirmek** (Sadelik,
   kendi de "itiraz değil" dedi) — bir `u16` kazandırır, okunurluk kaybettirir.
+
+## Karar (2026-09-11, kullanıcı onayı)
+
+- **Kapsam: yalnız yazı biçimleri** — kalın, eğik, alt çizgi ailesi, üstü
+  çizili. Gerekçe: emoji tek hücreye sığmıyor ve 003'ün iki öncülünü birden
+  kırıyor (tek `R8Unorm` doku, hücre boyutunda glyph); aynı problemi 003'ten
+  devreden "geniş karakter yarım çiziliyor" borcuyla tek sette çözmek daha
+  temiz. Kutu çizim ise fonttan glyph almayan yordamsal bir iş, konu birliği
+  yok.
+- **Reddedilen: emoji bu sete** — geniş-glyph setini yarım bırakırdı.
+- **Reddedilen: kutu çizim bu sete** — yazı biçimleriyle ortak parçası yok.
+- **Alt çizgi: kıvrımlı dâhil, beş çeşit + SGR 58 rengi.** Kullanıcı
+  kıvrımlı çizgiyi (nvim / dil sunucusu tanı çizgileri) açıkça istedi.
+  Panelin 1. turu bu yönü **görmedi** — Karar 3 ve Karar 4 bu karara göre
+  yeniden yazıldı ve muhakeme 2. tura sokuldu.
+- **Reddedilen (öneri geri alındı): "yalnız düz + üstü çizili, ayrı renk
+  yok"** — 1. turun önerisiydi; kullanıcı kıvrımlıyı isteyince gerekçesi
+  düştü. Kıvrımlı bir shader zorunlu kılıyor, o shader varken beş stil aynı
+  shader'ın desen dallarına iniyor ve SGR 58 rengi olmadan undercurl yarım
+  özellik kalıyor.
+- **`kural=` duman jetonu: eklenecek** (ana döngü kararı, Karar 9). İki
+  mercek çelişti; tie-break kodda yapıldı — üçüncü liste korunduğu için
+  jeton gerçekten yeni bir yolu kanıtlıyor.
