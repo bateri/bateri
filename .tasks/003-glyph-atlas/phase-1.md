@@ -255,4 +255,4 @@ oynaması hasar zamanlamasıdır, jeton sözleşmesi değişmedi.
 - [x] `/code-review` çalıştırıldı (10 bulgu): 7 uygulandı, 1 phase-4'e devredildi, 2 gerekçeli waive (yukarıda)
 - [x] `/audit` çalıştırıldı: M1/M6/M9 temiz, M3 + M10 giderildi, M2/M4/M5/M7/M8 ilgisiz
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [x] Commit: 4938faf
+- [x] Commit: b5a0585
