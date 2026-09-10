@@ -164,7 +164,9 @@ ikinci bir CF sarmalayıcı yığını olurdu). phase-1, phase-3 ve phase-4
 
 - [ ] B.1 `/measure 003-glyph-atlas` `[komut]` — beş ölçüm bekliyor;
       2026-09-10'da koştu, **ölçüm aracı yok** (kanca seti bekliyor, bkz. B.1)
-- [ ] B.2 Göz kontrolü `[elle]` — `colorspace` `nil` ve glyph yerleşimi
+- [x] B.2 Göz kontrolü `[elle]` — 2026-09-10, kullanıcı baktı: harfler hücrelerine
+      oturuyor, kenarlarda saydamlık yok, kırmızı zemin doğru. `colorspace` `nil`
+      kalıyor: P3 ekranda gözle sapma görülmedi
 - [x] B.3 Bilinen sınırlar `[oto]` — kod yorumlarında ve phase notlarında yazılı
 - [x] B.4 Bağımlılık kaydı `[oto]` — `Cargo.lock` depoda, gerekçe `discussion.md → Karar`
 
