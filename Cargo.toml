@@ -29,6 +29,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 # DispatchData kurucuları `block2` feature'ının arkasında; objc2-metal bunu
 # açmaz. Kullanıcı onaylı bağımlılık kararı: .tasks/001 discussion.md → Karar.
 dispatch2 = { version = "0.3", features = ["block2"] }
+# VT ayrıştırma, grid, scrollback, hasar, PTY ve okuyucu thread. bt-core onu
+# KAPSÜLLER: pub API'de alacritty tipi görünmez. Kullanıcı onaylı bağımlılık
+# kararı: .tasks/002-vt-motoru/discussion.md → Karar. Tek varsayılan feature
+# serde'dir ve kapatılır: hiçbir yerde serialize etmiyoruz.
+alacritty_terminal = { version = "0.26", default-features = false }
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
