@@ -47,19 +47,12 @@ struct WakerInner {
     /// **Ama `Drop`'u ana thread dışında bloklar:** ana kuyruğa `exec_sync`
     /// ile iş atıp bekler. Bu gövdeyi Metal'in tamamlanma bloğu da tutuyor,
     /// yani son referans orada düşerse ve ana thread o sırada kapanışta
-    /// bekliyorsa ikisi birbirini kilitler. Bugün ulaşılamaz (`process::exit`
-    /// kapanışı atlıyor); phase-4'ün kapanış sırası bunu çözmek zorunda ve
-    /// checklist'inde yazılı.
+    /// bekliyorsa ikisi birbirini kilitler. Kapanış yolu bu yüzden
+    /// [`DisplayLink::stop`] çağırır ve `DisplayLink`'i **düşürmez**: son
+    /// referans hep ana thread'de kalır.
     link: MainThreadBound<Retained<CAMetalDisplayLink>>,
-    /// Pencere görünür mü.
-    ///
-    /// Kapı **her iki** tarafta da gerekiyor: çizim tarafında (callback erken
-    /// döner) ve uyandırma tarafında (burası). Yalnız çizim tarafında olsaydı
-    /// örtülü pencerede konuşkan bir shell link'i tazeleme hızında kaldırıp
-    /// yatırırdı — kare çizilmez ama her vsync'te bir ana thread callback'i ve
-    /// `CAMetalDisplayLink`'in callback'ten önce aldığı bir drawable ödenir.
-    /// Çizim durur, ritim durmaz; sözleşmenin harfi kalır, ruhu gider.
-    gorunur: AtomicBool,
+    /// Kare çizilir mi, ritim döner mi.
+    kapi: Kapi,
     /// Ana kuyrukta bekleyen bir "aç" işi var mı.
     ///
     /// Kareler zaten birleşiyordu, **dispatch'ler birleşmiyordu**: alacritty
@@ -83,7 +76,7 @@ impl Waker {
         // Hasar HER ZAMAN dikilir; görünmezken yalnız link açılmaz. Bayrak
         // tüketilmediği için görünürlük dönünce birikmiş hasar çizilir.
         self.inner.dirty.mark();
-        if !self.inner.gorunur.load(Ordering::Acquire) {
+        if !self.inner.kapi.acik() {
             return;
         }
         if self.inner.bekleyen.swap(true, Ordering::AcqRel) {
@@ -94,18 +87,78 @@ impl Waker {
             // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
             inner.bekleyen.store(false, Ordering::Release);
+            // Kapı **burada da** okunuyor: bu blok kuyruğa girdikten sonra
+            // pencere örtülmüş ya da link durdurulmuş olabilir. Okumasaydı
+            // link bir kez açılır, bir vsync callback'i ve bir drawable
+            // ödenirdi — ve `stop()` sonrası bu, `invalidate`'in ardından
+            // gelen `setPaused(false)`'un etkisiz olduğu varsayımına
+            // dayanmak olurdu; kodun geri kalanı o varsayımı bilerek yapmıyor.
+            if !inner.kapi.acik() {
+                return;
+            }
             inner.link.get(mtm).setPaused(false);
         });
     }
 
-    fn gorunur(&self) -> bool {
-        self.inner.gorunur.load(Ordering::Acquire)
+    fn kapi(&self) -> &Kapi {
+        &self.inner.kapi
+    }
+}
+
+/// Kare istemenin açık/kapalı kapısı — **durma politikasının tamamı**.
+///
+/// `Ardisik` gibi ayrı bir tip ve aynı sebeple: ObjC'siz, kilitsiz ve
+/// platformsuz olduğu için sınanabilir; `Waker`'a gömülü kalsaydı yalnız
+/// gerçek bir pencereyle denenebilirdi.
+///
+/// Kapı **her iki** tarafta da okunur: çizim tarafında (callback erken döner)
+/// ve uyandırma tarafında ([`Waker::wake`]). Yalnız çizim tarafında olsaydı
+/// örtülü pencerede konuşkan bir shell link'i tazeleme hızında kaldırıp
+/// yatırırdı — kare çizilmez ama her vsync'te bir ana thread callback'i ve
+/// `CAMetalDisplayLink`'in callback'ten önce aldığı bir drawable ödenir.
+/// Çizim durur, ritim durmaz; sözleşmenin harfi kalır, ruhu gider.
+struct Kapi {
+    /// Pencere görünür mü. İki yönlü: `windowDidChangeOcclusionState:` hem
+    /// örtülmeyi hem geri dönmeyi bildirir.
+    acik: AtomicBool,
+    /// Kalıcı durdurma mandalı — bir kez iner, bir daha kalkmaz.
+    ///
+    /// `acik = false` ile aynı şey **değil**: kapanışta pencere delegate'i
+    /// sökülmüyor, yani `kapat()`'tan sonra düşen bir görünürlük bildirimi
+    /// kapıyı geri açar ve bekleyen ana thread'e iş atılmaya devam ederdi.
+    durdu: AtomicBool,
+}
+
+impl Kapi {
+    fn yeni() -> Self {
+        Self {
+            acik: AtomicBool::new(true),
+            durdu: AtomicBool::new(false),
+        }
     }
 
-    /// Sıra önemli: `true`'ya geçerken bunu **önce** yazan taraf, hemen
-    /// ardından gelen `request_frame`'in kapıdan geçmesini garanti eder.
-    fn set_gorunur(&self, gorunur: bool) {
-        self.inner.gorunur.store(gorunur, Ordering::Release);
+    /// Mandal **okuma** tarafında sorgulanıyor, yazma tarafında değil: iki
+    /// bayrağı ayrı ayrı okuyup yazmak (`ayarla` mandalı görmez → `durdur`
+    /// koşar → `ayarla` kapıyı açar) durdurulmuş bir kapıyı geri açardı ve o
+    /// yarış tam da mandalın var olma sebebini yok ederdi.
+    fn acik(&self) -> bool {
+        !self.durdu.load(Ordering::Acquire) && self.acik.load(Ordering::Acquire)
+    }
+
+    fn durdu(&self) -> bool {
+        self.durdu.load(Ordering::Acquire)
+    }
+
+    /// Görünürlük bildirimi. Sıra önemli: `true`'ya geçerken bunu **önce**
+    /// yazan taraf, hemen ardından gelen `request_frame`'in kapıdan geçmesini
+    /// garanti eder.
+    fn ayarla(&self, acik: bool) {
+        self.acik.store(acik, Ordering::Release);
+    }
+
+    /// Mandalı indirir; bu andan sonra `ayarla` ne yazarsa yazsın kapı kapalı.
+    fn durdur(&self) {
+        self.durdu.store(true, Ordering::Release);
     }
 }
 
@@ -163,8 +216,8 @@ struct LinkIvars {
     renderer: Arc<Renderer>,
     session: Arc<Session>,
     retry: Arc<Retry>,
-    /// Görünürlük kapısının çizim tarafı buradan okunuyor; bayrağın tek
-    /// sahibi `Waker` (uyandırma tarafı da aynı bayrağa bakmak zorunda).
+    /// Kapının çizim tarafı buradan okunuyor; gövdenin tek sahibi `Waker`
+    /// (uyandırma tarafı da aynı kapıya bakmak zorunda).
     waker: Waker,
     /// Tamamlanma bloğu kurulumda bir kez ayrılır ve burada yaşar.
     completion: Completion,
@@ -193,7 +246,7 @@ define_class!(
             // Görünmeyen pencereye çizmek boşa iş değil, pil sözleşmesinin
             // ihlali: örtülü pencerede konuşkan bir shell her tazelemede tam
             // bir kare çizdirirdi.
-            if !iv.waker.gorunur() {
+            if !iv.waker.kapi().acik() {
                 link.setPaused(true);
                 return;
             }
@@ -265,7 +318,7 @@ impl DisplayLink {
             inner: Arc::new(WakerInner {
                 dirty: session.dirty_flag(),
                 link: MainThreadBound::new(link.clone(), mtm),
-                gorunur: AtomicBool::new(true),
+                kapi: Kapi::yeni(),
                 bekleyen: AtomicBool::new(false),
             }),
         };
@@ -329,12 +382,33 @@ impl DisplayLink {
     /// diker). Görünürlük dönünce bir kare istenir — compositor örtülüyken
     /// layer içeriğini atmış olabilir, içerik aynı olsa da yeniden çizilmeli.
     pub fn set_visible(&self, visible: bool) {
-        self.waker.set_gorunur(visible);
+        self.waker.kapi().ayarla(visible);
         if visible {
             self.request_frame();
         } else {
             self.link.setPaused(true);
         }
+    }
+
+    /// Ritmi **kalıcı olarak** keser: uyandırma mandalı iner, link durur ve
+    /// run loop'tan çıkar. Geri dönüşü yok — `set_visible(true)` de artık
+    /// hiçbir şey yapmaz, ve bu bir söz değil `durdu` mandalının kendisi.
+    ///
+    /// Kapanış yolu bunu `Drop` yerine çağırır çünkü `DisplayLink`'in kendisi
+    /// kapanış boyunca **yaşamak zorunda** (gerekçe `bt-shell`'in kapanış
+    /// sırasında). Uyandırma tarafı da kapanıyor: açık kalsaydı okuyucunun
+    /// son `Wakeup`'ları ana kuyruğa iş atmaya devam eder ve kapanışta bekleyen
+    /// ana thread'i meşgul ederdi.
+    pub fn stop(&self) {
+        // `invalidate` Apple'ın belgelerinde tek atımlık bir sökme; ikinci kez
+        // çağrılınca ne olduğu yazmıyor. İdempotentliği varsaymak yerine
+        // mandalın kendisiyle sağlıyoruz — `Drop` de buradan geçiyor.
+        if self.waker.kapi().durdu() {
+            return;
+        }
+        self.waker.kapi().durdur();
+        self.link.setPaused(true);
+        self.link.invalidate();
     }
 
     /// Pencere geometrisi oynadı: grid'i ve hücre boyutunu güncelle, kare iste.
@@ -365,14 +439,35 @@ impl Drop for DisplayLink {
         // tazeleme hızında atmaya devam eder ve delegate zayıf olduğu için
         // sessizce hiçbir şey çizmez — pil giden, belirtisi olmayan tam da o
         // döngü. Ana thread: `DisplayLink` `Send` değil, doğduğu yerde düşer.
-        self.link.setPaused(true);
-        self.link.invalidate();
+        // `stop` mandalıyla korumalı: kapanış yolundan zaten çağrılmışsa
+        // burada hiçbir şey yapmaz.
+        self.stop();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durdurulan_kapi_gorunurlukle_geri_acilmaz() {
+        // Kapanışta pencere delegate'i sökülmüyor: `stop()`'tan sonra düşen
+        // bir `windowDidChangeOcclusionState:` kapıyı geri açsaydı, kapanışta
+        // `shutdown()`'ın `join`'inde bekleyen ana thread'e iş atılmaya devam
+        // ederdi. Mandal bunu koda bağlıyor, yorum cümlesine değil.
+        let kapi = Kapi::yeni();
+        assert!(kapi.acik(), "link görünür pencereyle doğar");
+
+        kapi.ayarla(false);
+        assert!(!kapi.acik(), "örtülen pencere kapıyı kapatır");
+        kapi.ayarla(true);
+        assert!(kapi.acik(), "örtülme kalkınca kapı geri açılır");
+
+        kapi.durdur();
+        assert!(!kapi.acik());
+        kapi.ayarla(true);
+        assert!(!kapi.acik(), "durdurulmuş kapı bildirimle geri açılmaz");
+    }
 
     #[test]
     fn durma_kosulu_art_arda_ikinci_hatada_devreye_girer() {

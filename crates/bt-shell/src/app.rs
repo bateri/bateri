@@ -1,17 +1,18 @@
 //! Uygulama delegate'i: pencereyi açar, `CAMetalLayer`'ı view'a takar,
-//! shell oturumunu başlatır ve kareyi süren display link'i bağlar. Tek ObjC
-//! sınıfı; çizim çağrısı burada **yok**, bu dosyanın işi bağlamak.
+//! shell oturumunu başlatır, kareyi süren display link'i bağlar ve kapanış
+//! sırasını yürütür. Çizim çağrısı burada **yok**, bu dosyanın işi bağlamak.
 
 use std::cell::OnceCell;
 use std::sync::{Arc, OnceLock};
 
 use bt_core::{Session, SessionOptions, Wake, smoke_shell};
 use bt_gpu::{DisplayLink, Renderer, Surface, Waker};
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSBackingStoreType, NSView, NSWindow, NSWindowDelegate,
+    NSApplication, NSApplicationDelegate, NSBackingStoreType, NSWindow, NSWindowDelegate,
     NSWindowOcclusionState, NSWindowStyleMask,
 };
 use objc2_foundation::{
@@ -20,6 +21,7 @@ use objc2_foundation::{
 };
 
 use crate::Options;
+use crate::view::BateriView;
 
 /// Hücrenin @1x piksel boyutu. Gerçek font metriği `bt-atlas` ile (003)
 /// gelene kadar yer tutucu: grid ölçüsü ve PTY'ye giden `TIOCSWINSZ` bundan
@@ -58,12 +60,29 @@ impl Wake for ShellWake {
     }
 
     fn child_exit(&self, _code: Option<i32>) {
-        // Shell'in son çıktısı ekrana gelsin diye **gerçekten** bir kare
-        // isteniyor: `Waker::wake` hasar bayrağını da dikiyor. Yalnız link'i
-        // açsaydı callback "hasar yok" bulup anında geri uyurdu — `ChildExit`
-        // bayrak dikmez, onu yalnız `Wakeup` yapar. Uygulamayı sonlandırmak
-        // phase-4'ün işi (R6).
-        self.wake();
+        // Shell gitti, terminal penceresinin dayanağı kalmadı: uygulama
+        // sonlanır. Sonlanmayı `terminate:` yürütüyor ki kapanış tek kapıdan
+        // geçsin — kırmızı düğme, `exit` ve duman deadline'ı aynı
+        // `applicationWillTerminate:`'a varır.
+        //
+        // Ana kuyruğa atılmasının iki sebebi var ve ikisi de zorunlu: AppKit
+        // ana thread ister, ve bu çağrı **okuyucu thread'de** geliyor —
+        // `shutdown()`'a giden senkron bir yol o thread'i kendi kendine
+        // `join` ettirirdi (`wake.rs` → Sahiplik).
+        //
+        // **Bilinen sınır:** shell'in son çıktısı ekrana gelmeyebilir.
+        // alacritty sırayı `ChildExit` → `Wakeup` diye kuruyor, yani buraya
+        // geldiğimizde son bayt henüz çizilmemiş olabilir; `terminate:` de
+        // araya bir vsync girmeden koşar. Garanti etmek ya sihirli bir
+        // gecikme ya da display link'e "hasar tükendi, şimdi çık" semantiği
+        // eklemek olurdu — ikincisi renderer'a terminal bilgisi sokar.
+        // `bateri -e cmd` yolu geldiğinde `drain_on_exit` ile birlikte
+        // tasarlanacak (`.tasks/002-vt-motoru/phase-4.md` → Uygulama Notları).
+        DispatchQueue::main().exec_async(|| {
+            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+            NSApplication::sharedApplication(mtm).terminate(None);
+        });
     }
 }
 
@@ -74,6 +93,9 @@ pub(crate) struct Ivars {
     surface: Surface,
     window: OnceCell<Retained<NSWindow>>,
     link: OnceCell<DisplayLink>,
+    /// Kapanış sırasının ikinci adımı buradan çağrılır; `DisplayLink` de bir
+    /// kopya tutuyor ama oraya `stop()`'tan sonra uzanmak yanlış olurdu.
+    session: OnceCell<Arc<Session>>,
     wake: Arc<ShellWake>,
     run_seconds: Option<u64>,
 }
@@ -112,13 +134,19 @@ define_class!(
             };
             // SAFETY: yalnız sahiplik semantiğini değiştirir; Retained sahibi biziz.
             unsafe { window.setReleasedWhenClosed(false) };
-            let view = NSView::initWithFrame(NSView::alloc(mtm), rect);
+            let view = BateriView::new(mtm, rect);
             // Sıra önemli: önce layer, sonra wantsLayer — tersi AppKit'e kendi
             // layer'ını kurdurur ve CAMetalLayer düşer.
             view.setLayer(Some(self.ivars().surface.ca_layer()));
             view.setWantsLayer(true);
             window.setContentView(Some(&view));
             window.setTitle(ns_string!("bateri"));
+            // Klavyenin PTY'ye varan yolu buradan başlıyor. `contentView`
+            // otomatik first responder DEĞİLDİR; bu satır olmadan pencere
+            // key olur, tuşlar view'a hiç uğramaz ve terminal sessizce
+            // yazmaz. `acceptsFirstResponder` da şart, ikisi bir arada.
+            let ilk = window.makeFirstResponder(Some(&view));
+            debug_assert!(ilk, "BateriView first responder olmalı");
             // Delegate bağlanmadan önce ivar dolu olsun: arada düşen bir
             // pencere bildirimi geometriyi boş bulup bayat boyutla çizmesin.
             // OnceCell doluysa didFinishLaunching ikinci kez geldi demek; AppKit
@@ -137,7 +165,7 @@ define_class!(
             let metrics = self
                 .geometriyi_esitle()
                 .expect("pencere ve contentView kuruldu");
-            self.baglat(mtm, metrics);
+            self.baglat(mtm, metrics, &view);
 
             if let Some(s) = self.ivars().run_seconds {
                 // block2 yok: zamanlayıcı performSelector ile.
@@ -161,6 +189,27 @@ define_class!(
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window(&self, _app: &NSApplication) -> bool {
             true
+        }
+
+        /// AppKit'in kapanış yolu: kırmızı düğme ve `exit` yazan shell
+        /// (`child_exit` → `terminate:`) buraya varır. (Cmd-Q **varmaz**: ana
+        /// menü yok, `keyDown:` Command'lı tuşları yutuyor — menü 00X'te.)
+        /// Duman deadline'ı da buraya uğramaz, `terminate:` her zaman 0 ile
+        /// çıkar ve `runDeadline:` kırmızı düşebilmek zorunda. Ortak olan
+        /// bildirim değil sıra: iki yol da [`AppDelegate::kapat`] çağırır ve
+        /// kapanışa eklenecek her adım oraya eklenir.
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, _n: &NSNotification) {
+            self.kapat();
+            // Duman koşusu deadline'a varmadan da bitebilir: shell kendi
+            // çıkarsa (`BT_RUN_SECONDS` betiğin uykusundan uzunsa, ya da
+            // gerçek bir shell hemen ölürse) `ChildExit` buraya getirir.
+            // Rapor basılmadan çıkmak `make duman`'a hiçbir şey ölçmemiş bir
+            // koşuyu exit 0 ile yeşil gösterirdi — kapının sahte yeşil verdiği
+            // tek yol buydu.
+            if self.ivars().run_seconds.is_some() {
+                self.rapor_ve_cik();
+            }
         }
     }
 
@@ -204,25 +253,8 @@ define_class!(
     impl AppDelegate {
         #[unsafe(method(runDeadline:))]
         fn run_deadline(&self, _arg: Option<&AnyObject>) {
-            let n = self.ivars().renderer.frames();
-            let k = self.ivars().renderer.last_bg_count();
-            // İki jeton iki ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
-            // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi. Biri
-            // sıfırken diğeri yeşil geçemez — kare>0 & hucre=0 "pencere var,
-            // shell çıktısı yok" demektir ve tam da kaçırmak istemediğimiz şey.
-            if n > 0 && k > 0 {
-                println!("kare={n} hucre={k} pipeline=ok");
-                std::process::exit(0);
-            }
-            // Jetonlar (`kare=`, `hucre=`) **yalnız** başarı satırında ve
-            // yalnız stdout'ta: makine sözleşmesi o. Hata satırı aynı sayıları
-            // taşıyor ama jeton biçiminde değil, yoksa `kare=` arayan bir CI
-            // adımı düşen koşudan kare sayısı okurdu.
-            eprintln!(
-                "bateri: {} saniyede çizilen kare {n}, üretilen hücre {k} (ikisi de >0 olmalı)",
-                self.ivars().run_seconds.unwrap_or(0)
-            );
-            std::process::exit(1);
+            self.kapat();
+            self.rapor_ve_cik();
         }
     }
 );
@@ -239,6 +271,7 @@ impl AppDelegate {
             surface,
             window: OnceCell::new(),
             link: OnceCell::new(),
+            session: OnceCell::new(),
             wake: Arc::new(ShellWake {
                 waker: OnceLock::new(),
             }),
@@ -250,7 +283,7 @@ impl AppDelegate {
 
     /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
     /// `Wake`'i ister, link `Session`'ı ister, `Waker` link'ten doğar.
-    fn baglat(&self, mtm: MainThreadMarker, metrics: Metrics) {
+    fn baglat(&self, mtm: MainThreadMarker, metrics: Metrics, view: &BateriView) {
         let session = Session::spawn(
             SessionOptions {
                 // Duman koşusunda shell sabit: sonuç kullanıcının `$SHELL`'ine
@@ -274,6 +307,11 @@ impl AppDelegate {
                 std::process::exit(1);
             }
         };
+        // Kapanış sırası oturuma link üzerinden değil buradan uzanır, klavye
+        // de kendi kopyasını tutar; üçü de ana thread'de yaşıyor, yani son
+        // referansın nerede düşeceği belli (bkz. `kapat`).
+        let _ = self.ivars().session.set(Arc::clone(&session));
+        view.baglan(Arc::clone(&session));
         let link = DisplayLink::new(
             mtm,
             &self.ivars().surface,
@@ -295,6 +333,71 @@ impl AppDelegate {
         // Açılış karesi: `Session` kirli doğar, link'i bir kez elle açıyoruz.
         link.request_frame();
         let _ = self.ivars().link.set(link);
+    }
+
+    /// Kapanış sırasının **tek** yeri; her çıkış yolu buradan geçer
+    /// (`applicationWillTerminate:` ve `runDeadline:`). **Sıra zorunlu.**
+    ///
+    /// İki kapanış adımı idempotent (`stop` mandalıyla, `shutdown` `Option`
+    /// ile); bekçi değil — ikinci bir çağrı ikinci bir thread doğururdu. Bugün
+    /// çağrı tek: iki yol da `process::exit`'e varıyor ve ana thread `join`'de
+    /// beklerken zamanlayıcı ateşleyemiyor.
+    ///
+    /// 1. Ritmi kes (`DisplayLink::stop`): link durur, run loop'tan çıkar ve
+    ///    uyandırma kapısı kapanır. Bundan sonra yeni kare istenmez.
+    /// 2. Oturumu kapat: `SIGHUP` + okuyucu thread'in `join`'i. **Bloklar** —
+    ///    sinyali yutan bir çocuk (`trap '' HUP`) `Pty::drop`'un
+    ///    `child.wait()`'inde süresiz bekletir; kesecek olan bekçi thread
+    ///    (`crate::bekci`).
+    ///
+    /// `DisplayLink` bilerek **düşürülmüyor**, yalnız durduruluyor. İçindeki
+    /// `Waker`'ı Metal'in tamamlanma bloğu da tutuyor ve onun
+    /// `MainThreadBound<Retained<CAMetalDisplayLink>>`'i ana thread dışında
+    /// düşerse `Drop`'u ana kuyruğa **senkron** iş atıp bekler: ana thread o
+    /// sırada 2. adımın `join`'inde olurdu ve ikisi birbirini kilitlerdi.
+    /// `Ivars` `app.run()`'ı aştığı sürece o son referans hiçbir zaman
+    /// Metal'in thread'inde olmaz.
+    fn kapat(&self) {
+        // Bekçinin bütçesi **kapanıştan** başlıyor, süreç başından değil:
+        // açılış (Metal device, metallib yükleme, ilk pencere) soğuk bir
+        // makinede saniyeler sürebilir ve o süre bütçeden düşseydi sağlıklı
+        // bir koşu `_exit(70)` ile kırmızı düşerdi.
+        if let Some(s) = self.ivars().run_seconds {
+            crate::bekci(s);
+        }
+        if let Some(link) = self.ivars().link.get() {
+            link.stop();
+        }
+        if let Some(session) = self.ivars().session.get() {
+            session.shutdown();
+        }
+    }
+
+    /// Duman koşusunun raporu ve çıkışı — **kapanıştan sonra** çağrılır.
+    ///
+    /// Sıra bilinçli: `kapat()` bloklar ve asılırsa bekçi süreci 70 ile keser,
+    /// yani asılan bir kapanışta `kare=` satırı hiç çıkmaz. Ters sırada
+    /// `make duman` yeşil bir satırla kırmızı bir çıkış kodunu birlikte verirdi.
+    fn rapor_ve_cik(&self) -> ! {
+        let n = self.ivars().renderer.frames();
+        let k = self.ivars().renderer.last_bg_count();
+        // İki jeton iki ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
+        // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi. Biri
+        // sıfırken diğeri yeşil geçemez — kare>0 & hucre=0 "pencere var,
+        // shell çıktısı yok" demektir ve tam da kaçırmak istemediğimiz şey.
+        if n > 0 && k > 0 {
+            println!("kare={n} hucre={k} pipeline=ok");
+            std::process::exit(0);
+        }
+        // Jetonlar (`kare=`, `hucre=`) **yalnız** başarı satırında ve yalnız
+        // stdout'ta: makine sözleşmesi o. Hata satırı aynı sayıları taşıyor
+        // ama jeton biçiminde değil, yoksa `kare=` arayan bir CI adımı düşen
+        // koşudan kare sayısı okurdu.
+        eprintln!(
+            "bateri: {} saniyelik koşuda çizilen kare {n}, üretilen hücre {k} (ikisi de >0 olmalı)",
+            self.ivars().run_seconds.unwrap_or(0)
+        );
+        std::process::exit(1);
     }
 
     /// Pencere geometrisi oynadı: layer'ı eşle, grid'i güncelle, kare iste.

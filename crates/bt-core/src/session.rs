@@ -82,10 +82,11 @@ impl DirtyFlag {
 /// Kullanıcının `$SHELL`'ine ve rc dosyasına bağlı olmayan bir komut: ilk
 /// satıra **sekiz** kırmızı arka planlı hücre (`" bateri "`) basar, sonra uyur.
 ///
-/// Uyku süresi iki yönden sınırlı: duman koşusunun süresini (`BT_RUN_SECONDS`,
-/// varsayılan 3) rahatça aşmalı, ama uzun da olmamalı — `run_deadline`
-/// `process::exit` ile çıkıyor, yani `Drop` koşmuyor ve `SIGHUP` gitmiyor;
-/// artakalan çocuk uyku bitene kadar yaşar.
+/// Uyku süresi duman koşusunun süresini (`BT_RUN_SECONDS`, varsayılan 3)
+/// rahatça aşmalı: shell deadline'dan önce kendi kendine çıkarsa `ChildExit`
+/// uygulamayı erken sonlandırır ve koşu ölçtüğü şeyi ölçmemiş olur. Üst sınır
+/// artık yok — `run_deadline` çıkmadan önce `shutdown()` çağırıyor, yani
+/// `SIGHUP` gidiyor ve artakalan çocuk uyku bitene kadar yaşamıyor.
 ///
 /// Tek sahip olmasının sebebi sayının kendisi: `make duman`'ın `hucre=8`
 /// beklentisi ile `sabit_shell_arka_plan_hucreleri_verir` sınamasının 8'i aynı
@@ -476,7 +477,9 @@ impl Session {
     ///
     /// **Bloklar.** `Pty::drop` `SIGHUP`'tan sonra `child.wait()` çağırıyor;
     /// sinyali yutan bir çocuk (`trap '' HUP`) bu çağrıyı süresiz bekletir.
-    /// Kesecek olan `bateri`'nin bekçi thread'i — henüz yok, phase-4'ün işi.
+    /// Kesecek olan `bt-shell`'in bekçi thread'i ve o yalnız `BT_RUN_SECONDS`
+    /// yolunda kurulur: etkileşimli kullanımda böyle bir çocuk uygulamayı
+    /// gerçekten asar (bilinen sınır, `.tasks/002-vt-motoru/phase-4.md`).
     pub fn shutdown(&self) {
         let Some(reader) = kilit(&self.reader).take() else {
             return;

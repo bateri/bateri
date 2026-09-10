@@ -3,11 +3,16 @@
 //! `objc2-app-kit` üzerinden doğrudan AppKit; Metal'i görmez, çizimi
 //! `bt-gpu`'ya bırakır ve device'ı `Renderer::system_default` kurar. Kareyi
 //! de sürmez: pencereyi, oturumu ve display link'i birbirine bağlar, gerisi
-//! `bt-gpu`'nun ritmidir. Tek pencere; sekme, menü ve klavye sonraki setlerde.
+//! `bt-gpu`'nun ritmidir. Klavye buradan PTY'ye akar (`keys`, `view`);
+//! kapanış sırasının sahibi de bu crate. Tek pencere; sekme, bölme, menü ve
+//! IME sonraki setlerde.
 
 mod app;
+mod keys;
+mod view;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use objc2::MainThreadMarker;
 use objc2::runtime::ProtocolObject;
@@ -21,10 +26,14 @@ pub struct Options {
 }
 
 /// Uygulamayı kurar ve `NSApplication::run` ile ana döngüye girer. **Dönmez:**
-/// son pencere kapanınca AppKit `terminate:` ile, `BT_RUN_SECONDS` yolu
-/// `process::exit` ile süreçten çıkar; `Ok(())` yalnız kurulum hatası yoksa ve
-/// AppKit'in `run`'ı bir gün dönerse görülür. Kapanış işi (PTY, ayar yazımı)
-/// buradan sonraya değil, AppKit'in `applicationWillTerminate:`'ına konur.
+/// son pencere kapanınca ve shell çıkınca (`child_exit` → `terminate:`) AppKit
+/// yoluyla, `BT_RUN_SECONDS` yolu `process::exit` ile süreçten çıkar; `Ok(())`
+/// yalnız kurulum hatası yoksa ve AppKit'in `run`'ı bir gün dönerse görülür.
+///
+/// Kapanış işi (PTY, ayar yazımı) buradan sonraya değil, **her iki çıkış
+/// yolunun da geçtiği** `app::AppDelegate::kapat`'a konur —
+/// `applicationWillTerminate:`'a değil: duman deadline'ı ona bilerek uğramıyor
+/// ve oraya konan bir adım o yolda sessizce atlanır.
 pub fn run(opts: Options) -> Result<(), GpuError> {
     // audit: giriş noktası; ana thread dışından çağrılması programlama hatasıdır.
     let mtm = MainThreadMarker::new().expect("bt_shell::run ana thread'de çağrılır");
@@ -38,4 +47,42 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.run();
     Ok(())
+}
+
+/// Kapanışın asılmasını kesen son çare — **yalnız `BT_RUN_SECONDS`
+/// yolunda** ve kapanış başlarken kurulur (`AppDelegate::kapat`).
+///
+/// Kapanış ana thread'de koşuyor ve oradan `Session::shutdown()`'a giriyor;
+/// `Pty::drop` `SIGHUP`'tan sonra `child.wait()` çağırdığı için sinyali yutan
+/// bir çocuk (`trap '' HUP`) ana thread'i süresiz bekletir. O noktada kesecek
+/// kimse kalmıyor: bekçi bu yüzden ayrı bir thread.
+///
+/// Etkileşimli kullanımda bekçi **yoktur** ve böyle bir çocuk uygulamayı
+/// gerçekten asar; bilinen sınır, `Session::shutdown`'ın kendi belgesinde de
+/// yazılı. Kalıcı çözüm sınırlı bekleme (`SIGHUP` → süre → `SIGKILL`) ve yeri
+/// `bt-core`.
+pub(crate) fn bekci(run_seconds: u64) {
+    // Koşu süresinin üç katı. Sağlıklı bir kapanış `SIGHUP` ile hemen biter;
+    // bu süreye ancak gerçekten asılmış bir çocuk varır. `max(1)`:
+    // `BT_RUN_SECONDS=0` bekçiyi doğar doğmaz ateşlemesin.
+    let sure = Duration::from_secs(run_seconds.saturating_mul(3).max(1));
+    std::thread::spawn(move || {
+        std::thread::sleep(sure);
+        // `eprintln!` DEĞİL: Rust'ın stderr'i kilitli ve ana thread o kilidi
+        // tutarken asılmış olabilir (`shutdown`'ın kendi `eprintln!`'i,
+        // `Retry::cizilemedi`, ileride logger). Bekçi tam da onu kesmek için
+        // var; aynı kilide girip beklemesi kendini iptal etmek olurdu. Sabit
+        // metin, `format!` bile yok — `malloc` da bir kilit.
+        //
+        // `process::exit` de değil: o atexit zincirini ve stdio flush'ını
+        // koşturur. 70 = EX_SOFTWARE; `make` bunu "Error 70" diye gösterir.
+        //
+        // SAFETY: `write` ve `_exit` async-signal-safe; ikisi de kilit almaz
+        // ve süreci hiçbir şey koşturmadan bitirir.
+        const MESAJ: &str = "bateri: kapanış bekçinin bütçesinde bitmedi, süreç kesiliyor\n";
+        unsafe {
+            libc::write(2, MESAJ.as_ptr().cast(), MESAJ.len());
+            libc::_exit(70)
+        };
+    });
 }
