@@ -362,4 +362,4 @@ karar"dı; bu phase o ölçümü yapmıyor.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi
 - [x] `/audit` çalıştırıldı, bulgular giderildi (mercek 9: `Instance` ↔ MSL, `[[buffer(0/1)]]` indeksleri)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: 3191677
