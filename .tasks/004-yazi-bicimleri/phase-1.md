@@ -437,4 +437,4 @@ sayısal çift ikisini de gereksiz kıldı).
 - [x] `/code-review` çalıştırıldı — 12 bulgu, **12'si de giderildi**, waive yok (kayıt yukarıda)
 - [x] `/audit` çalıştırıldı — 4 mercek ilgisiz, 6 mercek koştu, hepsi temiz; iki üretim paniğine `// audit:` işareti eklendi (kayıt yukarıda)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: `92607aa`
