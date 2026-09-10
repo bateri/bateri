@@ -9,16 +9,63 @@
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, Rgb};
 
+/// Çizim hedefinin uzayındaki renk: **lineer** RGBA.
+///
+/// Newtype, çünkü simetrik hatanın yalnız yarısı temsil edilemezdi: `bt-gpu`
+/// tarafında "sRGB olmayan hedef" bir `const`la (`Renderer::PIXEL_FORMAT`)
+/// kapatıldı, ama sınırın bu tarafında renk çıplak bir `[f32; 4]`'tü ve uzayı
+/// yalnız bir yorum söylüyordu. Oraya sRGB-kodlu bir float (`c / 255.0`)
+/// yazan renk açılır — `0x1a1c21` `0x5a5d65` griye — ve belirti sessizdir.
+/// Alan private ve tek kurucusu [`LinearRgba::from_srgb`], yani dönüşüm
+/// tipin içinde: uzayı artık bir yorum değil tip taşıyor.
+///
+/// `Eq` yok, `PartialEq` var: bileşenler `f32` ve karşılaştırılan şey hep
+/// aynı tablodan çıkmış iki değer, hesaplanmış iki değer değil.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinearRgba([f32; 4]);
+
+impl LinearRgba {
+    /// sRGB kodlu 8-bit üçlüden — **tek kurucu**.
+    ///
+    /// Girdi kasten `u8`: renkler her yerde `0xRRGGBB` yazılır ve
+    /// lineerleştirme crate'in içinde kalır. Lineer float alan bir kurucu
+    /// olsaydı newtype yalnız bir ad olurdu; kapattığı hata "sRGB float'ı
+    /// lineer yuvaya koymak" ve o hata ancak dönüşüm **burada** olduğunda
+    /// temsil edilemez hâle geliyor.
+    ///
+    /// Paletin tek sahibi olmasını bu kurucu vermiyor, o ayrı bir kural
+    /// (bu modülün başı): rengi buradan üretebilmek onu palete yazmak
+    /// değildir.
+    pub const fn from_srgb(r: u8, g: u8, b: u8) -> Self {
+        Self([
+            // audit: `u8 as usize` 0..=255, tablo 256 girdilik — indeks tipin
+            // kendisiyle sınırlı, sınır kontrolü kodgen'de de eleniyor.
+            SRGB_LINEER[r as usize],
+            SRGB_LINEER[g as usize],
+            SRGB_LINEER[b as usize],
+            1.0,
+        ])
+    }
+
+    /// GPU'ya giden dört bileşen.
+    ///
+    /// `const`: `DEFAULT_BG` gibi sabitlerin derleme zamanında da açılması
+    /// gerekiyor.
+    pub const fn to_array(self) -> [f32; 4] {
+        self.0
+    }
+}
+
 /// Varsayılan arka plan, **lineer** RGBA (`lineer_rgba`, crate-içi).
 /// **Tek sahibi burasıdır**: pencerenin clear rengi de,
 /// `frame()`'in "bu hücre varsayılan, çizilmesin" kararı da buradan okur. İki
 /// yerde dursaydı biri değişince pencere ile hücreler ayrı renk olurdu.
-pub const DEFAULT_BG: [f32; 4] = lineer_rgba(rgb(BG));
+pub const DEFAULT_BG: LinearRgba = lineer_rgba(rgb(BG));
 
 /// İmleç bloğunun rengi, **lineer** RGBA (`lineer_rgba`, crate-içi). Renderer'da
 /// sabit durmasın diye burada: renk kararı
 /// paletin, çizim kararı renderer'ın.
-pub const DEFAULT_CURSOR: [f32; 4] = lineer_rgba(rgb(CURSOR));
+pub const DEFAULT_CURSOR: LinearRgba = lineer_rgba(rgb(CURSOR));
 
 /// Varsayılan arka planın `Rgb` hâli; `frame()` karşılaştırmayı burada yapar,
 /// f32 eşitliği aramaz.
@@ -214,15 +261,8 @@ const SRGB_LINEER: [f32; 256] = [
 /// geçmiyordu — `nm -u` release rlib'inde tanımsız sembol gösteriyordu, yani
 /// bir tablo aramasının etrafında gerçek bir çağrı kalıyordu.
 #[inline]
-pub(crate) const fn lineer_rgba(color: Rgb) -> [f32; 4] {
-    [
-        // audit: `u8 as usize` 0..=255, tablo 256 girdilik — indeks tipin
-        // kendisiyle sınırlı, sınır kontrolü kodgen'de de eleniyor.
-        SRGB_LINEER[color.r as usize],
-        SRGB_LINEER[color.g as usize],
-        SRGB_LINEER[color.b as usize],
-        1.0,
-    ]
+pub(crate) const fn lineer_rgba(color: Rgb) -> LinearRgba {
+    LinearRgba::from_srgb(color.r, color.g, color.b)
 }
 
 #[cfg(test)]

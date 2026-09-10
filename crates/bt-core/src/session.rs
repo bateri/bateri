@@ -20,21 +20,47 @@ use alacritty_terminal::term::{Config, RenderableContent, Term};
 use alacritty_terminal::tty::{self, Pty, Shell};
 use alacritty_terminal::vte::ansi::CursorShape;
 
-use crate::color;
+use crate::color::{self, LinearRgba};
 use crate::wake::Wake;
 
-/// Varsayılan olmayan arka planıyla çizilecek tek hücre.
+/// Çizilecek tek hücre: bir arka plan, bir glyph ya da ikisi.
+///
+/// Tek zengin tip, tek sink. İki ayrı sink (biri arka plan, biri glyph) grid'i
+/// kare başına iki kez taratır ve `Term` kilidini iki kez aldırırdı; hücrenin
+/// iki yüzü zaten aynı iterasyonda yan yana duruyor.
+///
+/// Biçim bayrakları **geçmez**: `INVERSE` ve `DIM` burada renge çözülüyor,
+/// `HIDDEN` mürekkebi `None`'a düşürüyor (aşağıda), `BOLD`/`ITALIC` (ikinci font yüzü)
+/// ile `UNDERLINE`/`STRIKEOUT` (kural çizgisi) 004'ün işi. Alacritty'nin
+/// `Flags`'i hiçbir hâlde yeniden ihraç edilmez — ettiği gün `bt-gpu`
+/// terminal semantiği bilmeye başlar.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CellBg {
+pub struct Cell {
     pub col: u16,
     pub row: u16,
-    /// **Lineer** RGBA: çizim hedefi sRGB ve donanım yazarken kodluyor.
-    /// Buraya sRGB-kodlu bir float (`c / 255.0`) koyan renk açılır ve belirti
-    /// sessizdir. Crate içinde tek dönüşüm yolu `color::lineer_rgba`; dışarıda
-    /// dönüşüm **yok** — alan `pub` ama palet renginin sRGB baytından burada
-    /// üretilmesi diye bir yol tasarlanmadı. Uzayı tipe yazmak (newtype)
-    /// bu sınırın kendisi yeniden yazılırken yapılır (003 phase-4).
-    pub rgba: [f32; 4],
+    /// Çizilecek karakter; **`None` = mürekkep yok**.
+    ///
+    /// `Option`, `' '` sentinel'i değil: boşluk karakterinin kendi başına
+    /// meşru bir anlamı var ve "mürekkep yok"u onun üstüne yüklemek dört
+    /// ayrık durumu (gerçek boşluk, `HIDDEN`, iki spacer) tek değere
+    /// indirirdi. Bedeli 004'te ödenirdi: altı çizili bir boşluk **mürekkep
+    /// ister**, gizli metin istemez, ve o gün `ch == ' '`i okuyan üç yerin
+    /// üçü de ayrı ayrı elden geçirilmek zorunda kalırdı. `Option<char>`
+    /// niche ile 4 bayt, yani ayrım bedava.
+    pub ch: Option<char>,
+    /// Ön plan; glyph bu renkle çizilir. **Her hücrede anlamlı**, `ch`
+    /// `None` olsa bile: 004'ün kural çizgisi (`UNDERLINE`/`STRIKEOUT`)
+    /// mürekkebi olmayan bir hücrede de bu rengi isteyecek ve o gün alanın
+    /// "boşlukta yer tutucu" olması çizgiyi arka plan rengiyle, yani
+    /// görünmez, çizerdi.
+    ///
+    /// İmlecin altındaki hücrede **ters**: değer paletin arka planıdır, çünkü
+    /// imleç bloğu opak ve glyph'in altında (`plan.md` → R4.1).
+    pub fg: LinearRgba,
+    /// `None` = varsayılan arka plan, çizilmez. `Frame` yalnız `Some`
+    /// gördüğünde `bg_count`'u artırır: `hucre=K` jetonunun anlamı bit bit
+    /// korunur ve `sabit_shell_arka_plan_hucreleri_verir` oynamaz.
+    pub bg: Option<LinearRgba>,
 }
 
 /// İmlecin karedeki yeri.
@@ -87,6 +113,7 @@ impl DirtyFlag {
 ///
 /// Kullanıcının `$SHELL`'ine ve rc dosyasına bağlı olmayan bir komut: ilk
 /// satıra **sekiz** kırmızı arka planlı hücre (`" bateri "`) basar, sonra uyur.
+/// Sekizin **altısında** mürekkep var: iki ucu boşluk, ortası `bateri`.
 ///
 /// Uyku süresi duman koşusunun süresini (`BT_RUN_SECONDS`, varsayılan 3)
 /// rahatça aşmalı: shell deadline'dan önce kendi kendine çıkarsa `ChildExit`
@@ -94,11 +121,12 @@ impl DirtyFlag {
 /// artık yok — `run_deadline` çıkmadan önce `shutdown()` çağırıyor, yani
 /// `SIGHUP` gidiyor ve artakalan çocuk uyku bitene kadar yaşamıyor.
 ///
-/// Tek sahip olmasının sebebi sayının kendisi: `make duman`'ın `hucre=8`
-/// beklentisi ile `sabit_shell_arka_plan_hucreleri_verir` sınamasının 8'i aynı
-/// betiğe bağlı. İki yerde ayrı yazılsalardı biri değişip diğeri sessizce eski
-/// kalırdı — ve duman K'yı yalnız "> 0" diye sorduğu için kimse fark etmezdi.
-/// Bu hâliyle sınama, uygulamanın gerçekten koştuğu betiği doğruluyor.
+/// Tek sahip olmasının sebebi sayıların kendisi: `make duman`'ın `hucre=8` ve
+/// `glif=6` beklentisi ile `sabit_shell_arka_plan_hucreleri_verir` /
+/// `sabit_shell_alti_glif_verir` sınamalarının 8'i ve 6'sı aynı betiğe bağlı.
+/// İki yerde ayrı yazılsalardı biri değişip diğeri sessizce eski kalırdı — ve
+/// duman ikisini de yalnız "> 0" diye sorduğu için kimse fark etmezdi.
+/// Bu hâliyle sınamalar, uygulamanın gerçekten koştuğu betiği doğruluyor.
 pub fn smoke_shell() -> (String, Vec<String>) {
     (
         "/bin/sh".to_owned(),
@@ -336,7 +364,7 @@ impl Session {
     /// değildir: `Session`'a geri giren bir sink (`resize`, `frame`) kendi
     /// kendini kilitler. Sink'in işi tamponu doldurmaktır, başka bir şey değil —
     /// `Wake` ile aynı sözleşme.
-    pub fn frame(&self, mut sink: impl FnMut(CellBg)) -> Option<Cursor> {
+    pub fn frame(&self, mut sink: impl FnMut(Cell)) -> Option<Cursor> {
         // Bayrak kilit istemez, kilit ise ucuz değil: `FairMutex::lock()` iki
         // muteks alır ve okuyucu thread PTY'den okumaya başlamadan önce
         // aynı sıraya giriyor. Boştaki kare o sıraya hiç girmesin.
@@ -357,19 +385,60 @@ impl Session {
         } = term.renderable_content();
         let offset = display_offset as i32;
 
+        // İmleç döngüden **önce** çözülüyor: altındaki hücrenin ön planı ona
+        // bağlı (aşağıda) ve o karar hücre çizilirken verilmek zorunda.
+        let cursor_row = cursor.point.line.0 + offset;
+        let cursor = Cursor {
+            col: cursor.point.column.0 as u16,
+            row: cursor_row.clamp(0, rows.saturating_sub(1)) as u16,
+            // Kaydırma geçmişine bakarken imleç ekranın dışına çıkar.
+            visible: cursor.shape != CursorShape::Hidden && (0..rows).contains(&cursor_row),
+        };
+
+        // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
+        // bayrak sormuyor. Üçü bayraklı:
+        // - `HIDDEN` (`\e[8m`): metin gizli, arka planı yerinde kalır.
+        // - `WIDE_CHAR_SPACER`: geniş karakterin ikinci hücresi. Hücrenin
+        //   `c`'si alacritty'de zaten `' '` (spacer `write_at_cursor(' ')` ile
+        //   yazılıyor), ama arka planı geniş karakterin şablonundan geliyor:
+        //   hücreyi tümden elemek onun sağ yarısını renksiz bırakırdı.
+        // - `LEADING_WIDE_CHAR_SPACER`: satır sonuna sığmayan geniş karakterin
+        //   bıraktığı boşluk; aynı gerekçe.
+        // Dördüncüsü boşluk karakterinin kendisi: bugün onun da mürekkebi yok.
+        // 004'te değişecek olan tam burası — altı çizili bir boşluk `Some(' ')`
+        // olacak ve tek dokunulacak satır aşağıdaki `then_some`.
+        const MUREKKEPSIZ: Flags = Flags::HIDDEN
+            .union(Flags::WIDE_CHAR_SPACER)
+            .union(Flags::LEADING_WIDE_CHAR_SPACER);
+
         for indexed in display_iter {
-            // Ters video hücrenin iki rengini takas eder; arka plan ön plandır.
             let cell = indexed.cell;
             let inverse = cell.flags.contains(Flags::INVERSE);
-            let source = if inverse { cell.fg } else { cell.bg };
-            let mut rgb = color::resolve(source, colors);
-            // `DIM` ön plana uygulanır — ters videoda ön plan artık bu renk.
-            // Adlı rengi sönük eşine çeviren kod alacritty'nin ikili
-            // tarafında, kitaplıkta değil; çeviri bize düşüyor.
-            if inverse && cell.flags.contains(Flags::DIM) {
-                rgb = color::dim(rgb);
+            let dim = cell.flags.contains(Flags::DIM);
+
+            // **Arka plan önce**: atlama koşulunun ağır yarısı bu ve boş
+            // grid'de hücrelerin neredeyse tamamı burada eleniyor. Ön plan
+            // zincirini de bu satırın önüne almak, `Term` kilidi tutulurken
+            // hücre başına ikinci bir renk çözümünü çizilmeyen hücreler için
+            // de ödemek olurdu.
+            //
+            // Ters video hücrenin iki rengini takas eder; `DIM` ise **ön
+            // plana** uygulanır (adlı rengi sönük eşine çeviren kod
+            // alacritty'nin ikili tarafında, kitaplıkta değil). İkisi
+            // birleşince kural şu: sönüklük, `cell.fg`'den doğan renge gider —
+            // ters videoda o renk arka plan olmuştur.
+            let mut arka = color::resolve(if inverse { cell.fg } else { cell.bg }, colors);
+            if inverse && dim {
+                arka = color::dim(arka);
             }
-            if rgb == color::BG_RGB {
+            // Varsayılan arka plan çizilmez; `None` onun adı.
+            let bg = (arka != color::BG_RGB).then(|| color::lineer_rgba(arka));
+
+            let ch = (!cell.flags.intersects(MUREKKEPSIZ) && cell.c != ' ').then_some(cell.c);
+            // Atlama koşulu: ne boyanacak bir arka plan ne çizilecek bir
+            // mürekkep. Boş grid'de bu koşul her hücreye uyar ve sink hiç
+            // çağrılmaz — `frame()`'in boştaki maliyeti iterasyonun kendisi.
+            if bg.is_none() && ch.is_none() {
                 continue;
             }
             // `display_iter` yalnız görünür pencereyi verir: aralığı
@@ -383,20 +452,38 @@ impl Session {
             let Ok(row) = u16::try_from(row) else {
                 continue;
             };
-            sink(CellBg {
-                col: indexed.point.column.0 as u16,
+            // Ön plan **ancak burada** çözülüyor — atlama kapısından sonra.
+            // Kapıdan önce olsaydı `Term` kilidi tutulurken çizilmeyen her
+            // hücre için de ödenirdi ve boş grid'de hücrelerin neredeyse
+            // tamamı çizilmiyor. Koşulsuz: alan adının söylediği şey olmalı,
+            // yoksa 004'ün kural çizgisi (`UNDERLINE`) mürekkepsiz bir
+            // hücrede arka plan rengiyle çizilir, yani görünmez olurdu.
+            let mut on = color::resolve(if inverse { cell.bg } else { cell.fg }, colors);
+            if !inverse && dim {
+                on = color::dim(on);
+            }
+
+            let col = indexed.point.column.0 as u16;
+            // İmlecin altındaki hücre **ters** çiziliyor. İmleç bloğu opak ve
+            // glyph'lerin altında (`plan.md` → R4.1); harf kendi ön planıyla
+            // kalsaydı açık gri, açık mavi bloğun üstüne düşer ve okunmazdı.
+            // Kararı `bt-core` veriyor çünkü kararın adı terminal
+            // semantiğidir; `bt-gpu`'nun bileceği bir şey değil.
+            let on = if cursor.visible && (col, row) == (cursor.col, cursor.row) {
+                color::BG_RGB
+            } else {
+                on
+            };
+            sink(Cell {
+                col,
                 row,
-                rgba: color::lineer_rgba(rgb),
+                ch,
+                fg: color::lineer_rgba(on),
+                bg,
             });
         }
 
-        let cursor_row = cursor.point.line.0 + offset;
-        Some(Cursor {
-            col: cursor.point.column.0 as u16,
-            row: cursor_row.clamp(0, rows.saturating_sub(1)) as u16,
-            // Kaydırma geçmişine bakarken imleç ekranın dışına çıkar.
-            visible: cursor.shape != CursorShape::Hidden && (0..rows).contains(&cursor_row),
-        })
+        Some(cursor)
     }
 
     /// Hasarı uzaktan işaretleyebilen tutamak.
@@ -619,8 +706,14 @@ mod tests {
         kontrol::<Session>();
     }
 
-    /// `adet` arka plan hücresi çizilen ilk kareyi bekler.
-    fn hucreleri_bekle(session: &Session, wake: &TestWake, adet: usize) -> Vec<CellBg> {
+    /// `adet` **arka planlı** hücre taşıyan ilk kareyi bekler; dönen liste
+    /// karenin tamamıdır.
+    ///
+    /// Ölçüt sink çağrısı sayısı **değil**, arka planlı hücre sayısı: sink
+    /// artık mürekkebi olan hücreleri de veriyor ve PTY'nin yankısı
+    /// (`read x` betiğinde yazılan "ab") sayıyı sessizce şişirirdi. Arka plan
+    /// sayısı bu sınamaların gerçekten baktığı şey ve betiklerden türüyor.
+    fn hucreleri_bekle(session: &Session, wake: &TestWake, adet: usize) -> Vec<Cell> {
         let bitis = Instant::now() + Duration::from_secs(5);
         let mut hucreler = Vec::new();
         let mut gorulen = 0;
@@ -631,10 +724,18 @@ mod tests {
             );
             gorulen = wake.bekle(gorulen + 1, Duration::from_millis(500));
             hucreler.clear();
-            if session.frame(|c| hucreler.push(c)).is_some() && hucreler.len() == adet {
+            if session.frame(|c| hucreler.push(c)).is_some()
+                && arka_planlar(&hucreler).count() == adet
+            {
                 return hucreler;
             }
         }
+    }
+
+    /// Karenin arka plan boyayan hücreleri — `Frame`'in `bg_count`'unun
+    /// saydığı küme.
+    fn arka_planlar(hucreler: &[Cell]) -> impl Iterator<Item = &Cell> {
+        hucreler.iter().filter(|c| c.bg.is_some())
     }
 
     #[test]
@@ -657,15 +758,42 @@ mod tests {
         .unwrap();
 
         let hucreler = hucreleri_bekle(&session, &wake, 8);
+        let arka: Vec<_> = arka_planlar(&hucreler).collect();
 
         // " bateri " → sekiz hücre, hepsi ilk satırda ve kırmızı.
-        assert!(hucreler.iter().all(|c| c.row == 0), "{hucreler:?}");
+        assert!(arka.iter().all(|c| c.row == 0), "{arka:?}");
         assert_eq!(
-            hucreler.iter().map(|c| c.col).collect::<Vec<_>>(),
+            arka.iter().map(|c| c.col).collect::<Vec<_>>(),
             (0..8).collect::<Vec<_>>()
         );
-        let kirmizi = color::lineer_rgba(color::default(1));
-        assert!(hucreler.iter().all(|c| c.rgba == kirmizi), "{hucreler:?}");
+        let kirmizi = Some(color::lineer_rgba(color::default(1)));
+        assert!(arka.iter().all(|c| c.bg == kirmizi), "{arka:?}");
+    }
+
+    #[test]
+    fn sabit_shell_alti_glif_verir() {
+        // `make duman`'ın `glif=G` kapısının bağlandığı sayı. Ayrı bir
+        // sınama, çünkü ayrı bir iddia: `hucre=8` sink'in hücre ürettiğini,
+        // `glif=6` **mürekkep** ürettiğini söylüyor. Sekizi de arka planlı
+        // olduğu için tek bir sayı ikisini birden kanıtlayamazdı — boşluklu
+        // iki uç tam da farkın yaşadığı yer.
+        let wake = Arc::new(TestWake::default());
+        let (program, args) = smoke_shell();
+        let session = Session::spawn(
+            SessionOptions {
+                command: Some((program, args)),
+                cols: 40,
+                rows: 10,
+                cell_px: (9, 18),
+                scrollback: 100,
+            },
+            Arc::clone(&wake) as Arc<dyn Wake>,
+        )
+        .unwrap();
+
+        let hucreler = hucreleri_bekle(&session, &wake, 8);
+        let glifler: String = hucreler.iter().filter_map(|c| c.ch).collect();
+        assert_eq!(glifler, "bateri", "{hucreler:?}");
     }
 
     #[test]
@@ -698,11 +826,56 @@ mod tests {
 
         let hucreler = hucreleri_bekle(&session, &wake, 1);
         assert_eq!(
-            hucreler[0].rgba,
-            color::lineer_rgba(color::dim(color::default(1)))
+            hucreler[0].bg,
+            Some(color::lineer_rgba(color::dim(color::default(1))))
         );
         // Sönük olmayan kırmızıdan gerçekten farklı.
-        assert_ne!(hucreler[0].rgba, color::lineer_rgba(color::default(1)));
+        assert_ne!(hucreler[0].bg, Some(color::lineer_rgba(color::default(1))));
+        // Ters videoda ön plan hücrenin arka planından gelir ve **sönmez**:
+        // `DIM` yalnız `cell.fg`'den doğan renge uygulanıyor.
+        assert_eq!(hucreler[0].ch, Some('x'));
+        assert_eq!(hucreler[0].fg, color::lineer_rgba(color::BG_RGB));
+    }
+
+    #[test]
+    fn imlecin_altindaki_harf_ters_cizilir() {
+        // İmleç bloğu opak ve glyph'in altında; harf kendi ön planıyla
+        // kalsaydı açık gri, açık mavi bloğun üstüne düşer ve okunmazdı.
+        // `bt-gpu` bunu göremez — imleci ayrı listede, hücreyi ayrı listede
+        // çiziyor ve ikisinin çakıştığını bilmiyor.
+        let wake = Arc::new(TestWake::default());
+        // İmleç yazılan metnin **sonunda** durur; hücreyi imlecin altına
+        // sokmak için geri sarıyoruz (`\b`).
+        let session = oturum(
+            "printf '\\033[41mAB\\033[0m\\b\\b'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        let hucreler = hucreleri_bekle(&session, &wake, 2);
+        let a = hucreler.iter().find(|c| c.col == 0).expect("ilk hücre");
+        let b = hucreler.iter().find(|c| c.col == 1).expect("ikinci hücre");
+        assert_eq!((a.ch, b.ch), (Some('A'), Some('B')), "{hucreler:?}");
+        // İmleç 0. sütunda: oradaki harf arka plan rengine döner, komşusu
+        // dönmez. İkisini birden sınamak "hepsini terse çevirdim" hatasını da
+        // yakalıyor.
+        assert_eq!(a.fg, color::lineer_rgba(color::BG_RGB), "{hucreler:?}");
+        assert_ne!(b.fg, color::lineer_rgba(color::BG_RGB), "{hucreler:?}");
+    }
+
+    #[test]
+    fn gizli_metnin_murekkebi_dusar_arka_plani_kalir() {
+        let wake = Arc::new(TestWake::default());
+        // `\e[8m` (conceal) ön planı gizler, arka planı değil. Bayrak
+        // `bt-gpu`'ya geçmediği için burada çözülmek zorunda: geçmeseydi ve
+        // burada da elenmeseydi gizlenmiş metin ekranda okunurdu.
+        let session = oturum(
+            "printf '\\033[41;8mgizli\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        let hucreler = hucreleri_bekle(&session, &wake, 5);
+        assert!(hucreler.iter().all(|c| c.ch.is_none()), "{hucreler:?}");
+        assert_eq!(arka_planlar(&hucreler).count(), 5, "{hucreler:?}");
     }
 
     #[test]
@@ -720,8 +893,11 @@ mod tests {
 
         // İki yeşil hücre: shell girdiyi okuyup geri yazabildi.
         let hucreler = hucreleri_bekle(&session, &wake, 2);
-        let yesil = color::lineer_rgba(color::default(2));
-        assert!(hucreler.iter().all(|c| c.rgba == yesil), "{hucreler:?}");
+        let yesil = Some(color::lineer_rgba(color::default(2)));
+        assert!(
+            arka_planlar(&hucreler).all(|c| c.bg == yesil),
+            "{hucreler:?}"
+        );
     }
 
     #[test]

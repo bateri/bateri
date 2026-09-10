@@ -1,0 +1,72 @@
+#include <metal_stdlib>
+using namespace metal;
+
+// Rust karşılığı: bt_gpu::frame::GlyphInstance,
+// #[repr(C)] { pos: [f32; 2], uv0: [f32; 2], rgba: [f32; 4] }.
+//
+// `size` ve uv boyutu instance'ta YOK: bu sette her glyph tam bir hücre
+// boyunda (sabit yuva ızgarası) ve ikisi de kare boyunca sabit, uniform
+// olarak geliyorlar. Yan etkisi düzenin dolgusuz örtüşmesi: float2 8, float4
+// 16 hizalı → pos@0, uv0@8, rgba@16, stride 32. Araya bir `float2 size`
+// girseydi rgba 32'ye kayar, MSL 48 bayt eder ve Rust'ın 40'ıyla ayrışırdı.
+struct GlyphInstance {
+    float2 pos;   // hücrenin sol üst köşesi, piksel
+    float2 uv0;   // atlastaki yuvanın sol üst köşesi, normalize
+    // Lineer RGBA: hedef BGRA8Unorm_sRGB ve kodlamayı ROP yapıyor. Buraya
+    // ya da fragment'e bir gamma düzeltmesi eklemek paleti İKİ KEZ kodlar.
+    float4 rgba;
+};
+
+// cell_bg.metal ile aynı gerekçe: her iki taraf KENDİ assert'iyle bağlı.
+// Buraya eklenen bir alan stride'ı kaydırır, Rust tarafı bunu göremez.
+static_assert(sizeof(GlyphInstance) == 32, "GlyphInstance stride 32 olmalı");
+static_assert(__builtin_offsetof(GlyphInstance, uv0) == 8, "uv0@8");
+static_assert(__builtin_offsetof(GlyphInstance, rgba) == 16, "rgba@16");
+
+struct Out {
+    float4 position [[position]];
+    // uv interpolasyon İSTER: dörtlünün içinde atlas yuvasını tarıyor.
+    float2 uv;
+    // Renk instance boyunca sabit; `flat` fragment başına interpolasyonu kaldırır.
+    float4 rgba [[flat]];
+};
+
+// inst `device`: cell_bg ile aynı gerekçe (instance_id ile ıraksak, grid'le
+// büyür). Üç uniform `constant`: üçü de kare boyunca tekdüze.
+vertex Out cell_vertex(uint vid [[vertex_id]],
+                       uint iid [[instance_id]],
+                       device const GlyphInstance* inst [[buffer(0)]],
+                       constant float2& viewport_px [[buffer(1)]],
+                       constant float2& cell_px [[buffer(2)]],
+                       constant float2& uv_size [[buffer(3)]]) {
+    GlyphInstance it = inst[iid];
+    float2 corner = float2(vid & 1, vid >> 1);
+    float2 ndc = (it.pos + corner * cell_px) / viewport_px * 2.0 - 1.0;
+    Out o;
+    // Piksel uzayı sol-üst başlangıçlı, NDC sol-alt: y ters çevrilir. Atlas
+    // dokusunun kendi y'si de sol-üst başlangıçlı (replaceRegion satır
+    // satır yazıyor), yani uv ters ÇEVRİLMEZ — ikisi aynı yönde.
+    o.position = float4(ndc.x, -ndc.y, 0.0, 1.0);
+    o.uv = it.uv0 + corner * uv_size;
+    o.rgba = it.rgba;
+    return o;
+}
+
+// Atlas R8Unorm: tek kanal kapsama (alfa). Renk instance'tan gelir, dokudan
+// değil — atlas glyph başına bir maske tutuyor, bir görüntü değil.
+fragment float4 cell_fragment(Out in [[stage_in]],
+                              texture2d<float> atlas [[texture(0)]]) {
+    // `nearest`, `linear` DEĞİL. Birebir oturan olağan durumda ikisi aynı
+    // sonucu verir (fragment merkezleri texel merkezlerine düşer). Ayrıştıkları
+    // karede — ölçek değişimiyle bir sonraki geometri olayı arasında — fark
+    // ortaya çıkıyor: dörtlü yuvadan genişse linear'ın son sütunu komşu
+    // yuvanın ilk sütununu karıştırır. Yuvalar arasında pay yok ve
+    // `clamp_to_edge` yalnız dokunun kenarında kırpıyor; üstelik Metal yeni
+    // dokuyu sıfırlamıyor, yani komşu henüz yazılmamış olabilir. `nearest`
+    // her zaman yuvanın içinde kalıyor: o karede glyph köşeli görünür, ama
+    // rastgele kapsama okumaz.
+    constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
+    float kapsama = atlas.sample(s, in.uv).r;
+    // Ön çarpımsız: blend src_alpha/one_minus_src_alpha ile eşleşiyor.
+    return float4(in.rgba.rgb, in.rgba.a * kapsama);
+}

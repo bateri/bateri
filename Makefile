@@ -21,8 +21,8 @@ clippy:
 test:
 	$(CARGO) test --workspace
 
-# Pencereyi açar, BT_RUN_SECONDS dolunca kare ve hücre sayısına bakar:
-# kare=N hucre=K pipeline=ok, biri 0 → kırmızı.
+# Pencereyi açar, BT_RUN_SECONDS dolunca kare, hücre ve glyph sayısına bakar:
+# kare=N hucre=K glif=G pipeline=ok, biri 0 → kırmızı.
 # Başsız ortamda binary stdout'a "ATLANDI" basıp 78 ile çıkar; make bunu 2
 # olarak döndürür — ayırt edici sinyal stdout metnidir, çıkış kodu değil.
 # `cargo run` CARGO_TARGET_DIR'a saygı duyar ve çocuğun çıkış kodunu geçirir.
