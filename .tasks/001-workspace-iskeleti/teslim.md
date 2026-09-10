@@ -56,7 +56,7 @@ adresi eklenmeli (`git remote add origin …`).
 
 ### Yayın Checklist
 
-- [ ] B.1 görsel kontrol (phase-3 checklist'indeki iki `[~]` kutusu buna bağlı)
+- [x] B.1 görsel kontrol — kullanıcı gözüyle doğrulandı (10 Eylül 2026)
 - [x] B.2 uzak depo tanımı (`origin` = git@github.com:bateri/bateri.git)
 - [x] `[oto]` `/ship`: doğrulama + push (8 commit, `main`)
 

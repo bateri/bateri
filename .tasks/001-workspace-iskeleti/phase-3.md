@@ -269,9 +269,9 @@ kalır.
 - [x] `setLayer` → `setWantsLayer(true)` sırası
 - [x] `bateri` main: Aqua kontrolü, `BT_RUN_SECONDS`, hata → stderr + 1
 - [x] Test: `make duman` → stdout `kare=1 pipeline=ok`, çıkış 0
-- [~] Test: pencere koyu gri, siyah değil (göz) — ekran görüntüsü pencereyi yakalamadı, kullanıcı gözü bekliyor
+- [x] Test: pencere koyu gri, siyah değil (göz) — kullanıcı doğruladı, teslim B.1
 - [x] Test: `quad_fragment` adını `quad.metal`'de geçici olarak değiştir → `make duman` kırmızı; geri al
-- [~] Test: pencereyi boyutlandır → bulanıklık yok; kapat → süreç 0 ile biter — etkileşimli, kullanıcı gözü bekliyor
+- [x] Test: pencereyi boyutlandır → bulanıklık yok; kapat → süreç 0 ile biter — kullanıcı doğruladı, teslim B.1
 - [x] Test: `launchctl managername` ≠ Aqua ortamı taklidi (`PATH`'e sahte `launchctl` koyarak) → çıkış 78
 - [x] `make duman` stub'ı gerçek reçeteyle değiştirildi; `proje.md` listesinden çıkarıldı
 - [x] Belge paragrafları (bölüm 5) aynı commit'te
