@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/bt-core",
+    "crates/bt-atlas",
+    "crates/bt-gpu",
+    "crates/bt-shell",
+    "crates/bateri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+
+# Dış crate sürümleri tek yerden; üyeler `{ workspace = true }` der.
+# Bu phase'de dış crate yok — phase-2 (objc2-metal, dispatch2) ve
+# phase-3 (objc2-app-kit) ekler; Cargo.lock farkı phase başına okunur.
+[workspace.dependencies]
+bt-core = { path = "crates/bt-core" }
+bt-atlas = { path = "crates/bt-atlas" }
+bt-gpu = { path = "crates/bt-gpu" }
+bt-shell = { path = "crates/bt-shell" }
