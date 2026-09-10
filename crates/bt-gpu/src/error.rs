@@ -18,6 +18,8 @@ pub enum GpuError {
     NoCommandQueue,
     NoDrawable,
     NoCommandBuffer,
+    /// Instance tamponu ayrılamadı (bellek baskısı).
+    NoInstanceBuffer,
     NoRenderEncoder,
     /// Komut tamponu `Error` durumuyla bitti (GPU hatası, zaman aşımı, cihaz
     /// kaybı); kare sunulmadı, sayaç artmaz.
@@ -34,6 +36,7 @@ impl fmt::Display for GpuError {
             Self::NoCommandQueue => write!(f, "komut kuyruğu kurulamadı"),
             Self::NoDrawable => write!(f, "drawable alınamadı"),
             Self::NoCommandBuffer => write!(f, "komut tamponu alınamadı"),
+            Self::NoInstanceBuffer => write!(f, "instance tamponu ayrılamadı"),
             Self::NoRenderEncoder => write!(f, "render encoder kurulamadı"),
             Self::CommandFailed(Some(e)) => write!(f, "komut tamponu hatayla bitti: {e}"),
             Self::CommandFailed(None) => write!(f, "komut tamponu hatayla bitti"),

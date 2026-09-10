@@ -14,7 +14,9 @@ akıtır ve kapanış shell çocuğunu düzgün bitirir. 001'in devrettiği notl
   - **R1.1** — `Session::spawn(SessionOptions, Arc<dyn Wake>)`: `$SHELL` login
     ya da verilen komut; `TERM=xterm-256color`, `COLORTERM=truecolor` elle;
     `tty::setup_env()` çağrılmaz.
-  - **R1.2** — `Session::frame(&self, sink: &mut dyn FnMut(CellBg)) -> Option<Cursor>`:
+  - **R1.2** — `Session::frame(&self, sink: impl FnMut(CellBg)) -> Option<Cursor>`
+    (taslak `&mut dyn` yazıyordu; hücre başına dinamik çağrı olmasın diye
+    jenerik, uygulamada karar):
     tek kilit tutuşunda hasar sorgusu, hasar yoksa `None` ve hiç iterasyon;
     varsa varsayılan olmayan arka planlar çözülmüş RGBA ile, imleç, `reset_damage()`.
   - **R1.3** — `Session::write(&[u8])`, `Session::resize(cols, rows, cell_px)`,
@@ -50,8 +52,10 @@ akıtır ve kapanış shell çocuğunu düzgün bitirir. 001'in devrettiği notl
 
 1. **Phase-1 `bt-core`** — bağımlılık, `Wake`, `Session`, `frame`, sınamalar,
    `make test-yaris` nightly'siz reçete. Pencere ve Metal yok.
-2. **Phase-2 `bt-gpu` cell_bg** — shader, `Frame`, instance düzeni; `draw` hem
-   quad (001 duman) hem cell_bg çizebilir; sözleşme değişmez.
+2. **Phase-2 `bt-gpu` cell_bg** — shader, `Frame`, instance düzeni; arka planı
+   render pass'in `Clear` yükü boyar ve 001'in tam ekran quad'ı silinir
+   (uygulamada karar; gerekçe phase-2 → Uygulama Notları). `make duman`
+   sözleşmesi değişmez.
 3. **Phase-3 `bt-shell` çizim** — `DisplayLink` + `Waker`, `Session` bağlanır,
    asenkron, yeni duman sözleşmesi ve jeton listesi **tek commit'te**;
    `draw_surface` yolu silinir.

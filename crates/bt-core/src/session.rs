@@ -78,12 +78,27 @@ struct GridSize {
 impl GridSize {
     /// Sıfır sütun ya da satır alacritty'de taşmadır:
     /// `Dimensions::last_column()` = `Column(columns() - 1)`, `usize`'ta
-    /// `0 - 1`. Küçültülen ya da simge durumuna indirilen pencere gerçekten
-    /// sıfır hesaplatabilir, o yüzden taban 1×1'de kesilir.
-    fn new(cols: u16, rows: u16) -> Self {
+    /// `0 - 1`. Açılışta grid'in var olması gerektiği için taban 1×1'de
+    /// kesilir; henüz kaybedilecek geçmiş yok.
+    ///
+    /// **`resize` bu kurucuyu kullanmaz.** Var olan bir grid'i 1 sütuna
+    /// çekmek yıkıcıdır: alacritty her sarmalı satırı tek sütuna açar ve
+    /// `reversed.truncate(max_scroll_limit + lines)` ile geçmişin neredeyse
+    /// tamamını atar; 80 sütuna dönmek onu geri getirmez. Dejenere boyut
+    /// kırpılmaz, yoksayılır.
+    fn spawn_tabani(cols: u16, rows: u16) -> Self {
         Self {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
+        }
+    }
+
+    /// Kırpmadan. Çağıran dejenere boyutu zaten elemiş olmalı;
+    /// `spawn_tabani`'nin karşılığıdır ve `resize` bunu kullanır.
+    fn tam(cols: u16, rows: u16) -> Self {
+        Self {
+            cols: cols as usize,
+            rows: rows as usize,
         }
     }
 }
@@ -165,9 +180,16 @@ impl EventListener for Adapter {
             Event::ChildExit(status) => self.0.wake.child_exit(status.code()),
             Event::PtyWrite(text) => self.reply(text),
             // Renk sorusu `Term` kilidi tutulurken gelir; tabloyu okumak için
-            // kilidi geri istemek kilitlenme olurdu. Paletin varsayılanıyla
-            // yanıtlarız — uygulamanın OSC 4 ile değiştirdiği renk bu yanıtta
-            // eski kalır (kimse sormadan değiştirmiyor; 00X tema setinin işi).
+            // kilidi geri istemek kilitlenme olurdu (kilit yeniden girilebilir
+            // değil, `try_lock` da aynı thread'de hep düşer). Paletin
+            // varsayılanıyla yanıtlıyoruz.
+            //
+            // **Bilinen sınır:** uygulama OSC 4/10/11 ile bir rengi
+            // değiştirip sonra sorarsa eski değeri alır — "önce ata, sonra
+            // sor" yaygın bir örüntüdür (arka planı okuyup açık/koyu tema
+            // seçen editörler). Çizim yolu tabloyu doğru okuyor, yalnız
+            // yanıt yolu okumuyor; ikisi ayrışıyor. Gerçek çözüm paletin
+            // sahipliğinin alacritty'den bize geçmesi, yani 00X tema seti.
             Event::ColorRequest(index, format) => self.reply(format(color::default(index))),
             Event::TextAreaSizeRequest(format) => {
                 let size = *kilit(&self.0.size);
@@ -207,7 +229,7 @@ pub struct Session {
 impl Session {
     /// PTY'yi açar, shell'i başlatır ve okuyucu thread'i kurar.
     pub fn spawn(options: SessionOptions, wake: Arc<dyn Wake>) -> io::Result<Self> {
-        let grid = GridSize::new(options.cols, options.rows);
+        let grid = GridSize::spawn_tabani(options.cols, options.rows);
         let size = window_size(grid, options.cell_px);
 
         let pty_options = tty::Options {
@@ -258,11 +280,12 @@ impl Session {
     /// çizileceğine" değil: drawable içeriği korunmadığı için her karede tam
     /// grid taranır.
     ///
-    /// `sink` **`Term` kilidi tutulurken** çağrılır ve kilit yeniden girilebilir
+    /// `sink` jeneriktir: hücre başına dinamik çağrı yerine satır içine
+    /// alınır. **`Term` kilidi tutulurken** çağrılır ve kilit yeniden girilebilir
     /// değildir: `Session`'a geri giren bir sink (`resize`, `frame`) kendi
     /// kendini kilitler. Sink'in işi tamponu doldurmaktır, başka bir şey değil —
     /// `Wake` ile aynı sözleşme.
-    pub fn frame(&self, sink: &mut dyn FnMut(CellBg)) -> Option<Cursor> {
+    pub fn frame(&self, mut sink: impl FnMut(CellBg)) -> Option<Cursor> {
         // Bayrak kilit istemez, kilit ise ucuz değil: `FairMutex::lock()` iki
         // muteks alır ve okuyucu thread PTY'den okumaya başlamadan önce
         // aynı sıraya giriyor. Boştaki kare o sıraya hiç girmesin.
@@ -325,6 +348,25 @@ impl Session {
         })
     }
 
+    /// Hasar bayrağını yeniden diker.
+    ///
+    /// `frame()` bayrağı çizim başlamadan tüketir; çizim sonradan başarısız
+    /// olursa (drawable alınamadı, tampon ayrılamadı) o içerik bir daha
+    /// istenmez ve pencere PTY'den yeni bayt gelene kadar bayat kalır —
+    /// "boşta sıfır kare" sessizce "boşta hiç kare" olur. Çizemeyen taraf
+    /// bunu çağırır.
+    ///
+    /// **Bayrak kimseyi uyandırmaz**, `resize`'da olduğu gibi: uyandırmak
+    /// çağıranın işi (kareyi bir tur daha isteyecek olan o).
+    ///
+    /// **Durma koşulu çağıranındır ve zorunludur.** Kalıcı bir çizim hatası
+    /// "başarısız → bayrağı dik → yeniden dene" döngüsünü ekran tazeleme
+    /// hızında sonsuza çevirir; hata başına **tek** yeniden deneme, art arda
+    /// ikinci hatada kare talebi kesilir ve sıradaki `Wakeup` beklenir.
+    pub fn mark_dirty(&self) {
+        self.adapter.0.dirty.store(true, Ordering::Release);
+    }
+
     /// Klavyeden ya da başka bir kaynaktan PTY'ye bayt akıtır.
     ///
     /// Boş dilim sessizce düşer: sıfır baytlık bir `Msg::Input`
@@ -338,8 +380,26 @@ impl Session {
 
     /// Grid'i ve PTY'yi yeni boyuta getirir. Reflow alacritty'nindir.
     pub fn resize(&self, cols: u16, rows: u16, cell_px: (u16, u16)) {
-        let grid = GridSize::new(cols, rows);
+        // Simge durumuna inen ya da sıfır yükseklikli pencere 0 hesaplatabilir.
+        // Bu boyut kırpılmaz, YOKSAYILIR: 1 sütuna reflow geçmişi kalıcı
+        // olarak yok eder ve PTY'ye 1×1 winsize gitmesi tam ekran uygulamaları
+        // bozar. Görünmeyen pencerede çizecek bir şey de yok.
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        let grid = GridSize::tam(cols, rows);
         let size = window_size(grid, cell_px);
+
+        // Ucuz kapı önce. Canlı boyutlandırmada `windowDidResize:`
+        // çağrılarının çoğu hücre sınırını geçmez ve hiçbir şey yapmaz;
+        // `Term`'ün kilidi ise okuyucunun ayrıştırma lease'inin arkasında
+        // bekleyebilir. Küçük kilitle eleyip oraya hiç girmiyoruz. Guard
+        // `term`'den ÖNCE düşüyor, kilit sırası (term → size) bozulmuyor.
+        let degisti = !ayni_boyut(*kilit(&self.adapter.0.size), size);
+        if !degisti {
+            return;
+        }
+
         // Üç adım tek kilit tutuşunda: grid, adapter'ın bildiği boyut ve
         // PTY'ye giden mesaj. Ayrı ayrı yapılsalardı eşzamanlı iki resize
         // grid'i bir sayıda, `TIOCSWINSZ`'i başkasında bırakabilirdi.
@@ -347,9 +407,8 @@ impl Session {
         // kilitlenme yok; `send` kilitsizdir.
         let mut term = self.term.lock();
         let mut onceki = kilit(&self.adapter.0.size);
-        // Aynı boyutta erken dön. `windowDidChangeBackingProperties:` gibi
-        // olaylar boyut değişmeden de ateşlenir; koşulsuz dikilen bayrak
-        // "boşta sıfır kare"yi sessizce delerdi.
+        // Ön kapıdan iki eşzamanlı resize birlikte geçebilir; ikincisi burada
+        // yakalanır. Koşulsuz dikilen bayrak "boşta sıfır kare"yi delerdi.
         if ayni_boyut(*onceki, size) {
             return;
         }
@@ -516,7 +575,7 @@ mod tests {
             );
             gorulen = wake.bekle(gorulen + 1, Duration::from_millis(500));
             hucreler.clear();
-            if session.frame(&mut |c| hucreler.push(c)).is_some() && hucreler.len() == adet {
+            if session.frame(|c| hucreler.push(c)).is_some() && hucreler.len() == adet {
                 return hucreler;
             }
         }
@@ -556,7 +615,7 @@ mod tests {
         // İkinci çağrı hasarsız: ne kare ne iterasyon. Kapı düşseydi aynı üç
         // hücre yeniden emilir ve sayaç büyürdü.
         let mut sayac = 0;
-        assert!(session.frame(&mut |_| sayac += 1).is_none());
+        assert!(session.frame(|_| sayac += 1).is_none());
         assert_eq!(sayac, 0, "hasarsız kare sink'i çağırdı");
     }
 
@@ -596,20 +655,33 @@ mod tests {
     }
 
     #[test]
-    fn sifir_boyut_panik_etmez() {
+    fn sifir_boyut_yoksayilir() {
         let wake = Arc::new(TestWake::default());
         let session = oturum("sleep 5", Arc::clone(&wake));
 
         // Açılış karesi: grid boş ama pencere bir kez boyanmalı (bayrak
         // `Adapter::new`'da `true` başlıyor).
-        assert!(session.frame(&mut |_| ()).is_some());
+        assert!(session.frame(|_| ()).is_some());
+        assert!(session.frame(|_| ()).is_none());
 
-        // Simge durumuna inen pencere `bounds()`'tan sıfır hesaplatabilir;
-        // alacritty'de `last_column()` = `columns() - 1` ve `usize` taşar.
+        // Simge durumuna inen pencere `bounds()`'tan sıfır hesaplatabilir.
+        // Bu boyut grid'e HİÇ ulaşmamalı: 1 sütuna kırpmak alacritty'de
+        // panik yerine daha kötüsünü yapar, geçmişi kalıcı olarak yok eder.
+        // Hasar işaretlenmemesi resize'ın hiç olmadığının kanıtı.
+        session.resize(0, 24, (9, 18));
+        session.resize(80, 0, (9, 18));
         session.resize(0, 0, (9, 18));
-        assert!(session.frame(&mut |_| ()).is_some());
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "dejenere boyut grid'e ulaştı"
+        );
+
+        // Gerçek boyut değişimi hasar işaretler.
         session.resize(80, 24, (9, 18));
-        assert!(session.frame(&mut |_| ()).is_some());
+        assert!(session.frame(|_| ()).is_some());
+        // Aynı boyut ikinci kez: değişiklik yok, hasar yok.
+        session.resize(80, 24, (9, 18));
+        assert!(session.frame(|_| ()).is_none());
     }
 
     #[test]
@@ -669,7 +741,7 @@ mod tests {
 
         let mut kare = 0u64;
         while Instant::now() < bitis {
-            if session.frame(&mut |_| ()).is_some() {
+            if session.frame(|_| ()).is_some() {
                 kare += 1;
             }
             std::thread::sleep(Duration::from_millis(1));

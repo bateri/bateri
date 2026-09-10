@@ -6,9 +6,11 @@
 //! ve `objc2-metal`'i hiç görmez — device'ı `Renderer::system_default` kurar.
 
 mod error;
+mod frame;
 mod renderer;
 mod surface;
 
 pub use error::GpuError;
+pub use frame::Frame;
 pub use renderer::Renderer;
 pub use surface::Surface;

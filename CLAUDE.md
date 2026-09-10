@@ -84,6 +84,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   çağrıları `MainThreadMarker` ile ana thread'de; renderer `CAMetalDisplayLink`
   ile sürülür.
 - **PTY ve ayrıştırma yolunda panik yok.** Bilinmeyen dizi yoksayılır, loglanır.
+  Kuralın ikinci yarısı **henüz borç**: `tracing` bağlanmadı, logger yok —
+  yoksayılan olaylar (başlık, zil, pano) ve alacritty'nin `log` satırları
+  sessizce düşüyor; logger gelince bu cümle kalkar.
 - **`tty::setup_env()` çağrılmaz.** O, *kendi* sürecimizin ortamını `set_var`
   ile değiştirir ve makinede alacritty kuruluysa `TERM=alacritty` yazar.
   Çocuğun ortamı `tty::Options.env` ile verilir: `TERM=xterm-256color`,
