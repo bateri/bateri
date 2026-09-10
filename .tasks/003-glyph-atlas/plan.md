@@ -146,6 +146,6 @@ frame(sink: FnMut(Cell)) → Option<Cursor>  1. cell_bg: arka planlar + imleç
 | Phase | Durum | Commit |
 |-------|-------|--------|
 | phase-1 | ✅ | b5a0585 |
-| phase-2 | | |
+| phase-2 | ✅ | ae50826 |
 | phase-3 | | |
 | phase-4 | | |

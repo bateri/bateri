@@ -269,4 +269,4 @@ bir kanıt değil; ölçüt dönen aile adı.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (12 bulgu; 11 uygulandı, 1 waive)
 - [x] `/audit` çalıştırıldı, bulgular giderildi (2 bulgu; 4 mercek temiz, 5 mercek ilgisiz)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: ae50826
