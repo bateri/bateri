@@ -366,4 +366,4 @@ Kılavuzdan sapmalar (kalite kapısından geldi; çelişkide bu notlar kazanır)
 - [x] `/code-review` çalıştırıldı, 8 bulgu giderildi
 - [x] `/audit` çalıştırıldı — mercek 1, 2, 6, 8, 9 temiz; 7 (havuz) ve 10 (SAFETY, belge, `objc2` satırı) giderildi; 3, 4, 5 ilgisiz
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: 905aa50
