@@ -659,4 +659,4 @@ de atması, tavanın kalkması — üçü de düşüyor.
       fan-out), mercek 7'nin 1 bulgusu ve mercek 10'un 6 belge–kod çelişkisi
       giderildi (+ ana döngünün kendi bulduğu 1 çelişki)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: `3c91814`

@@ -4,7 +4,7 @@
 |---|---|---|---|
 | 001 | [workspace-iskeleti](001-workspace-iskeleti/) | 🟢 | workspace, Makefile, shader zinciri, ilk pencere; `main`'de |
 | 002 | [vt-motoru](002-vt-motoru/) | 🔨 | `main`'de — pencerede gerçek shell, klavye PTY'ye akıyor, boşta sıfır kare. Teslim bekliyor: `/measure` (iki ölçüm); Apache-2.0 attribution bundle setine devredildi |
-| 003 | [glyph-atlas](003-glyph-atlas/) | 🔨 | CoreText rasterizasyonu, atlas paketleme, `cell` pipeline'ı — 002'nin körlemesine yazma dönemini bitirir. phase-1 (sRGB) + phase-2 (`bt-atlas` CoreText raster) + phase-3 (metrik geçişi, `CELL_PX` öldü) tamam, 4 phase'den 3'ü |
+| 003 | [glyph-atlas](003-glyph-atlas/) | 🔨 | 4 phase tamam (sRGB → `bt-atlas` CoreText raster → metrik geçişi → glyph): pencerede okunabilir metin var, `make duman` `glif=` jetonu kazandı. Teslim bekliyor: `/measure` (beş ölçüm) + göz kontrolü (`colorspace` `nil`, glyph yerleşimi) |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
