@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use block2::RcBlock;
-use bt_atlas::{Atlas, Metrics, TOFU};
+use bt_atlas::{Atlas, Face, Metrics, Sprite, TOFU};
 use bt_core::LinearRgba;
 use dispatch2::DispatchData;
 use objc2::rc::{Retained, autoreleasepool};
@@ -654,7 +654,9 @@ impl AtlasDoku {
         // glyph başına iki f32 bölmesi ödenirdi.
         let (inv_tw, inv_th) = (1.0 / f32::from(tw), 1.0 / f32::from(th));
         for glyph in glyphs {
-            let (yuva, upload) = self.atlas.slot(glyph.ch);
+            // Yüz phase-3'te geliyor; bu phase yalnız `slot`'un imza
+            // değişimini karşılıyor.
+            let (yuva, upload) = self.atlas.slot(Sprite::Char(glyph.ch), Face::Regular);
             // `Upload` köşeyi zaten taşıyor — `bt-atlas` ikisini bilerek aynı
             // dönüşte veriyor. Yeni yuvada onu kullanmak hem glyph başına bir
             // `%` + `/` çiftini düşürüyor hem de aynı olguyu iki ayrı ifadeyle

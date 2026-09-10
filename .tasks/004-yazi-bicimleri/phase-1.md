@@ -219,7 +219,179 @@ commit'te yanlışa düşüyor — kodla çelişen cümle aynı commit'te düzel
 
 ## Uygulama Notları
 
-<!-- /implement doldurur. -->
+**1. `ciz_kural` CoreGraphics kullanmıyor — doğrudan bayt yazıyor.** Phase
+metni alfa-only `CGBitmapContext`'i öngörüyordu. Kod yazılırken `tofu_tamponu`
+görüldü: o zaten fontu ve CG'yi hiç sormadan yuvaya elle kutu çiziyor. Kural
+sprite'ları o mekanizmanın ikinci müşterisi oldu. Üç kazanç — çizim
+deterministik (CG'nin antialias sürümüne bağlı değil, sınama tam yapı assert
+edebiliyor), `BaglamYok` başarısızlık dalı **hiç doğmuyor** (dönüş `()`), ve
+font hiç sorulmuyor. `slot()` bu yüzden kural kolunda `Cizim::Cizildi`'yi elle
+üretiyor: doğmayan bir başarısızlığı tipte yaşatmamak için bilinçli.
+
+**2. `crates/bt-gpu/src/renderer.rs` envanterde yoktu ama değişmek zorundaydı.**
+`slot(ch)` → `slot(sprite, face)` imza değişimi tek çağıranı kırıyor
+(`renderer.rs:657`). Tek satır, `Sprite::Char(glyph.ch), Face::Regular`.
+Kapsam kayması değil derleme zorunluluğu; yüzün gerçek kullanımı phase-3'te.
+
+**3. Kırpma gerçek fontla hiç ateşlenmiyor — bekçi bu yüzden saf fonksiyona
+ayrıldı.** Ölçüldü (`font.rs`, bu makine): Menlo 13pt `u_pos` −0.825,
+`u_kal` 0.571 → alt çizgi 14+1, hücre 17. 26pt'de 27+2, hücre 32. Yani
+`kural_zarfi`'nin `.min()` kolu üretim yolunda ölü ve oradan yazılan bir
+sınama mutasyonu yakalayamazdı. Kırpma ayrı bir saf fonksiyona alındı ve
+`zarf_hucrenin_disina_tasmaz` **sentetik** girdiyle sınıyor. Mutasyonla
+doğrulandı: `.min()` silinince kırmızı düşüyor.
+
+**4. `curl_amp_px` `Metrics`'e girmedi.** Phase metni üç alan öngörüyordu.
+Panelin (Simplification + Altitude, bağımsız) itirazı kabul edildi: genlik
+fonttan gelmiyor, `kalinlik * 3` — bu çizicinin tasarım sabiti. `Metrics`
+"fonttan türeyen hücre geometrisi" olarak kaldı; genlik `raster::KIVRIM_KAT`
+olarak tek tüketicisinin yanında yaşıyor. `underline_px` ve `strikeout_px`
+yerlerini hak ediyor: fonttan okunuyorlar ve `cell_px`'e kırpılmaları gerek.
+
+**5. Sessiz yüz ikamesi yuva israfına yol açıyordu — `Yuzler` artık edinilen
+yüzleri tutuyor.** Phase metninde yoktu; panelin en derin bulgusu. Tek yüzlü
+bir ailede (`Monaco`) `unwrap_or_else(|| duz.clone())` kalın yüzü düz yüze
+bağlıyordu **ama anahtar hâlâ `(Char, Bold)`'du**: bayt bayt aynı bitmap iki
+ayrı yuvada, dört yüzle dört kat yuva. Üstelik `slot()`'un kendi yorumu bu
+tehlikeyi tam adıyla anlatıp yalnız kurallar için önlüyordu. `Yuzler::etkin`
+ikisini tek mekanizmaya indirdi: anahtar **istenen** yüzü değil **çizilen**
+yüzü taşıyor. Geri düşüş uyarısı kurulumda bir kez basılıyor.
+
+**6. `#[repr(u8)]` üç enum'a da eklendi.** `slot()` çizim yolunda ve türetilen
+`Hash` enum discriminant'ını varsayılan olarak `isize` yazıyor: anahtar
+`char`'ın 4 baytından 20 bayta çıkmıştı. `repr(u8)` onu 6 bayta ve tek
+SipHash bloğuna indiriyor. İş sayımı, ölçüm değil — kare süresi iddiası
+yok.
+
+**7. `bulunamayan_yuz_duze_duser` Monaco ile yazıldı.** Zincirin tabanı Menlo
+dört yüzü de taşıyor (ölçüldü: Bold/Italic/BoldItalic üçü de `true`), yani
+geri düşüş dalı onunla ateşlenemiyor. Monaco bu makinede üçünü de vermiyor —
+sınama tam olarak `Yuzler::turet`'in ayrı bir kurucu olma gerekçesini
+kullanıyor. Mutasyonla doğrulandı: `etkin()` çökmeyi yapmayınca kırmızı.
+
+**8. `kivrim_hucre_sinirinda_sureklidir`'in iddiası düzeltildi.** Checklist
+"sol/sağ kenar sütunları eşleşiyor" diyordu; **o sınama yanlış olurdu** — bir
+tam periyotta ilk ve son sütun eşit değil, orta eksene göre **ayna**dır
+(`sin(τ(x+0.5)/w)` ile `sin(τ(w−1−x+0.5)/w)` işaretçe zıt). Bekçi
+`tepe[x] + tepe[w−1−x]` toplamının sabit olduğunu assert ediyor; bu R2.4'ün
+(periyot hücreyi tam bölmeli) gerçek karşılığı. Mutasyonla doğrulandı:
+`DALGA_SAYISI` 1.5 yapılınca kırmızı.
+
+**9. `Cargo.lock` oynamadı.** `CTFontTraits` feature'ı yeni crate çekmedi —
+`objc2-core-text` zaten grafta ve feature yalnız kendi modülünü açıyor.
+
+### `/audit` kaydı
+
+**İlgisiz mercekler (elendi, kayda geçiyor):** 4 (ayar/tema şeması — model
+yok), 5 (shell üçlüsü — `assets/shell/` el değmedi), 8 (boşta sıfır kare —
+yeni animasyon/zamanlayıcı yok, `frame()` gövdesi değişmedi), 9 (shader/Rust
+düzeni ve hücre boyutu — `.metal`, `build.rs` ve `Cell` el değmedi).
+
+**Koşan mercekler:**
+
+- **1 katman yönü — temiz.** `cargo tree`: `bt-atlas` yalnız
+  `objc2-core-{foundation,graphics,text}` görüyor; `bt-core` ağacında ve
+  kaynağında platform kütüphanesi yok. `Face`/`Sprite`/`RuleKind` `bt-core`'a
+  **sızmadı** (bu setin en kolay hatası olurdu).
+- **2 bağımlılık — temiz, ama kayda değer.** `Cargo.lock` **hiç değişmedi**;
+  `Cargo.toml`'a yalnız `CTFontTraits` feature satırı girdi ve `/code-review`
+  gerekçesinin yazılmasını istedi, yazıldı. Yeni crate yok.
+- **3 panik yolu — bt-core el değmedi, yani merceğin harfiyle ilgisiz;** yine
+  de `bt-atlas`'a giren iki üretim paniği gerekçelendirildi ve depo
+  konvansiyonuna göre `// audit:` işareti aldı: `Face::traits`'in
+  `unreachable!()`'ı (modül sınırıyla korunuyor, çağrı disipliniyle değil) ve
+  `ciz_kural`'ın tampon boyu assert'i (`ciz`'inkinin kardeşi). Geri kalan
+  bütün assert'ler `#[cfg(test)]` içinde.
+- **6 ölçüm sahipliği — temiz.** `docs/OLCUMLER.md` yok ve oluşturulmadı; kod
+  yorumlarında ve phase notlarında **hız/bellek iddiası yok**. Sınır bilinçli
+  çizildi: "anahtar 4 bayttan 20 bayta çıkmıştı" ve "8 % 6 = 2" birer **iş
+  sayımı / aritmetik**, kodu okuyarak doğrulanabilir; "Menlo 13pt `u_pos`
+  −0.825" **fonttan okunan bir değer**, kare süresi iddiası değil — ve zaten
+  `metrics()`'in var olan doc'u aynı türden sayılar taşıyor (003'ün
+  denetiminden geçmişti).
+- **7 thread ve blokaj — temiz.** `bt-atlas`'ta kilit, `sleep`, dosya G/Ç
+  yok. İki `eprintln!` de **kurulum yolunda** (`Yuzler::turet`,
+  `zincirden_ac`), çizim yolunda değil. `Atlas::new`'in dört `CTFont` açması
+  ana thread'de ama kare başına değil: açılışta ve ölçek değişiminde
+  (`/simplify`'ın Efficiency merceği bunu tartıp "eager kalsın" dedi).
+- **10 belge ve üslup borcu — temiz.** `lib.rs` modül doc'unun kapsam cümlesi
+  güncellendi ve doğru söylüyor; `Metrics`'in doc'unda düşürülen alandan iz
+  kalmadı; `kural_zarfi`'nin "13pt'de 14+1, hücre 17" cümlesi ölçülen
+  değerlerle uyuşuyor; `Yuzler::turet`'in "sınama için" gerekçesi artık
+  karşılıklı (`bulunamayan_yuz_duze_duser`). *Bu mercek 002'de 4, 003'te 6
+  çelişki bulmuştu; bu phase'de sıfır — çünkü çelişkilerin hepsini
+  `/code-review` önce yakaladı.*
+
+### `/code-review` kaydı
+
+**12 bulgu, 12'si de uygulandı, waive yok.** Üçü gerçek arızaydı:
+
+- **Dolu atlasta kural sprite'ı da tofu'ya düşüyordu.** `slot()`'un kapasite
+  kapısı sprite match'inden önce. Birkaç bin farklı glyph görüldükten sonra
+  (CJK metin, simge-ağır TUI) ızgara dolar ve o andan itibaren altı çizili
+  **her** hücrenin altında çizgi yerine tofu kutusu belirirdi; belirti ancak
+  uzun bir oturumdan sonra çıkardı. `KURAL_PAYI` ile kapasitenin altısı
+  karakterlere kapatıldı — kurallar tembel kalıyor ama yerleri garanti.
+  *Bunu `/simplify`'da Altitude merceği "rezident yuva" olarak önermiş, ben
+  "LRU 00X'in işi, erken" diye reddetmiştim. Yanılmışım: gelecek kaygısı
+  değil, bugünkü bir arızaydı.* Mutasyon doğrulandı.
+- **Nokta/kesik deseninin periyodu hücre genişliğini bölmüyordu.** Ölçüldü:
+  13pt@1x `w=8`, `Dashed` periyodu 6 → `8 % 6 = 2`; @2x `w=16`, periyot 12
+  → kalan 4. Yani çok hücreli bir kesik alt çizgi her hücre sınırında faz
+  atlıyor, komşu hücrelerde tire uzunlukları farklı görünüyordu. Kod bu
+  tehlikeyi `DALGA_SAYISI`'nın doc'unda açıkça yazıp **kıvrımda uygulamış,
+  `bant`'ta uygulamamıştı** — gözden kaçma. `bolen_periyot` eklendi,
+  `desen_periyodu_hucreyi_tam_boler` bekçilik ediyor, mutasyon doğrulandı.
+- **`Double`'ın ikinci bandı ve kıvrım yukarı doğru büyüyüp glyph gövdesine
+  giriyordu.** 13pt: hücre 17, taban 13, alt çizgi 14 → 15-16 satırları
+  **boş**, ama ikinci bant 12'ye yani `a e o`'nun son gövde satırına
+  düşüyordu; iki çizgi ayrı görünmek yerine harflerin dibine yapışık tek
+  kalın çizgi gibi okunurdu. İkisi de artık **önce aşağıdaki boş satırları**
+  kullanıyor, yer kalmazsa yukarı taşıyor.
+
+Kalan dokuz bulgu ve düzeltmeleri: `etkin()` düz düşüş yerine **merdiven**
+oldu (`BoldItalic → Bold → Italic → Regular`; doğrudan `Regular`'a inmek
+kalınlığı da düşürürdü ve `Bold`'u olup `BoldItalic`'i olmayan aile yaygın);
+glyph düzeyinde geri düşüş eklendi (kalın yüzde olmayan '→' düz yüzde varsa
+oradan gelir, tofu'ya değil); `yuz_turet` modül-özel yapıldı, böylece
+`Face::traits`'in `unreachable!()`'ı çağrı disiplinine değil **modül sınırına**
+dayanıyor; `copy_with_symbolic_traits`'in SAFETY yorumu düzeltildi (copy
+ailesinde `matrix = NULL` "birim matris" değil, **kaynağın matrisi korunur**
+— `ac()`'tan kopyalanmış yanlış gerekçeydi); `Metrics` literalinde kalan ölü
+genlik yorumu silindi; `cell_wh()` gerekçesini kendi diff'inde tutmuyordu,
+`ciz()` ve `tofu_tamponu` da ona geçti; `Cargo.toml`'daki feature'a "neden"i
+yazıldı; `kural_zarfi` `cell_h == 0` girdisinde kendi değişmezini deliyordu,
+artık `(0, 0)` dönüyor; ve `eprintln!`'in "bir kez" iddiası düzeltildi —
+`ensure()` atlası yeniden kurunca satır tekrar düşüyor, yorum artık bunu
+söylüyor.
+
+**Sınanmayan tek düzeltme:** glyph düzeyinde geri düşüş. Menlo'da düz yüzün
+taşıyıp kalın yüzün taşımadığı bir karakter bulunamadı, yani dal bu makinede
+ateşlenemiyor. Uydurma sınama yazmak yerine kayda geçiyor — kırpma dalıyla
+(not 3) aynı dürüstlük.
+
+### `/simplify` kaydı
+
+Dört mercek (reuse, simplification, efficiency, altitude) paralel koştu.
+**Uygulanan:** ortak `kaplama()` yardımcısı (formül `bant`/`kivrim`'de
+kopyaydı ve harmanlama disiplininde **zaten ayrışmıştı**); ölü `w` + çizimden
+**sonra** koşan `debug_assert!` silindi (değişmezin sahibi `font::yukari`);
+desen closure'ı (`&dyn Fn`) sayısal `(periyot, dolu)` çiftine indi ve
+`.max(2.0)`/`.max(6.0)` ölü savunmaları düştü; `curl_amp_px` `Metrics`'ten
+çıktı (not 4); `Metrics::cell_wh()` eklendi (açım dört yerde kopyaydı);
+`Yuzler` edinilen yüzleri tutar oldu (not 5); `#[repr(u8)]` (not 6);
+`yuz_turet`'in `is_empty()` kapısı ve `Face::traits`'in `Regular` kolu ölü
+sentineldi → `unreachable!()` ile sözleşme netleşti; `turet`'in doc'unun vaat
+ettiği sınama yazıldı (not 7).
+
+**Reddedilen:** kural sprite'larını `TOFU` gibi **rezident** yapmak (Altitude,
+kendisi de "önerilen değil" dedi) — LRU 00X'in işi ve bugün var olmayan bir
+tahliyeye bugünden istisna kurmak erken. Dört `CTFont`'u **tembelleştirmek**
+(Efficiency kendi reddetti: kazanç yalnız açılış, bedeli descriptor
+eşleşmesini çizim yoluna taşımak). Anahtarı elle paketlenmiş `u32` yapmak
+(`repr(u8)` zaten eski maliyete döndürüyor; elle `Hash` aşırı). `&dyn Fn`'i
+generic'e çevirmek (Efficiency: beş monomorfizasyon kopyası, karşılığı yok —
+sayısal çift ikisini de gereksiz kıldı).
 
 ## Yayın Etkisi
 
@@ -248,20 +420,21 @@ commit'te yanlışa düşüyor — kodla çelişen cümle aynı commit'te düzel
 
 ## Checklist
 
-- [ ] `Cargo.toml`: `CTFontTraits` feature'ı
-- [ ] `Face` enum'ı + `Yuzler`: dört yüz, `symbolic_traits()` kesişimi, düz yüze geri düşüş, **tek seferlik** uyarı
-- [ ] `Metrics`: `underline_px`, `strikeout_px`, `curl_amp_px` — üçü de `metrics()` içinde hücreye kırpılır
-- [ ] `RuleKind` + `raster::ciz_kural`: altı çeşit, alfa-only bağlam, fontsuz
-- [ ] `Sprite` enum'ı + `HashMap<(Sprite, Face), u16>` + `slot(sprite, face)`
-- [ ] `lib.rs` modül doc'unun kapsam cümlesi düzeltildi
-- [ ] Test: `kalin_yuz_ayri_yuva_alir` — `slot(Char('M'), Bold) != slot(Char('M'), Regular)`
-- [ ] Test: `bulunamayan_yuz_duze_duser` — trait edinilemezse düz yüzün fontu, tofu değil
-- [ ] Test: `kural_hucreye_sigar` — üç zarf da `cell_px.1`'i aşmıyor (metrik fonttan okunur, sayı yazılmaz)
-- [ ] Test: `kivrim_hucre_sinirinda_sureklidir` — sprite'ın sol/sağ kenar sütunları eşleşiyor
-- [ ] Test: `kural_sprite_bos_degil` — altı çeşit birbirinden ve boş yuvadan farklı
-- [ ] Doğrulama geçti (`make hepsi`; `make shader` `[~]` — `.metal` ve `build.rs` el değmedi; `make duman` bu phase'de değişmiyor)
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] `Cargo.toml`: `CTFontTraits` feature'ı (`Cargo.lock` oynamadı)
+- [x] `Face` enum'ı + `Yuzler`: dört yüz, `symbolic_traits()` kesişimi, düz yüze geri düşüş, **tek seferlik** uyarı
+- [x] `Metrics`: `underline_px`, `strikeout_px` — ikisi de `metrics()` içinde hücreye kırpılır
+- [~] `curl_amp_px` **eklenmedi** — fonttan gelmiyor, tasarım sabiti; `raster::KIVRIM_KAT` oldu (not 4)
+- [x] `RuleKind` + `raster::ciz_kural`: altı çeşit, fontsuz — **CG değil, doğrudan bayt** (not 1)
+- [x] `Sprite` enum'ı + `HashMap<(Sprite, Face), u16>` + `slot(sprite, face)` + `bt-gpu` çağrı yeri (not 2)
+- [x] `lib.rs` modül doc'unun kapsam cümlesi düzeltildi
+- [x] Test: `kalin_yuz_ayri_yuva_alir` — dört yüzün dördü de ayrı yuva
+- [x] Test: `bulunamayan_yuz_duze_duser` — Monaco ile, **mutasyon doğrulandı** (not 7)
+- [x] Test: `kural_zarfi_gercek_fontta_hucreye_sigar` + `zarf_hucrenin_disina_tasmaz` (sentetik, **mutasyon doğrulandı** — not 3)
+- [x] Test: `kivrim_hucre_sinirinda_sureklidir` — **iddiası düzeltildi**, ayna simetrisi (not 8); `kivrim_gercekten_dalga` da eklendi, ikisi de mutasyon doğrulandı
+- [x] Test: `kural_sprite_bos_degil_ve_cesitler_ayrisir` + `kural_yuzden_bagimsiz_tek_yuva_tutar` + `kalin_glif_duz_yuzun_yuvasina_sigar`
+- [x] Doğrulama geçti — `make hepsi` 0, `make test-yaris` 0, `make duman` `kare=1 hucre=8 glif=6 pipeline=ok` (**değişmedi**); `make shader` 0 koştu ama koşulu doğmamıştı (`.metal` el değmedi); `make terminfo`/`make kur` girdisi yok
+- [x] `/simplify` çalıştırıldı — 4 mercek, 9 bulgu uygulandı, 4 gerekçesiyle reddedildi (kayıt yukarıda)
+- [x] `/code-review` çalıştırıldı — 12 bulgu, **12'si de giderildi**, waive yok (kayıt yukarıda)
+- [x] `/audit` çalıştırıldı — 4 mercek ilgisiz, 6 mercek koştu, hepsi temiz; iki üretim paniğine `// audit:` işareti eklendi (kayıt yukarıda)
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
 - [ ] Commit: {hash}
