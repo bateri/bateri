@@ -448,4 +448,4 @@ düzeltildi: eski hâli okuyucuyu tersine ikna ediyordu.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (13 bulgu; ikisi gerçek hata, giderilmeyenler gerekçeli)
 - [x] `/audit` çalıştırıldı, bulgular giderildi (mercek 7: callback ana thread, `Session` kilidi kısa, handler thread'i; mercek 8: boşta N küçük)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: `98baf87`
