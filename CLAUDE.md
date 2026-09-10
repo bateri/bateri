@@ -48,7 +48,6 @@ Tek crate / tek sınama:
 
 ```sh
 cargo test -p bt-core -- osc::tests
-cargo bench -p bt-core --bench parse
 ```
 
 ## Katman düzeni
@@ -125,7 +124,12 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   sarmalayıcısı, fish `vendor_conf.d`) ve kullanıcının rc dosyasına **asla**
   dokunmaz. Komut blokları OSC 133 işaretlerinden okunur.
 - **Ölçülmemiş sayı yazılmaz.** Tek sahip `docs/OLCUMLER.md`; ölçüm bir kapı
-  değildir, `/measure` ile kullanıcı ister.
+  değildir, `/measure` ile kullanıcı ister. Kuralın ikinci yarısı **henüz
+  borç**: ölçüm kancaları (`BT_FRAME_LOG`, `BT_SCROLL_TEST`,
+  `BT_STARTUP_TRACE`) ve bench hedefleri yok, `docs/OLCUMLER.md` de yok —
+  `/measure` bugün sayı değil **ölçüm aracı yok** döndürüyor. Bekleyen yedi
+  iddia 002 ve 003'ün `teslim.md`'lerinde duruyor; kancalar gelince bu cümle
+  kalkar ve `cargo bench` satırı yukarıdaki bloğa geri gelir.
 - **Dil:** yorumlar, commit iletileri, belgeler Türkçe ve "neden"i anlatır;
   UI dizgileri, ayar anahtarları, tema ve materyal adları İngilizce. Kod
   tanımlayıcılarında dışa bakan ad (pub tip, fonksiyon, varyant) İngilizce;
