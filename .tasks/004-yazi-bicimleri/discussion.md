@@ -49,7 +49,9 @@ pub struct Cell {
     pub ch: Option<char>,
     pub fg: LinearRgba, pub bg: Option<LinearRgba>,
     pub bold: bool, pub italic: bool,
-    pub underline: bool, pub strikeout: bool,
+    pub underline: UnderlineStyle,               // Karar 3
+    pub underline_color: Option<LinearRgba>,     // SGR 58; None → ön plan
+    pub strikeout: bool,
 }
 
 // bt-atlas — tipografi. CoreText trait'inin karşılığı.
@@ -67,7 +69,7 @@ let face = match (cell.bold, cell.italic) {
 hamle katman yönünü ters çevirir. `bt_core::bold/italic` bir SGR bayrağıdır,
 `bt_atlas::Face` bir font yüzüdür; dört varyantları aynı, **sebepleri ayrı**.
 
-Ayrı bir `Rules` tipi yok — dört `bool` yeterli ve çağıran tarafta daha az kod.
+Ayrı bir `Rules` sarmalayıcı tipi yok: alanlar doğrudan `Cell`'de. (1. tur bunu "dört `bool`" diye yazmıştı; SGR 58 geri gelince alt çizgi bir enum'a ve bir renge dönüştü, gruplama kararı yeniden türetilmedi — gerekçe aynı: sarmalayıcı tip çağıran tarafta kod kazandırmıyor.)
 
 **Bu bir "hücreye alan eklemek" değil.** `CLAUDE.md`'nin 24 baytlık `const`
 assert'i alacritty'nin **grid hücresine** bağlı (10 000 satır scrollback ×
@@ -110,58 +112,65 @@ pub enum UnderlineStyle { None, Single, Double, Curl, Dotted, Dashed }
 **Kapsamda:** beş alt çizgi çeşidi + üstü çizili + SGR 58 rengi.
 **Kapsam dışı, kayda geçer:** üstü çizili için ayrı renk (SGR'de yok).
 
-## Karar 4: Kural çizgisi nasıl çizilir? → **`cell_rule` pipeline'ı, yeni `.metal`**
+## Karar 4: Kural çizgisi nasıl çizilir? → **atlasta sprite, var olan `cell` pipeline'ı**
 
-<!-- 2026-09-11: kıvrımlı çizgi kararıyla yeniden yazıldı. İlk hâli
-     "cell_bg pipeline'ı yeniden kullanılır, .metal değişmez" diyordu; dalga
-     bir fragment hesabı istediği için o yol kapandı. -->
+<!-- 2026-09-11, 2. tur: iki kez yeniden yazıldı. (a) "cell_bg'yi yeniden
+     kullan" → dalga fragment hesabı ister, düştü. (b) "yeni cell_rule.metal +
+     üçüncü pipeline" → panel üçüncü bir yol gösterdi, o da düştü. -->
 
-Düz bir çizgi `cell_bg`'nin `Instance`'ıyla çizilebilirdi, ama **dalga
-çizilemez**: kıvrım fragment başına bir hesap ister. Yani bu set
-`crates/bt-gpu/shaders/cell_rule.metal` ekliyor ve pipeline sayısı üçe
-çıkıyor (`cell_bg`, `cell`, `cell_rule`). Metalterm'in de tam olarak böyle
-ayrı bir `cell_rule` pipeline'ı var (`docs/ARASTIRMA.md`).
+**Yeni shader yok, üçüncü pipeline yok.** `cell` pipeline'ı zaten genel bir
+**kapsama maskesi çizicisi** ve bunu kodun kendi yorumu söylüyor
+(`cell.metal:55-56`): *"Renk instance'tan gelir, dokudan değil — atlas glyph
+başına bir maske tutuyor, bir görüntü değil."* Kıvrımlı bir alt çizgi de
+hücre boyunda bir kapsama maskesinden ibaret.
 
-**Sonuç: `make shader` bu sette zorunlu kapı.** İlk taslak "koşulu doğmuyor"
-diyordu; artık doğuyor.
+`GlyphInstance`'ın `size`'ı yok (`frame.rs:41-48`), dörtlü **tam bir hücre** —
+kural yuvası da tam bir hücre. Renk instance'tan geldiği için SGR 58 bedava.
 
-Instance düzeni — 003'ün hizalama tuzağı burada **yeniden** geçerli:
+Yani kural çizgileri **atlasta yuva tutan sprite'lar** olur:
 
 ```rust
-#[repr(C)]
-pub(crate) struct RuleInstance {
-    pos: [f32; 2],    // @0   hücrenin sol üstü, piksel
-    size: [f32; 2],   // @8   kural dikdörtgeni (kıvrımda daha yüksek)
-    rgba: [f32; 4],   // @16  lineer; SGR 58 yoksa ön plan
-    style: u32,       // @32  UnderlineStyle'ın sayısal karşılığı
-    _pad: [u32; 3],   // @36  MSL tarafı 16'ya yuvarlıyor, Rust yuvarlamıyor
-}
-const _: () = assert!(size_of::<RuleInstance>() == 48);
+// bt-atlas
+pub enum RuleKind { Single, Double, Curl, Dotted, Dashed, Strike }
+pub enum Sprite { Char(char), Rule(RuleKind) }
+yuvalar: HashMap<(Sprite, Face), u16>   // kurallar Face::Regular'da yaşar
 ```
 
-Dolgu **bilinçli ve zorunlu**: MSL struct hizası `float4` yüzünden 16, yani
-`sizeof` 36'dan 48'e yuvarlanır; Rust `#[repr(C)]` yuvarlamaz ve 36'da kalır.
-003 bu tuzağı alan sırasını değiştirerek çözmüştü, burada çözülemiyor
-(`style` gerçekten instance başına) — o yüzden dolgu alanı yazılır ve iki
-tarafa da `static_assert`/`offset_of!` çifti konur, `cell.metal`'daki gibi.
+**Bu makine zaten kurulu ve sınanmış.** `raster.rs` alfa-only bir
+`CGBitmapContext` kuruyor (renk uzayı yok, kapsama doğrudan alfa baytı) ve
+`tofu_tamponu` **fontu hiç kullanmadan** yuvaya elle bir kutu çiziyor. Kural
+sprite'ları o iki mekanizmanın ikinci müşterisi; yeni bir şey icat etmiyor.
+`CLAUDE.md`'nin katman tablosu da `bt-atlas`'ı zaten *"glyph rasterizasyonu,
+atlas paketleme, **kutu çizim karakterleri**"* ile yükümlü kılıyor — yordamsal
+raster oraya yazılı, ve Karar 1'de ayrılan kutu çizim seti aynı makineyi
+isteyecek.
 
-**Üçüncü liste — gerekçe imleç.** `push_cursor` imleç bloğunu `self.bg`'nin
-**sonuna** ekliyor (`frame.rs:150-158`) ve o blok opak. Kural `bg`'ye
-girseydi imlecin altındaki hücrenin alt çizgisi örtülürdü. Ayrı liste
-glyph'lerden **sonra** kodlanır, yani imlecin de üstüne çizilir — ve orada
-rengi `bt-core`'un imleç için zaten tersine çevirdiği ön plandır (SGR 58 yoksa),
-yani görünür kalması bedava.
+**Bu rotanın düşürdükleri**, tek tek:
 
-`bg_count` **el değmez** → `hucre=K` bit bit korunur ve `push`'taki
-`debug_assert_eq!(bg.len(), bg_count)` bekçisi olduğu gibi kalır.
+| pipeline rotası isterdi | sprite rotasında |
+|---|---|
+| `cell_rule.metal` + üçüncü pipeline | **yok** |
+| `RuleInstance` + iki taraflı assert çifti | **yok** — `GlyphInstance` |
+| `Frame::clear(cell_px, **rule_px**)` | **yok** — kural metriği `Frame`'e hiç girmiyor |
+| `make shader` zorunlu kapı | **yok** — `.metal` el değmiyor, `[~]` |
+| imleç sırası gerekçesi | **bedava** — glyph geçişi zaten arka planlardan ve imleçten sonra kodlanıyor (`renderer.rs:409-412`) |
 
-> Geometri sorunu: `Frame::push` kural dikdörtgenini kurmak için çizginin
-> konumunu, kalınlığını ve kıvrım yüksekliğini bilmeli, ama tek bildiği ölçü
-> `clear()`'dan gelen `cell_px`. `bt_atlas::Metrics`'i `Frame`'e taşımak
-> katman tablosunu bulanıklaştırır — `CellMetrics` bunu açıkça reddediyor
-> (`renderer.rs:94-97`), atlas ödüncü de `encode_glyphs`'e hapsedilmiş.
-> **Çözüm var olan örüntü:** kural metriği kare boyunca sabittir, tıpkı
-> `cell_px` gibi → `Frame::clear(cell_px, rule_px)` parametresi olur.
+Metrik sorunu da kökünden kalkıyor: kırpma `font.rs:127`'de, `cell_px`'i
+bilen **tek** yerde yapılır ve `slot_bytes`'ın "yuva geometrisinin tek sahibi"
+gerekçesine (`font.rs:42-45`) birebir oturur.
+
+**Kısıt — plana yazılır:** dalganın (ve noktalı/kesikli desenin) periyodu
+hücre genişliğini **tam bölmeli**, yoksa hücre sınırında faz kırılır ve
+çok hücreli bir alt çizgi kesintili görünür. Kendiliğinden gelen bir özellik
+değil, kurulurken sağlanacak bir kısıt.
+
+**Reddedilen alternatif — `cell_rule` pipeline'ı:** `docs/ARASTIRMA.md:31`
+Metalterm'de böyle bir pipeline'ın **var olduğunu** söylüyor ama **nasıl
+çizdiğini** söylemiyor; aynı envanterde `mt-atlas/raster` ve `boxdraw` da var.
+İki okuma da referansa uygun, sadelik sprite'ı seçtiriyor. Pipeline rotası
+gerekirse geri gelebilir — asıl kazancı mutlak ekran x'inden türeyen
+**kesintisiz** dalga olurdu, yani yukarıdaki periyot kısıtından kurtulmak.
+Bugün o kısıt ucuz, o yüzden ertelendi.
 
 ## Karar 5: Atlas anahtarı ve font yüzleri
 
@@ -236,7 +245,8 @@ değil. `Some(' ')` yapmak atlasa bir boşluk glyph'i yükletir: yuva harcar,
 hiçbir piksel boyamaz. Doğrusu `ch`'yi `None` bırakıp koşulu genişletmek:
 
 ```rust
-if bg.is_none() && ch.is_none() && !underline && !strikeout { continue; }
+if bg.is_none() && ch.is_none()
+    && underline == UnderlineStyle::None && !strikeout { continue; }
 ```
 
 003'ün o yorumu aynı phase'de düzeltilir (kodla çelişen cümle kuralı).
@@ -257,36 +267,83 @@ if bg.is_none() && ch.is_none() && !underline && !strikeout { continue; }
   ilgili, yazı biçimiyle değil, ve bu seti genişletir. Sessizce düşmesin
   diye `## Kapsam Dışı`'na açıkça yazılır.
 
-## Karar 9: Duman sözleşmesine `kural=R` jetonu
+## Karar 9: Duman sözleşmesine `kural=R` jetonu ve reçetesi
 
-`glif=` ile birebir aynı sınıf kapı: phase-2 durumunda (sınır bayrak taşıyor,
-renderer yoksayıyor) `kare=N hucre=8 glif=6 pipeline=ok` **hepsi > 0** basılır
-ve `make duman` yeşil geçer. Kuralların hiç çizilmediğini gören başka otomatik
-kapı yok.
+`glif=` ile aynı sınıf kapı: renderer kuralları hiç çizmese de
+`kare=N hucre=8 glif=6 pipeline=ok` **hepsi > 0** basılır ve `make duman`
+yeşil geçer.
 
-Betiği serbestçe değiştirmek `hucre=8`/`glif=6` sabitlerini ve üç sınamayı
-oynatır. **Kırmayan reçete:**
+**İlk reçete yetersizdi.** `\033[4m` yalnız **düz** çizgidir
+(`vte/src/ansi.rs:1843` → `[4, ..] => Attr::Underline`); beş stilin dördünü
+hiç sınamaz. Kıvrım dalını düz çizgiye düşüren bir kod tıpatıp aynı `kural=R`
+sayısını basardı — yani setin **varlık sebebi** kapının kör noktasında kalırdı.
+
+**Reçete** — sabitleri kırmıyor, çünkü eklenen hücrelerin hepsi `bg: None,
+ch: None`, yani `hucre=8` ve `glif=6` bit bit duruyor ve hepsi Karar 7'nin
+yeni yan tümcesinden geçiyor:
 
 ```sh
-printf '\033[41;1;4m bateri \033[0m\033[4m \033[0m\n'
+printf '\033[41;1;4m bateri \033[0m\033[4m \033[0;4:2m \033[0;4:3m \033[0;4:4m \033[0;4:5m \033[0;9m \033[0;4:3;58;5;196m \033[0m\n'
 ```
 
-- `hucre=8` **aynen durur** — 9. hücrenin arka planı varsayılan, sayılmaz.
-- `glif=6` **aynen durur** — 9. hücre boşluk, `ch=None`.
-- 9. hücre **tam olarak Karar 7'nin vakası**: arka plan yok, mürekkep yok,
-  ama altı çizili. Yani atlama koşulunun yeni yan tümcesi duman kapısından
-  geçer. (Arka planlı bir varyant bunu **sınamaz**: sekiz hücre zaten
-  `bg.is_some()` ile geçiyor, yeni yan tümce hiç karar veren dal olmaz.)
-- İlk sekiz hücre `BOLD` taşır, yani `Face` yolu da betikte var.
+Aradaki `\033[0;` **zorunlu**: `Attr::Strike` `ALL_UNDERLINES`'ı kaldırmıyor,
+sıfırlanmazsa o hücre kesikli **artı** üstü çizili olur.
 
-**Sınır: `kural=` setin yalnız kural yarısını kapatır.** `Face` her zaman
-`Regular` dönen bir yapı da aynı `kural=9`'u basar; yüz yarısının kapısı ayrı
-ve birim düzeyinde (`slot('M', Bold) != slot('M', Regular)` + offscreen
-sınama). Jeton, renderer'ın çizdiği phase ile **aynı commit'te** girer —
-erken girerse `R=0` olur ve set ortasında `make duman` kırmızıya düşer.
+> **İki nokta yük taşıyor.** `\033[4;3m` ≠ `\033[4:3m`. Noktalı virgüllü hâl
+> `Underline + Italic`'tir (`[3] => Attr::Italic`); iki noktalı hâl undercurl.
+> Reçeteyi "sadeleştiren" biri `:`'yı `;` yaparsa sınama sessizce
+> düz-altı-çizili-eğik'e iner ve duman yeşil kalır.
+
+**Kapı üçe ayrılır** — üçü de var olan örüntünün kopyası:
+
+| kapı | ne kanıtlar |
+|---|---|
+| `make duman` → `kural=R > 0` | sınır kural üretti (CPU sayacı, `hucre=`/`glif=` sınıfı) |
+| `bt-core` sınaması — **stil dizisini** assert eder | beş stilin ayırt edildiği; `hucre=8`/`glif=6` sahipliğinin aynısı |
+| offscreen sınama — kural bandının **x boyunca tekdüze olmadığı** | kıvrımın gerçekten dalga olduğu; `glif_hucrenin_icini_arka_planindan_ayirir`'ın analoğu, tam bayt assert etmeden |
+
+**Reçete ile jeton aynı phase'e girmez.** Reçete + `bt-core` stil sınaması
+sınır phase'ine girer (o phase'de `Frame::push` o hücreler için hiçbir şey
+push etmez: `bg: None` → `bg_count` oynamaz, `ch: None` → glyph yok, yani
+`make duman` yeşil kalır). Yalnız `kural=` **jetonu** çizen phase'i bekler —
+erken girerse `R=0` olur ve set ortasında duman kırmızıya düşer.
 
 Sahiplik `hucre=`/`glif=` ile aynı: `bt_core::smoke_shell` **ve** kendi
 `bt-core` sınaması. Jeton kuralı korunur: **eklenir, silinmez.**
+
+## Karar 10: Bayrak eşlemesinin tuzağı — `UNDERCURL`, `UNDERLINE` demek değil
+
+Bu setin **en sessiz** hata kaynağı ve refleks tam ters yönde çalışıyor.
+
+`Attr::Undercurl` önce `ALL_UNDERLINES`'ı **siliyor**, sonra yalnız
+`UNDERCURL` ekliyor (`alacritty_terminal/src/term/mod.rs:1910-1913`):
+
+```rust
+Attr::Undercurl => {
+    cursor.template.flags.remove(Flags::ALL_UNDERLINES);
+    cursor.template.flags.insert(Flags::UNDERCURL);
+},
+```
+
+Yani **kıvrımlı metinde `Flags::UNDERLINE` kapalıdır.** `bt-core`'un eşlemesi
+refleksle `cell.flags.contains(Flags::UNDERLINE)` diye yazılırsa kullanıcının
+istediği dalgalı çizgi **hiç çizilmez** ve hiçbir sayaç bunu görmez.
+
+Doğru eşleme beş bayrağı **ayrı ayrı** sorar ve sırası önemlidir (beşi birbirini
+dışlıyor, ama savunmacı sıra tek bir doğru cevap verir):
+
+```rust
+let underline = if f.contains(Flags::UNDERCURL)         { UnderlineStyle::Curl }
+    else if f.contains(Flags::DOUBLE_UNDERLINE)         { UnderlineStyle::Double }
+    else if f.contains(Flags::DOTTED_UNDERLINE)         { UnderlineStyle::Dotted }
+    else if f.contains(Flags::DASHED_UNDERLINE)         { UnderlineStyle::Dashed }
+    else if f.contains(Flags::UNDERLINE)                { UnderlineStyle::Single }
+    else                                                { UnderlineStyle::None };
+```
+
+Bekçisi Karar 9'un `bt-core` stil sınaması: beş hücrenin **beş ayrı** stil
+vermesini assert eder. `contains(UNDERLINE)` refleksi o sınamada anında kırmızı
+düşer.
 
 ## Karar Noktaları
 
@@ -316,6 +373,9 @@ Hiçbir mercek `KIRMIZI` vermedi: yaklaşım ayakta, itirazlar giderildi.
 - **`Rules` tipi vaat ettiği rengi taşıyamıyor** (Sadelik + Codebase-fit;
   taslak kendi içinde çelişiyordu) → SGR 58 kapsam dışına alındı, `Rules`
   tipi tümden düştü, dört `bool` kaldı. Karar 3 yeniden yazıldı.
+  **(2026-09-11 tarihinde geçersiz: kullanıcı kıvrımlıyı isteyince SGR 58
+  geri geldi; `Rules` tipinin düşmesi kararı korundu, gerekçesi Karar 2'de
+  yeniden türetildi.)**
 - **`Frame::push` kural metriğine erişemez** (Codebase-fit; `CellMetrics`'in
   font metriği taşımayı reddi ve atlas ödüncünün `encode_glyphs`'e hapsi
   kanıtıyla) → `Frame::clear(cell_px, rule_px)` parametresi, var olan
@@ -376,3 +436,71 @@ Hiçbir mercek `KIRMIZI` vermedi: yaklaşım ayakta, itirazlar giderildi.
 - **`kural=` duman jetonu: eklenecek** (ana döngü kararı, Karar 9). İki
   mercek çelişti; tie-break kodda yapıldı — üçüncü liste korunduğu için
   jeton gerçekten yeni bir yolu kanıtlıyor.
+
+## Muhakeme — 2. tur (2026-09-11)
+
+Kullanıcının kıvrımlı çizgi kararı tasarımı 1. turun hiç görmediği bir yöne
+taşıdı; panel yalnız **değişen yüzey** için tekrarlandı.
+
+| Mercek | Verdict |
+|---|---|
+| Sadelik / YAGNI | SORUNLU |
+| Codebase-fit | SORUNLU |
+| İşletme | SORUNLU |
+
+Yine `KIRMIZI` yok. Ama tur, tasarımın **rotasını** değiştirdi.
+
+**Rota değişikliği — kabul (Sadelik):** *"dalga çizilemez"* öncülü yanlıştı;
+yalnız iki seçenek (`cell_bg` ya da yeni shader) varsayıyordu. Üçüncüsü
+zaten kurulu: `cell` pipeline'ı bir **kapsama maskesi** çizicisi
+(`cell.metal:55-56`, ana döngüde doğrulandı) ve `bt-atlas`'ta yordamsal
+raster hem var hem sınanmış (`raster.rs` alfa-only CG bağlamı, `tofu_tamponu`
+fontsuz çizim — ana döngüde doğrulandı). Karar 4 sprite rotasına çevrildi.
+
+**Rota değişikliğinin konusuz bıraktıkları** (itiraz geçerliydi, tasarım
+değişince ortadan kalktı):
+
+- `rule_px`'in `Frame::clear`'a ulaşma yolu yok (Codebase-fit + İşletme, iki
+  mercek bağımsız buldu; `CellMetrics`'in font metriğini reddeden doc'u
+  kanıtıyla) → sprite rotasında kural metriği `Frame`'e hiç girmiyor.
+- Kıvrım genliğinin kırpması sahipsiz ve `Metrics`'in `(u16,u16)` şekli onu
+  ifade edemiyor (Codebase-fit) → kırpma `font.rs:127`'ye, `cell_px`'i bilen
+  tek yere iniyor.
+- `RuleInstance` 48 bayt / 3 dolgu (Sadelik + Codebase-fit) → tip tümden yok,
+  `GlyphInstance` kullanılıyor.
+
+**Kabul edilen, rotadan bağımsız itirazlar:**
+
+- **`UNDERCURL`, `UNDERLINE`'ı içermiyor** (İşletme; ana döngüde
+  `term/mod.rs:1910-1913`'ten doğrulandı) → **Karar 10** olarak yazıldı.
+  Setin varlık sebebini sessizce boşa çıkaracak tek satırlık hata.
+- **`\033[4m` yalnız düz çizgi** (İşletme; `vte/src/ansi.rs:1838-1843`) →
+  Karar 9'un reçetesi beş stili + üstü çiziliyi + SGR 58'i sınayan hâle
+  getirildi, `hucre=8`/`glif=6` bit bit korunarak.
+- **`\033[4;3m` ≠ `\033[4:3m`** (İşletme) → Karar 9'a tuzak notu.
+- **Reçete ile jeton aynı phase'e girmemeli** (İşletme) → Karar 9'a yazıldı.
+- **Revizyon kalıntıları** (Codebase-fit): Karar 2'nin `underline: bool`
+  taslağı, Karar 7'nin enum'la derlenmeyen koşulu, 1. tur kaydının bayat
+  "SGR 58 kapsam dışı" cümlesi → üçü de düzeltildi; kayıt silinmedi,
+  tarihlenerek geçersiz işaretlendi.
+- **Phase bölmesi** (İşletme): yüz yarısı ile kural yarısı birbirine bağlı
+  değil → `plan.md → ## Yaklaşım`'da üç phase, gerekçesiyle.
+- **Ölçüm dili** (İşletme): yeni bağımsız liste açılmaz, 003 B.1'in
+  #2/#3/#4/#5'ini **genişlettiği** yazılır ve kancası hâlâ olmadığı için
+  `/measure` yine "ölçüm aracı yok" der.
+- **`Cell` alan sayısı** (Sadelik): 5 → 10. Kopyalama maliyeti sorun değil
+  (sink jenerik ve satır içine alınıyor), ama "geçici kare-başı tip"
+  savunması ilk kez zorlanıyor — `plan.md`'ye açık not.
+
+**Reddedilenler:**
+
+- **`STRIKEOUT` ayrı mekanizmadan çizilsin** — Sadelik merceğinin kendisi de
+  reddetti: `cell_bg`'ye ayırmak imleç sırası problemini ikinci kez doğurur
+  ve iki kod yolu açar.
+- **Rengi `u8x4`'e paketlemek** (Sadelik, kendi reddetti) — `CLAUDE.md` renk
+  uzayı kuralı: 8-bit **lineer** koyu tonlarda bantlanır.
+- **Stil başına ayrı draw call** (Sadelik, kendi reddetti) — `instans_tamponu`
+  draw başına kare başına tampon ayırıyor; beş liste beş ayırma demek.
+- **`cell_rule` pipeline'ı** — bkz. Karar 4'ün son paragrafı: referans
+  envanteri iki okumaya da açık, kazancı (kesintisiz dalga) bugünkü periyot
+  kısıtının bedelinden küçük. Gerekirse geri gelir.
