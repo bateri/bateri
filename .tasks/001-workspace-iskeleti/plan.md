@@ -94,7 +94,7 @@ bateri main
 
 | Phase | Durum | Commit |
 |-------|-------|--------|
-| phase-0 | | |
+| phase-0 | ✅ | d3581bf |
 | phase-1 | | |
 | phase-2 | | |
 | phase-3 | | |

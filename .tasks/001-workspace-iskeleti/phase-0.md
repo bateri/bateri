@@ -47,6 +47,9 @@ onu düşürür).
 
 ## Uygulama Notları
 
+Sapma yok. Checklist ve durum tablosu ayrı bir durum commit'iyle işlendi;
+kök commit'in hash'i değişmesin diye amend yapılmadı.
+
 ## Yayın Etkisi
 
 yok
@@ -55,11 +58,11 @@ yok
 
 ## Checklist
 
-- [ ] `.gitignore` yazıldı
-- [ ] `git init -b main`, belgeler eklendi
+- [x] `.gitignore` yazıldı
+- [x] `git init -b main`, belgeler eklendi
 - [~] Doğrulama geçti — cargo workspace henüz yok, `make hepsi` koşamaz; bu phase kod içermiyor
 - [~] `/simplify` — kod yok
 - [~] `/code-review` — kod yok
 - [~] `/audit` — kod yok; `.gitignore` içeriği `proje.md` → Teslim listesiyle elle karşılaştırıldı
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] Commit: d3581bf
