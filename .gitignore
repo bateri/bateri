@@ -1,0 +1,12 @@
+# derleme çıktıları
+/target/
+*.metallib
+*.air
+*.dSYM/
+# paketleme
+*.app/
+*.dmg
+# macOS
+.DS_Store
+# ölçüm kayıtları
+*.trace/
