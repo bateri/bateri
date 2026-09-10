@@ -102,4 +102,4 @@ applicationWillTerminate / ChildExit / deadline ── Session::shutdown ── 
 | phase-1 | ✅ | ed1c5a3 |
 | phase-2 | ✅ | 3191677 |
 | phase-3 | ✅ | 98baf87 |
-| phase-4 | | |
+| phase-4 | ✅ | b458d7f |

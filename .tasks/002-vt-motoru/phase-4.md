@@ -277,4 +277,4 @@ değil `exec_async` iş atan yerel bir sarmalayıcı.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi
 - [x] `/audit` çalıştırıldı, bulgular giderildi (mercek 7: `shutdown` ana thread'de bloklar mı, bekçi; mercek 10: `kod_cevir` Türkçe ad yerel)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [x] Commit: {hash}
+- [x] Commit: `b458d7f`
