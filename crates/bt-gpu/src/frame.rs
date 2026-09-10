@@ -18,6 +18,9 @@ use bt_core::{CellBg, Cursor};
 pub(crate) struct Instance {
     pos: [f32; 2],
     size: [f32; 2],
+    /// **Lineer** RGBA. Hedef `BGRA8Unorm_sRGB` ve kodlamayı ROP yapıyor:
+    /// shader tarafında ikinci bir gamma düzeltmesi paleti iki kez kodlar.
+    /// Kaynağı `bt_core::color::lineer_rgba` (`CLAUDE.md` → renk uzayı).
     rgba: [f32; 4],
 }
 
@@ -111,6 +114,9 @@ impl Frame {
 mod tests {
     use super::*;
 
+    // Uçlar bilerek: `0.0`/`1.0` sRGB transfer fonksiyonunun sabit noktaları,
+    // yani bu sınamalar renk uzayından bağımsız. Uzayı sınayan yer
+    // `renderer.rs` → `cell_bg_pikseli_gpu_tarafinda_boyar`.
     const KIRMIZI: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
     const MAVI: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 

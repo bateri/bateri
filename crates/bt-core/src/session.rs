@@ -28,6 +28,12 @@ use crate::wake::Wake;
 pub struct CellBg {
     pub col: u16,
     pub row: u16,
+    /// **Lineer** RGBA: çizim hedefi sRGB ve donanım yazarken kodluyor.
+    /// Buraya sRGB-kodlu bir float (`c / 255.0`) koyan renk açılır ve belirti
+    /// sessizdir. Crate içinde tek dönüşüm yolu `color::lineer_rgba`; dışarıda
+    /// dönüşüm **yok** — alan `pub` ama palet renginin sRGB baytından burada
+    /// üretilmesi diye bir yol tasarlanmadı. Uzayı tipe yazmak (newtype)
+    /// bu sınırın kendisi yeniden yazılırken yapılır (003 phase-4).
     pub rgba: [f32; 4],
 }
 
@@ -380,7 +386,7 @@ impl Session {
             sink(CellBg {
                 col: indexed.point.column.0 as u16,
                 row,
-                rgba: color::rgba(rgb),
+                rgba: color::lineer_rgba(rgb),
             });
         }
 
@@ -658,7 +664,7 @@ mod tests {
             hucreler.iter().map(|c| c.col).collect::<Vec<_>>(),
             (0..8).collect::<Vec<_>>()
         );
-        let kirmizi = color::rgba(color::default(1));
+        let kirmizi = color::lineer_rgba(color::default(1));
         assert!(hucreler.iter().all(|c| c.rgba == kirmizi), "{hucreler:?}");
     }
 
@@ -691,9 +697,12 @@ mod tests {
         );
 
         let hucreler = hucreleri_bekle(&session, &wake, 1);
-        assert_eq!(hucreler[0].rgba, color::rgba(color::dim(color::default(1))));
+        assert_eq!(
+            hucreler[0].rgba,
+            color::lineer_rgba(color::dim(color::default(1)))
+        );
         // Sönük olmayan kırmızıdan gerçekten farklı.
-        assert_ne!(hucreler[0].rgba, color::rgba(color::default(1)));
+        assert_ne!(hucreler[0].rgba, color::lineer_rgba(color::default(1)));
     }
 
     #[test]
@@ -711,7 +720,7 @@ mod tests {
 
         // İki yeşil hücre: shell girdiyi okuyup geri yazabildi.
         let hucreler = hucreleri_bekle(&session, &wake, 2);
-        let yesil = color::rgba(color::default(2));
+        let yesil = color::lineer_rgba(color::default(2));
         assert!(hucreler.iter().all(|c| c.rgba == yesil), "{hucreler:?}");
     }
 
