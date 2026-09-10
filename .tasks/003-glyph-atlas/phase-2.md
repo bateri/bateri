@@ -133,20 +133,140 @@ Izgara boyutu: doku kenarı 1024 px hedeflenir, satır/sütun sayısı hücre
 
 ## Uygulama Notları
 
+**1. `slot()`'un dönüşü bölünemedi — `Upload { origin, bytes }`.** Kılavuzun API
+taslağı `slot(ch) -> (u16, Option<&[u8]>)` ile ayrı bir `slot_origin(slot)`
+öngörüyordu. İkisi **aynı döngüde çağrılamıyor**: `slot` `&mut self`'ten türeyen
+bir ödünç döndürüyor, `slot_origin` `&self` istiyor, `replaceRegion` ise ikisine
+**birden** ihtiyaç duyuyor → `E0502`. Yani phase-4'ün yükleme döngüsü
+derlenmeyecekti ve kaçış yolları da kötüydü (bitmap'i `Vec`'e kopyalamak —
+`tampon` alanı tam olarak bunu önlemek için var — ya da ızgara aritmetiğini
+`bt-gpu`'da yeniden yazmak). Köşe `Upload`'ın içine alındı. `slot_origin` `pub`
+kaldı: uv aritmetiği için gerekli ve orada ödünç çoktan bitmiş oluyor.
+
+**2. `Atlas::ensure(point_size, scale) -> bool` eklendi (taslakta yoktu).**
+Kılavuz ölçeğin "anahtarın parçası" olmasını şart koşuyordu, ama anahtar
+hiçbir yerde **saklanmıyordu**: `Atlas` ne kurulduğu ölçeği biliyordu ne de
+soruyordu, yeniden kurma tamamen çağıranın hatırlamasına kalmıştı. `ensure`
+anahtarı tipe yazıyor; `true` dönüşü aynı zamanda "dokuyu yeniden ayır"
+demek, çünkü metrik değişince `texture_px()` de değişiyor ve eski boyutlu
+dokuya yeni metrikle yazmak sessizce bozar. Phase-3'ün `RefCell<HashMap<ölçek,
+Atlas>>` önerisi bununla gereksizleşti — phase-3.md'ye işlendi.
+
+**3. Hücre yüksekliği iki parçanın AYRI yuvarlanmasıyla hesaplanıyor.**
+Kılavuz "yükseklik = `ascent + descent + leading`, yukarı yuvarlanır" ve
+"`baseline_px` = `ascent` yuvarlanır" diyordu; ikisi birlikte descender'ı
+**kırpıyor**. Bu makinede Menlo 13pt ascent 12.067, descent 3.066 veriyor:
+birleşik yuvarlama 16 ediyor, taban 13'e oturunca alta 3 piksel kalıyor, oysa
+font 3.066 istiyor — `g j p q y ,` altındaki son kapsama satırı gidiyor ve üstte
+0.93 piksel boşa duruyor. `yukari(ascent) + yukari(descent + leading)` ile
+yükseklik 17 oluyor ve taban **inşa gereği** tam oturuyor. Bekçisi
+`descender_hucreye_sigar`; 'W' ile sınamak yetmiyordu, descender'ı olmayan harf
+iki yuvarlamada da aynı görünüyor.
+
+**4. `.notdef` önbelleğe giriyor, dolu atlas girmiyor.** Kılavuz ikisini de
+"tofu'ya düşer" diye tarif ediyordu ve ilk uygulama tek bir `||` ile
+birleştirmişti. Görünür sonuçları aynı ama **ömürleri** farklı: fontun bir
+karakteri tanımaması kalıcı bir gerçek (önbelleğe girer, aynı karakter bir daha
+CoreText'e sorulmaz), atlasın dolu olması geçici bir hâl (girmez — tahliye
+geldiğinde, 00X, yer açılmış olacak ve kayıt yalan söyleyecekti). `raster::ciz`
+bu yüzden `bool` değil `Cizim` enum'u döndürüyor. `Cizim::BaglamYok` da kalıcı
+sayılıyor: `CGBitmapContextCreate`'in karakterle ilgili tek argümanı yok, hepsi
+atlas ömrü boyunca sabit — "bir sonraki karede düzelir" diye bir şey yok ve
+önbelleğe girmeseydi her hücre her karede başarısız bir bağlam kurulumu öderdi.
+
+**5. Negatif önbelleğin tavanı `kapasite()`.** Tofu'ya çözümlenen kayıt yuva
+harcamıyor, yani `sonraki` onu sınırlamıyordu: bir ikili dosyayı `cat`'lemek
+milyonlarca ayrı codepoint üretebilir ve harita sınırsız büyürdü. Crate'in
+tavanı olmayan tek sayısı burasıydı.
+
+**6. `point_size · scale` aralığa oturtuluyor (`etkin_punto`).** `yukari`'nin
+`clamp(1.0, …)`'ı NaN'ı **geçiriyor** ve `NaN as u16` sıfır ediyor; sınır
+konmasaydı `DOKU_KENARI / 0` panikleyecekti. Devasa punto ise yuva başına
+gigabaytlık tampon ve Metal'in doku sınırını katbekat aşan bir `texture_px()`
+isterdi. Bekçisi `bozuk_punto_atlasi_dusurmez`.
+
+**7. `NonNull` işaretçileri dilimden türetiliyor, `&dizi[0]`'dan değil.** BMP
+dışı bir karakterde `encode_utf16` iki birim üretiyor ve CoreText ikinci
+elemana da dokunuyor (düşük vekili okur, karşılığına 0 yazar). Tek elemanlık
+bir referanstan türeyen işaretçinin provenance'ı o erişimi kapsamıyor — bugün
+çalışır, aliasing modeline göre tanımsızdır. Yol artık
+`bmp_disi_karakter_yolu_calisir` ile koşuluyor.
+
+**8. `objc2` çekirdeği hiç gerekmedi.** `bt-atlas` yalnız C API'si çağırıyor,
+ObjC runtime'ı değil: `cargo tree -p bt-atlas` üç CF/CG crate'i gösteriyor,
+`objc2`'yi göstermiyor. `CLAUDE.md`'nin katman tablosuna bu şekilde yazıldı.
+
+**9. `CGBitmapContext` dördüncü bir feature olarak gerekti.** Kılavuz
+`CGColorSpace` + `CGContext` + `CGImage` sayıyordu; `CGBitmapContextCreate`
+kendi başlığının arkasında ve o feature olmadan crate kökünde görünmüyor.
+Kırpma `objc2-io-surface`'i grafın dışında tuttu: `Cargo.lock`'a yalnız
+`objc2-core-text` ve `objc2-core-graphics` girdi, `objc2-core-foundation`
+iddia edildiği gibi zaten graftaydı.
+
+**10. `CLAUDE.md` phase-4'te değil BU commit'te güncellendi.** Kılavuz belge
+güncellemesini phase-4'e erteliyordu, ama `CLAUDE.md`'nin kendi kuralı
+"buradaki bir cümle kodla çelişirse ikisinden biri **aynı commit'te** düzelir"
+diyor ve üç cümle çelişiyordu: "`bt-atlas` hâlâ boş", katman tablosundaki
+`core-text`/`core-graphics` adları, bağımlılık tabanındaki `core-text`. Depo
+kuralı kılavuzu yendi. Phase-4'e kalan belge işi `glif=` jetonu ve `bt-atlas`
+satırının "bağlandı" hâline gelmesi.
+
+**11. SF Mono bu makinede yok.** `CTFontCreateWithName("SF Mono")` **Helvetica**
+döndürüyor — zincir Menlo'ya düşüyor ve tam olarak bu yüzden var. "Font açıldı"
+bir kanıt değil; ölçüt dönen aile adı.
+
+### Waive edilen bulgular
+
+- **`HashMap<char, u16>` varsayılan SipHash ile.** `slot()` phase-4'te kare
+  başına hücre başına çağrılacak. ASCII için `[u16; 128]` yan tablosu
+  bağımlılıksız bir alternatif (hasher crate'i eklemek `CLAUDE.md`'ye göre
+  mimari karar), ama ikinci bir arama yolu ekliyor ve kazanç **ölçülmedi** —
+  `/measure` sonrası açılır.
+- **`slot_origin`'deki bölme ve mod.** Sütun sayısını ikinin kuvvetine aşağı
+  yuvarlamak maske/kaydırmaya çevirirdi; bedeli kenarda kullanılmayan yuvalar
+  ve kazanç yine ölçülmedi. uv aritmetiği phase-4'ün işi.
+- **`raster::ciz` her cache miss'te bağlam kuruyor.** Bağlamı alanda tutmak
+  self-referential bir yapı demek (tampon işaretçisi); CG'nin tamponu
+  sahiplenmesi ise `bytesPerRow`'u `slot()`'un sözleşmesine sızdırırdı —
+  "tam `cell_w × cell_h` bayt" iddiası düşerdi.
+- **`font::ac` her çağrıda `String` ayırıyor.** Karşılaştırma `CFString`
+  düzeyinde de yapılabilirdi, ama bu yol atlas kurulumunda en çok iki kez
+  koşuyor: soğuk.
+- **Reuse merceğinin üç bulgusu phase-3'e devredildi** (iki yuvarlama kuralı,
+  iki `Metrics` tipinin ad çakışması, `cell_px` demetinin tek geçiş noktası) —
+  hepsi `CELL_PX`'in ölmesiyle aynı anda çözülüyor, phase-3.md'ye işlendi.
+
 ## Yayın Etkisi
+
+- **`CLAUDE.md` bu commit'te güncellendi** (üç cümle: `bt-atlas`'ın durumu,
+  katman tablosundaki platform kütüphaneleri, bağımlılık tabanı). Gerekçe
+  yukarıda, madde 10.
+- **`Cargo.lock` iki crate büyüdü**: `objc2-core-text` 0.3.2 ve
+  `objc2-core-graphics` 0.3.2. Kullanıcı onaylı bağımlılık kararı
+  (`discussion.md → ## Karar`). Sürüm oynaması ve kaldırılan crate yok.
+- **ölçüm bekliyor:** `Atlas::slot`'un kare başına hücre başına maliyeti
+  (SipHash araması + `slot_origin`'deki bölme) ve atlas doluluğu —
+  `occupancy()` sayacı bunun için var. İkisi de ancak phase-4 atlası çizim
+  yoluna bağladıktan sonra anlamlı.
+- shader, terminfo/`TERM`, ayar şeması, tema/materyal biçimi, shell
+  entegrasyonu, app bundle: **yok** — hiçbirine dokunulmadı.
 
 ---
 
 ## Checklist
 
-- [ ] Bağımlılıklar workspace + `bt-atlas` `Cargo.toml`'a eklendi
-- [ ] `font.rs`: zincir, ikame uyarısı, `Metrics`
-- [ ] `raster.rs`: alfa-only `CGBitmapContext`, `CTFontDrawGlyphs`
-- [ ] `lib.rs`: `Atlas`, sabit yuva ızgarası, rezident tofu, `doluluk()`
-- [ ] Test: metrik / aynı yuva / dolu atlas tofu / ikame / ölçek anahtarı
-- [ ] Doğrulama geçti (`proje.md` → Doğrulama; `make hepsi`)
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] Bağımlılıklar workspace + `bt-atlas` `Cargo.toml`'a eklendi
+- [x] `font.rs`: zincir, ikame uyarısı, `Metrics`
+- [x] `raster.rs`: alfa-only `CGBitmapContext`, `CTFontDrawGlyphs`
+- [x] `lib.rs`: `Atlas`, sabit yuva ızgarası, rezident tofu, `occupancy()`
+- [x] Test: metrik / aynı yuva / dolu atlas tofu / ikame / ölçek anahtarı
+- [x] Doğrulama geçti (`make hepsi` yeşil; `make duman` → `kare=1 hucre=8 pipeline=ok`)
+- [~] `make shader` — `.metal` ve `build.rs` el değmedi, koşul sağlanmıyor
+- [~] `make test-yaris` — thread, PTY okuyucu ve paylaşılan duruma dokunulmadı;
+      `bt-atlas` hiçbir yerden çağrılmıyor, koşul sağlanmıyor
+- [~] `make terminfo` / `make kur` — girdisi yok (`proje.md`'nin bilinen listesi)
+- [x] `/simplify` çalıştırıldı, bulgular uygulandı (dört mercek; 12 uygulandı, 9 waive/devir)
+- [x] `/code-review` çalıştırıldı, bulgular giderildi (12 bulgu; 11 uygulandı, 1 waive)
+- [x] `/audit` çalıştırıldı, bulgular giderildi (2 bulgu; 4 mercek temiz, 5 mercek ilgisiz)
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
 - [ ] Commit: {hash}

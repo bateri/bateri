@@ -52,6 +52,42 @@ makul metrikte sığar) ama `make duman` yine de koşturulur.
 
 ---
 
+## Phase-2'den devir
+
+Phase-2'nin kalite kapısı (reuse merceği) bu phase'e ait üç bulgu üretti;
+uygulanmadılar çünkü hepsi `CELL_PX`'in ölmesiyle aynı anda çözülüyor.
+
+**1. İki yuvarlama kuralı yan yana duruyor ve biri silinmezse kalıcı olur.**
+`bt-atlas` hücre ölçüsünü `ceil()` ile yukarı yuvarlıyor (`font::yukari`),
+`app.rs:38` ise `CELL_PX.0 * scale` sonucunu `.round()` ile yuvarlıyor.
+`cell_metrics(scale)` bağlandığında `app.rs`'teki yuvarlama bloğu **silinmeli**
+— kalırsa depoda iki kural olur, hangisinin kazandığı çağrı sırasına bağlanır
+ve belirti bir piksellik hücre kayması, yani sessiz.
+
+**2. İki `Metrics` tipi aynı dosyada buluşacak.** `app.rs`'in `Metrics`'i
+aslında "grid ölçüsü + hücre" (`cols`, `rows`, `cell_px`); `bt_atlas::Metrics`
+ise yalnız hücre. `cell_metrics` geldiğinde ikisi yan yana okunacak, biri
+yeniden adlandırılmalı — `app.rs` tarafı için `GridMetrics`/`Geometry`.
+`CellMetrics`'in `bt_atlas::Metrics`'i yeniden ihraç **etmemesi** kararı
+(yukarıda, 1. bölüm) bu yüzden ayrıca değerli: ad çakışması katmanı da
+bulanıklaştırırdı.
+
+**3. `cell_px: (u16, u16)` adsız demeti dördüncü kez dolaşıyor**
+(`bt_core::SessionOptions.cell_px`, `bt_gpu::DisplayLink::resize`,
+`bt_gpu::Frame::clear`, `bt-shell::app::Metrics`). Katman sözleşmesi ortak bir
+tipe izin vermiyor (`bt-atlas` `bt-core`'u göremez) ama `bt-gpu` ikisini birden
+görüyor: `cell_metrics` bu demetin **tek geçiş noktası** olsun, beşincisi elle
+kurulmasın.
+
+**Ayrıca — yukarıdaki 1. bölümün "ölçek önbelleği" tasarımı değişti.**
+Phase-2 `Atlas::yenile(punto, scale) -> bool` ile çıktı: anahtar değiştiyse
+atlası yeniden kurar ve `true` döner, `true` aynı zamanda "dokuyu yeniden
+ayır" demektir. Yani `RefCell<HashMap<ölçek, Atlas>>` **gerekmiyor**; tek bir
+atlas + `yenile` çağrısı yeter ve ölçek başına ikinci bir atlas taşımaz.
+Karar gerekçesiyle `## Uygulama Notları`'na yazılır.
+
+---
+
 ## Uygulama Notları
 
 ## Yayın Etkisi

@@ -15,8 +15,11 @@ bir işe başlamadan önce ilgili bölümüne bakılır, sıfırdan keşfedilmez
 İskelet 001 ile kuruldu (workspace, Makefile, shader zinciri, ilk pencere),
 VT motoru 002 ile: `bt-core` shell'i çalıştırır, `bt-gpu` hücre arka planlarını
 çizer, `bt-shell` klavyeyi PTY'ye akıtır ve kapanışta shell'i düzgün bitirir.
-`bt-atlas` hâlâ boş — glyph 003'te, yani yazılan hâlâ görünmez: bugün ekranda
-yalnız renkli hücreler var. Aşağıdaki sözleşme kod
+`bt-atlas` 003 ile doldu: CoreText glyph'leri rasterize ediyor ve sabit yuva
+ızgarasında adresliyor. Ama **kimse onu çağırmıyor** — atlası dokuya bağlayan
+`cell` pipeline'ı da hücre metriğini oradan okuyan yol da 003'ün sonraki
+phase'lerinde. Yani yazılan hâlâ görünmez: bugün ekranda yalnız renkli
+hücreler var. Aşağıdaki sözleşme kod
 geldikçe kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse
 ikisinden biri aynı commit'te düzelir.
 
@@ -56,7 +59,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52), komut blokları, seçim, ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek (00X) | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
-| `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `core-text`, `core-graphics` |
+| `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi | `objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`), `libc` (yalnız bekçinin `write` + `_exit`'i) |
 | `bateri` | `main`, app bundle, Sparkle | — |
@@ -73,8 +76,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **Bağımlılık mimari karardır**, kendiliğinden eklenmez. Taban:
   `alacritty_terminal` (VT ayrıştırma, grid, PTY ve okuyucu thread; kendi
   ayrıştırıcımızı yazmıyoruz — `bt-core` onu **kapsüller**, `pub` API'de
-  alacritty tipi görünmez), `objc2` ailesi, `core-text`, `toml` + `serde`,
-  `tracing`. `Cargo.lock` depodadır.
+  alacritty tipi görünmez), `objc2` ailesi (CoreText ve CoreGraphics dahil:
+  servo ailesi `core-text` **reddedildi**, ikinci bir CF sarmalayıcı yığını
+  olurdu — 003 kararı), `toml` + `serde`, `tracing`. `Cargo.lock` depodadır.
 - **Hücre sabit boyuttadır** ve `const` assert ile bağlanır; emoji, grapheme
   kümeleri ve alt çizgi rengi gibi seyrek veriler yan tablolarda yaşar
   (alacritty'de `CellExtra`). Bugünkü sabit **24 bayt**: alacritty `Cell`'i

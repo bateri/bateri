@@ -26,6 +26,28 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSGraphics",
     "NSRunningApplication", "NSEvent", "objc2-core-foundation", "objc2-quartz-core",
 ] }
+# Glyph rasterizasyonu (`bt-atlas`): CTFont metriği + alfa-only bitmap bağlamı.
+# Kullanıcı onaylı bağımlılık kararı: .tasks/003-glyph-atlas/discussion.md →
+# Karar. Servo ailesi (`core-text` 22) reddedildi: ikinci bir CF sarmalayıcı
+# yığını `Cargo.lock`'a girerdi, workspace zaten objc2 ailesini pinliyor.
+# `CTFontDescriptor` süs değil — `CTFontGetAdvancesForGlyphs` yönelim tipini
+# (`CTFontOrientation`) oradan alıyor ve o feature olmadan derlenmiyor.
+objc2-core-text = { version = "0.3", default-features = false, features = [
+    "std", "CTFont", "CTFontDescriptor", "objc2-core-graphics",
+] }
+# `CGBitmapContextCreate` dört başlığın kesişiminde (kendi `CGBitmapContext`
+# başlığı + `CGColorSpace` + `CGContext` + `CGImage`), `CGFont` ise `CGGlyph`
+# tipi için. Varsayılan feature seti `objc2-io-surface`'i de çekiyordu;
+# kırpma onu grafın dışında tutuyor.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGFont", "CGImage",
+] }
+# Yeni bir crate DEĞİL — grafta zaten vardı (objc2-app-kit çekiyor) ve sürüm
+# oynamıyor; `Cargo.lock`'ta yalnız `bt-atlas`'ın listesine kenar ekleniyor.
+# `CFString` font adı, `CFCGTypes` ise CGPoint/CGSize/CGRect için.
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std", "CFString", "CFCGTypes",
+] }
 # DispatchData kurucuları `block2` feature'ının arkasında; objc2-metal bunu
 # açmaz. Kullanıcı onaylı bağımlılık kararı: .tasks/001 discussion.md → Karar.
 dispatch2 = { version = "0.3", features = ["block2"] }
