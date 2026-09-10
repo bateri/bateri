@@ -4,7 +4,7 @@
 use std::cell::OnceCell;
 
 use bt_core::DEFAULT_BG;
-use bt_gpu::{Renderer, Surface};
+use bt_gpu::{Frame, Renderer, Surface};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -108,7 +108,7 @@ define_class!(
     unsafe impl NSWindowDelegate for AppDelegate {
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _n: &NSNotification) {
-            // 002'de burası yalnız kirli işaretler; kareyi display link sürer.
+            // phase-3'te burası yalnız kirli işaretler; kareyi display link sürer.
             self.sync_size();
             self.draw();
         }
@@ -175,7 +175,9 @@ impl AppDelegate {
         if let Err(e) = self
             .ivars()
             .renderer
-            .draw_surface(&self.ivars().surface, DEFAULT_BG)
+            // Hücre yok: `Session` phase-3'te bağlanıyor. Boş kare yalnız
+            // clear rengini boyar, yani 001'in görüntüsü birebir aynı.
+            .draw_surface(&self.ivars().surface, DEFAULT_BG, &Frame::default())
         {
             eprintln!("bateri: kare çizilemedi: {e}");
         }
