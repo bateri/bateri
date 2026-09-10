@@ -8,10 +8,12 @@ projeye taşırken `.claude/` klasörünü olduğu gibi kopyala ve yalnız bu do
 Proje sözleşmesinin tamamı `CLAUDE.md`'dedir; burada yalnızca **iş akışının
 dokunduğu** kısmı özetlenir.
 
-> Depo iskelet aşamasındadır: Makefile ve cargo workspace ilk iş setiyle
-> gelir. Aşağıdaki hedef adları o setin **sözleşmesidir** — set onları kurar,
-> skill'ler o günden itibaren bunları koşturur. Hedef henüz yoksa doğrulama
-> "yeşil" değil "koşamadı"dır ve phase bitmiş sayılmaz.
+> Aşağıdaki `make` hedeflerinin bir kısmının girdisi henüz yok: `shader`
+> (001 phase-2), `duman` (001 phase-3), `terminfo` (shell/TERM seti),
+> `test-yaris` (PTY seti, nightly), `kur` (bundle seti). Hedef **var olur**,
+> koşunca "henüz yok" deyip kırmızı düşer — "geçti" demez. O satır
+> tetiklenirse doğrulama "yeşil" değil "koşamadı"dır: `[~]` işaretlenir, phase
+> bitmiş sayılmaz. Hedef gerçek olunca bu listeden silinir.
 
 ## İçindekiler
 
@@ -29,10 +31,10 @@ Bir phase, doğrulama yeşil olmadan bitmiş sayılmaz. Sırayla:
 |---|---|
 | her phase | `make hepsi` (`cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace`) |
 | hızlı iç döngü | `cargo test -p {crate}` |
-| `.metal` ya da `build.rs` değiştiyse | `make shader` (`xcrun -sdk macosx metal` ile derleme; hata shader'da kalır, `cargo test` onu görmez) |
-| `assets/terminfo/*` değiştiyse | `make terminfo` (`tic -x` ile geçici dizine derleme; SSH'daki uzak makine bunu **alamaz**, bkz. tuzaklar) |
-| PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` (`RUSTFLAGS=-Zsanitizer=thread` nightly ister; nightly yoksa `cargo test --workspace -- --test-threads=1` ile karşılaştırmalı koşu ve phase notuna "TSan koşmadı" yaz) |
-| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — uygulamayı `BT_RUN_SECONDS=3` ile başlatıp çıkış koduna bakar; başsız ortamda atlanır ve `[~]` işaretlenir |
+| `.metal` ya da `build.rs` değiştiyse | `make shader` — *henüz yok, bkz. üstteki not* — `build.rs` shader hatasını `cargo build`'de zaten yakalar; bu hedef cargo'nun bayatlık takibini atlayan kanaryadır (`touch` + `cargo build -p bt-gpu`), derleme reçetesi yalnız `build.rs`'te |
+| `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz yok, bkz. üstteki not* (`tic -x` ile geçici dizine derleme; SSH'daki uzak makine bunu **alamaz**, bkz. tuzaklar) |
+| PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — *henüz yok, bkz. üstteki not* (`RUSTFLAGS=-Zsanitizer=thread` nightly ister; nightly yoksa `cargo test --workspace -- --test-threads=1` ile karşılaştırmalı koşu ve phase notuna "TSan koşmadı" yaz) |
+| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — *henüz yok, bkz. üstteki not* — uygulamayı `BT_RUN_SECONDS=3` ile başlatır; süre dolunca **kare sayısına** bakar (0 → çıkış 1); başsız ortamda binary `exit 78` + "ATLANDI" der ve `[~]` işaretlenir |
 
 **Türetilmiş dosya yoktur.** `default.metallib` `build.rs` üretir ve `target/`
 altında kalır; depoya girmez. terminfo derlemesi de girmez. Dolayısıyla
@@ -143,7 +145,7 @@ Tek branch: `main`. Dev branch, migration, container, panel yok.
 - **Boşta sıfır kare.** Kirli satır yoksa frame gönderilmez; her animasyonun
   bir **durma koşulu** vardır (imleç yerleştiğinde, decay bittiğinde). Durma
   koşulu olmayan animasyon pil tüketen sonsuz döngüdür ve belirtisi sessizdir.
-- **Hücre sabit boyuttadır.** `Cell` 16 baytı geçmez (hedef; 001 ölçüp
+- **Hücre sabit boyuttadır.** `Cell` 16 baytı geçmez (hedef; 002 ölçüp
   sabitler) ve `const` assert ile bağlanır. Emoji, grapheme kümesi, alt çizgi
   rengi gibi seyrek veriler **yan tablodadır**; hücreye alan eklemek 10 000
   satırlık scrollback'i sekme başına megabaytlarca büyütür.
@@ -159,6 +161,11 @@ Tek branch: `main`. Dev branch, migration, container, panel yok.
   veri kaybıdır.
 - **Ölçümün tek sahibi `docs/OLCUMLER.md`.** Başka belgeye sayı yazma;
   niteliksel anlat ve oraya bağla.
+- **Araç zinciri pin'li değil.** Homebrew rustc, `rustup` yok,
+  `rust-toolchain.toml` bilinçli olarak yok (001 kararı); `rust-version`
+  yalnız tabandır. `brew upgrade` sonrası yeni bir clippy lint'i dokunulmamış
+  kodu kırmızıya çevirebilir — `make hepsi` bu yüzden sürümü başta basar;
+  kırmızı görünce önce sürüme bak, koda değil.
 - **Dil:** kod yorumları, commit iletileri ve belgeler Türkçe; kullanıcıya
   görünen UI dizgileri, ayar anahtarları ve tema adları İngilizce (ürün
   uluslararası, ayar dosyası paylaşılır). Yorumlar "neden"i anlatır.

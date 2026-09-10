@@ -64,8 +64,10 @@ kütüphanesi görmez; `bt-atlas` yalnız `core-text`/`core-graphics`.
 cargo tree -p bt-core  -e normal | grep -E "objc2|core-text|core-graphics|metal"
 cargo tree -p bt-atlas -e normal | grep -E "objc2"
 cargo tree -p bt-gpu   -e normal | grep -E "bt-shell"
-grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src
+grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"
 ```
+(Son süzgeç yorum satırlarını düşürür: `bt-core`'un kendi başlık yorumu
+"objc2 yok" der ve grep'i yanlış pozitife düşürür — 001 phase-1'de oldu.)
 Hepsi boş dönmeli. `cargo tree` `Cargo.toml`'daki sözleşmeyi, `grep` kaynak
 içindeki kaçağı görür — ikisi birden sorulur; `[cfg(target_os)]` arkasına
 saklanmış bir `objc2` çağrısı `cargo tree`'de görünmeyebilir.

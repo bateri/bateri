@@ -281,14 +281,19 @@ yolu tip düzeyinde bağlıdır ve `make duman` (phase-3) onu koşturur.
 
 ## 8. Makefile
 
+Phase-1'deki `shader` **stub'ını yerinde değiştir** (ikinci bir `shader:`
+tanımı ekleme — make "overriding recipe" der ve sondaki kazanır):
+
 ```make
-.PHONY: shader
 # build.rs'in yaptığını cargo'nun bayatlık takibini atlayarak koşturur;
 # derleme reçetesi burada TEKRARLANMAZ.
 shader:
 	touch crates/bt-gpu/shaders/*.metal
 	$(CARGO) build -p bt-gpu
 ```
+
+Aynı commit'te `.claude/is-akisi/proje.md` başındaki "henüz yok" listesinden
+`shader`'ı ve doğrulama tablosundaki *henüz yok* notunu çıkar.
 
 ---
 
@@ -313,7 +318,7 @@ shader:
 - [ ] Test: `metallib_gomulu_ve_gecerli`, `library_ve_pipeline_kurulur` geçer
 - [ ] Test: `quad.metal`'e kasıtlı sözdizimi hatası → `cargo build -p bt-gpu` satır numarasıyla düşer; geri al
 - [ ] Test: `shaders/`'a yeni boş `.metal` eklenince `cargo build` yeniden derler (dizin izleme)
-- [ ] `make shader` hedefi eklendi ve koşuyor
+- [ ] `make shader` stub'ı gerçek reçeteyle değiştirildi ve koşuyor; `proje.md` listesinden çıkarıldı
 - [ ] Doğrulama geçti (`make hepsi`; koşullu: `make shader`)
 - [ ] `/simplify` çalıştırıldı, bulgular uygulandı
 - [ ] `/code-review` çalıştırıldı, bulgular giderildi

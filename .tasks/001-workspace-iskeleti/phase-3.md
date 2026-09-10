@@ -180,14 +180,19 @@ fn aqua_oturumu() -> bool {
 
 ## 4. Makefile
 
+Phase-1'deki `duman` **stub'ını yerinde değiştir** (ikinci tanım ekleme):
+
 ```make
-.PHONY: duman
 # Pencereyi açar, BT_RUN_SECONDS dolunca kare sayısına bakar: 0 → exit 1.
-# Başsız ortamda binary kendisi 78 ile çıkar; hedef onu aynen geçirir.
+# Başsız ortamda binary "ATLANDI" basıp 78 ile çıkar; make bunu 2 olarak
+# döndürür — ayırt edici sinyal stdout metnidir, çıkış kodu değil.
 duman:
 	$(CARGO) build -p bateri
 	BT_RUN_SECONDS=3 ./target/debug/bateri
 ```
+
+Aynı commit'te `proje.md` başındaki "henüz yok" listesinden `duman`'ı ve
+tablodaki *henüz yok* notunu çıkar.
 
 ## 5. Belge
 
@@ -220,7 +225,7 @@ kalır.
 - [ ] Test: `quad_fragment` adını `quad.metal`'de geçici olarak değiştir → `make duman` "MissingFunction(quad_fragment)" ile çıkış 1; geri al
 - [ ] Test: pencereyi boyutlandır → bulanıklık yok (drawable boyutu güncelleniyor); kapat → süreç 0 ile biter
 - [ ] Test: `launchctl managername` ≠ Aqua ortamı taklidi (`PATH`'e sahte `launchctl` koyarak) → çıkış 78
-- [ ] `make duman` hedefi eklendi
+- [ ] `make duman` stub'ı gerçek reçeteyle değiştirildi; `proje.md` listesinden çıkarıldı
 - [ ] Belge paragrafları (bölüm 5) aynı commit'te
 - [ ] Doğrulama geçti (`make hepsi`; koşullu: `make duman`)
 - [~] `make test-yaris` — nightly yok ve paylaşılan durum yok (tek thread); hedef `exit 78`

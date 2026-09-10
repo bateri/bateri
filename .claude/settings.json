@@ -4,6 +4,8 @@
     "allow": [
       "Bash(make hepsi)",
       "Bash(make test)",
+      "Bash(make clippy)",
+      "Bash(make fmt)",
       "Bash(make shader)",
       "Bash(make terminfo)",
       "Bash(make test-yaris)",

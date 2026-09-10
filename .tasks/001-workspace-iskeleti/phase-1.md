@@ -147,6 +147,30 @@ Kodla **aynı commit'te**:
 
 ## Uygulama Notları
 
+- **`exit 78` make'ten geçmez.** GNU make reçete hatasını her zaman 2 ile
+  döndürür; 78 yalnız "Error 78" satırında görünürdü. Ayırt edici sinyal
+  stdout'taki "henüz yok" metni oldu, stub'lar `exit 1` ile düşer.
+  `proje.md`, `CLAUDE.md` ve phase-3'ün `duman` notu buna göre yazıldı
+  (`/simplify` altitude + `/code-review`).
+- **`shader` ve `duman` stub'ları bu phase'de eklendi**, kılavuz "phase-2/3'te
+  gelir" diyordu: `proje.md` tablosu beş hedef adı taşıyor, ikisi eksik
+  kalınca `No rule to make target` ile tablo yalan söylüyordu. Phase-2 ve
+  phase-3 dosyaları "stub'ı yerinde değiştir + `proje.md` listesinden çıkar"
+  adımıyla güncellendi.
+- `hepsi` alt hedeflere bölündü (`fmt`, `clippy`, `test`; `.NOTPARALLEL`),
+  `surum` hedefi ve `RUSTC` değişkeni kılavuzdan sonra eklenip `/code-review`
+  ile geri alındı; sürüm satırı `hepsi` reçetesinde. `settings.json` iznine
+  `make fmt`/`make clippy` eklendi.
+- `proje.md`'deki üç satır içi "henüz yok" notu tek bir başlık alıntısına
+  toplandı; tablo satırları ona atıf yapıyor. Homebrew rustc kayması
+  tuzaklara girdi.
+- `bt-core`/`bt-atlas` `Cargo.toml`'larında boş `[dependencies]` yok.
+- `/audit` mercek 1'in kaynak grep'i yorum satırlarını dışlayacak şekilde
+  düzeltildi (yanlış pozitif bu phase'de çıktı).
+- Doğrulama: `make hepsi` → 0 (rustc 1.88.0), `make -j4 hepsi` → sürüm başta;
+  `cargo tree` beş crate'te yön doğru; stub'lar "henüz yok" + sıfır dışı.
+- sadakat: makas yok.
+
 ## Yayın Etkisi
 
 - `CLAUDE.md` ve `proje.md` düzeltmeleri bu commit'te (yukarıdaki tablo).
@@ -157,14 +181,14 @@ Kodla **aynı commit'te**:
 
 ## Checklist
 
-- [ ] `Cargo.toml` workspace, beş crate, katman yönü tablodaki gibi
-- [ ] `Makefile`: `hepsi`, `test`; `terminfo`/`test-yaris`/`kur` `exit 78`
-- [ ] Belge düzeltmeleri (R8) aynı commit'te
-- [ ] Test: `cargo tree -p bt-core -e normal` ve `-p bt-atlas` yalnız kendilerini listeler; `cargo tree -p bt-gpu` `bt-shell` içermez
-- [ ] Test: `make terminfo; echo $?` → 78
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] `Cargo.toml` workspace, beş crate, katman yönü tablodaki gibi
+- [x] `Makefile`: `hepsi` (`fmt`/`clippy`/`test`); beş stub "henüz yok" + `exit 1` (78 iddiası düştü, bkz. notlar)
+- [x] Belge düzeltmeleri (R8) aynı commit'te (+ `CLAUDE.md` komut bloğu, tuzak maddesi)
+- [x] Test: `cargo tree -p bt-core -e normal` ve `-p bt-atlas` yalnız kendilerini listeler; `cargo tree -p bt-gpu` `bt-shell` içermez
+- [x] Test: `make terminfo` stdout'a "henüz yok" basar ve sıfır dışı çıkar (make reçete hatasını 2 ile döndürür; 78 iddiası düşürüldü)
+- [x] Doğrulama geçti (`make hepsi`, kapı sonrası yeniden koşuldu)
+- [x] `/simplify` çalıştırıldı, bulgular uygulandı (4 mercek; efficiency temiz)
+- [x] `/code-review` çalıştırıldı, 7 bulgu giderildi
+- [x] `/audit` çalıştırıldı — mercek 1, 2, 6, 10 temiz; 3, 4, 5, 7, 8, 9 ilgisiz
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
 - [ ] Commit: {hash}

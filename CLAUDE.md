@@ -20,14 +20,19 @@ cümle kodla çelişirse ikisinden biri aynı commit'te düzelir.
 ## Komutlar
 
 ```sh
-make hepsi        # fmt --check + clippy -D warnings + test (definition of done)
+make hepsi        # rustc sürümü + fmt --check + clippy -D warnings + test (definition of done)
+make fmt          # cargo fmt --all -- --check
+make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
-make shader       # .metal dosyalarını xcrun metal ile derler (build.rs'in yaptığı iş, tek başına)
+make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
+make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; süre dolunca kare sayısına bakar, 0 → kırmızı
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # ThreadSanitizer ile test (nightly ister)
-make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar, çıkış koduna bakar
 make kur          # release derler ve bateri.app paketini target/ altına kurar
 ```
+
+Girdisi henüz olmayan hedefler "henüz yok" deyip kırmızı düşer; listesi
+`.claude/is-akisi/proje.md` başındadır.
 
 Tek crate / tek sınama:
 
@@ -49,7 +54,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY, OSC (7/8/9/52/133), komut blokları, seçim, ayar modeli, shell bağlamı | **hiçbiri** — Linux'ta derlenir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `core-text`, `core-graphics` |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2-metal`, `objc2-quartz-core` |
-| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi | `objc2-app-kit` |
+| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi | `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -62,7 +67,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   `objc2` ailesi, `core-text`, `toml` + `serde`, `tracing`. `Cargo.lock` depodadır.
 - **Hücre sabit boyuttadır** ve `const` assert ile bağlanır; emoji, grapheme
   kümeleri ve alt çizgi rengi gibi seyrek veriler yan tablolarda yaşar. Metalterm
-  20 baytta tuttu; hedefimiz 16, 001 ölçer ve sabitler.
+  20 baytta tuttu; hedefimiz 16, 002 ölçer ve sabitler.
 - **Boşta sıfır kare.** Kirli satır yoksa frame gönderilmez. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
   animasyonu 90 ms'lik solmaya indirir.
