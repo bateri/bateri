@@ -147,5 +147,5 @@ frame(sink: FnMut(Cell)) → Option<Cursor>  1. cell_bg: arka planlar + imleç
 |-------|-------|--------|
 | phase-1 | ✅ | b5a0585 |
 | phase-2 | ✅ | ae50826 |
-| phase-3 | | |
+| phase-3 | ✅ | 2f19277 |
 | phase-4 | | |

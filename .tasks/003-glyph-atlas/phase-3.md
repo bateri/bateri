@@ -322,4 +322,4 @@ atlas o sınamada `None` kalıyor.
 - [x] `/audit` çalıştırıldı, bulgular giderildi (5 mercek temiz, 4 ilgisiz,
       mercek 10'un 4 belge–kod çelişkisi düzeltildi)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: `2f19277`
