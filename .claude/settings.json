@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(make hepsi)",
+      "Bash(make test)",
+      "Bash(make shader)",
+      "Bash(make terminfo)",
+      "Bash(make test-yaris)",
+      "Bash(make duman)",
+      "Bash(make kur)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo bench:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(xcrun -sdk macosx metal:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git blame:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)"
+    ]
+  }
+}
