@@ -11,5 +11,6 @@ bt-atlas = { workspace = true }
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true }
 objc2-metal = { workspace = true }
-objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMetalLayer", "objc2-metal", "objc2-core-foundation"] }
+objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMetalLayer", "CAMetalDisplayLink", "objc2-metal", "objc2-core-foundation"] }
 dispatch2 = { workspace = true }
+block2 = { workspace = true }

@@ -41,33 +41,31 @@ const _: () = assert!(offset_of!(Instance, rgba) == 16);
 /// parametresidir** — kurucuda dondurulsaydı ekran ölçeği değiştiğinde
 /// (`windowDidChangeBackingProperties:`) sessizce bayatlardı.
 #[derive(Default)]
-pub struct Frame {
+pub(crate) struct Frame {
     instances: Vec<Instance>,
     cell_px: (f32, f32),
     /// Çizilen **arka plan** instance'ı sayısı; imleç sayılmaz.
     ///
-    /// `make duman`'ın `hucre=K` jetonu bunu okuyacak (phase-3'te doğuyor):
-    /// sink'in hücre ürettiğinin kanıtı. İmleç sayıya girseydi K, boş bir
-    /// grid'de bile 1 olur ve iddiayı boşa çıkarırdı. Dikkat: bu bir **CPU**
-    /// sayacıdır, GPU'nun o hücreleri boyadığını kanıtlamaz — onu
-    /// `renderer`'ın offscreen okuma sınaması yapar.
+    /// `make duman`'ın `hucre=K` jetonu bunu okur: sink'in hücre ürettiğinin
+    /// kanıtı. İmleç sayıya girseydi K boş bir grid'de bile 1 olur ve iddiayı
+    /// boşa çıkarırdı. Dikkat: bu bir **CPU** sayacıdır, GPU'nun o hücreleri
+    /// boyadığını kanıtlamaz — onu `renderer`'ın offscreen okuma sınaması yapar.
     bg_count: usize,
 }
 
-// Kurucular `pub`: bugün `Frame`'i dolduracak tek yer crate DIŞI olurdu
-// (`bt-shell`), çünkü display link phase-3'te doğuyor. O gün sahiplik
-// `bt-gpu`'nun içine geçince bunlar `pub(crate)`'e daralır — phase-3
-// checklist'inde yazılı.
+// Tümü `pub(crate)`: `Frame`'i dolduran tek yer `link.rs`, yani bu crate.
+// Kare listesi bir GPU ayrıntısıdır; `bt-shell`'in onu görmesi için bir sebep
+// yok ve görmezse yanlış hücre boyutuyla dolduramaz.
 impl Frame {
     /// Tamponu boşaltır ve bu karenin hücre piksel boyutunu kurar. Ayrılan
     /// yer korunur: kare başına yeniden ayırma yok.
-    pub fn clear(&mut self, cell_px: (u16, u16)) {
+    pub(crate) fn clear(&mut self, cell_px: (u16, u16)) {
         self.instances.clear();
         self.bg_count = 0;
         self.cell_px = (f32::from(cell_px.0), f32::from(cell_px.1));
     }
 
-    pub fn push_bg(&mut self, cell: CellBg) {
+    pub(crate) fn push_bg(&mut self, cell: CellBg) {
         // `instances.len() > bg_count` tam olarak "imleç eklendi" demektir.
         debug_assert_eq!(
             self.instances.len(),
@@ -80,7 +78,7 @@ impl Frame {
     }
 
     /// İmleç bloğu; `bg_count`'a **girmez** ve görünmez imleç çizilmez.
-    pub fn push_cursor(&mut self, cursor: Cursor, rgba: [f32; 4]) {
+    pub(crate) fn push_cursor(&mut self, cursor: Cursor, rgba: [f32; 4]) {
         if !cursor.visible {
             return;
         }
@@ -88,7 +86,7 @@ impl Frame {
             .push(self.hucre(cursor.col, cursor.row, rgba));
     }
 
-    pub fn bg_count(&self) -> usize {
+    pub(crate) fn bg_count(&self) -> usize {
         self.bg_count
     }
 

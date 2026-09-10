@@ -16,13 +16,13 @@ pub enum GpuError {
     MissingFunction(&'static str),
     Pipeline(Retained<NSError>),
     NoCommandQueue,
-    NoDrawable,
     NoCommandBuffer,
     /// Instance tamponu ayrılamadı (bellek baskısı).
     NoInstanceBuffer,
     NoRenderEncoder,
     /// Komut tamponu `Error` durumuyla bitti (GPU hatası, zaman aşımı, cihaz
-    /// kaybı); kare sunulmadı, sayaç artmaz.
+    /// kaybı); kare sunulmadı, sayaç artmaz. **Asenkron gelir:** `draw`
+    /// çoktan `Ok` dönmüştür, bu hata tamamlanma kapanışına düşer.
     CommandFailed(Option<Retained<NSError>>),
 }
 
@@ -34,7 +34,6 @@ impl fmt::Display for GpuError {
             Self::MissingFunction(name) => write!(f, "shader fonksiyonu yok: {name}"),
             Self::Pipeline(e) => write!(f, "pipeline kurulamadı: {e}"),
             Self::NoCommandQueue => write!(f, "komut kuyruğu kurulamadı"),
-            Self::NoDrawable => write!(f, "drawable alınamadı"),
             Self::NoCommandBuffer => write!(f, "komut tamponu alınamadı"),
             Self::NoInstanceBuffer => write!(f, "instance tamponu ayrılamadı"),
             Self::NoRenderEncoder => write!(f, "render encoder kurulamadı"),

@@ -29,6 +29,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 # DispatchData kurucuları `block2` feature'ının arkasında; objc2-metal bunu
 # açmaz. Kullanıcı onaylı bağımlılık kararı: .tasks/001 discussion.md → Karar.
 dispatch2 = { version = "0.3", features = ["block2"] }
+# `addCompletedHandler:` bir ObjC bloğu ister; `RcBlock` onu yığında tutar.
+# Grafta zaten vardı (objc2-metal'in varsayılan `block2` feature'ı çekiyor),
+# bu satır yalnız adını kullanılabilir kılar — Cargo.lock oynamaz.
+block2 = "0.6"
 # VT ayrıştırma, grid, scrollback, hasar, PTY ve okuyucu thread. bt-core onu
 # KAPSÜLLER: pub API'de alacritty tipi görünmez. Kullanıcı onaylı bağımlılık
 # kararı: .tasks/002-vt-motoru/discussion.md → Karar. Tek varsayılan feature

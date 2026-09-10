@@ -1,10 +1,13 @@
 //! bt-shell — AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler.
 //!
 //! `objc2-app-kit` üzerinden doğrudan AppKit; Metal'i görmez, çizimi
-//! `bt-gpu`'ya bırakır ve device'ı `Renderer::system_default` kurar.
-//! Bu phase'de tek pencere ve tek kare; sekme, menü ve klavye sonraki setlerde.
+//! `bt-gpu`'ya bırakır ve device'ı `Renderer::system_default` kurar. Kareyi
+//! de sürmez: pencereyi, oturumu ve display link'i birbirine bağlar, gerisi
+//! `bt-gpu`'nun ritmidir. Tek pencere; sekme, menü ve klavye sonraki setlerde.
 
 mod app;
+
+use std::sync::Arc;
 
 use objc2::MainThreadMarker;
 use objc2::runtime::ProtocolObject;
@@ -25,7 +28,8 @@ pub struct Options {
 pub fn run(opts: Options) -> Result<(), GpuError> {
     // audit: giriş noktası; ana thread dışından çağrılması programlama hatasıdır.
     let mtm = MainThreadMarker::new().expect("bt_shell::run ana thread'de çağrılır");
-    let renderer = bt_gpu::Renderer::system_default()?;
+    // `Arc`: renderer'ı hem delegate hem display link tutar.
+    let renderer = Arc::new(bt_gpu::Renderer::system_default()?);
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // `delegate` bu kapsamda `app.run()`'ı aşar: AppKit'in ve pencerenin

@@ -1,10 +1,13 @@
 //! Renderer: metallib'i yükler, pipeline'ı kurar, verilen drawable'a bir kare
-//! çizer. Drawable'ı kimin sağladığını bilmez; kare sayacını yalnız sunulan
-//! kare artırır.
+//! çizer. Drawable'ı kimin sağladığını bilmez. Çizim **asenkrondur**: `commit`
+//! GPU'yu beklemez ve kare sayacını `addCompletedHandler` artırır — yani sayaç
+//! "sunuldu"yu değil "GPU hatasız bitirdi"yi sayar.
 
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use block2::RcBlock;
 use dispatch2::DispatchData;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
@@ -21,6 +24,17 @@ use objc2_quartz_core::CAMetalDrawable;
 use crate::frame::Frame;
 use crate::{GpuError, Surface};
 
+/// `addCompletedHandler:`e verilen blok; [`Renderer::completion`] kurar.
+///
+/// Ayrı bir tip olmasının sebebi ömrü: blok kurulumda bir kez ayrılır ve
+/// karelerin tamamı boyunca yaşar. `link.rs` onu ivar'da tutar.
+pub(crate) struct Completion(CompletionBlock);
+
+/// `objc2-metal`'in `MTLCommandBufferHandler`'ı ham işaretçidir; blok tipinin
+/// kendisi bu. Takma adın işi okunabilirlik: tip tek satıra sığmıyor ve adı
+/// `Completion`'ın neyi sardığını söylüyor.
+type CompletionBlock = RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTLCommandBuffer>>)>;
+
 /// build.rs'in ürettiği metallib; derleme zamanında gömülür, dosya yoksa
 /// `rustc` düşer — çalışma zamanına kalan tek şey fonksiyon adlarıdır.
 static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/default.metallib"));
@@ -35,11 +49,18 @@ pub struct Renderer {
     /// Pipeline bu formata derlendi; `surface()` layer'ı aynı formatta kurar,
     /// ikisinin ayrışması yapısal olarak imkânsız kalsın.
     pixel_format: MTLPixelFormat,
-    /// Sunulan kare sayısı. `Relaxed` yeter: yazan `draw` (birden çok thread
-    /// olsa da `fetch_add` sayım kaybetmez), okuyan `make duman` yalnız "> 0"
-    /// sorar; happens-before gereksinimi yok. Atomik olması 002'de display
-    /// link kuyruğundan yazılıp ana thread'den okunabilsin diye.
-    frames: AtomicU64,
+    /// Son **gönderilen** karedeki arka plan hücresi sayısı; `make duman`'ın
+    /// `hucre=K` jetonu. `frames`'in yanında duruyor çünkü ikisi de aynı
+    /// soruya bakan tanı sayaçları ve tek yerden okunmaları gerekiyor.
+    /// Dikkat: bu bir **CPU** sayacıdır, GPU'nun o hücreleri boyadığını
+    /// kanıtlamaz — onu `cell_bg_pikseli_gpu_tarafinda_boyar` yapar.
+    last_bg_count: AtomicUsize,
+    /// **Tamamlanan** kare sayısı; `make duman` bunu okur.
+    ///
+    /// `Arc`: sayacı artıran tamamlanma bloğu `Renderer`'dan bağımsız yaşar
+    /// (Metal onu kendi thread'inde, kendi kopyasıyla çağırır). `Relaxed`
+    /// yeter: `fetch_add` sayım kaybetmez ve okuyan yalnız "> 0" sorar.
+    frames: Arc<AtomicU64>,
 }
 
 impl Renderer {
@@ -84,7 +105,8 @@ impl Renderer {
             queue,
             cell_bg,
             pixel_format,
-            frames: AtomicU64::new(0),
+            last_bg_count: AtomicUsize::new(0),
+            frames: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -92,41 +114,61 @@ impl Renderer {
         Surface::new(&self.device, self.pixel_format)
     }
 
-    /// Sunulan (`presentDrawable` + `commit`) kare sayısı; `make duman` bunu okur.
-    /// İskelette `waitUntilCompleted` sayesinde "GPU bitirdi" ile çakışır;
-    /// 002 asenkron olunca bu anlam `addCompletedHandler`'a taşınır.
+    /// GPU'nun hatasız bitirdiği kare sayısı. Anlamın sahibi artık
+    /// `addCompletedHandler`: `commit` etmek bitirmek değildir, bitirmek de
+    /// hatasız bitirmek değildir.
     pub fn frames(&self) -> u64 {
         self.frames.load(Ordering::Relaxed)
     }
 
-    /// Yüzeyden bir drawable alıp [`Renderer::draw`]'a verir. Drawable'ı kimin
-    /// sağladığını `draw` bilmez: phase-3'te display link hazır drawable'ı
-    /// verir ve bu sarmalayıcıyı atlar.
-    pub fn draw_surface(
-        &self,
-        surface: &Surface,
-        clear: [f32; 4],
-        frame: &Frame,
-    ) -> Result<(), GpuError> {
-        // Drawable autorelease'li döner ve objc2'nin sahipliği devralması
-        // "best effort"; havuz burada olmazsa run loop'suz bir thread'de
-        // drawable asılı kalır, layer'ın 3'lük havuzu tükenir ve sonraki
-        // `nextDrawable` bloklar.
-        autoreleasepool(|_| {
-            let drawable = surface.layer().nextDrawable().ok_or(GpuError::NoDrawable)?;
-            self.draw(&drawable, clear, frame)
-        })
+    /// Son gönderilen karede çizilen arka plan hücresi sayısı (imleç hariç).
+    pub fn last_bg_count(&self) -> usize {
+        self.last_bg_count.load(Ordering::Relaxed)
     }
 
-    /// Tek kare: arka planı `clear` ile boya, `frame`'in dikdörtgenlerini çiz, sun.
+    /// Kare tamamlanınca çağrılacak bloğu **bir kez** kurar.
     ///
-    /// Bu phase'de senkron (`waitUntilCompleted`) — sayaç "GPU bitirdi" demek
-    /// olsun; phase-3 display link gelince asenkron olur.
-    pub fn draw(
+    /// Blok kare başına kurulmuyor: taşıdığı hiçbir şey kareden kareye
+    /// değişmiyor, oysa her kurulum bir heap ayırması ve birkaç `Arc`
+    /// sayaç hareketi demek — hepsi tazeleme hızında. Metal `Block_copy` ile
+    /// kendi referansını aldığı için aynı blok her komut tamponuna eklenebilir.
+    pub(crate) fn completion(
+        &self,
+        on_complete: impl Fn(Result<(), GpuError>) + Send + Sync + 'static,
+    ) -> Completion {
+        let frames = Arc::clone(&self.frames);
+        Completion(RcBlock::new(
+            move |cmd: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+                // SAFETY: Metal handler'ı tamamlanmış ve canlı bir komut
+                // tamponuyla, tampon başına bir kez çağırır.
+                let cmd = unsafe { cmd.as_ref() };
+                // Tamamlanmak sunulmak değildir: Error durumunda drawable boş
+                // kalır ve sayaç artarsa `make duman` siyah pencereyi yeşil geçer.
+                if cmd.status() == MTLCommandBufferStatus::Error {
+                    on_complete(Err(GpuError::CommandFailed(cmd.error())));
+                    return;
+                }
+                frames.fetch_add(1, Ordering::Relaxed);
+                on_complete(Ok(()));
+            },
+        ))
+    }
+
+    /// Tek kare: arka planı `clear` ile boya, `frame`'in dikdörtgenlerini çiz,
+    /// sun. **Asenkron**: `commit` GPU'yu beklemez, dönen `Ok` yalnız "komut
+    /// tamponu yola çıktı" demektir.
+    ///
+    /// `completion` GPU işi bitirince **Metal'in thread'inde** çağrılır ve
+    /// karenin gerçek akıbetini taşır. Sonucu renderer yorumlamaz: yeniden
+    /// deneme ve durma koşulu kareyi isteyenin işidir (bkz. `link.rs`), bu
+    /// yüzden hata buradan loglanmaz da. Senkron hata `Err` ile döner;
+    /// çağıran ikisini de **aynı** politikadan geçirmeli.
+    pub(crate) fn draw(
         &self,
         drawable: &ProtocolObject<dyn CAMetalDrawable>,
         clear: [f32; 4],
         frame: &Frame,
+        completion: &Completion,
     ) -> Result<(), GpuError> {
         // Metal/CA çağrıları iç geçicileri autorelease havuzuna atar; kare
         // başına bir havuz, run loop'suz bir thread'den çağrılınca birikimi önler.
@@ -137,15 +179,15 @@ impl Renderer {
                 .ok_or(GpuError::NoCommandBuffer)?;
             self.encode_pass(&cmd, &drawable.texture(), clear, frame)?;
 
+            // SAFETY: blok geçerli bir işaretçi ve `completion` çağrı boyunca
+            // yaşıyor; Metal `Block_copy` ile kendi referansını alır.
+            unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&completion.0)) };
+            // Kare yola çıktı: jeton bu noktada güncellenir, encode edilemeyen
+            // kare `hucre=` sayısını kirletmez.
+            self.last_bg_count
+                .store(frame.bg_count(), Ordering::Relaxed);
             cmd.presentDrawable(drawable.as_ref());
             cmd.commit();
-            cmd.waitUntilCompleted();
-            // Tamamlanmak sunulmak değildir: Error durumunda drawable boş kalır
-            // ve sayaç artarsa `make duman` siyah pencereyi yeşil geçer.
-            if cmd.status() == MTLCommandBufferStatus::Error {
-                return Err(GpuError::CommandFailed(cmd.error()));
-            }
-            self.frames.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
     }
@@ -244,6 +286,8 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use bt_core::CellBg;
     use objc2_metal::{
         MTLOrigin, MTLRegion, MTLSize, MTLStorageMode, MTLTextureDescriptor, MTLTextureUsage,
@@ -285,6 +329,34 @@ mod tests {
         device
             .newTextureWithDescriptor(&desc)
             .expect("offscreen doku")
+    }
+
+    #[test]
+    fn tamamlanma_blogu_kareyi_sayar_ve_sonucu_iletir() {
+        // `frames()`'in anlamı bu phase'de değişti: "commit edildi" değil,
+        // "GPU hatasız bitirdi". O anlamı yalnız `make duman` görüyordu ve
+        // orası "> 0" diye soruyor — sayacın hiç artmaması yeşil geçerdi.
+        //
+        // Adının söylemediği: **hatalı** tamponun sayılmadığı. `Error`
+        // durumunu isteyerek üretmenin güvenilir bir yolu yok (cihaz kaybı,
+        // zaman aşımı), o dal burada koşmuyor — sınama adının bunu iddia
+        // etmemesi de bu yüzden.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let gorulen = Arc::new(Mutex::new(Vec::new()));
+        let completion = {
+            let gorulen = Arc::clone(&gorulen);
+            r.completion(move |sonuc| gorulen.lock().unwrap().push(sonuc.is_ok()))
+        };
+
+        let cmd = r.queue.commandBuffer().expect("komut tamponu");
+        // SAFETY: blok geçerli ve `completion` çağrı boyunca yaşıyor.
+        unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&completion.0)) };
+        cmd.commit();
+        // `waitUntilCompleted` tamamlanma handler'ları dönene kadar bekler.
+        cmd.waitUntilCompleted();
+
+        assert_eq!(r.frames(), 1, "hatasız biten kare sayılmalı");
+        assert_eq!(*gorulen.lock().unwrap(), vec![true]);
     }
 
     #[test]

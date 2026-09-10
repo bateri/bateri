@@ -59,6 +59,50 @@ pub struct SessionOptions {
     pub scrollback: usize,
 }
 
+/// Hasarı işaretlemenin oturumdan bağımsız yolu; [`Session::dirty_flag`] verir.
+///
+/// `mark()` çağrılınca sıradaki `frame()` çizilecek bir kare döndürür.
+/// **Kimseyi uyandırmaz:** uyandırmak çağıranın işi (kareyi isteyecek olan o).
+///
+/// **Durma koşulu çağıranındır ve zorunludur.** Kalıcı bir çizim hatası
+/// "başarısız → bayrağı dik → yeniden dene" döngüsünü ekran tazeleme hızında
+/// sonsuza çevirir; hata başına **tek** yeniden deneme, art arda ikinci hatada
+/// kare talebi kesilir ve sıradaki `Wakeup` beklenir.
+#[derive(Clone)]
+pub struct DirtyFlag(Arc<AtomicBool>);
+
+impl DirtyFlag {
+    pub fn mark(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Duman koşusunun ve sınamaların ortak sabit shell'i.
+///
+/// Kullanıcının `$SHELL`'ine ve rc dosyasına bağlı olmayan bir komut: ilk
+/// satıra **sekiz** kırmızı arka planlı hücre (`" bateri "`) basar, sonra uyur.
+///
+/// Uyku süresi iki yönden sınırlı: duman koşusunun süresini (`BT_RUN_SECONDS`,
+/// varsayılan 3) rahatça aşmalı, ama uzun da olmamalı — `run_deadline`
+/// `process::exit` ile çıkıyor, yani `Drop` koşmuyor ve `SIGHUP` gitmiyor;
+/// artakalan çocuk uyku bitene kadar yaşar.
+///
+/// Tek sahip olmasının sebebi sayının kendisi: `make duman`'ın `hucre=8`
+/// beklentisi ile `sabit_shell_arka_plan_hucreleri_verir` sınamasının 8'i aynı
+/// betiğe bağlı. İki yerde ayrı yazılsalardı biri değişip diğeri sessizce eski
+/// kalırdı — ve duman K'yı yalnız "> 0" diye sorduğu için kimse fark etmezdi.
+/// Bu hâliyle sınama, uygulamanın gerçekten koştuğu betiği doğruluyor.
+pub fn smoke_shell() -> (String, Vec<String>) {
+    (
+        "/bin/sh".to_owned(),
+        // Kaçışları printf çözer: Rust dizgisinde `\033` ilk baytı NUL yapardı.
+        vec![
+            "-c".to_owned(),
+            "printf '\\033[41m bateri \\033[0m\\n'; sleep 10".to_owned(),
+        ],
+    )
+}
+
 /// `Term` boyutu `Dimensions` ister.
 ///
 /// alacritty'nin `TermSize`'ı bu işi görürdü ve `#[cfg(test)]` ile kapalı da
@@ -135,7 +179,7 @@ struct AdapterInner {
     /// imleci koşulsuz kirletir (`damage_cursor`), yani "hasar yok" cevabı
     /// hiçbir zaman gelmez. Boşta sıfır kare ondan okunamaz. Bayrağı
     /// `Event::Wakeup` diker — alacritty'nin "yeni içerik var" sinyali odur.
-    dirty: AtomicBool,
+    dirty: Arc<AtomicBool>,
     /// PTY'nin bildiği son boyut; `TextAreaSizeRequest` bunu yanıtlar.
     size: Mutex<WindowSize>,
 }
@@ -146,7 +190,7 @@ impl Adapter {
             wake,
             sender: OnceLock::new(),
             // Açılış karesi: pencere ilk kez boyansın diye kirli başlar.
-            dirty: AtomicBool::new(true),
+            dirty: Arc::new(AtomicBool::new(true)),
             size: Mutex::new(size),
         }))
     }
@@ -348,23 +392,18 @@ impl Session {
         })
     }
 
-    /// Hasar bayrağını yeniden diker.
+    /// Hasarı uzaktan işaretleyebilen tutamak.
     ///
-    /// `frame()` bayrağı çizim başlamadan tüketir; çizim sonradan başarısız
-    /// olursa (drawable alınamadı, tampon ayrılamadı) o içerik bir daha
-    /// istenmez ve pencere PTY'den yeni bayt gelene kadar bayat kalır —
-    /// "boşta sıfır kare" sessizce "boşta hiç kare" olur. Çizemeyen taraf
-    /// bunu çağırır.
-    ///
-    /// **Bayrak kimseyi uyandırmaz**, `resize`'da olduğu gibi: uyandırmak
-    /// çağıranın işi (kareyi bir tur daha isteyecek olan o).
-    ///
-    /// **Durma koşulu çağıranındır ve zorunludur.** Kalıcı bir çizim hatası
-    /// "başarısız → bayrağı dik → yeniden dene" döngüsünü ekran tazeleme
-    /// hızında sonsuza çevirir; hata başına **tek** yeniden deneme, art arda
-    /// ikinci hatada kare talebi kesilir ve sıradaki `Wakeup` beklenir.
-    pub fn mark_dirty(&self) {
-        self.adapter.0.dirty.store(true, Ordering::Release);
+    /// Oturumun kendisine referans **vermez** ve bu kasıtlı: tutamağı tutan
+    /// taraf (`bt-gpu`'nun `Waker`'ı, oradan da Metal'in tamamlanma bloğu)
+    /// hiçbir koşulda `Arc<Session>` maddileştirmemeli. Maddileştirseydi son
+    /// güçlü referans okuyucu ya da GPU thread'inde düşebilir, `Drop` →
+    /// `shutdown()` → `join()` zinciri orada koşar ve thread kendi kendini
+    /// beklerdi (`EDEADLK`) — `Wake` sözleşmesinin (`wake.rs`) yasakladığı
+    /// tam olarak bu. `Weak<Session>` bile yetmez: `upgrade()` o referansı
+    /// çağrı süresince maddileştirir.
+    pub fn dirty_flag(&self) -> DirtyFlag {
+        DirtyFlag(Arc::clone(&self.adapter.0.dirty))
     }
 
     /// Klavyeden ya da başka bir kaynaktan PTY'ye bayt akıtır.
@@ -379,13 +418,20 @@ impl Session {
     }
 
     /// Grid'i ve PTY'yi yeni boyuta getirir. Reflow alacritty'nindir.
-    pub fn resize(&self, cols: u16, rows: u16, cell_px: (u16, u16)) {
+    ///
+    /// `true` → boyut gerçekten değişti ve uygulandı. `false` iki durumda
+    /// döner: boyut dejenere (yoksayıldı) ya da zaten aynı. Çağıranın buna
+    /// ihtiyacı var çünkü hücre piksel boyutunu **kendi** tarafında da
+    /// tutuyor: yoksayılan bir boyutu orada uygulamak grid'i eski ölçüde
+    /// bırakıp çizimi yeni ölçüye kaydırırdı.
+    #[must_use]
+    pub fn resize(&self, cols: u16, rows: u16, cell_px: (u16, u16)) -> bool {
         // Simge durumuna inen ya da sıfır yükseklikli pencere 0 hesaplatabilir.
         // Bu boyut kırpılmaz, YOKSAYILIR: 1 sütuna reflow geçmişi kalıcı
         // olarak yok eder ve PTY'ye 1×1 winsize gitmesi tam ekran uygulamaları
         // bozar. Görünmeyen pencerede çizecek bir şey de yok.
         if cols == 0 || rows == 0 {
-            return;
+            return false;
         }
         let grid = GridSize::tam(cols, rows);
         let size = window_size(grid, cell_px);
@@ -397,7 +443,7 @@ impl Session {
         // `term`'den ÖNCE düşüyor, kilit sırası (term → size) bozulmuyor.
         let degisti = !ayni_boyut(*kilit(&self.adapter.0.size), size);
         if !degisti {
-            return;
+            return false;
         }
 
         // Üç adım tek kilit tutuşunda: grid, adapter'ın bildiği boyut ve
@@ -410,7 +456,7 @@ impl Session {
         // Ön kapıdan iki eşzamanlı resize birlikte geçebilir; ikincisi burada
         // yakalanır. Koşulsuz dikilen bayrak "boşta sıfır kare"yi delerdi.
         if ayni_boyut(*onceki, size) {
-            return;
+            return false;
         }
         term.resize(grid);
         *onceki = size;
@@ -419,6 +465,7 @@ impl Session {
         // bayrağı bu yüzden elle dikiyoruz. Uyandırmak çağıranın işi
         // (`bt-shell` resize'dan sonra link'i açar); bayrak kimseyi uyandırmaz.
         self.adapter.0.dirty.store(true, Ordering::Release);
+        true
     }
 
     /// Okuyucu thread'i durdurur ve shell çocuğunu bitirir.
@@ -584,10 +631,21 @@ mod tests {
     #[test]
     fn sabit_shell_arka_plan_hucreleri_verir() {
         let wake = Arc::new(TestWake::default());
-        let session = oturum(
-            "printf '\\033[41m bateri \\033[0m\\n'; sleep 5",
-            Arc::clone(&wake),
-        );
+        // `smoke_shell`'in ta kendisi: `make duman`'ın koştuğu betiğin sekiz
+        // hücre verdiğini doğrulayan yer burası. Betiğin `sleep`'i uzun ama
+        // önemsiz — oturum düşerken `SIGHUP` çocuğu keser.
+        let (program, args) = smoke_shell();
+        let session = Session::spawn(
+            SessionOptions {
+                command: Some((program, args)),
+                cols: 40,
+                rows: 10,
+                cell_px: (9, 18),
+                scrollback: 100,
+            },
+            Arc::clone(&wake) as Arc<dyn Wake>,
+        )
+        .unwrap();
 
         let hucreler = hucreleri_bekle(&session, &wake, 8);
 
@@ -668,20 +726,25 @@ mod tests {
         // Bu boyut grid'e HİÇ ulaşmamalı: 1 sütuna kırpmak alacritty'de
         // panik yerine daha kötüsünü yapar, geçmişi kalıcı olarak yok eder.
         // Hasar işaretlenmemesi resize'ın hiç olmadığının kanıtı.
-        session.resize(0, 24, (9, 18));
-        session.resize(80, 0, (9, 18));
-        session.resize(0, 0, (9, 18));
+        // Dönüş değeri de sözleşmenin parçası: çağıran hücre piksel boyutunu
+        // buna bakarak uyguluyor.
+        assert!(!session.resize(0, 24, (9, 18)));
+        assert!(!session.resize(80, 0, (9, 18)));
+        assert!(!session.resize(0, 0, (9, 18)));
         assert!(
             session.frame(|_| ()).is_none(),
             "dejenere boyut grid'e ulaştı"
         );
 
         // Gerçek boyut değişimi hasar işaretler.
-        session.resize(80, 24, (9, 18));
+        assert!(session.resize(80, 24, (9, 18)));
         assert!(session.frame(|_| ()).is_some());
         // Aynı boyut ikinci kez: değişiklik yok, hasar yok.
-        session.resize(80, 24, (9, 18));
+        assert!(!session.resize(80, 24, (9, 18)));
         assert!(session.frame(|_| ()).is_none());
+        // Yalnız hücre piksel boyutu değişse de bu bir değişikliktir: PTY'ye
+        // giden `TIOCSWINSZ` onu taşıyor (Retina'ya taşınan pencere).
+        assert!(session.resize(80, 24, (18, 36)));
     }
 
     #[test]
@@ -732,7 +795,7 @@ mod tests {
                     while Instant::now() < bitis {
                         session.write(b" ");
                         // Sütun sayısı oynasın ki reflow da yarışa girsin.
-                        session.resize(40 + n % 2, 10, (9, 18));
+                        let _ = session.resize(40 + n % 2, 10, (9, 18));
                         std::thread::sleep(Duration::from_millis(1));
                     }
                 })
