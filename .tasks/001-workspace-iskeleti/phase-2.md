@@ -141,6 +141,7 @@ pub enum GpuError {
     NoCommandQueue,
     NoDrawable,
     NoCommandBuffer,
+    NoRenderEncoder,
 }
 
 impl std::fmt::Display for GpuError { /* Türkçe, tek satır, adıyla */ }
@@ -180,11 +181,6 @@ impl Surface {
 `crates/bt-gpu/src/renderer.rs`
 
 ```rust
-// MTLCreateSystemDefaultDevice CoreGraphics'e link ister; crate bağımlılığı
-// değildir, katman tablosunu bozmaz (objc2-metal/src/lib.rs belgeliyor).
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {}
-
 static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/default.metallib"));
 
 /// quad.metal → Uniforms ile alan alan aynı. float4 = 16 bayt.
@@ -208,7 +204,7 @@ impl Renderer {
         Self::new(device, MTLPixelFormat::BGRA8Unorm)
     }
 
-    pub fn new(device: Retained<ProtocolObject<dyn MTLDevice>>, pixel_format: MTLPixelFormat) -> Result<Self, GpuError> {
+    pub(crate) fn new(device: Retained<ProtocolObject<dyn MTLDevice>>, pixel_format: MTLPixelFormat) -> Result<Self, GpuError> {
         let data = DispatchData::from_static_bytes(METALLIB);   // kopyasız
         let library = device.newLibraryWithData_error(&data).map_err(GpuError::Library)?;
         let vs = library.newFunctionWithName(ns_string!("quad_vertex"))
@@ -230,8 +226,13 @@ impl Renderer {
     /// Tek kare: drawable al, quad'ı çiz, sun. İskelette senkron
     /// (`waitUntilCompleted`) — kare sayacı "GPU bitirdi" demek olsun;
     /// 002 display link gelince asenkron olur.
-    pub fn draw(&self, surface: &Surface, colour: [f32; 4]) -> Result<(), GpuError> {
+    pub fn draw_surface(&self, surface: &Surface, colour: [f32; 4]) -> Result<(), GpuError> {
         let drawable = surface.layer().nextDrawable().ok_or(GpuError::NoDrawable)?;
+        self.draw(&drawable, colour)
+    }
+
+    /// Drawable'ı kimin sağladığını bilmez (002'de display link verir).
+    pub fn draw(&self, drawable: &ProtocolObject<dyn CAMetalDrawable>, colour: [f32; 4]) -> Result<(), GpuError> {
         let cmd = self.queue.commandBuffer().ok_or(GpuError::NoCommandBuffer)?;
         let pass = MTLRenderPassDescriptor::new();
         let att = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
@@ -299,6 +300,47 @@ Aynı commit'te `.claude/is-akisi/proje.md` başındaki "henüz yok" listesinden
 
 ## Uygulama Notları
 
+Kılavuzdan sapmalar (kalite kapısından geldi; çelişkide bu notlar kazanır):
+
+- **`draw` drawable alır, `draw_surface` sarar.** Kılavuz `draw(&Surface)`
+  yazmıştı; karar kaydı (K2 daraltması) "imza drawable alır" diyordu.
+  Phase-3 `draw_surface` çağırır. Her iki yol da autorelease havuzunda
+  (`nextDrawable` havuz dışında kalırsa run loop'suz thread'de drawable asılı
+  kalır ve sonraki çağrı bloklar — `/audit` mercek 7).
+- **Taban macOS 14 tek kaynak `.cargo/config.toml` `[env] MACOSX_DEPLOYMENT_TARGET`.**
+  Kılavuz `-mmacos-version-min=14.0` sabitini `build.rs`'e yazıyordu; rustc
+  binary'yi 11.0'a linkliyordu (`vtool` ile ölçüldü). Şimdi binary, test
+  ikilisi ve metallib aynı sayıda; `build.rs` tabanın ≥ 14 olduğunu assert eder
+  (`[env]` `force`suz kabuk ortamına yenilir, metal3.1 14 ister).
+- **`CommandFailed(Option<NSError>)` varyantı ve durum kontrolü.** Sayaç yalnız
+  `status != Error` ise artar; "tamamlanmak sunulmak değildir".
+- **`NoRenderEncoder` varyantı** — encoder arızası komut tamponu arızasıyla
+  aynı varyanta düşüyordu.
+- **`CoreGraphics` link satırı yok.** `objc2-quartz-core`'un varsayılan
+  feature'ları `objc2-core-graphics`'i çeker ve o zaten `#[link]` taşır;
+  kılavuzdaki stanza gereksizdi (silinip sınama geçti).
+- **`objc2-core-foundation` eklenmedi**: `CGSize` için `objc2_foundation::NSSize`
+  takma adı yeter. Yayın etkisindeki bağımlılık listesi beş crate olarak kaldı.
+- `Renderer`'da `device` alanı yok (`queue.device()`), sayaç `AtomicU64`
+  (`Renderer: Send + Sync` derleyiciyle doğrulandı), `Uniforms` crate-içi,
+  `Renderer::new` `pub(crate)` (geçersiz pixel format ObjC istisnasıyla
+  düşürür, `Result` dönmez), modüller özel yalnız `pub use`.
+- `airs.sort()`: `read_dir` sırası tanımsız, metallib baytları deterministik.
+- `make shader` `touch $(wildcard ...)`: boş dizinde `sh` glob'u literal
+  `*.metal` dosyası yaratıyordu.
+- Kılavuzdaki `last_size` erken dönüşü uygulanıp geri alındı: gerekçesi
+  ("aynı boyutla `setDrawableSize` havuzu yeniden ayırır") belgelenmiş Apple
+  davranışı değil, phase-3 zaten yalnız değişimde çağırıyor.
+- Deneyler: kasıtlı sözdizimi hatası `quad.metal:23:1` ile düştü; `shaders/`'a
+  yeni `.metal` eklenince `build.rs` yeniden koştu; `make shader` kanaryası
+  çalışıyor.
+- 002'ye kalan yapısal notlar (`/audit` mercek 7): `waitUntilCompleted`
+  kalkınca drawable geri basıncı `nextDrawable`'a taşınır; çizim display
+  link'in verdiği drawable ile `draw`'dan sürülmeli, resize yolu drawable
+  almak yerine kirli işaretlemeli. sRGB kararı (glyph harmanlaması için)
+  henüz kayıtlı değil.
+- sadakat: makas yok (imza değişiklikleri phase-2/3 dosyalarına işlendi).
+
 ## Yayın Etkisi
 
 - **shader**: ilk `.metal` ve `build.rs`; `make shader` bu phase'de gerçek olur.
@@ -312,16 +354,16 @@ Aynı commit'te `.claude/is-akisi/proje.md` başındaki "henüz yok" listesinden
 
 ## Checklist
 
-- [ ] Workspace ve `bt-gpu` bağımlılıkları; `cargo tree -p bt-core` hâlâ temiz
-- [ ] `shaders/quad.metal`, `build.rs` (`xcrun` kontrolü, `-mmacos-version-min=14.0`, dizin `rerun-if-changed`)
-- [ ] `GpuError`, `Surface`, `Renderer` (`system_default`, `new`, `surface`, `draw`, `frames`)
-- [ ] Test: `metallib_gomulu_ve_gecerli`, `library_ve_pipeline_kurulur` geçer
-- [ ] Test: `quad.metal`'e kasıtlı sözdizimi hatası → `cargo build -p bt-gpu` satır numarasıyla düşer; geri al
-- [ ] Test: `shaders/`'a yeni boş `.metal` eklenince `cargo build` yeniden derler (dizin izleme)
-- [ ] `make shader` stub'ı gerçek reçeteyle değiştirildi ve koşuyor; `proje.md` listesinden çıkarıldı
-- [ ] Doğrulama geçti (`make hepsi`; koşullu: `make shader`)
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi (mercek 2 yeni bağımlılık: karar kaydına bağla; mercek 9 `Uniforms` eşlemesi)
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] Workspace ve `bt-gpu` bağımlılıkları; `cargo tree -p bt-core` hâlâ temiz
+- [x] `shaders/quad.metal`, `build.rs` (`xcrun` kontrolü, taban `.cargo/config.toml`'dan, dizin `rerun-if-changed`)
+- [x] `GpuError`, `Surface`, `Renderer` (`system_default`, `new`, `surface`, `draw`, `draw_surface`, `frames`)
+- [x] Test: `metallib_gomulu_ve_gecerli`, `library_ve_pipeline_kurulur` geçer
+- [x] Test: `quad.metal`'e kasıtlı sözdizimi hatası → `cargo build -p bt-gpu` satır numarasıyla düşer; geri al
+- [x] Test: `shaders/`'a yeni boş `.metal` eklenince `cargo build` yeniden derler (dizin izleme)
+- [x] `make shader` stub'ı gerçek reçeteyle değiştirildi ve koşuyor; `proje.md` listesinden çıkarıldı
+- [x] Doğrulama geçti (`make hepsi`; koşullu: `make shader`; kapı sonrası yeniden koşuldu)
+- [x] `/simplify` çalıştırıldı, bulgular uygulandı (4 mercek, 10 bulgu; `last_size` sonra geri alındı)
+- [x] `/code-review` çalıştırıldı, 8 bulgu giderildi
+- [x] `/audit` çalıştırıldı — mercek 1, 2, 6, 8, 9 temiz; 7 (havuz) ve 10 (SAFETY, belge, `objc2` satırı) giderildi; 3, 4, 5 ilgisiz
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
 - [ ] Commit: {hash}

@@ -138,7 +138,7 @@ impl AppDelegate {
         let bounds = view.bounds();
         let px = view.convertSizeToBacking(bounds.size);
         self.ivars().surface.set_size(px.width, px.height, window.backingScaleFactor());
-        if let Err(e) = self.ivars().renderer.draw(&self.ivars().surface, [0.10, 0.11, 0.13, 1.0]) {
+        if let Err(e) = self.ivars().renderer.draw_surface(&self.ivars().surface, [0.10, 0.11, 0.13, 1.0]) {
             eprintln!("bateri: kare çizilemedi: {e}");
         }
     }
@@ -231,6 +231,6 @@ kalır.
 - [~] `make test-yaris` — nightly yok ve paylaşılan durum yok (tek thread); hedef `exit 78`
 - [ ] `/simplify` çalıştırıldı, bulgular uygulandı
 - [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi (mercek 1: `cargo tree -p bt-shell` `objc2-metal` içermez; mercek 8: `waitUntilCompleted` sonrası talep yok, boşta sıfır kare)
+- [ ] `/audit` çalıştırıldı, bulgular giderildi (mercek 1: `cargo tree -p bt-shell --depth 1` `objc2-metal` içermez — geçişli olarak `bt-gpu` üzerinden gelir, doğrudan bağımlılık olmamalı; mercek 8: `waitUntilCompleted` sonrası talep yok, boşta sıfır kare)
 - [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
 - [ ] Commit: {hash}

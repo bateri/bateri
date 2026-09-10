@@ -53,7 +53,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 |---|---|---|
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY, OSC (7/8/9/52/133), komut blokları, seçim, ayar modeli, shell bağlamı | **hiçbiri** — Linux'ta derlenir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `core-text`, `core-graphics` |
-| `bt-gpu` | Metal renderer, shader'lar (`.metal`), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2-metal`, `objc2-quartz-core` |
+| `bt-gpu` | Metal renderer, shader'lar (`.metal`), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi | `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
@@ -62,6 +62,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 
 ## Bilinmesi gerekenler
 
+- **Taban macOS 14, tek kaynağı `.cargo/config.toml`'daki
+  `MACOSX_DEPLOYMENT_TARGET`.** rustc binary'nin minos'unu, `bt-gpu/build.rs`
+  shader'ların `-mmacos-version-min`'ini oradan alır; ileride `Info.plist`'in
+  `LSMinimumSystemVersion`'ı da oradan türetilir. Metalterm'in tabanıyla aynı.
 - **Bağımlılık mimari karardır**, kendiliğinden eklenmez. Taban: `alacritty_terminal`
   (VT ayrıştırma + grid; kendi ayrıştırıcımızı yazmıyoruz), `portable-pty`,
   `objc2` ailesi, `core-text`, `toml` + `serde`, `tracing`. `Cargo.lock` depodadır.
@@ -86,7 +90,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **Ölçülmemiş sayı yazılmaz.** Tek sahip `docs/OLCUMLER.md`; ölçüm bir kapı
   değildir, `/measure` ile kullanıcı ister.
 - **Dil:** yorumlar, commit iletileri, belgeler Türkçe ve "neden"i anlatır;
-  UI dizgileri, ayar anahtarları, tema ve materyal adları İngilizce.
+  UI dizgileri, ayar anahtarları, tema ve materyal adları İngilizce. Kod
+  tanımlayıcılarında dışa bakan ad (pub tip, fonksiyon, varyant) İngilizce;
+  yerel yardımcı, `build.rs` ve `Makefile` hedefi Türkçe olabilir.
 
 ## İş akışı
 

@@ -21,6 +21,12 @@ clippy:
 test:
 	$(CARGO) test --workspace
 
+# build.rs'in yaptığını cargo'nun bayatlık takibini atlayarak koşturur;
+# derleme reçetesi burada TEKRARLANMAZ.
+shader:
+	touch $(wildcard crates/bt-gpu/shaders/*.metal)
+	$(CARGO) build -p bt-gpu
+
 # Girdisi henüz olmayan hedefler. Var olurlar ki `proje.md`'nin doğrulama
 # tablosu var olmayan bir hedef adı taşımasın; koşarlarsa "henüz yok" deyip
 # kırmızı düşerler, "geçti" demezler. make reçete hatasını 2 ile döndürür;
@@ -28,8 +34,6 @@ test:
 # satırı sil, proje.md başındaki listeden de çıkar.
 henuz_yok = @echo "henüz yok: $(1)"; exit 1
 
-shader:
-	$(call henuz_yok,001 phase-2 ile gelir (crates/bt-gpu/shaders + build.rs))
 duman:
 	$(call henuz_yok,001 phase-3 ile gelir (bt-shell penceresi + BT_RUN_SECONDS))
 terminfo:

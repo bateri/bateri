@@ -8,12 +8,12 @@ projeye taşırken `.claude/` klasörünü olduğu gibi kopyala ve yalnız bu do
 Proje sözleşmesinin tamamı `CLAUDE.md`'dedir; burada yalnızca **iş akışının
 dokunduğu** kısmı özetlenir.
 
-> Aşağıdaki `make` hedeflerinin bir kısmının girdisi henüz yok: `shader`
-> (001 phase-2), `duman` (001 phase-3), `terminfo` (shell/TERM seti),
-> `test-yaris` (PTY seti, nightly), `kur` (bundle seti). Hedef **var olur**,
-> koşunca "henüz yok" deyip kırmızı düşer — "geçti" demez. O satır
-> tetiklenirse doğrulama "yeşil" değil "koşamadı"dır: `[~]` işaretlenir, phase
-> bitmiş sayılmaz. Hedef gerçek olunca bu listeden silinir.
+> Aşağıdaki `make` hedeflerinin bir kısmının girdisi henüz yok: `duman` (001
+> phase-3), `terminfo` (shell/TERM seti), `test-yaris` (PTY seti, nightly),
+> `kur` (bundle seti). Hedef **var olur**, koşunca "henüz yok" deyip kırmızı
+> düşer — "geçti" demez. O satır tetiklenirse doğrulama "yeşil" değil
+> "koşamadı"dır: `[~]` işaretlenir, phase bitmiş sayılmaz. Hedef gerçek olunca
+> bu listeden silinir.
 
 ## İçindekiler
 
@@ -31,7 +31,7 @@ Bir phase, doğrulama yeşil olmadan bitmiş sayılmaz. Sırayla:
 |---|---|
 | her phase | `make hepsi` (`cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace`) |
 | hızlı iç döngü | `cargo test -p {crate}` |
-| `.metal` ya da `build.rs` değiştiyse | `make shader` — *henüz yok, bkz. üstteki not* — `build.rs` shader hatasını `cargo build`'de zaten yakalar; bu hedef cargo'nun bayatlık takibini atlayan kanaryadır (`touch` + `cargo build -p bt-gpu`), derleme reçetesi yalnız `build.rs`'te |
+| `.metal` ya da `build.rs` değiştiyse | `make shader` — `build.rs` shader hatasını `cargo build`'de zaten yakalar; bu hedef cargo'nun bayatlık takibini atlayan kanaryadır (`touch` + `cargo build -p bt-gpu`), derleme reçetesi yalnız `build.rs`'te |
 | `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz yok, bkz. üstteki not* (`tic -x` ile geçici dizine derleme; SSH'daki uzak makine bunu **alamaz**, bkz. tuzaklar) |
 | PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — *henüz yok, bkz. üstteki not* (`RUSTFLAGS=-Zsanitizer=thread` nightly ister; nightly yoksa `cargo test --workspace -- --test-threads=1` ile karşılaştırmalı koşu ve phase notuna "TSan koşmadı" yaz) |
 | pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — *henüz yok, bkz. üstteki not* — uygulamayı `BT_RUN_SECONDS=3` ile başlatır; süre dolunca **kare sayısına** bakar (0 → çıkış 1); başsız ortamda binary `exit 78` + "ATLANDI" der ve `[~]` işaretlenir |
