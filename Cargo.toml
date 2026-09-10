@@ -19,7 +19,13 @@ license = "MIT"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-metal = "0.3"
-objc2-quartz-core = "0.3"
+# Framework crate'leri varsayılanda her başlığı açar; kullanılanlar sayılır.
+# Üye başına `default-features = false` mirası ezemediği için kırpma burada.
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSGraphics",
+    "NSRunningApplication", "objc2-core-foundation", "objc2-quartz-core",
+] }
 # DispatchData kurucuları `block2` feature'ının arkasında; objc2-metal bunu
 # açmaz. Kullanıcı onaylı bağımlılık kararı: .tasks/001 discussion.md → Karar.
 dispatch2 = { version = "0.3", features = ["block2"] }

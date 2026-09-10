@@ -206,6 +206,53 @@ kalır.
 
 ## Uygulama Notları
 
+- **`define_class!` sözdizimi (objc2 0.6.4):** kılavuz depodaki güncel
+  örneklerin sözdizimini (`struct X { ivar... }`, `Ivars::<Self>`) taşıyordu;
+  0.6.4'te ivar'lar ayrı `pub(crate) struct Ivars` + `#[ivars = Ivars]` ile
+  bildirilir, sınıf `struct AppDelegate;` olur, `DefinedClass` trait'i
+  `ivars()` için import edilir. `Ivars` `pub(crate)` olmak zorunda (makro onu
+  `DefinedClass::Ivars` olarak dışa verir).
+- **Feature kırpma workspace düzeyinde:** üye mirası `default-features = false`'u
+  ezemediği için `objc2-quartz-core` ve `objc2-app-kit` workspace tablosunda
+  kırpıldı, üyeler yalnız feature ekler (`bt-gpu`: CALayer, CAMetalLayer,
+  objc2-metal, objc2-core-foundation; `bt-shell`: CALayer). quartz-core 39 →
+  31 birleşik feature, app-kit 305 → 17. app-kit kırpması dört alt crate'in
+  (`objc2-cloud-kit`, `core-data`, `core-image`, `core-text`) lock'a girmesini
+  engelledi; quartz-core kırpması üçünü (`objc2-core-graphics`, `core-video`,
+  `io-surface`) düşürdü. Lock 16 crate.
+- `NSObjectNSDelayedPerforming` trait'i `performSelector_withObject_afterDelay`
+  için gerekir (`objc2-foundation`, `NSRunLoop` + `NSDate` feature'ları;
+  `bt-shell` bunları açıkça sayar).
+- `setReleasedWhenClosed(false)`: kılavuzda yoktu; pencere kontrolcüsü yok,
+  kapanışta AppKit pencereyi serbest bırakırdı ve `Ivars.window` sarkardı.
+  `windowDidChangeBackingProperties:` de eklendi (ekranlar arası ölçek).
+- `run()` dönmez (kılavuz doğruydu, ilk yazım yanlıştı); `ATLANDI` stdout'a;
+  `make duman` `cargo run` ile (`CARGO_TARGET_DIR`'a saygı, çıkış kodu geçer).
+- `sync_size` ölçeği tek kaynaktan çarpar (`convertSizeToBacking` yerine);
+  `Ivars.view` yok, `contentView()` türetir; `resize_and_draw` → `sync_size` +
+  `draw` (002 resize'da yalnız kirli işaretleyecek).
+- Deadline `NSRunLoopCommonModes`'ta (`/audit` mercek 7: canlı boyutlandırma
+  varsayılan mod zamanlayıcısını erteler); `window.set` `setDelegate`'ten önce
+  (mercek 8: arada düşen bildirim bayat boyutla çizmesin).
+- 002'ye şart (`/audit` mercek 7): duman çıkışı da `stop:`/`terminate:`
+  üzerinden `applicationWillTerminate:`'a uğramalı; PTY çocuğu gelince
+  `process::exit` `Drop`'ları atlar.
+- Reddedilen sadeleştirme önerileri: çıkış politikasını `run()`'a taşımak
+  (`NSApplication::terminate` kod taşımaz, `stop:` + sahte olay gerekir; 002),
+  Aqua kontrolünü `bt-shell`'e `CGSessionCopyCurrentDictionary` ile taşımak
+  (yeni bağımlılık `objc2-core-graphics`, ayrı karar), ikinci `BateriView`
+  sınıfı (R6 tek sınıf; 002'nin klavye/display link işiyle gelir), ilk kareyi
+  `makeKeyAndOrderFront`'tan önce çizmek (doğrulanmamış kazanç).
+- **Görsel kontrol otomatik yapılamadı:** `activate()` macOS 14'te işbirlikçi;
+  pencere öndeki terminalin arkasında açılıyor, `screencapture` onu yakalamadı.
+  Menü çubuğu olmadığı için ⌘Q da çalışmıyor (kapsam dışı, bundle/menü seti).
+  Renk, boyutlandırma ve kapatma kullanıcı gözü bekliyor.
+- Doğrulama: `make duman` → `kare=1 pipeline=ok`, çıkış 0; eksik fonksiyon
+  deneyi → kırmızı (`MissingFunction`); sahte `launchctl` → "ATLANDI", 78;
+  bozuk `BT_RUN_SECONDS` → stderr + 1;
+  `cargo tree -p bt-shell --depth 1` `objc2-metal` içermiyor; `make hepsi` 0.
+- sadakat: makas yok.
+
 ## Yayın Etkisi
 
 - **app bundle**: yok — çıplak binary; `Info.plist` ve `make kur` bundle setinde.
@@ -218,19 +265,20 @@ kalır.
 
 ## Checklist
 
-- [ ] `bt-shell`: `run`, `Options`, `AppDelegate` (tek `define_class!`, iki protokol + `runDeadline:`)
-- [ ] `setLayer` → `setWantsLayer(true)` sırası
-- [ ] `bateri` main: Aqua kontrolü, `BT_RUN_SECONDS`, hata → stderr + 1
-- [ ] Test: `make duman` → stdout `kare=1 pipeline=ok`, çıkış 0; pencere koyu gri, siyah değil (göz)
-- [ ] Test: `quad_fragment` adını `quad.metal`'de geçici olarak değiştir → `make duman` "MissingFunction(quad_fragment)" ile çıkış 1; geri al
-- [ ] Test: pencereyi boyutlandır → bulanıklık yok (drawable boyutu güncelleniyor); kapat → süreç 0 ile biter
-- [ ] Test: `launchctl managername` ≠ Aqua ortamı taklidi (`PATH`'e sahte `launchctl` koyarak) → çıkış 78
-- [ ] `make duman` stub'ı gerçek reçeteyle değiştirildi; `proje.md` listesinden çıkarıldı
-- [ ] Belge paragrafları (bölüm 5) aynı commit'te
-- [ ] Doğrulama geçti (`make hepsi`; koşullu: `make duman`)
-- [~] `make test-yaris` — nightly yok ve paylaşılan durum yok (tek thread); hedef `exit 78`
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi (mercek 1: `cargo tree -p bt-shell --depth 1` `objc2-metal` içermez — geçişli olarak `bt-gpu` üzerinden gelir, doğrudan bağımlılık olmamalı; mercek 8: `waitUntilCompleted` sonrası talep yok, boşta sıfır kare)
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] `bt-shell`: `run`, `Options`, `AppDelegate` (tek `define_class!`, iki protokol + `runDeadline:`)
+- [x] `setLayer` → `setWantsLayer(true)` sırası
+- [x] `bateri` main: Aqua kontrolü, `BT_RUN_SECONDS`, hata → stderr + 1
+- [x] Test: `make duman` → stdout `kare=1 pipeline=ok`, çıkış 0
+- [~] Test: pencere koyu gri, siyah değil (göz) — ekran görüntüsü pencereyi yakalamadı, kullanıcı gözü bekliyor
+- [x] Test: `quad_fragment` adını `quad.metal`'de geçici olarak değiştir → `make duman` kırmızı; geri al
+- [~] Test: pencereyi boyutlandır → bulanıklık yok; kapat → süreç 0 ile biter — etkileşimli, kullanıcı gözü bekliyor
+- [x] Test: `launchctl managername` ≠ Aqua ortamı taklidi (`PATH`'e sahte `launchctl` koyarak) → çıkış 78
+- [x] `make duman` stub'ı gerçek reçeteyle değiştirildi; `proje.md` listesinden çıkarıldı
+- [x] Belge paragrafları (bölüm 5) aynı commit'te
+- [x] Doğrulama geçti (`make hepsi`; koşullu: `make duman`)
+- [~] `make test-yaris` — nightly yok ve paylaşılan durum yok (tek thread); hedef "henüz yok" deyip kırmızı düşer, koşu `[~]`
+- [x] `/simplify` çalıştırıldı, bulgular uygulandı (4 mercek; 6 uygulandı, 4 gerekçeyle reddedildi)
+- [x] `/code-review` çalıştırıldı, 8 bulgu giderildi
+- [x] `/audit` çalıştırıldı — mercek 1, 2, 6, 8 temiz; 7 (run loop modu), 10 (dil kuralı, notlar) giderildi; 3, 4, 5, 9 ilgisiz (mercek 1: `cargo tree -p bt-shell --depth 1` `objc2-metal` içermez — geçişli olarak `bt-gpu` üzerinden gelir, doğrudan bağımlılık olmamalı; mercek 8: `waitUntilCompleted` sonrası talep yok, boşta sıfır kare)
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
 - [ ] Commit: {hash}

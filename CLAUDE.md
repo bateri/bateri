@@ -12,10 +12,10 @@ yüzeyler, fizik tabanlı imleç hareketi ve boşta sıfır kare. Referansın bi
 incelemesinden çıkan mimari, özellik ve ayar envanteri `docs/ARASTIRMA.md`'dedir;
 bir işe başlamadan önce ilgili bölümüne bakılır, sıfırdan keşfedilmez.
 
-Depo **iskelet aşamasındadır**: cargo workspace'i, Makefile'ı ve ilk Metal
-penceresini kurmak ilk iş setinin (`.tasks/001-*`) işidir. Aşağıdaki sözleşme
-o iskelete rehberdir ve kod geldikçe kodla birlikte güncellenir — buradaki bir
-cümle kodla çelişirse ikisinden biri aynı commit'te düzelir.
+İskelet 001 ile kuruldu (workspace, Makefile, shader zinciri, ilk pencere);
+`bt-core` ve `bt-atlas` boştur, VT motoru 002'de gelir. Aşağıdaki sözleşme kod
+geldikçe kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse
+ikisinden biri aynı commit'te düzelir.
 
 ## Komutlar
 
@@ -54,7 +54,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY, OSC (7/8/9/52/133), komut blokları, seçim, ayar modeli, shell bağlamı | **hiçbiri** — Linux'ta derlenir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `core-text`, `core-graphics` |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme) |
-| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi | `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma) |
+| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi | `objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -92,7 +92,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **Dil:** yorumlar, commit iletileri, belgeler Türkçe ve "neden"i anlatır;
   UI dizgileri, ayar anahtarları, tema ve materyal adları İngilizce. Kod
   tanımlayıcılarında dışa bakan ad (pub tip, fonksiyon, varyant) İngilizce;
-  yerel yardımcı, `build.rs` ve `Makefile` hedefi Türkçe olabilir.
+  yerel yardımcı, `build.rs` ve `Makefile` hedefi Türkçe olabilir. Süreç ve
+  tanı çıktısı (stderr iletileri, `make duman` satırları) UI dizgisi değildir,
+  Türkçe kalır; `kare=`/`pipeline=ok`/`ATLANDI` gibi anahtar-değer jetonları
+  makine sözleşmesidir ve değişmez.
 
 ## İş akışı
 

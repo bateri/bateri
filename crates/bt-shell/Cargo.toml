@@ -7,3 +7,11 @@ license.workspace = true
 
 [dependencies]
 bt-gpu = { workspace = true }
+objc2 = { workspace = true }
+# performSelector:withObject:afterDelay: NSRunLoop + NSDate ister; varsayılan
+# set bugün açık, kırpılırsa bu satır onu korur.
+objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate"] }
+objc2-app-kit = { workspace = true }
+# Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
+# Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.
+objc2-quartz-core = { workspace = true, features = ["CALayer"] }
