@@ -9,6 +9,8 @@ using namespace metal;
 struct Instance {
     float2 pos;   // sol üst köşe, piksel
     float2 size;  // genişlik/yükseklik, piksel
+    // Lineer RGBA: hedef BGRA8Unorm_sRGB ve kodlamayı ROP yapıyor. Buraya
+    // ya da fragment'e bir gamma düzeltmesi eklemek paleti İKİ KEZ kodlar.
     float4 rgba;
 };
 

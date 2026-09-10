@@ -80,6 +80,14 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   (alacritty'de `CellExtra`). Bugünkü sabit **24 bayt**: alacritty `Cell`'i
   (Metalterm 20'de tuttu). Assert `bt-core/src/lib.rs`'tedir; kendi hücremize
   geçiş `Session::frame()` sınırının arkasında yapılır ve renderer'ı değiştirmez.
+- **Renk uzayı sınırı geçer.** Çizim hedefi `BGRA8Unorm_sRGB`: donanım
+  fragment çıktısını **lineer** sayar ve yazarken sRGB'ye kodlar. Bu yüzden
+  `bt-core` sınırdan lineer float verir (`color::lineer_rgba`) ve `MTLClearColor`
+  da aynı kaynaktan beslenir — pencere zemini ile hücreler tek yerden düzelir.
+  İkisi **birlikte** değişir; biri lineerleşmeden ötekine geçilirse palet
+  `0x1a1c21`'den `0x5a5d65` griye açılır ve belirti sessizdir. Gören tek bekçi
+  `cell_bg_pikseli_gpu_tarafinda_boyar` ve ancak **ara ton** bir renkle görür:
+  `0.0` ve `1.0` sRGB transfer fonksiyonunun sabit noktalarıdır.
 - **Boşta sıfır kare.** Kirli satır yoksa frame gönderilmez. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
   animasyonu 90 ms'lik solmaya indirir.

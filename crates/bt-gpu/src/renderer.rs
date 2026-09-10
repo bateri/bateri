@@ -46,9 +46,6 @@ pub struct Renderer {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     /// Hücre arka planlarını ve imleci çizen tek pipeline; instanced quad.
     cell_bg: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    /// Pipeline bu formata derlendi; `surface()` layer'ı aynı formatta kurar,
-    /// ikisinin ayrışması yapısal olarak imkânsız kalsın.
-    pixel_format: MTLPixelFormat,
     /// Son **gönderilen** karedeki arka plan hücresi sayısı; `make duman`'ın
     /// `hucre=K` jetonu. `frames`'in yanında duruyor çünkü ikisi de aynı
     /// soruya bakan tanı sayaçları ve tek yerden okunmaları gerekiyor.
@@ -64,20 +61,27 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// Çizim hedefinin piksel formatı — **tek kaynak**.
+    ///
+    /// `_sRGB`: fragment çıktısı **lineer** sayılır ve donanım yazarken
+    /// kodlar, yani alfa karıştırma lineer uzayda koşar (glyph'in tek sebebi
+    /// bu). Karşılığı `bt_core::color::lineer_rgba`; ikisi birlikte değişir —
+    /// biri lineerleşmeden ötekine geçilirse palet griye açılır.
+    ///
+    /// Alan değil `const`: kurucusu tek ve koşulsuz atıyordu, yani örnek
+    /// başına saklanan türetilebilir durumdu. `const` olunca değer bir
+    /// `Renderer` olmadan da okunabiliyor ve "lineer palet + sRGB olmayan
+    /// hedef" temsil edilebilir bir durum olmaktan çıkıyor: ikinci bir
+    /// renderer'a (offscreen, ekran görüntüsü) düz `BGRA8Unorm` geçen kişi
+    /// gürültülü bir Metal istisnası değil **sessizce yanlış renk** alırdı.
+    pub(crate) const PIXEL_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm_sRGB;
+
     /// Sistem varsayılan device ile; bt-shell yalnız bunu çağırır ve
     /// `objc2-metal`'i hiç görmez.
+    ///
+    /// Piksel formatı parametre değil, [`Renderer::PIXEL_FORMAT`].
     pub fn system_default() -> Result<Self, GpuError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(GpuError::NoDevice)?;
-        Self::new(device, MTLPixelFormat::BGRA8Unorm)
-    }
-
-    /// Pixel format doğrulanmaz: layer ya da pipeline'ın reddettiği bir format
-    /// ObjC istisnasıyla süreci düşürür, `GpuError` dönmez. Bu yüzden crate-içi;
-    /// dış dünya `system_default` ile `BGRA8Unorm` alır.
-    pub(crate) fn new(
-        device: Retained<ProtocolObject<dyn MTLDevice>>,
-        pixel_format: MTLPixelFormat,
-    ) -> Result<Self, GpuError> {
         // `include_bytes!` 'static verir; kopyasız kurucu doğru olan.
         let data = DispatchData::from_static_bytes(METALLIB);
         let library = device
@@ -94,7 +98,8 @@ impl Renderer {
         desc.setVertexFunction(Some(&vs));
         desc.setFragmentFunction(Some(&fs));
         // SAFETY: indeks 0 her render pipeline'da vardır.
-        unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) }.setPixelFormat(pixel_format);
+        unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) }
+            .setPixelFormat(Self::PIXEL_FORMAT);
         let cell_bg = device
             .newRenderPipelineStateWithDescriptor_error(&desc)
             .map_err(GpuError::Pipeline)?;
@@ -104,14 +109,13 @@ impl Renderer {
             device,
             queue,
             cell_bg,
-            pixel_format,
             last_bg_count: AtomicUsize::new(0),
             frames: Arc::new(AtomicU64::new(0)),
         })
     }
 
     pub fn surface(&self) -> Surface {
-        Surface::new(&self.device, self.pixel_format)
+        Surface::new(&self.device, Self::PIXEL_FORMAT)
     }
 
     /// GPU'nun hatasız bitirdiği kare sayısı. Anlamın sahibi artık
@@ -312,13 +316,14 @@ mod tests {
 
     /// Sınama için küçük bir offscreen render hedefi; `Shared` depolama
     /// `getBytes` ile CPU'dan okumaya izin verir.
-    fn hedef_doku(
-        device: &ProtocolObject<dyn MTLDevice>,
-        kenar: usize,
-    ) -> Retained<ProtocolObject<dyn MTLTexture>> {
+    fn hedef_doku(r: &Renderer, kenar: usize) -> Retained<ProtocolObject<dyn MTLTexture>> {
         let desc = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                MTLPixelFormat::BGRA8Unorm,
+                // Formatı `Renderer`'dan: pipeline hangi formata derlendiyse
+                // hedef de o. Elle yazılsaydı sRGB geçişi burada assert'le
+                // değil Metal doğrulama istisnasıyla düşerdi — ve istisna
+                // sınamanın ne aradığını hiç söylemez.
+                Renderer::PIXEL_FORMAT,
                 kenar,
                 kenar,
                 false,
@@ -326,7 +331,7 @@ mod tests {
         };
         desc.setUsage(MTLTextureUsage::RenderTarget);
         desc.setStorageMode(MTLStorageMode::Shared);
-        device
+        r.device
             .newTextureWithDescriptor(&desc)
             .expect("offscreen doku")
     }
@@ -369,13 +374,18 @@ mod tests {
         // burası çalıştırıyor. Pencere gerekmediği için başsız ortamda da koşar.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         const KENAR: usize = 16;
-        let texture = hedef_doku(&r.device, KENAR);
+        let texture = hedef_doku(&r, KENAR);
 
         // 8×8 hücre, viewport 16×16 → dört çeyrek. Sol üstte kırmızı, sağ
-        // altta yeşil, sağ üst boş. İki instance şart: tek instance `inst[0]`
-        // stride'dan bağımsız okunur, yani stride hatası (32'den kayma) tek
-        // instance'la GÖRÜNMEZ. İkincisi ancak doğru stride ile bulunur.
-        // y ters çevirme bozuksa kırmızı ile yeşil yer değiştirir.
+        // altta yeşil, sol altta paletin arka planı, sağ üst boş. İki instance
+        // şart: tek instance `inst[0]` stride'dan bağımsız okunur, yani stride
+        // hatası (32'den kayma) tek instance'la GÖRÜNMEZ. İkincisi ancak doğru
+        // stride ile bulunur. y ters çevirme bozuksa kırmızı ile yeşil yer
+        // değiştirir.
+        //
+        // Üçüncüsü **ara ton** ve sRGB geçişinin tek bekçisi: saf 0.0/1.0
+        // sRGB transfer fonksiyonunun sabit noktaları, yani kırmızı ve yeşil
+        // lineerleştirme olsa da olmasa da aynı baytı verir.
         let mut frame = Frame::default();
         frame.clear((8, 8));
         frame.push_bg(CellBg {
@@ -388,9 +398,26 @@ mod tests {
             row: 1,
             rgba: [0.0, 1.0, 0.0, 1.0],
         });
+        frame.push_bg(CellBg {
+            col: 0,
+            row: 1,
+            rgba: bt_core::DEFAULT_BG,
+        });
 
+        // Clear rengi de **ara ton**, ve bilerek paletten: üretimde pencerenin
+        // görünen zemininin tamamı bu yoldan geliyor (`frame()` varsayılan
+        // arka planlı hücreleri eliyor, `link.rs` clear'a `DEFAULT_BG` veriyor).
+        // Saf mavi bırakılsaydı `MTLClearColor`'ın sRGB hedefteki semantiği
+        // sınanmamış kalırdı: onu "hedefin uzayına çevireyim" diye bir kez
+        // daha kodlayan biri pencere zeminini karartır, hücreleri doğru
+        // bırakır ve bütün sınamalar yeşil geçerdi.
+        //
+        // Clear **`DEFAULT_CURSOR`**, `DEFAULT_BG` değil: `DEFAULT_BG` hücrede
+        // kullanıldı ve iki yolun ayrı ayrı kanıtlanması ayrık iki renk ister.
+        // Buraya `DEFAULT_BG` "düzeltilirse" sınama hücre yolu ile clear
+        // yolunu birbirinden ayırt edemez hâle gelir.
         let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        r.encode_pass(&cmd, &texture, [0.0, 0.0, 1.0, 1.0], &frame)
+        r.encode_pass(&cmd, &texture, bt_core::DEFAULT_CURSOR, &frame)
             .expect("pass encode edilemedi");
         cmd.commit();
         cmd.waitUntilCompleted();
@@ -415,13 +442,34 @@ mod tests {
             );
         }
 
-        // BGRA8Unorm: bayt sırası B, G, R, A.
+        // Bayt sırası B, G, R, A (formatın `_sRGB` eki sırayı değiştirmez).
         let piksel = |x: usize, y: usize| {
             let i = (y * KENAR + x) * 4;
             (pikseller[i + 2], pikseller[i + 1], pikseller[i])
         };
         assert_eq!(piksel(2, 2), (255, 0, 0), "ilk hücre sol üstte kırmızı");
         assert_eq!(piksel(12, 12), (0, 255, 0), "ikinci hücre sağ altta yeşil");
-        assert_eq!(piksel(12, 2), (0, 0, 255), "boş çeyrek clear rengi kalmalı");
+        // Paletin baytları burada elle yazılı (`BG` ve `CURSOR` `bt-core`'da
+        // private). Tema modeli geldiğinde bu üçlüler onunla birlikte
+        // güncellenir; bugün onları kaynağa bağlayacak bir `pub` yol yok.
+        let yakin = |gorulen: (u8, u8, u8), beklenen: (u8, u8, u8), ne: &str| {
+            // ±1: 8-bit sRGB kodlaması yuvarlama taşır ve Metal spec'i bit
+            // birebirlik değil doğruluk sınırı verir. Bit aransaydı kapı
+            // sürücü sürümüne rehin olurdu.
+            assert!(
+                gorulen.0.abs_diff(beklenen.0) <= 1
+                    && gorulen.1.abs_diff(beklenen.1) <= 1
+                    && gorulen.2.abs_diff(beklenen.2) <= 1,
+                "{ne}: {gorulen:02x?} ≠ {beklenen:02x?}"
+            );
+        };
+        // sRGB round-trip: `lineer_rgba`'nın lineerleştirmesi ile donanımın
+        // yazarken yaptığı kodlama birbirini tersine çevirmeli, yani ekrana
+        // giden bayt paletin yazıldığı bayt olmalı. Lineerleştirme düşerse
+        // `0x1a1c21` `0x5a5d65` griye açılır — geçişin sessiz kalabileceği
+        // tek yer burasıydı; saf kırmızı ve yeşil bunu göremez, ikisi de
+        // sRGB transfer fonksiyonunun sabit noktaları.
+        yakin(piksel(2, 12), (0x1a, 0x1c, 0x21), "hücre ara tonu");
+        yakin(piksel(12, 2), (0x7a, 0x9c, 0xc6), "boş çeyrek clear rengi");
     }
 }

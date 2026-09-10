@@ -1,5 +1,10 @@
 # Glyph ve atlas — Bağlam
 
+> **Not (phase-1 sonrası):** bu dosya setin **başlangıç** anlık görüntüsüdür ve
+> öyle kalır. Aşağıdaki "yüzey `BGRA8Unorm` — sRGB değil" tespiti phase-1 ile
+> kapandı: yüzey `BGRA8Unorm_sRGB`, palet lineerleştirildi. Güncel durumun
+> sahibi `plan.md → ## Durum` ve `phase-1.md → Uygulama Notları`.
+
 ## Mevcut Durum
 
 002 pencereye gerçek bir shell getirdi ama **harf çizmiyor**. Zincir uçtan uca
