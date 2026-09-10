@@ -3,6 +3,7 @@
 
 use std::cell::OnceCell;
 
+use bt_core::DEFAULT_BG;
 use bt_gpu::{Renderer, Surface};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -17,9 +18,6 @@ use objc2_foundation::{
 };
 
 use crate::Options;
-
-/// Geçici arka plan; tema modeli sonraki setlerde.
-const ARKA_PLAN: [f32; 4] = [0.10, 0.11, 0.13, 1.0];
 
 /// Delegate'in durumu. `OnceCell`: pencere `applicationDidFinishLaunching`
 /// içinde bir kez doğar, sonra yalnız okunur; view `contentView()` ile türetilir.
@@ -177,7 +175,7 @@ impl AppDelegate {
         if let Err(e) = self
             .ivars()
             .renderer
-            .draw_surface(&self.ivars().surface, ARKA_PLAN)
+            .draw_surface(&self.ivars().surface, DEFAULT_BG)
         {
             eprintln!("bateri: kare çizilemedi: {e}");
         }

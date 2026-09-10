@@ -27,7 +27,7 @@ make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; süre dolunca kare sayısına bakar, 0 → kırmızı
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
-make test-yaris   # ThreadSanitizer ile test (nightly ister)
+make test-yaris   # yarış stresi: yaris_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler ve bateri.app paketini target/ altına kurar
 ```
 
@@ -47,11 +47,12 @@ Katmanlar tek yönlüdür; **hiçbir bağımlılık yukarı doğru gitmez**:
 
 ```
 bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
+                   └──────────────────────→ bt-core
 ```
 
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
-| `bt-core` | VT durum makinesi, grid ve scrollback, PTY, OSC (7/8/9/52/133), komut blokları, seçim, ayar modeli, shell bağlamı | **hiçbiri** — Linux'ta derlenir |
+| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52), komut blokları, seçim, ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek (00X) | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `core-text`, `core-graphics` |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi | `objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma) |
@@ -66,12 +67,16 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   `MACOSX_DEPLOYMENT_TARGET`.** rustc binary'nin minos'unu, `bt-gpu/build.rs`
   shader'ların `-mmacos-version-min`'ini oradan alır; ileride `Info.plist`'in
   `LSMinimumSystemVersion`'ı da oradan türetilir. Metalterm'in tabanıyla aynı.
-- **Bağımlılık mimari karardır**, kendiliğinden eklenmez. Taban: `alacritty_terminal`
-  (VT ayrıştırma + grid; kendi ayrıştırıcımızı yazmıyoruz), `portable-pty`,
-  `objc2` ailesi, `core-text`, `toml` + `serde`, `tracing`. `Cargo.lock` depodadır.
+- **Bağımlılık mimari karardır**, kendiliğinden eklenmez. Taban:
+  `alacritty_terminal` (VT ayrıştırma, grid, PTY ve okuyucu thread; kendi
+  ayrıştırıcımızı yazmıyoruz — `bt-core` onu **kapsüller**, `pub` API'de
+  alacritty tipi görünmez), `objc2` ailesi, `core-text`, `toml` + `serde`,
+  `tracing`. `Cargo.lock` depodadır.
 - **Hücre sabit boyuttadır** ve `const` assert ile bağlanır; emoji, grapheme
-  kümeleri ve alt çizgi rengi gibi seyrek veriler yan tablolarda yaşar. Metalterm
-  20 baytta tuttu; hedefimiz 16, 002 ölçer ve sabitler.
+  kümeleri ve alt çizgi rengi gibi seyrek veriler yan tablolarda yaşar
+  (alacritty'de `CellExtra`). Bugünkü sabit **24 bayt**: alacritty `Cell`'i
+  (Metalterm 20'de tuttu). Assert `bt-core/src/lib.rs`'tedir; kendi hücremize
+  geçiş `Session::frame()` sınırının arkasında yapılır ve renderer'ı değiştirmez.
 - **Boşta sıfır kare.** Kirli satır yoksa frame gönderilmez. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
   animasyonu 90 ms'lik solmaya indirir.
@@ -79,6 +84,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   çağrıları `MainThreadMarker` ile ana thread'de; renderer `CAMetalDisplayLink`
   ile sürülür.
 - **PTY ve ayrıştırma yolunda panik yok.** Bilinmeyen dizi yoksayılır, loglanır.
+- **`tty::setup_env()` çağrılmaz.** O, *kendi* sürecimizin ortamını `set_var`
+  ile değiştirir ve makinede alacritty kuruluysa `TERM=alacritty` yazar.
+  Çocuğun ortamı `tty::Options.env` ile verilir: `TERM=xterm-256color`,
+  `COLORTERM=truecolor`. Buna karşılık alacritty `ALACRITTY_WINDOW_ID` ve
+  `WINDOWID`'yi koşulsuz yazar ve kapatılamaz — shell'de görünürler.
 - **Tema = sekiz rol:** arka plan, ön plan, dim, accent ve dört durum. Materyal
   yüzey (grain, sheen) bunun üstüne ayrı bir katmandır ve `substrate` shader'ı
   çizer. Palet dosyaları `~/.config/bateri/themes/*.toml`.

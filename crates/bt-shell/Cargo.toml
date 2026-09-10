@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 bt-gpu = { workspace = true }
+# Doğrudan kenar (aşağı yönlü, katman düzenine uygun): varsayılan arka plan
+# rengi `bt-core`'un paletinde tek sahiplidir. 002 phase-3 Session için zaten
+# ekliyordu; renk iki yerde durmasın diye phase-1'de eklendi.
+bt-core = { workspace = true }
 objc2 = { workspace = true }
 # performSelector:withObject:afterDelay: NSRunLoop + NSDate ister; varsayılan
 # set bugün açık, kırpılırsa bu satır onu korur.

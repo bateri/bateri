@@ -9,7 +9,7 @@ Proje sözleşmesinin tamamı `CLAUDE.md`'dedir; burada yalnızca **iş akışı
 dokunduğu** kısmı özetlenir.
 
 > Aşağıdaki `make` hedeflerinin bir kısmının girdisi henüz yok: `terminfo`
-> (shell/TERM seti), `test-yaris` (PTY seti, nightly), `kur` (bundle seti).
+> (shell/TERM seti), `kur` (bundle seti).
 > Hedef **var olur**, koşunca "henüz yok" deyip kırmızı düşer — "geçti" demez.
 > O satır tetiklenirse doğrulama "yeşil" değil "koşamadı"dır: `[~]`
 > işaretlenir, phase bitmiş sayılmaz. Hedef gerçek olunca bu listeden silinir.
@@ -32,7 +32,7 @@ Bir phase, doğrulama yeşil olmadan bitmiş sayılmaz. Sırayla:
 | hızlı iç döngü | `cargo test -p {crate}` |
 | `.metal` ya da `build.rs` değiştiyse | `make shader` — `build.rs` shader hatasını `cargo build`'de zaten yakalar; bu hedef cargo'nun bayatlık takibini atlayan kanaryadır (`touch` + `cargo build -p bt-gpu`), derleme reçetesi yalnız `build.rs`'te |
 | `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz yok, bkz. üstteki not* (`tic -x` ile geçici dizine derleme; SSH'daki uzak makine bunu **alamaz**, bkz. tuzaklar) |
-| PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — *henüz yok, bkz. üstteki not* (`RUSTFLAGS=-Zsanitizer=thread` nightly ister; nightly yoksa `cargo test --workspace -- --test-threads=1` ile karşılaştırmalı koşu ve phase notuna "TSan koşmadı" yaz) |
+| PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — iki zamanlama profili — yalnız `yaris_*` stresi (`--ignored yaris_`), sonra ignore'lular **dahil** bütün takım tek thread'de (`--include-ignored --test-threads=1`); ikisi de geçmeli. ThreadSanitizer nightly ister ve araç zinciri pin'li değil (`rustup` yok): TSan satırı nightly gelince Makefile'a eklenir, o güne kadar "TSan koşmadı" bir waive değil, bilinen sınırdır |
 | pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — uygulamayı `BT_RUN_SECONDS=3` ile başlatır; süre dolunca **kare sayısına** bakar (0 → çıkış 1; kare > 0 "pipeline çalıştı" demektir, pencerenin görünür ve doğru olduğunu kanıtlamaz — bundle'sız süreç öne çıkma hakkı taşımaz); başsız ortamda binary `exit 78` + "ATLANDI" der ve `[~]` işaretlenir |
 
 **Türetilmiş dosya yoktur.** `default.metallib` `build.rs` üretir ve `target/`
