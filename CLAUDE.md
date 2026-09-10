@@ -12,8 +12,9 @@ yüzeyler, fizik tabanlı imleç hareketi ve boşta sıfır kare. Referansın bi
 incelemesinden çıkan mimari, özellik ve ayar envanteri `docs/ARASTIRMA.md`'dedir;
 bir işe başlamadan önce ilgili bölümüne bakılır, sıfırdan keşfedilmez.
 
-İskelet 001 ile kuruldu (workspace, Makefile, shader zinciri, ilk pencere);
-`bt-core` ve `bt-atlas` boştur, VT motoru 002'de gelir. Aşağıdaki sözleşme kod
+İskelet 001 ile kuruldu (workspace, Makefile, shader zinciri, ilk pencere),
+VT motoru 002 ile: `bt-core` shell'i çalıştırır, `bt-gpu` hücre arka planlarını
+çizer. `bt-atlas` hâlâ boş — glyph 003'te. Aşağıdaki sözleşme kod
 geldikçe kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse
 ikisinden biri aynı commit'te düzelir.
 
@@ -25,7 +26,7 @@ make fmt          # cargo fmt --all -- --check
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
-make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; süre dolunca kare sayısına bakar, 0 → kırmızı
+make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare ve çizilen arka plan hücresi sayar: kare=N hucre=K pipeline=ok, biri 0 → kırmızı
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: yaris_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler ve bateri.app paketini target/ altına kurar
@@ -54,7 +55,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 |---|---|---|
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52), komut blokları, seçim, ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek (00X) | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `core-text`, `core-graphics` |
-| `bt-gpu` | Metal renderer, shader'lar (`.metal`), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme) |
+| `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi | `objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
@@ -107,8 +108,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   tanımlayıcılarında dışa bakan ad (pub tip, fonksiyon, varyant) İngilizce;
   yerel yardımcı, `build.rs` ve `Makefile` hedefi Türkçe olabilir. Süreç ve
   tanı çıktısı (stderr iletileri, `make duman` satırları) UI dizgisi değildir,
-  Türkçe kalır; `kare=`/`pipeline=ok`/`ATLANDI` gibi anahtar-değer jetonları
-  makine sözleşmesidir ve değişmez.
+  Türkçe kalır; `kare=`/`hucre=`/`pipeline=ok`/`ATLANDI` gibi anahtar-değer
+  jetonları makine sözleşmesidir: **silinmez, eklenir** — okuyan taraf
+  tanımadığı jetonu atlayabilir, kaybolanı arayamaz.
 
 ## İş akışı
 

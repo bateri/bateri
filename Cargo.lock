@@ -90,6 +90,7 @@ dependencies = [
 name = "bt-gpu"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "bt-atlas",
  "bt-core",
  "dispatch2",

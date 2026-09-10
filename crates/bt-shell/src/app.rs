@@ -1,16 +1,18 @@
-//! Uygulama delegate'i: pencereyi açar, CAMetalLayer'ı view'a takar, ilk
-//! kareyi çizer, boyut değişince yeniden çizer. Tek ObjC sınıfı.
+//! Uygulama delegate'i: pencereyi açar, `CAMetalLayer`'ı view'a takar,
+//! shell oturumunu başlatır ve kareyi süren display link'i bağlar. Tek ObjC
+//! sınıfı; çizim çağrısı burada **yok**, bu dosyanın işi bağlamak.
 
 use std::cell::OnceCell;
+use std::sync::{Arc, OnceLock};
 
-use bt_core::DEFAULT_BG;
-use bt_gpu::{Frame, Renderer, Surface};
+use bt_core::{Session, SessionOptions, Wake, smoke_shell};
+use bt_gpu::{DisplayLink, Renderer, Surface, Waker};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBackingStoreType, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSWindowOcclusionState, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
@@ -19,12 +21,60 @@ use objc2_foundation::{
 
 use crate::Options;
 
-/// Delegate'in durumu. `OnceCell`: pencere `applicationDidFinishLaunching`
-/// içinde bir kez doğar, sonra yalnız okunur; view `contentView()` ile türetilir.
+/// Hücrenin @1x piksel boyutu. Gerçek font metriği `bt-atlas` ile (003)
+/// gelene kadar yer tutucu: grid ölçüsü ve PTY'ye giden `TIOCSWINSZ` bundan
+/// türer, yani sayı yanlışsa yalnız hücreler yanlış boyutta olur — akış
+/// doğru kalır.
+const CELL_PX: (f64, f64) = (9.0, 18.0);
+
+/// Kaydırma geçmişi satır sayısı; ayar dosyası (00X) gelene kadar sabit.
+const SCROLLBACK: usize = 10_000;
+
+/// Pencere geometrisinden türeyen grid ölçüsü.
+#[derive(Clone, Copy)]
+struct Metrics {
+    cols: u16,
+    rows: u16,
+    cell_px: (u16, u16),
+}
+
+/// `bt-core`'un uyandırma ucu.
+///
+/// `Session::spawn` `Wake`'i link'ten **önce** ister, `Waker` ise link'ten
+/// sonra doğar; boşluğu `OnceLock` kapatır. Kaçan kare yok: açılış karesi
+/// zaten elle isteniyor ve o ana kadar okunmuş her bayt hasar bayrağında
+/// birikmiş olur.
+struct ShellWake {
+    waker: OnceLock<Waker>,
+}
+
+impl Wake for ShellWake {
+    fn wake(&self) {
+        // Okuyucu thread; `Term` kilidi tutuluyor olabilir. Tek iş: ana
+        // kuyruğa "link'i aç" işini at, hemen dön.
+        if let Some(waker) = self.waker.get() {
+            waker.wake();
+        }
+    }
+
+    fn child_exit(&self, _code: Option<i32>) {
+        // Shell'in son çıktısı ekrana gelsin diye **gerçekten** bir kare
+        // isteniyor: `Waker::wake` hasar bayrağını da dikiyor. Yalnız link'i
+        // açsaydı callback "hasar yok" bulup anında geri uyurdu — `ChildExit`
+        // bayrak dikmez, onu yalnız `Wakeup` yapar. Uygulamayı sonlandırmak
+        // phase-4'ün işi (R6).
+        self.wake();
+    }
+}
+
+/// Delegate'in durumu. `OnceCell`: pencere, oturum ve link
+/// `applicationDidFinishLaunching` içinde bir kez doğar, sonra yalnız okunur.
 pub(crate) struct Ivars {
-    renderer: Renderer,
+    renderer: Arc<Renderer>,
     surface: Surface,
     window: OnceCell<Retained<NSWindow>>,
+    link: OnceCell<DisplayLink>,
+    wake: Arc<ShellWake>,
     run_seconds: Option<u64>,
 }
 
@@ -70,7 +120,7 @@ define_class!(
             window.setContentView(Some(&view));
             window.setTitle(ns_string!("bateri"));
             // Delegate bağlanmadan önce ivar dolu olsun: arada düşen bir
-            // pencere bildirimi `sync_size`'ı boş bulup bayat boyutla çizmesin.
+            // pencere bildirimi geometriyi boş bulup bayat boyutla çizmesin.
             // OnceCell doluysa didFinishLaunching ikinci kez geldi demek; AppKit
             // bunu yapmaz, yapsaydı ilk pencere kalırdı.
             let _ = self.ivars().window.set(window.clone());
@@ -78,8 +128,17 @@ define_class!(
             window.center();
             window.makeKeyAndOrderFront(None);
             NSApplication::sharedApplication(mtm).activate();
-            self.sync_size();
-            self.draw();
+
+            // Grid ölçüsü pencereden türer; oturum ilk boyutuyla doğsun ki
+            // shell açılışta doğru `TIOCSWINSZ` görsün.
+            // audit: pencere ve contentView hemen yukarıda kuruldu; `None`
+            // dönmesi programlama hatası olurdu ve yedek bir ölçü uydurmak
+            // `CELL_PX`'in ikinci bir kopyasını doğururdu.
+            let metrics = self
+                .geometriyi_esitle()
+                .expect("pencere ve contentView kuruldu");
+            self.baglat(mtm, metrics);
+
             if let Some(s) = self.ivars().run_seconds {
                 // block2 yok: zamanlayıcı performSelector ile.
                 // SAFETY: `runDeadline:` bu sınıfta tanımlı ve tek
@@ -108,17 +167,37 @@ define_class!(
     unsafe impl NSWindowDelegate for AppDelegate {
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _n: &NSNotification) {
-            // phase-3'te burası yalnız kirli işaretler; kareyi display link sürer.
-            self.sync_size();
-            self.draw();
+            self.geometri_degisti();
         }
 
         // Ekranlar arası taşımada boyut (nokta) değişmez ama ölçek değişir;
         // layer-hosting view'da bunu bizden başka kimse yazmaz.
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, _n: &NSNotification) {
-            self.sync_size();
-            self.draw();
+            self.geometri_degisti();
+        }
+
+        // Görünürlük yolu: compositor, örtülü ya da simge durumundaki bir
+        // pencerenin layer içeriğini atabilir. Grid değişmediği için hiçbir
+        // hasar bayrağı dikilmez ve link uyumaya devam eder — geri dönen
+        // pencere boş kalır.
+        //
+        // Tek kanca yetiyor: simge durumu da örtülme de `occlusionState`'i
+        // düşürür, yani `windowDidDeminiaturize:` bunun altkümesi olurdu.
+        // Genel sinyalin üstüne özel durum dizmek, listenin hiç kapanmaması
+        // demek (tam ekran, Space, `unhide`, ekran uyanması...).
+        #[unsafe(method(windowDidChangeOcclusionState:))]
+        fn window_did_change_occlusion(&self, _n: &NSNotification) {
+            // Bildirim iki yönde de gelir; örtülmeye GİDERKEN kare istemek
+            // kimsenin görmeyeceği bir kare çizmek olurdu.
+            let gorunur = self.ivars().window.get().is_some_and(|window| {
+                window
+                    .occlusionState()
+                    .contains(NSWindowOcclusionState::Visible)
+            });
+            if let Some(link) = self.ivars().link.get() {
+                link.set_visible(gorunur);
+            }
         }
     }
 
@@ -126,12 +205,21 @@ define_class!(
         #[unsafe(method(runDeadline:))]
         fn run_deadline(&self, _arg: Option<&AnyObject>) {
             let n = self.ivars().renderer.frames();
-            if n > 0 {
-                println!("kare={n} pipeline=ok");
+            let k = self.ivars().renderer.last_bg_count();
+            // İki jeton iki ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
+            // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi. Biri
+            // sıfırken diğeri yeşil geçemez — kare>0 & hucre=0 "pencere var,
+            // shell çıktısı yok" demektir ve tam da kaçırmak istemediğimiz şey.
+            if n > 0 && k > 0 {
+                println!("kare={n} hucre={k} pipeline=ok");
                 std::process::exit(0);
             }
+            // Jetonlar (`kare=`, `hucre=`) **yalnız** başarı satırında ve
+            // yalnız stdout'ta: makine sözleşmesi o. Hata satırı aynı sayıları
+            // taşıyor ama jeton biçiminde değil, yoksa `kare=` arayan bir CI
+            // adımı düşen koşudan kare sayısı okurdu.
             eprintln!(
-                "bateri: {} saniyede hiç kare çizilmedi",
+                "bateri: {} saniyede çizilen kare {n}, üretilen hücre {k} (ikisi de >0 olmalı)",
                 self.ivars().run_seconds.unwrap_or(0)
             );
             std::process::exit(1);
@@ -140,46 +228,108 @@ define_class!(
 );
 
 impl AppDelegate {
-    pub(crate) fn new(mtm: MainThreadMarker, renderer: Renderer, opts: Options) -> Retained<Self> {
+    pub(crate) fn new(
+        mtm: MainThreadMarker,
+        renderer: Arc<Renderer>,
+        opts: Options,
+    ) -> Retained<Self> {
         let surface = renderer.surface();
         let this = Self::alloc(mtm).set_ivars(Ivars {
             renderer,
             surface,
             window: OnceCell::new(),
+            link: OnceCell::new(),
+            wake: Arc::new(ShellWake {
+                waker: OnceLock::new(),
+            }),
             run_seconds: opts.run_seconds,
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Layer'ın drawable boyutunu view'ın backing geometrisiyle eşle. Ölçek tek
-    /// kaynaktan okunur ve piksel boyutu ondan çarpılır; `drawableSize` ile
-    /// `contentsScale` ayrışırsa bulanıklık olur.
-    fn sync_size(&self) {
-        let Some(window) = self.ivars().window.get() else {
-            return;
+    /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
+    /// `Wake`'i ister, link `Session`'ı ister, `Waker` link'ten doğar.
+    fn baglat(&self, mtm: MainThreadMarker, metrics: Metrics) {
+        let session = Session::spawn(
+            SessionOptions {
+                // Duman koşusunda shell sabit: sonuç kullanıcının `$SHELL`'ine
+                // ve rc dosyasına bağlı olmasın. Betiğin sahibi `bt-core` ve
+                // sekiz hücre verdiği orada sınanıyor — `hucre=8` beklentisi
+                // bu yüzden bir belge cümlesi değil, sınanmış bir iddia.
+                command: self.ivars().run_seconds.map(|_| smoke_shell()),
+                cols: metrics.cols,
+                rows: metrics.rows,
+                cell_px: metrics.cell_px,
+                scrollback: SCROLLBACK,
+            },
+            Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
+        );
+        let session = match session {
+            Ok(session) => Arc::new(session),
+            // `didFinishLaunching` hata döndüremez ve shell'siz bir terminal
+            // penceresi boş bir kutudur: sessizce açık kalmaktansa çık.
+            Err(e) => {
+                eprintln!("bateri: shell başlatılamadı: {e}");
+                std::process::exit(1);
+            }
         };
-        let Some(view) = window.contentView() else {
-            return;
-        };
-        let scale = window.backingScaleFactor();
-        let bounds = view.bounds().size;
-        self.ivars()
-            .surface
-            .set_size(bounds.width * scale, bounds.height * scale, scale);
+        let link = DisplayLink::new(
+            mtm,
+            &self.ivars().surface,
+            Arc::clone(&self.ivars().renderer),
+            session,
+            metrics.cell_px,
+        );
+        // Uyandırma yolu kapanmadan kare istemiyoruz: aradaki bir `Wakeup`
+        // sessizce düşerdi.
+        //
+        // audit: `baglat` yalnız `didFinishLaunching`'ten, bir kez çağrılır.
+        // Sessizce yutulan bir `Err` burada en sinsi hatayı üretirdi: eski
+        // link'in `Waker`'ı kalır, pencere shell çıktısına bir daha hiç
+        // uyanmaz ve tek satır iz kalmaz.
+        assert!(
+            self.ivars().wake.waker.set(link.waker()).is_ok(),
+            "waker ikinci kez kuruldu"
+        );
+        // Açılış karesi: `Session` kirli doğar, link'i bir kez elle açıyoruz.
+        link.request_frame();
+        let _ = self.ivars().link.set(link);
     }
 
-    /// Bir kare çiz. Hata stderr'e; iskelette kare düşer, süreç düşmez
-    /// (sayaç artmaz, duman kırmızı çıkar).
-    fn draw(&self) {
-        if let Err(e) = self
-            .ivars()
-            .renderer
-            // Hücre yok: `Session` phase-3'te bağlanıyor. Boş kare yalnız
-            // clear rengini boyar, yani 001'in görüntüsü birebir aynı.
-            .draw_surface(&self.ivars().surface, DEFAULT_BG, &Frame::default())
-        {
-            eprintln!("bateri: kare çizilemedi: {e}");
+    /// Pencere geometrisi oynadı: layer'ı eşle, grid'i güncelle, kare iste.
+    fn geometri_degisti(&self) {
+        let Some(metrics) = self.geometriyi_esitle() else {
+            return;
+        };
+        if let Some(link) = self.ivars().link.get() {
+            link.resize(metrics.cols, metrics.rows, metrics.cell_px);
         }
+    }
+
+    /// Layer'ın drawable boyutunu view'ın backing geometrisiyle eşler **ve**
+    /// grid ölçüsünü döndürür — ad ikisini birden söylüyor çünkü çağıranın
+    /// ikisine de ihtiyacı var ve boyutu yazmadan ölçüyü türetmek yanlış
+    /// sonuç verirdi. Ölçek tek kaynaktan okunur ve piksel boyutu ondan
+    /// çarpılır; `drawableSize` ile `contentsScale` ayrışırsa bulanıklık olur.
+    fn geometriyi_esitle(&self) -> Option<Metrics> {
+        let window = self.ivars().window.get()?;
+        let view = window.contentView()?;
+        let scale = window.backingScaleFactor();
+        let bounds = view.bounds().size;
+        let (width_px, height_px) = (bounds.width * scale, bounds.height * scale);
+        self.ivars().surface.set_size(width_px, height_px, scale);
+
+        // Hücre en az 1 piksel: sıfır bölme yok. `as u16` f64'te doygundur
+        // (NaN ve negatif → 0, büyük → 65535) ve kesme tam olarak istediğimiz
+        // taban yuvarlama; sıfır sütun/satırı `Session::resize` zaten
+        // yoksayar (simge durumundaki pencere).
+        let cell_w = (CELL_PX.0 * scale).round().max(1.0);
+        let cell_h = (CELL_PX.1 * scale).round().max(1.0);
+        Some(Metrics {
+            cols: (width_px / cell_w) as u16,
+            rows: (height_px / cell_h) as u16,
+            cell_px: (cell_w as u16, cell_h as u16),
+        })
     }
 }

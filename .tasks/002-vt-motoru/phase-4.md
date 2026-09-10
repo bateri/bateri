@@ -104,6 +104,7 @@ define_class!(
 
 ## Checklist
 
+- [ ] **Kapanışta uçuştaki kare** (002 phase-3 `/code-review` devri): tamamlanma bloğunu Metal `Block_copy` ile tutuyor ve **kendi thread'inde** serbest bırakıyor. `DisplayLink` uçuşta kare varken düşerse bloğun elindeki son `Waker` de orada düşer; `MainThreadBound::drop` ana kuyruğa **senkron** iş atar (`exec_sync`) ve ana thread o sırada `Session::shutdown()`'ın `join`'inde bekliyorsa ikisi birbirini kilitler. `Session` tarafı tümüyle kapatıldı (`Waker` artık `DirtyFlag` tutuyor, `Arc`/`Weak` değil), kalan tek şey `MainThreadBound<Retained<CAMetalDisplayLink>>`'in `Drop`'u — ana thread dışında `exec_sync` ile ana kuyruğa iş atıp **bekler**; kalan yarı kapanış sırasının kendisiyle çözülür (önce link'i durdur/invalidate et, sonra oturumu kapat) — `applicationWillTerminate:` yolunu kurarken bu sıra yazılmalı
 - [ ] `keys.rs` + sınamalar; `BateriView` `keyDown:`; `makeFirstResponder`
 - [ ] `applicationWillTerminate:` → `shutdown()`; `child_exit` → terminate; deadline → `shutdown` + exit; bekçi
 - [ ] Test: `cargo run -q -p bateri` → prompt gelir, `ls --color` yazınca renkli arka planlı hücreler belirir (göz; glyph yok)

@@ -19,7 +19,7 @@ mod session;
 mod wake;
 
 pub use color::{DEFAULT_BG, DEFAULT_CURSOR};
-pub use session::{CellBg, Cursor, Session, SessionOptions};
+pub use session::{CellBg, Cursor, DirtyFlag, Session, SessionOptions, smoke_shell};
 pub use wake::Wake;
 
 /// Hücre sabit boyuttadır ve sabit burada bağlanır: alacritty `Cell` = `c` 4 +
