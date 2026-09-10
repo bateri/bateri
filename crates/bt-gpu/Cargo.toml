@@ -8,3 +8,8 @@ license.workspace = true
 [dependencies]
 bt-core = { workspace = true }
 bt-atlas = { workspace = true }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-metal = { workspace = true }
+objc2-quartz-core = { workspace = true }
+dispatch2 = { workspace = true }

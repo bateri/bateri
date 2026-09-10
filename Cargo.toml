@@ -15,9 +15,15 @@ rust-version = "1.88"
 license = "MIT"
 
 # Dış crate sürümleri tek yerden; üyeler `{ workspace = true }` der.
-# Bu phase'de dış crate yok — phase-2 (objc2-metal, dispatch2) ve
-# phase-3 (objc2-app-kit) ekler; Cargo.lock farkı phase başına okunur.
 [workspace.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+objc2-quartz-core = "0.3"
+# DispatchData kurucuları `block2` feature'ının arkasında; objc2-metal bunu
+# açmaz. Kullanıcı onaylı bağımlılık kararı: .tasks/001 discussion.md → Karar.
+dispatch2 = { version = "0.3", features = ["block2"] }
+
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
 bt-gpu = { path = "crates/bt-gpu" }
