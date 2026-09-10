@@ -33,7 +33,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 # `CTFontDescriptor` süs değil — `CTFontGetAdvancesForGlyphs` yönelim tipini
 # (`CTFontOrientation`) oradan alıyor ve o feature olmadan derlenmiyor.
 objc2-core-text = { version = "0.3", default-features = false, features = [
-    "std", "CTFont", "CTFontDescriptor", "objc2-core-graphics",
+    "std", "CTFont", "CTFontDescriptor", "CTFontTraits", "objc2-core-graphics",
+# `CTFontTraits` da süs değil: `CTFontSymbolicTraits` tipi ve onunla çalışan
+# `copy_with_symbolic_traits` / `symbolic_traits` kapıları o feature'ın
+# arkasında. Dört font yüzü (kalın, eğik, kalın-eğik) onlarsız türetilemiyor.
 ] }
 # `CGBitmapContextCreate` dört başlığın kesişiminde (kendi `CGBitmapContext`
 # başlığı + `CGColorSpace` + `CGContext` + `CGImage`), `CGFont` ise `CGGlyph`
