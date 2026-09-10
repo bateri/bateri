@@ -6,6 +6,7 @@
 //! bir gerekçe ister ve her kare bir durma koşulu taşır.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -18,7 +19,7 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonMod
 use objc2_quartz_core::{CAMetalDisplayLink, CAMetalDisplayLinkDelegate, CAMetalDisplayLinkUpdate};
 
 use crate::frame::Frame;
-use crate::renderer::Completion;
+use crate::renderer::{CellMetrics, Completion};
 use crate::{GpuError, Renderer, Surface};
 
 /// **Kare istemenin tek tanımı**: hasar bayrağını dik, link'i aç.
@@ -213,7 +214,12 @@ impl Ardisik {
 /// Delegate'in durumu. Ana thread'e ait olanlar `Cell`/`RefCell`; `retry`
 /// paylaşılıyor çünkü onu Metal'in tamamlanma thread'i de çağırır.
 struct LinkIvars {
-    renderer: Arc<Renderer>,
+    /// `Rc`, `Arc` değil: `Renderer` artık `Sync` değil. Kaldırılabilir sebep
+    /// glyph atlasının `CFRetained<CTFont>`'u (`Send` değil), **yapısal**
+    /// sebep atlası saran `RefCell` — tamamen thread-güvenli bir fontla bile
+    /// `Arc` "başka thread'e geçebilir" diye yanlış bir söz verirdi. `retry`
+    /// ile `session` gerçekten geçtikleri için `Arc` kalıyor.
+    renderer: Rc<Renderer>,
     session: Arc<Session>,
     retry: Arc<Retry>,
     /// Kapının çizim tarafı buradan okunuyor; gövdenin tek sahibi `Waker`
@@ -224,7 +230,14 @@ struct LinkIvars {
     /// Kare listesi uzun ömürlü: her karede `clear` ile dolar, ayrılan yer
     /// korunur (kare başına yeniden ayırma yok).
     frame: RefCell<Frame>,
-    cell_px: Cell<(u16, u16)>,
+    /// Demet değil `CellMetrics`: ölçü `Renderer::cell_metrics`'ten
+    /// `bt-shell` üzerinden buraya tip olarak geliyor ve **saklanırken de**
+    /// tip kalıyor. Saklanan bu değer yalnız `Frame::clear`'a girerken
+    /// demete iniyor, çünkü kare kurucusu `#[repr(C)]` tarafına sayı yazıyor.
+    /// (`resize`'ın `Session::resize`'a geçirdiği demet başka bir değer:
+    /// oraya **gelen** ölçü gider, saklanan değil — kabul edilmeyen bir
+    /// boyut buraya hiç yazılmaz.)
+    cell: Cell<CellMetrics>,
 }
 
 define_class!(
@@ -253,7 +266,7 @@ define_class!(
             // audit: callback ana thread'e bağlı ve yeniden girilmez; sink
             // `Session`'a geri girmiyor, yani ikinci bir ödünç doğmuyor.
             let mut frame = iv.frame.borrow_mut();
-            frame.clear(iv.cell_px.get());
+            frame.clear(iv.cell.get().cell_px());
             // Hasar yoksa encode ve commit'i hiç yapmıyoruz. Drawable'ı bu
             // tasarruf kapsamaz: `CAMetalDisplayLink` onu callback'ten ÖNCE
             // alıp `update`'in içine koyuyor, `drawable()`'ı çağırmamak alımı
@@ -308,9 +321,9 @@ impl DisplayLink {
     pub fn new(
         mtm: MainThreadMarker,
         surface: &Surface,
-        renderer: Arc<Renderer>,
+        renderer: Rc<Renderer>,
         session: Arc<Session>,
-        cell_px: (u16, u16),
+        cell: CellMetrics,
     ) -> Self {
         let link =
             CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), surface.layer());
@@ -342,7 +355,7 @@ impl DisplayLink {
                 waker: waker.clone(),
                 completion,
                 frame: RefCell::new(Frame::default()),
-                cell_px: Cell::new(cell_px),
+                cell: Cell::new(cell),
             },
         );
         link.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -424,10 +437,10 @@ impl DisplayLink {
     /// boyut yoksayılıyor (simge durumundaki pencere 0 sütun hesaplatır) ve
     /// onu burada uygulamak grid'i eski ölçüde bırakıp çizimi yeni ölçüye
     /// kaydırırdı — PTY'nin bildiği `TIOCSWINSZ` ile de ayrışırdı.
-    pub fn resize(&self, cols: u16, rows: u16, cell_px: (u16, u16)) {
+    pub fn resize(&self, cols: u16, rows: u16, cell: CellMetrics) {
         let iv = self.delegate.ivars();
-        if iv.session.resize(cols, rows, cell_px) {
-            iv.cell_px.set(cell_px);
+        if iv.session.resize(cols, rows, cell.cell_px()) {
+            iv.cell.set(cell);
         }
         self.request_frame();
     }

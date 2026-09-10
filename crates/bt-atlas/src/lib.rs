@@ -118,6 +118,7 @@ impl Atlas {
     /// kancanın karşılığı ve yeniden kurma kararını çağıranın hatırlamasına
     /// bırakmıyor. Karşılaştırma **tam eşitlik**: ölçek ve punto ayrık
     /// değerler arasında sıçrıyor, aralarında yorumlanacak bir yakınlık yok.
+    #[must_use = "true ise atlas yeniden kuruldu: yuva eşlemesi ve doku boyutu değişmiş olabilir, doku da yeniden ayrılmalı"]
     pub fn ensure(&mut self, point_size: f64, scale: f64) -> bool {
         if (point_size, scale) == self.anahtar {
             return false;

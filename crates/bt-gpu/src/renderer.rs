@@ -3,11 +3,13 @@
 //! GPU'yu beklemez ve kare sayacını `addCompletedHandler` artırır — yani sayaç
 //! "sunuldu"yu değil "GPU hatasız bitirdi"yi sayar.
 
+use std::cell::RefCell;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use block2::RcBlock;
+use bt_atlas::Atlas;
 use dispatch2::DispatchData;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
@@ -39,6 +41,62 @@ type CompletionBlock = RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTLCommandBuffe
 /// `rustc` düşer — çalışma zamanına kalan tek şey fonksiyon adlarıdır.
 static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/default.metallib"));
 
+/// Mantıksal font puntosu; `font_size`/`family` ayarları (00X) gelene kadar
+/// sabit — ölçülmüş bir sayı değil, seçilmiş bir varsayılan. `SCROLLBACK`
+/// (`bt-shell`) ile aynı örüntü: ayar modeli gelince sabit ölü doğar.
+///
+/// [`Renderer::cell_metrics`] puntoyu **parametre almıyor**: alsaydı bir ayar
+/// değeri her yeniden boyutlandırmada çağrı yoluna girer ve varsayılanın
+/// sahibi `bt-shell` olurdu — `CELL_PX` bir kat yukarıda yeniden doğardı.
+const PUNTO: f64 = 13.0;
+
+/// Hücrenin **fiziksel piksel** ölçüsü (ölçek uygulanmış); `bt-shell` grid
+/// boyutunu ve PTY'ye giden `TIOCSWINSZ`'i bundan türetir.
+///
+/// Alan `private` ve kurucusu sıfırı eleyen [`CellMetrics::new`]: bu tipin işi
+/// bir demeti adlandırmak değil, **taşımak**. `pub` bir alan olsaydı
+/// `CellMetrics { cell_px: (0, 0) }` `bt-shell`'den kurulabilirdi ve
+/// `900.0 / 0.0` → `inf`, `inf as u16` → `65535`, yani 65535×65535'lik bir
+/// grid ile o boyda bir `TIOCSWINSZ`. `Session::resize` yalnız sıfır grid'i
+/// eliyor; bu sessizce geçerdi. Şimdi geçemiyor: **≥ 1 garantisi tipin
+/// içinde**, kaynağı `bt_atlas::Metrics` (`font::yukari` 1'e kırpar).
+///
+/// `bt_atlas::Metrics`'i yeniden ihraç **etmiyor**: `bt-shell`'in bir
+/// `bt-atlas` tipi görmesi katman tablosunu bulanıklaştırırdı (`CLAUDE.md`),
+/// ve atlasın `baseline_px`'i sınırın bu tarafında hiçbir işe yaramaz —
+/// glyph'i taban çizgisine oturtmak `bt-atlas`'ın kendi işi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellMetrics {
+    cell_px: (u16, u16),
+}
+
+impl CellMetrics {
+    /// Sıfır bileşen yoksa ölçü, varsa `None`.
+    ///
+    /// Alan `private` ama kurucu `pub`: garanti "kimse kuramasın" ile değil
+    /// **"kuran sıfırı geçiremesin"** ile sağlanıyor. Aradaki fark sınamada
+    /// görünür — `bt-shell`'in grid aritmetiği bir Metal device kurmadan
+    /// sınanabilir kalıyor, oysa yalnız `Renderer::cell_metrics`'in
+    /// kurabildiği bir tip o testleri GPU'ya bağlardı.
+    pub fn new(width: u16, height: u16) -> Option<Self> {
+        (width > 0 && height > 0).then_some(Self {
+            cell_px: (width, height),
+        })
+    }
+
+    /// (genişlik, yükseklik).
+    ///
+    /// Tip `bt-gpu` ile `bt-shell` arasında **taşınıyor**; demet yalnız
+    /// değerin tipi bırakmak zorunda olduğu üç yerde açılıyor: sayıya dönüp
+    /// bölmeye girerken (`izgaraya_bol`), `bt-core`'a geçerken
+    /// (`SessionOptions.cell_px`, `Session::resize` — `bt-core` `bt-gpu`'yu
+    /// göremez, katman kuralının bedeli bu) ve `#[repr(C)]` kare kurucusuna
+    /// girerken (`Frame::clear`). Bunların dışında demet dolaşmaz.
+    pub fn cell_px(self) -> (u16, u16) {
+        self.cell_px
+    }
+}
+
 pub struct Renderer {
     /// Kurucuda elde olan device; tampon ayırmak için kare başına
     /// `queue.device()` mesajı atmaya gerek yok.
@@ -52,6 +110,19 @@ pub struct Renderer {
     /// Dikkat: bu bir **CPU** sayacıdır, GPU'nun o hücreleri boyadığını
     /// kanıtlamaz — onu `cell_bg_pikseli_gpu_tarafinda_boyar` yapar.
     last_bg_count: AtomicUsize,
+    /// Font metriğinin kaynağı; phase-4'te glyph yuvaları da buradan gelecek.
+    ///
+    /// `Option`, çünkü atlasın anahtarı (punto + backing ölçeği) **pencereden**
+    /// gelir ve kurucu pencereyi görmez. Sabit bir 1.0 ile kurmak iki şeyi
+    /// birden bozardı: retina makinede font zinciri açılışta boşuna bir kez
+    /// daha koşar, ve metriği hiç sormadan atlası okuyan bir yol **sessizce
+    /// @1x** çizerdi. `None` o yolu sessiz olmaktan çıkarıyor — phase-4 glyph
+    /// çizmeden önce ölçeği söylemek zorunda.
+    ///
+    /// `RefCell`, çünkü [`Renderer::cell_metrics`] `&self` alıyor
+    /// ([`Atlas::ensure`] ise `&mut`) ve `bt-shell` renderer'ı bir `Rc`
+    /// içinde tutuyor — paylaşılan bir sahiplikte `&mut` yolu yok.
+    atlas: RefCell<Option<Atlas>>,
     /// **Tamamlanan** kare sayısı; `make duman` bunu okur.
     ///
     /// `Arc`: sayacı artıran tamamlanma bloğu `Renderer`'dan bağımsız yaşar
@@ -109,6 +180,7 @@ impl Renderer {
             device,
             queue,
             cell_bg,
+            atlas: RefCell::new(None),
             last_bg_count: AtomicUsize::new(0),
             frames: Arc::new(AtomicU64::new(0)),
         })
@@ -116,6 +188,40 @@ impl Renderer {
 
     pub fn surface(&self) -> Surface {
         Surface::new(&self.device, Self::PIXEL_FORMAT)
+    }
+
+    /// Verilen backing ölçeğinde hücre ölçüsü.
+    ///
+    /// `scale` parametre çünkü ekran ölçeği çalışırken değişebilir
+    /// (`windowDidChangeBackingProperties:`, harici ekran) ve atlas ölçeği
+    /// önbellek anahtarının parçası olarak taşır: aynı `Renderer` iki ölçekte
+    /// iki farklı metrik verir. @1x rasterize edilmiş bir glyph @2x'te
+    /// hatasız bulanıklaşır ve belirti yalnız iki ekranlı makinede görünür.
+    ///
+    /// `bt-shell` `bt-atlas`'ı görmüyor, metrik buradan geçiyor; katman
+    /// tablosu (`CLAUDE.md`) değişmeden `CELL_PX` yer tutucusu ölebildi.
+    pub fn cell_metrics(&self, scale: f64) -> CellMetrics {
+        let mut atlas = self.atlas.borrow_mut();
+        let atlas = atlas.get_or_insert_with(|| Atlas::new(PUNTO, scale));
+        // Dönüş "atlası yeniden kurdum, dokuyu da yeniden ayır" demek ve
+        // dokunun sahibi phase-4'te `Renderer` olacak. Bugün ayrılacak doku yok,
+        // o yüzden burada düşürmek **doğru**; sinyalin kaçtığı yer phase-4 olur:
+        // ızgara geometrisi değişmiş atlastan bayat bir yuva okumak, aralık
+        // içinde kaldığı sürece `slot_origin`'in savunmasına takılmadan
+        // **başka bir glyph** çizer ve belirti yalnız iki ekranlı makinede
+        // görünür. `ensure`'ün `#[must_use]`'ı phase-4'ün **yeni** çağrı
+        // yerlerinde durdurur; `let _ =` derleyicinin kabul ettiği susturma
+        // biçimidir, yani bu satırda durdurmaz — phase-4 buraya elle bakmak
+        // zorunda ve bu `phase-4.md`'nin devir bölümünde de yazılı.
+        let _ = atlas.ensure(PUNTO, scale);
+        let (w, h) = atlas.metrics().cell_px;
+        // audit: `bt_atlas::Metrics.cell_px` çıplak bir `pub` alan, yani ≥ 1
+        // garantisi bir crate ötede (`font::yukari` 1'e kırpar) ve tipin
+        // kendisi taşımıyor. Yapı gövdesiyle kurmak bu boşluğu sessiz
+        // bırakırdı; `expect` onu programlama hatasına çevirir. Panik yolu
+        // değil: PTY okuma ve ayrıştırma bu satırdan geçmez, burası
+        // pencere geometrisi yolu.
+        CellMetrics::new(w, h).expect("bt-atlas hücre ölçüsünü 1'e kırpar")
     }
 
     /// GPU'nun hatasız bitirdiği kare sayısı. Anlamın sahibi artık
@@ -303,6 +409,47 @@ mod tests {
     fn metallib_gomulu_ve_gecerli() {
         // Metal kütüphanesi dosyası "MTLB" sihirli sayısıyla başlar.
         assert_eq!(&METALLIB[..4], b"MTLB");
+    }
+
+    #[test]
+    fn iki_olcek_iki_metrik_verir() {
+        // Ölçek önbellek anahtarının parçası (`plan.md` → R1.2) ve metrik o
+        // anahtarın gözle görülür ucu: @2x'te hücre büyümezse atlas ölçeği
+        // yutuyor demektir ve glyph'ler hatasız bulanıklaşır.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let bir = r.cell_metrics(1.0);
+        let iki = r.cell_metrics(2.0);
+        assert!(
+            iki.cell_px().0 > bir.cell_px().0 && iki.cell_px().1 > bir.cell_px().1,
+            "@2x hücre @1x'ten büyük olmalı: {bir:?} → {iki:?}"
+        );
+        // Geri dönüş de çalışmalı: `ensure` tek yönlü bir kapı değil. Yoksa
+        // harici ekran çıkarıldığında metrik @2x'te takılı kalır ve pencere
+        // yarı yarıya az hücre gösterirdi.
+        assert_eq!(r.cell_metrics(1.0), bir, "aynı ölçek aynı metriği verir");
+    }
+
+    #[test]
+    fn sifir_bilesenli_olcu_kurulamaz() {
+        // Tipin taşıdığı tek garanti bu. Düşerse `bt-shell`'in bölmesi
+        // `inf` verir, `inf as u16` 65535 eder ve `Session::resize`'ın sıfır
+        // kapısına takılmadan 65535×65535'lik bir `TIOCSWINSZ` geçer.
+        assert!(CellMetrics::new(0, 18).is_none());
+        assert!(CellMetrics::new(9, 0).is_none());
+        assert_eq!(CellMetrics::new(9, 18).expect("ölçü").cell_px(), (9, 18));
+    }
+
+    #[test]
+    fn hucre_olcusu_hic_sifir_olmaz() {
+        // `bt-shell` bu iki sayıyı **bölen** olarak kullanıyor. Garantiyi
+        // `bt-atlas` veriyor (`font::yukari` 1'e kırpar) ve `CellMetrics`'in
+        // private alanı onu sınırın bu tarafında yapısal kılıyor; bu sınama
+        // kaynaktaki kırpmanın hâlâ yerinde olduğunu söylüyor.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        for scale in [1.0, 2.0, 3.0] {
+            let (w, h) = r.cell_metrics(scale).cell_px();
+            assert!(w >= 1 && h >= 1, "ölçek {scale}: {w}×{h}");
+        }
     }
 
     #[test]

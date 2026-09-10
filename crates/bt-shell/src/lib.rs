@@ -11,7 +11,7 @@ mod app;
 mod keys;
 mod view;
 
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::Duration;
 
 use objc2::MainThreadMarker;
@@ -37,8 +37,10 @@ pub struct Options {
 pub fn run(opts: Options) -> Result<(), GpuError> {
     // audit: giriş noktası; ana thread dışından çağrılması programlama hatasıdır.
     let mtm = MainThreadMarker::new().expect("bt_shell::run ana thread'de çağrılır");
-    // `Arc`: renderer'ı hem delegate hem display link tutar.
-    let renderer = Arc::new(bt_gpu::Renderer::system_default()?);
+    // `Rc`: renderer'ı hem delegate hem display link tutar, ama ikisi de ana
+    // thread'de. `Arc` yanlış bir söz verirdi — `Renderer` glyph atlasını
+    // taşıyor ve atlasın `CTFont`'u `Send` değil.
+    let renderer = Rc::new(bt_gpu::Renderer::system_default()?);
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // `delegate` bu kapsamda `app.run()`'ı aşar: AppKit'in ve pencerenin
