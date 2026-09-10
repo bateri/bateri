@@ -125,6 +125,70 @@ kapı sistem fontunun sürümüne rehin olurdu.
 
 ---
 
+## Phase-3'ten devir
+
+Phase-3'ün kalite kapısı (irtifa merceği + `/code-review`) dört bulgu üretti;
+hiçbiri phase-3'te uygulanamadı çünkü dördü de **atlas dokusunun doğduğu** ana
+bağlı.
+
+**1. `Atlas::ensure`'ün dönüşü bu phase'de yakalanmak zorunda.**
+`Renderer::cell_metrics` içindeki `let _ = atlas.ensure(PUNTO, scale)` bugün
+sinyali atıyor: "atlası yeniden kurdum, dokuyu da yeniden ayır". Bugün ayrılacak
+doku yok. Bu phase'de doku doğuyor ve sinyal kaçarsa belirti **sessiz**: ızgara
+geometrisi değişmiş bir atlastan bayat bir yuva okumak, yuva aralık içinde
+kaldığı sürece `slot_origin`'in savunmasına takılmaz ve **başka bir glyph**
+çizer. Belirti "harici ekranı çıkardım, harfler karıştı" ve yalnız iki ekranlı
+makinede görünür.
+
+Phase-3 `ensure`'ü `#[must_use]` işaretledi ama **bu satır o korumanın dışında
+kalıyor** ve bunu bilerek bilmek gerek: `let _ = expr;` rustc'nin kabul ettiği
+susturma biçimidir, yani `cell_metrics` derlenirken hiçbir uyarı çıkmaz.
+`#[must_use]` bu phase'in **yeni** `ensure` çağrılarında durdurur; mevcut
+satırı bu phase elle ele almak zorunda. İlk iş: `cell_metrics`'in `let _`'sini
+dokuyu yeniden ayıran yola bağla ya da sinyali oradan taşıyacak bir alan
+kur — "işaretliydi, görürüz" yanlış bir güvendi.
+
+**2. Atlası ödünç alan tek yer `Renderer::draw` olsun.**
+`Renderer.atlas` bir `RefCell`. `link.rs:260` şu örüntüyü öğretiyor:
+`iv.frame.borrow_mut()` alınıyor ve `renderer.draw(..., &frame, ...)` çağrısı
+**boyunca tutuluyor**. Aynı şekil atlas için kopyalanırsa — yuva çözümünü
+`session.frame(...)` sink'inde hoist et (sink hücre başına koştuğu için doğal
+refleks bu), sonra o guard canlıyken `draw`'u çağır, `draw` da `slot_origin`
+için atlası ödünç alsın — ilk glyph'li karede `BorrowMutError`. Çizim yolunda
+ve `Retry` `GpuError` için tasarlandı, unwind için değil.
+Çözüm: `Frame` `char` taşısın, `char → yuva → uv` çözümü `draw` içinde **tek
+bir** `borrow_mut` altında yapılsın. Üç şey bedavaya gelir: yeniden-ödünç
+temsil edilemez olur; bütün kare tek atlas kuşağıyla çizilir (1. maddedeki
+bayat-yuva tehlikesi kuşak sayacı gerektirmeden yok olur); `link.rs`'in sink'i
+renderer durumundan uzak kalır.
+
+**3. Atlas ölçeği koşulsuz, `cell_px` koşullu uygulanıyor.**
+`geometriyi_esitle` her çağrıda `cell_metrics(scale)` çağırıyor ve o çağrı
+atlası **koşulsuz** yeni ölçeğe geçiriyor; `DisplayLink::resize` ise
+`iv.cell` alanını yalnız `Session::resize` kabul ederse yazıyor. Bugün ikisi
+ayrışsa da zarar yok: reddin iki sebebi var, "dejenere boyut" (o durumda
+çizilecek hücre de yok) ve "hiç değişmedi" (o durumda ölçü zaten aynı), ve
+bir sonraki geometri olayı ikisini eşitliyor. Doku gelince ayrışma
+**ucuz olmaktan çıkar**: @2x rasterize edilmiş bir glyph @1x yuvaya blit
+edilir. Bu phase atlas kuşağını çizim tarafında kabul edilen ölçüyle
+eşlemeli — 2. maddedeki "tek `borrow_mut`, tek kuşak" çözümü bunu da kapatır.
+
+**4. "Önce metriği sor" sözleşmesi ve GPU kapısının kendi tuzağı.**
+`Renderer.atlas` artık `Option` ve `None` doğuyor: metriği hiç sormadan atlası
+okuyan bir yol sessizce @1x çizmek yerine "atlas yok" durumuyla karşılaşır.
+Bu phase'in glyph kapısı (`hücre içi arka planla tekdüze değil`, §3) tam da
+böyle bir yolda koşacak: `cell_bg_pikseli_gpu_tarafinda_boyar` bir `Renderer`
+kurup `cell_metrics`'i **hiç çağırmıyor**. Yeni sınama da öyle kurulursa atlas
+`None` kalır; kapı ya düşer ya da (eski tasarımda olacağı gibi) @1x atlasla
+yeşil geçerdi. Sınama ölçeği açıkça söylemeli.
+Ölçeğin `bt-gpu`'ya **iki kapısı** olduğu da kayda geçsin: `Surface::set_size`
+ve `cell_metrics`, `app.rs`'te komşu iki satır. Bugün uyuşuyorlar çünkü öyle
+yazıldı, kurgu gereği değil. Birleştirmek (`Renderer::resize(surface, w, h,
+scale) -> CellMetrics`) R5'in harfiyle çelişir; bu sette yapılmadı, doku
+geldiğinde yeniden bakılır.
+
+---
+
 ## Uygulama Notları
 
 ## Yayın Etkisi

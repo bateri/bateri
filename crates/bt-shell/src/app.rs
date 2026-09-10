@@ -3,10 +3,11 @@
 //! sırasını yürütür. Çizim çağrısı burada **yok**, bu dosyanın işi bağlamak.
 
 use std::cell::OnceCell;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use bt_core::{Session, SessionOptions, Wake, smoke_shell};
-use bt_gpu::{DisplayLink, Renderer, Surface, Waker};
+use bt_gpu::{CellMetrics, DisplayLink, Renderer, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -23,21 +24,49 @@ use objc2_foundation::{
 use crate::Options;
 use crate::view::BateriView;
 
-/// Hücrenin @1x piksel boyutu. Gerçek font metriği `bt-atlas` ile (003)
-/// gelene kadar yer tutucu: grid ölçüsü ve PTY'ye giden `TIOCSWINSZ` bundan
-/// türer, yani sayı yanlışsa yalnız hücreler yanlış boyutta olur — akış
-/// doğru kalır.
-const CELL_PX: (f64, f64) = (9.0, 18.0);
-
 /// Kaydırma geçmişi satır sayısı; ayar dosyası (00X) gelene kadar sabit.
 const SCROLLBACK: usize = 10_000;
 
-/// Pencere geometrisinden türeyen grid ölçüsü.
+/// Pencere geometrisi + hücre ölçüsünden türeyen grid.
+///
+/// Adı `Metrics` değil: hücre metriğinin sahibi artık `bt-gpu`
+/// ([`CellMetrics`]) ve iki tip bu dosyada yan yana okunuyor. Buradaki
+/// "kaç sütun kaç satır **ve** hangi hücreyle", oradaki yalnız hücre.
 #[derive(Clone, Copy)]
-struct Metrics {
+struct Grid {
     cols: u16,
     rows: u16,
-    cell_px: (u16, u16),
+    /// Demet değil `CellMetrics`: ölçü buradan `DisplayLink::resize`'a
+    /// olduğu gibi geçiyor. `Grid`'de saklanan bu değer yalnız
+    /// `SessionOptions`'a girerken demete iniyor — `izgaraya_bol`'un
+    /// bölmeye soktuğu demet başka bir değer: oraya **gelen** ölçü girer,
+    /// `Grid` ondan sonra doğar.
+    cell: CellMetrics,
+}
+
+/// Piksel geometrisi + hücre ölçüsü → grid.
+///
+/// `geometriyi_esitle`'den ayrı duruyor çünkü saf olan tek parça bu; geri
+/// kalanı pencere ve layer, yani sınanamaz. Hücre ölçüsü **argüman**: bu
+/// gövdeye gizlenmiş bir sabit `hucre_olcusu_disaridan_gelir`'i düşürür.
+///
+/// Kapsamı bu kadar, daha fazlası değil: `CELL_PX`'in asıl durduğu satır
+/// `geometriyi_esitle`'deki `cell_metrics(scale)` çağrısıydı ve orası bir
+/// pencere ile Metal device istediği için sınanmıyor. `CellMetrics::new`
+/// bilerek `pub`, yani oraya yazılacak bir `CellMetrics::new(9, 18)` yer
+/// tutucuyu diriltir ve buradaki iki sınama yeşil kalır.
+fn izgaraya_bol(width_px: f64, height_px: f64, cell: CellMetrics) -> Grid {
+    let (cell_w, cell_h) = cell.cell_px();
+    // `as u16` f64'te doygundur (NaN ve negatif → 0, büyük → 65535) ve kesme
+    // tam olarak istediğimiz taban yuvarlama; sıfır sütun/satırı
+    // `Session::resize` zaten yoksayar (simge durumundaki pencere). Bölen
+    // sıfır olamaz ve bunu tip taşıyor: `CellMetrics`'in alanı private,
+    // kurucusu `Renderer::cell_metrics` ve kaynağı `bt-atlas`'ın ≥ 1 kırpması.
+    Grid {
+        cols: (width_px / f64::from(cell_w)) as u16,
+        rows: (height_px / f64::from(cell_h)) as u16,
+        cell,
+    }
 }
 
 /// `bt-core`'un uyandırma ucu.
@@ -89,7 +118,8 @@ impl Wake for ShellWake {
 /// Delegate'in durumu. `OnceCell`: pencere, oturum ve link
 /// `applicationDidFinishLaunching` içinde bir kez doğar, sonra yalnız okunur.
 pub(crate) struct Ivars {
-    renderer: Arc<Renderer>,
+    /// `Rc`: renderer ana thread'e çivili (bkz. `bt_gpu::DisplayLink`).
+    renderer: Rc<Renderer>,
     surface: Surface,
     window: OnceCell<Retained<NSWindow>>,
     link: OnceCell<DisplayLink>,
@@ -161,11 +191,12 @@ define_class!(
             // shell açılışta doğru `TIOCSWINSZ` görsün.
             // audit: pencere ve contentView hemen yukarıda kuruldu; `None`
             // dönmesi programlama hatası olurdu ve yedek bir ölçü uydurmak
-            // `CELL_PX`'in ikinci bir kopyasını doğururdu.
-            let metrics = self
+            // hücre boyutu için ikinci bir kaynak doğururdu — tek kaynak
+            // `Renderer::cell_metrics`.
+            let izgara = self
                 .geometriyi_esitle()
                 .expect("pencere ve contentView kuruldu");
-            self.baglat(mtm, metrics, &view);
+            self.baglat(mtm, izgara, &view);
 
             if let Some(s) = self.ivars().run_seconds {
                 // block2 yok: zamanlayıcı performSelector ile.
@@ -262,7 +293,7 @@ define_class!(
 impl AppDelegate {
     pub(crate) fn new(
         mtm: MainThreadMarker,
-        renderer: Arc<Renderer>,
+        renderer: Rc<Renderer>,
         opts: Options,
     ) -> Retained<Self> {
         let surface = renderer.surface();
@@ -283,7 +314,7 @@ impl AppDelegate {
 
     /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
     /// `Wake`'i ister, link `Session`'ı ister, `Waker` link'ten doğar.
-    fn baglat(&self, mtm: MainThreadMarker, metrics: Metrics, view: &BateriView) {
+    fn baglat(&self, mtm: MainThreadMarker, izgara: Grid, view: &BateriView) {
         let session = Session::spawn(
             SessionOptions {
                 // Duman koşusunda shell sabit: sonuç kullanıcının `$SHELL`'ine
@@ -291,9 +322,9 @@ impl AppDelegate {
                 // sekiz hücre verdiği orada sınanıyor — `hucre=8` beklentisi
                 // bu yüzden bir belge cümlesi değil, sınanmış bir iddia.
                 command: self.ivars().run_seconds.map(|_| smoke_shell()),
-                cols: metrics.cols,
-                rows: metrics.rows,
-                cell_px: metrics.cell_px,
+                cols: izgara.cols,
+                rows: izgara.rows,
+                cell_px: izgara.cell.cell_px(),
                 scrollback: SCROLLBACK,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
@@ -315,9 +346,9 @@ impl AppDelegate {
         let link = DisplayLink::new(
             mtm,
             &self.ivars().surface,
-            Arc::clone(&self.ivars().renderer),
+            Rc::clone(&self.ivars().renderer),
             session,
-            metrics.cell_px,
+            izgara.cell,
         );
         // Uyandırma yolu kapanmadan kare istemiyoruz: aradaki bir `Wakeup`
         // sessizce düşerdi.
@@ -402,11 +433,11 @@ impl AppDelegate {
 
     /// Pencere geometrisi oynadı: layer'ı eşle, grid'i güncelle, kare iste.
     fn geometri_degisti(&self) {
-        let Some(metrics) = self.geometriyi_esitle() else {
+        let Some(izgara) = self.geometriyi_esitle() else {
             return;
         };
         if let Some(link) = self.ivars().link.get() {
-            link.resize(metrics.cols, metrics.rows, metrics.cell_px);
+            link.resize(izgara.cols, izgara.rows, izgara.cell);
         }
     }
 
@@ -415,7 +446,7 @@ impl AppDelegate {
     /// ikisine de ihtiyacı var ve boyutu yazmadan ölçüyü türetmek yanlış
     /// sonuç verirdi. Ölçek tek kaynaktan okunur ve piksel boyutu ondan
     /// çarpılır; `drawableSize` ile `contentsScale` ayrışırsa bulanıklık olur.
-    fn geometriyi_esitle(&self) -> Option<Metrics> {
+    fn geometriyi_esitle(&self) -> Option<Grid> {
         let window = self.ivars().window.get()?;
         let view = window.contentView()?;
         let scale = window.backingScaleFactor();
@@ -423,16 +454,41 @@ impl AppDelegate {
         let (width_px, height_px) = (bounds.width * scale, bounds.height * scale);
         self.ivars().surface.set_size(width_px, height_px, scale);
 
-        // Hücre en az 1 piksel: sıfır bölme yok. `as u16` f64'te doygundur
-        // (NaN ve negatif → 0, büyük → 65535) ve kesme tam olarak istediğimiz
-        // taban yuvarlama; sıfır sütun/satırı `Session::resize` zaten
-        // yoksayar (simge durumundaki pencere).
-        let cell_w = (CELL_PX.0 * scale).round().max(1.0);
-        let cell_h = (CELL_PX.1 * scale).round().max(1.0);
-        Some(Metrics {
-            cols: (width_px / cell_w) as u16,
-            rows: (height_px / cell_h) as u16,
-            cell_px: (cell_w as u16, cell_h as u16),
-        })
+        // Hücre ölçüsü `bt-gpu` üzerinden `bt-atlas`'ın font metriğinden
+        // geliyor ve ölçekle çarpma da orada. Burada ikinci bir yuvarlama
+        // kuralı **yok**: eski `.round()` bloğu bilerek silindi. İki kural
+        // yan yana dursaydı hangisinin kazandığı çağrı sırasına bağlanır ve
+        // belirti bir piksellik hücre kayması, yani sessiz olurdu.
+        let cell = self.ivars().renderer.cell_metrics(scale);
+        Some(izgaraya_bol(width_px, height_px, cell))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn olcu(w: u16, h: u16) -> CellMetrics {
+        CellMetrics::new(w, h).expect("sıfır olmayan hücre")
+    }
+
+    #[test]
+    fn hucre_olcusu_disaridan_gelir() {
+        // Yer tutucunun ölmüş olmasının sınanabilir hâli: aynı pencere, iki
+        // farklı hücre ölçüsü, iki farklı grid. Gövdeye geri sızan bir sabit
+        // ikisini eşitler ve bu sınama düşer.
+        let dar = izgaraya_bol(900.0, 600.0, olcu(9, 18));
+        let genis = izgaraya_bol(900.0, 600.0, olcu(18, 36));
+        assert_eq!((dar.cols, dar.rows), (100, 33));
+        assert_eq!((genis.cols, genis.rows), (50, 16));
+    }
+
+    #[test]
+    fn sifir_pencere_panik_etmez() {
+        // Simge durumuna alınan pencere 0×0 bounds verir; `Session::resize`
+        // sıfır grid'i yoksayıyor ama buraya gelen yolun panik etmemesi
+        // gerekiyor — bölme değil, `as u16` doygunluğu taşıyor.
+        let g = izgaraya_bol(0.0, 0.0, olcu(9, 18));
+        assert_eq!((g.cols, g.rows), (0, 0));
     }
 }

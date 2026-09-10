@@ -16,10 +16,12 @@ bir işe başlamadan önce ilgili bölümüne bakılır, sıfırdan keşfedilmez
 VT motoru 002 ile: `bt-core` shell'i çalıştırır, `bt-gpu` hücre arka planlarını
 çizer, `bt-shell` klavyeyi PTY'ye akıtır ve kapanışta shell'i düzgün bitirir.
 `bt-atlas` 003 ile doldu: CoreText glyph'leri rasterize ediyor ve sabit yuva
-ızgarasında adresliyor. Ama **kimse onu çağırmıyor** — atlası dokuya bağlayan
-`cell` pipeline'ı da hücre metriğini oradan okuyan yol da 003'ün sonraki
-phase'lerinde. Yani yazılan hâlâ görünmez: bugün ekranda yalnız renkli
-hücreler var. Aşağıdaki sözleşme kod
+ızgarasında adresliyor. Hücre ölçüsü artık oradan geliyor — `bt-gpu`
+`Renderer::cell_metrics(scale)` ile yeniden yayınlıyor, `bt-shell`'in `CELL_PX`
+yer tutucusu öldü ve grid gerçek font metriğinden türüyor. Ama **glyph'in
+kendisi hâlâ çizilmiyor**: atlası dokuya bağlayan `cell` pipeline'ı 003'ün son
+phase'inde. Bugün ekranda yalnız renkli hücreler var — doğru boyda.
+Aşağıdaki sözleşme kod
 geldikçe kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse
 ikisinden biri aynı commit'te düzelir.
 
