@@ -281,4 +281,4 @@ kalır.
 - [x] `/code-review` çalıştırıldı, 8 bulgu giderildi
 - [x] `/audit` çalıştırıldı — mercek 1, 2, 6, 8 temiz; 7 (run loop modu), 10 (dil kuralı, notlar) giderildi; 3, 4, 5, 9 ilgisiz (mercek 1: `cargo tree -p bt-shell --depth 1` `objc2-metal` içermez — geçişli olarak `bt-gpu` üzerinden gelir, doğrudan bağımlılık olmamalı; mercek 8: `waitUntilCompleted` sonrası talep yok, boşta sıfır kare)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: a4c5b79

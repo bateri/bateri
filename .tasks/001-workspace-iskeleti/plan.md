@@ -97,4 +97,4 @@ bateri main
 | phase-0 | ✅ | d3581bf |
 | phase-1 | ✅ | 3e006ba |
 | phase-2 | ✅ | 905aa50 |
-| phase-3 | | |
+| phase-3 | ✅ | a4c5b79 |
