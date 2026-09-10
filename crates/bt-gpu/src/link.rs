@@ -273,7 +273,7 @@ define_class!(
             // iptal etmiyor. (Bu yüzden `nextDrawable`'ın `Option`'ı ve onun
             // `GpuError::NoDrawable`'ı da kalktı: `update.drawable()` başlıkta
             // `nonnull` ve objc2 onu `Option`suz üretiyor.)
-            let Some(cursor) = iv.session.frame(|cell| frame.push_bg(cell)) else {
+            let Some(cursor) = iv.session.frame(|cell| frame.push(cell)) else {
                 // Boşta sıfır kare: yeni içerik yok, link uyur. Sıradaki
                 // `Wakeup` onu `Waker` üzerinden geri açar.
                 link.setPaused(true);

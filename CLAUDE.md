@@ -16,11 +16,13 @@ bir işe başlamadan önce ilgili bölümüne bakılır, sıfırdan keşfedilmez
 VT motoru 002 ile: `bt-core` shell'i çalıştırır, `bt-gpu` hücre arka planlarını
 çizer, `bt-shell` klavyeyi PTY'ye akıtır ve kapanışta shell'i düzgün bitirir.
 `bt-atlas` 003 ile doldu: CoreText glyph'leri rasterize ediyor ve sabit yuva
-ızgarasında adresliyor. Hücre ölçüsü artık oradan geliyor — `bt-gpu`
+ızgarasında adresliyor. Hücre ölçüsü oradan geliyor — `bt-gpu`
 `Renderer::cell_metrics(scale)` ile yeniden yayınlıyor, `bt-shell`'in `CELL_PX`
-yer tutucusu öldü ve grid gerçek font metriğinden türüyor. Ama **glyph'in
-kendisi hâlâ çizilmiyor**: atlası dokuya bağlayan `cell` pipeline'ı 003'ün son
-phase'inde. Bugün ekranda yalnız renkli hücreler var — doğru boyda.
+yer tutucusu öldü ve grid gerçek font metriğinden türüyor. Glyph de artık
+çiziliyor: `frame()` sınırı karakteri ve ön plan rengini geçiriyor, `bt-gpu`
+atlası bir `R8Unorm` dokuya bağlayıp `cell` pipeline'ıyla harfleri arka
+planların üstüne alfa karıştırarak koyuyor. Ekranda okunabilir metin var;
+kalanı 004'ün işi (`BOLD`/`ITALIC`/`UNDERLINE`/`STRIKEOUT`, emoji, kutu çizim).
 Aşağıdaki sözleşme kod
 geldikçe kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse
 ikisinden biri aynı commit'te düzelir.
@@ -33,7 +35,7 @@ make fmt          # cargo fmt --all -- --check
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
-make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare ve çizilen arka plan hücresi sayar: kare=N hucre=K pipeline=ok, biri 0 → kırmızı
+make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hücresi ve glyph sayar: kare=N hucre=K glif=G pipeline=ok, biri 0 → kırmızı
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: yaris_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler ve bateri.app paketini target/ altına kurar
@@ -129,7 +131,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   tanımlayıcılarında dışa bakan ad (pub tip, fonksiyon, varyant) İngilizce;
   yerel yardımcı, `build.rs` ve `Makefile` hedefi Türkçe olabilir. Süreç ve
   tanı çıktısı (stderr iletileri, `make duman` satırları) UI dizgisi değildir,
-  Türkçe kalır; `kare=`/`hucre=`/`pipeline=ok`/`ATLANDI` gibi anahtar-değer
+  Türkçe kalır; `kare=`/`hucre=`/`glif=`/`pipeline=ok`/`ATLANDI` gibi anahtar-değer
   jetonları makine sözleşmesidir: **silinmez, eklenir** — okuyan taraf
   tanımadığı jetonu atlayabilir, kaybolanı arayamaz.
 

@@ -60,8 +60,10 @@ fn izgaraya_bol(width_px: f64, height_px: f64, cell: CellMetrics) -> Grid {
     // `as u16` f64'te doygundur (NaN ve negatif → 0, büyük → 65535) ve kesme
     // tam olarak istediğimiz taban yuvarlama; sıfır sütun/satırı
     // `Session::resize` zaten yoksayar (simge durumundaki pencere). Bölen
-    // sıfır olamaz ve bunu tip taşıyor: `CellMetrics`'in alanı private,
-    // kurucusu `Renderer::cell_metrics` ve kaynağı `bt-atlas`'ın ≥ 1 kırpması.
+    // sıfır olamaz ve bunu tip taşıyor: `CellMetrics`'in alanı private ve
+    // kurucusu (`CellMetrics::new`) sıfırı eliyor; üretimdeki kaynağı
+    // `Renderer::cell_metrics`, oranın garantisi de `bt-atlas`'ın ≥ 1
+    // kırpması.
     Grid {
         cols: (width_px / f64::from(cell_w)) as u16,
         rows: (height_px / f64::from(cell_h)) as u16,
@@ -318,9 +320,10 @@ impl AppDelegate {
         let session = Session::spawn(
             SessionOptions {
                 // Duman koşusunda shell sabit: sonuç kullanıcının `$SHELL`'ine
-                // ve rc dosyasına bağlı olmasın. Betiğin sahibi `bt-core` ve
-                // sekiz hücre verdiği orada sınanıyor — `hucre=8` beklentisi
-                // bu yüzden bir belge cümlesi değil, sınanmış bir iddia.
+                // ve rc dosyasına bağlı olmasın. Betiğin sahibi `bt-core`;
+                // sekiz hücre ve altı glyph verdiği orada sınanıyor —
+                // `hucre=8` ve `glif=6` beklentileri bu yüzden birer belge
+                // cümlesi değil, sınanmış birer iddia.
                 command: self.ivars().run_seconds.map(|_| smoke_shell()),
                 cols: izgara.cols,
                 rows: izgara.rows,
@@ -412,20 +415,28 @@ impl AppDelegate {
     fn rapor_ve_cik(&self) -> ! {
         let n = self.ivars().renderer.frames();
         let k = self.ivars().renderer.last_bg_count();
-        // İki jeton iki ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
-        // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi. Biri
-        // sıfırken diğeri yeşil geçemez — kare>0 & hucre=0 "pencere var,
-        // shell çıktısı yok" demektir ve tam da kaçırmak istemediğimiz şey.
-        if n > 0 && k > 0 {
-            println!("kare={n} hucre={k} pipeline=ok");
+        let g = self.ivars().renderer.last_glyph_count();
+        // Üç jeton üç ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği kare
+        // sayısı, `hucre` sink'in ürettiği arka plan hücresi, `glif` çizilen
+        // glyph. Biri sıfırken diğerleri yeşil geçemez — kare>0 & hucre=0
+        // "pencere var, shell çıktısı yok" demek; hucre>0 & glif=0 ise
+        // "hücreler boyanıyor ama harf yok", yani 002'nin körlemesine yazma
+        // dönemine sessizce geri düşmek: `glif` kapısı olmasaydı `frame()`
+        // sınırı karakteri hiç geçirmese bile `kare=1 hucre=8 pipeline=ok`
+        // basılırdı. Kapsamadığı — `glif` de `hucre` gibi bir **CPU**
+        // sayacı: boş bir atlas ve hiç çizmeyen bir glyph pipeline'ı bu
+        // sayıyı düşürmez, onu `glif_hucrenin_icini_arka_planindan_ayirir`
+        // offscreen sınaması yakalar.
+        if n > 0 && k > 0 && g > 0 {
+            println!("kare={n} hucre={k} glif={g} pipeline=ok");
             std::process::exit(0);
         }
-        // Jetonlar (`kare=`, `hucre=`) **yalnız** başarı satırında ve yalnız
-        // stdout'ta: makine sözleşmesi o. Hata satırı aynı sayıları taşıyor
-        // ama jeton biçiminde değil, yoksa `kare=` arayan bir CI adımı düşen
-        // koşudan kare sayısı okurdu.
+        // Jetonlar (`kare=`, `hucre=`, `glif=`) **yalnız** başarı satırında ve
+        // yalnız stdout'ta: makine sözleşmesi o. Hata satırı aynı sayıları
+        // taşıyor ama jeton biçiminde değil, yoksa `kare=` arayan bir CI adımı
+        // düşen koşudan kare sayısı okurdu.
         eprintln!(
-            "bateri: {} saniyelik koşuda çizilen kare {n}, üretilen hücre {k} (ikisi de >0 olmalı)",
+            "bateri: {} saniyelik koşuda çizilen kare {n}, üretilen hücre {k}, çizilen glif {g} (üçü de >0 olmalı)",
             self.ivars().run_seconds.unwrap_or(0)
         );
         std::process::exit(1);

@@ -19,6 +19,15 @@ pub enum GpuError {
     NoCommandBuffer,
     /// Instance tamponu ayrılamadı (bellek baskısı).
     NoInstanceBuffer,
+    /// Atlas dokusu ayrılamadı (bellek baskısı ya da doku sınırı).
+    NoAtlasTexture,
+    /// Glyph'i olan bir kare, atlası hiç kurulmamış bir renderer'a geldi.
+    ///
+    /// Atlasın anahtarı (punto + backing ölçeği) pencereden gelir ve onu
+    /// kuran tek yer `Renderer::cell_metrics`. Bu hata "ölçeği söylemeden
+    /// glyph çizmeye çalışıldı" demektir; alternatifi @1x bir atlas uydurup
+    /// **sessizce** yanlış boyda çizmekti.
+    NoAtlas,
     NoRenderEncoder,
     /// Komut tamponu `Error` durumuyla bitti (GPU hatası, zaman aşımı, cihaz
     /// kaybı); kare sunulmadı, sayaç artmaz. **Asenkron gelir:** `draw`
@@ -36,6 +45,8 @@ impl fmt::Display for GpuError {
             Self::NoCommandQueue => write!(f, "komut kuyruğu kurulamadı"),
             Self::NoCommandBuffer => write!(f, "komut tamponu alınamadı"),
             Self::NoInstanceBuffer => write!(f, "instance tamponu ayrılamadı"),
+            Self::NoAtlasTexture => write!(f, "atlas dokusu ayrılamadı"),
+            Self::NoAtlas => write!(f, "atlas kurulmadı: önce cell_metrics(scale) çağrılmalı"),
             Self::NoRenderEncoder => write!(f, "render encoder kurulamadı"),
             Self::CommandFailed(Some(e)) => write!(f, "komut tamponu hatayla bitti: {e}"),
             Self::CommandFailed(None) => write!(f, "komut tamponu hatayla bitti"),

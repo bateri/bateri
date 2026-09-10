@@ -8,7 +8,9 @@
 //! hasar tükenince durur; `bt-shell` yalnız pencereyi ve [`Waker`]'ı bağlar.
 //! Hücre metriği de buradan geçer ([`Renderer::cell_metrics`]): kaynağı
 //! `bt-atlas`'ın font ölçüsüdür ama `bt-shell` o crate'i görmez, [`CellMetrics`]
-//! görür — katman tablosu iki kenarla değil bir kenarla yaşar.
+//! görür — katman tablosu iki kenarla değil bir kenarla yaşar. Atlasın
+//! **dokusu** da bu crate'in: `bt-atlas` yuva numarası ve CPU bitmap'i verir,
+//! `replaceRegion` ile dokuya yazan ve `cell` pipeline'ıyla çizen buradır.
 
 mod error;
 mod frame;

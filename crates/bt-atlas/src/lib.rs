@@ -4,9 +4,11 @@
 //! yaşar. Sözleşme: yalnız `objc2-core-text` / `objc2-core-graphics` (ve
 //! ikisinin ortak tabanı `objc2-core-foundation`) görülür; AppKit ve **Metal
 //! görülmez**. Dokunun sahibi `bt-gpu`'dur — buradan çıkan şey bir yuva
-//! numarası ve CPU bitmap'idir, `MTLTexture` değil.
+//! numarası ve CPU bitmap'idir, `MTLTexture` değil; `bt-gpu` onu
+//! `replaceRegion` ile kendi `R8Unorm` dokusuna yazıyor.
 //!
-//! Kutu çizim karakterleri, emoji ve font seti ayarı 003'ün kapsamı dışında.
+//! Kutu çizim karakterleri, emoji ve font seti ayarı kapsam dışı (003 →
+//! `plan.md` → Kapsam Dışı); ikinci font yüzü isteyen `BOLD`/`ITALIC` 004'ün.
 
 mod font;
 mod raster;
@@ -196,13 +198,24 @@ impl Atlas {
             // Önbelleğe girmeselerdi aynı karakter ekranda durduğu sürece her
             // karede yeniden CoreText'e sorulurdu.
             Cizim::GlifYok | Cizim::BaglamYok => {
-                // Tavan: negatif önbellek yuva harcamıyor, yani `sonraki`
-                // onu sınırlamıyor. Bir ikili dosyayı `cat`'lemek milyonlarca
-                // ayrı codepoint üretebilir ve harita sessizce büyürdü —
-                // crate'in tavanı olmayan tek sayısı burasıydı.
-                if self.yuvalar.len() < usize::from(self.kapasite()) {
-                    self.yuvalar.insert(ch, TOFU);
+                // Tavan: negatif önbellek yuva harcamıyor, yani `sonraki` onu
+                // sınırlamıyor. Bir ikili dosyayı `cat`'lemek milyonlarca ayrı
+                // codepoint üretebilir ve harita sessizce büyürdü — crate'in
+                // tavanı olmayan tek sayısı burasıydı.
+                //
+                // Tavan dolunca **negatif kayıtlar toptan atılıyor**, "artık
+                // hiç önbellekleme" değil. Fark bu sette ortaya çıktı:
+                // `slot()` artık çizim yolunda (`bt-gpu` onu display link
+                // callback'inde çağırıyor), yani önbelleklenmeyen bir
+                // karakter ekranda durduğu sürece **her kare** CoreText'e
+                // geri sorulurdu — ana thread'de, kare bütçesinin ortasında.
+                // Tahliye bedeli amortize: iki tahliye arasına en az
+                // `kapasite()` yeni kayıt sığıyor. Pozitif kayıtlar (gerçek
+                // yuvalar) korunuyor; onların tahliyesi LRU'nun işi (00X).
+                if self.yuvalar.len() >= self.negatif_tavan() {
+                    self.yuvalar.retain(|_, &mut yuva| yuva != TOFU);
                 }
+                self.yuvalar.insert(ch, TOFU);
                 (TOFU, None)
             }
         }
@@ -214,6 +227,13 @@ impl Atlas {
     /// `/measure`'da bu iki sayıdan okunacak.
     pub fn occupancy(&self) -> (usize, usize) {
         (usize::from(self.sonraki), usize::from(self.kapasite()))
+    }
+
+    /// Haritanın kabul ettiği en çok kayıt sayısı — pozitif ve negatif
+    /// birlikte. Kapasitenin **iki katı**: bir katı pozitif kayıtların
+    /// olabildiği en büyük değer, ikincisi negatif önbelleğe bırakılan pay.
+    fn negatif_tavan(&self) -> usize {
+        usize::from(self.kapasite()).saturating_mul(2)
     }
 
     /// Toplam yuva sayısı.
@@ -417,7 +437,9 @@ mod tests {
         // Bu bekçi olmadan y ekseni ters çevrilse (CG'nin başlangıcı sol
         // **alt**) ya da taban yanlış hesaplansa bütün sınamalar yeşil kalır:
         // `rasterize_edilen_glif_bos_degildir` yalnız "bir yerde piksel var"
-        // diyor. Hata ancak phase-4'te, ekranda görünürdü.
+        // diyor. `bt-gpu`'nun offscreen kapısı da göremezdi: o da "hücrenin
+        // içi arka planla tekdüze değil" diyor, harfin doğru yerde olduğunu
+        // değil. Ters bir taban ancak gözle görülürdü.
         let mut a = Atlas::new(PUNTO, 1.0);
         let m = a.metrics();
         let (_, yukleme) = a.slot('W');
@@ -456,22 +478,43 @@ mod tests {
     }
 
     #[test]
-    fn negatif_onbellek_tavanlidir() {
+    fn negatif_onbellek_tavanli_ve_tahliyeli() {
         let mut a = Atlas::new(BUYUK_PUNTO, 1.0);
-        let (_, kapasite) = a.occupancy();
+        let tavan = a.negatif_tavan();
+        // Tanınan bir karakter önce yuvasını alsın: tahliyenin **yalnız**
+        // negatif kayıtları attığını sınamak için bir pozitif kayıt gerek.
+        let (harf, _) = a.slot('A');
+        assert_ne!(harf, TOFU, "'A' Menlo'da var");
+
         // Tanınmayan karakter yuva harcamıyor, yani `sonraki` onu
         // sınırlamıyor. Tavan olmasaydı harita gördüğü ayrı codepoint sayısı
         // kadar büyürdü ve bir ikili dosyayı `cat`'lemek bunu gerçek bir yola
         // çevirir. Crate'in tavanı olmayan tek sayısı burasıydı.
-        for ch in ('\u{4e00}'..'\u{9fff}').take(kapasite * 3) {
+        let havuz: Vec<char> = ('\u{4e00}'..'\u{9fff}').take(tavan * 3).collect();
+        assert!(havuz.len() > tavan, "havuz tavanı aşmalı");
+        for &ch in &havuz {
             assert_eq!(a.slot(ch).0, TOFU, "'{ch}' Menlo/SF Mono'da yok");
+            assert!(
+                a.yuvalar.len() <= tavan,
+                "negatif önbellek tavanı aşıldı: {} > {tavan}",
+                a.yuvalar.len()
+            );
         }
-        assert_eq!(a.occupancy().0, 1, "tofu düşüşleri yuva harcamamalı");
-        assert!(
-            a.yuvalar.len() <= kapasite,
-            "negatif önbellek tavanı aşıldı: {} > {kapasite}",
-            a.yuvalar.len()
+        assert_eq!(a.occupancy().0, 2, "tofu düşüşleri yuva harcamamalı");
+
+        // Tavan dolunca önbellekleme **durmuyor**, tahliye oluyor: tahliyeden
+        // sonra gelen kayıt haritaya giriyor. Eski davranışta ("tavan dolu →
+        // hiç yazma") burası boş dönerdi ve ekranda duran her desteklenmeyen
+        // karakter her karede CoreText'e geri sorulurdu — `slot()` bu sette
+        // çizim yoluna girdiği için bedeli ana thread'de ödenirdi.
+        let son = *havuz.last().expect("havuz boş değil");
+        assert_eq!(
+            a.yuvalar.get(&son),
+            Some(&TOFU),
+            "tahliyeden sonraki kayıt önbelleğe girmeli"
         );
+        // Pozitif kayıt tahliyeye girmiyor: yuvası duruyor.
+        assert_eq!(a.slot('A').0, harf, "pozitif kayıt tahliyede kayboldu");
     }
 
     #[test]
