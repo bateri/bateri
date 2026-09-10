@@ -178,6 +178,13 @@ yalnız `bt-shell`'in bağımlılık listesine iki satır girdi, sürüm oynamad
 catch-all'ın ürettiği baytın aynısını üretiyordu (`/simplify` bunu tüm karakter
 uzayında doğruladı); silindiler, sözleşmeyi `donus_ve_silme_tek_bayt` çiviliyor.
 
+**Checklist'in `ls --color` testi yanlıştı.** Plan "renkli arka planlı hücreler
+belirir" derken `ls`'in arka plan boyadığını varsayıyordu; boyamıyor —
+`ls -G` ön plan basıyor (`ESC[1m ESC[35m … ESC[39;49m`) ve bu renderer yalnız
+varsayılan olmayan **arka planı** çiziyor. Glyph 003'te olduğu için `ls`
+çıktısı tanım gereği sıfır hücre üretir, yani madde geçseydi de yanlış şeyi
+kanıtlardı. Göz kontrolü `\033[4Xm` basan bir betikle tekrarlandı ve geçti.
+
 ---
 
 ## Yayın Etkisi
@@ -267,8 +274,8 @@ değil `exec_async` iş atan yerel bir sarmalayıcı.
 - [x] **Kapanışta uçuştaki kare** (002 phase-3 `/code-review` devri): tamamlanma bloğunu Metal `Block_copy` ile tutuyor ve **kendi thread'inde** serbest bırakıyor. `DisplayLink` uçuşta kare varken düşerse bloğun elindeki son `Waker` de orada düşer; `MainThreadBound::drop` ana kuyruğa **senkron** iş atar (`exec_sync`) ve ana thread o sırada `Session::shutdown()`'ın `join`'inde bekliyorsa ikisi birbirini kilitler. Çözüldü: `kapat()` link'i **düşürmüyor**, `DisplayLink::stop()` ile durduruyor ve sıra "önce link, sonra oturum"; son referans hep ana thread'de kalıyor. Yapısal kalıntı (sekme geldiğinde link düşmek zorunda) yukarıda sete devredildi
 - [x] `keys.rs` + sınamalar; `BateriView` `keyDown:`; `makeFirstResponder`
 - [x] `applicationWillTerminate:` → `shutdown()`; `child_exit` → terminate; deadline → `shutdown` + exit; bekçi
-- [~] Test: `cargo run -q -p bateri` → prompt gelir, `ls --color` yazınca renkli arka planlı hücreler belirir (göz; glyph yok) — **göz kontrolü kullanıcıya kaldı**, ajan pencereyle etkileşemez ve tuş gönderemez. Kod tarafı kapatıldı: `kod_cevir` altı sınamayla bağlı, `makeFirstResponder` `debug_assert!` ile korunuyor, PTY'ye yazma yolu `bos_yazma_pty_yazicisini_kilitlemez` ve `sabit_shell_arka_plan_hucreleri_verir` ile uçtan uca sınanıyor
-- [~] Test: `exit` yazınca pencere kapanır ve süreç 0 ile biter; kırmızı düğme aynı; `ps` ile yetim shell yok — **kısmen otomatik**: shell'in kendi çıkışı → `ChildExit` → `terminate:` → çıkış 0 yolu `BT_RUN_SECONDS=11` koşusuyla doğrulandı (`kare=1 hucre=8 pipeline=ok`, exit 0) ve `ps` yetim bırakmadığını gösterdi; klavyeden `exit` yazmak ve kırmızı düğme göz kontrolü, kullanıcıya kaldı
+- [x] Test: `cargo run -q -p bateri` → pencerede imleç bloğu var, körlemesine yazılan `sh /tmp/r` (üç `\033[4Xm` bloğu basan betik) renkli hücreleri getirdi — **kullanıcı koştu, geçti**. Maddenin `ls --color` hâli **yanlış testti**: `ls` ön plan rengi basıyor (`ESC[35m`), arka plan değil, ve bu renderer yalnız varsayılan olmayan **arka planı** çiziyor — glyph 003'te olduğu için `ls` çıktısı tanım gereği sıfır hücre üretir. Test doğru komutla tekrarlandı
+- [x] Test: `exit` yazınca pencere kapanır ve süreç 0 ile biter; kırmızı düğme aynı; `ps` ile yetim shell yok — **kullanıcı koştu, geçti**. Klavyenin uçtan uca çalıştığının kanıtı da bu: dört harf + Enter `keyDown:` → `kod_cevir` → `Session::write` → PTY → `ChildExit` → `terminate:` zincirinin tamamını geçti. Otomatik yarısı ayrıca `BT_RUN_SECONDS=11` ile doğrulanmıştı (`kare=1 hucre=8 pipeline=ok`, exit 0, `ps` temiz)
 - [x] Test: `make duman` → `kare=1 hucre=8 pipeline=ok` (çıkış 0); `BT_RUN_SECONDS=1` → 1,5 s'de bitti, bekçi (3 s) devreye girmedi
 - [x] Test: SIGHUP'ı yutan komut (`trap '' HUP; sleep 100`) ile bekçi `_exit(70)` — `BT_RUN_SECONDS=2`, kapanış bütçesi 6 s, çıkış 70 ve **jeton basılmadı**; `smoke_shell` geçici olarak değiştirilip geri alındı
 - [x] Belgeler aynı commit'te

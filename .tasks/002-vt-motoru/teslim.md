@@ -41,11 +41,11 @@ make duman        # pencereyi açar, kare ve hücre sayar
 - [x] `BT_RUN_SECONDS=11` (shell deadline'dan önce çıkar) → jetonlar yine
       basılıyor, çıkış 0; `ps` yetim shell bırakmıyor
 - [x] Bekçi: `trap '' HUP` yiyen çocukla `_exit(70)`, jeton basılmıyor
-- [~] **Göz kontrolü — kullanıcıya kaldı** (ajan pencereyle etkileşemez):
-      `cargo run -q -p bateri` → prompt gelir, `ls --color` renkli hücreler
-      verir; `exit` ve kırmızı düğme pencereyi kapatır; pencereyi simge
-      durumuna indirip geri almak ve başka pencerenin arkasına almak kareyi
-      durdurup geri getirir. Kod tarafı kapalı, bu bir doğrulama — keşif değil
+- [x] **Göz kontrolü — kullanıcı koştu, geçti**: pencerede imleç bloğu,
+      körlemesine yazılan `sh /tmp/r` ile renkli hücreler, `exit` ve kırmızı
+      düğmeyle temiz kapanış, simge durumu/örtülme sonrası kare geri geliyor.
+      (`ls --color` yanlış testti — `ls` ön plan basıyor, arka plan değil;
+      bkz. phase-4 → Uygulama Notları)
 
 ## B. Yayın (doğrulamadan SONRA)
 
