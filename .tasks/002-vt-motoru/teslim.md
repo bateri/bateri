@@ -71,6 +71,24 @@ kapsam dışı bırakıldı. Bundle seti açıldığında bu satır oraya taşı
 
 Sonuç `docs/OLCUMLER.md`'ye girer — başka hiçbir belgeye sayı yazılmaz.
 
+#### 2026-09-10 — koşuldu, sonuç: **ölçüm aracı yok**
+
+`/measure 002-vt-motoru` koştu ve sayı **üretmedi**. İki iddia da kare süresi
+ailesinden ve ikisi de aynı eksik kancaya dayanıyor:
+
+| # | iddia | gereken kanca | durum |
+|---|---|---|---|
+| 1 | `FairMutex::lock()` beklemesi | `BT_FRAME_LOG` + `BT_SCROLL_TEST` | kanca yok |
+| 2 | kare başına instans tamponu + `setVertexBytes` eşiği | `BT_FRAME_LOG`, `cargo bench` | kanca yok, bench hedefi yok |
+
+Kanıt ve gerekçenin tamamı `003-glyph-atlas/teslim.md` → B.1'in aynı tarihli
+notundadır (kancalar depoda yalnız belgelerde geçiyor, `cargo bench
+--workspace -- --list` → `0 benchmarks`, boşta sıfır kare yüzünden profiler
+geri düşüşü de yok). İki set aynı kancaları bekliyor; kanca seti açıldığında
+**ikisi birden** ölçülür.
+
+Kutu `[ ]` kalıyor — ölçüm bir kapı değil, atlanmış da değil: **aracı yok**.
+
 ### B.3 Bağımlılık kaydı `[oto]`
 
 `Cargo.lock` bu sette **+47 paket** aldı (phase-1, ölçüldü; çoğu Windows
@@ -86,7 +104,8 @@ ilgili crate'in bağımlılık listesine kenar eklendi.
 
 - [ ] B.1 Apache-2.0 attribution `[elle]` — bundle setine devredildi, bu
       teslimde yapılacak bir şey yok
-- [ ] B.2 `/measure 002-vt-motoru` `[komut]` — iki ölçüm bekliyor
+- [ ] B.2 `/measure 002-vt-motoru` `[komut]` — iki ölçüm bekliyor;
+      2026-09-10'da koştu, **ölçüm aracı yok** (kanca seti bekliyor, bkz. B.2)
 - [x] B.3 Bağımlılık kaydı `[oto]` — `Cargo.lock` depoda, gerekçeler
       manifest yorumlarında ve `discussion.md → Karar`'da
 

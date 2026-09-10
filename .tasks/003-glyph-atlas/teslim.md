@@ -75,6 +75,40 @@ Sonuç `docs/OLCUMLER.md`'ye girer — başka hiçbir belgeye sayı yazılmaz.
 Ölçüm sonrası yeniden bakılacak iki karar da bunlara bağlı: `replaceRegion`
 yerine staging + blit (aşağıda B.3) ve atlas dokusunun `Shared` depolaması.
 
+#### 2026-09-10 — koşuldu, sonuç: **ölçüm aracı yok**
+
+`/measure 003-glyph-atlas` koştu ve sayı **üretmedi**. Beş iddianın hiçbiri
+bugünkü depoda ölçülebilir değil; eksik olan ölçüm değil **kanca**:
+
+| # | iddia | gereken kanca | durum |
+|---|---|---|---|
+| 1 | `#[inline]` renk yolu | `cargo bench -p bt-core` | bench hedefi yok |
+| 2 | `Atlas::slot` maliyeti | `cargo bench -p bt-atlas` | bench hedefi yok |
+| 3 | atlas doluluğu | `occupancy()`'yi raporlayan yol | sayaç var, raporlayan yok |
+| 4 | ilk karede atlas + doku kurulumu | `BT_STARTUP_TRACE` | kanca yok |
+| 5 | ikinci pipeline'ın kare süresine etkisi | `BT_FRAME_LOG` + `BT_SCROLL_TEST` | kanca yok |
+
+Kanıt: `cargo bench --workspace -- --list` → **`0 benchmarks`**; `benches/`
+dizini yok; `BT_FRAME_LOG`/`BT_SCROLL_TEST`/`BT_STARTUP_TRACE`/
+`BT_INPUT_LATENCY_SAMPLES` depoda **yalnız belgelerde** geçiyor, hiçbir
+`env::var` çağrısında değil (crate'lerdeki üç çağrı:
+`MACOSX_DEPLOYMENT_TARGET`, `OUT_DIR`, `BT_RUN_SECONDS`). `occupancy()`'nin
+tek çağıranı `bt-atlas`'ın kendi sınamaları.
+
+`xcrun xctrace` da geri düşüş **değil**: boşta sıfır kare kuralı gereği sabit
+duman betiğinde `kare=1` çıkıyor, yani örneklenecek bir dağılım (p95, en kötü
+kare) ve tekrarlanabilir bir taban koşusu yok — iş yükü kancası olmadan
+profiler boş bir zaman çizelgesi kaydeder.
+
+`docs/OLCUMLER.md` bu yüzden **oluşturulmadı**: dosyanın ilk iki bölümü
+(`## Yöntem`, `## Nasıl yeniden ölçülür`) kancaların biçimine bağlıdır ve
+onları kanca yokken yazmak yöntemi uydurmak olurdu. Dosyayı kancaları ekleyen
+set kurar.
+
+Bu, 001 phase-3'ün öngördüğü durum: *"Kare süresi ölçümü `BT_FRAME_LOG`
+kancasıyla gelir; bu sette kanca yok, `/measure` 'ölçüm aracı yok' der."*
+Kutu `[ ]` kalıyor — ölçüm bir kapı değil, atlanmış da değil: **aracı yok**.
+
 ### B.2 Göz kontrolü `[elle]`
 
 İki şey hiçbir otomatik kapının göremediği yerde:
@@ -128,7 +162,8 @@ ikinci bir CF sarmalayıcı yığını olurdu). phase-1, phase-3 ve phase-4
 
 <!-- `/ship` bekleyen manuel adımları BU başlık altında arar. -->
 
-- [ ] B.1 `/measure 003-glyph-atlas` `[komut]` — beş ölçüm bekliyor
+- [ ] B.1 `/measure 003-glyph-atlas` `[komut]` — beş ölçüm bekliyor;
+      2026-09-10'da koştu, **ölçüm aracı yok** (kanca seti bekliyor, bkz. B.1)
 - [ ] B.2 Göz kontrolü `[elle]` — `colorspace` `nil` ve glyph yerleşimi
 - [x] B.3 Bilinen sınırlar `[oto]` — kod yorumlarında ve phase notlarında yazılı
 - [x] B.4 Bağımlılık kaydı `[oto]` — `Cargo.lock` depoda, gerekçe `discussion.md → Karar`
