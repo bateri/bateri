@@ -191,4 +191,4 @@ Kodla **aynı commit'te**:
 - [x] `/code-review` çalıştırıldı, 7 bulgu giderildi
 - [x] `/audit` çalıştırıldı — mercek 1, 2, 6, 10 temiz; 3, 4, 5, 7, 8, 9 ilgisiz
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: 3e006ba
