@@ -62,6 +62,16 @@ yol, ölçmediği zaman **hiç var olmamış gibi** davranmalı.
     değil, aynı bayrağın altında tek sayı.
   - **R7.3** — `docs/OLCUMLER.md` bu sette **yazılmaz**; ilk `/measure` kurar.
 
+- **R8** — Kapanış **sınırlı sürede** döner; ölçüm koşusu asılmaz.
+  - **R8.1** — Mekanizma **teşhis edilir**, tahminle düzeltilmez.
+    `shutdown()`'ın bugünkü doc'u asılmayı `trap '' HUP` ile açıklıyor, oysa
+    üretici (`load_shell`) HUP'ı yutmuyor: doc kodu kapsamıyor.
+  - **R8.2** — Sınır bir `const` ve gerekçesi yorumda. Bekçiden (`bt-shell`,
+    yalnız `BT_RUN_SECONDS` yolu) **ayrı**: bu `bt-core`'da ve her yolda
+    çalışır, yani etkileşimli kullanımdaki "kesen yok" hâlini de kapatır.
+  - **R8.3** — Kanıt ölçülür: `BT_SCROLL_TEST` en az 8 koşuda **0 asılma**
+    (öncesi 5/8).
+
 ## Yaklaşım
 
 1. **Phase-1 `bt-core` + `bt-gpu` + `bt-shell`** — ölçüm olmayan boru: ayrı
@@ -73,6 +83,12 @@ yol, ölçmediği zaman **hiç var olmamış gibi** davranmalı.
    alanlar, env kenarda bir kez, CPU'nun iki aralığı, GPU'nun paylaşılan
    slotu, açılış damgası, örnek halkası. Henüz hiçbir şey basılmaz; kapı
    kapalıyken hiçbir yol değişmez.
+2b. **Phase-2b `bt-core`** — kapanışın sınırlı beklemesi. Phase-2 sonrası
+   ölçüldü: ölçüm yükünün kapanışı 8 koşunun 5'inde asılıyor (`exit 70`, jeton
+   satırı hiç çıkmıyor), smoke yükü 4/4 temiz. Setin bütün ürünü ölçüm koşusu
+   olduğu için bu bir kusur değil **ürünün güvenilmezliği**. Rapordan **önce**
+   geliyor: phase-3 `## Yöntem`'i yazacak ve asılma kapanmazsa o belge "asılan
+   koşu atılır" demek zorunda kalır.
 3. **Phase-3 `bt-shell` + belgeler** — rapor: p95 ve en kötü değerin süreç
    içinde hesabı, jetonların basılması, `CLAUDE.md` / `/measure` skill'i /
    `context.md` şablonunun kanca adlarıyla uyumlanması.
@@ -131,4 +147,5 @@ main.rs   BT_FRAME_STATS / BT_SCROLL_TEST okunur (TEK YER)
 |-------|-------|--------|
 | phase-1 | ✅ | `9788d95` |
 | phase-2 | ✅ | `8df1ef6` |
+| phase-2b | | |
 | phase-3 | | |
