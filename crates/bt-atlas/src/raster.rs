@@ -231,9 +231,11 @@ fn coverage(y: usize, y0: f32, y1: f32) -> u8 {
 
 /// Kıvrımlı çizgi: bandın merkezi sütun boyunca sinüsle salınıyor.
 ///
-/// Dalga bandının **altı alt çizginin altına çakılı** (`position + thickness`).
-/// O sınır `font::rule_envelope` tarafından zaten hücrenin içine oturtulduğu
-/// için kıvrım da inşaen içeride; ayrıca kırpılmasına gerek yok.
+/// Dalga bandının **altı alt çizginin altına çakılı**: `position +
+/// CURL_FACTOR * thickness`, hücre tabanına kırpılarak. Kırpma burada
+/// **gerekli** — `font::rule_envelope` yalnız `position + thickness`'ı
+/// hücrenin içine oturtuyor, kıvrım ise onun `CURL_FACTOR` katı kadar aşağı
+/// iniyor ve tabanı taşabiliyor.
 fn curl(target: &mut [u8], m: Metrics, position: f32, thickness: f32) {
     let (w, h) = m.cell_wh();
     // Dalga bandı alt çizgiden **aşağı** doğru büyüyor, yukarı değil: alt
