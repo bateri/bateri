@@ -375,6 +375,11 @@ kare **talebi** değişmedi).
   sınama adı dahil), yorumlar ve `assert!` gerekçeleri Türkçe, `#[allow]`
   yok, yeni UI dizgisi ya da ayar anahtarı yok.
 
+- **sadakat: makas yok.** `git show --stat 643c8c6` ile checklist karşılaştırıldı:
+  dokunulan altı dosyanın her biri bir maddeyle, her madde bir dosyayla eşleşiyor;
+  `phase-3.md`'nin +2 satırı devredilen iki belge kalemi, `plan.md`'nin `## Durum`'u
+  damga commit'inde (`271c670`). `Cargo.lock` oynamadı.
+
 ## Yayın Etkisi
 
 - **shader** — yok.
