@@ -217,6 +217,8 @@ Hepsi bu commit'te (kodla çelişen cümle kuralı):
 - [ ] Test: `kalin_ve_duz_ayri_cizilir` — aynı karakter iki yüzle iki farklı piksel kümesi verir (offscreen, `assert_ne!`)
 - [ ] Test: `imlecin_ustundeki_kural_gorunur` — imleç hücresindeki kural imleç bloğuyla örtülmüyor
 - [ ] Belgeler: `CLAUDE.md` (jeton + duman satırı + "004'ün işi" cümlesi), `Makefile`, `proje.md`
+- [ ] **phase-2'den devir** (`/audit` mercek 9): `CLAUDE.md`'nin hücre maddesine "24 bayt **grid** hücresidir; `frame()` sınırının `Cell`'i ayrı bir kare kaydıdır" yan tümcesi. Sınır hücresi 004'te 5 alandan 10'a çıktı ve maddeyi okuyan "hücreye alan eklendi, yan tablo neden yok" diye okuyor; gerekçe `bt-core/src/lib.rs` ve `session.rs`'te yazılı ama `CLAUDE.md`'de değil
+- [ ] **phase-2'den devir** (`/audit` mercek 10, bulgu değil not): `CLAUDE.md`'nin 003 anlatısındaki "`frame()` sınırı karakteri ve ön plan rengini geçiriyor" cümlesi artık eksik — sınır beş alan daha geçiriyor
 - [ ] Doğrulama geçti (`make hepsi`; `make shader` `[~]` — `.metal` el değmedi; `make duman` → `kare=N hucre=8 glif=6 kural=R pipeline=ok`; `make test-yaris`)
 - [ ] `/simplify` çalıştırıldı, bulgular uygulandı
 - [ ] `/code-review` çalıştırıldı, bulgular giderildi

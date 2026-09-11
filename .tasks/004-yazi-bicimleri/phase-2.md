@@ -187,7 +187,193 @@ yanına `kural=` sayısı eklenir — sahibi bu fonksiyon **ve** aşağıdaki s�
 
 ## Uygulama Notları
 
-<!-- /implement doldurur. -->
+**0. Ad ve dil düzeltmesi (`SAPMA` değil).** Phase dosyası `bb04da7`'de, yani
+`1dbb084`'ün dil daraltmasından önce yazıldı. Kod tanımlayıcılarının tamamı
+İngilizce: `color::lineer_rgba` → `color::linear_rgba`, `let gizli` →
+`let hidden`, ve checklist'in Türkçe sınama adları İngilizceye taşındı —
+`kivrimli_metin_curl_verir` → `undercurl_text_yields_curl`,
+`sabit_shell_bes_stili_ayirt_eder` → `smoke_shell_distinguishes_five_styles`,
+`gizli_metnin_kurallari_da_duser` → `hidden_text_drops_rules_too`,
+`alti_cizili_bosluk_hucresi_gecer` → `underlined_space_cell_passes_sink`.
+"Değişmeden geçsin" denen ikisi zaten İngilizceydi
+(`smoke_shell_yields_background_cells`, `smoke_shell_yields_six_glyphs`).
+
+**1. `#[derive(Default)]` derlenmiyor; `Cell`'in `Default`'u elle yazıldı.**
+`LinearRgba` `Default` taşımıyor ve taşımamalı: tek kurucusunun `from_srgb`
+olması renk uzayını tipe bağlayan şeyin ta kendisi (`color.rs`'in newtype
+gerekçesi). `impl Default for Cell` `fg`'yi **siyah** veriyor — anlamlı bir
+varsayılan ön plan yok ve makul görünen bir varsayılan, unutulan bir alanı
+ekranda sessizce yanlış yapardı. Doc'u kapsamı söylüyor: yalnız
+`..Default::default()` ile kurulan sınama literalleri için; üretim yolunda
+tek kurucu `frame()` ve orada on alanın onu da koşulsuz yazılıyor.
+
+**2. `UnderlineStyle` `lib.rs`'ten yeniden ihraç edilmek zorundaydı.**
+Checklist'te yoktu: `pub` bir alanın tipi, ihraç edilmezse
+"private type in public interface". `lib.rs`'in modül doc'undaki görünür tip
+listesi de aynı commit'te güncellendi.
+
+**3. Eşleme zinciri atlama kapısının ÜSTÜNDE değil ALTINDA.** Phase metni
+(madde 2 + madde 4) beş bayrağı kapıdan önce çözüp kapıda
+`underline == None && !strikeout` soruyordu. İlk hâli öyle yazıldı;
+`/simplify`'ın Altitude ve Efficiency mercekleri bağımsız olarak aynı şeyi
+söyledi ve haklılar: `frame()`'in kendi disiplini "kapıda ucuz test, çözüm
+kapıdan sonra" (aynı gerekçe `fg` ve `underline_color` için iki ayrı yorumda
+yazılı), oysa zincir kapının üstünde **her görünür hücrede** yedi bayrak
+okuyordu — kapının ihtiyacı tek soru: "hiç kural var mı".
+Son hâl: `const RULES = ALL_UNDERLINES | STRIKEOUT`, kapıda
+`let ruled = !hidden && flags.intersects(RULES)`, beş kollu zincir ve
+`strikeout` kapıdan sonra. Davranış aynı, sınamalar aynı.
+`!hidden` maskenin **içinde**: dışarıda kalsaydı gizli+altı çizili hücre
+kapıdan geçip `sink`'e çizilecek hiçbir şeyi olmadan varırdı (mutasyonla
+doğrulandı: `hidden_text_drops_rules_too` kırmızı düşüyor).
+Aynı hamlede `NO_INK` `SPACERS`'a indi ve `HIDDEN` **tek bir `let`** oldu:
+gizlilik hem mürekkebi hem kuralları düşürüyor, iki ifadede yaşarsa
+ayrışabilirler.
+
+**4. Sıra mutasyonu kırmızı düşmüyor — bekçi *sırayı* değil *düşürmeyi*
+tutuyor.** Ölçüldü: `contains(UNDERLINE)` kolunu zincirin **başına** almak
+üç sınamanın hiçbirini kırmıyor, çünkü alacritty beş bayrağı gerçekten
+birbirini dışlar tutuyor (`Attr::*Underline`'ın beşi de önce
+`ALL_UNDERLINES`'ı siliyor). Kırmızı düşen mutasyon asıl refleks: zinciri
+tek bir `contains(UNDERLINE)`'a indirmek →
+`undercurl_text_yields_curl` **ve** `smoke_shell_distinguishes_five_styles`
+düşüyor. Kıvrımlı-önce sırası yine de korundu: bedava ve dışlayıcılık
+alacritty'nin bize vermediği bir garanti. `hidden` kolunu silmek de
+`hidden_text_drops_rules_too`'yu kırıyor (mutasyonla doğrulandı) — o sınama
+uygulamadan önce yeşildi, çünkü atıl alanlar zaten `None`/`false`'tu; kanıtı
+mutasyon, kırmızı-önce değil.
+
+**5. Üç duman sınaması ortak `spawn_smoke()` kurucusuna geçti.**
+Üçüncü kopya `SessionOptions` literalini üçe çıkarıyordu. İki var olan
+sınamanın **iddiaları bit bit aynı** (8 ve 6 korundu); değişen yalnız
+oturumun nasıl açıldığı. `spawn_session` da aynı `spawn_with_command`
+gövdesine indi.
+
+**6. Reçete Rust satır devamıyla yazıldı.** Tek satır 100 sütunu aşıyor ve
+rustfmt dizgi literalini bölemiyor; `\` + satır sonu kaçışı sonundaki boşluğu
+koruyup baştaki girintiyi yiyor, yani kabuğa giden komut tek satır.
+Doğrulaması `smoke_shell_distinguishes_five_styles`'ın `cells.len() == 15`
+iddiası: reçete bozulsa hücre sayısı tutmaz.
+
+**7. `underline_color` atlama kapısından SONRA çözülüyor.** Kapının kural
+yan tümcesi yalnız bayrak okuyor; `CellExtra`'ya inip palete bakmak
+çizilmeyen hücreler için `Term` kilidi altında ödenirdi — ön planın kapı
+sonrasına alınmasıyla birebir aynı gerekçe.
+
+**8. Kodla çelişen dört yorum aynı commit'te düzeltildi.** `NO_INK` bloğunun
+"004'te `Some(' ')` olacak" cümlesi (karar tersine çıktı), `Cell`'in
+"biçim bayrakları geçmez … 004'ün işi" başlığı, ve `fg`'nin gelecek zamanlı
+"004'ün kural çizgisi isteyecek" cümlesi, ve `Cell::ch`'in `Option<char>`
+gerekçesindeki "bedeli 004'te ödenirdi: altı çizili bir boşluk **mürekkep
+ister**" öngörüsü (dördüncüsünü `/simplify` buldu; karar tersine çıktığı için
+gerekçe artık dört ayrık durumun *farklı şey istemesine* dayanıyor).
+`smoke_shell`'in doc'u yedi kural hücresini, stil sırasını ve iki nokta
+uyarısını kazandı; `fore`'un yorumundaki gelecek zaman da düzeldi.
+
+### `/simplify` kaydı
+
+Dört mercek (reuse, simplification, efficiency, altitude) paralel koştu.
+
+**Uygulanan:** eşleme zinciri kapının altına indi ve kapı tek maske testine
+düştü (not 3 — Altitude 1 + Efficiency 1, aynı bulgu iki mercekten);
+`underline_color` da `ruled` kapısının arkasına alındı (Efficiency 3:
+`extra` sıfır genişlikli birleşik karakter ve hyperlink için de dolu, yani
+kuralsız hücrede `Arc` deref + palet çözümü boşa gidiyordu);
+`spawn_with_command`'ın `Option` parametresi düştü — iki çağıranın ikisi de
+`Some` veriyordu (üç mercek birden); beklenen renk vektörü
+`vec![Option::None; 6].into_iter().chain([red])` yerine düz `vec!` literali
+(iki kardeş assert zaten öyle); `Cell::ch`'in ölü 004 öngörüsü (not 8);
+alacritty'nin "`Undercurl` `ALL_UNDERLINES`'ı siler" olgusunun üç kopyası
+bire indi — tek yük taşıyan yer eşleme sitesi, `UnderlineStyle`'ın doc'u
+tasarım sonucunu, sınama yorumu yakaladığı mutasyonu söylüyor.
+
+**Reddedilen (uygulanmadı, waive değil — bulgu değil tercih):**
+`undercurl_text_yields_curl` ve
+`underlined_space_cell_passes_sink`'i silip duman sınamasına bırakmak
+(Simplification 3) — ikisi de `plan.md`'nin onaylı checklist'inde ve
+odaklı sınama duman reçetesi yeniden yazıldığında da ayakta kalıyor;
+üç duman sınamasını tek PTY spawn'ına toplamak (Efficiency 4) — hata
+yalıtımı sınama başına bir süreçten daha değerli; `underline_color`'ı
+`Option` yerine düz `LinearRgba` yapıp yokluğunda `fg` yazmak
+(Efficiency 2) — `plan.md` R3.5 "`None` → ön plan" diyor ve phase-3'ün
+`underline_color ?? fg` satırı buna bağlı, `/simplify` bir plan kararını
+çeviremez; `bt-gpu`'nun yeni alanları okumaması (Efficiency 2) — phase-3'ün
+işi, bu setin dikişi tam olarak bu.
+
+### `/code-review` kaydı
+
+**2 bulgu, ikisi de düşük, ikisi de uygulandı; waive yok.** Bulguların
+ikisi de `/simplify`'ın açtığı yüzeyde:
+
+- **SGR 58 kapısı `ruled`'a bağlıydı ve yalnız üstü çizili bir hücreye renk
+  taşıyordu.** `\e[9;58;5;196m` → `underline: None, strikeout: true,
+  underline_color: Some(kırmızı)`; `plan.md` ve `phase-3.md` ise "üstü
+  çizili **hep** `fg`" diyor, yani phase-3'ün çizicisi bu rengi okusa üstü
+  çiziliyi kırmızıya boyardı. Kapı `underline != None`'a daraltıldı
+  (adı "alt çizgi rengi" ve SGR'de üstü çizilinin ayrı rengi yok) ve
+  `Cell::fg`'nin doc'u aynı ayrımı söyleyecek şekilde düzeltildi. Duman
+  reçetesi bunu göremiyor — 9 ile 58 aynı hücrede buluşmuyor — bu yüzden
+  `strikeout_only_cell_carries_no_underline_color` eklendi; mutasyonla
+  doğrulandı (kapı `ruled`'a döndüğünde kırmızı).
+- **`smoke_shell_distinguishes_five_styles`'ın bekleme ölçütü yapısal
+  olarak kırılgandı.** `wait_cells(.., 8)` arka planlı hücre sayar, ama
+  yedi kural hücresi sekiz arka planlı hücreden **sonra** geliyor: PTY
+  okuması ikisinin arasında bölünürse sınama 8'i gören karede dönüp
+  `cells.len() == 15`'te düşerdi. 15 koşuda görülmedi, ama kardeşi
+  (`underlined_space_cell_passes_sink`) çapasını tam da bu yüzden sona
+  koyuyor. `wait_cells` genel `wait_frame(session, wake, ready)` üstüne
+  oturtuldu ve stil sınaması ölçütünü karenin tamamına bağladı.
+
+Kayda değer ikinci yarısı: `/code-review` alacritty ve vte kaynaklarından
+dört olguyu bağımsız doğruladı (beş alt çizgi bayrağının gerçekten birbirini
+dışladığı, `BOLD_ITALIC`'in `BOLD|ITALIC` birleşimi olduğu için `contains`'in
+doğru yanıtladığı, `4:2/4:3/4:4/4:5` eşlemesi, `58;5;196` → `Indexed(196)`)
+ve iki yeni PTY sınamasını 15 kez koşturdu — flake yok.
+
+### `/audit` kaydı
+
+**İlgisiz mercekler (elendi, kayda geçiyor):** 4 (ayar/tema şeması — model
+yok), 5 (shell üçlüsü — `assets/shell/` el değmedi), 7 (thread ve blokaj —
+yeni thread, kilit, `sleep` ya da G/Ç yok; diff'teki `sleep`'ler sınama
+betiklerinin kabuk komutu), 8 (boşta sıfır kare — yeni animasyon ya da
+zamanlayıcı yok, `dirty` kapısı el değmedi; `frame()`'in gövdesi değişti ama
+kare **talebi** değişmedi).
+
+**Koşan mercekler:**
+
+- **1 katman yönü ve platformsuzluk — temiz.** `cargo tree -p bt-core` yalnız
+  `alacritty_terminal` ve onun ağacını veriyor; `objc2`/`core-text`/`metal`
+  yok, kaynakta da grep boş. `bt-gpu` ağacında `bt-shell` yok.
+  `UnderlineStyle` `bt-core`'un kendi tipi ve alacritty'nin `Flags`'i ile
+  `Color`'ı `pub` API'ye çıkmıyor; `(bold, italic) → Face` çevirisi
+  bilerek yazılmadı, phase-3'ün işi.
+- **2 yeni bağımlılık — temiz.** `Cargo.toml` ve `Cargo.lock` el değmedi
+  (`git diff HEAD --name-only` ikisini de göstermiyor).
+- **3 panik yolu — temiz.** `bt-core`'a giren tek `expect` sınama
+  modülünde (`underlined_space_cell_passes_sink`'in çapası); üretim yolunda
+  yeni `unwrap`/`expect`/`panic!`/indeksleme yok.
+- **6 ölçüm sahipliği — temiz.** Diff'te fps/gecikme/bellek iddiası yok.
+  Geçen sayılar (`24 bayt`, `4 bayt`, `8`/`6`/`7`/`15` hücre) `size_of`
+  gerçeği ve iş sayımı; `docs/OLCUMLER.md` yok ve oluşturulmadı. Sınır
+  `Cell`'inin büyümesinin kare süresine etkisi "ölçüm bekliyor" olarak
+  duruyor ve bu phase de sayı yazmadı.
+- **9 hücre boyutu ve shader/Rust düzeni — bir düşük bulgu, devredildi.**
+  24 baytlık `const` assert güncel ve hâlâ alacritty'nin **grid** hücresine
+  bağlı; `.metal` el değmedi, `Instance`/`GlyphInstance` assert'leri
+  oynamadı, `Frame::push` yeni alanları okumuyor. Bulgu: `CLAUDE.md`'nin
+  hücre maddesi grid hücresi ile sınır hücresini ayıran yan tümceyi
+  taşımıyor — **phase-3'e devredildi** ve oranın checklist'ine yazıldı
+  (phase-3 zaten `CLAUDE.md`'ye dokunuyor).
+- **10 belge ve üslup borcu — üç bulgu, üçü de uygulandı.** (a)
+  `Frame::push`'un "burada sorulacak bir bayrak yok" yorumu phase-2'den
+  sonra eksik kalıyordu: sorulacak alan **var**, yalnız phase-3'e ertelendi
+  — dikiş notu kodun yanına yazıldı. (b) `Cell`'in doc'undaki "`BOLD`/
+  `ITALIC` **ikişer** `bool`" üleştirme sayısıydı, yani dört `bool` diyordu;
+  "iki ayrı `bool`" oldu. (c) Bu dosyanın "Yayın Etkisi → belge" listesi
+  "dördü" deyip beş kalem sayıyordu ve not 8'in listesiyle örtüşmüyordu;
+  ikisi tek sayıda buluşturuldu. Tanımlayıcıların tamamı İngilizce (beş yeni
+  sınama adı dahil), yorumlar ve `assert!` gerekçeleri Türkçe, `#[allow]`
+  yok, yeni UI dizgisi ya da ayar anahtarı yok.
 
 ## Yayın Etkisi
 
@@ -199,10 +385,24 @@ yanına `kural=` sayısı eklenir — sahibi bu fonksiyon **ve** aşağıdaki s�
 - **shell entegrasyonu** — yok. `smoke_shell` bir **sınama** betiği,
   `assets/shell/` altındaki entegrasyon üçlüsü değil.
 - **app bundle** — yok.
-- **yeni bağımlılık** — yok; `Cargo.toml`/`Cargo.lock` el değmiyor.
-- **belge** — `session.rs`'in `MUREKKEPSIZ` yorumu ve `smoke_shell` doc'u.
+- **yeni bağımlılık** — yok; `Cargo.toml`/`Cargo.lock` el değmedi (doğrulandı:
+  `git status` ikisini de göstermiyor).
+- **belge** — öngörülenden geniş çıktı. **Kodla çelişen beş cümle**
+  (not 8'in listesi) aynı commit'te düzeldi: `session.rs`'te `NO_INK`
+  yorumu (`MUREKKEPSIZ`'in bugünkü adı; 003'ün "`Some(' ')` olacak"
+  öngörüsü tersine çıktı), `Cell`'in başlık doc'u, `Cell::fg`'nin gelecek
+  zamanlı cümlesi, `Cell::ch`'in ölü 004 öngörüsü, `fore`'un yorumundaki
+  gelecek zaman. Ayrıca **üç ekleme**: `smoke_shell`'in doc'u (yedi kural
+  hücresi, stil sırası, iki nokta uyarısı), `bt-core/src/lib.rs`'in modül
+  doc'undaki görünür tip listesi (`UnderlineStyle`), ve `bt-gpu`'nun
+  `Frame::push`'una "yeni alanlar bu phase'de okunmuyor" dikiş notu
+  (`/audit` mercek 10'un bulgusu).
   Duman jetonu **bu phase'de eklenmiyor** (phase-3), o yüzden `CLAUDE.md`,
-  `Makefile` ve `proje.md` el değmiyor.
+  `Makefile` ve `proje.md` el değmiyor — doğrulandı, `make duman`
+  `kare=1 hucre=8 glif=6 pipeline=ok` ile bit bit aynı satırı basıyor.
+  `CLAUDE.md`'nin hücre maddesine "sınır `Cell`'i ayrı kayıttır" yan
+  tümcesi **phase-3'e devredildi** (`/audit` mercek 9; phase-3 zaten
+  `CLAUDE.md`'ye dokunuyor, iki commit'te iki kez açmanın anlamı yok).
 - **ölçüm bekliyor:** sınır `Cell`'inin büyümesinin kare süresine etkisi —
   003 `teslim.md` B.1 **#5**'in genişlemesi. `size_of` bir ölçüm değil
   gerçektir ve istenirse `const` assert'le bağlanır; **kare süresine
@@ -212,22 +412,28 @@ yanına `kural=` sayısı eklenir — sahibi bu fonksiyon **ve** aşağıdaki s�
 
 ## Checklist
 
-- [ ] `UnderlineStyle` enum'ı + `Cell`'in beş yeni alanı + `Default` türetimi
-- [ ] `Cell`'in doc'una "24 baytlık assert bu tipe değil, grid hücresine bağlı" notu
-- [ ] Bayrak eşlemesi: beş bayrak ayrı ayrı, **kıvrımlı önce** (madde 2)
-- [ ] `HIDDEN` kuralları da düşürüyor
-- [ ] SGR 58 → `Option<LinearRgba>`
-- [ ] Atlama koşulu genişledi; `MUREKKEPSIZ` yorumu düzeltildi
-- [ ] `smoke_shell` reçetesi + doc'una iki nokta uyarısı
-- [ ] `bt-gpu`'nun altı `Cell { … }` sınama literali `..Default::default()`'a geçti
-- [ ] Test: `kivrimli_metin_curl_verir` — `\033[4:3m` `UnderlineStyle::Curl` üretir (**`contains(UNDERLINE)` refleksi burada kırmızı düşer**)
-- [ ] Test: `sabit_shell_bes_stili_ayirt_eder` — reçetenin stil dizisi `[Single, Double, Curl, Dotted, Dashed]` + üstü çizili + SGR 58 rengi
-- [ ] Test: `gizli_metnin_kurallari_da_duser` — `\033[8;4m` kural üretmez
-- [ ] Test: `alti_cizili_bosluk_hucresi_gecer` — `bg: None, ch: None`, kural var → sink çağrılır
-- [ ] Test: `sabit_shell_arka_plan_hucreleri_verir` ve `sabit_shell_alti_glif_verir` **değişmeden** geçiyor (8 ve 6 korundu)
-- [ ] Doğrulama geçti (`make hepsi`; `make shader` `[~]`; `make duman` → `kare=N hucre=8 glif=6 pipeline=ok` — jeton henüz yok; `make test-yaris` **zorunlu**, `frame()` gövdesi `Term` kilidi altında değişti)
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] `UnderlineStyle` enum'ı + `Cell`'in beş yeni alanı + `Default` (elle, bkz. not 1) + `lib.rs`'ten yeniden ihraç (not 2)
+- [x] `Cell`'in doc'una "24 baytlık assert bu tipe değil, grid hücresine bağlı" notu
+- [x] Bayrak eşlemesi: beş bayrak ayrı ayrı, **kıvrımlı önce** (madde 2)
+- [x] `HIDDEN` kuralları da düşürüyor (zincirin ilk kolu, not 3)
+- [x] SGR 58 → `Option<LinearRgba>` (kapıdan sonra çözülüyor, not 7)
+- [x] Atlama koşulu genişledi; `NO_INK` yorumu düzeltildi (`MUREKKEPSIZ`'in bugünkü adı)
+- [x] `smoke_shell` reçetesi + doc'una iki nokta uyarısı
+- [x] `bt-gpu`'nun altı `Cell { … }` sınama literali `..Default::default()`'a geçti
+- [x] Test: `undercurl_text_yields_curl` — `\033[4:3m` `UnderlineStyle::Curl` üretir (**`contains(UNDERLINE)` refleksi burada kırmızı düşer**; mutasyonla doğrulandı, not 4)
+- [x] Test: `smoke_shell_distinguishes_five_styles` — 15 hücre, stil dizisi `[Single, Double, Curl, Dotted, Dashed]` + üstü çizili + SGR 58 rengi
+- [x] Test: `hidden_text_drops_rules_too` — `\033[8;4:3;9m` kural üretmez
+- [x] Test: `underlined_space_cell_passes_sink` — `bg: None, ch: None`, kural var → sink çağrılır
+- [x] Test: `smoke_shell_yields_background_cells` ve `smoke_shell_yields_six_glyphs` **iddiaları bit bit aynı** geçiyor (8 ve 6 korundu; ortak kurucuya geçtiler, not 5)
+- [x] Doğrulama geçti — **kapıdan sonra yeniden koşuldu** (kapı kodu değiştirdi, kapı öncesi yeşil geçersizdi):
+  - `cargo fmt --all -- --check` → exit 0, `make hepsi` → exit 0
+  - `make test-yaris` → exit 0 (**zorunluydu**: `frame()` gövdesi `Term` kilidi altında değişti)
+  - `make duman` → exit 0, `kare=1 hucre=8 glif=6 pipeline=ok` — jeton bu phase'de eklenmiyor, sayılar bit bit korundu
+  - `make shader` `[~]` — `.metal` ve `build.rs` el değmedi, tetiklenmedi
+  - `make terminfo` `[~]` — `assets/terminfo` el değmedi (ve hedefin girdisi henüz yok)
+  - `git status`: `Cargo.lock` **oynamadı**
+- [x] `/simplify` çalıştırıldı, bulgular uygulandı (kaydı yukarıda)
+- [x] `/code-review` çalıştırıldı, bulgular giderildi (kaydı yukarıda; +1 sınama: `strikeout_only_cell_carries_no_underline_color`)
+- [x] `/audit` çalıştırıldı, bulgular giderildi (kaydı yukarıda; mercek 9'un bulgusu phase-3'e devredildi ve oranın checklist'ine yazıldı)
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı (öngörü doğrulandı: `Cargo.lock` oynamadı, `.metal`/`build.rs`/`assets` el değmedi)
 - [ ] Commit: {hash}

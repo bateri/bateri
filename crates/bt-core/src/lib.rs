@@ -2,8 +2,8 @@
 //!
 //! VT durum makinesi, grid, scrollback, PTY ve okuyucu thread burada yaşar;
 //! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
-//! dışarısı yalnız `Session`, `Cell`, `Cursor`, `LinearRgba` ve `Wake`
-//! görür (tam liste aşağıdaki `pub use` bloğu). Kendi
+//! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`,
+//! `LinearRgba` ve `Wake` görür (tam liste aşağıdaki `pub use` bloğu). Kendi
 //! grid'imize geçiş (00X) bu sınırın arkasında yapılır ve renderer'ı bilmez.
 //!
 //! Sözleşme: bu crate macOS'a özgü hiçbir kütüphane görmez — `objc2*`,
@@ -20,7 +20,7 @@ mod session;
 mod wake;
 
 pub use color::{DEFAULT_BG, DEFAULT_CURSOR, LinearRgba};
-pub use session::{Cell, Cursor, DirtyFlag, Session, SessionOptions, smoke_shell};
+pub use session::{Cell, Cursor, DirtyFlag, Session, SessionOptions, UnderlineStyle, smoke_shell};
 pub use wake::Wake;
 
 /// Hücre sabit boyuttadır ve sabit burada bağlanır: **alacritty'nin** hücresi
