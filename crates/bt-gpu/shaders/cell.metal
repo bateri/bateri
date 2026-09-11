@@ -66,7 +66,7 @@ fragment float4 cell_fragment(Out in [[stage_in]],
     // her zaman yuvanın içinde kalıyor: o karede glyph köşeli görünür, ama
     // rastgele kapsama okumaz.
     constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
-    float kapsama = atlas.sample(s, in.uv).r;
+    float coverage = atlas.sample(s, in.uv).r;
     // Ön çarpımsız: blend src_alpha/one_minus_src_alpha ile eşleşiyor.
-    return float4(in.rgba.rgb, in.rgba.a * kapsama);
+    return float4(in.rgba.rgb, in.rgba.a * coverage);
 }
