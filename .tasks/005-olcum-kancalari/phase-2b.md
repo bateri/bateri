@@ -331,6 +331,32 @@ commit'te güncellenir — borç kapanıyorsa cümle kalkar, daralıyorsa daralt
   pozitif olmasını engelliyor. (c) Thread adının `String` ayırması (`"PTY
   teardown".to_owned()`): oturum başına bir kez, tanı değeri ayırmadan büyük.
 
+- **sadakat: makas yok.** `git show --stat e991d78` checklist'le
+  karşılaştırıldı: sekiz dosyanın her biri bir maddeyle eşleşiyor
+  (`wake.rs`/`link.rs` sapma (c)'nin mekanizma cümleleri, `CLAUDE.md` madde 3,
+  `app.rs`/`lib.rs` bekçi ve kapanış bağlantısı), `plan.md` damga commit'inde
+  (`9630c5d`). `Cargo.lock` oynamadı.
+
+- **Orkestratör doğrulaması ve kendi hatasının kaydı.** Düzeltmeyi bağımsız
+  ölçtüm: load 2 sn → `kare=230–234` (beş koşu), load 5 sn → `kare=594`,
+  smoke 5 sn → `kare=1`. Yani boşta sıfır kare **kusursuz** çalışıyor ve yük
+  altında link tam hızda.
+
+  Bu, phase-2 sonrası **benim** yaptığım çıkarımı çürütüyor: `kare=3` ölçüp
+  "pencere örtülü, sistem display link'i askıya alıyor, tavan 3" demiştim.
+  Örtülülük gerçek (phase-1 `occlusionState`'i okudu) ama sebep o değilmiş;
+  düşük sayı kapanış kilitlenmesinin kök nedeninden geliyormuş — master
+  boşaltılmayınca kuyruk doluyor, okuyucu tıkanıyor, kirli satır düşmüyor.
+  **Bozuk bir koşuyu ölçüp tavan sanmışım; korelasyonu nedensellik yapmışım.**
+  `plan.md → R5.6`'nın gerekçesi, `phase-3`'ün checklist maddesi ve
+  `phase-1`'deki notum buna göre düzeltildi. Gereksinimin kendisi ayakta:
+  dayanağı bu ölçüm değil, "az örnek üstünden p95 anlamsızdır" ilkesi.
+
+  Sonuç olarak `IDLE_FRAME_LIMIT=2`'nin **değeri** hâlâ doğru ama **payı**
+  sanılandan çok büyük: sağlam smoke koşusu 5 saniyede bile `kare=1`, bozulmuş
+  bir boşta yolu ise yüzlerce kare üretirdi. Phase-3'ün devraldığı
+  "dayanağı çürüdü" maddesi bunu yeniden ölçüp yazacak.
+
 ## Yayın Etkisi
 
 - **Ölçüm bekliyor: yok.** Bu phase bir kusuru kapatıyor; kapanış süresi bir

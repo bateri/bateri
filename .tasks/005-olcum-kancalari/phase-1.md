@@ -274,6 +274,11 @@ const IDLE_FRAME_LIMIT: u64 = 8;
   koşumda üç örnek toplar. `plan.md`'ye `R5.6` (örnek tabanı) olarak eklendi,
   phase-3'ün checklist'ine iki madde düştü.
 
+  > **Bu paragrafın çıkarımı phase-2b'de çürüdü.** Düşük kare sayısının
+  > sebebi örtülülük değil kapanış kilitlenmesinin kök nedeniymiş; düzeltme
+  > sonrası aynı koşu `kare=594` veriyor. Ölçüm doğruydu, atıf yanlıştı.
+  > `plan.md → R5.6`'nın gerekçesi buna göre yeniden yazıldı.
+
 ## Yayın Etkisi
 
 - **Duman sözleşmesi:** jeton **eklendi, silinmedi** — `yuva=U/T` ve

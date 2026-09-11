@@ -132,11 +132,12 @@ kodun doc yorumunda durur ve ilk `/measure` onu `## Yöntem`'e taşır.
 - [ ] `.tasks/README.md`: 002/003/004 satırları "ölçüm aracı yok" demiyor
 - [ ] Phase-2'nin dürüst sınırı (açılış damgası `main()`'den, süreç başından değil) kodun doc'unda yazılı
 - [ ] **R5.6 örnek tabanı** — taban altında p95 **basılmaz**, `ornek=` yerine
-      gerekçe çıkar. Orkestratör ölçtü: örtülü pencerede `BT_SCROLL_TEST=1
-      BT_RUN_SECONDS=5` → `kare=3` (içerik akıyor, `glif=1836`). Sistem örtülü
-      pencerede display link'i askıya alıyor; `.app` paketi (006) gelene kadar
-      anlamlı ölçüm **öne getirilmiş pencere** istiyor ve bu `/measure`'ın
-      `[elle]` adımıdır
+      gerekçe çıkar. **Gerekçe düzeltildi:** orkestratörün "örtülü pencere
+      display link'i askıya alıyor, tavan 3 kare" saptaması phase-2b ile
+      çürüdü — aynı pencere durumunda `kare=594` (5 sn). Düşük sayının sebebi
+      kapanış kilitlenmesinin kök nedeniydi. Taban gereksinimi ilkeye dayanır:
+      az örnek üstünden p95 anlamsızdır. `.app` paketi ve öne getirilmiş
+      pencere şartı **kalktı** — bu makinede ölçüm bugün de anlamlı
 - [ ] **phase-2'den devir — okuma API'si.** Halka `bt-gpu`'da ve `bt-shell`'in elinde bir `Arc<Stats>` var (`AppDelegate` ivar'ı, `report_and_exit` oradan okur). Yüzey: `Stats::startup() -> Option<Duration>` ve sütun başına `cpu_frame()` / `cpu_encode()` / `gpu() -> Samples { nanos: Vec<u64>, dropped: u64 }` — değerler **nanosaniye**, eskiden yeniye. p95 bu üç sütunun her birinden ayrı hesaplanır; `Duration` isteyen bir `p95_and_worst` imzası `from_nanos` ile besleniyor
 - [ ] **phase-2'den devir — GPU sütunu CPU'dan kısa olabilir.** `GPUStartTime`/`GPUEndTime` Metal'de sıfır dönebiliyor ("başlamadı" / "bildirim gelmedi") ve o kare **hiç örnek yazmıyor** (0 ns p95'i aşağı çeker). `ornek=` jetonu bu yüzden tek sayı olamaz: ya sütun başına verilir ya da en küçüğü basılıp hangi sütun olduğu söylenir — **karar phase-3'ün**. Düşen örnek (`dropped`) de aynı jetonun içinde görünmeli
 - [ ] **phase-2'den devir — `BT_FRAME_STATS` süre ister.** `main.rs` `BT_SCROLL_TEST`'in eşi bir kolla süresiz (ve sıfır saniyelik) ölçümü eliyor: çıkış 1 + *"sıfırdan büyük bir BT_RUN_SECONDS ister"*. Sebebi rapor yolu: `report_and_exit` yalnız deadline ile koşuyor, yani süresiz ölçüm hiç basılmazdı. Belge güncellemesi (R7.2) kanca adını yazarken bu şartı da yazmalı

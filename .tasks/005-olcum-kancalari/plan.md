@@ -42,13 +42,22 @@ yol, ölçmediği zaman **hiç var olmamış gibi** davranmalı.
     güvenen hiçbir yol kullanılmaz (`process::exit` `Drop` koşturmaz, bekçinin
     `_exit(70)`'i atexit'i bile atlar).
   - **R5.6** — **Örnek tabanı.** Az örnek üstünden hesaplanan p95 basılmaz.
-    Ölçüldü (phase-1 sonrası, orkestratör): `BT_SCROLL_TEST=1
-    BT_RUN_SECONDS=5` → `kare=3 glif=1836`. İçerik akıyor ve grid doluyor ama
-    **beş saniyede üç kare** çiziliyor: pencere örtülü (`occlusionState`
-    `Visible` taşımıyor) ve sistem `CAMetalDisplayLink`'i askıya alıyor.
-    Dolayısıyla `ornek=` bir süs değil **kapı**: taban altında sayı
-    **hesaplanmaz**, jeton "yetersiz" der. Sebebi de basılır, yoksa kullanıcı
-    aracı bozuk sanır — oysa bozuk olan koşu ortamı.
+    `ornek=` bir süs değil **kapı**: taban altında sayı **hesaplanmaz**,
+    jeton "yetersiz" der ve sebebini söyler.
+
+    > **Bu gereksinimin ilk gerekçesi yanlıştı ve düzeltildi.** Orkestratör
+    > phase-2 sonrası `BT_SCROLL_TEST=1 BT_RUN_SECONDS=5` → `kare=3` ölçtü ve
+    > bunu "pencere örtülü, sistem `CAMetalDisplayLink`'i askıya alıyor" diye
+    > açıkladı. **Örtülülük gerçek** (`occlusionState` `Visible` taşımıyor,
+    > phase-1'de okundu) ama **sebep o değil**: phase-2b'nin düzeltmesinden
+    > sonra aynı pencere durumunda `kare=594` (5 sn) ve `kare=230–234` (2 sn)
+    > ölçüldü. Gerçek sebep kapanış kilitlenmesinin kök nedeniydi — master'ı
+    > kimse boşaltmayınca kuyruk doluyor, okuyucu tıkanıyor, kirli satır
+    > düşmüyor. Yani ölçülen şey tavan değil **bozuk bir koşuydu**;
+    > korelasyon nedensellik sanıldı.
+    >
+    > Gereksinim ayakta kalıyor çünkü dayanağı bu ölçüm değil ilkedir: az
+    > örnek üstünden hesaplanan p95, sebebi ne olursa olsun anlamsızdır.
 
 - **R6** — Boşta sıfır kare korunur ve bunun bir bekçisi vardır.
   - **R6.1** — `make duman` kapısı `kare` için **üst sınır** kazanır; bugünkü
