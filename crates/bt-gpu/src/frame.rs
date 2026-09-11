@@ -137,6 +137,12 @@ impl Frame {
         // instance ve GPU'da tamamen şeffaf bir dörtlü harcardı. Ayrımı
         // `bt-core` yapıyor (boşluk, gizli metin, geniş karakterin ikinci
         // hücresi hepsi `None`), burada sorulacak bir bayrak yok.
+        //
+        // `Cell`'in `underline`/`strikeout`/`underline_color` alanları bu
+        // phase'de **okunmuyor**: kural çizgileri phase-3'ün işi ve o güne
+        // kadar yalnız-kurallı bir hücre (altı çizili boşluk; duman
+        // reçetesinde yedi tane var) buradan çıktısız geçer. Dikiş bilerek
+        // böyle: sınır alanları taşır, renderer onları sonra okur.
         if let Some(ch) = cell.ch {
             self.glyphs.push(GlyphCell {
                 pos: self.pos(cell.col, cell.row),
@@ -219,9 +225,9 @@ mod tests {
         Cell {
             col,
             row,
-            ch: None,
             fg: CURSOR,
             bg: Some(BG),
+            ..Default::default()
         }
     }
 
@@ -309,6 +315,7 @@ mod tests {
             ch: Some('b'),
             fg: CURSOR,
             bg: Some(BG),
+            ..Default::default()
         });
         // Arka planı olmayan ama mürekkebi olan hücre: yalnız glyph listesine.
         frame.push(Cell {
@@ -317,6 +324,7 @@ mod tests {
             ch: Some('a'),
             fg: CURSOR,
             bg: None,
+            ..Default::default()
         });
 
         assert_eq!(frame.bg_count(), 2);

@@ -23,17 +23,46 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use crate::color::{self, LinearRgba};
 use crate::wake::Wake;
 
-/// Çizilecek tek hücre: bir arka plan, bir glyph ya da ikisi.
+/// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
+///
+/// Bitflag değil enum, çünkü SGR'de de birbirini dışlıyorlar (mekanizması
+/// [`Session::frame`]'in eşleme yorumunda). Bitflag olsaydı tip temsil
+/// edilemeyen bir durumu (`Curl + Dotted`) taşıyabilir ve çizen tarafa bir
+/// öncelik kuralı yazdırırdı.
+///
+/// Alacritty'nin `Flags`'i **yeniden ihraç edilmiyor** (`CLAUDE.md`):
+/// `bt-core` alacritty'yi kapsüller, `pub` API'de alacritty tipi görünmez.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curl,
+    Dotted,
+    Dashed,
+}
+
+/// Çizilecek tek hücre: bir arka plan, bir glyph, bir kural çizgisi ya da
+/// hepsi.
 ///
 /// Tek zengin tip, tek sink. İki ayrı sink (biri arka plan, biri glyph) grid'i
 /// kare başına iki kez taratır ve `Term` kilidini iki kez aldırırdı; hücrenin
 /// iki yüzü zaten aynı iterasyonda yan yana duruyor.
 ///
-/// Biçim bayrakları **geçmez**: `INVERSE` ve `DIM` burada renge çözülüyor,
-/// `HIDDEN` mürekkebi `None`'a düşürüyor (aşağıda), `BOLD`/`ITALIC` (ikinci font yüzü)
-/// ile `UNDERLINE`/`STRIKEOUT` (kural çizgisi) 004'ün işi. Alacritty'nin
-/// `Flags`'i hiçbir hâlde yeniden ihraç edilmez — ettiği gün `bt-gpu`
-/// terminal semantiği bilmeye başlar.
+/// Biçim bayrakları **çözülmüş** geçer, ham geçmez: `INVERSE` ve `DIM` burada
+/// renge iniyor, `HIDDEN` hem mürekkebi hem kuralları düşürüyor (aşağıda),
+/// `BOLD`/`ITALIC` iki ayrı `bool`, beş alt çizgi bayrağı tek
+/// [`UnderlineStyle`]. Alacritty'nin `Flags`'i hiçbir hâlde yeniden ihraç
+/// edilmez — ettiği gün `bt-gpu` terminal semantiği bilmeye başlar.
+///
+/// **`CLAUDE.md`'nin 24 baytlık `const` assert'i bu tipe değil, alacritty'nin
+/// grid hücresine bağlıdır** (`lib.rs`): 10 000 satırlık scrollback'i sekme
+/// başına megabaytlarca büyüten o kayıt, bu değil. Buradaki alanlar kare
+/// başına ve yalnız **çizilen** hücreler için doğuyor; sink jenerik
+/// (`impl FnMut(Cell)`) ve satır içine alınıyor, yani kopyalama da bir çağrı
+/// sınırından geçmiyor. Seyrek veri yan tabloya taşınacaksa ölçüt o assert
+/// değil, bu tipin kare başına maliyeti olur — ve o ölçüm bekliyor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
     pub col: u16,
@@ -43,16 +72,17 @@ pub struct Cell {
     /// `Option`, `' '` sentinel'i değil: boşluk karakterinin kendi başına
     /// meşru bir anlamı var ve "mürekkep yok"u onun üstüne yüklemek dört
     /// ayrık durumu (gerçek boşluk, `HIDDEN`, iki spacer) tek değere
-    /// indirirdi. Bedeli 004'te ödenirdi: altı çizili bir boşluk **mürekkep
-    /// ister**, gizli metin istemez, ve o gün `ch == ' '`i okuyan üç yerin
-    /// üçü de ayrı ayrı elden geçirilmek zorunda kalırdı. `Option<char>`
-    /// niche ile 4 bayt, yani ayrım bedava.
+    /// indirirdi — oysa dördü aynı şeyi istemiyor: `HIDDEN` kuralları da
+    /// düşürüyor, boşluk düşürmüyor (altı çizili boşluk çizgisini alır,
+    /// gizli metin almaz). `Option<char>` niche ile 4 bayt: ayrım bedava.
     pub ch: Option<char>,
     /// Ön plan; glyph bu renkle çizilir. **Her hücrede anlamlı**, `ch`
-    /// `None` olsa bile: 004'ün kural çizgisi (`UNDERLINE`/`STRIKEOUT`)
-    /// mürekkebi olmayan bir hücrede de bu rengi isteyecek ve o gün alanın
-    /// "boşlukta yer tutucu" olması çizgiyi arka plan rengiyle, yani
-    /// görünmez, çizerdi.
+    /// `None` olsa bile: kural çizgisi ([`Cell::underline`],
+    /// [`Cell::strikeout`]) mürekkebi olmayan bir hücrede de bir renk
+    /// istiyor ve alan "boşlukta yer tutucu" olsaydı çizgi arka plan
+    /// rengiyle, yani görünmez, çizilirdi. Üstü çizili **her zaman** bu
+    /// rengi kullanır; alt çizgi ise [`Cell::underline_color`] doluysa onu,
+    /// boşsa bunu — SGR'de üstü çizilinin ayrı bir rengi yok.
     ///
     /// İmlecin altındaki hücrede **ters**: değer paletin arka planıdır, çünkü
     /// imleç bloğu opak ve glyph'in altında (`plan.md` → R4.1).
@@ -61,6 +91,46 @@ pub struct Cell {
     /// gördüğünde `bg_count`'u artırır: `hucre=K` jetonunun anlamı bit bit
     /// korunur ve `smoke_shell_yields_background_cells` oynamaz.
     pub bg: Option<LinearRgba>,
+    /// SGR 1 ve 3. Font **yüzü değil bayrak**: `(bold, italic)` → `Face`
+    /// çevirisi `bt-gpu`'da, çünkü `bt-atlas`'ın `Face`'i bir font kavramı,
+    /// bu ikisi SGR semantiği. İkisi burada birleşseydi katman yönü ters
+    /// dönerdi — `bt-atlas` `bt-core`'u görmüyor ve görmemeli.
+    pub bold: bool,
+    pub italic: bool,
+    /// Beş bayrağın tek çözümü; `HIDDEN` hücrede [`UnderlineStyle::None`].
+    pub underline: UnderlineStyle,
+    /// SGR 58; `None` → çizen taraf [`Cell::fg`]'yi kullanır. `bg` ile
+    /// birebir aynı örüntü: seyrek veri `Option`'da, varsayılanı olan
+    /// tarafın adı `None`.
+    pub underline_color: Option<LinearRgba>,
+    /// SGR 9; `HIDDEN` hücrede `false`.
+    pub strikeout: bool,
+}
+
+/// **Yalnız sınama literalleri için**: `bt-gpu`'nun kare sınamaları hücreyi
+/// `..Default::default()` ile kuruyor, böylece bu tipe alan eklemek onları
+/// bir daha kırmıyor. Üretim yolunda tek kurucu [`Session::frame`] ve orada
+/// her alan koşulsuz yazılıyor.
+///
+/// `fg` siyah: anlamlı bir varsayılan ön plan **yok** (palet kararı
+/// `color`'ın) ve olsaydı unutulan bir alan ekranda makul görünüp sessizce
+/// yanlış olurdu. [`LinearRgba`]'nın kendisi `Default` **almıyor**: tek
+/// kurucusunun `from_srgb` olması renk uzayını tipe bağlayan şey.
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            col: 0,
+            row: 0,
+            ch: None,
+            fg: LinearRgba::from_srgb(0, 0, 0),
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: UnderlineStyle::None,
+            underline_color: None,
+            strikeout: false,
+        }
+    }
 }
 
 /// İmlecin karedeki yeri.
@@ -112,8 +182,24 @@ impl DirtyFlag {
 /// Duman koşusunun ve sınamaların ortak sabit shell'i.
 ///
 /// Kullanıcının `$SHELL`'ine ve rc dosyasına bağlı olmayan bir komut: ilk
-/// satıra **sekiz** kırmızı arka planlı hücre (`" bateri "`) basar, sonra uyur.
-/// Sekizin **altısında** mürekkep var: iki ucu boşluk, ortası `bateri`.
+/// satıra **sekiz** kırmızı arka planlı hücre (`" bateri "`) basar, arkasına
+/// **yedi** yalnız-kurallı hücre ekler, sonra uyur. Sekizin **altısında**
+/// mürekkep var: iki ucu boşluk, ortası `bateri`; sekizi de kalın ve düz altı
+/// çizili, yani font yüzü yolu da betikte.
+///
+/// Yedi kural hücresinin hepsi **boşluk ve varsayılan arka planlı**
+/// (`bg: None`, `ch: None`): `hucre=8` ve `glif=6` bit bit duruyor, ama
+/// yedisi de [`Session::frame`]'in atlama koşulunun kural yan tümcesinden
+/// geçiyor — yani o yan tümce duman kapısından her koşuda geçmiş oluyor.
+/// Sırası `Single, Double, Curl, Dotted, Dashed, Strikeout, Curl + SGR 58`.
+///
+/// **İki nokta yük taşıyor:** `\033[4;3m` ≠ `\033[4:3m`. Noktalı virgüllü
+/// hâl `Underline + Italic`'tir (`[3] => Attr::Italic`), iki noktalı hâl
+/// undercurl'dür (`[4, 3] => Attr::Undercurl`). Reçeteyi "sadeleştiren" biri
+/// `:`'yı `;` yaparsa sınama sessizce düz-altı-çizili-eğik'e iner ve duman
+/// yeşil kalır. Aradaki `\033[0;` de zorunlu: `Attr::Strike`
+/// `ALL_UNDERLINES`'ı **kaldırmıyor**, sıfırlanmazsa o hücre kesikli **artı**
+/// üstü çizili olur.
 ///
 /// Uyku süresi duman koşusunun süresini (`BT_RUN_SECONDS`, varsayılan 3)
 /// rahatça aşmalı: shell deadline'dan önce kendi kendine çıkarsa `ChildExit`
@@ -122,8 +208,9 @@ impl DirtyFlag {
 /// `SIGHUP` gidiyor ve artakalan çocuk uyku bitene kadar yaşamıyor.
 ///
 /// Tek sahip olmasının sebebi sayıların kendisi: `make duman`'ın `hucre=8` ve
-/// `glif=6` beklentisi ile `smoke_shell_yields_background_cells` /
-/// `smoke_shell_yields_six_glyphs` sınamalarının 8'i ve 6'sı aynı betiğe bağlı.
+/// `glif=6` beklentisi ile `smoke_shell_yields_background_cells`,
+/// `smoke_shell_yields_six_glyphs` ve `smoke_shell_distinguishes_five_styles`
+/// sınamalarının 8'i, 6'sı ve 15'i aynı betiğe bağlı.
 /// İki yerde ayrı yazılsalardı biri değişip diğeri sessizce eski kalırdı — ve
 /// duman ikisini de yalnız "> 0" diye sorduğu için kimse fark etmezdi.
 /// Bu hâliyle sınamalar, uygulamanın gerçekten koştuğu betiği doğruluyor.
@@ -133,7 +220,10 @@ pub fn smoke_shell() -> (String, Vec<String>) {
         // Kaçışları printf çözer: Rust dizgisinde `\033` ilk baytı NUL yapardı.
         vec![
             "-c".to_owned(),
-            "printf '\\033[41m bateri \\033[0m\\n'; sleep 10".to_owned(),
+            "printf '\\033[41;1;4m bateri \\033[0m\\033[4m \\033[0;4:2m \\033[0;4:3m \
+             \\033[0;4:4m \\033[0;4:5m \\033[0;9m \\033[0;4:3;58;5;196m \\033[0m\\n'; \
+             sleep 10"
+                .to_owned(),
         ],
     )
 }
@@ -396,25 +486,35 @@ impl Session {
         };
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
-        // bayrak sormuyor. Üçü bayraklı:
-        // - `HIDDEN` (`\e[8m`): metin gizli, arka planı yerinde kalır.
+        // bayrak sormuyor. Biri `HIDDEN` (`\e[8m`) ve o bu maskede **değil**:
+        // gizlilik mürekkebin yanında kuralları da düşürdüğü için aşağıda
+        // tek bir `let`'te yaşıyor — iki ifadeye yazılsaydı sonradan
+        // ayrışabilirlerdi. İkisi spacer:
         // - `WIDE_CHAR_SPACER`: geniş karakterin ikinci hücresi. Hücrenin
         //   `c`'si alacritty'de zaten `' '` (spacer `write_at_cursor(' ')` ile
         //   yazılıyor), ama arka planı geniş karakterin şablonundan geliyor:
         //   hücreyi tümden elemek onun sağ yarısını renksiz bırakırdı.
         // - `LEADING_WIDE_CHAR_SPACER`: satır sonuna sığmayan geniş karakterin
         //   bıraktığı boşluk; aynı gerekçe.
-        // Dördüncüsü boşluk karakterinin kendisi: bugün onun da mürekkebi yok.
-        // 004'te değişecek olan tam burası — altı çizili bir boşluk `Some(' ')`
-        // olacak ve tek dokunulacak satır aşağıdaki `then_some`.
-        const NO_INK: Flags = Flags::HIDDEN
-            .union(Flags::WIDE_CHAR_SPACER)
-            .union(Flags::LEADING_WIDE_CHAR_SPACER);
+        // Dördüncüsü boşluk karakterinin kendisi: onun da mürekkebi yok ve
+        // **altı çiziliyken de yok**. 003 burada tersini öngörmüştü; karar
+        // tersine çıktı, çünkü `Some(' ')` bir boşluk glyph'i yükletirdi —
+        // atlasta yuva harcar, tek piksel boyamaz. Altı çizili boşluğun
+        // istediği bir kural çizgisi ve onu aşağıdaki atlama koşulu taşıyor.
+        const SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
+
+        // Kural çizgisi isteyen bayrakların maskesi: atlama koşulunun kural
+        // yarısı **tek** test olsun diye. "Hangi çeşit" sorusu (aşağıdaki
+        // zincir) kapıdan sonra sorulur — `fg` ve `underline_color`'ın kapıdan
+        // sonra çözülmesiyle aynı disiplin: kapı "çizilecek bir şey var mı"
+        // diye sorar, "ne" diye değil.
+        const RULES: Flags = Flags::ALL_UNDERLINES.union(Flags::STRIKEOUT);
 
         for indexed in display_iter {
             let cell = indexed.cell;
-            let inverse = cell.flags.contains(Flags::INVERSE);
-            let dim = cell.flags.contains(Flags::DIM);
+            let flags = cell.flags;
+            let inverse = flags.contains(Flags::INVERSE);
+            let dim = flags.contains(Flags::DIM);
 
             // **Arka plan önce**: atlama koşulunun ağır yarısı bu ve boş
             // grid'de hücrelerin neredeyse tamamı burada eleniyor. Ön plan
@@ -434,11 +534,24 @@ impl Session {
             // Varsayılan arka plan çizilmez; `None` onun adı.
             let bg = (back != color::BG_RGB).then(|| color::linear_rgba(back));
 
-            let ch = (!cell.flags.intersects(NO_INK) && cell.c != ' ').then_some(cell.c);
-            // Atlama koşulu: ne boyanacak bir arka plan ne çizilecek bir
-            // mürekkep. Boş grid'de bu koşul her hücreye uyar ve sink hiç
-            // çağrılmaz — `frame()`'in boştaki maliyeti iterasyonun kendisi.
-            if bg.is_none() && ch.is_none() {
+            // `HIDDEN` (`\e[8m`) "mürekkep yok" demek ve **tek bir `let`**:
+            // hem glyph'i hem kuralları düşürüyor. İki ayrı ifadeye
+            // yazılsaydı biri sonradan değişip öteki eski kalabilirdi ve
+            // belirti "gizli metin altı çizgisinden okunuyor" olurdu.
+            let hidden = flags.contains(Flags::HIDDEN);
+            let ch = (!hidden && !flags.intersects(SPACERS) && cell.c != ' ').then_some(cell.c);
+            // Kapının kural yarısı tek maske testi; **hangi** çeşit olduğu
+            // kapıdan sonra sorulur (aşağıda). `!hidden` maskenin dışında
+            // değil içinde: dışarıda kalsaydı gizli ve altı çizili bir hücre
+            // kapıdan geçer, aşağıda `None`'a çözülür ve `sink`'e çizilecek
+            // hiçbir şeyi olmadan varırdı.
+            let ruled = !hidden && flags.intersects(RULES);
+
+            // Atlama koşulu: ne boyanacak bir arka plan, ne çizilecek bir
+            // mürekkep, ne de bir kural çizgisi. Boş grid'de bu koşul her
+            // hücreye uyar ve sink hiç çağrılmaz — `frame()`'in boştaki
+            // maliyeti iterasyonun kendisi.
+            if bg.is_none() && ch.is_none() && !ruled {
                 continue;
             }
             // `display_iter` yalnız görünür pencereyi verir: aralığı
@@ -456,12 +569,57 @@ impl Session {
             // Kapıdan önce olsaydı `Term` kilidi tutulurken çizilmeyen her
             // hücre için de ödenirdi ve boş grid'de hücrelerin neredeyse
             // tamamı çizilmiyor. Koşulsuz: alan adının söylediği şey olmalı,
-            // yoksa 004'ün kural çizgisi (`UNDERLINE`) mürekkepsiz bir
-            // hücrede arka plan rengiyle çizilir, yani görünmez olurdu.
+            // yoksa kural çizgisi mürekkepsiz bir hücrede arka plan rengiyle
+            // çizilir, yani görünmez olurdu.
             let mut fore = color::resolve(if inverse { cell.bg } else { cell.fg }, colors);
             if !inverse && dim {
                 fore = color::dim(fore);
             }
+            // **Beş bayrak ayrı ayrı sorulur ve kıvrımlı önce gelir.**
+            // `UNDERCURL` `UNDERLINE`'ı **içermez**: `Attr::Undercurl` önce
+            // `ALL_UNDERLINES`'ı siliyor, sonra yalnız kendini ekliyor
+            // (alacritty `term/mod.rs`, beş kolun beşi de öyle). Refleksle
+            // yazılmış tek bir `contains(UNDERLINE)` bu setin varlık sebebi
+            // olan dalgalı çizgiyi sessizce düz çizgiye indirirdi ve hiçbir
+            // sayaç bunu göremezdi — `undercurl_text_yields_curl` görüyor.
+            //
+            // `ruled` yanlışsa hiç sorulmuyor: gizli hücre de, hiç kuralı
+            // olmayan hücre de tek testte eleniyor. Geniş karakterin ikinci
+            // hücresi bayrakları şablondan kopyaladığı için kural iki hücreye
+            // kendiliğinden yayılıyor — bedava, ama "neden çalışıyor"
+            // sorusunun cevabı burası.
+            let underline = if !ruled {
+                UnderlineStyle::None
+            } else if flags.contains(Flags::UNDERCURL) {
+                UnderlineStyle::Curl
+            } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+                UnderlineStyle::Double
+            } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+                UnderlineStyle::Dotted
+            } else if flags.contains(Flags::DASHED_UNDERLINE) {
+                UnderlineStyle::Dashed
+            } else if flags.contains(Flags::UNDERLINE) {
+                UnderlineStyle::Single
+            } else {
+                UnderlineStyle::None
+            };
+            let strikeout = ruled && flags.contains(Flags::STRIKEOUT);
+            // SGR 58 (`CellExtra`'da yaşıyor) ön planla **aynı kapıdan
+            // sonra**, aynı gerekçeyle: yan tabloya inmenin ve palete
+            // bakmanın bedeli çizilmeyen hücreler için ödenmesin — `extra`
+            // yalnız alt çizgi rengi için değil, sıfır genişlikli birleşik
+            // karakter ve hyperlink için de doluyor.
+            //
+            // Kapı `ruled` değil **alt çizginin kendisi**: adı "alt çizgi
+            // rengi" ve SGR'de üstü çizilinin ayrı bir rengi yok. `ruled`
+            // olsaydı yalnız üstü çizili bir hücre (`\e[9;58;5;196m`) rengi
+            // taşırdı ve onu okuyan çizici üstü çiziliyi kırmızıya boyardı.
+            // `None` → çizen taraf `fg`'yi kullanır; `bg` ile birebir aynı
+            // örüntü ve alacritty'nin `Color`'ı `pub` API'ye sızmıyor.
+            let underline_color = (underline != UnderlineStyle::None)
+                .then(|| cell.underline_color())
+                .flatten()
+                .map(|c| color::linear_rgba(color::resolve(c, colors)));
 
             let col = indexed.point.column.0 as u16;
             // İmlecin altındaki hücre **ters** çiziliyor. İmleç bloğu opak ve
@@ -480,6 +638,13 @@ impl Session {
                 ch,
                 fg: color::linear_rgba(fore),
                 bg,
+                // `Flags::BOLD_ITALIC` ikisinin birleşimi, ayrı bir bit
+                // değil: `contains` her iki soruyu da doğru yanıtlıyor.
+                bold: flags.contains(Flags::BOLD),
+                italic: flags.contains(Flags::ITALIC),
+                underline,
+                underline_color,
+                strikeout,
             });
         }
 
@@ -684,10 +849,21 @@ mod tests {
         }
     }
 
+    /// [`smoke_shell`]'in ta kendisiyle bir oturum: `make duman`'ın koştuğu
+    /// betiğin sayılarını doğrulayan üç sınamanın ortak kurulumu. Betiğin
+    /// `sleep`'i uzun ama önemsiz — oturum düşerken `SIGHUP` çocuğu keser.
+    fn spawn_smoke(wake: Arc<TestWake>) -> Session {
+        spawn_with_command(smoke_shell(), wake)
+    }
+
     fn spawn_session(script: &str, wake: Arc<TestWake>) -> Session {
+        spawn_with_command(("/bin/sh".into(), vec!["-c".into(), script.into()]), wake)
+    }
+
+    fn spawn_with_command(command: (String, Vec<String>), wake: Arc<TestWake>) -> Session {
         Session::spawn(
             SessionOptions {
-                command: Some(("/bin/sh".into(), vec!["-c".into(), script.into()])),
+                command: Some(command),
                 cols: 40,
                 rows: 10,
                 cell_px: (9, 18),
@@ -714,6 +890,20 @@ mod tests {
     /// (`read x` betiğinde yazılan "ab") sayıyı sessizce şişirirdi. Arka plan
     /// sayısı bu sınamaların gerçekten baktığı şey ve betiklerden türüyor.
     fn wait_cells(session: &Session, wake: &TestWake, count: usize) -> Vec<Cell> {
+        wait_frame(session, wake, |cells| backgrounds(cells).count() == count)
+    }
+
+    /// `ready` "bu kare beklediğim kare" diyene kadar bekler.
+    ///
+    /// Ölçütün parametre olmasının sebebi PTY okumasının bölünebilmesi:
+    /// hücrelerin bir kısmı bir karede, kalanı sonrakinde gelebilir. Ölçüt
+    /// karenin **son** parçasına bağlanmazsa sınama erken dönüp eksik bir
+    /// kareyi doğrular.
+    fn wait_frame(
+        session: &Session,
+        wake: &TestWake,
+        ready: impl Fn(&[Cell]) -> bool,
+    ) -> Vec<Cell> {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut cells = Vec::new();
         let mut seen = 0;
@@ -724,7 +914,7 @@ mod tests {
             );
             seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
             cells.clear();
-            if session.frame(|c| cells.push(c)).is_some() && backgrounds(&cells).count() == count {
+            if session.frame(|c| cells.push(c)).is_some() && ready(&cells) {
                 return cells;
             }
         }
@@ -739,21 +929,9 @@ mod tests {
     #[test]
     fn smoke_shell_yields_background_cells() {
         let wake = Arc::new(TestWake::default());
-        // `smoke_shell`'in ta kendisi: `make duman`'ın koştuğu betiğin sekiz
-        // hücre verdiğini doğrulayan yer burası. Betiğin `sleep`'i uzun ama
-        // önemsiz — oturum düşerken `SIGHUP` çocuğu keser.
-        let (program, args) = smoke_shell();
-        let session = Session::spawn(
-            SessionOptions {
-                command: Some((program, args)),
-                cols: 40,
-                rows: 10,
-                cell_px: (9, 18),
-                scrollback: 100,
-            },
-            Arc::clone(&wake) as Arc<dyn Wake>,
-        )
-        .unwrap();
+        // `make duman`'ın koştuğu betiğin sekiz **arka planlı** hücre
+        // verdiğini doğrulayan yer burası.
+        let session = spawn_smoke(Arc::clone(&wake));
 
         let cells = wait_cells(&session, &wake, 8);
         let backs: Vec<_> = backgrounds(&cells).collect();
@@ -776,22 +954,126 @@ mod tests {
         // olduğu için tek bir sayı ikisini birden kanıtlayamazdı — boşluklu
         // iki uç tam da farkın yaşadığı yer.
         let wake = Arc::new(TestWake::default());
-        let (program, args) = smoke_shell();
-        let session = Session::spawn(
-            SessionOptions {
-                command: Some((program, args)),
-                cols: 40,
-                rows: 10,
-                cell_px: (9, 18),
-                scrollback: 100,
-            },
-            Arc::clone(&wake) as Arc<dyn Wake>,
-        )
-        .unwrap();
+        let session = spawn_smoke(Arc::clone(&wake));
 
         let cells = wait_cells(&session, &wake, 8);
         let glyphs: String = cells.iter().filter_map(|c| c.ch).collect();
         assert_eq!(glyphs, "bateri", "{cells:?}");
+    }
+
+    #[test]
+    fn smoke_shell_distinguishes_five_styles() {
+        // Duman kapısının **göremediği** yarı: `kare/hucre/glif` üçlüsü beş
+        // alt çizgi stilini birbirinden ayırdığımızı hiç sormuyor, çünkü
+        // yedi kural hücresi ne arka plan ne mürekkep üretiyor. Reçetenin
+        // stil dizisini bağlayan tek yer burası.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_smoke(Arc::clone(&wake));
+
+        // Ölçüt arka plan sayısı **değil** karenin tamamı: yedi kural
+        // hücresi sekiz arka planlı hücreden sonra geliyor ve PTY okuması
+        // ikisinin arasında bölünebilir — `wait_cells(.., 8)` o karede dönüp
+        // kuralları hiç görmezdi. Eksik kalan kare zaman aşımıyla, fazla
+        // hücre veren kare aşağıdaki `assert_eq!` ile düşer.
+        let cells = wait_frame(&session, &wake, |cells| cells.len() >= 15);
+        // Sekiz arka planlı + yedi yalnız-kurallı.
+        assert_eq!(cells.len(), 15, "{cells:?}");
+        assert!(cells.iter().all(|c| c.row == 0), "{cells:?}");
+
+        // İlk sekiz: `\033[41;1;4m` → kalın + düz alt çizgi. `Face` yolunun
+        // betikte gerçekten olduğunun kanıtı.
+        assert!(
+            cells[..8]
+                .iter()
+                .all(|c| c.bold && !c.italic && c.underline == UnderlineStyle::Single),
+            "{cells:?}"
+        );
+
+        // Yedisi de mürekkepsiz ve arka plansız: `hucre=8` ve `glif=6` bit
+        // bit duruyor, yani bu hücreler yalnız kural yan tümcesinden geçti.
+        let rules = &cells[8..];
+        assert!(
+            rules.iter().all(|c| c.bg.is_none() && c.ch.is_none()),
+            "{cells:?}"
+        );
+
+        use UnderlineStyle::{Curl, Dashed, Dotted, Double, None as NoLine, Single};
+        assert_eq!(
+            rules.iter().map(|c| c.underline).collect::<Vec<_>>(),
+            vec![Single, Double, Curl, Dotted, Dashed, NoLine, Curl],
+            "{cells:?}"
+        );
+        // Üstü çizili yalnız altıncıda ve alt çizgisi yok: `\033[0;9m`
+        // sıfırlamayı da sınıyor.
+        assert_eq!(
+            rules.iter().map(|c| c.strikeout).collect::<Vec<_>>(),
+            vec![false, false, false, false, false, true, false],
+            "{cells:?}"
+        );
+        // SGR 58 yalnız sonuncuda; ondan öncekiler ön plana düşüyor.
+        let red = Some(color::linear_rgba(color::default(196)));
+        assert_eq!(
+            rules.iter().map(|c| c.underline_color).collect::<Vec<_>>(),
+            vec![None, None, None, None, None, None, red],
+            "{cells:?}"
+        );
+    }
+
+    #[test]
+    fn undercurl_text_yields_curl() {
+        // Eşleme zincirini tek bir `contains(UNDERLINE)`'a indiren
+        // mutasyonun kırmızı düştüğü yer; gerekçesi `frame()`'in eşleme
+        // yorumunda. Odaklı sınama: duman reçetesi yeniden yazılsa da ayakta
+        // kalır ve hatanın yerini nokta atışı gösterir.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033[41;4:3mx\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        let cells = wait_cells(&session, &wake, 1);
+        assert_eq!(cells[0].underline, UnderlineStyle::Curl, "{cells:?}");
+    }
+
+    #[test]
+    fn strikeout_only_cell_carries_no_underline_color() {
+        // SGR 58'in adı "alt çizgi rengi" ve SGR'de üstü çizilinin ayrı bir
+        // rengi yok. Renk kapısı `ruled`'a bağlansaydı bu hücre rengi taşır
+        // ve onu okuyan çizici üstü çiziliyi kırmızıya boyardı — duman
+        // reçetesinde 9 ile 58 aynı hücrede buluşmadığı için oradan
+        // görülmezdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033[41;9;58;5;196mX\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        let cells = wait_cells(&session, &wake, 1);
+        assert!(cells[0].strikeout, "{cells:?}");
+        assert_eq!(cells[0].underline, UnderlineStyle::None, "{cells:?}");
+        assert_eq!(cells[0].underline_color, None, "{cells:?}");
+    }
+
+    #[test]
+    fn underlined_space_cell_passes_sink() {
+        // Altı çizili boşluk: `bg: None`, `ch: None` — ama bir kural var,
+        // yani atlama koşulundan **geçmeli**. `ch` `Some(' ')` olsaydı atlas
+        // hiçbir piksel boyamayan bir yuva harcardı; istenen bir çizgi.
+        let wake = Arc::new(TestWake::default());
+        // Kırmızı çapa bilerek **sonra**: `wait_cells` arka planlı hücre
+        // sayıyor, çapa göründüğünde boşluk aynı karede zaten işlenmiştir.
+        let session = spawn_session(
+            "printf '\\033[4m \\033[0;41mA\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        let cells = wait_cells(&session, &wake, 1);
+        let space = cells
+            .iter()
+            .find(|c| c.col == 0)
+            .expect("altı çizili boşluk sink'e gelmedi");
+        assert_eq!((space.bg, space.ch), (None, None), "{cells:?}");
+        assert_eq!(space.underline, UnderlineStyle::Single, "{cells:?}");
     }
 
     #[test]
@@ -873,6 +1155,27 @@ mod tests {
 
         let cells = wait_cells(&session, &wake, 5);
         assert!(cells.iter().all(|c| c.ch.is_none()), "{cells:?}");
+        assert_eq!(backgrounds(&cells).count(), 5, "{cells:?}");
+    }
+
+    #[test]
+    fn hidden_text_drops_rules_too() {
+        let wake = Arc::new(TestWake::default());
+        // `\e[8m` "mürekkep yok" demek. Kurallar mürekkepten ayrı bir yoldan
+        // çiziliyor, yani `HIDDEN` orada da sorulmazsa altı çizili gizli
+        // metin çizgisiyle okunur ve gizleme delinir. Arka plan yerinde kalır.
+        let session = spawn_session(
+            "printf '\\033[41;8;4:3;9mgizli\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        let cells = wait_cells(&session, &wake, 5);
+        assert!(
+            cells
+                .iter()
+                .all(|c| c.underline == UnderlineStyle::None && !c.strikeout),
+            "{cells:?}"
+        );
         assert_eq!(backgrounds(&cells).count(), 5, "{cells:?}");
     }
 

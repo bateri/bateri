@@ -765,9 +765,9 @@ mod tests {
         Cell {
             col,
             row,
-            ch: None,
             fg: bt_core::DEFAULT_BG,
             bg: Some(bg),
+            ..Default::default()
         }
     }
 
@@ -1023,6 +1023,7 @@ mod tests {
                 ch: Some(glyph),
                 fg: white,
                 bg: Some(red),
+                ..Default::default()
             });
         }
         assert_eq!(frame.glyph_count(), 2);
@@ -1096,6 +1097,7 @@ mod tests {
             ch: Some('x'),
             fg: bt_core::DEFAULT_CURSOR,
             bg: None,
+            ..Default::default()
         });
 
         let cmd = r.queue.commandBuffer().expect("komut tamponu");
