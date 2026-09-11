@@ -26,7 +26,7 @@ use objc2_metal::{
 };
 use objc2_quartz_core::CAMetalDrawable;
 
-use crate::frame::{Frame, GlyphCell, GlyphInstance};
+use crate::frame::{Frame, GlyphCell, GlyphInstance, RuleCell};
 use crate::{GpuError, Surface};
 
 /// `addCompletedHandler:`e verilen blok; [`Renderer::completion`] kurar.
@@ -71,8 +71,10 @@ struct AtlasTexture {
     /// bağlanmamalı; ayrıca `cell_metrics` hata döndüremez, doku ayırması ise
     /// başarısız olabilir.
     texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
-    /// `char → slot → uv` çözümünün hedefi; alan olması kare başına
-    /// yeniden ayırmayı önlüyor.
+    /// `sprite → slot → uv` çözümünün hedefi; alan olması kare başına
+    /// yeniden ayırmayı önlüyor. Glyph'ler ve kurallar **tek** liste: ikisi de
+    /// aynı pipeline'dan, tek draw call'da çiziliyor ve sıra (kurallar sonda)
+    /// listedeki sıradır.
     ///
     /// Yapının değişmezine (atlas ↔ doku) katılmıyor, yalnız onunla aynı
     /// ödüncün altında yaşıyor. "Tek kuşak" garantisini veren bu alan
@@ -148,6 +150,10 @@ pub struct Renderer {
     /// `glif=G` jetonu. `last_bg_count` ile aynı gerekçe ve aynı sınır:
     /// CPU sayacı, GPU'nun o glyph'leri boyadığını kanıtlamaz.
     last_glyph_count: AtomicUsize,
+    /// Son **gönderilen** karede çizilen kural çizgisi sayısı; `make duman`'ın
+    /// `kural=R` jetonu. İki kardeşiyle aynı gerekçe; jetonun neyi göremediği
+    /// [`crate::frame::Frame::rule_count`]'ta yazılı ve tek yerde durmalı.
+    last_rule_count: AtomicUsize,
     /// Font metriğinin ve glyph yuvalarının kaynağı, dokusuyla birlikte.
     ///
     /// `Option`, çünkü atlasın anahtarı (punto + backing ölçeği) **pencereden**
@@ -225,6 +231,7 @@ impl Renderer {
             atlas: RefCell::new(None),
             last_bg_count: AtomicUsize::new(0),
             last_glyph_count: AtomicUsize::new(0),
+            last_rule_count: AtomicUsize::new(0),
             frames: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -300,6 +307,11 @@ impl Renderer {
         self.last_glyph_count.load(Ordering::Relaxed)
     }
 
+    /// Son gönderilen karede çizilen kural çizgisi sayısı.
+    pub fn last_rule_count(&self) -> usize {
+        self.last_rule_count.load(Ordering::Relaxed)
+    }
+
     /// Kare tamamlanınca çağrılacak bloğu **bir kez** kurar.
     ///
     /// Blok kare başına kurulmuyor: taşıdığı hiçbir şey kareden kareye
@@ -362,6 +374,8 @@ impl Renderer {
                 .store(frame.bg_count(), Ordering::Relaxed);
             self.last_glyph_count
                 .store(frame.glyph_count(), Ordering::Relaxed);
+            self.last_rule_count
+                .store(frame.rule_count(), Ordering::Relaxed);
             cmd.presentDrawable(drawable.as_ref());
             cmd.commit();
             Ok(())
@@ -404,8 +418,10 @@ impl Renderer {
         // öldürür — `NoBuffer`'ı zarifçe döndürme amacının tam tersi.
         //
         // Sıra çizim sırasıdır (R4.1): önce arka planlar **ve imleç**, sonra
-        // glyph'ler. Ters olsaydı imleç altındaki harfi örterdi — imleç opak
-        // ve `Frame`'in arka plan listesinin sonunda.
+        // glyph'ler, en sonda kurallar (ikisi de `encode_glyphs`'te, aynı
+        // pipeline'da). Ters olsaydı imleç altındaki harfi örterdi — imleç
+        // opak ve `Frame`'in arka plan listesinin sonunda; imlecin üstündeki
+        // alt çizgi de aynı sıradan bedavaya görünür kalıyor.
         // Viewport tek yerde türetiliyor: iki encoder da aynı dokuya çiziyor
         // ve ayrı ayrı sormaları kare başına iki fazladan objc mesajı ile
         // ayrışabilen iki tanım demekti.
@@ -476,8 +492,9 @@ impl Renderer {
         Ok(())
     }
 
-    /// Glyph'leri encode eder: yuva çözümü, eksik yuvaların yüklenmesi ve tek
-    /// instanced çizim çağrısı.
+    /// Glyph'leri **ve kuralları** encode eder: yuva çözümü, eksik yuvaların
+    /// yüklenmesi ve tek instanced çizim çağrısı. İkisi tek tamponda ve tek
+    /// çağrıda, kurallar sonda (`AtlasTexture::prepare`).
     ///
     /// Atlas ödüncü **bu fonksiyonun içinde doğar ve burada ölür**. Yuva
     /// çözümünü `Session::frame`'in sink'ine hoist etmek doğal refleks
@@ -491,8 +508,11 @@ impl Renderer {
         frame: &Frame,
         viewport_px: [f32; 2],
     ) -> Result<(), GpuError> {
-        let glyphs = frame.glyphs();
-        if glyphs.is_empty() {
+        let (glyphs, rules) = (frame.glyphs(), frame.rules());
+        // Kapı ikisini birden soruyor: yalnız kural taşıyan bir kare (boş bir
+        // satırın altındaki kıvrım) buradan geçmeli, hiçbir şey taşımayan kare
+        // ise sıfır uzunluklu `newBufferWithBytes`'a ulaşmamalı.
+        if glyphs.is_empty() && rules.is_empty() {
             return Ok(());
         }
         let mut atlas = self.atlas.borrow_mut();
@@ -501,9 +521,9 @@ impl Renderer {
         // "ölçeği hiç söylemeden glyph çizmek" demek; sessizce @1x bir atlas
         // uydurmak yerine kare düşer.
         let atlas_tex = atlas.as_mut().ok_or(GpuError::NoAtlas)?;
-        atlas_tex.prepare(&self.device, glyphs)?;
+        atlas_tex.prepare(&self.device, glyphs, rules)?;
         // audit: `prepare` `Ok` döndüyse dokuyu kurmuştur; tek çıkış yolu `?`.
-        let atlas_texture = atlas_tex.texture.as_ref().expect("hazirla dokuyu kurdu");
+        let atlas_texture = atlas_tex.texture.as_ref().expect("prepare dokuyu kurdu");
         let instances = &atlas_tex.instances;
 
         // Düzen `GlyphInstance`'ın `offset_of` assert'leriyle `cell.metal`'e bağlı.
@@ -611,7 +631,9 @@ fn pipeline(
 
 impl AtlasTexture {
     /// Dokuyu (gerekirse) kurar, eksik yuvaları yükler ve `instances`'ı bu
-    /// karenin glyph'leriyle doldurur — hepsi **tek** ödünç altında.
+    /// karenin glyph'leri **ve kurallarıyla** doldurur — hepsi **tek** ödünç
+    /// altında ve tek listede, çünkü ikisi de aynı `cell` pipeline'ının
+    /// çizdiği hücre boyunda birer kapsama maskesi.
     ///
     /// **Bilinen sınır — `replaceRegion` uçuşta okunan dokuya yazıyor.**
     /// Izgara değişimi güvenli (`sync_atlas` dokuyu düşürür, burada yenisi
@@ -628,6 +650,7 @@ impl AtlasTexture {
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
         glyphs: &[GlyphCell],
+        rules: &[RuleCell],
     ) -> Result<(), GpuError> {
         let metrics = self.atlas.metrics();
         let (tw, th) = self.atlas.texture_px();
@@ -650,33 +673,86 @@ impl AtlasTexture {
         let texture = self.texture.as_ref().expect("doku hemen üstte kuruldu");
 
         self.instances.clear();
+        // `clear` kapasiteyi koruyor, yani durağan hâlde ayırma yok; `reserve`
+        // yalnız kapasitenin **ilk kez** aşıldığı kareyi düzleştiriyor (bir
+        // blok metnin altı çizilince glyph + kural toplamı sıçrar) — iki
+        // döngünün ortasında birden çok kez büyüyüp kopyalamak yerine bir kez.
+        self.instances.reserve(glyphs.len() + rules.len());
         // Doku boyutu döngü değişmezi: tersi bir kez alınıp çarpılıyor, yoksa
-        // glyph başına iki f32 bölmesi ödenirdi.
-        let (inv_tw, inv_th) = (1.0 / f32::from(tw), 1.0 / f32::from(th));
+        // sprite başına iki f32 bölmesi ödenirdi.
+        let inv = (1.0 / f32::from(tw), 1.0 / f32::from(th));
+        // **Tek liste, tek draw call: önce glyph'ler, sonra kurallar.** Sıra
+        // bilerek — üstü çizili harfin ÜSTÜNDEN geçmeli. İmleç sırası bedava
+        // geliyor: glyph geçişi zaten arka planlardan ve imleçten sonra
+        // kodlanıyor (`encode_pass`), yani kural da imlecin üstüne düşüyor.
         for glyph in glyphs {
-            // Yüz phase-3'te geliyor; bu phase yalnız `slot`'un imza
-            // değişimini karşılıyor.
-            let (slot, upload) = self.atlas.slot(Sprite::Char(glyph.ch), Face::Regular);
-            // `Upload` köşeyi zaten taşıyor — `bt-atlas` ikisini bilerek aynı
-            // dönüşte veriyor. Yeni yuvada onu kullanmak hem glyph başına bir
-            // `%` + `/` çiftini düşürüyor hem de aynı olguyu iki ayrı ifadeyle
-            // yazmayı önlüyor. `slot_origin` yalnız önbellekli ve tofu yoluna
-            // kalıyor. (`upload` atlası ödünç alıyor; `if let` onu tüketince
-            // ödünç bitiyor ve atlas yeniden sorulabiliyor.)
-            let (x, y) = if let Some(upload) = upload {
-                upload_slot(texture, upload.origin, metrics, upload.bytes);
-                upload.origin
-            } else {
-                self.atlas.slot_origin(slot)
-            };
+            let uv0 = slot_uv(
+                &mut self.atlas,
+                texture,
+                metrics,
+                inv,
+                Sprite::Char(glyph.ch),
+                glyph.face,
+            );
             self.instances.push(GlyphInstance {
                 pos: glyph.pos,
-                uv0: [f32::from(x) * inv_tw, f32::from(y) * inv_th],
+                uv0,
                 rgba: glyph.rgba,
+            });
+        }
+        for rule in rules {
+            // Kurallar **her zaman** `Face::Regular`: kalın metnin altındaki
+            // çizgi kalın değildir. `Atlas::slot` bunu ayrıca normalize ediyor;
+            // burada da doğru yüzü sormak o normalizasyonu bir savunma
+            // katmanı olarak bırakıyor, tek dayanak yapmıyor.
+            let uv0 = slot_uv(
+                &mut self.atlas,
+                texture,
+                metrics,
+                inv,
+                Sprite::Rule(rule.kind),
+                Face::Regular,
+            );
+            self.instances.push(GlyphInstance {
+                pos: rule.pos,
+                uv0,
+                rgba: rule.rgba,
             });
         }
         Ok(())
     }
+}
+
+/// Sprite'ın yuvasını çözer, yuva yeni açıldıysa dokuya yükler ve uv0'ını
+/// verir.
+///
+/// Glyph ve kural döngülerinin **ortak gövdesi**; ikisinin ayrıldığı tek yer
+/// sordukları sprite ve yüz. Kopyalansaydı `upload` dalı iki yerde yaşardı ve
+/// birinde unutulan bir `upload_slot` "yuva var ama doku boş" demek olurdu —
+/// ekranda görünmeyen bir glyph, hiçbir sayacın düşmediği.
+///
+/// `Upload` köşeyi zaten taşıyor — `bt-atlas` ikisini bilerek aynı dönüşte
+/// veriyor. Yeni yuvada onu kullanmak hem sprite başına bir `%` + `/` çiftini
+/// düşürüyor hem de aynı olguyu iki ayrı ifadeyle yazmayı önlüyor;
+/// `slot_origin` yalnız önbellekli ve tofu yoluna kalıyor. (`upload` atlası
+/// ödünç alıyor; `if let` onu tüketince ödünç bitiyor ve atlas yeniden
+/// sorulabiliyor.)
+fn slot_uv(
+    atlas: &mut Atlas,
+    texture: &ProtocolObject<dyn MTLTexture>,
+    metrics: Metrics,
+    inv: (f32, f32),
+    sprite: Sprite,
+    face: Face,
+) -> [f32; 2] {
+    let (slot, upload) = atlas.slot(sprite, face);
+    let (x, y) = if let Some(upload) = upload {
+        upload_slot(texture, upload.origin, metrics, upload.bytes);
+        upload.origin
+    } else {
+        atlas.slot_origin(slot)
+    };
+    [f32::from(x) * inv.0, f32::from(y) * inv.1]
 }
 
 /// Atlas dokusu: tek kanal kapsama, yalnız shader okur.
@@ -756,7 +832,7 @@ fn upload_slot(
 mod tests {
     use std::sync::Mutex;
 
-    use bt_core::Cell;
+    use bt_core::{Cell, Cursor, UnderlineStyle};
 
     use super::*;
 
@@ -878,6 +954,85 @@ mod tests {
         (pixels[i + 2], pixels[i + 1], pixels[i])
     }
 
+    /// Ön plan olarak kullanılan doygun beyaz.
+    ///
+    /// Doygun: kapsaması tam olan piksel `(0xff, 0xff, 0xff)` baytını birebir
+    /// veriyor, yani "kural ön plan rengiyle çizildi" iddiası eşitlikle
+    /// sorulabiliyor. Paletten değil, çünkü sınamaların sorduğu şey renk değil
+    /// **rengin nereden geldiği**.
+    const WHITE: LinearRgba = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+
+    /// Kareyi offscreen bir dokuya çizer ve pikselleri CPU'ya okur.
+    ///
+    /// Altı sınamanın ortak gövdesi: doku kurulumu, encode, `commit`, bekleme
+    /// ve durum kontrolü. Kopyalansaydı `MTLCommandBufferStatus::Error`
+    /// kontrolü birinde unutulur ve o sınama boş bir dokuyu okuyup "kural
+    /// çizilmedi" yerine anlamsız bir renk iddiası düşürürdü.
+    ///
+    /// `edge` ve `clear` parametre kalıyor: ikisi de yük taşıyor — kenar 16 ve
+    /// 64 olarak ayrışıyor, clear rengi ise `cell_bg_paints_pixels_on_the_gpu`
+    /// için bilerek ötekilerden **farklı** (hücre yolu ile clear yolu ayrık iki
+    /// renkle kanıtlanıyor).
+    fn render_offscreen(r: &Renderer, edge: usize, clear: LinearRgba, frame: &Frame) -> Vec<u8> {
+        let texture = target_texture(r, edge);
+        let cmd = r.queue.commandBuffer().expect("komut tamponu");
+        r.encode_pass(&cmd, &texture, clear, frame)
+            .expect("pass encode edilemedi");
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        assert_ne!(cmd.status(), MTLCommandBufferStatus::Error);
+        read_pixels(&texture, edge)
+    }
+
+    /// `col` sütunundaki hücrenin pikselleri, **satır satır** (üstten alta).
+    ///
+    /// Satır yapısı korunuyor çünkü kural sınamalarının sorduğu şey tam olarak
+    /// bir satırın x boyunca tekdüze olup olmadığı; düzleştirilmiş bir liste
+    /// o soruyu soramaz. Düz liste isteyen `.concat()` diyor.
+    fn cell_rows(
+        pixels: &[u8],
+        edge: usize,
+        cell_px: (u16, u16),
+        col: usize,
+    ) -> Vec<Vec<(u8, u8, u8)>> {
+        let (cw, ch) = (usize::from(cell_px.0), usize::from(cell_px.1));
+        (0..ch)
+            .map(|y| {
+                (0..cw)
+                    .map(|x| pixel_at(pixels, edge, col * cw + x, y))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Offscreen sınamaların ortak kurulumu: hücre ölçüsü + sığma kontrolü.
+    ///
+    /// Ölçek açıkça söyleniyor (`cell_metrics(1.0)`): atlasın anahtarı
+    /// pencereden gelir, sınamanın penceresi yok ve söylenmezse kare
+    /// `GpuError::NoAtlas` ile düşer. Sığma kontrolü ölü değil: büyük
+    /// varsayılan puntolu bir makinede hücre dokuyu aşar ve `cell_rows`
+    /// dokunun dışını okurdu.
+    fn fitting_cell_px(r: &Renderer, edge: usize, cols: usize) -> (u16, u16) {
+        let (cw, ch) = r.cell_metrics(1.0).cell_px();
+        assert!(
+            usize::from(cw) * cols <= edge && usize::from(ch) <= edge,
+            "{cols}×({cw}×{ch}) offscreen dokuya sığmıyor"
+        );
+        (cw, ch)
+    }
+
+    /// Yalnız kural taşıyan hücre: `ch: None`, `bg: None` — duman reçetesinin
+    /// yedi kural hücresinin aynısı. Ön plan her çağrıda [`WHITE`].
+    fn rule_cell(col: u16, underline: UnderlineStyle) -> Cell {
+        Cell {
+            col,
+            row: 0,
+            fg: WHITE,
+            underline,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn completion_block_counts_frame_and_reports_result() {
         // `frames()`'in anlamı bu phase'de değişti: "commit edildi" değil,
@@ -916,7 +1071,6 @@ mod tests {
         // burası çalıştırıyor. Pencere gerekmediği için başsız ortamda da koşar.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         const EDGE: usize = 16;
-        let texture = target_texture(&r, EDGE);
 
         // 8×8 hücre, viewport 16×16 → dört çeyrek. Sol üstte kırmızı, sağ
         // altta yeşil, sol altta paletin arka planı, sağ üst boş. İki instance
@@ -946,14 +1100,7 @@ mod tests {
         // kullanıldı ve iki yolun ayrı ayrı kanıtlanması ayrık iki renk ister.
         // Buraya `DEFAULT_BG` "düzeltilirse" sınama hücre yolu ile clear
         // yolunu birbirinden ayırt edemez hâle gelir.
-        let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        r.encode_pass(&cmd, &texture, bt_core::DEFAULT_CURSOR, &frame)
-            .expect("pass encode edilemedi");
-        cmd.commit();
-        cmd.waitUntilCompleted();
-        assert_ne!(cmd.status(), MTLCommandBufferStatus::Error);
-
-        let pixels = read_pixels(&texture, EDGE);
+        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_CURSOR, &frame);
         let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
         assert_eq!(pixel(2, 2), (255, 0, 0), "ilk hücre sol üstte kırmızı");
         assert_eq!(pixel(12, 12), (0, 255, 0), "ikinci hücre sağ altta yeşil");
@@ -994,13 +1141,8 @@ mod tests {
         // Söylenmeseydi kare `GpuError::NoAtlas` ile düşerdi — sessizce @1x
         // çizmek yerine. Hücre boyutu da atlasınkiyle aynı olsun ki yuva
         // dörtlüye birebir otursun.
-        let (cw, ch) = r.cell_metrics(1.0).cell_px();
         const EDGE: usize = 64;
-        assert!(
-            usize::from(cw) <= EDGE && usize::from(ch) <= EDGE,
-            "hücre {cw}×{ch} offscreen dokuya sığmıyor"
-        );
-        let texture = target_texture(&r, EDGE);
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
         // Saf kırmızı arka plan üstüne beyaz `M` ve `.`: ikisi de doygun,
         // aradaki fark kapsama neyse o.
@@ -1013,7 +1155,6 @@ mod tests {
         // farklı şey çizdiğini sormak o kapıyı kapatıyor: `M` hücreyi
         // doldurur, `.` yalnız tabanına küçük bir nokta koyar.
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
-        let white = LinearRgba::from_srgb(0xff, 0xff, 0xff);
         let mut frame = Frame::default();
         frame.clear((cw, ch));
         for (col, glyph) in [(0u16, 'M'), (1, '.')] {
@@ -1021,28 +1162,18 @@ mod tests {
                 col,
                 row: 0,
                 ch: Some(glyph),
-                fg: white,
+                fg: WHITE,
                 bg: Some(red),
                 ..Default::default()
             });
         }
         assert_eq!(frame.glyph_count(), 2);
 
-        let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        r.encode_pass(&cmd, &texture, bt_core::DEFAULT_BG, &frame)
-            .expect("pass encode edilemedi");
-        cmd.commit();
-        cmd.waitUntilCompleted();
-        assert_ne!(cmd.status(), MTLCommandBufferStatus::Error);
-
-        let pixels = read_pixels(&texture, EDGE);
-        let cell_pixels = |col: usize| -> Vec<(u8, u8, u8)> {
-            (0..usize::from(ch))
-                .flat_map(|y| (0..usize::from(cw)).map(move |x| (x, y)))
-                .map(|(x, y)| pixel_at(&pixels, EDGE, col * usize::from(cw) + x, y))
-                .collect()
-        };
-        let (m, dot) = (cell_pixels(0), cell_pixels(1));
+        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let (m, dot) = (
+            cell_rows(&pixels, EDGE, (cw, ch), 0).concat(),
+            cell_rows(&pixels, EDGE, (cw, ch), 1).concat(),
+        );
 
         // Dört iddia, dört ayrı hata: arka plan hâlâ görünür (glyph dörtlüsü
         // hücreyi tümden boyamadı), en az bir piksel ondan farklı (glyph
@@ -1076,6 +1207,172 @@ mod tests {
         assert!(
             alphas.iter().all(|&a| a == 0xff),
             "glyph kenarında alfa deliği: {alphas:?}"
+        );
+    }
+
+    #[test]
+    fn rule_band_is_not_uniform_along_x() {
+        // Kıvrım **bitmap'inin** dalga olduğunu `bt-atlas` kanıtlıyor
+        // (`curl_is_really_a_wave`, GPU'suz). Buranın kanıtladığı, o dalganın
+        // **GPU yolundan sağ çıktığı**: doğru yuvanın uv'siyle, `cell`
+        // pipeline'ından, kural listesinin kendi geçişinde. Yuvayı sabitleyen
+        // ya da kuralı düz çizgi olarak çizen bir kod ikisinin arasında
+        // kaybolurdu — `kural=R` sayacı stil ayrımını göremiyor
+        // (bkz. `Frame::rule_count`).
+        //
+        // **Tam bayt aranmıyor**: iddia "bandın satırı x boyunca tekdüze
+        // değil". Baytlar aransaydı kapı fontun `underline_px`'ine ve
+        // `CURL_FACTOR`'a rehin olurdu.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+
+        // Düz çizgi **kontrol**: tek başına "bir satır tekdüze değil" iddiası
+        // hücreyi çöple dolduran bir kodda da geçerdi. İkisi birlikte "kıvrım
+        // dalgalı **ve** düz çizgi düz" diyor.
+        let mut frame = Frame::default();
+        frame.clear((cw, ch));
+        frame.push(rule_cell(0, UnderlineStyle::Single));
+        frame.push(rule_cell(1, UnderlineStyle::Curl));
+        assert_eq!(frame.rule_count(), 2);
+        assert_eq!(frame.glyph_count(), 0, "kural hücresi mürekkep üretmez");
+
+        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let uniform = |row: &Vec<(u8, u8, u8)>| row.iter().all(|p| *p == row[0]);
+        let single = cell_rows(&pixels, EDGE, (cw, ch), 0);
+        let curl = cell_rows(&pixels, EDGE, (cw, ch), 1);
+
+        let clear = single[0][0];
+        assert!(
+            single.iter().flatten().any(|&p| p != clear),
+            "düz alt çizgi hiç çizilmedi: {single:?}"
+        );
+        assert!(
+            single.iter().all(uniform),
+            "düz çizginin bandı x boyunca tekdüze değil: {single:?}"
+        );
+        assert!(
+            curl.iter().any(|row| !uniform(row)),
+            "kıvrımın hiçbir satırı x boyunca değişmiyor: dalga düz çizgiye düşmüş"
+        );
+    }
+
+    #[test]
+    fn sgr58_color_differs_from_foreground() {
+        // SGR 58 `bt-core`'dan `Cell::underline_color` olarak geliyor ve
+        // `Frame::push` onu `fg`'nin **yerine** koyuyor. Düşerse belirti
+        // sessiz: çizgi çizilir, yalnız rengi yanlış olur ve sayaç oynamaz.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+
+        let mut frame = Frame::default();
+        frame.clear((cw, ch));
+        // Sol hücre kontrol: aynı çizgi, SGR 58 **yok** → ön plan rengi.
+        frame.push(rule_cell(0, UnderlineStyle::Single));
+        frame.push(Cell {
+            underline_color: Some(LinearRgba::from_srgb(0xff, 0x00, 0x00)),
+            ..rule_cell(1, UnderlineStyle::Single)
+        });
+
+        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let plain = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();
+        let colored = cell_rows(&pixels, EDGE, (cw, ch), 1).concat();
+
+        // Tam kaplanan satır ön planı birebir veriyor: kapsama 1 → blend
+        // kaynağı olduğu gibi yazıyor.
+        let fg = (0xff, 0xff, 0xff);
+        assert!(
+            plain.contains(&fg),
+            "SGR 58'siz kural ön plan rengiyle çizilmedi: {plain:?}"
+        );
+        assert!(
+            !colored.contains(&fg),
+            "SGR 58'li kuralın pikselleri ön plan rengini taşıyor: {colored:?}"
+        );
+        // Yön de sorulmalı: "farklı" tek başına çizilmemiş bir kuralda da
+        // doğrudur. Kırmızı baskın bir piksel rengin `underline_color`'dan
+        // geldiğini söylüyor.
+        //
+        // Karşılaştırma `u16`'da: `u8` olsaydı açık bir clear rengi (ya da
+        // yeşil/mavi bir kural) `+ 64`'te taşar ve sınama yanlış pikseli
+        // gösteren bir assert yerine "attempt to add with overflow" ile
+        // ölürdü — `make hepsi` sınamaları debug koşuyor.
+        assert!(
+            colored
+                .iter()
+                .any(|&(red, green, blue)| { u16::from(red) > u16::from(green.max(blue)) + 64 }),
+            "SGR 58'li kuralda kırmızı baskın piksel yok: {colored:?}"
+        );
+    }
+
+    #[test]
+    fn bold_and_regular_draw_differently() {
+        // `(bold, italic)` → `Face` çevirisi `bt-gpu`'nun tek yeri ve sessizce
+        // `Face::Regular` dönen bir hâli hiçbir sayaç göremez: `glif=G` aynı,
+        // `bt-core`'un bayrağı aynı, atlas yuvayı yine verir. Aynı karakterin
+        // iki yüzde iki farklı piksel kümesi vermesi tek kanıt.
+        //
+        // Bu sınama fontun **kalın yüzü taşımasına** dayanıyor. Taşımıyorsa
+        // `Faces::effective` düz yüze çöker, iki hücre birebir aynı çizilir ve
+        // sınama kırmızı düşer — yanlış bir yeşil vermez.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+
+        let mut frame = Frame::default();
+        frame.clear((cw, ch));
+        for (col, bold) in [(0u16, false), (1, true)] {
+            frame.push(Cell {
+                col,
+                row: 0,
+                ch: Some('M'),
+                fg: WHITE,
+                bold,
+                ..Default::default()
+            });
+        }
+
+        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let plain = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();
+        let bold = cell_rows(&pixels, EDGE, (cw, ch), 1).concat();
+        assert_ne!(plain, bold, "kalın `M` düz `M` ile aynı çizildi");
+    }
+
+    #[test]
+    fn rule_over_cursor_stays_visible() {
+        // Çizim sırası: arka planlar **ve imleç**, sonra glyph'ler, sonra
+        // kurallar. İmleç bloğu opak ve altındaki her şeyi örter; kural ondan
+        // sonra gelmezse imlecin üstündeki hücrede alt çizgi kaybolur ve
+        // belirti yalnız imlecin durduğu tek hücrede görünür.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
+
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let mut frame = Frame::default();
+        frame.clear((cw, ch));
+        frame.push(rule_cell(0, UnderlineStyle::Single));
+        frame.push_cursor(
+            Cursor {
+                col: 0,
+                row: 0,
+                visible: true,
+            },
+            red,
+        );
+
+        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let cell = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();
+        assert!(
+            cell.contains(&(0xff, 0xff, 0xff)),
+            "imlecin üstündeki kural örtüldü: {cell:?}"
+        );
+        // İkinci iddia bekçinin diğer yarısı: kural imleci tümden boyamamalı,
+        // yoksa "görünür" iddiası imleci silen bir kodda da geçerdi.
+        assert!(
+            cell.contains(&(0xff, 0x00, 0x00)),
+            "kural imleç bloğunun tamamını örttü: {cell:?}"
         );
     }
 

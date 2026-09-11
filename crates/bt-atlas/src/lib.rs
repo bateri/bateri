@@ -260,7 +260,31 @@ impl Atlas {
             // '→' tofu kutusu olur, aynı karakter düz satırda düzgün çizilirdi.
             // Özyineleme tek adım: düz yüzde `face == Regular` ve bu kol
             // yeniden ateşlenmiyor.
-            DrawResult::NoGlyph if face != Face::Regular => self.slot(sprite, Face::Regular),
+            //
+            // **İstenen anahtar da yazılıyor.** Yazılmasaydı geri düşüş her
+            // karede yeniden yaşanırdı: `(Char('→'), Bold)` haritada hiç
+            // görünmez, `raster::draw` kalın fontu her kare CoreText'e sorar
+            // (`font::glyph_index`), `NoGlyph` alır ve düz yüze düşerdi — ve
+            // bu, `slot()` çizim yolunda olduğu için ana thread'de, kare
+            // bütçesinin ortasında. Tam olarak hemen yukarıdaki yorumun
+            // "önbelleğe girmeselerdi her karede yeniden sorulurdu"
+            // gerekçesi; o gerekçe bu kol için de geçerli. Düz yüz de
+            // `NoGlyph` verirse takma ad `TOFU`'ya bağlanır ve negatif
+            // önbelleğin tavanı onu da süpürür.
+            DrawResult::NoGlyph if face != Face::Regular => {
+                let (slot, upload) = self.slot(sprite, Face::Regular);
+                // `map` `upload`'ı tüketiyor ve `self.buffer` ödüncü burada
+                // bitiyor; `insert` ancak ondan sonra mümkün. Tampon özyineli
+                // çağrının çizdiği baytları hâlâ taşıyor, yani `Upload` aynı
+                // içerikle yeniden kurulabiliyor.
+                let origin = upload.map(|upload| upload.origin);
+                self.slots.insert(key, slot);
+                let upload = origin.map(|origin| Upload {
+                    origin,
+                    bytes: &self.buffer,
+                });
+                (slot, upload)
+            }
             DrawResult::NoGlyph | DrawResult::NoContext => {
                 // Tavan: negatif önbellek yuva harcamıyor, yani `next` onu
                 // sınırlamıyor. Bir ikili dosyayı `cat`'lemek milyonlarca ayrı
@@ -462,6 +486,35 @@ mod tests {
             "tofu çözümü önbelleğe girmeli"
         );
         assert_eq!(a.occupancy().0, 1, "tofu düşüşü yuva harcamamalı");
+    }
+
+    #[test]
+    fn face_fallback_is_cached_under_the_requested_face() {
+        // `─` (U+2500) **ölçüldü** (bu makine, Menlo 13pt): düz yüzde var,
+        // kalın yüzde yok. Yani glyph düzeyindeki geri düşüş gerçek bir fontla
+        // ateşlenebiliyor — ve hiç de seyrek bir durum değil: kalın bir TUI
+        // çerçevesi bu koldan geçiyor.
+        const BOX_DRAWING: char = '─';
+        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let regular = a.slot(Sprite::Char(BOX_DRAWING), Face::Regular).0;
+        let (bold, _) = a.slot(Sprite::Char(BOX_DRAWING), Face::Bold);
+
+        // Geri düşüşün kendisi: kalın istek tofu'ya değil düz yüzün yuvasına
+        // çözülmeli, yoksa kalın bir satırdaki çerçeve kutu kutu görünürdü.
+        assert_ne!(bold, TOFU, "kalın yüzde olmayan glyph tofu'ya düştü");
+        assert_eq!(bold, regular, "geri düşüş düz yüzün yuvasını vermeli");
+
+        // Asıl bekçi: **istenen** yüzün anahtarı da haritada. Olmasaydı bu
+        // çözüm hiç önbelleğe girmez, `slot()` çizim yolunda olduğu için de
+        // ekranda duran her kalın çerçeve hücresi **her karede** CoreText'e
+        // yeniden sorulurdu — ana thread'de. Dışarıdan gözlenemediği için
+        // bekçi iç tabloya bakıyor; `unknown_char_is_cached` ile aynı gerekçe.
+        assert_eq!(
+            a.slots.get(&(Sprite::Char(BOX_DRAWING), Face::Bold)),
+            Some(&regular),
+            "geri düşüş istenen yüzün anahtarıyla önbelleğe girmeli"
+        );
+        assert_eq!(a.occupancy().0, 2, "geri düşüş ikinci bir yuva harcadı");
     }
 
     #[test]
