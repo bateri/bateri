@@ -74,6 +74,12 @@ ama aynı push aralığında. Notlar kazanıyor: `/ship`'in göreceği aralıkta
 
 ### B.1 `/ship` — dallanmamış `main` push'u `[oto]`
 
+> **Koşuldu: 2026-09-11, `a50f846..dd77945`, 16 commit.** Doğrulama push'tan
+> önce yeniden koşuldu ve dördü de tetiklendi: `make hepsi` 0 (79 sınama),
+> `make shader` 0 (`.metal` bu aralıkta değişti), `make test-yaris` 0
+> (`frame()` gövdesi `Term` kilidi altında değişti), `make duman` 0 →
+> `kare=1 hucre=8 glif=6 kural=15 pipeline=ok`. `Cargo.lock` oynamadı.
+
 Sayıyı `/ship` adım 2 sayar (`git log origin/main..HEAD`) — buraya sabit
 yazılan bir sayı, teslimden önce düşen her düzeltmeyle bayatlar. Bu
 belge yazılırken hiçbiri push edilmemişti; omurga sırayla:
@@ -192,6 +198,9 @@ Kapsam dışı ama görünürlüğü korunsun diye ayrıca not: `plan.md`'nin
 
 <!-- `/ship` bekleyen manuel adımları BU başlık altında arar. -->
 
+- [x] B.1 `/ship` push `[oto]` — `a50f846..dd77945`, 16 commit, 2026-09-11
+- [x] B.4 Bilinen borç kaydı `[oto]` — 6 kalem `teslim.md`'de, gerekçeleri
+      phase-3'ün `## Uygulama Notları`'nda
 - [x] B.2 Göz kontrolü `[elle]` — **kullanıcı 2026-09-11'de yaptı, geçti.**
       Doğrulayan kullanıcıdır; bu satır onun raporudur, otomatik bir kapı değil
 - [ ] B.3 `/measure 004-yazi-bicimleri` `[komut]` — beş iddia bekliyor;
