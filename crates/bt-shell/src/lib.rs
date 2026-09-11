@@ -93,18 +93,29 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
 /// Kapanışın asılmasını kesen son çare — **yalnız `BT_RUN_SECONDS`
 /// yolunda** ve kapanış başlarken kurulur (`AppDelegate::shutdown`).
 ///
-/// Kapanış ana thread'de koşuyor ve oradan `Session::shutdown()`'a giriyor;
-/// `Pty::drop` `SIGHUP`'tan sonra `child.wait()` çağırdığı için sinyali yutan
-/// bir çocuk (`trap '' HUP`) ana thread'i süresiz bekletir. O noktada kesecek
-/// kimse kalmıyor: bekçi bu yüzden ayrı bir thread.
+/// Kapanış ana thread'de koşuyor ve oradan `Session::shutdown()`'a giriyor.
+/// O çağrı artık **sınırlı bekliyor** (`bt-core`'un `SHUTDOWN_GRACE`'i), yani
+/// bekçinin doğduğu asılma — ölmeyen ya da çıkışın içinde takılan bir çocuk —
+/// ana thread'i artık tutamıyor ve bekçinin kapsamı **daraldı**: kapanış
+/// yolundaki *başka* bir asılma (ana kuyruğa senkron iş atan bir `Drop`, kilit
+/// sırasını bozan bir değişiklik) duman koşusunu süresiz bekletmesin diye
+/// duruyor. Bu yüzden hâlâ ayrı bir thread: kesmesi gereken şey ana thread'in
+/// kendisi.
 ///
-/// Etkileşimli kullanımda bekçi **yoktur** ve böyle bir çocuk uygulamayı
-/// gerçekten asar; bilinen sınır, `Session::shutdown`'ın kendi belgesinde de
-/// yazılı. Kalıcı çözüm sınırlı bekleme (`SIGHUP` → süre → `SIGKILL`) ve yeri
-/// `bt-core`.
+/// Sınırın tek istisnası kapanış thread'inin kurulamaması (OS thread
+/// sınırı); o dalda bu bekçi hâlâ tek kesen.
+///
+/// Etkileşimli kullanımda bekçi **yoktur**; oradaki güvence `bt-core`'un
+/// sınırı ve `Session::shutdown`'ın doc'u onun ne kapattığını, çocuğun
+/// arkada kalmasının neden sürdüğünü anlatıyor.
 pub(crate) fn watchdog(run_seconds: u64) {
-    // Koşu süresinin üç katı. Sağlıklı bir kapanış `SIGHUP` ile hemen biter;
-    // bu süreye ancak gerçekten asılmış bir çocuk varır. `max(1)`:
+    // Koşu süresinin üç katı. Sağlıklı bir kapanış `SIGHUP` ile hemen biter
+    // ve asılan bir çocuk artık `bt-core`'un sınırında kesiliyor; bu süreye
+    // ancak kapanış yolunun **başka** bir asılması varır. Bütçenin koşu
+    // süresine bağlı olması o daralmadan sonra cömert kaldı (3 saniyelik
+    // duman için 9 saniye) ve asıl ölçüsü artık `SHUTDOWN_GRACE` + sabit bir
+    // pay olurdu; retune phase-3'e yazıldı, ölçülmeden sayı değişmiyor.
+    // `max(1)`:
     // `BT_RUN_SECONDS=0` bekçiyi doğar doğmaz ateşlemesin.
     let budget = Duration::from_secs(run_seconds.saturating_mul(3).max(1));
     std::thread::spawn(move || {
