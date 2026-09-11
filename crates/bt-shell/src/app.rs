@@ -38,7 +38,7 @@ struct Grid {
     rows: u16,
     /// Demet değil `CellMetrics`: ölçü buradan `DisplayLink::resize`'a
     /// olduğu gibi geçiyor. `Grid`'de saklanan bu değer yalnız
-    /// `SessionOptions`'a girerken demete iniyor — `izgaraya_bol`'un
+    /// `SessionOptions`'a girerken demete iniyor — `split_into_grid`'un
     /// bölmeye soktuğu demet başka bir değer: oraya **gelen** ölçü girer,
     /// `Grid` ondan sonra doğar.
     cell: CellMetrics,
@@ -46,16 +46,16 @@ struct Grid {
 
 /// Piksel geometrisi + hücre ölçüsü → grid.
 ///
-/// `geometriyi_esitle`'den ayrı duruyor çünkü saf olan tek parça bu; geri
+/// `sync_geometry`'den ayrı duruyor çünkü saf olan tek parça bu; geri
 /// kalanı pencere ve layer, yani sınanamaz. Hücre ölçüsü **argüman**: bu
-/// gövdeye gizlenmiş bir sabit `hucre_olcusu_disaridan_gelir`'i düşürür.
+/// gövdeye gizlenmiş bir sabit `cell_metrics_come_from_outside`'i düşürür.
 ///
 /// Kapsamı bu kadar, daha fazlası değil: `CELL_PX`'in asıl durduğu satır
-/// `geometriyi_esitle`'deki `cell_metrics(scale)` çağrısıydı ve orası bir
+/// `sync_geometry`'deki `cell_metrics(scale)` çağrısıydı ve orası bir
 /// pencere ile Metal device istediği için sınanmıyor. `CellMetrics::new`
 /// bilerek `pub`, yani oraya yazılacak bir `CellMetrics::new(9, 18)` yer
 /// tutucuyu diriltir ve buradaki iki sınama yeşil kalır.
-fn izgaraya_bol(width_px: f64, height_px: f64, cell: CellMetrics) -> Grid {
+fn split_into_grid(width_px: f64, height_px: f64, cell: CellMetrics) -> Grid {
     let (cell_w, cell_h) = cell.cell_px();
     // `as u16` f64'te doygundur (NaN ve negatif → 0, büyük → 65535) ve kesme
     // tam olarak istediğimiz taban yuvarlama; sıfır sütun/satırı
@@ -177,8 +177,8 @@ define_class!(
             // otomatik first responder DEĞİLDİR; bu satır olmadan pencere
             // key olur, tuşlar view'a hiç uğramaz ve terminal sessizce
             // yazmaz. `acceptsFirstResponder` da şart, ikisi bir arada.
-            let ilk = window.makeFirstResponder(Some(&view));
-            debug_assert!(ilk, "BateriView first responder olmalı");
+            let accepted = window.makeFirstResponder(Some(&view));
+            debug_assert!(accepted, "BateriView first responder olmalı");
             // Delegate bağlanmadan önce ivar dolu olsun: arada düşen bir
             // pencere bildirimi geometriyi boş bulup bayat boyutla çizmesin.
             // OnceCell doluysa didFinishLaunching ikinci kez geldi demek; AppKit
@@ -195,10 +195,10 @@ define_class!(
             // dönmesi programlama hatası olurdu ve yedek bir ölçü uydurmak
             // hücre boyutu için ikinci bir kaynak doğururdu — tek kaynak
             // `Renderer::cell_metrics`.
-            let izgara = self
-                .geometriyi_esitle()
+            let grid = self
+                .sync_geometry()
                 .expect("pencere ve contentView kuruldu");
-            self.baglat(mtm, izgara, &view);
+            self.start_session(mtm, grid, &view);
 
             if let Some(s) = self.ivars().run_seconds {
                 // block2 yok: zamanlayıcı performSelector ile.
@@ -229,11 +229,11 @@ define_class!(
         /// menü yok, `keyDown:` Command'lı tuşları yutuyor — menü 00X'te.)
         /// Duman deadline'ı da buraya uğramaz, `terminate:` her zaman 0 ile
         /// çıkar ve `runDeadline:` kırmızı düşebilmek zorunda. Ortak olan
-        /// bildirim değil sıra: iki yol da [`AppDelegate::kapat`] çağırır ve
+        /// bildirim değil sıra: iki yol da [`AppDelegate::shutdown`] çağırır ve
         /// kapanışa eklenecek her adım oraya eklenir.
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
-            self.kapat();
+            self.shutdown();
             // Duman koşusu deadline'a varmadan da bitebilir: shell kendi
             // çıkarsa (`BT_RUN_SECONDS` betiğin uykusundan uzunsa, ya da
             // gerçek bir shell hemen ölürse) `ChildExit` buraya getirir.
@@ -241,7 +241,7 @@ define_class!(
             // koşuyu exit 0 ile yeşil gösterirdi — kapının sahte yeşil verdiği
             // tek yol buydu.
             if self.ivars().run_seconds.is_some() {
-                self.rapor_ve_cik();
+                self.report_and_exit();
             }
         }
     }
@@ -249,14 +249,14 @@ define_class!(
     unsafe impl NSWindowDelegate for AppDelegate {
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _n: &NSNotification) {
-            self.geometri_degisti();
+            self.geometry_changed();
         }
 
         // Ekranlar arası taşımada boyut (nokta) değişmez ama ölçek değişir;
         // layer-hosting view'da bunu bizden başka kimse yazmaz.
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, _n: &NSNotification) {
-            self.geometri_degisti();
+            self.geometry_changed();
         }
 
         // Görünürlük yolu: compositor, örtülü ya da simge durumundaki bir
@@ -272,13 +272,13 @@ define_class!(
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
             // Bildirim iki yönde de gelir; örtülmeye GİDERKEN kare istemek
             // kimsenin görmeyeceği bir kare çizmek olurdu.
-            let gorunur = self.ivars().window.get().is_some_and(|window| {
+            let visible = self.ivars().window.get().is_some_and(|window| {
                 window
                     .occlusionState()
                     .contains(NSWindowOcclusionState::Visible)
             });
             if let Some(link) = self.ivars().link.get() {
-                link.set_visible(gorunur);
+                link.set_visible(visible);
             }
         }
     }
@@ -286,8 +286,8 @@ define_class!(
     impl AppDelegate {
         #[unsafe(method(runDeadline:))]
         fn run_deadline(&self, _arg: Option<&AnyObject>) {
-            self.kapat();
-            self.rapor_ve_cik();
+            self.shutdown();
+            self.report_and_exit();
         }
     }
 );
@@ -316,7 +316,7 @@ impl AppDelegate {
 
     /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
     /// `Wake`'i ister, link `Session`'ı ister, `Waker` link'ten doğar.
-    fn baglat(&self, mtm: MainThreadMarker, izgara: Grid, view: &BateriView) {
+    fn start_session(&self, mtm: MainThreadMarker, grid: Grid, view: &BateriView) {
         let session = Session::spawn(
             SessionOptions {
                 // Duman koşusunda shell sabit: sonuç kullanıcının `$SHELL`'ine
@@ -325,9 +325,9 @@ impl AppDelegate {
                 // `hucre=8` ve `glif=6` beklentileri bu yüzden birer belge
                 // cümlesi değil, sınanmış birer iddia.
                 command: self.ivars().run_seconds.map(|_| smoke_shell()),
-                cols: izgara.cols,
-                rows: izgara.rows,
-                cell_px: izgara.cell.cell_px(),
+                cols: grid.cols,
+                rows: grid.rows,
+                cell_px: grid.cell.cell_px(),
                 scrollback: SCROLLBACK,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
@@ -343,20 +343,20 @@ impl AppDelegate {
         };
         // Kapanış sırası oturuma link üzerinden değil buradan uzanır, klavye
         // de kendi kopyasını tutar; üçü de ana thread'de yaşıyor, yani son
-        // referansın nerede düşeceği belli (bkz. `kapat`).
+        // referansın nerede düşeceği belli (bkz. `shutdown`).
         let _ = self.ivars().session.set(Arc::clone(&session));
-        view.baglan(Arc::clone(&session));
+        view.attach(Arc::clone(&session));
         let link = DisplayLink::new(
             mtm,
             &self.ivars().surface,
             Rc::clone(&self.ivars().renderer),
             session,
-            izgara.cell,
+            grid.cell,
         );
         // Uyandırma yolu kapanmadan kare istemiyoruz: aradaki bir `Wakeup`
         // sessizce düşerdi.
         //
-        // audit: `baglat` yalnız `didFinishLaunching`'ten, bir kez çağrılır.
+        // audit: `start_session` yalnız `didFinishLaunching`'ten, bir kez çağrılır.
         // Sessizce yutulan bir `Err` burada en sinsi hatayı üretirdi: eski
         // link'in `Waker`'ı kalır, pencere shell çıktısına bir daha hiç
         // uyanmaz ve tek satır iz kalmaz.
@@ -382,7 +382,7 @@ impl AppDelegate {
     /// 2. Oturumu kapat: `SIGHUP` + okuyucu thread'in `join`'i. **Bloklar** —
     ///    sinyali yutan bir çocuk (`trap '' HUP`) `Pty::drop`'un
     ///    `child.wait()`'inde süresiz bekletir; kesecek olan bekçi thread
-    ///    (`crate::bekci`).
+    ///    (`crate::watchdog`).
     ///
     /// `DisplayLink` bilerek **düşürülmüyor**, yalnız durduruluyor. İçindeki
     /// `Waker`'ı Metal'in tamamlanma bloğu da tutuyor ve onun
@@ -391,13 +391,13 @@ impl AppDelegate {
     /// sırada 2. adımın `join`'inde olurdu ve ikisi birbirini kilitlerdi.
     /// `Ivars` `app.run()`'ı aştığı sürece o son referans hiçbir zaman
     /// Metal'in thread'inde olmaz.
-    fn kapat(&self) {
+    fn shutdown(&self) {
         // Bekçinin bütçesi **kapanıştan** başlıyor, süreç başından değil:
         // açılış (Metal device, metallib yükleme, ilk pencere) soğuk bir
         // makinede saniyeler sürebilir ve o süre bütçeden düşseydi sağlıklı
         // bir koşu `_exit(70)` ile kırmızı düşerdi.
         if let Some(s) = self.ivars().run_seconds {
-            crate::bekci(s);
+            crate::watchdog(s);
         }
         if let Some(link) = self.ivars().link.get() {
             link.stop();
@@ -409,10 +409,10 @@ impl AppDelegate {
 
     /// Duman koşusunun raporu ve çıkışı — **kapanıştan sonra** çağrılır.
     ///
-    /// Sıra bilinçli: `kapat()` bloklar ve asılırsa bekçi süreci 70 ile keser,
+    /// Sıra bilinçli: `shutdown()` bloklar ve asılırsa bekçi süreci 70 ile keser,
     /// yani asılan bir kapanışta `kare=` satırı hiç çıkmaz. Ters sırada
     /// `make duman` yeşil bir satırla kırmızı bir çıkış kodunu birlikte verirdi.
-    fn rapor_ve_cik(&self) -> ! {
+    fn report_and_exit(&self) -> ! {
         let n = self.ivars().renderer.frames();
         let k = self.ivars().renderer.last_bg_count();
         let g = self.ivars().renderer.last_glyph_count();
@@ -425,7 +425,7 @@ impl AppDelegate {
         // sınırı karakteri hiç geçirmese bile `kare=1 hucre=8 pipeline=ok`
         // basılırdı. Kapsamadığı — `glif` de `hucre` gibi bir **CPU**
         // sayacı: boş bir atlas ve hiç çizmeyen bir glyph pipeline'ı bu
-        // sayıyı düşürmez, onu `glif_hucrenin_icini_arka_planindan_ayirir`
+        // sayıyı düşürmez, onu `glyph_differs_from_cell_background`
         // offscreen sınaması yakalar.
         if n > 0 && k > 0 && g > 0 {
             println!("kare={n} hucre={k} glif={g} pipeline=ok");
@@ -443,12 +443,12 @@ impl AppDelegate {
     }
 
     /// Pencere geometrisi oynadı: layer'ı eşle, grid'i güncelle, kare iste.
-    fn geometri_degisti(&self) {
-        let Some(izgara) = self.geometriyi_esitle() else {
+    fn geometry_changed(&self) {
+        let Some(grid) = self.sync_geometry() else {
             return;
         };
         if let Some(link) = self.ivars().link.get() {
-            link.resize(izgara.cols, izgara.rows, izgara.cell);
+            link.resize(grid.cols, grid.rows, grid.cell);
         }
     }
 
@@ -457,7 +457,7 @@ impl AppDelegate {
     /// ikisine de ihtiyacı var ve boyutu yazmadan ölçüyü türetmek yanlış
     /// sonuç verirdi. Ölçek tek kaynaktan okunur ve piksel boyutu ondan
     /// çarpılır; `drawableSize` ile `contentsScale` ayrışırsa bulanıklık olur.
-    fn geometriyi_esitle(&self) -> Option<Grid> {
+    fn sync_geometry(&self) -> Option<Grid> {
         let window = self.ivars().window.get()?;
         let view = window.contentView()?;
         let scale = window.backingScaleFactor();
@@ -471,7 +471,7 @@ impl AppDelegate {
         // yan yana dursaydı hangisinin kazandığı çağrı sırasına bağlanır ve
         // belirti bir piksellik hücre kayması, yani sessiz olurdu.
         let cell = self.ivars().renderer.cell_metrics(scale);
-        Some(izgaraya_bol(width_px, height_px, cell))
+        Some(split_into_grid(width_px, height_px, cell))
     }
 }
 
@@ -479,27 +479,27 @@ impl AppDelegate {
 mod tests {
     use super::*;
 
-    fn olcu(w: u16, h: u16) -> CellMetrics {
+    fn metrics(w: u16, h: u16) -> CellMetrics {
         CellMetrics::new(w, h).expect("sıfır olmayan hücre")
     }
 
     #[test]
-    fn hucre_olcusu_disaridan_gelir() {
+    fn cell_metrics_come_from_outside() {
         // Yer tutucunun ölmüş olmasının sınanabilir hâli: aynı pencere, iki
         // farklı hücre ölçüsü, iki farklı grid. Gövdeye geri sızan bir sabit
         // ikisini eşitler ve bu sınama düşer.
-        let dar = izgaraya_bol(900.0, 600.0, olcu(9, 18));
-        let genis = izgaraya_bol(900.0, 600.0, olcu(18, 36));
-        assert_eq!((dar.cols, dar.rows), (100, 33));
-        assert_eq!((genis.cols, genis.rows), (50, 16));
+        let narrow = split_into_grid(900.0, 600.0, metrics(9, 18));
+        let wide = split_into_grid(900.0, 600.0, metrics(18, 36));
+        assert_eq!((narrow.cols, narrow.rows), (100, 33));
+        assert_eq!((wide.cols, wide.rows), (50, 16));
     }
 
     #[test]
-    fn sifir_pencere_panik_etmez() {
+    fn zero_window_does_not_panic() {
         // Simge durumuna alınan pencere 0×0 bounds verir; `Session::resize`
         // sıfır grid'i yoksayıyor ama buraya gelen yolun panik etmemesi
         // gerekiyor — bölme değil, `as u16` doygunluğu taşıyor.
-        let g = izgaraya_bol(0.0, 0.0, olcu(9, 18));
+        let g = split_into_grid(0.0, 0.0, metrics(9, 18));
         assert_eq!((g.cols, g.rows), (0, 0));
     }
 }

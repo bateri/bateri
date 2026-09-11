@@ -14,12 +14,12 @@ use objc2_core_text::{CTFont, CTFontOrientation, CTFontSymbolicTraits};
 /// Tercih sırası. Bulunamayan ad **sessizce** atlanır: SF Mono Xcode ile
 /// gelir, her makinede yoktur ve yokluğu bir kusur değil tasarlanmış bir geri
 /// düşüştür. Uyarı yalnız tabanın da ikame edilmesi hâlinde anlamlı.
-const TERCIHLER: [&str; 1] = ["SF Mono"];
+const PREFERRED: [&str; 1] = ["SF Mono"];
 
 /// Garanti taban: macOS'un her sürümünde kurulu. Ayrı bir sabit olmasının
 /// sebebi tip düzeyinde bir güvence — zincir boş dönemez, dolayısıyla
 /// `Option`/`expect` yolu hiç doğmaz.
-const TABAN: &str = "Menlo";
+const FALLBACK: &str = "Menlo";
 
 /// Font yüzü — **tipografi kavramı**, SGR bayrağı değil.
 ///
@@ -42,7 +42,7 @@ pub enum Face {
 
 impl Face {
     /// Uyarı metninde geçen ad.
-    fn ad(self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Face::Regular => "Regular",
             Face::Bold => "Bold",
@@ -54,12 +54,12 @@ impl Face {
     /// Yüzün CoreText trait maskesi.
     ///
     /// `Regular` **çağrılmaz**: düz yüz türetilmiyor, zincirden geliyor.
-    /// Boş maske dönseydi `yuz_turet` onu "gerçek yüz değil" sentineli olarak
+    /// Boş maske dönseydi `derive_face` onu "gerçek yüz değil" sentineli olarak
     /// okumak zorunda kalır ve `None` iki anlam taşırdı.
     fn traits(self) -> CTFontSymbolicTraits {
         match self {
             // audit: ulaşılamaz ve bunu **modül sınırı** koruyor, çağıran
-            // disiplini değil: `yuz_turet` font.rs'e özel ve tek çağıranı
+            // disiplini değil: `derive_face` font.rs'e özel ve tek çağıranı
             // `[Bold, Italic, BoldItalic]` üzerinde dönüyor. `pub(crate)`
             // olsaydı crate içinden `Face::Regular` ile çağıran biri
             // derleyiciden uyarı almadan buraya düşer, panik de `slot()`
@@ -73,19 +73,19 @@ impl Face {
 }
 
 /// Dört yüz, `Face` sırasında. Düz yüz zincirden, ötekiler ondan türer.
-pub(crate) struct Yuzler {
-    fontlar: [CFRetained<CTFont>; 4],
+pub(crate) struct Faces {
+    fonts: [CFRetained<CTFont>; 4],
     /// Gerçekten **edinilen** yüzler; edinilemeyen düz yüze çökmüş demektir.
     ///
     /// Bu bilgi saklanmasaydı çağıran hangi yüzü aldığını bilemezdi ve
-    /// [`Yuzler::etkin`]'in kapattığı yuva israfı sessizce açık kalırdı.
-    edinilen: [bool; 4],
+    /// [`Faces::effective`]'in kapattığı yuva israfı sessizce açık kalırdı.
+    acquired: [bool; 4],
 }
 
-impl Yuzler {
-    /// Zincirden açar (`zincirden_ac`) ve üç yüzü türetir.
-    pub(crate) fn zincirden(punto: CGFloat) -> Self {
-        Self::turet(zincirden_ac(punto))
+impl Faces {
+    /// Zincirden açar (`open_chain`) ve üç yüzü türetir.
+    pub(crate) fn from_chain(point_size: CGFloat) -> Self {
+        Self::derive(open_chain(point_size))
     }
 
     /// Verilen düz yüzden türetir.
@@ -93,37 +93,37 @@ impl Yuzler {
     /// Ayrı bir kurucu, sınama için: zincirin tabanı (Menlo) dört yüzü de
     /// taşıyor, yani geri düşüş dalı gerçek bir fontla ancak **tek yüzlü** bir
     /// aile verilerek ateşlenebiliyor.
-    pub(crate) fn turet(duz: CFRetained<CTFont>) -> Self {
-        let mut fontlar = [duz.clone(), duz.clone(), duz.clone(), duz];
-        let mut edinilen = [true, false, false, false];
-        let mut eksik: Vec<&str> = Vec::new();
+    pub(crate) fn derive(regular: CFRetained<CTFont>) -> Self {
+        let mut fonts = [regular.clone(), regular.clone(), regular.clone(), regular];
+        let mut acquired = [true, false, false, false];
+        let mut missing: Vec<&str> = Vec::new();
         for face in [Face::Bold, Face::Italic, Face::BoldItalic] {
-            match yuz_turet(&fontlar[Face::Regular as usize], face) {
+            match derive_face(&fonts[Face::Regular as usize], face) {
                 Some(font) => {
-                    fontlar[face as usize] = font;
-                    edinilen[face as usize] = true;
+                    fonts[face as usize] = font;
+                    acquired[face as usize] = true;
                 }
-                None => eksik.push(face.ad()),
+                None => missing.push(face.name()),
             }
         }
-        if !eksik.is_empty() {
+        if !missing.is_empty() {
             // Atlas kurulumunda bir kez — `slot()` çizim yolunda ve orada
             // basılan bir satır kare başına tekrarlanırdı. **"Ömürde bir kez"
             // değil:** `Atlas::ensure` punto/ölçek değişince atlası (ve bunu)
             // yeniden kuruyor, yani pencere Retina ile harici ekran arasında
             // taşınırsa satır tekrar düşer. Kabul edilen bedel; susturmak
-            // `Yuzler`'in dışında kalıcı bir durum ister. Önek
-            // `zincirden_ac`'ınkiyle aynı (`bateri:`), aynı gerekçeyle.
+            // `Faces`'in dışında kalıcı bir durum ister. Önek
+            // `open_chain`'ınkiyle aynı (`bateri:`), aynı gerekçeyle.
             eprintln!(
                 "bateri: font ailesinde {} yüzü yok, düz yüz kullanılıyor",
-                eksik.join(", ")
+                missing.join(", ")
             );
         }
-        Self { fontlar, edinilen }
+        Self { fonts, acquired }
     }
 
     pub(crate) fn get(&self, face: Face) -> &CTFont {
-        &self.fontlar[face as usize]
+        &self.fonts[face as usize]
     }
 
     /// Yuva anahtarına girecek yüz: **edinilemeyen yüz `Regular`'a çöker**.
@@ -134,26 +134,26 @@ impl Yuzler {
     /// dolar, fazlalık glyph'ler tofu'ya düşer ve belirti sessizdir.
     /// `Sprite::Rule`'un `Regular`'a indirilmesiyle aynı olgunun ikinci yüzü:
     /// istenen yüz ile çizilen yüz aynı olmak zorunda değil.
-    pub(crate) fn etkin(&self, face: Face) -> Face {
+    pub(crate) fn effective(&self, face: Face) -> Face {
         // Merdiven, düz düşüş değil: `BoldItalic`'i doğrudan `Regular`'a
         // indirmek **kalınlığı da** düşürürdü. Gerçek bir `Bold Italic` yüzü
         // olmayan ama `Bold` taşıyan aile yaygın; orada SGR 1;3 metni düz
         // çıkardı, oysa kalın yüz elde mevcut.
-        let merdiven: &[Face] = match face {
+        let ladder: &[Face] = match face {
             Face::BoldItalic => &[Face::BoldItalic, Face::Bold, Face::Italic],
             Face::Bold => &[Face::Bold],
             Face::Italic => &[Face::Italic],
             Face::Regular => &[],
         };
-        merdiven
+        ladder
             .iter()
             .copied()
-            .find(|&f| self.edinilen[f as usize])
+            .find(|&f| self.acquired[f as usize])
             .unwrap_or(Face::Regular)
     }
 }
 
-/// `duz`den `face`in yüzünü türetir; edinemezse `None`.
+/// `regular`den `face`in yüzünü türetir; edinemezse `None`.
 ///
 /// Denetim **iki kapılı ve aile adı karşılaştırması yapmıyor**. Aile
 /// karşılaştırması burada totoloji olurdu: API'nin sözleşmesi zaten "aynı
@@ -162,20 +162,20 @@ impl Yuzler {
 /// 1. **`nil` mi** — tipte, `Option` olarak geliyor.
 /// 2. **İstenen trait'i gerçekten edindi mi** — CoreText istenen yüzü
 ///    bulamazsa **düz yüzü geri verebiliyor** ve o sessiz ikame,
-///    `zincirden_ac`'ın `CTFontCreateWithName` için yaşadığı hatanın ta
+///    `open_chain`'ın `CTFontCreateWithName` için yaşadığı hatanın ta
 ///    kendisi. Tek fark: orada aile adına, burada trait maskesine bakılıyor.
-fn yuz_turet(duz: &CTFont, face: Face) -> Option<CFRetained<CTFont>> {
-    let istenen = face.traits();
-    // SAFETY: `duz` canlı; `matrix` null geçerli. **Dikkat:** copy ailesinde
+fn derive_face(regular: &CTFont, face: Face) -> Option<CFRetained<CTFont>> {
+    let wanted = face.traits();
+    // SAFETY: `regular` canlı; `matrix` null geçerli. **Dikkat:** copy ailesinde
     // null "birim matris" değil, **kaynak fontun matrisi korunur** demek —
-    // `ac()`'taki `CTFontCreateWithName` gerekçesiyle karıştırılmamalı, orada
+    // `open()`'taki `CTFontCreateWithName` gerekçesiyle karıştırılmamalı, orada
     // null gerçekten birim matristir. İstenen de bu: türetilen yüz kaynağın
     // dönüşümünü aynen taşısın, yoksa bir gün matrisli bir font zincire
     // girdiğinde eğim iki kez uygulanır. `size` 0.0 → kaynağın puntosu korunur.
-    let font = unsafe { duz.copy_with_symbolic_traits(0.0, ptr::null(), istenen, istenen) }?;
+    let font = unsafe { regular.copy_with_symbolic_traits(0.0, ptr::null(), wanted, wanted) }?;
     // SAFETY: `font` az önce yaratıldı ve bu kapsamda canlı.
-    let donen = unsafe { font.symbolic_traits() };
-    donen.contains(istenen).then_some(font)
+    let returned = unsafe { font.symbolic_traits() };
+    returned.contains(wanted).then_some(font)
 }
 
 /// Hücre ölçüsü, **fiziksel piksel**.
@@ -193,7 +193,7 @@ pub struct Metrics {
     pub baseline_px: u16,
     /// Alt çizgi: (hücrenin üstünden konum, kalınlık).
     ///
-    /// `konum + kalınlık` **asla** `cell_px.1`'i aşmaz — [`kural_zarfi`]
+    /// `konum + kalınlık` **asla** `cell_px.1`'i aşmaz — [`rule_envelope`]
     /// sınırlıyor. Aşsaydı çizgi komşu satırın tepesinde belirirdi ve belirti
     /// sessiz olurdu.
     pub underline_px: (u16, u16),
@@ -224,60 +224,60 @@ impl Metrics {
 
 /// Adı verilen aileyi açar ve CoreText'in gerçekten verdiği aile adını
 /// **birlikte** döndürür. İkisi ayrışıyorsa istenen font makinede yok.
-pub(crate) fn ac(ad: &str, punto: CGFloat) -> (CFRetained<CTFont>, String) {
-    let istenen = CFString::from_str(ad);
+pub(crate) fn open(name: &str, point_size: CGFloat) -> (CFRetained<CTFont>, String) {
+    let wanted = CFString::from_str(name);
     // SAFETY: `matrix` null → birim matris; `CTFontCreateWithName` bunu
     // açıkça destekliyor ve dönüş non-null.
-    let font = unsafe { CTFont::with_name(&istenen, punto, ptr::null()) };
+    let font = unsafe { CTFont::with_name(&wanted, point_size, ptr::null()) };
     // SAFETY: `font` az önce yaratıldı ve bu kapsamda canlı.
-    let donen = unsafe { font.family_name() };
-    (font, donen.to_string())
+    let returned = unsafe { font.family_name() };
+    (font, returned.to_string())
 }
 
-/// Zinciri yürür: ilk gerçekten bulunan tercih, yoksa [`TABAN`].
-pub(crate) fn zincirden_ac(punto: CGFloat) -> CFRetained<CTFont> {
-    for ad in TERCIHLER {
-        let (font, donen) = ac(ad, punto);
-        if donen == ad {
+/// Zinciri yürür: ilk gerçekten bulunan tercih, yoksa [`FALLBACK`].
+pub(crate) fn open_chain(point_size: CGFloat) -> CFRetained<CTFont> {
+    for name in PREFERRED {
+        let (font, returned) = open(name, point_size);
+        if returned == name {
             return font;
         }
     }
-    let (font, donen) = ac(TABAN, punto);
-    if donen != TABAN {
+    let (font, returned) = open(FALLBACK, point_size);
+    if returned != FALLBACK {
         // Buraya düşülmesi beklenmez. Düşülürse metrik ve glyph'ler bilinmeyen
         // bir fonttan gelir; sessiz kalırsa yanlış hücre boyutu "her şey
         // normal" gibi görünür. Süreç çıktısı, UI dizgisi değil: Türkçe, ve
         // öneki depodaki öteki stderr satırlarıyla aynı (`bateri:`) — ayrı bir
         // önek, `bateri` diye süzen okuyucunun tam da bu satırı kaçırması
         // demek olurdu.
-        eprintln!("bateri: '{TABAN}' bulunamadı, CoreText '{donen}' ikame etti");
+        eprintln!("bateri: '{FALLBACK}' bulunamadı, CoreText '{returned}' ikame etti");
     }
     font
 }
 
 /// Karakterin glyph numarası; font karakteri tanımıyorsa `None`.
-pub(crate) fn glif(font: &CTFont, ch: char) -> Option<CGGlyph> {
+pub(crate) fn glyph_index(font: &CTFont, ch: char) -> Option<CGGlyph> {
     let mut utf16 = [0u16; 2];
-    let birim_sayisi = ch.encode_utf16(&mut utf16).len();
-    let mut glifler = [0 as CGGlyph; 2];
+    let unit_count = ch.encode_utf16(&mut utf16).len();
+    let mut glyphs = [0 as CGGlyph; 2];
     // İşaretçiler **dilimden** türetiliyor, `&dizi[0]`'dan değil: BMP dışı bir
-    // karakterde `birim_sayisi` 2 ve CoreText ikinci elemana da dokunuyor
+    // karakterde `unit_count` 2 ve CoreText ikinci elemana da dokunuyor
     // (düşük vekili okur, karşılığına 0 yazar). Tek elemanlık bir referanstan
     // türetilen işaretçinin provenance'ı o ikinci erişimi kapsamaz — bugün
     // çalışır, aliasing modeline göre tanımsızdır.
     // SAFETY: iki dilim de iki eleman taşıyor ve bu kapsamda canlı;
-    // `birim_sayisi` ≤ 2, yani sayı ikisiyle de tutarlı.
+    // `unit_count` ≤ 2, yani sayı ikisiyle de tutarlı.
     let _ = unsafe {
         font.glyphs_for_characters(
             NonNull::from(&mut utf16[..]).cast::<u16>(),
-            NonNull::from(&mut glifler[..]).cast::<CGGlyph>(),
-            birim_sayisi as isize,
+            NonNull::from(&mut glyphs[..]).cast::<CGGlyph>(),
+            unit_count as isize,
         )
     };
     // Dönüş değeri **ölçüt değil**: surrogate çiftinde ikinci UTF-16 birimi
     // için glyph üretilmez ve fonksiyon `false` döner, oysa glyph birinci
     // birimdedir ve geçerlidir. Tek ölçüt `.notdef` (0) mü sorusu.
-    (glifler[0] != 0).then_some(glifler[0])
+    (glyphs[0] != 0).then_some(glyphs[0])
 }
 
 /// Hücre ölçüsünü fontun kendi metriğinden türetir.
@@ -285,21 +285,21 @@ pub(crate) fn metrics(font: &CTFont) -> Metrics {
     // SAFETY: `font` canlı; üçü de saf okuma.
     let (ascent, descent, leading) = unsafe { (font.ascent(), font.descent(), font.leading()) };
     // Yükseklik iki parçanın **ayrı ayrı** yuvarlanıp toplanmasıyla bulunuyor,
-    // `yukari(ascent + descent + leading)` ile değil. Fark ölçülebilir bir
+    // `round_up(ascent + descent + leading)` ile değil. Fark ölçülebilir bir
     // kırpmaydı: bu makinede Menlo 13pt ascent 12.067, descent 3.066 veriyor
     // ve toplamı yukarı yuvarlamak 16 ediyor — taban 13'e oturunca alta 3
     // piksel kalıyor, oysa font 3.066 istiyor. Kaybedilen şey `g j p q y ,`
     // altındaki son kapsama satırı; belirti "yazı biraz garip" olurdu. Sayılar
     // font sürümüne bağlı ve eskiyebilir, **iddia eskimez**: bekçisi
-    // `descender_hucreye_sigar` ve o metriği fontun kendisinden okuyor.
-    let taban = yukari(ascent);
+    // `descender_fits_in_the_cell` ve o metriği fontun kendisinden okuyor.
+    let baseline = round_up(ascent);
     let cell_px = (
-        yukari(bosluk_advance(font)),
+        round_up(space_advance(font)),
         // `saturating_add`: iki parça da `u16::MAX`'e kadar çıkabiliyor.
-        taban.saturating_add(yukari(descent + leading)),
+        baseline.saturating_add(round_up(descent + leading)),
     );
     // SAFETY: `font` canlı; üçü de saf okuma.
-    let (u_pos, u_kal, x_h) = unsafe {
+    let (u_pos, u_thick, x_h) = unsafe {
         (
             font.underline_position(),
             font.underline_thickness(),
@@ -308,18 +308,26 @@ pub(crate) fn metrics(font: &CTFont) -> Metrics {
     };
     // CoreText'in `underline_position`'ı **negatif**: taban çizgisinin altını
     // gösteriyor. Hücrenin üstünden ölçülen konuma çevirirken işaret çevriliyor.
-    let kalinlik = yukari(u_kal);
-    let underline_px = kural_zarfi(taban.saturating_add(yukari(-u_pos)), kalinlik, cell_px.1);
+    let thickness = round_up(u_thick);
+    let underline_px = rule_envelope(
+        baseline.saturating_add(round_up(-u_pos)),
+        thickness,
+        cell_px.1,
+    );
     // Üstü çizilinin CoreText karşılığı **yok**; x-yüksekliğinin yarısı kadar
     // taban çizgisinin üstü, tipografide olağan yer. `saturating_sub`: küçük
     // puntoda x-yüksekliği tabanı aşabilir.
-    let strikeout_px = kural_zarfi(taban.saturating_sub(yukari(x_h / 2.0)), kalinlik, cell_px.1);
+    let strikeout_px = rule_envelope(
+        baseline.saturating_sub(round_up(x_h / 2.0)),
+        thickness,
+        cell_px.1,
+    );
     Metrics {
         cell_px,
         // Taban hücrenin içinde kalıyor ve bu artık bir dilek değil sonuç:
-        // alt parça `yukari` yüzünden en az 1, yani `baseline_px < cell_px.1`.
+        // alt parça `round_up` yüzünden en az 1, yani `baseline_px < cell_px.1`.
         // `raster`'ın `cell_h - baseline` çıkarması bu yüzden taşmıyor.
-        baseline_px: taban,
+        baseline_px: baseline,
         underline_px,
         strikeout_px,
     }
@@ -332,18 +340,18 @@ pub(crate) fn metrics(font: &CTFont) -> Metrics {
 /// kırpma bir dilek değil sözleşme: `underline_position` fontun kendi
 /// verisidir ve descent'i dar bir font çizgiyi hücrenin dışına atabilir.
 /// Belirti sessizdir: bir satırın alt çizgisi bir alttaki satırın tepesinde
-/// belirir. Bekçisi `zarf_hucrenin_disina_tasmaz` ve o **sentetik** girdiyle
+/// belirir. Bekçisi `envelope_stays_inside_cell` ve o **sentetik** girdiyle
 /// sınıyor, çünkü gerçek font bu dalı hiç ateşlemiyor.
-pub(crate) fn kural_zarfi(ust_konum: u16, kalinlik: u16, cell_h: u16) -> (u16, u16) {
+pub(crate) fn rule_envelope(top: u16, thickness: u16, cell_h: u16) -> (u16, u16) {
     // Sıfır yüksekliğe sığan kural yok. `metrics()` üzerinden buraya
-    // düşülemiyor (`yukari` her ölçüyü >= 1'e sabitliyor) ama fonksiyonun tek
+    // düşülemiyor (`round_up` her ölçüyü >= 1'e sabitliyor) ama fonksiyonun tek
     // varlık sebebi değişmezi taşımak: onu hem yazıp hem delmemeli.
     if cell_h == 0 {
         return (0, 0);
     }
     // Kalınlık hücreyi aşamaz; en az 1 — çizilmeyen çizgi kural değildir.
-    let kalinlik = kalinlik.clamp(1, cell_h);
-    (ust_konum.min(cell_h - kalinlik), kalinlik)
+    let thickness = thickness.clamp(1, cell_h);
+    (top.min(cell_h - thickness), thickness)
 }
 
 /// Boşluğun yatay advance'i — hücre genişliği.
@@ -351,21 +359,21 @@ pub(crate) fn kural_zarfi(ust_konum: u16, kalinlik: u16, cell_h: u16) -> (u16, u
 /// Monospace varsayımı zincirin kendisinde (SF Mono / Menlo). Ölçülen karakter
 /// boşluk çünkü her fontta var; seçim gövdede sabit, çünkü başka bir karakterle
 /// çağrılması hücre genişliğini fontun o harfine bağlamak olurdu.
-fn bosluk_advance(font: &CTFont) -> CGFloat {
-    let Some(glif) = glif(font, ' ') else {
+fn space_advance(font: &CTFont) -> CGFloat {
+    let Some(glyph) = glyph_index(font, ' ') else {
         return 0.0;
     };
-    let mut olcu = [CGSize::ZERO; 1];
+    let mut advance = [CGSize::ZERO; 1];
     // SAFETY: tek glyph, tek ölçü hücresi; sayı ikisiyle de tutarlı.
     unsafe {
         font.advances_for_glyphs(
             CTFontOrientation::Horizontal,
-            NonNull::from(&glif),
-            olcu.as_mut_ptr(),
+            NonNull::from(&glyph),
+            advance.as_mut_ptr(),
             1,
         );
     }
-    olcu[0].width
+    advance[0].width
 }
 
 /// Yukarı yuvarlar ve `u16`'ya sıkıştırır.
@@ -375,7 +383,7 @@ fn bosluk_advance(font: &CTFont) -> CGFloat {
 ///
 /// NaN ayrıca ele alınıyor çünkü `clamp` onu **geçirir** ve `NaN as u16` 0
 /// eder: alt sınır sessizce delinir ve hata bölmede patlar, kaynağında değil.
-fn yukari(v: CGFloat) -> u16 {
+fn round_up(v: CGFloat) -> u16 {
     if !v.is_finite() {
         return 1;
     }

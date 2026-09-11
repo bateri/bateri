@@ -31,7 +31,7 @@ pub struct Options {
 /// yalnız kurulum hatası yoksa ve AppKit'in `run`'ı bir gün dönerse görülür.
 ///
 /// Kapanış işi (PTY, ayar yazımı) buradan sonraya değil, **her iki çıkış
-/// yolunun da geçtiği** `app::AppDelegate::kapat`'a konur —
+/// yolunun da geçtiği** `app::AppDelegate::shutdown`'a konur —
 /// `applicationWillTerminate:`'a değil: duman deadline'ı ona bilerek uğramıyor
 /// ve oraya konan bir adım o yolda sessizce atlanır.
 pub fn run(opts: Options) -> Result<(), GpuError> {
@@ -52,7 +52,7 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
 }
 
 /// Kapanışın asılmasını kesen son çare — **yalnız `BT_RUN_SECONDS`
-/// yolunda** ve kapanış başlarken kurulur (`AppDelegate::kapat`).
+/// yolunda** ve kapanış başlarken kurulur (`AppDelegate::shutdown`).
 ///
 /// Kapanış ana thread'de koşuyor ve oradan `Session::shutdown()`'a giriyor;
 /// `Pty::drop` `SIGHUP`'tan sonra `child.wait()` çağırdığı için sinyali yutan
@@ -63,16 +63,16 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
 /// gerçekten asar; bilinen sınır, `Session::shutdown`'ın kendi belgesinde de
 /// yazılı. Kalıcı çözüm sınırlı bekleme (`SIGHUP` → süre → `SIGKILL`) ve yeri
 /// `bt-core`.
-pub(crate) fn bekci(run_seconds: u64) {
+pub(crate) fn watchdog(run_seconds: u64) {
     // Koşu süresinin üç katı. Sağlıklı bir kapanış `SIGHUP` ile hemen biter;
     // bu süreye ancak gerçekten asılmış bir çocuk varır. `max(1)`:
     // `BT_RUN_SECONDS=0` bekçiyi doğar doğmaz ateşlemesin.
-    let sure = Duration::from_secs(run_seconds.saturating_mul(3).max(1));
+    let budget = Duration::from_secs(run_seconds.saturating_mul(3).max(1));
     std::thread::spawn(move || {
-        std::thread::sleep(sure);
+        std::thread::sleep(budget);
         // `eprintln!` DEĞİL: Rust'ın stderr'i kilitli ve ana thread o kilidi
         // tutarken asılmış olabilir (`shutdown`'ın kendi `eprintln!`'i,
-        // `Retry::cizilemedi`, ileride logger). Bekçi tam da onu kesmek için
+        // `Retry::draw_failed`, ileride logger). Bekçi tam da onu kesmek için
         // var; aynı kilide girip beklemesi kendini iptal etmek olurdu. Sabit
         // metin, `format!` bile yok — `malloc` da bir kilit.
         //
@@ -81,9 +81,9 @@ pub(crate) fn bekci(run_seconds: u64) {
         //
         // SAFETY: `write` ve `_exit` async-signal-safe; ikisi de kilit almaz
         // ve süreci hiçbir şey koşturmadan bitirir.
-        const MESAJ: &str = "bateri: kapanış bekçinin bütçesinde bitmedi, süreç kesiliyor\n";
+        const MESSAGE: &str = "bateri: kapanış bekçinin bütçesinde bitmedi, süreç kesiliyor\n";
         unsafe {
-            libc::write(2, MESAJ.as_ptr().cast(), MESAJ.len());
+            libc::write(2, MESSAGE.as_ptr().cast(), MESSAGE.len());
             libc::_exit(70)
         };
     });

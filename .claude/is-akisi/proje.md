@@ -32,8 +32,8 @@ Bir phase, doğrulama yeşil olmadan bitmiş sayılmaz. Sırayla:
 | hızlı iç döngü | `cargo test -p {crate}` |
 | `.metal` ya da `build.rs` değiştiyse | `make shader` — `build.rs` shader hatasını `cargo build`'de zaten yakalar; bu hedef cargo'nun bayatlık takibini atlayan kanaryadır (`touch` + `cargo build -p bt-gpu`), derleme reçetesi yalnız `build.rs`'te |
 | `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz yok, bkz. üstteki not* (`tic -x` ile geçici dizine derleme; SSH'daki uzak makine bunu **alamaz**, bkz. tuzaklar) |
-| PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — iki zamanlama profili — yalnız `yaris_*` stresi (`--ignored yaris_`), sonra ignore'lular **dahil** bütün takım tek thread'de (`--include-ignored --test-threads=1`); ikisi de geçmeli. ThreadSanitizer nightly ister ve araç zinciri pin'li değil (`rustup` yok): TSan satırı nightly gelince Makefile'a eklenir, o güne kadar "TSan koşmadı" bir waive değil, bilinen sınırdır |
-| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — uygulamayı `BT_RUN_SECONDS=3` ile başlatır; süre dolunca `kare=N hucre=K glif=G pipeline=ok` basar ve **üçü de > 0 olmalıdır** (biri 0 → çıkış 1). `kare` GPU'nun hatasız bitirdiği kare, `hucre` son karede çizilen arka plan hücresi (imleç hariç), `glif` o karede çizilen glyph: birincisi pipeline'ın çalıştığını, ikincisi shell çıktısının `Session::frame` sink'inden geçtiğini, üçüncüsü sınırın karakteri de taşıdığını söyler. `glif` süs değil kapının kendisi: o olmasa `frame()` sınırı karakteri hiç geçirmese bile `kare=1 hucre=8 pipeline=ok` basılırdı. Duman koşusunda shell sabittir (`printf` ile `" bateri "`), yani `hucre=8 glif=6` beklenir ve sayılar kullanıcının `$SHELL`'ine bağlı değildir. Kapsamadığı: **GPU'nun o hücreleri gerçekten boyadığı** — ikisi de CPU sayacıdır; boyamayı `make hepsi` içindeki `cell_bg_pikseli_gpu_tarafinda_boyar` ve `glif_hucrenin_icini_arka_planindan_ayirir` offscreen sınamaları kanıtlar. Pencerenin görünür ve doğru olduğunu da hiçbir hâlde kanıtlamaz: bundle'sız süreç öne çıkma hakkı taşımaz. Başsız ortamda binary `exit 78` + "ATLANDI" der ve `[~]` işaretlenir |
+| PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — iki zamanlama profili — yalnız `race_*` stresi (`--ignored race_`), sonra ignore'lular **dahil** bütün takım tek thread'de (`--include-ignored --test-threads=1`); ikisi de geçmeli. ThreadSanitizer nightly ister ve araç zinciri pin'li değil (`rustup` yok): TSan satırı nightly gelince Makefile'a eklenir, o güne kadar "TSan koşmadı" bir waive değil, bilinen sınırdır |
+| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — uygulamayı `BT_RUN_SECONDS=3` ile başlatır; süre dolunca `kare=N hucre=K glif=G pipeline=ok` basar ve **üçü de > 0 olmalıdır** (biri 0 → çıkış 1). `kare` GPU'nun hatasız bitirdiği kare, `hucre` son karede çizilen arka plan hücresi (imleç hariç), `glif` o karede çizilen glyph: birincisi pipeline'ın çalıştığını, ikincisi shell çıktısının `Session::frame` sink'inden geçtiğini, üçüncüsü sınırın karakteri de taşıdığını söyler. `glif` süs değil kapının kendisi: o olmasa `frame()` sınırı karakteri hiç geçirmese bile `kare=1 hucre=8 pipeline=ok` basılırdı. Duman koşusunda shell sabittir (`printf` ile `" bateri "`), yani `hucre=8 glif=6` beklenir ve sayılar kullanıcının `$SHELL`'ine bağlı değildir. Kapsamadığı: **GPU'nun o hücreleri gerçekten boyadığı** — ikisi de CPU sayacıdır; boyamayı `make hepsi` içindeki `cell_bg_paints_pixels_on_the_gpu` ve `glyph_differs_from_cell_background` offscreen sınamaları kanıtlar. Pencerenin görünür ve doğru olduğunu da hiçbir hâlde kanıtlamaz: bundle'sız süreç öne çıkma hakkı taşımaz. Başsız ortamda binary `exit 78` + "ATLANDI" der ve `[~]` işaretlenir |
 
 **Türetilmiş dosya yoktur.** `default.metallib` `build.rs` üretir ve `target/`
 altında kalır; depoya girmez. terminfo derlemesi de girmez. Dolayısıyla
@@ -165,6 +165,12 @@ Tek branch: `main`. Dev branch, migration, container, panel yok.
   yalnız tabandır. `brew upgrade` sonrası yeni bir clippy lint'i dokunulmamış
   kodu kırmızıya çevirebilir — `make hepsi` bu yüzden sürümü başta basar;
   kırmızı görünce önce sürüme bak, koda değil.
-- **Dil:** kod yorumları, commit iletileri ve belgeler Türkçe; kullanıcıya
-  görünen UI dizgileri, ayar anahtarları ve tema adları İngilizce (ürün
-  uluslararası, ayar dosyası paylaşılır). Yorumlar "neden"i anlatır.
+- **Dil:** kod yorumları, commit iletileri ve belgeler Türkçe ve "neden"i
+  anlatır. **Kod tanımlayıcılarının tamamı İngilizce** — dışa bakan ad da,
+  yerel yardımcı, alan, değişken ve sınama adı da; `build.rs` dahil,
+  istisnasız. Kullanıcıya görünen UI dizgileri, ayar anahtarları ve tema
+  adları İngilizce (ürün uluslararası, ayar dosyası paylaşılır). İki şey
+  Türkçe kalır ve ikisi de kod değildir: süreç/tanı çıktısı (stderr,
+  `make duman` satırları, `assert!` gerekçeleri) UI dizgisi olmadığı için,
+  `Makefile` hedefleri projenin komut yüzeyi olduğu için. `kare=`/`hucre=`/
+  `glif=` jetonları makine sözleşmesidir: silinmez, eklenir.

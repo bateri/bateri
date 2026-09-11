@@ -40,9 +40,9 @@ impl LinearRgba {
         Self([
             // audit: `u8 as usize` 0..=255, tablo 256 girdilik — indeks tipin
             // kendisiyle sınırlı, sınır kontrolü kodgen'de de eleniyor.
-            SRGB_LINEER[r as usize],
-            SRGB_LINEER[g as usize],
-            SRGB_LINEER[b as usize],
+            SRGB_LINEAR[r as usize],
+            SRGB_LINEAR[g as usize],
+            SRGB_LINEAR[b as usize],
             1.0,
         ])
     }
@@ -56,16 +56,16 @@ impl LinearRgba {
     }
 }
 
-/// Varsayılan arka plan, **lineer** RGBA (`lineer_rgba`, crate-içi).
+/// Varsayılan arka plan, **lineer** RGBA (`linear_rgba`, crate-içi).
 /// **Tek sahibi burasıdır**: pencerenin clear rengi de,
 /// `frame()`'in "bu hücre varsayılan, çizilmesin" kararı da buradan okur. İki
 /// yerde dursaydı biri değişince pencere ile hücreler ayrı renk olurdu.
-pub const DEFAULT_BG: LinearRgba = lineer_rgba(rgb(BG));
+pub const DEFAULT_BG: LinearRgba = linear_rgba(rgb(BG));
 
-/// İmleç bloğunun rengi, **lineer** RGBA (`lineer_rgba`, crate-içi). Renderer'da
+/// İmleç bloğunun rengi, **lineer** RGBA (`linear_rgba`, crate-içi). Renderer'da
 /// sabit durmasın diye burada: renk kararı
 /// paletin, çizim kararı renderer'ın.
-pub const DEFAULT_CURSOR: LinearRgba = lineer_rgba(rgb(CURSOR));
+pub const DEFAULT_CURSOR: LinearRgba = linear_rgba(rgb(CURSOR));
 
 /// Varsayılan arka planın `Rgb` hâli; `frame()` karşılaştırmayı burada yapar,
 /// f32 eşitliği aramaz.
@@ -102,7 +102,7 @@ const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
 /// `colors` uygulamanın OSC 4/10/11 ile değiştirdiği tablodur ve girdileri
 /// `None` olabilir; boş girdide bizim varsayılan paletimize düşülür.
 ///
-/// `#[inline]`: `lineer_rgba` ile aynı sıcak yol ve aynı gerekçe. `default`
+/// `#[inline]`: `linear_rgba` ile aynı sıcak yol ve aynı gerekçe. `default`
 /// ile **birlikte** işaretlenir; yalnız biri alınırsa çağrı ötekine kayar.
 #[inline]
 pub(crate) fn resolve(color: Color, colors: &Colors) -> Rgb {
@@ -170,13 +170,13 @@ const fn rgb(hex: u32) -> Rgb {
 /// fonksiyonu (`c/12.92`, kırılmadan sonra `((c+0.055)/1.055)^2.4`).
 ///
 /// Tablo, elle bakılan bir sabit listesi **değil**, türetilmiş bir veridir:
-/// `srgb_tablosu_transfer_fonksiyonunu_izler` her girdiyi formüle bağlar.
+/// `srgb_table_follows_transfer_function` her girdiyi formüle bağlar.
 /// Tablo olmasının sebebi `const`luk — `powf` stable'da `const` değil, oysa
 /// `DEFAULT_BG` ve `DEFAULT_CURSOR` `const`.
 // rustfmt tabloyu girdi başına bir satıra açıyor: 64 satır 256 olur ve
 // dosyanın geri kalanı okunmaz hâle gelir. `ANSI` tablosuyla aynı gerekçe.
 #[rustfmt::skip]
-const SRGB_LINEER: [f32; 256] = [
+const SRGB_LINEAR: [f32; 256] = [
     0.0, 0.000303527, 0.000607054, 0.000910581,
     0.001214108, 0.001517635, 0.001821162, 0.0021246888,
     0.002428216, 0.0027317428, 0.00303527, 0.0033465358,
@@ -249,7 +249,7 @@ const SRGB_LINEER: [f32; 256] = [
 /// float'ın hangi uzayda olduğu: çizim hedefi `BGRA8Unorm_sRGB` ve donanım
 /// fragment çıktısını lineer sayıp yazarken kodluyor. Burada `c / 255.0`
 /// dönseydi palet `0x1a1c21`'den `0x5a5d65` griye açılırdı; bunu gören tek
-/// bekçi `bt-gpu`'nun `cell_bg_pikseli_gpu_tarafinda_boyar` sınamasıdır ve
+/// bekçi `bt-gpu`'nun `cell_bg_paints_pixels_on_the_gpu` sınamasıdır ve
 /// ancak **ara ton** bir renkle görüyor.
 ///
 /// Aynı floatlar `MTLClearColor`'a da gidiyor — Metal sRGB hedefte clear
@@ -261,7 +261,7 @@ const SRGB_LINEER: [f32; 256] = [
 /// geçmiyordu — `nm -u` release rlib'inde tanımsız sembol gösteriyordu, yani
 /// bir tablo aramasının etrafında gerçek bir çağrı kalıyordu.
 #[inline]
-pub(crate) const fn lineer_rgba(color: Rgb) -> LinearRgba {
+pub(crate) const fn linear_rgba(color: Rgb) -> LinearRgba {
     LinearRgba::from_srgb(color.r, color.g, color.b)
 }
 
@@ -271,29 +271,29 @@ mod tests {
     use alacritty_terminal::vte::ansi::NamedColor;
 
     #[test]
-    fn varsayilan_arka_plan_tek_kaynak() {
+    fn default_background_has_one_source() {
         // Hücrenin `Named(Background)`'ı ile pencerenin clear rengi aynı
         // sabitten gelmeli; ayrılırlarsa boş hücreler pencereden farklı boyanır.
         assert_eq!(default(NamedColor::Background as usize), BG_RGB);
     }
 
     #[test]
-    fn srgb_tablosu_transfer_fonksiyonunu_izler() {
+    fn srgb_table_follows_transfer_function() {
         // Tablo elle yazılmış 256 sayı değil, formülün donmuş hâli. Referans
         // f64'te hesaplanır; tablo f32 olduğu için epsilon yalnız f32
         // yuvarlamasını karşılar (mutlak hata ≤ ~6e-8).
-        assert_eq!(SRGB_LINEER[0], 0.0);
-        assert_eq!(SRGB_LINEER[255], 1.0, "beyaz lineerde de 1.0 kalmalı");
-        for (i, &lineer) in SRGB_LINEER.iter().enumerate() {
+        assert_eq!(SRGB_LINEAR[0], 0.0);
+        assert_eq!(SRGB_LINEAR[255], 1.0, "beyaz lineerde de 1.0 kalmalı");
+        for (i, &linear) in SRGB_LINEAR.iter().enumerate() {
             let c = i as f64 / 255.0;
-            let beklenen = if c <= 0.04045 {
+            let expected = if c <= 0.04045 {
                 c / 12.92
             } else {
                 ((c + 0.055) / 1.055).powf(2.4)
             };
             assert!(
-                (f64::from(lineer) - beklenen).abs() < 1e-7,
-                "{i}: {lineer} != {beklenen}"
+                (f64::from(linear) - expected).abs() < 1e-7,
+                "{i}: {linear} != {expected}"
             );
             // Tablonun gerçekten **lineerleştirdiğinin** kanıtı, GPU
             // istemeden: lineer değer sRGB-kodlu hâlinden (`i/255`) kesin
@@ -301,13 +301,13 @@ mod tests {
             // düşerdi. Uçlar (0 ve 255) transfer fonksiyonunun sabit
             // noktaları, eşitlik oradan gelir ve aralığın dışında bırakılır.
             if (1..255).contains(&i) {
-                assert!(f64::from(lineer) < c, "{i}: {lineer} !< {c}");
+                assert!(f64::from(linear) < c, "{i}: {linear} !< {c}");
             }
         }
     }
 
     #[test]
-    fn palet_indeksleri_xterm_sozlesmesi() {
+    fn palette_indices_follow_xterm() {
         assert_eq!(default(1), rgb(ANSI[1]));
         // 16 = küpün başı (0,0,0), 231 = sonu (255,255,255).
         assert_eq!(default(16), rgb(0x000000));
@@ -318,13 +318,13 @@ mod tests {
     }
 
     #[test]
-    fn sonuk_renkler_kaynagindan_koyu() {
+    fn dim_colors_are_darker_than_source() {
         // Sönük sekizli ANSI 0..8'in, sönük ön plan da ön planın altında kalır.
         for index in 259..=266 {
-            let sonuk = default(index);
-            let parlak = default(index - 259);
-            assert!(sonuk.r < parlak.r || parlak.r == 0, "{index}");
-            assert!(sonuk.g <= parlak.g && sonuk.b <= parlak.b, "{index}");
+            let dimmed = default(index);
+            let bright = default(index - 259);
+            assert!(dimmed.r < bright.r || bright.r == 0, "{index}");
+            assert!(dimmed.g <= bright.g && dimmed.b <= bright.b, "{index}");
         }
         assert!(default(268).r < default(256).r);
         // Kırmızının sönüğü: 209/109/106 → 139/72/70. vte f32'de çarpıp kırpar.
@@ -332,12 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn osc_tablosu_paleti_ezer() {
+    fn osc_table_overrides_palette() {
         let mut colors = Colors::default();
-        let ozel = rgb(0x010203);
-        colors[1] = Some(ozel);
-        assert_eq!(resolve(Color::Named(NamedColor::Red), &colors), ozel);
-        assert_eq!(resolve(Color::Indexed(1), &colors), ozel);
+        let custom = rgb(0x010203);
+        colors[1] = Some(custom);
+        assert_eq!(resolve(Color::Named(NamedColor::Red), &colors), custom);
+        assert_eq!(resolve(Color::Indexed(1), &colors), custom);
         // Doğrudan verilen renk tabloya hiç sormaz.
         assert_eq!(resolve(Color::Spec(rgb(ANSI[2])), &colors), rgb(ANSI[2]));
         // Tabloda olmayan girdi paletten gelir.

@@ -9,13 +9,13 @@ use std::borrow::Cow;
 /// kodunu UTF-8'e çevirip shell'e göndermek her zaman daha kötü. Private Use
 /// Area bundan geniştir (U+E000'den başlar) ve **kapsam dışı**: powerline
 /// glyph'i gibi gerçek bir karakter düz metin dalından geçer.
-const FONKSIYON: std::ops::RangeInclusive<char> = '\u{f700}'..='\u{f8ff}';
+const FUNCTION_KEYS: std::ops::RangeInclusive<char> = '\u{f700}'..='\u{f8ff}';
 
 /// `chars` = `NSEvent.characters`, `ctrl` = Control basılı.
 ///
 /// `None` → tuş yutulur; çağıran hiçbir şey yazmaz. Kapsam dışı: IME, ölü
 /// tuşlar, Option-as-Meta, kitty klavye protokolü.
-pub(crate) fn kod_cevir(chars: &str, ctrl: bool) -> Option<Cow<'static, [u8]>> {
+pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<Cow<'static, [u8]>> {
     let c = chars.chars().next()?;
     Some(match (c, ctrl) {
         // Sayısal tuş takımının Enter'ı ve Fn-Return `NSEnterCharacter` =
@@ -41,11 +41,11 @@ pub(crate) fn kod_cevir(chars: &str, ctrl: bool) -> Option<Cow<'static, [u8]>> {
         // Dizisini bilmediğimiz fonksiyon tuşu (F1, Home, PageUp…). Bunlar
         // gerçek bir karakter değil, AppKit'in private use kodları: UTF-8'e
         // çevirip PTY'ye yazmak shell'e çöp göndermek olurdu.
-        (c, _) if FONKSIYON.contains(&c) => return None,
+        (c, _) if FUNCTION_KEYS.contains(&c) => return None,
         // Enter, Tab, Escape ve Backspace de buradan geçiyor: AppKit onları
         // zaten doğru bayta çevirmiş (U+000D, U+0009, U+001B, U+007F) ve
         // ayrı kollar yazmak aynı baytı ikinci kez tarif etmek olurdu.
-        // Sözleşmeyi `donus_ve_silme_tek_bayt` çiviliyor.
+        // Sözleşmeyi `return_and_delete_are_single_bytes` çiviliyor.
         _ => Cow::Owned(chars.as_bytes().to_vec()),
     })
 }
@@ -54,62 +54,62 @@ pub(crate) fn kod_cevir(chars: &str, ctrl: bool) -> Option<Cow<'static, [u8]>> {
 mod tests {
     use super::*;
 
-    fn cevir(chars: &str, ctrl: bool) -> Vec<u8> {
-        kod_cevir(chars, ctrl)
+    fn encode(chars: &str, ctrl: bool) -> Vec<u8> {
+        encode_key(chars, ctrl)
             .unwrap_or_else(|| panic!("{chars:?} (ctrl={ctrl}) yutuldu"))
             .into_owned()
     }
 
     #[test]
-    fn donus_ve_silme_tek_bayt() {
-        assert_eq!(cevir("\r", false), b"\r");
-        assert_eq!(cevir("\u{7f}", false), b"\x7f");
-        assert_eq!(cevir("\t", false), b"\t");
-        assert_eq!(cevir("\u{1b}", false), b"\x1b");
+    fn return_and_delete_are_single_bytes() {
+        assert_eq!(encode("\r", false), b"\r");
+        assert_eq!(encode("\u{7f}", false), b"\x7f");
+        assert_eq!(encode("\t", false), b"\t");
+        assert_eq!(encode("\u{1b}", false), b"\x1b");
     }
 
     #[test]
-    fn oklar_csi_dizisi_verir() {
-        assert_eq!(cevir("\u{f700}", false), b"\x1b[A");
-        assert_eq!(cevir("\u{f701}", false), b"\x1b[B");
-        assert_eq!(cevir("\u{f702}", false), b"\x1b[D");
-        assert_eq!(cevir("\u{f703}", false), b"\x1b[C");
+    fn arrows_emit_csi_sequences() {
+        assert_eq!(encode("\u{f700}", false), b"\x1b[A");
+        assert_eq!(encode("\u{f701}", false), b"\x1b[B");
+        assert_eq!(encode("\u{f702}", false), b"\x1b[D");
+        assert_eq!(encode("\u{f703}", false), b"\x1b[C");
     }
 
     #[test]
-    fn ctrl_harf_iki_yoldan_da_kontrol_karakteri() {
+    fn ctrl_letter_yields_control_char_both_ways() {
         // AppKit Control'ü çoğu tuşta kendi uygular: `characters` doğrudan
         // U+0003 gelir. İki yol da aynı baytı vermeli, yoksa Ctrl-C'nin
         // çalışması AppKit'in o gün hangi yolu seçtiğine bağlı olur.
-        assert_eq!(cevir("\u{3}", true), b"\x03");
-        assert_eq!(cevir("c", true), b"\x03");
-        assert_eq!(cevir("C", true), b"\x03", "Shift ile de aynı");
+        assert_eq!(encode("\u{3}", true), b"\x03");
+        assert_eq!(encode("c", true), b"\x03");
+        assert_eq!(encode("C", true), b"\x03", "Shift ile de aynı");
     }
 
     #[test]
-    fn numpad_enter_satir_sonu_verir_kesme_degil() {
+    fn numpad_enter_sends_newline_not_interrupt() {
         // U+0003 iki ayrı tuşun `characters`'ı: Ctrl-C ve numpad Enter.
         // Ayıran tek şey Control bayrağı; karıştırılırsa numpad Enter her
         // komutu çalıştırmak yerine keser.
-        assert_eq!(cevir("\u{3}", false), b"\r");
-        assert_eq!(cevir("\u{3}", true), b"\x03");
+        assert_eq!(encode("\u{3}", false), b"\r");
+        assert_eq!(encode("\u{3}", true), b"\x03");
     }
 
     #[test]
-    fn duz_metin_utf8_gecer() {
-        assert_eq!(cevir("a", false), b"a");
+    fn plain_text_passes_as_utf8() {
+        assert_eq!(encode("a", false), b"a");
         // Türkçe karakter çok baytlı: bayt bayt geçmeli, `as u8` ile kırpılmamalı.
-        assert_eq!(cevir("ğ", false), "ğ".as_bytes());
-        assert_eq!(cevir("İ", false), "İ".as_bytes());
+        assert_eq!(encode("ğ", false), "ğ".as_bytes());
+        assert_eq!(encode("İ", false), "İ".as_bytes());
     }
 
     #[test]
-    fn dizisi_olmayan_tuslar_yutulur() {
+    fn keys_without_sequences_are_swallowed() {
         // Saf modifier tuşu: `characters` boş.
-        assert!(kod_cevir("", false).is_none());
+        assert!(encode_key("", false).is_none());
         // F1 ve Home private use alanında. UTF-8'e çevirip PTY'ye yazmak
         // shell'e çöp göndermek olurdu; dizileri 00X'te.
-        assert!(kod_cevir("\u{f704}", false).is_none(), "F1");
-        assert!(kod_cevir("\u{f729}", false).is_none(), "Home");
+        assert!(encode_key("\u{f704}", false).is_none(), "F1");
+        assert!(encode_key("\u{f729}", false).is_none(), "Home");
     }
 }

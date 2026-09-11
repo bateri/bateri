@@ -128,8 +128,12 @@ descriptor'daki attribute indeksleri shader'la eşleşiyor mu?
 
 **10. Belge ve üslup borcu.** Yeni crate `lib.rs` başında sözleşmesini anlatan
 bir yorum aldı mı? Yeni yorumlar "ne" değil **"neden"** anlatıyor mu
-(çevredeki yoğunlukta)? Yorumlar ve sınama iletileri Türkçe, UI dizgileri ve
-ayar anahtarları İngilizce mi? `clippy` bastırmaları (`#[allow]`) gerekçeli mi?
+(çevredeki yoğunlukta)? Yorumlar ve sınama iletileri Türkçe mi? **Kod
+tanımlayıcılarının tamamı İngilizce mi** — dışa bakan ad da, yerel yardımcı,
+alan, değişken ve sınama adı da (`build.rs` dahil, istisnasız)? UI dizgileri ve
+ayar anahtarları İngilizce mi? Türkçe kalması gereken iki şey yerinde mi:
+süreç/tanı çıktısı (stderr, `make duman` satırları) ve `Makefile` hedefleri?
+`clippy` bastırmaları (`#[allow]`) gerekçeli mi?
 
 ## Çıktı
 

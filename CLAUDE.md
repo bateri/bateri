@@ -37,7 +37,7 @@ make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hücresi ve glyph sayar: kare=N hucre=K glif=G pipeline=ok, biri 0 → kırmızı
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
-make test-yaris   # yarış stresi: yaris_* (--ignored) + tek thread karşılaştırma koşusu
+make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler ve bateri.app paketini target/ altına kurar
 ```
 
@@ -89,11 +89,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   geçiş `Session::frame()` sınırının arkasında yapılır ve renderer'ı değiştirmez.
 - **Renk uzayı sınırı geçer.** Çizim hedefi `BGRA8Unorm_sRGB`: donanım
   fragment çıktısını **lineer** sayar ve yazarken sRGB'ye kodlar. Bu yüzden
-  `bt-core` sınırdan lineer float verir (`color::lineer_rgba`) ve `MTLClearColor`
+  `bt-core` sınırdan lineer float verir (`color::linear_rgba`) ve `MTLClearColor`
   da aynı kaynaktan beslenir — pencere zemini ile hücreler tek yerden düzelir.
   İkisi **birlikte** değişir; biri lineerleşmeden ötekine geçilirse palet
   `0x1a1c21`'den `0x5a5d65` griye açılır ve belirti sessizdir. Gören tek bekçi
-  `cell_bg_pikseli_gpu_tarafinda_boyar` ve ancak **ara ton** bir renkle görür:
+  `cell_bg_paints_pixels_on_the_gpu` ve ancak **ara ton** bir renkle görür:
   `0.0` ve `1.0` sRGB transfer fonksiyonunun sabit noktalarıdır.
 - **Boşta sıfır kare.** Kirli satır yoksa frame gönderilmez. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
@@ -130,14 +130,17 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   `/measure` bugün sayı değil **ölçüm aracı yok** döndürüyor. Bekleyen yedi
   iddia 002 ve 003'ün `teslim.md`'lerinde duruyor; kancalar gelince bu cümle
   kalkar ve `cargo bench` satırı yukarıdaki bloğa geri gelir.
-- **Dil:** yorumlar, commit iletileri, belgeler Türkçe ve "neden"i anlatır;
-  UI dizgileri, ayar anahtarları, tema ve materyal adları İngilizce. Kod
-  tanımlayıcılarında dışa bakan ad (pub tip, fonksiyon, varyant) İngilizce;
-  yerel yardımcı, `build.rs` ve `Makefile` hedefi Türkçe olabilir. Süreç ve
-  tanı çıktısı (stderr iletileri, `make duman` satırları) UI dizgisi değildir,
-  Türkçe kalır; `kare=`/`hucre=`/`glif=`/`pipeline=ok`/`ATLANDI` gibi anahtar-değer
-  jetonları makine sözleşmesidir: **silinmez, eklenir** — okuyan taraf
-  tanımadığı jetonu atlayabilir, kaybolanı arayamaz.
+- **Dil:** yorumlar, commit iletileri ve belgeler Türkçe ve "neden"i anlatır.
+  **Kod tanımlayıcılarının tamamı İngilizce** — dışa bakan ad (pub tip,
+  fonksiyon, varyant) da, yerel yardımcı, alan, değişken ve sınama adı da;
+  `build.rs` dahil, istisnasız. UI dizgileri, ayar anahtarları, tema ve
+  materyal adları İngilizce. İki şey Türkçe kalır ve ikisi de kod değildir:
+  süreç ve tanı çıktısı (stderr iletileri, `make duman` satırları, `assert!`
+  gerekçeleri) UI dizgisi olmadığı için, `Makefile` hedefleri (`hepsi`,
+  `duman`, `shader`, `test-yaris`, `kur`, `terminfo`) projenin komut yüzeyi
+  olduğu için. `kare=`/`hucre=`/`glif=`/`pipeline=ok`/`ATLANDI` gibi
+  anahtar-değer jetonları makine sözleşmesidir: **silinmez, eklenir** —
+  okuyan taraf tanımadığı jetonu atlayabilir, kaybolanı arayamaz.
 
 ## İş akışı
 
