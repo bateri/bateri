@@ -11,23 +11,23 @@ fn main() {
     // shader'ları aynı sayıya bağlarız — ikisi ayrışırsa metallib çalışma
     // zamanında reddedilir, derlemede değil.
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
-    let taban = env::var("MACOSX_DEPLOYMENT_TARGET")
+    let min_os = env::var("MACOSX_DEPLOYMENT_TARGET")
         .expect("MACOSX_DEPLOYMENT_TARGET tanımsız; .cargo/config.toml [env] tek kaynak");
     // `[env]` tablosu `force` olmadan kabuk ortamına yenilir; metal3.1 macOS 14
     // ister ve derleyici bu çifti denetlemez — tabanı burada bağlarız.
-    let major: u32 = taban
+    let major: u32 = min_os
         .split('.')
         .next()
         .and_then(|m| m.parse().ok())
-        .unwrap_or_else(|| panic!("MACOSX_DEPLOYMENT_TARGET okunamadı: {taban:?}"));
+        .unwrap_or_else(|| panic!("MACOSX_DEPLOYMENT_TARGET okunamadı: {min_os:?}"));
     assert!(
         major >= 14,
-        "taban macOS {taban}: -std=metal3.1 en az 14.0 ister"
+        "taban macOS {min_os}: -std=metal3.1 en az 14.0 ister"
     );
-    let version_min = format!("-mmacos-version-min={taban}");
+    let version_min = format!("-mmacos-version-min={min_os}");
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-    xcrun_kontrol();
+    check_xcrun();
 
     let mut airs = Vec::new();
     for entry in fs::read_dir("shaders").expect("shaders/ dizini okunamadı") {
@@ -36,7 +36,7 @@ fn main() {
             let air = out
                 .join(path.file_name().expect("dosya adı"))
                 .with_extension("air");
-            kos(Command::new("xcrun")
+            run(Command::new("xcrun")
                 .args(["-sdk", "macosx", "metal"])
                 .args(["-std=metal3.1", &version_min, "-c"])
                 .arg(&path)
@@ -48,14 +48,14 @@ fn main() {
     assert!(!airs.is_empty(), "shaders/ altında .metal yok");
     // read_dir sırası tanımsız; metallib baytları deterministik kalsın.
     airs.sort();
-    kos(Command::new("xcrun")
+    run(Command::new("xcrun")
         .args(["-sdk", "macosx", "metallib"])
         .args(&airs)
         .arg("-o")
         .arg(out.join("default.metallib")));
 }
 
-fn xcrun_kontrol() {
+fn check_xcrun() {
     let ok = Command::new("xcrun")
         .args(["-sdk", "macosx", "-f", "metal"])
         .output()
@@ -69,9 +69,9 @@ fn xcrun_kontrol() {
     );
 }
 
-fn kos(cmd: &mut Command) {
-    let durum = cmd
+fn run(cmd: &mut Command) {
+    let status = cmd
         .status()
         .unwrap_or_else(|e| panic!("{cmd:?} başlatılamadı: {e}"));
-    assert!(durum.success(), "shader derlemesi başarısız: {cmd:?}");
+    assert!(status.success(), "shader derlemesi başarısız: {cmd:?}");
 }

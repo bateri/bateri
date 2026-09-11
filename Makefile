@@ -38,12 +38,12 @@ shader:
 # Paylaşılan duruma (PTY okuyucu thread'i ↔ kare üreten taraf) dokunan
 # değişikliklerde koşar. ThreadSanitizer nightly ister; araç zinciri pin'li
 # değil (`rust-toolchain.toml` bilinçli yok, Homebrew rustc) ve nightly yok:
-# yerine iki farklı zamanlama profili — önce yalnız yaris_* stresi,
+# yerine iki farklı zamanlama profili — önce yalnız race_* stresi,
 # sonra ignore'lular DAHİL bütün takım tek thread'de. İkinci satır
 # --include-ignored taşımasa `make test`in kopyası olurdu ve yarış
 # sınamasını hiç koşmazdı. TSan nightly gelince BURAYA üçüncü satır olur.
 test-yaris:
-	$(CARGO) test --workspace -- --ignored yaris_
+	$(CARGO) test --workspace -- --ignored race_
 	$(CARGO) test --workspace -- --include-ignored --test-threads=1
 
 # Girdisi henüz olmayan hedefler. Var olurlar ki `proje.md`'nin doğrulama

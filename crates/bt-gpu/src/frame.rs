@@ -24,7 +24,7 @@ pub(crate) struct Instance {
     size: [f32; 2],
     /// **Lineer** RGBA. Hedef `BGRA8Unorm_sRGB` ve kodlamayı ROP yapıyor:
     /// shader tarafında ikinci bir gamma düzeltmesi paleti iki kez kodlar.
-    /// Kaynağı `bt_core::color::lineer_rgba` (`CLAUDE.md` → renk uzayı).
+    /// Kaynağı `bt_core::color::linear_rgba` (`CLAUDE.md` → renk uzayı).
     rgba: [f32; 4],
 }
 
@@ -206,39 +206,39 @@ mod tests {
 
     // Uçlar bilerek: `0.0`/`1.0` sRGB transfer fonksiyonunun sabit noktaları,
     // yani bu sınamalar renk uzayından bağımsız. Uzayı sınayan yer
-    // `renderer.rs` → `cell_bg_pikseli_gpu_tarafinda_boyar`.
+    // `renderer.rs` → `cell_bg_paints_pixels_on_the_gpu`.
     //
     // Paletin iki ayrık sabiti; adları rolleri değil kaynakları söylüyor.
     // Burada bakılan şey renk değil düzen, o yüzden renk uydurmaya
     // (`LinearRgba::from_srgb`) gerek yok — `renderer.rs`'in offscreen
     // sınamaları onu üç ayrık ton gerektirdikleri için kullanıyor.
-    const ZEMIN: LinearRgba = bt_core::DEFAULT_BG;
-    const IMLEC: LinearRgba = bt_core::DEFAULT_CURSOR;
+    const BG: LinearRgba = bt_core::DEFAULT_BG;
+    const CURSOR: LinearRgba = bt_core::DEFAULT_CURSOR;
 
-    fn hucre(col: u16, row: u16) -> Cell {
+    fn bg_cell(col: u16, row: u16) -> Cell {
         Cell {
             col,
             row,
             ch: None,
-            fg: IMLEC,
-            bg: Some(ZEMIN),
+            fg: CURSOR,
+            bg: Some(BG),
         }
     }
 
     #[test]
-    fn frame_bg_count_imleci_saymaz() {
+    fn frame_bg_count_excludes_cursor() {
         let mut frame = Frame::default();
         frame.clear((9, 18));
 
-        frame.push(hucre(0, 0));
-        frame.push(hucre(1, 0));
+        frame.push(bg_cell(0, 0));
+        frame.push(bg_cell(1, 0));
         frame.push_cursor(
             Cursor {
                 col: 5,
                 row: 2,
                 visible: true,
             },
-            IMLEC,
+            CURSOR,
         );
 
         // Üç dikdörtgen çizilir ama `hucre=K` yalnız ikisini sayar.
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn gorunmez_imlec_cizilmez() {
+    fn invisible_cursor_is_not_drawn() {
         let mut frame = Frame::default();
         frame.clear((9, 18));
         frame.push_cursor(
@@ -260,62 +260,62 @@ mod tests {
                 row: 0,
                 visible: false,
             },
-            IMLEC,
+            CURSOR,
         );
         assert!(frame.bg_instances().is_empty());
     }
 
     #[test]
-    fn clear_hucre_boyutunu_gunceller() {
+    fn clear_updates_cell_size() {
         // `cell_px`'in `clear`'ın parametresi olmasının tek sebebi bu: alan
         // olsaydı ekran ölçeği değişince bayatlardı ve hiçbir sınama görmezdi.
         let mut frame = Frame::default();
         frame.clear((9, 18));
-        frame.push(hucre(1, 1));
+        frame.push(bg_cell(1, 1));
         assert_eq!(frame.bg_instances()[0].pos, [9.0, 18.0]);
 
         frame.clear((18, 36));
-        frame.push(hucre(1, 1));
+        frame.push(bg_cell(1, 1));
         assert_eq!(frame.bg_instances()[0].pos, [18.0, 36.0]);
         assert_eq!(frame.bg_instances()[0].size, [18.0, 36.0]);
     }
 
     #[test]
-    fn grid_koordinati_piksele_cevrilir() {
+    fn grid_coords_convert_to_pixels() {
         let mut frame = Frame::default();
         frame.clear((9, 18));
-        frame.push(hucre(3, 2));
+        frame.push(bg_cell(3, 2));
         assert_eq!(
             frame.bg_instances()[0],
             Instance {
                 pos: [27.0, 36.0],
                 size: [9.0, 18.0],
-                rgba: ZEMIN.to_array(),
+                rgba: BG.to_array(),
             }
         );
     }
 
     #[test]
-    fn murekkepsiz_hucre_glif_uretmez_arka_planini_verir() {
+    fn inkless_cell_yields_background_without_glyph() {
         // `hucre=K` ile `glif=G`'yi ayıran satır bu: `" bateri "` sekiz arka
         // planlı hücredir ama altı glyph'tir. İkisi tek sayaçtan okunsaydı
         // duman kapısı ikisinden birini hiç sormamış olurdu.
         let mut frame = Frame::default();
         frame.clear((8, 16));
-        frame.push(hucre(0, 0)); // mürekkepsiz
+        frame.push(bg_cell(0, 0)); // mürekkepsiz
         frame.push(Cell {
             col: 1,
             row: 0,
             ch: Some('b'),
-            fg: IMLEC,
-            bg: Some(ZEMIN),
+            fg: CURSOR,
+            bg: Some(BG),
         });
         // Arka planı olmayan ama mürekkebi olan hücre: yalnız glyph listesine.
         frame.push(Cell {
             col: 2,
             row: 0,
             ch: Some('a'),
-            fg: IMLEC,
+            fg: CURSOR,
             bg: None,
         });
 
@@ -326,7 +326,7 @@ mod tests {
             GlyphCell {
                 pos: [16.0, 0.0],
                 ch: 'a',
-                rgba: IMLEC.to_array(),
+                rgba: CURSOR.to_array(),
             }
         );
 

@@ -51,7 +51,7 @@ static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/default.metal
 /// [`Renderer::cell_metrics`] puntoyu **parametre almıyor**: alsaydı bir ayar
 /// değeri her yeniden boyutlandırmada çağrı yoluna girer ve varsayılanın
 /// sahibi `bt-shell` olurdu — `CELL_PX` bir kat yukarıda yeniden doğardı.
-const PUNTO: f64 = 13.0;
+const POINT_SIZE: f64 = 13.0;
 
 /// Atlas ve onun dokusu — **tek yerde**.
 ///
@@ -60,9 +60,9 @@ const PUNTO: f64 = 13.0;
 /// sessiz olurdu: ızgara geometrisi değişmiş bir atlastan bayat bir yuva
 /// okumak, yuva aralık içinde kaldığı sürece `slot_origin`'in savunmasına
 /// takılmaz ve **başka bir glyph** çizer. Burada sinyal bir hatırlama işi
-/// değil, [`Renderer::atlasi_esitle`]'nin tek satırı: doku düşer, `draw`
+/// değil, [`Renderer::sync_atlas`]'nin tek satırı: doku düşer, `draw`
 /// yenisini kurar.
-struct AtlasDoku {
+struct AtlasTexture {
     atlas: Atlas,
     /// `None` → doku henüz kurulmadı ya da `ensure` onu attı.
     ///
@@ -71,7 +71,7 @@ struct AtlasDoku {
     /// bağlanmamalı; ayrıca `cell_metrics` hata döndüremez, doku ayırması ise
     /// başarısız olabilir.
     texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
-    /// `char → yuva → uv` çözümünün hedefi; alan olması kare başına
+    /// `char → slot → uv` çözümünün hedefi; alan olması kare başına
     /// yeniden ayırmayı önlüyor.
     ///
     /// Yapının değişmezine (atlas ↔ doku) katılmıyor, yalnız onunla aynı
@@ -89,7 +89,7 @@ struct AtlasDoku {
 /// `900.0 / 0.0` → `inf`, `inf as u16` → `65535`, yani 65535×65535'lik bir
 /// grid ile o boyda bir `TIOCSWINSZ`. `Session::resize` yalnız sıfır grid'i
 /// eliyor; bu sessizce geçerdi. Şimdi geçemiyor: **≥ 1 garantisi tipin
-/// içinde**, kaynağı `bt_atlas::Metrics` (`font::yukari` 1'e kırpar).
+/// içinde**, kaynağı `bt_atlas::Metrics` (`font::round_up` 1'e kırpar).
 ///
 /// `bt_atlas::Metrics`'i yeniden ihraç **etmiyor**: `bt-shell`'in bir
 /// `bt-atlas` tipi görmesi katman tablosunu bulanıklaştırırdı (`CLAUDE.md`),
@@ -118,7 +118,7 @@ impl CellMetrics {
     ///
     /// Tip `bt-gpu` ile `bt-shell` arasında **taşınıyor**; demet yalnız
     /// değerin tipi bırakmak zorunda olduğu üç yerde açılıyor: sayıya dönüp
-    /// bölmeye girerken (`izgaraya_bol`), `bt-core`'a geçerken
+    /// bölmeye girerken (`split_into_grid`), `bt-core`'a geçerken
     /// (`SessionOptions.cell_px`, `Session::resize` — `bt-core` `bt-gpu`'yu
     /// göremez, katman kuralının bedeli bu) ve `#[repr(C)]` kare kurucusuna
     /// girerken (`Frame::clear`). Bunların dışında demet dolaşmaz.
@@ -142,7 +142,7 @@ pub struct Renderer {
     /// `hucre=K` jetonu. `frames`'in yanında duruyor çünkü ikisi de aynı
     /// soruya bakan tanı sayaçları ve tek yerden okunmaları gerekiyor.
     /// Dikkat: bu bir **CPU** sayacıdır, GPU'nun o hücreleri boyadığını
-    /// kanıtlamaz — onu `cell_bg_pikseli_gpu_tarafinda_boyar` yapar.
+    /// kanıtlamaz — onu `cell_bg_paints_pixels_on_the_gpu` yapar.
     last_bg_count: AtomicUsize,
     /// Son **gönderilen** karede çizilen glyph sayısı; `make duman`'ın
     /// `glif=G` jetonu. `last_bg_count` ile aynı gerekçe ve aynı sınır:
@@ -162,7 +162,7 @@ pub struct Renderer {
     /// `bt-shell` renderer'ı bir `Rc` içinde tutuyor — paylaşılan bir
     /// sahiplikte `&mut` yolu yok. Ödüncü **yalnız** bu iki metot alır ve
     /// hiçbiri onu bir çağrı sınırının ötesine taşımaz.
-    atlas: RefCell<Option<AtlasDoku>>,
+    atlas: RefCell<Option<AtlasTexture>>,
     /// **Tamamlanan** kare sayısı; `make duman` bunu okur.
     ///
     /// `Arc`: sayacı artıran tamamlanma bloğu `Renderer`'dan bağımsız yaşar
@@ -176,7 +176,7 @@ impl Renderer {
     ///
     /// `_sRGB`: fragment çıktısı **lineer** sayılır ve donanım yazarken
     /// kodlar, yani alfa karıştırma lineer uzayda koşar (glyph'in tek sebebi
-    /// bu). Karşılığı `bt_core::color::lineer_rgba`; ikisi birlikte değişir —
+    /// bu). Karşılığı `bt_core::color::linear_rgba`; ikisi birlikte değişir —
     /// biri lineerleşmeden ötekine geçilirse palet griye açılır.
     ///
     /// Alan değil `const`: kurucusu tek ve koşulsuz atıyordu, yani örnek
@@ -203,7 +203,7 @@ impl Renderer {
             &library,
             "cell_bg_vertex",
             "cell_bg_fragment",
-            Blend::Yok,
+            Blend::Opaque,
         )?;
         // Glyph'ler arka planların üstüne **karışarak** geliyor: atlas bir
         // kapsama maskesi, renk instance'tan. Blend lineer uzayda koşuyor ve
@@ -213,7 +213,7 @@ impl Renderer {
             &library,
             "cell_vertex",
             "cell_fragment",
-            Blend::Alfa,
+            Blend::Alpha,
         )?;
         let queue = device.newCommandQueue().ok_or(GpuError::NoCommandQueue)?;
 
@@ -244,9 +244,9 @@ impl Renderer {
     /// `bt-shell` `bt-atlas`'ı görmüyor, metrik buradan geçiyor; katman
     /// tablosu (`CLAUDE.md`) değişmeden `CELL_PX` yer tutucusu ölebildi.
     pub fn cell_metrics(&self, scale: f64) -> CellMetrics {
-        let (w, h) = self.atlasi_esitle(scale).cell_px;
+        let (w, h) = self.sync_atlas(scale).cell_px;
         // audit: `bt_atlas::Metrics.cell_px` çıplak bir `pub` alan, yani ≥ 1
-        // garantisi bir crate ötede (`font::yukari` 1'e kırpar) ve tipin
+        // garantisi bir crate ötede (`font::round_up` 1'e kırpar) ve tipin
         // kendisi taşımıyor. Yapı gövdesiyle kurmak bu boşluğu sessiz
         // bırakırdı; `expect` onu programlama hatasına çevirir. Panik yolu
         // değil: PTY okuma ve ayrıştırma bu satırdan geçmez, burası
@@ -267,20 +267,20 @@ impl Renderer {
     /// **derleyici tarafından kabul edilir** (`unused_must_use` yalnız çıplak
     /// ifade deyimine bakar), yani `#[must_use]` burada bir bekçi değil bir
     /// niyet beyanı; bekçi bu satırın kendisi.
-    fn atlasi_esitle(&self, scale: f64) -> Metrics {
+    fn sync_atlas(&self, scale: f64) -> Metrics {
         let mut slot = self.atlas.borrow_mut();
-        let doku = slot.get_or_insert_with(|| AtlasDoku {
-            atlas: Atlas::new(PUNTO, scale),
+        let atlas_tex = slot.get_or_insert_with(|| AtlasTexture {
+            atlas: Atlas::new(POINT_SIZE, scale),
             texture: None,
             instances: Vec::new(),
         });
-        if doku.atlas.ensure(PUNTO, scale) {
-            doku.texture = None;
+        if atlas_tex.atlas.ensure(POINT_SIZE, scale) {
+            atlas_tex.texture = None;
         }
         // Ödünç değil **metrik** dönüyor: atlas ödüncünün bir çağrı sınırını
         // aşabildiği tek yer burasıydı ve [`Renderer::encode_glyphs`]'in
         // dayandığı özellik tam olarak bunun olmaması.
-        doku.atlas.metrics()
+        atlas_tex.atlas.metrics()
     }
 
     /// GPU'nun hatasız bitirdiği kare sayısı. Anlamın sahibi artık
@@ -410,11 +410,11 @@ impl Renderer {
         // ve ayrı ayrı sormaları kare başına iki fazladan objc mesajı ile
         // ayrışabilen iki tanım demekti.
         let viewport_px: [f32; 2] = [texture.width() as f32, texture.height() as f32];
-        let sonuc = self
+        let result = self
             .encode_bg(&enc, frame, viewport_px)
             .and_then(|()| self.encode_glyphs(&enc, frame, viewport_px));
         enc.endEncoding();
-        sonuc
+        result
     }
 
     /// Instance dilimini kare başına yeni bir Metal tamponuna kopyalar.
@@ -424,7 +424,7 @@ impl Renderer {
     /// Komut tamponu buffer'ı tamamlanana kadar tutar. Karar **burada** tek
     /// yerde: iki pipeline da bu fonksiyondan geçiyor, yani değişirse ikisi
     /// birden değişir.
-    fn instans_tamponu<T>(
+    fn instance_buffer<T>(
         &self,
         instances: &[T],
     ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, GpuError> {
@@ -456,7 +456,7 @@ impl Renderer {
             return Ok(());
         }
         // Düzen `Instance`'ın `offset_of` assert'leriyle `cell_bg.metal`'e bağlı.
-        let buffer = self.instans_tamponu(instances)?;
+        let buffer = self.instance_buffer(instances)?;
 
         enc.setRenderPipelineState(&self.cell_bg);
         // İndeksler `cell_bg.metal`'in `[[buffer(0)]]` / `[[buffer(1)]]`
@@ -500,14 +500,14 @@ impl Renderer {
         // ve `cell_metrics` onu kuran tek yer. Buraya `None` ile gelmek
         // "ölçeği hiç söylemeden glyph çizmek" demek; sessizce @1x bir atlas
         // uydurmak yerine kare düşer.
-        let doku = atlas.as_mut().ok_or(GpuError::NoAtlas)?;
-        doku.hazirla(&self.device, glyphs)?;
-        // audit: `hazirla` `Ok` döndüyse dokuyu kurmuştur; tek çıkış yolu `?`.
-        let atlas_texture = doku.texture.as_ref().expect("hazirla dokuyu kurdu");
-        let instances = &doku.instances;
+        let atlas_tex = atlas.as_mut().ok_or(GpuError::NoAtlas)?;
+        atlas_tex.prepare(&self.device, glyphs)?;
+        // audit: `prepare` `Ok` döndüyse dokuyu kurmuştur; tek çıkış yolu `?`.
+        let atlas_texture = atlas_tex.texture.as_ref().expect("hazirla dokuyu kurdu");
+        let instances = &atlas_tex.instances;
 
         // Düzen `GlyphInstance`'ın `offset_of` assert'leriyle `cell.metal`'e bağlı.
-        let buffer = self.instans_tamponu(instances)?;
+        let buffer = self.instance_buffer(instances)?;
 
         // Hücre boyutu **karenin** (`Frame::clear`), uv boyutu **atlasın**.
         // İkisi normalde aynı ölçekten doğar; ayrıştıkları tek pencere ölçek
@@ -516,8 +516,8 @@ impl Renderer {
         // atlastan **alınamaz**: konum da (`GlyphCell::pos`), altındaki arka
         // plan da karenin ölçüsünden doğuyor ve yalnız boyu atlasa bağlamak
         // glyph'i hücresinden kaydırırdı.
-        let (cw, ch) = doku.atlas.metrics().cell_px;
-        let (tw, th) = doku.atlas.texture_px();
+        let (cw, ch) = atlas_tex.atlas.metrics().cell_px;
+        let (tw, th) = atlas_tex.atlas.texture_px();
         let uv_size: [f32; 2] = [f32::from(cw) / f32::from(tw), f32::from(ch) / f32::from(th)];
 
         enc.setRenderPipelineState(&self.cell);
@@ -558,30 +558,30 @@ fn vertex_uniform<T>(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, value: &
 /// Pipeline'ın karıştırma durumu.
 enum Blend {
     /// Opak: kaynak hedefin üstüne yazar.
-    Yok,
+    Opaque,
     /// Ön çarpımsız alfa; `cell.metal` alfayı atlasın kapsamasından üretiyor.
-    Alfa,
+    Alpha,
 }
 
 /// Bir vertex/fragment çiftinden render pipeline.
 ///
-/// Adlar **ayrı ayrı** parametre, `{ad}_vertex` diye türetilmiyor: hata
+/// Adlar **ayrı ayrı** parametre, `{name}_vertex` diye türetilmiyor: hata
 /// varyantı eksik sembolün kendisini taşıyor ve türetilmiş bir ad "ikisinden
 /// biri" demekle yetinirdi — metallib'de hangisinin olmadığını okuyanın
 /// aramasına bırakırdı.
 fn pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     library: &ProtocolObject<dyn MTLLibrary>,
-    vs_ad: &'static str,
-    fs_ad: &'static str,
+    vs_name: &'static str,
+    fs_name: &'static str,
     blend: Blend,
 ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, GpuError> {
     let vs = library
-        .newFunctionWithName(&NSString::from_str(vs_ad))
-        .ok_or(GpuError::MissingFunction(vs_ad))?;
+        .newFunctionWithName(&NSString::from_str(vs_name))
+        .ok_or(GpuError::MissingFunction(vs_name))?;
     let fs = library
-        .newFunctionWithName(&NSString::from_str(fs_ad))
-        .ok_or(GpuError::MissingFunction(fs_ad))?;
+        .newFunctionWithName(&NSString::from_str(fs_name))
+        .ok_or(GpuError::MissingFunction(fs_name))?;
 
     let desc = MTLRenderPipelineDescriptor::new();
     desc.setVertexFunction(Some(&vs));
@@ -589,7 +589,7 @@ fn pipeline(
     // SAFETY: indeks 0 her render pipeline'da vardır.
     let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
     att.setPixelFormat(Renderer::PIXEL_FORMAT);
-    if let Blend::Alfa = blend {
+    if let Blend::Alpha = blend {
         att.setBlendingEnabled(true);
         att.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
         att.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
@@ -609,12 +609,12 @@ fn pipeline(
         .map_err(GpuError::Pipeline)
 }
 
-impl AtlasDoku {
+impl AtlasTexture {
     /// Dokuyu (gerekirse) kurar, eksik yuvaları yükler ve `instances`'ı bu
     /// karenin glyph'leriyle doldurur — hepsi **tek** ödünç altında.
     ///
     /// **Bilinen sınır — `replaceRegion` uçuşta okunan dokuya yazıyor.**
-    /// Izgara değişimi güvenli (`atlasi_esitle` dokuyu düşürür, burada yenisi
+    /// Izgara değişimi güvenli (`sync_atlas` dokuyu düşürür, burada yenisi
     /// doğar, eskisini komut tamponu kendi referansıyla yaşatır). Güvenli
     /// **olmayan**, aynı doku canlıyken yeni bir yuvanın yazılması: yuvaların
     /// ayrık olması yetmiyor, çünkü doku düzeni doğrusal değil ve bir yuvaya
@@ -624,7 +624,7 @@ impl AtlasDoku {
     /// bozuk çizilebilir. Doğru biçimi bir staging tamponu + aynı komut
     /// tamponunda blit encoder'ı (Metal'in kendi hazard takibi sıralar);
     /// bu sette yapılmadı, `## Uygulama Notları`'na geçti.
-    fn hazirla(
+    fn prepare(
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
         glyphs: &[GlyphCell],
@@ -632,17 +632,17 @@ impl AtlasDoku {
         let metrics = self.atlas.metrics();
         let (tw, th) = self.atlas.texture_px();
         if self.texture.is_none() {
-            let yeni = atlas_dokusu(device, tw, th)?;
+            let texture = new_atlas_texture(device, tw, th)?;
             // Rezident tofu bir kez yazılır ve bir daha dokunulmaz:
             // `Atlas::slot` tofu'ya düştüğünde bitmap **vermiyor**, çünkü veri
             // zaten burada.
-            yukle(
-                &yeni,
+            upload_slot(
+                &texture,
                 self.atlas.slot_origin(TOFU),
                 metrics,
                 self.atlas.tofu_bitmap(),
             );
-            self.texture = Some(yeni);
+            self.texture = Some(texture);
         }
         // audit: hemen üstte kuruldu ya da zaten doluydu. `match` ile
         // kurtulunamıyor: `None` kolunda dokuyu kurup aynı ödünçten geri
@@ -656,7 +656,7 @@ impl AtlasDoku {
         for glyph in glyphs {
             // Yüz phase-3'te geliyor; bu phase yalnız `slot`'un imza
             // değişimini karşılıyor.
-            let (yuva, upload) = self.atlas.slot(Sprite::Char(glyph.ch), Face::Regular);
+            let (slot, upload) = self.atlas.slot(Sprite::Char(glyph.ch), Face::Regular);
             // `Upload` köşeyi zaten taşıyor — `bt-atlas` ikisini bilerek aynı
             // dönüşte veriyor. Yeni yuvada onu kullanmak hem glyph başına bir
             // `%` + `/` çiftini düşürüyor hem de aynı olguyu iki ayrı ifadeyle
@@ -664,10 +664,10 @@ impl AtlasDoku {
             // kalıyor. (`upload` atlası ödünç alıyor; `if let` onu tüketince
             // ödünç bitiyor ve atlas yeniden sorulabiliyor.)
             let (x, y) = if let Some(upload) = upload {
-                yukle(texture, upload.origin, metrics, upload.bytes);
+                upload_slot(texture, upload.origin, metrics, upload.bytes);
                 upload.origin
             } else {
-                self.atlas.slot_origin(yuva)
+                self.atlas.slot_origin(slot)
             };
             self.instances.push(GlyphInstance {
                 pos: glyph.pos,
@@ -686,17 +686,17 @@ impl AtlasDoku {
 /// kazancını taşımaz. Apple silicon'da bellek zaten tek; ayrık GPU'lu
 /// makinede bedeli örneklemede bir kopya olur ve karar `/measure` sonrası
 /// yeniden bakılacak bir yer.
-fn atlas_dokusu(
+fn new_atlas_texture(
     device: &ProtocolObject<dyn MTLDevice>,
-    genislik: u16,
-    yukseklik: u16,
+    width: u16,
+    height: u16,
 ) -> Result<Retained<ProtocolObject<dyn MTLTexture>>, GpuError> {
     // SAFETY: sınıf metodu, argümanlar değer tipleri.
     let desc = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
             MTLPixelFormat::R8Unorm,
-            usize::from(genislik),
-            usize::from(yukseklik),
+            usize::from(width),
+            usize::from(height),
             false,
         )
     };
@@ -708,7 +708,7 @@ fn atlas_dokusu(
 }
 
 /// Tam bir yuvayı dokuya yazar.
-fn yukle(
+fn upload_slot(
     texture: &ProtocolObject<dyn MTLTexture>,
     origin: (u16, u16),
     metrics: Metrics,
@@ -761,7 +761,7 @@ mod tests {
     use super::*;
 
     /// Yalnız arka planı olan hücre; `ch: None` glyph üretmez.
-    fn arka_plan(col: u16, row: u16, bg: LinearRgba) -> Cell {
+    fn bg_cell(col: u16, row: u16, bg: LinearRgba) -> Cell {
         Cell {
             col,
             row,
@@ -772,31 +772,31 @@ mod tests {
     }
 
     #[test]
-    fn metallib_gomulu_ve_gecerli() {
+    fn metallib_is_embedded_and_valid() {
         // Metal kütüphanesi dosyası "MTLB" sihirli sayısıyla başlar.
         assert_eq!(&METALLIB[..4], b"MTLB");
     }
 
     #[test]
-    fn iki_olcek_iki_metrik_verir() {
+    fn two_scales_give_two_metrics() {
         // Ölçek önbellek anahtarının parçası (`plan.md` → R1.2) ve metrik o
         // anahtarın gözle görülür ucu: @2x'te hücre büyümezse atlas ölçeği
         // yutuyor demektir ve glyph'ler hatasız bulanıklaşır.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
-        let bir = r.cell_metrics(1.0);
-        let iki = r.cell_metrics(2.0);
+        let one = r.cell_metrics(1.0);
+        let two = r.cell_metrics(2.0);
         assert!(
-            iki.cell_px().0 > bir.cell_px().0 && iki.cell_px().1 > bir.cell_px().1,
-            "@2x hücre @1x'ten büyük olmalı: {bir:?} → {iki:?}"
+            two.cell_px().0 > one.cell_px().0 && two.cell_px().1 > one.cell_px().1,
+            "@2x hücre @1x'ten büyük olmalı: {one:?} → {two:?}"
         );
         // Geri dönüş de çalışmalı: `ensure` tek yönlü bir kapı değil. Yoksa
         // harici ekran çıkarıldığında metrik @2x'te takılı kalır ve pencere
         // yarı yarıya az hücre gösterirdi.
-        assert_eq!(r.cell_metrics(1.0), bir, "aynı ölçek aynı metriği verir");
+        assert_eq!(r.cell_metrics(1.0), one, "aynı ölçek aynı metriği verir");
     }
 
     #[test]
-    fn sifir_bilesenli_olcu_kurulamaz() {
+    fn zero_component_metrics_cannot_be_built() {
         // Tipin taşıdığı tek garanti bu. Düşerse `bt-shell`'in bölmesi
         // `inf` verir, `inf as u16` 65535 eder ve `Session::resize`'ın sıfır
         // kapısına takılmadan 65535×65535'lik bir `TIOCSWINSZ` geçer.
@@ -806,9 +806,9 @@ mod tests {
     }
 
     #[test]
-    fn hucre_olcusu_hic_sifir_olmaz() {
+    fn cell_metrics_are_never_zero() {
         // `bt-shell` bu iki sayıyı **bölen** olarak kullanıyor. Garantiyi
-        // `bt-atlas` veriyor (`font::yukari` 1'e kırpar) ve `CellMetrics`'in
+        // `bt-atlas` veriyor (`font::round_up` 1'e kırpar) ve `CellMetrics`'in
         // private alanı onu sınırın bu tarafında yapısal kılıyor; bu sınama
         // kaynaktaki kırpmanın hâlâ yerinde olduğunu söylüyor.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
@@ -819,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_bg_pipeline_kurulur() {
+    fn cell_bg_pipeline_builds() {
         // Device yoksa `ignored` değil açık hata: bu makinede Metal var,
         // yokluğu bir kusurdur. Pipeline'ın kurulması shader'ın derlendiğini
         // ve fonksiyon adlarının metallib'de bulunduğunu kanıtlar.
@@ -829,7 +829,7 @@ mod tests {
 
     /// Sınama için küçük bir offscreen render hedefi; `Shared` depolama
     /// `getBytes` ile CPU'dan okumaya izin verir.
-    fn hedef_doku(r: &Renderer, kenar: usize) -> Retained<ProtocolObject<dyn MTLTexture>> {
+    fn target_texture(r: &Renderer, edge: usize) -> Retained<ProtocolObject<dyn MTLTexture>> {
         let desc = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
                 // Formatı `Renderer`'dan: pipeline hangi formata derlendiyse
@@ -837,8 +837,8 @@ mod tests {
                 // değil Metal doğrulama istisnasıyla düşerdi — ve istisna
                 // sınamanın ne aradığını hiç söylemez.
                 Renderer::PIXEL_FORMAT,
-                kenar,
-                kenar,
+                edge,
+                edge,
                 false,
             )
         };
@@ -850,36 +850,36 @@ mod tests {
     }
 
     /// Dokunun tamamını CPU'ya okur.
-    fn pikselleri_oku(texture: &ProtocolObject<dyn MTLTexture>, kenar: usize) -> Vec<u8> {
-        let mut pikseller = vec![0u8; kenar * kenar * 4];
+    fn read_pixels(texture: &ProtocolObject<dyn MTLTexture>, edge: usize) -> Vec<u8> {
+        let mut pixels = vec![0u8; edge * edge * 4];
         // SAFETY: tampon kenar×kenar×4 bayt, bölge dokunun tamamı, satır
         // adımı kenar*4. Doku `StorageModeShared` ve komut tamponu tamamlandı.
         unsafe {
             texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
-                NonNull::new(pikseller.as_mut_ptr()).expect("tampon").cast(),
-                kenar * 4,
+                NonNull::new(pixels.as_mut_ptr()).expect("tampon").cast(),
+                edge * 4,
                 MTLRegion {
                     origin: MTLOrigin { x: 0, y: 0, z: 0 },
                     size: MTLSize {
-                        width: kenar,
-                        height: kenar,
+                        width: edge,
+                        height: edge,
                         depth: 1,
                     },
                 },
                 0,
             );
         }
-        pikseller
+        pixels
     }
 
     /// Bayt sırası B, G, R, A (formatın `_sRGB` eki sırayı değiştirmez).
-    fn oku(pikseller: &[u8], kenar: usize, x: usize, y: usize) -> (u8, u8, u8) {
-        let i = (y * kenar + x) * 4;
-        (pikseller[i + 2], pikseller[i + 1], pikseller[i])
+    fn pixel_at(pixels: &[u8], edge: usize, x: usize, y: usize) -> (u8, u8, u8) {
+        let i = (y * edge + x) * 4;
+        (pixels[i + 2], pixels[i + 1], pixels[i])
     }
 
     #[test]
-    fn tamamlanma_blogu_kareyi_sayar_ve_sonucu_iletir() {
+    fn completion_block_counts_frame_and_reports_result() {
         // `frames()`'in anlamı bu phase'de değişti: "commit edildi" değil,
         // "GPU hatasız bitirdi". O anlamı yalnız `make duman` görüyordu ve
         // orası "> 0" diye soruyor — sayacın hiç artmaması yeşil geçerdi.
@@ -889,10 +889,10 @@ mod tests {
         // zaman aşımı), o dal burada koşmuyor — sınama adının bunu iddia
         // etmemesi de bu yüzden.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
-        let gorulen = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let completion = {
-            let gorulen = Arc::clone(&gorulen);
-            r.completion(move |sonuc| gorulen.lock().unwrap().push(sonuc.is_ok()))
+            let seen = Arc::clone(&seen);
+            r.completion(move |result| seen.lock().unwrap().push(result.is_ok()))
         };
 
         let cmd = r.queue.commandBuffer().expect("komut tamponu");
@@ -903,11 +903,11 @@ mod tests {
         cmd.waitUntilCompleted();
 
         assert_eq!(r.frames(), 1, "hatasız biten kare sayılmalı");
-        assert_eq!(*gorulen.lock().unwrap(), vec![true]);
+        assert_eq!(*seen.lock().unwrap(), vec![true]);
     }
 
     #[test]
-    fn cell_bg_pikseli_gpu_tarafinda_boyar() {
+    fn cell_bg_paints_pixels_on_the_gpu() {
         // Bu sınama, phase-2'nin sildiği "çizim çağrısı pipeline'dan geçti"
         // kanıtının yerine geçiyor ve daha fazlasını söylüyor: buffer
         // indeksleri, NDC dönüşümü, y ters çevirme, instance stride'ı ve
@@ -915,8 +915,8 @@ mod tests {
         // düzeni derleme zamanında bağlar ama hiçbir zaman ÇALIŞTIRMAZ;
         // burası çalıştırıyor. Pencere gerekmediği için başsız ortamda da koşar.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
-        const KENAR: usize = 16;
-        let texture = hedef_doku(&r, KENAR);
+        const EDGE: usize = 16;
+        let texture = target_texture(&r, EDGE);
 
         // 8×8 hücre, viewport 16×16 → dört çeyrek. Sol üstte kırmızı, sağ
         // altta yeşil, sol altta paletin arka planı, sağ üst boş. İki instance
@@ -930,9 +930,9 @@ mod tests {
         // lineerleştirme olsa da olmasa da aynı baytı verir.
         let mut frame = Frame::default();
         frame.clear((8, 8));
-        frame.push(arka_plan(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
-        frame.push(arka_plan(1, 1, LinearRgba::from_srgb(0x00, 0xff, 0x00)));
-        frame.push(arka_plan(0, 1, bt_core::DEFAULT_BG));
+        frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
+        frame.push(bg_cell(1, 1, LinearRgba::from_srgb(0x00, 0xff, 0x00)));
+        frame.push(bg_cell(0, 1, bt_core::DEFAULT_BG));
 
         // Clear rengi de **ara ton**, ve bilerek paletten: üretimde pencerenin
         // görünen zemininin tamamı bu yoldan geliyor (`frame()` varsayılan
@@ -953,36 +953,36 @@ mod tests {
         cmd.waitUntilCompleted();
         assert_ne!(cmd.status(), MTLCommandBufferStatus::Error);
 
-        let pikseller = pikselleri_oku(&texture, KENAR);
-        let piksel = |x: usize, y: usize| oku(&pikseller, KENAR, x, y);
-        assert_eq!(piksel(2, 2), (255, 0, 0), "ilk hücre sol üstte kırmızı");
-        assert_eq!(piksel(12, 12), (0, 255, 0), "ikinci hücre sağ altta yeşil");
+        let pixels = read_pixels(&texture, EDGE);
+        let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
+        assert_eq!(pixel(2, 2), (255, 0, 0), "ilk hücre sol üstte kırmızı");
+        assert_eq!(pixel(12, 12), (0, 255, 0), "ikinci hücre sağ altta yeşil");
         // Paletin baytları burada elle yazılı (`BG` ve `CURSOR` `bt-core`'da
         // private). Tema modeli geldiğinde bu üçlüler onunla birlikte
         // güncellenir; bugün onları kaynağa bağlayacak bir `pub` yol yok.
-        let yakin = |gorulen: (u8, u8, u8), beklenen: (u8, u8, u8), ne: &str| {
+        let close_to = |seen: (u8, u8, u8), expected: (u8, u8, u8), what: &str| {
             // ±1: 8-bit sRGB kodlaması yuvarlama taşır ve Metal spec'i bit
             // birebirlik değil doğruluk sınırı verir. Bit aransaydı kapı
             // sürücü sürümüne rehin olurdu.
             assert!(
-                gorulen.0.abs_diff(beklenen.0) <= 1
-                    && gorulen.1.abs_diff(beklenen.1) <= 1
-                    && gorulen.2.abs_diff(beklenen.2) <= 1,
-                "{ne}: {gorulen:02x?} ≠ {beklenen:02x?}"
+                seen.0.abs_diff(expected.0) <= 1
+                    && seen.1.abs_diff(expected.1) <= 1
+                    && seen.2.abs_diff(expected.2) <= 1,
+                "{what}: {seen:02x?} ≠ {expected:02x?}"
             );
         };
-        // sRGB round-trip: `lineer_rgba`'nın lineerleştirmesi ile donanımın
+        // sRGB round-trip: `linear_rgba`'nın lineerleştirmesi ile donanımın
         // yazarken yaptığı kodlama birbirini tersine çevirmeli, yani ekrana
         // giden bayt paletin yazıldığı bayt olmalı. Lineerleştirme düşerse
         // `0x1a1c21` `0x5a5d65` griye açılır — geçişin sessiz kalabileceği
         // tek yer burasıydı; saf kırmızı ve yeşil bunu göremez, ikisi de
         // sRGB transfer fonksiyonunun sabit noktaları.
-        yakin(piksel(2, 12), (0x1a, 0x1c, 0x21), "hücre ara tonu");
-        yakin(piksel(12, 2), (0x7a, 0x9c, 0xc6), "boş çeyrek clear rengi");
+        close_to(pixel(2, 12), (0x1a, 0x1c, 0x21), "hücre ara tonu");
+        close_to(pixel(12, 2), (0x7a, 0x9c, 0xc6), "boş çeyrek clear rengi");
     }
 
     #[test]
-    fn glif_hucrenin_icini_arka_planindan_ayirir() {
+    fn glyph_differs_from_cell_background() {
         // `make duman`'ın `glif=G` jetonu bir CPU sayacı: atlas boş ve glyph
         // pipeline'ı hiç çizmese bile G > 0 basardı. GPU tarafını kanıtlayan
         // yer burası — ve **tam bayt aranmıyor**: hücrenin içi arka planıyla
@@ -995,12 +995,12 @@ mod tests {
         // çizmek yerine. Hücre boyutu da atlasınkiyle aynı olsun ki yuva
         // dörtlüye birebir otursun.
         let (cw, ch) = r.cell_metrics(1.0).cell_px();
-        const KENAR: usize = 64;
+        const EDGE: usize = 64;
         assert!(
-            usize::from(cw) <= KENAR && usize::from(ch) <= KENAR,
+            usize::from(cw) <= EDGE && usize::from(ch) <= EDGE,
             "hücre {cw}×{ch} offscreen dokuya sığmıyor"
         );
-        let texture = hedef_doku(&r, KENAR);
+        let texture = target_texture(&r, EDGE);
 
         // Saf kırmızı arka plan üstüne beyaz `M` ve `.`: ikisi de doygun,
         // aradaki fark kapsama neyse o.
@@ -1012,17 +1012,17 @@ mod tests {
         // rengi taşıyor" iddialarının üçü de geçerdi. İki farklı yuvanın iki
         // farklı şey çizdiğini sormak o kapıyı kapatıyor: `M` hücreyi
         // doldurur, `.` yalnız tabanına küçük bir nokta koyar.
-        let kirmizi = LinearRgba::from_srgb(0xff, 0x00, 0x00);
-        let beyaz = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let white = LinearRgba::from_srgb(0xff, 0xff, 0xff);
         let mut frame = Frame::default();
         frame.clear((cw, ch));
-        for (col, glif) in [(0u16, 'M'), (1, '.')] {
+        for (col, glyph) in [(0u16, 'M'), (1, '.')] {
             frame.push(Cell {
                 col,
                 row: 0,
-                ch: Some(glif),
-                fg: beyaz,
-                bg: Some(kirmizi),
+                ch: Some(glyph),
+                fg: white,
+                bg: Some(red),
             });
         }
         assert_eq!(frame.glyph_count(), 2);
@@ -1034,59 +1034,59 @@ mod tests {
         cmd.waitUntilCompleted();
         assert_ne!(cmd.status(), MTLCommandBufferStatus::Error);
 
-        let pikseller = pikselleri_oku(&texture, KENAR);
-        let hucre = |col: usize| -> Vec<(u8, u8, u8)> {
+        let pixels = read_pixels(&texture, EDGE);
+        let cell_pixels = |col: usize| -> Vec<(u8, u8, u8)> {
             (0..usize::from(ch))
                 .flat_map(|y| (0..usize::from(cw)).map(move |x| (x, y)))
-                .map(|(x, y)| oku(&pikseller, KENAR, col * usize::from(cw) + x, y))
+                .map(|(x, y)| pixel_at(&pixels, EDGE, col * usize::from(cw) + x, y))
                 .collect()
         };
-        let (m, nokta) = (hucre(0), hucre(1));
+        let (m, dot) = (cell_pixels(0), cell_pixels(1));
 
         // Dört iddia, dört ayrı hata: arka plan hâlâ görünür (glyph dörtlüsü
         // hücreyi tümden boyamadı), en az bir piksel ondan farklı (glyph
         // gerçekten çizildi), farkın yönü ön plan rengi (kırmızının yeşili
         // yok, beyazınki var — yani fark `rgba`'dan geliyor, rastgele bir
         // çöpten değil) ve iki yuva iki farklı şey çiziyor (uv aritmetiği).
-        let arka = (0xff, 0x00, 0x00);
+        let bg = (0xff, 0x00, 0x00);
         assert!(
-            m.contains(&arka),
+            m.contains(&bg),
             "hücrenin içinde hiç arka plan kalmadı: {m:?}"
         );
         assert!(
-            m.iter().any(|&p| p != arka),
+            m.iter().any(|&p| p != bg),
             "hücrenin içi arka planla tekdüze: glyph çizilmedi"
         );
         assert!(
             m.iter().any(|&(_, g, _)| g > 0),
             "farklı piksel var ama ön plan rengi taşımıyor"
         );
-        assert_ne!(m, nokta, "iki yuva aynı şeyi çizdi: uv yuvaya bağlı değil");
+        assert_ne!(m, dot, "iki yuva aynı şeyi çizdi: uv yuvaya bağlı değil");
 
         // Alfa: fragment ön çarpımsız veriyor ve blend'in **alfa** çarpanı
         // `One` olmak zorunda. `SourceAlpha` olsaydı yarı kapsamalı kenarda
         // hedefin alfası 1'den düşerdi; `CAMetalLayer` opak olmadığı için
         // compositor o deliği onurlandırır ve harf kenarından pencerenin
         // arkası sızardı. Hiçbir renk iddiası bunu göremez.
-        let alfalar: Vec<u8> = (0..usize::from(ch))
+        let alphas: Vec<u8> = (0..usize::from(ch))
             .flat_map(|y| (0..usize::from(cw)).map(move |x| (x, y)))
-            .map(|(x, y)| pikseller[(y * KENAR + x) * 4 + 3])
+            .map(|(x, y)| pixels[(y * EDGE + x) * 4 + 3])
             .collect();
         assert!(
-            alfalar.iter().all(|&a| a == 0xff),
-            "glyph kenarında alfa deliği: {alfalar:?}"
+            alphas.iter().all(|&a| a == 0xff),
+            "glyph kenarında alfa deliği: {alphas:?}"
         );
     }
 
     #[test]
-    fn atlassiz_renderer_glif_cizmeyi_reddeder() {
+    fn renderer_without_atlas_refuses_glyphs() {
         // "Önce metriği sor" sözleşmesinin sınanabilir hâli. `Renderer`
         // atlası `None` doğuyor; ölçeği hiç söylemeden glyph çizen bir yol
         // sessizce @1x çizmek yerine kareyi düşürmeli. Sessiz olsaydı belirti
         // "retina makinede harfler yarım boy" olurdu ve hiçbir sınama görmezdi.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
-        const KENAR: usize = 32;
-        let texture = hedef_doku(&r, KENAR);
+        const EDGE: usize = 32;
+        let texture = target_texture(&r, EDGE);
 
         let mut frame = Frame::default();
         frame.clear((8, 16));
@@ -1099,10 +1099,10 @@ mod tests {
         });
 
         let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        let sonuc = r.encode_pass(&cmd, &texture, bt_core::DEFAULT_BG, &frame);
+        let result = r.encode_pass(&cmd, &texture, bt_core::DEFAULT_BG, &frame);
         assert!(
-            matches!(sonuc, Err(GpuError::NoAtlas)),
-            "atlassız kare sessizce geçti: {sonuc:?}"
+            matches!(result, Err(GpuError::NoAtlas)),
+            "atlassız kare sessizce geçti: {result:?}"
         );
         // Encoder yine de kapandı: hata `?` ile erken dönmüyor, yoksa Metal
         // "released without endEncoding" ile süreci öldürürdü.

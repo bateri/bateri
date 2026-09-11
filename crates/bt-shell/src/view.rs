@@ -1,7 +1,7 @@
 //! Pencerenin içeriği: `CAMetalLayer`'ı taşıyan ve klavyeyi PTY'ye akıtan view.
 //!
 //! Çizim burada **yok** — layer'ın içeriğini `bt-gpu` doldurur. Bu sınıfın tek
-//! işi first responder olmak ve tuş vuruşunu [`crate::keys::kod_cevir`]'e
+//! işi first responder olmak ve tuş vuruşunu [`crate::keys::encode_key`]'e
 //! verip çıkan baytları oturuma yazmak.
 
 use std::cell::OnceCell;
@@ -13,7 +13,7 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
 use objc2_foundation::{NSObjectProtocol, NSRect};
 
-use crate::keys::kod_cevir;
+use crate::keys::encode_key;
 
 pub(crate) struct ViewIvars {
     /// View, oturumdan **önce** doğmak zorunda: grid ölçüsü contentView'ın
@@ -67,7 +67,7 @@ define_class!(
             };
             // `super`'e geçmiyoruz: `NSResponder::keyDown:` tanımadığı tuşta
             // beep çalar ve terminalde her ok tuşu bip sesi olurdu.
-            if let Some(bytes) = kod_cevir(&chars.to_string(), ctrl) {
+            if let Some(bytes) = encode_key(&chars.to_string(), ctrl) {
                 session.write(&bytes);
             }
         }
@@ -85,7 +85,7 @@ impl BateriView {
     }
 
     /// Oturumu bağlar; bu andan sonra tuşlar PTY'ye gider.
-    pub(crate) fn baglan(&self, session: Arc<Session>) {
+    pub(crate) fn attach(&self, session: Arc<Session>) {
         // İkinci çağrı sessizce düşseydi tuşlar eski oturuma giderdi ve
         // pencere yazmıyor gibi görünürdü — tek satır iz bile bırakmadan.
         assert!(

@@ -53,7 +53,7 @@ struct WakerInner {
     /// referans hep ana thread'de kalır.
     link: MainThreadBound<Retained<CAMetalDisplayLink>>,
     /// Kare çizilir mi, ritim döner mi.
-    kapi: Kapi,
+    gate: Gate,
     /// Ana kuyrukta bekleyen bir "aç" işi var mı.
     ///
     /// Kareler zaten birleşiyordu, **dispatch'ler birleşmiyordu**: alacritty
@@ -62,7 +62,7 @@ struct WakerInner {
     /// kapanış kutulaması, bir kuyruk girişi ve **ana thread'in uyandırılması**
     /// demekti — hepsi aynı idempotent `setPaused(false)` için. PTY yükü bu
     /// yolla doğrudan çizim thread'inin ritmine giriyordu.
-    bekleyen: AtomicBool,
+    pending: AtomicBool,
 }
 
 impl Waker {
@@ -72,43 +72,43 @@ impl Waker {
     /// Uçuşta bir iş varken gelen uyandırmalar **dispatch** düzeyinde düşer ve
     /// bu kayıpsızdır: bayrak her çağrıda dikilir, düşen uyandırma da bayrağı
     /// henüz `setPaused(false)` yapmamış bir bloğun önüne düşer (blok sırayı
-    /// `bekleyen` → `setPaused` diye kuruyor), yani link her hâlükârda açılır.
+    /// `pending` → `setPaused` diye kuruyor), yani link her hâlükârda açılır.
     pub fn wake(&self) {
         // Hasar HER ZAMAN dikilir; görünmezken yalnız link açılmaz. Bayrak
         // tüketilmediği için görünürlük dönünce birikmiş hasar çizilir.
         self.inner.dirty.mark();
-        if !self.inner.kapi.acik() {
+        if !self.inner.gate.is_open() {
             return;
         }
-        if self.inner.bekleyen.swap(true, Ordering::AcqRel) {
+        if self.inner.pending.swap(true, Ordering::AcqRel) {
             return;
         }
         let inner = Arc::clone(&self.inner);
         DispatchQueue::main().exec_async(move || {
             // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            inner.bekleyen.store(false, Ordering::Release);
+            inner.pending.store(false, Ordering::Release);
             // Kapı **burada da** okunuyor: bu blok kuyruğa girdikten sonra
             // pencere örtülmüş ya da link durdurulmuş olabilir. Okumasaydı
             // link bir kez açılır, bir vsync callback'i ve bir drawable
             // ödenirdi — ve `stop()` sonrası bu, `invalidate`'in ardından
             // gelen `setPaused(false)`'un etkisiz olduğu varsayımına
             // dayanmak olurdu; kodun geri kalanı o varsayımı bilerek yapmıyor.
-            if !inner.kapi.acik() {
+            if !inner.gate.is_open() {
                 return;
             }
             inner.link.get(mtm).setPaused(false);
         });
     }
 
-    fn kapi(&self) -> &Kapi {
-        &self.inner.kapi
+    fn gate(&self) -> &Gate {
+        &self.inner.gate
     }
 }
 
 /// Kare istemenin açık/kapalı kapısı — **durma politikasının tamamı**.
 ///
-/// `Ardisik` gibi ayrı bir tip ve aynı sebeple: ObjC'siz, kilitsiz ve
+/// `FailureStreak` gibi ayrı bir tip ve aynı sebeple: ObjC'siz, kilitsiz ve
 /// platformsuz olduğu için sınanabilir; `Waker`'a gömülü kalsaydı yalnız
 /// gerçek bir pencereyle denenebilirdi.
 ///
@@ -118,48 +118,48 @@ impl Waker {
 /// yatırırdı — kare çizilmez ama her vsync'te bir ana thread callback'i ve
 /// `CAMetalDisplayLink`'in callback'ten önce aldığı bir drawable ödenir.
 /// Çizim durur, ritim durmaz; sözleşmenin harfi kalır, ruhu gider.
-struct Kapi {
+struct Gate {
     /// Pencere görünür mü. İki yönlü: `windowDidChangeOcclusionState:` hem
     /// örtülmeyi hem geri dönmeyi bildirir.
-    acik: AtomicBool,
+    open: AtomicBool,
     /// Kalıcı durdurma mandalı — bir kez iner, bir daha kalkmaz.
     ///
-    /// `acik = false` ile aynı şey **değil**: kapanışta pencere delegate'i
-    /// sökülmüyor, yani `kapat()`'tan sonra düşen bir görünürlük bildirimi
+    /// `open = false` ile aynı şey **değil**: kapanışta pencere delegate'i
+    /// sökülmüyor, yani `shutdown()`'tan sonra düşen bir görünürlük bildirimi
     /// kapıyı geri açar ve bekleyen ana thread'e iş atılmaya devam ederdi.
-    durdu: AtomicBool,
+    stopped: AtomicBool,
 }
 
-impl Kapi {
-    fn yeni() -> Self {
+impl Gate {
+    fn new() -> Self {
         Self {
-            acik: AtomicBool::new(true),
-            durdu: AtomicBool::new(false),
+            open: AtomicBool::new(true),
+            stopped: AtomicBool::new(false),
         }
     }
 
     /// Mandal **okuma** tarafında sorgulanıyor, yazma tarafında değil: iki
-    /// bayrağı ayrı ayrı okuyup yazmak (`ayarla` mandalı görmez → `durdur`
-    /// koşar → `ayarla` kapıyı açar) durdurulmuş bir kapıyı geri açardı ve o
+    /// bayrağı ayrı ayrı okuyup yazmak (`set_open` mandalı görmez → `stop`
+    /// koşar → `set_open` kapıyı açar) durdurulmuş bir kapıyı geri açardı ve o
     /// yarış tam da mandalın var olma sebebini yok ederdi.
-    fn acik(&self) -> bool {
-        !self.durdu.load(Ordering::Acquire) && self.acik.load(Ordering::Acquire)
+    fn is_open(&self) -> bool {
+        !self.stopped.load(Ordering::Acquire) && self.open.load(Ordering::Acquire)
     }
 
-    fn durdu(&self) -> bool {
-        self.durdu.load(Ordering::Acquire)
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
     }
 
     /// Görünürlük bildirimi. Sıra önemli: `true`'ya geçerken bunu **önce**
     /// yazan taraf, hemen ardından gelen `request_frame`'in kapıdan geçmesini
     /// garanti eder.
-    fn ayarla(&self, acik: bool) {
-        self.acik.store(acik, Ordering::Release);
+    fn set_open(&self, open: bool) {
+        self.open.store(open, Ordering::Release);
     }
 
-    /// Mandalı indirir; bu andan sonra `ayarla` ne yazarsa yazsın kapı kapalı.
-    fn durdur(&self) {
-        self.durdu.store(true, Ordering::Release);
+    /// Mandalı indirir; bu andan sonra `set_open` ne yazarsa yazsın kapı kapalı.
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
     }
 }
 
@@ -173,16 +173,16 @@ impl Kapi {
 /// Durak artık tek: `needs_update`'in "hasar yok → uyu" dalı.
 struct Retry {
     waker: Waker,
-    ardisik: Ardisik,
+    streak: FailureStreak,
 }
 
 impl Retry {
     /// Kare çizilemedi. İlk hatada bir kare daha istenir; art arda
     /// ikincisinde **hiçbir şey yapılmaz** ve durak kendiliğinden devreye
-    /// girer (bkz. [`Ardisik`]).
-    fn cizilemedi(&self, e: &GpuError) {
+    /// girer (bkz. [`FailureStreak`]).
+    fn draw_failed(&self, e: &GpuError) {
         eprintln!("bateri: kare çizilemedi: {e}");
-        if self.ardisik.hata() {
+        if self.streak.failed() {
             self.waker.wake();
         }
     }
@@ -194,11 +194,11 @@ impl Retry {
 /// ObjC'siz, kilitsiz ve platformsuz; `Waker`'a gömülü kalsaydı yalnız
 /// gerçek bir pencereyle denenebilirdi.
 #[derive(Default)]
-struct Ardisik(AtomicU32);
+struct FailureStreak(AtomicU32);
 
-impl Ardisik {
+impl FailureStreak {
     /// Kare tamamlandı: bütçe geri verilir.
-    fn basarili(&self) {
+    fn succeeded(&self) {
         self.0.store(0, Ordering::Release);
     }
 
@@ -206,7 +206,7 @@ impl Ardisik {
     /// `false`: bayrak dikilmediği için sıradaki callback "hasar yok" bulur,
     /// link'i uyutur ve sıradaki `Wakeup` beklenir. Bu olmadan kalıcı bir
     /// hata "dik, dene, düş" döngüsünü tazeleme hızında sonsuza çevirirdi.
-    fn hata(&self) -> bool {
+    fn failed(&self) -> bool {
         self.0.fetch_add(1, Ordering::AcqRel) == 0
     }
 }
@@ -259,7 +259,7 @@ define_class!(
             // Görünmeyen pencereye çizmek boşa iş değil, pil sözleşmesinin
             // ihlali: örtülü pencerede konuşkan bir shell her tazelemede tam
             // bir kare çizdirirdi.
-            if !iv.waker.kapi().acik() {
+            if !iv.waker.gate().is_open() {
                 link.setPaused(true);
                 return;
             }
@@ -288,7 +288,7 @@ define_class!(
                 .renderer
                 .draw(&update.drawable(), DEFAULT_BG, &frame, &iv.completion)
             {
-                iv.retry.cizilemedi(&e);
+                iv.retry.draw_failed(&e);
             }
         }
     }
@@ -331,19 +331,19 @@ impl DisplayLink {
             inner: Arc::new(WakerInner {
                 dirty: session.dirty_flag(),
                 link: MainThreadBound::new(link.clone(), mtm),
-                kapi: Kapi::yeni(),
-                bekleyen: AtomicBool::new(false),
+                gate: Gate::new(),
+                pending: AtomicBool::new(false),
             }),
         };
         let retry = Arc::new(Retry {
             waker: waker.clone(),
-            ardisik: Ardisik::default(),
+            streak: FailureStreak::default(),
         });
         let completion = {
             let retry = Arc::clone(&retry);
-            renderer.completion(move |sonuc| match sonuc {
-                Ok(()) => retry.ardisik.basarili(),
-                Err(e) => retry.cizilemedi(&e),
+            renderer.completion(move |result| match result {
+                Ok(()) => retry.streak.succeeded(),
+                Err(e) => retry.draw_failed(&e),
             })
         };
         let delegate = LinkDelegate::new(
@@ -395,7 +395,7 @@ impl DisplayLink {
     /// diker). Görünürlük dönünce bir kare istenir — compositor örtülüyken
     /// layer içeriğini atmış olabilir, içerik aynı olsa da yeniden çizilmeli.
     pub fn set_visible(&self, visible: bool) {
-        self.waker.kapi().ayarla(visible);
+        self.waker.gate().set_open(visible);
         if visible {
             self.request_frame();
         } else {
@@ -405,7 +405,7 @@ impl DisplayLink {
 
     /// Ritmi **kalıcı olarak** keser: uyandırma mandalı iner, link durur ve
     /// run loop'tan çıkar. Geri dönüşü yok — `set_visible(true)` de artık
-    /// hiçbir şey yapmaz, ve bu bir söz değil `durdu` mandalının kendisi.
+    /// hiçbir şey yapmaz, ve bu bir söz değil `stopped` mandalının kendisi.
     ///
     /// Kapanış yolu bunu `Drop` yerine çağırır çünkü `DisplayLink`'in kendisi
     /// kapanış boyunca **yaşamak zorunda** (gerekçe `bt-shell`'in kapanış
@@ -416,10 +416,10 @@ impl DisplayLink {
         // `invalidate` Apple'ın belgelerinde tek atımlık bir sökme; ikinci kez
         // çağrılınca ne olduğu yazmıyor. İdempotentliği varsaymak yerine
         // mandalın kendisiyle sağlıyoruz — `Drop` de buradan geçiyor.
-        if self.waker.kapi().durdu() {
+        if self.waker.gate().is_stopped() {
             return;
         }
-        self.waker.kapi().durdur();
+        self.waker.gate().stop();
         self.link.setPaused(true);
         self.link.invalidate();
     }
@@ -463,36 +463,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn durdurulan_kapi_gorunurlukle_geri_acilmaz() {
+    fn stopped_gate_does_not_reopen_on_visibility() {
         // Kapanışta pencere delegate'i sökülmüyor: `stop()`'tan sonra düşen
         // bir `windowDidChangeOcclusionState:` kapıyı geri açsaydı, kapanışta
         // `shutdown()`'ın `join`'inde bekleyen ana thread'e iş atılmaya devam
         // ederdi. Mandal bunu koda bağlıyor, yorum cümlesine değil.
-        let kapi = Kapi::yeni();
-        assert!(kapi.acik(), "link görünür pencereyle doğar");
+        let gate = Gate::new();
+        assert!(gate.is_open(), "link görünür pencereyle doğar");
 
-        kapi.ayarla(false);
-        assert!(!kapi.acik(), "örtülen pencere kapıyı kapatır");
-        kapi.ayarla(true);
-        assert!(kapi.acik(), "örtülme kalkınca kapı geri açılır");
+        gate.set_open(false);
+        assert!(!gate.is_open(), "örtülen pencere kapıyı kapatır");
+        gate.set_open(true);
+        assert!(gate.is_open(), "örtülme kalkınca kapı geri açılır");
 
-        kapi.durdur();
-        assert!(!kapi.acik());
-        kapi.ayarla(true);
-        assert!(!kapi.acik(), "durdurulmuş kapı bildirimle geri açılmaz");
+        gate.stop();
+        assert!(!gate.is_open());
+        gate.set_open(true);
+        assert!(!gate.is_open(), "durdurulmuş kapı bildirimle geri açılmaz");
     }
 
     #[test]
-    fn durma_kosulu_art_arda_ikinci_hatada_devreye_girer() {
+    fn stop_condition_kicks_in_on_second_failure() {
         // Checklist'in "durma koşulu zorunlu" maddesi bu sınamayla bağlı:
         // kalıcı bir çizim hatası kare talebini tazeleme hızında tekrarlarsa
         // belirtisi yok, faturası pil. Politika burada, ObjC'siz.
-        let sayac = Ardisik::default();
-        assert!(sayac.hata(), "ilk hata bir kez daha denenir");
-        assert!(!sayac.hata(), "art arda ikinci hata kare talebini keser");
-        assert!(!sayac.hata(), "sonrası da kesik kalır");
+        let streak = FailureStreak::default();
+        assert!(streak.failed(), "ilk hata bir kez daha denenir");
+        assert!(!streak.failed(), "art arda ikinci hata kare talebini keser");
+        assert!(!streak.failed(), "sonrası da kesik kalır");
 
-        sayac.basarili();
-        assert!(sayac.hata(), "tamamlanan kare bütçeyi geri verir");
+        streak.succeeded();
+        assert!(streak.failed(), "tamamlanan kare bütçeyi geri verir");
     }
 }

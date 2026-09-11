@@ -59,7 +59,7 @@ pub struct Cell {
     pub fg: LinearRgba,
     /// `None` = varsayılan arka plan, çizilmez. `Frame` yalnız `Some`
     /// gördüğünde `bg_count`'u artırır: `hucre=K` jetonunun anlamı bit bit
-    /// korunur ve `sabit_shell_arka_plan_hucreleri_verir` oynamaz.
+    /// korunur ve `smoke_shell_yields_background_cells` oynamaz.
     pub bg: Option<LinearRgba>,
 }
 
@@ -122,8 +122,8 @@ impl DirtyFlag {
 /// `SIGHUP` gidiyor ve artakalan çocuk uyku bitene kadar yaşamıyor.
 ///
 /// Tek sahip olmasının sebebi sayıların kendisi: `make duman`'ın `hucre=8` ve
-/// `glif=6` beklentisi ile `sabit_shell_arka_plan_hucreleri_verir` /
-/// `sabit_shell_alti_glif_verir` sınamalarının 8'i ve 6'sı aynı betiğe bağlı.
+/// `glif=6` beklentisi ile `smoke_shell_yields_background_cells` /
+/// `smoke_shell_yields_six_glyphs` sınamalarının 8'i ve 6'sı aynı betiğe bağlı.
 /// İki yerde ayrı yazılsalardı biri değişip diğeri sessizce eski kalırdı — ve
 /// duman ikisini de yalnız "> 0" diye sorduğu için kimse fark etmezdi.
 /// Bu hâliyle sınamalar, uygulamanın gerçekten koştuğu betiği doğruluyor.
@@ -165,7 +165,7 @@ impl GridSize {
     /// `reversed.truncate(max_scroll_limit + lines)` ile geçmişin neredeyse
     /// tamamını atar; 80 sütuna dönmek onu geri getirmez. Dejenere boyut
     /// kırpılmaz, yoksayılır.
-    fn spawn_tabani(cols: u16, rows: u16) -> Self {
+    fn for_spawn(cols: u16, rows: u16) -> Self {
         Self {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
@@ -173,8 +173,8 @@ impl GridSize {
     }
 
     /// Kırpmadan. Çağıran dejenere boyutu zaten elemiş olmalı;
-    /// `spawn_tabani`'nin karşılığıdır ve `resize` bunu kullanır.
-    fn tam(cols: u16, rows: u16) -> Self {
+    /// `for_spawn`'nin karşılığıdır ve `resize` bunu kullanır.
+    fn exact(cols: u16, rows: u16) -> Self {
         Self {
             cols: cols as usize,
             rows: rows as usize,
@@ -271,7 +271,7 @@ impl EventListener for Adapter {
             // sahipliğinin alacritty'den bize geçmesi, yani 00X tema seti.
             Event::ColorRequest(index, format) => self.reply(format(color::default(index))),
             Event::TextAreaSizeRequest(format) => {
-                let size = *kilit(&self.0.size);
+                let size = *lock(&self.0.size);
                 self.reply(format(size));
             }
             // Başlık, zil ve pano bu sette yok; bilinmeyen dizi gibi sessizce
@@ -308,7 +308,7 @@ pub struct Session {
 impl Session {
     /// PTY'yi açar, shell'i başlatır ve okuyucu thread'i kurar.
     pub fn spawn(options: SessionOptions, wake: Arc<dyn Wake>) -> io::Result<Self> {
-        let grid = GridSize::spawn_tabani(options.cols, options.rows);
+        let grid = GridSize::for_spawn(options.cols, options.rows);
         let size = window_size(grid, options.cell_px);
 
         let pty_options = tty::Options {
@@ -407,7 +407,7 @@ impl Session {
         // Dördüncüsü boşluk karakterinin kendisi: bugün onun da mürekkebi yok.
         // 004'te değişecek olan tam burası — altı çizili bir boşluk `Some(' ')`
         // olacak ve tek dokunulacak satır aşağıdaki `then_some`.
-        const MUREKKEPSIZ: Flags = Flags::HIDDEN
+        const NO_INK: Flags = Flags::HIDDEN
             .union(Flags::WIDE_CHAR_SPACER)
             .union(Flags::LEADING_WIDE_CHAR_SPACER);
 
@@ -427,14 +427,14 @@ impl Session {
             // alacritty'nin ikili tarafında, kitaplıkta değil). İkisi
             // birleşince kural şu: sönüklük, `cell.fg`'den doğan renge gider —
             // ters videoda o renk arka plan olmuştur.
-            let mut arka = color::resolve(if inverse { cell.fg } else { cell.bg }, colors);
+            let mut back = color::resolve(if inverse { cell.fg } else { cell.bg }, colors);
             if inverse && dim {
-                arka = color::dim(arka);
+                back = color::dim(back);
             }
             // Varsayılan arka plan çizilmez; `None` onun adı.
-            let bg = (arka != color::BG_RGB).then(|| color::lineer_rgba(arka));
+            let bg = (back != color::BG_RGB).then(|| color::linear_rgba(back));
 
-            let ch = (!cell.flags.intersects(MUREKKEPSIZ) && cell.c != ' ').then_some(cell.c);
+            let ch = (!cell.flags.intersects(NO_INK) && cell.c != ' ').then_some(cell.c);
             // Atlama koşulu: ne boyanacak bir arka plan ne çizilecek bir
             // mürekkep. Boş grid'de bu koşul her hücreye uyar ve sink hiç
             // çağrılmaz — `frame()`'in boştaki maliyeti iterasyonun kendisi.
@@ -458,9 +458,9 @@ impl Session {
             // tamamı çizilmiyor. Koşulsuz: alan adının söylediği şey olmalı,
             // yoksa 004'ün kural çizgisi (`UNDERLINE`) mürekkepsiz bir
             // hücrede arka plan rengiyle çizilir, yani görünmez olurdu.
-            let mut on = color::resolve(if inverse { cell.bg } else { cell.fg }, colors);
+            let mut fore = color::resolve(if inverse { cell.bg } else { cell.fg }, colors);
             if !inverse && dim {
-                on = color::dim(on);
+                fore = color::dim(fore);
             }
 
             let col = indexed.point.column.0 as u16;
@@ -469,16 +469,16 @@ impl Session {
             // kalsaydı açık gri, açık mavi bloğun üstüne düşer ve okunmazdı.
             // Kararı `bt-core` veriyor çünkü kararın adı terminal
             // semantiğidir; `bt-gpu`'nun bileceği bir şey değil.
-            let on = if cursor.visible && (col, row) == (cursor.col, cursor.row) {
+            let fore = if cursor.visible && (col, row) == (cursor.col, cursor.row) {
                 color::BG_RGB
             } else {
-                on
+                fore
             };
             sink(Cell {
                 col,
                 row,
                 ch,
-                fg: color::lineer_rgba(on),
+                fg: color::linear_rgba(fore),
                 bg,
             });
         }
@@ -527,7 +527,7 @@ impl Session {
         if cols == 0 || rows == 0 {
             return false;
         }
-        let grid = GridSize::tam(cols, rows);
+        let grid = GridSize::exact(cols, rows);
         let size = window_size(grid, cell_px);
 
         // Ucuz kapı önce. Canlı boyutlandırmada `windowDidResize:`
@@ -535,8 +535,8 @@ impl Session {
         // `Term`'ün kilidi ise okuyucunun ayrıştırma lease'inin arkasında
         // bekleyebilir. Küçük kilitle eleyip oraya hiç girmiyoruz. Guard
         // `term`'den ÖNCE düşüyor, kilit sırası (term → size) bozulmuyor.
-        let degisti = !ayni_boyut(*kilit(&self.adapter.0.size), size);
-        if !degisti {
+        let changed = !same_size(*lock(&self.adapter.0.size), size);
+        if !changed {
             return false;
         }
 
@@ -546,14 +546,14 @@ impl Session {
         // Okuyucu thread de aynı sırayla (term → size) kilit alıyor,
         // kilitlenme yok; `send` kilitsizdir.
         let mut term = self.term.lock();
-        let mut onceki = kilit(&self.adapter.0.size);
+        let mut prev = lock(&self.adapter.0.size);
         // Ön kapıdan iki eşzamanlı resize birlikte geçebilir; ikincisi burada
         // yakalanır. Koşulsuz dikilen bayrak "boşta sıfır kare"yi delerdi.
-        if ayni_boyut(*onceki, size) {
+        if same_size(*prev, size) {
             return false;
         }
         term.resize(grid);
-        *onceki = size;
+        *prev = size;
         self.send(Msg::Resize(size));
         // Boyut değişimi grid'i değiştiren ama `Wakeup` üretmeyen tek yol,
         // bayrağı bu yüzden elle dikiyoruz. Uyandırmak çağıranın işi
@@ -574,7 +574,7 @@ impl Session {
     /// yolunda kurulur: etkileşimli kullanımda böyle bir çocuk uygulamayı
     /// gerçekten asar (bilinen sınır, `.tasks/002-vt-motoru/phase-4.md`).
     pub fn shutdown(&self) {
-        let Some(reader) = kilit(&self.reader).take() else {
+        let Some(reader) = lock(&self.reader).take() else {
             return;
         };
         self.send(Msg::Shutdown);
@@ -586,7 +586,7 @@ impl Session {
     /// Okuyucu thread hâlâ çalışıyor mu. `false` ya kapandığımız ya da
     /// shell'in öldüğü anlamına gelir.
     pub fn reader_alive(&self) -> bool {
-        kilit(&self.reader)
+        lock(&self.reader)
             .as_ref()
             .is_some_and(|reader| !reader.is_finished())
     }
@@ -613,7 +613,7 @@ impl Drop for Session {
 }
 
 /// `WindowSize` `PartialEq` türetmiyor; dört alanı elle karşılaştırıyoruz.
-fn ayni_boyut(a: WindowSize, b: WindowSize) -> bool {
+fn same_size(a: WindowSize, b: WindowSize) -> bool {
     a.num_cols == b.num_cols
         && a.num_lines == b.num_lines
         && a.cell_width == b.cell_width
@@ -632,7 +632,7 @@ fn window_size(grid: GridSize, cell_px: (u16, u16)) -> WindowSize {
 /// Zehirlenmiş kilitten içeriği geri alır. Bu kilitlerin altında `Option`
 /// ve dört sayı var; panik anında da tutarlılar. Kapanış yolunda ikinci bir
 /// panik üretmenin kimseye faydası yok.
-fn kilit<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -646,48 +646,48 @@ mod tests {
     /// Uyandırmaları sayar ve sınamanın beklemesine izin verir.
     #[derive(Default)]
     struct TestWake {
-        durum: Mutex<(u32, Option<Option<i32>>)>,
-        kosul: Condvar,
+        state: Mutex<(u32, Option<Option<i32>>)>,
+        cond: Condvar,
     }
 
     impl TestWake {
-        /// En az `hedef` uyandırma gelene kadar bekler.
-        fn bekle(&self, hedef: u32, sure: Duration) -> u32 {
-            let durum = self.durum.lock().unwrap();
-            let (durum, _) = self
-                .kosul
-                .wait_timeout_while(durum, sure, |(sayac, _)| *sayac < hedef)
+        /// En az `target` uyandırma gelene kadar bekler.
+        fn wait_wakes(&self, target: u32, timeout: Duration) -> u32 {
+            let state = self.state.lock().unwrap();
+            let (state, _) = self
+                .cond
+                .wait_timeout_while(state, timeout, |(count, _)| *count < target)
                 .unwrap();
-            durum.0
+            state.0
         }
 
         /// Çocuk ölene kadar bekler; zaman aşımında `None`.
-        fn bekle_cikis(&self, sure: Duration) -> Option<Option<i32>> {
-            let durum = self.durum.lock().unwrap();
-            let (durum, _) = self
-                .kosul
-                .wait_timeout_while(durum, sure, |(_, kod)| kod.is_none())
+        fn wait_exit(&self, timeout: Duration) -> Option<Option<i32>> {
+            let state = self.state.lock().unwrap();
+            let (state, _) = self
+                .cond
+                .wait_timeout_while(state, timeout, |(_, code)| code.is_none())
                 .unwrap();
-            durum.1
+            state.1
         }
     }
 
     impl Wake for TestWake {
         fn wake(&self) {
-            self.durum.lock().unwrap().0 += 1;
-            self.kosul.notify_all();
+            self.state.lock().unwrap().0 += 1;
+            self.cond.notify_all();
         }
 
         fn child_exit(&self, code: Option<i32>) {
-            self.durum.lock().unwrap().1 = Some(code);
-            self.kosul.notify_all();
+            self.state.lock().unwrap().1 = Some(code);
+            self.cond.notify_all();
         }
     }
 
-    fn oturum(betik: &str, wake: Arc<TestWake>) -> Session {
+    fn spawn_session(script: &str, wake: Arc<TestWake>) -> Session {
         Session::spawn(
             SessionOptions {
-                command: Some(("/bin/sh".into(), vec!["-c".into(), betik.into()])),
+                command: Some(("/bin/sh".into(), vec!["-c".into(), script.into()])),
                 cols: 40,
                 rows: 10,
                 cell_px: (9, 18),
@@ -699,47 +699,45 @@ mod tests {
     }
 
     #[test]
-    fn session_send_ve_sync() {
+    fn session_is_send_and_sync() {
         // Renderer `Arc<Session>`'ı ana thread'de, okuyucu thread'i PTY'de
         // kullanır; bu iki sınır derleme zamanında bağlanmalı.
-        fn kontrol<T: Send + Sync>() {}
-        kontrol::<Session>();
+        fn require_send_sync<T: Send + Sync>() {}
+        require_send_sync::<Session>();
     }
 
-    /// `adet` **arka planlı** hücre taşıyan ilk kareyi bekler; dönen liste
+    /// `count` **arka planlı** hücre taşıyan ilk kareyi bekler; dönen liste
     /// karenin tamamıdır.
     ///
     /// Ölçüt sink çağrısı sayısı **değil**, arka planlı hücre sayısı: sink
     /// artık mürekkebi olan hücreleri de veriyor ve PTY'nin yankısı
     /// (`read x` betiğinde yazılan "ab") sayıyı sessizce şişirirdi. Arka plan
     /// sayısı bu sınamaların gerçekten baktığı şey ve betiklerden türüyor.
-    fn hucreleri_bekle(session: &Session, wake: &TestWake, adet: usize) -> Vec<Cell> {
-        let bitis = Instant::now() + Duration::from_secs(5);
-        let mut hucreler = Vec::new();
-        let mut gorulen = 0;
+    fn wait_cells(session: &Session, wake: &TestWake, count: usize) -> Vec<Cell> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut cells = Vec::new();
+        let mut seen = 0;
         loop {
             assert!(
-                Instant::now() < bitis,
-                "beklenen çıktı gelmedi: {hucreler:?}"
+                Instant::now() < deadline,
+                "beklenen çıktı gelmedi: {cells:?}"
             );
-            gorulen = wake.bekle(gorulen + 1, Duration::from_millis(500));
-            hucreler.clear();
-            if session.frame(|c| hucreler.push(c)).is_some()
-                && arka_planlar(&hucreler).count() == adet
-            {
-                return hucreler;
+            seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
+            cells.clear();
+            if session.frame(|c| cells.push(c)).is_some() && backgrounds(&cells).count() == count {
+                return cells;
             }
         }
     }
 
     /// Karenin arka plan boyayan hücreleri — `Frame`'in `bg_count`'unun
     /// saydığı küme.
-    fn arka_planlar(hucreler: &[Cell]) -> impl Iterator<Item = &Cell> {
-        hucreler.iter().filter(|c| c.bg.is_some())
+    fn backgrounds(cells: &[Cell]) -> impl Iterator<Item = &Cell> {
+        cells.iter().filter(|c| c.bg.is_some())
     }
 
     #[test]
-    fn sabit_shell_arka_plan_hucreleri_verir() {
+    fn smoke_shell_yields_background_cells() {
         let wake = Arc::new(TestWake::default());
         // `smoke_shell`'in ta kendisi: `make duman`'ın koştuğu betiğin sekiz
         // hücre verdiğini doğrulayan yer burası. Betiğin `sleep`'i uzun ama
@@ -757,21 +755,21 @@ mod tests {
         )
         .unwrap();
 
-        let hucreler = hucreleri_bekle(&session, &wake, 8);
-        let arka: Vec<_> = arka_planlar(&hucreler).collect();
+        let cells = wait_cells(&session, &wake, 8);
+        let backs: Vec<_> = backgrounds(&cells).collect();
 
         // " bateri " → sekiz hücre, hepsi ilk satırda ve kırmızı.
-        assert!(arka.iter().all(|c| c.row == 0), "{arka:?}");
+        assert!(backs.iter().all(|c| c.row == 0), "{backs:?}");
         assert_eq!(
-            arka.iter().map(|c| c.col).collect::<Vec<_>>(),
+            backs.iter().map(|c| c.col).collect::<Vec<_>>(),
             (0..8).collect::<Vec<_>>()
         );
-        let kirmizi = Some(color::lineer_rgba(color::default(1)));
-        assert!(arka.iter().all(|c| c.bg == kirmizi), "{arka:?}");
+        let red = Some(color::linear_rgba(color::default(1)));
+        assert!(backs.iter().all(|c| c.bg == red), "{backs:?}");
     }
 
     #[test]
-    fn sabit_shell_alti_glif_verir() {
+    fn smoke_shell_yields_six_glyphs() {
         // `make duman`'ın `glif=G` kapısının bağlandığı sayı. Ayrı bir
         // sınama, çünkü ayrı bir iddia: `hucre=8` sink'in hücre ürettiğini,
         // `glif=6` **mürekkep** ürettiğini söylüyor. Sekizi de arka planlı
@@ -791,54 +789,54 @@ mod tests {
         )
         .unwrap();
 
-        let hucreler = hucreleri_bekle(&session, &wake, 8);
-        let glifler: String = hucreler.iter().filter_map(|c| c.ch).collect();
-        assert_eq!(glifler, "bateri", "{hucreler:?}");
+        let cells = wait_cells(&session, &wake, 8);
+        let glyphs: String = cells.iter().filter_map(|c| c.ch).collect();
+        assert_eq!(glyphs, "bateri", "{cells:?}");
     }
 
     #[test]
-    fn hasarsiz_frame_sink_cagirmaz() {
+    fn clean_frame_does_not_call_sink() {
         let wake = Arc::new(TestWake::default());
         // Shell ÇIKTI üretmeli: boş grid'de her hücre varsayılan arka planlı
         // olduğu için sink zaten çağrılmazdı, yani kirli kapısı tamamen
         // silinse bile sayaç 0 kalır ve sınama hiçbir şey bağlamazdı.
-        let session = oturum("printf '\\033[41m x \\033[0m'; sleep 5", Arc::clone(&wake));
+        let session = spawn_session("printf '\\033[41m x \\033[0m'; sleep 5", Arc::clone(&wake));
 
         // Dolu kareyi tüket: " x " → üç kırmızı hücre.
-        assert_eq!(hucreleri_bekle(&session, &wake, 3).len(), 3);
+        assert_eq!(wait_cells(&session, &wake, 3).len(), 3);
 
         // İkinci çağrı hasarsız: ne kare ne iterasyon. Kapı düşseydi aynı üç
         // hücre yeniden emilir ve sayaç büyürdü.
-        let mut sayac = 0;
-        assert!(session.frame(|_| sayac += 1).is_none());
-        assert_eq!(sayac, 0, "hasarsız kare sink'i çağırdı");
+        let mut count = 0;
+        assert!(session.frame(|_| count += 1).is_none());
+        assert_eq!(count, 0, "hasarsız kare sink'i çağırdı");
     }
 
     #[test]
-    fn ters_videoda_sonuk_bayragi_arka_plani_koyultur() {
+    fn dim_flag_darkens_background_in_inverse_video() {
         let wake = Arc::new(TestWake::default());
         // DIM + INVERSE + kırmızı ön plan: ön plan arka plan olur ve sönük
         // uygulanır. alacritty kitaplığı `Named(Red)`i `DimRed`e çevirmez.
-        let session = oturum(
+        let session = spawn_session(
             "printf '\\033[2;7;31mx\\033[0m'; sleep 5",
             Arc::clone(&wake),
         );
 
-        let hucreler = hucreleri_bekle(&session, &wake, 1);
+        let cells = wait_cells(&session, &wake, 1);
         assert_eq!(
-            hucreler[0].bg,
-            Some(color::lineer_rgba(color::dim(color::default(1))))
+            cells[0].bg,
+            Some(color::linear_rgba(color::dim(color::default(1))))
         );
         // Sönük olmayan kırmızıdan gerçekten farklı.
-        assert_ne!(hucreler[0].bg, Some(color::lineer_rgba(color::default(1))));
+        assert_ne!(cells[0].bg, Some(color::linear_rgba(color::default(1))));
         // Ters videoda ön plan hücrenin arka planından gelir ve **sönmez**:
         // `DIM` yalnız `cell.fg`'den doğan renge uygulanıyor.
-        assert_eq!(hucreler[0].ch, Some('x'));
-        assert_eq!(hucreler[0].fg, color::lineer_rgba(color::BG_RGB));
+        assert_eq!(cells[0].ch, Some('x'));
+        assert_eq!(cells[0].fg, color::linear_rgba(color::BG_RGB));
     }
 
     #[test]
-    fn imlecin_altindaki_harf_ters_cizilir() {
+    fn char_under_cursor_is_drawn_inverted() {
         // İmleç bloğu opak ve glyph'in altında; harf kendi ön planıyla
         // kalsaydı açık gri, açık mavi bloğun üstüne düşer ve okunmazdı.
         // `bt-gpu` bunu göremez — imleci ayrı listede, hücreyi ayrı listede
@@ -846,42 +844,42 @@ mod tests {
         let wake = Arc::new(TestWake::default());
         // İmleç yazılan metnin **sonunda** durur; hücreyi imlecin altına
         // sokmak için geri sarıyoruz (`\b`).
-        let session = oturum(
+        let session = spawn_session(
             "printf '\\033[41mAB\\033[0m\\b\\b'; sleep 5",
             Arc::clone(&wake),
         );
 
-        let hucreler = hucreleri_bekle(&session, &wake, 2);
-        let a = hucreler.iter().find(|c| c.col == 0).expect("ilk hücre");
-        let b = hucreler.iter().find(|c| c.col == 1).expect("ikinci hücre");
-        assert_eq!((a.ch, b.ch), (Some('A'), Some('B')), "{hucreler:?}");
+        let cells = wait_cells(&session, &wake, 2);
+        let a = cells.iter().find(|c| c.col == 0).expect("ilk hücre");
+        let b = cells.iter().find(|c| c.col == 1).expect("ikinci hücre");
+        assert_eq!((a.ch, b.ch), (Some('A'), Some('B')), "{cells:?}");
         // İmleç 0. sütunda: oradaki harf arka plan rengine döner, komşusu
         // dönmez. İkisini birden sınamak "hepsini terse çevirdim" hatasını da
         // yakalıyor.
-        assert_eq!(a.fg, color::lineer_rgba(color::BG_RGB), "{hucreler:?}");
-        assert_ne!(b.fg, color::lineer_rgba(color::BG_RGB), "{hucreler:?}");
+        assert_eq!(a.fg, color::linear_rgba(color::BG_RGB), "{cells:?}");
+        assert_ne!(b.fg, color::linear_rgba(color::BG_RGB), "{cells:?}");
     }
 
     #[test]
-    fn gizli_metnin_murekkebi_dusar_arka_plani_kalir() {
+    fn hidden_text_loses_ink_keeps_background() {
         let wake = Arc::new(TestWake::default());
         // `\e[8m` (conceal) ön planı gizler, arka planı değil. Bayrak
         // `bt-gpu`'ya geçmediği için burada çözülmek zorunda: geçmeseydi ve
         // burada da elenmeseydi gizlenmiş metin ekranda okunurdu.
-        let session = oturum(
+        let session = spawn_session(
             "printf '\\033[41;8mgizli\\033[0m'; sleep 5",
             Arc::clone(&wake),
         );
 
-        let hucreler = hucreleri_bekle(&session, &wake, 5);
-        assert!(hucreler.iter().all(|c| c.ch.is_none()), "{hucreler:?}");
-        assert_eq!(arka_planlar(&hucreler).count(), 5, "{hucreler:?}");
+        let cells = wait_cells(&session, &wake, 5);
+        assert!(cells.iter().all(|c| c.ch.is_none()), "{cells:?}");
+        assert_eq!(backgrounds(&cells).count(), 5, "{cells:?}");
     }
 
     #[test]
-    fn bos_yazma_pty_yazicisini_kilitlemez() {
+    fn empty_write_does_not_stall_pty_writer() {
         let wake = Arc::new(TestWake::default());
-        let session = oturum(
+        let session = spawn_session(
             "read x; printf '\\033[42m%s\\033[0m\\n' \"$x\"; sleep 5",
             Arc::clone(&wake),
         );
@@ -892,18 +890,15 @@ mod tests {
         session.write(b"ab\n");
 
         // İki yeşil hücre: shell girdiyi okuyup geri yazabildi.
-        let hucreler = hucreleri_bekle(&session, &wake, 2);
-        let yesil = Some(color::lineer_rgba(color::default(2)));
-        assert!(
-            arka_planlar(&hucreler).all(|c| c.bg == yesil),
-            "{hucreler:?}"
-        );
+        let cells = wait_cells(&session, &wake, 2);
+        let green = Some(color::linear_rgba(color::default(2)));
+        assert!(backgrounds(&cells).all(|c| c.bg == green), "{cells:?}");
     }
 
     #[test]
-    fn sifir_boyut_yoksayilir() {
+    fn zero_size_is_ignored() {
         let wake = Arc::new(TestWake::default());
-        let session = oturum("sleep 5", Arc::clone(&wake));
+        let session = spawn_session("sleep 5", Arc::clone(&wake));
 
         // Açılış karesi: grid boş ama pencere bir kez boyanmalı (bayrak
         // `Adapter::new`'da `true` başlıyor).
@@ -936,51 +931,51 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_okuyucuyu_bitirir() {
+    fn shutdown_ends_the_reader() {
         let wake = Arc::new(TestWake::default());
-        let session = oturum("sleep 30", Arc::clone(&wake));
+        let session = spawn_session("sleep 30", Arc::clone(&wake));
         assert!(session.reader_alive());
 
-        let baslangic = Instant::now();
+        let started = Instant::now();
         session.shutdown();
         assert!(!session.reader_alive());
         // `sleep 30` sürerken bile SIGHUP yolu hemen dönmeli.
         assert!(
-            baslangic.elapsed() < Duration::from_secs(5),
+            started.elapsed() < Duration::from_secs(5),
             "{:?}",
-            baslangic.elapsed()
+            started.elapsed()
         );
         // İkinci çağrı sessizce döner.
         session.shutdown();
     }
 
     #[test]
-    fn cocuk_olunce_child_exit_gelir() {
+    fn child_exit_fires_when_child_dies() {
         let wake = Arc::new(TestWake::default());
-        let session = oturum("exit 3", Arc::clone(&wake));
+        let session = spawn_session("exit 3", Arc::clone(&wake));
 
-        assert_eq!(wake.bekle_cikis(Duration::from_secs(5)), Some(Some(3)));
+        assert_eq!(wake.wait_exit(Duration::from_secs(5)), Some(Some(3)));
         drop(session);
     }
 
     #[test]
     #[ignore = "make test-yaris ile koşar"]
-    fn yaris_wake_ve_frame() {
+    fn race_wake_and_frame() {
         let wake = Arc::new(TestWake::default());
         // Çıktı bilerek kısıtlı: aranan şey yarış, kuyruk şişirmesi değil.
         // Kısıtsız `printf` döngüsü saniyede milyonlarca `Msg::Input`
         // biriktirir ve sınama yarışı değil belleği ölçer.
-        let session = Arc::new(oturum(
+        let session = Arc::new(spawn_session(
             "while :; do printf '\\033[42mx\\033[0m'; sleep 0.01; done",
             Arc::clone(&wake),
         ));
 
-        let bitis = Instant::now() + Duration::from_secs(2);
-        let yazanlar: Vec<_> = (0..4)
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let writers: Vec<_> = (0..4)
             .map(|n| {
                 let session = Arc::clone(&session);
                 std::thread::spawn(move || {
-                    while Instant::now() < bitis {
+                    while Instant::now() < deadline {
                         session.write(b" ");
                         // Sütun sayısı oynasın ki reflow da yarışa girsin.
                         let _ = session.resize(40 + n % 2, 10, (9, 18));
@@ -990,22 +985,25 @@ mod tests {
             })
             .collect();
 
-        let mut kare = 0u64;
-        while Instant::now() < bitis {
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
             if session.frame(|_| ()).is_some() {
-                kare += 1;
+                frames += 1;
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        for yazan in yazanlar {
-            yazan.join().unwrap();
+        for writer in writers {
+            writer.join().unwrap();
         }
-        assert!(kare > 0, "yarış boyunca hiç kare üretilmedi");
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         // Aranan hata sınıfı tam olarak budur: okuyucu thread paniklerse
         // `shutdown()` yalnız stderr'e yazar ve sınama yeşil kalırdı.
         // Çocuk sonsuz döngüde, thread'in bitmiş olmasının tek açıklaması panik.
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
-        assert!(wake.bekle(1, Duration::ZERO) > 0, "hiç uyandırma gelmedi");
+        assert!(
+            wake.wait_wakes(1, Duration::ZERO) > 0,
+            "hiç uyandırma gelmedi"
+        );
         session.shutdown();
     }
 }

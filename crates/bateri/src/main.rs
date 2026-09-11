@@ -5,7 +5,7 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     // Başsız ortam (SSH, CI): AppKit WindowServer'a bağlanamaz ve belirsiz
     // hata verir. Atlama ≠ geçme: 78 (EX_CONFIG) ile açıkça çık.
-    if !aqua_oturumu() {
+    if !has_aqua_session() {
         // stdout: `kare=` satırıyla aynı kanal, `make duman` tek yerden okur.
         println!("ATLANDI: Aqua oturumu yok");
         return ExitCode::from(78);
@@ -31,7 +31,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn aqua_oturumu() -> bool {
+fn has_aqua_session() -> bool {
     Command::new("launchctl")
         .arg("managername")
         .output()
