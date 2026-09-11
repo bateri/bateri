@@ -131,8 +131,10 @@ impl Wake for ShellWake {
         //
         // Ana kuyruğa atılmasının iki sebebi var ve ikisi de zorunlu: AppKit
         // ana thread ister, ve bu çağrı **okuyucu thread'de** geliyor —
-        // `shutdown()`'a giden senkron bir yol o thread'i kendi kendine
-        // `join` ettirirdi (`wake.rs` → Sahiplik).
+        // `shutdown()`'a giden senkron bir yol okuyucu thread'i kendi
+        // kapanışında bekletirdi (`wake.rs` → Sahiplik). Kapanış sınırlı
+        // olduğundan bu artık `EDEADLK` paniği değil, yarım saniyelik bir
+        // durma ve hiç tamamlanmayan bir kapanış — yasak aynı kalıyor.
         //
         // **Bilinen sınır:** shell'in son çıktısı ekrana gelmeyebilir.
         // alacritty sırayı `ChildExit` → `Wakeup` diye kuruyor, yani buraya
@@ -505,18 +507,25 @@ impl AppDelegate {
     ///
     /// 1. Ritmi kes (`DisplayLink::stop`): link durur, run loop'tan çıkar ve
     ///    uyandırma kapısı kapanır. Bundan sonra yeni kare istenmez.
-    /// 2. Oturumu kapat: `SIGHUP` + okuyucu thread'in `join`'i. **Bloklar** —
-    ///    sinyali yutan bir çocuk (`trap '' HUP`) `Pty::drop`'un
-    ///    `child.wait()`'inde süresiz bekletir; kesecek olan bekçi thread
-    ///    (`crate::watchdog`).
+    /// 2. Oturumu kapat: `SIGHUP` + okuyucu thread'in bitişi. **Sınırlı
+    ///    bloklar** — en çok `bt-core`'un `SHUTDOWN_GRACE`'i kadar (yarım
+    ///    saniye); ölmeyen çocuk arkada bırakılıyor. Tek istisna kapanış
+    ///    thread'inin kurulamaması (OS thread sınırı): o dalda sınır yok ve
+    ///    kesecek olan yine bekçi. Eskiden sınır **hiç** yoktu ve kesen
+    ///    yalnız bekçiydi (`crate::watchdog`); bugün bekçi bu adımın değil
+    ///    kapanış yolunun geri kalanının bekçisi.
     ///
     /// `DisplayLink` bilerek **düşürülmüyor**, yalnız durduruluyor. İçindeki
     /// `Waker`'ı Metal'in tamamlanma bloğu da tutuyor ve onun
     /// `MainThreadBound<Retained<CAMetalDisplayLink>>`'i ana thread dışında
     /// düşerse `Drop`'u ana kuyruğa **senkron** iş atıp bekler: ana thread o
-    /// sırada 2. adımın `join`'inde olurdu ve ikisi birbirini kilitlerdi.
-    /// `Ivars` `app.run()`'ı aştığı sürece o son referans hiçbir zaman
-    /// Metal'in thread'inde olmaz.
+    /// sırada 2. adımın beklemesinde olurdu ve ikisi birbirini kilitlerdi.
+    /// Kapanışın yeni sınırı bu kilitlenmeyi en çok yarım saniyelik bir
+    /// beklemeye indirir ama kuralı kaldırmaz — üstelik tehlikeli thread
+    /// listesini **uzatır**: sınır dolduğunda `bt-core`'un `"PTY teardown"`
+    /// thread'i `Adapter` üzerinden `Waker`'ın bir kopyasını tutmaya devam
+    /// eder (`wake.rs` → Sahiplik). `Ivars` `app.run()`'ı aştığı sürece o son
+    /// referans ne Metal'in thread'inde ne kapanış thread'inde olmaz.
     fn shutdown(&self) {
         // Bekçinin bütçesi **kapanıştan** başlıyor, süreç başından değil:
         // açılış (Metal device, metallib yükleme, ilk pencere) soğuk bir
@@ -535,9 +544,10 @@ impl AppDelegate {
 
     /// Duman koşusunun raporu ve çıkışı — **kapanıştan sonra** çağrılır.
     ///
-    /// Sıra bilinçli: `shutdown()` bloklar ve asılırsa bekçi süreci 70 ile keser,
-    /// yani asılan bir kapanışta `kare=` satırı hiç çıkmaz. Ters sırada
-    /// `make duman` yeşil bir satırla kırmızı bir çıkış kodunu birlikte verirdi.
+    /// Sıra bilinçli: `shutdown()` sınırlı da olsa bekler ve o sınırı da aşan
+    /// bir kapanışta bekçi süreci 70 ile keser, yani öyle bir kapanışta
+    /// `kare=` satırı hiç çıkmaz. Ters sırada `make duman` yeşil bir satırla
+    /// kırmızı bir çıkış kodunu birlikte verirdi.
     ///
     /// Satır burada **açıkça** yazılıyor; `Drop`'a güvenen hiçbir yol yok.
     /// `process::exit` `Drop` koşturmaz ve bekçinin `_exit(70)`'i atexit'i

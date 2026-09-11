@@ -13,9 +13,19 @@
 /// `Arc<Session>` tutarsa çember kapanır: `Drop for Session` hiç koşmaz,
 /// okuyucu thread hiç `join` edilmez ve sekme başına bir PTY ile bir thread
 /// sızar. `Session`'a bakmak gerekiyorsa `Weak` ile bakılır — ve `wake()`
-/// içinden `shutdown()`'a varan **senkron** bir yol açılmaz: son güçlü
-/// referans okuyucu thread'in içinde düşerse `join` thread'i kendi kendine
-/// bekletir (`EDEADLK`) ve `Drop` içinde panik olur.
+/// içinden `shutdown()`'a varan **senkron** bir yol açılmaz. Yasak duruyor,
+/// bedeli değişti: `shutdown()` artık `join`'i ayrı bir thread'e alıp
+/// sınırlı beklediği için son güçlü referans okuyucu thread'de düşse bile
+/// `EDEADLK` paniği olmaz — onun yerine o thread yarım saniye durur, bir
+/// satır "arkada bırakıldı" basılır ve kapanış hiç bitmez.
+///
+/// **`Drop`'un koştuğu thread sözleşmenin parçası.** Sınır dolduğunda
+/// `(EventLoop, State)` çifti `"PTY teardown"` thread'inde kalır ve o çift
+/// `Adapter` üzerinden bu nesnenin bir `Arc` kopyasını taşır: son kopya
+/// oraya düşerse **`Wake::drop` o thread'de koşar**. Dolayısıyla uygulayanın
+/// `Drop`'u da bloklamaz — özellikle ana kuyruğa senkron iş atmaz (bugünkü
+/// tek uygulayan `bt-gpu`'nun `Waker`'ı ve orada tam böyle bir alan var:
+/// `MainThreadBound<Retained<CAMetalDisplayLink>>`).
 pub trait Wake: Send + Sync + 'static {
     /// Grid değişti; bir kare gerekebilir.
     fn wake(&self);

@@ -129,6 +129,208 @@ commit'te güncellenir — borç kapanıyorsa cümle kalkar, daralıyorsa daralt
 
 ## Uygulama Notları
 
+- **Teşhis (ölçüldü, bu makine, debug).** Asılan bir koşuda ana thread
+  `Pty::drop → std::process::Child::wait → __wait4` içinde duruyor (`sample`,
+  1665/1665 örnek) ve **aynı** koşuda çocuk `?Es` durumunda: çıkışa girmiş
+  ama bitmemiş bir oturum lideri. Ayırt edilenler: çocuğun **alt süreci yok**
+  (`pgrep -P` boş, `date` ikamesi o anda koşmuyor) → **H2 düştü**, sinyalin
+  hedefi tek süreç. Çocuğa `SIGKILL` gönderildi, durumu **değişmedi** (`?Es`
+  kaldı) ve ancak *bizim* süreç `_exit(70)` ile ölüp master fd kapandığında
+  gitti → bloke bir `write()` değil (onu `SIGHUP` keserdi, kesildiğini ayrı
+  bir `pty` üreticisiyle de gördüm: master okunmazken `SIGHUP` alan yazıcı
+  ~0,6 sn'de bitiyor, master kapatılır ya da boşaltılırsa ~0 ms), yani **saf
+  H1 de düştü**. Kalan **H3**: `Pty::drop` `SIGHUP` → `child.wait()` sırasını
+  koşuyor, master fd ise `Pty`'nin bir **alanı**, yani `Drop` gövdesinden
+  *sonra* kapanıyor; okuyucu thread de `join` ile bittiği için kuyruğu artık
+  kimse boşaltmıyor. Çocuk çıkışını bitirmek için kuyruğun boşalmasını
+  bekliyor, kuyruk bizim elimizde, biz de çocuğu bekliyoruz — kilitlenme.
+  H1'in "dolu tampon"u tetik, H3'ün sırası kilit. **Ne ölçmedim:** çekirdeğin
+  çocuğu tam olarak hangi noktada beklettiği (`?Es`'in içi); adını
+  varsaymadım, dışarıdan gözlenen bağımlılık zincirini yazdım. Aralıklılık da
+  **gözlem**: bugün 2/10 ve 4/8 (kuyruğun kapanış anında dolu olup olmamasına
+  bağlı), orkestratörün 5/8'i örtülü pencerede. Düzeltmenin doğruluğu bu
+  belirsizliğe bağlı **değil**: sınırlı bekleme `wait4`'ün *neden*
+  bloklandığını sormuyor.
+
+- **Yol (A) seçildi: `join` + düşme ayrı thread'de, ana thread sınırlı
+  bekliyor.** `Send` doğrulandı, varsayılmadı: `EventLoop::spawn`'ın
+  `T: Send + 'static` sınırı `Pty`'yi zaten `Send` yapıyor ve `JoinHandle<T>`
+  koşulsuz `Send` — tutamak taşınabiliyor. Kılavuzun §1'inden bir sapma:
+  `join` **de** taşındı, yalnız düşme değil. Sebebi ölçülmüş mekanizmanın
+  ikinci yarısı: okuyucu thread panikle sarılırken `Pty::drop` o thread'de
+  koşar ve `join`'in kendisi de bloklayabilir; ikisi aynı thread'e konunca
+  sözleşme ("sınırlı sürede döner") tek yerden garanti ediliyor.
+- **Yol (B) ölçümle kapandı**, tasarımla değil: (a) `?Es` durumundaki çocuk
+  `SIGKILL` almıyor — "`SIGHUP` → süre → `SIGKILL`" zinciri bu üreticide
+  **işe yaramaz**, ölçüldü; (b) çocuğu o duruma hiç sokmamak master'ı `wait`
+  bloklarken boşaltmak demek, ama alacritty **0.26.0**'ın yüzeyi buna izin
+  vermiyor: `EventLoop`'un alanları private ve `pty` için erişimci yok
+  (`pub fn` yalnız `new`, `channel`, `spawn`), `Pty` de `child()`/`file()`
+  ile yalnız `&Child`/`&File` veriyor — `EventedPty`/`ChildEvent`/
+  `next_child_event` **var** ama okuyucu döngüsünün içinde, `join`'den sonra
+  ulaşılmaz. (c) Master'ın bir kopyası `Session::spawn`'da
+  `pty.file().try_clone()` ile alınabilirdi, ama o yol da HUP'ı yutan çocuğu
+  sınırlayamaz: sınır her hâlde gerekiyordu ve sınır tek başına iki kusuru
+  birden kapatıyor.
+- **Sınır çocuğu iyileştirmiyor, kapanışı sınırlıyor.** Süre dolan koşuda
+  çocuk çıkışın içinde kalıyor ve süreç çıkışı topluyor; kanıt koşusunda
+  bu **2/8**. Kalıcı çare (master'ı boşaltmak) phase-3'ün `## Yöntem` notuna
+  ve `CLAUDE.md`'ye borç olarak yazıldı — `try_clone()` yeni bağımlılık
+  istemiyor, yani kapı açık.
+- **`SHUTDOWN_GRACE = 500 ms` ölçümden.** Geçici bir enstrümantasyonla sekiz
+  Load koşusunda kapanış süresi okundu: **0,44–0,70 ms** (dört koşu) ya da
+  **hiç bitmiyor** (dört koşu). Arası yok, yani sabit "düzgün kapanışa yetsin"
+  diye değil "kullanıcı ne kadar bekler" diye seçildi; gerekçenin iki yarısı
+  (kısa/uzun olmanın bedeli) `const`'un doc'unda. Enstrümantasyon ölçümden
+  sonra **söküldü** — kapanış yolunda kalıcı `Instant::now()` yok, yalnız
+  sınır dolduğunda bir stderr satırı var.
+- **Thread kurulamazsa** (OS thread sınırı) eski davranışa dönülüyor ve bu
+  **söyleniyor**: tutamak o dalda yerinde düşer, yani `Pty::drop` ana
+  thread'de koşabilir. Alternatifi tutamağı `mem::forget` etmekti; alınmadı,
+  çünkü `Pty`'yi (master fd + çocuk) ve `Term`'ü kalıcı olarak sızdırmak
+  ihtimali OOM dalında bir blokajdan daha kötü — ve o dalda panik yasağı
+  gereği `expect` de yok.
+- **Doc ve belge aynı commit'te.** `shutdown()`'ın doc'u iki sebebi de
+  sayıyor (`trap '' HUP` **ve** çıkışta takılma) ve artık sınırı söylüyor;
+  `CLAUDE.md`'nin kapanış maddesi **daraltıldı**, silinmedi — "kesen yok"
+  kalktı, yerine kalan borç (arkada kalan çocuk) ve çürütülen çare
+  (`SIGKILL`) yazıldı. Kılavuzun istediği `.tasks/002-vt-motoru/phase-4.md`
+  atfı `shutdown()`'ın doc'undan düştü: o atıf "bilinen sınır" cümlesinin
+  dayanağıydı ve sınır artık orada değil — `app.rs:144`'teki atıf (kapanış
+  sırasının tasarımı) yerinde kaldı. Bekçinin iki doc'u (`lib.rs::watchdog`,
+  `app.rs::shutdown`) kapsam daralmasını yazıyor: bekçi artık bu adımın değil
+  kapanış yolunun geri kalanının bekçisi.
+- **Kanıt (Load, 8 koşu, debug, bu makine): asılma 0/8** (öncesi 5/8), jeton
+  satırı sekizde sekiz basıldı (`kare≈226–235`), sınır 2/8 koşuda doldu.
+  Ayrıca phase-3'ün bekleyen kalemi düştü: **`BT_RUN_SECONDS=5` artık
+  koşulabiliyor** — dört koşu, dördü temiz, `kare≈592–595` (R5.6'nın ölçüm
+  koşusu phase-2'de bu süreyle imkânsızdı, devir satırı `phase-3.md`'de
+  güncellendi).
+
+- **`/simplify` dört mercek koştu, dördü döndü; dört şey değişti.**
+  1. **Üst sınır iddiası tek yere indi** (reuse + simplification, ikisi de
+     aynı beş satırı gösterdi): iki sınamada birebir kopya olan "ölç,
+     `shutdown()` çağır, sınırı aşmadığını doğrula" bloğu
+     `shutdown_within_grace()` yardımcısına çıktı — modülün kendi deseni
+     (`wait_cells` → `wait_frame`) ile aynı.
+  2. **Yardımcı süreyi döndürüyor** ve `shutdown_returns_within_limit`
+     buna bir **alt sınır** ekliyor (`elapsed >= SHUTDOWN_GRACE`). Bu
+     kılavuzda yoktu, efficiency merceğinin "bu sınamalar her koşuda tam
+     500 ms yakıyor" notundan çıktı: sınırı gerçekten dolduran bir sınamada
+     erken dönen bir `shutdown` **boşuna yeşil** kalırdı (çocuk erken
+     ölmüştür), üst sınır onu göremez.
+  3. **Ortak dal düzleşti** (simplification): `match teardown` yerine
+     erken dönen bir `if let Err`. Normal kapanış artık bir girinti daha
+     sığ; nadir dal (OS thread sınırı) yukarıda duruyor.
+  4. **`Err` dalının yorumu düzeltildi** (altitude, ölçerek): "eski
+     davranışa dönüyoruz" **yanlıştı**. Tutamak `spawn` başarısız olurken
+     closure'la düşer ve `JoinHandle::drop` detach eder, yani çift ya
+     okuyucu thread'in bitişinde düşer (kimse bloklanmaz, `SIGHUP` +
+     `child.wait()` sınırsız koşar) ya da — okuyucu thread çoktan bitmişse
+     — orada düşer ve bu thread'i bloklar. Yorum artık iki sonucu da
+     söylüyor ve stderr satırı "bloklayabilir" değil "sınırsız" diyor.
+
+- **`/code-review` iki koşucuyla koştu** (Skill fork'u phase-1 ve phase-2'de
+  olduğu gibi gecikti, `proje.md`'nin iniş sırası basamak 2: `code-reviewer`
+  subagent'ı; sonra fork da döndü ve ikisi de rapor verdi). **Çalışma zamanı
+  hatası yok** — sınır sözleşmesi ikisinde de ayakta, `drop(tail)`'in
+  `send`'den önce geldiği bağımsız doğrulandı. Yedi bulgu uygulandı:
+  1. **Tanı artık yalan söyleyemiyor** (ikisi de buldu, MEDIUM):
+     `recv_timeout(...).is_err()` `Timeout` ile `Disconnected`'ı katlıyordu.
+     `Disconnected` = kapanış thread'i **panikledi** ve çağrı *hemen* dönüyor;
+     eski satır "500 ms bekledim, arkada bıraktım" diyerek hem süreyi hem
+     sebebi yanlış söylüyor, üstelik kapanış yolundaki bir paniği yutuyordu.
+     Artık iki ayrı satır.
+  2. **Yeni bir tehlike doğdu ve hiçbir yerde yazmıyordu** (HIGH): sınır
+     dolduğunda `(EventLoop, State)` çifti `"PTY teardown"` thread'inde
+     kalıyor ve o çift `Adapter` üzerinden `Arc<dyn Wake>` taşıyor — son kopya
+     oraya düşerse **`Wake::drop` o thread'de koşar**. Bugünkü tek uygulayan
+     `bt-gpu`'nun `Waker`'ı ve içinde ana kuyruğa senkron iş atan bir alan var
+     (`MainThreadBound<Retained<CAMetalDisplayLink>>`). Bugün patlamıyor
+     çünkü `bt-shell`'in `Ivars`'ı referansı süreç sonuna kadar tutuyor; o
+     yük taşıyıcı gerçek `bt-shell`'de, tehlike ise artık `bt-core`'da. Kural
+     `wake.rs`'in Sahiplik paragrafına yazıldı: uygulayanın `Drop`'u da
+     bloklamaz.
+  3. **Üç kodla çelişen cümle düzeltildi** (HIGH, hepsi diff dışıydı ama aynı
+     mekanizmayı anlatıyordu): `wake.rs`'in "`EDEADLK` ve `Drop` içinde
+     panik" cümlesi artık **yanlıştı** (sınır paniği yarım saniyelik bir
+     durmaya çevirdi — yasak duruyor, bedeli değişti), `bt-gpu/link.rs`'in
+     "`join()` o thread'de koşar"ı ve `app.rs`'in `child_exit` yorumundaki
+     "kendi kendine `join`"i aynı biçimde.
+  4. **Tehlikeli thread listesi uzadı**: `app.rs`'in "son referans hiçbir
+     zaman Metal'in thread'inde olmaz" sayımı eksikti, kapanış thread'i
+     eklendi.
+  5. **Sınırın istisnası üç yerde yazılıydı gibi duruyordu ama yazılı
+     değildi** (MEDIUM): `CLAUDE.md`, bekçinin doc'u ve `app.rs`'in kapanış
+     sırası "artık asamaz / en çok yarım saniye" diyordu, oysa thread
+     kurulamayan dalda sınır yok. Üçü de kayıtlandı.
+  6. **`shutdown()`'ın doc'u iki şeyi vaat etmiyor** (LOW): süre dolduğunda
+     `SIGHUP`'ın gittiği garanti değil (yavaş adım `join` ise `Pty::drop`
+     hiç başlamamıştır) ve sınır her yolda yok.
+  7. **Sınamanın artığı yarıya indi** (LOW): `trap ''` sinyali `SIG_IGN`
+     yapıyor ve `sleep` onu **miras alıyor**, yani çocuk süreç çıkışında bile
+     ölmüyor — `sleep 10` → `sleep 5` (sınırın on katı; alt sınır erken ölen
+     çocuğu kırmızıya çevirdiği için pay güvenle kısaldı). İncelemeci
+     `cargo test` sonrası pid'i `ps`'te gösterdi.
+
+  **Kapsam dışı bırakılanlar (phase-3'ün checklist'ine yazıldı, gerekçe:
+  `bt-core` kapanışı değil rapor/ölçüm yolları):** `IDLE_FRAME_LIMIT`'in
+  dayandığı "tavan ~3 kare" ölçümünün **çürütülmesi** (fork ölçtü: 3
+  saniyede `kare=352`; ben 2 saniyede 232, 5 saniyede 593 ölçtüm — yani
+  kapının ölçüsü artık yanlış bir sayıdan geliyor ve meşru bir uyandırma
+  kapıyı kırmızıya düşürebilir), `kapanis=` jetonu (sınır dolan koşu bugün
+  yeşil bir satırla geçiyor; jeton sözleşmesi "eklenir" diyor),
+  `record_gpu`'nun elenen örneği saymaması, `completion_hands_over_live_gpu_timestamps`'ın
+  donanım yeteneğini sert bir kapıya çevirmesi, `verdict`'in dört konumsal
+  sayacı, `Workload → yuk=` eşlemesinin çağrı yerinde durması, `Ring`in
+  hizalamasının yığın dizilerini kapsamaması ve `Stats`'ın okuyucusunun
+  henüz olmaması (plan gereği phase-3). Bekçi bütçesinin (`run_seconds × 3`)
+  artık koruduğu şeyle ilgisiz olması da phase-3'e: sayı ölçülmeden
+  değişmiyor, yorumu bugün durumu söylüyor.
+
+- **`/audit` on merceği eledi ve koştu; yeni bulgu çıkmadı.** İlgili çıkanlar
+  inline koşuldu (kural: ikiden çok ilgili yargı merceği varsa fan-out; burada
+  iki tane).
+  - **1 (katman/platformsuzluk): temiz.** `cargo tree -p bt-core` ve
+    `-p bt-gpu` boş; `crates/bt-core/src` içinde `objc2|core_text|
+    core_graphics` yok. `bt-core`'a giren tek şey `std::thread`,
+    `std::sync::mpsc`, `std::time::Duration`.
+  - **2 (yeni bağımlılık): temiz.** `Cargo.toml` ve `Cargo.lock` diff'te yok.
+  - **3 (panik yolu): temiz.** `bt-core`'un eklenen satırlarında
+    `unwrap/expect/panic!/indeksleme` yok; gönderim `let _ = done.send(())`,
+    kanal hatası `match` ile karşılanıyor, iki dal da stderr'e yazıyor.
+  - **6 (ölçüm sahipliği): temiz, bir nüansla.** `CLAUDE.md`'ye sayı girmedi
+    (yalnız `const`'un adı ve niteliksel "yarım saniye"); ölçülen sayılar
+    `SHUTDOWN_GRACE`'in doc'unda (sabiti gerekçelendiriyorlar, phase-2'nin
+    deseni) ve bu phase dosyasında. `docs/OLCUMLER.md` bu sette **bilerek
+    yok** (R7.3: ilk `/measure` kurar), yani sayının gidebileceği başka bir
+    sahip yok. Ölçülmemiş iddia yok: "asamaz" cümlesinin arkasında 0/8 var.
+  - **7 (thread ve blokaj): bulgu `/code-review` turunda kapandı.** Render
+    yoluna bloklayan çağrı **girmedi** — eklenen bekleme kapanışta ve
+    `DisplayLink::stop`'tan *sonra*. Yeni kilit sırası yok: kapanış thread'i
+    `Term` kilidini almıyor, yalnız `Arc`'ları düşürüyor. Gerçek tehlike
+    `Wake::drop`'un o thread'e düşebilmesiydi ve bu tura girmeden
+    belgelendi (`wake.rs` Sahiplik, `app.rs` kapanış sırası).
+  - **10 (belge ve üslup): temiz.** Eklenen tanımlayıcıların tamamı İngilizce
+    (`SHUTDOWN_GRACE`, `shutdown_within_grace`, `teardown`, `tail`, thread adı
+    `"PTY teardown"`); yorumlar Türkçe ve "neden" anlatıyor; Türkçe kalan
+    dizgiler yalnız tanı çıktısı ve `assert!` gerekçeleri; yeni `#[allow]`
+    yok.
+  - **İlgisiz (bakılmadı, sebebiyle): 4** (`settings.rs`/tema el değmedi),
+    **5** (`assets/shell/` el değmedi), **9** (`.metal` yok, `Cell` yapısı
+    değişmedi — `bt-gpu`'da yalnız bir doc satırı). **8** de dar anlamda
+    ilgisiz (diff animasyon/zamanlayıcı eklemiyor), ama merceğin koruduğu
+    kapının kendisi `/code-review`'da çürük çıktı ve phase-3'e devredildi.
+
+  **Uygulanmayanlar:** (a) efficiency'nin "iki sınama `cargo test`'e ~1 sn
+  ekliyor, `make test-yaris` tek thread'de bunu bir kez daha ödüyor" notu —
+  sınanan şeyin kendisi `SHUTDOWN_GRACE`, süre kısaltılamaz; kayda geçti,
+  koda dokunulmadı. (b) `sleep 10`'u kısaltmak: çapa (`wait_cells`) en kötü
+  hâlde 5 saniyeye kadar bekleyebilir ve alt sınır eklendiği için erken ölen
+  bir çocuk artık **kırmızı** düşer — payı korumak o kırmızının yanlış
+  pozitif olmasını engelliyor. (c) Thread adının `String` ayırması (`"PTY
+  teardown".to_owned()`): oturum başına bir kez, tanı değeri ayırmadan büyük.
+
 ## Yayın Etkisi
 
 - **Ölçüm bekliyor: yok.** Bu phase bir kusuru kapatıyor; kapanış süresi bir
@@ -149,17 +351,17 @@ commit'te güncellenir — borç kapanıyorsa cümle kalkar, daralıyorsa daralt
 
 ## Checklist
 
-- [ ] **Teşhis:** H1/H2/H3 ayırt edildi, mekanizma `## Uygulama Notları`'na tek paragraf yazıldı (ölçümle, koda bakarak varsayarak değil)
-- [ ] Seçilen yol (A ya da B) ve **neden öteki değil** — gerekçe notlarda
-- [ ] `shutdown()` sınırlı sürede dönüyor; süre bir `const` ve gerekçesi yorumda (kısa/uzun olmanın bedeli)
-- [ ] `shutdown()`'ın doc'u gerçek mekanizmayı anlatıyor; `trap '' HUP`'ı tek sebep gibi sunan cümle düzeltildi
-- [ ] `CLAUDE.md`'nin kapanış maddesi güncellendi — borç kapandıysa kalktı, daraldıysa daraltıldı, **silinip geçilmedi**
-- [ ] Test: `shutdown_returns_within_limit` — HUP'ı yutan çocukla (`trap '' HUP`) `shutdown()` sınırı aşmıyor
-- [ ] Test: `shutdown_with_busy_writer` — kapanış anında PTY'ye yazan çocukla asılmıyor (bu setin gerçek üreticisi)
-- [ ] **Ölçüm:** `BT_SCROLL_TEST=1` en az 8 koşu, asılma oranı **0/8** olmalı; sayı notlara yazılır (öncesi 5/8)
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` **zorunlu** + `make duman` **iki yükte**)
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] **Teşhis:** H1/H2/H3 ayırt edildi, mekanizma `## Uygulama Notları`'na tek paragraf yazıldı (ölçümle, koda bakarak varsayarak değil)
+- [x] Seçilen yol (A ya da B) ve **neden öteki değil** — gerekçe notlarda
+- [x] `shutdown()` sınırlı sürede dönüyor; süre bir `const` ve gerekçesi yorumda (kısa/uzun olmanın bedeli)
+- [x] `shutdown()`'ın doc'u gerçek mekanizmayı anlatıyor; `trap '' HUP`'ı tek sebep gibi sunan cümle düzeltildi
+- [x] `CLAUDE.md`'nin kapanış maddesi güncellendi — borç kapandıysa kalktı, daraldıysa daraltıldı, **silinip geçilmedi**
+- [x] Test: `shutdown_returns_within_limit` — HUP'ı yutan çocukla (`trap '' HUP`) `shutdown()` sınırı aşmıyor
+- [x] Test: `shutdown_with_busy_writer` — kapanış anında PTY'ye yazan çocukla asılmıyor (bu setin gerçek üreticisi)
+- [x] **Ölçüm:** `BT_SCROLL_TEST=1` en az 8 koşu, asılma oranı **0/8** olmalı; sayı notlara yazılır (öncesi 5/8) — **0/8**, sınır 2/8 koşuda doldu
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` **zorunlu** + `make duman` **iki yükte**) — kapıdan sonra yeniden koşuldu: üçü de çıkış 0, Smoke `kare=1 hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke pipeline=ok` (bit bit aynı), Load 8/8 jeton satırı
+- [x] `/simplify` çalıştırıldı, bulgular uygulandı — dört mercek, dördü döndü; dört bulgu uygulandı, üçü gerekçeyle geçildi (notlarda)
+- [x] `/code-review` çalıştırıldı, bulgular giderildi — Skill fork'u gecikti, `proje.md` basamak 2 (`code-reviewer` subagent) koştu, sonra fork da döndü; yedi bulgu uygulandı, ölçüm yolundaki dokuz bulgu phase-3'e devredildi (notlarda)
+- [x] `/audit` çalıştırıldı, bulgular giderildi — on mercek elendi, ilgili altısı koştu (1/2/3/6/7/10 temiz), dördü ilgisiz; yeni bulgu yok (notlarda)
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
 - [ ] Commit: {hash}

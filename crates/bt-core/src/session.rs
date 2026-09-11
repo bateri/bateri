@@ -8,8 +8,9 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
@@ -456,6 +457,25 @@ impl EventListener for Adapter {
 /// `SIGHUP` bu ikilinin düşmesiyle gider.
 type Reader = JoinHandle<(EventLoop<Pty, Adapter>, State)>;
 
+/// [`Session::shutdown`]'ın çocuğa tanıdığı süre.
+///
+/// Sayı **ölçümden** geliyor ve ölçüm iki kutup gösteriyor, arası yok
+/// (`BT_SCROLL_TEST=1 BT_RUN_SECONDS=2`, sekiz koşu, debug, bu makine):
+/// kapanış ya **0,44–0,70 ms**'de bitiyor (dört koşu) ya da hiç bitmiyor
+/// (dört koşu — çocuk çıkışın içinde takılı, mekanizması
+/// [`Session::shutdown`]'ın doc'unda). Yani süre "çocuğun düzgün kapanma
+/// şansı" için değil, o şans bittikten sonra **kullanıcının ne kadar
+/// bekleyeceği** için var:
+///
+/// - Kısa olsa ne kaybolur: ölçülen düzgün kapanışın üç mertebe üstünde
+///   duruyoruz; daralan pay yavaş bir makinenin ya da release olmayan bir
+///   yolun düzgün kapanışı olurdu — bu kadar paydan sonra kesilen bir
+///   kapanış artık "yavaş" değil, takılmıştır.
+/// - Uzun olsa ne kaybolur: bu süre Cmd-Q ile pencerenin kapanması
+///   arasındaki gecikmenin tavanı. Yarım saniye donma sayılmıyor; saniyeler
+///   sayılır.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
 /// PTY'si, okuyucu thread'i ve grid'i olan bir terminal oturumu.
 pub struct Session {
     term: Arc<FairMutex<Term<Adapter>>>,
@@ -812,18 +832,88 @@ impl Session {
     /// `SIGHUP` o son adımda, `Pty`'nin `Drop`'unda gider. İkinci çağrı
     /// sessizce döner.
     ///
-    /// **Bloklar.** `Pty::drop` `SIGHUP`'tan sonra `child.wait()` çağırıyor;
-    /// sinyali yutan bir çocuk (`trap '' HUP`) bu çağrıyı süresiz bekletir.
-    /// Kesecek olan `bt-shell`'in bekçi thread'i ve o yalnız `BT_RUN_SECONDS`
-    /// yolunda kurulur: etkileşimli kullanımda böyle bir çocuk uygulamayı
-    /// gerçekten asar (bilinen sınır, `.tasks/002-vt-motoru/phase-4.md`).
+    /// **En çok [`SHUTDOWN_GRACE`] bekler**, çünkü son iki adım bu thread'de
+    /// değil: tutamak ayrı bir thread'e taşınıyor, `join` ve düşme orada
+    /// koşuyor, bu fonksiyon onları sınırlı bekliyor. Süre dolarsa çocuk
+    /// arkada bırakılır ve bir satır stderr'e düşer.
+    ///
+    /// Sınırın sebebi `Pty::drop`'un `SIGHUP`'tan sonra çağırdığı
+    /// `child.wait()` ve o çağrının **iki** ayrı sebeple dönmemesi:
+    ///
+    /// 1. Sinyali yutan çocuk (`trap '' HUP`) hiç ölmez; `wait` çocuk kendi
+    ///    kendine bitene kadar bekler (ölçüldü: 10 saniyelik betikte
+    ///    `shutdown` 10,0 saniye bloklamıştı).
+    /// 2. PTY'ye **yazmakta** olan çocuk `SIGHUP`'ı alıp çıkışa girer ama
+    ///    çıkışın içinde takılır (`ps` durumu `?Es`): master fd'yi artık
+    ///    kimse okumuyor — okuyucu thread bitti ve fd `Pty`'nin bir alanı,
+    ///    yani `Drop` gövdesinden **sonra** kapanıyor. O çocuk `SIGKILL` ile
+    ///    de kurtulmuyor (ölçüldü); ancak sürecimiz ölüp master kapandığında
+    ///    gidiyor. Ölçüm yükünün koşularını asan mekanizma buydu.
+    ///
+    /// Yani sınır çocuğu **iyileştirmiyor**, kapanışı sınırlıyor: süresi
+    /// dolan yolda çocuk çıkışın içinde kalır ve onu süreç çıkışı toplar.
+    /// Kalıcı çare (2) için master'ı `wait` bloklarken boşaltmaktır; bu
+    /// crate'ten yolu `Session::spawn`'da `pty.file().try_clone()` ile
+    /// master'ın bir kopyasını almaktan geçer (`EventLoop` `Pty`'yi
+    /// `join`'den sonra **vermiyor**, yani kopya baştan alınmak zorunda).
+    /// Yapılmadı ve borç olarak kayıtlı: sınır her hâlde gerekiyor, (1)
+    /// boşaltmakla çözülmüyor.
+    ///
+    /// **İki şeyi vaat etmiyor.** Süre dolduğunda `SIGHUP`'ın gittiği garanti
+    /// değil: yavaş olan adım `join` ise (okuyucu thread hâlâ ayrıştırıyorsa)
+    /// `Pty::drop` daha başlamamıştır ve çocuğa asıl hangup'ı süreç çıkışının
+    /// master'ı kapatması verir. Sınır da her yolda yok: kapanış thread'i
+    /// kurulamazsa (OS thread sınırı) bu fonksiyon sınırsız kalır, gövdedeki
+    /// yorum o dalın iki sonucunu sayıyor.
     pub fn shutdown(&self) {
         let Some(reader) = lock(&self.reader).take() else {
             return;
         };
         self.send(Msg::Shutdown);
-        if reader.join().is_err() {
-            eprintln!("bateri: okuyucu thread panikle bitti");
+
+        // `join` de düşme de bloklayabilir (iki sebep yukarıda), yani ikisi
+        // de bu thread'de koşmuyor. Kanalın taşıdığı `()` değil zamanlama:
+        // "bitti" haberi gelmezse sınır dolmuştur.
+        let (done, finished) = mpsc::channel();
+        let teardown = thread::Builder::new()
+            .name("PTY teardown".to_owned())
+            .spawn(move || {
+                let tail = reader.join();
+                if tail.is_err() {
+                    eprintln!("bateri: okuyucu thread panikle bitti");
+                }
+                // Düşme `send`'den **önce**, açıkça: `SIGHUP` ve
+                // `child.wait()` `Pty::drop`'ta koşuyor, yani sınırın
+                // kapsaması gereken iş bu satır. `send` öne alınsa sınır
+                // yalnız `join`'i kapsar ve belirti sessizce geri döner —
+                // `shutdown_returns_within_limit`'in alt sınırı tam bunu
+                // kırmızıya çeviriyor.
+                drop(tail);
+                let _ = done.send(());
+            });
+        // Thread kurulamazsa (OS thread sınırı) **sınır yoktur** ve bu dalda
+        // kapanışın nerede koştuğu bir yarışa bağlı: tutamak `spawn`
+        // başarısız olurken closure ile birlikte çoktan düşmüştür, yani
+        // `(EventLoop, State)` çiftini ya okuyucu thread kendi bitişinde
+        // düşürür (kimse bloklanmaz, ama `SIGHUP` + `child.wait()` sınırsız
+        // koşar) ya da — okuyucu thread çoktan bitmişse — çift orada düştüğü
+        // için `Pty::drop` bu thread'i bloklar. İkisi de sessiz kalmasın.
+        if let Err(err) = teardown {
+            eprintln!("bateri: kapanış thread'i kurulamadı ({err}), kapanış sınırsız");
+            return;
+        }
+        match finished.recv_timeout(SHUTDOWN_GRACE) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!("bateri: shell {SHUTDOWN_GRACE:?} içinde kapanmadı, arkada bırakıldı");
+            }
+            // Kanal göndermeden kapandı: kapanış thread'i panikledi ve bu
+            // **hemen** dönüyor, yani süre dolmadı. İki durum tek satıra
+            // katlanırsa tanı yalan söyler ("500 ms bekledim") ve kapanış
+            // yolundaki bir panik sessizce yutulur.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("bateri: kapanış thread'i panikle bitti, PTY'nin durumu bilinmiyor");
+            }
         }
     }
 
@@ -1389,6 +1479,73 @@ mod tests {
         );
         // İkinci çağrı sessizce döner.
         session.shutdown();
+    }
+
+    /// `shutdown()`'ı ölçerek çağırır ve **üst** sınırı doğrular; dönen süre
+    /// çağıranın kendi ölçütü için.
+    ///
+    /// Üst sınır tek yerde: sözleşme `SHUTDOWN_GRACE` artı zamanlama payı.
+    /// Pay iki saniye, çünkü `make test-yaris` bütün takımı tek thread'de
+    /// koşuyor ve o koşuda thread kurulumu gecikebilir — pay olmasa sınama
+    /// sınırı değil makinenin yükünü ölçerdi.
+    fn shutdown_within_grace(session: &Session) -> Duration {
+        let started = Instant::now();
+        session.shutdown();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < SHUTDOWN_GRACE + Duration::from_secs(2),
+            "kapanış sınırı aşıldı: {elapsed:?}"
+        );
+        elapsed
+    }
+
+    #[test]
+    fn shutdown_returns_within_limit() {
+        let wake = Arc::new(TestWake::default());
+        // `shutdown()`'ın eski doc'unun tek sebep gibi anlattığı senaryo:
+        // sinyali **yutan** çocuk. `Pty::drop`'un `child.wait()`'i böyle bir
+        // çocukta süresiz bekler, sınırlı bekleme onu kesiyor.
+        //
+        // `sleep` sonlu ve bu bir süs değil: `trap ''` sinyali `SIG_IGN`
+        // yapıyor, `sleep` onu **miras alıyor** ve süreç çıkışı master'ı
+        // kapatsa bile ikisi ölmüyor — sonsuz bir döngü her `cargo test`'ten
+        // sonra makinede kalırdı. Beş saniye sınırın on katı: aşağıdaki alt
+        // sınır erken ölen bir çocuğu kırmızıya çevirdiği için bu pay
+        // kısaltılabilir ama sıfırlanamaz.
+        let session = spawn_session(
+            "trap '' HUP; printf '\\033[41mx\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+        // Çapa: kırmızı hücre geldiyse `trap` satırı koştu ve çocuk
+        // `sleep`'te. Çapa olmadan sınama boşuna yeşil kalabilir — `trap`'a
+        // henüz varmamış bir çocuk `SIGHUP` ile zaten hemen ölür.
+        wait_cells(&session, &wake, 1);
+
+        let elapsed = shutdown_within_grace(&session);
+        // İkinci yarı: sınır gerçekten **dolmuş** olmalı. Bu çocuk ölmüyor,
+        // yani hemen dönen bir `shutdown` sınırı değil çocuğun erken
+        // ölümünü ölçerdi ve sınama boşuna yeşil kalırdı.
+        assert!(elapsed >= SHUTDOWN_GRACE, "{elapsed:?}");
+    }
+
+    #[test]
+    fn shutdown_with_busy_writer() {
+        let wake = Arc::new(TestWake::default());
+        // Asılmanın **gerçek** üreticisi ve bu sette setin kendi yükü:
+        // kapanış anında PTY'ye yazan çocuk, yani `shutdown()`'ın doc'undaki
+        // ikinci sebep (çıkışın içinde takılma). Sınır olmasa bu sınama
+        // asılırdı — takılma her koşuda değil, kuyruğun kapanış anında dolu
+        // olmasına bağlı; alt sınır bu yüzden `shutdown_returns_within_limit`
+        // tarafında pinli.
+        let session = spawn_with_command(load_shell(5), Arc::clone(&wake));
+        // Yük gerçekten akıyor: ilk uyandırma geldiyse çocuk yazmaya başladı,
+        // yani kapanış anında kuyruk dolu olabilir.
+        assert!(
+            wake.wait_wakes(1, Duration::from_secs(5)) > 0,
+            "ölçüm yükü hiç çıktı üretmedi"
+        );
+
+        shutdown_within_grace(&session);
     }
 
     #[test]

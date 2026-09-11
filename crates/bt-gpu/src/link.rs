@@ -43,7 +43,9 @@ struct WakerInner {
     /// `Arc<Session>` (hatta `Weak`, çünkü `upgrade()` onu çağrı süresince
     /// maddileştirir) burada olamaz: bu gövdeyi okuyucu thread de, Metal'in
     /// tamamlanma thread'i de tutuyor ve son güçlü referans oralardan birinde
-    /// düşerse `Drop for Session` → `shutdown()` → `join()` o thread'de koşar.
+    /// düşerse `Drop for Session` → `shutdown()` o thread'de koşar — `join`
+    /// artık ayrı bir thread'de ve sınırlı, yani panik değil ama yarım
+    /// saniyelik bir durma ve hiç bitmeyen bir kapanış.
     /// `wake.rs`'in Sahiplik paragrafı bunu adıyla yasaklıyor.
     dirty: DirtyFlag,
     /// `Retained<CAMetalDisplayLink>` kendiliğinden `Send` değil;

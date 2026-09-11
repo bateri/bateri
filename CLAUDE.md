@@ -109,11 +109,20 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **Boşta sıfır kare.** Kirli satır yoksa frame gönderilmez. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
   animasyonu 90 ms'lik solmaya indirir.
-- **Kapanış bloklar ve bunun bir sınırı var.** `Session::shutdown()`
-  `SIGHUP`'tan sonra çocuğu bekler; sinyali yutan bir çocuk (`trap '' HUP`)
-  ana thread'i süresiz bekletir. Duman koşusunda bekçi thread bunu keser
-  (`_exit(70)`), etkileşimli kullanımda **kesen yok** — bilinen borç; kalıcı
-  çözüm `bt-core`'da sınırlı bekleme (`SIGHUP` → süre → `SIGKILL`).
+- **Kapanış sınırlı bekler, çocuk yine de ölmeyebilir.**
+  `Session::shutdown()` `SIGHUP`'tan sonra `join`'i ve `Pty`'nin düşmesini
+  ayrı bir thread'e alır ve en çok `SHUTDOWN_GRACE` (yarım saniye) bekler;
+  ne sinyali yutan bir çocuk (`trap '' HUP`) ne de PTY'ye yazarken `SIGHUP`
+  alıp **çıkışın içinde takılan** çocuk (`ps` durumu `?Es`) artık kapanışı
+  asamaz; tek istisna kapanış thread'inin kurulamaması (OS thread sınırı),
+  o dalda sınır yoktur. Kalan borç çocuğun kendisi: süre dolunca arkada
+  bırakılır ve ancak süreç çıkışı master fd'yi kapatınca gider. Kalıcı çare
+  "süre → `SIGKILL`" **değil** — ölçüm onu çürüttü, o çocuk `SIGKILL`
+  almıyor; çare `wait` bloklarken master'ı boşaltmak, yolu da
+  `Session::spawn`'da `pty.file().try_clone()` (yeni bağımlılık istemiyor) —
+  `EventLoop` `Pty`'yi `join`'den sonra vermediği için kopya baştan alınmak
+  zorunda. Duman koşusundaki bekçi (`_exit(70)`) duruyor ama artık kapanış
+  yolunun **başka** asılmalarına karşı.
 - **Render yolu bloklanmaz.** PTY okuma ve ayrıştırma kendi thread'inde; AppKit
   çağrıları `MainThreadMarker` ile ana thread'de; renderer `CAMetalDisplayLink`
   ile sürülür.
