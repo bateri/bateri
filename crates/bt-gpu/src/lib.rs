@@ -11,14 +11,20 @@
 //! görür — katman tablosu iki kenarla değil bir kenarla yaşar. Atlasın
 //! **dokusu** da bu crate'in: `bt-atlas` yuva numarası ve CPU bitmap'i verir,
 //! `replaceRegion` ile dokuya yazan ve `cell` pipeline'ıyla çizen buradır.
+//! Kare yolunun **ölçüm defteri** de burada ([`Stats`]): zamanı kim
+//! üretiyorsa örneği de o topluyor — CPU aralıkları display link'ten, GPU
+//! deltası Metal'in tamamlanma bloğundan. Bu crate hiçbir şey **basmaz**;
+//! defteri kuran ve kapanışta okuyan `bt-shell`'dir.
 
 mod error;
 mod frame;
 mod link;
 mod renderer;
+mod stats;
 mod surface;
 
 pub use error::GpuError;
 pub use link::{DisplayLink, Waker};
 pub use renderer::{CellMetrics, Renderer};
+pub use stats::{Samples, Stats};
 pub use surface::Surface;

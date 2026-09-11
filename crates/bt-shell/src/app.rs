@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use bt_core::{Session, SessionOptions, Wake, load_shell, smoke_shell};
-use bt_gpu::{CellMetrics, DisplayLink, Renderer, Surface, Waker};
+use bt_gpu::{CellMetrics, DisplayLink, Renderer, Stats, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -22,7 +22,7 @@ use objc2_foundation::{
 };
 
 use crate::view::BateriView;
-use crate::{Options, Workload};
+use crate::{Options, Run, Workload};
 
 /// Kaydırma geçmişi satır sayısı; ayar dosyası (00X) gelene kadar sabit.
 const SCROLLBACK: usize = 10_000;
@@ -162,8 +162,14 @@ pub(crate) struct Ivars {
     /// kopya tutuyor ama oraya `stop()`'tan sonra uzanmak yanlış olurdu.
     session: OnceCell<Arc<Session>>,
     wake: Arc<ShellWake>,
-    run_seconds: Option<u64>,
-    workload: Option<Workload>,
+    /// Süreli koşunun tarifi; `None` → kullanıcının kendi oturumu. Deadline,
+    /// bekçi, sabit shell ve rapor **hep birlikte** buna bağlı.
+    run: Option<Run>,
+    /// Ölçüm defteri — kapı kapalıyken `None` ve hiç ayrılmamış.
+    ///
+    /// `bt-gpu`'nun tipi ama sahibi burası: `DisplayLink` ile tamamlanma bloğu
+    /// birer kopyasını yazıyor, kapanışta okuyan (rapor) bu kopya.
+    stats: Option<Arc<Stats>>,
 }
 
 define_class!(
@@ -234,7 +240,7 @@ define_class!(
                 .expect("pencere ve contentView kuruldu");
             self.start_session(mtm, grid, &view);
 
-            if let Some(s) = self.ivars().run_seconds {
+            if let Some(run) = self.ivars().run {
                 // block2 yok: zamanlayıcı performSelector ile.
                 // SAFETY: `runDeadline:` bu sınıfta tanımlı ve tek
                 // Option<&AnyObject> argüman alıyor. Delegate özellikleri zayıf
@@ -246,7 +252,7 @@ define_class!(
                     self.performSelector_withObject_afterDelay_inModes(
                         sel!(runDeadline:),
                         None,
-                        s as f64,
+                        run.seconds as f64,
                         &NSArray::from_slice(&[NSRunLoopCommonModes]),
                     );
                 }
@@ -274,8 +280,8 @@ define_class!(
             // Rapor basılmadan çıkmak `make duman`'a hiçbir şey ölçmemiş bir
             // koşuyu exit 0 ile yeşil gösterirdi — kapının sahte yeşil verdiği
             // tek yol buydu.
-            if self.ivars().run_seconds.is_some() {
-                self.report_and_exit();
+            if let Some(run) = self.ivars().run {
+                self.report_and_exit(run);
             }
         }
     }
@@ -321,7 +327,12 @@ define_class!(
         #[unsafe(method(runDeadline:))]
         fn run_deadline(&self, _arg: Option<&AnyObject>) {
             self.shutdown();
-            self.report_and_exit();
+            // Zamanlayıcı yalnız `run` doluyken kuruldu; `if let` burada bir
+            // dal değil o değişmezin okunması. `expect` olmadı, çünkü burası
+            // rapor yolu ve kapanışta bir panik raporun kendisini yutardı.
+            if let Some(run) = self.ivars().run {
+                self.report_and_exit(run);
+            }
         }
     }
 );
@@ -353,13 +364,13 @@ enum Verdict {
 /// Karar [`AppDelegate::report_and_exit`]'in gövdesinde kalsaydı sınırın
 /// yönünü (8 mi 180 mi, `Load` muaf mı) yalnız `make duman` bilirdi ve hiçbir
 /// sınamada yazılı olmazdı.
-fn verdict(n: u64, k: usize, g: usize, r: usize, workload: Option<Workload>) -> Verdict {
+fn verdict(n: u64, k: usize, g: usize, r: usize, workload: Workload) -> Verdict {
     match workload {
         // Ölçüm yükü düz metin akıtıyor: arka plan da kural da **yok** ve
         // olmayacak. İkisini sormak, duman reçetesini hiç koşmayan bir koşuya
         // o reçetenin sayılarını sormak olurdu — kapı her ölçüm koşusunda
         // düşerdi. Kare akışı burada işin kendisi: üst sınır da yok.
-        Some(Workload::Load) => {
+        Workload::Load => {
             if n == 0 || g == 0 {
                 Verdict::MissingCounter {
                     required: "kare ve glif >0 olmalı",
@@ -369,7 +380,7 @@ fn verdict(n: u64, k: usize, g: usize, r: usize, workload: Option<Workload>) -> 
             }
         }
         // Duman reçetesi: dördü de > 0 **ve** kare sayısı üst sınırlı.
-        Some(Workload::Smoke) | None => {
+        Workload::Smoke => {
             if n == 0 || k == 0 || g == 0 || r == 0 {
                 Verdict::MissingCounter {
                     required: "dördü de >0 olmalı",
@@ -392,6 +403,14 @@ impl AppDelegate {
         opts: Options,
     ) -> Retained<Self> {
         let surface = renderer.surface();
+        // Halka **yalnız** kapı açıkken ayrılıyor: kapalı kapının bedeli bir
+        // `Option` dallanması olmalı, bir ayırma değil (R4.1). Kapasitenin
+        // koşu süresinden türemesi de `bt-gpu`'nun işi — tazeleme hızını bilen
+        // taraf o.
+        let stats = opts
+            .run
+            .and_then(|run| run.stats_since.map(|since| Stats::new(since, run.seconds)))
+            .map(Arc::new);
         let this = Self::alloc(mtm).set_ivars(Ivars {
             renderer,
             surface,
@@ -401,8 +420,8 @@ impl AppDelegate {
             wake: Arc::new(ShellWake {
                 waker: OnceLock::new(),
             }),
-            run_seconds: opts.run_seconds,
-            workload: opts.workload,
+            run: opts.run,
+            stats,
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
@@ -420,29 +439,16 @@ impl AppDelegate {
                 // beklentileri bu yüzden birer belge cümlesi değil, sınanmış
                 // birer iddia.
                 //
-                // Dallanma **yükü** soruyor, süreyi değil: `run_seconds`
-                // deadline'ı ve bekçiyi de kuruyor ve üçü tek koşula
-                // bağlanırsa ölçüm koşusu ikisinden birini kaybeder.
-                command: self.ivars().workload.map(|w| match w {
+                // Dallanma **yükü** soruyor, süreyi değil: aynı `Run` hem
+                // deadline'ı hem bekçiyi kuruyor ve yük onlardan bağımsız.
+                command: self.ivars().run.map(|run| match run.workload {
                     Workload::Smoke => smoke_shell(),
-                    // Yükün süresi deadline'la aynı olmalı: kısa kalırsa
-                    // pencere koşunun kuyruğunda boşa düşer ve ölçüm boşta
-                    // kare örnekler.
-                    //
-                    // `main.rs` süresiz yükü eliyor, ama `Options` `pub` ve
-                    // alanları da `pub`: dışarıdan `run_seconds: None` +
-                    // `workload: Some(Load)` kurulabilir ve o koşu **sessizce
-                    // 0 ile** çıkardı (`will_terminate` raporu `run_seconds`'a
-                    // bakıyor). Yorum bir değişmezi savunamaz; `debug_assert`
-                    // savunur. Kalıcı çözüm tipin kendisi — `Options`'ın tek
-                    // alana inmesi 005 phase-2'ye devredildi.
-                    Workload::Load => {
-                        debug_assert!(
-                            self.ivars().run_seconds.is_some(),
-                            "ölçüm yükü süresiz kurulamaz"
-                        );
-                        load_shell(self.ivars().run_seconds.unwrap_or(0))
-                    }
+                    // Yükün süresi deadline'la aynı: kısa kalırsa pencere
+                    // koşunun kuyruğunda boşa düşer ve ölçüm boşta kare
+                    // örnekler. Süresiz yük artık **temsil edilemiyor** —
+                    // `Run` süreyi yükün yanında taşıyor, o yüzden eski
+                    // `unwrap_or(0)` ve onu savunan `debug_assert` düştü.
+                    Workload::Load => load_shell(run.seconds),
                 }),
                 cols: grid.cols,
                 rows: grid.rows,
@@ -471,6 +477,7 @@ impl AppDelegate {
             Rc::clone(&self.ivars().renderer),
             session,
             grid.cell,
+            self.ivars().stats.clone(),
         );
         // Uyandırma yolu kapanmadan kare istemiyoruz: aradaki bir `Wakeup`
         // sessizce düşerdi.
@@ -515,8 +522,8 @@ impl AppDelegate {
         // açılış (Metal device, metallib yükleme, ilk pencere) soğuk bir
         // makinede saniyeler sürebilir ve o süre bütçeden düşseydi sağlıklı
         // bir koşu `_exit(70)` ile kırmızı düşerdi.
-        if let Some(s) = self.ivars().run_seconds {
-            crate::watchdog(s);
+        if let Some(run) = self.ivars().run {
+            crate::watchdog(run.seconds);
         }
         if let Some(link) = self.ivars().link.get() {
             link.stop();
@@ -535,7 +542,7 @@ impl AppDelegate {
     /// Satır burada **açıkça** yazılıyor; `Drop`'a güvenen hiçbir yol yok.
     /// `process::exit` `Drop` koşturmaz ve bekçinin `_exit(70)`'i atexit'i
     /// bile atlar.
-    fn report_and_exit(&self) -> ! {
+    fn report_and_exit(&self, run: Run) -> ! {
         let n = self.ivars().renderer.frames();
         let k = self.ivars().renderer.last_bg_count();
         let g = self.ivars().renderer.last_glyph_count();
@@ -571,18 +578,17 @@ impl AppDelegate {
         // başarı satırında ve yalnız stdout'ta: makine sözleşmesi o. Hata
         // satırları aynı sayıları taşıyor ama jeton biçiminde değil, yoksa
         // `kare=` arayan bir CI adımı düşen koşudan kare sayısı okurdu.
-        let secs = self.ivars().run_seconds.unwrap_or(0);
-        let workload = self.ivars().workload;
+        let secs = run.seconds;
         // `yuk=` jetonu, `Load`'un başarı satırındaki `hucre=0 kural=0`'ı
         // okunabilir kılıyor: o iki sıfır ölçüm yükünde **beklenen** (düz
         // metin akıyor), duman yükünde ise ölü bir boru hattı demek. Jeton
         // olmadan satırı okuyan taraf ikisini ayıramazdı — ve sözleşme jeton
         // eklemeye zaten izin veriyor, silmeye vermiyor.
-        let load = match workload {
-            Some(Workload::Load) => "load",
-            Some(Workload::Smoke) | None => "smoke",
+        let load = match run.workload {
+            Workload::Load => "load",
+            Workload::Smoke => "smoke",
         };
-        match verdict(n, k, g, r, workload) {
+        match verdict(n, k, g, r, run.workload) {
             Verdict::Pass => {
                 println!(
                     "kare={n} hucre={k} glif={g} kural={r} yuva={used}/{total} yuk={load} pipeline=ok"
@@ -655,8 +661,8 @@ mod tests {
 
     #[test]
     fn idle_limit_catches_excess_frames() {
-        let smoke = |n, k, g, r| verdict(n, k, g, r, Some(Workload::Smoke));
-        let load = |n, k, g, r| verdict(n, k, g, r, Some(Workload::Load));
+        let smoke = |n, k, g, r| verdict(n, k, g, r, Workload::Smoke);
+        let load = |n, k, g, r| verdict(n, k, g, r, Workload::Load);
         let excess = Verdict::ExcessFrames {
             limit: IDLE_FRAME_LIMIT,
         };

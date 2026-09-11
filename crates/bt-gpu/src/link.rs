@@ -9,6 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Instant;
 
 use bt_core::{DEFAULT_BG, DEFAULT_CURSOR, DirtyFlag, Session};
 use dispatch2::{DispatchQueue, MainThreadBound};
@@ -16,10 +17,14 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
+// Yalnız tamamlanma bloğunun GPU damgaları için: `GPUStartTime`/`GPUEndTime`
+// `MTLCommandBuffer` protokolünde ve trait kapsamda olmadan çağrılamaz.
+use objc2_metal::MTLCommandBuffer;
 use objc2_quartz_core::{CAMetalDisplayLink, CAMetalDisplayLinkDelegate, CAMetalDisplayLinkUpdate};
 
 use crate::frame::Frame;
 use crate::renderer::{CellMetrics, Completion};
+use crate::stats::Stats;
 use crate::{GpuError, Renderer, Surface};
 
 /// **Kare istemenin tek tanımı**: hasar bayrağını dik, link'i aç.
@@ -227,6 +232,11 @@ struct LinkIvars {
     waker: Waker,
     /// Tamamlanma bloğu kurulumda bir kez ayrılır ve burada yaşar.
     completion: Completion,
+    /// Ölçüm kapısı. `None` → kapı kapalı ve kare yolu bu phase'den **önceki**
+    /// hâliyle koşar: tek bir saat okuması bile yok (R4.1). Kapı açıkken de
+    /// aynı gövdeyi tamamlanma bloğu paylaşıyor (`Arc`), çünkü GPU deltası
+    /// Metal'in thread'inde doğuyor.
+    stats: Option<Arc<Stats>>,
     /// Kare listesi uzun ömürlü: her karede `clear` ile dolar, ayrılan yer
     /// korunur (kare başına yeniden ayırma yok).
     frame: RefCell<Frame>,
@@ -267,6 +277,14 @@ define_class!(
             // `Session`'a geri girmiyor, yani ikinci bir ödünç doğmuyor.
             let mut frame = iv.frame.borrow_mut();
             frame.clear(iv.cell.get().cell_px());
+            // CPU **iki** aralık ölçülüyor, bir değil: kilit beklemesi
+            // `session.frame`'in içinde, encode ise `draw`'ın. Tek aralık
+            // ikisini toplar ve ayrımı yok eder (R3.1).
+            //
+            // Kapı kapalıyken saat **hiç** okunmuyor (R4.1): `then` de `map`
+            // de closure'ı yalnız dolu tarafta koşturuyor, yani kapalı kapının
+            // bedeli bir dallanma.
+            let t0 = iv.stats.is_some().then(Instant::now);
             // Hasar yoksa encode ve commit'i hiç yapmıyoruz. Drawable'ı bu
             // tasarruf kapsamaz: `CAMetalDisplayLink` onu callback'ten ÖNCE
             // alıp `update`'in içine koyuyor, `drawable()`'ı çağırmamak alımı
@@ -276,19 +294,39 @@ define_class!(
             let Some(cursor) = iv.session.frame(|cell| frame.push(cell)) else {
                 // Boşta sıfır kare: yeni içerik yok, link uyur. Sıradaki
                 // `Wakeup` onu `Waker` üzerinden geri açar.
+                //
+                // Örnek de **yazılmıyor** ve bu bir dal değil, yolun şekli:
+                // bu karede `draw` hiç koşmadı, "encode = 0 ns" diye sahte bir
+                // örnek p95'i aşağı çekerdi.
                 link.setPaused(true);
                 return;
             };
             frame.push_cursor(cursor, DEFAULT_CURSOR);
+            // Birinci aralık burada kapanıyor — `push_cursor`'dan **sonra**:
+            // imleci listeye koymak sink işidir, encode değil. Damga bir satır
+            // yukarıda alınsaydı `cpu_encode` `draw`'ın yanında onu da ölçer
+            // ve jetonun adı yalan söylerdi. Çift tek bir `Option`'da taşınıyor
+            // ki "ikisi de var ya da hiçbiri" temsil edilebilir tek durum olsun.
+            let spans = t0.map(|t0| (t0, Instant::now()));
 
             // `frame()` bayrağı çizim başlamadan tüketti; hata hâlinde geri
             // dikilmezse bu içerik bir daha istenmez ve pencere bayat kalır.
             // Senkron ve asenkron hata aynı kapıdan geçiyor.
-            if let Err(e) = iv
+            let drawn = iv
                 .renderer
-                .draw(&update.drawable(), DEFAULT_BG, &frame, &iv.completion)
-            {
-                iv.retry.draw_failed(&e);
+                .draw(&update.drawable(), DEFAULT_BG, &frame, &iv.completion);
+            // Encode aralığı `draw`'ın dönüşüyle kapanıyor: ikinci damga
+            // buraya, karar dallarından **önce** düşüyor.
+            let spans = spans.map(|(t0, t1)| (t1 - t0, Instant::now() - t1));
+            match drawn {
+                // Örnek yalnız **yola çıkan** karede yazılır: encode
+                // edilemeyen kare hiçbir şey ölçmedi.
+                Ok(()) => {
+                    if let Some((stats, (cpu_frame, cpu_encode))) = iv.stats.as_ref().zip(spans) {
+                        stats.record_cpu(cpu_frame, cpu_encode);
+                    }
+                }
+                Err(e) => iv.retry.draw_failed(&e),
             }
         }
     }
@@ -324,6 +362,7 @@ impl DisplayLink {
         renderer: Rc<Renderer>,
         session: Arc<Session>,
         cell: CellMetrics,
+        stats: Option<Arc<Stats>>,
     ) -> Self {
         let link =
             CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), surface.layer());
@@ -341,8 +380,25 @@ impl DisplayLink {
         });
         let completion = {
             let retry = Arc::clone(&retry);
+            // Blok kare başına kurulmuyor (bkz. `Renderer::completion`), yani
+            // ölçüm gövdesi de kurulumda bir kez giriyor: `Arc` ile, tıpkı
+            // `retry` gibi (R3.2 — closure ile kare damgası yakalanamaz).
+            let stats = stats.clone();
             renderer.completion(move |result| match result {
-                Ok(()) => retry.streak.succeeded(),
+                Ok(cmd) => {
+                    retry.streak.succeeded();
+                    // Ölçüm kapısı **burada**: kapalıyken tek bir ObjC çağrısı
+                    // bile yapılmıyor (R4.1). Açılış damgası da burada
+                    // kapanıyor, `draw`'da değil — ölçülen şey "main'den ilk
+                    // **tamamlanan** kareye" ve commit etmek bitirmek değildir.
+                    if let Some(stats) = &stats {
+                        stats.mark_startup();
+                        // `GPUEndTime - GPUStartTime` Metal'in kendi saati; CPU
+                        // damgasıyla ilişkilendirilmiyor, çünkü soru "hangi
+                        // kare" değil **dağılım**.
+                        stats.record_gpu(cmd.GPUStartTime(), cmd.GPUEndTime());
+                    }
+                }
                 Err(e) => retry.draw_failed(&e),
             })
         };
@@ -354,6 +410,7 @@ impl DisplayLink {
                 retry,
                 waker: waker.clone(),
                 completion,
+                stats,
                 frame: RefCell::new(Frame::default()),
                 cell: Cell::new(cell),
             },
