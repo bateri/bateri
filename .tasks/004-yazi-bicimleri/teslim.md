@@ -72,9 +72,11 @@ ama aynı push aralığında. Notlar kazanıyor: `/ship`'in göreceği aralıkta
 `.metal` gerçekten değişti, yani A bölümünde `make shader` `[~]` değil
 **gerçek, koşmuş ve geçmiş bir adım**.
 
-### B.1 `/ship` — 13 commit'lik push `[oto]`
+### B.1 `/ship` — dallanmamış `main` push'u `[oto]`
 
-`origin/main..HEAD` bugün 13 commit; hiçbiri push edilmedi. Sırayla:
+Sayıyı `/ship` adım 2 sayar (`git log origin/main..HEAD`) — buraya sabit
+yazılan bir sayı, teslimden önce düşen her düzeltmeyle bayatlar. Bu
+belge yazılırken hiçbiri push edilmemişti; omurga sırayla:
 `9311e1b` (set kurulumu) → `9b9d63f`, `b0e2e38` (planlama damgaları) →
 `bb04da7` (phase dosyaları) → `92607aa` (phase-1) → `004c61a` (damga) →
 `1dbb084` → `643c8c6` (phase-2) → `271c670`, `b648d56` (damgalar) →

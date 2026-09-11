@@ -370,6 +370,12 @@ taşıyıp kalın yüzün taşımadığı bir karakter bulunamadı, yani dal bu 
 ateşlenemiyor. Uydurma sınama yazmak yerine kayda geçiyor — kırpma dalıyla
 (not 3) aynı dürüstlük.
 
+> **Bu iddia phase-3'te düştü.** Aranan karakter bulundu: kutu çizim
+> karakterleri Menlo Bold'da yok ama düz yüzde var, yani dal artık
+> ateşleniyor ve sınanıyor. Gerekçe phase-3'ün `## Uygulama Notları`'nda;
+> `teslim.md`'nin borç listesine **taşınmadı**. Cümle silinmiyor çünkü o
+> günkü kayıt doğruydu — aşıldığı buraya yazılıyor.
+
 ### `/simplify` kaydı
 
 Dört mercek (reuse, simplification, efficiency, altitude) paralel koştu.
