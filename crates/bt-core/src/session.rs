@@ -218,6 +218,12 @@ impl DirtyFlag {
 /// İki yerde ayrı yazılsalardı biri değişip diğeri sessizce eski kalırdı — ve
 /// duman ikisini de yalnız "> 0" diye sorduğu için kimse fark etmezdi.
 /// Bu hâliyle sınamalar, uygulamanın gerçekten koştuğu betiği doğruluyor.
+///
+/// Ölçüm yükü için [`load_shell`]: bu fonksiyon duman sayılarının sahibi
+/// olduğu için ikinci bir yük **buraya eklenmez**. Süre parametresi, ikinci
+/// bir `printf`, "bir de şu kadar satır bas" — hiçbiri; her biri sekiz
+/// hücreyi, altı glyph'i ya da on beş kuralı oynatır ve oynattığında üç
+/// sınama ile `make duman` aynı anda ama ayrı ayrı yalan söyler.
 pub fn smoke_shell() -> (String, Vec<String>) {
     (
         "/bin/sh".to_owned(),
@@ -228,6 +234,67 @@ pub fn smoke_shell() -> (String, Vec<String>) {
              \\033[0;4:4m \\033[0;4:5m \\033[0;9m \\033[0;4:3;58;5;196m \\033[0m\\n'; \
              sleep 10"
                 .to_owned(),
+        ],
+    )
+}
+
+/// Ölçüm yükü: `secs` saniye boyunca kesintisiz çıktı akıtır.
+///
+/// [`smoke_shell`]'den **ayrı** ve öyle kalmalı — o, `hucre=8 glif=6
+/// kural=15` sayılarının tek sahibi ve üç sınama o sayılara bağlı. Buradaki
+/// komut değişince duman sayıları oynamaz; oynarsa ayrım kaybolmuş demektir.
+///
+/// Viewport kaydırma **yok** (tekerlek işleyicisi yok), o yüzden kaydırılan
+/// şey viewport değil **içerik**: her satır kirli düşer, grid yukarı kayar,
+/// kare akışı kendiliğinden sürer. Ölçtüğümüz şey zaten bu — dolu bir karede
+/// parse + [`Session::frame`] + encode + GPU maliyeti.
+pub fn load_shell(secs: u64) -> (String, Vec<String>) {
+    // POSIX `$((...))` işaretli `intmax_t`: `u64::MAX` kabukta `-1`'e sarıyor
+    // ve `end` **geçmişte** kalıyor, yani yük hiç koşmadan biter. Ölçüldü (bu
+    // makine): `$(( now + 18446744073709551615 ))` → `now - 1`. Kırpma o
+    // sessiz dalı kapatıyor; bu aralığın üstündeki bir "ölçüm süresi" zaten
+    // bir kullanım hatası.
+    let secs = secs.min(u64::from(u32::MAX));
+    (
+        "/bin/sh".to_owned(),
+        vec![
+            "-c".to_owned(),
+            // `seq` değil `while`: sabit satır sayısı makineye göre ya erken
+            // biter ya da hiç bitmez. Süre kapısı deterministik.
+            //
+            // **İç döngü şart, süs değil.** Saati her satırda sormak (`while
+            // [ $(date +%s) -lt $end ]` doğrudan `printf`'i sarmalasa) satır
+            // başına bir komut ikamesi + bir `date` `exec`'i demek: ölçülen
+            // şey renderer değil `fork` gecikmesi olur. Ölçüldü (2 saniye,
+            // bu makine): saat her satırda → **458** satır, 256'lık öbekler
+            // hâlinde → **119 296** satır, yani ~260 kat. Yükün işi PTY'yi
+            // doyurmak; doyuramayan yük dolu kareyi hiç göstermez.
+            //
+            // Saat yine de `date`: `$SECONDS` bash'in eklentisi ve `/bin/sh`
+            // Linux'ta dash olur — `bt-core` platformsuz kalmak zorunda
+            // (Vulkan kapısı), yani betik de POSIX kalır.
+            //
+            // **`+ 1` şart.** `date +%s` saniye çözünürlüklü: ilk örnekleme
+            // saniyenin sonunda düşerse döngü `secs` değil `secs - 0.99`
+            // sonra biter. Ölçüldü (bu makine, `secs = 3`): 2,4 / 2,9 / 2,9
+            // saniye — yani çocuk `run_deadline`'dan **önce** ölüyor,
+            // `ChildExit` koşuyu erken kapatıyor ve rapor yine "3 saniyelik
+            // koşuda" diyor. `+ 1` ile 3,9 saniye, deadline rahatça içeride.
+            // Aynı gerekçe `smoke_shell`'in `sleep 10`'unda da yazılı;
+            // artakalan çocuğu deadline'ın `SIGHUP`'ı zaten kesiyor.
+            //
+            // `printf '%s\n' 'metin'` değil `printf 'metin\n'`: yük metninde
+            // `%` de `\` de yok, ikinci argüman boşuna.
+            format!(
+                "end=$(($(date +%s) + {secs} + 1)); \
+                 while [ $(date +%s) -lt $end ]; do \
+                   n=0; \
+                   while [ $n -lt 256 ]; do \
+                     printf 'bateri olcum yuku 0123456789 abcdefghijklmnopqrstuvwxyz\\n'; \
+                     n=$((n + 1)); \
+                   done; \
+                 done"
+            ),
         ],
     )
 }
@@ -1029,6 +1096,20 @@ mod tests {
             vec![None, None, None, None, None, None, red],
             "{cells:?}"
         );
+    }
+
+    #[test]
+    fn load_shell_carries_duration() {
+        // Süre komuta girmezse ölçüm koşusu ya hiç bitmez ya deadline'dan
+        // önce biter; ikisi de sessiz. `4242` betiğin sabit metninde geçmeyen
+        // bir sayı, yani eşleşme gerçekten parametreden geliyor.
+        let (program, args) = load_shell(4242);
+        assert_eq!(program, "/bin/sh");
+        assert!(args.iter().any(|a| a.contains("4242")), "{args:?}");
+        // Ayrılık sözleşmesinin sınanabilir hâli: `smoke_shell` `hucre=8
+        // glif=6 kural=15` sayılarının tek sahibi ve ikinci yük onun
+        // gövdesine girmez. İkisi bir gün aynı betiğe düşerse burası kırmızı.
+        assert_ne!(args, smoke_shell().1);
     }
 
     #[test]

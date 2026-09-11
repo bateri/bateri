@@ -39,7 +39,8 @@ make fmt          # cargo fmt --all -- --check
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
-make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hücresi, glyph ve kural çizgisi sayar: kare=N hucre=K glif=G kural=R pipeline=ok, biri 0 → kırmızı
+make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hücresi, glyph, kural çizgisi ve atlas yuvası sayar: kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke pipeline=ok
+                  # dördünden biri 0 ise kırmızı; `kare` ayrıca ÜST SINIRLI (boşta sıfır karenin bekçisi, `IDLE_FRAME_LIMIT` = 2, ölçülmüş), `yuva` ile `yuk` kapı değil sayaç ve etiket
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler ve bateri.app paketini target/ altına kurar
@@ -134,12 +135,16 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   sarmalayıcısı, fish `vendor_conf.d`) ve kullanıcının rc dosyasına **asla**
   dokunmaz. Komut blokları OSC 133 işaretlerinden okunur.
 - **Ölçülmemiş sayı yazılmaz.** Tek sahip `docs/OLCUMLER.md`; ölçüm bir kapı
-  değildir, `/measure` ile kullanıcı ister. Kuralın ikinci yarısı **henüz
-  borç**: ölçüm kancaları (`BT_FRAME_LOG`, `BT_SCROLL_TEST`,
-  `BT_STARTUP_TRACE`) ve bench hedefleri yok, `docs/OLCUMLER.md` de yok —
-  `/measure` bugün sayı değil **ölçüm aracı yok** döndürüyor. Bekleyen yedi
-  iddia 002 ve 003'ün `teslim.md`'lerinde duruyor; kancalar gelince bu cümle
-  kalkar ve `cargo bench` satırı yukarıdaki bloğa geri gelir.
+  değildir, `/measure` ile kullanıcı ister. Kuralın ikinci yarısı **hâlâ
+  borç, ama daraldı**: `BT_SCROLL_TEST` 005 phase-1 ile geldi (ölçüm yükünü
+  seçer) ve `make duman` atlas doluluğunu `yuva=U/T` ile basıyor. Açık kalan:
+  zaman kancaları (`BT_FRAME_STATS`, açılış damgası — 005 phase-2/3),
+  `docs/OLCUMLER.md` (ilk `/measure` kurar) ve **bench seti** — `criterion`
+  yeni bir bağımlılık, yani ayrı bir mimari karar, o yüzden bu set bir borcu
+  başka bir borçla takas ediyor: `cargo bench` satırı yukarıdaki bloğa
+  **bench seti gelince** döner, kancalarla değil. `/measure` zaman soran
+  iddialara bugün hâlâ **ölçüm aracı yok** diyor; bekleyen on iki iddia 002,
+  003 ve 004'ün `teslim.md`'lerinde duruyor.
 - **Dil:** yorumlar, commit iletileri ve belgeler Türkçe ve "neden"i anlatır.
   **Kod tanımlayıcılarının tamamı İngilizce** — dışa bakan ad (pub tip,
   fonksiyon, varyant) da, yerel yardımcı, alan, değişken ve sınama adı da;

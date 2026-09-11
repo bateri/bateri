@@ -21,8 +21,14 @@ clippy:
 test:
 	$(CARGO) test --workspace
 
-# Pencereyi açar, BT_RUN_SECONDS dolunca kare, hücre, glyph ve kural çizgisi
-# sayısına bakar: kare=N hucre=K glif=G kural=R pipeline=ok, biri 0 → kırmızı.
+# Pencereyi açar, BT_RUN_SECONDS dolunca kare, hücre, glyph, kural çizgisi ve
+# atlas yuvası sayısına bakar:
+# kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke pipeline=ok
+# Dördünden (kare, hucre, glif, kural) BİRİ 0 ise kırmızı; `yuva` ile `yuk`
+# kapı değil, sayaç ve etiket.
+# `kare` ayrıca ÜST SINIRLI (bkz. app.rs IDLE_FRAME_LIMIT): boşta sıfır kareyi
+# bozan değişikliğin belirtisi eksik kare değil FAZLA karedir. `yuva` bir kapı
+# değil sayaç — eşiği ölçülmedi, ölçülmemiş sayı kapıya yazılmaz.
 # Başsız ortamda binary stdout'a "ATLANDI" basıp 78 ile çıkar; make bunu 2
 # olarak döndürür — ayırt edici sinyal stdout metnidir, çıkış kodu değil.
 # `cargo run` CARGO_TARGET_DIR'a saygı duyar ve çocuğun çıkış kodunu geçirir.

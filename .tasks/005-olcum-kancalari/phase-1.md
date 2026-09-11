@@ -190,9 +190,79 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 
 ## Uygulama Notları
 
+- **`atlas` alanı `RefCell<Option<AtlasTexture>>`.** Kılavuzun
+  `self.atlas.occupancy()` satırı derlenmez; gerçek hâli
+  `self.atlas.borrow().as_ref().map_or((0, 0), |tex| tex.atlas.occupancy())`.
+  `None` bir hata değil doğru cevap: atlasın anahtarı pencereden geliyor ve
+  metrik hiç sorulmadıysa açılmış yuva da yok. `expect` olmadı, çünkü burası
+  `report_and_exit` yolunda ve kapanışta bir panik raporun kendisini yutardı.
+
+- **`smoke_shell_counts_unchanged` diye yeni bir sınama yazılmadı.** `8/6/15`
+  iddialarının pin'i zaten `session.rs`'teki üçlü
+  (`smoke_shell_yields_background_cells`, `smoke_shell_yields_six_glyphs`,
+  `smoke_shell_distinguishes_five_styles`) ve üçü de bu sette dokunulmadan
+  geçti. Dördüncü bir sınama aynı sayıları yeniden türetirdi, yani **hiçbir
+  koşulda kırmızı düşemezdi**. "Ayrılık" yarısını `load_shell_carries_duration`
+  içindeki `assert_ne!(args, smoke_shell().1)` taşıyor. Kutu `[x]`: iddia
+  korunuyor, ama koruyanı mevcut üçlü.
+
+- **`Load` yükünün alt sınırı ayrıldı** (kılavuzda yoktu, ilk koşuda çıktı).
+  `load_shell` düz metin akıtıyor: arka plan da kural da **yapısal olarak
+  sıfır**. Dört sayacın dördünü de soran kapı her ölçüm koşusunda kırmızı
+  düşüyordu (`kare 3, hücre 0, glif 1836, kural 0`). `verdict` (eski adı `gate_passes`) artık yükü
+  soruyor: `Load` → `kare > 0 && glif > 0`, üst sınır yok; `Smoke` (ve yüksüz)
+  → dördü de `> 0` **ve** `kare <= IDLE_FRAME_LIMIT`. Hata iletisinin
+  gereklilik metni de yüke göre — "dördü de >0 olmalı" `Load`'da okuyanı var
+  olmayan bir arızayı aramaya gönderirdi.
+
+- **Bekçi silahlı ama `make duman` koşumunda kör — ölçüldü.** Üç gözlem:
+  1. Koşu sonunda pencere `isVisible() = true` ama
+     `occlusionState` `Visible` bitini **taşımıyor** (ham değer `8192`,
+     `Visible = 1<<1`). `windowDidChangeOcclusionState:` hiç ateşlemiyor
+     (durum hiç *değişmiyor*), yani bizim `Gate.open`'ımız `true` kalıyor —
+     kareyi kısan bizim kapımız değil, sistemin display link'i askıya alması.
+  2. `BT_SCROLL_TEST=1` ile `BT_RUN_SECONDS` 3, 6 ve 10 → **hep `kare=3`**.
+     Bu bir hız değil, bir doyma: hasar sürekliyken bile kare sayısı artmıyor.
+     Yük 260 kat hızlandıktan sonra (aşağıdaki `/simplify` maddesi) **aynı
+     sonuç**: `kare=3`, `glif` 816'dan 1836'ya çıktı. Yani doyma cılız yükün
+     değil, örtülü pencerenin sonucu.
+  3. Boşta sıfır kare bilerek bozulduğunda (`needs_update`'in sonuna koşulsuz
+     `iv.waker.wake()`) `make duman` **`kare=3` basıp geçti** — `8` sınırının
+     altında.
+
+  4. Sınır **8'den 2'ye indirildi** — kılavuzun sayısı değil, ölçümün sayısı.
+     `8`, "bozulursa 60 Hz'de üç saniye ~180 kare" türetimine dayanıyordu ve o
+     türetim yukarıdaki üç gözlemle çürüdü: tavan 3, yani `8` bu koşumda
+     **hiçbir zaman** ateşleyemezdi. `2` üç sayının arasındaki tek anlamlı
+     yer — sağlam koşuyu bir kare payla geçirir, bozulmuşu yakalar.
+     **Doğrulandı:** sağlam koşu beş kez üst üste `kare=1` + çıkış 0;
+     sabotajlı koşu `bateri: boşta sıfır kare bozuldu — 3 saniyelik koşuda
+     3 kare çizildi, üst sınır 2` + çıkış 1. Bekçi artık gerçekten koruyor.
+
+  Kapının koştuğu **tek** bağlam `make duman`'dır: `report_and_exit` yalnız
+  `BT_RUN_SECONDS` yolunda çalışıyor, yani etkileşimli koşu bu sınırı hiç
+  değerlendirmiyor — "pencere görünürken zaten gerçek" savunması bu yüzden
+  geçersizdi. `.app` paketi (`make kur`) gelince görünür pencerede tavan
+  kalkar ve sınır **yeniden ölçülmelidir**; bu not sabitin doc'unda da duruyor.
+
+- **Escalation değil, gerekçesi:** R6.1 **ölçülmüş bir sınırla** teslim
+  edildi ve `kare=1 hucre=8 glif=6 kural=15` bit bit korundu. Geçersiz olan
+  gereksinim değil, §4'ün `8`i türeten varsayımıydı; çürütülmüş bir türetimi
+  ölçülmüş bir sayıyla değiştirmek uygulamadır, yeniden tasarım değil — ve
+  alternatif (kılavuzun `8`ini olduğu gibi göndermek) ateşleyemeyen bir bekçi
+  göndermek olurdu, yani phase'in var olma sebebini boşa çıkarmak. Sapma
+  kayıtlı, üç sayı da yazılı, `.app` gelince yeniden ölçüm notu düşüldü.
+
+- **code-reviewer'ın L3'ü (not, düzeltme değil):** `verdict`'in
+  `Some(Workload::Smoke) | None` kolu, kullanıcının kendi `$SHELL`'iyle koşan
+  bir harness'a da duman reçetesinin dört sayacını **ve** üst sınırı
+  uyguluyor. `main.rs`'ten ulaşılamaz; kalıcı çözüm `Options`'ın tek alana
+  inmesi ve o phase-2'ye devredildi.
+
 ## Yayın Etkisi
 
-- **Duman sözleşmesi:** jeton **eklendi, silinmedi** — `yuva=U/T`. Okuyan
+- **Duman sözleşmesi:** jeton **eklendi, silinmedi** — `yuva=U/T` ve
+  `yuk=smoke|load`. Okuyan
   taraf tanımadığı jetonu atlayabilir; `kare`/`hucre`/`glif`/`kural` aynen
   duruyor ve **sayıları değişmiyor** (`load_shell` yalnız `BT_SCROLL_TEST`
   ile devreye giriyor, `make duman` `Smoke` koşuyor).
@@ -202,25 +272,36 @@ const IDLE_FRAME_LIMIT: u64 = 8;
   `assets/`, ayar şeması, tema, shell entegrasyonu: el değmiyor.
 - **Ölçüm bekliyor: yok.** Bu phase iki iddia **kapatıyor** (003 #3, 004 #2 —
   atlas doluluğu) ve hiçbir yeni iddia doğurmuyor: eklenen tek iş bir erişimci
-  çağrısı ve bir karşılaştırma, ikisi de kapanış yolunda.
+  çağrısı ve bir karşılaştırma, ikisi de kapanış yolunda. Duman koşusunda
+  ölçülen doluluk: `yuva=13/2048`.
+- **Doğrulanan duman satırı (2026-09-11, debug profili):**
+  `kare=1 hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke pipeline=ok`,
+  çıkış 0, art arda beş koşuda da aynı. Dört sayaç da öncekiyle bit bit aynı;
+  eklenen iki jeton `yuva=` ve `yuk=`, silinen jeton yok.
+- **Ölçüm yükünün satırı** (`BT_SCROLL_TEST=1 BT_RUN_SECONDS=3`):
+  `kare=3 hucre=0 glif=1836 kural=0 yuva=37/2048 yuk=load pipeline=ok`,
+  çıkış 0.
+- **`proje.md` → `make duman` satırı** da güncellendi: `yuva=` jetonu, üst
+  sınır ve üst sınırın kendi sınırı (örtülü pencerede kare sayısının doyması)
+  oraya yazıldı. `Makefile`'ın `duman` yorumu aynı üç şeyi taşıyor.
 
 ---
 
 ## Checklist
 
-- [ ] `load_shell(secs)` — `bt-core`, `smoke_shell`'in yanında; `smoke_shell`'in doc'una "ikinci yük buraya eklenmez" cümlesi
-- [ ] `Workload` enum'ı + `Options.workload`; `app.rs:327` dallanması yükü sorar, süreyi değil
-- [ ] `main.rs`: `BT_SCROLL_TEST` okunur; süresiz yük **kırmızı düşer**, sessizce sıfıra inmez
-- [ ] `Renderer::atlas_occupancy()` — `cell_metrics` deseni; `bt-shell`'e `bt-atlas` kenarı **eklenmedi**
-- [ ] `yuva=U/T` jetonu `report_and_exit`'e eklendi
-- [ ] Duman kapısına `IDLE_FRAME_LIMIT` — yalnız `Smoke` yükünde
-- [ ] Test: `load_shell_carries_duration` → komut `run_seconds`'ı içeriyor ve `smoke_shell`'den farklı
-- [ ] Test: `smoke_shell_counts_unchanged` — `hucre=8 glif=6 kural=15` iddiaları bit bit aynı geçiyor
-- [ ] Test: `atlas_occupancy_is_republished` → `Renderer::atlas_occupancy` `Atlas::occupancy` ile aynı çifti veriyor
-- [ ] Test: `idle_limit_catches_excess_frames` — sınır karşılaştırması saf fonksiyon olarak sınanır (gerçek display link gerektirmeden)
-- [ ] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu**: kapı değişti)
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] `load_shell(secs)` — `bt-core`, `smoke_shell`'in yanında; `smoke_shell`'in doc'una "ikinci yük buraya eklenmez" cümlesi
+- [x] `Workload` enum'ı + `Options.workload`; `app.rs:327` dallanması yükü sorar, süreyi değil
+- [x] `main.rs`: `BT_SCROLL_TEST` okunur; süresiz yük **kırmızı düşer**, sessizce sıfıra inmez
+- [x] `Renderer::atlas_occupancy()` — `cell_metrics` deseni; `bt-shell`'e `bt-atlas` kenarı **eklenmedi**
+- [x] `yuva=U/T` jetonu `report_and_exit`'e eklendi
+- [x] Duman kapısına `IDLE_FRAME_LIMIT` — yalnız `Smoke` yükünde (kılavuzun `8`i ölçümle `2`ye indi, bkz. Uygulama Notları)
+- [x] Test: `load_shell_carries_duration` → komut `run_seconds`'ı içeriyor ve `smoke_shell`'den farklı
+- [x] Test: `smoke_shell_counts_unchanged` — **yeni sınama yazılmadı**, pin mevcut üçlü (`smoke_shell_yields_background_cells` / `_six_glyphs` / `_distinguishes_five_styles`); üçü de dokunulmadan geçti ve `make duman` `hucre=8 glif=6 kural=15` bastı. Gerekçe: Uygulama Notları
+- [x] Test: `atlas_occupancy_is_republished` → `Renderer::atlas_occupancy` `Atlas::occupancy` ile aynı çifti veriyor
+- [x] Test: `idle_limit_catches_excess_frames` — sınır karşılaştırması saf fonksiyon olarak sınanır (gerçek display link gerektirmeden)
+- [x] Doğrulama geçti (`make hepsi` → 0; `make duman` → `kare=1 hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke pipeline=ok`, çıkış 0, beş koşuda da aynı; `make test-yaris` → 0. `make shader` ve `make terminfo` **gerekmedi**: `.metal`, `build.rs` ve `assets/terminfo` el değmedi)
+- [x] `/simplify` çalıştırıldı (dört mercek ajanı), bulgular uygulandı; uygulanmayan üçü gerekçesiyle Uygulama Notları'nda
+- [x] `/code-review` çalıştırıldı, beş bulgunun beşi de giderildi. Skill fork'u ~35 dk sessiz kaldı, bu sırada `proje.md` basamak 2 uygulanıp `code-reviewer` subagent'ı da koşturuldu; ikisi de aynı bulgularla döndü (subagent ayrıca M2 `u64::MAX` sarması ve M3 `pub Options` sessiz-yeşil dallarını buldu, ikisi de düzeltildi)
+- [x] `/audit` çalıştırıldı: mekanik mercekler (1, 2, 3, 6) inline ve temiz; 4, 5, 9 ilgisiz; yargı mercekleri ajanla — 7 temiz, 8 sınırın ateşleyemediğini yakaladı (8→2), 10 dört belge çelişkisi buldu, hepsi giderildi
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
 - [ ] Commit: {hash}

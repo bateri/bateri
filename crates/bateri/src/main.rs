@@ -22,7 +22,32 @@ fn main() -> ExitCode {
         },
         Err(_) => None,
     };
-    match bt_shell::run(bt_shell::Options { run_seconds }) {
+    // `BT_SCROLL_TEST` yükü seçer, süreyi değil — süre `BT_RUN_SECONDS`'ta.
+    // Yük istenip süre verilmezse koşu hiç bitmez: bu bir kullanım hatası,
+    // sessizce sıfır saniyelik yüke düşmez.
+    //
+    // Env **yalnız burada** okunuyor ve kodun derinine tipli bir `Option`
+    // olarak giriyor. Ayrıştırma yarısı `BT_RUN_SECONDS`'a benzemiyor ve
+    // benzemesi de gerekmiyor: bu bayrağın **varlığı** anlam taşıyor, değeri
+    // değil — `BT_SCROLL_TEST=0` da yükü seçer.
+    let workload = match (std::env::var_os("BT_SCROLL_TEST").is_some(), run_seconds) {
+        // Sıfır da eleniyor, yalnız eksik değişken değil: sıfır saniyelik bir
+        // yük hiçbir şey ölçmez ve kapıya `glif=0` ile düşerek okuyanı var
+        // olmayan bir boru hattı arızasına gönderirdi.
+        (true, None | Some(0)) => {
+            eprintln!("bateri: BT_SCROLL_TEST, sıfırdan büyük bir BT_RUN_SECONDS ister");
+            return ExitCode::FAILURE;
+        }
+        (true, Some(_)) => Some(bt_shell::Workload::Load),
+        // Geriye uyum: `BT_RUN_SECONDS` tek başına eskisi gibi duman yükü
+        // seçiyor, yani `make duman` hiç değişmeden çalışır.
+        (false, Some(_)) => Some(bt_shell::Workload::Smoke),
+        (false, None) => None,
+    };
+    match bt_shell::run(bt_shell::Options {
+        run_seconds,
+        workload,
+    }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("bateri: {e}");
