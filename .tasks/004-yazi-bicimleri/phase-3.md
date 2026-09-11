@@ -432,6 +432,28 @@ yok), 5 (shell üçlüsü — `assets/shell/` el değmedi).
   bir ünlü uyumu ve `CLAUDE.md`'de bir satır sarma düzeltildi. Tanımlayıcıların
   tamamı İngilizce, yorumlar ve tanı çıktıları Türkçe, `#[allow]` yok.
 
+**Orkestratör kararı — devredilen 8 bulgunun 2'si kapatıldı, borç listesine 6 girer.**
+Otonom şeritte bulgu kararı devredilmez; sekizi tek tek değerlendirildi.
+Altısının ertelenmesi kabul edildi (DIM'in doğru davranışı doğrulanamıyor,
+`dividing_period` bir tasarım kararı ister, kalan dördü canlı hatası olmayan
+yüzey/sınama borcu). İkisi `d8ad544` ile kapatıldı — ikisi de *depo kuralı*
+ihlali, yani ertelenmesi kuralın kendisini aşındırırdı:
+
+- `cell.metal:69`'daki `float kapsama` → `coverage`. Hedef olarak `/ship`
+  yazılmıştı ama `/ship` kod düzeltmez; `CLAUDE.md` de "tek dosyalık düzeltme
+  için set açılmaz" diyor. Kaynağı bu set değil `1dbb084`'ün kendi taraması.
+- `curl()`'ün doc'u. `CLAUDE.md`'nin açık kuralı: "buradaki bir cümle kodla
+  çelişirse ikisinden biri **aynı commit'te** düzelir". Bilinen bir doc
+  yalanını borç listesine yazmak o kuralın tam tersi. Çelişki ikiliydi:
+  formül **ve** "kırpılmasına gerek yok" sonucu (kodda `.min(h as f32)` var).
+
+- **sadakat: makas yok.** `git show --stat c3d7359` phase-3'ün checklist'iyle
+  karşılaştırıldı: dokuz dosyanın her biri bir maddeyle eşleşiyor
+  (`bt-atlas`/`bt-core`'a dokunuş `SAPMA`'da bildirilen iki `/code-review`
+  bulgusu), `plan.md`'nin `## Durum`'u damga commit'inde (`7659cc1`).
+  `Cargo.lock` oynamadı. Sınama adlarının gerçekten İngilizce olduğu ayrıca
+  doğrulandı — checklist metni `bb04da7`'den kalma Türkçe adları taşıyor.
+
 ## Yayın Etkisi
 
 - **shader** — **yok.** `.metal` dosyalarına dokunulmadı: kural sprite'ları
