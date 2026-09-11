@@ -436,4 +436,4 @@ kare **talebi** değişmedi).
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (kaydı yukarıda; +1 sınama: `strikeout_only_cell_carries_no_underline_color`)
 - [x] `/audit` çalıştırıldı, bulgular giderildi (kaydı yukarıda; mercek 9'un bulgusu phase-3'e devredildi ve oranın checklist'ine yazıldı)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı (öngörü doğrulandı: `Cargo.lock` oynamadı, `.metal`/`build.rs`/`assets` el değmedi)
-- [ ] Commit: {hash}
+- [x] Commit: 643c8c6

@@ -165,5 +165,5 @@ underline_color() ►  Option<LinearRgba>                       kapsama maskesi
 | Phase | Durum | Commit |
 |-------|-------|--------|
 | phase-1 | ✅ | 92607aa |
-| phase-2 | | |
+| phase-2 | ✅ | 643c8c6 |
 | phase-3 | | |
