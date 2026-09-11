@@ -269,3 +269,32 @@ Onaylanacak kapsam, panelden sonraki hâliyle:
   kutusu da `[x]` olmayacak.
 - **Boşta sıfır kare bekçisi yeni bir harness değil**: `make duman`'ın
   `kare=1`'ine üst sınır.
+
+## Karar (2026-09-11, kullanıcı onayı)
+
+- **Seçilen:** Panelden çıkan revize kapsam — iki zaman kaynağı (CPU ikiye
+  ayrık + GPU), ayrı `load_shell(secs)` yük profili, **dosyasız** rapor
+  (jeton satırı genişler), atlas doluluğunun `bt-gpu` üzerinden yeniden
+  yayımı, ve boşta sıfır kare bekçisi olarak `make duman`'ın `kare=1`'ine üst
+  sınır. Gerekçe: bekleyen on iki iddianın gerçekten ihtiyaç duyduğu asgari
+  araç bu; her fazlalık ya kendi ilkesini çiğniyordu (dosya → Karar 5) ya da
+  hiçbir iddiaya karşılık gelmiyordu (düşen kare → Karar 1'in ölçütü).
+
+- **Reddedilen:** Giriş gecikmesi zinciri — iki bağımsız gerekçe: hiçbir
+  bekleyen iddia gecikme iddiası değil, ve zincirin orta halkaları
+  (`PTY yazıldı → echo okundu`) `alacritty_terminal::EventLoop` içinde, yani
+  bilerek kapsüllediğimiz bağımlılığın içinde.
+
+- **Reddedilen:** `cargo bench` + `criterion` — yeni bağımlılık, ayrı mimari
+  karar. Bedeli kabul ve **kayıtlı**: 003 #1 ile #2'nin bench yarısı açık
+  kalıyor, `CLAUDE.md`'nin bench sözü silinmeyip "bench seti bekliyor"a
+  çevriliyor. Set bir borç cümlesini başka bir borç cümlesiyle takas ediyor.
+
+- **Reddedilen:** Logger (`tracing`) — aynı damardan geçiyor ama ayrı bir
+  bağımlılık kararı; seti şişirir. `docs/YOL-HARITASI.md`'de borç olarak
+  duruyor.
+
+- **Reddedilen:** `docs/OLCUMLER.md`'nin bu sette yazılması — `/measure`
+  skill'i zaten "dosya yoksa ilk ölçüm onu kurar" diyor ve yöntemi ölçüm
+  koşmadan yazmak, eşiği ölçmeden yazmaya bir adım kalıyor. Arkasındaki
+  gerçek kaygı (debug sayısını release sanmak) `profil=` jetonuyla çözüldü.
