@@ -157,10 +157,10 @@ jetonu bunu görünür kılar).
 - [ ] `link.rs`: `t0`/`t1`/`t2` — iki ayrı CPU aralığı; `None` dönen karede örnek **yazılmaz**
 - [ ] `renderer.rs`: GPU deltası tamamlanma bloğundan, `Arc`'lı halkayla — blok kare başına **kurulmadı**
 - [ ] `Samples` halkası: önceden ayrılmış, kilitsiz, düşen örnek sayılıyor
-- [ ] Test: `kapi_kapaliyken_saat_okunmaz` — kapı `None` iken `Instant::now()` çağrılmadığını gösteren bekçi (sayaç ya da tip düzeyinde)
-- [ ] Test: `bos_karede_ornek_yazilmaz` — `session.frame` `None` dönünce halka büyümüyor
-- [ ] Test: `halka_dolunca_en_eski_duser_ve_sayilir` — kapasite aşımı sessiz değil
-- [ ] Test: `acilis_damgasi_renderer_kurulumundan_once` — damganın `system_default()` öncesinde alındığını bağlayan sınama
+- [ ] Test: `clock_untouched_when_gate_closed` — kapı `None` iken `Instant::now()` çağrılmadığını gösteren bekçi (sayaç ya da tip düzeyinde)
+- [ ] Test: `empty_frame_records_no_sample` — `session.frame` `None` dönünce halka büyümüyor
+- [ ] Test: `full_ring_drops_oldest_and_counts` — kapasite aşımı sessiz değil
+- [ ] Test: `startup_stamp_precedes_renderer_setup` — damganın `system_default()` öncesinde alındığını bağlayan sınama
 - [ ] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu**: `kare` oynamamalı)
 - [ ] `/simplify` çalıştırıldı, bulgular uygulandı
 - [ ] `/code-review` çalıştırıldı, bulgular giderildi

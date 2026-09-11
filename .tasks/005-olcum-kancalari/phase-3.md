@@ -25,7 +25,7 @@ jeton satırı ise bir `Read`.
 ///
 /// Örnek sayısı azsa p95 anlamsızdır ama **sessiz** de olmamalı: sayı
 /// basılır, yanında `ornek=` gider, yorumu `/measure` yapar.
-fn p95_ve_en_kotu(halka: &[Duration]) -> Option<(Duration, Duration)>
+fn p95_and_worst(halka: &[Duration]) -> Option<(Duration, Duration)>
 ```
 
 ---
@@ -121,7 +121,7 @@ kodun doc yorumunda durur ve ilk `/measure` onu `## Yöntem`'e taşır.
 
 ## Checklist
 
-- [ ] `p95_ve_en_kotu` — ortalama **yok**; boş/az örnekte davranışı tanımlı
+- [ ] `p95_and_worst` — ortalama **yok**; boş/az örnekte davranışı tanımlı
 - [ ] Jetonlar `report_and_exit`'te `println!` ile **açıkça** basılıyor; `Drop`'a güvenen yol yok
 - [ ] `ornek=` jetonu — düşen örnekler dâhil
 - [ ] `profil=` jetonu (`cfg!(debug_assertions)`)
@@ -130,9 +130,9 @@ kodun doc yorumunda durur ve ilk `/measure` onu `## Yöntem`'e taşır.
 - [ ] `/measure` skill'i, `context.md` şablonu, `proje.md` kanca adlarıyla uyumlandı
 - [ ] `.tasks/README.md`: 002/003/004 satırları "ölçüm aracı yok" demiyor
 - [ ] Phase-2'nin dürüst sınırı (açılış damgası `main()`'den, süreç başından değil) kodun doc'unda yazılı
-- [ ] Test: `p95_bos_halkada_none_doner`
-- [ ] Test: `jeton_satiri_eski_jetonlari_koruyor` — beş eski jeton ve `pipeline=ok` yerinde
-- [ ] Test: `duman_sayilari_oynamadi` — `kare=1 hucre=8 glif=6 kural=15` bit bit aynı
+- [ ] Test: `p95_returns_none_on_empty_ring`
+- [ ] Test: `token_line_preserves_old_tokens` — beş eski jeton ve `pipeline=ok` yerinde
+- [ ] Test: `smoke_counts_unchanged` — `kare=1 hucre=8 glif=6 kural=15` bit bit aynı
 - [ ] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu**)
 - [ ] `/simplify` çalıştırıldı, bulgular uygulandı
 - [ ] `/code-review` çalıştırıldı, bulgular giderildi

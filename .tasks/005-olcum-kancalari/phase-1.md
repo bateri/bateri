@@ -178,7 +178,7 @@ duruyor ve çıktı `kare=1`.
 // ~180 kare demek. 8 ile 180 arasında tartışma yok.
 //
 // `Load` yükünde üst sınır YOK — orada kare akışı işin kendisi.
-const BOSTA_UST_SINIR: u64 = 8;
+const IDLE_FRAME_LIMIT: u64 = 8;
 ```
 
 > **Neden bu phase'de, ölçümden önce?** Bekçi, koruduğu şey geldiğinde zaten
@@ -213,11 +213,11 @@ const BOSTA_UST_SINIR: u64 = 8;
 - [ ] `main.rs`: `BT_SCROLL_TEST` okunur; süresiz yük **kırmızı düşer**, sessizce sıfıra inmez
 - [ ] `Renderer::atlas_occupancy()` — `cell_metrics` deseni; `bt-shell`'e `bt-atlas` kenarı **eklenmedi**
 - [ ] `yuva=U/T` jetonu `report_and_exit`'e eklendi
-- [ ] Duman kapısına `BOSTA_UST_SINIR` — yalnız `Smoke` yükünde
-- [ ] Test: `load_shell_sure_kapisi_tasir` → komut `run_seconds`'ı içeriyor ve `smoke_shell`'den farklı
-- [ ] Test: `smoke_shell_sayilari_oynamadi` — `hucre=8 glif=6 kural=15` iddiaları bit bit aynı geçiyor
-- [ ] Test: `atlas_doluluk_yeniden_yayimlaniyor` → `Renderer::atlas_occupancy` `Atlas::occupancy` ile aynı çifti veriyor
-- [ ] Test: `bosta_ust_siniri_fazla_kareyi_gorur` — sınır karşılaştırması saf fonksiyon olarak sınanır (gerçek display link gerektirmeden)
+- [ ] Duman kapısına `IDLE_FRAME_LIMIT` — yalnız `Smoke` yükünde
+- [ ] Test: `load_shell_carries_duration` → komut `run_seconds`'ı içeriyor ve `smoke_shell`'den farklı
+- [ ] Test: `smoke_shell_counts_unchanged` — `hucre=8 glif=6 kural=15` iddiaları bit bit aynı geçiyor
+- [ ] Test: `atlas_occupancy_is_republished` → `Renderer::atlas_occupancy` `Atlas::occupancy` ile aynı çifti veriyor
+- [ ] Test: `idle_limit_catches_excess_frames` — sınır karşılaştırması saf fonksiyon olarak sınanır (gerçek display link gerektirmeden)
 - [ ] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu**: kapı değişti)
 - [ ] `/simplify` çalıştırıldı, bulgular uygulandı
 - [ ] `/code-review` çalıştırıldı, bulgular giderildi
