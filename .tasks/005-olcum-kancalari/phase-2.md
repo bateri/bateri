@@ -315,6 +315,29 @@ jetonu bunu görünür kılar).
   `bt-core`'a düşüyor). Phase-3'ün checklist'ine yazıldı: R5.6'nın ölçüm
   koşusu bu komutu kullanıyor ve **5 saniye ile koşulamıyor**.
 
+- **sadakat: makas yok.** `git show --stat 8df1ef6` checklist'le karşılaştırıldı:
+  on dosyanın her biri bir maddeyle eşleşiyor (`stats.rs` yeni halka modülü,
+  `Makefile` → `env -u` sapması, `phase-3.md` +8 → devir satırları), `plan.md`
+  damga commit'inde (`63baaf7`), `.tasks/README.md` `7790341`'de.
+  `Cargo.lock` oynamadı.
+
+- **Orkestratör ölçümü — waive'in oranı düzeltildi, sebebi doğrulandı.**
+  Rapor ölçüm yükünün kapanışının koşuların ~%40'ında asıldığını söylüyordu;
+  ölçtüm, **8 koşunun 5'i** asılıyor (`exit 70`, jeton satırı hiç çıkmıyor).
+  Smoke yükü aynı koşulda **4/4 temiz**. Oran %40 değil ~%62.
+
+  Kusurun phase-2'ye ait olmadığı **bağımsız** doğrulandı: bu sekiz koşuda
+  `BT_FRAME_STATS` verilmedi, yani phase-2'nin bütün enstrümantasyonu
+  kapalıydı ve asılma yine oldu. İmplementer'ın `git stash` üretimiyle aynı
+  sonuç, ayrı yoldan.
+
+  **Bu bir phase-3 kalemi değil.** Kök neden `bt-core`'un kapanış sırası ve
+  `CLAUDE.md` onu zaten bilinen borç olarak sayıyor ("kalıcı çözüm
+  `bt-core`'da sınırlı bekleme: `SIGHUP` → süre → `SIGKILL`"). Phase-3 rapor
+  ve belge phase'i; oraya `bt-core` davranış değişikliği sığmaz. Karar
+  kullanıcıya taşındı — otonom şeridin "phase dosyası dışına taşan kapsam
+  ihtiyacı" eskalasyonu.
+
 ## Yayın Etkisi
 
 - **Ölçüm bekliyor: yok** — bu phase araç üretiyor, iddia değil. Kapı
