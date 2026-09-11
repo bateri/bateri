@@ -364,4 +364,4 @@ commit'te güncellenir — borç kapanıyorsa cümle kalkar, daralıyorsa daralt
 - [x] `/code-review` çalıştırıldı, bulgular giderildi — Skill fork'u gecikti, `proje.md` basamak 2 (`code-reviewer` subagent) koştu, sonra fork da döndü; yedi bulgu uygulandı, ölçüm yolundaki dokuz bulgu phase-3'e devredildi (notlarda)
 - [x] `/audit` çalıştırıldı, bulgular giderildi — on mercek elendi, ilgili altısı koştu (1/2/3/6/7/10 temiz), dördü ilgisiz; yeni bulgu yok (notlarda)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: `e991d78`
