@@ -499,4 +499,4 @@ yok), 5 (shell üçlüsü — `assets/shell/` el değmedi).
 - [x] `/code-review` çalıştırıldı — 13 bulgu: 4 uygulandı, 8 devredildi, 1 reddedildi; waive yok
 - [x] `/audit` çalıştırıldı — 8 mercek koştu, 2 elendi; tek bulgulu mercek 10 (6 bulgu, 6'sı da uygulandı)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: c3d7359
