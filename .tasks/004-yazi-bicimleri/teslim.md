@@ -94,6 +94,13 @@ belge yazılırken hiçbiri push edilmemişti; omurga sırayla:
 
 ### B.2 Göz kontrolü `[elle]`
 
+> **Sonuç: geçti (kullanıcı, 2026-09-11, `cd97728` ağacı).** Dört madde
+> `~/g.sh` betiğiyle koşuldu — betik kaçış dizilerini kendisi bastı, yani
+> `4:3`'ün iki noktası elle yazılmadı ve yanlış yazılma riski (`4;3` →
+> altı çizili + eğik) hiç doğmadı. Uygulama `BT_RUN_SECONDS`'sız açıldı,
+> yani kullanıcının kendi `$SHELL`'iyle; duman koşusunun sabit shell'i
+> değil.
+
 Bu set ekranda görünen değişiklik üretiyor; hiçbir otomatik kapı "doğru
 görünüyor mu"yu göremez. Reçete:
 
@@ -185,7 +192,8 @@ Kapsam dışı ama görünürlüğü korunsun diye ayrıca not: `plan.md`'nin
 
 <!-- `/ship` bekleyen manuel adımları BU başlık altında arar. -->
 
-- [ ] B.2 Göz kontrolü `[elle]` — yukarıdaki dört madde
+- [x] B.2 Göz kontrolü `[elle]` — **kullanıcı 2026-09-11'de yaptı, geçti.**
+      Doğrulayan kullanıcıdır; bu satır onun raporudur, otomatik bir kapı değil
 - [ ] B.3 `/measure 004-yazi-bicimleri` `[komut]` — beş iddia bekliyor;
       kancalar (`BT_FRAME_LOG`, `BT_SCROLL_TEST`, `BT_STARTUP_TRACE`) hâlâ
       yok, bugün "ölçüm aracı yok" döner — 002/003 ile aynı bekleme
