@@ -259,6 +259,21 @@ const IDLE_FRAME_LIMIT: u64 = 8;
   uyguluyor. `main.rs`'ten ulaşılamaz; kalıcı çözüm `Options`'ın tek alana
   inmesi ve o phase-2'ye devredildi.
 
+- **sadakat: makas yok.** `git show --stat 9788d95` checklist'le karşılaştırıldı:
+  on bir dosyanın her biri bir maddeyle eşleşiyor (`Makefile` + `CLAUDE.md` +
+  `proje.md` → Yayın Etkisi'nin belge kalemi, `phase-2.md`/`phase-3.md` → dört
+  devir satırı), `plan.md` ve `.tasks/README.md` damga commit'inde (`0b21888`).
+  `Cargo.lock` oynamadı.
+
+- **Orkestratör ölçümü — `IDLE_FRAME_LIMIT`'in tavanı doğrulandı ve genişletildi.**
+  Implementer smoke yükünde tavanı 3 ölçmüştü; aynı tavan **load yükünde de**
+  geçerli: `BT_SCROLL_TEST=1 BT_RUN_SECONDS=5` → `kare=3 hucre=0 glif=1836
+  kural=0 yuk=load`. İçerik akıyor (1836 glyph) ama beş saniyede üç kare
+  çiziliyor. Yani örtülü pencerede display link askıya alınıyor ve bu **yalnız
+  bekçiyi değil ölçümün kendisini** ilgilendiriyor: phase-2'nin halkası bu
+  koşumda üç örnek toplar. `plan.md`'ye `R5.6` (örnek tabanı) olarak eklendi,
+  phase-3'ün checklist'ine iki madde düştü.
+
 ## Yayın Etkisi
 
 - **Duman sözleşmesi:** jeton **eklendi, silinmedi** — `yuva=U/T` ve
@@ -296,7 +311,7 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 - [x] `yuva=U/T` jetonu `report_and_exit`'e eklendi
 - [x] Duman kapısına `IDLE_FRAME_LIMIT` — yalnız `Smoke` yükünde (kılavuzun `8`i ölçümle `2`ye indi, bkz. Uygulama Notları)
 - [x] Test: `load_shell_carries_duration` → komut `run_seconds`'ı içeriyor ve `smoke_shell`'den farklı
-- [x] Test: `smoke_shell_counts_unchanged` — **yeni sınama yazılmadı**, pin mevcut üçlü (`smoke_shell_yields_background_cells` / `_six_glyphs` / `_distinguishes_five_styles`); üçü de dokunulmadan geçti ve `make duman` `hucre=8 glif=6 kural=15` bastı. Gerekçe: Uygulama Notları
+- [~] Test: `smoke_shell_counts_unchanged` — **yeni sınama yazılmadı** (bilinçli atlama; adı geçen sınama dosyada YOK), pin mevcut üçlü (`smoke_shell_yields_background_cells` / `_six_glyphs` / `_distinguishes_five_styles`); üçü de dokunulmadan geçti ve `make duman` `hucre=8 glif=6 kural=15` bastı. Gerekçe: Uygulama Notları
 - [x] Test: `atlas_occupancy_is_republished` → `Renderer::atlas_occupancy` `Atlas::occupancy` ile aynı çifti veriyor
 - [x] Test: `idle_limit_catches_excess_frames` — sınır karşılaştırması saf fonksiyon olarak sınanır (gerçek display link gerektirmeden)
 - [x] Doğrulama geçti (`make hepsi` → 0; `make duman` → `kare=1 hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke pipeline=ok`, çıkış 0, beş koşuda da aynı; `make test-yaris` → 0. `make shader` ve `make terminfo` **gerekmedi**: `.metal`, `build.rs` ve `assets/terminfo` el değmedi)

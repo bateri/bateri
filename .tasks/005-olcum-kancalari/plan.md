@@ -41,6 +41,15 @@ yol, ölçmediği zaman **hiç var olmamış gibi** davranmalı.
   - **R5.5** — Çıktı `report_and_exit` içinde **açıkça** yazılır; `Drop`'a
     güvenen hiçbir yol kullanılmaz (`process::exit` `Drop` koşturmaz, bekçinin
     `_exit(70)`'i atexit'i bile atlar).
+  - **R5.6** — **Örnek tabanı.** Az örnek üstünden hesaplanan p95 basılmaz.
+    Ölçüldü (phase-1 sonrası, orkestratör): `BT_SCROLL_TEST=1
+    BT_RUN_SECONDS=5` → `kare=3 glif=1836`. İçerik akıyor ve grid doluyor ama
+    **beş saniyede üç kare** çiziliyor: pencere örtülü (`occlusionState`
+    `Visible` taşımıyor) ve sistem `CAMetalDisplayLink`'i askıya alıyor.
+    Dolayısıyla `ornek=` bir süs değil **kapı**: taban altında sayı
+    **hesaplanmaz**, jeton "yetersiz" der. Sebebi de basılır, yoksa kullanıcı
+    aracı bozuk sanır — oysa bozuk olan koşu ortamı.
+
 - **R6** — Boşta sıfır kare korunur ve bunun bir bekçisi vardır.
   - **R6.1** — `make duman` kapısı `kare` için **üst sınır** kazanır; bugünkü
     `n > 0` kancaların ürettiği boşta kareyi göremez.

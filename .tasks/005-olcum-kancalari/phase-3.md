@@ -131,6 +131,13 @@ kodun doc yorumunda durur ve ilk `/measure` onu `## Yöntem`'e taşır.
 - [ ] `/measure` skill'i, `context.md` şablonu, `proje.md` kanca adlarıyla uyumlandı
 - [ ] `.tasks/README.md`: 002/003/004 satırları "ölçüm aracı yok" demiyor
 - [ ] Phase-2'nin dürüst sınırı (açılış damgası `main()`'den, süreç başından değil) kodun doc'unda yazılı
+- [ ] **R5.6 örnek tabanı** — taban altında p95 **basılmaz**, `ornek=` yerine
+      gerekçe çıkar. Orkestratör ölçtü: örtülü pencerede `BT_SCROLL_TEST=1
+      BT_RUN_SECONDS=5` → `kare=3` (içerik akıyor, `glif=1836`). Sistem örtülü
+      pencerede display link'i askıya alıyor; `.app` paketi (006) gelene kadar
+      anlamlı ölçüm **öne getirilmiş pencere** istiyor ve bu `/measure`'ın
+      `[elle]` adımıdır
+- [ ] Test: `few_samples_suppress_p95` — taban altında sayı basılmıyor
 - [ ] Test: `p95_returns_none_on_empty_ring`
 - [ ] Test: `token_line_preserves_old_tokens` — beş eski jeton ve `pipeline=ok` yerinde
 - [ ] Test: `smoke_counts_unchanged` — `kare=1 hucre=8 glif=6 kural=15` bit bit aynı
