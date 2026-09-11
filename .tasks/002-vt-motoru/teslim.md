@@ -28,8 +28,10 @@ make duman        # pencereyi açar, kare ve hücre sayar
   aynı betiğin sekiz hücre verdiği `sabit_shell_arka_plan_hucreleri_verir`
   ile sınanıyor. Başsız ortamda (SSH, CI) binary `ATLANDI: Aqua oturumu yok`
   basıp 78 ile çıkar — bu "geçti" değildir.
-- Ölçüm sayısı **yok**: bu set hiçbir kare süresi/gecikme iddiası taşımıyor,
-  `docs/OLCUMLER.md` bu teslimle değişmiyor.
+- Ölçüm sayısı **yok** ve `docs/OLCUMLER.md` bu teslimle değişmiyor — ama bu
+  "iddia yok" demek değil: aşağıda **iki** kare süresi iddiası ölçüm bekliyor.
+  Ayrım şu: teslim bir sayı *yayımlamıyor*, çünkü ölçüm aracı yok. Sayı
+  gelince buraya değil `docs/OLCUMLER.md`'ye yazılır.
 
 ### Doğrulama Checklist
 
