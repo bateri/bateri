@@ -12,7 +12,7 @@ mod keys;
 mod view;
 
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use objc2::MainThreadMarker;
 use objc2::runtime::ProtocolObject;
@@ -38,11 +38,28 @@ pub enum Workload {
     Load,
 }
 
-pub struct Options {
+/// Süreli koşu: `make duman` ve ölçüm. `None` → kullanıcının kendi oturumu.
+///
+/// Üç alan **birlikte** doğuyor ve tek bir `Option`'ın altında duruyor, çünkü
+/// üçü de süreye bağlı: süresiz bir yük hiç bitmez, süresiz bir ölçüm de hiç
+/// raporlanmaz (rapor `report_and_exit`'te ve oraya yalnız deadline varır).
+/// Ayrı `Option`'lar olsaydı tip bu imkânsız durumlara izin verir ve bedeli
+/// `unwrap_or(0)` ile "ulaşılmaz dal" yorumlarına çıkardı.
+#[derive(Clone, Copy, Debug)]
+pub struct Run {
     /// `BT_RUN_SECONDS`: dolunca kare sayısına bakıp çıkılır (`make duman`).
-    pub run_seconds: Option<u64>,
-    /// Hangi sabit shell. `None` → kullanıcının kendi `$SHELL`'i.
-    pub workload: Option<Workload>,
+    pub seconds: u64,
+    /// Hangi sabit shell.
+    pub workload: Workload,
+    /// `BT_FRAME_STATS`: `Some` ise ölçüm açık **ve** damga süreç başında
+    /// alınmış. `bool` olsaydı damgayı [`run`] içinde almak gerekirdi — yani
+    /// `Renderer::system_default()`'tan sonra, açılışın en pahalı parçasını
+    /// (Metal device kurulumu, metallib yüklemesi) kaçırarak.
+    pub stats_since: Option<Instant>,
+}
+
+pub struct Options {
+    pub run: Option<Run>,
 }
 
 /// Uygulamayı kurar ve `NSApplication::run` ile ana döngüye girer. **Dönmez:**
@@ -60,6 +77,8 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
     // `Rc`: renderer'ı hem delegate hem display link tutar, ama ikisi de ana
     // thread'de. `Arc` yanlış bir söz verirdi — `Renderer` glyph atlasını
     // taşıyor ve atlasın `CTFont`'u `Send` değil.
+    // Açılış damgası bu satırdan **önce** alınmış olmalı ve tipi bunu zorluyor:
+    // `Options` bir `Instant` taşıyor, bir bayrak değil.
     let renderer = Rc::new(bt_gpu::Renderer::system_default()?);
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);

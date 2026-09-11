@@ -32,8 +32,13 @@ test:
 # Başsız ortamda binary stdout'a "ATLANDI" basıp 78 ile çıkar; make bunu 2
 # olarak döndürür — ayırt edici sinyal stdout metnidir, çıkış kodu değil.
 # `cargo run` CARGO_TARGET_DIR'a saygı duyar ve çocuğun çıkış kodunu geçirir.
+# `env -u`: kabukta ihraç edilmiş bir BT_SCROLL_TEST ya da BT_FRAME_STATS
+# kapıyı SESSİZCE başka bir koşuya çevirirdi — `var_os` değere değil VARLIĞA
+# bakıyor, yani `BT_SCROLL_TEST=` bile yükü seçer. O koşu `yuk=load` basıp
+# exit 0 verir, `hucre`/`kural` yarısı ise hiç sınanmaz: kapı yeşil kalır ama
+# iddia ettiğinden başka bir şeyi sınar. Kapı hermetik olmalı.
 duman:
-	BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
+	env -u BT_SCROLL_TEST -u BT_FRAME_STATS BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
 
 # build.rs'in yaptığını cargo'nun bayatlık takibini atlayarak koşturur;
 # derleme reçetesi burada TEKRARLANMAZ.

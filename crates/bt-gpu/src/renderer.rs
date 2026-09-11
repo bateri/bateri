@@ -336,9 +336,23 @@ impl Renderer {
     /// değişmiyor, oysa her kurulum bir heap ayırması ve birkaç `Arc`
     /// sayaç hareketi demek — hepsi tazeleme hızında. Metal `Block_copy` ile
     /// kendi referansını aldığı için aynı blok her komut tamponuna eklenebilir.
+    ///
+    /// Başarı kolu **komut tamponunu** geçiriyor, `()` değil: kareyi kim
+    /// istediyse GPU'nun kendi damgalarını (`GPUStartTime`/`GPUEndTime`) ondan
+    /// okuyabilsin diye. Renderer bu damgaları kendisi okumuyor — okusaydı
+    /// ölçüm kapalıyken de kare başına iki ObjC çağrısı öderdi ve ölçüm
+    /// politikası "ne çizeceğini bilen" tarafa sızardı.
+    ///
+    /// Blok tek ve paylaşılmış, yani `on_complete`'in yakalayabileceği tek şey
+    /// bütün karelerin **ortak** durumudur (R3.2); `Send + Sync` sınırı da o
+    /// yüzden var. Kare eşleştirmesi yok — bekleyen iddiaların hiçbiri "şu
+    /// kare" sorusunu sormuyor, hepsi dağılım soruyor.
     pub(crate) fn completion(
         &self,
-        on_complete: impl Fn(Result<(), GpuError>) + Send + Sync + 'static,
+        on_complete: impl Fn(Result<&ProtocolObject<dyn MTLCommandBuffer>, GpuError>)
+        + Send
+        + Sync
+        + 'static,
     ) -> Completion {
         let frames = Arc::clone(&self.frames);
         Completion(RcBlock::new(
@@ -353,7 +367,7 @@ impl Renderer {
                     return;
                 }
                 frames.fetch_add(1, Ordering::Relaxed);
-                on_complete(Ok(()));
+                on_complete(Ok(cmd));
             },
         ))
     }
@@ -849,10 +863,12 @@ fn upload_slot(
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::time::Instant;
 
     use bt_core::{Cell, Cursor, UnderlineStyle};
 
     use super::*;
+    use crate::stats::Stats;
 
     /// Yalnız arka planı olan hücre; `ch: None` glyph üretmez.
     fn bg_cell(col: u16, row: u16, bg: LinearRgba) -> Cell {
@@ -1091,6 +1107,52 @@ mod tests {
 
         assert_eq!(r.frames(), 1, "hatasız biten kare sayılmalı");
         assert_eq!(*seen.lock().unwrap(), vec![true]);
+    }
+
+    #[test]
+    fn completion_hands_over_live_gpu_timestamps() {
+        // Bloğun başarı kolu komut tamponunu geçiriyor ve o tampon **canlı**:
+        // `GPUStartTime`/`GPUEndTime` gerçek bir pass'ten sonra sıfır değil.
+        // Ölçümün bu makinede mümkün olduğunu söyleyen tek sınama bu — Apple
+        // ikisini de "başlamadı" hâlinde sıfır döndürüyor ve sıfır örnek
+        // `record_gpu`'da elendiği için halka **sessizce** boş kalırdı.
+        //
+        // Kapının kendisi burada değil: ölçümü isteyen taraf `link.rs` ve
+        // kapalı kapıda bu iki çağrı hiç yapılmıyor.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let stats = Arc::new(Stats::new(Instant::now(), 1));
+        let completion = {
+            let stats = Arc::clone(&stats);
+            r.completion(move |result| {
+                if let Ok(cmd) = result {
+                    stats.mark_startup();
+                    stats.record_gpu(cmd.GPUStartTime(), cmd.GPUEndTime());
+                }
+            })
+        };
+
+        const EDGE: usize = 16;
+        let texture = target_texture(&r, EDGE);
+        let mut frame = Frame::default();
+        frame.clear((8, 8));
+        frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
+        let cmd = r.queue.commandBuffer().expect("komut tamponu");
+        r.encode_pass(&cmd, &texture, bt_core::DEFAULT_BG, &frame)
+            .expect("pass encode edilemedi");
+        // SAFETY: blok geçerli ve `completion` çağrı boyunca yaşıyor.
+        unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&completion.0)) };
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        assert!(
+            stats.startup().is_some(),
+            "ilk tamamlanan kare açılış süresini kapatır"
+        );
+        assert_eq!(stats.gpu().nanos.len(), 1, "GPU damgaları sıfır değil");
+        assert!(
+            stats.cpu_frame().nanos.is_empty(),
+            "CPU aralıkları bloktan değil display link'ten yazılır"
+        );
     }
 
     #[test]
