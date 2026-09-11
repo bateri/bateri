@@ -102,6 +102,10 @@ pub struct Cell {
     /// SGR 58; `None` → çizen taraf [`Cell::fg`]'yi kullanır. `bg` ile
     /// birebir aynı örüntü: seyrek veri `Option`'da, varsayılanı olan
     /// tarafın adı `None`.
+    ///
+    /// **İmlecin altındaki hücrede her zaman `None`**: [`Cell::fg`] orada
+    /// tersine döndüğü için çizgi de onunla birlikte dönsün. Ayrıntısı
+    /// [`Session::frame`]'in imleç dalında.
     pub underline_color: Option<LinearRgba>,
     /// SGR 9; `HIDDEN` hücrede `false`.
     pub strikeout: bool,
@@ -627,11 +631,19 @@ impl Session {
             // kalsaydı açık gri, açık mavi bloğun üstüne düşer ve okunmazdı.
             // Kararı `bt-core` veriyor çünkü kararın adı terminal
             // semantiğidir; `bt-gpu`'nun bileceği bir şey değil.
-            let fore = if cursor.visible && (col, row) == (cursor.col, cursor.row) {
-                color::BG_RGB
-            } else {
-                fore
-            };
+            // **Alt çizgi rengi de tersine dönüyor** — daha doğrusu düşüyor:
+            // `None` "çizen taraf `fg`'yi kullansın" demek ve `fg` zaten
+            // tersine döndü. Düşmeseydi SGR 58'li bir hücrede imleç bloğunun
+            // üstündeki çizgi terminalin seçtiği renkte kalır, üstü çizili ise
+            // (`fg`'yi kullanıyor) tersine dönerdi: aynı hücrede iki kural, iki
+            // farklı davranış. Rengin imleç bloğuna yakın düştüğü durumda
+            // çizgi büsbütün kaybolurdu.
+            let (fore, underline_color) =
+                if cursor.visible && (col, row) == (cursor.col, cursor.row) {
+                    (color::BG_RGB, None)
+                } else {
+                    (fore, underline_color)
+                };
             sink(Cell {
                 col,
                 row,
@@ -1052,6 +1064,52 @@ mod tests {
         assert!(cells[0].strikeout, "{cells:?}");
         assert_eq!(cells[0].underline, UnderlineStyle::None, "{cells:?}");
         assert_eq!(cells[0].underline_color, None, "{cells:?}");
+    }
+
+    #[test]
+    fn cursor_cell_drops_the_underline_color() {
+        // İmlecin altındaki hücrede `fg` tersine dönüyor; SGR 58 rengi
+        // dönmeseydi aynı hücredeki iki kural iki farklı davranış gösterirdi —
+        // üstü çizili `fg`'yi kullandığı için ters, alt çizgi terminalin
+        // seçtiği renkte. Rengin imleç bloğuna yakın düştüğü durumda çizgi
+        // büsbütün kaybolurdu ve bunu hiçbir sayaç göremezdi.
+        let wake = Arc::new(TestWake::default());
+        // `\033[D` imleci X'in üstüne geri getiriyor.
+        let session = spawn_session(
+            "printf '\\033[4;58;5;196mX\\033[0m\\033[D'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        // Ölçüt **imlecin varışı**: PTY okuması X ile `\033[D` arasında
+        // bölünebilir ve o karede imleç hâlâ bir sağdadır. Hücre listesine
+        // bağlanan bir ölçüt o kareyi kabul edip yanlış hücreyi doğrulardı.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = 0;
+        let cell = loop {
+            assert!(Instant::now() < deadline, "imleç X hücresine dönmedi");
+            seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
+            let mut cells = Vec::new();
+            let Some(cursor) = session.frame(|c| cells.push(c)) else {
+                continue;
+            };
+            if cursor.visible && (cursor.col, cursor.row) == (0, 0) {
+                if let Some(cell) = cells.iter().copied().find(|c| c.ch == Some('X')) {
+                    break cell;
+                }
+            }
+        };
+
+        // Kuralın kendisi duruyor — düşen yalnız rengi.
+        assert_eq!(cell.underline, UnderlineStyle::Single, "{cell:?}");
+        assert_eq!(
+            cell.underline_color, None,
+            "imleç hücresinde SGR 58 rengi düşmeli: {cell:?}"
+        );
+        assert_eq!(
+            cell.fg,
+            color::linear_rgba(color::BG_RGB),
+            "imleç hücresinde ön plan tersine dönmeli: {cell:?}"
+        );
     }
 
     #[test]

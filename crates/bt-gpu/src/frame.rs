@@ -4,13 +4,17 @@
 //! burada piksele çevrilir ve GPU'nun göreceği düzene girer. Renderer "ne
 //! çizileceğini" buradan okur, "ne anlama geldiğini" bilmez.
 //!
-//! İki liste, iki pipeline: arka planlar (ve imleç) `cell_bg`'nin, glyph'ler
-//! `cell`'in. Ayrı durmalarının sebebi çizim sırası — glyph'ler arka planların
-//! **üstüne** gelmek zorunda ve tek listede sıra hücre hücre karışırdı.
+//! Üç liste, iki pipeline: arka planlar (ve imleç) `cell_bg`'nin, glyph'ler ve
+//! kural çizgileri `cell`'in. Ayrı durmalarının sebebi çizim sırası —
+//! glyph'ler arka planların, kurallar da glyph'lerin **üstüne** gelmek zorunda
+//! ve tek listede sıra hücre hücre karışırdı. Glyph ile kuralın ayrı listede
+//! olması da aynı cümlenin devamı: ikisi aynı pipeline'dan geçiyor ama üstü
+//! çizili, altındaki harften sonra çizilmeli.
 
 use std::mem::offset_of;
 
-use bt_core::{Cell, Cursor, LinearRgba};
+use bt_atlas::{Face, RuleKind};
+use bt_core::{Cell, Cursor, LinearRgba, UnderlineStyle};
 
 /// `shaders/cell_bg.metal` → `Instance` ile alan alan aynı.
 ///
@@ -75,7 +79,58 @@ const _: () = assert!(offset_of!(GlyphInstance, rgba) == 16);
 pub(crate) struct GlyphCell {
     pub(crate) pos: [f32; 2],
     pub(crate) ch: char,
+    /// Hangi font yüzünden rasterize edileceği; `(bold, italic)`'in [`face`]
+    /// çevirisi. [`GlyphInstance`] bunu **taşımıyor**: uv0 yuvayı, yuva da
+    /// yüzü zaten kodluyor.
+    pub(crate) face: Face,
     pub(crate) rgba: [f32; 4],
+}
+
+/// Çizilecek bir kural çizgisi — [`GlyphCell`]'in kardeşi ve aynı gerekçeyle
+/// uv'siz: yuva çözümü atlas ödüncünün yaşadığı yerde (`encode_glyphs`).
+///
+/// Yüz taşımıyor çünkü kurallar yüzden bağımsız (kalın metnin altındaki çizgi
+/// kalın değildir); çağıran onları her zaman [`Face::Regular`] ile soruyor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuleCell {
+    pub(crate) pos: [f32; 2],
+    pub(crate) kind: RuleKind,
+    pub(crate) rgba: [f32; 4],
+}
+
+/// `bt_core`'un SGR bayrakları → `bt_atlas`'ın font yüzü.
+///
+/// **Çeviri burada, çünkü tek yer.** `bt-atlas` `bt-core`'u görmüyor ve
+/// görmemeli: o kenar `alacritty_terminal`'i saf-CoreText crate'ine çekerdi
+/// (`CLAUDE.md` → "bağımlılık mimari karardır"); `bt-gpu` ikisini birden gören
+/// tek katman. Dört varyantları aynı, **sebepleri ayrı** — biri SGR 1/3
+/// semantiği, öteki bir CoreText trait'i. "Aynı görünüyorlar" diye
+/// birleştirilirse katman yönü ters döner: birleşik tip ya `bt-core`'a girer
+/// (`bt-atlas` onu göremez) ya `bt-atlas`'a (`bt-core` göremez).
+fn face(bold: bool, italic: bool) -> Face {
+    match (bold, italic) {
+        (false, false) => Face::Regular,
+        (true, false) => Face::Bold,
+        (false, true) => Face::Italic,
+        (true, true) => Face::BoldItalic,
+    }
+}
+
+/// Alt çizgi çeşidi → kural sprite'ı; [`UnderlineStyle::None`] çizgi istemiyor.
+///
+/// Beş varyantın beşi de birebir karşılığını buluyor ve `Option` yalnız
+/// "çizgi yok"u taşıyor — [`RuleKind`]'ın altıncısı ([`RuleKind::Strike`]) bu
+/// çeviriden geçmez, çünkü SGR'de üstü çizili alt çizginin bir çeşidi değil
+/// ayrı bir bayrak.
+fn rule_kind(underline: UnderlineStyle) -> Option<RuleKind> {
+    match underline {
+        UnderlineStyle::None => None,
+        UnderlineStyle::Single => Some(RuleKind::Single),
+        UnderlineStyle::Double => Some(RuleKind::Double),
+        UnderlineStyle::Curl => Some(RuleKind::Curl),
+        UnderlineStyle::Dotted => Some(RuleKind::Dotted),
+        UnderlineStyle::Dashed => Some(RuleKind::Dashed),
+    }
 }
 
 /// Tek karede çizilecekler.
@@ -93,6 +148,9 @@ pub(crate) struct GlyphCell {
 pub(crate) struct Frame {
     bg: Vec<Instance>,
     glyphs: Vec<GlyphCell>,
+    /// Kural çizgileri; glyph'lerle **aynı** pipeline'dan ama onlardan sonra
+    /// çizilir (üstü çizili, altındaki harfin üstünden geçmeli).
+    rules: Vec<RuleCell>,
     cell_px: (f32, f32),
     /// Çizilen **arka plan** instance'ı sayısı; imleç sayılmaz.
     ///
@@ -112,13 +170,22 @@ impl Frame {
     pub(crate) fn clear(&mut self, cell_px: (u16, u16)) {
         self.bg.clear();
         self.glyphs.clear();
+        self.rules.clear();
         self.bg_count = 0;
         self.cell_px = (f32::from(cell_px.0), f32::from(cell_px.1));
     }
 
     /// Sink'in tek girişi: hücrenin arka planı varsa boyanır, mürekkebi varsa
-    /// çizilir, ikisi de varsa ikisi de.
+    /// çizilir, kuralı varsa çizilir — üçü de varsa üçü de.
+    ///
+    /// Bir hücre **ikiye kadar** kural üretir: alt çizgi ve üstü çizili. İkisi
+    /// `bt-core`'da ayrı alanlar çünkü SGR'de de ayrılar; aynı hücrede
+    /// buluştuklarında ikisi de çizilir.
     pub(crate) fn push(&mut self, cell: Cell) {
+        // Dört dalın (arka plan, glyph, alt çizgi, üstü çizili) ortak
+        // aritmetiği bir kez: hücre başına dört kez `pos()` çağırmanın kazancı
+        // yok ve ayrışabilen dört kopya demek.
+        let pos = self.pos(cell.col, cell.row);
         if let Some(bg) = cell.bg {
             // `bg.len() > bg_count` tam olarak "imleç eklendi" demektir.
             debug_assert_eq!(
@@ -127,7 +194,7 @@ impl Frame {
                 "arka plan imleçten sonra eklendi: imleç gömülür"
             );
             self.bg.push(Instance {
-                pos: self.pos(cell.col, cell.row),
+                pos,
                 size: [self.cell_px.0, self.cell_px.1],
                 rgba: bg.to_array(),
             });
@@ -136,17 +203,31 @@ impl Frame {
         // Mürekkebi olmayan hücre glyph üretmez: atlasta yuva, tamponda
         // instance ve GPU'da tamamen şeffaf bir dörtlü harcardı. Ayrımı
         // `bt-core` yapıyor (boşluk, gizli metin, geniş karakterin ikinci
-        // hücresi hepsi `None`), burada sorulacak bir bayrak yok.
-        //
-        // `Cell`'in `underline`/`strikeout`/`underline_color` alanları bu
-        // phase'de **okunmuyor**: kural çizgileri phase-3'ün işi ve o güne
-        // kadar yalnız-kurallı bir hücre (altı çizili boşluk; duman
-        // reçetesinde yedi tane var) buradan çıktısız geçer. Dikiş bilerek
-        // böyle: sınır alanları taşır, renderer onları sonra okur.
+        // hücresi hepsi `None`), burada sorulacak bir bayrak yok. Kural
+        // dalları buna **bağlı değil**: altı çizili bir boşluk mürekkepsizdir
+        // ama çizgisini alır (duman reçetesinde yedi tane var).
         if let Some(ch) = cell.ch {
             self.glyphs.push(GlyphCell {
-                pos: self.pos(cell.col, cell.row),
+                pos,
                 ch,
+                face: face(cell.bold, cell.italic),
+                rgba: cell.fg.to_array(),
+            });
+        }
+        if let Some(kind) = rule_kind(cell.underline) {
+            self.rules.push(RuleCell {
+                pos,
+                kind,
+                // SGR 58 varsa o, yoksa ön plan (`bt-core` → R3.5).
+                rgba: cell.underline_color.unwrap_or(cell.fg).to_array(),
+            });
+        }
+        if cell.strikeout {
+            self.rules.push(RuleCell {
+                pos,
+                kind: RuleKind::Strike,
+                // Üstü çizili SGR 58'i **kullanmaz**: SGR'de üstü çizilinin
+                // ayrı bir rengi yok ve `underline_color` adıyla alt çizginin.
                 rgba: cell.fg.to_array(),
             });
         }
@@ -175,6 +256,22 @@ impl Frame {
         self.glyphs.len()
     }
 
+    /// Bu karede çizilecek kural çizgisi sayısı; `make duman`'ın `kural=R`
+    /// jetonu.
+    ///
+    /// **Jetonun sınırının tek sahibi burası** — okuyan üç yer (`app.rs`'in
+    /// duman kapısı, `Renderer::last_rule_count`, offscreen sınamalar) buraya
+    /// işaret ediyor; dört kopya olsaydı bekçi yeniden adlandırıldığında üçü
+    /// sessizce bayatlardı. Sınır iki katlı: (1) `bg_count` ve `glyph_count`
+    /// gibi bir **CPU** sayacı, GPU'nun o çizgileri boyadığını kanıtlamaz;
+    /// (2) **stil ayrımını göremez** — beş çeşidi de düz çizgi olarak çizen
+    /// bir kod da aynı R'yi basar. Birincisini `rule_band_is_not_uniform_along_x`
+    /// ve `sgr58_color_differs_from_foreground` kapatıyor, ikincisini o kıvrım
+    /// sınaması ile `bt-core`'un `smoke_shell_distinguishes_five_styles`'ı.
+    pub(crate) fn rule_count(&self) -> usize {
+        self.rules.len()
+    }
+
     /// Bu karenin hücre piksel boyutu; glyph dörtlüsünün boyu.
     ///
     /// Instance başına taşınmıyor (bkz. [`GlyphInstance`]), uniform olarak
@@ -192,13 +289,18 @@ impl Frame {
         &self.glyphs
     }
 
-    /// Grid koordinatının sol üst köşesi, piksel — **iki listenin ortak
+    pub(crate) fn rules(&self) -> &[RuleCell] {
+        &self.rules
+    }
+
+    /// Grid koordinatının sol üst köşesi, piksel — **üç listenin ortak
     /// aritmetiği**.
     ///
-    /// Bekçi burada duruyor ki iki yolu birden korusun: `clear` çağrılmadan
-    /// push edilen hücre sıfır boyutlu doğar ve ekranda sessizce kaybolur.
-    /// Formül arka plan dalında kopyalanmış olsaydı yalnız mürekkep taşıyan
-    /// bir kare bu bekçinin dışında kalırdı.
+    /// [`Frame::push`] onu hücre başına bir kez çağırıyor, yani bekçi artık
+    /// push edilen **her** hücrede koşuyor: `clear` çağrılmadan push edilen
+    /// hücre sıfır boyutlu doğar ve ekranda sessizce kaybolur. Tek çağrı
+    /// olduğu için formülün dallara kopyalanma ihtimali de kalmadı; imleç
+    /// yolu ([`Frame::push_cursor`]) aynı fonksiyondan geçen ikinci çağıran.
     fn pos(&self, col: u16, row: u16) -> [f32; 2] {
         let (w, h) = self.cell_px;
         debug_assert!(w > 0.0 && h > 0.0, "clear(cell_px) çağrılmadı");
@@ -334,11 +436,68 @@ mod tests {
             GlyphCell {
                 pos: [16.0, 0.0],
                 ch: 'a',
+                face: Face::Regular,
                 rgba: CURSOR.to_array(),
             }
         );
 
         frame.clear((8, 16));
         assert_eq!(frame.glyph_count(), 0);
+    }
+
+    #[test]
+    fn cell_yields_up_to_two_rules() {
+        // Beş iddia, beşi de sessizce bozulabilir: kuralsız hücre kural
+        // üretmez, altı çizili **mürekkepsiz** hücre üretir (`ch: None` kuralı
+        // düşürmez), alt çizgi rengi SGR 58'den gelir, üstü çizili hep ön
+        // plandan, ikisi aynı hücrede buluşabilir — ve `clear` kural listesini
+        // de boşaltır (üç listenin üçü de aynı çağrıda sıfırlanmalı).
+        let mut frame = Frame::default();
+        frame.clear((8, 16));
+
+        frame.push(bg_cell(0, 0));
+        assert_eq!(frame.rule_count(), 0, "kuralsız hücre kural üretti");
+
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        frame.push(Cell {
+            col: 1,
+            row: 0,
+            fg: CURSOR,
+            underline: UnderlineStyle::Curl,
+            underline_color: Some(red),
+            strikeout: true,
+            ..Default::default()
+        });
+
+        assert_eq!(frame.rule_count(), 2);
+        assert_eq!(frame.glyph_count(), 0, "kural hücresi mürekkep üretmedi");
+        assert_eq!(
+            frame.rules(),
+            [
+                RuleCell {
+                    pos: [8.0, 0.0],
+                    kind: RuleKind::Curl,
+                    rgba: red.to_array(),
+                },
+                RuleCell {
+                    pos: [8.0, 0.0],
+                    kind: RuleKind::Strike,
+                    rgba: CURSOR.to_array(),
+                },
+            ]
+        );
+
+        frame.clear((8, 16));
+        assert_eq!(frame.rule_count(), 0);
+    }
+
+    #[test]
+    fn sgr_flags_translate_to_four_faces() {
+        // Çevirinin tek yeri burası ve dört kolun ikisi karıştığında belirti
+        // "eğik metin kalın çiziliyor" olur — hiçbir sayaç görmez.
+        assert_eq!(face(false, false), Face::Regular);
+        assert_eq!(face(true, false), Face::Bold);
+        assert_eq!(face(false, true), Face::Italic);
+        assert_eq!(face(true, true), Face::BoldItalic);
     }
 }

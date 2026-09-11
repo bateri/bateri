@@ -21,11 +21,15 @@ VT motoru 002 ile: `bt-core` shell'i çalıştırır, `bt-gpu` hücre arka planl
 yer tutucusu öldü ve grid gerçek font metriğinden türüyor. Glyph de artık
 çiziliyor: `frame()` sınırı karakteri ve ön plan rengini geçiriyor, `bt-gpu`
 atlası bir `R8Unorm` dokuya bağlayıp `cell` pipeline'ıyla harfleri arka
-planların üstüne alfa karıştırarak koyuyor. Ekranda okunabilir metin var;
-kalanı 004'ün işi (`BOLD`/`ITALIC`/`UNDERLINE`/`STRIKEOUT`, emoji, kutu çizim).
-Aşağıdaki sözleşme kod
-geldikçe kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse
-ikisinden biri aynı commit'te düzelir.
+planların üstüne alfa karıştırarak koyuyor. 004 sınıra **biçimi** ekledi:
+`bt-atlas` dört font yüzü ve altı kural sprite'ı (beş alt çizgi + üstü çizili)
+tanıyor, `frame()` beş alan daha geçiriyor (`bold`, `italic`, `underline`,
+`underline_color`, `strikeout`) ve `bt-gpu` `(bold, italic)`'i font yüzüne
+çevirip kural çizgilerini glyph'lerden **sonra**, aynı pipeline'da çiziyor.
+Ekranda kalın, eğik, altı çizili ve üstü çizili metin var; emoji, geniş glyph
+ve kutu çizim ayrı setlerde. Aşağıdaki sözleşme kod geldikçe kodla birlikte
+güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri aynı commit'te
+düzelir.
 
 ## Komutlar
 
@@ -35,7 +39,7 @@ make fmt          # cargo fmt --all -- --check
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
-make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hücresi ve glyph sayar: kare=N hucre=K glif=G pipeline=ok, biri 0 → kırmızı
+make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hücresi, glyph ve kural çizgisi sayar: kare=N hucre=K glif=G kural=R pipeline=ok, biri 0 → kırmızı
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler ve bateri.app paketini target/ altına kurar
@@ -87,6 +91,12 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   (alacritty'de `CellExtra`). Bugünkü sabit **24 bayt**: alacritty `Cell`'i
   (Metalterm 20'de tuttu). Assert `bt-core/src/lib.rs`'tedir; kendi hücremize
   geçiş `Session::frame()` sınırının arkasında yapılır ve renderer'ı değiştirmez.
+  **Bu 24 bayt bir *grid* hücresidir; `frame()` sınırının `bt_core::Cell`'i
+  ayrı bir kare kaydıdır ve aynı bütçeye tabi değil** — grid hücresi 10 000
+  satırlık scrollback'te sekme başına megabaytlarca yaşar, sınır hücresi kare
+  başına ve yalnız **çizilen** hücreler için doğar (004'te beş alan daha
+  kazandı ve assert oynamadı). Sınır hücresine alan eklenirken ölçüt bu assert
+  değil, kare başına maliyettir.
 - **Renk uzayı sınırı geçer.** Çizim hedefi `BGRA8Unorm_sRGB`: donanım
   fragment çıktısını **lineer** sayar ve yazarken sRGB'ye kodlar. Bu yüzden
   `bt-core` sınırdan lineer float verir (`color::linear_rgba`) ve `MTLClearColor`
@@ -138,7 +148,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   süreç ve tanı çıktısı (stderr iletileri, `make duman` satırları, `assert!`
   gerekçeleri) UI dizgisi olmadığı için, `Makefile` hedefleri (`hepsi`,
   `duman`, `shader`, `test-yaris`, `kur`, `terminfo`) projenin komut yüzeyi
-  olduğu için. `kare=`/`hucre=`/`glif=`/`pipeline=ok`/`ATLANDI` gibi
+  olduğu için. `kare=`/`hucre=`/`glif=`/`kural=`/`pipeline=ok`/`ATLANDI` gibi
   anahtar-değer jetonları makine sözleşmesidir: **silinmez, eklenir** —
   okuyan taraf tanımadığı jetonu atlayabilir, kaybolanı arayamaz.
 

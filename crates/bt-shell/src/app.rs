@@ -416,27 +416,37 @@ impl AppDelegate {
         let n = self.ivars().renderer.frames();
         let k = self.ivars().renderer.last_bg_count();
         let g = self.ivars().renderer.last_glyph_count();
-        // Üç jeton üç ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği kare
-        // sayısı, `hucre` sink'in ürettiği arka plan hücresi, `glif` çizilen
-        // glyph. Biri sıfırken diğerleri yeşil geçemez — kare>0 & hucre=0
-        // "pencere var, shell çıktısı yok" demek; hucre>0 & glif=0 ise
-        // "hücreler boyanıyor ama harf yok", yani 002'nin körlemesine yazma
-        // dönemine sessizce geri düşmek: `glif` kapısı olmasaydı `frame()`
-        // sınırı karakteri hiç geçirmese bile `kare=1 hucre=8 pipeline=ok`
-        // basılırdı. Kapsamadığı — `glif` de `hucre` gibi bir **CPU**
-        // sayacı: boş bir atlas ve hiç çizmeyen bir glyph pipeline'ı bu
-        // sayıyı düşürmez, onu `glyph_differs_from_cell_background`
-        // offscreen sınaması yakalar.
-        if n > 0 && k > 0 && g > 0 {
-            println!("kare={n} hucre={k} glif={g} pipeline=ok");
+        let r = self.ivars().renderer.last_rule_count();
+        // Dört jeton dört ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
+        // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi, `glif`
+        // çizilen glyph, `kural` çizilen alt çizgi/üstü çizili. Biri sıfırken
+        // diğerleri yeşil geçemez — kare>0 & hucre=0 "pencere var, shell
+        // çıktısı yok" demek; hucre>0 & glif=0 ise "hücreler boyanıyor ama
+        // harf yok", yani 002'nin körlemesine yazma dönemine sessizce geri
+        // düşmek: `glif` kapısı olmasaydı `frame()` sınırı karakteri hiç
+        // geçirmese bile `kare=1 hucre=8 pipeline=ok` basılırdı. `kural`ın
+        // kapattığı yarı da aynı biçimde ayrı: sınır beş alt çizgi çeşidini,
+        // üstü çiziliyi ve SGR 58'i taşıyor ve o yolun tamamı `glif`'ten
+        // bağımsız — duman reçetesinin yedi kural hücresi mürekkepsiz.
+        //
+        // Kapsamadığı — dördü de birer **CPU** sayacı ve `kural` bunun üstüne
+        // stil ayrımını da göremez; sınırın tamamı `Frame::rule_count`'ta
+        // yazılı ve tek yerde duruyor. Buraya yalnız duman kapısına özgü olan
+        // yarı düşüyor: jeton setin **yüz yarısını hiç sormuyor** — `Face`
+        // çevirisini hep `Regular` döndüren bir yapı da aynı dört sayıyı
+        // basar, çünkü kalın bir glyph de bir glyph'tir. O yarının kapısı
+        // `bt-gpu`'nun `sgr_flags_translate_to_four_faces` ve
+        // `bold_and_regular_draw_differently` sınamaları.
+        if n > 0 && k > 0 && g > 0 && r > 0 {
+            println!("kare={n} hucre={k} glif={g} kural={r} pipeline=ok");
             std::process::exit(0);
         }
-        // Jetonlar (`kare=`, `hucre=`, `glif=`) **yalnız** başarı satırında ve
-        // yalnız stdout'ta: makine sözleşmesi o. Hata satırı aynı sayıları
-        // taşıyor ama jeton biçiminde değil, yoksa `kare=` arayan bir CI adımı
-        // düşen koşudan kare sayısı okurdu.
+        // Jetonlar (`kare=`, `hucre=`, `glif=`, `kural=`) **yalnız** başarı
+        // satırında ve yalnız stdout'ta: makine sözleşmesi o. Hata satırı aynı
+        // sayıları taşıyor ama jeton biçiminde değil, yoksa `kare=` arayan bir
+        // CI adımı düşen koşudan kare sayısı okurdu.
         eprintln!(
-            "bateri: {} saniyelik koşuda çizilen kare {n}, üretilen hücre {k}, çizilen glif {g} (üçü de >0 olmalı)",
+            "bateri: {} saniyelik koşuda çizilen kare {n}, üretilen hücre {k}, çizilen glif {g}, çizilen kural {r} (dördü de >0 olmalı)",
             self.ivars().run_seconds.unwrap_or(0)
         );
         std::process::exit(1);
