@@ -158,3 +158,8 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 yürür: `/rfc → /plan-review → /implement → /ship`, sürücüsü `/akis`.
 Kurallar `.claude/README.md` ve `.claude/is-akisi/`'de; iş setleri `.tasks/`
 altında. Tek dosyalık düzeltme için set açılmaz.
+
+Hangi işin **neden o sırada** olduğu `docs/YOL-HARITASI.md`'dedir; henüz
+açılmamış setlerin sırası ve bağımlılıkları oraya yazılır. **Durumu** o dosya
+tutmaz — tek sahibi `.tasks/README.md` indeksidir, iki yerde durum tutmak
+drift üretir.
