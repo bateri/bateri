@@ -141,7 +141,7 @@ jetonu bunu görünür kılar).
   kapalıyken hiçbir yol değişmediği için kendi maliyeti de ölçülecek bir şey
   değil; kapalı kapının bedeli `Option` üstünde bir dallanma.
 - `make duman` çıktısı **bu phase'de değişmez**: örnekler birikiyor ama
-  basılmıyor. `kare=1 hucre=8 glif=6 kural=15 yuva=U/T` aynen durur.
+  basılmıyor. `kare=1 hucre=8 glif=6 kural=15 yuva=U/T yuk=smoke` aynen durur.
 - Yeni bağımlılık **yok** (`std::time::Instant`), `Cargo.lock` oynamamalı.
   `.metal` ve `build.rs` el değmiyor — GPU zamanı komut tamponundan okunuyor,
   shader'dan değil.

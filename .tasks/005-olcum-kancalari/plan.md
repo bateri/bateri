@@ -120,6 +120,6 @@ main.rs   BT_FRAME_STATS / BT_SCROLL_TEST okunur (TEK YER)
 
 | Phase | Durum | Commit |
 |-------|-------|--------|
-| phase-1 | | |
+| phase-1 | ✅ | `9788d95` |
 | phase-2 | | |
 | phase-3 | | |

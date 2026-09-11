@@ -304,4 +304,4 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 - [x] `/code-review` çalıştırıldı, beş bulgunun beşi de giderildi. Skill fork'u ~35 dk sessiz kaldı, bu sırada `proje.md` basamak 2 uygulanıp `code-reviewer` subagent'ı da koşturuldu; ikisi de aynı bulgularla döndü (subagent ayrıca M2 `u64::MAX` sarması ve M3 `pub Options` sessiz-yeşil dallarını buldu, ikisi de düzeltildi)
 - [x] `/audit` çalıştırıldı: mekanik mercekler (1, 2, 3, 6) inline ve temiz; 4, 5, 9 ilgisiz; yargı mercekleri ajanla — 7 temiz, 8 sınırın ateşleyemediğini yakaladı (8→2), 10 dört belge çelişkisi buldu, hepsi giderildi
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: `9788d95`

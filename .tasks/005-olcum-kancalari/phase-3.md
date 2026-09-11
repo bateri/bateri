@@ -121,6 +121,7 @@ kodun doc yorumunda durur ve ilk `/measure` onu `## Yöntem`'e taşır.
 
 ## Checklist
 
+- [ ] **phase-1'den devir:** başarı satırı `9788d95` ile iki jeton kazandı — `yuva=U/T` **ve** `yuk=smoke|load`. `plan.md`'nin Akış şeması `yuk=`'ü göstermiyor (phase-1'de, `/code-review` bulgusu üzerine eklendi): oradaki satırı olduğu gibi kopyalayan bir `println!` jetonu **sessizce düşürür** ve sözleşme "silinmez, eklenir" der. Rapor genişlerken ikisi de korunacak; korunduğunu `make duman` çıktısında gözle doğrula
 - [ ] `p95_and_worst` — ortalama **yok**; boş/az örnekte davranışı tanımlı
 - [ ] Jetonlar `report_and_exit`'te `println!` ile **açıkça** basılıyor; `Drop`'a güvenen yol yok
 - [ ] `ornek=` jetonu — düşen örnekler dâhil
