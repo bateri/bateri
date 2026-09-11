@@ -65,6 +65,20 @@ Referans kanca envanteri ve gecikme zincirinin halkaları
 | Atlas doluluğu | 2 | 003 #3, 004 #2 — zamanlama değil, **sayaç** (`occupancy()` zaten var) |
 | **Giriş gecikmesi** | **0** | — |
 
+**Bu set on ikisini de kapatmıyor — panel bunu yakaladı ve kayda geçiyor.**
+Kapanan: kare süresi iddialarının tamamı (CPU `session.frame()` + CPU `draw` +
+GPU deltası), açılış/ölçek iddiaları (açılış damgası) ve atlas doluluğu
+(`occupancy()` yeniden yayımı). **Açık kalan:** saf mikro-bench isteyenler —
+başta 003 #1 (`#[inline]`'ın hücre başına renk yolundaki etkisi) ve 003 #2'nin
+bench yarısı. Onların aracı `cargo bench` ve o bilerek kapsam dışı (bkz.
+`discussion.md` Karar 7): `criterion` yeni bir bağımlılık, yani ayrı bir
+mimari karar.
+
+Sonuç dürüst hâliyle: bu set üç seti **kısmen** açar. `/measure 003` bu setten
+sonra da bir kısmına "ölçüm aracı yok" diyecek. Hangi iddianın hangi araca
+düştüğü phase dosyalarında tek tek eşlenir — çünkü "kapanır sandık, kapanmadı"
+tam olarak bu setin var olma sebebi olan hatanın kendisi.
+
 İddialar bağımsız da değil: 004 #4 kendi metninde *"003 B.1 #2 ve #5'in"*
 aynısı olduğunu söylüyor. Yani tek bir kare süresi koşusu birden çok iddiayı
 kapatıyor.
