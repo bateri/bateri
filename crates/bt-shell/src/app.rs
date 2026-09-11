@@ -6,7 +6,7 @@ use std::cell::OnceCell;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use bt_core::{Session, SessionOptions, Wake, smoke_shell};
+use bt_core::{Session, SessionOptions, Wake, load_shell, smoke_shell};
 use bt_gpu::{CellMetrics, DisplayLink, Renderer, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -21,11 +21,44 @@ use objc2_foundation::{
     NSRect, NSRunLoopCommonModes, NSSize, ns_string,
 };
 
-use crate::Options;
 use crate::view::BateriView;
+use crate::{Options, Workload};
 
 /// Kaydırma geçmişi satır sayısı; ayar dosyası (00X) gelene kadar sabit.
 const SCROLLBACK: usize = 10_000;
+
+/// Boşta sıfır karenin bekçisi: [`Workload::Smoke`] yükünde pencere ilk
+/// çizimden sonra ~`run_seconds` saniye boşta duruyor.
+///
+/// **Sayı ölçüldü, türetilmedi** (2026-09-11, bu makine). Üç okuma:
+/// sağlıklı duman koşusu `kare=1` (art arda beş koşuda da); boşta sıfır kare
+/// bilerek bozulduğunda (`needs_update`'in sonuna koşulsuz `wake()`)
+/// `kare=3`; [`Workload::Load`] ile `BT_RUN_SECONDS` 3, 6, 10 → hep `kare=3`,
+/// yani ritim süreyle artmıyor. Sebebi görünürlük: bundle'sız süreç öne
+/// çıkamıyor, pencere `isVisible()` olsa da `occlusionState` `Visible`
+/// taşımıyor ve sistem display link'i askıya alıyor — tavan ~3.
+///
+/// `2` bu üç sayının arasındaki tek anlamlı yer: sağlıklı koşuyu bir kare
+/// payla geçiriyor (açılışta düşen bir geometri olayı için), bozulmuş koşuyu
+/// yakalıyor. **Kapının koştuğu tek bağlam `make duman`'dır** —
+/// [`AppDelegate::report_and_exit`] yalnız `BT_RUN_SECONDS` yolunda çalışıyor,
+/// yani etkileşimli koşu bu sınırı hiç değerlendirmiyor. Plan dosyasındaki
+/// `8`, "bozulursa 60 Hz'de üç saniye ~180 kare" türetimine dayanıyordu; o
+/// türetim ölçümle çürüdü (tavan 3) ve `8` bu koşumda **hiçbir zaman**
+/// ateşleyemezdi.
+///
+/// **`.app` paketi (`make kur`) gelince yeniden ölç:** görünür bir pencerede
+/// tavan kalkar, meşru kare sayısı artar ve sınır yükselmelidir.
+///
+/// **Bilinen yanlış pozitif:** `DisplayLink::resize` koşulsuz kare istiyor,
+/// yani koşu sırasında pencereyi sürüklemek (ya da ekran/ölçek değiştirmek)
+/// meşru kareler üretir ve sınırı aşabilir. `make duman` gözetimsiz koşuyor,
+/// bedel kabul edildi; kalıcı çözüm geometri yolundan gelen kareleri sayaç
+/// dışında tutmak.
+///
+/// [`Workload::Load`] yükünde üst sınır **yok** — orada kare akışı işin
+/// kendisi.
+const IDLE_FRAME_LIMIT: u64 = 2;
 
 /// Pencere geometrisi + hücre ölçüsünden türeyen grid.
 ///
@@ -130,6 +163,7 @@ pub(crate) struct Ivars {
     session: OnceCell<Arc<Session>>,
     wake: Arc<ShellWake>,
     run_seconds: Option<u64>,
+    workload: Option<Workload>,
 }
 
 define_class!(
@@ -292,6 +326,65 @@ define_class!(
     }
 );
 
+/// Duman kapısının kararı.
+///
+/// `bool` **değil**: hata yolunun iki ayrı iletisi var ve `bool` onları
+/// kapının dışında yeniden türetmeye zorlardı. Politika o zaman üç yere
+/// dağılırdı (başarı satırı, "sıfır" iletisi, "fazla" iletisi) ve yalnız biri
+/// sınanmış olurdu — kapı düşerken yanlış arızayı tarif eden bir koşu tam da
+/// böyle doğar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    Pass,
+    /// Sayaçlardan biri sıfır: pipeline'ın bir halkası hiç çalışmamış.
+    /// `required` iletinin gereklilik yarısı ve yüke göre değişiyor — `Load`
+    /// düz metin akıtıyor, orada `hucre` ile `kural` yapısal olarak sıfır.
+    MissingCounter {
+        required: &'static str,
+    },
+    /// Kare sayısı üst sınırı aştı: boşta sıfır kare bozulmuş.
+    ExcessFrames {
+        limit: u64,
+    },
+}
+
+/// Kapının saf hâli — gerçek bir display link ve pencere istemeden sınanır.
+///
+/// Karar [`AppDelegate::report_and_exit`]'in gövdesinde kalsaydı sınırın
+/// yönünü (8 mi 180 mi, `Load` muaf mı) yalnız `make duman` bilirdi ve hiçbir
+/// sınamada yazılı olmazdı.
+fn verdict(n: u64, k: usize, g: usize, r: usize, workload: Option<Workload>) -> Verdict {
+    match workload {
+        // Ölçüm yükü düz metin akıtıyor: arka plan da kural da **yok** ve
+        // olmayacak. İkisini sormak, duman reçetesini hiç koşmayan bir koşuya
+        // o reçetenin sayılarını sormak olurdu — kapı her ölçüm koşusunda
+        // düşerdi. Kare akışı burada işin kendisi: üst sınır da yok.
+        Some(Workload::Load) => {
+            if n == 0 || g == 0 {
+                Verdict::MissingCounter {
+                    required: "kare ve glif >0 olmalı",
+                }
+            } else {
+                Verdict::Pass
+            }
+        }
+        // Duman reçetesi: dördü de > 0 **ve** kare sayısı üst sınırlı.
+        Some(Workload::Smoke) | None => {
+            if n == 0 || k == 0 || g == 0 || r == 0 {
+                Verdict::MissingCounter {
+                    required: "dördü de >0 olmalı",
+                }
+            } else if n > IDLE_FRAME_LIMIT {
+                Verdict::ExcessFrames {
+                    limit: IDLE_FRAME_LIMIT,
+                }
+            } else {
+                Verdict::Pass
+            }
+        }
+    }
+}
+
 impl AppDelegate {
     pub(crate) fn new(
         mtm: MainThreadMarker,
@@ -309,6 +402,7 @@ impl AppDelegate {
                 waker: OnceLock::new(),
             }),
             run_seconds: opts.run_seconds,
+            workload: opts.workload,
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
@@ -319,12 +413,37 @@ impl AppDelegate {
     fn start_session(&self, mtm: MainThreadMarker, grid: Grid, view: &BateriView) {
         let session = Session::spawn(
             SessionOptions {
-                // Duman koşusunda shell sabit: sonuç kullanıcının `$SHELL`'ine
-                // ve rc dosyasına bağlı olmasın. Betiğin sahibi `bt-core`;
-                // sekiz hücre ve altı glyph verdiği orada sınanıyor —
-                // `hucre=8` ve `glif=6` beklentileri bu yüzden birer belge
-                // cümlesi değil, sınanmış birer iddia.
-                command: self.ivars().run_seconds.map(|_| smoke_shell()),
+                // Duman ve ölçüm koşularında shell sabit: sonuç kullanıcının
+                // `$SHELL`'ine ve rc dosyasına bağlı olmasın. Betiklerin
+                // sahibi `bt-core`; `smoke_shell`'in sekiz hücre ve altı
+                // glyph verdiği orada sınanıyor — `hucre=8` ve `glif=6`
+                // beklentileri bu yüzden birer belge cümlesi değil, sınanmış
+                // birer iddia.
+                //
+                // Dallanma **yükü** soruyor, süreyi değil: `run_seconds`
+                // deadline'ı ve bekçiyi de kuruyor ve üçü tek koşula
+                // bağlanırsa ölçüm koşusu ikisinden birini kaybeder.
+                command: self.ivars().workload.map(|w| match w {
+                    Workload::Smoke => smoke_shell(),
+                    // Yükün süresi deadline'la aynı olmalı: kısa kalırsa
+                    // pencere koşunun kuyruğunda boşa düşer ve ölçüm boşta
+                    // kare örnekler.
+                    //
+                    // `main.rs` süresiz yükü eliyor, ama `Options` `pub` ve
+                    // alanları da `pub`: dışarıdan `run_seconds: None` +
+                    // `workload: Some(Load)` kurulabilir ve o koşu **sessizce
+                    // 0 ile** çıkardı (`will_terminate` raporu `run_seconds`'a
+                    // bakıyor). Yorum bir değişmezi savunamaz; `debug_assert`
+                    // savunur. Kalıcı çözüm tipin kendisi — `Options`'ın tek
+                    // alana inmesi 005 phase-2'ye devredildi.
+                    Workload::Load => {
+                        debug_assert!(
+                            self.ivars().run_seconds.is_some(),
+                            "ölçüm yükü süresiz kurulamaz"
+                        );
+                        load_shell(self.ivars().run_seconds.unwrap_or(0))
+                    }
+                }),
                 cols: grid.cols,
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
@@ -412,6 +531,10 @@ impl AppDelegate {
     /// Sıra bilinçli: `shutdown()` bloklar ve asılırsa bekçi süreci 70 ile keser,
     /// yani asılan bir kapanışta `kare=` satırı hiç çıkmaz. Ters sırada
     /// `make duman` yeşil bir satırla kırmızı bir çıkış kodunu birlikte verirdi.
+    ///
+    /// Satır burada **açıkça** yazılıyor; `Drop`'a güvenen hiçbir yol yok.
+    /// `process::exit` `Drop` koşturmaz ve bekçinin `_exit(70)`'i atexit'i
+    /// bile atlar.
     fn report_and_exit(&self) -> ! {
         let n = self.ivars().renderer.frames();
         let k = self.ivars().renderer.last_bg_count();
@@ -437,18 +560,44 @@ impl AppDelegate {
         // basar, çünkü kalın bir glyph de bir glyph'tir. O yarının kapısı
         // `bt-gpu`'nun `sgr_flags_translate_to_four_faces` ve
         // `bold_and_regular_draw_differently` sınamaları.
-        if n > 0 && k > 0 && g > 0 && r > 0 {
-            println!("kare={n} hucre={k} glif={g} kural={r} pipeline=ok");
-            std::process::exit(0);
+        //
+        // Beşinci jeton `yuva=U/T` bir kapı değil, bir **sayaç**: atlasın kaç
+        // yuvasının dolduğunu söylüyor ve `/measure` doluluk oranını ondan
+        // okuyacak. Kapıya girmemesinin sebebi anlamı: boş bir atlas da
+        // meşrudur (glyph'siz bir kare) ve dolu bir atlas da — arıza eşiği
+        // ölçülmeden bilinmiyor, ölçülmemiş sayı da kapıya yazılmaz.
+        let (used, total) = self.ivars().renderer.atlas_occupancy();
+        // Jetonlar (`kare=`, `hucre=`, `glif=`, `kural=`, `yuva=`) **yalnız**
+        // başarı satırında ve yalnız stdout'ta: makine sözleşmesi o. Hata
+        // satırları aynı sayıları taşıyor ama jeton biçiminde değil, yoksa
+        // `kare=` arayan bir CI adımı düşen koşudan kare sayısı okurdu.
+        let secs = self.ivars().run_seconds.unwrap_or(0);
+        let workload = self.ivars().workload;
+        // `yuk=` jetonu, `Load`'un başarı satırındaki `hucre=0 kural=0`'ı
+        // okunabilir kılıyor: o iki sıfır ölçüm yükünde **beklenen** (düz
+        // metin akıyor), duman yükünde ise ölü bir boru hattı demek. Jeton
+        // olmadan satırı okuyan taraf ikisini ayıramazdı — ve sözleşme jeton
+        // eklemeye zaten izin veriyor, silmeye vermiyor.
+        let load = match workload {
+            Some(Workload::Load) => "load",
+            Some(Workload::Smoke) | None => "smoke",
+        };
+        match verdict(n, k, g, r, workload) {
+            Verdict::Pass => {
+                println!(
+                    "kare={n} hucre={k} glif={g} kural={r} yuva={used}/{total} yuk={load} pipeline=ok"
+                );
+                std::process::exit(0);
+            }
+            // Ayrı ileti, çünkü ayrı arıza: burada dört sayacın dördü de
+            // yerinde ve okuyanı sıfır aramaya göndermek zaman kaybettirirdi.
+            Verdict::ExcessFrames { limit } => eprintln!(
+                "bateri: boşta sıfır kare bozuldu — {secs} saniyelik koşuda {n} kare çizildi, üst sınır {limit}"
+            ),
+            Verdict::MissingCounter { required } => eprintln!(
+                "bateri: {secs} saniyelik koşuda çizilen kare {n}, üretilen hücre {k}, çizilen glif {g}, çizilen kural {r} ({required})"
+            ),
         }
-        // Jetonlar (`kare=`, `hucre=`, `glif=`, `kural=`) **yalnız** başarı
-        // satırında ve yalnız stdout'ta: makine sözleşmesi o. Hata satırı aynı
-        // sayıları taşıyor ama jeton biçiminde değil, yoksa `kare=` arayan bir
-        // CI adımı düşen koşudan kare sayısı okurdu.
-        eprintln!(
-            "bateri: {} saniyelik koşuda çizilen kare {n}, üretilen hücre {k}, çizilen glif {g}, çizilen kural {r} (dördü de >0 olmalı)",
-            self.ivars().run_seconds.unwrap_or(0)
-        );
         std::process::exit(1);
     }
 
@@ -502,6 +651,62 @@ mod tests {
         let wide = split_into_grid(900.0, 600.0, metrics(18, 36));
         assert_eq!((narrow.cols, narrow.rows), (100, 33));
         assert_eq!((wide.cols, wide.rows), (50, 16));
+    }
+
+    #[test]
+    fn idle_limit_catches_excess_frames() {
+        let smoke = |n, k, g, r| verdict(n, k, g, r, Some(Workload::Smoke));
+        let load = |n, k, g, r| verdict(n, k, g, r, Some(Workload::Load));
+        let excess = Verdict::ExcessFrames {
+            limit: IDLE_FRAME_LIMIT,
+        };
+
+        // Bugünkü duman koşusunun ta kendisi: bir kare, sekiz hücre, altı
+        // glyph, on beş kural.
+        assert_eq!(smoke(1, 8, 6, 15), Verdict::Pass);
+        // Sınırın kendisi geçer, bir fazlası düşer. Eski kapı (`n > 0`) sıfırı
+        // görüyordu ama fazlayı görmüyordu ve boşta sıfır kareyi bozan bir
+        // değişikliğin belirtisi tam olarak fazla kare: görünür bir pencerede
+        // 60 Hz'de üç saniye ~180 kare eder ve o koşu yeşil geçerdi.
+        assert_eq!(smoke(IDLE_FRAME_LIMIT, 8, 6, 15), Verdict::Pass);
+        assert_eq!(smoke(IDLE_FRAME_LIMIT + 1, 8, 6, 15), excess);
+        assert_eq!(smoke(180, 8, 6, 15), excess);
+        // Bilerek bozulmuş koşunun **ölçülen** sayısı (2026-09-11):
+        // `needs_update`'in sonuna koşulsuz `wake()` konunca duman `kare=3`
+        // bastı. Sınır bu sayıyı yakalamak zorunda — eski `8` yakalamıyordu.
+        assert_eq!(smoke(3, 8, 6, 15), excess);
+        // `Load` yükünde akış işin kendisi: aynı sayı geçmeli. Sınırın yüke
+        // bağlı olduğu tek yerde yazılı ve burada sınanıyor.
+        assert_eq!(load(180, 8, 6, 15), Verdict::Pass);
+        // Ölçüm yükünün **gerçek** sayıları (`BT_SCROLL_TEST=1
+        // BT_RUN_SECONDS=3`, 2026-09-11): düz metin akıyor, arka plan ve kural
+        // yapısal olarak sıfır. Dört sayaç da sorulsaydı her ölçüm koşusu
+        // kırmızı düşerdi.
+        assert_eq!(load(3, 0, 1836, 0), Verdict::Pass);
+
+        // Sıfır, fazladan **önce** gelir: ikisi birden bozuksa okuyan taraf
+        // önce eksik halkayı arasın. Kolların sırasını ters çeviren bir
+        // değişiklik burada kırmızı düşer.
+        assert_eq!(
+            smoke(200, 0, 6, 15),
+            Verdict::MissingCounter {
+                required: "dördü de >0 olmalı"
+            }
+        );
+
+        // Alt sınır iki yükte de duruyor ve her sayaç ayrı bir kapı. Karar
+        // `MissingCounter` olmalı, `ExcessFrames` değil: düşen koşu okuyanı
+        // doğru arızaya göndermeli.
+        for (got, required) in [
+            (smoke(0, 8, 6, 15), "dördü de >0 olmalı"),
+            (smoke(1, 0, 6, 15), "dördü de >0 olmalı"),
+            (smoke(1, 8, 0, 15), "dördü de >0 olmalı"),
+            (smoke(1, 8, 6, 0), "dördü de >0 olmalı"),
+            (load(0, 0, 1836, 0), "kare ve glif >0 olmalı"),
+            (load(3, 0, 0, 0), "kare ve glif >0 olmalı"),
+        ] {
+            assert_eq!(got, Verdict::MissingCounter { required });
+        }
     }
 
     #[test]

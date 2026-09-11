@@ -20,9 +20,29 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
 pub use bt_gpu::GpuError;
 
+/// Duman ve ölçüm koşularının shell'i. Kullanıcının `$SHELL`'i **değil**:
+/// sonuç rc dosyasına bağlı olmasın.
+///
+/// Ayrı bir tip olmasının sebebi `run_seconds.is_some()`'ın taşıdığı üç ayrı
+/// anlam: sabit shell seç, deadline kur, bekçiyi kur. Yük seçimi yalnız
+/// birincisini ilgilendiriyor; ayrılmazsa ölçüm koşusu ya deadline'ı ya
+/// bekçiyi kaybeder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Workload {
+    /// `make duman`: tek atış, sonra boşta. `hucre`/`glif`/`kural`
+    /// sayılarının kaynağı ve boşta sıfır karenin bekçisi — kare sayısı
+    /// burada **üst sınırlıdır** (`app::IDLE_FRAME_LIMIT`).
+    Smoke,
+    /// `BT_SCROLL_TEST`: koşu boyunca akan çıktı. Kare akışı işin kendisi,
+    /// üst sınır yok.
+    Load,
+}
+
 pub struct Options {
     /// `BT_RUN_SECONDS`: dolunca kare sayısına bakıp çıkılır (`make duman`).
     pub run_seconds: Option<u64>,
+    /// Hangi sabit shell. `None` → kullanıcının kendi `$SHELL`'i.
+    pub workload: Option<Workload>,
 }
 
 /// Uygulamayı kurar ve `NSApplication::run` ile ana döngüye girer. **Dönmez:**

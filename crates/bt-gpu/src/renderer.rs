@@ -261,6 +261,24 @@ impl Renderer {
         CellMetrics::new(w, h).expect("bt-atlas hücre ölçüsünü 1'e kırpar")
     }
 
+    /// Atlasın yuva doluluğu: (kullanılan, toplam).
+    ///
+    /// [`Renderer::cell_metrics`] ile aynı gerekçe: `bt-shell`'in `bt-atlas`
+    /// kenarı yok ve olmamalı. Değer `bt-atlas`'ta doğuyor, `bt-gpu` yeniden
+    /// yayımlıyor.
+    ///
+    /// Metrik hiç sorulmadıysa atlas **yok** (alan `Option`, anahtarı
+    /// pencereden geliyor) ve cevap `(0, 0)`. Bu bir hata değil, doğru cevap:
+    /// açılmamış bir atlasın yuvası da yok. Sıfır uydurulmuş bir değer
+    /// olsaydı `panic!` gerekirdi — burası `report_and_exit` yolunda ve
+    /// kapanışta panik, raporun kendisini yutardı.
+    pub fn atlas_occupancy(&self) -> (usize, usize) {
+        self.atlas
+            .borrow()
+            .as_ref()
+            .map_or((0, 0), |tex| tex.atlas.occupancy())
+    }
+
     /// Atlası `scale` ölçeğine getirir ve metriğini verir.
     ///
     /// **Atlasın anahtarını (punto + ölçek) değiştiren tek yer burasıdır** —
@@ -1021,6 +1039,20 @@ mod tests {
         (cw, ch)
     }
 
+    /// Mürekkepli hücre; ön plan her çağrıda [`WHITE`]. `bg_cell` ile
+    /// `rule_cell`'in yanındaki üçüncü şekil — glyph çizen üç sınama aynı
+    /// dörtlüyü elle kuruyordu ve biri değişince ötekiler sessizce ayrışırdı.
+    fn glyph_cell(col: u16, ch: char, bg: Option<LinearRgba>) -> Cell {
+        Cell {
+            col,
+            row: 0,
+            ch: Some(ch),
+            fg: WHITE,
+            bg,
+            ..Default::default()
+        }
+    }
+
     /// Yalnız kural taşıyan hücre: `ch: None`, `bg: None` — duman reçetesinin
     /// yedi kural hücresinin aynısı. Ön plan her çağrıda [`WHITE`].
     fn rule_cell(col: u16, underline: UnderlineStyle) -> Cell {
@@ -1158,14 +1190,7 @@ mod tests {
         let mut frame = Frame::default();
         frame.clear((cw, ch));
         for (col, glyph) in [(0u16, 'M'), (1, '.')] {
-            frame.push(Cell {
-                col,
-                row: 0,
-                ch: Some(glyph),
-                fg: WHITE,
-                bg: Some(red),
-                ..Default::default()
-            });
+            frame.push(glyph_cell(col, glyph, Some(red)));
         }
         assert_eq!(frame.glyph_count(), 2);
 
@@ -1208,6 +1233,42 @@ mod tests {
             alphas.iter().all(|&a| a == 0xff),
             "glyph kenarında alfa deliği: {alphas:?}"
         );
+    }
+
+    #[test]
+    fn atlas_occupancy_is_republished() {
+        // `bt-shell`'in `bt-atlas` kenarı yok ve olmamalı; doluluk
+        // `cell_metrics` deseniyle buradan geçiyor.
+        //
+        // Ölçüt **artış**, eşitlik değil: `Atlas::occupancy()`'yi burada
+        // ikinci kez çağırmak, sınanan fonksiyonun gövdesini sınamanın içine
+        // kopyalamak olurdu ve o `assert_eq!` hiçbir koşulda düşemezdi. Sabit
+        // bir çift döndüren bir `atlas_occupancy` de onu geçerdi. İki farklı
+        // glyph'in yuva sayısını **birer birer** artırması, değerin gerçekten
+        // atlasın kendisinden geldiğini söylüyor.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        // Atlas ilk metrik sorusunda doğuyor; ondan önce doluluk (0, 0).
+        assert_eq!(r.atlas_occupancy(), (0, 0), "atlas metrik sorulmadan yok");
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+        // Taze atlas **boş değil**: rezident tofu yuvası zaten açılmış
+        // ([`TOFU`]). Taban bu yüzden okunuyor, sıfır varsayılmıyor.
+        let base = r.atlas_occupancy();
+        assert!(base.1 > 0, "kapasite sıfır olamaz: {base:?}");
+        assert!(base.0 < base.1, "taban kapasiteyi doldurmamalı: {base:?}");
+
+        let mut used = base.0;
+        for (col, glyph) in [(0u16, 'M'), (1, '.')] {
+            let mut frame = Frame::default();
+            frame.clear((cw, ch));
+            frame.push(glyph_cell(col, glyph, None));
+            render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+
+            let now = r.atlas_occupancy();
+            assert_eq!(now.0, used + 1, "{glyph:?} bir yuva açmalıydı: {now:?}");
+            assert_eq!(now.1, base.1, "kapasite oynamamalı: {now:?}");
+            used = now.0;
+        }
     }
 
     #[test]
