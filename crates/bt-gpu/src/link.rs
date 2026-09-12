@@ -8,7 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use bt_core::{DEFAULT_BG, DEFAULT_CURSOR, DirtyFlag, Session};
@@ -61,6 +61,50 @@ struct WakerInner {
     link: MainThreadBound<Retained<CAMetalDisplayLink>>,
     /// Kare çizilir mi, ritim döner mi.
     gate: Gate,
+    /// Kare **talebi** sayacı — boşta sıfır karenin `kare`'den daha derin
+    /// ölçütü.
+    ///
+    /// `kare` GPU'nun hatasız bitirdiğini sayıyor: bizim tarafımızda doğup
+    /// [`Gate`]'te ölen ya da birleşen talepler ona hiç görünmez. Bu sayaç
+    /// kapıdan **önce** artıyor, yani talebin kendisini sayıyor — örtülü bir
+    /// pencerede kapı kareyi yutsa da talep burada iz bırakır.
+    ///
+    /// **Ne sayıyor:** [`Waker::wake`]'e yapılan *her* çağrı. Yani yalnız
+    /// shell çıktısı değil; [`Retry::draw_failed`]'in yeniden denemesi,
+    /// [`DisplayLink::resize`]'ın koşulsuz talebi ve `stopped` mandalı
+    /// indikten sonra okuyucudan gelen son uyandırmalar da buraya yazılıyor.
+    /// Sayı bu yüzden "kare üretebilecek talep" değil "istenen kare"; kalıcı
+    /// bir çizim hatası onu şişirir ve okuyan taraf bunu `kare` ile
+    /// karşılaştırarak ayırt eder.
+    ///
+    /// Bir **sayaç, kapı değil**: eşiği ölçülmedi ve ölçülmemiş sayı kapıya
+    /// yazılmaz (`yuva=` ile aynı kural). Ölçülen (2026-09-12, debug, bu
+    /// makine) iki ayrı rejim gösteriyor ve ikisi de sayacın niye ayrı bir
+    /// sayı olduğunu söylüyor:
+    ///
+    /// - **Duman yükü** — sağlıklı koşuda `kare=1–2` iken `istek=2–3`; boşta
+    ///   sıfır kare bilerek bozulduğunda `kare=82–354`, `istek=84–357`. İkisi
+    ///   bir arada gidiyor, yani burada `kare`'den daha ayırt edici değil.
+    /// - **Ölçüm yükü** — `kare=9` (2 sn) / `21` (5 sn) iken `istek`
+    ///   **25 000–72 000**. Kare akmıyor ama talep akıyor: aradaki üç
+    ///   mertebeyi `kare` hiç göremiyor.
+    ///
+    /// İkinci rejimin **mekanizmasını ölçmedim** (kapı mı yutuyor, ana thread
+    /// mi doyuyor, sistem mi link'i kısıyor); dışarıdan gözlenen iki sayıyı
+    /// yazdım.
+    ///
+    /// `Relaxed`, çünkü hiçbir şeyi sıralamıyor — kapanışta bir kez okunuyor.
+    ///
+    /// **Kapılı değil ve bedeli ölçüldü.** Sayacı okuyan tek yer süreli koşu
+    /// (`report_and_exit`), yani etkileşimli oturumda kimse bakmıyor; buna
+    /// rağmen kapı takılmadı, çünkü bedel kapının kendi bedelinden büyük
+    /// değil: ölçülen en yüksek uyandırma hızı **~15 000/sn**
+    /// (45 167 talep / 3 sn, ölçüm yükü) ve bu, `pending.swap`'in zaten
+    /// kirlettiği önbellek satırında saniyede bir kez daha `fetch_add` demek —
+    /// mertebe olarak **saniyede on mikrosaniye**. Bir `Option` dallanması
+    /// aynı mertebeyi ödetir, üstelik `DisplayLink::new`'e bir parametre
+    /// ekleyerek.
+    requests: AtomicU64,
     /// Ana kuyrukta bekleyen bir "aç" işi var mı.
     ///
     /// Kareler zaten birleşiyordu, **dispatch'ler birleşmiyordu**: alacritty
@@ -81,6 +125,9 @@ impl Waker {
     /// henüz `setPaused(false)` yapmamış bir bloğun önüne düşer (blok sırayı
     /// `pending` → `setPaused` diye kuruyor), yani link her hâlükârda açılır.
     pub fn wake(&self) {
+        // Sayaç kapıdan da bayraktan da **önce**: ölçmek istediğimiz şey
+        // talebin kendisi, kapının ondan sonra ne yaptığı değil.
+        self.inner.requests.fetch_add(1, Ordering::Relaxed);
         // Hasar HER ZAMAN dikilir; görünmezken yalnız link açılmaz. Bayrak
         // tüketilmediği için görünürlük dönünce birikmiş hasar çizilir.
         self.inner.dirty.mark();
@@ -110,6 +157,11 @@ impl Waker {
 
     fn gate(&self) -> &Gate {
         &self.inner.gate
+    }
+
+    /// Şimdiye kadarki kare talebi sayısı.
+    fn requests(&self) -> u64 {
+        self.inner.requests.load(Ordering::Relaxed)
     }
 }
 
@@ -373,6 +425,7 @@ impl DisplayLink {
                 dirty: session.dirty_flag(),
                 link: MainThreadBound::new(link.clone(), mtm),
                 gate: Gate::new(),
+                requests: AtomicU64::new(0),
                 pending: AtomicBool::new(false),
             }),
         };
@@ -434,6 +487,14 @@ impl DisplayLink {
     /// Başka thread'lerden kare istemenin yolu; `Wake` uygulaması bunu tutar.
     pub fn waker(&self) -> Waker {
         self.waker.clone()
+    }
+
+    /// Koşu boyunca istenen kare sayısı — çizilen değil, **istenen**.
+    ///
+    /// Rapor bunu `istek=` jetonuyla basıyor; `kare` ile arasındaki fark
+    /// birleşen ve kapıda ölen taleplerdir (bkz. [`WakerInner::requests`]).
+    pub fn requests(&self) -> u64 {
+        self.waker.requests()
     }
 
     /// Bir kare iste.

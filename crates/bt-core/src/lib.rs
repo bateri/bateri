@@ -21,7 +21,8 @@ mod wake;
 
 pub use color::{DEFAULT_BG, DEFAULT_CURSOR, LinearRgba};
 pub use session::{
-    Cell, Cursor, DirtyFlag, Session, SessionOptions, UnderlineStyle, load_shell, smoke_shell,
+    Cell, Cursor, DirtyFlag, SHUTDOWN_GRACE, Session, SessionOptions, Teardown, UnderlineStyle,
+    load_shell, smoke_shell,
 };
 pub use wake::Wake;
 

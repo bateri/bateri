@@ -474,7 +474,47 @@ type Reader = JoinHandle<(EventLoop<Pty, Adapter>, State)>;
 /// - Uzun olsa ne kaybolur: bu süre Cmd-Q ile pencerenin kapanması
 ///   arasındaki gecikmenin tavanı. Yarım saniye donma sayılmıyor; saniyeler
 ///   sayılır.
-const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+///
+/// **`pub` olmasının sebebi tek bir tüketici:** `bt-shell`'in duman bekçisi
+/// bütçesini bunun **üstüne** kuruyor (`SHUTDOWN_GRACE` + sabit pay). İki
+/// sayı ayrı ayrı yazılsaydı biri değişince öteki sessizce kayar ve bekçi ya
+/// sağlıklı bir kapanışı keser ya da hiç kesmezdi.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
+/// [`Session::shutdown`]'ın sonucu — duman/ölçüm raporundaki `kapanis=`
+/// jetonunun kaynağı.
+///
+/// `bool` **değil** ve sebebi `Verdict`'inkiyle aynı: altı sonucun **dördü**
+/// ayrı birer arıza ([`Teardown::Abandoned`], [`Teardown::ReaderPanicked`],
+/// [`Teardown::Panicked`], [`Teardown::Unbounded`]) ve bunları tek bayrağa
+/// katlamak tanıyı çağrı yerinde yeniden türetmeye zorlardı. Dördü aynı
+/// ağırlıkta da değil: `bt-shell`'in duman kapısı yalnız iki panik kolunu
+/// kırmızıya çeviriyor, ötekiler kayıtlı borç. Kalan ikisi arıza değil —
+/// [`Teardown::Clean`] ve "zaten kapanmıştı" diyen
+/// [`Teardown::AlreadyDone`]. Sınır dolan koşu bugüne kadar **yeşil bir jeton
+/// satırıyla** geçiyordu — stderr'de bir satır vardı, jetonda iz yoktu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Teardown {
+    /// Okuyucu thread bitti ve `Pty` düştü: çocuk arkada kalmadı.
+    Clean,
+    /// [`SHUTDOWN_GRACE`] doldu; çocuk çıkışın içinde bırakıldı ve onu süreç
+    /// çıkışı toplayacak.
+    Abandoned,
+    /// Okuyucu thread **panikle** bitti. Kapanış tamamlandı (`Pty` unwind
+    /// sırasında düştü, yani `SIGHUP` + `wait` yine koştu) ama panik
+    /// projenin "PTY ve ayrıştırma yolunda panik yok" kuralının ihlali ve
+    /// bunun jetonda izi olmalı — eskiden yalnız stderr'e bir satır düşüyor,
+    /// rapor `temiz` diyordu.
+    ReaderPanicked,
+    /// Kapanış thread'i panikledi; PTY'nin durumu bilinmiyor.
+    Panicked,
+    /// Kapanış thread'i kurulamadı (OS thread sınırı): bu yolda **sınır
+    /// yoktu** ve kapanış işi arkada, sahipsiz kaldı.
+    Unbounded,
+    /// İkinci ve sonraki çağrı. Hiçbir şey beklenmedi; kapanışın gerçek
+    /// sonucunu **ilk** çağrı biliyor.
+    AlreadyDone,
+}
 
 /// PTY'si, okuyucu thread'i ve grid'i olan bir terminal oturumu.
 pub struct Session {
@@ -850,6 +890,13 @@ impl Session {
     ///    de kurtulmuyor (ölçüldü); ancak sürecimiz ölüp master kapandığında
     ///    gidiyor. Ölçüm yükünün koşularını asan mekanizma buydu.
     ///
+    /// **Sonucu döndürüyor** ([`Teardown`]) ve bu bir tanı yüzeyi: sınır dolan
+    /// koşu (çocuk arkada kaldı) ve **panikle biten okuyucu** eskiden yalnız
+    /// stderr'de görünüyordu, yani duman/ölçüm raporunun jeton satırı ikisini
+    /// de **yeşil** basıyordu. İkinci ve
+    /// sonraki çağrılar [`Teardown::AlreadyDone`] döner: gerçek sonucu ilk
+    /// çağrı bilir, `Drop`'unki değil.
+    ///
     /// Yani sınır çocuğu **iyileştirmiyor**, kapanışı sınırlıyor: süresi
     /// dolan yolda çocuk çıkışın içinde kalır ve onu süreç çıkışı toplar.
     /// Kalıcı çare (2) için master'ı `wait` bloklarken boşaltmaktır; bu
@@ -865,21 +912,24 @@ impl Session {
     /// master'ı kapatması verir. Sınır da her yolda yok: kapanış thread'i
     /// kurulamazsa (OS thread sınırı) bu fonksiyon sınırsız kalır, gövdedeki
     /// yorum o dalın iki sonucunu sayıyor.
-    pub fn shutdown(&self) {
+    pub fn shutdown(&self) -> Teardown {
         let Some(reader) = lock(&self.reader).take() else {
-            return;
+            return Teardown::AlreadyDone;
         };
         self.send(Msg::Shutdown);
 
         // `join` de düşme de bloklayabilir (iki sebep yukarıda), yani ikisi
-        // de bu thread'de koşmuyor. Kanalın taşıdığı `()` değil zamanlama:
-        // "bitti" haberi gelmezse sınır dolmuştur.
+        // de bu thread'de koşmuyor. Kanal iki şey taşıyor: **zamanlama**
+        // ("bitti" haberi gelmezse sınır dolmuştur) ve okuyucunun paniğe
+        // düşüp düşmediği. İkincisi `()` ile taşınamazdı ve taşınmayınca
+        // panikleyen bir okuyucu raporda `temiz` görünüyordu.
         let (done, finished) = mpsc::channel();
         let teardown = thread::Builder::new()
             .name("PTY teardown".to_owned())
             .spawn(move || {
                 let tail = reader.join();
-                if tail.is_err() {
+                let reader_ok = tail.is_ok();
+                if !reader_ok {
                     eprintln!("bateri: okuyucu thread panikle bitti");
                 }
                 // Düşme `send`'den **önce**, açıkça: `SIGHUP` ve
@@ -889,7 +939,7 @@ impl Session {
                 // `shutdown_returns_within_limit`'in alt sınırı tam bunu
                 // kırmızıya çeviriyor.
                 drop(tail);
-                let _ = done.send(());
+                let _ = done.send(reader_ok);
             });
         // Thread kurulamazsa (OS thread sınırı) **sınır yoktur** ve bu dalda
         // kapanışın nerede koştuğu bir yarışa bağlı: tutamak `spawn`
@@ -900,12 +950,16 @@ impl Session {
         // için `Pty::drop` bu thread'i bloklar. İkisi de sessiz kalmasın.
         if let Err(err) = teardown {
             eprintln!("bateri: kapanış thread'i kurulamadı ({err}), kapanış sınırsız");
-            return;
+            return Teardown::Unbounded;
         }
         match finished.recv_timeout(SHUTDOWN_GRACE) {
-            Ok(()) => {}
+            Ok(true) => Teardown::Clean,
+            // Kapanış **bitti** ama okuyucu panikle bitti: çocuk toplandı,
+            // yine de bu bir kural ihlali ve raporda görünmeli.
+            Ok(false) => Teardown::ReaderPanicked,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 eprintln!("bateri: shell {SHUTDOWN_GRACE:?} içinde kapanmadı, arkada bırakıldı");
+                Teardown::Abandoned
             }
             // Kanal göndermeden kapandı: kapanış thread'i panikledi ve bu
             // **hemen** dönüyor, yani süre dolmadı. İki durum tek satıra
@@ -913,6 +967,7 @@ impl Session {
             // yolundaki bir panik sessizce yutulur.
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 eprintln!("bateri: kapanış thread'i panikle bitti, PTY'nin durumu bilinmiyor");
+                Teardown::Panicked
             }
         }
     }
@@ -942,7 +997,14 @@ impl Drop for Session {
     fn drop(&mut self) {
         // `shutdown()`suz düşen bir oturumda alacritty'nin okuyucu thread'i
         // "event loop channel closed" diye panikler.
-        self.shutdown();
+        //
+        // Sonuç bilerek yutuluyor: `Drop`'un raporlayacak bir yeri yok. Rapor
+        // yolunda buraya zaten [`Teardown::AlreadyDone`] kalır
+        // (`bt-shell` `shutdown()`'ı kendi çağırıp sonucu basıyor); rapor
+        // olmayan bir yolda ise gerçek sonuç burada düşer ve **kimse
+        // bakmaz** — o yolda kapanışın nasıl bittiğini söyleyen şey
+        // `shutdown()`'ın kendi stderr satırlarıdır.
+        let _ = self.shutdown();
     }
 }
 
@@ -1469,7 +1531,9 @@ mod tests {
         assert!(session.reader_alive());
 
         let started = Instant::now();
-        session.shutdown();
+        // Sonuç **döndürülüyor**: jeton satırı bunu basacak ve sınır dolan bir
+        // koşunun yeşil görünmesi böyle bitiyor.
+        assert_eq!(session.shutdown(), Teardown::Clean);
         assert!(!session.reader_alive());
         // `sleep 30` sürerken bile SIGHUP yolu hemen dönmeli.
         assert!(
@@ -1477,8 +1541,9 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        // İkinci çağrı sessizce döner.
-        session.shutdown();
+        // İkinci çağrı sessizce döner ve bunu **söyler**: `Drop`'un çağrısı
+        // buraya düşüyor ve onun `Clean` demesi ilk çağrının sonucunu silerdi.
+        assert_eq!(session.shutdown(), Teardown::AlreadyDone);
     }
 
     /// `shutdown()`'ı ölçerek çağırır ve **üst** sınırı doğrular; dönen süre
