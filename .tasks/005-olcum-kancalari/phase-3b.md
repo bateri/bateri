@@ -67,6 +67,14 @@ Aşağıdakiler phase-3'ten taşındı; gövdeleri phase-3'ün ilgili bölümler
 - [ ] **phase-3'ten devir — `IDLE_FRAME_LIMIT` `.app` paketiyle yeniden ölçülecek.** Bugünkü `8` görünmeyen bir pencerede ölçüldü; `make kur` gelince meşru kare sayısı artabilir. Sabitin doc'unda yazılı, belge tarafında da anılmalı
 - [ ] **phase-3'ten devir — `CLAUDE.md`'nin dil kuralı jeton satırını tam anlatmıyor.** Bugün "`make duman` satırları Türkçe kalır" diyor; kod ise ayrım yapıyor ve ayrımın gerekçesi `Report::token_line`'ın doc'unda: **anahtarlar** Türkçe ve donmuş (sözleşme "silinmez" diyor), **değerler** İngilizce (okuyan taraf bir `match` kolu / CI grep'i), **tanı metni** (stderr, `assert!`) Türkçe. Cümle bu üçe ayrılmalı — `/audit` mercek 10'un bulgusu
 - [ ] **phase-3'ten devir — boşta kare kapısının algılama tabanı yükseldi.** `IDLE_FRAME_LIMIT` 2→8 olunca 3 sn'lik koşuda yakalanabilen en yavaş sızıntı ~0,7 Hz'den ~2,7 Hz'e çıktı. Bu sette öyle bir animasyon **yok**, ama motion/imleç fiziği seti (00X) tam bu şekilde gelecek: durma koşulsuz 2 Hz'lik bir blink 3 sn'de ~6 kare eder ve bugün yeşil geçer. `/audit` mercek 8'in notu; motion setinin `context.md`'sine taşınmalı. Yarısı kurulu: `istek=` örtülmeden etkilenmiyor ve **oran** olarak (saniye başına talep) kapıya bağlanabilir — ama eşik ölçülmedi
+- [ ] **AÇIK ÇELİŞKİ — `CLAUDE.md:43` `IDLE_FRAME_LIMIT = 2` diyor, kod `8`.**
+      Phase-3 sabiti ölçümle 2→8 taşıdı (31 sağlıklı duman → `kare` 1–2, bir
+      kez 4; 9 bozuk koşu → 49–354) ama belgeye dokunması **orkestratör
+      tarafından yasaklanmıştı** (bölmenin gerekçesi: belge nihai davranışı
+      anlatmalı). Sonuç, `CLAUDE.md`'nin kendi "kodla çelişen cümle aynı
+      commit'te düzelir" kuralının **bir commit boyunca** ihlali. Bilinçli,
+      kayıtlı ve süresi bu phase ile doluyor — `/ship`'ten **önce** kapanmalı,
+      yoksa çelişki `main`'e iner.
 - [ ] Doğrulama geçti (`proje.md` → Doğrulama; belge-only ise `make hepsi` yeter, gerekçesi notlara)
 - [ ] `/simplify` çalıştırıldı, bulgular uygulandı
 - [ ] `/code-review` çalıştırıldı, bulgular giderildi

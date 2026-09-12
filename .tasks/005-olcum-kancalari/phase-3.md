@@ -414,6 +414,21 @@ dolduğu yalnız stderr'de görünüyordu.
 
 ---
 
+- **sadakat: makas yok.** `git show --stat ee4b31c` checklist'le
+  karşılaştırıldı: on dosyanın her biri bir maddeyle eşleşiyor, `plan.md`
+  damga commit'inde (`e6627eb`), `Cargo.lock` oynamadı. Belge dosyalarına
+  **hiç dokunulmamış** — orkestratörün "belgeye dokunma" talimatı birebir
+  uygulanmış (`--stat`'ta `CLAUDE.md` yok).
+
+- **Waive kabul, ama bedeli orkestratörün.** `CLAUDE.md:43` ile kodun `8`i
+  arasındaki çelişki, benim phase bölme kararımın doğrudan sonucu: bölmeyi
+  "belge nihai davranışı anlatsın" diye yaptım, o da belgeyi bir commit
+  boyunca bayat bıraktı. İmplementer kuralı sessizce çiğnemek yerine
+  bildirdi; doğru davranış. Satır phase-3b'nin checklist'ine **adıyla**
+  yazıldı — genel "`make duman` satırı" kalemine gömülü kalsaydı kaybolurdu.
+  Commit'ler push'lu olmadığı için çelişki `main`'e inmiş değil; phase-3b
+  `/ship`'ten önce kapatacak.
+
 ## Yayın Etkisi
 
 - **Duman sözleşmesi korundu, ölçüldü:** `make duman` →
