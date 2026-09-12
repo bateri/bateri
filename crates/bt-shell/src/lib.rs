@@ -68,10 +68,12 @@ pub struct Run {
     pub seconds: u64,
     /// Hangi sabit shell.
     pub workload: Workload,
-    /// `BT_FRAME_STATS`: `Some` ise ölçüm açık **ve** damga süreç başında
-    /// alınmış. `bool` olsaydı damgayı [`run`] içinde almak gerekirdi — yani
-    /// `Renderer::system_default()`'tan sonra, açılışın en pahalı parçasını
-    /// (Metal device kurulumu, metallib yüklemesi) kaçırarak.
+    /// `BT_FRAME_STATS`: `Some` ise ölçüm açık **ve** damga `main()`'in ilk
+    /// satırında alınmış (süreç başlangıcı **değil**, bkz.
+    /// [`bt_gpu::Stats::new`]). `bool` olsaydı damgayı [`run`] içinde almak
+    /// gerekirdi — yani `Renderer::system_default()`'tan sonra, açılışın en
+    /// pahalı parçasını (Metal device kurulumu, metallib yüklemesi)
+    /// kaçırarak.
     pub stats_since: Option<Instant>,
 }
 

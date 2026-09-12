@@ -55,6 +55,18 @@ const SCROLLBACK: usize = 10_000;
 /// yani ~4 Hz) bozuk bir üç saniyelik duman ~12 kare eder, yani `8`'in
 /// **1,5 katı** — sınırı buradan yükseltmemenin sebebi bu.
 ///
+/// **Sınır büyürken kapının algılama tabanı da yükseldi** ve bunun bedeli
+/// bugün değil sonra ödenecek. Kapı `n > limit`'te ateşliyor, yani yakalamak
+/// için `limit + 1` kare gerekiyor: üç saniyelik bir koşuda eski `2` **1
+/// Hz**'lik bir sızıntıyı yakalardı, bugünkü `8` ancak **3 Hz**'i yakalıyor.
+/// (İkisi de `make duman`'ın 3 saniyesinden türüyor; süre değişirse eşik de
+/// değişir.) Bu depoda öyle bir animasyon **yok**, ama hareket/imleç fiziği
+/// seti tam bu şekilde gelecek: durma koşulu unutulmuş 2 Hz'lik bir blink üç
+/// saniyede ~6 kare eder — sınırın altında, yani bugünkü kapıdan **yeşil**
+/// geçer. O set açıldığında kapı ya süreye ya `istek=`'e bağlanmalı;
+/// `istek=` örtülmeden etkilenmiyor ve oran olarak (saniye başına talep) bir
+/// eşik verebilir, ama o eşik **ölçülmedi**.
+///
 /// **Sağlıklı koşudaki 1↔2 oynamasının mekanizması ölçülmedi.** Kare talebi
 /// (`istek=`) o koşularda **sabit** kaldı (2–3), yani fazladan kare fazladan
 /// **talepten** gelmiyor — geometri/örtülme kancaları olsaydı `istek` de
@@ -399,8 +411,63 @@ struct Counters {
 /// Sayaç yarısı (`ornek`, `dusen`, `elenen`) p95'ten **önce** okunuyor, çünkü
 /// [`bt_gpu::Samples::p95_and_worst`] kendini tüketiyor — sıra tipin
 /// zorladığı bir şey, yorumun değil.
+///
+/// # Ölçümün dürüst sınırları
+///
+/// Bu liste `docs/OLCUMLER.md` → `## Yöntem`'in **kaynağıdır**: o dosya henüz
+/// yok (ilk `/measure` kuracak, 005 R7.3) ve kurulurken buradan taşınır.
+/// Buradaki koşu sayıları da o taşımaya kadar geçici: sayının asıl sahibi o
+/// dosya, burası **emanetçi**. Hepsi 2026-09-12, `profil=debug`, tek makine.
+///
+/// Her kalem **kapsam** ya da **açık kalem** diye etiketli, çünkü okuyanın
+/// yapacağı şey farklı: kapsam bilinip geçilir, açık kalem eylem bekler.
+///
+/// - **Kapsam — `acilis=` iki ucundan da kısa.** Başı `main()`'in ilk satırı,
+///   süreç başlangıcı değil; sonu ilk **tamamlanan** kare
+///   (`addCompletedHandler`), sunulan kare değil. İkisi de
+///   [`bt_gpu::Stats::startup`]'ta yazılı. Ölçüm halkalarının ayrılması bu
+///   aralığın **içinde** kalıyor.
+/// - **Kapsam — bugüne kadarki bütün sayılar `profil=debug`.** Taban
+///   değiller; `/measure` release şart koşuyor ve jeton hangi profilde
+///   olduğunu satırın kendisinde söylüyor (R5.3).
+/// - **Kapsam — düşen kare ölçülmüyor** (R3, kapsam dışı). `dusen=` halkaya
+///   sığmayan **örnek**, atlanan kare değil; kuralı [`bt_gpu::Samples`]'ın
+///   doc'unda.
+/// - **Açık kalem (jeton boşluğu) — CPU'nun elenen örneği sayılıyor ama
+///   basılmıyor.** `Stats::record_cpu` sıfır uzunluklu bir aralığı eliyor ve
+///   [`bt_gpu::Samples::rejected`]'a yazıyor; rapor bu sayacı yalnız GPU
+///   sütunu için (`gpu_elenen=`) okuyor. Yani elenen bir CPU örneği `ornek=`'i
+///   sessizce düşürüyor ve satırda sebebini söyleyen jeton **yok** — GPU
+///   tarafında tam bu körlüğü kapatmak için eklenen sayacın CPU'da eksik
+///   kalmış hâli (R5.2). Bugün zararsız: eleme yalnız sıfır uzunluklu
+///   aralıkta oluyor ve ölçülen koşuların hiçbirinde görülmedi. Kapatmanın
+///   yolu belli ve bedeli de belli: bir `cpu_elenen=` jetonu eklemek, yani
+///   **makine sözleşmesini genişletmek** — sözleşme "silinmez, eklenir"
+///   dediği için geri alınamaz bir adım, o yüzden ölçülmüş bir ihtiyaç
+///   beklemeden atılmadı.
+/// - **Açık kalem (kayıtlı kusur) — `kapanis=abandoned`** ölçüm koşularının
+///   dörtte birinde çıkıyor (on yedi koşuda dört). Örneklere etkisi **yok**,
+///   ama sebebi sıra değil: kapanış halkadan **önce** koşuyor
+///   ([`AppDelegate::report_and_exit`]'in "Sıra bilinçli" doc'u). Etkisiz
+///   olmasının sebebi `shutdown()`'ın **ilk** işinin `link.stop()` olması —
+///   bekleme başladığında artık yeni kare düşmüyor, yani halka bekleme
+///   boyunca durağan. Bedeli yalnız koşunun duvar saatinde:
+///   `SHUTDOWN_GRACE` kadar ekliyor. Bu ölçümün bir **özelliği değil**,
+///   kapanış tasarımının borcu ve çaresi adı konmuş durumda
+///   (`Session::spawn`'da master'ın bir kopyası); ayrıntısı `CLAUDE.md`'nin
+///   kapanış maddesinde.
+/// - **Açık kalem (cevaplanmamış soru) — `kare` ile `istek` iki yükte apayrı
+///   davranıyor** ve mekanizması **ölçülmedi** (kapı mı yutuyor, ana thread
+///   mi doyuyor, sistem mi link'i kısıyor): duman yükünde `istek ≈ kare + 2`,
+///   ölçüm yükünde ikisi **mertebelerce** ayrışıyor. Üstüne, ölçüm yükünün
+///   kendisi **aynı komut ve aynı derlemeyle** iki farklı rejim verdi: `kare`
+///   bir koşuda onlarda, başka bir koşuda yüzlerde. En olası değişken pencere
+///   görünürlüğü ama **doğrulanmadı** (bkz. [`IDLE_FRAME_LIMIT`]). Bir kare
+///   süresini yorumlayan taraf hangi rejimde olduğunu satırdan
+///   **okuyamıyor** — yani iki koşuyu karşılaştırmadan önce bu cevaplanmalı.
 struct Measured {
-    /// Süreç başından ilk **tamamlanan** kareye. `None` → hiç kare bitmedi.
+    /// `main()`'in ilk satırından ilk **tamamlanan** kareye. `None` → hiç kare
+    /// bitmedi; iki ucun sınırı [`bt_gpu::Stats::startup`]'ta.
     startup: Option<Duration>,
     /// CPU sütunlarının uzunluğu. Tek sayı, çünkü iki CPU sütunu birlikte
     /// yazılıyor (`Stats::record_cpu`) ve hizaları tipte bağlı.
@@ -480,8 +547,8 @@ impl Report {
     /// metni değil bir `match` kolu ya da CI grep'i (`yuk=smoke|load` ve
     /// `pipeline=ok` bu deseni bu satır doğmadan önce kurmuştu). Türkçe kalan
     /// tek yer **tanı metni**: stderr satırları ve `assert!` gerekçeleri.
-    /// `CLAUDE.md`'nin "`make duman` satırları Türkçe kalır" cümlesi bu
-    /// ayrımı henüz yapmıyor; ayrılması phase-3b'ye yazıldı. Satır **açıkça** basılıyor (`report_and_exit`'te bir
+    ///
+    /// Satır **açıkça** basılıyor (`report_and_exit`'te bir
     /// `println!`); `Drop`'ta boşalan bir tampona bırakılan hiçbir yol yok —
     /// `process::exit` `Drop` koşturmuyor, bekçinin `_exit(70)`'i atexit'i
     /// bile atlıyor (R5.5).

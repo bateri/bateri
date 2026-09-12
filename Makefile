@@ -23,12 +23,19 @@ test:
 
 # Pencereyi açar, BT_RUN_SECONDS dolunca kare, hücre, glyph, kural çizgisi ve
 # atlas yuvası sayısına bakar:
-# kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke pipeline=ok
-# Dördünden (kare, hucre, glif, kural) BİRİ 0 ise kırmızı; `yuva` ile `yuk`
-# kapı değil, sayaç ve etiket.
+# kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I kapanis=clean \
+#   profil=debug ornek=off pipeline=ok
+# İlk dördünden (kare, hucre, glif, kural) BİRİ 0 ise kırmızı; `yuva`, `yuk`,
+# `istek` ve `profil` kapı değil, sayaç ve etiket.
 # `kare` ayrıca ÜST SINIRLI (bkz. app.rs IDLE_FRAME_LIMIT): boşta sıfır kareyi
 # bozan değişikliğin belirtisi eksik kare değil FAZLA karedir. `yuva` bir kapı
 # değil sayaç — eşiği ölçülmedi, ölçülmemiş sayı kapıya yazılmaz.
+# `kapanis` KISMEN kapı: panik kolları kırmızı düşürür, kayıtlı borç olan iki
+# kol düşürmez — bağlansaydı kapı bilinen bir borç yüzünden kırmızı düşerdi.
+# `ornek=off` = ölçüm kapısı (BT_FRAME_STATS) kapalıydı; ölçüm jetonları o
+# koşuda HİÇ basılmaz.
+# Jetonların tam listesi ve sözleşmesi: app.rs Report::token_line; `kapanis`
+# değerleri teardown_token'da, `insufficient` push_span'de.
 # Başsız ortamda binary stdout'a "ATLANDI" basıp 78 ile çıkar; make bunu 2
 # olarak döndürür — ayırt edici sinyal stdout metnidir, çıkış kodu değil.
 # `cargo run` CARGO_TARGET_DIR'a saygı duyar ve çocuğun çıkış kodunu geçirir.
