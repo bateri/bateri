@@ -154,7 +154,12 @@ sayımı — kapsam dışı, sonraki bir sete kalıyor (`plan.md` → Kapsam Dı
 
 <!-- `/ship` bekleyen manuel adımları BU başlık altında arar. -->
 
-- [ ] B.1 `/ship` push `[oto]` — 26 commit (`c32f13d..86143ea`) `main`'e gitmeyi bekliyor
+- [x] B.1 `/ship` push `[oto]` — **koşuldu 2026-09-12: `c32f13d..3f9ac91`, 27 commit.**
+      (Yazıldığında 26'ydı; teslim defterinin kendi damgası son commit'i de kapsıyor.)
+      Doğrulama push'tan önce yeniden koştu: `make hepsi` 0 (100 sınama),
+      `make test-yaris` 0, `make duman` Smoke 0 / Load 0. `make shader` ve
+      `make terminfo` gerekmedi — `.metal`, `build.rs`, `assets/terminfo` bu
+      aralıkta el değmedi. `Cargo.lock` oynamadı.
 - [ ] B.2 `/measure 002-vt-motoru` · `/measure 003-glyph-atlas` · `/measure 004-yazi-bicimleri` `[komut]` — sekiz iddia ölçülebilir, henüz koşulmadı; 005'i bloklamıyor
 - [x] B.3 Bilinen borç kaydı `[oto]` — beşi de `CLAUDE.md` / ilgili modülün doc'unda yazılı
 
