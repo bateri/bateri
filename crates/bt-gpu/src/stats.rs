@@ -32,8 +32,11 @@ const MAX_CAPACITY: u64 = MAX_REFRESH_HZ * 600;
 /// aynı sayıyı taşır ve biri "dağılım" diye okunur. Taban bu çökmenin
 /// bittiği ilk `n`'dir (`ceil(0.95 × 20) = 19 < 20`).
 ///
-/// R5.6'nın kapısı bu: taban altında sayı **hesaplanmaz** ve jeton
-/// `yetersiz` der — sebebi de aynı satırdaki `ornek=` ile `taban=`.
+/// R5.6'nın kapısı bu: taban altında sayı **hesaplanmaz**
+/// ([`Samples::p95_and_worst`] `None` döner). Bunun raporda nasıl söylendiği
+/// bu katmanın işi **değil** — jetonu basan üst katman biliyor; buraya bir
+/// jeton yazımı kopyalamak hem katman yönüne aykırı olurdu hem de bir sonraki
+/// yeniden adlandırmada sessizce bayatlardı (bir kez bayatladı).
 pub const MIN_SAMPLES: usize = 20;
 
 /// Bir sütunun kapanıştaki hâli: halkada duran örnekler (eskiden yeniye,
@@ -197,10 +200,15 @@ impl Ring {
 /// Koşunun ölçüm defteri. Kapı açıkken `bt-shell` kurar, `bt-gpu` doldurur ve
 /// kapanışta yine `bt-shell` okur.
 pub struct Stats {
-    /// Açılış damgası: `main()`'in başında alındı ve buraya **taşındı**.
-    /// Kurucunun kendisi okusaydı ölçüm `Renderer::system_default()`'tan
-    /// sonra başlar, yani Metal device kurulumunu ve metallib yüklemesini
-    /// kaçırırdı (R3.3).
+    /// Açılış damgası: `main()`'in **ilk satırında** alındı ve buraya
+    /// **taşındı**. Kurucunun kendisi okusaydı ölçüm
+    /// `Renderer::system_default()`'tan sonra başlar, yani Metal device
+    /// kurulumunu ve metallib yüklemesini kaçırırdı (R3.3).
+    ///
+    /// **Süreç başlangıcı değil:** dyld ve Rust runtime kurulumu bu damgadan
+    /// önce bitiyor. `main()`'in ilk satırı elimizdeki en erken nokta ve
+    /// damgayı oraya koyan taraf neden orada durduğunu kendi yanında
+    /// anlatıyor.
     since: Instant,
     /// İlk tamamlanan kareye kadar geçen süre. `OnceLock`: bir kez yazılıyor
     /// ve yazan **Metal'in thread'i** — `ShellWake.waker` ile `Session`'ın
@@ -219,11 +227,20 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// `since` süreç başındaki damga, `run_seconds` koşunun bütçesi.
+    /// `since` açılış damgası, `run_seconds` koşunun bütçesi.
+    ///
+    /// Damgayı bu kurucu **almıyor**, dışarıdan alıyor; hem gerekçesi hem
+    /// ne olmadığı `since` alanının doc'unda.
     ///
     /// Kapasite koşu süresinden türüyor: `run_seconds × MAX_REFRESH_HZ`.
     /// Sıfır saniyelik koşu [`Ring::new`]'in alt sınırına düşer (bir yuva) —
     /// kırpma tek yerde durur ve orada `%`'nin yanında durduğu için görünür.
+    ///
+    /// **Ayırma açılış süresinin içinde:** üç halka burada, damga alındıktan
+    /// sonra ve ilk kare bitmeden doğuyor, yani [`Stats::startup`] kendi
+    /// ölçüm aracının kurulumunu da sayıyor. Bedel
+    /// `run_seconds × MAX_REFRESH_HZ × 3 × 8` bayt — türetme, ölçüm değil:
+    /// üç saniyelik bir koşuda ~8,6 KB, `MAX_CAPACITY` tavanında ~1,7 MB.
     pub fn new(since: Instant, run_seconds: u64) -> Self {
         let capacity = run_seconds.saturating_mul(MAX_REFRESH_HZ);
         Self {
@@ -307,7 +324,13 @@ impl Stats {
         self.startup.get_or_init(|| self.since.elapsed());
     }
 
-    /// Süreç başından ilk tamamlanan kareye. `None` → hiç kare bitmedi.
+    /// `since` damgasından ilk **tamamlanan** kareye. `None` → hiç kare
+    /// bitmedi.
+    ///
+    /// İki ucu da dar ve ikisi de adıyla anılmalı: baş **süreç başlangıcı
+    /// değil** (bkz. `since`), son da **sunulan** kare değil —
+    /// `addCompletedHandler` GPU'nun komut tamponunu bitirdiğini söyler,
+    /// ekrana çıktığını değil.
     pub fn startup(&self) -> Option<Duration> {
         self.startup.get().copied()
     }
@@ -392,7 +415,10 @@ mod tests {
         let gpu = stats.gpu();
         assert_eq!(gpu.nanos, vec![2_000_000]);
         assert_eq!(gpu.rejected, 2, "elenen kare sayılır");
-        // CPU sütununda eleme **ulaşılmaz**: 584 yıllık bir kare demek.
+        // CPU sütunu bu koşuda hiç yazılmadı, yani elenen de yok. CPU'nun
+        // **kendi** eleme yolu ulaşılmaz değil — sıfır uzunluklu aralık onu
+        // ateşliyor ve `cpu_rejects_zero_spans` bunu pinliyor; ulaşılmaz olan
+        // yalnız taşma kolu (584 yıllık bir kare demek).
         assert_eq!(stats.cpu_frame().rejected, 0);
     }
 
@@ -538,8 +564,11 @@ mod tests {
 
     #[test]
     fn zero_second_run_still_has_a_ring() {
-        // `BT_RUN_SECONDS=0` meşru (deadline hemen ateşler) ve kapasitesiz bir
-        // halka imleci modlayamaz — sıfıra bölme değil, panik: `slots[i % 0]`.
+        // Sıfır saniyelik bir defter **binary'den artık doğmuyor**
+        // (`main.rs` `BT_FRAME_STATS`'i sıfırdan büyük bir `BT_RUN_SECONDS`'a
+        // bağlıyor, yoksa çıkış 1), ama kurucu `pub` ve kütüphane API'sinden
+        // çağrılabilir: kapasitesiz bir halka imleci modlayamaz — sıfıra
+        // bölme değil, panik (`slots[i % 0]`). Alt sınır o yüzden duruyor.
         let stats = Stats::new(Instant::now(), 0);
         stats.record_gpu(1.0, 1.001);
         assert_eq!(stats.gpu().nanos.len(), 1);

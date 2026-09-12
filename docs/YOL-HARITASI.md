@@ -27,8 +27,8 @@ bulunamaz.
 
 | # | İş | Neden burada |
 |---|---|---|
-| 005 | ölçüm kancaları + `docs/OLCUMLER.md` | 002, 003 ve 004'ün bekleyen on iki iddiası tek bir kanca setine bağlı. Taban, **bir sonraki büyük render değişikliğinden önce** alınırsa "hangi set yavaşlattı" sorusu cevaplanabilir olur; sonra alınırsa o soru kalıcı olarak cevapsız kalır |
-| 006 | pano + seçim + kaydırma + bundle | **Eşiği tek hamlede geçmek için bilerek şişirilmiş set.** Cila feda edilir: yapıştır, kopyala, fareyle seçim, tekerlek, `.app` bundle. Bundle burada çünkü bundle'sız süreç öne çıkamıyor, Dock ikonu almıyor ve varsayılan terminal olamıyor. 002'nin ertelenmiş Apache-2.0 attribution'ı da burada kapanır |
+| 005 | ölçüm kancaları | 002, 003 ve 004'ün bekleyen on iki iddiası tek bir kanca setine bağlı. Taban, **bir sonraki büyük render değişikliğinden önce** alınırsa "hangi set yavaşlattı" sorusu cevaplanabilir olur; sonra alınırsa o soru kalıcı olarak cevapsız kalır. `docs/OLCUMLER.md` bilerek **kapsam dışı** bırakıldı (onu ilk `/measure` kurar) ve bench (`criterion`) de öyle; **bench'in dışarıda kalması** on ikinin ikisini bu setten sonra da açık bırakıyor — ikisi de saf `cargo bench` iddiası |
+| 006 | pano + seçim + kaydırma + bundle | **Eşiği tek hamlede geçmek için bilerek şişirilmiş set.** Cila feda edilir: yapıştır, kopyala, fareyle seçim, tekerlek, `.app` bundle. Bundle burada çünkü bundle'sız süreç öne çıkamıyor, Dock ikonu almıyor ve varsayılan terminal olamıyor. 002'nin ertelenmiş Apache-2.0 attribution'ı da burada kapanır. **Bundle'ın bir yan ödevi var:** görünür pencere meşru kare sayısını değiştirir, yani `IDLE_FRAME_LIMIT` (boşta sıfır kare kapısı) bu sette **yeniden ölçülmeli** — bugünkü değeri görünmeyen bir pencerede ölçüldü |
 
 > **006'nın kapsamı henüz kesin değil.** İki seçenek tartışıldı: (a) düzenli
 > sıra — pano, kaydırma, ayar, bundle ayrı setler; (b) tek hamlede eşik.
@@ -58,16 +58,29 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 
 - **Logger yok.** `tracing` bağlanmadı; yoksayılan olaylar (başlık, zil, pano)
   ve alacritty'nin `log` satırları **sessizce** düşüyor. Hata ayıklamayı
-  körleştiriyor, o yüzden erken yamanmalı — 005 doğal adayı, ölçüm kancaları
-  zaten aynı enstrümantasyon damarından geçiyor.
-- **Kapanışta sınırsız bekleme.** `SIGHUP`'ı yutan çocuk (`trap '' HUP`) ana
-  thread'i süresiz bekletiyor; duman koşusunda bekçi kesiyor, etkileşimli
-  kullanımda **kesen yok**. Kalıcı çözüm `bt-core`'da sınırlı bekleme
-  (`SIGHUP` → süre → `SIGKILL`). Eşikten önce kapanmalı: günlük kullanımda
-  donan bir terminal kabul edilemez → 006.
+  körleştiriyor, o yüzden erken yamanmalı. 005 doğal adayıydı — ölçüm
+  kancaları aynı enstrümantasyon damarından geçiyor — ama **almadı**: ayrı
+  bir bağımlılık kararı (`tracing`) ve seti "ölçüm + gözlemlenebilirlik" diye
+  şişirirdi (`005/plan.md` → Kapsam Dışı). Hâlâ sete bağlanmadı.
+- **Kapanışta arkada kalan çocuk.** Sınırsız bekleme **kapandı** (005
+  phase-2b) ve bu maddenin eski "→ 006" bağı da onunla düştü: 006'ya
+  bağlanma gerekçesi "günlük kullanımda donan bir terminal kabul edilemez"
+  idi, artık donmuyor. Kalan borç daha dar ve eşiği bloke etmiyor: süre
+  dolunca çocuk arkada bırakılıyor, onu süreç çıkışı topluyor. Bu yüzden
+  **sete bağlanmadı** — `bt-core`'un kapanış tasarımına meşru biçimde dokunan
+  ilk set toplar. Ayrıntısı ve çürütülmüş çaresi `CLAUDE.md`'nin kapanış
+  maddesinde; artık **ölçülebilir** de (`kapanis=abandoned`).
 - **Ölçeğin `bt-gpu`'ya iki kapısı** (`Surface::set_size` ve `cell_metrics`).
   003'ten devralındı, 004'te bilerek yeniden ertelendi. Ölçek borusuyla
   ilgili; ayar/tema seti ölçeği zaten elleyecek → 007.
+- **Boşta kare kapısı yavaş bir animasyonu kaçırır.** 005 phase-3 sınırı
+  ölçümle büyüttü; bedeli, kapının algılama tabanının yükselmesi oldu — durma
+  koşulu unutulmuş yavaş bir blink bugün yeşil geçer. Bu depoda öyle bir
+  animasyon **yok**, ama hareket/motion seti tam bunu getirecek. Sayılar,
+  mekanizma ve aday çözüm (`istek=`'i orana çevirip kapıya bağlamak; eşiği
+  **ölçülmedi**) `bt-shell`'in `IDLE_FRAME_LIMIT` doc'unda; set açılınca bu
+  madde onun `context.md`'sine taşınır → hareket/motion. Aynı sabit 006'da
+  da yeniden ölçülüyor (bundle) — **tek sabit, iki ayrı iş**.
 - **004'ün altı kalemlik bulgu borcu.** Listesi ve gerekçeleri
   `.tasks/004-yazi-bicimleri/teslim.md` ile phase-3'ün `## Uygulama
   Notları`'nda. Sete bağlanmadı; ilgili dosyaya meşru biçimde dokunan ilk set

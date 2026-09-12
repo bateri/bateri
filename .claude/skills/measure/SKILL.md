@@ -20,22 +20,50 @@ yürütür. Dosya **yoksa** ilk ölçüm onu kurar: önce `## Yöntem` ve `## Na
 yeniden ölçülür` yazılır, sonra sayı girer — yöntemsiz sayı sonraki ölçümle
 karşılaştırılamaz.
 
+Dosya bugün **yok** ve `## Yöntem`'i sıfırdan yazmak gerekmiyor: kancaların
+dürüst sınırları **kodda** emaneten duruyor ve oradan taşınır —
+
+- `crates/bt-shell/src/app.rs` → `Measured`'ın doc'u, "**Ölçümün dürüst
+  sınırları**" başlığı — listenin tamamı orada ve her kalem **kapsam** ya da
+  **açık kalem** diye etiketli; buraya kopyalanmıyor, çünkü eksik kopyalanan
+  bir liste sessizce ayrışır.
+- Aynı dosyada `IDLE_FRAME_LIMIT` ve `Report::token_line`: kapının gerekçesi
+  ve jeton sözleşmesinin dil kuralı.
+- `crates/bt-gpu/src/stats.rs`: `MIN_SAMPLES`'ın türetimi (p95'in tabanı),
+  halka kapasitesi, hangi karenin **elendiği**.
+
 ## 1. Neyi, neye karşı
 
 `$ARGUMENTS` ne ölçüleceğini söylüyorsa onu al; söylemiyorsa sor. Ölçüm
 türleri ve `docs/OLCUMLER.md`'deki karşılıkları:
 
-| tür | nasıl | bölüm |
-|---|---|---|
-| kare süresi | `BT_SCROLL_TEST=1 BT_RUN_SECONDS=30` ile dolu scrollback kaydırma; GPU/CPU ms ve düşen kare `BT_FRAME_LOG` çıktısından; çapraz kontrol `xcrun xctrace record --template 'Metal System Trace'` | `## Kare süresi` |
-| giriş gecikmesi | `BT_INPUT_LATENCY_SAMPLES=200` — tuş → PTY → echo → parse → commit → presented zinciri, medyan ve p95 | `## Giriş gecikmesi` |
-| bellek | `footprint -p {pid}` ya da `vmmap --summary`; 1 sekme boş, 1 sekme 10 000 satır dolu, 8 sekme | `## Bellek` |
-| açılış | `BT_STARTUP_TRACE=1` — process başlangıcından ilk presented frame'e | `## Açılış` |
-| ayrıştırıcı / atlas bench | `cargo bench -p bt-core --bench parse`, `cargo bench -p bt-atlas` | `## Bench` |
+| tür | nasıl | kanca | bölüm |
+|---|---|---|---|
+| kare süresi | `BT_FRAME_STATS=1 BT_SCROLL_TEST=1 BT_RUN_SECONDS=30` — jeton satırı üç sütun basar: `cpu_kare_*` (`session.frame`: kilit + ayrıştırma + grid + sink), `cpu_encode_*` (encode + commit), `gpu_*` (Metal'in kendi saatinden). Çapraz kontrol `xcrun xctrace record --template 'Metal System Trace'` | **var** | `## Kare süresi` |
+| düşen kare | — | **yok** (005 R3, bilerek kapsam dışı). `dusen=` halkaya sığmayan **örnek**, atlanan kare **değil**; ikisini karıştırma | `## Kare süresi` |
+| giriş gecikmesi | `BT_INPUT_LATENCY_SAMPLES=200` — tuş → PTY → echo → parse → commit → presented zinciri, medyan ve p95 | **yok** (005 kapsam dışı: zincirin orta halkaları `alacritty_terminal`'de) | `## Giriş gecikmesi` |
+| bellek | `footprint -p {pid}` ya da `vmmap --summary`; 1 sekme boş, 1 sekme 10 000 satır dolu, 8 sekme | araç dışarıdan, sekme yok | `## Bellek` |
+| açılış | aynı koşunun `acilis=` jetonu — `main()`'in **ilk satırından** ilk **tamamlanan** kareye | **var**, ama tarifi dar: süreç başlangıcı ve *presented* değil (bkz. yukarıdaki dürüst sınırlar) | `## Açılış` |
+| ayrıştırıcı / atlas bench | `cargo bench -p bt-core --bench parse`, `cargo bench -p bt-atlas` | **yok** — `criterion` ayrı bir bağımlılık kararı; `cargo bench --workspace -- --list` → `0 benchmarks` | `## Bench` |
+
+Ölçüm koşusunun iki şartı: `BT_FRAME_STATS` ile `BT_SCROLL_TEST` **sıfırdan
+büyük** bir `BT_RUN_SECONDS` ister (yoksa süreç çıkış 1 verir — rapor yalnız
+deadline yolunda basılıyor), ve ölçüm yükü olmadan kare akmaz. Satır profilini
+kendi söylüyor (`profil=debug|release`), yani release şartını (§2) sonradan
+da doğrulayabilirsin. `ornek=` ile `taban=` birlikte okunur: taban altında p95
+**ve** en kötü değer basılmaz, ikisi de `insufficient` çıkar — o koşu bir sayı
+değil, bir **arıza** raporudur (örnekleme durmuş).
+
+Sütun sayaçları ayrı ve karıştırılmaz — `ornek=` CPU'nun, `gpu_ornek=`
+GPU'nun, `gpu_elenen=` ölçülemeyip atılan kare, `dusen=` halkaya sığmayan
+örnek. İkisinin neden eşit olmayabildiği ve `dusen=`'in nasıl türediği
+alanların kendi doc'unda (`Measured`, `bt_gpu::Samples`); buraya
+kopyalanmıyor.
 
 Ortam değişkenleri **sözleşmedir**: kancayı taşıyan kod henüz yoksa ölçüm
 "yok" değil "ölçüm aracı yok"tur — bunu söyle, sayı uydurma ve kancayı ekleyen
-bir iş seti öner. Metalterm'in aynı iş için kullandığı kancalar
+bir iş seti öner. Yukarıdaki tabloda **yok** yazan üç satır bugün tam olarak
+bu durumda. Metalterm'in aynı iş için kullandığı kancalar
 `docs/ARASTIRMA.md` → "Shell entegrasyonu" altındadır.
 
 **Taban olmadan ölçüm yorumlanamaz.** Karşılaştırılacak değeri
@@ -55,7 +83,10 @@ oynuyorsa `docs/OLCUMLER.md#yöntem`'deki gürültü kuralını uygula.
 süresi ölçmek (renderer frame göndermez, sıfır çıkar), atlası ısıtmadan glyph
 yükleme ölçmek, uygulanmamış bir değişikliği ölçmek — hepsi sessiz yanlış sayı
 üretir. Sayıyı almadan önce yolun ateşlendiğini göster (frame sayacı, log,
-kasıtlı bozma ile değişen sonuç).
+kasıtlı bozma ile değişen sonuç). Kare süresinde bunun bir kısmı satırın
+kendisinde: `kare=`, `ornek=`, `gpu_ornek=` ve `gpu_elenen=` beklediğinden
+küçükse ölçüm durmuştur — `insufficient` gördüğün bir koşuyu **yorumlama**,
+yeniden koş.
 
 **Release derlemesi ölç.** Debug derlemesinin sayısı bir taban değildir;
 `cargo build --release` ve `target/release` altındaki binary.

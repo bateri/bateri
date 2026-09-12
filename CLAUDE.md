@@ -39,8 +39,11 @@ make fmt          # cargo fmt --all -- --check
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
-make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hücresi, glyph, kural çizgisi ve atlas yuvası sayar: kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke pipeline=ok
-                  # dördünden biri 0 ise kırmızı; `kare` ayrıca ÜST SINIRLI (boşta sıfır karenin bekçisi, `IDLE_FRAME_LIMIT` = 2, ölçülmüş), `yuva` ile `yuk` kapı değil sayaç ve etiket
+make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hücresi, glyph, kural çizgisi ve atlas yuvası sayar:
+                  # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I kapanis=clean profil=debug ornek=off pipeline=ok
+                  # ilk dördünden biri 0 ise kırmızı; `kare` ayrıca ÜST SINIRLI (boşta sıfır karenin bekçisi, `IDLE_FRAME_LIMIT` = 8, ölçülmüş — gerekçesi ve koşuları sabitin doc'unda).
+                  # `yuva`/`yuk`/`istek`/`profil` kapı değil sayaç ve etiket; `kapanis` kısmen kapı (panik kolları kırmızı düşürür, kayıtlı borç olan iki kol düşürmez — değerleri `teardown_token`'da).
+                  # `ornek=off` = ölçüm kapısı kapalıydı ve o koşuda ölçüm jetonları hiç basılmaz; neden sıfır olmadığı `Report::token_line`'da.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler ve bateri.app paketini target/ altına kurar
@@ -68,7 +71,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 |---|---|---|
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52), komut blokları, seçim, ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek (00X) | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
-| `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
+| `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi | `objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`), `libc` (yalnız bekçinin `write` + `_exit`'i) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
@@ -122,7 +125,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   `Session::spawn`'da `pty.file().try_clone()` (yeni bağımlılık istemiyor) —
   `EventLoop` `Pty`'yi `join`'den sonra vermediği için kopya baştan alınmak
   zorunda. Duman koşusundaki bekçi (`_exit(70)`) duruyor ama artık kapanış
-  yolunun **başka** asılmalarına karşı.
+  yolunun **başka** asılmalarına karşı. Borç aynı borç, ama artık
+  **görünür**: `shutdown()` sonucu döndürüyor (`Teardown`) ve süreli koşu onu
+  `kapanis=` jetonuyla basıyor (değerler `teardown_token`'da) — sınırın
+  dolduğu koşu eskiden yeşil bir satırla geçip yalnız stderr'de iz
+  bırakıyordu.
 - **Render yolu bloklanmaz.** PTY okuma ve ayrıştırma kendi thread'inde; AppKit
   çağrıları `MainThreadMarker` ile ana thread'de; renderer `CAMetalDisplayLink`
   ile sürülür.
@@ -144,27 +151,41 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   sarmalayıcısı, fish `vendor_conf.d`) ve kullanıcının rc dosyasına **asla**
   dokunmaz. Komut blokları OSC 133 işaretlerinden okunur.
 - **Ölçülmemiş sayı yazılmaz.** Tek sahip `docs/OLCUMLER.md`; ölçüm bir kapı
-  değildir, `/measure` ile kullanıcı ister. Kuralın ikinci yarısı **hâlâ
-  borç, ama daraldı**: `BT_SCROLL_TEST` 005 phase-1 ile geldi (ölçüm yükünü
-  seçer) ve `make duman` atlas doluluğunu `yuva=U/T` ile basıyor. Açık kalan:
-  zaman kancaları (`BT_FRAME_STATS`, açılış damgası — 005 phase-2/3),
-  `docs/OLCUMLER.md` (ilk `/measure` kurar) ve **bench seti** — `criterion`
-  yeni bir bağımlılık, yani ayrı bir mimari karar, o yüzden bu set bir borcu
-  başka bir borçla takas ediyor: `cargo bench` satırı yukarıdaki bloğa
-  **bench seti gelince** döner, kancalarla değil. `/measure` zaman soran
-  iddialara bugün hâlâ **ölçüm aracı yok** diyor; bekleyen on iki iddia 002,
-  003 ve 004'ün `teslim.md`'lerinde duruyor.
+  değildir, `/measure` ile kullanıcı ister. **Zaman kancaları 005 ile geldi**
+  ve ikisi de env: `BT_SCROLL_TEST` yükü seçer (akan çıktı; boşta bir pencere
+  kare süresi vermez), `BT_FRAME_STATS` ölçümü açar. İkisi de
+  `BT_RUN_SECONDS`'ı **sıfırdan büyük** ister, yoksa süreç çıkış 1 verir:
+  rapor yalnız deadline yolunda basılıyor, süresiz bir ölçüm sessizce örnek
+  biriktirip atardı. Kapı kapalıyken tek bir saat okuması bile yok. Açık
+  ölçüm koşusu jetonlarla dönüyor — CPU'nun iki aralığı, GPU deltası, açılış,
+  örnek sayısı ve tabanı — ama **sayının kendisi buraya yazılmaz**:
+  `docs/OLCUMLER.md` henüz **yok** ve onu ilk `/measure` kuracak. O dosyanın
+  `## Yöntem`'i sıfırdan yazılmayacak: kancanın dürüst sınırları — her biri
+  **kapsam** ya da **açık kalem** diye etiketli — `bt-shell`'de `Measured`'ın
+  doc'unda emaneten duruyor. **Bench seti hâlâ borç:** `criterion` yeni bir bağımlılık, yani
+  ayrı bir mimari karar; 005 bir borcu bilerek başka bir borçla takas etti ve
+  `cargo bench` satırı yukarıdaki komut bloğuna **bench seti gelince** döner,
+  kancalarla değil. Aynı şey giriş gecikmesi zinciri
+  (`BT_INPUT_LATENCY_SAMPLES`) ve düşen kare sayımı için de geçerli. Hangi
+  iddianın hangi araca baktığı `/measure` skill'inin tablosunda, set başına
+  durum `.tasks/README.md`'de, gövdeler 002, 003 ve 004'ün
+  `teslim.md`'lerinde.
 - **Dil:** yorumlar, commit iletileri ve belgeler Türkçe ve "neden"i anlatır.
   **Kod tanımlayıcılarının tamamı İngilizce** — dışa bakan ad (pub tip,
   fonksiyon, varyant) da, yerel yardımcı, alan, değişken ve sınama adı da;
   `build.rs` dahil, istisnasız. UI dizgileri, ayar anahtarları, tema ve
-  materyal adları İngilizce. İki şey Türkçe kalır ve ikisi de kod değildir:
-  süreç ve tanı çıktısı (stderr iletileri, `make duman` satırları, `assert!`
-  gerekçeleri) UI dizgisi olmadığı için, `Makefile` hedefleri (`hepsi`,
-  `duman`, `shader`, `test-yaris`, `kur`, `terminfo`) projenin komut yüzeyi
-  olduğu için. `kare=`/`hucre=`/`glif=`/`kural=`/`pipeline=ok`/`ATLANDI` gibi
-  anahtar-değer jetonları makine sözleşmesidir: **silinmez, eklenir** —
-  okuyan taraf tanımadığı jetonu atlayabilir, kaybolanı arayamaz.
+  materyal adları İngilizce. **Üç öbek Türkçe kalır ve üçü de kod değildir:**
+  tanı metni (stderr iletileri, `assert!` gerekçeleri, `make duman`'ın düşen
+  koşuda bastığı açıklama satırı) UI dizgisi olmadığı için; `Makefile`
+  hedefleri (`hepsi`, `duman`, `shader`, `test-yaris`, `kur`, `terminfo`)
+  projenin komut yüzeyi olduğu için; süreli koşunun jeton satırındaki
+  **anahtarlar** (`kare=`, `hucre=`, …) sözleşme donmuş olduğu için. Bu
+  sonuncusu tanı metni değil bir **makine sözleşmesidir** ve içinde üçe
+  ayrılır — anahtar Türkçe ve donmuş, **değer İngilizce**, tanı metni satırın
+  dışında; ayrımın gerekçesi `Report::token_line`'ın doc'unda. Sözleşmenin
+  kuralı burada kalıyor çünkü depo geneli: **jeton silinmez, eklenir** —
+  okuyan taraf tanımadığı jetonu atlayabilir, kaybolanı arayamaz. `ATLANDI`
+  da aynı sözleşmenin parçası.
 
 ## İş akışı
 
