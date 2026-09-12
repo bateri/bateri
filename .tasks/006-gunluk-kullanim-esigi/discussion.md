@@ -112,3 +112,60 @@ görünmez pencerede ölçüldü; sayısı `bt-shell`'de sabitin doc'unda duruyo
 Kullanıcıya sorulacak tek şey **Karar 0**: kapsam (b) olarak kesinleşsin mi?
 Önerim evet; gerekçesi yol haritasında yazılı ve kullanıcı daha önce bu yönde
 tercih bildirdi. Kalan altı karar teknik ve panelin işi.
+
+## Muhakeme (2026-09-12)
+
+| Mercek | Verdict |
+|---|---|
+| Sadelik | SORUNLU |
+| Codebase-fit | Karar 5 revize edilmeden geçemez; 1/3/4 küçük düzeltmeyle geçer; 2 ve 6 temiz |
+| İşletme | ŞARTLI GEÇER |
+
+Üçü de aynı yöne vuruyor: kapsam küçülsün, faz sırası yazılsın, kapı-kod
+ayrıklığı korunsun. Hiçbiri KIRMIZI değil — yön doğru, parçalar sorunlu.
+
+**Kabul edilen itirazlar → plan değişikliği:**
+- Bundle kapsamdan çıkıyor (sadelik 1) → ayrı set olur; `IDLE_FRAME_LIMIT`
+  yeniden ölçümü de onunla gider. Gerekçe: pano/seçim/kaydırma aynı yola
+  dokunuyor (`view.rs` → `bt-core` → `frame()`), bundle hiçbirine değmiyor;
+  eşik "kopyala/yapıştır/seç/kaydır" ile geçilir. **Karar 0 revizyonu,
+  kullanıcı onayı bekliyor.**
+- OSC 52 yazma yönü 007'ye erteleniyor (sadelik 3) → ayarsız açılan yazma
+  yönü sonradan kapı ekletir; ayrıştırma `bt-core`'da hazır durabilir,
+  `NSPasteboard` köprüsü ayar anahtarıyla gelir. **Kullanıcı onayı bekliyor.**
+- Karar 2: (b) yerine (a) — `keyDown:`'da iki tuşluk dal. (b) teknik olarak
+  temiz (codebase-fit doğruladı: çakışma yok) ama menü 00X'te ve çağrısı
+  olmayan soyutlamaya iskelet yazılmaz (YAGNI). Menü günü (a) silinir.
+- Karar 5 sınırı (codebase-fit 1): `frame()` kirli kapılıdır
+  (`session.rs:594-596`), pano olayı asenkron — aradaki kanal `ShellEvent`
+  kuyruğu (`mpsc::Sender`), `Adapter::send_event` içinde `ClipboardStore`
+  kolu. `frame()` el değmeden kalır. (Kapsamda kalırsa; erteleme hâlinde
+  yalnız ayrıştırma durur.)
+- Karar 1 eksiği (codebase-fit 2): seçim değişiminde `DirtyFlag::mark()`
+  (`session.rs:803`) + link uyandırma yazılmalı, yoksa seçim hiç boyanmaz.
+  Vurgunun kendisi sorunsuz — imleç tersine çevirme emsali
+  (`session.rs:768-773`), `cell_bg` borusu yeter.
+- Karar 3/4 düzeltmesi (codebase-fit 3): DECSET 2004 tutulmaz, `Term`'den
+  kilit altında sorgulanır; yapıştırma `session.write`'tan (`session.rs:811`)
+  ama yeni bir `paste()` ile sarılarak; viewport için `display_offset`
+  zaten var (`session.rs:603-617`), eksik yalnız ince `scroll_display` API'si.
+- `IDLE_FRAME_LIMIT` ayrıklığı (işletme 2): bundle fazı sayıyı ölçüp ayrı
+  commit + gerekçeyle dondurur; kapı değişikliği kod fazlarından ayrık.
+  (Bundle ayrı sete çıkınca bu kendiliğinden sağlanır.)
+- Faz sırası + `[elle]` göz kontrolü (işletme 1): seçim→kopyala→yapıştır→
+  kaydırma, her faza göz kontrolü; seçim olmadan pano doğrulanamaz.
+- İmzasız bundle notu (işletme 3): bundle ayrı sete çıkınca eşik tanımı
+  "tek seferlik Gatekeeper onayı" gerçeğine göre yazılır.
+- Attribution içerik denetimi (işletme 3): bundle fazına Info.plist + lisans
+  dosyası varlığı konur — eksik kalırsa hiçbir kapı kızarmaz.
+
+**Reddedilenler:**
+- *"Bundle eşik için şart"* (önceki varsayım) — sadelik çürüttü: Dock
+  ikonu/öne çıkma hata buldurmaz, paketler. Eşik tanımı daralıyor.
+- *"OSC 52 yazma yönü risksiz, girsin"* (Karar 5 önerisi) — sadelik çürüttü:
+  ayarsız açılan yön sonradan kapı ekletir, üstelik azınlık senaryo.
+
+## Karar (2026-09-12, kullanıcı onayı bekleniyor)
+
+Henüz verilmedi. Panelin önerdiği revize kapsam onaya sunuldu; aşağıdaki
+üç soru yanıtlanınca bu bölüm doldurulacak.
