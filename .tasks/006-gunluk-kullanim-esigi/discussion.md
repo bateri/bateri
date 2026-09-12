@@ -165,7 +165,23 @@ ayrıklığı korunsun. Hiçbiri KIRMIZI değil — yön doğru, parçalar sorun
 - *"OSC 52 yazma yönü risksiz, girsin"* (Karar 5 önerisi) — sadelik çürüttü:
   ayarsız açılan yön sonradan kapı ekletir, üstelik azınlık senaryo.
 
-## Karar (2026-09-12, kullanıcı onayı bekleniyor)
+## Karar (2026-09-12, kullanıcı onayı)
 
-Henüz verilmedi. Panelin önerdiği revize kapsam onaya sunuldu; aşağıdaki
-üç soru yanıtlanınca bu bölüm doldurulacak.
+- **Seçilen: kapsam (b) — tek hamlede eşik tutuldu.** Panel (üç koldan)
+  bundle'ın çıkmasını önerdi; kullanıcı reddetti. Gerekçe: eşik tanımı
+  "kopyala/yapıştır/seç/kaydır **+ açılabilir, öne çıkabilen bir uygulama**" —
+  Dock ikonu ve öne çıkma olmadan günlük kullanıma geçilemez, dolayısıyla
+  hata-buldurma argümanı bundle'sız işlemiyor. Bedeli kabul edildi: set
+  normalden büyük olur; işletme jürisinin şartları (faz sırası, `[elle]`
+  kapıları, `IDLE_FRAME_LIMIT` ölçümünün kod fazlarından ayrık tutulması)
+  aynen uygulanır.
+- **Seçilen: OSC 52 yazma yönü 007'ye ertelendi (panel önerisi).** Ayrıştırma
+  `bt-core`'da hazır durabilir; `NSPasteboard` köprüsü ayar anahtarıyla
+  gelir. Codebase-fit'in `ShellEvent` kuyruğu tasarımı park edildi —
+  çöpe gitmedi, 007'de kullanılacak.
+- **Seçilen: Karar 2 (a) — `keyDown:`'da iki tuşluk dal.** (b) teknik olarak
+  temizdi (codebase-fit: çakışma yok) ama menü 00X'te ve çağrısı olmayan
+  soyutlamaya iskelet yazılmaz. Menü günü (a) silinir.
+- **Reddedilen:** *"Bundle ayrı sete çıksın"* (sadelik 1, işletme 2'nin
+  varsayımı) — kullanıcı reddetti, gerekçe yukarıda. *"OSC 52 yazma yönü
+  girsin"* (Karar 5 önerisi) — sadelik çürüttü, kullanıcı onayladı.
