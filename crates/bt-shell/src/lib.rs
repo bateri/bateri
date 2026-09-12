@@ -7,7 +7,7 @@
 //! kapanış sırasının sahibi de bu crate. Tek pencere; sekme, bölme, menü ve
 //! IME sonraki setlerde.
 
-mod app;
+pub(crate) mod app;
 mod keys;
 mod view;
 

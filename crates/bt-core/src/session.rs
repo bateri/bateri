@@ -15,6 +15,8 @@ use std::time::Duration;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, RenderableContent, Term};
@@ -608,6 +610,9 @@ impl Session {
 
         // İmleç döngüden **önce** çözülüyor: altındaki hücrenin ön planı ona
         // bağlı (aşağıda) ve o karar hücre çizilirken verilmek zorunda.
+        // Şekil ayrı tutuluyor: `Cursor` onu taşımıyor ve aşağıdaki
+        // `contains_cell` blok imlecin sınır istisnasını soruyor.
+        let cursor_shape = cursor.shape;
         let cursor_row = cursor.point.line.0 + offset;
         let cursor = Cursor {
             col: cursor.point.column.0 as u16,
@@ -641,11 +646,36 @@ impl Session {
         // diye sorar, "ne" diye değil.
         const RULES: Flags = Flags::ALL_UNDERLINES.union(Flags::STRIKEOUT);
 
+        // Vurgu aralığı kare başına bir kez çözülüyor: `to_range` hücrenin
+        // yanında değil burada, çünkü yan tablolara inmiyor ve hücre başına
+        // sorulacak bir şey değil. Şekil yukarıda okundu (`cursor_shape`):
+        // aşağıdaki `contains_cell` blok imlecin sınır istisnasını soruyor ve
+        // onu hücre başına okumak aynı değeri her hücrede yeniden okumak
+        // olurdu.
+        let selected_range = term.selection.as_ref().and_then(|s| s.to_range(&term));
+
         for indexed in display_iter {
             let cell = indexed.cell;
             let flags = cell.flags;
-            let inverse = flags.contains(Flags::INVERSE);
             let dim = flags.contains(Flags::DIM);
+            let hidden = flags.contains(Flags::HIDDEN);
+            // Seçim vurgusu ters videodur — yeni shader/uniform yok, emsali
+            // imleç tersine çevirme (aşağıda). `||`, `^` değil: ters videolu
+            // bir hücre seçilince düzleşmemeli. İmlecin altındaki hücreyle
+            // seçim çakışırsa imleç kazanır (onun dalı aşağıda koşulsuz).
+            //
+            // Gizli metin seçilince de vurgulanmaz: `HIDDEN` "çizme" demek ve
+            // seçim onu delseydi gizli hücrenin yeri boyalı bir blok olarak
+            // görünürdü. Gizli metni kopyalamak isteyen phase-2'de
+            // `selection_text()`'e sorar — vurgu ile metin aynı kapıdan geçmek
+            // zorunda değil. `contains` değil `contains_cell`: seçim tam bir
+            // spacer hücresinden başlarsa geniş karakterin baş hücresi de
+            // vurgulanır — metin yolunun gördüğüyle vurgunun gördüğü ayrışmaz.
+            let selected = !hidden
+                && selected_range.as_ref().is_some_and(|range| {
+                    range.contains_cell(&indexed, indexed.point, cursor_shape)
+                });
+            let inverse = flags.contains(Flags::INVERSE) || selected;
 
             // **Arka plan önce**: atlama koşulunun ağır yarısı bu ve boş
             // grid'de hücrelerin neredeyse tamamı burada eleniyor. Ön plan
@@ -665,11 +695,11 @@ impl Session {
             // Varsayılan arka plan çizilmez; `None` onun adı.
             let bg = (back != color::BG_RGB).then(|| color::linear_rgba(back));
 
-            // `HIDDEN` (`\e[8m`) "mürekkep yok" demek ve **tek bir `let`**:
-            // hem glyph'i hem kuralları düşürüyor. İki ayrı ifadeye
-            // yazılsaydı biri sonradan değişip öteki eski kalabilirdi ve
-            // belirti "gizli metin altı çizgisinden okunuyor" olurdu.
-            let hidden = flags.contains(Flags::HIDDEN);
+            // `HIDDEN` (`\e[8m`) "mürekkep yok" demek ve **tek bir `let`**
+            // (yukarıdaki `hidden`): hem glyph'i hem kuralları düşürüyor, hem
+            // de seçim vurgusunu dışlıyor. Üç ayrı ifadeye yazılsaydı biri
+            // sonradan değişip ötekiler eski kalabilirdi ve belirti "gizli
+            // metin altı çizgisinden/vurgusundan okunuyor" olurdu.
             let ch = (!hidden && !flags.intersects(SPACERS) && cell.c != ' ').then_some(cell.c);
             // Kapının kural yarısı tek maske testi; **hangi** çeşit olduğu
             // kapıdan sonra sorulur (aşağıda). `!hidden` maskenin dışında
@@ -788,6 +818,67 @@ impl Session {
         }
 
         Some(cursor)
+    }
+
+    /// Fareyle seçimin iki ucu — aralık modeli burada yaşar, çünkü "hangi
+    /// hücreler" grid bilgisidir (Karar 1).
+    ///
+    /// Uçlar görünür pencere cinsinden (sütun, satır); grid satırına o anki
+    /// `display_offset` ile inilir. Aralık grid mutlağında tutulduğu için
+    /// alacritty'nin kendi döndürme mantığı kaydırınca onu içerikle birlikte
+    /// taşır — buraya fazladan bir kaydırma kolu yazılmaz.
+    ///
+    /// Değişim kirli bayrağını diker **ve uyandırır**: `resize`'ın tersine
+    /// uyandırma `bt-shell`'e bırakılamaz — farenin vardığı `view` link'e
+    /// uzanamıyor, elindeki tek tutamak bu oturum.
+    pub fn set_selection(&self, start: (u16, u16), end: (u16, u16)) {
+        let mut term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let (first, second) = (viewport_point(start, offset), viewport_point(end, offset));
+        // Yanlar hücrenin kendisine bakar: başlangıç solda, bitiş sağda —
+        // tersi alacritty'nin `range_simple`'ında iki ucu da birer hücre
+        // içten kırpar. Yanlar sıraya **bağlı değil** (`update` de buna uyar,
+        // çünkü fare sürüklemesi seçimin içine kapanır), o yüzden dal yalnız
+        // noktaları sıralar.
+        let (anchor, active) = if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let mut selection = Selection::new(SelectionType::Simple, anchor, Side::Left);
+        selection.update(active, Side::Right);
+        // Aynı aralık tekrar gelirse sessiz: `mouseDragged` aynı hücrede
+        // kaldıkça kare istenmez — boşta sıfır kare, sabit bir sürüklemeyle
+        // delinmemeli. Karşılaştırma `Selection`'ın `PartialEq`'siyle, kilit
+        // altında ve tek yerde.
+        if term.selection.as_ref() == Some(&selection) {
+            return;
+        }
+        term.selection = Some(selection);
+        drop(term);
+        // Sıra `Adapter`'ın `Wakeup` koluyla aynı: bayrak uyandırmadan önce.
+        self.adapter.0.dirty.store(true, Ordering::Release);
+        self.adapter.0.wake.wake();
+    }
+
+    /// Seçimi temizler. Seçim zaten yoksa sessizdir: bayrak dikilmez, kare
+    /// istenmez — boşta sıfır kare, boş bir temizlemeyle delinmemeli.
+    pub fn clear_selection(&self) {
+        // Kilit gövdeden önce düşüyor: `dirty.store` + `wake.wake()` `Term`
+        // kilidi (çift muteksli `FairMutex`) tutulurken koşmamalı —
+        // `set_selection`'daki `drop` disiplininin aynısı.
+        let had = self.term.lock().selection.take().is_some();
+        if had {
+            self.adapter.0.dirty.store(true, Ordering::Release);
+            self.adapter.0.wake.wake();
+        }
+    }
+
+    /// Seçili aralığın metni — kopyalamanın (phase-2) ve sınamaların **tek**
+    /// yolu. Satır sarma ve geniş karakter spacer'ları alacritty'nin içinde
+    /// çözülür; ikinci bir metin yolu, ikinci bir sarma hatası demek olurdu.
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string()
     }
 
     /// Hasarı uzaktan işaretleyebilen tutamak.
@@ -1014,6 +1105,14 @@ fn same_size(a: WindowSize, b: WindowSize) -> bool {
         && a.num_lines == b.num_lines
         && a.cell_width == b.cell_width
         && a.cell_height == b.cell_height
+}
+
+/// Görünür pencere hücresini grid noktasına çevirir.
+fn viewport_point((col, row): (u16, u16), display_offset: i32) -> Point {
+    Point::new(
+        Line(i32::from(row) - display_offset),
+        Column(usize::from(col)),
+    )
 }
 
 fn window_size(grid: GridSize, cell_px: (u16, u16)) -> WindowSize {
@@ -1522,6 +1621,158 @@ mod tests {
         // Yalnız hücre piksel boyutu değişse de bu bir değişikliktir: PTY'ye
         // giden `TIOCSWINSZ` onu taşıyor (Retina'ya taşınan pencere).
         assert!(session.resize(80, 24, (18, 36)));
+    }
+
+    #[test]
+    fn selection_text_returns_selected_range() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033[41mhello world\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        // Seçimden önce metin yok.
+        assert_eq!(session.selection_text(), None);
+        // Çapa: 11 kırmızı hücre geldiyse metin grid'de.
+        assert_eq!(wait_cells(&session, &wake, 11).len(), 11);
+
+        session.set_selection((0, 0), (4, 0));
+        assert_eq!(session.selection_text().as_deref(), Some("hello"));
+        // Uçlar sırasız verilebilir: tersi aynı metni verir.
+        session.set_selection((4, 0), (0, 0));
+        assert_eq!(session.selection_text().as_deref(), Some("hello"));
+        // Temizleyince metin de gider.
+        session.clear_selection();
+        assert_eq!(session.selection_text(), None);
+    }
+
+    #[test]
+    fn selection_text_spans_wrapped_lines_without_newline() {
+        // 40 sütunluk grid'e 45 karakter: satır sarıyor (WRAPLINE) ve seçim
+        // metni satır sonu koymadan birleştiriyor.
+        let text = "0123456789".repeat(4) + "01234";
+        assert_eq!(text.len(), 45);
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!("printf '\\033[41m{text}\\033[0m'; sleep 5"),
+            Arc::clone(&wake),
+        );
+
+        assert_eq!(wait_cells(&session, &wake, 45).len(), 45);
+        session.set_selection((35, 0), (4, 1));
+        assert_eq!(session.selection_text().as_deref(), Some("5678901234"));
+    }
+
+    #[test]
+    fn selection_text_skips_wide_char_spacers() {
+        // `あ` iki hücrelik: ikincisi `WIDE_CHAR_SPACER` ve metne girmemeli.
+        // Çapa dört arka plan hücresi — spacer'ın bg'si şablondan geliyor —
+        // yani geniş karakter gerçekten iki hücre kaplamış.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf '\\033[41maあb\\033[0m'; sleep 5", Arc::clone(&wake));
+
+        assert_eq!(wait_cells(&session, &wake, 4).len(), 4);
+        session.set_selection((0, 0), (3, 0));
+        assert_eq!(session.selection_text().as_deref(), Some("aあb"));
+    }
+
+    #[test]
+    fn selection_change_marks_dirty() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("sleep 5", Arc::clone(&wake));
+        // Açılış karesi + sessizlik: shell çıktı üretmiyor.
+        assert!(session.frame(|_| ()).is_some());
+        assert!(session.frame(|_| ()).is_none());
+
+        session.set_selection((0, 0), (2, 0));
+        assert!(
+            session.frame(|_| ()).is_some(),
+            "seçim kirli bayrağını dikmeli"
+        );
+        assert!(session.frame(|_| ()).is_none());
+
+        session.clear_selection();
+        assert!(
+            session.frame(|_| ()).is_some(),
+            "temizleme de kare istemeli"
+        );
+        assert!(session.frame(|_| ()).is_none());
+        // Boş seçimi temizlemek sessiz: bayrak dikilmez, kare istenmez.
+        session.clear_selection();
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "boş temizleme kare istememeli"
+        );
+    }
+
+    #[test]
+    fn selected_cells_are_inverted_through_existing_pipe() {
+        // Vurgu `cell_bg` borusundan ters video ile geçiyor. Reçetede yalnız
+        // seçili aralık bg'li (`\033[41mell\033[0m`); `h` ile `o` varsayılan
+        // bg'li, yani vurgusuz karede `bg: None` taşıyor. İddia iki yönlü:
+        // seçili hücrede boya **beliriyor**, seçimsiz hücrede boya **yok**.
+        //
+        // Boyanın rengi takasın görünen yüzü **değil**: seçili hücrenin bg'si
+        // kendi fg'sinden değil, ters video kuralının çözdüğü renkten gelir
+        // (`resolve(if inverse { cell.fg } …)` — alacritty hücrenin `fg`'si
+        // `Named(Foreground)`, çözüm paletin ön planıdır). Rengi soran, boruyu
+        // değil paleti sorar; boruyu soran boyanın varlığı ile yokluğudur.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf 'h\\033[41mell\\033[0mo'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        // Metin grid'e indi: beş glyph'li kare (`hello` — `h` ve `o`
+        // mürekkepli ama boyasız, `frame()` onları mürekkep için geçiriyor).
+        // Üçlük bg çapası burada **yanlış**: `h`/`o` bg'siz diye üçlük karede
+        // yoktur sanıyorduk, ama kare mürekkebi de taşıyor. Mürekkep sayısına
+        // bağlanan çapa hem erken-dönüşü hem bölünmüş PTY okumasını kapatıyor.
+        let cells = wait_frame(&session, &wake, |cells| {
+            cells.iter().filter_map(|c| c.ch).collect::<String>() == "hello"
+        });
+        assert_eq!(backgrounds(&cells).count(), 3, "{cells:?}");
+        session.set_selection((1, 0), (3, 0));
+        assert_eq!(session.selection_text().as_deref(), Some("ell"));
+
+        let mut next = Vec::new();
+        assert!(session.frame(|c| next.push(c)).is_some());
+        // Seçili üç hücre boyalı, seçili olmayan iki hücre boyasız. `h`
+        // vurgusuz karede eleniyordu (`bg: None, ch: Some` — `ch`'si var ama
+        // bu döngü bg'ye bakıyor); seçim onu karesine sokmaz, sokmamalı.
+        let painted: Vec<u16> = next
+            .iter()
+            .filter(|c| c.bg.is_some())
+            .map(|c| c.col)
+            .collect();
+        assert_eq!(painted, vec![1, 2, 3], "{next:?}");
+        // Seçimsiz `o` boyanın yokluğuyla duruyor.
+        let outside = next.iter().find(|c| c.col == 4).expect("o hücresi");
+        assert_eq!(outside.bg, None, "{outside:?}");
+    }
+
+    #[test]
+    fn wide_char_head_is_highlighted_from_trailing_spacer() {
+        // Seçim tam spacer hücresinden başlarsa geniş karakterin baş hücresi
+        // de vurgulanır: metin yolunun gördüğüyle vurgunun gördüğü ayrışmaz.
+        // `あ` 0–1. hücreler (baş + spacer), `b` 2. hücre. Üç hücrenin üçü de
+        // kırmızı bg'li doğuyor; baş hücrenin ters videoda bg'si seçimsiz
+        // karenin fg'si olur.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf '\\033[41mあb\\033[0m'; sleep 5", Arc::clone(&wake));
+
+        let cells = wait_cells(&session, &wake, 3);
+        let plain_fg = cells
+            .iter()
+            .find(|c| c.ch == Some('b'))
+            .expect("b hücresi")
+            .fg;
+
+        session.set_selection((1, 0), (2, 0));
+        let mut next = Vec::new();
+        assert!(session.frame(|c| next.push(c)).is_some());
+        let head = next.iter().find(|c| c.col == 0).expect("baş hücre");
+        assert_eq!(head.bg, Some(plain_fg), "{head:?}");
     }
 
     #[test]

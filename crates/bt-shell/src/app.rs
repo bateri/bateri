@@ -115,16 +115,19 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// Adı `Metrics` değil: hücre metriğinin sahibi artık `bt-gpu`
 /// ([`CellMetrics`]) ve iki tip bu dosyada yan yana okunuyor. Buradaki
 /// "kaç sütun kaç satır **ve** hangi hücreyle", oradaki yalnız hücre.
+///
+/// `view` modülüne de açık: fare çevirisi aynı üçlüyü ister ve ayrıştırma
+/// iki çağrı yerinde tekrarlanacağına burada bir kez durur.
 #[derive(Clone, Copy)]
-struct Grid {
-    cols: u16,
-    rows: u16,
+pub(crate) struct Grid {
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
     /// Demet değil `CellMetrics`: ölçü buradan `DisplayLink::resize`'a
     /// olduğu gibi geçiyor. `Grid`'de saklanan bu değer yalnız
     /// `SessionOptions`'a girerken demete iniyor — `split_into_grid`'un
     /// bölmeye soktuğu demet başka bir değer: oraya **gelen** ölçü girer,
     /// `Grid` ondan sonra doğar.
-    cell: CellMetrics,
+    pub(crate) cell: CellMetrics,
 }
 
 /// Piksel geometrisi + hücre ölçüsü → grid.
@@ -209,6 +212,9 @@ pub(crate) struct Ivars {
     renderer: Rc<Renderer>,
     surface: Surface,
     window: OnceCell<Retained<NSWindow>>,
+    /// Fare çevirisinin girdileri pencere boyuyla tazeleniyor (`set_metrics`);
+    /// view'a `contentView`'dan (`NSView`) inilemiyor, o yüzden burada tutuluyor.
+    view: OnceCell<Retained<BateriView>>,
     link: OnceCell<DisplayLink>,
     /// Kapanış sırasının ikinci adımı buradan çağrılır; `DisplayLink` de bir
     /// kopya tutuyor ama oraya `stop()`'tan sonra uzanmak yanlış olurdu.
@@ -276,6 +282,7 @@ define_class!(
             // OnceCell doluysa didFinishLaunching ikinci kez geldi demek; AppKit
             // bunu yapmaz, yapsaydı ilk pencere kalırdı.
             let _ = self.ivars().window.set(window.clone());
+            let _ = self.ivars().view.set(view.clone());
             window.setDelegate(Some(ProtocolObject::from_ref(self)));
             window.center();
             window.makeKeyAndOrderFront(None);
@@ -341,14 +348,14 @@ define_class!(
     unsafe impl NSWindowDelegate for AppDelegate {
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _n: &NSNotification) {
-            self.geometry_changed();
+            self.refresh_geometry();
         }
 
         // Ekranlar arası taşımada boyut (nokta) değişmez ama ölçek değişir;
         // layer-hosting view'da bunu bizden başka kimse yazmaz.
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, _n: &NSNotification) {
-            self.geometry_changed();
+            self.refresh_geometry();
         }
 
         // Görünürlük yolu: compositor, örtülü ya da simge durumundaki bir
@@ -761,6 +768,7 @@ impl AppDelegate {
             renderer,
             surface,
             window: OnceCell::new(),
+            view: OnceCell::new(),
             link: OnceCell::new(),
             session: OnceCell::new(),
             wake: Arc::new(ShellWake {
@@ -817,6 +825,10 @@ impl AppDelegate {
         // referansın nerede düşeceği belli (bkz. `shutdown`).
         let _ = self.ivars().session.set(Arc::clone(&session));
         view.attach(Arc::clone(&session));
+        // Fare çevirisi oturumla aynı grid'i görmeli: ölçü ve sayı yukarıdaki
+        // `SessionOptions`'a gidenlerin aynısı. `resize` yolunda da aynı üçlü
+        // (`refresh_geometry`) birlikte yazılıyor.
+        view.set_metrics(grid);
         let link = DisplayLink::new(
             mtm,
             &self.ivars().surface,
@@ -983,10 +995,18 @@ impl AppDelegate {
     }
 
     /// Pencere geometrisi oynadı: layer'ı eşle, grid'i güncelle, kare iste.
-    fn geometry_changed(&self) {
+    ///
+    /// Fare girdileri de burada tazeleniyor: view `Ivars.view`'da
+    /// `Retained<BateriView>` olarak duruyor. Pencere kapanınca ikisi
+    /// birlikte gidiyor — `Ivars` delegate'te, delegate `run()`'un
+    /// `Retained`'ında, o da `app.run()`'ı aşıyor.
+    fn refresh_geometry(&self) {
         let Some(grid) = self.sync_geometry() else {
             return;
         };
+        if let Some(view) = self.ivars().view.get() {
+            view.set_metrics(grid);
+        }
         if let Some(link) = self.ivars().link.get() {
             link.resize(grid.cols, grid.rows, grid.cell);
         }
