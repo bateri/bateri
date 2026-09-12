@@ -449,9 +449,11 @@ struct Counters {
 ///   dörtte birinde çıkıyor (on yedi koşuda dört). Örneklere etkisi **yok**,
 ///   ama sebebi sıra değil: kapanış halkadan **önce** koşuyor
 ///   ([`AppDelegate::report_and_exit`]'in "Sıra bilinçli" doc'u). Etkisiz
-///   olmasının sebebi `shutdown()`'ın **ilk** işinin `link.stop()` olması —
-///   bekleme başladığında artık yeni kare düşmüyor, yani halka bekleme
-///   boyunca durağan. Bedeli yalnız koşunun duvar saatinde:
+///   olmasının sebebi `shutdown()`'ın beklemeye girmeden **önce**
+///   `link.stop()` çağırması: bekleme boyunca yeni kare **istenmiyor**.
+///   Halkanın tamamen durağan olduğu anlamına gelmez — uçuşta kalan bir iki
+///   tamamlanma hâlâ düşebilir ve o bir örneklik kayma
+///   [`Measured::read`]'de yazılı. Bedeli yalnız koşunun duvar saatinde:
 ///   `SHUTDOWN_GRACE` kadar ekliyor. Bu ölçümün bir **özelliği değil**,
 ///   kapanış tasarımının borcu ve çaresi adı konmuş durumda
 ///   (`Session::spawn`'da master'ın bir kopyası); ayrıntısı `CLAUDE.md`'nin
