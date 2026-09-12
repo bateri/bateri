@@ -18,6 +18,8 @@ use objc2::MainThreadMarker;
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
+use bt_core::SHUTDOWN_GRACE;
+
 pub use bt_gpu::GpuError;
 
 /// Duman ve ölçüm koşularının shell'i. Kullanıcının `$SHELL`'i **değil**:
@@ -36,6 +38,21 @@ pub enum Workload {
     /// `BT_SCROLL_TEST`: koşu boyunca akan çıktı. Kare akışı işin kendisi,
     /// üst sınır yok.
     Load,
+}
+
+impl Workload {
+    /// `yuk=` jetonunun değeri.
+    ///
+    /// Dizgi tipin **yanında**, çağrı yerinde değil: jeton bir makine
+    /// sözleşmesi ve sözleşmenin metni tanımın yanında yaşar. Çağrı yerinde
+    /// dursaydı üçüncü bir yük eklendiğinde eşlemeyi derleyici değil okuyan
+    /// hatırlamak zorunda kalırdı.
+    pub(crate) fn token(self) -> &'static str {
+        match self {
+            Self::Load => "load",
+            Self::Smoke => "smoke",
+        }
+    }
 }
 
 /// Süreli koşu: `make duman` ve ölçüm. `None` → kullanıcının kendi oturumu.
@@ -90,6 +107,31 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
     Ok(())
 }
 
+/// Bekçinin bütçesi: `bt-core`'un kapanış sınırı artı sabit bir pay.
+///
+/// **Koşu süresinden türemiyor artık ve sebebi kapsamın daralması.** Eski
+/// ölçü `run_seconds × 3`'tü; o, bekçi kapanışın *tamamının* tek keseni iken
+/// doğruydu. Kapanış [`bt_core::SHUTDOWN_GRACE`] ile sınırlandıktan sonra
+/// bekçinin kapsamı "kapanış yolunun **başka** asılmaları"na daraldı ve
+/// bunların hiçbiri koşu süresiyle ölçeklenmiyor: eski ölçü üç saniyelik
+/// dumana 9 saniye, altmış saniyelik bir ölçüm koşusuna **3 dakika**
+/// veriyordu.
+///
+/// Sayı **ölçüldü** (2026-09-12, debug, bu makine, altı koşu): kapanışın
+/// **beşi** temiz bitti ve `SHUTDOWN_GRACE`'in çok altında kaldı (toplam süre
+/// koşu süresini ~0,18 sn aşıyor ve o payın içinde açılış da var); **biri**
+/// sınırı doldurdu (`kapanis=abandoned`) ve tam **+0,49 sn** sürdü. Yani ölçülen
+/// tavan `SHUTDOWN_GRACE`'in kendisi. İki saniyelik pay bunun **beş katı**.
+///
+/// Yeni bütçeyle on ölçüm koşusu koşuldu ve **hiçbiri** bekçiye düşmedi
+/// (`exit 70` yok) — eski bütçenin bu koşularda verdiği 6 saniyeye karşılık.
+///
+/// Kısa olsa ne kaybolur: sağlıklı ama yavaş bir kapanış `_exit(70)` ile
+/// kesilir ve `make duman` yanlış arızayı gösterir. Uzun olsa ne kaybolur:
+/// gerçekten asılan bir koşu o kadar bekletir — ve bu bir insanın önünde
+/// değil, bir kapının içinde geçiyor.
+const WATCHDOG_BUDGET: Duration = SHUTDOWN_GRACE.saturating_add(Duration::from_secs(2));
+
 /// Kapanışın asılmasını kesen son çare — **yalnız `BT_RUN_SECONDS`
 /// yolunda** ve kapanış başlarken kurulur (`AppDelegate::shutdown`).
 ///
@@ -103,38 +145,48 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
 /// kendisi.
 ///
 /// Sınırın tek istisnası kapanış thread'inin kurulamaması (OS thread
-/// sınırı); o dalda bu bekçi hâlâ tek kesen.
+/// sınırı). O dalda **kesen de kalmayabilir** ve bu vaat edilmiyor: thread
+/// kurulamayan bir makinede bu bekçinin kendi thread'i de kurulamaz, yani
+/// `Teardown::Unbounded` ile bekçisizlik aynı koşulda buluşur. İkisi de
+/// stderr'e bir satır bırakıyor; sessiz kalan bir yol yok.
+///
+/// Bütçesi artık koşu süresinden değil [`WATCHDOG_BUDGET`]'ten geliyor, yani
+/// argümansız: kestiği şeylerin hiçbiri koşu süresiyle ölçeklenmiyor.
 ///
 /// Etkileşimli kullanımda bekçi **yoktur**; oradaki güvence `bt-core`'un
 /// sınırı ve `Session::shutdown`'ın doc'u onun ne kapattığını, çocuğun
 /// arkada kalmasının neden sürdüğünü anlatıyor.
-pub(crate) fn watchdog(run_seconds: u64) {
-    // Koşu süresinin üç katı. Sağlıklı bir kapanış `SIGHUP` ile hemen biter
-    // ve asılan bir çocuk artık `bt-core`'un sınırında kesiliyor; bu süreye
-    // ancak kapanış yolunun **başka** bir asılması varır. Bütçenin koşu
-    // süresine bağlı olması o daralmadan sonra cömert kaldı (3 saniyelik
-    // duman için 9 saniye) ve asıl ölçüsü artık `SHUTDOWN_GRACE` + sabit bir
-    // pay olurdu; retune phase-3'e yazıldı, ölçülmeden sayı değişmiyor.
-    // `max(1)`:
-    // `BT_RUN_SECONDS=0` bekçiyi doğar doğmaz ateşlemesin.
-    let budget = Duration::from_secs(run_seconds.saturating_mul(3).max(1));
-    std::thread::spawn(move || {
-        std::thread::sleep(budget);
-        // `eprintln!` DEĞİL: Rust'ın stderr'i kilitli ve ana thread o kilidi
-        // tutarken asılmış olabilir (`shutdown`'ın kendi `eprintln!`'i,
-        // `Retry::draw_failed`, ileride logger). Bekçi tam da onu kesmek için
-        // var; aynı kilide girip beklemesi kendini iptal etmek olurdu. Sabit
-        // metin, `format!` bile yok — `malloc` da bir kilit.
-        //
-        // `process::exit` de değil: o atexit zincirini ve stdio flush'ını
-        // koşturur. 70 = EX_SOFTWARE; `make` bunu "Error 70" diye gösterir.
-        //
-        // SAFETY: `write` ve `_exit` async-signal-safe; ikisi de kilit almaz
-        // ve süreci hiçbir şey koşturmadan bitirir.
-        const MESSAGE: &str = "bateri: kapanış bekçinin bütçesinde bitmedi, süreç kesiliyor\n";
-        unsafe {
-            libc::write(2, MESSAGE.as_ptr().cast(), MESSAGE.len());
-            libc::_exit(70)
-        };
-    });
+pub(crate) fn watchdog() {
+    // `thread::spawn` **değil**: o, thread kurulamayınca panikler ve buranın
+    // çağrı yeri bir ObjC callback'i (`applicationWillTerminate:` /
+    // `runDeadline:`). Panik `extern "C"` sınırından geçemez, yani süreç
+    // **abort** eder: ne jeton satırı basılır ne `_exit(70)`. Üstelik bu tam
+    // olarak `bt-core`'un `Teardown::Unbounded` ile hayatta kalmayı seçtiği
+    // senaryo (OS thread sınırı) — ve o koşulda bu thread de kurulamaz, yani
+    // bekçi **kesemez**. Hata yutulmuyor, söyleniyor: bekçisiz kalan bir
+    // kapanış sessiz kalmamalı.
+    let spawned = std::thread::Builder::new()
+        .name("watchdog".to_owned())
+        .spawn(|| {
+            std::thread::sleep(WATCHDOG_BUDGET);
+            // `eprintln!` DEĞİL: Rust'ın stderr'i kilitli ve ana thread o kilidi
+            // tutarken asılmış olabilir (`shutdown`'ın kendi `eprintln!`'i,
+            // `Retry::draw_failed`, ileride logger). Bekçi tam da onu kesmek için
+            // var; aynı kilide girip beklemesi kendini iptal etmek olurdu. Sabit
+            // metin, `format!` bile yok — `malloc` da bir kilit.
+            //
+            // `process::exit` de değil: o atexit zincirini ve stdio flush'ını
+            // koşturur. 70 = EX_SOFTWARE; `make` bunu "Error 70" diye gösterir.
+            //
+            // SAFETY: `write` ve `_exit` async-signal-safe; ikisi de kilit almaz
+            // ve süreci hiçbir şey koşturmadan bitirir.
+            const MESSAGE: &str = "bateri: kapanış bekçinin bütçesinde bitmedi, süreç kesiliyor\n";
+            unsafe {
+                libc::write(2, MESSAGE.as_ptr().cast(), MESSAGE.len());
+                libc::_exit(70)
+            };
+        });
+    if let Err(err) = spawned {
+        eprintln!("bateri: bekçi thread'i kurulamadı ({err}), kapanışı kesen yok");
+    }
 }

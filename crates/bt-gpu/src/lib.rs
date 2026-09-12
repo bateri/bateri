@@ -14,7 +14,10 @@
 //! Kare yolunun **ölçüm defteri** de burada ([`Stats`]): zamanı kim
 //! üretiyorsa örneği de o topluyor — CPU aralıkları display link'ten, GPU
 //! deltası Metal'in tamamlanma bloğundan. Bu crate hiçbir şey **basmaz**;
-//! defteri kuran ve kapanışta okuyan `bt-shell`'dir.
+//! defteri kuran ve kapanışta okuyan `bt-shell`'dir. İstatistiğin kuralı da
+//! burada: p95'in anlamlı olduğu en küçük örnek sayısı ([`MIN_SAMPLES`])
+//! defterin yanında tanımlı, `bt-shell` onu `taban=` diye **basıyor** ama
+//! değerini kendisi seçmiyor.
 
 mod error;
 mod frame;
@@ -26,5 +29,5 @@ mod surface;
 pub use error::GpuError;
 pub use link::{DisplayLink, Waker};
 pub use renderer::{CellMetrics, Renderer};
-pub use stats::{Samples, Stats};
+pub use stats::{MIN_SAMPLES, Samples, Stats};
 pub use surface::Surface;

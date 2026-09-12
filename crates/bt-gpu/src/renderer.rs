@@ -1112,10 +1112,16 @@ mod tests {
     #[test]
     fn completion_hands_over_live_gpu_timestamps() {
         // Bloğun başarı kolu komut tamponunu geçiriyor ve o tampon **canlı**:
-        // `GPUStartTime`/`GPUEndTime` gerçek bir pass'ten sonra sıfır değil.
-        // Ölçümün bu makinede mümkün olduğunu söyleyen tek sınama bu — Apple
-        // ikisini de "başlamadı" hâlinde sıfır döndürüyor ve sıfır örnek
-        // `record_gpu`'da elendiği için halka **sessizce** boş kalırdı.
+        // damgalar `Stats`'a varıyor. Sınadığı şey **boru**, donanımın
+        // davranışı değil — Apple `GPUStartTime`/`GPUEndTime`'ı "başlamadı" /
+        // "bildirim gelmedi" hâllerinde sıfır döndürebiliyor ve `record_gpu`
+        // sıfırı **meşru** sayıp eliyor. Eski hâli `nanos.len() == 1` diyordu,
+        // yani donanımın damga verme yeteneğini `make hepsi`'nin kırmızısına
+        // çeviriyordu; kendi doc'uyla çelişiyordu (`/code-review` bulgusu).
+        //
+        // Kaybolan sinyal telafi edildi: "bu makine damga veriyor mu"
+        // sorusunun cevabı artık `BT_FRAME_STATS=1` koşusunun `gpu_elenen=`
+        // jetonunda — sıfır ise damgalar canlı, kare sayısına eşitse değil.
         //
         // Kapının kendisi burada değil: ölçümü isteyen taraf `link.rs` ve
         // kapalı kapıda bu iki çağrı hiç yapılmıyor.
@@ -1148,7 +1154,14 @@ mod tests {
             stats.startup().is_some(),
             "ilk tamamlanan kare açılış süresini kapatır"
         );
-        assert_eq!(stats.gpu().nanos.len(), 1, "GPU damgaları sıfır değil");
+        // Kare **bir kez** kaydedildi: ya örnek olarak ya elenmiş olarak.
+        // İkisinin toplamı boruyu pinler; hangisi olduğu donanımın işi.
+        let gpu = stats.gpu();
+        assert_eq!(
+            gpu.nanos.len() as u64 + gpu.rejected,
+            1,
+            "tamamlanan kare tam bir kez kaydedilir"
+        );
         assert!(
             stats.cpu_frame().nanos.is_empty(),
             "CPU aralıkları bloktan değil display link'ten yazılır"
