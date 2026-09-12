@@ -486,4 +486,4 @@ dolduğu yalnız stderr'de görünüyordu.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi — `Skill` fork'u koştu ama geç döndü; `proje.md`'nin iniş sırası gereği beklerken **ikinci basamak** da koşuldu (`code-reviewer` subagent'ı) ve ikisi de rapor verdi. Altı bulgu uygulandı (ikisi YÜKSEK: panikleyen okuyucu `clean` diyordu, `watchdog()` panikleyip süreci abort ettirebiliyordu), altısı gerekçeli waive
 - [x] `/audit` çalıştırıldı, bulgular giderildi — `Skill` ile; 4/5/9 ilgisiz (kanıtıyla), 1/2/3/6 inline ve temiz, 7/8/10 fan-out (`opus`). 7 ve 8 temiz (birer yorum/kayıt notuyla), 10'un dört bulgusunun dördü düzeltildi
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: `ee4b31c`
