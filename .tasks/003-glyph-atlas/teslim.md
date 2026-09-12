@@ -107,7 +107,7 @@ set kurar.
 
 Bu, 001 phase-3'ün öngördüğü durum: *"Kare süresi ölçümü `BT_FRAME_LOG`
 kancasıyla gelir; bu sette kanca yok, `/measure` 'ölçüm aracı yok' der."*
-Kutu `[ ]` kalıyor — ölçüm bir kapı değil, atlanmış da değil: **aracı yok**.
+Kutu `[ ]` kalıyor — ölçüm bir kapı değil, atlanmış da değil. **005 sonrası güncellendi:** kanca seti geldi (`BT_FRAME_STATS`, `BT_SCROLL_TEST`, açılış damgası) ve `/measure` artık sayı üretebiliyor. Tarihli kayıtlar o gün doğruydu, dokunulmadı.
 
 ### B.2 Göz kontrolü `[elle]`
 
@@ -162,8 +162,11 @@ ikinci bir CF sarmalayıcı yığını olurdu). phase-1, phase-3 ve phase-4
 
 <!-- `/ship` bekleyen manuel adımları BU başlık altında arar. -->
 
-- [ ] B.1 `/measure 003-glyph-atlas` `[komut]` — beş ölçüm bekliyor;
-      2026-09-10'da koştu, **ölçüm aracı yok** (kanca seti bekliyor, bkz. B.1)
+- [ ] B.1 `/measure 003-glyph-atlas` `[komut]` — beş ölçüm bekliyor.
+      **005 kanca setini getirdi.** 2026-09-10'daki "ölçüm aracı yok" sonucu o
+      güne aitti. Kapanabilenler: `#3` (atlas doluluğu → `yuva=` jetonu), `#4`
+      ve `#5` (açılış damgası ve kare sütunları). **Açık kalan:** `#1` ve `#2`
+      — ikisi de `cargo bench` istiyor ve bench seti henüz yok
 - [x] B.2 Göz kontrolü `[elle]` — 2026-09-10, kullanıcı baktı: harfler hücrelerine
       oturuyor, kenarlarda saydamlık yok, kırmızı zemin doğru. `colorspace` `nil`
       kalıyor: P3 ekranda gözle sapma görülmedi

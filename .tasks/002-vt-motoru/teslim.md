@@ -30,8 +30,8 @@ make duman        # pencereyi açar, kare ve hücre sayar
   basıp 78 ile çıkar — bu "geçti" değildir.
 - Ölçüm sayısı **yok** ve `docs/OLCUMLER.md` bu teslimle değişmiyor — ama bu
   "iddia yok" demek değil: aşağıda **iki** kare süresi iddiası ölçüm bekliyor.
-  Ayrım şu: teslim bir sayı *yayımlamıyor*, çünkü ölçüm aracı yok. Sayı
-  gelince buraya değil `docs/OLCUMLER.md`'ye yazılır.
+  Ayrım şu: teslim bir sayı *yayımlamıyor*, çünkü o gün ölçüm aracı yoktu.
+  Sayı gelince buraya değil `docs/OLCUMLER.md`'ye yazılır. **005 sonrası güncellendi:** kanca seti geldi (`BT_FRAME_STATS`, `BT_SCROLL_TEST`, açılış damgası) ve `/measure` artık sayı üretebiliyor. Tarihli kayıtlar o gün doğruydu, dokunulmadı.
 
 ### Doğrulama Checklist
 
@@ -106,8 +106,11 @@ ilgili crate'in bağımlılık listesine kenar eklendi.
 
 - [ ] B.1 Apache-2.0 attribution `[elle]` — bundle setine devredildi, bu
       teslimde yapılacak bir şey yok
-- [ ] B.2 `/measure 002-vt-motoru` `[komut]` — iki ölçüm bekliyor;
-      2026-09-10'da koştu, **ölçüm aracı yok** (kanca seti bekliyor, bkz. B.2)
+- [ ] B.2 `/measure 002-vt-motoru` `[komut]` — iki ölçüm bekliyor.
+      **005 kanca setini getirdi, komut artık koşulabilir.** 2026-09-10'daki
+      "ölçüm aracı yok" sonucu o güne aitti. Kilit beklemesi (`#1`) CPU'nun
+      `session.frame()` sütunundan okunur; instance tamponu (`#2`) kısmen —
+      `setVertexBytes` eşiği bench ister ve bench **hâlâ yok**
 - [x] B.3 Bağımlılık kaydı `[oto]` — `Cargo.lock` depoda, gerekçeler
       manifest yorumlarında ve `discussion.md → Karar`'da
 

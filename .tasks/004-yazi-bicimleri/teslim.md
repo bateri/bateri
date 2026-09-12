@@ -135,7 +135,7 @@ Bakılacak:
 
 `docs/OLCUMLER.md` bu depoda **yok** ve ölçüm kancaları (`BT_FRAME_LOG`,
 `BT_SCROLL_TEST`, `BT_STARTUP_TRACE`) da yok — 002 ve 003'ün bekleyen
-ölçümleriyle aynı durum. `/measure` bugün sayı değil **"ölçüm aracı yok"**
+ölçümleriyle aynı durumdu. **005 sonrası güncellendi:** kanca seti geldi (`BT_FRAME_STATS`, `BT_SCROLL_TEST`, açılış damgası) ve `/measure` artık sayı üretebiliyor. Tarihli kayıtlar o gün doğruydu, dokunulmadı. O gün `/measure` sayı değil **"ölçüm aracı yok"**
 döndürür (003 `teslim.md` B.1'de kanıtlandı: `cargo bench --workspace --
 --list` → `0 benchmarks`). Beşi de kanca seti gelene kadar eylemsiz kalıyor,
 sayı uydurulmadı:
@@ -203,9 +203,11 @@ Kapsam dışı ama görünürlüğü korunsun diye ayrıca not: `plan.md`'nin
       phase-3'ün `## Uygulama Notları`'nda
 - [x] B.2 Göz kontrolü `[elle]` — **kullanıcı 2026-09-11'de yaptı, geçti.**
       Doğrulayan kullanıcıdır; bu satır onun raporudur, otomatik bir kapı değil
-- [ ] B.3 `/measure 004-yazi-bicimleri` `[komut]` — beş iddia bekliyor;
-      kancalar (`BT_FRAME_LOG`, `BT_SCROLL_TEST`, `BT_STARTUP_TRACE`) hâlâ
-      yok, bugün "ölçüm aracı yok" döner — 002/003 ile aynı bekleme
+- [ ] B.3 `/measure 004-yazi-bicimleri` `[komut]` — beş iddia bekliyor.
+      **005 kanca setini getirdi**, komut artık koşulabilir. Kanca adları
+      değişti: `BT_FRAME_LOG` ve `BT_STARTUP_TRACE` yok, ikisinin yerine
+      `BT_FRAME_STATS` (açılış aynı bayrağın altında). `#4`'ün bench yarısı
+      açık kalıyor
 
 ## Geri Alma
 
