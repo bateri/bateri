@@ -233,7 +233,7 @@ impl Stats {
     /// ne olmadığı `since` alanının doc'unda.
     ///
     /// Kapasite koşu süresinden türüyor: `run_seconds × MAX_REFRESH_HZ`.
-    /// Sıfır saniyelik koşu [`Ring::new`]'in alt sınırına düşer (bir yuva) —
+    /// Sıfır saniyelik koşu `Ring::new`'in alt sınırına düşer (bir yuva) —
     /// kırpma tek yerde durur ve orada `%`'nin yanında durduğu için görünür.
     ///
     /// **Ayırma açılış süresinin içinde:** üç halka burada, damga alındıktan

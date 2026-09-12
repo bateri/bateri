@@ -253,6 +253,35 @@ Bir ölçüm hatam da yakalandı ve düzeltildi: rustdoc uyarı sayarken
 Kutulardaki iki bayat değer (`~0,7/~2,7 Hz`, `kapanis=asildi`) **silinmedi**,
 yanlarına düzeltme notu düşüldü — kutu metni tarihsel kayıt.
 
+**Mercek 10'un ayrı ajanı commit'ten SONRA döndü** ve altı bulgu getirdi; beşi
+uygulandı, ayrı bir düzeltme commit'iyle (hash aşağıda, `Commit:` satırında). Kutuyu `[x]` bırakmak yerine
+kaydı burada büyütmek doğru olan: kapı koştu, bulgusu geldi, bulgu kapandı.
+
+1. **En ağırı yine doc-doc çelişkisi ve yine benim.** `Measured`'a yazdığım
+   "halka bekleme boyunca **durağan**" cümlesi, kırk satır aşağıdaki
+   `Measured::read`'in "**halkaların hepsi durağan değil** — uçuşta kalan bir
+   kare hâlâ düşebilir" doc'uyla çelişiyordu ve kod `read`'den yanaydı:
+   `link.stop()` **talebi** kesiyor, Metal'in tamamlanma bloğu
+   `SHUTDOWN_GRACE` boyunca hâlâ `record_gpu` çağırabiliyor. Sonuç
+   ("örneklere etkisi yok") ayaktaydı, **gerekçe** yanlıştı — `/code-review`
+   aynı cümlenin *sırasını* düzeltmişti, bu tur *fiziğini* düzeltti.
+2. **`.tasks/README.md` "Kapanan: kare süresi, açılış…" diyordu**, oysa
+   yalnız atlas doluluğu kapandı; kalan sekiz iddia **ölçülebilir** oldu ve
+   sayı henüz alınmadı (gideceği `docs/OLCUMLER.md` de yok). Aynı tablonun
+   002/003/004 satırları ve bu dosyanın kendi muhasebesi zaten doğruyu
+   söylüyordu — yani 005 satırı üç komşusuyla çelişiyordu.
+3. Aynı satırın bench listesi üç kalem sayıyordu, dördüncüsü (004 #4'ün
+   `Atlas::slot` yarısı) düşmüştü.
+4. **Public doc'tan private alana biten işaretçi zinciri:**
+   `Run::stats_since` → `Stats::new` → "`since` **alanının** doc'unda", ama
+   `since` private, yani rendered rustdoc'ta hedef görünmüyor. Zincir artık
+   `Stats::startup`'a (public) gidiyor.
+5. `Stats::new`'in yeniden yazdığım bloğunda `[`Ring::new`]` private link'i
+   kalmıştı; düz span'e çevrildi. Yan etki: `bt-gpu`'nun rustdoc uyarısı
+   **4'ten 3'e** düştü, yani tabanın bir altında.
+6. "`shutdown()`'ın **ilk** işi `link.stop()`" yanlıştı — ilk iş
+   `crate::watchdog()`. "Beklemeye girmeden önce" oldu.
+
 Uygulanmayanlar gerekçeli: `bt-gpu` prose'unun üst katmanı anması (yerleşik,
 bağımlılık kenarı değil), `Measured`'ın private oluşu yüzünden
 `cargo doc`'ta görünmemesi (`/measure` dosya yoluyla işaret ediyor, sorun
