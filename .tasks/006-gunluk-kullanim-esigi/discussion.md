@@ -1,0 +1,114 @@
+# Günlük kullanım eşiği — Tartışma
+
+## Karar 0: Kapsam — tek hamlede eşik mi, düzenli sıra mı?
+
+Yol haritası iki seçeneği yazmıştı: (a) pano, kaydırma, ayar, bundle ayrı
+setler; (b) tek hamlede eşik. Kullanıcı tercihi **(b)** — gerekçe "kullanımın
+bulduğu hatalar" argümanı, bedeli setin normalden büyük olması
+(`docs/YOL-HARITASI.md:33-37`).
+
+Bu karar `/rfc 006`'da kesinleşmek üzere buraya taşındı. Kesinleşirse bu set
+dört işi birlikte taşır: pano, seçim, kaydırma, bundle. Aşağıdaki kararlar
+o varsayımla yazıldı; kapsam daralırsa kararlar da daralır.
+
+## Karar 1: Seçim modeli nerede yaşar?
+
+Üç aday var ve katman sözleşmesi ikisini zorluyor:
+
+- **`bt-core`** — grid'i gören tek yer. Seçim "hangi hücreler" sorusuysa
+  cevabı burada. Ama `bt-core` platformsuz: fare pikselini hücreye çevirme
+  (hücre ölçüsü, ölçek, pencere kenar boşluğu) AppKit/Metal bilgisidir.
+- **`bt-shell`** — olayı gören tek yer (`mouseDown:`, `mouseDragged:`).
+  Ama grid'i görmüyor; her seçim değişiminde `bt-core`'a sormak gerekir.
+- **`bt-gpu`** — pikseli gören yer, ama sözleşme açık: "Renderer'a terminal
+  semantiği eklenmez" (proje.md → tuzaklar). Seçim modeli semantik taşır
+  (satır sarma, geniş karakter, alternate screen) — burası **elendi**.
+
+**Öneri: model `bt-core`'da, koordinat çevirisi `bt-shell`'de.** Fare
+pikseli `bt-shell`'de hücreye iner (ölçüyü `cell_metrics`'ten alıyor), seçim
+aralığı `bt-core`'da tutulur, çizim için `frame()` sınırından geçer. Deseni
+hazır: tuş yolu bugün aynen böyle çalışıyor (`view.rs` olayı alır,
+`keys.rs` saf çeviriyi yapar, `bt-core` yazar).
+
+Açık alt soru: seçim alternate screen'de ve satır sarmada nasıl davranır?
+Cevap `bt-core`'un grid bilgisine dayanır — panel baksın.
+
+## Karar 2: Cmd-C / Cmd-V menüsüz nasıl çalışır?
+
+Bugün `view.rs:61-63` Command'lı her tuşu yutuyor ve yorum "menü gelene
+kadar" diyor. Menü **bu sette yok** (00X). Üç yol:
+
+- **(a) `keyDown:`'da ele al.** Command+C/V gelirse panoya yaz/okut, yutmayı
+  yalnız o iki tuşta kaldır, geri kalanı yutmaya devam. Dar, ama iki tuşa
+  özel dal demek.
+- **(b) `performKeyEquivalent:`'i doldur.** AppKit'in tasarlanmış yolu;
+  menü gelince aynı seçiciler menüye bağlanır, bugün yazılan kod yarın
+  çöpe gitmez. Biraz daha fazla iskelet.
+- **(c) Menüyü de getir.** Kapsam şişer; yol haritasında menü 00X'te.
+
+**Öneri: (b).** (a) bugünü kurtarır ama menü gününde çöpe gider; (b)'nin
+iskeleti menüye devredilir. Cmd-C/V dışındaki Command tuşları yutulmaya
+devam eder.
+
+## Karar 3: Yapıştırma PTY'ye nasıl girer — bracketed paste şart mı?
+
+Ham yapıştırma (baytları dümdüz yazmak), kabuk satırında çalışan bir
+uygulamaya (vim, REPL, `read`) yapıştırınca satırları tek tek **çalıştırır**.
+Bunun çaresi bracketed paste (`\e[200~` … `\e[201~`): uygulamaya "bu bir
+yapıştırma" denir.
+
+Metalterm bracketed paste destekliyor (`ARASTIRMA.md:42`). alacritty tarafı
+`bt-core`'da — uygulamanın isteyip istemediğini (DECSET 2004) **o** bilir.
+
+**Öneri: bracketed paste bu sete girer, ama yalnız `bt-core`'un bildiği
+kadarıyla.** Uygulama istemişse sar, istememişse ham yaz. İkinci hâl
+kullanıcının sorumluluğunda — uygulamanın istemediğini terminalin
+bilemeyeceği bir şeyi terminal çözemez.
+
+## Karar 4: Kaydırmanın kapsamı — viewport mu, scrollback mi?
+
+İki ayrı şey: scrollback deposu (`bt-core`'da var) ve viewport'un geriye
+gitmesi (yok). Tekerlek, Shift+PgUp, kaydırma çubuğu — üçü de ayrı iş.
+
+**Öneri: tekerlek + Shift+PgUp girer, kaydırma çubuğu girmez.** Çubuk AppKit
+kroniğidir (thumb boyutu, orantı, sürükleme), eşik için gerekli değil;
+tekerlek ve tuş, aynı "viewport kaydır" yolunun iki tetikleyicisi.
+
+Açık alt soru: alternate screen'de (vim, less, tmux) tekerlek ne yapar?
+Doğru davranış uygulamaya fare dizisi göndermektir — ama fare raporlaması
+(SGR-pixel) kendisi ayrı bir iş. Bu sette tekerlek alternate screen'de
+**yoksayılır** önerisi var; panel baksın.
+
+## Karar 5: OSC 52 (panodan okuma/yazma dizisi) girer mi?
+
+Uzak makinedeki bir uygulama (`ssh` üstünden vim) panoya OSC 52 ile yazar.
+`bt-core` OSC 7/8/9/52'yi zaten tanıyor (katman tablosu). Ama dizinin ucu
+`NSPasteboard`'da — yani `bt-core` ayrıştırır, `bt-shell` yazar.
+
+**Öneri: girer, ama yalnız yazma yönü (uygulama → pano).** Okuma yönü
+(panoyu uygulamaya verme) güvenlik sorusudur: herhangi bir uzak uygulama
+kullanıcının panosunu okuyabilir. Metalterm'de `clipboard.osc52` bir ayar
+(`ARASTIRMA.md:103`) — ayar sistemi ise 007'de. Ayarı olmadan okuma yönünü
+açmak ya hep-açık (riskli) ya hep-kapalı (işlevsiz) olur; ikisi de yanlış.
+Yazma yönü risksizdir.
+
+## Karar 6: Bundle'ın sınırı nerede?
+
+`make kur` bugün "henüz yok". Bundle demek en az: `Info.plist`, ikon,
+`BT_RUN_SECONDS`-sız normal açılış, Dock davranışı, öne çıkma hakkı.
+
+**Öneri: en küçük çalışan bundle.** İmza ve notarization **girmez** (dağıtım
+işi, eşik değil); Sparkle **girmez** (güncelleme, eşik değil); `Info.plist` +
+ikon + `make kur`'un gerçek olması girer. 002'nin Apache-2.0 attribution'ı
+("lisans metni ve paneli **bundle**") bu sete girer — yeri hazır, borcu
+kapanır.
+
+**Bundle'ın yan ödevi kayıtlı:** görünür pencere meşru kare sayısını
+değiştirir, `IDLE_FRAME_LIMIT` bu sette **yeniden ölçülür**. Bugünkü `8`,
+görünmez pencerede ölçüldü; sayısı `bt-shell`'de sabitin doc'unda duruyor.
+
+## Karar Noktaları
+
+Kullanıcıya sorulacak tek şey **Karar 0**: kapsam (b) olarak kesinleşsin mi?
+Önerim evet; gerekçesi yol haritasında yazılı ve kullanıcı daha önce bu yönde
+tercih bildirdi. Kalan altı karar teknik ve panelin işi.
