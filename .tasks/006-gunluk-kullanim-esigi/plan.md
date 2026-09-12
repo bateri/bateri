@@ -97,7 +97,7 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 
 | Phase | Durum | Commit |
 |-------|-------|--------|
-| phase-1 | | |
+| phase-1 | ✅ | 77b4afd | `[elle]` göz kontrolü kullanıcıda |
 | phase-2 | | |
 | phase-3 | | |
 | phase-4 | | |

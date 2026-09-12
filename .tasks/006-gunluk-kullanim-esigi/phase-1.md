@@ -101,16 +101,16 @@ imleç tersine çevirme, `session.rs:768-773`).
 
 ## Checklist
 
-- [ ] Seçim modeli `bt-core`'da + `selection_text()` tek metin yolu
-- [ ] Değişimde `DirtyFlag::mark()` + link uyandırma
-- [ ] `view.rs`'de `mouseDown:`/`mouseDragged:` + fare→hücre çevirisi
-- [ ] Vurgu `cell_bg` borusundan; yeni shader/uniform yok
-- [ ] Test: seçim aralığı metin çıkarımı (sarma + spacer atlama)
-- [ ] Test: seçim değişimi kirli bayrağını dikiyor
+- [x] Seçim modeli `bt-core`'da + `selection_text()` tek metin yolu
+- [x] Değişimde `DirtyFlag::mark()` + link uyandırma
+- [x] `view.rs`'de `mouseDown:`/`mouseDragged:` + fare→hücre çevirisi
+- [x] Vurgu `cell_bg` borusundan; yeni shader/uniform yok
+- [x] Test: seçim aralığı metin çıkarımı (sarma + spacer atlama)
+- [x] Test: seçim değişimi kirli bayrağını dikiyor
 - [ ] `[elle]` göz kontrolü: fareyle seç, ters video vurguyu gör
-- [ ] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu** — pencere davranışı değişti)
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu** — pencere davranışı değişti)
+- [x] `/simplify` çalıştırıldı, bulgular uygulandı
+- [x] `/code-review` çalıştırıldı, bulgular giderildi
+- [x] `/audit` çalıştırıldı, bulgular giderildi
+- [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
+- [x] Commit: 77b4afd
