@@ -90,6 +90,8 @@ imleç tersine çevirme, `session.rs:768-773`).
   İngilizce, `#[allow]` gerekçeli) temiz; 4 (ayar), 5 (shell), 9 (hücre/shader)
   ilgisiz.
 
+- **sadakat: makas yok.** `git show --stat 77b4afd` checklist ile eşleşiyor: phase-1.md (kılavuz + notlar), session.rs (model + vurgu), app.rs/lib.rs (kablo), view.rs (fare). `plan.md ## Durum` damga commit'inde (`f17ea69`).
+
 ## Yayın Etkisi
 
 - Fare tıklaması artık seçim başlatır; tek tıkla odaklanma değişmez.
