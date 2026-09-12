@@ -158,4 +158,4 @@ main.rs   BT_FRAME_STATS / BT_SCROLL_TEST okunur (TEK YER)
 | phase-2 | ✅ | `8df1ef6` |
 | phase-2b | ✅ | `e991d78` |
 | phase-3 | ✅ | `ee4b31c` |
-| phase-3b | | |
+| phase-3b | ✅ | `8be6f68` |

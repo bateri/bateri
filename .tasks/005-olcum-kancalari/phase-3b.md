@@ -342,4 +342,4 @@ kararı orkestratörün).
 - [x] `/code-review` çalıştırıldı, bulgular giderildi — iki koşucu (`Skill` fork'u geç döndü, beklerken `code-reviewer` subagent'ı da koşuldu; phase-3'ün deseni). Kodda hata **yok**; altı sözleşme/belge bulgusundan beşi uygulandı — dördü bu phase'in kendi ürettiği hatalardı (ters sıra iddiası, yanlış türetilmiş Hz sayıları, eklenen üç rustdoc uyarısı) — biri gerekçeli WAIVE (CPU'nun elenen örneği için jeton yok: çare sözleşmeye dokunmak), biri gerekçeli waive (`bt-gpu` prose'unun `bt-shell`'i anması: yerleşik ve bağımlılık kenarı değil)
 - [x] `/audit` çalıştırıldı, bulgular giderildi — `Skill` ile. 2/3/4/5/7/9 ilgisiz (kanıtıyla), 1 ve 8 inline temiz, 6 inline (bir bulgu: `proje.md`'ye kopyalanmış `24 bayt`, düzeltildi), 10 fan-out (`opus`) + `/code-review`'un ikinci koşucusu aynı zemini taradı — on dört kalemden on biri uygulandı, üçü gerekçeli waive
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [x] Commit: {hash}
+- [x] Commit: `8be6f68`
