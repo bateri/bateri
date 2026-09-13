@@ -2,8 +2,12 @@
 //!
 //! Crate'in kapsül sözleşmesi `lib.rs`'te; burada onun iki pratik sonucu
 //! yaşıyor: alacritty'nin `EventListener`'ı `Adapter`'da bizim `Wake`'imize
-//! çevrilir, ve `Term` kilidi yalnız `frame()` ile `resize()`'da alınır —
-//! üçüncü bir alan yeri yoktur, kilit sırası oradan okunur.
+//! çevrilir, ve `Term` kilidi **yalnız** şu çağrı yerlerinde alınır:
+//! `frame`, `resize`, seçim yolu (`set_selection`, `clear_selection`,
+//! `selection_text`) ve `paste`'in kip sorgusu (`bracketed_paste`). Kilit
+//! **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
+//! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa
+//! kilitlenme doğar.
 
 use std::collections::HashMap;
 use std::io;
@@ -18,6 +22,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, RenderableContent, Term};
 use alacritty_terminal::tty::{self, Pty, Shell};
@@ -906,6 +911,79 @@ impl Session {
         self.send(Msg::Input(bytes.to_vec().into()));
     }
 
+    /// Sahiplenen yazma: `write` ile aynı kapı, ama baytları bir kez daha
+    /// kopyalamaz. Yapıştırma yükü pano mertebesinde olabilir (kopyalanmış
+    /// bir log dosyası); sarma dalı tamponu zaten kuruyorken `write`'a
+    /// dilimle gitmek ikinci bir tam kopya demekti.
+    ///
+    /// Boş vektör burada da sessizce düşer: kapı `write`'ınkiyle aynı ve
+    /// iki fonksiyon da `send`'den geçer. `Msg::Input`'u kuran üçüncü yer
+    /// `Adapter::reply`'dir; orada `Session` yok, adapter kendi kanalına
+    /// doğrudan yazıyor — yani bu kapının dışında.
+    fn write_owned(&self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.send(Msg::Input(bytes.into()));
+    }
+
+    /// Yapıştırma bu kapıdan girer — **ham bayt bu kapının dışında kalır**.
+    ///
+    /// Ham yapıştırma (baytları dümdüz yazmak), kabuk satırında çalışan bir
+    /// uygulamaya (vim, REPL, `read`) yapıştırınca satırları tek tek
+    /// **çalıştırır**. Bunun çaresi bracketed paste (`\e[200~` … `\e[201~`):
+    /// uygulamaya "bu bir yapıştırma" denir. Uygulama istemişse (DECSET 2004)
+    /// sar, istememişse ham yaz — uygulamanın istemediğini terminalin
+    /// bilemeyeceği bir şeyi terminal çözemez (Karar 3).
+    ///
+    /// Kip **tutulmaz**; alacritty'nin `Term`'inde yaşar, kilit altında
+    /// sorgulanır. `session.write`'a doğrudan yapıştırma baytı verilmez —
+    /// sarmalayan bu fonksiyondur.
+    ///
+    /// Boş yapıştırma iki dalda da sessizdir: sarma dalı bile boş
+    /// `\e[200~\e[201~` çifti yazmaz, çünkü sıfır baytlık bir `Msg::Input`
+    /// yazıcıyı kilitler (`write`'ın kapısı).
+    ///
+    /// Baytları **sahiplenerek** alır (`&[u8]` değil): pano yükü megabayt
+    /// mertebesine çıkabilir ve yapıştırma yolunda iki tam kopya
+    /// (dilim → `Vec` → `Msg`) ana thread'de ödenmemeli. Çağıran zaten
+    /// sahibi (`clipboard::read` → `String` → `into_bytes`), sarma dalı da
+    /// tamponu kendisi kuruyor.
+    pub fn paste(&self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        if self.bracketed_paste() {
+            let mut wrapped = Vec::with_capacity(bytes.len() + 12);
+            // `b"\e[200~"` yazılamaz: `\e` Rust kaçışı değil. Altı baytın
+            // altısı da ASCII, `extend_from_slice` kopyalar.
+            wrapped.extend_from_slice(b"\x1b[200~");
+            // `ESC` ve `ETX` süzülüyor — sarma **kendi iğnesini**
+            // koruyamazsa bracketed paste'in varlık sebebi kalmaz: panoya
+            // `\x1b[201~` koyan bir süreç bölgeyi erken kapatır ve gerisi
+            // uygulamaya **yazılmış girdi** olarak varır (kullanıcı Cmd-V'ye
+            // basar basmaz satır çalışır, Enter yok, ekranda fark yok).
+            // Çıplak `ETX` aynı deliğin ikinci hâli: ön plandaki işe SIGINT.
+            // Emsal alacritty (`ActionContext::paste`) aynı iki baytı süzüyor.
+            wrapped.extend(bytes.into_iter().filter(|b| !matches!(b, 0x1b | 0x03)));
+            wrapped.extend_from_slice(b"\x1b[201~");
+            self.write_owned(wrapped);
+        } else {
+            // Ham dal sıfır kopya: sahiplenen bayt doğrudan kanala gider.
+            self.write_owned(bytes);
+        }
+    }
+
+    /// DECSET 2004 (bracketed paste) set mi — kipi `Term`'den, kilit altında
+    /// sorar. `paste()`'in iki dalını ayıran tek soru; tutulmaz.
+    ///
+    /// `pub` değil `fn`: kapı `paste()`'tir — kip dışarıdan sorgulansaydı
+    /// biri `write`'a ham yapıştırma baytı vererek sarma kapısını by-pass
+    /// edebilirdi. Sınamalar aynı modülde, erişir.
+    fn bracketed_paste(&self) -> bool {
+        self.term.lock().mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     /// Grid'i ve PTY'yi yeni boyuta getirir. Reflow alacritty'nindir.
     ///
     /// `true` → boyut gerçekten değişti ve uygulandı. `false` iki durumda
@@ -1256,6 +1334,11 @@ mod tests {
         cells.iter().filter(|c| c.bg.is_some())
     }
 
+    /// Karenin mürekkebini tek dizide verir: `od` hex dökümü buradan okunur.
+    fn glyph_text(cells: &[Cell]) -> String {
+        cells.iter().filter_map(|c| c.ch).collect()
+    }
+
     #[test]
     fn smoke_shell_yields_background_cells() {
         let wake = Arc::new(TestWake::default());
@@ -1287,8 +1370,7 @@ mod tests {
         let session = spawn_smoke(Arc::clone(&wake));
 
         let cells = wait_cells(&session, &wake, 8);
-        let glyphs: String = cells.iter().filter_map(|c| c.ch).collect();
-        assert_eq!(glyphs, "bateri", "{cells:?}");
+        assert_eq!(glyph_text(&cells), "bateri", "{cells:?}");
     }
 
     #[test]
@@ -1586,6 +1668,141 @@ mod tests {
         let cells = wait_cells(&session, &wake, 2);
         let green = Some(color::linear_rgba(color::default(2)));
         assert!(backgrounds(&cells).all(|c| c.bg == green), "{cells:?}");
+    }
+
+    /// `needle` mürekkepte görünene kadar kare bekler; `od` satırı bölünmüş
+    /// PTY okumasıyla parça parça gelebilir.
+    fn wait_ink(session: &Session, wake: &TestWake, needle: &str) -> Vec<Cell> {
+        wait_frame(session, wake, |cells| glyph_text(cells).contains(needle))
+    }
+
+    /// 2004 kipi set olana kadar bekler: erken giden bir `paste` ham yazardı
+    /// ve sınama yanlış şeyi doğrular, yanlış kırmızıyı değil.
+    fn wait_bracketed_mode(session: &Session) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "2004 kipi açılmadı");
+            if session.bracketed_paste() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Yapıştırma yükü: 20 bayt. `od` 16 baytlık bloklar hâlinde okur ve blok
+    /// dolmadan döküm basmaz — kısa bir yük ("AB\n") yankıdan öteye gitmez,
+    /// döküm satırı hiç kareye düşmezdi (deneyle doğrulandı: 3 bayt →
+    /// sessizlik, 16+ bayt → döküm; kanonik modun satır tamponu değil,
+    /// `od`'nin okuma boyutu). Sarılmış hâl (6 + 20 + 6) tam iki blok eder,
+    /// kapanış iğnesi ikinci döküm satırından okunur; ham hâlde ilk blok dolar.
+    /// Dolgu hex'i iğnelerle çakışmıyor ("4142" yok, "1b" yok).
+    const PASTE_PAYLOAD: &[u8] = b"AB0123456789abcdefg\n";
+
+    #[test]
+    fn paste_wraps_when_bracketed_mode_set() {
+        // Çocuk önce 2004'ü açıyor (`\e[?2004h` PTY→Term yönü, uygulamadan),
+        // sonra `od` stdin'i hex'e döküyor. `paste()` o kipi kilit altında
+        // sorgulayıp sarıyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf '\\033[?2004h'; exec od -An -tx1", Arc::clone(&wake));
+
+        wait_bracketed_mode(&session);
+
+        session.paste(PASTE_PAYLOAD.to_vec());
+        // `1b5b3230307e` = `\e[200~`, `1b5b3230317e` = `\e[201~`. İğneler
+        // boşluksuz: `od` alanları boşlukla ayırıyor ama boşluk `frame()`'de
+        // mürekkep değil (`ch: None`), yani mürekkep dizisinde boşluk yok.
+        // Satır genişliği bölünebilir, o yüzden ölçüt iki ayrı iğne — tek
+        // uzun iğne bölünmüş satırda tutmazdı.
+        let cells = wait_ink(&session, &wake, "1b5b3230307e");
+        assert!(
+            glyph_text(&cells).contains("4142"),
+            "yük sarmanın içinde ham gitmeli: {cells:?}"
+        );
+        // Kapanış iğnesi tek `paste` ile gelmez: sarılı yük 32 bayt, `od`
+        // ilk 16 baytı ilk okumada döküyor, kalan 16 baytın 10'u ikinci
+        // okumada `od`'nin blok tamponunda kalıyor, son 6 bayt (`\e[201~`)
+        // ise satır sonu görmeden PTY tamponundan çıkmıyor. İkinci `paste`
+        // iki tamponu da akıtıyor — dökülen ikinci satır birinci yapıştırmanın
+        // kapanışını taşıyor. İkinci yapıştırma da `paste()` yolundan gidiyor:
+        // ham bayt bu sınamada da `write`'a değmiyor.
+        session.paste(PASTE_PAYLOAD.to_vec());
+        wait_ink(&session, &wake, "1b5b3230317e");
+    }
+
+    #[test]
+    fn paste_strips_escape_and_etx_from_wrapped_payload() {
+        // Sarma **kendi iğnesini** korumalı: yükteki `ESC`/`ETX` süzülmezse
+        // panoya `\x1b[201~` koyan bir süreç bölgeyi erken kapatır ve gerisi
+        // uygulamaya yazılmış girdi olarak varır — kullanıcı Cmd-V'ye basar
+        // basmaz satır çalışır (enjeksiyon). Ölçüt `od` dökümü: "ABCDEF"
+        // bitişik görünüyorsa aradaki `ESC`/`ETX` düşmüş demektir, çünkü
+        // süzülmeseydi döküm "41421b4344…" olurdu (ilk 16 bayt: sarma iğnesi
+        // + yükün ilk on baytı).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf '\\033[?2004h'; exec od -An -tx1", Arc::clone(&wake));
+        wait_bracketed_mode(&session);
+
+        session.paste(b"AB\x1bCD\x03EF0123456789\n".to_vec());
+        let cells = wait_ink(&session, &wake, "414243444546");
+        // Sarma yine de sarmaya devam ediyor — süzme iğneyi yemiyor.
+        assert!(glyph_text(&cells).contains("1b5b3230307e"), "{cells:?}");
+    }
+
+    #[test]
+    fn paste_writes_raw_when_bracketed_mode_unset() {
+        // 2004 açılmadı: `paste()` ham yazar, sarma baytı gitmez.
+        //
+        // Çocuk `od`: stdin'i hex'e döküp stdout'a yazar. Yapıştırılan
+        // baytların **çocuğa ne olarak gittiğini** karenin mürekkebinden
+        // okumanın yolu — sarma baytları (`\e[200~`) alacritty tarafından
+        // yutulduğu için yankı karesinden okunamaz, `od` dökümünden okunur.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("od -An -tx1", Arc::clone(&wake));
+
+        // Kip kapalı: `paste()`'ten önce de kapalı olmalı ki sınama yanlış
+        // dalı doğrulamasın. `od` açılışta satır basmaz, canlılık çapası yok —
+        // gerek de yok: bayt geldiyse çocuk yaşıyor, gelmediyse zaman aşımı var.
+        assert!(!session.bracketed_paste());
+
+        session.paste(PASTE_PAYLOAD.to_vec());
+        let cells = wait_ink(&session, &wake, "4142");
+        assert!(
+            !glyph_text(&cells).contains("1b"),
+            "sarılmamış yapıştırmada kaçış baytı olmamalı: {cells:?}"
+        );
+    }
+
+    #[test]
+    fn paste_empty_writes_nothing() {
+        // Boş yapıştırma sessizdir: ham dal da sarma dalı da PTY'ye gitmez —
+        // sarma dalında bile `\e[200~\e[201~` boş çifti yazılmamalı, sıfır
+        // baytlık `Msg::Input` yazıcıyı kilitlerdi (`Adapter::reply`).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf '\\033[?2004h'; sleep 5", Arc::clone(&wake));
+
+        wait_bracketed_mode(&session);
+
+        // **Önce akış durulsun.** `printf`'in karesi, kip görünür olduktan
+        // *sonra* düşer: `dirty` bayrağını `Event::Wakeup` dikiyor ve o,
+        // `term.process()` kilidi bırakıldıktan sonra koşuyor. Tek bir
+        // `None` beklemek bu yüzden yarışırdı — gecikmiş kare "yapıştırma
+        // kare doğurdu" diye okunurdu. Ölçüt tek kare değil **durulma**.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while session.frame(|_| ()).is_some() {
+            assert!(Instant::now() < deadline, "açılış karesi durulmadı");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        session.paste(Vec::new());
+        // Sessizliğin kanıtı yankı: PTY'ye bayt gitseydi satır disiplini onu
+        // yankılardı (ECHO açık) ve yankı bir kare doğururdu. Yankının tur
+        // atması için bir nefes bekleniyor; sonra kare olmamalı.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "boş paste kare doğurdu — PTY'ye bayt gitmiş"
+        );
     }
 
     #[test]

@@ -50,6 +50,12 @@ kaydırmaz.
 
 ## Checklist
 
+- [ ] **(phase-1'den devir)** Sürükleme **basılıyken** kaydırma olursa view'daki
+      çapa bayat kalır: `set_selection` aralığı grid mutlağında tutuyor ve
+      alacritty döndürmesi onu içerikle taşıyor, ama `ViewIvars::anchor`
+      viewport cinsinden. Kaydırma tetikleyicisi phase-1'de yoktu, bu phase'de
+      geliyor — göz kontrolü bu hâli de kapsamalı (`view.rs` → `mouseUp:`
+      doc'unda kayıtlı)
 - [ ] `scroll_display` API'si + kaydırınca kirli bayrağı
 - [ ] `scrollWheel:` ve Shift+PgUp tetikleyicileri; çubuk yok
 - [ ] Alternate screen'de yoksayma `bt-core` kipiyle

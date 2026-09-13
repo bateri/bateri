@@ -24,7 +24,8 @@ objc2-metal = "0.3"
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSGraphics",
-    "NSRunningApplication", "NSEvent", "objc2-core-foundation", "objc2-quartz-core",
+    "NSRunningApplication", "NSEvent", "NSPasteboard", "objc2-core-foundation",
+    "objc2-quartz-core",
 ] }
 # Glyph rasterizasyonu (`bt-atlas`): CTFont metriği + alfa-only bitmap bağlamı.
 # Kullanıcı onaylı bağımlılık kararı: .tasks/003-glyph-atlas/discussion.md →
