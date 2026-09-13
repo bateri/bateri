@@ -158,4 +158,4 @@ toparlanır, `cargo clean` gerekmez.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi
 - [x] `/audit` çalıştırıldı, bulgular giderildi
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- Commit: {hash}
+- Commit: 97b9c2c
