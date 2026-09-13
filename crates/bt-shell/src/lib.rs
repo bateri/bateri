@@ -3,11 +3,13 @@
 //! `objc2-app-kit` üzerinden doğrudan AppKit; Metal'i görmez, çizimi
 //! `bt-gpu`'ya bırakır ve device'ı `Renderer::system_default` kurar. Kareyi
 //! de sürmez: pencereyi, oturumu ve display link'i birbirine bağlar, gerisi
-//! `bt-gpu`'nun ritmidir. Klavye buradan PTY'ye akar (`keys`, `view`);
+//! `bt-gpu`'nun ritmidir. Klavye buradan PTY'ye akar (`keys`, `view`,
+//! `clipboard`);
 //! kapanış sırasının sahibi de bu crate. Tek pencere; sekme, bölme, menü ve
 //! IME sonraki setlerde.
 
 pub(crate) mod app;
+mod clipboard;
 mod keys;
 mod view;
 
