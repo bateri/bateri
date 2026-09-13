@@ -98,7 +98,7 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 | Phase | Durum | Commit |
 |-------|-------|--------|
 | phase-1 | ✅ | 77b4afd | `[elle]` göz kontrolü kullanıcıda |
-| phase-2 | ✅ | 97b9c2c | Doğrulama yarım: Xcode lisans kapısı `make hepsi`/`make duman`'ı kilitledi (detay `phase-2.md` → "Doğrulama Durumu"); `[elle]` kullanıcıda |
+| phase-2 | ✅ | 97b9c2c | Doğrulama tamam: `make hepsi` 0 · `make test-yaris` 0 · `make duman` yeşil (Xcode lisansı + Metal Toolchain kullanıcı tarafından çözüldü, `phase-2.md` → "Doğrulama Durumu"); `[elle]` kullanıcıda |
 | phase-3 | | |
 | phase-4 | | |
 | phase-5 | | |

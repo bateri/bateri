@@ -114,6 +114,16 @@ Güvenlik notu: ham yapıştırma vim/REPL'de satırları çalıştırır. Sarma
 
 ## Doğrulama Durumu (2026-09-13)
 
+> **KAPANDI — tam koşu yeşil.** Engel ortamsaldı ve kullanıcı çözdü: Xcode
+> lisansı kabul edildi, ardından eksik **Metal Toolchain bileşeni** indirildi
+> (`xcodebuild -downloadComponent MetalToolchain`, 687,9 MB — Xcode 26'da
+> `.metal` derleyicisi ayrı bileşen olmuş). Sonrasında **son hâl** üzerinde:
+> `make hepsi` → exit 0 · `make test-yaris` → exit 0 · `make duman` →
+> `kare=2 hucre=8 glif=6 kural=15 yuva=13/2048 kapanis=clean pipeline=ok`.
+> `kare=2` beklenen aralıkta (005 phase-3 bu makinede 1 **veya** 2 ölçtü,
+> `IDLE_FRAME_LIMIT=8`'in altında). Aşağıdaki tablo engelin sürdüğü andaki
+> fotoğraf olarak **tarihsel kayıt** diye duruyor.
+
 **Son hâl üzerinde tam koşu tamamlanamadı — engel ortamsal, kod değil.**
 Bu makinede Xcode lisansı kabul edilmemiş: `/usr/bin/{make,cc,clang,git}` ve
 `xcrun` "You have not agreed to the Xcode license agreements" deyip **exit
@@ -153,7 +163,7 @@ toparlanır, `cargo clean` gerekmez.
 - [x] Test: 2004 setken sarma, değilken ham yazma (`paste_wraps…`, `paste_writes_raw…`; üstüne `paste_empty…` ve `paste_strips_escape_and_etx…`)
 - [x] Test: Cmd-C seçili metni panoya yazıyor (canlı panoda round-trip; başsızda atlanır — `clipboard::tests`)
 - [ ] `[elle]` göz kontrolü: kopyala-yapıştır turu (terminal içi + dış uygulama) — **kullanıcının işi**
-- [ ] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu**) — **son hâl üzerinde koşturulamadı**: makinede Xcode lisans kapısı bağlamayı kilitledi (`cc`/`clang`/`make` exit 69). Ayrıntı ve ölçülen/kalan tablosu → `## Doğrulama Durumu`
+- [x] Doğrulama geçti — **kapı geri gelince son hâl üzerinde koşuldu**: `make hepsi` exit 0, `make test-yaris` exit 0, `make duman` → `kare=2 hucre=8 glif=6 kural=15 kapanis=clean pipeline=ok`. Engel ortamsaldı (Xcode lisansı + eksik Metal Toolchain), kullanıcı çözdü; tablo ve gerekçe → `## Doğrulama Durumu`
 - [x] `/simplify` çalıştırıldı, bulgular uygulandı
 - [x] `/code-review` çalıştırıldı, bulgular giderildi
 - [x] `/audit` çalıştırıldı, bulgular giderildi
