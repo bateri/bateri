@@ -10,11 +10,12 @@ use bt_core::Arrow;
 
 /// AppKit'in fonksiyon tuşu aralığı: U+F700–U+F8FF. Adlandırılmış sabitler
 /// (`NSUpArrowFunctionKey` … `NSModeSwitchFunctionKey`) bunun ilk dilimini
-/// kullanıyor. Oklar [`KeyInput::Arrow`]'a, PgUp/PgDn kendi dizilerine
-/// çevriliyor; aralığın **tanınmayan geri kalanı** bilerek yutuluyor çünkü
-/// bilmediğimiz bir tuş kodunu UTF-8'e çevirip shell'e göndermek her zaman
-/// daha kötü. Private Use Area bundan geniştir (U+E000'den başlar) ve **kapsam
-/// dışı**: powerline glyph'i gibi gerçek bir karakter düz metin dalından geçer.
+/// kullanıyor. Oklar [`KeyInput::Arrow`]'a, PgUp/PgDn ve ileri silme kendi
+/// dizilerine çevriliyor; aralığın **tanınmayan geri kalanı** bilerek
+/// yutuluyor çünkü bilmediğimiz bir tuş kodunu UTF-8'e çevirip shell'e
+/// göndermek her zaman daha kötü. Private Use Area bundan geniştir (U+E000'den
+/// başlar) ve **kapsam dışı**: powerline glyph'i gibi gerçek bir karakter düz
+/// metin dalından geçer.
 const FUNCTION_KEYS: std::ops::RangeInclusive<char> = '\u{f700}'..='\u{f8ff}';
 
 /// `NSPageUpFunctionKey` ve `NSPageDownFunctionKey`. İki yerde okunuyor —
@@ -36,12 +37,14 @@ pub(crate) enum KeyInput {
 ///
 /// `None` → tuş yutulur; çağıran hiçbir şey yazmaz. Kapsam dışı: IME, ölü
 /// tuşlar, Option-as-Meta, kitty klavye protokolü, değiştiricili oklar
-/// (`\e[1;5A`) ve Home/End (dizileri yok, aşağıda yutuluyor).
+/// (`\e[1;5A`), Control'lü/Option'lı geri sekme ve ileri silme, Home/End
+/// (dizileri henüz yazılmadı — borç; aşağıda yutuluyor).
 pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<KeyInput> {
     let c = chars.chars().next()?;
     // `characters` tek karakter mi — tek bir `c`'den çıkan kolların ortak
-    // koruması (aşağıda oklar, PgUp/PgDn ve Control): çok karakterli girdi
-    // (ölü tuş bileşimi, marked text) ilk karakterinden okunmaz.
+    // koruması (aşağıda geri sekme, oklar, PgUp/PgDn, ileri silme ve
+    // Control): çok karakterli girdi (ölü tuş bileşimi, marked text) ilk
+    // karakterinden okunmaz.
     let single = chars.len() == c.len_utf8();
     let bytes: Cow<'static, [u8]> = match (c, ctrl) {
         // Sayısal tuş takımının Enter'ı ve Fn-Return `NSEnterCharacter` =
@@ -49,6 +52,12 @@ pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<KeyInput> {
         // satır sonudur; bu kol olmasaydı düz metin dalından 0x03 olarak geçer
         // ve numpad Enter her komutu çalıştırmak yerine keserdi.
         ('\u{3}', false) => Cow::Borrowed(b"\r"),
+        // Shift+Tab: `characters` `NSBackTabCharacter` = U+0019 verir.
+        // `xterm-256color`'ın `kcbt`'si `\e[Z` — zsh'ın tamamlama menüsü ve
+        // readline geri sekmeyi bu diziden okuyor, ham 0x19'dan değil. U+0019
+        // Ctrl-Y'nin de baytı (yank); ayıran yine Control bayrağı, yukarıdaki
+        // U+0003 kolunun aynısı. Ctrl'lü hâl düz metin dalından 0x19 gider.
+        ('\u{19}', false) if single => Cow::Borrowed(b"\x1b[Z"),
         ('\u{f700}', _) if single => return Some(KeyInput::Arrow(Arrow::Up)),
         ('\u{f701}', _) if single => return Some(KeyInput::Arrow(Arrow::Down)),
         ('\u{f702}', _) if single => return Some(KeyInput::Arrow(Arrow::Left)),
@@ -64,6 +73,11 @@ pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<KeyInput> {
         // girdi aşağıdaki fonksiyon tuşu kolunda bütünüyle yutulur.
         (PAGE_UP, _) if single => Cow::Borrowed(b"\x1b[5~"),
         (PAGE_DOWN, _) if single => Cow::Borrowed(b"\x1b[6~"),
+        // `kdch1`: imlecin sağındaki harfi siler. Fonksiyon tuşu aralığında
+        // olduğu için aşağıdaki yutma kolundan **önce** yazılı; değiştiricili
+        // hâli (`\e[3;5~`) oklar gibi kapsam dışı ve düz diziyi alır.
+        // `NSDeleteFunctionKey`: fn+Backspace, tam klavyede Delete (⌦).
+        ('\u{f728}', _) if single => Cow::Borrowed(b"\x1b[3~"),
         // AppKit Control'ü `characters`'a çoğu tuşta kendi uygular (Ctrl-C →
         // U+0003) ve o hâl aşağıdaki düz metin dalından geçer. Ama hepsinde
         // uygulamaz — Ctrl-Shift-C'de harf harf kalır. İki yol da aynı baytı
@@ -209,6 +223,24 @@ mod tests {
         // başlayan çok karakterli bir `characters` dizi üretip kalanını
         // izsiz düşürmez — tanınmayan fonksiyon tuşu gibi bütünüyle yutulur.
         assert!(encode_key("\u{f72c}x", false).is_none());
+    }
+
+    #[test]
+    fn back_tab_and_forward_delete_emit_xterm_sequences() {
+        // `xterm-256color`'ın `kcbt`'si ve `kdch1`'i (`infocmp`). Shift+Tab'ın
+        // `characters`'ı `NSBackTabCharacter` (U+0019): düz metin dalından
+        // ham `0x19` gidiyordu, zsh'ın menüsü onu geri gitme diye okumuyor.
+        // fn+Backspace `NSDeleteFunctionKey` (U+F728): fonksiyon tuşu kolunda
+        // yutuluyordu.
+        assert_eq!(encode("\u{19}", false), b"\x1b[Z");
+        assert_eq!(encode("\u{f728}", false), b"\x1b[3~");
+        // U+0019 Ctrl-Y'nin de `characters`'ı (`'y' & 0x1f`) — readline'ın
+        // yank'i. Ayıran yalnız Control bayrağı, numpad Enter/Ctrl-C ikilisi
+        // gibi; karışırsa Ctrl-Y geri sekme olur.
+        assert_eq!(encode("\u{19}", true), b"\x19");
+        assert_eq!(encode("y", true), b"\x19");
+        // Tek karakterlik eşleşme, PgUp'la aynı ölçüt.
+        assert!(encode_key("\u{f728}x", false).is_none());
     }
 
     #[test]
