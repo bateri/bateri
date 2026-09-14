@@ -249,4 +249,4 @@ kaydırmaz.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (15 bulgu; DECSET 1007 waive önerisi notlarda)
 - [x] `/audit` çalıştırıldı, bulgular giderildi (7/8/10 ajanla; 8'in bilinen sınırı notlarda)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: 6a7a92d
