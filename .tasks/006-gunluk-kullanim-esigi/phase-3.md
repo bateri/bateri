@@ -202,6 +202,22 @@ kaydırmaz.
     `CLAUDE.md`'nin `bt-shell` satırı da fareyi saymıyor — çelişki değil
     eksik ve phase-1'den beri öyle.
 
+- **Orkestratör kararları (2026-09-14).**
+  - sadakat: makas yok — `git show --stat 6a7a92d` (`bt-core` `session.rs`,
+    `bt-shell` `keys.rs`/`view.rs`/`lib.rs`, `phase-3.md`, `plan.md`)
+    checklist'le örtüşüyor; `241b283` yalnız hash damgası.
+  - Sapma (girdide dibe dönüş) ve düz PgUp/PgDn'in `\e[5~`/`\e[6~`
+    göndermesi **kabul**: R3'le çelişmiyor, `TERM` değişmedi; plan.md'nin
+    Yaklaşım/Gereksinimler'i oynamadı.
+  - WAIVE (DECSET 1007) **kabul**: R3.3 ve Karar 4 yürürlükte kalıyor. Ama
+    bedeli kullanıcıya görünür (`less`, `man`, `git log` tekerlekle
+    kaydırılmıyor) ve kararı değiştirmek gereksinim değişikliği → kullanıcıya
+    ayrı soru olarak sunuldu; taslak yukarıda hazır.
+  - Bilinen sınır (geçmişe kaydırılmış pencerede akan çıktı değişiklik
+    göstermeyen kare ister) **kabul**: boşta değil, çıktı akarken; kaydırmayla
+    görünür oldu, getirilmedi. Kapanışta `docs/YOL-HARITASI.md` → "Sete
+    bağlanmamış borçlar"a taşınır (pencereye duyarlı hasar).
+
 ## Yayın Etkisi
 
 - Tekerlek/trackpad ve Shift+PgUp artık görünen pencereyi geçmişe kaydırır;
