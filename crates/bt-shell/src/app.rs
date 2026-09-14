@@ -33,28 +33,39 @@ const SCROLLBACK: usize = 10_000;
 /// Boşta sıfır karenin bekçisi: [`Workload::Smoke`] yükünde pencere ilk
 /// çizimden sonra ~`run_seconds` saniye boşta duruyor.
 ///
-/// **Sayı yeniden ölçüldü ve büyüdü; eski dayanağı çürüktü.** Önceki `2`,
-/// "sistem display link'i askıya alıyor, tavan ~3 kare" saptamasına
-/// dayanıyordu. O saptama 005 phase-2b'de çürüdü: aynı pencere durumunda
-/// [`Workload::Load`] beş saniyede `kare=594` üretiyor, yani **tavan yok** —
-/// ölçülen şey tavan değil, kapanış kilitlenmesiyle bozulmuş bir koşuydu.
+/// **Sayı iki kez ölçüldü; ikincisi görünür pencerede ve onu değiştirmedi.**
+/// Koşu tabloları, ortam ve yöntem `docs/OLCUMLER.md` → `## Boşta kare`'de;
+/// burada yalnız sınırı doğuran kutuplar ve türetme duruyor.
 ///
-/// Bugünkü iki kutup **ölçüldü** (2026-09-12, debug, bu makine):
+/// - **005 phase-3 (2026-09-12, debug, bundle'sız süreç):** `2` → `8`. Eski
+///   `2`'nin dayanağı ("sistem display link'i askıya alıyor, tavan ~3 kare")
+///   005 phase-2b'de çürüdü: [`Workload::Load`] aynı pencere durumunda beş
+///   saniyede `kare=594` üretti, yani ölçülen şey tavan değil kapanış
+///   kilitlenmesiyle bozulmuş bir koşuydu. Üstelik `2` **doğru bir build'de
+///   kırmızı düştü** (beş saniyelik sağlıklı koşu `kare=4`). Kutuplar:
+///   sağlıklı en çok `4`, bozuk en az `49`.
+/// - **006 phase-5 (2026-09-15, debug + release paket; yoklanan iki koşuda
+///   pencere ekranda ve önde):** sağlıklı elli bir koşunun en yükseği `2`, bozuk altı koşunun en
+///   düşüğü `353`. Görünür pencere meşru kare sayısını **artırmadı**; bozuk
+///   koşuyu ise tam tazeleme hızına taşıdı.
 ///
-/// - **Sağlıklı:** otuz bir koşu (3 sn ×18, 5 sn ×11, 10 sn ×2; ikisi
-///   `BT_FRAME_STATS=1` ile) → `kare` **1 veya 2**; otuz birde **bir** kez
-///   `4`. Süreyle artmıyor: on saniyelik koşu da `2`.
-/// - **Bozuk:** `needs_update`'in sonuna koşulsuz bir `wake()` konunca
-///   dokuz koşu → `kare` **49–354** (3 sn'de 82–354, 5 sn'de 49–63).
+/// `8` iki ölçümün kutuplarının arasında: en yüksek sağlıklı gözlemin (`4`)
+/// iki katı, en düşük bozuk gözlemin (`49`) altıda biri. 006 boşluğu yalnız
+/// genişletti; sınırı oynatacak bir gözlem yok — düşürmek 005'in sağlıklı
+/// `4`'ünü yeniden ölçmeden geçersiz saymak olurdu.
 ///
-/// Aynı makine iki rejimde koşuyor (ölçüm yükü aynı komutla bir kez
-/// `kare=21`, bir kez `kare=597` verdi; en olası değişken pencere
-/// görünürlüğü, **doğrulanmadı**). Sınır her ikisinde de güvenli: kare
-/// akışının serbest olduğu rejimde sağlıklı duman beş koşuda **beşi de**
-/// `kare=1` bastı — boşta sıfır kare orada da çalışıyor. Payın rejime bağlı
-/// olduğu da kayda geçsin: kısılmış rejimde (ölçüm yükü 5 sn'de `kare=21`,
-/// yani ~4 Hz) bozuk bir üç saniyelik duman ~12 kare eder, yani `8`'in
-/// **1,5 katı** — sınırı buradan yükseltmemenin sebebi bu.
+/// **Kapıya bağlanan profil debug**, çünkü gözetimsiz koşan tek bağlam
+/// `make duman` ve o debug derliyor. Release paketi de aynı sınıra tabi (kapı
+/// profilden bağımsız) ve dağılımı ayrı ölçüldü; aynı sayı ikisini de taşıyor.
+///
+/// Sınır, bu makinenin iki rejiminde de güvenli ama pay rejime bağlı.
+/// Kısılmış rejimde (005: ölçüm yükü 5 sn'de `kare=21`, yani ~4 Hz) bozuk bir
+/// üç saniyelik duman ~12 kare eder, `8`'in **1,5 katı** — sınırı buradan
+/// yükseltmemenin sebebi bu. 006'nın görünür penceresinde kısılma görülmedi.
+/// Aynı binary'nin ölçüm yükünde iki rejim vermesinin (bir koşuda `kare=21`,
+/// bir koşuda `kare=597`) en olası değişkeni pencere görünürlüğü ama bu
+/// **doğrulanmadı**: 006 duman yükünde pencereyi ekranda gördü, ölçüm yükünü
+/// koşmadı.
 ///
 /// **Sınır büyürken kapının algılama tabanı da yükseldi** ve bunun bedeli
 /// bugün değil sonra ödenecek. Kapı `n > limit`'te ateşliyor, yani yakalamak
@@ -69,30 +80,23 @@ const SCROLLBACK: usize = 10_000;
 /// eşik verebilir, ama o eşik **ölçülmedi**.
 ///
 /// **Sağlıklı koşudaki 1↔2 oynamasının mekanizması ölçülmedi.** Kare talebi
-/// (`istek=`) o koşularda **sabit** kaldı (2–3), yani fazladan kare fazladan
-/// **talepten** gelmiyor — geometri/örtülme kancaları olsaydı `istek` de
-/// artardı. Geriye taleplerin birleşip birleşmemesi kalıyor (açılış karesi
-/// shell'in ilk baytlarından önce çizildiyse ikinci bir kare gerekir) ama bu
-/// bir **hipotez**, ölçüm değil.
+/// (`istek=`) iki ölçümde de **sabit** kaldı (2–3), yani fazladan kare
+/// fazladan **talepten** gelmiyor — geometri/örtülme kancaları olsaydı
+/// `istek` de artardı. 006'da oynama profile göre ayrıştı (debug çoğunlukla
+/// `1`, release paket çoğunlukla `2`) ve talep yine ayrışmadı. Geriye
+/// taleplerin birleşip birleşmemesi kalıyor (açılış karesi shell'in ilk
+/// baytlarından önce çizildiyse ikinci bir kare gerekir; profil farkı onu
+/// `acilis=` ile sınayabilir, sınanmadı) ama bu bir **hipotez**, ölçüm değil.
 ///
-/// Oynama **bu değişikliğin getirdiği bir şey değil**: aynı on beş koşu
-/// değiştirilmemiş `854f027` üstünde de koşuldu (`git stash`) ve aynı
-/// dağılımı verdi — 3 sn'de sekiz kez `2`, iki kez `1`; 5 sn'de üç kez `1`,
-/// iki kez `2`. Yani `2` sınırı sağlıklı koşuların **çoğunun tam üstünde**
-/// duruyordu.
+/// **Kapı yalnız `BT_RUN_SECONDS` yolunda değerlendiriliyor**
+/// ([`AppDelegate::report_and_exit`]). Gözetimsiz koşan tek bağlamı
+/// `make duman`; paketten aynı ortamla açılan koşu da aynı sınıra tabi (006'nın
+/// bozuk paket koşuları onu ateşledi). Etkileşimli koşu bu sınırı hiç
+/// değerlendirmiyor.
 ///
-/// `8` bu iki kutbun arasında: en yüksek sağlıklı gözlemin (`4`) **iki katı**,
-/// en düşük bozuk gözlemin (`49`) **altıda biri**. Eski `2` bu boşluğun
-/// sağlıklı ucuna sıkışmıştı ve **doğru bir build'de kırmızı düştüğü
-/// ölçüldü** (5 saniyelik bir koşu `kare=4` bastı) — yani kapı, koruduğu
-/// şeyi değil makinenin o anki gürültüsünü ölçüyordu.
-///
-/// **Kapının koştuğu tek bağlam `make duman`'dır** —
-/// [`AppDelegate::report_and_exit`] yalnız `BT_RUN_SECONDS` yolunda çalışıyor,
-/// yani etkileşimli koşu bu sınırı hiç değerlendirmiyor.
-///
-/// **`.app` paketi (`make kur`) gelince yeniden ölç:** görünür bir pencerede
-/// meşru kare sayısı artabilir ve sınır yükselmelidir.
+/// **Ne zaman yeniden ölçülür:** kare yolunu ya da pencerenin görünürlüğünü
+/// değiştiren bir set geldiğinde (hareket/motion, sekme). Tarif
+/// `docs/OLCUMLER.md` → `## Nasıl yeniden ölçülür`.
 ///
 /// **Bilinen yanlış pozitif (duruyor):** `DisplayLink::resize` koşulsuz kare
 /// istiyor, yani koşu sırasında pencereyi sürüklemek meşru kareler üretir ve
@@ -422,8 +426,8 @@ struct Counters {
 ///
 /// # Ölçümün dürüst sınırları
 ///
-/// Bu liste `docs/OLCUMLER.md` → `## Yöntem`'in **kaynağıdır**: o dosya henüz
-/// yok (ilk `/measure` kuracak, 005 R7.3) ve kurulurken buradan taşınır.
+/// Bu liste `docs/OLCUMLER.md` → `## Yöntem`'in **kaynağıdır** ve kare süresi
+/// ile açılışın ilk `/measure`'ında oraya taşınır.
 /// Buradaki koşu sayıları da o taşımaya kadar geçici: sayının asıl sahibi o
 /// dosya, burası **emanetçi**. Hepsi 2026-09-12, `profil=debug`, tek makine.
 ///
