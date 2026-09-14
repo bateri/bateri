@@ -202,6 +202,27 @@ düzelir.
   - `make test-yaris` gerekmedi: PTY/render/paylaşılan duruma dokunulmadı,
     yalnız açılışta bir kez koşan saf karar. `make shader` gerekmedi.
 
+
+- **Orkestratör kararları (2026-09-15).**
+  - sadakat: makas yok — `git show --stat aa6b3a0` (`bt-shell` `child.rs`,
+    `CLAUDE.md`, `phase-4c.md`, `plan.md`) checklist'le örtüşüyor;
+    `d5dd6ad` yalnız hash damgası.
+  - Sapma (son çare `LC_CTYPE=UTF-8` tutulmadı) **kabul**: kılavuz serbest
+    bırakmıştı.
+  - WAIVE (4) (`C.UTF-8`'i önce denemek) **kabul**: yedeğin değeri kullanıcı
+    kararı; `C.UTF-8`'in macOS 14'te varlığı da doğrulanmadı.
+  - WAIVE (5) (`en-GB` + `TR` → `en_US`, etiketin bölgesi atılıyor) **kabul**,
+    kapanışta `docs/YOL-HARITASI.md` borçlarına taşınır.
+  - `make duman` `glif=7/8/9` gürültüsü: değişen kol bu ortamda koşmuyor ve
+    HEAD tabanı `glif=6` — 4c'ye bağlanmadı. Ajanın hipotezi (öne çıkan
+    pencereye düşen tuş vuruşları) kanıtsız; o sırada kullanıcı paketi
+    açmış ve deniyordu, hipotezle uyumlu. phase-5 checklist'ine devredildi.
+  - Kapsam dışı sekiz bulgu (1, 2, 3, 6, 7, 8, 9, 10) — önceki phase'lerin
+    kodu, doğrulanmadı: (6) phase-2'de, (7) phase-3'te zaten waive'li,
+    **aynen kalır**; (10) kapanışın indeks adımında düzelir; (1), (2), (3),
+    (8), (9) **kullanıcıya soruldu** (phase-5'ten önce küçük bir phase mı,
+    borç mu).
+
 ## Yayın Etkisi
 
 - **Davranış değişikliği — yalnız düşüş kolu.** Ortamda yerel yokken ve

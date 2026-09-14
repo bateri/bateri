@@ -53,6 +53,7 @@ sözleşme satırı ve proje.md'deki kapı paragrafı güncellenir.
       (phase-4'te `open`'la açılan bir probe kabuğun değişkenlerini gördü),
       yani `env -u` hermetikliği burada da şart; (4) `--stdout` yolu mutlak
       olmalı — LaunchServices süreci `cwd=/` ile başlatıyor
+- [ ] **Devir (phase-4c): `make duman` `glif=` gürültüsü.** phase-4c'nin ilk üç koşusu `glif=7/9/8` (`kare=3/4/3`, `yuva=14/16/15`) verdi, HEAD tabanı `glif=6`. Hipotez (kanıtsız): koşu sırasında öne çıkan pencereye kullanıcının tuş vuruşu düşüyor. Ölçüm koşuları kullanıcı bilgisayarı kullanmıyorken yapılır; `glif=`/`yuva=` dağılımı da kaydedilir ve 6'dan sapan koşu **ayıklanmadan önce** nedeni yazılır — aynı gürültü `kare=`'yi de oynatıyorsa sınırın türetmesine karışır
 - [ ] Görünür pencerede sağlıklı + bozuk koşu dağılımı ölçüldü
 - [ ] Sayı ayrı commit + gerekçeyle donduruldu (kod değişikliği yok)
 - [ ] Sabit doc'u + `CLAUDE.md` sözleşme satırı + proje.md kapı paragrafı güncel
