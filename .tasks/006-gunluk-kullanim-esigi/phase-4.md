@@ -230,4 +230,4 @@ fazına **içerik denetimi** konur: Info.plist + lisans dosyası varlığı.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (14 bulgu; `cwd=/` + `LANG` WAIVE önerisi notlarda)
 - [x] `/audit` çalıştırıldı, bulgular giderildi (bulgu yok; ilgisiz mercekler notlarda)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: dd46e85
