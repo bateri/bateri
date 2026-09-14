@@ -212,7 +212,7 @@ toparlanır, `cargo clean` gerekmez.
 - [x] `paste()` + 2004 sorgulu sarma; `session.write`'a ham yapıştırma yok
 - [x] Test: 2004 setken sarma, değilken ham yazma (`paste_wraps…`, `paste_writes_raw…`; üstüne `paste_empty…` ve `paste_strips_escape_and_etx…`)
 - [x] Test: Cmd-C seçili metni panoya yazıyor (canlı panoda round-trip; başsızda atlanır — `clipboard::tests`)
-- [ ] `[elle]` göz kontrolü: kopyala-yapıştır turu (terminal içi + dış uygulama) — **kullanıcının işi**
+- [x] `[elle]` göz kontrolü: kopyala-yapıştır turu (terminal içi + dış uygulama) — kullanıcı 2026-09-14'te `097f155` üstünde denedi ("araba"/"raba" turu): "denedim oluyor doğru şekilde"
 - [x] Doğrulama geçti — **kapı geri gelince son hâl üzerinde koşuldu**: `make hepsi` exit 0, `make test-yaris` exit 0, `make duman` → `kare=2 hucre=8 glif=6 kural=15 kapanis=clean pipeline=ok`. Engel ortamsaldı (Xcode lisansı + eksik Metal Toolchain), kullanıcı çözdü; tablo ve gerekçe → `## Doğrulama Durumu`
 - [x] `/simplify` çalıştırıldı, bulgular uygulandı
 - [x] `/code-review` çalıştırıldı, bulgular giderildi

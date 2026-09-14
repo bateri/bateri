@@ -119,7 +119,7 @@ imleç tersine çevirme, `session.rs:768-773`).
 - [x] Vurgu `cell_bg` borusundan; yeni shader/uniform yok
 - [x] Test: seçim aralığı metin çıkarımı (sarma + spacer atlama)
 - [x] Test: seçim değişimi kirli bayrağını dikiyor
-- [ ] `[elle]` göz kontrolü: fareyle seç, ters video vurguyu gör
+- [x] `[elle]` göz kontrolü: fareyle seç, ters video vurguyu gör — kullanıcı 2026-09-14'te `097f155` üstünde denedi: "denedim oluyor doğru şekilde"
 - [x] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu** — pencere davranışı değişti)
 - [x] `/simplify` çalıştırıldı, bulgular uygulandı
 - [x] `/code-review` çalıştırıldı, bulgular giderildi
