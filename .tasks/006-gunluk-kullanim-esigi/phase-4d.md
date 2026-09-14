@@ -308,6 +308,22 @@ kodlaması orada toplandıysa aynı yere).
   - `make shader`, `make kur`, `make terminfo` gerekmedi (`.metal`, bundle,
     terminfo el değmedi).
 
+
+- **Orkestratör kararları (2026-09-15).**
+  - sadakat: makas yok — `git show --stat 3907585` (`bt-core` `session.rs`,
+    `bt-shell` `keys.rs`, `phase-4d.md`, `plan.md`) checklist'le örtüşüyor;
+    `4817155` yalnız hash damgası.
+  - Üç bulgu da HEAD'de kırmızı düşerek **doğrulandı**; hiçbiri düşmedi.
+  - Sapmalar (ortak `clear_selection_locked`; `contains_cell` yorumunun
+    düzeltilmesi; boş yapıştırmanın seçime dokunmaması; tuş dizilerinin
+    `keys.rs`'te kalması) **kabul**: R1.4, R1.5, R7 oynamadı. Boş yapıştırma
+    alacritty'den ayrılıyor ama bizde boş girdi pencereye de dokunmuyor —
+    tutarlı.
+  - WAIVE (1) (Ctrl+Shift+Tab `0x19`) **kabul**, kapanışta Home/End ile
+    birlikte klavye borcu olarak yol haritasına.
+  - WAIVE (4) (uygulama seçili hücreyi yeniden yazınca seçim düşmüyor)
+    **kabul**: alacritty de düşürmüyor; borç değil, not.
+
 ## Yayın Etkisi
 
 - **Davranış değişikliği (kullanıcıya görünen):**
