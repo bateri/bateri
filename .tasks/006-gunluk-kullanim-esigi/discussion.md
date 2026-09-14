@@ -231,3 +231,11 @@ soruldu, üçünde de öneri seçildi:
   çağrılmaz). Politika `bt-shell`'de, `bt-core` yalnız geçirir.
   `objc2-foundation`'a `NSLocale` feature'ı eklenir — yeni crate değil,
   `Cargo.lock` oynamamalı.
+- **Yedek değişti (2026-09-15, kullanıcı kararı): `LANG=en_US.UTF-8`.**
+  phase-4b alacritty'nin `LC_CTYPE=UTF-8` düşüşünü uyguladı (orkestratörün
+  kılavuz tercihi, kullanıcıya sorulmamıştı); `/code-review` SSH bedelini
+  buldu (`SendEnv LANG LC_*` → Linux'ta `setlocale` uyarısı) ve bu makine tam
+  o kolda (`en` + `TR`). Kullanıcı önerilen yedeği seçti: bugünkü terminalinin
+  verdiği değer, Linux'ta çoğunlukla kurulu. Reddedilen: *"`LC_CTYPE=UTF-8`
+  kalsın"*. Uygulaması phase-4c; kullanıcının göz kontrollerinden sonra,
+  phase-5'ten önce.

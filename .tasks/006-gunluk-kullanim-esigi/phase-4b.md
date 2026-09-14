@@ -334,7 +334,8 @@ listesi `NSLocale`'i kapsamıyorsa düzelt.
   - WAIVE (10) (boş olmayan her yerel değişkeni tanımlı sayma) **kabul**:
     kılavuzun kendi kuralı.
   - WAIVE (2) (düşüş kolunun `LC_CTYPE=UTF-8`'i SSH ile Linux'a taşınınca
-    `setlocale` uyarısı) **kullanıcıya soruldu**: bu makine tam o kolda
+    `setlocale` uyarısı) *karar verildi (2026-09-15): yedek
+    `LANG=en_US.UTF-8` → `phase-4c.md`.* İlk hâli — **kullanıcıya soruldu**: bu makine tam o kolda
     (`en` + `TR`), ve kullanıcının bugünkü terminali çocuğa
     `LANG=en_US.UTF-8` veriyor (ajanın `cargo run` yoklaması). Düşüş biçimi
     kullanıcının seçtiği şey değil, orkestratörün kılavuza koyduğu alacritty
