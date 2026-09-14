@@ -239,3 +239,19 @@ soruldu, üçünde de öneri seçildi:
   verdiği değer, Linux'ta çoğunlukla kurulu. Reddedilen: *"`LC_CTYPE=UTF-8`
   kalsın"*. Uygulaması phase-4c; kullanıcının göz kontrollerinden sonra,
   phase-5'ten önce.
+
+## Kapsam eki (2026-09-15, kullanıcı kararı)
+
+phase-4c'nin `/code-review`'u 006'nın yayımlanmamış bütün commit'lerine baktı
+ve önceki phase'lerin kodunda sekiz **doğrulanmamış** bulgu bıraktı
+(`phase-4c.md`). Orkestratör üçünü kapattı: yapıştırmada `\r\n` dönüşümü
+(phase-2 waive'i) ve tuş başına `Term` kilidi (phase-3 kararı) aynen kalır,
+indeks satırı kapanışta düzelir. Kalan beşi kullanıcıya soruldu:
+
+- **Seçilen (phase-4d):** girdide seçimin temizlenmesi, ters videoda seçimin
+  görünmesi, Shift+Tab ve ileri silme. Gerekçe: üçü de günlük kullanımda
+  görünür ve eşiğin kendi alanında (seçim, klavye). Her biri önce kırmızı
+  sınamayla doğrulanır; yanlış çıkan düşer.
+- **Seçilmeyen → yol haritası borcu:** `make kur`'un boş hedef dizini
+  denetimi (bugün zararsız) ve pano sınamalarının geçici panoları
+  bırakması (kullanıcıya görünmez).

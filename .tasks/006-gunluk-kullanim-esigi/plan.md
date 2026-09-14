@@ -18,6 +18,10 @@ istemez; indirilen kopyadaki onayın tek seferlik olduğu doğrulanmadı
     yoksa seçim hiç boyanmaz (`session.rs:803`)
   - **R1.3** — Vurgu mevcut `cell_bg` borusundan geçiyor; yeni
     shader/uniform yok (emsal: imleç tersine çevirme, `session.rs:768-773`)
+  - **R1.4** — Kullanıcı girdisi (yazma, yapıştırma) seçimi temizler.
+    *2026-09-15'te eklendi — `discussion.md` → Kapsam eki*
+  - **R1.5** — Seçim ters videolu hücrede de görünür (ters videoyu çevirir).
+    *2026-09-15'te eklendi*
 - **R2** — Cmd-C kopyalar, Cmd-V yapıştırır
   - **R2.1** — `keyDown:`'da iki tuşluk dal (Karar 2 (a)); diğer Command
     tuşları yutulmaya devam eder, menü günü (00X) dal silinir
@@ -62,6 +66,8 @@ istemez; indirilen kopyadaki onayın tek seferlik olduğu doğrulanmadı
     seçim olmadan pano doğrulanamaz, o yüzden sıra bağlayıcıdır
   - **R6.2** — Her faza `[elle]` göz kontrolü (pano/seçim/kaydırma
     `make duman` reçetesinde yok)
+- **R7** — Günlük kullanımda eksik iki tuş: Shift+Tab `\e[Z`, ileri silme
+  `\e[3~`. *2026-09-15'te eklendi — `discussion.md` → Kapsam eki*
 
 ## Yaklaşım
 
@@ -83,6 +89,9 @@ istemez; indirilen kopyadaki onayın tek seferlik olduğu doğrulanmadı
 4c. **Phase-4c `bt-shell`** — yerel yedeği `LANG=en_US.UTF-8` (SSH'ta
    `setlocale` uyarısı vermesin). Kullanıcının göz kontrollerinden sonra,
    phase-5'ten önce.
+4d. **Phase-4d `bt-core` + `bt-shell`** — rötuş: girdide seçim temizlenir,
+   seçim ters videoyu çevirir, Shift+Tab ve ileri silme. phase-4c'nin
+   `/code-review` bulgularından, önce doğrulanarak; phase-5'ten önce.
 5. **Phase-5 `bt-shell`** — `IDLE_FRAME_LIMIT` yeniden ölçümü: görünür
    pencerede ölç, ayrı commit + gerekçeyle dondur. Kod değişmez; bu phase
    belge + sayı fazıdır.
@@ -129,4 +138,5 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 | phase-4 | ✅ | dd46e85 | `[elle]` göz kontrolü tamam (2026-09-15); WAIVE önerisi: Dock açılışında `cwd=/` + `LANG` (`phase-4.md`) |
 | phase-4b | ✅ | 87034aa | `[elle]` göz kontrolü tamam (2026-09-15) (gerçek Dock açılışı, Türkçe giriş); paketli açılış yoklamayla kanıtlandı (`phase-4b.md`) |
 | phase-4c | ✅ | aa6b3a0 | Düşüş `LANG=en_US.UTF-8`; paketli yoklamada bu makinenin (`en` + `TR`) kabuğu `LANG=en_US.UTF-8` görüyor; WAIVE önerileri: `/code-review` (4) `C.UTF-8`, (5) dil etiketinin bölgesi (`phase-4c.md`) |
-| phase-5 | | | phase-4c'den sonra; pencere açıp kapatır — kullanıcı bilgisayarı kullanmıyorken |
+| phase-4d | | |
+| phase-5 | | | phase-4d'den sonra; pencere açıp kapatır — kullanıcı bilgisayarı kullanmıyorken |
