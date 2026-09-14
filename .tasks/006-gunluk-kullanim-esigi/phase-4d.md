@@ -363,4 +363,4 @@ kodlaması orada toplandıysa aynı yere).
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (WAIVE önerisi: (1) Ctrl+Shift+Tab; atlanan (4), (8) gerekçeli)
 - [x] `/audit` çalıştırıldı, bulgular giderildi
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: 3907585
