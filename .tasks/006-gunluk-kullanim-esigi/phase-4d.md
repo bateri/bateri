@@ -373,7 +373,7 @@ kodlaması orada toplandıysa aynı yere).
 - [x] Test: seçim + tekerlek raporu/yanıt → seçim duruyor (yanıt yarısı yapı gereği kızaramaz — Uygulama Notları → `/code-review` (6))
 - [x] Test: seçili ters videolu hücre seçilmemiş ters videolu hücreden farklı renkte (normal renkler)
 - [x] Test: `encode_key` Shift+Tab ve `U+F728` dizileri
-- [ ] `[elle]` göz kontrolü: bir kelime seç, bir harf yaz → vurgu kalkıyor; `printf '\e[7mters yazı\e[0m\n'` çıktısını seç → vurgu görünüyor; zsh'ta `ls ` + Tab Tab ile açılan menüde Shift+Tab geri gidiyor; satır ortasında fn+Backspace imlecin sağındaki harfi siliyor
+- [x] `[elle]` göz kontrolü: bir kelime seç, bir harf yaz → vurgu kalkıyor; `printf '\e[7mters yazı\e[0m\n'` çıktısını seç → vurgu görünüyor; zsh'ta `ls ` + Tab Tab ile açılan menüde Shift+Tab geri gidiyor; satır ortasında fn+Backspace imlecin sağındaki harfi siliyor — kullanıcı 2026-09-15'te `make kur` paketi (`3907585` sonrası) üstünde denedi: "hepsi çalışıyor harika"
 - [x] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu**; kilit yolu değişirse `make test-yaris`)
 - [x] `/simplify` çalıştırıldı, bulgular uygulandı
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (WAIVE önerisi: (1) Ctrl+Shift+Tab; atlanan (4), (8) gerekçeli)
