@@ -7,7 +7,7 @@
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use bt_core::Session;
+use bt_core::{CellHalf, SelectionPoint, Session};
 use bt_gpu::CellMetrics;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -17,38 +17,77 @@ use objc2_foundation::{NSObjectProtocol, NSRect};
 use crate::clipboard;
 use crate::keys::encode_key;
 
-/// Fare noktası → grid hücresi. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
+/// Fare noktası → seçim ucu. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
 ///
 /// `view_px` view koordinatında (nokta), `cell_px` fiziksel piksel, `scale`
 /// backing ölçeği: ölçü `bt-gpu`'dan fiziksel geldiği için fare de önce
 /// fiziksel piksele çıkar, sonra bölünür.
 ///
-/// Kenar davranışı asimetrik ve bilerek: sol/üst dışarısı negatif ara değerden
-/// **0'a kırpılır** (sürükleme grid'in o yanına yapışır), sağ/alt dışarısı
-/// `None` ile **yutulur** (olmayan hücreyi seçmek `Some("")` üretip phase-2'nin
-/// kopyasını boşaltırdı). Kırpma `to_range`'ın kırpmasıyla aynı yönde, yani
-/// iki katman aynı kenarda aynı kararı veriyor.
+/// **Adı "hücre" kaldı, dönen şey hücre + yarısı**: yarı hücrenin içindeki
+/// yerin ikinci yarısı, ayrı bir soru değil — `col` ile aynı bölmeden çıkar.
+/// Çağrı yerlerinin hepsi (çapa, sürükleme, olay) zaten "farenin altındaki
+/// hücre" diyor; ikinci bir ad (`point_to_selection_point`) yalnız churn
+/// olurdu.
 ///
-/// Taban yuvarlama (`as u16` kesmesi): farenin hücrenin neresinde olduğu değil
-/// **hangi** hücrede olduğu soruluyor ve `split_into_grid` ile aynı aritmetik.
-/// Negatif ara değer `as u16`'da doygun (0'a iner) — sarmaz, çünkü kaynak
-/// `f64` ve `f64 as u16` negatifi 0'a doyurur.
+/// Kenar dışı her nokta **en yakın hücreye yapışır**: sürükleme grid'in hangi
+/// yanından çıkarsa çıksın o kenara tutunur. Sağa taşan nokta son sütunun
+/// **sağ** yarısıdır — satır sonuna sürükleyen fare grid'in sağındaki
+/// kullanılmayan şeride (`split_into_grid` sütunu aşağı yuvarlıyor) geçince
+/// son harf seçimde kalmalı. `None` yalnız sıfır sütunlu/satırlı grid içindir
+/// (simge durumundaki pencere): yapışacak hücre yok.
+///
+/// Taban yuvarlama (`as u16` kesmesi): farenin **hangi** hücrede olduğu
+/// soruluyor ve `split_into_grid` ile aynı aritmetik. Sol/üst yapışması ayrı
+/// bir kırpma değil, dilin iki kuralı: `f64 as u16` negatifi 0'a **doyurur**
+/// (sarmaz), ve `f64`'ün `%`'i bölünenin işaretini korur — negatif x'in artığı
+/// negatiftir, yani her zaman yarı hücreden küçük ve **sol** yarı. Grid'in
+/// solundan başlayan sürükleme bu yüzden 0. hücreyi seçime katar;
+/// `rem_euclid`'e geçen bir "düzeltme" artığı pozitife çevirip onu dışarıda
+/// bırakırdı (`dragging_left_of_the_grid_clamps_to_the_left_half` bekçisi).
 pub(crate) fn point_to_cell(
     view_px: (f64, f64),
     cell_px: (u16, u16),
     scale: f64,
     cols: u16,
     rows: u16,
-) -> Option<(u16, u16)> {
+) -> Option<SelectionPoint> {
+    if cols == 0 || rows == 0 {
+        return None;
+    }
     let (cell_w, cell_h) = (f64::from(cell_px.0), f64::from(cell_px.1));
     // View `isFlipped`, yani y grid yönünde (üstten) geliyor: tersine çevirme
-    // yok. `rows` yalnız dışarılık kapısında kullanılıyor — yüksekliği view
-    // değil grid söylüyor ki pencere kenar boşluğundaki tıklama yutulsun.
-    let col = (view_px.0 * scale / cell_w) as u16;
-    let row = (view_px.1 * scale / cell_h) as u16;
-    // Sağ/alt: `cols`/`rows` `u16`'nın tamamını tutabilir, o yüzden `col < cols`
-    // kapısı taşan bir değeri kaçırmaz — kapıdan geçen her değer grid'dedir.
-    (col < cols && row < rows).then_some((col, row))
+    // yok. Grid'in boyunu view değil `cols`/`rows` söylüyor — pencere kenar
+    // boşluğundaki nokta son hücreye yapışsın.
+    let x = view_px.0 * scale;
+    let row = ((view_px.1 * scale / cell_h) as u16).min(rows - 1);
+    let col = (x / cell_w) as u16;
+    let (col, half) = if col < cols {
+        (col, cell_half(x, cell_w))
+    } else {
+        (cols - 1, CellHalf::Right)
+    };
+    Some(SelectionPoint { col, row, half })
+}
+
+/// Hücre içi x'in yarısı — seçim sınırını çizen tek girdi.
+///
+/// Yarı `col`'dan **türetilemez**: `col` tam sayıya kesiyor ve kesme artığı
+/// atıyor, yani hücrenin neresinde olduğumuz bilgisi orada yok. Kaynak
+/// bölmeden önceki **artıktır** (x, `cell_w`'ye göre). Negatif x'te artık da
+/// negatiftir ve sol yarıya düşer — sol kenar kuralı [`point_to_cell`]'de.
+///
+/// **Orta nokta sağ yarıya yazıldı** (`>=`): iki yarı `[0, w/2)` ve
+/// `[w/2, w)` diye tam bölüşür — hiçbir x yarısız kalmaz, hiçbiri iki yarıya
+/// birden düşmez ve kural tek karşılaştırma olur. Tam ortaya basmak (fare
+/// pikseli tam sınıra düşerse) hücreyi başlangıç ucunda **dışarıda**, bitiş
+/// ucunda **içeride** bırakır — sağ yarının iki uçtaki anlamı bu
+/// ([`CellHalf`]).
+fn cell_half(x_px: f64, cell_w: f64) -> CellHalf {
+    if x_px % cell_w >= cell_w / 2.0 {
+        CellHalf::Right
+    } else {
+        CellHalf::Left
+    }
 }
 
 pub(crate) struct ViewIvars {
@@ -59,9 +98,12 @@ pub(crate) struct ViewIvars {
     /// `applicationDidFinishLaunching`'in içinde, **run loop dönmeden**
     /// kapanıyor, yani araya hiçbir olay düşemiyor.
     session: OnceCell<Arc<Session>>,
-    /// Sürüklemenin çapası: basışın hücresi. `bt-core` aralığı tutar ama
-    /// çapayı hatırlamaz — `mouseDragged:` bunu okur.
-    anchor: std::cell::Cell<Option<(u16, u16)>>,
+    /// Sürüklemenin çapası: basışın hücresi **ve yarısı**. Yarı da saklanıyor:
+    /// sınırı o çiziyor, `bt-core` ise yalnız aralığı tutar — çapayı
+    /// hatırlamaz. Yarı kaybolsaydı (çapa yalnız hücre olsaydı) sürükleme
+    /// çapayı her olayda yeniden yorumlamak zorunda kalır, basış anındaki
+    /// yarısını kaybederdi.
+    anchor: std::cell::Cell<Option<SelectionPoint>>,
     /// Fare çevirisinin canlı girdileri: ölçü `bt-gpu`'dan, grid `bt-core`'un
     /// bildiği sayı. `OnceCell` değil `Cell<Option<…>>`, çünkü pencere boyu
     /// değişince tazeleniyor (`set_metrics`). Ayrı bir kopya gibi görünüyor
@@ -100,6 +142,9 @@ define_class!(
 
         /// Fare basıldı: seçimin çapası burada atılır ve sürükleme başlar.
         ///
+        /// Çapa **yarısıyla** saklanır: basış hücrenin hangi yarısındaysa
+        /// sınır oradan geçer, sürükleme boyunca da orada kalır.
+        ///
         /// Yalnız sol tuş (button 0): sağ/orta tık bir seçim başlatmaz —
         /// bağlam tıklaması beklenmedik bir vurgu üretirdi. Tek tıkla
         /// odaklanma değişmez — view zaten first responder; tıklama bir seçim
@@ -114,16 +159,19 @@ define_class!(
                 return;
             };
             // İmleç çapa hücresinden sürüklenir: ters yöne ilk hareket seçimi
-            // boşaltmamalı, fare ucundan büyümeli.
+            // boşaltmamalı, fare ucundan büyümeli. İki uç **aynı** olduğu
+            // sürece seçim boştur — yani sürüklemesiz tık hiçbir şey seçmez ve
+            // Cmd-C panoya dokunmaz (`selection_text()` `None`).
             session.set_selection(anchor, anchor);
         }
 
-        /// Sürükleme: çapa fare basışının hücresi, aktif uç farenin şimdiki
-        /// yeri. Çapa `Session`'dan okunmuyor — `bt-core` yalnız aralığı tutar,
-        /// çapayı hatırlamaz. İki olay da aynı `set_selection`'ı çağırıyor;
-        /// `mouseDown:` iki ucu da çapaya veriyor, burası aktif ucu fareye.
-        /// Aynı hücrede kalan olaylar `set_selection`'ın eşitlik kapısında
-        /// eleniyor — kare istenmez.
+        /// Sürükleme: çapa fare basışının hücresi **ve yarısı**, aktif uç
+        /// farenin şimdiki yeri. Çapa `Session`'dan okunmuyor — `bt-core`
+        /// yalnız aralığı tutar, çapayı hatırlamaz. İki olay da aynı
+        /// `set_selection`'ı çağırıyor; `mouseDown:` iki ucu da çapaya
+        /// veriyor, burası aktif ucu fareye. Çizilen aralığı değiştirmeyen
+        /// olaylar (aynı yarıda kalmak, hücre sınırını geçmek)
+        /// `set_selection`'ın aralık kapısında eleniyor — kare istenmez.
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
             let Some((session, anchor, cell)) = self.drag_cells(event) else {
@@ -132,9 +180,10 @@ define_class!(
             session.set_selection(anchor, cell);
         }
 
-        /// Tuş bırakıldı: çapa düşer. Çapa grid hücresi cinsinden saklanıyor;
-        /// bırakma ile sonraki basış arasında kaydırma olursa bayat çapayla
-        /// sürükleme hiç başlamıyor — `drag_cells` çapasız olayı yutuyor.
+        /// Tuş bırakıldı: çapa düşer. Çapa pencere hücresi (ve yarısı)
+        /// cinsinden saklanıyor; bırakma ile sonraki basış arasında kaydırma
+        /// olursa bayat çapayla sürükleme hiç başlamıyor — `drag_cells`
+        /// çapasız olayı yutuyor.
         /// Kaydırma **sürerken** (basılı) çapa kayması phase-3'ün işi:
         /// `set_selection` aralığı grid mutlağında tutuyor ve alacritty
         /// döndürmesi onu içerikle taşıyor, ama view'daki çapa viewport
@@ -209,19 +258,20 @@ impl BateriView {
             .set(Some((grid.cell, (grid.cols, grid.rows))));
     }
 
-    /// Oturum + olayın altındaki hücre. Üçü (`session`, ölçü, grid) birlikte
-    /// yoksa `None`: yarım bilgiyle seçim başlatılamaz.
-    fn session_cell(&self, event: &NSEvent) -> Option<(Arc<Session>, (u16, u16))> {
+    /// Oturum + olayın altındaki uç (hücre ve yarısı). Üçü (`session`, ölçü,
+    /// grid) birlikte yoksa `None`: yarım bilgiyle seçim başlatılamaz.
+    fn session_cell(&self, event: &NSEvent) -> Option<(Arc<Session>, SelectionPoint)> {
         let session = Arc::clone(self.ivars().session.get()?);
         let cell = self.event_cell(event)?;
         Some((session, cell))
     }
 
-    /// Olayın altındaki hücre + bağlı oturum; çapayı da kurar.
-    fn cell_under(&self, event: &NSEvent) -> Option<(Arc<Session>, (u16, u16))> {
+    /// Olayın altındaki uç + bağlı oturum; çapayı da kurar.
+    fn cell_under(&self, event: &NSEvent) -> Option<(Arc<Session>, SelectionPoint)> {
         let (session, cell) = self.session_cell(event)?;
         // Çapa burada saklanıyor: sürükleme çapa + aktif uç ister, `bt-core`
-        // yalnız aralığı tutar.
+        // yalnız aralığı tutar. Yarısı da çapayla gidiyor — basış anındaki
+        // yarı, sürüklemenin bir ucunu sabitleyen şey.
         self.ivars().anchor.set(Some(cell));
         Some((session, cell))
     }
@@ -230,18 +280,21 @@ impl BateriView {
     /// sürükleme (çapa yok) yutulur — `mouseDown:`'sız `mouseDragged:` olmaz
     /// ama AppKit'in sözüne güvenilmez, tipe güvenilir.
     ///
-    /// Üçlü `#[allow]`'suz geçiyor, çünkü clippy'nin saydığı şey parantez:
-    /// dördüncü bir eleman eklenecekse o gün ayrı bir struct doğar.
-    #[allow(clippy::type_complexity)]
-    fn drag_cells(&self, event: &NSEvent) -> Option<(Arc<Session>, (u16, u16), (u16, u16))> {
+    /// Üçlü `#[allow]`'suz geçiyor: uçlar adlı tip (`SelectionPoint`), iç içe
+    /// demet değil. Dördüncü bir eleman eklenecekse o gün ayrı bir struct doğar.
+    fn drag_cells(
+        &self,
+        event: &NSEvent,
+    ) -> Option<(Arc<Session>, SelectionPoint, SelectionPoint)> {
         // `cell_under` çağrılamaz: çapayı ezerdi.
         let anchor = self.ivars().anchor.get()?;
         let (session, cell) = self.session_cell(event)?;
         Some((session, anchor, cell))
     }
 
-    /// Olay noktasını hücreye indirir; dışarısı `None` (yutulur).
-    fn event_cell(&self, event: &NSEvent) -> Option<(u16, u16)> {
+    /// Olay noktasını seçim ucuna indirir. `None` yalnız ölçü ya da pencere
+    /// henüz yokken ve grid sıfır boyutluyken — kenar dışı nokta yapışır.
+    fn event_cell(&self, event: &NSEvent) -> Option<SelectionPoint> {
         let (metrics, (cols, rows)) = self.ivars().metrics.get()?;
         let point = self.convertPoint_fromView(event.locationInWindow(), None);
         let scale = self.window()?.backingScaleFactor();
@@ -318,10 +371,20 @@ enum Shortcut {
 mod tests {
     use super::*;
 
-    /// Dört testin ortak sahnesi: 100×33 grid, 9×18 hücre, @2x.
+    /// Testlerin ortak sahnesi: 100×33 grid, 9×18 hücre, @2x.
     /// View 450×297 nokta eder.
-    fn scene(view_px: (f64, f64)) -> Option<(u16, u16)> {
+    fn scene_point(view_px: (f64, f64)) -> Option<SelectionPoint> {
         point_to_cell(view_px, (9, 18), 2.0, 100, 33)
+    }
+
+    /// Sahnenin hücresi ve yarısı ayrı okunuyor: hücre testleri hücreye, yarı
+    /// testleri yarıya baksın.
+    fn scene(view_px: (f64, f64)) -> Option<(u16, u16)> {
+        scene_point(view_px).map(|point| (point.col, point.row))
+    }
+
+    fn scene_half(view_px: (f64, f64)) -> Option<CellHalf> {
+        scene_point(view_px).map(|point| point.half)
     }
 
     #[test]
@@ -337,18 +400,91 @@ mod tests {
         // Hücre view'da 4.5×9 nokta eder; (2,1) hücresinin ortası x = 2.5,
         // y = 1.5 hücre.
         assert_eq!(scene((2.5 * 4.5, 1.5 * 9.0)), Some((2, 1)));
+        // Hücre ile yarı **aynı** çeviriden çıkıyor, ayrı sorulmuyor.
+        assert_eq!(
+            scene_point((11.0, 13.5)),
+            Some(SelectionPoint {
+                col: 2,
+                row: 1,
+                half: CellHalf::Left,
+            })
+        );
     }
 
     #[test]
-    fn outside_points_are_swallowed() {
-        // Sağ ve alt kenar dışı yutulur: olmayan hücreyi seçmek `Some("")`
-        // üretip phase-2'nin kopyasını boşaltırdı.
-        assert_eq!(scene((900.0, 100.0)), None);
-        assert_eq!(scene((100.0, 600.0)), None);
+    fn halves_split_the_cell_at_its_middle() {
+        // (2,1) hücresi view'da x ∈ [9.0, 13.5), y ∈ [9.0, 18.0) nokta; yarısı
+        // fiziksel x'te cell_w/2 = 4.5 piksel, yani view'da 2.25 nokta. Sol
+        // yarı 9.0–11.25, sağ yarı 11.25–13.5.
+        assert_eq!(scene_half((9.0, 9.0)), Some(CellHalf::Left));
+        assert_eq!(scene_half((11.0, 9.0)), Some(CellHalf::Left));
+        assert_eq!(scene_half((11.5, 9.0)), Some(CellHalf::Right));
+        assert_eq!(scene_half((13.4, 9.0)), Some(CellHalf::Right));
+        // Yarı hücreyi kaydırmıyor: dördü de (2,1) hücresinde.
+        for x in [9.0, 11.0, 11.5, 13.4] {
+            assert_eq!(scene((x, 9.0)), Some((2, 1)), "x = {x}");
+        }
+    }
+
+    #[test]
+    fn the_exact_middle_belongs_to_the_right_half() {
+        // Orta nokta **yazılı** bir karar: yarılar `[0, w/2)` ve `[w/2, w)`
+        // diye bölüşüyor, yani tam sınır sağ yarıya düşer (view'da
+        // 9.0 + 2.25 = 11.25 nokta); bir tık solu hâlâ sol yarıdır. Sağ yarı
+        // başlangıç ucunda hücreyi dışarıda, bitiş ucunda içeride bırakır.
+        assert_eq!(scene_half((11.25, 9.0)), Some(CellHalf::Right));
+        assert_eq!(scene_half((11.25 - 0.25, 9.0)), Some(CellHalf::Left));
+    }
+
+    #[test]
+    fn dragging_left_of_the_grid_clamps_to_the_left_half() {
+        // Grid'in solundaki x 0. hücrenin **sol** yarısına yapışır: `as u16`
+        // doyuruyor, `%` bölünenin işaretini koruyor (negatif artık < w/2).
+        // Artık pozitife çevrilseydi (`rem_euclid`) sağ yarıya düşer ve sol
+        // kenardan başlayan sürükleme 0. hücreyi dışarıda bırakırdı —
+        // kullanıcı satır başından seçmek isterken ilk harf eksik gelirdi.
+        //
+        // Nokta **seçilmiş**: view'da -1 nokta, @2x'te -2 piksel; `-2 % 9 = -2`
+        // (sol), `(-2).rem_euclid(9) = 7` (sağ). İki kural her
+        // `[-(k+½)w, -kw)` aralığında ayrışıyor, geri kalanında aynı yarıyı
+        // veriyor — -3 nokta (-6 piksel, artık 3) ikisinde de sol yarıya düşer
+        // ve bu sınamayı bekçi olmaktan çıkarırdı.
+        assert_eq!(scene((-1.0, 9.0)), Some((0, 1)));
+        assert_eq!(scene_half((-1.0, 9.0)), Some(CellHalf::Left));
+    }
+
+    #[test]
+    fn points_past_the_grid_stick_to_its_edge() {
+        // Sağ ve alt kenar dışı **yutulmaz**, son sütuna/satıra yapışır. Yarı
+        // artık seçimi belirlediği için yutmak bir kayıp üretiyordu: pencere
+        // genişliği hücrenin tam katı değilse grid'in sağında kullanılmayan bir
+        // şerit kalıyor (`split_into_grid` sütunu aşağı yuvarlıyor) ve satır
+        // sonuna doğru sürükleyen fare
+        // oraya geçince olay düşer, seçim grid'deki son olayda kalırdı. O olay
+        // son sütunun sol yarısındaysa son harf kopyadan eksik çıkardı.
+        // Sağa taşan nokta son sütunun **sağ** yarısıdır: hücreyi katar.
+        let last = |col, row| {
+            Some(SelectionPoint {
+                col,
+                row,
+                half: CellHalf::Right,
+            })
+        };
+        assert_eq!(scene_point((900.0, 100.0)), last(99, 11));
         // Pencere grid'den büyük olabilir (kenar boşluğu): view 500×400 ama
-        // grid 450×297 — taşan tıklama yutulur.
-        assert_eq!(scene((470.0, 100.0)), None);
-        assert_eq!(scene((100.0, 350.0)), None);
+        // grid 450×297.
+        assert_eq!(scene_point((470.0, 100.0)), last(99, 11));
+        // Alt taşma yalnız satırı kırpar; sütun ve yarı x'ten gelir.
+        assert_eq!(scene((100.0, 600.0)), Some((22, 32)));
+        assert_eq!(scene((100.0, 350.0)), Some((22, 32)));
+    }
+
+    #[test]
+    fn empty_grid_has_no_cell() {
+        // Simge durumundaki pencere sıfır sütun/satır verebilir: yapışacak bir
+        // son hücre yok.
+        assert_eq!(point_to_cell((1.0, 1.0), (9, 18), 2.0, 0, 33), None);
+        assert_eq!(point_to_cell((1.0, 1.0), (9, 18), 2.0, 100, 0), None);
     }
 
     /// Command'lı bir tuşun bayrakları: Command tek başına.
@@ -420,6 +556,9 @@ mod tests {
         // yarı kayar.
         let at1x = point_to_cell((90.0, 150.0), (9, 18), 1.0, 100, 33);
         let at2x = point_to_cell((90.0, 150.0), (9, 18), 2.0, 100, 33);
-        assert_eq!((at1x, at2x), (Some((10, 8)), Some((20, 16))));
+        assert_eq!(
+            (at1x.map(|p| (p.col, p.row)), at2x.map(|p| (p.col, p.row))),
+            (Some((10, 8)), Some((20, 16)))
+        );
     }
 }

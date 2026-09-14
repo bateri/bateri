@@ -3,8 +3,9 @@
 //! VT durum makinesi, grid, scrollback, PTY ve okuyucu thread burada yaşar;
 //! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`,
-//! `LinearRgba` ve `Wake` görür (tam liste aşağıdaki `pub use` bloğu). Kendi
-//! grid'imize geçiş (00X) bu sınırın arkasında yapılır ve renderer'ı bilmez.
+//! `SelectionPoint`, `CellHalf`, `LinearRgba` ve `Wake` görür (tam liste
+//! aşağıdaki `pub use` bloğu). Kendi grid'imize geçiş (00X) bu sınırın
+//! arkasında yapılır ve renderer'ı bilmez.
 //!
 //! Sözleşme: bu crate macOS'a özgü hiçbir kütüphane görmez — `objc2*`,
 //! `core-text`, `metal` yok — ve Linux'ta derlenebilir kalır; Vulkan kapısı
@@ -21,8 +22,8 @@ mod wake;
 
 pub use color::{DEFAULT_BG, DEFAULT_CURSOR, LinearRgba};
 pub use session::{
-    Cell, Cursor, DirtyFlag, SHUTDOWN_GRACE, Session, SessionOptions, Teardown, UnderlineStyle,
-    load_shell, smoke_shell,
+    Cell, CellHalf, Cursor, DirtyFlag, SHUTDOWN_GRACE, SelectionPoint, Session, SessionOptions,
+    Teardown, UnderlineStyle, load_shell, smoke_shell,
 };
 pub use wake::Wake;
 
