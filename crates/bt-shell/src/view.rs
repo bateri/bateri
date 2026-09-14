@@ -2,16 +2,16 @@
 //!
 //! Çizim burada **yok** — layer'ın içeriğini `bt-gpu` doldurur. Bu sınıfın işi
 //! first responder olmak, tuş vuruşunu [`crate::keys::encode_key`]'e verip
-//! çıkan baytları oturuma yazmak ve fareyi (basış, sürükleme, bırakış ve
+//! çıkan baytı ya da oku oturuma yazmak ve fareyi (basış, sürükleme, bırakış ve
 //! tekerlek) hücreye çevirip oturuma iletmek. Terminal kararları (seçim
-//! aralığı, sayfanın boyu, kaydırmanın kipe göre reddi) `bt-core`'da; burada
-//! AppKit'e bakan taraf yaşar — piksel → hücre aritmetiği, tekerleğin satır
-//! artığı, sürüklemenin sürüp sürmediği.
+//! aralığı, sayfanın boyu, tekerleğin kipe göre yolu, okun baytı) `bt-core`'da;
+//! burada AppKit'e bakan taraf yaşar — piksel → hücre aritmetiği, tekerleğin
+//! satır artığı, sürüklemenin sürüp sürmediği.
 
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use bt_core::{CellHalf, SelectionPoint, Session};
+use bt_core::{CellHalf, SelectionPoint, Session, Wheel};
 use bt_gpu::CellMetrics;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -19,7 +19,7 @@ use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventPhase, NSPasteboard, N
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect};
 
 use crate::clipboard;
-use crate::keys::{encode_key, page_scroll};
+use crate::keys::{KeyInput, encode_key, page_scroll};
 
 /// Fare noktası → seçim ucu. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
 ///
@@ -100,7 +100,7 @@ fn cell_half(x_px: f64, cell_w: f64) -> CellHalf {
 /// delta nokta cinsinden gelir ve birim hücre boyudur (nokta); klasik
 /// tekerlekte delta zaten satırdır ve birim 1. İşaret korunur — AppKit'in
 /// `scrollingDeltaY`'si "doğal kaydırma" tercihi uygulanmış hâldedir ve artısı
-/// belgenin başına doğrudur, yani `Session::scroll_display`'in "artı geriye"
+/// belgenin başına doğrudur, yani `Session::scroll_wheel`'in "artı geriye"
 /// yönüyle aynı.
 ///
 /// **Artık neden taşınıyor:** trackpad hücre boyundan küçük deltalar yağdırır;
@@ -142,9 +142,11 @@ pub(crate) struct ViewIvars {
     /// Tekerleğin satıra dönmemiş artığı ([`wheel_lines`]). Üç yerde sıfırlanır,
     /// üçünde de kalan artık bir sonraki kaydırmaya ait değil: yeni jestin
     /// başında (önceki jestin kırıntısı yeni jesti erken ya da geç tetiklemesin),
-    /// kaydırma reddedilince (alternate screen'in artığı birincil ekrana
+    /// tekerlek yoksayılınca (`Wheel::Ignored`: bir kipin artığı sonraki kipe
     /// taşınmasın) ve geçmişin ucuna dayanınca (uca doğru biriken momentum
-    /// ters yöndeki ilk satırı geciktirmesin).
+    /// ters yöndeki ilk satırı geciktirmesin). Tekerlek uygulamaya gidince
+    /// (`Wheel::Sent`) **korunur**: trackpad'le yavaş kaydırmada her olayın
+    /// küsuratı düşseydi `less` sarsak kayardı.
     scroll_carry: std::cell::Cell<f64>,
     /// Fare çevirisinin canlı girdileri: ölçü `bt-gpu`'dan, grid `bt-core`'un
     /// bildiği sayı. `OnceCell` değil `Cell<Option<…>>`, çünkü pencere boyu
@@ -233,13 +235,18 @@ define_class!(
             self.ivars().dragging.set(false);
         }
 
-        /// Tekerlek ve trackpad: görünen pencereyi geçmişe kaydırır. Kaydırma
-        /// çubuğu **yok** — AppKit kroniği (thumb, orantı, sürükleme), eşik için
-        /// gerekli değil.
+        /// Tekerlek ve trackpad: uygulama fare raporu istediyse — ekran fark
+        /// etmez — tekerlek raporu olarak uygulamaya gider; istemediyse
+        /// alternate screen'de ok olarak gider, birincil ekranda görünen
+        /// pencereyi geçmişe kaydırır. Kaydırma çubuğu **yok** — AppKit kroniği
+        /// (thumb, orantı, sürükleme), eşik için gerekli değil.
         ///
-        /// Kipe göre karar `bt-core`'da: alternate screen'de oturum kaydırmayı
-        /// reddeder (`None`) ve burası körü körüne kaydırmaz. Yatay delta
-        /// yoksayılıyor — yatay kaydırılacak bir şey yok.
+        /// Kipe göre karar `bt-core`'da (`Session::scroll_wheel`); burası
+        /// satırı, işaretçinin hücresini ve Shift'i verir. Yatay delta
+        /// yoksayılıyor — yatay kaydırılacak bir şey yok (yatay tekerlek
+        /// raporu, 66/67, kapsam dışı). macOS klasik farede Shift+tekerleği
+        /// yatay deltaya çeviriyor, yani Shift'in kolu bu yolda çoğunlukla
+        /// trackpad'den gelir.
         ///
         /// Basılı sürüklemenin ortasında kaydırma olursa seçimin ucu farenin
         /// **yeni** altındaki hücreye taşınır ([`BateriView::follow_pointer`]).
@@ -271,9 +278,19 @@ define_class!(
             if lines == 0 {
                 return;
             }
-            match session.scroll_display(lines) {
-                None | Some(0) => carry.set(0.0),
-                Some(_) => self.follow_pointer(session),
+            // İşaretçinin hücresi fare kipinde rapora giriyor; yarısı girmiyor
+            // (`bt-core` okumuyor). Kenar dışı nokta yapışır, `None` yalnız
+            // sıfır boyutlu grid'de.
+            let Some(pointer) = self.event_cell(event) else {
+                return;
+            };
+            let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
+            match session.scroll_wheel(lines, pointer, shift) {
+                Wheel::Scrolled(0) | Wheel::Ignored => carry.set(0.0),
+                Wheel::Scrolled(_) => self.follow_pointer(session),
+                // Pencere kaymadı, uygulama kendi ekranını çiziyor: seçim ucu
+                // taşınmaz, artık korunur (`ViewIvars::scroll_carry`).
+                Wheel::Sent => {}
             }
         }
 
@@ -319,8 +336,11 @@ define_class!(
             let ctrl = flags.contains(NSEventModifierFlags::Control);
             // `super`'e geçmiyoruz: `NSResponder::keyDown:` tanımadığı tuşta
             // beep çalar ve terminalde her ok tuşu bip sesi olurdu.
-            if let Some(bytes) = encode_key(&chars, ctrl) {
-                session.write(&bytes);
+            match encode_key(&chars, ctrl) {
+                Some(KeyInput::Bytes(bytes)) => session.write(&bytes),
+                // Okun baytı DECCKM'e bağlı, kip `bt-core`'da.
+                Some(KeyInput::Arrow(arrow)) => session.write_arrow(arrow),
+                None => {}
             }
         }
     }
@@ -662,7 +682,7 @@ mod tests {
     #[test]
     fn wheel_whole_lines_pass_through() {
         // Trackpad: birim hücre boyu (nokta). Tam bir hücre = bir satır, işaret
-        // korunur — artı geriye, `Session::scroll_display` ile aynı yön.
+        // korunur — artı geriye, `Session::scroll_wheel` ile aynı yön.
         assert_eq!(wheel_lines(9.0, 9.0, 0.0), (1, 0.0));
         assert_eq!(wheel_lines(-27.0, 9.0, 0.0), (-3, 0.0));
         // Klasik tekerlek: `scrollingDeltaY` zaten satır, birim 1.

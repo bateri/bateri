@@ -4,12 +4,12 @@
 //! yaşıyor: alacritty'nin `EventListener`'ı `Adapter`'da bizim `Wake`'imize
 //! çevrilir, ve `Term` kilidi **yalnız** şu çağrı yerlerinde alınır:
 //! `frame`, `resize`, seçim yolu (`set_selection`, `update_selection`,
-//! `clear_selection`, `selection_text`), kaydırma yolu (`scroll_by`:
-//! `scroll_display`, `scroll_page` ve girdinin dibe dönüşü) ve `paste`'in kip
-//! sorgusu (`bracketed_paste`). Kilit
-//! **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
-//! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa
-//! kilitlenme doğar.
+//! `clear_selection`, `selection_text`), kaydırma yolu (`scroll_wheel`,
+//! `scroll_page`), kullanıcı girdisinin gönderimi (`send_input`: dibe dönüş ve
+//! okun kip sorusu aynı kilitte) ve `paste`'in kip sorgusu (`bracketed_paste`).
+//! Kilit **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
+//! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa kilitlenme
+//! doğar.
 
 use std::collections::HashMap;
 use std::io;
@@ -31,6 +31,7 @@ use alacritty_terminal::tty::{self, Pty, Shell};
 use alacritty_terminal::vte::ansi::CursorShape;
 
 use crate::color::{self, LinearRgba};
+use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
 use crate::wake::Wake;
 
 /// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
@@ -150,7 +151,7 @@ impl Default for Cell {
 /// İmlecin karedeki yeri.
 ///
 /// `row` her zaman görünür pencereye kırpılıdır. Kaydırma geçmişine bakarken
-/// ([`Session::scroll_display`]) imleç ekranın dışına çıkar; o durumda
+/// ([`Session::scroll_wheel`]) imleç ekranın dışına çıkar; o durumda
 /// `visible` kapanır ve `row` gerçek satırı değil kırpılmış değeri taşır.
 /// Kaydırmanın kendisi imleç konumunu okumuyor; konuma güvenen ilk tüketici
 /// (IME) çıkmadan önce buranın sözleşmesini genişletmeli.
@@ -256,7 +257,7 @@ pub fn smoke_shell() -> (String, Vec<String>) {
 /// komut değişince duman sayıları oynamaz; oynarsa ayrım kaybolmuş demektir.
 ///
 /// Kaydırılan şey viewport değil **içerik**: yük pencereyi geriye almaz
-/// ([`Session::scroll_display`] tekerleğin yolu, bu koşuda kimse çevirmiyor),
+/// ([`Session::scroll_wheel`] tekerleğin yolu, bu koşuda kimse çevirmiyor),
 /// yani her satır kirli düşer, grid yukarı kayar, kare akışı kendiliğinden
 /// sürer. Ölçtüğümüz şey zaten bu — dolu bir karede parse +
 /// [`Session::frame`] + encode + GPU maliyeti.
@@ -462,7 +463,7 @@ impl EventListener for Adapter {
             //
             // `MouseCursorDirty` `Term::scroll_display`'in **tek** olayı ve
             // burada yutuluyor: kaydırmanın karesini o değil
-            // `Session::scroll_display` elle istiyor. Bu kola `dirty` dikmek
+            // `Session::scroll_wheel` elle istiyor. Bu kola `dirty` dikmek
             // yanlış çare olurdu — olay kaymayan bir kaydırmada da (geçmişin
             // ucunda) ve fare raporlama kipinin her değişiminde (DECSET
             // 1000/1002/1003) gönderiliyor, yani boş kare doğururdu.
@@ -637,6 +638,32 @@ fn visible_range<T>(selection: Option<&Selection>, term: &Term<T>) -> Option<Sel
     let top = Line(-offset);
     let bottom = Line(term.screen_lines() as i32 - 1 - offset);
     (range.end.line >= top && range.start.line <= bottom).then_some(range)
+}
+
+/// [`Session::scroll_wheel`]'in cevabı: tekerlek nereye gitti.
+///
+/// `Option<i32>` değil, çünkü `bt-shell` üç cevapta üç ayrı şey yapıyor:
+/// kayan pencerede basılı sürüklemenin ucunu taşıyor, gönderimde tekerleğin
+/// satır artığını **koruyor**, yoksayılan olayda artığı atıyor. Gönderim
+/// `None`'a katlansaydı trackpad'le yavaş kaydırmada her olayın küsuratı
+/// düşer ve uygulama sarsak kayardı; `Some(0)`'a katlansaydı artık yine
+/// düşerdi.
+///
+/// **Kapı tipte**, davranışta görünmüyor: alacritty alternate grid'i geçmişsiz
+/// kuruyor (`Grid::new(.., 0)`), yani alternate screen kapısı silinse de ofset
+/// oynamaz, kare istenmez — [`Wheel::Ignored`] ile `Scrolled(0)` ekranda aynı.
+/// `wheel_is_ignored_without_alternate_scroll_or_with_shift` bu yüzden
+/// cevabın kendisini soruyor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wheel {
+    /// Birincil ekran: görünen pencere `n` satır kaydı; geçmişin iki ucunda `0`.
+    Scrolled(i32),
+    /// Uygulamaya gitti: fare kipinde tekerlek raporu, alternate screen'de ok.
+    Sent,
+    /// Hiçbir şey gitmedi: alternate screen'de ok kapalı (`\e[?1007l`) ya da
+    /// Shift basılı; fare kipinde işaretçi geçmişte ya da koordinat
+    /// kodlamaya sığmıyor; uygulama yolunda sıfır satır.
+    Ignored,
 }
 
 /// PTY'si, okuyucu thread'i ve grid'i olan bir terminal oturumu.
@@ -1002,7 +1029,7 @@ impl Session {
     /// satırı olarak `bt-shell`'de tutup her olayda iki uçla yeniden kurmak
     /// kaydırmaya dayanmıyordu: basılı sürüklemenin ortasında pencere
     /// kayınca aynı satır numarası başka bir içeriği gösterir ve seçim
-    /// başka yerden başlamış olurdu. Grid-mutlak çapa hem [`Session::scroll_display`]
+    /// başka yerden başlamış olurdu. Grid-mutlak çapa hem [`Session::scroll_wheel`]
     /// ile kaymayı hem de çıktının içeriği yukarı itmesini (alacritty
     /// `rotate`) kendiliğinden taşıyor.
     ///
@@ -1046,77 +1073,126 @@ impl Session {
         }
     }
 
-    /// Görünen pencereyi kaydırır; artı değer geriye. Kaydırınca kirli bayrağı
-    /// dikilir, yoksa kaydırma hiç boyanmaz (seçimdeki R1.2 ile aynı tuzak).
+    /// Tekerlek ve trackpad; artı değer geriye (yukarı). Karar kipe bakar ve
+    /// kip `Term`'de yaşıyor, yani karar burada — `bt-shell` kip tutmaz.
+    /// Tablonun kendisi saf (`input::wheel_route`), sırası alacritty'nin
+    /// `scroll_terminal`'ınınki:
     ///
-    /// Tuzağın bu yoldaki biçimi: alacritty'nin `Term::scroll_display`'i kareyi
-    /// **kendisi istemez** — tek olayı `Event::MouseCursorDirty` ve `Adapter`
-    /// onu yutuyor. Bayrak burada elle dikiliyor, **uyandırma da**: seçimde
-    /// olduğu gibi tekerleğin vardığı `view` link'e uzanamıyor.
+    /// 1. **Fare raporlama kipi** (1000/1002/1003), ekran fark etmez → satır
+    ///    başına bir tekerlek raporu, işaretçinin hücresi için (vim `mouse=a`,
+    ///    htop). Ok gitseydi rapor bekleyen uygulamada boşa düşerdi.
+    /// 2. **Alternate screen + DECSET 1007**, Shift basılı değil → satır başına
+    ///    bir ok (less, man). 1007 alacritty'de varsayılan açık.
+    /// 3. **Alternate screen**, geri kalanı → [`Wheel::Ignored`]: birincil
+    ///    ekranın geçmişine inmek uygulamanın ekranının altını gösterirdi.
+    /// 4. **Birincil ekran** → görünen pencere kayar, [`Wheel::Scrolled`].
     ///
-    /// Dönüş iki soruyu ayırır:
+    /// **Kare.** Kaydırma kirli bayrağını elle diker **ve uyandırır**:
+    /// alacritty'nin `Term::scroll_display`'i kareyi kendisi istemez (tek olayı
+    /// `MouseCursorDirty`, `Adapter` yutuyor) ve tekerleğin vardığı `view`
+    /// link'e uzanamıyor. Yalnız kayan pencere kare ister — trackpad momentumu
+    /// geçmişin ucunda da olay yağdırır. Uygulamaya gönderim ise kare
+    /// **istemez**: uygulama ekranını yeniden çizince okuyucunun `Wakeup`'ı
+    /// kareyi getirir.
     ///
-    /// - `None` → kip kaydırmayı **reddetti**: alternate screen (vim, less,
-    ///   tmux). Tekerlek orada uygulamaya fare dizisi göndermeli ve o iş (fare
-    ///   raporlaması) bu sette yok; yoksaymak, uygulamanın ekranının altında
-    ///   birincil ekranın geçmişine inmekten iyidir. Karar `view`'da değil
-    ///   burada, çünkü kip `Term`'de yaşıyor.
-    /// - `Some(n)` → pencere `n` satır kaydı; geçmişin iki ucunda `0`. **Yalnız
-    ///   `n != 0` kare ister**: trackpad momentumu uçta da olay yağdırır ve
-    ///   her biri boş bir kare olurdu.
+    /// **Gönderim `write_owned`'dan geçmez**, doğrudan kanala gider. O kapı
+    /// girdide pencereyi dibe döndürüyor: birincil ekranda fare kipi açıkken
+    /// (pencereyi Shift+PgUp geçmişe almış olabilir) her tekerlek raporu
+    /// pencereyi dibe atar ve raporlanan hücre kullanıcının baktığı yerden
+    /// kayardı; alternate screen'de dönüş zaten boş iş ve ikinci bir `Term`
+    /// kilidi olurdu. alacritty'nin rapor ve ok yolu da dibe dönmüyor.
     ///
-    /// `None` ile `Some(0)` bugün aynı görünür — alacritty alternate grid'i
-    /// geçmişsiz kuruyor (`Grid::new(.., 0)`), yani kip kapısı olmasa da ofset
-    /// oynamazdı. Ayrım o yüzden **tipte**: kapı alacritty'nin iç kararına
-    /// yaslanmıyor ve silinirse `alternate_screen_ignores_scroll` kırmızı.
+    /// **İşaretçi** (`at`) görünen pencerenin hücresidir ve `half` okunmaz:
+    /// rapor hücre çözünürlüğünde (SGR-pixel, 1016, kapsam dışı). Tip
+    /// [`SelectionPoint`], çünkü `bt-shell`'in fare çevirisi onu zaten veriyor
+    /// ve alanları adlı — sütun ile satırın yer değiştirmesi derlenmez. Hücre
+    /// `display_offset` ile uygulamanın satırına iner; satır uygulamanın
+    /// ekranında değilse (pencere geçmişte, satır `< 0`) rapor gitmez —
+    /// alacritty'nin kuralı.
     ///
-    /// Seçim kapısına (`visible_range`) dokunulmuyor: iki tarafı aynı karede
-    /// aynı `display_offset`'le hesaplıyor, kaydırmanın kendi karesini
-    /// istemesi yeterli. Seçim aralığı grid mutlağında durduğu için içerikle
-    /// birlikte kayıyor.
-    pub fn scroll_display(&self, lines: i32) -> Option<i32> {
-        self.scroll_by(|_| lines)
+    /// **Tekrar kırpılır**: bir olayda uygulamaya en çok **bir sayfa** (görünen
+    /// satır sayısı) gider. `bt-shell` deltayı `f64`'ten doyurarak çeviriyor ve
+    /// `i32::MAX` tekrarlık bir tampon kurulmamalı. Sayfa ölçülmüş bir sınır
+    /// değil, `Term`'in verdiği tek ölçü; kaydırma yolunun kırpması
+    /// (ulaşılabilir aralık, `scroll_locked`) burada yok, çünkü uygulamanın
+    /// ne kadar kayabileceğini terminal bilmiyor.
+    pub fn scroll_wheel(&self, lines: i32, at: SelectionPoint, shift: bool) -> Wheel {
+        let mut term = self.term.lock();
+        let unit = match input::wheel_route(*term.mode(), shift) {
+            WheelRoute::Scroll => {
+                // Yol zaten birincil ekran; `None` yalnız `scroll_locked`'ın
+                // kendi kip kapısından gelebilir.
+                let moved = scroll_locked(&mut term, lines);
+                drop(term);
+                self.wake_if_moved(moved);
+                return moved.map_or(Wheel::Ignored, Wheel::Scrolled);
+            }
+            WheelRoute::Ignore => return Wheel::Ignored,
+            WheelRoute::Arrows => {
+                let arrow = if lines > 0 { Arrow::Up } else { Arrow::Down };
+                input::arrow(arrow, *term.mode()).to_vec()
+            }
+            WheelRoute::Report(encoding) => {
+                let offset = term.grid().display_offset() as i32;
+                let line = viewport_point((at.col, at.row), offset).line;
+                let button = if lines > 0 { WHEEL_UP } else { WHEEL_DOWN };
+                let report = u16::try_from(line.0)
+                    .ok()
+                    .and_then(|row| input::wheel_report(encoding, button, at.col, row));
+                let Some(report) = report else {
+                    return Wheel::Ignored;
+                };
+                report
+            }
+        };
+        let count = lines.unsigned_abs().min(term.screen_lines() as u32) as usize;
+        drop(term);
+        // Sıfır satır boş bir `Msg::Input` olurdu ve o, `EventLoop`'un
+        // yazıcısını kalıcı olarak kilitler (`Adapter::reply`).
+        if count == 0 {
+            return Wheel::Ignored;
+        }
+        self.send(Msg::Input(unit.repeat(count).into()));
+        Wheel::Sent
+    }
+
+    /// Ok tuşu — klavyenin oku baytla değil tuşla girer; neden [`Arrow`]'da.
+    ///
+    /// [`Session::write`] gibi kullanıcı girdisidir ve pencereyi dibe döndürür;
+    /// kip sorusu ile dibe dönüş **aynı** `Term` kilidinde (`send_input`), yani
+    /// ok tuşu da vuruş başına tek kilit öder.
+    pub fn write_arrow(&self, arrow: Arrow) {
+        self.send_input(|mode| input::arrow(arrow, mode).to_vec());
     }
 
     /// Görünen pencereyi `pages` sayfa kaydırır (Shift+PgUp/PgDn); artı değer
-    /// geriye, dönüşü [`Session::scroll_display`]'inkiyle aynı — alternate
-    /// screen'de `None` ve `bt-shell` o cevapta tuşu uygulamaya geçiriyor.
+    /// geriye. `None` → alternate screen ve `bt-shell` o cevapta tuşu
+    /// uygulamaya geçiriyor; `Some(n)` → pencere `n` satır kaydı, uçta `0`.
+    /// Tekerleğin karar tablosundan **geçmez**: klavyedir, rapor ya da ok
+    /// üretmez.
     ///
     /// Sayfa **görünen satır sayısı** ve o sayı `Term`'de: "bir sayfa kaç
     /// satır" terminalin kararı, `bt-shell`'in piksel aritmetiği değil. View
     /// sayfayı kendi ölçü önbelleğinden türetseydi ekran boyunun ikinci bir
     /// kopyasını taşır, ölçü yokken de tuşu sessizce uygulamaya düşürürdü.
     pub fn scroll_page(&self, pages: i32) -> Option<i32> {
-        self.scroll_by(|term| pages.saturating_mul(term.screen_lines() as i32))
-    }
-
-    /// İki kaydırma yolunun ortak gövdesi: kip kapısı, kırpma, kare talebi.
-    /// Satır sayısı kilit **altında** çözülüyor (`lines`), çünkü sayfa boyu
-    /// `Term`'den okunuyor.
-    fn scroll_by(&self, lines: impl FnOnce(&Term<Adapter>) -> i32) -> Option<i32> {
         let moved = {
             let mut term = self.term.lock();
-            if term.mode().contains(TermMode::ALT_SCREEN) {
-                return None;
-            }
-            let lines = lines(&term);
-            let before = term.grid().display_offset() as i32;
-            // Kırpma **ulaşılabilir** aralığa (`[-ofset, geçmiş - ofset]`):
-            // ötesi zaten aynı yere varır, ama alacritty ofseti `i32`'de
-            // topluyor (`offset + count`) ve kırpılmamış bir delta debug
-            // derlemesinde **panik**, sürümde ters yöne sarma olurdu. Bu aralıkta
-            // toplam `[0, geçmiş]`'ten çıkamaz. `bt-shell` deltayı `f64`'ten
-            // doyurarak çeviriyor, yani `i32::MAX` ulaşılabilir bir değer.
-            // Geçmişin `i32`'ye sığması alacritty'nin kendi varsayımı
-            // (`display_offset as i32`); sığmazsa kırpılır.
-            let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
-            term.scroll_display(Scroll::Delta(lines.clamp(-before, history - before)));
-            term.grid().display_offset() as i32 - before
+            let lines = pages.saturating_mul(term.screen_lines() as i32);
+            scroll_locked(&mut term, lines)
         };
-        if moved != 0 {
+        self.wake_if_moved(moved);
+        moved
+    }
+
+    /// Pencere gerçekten kaydıysa kare ister. Kaymayan kaydırma (geçmişin
+    /// ucu, `Some(0)`) ve alternate screen (`None`) istemez — trackpad
+    /// momentumu uçta da olay yağdırır ve her biri boş bir kare olurdu. `Term`
+    /// kilidi bırakıldıktan sonra çağrılır ([`Session::request_frame`]).
+    fn wake_if_moved(&self, moved: Option<i32>) {
+        if moved.is_some_and(|n| n != 0) {
             self.request_frame();
         }
-        Some(moved)
     }
 
     /// Kirli bayrağını diker ve uyandırır — `Adapter`'ın `Wakeup` kolunun
@@ -1169,12 +1245,14 @@ impl Session {
     /// bir log dosyası); sarma dalı tamponu zaten kuruyorken `write`'a
     /// dilimle gitmek ikinci bir tam kopya demekti.
     ///
-    /// Boş vektör sessizce düşer; `write` de bu kapıdan geçer, yani kullanıcı
-    /// girdisinin (klavye ve yapıştırma) **tek** gönderim noktası burası.
-    /// `Msg::Input`'u kuran öteki yer `Adapter::reply`'dir; orada `Session`
-    /// yok, adapter kendi kanalına doğrudan yazıyor — ve o bir kullanıcı
-    /// girdisi değil, uygulamanın sorusuna yanıt: aşağıdaki dibe dönüş ona
-    /// uygulanmaz.
+    /// Boş vektör sessizce düşer; `write` de `paste` de bu kapıdan geçer ve
+    /// ok tuşuyla ([`Session::write_arrow`]) birlikte hepsi `send_input`'ta
+    /// buluşur — kullanıcı girdisinin **tek** gönderim noktası orası.
+    /// `Msg::Input`'u kuran öteki iki yer kullanıcı girdisi değil, ve aşağıdaki
+    /// dibe dönüş onlara uygulanmaz: `Adapter::reply` uygulamanın sorusuna
+    /// yanıt (orada `Session` yok, adapter kendi kanalına yazıyor),
+    /// [`Session::scroll_wheel`] tekerleği uygulamaya veriyor (gerekçesi
+    /// orada).
     ///
     /// **Girdi pencereyi dibe döndürür.** Geçmişe bakarken yazılan girdi
     /// görünmeyen bir satıra giderdi ve yanıtı da görünmezdi: alacritty
@@ -1190,12 +1268,35 @@ impl Session {
     /// kurulmadı: alternate screen'de alt grid'in ofseti okunur ve birincil
     /// ekran hâlâ kaydırılmışken önbellek "dipte" derdi.
     fn write_owned(&self, bytes: Vec<u8>) {
+        // `send_input` boş girdiyi kendisi de düşürüyor; buradaki erken dönüş
+        // `Term` kilidini hiç almamak için.
         if bytes.is_empty() {
             return;
         }
-        // Dönüş yok sayılıyor: `None` (alternate screen) ya da `Some(0)`
-        // (zaten dipte) iki hâlde de gönderim aynı.
-        let _ = self.scroll_by(|_| i32::MIN);
+        self.send_input(|_| bytes);
+    }
+
+    /// Kullanıcı girdisinin gönderimi: pencereyi dibe döndürür ve baytları
+    /// **aynı** `Term` kilidinde, kipi görerek kurar (`bytes`). Ok tuşu kipi
+    /// soruyor (DECCKM); ikinci bir kilit almasın diye soru buraya taşındı.
+    ///
+    /// Boş bayt ne gönderilir ne pencereyi oynatır: sıfır baytlık `Msg::Input`
+    /// `EventLoop`'un yazıcısını kalıcı olarak kilitler (`Adapter::reply`).
+    /// Kural çağıranlara bırakılmadı — ok gibi kipe bağlı bir sonraki tuş
+    /// buradan geçecek.
+    ///
+    /// `bytes` kilit **altında** koşar ve `Session`'a dokunmamalı: `FairMutex`
+    /// yeniden girilebilir değil, geri giren bir closure kendi kendini kilitler.
+    fn send_input(&self, bytes: impl FnOnce(TermMode) -> Vec<u8>) {
+        let (bytes, moved) = {
+            let mut term = self.term.lock();
+            let bytes = bytes(*term.mode());
+            if bytes.is_empty() {
+                return;
+            }
+            (bytes, scroll_locked(&mut term, i32::MIN))
+        };
+        self.wake_if_moved(moved);
         self.send(Msg::Input(bytes.into()));
     }
 
@@ -1458,6 +1559,31 @@ fn same_size(a: WindowSize, b: WindowSize) -> bool {
         && a.cell_height == b.cell_height
 }
 
+/// Görünen pencereyi kilit altında kaydırır: kip kapısı ve kırpma. Kaydırmanın
+/// üç yolunun (tekerlek, sayfa, girdide dibe dönüş) ortak gövdesi; kareyi
+/// çağıran ister, çünkü uyandırma kilit bırakıldıktan sonra koşmalı.
+///
+/// `None` → alternate screen: alt grid geçmişsiz ve birincil ekranın ofseti
+/// orada kalıyor; kaydırılacak bir şey yok. `Some(n)` → pencere `n` satır
+/// kaydı, geçmişin iki ucunda `0`.
+fn scroll_locked<T: EventListener>(term: &mut Term<T>, lines: i32) -> Option<i32> {
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return None;
+    }
+    let before = term.grid().display_offset() as i32;
+    // Kırpma **ulaşılabilir** aralığa (`[-ofset, geçmiş - ofset]`): ötesi
+    // zaten aynı yere varır, ama alacritty ofseti `i32`'de topluyor
+    // (`offset + count`) ve kırpılmamış bir delta debug derlemesinde
+    // **panik**, sürümde ters yöne sarma olurdu. Bu aralıkta toplam
+    // `[0, geçmiş]`'ten çıkamaz. `bt-shell` deltayı `f64`'ten doyurarak
+    // çeviriyor, yani `i32::MAX` ulaşılabilir bir değer. Geçmişin `i32`'ye
+    // sığması alacritty'nin kendi varsayımı (`display_offset as i32`);
+    // sığmazsa kırpılır.
+    let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
+    term.scroll_display(Scroll::Delta(lines.clamp(-before, history - before)));
+    Some(term.grid().display_offset() as i32 - before)
+}
+
 /// Görünür pencere hücresini grid noktasına çevirir.
 fn viewport_point((col, row): (u16, u16), display_offset: i32) -> Point {
     Point::new(
@@ -1542,10 +1668,15 @@ mod tests {
     }
 
     fn spawn_with_command(command: (String, Vec<String>), wake: Arc<TestWake>) -> Session {
+        spawn_with_cols(command, 40, wake)
+    }
+
+    /// Geniş grid isteyen sınamalar için (fare raporunun 223 sütunluk sınırı).
+    fn spawn_with_cols(command: (String, Vec<String>), cols: u16, wake: Arc<TestWake>) -> Session {
         Session::spawn(
             SessionOptions {
                 command: Some(command),
-                cols: 40,
+                cols,
                 rows: 10,
                 cell_px: (9, 18),
                 scrollback: 100,
@@ -2556,6 +2687,12 @@ mod tests {
         session.term.lock().grid().display_offset()
     }
 
+    /// Shift'siz tekerlek, işaretçi sol üstte — birincil ekranın kaydırma
+    /// sınamalarının ortak çağrısı; işaretçi o dalda okunmuyor.
+    fn scroll(session: &Session, lines: i32) -> Wheel {
+        session.scroll_wheel(lines, at(0, 0, CellHalf::Left), false)
+    }
+
     #[test]
     fn scroll_moves_the_display_offset_and_marks_dirty() {
         // `Term::scroll_display` kareyi **kendisi istemez**: tek olayı
@@ -2565,7 +2702,7 @@ mod tests {
         let (session, wake) = history_session("seq 1 30; sleep 5");
 
         let woken = wakes(&wake);
-        assert_eq!(session.scroll_display(3), Some(3));
+        assert_eq!(scroll(&session, 3), Wheel::Scrolled(3));
         assert_eq!(display_offset(&session), 3);
         // Uyandırma da elle: `frame()` bayrağı doğrudan okuduğu için bayrağı
         // diken ama uyandırmayı unutan bir `request_frame` aşağıdaki
@@ -2586,12 +2723,12 @@ mod tests {
         // bekçisi — alacritty ofseti `i32`'de topluyor (`offset + count`),
         // kırpılmayan bir delta debug derlemesinde panik, sürümde ters yöne
         // sarma olurdu. Giriş yolunda panik yok.
-        assert_eq!(session.scroll_display(i32::MAX), Some(18));
+        assert_eq!(scroll(&session, i32::MAX), Wheel::Scrolled(18));
         assert!(session.frame(|_| ()).is_some());
         // Tepede kaymayan tekerlek **kare istemez**: trackpad momentumu
         // tepede de olay yağdırır ve her biri boş bir kare olurdu.
         let woken = wakes(&wake);
-        assert_eq!(session.scroll_display(1), Some(0));
+        assert_eq!(scroll(&session, 1), Wheel::Scrolled(0));
         assert!(
             session.frame(|_| ()).is_none(),
             "kaymayan kaydırma kare istedi"
@@ -2599,7 +2736,7 @@ mod tests {
         assert_eq!(wakes(&wake), woken, "kaymayan kaydırma uyandırdı");
 
         // Dibe dönüş ters yönde aynı yol: imleç yeniden görünür.
-        assert_eq!(session.scroll_display(i32::MIN), Some(-21));
+        assert_eq!(scroll(&session, i32::MIN), Wheel::Scrolled(-21));
         let cursor = session.frame(|_| ()).expect("dibe dönüş kare istemeli");
         assert!(cursor.visible, "{cursor:?}");
 
@@ -2608,42 +2745,252 @@ mod tests {
         assert!(session.frame(|_| ()).is_some());
         assert_eq!(session.scroll_page(i32::MAX), Some(11));
         assert_eq!(session.scroll_page(-1), Some(-10));
+
+        // Birincil ekranda Shift tekerleği değiştirmiyor (alacritty de öyle):
+        // karar tablosunda Shift yalnız alternate screen'in okunu keser.
+        assert_eq!(
+            session.scroll_wheel(-1, at(0, 0, CellHalf::Left), true),
+            Wheel::Scrolled(-1)
+        );
+    }
+
+    /// PTY'ye giden baytları okumanın sahnesi — phase-2'nin `od` kalıbı, bir
+    /// farkla: çocuk önce satır disiplinini susturuyor (`stty -echo -icanon`).
+    /// Ok ve rapor dizilerinde `\n` yok, kanonik kipte `od` onları hiç
+    /// görmezdi; yankı da ayrıca kare doğururdu. Ardından `setup` koşar (kip
+    /// açan `printf`, gerekirse geçmiş), sonra `od` stdin'i hex'e döker.
+    ///
+    /// Sıra yük taşıyor: kipler `stty`'den **sonra** basılıyor, yani `ready`
+    /// tuttuğunda satır disiplini de hazır. Dönen oturumun karesi durulmuştur.
+    fn dump_session(
+        cols: u16,
+        setup: &str,
+        ready: impl Fn(TermMode) -> bool,
+    ) -> (Session, Arc<TestWake>) {
+        let wake = Arc::new(TestWake::default());
+        let script = format!("stty -echo -icanon; {setup}; exec od -An -tx1");
+        let session = spawn_with_cols(
+            ("/bin/sh".into(), vec!["-c".into(), script]),
+            cols,
+            Arc::clone(&wake),
+        );
+        wait_until("kip açılmadı", Duration::from_secs(5), || {
+            ready(*session.term.lock().mode())
+        });
+        wait_settled(&session);
+        (session, wake)
+    }
+
+    /// PTY'ye **tam olarak** `expected`'ın gittiğini `od` dökümünden okur.
+    ///
+    /// `od` 16 baytlık blok dolmadan döküm basmaz; blok nokta (`2e`) ile
+    /// tamamlanıyor ve iğne dolguyu da taşıyor. Sayıyı çivileyen bu: bir
+    /// fazla dizi bloğu erken doldurur ve dolgunun bir kısmını dışarıda
+    /// bırakır, bir eksik dizi bloğu hiç doldurmaz — iki hâlde de iğne
+    /// görünmez. `expected` boşsa iğne 16 nokta: "hiçbir şey gitmedi".
+    /// Dolgu `write`'tan gidiyor; önceki adımın bloğu her zaman tam kapandığı
+    /// için adımlar aynı oturumda sıralanabilir — **iğneleri farklı olduğu
+    /// sürece**. `wait_ink` bütün ekrana bakıyor: önceki adımın dökümü ekranda
+    /// kaldığı için aynı iğneyi soran ikinci adım hemen yeşil geçer (üstelik
+    /// `od` tekrar eden bloğu `*` diye basıyor). "Hiçbir şey gitmedi" bu yüzden
+    /// oturum başına en çok bir kez ve ilk adım olarak sorulur.
+    fn expect_sent(session: &Session, wake: &TestWake, expected: &[u8]) {
+        let fill = vec![b'.'; 16 - expected.len() % 16];
+        session.write(&fill);
+        let needle: String = expected
+            .iter()
+            .chain(&fill)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        wait_ink(session, wake, &needle);
     }
 
     #[test]
-    fn alternate_screen_ignores_scroll() {
-        // Kip kararı `bt-core`'da. Sonuç `None` — `Some(0)` **değil**, ve
-        // ayrım sınamanın kendisi: alacritty'nin alternate grid'i geçmişsiz
-        // kuruluyor (`Grid::new(.., 0)`), yani kip kapısı silinse de ofset
-        // oynamaz ve kare istenmezdi. Yalnız ofsete bakan bir sınama o
-        // silinmeye yeşil kalırdı (mutasyonla görüldü).
-        //
-        // Birincil ekranda geçmiş **var** (`seq`): kapı olmasa kaydırmanın
-        // gidebileceği bir yer olsun. `history_session` burada kullanılamaz —
-        // `30`'u bekliyor, alternate screen ise onu gizliyor. Kip anahtarı
-        // akışta `seq`'ten sonra geliyor, yani kip görünür olduğunda `seq`
-        // çoktan işlendi.
-        let wake = Arc::new(TestWake::default());
-        let session = spawn_session(
-            "seq 1 30; printf '\\033[?1049h'; sleep 5",
-            Arc::clone(&wake),
-        );
-        wait_until(
-            "alternate screen açılmadı",
-            Duration::from_secs(5),
-            || session.term.lock().mode().contains(TermMode::ALT_SCREEN),
-        );
-        wait_settled(&session);
+    fn alternate_screen_wheel_sends_arrows() {
+        // R3.3: `less` ve `man` tekerlekle kayar — satır başına bir ok, geriye
+        // yukarı. DECSET 1007'yi kimse açmıyor: alacritty'de varsayılan açık.
+        let (session, wake) = dump_session(40, "printf '\\033[?1049h'", |mode| {
+            mode.contains(TermMode::ALT_SCREEN)
+        });
+        assert_eq!(scroll(&session, 3), Wheel::Sent);
+        expect_sent(&session, &wake, &b"\x1b[A".repeat(3));
+        assert_eq!(scroll(&session, -2), Wheel::Sent);
+        expect_sent(&session, &wake, &b"\x1b[B".repeat(2));
+        // Doyan delta (`bt-shell` `f64`'ten `i32`'ye) bir olayda en çok bir
+        // sayfa, yani 10 ok: `i32::MAX` tekrarlık tampon kurulmaz.
+        assert_eq!(scroll(&session, i32::MAX), Wheel::Sent);
+        expect_sent(&session, &wake, &b"\x1b[A".repeat(10));
+    }
 
-        assert_eq!(session.scroll_display(3), None);
-        // Sayfa yolu aynı kapıdan geçiyor: `bt-shell` bu `None`'da Shift+PgUp'ı
-        // uygulamaya düz PgUp olarak veriyor.
-        assert_eq!(session.scroll_page(1), None);
-        assert_eq!(display_offset(&session), 0);
-        assert!(
-            session.frame(|_| ()).is_none(),
-            "yoksayılan kaydırma kare istedi"
+    #[test]
+    fn arrows_follow_decckm_from_keyboard_and_wheel() {
+        // DECCKM kapalı: CSI. `\e[?2004h` yalnız hazır olma işareti — kapalı
+        // DECCKM'in gözlenebilir bir kipi yok, 2004 oklara dokunmuyor.
+        let (plain, wake) = dump_session(40, "printf '\\033[?2004h'", |mode| {
+            mode.contains(TermMode::BRACKETED_PASTE)
+        });
+        plain.write_arrow(Arrow::Up);
+        plain.write_arrow(Arrow::Left);
+        expect_sent(&plain, &wake, b"\x1b[A\x1b[D");
+
+        // DECCKM açık (less ve ncurses'ın `smkx`'i): SS3 — klavye de tekerlek
+        // de, çünkü ikisi aynı yardımcıdan geçiyor.
+        let (app, wake) = dump_session(40, "printf '\\033[?1049h\\033[?1h'", |mode| {
+            mode.contains(TermMode::ALT_SCREEN | TermMode::APP_CURSOR)
+        });
+        app.write_arrow(Arrow::Down);
+        assert_eq!(scroll(&app, 1), Wheel::Sent);
+        expect_sent(&app, &wake, b"\x1bOB\x1bOA");
+    }
+
+    #[test]
+    fn mouse_mode_wheel_sends_sgr_reports() {
+        // Fare kipi alternate scroll'dan **önce** gelir: `mouse=a` açık vim
+        // ok değil rapor bekler. Sahne bu yüzden alternate screen'de ve 1007
+        // (varsayılan) açık — sıra ters olsa ok giderdi. Shift fare kipini
+        // geçmiyor (değiştirici bitleri kapsam dışı, düğme kodu aynı).
+        let (session, wake) = dump_session(
+            40,
+            "printf '\\033[?1049h\\033[?1000h\\033[?1006h'",
+            |mode| mode.contains(TermMode::ALT_SCREEN | TermMode::SGR_MOUSE),
         );
+        let pointer = at(4, 2, CellHalf::Right);
+        assert_eq!(session.scroll_wheel(2, pointer, false), Wheel::Sent);
+        expect_sent(&session, &wake, &b"\x1b[<64;5;3M".repeat(2));
+        assert_eq!(session.scroll_wheel(-1, pointer, true), Wheel::Sent);
+        expect_sent(&session, &wake, b"\x1b[<65;5;3M");
+    }
+
+    #[test]
+    fn mouse_mode_wheel_sends_plain_and_utf8_reports() {
+        // Düz kodlama (1006 yok): koordinat tek bayt. Grid 224 sütun, yani
+        // 223. sütun ekranda ve sınır gerçek bir hücrede sınanıyor.
+        let (plain, wake) = dump_session(224, "printf '\\033[?1000h'", |mode| {
+            mode.contains(TermMode::MOUSE_REPORT_CLICK)
+        });
+        // Sığmayan koordinat hiçbir şey göndermez — önce, çünkü "hiçbir şey"
+        // ancak boş blokta 16 nokta diye okunur.
+        assert_eq!(
+            plain.scroll_wheel(1, at(223, 2, CellHalf::Left), false),
+            Wheel::Ignored
+        );
+        expect_sent(&plain, &wake, b"");
+        assert_eq!(
+            plain.scroll_wheel(1, at(222, 2, CellHalf::Left), false),
+            Wheel::Sent
+        );
+        expect_sent(&plain, &wake, &[0x1b, b'[', b'M', 96, 255, 35]);
+
+        // UTF-8 kodlama (1005): 95. sütundan itibaren koordinat iki bayt.
+        let (utf8, wake) = dump_session(224, "printf '\\033[?1000h\\033[?1005h'", |mode| {
+            mode.contains(TermMode::UTF8_MOUSE)
+        });
+        assert_eq!(
+            utf8.scroll_wheel(1, at(94, 2, CellHalf::Left), false),
+            Wheel::Sent
+        );
+        assert_eq!(
+            utf8.scroll_wheel(-1, at(95, 2, CellHalf::Left), false),
+            Wheel::Sent
+        );
+        expect_sent(
+            &utf8,
+            &wake,
+            &[
+                0x1b, b'[', b'M', 96, 127, 35, 0x1b, b'[', b'M', 97, 0xc2, 0x80, 35,
+            ],
+        );
+    }
+
+    #[test]
+    fn wheel_report_skips_a_pointer_in_history() {
+        // Birincil ekranda fare kipi açık ve pencere geçmişte: işaretçinin
+        // satırı uygulamanın ekranında yoksa rapor gitmez (alacritty
+        // `point.line < 0`); varsa rapor **uygulamanın** satırını taşır.
+        // Pencere `Term`'den doğrudan kaydırılıyor: fare kipinde tekerlek
+        // kaydırmaz (rapor olur) ve `write` pencereyi dibe döndürür.
+        let (session, wake) =
+            dump_session(40, "seq 1 30; printf '\\033[?1000h\\033[?1006h'", |mode| {
+                mode.contains(TermMode::SGR_MOUSE)
+            });
+        session.term.lock().scroll_display(Scroll::Delta(5));
+
+        // Ofset 5: görünen 4. satır geçmişin son satırı.
+        assert_eq!(
+            session.scroll_wheel(1, at(0, 4, CellHalf::Left), false),
+            Wheel::Ignored
+        );
+        expect_sent(&session, &wake, b"");
+        // Yeniden 5 geri (dolgu `write`'ı dibe döndürdü): görünen 7. satır
+        // uygulamanın 2. satırı → rapor 3 der.
+        session.term.lock().scroll_display(Scroll::Delta(5));
+        assert_eq!(
+            session.scroll_wheel(1, at(0, 7, CellHalf::Left), false),
+            Wheel::Sent
+        );
+        expect_sent(&session, &wake, b"\x1b[<64;1;3M");
+    }
+
+    #[test]
+    fn wheel_is_ignored_without_alternate_scroll_or_with_shift() {
+        // Karar tablosunun üçüncü satırı: alternate screen'de ok yoksa tekerlek
+        // **yoksayılır** — birincil ekranın geçmişine de inmez. Birincil
+        // ekranda geçmiş var (`seq`) ki kip kapısı olmasa kaydırmanın
+        // gidebileceği bir yer olsun.
+        //
+        // Sonuç `Ignored` — `Scrolled(0)` **değil**: alacritty alternate grid'i
+        // geçmişsiz kuruyor (`Grid::new(.., 0)`), yani kapı silinse de ofset
+        // oynamaz ve kare istenmezdi. Ayrım tipte ve sınamanın kendisi.
+        let (shifted, wake) = dump_session(40, "seq 1 30; printf '\\033[?1049h'", |mode| {
+            mode.contains(TermMode::ALT_SCREEN)
+        });
+        assert_eq!(
+            shifted.scroll_wheel(3, at(0, 0, CellHalf::Left), true),
+            Wheel::Ignored
+        );
+        // Sıfır satır da sessiz: boş `Msg::Input` `EventLoop`'un yazıcısını
+        // kalıcı olarak kilitlerdi (`Adapter::reply`).
+        assert_eq!(scroll(&shifted, 0), Wheel::Ignored);
+        // Sayfa yolu tablodan geçmiyor: `bt-shell` bu `None`'da Shift+PgUp'ı
+        // uygulamaya düz PgUp olarak veriyor.
+        assert_eq!(shifted.scroll_page(1), None);
+        expect_sent(&shifted, &wake, b"");
+
+        // `\e[?1007l`: uygulama tekerleğin ok olmasını istemedi. 1007 önce
+        // kapanıyor ki hazır olma işareti (1049) ikisinin de işlendiğini söylesin.
+        let (plain, wake) =
+            dump_session(40, "seq 1 30; printf '\\033[?1007l\\033[?1049h'", |mode| {
+                mode.contains(TermMode::ALT_SCREEN)
+            });
+        assert_eq!(scroll(&plain, 3), Wheel::Ignored);
+        assert!(
+            plain.frame(|_| ()).is_none(),
+            "yoksayılan tekerlek kare istedi"
+        );
+        expect_sent(&plain, &wake, b"");
+    }
+
+    #[test]
+    fn wheel_to_the_app_requests_no_frame() {
+        // Rapor ya da ok göndermek kare **istemez**: uygulama ekranını yeniden
+        // çizince okuyucunun `Wakeup`'ı kareyi getirir. Boşta sıfır kare. Yankı
+        // yok (`-echo`) ve gönderilen bayt 16'nın altında, yani `od` da basmıyor:
+        // kare isteyebilecek tek aday gönderimin kendisi.
+        let (arrows, wake) = dump_session(40, "printf '\\033[?1049h'", |mode| {
+            mode.contains(TermMode::ALT_SCREEN)
+        });
+        let woken = wakes(&wake);
+        assert_eq!(scroll(&arrows, 3), Wheel::Sent);
+        assert!(arrows.frame(|_| ()).is_none(), "ok kare istedi");
+        assert_eq!(wakes(&wake), woken, "ok uyandırdı");
+
+        let (reports, wake) = dump_session(40, "printf '\\033[?1000h\\033[?1006h'", |mode| {
+            mode.contains(TermMode::SGR_MOUSE)
+        });
+        let woken = wakes(&wake);
+        assert_eq!(scroll(&reports, 1), Wheel::Sent);
+        assert!(reports.frame(|_| ()).is_none(), "rapor kare istedi");
+        assert_eq!(wakes(&wake), woken, "rapor uyandırdı");
     }
 
     #[test]
@@ -2656,7 +3003,7 @@ mod tests {
         // yapmıyor.
         let (session, _wake) = history_session("seq 1 30; sleep 5");
 
-        assert_eq!(session.scroll_display(5), Some(5));
+        assert_eq!(scroll(&session, 5), Wheel::Scrolled(5));
         wait_settled(&session);
         session.write(b"x");
         assert_eq!(display_offset(&session), 0, "yazma dibe döndürmedi");
@@ -2666,13 +3013,23 @@ mod tests {
         assert!(cursor.visible, "{cursor:?}");
 
         // Yapıştırma da aynı kapıdan: `paste` → `write_owned`.
-        assert_eq!(session.scroll_display(5), Some(5));
+        assert_eq!(scroll(&session, 5), Wheel::Scrolled(5));
         session.paste(b"y".to_vec());
         assert_eq!(display_offset(&session), 0, "yapıştırma dibe döndürmedi");
 
+        // Ok tuşu da: kip sorusuyla dibe dönüş aynı kilitte.
+        assert_eq!(scroll(&session, 5), Wheel::Scrolled(5));
+        wait_settled(&session);
+        session.write_arrow(Arrow::Up);
+        assert_eq!(display_offset(&session), 0, "ok tuşu dibe döndürmedi");
+        assert!(
+            session.frame(|_| ()).is_some(),
+            "ok tuşunun dibe dönüşü kare istemeli"
+        );
+
         // Boş girdi pencereye dokunmaz: yazılacak bayt yoksa dibe dönmek de
         // yok (ve `Term` kilidi hiç alınmaz).
-        assert_eq!(session.scroll_display(5), Some(5));
+        assert_eq!(scroll(&session, 5), Wheel::Scrolled(5));
         session.write(b"");
         session.paste(Vec::new());
         assert_eq!(display_offset(&session), 5, "boş girdi pencereyi oynattı");
@@ -2691,7 +3048,7 @@ mod tests {
         let press = at(1, 8, CellHalf::Right);
         session.set_selection(press, press);
         // Tekerlek üç satır geriye, fare pencerenin tepesine: orada artık `19`.
-        assert_eq!(session.scroll_display(3), Some(3));
+        assert_eq!(scroll(&session, 3), Wheel::Scrolled(3));
         session.update_selection(at(0, 0, CellHalf::Left));
 
         let text = session.selection_text().expect("seçim metni");
