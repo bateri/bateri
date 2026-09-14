@@ -374,7 +374,7 @@ alacritty'de de aynı. Göz kontrolüne bu yüzden girmedi.
 - [x] Test: `\e[?1000h` (SGR yok) altında düz kodlama doğru; `\e[?1005h` altında `pos >= 95` iki bayt; sınırı aşan koordinatta hiçbir şey gitmiyor
 - [x] Test: fare kipi alternate scroll'dan önce geliyor; `\e[?1007l` ve Shift altında hiçbir şey gitmiyor
 - [x] Test: rapor/ok göndermek kare istemiyor (kirli bayrağı dikilmiyor)
-- [ ] `[elle]` göz kontrolü: `man ls` ve `less` tekerlek + trackpad'le kayıyor; `less`'te klavye okları çalışıyor; `nvim` (ya da `.vimrc`'siz `vim`) ve `htop` tekerlekle kayıyor; birincil ekranda geçmişe kaydırma bozulmadı
+- [x] `[elle]` göz kontrolü: `man ls` ve `less` tekerlek + trackpad'le kayıyor; `less`'te klavye okları çalışıyor; `nvim` (ya da `.vimrc`'siz `vim`) ve `htop` tekerlekle kayıyor; birincil ekranda geçmişe kaydırma bozulmadı — kullanıcı 2026-09-15'te `make kur` paketi (`87034aa` sonrası) üstünde denedi: "tamam güzel çalışıyor"
 - [x] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu**, kilit yolu değişirse `make test-yaris`)
 - [x] `/simplify` çalıştırıldı, bulgular uygulandı
 - [x] `/code-review` çalıştırıldı, bulgular giderildi

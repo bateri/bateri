@@ -261,7 +261,7 @@ kaydırmaz.
 - [x] Alternate screen'de yoksayma `bt-core` kipiyle (`None`; ayrım tipte, gerekçe notlarda)
 - [x] Test: kaydırma `display_offset`'i oynatıyor + kirli dikiliyor (`scroll_moves_the_display_offset_and_marks_dirty` — uyandırmayı ve uçta sessizliği de soruyor; kirli bayrağı ve uyandırma mutasyonla kırmızı)
 - [x] Test: alternate screen'de tekerlek yoksayılıyor (`alternate_screen_ignores_scroll` — kapısız taslakta `Some(0)` ile kırmızı)
-- [ ] `[elle]` göz kontrolü: tekerlekle geçmişe git, alternate screen'de sus — ayrıca: trackpad'le yavaş kaydırma satır üretiyor mu; tuşu basılı tutup tekerlek/Shift+PgUp ile geçmişe inince seçim uzuyor mu (phase-1 devri); geçmişe bakarken yaz → dibe dönüyor mu; `less`'te Shift+PgUp sayfa çeviriyor mu
+- [x] `[elle]` göz kontrolü: tekerlekle geçmişe git, alternate screen'de sus — ayrıca: trackpad'le yavaş kaydırma satır üretiyor mu; tuşu basılı tutup tekerlek/Shift+PgUp ile geçmişe inince seçim uzuyor mu (phase-1 devri); geçmişe bakarken yaz → dibe dönüyor mu; `less`'te Shift+PgUp sayfa çeviriyor mu — kullanıcı 2026-09-15'te `make kur` paketi (`87034aa` sonrası) üstünde denedi: "tamam güzel çalışıyor"
 - [x] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu**) — kapı sonrası son hâlde: `make hepsi` exit 0 · `make duman` exit 0 (`kare=1 hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke istek=2 kapanis=clean profil=debug ornek=off pipeline=ok`) · `make test-yaris` exit 0 (yeni `Term` kilidi yerleri ve girdi yolunda kilit → gerekli)
 - [x] `/simplify` çalıştırıldı, bulgular uygulandı (4 mercek; atlananlar gerekçesiyle notlarda)
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (15 bulgu; DECSET 1007 waive önerisi notlarda)

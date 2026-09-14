@@ -387,7 +387,7 @@ listesi `NSLocale`'i kapsamıyorsa düzelt.
 - [x] Test: çalışma dizini verilince çocuğun `pwd`'si o dizin; verilmeyince miras
 - [x] Test: ek ortam çocuğa ulaşıyor, `TERM`'ü ezemiyor
 - [x] Test: yerel kararı — `LANG`/`LC_ALL`/`LC_CTYPE` tanımlıysa hiçbir şey; boş değer tanımsız sayılıyor; geçerli sistem yereli → `LANG`; geçersiz → `LC_CTYPE=UTF-8`
-- [ ] `[elle]` göz kontrolü: `make kur`, `bateri.app`'i Dock'tan aç → `pwd` ev dizini, `echo $LANG $LC_CTYPE` beklenen değer, `ğüşıöç İ` yazınca doğru görünüyor; `cargo run` ile terminalden açınca da ev dizininde başlıyor ve kendi `LANG`'ını koruyor
+- [x] `[elle]` göz kontrolü: `make kur`, `bateri.app`'i Dock'tan aç → `pwd` ev dizini, `echo $LANG $LC_CTYPE` beklenen değer, `ğüşıöç İ` yazınca doğru görünüyor; `cargo run` ile terminalden açınca da ev dizininde başlıyor ve kendi `LANG`'ını koruyor — kullanıcı 2026-09-15'te `make kur` paketi (`87034aa` sonrası) üstünde denedi: "tamam güzel çalışıyor"
 - [x] Doğrulama geçti (`proje.md` → Doğrulama; `make duman` **zorunlu**; `make kur` koşar)
 - [x] `/simplify` çalıştırıldı, bulgular uygulandı
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (12 bulgu; 8 giderildi, 2 WAIVE önerisi, 2 atlandı — notlarda)
