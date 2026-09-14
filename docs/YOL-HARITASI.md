@@ -15,10 +15,10 @@ yaptığını** söyler, burası **bizim hangi sırayla yapacağımızı**.
 
 ## Günlük kullanım eşiği
 
-Projenin bugünkü hâli bir pencere: içinde gerçek shell koşuyor ve metin
-kalın/eğik/altı çizili/üstü çizili doğru çiziliyor. Ama **kopyalanamıyor,
-yapıştırılamıyor, seçilemiyor, kaydırılamıyor.** Yani sınanabilir ama
-kullanılamaz.
+006'dan önce proje bir pencereydi: içinde gerçek shell koşuyor ve metin
+kalın/eğik/altı çizili/üstü çizili doğru çiziliyordu. Ama **kopyalanamıyor,
+yapıştırılamıyor, seçilemiyor, kaydırılamıyordu.** Yani sınanabilirdi ama
+kullanılamazdı.
 
 Eşik şu: **bateri'yi kendi terminalim olarak açabildiğim gün.** Bu tarihin
 kendisi bir kilometre taşıdır, çünkü ondan sonra hatalar sınamadan değil
@@ -30,11 +30,17 @@ bulunamaz.
 | 005 | ölçüm kancaları | 002, 003 ve 004'ün bekleyen on iki iddiası tek bir kanca setine bağlı. Taban, **bir sonraki büyük render değişikliğinden önce** alınırsa "hangi set yavaşlattı" sorusu cevaplanabilir olur; sonra alınırsa o soru kalıcı olarak cevapsız kalır. `docs/OLCUMLER.md` bilerek **kapsam dışı** bırakıldı (onu ilk `/measure` kurar) ve bench (`criterion`) de öyle; **bench'in dışarıda kalması** on ikinin ikisini bu setten sonra da açık bırakıyor — ikisi de saf `cargo bench` iddiası |
 | 006 | pano + seçim + kaydırma + bundle | **Eşiği tek hamlede geçmek için bilerek şişirilmiş set.** Cila feda edilir: yapıştır, kopyala, fareyle seçim, tekerlek, `.app` bundle. Bundle burada çünkü bundle'sız süreç öne çıkamıyor, Dock ikonu almıyor ve varsayılan terminal olamıyor. 002'nin ertelenmiş Apache-2.0 attribution'ı da burada kapanır. **Bundle'ın bir yan ödevi var:** görünür pencere meşru kare sayısını değiştirir, yani `IDLE_FRAME_LIMIT` (boşta sıfır kare kapısı) bu sette **yeniden ölçülmeli** — bugünkü değeri görünmeyen bir pencerede ölçüldü *(sonradan: 006 phase-5 yoklamasında bundle'sız `make duman` penceresi de ekranda ve öndeydi; 005'in penceresi ise yoklanmamıştı, yani iki gerekçe de ölçülmüş değildi — sonuç `docs/OLCUMLER.md` → `## Boşta kare`)* |
 
-> **006'nın kapsamı henüz kesin değil.** İki seçenek tartışıldı: (a) düzenli
-> sıra — pano, kaydırma, ayar, bundle ayrı setler; (b) tek hamlede eşik.
-> Şu anki tercih **(b)**, gerekçesi yukarıdaki "kullanımın bulduğu hatalar"
-> argümanı; bedeli setin normalden büyük olması. Karar `/rfc 006` açılırken
-> kesinleşir ve o setin `discussion.md`'sine damgalanır.
+> **006'nın kapsamı — karar verildi (2026-09-12).** Tek hamlede eşik **(b)**
+> tutuldu: panel üç koldan bundle'ın ayrı sete çıkmasını önerdi, kullanıcı
+> reddetti — Dock ikonu ve öne çıkma olmadan günlük kullanıma geçilemez, yani
+> "kullanımın bulduğu hatalar" argümanı bundle'sız işlemiyor; OSC 52 köprüsü
+> ise panelin önerisiyle 007'ye ertelendi. Set sonra yine kullanıcı
+> kararlarıyla büyüdü ve beş phase'lik plan dokuza çıktı: tam ekran uygulamada
+> tekerlek (3b, Karar 4 eki), Dock açılışında ev dizini ve yerel (4b, Karar 6
+> eki), yerel yedeği (4c, aynı ekin son maddesi), seçim ve klavye rötuşu (4d,
+> Kapsam eki) — dördü de kalite kapısının (`/code-review`) bulgularından doğdu.
+> Kayıt `.tasks/006-gunluk-kullanim-esigi/discussion.md`'de, durumu
+> `.tasks/README.md`'de.
 
 ## Eşikten sonra
 
@@ -50,6 +56,17 @@ bulunamaz.
 Sonrası (sırasız): hareket/motion, materyal yüzey (`substrate` shader'ı,
 grain/sheen), palet ve arama overlay'leri, durum çubuğu, Sparkle ile
 güncelleme.
+
+> **Açık soru — hareket/motion nereye oturur?** Kullanıcı 2026-09-14'te
+> "animasyon senaryolarına bu rfc bitince bir değerlendireceğiz" dedi;
+> değerlendirme henüz yapılmadı. Orkestratörün önerisi (**kullanıcı
+> onaylamadı**): hareket toplu bir set değil, parça parça gelsin —
+> (1) altyapı + imleç kayması 008'den sonra, çünkü ayarlar (007) ve geniş
+> glyph (008) o zaman oturmuş olur ve aşağıdaki "boşta kare kapısı yavaş bir
+> animasyonu kaçırır" borcu ilk animasyondan **önce** çözülmeli;
+> (2) blok animasyonları 011 (komut blokları) ile; (3) yazma animasyonları
+> (tuş vuruşu, silme) 012 (Input Dock) ile. Yukarıdaki sıra bu öneri yüzünden
+> **değişmedi**; karar verilince gerekçesiyle değişir.
 
 ## Sete bağlanmamış borçlar
 
@@ -97,3 +114,39 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   `.tasks/004-yazi-bicimleri/teslim.md` ile phase-3'ün `## Uygulama
   Notları`'nda. Sete bağlanmadı; ilgili dosyaya meşru biçimde dokunan ilk set
   toplar.
+- **Pencereye duyarlı hasar yok.** Geçmişe kaydırılmış pencerede akan çıktı,
+  ekranda hiçbir şey değişmediği hâlde her `Wakeup`'ta kare istiyor: `dirty`
+  bayrağı pencereyi bilmiyor. **Boşta değil, çıktı akarken** — yukarıdaki
+  boşta kare borcundan ayrı bir iş. Kaydırma (006) görünür kıldı, getirmedi;
+  maliyeti ölçülmedi. Kaynak: 006 `phase-3.md` → `/audit` mercek 8 ve
+  orkestratör kararı; `bt-core`'da `AdapterInner::dirty`'nin doc'u.
+- **Fare raporlamasının geri kalanı.** 006 yalnız tekerlek kolunu getirdi
+  (SGR, UTF-8, düz kodlama). Eksik: tıklama/sürükleme/hareket raporu,
+  değiştirici bitleri (bugün `0`), yatay tekerlek, SGR-pixel. Görünen bedeli:
+  `mouse=a` açık vim'de tıklama imleci taşımıyor, seçim yapıyor. Tıklama
+  raporu seçimle çakışır, yani 006'nın seçim modelini (Karar 1) yeniden açar.
+  Kaynak: 006 `phase-3b.md` → Kapsam dışı; 006 `discussion.md` → Karar 4 eki.
+- **Klavye kalanları.** Home/End bilerek yutuluyor (terminfo `khome`/`kend`,
+  oklar gibi DECCKM'e bağlı; yutmayı bağlayan sınama duruyor). Değiştiricili
+  oklar (`\e[1;5A` vb.) yok. Ctrl+Shift+Tab `0x19` (readline/zle `yank`)
+  gönderiyor, Ctrl+numpad Enter aynı yapıdan `0x03` — ikisi de gerçek
+  klavyede doğrulanmadı; aday çare `charactersIgnoringModifiers`'ı
+  `encode_key`'e geçirmek. Kaynak: 006 `phase-4d.md` → Uygulama Notları ve
+  orkestratör kararı (WAIVE (1)); 006 `phase-3b.md` → Kapsam dışı.
+- **Yerel ara kolu.** Kabuğun dili `preferredLanguages`'ın yalnız dil alt
+  etiketinden alınıyor, etiketin kendi bölgesi atılıyor: `en-GB` dili + `TR`
+  bölgesi → `en_TR` kurulu değil → `LANG=en_US.UTF-8`, oysa `en_GB.UTF-8`
+  kurulu. `{dil}_{etiket bölgesi}` ara kolu bir ürün kararı; düşüş `en_US`
+  olduğu için etkisi görünür (ABD tarih biçimi). Kaynak: 006 `phase-4c.md` →
+  `/code-review` WAIVE (5) ve orkestratör kararı.
+- **Küçük hijyen.** `make kur` boş hedef dizinini denetlemiyor — bugün
+  zararsız. Pano sınamaları oluşturdukları geçici panoları bırakmıyor
+  (`releaseGlobally` yok) — kullanıcıya görünmez. İkisi de doğrulanmadı;
+  kullanıcı 006'ya almadı. Kaynak: 006 `phase-4c.md` → `/code-review` (8),
+  (9); 006 `discussion.md` → Kapsam eki.
+- **Paket dumanı.** Paketten açılan duman/ölçüm koşusu bugün elle yazılan bir
+  `open` komutu; bir `Makefile` hedefi `docs/OLCUMLER.md` → `## Nasıl yeniden
+  ölçülür`'deki dört tuzağın üçünü tasarımla kapatır. Aynı işe bir cümle
+  daha: `report_and_exit`'in doc'u kapı düşünce jeton satırının basılmadığını
+  ve tanının stderr'e gittiğini söylemiyor. Kaynak: 006 `phase-5.md` →
+  `/simplify` takip önerisi ve orkestratör kararı.
