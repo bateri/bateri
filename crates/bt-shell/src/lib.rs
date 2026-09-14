@@ -5,10 +5,12 @@
 //! de sürmez: pencereyi, oturumu ve display link'i birbirine bağlar, gerisi
 //! `bt-gpu`'nun ritmidir. Klavye buradan PTY'ye akar (`keys`, `view`,
 //! `clipboard`), fare de buradan oturuma (seçim ve kaydırma, `view`);
-//! kapanış sırasının sahibi de bu crate. Tek pencere; sekme, bölme, menü ve
-//! IME sonraki setlerde.
+//! kabuğun hangi dizinde ve hangi yerelle açılacağına (`child`) ve kapanış
+//! sırasına da bu crate karar verir. Tek pencere; sekme, bölme, menü ve IME
+//! sonraki setlerde.
 
 pub(crate) mod app;
+mod child;
 mod clipboard;
 mod keys;
 mod view;
