@@ -1,0 +1,124 @@
+//! Paket girdilerinin içerik denetimi (006 phase-4).
+//!
+//! Ayrı bir `tests/` sınaması değil, bin'in birim test demetinde: o demet
+//! `make hepsi`'de zaten bağlanıyor. `tests/` altında dursaydı cargo her
+//! koşuda uygulama binary'sini de ayrıca bağlardı (`CARGO_BIN_EXE_*`).
+//!
+//! Neden var: `alacritty_terminal` Apache-2.0 ve lisans metni `.app` ile
+//! birlikte gitmek zorunda. Metin ya da atıf silinirse hiçbir derleme,
+//! clippy ya da duman koşusu kızarmaz — ihlal **sessiz** olur. Bu sınama
+//! `make hepsi`'de koşar ve girdileri (`assets/bundle/`) denetler.
+//!
+//! Kapsamadığı: girdilerin pakete **kopyalanıp kopyalanmadığı**. Ürün yalnız
+//! `make kur`'da doğuyor ve onu `kur`'un kendi denetimi görüyor; burada
+//! tekrarlanmıyor, çünkü sınamanın ürünü kurması için release derlemesi
+//! gerekirdi.
+//!
+//! `plutil` bir macOS aracı; bu crate de zaten yalnız macOS'ta derleniyor
+//! (`bt-shell` → AppKit).
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn asset(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/bundle")
+        .join(name)
+}
+
+fn read_asset(name: &str) -> String {
+    let path = asset(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} okunamadı: {e}", path.display()))
+}
+
+/// Şablondan tek anahtarın ham değeri; anahtar yoksa `None`.
+fn plist_value(key: &str) -> Option<String> {
+    let out = Command::new("plutil")
+        .args(["-extract", key, "raw", "-o", "-"])
+        .arg(asset("Info.plist.in"))
+        .output()
+        .expect("plutil çalıştırılamadı");
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+#[test]
+fn info_plist_template_launches_the_binary() {
+    let lint = Command::new("plutil")
+        .arg("-lint")
+        .arg(asset("Info.plist.in"))
+        .output()
+        .expect("plutil çalıştırılamadı");
+    assert!(
+        lint.status.success(),
+        "Info.plist.in geçerli bir plist değil: {}{}",
+        String::from_utf8_lossy(&lint.stdout),
+        String::from_utf8_lossy(&lint.stderr)
+    );
+    // Çalıştırılabilir adı bin hedefinden okunuyor, elle yazılmıyor: ikisi
+    // ayrışırsa LaunchServices paketi açamaz ve belirti Finder'da "uygulama
+    // açılamıyor" iletisidir, derleme değil.
+    assert_eq!(
+        plist_value("CFBundleExecutable").as_deref(),
+        Some(env!("CARGO_BIN_NAME"))
+    );
+    assert_eq!(plist_value("CFBundlePackageType").as_deref(), Some("APPL"));
+    assert!(
+        plist_value("CFBundleIdentifier").is_some_and(|id| !id.is_empty()),
+        "CFBundleIdentifier yok"
+    );
+    // GPU'nun çizdiği bir terminal Retina'da bulanık açılmasın.
+    assert_eq!(
+        plist_value("NSHighResolutionCapable").as_deref(),
+        Some("true")
+    );
+    let icon = plist_value("CFBundleIconFile").expect("CFBundleIconFile yok");
+    assert!(
+        asset(&format!("{icon}.png")).is_file(),
+        "ikon kaynağı yok: assets/bundle/{icon}.png"
+    );
+}
+
+/// Sürüm ve taban macOS şablona **yazılmaz**: `make kur` sürümü `Cargo.toml`'dan,
+/// tabanı binary'nin `minos`'undan (o da `.cargo/config.toml`'dan) doldurur.
+/// Şablonda düz bir `14.0` görmek, taban yükseldiğinde paketin eski sayıyla
+/// kalacağı demek. Yer tutucuların şablon içinde bir açıklaması yok, çünkü
+/// `sed` açıklamayı da doldurup ürüne sızdırırdı; açıklama `Makefile`'ın
+/// `kur` yorumunda.
+#[test]
+fn info_plist_template_derives_version_and_minimum_os() {
+    assert_eq!(
+        plist_value("LSMinimumSystemVersion").as_deref(),
+        Some("@MACOS_MIN@")
+    );
+    assert_eq!(
+        plist_value("CFBundleShortVersionString").as_deref(),
+        Some("@VERSION@")
+    );
+    assert_eq!(plist_value("CFBundleVersion").as_deref(), Some("@VERSION@"));
+}
+
+/// Apache-2.0 §4(a): alıcıya lisansın bir kopyası verilir. Atıf metni
+/// (`Credits.html`) AppKit'in standart About panelinin okuduğu dosya.
+#[test]
+fn third_party_license_ships_with_attribution() {
+    let licenses = read_asset("THIRD-PARTY-LICENSES.txt");
+    for needle in ["alacritty_terminal", "Apache License", "Version 2.0"] {
+        assert!(
+            licenses.contains(needle),
+            "THIRD-PARTY-LICENSES.txt içinde {needle:?} yok"
+        );
+    }
+    let credits = read_asset("Credits.html");
+    for needle in [
+        "alacritty_terminal",
+        "Apache License",
+        "THIRD-PARTY-LICENSES.txt",
+    ] {
+        assert!(
+            credits.contains(needle),
+            "Credits.html içinde {needle:?} yok"
+        );
+    }
+}

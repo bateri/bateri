@@ -1,5 +1,8 @@
 //! bateri — uygulama girişi.
 
+#[cfg(test)]
+mod bundle_assets;
+
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
