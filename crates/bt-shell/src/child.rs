@@ -55,7 +55,7 @@ fn home_directory(home: Option<PathBuf>) -> Option<PathBuf> {
 /// yerelleştirmesinden seçilen dili veriyor — `bateri.app` `.lproj`
 /// taşımıyor ve `CFBundleDevelopmentRegion` `en`, yani her Dock açılışında
 /// `en`. Paketle yoklandı (`-AppleLanguages (tr-TR) -AppleLocale tr_TR`):
-/// Türk kullanıcı `tr_TR.UTF-8` yerine `LC_CTYPE=UTF-8`, `fr-CA` kullanıcı
+/// Türk kullanıcı `tr_TR.UTF-8` yerine düşüş yerelini, `fr-CA` kullanıcı
 /// `fr_CA.UTF-8` yerine `en_CA.UTF-8` alıyordu. `cargo run` (paketsiz)
 /// doğru dili verdiği için hata orada görünmüyordu. alacritty
 /// `currentLocale`'i kullanıyor; izlenmedi.
@@ -85,21 +85,30 @@ pub(crate) fn locale_env() -> Option<(String, String)> {
 ///    Değerin geçerliliği sorulmuyor — `LANG=C` de dokunulmaz.
 /// 2. Değilse ve `{dil}_{bölge}.UTF-8` kuruluysa → `LANG` o ad.
 /// 3. Değilse (bölge yok, ya da ör. İngilizce dil + Türkiye bölgesi →
-///    `en_TR.UTF-8` yok) → `LC_CTYPE=UTF-8`: mesajlar İngilizce kalır ama
-///    UTF-8 girişi çalışır. alacritty'nin düşüşüyle aynı.
+///    `en_TR.UTF-8` yok) → `LANG=en_US.UTF-8`: mesajlar İngilizce; tarih,
+///    sayı biçimi ve sıralama `en_US`'ninki, ama UTF-8 girişi çalışır.
 ///
-/// **`LC_ALL` değil `LANG`**, en zayıf değişken (Terminal.app'in yaptığı):
-/// kabuğun rc dosyası kendi `LC_*`'ını üstüne yazabilsin. alacritty
-/// `LC_ALL` yazıyor ve o, rc'deki her `LC_*`'ı ezer. Düşüş kolunda bu söz
-/// **daralıyor**: `LC_CTYPE`, `LANG`'dan güçlü, yani rc'de yalnız `LANG`
-/// değiştiren kullanıcının karakter sınıfı `UTF-8` kalır — değiştirmek için
-/// `LC_CTYPE` ya da `LC_ALL` gerekir.
+/// **`LC_ALL` değil `LANG`**, yazan iki kolda da: en zayıf değişken
+/// (Terminal.app'in yaptığı), kabuğun rc dosyası kendi `LC_*`'ını üstüne
+/// yazabilsin. alacritty `LC_ALL` yazıyor ve o, rc'deki her `LC_*`'ı ezer.
 ///
-/// **Bilinen bedel (düşüş kolu):** `LC_CTYPE=UTF-8` macOS'ta geçerli ama
-/// Linux'ta yerel adı değil, ve macOS'un `ssh_config`'i `LC_*`'ı uzak
+/// **Düşüş `LC_CTYPE=UTF-8` değil** — alacritty ve iTerm2'nin düşüşünden
+/// bilerek ayrılıyoruz. `UTF-8` macOS'ta geçerli bir `LC_CTYPE` ama Linux'ta
+/// yerel adı değil, ve macOS'un `ssh_config`'i `LANG` ile `LC_*`'ı uzak
 /// makineye taşıyor (`SendEnv LANG LC_*`): oradaki araçlar `setlocale`
-/// uyarısı basıp `C`'ye düşer. Düşüşün kendisi kullanıcı kararı
-/// (`discussion.md` → Karar 6 eki).
+/// uyarısı basıp `C`'ye düşerdi. `en_US.UTF-8` Linux'ta da bir yerel adı ve
+/// sunucuların çoğunda kurulu; kurulu olmayanda (ör. yalnız `C.UTF-8`
+/// taşıyan bir imaj) uyarı yine çıkar — `LANG=en_US.UTF-8` veren her
+/// terminalin bedeli. Üstelik `LC_CTYPE` `LANG`'dan güçlü: rc'de yalnız
+/// `LANG` değiştiren kullanıcının karakter sınıfını da kilitlerdi.
+/// Kullanıcı kararı (`discussion.md` → Karar 6 eki, son madde).
+///
+/// `en_US.UTF-8`'in kurulu olup olmadığı **sorulmuyor**: `bt-shell` yalnız
+/// macOS'ta derleniyor ve o yerel sistemle geliyor (`/usr/share/locale`
+/// salt okunur sistem biriminde). "O da yoksa `LC_CTYPE=UTF-8`" diye bir
+/// son çare hiç koşmayacak bir dal olurdu. İkisinin karakter sınıfı zaten
+/// aynı dosya: `en_US.UTF-8/LC_CTYPE` → `../C.UTF-8/LC_CTYPE`, o da
+/// `UTF-8/LC_CTYPE` ile aynı inode.
 fn decide_locale(
     env: impl Fn(&str) -> Option<OsString>,
     system: Option<(String, String)>,
@@ -111,12 +120,11 @@ fn decide_locale(
     if defined {
         return None;
     }
-    Some(
-        match system.map(|(language, region)| format!("{language}_{region}.UTF-8")) {
-            Some(name) if installed(&name) => ("LANG".to_owned(), name),
-            _ => ("LC_CTYPE".to_owned(), "UTF-8".to_owned()),
-        },
-    )
+    let name = system
+        .map(|(language, region)| format!("{language}_{region}.UTF-8"))
+        .filter(|name| installed(name))
+        .unwrap_or_else(|| "en_US.UTF-8".to_owned());
+    Some(("LANG".to_owned(), name))
 }
 
 /// Yerel kurulu mu: `/usr/share/locale/{ad}` dizini var mı.
@@ -207,21 +215,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_system_locale_falls_back_to_utf8_ctype() {
+    fn missing_system_locale_falls_back_to_en_us_lang() {
         // Bu makinenin hâli: İngilizce dil + Türkiye bölgesi, `en_TR.UTF-8`
         // yok (`ls /usr/share/locale`).
         let decided = decide_locale(env_of(&[]), system("en", "TR"), |name| {
             name == "tr_TR.UTF-8"
         });
-        assert_eq!(decided, pair("LC_CTYPE", "UTF-8"));
+        assert_eq!(decided, pair("LANG", "en_US.UTF-8"));
     }
 
     #[test]
-    fn locale_without_region_falls_back_to_utf8_ctype() {
+    fn locale_without_region_falls_back_to_en_us_lang() {
         // Bölgesiz yerelden (`en`) `{dil}_{ülke}` kurulamaz. Her ad "kurulu"
         // diyen sorgu bu dalın varlık sorgusundan geçmediğini gösteriyor.
         let decided = decide_locale(env_of(&[]), None, |_| true);
-        assert_eq!(decided, pair("LC_CTYPE", "UTF-8"));
+        assert_eq!(decided, pair("LANG", "en_US.UTF-8"));
     }
 
     #[test]

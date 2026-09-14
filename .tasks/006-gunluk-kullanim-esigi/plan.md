@@ -128,5 +128,5 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 | phase-3b | ✅ | 100ecfa | `[elle]` göz kontrolü tamam (2026-09-15); WAIVE önerisi: `CLAUDE.md` `bt-core` satırına girdi kodlaması (`phase-3b.md`) |
 | phase-4 | ✅ | dd46e85 | `[elle]` göz kontrolü tamam (2026-09-15); WAIVE önerisi: Dock açılışında `cwd=/` + `LANG` (`phase-4.md`) |
 | phase-4b | ✅ | 87034aa | `[elle]` göz kontrolü tamam (2026-09-15) (gerçek Dock açılışı, Türkçe giriş); paketli açılış yoklamayla kanıtlandı (`phase-4b.md`) |
-| phase-4c | | | kullanıcının phase-3/3b/4/4b göz kontrolünden sonra |
+| phase-4c | ✅ | | Düşüş `LANG=en_US.UTF-8`; paketli yoklamada bu makinenin (`en` + `TR`) kabuğu `LANG=en_US.UTF-8` görüyor; WAIVE önerileri: `/code-review` (4) `C.UTF-8`, (5) dil etiketinin bölgesi (`phase-4c.md`) |
 | phase-5 | | | phase-4c'den sonra; pencere açıp kapatır — kullanıcı bilgisayarı kullanmıyorken |

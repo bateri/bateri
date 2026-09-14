@@ -154,7 +154,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   açılışta ev dizininde başlar (`HOME`, yoksa passwd kaydı; mutlak değilse miras) ve ortamda
   `LC_ALL`/`LC_CTYPE`/`LANG`'dan hiçbiri boş olmayan bir değer taşımıyorsa
   macOS'un dil/bölge ayarından `LANG={dil}_{bölge}.UTF-8` alır; o yerel
-  `/usr/share/locale`'de yoksa `LC_CTYPE=UTF-8`. Dil
+  `/usr/share/locale`'de yoksa `LANG=en_US.UTF-8` — alacritty'nin
+  `LC_CTYPE=UTF-8`'i değil, SSH onu Linux'a taşıyınca `setlocale` uyarısı
+  verir (006 phase-4c; gerekçe `child::decide_locale`'in doc'unda). Dil
   `NSLocale.preferredLanguages`'tan okunur: paketin içinde
   `currentLocale().languageCode` kullanıcının değil **paketin** dilini
   (`en`) verir ve `cargo run` bunu göstermez. Kendi sürecimizde
