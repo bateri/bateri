@@ -245,4 +245,4 @@ koşulu koddan okundu (`/code-review`).
 - [x] `/code-review` çalıştırıldı, bulgular giderildi
 - [x] `/audit` çalıştırıldı, bulgular giderildi
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: 32f28b2
