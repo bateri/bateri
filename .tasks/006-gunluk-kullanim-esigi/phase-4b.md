@@ -321,6 +321,25 @@ listesi `NSLocale`'i kapsamıyorsa düzelt.
   ardından yukarıdaki paketli yoklamalar. `make test-yaris` → 0
   (`/simplify` sonrası).
 
+
+- **Orkestratör kararları (2026-09-14).**
+  - sadakat: makas yok — `git show --stat 87034aa` (`bt-core` `session.rs`,
+    `bt-shell` `child.rs`/`app.rs`/`lib.rs`/`Cargo.toml`, `CLAUDE.md`,
+    `phase-4b.md`, `plan.md`) checklist'le örtüşüyor; `Cargo.lock`
+    değişmedi; `03f2fdb` yalnız hash damgası.
+  - Sapmalar (dilin `preferredLanguages`'tan okunması — paketin kendi dili
+    `en` dönüyordu; `regionCode`; `HOME` yoksa passwd kaydı; bölgesiz yerelin
+    düşüşe gitmesi; süreli koşunun da aynı kuralı alması) **kabul**: R4.4 ve
+    Yaklaşım 4b oynamadı.
+  - WAIVE (10) (boş olmayan her yerel değişkeni tanımlı sayma) **kabul**:
+    kılavuzun kendi kuralı.
+  - WAIVE (2) (düşüş kolunun `LC_CTYPE=UTF-8`'i SSH ile Linux'a taşınınca
+    `setlocale` uyarısı) **kullanıcıya soruldu**: bu makine tam o kolda
+    (`en` + `TR`), ve kullanıcının bugünkü terminali çocuğa
+    `LANG=en_US.UTF-8` veriyor (ajanın `cargo run` yoklaması). Düşüş biçimi
+    kullanıcının seçtiği şey değil, orkestratörün kılavuza koyduğu alacritty
+    düşüşüydü.
+
 ## Yayın Etkisi
 
 - **Davranış değişikliği — dizin:** kabuk her açılışta ev dizininde
