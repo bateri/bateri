@@ -64,10 +64,17 @@ imleç tersine çevirme, `session.rs:768-773`).
 - **Eşitlik kapısı** (`/code-review` bulgusu): `set_selection` aynı aralığı
   tekrar alınca sessiz dönüyor (`Selection: PartialEq`); aynı hücrede kalan
   `mouseDragged` yağmuru kare istemiyor.
+  > **Aşıldı (phase-2 sonrası, seçim yarısı düzeltmesi):** kapı artık uçları
+  > değil **ekranda çizilen aralığı** karşılaştırıyor (`visible_range`) —
+  > yarılı uçlarda aynı aralık farklı uç çiftlerinden doğabiliyor.
 - **`buttonNumber` + `mouseUp:`** (`/code-review` bulguları): sağ/orta tık
   seçim başlatmıyor; bırakış çapayı düşürüyor. Tek tık kalıcı tek-hücrelik
   seçim bırakır — phase-2'de Cmd-C onu kopyalar, temizleme davranışı (tıklayınca
   seçim kalksın mı) phase-2'nin kararı.
+  > **Aşıldı (phase-2 sonrası, seçim yarısı düzeltmesi):** tek tık artık **boş**
+  > seçimdir. Uçlar yarısını taşıyınca sürüklemesiz tıkın iki ucu birebir eşit
+  > olur ve alacritty onu boş sayar (`is_empty`); kopyalanacak metin yok.
+  > Ayrıntı → `phase-2.md` → `## Uygulama Notları` → "Kullanıcı bildirimi".
 - **Çapa viewport cinsinden** (`/code-review` bulgusu, phase-3'e devir):
   basılı-sürükleme sırasında kaydırma olursa çapa bayat kalır; aralık grid
   mutlağında tutulduğu için içerikle taşınıyor ama view'daki çapa taşınmıyor.
@@ -76,6 +83,9 @@ imleç tersine çevirme, `session.rs:768-773`).
 - **`point_to_cell` kenar asimetrisi** (iki inceleme de buldu): sol/üst
   dışarısı 0'a kırpılır (`f64 as u16` doygun), sağ/alt dışarısı yutulur
   (`None`). Doc'ta yazıyor; kırpma yönü `to_range`'ın kırpmasıyla aynı.
+  > **Aşıldı (phase-2 sonrası, seçim yarısı düzeltmesi):** sağ/alt dışarısı
+  > artık yutulmuyor, son hücreye yapışıyor (sağda sağ yarı). Yarı seçimi
+  > belirleyince yutmak satır sonunda son harfi kaybettiriyordu.
 - **Vurgu test çapası dersi**: `wait_cells` bg sayıyor, kare mürekkebi de
   taşıyor — `h…o` reçetesinde üçlük bg çapası `hello` mürekkepli karede erken
   dönüp seçim aralığını kaydırıyordu. Çapa mürekkep dizesine (`"hello"`) +

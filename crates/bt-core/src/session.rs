@@ -19,8 +19,8 @@ use std::time::Duration;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point, Side};
-use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::index::{Boundary, Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
@@ -523,6 +523,97 @@ pub enum Teardown {
     AlreadyDone,
 }
 
+/// Seçim ucunun hücre içindeki yeri.
+///
+/// Sınırı belirleyen budur: bir hücrenin seçime girip girmemesi **farenin o
+/// hücrenin ortasını geçip geçmediğine** bakar, yalnız hangi hücrede olduğuna
+/// değil. İki uçta da kural tek cümledir — hücre, ortası iki uç arasında
+/// kalıyorsa seçilir — ama ucun yarısı bu yüzden **aynaya bakar**: başlangıç
+/// ucunda sol yarı kendi hücresini seçime katar (sağ yarı sınırı bir sonraki
+/// hücrenin başına taşır), bitiş ucunda sağ yarı katar (sol yarı sınırı o
+/// hücrenin başına çeker).
+///
+/// Bu alan olmadan kullanıcı, hedeflediği harfin **hemen soluna** basar —
+/// doğal olan budur — ve o piksel bir önceki hücrenin sağ yarısına düşer;
+/// yarı taşınmadığı için önceki harf de kopyalanır (006'da bildirilen kusur).
+///
+/// Geniş karakterde "hücre" iki hücrelik **glyph**'tir: baş hücre glyph'in
+/// sol yarısı, spacer sağ yarısı sayılır (`anchor`). Hücre düzeyinde
+/// kalsaydı spacer'ın sol yarısında biten seçim harfi kopyalar ama yalnız
+/// yarısını vurgulardı.
+///
+/// Yarı alacritty'nin `Side`'ına birebir çevrilir, ama tip `pub` API'ye
+/// **çıkmaz**: `bt-core` alacritty'yi kapsüller (`lib.rs`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CellHalf {
+    Left,
+    Right,
+}
+
+/// Seçim ucu: hücre ve o hücrenin içindeki yarısı.
+///
+/// Hücre görünür pencere cinsindendir — [`Session::set_selection`] onu
+/// `display_offset` ile grid satırına indirir. Alanlar [`Cell`] ve [`Cursor`]
+/// gibi adlı (`col`, `row`): demet olsaydı sütun ile satırın yer değiştirmesi
+/// sessizce derlenirdi.
+///
+/// İki uç **eşit** verilebilir; bu sürüklemesiz tıktır ve alacritty böyle bir
+/// seçimi boş sayar (`is_empty`): aralık doğmaz, kopyalanacak metin olmaz.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SelectionPoint {
+    pub col: u16,
+    pub row: u16,
+    pub half: CellHalf,
+}
+
+/// Ucun alacritty karşılığı: nokta + yan. Eşleme **tek yerde**: iki uç için
+/// ayrı ayrı yazılsa biri `Left`/`Right` çevirmesinde kayabilir ve kayma
+/// sessiz olurdu.
+///
+/// İki normalizasyon, ikisi de yarının kuralını ([`CellHalf`]) alacritty'nin
+/// hücre düzeyindeki modeline taşımak için:
+///
+/// - **Geniş karakter:** baş hücre hep `Left`, spacer hep `Right` — yarı
+///   glyph'e uygulanır.
+/// - **Satır sonu:** son sütunun sağ yarısı, alt satırın başının sol yarısıyla
+///   aynı sınırdır ve öyle yazılır. alacritty ikisini ayrı tutuyor ve iki uç o
+///   sınırın iki yanına düşünce (arada hücre yok) üst satırın son hücresini
+///   seçiyor. Grid'in son satırında alt satır yok, orada dokunulmaz.
+///
+/// Bayrak okuması kırpılmış noktadan — `pub` API'ye grid dışı bir sütun
+/// gelirse indeksleme paniklemesin.
+fn anchor<T>(term: &Term<T>, point: Point, half: CellHalf) -> (Point, Side) {
+    let flags = term.grid()[point.grid_clamp(term, Boundary::Grid)].flags;
+    let side = if flags.contains(Flags::WIDE_CHAR) {
+        Side::Left
+    } else if flags.contains(Flags::WIDE_CHAR_SPACER) {
+        Side::Right
+    } else {
+        match half {
+            CellHalf::Left => Side::Left,
+            CellHalf::Right => Side::Right,
+        }
+    };
+    if side == Side::Right
+        && point.column == term.last_column()
+        && point.line < term.bottommost_line()
+    {
+        return (Point::new(point.line + 1, Column(0)), Side::Left);
+    }
+    (point, side)
+}
+
+/// Seçimin **ekranda** çizilen aralığı — `frame()`, kare kapısı ve temizleme
+/// hep bunu sorar, ki "çizili mi" sorusunun tek cevabı olsun. Çıktının
+/// görünür pencerenin üstüne ittiği bir aralık grid'de durur ama çizilmez.
+fn visible_range<T>(selection: Option<&Selection>, term: &Term<T>) -> Option<SelectionRange> {
+    let range = selection?.to_range(term)?;
+    let offset = term.grid().display_offset() as i32;
+    let top = Line(-offset);
+    let bottom = Line(term.screen_lines() as i32 - 1 - offset);
+    (range.end.line >= top && range.start.line <= bottom).then_some(range)
+}
+
 /// PTY'si, okuyucu thread'i ve grid'i olan bir terminal oturumu.
 pub struct Session {
     term: Arc<FairMutex<Term<Adapter>>>,
@@ -615,9 +706,13 @@ impl Session {
 
         // İmleç döngüden **önce** çözülüyor: altındaki hücrenin ön planı ona
         // bağlı (aşağıda) ve o karar hücre çizilirken verilmek zorunda.
-        // Şekil ayrı tutuluyor: `Cursor` onu taşımıyor ve aşağıdaki
-        // `contains_cell` blok imlecin sınır istisnasını soruyor.
+        // Şekil ve grid noktası ayrı tutuluyor: `Cursor` ikisini de taşımıyor
+        // ve aşağıdaki `contains_cell` blok imlecin sınır istisnasını
+        // soruyor. İstisna **imlecin durduğu** hücre içindir — oraya hücrenin
+        // kendi noktası verilince her seçimin ilk ve son hücresi vurgusuz
+        // kalıyordu.
         let cursor_shape = cursor.shape;
+        let cursor_point = cursor.point;
         let cursor_row = cursor.point.line.0 + offset;
         let cursor = Cursor {
             col: cursor.point.column.0 as u16,
@@ -657,7 +752,7 @@ impl Session {
         // aşağıdaki `contains_cell` blok imlecin sınır istisnasını soruyor ve
         // onu hücre başına okumak aynı değeri her hücrede yeniden okumak
         // olurdu.
-        let selected_range = term.selection.as_ref().and_then(|s| s.to_range(&term));
+        let selected_range = visible_range(term.selection.as_ref(), &term);
 
         for indexed in display_iter {
             let cell = indexed.cell;
@@ -673,13 +768,18 @@ impl Session {
             // seçim onu delseydi gizli hücrenin yeri boyalı bir blok olarak
             // görünürdü. Gizli metni kopyalamak isteyen phase-2'de
             // `selection_text()`'e sorar — vurgu ile metin aynı kapıdan geçmek
-            // zorunda değil. `contains` değil `contains_cell`: seçim tam bir
-            // spacer hücresinden başlarsa geniş karakterin baş hücresi de
-            // vurgulanır — metin yolunun gördüğüyle vurgunun gördüğü ayrışmaz.
+            // zorunda değil. `contains` değil `contains_cell`, iki sebeple:
+            // blok imlecin durduğu hücrede seçim tersine çevrilmez (imleç
+            // zaten ters videodur, çift tersleme onu silerdi — imlecin
+            // **kendi** noktası bu yüzden veriliyor), ve aralık bir spacer'da
+            // başlarsa geniş karakterin baş hücresi de vurgulanır.
+            // `set_selection` spacer'dan başlayan aralık kurmaz (`anchor`
+            // spacer'ı `Right` yapıyor), ama seçimden sonra satır yeniden
+            // yazılıp o hücre spacer olursa aralık orada başlar.
             let selected = !hidden
-                && selected_range.as_ref().is_some_and(|range| {
-                    range.contains_cell(&indexed, indexed.point, cursor_shape)
-                });
+                && selected_range
+                    .as_ref()
+                    .is_some_and(|range| range.contains_cell(&indexed, cursor_point, cursor_shape));
             let inverse = flags.contains(Flags::INVERSE) || selected;
 
             // **Arka plan önce**: atlama koşulunun ağır yarısı bu ve boş
@@ -828,51 +928,64 @@ impl Session {
     /// Fareyle seçimin iki ucu — aralık modeli burada yaşar, çünkü "hangi
     /// hücreler" grid bilgisidir (Karar 1).
     ///
-    /// Uçlar görünür pencere cinsinden (sütun, satır); grid satırına o anki
-    /// `display_offset` ile inilir. Aralık grid mutlağında tutulduğu için
-    /// alacritty'nin kendi döndürme mantığı kaydırınca onu içerikle birlikte
-    /// taşır — buraya fazladan bir kaydırma kolu yazılmaz.
+    /// Uçlar görünür pencere cinsinden (sütun, satır) **ve yarısıyla** gelir;
+    /// grid satırına o anki `display_offset` ile inilir. Aralık grid
+    /// mutlağında tutulduğu için alacritty'nin kendi döndürme mantığı
+    /// kaydırınca onu içerikle birlikte taşır — buraya fazladan bir kaydırma
+    /// kolu yazılmaz.
+    ///
+    /// Her uç yarısını kendisi taşır — kuralın tamamı [`CellHalf`]'ta. Uçlar
+    /// sırasız verilebilir: alacritty bölgeyi her okuyuşta kendisi sıralıyor
+    /// (`is_empty`, `to_range`, `rotate`), yani burada ayrıca sıralanmıyor.
     ///
     /// Değişim kirli bayrağını diker **ve uyandırır**: `resize`'ın tersine
     /// uyandırma `bt-shell`'e bırakılamaz — farenin vardığı `view` link'e
     /// uzanamıyor, elindeki tek tutamak bu oturum.
-    pub fn set_selection(&self, start: (u16, u16), end: (u16, u16)) {
+    pub fn set_selection(&self, start: SelectionPoint, end: SelectionPoint) {
         let mut term = self.term.lock();
         let offset = term.grid().display_offset() as i32;
-        let (first, second) = (viewport_point(start, offset), viewport_point(end, offset));
-        // Yanlar hücrenin kendisine bakar: başlangıç solda, bitiş sağda —
-        // tersi alacritty'nin `range_simple`'ında iki ucu da birer hücre
-        // içten kırpar. Yanlar sıraya **bağlı değil** (`update` de buna uyar,
-        // çünkü fare sürüklemesi seçimin içine kapanır), o yüzden dal yalnız
-        // noktaları sıralar.
-        let (anchor, active) = if first <= second {
-            (first, second)
-        } else {
-            (second, first)
-        };
-        let mut selection = Selection::new(SelectionType::Simple, anchor, Side::Left);
-        selection.update(active, Side::Right);
-        // Aynı aralık tekrar gelirse sessiz: `mouseDragged` aynı hücrede
-        // kaldıkça kare istenmez — boşta sıfır kare, sabit bir sürüklemeyle
-        // delinmemeli. Karşılaştırma `Selection`'ın `PartialEq`'siyle, kilit
-        // altında ve tek yerde.
-        if term.selection.as_ref() == Some(&selection) {
-            return;
-        }
+        let (start_point, start_side) = anchor(
+            &term,
+            viewport_point((start.col, start.row), offset),
+            start.half,
+        );
+        let (end_point, end_side) =
+            anchor(&term, viewport_point((end.col, end.row), offset), end.half);
+        let mut selection = Selection::new(SelectionType::Simple, start_point, start_side);
+        selection.update(end_point, end_side);
+        // Kapı **çizilen aralığa** bakar, uçlara değil (`visible_range`).
+        // Uçlar karşılaştırılsaydı sürükleme her hücre sınırında
+        // (`(c, Right)` → `(c+1, Left)`, aynı aralık) ve her sürüklemesiz tıkta
+        // (boş seçim) ekrana hiçbir şey eklemeyen bir kare isterdi. Seçim yine
+        // de **her seferinde** saklanır: "çizilen aralık aynı" seçimin aynı
+        // olduğu anlamına gelmez. Çıktının geçmişe ittiği bir seçimin yerine
+        // boş bir tık gelince iki taraf da görünmez (`None == None`), ama
+        // saklanmasaydı Cmd-C ekranda olmayan eski metni kopyalardı —
+        // `selection_text` görünürlüğe bakmıyor.
+        let changed =
+            visible_range(term.selection.as_ref(), &term) != visible_range(Some(&selection), &term);
         term.selection = Some(selection);
         drop(term);
-        // Sıra `Adapter`'ın `Wakeup` koluyla aynı: bayrak uyandırmadan önce.
-        self.adapter.0.dirty.store(true, Ordering::Release);
-        self.adapter.0.wake.wake();
+        if changed {
+            // Sıra `Adapter`'ın `Wakeup` koluyla aynı: bayrak uyandırmadan önce.
+            self.adapter.0.dirty.store(true, Ordering::Release);
+            self.adapter.0.wake.wake();
+        }
     }
 
-    /// Seçimi temizler. Seçim zaten yoksa sessizdir: bayrak dikilmez, kare
-    /// istenmez — boşta sıfır kare, boş bir temizlemeyle delinmemeli.
+    /// Seçimi temizler. Ekranda çizili bir aralık yoksa sessizdir — seçim hiç
+    /// yoksa da, sürüklemesiz tıkın bıraktığı boş seçimse de, çıktının
+    /// geçmişe ittiği bir seçimse de: bayrak dikilmez, kare istenmez.
     pub fn clear_selection(&self) {
         // Kilit gövdeden önce düşüyor: `dirty.store` + `wake.wake()` `Term`
         // kilidi (çift muteksli `FairMutex`) tutulurken koşmamalı —
         // `set_selection`'daki `drop` disiplininin aynısı.
-        let had = self.term.lock().selection.take().is_some();
+        let had = {
+            let mut term = self.term.lock();
+            let had = visible_range(term.selection.as_ref(), &term).is_some();
+            term.selection = None;
+            had
+        };
         if had {
             self.adapter.0.dirty.store(true, Ordering::Release);
             self.adapter.0.wake.wake();
@@ -1840,6 +1953,24 @@ mod tests {
         assert!(session.resize(80, 24, (18, 36)));
     }
 
+    /// Seçim ucu kurucusu — sınama gövdelerini kısaltır. Hücre aralığı ile
+    /// yarısı ayrı ayrı okunsun diye konum ve yarı **ayrı argüman**.
+    fn at(col: u16, row: u16, half: CellHalf) -> SelectionPoint {
+        SelectionPoint { col, row, half }
+    }
+
+    /// Yarı sınamalarının ortak sahnesi: satırın başında kırmızı zeminli
+    /// `araba`. Beş hücre çizildiyse metin grid'dedir.
+    fn word_session() -> Session {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033[41maraba\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+        assert_eq!(wait_cells(&session, &wake, 5).len(), 5);
+        session
+    }
+
     #[test]
     fn selection_text_returns_selected_range() {
         let wake = Arc::new(TestWake::default());
@@ -1853,13 +1984,64 @@ mod tests {
         // Çapa: 11 kırmızı hücre geldiyse metin grid'de.
         assert_eq!(wait_cells(&session, &wake, 11).len(), 11);
 
-        session.set_selection((0, 0), (4, 0));
+        // Başlangıç ucunun sol yarısı hücreyi katar, bitiş ucunun sağ yarısı
+        // katar: beş harfin beşi de içeride — eski davranışla aynı sonuç,
+        // çünkü eskiden yanlar sabit bu ikisiydi.
+        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
         assert_eq!(session.selection_text().as_deref(), Some("hello"));
-        // Uçlar sırasız verilebilir: tersi aynı metni verir.
-        session.set_selection((4, 0), (0, 0));
+        // Uçlar sırasız verilebilir: tersi aynı metni verir. Yarının sıraya
+        // göre atanmadığının kanıtı da bu — ters çevrilen yarılar değil.
+        session.set_selection(at(4, 0, CellHalf::Right), at(0, 0, CellHalf::Left));
         assert_eq!(session.selection_text().as_deref(), Some("hello"));
         // Temizleyince metin de gider.
         session.clear_selection();
+        assert_eq!(session.selection_text(), None);
+    }
+
+    #[test]
+    fn selection_text_follows_the_half_of_the_left_end() {
+        // 006'da bildirilen kusur, birebir: kullanıcı `araba`nın `raba`
+        // kısmını seçiyor, kopyaya `araba` geliyordu. Sebep yarının hiç
+        // sorulmamasıydı: hedeflediği harfin **hemen soluna** basan biri o
+        // pikseli bir önceki hücrenin sağ yarısına düşürür ve sabit `Left`
+        // yüzünden o hücre de aralığa girer. Aynı hücre aralığı, iki farklı
+        // yarı, iki farklı metin — aralığı belirleyen şey yarı.
+        let session = word_session();
+
+        session.set_selection(at(0, 0, CellHalf::Right), at(4, 0, CellHalf::Right));
+        assert_eq!(session.selection_text().as_deref(), Some("raba"));
+        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        assert_eq!(session.selection_text().as_deref(), Some("araba"));
+    }
+
+    #[test]
+    fn selection_text_follows_the_half_of_the_right_end() {
+        // Bitiş ucu **aynaya** bakar: sağ yarı kendi hücresini seçime katar,
+        // sol yarı sınırı o hücrenin başına çeker. Yani fare bir hücrenin
+        // ortasını geçtiği an o hücre yanar — iki uçta da kural bu.
+        let session = word_session();
+
+        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        assert_eq!(session.selection_text().as_deref(), Some("araba"));
+        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Left));
+        assert_eq!(session.selection_text().as_deref(), Some("arab"));
+    }
+
+    #[test]
+    fn selection_with_both_ends_in_the_right_half_covers_nothing() {
+        // İki uç da aynı hücrenin sağ yarısı — sürüklemesiz tık budur. Seçim
+        // **boş** doğar (`is_empty` iki ucu da dışarıda bırakır), yani
+        // aralık yok ve `selection_text()` `None`: sağ yarıya basmak hücreyi
+        // seçime katmaz, tek başına hiçbir şeyi de katmaz. Kopya kapısının
+        // `None` kolu bunun üstünde durur — metin yoksa pano el değmeden
+        // kalır.
+        let session = word_session();
+
+        session.set_selection(at(2, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
+        assert_eq!(session.selection_text(), None);
+        // Sol yarısı da boş: iki uç birbirinin **aynısı** olduğu sürece
+        // seçim doğmaz, yarı ne olursa olsun.
+        session.set_selection(at(2, 0, CellHalf::Left), at(2, 0, CellHalf::Left));
         assert_eq!(session.selection_text(), None);
     }
 
@@ -1876,7 +2058,9 @@ mod tests {
         );
 
         assert_eq!(wait_cells(&session, &wake, 45).len(), 45);
-        session.set_selection((35, 0), (4, 1));
+        // İki uç da kendi hücresini katan yarıda: 35. sütundan sarılan
+        // satırın 4. sütununa kadar on hücre (eski sabit yanlarla aynı sonuç).
+        session.set_selection(at(35, 0, CellHalf::Left), at(4, 1, CellHalf::Right));
         assert_eq!(session.selection_text().as_deref(), Some("5678901234"));
     }
 
@@ -1889,8 +2073,134 @@ mod tests {
         let session = spawn_session("printf '\\033[41maあb\\033[0m'; sleep 5", Arc::clone(&wake));
 
         assert_eq!(wait_cells(&session, &wake, 4).len(), 4);
-        session.set_selection((0, 0), (3, 0));
+        session.set_selection(at(0, 0, CellHalf::Left), at(3, 0, CellHalf::Right));
         assert_eq!(session.selection_text().as_deref(), Some("aあb"));
+    }
+
+    #[test]
+    fn selection_redraws_only_when_the_drawn_range_changes() {
+        // Kapı çizilen aralığa bakar, uçlara değil. Yarı artık ucun kendi
+        // özelliği olduğu için aynı aralık iki farklı uç çiftinden doğabilir:
+        // sürükleme hücre sınırını geçerken `(2, Right)` → `(3, Left)` olur ve
+        // ikisi de 2. sütunda biter. Uçları karşılaştıran kapı bu geçişte
+        // ekrana hiçbir şey eklemeyen bir kare isterdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("sleep 5", Arc::clone(&wake));
+        assert!(session.frame(|_| ()).is_some());
+        assert!(session.frame(|_| ()).is_none());
+
+        // Sürüklemesiz tık: seçim boş doğar, önceki seçim de yoktu — çizilecek
+        // bir şey değişmedi.
+        session.set_selection(at(2, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
+        assert!(session.frame(|_| ()).is_none(), "boş seçim kare istememeli");
+
+        session.set_selection(at(0, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
+        assert!(session.frame(|_| ()).is_some(), "yeni aralık kare istemeli");
+        assert!(session.frame(|_| ()).is_none());
+
+        // Hücre sınırı geçildi, aralık aynı: 2. sütunda bitiyor.
+        session.set_selection(at(0, 0, CellHalf::Left), at(3, 0, CellHalf::Left));
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "aynı aralık kare istememeli"
+        );
+
+        // Temizle, sonra yine sürüklemesiz tık: saklanan seçim boş, temizlemek
+        // ekrandan bir şey silmez.
+        session.clear_selection();
+        assert!(session.frame(|_| ()).is_some());
+        session.set_selection(at(1, 0, CellHalf::Left), at(1, 0, CellHalf::Left));
+        session.clear_selection();
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "boş seçimi temizlemek kare istememeli"
+        );
+    }
+
+    #[test]
+    fn drag_between_halves_across_a_line_break_selects_nothing() {
+        // Satır sonunun sağ yarısından alt satırın başının sol yarısına: iki uç
+        // de kendi hücresini dışarıda bırakır, arada hücre yok. alacritty
+        // bunu boş saymıyor — önce bitişi üst satırın son hücresine geri
+        // alıyor, uçlar eşitlendiği için başlangıcı kaydırmıyor ve **son
+        // hücreyi** seçiyor. Yarının kuralına göre hiçbir şey seçilmemeli.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("sleep 5", Arc::clone(&wake));
+        assert!(session.frame(|_| ()).is_some());
+        assert!(session.frame(|_| ()).is_none());
+
+        session.set_selection(at(39, 0, CellHalf::Right), at(0, 1, CellHalf::Left));
+        assert!(session.frame(|_| ()).is_none(), "boş seçim kare istememeli");
+        assert_eq!(session.selection_text(), None);
+    }
+
+    #[test]
+    fn selection_scrolled_into_history_is_not_drawn() {
+        // Çıktı seçili satırı görünür pencerenin üstüne itti: aralık grid'de
+        // duruyor ama ekranda değil. Kapı ve temizleme görünür pencereye bakar
+        // — geçmişteki bir aralığı "çizili" saymak onun yerine gelen ilk tıkta
+        // ekrana hiçbir şey eklemeyen bir kare isterdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033[41mx\\033[0m'; read _; seq 1 30; sleep 5",
+            Arc::clone(&wake),
+        );
+        assert_eq!(wait_cells(&session, &wake, 1).len(), 1);
+        session.set_selection(at(0, 0, CellHalf::Left), at(0, 0, CellHalf::Right));
+        assert!(session.frame(|_| ()).is_some());
+
+        // `read` satır sonunu bekliyor; gelince 30 satır `x`'i geçmişe iter.
+        // Hazır: son satır (`30`) görünür.
+        session.write(b"\n");
+        wait_frame(&session, &wake, |cells| {
+            cells.iter().any(|c| c.col == 0 && c.ch == Some('3'))
+                && cells.iter().any(|c| c.col == 1 && c.ch == Some('0'))
+        });
+        while session.frame(|_| ()).is_some() {}
+
+        session.set_selection(at(5, 5, CellHalf::Left), at(5, 5, CellHalf::Left));
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "geçmişteki seçimin yerine boş seçim kare istememeli"
+        );
+        // Kare istenmedi ama seçim **değişti**: iki taraf da görünmez olduğu için
+        // kapı "aynı" dedi, yine de boş seçim saklanmalı. Saklanmasaydı Cmd-C
+        // ekranda olmayan eski `x`'i kopyalardı — `selection_text` görünürlüğe
+        // bakmıyor.
+        assert_eq!(session.selection_text(), None);
+        session.clear_selection();
+        assert!(session.frame(|_| ()).is_none());
+    }
+
+    #[test]
+    fn selection_highlights_its_first_and_last_cell() {
+        // Vurgu aralığın **iki ucunu da** kapsar. Blok imlecin sınır istisnası
+        // (`contains_cell`) yalnız imlecin durduğu hücre içindir; imleç
+        // noktası yerine hücrenin kendi noktası verilince istisna her sınır
+        // hücresine uygulanıyor ve seçimin ilk ile son harfi hiç ters
+        // videolanmıyordu. İmleç burada `araba`'nın sağında, 5. sütunda.
+        let session = word_session();
+        // Taban: seçimsiz `a`'nın ön planı. Kare istemek için seçim son
+        // satıra kuruluyor — boş seçim (haklı olarak) kare istemez.
+        let mut plain = Vec::new();
+        session.set_selection(at(0, 9, CellHalf::Left), at(1, 9, CellHalf::Right));
+        assert!(session.frame(|c| plain.push(c)).is_some());
+        let plain_fg = plain.iter().find(|c| c.col == 0).expect("a hücresi").fg;
+
+        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        let mut next = Vec::new();
+        assert!(session.frame(|c| next.push(c)).is_some());
+        for col in 0..5 {
+            let cell = next
+                .iter()
+                .find(|c| c.col == col && c.row == 0)
+                .expect("hücre");
+            assert_eq!(
+                cell.bg,
+                Some(plain_fg),
+                "sütun {col} vurgulanmalı: {cell:?}"
+            );
+        }
     }
 
     #[test]
@@ -1901,7 +2211,7 @@ mod tests {
         assert!(session.frame(|_| ()).is_some());
         assert!(session.frame(|_| ()).is_none());
 
-        session.set_selection((0, 0), (2, 0));
+        session.set_selection(at(0, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
         assert!(
             session.frame(|_| ()).is_some(),
             "seçim kirli bayrağını dikmeli"
@@ -1949,7 +2259,7 @@ mod tests {
             cells.iter().filter_map(|c| c.ch).collect::<String>() == "hello"
         });
         assert_eq!(backgrounds(&cells).count(), 3, "{cells:?}");
-        session.set_selection((1, 0), (3, 0));
+        session.set_selection(at(1, 0, CellHalf::Left), at(3, 0, CellHalf::Right));
         assert_eq!(session.selection_text().as_deref(), Some("ell"));
 
         let mut next = Vec::new();
@@ -1969,27 +2279,53 @@ mod tests {
     }
 
     #[test]
-    fn wide_char_head_is_highlighted_from_trailing_spacer() {
-        // Seçim tam spacer hücresinden başlarsa geniş karakterin baş hücresi
-        // de vurgulanır: metin yolunun gördüğüyle vurgunun gördüğü ayrışmaz.
-        // `あ` 0–1. hücreler (baş + spacer), `b` 2. hücre. Üç hücrenin üçü de
-        // kırmızı bg'li doğuyor; baş hücrenin ters videoda bg'si seçimsiz
-        // karenin fg'si olur.
+    fn wide_char_is_selected_as_one_glyph() {
+        // Geniş karakter iki hücrelik **tek** glyph'tir ve yarı kuralı glyph'e
+        // uygulanır, hücreye değil: baş hücre glyph'in sol yarısı, spacer sağ
+        // yarısı. Hücre düzeyinde uygulansaydı bitiş ucu spacer'ın sol yarısına
+        // düştüğünde aralık baş hücrede biterdi — harf kopyalanır ama yalnız
+        // yarısı ters videolanırdı (`contains_cell` spacer'ı ancak kendisi
+        // aralıktaysa vurgular). Başlangıç ucu da glyph'in dörtte üçüne kadar
+        // harfi katardı.
+        //
+        // `あ` 0–1. hücreler (baş + spacer), `b` 2. hücre; üçü de kırmızı
+        // bg'li. Ters videoda vurgulu hücrenin bg'si seçimsiz karenin fg'si.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("printf '\\033[41mあb\\033[0m'; sleep 5", Arc::clone(&wake));
-
         let cells = wait_cells(&session, &wake, 3);
         let plain_fg = cells
             .iter()
             .find(|c| c.ch == Some('b'))
             .expect("b hücresi")
             .fg;
+        let highlighted = |session: &Session, col: u16| {
+            let mut next = Vec::new();
+            session.frame(|c| next.push(c));
+            next.iter()
+                .find(|c| c.col == col)
+                .is_some_and(|c| c.bg == Some(plain_fg))
+        };
 
-        session.set_selection((1, 0), (2, 0));
-        let mut next = Vec::new();
-        assert!(session.frame(|c| next.push(c)).is_some());
-        let head = next.iter().find(|c| c.col == 0).expect("baş hücre");
-        assert_eq!(head.bg, Some(plain_fg), "{head:?}");
+        // Bitiş ucu glyph'in sağ yarısında (spacer'ın sol yarısı): harf
+        // içeride, **iki** hücresi de vurgulu.
+        session.set_selection(at(0, 0, CellHalf::Left), at(1, 0, CellHalf::Left));
+        assert_eq!(session.selection_text().as_deref(), Some("あ"));
+        assert!(highlighted(&session, 1), "spacer vurgulanmalı");
+
+        // Bitiş ucu glyph'in sol yarısında (baş hücrenin sağ yarısı): harf
+        // dışarıda, seçim boş.
+        session.set_selection(at(0, 0, CellHalf::Left), at(0, 0, CellHalf::Right));
+        assert_eq!(session.selection_text(), None);
+
+        // Başlangıç ucu glyph'in sağ yarısında: harf dışarıda, baş hücre
+        // vurgusuz — metin ile vurgu aynı kararı veriyor.
+        session.set_selection(at(1, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
+        assert_eq!(session.selection_text().as_deref(), Some("b"));
+        assert!(!highlighted(&session, 0), "baş hücre vurgulanmamalı");
+
+        // Başlangıç ucu glyph'in sol yarısında: harf içeride.
+        session.set_selection(at(0, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
+        assert_eq!(session.selection_text().as_deref(), Some("あb"));
     }
 
     #[test]

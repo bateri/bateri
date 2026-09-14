@@ -57,6 +57,9 @@ Güvenlik notu: ham yapıştırma vim/REPL'de satırları çalıştırır. Sarma
     satırda `line_length()`'i sıfır) → Cmd-C **kullanıcının genel panosunu
     silerdi**. Kapı artık `Some("")`'ı da eliyor; yalnız-boşluk (`"   "`)
     elenmiyor, o meşru bir kopya.
+    > **Aşıldı (seçim yarısı düzeltmesi):** sürüklemesiz tık artık `Some("")`
+    > değil `None` verir (iki ucu eşit seçim boş). `Some("")` kolu yine
+    > gerekli — boş bir satırın üstünde sürükleme onu üretiyor.
   - Sarma **kendi iğnesini** korumuyordu: yükteki `ESC`/`ETX` süzülmüyordu,
     yani panoya `\x1b[201~` koyan bir süreç bölgeyi erken kapatıp gerisini
     uygulamaya **yazılmış girdi** olarak geçirebilirdi (Cmd-V'ye basar basmaz
@@ -105,6 +108,53 @@ Güvenlik notu: ham yapıştırma vim/REPL'de satırları çalıştırır. Sarma
   dala düşer. Pencere mikrosaniye mertebesinde; tek kilit tutuşuna almak
   `paste`'in büyük yük kopyasını `Term` kilidi altına sokardı — kazancından
   pahalı. Kayıt burada, karar bilinçli.
+
+### Kullanıcı bildirimi — seçim bir harf fazla kopyalıyordu (2026-09-14)
+
+**Bildirim:** "araba"nın "raba" kısmı fareyle seçilip kopyalanınca "araba"
+geliyordu. **Kök neden** phase-1'deydi, kopyada değil: `set_selection` uçların
+hücre **içindeki yarısını** hiç almıyor, alacritty'ye başlangıç için koşulsuz
+`Side::Left`, bitiş için `Side::Right` veriyordu. Hedeflediği harfin hemen
+soluna basan kullanıcı o pikseli bir önceki hücrenin sağ yarısına düşürüyor,
+sabit `Left` o hücreyi aralığa katıyordu. Koordinat çevirisinde kayma yoktu
+(`point_to_cell` sınamaları bunu gösteriyordu).
+
+**Düzeltme:** `bt-core`'a `CellHalf` + `SelectionPoint { col, row, half }`
+(alacritty `Side` `pub` API'ye çıkmadan); `bt-shell` yarıyı `x % cell_w`'den
+okuyor. Kapıların bulduğu, aynı yolda yaşayan dört kusur daha kapatıldı:
+
+- **Her seçimin ilk ve son hücresi hiç vurgulanmıyordu** (phase-1'den beri):
+  `frame()` blok imlecin sınır istisnasına imlecin değil hücrenin kendi
+  noktasını veriyordu. İmleç blok şekilliyken (varsayılan) vurgu her iki uçtan
+  birer hücre kısa görünürdü; kabuğun imleç şeklini değiştirip değiştirmediği
+  bilinmediği için kullanıcının ekranında olup olmadığı doğrulanmadı.
+- **Sürüklemede boşa kare:** kare kapısı uçları karşılaştırıyordu; yarılı uçlarda
+  aynı aralık iki uç çiftinden doğabildiği için her hücre sınırında ve her
+  tıkta ekrana hiçbir şey eklemeyen kare isteniyordu. Kapı artık **ekranda
+  çizilen aralığa** bakıyor (`visible_range`; `frame()` ve temizleme de aynı
+  kaynaktan) — geçmişe kaymış bir seçim de çizili sayılmıyor.
+- **Satır sonuna sürüklemede son harf kayboluyordu:** grid'in sağındaki
+  kullanılmayan şeritteki olaylar yutuluyor, seçim son sütunun sol yarısında
+  kalabiliyordu. Kenar dışı nokta artık son hücreye yapışıyor (sağda sağ yarı).
+- **Geniş karakter:** yarı glyph'e uygulanıyor (baş hücre sol, spacer sağ);
+  yoksa harf kopyalanırken yalnız yarısı ters videolanıyordu. Satır sonunun
+  sağ yarısı ile alt satırın başının sol yarısı da aynı sınır sayılıyor —
+  alacritty o ikisinin arasında üst satırın son hücresini seçiyordu.
+
+Tek tık artık **boş** seçim (iki uç eşit → alacritty `is_empty`); phase-1'in
+"tek tık kalıcı tek-hücrelik seçim" notu aşıldı ve orada damgalı.
+
+**Reddedilen iki inceleme iddiası, kaynağa bakılarak:** "sürüklemede ters aralık
+oluşuyor" — oluşmuyor, `range_simple` önce bitişi geri alıp uçlar eşitlenince
+başlangıcı kaydırmıyor (sonuç ters aralık değil son hücre; yukarıdaki satır
+sonu normalizasyonu onu kapattı). `clear_selection`'ın üretim çağıranı yok —
+doğru ama phase-1'den kalma API, bu düzeltmenin kapsamı değil.
+
+**Kanıt:** her davranış düzeltmesi önce kırmızı sınamayla yazıldı; beşi
+(geniş karakter, spacer, satır sonu, imleç noktası, görünürlük) ve sol kenar
+bekçisi (`%` → `rem_euclid`) **mutasyonla** ayrı ayrı doğrulandı. Bir sınama
+mutasyonda yeşil kaldığı için düzeltildi: @2x sahnede -3 nokta iki kuralı
+ayırt etmiyordu.
 
 ## Yayın Etkisi
 

@@ -57,6 +57,12 @@ kaydırmaz.
       geliyor — göz kontrolü bu hâli de kapsamalı (`view.rs` → `mouseUp:`
       doc'unda kayıtlı)
 - [ ] `scroll_display` API'si + kaydırınca kirli bayrağı
+- [ ] **Devir (seçim yarısı düzeltmesinin `/audit`'i):** kirli bayrağı **elle**
+      dikilmeli — alacritty'nin `Term::scroll_display`'i yalnız
+      `Event::MouseCursorDirty` gönderiyor ve bizim `Adapter` onu yutuyor;
+      bayrak dikilmezse kaydırma hiç çizilmez. Seçim kapısı (`visible_range`)
+      iki tarafı aynı `display_offset`'le hesaplıyor, yani kaydırmanın kendi
+      karesini kendisi istemesi yeterli; kapıya dokunmak gerekmiyor
 - [ ] `scrollWheel:` ve Shift+PgUp tetikleyicileri; çubuk yok
 - [ ] Alternate screen'de yoksayma `bt-core` kipiyle
 - [ ] Test: kaydırma `display_offset`'i oynatıyor + kirli dikiliyor

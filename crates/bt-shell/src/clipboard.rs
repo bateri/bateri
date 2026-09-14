@@ -25,13 +25,13 @@ use objc2_foundation::NSString;
 /// kopyaladığını silerdi. Kapı bu yüzden iki hâli birden eler:
 ///
 /// - `None` → seçim yok.
-/// - `Some("")` → seçim **var** ama boş metin veriyor. `mouseDown:` sürüklemesiz
-///   tıklamada da bir hücrelik seçim kuruyor (tek tık kalıcı seçim bırakır,
-///   phase-1) ve boşluklardan oluşan bir satırda alacritty'nin
-///   `line_length()`'i sıfır, yani `selection_to_string()` `Some("")` döner.
-///   Bu hâl kapıdan geçseydi prompt altındaki boş bir satıra tıklayıp Cmd-C
-///   demek kullanıcının panosunu boşaltırdı — `None` kapısının engellediği
-///   kaybın ta kendisi.
+/// - `Some("")` → seçim **var** ama boş metin veriyor: boşluklardan oluşan
+///   bir satırın üstünde sürükleme. O satırda alacritty'nin `line_length()`'i
+///   sıfır, yani `selection_to_string()` `Some("")` döner. Bu hâl kapıdan
+///   geçseydi prompt altındaki boş bir satırı seçip Cmd-C demek kullanıcının
+///   panosunu boşaltırdı — `None` kapısının engellediği kaybın ta kendisi.
+///   (Sürüklemesiz tık buraya düşmez: iki ucu eşit seçim boştur ve `None`
+///   verir.)
 ///
 /// **Yalnız boşluk** (`Some("   ")`) elenmez: satırın içindeki boşlukları
 /// seçip kopyalamak meşru ve o metin boş değil.
@@ -113,8 +113,8 @@ mod tests {
 
     #[test]
     fn copy_of_empty_text_leaves_board_untouched() {
-        // `Some("")` = seçim var ama metin boş: sürüklemesiz tıklamada boş bir
-        // satır. Kapı bunu da eler, yoksa Cmd-C kullanıcının panosunu
+        // `Some("")` = seçim var ama metin boş: boş bir satırın üstünde
+        // sürükleme. Kapı bunu da eler, yoksa Cmd-C kullanıcının panosunu
         // boşaltırdı. Pano gerektirmeyen kısım her ortamda ölçülür
         // (`Some("")` hiç yazmaz), gerisi canlı pano ister.
         let fresh = NSPasteboard::pasteboardWithUniqueName();
