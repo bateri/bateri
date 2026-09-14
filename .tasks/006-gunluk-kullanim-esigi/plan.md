@@ -99,6 +99,6 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 |-------|-------|--------|
 | phase-1 | ✅ | 77b4afd | `[elle]` göz kontrolü tamam (2026-09-14, `097f155` üstünde) |
 | phase-2 | ✅ | 97b9c2c | Doğrulama tamam: `make hepsi` 0 · `make test-yaris` 0 · `make duman` yeşil (Xcode lisansı + Metal Toolchain kullanıcı tarafından çözüldü, `phase-2.md` → "Doğrulama Durumu"); `[elle]` tamam (2026-09-14) |
-| phase-3 | | |
+| phase-3 | ✅ | (hash: sonraki commit) | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: DECSET 1007 (`phase-3.md`) |
 | phase-4 | | |
 | phase-5 | | |

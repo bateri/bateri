@@ -3,8 +3,10 @@
 //! Crate'in kapsül sözleşmesi `lib.rs`'te; burada onun iki pratik sonucu
 //! yaşıyor: alacritty'nin `EventListener`'ı `Adapter`'da bizim `Wake`'imize
 //! çevrilir, ve `Term` kilidi **yalnız** şu çağrı yerlerinde alınır:
-//! `frame`, `resize`, seçim yolu (`set_selection`, `clear_selection`,
-//! `selection_text`) ve `paste`'in kip sorgusu (`bracketed_paste`). Kilit
+//! `frame`, `resize`, seçim yolu (`set_selection`, `update_selection`,
+//! `clear_selection`, `selection_text`), kaydırma yolu (`scroll_by`:
+//! `scroll_display`, `scroll_page` ve girdinin dibe dönüşü) ve `paste`'in kip
+//! sorgusu (`bracketed_paste`). Kilit
 //! **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
 //! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa
 //! kilitlenme doğar.
@@ -18,7 +20,7 @@ use std::time::Duration;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
@@ -148,9 +150,10 @@ impl Default for Cell {
 /// İmlecin karedeki yeri.
 ///
 /// `row` her zaman görünür pencereye kırpılıdır. Kaydırma geçmişine bakarken
-/// imleç ekranın dışına çıkar; o durumda `visible` kapanır ve `row` gerçek
-/// satırı değil kırpılmış değeri taşır — konuma güvenen bir tüketici
-/// (kaydırma, IME) çıkmadan önce buranın sözleşmesini genişletmeli.
+/// ([`Session::scroll_display`]) imleç ekranın dışına çıkar; o durumda
+/// `visible` kapanır ve `row` gerçek satırı değil kırpılmış değeri taşır.
+/// Kaydırmanın kendisi imleç konumunu okumuyor; konuma güvenen ilk tüketici
+/// (IME) çıkmadan önce buranın sözleşmesini genişletmeli.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub col: u16,
@@ -252,10 +255,11 @@ pub fn smoke_shell() -> (String, Vec<String>) {
 /// kural=15` sayılarının tek sahibi ve üç sınama o sayılara bağlı. Buradaki
 /// komut değişince duman sayıları oynamaz; oynarsa ayrım kaybolmuş demektir.
 ///
-/// Viewport kaydırma **yok** (tekerlek işleyicisi yok), o yüzden kaydırılan
-/// şey viewport değil **içerik**: her satır kirli düşer, grid yukarı kayar,
-/// kare akışı kendiliğinden sürer. Ölçtüğümüz şey zaten bu — dolu bir karede
-/// parse + [`Session::frame`] + encode + GPU maliyeti.
+/// Kaydırılan şey viewport değil **içerik**: yük pencereyi geriye almaz
+/// ([`Session::scroll_display`] tekerleğin yolu, bu koşuda kimse çevirmiyor),
+/// yani her satır kirli düşer, grid yukarı kayar, kare akışı kendiliğinden
+/// sürer. Ölçtüğümüz şey zaten bu — dolu bir karede parse +
+/// [`Session::frame`] + encode + GPU maliyeti.
 pub fn load_shell(secs: u64) -> (String, Vec<String>) {
     // POSIX `$((...))` işaretli `intmax_t`: `u64::MAX` kabukta `-1`'e sarıyor
     // ve `end` **geçmişte** kalıyor, yani yük hiç koşmadan biter. Ölçüldü (bu
@@ -383,6 +387,13 @@ struct AdapterInner {
     /// imleci koşulsuz kirletir (`damage_cursor`), yani "hasar yok" cevabı
     /// hiçbir zaman gelmez. Boşta sıfır kare ondan okunamaz. Bayrağı
     /// `Event::Wakeup` diker — alacritty'nin "yeni içerik var" sinyali odur.
+    ///
+    /// **Bilinen sınır:** bayrak pencereyi bilmiyor. Geçmişe kaydırılmış bir
+    /// pencerede alacritty görünen satırları yeni çıktıya karşı sabitliyor
+    /// (`grid.scroll_up` ofseti artırıyor), yani akan çıktı ekranda hiçbir şey
+    /// değiştirmediği hâlde her `Wakeup` bir kare ister. Boşta değil (çıktı
+    /// akıyor) ve kaydırma gelene kadar ulaşılamazdı; çaresi pencereye duyarlı
+    /// hasar, bu setin işi değil.
     dirty: Arc<AtomicBool>,
     /// PTY'nin bildiği son boyut; `TextAreaSizeRequest` bunu yanıtlar.
     size: Mutex<WindowSize>,
@@ -448,6 +459,13 @@ impl EventListener for Adapter {
             // LOGLANIR" kuralının ikinci yarısı borç: `tracing` henüz
             // bağımlılık değil, workspace'te hiçbir logger yok — alacritty'nin
             // kendi `log::error!` satırları da bu yüzden yere düşüyor.
+            //
+            // `MouseCursorDirty` `Term::scroll_display`'in **tek** olayı ve
+            // burada yutuluyor: kaydırmanın karesini o değil
+            // `Session::scroll_display` elle istiyor. Bu kola `dirty` dikmek
+            // yanlış çare olurdu — olay kaymayan bir kaydırmada da (geçmişin
+            // ucunda) ve fare raporlama kipinin her değişiminde (DECSET
+            // 1000/1002/1003) gönderiliyor, yani boş kare doğururdu.
             Event::Title(_)
             | Event::ResetTitle
             | Event::Bell
@@ -552,7 +570,8 @@ pub enum CellHalf {
 
 /// Seçim ucu: hücre ve o hücrenin içindeki yarısı.
 ///
-/// Hücre görünür pencere cinsindendir — [`Session::set_selection`] onu
+/// Hücre görünür pencere cinsindendir — seçimin iki kurucusu
+/// ([`Session::set_selection`], [`Session::update_selection`]) onu
 /// `display_offset` ile grid satırına indirir. Alanlar [`Cell`] ve [`Cursor`]
 /// gibi adlı (`col`, `row`): demet olsaydı sütun ile satırın yer değiştirmesi
 /// sessizce derlenirdi.
@@ -580,9 +599,15 @@ pub struct SelectionPoint {
 ///   sınırın iki yanına düşünce (arada hücre yok) üst satırın son hücresini
 ///   seçiyor. Grid'in son satırında alt satır yok, orada dokunulmaz.
 ///
+/// Uç görünür pencere cinsinden gelir ve grid satırına **burada**, o anki
+/// `display_offset` ile iner: seçimin iki kurucusu (`set_selection`,
+/// `update_selection`) aynı reçeteyi iki kez yazmasın.
+///
 /// Bayrak okuması kırpılmış noktadan — `pub` API'ye grid dışı bir sütun
 /// gelirse indeksleme paniklemesin.
-fn anchor<T>(term: &Term<T>, point: Point, half: CellHalf) -> (Point, Side) {
+fn anchor<T>(term: &Term<T>, at: SelectionPoint) -> (Point, Side) {
+    let offset = term.grid().display_offset() as i32;
+    let (point, half) = (viewport_point((at.col, at.row), offset), at.half);
     let flags = term.grid()[point.grid_clamp(term, Boundary::Grid)].flags;
     let side = if flags.contains(Flags::WIDE_CHAR) {
         Side::Left
@@ -934,6 +959,9 @@ impl Session {
     /// kaydırınca onu içerikle birlikte taşır — buraya fazladan bir kaydırma
     /// kolu yazılmaz.
     ///
+    /// Yeni seçimin **kurucusu** budur (fare basışı); sürüklemenin aktif ucu
+    /// [`Session::update_selection`]'dan geçer ve çapaya dokunmaz.
+    ///
     /// Her uç yarısını kendisi taşır — kuralın tamamı [`CellHalf`]'ta. Uçlar
     /// sırasız verilebilir: alacritty bölgeyi her okuyuşta kendisi sıralıyor
     /// (`is_empty`, `to_range`, `rotate`), yani burada ayrıca sıralanmıyor.
@@ -943,20 +971,15 @@ impl Session {
     /// uzanamıyor, elindeki tek tutamak bu oturum.
     pub fn set_selection(&self, start: SelectionPoint, end: SelectionPoint) {
         let mut term = self.term.lock();
-        let offset = term.grid().display_offset() as i32;
-        let (start_point, start_side) = anchor(
-            &term,
-            viewport_point((start.col, start.row), offset),
-            start.half,
-        );
-        let (end_point, end_side) =
-            anchor(&term, viewport_point((end.col, end.row), offset), end.half);
+        let (start_point, start_side) = anchor(&term, start);
+        let (end_point, end_side) = anchor(&term, end);
         let mut selection = Selection::new(SelectionType::Simple, start_point, start_side);
         selection.update(end_point, end_side);
         // Kapı **çizilen aralığa** bakar, uçlara değil (`visible_range`).
         // Uçlar karşılaştırılsaydı sürükleme her hücre sınırında
         // (`(c, Right)` → `(c+1, Left)`, aynı aralık) ve her sürüklemesiz tıkta
-        // (boş seçim) ekrana hiçbir şey eklemeyen bir kare isterdi. Seçim yine
+        // (boş seçim) ekrana hiçbir şey eklemeyen bir kare isterdi — sürükleme
+        // bugün `update_selection`'dan geçiyor ve orada da aynı kapı. Seçim yine
         // de **her seferinde** saklanır: "çizilen aralık aynı" seçimin aynı
         // olduğu anlamına gelmez. Çıktının geçmişe ittiği bir seçimin yerine
         // boş bir tık gelince iki taraf da görünmez (`None == None`), ama
@@ -967,9 +990,41 @@ impl Session {
         term.selection = Some(selection);
         drop(term);
         if changed {
-            // Sıra `Adapter`'ın `Wakeup` koluyla aynı: bayrak uyandırmadan önce.
-            self.adapter.0.dirty.store(true, Ordering::Release);
-            self.adapter.0.wake.wake();
+            self.request_frame();
+        }
+    }
+
+    /// Sürüklemenin aktif ucu: var olan seçimin **yalnız bitişini** taşır.
+    ///
+    /// Seçimin başlangıcı (çapa) burada hiç okunmuyor — alacritty onu grid
+    /// mutlağında tutuyor, [`Session::set_selection`]'ın kurduğu yerde;
+    /// `anchor` yardımcısı yalnız **bitişin** alacritty karşılığını çözüyor. Çapayı pencere
+    /// satırı olarak `bt-shell`'de tutup her olayda iki uçla yeniden kurmak
+    /// kaydırmaya dayanmıyordu: basılı sürüklemenin ortasında pencere
+    /// kayınca aynı satır numarası başka bir içeriği gösterir ve seçim
+    /// başka yerden başlamış olurdu. Grid-mutlak çapa hem [`Session::scroll_display`]
+    /// ile kaymayı hem de çıktının içeriği yukarı itmesini (alacritty
+    /// `rotate`) kendiliğinden taşıyor.
+    ///
+    /// Seçim yoksa sessizdir: yeni seçim **doğurmaz**. Seçim sürüklemenin
+    /// ortasında da düşebilir — alternate screen'e geçiş onu siliyor
+    /// (`swap_alt`) ya da çıktı başlangıcı geçmişin dışına itiyor — ve o
+    /// hâlde fare hareketi basışsız bir seçim başlatmamalı.
+    ///
+    /// Kare kapısı [`Session::set_selection`]'ınkiyle aynı: çizilen aralık
+    /// değişmediyse kare istenmez.
+    pub fn update_selection(&self, end: SelectionPoint) {
+        let mut term = self.term.lock();
+        let (point, side) = anchor(&term, end);
+        let before = visible_range(term.selection.as_ref(), &term);
+        let Some(selection) = term.selection.as_mut() else {
+            return;
+        };
+        selection.update(point, side);
+        let changed = before != visible_range(term.selection.as_ref(), &term);
+        drop(term);
+        if changed {
+            self.request_frame();
         }
     }
 
@@ -977,9 +1032,9 @@ impl Session {
     /// yoksa da, sürüklemesiz tıkın bıraktığı boş seçimse de, çıktının
     /// geçmişe ittiği bir seçimse de: bayrak dikilmez, kare istenmez.
     pub fn clear_selection(&self) {
-        // Kilit gövdeden önce düşüyor: `dirty.store` + `wake.wake()` `Term`
-        // kilidi (çift muteksli `FairMutex`) tutulurken koşmamalı —
-        // `set_selection`'daki `drop` disiplininin aynısı.
+        // Kilit gövdeden önce düşüyor: `request_frame` `Term` kilidi (çift
+        // muteksli `FairMutex`) tutulurken koşmamalı — `set_selection`'daki
+        // `drop` disiplininin aynısı.
         let had = {
             let mut term = self.term.lock();
             let had = visible_range(term.selection.as_ref(), &term).is_some();
@@ -987,9 +1042,93 @@ impl Session {
             had
         };
         if had {
-            self.adapter.0.dirty.store(true, Ordering::Release);
-            self.adapter.0.wake.wake();
+            self.request_frame();
         }
+    }
+
+    /// Görünen pencereyi kaydırır; artı değer geriye. Kaydırınca kirli bayrağı
+    /// dikilir, yoksa kaydırma hiç boyanmaz (seçimdeki R1.2 ile aynı tuzak).
+    ///
+    /// Tuzağın bu yoldaki biçimi: alacritty'nin `Term::scroll_display`'i kareyi
+    /// **kendisi istemez** — tek olayı `Event::MouseCursorDirty` ve `Adapter`
+    /// onu yutuyor. Bayrak burada elle dikiliyor, **uyandırma da**: seçimde
+    /// olduğu gibi tekerleğin vardığı `view` link'e uzanamıyor.
+    ///
+    /// Dönüş iki soruyu ayırır:
+    ///
+    /// - `None` → kip kaydırmayı **reddetti**: alternate screen (vim, less,
+    ///   tmux). Tekerlek orada uygulamaya fare dizisi göndermeli ve o iş (fare
+    ///   raporlaması) bu sette yok; yoksaymak, uygulamanın ekranının altında
+    ///   birincil ekranın geçmişine inmekten iyidir. Karar `view`'da değil
+    ///   burada, çünkü kip `Term`'de yaşıyor.
+    /// - `Some(n)` → pencere `n` satır kaydı; geçmişin iki ucunda `0`. **Yalnız
+    ///   `n != 0` kare ister**: trackpad momentumu uçta da olay yağdırır ve
+    ///   her biri boş bir kare olurdu.
+    ///
+    /// `None` ile `Some(0)` bugün aynı görünür — alacritty alternate grid'i
+    /// geçmişsiz kuruyor (`Grid::new(.., 0)`), yani kip kapısı olmasa da ofset
+    /// oynamazdı. Ayrım o yüzden **tipte**: kapı alacritty'nin iç kararına
+    /// yaslanmıyor ve silinirse `alternate_screen_ignores_scroll` kırmızı.
+    ///
+    /// Seçim kapısına (`visible_range`) dokunulmuyor: iki tarafı aynı karede
+    /// aynı `display_offset`'le hesaplıyor, kaydırmanın kendi karesini
+    /// istemesi yeterli. Seçim aralığı grid mutlağında durduğu için içerikle
+    /// birlikte kayıyor.
+    pub fn scroll_display(&self, lines: i32) -> Option<i32> {
+        self.scroll_by(|_| lines)
+    }
+
+    /// Görünen pencereyi `pages` sayfa kaydırır (Shift+PgUp/PgDn); artı değer
+    /// geriye, dönüşü [`Session::scroll_display`]'inkiyle aynı — alternate
+    /// screen'de `None` ve `bt-shell` o cevapta tuşu uygulamaya geçiriyor.
+    ///
+    /// Sayfa **görünen satır sayısı** ve o sayı `Term`'de: "bir sayfa kaç
+    /// satır" terminalin kararı, `bt-shell`'in piksel aritmetiği değil. View
+    /// sayfayı kendi ölçü önbelleğinden türetseydi ekran boyunun ikinci bir
+    /// kopyasını taşır, ölçü yokken de tuşu sessizce uygulamaya düşürürdü.
+    pub fn scroll_page(&self, pages: i32) -> Option<i32> {
+        self.scroll_by(|term| pages.saturating_mul(term.screen_lines() as i32))
+    }
+
+    /// İki kaydırma yolunun ortak gövdesi: kip kapısı, kırpma, kare talebi.
+    /// Satır sayısı kilit **altında** çözülüyor (`lines`), çünkü sayfa boyu
+    /// `Term`'den okunuyor.
+    fn scroll_by(&self, lines: impl FnOnce(&Term<Adapter>) -> i32) -> Option<i32> {
+        let moved = {
+            let mut term = self.term.lock();
+            if term.mode().contains(TermMode::ALT_SCREEN) {
+                return None;
+            }
+            let lines = lines(&term);
+            let before = term.grid().display_offset() as i32;
+            // Kırpma **ulaşılabilir** aralığa (`[-ofset, geçmiş - ofset]`):
+            // ötesi zaten aynı yere varır, ama alacritty ofseti `i32`'de
+            // topluyor (`offset + count`) ve kırpılmamış bir delta debug
+            // derlemesinde **panik**, sürümde ters yöne sarma olurdu. Bu aralıkta
+            // toplam `[0, geçmiş]`'ten çıkamaz. `bt-shell` deltayı `f64`'ten
+            // doyurarak çeviriyor, yani `i32::MAX` ulaşılabilir bir değer.
+            // Geçmişin `i32`'ye sığması alacritty'nin kendi varsayımı
+            // (`display_offset as i32`); sığmazsa kırpılır.
+            let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
+            term.scroll_display(Scroll::Delta(lines.clamp(-before, history - before)));
+            term.grid().display_offset() as i32 - before
+        };
+        if moved != 0 {
+            self.request_frame();
+        }
+        Some(moved)
+    }
+
+    /// Kirli bayrağını diker ve uyandırır — `Adapter`'ın `Wakeup` kolunun
+    /// **kendisi**, ikinci bir kopyası değil: "bayrak uyandırmadan önce"
+    /// sırası tek yerde yaşıyor. `Term` kilidi **bırakıldıktan sonra**
+    /// çağrılır: uyandırma çift muteksli `FairMutex` tutulurken koşmamalı.
+    ///
+    /// `resize` bunu **kullanmıyor**: onun uyandırması `bt-shell`'in işi
+    /// (link'i kendisi açıyor). Buradaki çağıranların (seçim ve kaydırma)
+    /// ise elinde link yok.
+    fn request_frame(&self) {
+        self.adapter.send_event(Event::Wakeup);
     }
 
     /// Seçili aralığın metni — kopyalamanın (phase-2) ve sınamaların **tek**
@@ -1013,15 +1152,16 @@ impl Session {
         DirtyFlag(Arc::clone(&self.adapter.0.dirty))
     }
 
-    /// Klavyeden ya da başka bir kaynaktan PTY'ye bayt akıtır.
+    /// Klavyeden PTY'ye bayt akıtır — kullanıcı girdisi.
     ///
     /// Boş dilim sessizce düşer: sıfır baytlık bir `Msg::Input`
     /// `EventLoop`'un yazıcısını kalıcı olarak kilitler (bkz. `Adapter::reply`).
+    ///
+    /// Boş olmayan girdi **pencereyi dibe döndürür** ve bunun için `Term`
+    /// kilidini bir kez alır: geçmişe bakarken yazılan satır görünmez kalmasın.
+    /// Gerekçe ve bedeli `write_owned`'da — iki yol da oradan geçiyor.
     pub fn write(&self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-        self.send(Msg::Input(bytes.to_vec().into()));
+        self.write_owned(bytes.to_vec());
     }
 
     /// Sahiplenen yazma: `write` ile aynı kapı, ama baytları bir kez daha
@@ -1029,14 +1169,33 @@ impl Session {
     /// bir log dosyası); sarma dalı tamponu zaten kuruyorken `write`'a
     /// dilimle gitmek ikinci bir tam kopya demekti.
     ///
-    /// Boş vektör burada da sessizce düşer: kapı `write`'ınkiyle aynı ve
-    /// iki fonksiyon da `send`'den geçer. `Msg::Input`'u kuran üçüncü yer
-    /// `Adapter::reply`'dir; orada `Session` yok, adapter kendi kanalına
-    /// doğrudan yazıyor — yani bu kapının dışında.
+    /// Boş vektör sessizce düşer; `write` de bu kapıdan geçer, yani kullanıcı
+    /// girdisinin (klavye ve yapıştırma) **tek** gönderim noktası burası.
+    /// `Msg::Input`'u kuran öteki yer `Adapter::reply`'dir; orada `Session`
+    /// yok, adapter kendi kanalına doğrudan yazıyor — ve o bir kullanıcı
+    /// girdisi değil, uygulamanın sorusuna yanıt: aşağıdaki dibe dönüş ona
+    /// uygulanmaz.
+    ///
+    /// **Girdi pencereyi dibe döndürür.** Geçmişe bakarken yazılan girdi
+    /// görünmeyen bir satıra giderdi ve yanıtı da görünmezdi: alacritty
+    /// kaydırılmış pencereyi yeni çıktıya karşı sabitliyor (`grid.scroll_up`
+    /// ofseti artırıyor). Birincil ekranın ofseti alternate screen gidiş
+    /// dönüşünden de sağ çıkıyor (`swap_alt` grid'i bütün olarak takas
+    /// ediyor), yani geçmişte yazılan `vim` kapanınca istem yine görünmezdi.
+    /// Emsal alacritty'nin ikilisi (tuş ve yapıştırma girdisinde
+    /// `Scroll::Bottom`); kitaplık bunu yapmıyor.
+    ///
+    /// Bedeli girdi başına bir `Term` kilidi — sürükleme yolunun olay başına
+    /// ödediğiyle aynı. Kilidi atlayan bir "kaydırılmış mı" önbelleği
+    /// kurulmadı: alternate screen'de alt grid'in ofseti okunur ve birincil
+    /// ekran hâlâ kaydırılmışken önbellek "dipte" derdi.
     fn write_owned(&self, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
+        // Dönüş yok sayılıyor: `None` (alternate screen) ya da `Some(0)`
+        // (zaten dipte) iki hâlde de gönderim aynı.
+        let _ = self.scroll_by(|_| i32::MIN);
         self.send(Msg::Input(bytes.into()));
     }
 
@@ -1055,7 +1214,8 @@ impl Session {
     ///
     /// Boş yapıştırma iki dalda da sessizdir: sarma dalı bile boş
     /// `\e[200~\e[201~` çifti yazmaz, çünkü sıfır baytlık bir `Msg::Input`
-    /// yazıcıyı kilitler (`write`'ın kapısı).
+    /// yazıcıyı kilitler (`write_owned`'ın kapısı). Boş olmayan yapıştırma
+    /// [`Session::write`] gibi pencereyi dibe döndürür.
     ///
     /// Baytları **sahiplenerek** alır (`&[u8]` değil): pano yükü megabayt
     /// mertebesine çıkabilir ve yapıştırma yolunda iki tam kopya
@@ -1789,17 +1949,38 @@ mod tests {
         wait_frame(session, wake, |cells| glyph_text(cells).contains(needle))
     }
 
+    /// `ready` doğru dönene kadar 20 ms aralıkla sorar; `timeout` dolarsa
+    /// `what` gerekçesiyle düşer. Kip ve durulma beklemelerinin ortak
+    /// iskeleti — kare değil **durum** bekleyenler için (kare bekleyen
+    /// `wait_frame`).
+    fn wait_until(what: &str, timeout: Duration, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while !ready() {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// 2004 kipi set olana kadar bekler: erken giden bir `paste` ham yazardı
     /// ve sınama yanlış şeyi doğrular, yanlış kırmızıyı değil.
     fn wait_bracketed_mode(session: &Session) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            assert!(Instant::now() < deadline, "2004 kipi açılmadı");
-            if session.bracketed_paste() {
-                return;
+        wait_until("2004 kipi açılmadı", Duration::from_secs(5), || {
+            session.bracketed_paste()
+        });
+    }
+
+    /// Kare akışı durulana kadar bekler: **tek** `None` yetmez. Okumanın
+    /// karesi içerik görünür olduktan *sonra* düşebilir — `dirty` bayrağını
+    /// `Event::Wakeup` dikiyor ve o, `term.process()` kilidi bırakıldıktan
+    /// sonra koşuyor. Ölçüt bu yüzden **arka arkaya iki** `None`, aralarında
+    /// 20 ms: ilk `None` o gecikmiş `Wakeup`'tan önce düşmüş olabilir.
+    fn wait_settled(session: &Session) {
+        wait_until("kare akışı durulmadı", Duration::from_secs(2), || {
+            session.frame(|_| ()).is_none() && {
+                std::thread::sleep(Duration::from_millis(20));
+                session.frame(|_| ()).is_none()
             }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        });
     }
 
     /// Yapıştırma yükü: 20 bayt. `od` 16 baytlık bloklar hâlinde okur ve blok
@@ -1896,16 +2077,10 @@ mod tests {
 
         wait_bracketed_mode(&session);
 
-        // **Önce akış durulsun.** `printf`'in karesi, kip görünür olduktan
-        // *sonra* düşer: `dirty` bayrağını `Event::Wakeup` dikiyor ve o,
-        // `term.process()` kilidi bırakıldıktan sonra koşuyor. Tek bir
-        // `None` beklemek bu yüzden yarışırdı — gecikmiş kare "yapıştırma
-        // kare doğurdu" diye okunurdu. Ölçüt tek kare değil **durulma**.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while session.frame(|_| ()).is_some() {
-            assert!(Instant::now() < deadline, "açılış karesi durulmadı");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        // **Önce akış durulsun** (`wait_settled`): tek bir `None` beklemek
+        // yarışırdı — gecikmiş `printf` karesi "yapıştırma kare doğurdu" diye
+        // okunurdu.
+        wait_settled(&session);
 
         session.paste(Vec::new());
         // Sessizliğin kanıtı yankı: PTY'ye bayt gitseydi satır disiplini onu
@@ -2083,7 +2258,8 @@ mod tests {
         // özelliği olduğu için aynı aralık iki farklı uç çiftinden doğabilir:
         // sürükleme hücre sınırını geçerken `(2, Right)` → `(3, Left)` olur ve
         // ikisi de 2. sütunda biter. Uçları karşılaştıran kapı bu geçişte
-        // ekrana hiçbir şey eklemeyen bir kare isterdi.
+        // ekrana hiçbir şey eklemeyen bir kare isterdi. Sürüklemenin üretim
+        // yolu `update_selection` ve kapısı aynı; ikisi de aşağıda sınanıyor.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("sleep 5", Arc::clone(&wake));
         assert!(session.frame(|_| ()).is_some());
@@ -2103,6 +2279,19 @@ mod tests {
         assert!(
             session.frame(|_| ()).is_none(),
             "aynı aralık kare istememeli"
+        );
+        // Sürüklemenin kendi yolu: uç ters yönde geri döndü, aralık yine aynı.
+        // Kapı `set_selection`'da kalıp burada unutulsaydı her sürükleme olayı
+        // kare isterdi.
+        session.update_selection(at(2, 0, CellHalf::Right));
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "aynı aralığa sürükleme kare istememeli"
+        );
+        session.update_selection(at(4, 0, CellHalf::Right));
+        assert!(
+            session.frame(|_| ()).is_some(),
+            "aralığı büyüten sürükleme kare istemeli"
         );
 
         // Temizle, sonra yine sürüklemesiz tık: saklanan seçim boş, temizlemek
@@ -2152,11 +2341,7 @@ mod tests {
         // `read` satır sonunu bekliyor; gelince 30 satır `x`'i geçmişe iter.
         // Hazır: son satır (`30`) görünür.
         session.write(b"\n");
-        wait_frame(&session, &wake, |cells| {
-            cells.iter().any(|c| c.col == 0 && c.ch == Some('3'))
-                && cells.iter().any(|c| c.col == 1 && c.ch == Some('0'))
-        });
-        while session.frame(|_| ()).is_some() {}
+        wait_seq_tail(&session, &wake);
 
         session.set_selection(at(5, 5, CellHalf::Left), at(5, 5, CellHalf::Left));
         assert!(
@@ -2326,6 +2511,207 @@ mod tests {
         // Başlangıç ucu glyph'in sol yarısında: harf içeride.
         session.set_selection(at(0, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
         assert_eq!(session.selection_text().as_deref(), Some("あb"));
+    }
+
+    /// Kaydırma sınamalarının ortak sahnesi: 10 satırlık grid'e `seq 1 30`.
+    /// Otuz satır + imlecin boş satırı = 31 satır, yani **21** satır geçmiş;
+    /// dipte `22`…`30` ve imleç satırı görünür. Dönen oturumun karesi
+    /// durulmuştur: sonraki `frame()` ancak kaydırmanın istediği kare olabilir.
+    fn history_session(script: &str) -> (Session, Arc<TestWake>) {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(script, Arc::clone(&wake));
+        wait_seq_tail(&session, &wake);
+        (session, wake)
+    }
+
+    /// `seq 1 30`'un **son** satırı dipte görünene kadar bekler, sonra durulur.
+    ///
+    /// Ölçüt satırın kendisi (`row_text(.., 8) == "30"`): "sıfırıncı sütunda
+    /// bir `3`, birinci sütunda bir `0`" diye iki bağımsız soru `3` ile `10`
+    /// ekrandayken de tutar — `seq` çıktısı PTY okumasında bölünebilir ve
+    /// sınama geçmişin yarısıyla başlardı. Dokuzuncu satırda imlecin boş
+    /// satırı var.
+    fn wait_seq_tail(session: &Session, wake: &TestWake) {
+        wait_frame(session, wake, |cells| row_text(cells, 8) == "30");
+        wait_settled(session);
+    }
+
+    /// Şimdiye kadarki uyandırma sayısı — beklemeden.
+    fn wakes(wake: &TestWake) -> u32 {
+        wake.wait_wakes(0, Duration::ZERO)
+    }
+
+    /// Karenin `row` satırındaki mürekkep — kaydırmanın **hangi** içeriği
+    /// gösterdiğini okumanın yolu.
+    fn row_text(cells: &[Cell], row: u16) -> String {
+        cells
+            .iter()
+            .filter(|c| c.row == row)
+            .filter_map(|c| c.ch)
+            .collect()
+    }
+
+    /// Görünen pencerenin geçmişteki ofseti — `Term`'den doğrudan.
+    fn display_offset(session: &Session) -> usize {
+        session.term.lock().grid().display_offset()
+    }
+
+    #[test]
+    fn scroll_moves_the_display_offset_and_marks_dirty() {
+        // `Term::scroll_display` kareyi **kendisi istemez**: tek olayı
+        // `MouseCursorDirty` ve `Adapter` onu yutuyor. Kirli bayrağı elle
+        // dikilmezse kaydırma grid'de olur ama ekrana hiç çıkmaz — bu sınama
+        // ilk `frame()`'de kırmızıya düşer.
+        let (session, wake) = history_session("seq 1 30; sleep 5");
+
+        let woken = wakes(&wake);
+        assert_eq!(session.scroll_display(3), Some(3));
+        assert_eq!(display_offset(&session), 3);
+        // Uyandırma da elle: `frame()` bayrağı doğrudan okuduğu için bayrağı
+        // diken ama uyandırmayı unutan bir `request_frame` aşağıdaki
+        // `frame()`'den geçerdi — uygulamada ise duraklamış display link hiç
+        // açılmaz ve kaydırma, ilgisiz bir PTY çıktısı gelene kadar boyanmazdı.
+        assert!(wakes(&wake) > woken, "kaydırma uyandırmadı");
+        let mut cells = Vec::new();
+        let cursor = session
+            .frame(|c| cells.push(c))
+            .expect("kaydırma kare istemeli");
+        // Pencere gerçekten geriye gitti: en üst satır `22` değil `19`. İmleç
+        // dipteki satırla birlikte pencerenin altına düştü.
+        assert_eq!(row_text(&cells, 0), "19", "{cells:?}");
+        assert!(!cursor.visible, "{cursor:?}");
+        assert!(session.frame(|_| ()).is_none());
+
+        // Geçmişin tepesine: 21 - 3 = 18 satır daha. `i32::MAX` taşma
+        // bekçisi — alacritty ofseti `i32`'de topluyor (`offset + count`),
+        // kırpılmayan bir delta debug derlemesinde panik, sürümde ters yöne
+        // sarma olurdu. Giriş yolunda panik yok.
+        assert_eq!(session.scroll_display(i32::MAX), Some(18));
+        assert!(session.frame(|_| ()).is_some());
+        // Tepede kaymayan tekerlek **kare istemez**: trackpad momentumu
+        // tepede de olay yağdırır ve her biri boş bir kare olurdu.
+        let woken = wakes(&wake);
+        assert_eq!(session.scroll_display(1), Some(0));
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "kaymayan kaydırma kare istedi"
+        );
+        assert_eq!(wakes(&wake), woken, "kaymayan kaydırma uyandırdı");
+
+        // Dibe dönüş ters yönde aynı yol: imleç yeniden görünür.
+        assert_eq!(session.scroll_display(i32::MIN), Some(-21));
+        let cursor = session.frame(|_| ()).expect("dibe dönüş kare istemeli");
+        assert!(cursor.visible, "{cursor:?}");
+
+        // Sayfa = görünen satır sayısı (10), `Term`'den; kırpma aynı gövdede.
+        assert_eq!(session.scroll_page(1), Some(10));
+        assert!(session.frame(|_| ()).is_some());
+        assert_eq!(session.scroll_page(i32::MAX), Some(11));
+        assert_eq!(session.scroll_page(-1), Some(-10));
+    }
+
+    #[test]
+    fn alternate_screen_ignores_scroll() {
+        // Kip kararı `bt-core`'da. Sonuç `None` — `Some(0)` **değil**, ve
+        // ayrım sınamanın kendisi: alacritty'nin alternate grid'i geçmişsiz
+        // kuruluyor (`Grid::new(.., 0)`), yani kip kapısı silinse de ofset
+        // oynamaz ve kare istenmezdi. Yalnız ofsete bakan bir sınama o
+        // silinmeye yeşil kalırdı (mutasyonla görüldü).
+        //
+        // Birincil ekranda geçmiş **var** (`seq`): kapı olmasa kaydırmanın
+        // gidebileceği bir yer olsun. `history_session` burada kullanılamaz —
+        // `30`'u bekliyor, alternate screen ise onu gizliyor. Kip anahtarı
+        // akışta `seq`'ten sonra geliyor, yani kip görünür olduğunda `seq`
+        // çoktan işlendi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "seq 1 30; printf '\\033[?1049h'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until(
+            "alternate screen açılmadı",
+            Duration::from_secs(5),
+            || session.term.lock().mode().contains(TermMode::ALT_SCREEN),
+        );
+        wait_settled(&session);
+
+        assert_eq!(session.scroll_display(3), None);
+        // Sayfa yolu aynı kapıdan geçiyor: `bt-shell` bu `None`'da Shift+PgUp'ı
+        // uygulamaya düz PgUp olarak veriyor.
+        assert_eq!(session.scroll_page(1), None);
+        assert_eq!(display_offset(&session), 0);
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "yoksayılan kaydırma kare istedi"
+        );
+    }
+
+    #[test]
+    fn input_returns_the_view_to_the_bottom() {
+        // Geçmişe bakarken yazılan girdi pencereyi dibe döndürür. Dönmeseydi
+        // kullanıcı göremediği bir satıra yazardı: alacritty kaydırılmış
+        // pencereyi yeni çıktıya karşı **sabitliyor** (`grid.scroll_up`
+        // ofseti artırıyor), yani `ls` + Enter'in çıktısı da görünmez kalırdı.
+        // alacritty'nin ikilisi aynı şeyi tuş girdisinde yapıyor; kitaplık
+        // yapmıyor.
+        let (session, _wake) = history_session("seq 1 30; sleep 5");
+
+        assert_eq!(session.scroll_display(5), Some(5));
+        wait_settled(&session);
+        session.write(b"x");
+        assert_eq!(display_offset(&session), 0, "yazma dibe döndürmedi");
+        // Kare `write` dönmeden istenmiş olmalı — yankının `Wakeup`'ını
+        // beklemeden: dönüş, okuyucu thread'in işi değil.
+        let cursor = session.frame(|_| ()).expect("dibe dönüş kare istemeli");
+        assert!(cursor.visible, "{cursor:?}");
+
+        // Yapıştırma da aynı kapıdan: `paste` → `write_owned`.
+        assert_eq!(session.scroll_display(5), Some(5));
+        session.paste(b"y".to_vec());
+        assert_eq!(display_offset(&session), 0, "yapıştırma dibe döndürmedi");
+
+        // Boş girdi pencereye dokunmaz: yazılacak bayt yoksa dibe dönmek de
+        // yok (ve `Term` kilidi hiç alınmaz).
+        assert_eq!(session.scroll_display(5), Some(5));
+        session.write(b"");
+        session.paste(Vec::new());
+        assert_eq!(display_offset(&session), 5, "boş girdi pencereyi oynattı");
+    }
+
+    #[test]
+    fn drag_anchor_survives_a_scroll() {
+        // phase-1'in devri: basılı sürüklemenin ortasında kaydırma. Çapa
+        // pencere satırı olarak tutulsaydı (eski `set_selection(çapa, uç)`
+        // yolu) kaydırmadan sonra başka bir içeriğe işaret ederdi — `30`'dan
+        // başlayan sürükleme `27`'den başlamış gibi olurdu. Çapa artık
+        // alacritty'nin grid-mutlak başlangıcında yaşıyor.
+        let (session, _wake) = history_session("seq 1 30; sleep 5");
+
+        // Basış: `30`'un sıfırının sağ yarısı (8. satır, 1. sütun).
+        let press = at(1, 8, CellHalf::Right);
+        session.set_selection(press, press);
+        // Tekerlek üç satır geriye, fare pencerenin tepesine: orada artık `19`.
+        assert_eq!(session.scroll_display(3), Some(3));
+        session.update_selection(at(0, 0, CellHalf::Left));
+
+        let text = session.selection_text().expect("seçim metni");
+        assert!(
+            text.starts_with("19") && text.ends_with("30"),
+            "çapa kaydırmayla kaydı: {text:?}"
+        );
+    }
+
+    #[test]
+    fn update_selection_without_a_selection_is_silent() {
+        // Basışsız sürükleme (seçim yok) seçim doğurmaz ve kare istemez:
+        // güncelleme yalnız var olan seçimin ucunu taşır.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("sleep 5", Arc::clone(&wake));
+        assert!(session.frame(|_| ()).is_some());
+
+        session.update_selection(at(3, 0, CellHalf::Right));
+        assert_eq!(session.selection_text(), None);
+        assert!(session.frame(|_| ()).is_none());
     }
 
     #[test]
