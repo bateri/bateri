@@ -5,8 +5,9 @@
 //! çevrilir, ve `Term` kilidi **yalnız** şu çağrı yerlerinde alınır:
 //! `frame`, `resize`, seçim yolu (`set_selection`, `update_selection`,
 //! `clear_selection`, `selection_text`), kaydırma yolu (`scroll_wheel`,
-//! `scroll_page`), kullanıcı girdisinin gönderimi (`send_input`: dibe dönüş ve
-//! okun kip sorusu aynı kilitte) ve `paste`'in kip sorgusu (`bracketed_paste`).
+//! `scroll_page`), kullanıcı girdisinin gönderimi (`send_input`: seçimin
+//! temizliği, dibe dönüş ve okun kip sorusu aynı kilitte) ve `paste`'in kip
+//! sorgusu (`bracketed_paste`).
 //! Kilit **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
 //! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa kilitlenme
 //! doğar.
@@ -841,19 +842,29 @@ impl Session {
             let dim = flags.contains(Flags::DIM);
             let hidden = flags.contains(Flags::HIDDEN);
             // Seçim vurgusu ters videodur — yeni shader/uniform yok, emsali
-            // imleç tersine çevirme (aşağıda). `||`, `^` değil: ters videolu
-            // bir hücre seçilince düzleşmemeli. İmlecin altındaki hücreyle
-            // seçim çakışırsa imleç kazanır (onun dalı aşağıda koşulsuz).
+            // imleç tersine çevirme (aşağıda). `^`, `||` değil: seçim ters
+            // videoyu **çevirir**, seçili ters videolu hücre normal renklerine
+            // döner. `||` ile ters videolu bir satırın (vim durum satırı, tmux
+            // çubuğu) seçimi hiç görünmüyordu — seçili hücre seçilmemişle aynı
+            // renkteydi. Emsal alacritty: hücreyi önce `INVERSE` için takaslıyor,
+            // sonra varsayılan seçim renkleri (`CellBackground`/`CellForeground`)
+            // takaslanmış iki rengi bir kez daha takaslıyor. İmlecin altındaki
+            // hücreyle seçim çakışırsa imleç kazanır (onun dalı aşağıda
+            // koşulsuz ve bu değişkenden geçmiyor).
             //
             // Gizli metin seçilince de vurgulanmaz: `HIDDEN` "çizme" demek ve
             // seçim onu delseydi gizli hücrenin yeri boyalı bir blok olarak
             // görünürdü. Gizli metni kopyalamak isteyen phase-2'de
             // `selection_text()`'e sorar — vurgu ile metin aynı kapıdan geçmek
             // zorunda değil. `contains` değil `contains_cell`, iki sebeple:
-            // blok imlecin durduğu hücrede seçim tersine çevrilmez (imleç
-            // zaten ters videodur, çift tersleme onu silerdi — imlecin
-            // **kendi** noktası bu yüzden veriliyor), ve aralık bir spacer'da
-            // başlarsa geniş karakterin baş hücresi de vurgulanır.
+            // blok imleç seçimin **ucunda** durursa o hücre seçilmiş sayılmaz
+            // (alacritty'nin istisnası; imlecin **kendi** noktası bu yüzden
+            // veriliyor — hücrenin noktası verilince istisna her uca
+            // uygulanıyordu), ve aralık bir spacer'da başlarsa geniş
+            // karakterin baş hücresi de vurgulanır. Seçimin ortasındaki imleç
+            // hücresi seçili sayılır ve `inverse`'i çevrilir, ama imlecin
+            // rengi bu değişkenden geçmiyor: değişen yalnız opak bloğun
+            // altında kalan arka plan.
             // `set_selection` spacer'dan başlayan aralık kurmaz (`anchor`
             // spacer'ı `Right` yapıyor), ama seçimden sonra satır yeniden
             // yazılıp o hücre spacer olursa aralık orada başlar.
@@ -861,7 +872,7 @@ impl Session {
                 && selected_range
                     .as_ref()
                     .is_some_and(|range| range.contains_cell(&indexed, cursor_point, cursor_shape));
-            let inverse = flags.contains(Flags::INVERSE) || selected;
+            let inverse = flags.contains(Flags::INVERSE) ^ selected;
 
             // **Arka plan önce**: atlama koşulunun ağır yarısı bu ve boş
             // grid'de hücrelerin neredeyse tamamı burada eleniyor. Ön plan
@@ -873,7 +884,9 @@ impl Session {
             // plana** uygulanır (adlı rengi sönük eşine çeviren kod
             // alacritty'nin ikili tarafında, kitaplıkta değil). İkisi
             // birleşince kural şu: sönüklük, `cell.fg`'den doğan renge gider —
-            // ters videoda o renk arka plan olmuştur.
+            // ters videoda o renk arka plan olmuştur. "Ters video" burada
+            // seçimin çevirdiği `inverse`: seçili ters videolu hücrede sönüklük
+            // yeniden ön plana döner.
             let mut back = color::resolve(if inverse { cell.fg } else { cell.bg }, colors);
             if inverse && dim {
                 back = color::dim(back);
@@ -1090,13 +1103,8 @@ impl Session {
     pub fn clear_selection(&self) {
         // Kilit gövdeden önce düşüyor: `request_frame` `Term` kilidi (çift
         // muteksli `FairMutex`) tutulurken koşmamalı — `set_selection`'daki
-        // `drop` disiplininin aynısı.
-        let had = {
-            let mut term = self.term.lock();
-            let had = visible_range(term.selection.as_ref(), &term).is_some();
-            term.selection = None;
-            had
-        };
+        // `drop` disiplininin aynısı. Geçici kilit `let`'in sonunda düşüyor.
+        let had = clear_selection_locked(&mut self.term.lock());
         if had {
             self.request_frame();
         }
@@ -1125,11 +1133,21 @@ impl Session {
     /// kareyi getirir.
     ///
     /// **Gönderim `write_owned`'dan geçmez**, doğrudan kanala gider. O kapı
-    /// girdide pencereyi dibe döndürüyor: birincil ekranda fare kipi açıkken
-    /// (pencereyi Shift+PgUp geçmişe almış olabilir) her tekerlek raporu
-    /// pencereyi dibe atar ve raporlanan hücre kullanıcının baktığı yerden
-    /// kayardı; alternate screen'de dönüş zaten boş iş ve ikinci bir `Term`
-    /// kilidi olurdu. alacritty'nin rapor ve ok yolu da dibe dönmüyor.
+    /// girdide pencereyi dibe döndürüyor ve seçimi temizliyor: birincil ekranda
+    /// fare kipi açıkken (pencereyi Shift+PgUp geçmişe almış olabilir) her
+    /// tekerlek raporu pencereyi dibe atar ve raporlanan hücre kullanıcının
+    /// baktığı yerden kayardı; alternate screen'de dönüş zaten boş iş ve ikinci
+    /// bir `Term` kilidi olurdu. alacritty'nin rapor ve ok yolu da ne dibe
+    /// dönüyor ne seçimi temizliyor (`write_to_pty`'ye doğrudan).
+    ///
+    /// **Seçim de durur** ve bunun dayanağı alacritty ile aynı davranmak, bir
+    /// garanti değil. Bedeli bilinen: tekerlek oku klavyenin okuyla aynı
+    /// baytlar ve ekranı satır kaydırmakla değil **baştan çizerek** yenileyen
+    /// bir uygulamada (htop, fzf listesi) vurgu aynı hücrelerde kalır, altındaki
+    /// metin değişir — `write_owned`'daki "girdi seçimi temizler" gerekçesinin
+    /// aynısı. Satır kaydıran uygulamada (less'in `LF`/`\eM`'si) seçim içerikle
+    /// birlikte döner ve doğru kalır. Uygulamanın yazdığı hücrede seçimi
+    /// düşürmek iki yolu da kapsardı; o, girdiden bağımsız ayrı bir iş.
     ///
     /// **İşaretçi** (`at`) görünen pencerenin hücresidir ve `half` okunmaz:
     /// rapor hücre çözünürlüğünde (SGR-pixel, 1016, kapsam dışı). Tip
@@ -1187,9 +1205,9 @@ impl Session {
 
     /// Ok tuşu — klavyenin oku baytla değil tuşla girer; neden [`Arrow`]'da.
     ///
-    /// [`Session::write`] gibi kullanıcı girdisidir ve pencereyi dibe döndürür;
-    /// kip sorusu ile dibe dönüş **aynı** `Term` kilidinde (`send_input`), yani
-    /// ok tuşu da vuruş başına tek kilit öder.
+    /// [`Session::write`] gibi kullanıcı girdisidir: seçimi temizler ve
+    /// pencereyi dibe döndürür; kip sorusu ile ikisi **aynı** `Term` kilidinde
+    /// (`send_input`), yani ok tuşu da vuruş başına tek kilit öder.
     pub fn write_arrow(&self, arrow: Arrow) {
         self.send_input(|mode| input::arrow(arrow, mode).to_vec());
     }
@@ -1239,6 +1257,9 @@ impl Session {
     /// Seçili aralığın metni — kopyalamanın (phase-2) ve sınamaların **tek**
     /// yolu. Satır sarma ve geniş karakter spacer'ları alacritty'nin içinde
     /// çözülür; ikinci bir metin yolu, ikinci bir sarma hatası demek olurdu.
+    ///
+    /// Okumadır, seçimi **temizlemez**: Cmd-C girdi değil, `send_input`'a hiç
+    /// varmaz — kopyaladıktan sonra vurgu ekranda kalır (alacritty de öyle).
     pub fn selection_text(&self) -> Option<String> {
         self.term.lock().selection_to_string()
     }
@@ -1262,9 +1283,10 @@ impl Session {
     /// Boş dilim sessizce düşer: sıfır baytlık bir `Msg::Input`
     /// `EventLoop`'un yazıcısını kalıcı olarak kilitler (bkz. `Adapter::reply`).
     ///
-    /// Boş olmayan girdi **pencereyi dibe döndürür** ve bunun için `Term`
-    /// kilidini bir kez alır: geçmişe bakarken yazılan satır görünmez kalmasın.
-    /// Gerekçe ve bedeli `write_owned`'da — iki yol da oradan geçiyor.
+    /// Boş olmayan girdi **seçimi temizler ve pencereyi dibe döndürür**, ikisi
+    /// için `Term` kilidini bir kez alır: geçmişe bakarken yazılan satır
+    /// görünmez kalmasın, eski vurgu değişen metnin üstünde kalmasın. Gerekçe
+    /// ve bedeli `write_owned`'da — iki yol da oradan geçiyor.
     pub fn write(&self, bytes: &[u8]) {
         self.write_owned(bytes.to_vec());
     }
@@ -1278,10 +1300,25 @@ impl Session {
     /// ok tuşuyla ([`Session::write_arrow`]) birlikte hepsi `send_input`'ta
     /// buluşur — kullanıcı girdisinin **tek** gönderim noktası orası.
     /// `Msg::Input`'u kuran öteki iki yer kullanıcı girdisi değil, ve aşağıdaki
-    /// dibe dönüş onlara uygulanmaz: `Adapter::reply` uygulamanın sorusuna
-    /// yanıt (orada `Session` yok, adapter kendi kanalına yazıyor),
-    /// [`Session::scroll_wheel`] tekerleği uygulamaya veriyor (gerekçesi
-    /// orada).
+    /// dibe dönüş de seçimin temizliği de onlara uygulanmaz: `Adapter::reply`
+    /// uygulamanın sorusuna yanıt (orada `Session` yok, adapter kendi kanalına
+    /// yazıyor ve `Term` kilidini okuyucu thread tutuyor),
+    /// [`Session::scroll_wheel`] tekerleğin raporunu ya da okunu uygulamaya
+    /// veriyor (gerekçesi orada). Cmd-C ise hiç yazmıyor
+    /// ([`Session::selection_text`]). Yolların hangisinin temizlediğini
+    /// `input_clears_the_selection` ve `wheel_and_replies_keep_the_selection`
+    /// çiviliyor.
+    ///
+    /// **Girdi seçimi temizler.** Kalsaydı yazılan satır ve yanıtı seçili
+    /// hücrelerin üstüne düşebilirdi: vurgu hücrede kalır, altındaki metin
+    /// değişir ve Cmd-C kullanıcının seçtiğini değil o an orada duranı
+    /// kopyalardı. alacritty'nin kitaplığı yalnız silme dizilerinde
+    /// (`intersects_range`) temizliyor, yazmada değil. Emsal alacritty'nin
+    /// ikilisi: `on_terminal_input_start` hem tuş girdisinde hem yapıştırmanın
+    /// iki dalında seçimi temizleyip dibe dönüyor. Kare yalnız **çizili** bir
+    /// aralık kalkınca istenir (`clear_selection_locked`, phase-1'in kare
+    /// kuralı): sürüklemesiz tıkın bıraktığı boş seçim her tıktan sonraki ilk
+    /// tuşa boş bir kare isteterdi.
     ///
     /// **Girdi pencereyi dibe döndürür.** Geçmişe bakarken yazılan girdi
     /// görünmeyen bir satıra giderdi ve yanıtı da görünmezdi: alacritty
@@ -1305,27 +1342,39 @@ impl Session {
         self.send_input(|_| bytes);
     }
 
-    /// Kullanıcı girdisinin gönderimi: pencereyi dibe döndürür ve baytları
-    /// **aynı** `Term` kilidinde, kipi görerek kurar (`bytes`). Ok tuşu kipi
-    /// soruyor (DECCKM); ikinci bir kilit almasın diye soru buraya taşındı.
+    /// Kullanıcı girdisinin gönderimi: seçimi temizler, pencereyi dibe
+    /// döndürür ve baytları **aynı** `Term` kilidinde, kipi görerek kurar
+    /// (`bytes`). Ok tuşu kipi soruyor (DECCKM); ikinci bir kilit almasın diye
+    /// soru buraya taşındı.
     ///
-    /// Boş bayt ne gönderilir ne pencereyi oynatır: sıfır baytlık `Msg::Input`
-    /// `EventLoop`'un yazıcısını kalıcı olarak kilitler (`Adapter::reply`).
+    /// Boş bayt ne gönderilir ne pencereyi ne seçimi oynatır: sıfır baytlık
+    /// `Msg::Input` `EventLoop`'un yazıcısını kalıcı olarak kilitler
+    /// (`Adapter::reply`).
     /// Kural çağıranlara bırakılmadı — ok gibi kipe bağlı bir sonraki tuş
     /// buradan geçecek.
     ///
     /// `bytes` kilit **altında** koşar ve `Session`'a dokunmamalı: `FairMutex`
     /// yeniden girilebilir değil, geri giren bir closure kendi kendini kilitler.
     fn send_input(&self, bytes: impl FnOnce(TermMode) -> Vec<u8>) {
-        let (bytes, moved) = {
+        let (bytes, cleared, moved) = {
             let mut term = self.term.lock();
             let bytes = bytes(*term.mode());
             if bytes.is_empty() {
                 return;
             }
-            (bytes, scroll_locked(&mut term, i32::MIN))
+            // Seçim dibe dönüşten **önce** düşer: "çizili miydi" sorusu
+            // kullanıcının baktığı pencereye sorulmalı. Pencere kayarsa kare
+            // zaten isteniyor; kaymazsa iki soru aynı cevabı verir.
+            let cleared = clear_selection_locked(&mut term);
+            (bytes, cleared, scroll_locked(&mut term, i32::MIN))
         };
-        self.wake_if_moved(moved);
+        // Tek istek: temizlik ve dönüş aynı kareyi istiyor, vuruş başına iki
+        // uyandırma olmasın. "Kaydı mı" kuralı `wake_if_moved`'da kalıyor.
+        if cleared {
+            self.request_frame();
+        } else {
+            self.wake_if_moved(moved);
+        }
         self.send(Msg::Input(bytes.into()));
     }
 
@@ -1345,7 +1394,9 @@ impl Session {
     /// Boş yapıştırma iki dalda da sessizdir: sarma dalı bile boş
     /// `\e[200~\e[201~` çifti yazmaz, çünkü sıfır baytlık bir `Msg::Input`
     /// yazıcıyı kilitler (`write_owned`'ın kapısı). Boş olmayan yapıştırma
-    /// [`Session::write`] gibi pencereyi dibe döndürür.
+    /// [`Session::write`] gibi seçimi temizler ve pencereyi dibe döndürür —
+    /// alacritty'nin `paste`'i de iki dalında `on_terminal_input_start`'ı
+    /// çağırıyor.
     ///
     /// Baytları **sahiplenerek** alır (`&[u8]` değil): pano yükü megabayt
     /// mertebesine çıkabilir ve yapıştırma yolunda iki tam kopya
@@ -1611,6 +1662,18 @@ fn scroll_locked<T: EventListener>(term: &mut Term<T>, lines: i32) -> Option<i32
     let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
     term.scroll_display(Scroll::Delta(lines.clamp(-before, history - before)));
     Some(term.grid().display_offset() as i32 - before)
+}
+
+/// Seçimi kilit altında düşürür; ekranda **çizili** bir aralık gittiyse `true`
+/// — kareyi çağıran ister, `scroll_locked` gibi. Temizliğin iki yolunun
+/// ortak gövdesi: girdide `send_input` (üretimdeki tek temizlik yolu) ve
+/// [`Session::clear_selection`] (`pub` API, bugün yalnız sınamalardan
+/// çağrılıyor). Tek gövde, "kare ne zaman" sorusunun tek cevabı olsun diye:
+/// hiç seçim yoksa da, sürüklemesiz tıkın boş seçimiyse de, ekranda olmayan
+/// (geçmişte kalan) bir seçimse de `false`.
+fn clear_selection_locked<T>(term: &mut Term<T>) -> bool {
+    let selection = term.selection.take();
+    visible_range(selection.as_ref(), term).is_some()
 }
 
 /// Görünür pencere hücresini grid noktasına çevirir.
@@ -2716,6 +2779,68 @@ mod tests {
     }
 
     #[test]
+    fn selected_inverse_cell_is_drawn_in_normal_colors() {
+        // Seçim ters videoyu **çevirir**: seçili ters videolu hücre normal
+        // renkleriyle çizilir (gerekçesi `frame()`'in `inverse` yorumunda).
+        //
+        // Sütunlar: 0–1 ters video (ön plan kırmızı, arka plan yeşil), 2–3
+        // aynısı artı `DIM`, 4 varsayılan renkli ters video boşluk. İmleç 5.
+        // sütunda, yani `contains_cell`'in blok imleç istisnası hiçbirine
+        // değmiyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033[7;31;42mab\\033[2mcd\\033[0;7m \\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+        assert_eq!(wait_cells(&session, &wake, 5).len(), 5);
+        let red = color::default(1);
+        let green = color::linear_rgba(color::default(2));
+        let colors = |session: &Session| {
+            let mut cells = Vec::new();
+            assert!(session.frame(|c| cells.push(c)).is_some());
+            cells
+                .iter()
+                .map(|c| (c.col, (c.bg, c.fg)))
+                .collect::<HashMap<_, _>>()
+        };
+
+        // 1. ve 2. sütun seçili: biri düz, biri sönük ters video.
+        session.set_selection(at(1, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
+        let drawn = colors(&session);
+        // Seçilmemiş ters video: renkler takaslı.
+        assert_eq!(
+            drawn[&0],
+            (Some(color::linear_rgba(red)), green),
+            "{drawn:?}"
+        );
+        // Seçili ters video: takas geri alınmış, yani hücrenin kendi renkleri.
+        assert_eq!(
+            drawn[&1],
+            (Some(green), color::linear_rgba(red)),
+            "{drawn:?}"
+        );
+        // `DIM` kuralı çevirmeden sonra da aynı: sönüklük `cell.fg`'den doğan
+        // renge gider. Seçilmemişte o renk arka plan, seçilide yine ön plan.
+        let dim_red = color::linear_rgba(color::dim(red));
+        assert_eq!(drawn[&2], (Some(green), dim_red), "{drawn:?}");
+        assert_eq!(drawn[&3], (Some(dim_red), green), "{drawn:?}");
+
+        // Varsayılan renkli ters video boşluk seçilince çizilmeyen hücreye
+        // döner: arka planı varsayılan, mürekkebi ve kuralı yok. Atlama
+        // koşulu onu elemeli — ekranın zeminiyle aynı renkte bir hücreyi
+        // `sink`'e sokmak `hucre=` sayısını şişirirdi.
+        assert!(drawn[&4].0.is_some(), "seçilmemiş boşluk boyalı: {drawn:?}");
+        session.set_selection(at(4, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        let drawn = colors(&session);
+        assert!(!drawn.contains_key(&4), "seçili boşluk çizildi: {drawn:?}");
+        assert_eq!(
+            drawn[&1],
+            (Some(color::linear_rgba(red)), green),
+            "{drawn:?}"
+        );
+    }
+
+    #[test]
     fn wide_char_is_selected_as_one_glyph() {
         // Geniş karakter iki hücrelik **tek** glyph'tir ve yarı kuralı glyph'e
         // uygulanır, hücreye değil: baş hücre glyph'in sol yarısı, spacer sağ
@@ -3150,6 +3275,151 @@ mod tests {
         session.write(b"");
         session.paste(Vec::new());
         assert_eq!(display_offset(&session), 5, "boş girdi pencereyi oynattı");
+    }
+
+    #[test]
+    fn input_clears_the_selection() {
+        // Yazınca seçim kalkar (alacritty `on_terminal_input_start`). Üç
+        // kullanıcı girdisi de aynı kapıdan (`send_input`) geçiyor; üçü de
+        // sınanıyor ki biri o kapıyı by-pass edince görünsün.
+        //
+        // `stty -echo` şart: yankı kendi `Wakeup`'ını doğururdu ve "kare
+        // istendi" iddiası temizleme olmadan da geçerdi. Uyku uzun: çocuk
+        // çıkınca `ChildExit`'in `Wakeup`'ı sondaki "kare yok" iddiasını yavaş
+        // bir koşuda kızartırdı.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf '\\033[41maraba\\033[0m'; sleep 60",
+            Arc::clone(&wake),
+        );
+        assert_eq!(wait_cells(&session, &wake, 5).len(), 5);
+
+        /// `araba`'yı seçer ve seçimin karesini tüketir: sonraki kare ancak
+        /// seçimden sonra olan bir şeyin karesi olabilir.
+        fn select_word(session: &Session) {
+            session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+            wait_settled(session);
+        }
+
+        /// `araba` seçiliyken `input` koşar: seçim gitmeli, kare istenmiş ve
+        /// vurgu ekrandan kalkmış olmalı.
+        fn clears(session: &Session, what: &str, input: impl FnOnce(&Session)) {
+            select_word(session);
+            input(session);
+            assert_eq!(session.selection_text(), None, "{what} seçimi temizlemedi");
+            // Kare `input` dönmeden istenmiş olmalı: yankı yok, çocuk da
+            // hiçbir şey basmıyor — isteyebilecek tek aday temizliğin kendisi.
+            let mut cells = Vec::new();
+            assert!(
+                session.frame(|c| cells.push(c)).is_some(),
+                "{what}: kalkan vurgu kare istemedi"
+            );
+            // Vurgu gerçekten gitti: beş hücre yeniden kendi kırmızısında.
+            let red = Some(color::linear_rgba(color::default(1)));
+            assert_eq!(
+                backgrounds(&cells).filter(|c| c.bg == red).count(),
+                5,
+                "{what}: vurgu kaldı: {cells:?}"
+            );
+        }
+        clears(&session, "yazma", |s| s.write(b"x"));
+        clears(&session, "yapıştırma", |s| s.paste(b"y".to_vec()));
+        clears(&session, "ok tuşu", |s| s.write_arrow(Arrow::Up));
+
+        // Boş girdi seçime dokunmaz — pencereye de dokunmuyor
+        // (`input_returns_the_view_to_the_bottom`): gönderilecek bayt yoksa
+        // kullanıcı girdisi de yok.
+        select_word(&session);
+        session.write(b"");
+        session.paste(Vec::new());
+        assert_eq!(session.selection_text().as_deref(), Some("araba"));
+
+        // Ekranda çizili aralık yoksa kare istenmez: sürüklemesiz tık boş seçim
+        // bırakır ve temizliği her tıktan sonraki ilk tuşa boş bir kare
+        // isteterdi.
+        session.set_selection(at(2, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
+        wait_settled(&session);
+        session.write(b"x");
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "boş seçimin temizliği kare istedi"
+        );
+
+        // Temizlik ve dibe dönüş birlikte: **tek** uyandırma. Geçmişe bakan
+        // pencerede çizili bir seçim var; girdi hem onu kaldırıyor hem pencereyi
+        // dibe alıyor. İki ayrı istek vuruş başına display link'i iki kez
+        // uyandırırdı. Uyandırma `write` dönmeden sayılır — yankı yok, çıktı
+        // yok, başka aday yok.
+        let (history, wake) = history_session("stty -echo; seq 1 30; sleep 60");
+        assert_eq!(scroll(&history, 5), Wheel::Scrolled(5));
+        history.set_selection(at(0, 0, CellHalf::Left), at(1, 0, CellHalf::Right));
+        wait_settled(&history);
+        let woken = wakes(&wake);
+        history.write(b"x");
+        assert_eq!(history.selection_text(), None);
+        assert_eq!(display_offset(&history), 0, "yazma dibe döndürmedi");
+        assert_eq!(wakes(&wake), woken + 1, "temizlik ve dönüş ayrı uyandırdı");
+
+        // Seçim grid'de ama ekranda değil (pencere geçmişten dibe döndü):
+        // temizlik kare istemez — kapı seçimin varlığına değil çizili aralığa
+        // bakıyor. Seçim yine de gider, yoksa Cmd-C görünmeyen metni kopyalardı.
+        assert_eq!(scroll(&history, 5), Wheel::Scrolled(5));
+        history.set_selection(at(0, 0, CellHalf::Left), at(1, 0, CellHalf::Right));
+        assert_eq!(scroll(&history, -5), Wheel::Scrolled(-5));
+        wait_settled(&history);
+        history.write(b"x");
+        assert_eq!(history.selection_text(), None);
+        assert!(
+            history.frame(|_| ()).is_none(),
+            "görünmeyen seçimin temizliği kare istedi"
+        );
+    }
+
+    #[test]
+    fn wheel_and_replies_keep_the_selection() {
+        // Tekerlek raporu ve tekerlek okları uygulamaya gidiyor, yanıt
+        // uygulamanın sorusuna gidiyor — hiçbiri kullanıcının yazdığı bir şey
+        // değil ve seçimi temizlemiyor. alacritty'de de öyle: `scroll_terminal`
+        // ve `mouse_report` `write_to_pty`'ye doğrudan yazıyor,
+        // `on_terminal_input_start`'tan geçmiyor.
+        //
+        // Kipler metinden **sonra** basılıyor: kip görününce `araba` da
+        // ayrıştırılmış demek.
+        let (start, end) = (at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        let (reports, _wake) = dump_session(40, "printf 'araba\\033[?1000h\\033[?1006h'", |mode| {
+            mode.contains(TermMode::SGR_MOUSE)
+        });
+        reports.set_selection(start, end);
+        assert_eq!(scroll(&reports, 1), Wheel::Sent);
+        assert_eq!(
+            reports.selection_text().as_deref(),
+            Some("araba"),
+            "tekerlek raporu seçimi temizledi"
+        );
+        // Yanıt, okuyucu thread'in `PtyWrite` olayından — `Adapter`'ın gerçek
+        // girişi.
+        reports
+            .adapter
+            .send_event(Event::PtyWrite("\x1b[0n".to_owned()));
+        assert_eq!(
+            reports.selection_text().as_deref(),
+            Some("araba"),
+            "yanıt seçimi temizledi"
+        );
+        // Karşıt: aynı oturumda kullanıcı girdisi temizliyor.
+        reports.write(b"x");
+        assert_eq!(reports.selection_text(), None);
+
+        let (arrows, _wake) = dump_session(40, "printf '\\033[?1049haraba\\033[?2004h'", |mode| {
+            mode.contains(TermMode::ALT_SCREEN | TermMode::BRACKETED_PASTE)
+        });
+        arrows.set_selection(start, end);
+        assert_eq!(scroll(&arrows, 1), Wheel::Sent);
+        assert_eq!(
+            arrows.selection_text().as_deref(),
+            Some("araba"),
+            "tekerlek oku seçimi temizledi"
+        );
     }
 
     #[test]
