@@ -221,7 +221,8 @@ düzelir.
     kodu, doğrulanmadı: (6) phase-2'de, (7) phase-3'te zaten waive'li,
     **aynen kalır**; (10) kapanışın indeks adımında düzelir; (1), (2), (3),
     (8), (9) **kullanıcıya soruldu** (phase-5'ten önce küçük bir phase mı,
-    borç mu).
+    borç mu). *Karar (2026-09-15): (1), (2), (3) → `phase-4d.md`; (8), (9)
+    → kapanışta yol haritası borcu (`discussion.md` → Kapsam eki).*
 
 ## Yayın Etkisi
 
