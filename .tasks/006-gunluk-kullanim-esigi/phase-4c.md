@@ -252,4 +252,4 @@ düzelir.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi — 4c'ye değen (4) doc'ta kısmen giderildi + WAIVE önerisi, (5) WAIVE önerisi; kalan 8'i önceki phase'lere ait, kapsam dışı (notlar)
 - [x] `/audit` çalıştırıldı, bulgular giderildi — bulgu yok
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: aa6b3a0
