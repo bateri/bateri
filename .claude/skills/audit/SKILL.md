@@ -104,7 +104,9 @@ Tek sahip `docs/OLCUMLER.md`. Başka belge (`CLAUDE.md`, `MIMARI.md`,
 Ayrıca: **ölçülmemiş iddia** var mı ("120 fps tutar", "gecikme düşer", "daha
 az bellek")? Ölçülmediyse iddia edilmez — `/measure` ile ölçülür ya da cümle
 düşer. `docs/ARASTIRMA.md` istisnadır: Metalterm'in kendi sayılarını aktarır,
-bizim ölçümümüz değildir ve bilerek eskir.
+bizim ölçümümüz değildir ve bilerek eskir. İkinci istisna bir `const`'un
+doc'u: o sabiti doğuran kutupları ve türetmeyi taşıyabilir, koşu tablosunu
+taşıyamaz (kural `proje.md` → tuzaklar).
 
 **7. Thread ve blokaj.** Render yolunda (`bt-gpu`'nun frame üreten kodu,
 display link callback'i) bloklayan çağrı var mı — PTY `read`, kilit bekleme,

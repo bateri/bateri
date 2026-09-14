@@ -1,6 +1,6 @@
 ---
 name: measure
-description: Kare süresi (GPU/CPU), giriş gecikmesi, sekme başına bellek, açılış süresi ve ayrıştırıcı bench ölçümlerini koşturur, tabanla karşılaştırır ve sonucu docs/OLCUMLER.md'ye işler. Kullanıcı "ölç", "kaç fps", "gecikme ne oldu", "bu hızlandı mı", "bench çalıştır", "ölçümleri güncelle" dediğinde kullanılır. Ölçüm gerçek pencere ve sessiz makine ister, bir kapı değildir — yalnız kullanıcı istediğinde koşar.
+description: Kare süresi (GPU/CPU), giriş gecikmesi, sekme başına bellek, açılış süresi, boşta kare kapısının sınırı (IDLE_FRAME_LIMIT) ve ayrıştırıcı bench ölçümlerini koşturur, tabanla karşılaştırır ve sonucu docs/OLCUMLER.md'ye işler. Kullanıcı "ölç", "kaç fps", "gecikme ne oldu", "bu hızlandı mı", "bench çalıştır", "ölçümleri güncelle" dediğinde kullanılır. Ölçüm gerçek pencere ve sessiz makine ister, bir kapı değildir — yalnız kullanıcı istediğinde koşar.
 allowed-tools: Read, Edit, Write, Glob, Grep, Bash(make:*), Bash(cargo:*), Bash(git:*), Bash(ls:*), Bash(diff:*), Bash(sort:*), Bash(xcrun:*), Bash(footprint:*), Bash(vmmap:*), Bash(wc:*)
 ---
 
@@ -20,8 +20,9 @@ yürütür. Dosya **yoksa** ilk ölçüm onu kurar: önce `## Yöntem` ve `## Na
 yeniden ölçülür` yazılır, sonra sayı girer — yöntemsiz sayı sonraki ölçümle
 karşılaştırılamaz.
 
-Dosya bugün **yok** ve `## Yöntem`'i sıfırdan yazmak gerekmiyor: kancaların
-dürüst sınırları **kodda** emaneten duruyor ve oradan taşınır —
+Hangi türün sayısı olduğunu dosyanın başı söylüyor. Kare süresi ve açılışın
+yöntemini sıfırdan yazmak gerekmiyor: o kancanın dürüst sınırları **kodda**
+emaneten duruyor ve o türün ilk ölçümü onları `## Yöntem`'e taşır —
 
 - `crates/bt-shell/src/app.rs` → `Measured`'ın doc'u, "**Ölçümün dürüst
   sınırları**" başlığı — listenin tamamı orada ve her kalem **kapsam** ya da
@@ -44,6 +45,7 @@ türleri ve `docs/OLCUMLER.md`'deki karşılıkları:
 | giriş gecikmesi | `BT_INPUT_LATENCY_SAMPLES=200` — tuş → PTY → echo → parse → commit → presented zinciri, medyan ve p95 | **yok** (005 kapsam dışı: zincirin orta halkaları `alacritty_terminal`'de) | `## Giriş gecikmesi` |
 | bellek | `footprint -p {pid}` ya da `vmmap --summary`; 1 sekme boş, 1 sekme 10 000 satır dolu, 8 sekme | araç dışarıdan, sekme yok | `## Bellek` |
 | açılış | aynı koşunun `acilis=` jetonu — `main()`'in **ilk satırından** ilk **tamamlanan** kareye | **var**, ama tarifi dar: süreç başlangıcı ve *presented* değil (bkz. yukarıdaki dürüst sınırlar) | `## Açılış` |
+| boşta kare (`IDLE_FRAME_LIMIT`) | sağlıklı `make duman` (debug) + paketten `open` (release) koşuları, üstüne kasıtlı bozulmuş bir koşu; tarif ve paket yolunun tuzakları dosyada | **var** (`kare=`/`istek=` jetonları); kapının kendisi değil, sınırını doğuran ölçüm | `## Boşta kare` |
 | ayrıştırıcı / atlas bench | `cargo bench -p bt-core --bench parse`, `cargo bench -p bt-atlas` | **yok** — `criterion` ayrı bir bağımlılık kararı; `cargo bench --workspace -- --list` → `0 benchmarks` | `## Bench` |
 
 Ölçüm koşusunun iki şartı: `BT_FRAME_STATS` ile `BT_SCROLL_TEST` **sıfırdan

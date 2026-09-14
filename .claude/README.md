@@ -29,7 +29,7 @@ değişmez — sürücü yalnız sırayı, kapıları ve eskalasyonu yönetir.
 | skill | ne yapar | ne zaman |
 |---|---|---|
 | `/audit` | bateri'ye özgü mercekler (katman yönü ve `bt-core`'un platformsuzluğu, panik yolu, boşta sıfır kare, hücre boyutu ve shader düzeni, ayar şeması, shell üçlüsü, bağımlılık, ölçüm sahipliği) | kalite kapısının üçüncü adımı; `/simplify` ve `/code-review` projeye özgü kural okumaz |
-| `/measure` | kare süresi, giriş gecikmesi, bellek, açılış ve bench ölçer, `docs/OLCUMLER.md`'ye işler | **yalnız kullanıcı isteyince** — ölçüm kapı değildir, gerçek pencere ve sessiz makine ister |
+| `/measure` | kare süresi, giriş gecikmesi, bellek, açılış, boşta kare sınırı ve bench ölçer, `docs/OLCUMLER.md`'ye işler | **yalnız kullanıcı isteyince** — ölçüm kapı değildir, gerçek pencere ve sessiz makine ister |
 
 ## Ne zaman kullanılmaz
 

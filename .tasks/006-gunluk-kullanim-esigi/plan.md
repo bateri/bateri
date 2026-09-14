@@ -139,4 +139,4 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 | phase-4b | ✅ | 87034aa | `[elle]` göz kontrolü tamam (2026-09-15) (gerçek Dock açılışı, Türkçe giriş); paketli açılış yoklamayla kanıtlandı (`phase-4b.md`) |
 | phase-4c | ✅ | aa6b3a0 | Düşüş `LANG=en_US.UTF-8`; paketli yoklamada bu makinenin (`en` + `TR`) kabuğu `LANG=en_US.UTF-8` görüyor; WAIVE önerileri: `/code-review` (4) `C.UTF-8`, (5) dil etiketinin bölgesi (`phase-4c.md`) |
 | phase-4d | ✅ | 3907585 | Üç bulgu da kırmızı sınamayla doğrulandı ve düzeldi; `[elle]` tamam (2026-09-15); Ctrl+Shift+Tab `0x19` WAIVE'i kabul, kapanışta borç |
-| phase-5 | | | phase-4d'den sonra; pencere açıp kapatır — kullanıcı bilgisayarı kullanmıyorken |
+| phase-5 | ✅ | {hash} | `IDLE_FRAME_LIMIT` görünür pencerede debug + release paket için yeniden ölçüldü, `8` kaldı (kod değişmedi); ölçüm `docs/OLCUMLER.md`'yi kurdu |

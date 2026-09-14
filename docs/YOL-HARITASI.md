@@ -28,7 +28,7 @@ bulunamaz.
 | # | İş | Neden burada |
 |---|---|---|
 | 005 | ölçüm kancaları | 002, 003 ve 004'ün bekleyen on iki iddiası tek bir kanca setine bağlı. Taban, **bir sonraki büyük render değişikliğinden önce** alınırsa "hangi set yavaşlattı" sorusu cevaplanabilir olur; sonra alınırsa o soru kalıcı olarak cevapsız kalır. `docs/OLCUMLER.md` bilerek **kapsam dışı** bırakıldı (onu ilk `/measure` kurar) ve bench (`criterion`) de öyle; **bench'in dışarıda kalması** on ikinin ikisini bu setten sonra da açık bırakıyor — ikisi de saf `cargo bench` iddiası |
-| 006 | pano + seçim + kaydırma + bundle | **Eşiği tek hamlede geçmek için bilerek şişirilmiş set.** Cila feda edilir: yapıştır, kopyala, fareyle seçim, tekerlek, `.app` bundle. Bundle burada çünkü bundle'sız süreç öne çıkamıyor, Dock ikonu almıyor ve varsayılan terminal olamıyor. 002'nin ertelenmiş Apache-2.0 attribution'ı da burada kapanır. **Bundle'ın bir yan ödevi var:** görünür pencere meşru kare sayısını değiştirir, yani `IDLE_FRAME_LIMIT` (boşta sıfır kare kapısı) bu sette **yeniden ölçülmeli** — bugünkü değeri görünmeyen bir pencerede ölçüldü |
+| 006 | pano + seçim + kaydırma + bundle | **Eşiği tek hamlede geçmek için bilerek şişirilmiş set.** Cila feda edilir: yapıştır, kopyala, fareyle seçim, tekerlek, `.app` bundle. Bundle burada çünkü bundle'sız süreç öne çıkamıyor, Dock ikonu almıyor ve varsayılan terminal olamıyor. 002'nin ertelenmiş Apache-2.0 attribution'ı da burada kapanır. **Bundle'ın bir yan ödevi var:** görünür pencere meşru kare sayısını değiştirir, yani `IDLE_FRAME_LIMIT` (boşta sıfır kare kapısı) bu sette **yeniden ölçülmeli** — bugünkü değeri görünmeyen bir pencerede ölçüldü *(sonradan: 006 phase-5 yoklamasında bundle'sız `make duman` penceresi de ekranda ve öndeydi; 005'in penceresi ise yoklanmamıştı, yani iki gerekçe de ölçülmüş değildi — sonuç `docs/OLCUMLER.md` → `## Boşta kare`)* |
 
 > **006'nın kapsamı henüz kesin değil.** İki seçenek tartışıldı: (a) düzenli
 > sıra — pano, kaydırma, ayar, bundle ayrı setler; (b) tek hamlede eşik.
@@ -79,8 +79,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   animasyon **yok**, ama hareket/motion seti tam bunu getirecek. Sayılar,
   mekanizma ve aday çözüm (`istek=`'i orana çevirip kapıya bağlamak; eşiği
   **ölçülmedi**) `bt-shell`'in `IDLE_FRAME_LIMIT` doc'unda; set açılınca bu
-  madde onun `context.md`'sine taşınır → hareket/motion. Aynı sabit 006'da
-  da yeniden ölçülüyor (bundle) — **tek sabit, iki ayrı iş**.
+  madde onun `context.md`'sine taşınır → hareket/motion. Aynı sabit 006
+  phase-5'te görünür pencerede yeniden ölçüldü ve değişmedi; bu madde o
+  ölçümle **kapanmadı**, algılama tabanı aynı — **tek sabit, iki ayrı iş**.
 - **About paneli erişilemiyor.** 006 phase-4 atfı AppKit'in standart About
   panelinin okuduğu `Credits.html` ile pakete koydu, ama paneli açan menü
   öğesi yok (menü seti 00X). O set `orderFrontStandardAboutPanel:`'ı bağlar

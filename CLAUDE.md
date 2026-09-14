@@ -41,7 +41,7 @@ make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hücresi, glyph, kural çizgisi ve atlas yuvası sayar:
                   # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I kapanis=clean profil=debug ornek=off pipeline=ok
-                  # ilk dördünden biri 0 ise kırmızı; `kare` ayrıca ÜST SINIRLI (boşta sıfır karenin bekçisi, `IDLE_FRAME_LIMIT` = 8, ölçülmüş — gerekçesi ve koşuları sabitin doc'unda).
+                  # ilk dördünden biri 0 ise kırmızı; `kare` ayrıca ÜST SINIRLI (boşta sıfır karenin bekçisi, `IDLE_FRAME_LIMIT` = 8, ölçülmüş — türetmesi sabitin doc'unda, koşuları `docs/OLCUMLER.md`'de).
                   # `yuva`/`yuk`/`istek`/`profil` kapı değil sayaç ve etiket; `kapanis` kısmen kapı (panik kolları kırmızı düşürür, kayıtlı borç olan iki kol düşürmez — değerleri `teardown_token`'da).
                   # `ornek=off` = ölçüm kapısı kapalıydı ve o koşuda ölçüm jetonları hiç basılmaz; neden sıfır olmadığı `Report::token_line`'da.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
@@ -183,10 +183,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   biriktirip atardı. Kapı kapalıyken tek bir saat okuması bile yok. Açık
   ölçüm koşusu jetonlarla dönüyor — CPU'nun iki aralığı, GPU deltası, açılış,
   örnek sayısı ve tabanı — ama **sayının kendisi buraya yazılmaz**:
-  `docs/OLCUMLER.md` henüz **yok** ve onu ilk `/measure` kuracak. O dosyanın
-  `## Yöntem`'i sıfırdan yazılmayacak: kancanın dürüst sınırları — her biri
-  **kapsam** ya da **açık kalem** diye etiketli — `bt-shell`'de `Measured`'ın
-  doc'unda emaneten duruyor. **Bench seti hâlâ borç:** `criterion` yeni bir bağımlılık, yani
+  hangi türün sayısı olduğunu `docs/OLCUMLER.md`'nin başı söylüyor. Kare
+  süresi ve açılışın yöntemi sıfırdan yazılmayacak: kancanın dürüst sınırları
+  — her biri **kapsam** ya da **açık kalem** diye etiketli — `bt-shell`'de
+  `Measured`'ın doc'unda emaneten duruyor ve o türün ilk `/measure`'ı onları
+  dosyanın `## Yöntem`'ine taşır. **Bench seti hâlâ borç:** `criterion` yeni bir bağımlılık, yani
   ayrı bir mimari karar; 005 bir borcu bilerek başka bir borçla takas etti ve
   `cargo bench` satırı yukarıdaki komut bloğuna **bench seti gelince** döner,
   kancalarla değil. Aynı şey giriş gecikmesi zinciri
