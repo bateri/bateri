@@ -1,8 +1,12 @@
 //! Pencerenin içeriği: `CAMetalLayer`'ı taşıyan ve klavyeyi PTY'ye akıtan view.
 //!
-//! Çizim burada **yok** — layer'ın içeriğini `bt-gpu` doldurur. Bu sınıfın tek
-//! işi first responder olmak ve tuş vuruşunu [`crate::keys::encode_key`]'e
-//! verip çıkan baytları oturuma yazmak.
+//! Çizim burada **yok** — layer'ın içeriğini `bt-gpu` doldurur. Bu sınıfın işi
+//! first responder olmak, tuş vuruşunu [`crate::keys::encode_key`]'e verip
+//! çıkan baytları oturuma yazmak ve fareyi (basış, sürükleme, bırakış ve
+//! tekerlek) hücreye çevirip oturuma iletmek. Terminal kararları (seçim
+//! aralığı, sayfanın boyu, kaydırmanın kipe göre reddi) `bt-core`'da; burada
+//! AppKit'e bakan taraf yaşar — piksel → hücre aritmetiği, tekerleğin satır
+//! artığı, sürüklemenin sürüp sürmediği.
 
 use std::cell::OnceCell;
 use std::sync::Arc;
@@ -11,11 +15,11 @@ use bt_core::{CellHalf, SelectionPoint, Session};
 use bt_gpu::CellMetrics;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSPasteboard, NSView};
-use objc2_foundation::{NSObjectProtocol, NSRect};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventPhase, NSPasteboard, NSView};
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect};
 
 use crate::clipboard;
-use crate::keys::encode_key;
+use crate::keys::{encode_key, page_scroll};
 
 /// Fare noktası → seçim ucu. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
 ///
@@ -25,8 +29,8 @@ use crate::keys::encode_key;
 ///
 /// **Adı "hücre" kaldı, dönen şey hücre + yarısı**: yarı hücrenin içindeki
 /// yerin ikinci yarısı, ayrı bir soru değil — `col` ile aynı bölmeden çıkar.
-/// Çağrı yerlerinin hepsi (çapa, sürükleme, olay) zaten "farenin altındaki
-/// hücre" diyor; ikinci bir ad (`point_to_selection_point`) yalnız churn
+/// Çağıranı (`window_point_cell`: fare olayı ve kaydırmada fare konumu) zaten
+/// "farenin altındaki hücre" diyor; ikinci bir ad (`point_to_selection_point`) yalnız churn
 /// olurdu.
 ///
 /// Kenar dışı her nokta **en yakın hücreye yapışır**: sürükleme grid'in hangi
@@ -90,6 +94,32 @@ fn cell_half(x_px: f64, cell_w: f64) -> CellHalf {
     }
 }
 
+/// Tekerlek deltası → tam satır ve **taşınan artık**. Saf, sınanabilir.
+///
+/// `unit` bir satırın delta cinsinden boyu: trackpad'de (`hasPreciseScrollingDeltas`)
+/// delta nokta cinsinden gelir ve birim hücre boyudur (nokta); klasik
+/// tekerlekte delta zaten satırdır ve birim 1. İşaret korunur — AppKit'in
+/// `scrollingDeltaY`'si "doğal kaydırma" tercihi uygulanmış hâldedir ve artısı
+/// belgenin başına doğrudur, yani `Session::scroll_display`'in "artı geriye"
+/// yönüyle aynı.
+///
+/// **Artık neden taşınıyor:** trackpad hücre boyundan küçük deltalar yağdırır;
+/// her olay tek başına sıfıra kesilseydi yavaş bir kaydırma hiç satır
+/// üretmezdi. Kesme sıfıra doğru (`trunc`), artık işaretini korur: yön dönünce
+/// önce birikmiş artık erir.
+///
+/// Sonlu olmayan toplam (sıfır birim, NaN delta) `(0, 0.0)` verir — NaN artığa
+/// girseydi sonraki her toplam NaN olur ve tekerlek sessizce ölürdü. Dev delta
+/// `as i32` ile doyar; geçmişin boyuna kırpma `bt-core`'da.
+pub(crate) fn wheel_lines(delta: f64, unit: f64, carry: f64) -> (i32, f64) {
+    let total = carry + delta / unit;
+    if !total.is_finite() {
+        return (0, 0.0);
+    }
+    let whole = total.trunc();
+    (whole as i32, total - whole)
+}
+
 pub(crate) struct ViewIvars {
     /// View, oturumdan **önce** doğmak zorunda: grid ölçüsü contentView'ın
     /// bounds'undan türüyor ve `Session::spawn` o ölçüyü istiyor. Bir tuş
@@ -98,12 +128,24 @@ pub(crate) struct ViewIvars {
     /// `applicationDidFinishLaunching`'in içinde, **run loop dönmeden**
     /// kapanıyor, yani araya hiçbir olay düşemiyor.
     session: OnceCell<Arc<Session>>,
-    /// Sürüklemenin çapası: basışın hücresi **ve yarısı**. Yarı da saklanıyor:
-    /// sınırı o çiziyor, `bt-core` ise yalnız aralığı tutar — çapayı
-    /// hatırlamaz. Yarı kaybolsaydı (çapa yalnız hücre olsaydı) sürükleme
-    /// çapayı her olayda yeniden yorumlamak zorunda kalır, basış anındaki
-    /// yarısını kaybederdi.
-    anchor: std::cell::Cell<Option<SelectionPoint>>,
+    /// Sol tuş basılı ve seçim bu basışla başladı mı.
+    ///
+    /// Çapanın **kendisi** burada değil: basışın hücresi ve yarısı
+    /// `Session::set_selection`'la `bt-core`'a gidiyor ve orada grid mutlağında
+    /// kalıyor. Çapa pencere hücresi olarak burada tutulduğu sürece basılı
+    /// sürüklemenin ortasındaki kaydırma onu bayatlatıyordu — aynı satır
+    /// numarası kaydırmadan sonra başka bir içeriği gösterir (phase-1'in
+    /// devri, 006 phase-3'te kapandı). Geriye kalan soru yalnız "sürükleme
+    /// sürüyor mu": basışsız bir `mouseDragged:` eski seçimin ucunu
+    /// taşımasın.
+    dragging: std::cell::Cell<bool>,
+    /// Tekerleğin satıra dönmemiş artığı ([`wheel_lines`]). Üç yerde sıfırlanır,
+    /// üçünde de kalan artık bir sonraki kaydırmaya ait değil: yeni jestin
+    /// başında (önceki jestin kırıntısı yeni jesti erken ya da geç tetiklemesin),
+    /// kaydırma reddedilince (alternate screen'in artığı birincil ekrana
+    /// taşınmasın) ve geçmişin ucuna dayanınca (uca doğru biriken momentum
+    /// ters yöndeki ilk satırı geciktirmesin).
+    scroll_carry: std::cell::Cell<f64>,
     /// Fare çevirisinin canlı girdileri: ölçü `bt-gpu`'dan, grid `bt-core`'un
     /// bildiği sayı. `OnceCell` değil `Cell<Option<…>>`, çünkü pencere boyu
     /// değişince tazeleniyor (`set_metrics`). Ayrı bir kopya gibi görünüyor
@@ -142,8 +184,8 @@ define_class!(
 
         /// Fare basıldı: seçimin çapası burada atılır ve sürükleme başlar.
         ///
-        /// Çapa **yarısıyla** saklanır: basış hücrenin hangi yarısındaysa
-        /// sınır oradan geçer, sürükleme boyunca da orada kalır.
+        /// Çapa **yarısıyla** `bt-core`'a gider: basış hücrenin hangi
+        /// yarısındaysa sınır oradan geçer, sürükleme boyunca da orada kalır.
         ///
         /// Yalnız sol tuş (button 0): sağ/orta tık bir seçim başlatmaz —
         /// bağlam tıklaması beklenmedik bir vurgu üretirdi. Tek tıkla
@@ -155,9 +197,10 @@ define_class!(
             if event.buttonNumber() != 0 {
                 return;
             }
-            let Some((session, anchor)) = self.cell_under(event) else {
+            let Some((session, anchor)) = self.session_cell(event) else {
                 return;
             };
+            self.ivars().dragging.set(true);
             // İmleç çapa hücresinden sürüklenir: ters yöne ilk hareket seçimi
             // boşaltmamalı, fare ucundan büyümeli. İki uç **aynı** olduğu
             // sürece seçim boştur — yani sürüklemesiz tık hiçbir şey seçmez ve
@@ -165,32 +208,73 @@ define_class!(
             session.set_selection(anchor, anchor);
         }
 
-        /// Sürükleme: çapa fare basışının hücresi **ve yarısı**, aktif uç
-        /// farenin şimdiki yeri. Çapa `Session`'dan okunmuyor — `bt-core`
-        /// yalnız aralığı tutar, çapayı hatırlamaz. İki olay da aynı
-        /// `set_selection`'ı çağırıyor; `mouseDown:` iki ucu da çapaya
-        /// veriyor, burası aktif ucu fareye. Çizilen aralığı değiştirmeyen
-        /// olaylar (aynı yarıda kalmak, hücre sınırını geçmek)
-        /// `set_selection`'ın aralık kapısında eleniyor — kare istenmez.
+        /// Sürükleme: aktif uç farenin şimdiki yeri, çapa `bt-core`'da
+        /// (`Session::update_selection` yalnız bitişi taşır). Çizilen aralığı
+        /// değiştirmeyen olaylar (aynı yarıda kalmak, hücre sınırını geçmek)
+        /// oturumun aralık kapısında eleniyor — kare istenmez.
+        ///
+        /// Basışsız sürükleme yutulur: `mouseDown:`'sız `mouseDragged:` olmaz
+        /// ama AppKit'in sözüne güvenilmez — olsaydı önceki seçimin ucunu
+        /// taşırdı.
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            let Some((session, anchor, cell)) = self.drag_cells(event) else {
+            if !self.ivars().dragging.get() {
                 return;
-            };
-            session.set_selection(anchor, cell);
+            }
+            if let Some((session, cell)) = self.session_cell(event) {
+                session.update_selection(cell);
+            }
         }
 
-        /// Tuş bırakıldı: çapa düşer. Çapa pencere hücresi (ve yarısı)
-        /// cinsinden saklanıyor; bırakma ile sonraki basış arasında kaydırma
-        /// olursa bayat çapayla sürükleme hiç başlamıyor — `drag_cells`
-        /// çapasız olayı yutuyor.
-        /// Kaydırma **sürerken** (basılı) çapa kayması phase-3'ün işi:
-        /// `set_selection` aralığı grid mutlağında tutuyor ve alacritty
-        /// döndürmesi onu içerikle taşıyor, ama view'daki çapa viewport
-        /// cinsinden kalıyor.
+        /// Tuş bırakıldı: sürükleme biter, seçim ekranda kalır (Cmd-C onu
+        /// kopyalar).
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
-            self.ivars().anchor.set(None);
+            self.ivars().dragging.set(false);
+        }
+
+        /// Tekerlek ve trackpad: görünen pencereyi geçmişe kaydırır. Kaydırma
+        /// çubuğu **yok** — AppKit kroniği (thumb, orantı, sürükleme), eşik için
+        /// gerekli değil.
+        ///
+        /// Kipe göre karar `bt-core`'da: alternate screen'de oturum kaydırmayı
+        /// reddeder (`None`) ve burası körü körüne kaydırmaz. Yatay delta
+        /// yoksayılıyor — yatay kaydırılacak bir şey yok.
+        ///
+        /// Basılı sürüklemenin ortasında kaydırma olursa seçimin ucu farenin
+        /// **yeni** altındaki hücreye taşınır ([`BateriView::follow_pointer`]).
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            let Some(session) = self.ivars().session.get() else {
+                return;
+            };
+            let Some((metrics, _)) = self.ivars().metrics.get() else {
+                return;
+            };
+            let Some(window) = self.window() else {
+                return;
+            };
+            // Trackpad nokta cinsinden: birim hücre boyu, fiziksel pikselden
+            // noktaya indirilmiş (ölçü `bt-gpu`'dan fiziksel geliyor). Klasik
+            // tekerlek zaten satır verir.
+            let unit = if event.hasPreciseScrollingDeltas() {
+                f64::from(metrics.cell_px().1) / window.backingScaleFactor()
+            } else {
+                1.0
+            };
+            let carry = &self.ivars().scroll_carry;
+            if event.phase().contains(NSEventPhase::Began) {
+                carry.set(0.0);
+            }
+            let (lines, rest) = wheel_lines(event.scrollingDeltaY(), unit, carry.get());
+            carry.set(rest);
+            if lines == 0 {
+                return;
+            }
+            match session.scroll_display(lines) {
+                None | Some(0) => carry.set(0.0),
+                Some(_) => self.follow_pointer(session),
+            }
         }
 
         #[unsafe(method(keyDown:))]
@@ -217,10 +301,25 @@ define_class!(
                 }
                 return;
             }
+            let chars = chars.to_string();
+            // Shift+PgUp/PgDn terminalin kaydırmasıdır, uygulamanın tuşu değil —
+            // ama yalnız oturum kabul ederse. Alternate screen'de kaydırma
+            // reddedilir (`None`) ve tuş aşağıdaki yoldan uygulamaya düz PgUp
+            // olarak gider: less/vim'de Shift+PgUp da sayfa çevirir, yutulmaz.
+            // Sayfanın kaç satır olduğu `bt-core`'un kararı (`scroll_page`).
+            let shift = flags.contains(NSEventModifierFlags::Shift);
+            if let Some(pages) = page_scroll(&chars, shift)
+                && let Some(moved) = session.scroll_page(pages)
+            {
+                if moved != 0 {
+                    self.follow_pointer(session);
+                }
+                return;
+            }
             let ctrl = flags.contains(NSEventModifierFlags::Control);
             // `super`'e geçmiyoruz: `NSResponder::keyDown:` tanımadığı tuşta
             // beep çalar ve terminalde her ok tuşu bip sesi olurdu.
-            if let Some(bytes) = encode_key(&chars.to_string(), ctrl) {
+            if let Some(bytes) = encode_key(&chars, ctrl) {
                 session.write(&bytes);
             }
         }
@@ -231,7 +330,8 @@ impl BateriView {
     pub(crate) fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ViewIvars {
             session: OnceCell::new(),
-            anchor: std::cell::Cell::new(None),
+            dragging: std::cell::Cell::new(false),
+            scroll_carry: std::cell::Cell::new(0.0),
             metrics: std::cell::Cell::new(None),
         });
         // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
@@ -266,39 +366,49 @@ impl BateriView {
         Some((session, cell))
     }
 
-    /// Olayın altındaki uç + bağlı oturum; çapayı da kurar.
-    fn cell_under(&self, event: &NSEvent) -> Option<(Arc<Session>, SelectionPoint)> {
-        let (session, cell) = self.session_cell(event)?;
-        // Çapa burada saklanıyor: sürükleme çapa + aktif uç ister, `bt-core`
-        // yalnız aralığı tutar. Yarısı da çapayla gidiyor — basış anındaki
-        // yarı, sürüklemenin bir ucunu sabitleyen şey.
-        self.ivars().anchor.set(Some(cell));
-        Some((session, cell))
-    }
-
-    /// Sürüklemenin iki ucu: çapa basıştan, aktif uç bu olaydan. Basışsız
-    /// sürükleme (çapa yok) yutulur — `mouseDown:`'sız `mouseDragged:` olmaz
-    /// ama AppKit'in sözüne güvenilmez, tipe güvenilir.
-    ///
-    /// Üçlü `#[allow]`'suz geçiyor: uçlar adlı tip (`SelectionPoint`), iç içe
-    /// demet değil. Dördüncü bir eleman eklenecekse o gün ayrı bir struct doğar.
-    fn drag_cells(
-        &self,
-        event: &NSEvent,
-    ) -> Option<(Arc<Session>, SelectionPoint, SelectionPoint)> {
-        // `cell_under` çağrılamaz: çapayı ezerdi.
-        let anchor = self.ivars().anchor.get()?;
-        let (session, cell) = self.session_cell(event)?;
-        Some((session, anchor, cell))
-    }
-
     /// Olay noktasını seçim ucuna indirir. `None` yalnız ölçü ya da pencere
     /// henüz yokken ve grid sıfır boyutluyken — kenar dışı nokta yapışır.
     fn event_cell(&self, event: &NSEvent) -> Option<SelectionPoint> {
+        self.window_point_cell(event.locationInWindow())
+    }
+
+    /// Pencere koordinatındaki noktayı seçim ucuna indirir — [`Self::event_cell`]'in
+    /// olaysız hâli: tuşla kaydırmada farenin yerini taşıyan bir fare olayı yok.
+    fn window_point_cell(&self, in_window: NSPoint) -> Option<SelectionPoint> {
         let (metrics, (cols, rows)) = self.ivars().metrics.get()?;
-        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let point = self.convertPoint_fromView(in_window, None);
         let scale = self.window()?.backingScaleFactor();
         point_to_cell((point.x, point.y), metrics.cell_px(), scale, cols, rows)
+    }
+
+    /// Pencere kaydı; basılı bir sürükleme varsa seçimin ucunu farenin **yeni**
+    /// altındaki hücreye taşır — fare kıpırdamadı ama altındaki içerik değişti.
+    /// Tuşu basılı tutup geçmişe inmek (tekerlek ya da Shift+PgUp) seçimi oraya
+    /// uzatır; çapa `bt-core`'da grid mutlağında, kaymaz. İki tetikleyici **tek**
+    /// yoldan geçiyor ki aynı jest iki ayrı davranış göstermesin.
+    ///
+    /// Fare konumu olaydan değil pencereden okunuyor
+    /// (`mouseLocationOutsideOfEventStream`): tuş olayının konumu yok.
+    ///
+    /// `dragging` tek başına yetmez: `mouseUp:` bu view'a hiç varmazsa
+    /// (sürükleme ortasında bir modal, sistem jesti) bayrak bayat `true` kalır
+    /// ve tuşsuz her kaydırma eski seçimi sessizce uzatırdı — sonraki Cmd-C onu
+    /// kopyalar. Tuşun **gerçekten** basılı olduğu sistemden soruluyor; değilse
+    /// bayat bayrak burada iner.
+    fn follow_pointer(&self, session: &Session) {
+        if !self.ivars().dragging.get() {
+            return;
+        }
+        if NSEvent::pressedMouseButtons() & 1 == 0 {
+            self.ivars().dragging.set(false);
+            return;
+        }
+        let Some(window) = self.window() else {
+            return;
+        };
+        if let Some(cell) = self.window_point_cell(window.mouseLocationOutsideOfEventStream()) {
+            session.update_selection(cell);
+        }
     }
 
     /// Command'lı tuşun düştüğü kısayol — **saf karar**, panoya ve oturuma
@@ -547,6 +657,46 @@ mod tests {
             BateriView::command_shortcut("C", cmd() | NSEventModifierFlags::CapsLock),
             Some(Shortcut::Copy)
         );
+    }
+
+    #[test]
+    fn wheel_whole_lines_pass_through() {
+        // Trackpad: birim hücre boyu (nokta). Tam bir hücre = bir satır, işaret
+        // korunur — artı geriye, `Session::scroll_display` ile aynı yön.
+        assert_eq!(wheel_lines(9.0, 9.0, 0.0), (1, 0.0));
+        assert_eq!(wheel_lines(-27.0, 9.0, 0.0), (-3, 0.0));
+        // Klasik tekerlek: `scrollingDeltaY` zaten satır, birim 1.
+        assert_eq!(wheel_lines(2.0, 1.0, 0.0), (2, 0.0));
+    }
+
+    #[test]
+    fn wheel_sub_line_deltas_accumulate() {
+        // Trackpad hücre boyundan küçük deltalar yağdırır. Artık taşınmasaydı
+        // yavaş bir kaydırma **hiç** satır üretmezdi: her olay tek başına
+        // sıfıra kesilir.
+        let (lines, carry) = wheel_lines(4.0, 9.0, 0.0);
+        assert_eq!(lines, 0);
+        let (lines, carry) = wheel_lines(4.0, 9.0, carry);
+        assert_eq!(lines, 0);
+        let (lines, carry) = wheel_lines(4.0, 9.0, carry);
+        assert_eq!(lines, 1);
+        assert!((carry - 3.0 / 9.0).abs() < 1e-9, "{carry}");
+        // Yön dönünce artık önce eriyor: geriye birikmiş üçte bir, ileriye
+        // üçte iki hücre → toplam üçte bir ileri, satır yok.
+        let (lines, carry) = wheel_lines(-6.0, 9.0, carry);
+        assert_eq!(lines, 0);
+        assert!((carry + 3.0 / 9.0).abs() < 1e-9, "{carry}");
+    }
+
+    #[test]
+    fn wheel_degenerate_inputs_do_not_poison_the_carry() {
+        // Sıfır birim (ölçüsüz hücre) sonsuz, 0/0 NaN üretir; NaN artığa
+        // girerse sonraki her toplam NaN olur ve tekerlek sessizce ölürdü.
+        assert_eq!(wheel_lines(9.0, 0.0, 0.0), (0, 0.0));
+        assert_eq!(wheel_lines(0.0, 0.0, 0.0), (0, 0.0));
+        assert_eq!(wheel_lines(f64::NAN, 9.0, 0.5), (0, 0.0));
+        // Dev delta doyar; kırpma `bt-core`'da (geçmişin boyuna).
+        assert_eq!(wheel_lines(1e300, 1.0, 0.0).0, i32::MAX);
     }
 
     #[test]
