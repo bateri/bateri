@@ -367,4 +367,4 @@ alacritty'de de aynı. Göz kontrolüne bu yüzden girmedi.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi
 - [x] `/audit` çalıştırıldı, bulgular giderildi
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: 100ecfa

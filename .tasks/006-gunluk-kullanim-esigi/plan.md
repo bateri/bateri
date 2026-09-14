@@ -114,6 +114,6 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 | phase-1 | ✅ | 77b4afd | `[elle]` göz kontrolü tamam (2026-09-14, `097f155` üstünde) |
 | phase-2 | ✅ | 97b9c2c | Doğrulama tamam: `make hepsi` 0 · `make test-yaris` 0 · `make duman` yeşil (Xcode lisansı + Metal Toolchain kullanıcı tarafından çözüldü, `phase-2.md` → "Doğrulama Durumu"); `[elle]` tamam (2026-09-14) |
 | phase-3 | ✅ | 6a7a92d | `[elle]` göz kontrolü bekliyor; DECSET 1007 WAIVE'i kullanıcı kararıyla phase-3b'ye dönüştü |
-| phase-3b | ✅ | | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: `CLAUDE.md` `bt-core` satırına girdi kodlaması (`phase-3b.md`) |
+| phase-3b | ✅ | 100ecfa | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: `CLAUDE.md` `bt-core` satırına girdi kodlaması (`phase-3b.md`) |
 | phase-4 | ✅ | dd46e85 | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: Dock açılışında `cwd=/` + `LANG` (`phase-4.md`) |
 | phase-5 | | |
