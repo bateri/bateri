@@ -48,6 +48,10 @@ istemez; indirilen kopyadaki onayın tek seferlik olduğu doğrulanmadı
     denetimi konur)
   - **R4.3** — İmza, notarization, Sparkle girmez; Gatekeeper tek seferlik
     onayı eşik tanımına yazılır
+  - **R4.4** — Dock'tan açılan kabuk kullanılabilir başlar: her zaman ev
+    dizininde; ortamda yerel yoksa macOS dil/bölge ayarından bir UTF-8
+    yereli (yoksa `LC_CTYPE=UTF-8`). İkisi yalnız çocuğa verilir, kendi
+    sürecimize değil. *2026-09-14'te eklendi — `discussion.md` → Karar 6 eki*
 - **R5** — `IDLE_FRAME_LIMIT` bundle'lı pencerede yeniden ölçülür
   - **R5.1** — Ölçüm ayrı commit + gerekçeyle dondurulur; kapı değişikliği
     kod fazlarından ayrıktır (aynı sette kodla kapı birlikte inerse
@@ -72,6 +76,9 @@ istemez; indirilen kopyadaki onayın tek seferlik olduğu doğrulanmadı
    ok kodlaması. phase-4'ten sonra eklendi, phase-5'ten önce koşar.
 4. **Phase-4 `bateri` + `Makefile` + `assets/`** — bundle: `Info.plist`,
    ikon, gerçek `make kur`, attribution içerik denetimiyle.
+4b. **Phase-4b `bt-core` + `bt-shell`** — Dock açılışı: `SessionOptions`'a
+   çocuğun dizini ve ek ortamı; `bt-shell` ev dizinini ve yerel kararını
+   verir. phase-3b'den sonra eklendi, phase-5'ten önce koşar.
 5. **Phase-5 `bt-shell`** — `IDLE_FRAME_LIMIT` yeniden ölçümü: görünür
    pencerede ölç, ayrı commit + gerekçeyle dondur. Kod değişmez; bu phase
    belge + sayı fazıdır.
@@ -116,4 +123,5 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 | phase-3 | ✅ | 6a7a92d | `[elle]` göz kontrolü bekliyor; DECSET 1007 WAIVE'i kullanıcı kararıyla phase-3b'ye dönüştü |
 | phase-3b | ✅ | 100ecfa | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: `CLAUDE.md` `bt-core` satırına girdi kodlaması (`phase-3b.md`) |
 | phase-4 | ✅ | dd46e85 | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: Dock açılışında `cwd=/` + `LANG` (`phase-4.md`) |
+| phase-4b | | |
 | phase-5 | | |

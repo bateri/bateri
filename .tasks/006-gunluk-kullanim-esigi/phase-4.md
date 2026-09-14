@@ -204,7 +204,9 @@ fazına **içerik denetimi** konur: Info.plist + lisans dosyası varlığı.
     Gatekeeper sormaması → yalnız `plan.md` Hedef ve `[elle]` metni
     düzeltildi) **kabul**; R satırları oynamadı.
   - WAIVE (About paneli, `[~]`) **kabul**: menü 00X, borç yol haritasında.
-  - WAIVE (Dock açılışında `cwd=/` + `LANG`) **kullanıcıya soruldu**: eşiğin
+  - WAIVE (Dock açılışında `cwd=/` + `LANG`) *karar verildi (2026-09-14):
+    kullanıcı 006'ya aldı → `phase-4b.md`, `discussion.md` → Karar 6 eki.*
+    İlk hâli — **kullanıcıya soruldu**: eşiğin
     tanımı "Dock'tan açılıp kullanılabilir" ve Türkçe karakter girişi LANG'a
     bağlı. alacritty macOS'ta koşulsuz ev dizinine geçiyor
     (`env::set_current_dir(home_dir)`) ve ortam yerelini geçersizse

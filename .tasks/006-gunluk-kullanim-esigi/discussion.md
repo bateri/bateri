@@ -207,3 +207,27 @@ ayrıklığı korunsun. Hiçbiri KIRMIZI değil — yön doğru, parçalar sorun
 - **Reddedilen:** *"WAIVE kalsın, R3.3 aynen"* — kullanıcı reddetti.
   *"Yalnız ok çevirisi, fare raporu 00X'e"* — vim/htop'ta aynı UX açığını
   bırakırdı.
+
+## Karar 6 eki (2026-09-14, kullanıcı kararı)
+
+phase-4'ün `/code-review`'u buldu: Dock/Finder'dan açılan paketin kabuğu
+`cwd=/` ile başlıyor (probe'la doğrulandı) ve launchd ortamında `LANG`
+olmayabilir (doğrulanmadı; yoksa UTF-8 girişi bozulur). Kullanıcıya üç soru
+soruldu, üçünde de öneri seçildi:
+
+- **006'ya girer (phase-4b)**, 007'ye bırakılmaz. Gerekçe: eşiğin tanımı
+  "Dock'tan açılıp kullanılabilir"; `/`'da ve UTF-8'siz başlayan kabuk bu
+  tanımı karşılamıyor.
+- **Her zaman ev dizini.** alacritty ve Terminal.app ile aynı; `cargo run`
+  dahil istisna yok. Reddedilen: *"yalnız `/` gelirse ev dizini"* — kural iki
+  kollu olurdu.
+- **Yerel yoksa macOS dil/bölge ayarından** (`LANG={dil}_{ülke}.UTF-8`, o
+  yerel sistemde yoksa `LC_CTYPE=UTF-8`). Reddedilen: *"sabit en_US.UTF-8"*.
+  Bilinen bedeli kullanıcıya söylendi: Türkçe mesajlar ve eski betiklerde
+  Türkçe 'I' dönüşümü.
+- **Uygulama biçimi (orkestratör):** ikisi de `tty::Options` üstünden
+  **yalnız çocuğa** verilir; alacritty'nin kendi sürecinde `set_current_dir`/
+  `set_var` yapması bilerek izlenmez (`CLAUDE.md` → `tty::setup_env()`
+  çağrılmaz). Politika `bt-shell`'de, `bt-core` yalnız geçirir.
+  `objc2-foundation`'a `NSLocale` feature'ı eklenir — yeni crate değil,
+  `Cargo.lock` oynamamalı.

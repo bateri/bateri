@@ -320,6 +320,19 @@ alacritty'de de aynı. Göz kontrolüne bu yüzden girmedi.
   kendiliğinden değiştirmedi; eklenecekse "girdi kodlaması (DECCKM oku,
   tekerlek raporu)" yeter. Karar orkestratörün/kullanıcının.
 
+- **Orkestratör kararları (2026-09-14).**
+  - sadakat: makas yok — `git show --stat 100ecfa` (`bt-core`
+    `input.rs`/`lib.rs`/`session.rs`, `bt-shell` `keys.rs`/`view.rs`,
+    `phase-3b.md`, `plan.md`) checklist'le örtüşüyor; `62da6b3` yalnız hash
+    damgası.
+  - Sapmalar (`scroll_wheel` + `Wheel`/`Arrow` pub tipleri, olay başına bir
+    sayfalık üst sınır, tekerlek oklarının DECCKM'e duyarlı seçilmesi,
+    birincil ekranda fare kipinde rapor) **kabul**: kılavuzun bıraktığı
+    seçimler, R3.3–R3.5 oynamadı.
+  - WAIVE (`CLAUDE.md` `bt-core` satırı) **kabul değil, devredildi**: sözleşme
+    kodla birlikte güncellenir kuralı gereği eksik kapanmalı; `CLAUDE.md`'ye
+    zaten dokunacak `phase-4b.md` checklist'ine yazıldı.
+
 ## Yayın Etkisi
 
 - **Tekerlek tam ekran uygulamada çalışıyor.**
