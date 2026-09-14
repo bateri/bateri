@@ -1,15 +1,20 @@
-//! Tuş vuruşu → PTY baytları, ve Shift+PgUp/PgDn'in kaydırma kararı. **Saf ve
-//! AppKit'siz**, bu yüzden sınanabilir.
+//! Tuş vuruşu → PTY baytları ya da ok, ve Shift+PgUp/PgDn'in kaydırma kararı.
+//! **Saf ve AppKit'siz**, bu yüzden sınanabilir.
+//!
+//! Okun baytı burada **yazılmaz**, yalnız hangi ok olduğu (`bt_core::Arrow`,
+//! nedeni orada).
 
 use std::borrow::Cow;
 
+use bt_core::Arrow;
+
 /// AppKit'in fonksiyon tuşu aralığı: U+F700–U+F8FF. Adlandırılmış sabitler
 /// (`NSUpArrowFunctionKey` … `NSModeSwitchFunctionKey`) bunun ilk dilimini
-/// kullanıyor. Oklar ve PgUp/PgDn aşağıda kendi dizilerine çevriliyor; aralığın
-/// **tanınmayan geri kalanı** bilerek yutuluyor çünkü bilmediğimiz bir tuş
-/// kodunu UTF-8'e çevirip shell'e göndermek her zaman daha kötü. Private Use
-/// Area bundan geniştir (U+E000'den başlar) ve **kapsam dışı**: powerline
-/// glyph'i gibi gerçek bir karakter düz metin dalından geçer.
+/// kullanıyor. Oklar [`KeyInput::Arrow`]'a, PgUp/PgDn kendi dizilerine
+/// çevriliyor; aralığın **tanınmayan geri kalanı** bilerek yutuluyor çünkü
+/// bilmediğimiz bir tuş kodunu UTF-8'e çevirip shell'e göndermek her zaman
+/// daha kötü. Private Use Area bundan geniştir (U+E000'den başlar) ve **kapsam
+/// dışı**: powerline glyph'i gibi gerçek bir karakter düz metin dalından geçer.
 const FUNCTION_KEYS: std::ops::RangeInclusive<char> = '\u{f700}'..='\u{f8ff}';
 
 /// `NSPageUpFunctionKey` ve `NSPageDownFunctionKey`. İki yerde okunuyor —
@@ -18,25 +23,36 @@ const FUNCTION_KEYS: std::ops::RangeInclusive<char> = '\u{f700}'..='\u{f8ff}';
 const PAGE_UP: char = '\u{f72c}';
 const PAGE_DOWN: char = '\u{f72d}';
 
+/// [`encode_key`]'in cevabı: baytı belli bir tuş ya da ok.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum KeyInput {
+    /// Baytı kipten bağımsız: harf, Enter, PgUp…
+    Bytes(Cow<'static, [u8]>),
+    /// `Session::write_arrow`'a gider.
+    Arrow(Arrow),
+}
+
 /// `chars` = `NSEvent.characters`, `ctrl` = Control basılı.
 ///
 /// `None` → tuş yutulur; çağıran hiçbir şey yazmaz. Kapsam dışı: IME, ölü
-/// tuşlar, Option-as-Meta, kitty klavye protokolü.
-pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<Cow<'static, [u8]>> {
+/// tuşlar, Option-as-Meta, kitty klavye protokolü, değiştiricili oklar
+/// (`\e[1;5A`) ve Home/End (dizileri yok, aşağıda yutuluyor).
+pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<KeyInput> {
     let c = chars.chars().next()?;
-    // `characters` tek karakter mi — tek bir `c`'den bayt üreten kolların
-    // ortak koruması (aşağıda Control ve PgUp/PgDn).
+    // `characters` tek karakter mi — tek bir `c`'den çıkan kolların ortak
+    // koruması (aşağıda oklar, PgUp/PgDn ve Control): çok karakterli girdi
+    // (ölü tuş bileşimi, marked text) ilk karakterinden okunmaz.
     let single = chars.len() == c.len_utf8();
-    Some(match (c, ctrl) {
+    let bytes: Cow<'static, [u8]> = match (c, ctrl) {
         // Sayısal tuş takımının Enter'ı ve Fn-Return `NSEnterCharacter` =
         // U+0003 verir — Ctrl-C'nin baytıyla aynı. Ctrl basılı DEĞİLSE bu bir
         // satır sonudur; bu kol olmasaydı düz metin dalından 0x03 olarak geçer
         // ve numpad Enter her komutu çalıştırmak yerine keserdi.
         ('\u{3}', false) => Cow::Borrowed(b"\r"),
-        ('\u{f700}', _) => Cow::Borrowed(b"\x1b[A"),
-        ('\u{f701}', _) => Cow::Borrowed(b"\x1b[B"),
-        ('\u{f702}', _) => Cow::Borrowed(b"\x1b[D"),
-        ('\u{f703}', _) => Cow::Borrowed(b"\x1b[C"),
+        ('\u{f700}', _) if single => return Some(KeyInput::Arrow(Arrow::Up)),
+        ('\u{f701}', _) if single => return Some(KeyInput::Arrow(Arrow::Down)),
+        ('\u{f702}', _) if single => return Some(KeyInput::Arrow(Arrow::Left)),
+        ('\u{f703}', _) if single => return Some(KeyInput::Arrow(Arrow::Right)),
         // `xterm-256color`'ın `kpp`/`knp`'si: less ve vim sayfa gezmeyi bu
         // iki diziden okuyor. Shift'li hâl buraya **gelmez** — o terminalin
         // kaydırması ([`page_scroll`]), `view` önce onu soruyor. Alternate
@@ -45,9 +61,7 @@ pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<Cow<'static, [u8]>> 
         // değiştiriciler gibi, kapsam dışı.
         //
         // `single` (yukarıda): `page_scroll` ile aynı ölçüt; çok karakterli
-        // girdi aşağıdaki fonksiyon tuşu kolunda bütünüyle yutulur. Okların
-        // kolları bu korumayı taşımıyor — bilinçli bir fark değil, bu phase'in
-        // kapsamı dışında kalan borç: AppKit ok tuşunda tek karakter veriyor.
+        // girdi aşağıdaki fonksiyon tuşu kolunda bütünüyle yutulur.
         (PAGE_UP, _) if single => Cow::Borrowed(b"\x1b[5~"),
         (PAGE_DOWN, _) if single => Cow::Borrowed(b"\x1b[6~"),
         // AppKit Control'ü `characters`'a çoğu tuşta kendi uygular (Ctrl-C →
@@ -55,9 +69,9 @@ pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<Cow<'static, [u8]>> 
         // uygulamaz — Ctrl-Shift-C'de harf harf kalır. İki yol da aynı baytı
         // versin diye dönüşüm burada tekrarlanıyor.
         // `single`: bu kol yalnız `c`'den bayt üretiyor, yani çok karakterli
-        // bir `characters` (ölü tuş bileşimi, marked text) gelseydi ilk
-        // karakterden sonrasını izsiz düşürürdü. Öyle bir girdi düz metin
-        // dalına gitsin, orada tamamı geçiyor.
+        // bir `characters` gelseydi ilk karakterden sonrasını izsiz
+        // düşürürdü. Öyle bir girdi düz metin dalına gitsin, orada tamamı
+        // geçiyor.
         (c, true) if c.is_ascii_alphabetic() && single => {
             Cow::Owned(vec![(c.to_ascii_lowercase() as u8) & 0x1f])
         }
@@ -70,7 +84,8 @@ pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<Cow<'static, [u8]>> 
         // ayrı kollar yazmak aynı baytı ikinci kez tarif etmek olurdu.
         // Sözleşmeyi `return_and_delete_are_single_bytes` çiviliyor.
         _ => Cow::Owned(chars.as_bytes().to_vec()),
-    })
+    };
+    Some(KeyInput::Bytes(bytes))
 }
 
 /// Shift+PgUp/PgDn → kaydırılacak sayfa sayısı (±1); `None` → kaydırma tuşu
@@ -101,9 +116,10 @@ mod tests {
     use super::*;
 
     fn encode(chars: &str, ctrl: bool) -> Vec<u8> {
-        encode_key(chars, ctrl)
-            .unwrap_or_else(|| panic!("{chars:?} (ctrl={ctrl}) yutuldu"))
-            .into_owned()
+        match encode_key(chars, ctrl) {
+            Some(KeyInput::Bytes(bytes)) => bytes.into_owned(),
+            other => panic!("{chars:?} (ctrl={ctrl}) bayt vermedi: {other:?}"),
+        }
     }
 
     #[test]
@@ -115,11 +131,34 @@ mod tests {
     }
 
     #[test]
-    fn arrows_emit_csi_sequences() {
-        assert_eq!(encode("\u{f700}", false), b"\x1b[A");
-        assert_eq!(encode("\u{f701}", false), b"\x1b[B");
-        assert_eq!(encode("\u{f702}", false), b"\x1b[D");
-        assert_eq!(encode("\u{f703}", false), b"\x1b[C");
+    fn arrows_are_keys_not_bytes() {
+        // Okun baytı DECCKM'e bağlı (`\e[A` ya da `\eOA`) ve kip `bt-core`'da:
+        // burada koşulsuz `\e[A` yazılıyordu, oysa `xterm-256color`'ın
+        // terminfo'sunu okuyan less açılışta DECCKM'i açıp `\eOA` bekliyor.
+        assert_eq!(
+            encode_key("\u{f700}", false),
+            Some(KeyInput::Arrow(Arrow::Up))
+        );
+        assert_eq!(
+            encode_key("\u{f701}", false),
+            Some(KeyInput::Arrow(Arrow::Down))
+        );
+        assert_eq!(
+            encode_key("\u{f702}", false),
+            Some(KeyInput::Arrow(Arrow::Left))
+        );
+        assert_eq!(
+            encode_key("\u{f703}", false),
+            Some(KeyInput::Arrow(Arrow::Right))
+        );
+        // Control'lü ok da düz ok: değiştiricili oklar (`\e[1;5A`) kapsam dışı.
+        assert_eq!(
+            encode_key("\u{f700}", true),
+            Some(KeyInput::Arrow(Arrow::Up))
+        );
+        // Tek karakterlik eşleşme, PgUp'la aynı ölçüt: okla başlayan bir
+        // bileşim ilk karakterinden ok diye okunmaz.
+        assert_eq!(encode_key("\u{f700}x", false), None);
     }
 
     #[test]
