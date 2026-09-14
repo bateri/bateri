@@ -46,7 +46,7 @@ make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar; kare, arka plan hüc
                   # `ornek=off` = ölçüm kapısı kapalıydı ve o koşuda ölçüm jetonları hiç basılmaz; neden sıfır olmadığı `Report::token_line`'da.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
-make kur          # release derler ve bateri.app paketini target/ altına kurar
+make kur          # release derler, target/release/bateri.app'i kurar ve içeriğini denetler (Info.plist, ikon, lisans); imza yok
 ```
 
 Girdisi henüz olmayan hedefler "henüz yok" deyip kırmızı düşer; listesi
@@ -82,14 +82,21 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 
 - **Taban macOS 14, tek kaynağı `.cargo/config.toml`'daki
   `MACOSX_DEPLOYMENT_TARGET`.** rustc binary'nin minos'unu, `bt-gpu/build.rs`
-  shader'ların `-mmacos-version-min`'ini oradan alır; ileride `Info.plist`'in
-  `LSMinimumSystemVersion`'ı da oradan türetilir. Metalterm'in tabanıyla aynı.
+  shader'ların `-mmacos-version-min`'ini oradan alır; `make kur` `Info.plist`'in
+  `LSMinimumSystemVersion`'ını binary'nin `minos`'undan, yani dolaylı olarak
+  yine oradan doldurur. Metalterm'in tabanıyla aynı.
 - **Bağımlılık mimari karardır**, kendiliğinden eklenmez. Taban:
   `alacritty_terminal` (VT ayrıştırma, grid, PTY ve okuyucu thread; kendi
   ayrıştırıcımızı yazmıyoruz — `bt-core` onu **kapsüller**, `pub` API'de
   alacritty tipi görünmez), `objc2` ailesi (CoreText ve CoreGraphics dahil:
   servo ailesi `core-text` **reddedildi**, ikinci bir CF sarmalayıcı yığını
   olurdu — 003 kararı), `toml` + `serde`, `tracing`. `Cargo.lock` depodadır.
+  `alacritty_terminal` **Apache-2.0**: lisans metni pakete
+  `assets/bundle/THIRD-PARTY-LICENSES.txt` ile girer, atfı About panelinin
+  `Credits.html`'inde durur. Atıf isteyen yeni bir bağımlılık da o iki
+  dosyaya yazılır — bu bir teamül, denetim yalnız `alacritty_terminal`'ı arıyor.
+  Liste **eksik**: ağaçtaki MIT paketlerinin bildirimleri henüz yok, borç
+  `docs/YOL-HARITASI.md` → sete bağlanmamış borçlar.
 - **Hücre sabit boyuttadır** ve `const` assert ile bağlanır; emoji, grapheme
   kümeleri ve alt çizgi rengi gibi seyrek veriler yan tablolarda yaşar
   (alacritty'de `CellExtra`). Bugünkü sabit **24 bayt**: alacritty `Cell`'i

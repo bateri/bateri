@@ -81,6 +81,17 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   **ölçülmedi**) `bt-shell`'in `IDLE_FRAME_LIMIT` doc'unda; set açılınca bu
   madde onun `context.md`'sine taşınır → hareket/motion. Aynı sabit 006'da
   da yeniden ölçülüyor (bundle) — **tek sabit, iki ayrı iş**.
+- **About paneli erişilemiyor.** 006 phase-4 atfı AppKit'in standart About
+  panelinin okuduğu `Credits.html` ile pakete koydu, ama paneli açan menü
+  öğesi yok (menü seti 00X). O set `orderFrontStandardAboutPanel:`'ı bağlar
+  ve paneli **gözle** doğrular — bugün hiç görülmedi → menü.
+- **Üçüncü taraf bildirimlerinin geri kalanı.** 006 yalnız `alacritty_terminal`'ın
+  (Apache-2.0) borcunu kapattı. macOS ağacındaki diğer dış paketlerin çoğu
+  MIT ya da MIT seçeneği taşıyor (`objc2` ailesinin dördü yalnız MIT) ve MIT
+  de bildirimin kopyalarla gitmesini istiyor. Paket **dağıtılmadan önce**
+  toplanmalı → imza/notarization/Sparkle ile gelecek dağıtım seti. Aynı set
+  indirilen kopyada Gatekeeper'ın gerçek davranışını da görmeli (kanıt ve
+  açık soru: 006 `phase-4.md` → Uygulama Notları).
 - **004'ün altı kalemlik bulgu borcu.** Listesi ve gerekçeleri
   `.tasks/004-yazi-bicimleri/teslim.md` ile phase-3'ün `## Uygulama
   Notları`'nda. Sete bağlanmadı; ilgili dosyaya meşru biçimde dokunan ilk set

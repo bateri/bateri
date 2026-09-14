@@ -5,7 +5,9 @@
 bateri'yi günlük kullanılabilir terminal yapmak: kopyala/yapıştır/seç/kaydır
 çalışsın, uygulama açılabilir bir `.app` olsun. Eşik tanımı: metin
 kopyalanıp yapıştırılabiliyor, geçmişe kaydırılabiliyor ve uygulama Dock'tan
-açılıp öne çıkabiliyor.
+açılıp öne çıkabiliyor. Gatekeeper (R4.3): yerel `make kur` kopyası onay
+istemez; indirilen kopyadaki onayın tek seferlik olduğu doğrulanmadı
+(`phase-4.md` → Uygulama Notları).
 
 ## Gereksinimler
 
@@ -100,5 +102,5 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 | phase-1 | ✅ | 77b4afd | `[elle]` göz kontrolü tamam (2026-09-14, `097f155` üstünde) |
 | phase-2 | ✅ | 97b9c2c | Doğrulama tamam: `make hepsi` 0 · `make test-yaris` 0 · `make duman` yeşil (Xcode lisansı + Metal Toolchain kullanıcı tarafından çözüldü, `phase-2.md` → "Doğrulama Durumu"); `[elle]` tamam (2026-09-14) |
 | phase-3 | ✅ | 6a7a92d | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: DECSET 1007 (`phase-3.md`) |
-| phase-4 | | |
+| phase-4 | ✅ | (damga bekliyor) | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: Dock açılışında `cwd=/` + `LANG` (`phase-4.md`) |
 | phase-5 | | |

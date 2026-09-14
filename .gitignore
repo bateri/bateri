@@ -3,9 +3,11 @@
 *.metallib
 *.air
 *.dSYM/
-# paketleme
+# paketleme (`make kur` hepsini target/ altında üretir; kaynak ikon PNG'si girer)
 *.app/
 *.dmg
+*.icns
+*.iconset/
 # macOS
 .DS_Store
 # ölçüm kayıtları

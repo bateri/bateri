@@ -64,6 +64,77 @@ test-yaris:
 	$(CARGO) test --workspace -- --ignored race_
 	$(CARGO) test --workspace -- --include-ignored --test-threads=1
 
+# Release derler ve `bateri.app`'i target/ altında kurar (/Applications'a
+# DEĞİL). İmza, notarization ve Sparkle yok (006 Karar 6): yerel kopya
+# linker'ın ad-hoc imzasıyla açılıyor, `codesign -vv` paketi "no resources"
+# diye reddediyor ve bu beklenen hâl.
+#
+# Paket önce `$(STAGE)`'de kurulur ve yalnız denetimden geçerse `$(APP)`'in
+# yerine taşınır: yerinde kurulsaydı düşen bir koşu Dock'un gösterdiği yolda
+# lisanssız ya da ikonsuz, açılabilir bir paket bırakırdı.
+#
+# Girdilerin İÇERİĞİNİ (`assets/bundle/`) `make hepsi` içindeki
+# `bundle_assets` sınar; buradaki denetim ÜRÜNÜ sınar: girdi yerinde durup
+# pakete kopyalanmasa sınama yeşil kalırdı. Denetimin listesi kopya
+# satırlarından bilerek ayrı yazılıyor — aynı değişkenden okusaydı kopyadan
+# silinen dosya denetimden de silinirdi.
+#
+# `LSMinimumSystemVersion` binary'nin kendi `minos`'undan doldurulur, TOML
+# ayrıştırılmaz: `.cargo/config.toml`'un `[env]`'i rustc'ye oradan ulaşıyor
+# ama kabukta ihraç edilmiş bir `MACOSX_DEPLOYMENT_TARGET` onu eziyor. Plist
+# binary'den okununca ikisi hiç ayrışamaz — ayrışsa LaunchServices uygulamayı
+# açamayacağı bir sistemde açardı.
+#
+# `X = $(eval X := $$(shell …))$(X)`: tembel VE bir kez. Düz `=` her açılışta
+# komutu yeniden koşardı (`$(APP)` tarifte yirmiden fazla açılıyor), `:=` ise
+# her make çağrısında — `hepsi` dahil. Hedef dizini `cargo metadata`'dan:
+# `CARGO_TARGET_DIR` tek kaynak değil (`build.target-dir` ve
+# `CARGO_BUILD_TARGET_DIR` de var) ve yanlış dizin bayat bir binary'yi
+# sessizce paketlerdi. Kapsamadığı: `build.target` üçlüsü (`target/<üçlü>/`).
+TARGET_DIR = $(eval TARGET_DIR := $$(shell $(CARGO) metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'))$(TARGET_DIR)
+APP = $(TARGET_DIR)/release/bateri.app
+STAGE = $(APP).partial
+ICONSET = $(TARGET_DIR)/release/bateri.iconset
+# `cargo pkgid` sürümü `…#0.1.0` ya da `…#bateri@0.1.0` biçiminde verir;
+# sed son ayırıcıya kadar siler. Ayırıcıyı adıyla yazamıyoruz: make o
+# karakteri satırın içinde de yorum başı sayıyor.
+VERSION = $(eval VERSION := $$(shell $(CARGO) pkgid -p bateri | sed 's/.*[^0-9A-Za-z.+-]//'))$(VERSION)
+# İkonun adı tek yerde: şablonun `CFBundleIconFile`'ı.
+ICON = $(eval ICON := $$(shell plutil -extract CFBundleIconFile raw assets/bundle/Info.plist.in))$(ICON)
+
+kur:
+	@case '$(APP)' in *[[:space:]]*) echo "kur: hedef dizininde boşluk var ($(APP)); tarif yolları bölerdi"; exit 1;; esac
+	@# CFBundleVersion en çok üç noktalı tamsayı ister; `0.2.0-alpha.1` plutil'den geçer ama LaunchServices'ten geçmez.
+	@echo '$(VERSION)' | grep -Eq '^[0-9]+(\.[0-9]+){0,2}$$' || { echo "kur: sürüm '$(VERSION)' CFBundleVersion biçiminde değil"; exit 1; }
+	$(CARGO) build --release -p bateri
+	rm -rf $(STAGE) $(ICONSET)
+	mkdir -p $(STAGE)/Contents/MacOS $(STAGE)/Contents/Resources $(ICONSET)
+	cp $(TARGET_DIR)/release/bateri $(STAGE)/Contents/MacOS/
+	minos=$$(vtool -show-build $(STAGE)/Contents/MacOS/bateri | awk '$$1=="minos"{print $$2; exit}'); \
+	sed -e 's/@VERSION@/$(VERSION)/g' -e "s/@MACOS_MIN@/$$minos/g" \
+		assets/bundle/Info.plist.in > $(STAGE)/Contents/Info.plist
+	@# iconutil standart on boyutu ister; `sips -s format icns` 1024'ü reddediyor.
+	@for s in 16 32 128 256 512; do \
+		sips -z $$s $$s assets/bundle/$(ICON).png --out $(ICONSET)/icon_$${s}x$${s}.png >/dev/null && \
+		sips -z $$((s*2)) $$((s*2)) assets/bundle/$(ICON).png --out $(ICONSET)/icon_$${s}x$${s}@2x.png >/dev/null || exit 1; \
+	done
+	iconutil -c icns $(ICONSET) -o $(STAGE)/Contents/Resources/$(ICON).icns
+	rm -rf $(ICONSET)
+	cp assets/bundle/Credits.html assets/bundle/THIRD-PARTY-LICENSES.txt $(STAGE)/Contents/Resources/
+	@c=$(STAGE)/Contents; fail() { echo "kur: içerik denetimi düştü — $$1"; exit 1; }; \
+	key() { plutil -extract "$$1" raw $$c/Info.plist 2>/dev/null; }; \
+	plutil -lint -s $$c/Info.plist || fail "Info.plist geçersiz"; \
+	! grep -q '@[A-Z_]*@' $$c/Info.plist || fail "Info.plist'te doldurulmamış yer tutucu var"; \
+	exe=$$c/MacOS/$$(key CFBundleExecutable); test -f $$exe && test -x $$exe || fail "CFBundleExecutable pakette yok"; \
+	minos=$$(vtool -show-build $$exe | awk '$$1=="minos"{print $$2; exit}'); \
+	test -n "$$minos" && test "$$(key LSMinimumSystemVersion)" = "$$minos" || fail "LSMinimumSystemVersion binary'nin minos'u ('$$minos') değil"; \
+	test -s "$$c/Resources/$$(key CFBundleIconFile).icns" || fail "ikon pakette yok"; \
+	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
+		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f pakette yok ya da girdiden farklı"; \
+	done; \
+	rm -rf $(APP) && mv $(STAGE) $(APP) && \
+	echo "kur: $(APP) (sürüm $(VERSION), taban macOS $$minos)"
+
 # Girdisi henüz olmayan hedefler. Var olurlar ki `proje.md`'nin doğrulama
 # tablosu var olmayan bir hedef adı taşımasın; koşarlarsa "henüz yok" deyip
 # kırmızı düşerler, "geçti" demezler. make reçete hatasını 2 ile döndürür;
@@ -73,5 +144,3 @@ henuz_yok = @echo "henüz yok: $(1)"; exit 1
 
 terminfo:
 	$(call henuz_yok,assets/terminfo bir shell/TERM setiyle gelir)
-kur:
-	$(call henuz_yok,.app paketi bundle setiyle gelir)

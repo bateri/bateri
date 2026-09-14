@@ -41,6 +41,18 @@ sözleşme satırı ve proje.md'deki kapı paragrafı güncellenir.
 
 ## Checklist
 
+- [ ] **Devir (phase-4): paketten açılan ölçüm koşusu.** Komut:
+      `make kur && env -u BT_SCROLL_TEST -u BT_FRAME_STATS open -W -n --env BT_RUN_SECONDS=3 --stdout "$PWD/target/duman-paket.out" "$PWD/target/release/bateri.app"`
+      → jeton satırı dosyada. Dört tuzak: (1) `open`'ın çıkış kodu
+      uygulamanınki **değil**, hep 0 — karar jeton satırından okunur; çıkış
+      kodu gerekiyorsa `target/release/bateri.app/Contents/MacOS/bateri`
+      aynı ortamla doğrudan koşulur ama o LaunchServices yolu değil;
+      (2) paket **release** (`profil=release`), bugünkü `8` ve `make duman`
+      **debug** — iki profilin dağılımı ayrı tutulur, hangisinin kapıya
+      bağlanacağı gerekçeyle yazılır; (3) `open` çağıranın ortamını geçiriyor
+      (phase-4'te `open`'la açılan bir probe kabuğun değişkenlerini gördü),
+      yani `env -u` hermetikliği burada da şart; (4) `--stdout` yolu mutlak
+      olmalı — LaunchServices süreci `cwd=/` ile başlatıyor
 - [ ] Görünür pencerede sağlıklı + bozuk koşu dağılımı ölçüldü
 - [ ] Sayı ayrı commit + gerekçeyle donduruldu (kod değişikliği yok)
 - [ ] Sabit doc'u + `CLAUDE.md` sözleşme satırı + proje.md kapı paragrafı güncel

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>bateri</string>
+	<key>CFBundleExecutable</key>
+	<string>bateri</string>
+	<key>CFBundleIconFile</key>
+	<string>bateri</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.bateri.bateri</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>bateri</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>@MACOS_MIN@</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>A program running in bateri wants to control another app.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>A program running in bateri wants to use Bluetooth.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>A program running in bateri wants to access your calendars.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>A program running in bateri wants to use the camera.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>A program running in bateri wants to access your contacts.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>A program running in bateri wants to access your location.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>A program running in bateri wants to use the microphone.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>A program running in bateri wants to access your photo library.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>A program running in bateri wants to access your reminders.</string>
+	<key>NSSystemAdministrationUsageDescription</key>
+	<string>A program running in bateri requires administrator privileges.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

@@ -104,8 +104,10 @@ ilgili crate'in bağımlılık listesine kenar eklendi.
 
 <!-- `/ship` bekleyen manuel adımları BU başlık altında arar. -->
 
-- [ ] B.1 Apache-2.0 attribution `[elle]` — bundle setine devredildi, bu
-      teslimde yapılacak bir şey yok
+- [x] B.1 Apache-2.0 attribution `[elle]` — bundle setine devredildi, bu
+      teslimde yapılacak bir şey yok. **006 phase-4'te kapandı:** lisans metni
+      `assets/bundle/THIRD-PARTY-LICENSES.txt`, atıf `Credits.html`; girdiyi
+      `bundle_assets` sınaması, ürünü `make kur`'un denetimi sınıyor
 - [ ] B.2 `/measure 002-vt-motoru` `[komut]` — iki ölçüm bekliyor.
       **005 kanca setini getirdi, komut artık koşulabilir.** 2026-09-10'daki
       "ölçüm aracı yok" sonucu o güne aitti. Kilit beklemesi (`#1`) CPU'nun
