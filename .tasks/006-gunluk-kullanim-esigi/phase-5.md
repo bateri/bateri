@@ -207,6 +207,25 @@ cümleyle ve `docs/OLCUMLER.md` onlara işaret ediyor. Mercek 8'in geri kalanı:
 `8` kutuplar arasında, algılama tabanı paragrafı yerinde, kapının `n > limit`
 koşulu koddan okundu (`/code-review`).
 
+
+- **Orkestratör kararları (2026-09-15).**
+  - sadakat: makas yok — `git show --stat 32f28b2`: `app.rs` farkı yalnız
+    yorum (yorum dışı `+`/`-` satırı yok), `docs/OLCUMLER.md` kuruldu,
+    `CLAUDE.md`/`proje.md` kapı satırları; `55242cb` yalnız hash damgası.
+  - Sapma (kapı bulgusuyla `.claude/README.md`, `/audit` mercek 6, `/measure`
+    skill'i ve `YOL-HARITASI.md`'nin değişmesi) **kabul**: dördü de yeni
+    kurulan `docs/OLCUMLER.md`'ye ve 005'ten beri süren "sabitin doc'u
+    kutupları taşır" düzenine uyum; iş akışının kuralı genişlemedi, var olan
+    uygulama yazıya geçti. Kullanıcıya kapanış özetinde söylenir.
+  - `[~]` `/measure` Skill aracıyla çağrılmadı, akışı elle izlendi **kabul**:
+    kullanıcı ölçümü açıkça başlattı ("başlat"); skill'in adımları (yöntem
+    önce, taban, en az iki koşu, tek sahip) izlendi. Kapanışta atlanan kapı
+    olarak sayılır.
+  - WAIVE (checklist metni "dört tuzak" diyor, beşinci `--stderr`) **kabul**:
+    güncel liste `docs/OLCUMLER.md`'de.
+  - Devredilenler (paket dumanı için `Makefile` hedefi; `report_and_exit`
+    doc'una "düşen koşuda tanı stderr'de") → kapanışta yol haritası borcu.
+
 ## Yayın Etkisi
 
 - **Ölçüm:** `IDLE_FRAME_LIMIT` görünür pencerede yeniden ölçüldü ve `8`
