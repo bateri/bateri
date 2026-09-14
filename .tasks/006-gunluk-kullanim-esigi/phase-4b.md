@@ -373,4 +373,4 @@ listesi `NSLocale`'i kapsamıyorsa düzelt.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi (12 bulgu; 8 giderildi, 2 WAIVE önerisi, 2 atlandı — notlarda)
 - [x] `/audit` çalıştırıldı, bulgular giderildi (bulgu yok)
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [x] Commit: 87034aa
