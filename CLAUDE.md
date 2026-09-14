@@ -69,10 +69,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
-| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52), komut blokları, seçim, ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek (00X) | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
+| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek (00X) | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
-| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi | `objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`), `libc` (yalnız bekçinin `write` + `_exit`'i) |
+| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini ve yereli (politika, `child`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`), `libc` (yalnız bekçinin `write` + `_exit`'i) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -147,8 +147,23 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **`tty::setup_env()` çağrılmaz.** O, *kendi* sürecimizin ortamını `set_var`
   ile değiştirir ve makinede alacritty kuruluysa `TERM=alacritty` yazar.
   Çocuğun ortamı `tty::Options.env` ile verilir: `TERM=xterm-256color`,
-  `COLORTERM=truecolor`. Buna karşılık alacritty `ALACRITTY_WINDOW_ID` ve
+  `COLORTERM=truecolor` — `SessionOptions.env`'in ek ortamı ikisini
+  **ezemez**. Buna karşılık alacritty `ALACRITTY_WINDOW_ID` ve
   `WINDOWID`'yi koşulsuz yazar ve kapatılamaz — shell'de görünürler.
+  **Dizin ve yerel de yalnız çocuğa gider** (006 phase-4b): kabuk her
+  açılışta ev dizininde başlar (`HOME`, yoksa passwd kaydı; mutlak değilse miras) ve ortamda
+  `LC_ALL`/`LC_CTYPE`/`LANG`'dan hiçbiri boş olmayan bir değer taşımıyorsa
+  macOS'un dil/bölge ayarından `LANG={dil}_{bölge}.UTF-8` alır; o yerel
+  `/usr/share/locale`'de yoksa `LC_CTYPE=UTF-8`. Dil
+  `NSLocale.preferredLanguages`'tan okunur: paketin içinde
+  `currentLocale().languageCode` kullanıcının değil **paketin** dilini
+  (`en`) verir ve `cargo run` bunu göstermez. Kendi sürecimizde
+  `set_current_dir`, `set_var` ve `setlocale` **yok** — alacritty ikisini de
+  kendi sürecinde yapıyor ve `LC_ALL` yazıyor; biz `LANG` yazıyoruz ki
+  kabuğun rc dosyası `LC_*`'ı üstüne yazabilsin. Politika `bt-shell`'de
+  (`child`), `bt-core` yalnız geçirir (`SessionOptions.working_directory`,
+  `.env`). Sebep Dock'tan açılış: LaunchServices süreci `cwd=/` ile
+  başlatıyor ve launchd'nin ortamında `LANG` yok.
 - **Tema = sekiz rol:** arka plan, ön plan, dim, accent ve dört durum. Materyal
   yüzey (grain, sheen) bunun üstüne ayrı bir katmandır ve `substrate` shader'ı
   çizer. Palet dosyaları `~/.config/bateri/themes/*.toml`.

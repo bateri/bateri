@@ -13,8 +13,14 @@ bt-gpu = { workspace = true }
 bt-core = { workspace = true }
 objc2 = { workspace = true }
 # performSelector:withObject:afterDelay: NSRunLoop + NSDate ister; varsayılan
-# set bugün açık, kırpılırsa bu satır onu korur.
-objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate"] }
+# set bugün açık, kırpılırsa bu satır onu korur. NSLocale: kabuğun yereli
+# (`child::locale_env`, 006 phase-4b) — yeni crate değil, var olan
+# bağımlılığın bayrağı; karar kaydı .tasks/006-gunluk-kullanim-esigi/
+# discussion.md → Karar 6 eki. Koruma **eksik**: kullanılan yöntemler
+# (`regionCode`, `preferredLanguages`) ayrıca NSString ve
+# NSArray ister. İkisi varsayılan sette ve crate onları başka yerlerde de
+# listesiz kullanıyor (`ns_string!`, `NSArray`); kırpma günü buraya girerler.
+objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLocale"] }
 objc2-app-kit = { workspace = true }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.

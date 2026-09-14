@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
@@ -169,6 +170,30 @@ pub struct SessionOptions {
     /// args))` → tam olarak o komut (duman ve sınamalar bunu kullanır ki
     /// sonuç kullanıcının rc dosyasına bağlı olmasın).
     pub command: Option<(String, Vec<String>)>,
+    /// Çocuğun başlangıç dizini. `None` → bizim sürecimizin dizinini miras
+    /// alır.
+    ///
+    /// **Yalnız çocuğa** gider (fork'la exec arasında `chdir`); kendi
+    /// sürecimizin dizini oynamaz. `chdir` exec'ten **önce** olduğu için
+    /// [`SessionOptions::command`]'ın göreli program yolu ve argümanları da
+    /// yeni dizine göre çözülür. Gidilemeyen bir yol (silinmiş, izinsiz)
+    /// sessizce yoksayılır ve çocuk yine miras alır — alacritty'nin
+    /// `pre_exec`'i `chdir`'in sonucuna bakmıyor; bu davranış
+    /// `unreachable_working_directory_is_inherited` ile bağlı, alacritty onu
+    /// değiştirirse orası kızarır. Hangi dizinin verileceği uygulamanın
+    /// kararı, bu crate yalnız geçirir.
+    pub working_directory: Option<PathBuf>,
+    /// Çocuğa **eklenen** ortam değişkenleri; geri kalanı miras.
+    ///
+    /// Öncelik, güçlüden zayıfa: `TERM` ve `COLORTERM` (bu crate'in sabiti,
+    /// ezilemez — `TERM` bir sözleşme, bkz. `CLAUDE.md`) > bu harita >
+    /// alacritty'nin koşulsuz yazdıkları (`USER`, `HOME`,
+    /// `ALACRITTY_WINDOW_ID`, `WINDOWID`) > miras. Tek istisna alacritty'nin
+    /// en sonda **sildiği** iki anahtar (`XDG_ACTIVATION_TOKEN`,
+    /// `DESKTOP_STARTUP_ID`): haritada olsalar da çocuğa ulaşmaz. Kendi
+    /// sürecimizin ortamı hiçbir hâlde değişmez (`tty::setup_env()`
+    /// çağrılmaz).
+    pub env: HashMap<String, String>,
     pub cols: u16,
     pub rows: u16,
     /// Bir hücrenin piksel boyutu; PTY'ye `TIOCSWINSZ` ile gider, grafik
@@ -682,17 +707,21 @@ impl Session {
         let grid = GridSize::for_spawn(options.cols, options.rows);
         let size = window_size(grid, options.cell_px);
 
+        // `tty::setup_env()` ÇAĞRILMAZ: o, kendi sürecimizin ortamını
+        // `set_var` ile değiştirir ve makinede alacritty kuruluysa
+        // `TERM=alacritty` yazar. Ortamı çocuğa doğrudan veriyoruz.
+        //
+        // Sıra öncelik sırasıdır (`SessionOptions::env`): ek ortamın
+        // haritasına iki sabit **sonra** giriyor — aynı anahtarı ezen onlar.
+        let mut env = options.env;
+        env.insert("TERM".to_owned(), "xterm-256color".to_owned());
+        env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
         let pty_options = tty::Options {
             shell: options
                 .command
                 .map(|(program, args)| Shell::new(program, args)),
-            // `tty::setup_env()` ÇAĞRILMAZ: o, kendi sürecimizin ortamını
-            // `set_var` ile değiştirir ve makinede alacritty kuruluysa
-            // `TERM=alacritty` yazar. Ortamı çocuğa doğrudan veriyoruz.
-            env: HashMap::from([
-                ("TERM".to_owned(), "xterm-256color".to_owned()),
-                ("COLORTERM".to_owned(), "truecolor".to_owned()),
-            ]),
+            working_directory: options.working_directory,
+            env,
             ..Default::default()
         };
         let pty = tty::new(&pty_options, size, 0)?;
@@ -1664,7 +1693,12 @@ mod tests {
     }
 
     fn spawn_session(script: &str, wake: Arc<TestWake>) -> Session {
-        spawn_with_command(("/bin/sh".into(), vec!["-c".into(), script.into()]), wake)
+        spawn_with_command(sh(script), wake)
+    }
+
+    /// `/bin/sh -c script` komutu.
+    fn sh(script: &str) -> (String, Vec<String>) {
+        ("/bin/sh".into(), vec!["-c".into(), script.into()])
     }
 
     fn spawn_with_command(command: (String, Vec<String>), wake: Arc<TestWake>) -> Session {
@@ -1673,17 +1707,22 @@ mod tests {
 
     /// Geniş grid isteyen sınamalar için (fare raporunun 223 sütunluk sınırı).
     fn spawn_with_cols(command: (String, Vec<String>), cols: u16, wake: Arc<TestWake>) -> Session {
-        Session::spawn(
-            SessionOptions {
-                command: Some(command),
-                cols,
-                rows: 10,
-                cell_px: (9, 18),
-                scrollback: 100,
-            },
-            wake,
-        )
-        .unwrap()
+        Session::spawn(test_options(command, cols), wake).unwrap()
+    }
+
+    /// Sınamaların ortak açılış ayarları: dizin ve ek ortam **boş**, yani
+    /// çocuk sınama sürecinin dizinini ve ortamını miras alır. İkisini
+    /// sınayanlar bunun üstüne yazar.
+    fn test_options(command: (String, Vec<String>), cols: u16) -> SessionOptions {
+        SessionOptions {
+            command: Some(command),
+            working_directory: None,
+            env: HashMap::new(),
+            cols,
+            rows: 10,
+            cell_px: (9, 18),
+            scrollback: 100,
+        }
     }
 
     #[test]
@@ -2072,6 +2111,88 @@ mod tests {
         let cells = wait_cells(&session, &wake, 2);
         let green = Some(color::linear_rgba(color::default(2)));
         assert!(backgrounds(&cells).all(|c| c.bg == green), "{cells:?}");
+    }
+
+    /// `options` ile açılan çocuğun çıktısını **tek dizgi** olarak verir;
+    /// çıktı `;` ile bitmeli.
+    ///
+    /// `;` bekleme ölçütü: satırın son baytı, yani görününce satırın tamamı
+    /// gelmiştir. İğneyle beklemek (`wait_ink`) yanlış çıktıda beş saniyelik
+    /// zaman aşımına düşer ve neyin geldiğini değil neyin gelmediğini
+    /// söylerdi; burada kıyas `assert_eq!` ile, gelen değer ekranda.
+    /// Boşluk mürekkep değil (`Cell::ch`), dizgiden düşer.
+    fn child_output(options: SessionOptions) -> String {
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, wake.clone()).unwrap();
+        glyph_text(&wait_ink(&session, &wake, ";"))
+    }
+
+    /// Çocuğun `pwd -P`'si, karşılaştırılacak biçimde.
+    ///
+    /// `-P` ve `canonicalize` birlikte: macOS'ta `/var` `/private/var`'a bir
+    /// sembolik bağ, ve mantıksal yol miras kalan `PWD`'ye bağlı.
+    fn cwd_line(dir: &std::path::Path) -> String {
+        let dir = dir.canonicalize().unwrap();
+        format!("cwd={};", dir.display()).replace(' ', "")
+    }
+
+    const PRINT_CWD: &str = "printf 'cwd=%s;' \"$(pwd -P)\"; sleep 5";
+
+    #[test]
+    fn working_directory_sets_child_cwd() {
+        // Sınama sürecinin dizininden (crate kökü) farklı olması yeter.
+        let dir = std::env::temp_dir();
+        let options = SessionOptions {
+            working_directory: Some(dir.clone()),
+            ..test_options(sh(PRINT_CWD), 200)
+        };
+
+        assert_eq!(child_output(options), cwd_line(&dir));
+    }
+
+    #[test]
+    fn unreachable_working_directory_is_inherited() {
+        // Belgelenen davranışın bekçisi (`SessionOptions::working_directory`):
+        // yol yoksa açılış düşmüyor, çocuk miras alıyor.
+        let options = SessionOptions {
+            working_directory: Some("/nonexistent/bt-core-working-directory".into()),
+            ..test_options(sh(PRINT_CWD), 200)
+        };
+
+        assert_eq!(
+            child_output(options),
+            cwd_line(&std::env::current_dir().unwrap())
+        );
+    }
+
+    #[test]
+    fn child_inherits_cwd_without_working_directory() {
+        let options = test_options(sh(PRINT_CWD), 200);
+
+        assert_eq!(
+            child_output(options),
+            cwd_line(&std::env::current_dir().unwrap())
+        );
+    }
+
+    #[test]
+    fn extra_env_reaches_child_without_overriding_term() {
+        // İki sabit de listede **ezilmeye çalışılıyor**: öncelik sırası
+        // (`SessionOptions::env`) yalnız burada bağlı.
+        let script = "printf 'env=%s|%s|%s;' \"$BT_PROBE\" \"$TERM\" \"$COLORTERM\"; sleep 5";
+        let options = SessionOptions {
+            env: HashMap::from([
+                ("BT_PROBE".into(), "reached".into()),
+                ("TERM".into(), "dumb".into()),
+                ("COLORTERM".into(), "none".into()),
+            ]),
+            ..test_options(sh(script), 200)
+        };
+
+        assert_eq!(
+            child_output(options),
+            "env=reached|xterm-256color|truecolor;"
+        );
     }
 
     /// `needle` mürekkepte görünene kadar kare bekler; `od` satırı bölünmüş
@@ -2769,11 +2890,7 @@ mod tests {
     ) -> (Session, Arc<TestWake>) {
         let wake = Arc::new(TestWake::default());
         let script = format!("stty -echo -icanon; {setup}; exec od -An -tx1");
-        let session = spawn_with_cols(
-            ("/bin/sh".into(), vec!["-c".into(), script]),
-            cols,
-            Arc::clone(&wake),
-        );
+        let session = spawn_with_cols(sh(&script), cols, Arc::clone(&wake));
         wait_until("kip açılmadı", Duration::from_secs(5), || {
             ready(*session.term.lock().mode())
         });

@@ -123,5 +123,5 @@ Kapı : IDLE_FRAME_LIMIT görünür pencerede yeniden ölçülür (phase-5, ayr�
 | phase-3 | ✅ | 6a7a92d | `[elle]` göz kontrolü bekliyor; DECSET 1007 WAIVE'i kullanıcı kararıyla phase-3b'ye dönüştü |
 | phase-3b | ✅ | 100ecfa | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: `CLAUDE.md` `bt-core` satırına girdi kodlaması (`phase-3b.md`) |
 | phase-4 | ✅ | dd46e85 | `[elle]` göz kontrolü bekliyor; WAIVE önerisi: Dock açılışında `cwd=/` + `LANG` (`phase-4.md`) |
-| phase-4b | | |
+| phase-4b | ✅ | | `[elle]` göz kontrolü bekliyor (gerçek Dock açılışı, Türkçe giriş); paketli açılış yoklamayla kanıtlandı (`phase-4b.md`) |
 | phase-5 | | |

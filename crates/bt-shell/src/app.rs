@@ -23,6 +23,7 @@ use objc2_foundation::{
     NSRect, NSRunLoopCommonModes, NSSize, ns_string,
 };
 
+use crate::child;
 use crate::view::BateriView;
 use crate::{Options, Run, Workload};
 
@@ -804,6 +805,13 @@ impl AppDelegate {
                     // `unwrap_or(0)` ve onu savunan `debug_assert` düştü.
                     Workload::Load => load_shell(run.seconds),
                 }),
+                // Dizin ve yerel **her** oturumda aynı kuralla, süreli koşu
+                // dahil: karar tek kollu (`discussion.md` → Karar 6 eki,
+                // "istisnasız") ve iki sabit betik de dizine ve yerele bağlı
+                // değil — `printf` ile `sleep`, `date` ile `printf`; yolları
+                // mutlak ya da `PATH`'ten, çıktıları ASCII.
+                working_directory: child::working_directory(),
+                env: child::locale_env().into_iter().collect(),
                 cols: grid.cols,
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
