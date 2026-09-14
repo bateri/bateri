@@ -195,6 +195,22 @@ fazına **içerik denetimi** konur: Info.plist + lisans dosyası varlığı.
   alana değmiyor): 3 panik yolu, 4 ayar şeması, 5 shell üçlüsü, 7 thread,
   8 boşta kare, 9 hücre/shader. Tek yargı merceği (10) inline koştu.
 
+- **Orkestratör kararları (2026-09-14).**
+  - sadakat: makas yok — `git show --stat dd46e85` checklist'le örtüşüyor
+    (`.cargo/config.toml` yalnız yorum, `CLAUDE.md`/`proje.md` komut ve
+    taban satırları, `YOL-HARITASI` iki borç, 002 teslim B.1); `6575836`
+    yalnız hash damgası.
+  - Sapma (R4.2 panelinin menüsüz açılamaması, R4.3'ün yerel kopyada
+    Gatekeeper sormaması → yalnız `plan.md` Hedef ve `[elle]` metni
+    düzeltildi) **kabul**; R satırları oynamadı.
+  - WAIVE (About paneli, `[~]`) **kabul**: menü 00X, borç yol haritasında.
+  - WAIVE (Dock açılışında `cwd=/` + `LANG`) **kullanıcıya soruldu**: eşiğin
+    tanımı "Dock'tan açılıp kullanılabilir" ve Türkçe karakter girişi LANG'a
+    bağlı. alacritty macOS'ta koşulsuz ev dizinine geçiyor
+    (`env::set_current_dir(home_dir)`) ve ortam yerelini geçersizse
+    `NSLocale`'den kuruyor (`macos/locale.rs`; orkestratör `master`'dan
+    okudu). Karar gelene kadar phase-5 başlamaz (ölçüm son koda alınır).
+
 ## Yayın Etkisi
 
 - **app bundle** (`proje.md` → Yayın etkisi): `make kur` gerçek →

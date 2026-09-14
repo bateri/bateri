@@ -160,6 +160,8 @@ kaydırmaz.
   **Atlanan:** kaydıramayan tekerlek olayının `Term` kilidi — `/simplify`'daki
   (1) ile aynı bulgu, aynı gerekçe.
 - **WAIVE önerisi — alternate screen'de tekerlek → ok tuşları (DECSET 1007).**
+  *Aşıldı (2026-09-14): kullanıcı R3.3'ü değiştirdi, iş `phase-3b.md`'ye
+  taşındı — `discussion.md` → Karar 4 eki.*
   `/code-review`: `TermMode::ALTERNATE_SCROLL` alacritty'de varsayılan açık ve
   fare raporlaması gerektirmiyor; `man`, `git log`, `less` tekerlekle
   kaydırılamıyor. Sınanmış taslak: `scroll_by`'ın alternate screen kolunda
@@ -209,7 +211,7 @@ kaydırmaz.
   - Sapma (girdide dibe dönüş) ve düz PgUp/PgDn'in `\e[5~`/`\e[6~`
     göndermesi **kabul**: R3'le çelişmiyor, `TERM` değişmedi; plan.md'nin
     Yaklaşım/Gereksinimler'i oynamadı.
-  - WAIVE (DECSET 1007) **kabul**: R3.3 ve Karar 4 yürürlükte kalıyor. Ama
+  - WAIVE (DECSET 1007) **kabul** — *sonra aşıldı, phase-3b:* R3.3 ve Karar 4 yürürlükte kalıyor. Ama
     bedeli kullanıcıya görünür (`less`, `man`, `git log` tekerlekle
     kaydırılmıyor) ve kararı değiştirmek gereksinim değişikliği → kullanıcıya
     ayrı soru olarak sunuldu; taslak yukarıda hazır.

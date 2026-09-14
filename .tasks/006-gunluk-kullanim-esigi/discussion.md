@@ -185,3 +185,25 @@ ayrıklığı korunsun. Hiçbiri KIRMIZI değil — yön doğru, parçalar sorun
 - **Reddedilen:** *"Bundle ayrı sete çıksın"* (sadelik 1, işletme 2'nin
   varsayımı) — kullanıcı reddetti, gerekçe yukarıda. *"OSC 52 yazma yönü
   girsin"* (Karar 5 önerisi) — sadelik çürüttü, kullanıcı onayladı.
+
+## Karar 4 eki (2026-09-14, kullanıcı kararı)
+
+- **R3.3 değişti: tam ekran uygulamada tekerlek uygulamaya gider.** phase-3
+  "alternate screen'de yoksayılır" diye uyguladı; `/code-review` bedelini
+  buldu (`man`, `less` tekerlekle kaymıyor) ve DECSET 1007 taslağını WAIVE
+  önerisi olarak bıraktı. Kullanıcı: *"less man gibi yerlerde scroll edememek
+  çok kötü bir olay ux olarak güzel olması lazım"* → tekerlek alternate
+  screen'de ok tuşlarına çevrilir (alacritty, iTerm2, Terminal.app ile aynı).
+- **Fare raporlamasının tekerlek kolu girdi.** Fare kipini açan uygulamalar
+  (nvim varsayılanı, `.vimrc`'siz macOS vim'i, htop) ok değil fare olayı
+  bekler; ok çevirisi onlarda işlemez. Orkestratör önerdi (b), kullanıcı
+  onayladı: *"önerini uygula"*. Tıklama/sürükleme/hareket raporu **girmedi** —
+  seçimle çakışır ve Karar 1'in seçim modelini yeniden açardı.
+- **Ok kodlaması DECCKM'e uyar.** Kılavuz yazılırken bulundu:
+  `xterm-256color` `smkx=\E[?1h\E=`, `kcuu1=\EOA` diyor ve `keys.rs` okları
+  koşulsuz `\e[A` kodluyordu; tekerleğin okları aynı kurala bağlanmadan
+  özellik hedeflediği uygulamada boşa düşebilirdi.
+- **Yeri:** phase-3b; phase-4'ten sonra, phase-5 ölçümünden önce (R5.1).
+- **Reddedilen:** *"WAIVE kalsın, R3.3 aynen"* — kullanıcı reddetti.
+  *"Yalnız ok çevirisi, fare raporu 00X'e"* — vim/htop'ta aynı UX açığını
+  bırakırdı.
