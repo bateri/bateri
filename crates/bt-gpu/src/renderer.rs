@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use block2::RcBlock;
-use bt_atlas::{Atlas, Face, Metrics, Sprite, TOFU};
-use bt_core::LinearRgba;
+use bt_atlas::{Atlas, Face, FontIssue, Metrics, Sprite, TOFU};
+use bt_core::{FontOptions, LinearRgba};
 use dispatch2::DispatchData;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
@@ -44,15 +44,19 @@ type CompletionBlock = RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTLCommandBuffe
 /// `rustc` düşer — çalışma zamanına kalan tek şey fonksiyon adlarıdır.
 static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/default.metallib"));
 
-/// Mantıksal font puntosu; `[font] size`/`family` ayarları (007 phase-5)
-/// gelene kadar sabit — ölçülmüş bir sayı değil, seçilmiş bir varsayılan.
-/// `bt-shell`'in eski `SCROLLBACK` sabiti aynı örüntüydü ve 007 phase-1'de
-/// ayar modeline (`bt_core::Settings`) geçti; bu sabit de öyle ölecek.
+/// Font seçiminin kullanıcıya söylenecek sonucu — `bt_atlas::FontIssue`'nun
+/// **bu crate'teki** karşılığı.
 ///
-/// [`Renderer::cell_metrics`] puntoyu **parametre almıyor**: alsaydı bir ayar
-/// değeri her yeniden boyutlandırmada çağrı yoluna girer ve varsayılanın
-/// sahibi `bt-shell` olurdu — `CELL_PX` bir kat yukarıda yeniden doğardı.
-const POINT_SIZE: f64 = 13.0;
+/// Ayrı tip, çünkü `bt-shell` `bt-atlas`'ı görmüyor ve görmemeli
+/// ([`CellMetrics`]'in gerekçesi, 003 R5): yeniden ihraç katman tablosunu
+/// bulanıklaştırırdı. Metin yok; alt başlığın dizgisini kuran `bt-shell`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FontNotice {
+    /// İstenen aile makinede yok; `using` açılan ailenin adı.
+    FamilyNotFound { requested: String, using: String },
+    /// Aile açıldı ama eşaralıklı değil; reddedilmedi.
+    NotMonospaced { family: String },
+}
 
 /// Atlas ve onun dokusu — **tek yerde**.
 ///
@@ -155,9 +159,21 @@ pub struct Renderer {
     /// `kural=R` jetonu. İki kardeşiyle aynı gerekçe; jetonun neyi göremediği
     /// [`crate::frame::Frame::rule_count`]'ta yazılı ve tek yerde durmalı.
     last_rule_count: AtomicUsize,
+    /// İstenen font; atlasın anahtarının aile ve punto yarısı.
+    ///
+    /// Ayar olarak **saklanıyor**, [`Renderer::cell_metrics`]'e parametre
+    /// olarak gitmiyor: gitseydi ayar değeri her yeniden boyutlandırmada çağrı
+    /// yoluna girer ve pencere geometrisi fonta dair bir şey bilmek zorunda
+    /// kalırdı. Açılış değeri `bt_core::FontOptions::default()`: süreli koşu
+    /// ([`Renderer::set_font`]'u hiç çağırmıyor) ile dosyasız kullanıcı aynı
+    /// fontu görür ve varsayılan puntonun ikinci bir sahibi yok.
+    ///
+    /// `RefCell`: `atlas` ile aynı gerekçe. Ödüncü yalnız `set_font` ve
+    /// `sync_atlas` alır, ikisi de çağrı sınırında bırakır.
+    font: RefCell<FontOptions>,
     /// Font metriğinin ve glyph yuvalarının kaynağı, dokusuyla birlikte.
     ///
-    /// `Option`, çünkü atlasın anahtarı (punto + backing ölçeği) **pencereden**
+    /// `Option`, çünkü atlasın anahtarının ölçek yarısı **pencereden**
     /// gelir ve kurucu pencereyi görmez. Sabit bir 1.0 ile kurmak iki şeyi
     /// birden bozardı: retina makinede font zinciri açılışta boşuna bir kez
     /// daha koşar, ve metriği hiç sormadan atlası okuyan bir yol **sessizce
@@ -229,6 +245,7 @@ impl Renderer {
             queue,
             cell_bg,
             cell,
+            font: RefCell::new(FontOptions::default()),
             atlas: RefCell::new(None),
             last_bg_count: AtomicUsize::new(0),
             last_glyph_count: AtomicUsize::new(0),
@@ -280,12 +297,49 @@ impl Renderer {
             .map_or((0, 0), |tex| tex.atlas.occupancy())
     }
 
-    /// Atlası `scale` ölçeğine getirir ve metriğini verir.
+    /// İstenen fontu değiştirir; önceki istekten farklıysa `true`.
     ///
-    /// **Atlasın anahtarını (punto + ölçek) değiştiren tek yer burasıdır** —
-    /// yani ızgara geometrisini. `draw` atlası okumakla kalmıyor, yuva da
-    /// açıyor ([`Atlas::slot`] `&mut` alır) ama ızgarayı değiştirmiyor;
-    /// ayrım tam olarak dokunun ne zaman düşmesi gerektiğidir.
+    /// Atlası **kurmuyor**, yalnız isteği saklıyor: anahtarı değiştiren ve
+    /// dokuyu düşüren tek yer [`Renderer::sync_atlas`] kalıyor. Yeni font
+    /// sonraki [`Renderer::cell_metrics`]'te açılır; `true` çağırana "hücre
+    /// ölçüsünü yeniden sor, grid'i yeniden kur" der (`bt-shell`'in
+    /// `refresh_geometry`'si). [`Renderer::font_notice`] de o ana kadar eski
+    /// atlasınkini söyler.
+    pub fn set_font(&self, font: &FontOptions) -> bool {
+        let mut current = self.font.borrow_mut();
+        if *current == *font {
+            return false;
+        }
+        current.clone_from(font);
+        true
+    }
+
+    /// Açık atlasın fontu için kullanıcıya söylenecek şey; atlas henüz yoksa
+    /// ya da söylenecek bir şey yoksa `None`.
+    ///
+    /// Atlas **en son** [`Renderer::cell_metrics`]'te kuruldu: cevap o
+    /// çağrının fontunu söyler. Ölçek değişimi atlası yeniden kursa da aynı
+    /// cevabı verir — aile ve eşaralık ölçekle değişmiyor.
+    pub fn font_notice(&self) -> Option<FontNotice> {
+        let atlas = self.atlas.borrow();
+        let issue = atlas.as_ref()?.atlas.font_issue()?;
+        Some(match issue {
+            FontIssue::FamilyNotFound { requested, using } => FontNotice::FamilyNotFound {
+                requested: requested.clone(),
+                using: using.clone(),
+            },
+            FontIssue::NotMonospaced { family } => FontNotice::NotMonospaced {
+                family: family.clone(),
+            },
+        })
+    }
+
+    /// Atlası istenen fonta ve `scale` ölçeğine getirir ve metriğini verir.
+    ///
+    /// **Atlasın anahtarını (aile + punto + ölçek) değiştiren tek yer
+    /// burasıdır** — yani ızgara geometrisini. `draw` atlası okumakla
+    /// kalmıyor, yuva da açıyor ([`Atlas::slot`] `&mut` alır) ama ızgarayı
+    /// değiştirmiyor; ayrım tam olarak dokunun ne zaman düşmesi gerektiğidir.
     ///
     /// [`Atlas::ensure`]'ün `true`'su burada dokuyu düşürüyor: yuva eşlemesi
     /// ve [`Atlas::texture_px`] değişmiş olabilir, eski boyutlu dokuya yeni
@@ -294,13 +348,15 @@ impl Renderer {
     /// ifade deyimine bakar), yani `#[must_use]` burada bir bekçi değil bir
     /// niyet beyanı; bekçi bu satırın kendisi.
     fn sync_atlas(&self, scale: f64) -> Metrics {
+        let font = self.font.borrow();
+        let family = font.family.as_deref();
         let mut slot = self.atlas.borrow_mut();
         let atlas_tex = slot.get_or_insert_with(|| AtlasTexture {
-            atlas: Atlas::new(POINT_SIZE, scale),
+            atlas: Atlas::new(family, font.size, scale),
             texture: None,
             instances: Vec::new(),
         });
-        if atlas_tex.atlas.ensure(POINT_SIZE, scale) {
+        if atlas_tex.atlas.ensure(family, font.size, scale) {
             atlas_tex.texture = None;
         }
         // Ödünç değil **metrik** dönüyor: atlas ödüncünün bir çağrı sınırını
@@ -909,6 +965,65 @@ mod tests {
         // harici ekran çıkarıldığında metrik @2x'te takılı kalır ve pencere
         // yarı yarıya az hücre gösterirdi.
         assert_eq!(r.cell_metrics(1.0), one, "aynı ölçek aynı metriği verir");
+    }
+
+    #[test]
+    fn set_font_changes_the_metrics_on_the_next_ask() {
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let base = r.cell_metrics(1.0);
+        // Açılış değeri ayar modelinin varsayılanı: süreli koşunun hücresi
+        // dosyasız kullanıcınınkiyle aynı.
+        assert!(
+            !r.set_font(&FontOptions::default()),
+            "varsayılan zaten istenmiş olmalı"
+        );
+        let large = FontOptions {
+            size: 26.0,
+            ..FontOptions::default()
+        };
+        assert!(r.set_font(&large), "punto değişti");
+        assert!(!r.set_font(&large), "aynı istek değişim değil");
+        let bigger = r.cell_metrics(1.0);
+        assert!(
+            bigger.cell_px().0 > base.cell_px().0 && bigger.cell_px().1 > base.cell_px().1,
+            "26pt hücre 13pt'den büyük olmalı: {base:?} → {bigger:?}"
+        );
+        assert!(r.set_font(&FontOptions::default()));
+        assert_eq!(r.cell_metrics(1.0), base, "varsayılana dönüş");
+    }
+
+    #[test]
+    fn missing_family_becomes_a_notice_after_the_atlas_opens() {
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        assert_eq!(r.font_notice(), None, "atlas yokken söylenecek şey yok");
+        r.cell_metrics(1.0);
+        assert_eq!(r.font_notice(), None, "zincir sessiz");
+        assert!(r.set_font(&FontOptions {
+            family: Some("Bu Aile Yok 12345".to_owned()),
+            ..FontOptions::default()
+        }));
+        r.cell_metrics(1.0);
+        let Some(FontNotice::FamilyNotFound { requested, using }) = r.font_notice() else {
+            panic!("bulunamadı bildirimi beklendi: {:?}", r.font_notice());
+        };
+        assert_eq!(requested, "Bu Aile Yok 12345");
+        assert!(
+            ["SF Mono", "Menlo"].contains(&using.as_str()),
+            "zincirin ailesi: {using}"
+        );
+        assert!(r.set_font(&FontOptions {
+            family: Some("Helvetica".to_owned()),
+            ..FontOptions::default()
+        }));
+        r.cell_metrics(2.0);
+        let proportional = Some(FontNotice::NotMonospaced {
+            family: "Helvetica".to_owned(),
+        });
+        assert_eq!(r.font_notice(), proportional);
+        // Ekran değişimi atlası yeniden kuruyor ama bildirim aynı: font
+        // yuvası pencere ekrandan ekrana taşınırken oynamamalı.
+        r.cell_metrics(1.0);
+        assert_eq!(r.font_notice(), proportional, "ölçek bildirimi oynattı");
     }
 
     #[test]

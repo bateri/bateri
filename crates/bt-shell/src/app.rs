@@ -24,7 +24,7 @@ use objc2_foundation::{
     NSRect, NSRunLoopCommonModes, NSSize, NSString, ns_string,
 };
 
-use crate::notices::{Notices, Source};
+use crate::notices::{Notices, Source, font_messages};
 use crate::view::BateriView;
 use crate::watch::{Notify, Watch};
 use crate::{Options, Run, Workload};
@@ -385,8 +385,8 @@ define_class!(
             // Ayarlar üç sınırın arasında okunuyor: pencere ivar'a girdikten
             // **sonra** (tanı alt başlığa yazılabilsin), geometriden ve
             // oturumdan **önce** — `scrollback` ve tema `SessionOptions`'a
-            // giriyor ve font ayarı (007 phase-5) hücre ölçüsünü, yani ilk
-            // grid'i ve kabuğun gördüğü ilk `TIOCSWINSZ`'yi belirleyecek.
+            // giriyor, font ayarı da hücre ölçüsünü, yani ilk grid'i ve
+            // kabuğun gördüğü ilk `TIOCSWINSZ`'yi belirliyor.
             let theme = self.load_settings();
             let grid = self
                 .sync_geometry()
@@ -982,8 +982,13 @@ impl AppDelegate {
     /// Süreli koşuda yükleyici **hiç çağrılmaz** ([`Inputs::Hermetic`]) ve
     /// tema gömülü `bateri`, görünüm okunmadan: `Settings::default()` artık
     /// `"system"` ve ona çözülseydi duman makinenin açık modundan etkilenirdi.
+    /// Font da renderer'ın açılış değerinde, yani `FontOptions::default()`'ta
+    /// kalır — `hucre=8 glif=6` makinenin ayar dosyasına bağlanmaz.
     /// Bozuk dosya pencereyi açık bırakır, varsayılanlarla
     /// ([`settings::Loaded::at_launch`], [`AppDelegate::choose_theme`]).
+    ///
+    /// Font renderer'a burada **yalnız istek** olarak gidiyor: atlas hemen
+    /// ardından gelen `sync_geometry`'de açılıyor ve font yuvasını da o yazıyor.
     ///
     /// İzleme de burada kuruluyor, okumadan **önce** (`watch` → kurulum tek
     /// atımlık): açılışla ilk olay arasına düşen bir kayıt kaybolmasın.
@@ -1009,6 +1014,8 @@ impl AppDelegate {
         };
         self.post_notices(Source::Settings, messages);
         let theme = self.choose_theme(config_root.as_deref(), &settings);
+        // Dönüş (değişti mi) burada soru değil: geometri henüz hiç kurulmadı.
+        let _ = self.ivars().renderer.set_font(&settings.font);
         self.ivars().settings.replace(settings);
         theme
     }
@@ -1045,7 +1052,9 @@ impl AppDelegate {
     ///   değişmez; yuva kendi kaynağına göre dolar ya da boşalır. Değilse
     ///   kabul edilmeyen anahtar geçerli değerini tutar
     ///   ([`settings::load_keeping`]) ve fark alınır: terminal seçenekleri
-    ///   **tamamıyla** oturuma gider.
+    ///   **tamamıyla** oturuma gider; font renderer'a gider ve istek
+    ///   değiştiyse geometri yeniden kurulur ([`AppDelegate::refresh_geometry`]:
+    ///   atlas, grid, PTY boyutu, font yuvası).
     /// - **Tema her olayda yeniden çözülüyor**, ayar dosyası bozuk olsa da
     ///   (son iyi ayarların adıyla): etkin tema dosyası ayrı bir kaynak ve
     ///   hangi dosyanın haber verdiği bilinmiyor. Kullanılamayan tema takas
@@ -1078,7 +1087,16 @@ impl AppDelegate {
             if changes.terminal {
                 session.set_terminal_options(new.terminal());
             }
+            // İki kapı, ikisi de gerekli: fark dosyanın değiştiğini söylüyor,
+            // `set_font` renderer'ın zaten o fontu isteyip istemediğini
+            // (phase-7'nin geçici puntosu ikisini ayırır). Geometri ayarlar
+            // yazıldıktan **sonra** kuruluyor: o yol ayarları okursa yeni
+            // değeri görsün.
+            let font = changes.font && self.ivars().renderer.set_font(&new.font);
             self.ivars().settings.replace(new);
+            if font {
+                self.refresh_geometry();
+            }
         }
         // Ödünç `set_theme`'den önce düşüyor; içerideki çağrılar `settings`'e
         // dokunmuyor (`apply_appearance`'ın deseni).
@@ -1184,12 +1202,22 @@ impl AppDelegate {
     ///
     /// Alt başlığa yazan ikinci bir yol olursa yuvalar anlamını yitirir: biri
     /// ötekinin tanısını sessizce ezer.
+    ///
+    /// **Yuva aynı kalıyorsa hiçbir şey yapmaz** — ne stderr ne alt başlık.
+    /// Font yuvası `sync_geometry`'nin sonunda yazılıyor ve o yol canlı
+    /// boyutlandırmada her olayda koşuyor: bulunamayan bir aile stderr'e olay
+    /// başına bir satır basar, alt başlık da boşuna yeniden kurulurdu. Aynı
+    /// hatalı ayar dosyasını ikinci kez kaydetmek de artık satırı tekrar
+    /// basmıyor; alt başlıkta zaten duruyor.
     fn post_notices(&self, source: Source, messages: Vec<String>) {
-        for message in &messages {
-            eprintln!("bateri: {message}");
-        }
         let subtitle = {
             let mut notices = self.ivars().notices.borrow_mut();
+            if notices.get(source) == messages.as_slice() {
+                return;
+            }
+            for message in &messages {
+                eprintln!("bateri: {message}");
+            }
             notices.replace(source, messages);
             notices.subtitle()
         };
@@ -1339,7 +1367,10 @@ impl AppDelegate {
         std::process::exit(1);
     }
 
-    /// Pencere geometrisi oynadı: layer'ı eşle, grid'i güncelle, kare iste.
+    /// Pencere geometrisi ya da font oynadı: layer'ı eşle, grid'i güncelle,
+    /// kare iste. Aynı grid'e düşen font değişimi de yeniden çizilir:
+    /// `DisplayLink::resize` kareyi koşulsuz istiyor ve kare istemek hasar
+    /// bayrağını da dikiyor.
     ///
     /// Fare girdileri de burada tazeleniyor: view `Ivars.view`'da
     /// `Retained<BateriView>` olarak duruyor. Pencere kapanınca ikisi
@@ -1362,6 +1393,16 @@ impl AppDelegate {
     /// ikisine de ihtiyacı var ve boyutu yazmadan ölçüyü türetmek yanlış
     /// sonuç verirdi. Ölçek tek kaynaktan okunur ve piksel boyutu ondan
     /// çarpılır; `drawableSize` ile `contentsScale` ayrışırsa bulanıklık olur.
+    ///
+    /// **Ölçeğin iki kapısı** (`Surface::set_size`, `Renderer::cell_metrics`;
+    /// 003'ten beri borç) birleştirilmiyor: ikisinin tek çağıranı bu
+    /// fonksiyon, ölçek burada bir kez okunuyor ve ikisine aynı yerelden
+    /// gidiyor; font ayarı ölçeğe dokunmuyor
+    /// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 6).
+    ///
+    /// Font yuvası da burada, sonda yazılıyor: atlası (yeniden) kuran tek
+    /// yol `cell_metrics` ve font bildirimi ancak ondan sonra güncel. Ekran
+    /// değişimi atlası yeniden kursa da aile aynı, yuva oynamaz.
     fn sync_geometry(&self) -> Option<Grid> {
         let window = self.ivars().window.get()?;
         let view = window.contentView()?;
@@ -1375,7 +1416,9 @@ impl AppDelegate {
         // kuralı **yok**: eski `.round()` bloğu bilerek silindi. İki kural
         // yan yana dursaydı hangisinin kazandığı çağrı sırasına bağlanır ve
         // belirti bir piksellik hücre kayması, yani sessiz olurdu.
-        let cell = self.ivars().renderer.cell_metrics(scale);
+        let renderer = &self.ivars().renderer;
+        let cell = renderer.cell_metrics(scale);
+        self.post_notices(Source::Font, font_messages(renderer.font_notice()));
         Some(split_into_grid(width_px, height_px, cell))
     }
 }
