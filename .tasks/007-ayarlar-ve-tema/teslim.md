@@ -49,7 +49,7 @@ aralığında el değmedi (`git diff --stat 24dbd5f^ HEAD` bu yollarda boş).
   `toml_edit` ve geçişlileri) ve `867650c` (phase-7, `toml_edit`'in `display`
   feature'ı → `toml_writer`). İkisi de `discussion.md` → Karar'da kayıtlı
   kararın parçası.
-- **Ölçüm:** bu set sayı taşımıyor; iki iddia ölçüm bekliyor (B.3).
+- **Ölçüm:** bu set sayı taşımıyor; iki iddia bilinçli olarak ertelendi (B.3).
 
 ### Set kapısı
 
@@ -91,7 +91,7 @@ sonra), ardından `/audit`; düzeltmeler tek commit `ab60313`.
 - [x] Set kapısı — `/code-review` setin aralığında, `/audit` (aşağıda)
 - [x] `Cargo.lock` değişimi kayıtlı karar (`toml_edit`)
 - [~] `make shader` / `make terminfo` / `make kur` — koşulu doğmadı: girdileri el değmedi
-- [ ] `[elle]` bekleyen göz kontrolleri (B.2)
+- [~] `[elle]` göz kontrolleri (B.2) — yapıldı; ssh üstünden gerçek kopya uzak makine olmadığı için waive
 
 ## B. Yayın (doğrulamadan SONRA)
 
@@ -139,7 +139,22 @@ geçiş göz kontrolü); Yayın Etkisi'ne düşmemiş bir dış etkisi yok.
   `osc52 = "off"` kapatır. Bedeli: arka plandaki bir program panoyu
   değiştirebilir; dev bir kopya panoya yazılırken pencereyi durdurur.
 
-### B.2 Göz kontrolleri `[elle]` — bekliyor
+### B.2 Göz kontrolleri `[elle]` — yapıldı, bir yarım waive
+
+**2026-09-16, kullanıcı (Türkçe-QWERTY-PC):** Cmd-T hiçbir şey yapmadı;
+maddelerin kalanını denedi ve sorun bildirmedi. Bulunan tek şey kısayolun
+yeriydi: Settings… bu düzende Cmd-ö (macOS kısayolu düzene göre yerleştiriyor;
+`docs/AYARLAR.md` → Settings…). Settings… dosyayı editörde açtı, değiştirip
+kaydedince pencere anında güncellendi; bateri'nin içinde vim açıkken tema
+değişince ekran yeni temaya geçti. Madde 1, 2 ve 3 tamam; 2'nin US düzenli
+Cmd-= yarısı bu makinede sınanamaz.
+
+**Madde 4, yerel yarısı (2026-09-16, gerçek pencere, geçici `HOME`):**
+uygulama açıkken `osc52` `"copy"` → `"off"` → `"copy"` kaydedildi; kopya
+önce geldi, `"off"` iken gelmedi, geri açılınca geldi. Kullanıcının panosu
+kaydedilip geri yazıldı. **ssh yarısı waive:** uzak makine yok. ssh diziyi
+bayt olarak taşıyor; terminalin gördüğü `c` ve `p` dizileri gerçek pencerede
+sınandı (B.2'nin başı), fark taşıma katmanında değil.
 
 Yapılanlar phase dosyalarının notlarında (geçici `HOME`, System Events ile
 menü tıklaması, `screencapture`, OSC 52 için gerçek pencereden `pbpaste`
@@ -159,17 +174,24 @@ fare enjeksiyonu kullanıcının makinesinde başka uygulamaya düşebileceği i
    `clipboard=unnamed` ile `yy`) ya da tmux copy-mode → Mac'te `pbpaste`;
    uygulama açıkken `osc52 = "off"` kaydedip aynı kopyanın gelmediğini gör.
 
-### B.3 Ölçüm `[komut]` — bekliyor
+### B.3 Ölçüm `[komut]` — bu sette yapılmadı (kullanıcı kararı, 2026-09-16)
 
 `/measure` ile; sayı `docs/OLCUMLER.md`'ye işlenir, bu belge sayı taşımaz.
+İki iddia da **ölçülmedi** ve bu setin hiçbir yeri onların sonucuna dayanmıyor.
 
 1. **Tema kilidinin kare süresine etkisi** (phase-2): `frame()` her dolu
    karede temanın yaprak kilidini alıyor, link de ikinci kez
    (`session.theme()`); `BT_FRAME_STATS` + `BT_SCROLL_TEST`'in `cpu`
-   aralıkları, 006 tabanıyla karşılaştırma.
+   aralıkları. **Ertelendi:** karşılaştırılacak taban yok —
+   `docs/OLCUMLER.md` → Kare süresi "Ölçülmedi" (005'in bekleyen kare süresi
+   ailesi). Tek başına bir sayı bir şey söylemez; o aile ölçüldüğünde bu
+   değişiklik zaten içinde görünür.
 2. **Font değişiminde geçmişin yeniden sarılması** (phase-5): dolu 10 000
    satırlık geçmişte `Term` kilidi ana thread'de tutulurken reflow süresi.
-   Bugünkü kancalar bunu ölçmüyor; araç kararı `/measure`'ın.
+   **Ertelendi:** bugünkü kancalar bunu ölçmüyor, önce araç gerekiyor; font
+   nadir ve bilerek değiştirilen bir ayar ve göz kontrolünde (phase-5, vim
+   açıkken 13 → 20 punto) takılma görülmedi — o denemede geçmiş dolu değildi.
+   Takılma bildirilirse ya da performans seti açılırsa ölçülür.
 
 ### B.4 Bağımlılık ve borç kaydı `[oto]`
 
@@ -199,11 +221,12 @@ fare enjeksiyonu kullanıcının makinesinde başka uygulamaya düşebileceği i
 Bölüm A'yı yeniden koşturur, bu belgenin Yayın Checklist'ini damgalar ve
 push eder. B.2 ve B.3 push'u bekletmez: koşulmadıkları için kutuları
 işaretsiz kalır ve indeks "teslim bekliyor" der; ikisi de kapanınca set 🟢.
+(İkinci teslimde ikisi de gerekçesiyle `[~]` kapandı ve set 🟢 oldu.)
 
 ### Yayın Checklist
 
-- [ ] B.2 göz kontrolleri (dört madde) — kullanıcı
-- [ ] B.3 `/measure` (iki iddia) — kullanıcı isterse
+- [~] B.2 göz kontrolleri — 1–3 kullanıcı yaptı, 4'ün yerel yarısı gerçek pencerede sınandı (2026-09-16); ssh yarısı uzak makine olmadığı için waive
+- [~] B.3 `/measure` (iki iddia) — ertelendi: kare süresinin tabanı yok (005'in ailesine katıldı), reflow'un aracı yok ve takılma görülmedi (B.3)
 - [x] B.5 `/ship` — push öncesi `make hepsi`, `make test-yaris` ve `make duman`
       (`kare=2 hucre=8 glif=6 kural=15`) yeşil
 

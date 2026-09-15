@@ -41,6 +41,10 @@ anında izlenir. Settings…'in yarattığı dizin hemen izlenir.
 
 ### Settings…
 
+Kısayol ABD düzenli klavyede Cmd `,`. macOS menü kısayolunu klavye düzenine
+göre yerleştirir; Türkçe Q klavyede aynı tuş **Cmd `ö`**, menüde de öyle
+görünür. View ▸ Bigger da bu düzende `⌘:` görünür.
+
 bateri ▸ Settings… (Cmd ,) ayar dosyasını açar: önce `.toml` dosyalarını
 açan uygulamayla, o yoksa varsayılan metin editörüyle (çoğu makinede
 TextEdit).
