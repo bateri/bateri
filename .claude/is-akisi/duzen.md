@@ -67,25 +67,50 @@ Phase'ler tamsayı olmak zorunda değil: `phase-0`, `phase-1`, `phase-1b`,
 Bu yüzden sıralama **doğaldır, leksik değil**: `phase-2` < `phase-10` ve
 `phase-2` < `phase-2a` < `phase-2b`. "phase-1'den N'e say" varsayma, glob'la.
 
+**Ek phase eşiği.** Set yürürken çıkan iş, ancak kendi kılavuzunu hak
+ediyorsa phase olur: birden çok dosyaya yayılır, kendi doğrulaması ve yayın
+etkisi vardır. Tek commit'lik düzeltme (006 phase-4c: tek dosyada otuz satır)
+phase açmaz — doğrudan commit'lenir, `plan.md → ## Durum`'un altına tek satır
+not düşer.
+
 ## Durum
 
 Bir işin nerede kaldığının **birincil sinyali** `plan.md` içindeki `## Durum`
-tablosudur; `/implement` her phase sonunda oraya yazar ve çağrıldığında resume
-noktasını oradan okur.
+tablosudur; `/implement` resume noktasını oradan okur.
 
 | işaret | anlamı |
 |---|---|
 | `✅` | phase bitti, commit atıldı |
 | `⏳` | phase devam ediyor |
+| `[~] {gerekçe}` | yalnız `kapı` satırında: set kapısı bilerek atlandı |
 | (boş) | başlanmadı |
+
+Phase'in ✅'ü **kendi kod commit'inin içinde** girer; hash tabloya yazılmaz.
+Hash commit'ten önce bilinmediği için onu dosyaya yazmak her phase'e ikinci bir
+"defter" commit'i doğuruyordu (001–006'da 121 commit'in 57'si). Phase'in
+commit'i gövdedeki `{NNN-slug} phase-{N}` satırından bulunur (`proje.md` →
+Teslim). Tablonun son satırı `kapı`dır: set sonundaki kalite kapısının izi.
 
 Tablo diskte yaşadığı için oturum geçmişine ihtiyaç yoktur: `/clear` sonrası
 `/implement {iş}` kaldığı yerden devam eder.
 
+### Set aralığı
+
+Set sonundaki `/code-review` setin bütün commit'lerine bakar. Aralığın başı
+`.tasks/{NNN-slug}/`'a dokunan **ilk** commit'tir (set koddan önce
+commit'lendiyse o, değilse ilk phase'in commit'i):
+
+```sh
+first=$(git log --reverse --format=%h -- .tasks/{NNN-slug} | head -1)
+git diff --stat "$first^" HEAD
+```
+
 ## İndeks
 
 `.tasks/README.md` bütün işleri tek tabloda tutar. Klasör adı zaten sırayı
-verdiği için indeks yalnız **durum** ve **tek satırlık not** taşır:
+verdiği için indeks yalnız **durum** ve **tek cümlelik not** taşır — commit
+listesi, açık kalem dökümü ve tarihçe `teslim.md`'dedir. İndeksi her akış
+okur; paragraf büyüyen not her okumada bağlama biner:
 
 ```markdown
 # İşler

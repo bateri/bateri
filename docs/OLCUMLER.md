@@ -2,7 +2,7 @@
 
 Depodaki ölçülmüş sayıların **tek sahibi** bu dosyadır. Başka belge sayı
 kopyalamaz; niteliksel anlatır ve buraya bağlanır. Kuralın istisnaları kuralın
-sahibinde yazılı (`.claude/is-akisi/proje.md` → tuzaklar, `/audit` mercek 6).
+sahibinde yazılı (`/audit` → Ölçüm sahipliği).
 
 Ölçüm bir **kapı değildir** (`.claude/is-akisi/proje.md` → Doğrulama): gerçek
 pencere, sessiz makine ve dakikalar ister. Kullanıcı ister, `/measure` koşturur.

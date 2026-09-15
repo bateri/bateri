@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Değişiklikleri kalite kapısından geçirip commit'ler ve uzak depoya gönderir; iş setlerinin teslim.md checklist'ini ve .tasks indeksini damgalar. Kullanıcı "push et", "teslim et", "gönder", "commit'le ve yolla" dediğinde kullanılır.
+description: Değişiklikleri doğrulayıp commit'ler ve uzak depoya gönderir; iş setlerinin teslim.md checklist'ini ve .tasks indeksini push'tan önce aynı commit'te damgalar. Kullanıcı "push et", "teslim et", "gönder", "commit'le ve yolla" dediğinde kullanılır.
 allowed-tools: Read, Edit, Glob, Grep, Bash(make:*), Bash(cargo:*), Bash(git:*)
 ---
 
@@ -44,7 +44,9 @@ Dokunmadan önce keşfet:
   `[komut]`/`[elle]` maddeleri.
   teslim.md'si olmayan set "standart, manuel adım yok" sayılır.
 - Bir set **yarım görünüyorsa** (`plan.md ## Durum` tablosunda `✅` olmayan
-  phase var) bunu **açıkça uyar**: onun kısmi commit'leri de gidecek.
+  phase var) bunu **açıkça uyar**: onun kısmi commit'leri de gidecek. Phase'ler
+  bitmiş ama `kapı` satırı ✅ ya da gerekçeli `[~]` değilse set kapısı koşmamıştır
+  (`proje.md` → Kalite kapısı) — uyar ve kullanıcıya sor.
 
 **Özetle ve onay bekle.** Örnek: "Bu teslimle 2 iş gidiyor: 003-ek-fiil-indeksi
 (2 `[elle]` adımı bekliyor — ölçüm `docs/OLCUMLER.md`'ye işlenecek),
@@ -57,13 +59,21 @@ Dokunmadan önce keşfet:
 ekran kaydı) görürsen **uyar ve devam etme**. Commit'lemek yerine
 `.gitignore` öner. `Cargo.lock` bilinçli olarak depodadır, kirlilik değildir.
 
-## 4. Commit
+## 4. Set defteri ve commit
 
-Çalışma ağacı zaten temizse (`/implement` her şeyi commit'lemiş olabilir) bu
-adımı **atla** — boş commit üretme.
+**Damga push'tan önce, gidecek commit'e girer.** Push'tan sonra ayrı bir
+"damgala" commit'i atılmaz — o commit gönderilmemiş kalır ve bir sonraki
+teslimi bekler. Adım 2'de bulunan her set için:
 
-Değilse: dosyaları hazırla ve `proje.md`'deki commit kuralına göre mesaj yaz
-(Türkçe, emir kipinde, tek satırlık özet; gövdede ne değişti).
+- **teslim.md:** adım 1'de koşulan `[oto]` maddelerini `[x]` yap.
+  `[komut]`/`[elle]` maddeleri işaretsiz kalır — koşulmadılar.
+- **`.tasks/README.md`:** bekleyen manuel adım yoksa satırı **🟢** yap; varsa
+  "🔨 teslim bekliyor: {kalan adımlar}". Not tek cümledir (`duzen.md` → İndeks).
+
+Sonra commit: çalışma ağacı temizse (defter değişmediyse) atla — boş commit
+üretme. Değilse `proje.md`'deki kurala göre mesaj yaz (Türkçe, emir kipinde,
+tek satırlık özet). Push reddedilirse damga commit'i de onunla birlikte bekler;
+ayrı düzeltme gerekmez.
 
 `$ARGUMENTS` gerçek bir commit konusu gibi görünüyorsa (anlamlı bir cümle/öbek)
 onu kullan. Kısa bir onay sözcüğüyse ("yap", "go", "tamam") "kullanıcı onayladı,
@@ -88,15 +98,11 @@ sonrası doğrulama atlanırsa birleşmiş kod hiç test edilmemiş olur.
 Gönderilen commit'ler, değişen dosya sayısı, `Cargo.lock` oynadıysa hangi
 crate ve ölçüm değiştiyse yeni değer.
 
-## 7. Set defteri — adım 2'de bulunan HER set için
+## 7. Kalan dilim
 
-- **teslim.md'yi damgala:** az önce koşulan `[oto]` maddelerini `[x]` yap.
-  `[komut]`/`[elle]` maddeleri işaretsiz kalır — koşulmadılar.
-- **`.tasks/README.md`'yi güncelle:** setin bekleyen manuel adımı yoksa
-  satırını **🟢 bitti** yap ve notu güncelle. Bekleyen adım varsa notu
-  "🔨 teslim bekliyor: {kalan adımlar}" yap — gerçekten bitmeden 🟢 verme.
 - **Kalan dilimi bitirmeyi teklif et:** "İstersen kalan adımları birlikte
   yürütelim — `[komut]` adımlarını tek tek onaylatarak ben koşarım, `[elle]`
   adımlarında ne yapılacağını tarif ederim, sen tamamlayınca doğrulamayı
   koştururum." Kabul edilirse teslim.md sırasını izle, tamamlanan her maddeyi
-  `[x]` yap ve checklist bitince README satırını 🟢'ye çevir.
+  `[x]` yap ve checklist bitince README satırını 🟢'ye çevir; bu işaretler bir
+  sonraki teslimin commit'ine girer, kendi başına commit doğurmaz.

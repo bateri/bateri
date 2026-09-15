@@ -6,6 +6,7 @@
       "Bash(make test)",
       "Bash(make clippy)",
       "Bash(make fmt)",
+      "Bash(make denetim)",
       "Bash(make shader)",
       "Bash(make terminfo)",
       "Bash(make test-yaris)",

@@ -8,7 +8,7 @@
 
 ## Seçenek A: {İsim}
 
-{Kısa açıklama + kod örneği}
+{Kısa açıklama; kod örneği yalnız seçenekleri ayıran şey koddaysa, birkaç satır}
 
 **Artıları:**
 -

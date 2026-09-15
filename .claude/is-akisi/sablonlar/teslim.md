@@ -30,7 +30,7 @@ tek crate sınamaları.}
 {Phase'lerin `## Yayın Etkisi` bloklarından derlenir. Her adım bir şeritle
 etiketlenir:}
 
-- **`[oto]`** — `/ship` kapsıyor (kalite kapısı + commit + `main`'e push).
+- **`[oto]`** — `/ship` kapsıyor (doğrulama + commit + `main`'e push).
 - **`[komut]`** — kopyasız çalıştırılabilir CLI bloğu (`tic -x assets/terminfo/bateri.terminfo`,
   `make kur`) ya da kullanıcının tetiklediği bir skill (`/measure` — ölçüm
   bekleyen iddialar).

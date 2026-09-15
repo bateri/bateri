@@ -36,10 +36,13 @@ değiştiriyorsa açık oturumların durumu. Yoksa bölümü sil.}
 
 ## Durum
 
-<!-- Phase ilerleme defteri. `/implement` her phase bitince günceller ve
-     çağrıldığında resume noktasını BURADAN okur.
+<!-- Phase ilerleme defteri. `/implement` phase'in ✅'ünü kod commit'inin
+     İÇİNDE yazar ve resume noktasını BURADAN okur. Hash yazılmaz: commit
+     gövdedeki `{NNN-slug} phase-{N}` satırından bulunur.
+     `kapı` satırı set sonundaki kalite kapısıdır (`[~]` + gerekçe olabilir).
      ✅ bitti · ⏳ devam · (boş) başlanmadı -->
 
-| Phase | Durum | Commit |
-|-------|-------|--------|
-| phase-1 | | |
+| Phase | Durum |
+|-------|-------|
+| phase-1 | |
+| kapı | |

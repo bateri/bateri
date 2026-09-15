@@ -84,16 +84,24 @@ tekrarlamaz. plan.md setin **omurgasıdır** ve çift rol taşır: onaylı tasar
 ## 9. Phase dosyaları
 
 Kullanıcı planı onaylayıp "phase'e geç" dediğinde `phase-1.md` üret, gerekirse
-`phase-2.md`... Her phase: değişecek dosyalar, kod örnekleri, `## Uygulama
-Notları`, `## Yayın Etkisi`, checklist.
+`phase-2.md`... Her phase: değişecek dosyalar, kabul ölçütü, `## Yayın
+Etkisi`, checklist.
 
-> Phase dosyaları kodun birebir kılavuzudur. Checklist maddeleri ve kalite
-> kapısı **kodlama adımında** uygulanır; bu skill onları çalıştırmaz, yalnız
-> kılavuza yazar. Yürüten `/implement`'tir.
+> Phase dosyası kodun **kılavuzudur, kopyası değil**: kod örneği yazılmaz,
+> hedef 3–5 KB (şablonun başındaki not). 001–006'nın phase dosyaları kod
+> örnekleriyle 15–39 KB'a çıktı; `.tasks/` toplamı üretilen kodu geçti ve
+> her implementer o metni bağlamında taşıdı. Bir imza ya da alan sırası
+> sözleşmeyse adıyla tek satır yeter, gövdesini implementer yazar.
+> Checklist'i ve kapıyı **kodlama adımı** uygular; bu skill yalnız yazar.
 
 Phase bölmenin ölçüsü: her phase **tek başına doğrulanabilir** olmalı
 (`make hepsi` yeşil bırakmalı) ve tek commit'e sığmalı. Doğrulanamayan bir
-ara durum bırakan bölme yanlıştır — ya birleştir ya da sınırı kaydır.
+ara durum bırakan bölme yanlıştır — ya birleştir ya da sınırı kaydır. Tersine,
+tek commit'lik düzeltme phase olmaz (`duzen.md` → Ek phase eşiği).
+
+Riskli phase kutusunu (`proje.md` → Kalite kapısı) yalnız koşulu tetikleyecek
+phase'e koy; set sonundaki kapı `plan.md → ## Durum`'un `kapı` satırıdır,
+phase checklist'lerine yazılmaz.
 
 Her phase'in `_Requirements:_` satırı plan.md'deki gereksinimlere bağlanır;
 `/implement` ön uçuşta kapsanmayan gereksinim / öksüz phase arar.

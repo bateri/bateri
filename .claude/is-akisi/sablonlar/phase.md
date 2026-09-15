@@ -1,48 +1,44 @@
 # Phase {N} — {Başlık}
 
+<!-- Hedef boyut: 3–5 KB. Phase dosyası kodun KILAVUZUDUR, kopyası değil:
+     ne değişecek, neden, hangi sınır korunacak, nasıl doğrulanacak. Kod
+     örneği yazılmaz; bir imza, tip adı ya da `#[repr(C)]` alan sırası
+     sözleşmeyse tek satırla adı geçer. Gerekçe tartışması discussion.md'de,
+     tarihçe teslim.md'dedir — burada tekrarlanmaz. -->
+
 ## Özet
 
 {Bu fazda ne yapılacak — tek cümle}
 
 _Requirements: R1, R2.1_
 
----
+## Değişiklikler
 
-## 1. {Değişiklik Başlığı}
+- **`crates/{crate}/src/{dosya}.rs`** — {ne değişir; korunacak sınır ya da
+  sözleşme varsa o}
 
-`crates/{crate}/src/{dosya}.rs`
+## Kabul
 
-{Açıklama + kod örneği. Shader değişiyorsa `.metal` ve Rust `#[repr(C)]`
-karşılığı yan yana verilir.}
-
----
+- {Doğrulanabilir sonuç: hangi sınama, hangi jeton, hangi davranış}
 
 ## Uygulama Notları
 
-{Kod yazılırken ilk varsayımdan SAPAN her şey: API davranışı, ölçüm sonucu,
-beklenmeyen etkileşim, bir TUI'nin gönderdiği beklenmedik dizi. Bu bölüm
-teslim.md'nin ve sonraki okuyucunun referansıdır — çelişki çıkarsa Yayın
-Etkisi'ne değil BURAYA güvenilir.}
+<!-- Kodlanırken doldurulur. YALNIZ ilk varsayımdan sapan şey, madde başına
+     bir-iki satır. Çelişki çıkarsa teslim.md Yayın Etkisi'ne değil BURAYA
+     güvenir. Sapma yoksa bölümü sil. -->
 
 ## Yayın Etkisi
 
-{Bu phase'in kullanıcı makinesindeki duruma ve belgelere etkisi — yoksa "yok"
-yaz. Aranacak başlıklar `.claude/is-akisi/proje.md` → "Yayın etkisi"
-bölümündedir (shader, terminfo, ayar şeması, tema biçimi, shell üçlüsü, app
-bundle, ölçüm bekleyen iddia, belge, yeni bağımlılık).}
-
----
+{Aranacak başlıklar `proje.md` → "Yayın etkisi"; hiçbiri yoksa "yok".}
 
 ## Checklist
 
 <!-- [x] yapıldı · [~] waive/atlandı (yanına gerekçe) · [ ] yapılmadı.
-     Kutular silinmez — koşmayan kapının kutusu da dosyada kalır. -->
+     Kutular silinmez. Riskli phase kutusu yalnız proje.md → Kalite kapısı →
+     "Riskli phase" koşulu tetiklenirse kalır; tetiklenmiyorsa üretirken sil. -->
 
 - [ ] {Yapılacak iş}
 - [ ] Test: {test senaryosu}
-- [ ] Doğrulama geçti (`proje.md` → Doğrulama; bu depoda `make hepsi` + koşullu komutlar)
-- [ ] `/simplify` çalıştırıldı, bulgular uygulandı
-- [ ] `/code-review` çalıştırıldı, bulgular giderildi
-- [ ] `/audit` çalıştırıldı, bulgular giderildi
-- [ ] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- [ ] Commit: {hash}
+- [ ] Doğrulama geçti (`make hepsi` + koşullu komutlar)
+- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [ ] Yayın etkisi yazıldı

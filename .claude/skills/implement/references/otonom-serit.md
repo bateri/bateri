@@ -1,201 +1,162 @@
 # Otonom şerit (`--auto`) ve model katmanlaması
 
 `/implement`'in bu dosyaya iki yerden ihtiyacı olur: kullanıcı `--auto`
-verdiğinde (otonom şerit) ve kalite kapısında subagent fan-out'u koşarken
-(model katmanlaması).
+verdiğinde (otonom şerit) ve bir subagent başlatırken (ajan kuralları, model
+katmanlaması).
+
+## Ajan kuralları — her subagent isteminde
+
+Bu kurallar implementer'ın, kapı ajanının ve kapanış ajanının isteminde
+**her seferinde** yazılır; subagent bu dosyayı okumaz, istemi okur.
+
+- **Boşta bekleme yok.** `sleep`, `until [ -f … ]`, `while …; sleep` ve
+  "hâlâ koşuyor mu" diye tekrar tekrar `echo`/`date` koşmak yasak. Her bekleme
+  turu ajanın bütün bağlamını yeniden okutur: 004 phase-3'ün implementer'ı 929
+  `echo tick` turu attı ve harcamasının büyük kısmı bekleme oldu.
+- **Kapıyı ve alt ajanı ön planda koştur.** `Skill` çağrısı zaten senkrondur.
+  Uzun komut (`make hepsi`, `make kur`) ön planda ve `timeout`'la koşar. Arka
+  plana alınmış iş bitince harness ajanı zaten uyandırır; yoklamaya gerek yoktur.
+- **Yalnız kendi başlattığın süreci kapat.** `pkill`/`killall bateri` yasak:
+  kullanıcı aynı anda kendi `bateri` örneğini açık tutuyor olabilir.
+- **Arkada kalanı bildir.** Raporun `ARTIK:` alanı açık kalan süreç, shell ya
+  da geçici dosyayı yazar; boş değilse orkestratör kapanıştan önce temizler ya
+  da kullanıcıya söyler.
+
+**Önbellek ön koşulu.** Uzun koşan ajan (implementer, kapı) prompt
+önbelleğinin çalıştığı yoldan koşmalı. 006 phase-1 ve phase-2'nin
+implementer'ları proxy'li bir oturumdan açıldı (`toolUseId` `toolu_` değil
+`call_` ile başlıyor), kayıtta `cache_read` sıfır ve her tur bütün bağlamı tam
+fiyattan okudu. Belirti oturum dökümündedir
+(`~/.claude/projects/…/subagents/*.jsonl` → `usage.cache_read_input_tokens`);
+şüphede otonom şeride girmeden önce sor.
 
 ## Otonom şerit
 
 Kullanıcı süreci komple devretti: plan onaylandı, phase'ler ardışık ve
 kendiliğinden yürütülür. Döngünün adımları aynı kalır; değişenler şunlardır.
 
-### 0. Ön uçuş orkestratöre girmez
+### 0. Ön uçuş
 
-Adım 0 bütün phase dosyalarını okutur (yükleme, sıralama, traceability).
-Otonom şeritte bu okuma **orkestratöre girmez**: 0.1–0.3 bir subagent'a
-devredilir ve dönen şey ihlal listesidir — kapsanmayan gereksinim,
-`_Requirements:_` satırı olmayan phase, doğal sıralamadaki sürpriz. Liste
-boşsa orkestratör dosyaların adlarından fazlasını bilmez.
-
-Resume noktası (0.4) orkestratörün kendi okumasıdır ve tek satırdır:
-`plan.md → ## Durum`.
+Traceability (0.3) phase dosyası açtırmaz: gereksinim listesi ve phase'lerin
+`_Requirements:_` satırları grep'le okunur
+(`grep -n "_Requirements:" .tasks/{set}/phase-*.md`). Resume noktası (0.4)
+`plan.md → ## Durum`'dur.
 
 ### 1. Orkestratör hafızasızdır
 
-Ana döngü **orkestratördür, kodu yazmaz** — ve kendi bağlamını da
-biriktirmez. Otonom şeridin bütün kazancı buna bağlıdır: taze bağlam
-`/clear` ile değil, **işin subagent'ta yaşamasıyla** sağlanır. Subagent'ın
-okudukları, koşturduğu komutlar ve ara adımları orkestratöre dönmez; dönen
-tek şey final rapordur. Korunması gereken şey bu yüzden subagent'ın işi
-değil, **orkestratörün kendi okumalarıdır**.
+Ana döngü **orkestratördür, kodu yazmaz** ve kendi bağlamını biriktirmez.
+Taze bağlam işin subagent'ta yaşamasıyla sağlanır: subagent'ın okudukları ve
+ara adımları orkestratöre dönmez, dönen tek şey raporudur.
 
 | orkestratör okur | okumaz |
 |---|---|
 | `plan.md → ## Durum` (resume noktası) | phase dosyalarının gövdesi |
-| implementer raporları (§3) | `git diff`'in gövdesi (§4 yalnız `--stat`) |
-| sapma anında `plan.md` → Yaklaşım/Gereksinimler | doğrulama komutlarının tam çıktısı |
-| | kapı bulgularının gövdesi |
+| ajan raporları (§3) | `git diff`'in gövdesi (yalnız `--stat`) |
+| sapma anında `plan.md` → Yaklaşım/Gereksinimler | doğrulama çıktısı, kapı bulgularının gövdesi |
 
-Kural tek cümledir: **orkestratörün bağlamı phase sayısıyla değil sapma
-sayısıyla büyür.** 011'in dört phase dosyası 1.478 satırdır; orkestratör
-onları okusaydı, kararı hiç gerekmeyen ayrıntıyı setin sonuna kadar taşırdı.
+Kural: **orkestratörün bağlamı phase sayısıyla değil sapma sayısıyla büyür.**
+Bunun bedeli tek yükümlülüktür: raporun taşıdığı bir karar bir dosyaya
+düşmediyse kaybolmuştur, orkestratör onu sonraki turda hatırlamaz.
 
-Hafızasızlığın bedelsiz olması `duzen.md` → Durum'a dayanır: hatırlanması
-gereken her şey zaten diskte yaşar. Buradan tek bir ek yükümlülük doğar ve
-otonom şeridin en kolay unutulan kuralı budur: **raporun taşıdığı bir bilgi,
-karar verildikten sonra bir dosyaya düşmediyse kaybolmuştur.** Orkestratör
-onu bir sonraki turda hatırlamayacaktır.
+**Bir oturum, bir set.** Hafızasızlık oturumu da kapsar: set bitince devir
+mesajı kullanıcıya `/clear` önerir ve aynı oturumda ikinci bir sete
+başlanmaz. 001–006 tek oturumda koştu; orkestratörün bağlamı ortalama 330K'da
+dolaştı ve 22 kez compact'landı — dosyalardaki kanonik kayıtla yarışan kayıplı
+özetler.
 
 ### 2. Yürütme: phase başına taze implementer
 
-Her phase için bir implementer subagent başlat. Ona **dosya yollarını ver,
-içeriğini değil** (`plan.md` + o phase dosyası; ikisini kendisi okur).
+Her phase için bir implementer başlat. Ona **dosya yollarını ver, içeriğini
+değil** (`plan.md` + o phase dosyası) ve istemine ajan kurallarını yaz.
 
-Kalite kapısını da **implementer koşturur**. Bu, insan-döngüdeki adım 5'in
-("kapıyı sen koşturursun") otonom şeritteki karşılığıdır ve sebebi yine
-bağlamdır: kapının fan-out'ları zaten taze ve bağımsız agent'lardır, ama
-bulguların **gövdesi** orkestratörde koşsaydı orkestratörün bağlamına
-girerdi. Kapının iniş sırası `proje.md` → "Kapıyı kim koşturur".
+İmplementer kodu yazar, doğrulamayı koşar (`proje.md` → Doğrulama) ve phase'i
+**tek commit**'le kapatır: kod + checklist + `## Durum` ✅. Phase riskliyse
+(`proje.md` → Kalite kapısı) `/code-review`'u da o koşturur ve doğrulamayı
+**kapıdan sonra yeniden** koşar — kapı kodu değiştirir, önceki yeşil geçersizdir.
 
-Devredilmeyen tek şey **bulgu kararıdır**: implementer gideremediği ya da
-kapsam dışı bulduğu bulguyu raporun `WAIVE` alanına yazar, kabul kararını
-orkestratör verir (model katmanlaması tablosunun son satırı).
+Devredilmeyen tek şey **bulgu kararıdır**: implementer gideremediği bulguyu
+`WAIVE` alanına yazar, kabulü orkestratör verir.
 
-**Doğrulama kapıdan sonra yeniden koşar.** Kapı kodu değiştirir, dolayısıyla
-kapıdan önceki yeşil ölçüm geçersizdir. Kaynak projede (odunluk, 012 phase-2) `/code-review`'un
-düzeltmesi türetilmiş bir dosyayı kırmış ve kusuru `/ship` yakalamıştı — **otonom şeritte `/ship` koşmaz**, o yüzden
-raporun `DOĞRULAMA` alanı kapı sonrası koşuyu bildirir.
-
-**Phase'ler arası devir iki yönlüdür ve hedef dosyaya yazılır.** İmplementer
-bir işi başka phase'e devrediyorsa satırı **hedef phase dosyasının
-checklist'ine** o yazar; devraldığı iş varsa raporun `DEVRALINAN` alanı
-taşır. Yazılmazsa devir yalnız raporda kalır ve §1 gereği buharlaşır: 011'de
-`Stem` yüzeyi phase-4'ten phase-3'e alınmıştı, hedefe yazılmasaydı phase-4'ün
-implementer'ı işi yapılmış bulur, sadakat kontrolü de onu eksik sanardı.
+**Phase'ler arası devir hedef dosyaya yazılır.** İmplementer bir işi başka
+phase'e devrediyorsa satırı hedef phase'in checklist'ine o yazar; yazılmazsa
+devir yalnız raporda kalır ve §1 gereği buharlaşır.
 
 ### 3. Rapor sözleşmesi
 
-Dönen rapor **sabit biçimlidir ve on beş satırı geçmez**. Serbest anlatı iki
-şeyi birden bozar: orkestratörün bağlamını taşır ve koşullu kapının (§5)
-şartlarını raporun içinde görünmez kılar. Anlatma, bildir.
+Rapor **sabit biçimlidir ve on iki satırı geçmez**. Anlatma, bildir.
 
 ```
 DURUM:      tamam | eskalasyon
-COMMIT:     {kod hash} [+ {durum hash}]
+COMMIT:     {hash}
 DOĞRULAMA:  make hepsi → exit {kod} · {koşullu komut} → exit {kod} | gerekmedi ({neden})
             git status → temiz | Cargo.lock değişti ({karar kaydında} | KUSUR)
-KAPI:       /simplify · /code-review · /audit → koştu | [~] {gerekçe}
+KAPI:       /code-review → koştu (riskli: {neden}) | gerekmedi | [~] {gerekçe}
 WAIVE:      {giderilemeyen bulgu, tek satır; gövdesi phase dosyasında} | yok
 SAPMA:      {plan varsayımından sapan her şey} | yok
 DEVRALINAN: {iş} ← phase-M | yok
 DEVREDİLEN: {iş} → phase-N (hedef checklist'e yazıldı) | yok
+ARTIK:      {arkada kalan süreç/shell/dosya} | yok
 ```
 
-`DOĞRULAMA`'nın koşullu komutları `proje.md`'de tanımlıdır (`make shader`,
-`make terminfo`, `make test-yaris`, `make duman`); "gerekmedi" bir cevaptır, boş bırakmak
-değildir — orkestratör diff okumadığı için koşulun tetiklenip
-tetiklenmediğini başka yerden göremez.
+"gerekmedi" bir cevaptır, boş bırakmak değildir: orkestratör diff okumadığı
+için koşullu komutun tetiklenip tetiklenmediğini başka yerden göremez.
+Doğrulama düştüğünde `DURUM: eskalasyon` olur ve fail satırları rapora girer.
 
-`WAIVE` ile `KAPI`'nın `[~]`'si karıştırılmaz: ilki bir *bulgunun*
-waive'idir, ikincisi *kapının* atlanmasıdır (`proje.md` → İz).
+### 4. Koşullu kapı
 
-Doğrulama düştüğünde `DURUM: eskalasyon` olur ve **fail satırları rapora
-girer**; geçtiğinde satır bir iddiadır ve kontrol edilebilirliği §4'e
-dayanır. "Testler geçti" cümlesi hiçbir durumda alanın yerini tutmaz.
+Adım 7'nin insan onayı yerine, şunlar **birlikte** sağlanınca sonraki phase'e
+otomatik geç:
 
-### 4. Sadakat: ucuz kontrol, ölçülmüş karar
+1. `DOĞRULAMA` yeşil (riskli phase'de kapı sonrası koşu, koşullu komutlar dahil)
+2. `KAPI` koştu ya da gerekmedi; `WAIVE` varsa onaylandı
+3. `git show --stat {COMMIT}` listesinde `plan.md` var — ✅ aynı commit'e girmiş
 
-Rapor kendini denetleyemez: checklist'i işaretleyen ile işi yapan aynı
-subagent'tır. Koşan kapıların hiçbiri bu boşluğu kapatmaz — `make hepsi`
-"kod çalışıyor mu" der, `/simplify` ve `/code-review` phase dosyasını **hiç
-görmez**, `/audit` projeye özgü kurallara bakar, kapanıştaki eksik-checklist
-taraması (adım 8) kutunun *işaretini* sayar, doğruluğunu değil.
+Kontrol raporun alanlarından ve tek bir `--stat`'tan okunur. Ayrı bir sadakat
+kontrolü (commit'in dosya listesini checklist'le karşılaştırmak) 001–006'da
+17 phase'de 17 kez "makas yok" döndü ve kendi kuralı gereği kaldırıldı.
 
-Kontrol orkestratördedir ve ucuzdur: `git show --stat {commit}` çıktısını
-phase'in checklist'iyle karşılaştır. Dosya listesi bir avuç satırdır ve
-diff'in gövdesi okunmaz, yani §1 delinmez. Aynı çıktı koşullu kapının
-dördüncü şartını da kanıtlar: `plan.md` listede yoksa `## Durum`
-yazılmamıştır (ayrı commit'e düştüyse `COMMIT` iki hash taşır).
+### 5. Set kapısı (kapanışta, bir kez)
 
-Makas çıkarsa **aynı implementer'a geri dön** — bağlamı hâlâ ayakta, phase'i
-yeniden anlatmak gerekmez. Geri sarma refleksi yanlıştır ve tuzağı somuttur:
-`/rfc` seti commit'lemez, phase dosyaları çoğu sette ilk kez o phase'in kod
-commit'iyle depoya girer (011'in dördü birden `ead9d66` ile), yani
-`reset --hard {commit}~1` kılavuzun kendisini çalışma ağacından siler.
-(`/akis` ile koşulan işte set koddan önce commit'lenir ve tuzak orada
-kapanır; gerekçesi o skill'in §2'sindedir.)
-
-**Ayrı bir denetçi subagent kurulmadı ve bu bilinçlidir.** Gerekçesi
-ölçülmemişti; bu depoda ölçülmemiş mekanizma kurulmaz, üstelik devir doğru
-yazılmadığında ilk işi yanlış pozitif üretmek olurdu. Ölçüm bu adımın
-kendisidir ve kontrol **koştuğunda her hâlükârda iz bırakır**: phase'in
-`## Uygulama Notları`'na tek satır düşer — `sadakat: makas yok` ya da
-`sadakat: {ne eksikti}`. Satırın yokluğu sıfır makas değil, koşmamış kontrol
-demektir; ikisi ayrışmasaydı iki set sonraki sayım boş kümeyle temiz kümeyi
-aynı görürdü. O sayım sıfır çıkarsa kontrol de kalkar; dolu çıkarsa ayrı bir
-denetçinin gerekçesi kanıtlanmış olur ve dar soruyla kurulur.
-
-### 5. İnsan kapısı → koşullu kapı
-
-Adım 7'nin insan onayı yerine, şunlar **birlikte** sağlanınca sonraki
-phase'e otomatik geç:
-
-1. Doğrulama yeşil — `DOĞRULAMA` (kapı sonrası koşu, koşullu komutlar dahil)
-2. Kapı koştu; bulgu giderildi ya da waive'i onaylandı — `KAPI` + `WAIVE`
-3. Sadakat kontrolü makassız (§4)
-4. Commit atıldı ve `## Durum` güncellendi — `COMMIT` + §4'ün `--stat`'ı
-
-Şartlar raporun alanlarından ve tek bir `--stat` çıktısından okunur: kapı,
-orkestratöre phase dosyası ya da diff gövdesi açtırmaz. Açtırsaydı §1 her
-phase'de bir kez delinirdi.
-
-İzlenebilirlik disiplini aynen sürer: kullanıcı `git log` + Durum
-tablosundan her an denetleyebilir.
+Son phase'den sonra, `teslim.md` derlenmeden önce **tek bir kapı ajanı**
+başlat: `proje.md` → Kalite kapısı → "Set sonunda" adımlarını koşar
+(aralık `duzen.md` → Set aralığı), bulguları giderir, `make hepsi`'yi yeniden
+koşar, düzeltme varsa tek commit atar ve `## Durum`'un `kapı` satırını aynı
+commit'te ✅ yapar. Rapor biçimi §3'tür (`KAPI:` satırı
+`/code-review · /audit → koştu`). Bulgu gövdesi orkestratöre girmez; `WAIVE`
+kararı orkestratörde kalır.
 
 ### Eskalasyon — şunlarda DUR ve sor, tahmin etme
 
-- Planı geçersiz kılan sapma. (Küçük sapma → `## Uygulama Notları`'na yaz,
-  devam. `plan.md`'nin Yaklaşım/Gereksinimler'ini değiştiren sapma → dur.)
-  Ayrımı raporun `SAPMA` alanı taşır; kararı vermek için `plan.md` **o an**
-  okunur — §1'in tablosundaki tek koşullu okuma budur.
+- Planı geçersiz kılan sapma. (Küçük sapma → `## Uygulama Notları`, devam.
+  `plan.md`'nin Yaklaşım/Gereksinimler'ini değiştiren sapma → dur; kararı
+  vermek için `plan.md` **o an** okunur.)
 - Üç denemede geçmeyen test.
-- `/code-review`'un giderilemeyen, waive de edilemeyen bulgusu.
-- Reddedilen `WAIVE` önerisi: bulgu ne giderildi ne kabul edildi, karar
-  kullanıcınındır.
-- Aynı phase'de ikinci sadakat makası.
+- Giderilemeyen ve waive de edilemeyen `/code-review` bulgusu; reddedilen `WAIVE`.
 - Yayın etkili sürpriz: beklenmeyen `Cargo.lock` değişimi, yeni bağımlılık
   ihtiyacı, ayar şeması / `TERM` / shell entegrasyonu etkisi.
-- Beklenmeyen ölçüm gerilemesi ya da boşta frame üreten bir yol. (Bir
-  efekti bilinçli sadeleştiren düzeltme gerileme olmayabilir — ama bu kararı
-  ana döngü vermez.)
-- Phase dosyası dışına taşan kapsam ihtiyacı.
+- Beklenmeyen ölçüm gerilemesi ya da boşta kare üreten bir yol.
+- Phase dosyası dışına taşan kapsam ihtiyacı. (Tek commit'lik ek iş phase
+  açmaz, `duzen.md` → Ek phase eşiği.)
 
 Eskalasyonda durumu özetle (hangi phase, ne bulundu, seçenekler + önerin) ve
 bekle. Yarıda kalan `--auto` koşusu aynı komutla kaldığı yerden devam eder.
 
 **Bitiş:** Kapanış adımları aynen koşar; teslim/push otonom şeritte de
-kullanıcıda kalır.
+kullanıcıda kalır. Devir mesajı `/ship` ve `/clear` önerir.
 
 ## Model katmanlaması
 
 İlke: *cevabı bulmak zorsa ucuz model çok yer gezsin; cevabı görmek zorsa güçlü
-model dar bağlamda düşünsün.* Redundant katmanlar (çok açı + sweep birbirini
-telafi eder) ucuzlayabilir; **tek-oy karar noktaları güçlü kalır**. Agent
-çağrılarında `model:` (gerekirse `effort:`) açıkça geç.
+model dar bağlamda düşünsün.* Tek-oy karar noktaları güçlü kalır. Agent
+çağrılarında `model:` açıkça geç.
 
 | Katman | Model | Neden |
 |---|---|---|
 | Okuma/haritalama/grep fan-out'ları | `sonnet` | çıkarım az, aktarım çok |
-| `/simplify` — reuse + simplification mercekleri | `sonnet` | mekanik karşılaştırma |
-| `/simplify` — efficiency + altitude mercekleri | `opus` | yargı içerir |
-| `/code-review` FIND — mekanik açılar (satır tarama, konvansiyon, cross-file trace) | `sonnet` | fan-out genişliği telafi eder |
-| `/code-review` FIND — semantik açılar (eşzamanlılık, hata politikası, dil tuzağı) | `opus` | derin muhakeme |
-| `/code-review` VERIFY | `opus` (+ `effort: 'high'`) | **tek oy karar verir**; yanlış REFUTED gerçek bug'ı öldürür |
-| `/code-review` SWEEP | `opus` | boşluk bulmak yargı ister |
+| `/code-review` FIND — mekanik açılar | `sonnet` | fan-out genişliği telafi eder |
+| `/code-review` FIND — semantik açılar, VERIFY, SWEEP | `opus` | tek oy karar verir |
 | `/plan-review` jürileri | `opus` | mercek başına tek ses |
-| `/audit` — mekanik mercekler (katman, `Cargo.lock`, panik yolu, ayar şeması, shell üçlüsü, ölçüm sahipliği) | ajansız | grep, `cargo tree` ve dosya varlığı |
-| `/audit` — yargı mercekleri (thread/blokaj, boşta sıfır kare, hücre boyutu ve shader düzeni, üslup) | `opus` | dosyalar arası akıl yürütme |
-| `/akis` — keşif ve tasarım aşamaları | `opus` | tasarım kararı üretir |
-| Otonom şerit — ön uçuş devri (§0) | `sonnet` | okuma ve eşleştirme, yargı az |
-| Otonom şerit — implementer subagent | `opus` | phase'i kodlar, kapıyı da o koşturur |
+| `/audit` yargı mercekleri (fan-out olursa) | `opus` | dosyalar arası akıl yürütme |
+| `/akis` — `/rfc` ajanı | `opus` | tasarım kararı üretir |
+| Otonom şerit — implementer, set kapısı ajanı | `opus` | kodlar, kapıyı koşturur |
 | Sentez, bulgu değerlendirme, "hangi sapma kabul" | ana döngü | devredilmez |

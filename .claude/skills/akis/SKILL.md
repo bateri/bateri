@@ -80,6 +80,12 @@ girerse iki iş tek commit'e karışır.
 `/implement {NNN-slug} --auto`. O noktadan sonra döngünün sahibi otonom
 şerittir; sürücü yalnız eskalasyonları karşılar ve kapanış özetini alır.
 
+Başlatılan her subagent'ın (`/rfc` ajanı dahil) istemine otonom şeridin
+**Ajan kuralları** yazılır ve önbellek ön koşulu orada okunur.
+
+**Bir oturum, bir akış.** Aynı oturumda ikinci bir `/akis` başlatma; set
+bitince devir `/clear` önerir (gerekçe otonom şerit §1).
+
 ## Eskalasyon — şunlarda DUR ve sor
 
 Uygulama tarafının listesi otonom şerittedir. Sürücünün kendi listesi:
@@ -103,4 +109,4 @@ bekle.
 
 Kapanışta: set yolu, phase commit'leri, kayda değer sapmalar, waive'ler ve
 ölçüm bekleyen iddialar. Net yönlendirme: **"Teslim için `/ship {NNN-slug}`
-çalıştır"** — akış push etmez.
+çalıştır; sonraki iş için `/clear`"** — akış push etmez.

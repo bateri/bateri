@@ -1,150 +1,84 @@
 ---
 name: audit
-description: Değişen kodu bateri'ye özgü mercekler için denetler — katman yönü ve bt-core'un platformsuzluğu, PTY/ayrıştırma yolunda panik, boşta sıfır kare ve animasyon durma koşulu, hücre boyutu ve shader/Rust düzen uyumu, ayar şeması, shell entegrasyon üçlüsü, yeni bağımlılık, ölçüm sahipliği. Kullanıcı "denetle", "kurallara uyuyor mu", "mimari bozuldu mu" dediğinde ve /implement'in kalite kapısında /simplify ve /code-review'dan SONRA koşar. Genel hata avı değildir.
+description: Değişen kodu bateri'ye özgü mercekler için denetler — make denetim'in mekanik yarısının üstüne bağımlılık kararının kaydı, ayar şeması, ölçüm sahipliği, thread/blokaj, boşta sıfır kare ve animasyon durma koşulu, hücre boyutu ve shader/Rust düzen uyumu, belge ve dil kuralı. Kullanıcı "denetle", "kurallara uyuyor mu", "mimari bozuldu mu" dediğinde ve /implement'in set sonundaki kalite kapısında /code-review'dan SONRA koşar. Genel hata avı değildir.
 allowed-tools: Read, Glob, Grep, Agent, Bash(git:*), Bash(cargo:*), Bash(make:*), Bash(ls:*), Bash(grep:*)
 ---
 
-Değişen kodu **bu depoya özgü** kurallar için denetle.
-
-Sınır nettir: `/simplify` genel kod kalitesine bakar (reuse, sadeleştirme,
-verimlilik), `/code-review` hata avlar. **İkisi de projeye özgü kural
-okumaz.** Bu skill yalnız o boşluğa bakar — genel bug ya da stil arama, o
-işler yapıldı.
+Değişen kodu **bu depoya özgü** kurallar için denetle. `/code-review` hata
+avlar ve projeye özgü kural okumaz; bu skill yalnız o boşluğa bakar.
 
 Kuralların gerekçesi `CLAUDE.md`'dedir ve burada tekrarlanmaz; aşağıdakiler o
 kuralların **kontrol edilebilir hâlleridir**.
 
 ## Girdi
 
-`$ARGUMENTS` bir hedef veriyorsa (commit, dosya, `.tasks/{set}` phase'i) onu
-al. Vermiyorsa çalışma ağacındaki değişiklik: `git diff HEAD` + staged. Hiç
-değişiklik yoksa son commit'i denetle.
+`$ARGUMENTS` bir hedef veriyorsa (commit aralığı, dosya, `.tasks/{set}`) onu
+al; set verildiyse aralık `duzen.md` → Set aralığı. Vermiyorsa çalışma
+ağacındaki değişiklik (`git diff HEAD`); o da yoksa son commit.
 
-## Kurgu: önce ele, sonra dağıt
+## Kurgu
 
-On merceğin çoğu her diff'te ilgisizdir; hepsini her seferinde koşturmak
-israftır. Sıra şu:
+**1. Mekanik yarı: `make denetim`.** Katman yönü ve platformsuzluk, `bt-core`'da
+gerekçesiz panik yolu, rc dosyasına yazan shell entegrasyonu ve bağımlılık
+uyarısı `Makefile`'dadır ve `make hepsi` onu her phase'de zaten koşar. Burada
+yeniden grep'leme; `make denetim`'i bir kez koş ve sonucunu rapora al.
 
-**1. Eleme (inline, saniyeler).** `git diff --name-only` ile hangi merceğin
-ilgili olduğunu belirle. Değişmemiş alana bakan mercek düşer — `Cargo.toml`
-değişmediyse 2 sorulmaz, `assets/shell/` el değmediyse 5 sorulmaz, `.metal`
-ve `bt-gpu` değişmediyse 8 ve 9 sorulmaz.
+**2. Eleme.** `git diff --name-only {hedef}` ile aşağıdaki merceklerden hangisinin
+ilgili olduğunu belirle; değişmemiş alana bakan mercek düşer ve raporda
+**"ilgisiz"** diye sayılır — sessizce düşen mercek "denetlendi" gibi okunur.
 
-**2. Mekanik mercekler inline koşar.** 1, 2, 3, 4, 5, 6 esasen grep, `cargo
-tree` ve dosya varlığıdır; çıkarım az, aktarım az. Bunlar için ajan kurma.
-
-**3. Yargı mercekleri fan-out.** 7, 8, 9, 10 akıl yürütme ister (bir
-animasyonun gerçekten durup durmadığını izlemek, bir thread'in render yolunu
-bloklayıp bloklamadığını görmek, `#[repr(C)]` yapıyla `.metal` struct'ını alan
-alan eşlemek). İlgili çıkanların sayısı **ikiden azsa inline** koş — tek mercek
-için ajan kurmak da israftır. İkiden çoksa her mercek için bir `Agent` başlat,
-paralel, `model: 'opus'` (yargı içerir;
-`.claude/skills/implement/references/otonom-serit.md` → Model katmanlaması).
-Her ajana yalnız kendi merceğini, ilgili diff'i ve `CLAUDE.md`'yi ver; aramayı
-repoyla sınırla.
-
-**4. Sentez ana döngüde — devredilmez.** Hangi bulgu gerçek, hangisi gürültü;
-ajanlar spekülatif bulgu üretebilir. Ayıklamayı sen yap.
-
-Elenen mercekleri raporda **"ilgisiz"** diye say: neyin bakılmadığı da
-bilgidir, sessizce düşürülen mercek "denetlendi" gibi okunur.
+**3. İnline koş.** Mercekleri kendin koş. Fan-out yalnız üç ya da daha fazla
+yargı merceği (4–7) ilgiliyse **ve** diff büyükse (birkaç yüz satırı aşıyorsa)
+anlamlıdır: her mercek için bir `Agent`, paralel, `model: 'opus'`, istemde
+otonom şeridin Ajan kuralları; ajana yalnız kendi merceğini ve ilgili diff'i
+ver. Sentez ana döngüdedir, devredilmez.
 
 ## Mercekler
 
-Her mercek için: bulgu varsa `dosya:satır` + neden ihlal + ne yapılmalı.
-Bulgu yoksa tek satır "temiz" — mercek başına paragraf yazma.
+Her mercek için: bulgu varsa `dosya:satır` + neden ihlal + ne yapılmalı. Bulgu
+yoksa tek satır "temiz".
 
-Mekanik olanlar **1–6**; yargı isteyenler **7–10**.
+**1. Bağımlılık kararı.** `make denetim` `Cargo.toml`/`Cargo.lock` uyarısı
+verdiyse: kararın kaydı (`discussion.md` → `## Karar` ya da phase notu) var mı?
+Yoksa bulgudur ve kullanıcıya sorulur — dış bağımlılık mimari karardır.
 
-**1. Katman yönü ve platformsuzluk.** Bağımlılık yukarı gitmemeli:
-`bateri → bt-shell → bt-gpu → {bt-atlas, bt-core}`. `bt-core` hiçbir platform
-kütüphanesi görmez; `bt-atlas` yalnız `core-text`/`core-graphics`.
+**2. Ayar ve tema şeması.** `settings.rs` ya da tema modeli değiştiyse: yeni
+anahtarın varsayılanı, eski anahtarın akıbeti (silinmez), `docs/AYARLAR.md`,
+yeniden yazma yolunun **bilinmeyen anahtarı koruduğu** round-trip sınaması,
+İngilizce `snake_case` adlar. Shell dosyası değiştiyse üç kabuk da (zsh, bash,
+fish) diff'te mi; değilse gerekçesi Uygulama Notları'nda mı.
 
-```sh
-cargo tree -p bt-core  -e normal | grep -E "objc2|core-text|core-graphics|metal"
-cargo tree -p bt-atlas -e normal | grep -E "objc2"
-cargo tree -p bt-gpu   -e normal | grep -E "bt-shell"
-grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"
-```
-(Son süzgeç yorum satırlarını düşürür: `bt-core`'un kendi başlık yorumu
-"objc2 yok" der ve grep'i yanlış pozitife düşürür — 001 phase-1'de oldu.)
-Hepsi boş dönmeli. `cargo tree` `Cargo.toml`'daki sözleşmeyi, `grep` kaynak
-içindeki kaçağı görür — ikisi birden sorulur; `[cfg(target_os)]` arkasına
-saklanmış bir `objc2` çağrısı `cargo tree`'de görünmeyebilir.
+**3. Ölçüm sahipliği.** Diff'te ölçüm sayısı taşıyan belge satırı ya da
+**ölçülmemiş iddia** ("120 fps tutar", "gecikme düşer") var mı? Tek sahip
+`docs/OLCUMLER.md`. İstisnalar: `docs/ARASTIRMA.md` (Metalterm'in sayıları) ve
+bir `const`'un doc'undaki türetme (koşu tablosu değil). `Measured`'ın doc'undaki
+sayılar istisna değil **emanettir**: kare süresi ve açılışın ilk ölçümü onları
+`docs/OLCUMLER.md`'ye taşır.
 
-**2. Yeni bağımlılık.** `Cargo.toml` ya da `Cargo.lock` değişti mi? Dış
-bağımlılık **mimari karardır**, kendiliğinden yapılmaz — bulgu olarak yaz ve
-kullanıcıya sor. `Cargo.lock`'un tek başına değişmesi de bulgudur: ya bir
-sürüm oynadı ya da bir feature bayrağı yeni crate çekti.
+**4. Thread ve blokaj.** Render yolunda (kare üreten kod, display link
+callback'i) bloklayan çağrı var mı — PTY `read`, kilit bekleme, `sleep`, dosya
+G/Ç? AppKit çağrıları `MainThreadMarker` taşıyor mu? PTY okuyucu ile renderer
+arasındaki paylaşılan durumda iki kilit sırası kilitlenme üretebilir mi?
 
-**3. Panik yolu.** PTY okuma ve ayrıştırma yolunda `unwrap`/`expect`/
-`panic!`/indeksleme paniği olmamalı; bilinmeyen dizi yoksayılır ve loglanır.
+**5. Boşta sıfır kare ve animasyon durma.** Yeni animasyon ya da zamanlayıcının
+**durma koşulu** nerede? Kirli satır olmadan kare talebi var mı? Belirti
+sessizdir: uygulama çalışır, pil gider.
 
-```sh
-git diff HEAD -U0 -- crates/bt-core/src | grep -E "^\+" | grep -E "\.unwrap\(\)|\.expect\(|panic!|unreachable!|\[[a-z_]+\]" | grep -v "// audit: "
-```
-Sınama modülleri (`#[cfg(test)]`) hariç. Bilinçli bir `unwrap` varsa yanına
-`// audit: {neden güvenli}` yazılır; yorumsuz olan bulgudur.
+**6. Hücre boyutu ve shader/Rust düzen uyumu.** `Cell` değiştiyse `const`
+assert güncel ve gerekçeli mi, alan yan tabloya mı gitmeliydi? `.metal`
+struct'ı değiştiyse Rust `#[repr(C)]` karşılığı alan sırası, tip ve hizalama
+ile aynı mı (`float3`'ün 16 bayt hizası)? Attribute indeksleri eşleşiyor mu?
 
-**4. Ayar ve tema şeması.** `settings.rs` ya da tema modeli değişti mi?
-Sorular: yeni anahtarın varsayılanı var mı; eski anahtar silindi mi (silinmez —
-okunup uyarı verilir); `docs/AYARLAR.md` güncellendi mi; yeniden yazma yolu
-**bilinmeyen anahtarı koruyor** mu (round-trip sınaması var mı). Anahtar
-adları İngilizce ve `snake_case` mi.
-
-**5. Shell entegrasyon üçlüsü.** `assets/shell/` altında bir kabuk dosyası
-değiştiyse üçü de (zsh, bash, fish) diff'te mi? Değilse ya gerekçesi
-`## Uygulama Notları`'nda yazar ya da bulgudur. Ayrıca: entegrasyon
-kullanıcının rc dosyasına **yazıyor mu** (`>>`, `sed -i`, `~/.zshrc`) — yazıyorsa
-kırmızı.
-
-**6. Ölçüm sahipliği.** Diff'te ölçüm sayısı taşıyan belge satırı var mı?
-Tek sahip `docs/OLCUMLER.md`. Başka belge (`CLAUDE.md`, `MIMARI.md`,
-`README.md`, `.tasks/*`) sayıyı **tekrar etmez**, niteliksel anlatıp bağlanır.
-Ayrıca: **ölçülmemiş iddia** var mı ("120 fps tutar", "gecikme düşer", "daha
-az bellek")? Ölçülmediyse iddia edilmez — `/measure` ile ölçülür ya da cümle
-düşer. `docs/ARASTIRMA.md` istisnadır: Metalterm'in kendi sayılarını aktarır,
-bizim ölçümümüz değildir ve bilerek eskir. İkinci istisna bir `const`'un
-doc'u: o sabiti doğuran kutupları ve türetmeyi taşıyabilir, koşu tablosunu
-taşıyamaz (kural `proje.md` → tuzaklar).
-
-**7. Thread ve blokaj.** Render yolunda (`bt-gpu`'nun frame üreten kodu,
-display link callback'i) bloklayan çağrı var mı — PTY `read`, kilit bekleme,
-`std::thread::sleep`, dosya G/Ç? AppKit çağrıları `MainThreadMarker` taşıyor
-mu, yoksa "zaten ana thread'deyiz" varsayımı mı? PTY okuyucu ile renderer
-arasındaki paylaşılan durum tek bir kilit altında mı, yoksa iki kilit sırası
-kilitlenme (deadlock) üretebilir mi?
-
-**8. Boşta sıfır kare ve animasyon durma.** Diff bir animasyon ya da zamanlayıcı
-ekliyorsa **durma koşulu** nerede? İmleç yerleşince, decay bitince, sayaç
-hedefe varınca frame talebi kesiliyor mu? "Her frame'de yeniden çiz" yolu
-açık mı kaldı? Kirli satır olmadan `setNeedsDisplay`/display link talebi var
-mı? Belirti sessizdir: uygulama çalışır, pil gider.
-
-**9. Hücre boyutu ve shader/Rust düzen uyumu.** `Cell` yapısı değiştiyse
-`const` boyut assert'i güncel mi ve gerekçesi yazıyor mu; yeni alan yan
-tabloya mı gitmeliydi? `.metal` içindeki bir struct ya da uniform değiştiyse
-Rust tarafındaki `#[repr(C)]` karşılığı **alan sırası, tip ve hizalama** ile
-aynı mı (`float3`'ün 16 bayt hizası klasik tuzaktır)? Vertex/pipeline
-descriptor'daki attribute indeksleri shader'la eşleşiyor mu?
-
-**10. Belge ve üslup borcu.** Yeni crate `lib.rs` başında sözleşmesini anlatan
-bir yorum aldı mı? Yeni yorumlar "ne" değil **"neden"** anlatıyor mu
-(çevredeki yoğunlukta)? Yorumlar ve sınama iletileri Türkçe mi? **Kod
-tanımlayıcılarının tamamı İngilizce mi** — dışa bakan ad da, yerel yardımcı,
-alan, değişken ve sınama adı da (`build.rs` dahil, istisnasız)? UI dizgileri ve
-ayar anahtarları İngilizce mi? Türkçe kalması gereken üç öbek yerinde mi:
-tanı metni (stderr, `assert!` gerekçeleri), `Makefile` hedefleri ve jeton
-satırının **anahtarları**? Jeton **değerleri** ise İngilizce olmalı — bir
-`match` kolu ya da CI grep'i okuyor (`CLAUDE.md` → Dil; gerekçe
-`Report::token_line`'ın doc'unda). `clippy` bastırmaları (`#[allow]`)
-gerekçeli mi?
+**7. Belge ve dil.** Yeni crate'in `lib.rs` başlık yorumu var mı? Yorumlar
+"neden"i mi anlatıyor? Yorumlar Türkçe, **kod tanımlayıcılarının tamamı
+İngilizce** mi (`build.rs` dahil)? Türkçe kalan üç öbek yerinde mi (tanı metni,
+`Makefile` hedefleri, jeton satırının anahtarları) ve jeton **değerleri**
+İngilizce mi (`CLAUDE.md` → Dil)? `#[allow]` gerekçeli mi?
 
 ## Çıktı
 
-Bulguları önem sırasıyla ver. Her biri: `dosya:satır` · hangi mercek · tek
-cümle ihlal · önerilen düzeltme. Bulgu yoksa hangi merceklerin temiz çıktığını
-tek satırda say — "denetlendi" demek yetmez, neyin denetlendiği görünmeli.
+Önce `make denetim` sonucu, sonra bulgular önem sırasıyla: `dosya:satır` ·
+mercek · tek cümle ihlal · önerilen düzeltme. Bulgu yoksa hangi merceklerin
+temiz, hangilerinin ilgisiz olduğunu tek satırda say.
 
-Bulgu **uydurma**: mercek uygulanamıyorsa (ilgili dosya değişmemiş) o merceği
-"ilgisiz" diye geç. Zorlama bulgu, gerçek bulguyu gömer.
+Bulgu **uydurma**: zorlama bulgu, gerçek bulguyu gömer.
