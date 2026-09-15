@@ -68,12 +68,12 @@ alacritty_terminal = { version = "0.26", default-features = false }
 # kararı: .tasks/007-ayarlar-ve-tema/discussion.md → Karar. `toml` + `serde`
 # yerine: menüden seçilen tema dosyaya yazılacak ve sözleşme "tanımadığını
 # bırakır" diyor — serde yolu yorumu, düzeni ve bilinmeyen anahtarın yerini
-# kaybeder. Yalnız `parse`: biçim koruyan yazma (`display` → `toml_writer`)
-# 007 phase-7'de açılır ve `Cargo.lock`'a o gün girer. `Cargo.lock`'taki
+# kaybeder. `parse` okuma, `display` biçim koruyan yazma (Tema menüsü, 007
+# phase-7; `toml_writer`'ı çekiyor). `Cargo.lock`'taki
 # `serde_core`/`serde_derive`/`syn` satırları **derlenmiyor**: `toml_datetime`'ın
 # zayıf `serde_core?/std` özelliği kilit dosyasına yazdırıyor, `cargo tree -p
 # bt-core` onları göstermez.
-toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 # Bekçi thread'in son çaresi: `write(2, …)` + `_exit(70)`, ikisi de
 # async-signal-safe (`bt-shell::bekci`). Yeni bir crate DEĞİL — grafta zaten
 # vardı (alacritty PTY'yi onunla açıyor) ve sürüm oynamıyor; `Cargo.lock`'ta

@@ -47,9 +47,10 @@ pub(crate) const SCROLLBACK_MAX: usize = 100_000;
 /// `light_theme`/`dark_theme` bu değeri kabul etmez (kendi kendine dönen bir
 /// seçim olurdu).
 ///
-/// `pub(crate)`: bugün dışarıda soran yok, `bt-shell`
-/// [`Settings::follows_system`]'e bakıyor; menüden yazan phase-7 açar.
-pub(crate) const SYSTEM_THEME: &str = "system";
+/// `pub`: View ▸ Theme ▸ Match System bu değeri yazıyor
+/// ([`Settings::with_theme`]); okuyan taraf [`Settings::follows_system`]'e
+/// bakar, değeri karşılaştırmaz.
+pub const SYSTEM_THEME: &str = "system";
 
 /// `[font]`: hücre ölçüsünü ve glyph'leri belirleyen iki değer.
 ///
@@ -99,8 +100,8 @@ pub struct Settings {
     pub theme: String,
     /// `[appearance] light_theme`: `theme = "system"` iken açık görünümün
     /// teması. `theme`'den **ayrı** anahtar: menüden sabit bir tema seçmek
-    /// yalnız `theme`'i yazar (007 phase-7) ve kullanıcının açık/koyu çifti
-    /// yerinde kalır.
+    /// yalnız `theme`'i yazar ([`Settings::with_theme`]) ve kullanıcının
+    /// açık/koyu çifti yerinde kalır.
     pub light_theme: String,
     /// `[appearance] dark_theme`: `theme = "system"` iken koyu görünümün
     /// teması.
@@ -168,9 +169,9 @@ impl Settings {
     /// Sahibi varsayılanların sahibi, yani burası: ayrıştırılınca tanısız
     /// [`Settings::default`] verdiği sınamayla bağlı. Anahtarlar **yazılı**,
     /// yorumda değil — kullanıcı değeri yerinde değiştiriyor, menüden tema
-    /// seçimi de satırı yerinde yazacak (phase-7). Bedeli: varsayılan bir gün
-    /// değişirse şablonu açmış kullanıcı eskisinde kalır. Yalnız
-    /// varsayılanı olmayan `family` yorumda bir örnek.
+    /// seçimi de satırı yerinde yazıyor ([`Settings::with_theme`]). Bedeli:
+    /// varsayılan bir gün değişirse şablonu açmış kullanıcı eskisinde kalır.
+    /// Yalnız varsayılanı olmayan `family` yorumda bir örnek.
     ///
     /// Bölüm başlıkları yorumda değil: yorumu kaldırılan bir anahtar başlıksız
     /// kalsaydı kök anahtar olur ve tanınmayan anahtar diye **sessizce**
@@ -347,6 +348,89 @@ size = 13
             terminal: self.terminal() != new.terminal(),
             font: self.font != new.font,
         }
+    }
+
+    /// Menünün tema seçimi (View ▸ Theme ▸): `settings.toml`'un metninde
+    /// `[appearance] theme`'i `name` yapar ve **geri kalan her baytı** yerinde
+    /// bırakır — yorumlar, boş satırlar, anahtar sırası, tanımadığımız
+    /// anahtarlar, değerin yanındaki yorum. Dosyayı okuyup yazan `bt-shell`.
+    ///
+    /// - Bölüm yoksa sona, anahtar yoksa bölümün içine eklenir; bölümün
+    ///   yazılışı (başlık, satır içi tablo, noktalı anahtar) korunur.
+    /// - `light_theme` ve `dark_theme`'e dokunmaz: sabit bir tema seçen
+    ///   kullanıcı `"system"`'e dönünce çiftini geri bulur.
+    /// - **Ayrıştırılamayan metin `Err`**, yeni metin üretilmez: dosya
+    ///   kullanıcının yarım işi ve üstüne yazmak onu silerdi. Aynı sebeple
+    ///   bölüm olmayan bir `appearance` (`appearance = 1`, `[[appearance]]`)
+    ///   ve bölüm olan bir `theme` (`[appearance.theme]`) de `Err`: yerlerine
+    ///   yazmak içeriklerini silerdi. Kabul edilmeyen türdeki bir değer
+    ///   (`theme = 3`) ise değişir — kullanıcı bir tema seçti.
+    ///
+    /// Adın biçimi sınanmıyor: çağıran (menü) yalnız gömülü temaların ve
+    /// `themes/`'teki dosyaların adlarını veriyor; öyle olmasa da ayrıştırıcı
+    /// adı okurken reddeder.
+    pub fn with_theme(text: &str, name: &str) -> Result<String, Diagnostic> {
+        const SECTION: &str = "appearance";
+        const KEY: &str = "appearance.theme";
+        let parsed = document(text)?;
+        // Ret konumlu belgede: `into_mut` konumları düşürüyor, tanının satırı
+        // onlardan geliyor.
+        let mut refused = Vec::new();
+        if let Some(appearance) = section(text, parsed.as_table(), SECTION, &mut refused)
+            && let Some(item) = appearance.get("theme").filter(|item| !item.is_value())
+        {
+            refused.push(Diagnostic {
+                key: Some(KEY),
+                line: item.span().and_then(|span| line_of(text, span.start)),
+                message: format!("`{KEY}` must be a string, found {}", kind(item)),
+            });
+        }
+        if let Some(diagnostic) = refused.pop() {
+            return Err(diagnostic);
+        }
+        let mut doc = parsed.into_mut();
+        if !doc.contains_key(SECTION) {
+            let mut table = toml_edit::Table::new();
+            // Belge sonundaki yorum `toml_edit`'te belgenin kuyruğu ve yeni
+            // bölüm onun önüne yazılırdı: son bölümün altındaki
+            // `# family = "Menlo"` `[appearance]`'a geçer, yorumu kaldıran
+            // kullanıcının satırı sessizce yoksayılırdı. Kuyruk yeni başlığın
+            // önüne alınıyor, yani yazıldığı bölümde kalıyor.
+            let trailing = doc.trailing().as_str().unwrap_or_default().to_owned();
+            if !trailing.trim().is_empty() {
+                table.decor_mut().set_prefix(format!("{trailing}\n"));
+                doc.set_trailing("");
+            }
+            doc.insert(SECTION, Item::Table(table));
+        }
+        // `else` dalı yok: bölüm olmayan bir `appearance` yukarıda reddedildi,
+        // eksik olan da az önce tablo olarak eklendi.
+        if let Some(appearance) = doc.get_mut(SECTION).and_then(Item::as_table_like_mut) {
+            match appearance.get_mut("theme").and_then(Item::as_value_mut) {
+                // Süs (`=`'den sonraki boşluk, satır sonundaki yorum) değerin
+                // üstünde duruyor; yeni değer onu devralmazsa yorum düşerdi.
+                Some(value) => {
+                    let decor = value.decor().clone();
+                    *value = name.into();
+                    *value.decor_mut() = decor;
+                }
+                None => {
+                    appearance.insert("theme", toml_edit::value(name));
+                }
+            }
+        }
+        // `toml_edit` satır sonlarını LF yazıyor. İlk satırı CRLF olan dosya
+        // CRLF kalıyor; yoksa tek bir seçim dotfile deposunda bütün dosyayı
+        // değişmiş gösterirdi. Karışık satır sonlu dosya ilk satırınkini alır.
+        let crlf = text
+            .find('\n')
+            .is_some_and(|end| text.as_bytes()[..end].ends_with(b"\r"));
+        let written = doc.to_string();
+        Ok(if crlf {
+            written.replace('\n', "\r\n")
+        } else {
+            written
+        })
     }
 }
 
@@ -628,8 +712,8 @@ mod tests {
         assert_eq!(clean(Settings::TEMPLATE), Settings::default());
 
         // Varsayılanı olan her anahtar **yazılı**, yorumda değil: kullanıcı
-        // değeri yerinde değiştiriyor ve menüden tema seçimi (phase-7) satırı
-        // yerinde yazıyor. Boş bir şablon yukarıdaki eşitliği de geçerdi.
+        // değeri yerinde değiştiriyor ve menüden tema seçimi satırı yerinde
+        // yazıyor. Boş bir şablon yukarıdaki eşitliği de geçerdi.
         let doc = document(Settings::TEMPLATE).expect("şablon TOML");
         for (section, key) in [
             ("terminal", "scrollback"),
@@ -1056,6 +1140,158 @@ line_height = 1.2
         // TOML'un tam sayı sınırını aşan sayı tavana kırpılamaz: değer hiç
         // okunamıyor ve belge düşüyor (`docs/AYARLAR.md`).
         assert!(Settings::parse("[terminal]\nscrollback = 99999999999999999999\n").is_err());
+    }
+
+    #[test]
+    fn theme_write_keeps_every_other_byte() {
+        // Kullanıcının dosyası: yorumlar, boş satırlar, anahtar sırası,
+        // tanımadığımız anahtar ve bölüm, değerin yanındaki yorum. Menüden
+        // tema seçmek yalnız değeri değiştirir.
+        let text = "\
+# my settings
+
+[terminal]
+scrollback = 500  # plenty
+shape = \"block\"
+
+[appearance]
+# picked by hand
+theme = \"system\"   # follows macOS
+light_theme = \"paper\"
+dark_theme = \"ink\"
+future = true
+
+[motion]
+cursor = \"spring\"
+";
+        let written = Settings::with_theme(text, "bateri").expect("yazılabilir metin");
+        assert_eq!(
+            written,
+            text.replace("theme = \"system\"", "theme = \"bateri\"")
+        );
+        // Çift yerinde: `"system"`'e dönmek onu geri getirir.
+        let settings = clean(&written);
+        assert_eq!(
+            (
+                settings.theme.as_str(),
+                settings.light_theme.as_str(),
+                settings.dark_theme.as_str(),
+                settings.scrollback
+            ),
+            ("bateri", "paper", "ink", 500)
+        );
+        assert_eq!(
+            Settings::with_theme(&written, SYSTEM_THEME).expect("yazılabilir metin"),
+            text
+        );
+    }
+
+    #[test]
+    fn theme_write_adds_what_is_missing() {
+        // Bölüm yok: sona eklenir, öncesi aynı kalır.
+        let text = "[terminal]\nscrollback = 5\n";
+        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        assert_eq!(
+            written,
+            format!("{text}\n[appearance]\ntheme = \"paper\"\n")
+        );
+        assert_eq!(clean(&written).theme, "paper");
+
+        // Boş metin.
+        assert_eq!(
+            Settings::with_theme("", "paper").expect("yazılabilir metin"),
+            "[appearance]\ntheme = \"paper\"\n"
+        );
+
+        // Bölüm var, anahtar yok: bölümün içine, sonraki bölümden önce.
+        let text = "[appearance]\ndark_theme = \"ink\"\n\n[font]\nsize = 14\n";
+        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        assert_eq!(
+            written,
+            "[appearance]\ndark_theme = \"ink\"\ntheme = \"paper\"\n\n[font]\nsize = 14\n"
+        );
+    }
+
+    #[test]
+    fn theme_write_leaves_trailing_comments_where_they_were() {
+        // `/code-review` bulgusu: belge sonundaki yorum `toml_edit`'te belgenin
+        // kuyruğu, yeni bölüm onun **önüne** ekleniyordu. Yorumu kaldıran
+        // kullanıcının satırı `appearance.family` olur ve sessizce
+        // yoksayılırdı.
+        let text = "[font]\nsize = 14\n# family = \"Menlo\"\n";
+        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        assert_eq!(
+            written,
+            format!("{text}\n[appearance]\ntheme = \"paper\"\n")
+        );
+        let uncommented = written.replace("# family", "family");
+        assert_eq!(clean(&uncommented).font.family.as_deref(), Some("Menlo"));
+    }
+
+    #[test]
+    fn theme_write_keeps_crlf_line_endings() {
+        // `/code-review` bulgusu: `toml_edit` satır sonlarını LF yazıyor; tek
+        // bir tema seçimi dotfile deposunda bütün dosyayı değişmiş gösterirdi.
+        let text = "[appearance]\r\ntheme = \"a\"  # c\r\n\r\n[font]\r\nsize = 14\r\n";
+        assert_eq!(
+            Settings::with_theme(text, "paper").expect("yazılabilir metin"),
+            text.replace("\"a\"", "\"paper\"")
+        );
+        // Eklenen bölüm de dosyanın satır sonuyla.
+        assert_eq!(
+            Settings::with_theme("[font]\r\nsize = 14\r\n", "paper").expect("yazılabilir metin"),
+            "[font]\r\nsize = 14\r\n\r\n[appearance]\r\ntheme = \"paper\"\r\n"
+        );
+    }
+
+    #[test]
+    fn theme_write_keeps_the_way_the_section_is_written() {
+        for (text, expected) in [
+            // Satır içi tablo satır içi kalır.
+            (
+                "appearance = { theme = \"a\", dark_theme = \"ink\" }\n",
+                "appearance = { theme = \"paper\", dark_theme = \"ink\" }\n",
+            ),
+            // Noktalı anahtar noktalı kalır.
+            (
+                "appearance.theme = \"a\"\n",
+                "appearance.theme = \"paper\"\n",
+            ),
+            // Kabul edilmeyen türdeki değerin yerine: kullanıcı bir tema seçti.
+            (
+                "[appearance]\ntheme = 3 # oops\n",
+                "[appearance]\ntheme = \"paper\" # oops\n",
+            ),
+        ] {
+            let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+            assert_eq!(written, expected);
+            assert_eq!(clean(&written).theme, "paper", "{text}");
+        }
+        // Yalnız alt bölümü yazılmış `[appearance]`: sonuç yine okunuyor.
+        let written = Settings::with_theme("[appearance.extra]\nx = 1\n", "paper")
+            .expect("yazılabilir metin");
+        assert_eq!(clean(&written).theme, "paper", "{written}");
+    }
+
+    #[test]
+    fn theme_write_refuses_what_it_would_destroy() {
+        // Ayrıştırılamayan metin: metin **üretilmez**, kullanıcının yarım işi
+        // ezilmez.
+        let err =
+            Settings::with_theme("[appearance]\ntheme = \"a\n", "paper").expect_err("geçersiz");
+        assert_eq!((err.key, err.line), (None, Some(2)));
+        assert!(err.message.starts_with("invalid TOML: "), "{err}");
+
+        // Bölüm olmayan `appearance`: yerine tablo yazmak değeri silerdi.
+        for text in ["appearance = 1\n", "[[appearance]]\ntheme = \"a\"\n"] {
+            let err = Settings::with_theme(text, "paper").expect_err("bölüm değil");
+            assert_eq!(err.key, Some("appearance"), "{text}");
+            assert!(err.message.contains("must be a section"), "{err}");
+        }
+        // Tablo olan `theme`: yerine değer yazmak alt tabloyu silerdi.
+        let err = Settings::with_theme("[appearance.theme]\nx = 1\n", "paper")
+            .expect_err("tema bir bölüm");
+        assert_eq!(err.key, Some("appearance.theme"));
     }
 
     #[test]

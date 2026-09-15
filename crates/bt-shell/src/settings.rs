@@ -95,6 +95,81 @@ pub(crate) fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// View ▸ Theme ▸'nin yazması: `{root}/settings.toml`'da `[appearance]
+/// theme`'i `name` yapar ([`Settings::with_theme`]); hata yazma yuvasının
+/// iletisi.
+///
+/// **Yalnız yazar, uygulamaz** — uygulayan dosyayı okuyan yol, izleyicinin
+/// yolu (`app`).
+///
+/// - Dosya **o anda** okunuyor: elde tutulan bir kopya editörde yapılmış
+///   kaydı ezerdi.
+/// - Dosya yoksa "Settings…"ın yolu ([`create_if_missing`]): şablon, üstüne
+///   anahtar. Hedefi olmayan bağın hedefi yaratılmıyor; okuma onu söylüyor.
+/// - **Yerinde** yazılıyor (`O_TRUNC`): sembolik bağ izleniyor, hedef
+///   güncelleniyor. Geçici dosya + yeniden adlandırma bağı düz dosyaya
+///   çevirirdi; korunduğu bir yarış da yok, okuma ve yazma aynı ana kuyrukta.
+///   Boşaltmayla yazma arasındaki boş dosyayı izleyici dosyasızlık sayıyor
+///   ([`load_keeping`]).
+/// - Okunamayan ya da ayrıştırılamayan dosyaya **yazılmaz**: içerik
+///   kullanıcının yarım işi.
+///
+/// **Bilinen sınır — boşaltmayla yazma arası.** `write` boşaltılmış dosyaya
+/// tek bir (1 KB'ın altında) yazma yapıyor; o yazma hata verirse ya da süreç
+/// tam o anda ölürse dosya boş ya da yarım kalır. Çözülmüş hedefin yanına
+/// geçici dosya + yeniden adlandırma bu pencereyi kapatırdı ama sabit bağı
+/// koparır, izinleri ve genişletilmiş öznitelikleri düşürür ve yazılamayan
+/// dizinde başarısız olur; yerinde yazma planın kararı (`/code-review` bulgusu,
+/// waive: `.tasks/007-ayarlar-ve-tema/phase-7.md`).
+pub(crate) fn write_theme(root: &Path, name: &str) -> Result<(), String> {
+    let not_saved = |reason: String| format!("{reason}; the theme was not saved");
+    let path = create_if_missing(root)
+        .map_err(|err| format!("{FILE_NAME} could not be created: {err}"))?;
+    let text = match read_text(&path) {
+        Text::Read(text) => text,
+        Text::Unreadable(err) => {
+            return Err(not_saved(format!("{FILE_NAME} could not be read: {err}")));
+        }
+        // Yaratmayla okuma arasında silindi.
+        Text::Missing => return Err(not_saved(format!("{FILE_NAME} was removed"))),
+    };
+    let written = Settings::with_theme(&text, name).map_err(|d| not_saved(notice(&d)))?;
+    std::fs::write(&path, written).map_err(|err| format!("{FILE_NAME} could not be written: {err}"))
+}
+
+/// View ▸ Theme ▸'deki kullanıcı temaları: `{root}/themes/*.toml`'un adları,
+/// büyük/küçük harf duyarsız sırayla.
+///
+/// Seçilemeyecek olan listelenmez: düz dosya olmayan (dizin, hedefi olmayan
+/// bağ), UTF-8 olmayan ve nokta ile başlayan ad (gizli dosya, başka dosya
+/// sisteminden kopyalanan AppleDouble `._x.toml`), ayrılmış
+/// [`SYSTEM_THEME`](bt_core::SYSTEM_THEME) ve gömülü bir temanın adı — o
+/// dosya gömülüyü gölgeliyor ve seçimi gömülü adın öğesiyle aynı.
+///
+/// Dizin yoksa ya da okunamıyorsa liste boş: menünün hata gösterecek yeri yok
+/// ve tema dizini olmayan kullanıcı olağan hâl.
+pub(crate) fn user_theme_names(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root.join(THEMES_DIR)) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let stem = name.strip_suffix(".toml")?;
+            // Ad sınanıyor, gövde değil: tam `.toml` adlı dosyanın gövdesi boş.
+            let selectable = !name.starts_with('.')
+                && stem != bt_core::SYSTEM_THEME
+                && Theme::embedded(stem).is_none()
+                // Bağı izliyor: bağlı tema dosyası da seçilebilir.
+                && std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_file());
+            selectable.then(|| stem.to_owned())
+        })
+        .collect();
+    names.sort_by_cached_key(|name| name.to_lowercase());
+    names
+}
+
 /// Bir okumanın sonucu.
 #[derive(Debug)]
 pub(crate) enum Loaded {
@@ -402,6 +477,133 @@ mod tests {
     }
 
     #[test]
+    fn theme_write_updates_the_file_in_place() {
+        // Yorum ve tanınmayan anahtar kalır, çift yerinde; okuma yeni temayı
+        // görür.
+        let root = TempRoot::new("write");
+        let text =
+            "# mine\n[appearance]\ntheme = \"system\" # os\ndark_theme = \"ink\"\n[x]\ny = 1\n";
+        std::fs::write(root.0.join(FILE_NAME), text).expect("yazılamadı");
+        assert_eq!(write_theme(&root.0, "paper"), Ok(()));
+        assert_eq!(
+            std::fs::read_to_string(root.0.join(FILE_NAME)).expect("okunamadı"),
+            text.replace("\"system\"", "\"paper\"")
+        );
+        let (settings, notices) = load(&root.0).at_launch();
+        assert_eq!(
+            (settings.theme.as_str(), settings.dark_theme.as_str()),
+            ("paper", "ink")
+        );
+        assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    #[test]
+    fn theme_write_goes_through_a_symlink() {
+        // Dotfile deposu: hedef güncellenir, bağ bağ olarak kalır — geçici
+        // dosya + yeniden adlandırma onu düz dosyaya çevirirdi.
+        let root = TempRoot::new("write-symlink");
+        let target = root.0.join("dotfiles.toml");
+        std::fs::write(&target, "[terminal]\nscrollback = 7\n").expect("yazılamadı");
+        let link = root.0.join(FILE_NAME);
+        std::os::unix::fs::symlink(&target, &link).expect("bağ kurulamadı");
+        assert_eq!(write_theme(&root.0, "paper"), Ok(()));
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("bağ yok")
+                .file_type()
+                .is_symlink(),
+            "bağ düz dosyaya döndü"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("okunamadı"),
+            "[terminal]\nscrollback = 7\n\n[appearance]\ntheme = \"paper\"\n"
+        );
+    }
+
+    #[test]
+    fn theme_write_refuses_a_file_it_cannot_parse() {
+        // Kullanıcının yarım işi ezilmez; ileti yazma yuvasına gider.
+        let root = TempRoot::new("write-unparseable");
+        let text = "[appearance\ntheme = \"ink\"\n";
+        std::fs::write(root.0.join(FILE_NAME), text).expect("yazılamadı");
+        let err = write_theme(&root.0, "paper").expect_err("yazılmamalı");
+        assert!(
+            err.starts_with("settings.toml: line 1: invalid TOML: ")
+                && err.ends_with("; the theme was not saved"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.0.join(FILE_NAME)).expect("okunamadı"),
+            text
+        );
+
+        // Bölüm olmayan `appearance` da ezilmez.
+        std::fs::write(root.0.join(FILE_NAME), "appearance = 1\n").expect("yazılamadı");
+        assert_eq!(
+            write_theme(&root.0, "paper"),
+            Err("settings.toml: line 1: `appearance` must be a section, found an integer; the theme was not saved".to_owned())
+        );
+
+        // Hedefi olmayan bağ: hedef yaratılmaz.
+        std::fs::remove_file(root.0.join(FILE_NAME)).expect("silinemedi");
+        let moved = root.0.join("moved.toml");
+        std::os::unix::fs::symlink(&moved, root.0.join(FILE_NAME)).expect("bağ kurulamadı");
+        assert_eq!(
+            write_theme(&root.0, "paper"),
+            Err("settings.toml could not be read: symbolic link points to a missing file; the theme was not saved".to_owned())
+        );
+        assert!(!moved.exists(), "bağın hedefi yaratıldı");
+    }
+
+    #[test]
+    fn theme_write_without_a_file_starts_from_the_template() {
+        // Dizin de dosya da yok: "Settings…"ın yolu, üstüne anahtar.
+        let root = TempRoot::new("write-missing");
+        let config = root.0.join("nested").join("bateri");
+        assert_eq!(write_theme(&config, "paper"), Ok(()));
+        assert_eq!(
+            std::fs::read_to_string(config.join(FILE_NAME)).expect("okunamadı"),
+            // Satır başıyla: şablonun yorumu da `theme = "system"` diyor ve
+            // yerinde kalıyor.
+            Settings::TEMPLATE.replace("\ntheme = \"system\"\n", "\ntheme = \"paper\"\n")
+        );
+        assert_eq!(
+            load(&config).at_launch(),
+            (
+                Settings {
+                    theme: "paper".to_owned(),
+                    ..Settings::default()
+                },
+                Vec::new()
+            )
+        );
+    }
+
+    #[test]
+    fn user_theme_names_are_the_selectable_files() {
+        let root = TempRoot::new("theme-names");
+        // Tema dizini yoksa liste boş, hata değil.
+        assert_eq!(user_theme_names(&root.0), Vec::<String>::new());
+        // `""`: adı tam `.toml` olan dosya — `/code-review` bulgusu, boş
+        // başlıklı bir öğe `theme = ""` yazardı.
+        for name in ["paper", "Ink", "bateri", "system", ".hidden", "._paper", ""] {
+            write_theme_file(&root, name, "");
+        }
+        let dir = root.0.join(THEMES_DIR);
+        std::fs::write(dir.join("notes.txt"), "").expect("yazılamadı");
+        std::fs::create_dir(dir.join("folder.toml")).expect("dizin kurulamadı");
+        std::os::unix::fs::symlink(dir.join("paper.toml"), dir.join("linked.toml"))
+            .expect("bağ kurulamadı");
+        std::os::unix::fs::symlink(dir.join("gone.toml"), dir.join("dangling.toml"))
+            .expect("bağ kurulamadı");
+        // Gömülü adı gölgeleyen dosya (`bateri`) gömülü adın öğesiyle aynı
+        // seçim, ayrıca listelenmez; `system` bir tema adı değil; nokta ile
+        // başlayan (AppleDouble `._x`, gizli) ve düz dosya olmayan girdiler
+        // seçilemez. Sıra büyük/küçük harf duyarsız.
+        assert_eq!(user_theme_names(&root.0), ["Ink", "linked", "paper"]);
+    }
+
+    #[test]
     fn missing_file_is_silent_default() {
         let root = TempRoot::new("missing");
         let loaded = load(&root.0);
@@ -503,7 +705,7 @@ mod tests {
     const DARK: bool = true;
 
     /// Kökün altına `themes/{name}.toml` yazar.
-    fn write_theme(root: &TempRoot, name: &str, text: &str) {
+    fn write_theme_file(root: &TempRoot, name: &str, text: &str) {
         let dir = root.0.join(THEMES_DIR);
         std::fs::create_dir_all(&dir).expect("tema dizini kurulamadı");
         std::fs::write(dir.join(format!("{name}.toml")), text).expect("yazılamadı");
@@ -524,7 +726,7 @@ mod tests {
     #[test]
     fn user_theme_shadows_the_embedded_one() {
         let root = TempRoot::new("theme-shadow");
-        write_theme(&root, "bateri", "background = \"#ffffff\"\n");
+        write_theme_file(&root, "bateri", "background = \"#ffffff\"\n");
         let (theme, notices) = load_theme(Some(&root.0), "bateri").or_embedded(DARK);
         assert_eq!(notices, Vec::<String>::new());
         assert_eq!(
@@ -539,7 +741,7 @@ mod tests {
     #[test]
     fn user_theme_reports_its_bad_colors_with_the_file_name() {
         let root = TempRoot::new("theme-diagnostics");
-        write_theme(
+        write_theme_file(
             &root,
             "paper",
             "[ansi]\nred = \"red\"\nblue = \"#0000ff\"\n",
@@ -607,7 +809,7 @@ mod tests {
         // `bateri` olsa da **ileti** dosyayı söylüyor. Gömülü adı olmayan bir
         // temayla aynı kural (ikinci yarı).
         let root = TempRoot::new("theme-broken");
-        write_theme(&root, "bateri", "background = \"#ffffff\n");
+        write_theme_file(&root, "bateri", "background = \"#ffffff\n");
         let loaded = load_theme(Some(&root.0), "bateri");
         assert!(matches!(loaded, ThemeLoaded::Failed(_)), "{loaded:?}");
         let (theme, notices) = loaded.or_embedded(DARK);
@@ -728,7 +930,7 @@ mod tests {
         // Canlı yenilemede kullanılamayan tema takas edilmiyor: yarım
         // kaydedilmiş tema dosyası gömülü temaya çakmıyor.
         let root = TempRoot::new("live-theme");
-        write_theme(&root, "paper", "background = \"#ffffff\n");
+        write_theme_file(&root, "paper", "background = \"#ffffff\n");
         let (theme, notices) = load_theme(Some(&root.0), "paper").or_current();
         assert_eq!(theme, None);
         assert_eq!(notices.len(), 1);
@@ -746,7 +948,7 @@ mod tests {
         );
 
         // Düzeltilen dosya takas ediliyor, yuva boşalıyor.
-        write_theme(&root, "paper", "background = \"#ffffff\"\n");
+        write_theme_file(&root, "paper", "background = \"#ffffff\"\n");
         assert_eq!(
             load_theme(Some(&root.0), "paper").or_current(),
             (

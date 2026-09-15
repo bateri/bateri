@@ -14,11 +14,12 @@ use std::collections::BTreeMap;
 use bt_gpu::FontNotice;
 
 /// Tanının geldiği yer. Sıra alt başlıkta hangi yuvanın önce görüneceği.
-///
-/// Yazma yuvası kendi phase'iyle gelir — kullanılmayan varyant ölü kod
-/// olurdu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Source {
+    /// View ▸ Theme ▸'nin dosyaya yazması: dosya okunamadı, ayrıştırılamadı
+    /// ya da yazılamadı. **İlk sırada**, çünkü kullanıcının az önce yaptığı
+    /// bir şeyin cevabı; ayar dosyasının tanısı onu "(+1 more)"e itmemeli.
+    Write,
     /// `settings.toml`: okunamadı, ayrıştırılamadı ya da bir anahtar kabul
     /// edilmedi.
     Settings,
@@ -126,6 +127,14 @@ mod tests {
         assert_eq!(notices.subtitle(), "tema");
         assert_eq!(notices.get(Source::Theme), ["tema"]);
         assert!(notices.get(Source::Settings).is_empty());
+    }
+
+    #[test]
+    fn write_notice_comes_first() {
+        let mut notices = Notices::default();
+        notices.replace(Source::Settings, vec!["ayar".to_owned()]);
+        notices.replace(Source::Write, vec!["yazma".to_owned()]);
+        assert_eq!(notices.subtitle(), "yazma (+1 more)");
     }
 
     #[test]
