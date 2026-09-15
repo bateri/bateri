@@ -246,8 +246,9 @@ Kod commit'lerinin içinde, aynı push'ta gidiyor:
 
 <!-- `/ship` bekleyen manuel adımları BU başlık altında arar. -->
 
-- [ ] B.1 `/ship` push `[oto]` — yapılacak: 37 commit + bu kapanış commit'i;
-      push'tan önce `make hepsi` · `make test-yaris` · `make duman` · `make kur`
+- [x] B.1 `/ship` push `[oto]` — 2026-09-15, `b9944de..5d3e821` (40 commit);
+      push'tan önce `make hepsi` · `make test-yaris` · `make duman` (`kare=1
+      hucre=8 glif=6 kural=15`) · `make kur` dördü de exit 0
 - [x] B.2 Göz kontrolleri `[elle]` — kullanıcı yaptı, 2026-09-14 ve
       2026-09-15 (tablo; phase-4c phase-4b'ninkine yaslandı, phase-5 ölçüm fazı)
 - [x] B.3 Ölçüm `[komut]` — phase-5, sonuç `docs/OLCUMLER.md` → `## Boşta
@@ -259,10 +260,8 @@ Kod commit'lerinin içinde, aynı push'ta gidiyor:
 
 ## Geri Alma
 
-- **Henüz push edilmediği için** en basit geri alma `/ship`'i koşmamak: sorun
-  push'tan önce bulunursa revert gerekmez, düzeltme forward-fix olarak eklenir.
-  Aşağıdaki zincir yalnız `main`'e gittikten **sonra** bir sorun çıkarsa
-  geçerli; sıra tersten.
+- **`main`'e gitti (2026-09-15, `5d3e821`).** Sorun çıkarsa önce forward-fix
+  düşünülür; revert gerekirse aşağıdaki zincir geçerli, sıra tersten.
 - **`32f28b2` (phase-5)** yalnız belge ve yorum: geri alınırsa
   `docs/OLCUMLER.md` silinir, "henüz yok" cümleleri (`CLAUDE.md`, `Measured`'ın
   doc'u, `/measure`) ve `.claude/` iş akışı değişiklikleri birlikte döner —
