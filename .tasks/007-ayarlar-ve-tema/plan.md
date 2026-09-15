@@ -32,8 +32,12 @@ görünümünü izlesin.
     takas edilebilir.
   - **R3.2** — Taşımadan önce bugünkü 19 palet değeri sabit listeye bağlı.
   - **R3.3** — Varsayılan ön plan + SGR 2 `dim` rolünü alır (ters video dahil).
-  - **R3.4** — Tema adı çözümü: `themes/{ad}.toml` → gömülü → önceki tema +
-    görünür hata.
+  - **R3.4** — Tema adı çözümü: `themes/{ad}.toml` → gömülü; kullanılamazsa
+    görünür hata ve yedek. Tema **bir görünüm için** seçilirken (açılış,
+    görünüm değişimi) yedek görünüme uyan gömülü tema; görünüm aynıyken
+    etkin tema dosyası bozulunca (canlı yenileme) ekrandaki tema kalır.
+    (phase-3'te düzeldi: "önceki tema" görünüm değişiminde öteki görünümün
+    temasını bırakıyordu.)
 - **R4** — Açık tema ve sistem: gömülü `bateri-light`; `theme = "system"`
   (varsayılan) → `light_theme` / `dark_theme`; görünüm değişimi canlı.
   - **R4.1** — SGR 2'li renk zemine doğru karıştırılır; sabit değerli çizim

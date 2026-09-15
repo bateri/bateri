@@ -45,6 +45,11 @@ _Requirements: R5, R1.1, R1.2, R10_
   - Değilse fark: tema seçimi ya da etkin tema dosyası değişti → ad çözümü →
     `set_theme` (görünüm uygulayıcısıyla aynı yol); `scrollback` →
     seçenekler. Yuvalar kendi kaynaklarına göre dolar/boşalır.
+  - **Hata kuralı görünüm değişiminden farklı (R3.4):** kullanılamayan tema
+    (yarım kaydedilmiş tema dosyası) takas edilmez, ekrandaki tema kalır ve
+    tema yuvası dolar. phase-3'ün `AppDelegate::choose_theme`'i gömülü yedeğe
+    düşüyor (`ThemeLoaded::or_embedded`) — bu yolda o yedek düzenleme
+    sırasında pencereyi gömülü temaya çakar; `Failed`'i ayrı ele al.
   - Açılışta izleme kurulur; **hermetik dal** süreli koşuda kurmaz.
 - **`docs/AYARLAR.md`** — "yeniden açılışta" cümlesi gider: kayıt anında
   uygulanır; yarım kayıtta ekran olduğu gibi kalır; dizini ilk kez kabuktan

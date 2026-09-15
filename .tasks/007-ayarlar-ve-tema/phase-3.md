@@ -131,14 +131,14 @@ _Requirements: R4, R4.1, R3.1, R10_
 - **Duman makine açık moddayken** iki koşuda `kare=1 hucre=8 glif=6
   kural=15`. Yarış sınaması `race_set_theme_and_frame` eklendi, iki profil
   yeşil.
-- **Göz kontrolü yarım:** geçici `HOME` + renk örneği basan kabukla açılış
-  açık modda `bateri-light`'la geldi; renkli ve parlak sekizli, sönük satır,
-  `ls -G` ve `git diff` okunur, alt başlık boş. **Canlı geçiş gözle
-  görülmedi:** sistem görünümü bir kez koyuya çevrilip geri alındı ama o
-  anda pencere kullanıcının etkin uygulamasının arkasındaydı; makine
-  kullanımdayken ikinci kez çevrilmedi. Parçalar sınamalı (`set_theme` →
-  kare, seçim fonksiyonu, canlı kural) ama **view → hedefsiz eylem →
-  uygulayıcı kablosunu hiçbir sınama görmüyor**; görsel onay kullanıcıda.
+- **Göz kontrolü** geçici `HOME` + renk örneği basan kabukla. Açılış açık
+  modda `bateri-light`'la geldi; renkli ve parlak sekizli, sönük satır,
+  `ls -G` ve `git diff` okunur, alt başlık boş. **Canlı geçiş** commit'ten
+  sonra, yalnız pencerenin dikdörtgeni yakalanarak: sistem koyu → açık
+  çevrilince pencerenin zemini açık → koyu → açık döndü, kabuk çıktısı
+  yerinde kaldı, stderr boş. Pencere öne alınamadı (yarısı başka pencerenin
+  arkasındaydı), görünen yarısı yetti. Bu kabloyu (view → hedefsiz eylem →
+  uygulayıcı) **hiçbir sınama görmüyor**; tek kanıtı bu göz kontrolü.
 - **`/code-review` (high) kararları.** Düzeltilen (düşük): ilk hâlde görünüm
   değişiminde kullanılamayan tema "ekrandaki kalır"dı; `dark_theme` bozukken
   koyu → açık → koyu geçiş açık temayı koyu modda bırakıyordu. Görünüm
