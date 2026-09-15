@@ -11,10 +11,12 @@
 
 use std::collections::BTreeMap;
 
+use bt_gpu::FontNotice;
+
 /// Tanının geldiği yer. Sıra alt başlıkta hangi yuvanın önce görüneceği.
 ///
-/// Font ve yazma yuvaları kendi phase'leriyle gelir — kullanılmayan varyant
-/// ölü kod olurdu.
+/// Yazma yuvası kendi phase'iyle gelir — kullanılmayan varyant ölü kod
+/// olurdu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Source {
     /// `settings.toml`: okunamadı, ayrıştırılamadı ya da bir anahtar kabul
@@ -23,6 +25,28 @@ pub(crate) enum Source {
     /// Seçilen tema: bulunamadı, dosyası okunamadı ya da ayrıştırılamadı, ya
     /// da bir rengi kabul edilmedi.
     Theme,
+    /// Açılan font: istenen aile bulunamadı ya da eşaralıklı değil. Kaynağı
+    /// dosya değil atlas; atlasın her kurulumundan sonra yeniden yazılıyor.
+    Font,
+}
+
+/// Font yuvasının iletileri.
+///
+/// Metin burada, `bt-gpu`'da değil: alt başlığın öteki dizgileri de bu
+/// crate'te kuruluyor ve dil kuralı (UI dizgisi İngilizce) tek yerde
+/// uygulanıyor.
+pub(crate) fn font_messages(notice: Option<FontNotice>) -> Vec<String> {
+    match notice {
+        None => Vec::new(),
+        Some(FontNotice::FamilyNotFound { requested, using }) => {
+            vec![format!("font \"{requested}\" not found; using {using}")]
+        }
+        Some(FontNotice::NotMonospaced { family }) => {
+            vec![format!(
+                "font \"{family}\" is not monospaced; text may not line up"
+            )]
+        }
+    }
 }
 
 /// Dolu yuvalar; boş yuva haritada durmuyor.
@@ -32,6 +56,11 @@ pub(crate) struct Notices {
 }
 
 impl Notices {
+    /// Kaynağın yuvasındaki iletiler; boş yuva boş dilim.
+    pub(crate) fn get(&self, source: Source) -> &[String] {
+        self.slots.get(&source).map_or(&[], Vec::as_slice)
+    }
+
     /// Kaynağın yuvasını **tamamen** yeniden yazar; boş liste yuvayı boşaltır.
     /// Başka kaynağın yuvasına dokunmaz.
     pub(crate) fn replace(&mut self, source: Source, messages: Vec<String>) {
@@ -95,5 +124,29 @@ mod tests {
         // Ayar dosyası düzeldi: temanın tanısı yerinde kalır.
         notices.replace(Source::Settings, Vec::new());
         assert_eq!(notices.subtitle(), "tema");
+        assert_eq!(notices.get(Source::Theme), ["tema"]);
+        assert!(notices.get(Source::Settings).is_empty());
+    }
+
+    #[test]
+    fn font_notices_come_after_the_files() {
+        let mut notices = Notices::default();
+        notices.replace(
+            Source::Font,
+            font_messages(Some(FontNotice::FamilyNotFound {
+                requested: "Fira".to_owned(),
+                using: "Menlo".to_owned(),
+            })),
+        );
+        assert_eq!(notices.subtitle(), "font \"Fira\" not found; using Menlo");
+        notices.replace(Source::Theme, vec!["tema".to_owned()]);
+        assert_eq!(notices.subtitle(), "tema (+1 more)");
+        assert_eq!(
+            font_messages(Some(FontNotice::NotMonospaced {
+                family: "Helvetica".to_owned()
+            })),
+            ["font \"Helvetica\" is not monospaced; text may not line up"]
+        );
+        assert!(font_messages(None).is_empty());
     }
 }

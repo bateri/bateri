@@ -8,9 +8,11 @@
 //! `replaceRegion` ile kendi `R8Unorm` dokusuna yazıyor.
 //!
 //! Dört font yüzü (`Face`) ve kural çizgileri (`RuleKind`) burada: kural
-//! sprite'ları fonttan glyph almıyor, yordamsal çiziliyor. Kutu çizim
-//! karakterleri, emoji ve font seti ayarı hâlâ kapsam dışı (004 →
-//! `plan.md` → Kapsam Dışı) ve ayrı setlere kaldı.
+//! sprite'ları fonttan glyph almıyor, yordamsal çiziliyor. Aile ayardan
+//! gelir (007 phase-5) ve makinede yoksa zincire düşülür; bunu söyleyen
+//! [`FontIssue`] çağırana döner, bu crate kimseye bir şey basmaz. Kutu çizim
+//! karakterleri, emoji ve yedek font listesi (bir glyph'i başka fonttan
+//! almak) hâlâ kapsam dışı ve ayrı setlere kaldı.
 
 mod font;
 mod raster;
@@ -18,7 +20,7 @@ mod raster;
 use std::collections::HashMap;
 
 use font::Faces;
-pub use font::{Face, Metrics};
+pub use font::{Face, FontIssue, Metrics};
 use raster::DrawResult;
 pub use raster::RuleKind;
 
@@ -60,9 +62,12 @@ const TEXTURE_EDGE: u16 = 1024;
 ///
 /// Üst sınır keyfi değil: `u16` metriğin sonuna kadar giden bir punto yuva
 /// başına gigabaytlık tampon ister ve `texture_px()` Metal'in doku sınırını
-/// katbekat aşar. Alt sınır okunmayan puntoları keser. Ayar dosyası geldiğinde
-/// (00X) doğrulama orada da yapılır ama sınırın **burada** olması şart:
-/// `Atlas` kendi değişmezini çağıranın disiplinine bırakmıyor.
+/// katbekat aşar. Alt sınır okunmayan puntoları keser. Ayar ayrıştırıcısı
+/// (`bt-core`) yalnız "sonlu ve sıfırdan büyük" diyor, aralığın **tek sahibi
+/// burası**: `Atlas` kendi değişmezini çağıranın disiplinine bırakmıyor, ve
+/// ölçüt `punto × ölçek` olduğu için ayar tarafında bir tavan pencere ekran
+/// değiştirdikçe anlamını değiştirirdi. Kırpma **sessiz**
+/// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 4).
 const MIN_POINT_SIZE: f64 = 4.0;
 const MAX_POINT_SIZE: f64 = 144.0;
 
@@ -86,8 +91,11 @@ pub struct Upload<'a> {
 pub struct Atlas {
     faces: Faces,
     metrics: Metrics,
-    /// Kurulduğu (punto, ölçek). [`Atlas::ensure`]'nin ölçütü.
-    key: (f64, f64),
+    /// Kurulduğu (aile, punto, ölçek). [`Atlas::ensure`]'nin ölçütü.
+    key: Key,
+    /// Zincirin istenen aile için söylediği; `None` → istenen açıldı ya da
+    /// aile istenmedi.
+    font_issue: Option<FontIssue>,
     /// Izgaranın (sütun, satır) yuva sayısı.
     grid: (u16, u16),
     /// Karakterin **çözümlendiği** yuva — yalnız yüklenenler değil: fontun
@@ -105,14 +113,40 @@ pub struct Atlas {
     tofu: Vec<u8>,
 }
 
+/// Atlasın anahtarı: bu üçünden biri değişirse metrik, raster ve yuva
+/// eşlemesi geçersizdir.
+#[derive(Debug, PartialEq)]
+struct Key {
+    family: Option<String>,
+    point_size: f64,
+    scale: f64,
+}
+
+impl Key {
+    /// Karşılaştırma **tam eşitlik**: punto ve ölçek ayrık değerler arasında
+    /// sıçrıyor, aralarında yorumlanacak bir yakınlık yok. Aile adı olduğu gibi
+    /// — `"menlo"` ile `"Menlo"` aynı fontu açsa da ayrı anahtar; bedeli tek
+    /// bir yeniden kurulum.
+    fn is(&self, family: Option<&str>, point_size: f64, scale: f64) -> bool {
+        self.family.as_deref() == family && self.point_size == point_size && self.scale == scale
+    }
+}
+
 impl Atlas {
-    /// `point_size` mantıksal punto, `scale` ekranın backing ölçeği.
+    /// `family` ayarın aile adı (`None` → zincir), `point_size` mantıksal
+    /// punto, `scale` ekranın backing ölçeği.
     ///
-    /// İkisi **çarpılıp** fonta girer: metrik ve raster aynı fiziksel piksel
-    /// uzayında doğar, yani ölçek önbellek anahtarının parçasıdır. Anahtarın
-    /// değişmesi hâlinde yapılacak şeyi [`Atlas::ensure`] biliyor.
-    pub fn new(point_size: f64, scale: f64) -> Self {
-        let faces = Faces::from_chain(effective_point_size(point_size, scale));
+    /// Punto ile ölçek **çarpılıp** fonta girer: metrik ve raster aynı fiziksel
+    /// piksel uzayında doğar, yani ölçek önbellek anahtarının parçasıdır. Aile
+    /// de öyle: başka fontun metriği başka hücre demek. Anahtarın değişmesi
+    /// hâlinde yapılacak şeyi [`Atlas::ensure`] biliyor.
+    ///
+    /// Bulunamayan aile **hata değil**: zincirdeki font açılır ve
+    /// [`Atlas::font_issue`] bunu söyler. Terminal fontsuz açılamaz; yanlış
+    /// yazılmış bir ad pencereyi kapatmamalı.
+    pub fn new(family: Option<&str>, point_size: f64, scale: f64) -> Self {
+        let (faces, font_issue) =
+            Faces::from_chain(family, effective_point_size(point_size, scale));
         // Metrik **yalnız düz yüzden**: hücre ızgarası yüze göre oynayamaz.
         // Kalın glyph aynı yuvaya rasterize olur ve bir piksel kırpılabilir —
         // her terminal bunu böyle yapıyor.
@@ -124,7 +158,12 @@ impl Atlas {
         Self {
             faces,
             metrics,
-            key: (point_size, scale),
+            key: Key {
+                family: family.map(str::to_owned),
+                point_size,
+                scale,
+            },
+            font_issue,
             grid,
             slots: HashMap::new(),
             next: TOFU + 1,
@@ -133,27 +172,36 @@ impl Atlas {
         }
     }
 
-    /// Anahtar ([`Atlas::new`]'in punto/ölçek çifti) değiştiyse atlası
+    /// Anahtar ([`Atlas::new`]'in aile/punto/ölçek üçlüsü) değiştiyse atlası
     /// yeniden kurar ve `true` döner.
     ///
     /// `true` aynı zamanda **"dokuyu yeniden ayır"** demektir: metrik ve
     /// dolayısıyla [`Atlas::texture_px`] değişmiş olabilir, eski boyutlu
     /// dokuya yeni metrikle yazmak sessizce bozar. Ölçek değişimini AppKit
-    /// haber veriyor (`windowDidChangeBackingProperties:`); bu metot o
-    /// kancanın karşılığı ve yeniden kurma kararını çağıranın hatırlamasına
-    /// bırakmıyor. Karşılaştırma **tam eşitlik**: ölçek ve punto ayrık
-    /// değerler arasında sıçrıyor, aralarında yorumlanacak bir yakınlık yok.
+    /// haber veriyor (`windowDidChangeBackingProperties:`), aile ve puntoyu
+    /// ayar dosyası; bu metot iki kancanın da karşılığı ve yeniden kurma
+    /// kararını çağıranın hatırlamasına bırakmıyor.
     #[must_use = "true ise atlas yeniden kuruldu: yuva eşlemesi ve doku boyutu değişmiş olabilir, doku da yeniden ayrılmalı"]
-    pub fn ensure(&mut self, point_size: f64, scale: f64) -> bool {
-        if (point_size, scale) == self.key {
+    pub fn ensure(&mut self, family: Option<&str>, point_size: f64, scale: f64) -> bool {
+        if self.key.is(family, point_size, scale) {
             return false;
         }
-        *self = Self::new(point_size, scale);
+        *self = Self::new(family, point_size, scale);
         true
     }
 
     pub fn metrics(&self) -> Metrics {
         self.metrics
+    }
+
+    /// İstenen ailenin sonucu: bulunamadı ya da eşaralıklı değil. Aile
+    /// istenmediyse ya da istenen eşaralıklı bir aile açıldıysa `None`.
+    ///
+    /// Atlasla birlikte doğuyor ve yeniden kurulumda yeniden hesaplanıyor;
+    /// ölçek değişimi aynı cevabı verir, yani pencereyi başka ekrana taşımak
+    /// cevabı oynatmaz.
+    pub fn font_issue(&self) -> Option<&FontIssue> {
+        self.font_issue.as_ref()
     }
 
     /// Atlas dokusunun piksel boyutu; `bt-gpu` dokuyu buna göre ayırır.
@@ -390,10 +438,17 @@ mod tests {
     /// Menlo ve SF Mono CJK içermez ve `CTFontGetGlyphsForCharacters` başka
     /// fonta düşmez: bu karakter `.notdef` verir.
     const UNKNOWN_CHAR: char = '漢';
+    /// Hiçbir makinede olmayan aile; CoreText yerine başka bir font verir.
+    const MISSING_FAMILY: &str = "Bu Aile Yok 12345";
+
+    /// Zincirle kurulan atlas — ayarda aile yokken üretimin kurduğu.
+    fn atlas(point_size: f64, scale: f64) -> Atlas {
+        Atlas::new(None, point_size, scale)
+    }
 
     #[test]
     fn metrics_are_in_a_sane_range() {
-        let m = Atlas::new(POINT_SIZE, 1.0).metrics();
+        let m = atlas(POINT_SIZE, 1.0).metrics();
         assert!(m.cell_px.0 > 0, "genişlik sıfır: {m:?}");
         assert!(m.cell_px.1 > m.cell_px.0, "monospace hücre uzundur: {m:?}");
         assert!(m.baseline_px > 0, "taban çizgisi sıfır: {m:?}");
@@ -406,7 +461,7 @@ mod tests {
 
     #[test]
     fn same_char_gets_same_slot() {
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let (first, upload) = a.slot(Sprite::Char('A'), Face::Regular);
         assert_ne!(first, TOFU, "tanınan karakter tofu'ya düşmemeli");
         assert!(upload.is_some(), "ilk soruluşta yükleme gelmeli");
@@ -423,7 +478,7 @@ mod tests {
         // Bu bekçinin asıl işi derlenmek: köşe ile baytlar ayrı çağrılardan
         // gelseydi `bt-gpu`'nun yükleme döngüsü `&mut` ödüncü elindeyken
         // `&self` istemek zorunda kalır ve derlenmezdi.
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let slot_len = a.metrics().slot_bytes();
         // `bt-gpu`'nun yükleme döngüsünün şekli: yükleme kendi bloğunda
         // tüketilir, sonra aynı atlas uv için yeniden okunur. Köşe
@@ -442,7 +497,7 @@ mod tests {
     fn rasterized_glyph_is_not_empty() {
         // Bu bekçi olmadan "her şey çalışıyor ama atlas bomboş" durumu sessiz
         // kalır: yuva numaraları doğru, doku doğru boyutta, ekran boş.
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let (_, upload) = a.slot(Sprite::Char('W'), Face::Regular);
         let bytes = upload.expect("ilk soruluşta yükleme gelmeli").bytes;
         assert!(bytes.iter().any(|&b| b > 0), "'W' hiç piksel boyamadı");
@@ -458,7 +513,7 @@ mod tests {
 
     #[test]
     fn tofu_box_is_drawn_and_resident() {
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         assert_eq!(a.tofu_bitmap().len(), a.metrics().slot_bytes());
         assert!(
             a.tofu_bitmap().iter().any(|&b| b > 0),
@@ -475,7 +530,7 @@ mod tests {
 
     #[test]
     fn unknown_char_is_cached() {
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         assert_eq!(a.slot(Sprite::Char(UNKNOWN_CHAR), Face::Regular).0, TOFU);
         // Fontun bu karakteri tanımaması kalıcı: ikinci soruluşta CoreText'e
         // gidilmemeli. Bekçi iç tabloya bakıyor çünkü FFI çağrısının olup
@@ -495,7 +550,7 @@ mod tests {
         // ateşlenebiliyor — ve hiç de seyrek bir durum değil: kalın bir TUI
         // çerçevesi bu koldan geçiyor.
         const BOX_DRAWING: char = '─';
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let regular = a.slot(Sprite::Char(BOX_DRAWING), Face::Regular).0;
         let (bold, _) = a.slot(Sprite::Char(BOX_DRAWING), Face::Bold);
 
@@ -519,7 +574,7 @@ mod tests {
 
     #[test]
     fn full_atlas_returns_tofu_without_caching() {
-        let mut a = Atlas::new(LARGE_POINT_SIZE, 1.0);
+        let mut a = atlas(LARGE_POINT_SIZE, 1.0);
         let (used, total) = a.occupancy();
         assert_eq!(used, 1, "yeni atlasta yalnız tofu ayrılmış olmalı");
         // Yazdırılabilir ASCII'nin tamamı: havuz kapasiteden büyük olmalı ve
@@ -565,7 +620,7 @@ mod tests {
         // diyor. `bt-gpu`'nun offscreen kapısı da göremezdi: o da "hücrenin
         // içi arka planla tekdüze değil" diyor, harfin doğru yerde olduğunu
         // değil. Ters bir taban ancak gözle görülürdü.
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
         let (_, upload) = a.slot(Sprite::Char('W'), Face::Regular);
         let bytes = upload.expect("yeni yuva").bytes;
@@ -591,7 +646,7 @@ mod tests {
         // satırı kırpılırdı. Kırpılan glyph hücrenin son satırını doldurur;
         // sığan glyph orayı boş bırakır — ölçüt bu. 'W' ile sınamak yetmez:
         // descender'ı olmayan harf iki yuvarlamada da aynı görünür.
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
         let (_, upload) = a.slot(Sprite::Char('g'), Face::Regular);
         let bytes = upload.expect("yeni yuva").bytes;
@@ -610,7 +665,7 @@ mod tests {
 
     #[test]
     fn negative_cache_is_capped_and_evicted() {
-        let mut a = Atlas::new(LARGE_POINT_SIZE, 1.0);
+        let mut a = atlas(LARGE_POINT_SIZE, 1.0);
         let cap = a.negative_cache_cap();
         // Tanınan bir karakter önce yuvasını alsın: tahliyenin **yalnız**
         // negatif kayıtları attığını sınamak için bir pozitif kayıt gerek.
@@ -662,7 +717,7 @@ mod tests {
         // birime de dokunuyor ve glyph üretmeyip `false` dönüyor. `font::glif`
         // o dönüşü bilerek yok sayıyor ve işaretçilerini dilimden türetiyor;
         // ikisinin gerekçesi de ancak bu yol koşarsa sınanmış olur.
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         assert_eq!(
             a.slot(Sprite::Char('𝔸'), Face::Regular).0,
             TOFU,
@@ -676,7 +731,7 @@ mod tests {
         // ızgara sıfıra bölerdi. Devasa punto ise yuva başına gigabaytlık
         // tampon isterdi.
         for (point_size, scale) in [(f64::NAN, 1.0), (13.0, f64::INFINITY), (1e9, 1.0)] {
-            let a = Atlas::new(point_size, scale);
+            let a = atlas(point_size, scale);
             let m = a.metrics();
             assert!(
                 m.cell_px.0 > 0 && m.cell_px.1 > 0,
@@ -692,8 +747,8 @@ mod tests {
 
     #[test]
     fn scale_is_part_of_the_key() {
-        let one = Atlas::new(POINT_SIZE, 1.0).metrics();
-        let two = Atlas::new(POINT_SIZE, 2.0).metrics();
+        let one = atlas(POINT_SIZE, 1.0).metrics();
+        let two = atlas(POINT_SIZE, 2.0).metrics();
         assert_ne!(one.cell_px, two.cell_px, "@2x hücre @1x ile aynı olamaz");
         // Tam iki kat beklenmiyor: her ölçü ayrı ayrı yukarı yuvarlanıyor.
         assert!(
@@ -704,16 +759,92 @@ mod tests {
 
     #[test]
     fn ensure_rebuilds_only_when_key_changes() {
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         a.slot(Sprite::Char('A'), Face::Regular);
-        assert!(!a.ensure(POINT_SIZE, 1.0), "aynı anahtar yeniden kurmamalı");
+        assert!(
+            !a.ensure(None, POINT_SIZE, 1.0),
+            "aynı anahtar yeniden kurmamalı"
+        );
         assert_eq!(a.occupancy().0, 2, "yuvalar korunmalı");
         assert!(
-            a.ensure(POINT_SIZE, 2.0),
+            a.ensure(None, POINT_SIZE, 2.0),
             "ölçek değişti: yeniden kurulmalı"
         );
         assert_eq!(a.occupancy().0, 1, "yeni atlasta yalnız tofu");
-        assert_eq!(a.metrics(), Atlas::new(POINT_SIZE, 2.0).metrics());
+        assert_eq!(a.metrics(), atlas(POINT_SIZE, 2.0).metrics());
+    }
+
+    #[test]
+    fn ensure_rebuilds_when_family_changes() {
+        // Monaco ile Menlo 13pt'de aynı hücreyi verebilir; ölçüt metrik değil
+        // yuvaların sıfırlanması. Anahtarda aile olmasaydı eski fontun
+        // glyph'leri yeni fontun atlasında kalırdı ve belirti sessizdi.
+        let mut a = atlas(POINT_SIZE, 1.0);
+        a.slot(Sprite::Char('A'), Face::Regular);
+        assert!(
+            !a.ensure(None, POINT_SIZE, 1.0),
+            "aynı anahtar yeniden kurmamalı"
+        );
+        assert!(
+            a.ensure(Some("Monaco"), POINT_SIZE, 1.0),
+            "aile değişti: yeniden kurulmalı"
+        );
+        assert_eq!(a.occupancy().0, 1, "yeni atlasta yalnız tofu");
+        a.slot(Sprite::Char('A'), Face::Regular);
+        assert!(
+            !a.ensure(Some("Monaco"), POINT_SIZE, 1.0),
+            "aynı aile yeniden kurmamalı"
+        );
+        assert_eq!(a.occupancy().0, 2, "yuvalar korunmalı");
+        assert!(
+            a.ensure(None, POINT_SIZE, 1.0),
+            "zincire dönüş de bir değişim"
+        );
+    }
+
+    #[test]
+    fn missing_family_opens_the_chain_and_says_so() {
+        let a = Atlas::new(Some(MISSING_FAMILY), POINT_SIZE, 1.0);
+        let (_, chain) = font::open_default(POINT_SIZE);
+        assert_eq!(
+            a.font_issue(),
+            Some(&FontIssue::FamilyNotFound {
+                requested: MISSING_FAMILY.to_owned(),
+                using: chain,
+            })
+        );
+        // CoreText'in ikamesi (bu makinede Helvetica) değil, zincir açıldı.
+        assert_eq!(a.metrics(), atlas(POINT_SIZE, 1.0).metrics());
+        assert_eq!(atlas(POINT_SIZE, 1.0).font_issue(), None, "zincir sessiz");
+    }
+
+    #[test]
+    fn family_name_is_matched_regardless_of_case() {
+        // CoreText `"menlo"`'yu buluyor ve adı `"Menlo"` diye bildiriyor
+        // (ölçüldü); birebir karşılaştırma bulunan fontu "yok" sayar ve
+        // zincire düşerdi.
+        for name in ["Menlo", "menlo", "MENLO"] {
+            let a = Atlas::new(Some(name), POINT_SIZE, 1.0);
+            assert_eq!(a.font_issue(), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn proportional_family_opens_with_a_warning() {
+        // Helvetica her macOS'ta var ve eşaralıklı değil.
+        let mut a = Atlas::new(Some("Helvetica"), POINT_SIZE, 1.0);
+        assert_eq!(
+            a.font_issue(),
+            Some(&FontIssue::NotMonospaced {
+                family: "Helvetica".to_owned()
+            })
+        );
+        // Reddedilmiyor, çiziliyor: hücre boşluktan dar olan 'W' yuvaya
+        // kırpılarak rasterize olur, tampon taşmaz.
+        let slot_len = a.metrics().slot_bytes();
+        let bytes = slot_bytes_of(&mut a, Sprite::Char('W'), Face::Regular);
+        assert_eq!(bytes.len(), slot_len);
+        assert!(bytes.iter().any(|&b| b > 0), "'W' hiç piksel boyamadı");
     }
 
     #[test]
@@ -727,7 +858,7 @@ mod tests {
 
     #[test]
     fn slot_origin_walks_the_grid() {
-        let a = Atlas::new(POINT_SIZE, 1.0);
+        let a = atlas(POINT_SIZE, 1.0);
         let (w, h) = a.metrics().cell_px;
         let cols = a.grid.0;
         assert_eq!(a.slot_origin(TOFU), (0, 0));
@@ -753,7 +884,7 @@ mod tests {
 
     #[test]
     fn bold_face_gets_own_slot() {
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let mut slots = Vec::new();
         for face in [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic] {
             let slot = a.slot(Sprite::Char('M'), face).0;
@@ -774,7 +905,7 @@ mod tests {
         // Metrik yalnız düz yüzden geliyor (R1.3); kalın glyph aynı yuvaya
         // rasterize oluyor. Kırpma kabul edilmiş bir bedel, ama yuvanın
         // **taşmaması** sözleşme: `raster::draw` tamponun boyunu assert ediyor.
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let bytes = slot_bytes_of(&mut a, Sprite::Char('M'), Face::Bold);
         assert_eq!(bytes.len(), a.metrics().slot_bytes());
         assert!(
@@ -785,7 +916,7 @@ mod tests {
 
     #[test]
     fn rule_sprites_are_not_empty_and_differ() {
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let mut seen: Vec<(RuleKind, Vec<u8>)> = Vec::new();
         for kind in [
             RuleKind::Single,
@@ -811,7 +942,7 @@ mod tests {
 
     #[test]
     fn rule_keeps_one_slot_regardless_of_face() {
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let regular = a.slot(Sprite::Rule(RuleKind::Single), Face::Regular).0;
         // Çağıran yanılıp yüz verse bile normalizasyon aynı yuvaya götürür;
         // yoksa altı çeşit dört yüzle yirmi dört yuva harcardı.
@@ -821,7 +952,7 @@ mod tests {
 
     #[test]
     fn curl_is_really_a_wave() {
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
         let (w, h) = (usize::from(m.cell_px.0), usize::from(m.cell_px.1));
         let bytes = slot_bytes_of(&mut a, Sprite::Rule(RuleKind::Curl), Face::Regular);
@@ -844,7 +975,7 @@ mod tests {
 
     #[test]
     fn curl_is_continuous_across_cell_edges() {
-        let mut a = Atlas::new(POINT_SIZE, 1.0);
+        let mut a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
         let (w, h) = m.cell_wh();
         let bytes = slot_bytes_of(&mut a, Sprite::Rule(RuleKind::Curl), Face::Regular);
@@ -890,7 +1021,7 @@ mod tests {
     #[test]
     fn rule_envelope_fits_cell_with_real_font() {
         for point_size in [POINT_SIZE, LARGE_POINT_SIZE] {
-            let m = Atlas::new(point_size, 2.0).metrics();
+            let m = atlas(point_size, 2.0).metrics();
             let h = m.cell_px.1;
             assert!(
                 m.underline_px.0 + m.underline_px.1 <= h,

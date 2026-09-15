@@ -23,7 +23,7 @@ pub enum GpuError {
     NoAtlasTexture,
     /// Glyph'i olan bir kare, atlası hiç kurulmamış bir renderer'a geldi.
     ///
-    /// Atlasın anahtarı (punto + backing ölçeği) pencereden gelir ve onu
+    /// Atlasın anahtarının ölçek yarısı pencereden gelir ve onu
     /// kuran tek yer `Renderer::cell_metrics`. Bu hata "ölçeği söylemeden
     /// glyph çizmeye çalışıldı" demektir; alternatifi @1x bir atlas uydurup
     /// **sessizce** yanlış boyda çizmekti.

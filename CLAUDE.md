@@ -23,11 +23,11 @@ rasterize eder; hücre ölçüsü oradan gelir ve `bt-gpu`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
 çizer. `bt-shell` klavyeyi PTY'ye akıtır; fareyle seçim, pano, geçmişte
 kaydırma ve kapanış sırası ondadır; `settings.toml`'u okur (bugün
-`scrollback` ve tema seçimi) ve temayı `themes/{ad}.toml`'dan ya da gömülü
-`bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
+`scrollback`, tema seçimi ve font) ve temayı `themes/{ad}.toml`'dan ya da
+gömülü `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
 anında** uygulanır (`watch`: vnode kaynakları; `Session::set_theme`,
-`Session::set_terminal_options`); varsayılan tema sistemin açık/koyu
-görünümünü de canlı izler. `make kur` `bateri.app` paketini üretir.
+`Session::set_terminal_options`, `Renderer::set_font`); varsayılan tema
+sistemin açık/koyu görünümünü de canlı izler. `make kur` `bateri.app` paketini üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri
 aynı commit'te düzelir.

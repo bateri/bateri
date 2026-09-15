@@ -5,7 +5,8 @@ dosyalarda durur. Bu belge anahtarların, tema biçiminin, varsayılanların ve
 dosya bozukken ne olacağının **tek sahibidir**; kod tarafındaki karşılığı
 `crates/bt-core/src/settings.rs` ve `theme.rs` (ayrıştırma),
 `crates/bt-shell/src/settings.rs` (okuma ve tema adının çözümü),
-`watch.rs` (dosyaların izlenmesi).
+`watch.rs` (dosyaların izlenmesi), `crates/bt-atlas/src/font.rs` (font
+ailesinin bulunması).
 
 ## Dosyanın yeri
 
@@ -55,6 +56,8 @@ kopya yolu kalır.
 | seçilen tema bulunamıyor | görünüme uyan gömülü tema (koyuda `bateri`, açıkta `bateri-light`), uyarı |
 | tema dosyası okunamıyor ya da geçersiz TOML | görünüme uyan gömülü tema, uyarı (aynı adlı gömülü tema **kullanılmaz**) |
 | tema dosyasında bir renk kabul edilmiyor | yalnız o renk `bateri`'ninki, uyarı |
+| font ailesi bulunamıyor | varsayılan font (SF Mono, yoksa Menlo), uyarı |
+| font ailesi eşaralıklı değil | aile yine kullanılır, uyarı |
 
 Tema kuralı görünüm değişiminde de aynı: yeni görünümün teması
 kullanılamıyorsa o görünüme uyan gömülü tema gelir — pencere öteki
@@ -70,6 +73,7 @@ ekranı bozmaz, uyarı çıkar ve dosyayı düzeltip kaydedince uyarı kalkar.
 | bir anahtarın değeri kabul edilmiyor | o anahtar **değişmez**, uyarı; tavanı aşan `scrollback` tavana iner |
 | anahtar dosyadan silindi | o anahtar varsayılanına döner |
 | seçilen tema bulunamıyor, dosyası okunamıyor ya da geçersiz TOML | **ekrandaki tema kalır**, uyarı |
+| font ailesi bulunamıyor | varsayılan font, uyarı; adı düzeltip kaydedince uyarı kalkar |
 
 Silinen dosyanın ayarları değiştirmemesi bilerek: çoğu editör kaydederken
 eski dosyayı bir an kenara taşır ya da önce boşaltıp sonra yazar; varsayılanlara
@@ -145,6 +149,49 @@ dark_theme = "bateri"
 - Boş ad ya da `/` içeren ad (`"../x"`) kabul edilmez, anahtarın
   varsayılanına döner ve uyarı verir: tema `themes/` dizininin dışından
   okunmaz.
+
+### `[font]`
+
+```toml
+[font]
+family = "Menlo"
+size = 13
+```
+
+| anahtar | tür | varsayılan | anlamı |
+|---|---|---|---|
+| `family` | metin | yok (SF Mono, yoksa Menlo) | yazı ailesi |
+| `size` | sayı, `0`'dan büyük | `13` | punto |
+
+- `family` bir **aile adıdır**, Font Kitabı'nda görünen ad (`"JetBrains
+  Mono"`, `"Menlo"`); büyük/küçük harf fark etmez. Tek bir yüzün PostScript
+  adı (`"Menlo-Regular"`) aile sayılmaz ve "bulunamadı" uyarısı verir.
+- Aile makinede yoksa varsayılan font kullanılır ve başlık çubuğunda
+  söylenir: `font "Fira Code" not found; using Menlo`. Adı düzeltip
+  kaydedince font değişir, uyarı kalkar.
+- Eşaralıklı olmayan bir aile (`"Helvetica"`) **reddedilmez**, uyarı verir:
+  `font "Helvetica" is not monospaced; text may not line up`. Hücre
+  genişliği boşluk karakterinden gelir; ondan geniş harfler hücreye
+  kırpılır.
+- `family = ""` ya da anahtarın olmaması varsayılan font demektir, uyarı
+  vermez.
+- `size` tam sayı da ondalıklı da olabilir (`13`, `13.5`). Sıfır, negatif,
+  `nan`, `inf` ya da sayı olmayan değer varsayılana (açılışta `13`, kayıt
+  anında o anki punto) döner ve uyarı verir.
+- Punto ekranın ölçeğiyle çarpılıp **sessizce** 4–144 aralığına çekilir:
+  Retina ekranda (2×) yazılan punto 2–72 arasında etkilidir, normal ekranda
+  4–144; dışındaki değer en yakın sınır gibi çizilir. Uyarı yok, çünkü aynı
+  değer pencere ekran değiştirdikçe sınırın bir içinde bir dışında
+  kalabilirdi.
+- Çok büyük puntoda glyph atlası çabuk dolar: dolduktan sonra ekranda ilk
+  kez görünen karakterler kutu (□) olarak çizilir. Punto küçültülünce ya da
+  uygulama yeniden açılınca geçer.
+- Font kaydettiğiniz anda değişir: pencere boyutu aynı kalır, sütun ve satır
+  sayısı yeni hücreye göre yeniden hesaplanır ve kabuk ile içindeki program
+  (vim, less) yeni boyutu pencere boyutlandırılmış gibi alır; uzun satırlar
+  yeniden sarılır.
+- Kalın ve eğik yüzü olmayan ailede o metin düz yüzle çizilir; bu uyarı
+  vermez (standart hata çıkışına bir satır düşer).
 
 ## Temalar
 

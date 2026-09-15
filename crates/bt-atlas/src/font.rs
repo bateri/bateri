@@ -82,10 +82,33 @@ pub(crate) struct Faces {
     acquired: [bool; 4],
 }
 
+/// İstenen ailenin kullanıcıya söylenmesi gereken sonucu.
+///
+/// **İkisi birden olamaz:** bulunamayan ailenin yerine zincir açılıyor ve
+/// zincirin iki fontu da eşaralıklı. Tip bu yüzden liste değil.
+///
+/// Metin yok: bu crate UI dizgisi kurmuyor, yalnız olguyu veriyor. Tip
+/// `bt-atlas`'ın dışına çıkmaz — `bt-gpu` kendi bildirim tipine çevirir
+/// (`bt-shell` bu crate'i görmüyor, 003 R5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FontIssue {
+    /// Aile makinede yok; `using` zincirin gerçekten açtığı ailenin adı.
+    FamilyNotFound { requested: String, using: String },
+    /// Aile açıldı ama CoreText onu eşaralıklı saymıyor. **Reddedilmiyor**:
+    /// hücre boşluğun genişliğinden türüyor ve harfler hücreye kırpılarak
+    /// çiziliyor, yani bozuk ama çalışan bir ekran. `family` CoreText'in
+    /// bildirdiği ad.
+    NotMonospaced { family: String },
+}
+
 impl Faces {
-    /// Zincirden açar (`open_chain`) ve üç yüzü türetir.
-    pub(crate) fn from_chain(point_size: CGFloat) -> Self {
-        Self::derive(open_chain(point_size))
+    /// Zincirden açar ([`open_chain`]) ve üç yüzü türetir.
+    pub(crate) fn from_chain(
+        family: Option<&str>,
+        point_size: CGFloat,
+    ) -> (Self, Option<FontIssue>) {
+        let (regular, issue) = open_chain(family, point_size);
+        (Self::derive(regular), issue)
     }
 
     /// Verilen düz yüzden türetir.
@@ -109,7 +132,7 @@ impl Faces {
         if !missing.is_empty() {
             // Atlas kurulumunda bir kez — `slot()` çizim yolunda ve orada
             // basılan bir satır kare başına tekrarlanırdı. **"Ömürde bir kez"
-            // değil:** `Atlas::ensure` punto/ölçek değişince atlası (ve bunu)
+            // değil:** `Atlas::ensure` aile/punto/ölçek değişince atlası (ve bunu)
             // yeniden kuruyor, yani pencere Retina ile harici ekran arasında
             // taşınırsa satır tekrar düşer. Kabul edilen bedel; susturmak
             // `Faces`'in dışında kalıcı bir durum ister. Önek
@@ -234,12 +257,54 @@ pub(crate) fn open(name: &str, point_size: CGFloat) -> (CFRetained<CTFont>, Stri
     (font, returned.to_string())
 }
 
-/// Zinciri yürür: ilk gerçekten bulunan tercih, yoksa [`FALLBACK`].
-pub(crate) fn open_chain(point_size: CGFloat) -> CFRetained<CTFont> {
+/// Zinciri yürür: istenen aile (varsa), sonra [`PREFERRED`], sonra
+/// [`FALLBACK`]. Kullanıcıya söylenecek bir şey varsa ikinci değerde.
+///
+/// İstenen aile de öteki halkalar gibi **dönen adla** sınanıyor
+/// ([`same_family`]): olmayan ad için CoreText bu makinede Helvetica
+/// veriyor, yani sınanmasaydı yanlış yazılmış her ad orantılı bir fontla
+/// açılırdı ve belirti "eşaralıklı değil" uyarısı olurdu — asıl hatayı değil
+/// bir yan etkisini söyleyen.
+pub(crate) fn open_chain(
+    family: Option<&str>,
+    point_size: CGFloat,
+) -> (CFRetained<CTFont>, Option<FontIssue>) {
+    let Some(requested) = family else {
+        return (open_default(point_size).0, None);
+    };
+    let (font, returned) = open(requested, point_size);
+    if !same_family(&returned, requested) {
+        let (font, using) = open_default(point_size);
+        let issue = FontIssue::FamilyNotFound {
+            requested: requested.to_owned(),
+            using,
+        };
+        return (font, Some(issue));
+    }
+    // SAFETY: `font` az önce yaratıldı ve bu kapsamda canlı.
+    let traits = unsafe { font.symbolic_traits() };
+    let issue = (!traits.contains(CTFontSymbolicTraits::TraitMonoSpace))
+        .then_some(FontIssue::NotMonospaced { family: returned });
+    (font, issue)
+}
+
+/// CoreText'in bildirdiği aile adı istenen ad mı — **harf duyarsız**.
+///
+/// CoreText adı harf duyarsız buluyor (`"menlo"` → `Menlo`, ölçüldü) ama
+/// adı kendi yazımıyla bildiriyor; birebir karşılaştırma bulunan fontu yok
+/// sayardı. PostScript adı (`Menlo-Regular`) **eşleşmez**: CoreText onu da
+/// açıyor ama aile adı başka, ve o ad ailenin tek bir yüzünü söylüyor —
+/// ayarın istediği aile (`docs/AYARLAR.md`).
+fn same_family(returned: &str, requested: &str) -> bool {
+    returned.to_lowercase() == requested.to_lowercase()
+}
+
+/// Ayar aile istemediğinde açılan font ve CoreText'in bildirdiği adı.
+pub(crate) fn open_default(point_size: CGFloat) -> (CFRetained<CTFont>, String) {
     for name in PREFERRED {
         let (font, returned) = open(name, point_size);
         if returned == name {
-            return font;
+            return (font, returned);
         }
     }
     let (font, returned) = open(FALLBACK, point_size);
@@ -252,7 +317,7 @@ pub(crate) fn open_chain(point_size: CGFloat) -> CFRetained<CTFont> {
         // demek olurdu.
         eprintln!("bateri: '{FALLBACK}' bulunamadı, CoreText '{returned}' ikame etti");
     }
-    font
+    (font, returned)
 }
 
 /// Karakterin glyph numarası; font karakteri tanımıyorsa `None`.
@@ -356,7 +421,9 @@ pub(crate) fn rule_envelope(top: u16, thickness: u16, cell_h: u16) -> (u16, u16)
 
 /// Boşluğun yatay advance'i — hücre genişliği.
 ///
-/// Monospace varsayımı zincirin kendisinde (SF Mono / Menlo). Ölçülen karakter
+/// Monospace varsayımı zincirin kendisinde (SF Mono / Menlo); ayarın ailesi
+/// eşaralıklı değilse hücre yine boşluktan türer, geniş harfler kırpılır ve
+/// bunu [`FontIssue::NotMonospaced`] söyler. Ölçülen karakter
 /// boşluk çünkü her fontta var; seçim gövdede sabit, çünkü başka bir karakterle
 /// çağrılması hücre genişliğini fontun o harfine bağlamak olurdu.
 fn space_advance(font: &CTFont) -> CGFloat {

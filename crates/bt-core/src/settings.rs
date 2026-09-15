@@ -51,12 +51,44 @@ pub(crate) const SCROLLBACK_MAX: usize = 100_000;
 /// [`Settings::follows_system`]'e bakıyor; menüden yazan phase-7 açar.
 pub(crate) const SYSTEM_THEME: &str = "system";
 
+/// `[font]`: hücre ölçüsünü ve glyph'leri belirleyen iki değer.
+///
+/// Ayrı bir tip, çünkü renderer onu **bütün olarak** tutuyor ve açılış
+/// değerini buradan alıyor: varsayılan puntonun tek sahibi bu tipin
+/// `Default`'u. Renderer'ın kendi sabiti olsaydı süreli koşunun (ayar hiç
+/// okunmuyor) fontu ile dosyasız kullanıcınınki iki ayrı sayıya bağlanırdı.
+///
+/// `Eq` yok: punto `f64`. Ayrıştırıcı yalnız sonlu ve pozitif değer
+/// bırakıyor, yani karşılaştırmaya NaN girmiyor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontOptions {
+    /// Aile adı; `None` → zincir (SF Mono, yoksa Menlo). Makinede olup
+    /// olmadığı `bt-atlas`'ın sorusu — burada yalnız metin.
+    pub family: Option<String>,
+    /// Mantıksal punto. Ölçekle çarpılmış hâlinin kırpması `bt-atlas`'ta ve
+    /// **sessiz**; buradaki kural yalnız "sonlu ve sıfırdan büyük".
+    pub size: f64,
+}
+
+impl Default for FontOptions {
+    /// 13 punto 006'ya kadar `bt-gpu`'nun `POINT_SIZE` sabitiydi: seçilmiş
+    /// bir varsayılan, ölçülmüş bir sayı değil.
+    fn default() -> Self {
+        Self {
+            family: None,
+            size: 13.0,
+        }
+    }
+}
+
 /// Kullanıcının değiştirebildiği her şey — ayrıştırılmış ve doğrulanmış.
 ///
 /// Alanlar `pub`: tip bir kayıt, davranış taşımıyor. Değerin geçerliliğini
 /// kuran yol [`Settings::parse`]; elle kurulan bir `Settings` bu kuralları
 /// atlayabilir ve bu bilerek serbest (sınamalar böyle kuruyor).
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Eq` yok: [`FontOptions::size`] `f64`.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     /// `[terminal] scrollback`: geçmişte tutulan satır, `0..=SCROLLBACK_MAX`.
     pub scrollback: usize,
@@ -73,6 +105,8 @@ pub struct Settings {
     /// `[appearance] dark_theme`: `theme = "system"` iken koyu görünümün
     /// teması.
     pub dark_theme: String,
+    /// `[font] family` ve `size`.
+    pub font: FontOptions,
 }
 
 impl Default for Settings {
@@ -87,12 +121,13 @@ impl Default for Settings {
             theme: SYSTEM_THEME.to_owned(),
             light_theme: "bateri-light".to_owned(),
             dark_theme: "bateri".to_owned(),
+            font: FontOptions::default(),
         }
     }
 }
 
 /// Ayrıştırılabilen bir dosyanın sonucu: değerler ve kabul edilmeyenler.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Parsed {
     pub settings: Settings,
     /// Dosyadaki sırayla değil **anahtar okuma sırasıyla**; boşsa dosya
@@ -214,6 +249,23 @@ impl Settings {
             }
             None => {}
         }
+        match section(text, root, "font", &mut parsed.diagnostics) {
+            Some(font) => {
+                let diagnostics = &mut parsed.diagnostics;
+                if let Some(item) = font.get("family") {
+                    parsed.settings.font.family =
+                        font_family(text, item, &fallback.font.family, diagnostics);
+                }
+                if let Some(item) = font.get("size") {
+                    parsed.settings.font.size =
+                        font_size(text, item, fallback.font.size, diagnostics);
+                }
+            }
+            None if root.contains_key("font") => {
+                parsed.settings.font.clone_from(&fallback.font);
+            }
+            None => {}
+        }
         Ok(parsed)
     }
 
@@ -253,6 +305,7 @@ impl Settings {
     pub fn changes(&self, new: &Settings) -> Changes {
         Changes {
             terminal: self.terminal() != new.terminal(),
+            font: self.font != new.font,
         }
     }
 }
@@ -269,6 +322,9 @@ pub struct Changes {
     /// [`Settings::terminal`] değişti: seçenekler `Session`'a **tamamıyla**
     /// gider.
     pub terminal: bool,
+    /// [`Settings::font`] değişti: renderer'a gider, hücre ölçüsü ve grid
+    /// yeniden hesaplanır.
+    pub font: bool,
 }
 
 /// Metni TOML belgesine ayrıştırır; ayrıştırılamıyorsa tek satırlık tanı.
@@ -391,6 +447,72 @@ fn theme_name(
         return None;
     }
     Some(name.to_owned())
+}
+
+/// `font.family`: metin; kırpılmış hâli boşsa `None` (zincir).
+///
+/// Boş ad bir hata değil: "aileyi sen seç" demenin yazılabilir yolu, anahtarı
+/// silmeden. Adın makinede olup olmadığı burada sorulmuyor — dosya sistemi
+/// değil CoreText ister, `bt-atlas` söylüyor.
+fn font_family(
+    text: &str,
+    item: &Item,
+    fallback: &Option<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    const KEY: &str = "font.family";
+    let Some(name) = item.as_str() else {
+        let using = match fallback {
+            Some(name) => format!("\"{name}\""),
+            None => "the default font".to_owned(),
+        };
+        diagnostics.push(Diagnostic {
+            key: Some(KEY),
+            line: item.span().and_then(|span| line_of(text, span.start)),
+            message: format!(
+                "`{KEY}` must be a string, found {}; using {using}",
+                kind(item)
+            ),
+        });
+        return fallback.clone();
+    };
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// `font.size`: tam sayı ya da ondalıklı, sonlu ve sıfırdan büyük.
+///
+/// Üst sınır **yok**: kırpma `punto × ölçek`'e bağlı ve `bt-atlas`'ta sessiz
+/// (`discussion.md` → Karar 4). Burada bir tavan olsaydı iki sahibi olurdu
+/// ve pencere ekran değiştirdikçe tanı gelip giderdi.
+fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagnostic>) -> f64 {
+    const KEY: &str = "font.size";
+    let line = item.span().and_then(|span| line_of(text, span.start));
+    let reject = |message: String| Diagnostic {
+        key: Some(KEY),
+        line,
+        message,
+    };
+    // `as f64` tam sayıda kayıpsız değil ama anlamlı her puntoda kayıpsız;
+    // kayıp başladığı büyüklük zaten kırpmanın çok ötesinde.
+    let value = match (item.as_float(), item.as_integer()) {
+        (Some(value), _) => value,
+        (None, Some(value)) => value as f64,
+        (None, None) => {
+            diagnostics.push(reject(format!(
+                "`{KEY}` must be a number, found {}; using {fallback}",
+                kind(item)
+            )));
+            return fallback;
+        }
+    };
+    if !(value.is_finite() && value > 0.0) {
+        diagnostics.push(reject(format!(
+            "`{KEY}` must be a number greater than 0, found {value}; using {fallback}"
+        )));
+        return fallback;
+    }
+    value
 }
 
 /// Bayt konumunun 1'den başlayan satırı.
@@ -561,7 +683,13 @@ mod tests {
     fn scrollback_change_is_a_terminal_change() {
         let before = clean("[terminal]\nscrollback = 500\n");
         let after = clean("[terminal]\nscrollback = 20\n");
-        assert_eq!(before.changes(&after), Changes { terminal: true });
+        assert_eq!(
+            before.changes(&after),
+            Changes {
+                terminal: true,
+                font: false
+            }
+        );
         assert_eq!(after.terminal(), TerminalOptions { scrollback: 20 });
         // Tema adları terminal seçeneği değil: tema her kayıtta yeniden
         // çözülüyor (`bt-shell`), fark onu kapılamıyor.
@@ -580,6 +708,7 @@ mod tests {
             theme: "paper".to_owned(),
             light_theme: "chalk".to_owned(),
             dark_theme: "ink".to_owned(),
+            font: FontOptions::default(),
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -622,6 +751,119 @@ mod tests {
                 .settings,
             Settings::default()
         );
+    }
+
+    #[test]
+    fn font_is_read() {
+        // Dosyada yoksa zincir ve 13 punto.
+        assert_eq!(
+            clean("").font,
+            FontOptions {
+                family: None,
+                size: 13.0
+            }
+        );
+        assert_eq!(
+            clean("[font]\nfamily = \"Monaco\"\nsize = 14.5\n").font,
+            FontOptions {
+                family: Some("Monaco".to_owned()),
+                size: 14.5
+            }
+        );
+        // Tam sayı da punto: kullanıcının ilk yazacağı `size = 14`.
+        assert_eq!(clean("[font]\nsize = 14\n").font.size, 14.0);
+        // Boş aile (yalnız boşluk da) zincir demek, hata değil; ad kırpılıyor.
+        assert_eq!(clean("[font]\nfamily = \"\"\n").font.family, None);
+        assert_eq!(clean("[font]\nfamily = \"  \"\n").font.family, None);
+        assert_eq!(
+            clean("font = { family = \" Menlo \" }\n").font.family,
+            Some("Menlo".to_owned())
+        );
+    }
+
+    #[test]
+    fn broken_font_size_falls_back_with_diagnostic() {
+        // TOML `nan` ve `inf`'i sayı olarak kabul ediyor; tip denetimi onları
+        // geçirir, kural geçirmemeli. Negatif ve sıfır punto da.
+        for (value, found) in [
+            ("-1", "-1"),
+            ("0", "0"),
+            ("0.0", "0"),
+            ("-2.5", "-2.5"),
+            ("nan", "NaN"),
+            ("inf", "inf"),
+        ] {
+            let (settings, diagnostic) = rejected(&format!("[font]\nsize = {value}\n"));
+            assert_eq!(settings, Settings::default(), "{value}");
+            assert_eq!(diagnostic.key, Some("font.size"), "{value}");
+            assert_eq!(diagnostic.line, Some(2), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!("`font.size` must be a number greater than 0, found {found}; using 13")
+            );
+        }
+        let (settings, diagnostic) = rejected("[font]\nsize = \"14\"\n");
+        assert_eq!(settings, Settings::default());
+        assert_eq!(
+            diagnostic.message,
+            "`font.size` must be a number, found a string; using 13"
+        );
+
+        let (settings, diagnostic) = rejected("[font]\nfamily = 3\n");
+        assert_eq!(settings, Settings::default());
+        assert_eq!(diagnostic.key, Some("font.family"));
+        assert_eq!(
+            diagnostic.message,
+            "`font.family` must be a string, found an integer; using the default font"
+        );
+    }
+
+    #[test]
+    fn rejected_font_values_keep_the_given_settings() {
+        // Kayıt anının kuralı fontta da: yarım kaydedilmiş bir punto pencereyi
+        // varsayılana çakıp geri döndürmesin.
+        let current = Settings {
+            font: FontOptions {
+                family: Some("Monaco".to_owned()),
+                size: 18.0,
+            },
+            ..Settings::default()
+        };
+        let parsed = Settings::parse_keeping("[font]\nfamily = false\nsize = 0\n", &current)
+            .expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.font, current.font);
+        assert_eq!(
+            parsed
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "`font.family` must be a string, found a boolean; using \"Monaco\"",
+                "`font.size` must be a number greater than 0, found 0; using 18",
+            ]
+        );
+        let parsed =
+            Settings::parse_keeping("font = 5\n", &current).expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings, current);
+        assert_eq!(parsed.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn font_change_is_a_font_change() {
+        let before = clean("[font]\nsize = 13\n");
+        let font_only = Changes {
+            terminal: false,
+            font: true,
+        };
+        assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
+        assert_eq!(
+            before.changes(&clean("[font]\nfamily = \"Monaco\"\nsize = 13\n")),
+            font_only
+        );
+        // Açıkça yazılan varsayılan bir fark değil: kayıt atlası yeniden
+        // kurdurmaz.
+        assert_eq!(Settings::default().changes(&before), Changes::default());
     }
 
     #[test]
@@ -704,6 +946,8 @@ scrollback = 42
 shape = \"block\"
 [motion]
 cursor = \"spring\"
+[font]
+line_height = 1.2
 ";
         assert_eq!(clean(text).scrollback, 42);
     }

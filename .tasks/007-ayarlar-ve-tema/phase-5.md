@@ -58,20 +58,69 @@ _Requirements: R6, R2, R10_
 
 ## Yayın Etkisi
 
-- **ayar şeması** — `[font] family`, `[font] size`.
+- **ayar şeması** — `[font] family` (metin; boş ya da yok → zincir) ve
+  `[font] size` (tam sayı ya da ondalıklı, `> 0`, varsayılan `13`). Eski
+  anahtar yok. `docs/AYARLAR.md` → `[font]`, iki hata tablosuna font
+  satırları.
+- **`bt-core` pub API** — `FontOptions`, `Settings.font`, `Changes.font`;
+  `Settings` ve `Parsed` artık `Eq` değil (`f64`).
+- **`bt-atlas` pub API** — `Atlas::new`/`ensure` aileyi alıyor,
+  `FontIssue`, `Atlas::font_issue`.
+- **`bt-gpu` pub API** — `FontNotice`, `Renderer::set_font`,
+  `Renderer::font_notice`; `POINT_SIZE` kalktı.
 - **ölçüm bekliyor:** font değişiminde geçmişin yeniden sarılması (`Term`
-  kilidi ana thread'de tutulurken).
+  kilidi ana thread'de tutulurken) — dolu 10 000 satırlık geçmişte süresi.
 - Borç kapanışı: ölçeğin iki kapısı (003'ten beri) — `sync_geometry` doc'u.
+- `CLAUDE.md` bugünkü hâl, `bt-atlas` `lib.rs` başlığı — güncellendi.
+- Yeni bağımlılık yok, `Cargo.lock` değişmedi. `make duman` jetonları
+  değişmedi: `kare=2 hucre=8 glif=6 kural=15 yuva=13/2048`.
 
 ## Checklist
 
-- [ ] Font zinciri istenen aileyi alır; durum (bulunamadı / eşaralıksız) döner
-- [ ] Atlas anahtarında aile
-- [ ] Renderer: `POINT_SIZE` kalktı, font ayarı, `bt-gpu` tipinde bildirim
-- [ ] `[font]` ayarları ve fark
-- [ ] Uygulayıcı ve açılış: font → `refresh_geometry`; font yuvası; hermetik dal
-- [ ] `sync_geometry` doc'unda Karar 6 kapanışı
-- [ ] Test: atlas yeniden kurulumu, bulunamayan ve orantılı aile, ayrıştırma
-- [ ] `docs/AYARLAR.md`
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
-- [ ] Yayın etkisi yazıldı
+- [x] Font zinciri istenen aileyi alır; durum (bulunamadı / eşaralıksız) döner
+- [x] Atlas anahtarında aile
+- [x] Renderer: `POINT_SIZE` kalktı, font ayarı, `bt-gpu` tipinde bildirim
+- [x] `[font]` ayarları ve fark
+- [x] Uygulayıcı ve açılış: font → `refresh_geometry`; font yuvası; hermetik dal
+- [x] `sync_geometry` doc'unda Karar 6 kapanışı
+- [x] Test: atlas yeniden kurulumu, bulunamayan ve orantılı aile, ayrıştırma
+- [x] `docs/AYARLAR.md`
+- [x] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+- **`FontOptions` `bt-core`'da bir tip** (plan: `Settings`'te iki anahtar,
+  renderer "aile ve puntoyu tutar"). Varsayılan puntonun tek sahibi
+  `FontOptions::default()`; renderer onu bütün olarak tutuyor ve açılış
+  değeri de o. Hermetik dalda bu yüzden çağrı **yok**: `set_font` hiç
+  çağrılmayınca font zaten varsayılan. Bedeli `Settings`/`Parsed`'ın `Eq`'yi
+  kaybetmesi.
+- **Aile adı harf duyarsız karşılaştırılıyor** (plan: aile adı
+  karşılaştırması). Ölçüldü: CoreText `"menlo"`'yu açıyor ve `"Menlo"` diye
+  bildiriyor. PostScript adı (`Menlo-Regular`) eşleşmiyor, belgede. Aynı
+  yoklamada: olmayan ad için CoreText **Helvetica** veriyor; SF Mono bu
+  makinede yok, zincir Menlo'ya düşüyor.
+- **`post_notices` yuva aynıysa hiçbir şey yapmıyor** (planda yok). Font
+  yuvası her `windowDidResize:`'da yazıldığı için bulunamayan bir aile
+  stderr'e olay başına satır basıyordu. Yan etkisi: aynı hatalı ayar
+  dosyasını ikinci kez kaydetmek stderr'e tekrar basmıyor (alt başlıkta
+  zaten duruyor).
+- **Font yuvasının dizgisi `bt-shell`'de** (`notices::font_messages`);
+  `FontNotice` metin taşımıyor, öteki yuvaların dili tek yerde.
+- **Yüz eksikliği** (Monaco'da Bold/Italic yok) stderr satırı olarak kaldı,
+  alt başlığa taşınmadı; belgede.
+- **Test-first:** `bt-core`'un dört font sınaması iskelete karşı düştü;
+  `bt-atlas`'ta bulunamayan ve orantılı aile sınamaları düştü, aile anahtarı
+  sınaması imzayla birlikte gelen `Key` yüzünden baştan yeşildi.
+- **Göz kontrolü** geçici `HOME` + `ZDOTDIR` + `screencapture -l` ile.
+  Kabuk `login` üzerinden açılıyor ve `HOME`'u gerçek ev dizinine çekiyor;
+  `ZDOTDIR`'daki `.zshrc` mutlak yolla `vim` açınca bateri **içinde** vim
+  sınanabildi (phase-4'ün bekleyen göz kontrolü de bu yoldan koşabilir).
+  Gözlenen: vim açıkken 13 → 20 punto anında, satırlar yeni sütuna
+  sarıldı; olmayan aile alt başlıkta, Monaco'ya düzeltince kalktı; Helvetica
+  uyarısı ve harflerin hücreye kırpılması; `size = 0` 20'yi tuttu, tanı
+  yuvasında; `[font]` silinince 13 punto Menlo, iki yuva boş. Pencere
+  boyutlandırma stderr'e satır eklemedi. **Tek ekran:** başka ekrana taşıma
+  gözle sınanmadı; `missing_family_becomes_a_notice_after_the_atlas_opens`
+  aynı fontun iki ölçekte aynı bildirimi verdiğini sınıyor.
