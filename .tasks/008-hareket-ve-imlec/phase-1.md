@@ -52,7 +52,11 @@ _Requirements: R1.1, R1.2, R1.3_
 ## Yayın Etkisi
 
 shader yok · terminfo yok · ayar şeması yok · tema yok · shell entegrasyonu yok
-· app bundle yok · yeni bağımlılık yok.
+· app bundle yok.
+
+**Yeni bağımlılık yok, ama `Cargo.toml` değişti:** `objc2-quartz-core`'un
+`CABase` feature'ı bt-gpu'da açıldı (`CACurrentMediaTime`). Mevcut paketin
+özelliği, `Cargo.lock` oynamadı; `make denetim`'in uyarısının karşılığı bu.
 
 Jeton sözleşmesi genişledi: üç yeni anahtar kalıcıdır, bu yüzden adları ve
 anlamları bu commit'te doğru olmalı. `docs/OLCUMLER.md`'nin "Sabit jetonlar"
@@ -60,14 +64,50 @@ bloğu artık eksik kalıyor; yeni satır biçimi ve sayıların türetmesi
 **phase-6'nın ölçümünde** yenilenir — ölçüm bekliyor: `sessiz=` dağılımı ve
 `IDLE_FRAME_LIMIT`'in yeni türetmesi (R7).
 
+## Uygulama Notları
+
+- **Eşitsizlik plan dosyasında tersti; doğrusu `kare ≤ icerik`.**
+  `renderer.frames` tamamlanma bloğunda artıyor (`renderer.rs:426`), `icerik`
+  ise `Some(cursor)` anında — yani hatasız biten her kare bir içerik
+  karesiydi, tersi değil. "Ölçüm beklemez" sonucu **duruyor** ama gerekçesi
+  başka: yeni ifade eskisinden *daha sıkı* ve sıkılaşma ölçülmüş paya
+  giriyor — sağlıklı koşuda ikisi eşit (encode hatası yok, `FailureStreak`
+  zaten en çok bir yeniden deneme veriyor; rapor `shutdown()`'dan sonra
+  koşuyor ve o `link.stop()` çağırdığı için uçuşta kare kalmıyor), en kötü
+  bir karelik kayma ve ölçülen tavan `4` ile sınır `8` arasındaki pay onu
+  yutuyor. Dört duman koşusunda dördünde de `kare == icerik` (2, 2, 2, 1).
+  `IDLE_FRAME_LIMIT` doc'una doğru yönüyle yazıldı.
+- **`sessiz=` saati kapanıştan önce okunuyor**, planın söylemediği bir yer.
+  `shutdown()` `SHUTDOWN_GRACE` kadar (yarım saniye) bekliyor ve ölçüm
+  koşularının dörtte birinde gerçekten bekliyor (`kapanis=abandoned`); sonra
+  okunsaydı jeton "son kare → deadline" değil "son kare → kapanışın sonu"
+  olur ve phase-6'nın dağılımına kapanış değişkenliği karışırdı. **İki**
+  rapor yolu da düzeltildi: `runDeadline:` ve `applicationWillTerminate:`
+  (shell erken çıkarsa rapor oradan basılıyor).
+- **Damga bir *hedef sunum* anı**, yani gelecekte bir nokta: deadline son
+  kareden bir tazeleme içinde düşerse fark negatif çıkar. Değer sıfıra
+  doyuruluyor ve `quiet_since`'in doc'u `sessiz=0.00ms`'in "deadline anında
+  kare akıyordu" diye okunacağını söylüyor.
+- **`objc2-quartz-core`'a `CABase` feature'ı eklendi** (bt-gpu). Yeni
+  bağımlılık değil, mevcut paketin `default-features = false` yüzünden kapalı
+  kalan bir özelliği; `CACurrentMediaTime` display link damgasıyla aynı zaman
+  tabanını veren tek okuma ve `Instant`'ın tabanı belgelenmiş değil.
+  `Cargo.lock` **değişmedi** (feature kilide yazılmıyor); `make denetim`'in
+  `Cargo.toml` uyarısının karşılığı bu satır.
+- **`sessiz=none` jeton satırında erişilemez:** kare çizilmemişse `kare=0` ve
+  kapı `MissingCounter` diyor, satır hiç basılmıyor. Sınama bu yüzden
+  `Report` üstünden kuruldu, koşu üstünden değil.
+- Ölçülen `sessiz=` dört koşuda 2947–2958 ms (3 sn'lik koşu), yani son kare
+  ~42–53 ms'de düşüyor. Phase-6'nın `T`'si bu dağılımın üstüne seçilecek.
+
 ## Checklist
 
-- [ ] `link.rs`: iki sayaç + son kare damgası, `DisplayLink` uçları
-- [ ] `app.rs`: `Counters.content`, üç jeton, `sessiz=none` kolu, kapının
+- [x] `link.rs`: iki sayaç + son kare damgası, `DisplayLink` uçları
+- [x] `app.rs`: `Counters.content`, üç jeton, `sessiz=none` kolu, kapının
       yeni ifadesi
-- [ ] `IDLE_FRAME_LIMIT` doc'u: operand, "ölçüm beklemez" gerekçesi, düşen
+- [x] `IDLE_FRAME_LIMIT` doc'u: operand, "ölçüm beklemez" gerekçesi, düşen
       aday çözüm cümlesi
-- [ ] `Makefile` + `proje.md` + `CLAUDE.md` duman cümleleri
-- [ ] Test: jeton satırı (eski + yeni), içerik kapısı, `sessiz=none`
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
-- [ ] Yayın etkisi yazıldı
+- [x] `Makefile` + `proje.md` + `CLAUDE.md` duman cümleleri
+- [x] Test: jeton satırı (eski + yeni), içerik kapısı, `sessiz=none`
+- [x] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] Yayın etkisi yazıldı

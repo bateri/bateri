@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bt_core::{DirtyFlag, Session};
 use dispatch2::{DispatchQueue, MainThreadBound};
@@ -20,7 +20,9 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonMod
 // Yalnız tamamlanma bloğunun GPU damgaları için: `GPUStartTime`/`GPUEndTime`
 // `MTLCommandBuffer` protokolünde ve trait kapsamda olmadan çağrılamaz.
 use objc2_metal::MTLCommandBuffer;
-use objc2_quartz_core::{CAMetalDisplayLink, CAMetalDisplayLinkDelegate, CAMetalDisplayLinkUpdate};
+use objc2_quartz_core::{
+    CACurrentMediaTime, CAMetalDisplayLink, CAMetalDisplayLinkDelegate, CAMetalDisplayLinkUpdate,
+};
 
 use crate::frame::Frame;
 use crate::renderer::{CellMetrics, Completion};
@@ -302,6 +304,47 @@ struct LinkIvars {
     /// oraya **gelen** ölçü gider, saklanan değil — kabul edilmeyen bir
     /// boyut buraya hiç yazılmaz.)
     cell: Cell<CellMetrics>,
+    /// **İçerik** karesi: `session.frame()` hasar buldu ve kare çizilmeye
+    /// karar verildi. Boşta sıfır kare kapısının operandı bu.
+    ///
+    /// `kare`'den (GPU'nun hatasız bitirdiği kare) ayrı bir sayı ve ayrılığın
+    /// sebebi sonraki phase: **hareket** karesi de çizilen bir karedir, yani
+    /// `kare`'yi artırır, ama grid kirli değildir — 200 ms'lik bir imleç
+    /// kayması 120 Hz'de ~24 kare eder ve `kare ≤ IDLE_FRAME_LIMIT` kapısı kod
+    /// doğruyken kırmızı düşerdi. Kapı bu yüzden "boştaki **içerik** karesi"ne
+    /// bağlanıyor; sınırın sayısı değil **operandı** değişti.
+    ///
+    /// Çıkarma (`kare − hareket`) bilerek yok: `kare` Metal'in tamamlanma
+    /// thread'inde, bu sayaç ana thread'de artıyor, yani deadline animasyonun
+    /// ortasına düşerse fark `u64` sarmasına açık. İki sayaç aynı noktada
+    /// artıyor ve kapı yalnız birine bakıyor
+    /// (`.tasks/008-hareket-ve-imlec/discussion.md` → Karar 2).
+    ///
+    /// `Cell`, atomik değil: ikisini de yalnız `needs_update` yazıyor ve o
+    /// ana thread'e bağlı (`MainThreadOnly`); okuyan da ana thread
+    /// ([`DisplayLink::content_frames`]).
+    content_frames: Cell<u64>,
+    /// **Hareket** karesi: hasar yok ama yerleşmemiş bir animasyon var.
+    ///
+    /// Bu phase'de kanıtlanabilir şekilde **hep `0`** — artıran yol henüz yok
+    /// ve jetonu basan sınama bunu satırın kendisinde arıyor. Muhasebe
+    /// hareket kodundan **önce** iniyor ki ilk kayma iki değişikliği tek
+    /// commit'e sıkıştırmasın.
+    motion_frames: Cell<u64>,
+    /// Son **çizilen** karenin damgası (`CAMetalDisplayLinkUpdate`'in hedef
+    /// sunum anı), `sessiz=` jetonunun tabanı.
+    ///
+    /// `update.targetTimestamp()` bir **alan kopyası**, saat okuması değil:
+    /// kare başına `CACurrentMediaTime()` çağırmak ölçüm kapısı kapalıyken de
+    /// saat okumak olurdu ve kare yolunun "kapı kapalıyken tek bir saat
+    /// okuması bile yok" sözleşmesini (`stats`'ın doc'u) kırardı. Tek okuma
+    /// deadline'da, [`DisplayLink::quiet_since`]'ta.
+    ///
+    /// Damga `Ok` dalında yazılıyor: encode edilemeyen kare sessizliği
+    /// bölmez, çünkü ekranda hiçbir şey olmadı.
+    ///
+    /// `None` → hiç kare çizilmedi; jeton o zaman `sessiz=none`.
+    last_frame_at: Cell<Option<f64>>,
 }
 
 define_class!(
@@ -355,6 +398,10 @@ define_class!(
                 link.setPaused(true);
                 return;
             };
+            // Kapının operandı burada artıyor: hasar bulundu, kare çizilecek.
+            // `kare`'den önce ve ondan bağımsız — GPU'nun bitirmesini
+            // beklemiyor (bkz. `LinkIvars::content_frames`).
+            iv.content_frames.set(iv.content_frames.get() + 1);
             // Clear ve imleç rengi oturumun temasından: `frame()`'in zemin
             // atlaması ve renk sorusunun yanıtıyla aynı kaynak. Tema yalnız
             // dolu karede okunuyor — boştaki callback yukarıda döndü.
@@ -383,6 +430,10 @@ define_class!(
                 // Örnek yalnız **yola çıkan** karede yazılır: encode
                 // edilemeyen kare hiçbir şey ölçmedi.
                 Ok(()) => {
+                    // Sessizliğin tabanı da yalnız **yola çıkan** karede
+                    // tazeleniyor ve aynı sebeple: encode edilemeyen kare
+                    // ekranda hiçbir şey değiştirmedi.
+                    iv.last_frame_at.set(Some(update.targetTimestamp()));
                     if let Some((stats, (cpu_frame, cpu_encode))) = iv.stats.as_ref().zip(spans) {
                         stats.record_cpu(cpu_frame, cpu_encode);
                     }
@@ -475,6 +526,9 @@ impl DisplayLink {
                 stats,
                 frame: RefCell::new(Frame::default()),
                 cell: Cell::new(cell),
+                content_frames: Cell::new(0),
+                motion_frames: Cell::new(0),
+                last_frame_at: Cell::new(None),
             },
         );
         link.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -502,6 +556,47 @@ impl DisplayLink {
     /// birleşen ve kapıda ölen taleplerdir (bkz. [`WakerInner::requests`]).
     pub fn requests(&self) -> u64 {
         self.waker.requests()
+    }
+
+    /// Boşta sıfır kare kapısının operandı: çizilmeye **karar verilen** içerik
+    /// karesi. Rapor bunu `icerik=` jetonuyla basıyor.
+    ///
+    /// `kare` ile ilişkisi tek yönlü: hatasız biten her kare bir içerik
+    /// karesiydi, tersi değil — yani **`kare ≤ icerik`**. Farkı encode
+    /// edilemeyen kareler ve uçuşta kalanlar açar; sağlıklı bir koşuda ikisi
+    /// eşit (gerekçe `bt-shell`'in `IDLE_FRAME_LIMIT` doc'unda).
+    pub fn content_frames(&self) -> u64 {
+        self.delegate.ivars().content_frames.get()
+    }
+
+    /// Yerleşmemiş animasyon yüzünden çizilen kare — `hareket=` jetonu.
+    ///
+    /// Bugün hep `0`: artıran yol bu phase'de yok (bkz.
+    /// [`LinkIvars::motion_frames`]).
+    pub fn motion_frames(&self) -> u64 {
+        self.delegate.ivars().motion_frames.get()
+    }
+
+    /// Son çizilen kareden bu yana geçen süre — `sessiz=` jetonu.
+    /// `None` → hiç kare çizilmedi.
+    ///
+    /// **Koşunun tek saat okuması.** Kare yolunda damga bir alan kopyası
+    /// (`LinkIvars::last_frame_at`); `CACurrentMediaTime()` yalnız burada,
+    /// yani deadline'da bir kez çağrılıyor. Ölçüm kapısı (`BT_FRAME_STATS`)
+    /// kapalıyken kare başına saat okunmaması sözleşmesi bu ayrımda duruyor.
+    ///
+    /// **Neyin arasını ölçüyor:** damga karenin *hedef sunum* anı, yani
+    /// gelecekte bir nokta. Deadline son kareden bir tazeleme içinde düşerse
+    /// fark negatif çıkar; değer sıfıra doyuruluyor. Yorumlayan taraf
+    /// `sessiz=0.00ms`'i "deadline anında kare akıyordu" diye okumalı,
+    /// "tam o anda çizildi" diye değil.
+    ///
+    /// Bir **sayaç, kapı değil**: eşiği (`sessiz ≥ T`) ölçülmedi ve ölçülmemiş
+    /// sayı kapıya yazılmaz (`yuva=`/`istek=` ile aynı kural). Ölçümü ve
+    /// kapıya bağlanması `.tasks/008-hareket-ve-imlec/phase-6.md`'de.
+    pub fn quiet_since(&self) -> Option<Duration> {
+        let last = self.delegate.ivars().last_frame_at.get()?;
+        Some(Duration::try_from_secs_f64(CACurrentMediaTime() - last).unwrap_or(Duration::ZERO))
     }
 
     /// Bir kare iste.

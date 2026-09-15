@@ -40,6 +40,25 @@ use crate::{child, settings};
 /// Boşta sıfır karenin bekçisi: [`Workload::Smoke`] yükünde pencere ilk
 /// çizimden sonra ~`run_seconds` saniye boşta duruyor.
 ///
+/// **Sınırın operandı `kare` değil [`Counters::content`]** (`icerik=`
+/// jetonu): GPU'nun bitirdiği kare değil, çizilmeye **karar verilen** içerik
+/// karesi. Sebep bu sınırın kendi doc'unda yıllanmış borç — "durma koşulu
+/// unutulmuş bir animasyon bugünkü kapıdan yeşil geçer". Çare sınırı
+/// oynatmak değil, hareket karelerini kapının dışında tutmak oldu: bir imleç
+/// kayması `kare`'yi meşru olarak ~24'e çıkarır, `icerik`'i hiç artırmaz
+/// (`.tasks/008-hareket-ve-imlec/discussion.md` → Karar 2).
+///
+/// **Aşağıdaki iki ölçüm geçerliliğini koruyor ve bu değişiklik ölçüm
+/// beklemiyor.** İlişki tek yönlü — hatasız biten her kare bir içerik
+/// karesiydi, tersi değil: **`kare ≤ icerik`**. Yani yeni ifade eskisinden
+/// *daha sıkı* ve sıkılaşma aslında ölçülmüş paya giriyor: sağlıklı bir
+/// koşuda ikisi **eşit**, çünkü farkı yalnız encode edilemeyen kareler
+/// ([`bt_gpu`]'nun `FailureStreak`'i zaten en çok bir yeniden deneme veriyor)
+/// ve deadline'da uçuşta kalanlar açar — rapor
+/// [`AppDelegate::shutdown`]'dan sonra koşuyor ve o `link.stop()`'u çağırdığı
+/// için uçuşta kare kalmıyor. En kötü hâlde bir karelik kayma; ölçülen
+/// sağlıklı tavan `4` ile sınır `8` arasındaki pay onu fazlasıyla yutuyor.
+///
 /// **Sayı iki kez ölçüldü; ikincisi görünür pencerede ve onu değiştirmedi.**
 /// Koşu tabloları, ortam ve yöntem `docs/OLCUMLER.md` → `## Boşta kare`'de;
 /// burada yalnız sınırı doğuran kutuplar ve türetme duruyor.
@@ -79,12 +98,17 @@ use crate::{child, settings};
 /// için `limit + 1` kare gerekiyor: üç saniyelik bir koşuda eski `2` **1
 /// Hz**'lik bir sızıntıyı yakalardı, bugünkü `8` ancak **3 Hz**'i yakalıyor.
 /// (İkisi de `make duman`'ın 3 saniyesinden türüyor; süre değişirse eşik de
-/// değişir.) Bu depoda öyle bir animasyon **yok**, ama hareket/imleç fiziği
-/// seti tam bu şekilde gelecek: durma koşulu unutulmuş 2 Hz'lik bir blink üç
-/// saniyede ~6 kare eder — sınırın altında, yani bugünkü kapıdan **yeşil**
-/// geçer. O set açıldığında kapı ya süreye ya `istek=`'e bağlanmalı;
-/// `istek=` örtülmeden etkilenmiyor ve oran olarak (saniye başına talep) bir
-/// eşik verebilir, ama o eşik **ölçülmedi**.
+/// değişir.) Durma koşulu unutulmuş 2 Hz'lik bir blink üç saniyede ~6 kare
+/// eder — sınırın altında, yani bu sayı onu tek başına **göremez**.
+///
+/// **Bu yüzden sınır kapının tamamı değil, bir katı.** 008 kapıyı iki katlı
+/// kuruyor ve ikisi de buradan bağımsız: (a) deadline'da **yerleşmemiş**
+/// animasyon varsa koşu kırmızı — hızdan bağımsız, ölçüm istemez, ama yalnız
+/// hareket altyapısından geçen animasyonları görür; (b) son kareyle deadline
+/// arasındaki sessizlik (`sessiz=` jetonu) ölçülmüş bir alt sınırla kapıya
+/// bağlanır — altyapıyı atlayan sızıntıyı da görür. İkincisi ölçüm bekliyor
+/// ve o inene kadar `sessiz=` bir **sayaç**
+/// (`.tasks/008-hareket-ve-imlec/phase-6.md`).
 ///
 /// **Sağlıklı koşudaki 1↔2 oynamasının mekanizması ölçülmedi.** Kare talebi
 /// (`istek=`) iki ölçümde de **sabit** kaldı (2–3), yani fazladan kare
@@ -111,10 +135,11 @@ use crate::{child, settings};
 /// edildi; kalıcı çözüm geometri yolundan gelen kareleri sayaç dışında
 /// tutmak.
 ///
-/// Sınırın **kare** üstünde durmasının sebebi adı: "boşta sıfır kare" çizilen
-/// kareyi söylüyor. `istek=` daha erken bir yerde sayıyor ama kapı değil —
-/// eşiği ölçülmedi ve **duman yükünde** ölçülen ilişki (`istek ≈ kare + 2`,
-/// hem sağlıklı hem bozuk koşuda) onu `kare`'den daha ayırt edici yapmıyor.
+/// Sınırın **çizilen** kare üstünde durmasının sebebi adı: "boşta sıfır kare"
+/// çizim hakkında bir söz. `istek=` daha erken bir yerde sayıyor ama kapı
+/// değil — eşiği ölçülmedi ve **duman yükünde** ölçülen ilişki
+/// (`istek ≈ kare + 2`, hem sağlıklı hem bozuk koşuda) onu daha ayırt edici
+/// yapmıyor.
 /// Ölçüm yükünde ikisi üç mertebe ayrışıyor (bkz. `bt_gpu`'nun `requests`
 /// sayacı); oran olarak bir kapı kurulabilir ama o ölçülmedi.
 ///
@@ -491,6 +516,10 @@ define_class!(
         /// kapanışa eklenecek her adım oraya eklenir.
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
+            // Damga kapanıştan **önce**, `runDeadline:`'daki gerekçeyle:
+            // `shutdown()` yarım saniyeye kadar bekleyebiliyor ve o bekleme
+            // sessizliğe yazılırsa jeton ölçtüğünü sandığı şeyi ölçmez.
+            let quiet = self.ivars().link.get().and_then(DisplayLink::quiet_since);
             let teardown = self.shutdown();
             // Duman koşusu deadline'a varmadan da bitebilir: shell kendi
             // çıkarsa (`BT_RUN_SECONDS` betiğin uykusundan uzunsa, ya da
@@ -499,7 +528,7 @@ define_class!(
             // koşuyu exit 0 ile yeşil gösterirdi — kapının sahte yeşil verdiği
             // tek yol buydu.
             if let Some(run) = self.ivars().run {
-                self.report_and_exit(run, teardown);
+                self.report_and_exit(run, teardown, quiet);
             }
         }
     }
@@ -644,26 +673,38 @@ define_class!(
 
         #[unsafe(method(runDeadline:))]
         fn run_deadline(&self, _arg: Option<&AnyObject>) {
+            // Sessizlik damgası kapanıştan **önce** okunuyor ve sıra
+            // bilinçli: `shutdown()` en çok `SHUTDOWN_GRACE` (yarım saniye)
+            // bekliyor ve ölçüm koşularının dörtte birinde gerçekten
+            // bekliyor (`kapanis=abandoned`). Sonra okunsaydı `sessiz=`
+            // "son kare → deadline" değil "son kare → kapanışın sonu" olurdu
+            // ve phase-6'nın dağılımına kapanış değişkenliği karışırdı.
+            let quiet = self.ivars().link.get().and_then(DisplayLink::quiet_since);
             let teardown = self.shutdown();
             // Zamanlayıcı yalnız `run` doluyken kuruldu; `if let` burada bir
             // dal değil o değişmezin okunması. `expect` olmadı, çünkü burası
             // rapor yolu ve kapanışta bir panik raporun kendisini yutardı.
             if let Some(run) = self.ivars().run {
-                self.report_and_exit(run, teardown);
+                self.report_and_exit(run, teardown, quiet);
             }
         }
     }
 );
 
-/// Duman satırının dört sayacı.
+/// Duman **kapısının** sayaçları — satırın hepsi değil, [`verdict`]'in gördüğü
+/// kadarı.
 ///
-/// Yapı, çünkü dördü de sayı: konumsal geçirilseler `hucre` ile `glif` yer
+/// Yapı, çünkü hepsi sayı: konumsal geçirilseler `hucre` ile `glif` yer
 /// değiştirdiğinde **derleme geçerdi** ve sınama da aynı sırayı kullandığı
 /// için ikisi birlikte yanılırdı (`/code-review` bulgusu).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counters {
     /// GPU'nun hatasız bitirdiği kare.
     frames: u64,
+    /// Çizilmeye **karar verilen** içerik karesi: boşta sıfır kare kapısının
+    /// operandı ([`IDLE_FRAME_LIMIT`]). `frames`'in yerine geçmiyor, yanına
+    /// geliyor — ikisi ayrı soru yanıtlıyor ve jeton ikisini de basıyor.
+    content: u64,
     /// Son karede sink'in ürettiği arka plan hücresi (imleç hariç).
     cells: usize,
     /// Son karede çizilen glyph.
@@ -796,6 +837,14 @@ struct Report {
     workload: Workload,
     /// Koşu boyunca istenen kare — çizilen değil.
     requests: u64,
+    /// Yerleşmemiş animasyon yüzünden çizilen kare. Bu phase'de hep `0`;
+    /// [`Counters`]'ta **değil**, çünkü kapı onu henüz sormuyor (soracağı yer
+    /// `.tasks/008-hareket-ve-imlec/phase-3.md`).
+    motion: u64,
+    /// Son çizilen kareyle deadline arasındaki süre; `None` → hiç kare
+    /// çizilmedi (`sessiz=none`). Sayaç, kapı değil — eşiği ölçülmedi
+    /// ([`bt_gpu::DisplayLink::quiet_since`]).
+    quiet: Option<Duration>,
     /// Kapanışın sonucu; `None` → oturum hiç doğmamıştı.
     teardown: Option<Teardown>,
     /// Ölçüm defteri; `None` → kapı kapalıydı (`BT_FRAME_STATS` verilmedi).
@@ -823,6 +872,7 @@ impl Report {
     fn token_line(&self) -> String {
         let Counters {
             frames,
+            content,
             cells,
             glyphs,
             rules,
@@ -837,12 +887,22 @@ impl Report {
         } else {
             "release"
         };
+        // `icerik`/`hareket`/`sessiz` üçlüsü `istek=`'in yanına giriyor: dördü
+        // de kare **muhasebesi** ve satırı okuyan taraf onları bir arada
+        // istiyor. Baştaki dört sayaç yerinde kalmak **zorunda**
+        // (`smoke_counts_unchanged`).
         let mut line = format!(
             "kare={frames} hucre={cells} glif={glyphs} kural={rules} \
-yuva={used}/{total} yuk={workload} istek={requests} kapanis={teardown} \
-profil={profile}",
+yuva={used}/{total} yuk={workload} istek={requests} icerik={content} \
+hareket={motion} sessiz={quiet} kapanis={teardown} profil={profile}",
             workload = self.workload.token(),
             requests = self.requests,
+            motion = self.motion,
+            // **`sessiz=0` değil:** sıfır, "deadline anında kare akıyordu"
+            // demek ve hiç kare çizilmemiş bir koşuyla karışırdı — `ornek=off`
+            // ile aynı kural, uydurulmuş bir sayı yerine yokluğun kendi
+            // kelimesi.
+            quiet = self.quiet.map_or_else(|| "none".to_owned(), ms),
             teardown = teardown_token(self.teardown),
         );
         match &self.measured {
@@ -961,6 +1021,7 @@ enum Verdict {
 fn verdict(counters: Counters, workload: Workload, teardown: Option<Teardown>) -> Verdict {
     let Counters {
         frames: n,
+        content: c,
         cells: k,
         glyphs: g,
         rules: r,
@@ -989,13 +1050,18 @@ fn verdict(counters: Counters, workload: Workload, teardown: Option<Teardown>) -
                 Verdict::Pass
             }
         }
-        // Duman reçetesi: dördü de > 0 **ve** kare sayısı üst sınırlı.
+        // Duman reçetesi: dördü de > 0 **ve** içerik karesi üst sınırlı.
+        //
+        // Alt sınır `kare`'de, üst sınır `icerik`'te ve bu bilinçli: "pipeline
+        // çalıştı mı" sorusunu GPU'nun bitirdiği kare yanıtlıyor, "boşta kare
+        // akıyor mu" sorusunu ise çizilmeye karar verilen kare — sonraki
+        // phase'in hareket kareleri `kare`'yi meşru olarak şişirecek.
         Workload::Smoke => {
             if n == 0 || k == 0 || g == 0 || r == 0 {
                 Verdict::MissingCounter {
                     required: "dördü de >0 olmalı",
                 }
-            } else if n > IDLE_FRAME_LIMIT {
+            } else if c > IDLE_FRAME_LIMIT {
                 Verdict::ExcessFrames {
                     limit: IDLE_FRAME_LIMIT,
                 }
@@ -1540,8 +1606,11 @@ impl AppDelegate {
     /// bile atlar.
     ///
     /// `teardown` argüman, ivar değil: kapanışın sonucunu **çağıran** biliyor
-    /// ve bir ivar'a saklamak onu ikinci bir kez okunabilir kılardı.
-    fn report_and_exit(&self, run: Run, teardown: Option<Teardown>) -> ! {
+    /// ve bir ivar'a saklamak onu ikinci bir kez okunabilir kılardı. `quiet`
+    /// de argüman ama başka bir sebeple: değeri kapanıştan **önce** okunmak
+    /// zorunda (iki çağıranın da doc'unda) ve burada okunsaydı `shutdown()`'ın
+    /// beklemesi sessizliğe yazılırdı.
+    fn report_and_exit(&self, run: Run, teardown: Option<Teardown>, quiet: Option<Duration>) -> ! {
         let renderer = &self.ivars().renderer;
         // Dört sayaç dört ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
         // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi, `glif`
@@ -1572,8 +1641,14 @@ impl AppDelegate {
             renderer.last_glyph_count(),
             renderer.last_rule_count(),
         );
+        // Beşinci sayaç `icerik` aynı yapıda ama başka bir yerden: `kare` GPU
+        // tarafında (tamamlanma bloğu), `icerik` ana thread'de
+        // (`needs_update`). Kapının üst sınırı buna bağlı ve alt sınır hâlâ
+        // `kare`'de — hangi sorunun hangi sayacı sorduğu [`verdict`]'te.
+        let link = self.ivars().link.get();
         let counters = Counters {
             frames: n,
+            content: link.map_or(0, DisplayLink::content_frames),
             cells: k,
             glyphs: g,
             rules: r,
@@ -1589,7 +1664,9 @@ impl AppDelegate {
             counters,
             atlas: renderer.atlas_occupancy(),
             workload: run.workload,
-            requests: self.ivars().link.get().map_or(0, DisplayLink::requests),
+            requests: link.map_or(0, DisplayLink::requests),
+            motion: link.map_or(0, DisplayLink::motion_frames),
+            quiet,
             teardown,
             // Kapı kapalıysa defter hiç doğmadı; `Option` bunu taşıyor ve
             // rapor `ornek=off` diyor — uydurulmuş bir sıfır değil.
@@ -1607,9 +1684,14 @@ impl AppDelegate {
             }
             // Ayrı ileti, çünkü ayrı arıza: burada dört sayacın dördü de
             // yerinde ve okuyanı sıfır aramaya göndermek zaman kaybettirirdi.
+            // Sınırı aşan sayı `icerik`, ama satır `kare` ile `istek`'i de
+            // söylüyor: üçü birlikte okunduğunda arıza "hasar akıyor" mu
+            // (üçü de yüksek) yoksa "hareket yerleşmiyor" mu (`kare` yüksek,
+            // `icerik` değil) ayırt edilebiliyor.
             Verdict::ExcessFrames { limit } => eprintln!(
-                "bateri: boşta sıfır kare bozuldu — {secs} saniyelik koşuda {n} kare çizildi (kare talebi {}), üst sınır {limit}",
-                report.requests
+                "bateri: boşta sıfır kare bozuldu — {secs} saniyelik koşuda {c} içerik karesi çizildi (toplam kare {n}, kare talebi {}), üst sınır {limit}",
+                report.requests,
+                c = counters.content,
             ),
             Verdict::MissingCounter { required } => eprintln!(
                 "bateri: {secs} saniyelik koşuda çizilen kare {n}, üretilen hücre {k}, çizilen glif {g}, çizilen kural {r} ({required})"
@@ -1694,6 +1776,8 @@ mod tests {
             atlas: (13, 2048),
             workload,
             requests: 4,
+            motion: 0,
+            quiet: Some(Duration::from_millis(2950)),
             teardown: Some(Teardown::Clean),
             measured: None,
         }
@@ -1702,6 +1786,7 @@ mod tests {
     fn smoke_counters() -> Counters {
         Counters {
             frames: 1,
+            content: 1,
             cells: 8,
             glyphs: 6,
             rules: 15,
@@ -1734,10 +1819,20 @@ mod tests {
             "kural=15",
             "yuva=13/2048",
             "yuk=smoke",
+            "istek=4",
+            "kapanis=clean",
         ] {
             assert!(line.contains(token), "{token} düştü: {line}");
         }
         assert!(line.ends_with(" pipeline=ok"), "{line}");
+
+        // Üç yeni anahtar da **kalıcı**: sözleşme bugünden sonra onları da
+        // "silinmez" tarafına alıyor. `hareket=0` bu phase'de kanıtlanabilir
+        // bir sıfır — artıran yol henüz yok — ve sonraki setin kırmızı
+        // düşürebileceği tek yer burası.
+        for token in ["icerik=1", "hareket=0", "sessiz=2950.00ms"] {
+            assert!(line.contains(token), "{token} yok: {line}");
+        }
 
         // Kapı kapalıyken ölçüm jetonları **yok** ve `ornek=0` da yok: sıfır,
         // "kapı açıktı ama hiç örnek toplanmadı" ile karışırdı ve R5.2'nin
@@ -1750,6 +1845,7 @@ mod tests {
         let load = report(
             Counters {
                 frames: 9,
+                content: 9,
                 cells: 0,
                 glyphs: 12,
                 rules: 0,
@@ -1758,6 +1854,23 @@ mod tests {
         )
         .token_line();
         assert!(load.contains("yuk=load"), "{load}");
+    }
+
+    #[test]
+    fn quiet_token_says_none_when_nothing_was_drawn() {
+        // `sessiz=` uydurulmuş bir sıfır basmıyor: sıfır, "deadline anında
+        // kare akıyordu" demek ve hiç kare çizilmemiş bir koşuyla karışırdı
+        // (`ornek=off` ile aynı kural).
+        //
+        // Bu kol jeton satırında **erişilemez** — kare çizilmemişse `kare=0`
+        // ve kapı `MissingCounter` diyor, yani satır hiç basılmıyor. Yine de
+        // sınanıyor: `Report` onu temsil edebiliyor ve phase-6 eşiği kapıya
+        // bağladığında ayırt edilmesi gereken ilk şey bu olacak.
+        let mut r = report(smoke_counters(), Workload::Smoke);
+        r.quiet = None;
+        let line = r.token_line();
+        assert!(line.contains(" sessiz=none "), "{line}");
+        assert!(!line.contains("sessiz=0"), "{line}");
     }
 
     #[test]
@@ -1812,8 +1925,12 @@ mod tests {
 
     #[test]
     fn idle_limit_catches_excess_frames() {
-        let counters = |frames, cells, glyphs, rules| Counters {
-            frames,
+        // Üst sınırın operandı `icerik`, alt sınırınki `kare`. Sağlıklı bir
+        // koşuda ikisi eşit olduğu için yardımcılar `kare = icerik` kuruyor;
+        // ikisinin ayrıştığı durumun kendi sınaması aşağıda.
+        let counters = |content, cells, glyphs, rules| Counters {
+            frames: content,
+            content,
             cells,
             glyphs,
             rules,
@@ -1824,6 +1941,26 @@ mod tests {
         let excess = Verdict::ExcessFrames {
             limit: IDLE_FRAME_LIMIT,
         };
+
+        // **Bu değişikliğin tamamı bu iki satırda.** Kapı `kare`'ye bakmayı
+        // bıraktı: hareket kareleri `kare`'yi meşru olarak şişirecek ve sınır
+        // onları görmemeli. Ters yön de bağlı — `icerik` taşarsa `kare`'nin
+        // düşük olması kurtarmıyor.
+        let mixed = |frames, content| {
+            verdict(
+                Counters {
+                    frames,
+                    content,
+                    cells: 8,
+                    glyphs: 6,
+                    rules: 15,
+                },
+                Workload::Smoke,
+                clean,
+            )
+        };
+        assert_eq!(mixed(200, 1), Verdict::Pass, "hareket karesi kapıya girmez");
+        assert_eq!(mixed(1, 200), excess, "içerik karesi kapıdan kaçamaz");
 
         // Bugünkü duman koşusunun ta kendisi: bir kare, sekiz hücre, altı
         // glyph, on beş kural.
@@ -1887,6 +2024,7 @@ mod tests {
         // tam tersi.
         let good = Counters {
             frames: 1,
+            content: 1,
             cells: 8,
             glyphs: 6,
             rules: 15,

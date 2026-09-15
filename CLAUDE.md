@@ -46,9 +46,10 @@ make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
-                  # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I kapanis=clean profil=debug ornek=off pipeline=ok
-                  # ilk dördünden biri 0 ise ya da kare > IDLE_FRAME_LIMIT (= 8, ölçülmüş; türetmesi sabitin doc'unda) ise kırmızı.
-                  # yuva/yuk/istek/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
+                  # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C hareket=M sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
+                  # ilk dördünden biri 0 ise ya da icerik > IDLE_FRAME_LIMIT (= 8, ölçülmüş; türetmesi sabitin doc'unda) ise kırmızı.
+                  # üst sınır kare'de değil icerik'te: icerik çizilmeye karar verilen kare, kare GPU'nun bitirdiği — animasyon ikincisini meşru olarak şişirir.
+                  # yuva/yuk/istek/hareket/sessiz/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler, target/release/bateri.app'i kurar ve içeriğini denetler (Info.plist, ikon, lisans); imza yok
