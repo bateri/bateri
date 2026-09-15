@@ -196,15 +196,16 @@ fare enjeksiyonu kullanıcının makinesinde başka uygulamaya düşebileceği i
 
 ### B.5 `/ship` — `main` push'u `[oto]`
 
-Bölüm A'yı yeniden koşturur, bu belgenin Yayın Checklist'ini damgalar,
-`.tasks/README.md`'de seti 🟢 yapar ve push eder. B.2 ve B.3 push'u
-bekletmez; açık kalırsa kutuları `[~]` ve gerekçesiyle kalır.
+Bölüm A'yı yeniden koşturur, bu belgenin Yayın Checklist'ini damgalar ve
+push eder. B.2 ve B.3 push'u bekletmez: koşulmadıkları için kutuları
+işaretsiz kalır ve indeks "teslim bekliyor" der; ikisi de kapanınca set 🟢.
 
 ### Yayın Checklist
 
 - [ ] B.2 göz kontrolleri (dört madde) — kullanıcı
 - [ ] B.3 `/measure` (iki iddia) — kullanıcı isterse
-- [ ] B.5 `/ship`
+- [x] B.5 `/ship` — push öncesi `make hepsi`, `make test-yaris` ve `make duman`
+      (`kare=2 hucre=8 glif=6 kural=15`) yeşil
 
 ## Geri Alma
 
