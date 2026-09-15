@@ -99,7 +99,8 @@ entegrasyonu, app bundle — beşi de her phase'de "yok".
    `.tasks/README.md`'nin bugünkü satırı, iki kaynak da aynı düzeltmeyi
    yapıyor): yalnız **atlas doluluğu** (003 #3, 004 #2) kapandı; kare
    süresi/açılış ailesinin sekiz iddiası **ölçülebilir** oldu, kapanmadı —
-   sayının gideceği `docs/OLCUMLER.md` henüz yok.
+   sayının gideceği `docs/OLCUMLER.md` henüz yok. *(2026-09-15: 006 phase-5
+   kurdu; yalnız `## Boşta kare`'yi taşıyor, bu sekiz iddianın sayısı hâlâ yok.)*
 
 ### B.1 `/ship` — dallanmamış `main` push'u `[oto]`
 
@@ -134,7 +135,9 @@ doğurmadı). Ama `86143ea` üç komşu setin şu satırlarını "artık koşula
 
 Release profili ve önde/görünür bir pencere ister (`profil=` jetonu
 debug'ı; `ornek=` örneklemenin örtülü pencerede sessizce durabildiğini
-gösterir). İlk koşu aynı zamanda `docs/OLCUMLER.md`'yi kuracak (R7.3) —
+gösterir). İlk koşu aynı zamanda `docs/OLCUMLER.md`'yi kuracak (R7.3) *(2026-09-15:
+dosyayı 006 phase-5'in `IDLE_FRAME_LIMIT` ölçümü kurdu; bu ölçüm onun
+`## Yöntem`'ine kare süresi kolunu ekler)* —
 bu teslimi bloklamıyor, `.app` paketi (`make kur`) gelene kadar da
 `IDLE_FRAME_LIMIT`'in kendisi yeniden ölçülmeyecek.
 

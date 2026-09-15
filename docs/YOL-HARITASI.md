@@ -46,7 +46,7 @@ bulunamaz.
 
 | # | İş | Neden bu sırada |
 |---|---|---|
-| 007 | ayarlar + sekiz rollü tema + font seçimi | Font bugün sabit (`FALLBACK = "Menlo"`), renkler alacritty'nin varsayılan paletinden geliyor. Eşikten **sonra** çünkü neye ihtiyaç olduğu kullanırken daha iyi görülür |
+| 007 | ayarlar + sekiz rollü tema + font seçimi | Font bugün sabit (`FALLBACK = "Menlo"`), renkler alacritty'nin varsayılan paletinden geliyor. Eşikten **sonra** çünkü neye ihtiyaç olduğu kullanırken daha iyi görülür. 006'dan ertelenen OSC 52 yazma yönünün `NSPasteboard` köprüsü de burada: ayar anahtarıyla gelir (`006/discussion.md` → Karar) |
 | 008 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür |
 | 009 | sekme + bölme | |
 | 010 | shell entegrasyonu (zsh/bash/fish) + OSC 133 | Kullanıcının rc dosyasına **asla** dokunulmaz: zsh `ZDOTDIR` sarmalayıcısı, bash `--rcfile`, fish `vendor_conf.d`. OSC 133 alacritty'de **yok**, `bt-core`'a eklenir |
