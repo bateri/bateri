@@ -30,9 +30,9 @@ pub use color::{LinearRgba, Theme};
 pub use input::Arrow;
 pub use session::{
     Cell, CellHalf, Cursor, DirtyFlag, SHUTDOWN_GRACE, SelectionPoint, Session, SessionOptions,
-    Teardown, UnderlineStyle, Wheel, load_shell, smoke_shell,
+    Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
-pub use settings::{Diagnostic, Parsed, Settings};
+pub use settings::{Changes, Diagnostic, Parsed, Settings};
 pub use wake::Wake;
 
 /// Hücre sabit boyuttadır ve sabit burada bağlanır: **alacritty'nin** hücresi

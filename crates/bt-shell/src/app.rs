@@ -26,6 +26,7 @@ use objc2_foundation::{
 
 use crate::notices::{Notices, Source};
 use crate::view::BateriView;
+use crate::watch::{Notify, Watch};
 use crate::{Options, Run, Workload};
 use crate::{child, settings};
 
@@ -119,8 +120,9 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// Süreli koşu (`make duman`, ölçüm) ayar dosyasını, dosya izlemeyi, sistemin
 /// açık/koyu görünümünü ve Tema menüsünün `themes/`'ten dolmasını görmez:
 /// kapının sonucu o makinenin `~/.config/bateri/`'sine bağlı olmasın. Bugün
-/// ilki ve üçüncüsü var ([`AppDelegate::load_settings`],
-/// [`AppDelegate::apply_appearance`]); sonraki girişler de bu değere bakar,
+/// ilk üçü var: dosyayı okuyup izlemeyi kuran [`AppDelegate::load_settings`]
+/// ve [`AppDelegate::reload_settings`], görünümü okuyan
+/// [`AppDelegate::apply_appearance`]. Tema menüsü de bu değere bakar,
 /// kendi `run.is_some()` koşulunu yazmaz — dört ayrı koşuldan birinin
 /// unutulduğu gün kapı sessizce kullanıcının dosyasına bağlanırdı
 /// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1).
@@ -245,6 +247,31 @@ impl Wake for ShellWake {
     }
 }
 
+/// İzleme kaynaklarının bildirimi ([`notify_settings_changed`]).
+fn watch_notify() -> Notify {
+    Arc::new(notify_settings_changed)
+}
+
+/// Bir izleme olayını uygulayıcıya taşır: **hedefsiz eylemle**
+/// `settingsDidChange:`'e, görünüm değişiminin (`view.rs`) yolundan.
+///
+/// Hiçbir şey yakalamıyor: kaynağın context'inde bir delegate referansı
+/// olsaydı iptal işleyicisi onu düşürür ve ömrünü libdispatch'in iptal
+/// zamanlamasına bağlardı. Responder zinciri pencere key olmasa da (kullanıcı
+/// editörde) `NSApp`'e ve onun delegate'ine varıyor.
+fn notify_settings_changed() {
+    // audit: kaynaklar yalnız `DispatchQueue::main()`'e kuruluyor
+    // (`AppDelegate::watch_config`, `watch_theme`) ve ana kuyrukta koşan iş
+    // tanımı gereği ana thread'dedir.
+    let mtm = MainThreadMarker::new().expect("izleme kaynakları ana kuyrukta");
+    let app = NSApplication::sharedApplication(mtm);
+    // SAFETY: seçici geçerli; hedef `None` → responder zinciri. Alıcısı
+    // `AppDelegate::settings_did_change`, tek `Option<&AnyObject>` argüman
+    // alıyor ve gönderene bakmıyor. Alıcı yoksa (delegate henüz bağlanmadı)
+    // `false` döner ve olay düşer; sonraki kayıt yine gelir.
+    let _ = unsafe { app.sendAction_to_from(sel!(settingsDidChange:), None, None) };
+}
+
 /// Delegate'in durumu. `OnceCell`: pencere, oturum ve link
 /// `applicationDidFinishLaunching` içinde bir kez doğar, sonra yalnız okunur.
 pub(crate) struct Ivars {
@@ -265,14 +292,24 @@ pub(crate) struct Ivars {
     run: Option<Run>,
     /// Alt başlığın yuvaları; yazanı yalnız [`AppDelegate::post_notices`].
     notices: RefCell<Notices>,
-    /// Geçerli ayarlar: açılışta [`AppDelegate::load_settings`] yazar, görünüm
-    /// uygulayıcısı `theme_for` için okur. Süreli koşuda varsayılanlar ve
-    /// görünüm uygulayıcısı onları hiç okumaz (`Inputs::Hermetic`).
+    /// Geçerli ayarlar: açılışta [`AppDelegate::load_settings`], kayıtta
+    /// [`AppDelegate::reload_settings`] yazar; görünüm uygulayıcısı
+    /// `theme_for` için okur. Süreli koşuda varsayılanlar ve görünüm
+    /// uygulayıcısı onları hiç okumaz (`Inputs::Hermetic`).
     ///
     /// Saklanıyor, çünkü görünüm değişimi dosyayı yeniden okumadan hangi
-    /// temanın seçileceğini bilmeli; canlı yenileme (phase-4) farkı da buna
-    /// karşı alacak.
+    /// temanın seçileceğini bilmeli ve canlı yenileme farkı buna karşı alıyor.
+    /// Kullanılamayan bir kayıt onu **değiştirmez**: sonraki görünüm değişimi
+    /// son iyi ayarlarla seçer.
     settings: RefCell<Settings>,
+    /// Ayar dizininin kaynakları: kök, `themes/`, `settings.toml`
+    /// ([`settings::watched_paths`]). Süreli koşuda ve ev dizini
+    /// çözülemeyince hiç kurulmuyor.
+    config_watch: RefCell<Option<Watch>>,
+    /// Etkin kullanıcı temasının dosyası. Ayrı yuva, çünkü adı görünümle de
+    /// değişiyor ve görünüm değişimi ayar dosyasını yeniden okumuyor; gömülü
+    /// tema seçiliyse dosya yok ve yuva kaynaksız.
+    theme_watch: RefCell<Option<Watch>>,
     /// Ölçüm defteri — kapı kapalıyken `None` ve hiç ayrılmamış.
     ///
     /// `bt-gpu`'nun tipi ama sahibi burası: `DisplayLink` ile tamamlanma bloğu
@@ -447,6 +484,13 @@ define_class!(
         #[unsafe(method(appearanceDidChange:))]
         fn appearance_did_change(&self, _sender: Option<&AnyObject>) {
             self.apply_appearance();
+        }
+
+        /// Bir izleme kaynağı haber verdi (`notify_settings_changed`,
+        /// hedefsiz eylem): ayar ya da tema dosyası kaydedildi.
+        #[unsafe(method(settingsDidChange:))]
+        fn settings_did_change(&self, _sender: Option<&AnyObject>) {
+            self.reload_settings();
         }
 
         #[unsafe(method(runDeadline:))]
@@ -843,6 +887,8 @@ impl AppDelegate {
             run: opts.run,
             notices: RefCell::new(Notices::default()),
             settings: RefCell::new(Settings::default()),
+            config_watch: RefCell::new(None),
+            theme_watch: RefCell::new(None),
             stats,
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
@@ -882,7 +928,7 @@ impl AppDelegate {
                 cols: grid.cols,
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
-                scrollback: self.ivars().settings.borrow().scrollback,
+                terminal: self.ivars().settings.borrow().terminal(),
                 theme,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
@@ -938,6 +984,9 @@ impl AppDelegate {
     /// `"system"` ve ona çözülseydi duman makinenin açık modundan etkilenirdi.
     /// Bozuk dosya pencereyi açık bırakır, varsayılanlarla
     /// ([`settings::Loaded::at_launch`], [`AppDelegate::choose_theme`]).
+    ///
+    /// İzleme de burada kuruluyor, okumadan **önce** (`watch` → kurulum tek
+    /// atımlık): açılışla ilk olay arasına düşen bir kayıt kaybolmasın.
     fn load_settings(&self) -> Theme {
         let Inputs::User { config_root } = self.inputs() else {
             return Theme::BATERI;
@@ -946,7 +995,10 @@ impl AppDelegate {
         // Dock'tan açılışta stderr'i kimse görmez, kullanıcının ayarları
         // sessizce yok sayılmış olurdu.
         let (settings, messages) = match &config_root {
-            Some(root) => settings::load(root).at_launch(),
+            Some(root) => {
+                self.watch_config(root);
+                settings::load(root).at_launch()
+            }
             None => (
                 Settings::default(),
                 vec![format!(
@@ -966,12 +1018,105 @@ impl AppDelegate {
     /// temanın yerine görünüme uyan gömülü tema gelir
     /// ([`settings::ThemeLoaded::or_embedded`]); ekrandaki temayı tutmak
     /// görünüm değişiminde öteki görünümün temasını bırakırdı.
+    ///
+    /// Etkin tema dosyasının kaynağı da burada, okumadan önce yenileniyor:
+    /// görünüm değişince ad değişiyor ve eski adın kaynağı yeni dosyadaki
+    /// yerinde yazmayı görmezdi.
     fn choose_theme(&self, config_root: Option<&Path>, settings: &Settings) -> Theme {
         let dark = self.dark_appearance();
-        let (theme, messages) =
-            settings::load_theme(config_root, settings.theme_for(dark)).or_embedded(dark);
+        let name = settings.theme_for(dark);
+        self.watch_theme(config_root, name);
+        let (theme, messages) = settings::load_theme(config_root, name).or_embedded(dark);
         self.post_notices(Source::Theme, messages);
         theme
+    }
+
+    /// Canlı yenileme: bir izleme kaynağı haber verdi. Phase-6'nın
+    /// "Ayarlar…"ı dizini yarattıktan sonra da buraya gelecek — sonradan
+    /// yaratılan dizini hiçbir kaynak görmüyor (`watch`).
+    ///
+    /// Sıra, üç kural:
+    /// - **Önce kur, sonra oku** ([`AppDelegate::watch_config`],
+    ///   [`AppDelegate::watch_theme`]); her olayda hepsi yeniden kuruluyor,
+    ///   üstüne taşınmış dosyanın ya da silinmiş dizinin bayat tanıtıcısı
+    ///   böyle düşüyor.
+    /// - **Ayar dosyası** ([`settings::Loaded::live`]): kullanılamayan ya da
+    ///   bir an yok olan dosyadan hiçbir şey uygulanmaz ve [`Ivars::settings`]
+    ///   değişmez; yuva kendi kaynağına göre dolar ya da boşalır. Değilse
+    ///   kabul edilmeyen anahtar geçerli değerini tutar
+    ///   ([`settings::load_keeping`]) ve fark alınır: terminal seçenekleri
+    ///   **tamamıyla** oturuma gider.
+    /// - **Tema her olayda yeniden çözülüyor**, ayar dosyası bozuk olsa da
+    ///   (son iyi ayarların adıyla): etkin tema dosyası ayrı bir kaynak ve
+    ///   hangi dosyanın haber verdiği bilinmiyor. Kullanılamayan tema takas
+    ///   edilmez, ekrandaki kalır ([`settings::ThemeLoaded::or_current`]);
+    ///   aynı tema takası no-op, kare istenmez.
+    ///
+    /// Birleştirme yok: bir kayıt birden çok olay doğurur (dizin + dosya) ve
+    /// sonrakiler boş fark verir.
+    fn reload_settings(&self) {
+        let Inputs::User {
+            config_root: Some(root),
+        } = self.inputs()
+        else {
+            return;
+        };
+        // Kaynaklar `didFinishLaunching` içinde kuruluyor ve olay ana kuyruğa
+        // ancak o dönünce, yani oturum doğduktan sonra düşebiliyor; bu dal
+        // bir sıra değişikliğine karşı.
+        let Some(session) = self.ivars().session.get() else {
+            return;
+        };
+        self.watch_config(&root);
+        // Kabul edilmeyen değer geçerli ayardan (`load_keeping`): yanlış
+        // türde kaydedilen `scrollback` geçmişi kırpmasın.
+        let (loaded, messages) =
+            settings::load_keeping(&root, &self.ivars().settings.borrow()).live();
+        self.post_notices(Source::Settings, messages);
+        if let Some(new) = loaded {
+            let changes = self.ivars().settings.borrow().changes(&new);
+            if changes.terminal {
+                session.set_terminal_options(new.terminal());
+            }
+            self.ivars().settings.replace(new);
+        }
+        // Ödünç `set_theme`'den önce düşüyor; içerideki çağrılar `settings`'e
+        // dokunmuyor (`apply_appearance`'ın deseni).
+        let theme = {
+            let settings = self.ivars().settings.borrow();
+            let name = settings.theme_for(self.dark_appearance());
+            self.watch_theme(Some(&root), name);
+            let (theme, messages) = settings::load_theme(Some(&root), name).or_current();
+            self.post_notices(Source::Theme, messages);
+            theme
+        };
+        if let Some(theme) = theme {
+            session.set_theme(theme);
+        }
+    }
+
+    /// Ayar dizininin kaynaklarını yeniden kurar. Yenisi eskisi düşmeden
+    /// kuruluyor (`replace`): iki kurulum arasında boşluk yok.
+    fn watch_config(&self, root: &Path) {
+        let watch = Watch::install(
+            &settings::watched_paths(root),
+            DispatchQueue::main(),
+            &watch_notify(),
+        );
+        self.ivars().config_watch.replace(Some(watch));
+    }
+
+    /// Etkin tema dosyasının kaynağını yeniden kurar; ev dizini yoksa yuva
+    /// boşalır.
+    fn watch_theme(&self, config_root: Option<&Path>, name: &str) {
+        let watch = config_root.map(|root| {
+            Watch::install(
+                &[settings::theme_path(root, name)],
+                DispatchQueue::main(),
+                &watch_notify(),
+            )
+        });
+        self.ivars().theme_watch.replace(watch);
     }
 
     /// Görünüm değişiminin uygulayıcısı: tema sistemi izliyorsa görünüme uyan

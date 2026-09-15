@@ -4,7 +4,8 @@ bateri'nin kullanıcı ayarları tek bir TOML dosyasında, renk temaları ayrı
 dosyalarda durur. Bu belge anahtarların, tema biçiminin, varsayılanların ve
 dosya bozukken ne olacağının **tek sahibidir**; kod tarafındaki karşılığı
 `crates/bt-core/src/settings.rs` ve `theme.rs` (ayrıştırma),
-`crates/bt-shell/src/settings.rs` (okuma ve tema adının çözümü).
+`crates/bt-shell/src/settings.rs` (okuma ve tema adının çözümü),
+`watch.rs` (dosyaların izlenmesi).
 
 ## Dosyanın yeri
 
@@ -16,10 +17,17 @@ Dosya yoksa her şey varsayılanıyla çalışır ve hiçbir uyarı çıkmaz. Di
 dosyayı elle oluşturmak yeterli. Dosya başka bir yere sembolik bağ olabilir
 (dotfile deposu); bağın hedefi okunur.
 
-Değişiklik — ayar dosyasında da tema dosyasında da — **uygulamayı yeniden
-açınca** geçerli olur. Sistemin açık/koyu görünümü ise **anında** izlenir:
-tema `"system"` iken (varsayılan) Sistem Ayarları'nda görünüm değişince
-pencere de değişir, kabuk yaşamaya devam eder.
+Değişiklik **kaydettiğiniz anda** geçerli olur — ayar dosyasında da,
+kullanılan temanın dosyasında da; kabuk ve içindeki program yaşamaya devam
+eder. Editörün kaydı nasıl yaptığı fark etmez (yerinde yazma, boşaltma,
+geçici dosya ve üstüne taşıma, sembolik bağın hedefine yazma). Sistemin açık/koyu
+görünümü de anında izlenir: tema `"system"` iken (varsayılan) Sistem
+Ayarları'nda görünüm değişince pencere de değişir.
+
+İzlenen yer `~/.config/bateri/` dizinidir. Uygulama açıkken bu dizin **hiç
+yoksa** oluşturmak izlemeyi başlatmaz: dizini kabuktan ilk kez oluşturan
+kullanıcı değişikliklerini uygulamayı yeniden açınca görür, sonrası kayıt
+anında izlenir.
 
 ## Hata olursa
 
@@ -37,7 +45,7 @@ durumda açılır.
 olabilir (denenmedi); dosyayı pencere modunda açıp bakmak ya da stderr'deki
 kopya yolu kalır.
 
-| durum | sonuç |
+| açılışta | sonuç |
 |---|---|
 | dosya yok | varsayılanlar, uyarı yok |
 | dosya okunamıyor (izin, UTF-8 olmayan içerik, düz dosya değil, hedefi olmayan sembolik bağ) | varsayılanlar, uyarı |
@@ -51,6 +59,24 @@ kopya yolu kalır.
 Tema kuralı görünüm değişiminde de aynı: yeni görünümün teması
 kullanılamıyorsa o görünüme uyan gömülü tema gelir — pencere öteki
 görünümün temasında kalmaz.
+
+**Kaydettiğiniz anda** ise kural düzenlemeyi korur: yarım kalmış bir kayıt
+ekranı bozmaz, uyarı çıkar ve dosyayı düzeltip kaydedince uyarı kalkar.
+
+| kayıt anında | sonuç |
+|---|---|
+| ayar dosyası geçersiz TOML ya da okunamıyor | **hiçbir ayar değişmez**, uyarı |
+| ayar dosyası silindi ya da boşaltıldı | ayarlar değişmez, uyarı yok; varsayılanlar uygulamayı yeniden açınca gelir |
+| bir anahtarın değeri kabul edilmiyor | o anahtar **değişmez**, uyarı; tavanı aşan `scrollback` tavana iner |
+| anahtar dosyadan silindi | o anahtar varsayılanına döner |
+| seçilen tema bulunamıyor, dosyası okunamıyor ya da geçersiz TOML | **ekrandaki tema kalır**, uyarı |
+
+Silinen dosyanın ayarları değiştirmemesi bilerek: çoğu editör kaydederken
+eski dosyayı bir an kenara taşır ya da önce boşaltıp sonra yazar; varsayılanlara
+dönmek her kayıtta pencereyi çakar, `scrollback` büyütülmüşse geçmişin fazlasını
+silerdi. Kabul edilmeyen değerin anahtarı değiştirmemesi de: `scrollback`'i
+yanlışlıkla metin olarak kaydetmek varsayılana düşseydi geçmişin fazlası o
+anda silinirdi.
 
 "Geçersiz TOML" sözdizimi hatasından geniştir: aynı anahtarı iki kez yazmak
 ve TOML'un tam sayı sınırını (9 223 372 036 854 775 807) aşan bir sayı da
@@ -78,6 +104,9 @@ scrollback = 10000
 - Negatif ya da tam sayı olmayan değer (`"lots"`, `1.5`) varsayılana döner
   ve uyarı verir.
 - `0` geçerli: geçmiş tutulmaz.
+- Değer uygulama açıkken değişince **hemen** uygulanır: küçültmek fazla
+  satırları o anda siler, sonra büyütmek silineni geri getirmez. Yazarken
+  kendiliğinden kaydeden bir editörde ara değer de (`100000` → `1`) kayıttır.
 
 Bölüm satır içi de yazılabilir: `terminal = { scrollback = 5000 }`.
 `[[terminal]]` (bölüm dizisi) bölüm sayılmaz ve uyarı verir.

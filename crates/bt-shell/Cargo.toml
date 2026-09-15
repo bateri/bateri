@@ -29,7 +29,9 @@ objc2-app-kit = { workspace = true, features = ["NSAppearance"] }
 objc2-quartz-core = { workspace = true, features = ["CALayer"] }
 # Ana kuyruk: `Wake::child_exit` okuyucu thread'de gelir ve `terminate:` ana
 # thread'in işidir. Grafta bt-gpu üzerinden zaten vardı; bu iki satır yeni
-# crate çekmez, `Cargo.lock`'a yalnız kenar ekler.
+# crate çekmez, `Cargo.lock`'a yalnız kenar ekler. Vnode kaynakları da buradan
+# (ayar ve tema dosyasının izlenmesi, `watch`, 007 phase-4): fonksiyon
+# işaretçili işleyiciyle, `block2` kenarı yok.
 dispatch2 = { workspace = true }
 # Yalnız bekçi thread'in `write` + `_exit`'i; gerekçesi workspace manifest'inde.
 libc = { workspace = true }

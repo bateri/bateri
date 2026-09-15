@@ -13,7 +13,9 @@
 //! **Bilinmeyen anahtar ve bölüm sessizce yoksayılır:** sonraki setlerin
 //! anahtarı (`[motion]`) bugünkü sürümde tanı üretmemeli.
 //!
-//! Ayrıştırıcı önceki `Settings`'i bilmez; fark almak çağıranın işi.
+//! Ayrıştırıcı önceki ayarları yalnız kabul edilmeyen değerin yerine geçecek
+//! değer olarak görür ([`Settings::parse_keeping`], kayıt anı); fark almak
+//! çağıranın işi ([`Settings::changes`]).
 //!
 //! Tanı tipi ve TOML yardımcıları tema dosyasının ayrıştırıcısıyla (`theme`)
 //! ortak: iki dosyanın hata dili aynı olsun.
@@ -21,6 +23,8 @@
 use std::fmt;
 
 use toml_edit::{Document, Item, TableLike};
+
+use crate::session::TerminalOptions;
 
 /// Kaydırma geçmişinin tavanı: **alacritty uygulamasının** sınırı.
 ///
@@ -133,49 +137,82 @@ impl Settings {
     /// `scrollback = 99999999999999999999` tavana kırpılamaz, çünkü değer
     /// hiç okunamıyor. `docs/AYARLAR.md` bunu söylüyor.
     pub fn parse(text: &str) -> Result<Parsed, Diagnostic> {
+        Self::parse_keeping(text, &Settings::default())
+    }
+
+    /// [`Settings::parse`], ama **kabul edilmeyen** değer varsayılanı değil
+    /// `fallback`'inkini alır — kayıt anının kuralı: çağıran geçerli ayarları
+    /// verir (`bt-shell`'in canlı yenilemesi).
+    ///
+    /// Sebep geri alınamayan uygulama: `scrollback = 100000` iken yanlışlıkla
+    /// kaydedilen `scrollback = "100000"` varsayılana (on bin) düşseydi
+    /// geçmişin doksan bin satırı o anda silinir, dosyayı düzeltmek onları
+    /// geri getirmezdi. Tanı da düşülen değeri söylüyor ("using 100000").
+    ///
+    /// Yalnız kabul edilmeyen değer: dosyada **olmayan** anahtar varsayılanını
+    /// alır (dosya bir şey söylemiyor, anahtarı silen kullanıcı varsayılanı
+    /// istiyor) ve tavanı aşan değer tavana kırpılır (niyet belli). Bölüm
+    /// yanlış türdeyse (`terminal = 5`) bölümün bütün anahtarları kabul
+    /// edilmemiş sayılır.
+    pub fn parse_keeping(text: &str, fallback: &Settings) -> Result<Parsed, Diagnostic> {
         let doc = document(text)?;
         let mut parsed = Parsed {
             settings: Settings::default(),
             diagnostics: Vec::new(),
         };
         let root = doc.as_table();
-        if let Some(terminal) = section(text, root, "terminal", &mut parsed.diagnostics) {
-            if let Some(item) = terminal.get("scrollback") {
-                if let Some(value) = scrollback(text, item, &mut parsed.diagnostics) {
-                    parsed.settings.scrollback = value;
+        match section(text, root, "terminal", &mut parsed.diagnostics) {
+            Some(terminal) => {
+                if let Some(item) = terminal.get("scrollback") {
+                    parsed.settings.scrollback =
+                        scrollback(text, item, fallback.scrollback, &mut parsed.diagnostics);
                 }
             }
+            None if root.contains_key("terminal") => {
+                parsed.settings.scrollback = fallback.scrollback;
+            }
+            None => {}
         }
-        if let Some(appearance) = section(text, root, "appearance", &mut parsed.diagnostics) {
-            // İkincisi tanıdaki noktalı yol (`Diagnostic::key` `'static`
-            // ister), `theme.rs`'in `ANSI_KEYS`'iyle aynı deyiş.
-            let names = [
-                ("theme", "appearance.theme", &mut parsed.settings.theme),
-                (
-                    "light_theme",
-                    "appearance.light_theme",
-                    &mut parsed.settings.light_theme,
-                ),
-                (
-                    "dark_theme",
-                    "appearance.dark_theme",
-                    &mut parsed.settings.dark_theme,
-                ),
-            ];
-            for (key, path, slot) in names {
-                if let Some(item) = appearance.get(key) {
-                    // Varsayılan `slot`'taki değer: taban `Settings::default()`
-                    // ve her anahtar bir kez okunuyor.
-                    let accepts_system = key == "theme";
-                    let diagnostics = &mut parsed.diagnostics;
-                    let default = slot.as_str();
-                    if let Some(value) =
-                        theme_name(text, item, path, default, accepts_system, diagnostics)
-                    {
-                        *slot = value;
+        // İkincisi tanıdaki noktalı yol (`Diagnostic::key` `'static` ister),
+        // `theme.rs`'in `ANSI_KEYS`'iyle aynı deyiş; sonuncusu kabul
+        // edilmeyen değerin yerine geçen.
+        let names = [
+            (
+                "theme",
+                "appearance.theme",
+                &mut parsed.settings.theme,
+                &fallback.theme,
+            ),
+            (
+                "light_theme",
+                "appearance.light_theme",
+                &mut parsed.settings.light_theme,
+                &fallback.light_theme,
+            ),
+            (
+                "dark_theme",
+                "appearance.dark_theme",
+                &mut parsed.settings.dark_theme,
+                &fallback.dark_theme,
+            ),
+        ];
+        match section(text, root, "appearance", &mut parsed.diagnostics) {
+            Some(appearance) => {
+                for (key, path, slot, kept) in names {
+                    if let Some(item) = appearance.get(key) {
+                        let accepts_system = key == "theme";
+                        let diagnostics = &mut parsed.diagnostics;
+                        *slot = theme_name(text, item, path, kept, accepts_system, diagnostics)
+                            .unwrap_or_else(|| kept.clone());
                     }
                 }
             }
+            None if root.contains_key("appearance") => {
+                for (_, _, slot, kept) in names {
+                    slot.clone_from(kept);
+                }
+            }
+            None => {}
         }
         Ok(parsed)
     }
@@ -198,6 +235,40 @@ impl Settings {
     pub fn follows_system(&self) -> bool {
         self.theme == SYSTEM_THEME
     }
+
+    /// Oturumun terminal seçenekleri — `Session`'a açılışta da canlı
+    /// değişimde de **tamamı** bununla gider ([`TerminalOptions`]'ın doc'u).
+    pub fn terminal(&self) -> TerminalOptions {
+        TerminalOptions {
+            scrollback: self.scrollback,
+        }
+    }
+
+    /// `self`'ten (önceki) `new`'e neyin değiştiği — canlı yenilemenin
+    /// kapısı: değişmeyen parça uygulanmaz.
+    ///
+    /// Saf; önceki değeri tutan çağıran (`bt-shell`). Ayrı bir birleştirme
+    /// mekanizması yok: bir kayıt birden çok olay doğurursa ikincisi boş fark
+    /// verir.
+    pub fn changes(&self, new: &Settings) -> Changes {
+        Changes {
+            terminal: self.terminal() != new.terminal(),
+        }
+    }
+}
+
+/// İki [`Settings`] arasındaki fark ([`Settings::changes`]).
+///
+/// **Tema burada yok**, bilerek: canlı yenilemede tema her olayda yeniden
+/// çözülüyor, çünkü etkin tema dosyasının kendisi de bir kaynak ve onun
+/// değişimi ayar metninin farkında görünmez. Tema adı için bir alan ikinci,
+/// yarım bir kapı olurdu; aynı temanın takası zaten no-op
+/// (`Session::set_theme`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    /// [`Settings::terminal`] değişti: seçenekler `Session`'a **tamamıyla**
+    /// gider.
+    pub terminal: bool,
 }
 
 /// Metni TOML belgesine ayrıştırır; ayrıştırılamıyorsa tek satırlık tanı.
@@ -239,14 +310,19 @@ pub(crate) fn section<'a>(
 /// İki kabul edilmeyen hâl iki ayrı sonuç veriyor ve ikisi de tanı bırakıyor:
 ///
 /// - **Tavanı aşan → tavan.** "Çok geçmiş" isteyen kullanıcının niyeti
-///   belli; varsayılana (on bin) düşürmek istediğinin tersini verirdi.
-///   Tanı sessiz değil: istediği sayı uygulanmadı ve bunu bilmeli. (Punto
-///   kırpması sessiz — orada sınır Cmd +/−'nin olağan ucu, bir hata değil.)
-/// - **Negatif ya da tam sayı değil → varsayılan.** Niyet okunamıyor.
-fn scrollback(text: &str, item: &Item, diagnostics: &mut Vec<Diagnostic>) -> Option<usize> {
+///   belli; `fallback`'e (açılışta on bin) düşürmek istediğinin tersini
+///   verirdi. Tanı sessiz değil: istediği sayı uygulanmadı ve bunu bilmeli.
+///   (Punto kırpması sessiz — orada sınır Cmd +/−'nin olağan ucu, bir hata
+///   değil.)
+/// - **Negatif ya da tam sayı değil → `fallback`.** Niyet okunamıyor.
+fn scrollback(
+    text: &str,
+    item: &Item,
+    fallback: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> usize {
     const KEY: &str = "terminal.scrollback";
     let line = item.span().and_then(|span| line_of(text, span.start));
-    let default = Settings::default().scrollback;
     let reject = |message: String| Diagnostic {
         key: Some(KEY),
         line,
@@ -254,24 +330,24 @@ fn scrollback(text: &str, item: &Item, diagnostics: &mut Vec<Diagnostic>) -> Opt
     };
     let Some(value) = item.as_integer() else {
         diagnostics.push(reject(format!(
-            "`{KEY}` must be an integer, found {}; using {default}",
+            "`{KEY}` must be an integer, found {}; using {fallback}",
             kind(item)
         )));
-        return None;
+        return fallback;
     };
     let Ok(value) = usize::try_from(value) else {
         diagnostics.push(reject(format!(
-            "`{KEY}` cannot be negative; using {default}"
+            "`{KEY}` cannot be negative; using {fallback}"
         )));
-        return None;
+        return fallback;
     };
     if value > SCROLLBACK_MAX {
         diagnostics.push(reject(format!(
             "`{KEY}` is at most {SCROLLBACK_MAX}; using {SCROLLBACK_MAX}"
         )));
-        return Some(SCROLLBACK_MAX);
+        return SCROLLBACK_MAX;
     }
-    Some(value)
+    value
 }
 
 /// `appearance.theme`, `.light_theme`, `.dark_theme`: bir tema adı
@@ -467,6 +543,85 @@ mod tests {
         assert_eq!(fixed.theme_for(true), "bateri");
         assert_eq!(fixed.theme_for(false), "bateri");
         assert!(!fixed.follows_system());
+    }
+
+    #[test]
+    fn unchanged_settings_have_no_changes() {
+        // Her kayıtta dosyanın tamamı yeniden okunuyor; aynı metin boş fark
+        // vermeli, yoksa her kayıt geçmişi yeniden kurar ve kare ister.
+        let text = "[terminal]\nscrollback = 500\n[appearance]\ntheme = \"paper\"\n";
+        assert_eq!(clean(text).changes(&clean(text)), Changes::default());
+        assert_eq!(
+            Settings::default().changes(&Settings::default()),
+            Changes::default()
+        );
+    }
+
+    #[test]
+    fn scrollback_change_is_a_terminal_change() {
+        let before = clean("[terminal]\nscrollback = 500\n");
+        let after = clean("[terminal]\nscrollback = 20\n");
+        assert_eq!(before.changes(&after), Changes { terminal: true });
+        assert_eq!(after.terminal(), TerminalOptions { scrollback: 20 });
+        // Tema adları terminal seçeneği değil: tema her kayıtta yeniden
+        // çözülüyor (`bt-shell`), fark onu kapılamıyor.
+        let themed = clean("[terminal]\nscrollback = 500\n[appearance]\ntheme = \"paper\"\n");
+        assert_eq!(before.changes(&themed), Changes::default());
+    }
+
+    #[test]
+    fn rejected_values_keep_the_given_settings() {
+        // Kayıt anının kuralı (`/code-review` bulgusu): `scrollback`'in
+        // yanlış türde kaydı varsayılana (on bin) düşseydi yüz binlik geçmiş
+        // o anda geri dönülmez kırpılırdı. Kabul edilmeyen değer verilen
+        // ayarlarınkini alıyor ve tanı **onu** söylüyor.
+        let current = Settings {
+            scrollback: 100_000,
+            theme: "paper".to_owned(),
+            light_theme: "chalk".to_owned(),
+            dark_theme: "ink".to_owned(),
+        };
+        let parsed = Settings::parse_keeping(
+            "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
+            &current,
+        )
+        .expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.scrollback, 100_000);
+        assert_eq!(parsed.settings.theme, "paper");
+        assert_eq!(
+            parsed
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "`terminal.scrollback` must be an integer, found a string; using 100000",
+                "`appearance.theme` must be a string, found an integer; using \"paper\"",
+            ]
+        );
+        // Dosyada **olmayan** anahtar yine varsayılan: dosya bir şey
+        // söylemiyor, kabul edilmeyen bir değer de yok.
+        assert_eq!(parsed.settings.light_theme, "bateri-light");
+        assert_eq!(parsed.settings.dark_theme, "bateri");
+
+        // Tavanı aşan değer tavana kırpılıyor, verilene değil: niyet belli.
+        let parsed = Settings::parse_keeping("[terminal]\nscrollback = 1000000\n", &current)
+            .expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.scrollback, SCROLLBACK_MAX);
+
+        // Bölüm yanlış türde: bölümün bütün anahtarları kabul edilmemiş sayılır.
+        let parsed = Settings::parse_keeping("terminal = 5\nappearance = 1\n", &current)
+            .expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings, current);
+        assert_eq!(parsed.diagnostics.len(), 2);
+
+        // `parse` açılışın kuralı: aynı metin varsayılana düşüyor.
+        assert_eq!(
+            Settings::parse("terminal = 5\nappearance = 1\n")
+                .expect("ayrıştırılabilir metin")
+                .settings,
+            Settings::default()
+        );
     }
 
     #[test]

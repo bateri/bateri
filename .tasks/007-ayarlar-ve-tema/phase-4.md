@@ -81,18 +81,114 @@ Ayrıca:
 
 ## Yayın Etkisi
 
-- **ayar şeması** — davranış: değişiklik kayıt anında uygulanır.
-- Göz kontrolü: vim açıkken tema değişimi.
+- **ayar şeması** — yeni anahtar yok; davranış değişti: ayar ve etkin tema
+  dosyası **kayıt anında** uygulanır. Kayıt anında kullanılamayan dosya
+  (geçersiz TOML, okunamayan, bir an yok olan) hiçbir şeyi değiştirmez;
+  kabul edilmeyen değer anahtarı değiştirmez; kullanılamayan tema takas
+  edilmez. Silinen `settings.toml` yeniden açılışa
+  kadar etkisiz. `scrollback` küçültmesi geçmişi hemen siler. Uygulama
+  açıkken ilk kez yaratılan `~/.config/bateri/` izlenmez (yeniden açılış;
+  phase-6'nın "Ayarlar…"ı kapatır). `docs/AYARLAR.md` → Dosyanın yeri, Hata
+  olursa (yeni "kayıt anında" tablosu), `[terminal]`.
+- **`bt-core` pub API** — `TerminalOptions`, `Changes`, `Settings::terminal`,
+  `Settings::changes`, `Settings::parse_keeping`,
+  `Session::set_terminal_options`;
+  `SessionOptions.scrollback` → `SessionOptions.terminal`.
+- `CLAUDE.md` bugünkü hâl, katman tablosu (`dispatch2`: vnode kaynakları),
+  "Ayarlar" maddesi; `bt-shell` `lib.rs` başlığı — güncellendi.
+- Yeni bağımlılık yok, `Cargo.lock` değişmedi; `bt-shell/Cargo.toml`'da
+  yalnız `dispatch2` yorumu (denetimin "Cargo.toml farklı" uyarısı bundan).
+- Göz kontrolü bekliyor: bateri **içinde** vim açıkken tema değişimi (bu
+  oturumda pencereye tuş gönderilemedi; dosya tarafı vim'le sınandı).
 
 ## Checklist
 
-- [ ] `watch.rs`: dizin + dosya kaynakları, her olayda yeniden kurulum
-- [ ] Saf fark fonksiyonu
-- [ ] `Config`'i tamamından kuran tek fonksiyon, canlı seçenek değişimi,
+- [x] `watch.rs`: dizin + dosya kaynakları, her olayda yeniden kurulum
+- [x] Saf fark fonksiyonu
+- [x] `Config`'i tamamından kuran tek fonksiyon, canlı seçenek değişimi,
       kare isteği
-- [ ] Uygulayıcı: ayrıştırılamayan dosyada uygulama yok; hermetik dal
-- [ ] Test: dört izleme senaryosu + olmayan dizin, fark, `Config` koruması
-- [ ] `docs/AYARLAR.md`
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi (paylaşılan durum)
-- [ ] Yayın etkisi yazıldı
+- [x] Uygulayıcı: ayrıştırılamayan dosyada uygulama yok; hermetik dal
+- [x] Test: dört izleme senaryosu + olmayan dizin, fark, `Config` koruması
+- [x] `docs/AYARLAR.md`
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi (paylaşılan durum)
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+- **Sıra "önce kur, sonra oku"** (plan: iptal → oku → uygula → kur). Plan
+  sırasında okumayla kurulum arasına düşen kayıt hiç olay doğurmuyor ve
+  ekranda eski içerik kalıyordu. Yenisi eskisi düşmeden kuruluyor
+  (`RefCell::replace`), arada boşluk yok; bedeli en çok bir fazladan olay.
+- **İki yuva:** `config_watch` (kök, `themes/`, `settings.toml`) ve
+  `theme_watch` (etkin tema dosyası). Görünüm değişimi de tema kaynağını
+  yeniliyor (`choose_theme`): ad `theme_for(dark)`'tan türüyor ve eski adın
+  kaynağı yeni dosyadaki yerinde yazmayı görmezdi. Plan bunu söylemiyordu.
+- **Dizin maskesi `WRITE | DELETE | RENAME`** (plan: `WRITE`): dizinin
+  kendisi silinince/taşınınca da olay gelsin, bayat tanıtıcı düşsün.
+- **Canlı yolda `Missing` ve `Unreadable` de "hiçbir şey uygulanmaz"**
+  (`Loaded::live`; plan yalnız ayrıştırılamayanı sayıyordu). Editörün "eskiyi
+  kenara taşı, yenisini yaz" kaydında yol bir an yok; varsayılanları
+  uygulamak her kayıtta pencereyi çakardı. Bedeli: silinen dosyanın
+  varsayılanları yeniden açılışta.
+- **Tema her olayda yeniden çözülüyor**, ayar dosyası bozukken de (son iyi
+  ayarların adıyla); `Changes`'ta tema alanı yok (plan: fark tema seçimini de
+  kapsıyordu). Etkin tema dosyası da bir kaynak ve hangi kaynağın haber
+  verdiği bilinmiyor; tema alanı yarım bir ikinci kapı olurdu, aynı temanın
+  takası zaten no-op. Kullanılamayan tema kuralı (`ThemeLoaded::or_current`,
+  ekrandaki kalır) adın ayar dosyasında değişmesinde de aynı.
+- **`Session` seçenekleri saklamıyor** (plan: "güncel seçenekleri tutar").
+  Tek sahibi `Ivars.settings`, kapı `Settings::changes`; `set_terminal_options`
+  her çağrıda `Config`'i tam `TerminalOptions`'tan kuruyor
+  (`term_config`), ikinci kopya ayrışabilirdi.
+- **"Dizin silinip yeniden yaratılınca" kabulü daraltıldı:** Karar 2 üst
+  dizini izlemiyor, yani yeniden yaratılan dizini kendiliğinden hiçbir şey
+  görmüyor. Sınama silmenin olay ürettiğini, silinmiş dizine kaynak
+  kurulmadığını ve **dış tetikli** yeniden kurulumun yeni dizini gördüğünü
+  sınıyor (phase-6'nın tetiğinin ilk sınaması).
+- **Bildirim hedefsiz eylemle** (`settingsDidChange:`, phase-3'ün görünüm
+  yolu): kaynağın context'inde delegate referansı yok, ömrü libdispatch'in
+  iptal zamanlamasına bağlanmıyor.
+- **`TempRoot`** `bt-shell/settings.rs`'te `#[cfg(test)]` modül düzeyine
+  çıktı: izleme sınamaları da kullanıyor.
+- **Test-first:** `watch` gövdesi boşken dört izleme sınaması, `changes` ve
+  `set_terminal_options` boşken ikisi düştü; `term_config` sınaması
+  kurucuyla birlikte yazıldı (bekçi).
+- **Göz kontrolü** geçici `HOME` + `screencapture -l` ile, sabit tema
+  `bateri`'den: `mv` ile üstüne taşınan kayıt `paper`'a geçirdi; **yeni**
+  dosyaya `>>` ile yarım satır ekranı bozmadı, alt başlık satırı söyledi,
+  düzeltilen kayıt (aynı kayıtta `scrollback = 50`) alt başlığı temizledi;
+  etkin tema dosyasının rengini değiştirmek anında boyadı, bozmak ekrandaki
+  temayı tuttu ("keeping the current theme"); vim'in kaydı temayı döndürdü;
+  `themes/ink.toml`'un doğumu adı bekleyen ayarı uyguladı; `settings.toml`'u
+  silmek hiçbir şeyi değiştirmedi. vim bu makinede `backupcopy=no`'da da
+  inode'u korudu, yani **kenara taşıma dansı ve arada boş dosyanın
+  yakalanması (bir karelik flaş) gözlenmedi** — birleştirme yok kararının
+  olası bedeli, kayıtlı.
+- **`/code-review` (high), iki bulgu, ikisi de düzeltildi.**
+  - *Orta:* kayıt anında kabul edilmeyen `scrollback` (`"100000"` metin
+    olarak) varsayılana düşüp geçmişi **geri dönülmez** kırpıyordu. Çare
+    `Settings::parse_keeping` + `settings::load_keeping`: kayıt anında kabul
+    edilmeyen değer (ve yanlış türdeki bölümün anahtarları) geçerli ayardan
+    geliyor, tanı da o değeri söylüyor; dosyadan silinen anahtar yine
+    varsayılan, tavanı aşan yine tavan. Kural bütün anahtarlara uygulandı,
+    yalnız `scrollback`'e değil (`theme = 3` de adı değiştirmiyor). Kalan
+    sınır `AYARLAR.md`'de: yazarken kaydeden editörün **geçerli** ara değeri
+    (`100000` → `1`) de bir kayıt.
+  - *Düşük:* yazmadan boşaltma (`: >`, `truncate`) kqueue'da yalnız `ATTRIB`
+    veriyordu; dosya maskesine eklendi. Okumanın kendisi olay doğursaydı "kur →
+    oku → olay" sonsuz döngü olurdu: `reading_does_not_notify` bunu bağlıyor,
+    canlı koşuda boşaltmadan sonra süreç boşta kaldı (üç saniyede 0,04 sn
+    CPU). Temiz bulunanlar (bulgu yok): iptal/context ömrü, hedefsiz eylem,
+    kilit altındaki başlık olayı, `Config` kurucusu.
+  - *Düşük düzeltmenin yan etkisi:* `ATTRIB` yerinde kaydın boşaltma anını da
+    olay yaptı; arada okunan **boş** dosya geçerli bir TOML ve varsayılan
+    `scrollback`'le geçmişi kırpabilirdi (göz kontrolündeki `: >` temayı
+    varsayılana döndürmüştü, aynı yol). Çare dar: `load_keeping` boş (yalnız
+    boşluk) dosyayı `Missing` sayıyor; açılışta ikisi zaten aynıydı. Daha geniş
+    çare ("dosyada olmayan anahtar da geçerli değeri tutar") **reddedildi**:
+    satırı silen ya da yoruma alan kullanıcı kaydettiği anda varsayılanı
+    bekliyor (R1.1), küçük ayar dosyası tek `write` ile yazıldığı için yarım
+    geçerli ara hâl gerçekçi değil. Tema dosyası aynı yolu almadı: boş ara
+    dosya `bateri` renklerini bir an gösterir, geri dönülür ve açılışta boş
+    `themes/x.toml`'u "bulunamadı" demek yanlış olurdu.

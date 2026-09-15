@@ -22,11 +22,12 @@ rasterize eder; hücre ölçüsü oradan gelir ve `bt-gpu`
 `R8Unorm` dokuya bağlar, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
 çizer. `bt-shell` klavyeyi PTY'ye akıtır; fareyle seçim, pano, geçmişte
-kaydırma ve kapanış sırası ondadır; açılışta `settings.toml`'u okur (bugün
+kaydırma ve kapanış sırası ondadır; `settings.toml`'u okur (bugün
 `scrollback` ve tema seçimi) ve temayı `themes/{ad}.toml`'dan ya da gömülü
-`bateri`/`bateri-light`'tan çözer. Varsayılan tema sistemin açık/koyu
-görünümünü **canlı** izler (`Session::set_theme`); dosya değişikliği henüz
-yeniden açılış ister. `make kur` `bateri.app` paketini üretir.
+`bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
+anında** uygulanır (`watch`: vnode kaynakları; `Session::set_theme`,
+`Session::set_terminal_options`); varsayılan tema sistemin açık/koyu
+görünümünü de canlı izler. `make kur` `bateri.app` paketini üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri
 aynı commit'te düzelir.
@@ -72,7 +73,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
-| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini ve yereli (politika, `child`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`), `libc` (yalnız bekçinin `write` + `_exit`'i) |
+| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini ve yereli (politika, `child`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`; vnode kaynakları: ayar izleme), `libc` (yalnız bekçinin `write` + `_exit`'i) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -174,9 +175,13 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **Ayarlar** `~/.config/bateri/settings.toml`; bilinmeyen anahtar korunur,
   anahtar silinmez, ayar penceresi dosyayı yeniden yazar ama tanımadığını bırakır.
   Anahtarlar, varsayılanlar ve hata davranışı (pencere alt başlığı)
-  `docs/AYARLAR.md`'de; ayrıştırma `bt-core::settings`'te saf, okuma
-  `bt-shell`'de. Süreli koşu (`BT_RUN_SECONDS`) dosyayı **hiç okumaz**: dalın
-  tek yeri `bt-shell`'in `app::Inputs`'u.
+  `docs/AYARLAR.md`'de; ayrıştırma ve fark (`Settings::changes`)
+  `bt-core::settings`'te saf, okuma ve izleme `bt-shell`'de. İzleme kaynağı
+  okumadan **önce** kurulur ve her olayda yeniden kurulur; kayıt anında
+  kullanılamayan dosya hiçbir şeyi, kabul edilmeyen değer kendi anahtarını
+  değiştirmez (`Settings::parse_keeping`). Süreli koşu
+  (`BT_RUN_SECONDS`) dosyayı **hiç okumaz ve izlemez**: dalın tek yeri
+  `bt-shell`'in `app::Inputs`'u.
 - **Shell entegrasyonu** üç kabuk içindir (zsh `ZDOTDIR`, bash `--rcfile`
   sarmalayıcısı, fish `vendor_conf.d`) ve kullanıcının rc dosyasına **asla**
   dokunmaz. Komut blokları OSC 133 işaretlerinden okunur.
