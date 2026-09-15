@@ -162,6 +162,46 @@ impl fmt::Display for Diagnostic {
 }
 
 impl Settings {
+    /// "Settings…"ın dosya yokken yarattığı `settings.toml`: her anahtar
+    /// açıklamasıyla ve varsayılan değeriyle.
+    ///
+    /// Sahibi varsayılanların sahibi, yani burası: ayrıştırılınca tanısız
+    /// [`Settings::default`] verdiği sınamayla bağlı. Anahtarlar **yazılı**,
+    /// yorumda değil — kullanıcı değeri yerinde değiştiriyor, menüden tema
+    /// seçimi de satırı yerinde yazacak (phase-7). Bedeli: varsayılan bir gün
+    /// değişirse şablonu açmış kullanıcı eskisinde kalır. Yalnız
+    /// varsayılanı olmayan `family` yorumda bir örnek.
+    ///
+    /// Bölüm başlıkları yorumda değil: yorumu kaldırılan bir anahtar başlıksız
+    /// kalsaydı kök anahtar olur ve tanınmayan anahtar diye **sessizce**
+    /// yoksayılırdı.
+    ///
+    /// Metin İngilizce: kullanıcının açtığı dosya bir UI dizgisi
+    /// (`CLAUDE.md` → Dil).
+    pub const TEMPLATE: &str = r#"# bateri settings. Changes apply as soon as you save this file.
+# A key you delete goes back to its default.
+
+[terminal]
+# Lines of history kept above the screen, from 0 to 100000.
+scrollback = 10000
+
+[appearance]
+# "system" follows the macOS light/dark appearance. Any other value is a theme
+# used in both: a file themes/NAME.toml next to this one, or a built-in theme,
+# "bateri" (dark) or "bateri-light" (light).
+theme = "system"
+# The themes used while theme = "system".
+light_theme = "bateri-light"
+dark_theme = "bateri"
+
+[font]
+# A family name as shown in Font Book. Without it bateri uses SF Mono, or
+# Menlo when SF Mono is not installed.
+# family = "Menlo"
+# Size in points.
+size = 13
+"#;
+
     /// `settings.toml`'un metni → değerler + tanılar, ya da ayrıştırılamadı.
     ///
     /// `Err` **yalnız** geçersiz TOML'da; anahtar düzeyindeki her sorun
@@ -578,6 +618,55 @@ mod tests {
     fn empty_file_is_default() {
         assert_eq!(clean(""), Settings::default());
         assert_eq!(clean("# yalnız yorum\n\n"), Settings::default());
+    }
+
+    #[test]
+    fn template_is_the_defaults() {
+        // "Settings…"ın yarattığı dosya bugünkü davranışı değiştirmemeli:
+        // tanısız ve varsayılanların ta kendisi. Varsayılan değişip şablon
+        // değişmezse burada düşer.
+        assert_eq!(clean(Settings::TEMPLATE), Settings::default());
+
+        // Varsayılanı olan her anahtar **yazılı**, yorumda değil: kullanıcı
+        // değeri yerinde değiştiriyor ve menüden tema seçimi (phase-7) satırı
+        // yerinde yazıyor. Boş bir şablon yukarıdaki eşitliği de geçerdi.
+        let doc = document(Settings::TEMPLATE).expect("şablon TOML");
+        for (section, key) in [
+            ("terminal", "scrollback"),
+            ("appearance", "theme"),
+            ("appearance", "light_theme"),
+            ("appearance", "dark_theme"),
+            ("font", "size"),
+        ] {
+            assert!(
+                doc.get(section).and_then(|s| s.get(key)).is_some(),
+                "şablonda {section}.{key} yok"
+            );
+        }
+
+        // Varsayılanı olmayan `family` yorumda bir örnek; yorumu kaldıran
+        // kullanıcı geçerli bir değer bulmalı.
+        let uncommented = Settings::TEMPLATE.replace("# family = ", "family = ");
+        assert_ne!(
+            uncommented,
+            Settings::TEMPLATE,
+            "şablonda family örneği yok"
+        );
+        assert!(clean(&uncommented).font.family.is_some());
+    }
+
+    #[test]
+    fn documented_template_is_the_template() {
+        // `docs/AYARLAR.md` şablonu olduğu gibi gösteriyor; kopya drift eder.
+        let doc = include_str!("../../../docs/AYARLAR.md");
+        let (_, after) = doc
+            .split_once("### Şablon\n")
+            .expect("AYARLAR.md'de şablon başlığı yok");
+        let (_, block) = after
+            .split_once("```toml\n")
+            .expect("başlığın altında toml bloğu yok");
+        let (block, _) = block.split_once("```").expect("toml bloğu kapanmıyor");
+        assert_eq!(block, Settings::TEMPLATE);
     }
 
     #[test]

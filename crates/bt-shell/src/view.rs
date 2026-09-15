@@ -2,8 +2,9 @@
 //!
 //! Çizim burada **yok** — layer'ın içeriğini `bt-gpu` doldurur. Bu sınıfın işi
 //! first responder olmak, tuş vuruşunu [`crate::keys::encode_key`]'e verip
-//! çıkan baytı ya da oku oturuma yazmak ve fareyi (basış, sürükleme, bırakış ve
-//! tekerlek) hücreye çevirip oturuma iletmek. Terminal kararları (seçim
+//! çıkan baytı ya da oku oturuma yazmak, fareyi (basış, sürükleme, bırakış ve
+//! tekerlek) hücreye çevirip oturuma iletmek ve Edit menüsünün Copy/Paste
+//! eylemlerini karşılamak. Terminal kararları (seçim
 //! aralığı, sayfanın boyu, tekerleğin kipe göre yolu, okun baytı) `bt-core`'da;
 //! burada AppKit'e bakan taraf yaşar — piksel → hücre aritmetiği, tekerleğin
 //! satır artığı, sürüklemenin sürüp sürmediği.
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use bt_core::{CellHalf, SelectionPoint, Session, Wheel};
 use bt_gpu::CellMetrics;
 use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSEvent, NSEventModifierFlags, NSEventPhase, NSPasteboard, NSView,
@@ -122,6 +124,19 @@ pub(crate) fn wheel_lines(delta: f64, unit: f64, carry: f64) -> (i32, f64) {
     (whole as i32, total - whole)
 }
 
+/// Tuş vuruşu terminale gider mi — **saf karar**, sınanıyor: Command'lı tuş
+/// gitmez.
+///
+/// Menünün kısayolları (Cmd-C, Cmd-V, Cmd-Q, Cmd-,) bu soruya hiç varmıyor:
+/// AppKit Command'lı tuşu `keyDown:`'dan **önce** `performKeyEquivalent:` ile
+/// ana menüye veriyor (`menu`). Buraya varan Command'lı tuşun menüde
+/// karşılığı yok (Cmd-T) ya da öğesi o an devre dışı; terminale düşseydi
+/// kabuğa düz harf yazardı. Değiştiricinin geri kalanı sorulmuyor: Cmd-Shift-T
+/// de bir kısayol denemesi, girdi değil.
+fn reaches_terminal(flags: NSEventModifierFlags) -> bool {
+    !flags.contains(NSEventModifierFlags::Command)
+}
+
 pub(crate) struct ViewIvars {
     /// View, oturumdan **önce** doğmak zorunda: grid ölçüsü contentView'ın
     /// bounds'undan türüyor ve `Session::spawn` o ölçüyü istiyor. Bir tuş
@@ -198,6 +213,34 @@ define_class!(
             let _ = unsafe {
                 app.sendAction_to_from(sel!(appearanceDidChange:), None, Some(self.as_ref()))
             };
+        }
+
+        /// Edit ▸ Copy (Cmd-C): seçili metni genel panoya yazar. Seçim yoksa
+        /// ya da boşsa pano el değmeden kalır (`clipboard::copy`).
+        ///
+        /// Menü öğesinin hedefi yok: eylem responder zincirinden first
+        /// responder'a, yani buraya varıyor (`menu`). Metin `selection_text()`'ten
+        /// — seçimin tek metin yolu.
+        #[unsafe(method(copy:))]
+        fn copy_selection(&self, _sender: Option<&AnyObject>) {
+            if let Some(session) = self.ivars().session.get() {
+                clipboard::copy(&NSPasteboard::generalPasteboard(), session.selection_text());
+            }
+        }
+
+        /// Edit ▸ Paste (Cmd-V): panodaki metni oturuma yapıştırır.
+        ///
+        /// `paste()` yolundan girer: 2004 setse bracketed sarılır, değilse ham
+        /// yazılır. Ham bayt `session.write`'a değmez. Panoda metin yoksa
+        /// sessiz.
+        #[unsafe(method(paste:))]
+        fn paste_clipboard(&self, _sender: Option<&AnyObject>) {
+            let Some(session) = self.ivars().session.get() else {
+                return;
+            };
+            if let Some(text) = clipboard::read(&NSPasteboard::generalPasteboard()) {
+                session.paste(text.into_bytes());
+            }
         }
 
         /// View'ın y ekseni üstten: fare noktası grid yönünde gelir.
@@ -331,16 +374,10 @@ define_class!(
             let Some(session) = self.ivars().session.get() else {
                 return;
             };
-            // Command basılıyken tuş bir kısayoldur, girdi değil. Yalnız
-            // Cmd-C/V ele alınır (Karar 2 (a)); geri kalan **yutulmaya devam
-            // eder** — ana menü henüz yok (00X), menüsüz bir uygulamada
-            // `performKeyEquivalent:` hiçbir şeyi yakalamıyor ve bu dal
-            // olmadan Cmd-V shell'e "v" yazardı. Yutma bu yüzden
-            // `command_shortcut`'ın `None`'undan bağımsız.
-            if flags.contains(NSEventModifierFlags::Command) {
-                if let Some(shortcut) = Self::command_shortcut(&chars.to_string(), flags) {
-                    Self::run_shortcut(session, shortcut);
-                }
+            // Command basılıyken tuş bir kısayoldur, girdi değil. Menü onu
+            // `performKeyEquivalent:` ile önce yakalıyor (Cmd-C/V/Q/,);
+            // yakalamadığı buraya varır ve **yutulur** (`reaches_terminal`).
+            if !reaches_terminal(flags) {
                 return;
             }
             let chars = chars.to_string();
@@ -455,71 +492,6 @@ impl BateriView {
             session.update_selection(cell);
         }
     }
-
-    /// Command'lı tuşun düştüğü kısayol — **saf karar**, panoya ve oturuma
-    /// dokunmaz, bu yüzden sınanabilir.
-    ///
-    /// `flags`'in Command'ı **içerdiği varsayılır** (çağıran onu zaten
-    /// süzüyor); burada sorulan yalnız "hangi kısayol" ve "kısayol mu".
-    ///
-    /// Kapı: Shift/Option/Control/Fn'li Command bir terminal kısayolu
-    /// değildir — Cmd-Shift-C yutulur. `Function` da kapıda, çünkü Fn ile
-    /// gelen Command kombinasyonu da tanınmıyor.
-    ///
-    /// Karşılaştırma ASCII-duyarsız, çünkü `characters` **CapsLock**'ta
-    /// "C"/"V" verir (`AlphaShift` yukarıdaki kapıda yok). Shift'in harfe
-    /// gömülmesi ("C") bu satıra hiç ulaşmaz — Shift kapıda eleniyor.
-    fn command_shortcut(chars: &str, flags: NSEventModifierFlags) -> Option<Shortcut> {
-        // Bayraklar `bitflags` ilişkili sabitleri, enum varyantı değil: tam
-        // nitelenirler, `use` ile içe aktarılmazlar.
-        let extra = NSEventModifierFlags::Shift
-            | NSEventModifierFlags::Option
-            | NSEventModifierFlags::Control
-            | NSEventModifierFlags::Function;
-        if flags.intersects(extra) {
-            return None;
-        }
-        // `eq_ignore_ascii_case`, `to_lowercase` değil: ikincisi vuruş başına
-        // ikinci bir `String` kurardı, karşılaştırmanın buna ihtiyacı yok.
-        if chars.eq_ignore_ascii_case("c") {
-            Some(Shortcut::Copy)
-        } else if chars.eq_ignore_ascii_case("v") {
-            Some(Shortcut::Paste)
-        } else {
-            None
-        }
-    }
-
-    /// Kısayolu uygular. Pano **burada** alınıyor: `generalPasteboard()`
-    /// AppKit'e bir mesajdır (ilk kullanımda pboard bağlantısı kurar) ve her
-    /// Command'lı tuşta ödenmesi gerekmez — yutulan kısayollar (Cmd-W, Cmd-Q)
-    /// artık panoya hiç dokunmuyor.
-    fn run_shortcut(session: &Session, shortcut: Shortcut) {
-        let board = NSPasteboard::generalPasteboard();
-        match shortcut {
-            // Kopya `selection_text()`'ten okur — phase-1'in tek metin yolu.
-            // Seçim yoksa ya da boşsa pano el değmeden kalır (`clipboard`).
-            Shortcut::Copy => {
-                clipboard::copy(&board, session.selection_text());
-            }
-            // Yapıştırma `paste()` yolundan girer: 2004 setse bracketed
-            // sarılır, değilse ham yazılır. Ham bayt `session.write`'a değmez.
-            Shortcut::Paste => {
-                if let Some(text) = clipboard::read(&board) {
-                    session.paste(text.into_bytes());
-                }
-            }
-        }
-    }
-}
-
-/// [`BateriView::command_shortcut`]'ın iki cevabı. Menü günü (00X) bu tip ve
-/// onu okuyan `keyDown:` dalı birlikte **silinir**: kalıcı çözüm menü
-/// seçicileridir, bu geçici köprüdür.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shortcut {
-    Copy,
-    Paste,
 }
 
 #[cfg(test)]
@@ -642,66 +614,34 @@ mod tests {
         assert_eq!(point_to_cell((1.0, 1.0), (9, 18), 2.0, 100, 0), None);
     }
 
-    /// Command'lı bir tuşun bayrakları: Command tek başına.
-    fn cmd() -> NSEventModifierFlags {
-        NSEventModifierFlags::Command
-    }
-
     #[test]
-    fn command_shortcut_routes_c_and_v() {
-        assert_eq!(
-            BateriView::command_shortcut("c", cmd()),
-            Some(Shortcut::Copy)
-        );
-        assert_eq!(
-            BateriView::command_shortcut("v", cmd()),
-            Some(Shortcut::Paste)
-        );
-        // CapsLock `characters`'ı "C"/"V" yapar — tek harf dışı fark bu.
-        assert_eq!(
-            BateriView::command_shortcut("C", cmd()),
-            Some(Shortcut::Copy)
-        );
-        assert_eq!(
-            BateriView::command_shortcut("V", cmd()),
-            Some(Shortcut::Paste)
-        );
-    }
-
-    #[test]
-    fn command_shortcut_swallows_unknown_and_composed_keys() {
-        // Tanınmayan harf kısayol değil: `keyDown:` yine yutar (menü yok),
-        // ama panoya dokunmaz.
-        assert_eq!(BateriView::command_shortcut("w", cmd()), None);
-        assert_eq!(BateriView::command_shortcut("q", cmd()), None);
-        // Çok harfli `characters` (ölü tuş bileşimi) tek harfe indirgenmez.
-        assert_eq!(BateriView::command_shortcut("cv", cmd()), None);
-
-        // Shift/Option/Control/Fn'li Command kısayol değil: Cmd-Shift-C
-        // yutulur. Kapı bu dört bayrakta ve yalnız burada.
+    fn command_keys_never_reach_the_terminal() {
+        // Menüde karşılığı olmayan Command'lı harf (Cmd-T) kabuğa "t" yazmaz;
+        // yanındaki değiştirici ne olursa olsun.
         for extra in [
+            NSEventModifierFlags::empty(),
             NSEventModifierFlags::Shift,
             NSEventModifierFlags::Option,
             NSEventModifierFlags::Control,
             NSEventModifierFlags::Function,
+            NSEventModifierFlags::CapsLock,
         ] {
-            assert_eq!(
-                BateriView::command_shortcut("c", cmd() | extra),
-                None,
-                "{extra:?}"
-            );
-            assert_eq!(
-                BateriView::command_shortcut("v", cmd() | extra),
-                None,
-                "{extra:?}"
+            assert!(
+                !reaches_terminal(NSEventModifierFlags::Command | extra),
+                "Command + {extra:?}"
             );
         }
-        // CapsLock kapıda **değil**: Cmd-CapsLock-C hâlâ kopyalar, çünkü
-        // `AlphaShift` karakteri büyütmekten başka bir şey yapmıyor.
-        assert_eq!(
-            BateriView::command_shortcut("C", cmd() | NSEventModifierFlags::CapsLock),
-            Some(Shortcut::Copy)
-        );
+        // Command'sız tuş terminalin: Control'lü harf bir bayt, Option'lı
+        // harf bir karakter.
+        for flags in [
+            NSEventModifierFlags::empty(),
+            NSEventModifierFlags::Shift,
+            NSEventModifierFlags::Option,
+            NSEventModifierFlags::Control,
+            NSEventModifierFlags::CapsLock,
+        ] {
+            assert!(reaches_terminal(flags), "{flags:?}");
+        }
     }
 
     #[test]

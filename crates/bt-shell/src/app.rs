@@ -18,10 +18,11 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationDelegate,
     NSBackingStoreType, NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
-    NSRect, NSRunLoopCommonModes, NSSize, NSString, ns_string,
+    NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL, ns_string,
 };
 
 use crate::notices::{Notices, Source, font_messages};
@@ -122,7 +123,8 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// kapının sonucu o makinenin `~/.config/bateri/`'sine bağlı olmasın. Bugün
 /// ilk üçü var: dosyayı okuyup izlemeyi kuran [`AppDelegate::load_settings`]
 /// ve [`AppDelegate::reload_settings`], görünümü okuyan
-/// [`AppDelegate::apply_appearance`]. Tema menüsü de bu değere bakar,
+/// [`AppDelegate::apply_appearance`]. Dosyayı yaratan "Settings…"
+/// ([`AppDelegate::edit_settings`]) ve Tema menüsü de bu değere bakar,
 /// kendi `run.is_some()` koşulunu yazmaz — dört ayrı koşuldan birinin
 /// unutulduğu gün kapı sessizce kullanıcının dosyasına bağlanırdı
 /// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1).
@@ -272,6 +274,25 @@ fn notify_settings_changed() {
     let _ = unsafe { app.sendAction_to_from(sel!(settingsDidChange:), None, None) };
 }
 
+/// Dosyayı kullanıcının editöründe açar; hiçbir yol açamadıysa `false`.
+///
+/// Önce dosya türünün varsayılan uygulaması (`NSWorkspace`, Finder'da çift
+/// tıklamanın yolu). `.toml`'u sahiplenen uygulama her makinede yok — sistem
+/// türü tanımasa da o türü kimse açmayabilir; o zaman varsayılan **metin**
+/// editörü (`open -t`, çoğu makinede TextEdit). İkincisi bir alt süreç ve
+/// dönüşü bekleniyor: `open` işi LaunchServices'e verip hemen çıkıyor.
+fn open_in_editor(path: &Path) -> bool {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    if NSWorkspace::sharedWorkspace().openURL(&url) {
+        return true;
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg("-t")
+        .arg(path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Delegate'in durumu. `OnceCell`: pencere, oturum ve link
 /// `applicationDidFinishLaunching` içinde bir kez doğar, sonra yalnız okunur.
 pub(crate) struct Ivars {
@@ -331,6 +352,7 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
+            crate::menu::install(mtm);
             let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0));
             let style = NSWindowStyleMask::Titled
                 | NSWindowStyleMask::Closable
@@ -417,10 +439,11 @@ define_class!(
             true
         }
 
-        /// AppKit'in kapanış yolu: kırmızı düğme ve `exit` yazan shell
-        /// (`child_exit` → `terminate:`) buraya varır. (Cmd-Q **varmaz**: ana
-        /// menü yok, `keyDown:` Command'lı tuşları yutuyor — menü 00X'te.)
-        /// Duman deadline'ı da buraya uğramaz, `terminate:` her zaman 0 ile
+        /// AppKit'in kapanış yolu: kırmızı düğme, bateri ▸ Quit (Cmd-Q, menüden
+        /// `terminate:`) ve `exit` yazan shell (`child_exit` → `terminate:`)
+        /// buraya varır. Cmd-Q açık programı sormadan kapatır: kapatma onayı
+        /// yok (`.tasks/007-ayarlar-ve-tema/discussion.md` → Kapsam dışı).
+        /// Duman deadline'ı buraya uğramaz, `terminate:` her zaman 0 ile
         /// çıkar ve `runDeadline:` kırmızı düşebilmek zorunda. Ortak olan
         /// bildirim değil sıra: iki yol da [`AppDelegate::shutdown`] çağırır ve
         /// kapanışa eklenecek her adım oraya eklenir.
@@ -491,6 +514,12 @@ define_class!(
         #[unsafe(method(settingsDidChange:))]
         fn settings_did_change(&self, _sender: Option<&AnyObject>) {
             self.reload_settings();
+        }
+
+        /// bateri ▸ Settings… (Cmd-,), hedefsiz menü öğesinden (`menu`).
+        #[unsafe(method(openSettings:))]
+        fn open_settings(&self, _sender: Option<&AnyObject>) {
+            self.edit_settings();
         }
 
         #[unsafe(method(runDeadline:))]
@@ -1038,9 +1067,9 @@ impl AppDelegate {
         theme
     }
 
-    /// Canlı yenileme: bir izleme kaynağı haber verdi. Phase-6'nın
-    /// "Ayarlar…"ı dizini yarattıktan sonra da buraya gelecek — sonradan
-    /// yaratılan dizini hiçbir kaynak görmüyor (`watch`).
+    /// Canlı yenileme: bir izleme kaynağı haber verdi. "Settings…" da dizini
+    /// yarattıktan sonra buraya geliyor ([`AppDelegate::edit_settings`]) —
+    /// sonradan yaratılan dizini hiçbir kaynak görmüyor (`watch`).
     ///
     /// Sıra, üç kural:
     /// - **Önce kur, sonra oku** ([`AppDelegate::watch_config`],
@@ -1110,6 +1139,48 @@ impl AppDelegate {
         };
         if let Some(theme) = theme {
             session.set_theme(theme);
+        }
+    }
+
+    /// bateri ▸ Settings…: dosya yoksa şablonla yaratır
+    /// ([`settings::create_if_missing`]), izlemeyi yeniden kurup okur ve
+    /// dosyayı editörde açar ([`open_in_editor`]).
+    ///
+    /// - **Süreli koşu** dosya yaratmaz ([`Inputs::Hermetic`]); ev dizini
+    ///   çözülemediyse ayar yuvası bunu açılıştan beri söylüyor.
+    /// - **Yeniden okuma yaratmadan sonra** ([`AppDelegate::reload_settings`]):
+    ///   dizin yeni doğduysa onu hiçbir kaynak görmüyordu. Şablon
+    ///   varsayılanları söylüyor; dosyasız kullanıcıda fark boş, ekran
+    ///   değişmez.
+    /// - **Hata ayar yuvasına, okumanın tanılarının arkasına** ekleniyor:
+    ///   okuma yuvayı dosyanın hâline göre yeniden yazdığı için önce
+    ///   yazılsaydı hemen silinirdi. Sonraki kayıt ya da "Settings…" yuvayı
+    ///   yeniden kurar.
+    fn edit_settings(&self) {
+        let Inputs::User {
+            config_root: Some(root),
+        } = self.inputs()
+        else {
+            return;
+        };
+        let created = settings::create_if_missing(&root);
+        self.reload_settings();
+        let problem = match created {
+            Err(err) => Some(format!(
+                "{} could not be created: {err}",
+                settings::FILE_NAME
+            )),
+            Ok(path) if !open_in_editor(&path) => Some(format!(
+                "no editor could open {}; it is at {}",
+                settings::FILE_NAME,
+                path.display()
+            )),
+            Ok(_) => None,
+        };
+        if let Some(problem) = problem {
+            let mut messages = self.ivars().notices.borrow().get(Source::Settings).to_vec();
+            messages.push(problem);
+            self.post_notices(Source::Settings, messages);
         }
     }
 
