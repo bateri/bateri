@@ -36,6 +36,17 @@ use toml_edit::{Document, Item, TableLike};
 /// da gerekmiyor, oraya giden tek değer bu ayrıştırıcıdan geçiyor.
 pub(crate) const SCROLLBACK_MAX: usize = 100_000;
 
+/// `[appearance] theme`'in ayrılmış değeri: temayı sistemin açık/koyu
+/// görünümü seçer ([`Settings::theme_for`]).
+///
+/// Bir tema adı **değil** — `themes/system.toml` bu yüzden seçilemez ve
+/// `light_theme`/`dark_theme` bu değeri kabul etmez (kendi kendine dönen bir
+/// seçim olurdu).
+///
+/// `pub(crate)`: bugün dışarıda soran yok, `bt-shell`
+/// [`Settings::follows_system`]'e bakıyor; menüden yazan phase-7 açar.
+pub(crate) const SYSTEM_THEME: &str = "system";
+
 /// Kullanıcının değiştirebildiği her şey — ayrıştırılmış ve doğrulanmış.
 ///
 /// Alanlar `pub`: tip bir kayıt, davranış taşımıyor. Değerin geçerliliğini
@@ -45,21 +56,33 @@ pub(crate) const SCROLLBACK_MAX: usize = 100_000;
 pub struct Settings {
     /// `[terminal] scrollback`: geçmişte tutulan satır, `0..=SCROLLBACK_MAX`.
     pub scrollback: usize,
-    /// `[appearance] theme`: tema **adı** — `themes/{ad}.toml` ya da gömülü
-    /// bir tema. Ad biçim olarak geçerli (boş değil, `/` yok); var olup
-    /// olmadığı dosya sistemi ister ve `bt-shell`'in ad çözümünde.
+    /// `[appearance] theme`: [`SYSTEM_THEME`] ya da tema **adı** —
+    /// `themes/{ad}.toml` ya da gömülü bir tema. Ad biçim olarak geçerli (boş
+    /// değil, `/` yok); var olup olmadığı dosya sistemi ister ve `bt-shell`'in
+    /// ad çözümünde.
     pub theme: String,
+    /// `[appearance] light_theme`: `theme = "system"` iken açık görünümün
+    /// teması. `theme`'den **ayrı** anahtar: menüden sabit bir tema seçmek
+    /// yalnız `theme`'i yazar (007 phase-7) ve kullanıcının açık/koyu çifti
+    /// yerinde kalır.
+    pub light_theme: String,
+    /// `[appearance] dark_theme`: `theme = "system"` iken koyu görünümün
+    /// teması.
+    pub dark_theme: String,
 }
 
 impl Default for Settings {
     /// Dosya yokken ve anahtar eksikken geçerli olan değerler.
     ///
     /// `scrollback` 006'ya kadar `bt-shell`'in `SCROLLBACK` sabitiydi; değer
-    /// aynı kaldı, sahibi buraya taşındı. `theme` gömülü koyu tema.
+    /// aynı kaldı, sahibi buraya taşındı. Tema sistemin görünümünü izler:
+    /// açıkta gömülü `bateri-light`, koyuda gömülü `bateri`.
     fn default() -> Self {
         Self {
             scrollback: 10_000,
-            theme: "bateri".to_owned(),
+            theme: SYSTEM_THEME.to_owned(),
+            light_theme: "bateri-light".to_owned(),
+            dark_theme: "bateri".to_owned(),
         }
     }
 }
@@ -124,13 +147,56 @@ impl Settings {
             }
         }
         if let Some(appearance) = section(text, root, "appearance", &mut parsed.diagnostics) {
-            if let Some(item) = appearance.get("theme") {
-                if let Some(value) = theme_name(text, item, &mut parsed.diagnostics) {
-                    parsed.settings.theme = value;
+            // İkincisi tanıdaki noktalı yol (`Diagnostic::key` `'static`
+            // ister), `theme.rs`'in `ANSI_KEYS`'iyle aynı deyiş.
+            let names = [
+                ("theme", "appearance.theme", &mut parsed.settings.theme),
+                (
+                    "light_theme",
+                    "appearance.light_theme",
+                    &mut parsed.settings.light_theme,
+                ),
+                (
+                    "dark_theme",
+                    "appearance.dark_theme",
+                    &mut parsed.settings.dark_theme,
+                ),
+            ];
+            for (key, path, slot) in names {
+                if let Some(item) = appearance.get(key) {
+                    // Varsayılan `slot`'taki değer: taban `Settings::default()`
+                    // ve her anahtar bir kez okunuyor.
+                    let accepts_system = key == "theme";
+                    let diagnostics = &mut parsed.diagnostics;
+                    let default = slot.as_str();
+                    if let Some(value) =
+                        theme_name(text, item, path, default, accepts_system, diagnostics)
+                    {
+                        *slot = value;
+                    }
                 }
             }
         }
         Ok(parsed)
+    }
+
+    /// Kullanılacak temanın **adı**: `theme = "system"` ise görünüme göre
+    /// `light_theme` ya da `dark_theme`, değilse `theme`'in kendisi —
+    /// görünümden bağımsız.
+    ///
+    /// Saf: görünümü okuyan `bt-shell`, ad çözümü de orada.
+    pub fn theme_for(&self, dark: bool) -> &str {
+        match (self.follows_system(), dark) {
+            (false, _) => &self.theme,
+            (true, true) => &self.dark_theme,
+            (true, false) => &self.light_theme,
+        }
+    }
+
+    /// Tema sistemin görünümüne mi bağlı. Değilse görünüm değişimi temaya
+    /// dokunmaz ve çağıranın dosyayı yeniden okumasına gerek yok.
+    pub fn follows_system(&self) -> bool {
+        self.theme == SYSTEM_THEME
     }
 }
 
@@ -208,31 +274,43 @@ fn scrollback(text: &str, item: &Item, diagnostics: &mut Vec<Diagnostic>) -> Opt
     Some(value)
 }
 
-/// `appearance.theme`: bir tema adı.
+/// `appearance.theme`, `.light_theme`, `.dark_theme`: bir tema adı
+/// (`theme` için [`SYSTEM_THEME`] de).
 ///
 /// Adın yalnız **biçimi** sınanıyor: boş ad ve `/` içeren ad varsayılana
 /// döner. `/` adı `themes/` dizininin dışına taşırdı — `"../settings"`
 /// ayar dosyasının kendisini tema diye okuturdu. NUL da dosya yolu olamaz.
 /// Adın bir temaya çözülüp çözülmediği `bt-shell`'in işi.
-fn theme_name(text: &str, item: &Item, diagnostics: &mut Vec<Diagnostic>) -> Option<String> {
-    const KEY: &str = "appearance.theme";
+fn theme_name(
+    text: &str,
+    item: &Item,
+    path: &'static str,
+    default: &str,
+    accepts_system: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<String> {
     let line = item.span().and_then(|span| line_of(text, span.start));
-    let default = Settings::default().theme;
     let reject = |message: String| Diagnostic {
-        key: Some(KEY),
+        key: Some(path),
         line,
         message,
     };
     let Some(name) = item.as_str() else {
         diagnostics.push(reject(format!(
-            "`{KEY}` must be a string, found {}; using \"{default}\"",
+            "`{path}` must be a string, found {}; using \"{default}\"",
             kind(item)
         )));
         return None;
     };
     if name.is_empty() || name.contains(['/', '\0']) {
         diagnostics.push(reject(format!(
-            "`{KEY}` must be a theme name without `/`, found {name:?}; using \"{default}\""
+            "`{path}` must be a theme name without `/`, found {name:?}; using \"{default}\""
+        )));
+        return None;
+    }
+    if name == SYSTEM_THEME && !accepts_system {
+        diagnostics.push(reject(format!(
+            "`{path}` must name a theme, not \"{SYSTEM_THEME}\"; using \"{default}\""
         )));
         return None;
     }
@@ -346,34 +424,104 @@ mod tests {
     #[test]
     fn theme_name_is_read() {
         assert_eq!(clean("[appearance]\ntheme = \"paper\"\n").theme, "paper");
-        assert_eq!(clean("").theme, "bateri");
+        // Varsayılan sistemi izlemek, çift gömülü temalar.
+        let defaults = clean("");
+        assert_eq!(
+            (
+                defaults.theme.as_str(),
+                defaults.light_theme.as_str(),
+                defaults.dark_theme.as_str()
+            ),
+            ("system", "bateri-light", "bateri")
+        );
         // Bölüm satır içi de yazılabilir; komşu bölüm okumayı bozmaz.
         let settings = clean("appearance = { theme = \"a b.c\" }\n[terminal]\nscrollback = 3\n");
         assert_eq!((settings.theme.as_str(), settings.scrollback), ("a b.c", 3));
+
+        let settings = clean("[appearance]\nlight_theme = \"paper\"\ndark_theme = \"ink\"\n");
+        assert_eq!(
+            (
+                settings.theme.as_str(),
+                settings.light_theme.as_str(),
+                settings.dark_theme.as_str()
+            ),
+            ("system", "paper", "ink")
+        );
+    }
+
+    #[test]
+    fn theme_follows_the_appearance_only_when_system() {
+        let pair = Settings {
+            light_theme: "paper".to_owned(),
+            dark_theme: "ink".to_owned(),
+            ..Settings::default()
+        };
+        assert_eq!(pair.theme_for(true), "ink");
+        assert_eq!(pair.theme_for(false), "paper");
+        assert!(pair.follows_system());
+        // Sabit ad görünümden bağımsız; çift yerinde kalsa da okunmaz.
+        let fixed = Settings {
+            theme: "bateri".to_owned(),
+            ..pair
+        };
+        assert_eq!(fixed.theme_for(true), "bateri");
+        assert_eq!(fixed.theme_for(false), "bateri");
+        assert!(!fixed.follows_system());
     }
 
     #[test]
     fn theme_name_outside_themes_dir_falls_back() {
         let (settings, diagnostic) = rejected("[appearance]\ntheme = \"../settings\"\n");
-        assert_eq!(settings.theme, "bateri");
+        assert_eq!(settings.theme, "system");
         assert_eq!(diagnostic.key, Some("appearance.theme"));
         assert_eq!(diagnostic.line, Some(2));
         assert_eq!(
             diagnostic.message,
-            "`appearance.theme` must be a theme name without `/`, found \"../settings\"; using \"bateri\""
+            "`appearance.theme` must be a theme name without `/`, found \"../settings\"; using \"system\""
         );
-        assert_eq!(rejected("[appearance]\ntheme = \"\"\n").0.theme, "bateri");
+        assert_eq!(rejected("[appearance]\ntheme = \"\"\n").0.theme, "system");
         assert_eq!(
             rejected("[appearance]\ntheme = \"a\\u0000\"\n").0.theme,
-            "bateri"
+            "system"
         );
 
         let (settings, diagnostic) = rejected("[appearance]\ntheme = 3\n");
-        assert_eq!(settings.theme, "bateri");
+        assert_eq!(settings.theme, "system");
         assert_eq!(
             diagnostic.message,
-            "`appearance.theme` must be a string, found an integer; using \"bateri\""
+            "`appearance.theme` must be a string, found an integer; using \"system\""
         );
+
+        // Çiftin anahtarları da aynı kuraldan, kendi varsayılanlarına.
+        let (settings, diagnostic) = rejected("[appearance]\ndark_theme = \"a/b\"\n");
+        assert_eq!(settings.dark_theme, "bateri");
+        assert_eq!(diagnostic.key, Some("appearance.dark_theme"));
+        let (settings, diagnostic) = rejected("[appearance]\nlight_theme = false\n");
+        assert_eq!(settings.light_theme, "bateri-light");
+        assert_eq!(
+            diagnostic.message,
+            "`appearance.light_theme` must be a string, found a boolean; using \"bateri-light\""
+        );
+    }
+
+    #[test]
+    fn system_is_not_a_name_for_the_pair() {
+        // `light_theme = "system"` kendi kendine dönen bir seçim olurdu.
+        let (settings, diagnostic) = rejected("[appearance]\nlight_theme = \"system\"\n");
+        assert_eq!(settings, Settings::default());
+        assert_eq!(diagnostic.key, Some("appearance.light_theme"));
+        assert_eq!(
+            diagnostic.message,
+            "`appearance.light_theme` must name a theme, not \"system\"; using \"bateri-light\""
+        );
+        assert_eq!(
+            rejected("[appearance]\ndark_theme = \"system\"\n")
+                .0
+                .dark_theme,
+            "bateri"
+        );
+        // `theme` için ayrılmış değer geçerli.
+        assert!(clean("[appearance]\ntheme = \"system\"\n").follows_system());
     }
 
     #[test]

@@ -229,19 +229,29 @@ mod tests {
     }
 
     #[test]
-    fn documented_bateri_block_is_the_embedded_theme() {
-        // `docs/AYARLAR.md` "kopyala, değiştir" diye tam bir tema bloğu veriyor.
-        // Belge değer **kopyaladığı** için drift eder; bu sınama bloğu
-        // gömülü temaya bağlıyor. Taban ayrık: bloktan düşen bir anahtar
-        // tabandan dolup eşitliği bozar, yani blok eksiksiz kalmak zorunda.
+    fn documented_blocks_are_the_embedded_themes() {
+        // `docs/AYARLAR.md` "kopyala, değiştir" diye her gömülü tema için tam
+        // bir blok veriyor. Belge değer **kopyaladığı** için drift eder; bu
+        // sınama blokları gömülü temalara bağlıyor. Taban ayrık: bloktan düşen
+        // bir anahtar tabandan dolup eşitliği bozar, yani blok eksiksiz kalmak
+        // zorunda.
         let doc = include_str!("../../../docs/AYARLAR.md");
-        let (_, after) = doc
-            .split_once("### Gömülü `bateri`")
-            .expect("AYARLAR.md'de gömülü tema başlığı yok");
-        let (_, block) = after
-            .split_once("```toml\n")
-            .expect("başlığın altında toml bloğu yok");
-        let (block, _) = block.split_once("```").expect("toml bloğu kapanmıyor");
-        assert_eq!(clean(block, &SENTINEL), Theme::BATERI);
+        for name in EMBEDDED_NAMES {
+            let theme = Theme::embedded(name);
+            // Başlık satır sonuyla aranıyor: "`bateri`" "`bateri-light`"in
+            // öneki ve sonsuz arama yanlış bloğu okurdu.
+            let heading = format!("### Gömülü `{name}`\n");
+            let (_, after) = doc
+                .split_once(&heading)
+                .unwrap_or_else(|| panic!("AYARLAR.md'de {heading:?} yok"));
+            let (_, block) = after
+                .split_once("```toml\n")
+                .expect("başlığın altında toml bloğu yok");
+            let (block, _) = block.split_once("```").expect("toml bloğu kapanmıyor");
+            assert_eq!(Some(clean(block, &SENTINEL)), theme, "{name}");
+        }
     }
+
+    /// Belgede bloğu olması gereken gömülü temalar.
+    const EMBEDDED_NAMES: [&str; 2] = ["bateri", "bateri-light"];
 }

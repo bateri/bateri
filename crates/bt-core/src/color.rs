@@ -77,7 +77,8 @@ pub struct Theme {
     /// Varsayılan ön plan.
     pub foreground: u32,
     /// Sönük (SGR 2) varsayılan ön plan. Adlı ve dolaylı renklerin sönüğü
-    /// bugün hâlâ `× 2/3` ([`dim`]); bu rol yalnız varsayılan ön planın.
+    /// bir kuraldan, zemine karıştırarak gelir ([`dim_toward`]); bu rol
+    /// yalnız varsayılan ön planın.
     pub dim: u32,
     /// Vurgu; bugün imleç bloğu.
     pub accent: u32,
@@ -93,7 +94,8 @@ impl Theme {
     /// Siyah bilerek arka plandan ayrıdır — `\e[40m` çizilmeyen bir hücre
     /// değil, görünür bir blok olmalı. `dim`, `foreground × 2/3`'ün vte
     /// çarpımıyla (`f32`, kesme) sonucu: 006'ya kadar sönük ön plan böyle
-    /// hesaplanıyordu ve ekran bit bit aynı kaldı.
+    /// hesaplanıyordu. Rol bir değer, kural değil — 007 phase-3'te adlı
+    /// renklerin sönüğü zemine karışmaya başladığında bu değer yerinde kaldı.
     ///
     /// `const`: `bt-gpu`'nun sınamaları clear ve imleç rengini `const`
     /// bağlamda buradan alıyor. sRGB tablosunun `const` olmasının gerekçesi
@@ -112,6 +114,41 @@ impl Theme {
             0x7a9cc6, 0xb08ec0, 0x79b3b3, 0xc8c9cc, // mavi    macenta  camgöbeği beyaz
             0x4a4e57, 0xe58b88, 0xa4cba4, 0xe8c988, // parlak sekizlisi, aynı sırada
             0x9bb8dc, 0xc9aad8, 0x96caca, 0xe6e7ea,
+        ],
+    };
+
+    /// Gömülü açık tema — `[appearance] theme = "system"` açık görünümde bunu
+    /// seçer (`light_theme`'in varsayılanı).
+    ///
+    /// Değerler göz kontrolüyle kabul edildi; ölçütleri:
+    ///
+    /// - **ANSI adlarının anlamı korunur.** 0 (siyah) koyu uç, 7 ve 15 (beyaz)
+    ///   açık uç. Açık zeminde beyaz metin zayıf okunur ama adı "beyaz" olan
+    ///   rengi koyulaştırmak onu zemin bloğu olarak kullanan uygulamayı
+    ///   (`\e[47m`, tmux çubuğu) bozardı. Parlak beyaz yine zeminden ayrık:
+    ///   `\e[107m` görünür bir blok kalmalı, `BATERI`'nin siyahıyla aynı
+    ///   gerekçe.
+    /// - **Renkli sekizli açık zeminde okunur.** Koyu temanın pastelleri beyaz
+    ///   üstünde kaybolurdu; sarı ve camgöbeği bu yüzden koyu, doygun tonlarda
+    ///   (hardal, petrol). Parlak sekizli normalden biraz açık ama metin rengi
+    ///   olarak kullanılabilir kalır — `ls --color`'ın dizini, `git diff`'in
+    ///   eklenen satırı.
+    /// - **İmleç zeminden ve ön plandan ayrışır:** koyu mavi blok; altındaki
+    ///   harf zemin rengiyle çizildiği için (`Session::frame`) bloğun zemin
+    ///   rengine karşı da okunur olması gerekiyor.
+    /// - `dim`, ön planın zemine karışmış hâli ([`dim_toward`]) — adlı
+    ///   renklerin sönüğüyle aynı kural, ayrı bir zevk değil.
+    #[rustfmt::skip]
+    pub const BATERI_LIGHT: Theme = Theme {
+        background: 0xf5f6f8,
+        foreground: 0x24262c,
+        dim: 0x696b70,
+        accent: 0x3d6aa8,
+        ansi: [
+            0x2b2e35, 0xb5423d, 0x3b7a3b, 0x8f6a00, // siyah   kırmızı  yeşil    sarı
+            0x3a66a6, 0x8a4c9c, 0x23787f, 0xb9bbc1, // mavi    macenta  camgöbeği beyaz
+            0x70737b, 0xc9504a, 0x4a8f4a, 0xa67c00, // parlak sekizlisi, aynı sırada
+            0x4a78ba, 0x9d5db0, 0x2f8a92, 0xdcdee3,
         ],
     };
 
@@ -162,7 +199,7 @@ impl Theme {
             258 => rgb(self.accent),
             // 259..=266 sönük ANSI sekizlisi, 267 parlak ön plan, 268 sönük ön
             // plan.
-            259..=266 => rgb(self.ansi[index - 259]) * DIM,
+            259..=266 => dim_toward(rgb(self.ansi[index - 259]), self.background_rgb()),
             267 => rgb(self.foreground),
             268 => rgb(self.dim),
             // Tablo 269 girdilik; buraya düşen bir indeks alacritty'nin
@@ -180,12 +217,44 @@ impl Theme {
 }
 
 /// Gömülü temaların tablosu; [`Theme::embedded`] okur.
-const EMBEDDED: [(&str, Theme); 1] = [("bateri", Theme::BATERI)];
+const EMBEDDED: [(&str, Theme); 2] = [
+    ("bateri", Theme::BATERI),
+    ("bateri-light", Theme::BATERI_LIGHT),
+];
 
-/// Sönük (`DIM`) renklerin çarpanı. Çarpma vte'nin `impl Mul<f32> for Rgb`'si
-/// (`vte/src/ansi.rs`, yorumu birebir "the default dim is just *2/3"): `f32`'de
-/// hesaplar ve `clamp(0.0, 255.0)` uygular, yani kanal taşması diye bir sınıf yok.
-const DIM: f32 = 2.0 / 3.0;
+/// Sönük (SGR 2) rengin **tek kuralı**: renk, zemine doğru üçte bir yol alır.
+///
+/// Neden zemine: sönüklük "zeminle arasındaki farkı azalt" demek. 006'ya
+/// kadarki kural vte'nin `× 2/3`'üydü (`impl Mul<f32> for Rgb`, yorumu birebir
+/// "the default dim is just *2/3") ve o siyaha doğru karıştırmanın ta
+/// kendisi — açık zeminde sönük metni **koyulaştırıp** öne çıkarıyordu.
+///
+/// Oran bir tasarım sabiti, ölçüm değil. Üçte bir seçildi çünkü siyah zeminde
+/// vte'nin çarpımıyla bit bit aynı sonucu veriyor (`dim_on_black_is_vte`):
+/// alışılmış sönüklük koyu temada en az kayar, `BATERI`'nin zemini siyaha
+/// yakın olduğu için değerler birkaç basamak açılır.
+///
+/// Uzay sRGB 8-bit, vte'ninkiyle aynı; lineerleştirme sınırda kalır
+/// (`linear_rgba`). Lineer uzayda karıştırmak koyu zeminde algıda çok daha
+/// az söndürürdü. Tam sayı bölmesi keser — vte'nin `as u8`'i de kesiyor.
+///
+/// Hedef **temanın** zemini, uygulamanın OSC 11 ile değiştirdiği değil: clear
+/// rengi ve `frame()`'in atlama kararı da temadan okuyor.
+///
+/// `const`: `Theme::default` gibi palet yolunda ve tek bir tamsayı
+/// aritmetiği.
+const fn dim_toward(color: Rgb, background: Rgb) -> Rgb {
+    Rgb {
+        r: dim_channel(color.r, background.r),
+        g: dim_channel(color.g, background.g),
+        b: dim_channel(color.b, background.b),
+    }
+}
+
+const fn dim_channel(color: u8, background: u8) -> u8 {
+    // audit: en çok (2·255 + 255) / 3 = 255, `u8`'e sığar.
+    ((2 * color as u16 + background as u16) / 3) as u8
+}
 
 /// 6×6×6 renk küpünün kanal basamakları (xterm sözleşmesi).
 const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
@@ -218,14 +287,14 @@ pub(crate) fn resolve(color: Color, colors: &Colors, theme: &Theme) -> Rgb {
 /// Varsayılan ön plan sönükse çözümden **önce** temanın `dim` rolü alınır —
 /// alacritty uygulamasının `DimForeground`'ı. Sonucu: OSC 10 ile değişmiş bir
 /// ön plan sönük hücrede o rengin sönüğü değil, rolün kendisi olur (alacritty
-/// de öyle). Öteki renkler çözülür ve `× 2/3` iner.
+/// de öyle). Öteki renkler çözülür ve zemine karışır ([`dim_toward`]).
 ///
 /// `#[inline]`: `resolve` ile aynı sıcak yol.
 #[inline]
 pub(crate) fn resolve_fg(color: Color, dim: bool, colors: &Colors, theme: &Theme) -> Rgb {
     match color {
         Color::Named(NamedColor::Foreground) if dim => rgb(theme.dim),
-        color if dim => resolve(color, colors, theme) * DIM,
+        color if dim => dim_toward(resolve(color, colors, theme), theme.background_rgb()),
         color => resolve(color, colors, theme),
     }
 }
@@ -382,8 +451,37 @@ mod tests {
     }
 
     #[test]
+    fn bateri_light_palette_is_pinned() {
+        // `bateri_palette_is_pinned`'in açık tema karşılığı, aynı gerekçe;
+        // sönük ön plan rolü de listede (268), çünkü o da elle seçildi.
+        #[rustfmt::skip]
+        const EXPECTED: [(usize, u32); 20] = [
+            (0, 0x2b2e35), (1, 0xb5423d), (2, 0x3b7a3b), (3, 0x8f6a00),
+            (4, 0x3a66a6), (5, 0x8a4c9c), (6, 0x23787f), (7, 0xb9bbc1),
+            (8, 0x70737b), (9, 0xc9504a), (10, 0x4a8f4a), (11, 0xa67c00),
+            (12, 0x4a78ba), (13, 0x9d5db0), (14, 0x2f8a92), (15, 0xdcdee3),
+            (256, 0x24262c), // ön plan
+            (257, 0xf5f6f8), // arka plan
+            (258, 0x3d6aa8), // imleç
+            (268, 0x696b70), // sönük ön plan
+        ];
+        let light = Theme::BATERI_LIGHT;
+        for (index, hex) in EXPECTED {
+            assert_eq!(light.default(index), rgb(hex), "{index}");
+        }
+        // Parlak beyaz zeminden ayrık: `\e[107m` görünür bir blok.
+        assert_ne!(light.ansi[15], light.background);
+        // `dim` rolü kuralın kendisinden: ön planın zemine karışmış hâli.
+        assert_eq!(
+            rgb(light.dim),
+            dim_toward(rgb(light.foreground), light.background_rgb())
+        );
+    }
+
+    #[test]
     fn embedded_themes_are_found_by_name() {
         assert_eq!(Theme::embedded("bateri"), Some(Theme::BATERI));
+        assert_eq!(Theme::embedded("bateri-light"), Some(Theme::BATERI_LIGHT));
         assert_eq!(
             Theme::embedded("Bateri"),
             None,
@@ -433,19 +531,48 @@ mod tests {
     }
 
     #[test]
-    fn dim_colors_are_darker_than_source() {
-        // Sönük sekizli ANSI 0..8'in, sönük ön plan da ön planın altında kalır.
-        for index in 259..=266 {
-            let dimmed = THEME.default(index);
-            let bright = THEME.default(index - 259);
-            assert!(dimmed.r < bright.r || bright.r == 0, "{index}");
-            assert!(dimmed.g <= bright.g && dimmed.b <= bright.b, "{index}");
+    fn dim_colors_move_toward_the_background() {
+        // Kuralın asıl değişmezi: sönük renk, kaynağı ile zemin arasında
+        // durur — kanal kanal. Koyu temada bu "koyulaşır", açıkta "açılır"
+        // demek; iki zemin de sınanıyor ki kural yeniden siyaha doğru
+        // çarpmaya dönerse açık tema düşsün.
+        for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
+            let bg = theme.background_rgb();
+            for index in 259..=266 {
+                let (source, dimmed) = (theme.default(index - 259), theme.default(index));
+                for (s, d, b) in [
+                    (source.r, dimmed.r, bg.r),
+                    (source.g, dimmed.g, bg.g),
+                    (source.b, dimmed.b, bg.b),
+                ] {
+                    assert!(
+                        s.min(b) <= d && d <= s.max(b),
+                        "{index}: {source:?} → {dimmed:?}"
+                    );
+                }
+            }
         }
-        assert!(THEME.default(268).r < THEME.default(256).r);
-        // Kırmızının sönüğü: 209/109/106 → 139/72/70. vte f32'de çarpıp kırpar.
-        assert_eq!(THEME.default(260), rgb(0x8b4846));
-        // `dim` rolü 006'nın hesabının donmuş hâli: `foreground × 2/3`.
-        assert_eq!(rgb(THEME.dim), rgb(THEME.foreground) * DIM);
+        let sum = |c: Rgb| u32::from(c.r) + u32::from(c.g) + u32::from(c.b);
+        // Koyu temada kırmızının sönüğü kararır, açık temada açılır.
+        assert!(sum(Theme::BATERI.default(260)) < sum(Theme::BATERI.default(1)));
+        assert!(sum(Theme::BATERI_LIGHT.default(260)) > sum(Theme::BATERI_LIGHT.default(1)));
+        // Elle yazılı: `(2·0xd1 + 0x1a) / 3`, `(2·0x6d + 0x1c) / 3`,
+        // `(2·0x6a + 0x21) / 3`, tam sayı bölmesiyle.
+        assert_eq!(THEME.default(260), rgb(0x945251));
+    }
+
+    #[test]
+    fn dim_on_black_is_vte() {
+        // Oranın gerekçesi (`dim_toward`'ın doc'u): siyah zeminde kural vte'nin
+        // `× 2/3`'üyle bit bit aynı. Her kanal değeri sınanıyor; `f32`'nin
+        // `2/3`'ü tam değerin biraz üstünde olduğu için kesme aynı yere düşüyor.
+        let black = rgb(0x000000);
+        for c in 0..=255u8 {
+            let color = Rgb { r: c, g: c, b: c };
+            assert_eq!(dim_toward(color, black), color * (2.0 / 3.0), "{c}");
+        }
+        // `BATERI`'nin `dim` rolü 006'nın hesabının donmuş hâli.
+        assert_eq!(rgb(THEME.dim), dim_toward(rgb(THEME.foreground), black));
     }
 
     #[test]
@@ -466,11 +593,11 @@ mod tests {
             resolve_fg(foreground, false, &colors, &theme),
             rgb(0xffffff)
         );
-        // Adlı renk çözülüp `× 2/3` iner; rol ona dokunmaz.
+        // Adlı renk çözülüp zemine karışır; rol ona dokunmaz.
         let red = Color::Named(NamedColor::Red);
         assert_eq!(
             resolve_fg(red, true, &colors, &theme),
-            rgb(THEME.ansi[1]) * DIM
+            dim_toward(rgb(THEME.ansi[1]), THEME.background_rgb())
         );
     }
 
