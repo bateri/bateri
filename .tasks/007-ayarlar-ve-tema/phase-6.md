@@ -66,21 +66,59 @@ _Requirements: R7, R10_
 ## Yayın Etkisi
 
 - **app bundle** — About paneli artık erişilebilir (006'dan kalan "About
-  paneli erişilemiyor" borcu kapanır; borç `context.md`'ye taşındı, göz
-  kontrolüyle kapanışı `teslim.md`'ye düşer).
+  paneli erişilemiyor" borcu kapanır; paketten göz kontrolüyle doğrulandı).
 - **ayar şeması** — şablon dosyası.
-- Klavye davranışı: Cmd-Q çalışır ve açık programı sormadan kapatır (teslim
-  notu; kapatma onayı kapsam dışı).
+- Klavye davranışı: Cmd-Q çalışır ve açık programı sormadan kapatır, Cmd-H
+  gizler (teslim notu; kapatma onayı kapsam dışı).
+- **Bekleyen göz kontrolü** `[elle]`: Cmd-C/V/Q/T tuşları, seçimle kopyalama
+  ve başka uygulamayla pano alışverişi (Uygulama Notları).
+- `CLAUDE.md` "Bugünkü hâl" ana menüyü, `bt-shell` başlık yorumu `menu`'yü
+  söylüyor.
 
 ## Checklist
 
-- [ ] `objc2-app-kit` feature'ları; `Cargo.lock` kontrolü
-- [ ] `menu.rs`: bateri ve Düzen menüleri
-- [ ] `BateriView` `copy:`/`paste:`; köprü silindi, yutma dalı kaldı
-- [ ] Ayarlar… eylemi (şablon, editör, izlemeyi yeniden kurma)
-- [ ] Şablon `bt-core`'da, varsayılanlarla sınamayla bağlı
-- [ ] Yorumlar: `view.rs:309-314`, `:491-493`, `app.rs:332`
-- [ ] Test: şablon, yutma
-- [ ] `docs/AYARLAR.md`
-- [ ] Doğrulama geçti (`make hepsi` + `make duman` + `make kur`)
-- [ ] Yayın etkisi yazıldı
+- [x] `objc2-app-kit` feature'ları; `Cargo.lock` kontrolü
+- [x] `menu.rs`: bateri ve Düzen menüleri
+- [x] `BateriView` `copy:`/`paste:`; köprü silindi, yutma dalı kaldı
+- [x] Ayarlar… eylemi (şablon, editör, izlemeyi yeniden kurma)
+- [x] Şablon `bt-core`'da, varsayılanlarla sınamayla bağlı
+- [x] Yorumlar: `view.rs:309-314`, `:491-493`, `app.rs:332`
+- [x] Test: şablon, yutma
+- [x] `docs/AYARLAR.md`
+- [x] Doğrulama geçti (`make hepsi` + `make duman` + `make kur`)
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+- **Bayraklar kök `Cargo.toml`'da değil `bt-shell/Cargo.toml`'da** (phase-3
+  emsali); `objc2-foundation`'a `NSURL` da eklendi. `Cargo.lock` değişmedi,
+  phase riskli değil.
+- **Uygulama menüsüne Hide bateri (Cmd-H), Hide Others, Show All eklendi**
+  (planda yok): macOS'un standart öğeleri, yoksa Cmd-H yutuluyordu. AppKit
+  menülere kendi öğelerini de ekliyor (Quit and Keep Windows, Edit'te
+  AutoFill/dikte/emoji).
+- **Şablonda anahtarlar değeriyle yazılı, yorumda değil** (yalnız varsayılanı
+  olmayan `family` yorumlu örnek); bölüm başlıkları açık — yorumu kaldırılan
+  anahtar başlıksız kalıp sessizce yoksayılmasın. Sınama anahtarların
+  varlığını da bağlıyor (boş şablon eşitliği geçerdi). Şablon
+  `docs/AYARLAR.md`'de blok olarak duruyor ve
+  `documented_template_is_the_template` ile bağlı.
+- **Editör:** önce `NSWorkspace::openURL` (türün uygulaması), `false`
+  dönerse `open -t` (varsayılan metin editörü) — `.toml`'u sahiplenen
+  uygulama her makinede yok. Yedek yol **sınanmadı**: bu makinede `.toml`'un
+  sahibi var. İkisi de açamazsa ayar yuvasına dosyanın yolu.
+- **Hata ayar yuvasına, okumanın tanılarının arkasına** ekleniyor: Settings…
+  yarattıktan sonra `reload_settings` yuvayı dosyanın hâline göre yeniden
+  yazdığı için önce yazılan hata hemen silinirdi.
+- **Göz kontrolü** (paketten, geçici `HOME`, menü öğeleri System Events'le
+  süreç hedeflenerek): About paneli atıfla açıldı; Settings… açılışta olmayan
+  dizini ve şablonu yarattı (içerik belge bloğuyla aynı), `.toml` editörünü
+  öne getirdi; aynı dosyada `theme` yerinde değiştirilince tema anında döndü
+  (izleme yeni dizini görüyor); Edit ▸ Paste metni yapıştırdı; bateri ▸ Quit
+  süreci temiz kapattı, stderr boş. **Gözle sınanmayan:** Cmd-C/V/Q/T
+  tuşları, seçimle Copy ve başka uygulamayla pano alışverişi — fare
+  sürüklemesi pencerenin boyutlandırma kenarına düştü ve kullanıcı makineyi
+  kullanıyordu, tuş/fare enjeksiyonu başka uygulamaya düşebileceği için
+  bırakıldı. Etkin olmayan uygulamanın menüsünden tıklanan Paste hiçbir şey
+  yapmadı: key pencere yok, eylem view'a varmıyor (AppKit davranışı; kullanıcı
+  etkin olmayan uygulamanın menüsüne tıklayamaz).

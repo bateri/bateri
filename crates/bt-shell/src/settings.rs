@@ -69,6 +69,32 @@ pub(crate) fn theme_path(root: &Path, name: &str) -> PathBuf {
     root.join(theme_file(name))
 }
 
+/// "Settings…"ın ilk yarısı: kök dizini ve `settings.toml`'u yoksa
+/// [`Settings::TEMPLATE`] ile yaratır, dosyanın yolunu döner.
+///
+/// **Var olanı asla ezmez** — bozuk dosya da, sembolik bağ da, hedefi olmayan
+/// bağ da (`create_new`, `O_EXCL`: bağı izlemiyor). Bozuk dosyanın içeriği
+/// kullanıcının yarım işi; hedefsiz bağın hedefini yaratmak dotfile deposunun
+/// taşındığı yerde başıboş bir dosya bırakırdı, ayar yuvası o bağı zaten
+/// söylüyor.
+pub(crate) fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(root)?;
+    let path = root.join(FILE_NAME);
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path);
+    match created {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            file.write_all(Settings::TEMPLATE.as_bytes())?;
+        }
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err),
+    }
+    Ok(path)
+}
+
 /// Bir okumanın sonucu.
 #[derive(Debug)]
 pub(crate) enum Loaded {
@@ -329,6 +355,50 @@ mod tests {
             config_root(Path::new("/Users/someone")),
             PathBuf::from("/Users/someone/.config/bateri")
         );
+    }
+
+    #[test]
+    fn settings_command_creates_the_template_once() {
+        // Dizin de dosya da yok: ikisi yaratılır, şablon açılışta tanısız
+        // varsayılanları verir — "Settings…" davranışı değiştirmez.
+        let root = TempRoot::new("create");
+        let config = root.0.join("nested").join("bateri");
+        let path = create_if_missing(&config).expect("şablon yaratılamadı");
+        assert_eq!(path, config.join(FILE_NAME));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("okunamadı"),
+            Settings::TEMPLATE
+        );
+        assert_eq!(load(&config).at_launch(), (Settings::default(), Vec::new()));
+
+        // Var olan dosya ezilmez, bozuk olsa da: yarım kalmış bir düzenleme.
+        std::fs::write(&path, "[terminal\n").expect("yazılamadı");
+        assert_eq!(create_if_missing(&config).expect("ikinci çağrı"), path);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("okunamadı"),
+            "[terminal\n"
+        );
+    }
+
+    #[test]
+    fn settings_command_does_not_write_through_a_dangling_link() {
+        // Taşınmış dotfile deposuna bakan bağ: hedef yaratılmaz, bağ kalır ve
+        // ayar yuvası onu söylemeye devam eder.
+        let root = TempRoot::new("create-dangling");
+        let target = root.0.join("moved-away.toml");
+        std::os::unix::fs::symlink(&target, root.0.join(FILE_NAME)).expect("bağ kurulamadı");
+        assert!(create_if_missing(&root.0).is_ok());
+        assert!(!target.exists(), "bağın hedefi yaratıldı");
+        assert!(matches!(load(&root.0), Loaded::Unreadable(_)));
+    }
+
+    #[test]
+    fn settings_command_reports_an_uncreatable_root() {
+        // Kökün yerinde bir dosya: dizin yaratılamaz, hata çağırana döner.
+        let root = TempRoot::new("create-blocked");
+        let config = root.0.join("bateri");
+        std::fs::write(&config, "").expect("yazılamadı");
+        assert!(create_if_missing(&config).is_err());
     }
 
     #[test]

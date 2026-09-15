@@ -22,7 +22,8 @@ rasterize eder; hücre ölçüsü oradan gelir ve `bt-gpu`
 `R8Unorm` dokuya bağlar, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
 çizer. `bt-shell` klavyeyi PTY'ye akıtır; fareyle seçim, pano, geçmişte
-kaydırma ve kapanış sırası ondadır; `settings.toml`'u okur (bugün
+kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste) ve kapanış
+sırası ondadır; `settings.toml`'u okur (bugün
 `scrollback`, tema seçimi ve font) ve temayı `themes/{ad}.toml`'dan ya da
 gömülü `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
 anında** uygulanır (`watch`: vnode kaynakları; `Session::set_theme`,

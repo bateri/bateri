@@ -20,10 +20,16 @@ objc2 = { workspace = true }
 # (`regionCode`, `preferredLanguages`) ayrıca NSString ve
 # NSArray ister. İkisi varsayılan sette ve crate onları başka yerlerde de
 # listesiz kullanıyor (`ns_string!`, `NSArray`); kırpma günü buraya girerler.
-objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLocale"] }
-# NSAppearance: sistemin açık/koyu görünümü (007 phase-3). Yeni crate değil,
-# var olan bağımlılığın bayrağı; `Cargo.lock` bayrak kaydetmiyor.
-objc2-app-kit = { workspace = true, features = ["NSAppearance"] }
+# NSURL: "Settings…"ın dosya URL'si (007 phase-6); `NSWorkspace` de çekiyor,
+# ama kullanan bu crate.
+objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLocale", "NSURL"] }
+# NSAppearance: sistemin açık/koyu görünümü (007 phase-3). NSMenu ve
+# NSMenuItem: ana menü; NSWorkspace: "Settings…"ın dosyayı editörde açması
+# (007 phase-6). Yeni crate değil, var olan bağımlılığın bayrakları;
+# `Cargo.lock` bayrak kaydetmiyor.
+objc2-app-kit = { workspace = true, features = [
+    "NSAppearance", "NSMenu", "NSMenuItem", "NSWorkspace",
+] }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.
 objc2-quartz-core = { workspace = true, features = ["CALayer"] }

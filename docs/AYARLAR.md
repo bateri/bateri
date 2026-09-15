@@ -14,9 +14,11 @@ ailesinin bulunması).
 ~/.config/bateri/settings.toml
 ```
 
-Dosya yoksa her şey varsayılanıyla çalışır ve hiçbir uyarı çıkmaz. Dizini ve
-dosyayı elle oluşturmak yeterli. Dosya başka bir yere sembolik bağ olabilir
-(dotfile deposu); bağın hedefi okunur.
+Dosya yoksa her şey varsayılanıyla çalışır ve hiçbir uyarı çıkmaz.
+**bateri ▸ Settings…** (Cmd ,) dosyayı editörde açar, yoksa önce yaratır
+(bkz. [Settings…](#settings)); dizini ve dosyayı elle oluşturmak da yeterli.
+Dosya başka bir yere sembolik bağ olabilir (dotfile deposu); bağın hedefi
+okunur.
 
 Değişiklik **kaydettiğiniz anda** geçerli olur — ayar dosyasında da,
 kullanılan temanın dosyasında da; kabuk ve içindeki program yaşamaya devam
@@ -26,9 +28,57 @@ görünümü de anında izlenir: tema `"system"` iken (varsayılan) Sistem
 Ayarları'nda görünüm değişince pencere de değişir.
 
 İzlenen yer `~/.config/bateri/` dizinidir. Uygulama açıkken bu dizin **hiç
-yoksa** oluşturmak izlemeyi başlatmaz: dizini kabuktan ilk kez oluşturan
-kullanıcı değişikliklerini uygulamayı yeniden açınca görür, sonrası kayıt
-anında izlenir.
+yoksa** kabuktan oluşturmak izlemeyi başlatmaz: değişiklikler uygulamayı
+yeniden açınca ya da bir kez Settings… seçilince görülür, sonrası kayıt
+anında izlenir. Settings…'in yarattığı dizin hemen izlenir.
+
+### Settings…
+
+bateri ▸ Settings… (Cmd ,) ayar dosyasını açar: önce `.toml` dosyalarını
+açan uygulamayla, o yoksa varsayılan metin editörüyle (çoğu makinede
+TextEdit).
+
+Dosya yoksa dizini ve dosyayı aşağıdaki şablonla yaratır. Şablon hiçbir şeyi
+değiştirmez: varsayılanı olan her anahtar varsayılan değeriyle yazılıdır,
+değeri yerinde değiştirip kaydetmek yeter.
+
+- Var olan dosyaya **dokunmaz** — bozuk olsa da, başka yere sembolik bağ olsa
+  da, bağın hedefi olmasa da.
+- Dosya yaratılamazsa (izin yok, `~/.config/bateri` bir dosya) ya da hiçbir
+  uygulama açamazsa başlık çubuğunda söylenir; ikincisinde dosyanın yolu da
+  yazılır.
+- Şablondaki değerler yaratıldığı günün varsayılanlarıdır: sonraki bir
+  sürümde bir varsayılan değişirse bu dosya eski değeri tutar. Satırı silmek
+  anahtarı güncel varsayılana döndürür.
+
+### Şablon
+
+```toml
+# bateri settings. Changes apply as soon as you save this file.
+# A key you delete goes back to its default.
+
+[terminal]
+# Lines of history kept above the screen, from 0 to 100000.
+scrollback = 10000
+
+[appearance]
+# "system" follows the macOS light/dark appearance. Any other value is a theme
+# used in both: a file themes/NAME.toml next to this one, or a built-in theme,
+# "bateri" (dark) or "bateri-light" (light).
+theme = "system"
+# The themes used while theme = "system".
+light_theme = "bateri-light"
+dark_theme = "bateri"
+
+[font]
+# A family name as shown in Font Book. Without it bateri uses SF Mono, or
+# Menlo when SF Mono is not installed.
+# family = "Menlo"
+# Size in points.
+size = 13
+```
+
+Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
 
 ## Hata olursa
 
