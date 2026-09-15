@@ -10,9 +10,10 @@
 //! kayıt anında yeniden okuyabilsin diye izleyen (`watch`) ve tanısını
 //! pencere alt başlığında gösteren (`notices`) de burası; ayrıştırma ve fark
 //! `bt-core`'da. Sistemin açık/koyu görünümünü okuyup temayı seçen de
-//! (`app`, view'dan hedefsiz eylemle). Ana menü (`menu`) uygulama ve Edit
-//! menüsü; öğeleri hedefsiz eylem. Tek pencere; sekme, bölme ve IME sonraki
-//! setlerde.
+//! (`app`, view'dan hedefsiz eylemle). Ana menü (`menu`) uygulama, Edit ve
+//! View menüsü; öğeleri hedefsiz eylem. View'da Theme ▸ seçimi ayar dosyasına
+//! yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan geçici punto (`zoom`).
+//! Tek pencere; sekme, bölme ve IME sonraki setlerde.
 
 pub(crate) mod app;
 mod child;
@@ -23,6 +24,7 @@ mod notices;
 mod settings;
 mod view;
 mod watch;
+mod zoom;
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};

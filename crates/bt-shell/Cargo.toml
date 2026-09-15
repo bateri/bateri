@@ -25,10 +25,11 @@ objc2 = { workspace = true }
 objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLocale", "NSURL"] }
 # NSAppearance: sistemin açık/koyu görünümü (007 phase-3). NSMenu ve
 # NSMenuItem: ana menü; NSWorkspace: "Settings…"ın dosyayı editörde açması
-# (007 phase-6). Yeni crate değil, var olan bağımlılığın bayrakları;
+# (007 phase-6). NSCell: Theme ▸'deki işaretin tipi (`NSControlStateValue`,
+# 007 phase-7). Yeni crate değil, var olan bağımlılığın bayrakları;
 # `Cargo.lock` bayrak kaydetmiyor.
 objc2-app-kit = { workspace = true, features = [
-    "NSAppearance", "NSMenu", "NSMenuItem", "NSWorkspace",
+    "NSAppearance", "NSCell", "NSMenu", "NSMenuItem", "NSWorkspace",
 ] }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.

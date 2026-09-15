@@ -234,9 +234,12 @@ mod tests {
         // bir blok veriyor. Belge değer **kopyaladığı** için drift eder; bu
         // sınama blokları gömülü temalara bağlıyor. Taban ayrık: bloktan düşen
         // bir anahtar tabandan dolup eşitliği bozar, yani blok eksiksiz kalmak
-        // zorunda.
+        // zorunda. Liste tablonun kendisinden: eklenen gömülü tema bloğuyla
+        // gelmek zorunda.
         let doc = include_str!("../../../docs/AYARLAR.md");
-        for name in EMBEDDED_NAMES {
+        let names: Vec<_> = Theme::embedded_names().collect();
+        assert_eq!(names, ["bateri", "bateri-light"]);
+        for name in names {
             let theme = Theme::embedded(name);
             // Başlık satır sonuyla aranıyor: "`bateri`" "`bateri-light`"in
             // öneki ve sonsuz arama yanlış bloğu okurdu.
@@ -251,7 +254,4 @@ mod tests {
             assert_eq!(Some(clean(block, &SENTINEL)), theme, "{name}");
         }
     }
-
-    /// Belgede bloğu olması gereken gömülü temalar.
-    const EMBEDDED_NAMES: [&str; 2] = ["bateri", "bateri-light"];
 }

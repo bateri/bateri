@@ -22,10 +22,11 @@ rasterize eder; hücre ölçüsü oradan gelir ve `bt-gpu`
 `R8Unorm` dokuya bağlar, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
 çizer. `bt-shell` klavyeyi PTY'ye akıtır; fareyle seçim, pano, geçmişte
-kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste) ve kapanış
-sırası ondadır; `settings.toml`'u okur (bugün
-`scrollback`, tema seçimi ve font) ve temayı `themes/{ad}.toml`'dan ya da
-gömülü `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
+kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
+Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; `settings.toml`'u
+okur (bugün `scrollback`, tema seçimi ve font), Theme ▸'nin seçimini oraya
+yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
+`bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
 anında** uygulanır (`watch`: vnode kaynakları; `Session::set_theme`,
 `Session::set_terminal_options`, `Renderer::set_font`); varsayılan tema
 sistemin açık/koyu görünümünü de canlı izler. `make kur` `bateri.app` paketini üretir.
@@ -174,7 +175,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   anahtar opsiyonel ve eksiği gömülü `bateri`'den; biçim `docs/AYARLAR.md` →
   Temalar.
 - **Ayarlar** `~/.config/bateri/settings.toml`; bilinmeyen anahtar korunur,
-  anahtar silinmez, ayar penceresi dosyayı yeniden yazar ama tanımadığını bırakır.
+  anahtar silinmez. Dosyaya yazan tek yol View ▸ Theme ▸: yalnız
+  `[appearance] theme`'i, biçimi koruyarak (`Settings::with_theme`), yerinde
+  (sembolik bağın hedefine); ayrıştırılamayan dosyaya yazmaz. Menü yalnız
+  yazar, uygulayan dosyayı okuyan yol.
   Anahtarlar, varsayılanlar ve hata davranışı (pencere alt başlığı)
   `docs/AYARLAR.md`'de; ayrıştırma ve fark (`Settings::changes`)
   `bt-core::settings`'te saf, okuma ve izleme `bt-shell`'de. İzleme kaynağı

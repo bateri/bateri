@@ -5,8 +5,9 @@ dosyalarda durur. Bu belge anahtarların, tema biçiminin, varsayılanların ve
 dosya bozukken ne olacağının **tek sahibidir**; kod tarafındaki karşılığı
 `crates/bt-core/src/settings.rs` ve `theme.rs` (ayrıştırma),
 `crates/bt-shell/src/settings.rs` (okuma ve tema adının çözümü),
-`watch.rs` (dosyaların izlenmesi), `crates/bt-atlas/src/font.rs` (font
-ailesinin bulunması).
+`watch.rs` (dosyaların izlenmesi), `menu.rs` ve `zoom.rs` (View menüsü:
+tema seçimi ve geçici punto), `crates/bt-atlas/src/font.rs` (font ailesinin
+bulunması).
 
 ## Dosyanın yeri
 
@@ -19,6 +20,9 @@ Dosya yoksa her şey varsayılanıyla çalışır ve hiçbir uyarı çıkmaz.
 (bkz. [Settings…](#settings)); dizini ve dosyayı elle oluşturmak da yeterli.
 Dosya başka bir yere sembolik bağ olabilir (dotfile deposu); bağın hedefi
 okunur.
+
+Uygulama bu dosyaya yalnız bir yerden yazar: **View ▸ Theme ▸** ile tema
+seçince `[appearance] theme` satırını (bkz. [View ▸ Theme ▸](#view--theme-)).
 
 Değişiklik **kaydettiğiniz anda** geçerli olur — ayar dosyasında da,
 kullanılan temanın dosyasında da; kabuk ve içindeki program yaşamaya devam
@@ -80,6 +84,46 @@ size = 13
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
 
+### View ▸ Theme ▸
+
+Menü her açılışta yeniden kurulur:
+
+- **Match System** — `theme = "system"`: tema macOS'un görünümünü izler
+  (`light_theme` / `dark_theme`).
+- Gömülü temalar: `bateri`, `bateri-light`.
+- `~/.config/bateri/themes/` altındaki her `{ad}.toml`, adıyla. Dizine yeni
+  dosya koymak menüyü bir sonraki açılışta günceller. Nokta ile başlayan
+  dosyalar ve `system.toml` listelenmez; gömülü bir temayı gölgeleyen dosya
+  (`themes/bateri.toml`) ayrıca listelenmez, gömülü adın öğesi onu seçer.
+
+İşaretli öğe ayar dosyasındaki `theme` değeridir.
+
+Bir öğe seçmek temayı **ayar dosyasına yazar** ve dosya kaydedilmiş gibi hemen
+uygulanır; uygulama yeniden açılınca da aynı tema gelir. Yazılan tek şey
+`[appearance] theme` satırının değeridir:
+
+- Yorumlar, boş satırlar, anahtarların sırası, tanınmayan anahtarlar ve
+  satırın yanındaki yorum yerinde kalır.
+- `light_theme` ve `dark_theme` değişmez: sabit bir tema seçip sonra
+  Match System'e dönmek açık/koyu çiftini geri getirir.
+- `[appearance]` bölümü yoksa dosyanın sonuna eklenir; `theme` yoksa bölümün
+  içine. Satır içi (`appearance = { … }`) ya da noktalı
+  (`appearance.theme = …`) yazılış korunur.
+- Dosya yoksa önce [şablonla](#şablon) yaratılır, sonra satır yazılır.
+- Dosya sembolik bağsa **hedefi** yazılır, bağ bağ olarak kalır.
+- Satır sonları korunur: ilk satırı Windows satır sonuyla (CRLF) biten dosya
+  CRLF kalır. Son satırın sonunda satır sonu yoksa eklenir.
+
+Dosyaya **yazılmayan** durumlar — dosyanın içeriği olduğu gibi kalır ve başlık
+çubuğu sebebini söyler (`…; the theme was not saved`):
+
+- dosya geçersiz TOML ya da okunamıyor (izin, hedefi olmayan sembolik bağ);
+- `appearance` bir bölüm değil (`appearance = 1`, `[[appearance]]`) ya da
+  `theme` bir bölüm (`[appearance.theme]`): üstüne yazmak içeriğini silerdi.
+
+Uyarı bir sonraki başarılı seçimde ya da dosya okunabilir ve geçerli
+kaydedilince kalkar.
+
 ## Hata olursa
 
 Hata pencerenin başlık çubuğunda, başlığın yanında İngilizce görünür:
@@ -124,6 +168,9 @@ ekranı bozmaz, uyarı çıkar ve dosyayı düzeltip kaydedince uyarı kalkar.
 | anahtar dosyadan silindi | o anahtar varsayılanına döner |
 | seçilen tema bulunamıyor, dosyası okunamıyor ya da geçersiz TOML | **ekrandaki tema kalır**, uyarı |
 | font ailesi bulunamıyor | varsayılan font, uyarı; adı düzeltip kaydedince uyarı kalkar |
+
+Menüden tema seçerken dosya geçersiz ya da okunamıyorsa dosyaya **yazılmaz**;
+bkz. [View ▸ Theme ▸](#view--theme-).
 
 Silinen dosyanın ayarları değiştirmemesi bilerek: çoğu editör kaydederken
 eski dosyayı bir an kenara taşır ya da önce boşaltıp sonra yazar; varsayılanlara
@@ -242,6 +289,19 @@ size = 13
   yeniden sarılır.
 - Kalın ve eğik yüzü olmayan ailede o metin düz yüzle çizilir; bu uyarı
   vermez (standart hata çıkışına bir satır düşer).
+
+#### Geçici punto: Cmd +, Cmd −, Cmd 0
+
+**View ▸ Bigger** (Cmd +), **Smaller** (Cmd −) ve **Actual Size** (Cmd 0)
+puntoyu **geçici** olarak değiştirir: dosyaya yazılmaz, uygulama kapanınca
+gider.
+
+- Her basış bir punto; aralık 4–72. Aralığın ucundaki basış hiçbir şey
+  yapmaz, yani tuşu basılı tutup geri dönmek hemen görünür. Dosyadaki `size`
+  aralığın dışındaysa basış yalnız aralığa doğru çalışır.
+- **Actual Size** dosyadaki `size`'a döner.
+- Dosyada `size`'ı değiştirip kaydetmek geçici farkı bırakır: yazdığınız
+  punto görünür. `family` ya da başka bir anahtarı değiştirmek farkı korur.
 
 ## Temalar
 

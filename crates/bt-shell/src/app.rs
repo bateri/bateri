@@ -2,14 +2,18 @@
 //! shell oturumunu başlatır, kareyi süren display link'i bağlar ve kapanış
 //! sırasını yürütür. Çizim çağrısı burada **yok**, bu dosyanın işi bağlamak.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
+use std::ffi::c_void;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use bt_core::{Session, SessionOptions, Settings, Teardown, Theme, Wake, load_shell, smoke_shell};
+use bt_core::{
+    FontOptions, SYSTEM_THEME, Session, SessionOptions, Settings, Teardown, Theme, Wake,
+    load_shell, smoke_shell,
+};
 use bt_gpu::{CellMetrics, DisplayLink, MIN_SAMPLES, Renderer, Stats, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -17,8 +21,8 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationDelegate,
-    NSBackingStoreType, NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask,
-    NSWorkspace,
+    NSBackingStoreType, NSEvent, NSMenu, NSMenuDelegate, NSMenuItem, NSWindow, NSWindowDelegate,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
@@ -28,6 +32,7 @@ use objc2_foundation::{
 use crate::notices::{Notices, Source, font_messages};
 use crate::view::BateriView;
 use crate::watch::{Notify, Watch};
+use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
 use crate::{child, settings};
 
@@ -120,13 +125,15 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 ///
 /// Süreli koşu (`make duman`, ölçüm) ayar dosyasını, dosya izlemeyi, sistemin
 /// açık/koyu görünümünü ve Tema menüsünün `themes/`'ten dolmasını görmez:
-/// kapının sonucu o makinenin `~/.config/bateri/`'sine bağlı olmasın. Bugün
-/// ilk üçü var: dosyayı okuyup izlemeyi kuran [`AppDelegate::load_settings`]
-/// ve [`AppDelegate::reload_settings`], görünümü okuyan
-/// [`AppDelegate::apply_appearance`]. Dosyayı yaratan "Settings…"
-/// ([`AppDelegate::edit_settings`]) ve Tema menüsü de bu değere bakar,
-/// kendi `run.is_some()` koşulunu yazmaz — dört ayrı koşuldan birinin
-/// unutulduğu gün kapı sessizce kullanıcının dosyasına bağlanırdı
+/// kapının sonucu o makinenin `~/.config/bateri/`'sine bağlı olmasın: dosyayı
+/// okuyup izlemeyi kuran [`AppDelegate::load_settings`] ve
+/// [`AppDelegate::reload_settings`], görünümü okuyan
+/// [`AppDelegate::apply_appearance`] ve Theme ▸'yi dolduran
+/// `menuNeedsUpdate:`. Dosyayı yaratan "Settings…"
+/// ([`AppDelegate::edit_settings`]) ve yazan tema seçimi
+/// ([`AppDelegate::save_theme`]) de bu değere bakar, kendi `run.is_some()`
+/// koşulunu yazmaz — dört ayrı koşuldan birinin unutulduğu gün kapı sessizce
+/// kullanıcının dosyasına bağlanırdı
 /// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1).
 ///
 /// Bedeli: dosyadan ekrana giden kabloyu hiçbir kapı görmüyor; onu geçici
@@ -315,7 +322,7 @@ pub(crate) struct Ivars {
     notices: RefCell<Notices>,
     /// Geçerli ayarlar: açılışta [`AppDelegate::load_settings`], kayıtta
     /// [`AppDelegate::reload_settings`] yazar; görünüm uygulayıcısı
-    /// `theme_for` için okur. Süreli koşuda varsayılanlar ve görünüm
+    /// `theme_for` için, Theme ▸ işaretli öğe için okur. Süreli koşuda varsayılanlar ve görünüm
     /// uygulayıcısı onları hiç okumaz (`Inputs::Hermetic`).
     ///
     /// Saklanıyor, çünkü görünüm değişimi dosyayı yeniden okumadan hangi
@@ -323,6 +330,10 @@ pub(crate) struct Ivars {
     /// Kullanılamayan bir kayıt onu **değiştirmez**: sonraki görünüm değişimi
     /// son iyi ayarlarla seçer.
     settings: RefCell<Settings>,
+    /// Cmd +/−/0'ın geçici punto farkı: renderer'a giden font
+    /// `zoom.apply(&settings.font)` ([`AppDelegate::apply_font`]). Dosyadaki
+    /// `size` değişince sıfırlanır.
+    zoom: Cell<Zoom>,
     /// Ayar dizininin kaynakları: kök, `themes/`, `settings.toml`
     /// ([`settings::watched_paths`]). Süreli koşuda ve ev dizini
     /// çözülemeyince hiç kurulmuyor.
@@ -352,7 +363,12 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
-            crate::menu::install(mtm);
+            // AppKit'in kendi pencere sekmeleri kapalı: açıkken "View" adlı
+            // menüye Show Tab Bar / Show All Tabs ekliyor ve tek pencerelik
+            // uygulamada boş bir sekme çubuğu açıyorlar. Sekmeler kendi
+            // setinde ve yolu orada seçilecek.
+            NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
+            crate::menu::install(mtm, ProtocolObject::from_ref(self));
             let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0));
             let style = NSWindowStyleMask::Titled
                 | NSWindowStyleMask::Closable
@@ -499,6 +515,50 @@ define_class!(
         }
     }
 
+    unsafe impl NSMenuDelegate for AppDelegate {
+        /// Theme ▸ açılıyor — delegate yalnız ona bağlı (`menu::install`).
+        /// Liste o anda kuruluyor: `themes/`'e konan dosya bir sonraki
+        /// açılışta görünür, dizin liste için izlenmiyor. İşaretli öğe
+        /// geçerli ayardaki `theme`.
+        ///
+        /// Süreli koşuda ve ev dizini çözülemeyince doldurulmaz
+        /// ([`Inputs`]): seçimin yazacağı bir dosya yok.
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            let Inputs::User {
+                config_root: Some(root),
+            } = self.inputs()
+            else {
+                return;
+            };
+            let embedded: Vec<&str> = Theme::embedded_names().collect();
+            let user = settings::user_theme_names(&root);
+            let settings = self.ivars().settings.borrow();
+            crate::menu::fill_themes(self.mtm(), menu, &settings.theme, &embedded, &user);
+        }
+
+        /// "Bu menüde şu tuşun karşılığı var mı": hayır, tema öğelerinin
+        /// kısayolu yok.
+        ///
+        /// Tanımlanmasının tek sebebi maliyet: delegate bunu tanımlamazsa
+        /// AppKit her Command'lı tuşta (Cmd-C dahil) karşılığı aramak için
+        /// menüyü `menuNeedsUpdate:` ile doldurur — her tuşta `themes/`
+        /// okunurdu. `objc2-app-kit` bu yöntemi üretmiyor (dönüş işaretçili
+        /// argümanlar); imza elle. İki çıkış argümanı (`id *`, `SEL *`) opak
+        /// işaretçi: `Sel` işaretçi kodlaması taşımıyor ve `false` dönen yöntem
+        /// onlara hiç yazmıyor.
+        #[unsafe(method(menuHasKeyEquivalent:forEvent:target:action:))]
+        fn menu_has_key_equivalent(
+            &self,
+            _menu: &NSMenu,
+            _event: &NSEvent,
+            _target: *mut c_void,
+            _action: *mut c_void,
+        ) -> bool {
+            false
+        }
+    }
+
     impl AppDelegate {
         /// Sistemin açık/koyu görünümü değişti. Gönderen `BateriView`'ın
         /// `viewDidChangeEffectiveAppearance`'ı, hedefsiz eylemle: view
@@ -520,6 +580,40 @@ define_class!(
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
             self.edit_settings();
+        }
+
+        /// View ▸ Theme ▸ {ad}: öğenin başlığı temanın adı
+        /// (`menu::fill_themes`).
+        #[unsafe(method(selectTheme:))]
+        fn select_theme(&self, sender: Option<&AnyObject>) {
+            let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>()) else {
+                return;
+            };
+            self.save_theme(&item.title().to_string());
+        }
+
+        /// View ▸ Theme ▸ Match System.
+        #[unsafe(method(matchSystemTheme:))]
+        fn match_system_theme(&self, _sender: Option<&AnyObject>) {
+            self.save_theme(SYSTEM_THEME);
+        }
+
+        /// View ▸ Bigger (Cmd +).
+        #[unsafe(method(makeFontBigger:))]
+        fn make_font_bigger(&self, _sender: Option<&AnyObject>) {
+            self.change_zoom(Zoom::bigger);
+        }
+
+        /// View ▸ Smaller (Cmd −).
+        #[unsafe(method(makeFontSmaller:))]
+        fn make_font_smaller(&self, _sender: Option<&AnyObject>) {
+            self.change_zoom(Zoom::smaller);
+        }
+
+        /// View ▸ Actual Size (Cmd 0): fark sıfırlanır, ayarın puntosu.
+        #[unsafe(method(resetFontSize:))]
+        fn reset_font_size(&self, _sender: Option<&AnyObject>) {
+            self.change_zoom(|_, _| Zoom::default());
         }
 
         #[unsafe(method(runDeadline:))]
@@ -916,6 +1010,7 @@ impl AppDelegate {
             run: opts.run,
             notices: RefCell::new(Notices::default()),
             settings: RefCell::new(Settings::default()),
+            zoom: Cell::new(Zoom::default()),
             config_watch: RefCell::new(None),
             theme_watch: RefCell::new(None),
             stats,
@@ -1081,9 +1176,11 @@ impl AppDelegate {
     ///   değişmez; yuva kendi kaynağına göre dolar ya da boşalır. Değilse
     ///   kabul edilmeyen anahtar geçerli değerini tutar
     ///   ([`settings::load_keeping`]) ve fark alınır: terminal seçenekleri
-    ///   **tamamıyla** oturuma gider; font renderer'a gider ve istek
-    ///   değiştiyse geometri yeniden kurulur ([`AppDelegate::refresh_geometry`]:
-    ///   atlas, grid, PTY boyutu, font yuvası).
+    ///   **tamamıyla** oturuma gider; font geçici punto farkıyla renderer'a
+    ///   gider ([`AppDelegate::apply_font`]) — `size` değiştiyse fark
+    ///   sıfırlanarak ([`Zoom::after_reload`]). Dosya okunup uygulanınca yazma
+    ///   yuvası da boşalır: Theme ▸'nin reddettiği dosya düzeltildiyse ret
+    ///   artık doğru değil.
     /// - **Tema her olayda yeniden çözülüyor**, ayar dosyası bozuk olsa da
     ///   (son iyi ayarların adıyla): etkin tema dosyası ayrı bir kaynak ve
     ///   hangi dosyanın haber verdiği bilinmiyor. Kullanılamayan tema takas
@@ -1112,20 +1209,22 @@ impl AppDelegate {
             settings::load_keeping(&root, &self.ivars().settings.borrow()).live();
         self.post_notices(Source::Settings, messages);
         if let Some(new) = loaded {
-            let changes = self.ivars().settings.borrow().changes(&new);
+            let (changes, zoom) = {
+                let old = self.ivars().settings.borrow();
+                let zoom = self.ivars().zoom.get().after_reload(&old.font, &new.font);
+                (old.changes(&new), zoom)
+            };
             if changes.terminal {
                 session.set_terminal_options(new.terminal());
             }
-            // İki kapı, ikisi de gerekli: fark dosyanın değiştiğini söylüyor,
-            // `set_font` renderer'ın zaten o fontu isteyip istemediğini
-            // (phase-7'nin geçici puntosu ikisini ayırır). Geometri ayarlar
-            // yazıldıktan **sonra** kuruluyor: o yol ayarları okursa yeni
-            // değeri görsün.
-            let font = changes.font && self.ivars().renderer.set_font(&new.font);
+            self.ivars().zoom.set(zoom);
             self.ivars().settings.replace(new);
-            if font {
-                self.refresh_geometry();
+            // Ayarlar ve fark yazıldıktan **sonra**: `apply_font` ikisini de
+            // okuyor.
+            if changes.font {
+                self.apply_font();
             }
+            self.post_notices(Source::Write, Vec::new());
         }
         // Ödünç `set_theme`'den önce düşüyor; içerideki çağrılar `settings`'e
         // dokunmuyor (`apply_appearance`'ın deseni).
@@ -1181,6 +1280,64 @@ impl AppDelegate {
             let mut messages = self.ivars().notices.borrow().get(Source::Settings).to_vec();
             messages.push(problem);
             self.post_notices(Source::Settings, messages);
+        }
+    }
+
+    /// View ▸ Theme ▸'nin seçimi: `theme`'i dosyaya yazar
+    /// ([`settings::write_theme`]) ve **dosyayı okuyan yoldan** uygular
+    /// ([`AppDelegate::reload_settings`]) — menünün kendi uygulama yolu yok,
+    /// ekrana giden tek zincir dosyadan geçiyor.
+    ///
+    /// Okuma yazmadan hemen sonra, izleyicinin olayını beklemeden: dizin az
+    /// önce yaratıldıysa onu gören bir kaynak yok ("Settings…"ın gerekçesi).
+    /// Ardından gelen olay boş fark ve aynı temanın takası, yani no-op.
+    ///
+    /// Hata **yazma yuvasına**; başarılı yazma yuvayı boşaltır. Süreli koşu
+    /// yazmaz ([`Inputs::Hermetic`]); menü o dalda zaten dolmuyor.
+    fn save_theme(&self, name: &str) {
+        let Inputs::User {
+            config_root: Some(root),
+        } = self.inputs()
+        else {
+            return;
+        };
+        match settings::write_theme(&root, name) {
+            Ok(()) => {
+                self.post_notices(Source::Write, Vec::new());
+                self.reload_settings();
+            }
+            Err(message) => self.post_notices(Source::Write, vec![message]),
+        }
+    }
+
+    /// Bigger, Smaller, Actual Size: geçici punto farkını `step` ile
+    /// değiştirir ve fontu uygular. Dosyaya dokunmaz, süreli koşuda da çalışır
+    /// — kullanıcının dünyasından bir şey okumuyor.
+    fn change_zoom(&self, step: impl FnOnce(Zoom, &FontOptions) -> Zoom) {
+        let zoom = step(
+            self.ivars().zoom.get(),
+            &self.ivars().settings.borrow().font,
+        );
+        self.ivars().zoom.set(zoom);
+        self.apply_font();
+    }
+
+    /// Renderer'a ayarın fontunu geçici punto farkıyla verir; istek değiştiyse
+    /// geometri yeniden kurulur ([`AppDelegate::refresh_geometry`]: atlas,
+    /// grid, PTY boyutu, font yuvası).
+    ///
+    /// İki kapı, ikisi de gerekli: çağıranın kapısı (fark, basış) bir şeyin
+    /// değiştiğini söylüyor, `set_font` renderer'ın zaten o fontu isteyip
+    /// istemediğini — uçtaki basış ya da farkla aynı puntoyu yazan kayıt
+    /// atlası yeniden kurdurmaz.
+    fn apply_font(&self) {
+        let font = self
+            .ivars()
+            .zoom
+            .get()
+            .apply(&self.ivars().settings.borrow().font);
+        if self.ivars().renderer.set_font(&font) {
+            self.refresh_geometry();
         }
     }
 

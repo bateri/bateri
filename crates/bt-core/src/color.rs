@@ -161,6 +161,12 @@ impl Theme {
             .map(|(_, theme)| *theme)
     }
 
+    /// Gömülü temaların adları, tablonun sırasıyla — View ▸ Theme ▸ bu sırayla
+    /// listeliyor.
+    pub fn embedded_names() -> impl Iterator<Item = &'static str> {
+        EMBEDDED.iter().map(|(name, _)| *name)
+    }
+
     /// Pencerenin clear rengi, **lineer** RGBA.
     pub const fn background_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.background))

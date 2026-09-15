@@ -127,8 +127,8 @@ pub(crate) fn wheel_lines(delta: f64, unit: f64, carry: f64) -> (i32, f64) {
 /// Tuş vuruşu terminale gider mi — **saf karar**, sınanıyor: Command'lı tuş
 /// gitmez.
 ///
-/// Menünün kısayolları (Cmd-C, Cmd-V, Cmd-Q, Cmd-,) bu soruya hiç varmıyor:
-/// AppKit Command'lı tuşu `keyDown:`'dan **önce** `performKeyEquivalent:` ile
+/// Menünün kısayolları (Cmd-C, Cmd-V, Cmd-Q, Cmd-,, Cmd +/−/0) bu soruya hiç
+/// varmıyor: AppKit Command'lı tuşu `keyDown:`'dan **önce** `performKeyEquivalent:` ile
 /// ana menüye veriyor (`menu`). Buraya varan Command'lı tuşun menüde
 /// karşılığı yok (Cmd-T) ya da öğesi o an devre dışı; terminale düşseydi
 /// kabuğa düz harf yazardı. Değiştiricinin geri kalanı sorulmuyor: Cmd-Shift-T
@@ -375,7 +375,7 @@ define_class!(
                 return;
             };
             // Command basılıyken tuş bir kısayoldur, girdi değil. Menü onu
-            // `performKeyEquivalent:` ile önce yakalıyor (Cmd-C/V/Q/,);
+            // `performKeyEquivalent:` ile önce yakalıyor (Cmd-C/V/Q/,, Cmd +/−/0);
             // yakalamadığı buraya varır ve **yutulur** (`reaches_terminal`).
             if !reaches_terminal(flags) {
                 return;
