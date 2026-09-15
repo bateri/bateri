@@ -59,20 +59,92 @@ _Requirements: R4, R4.1, R3.1, R10_
 
 ## Yayın Etkisi
 
-- **tema / materyal biçimi** — ikinci gömülü tema; biçim değişmedi.
-- **ayar şeması** — `theme = "system"` varsayılan, `light_theme`,
-  `dark_theme`. Dosyasız kullanıcıda davranış değişir: açık modda açık tema.
-- Koyu temada SGR 2'li renklerin değerleri kayar (bilinçli, bekçi diff'i).
+- **tema / materyal biçimi** — ikinci gömülü tema `bateri-light`; biçim
+  değişmedi, kullanıcı temaları olduğu gibi okunur (taban hâlâ `bateri`).
+- **ayar şeması** — `theme = "system"` varsayılan (eski varsayılan
+  `"bateri"`), yeni `light_theme` (`"bateri-light"`) ve `dark_theme`
+  (`"bateri"`); `"system"` ayrılmış değer. Dosyasız kullanıcıda davranış
+  değişir: açık modda açık tema. `docs/AYARLAR.md` → `[appearance]`, hata
+  tablosu, Temalar.
+- Koyu temada SGR 2'li adlı renklerin değerleri birkaç basamak açılır
+  (bilinçli, bekçi diff'i); varsayılan ön planın sönüğü (`dim` rolü) aynı.
+- `CLAUDE.md` bugünkü hâl ve "Tema" maddesi; `bt-shell` `lib.rs` başlığı.
+- Yeni bağımlılık yok: `objc2-app-kit`'e `NSAppearance` bayrağı,
+  `Cargo.lock` değişmedi.
 
 ## Checklist
 
-- [ ] Sönük kural (zemine karıştırma), bekçinin bilinçli güncellenmesi
-- [ ] `Theme::BATERI_LIGHT` ve palet bekçisine eklenmesi
-- [ ] `system` / `light_theme` / `dark_theme` ve saf seçim fonksiyonu
-- [ ] `Session::set_theme` + kare isteği
-- [ ] Görünüm değişimi: view → hedefsiz eylem → uygulayıcı; hermetik dal
-- [ ] Test: sönük kural iki zeminde, seçim fonksiyonu, takas sonrası kare
-- [ ] `docs/AYARLAR.md`
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi (paylaşılan durum)
-- [ ] Yayın etkisi yazıldı
+- [x] Sönük kural (zemine karıştırma), bekçinin bilinçli güncellenmesi
+- [x] `Theme::BATERI_LIGHT` ve palet bekçisine eklenmesi
+- [x] `system` / `light_theme` / `dark_theme` ve saf seçim fonksiyonu
+- [x] `Session::set_theme` + kare isteği
+- [x] Görünüm değişimi: view → hedefsiz eylem → uygulayıcı; hermetik dal
+- [x] Test: sönük kural iki zeminde, seçim fonksiyonu, takas sonrası kare
+- [x] `docs/AYARLAR.md`
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi (paylaşılan durum)
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+- **Sönük kural tam sayıda:** kanal başına `(2·renk + zemin) / 3`, kesmeyle
+  (`color::dim_toward`). Siyah zeminde vte'nin `× 2/3`'üyle 256 değerin
+  hepsinde bit bit aynı (`dim_on_black_is_vte`) — oranın gerekçesi bu.
+  Palet tablosunun sönük sekizlisi (259..=266) de aynı kuraldan. Hedef
+  temanın zemini, OSC 11 ile değişmiş zemin değil. `BATERI.dim` (`#909093`)
+  yerinde kaldı: rol bir değer.
+- **Test-first:** kural değişince eski literallerle tam üç çizim yolu
+  sınaması düştü (sönük kırmızının üç yeri), rol değerleri geçti; literaller
+  sonra bilerek güncellendi. `set_theme` sınaması mutasyonla sınandı (kare
+  isteği kaldırılınca kırmızı).
+- **`Session::set_theme` aynı temada no-op:** görünüm bildirimi vurgu rengi
+  ve kontrast değişiminde de geliyor, koşulsuz kare boşta sıfır kareyi
+  bozardı.
+- **Bayrak kök `Cargo.toml`'da değil `bt-shell/Cargo.toml`'da** (crate'in
+  `NSLocale`/`CALayer` deyişi). `Cargo.lock` değişmedi; phase yalnız
+  paylaşılan durum yüzünden riskli.
+- **Ayarlar artık saklanıyor** (`Ivars.settings`): görünüm uygulayıcısı
+  `theme_for` için dosyayı yeniden okumadan seçmeli. `load_settings` yalnız
+  temayı döndürüyor, `start_session` `scrollback`'i ivar'dan okuyor.
+- **Yedek görünüme uyuyor, açılışta da görünüm değişiminde de** (R3.4
+  "açılışta `bateri`, canlıda önceki tema" diyordu): bulunamayan ya da bozuk
+  tema açık modda `bateri-light`'a, koyuda `bateri`'ye döner
+  (`ThemeLoaded::or_embedded`, `Settings::default().theme_for(dark)`); iki
+  yol tek yardımcıdan (`AppDelegate::choose_theme`). "Önceki tema kalır"
+  görünüm değişiminde yanlış: ekrandaki tema öteki görünümün. O kural
+  görünüm aynıyken tema dosyasının bozulduğu canlı yenilemeye (phase-4)
+  kalıyor.
+- **`light_theme`/`dark_theme` `"system"`'i reddeder** (kendine dönen
+  seçim); `SYSTEM_THEME` `pub(crate)`, `bt-shell` `follows_system()`'e bakıyor
+  ve sabit temada görünüm bildirimini dosya okumadan bırakıyor.
+- **Koyu mu sorusu `NSApp.effectiveAppearance`'tan**, `bestMatchFromAppearancesWithNames`
+  ile (yüksek kontrastlı koyu da koyu sayılır); view'dan okumaya gerek
+  kalmadı. View `super`'i çağırıp hedefsiz eylemi `sendAction:to:from:` ile
+  atıyor.
+- **`bateri-light` değerleri** koyu temanın deyişiyle seçildi; WCAG kontrast
+  oranı hesapla bakıldı (normal renkli sekizli zemine karşı ≥ 4.5:1, parlak
+  sekizli ≥ 3.5:1, imleç bloğu üstündeki zemin rengi ≥ 5:1). `dim` rolü
+  kuralın kendisinden (sınamada bağlı).
+- **Belge bloğu sınaması genelleşti:** `documented_blocks_are_the_embedded_themes`
+  iki gömülü temayı da `AYARLAR.md`'ye bağlıyor; başlık satır sonuyla
+  aranıyor (`bateri` `bateri-light`'ın öneki).
+- **Duman makine açık moddayken** iki koşuda `kare=1 hucre=8 glif=6
+  kural=15`. Yarış sınaması `race_set_theme_and_frame` eklendi, iki profil
+  yeşil.
+- **Göz kontrolü yarım:** geçici `HOME` + renk örneği basan kabukla açılış
+  açık modda `bateri-light`'la geldi; renkli ve parlak sekizli, sönük satır,
+  `ls -G` ve `git diff` okunur, alt başlık boş. **Canlı geçiş gözle
+  görülmedi:** sistem görünümü bir kez koyuya çevrilip geri alındı ama o
+  anda pencere kullanıcının etkin uygulamasının arkasındaydı; makine
+  kullanımdayken ikinci kez çevrilmedi. Parçalar sınamalı (`set_theme` →
+  kare, seçim fonksiyonu, canlı kural) ama **view → hedefsiz eylem →
+  uygulayıcı kablosunu hiçbir sınama görmüyor**; görsel onay kullanıcıda.
+- **`/code-review` (high) kararları.** Düzeltilen (düşük): ilk hâlde görünüm
+  değişiminde kullanılamayan tema "ekrandaki kalır"dı; `dark_theme` bozukken
+  koyu → açık → koyu geçiş açık temayı koyu modda bırakıyordu. Görünüm
+  değişimi artık açılışın kuralından geçiyor, `live()` silindi, senaryo
+  `appearance_switches_never_leave_the_other_appearances_theme`'de. Temiz
+  bulunanlar: `dim_toward` taşmasız ve siyahta vte'yle aynı, `bateri-light`'ın
+  `dim`'i kuraldan, `set_theme`'in kilit sırası, takas sonrası clear/imleç
+  rengi, hedefsiz eylemin iki yolu (key pencere ve etkin olmayan uygulama),
+  süreli koşunun görünümü okumaması, belge bloğu aramasının öneki.

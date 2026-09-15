@@ -4,7 +4,7 @@
 
 use std::cell::{OnceCell, RefCell};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -16,8 +16,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSBackingStoreType, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowStyleMask,
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationDelegate,
+    NSBackingStoreType, NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
@@ -119,9 +119,10 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// Süreli koşu (`make duman`, ölçüm) ayar dosyasını, dosya izlemeyi, sistemin
 /// açık/koyu görünümünü ve Tema menüsünün `themes/`'ten dolmasını görmez:
 /// kapının sonucu o makinenin `~/.config/bateri/`'sine bağlı olmasın. Bugün
-/// yalnız ilki var; sonraki girişler de bu değere bakar, kendi
-/// `run.is_some()` koşulunu yazmaz — dört ayrı koşuldan birinin unutulduğu
-/// gün kapı sessizce kullanıcının dosyasına bağlanırdı
+/// ilki ve üçüncüsü var ([`AppDelegate::load_settings`],
+/// [`AppDelegate::apply_appearance`]); sonraki girişler de bu değere bakar,
+/// kendi `run.is_some()` koşulunu yazmaz — dört ayrı koşuldan birinin
+/// unutulduğu gün kapı sessizce kullanıcının dosyasına bağlanırdı
 /// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1).
 ///
 /// Bedeli: dosyadan ekrana giden kabloyu hiçbir kapı görmüyor; onu geçici
@@ -264,6 +265,14 @@ pub(crate) struct Ivars {
     run: Option<Run>,
     /// Alt başlığın yuvaları; yazanı yalnız [`AppDelegate::post_notices`].
     notices: RefCell<Notices>,
+    /// Geçerli ayarlar: açılışta [`AppDelegate::load_settings`] yazar, görünüm
+    /// uygulayıcısı `theme_for` için okur. Süreli koşuda varsayılanlar ve
+    /// görünüm uygulayıcısı onları hiç okumaz (`Inputs::Hermetic`).
+    ///
+    /// Saklanıyor, çünkü görünüm değişimi dosyayı yeniden okumadan hangi
+    /// temanın seçileceğini bilmeli; canlı yenileme (phase-4) farkı da buna
+    /// karşı alacak.
+    settings: RefCell<Settings>,
     /// Ölçüm defteri — kapı kapalıyken `None` ve hiç ayrılmamış.
     ///
     /// `bt-gpu`'nun tipi ama sahibi burası: `DisplayLink` ile tamamlanma bloğu
@@ -341,11 +350,11 @@ define_class!(
             // oturumdan **önce** — `scrollback` ve tema `SessionOptions`'a
             // giriyor ve font ayarı (007 phase-5) hücre ölçüsünü, yani ilk
             // grid'i ve kabuğun gördüğü ilk `TIOCSWINSZ`'yi belirleyecek.
-            let (settings, theme) = self.load_settings();
+            let theme = self.load_settings();
             let grid = self
                 .sync_geometry()
                 .expect("pencere ve contentView kuruldu");
-            self.start_session(mtm, grid, &view, &settings, theme);
+            self.start_session(mtm, grid, &view, theme);
 
             if let Some(run) = self.ivars().run {
                 // block2 yok: zamanlayıcı performSelector ile.
@@ -431,6 +440,15 @@ define_class!(
     }
 
     impl AppDelegate {
+        /// Sistemin açık/koyu görünümü değişti. Gönderen `BateriView`'ın
+        /// `viewDidChangeEffectiveAppearance`'ı, hedefsiz eylemle: view
+        /// oturumdan başka bir şeye referans tutmuyor ve responder zinciri
+        /// eylemi app delegate'e ulaştırıyor.
+        #[unsafe(method(appearanceDidChange:))]
+        fn appearance_did_change(&self, _sender: Option<&AnyObject>) {
+            self.apply_appearance();
+        }
+
         #[unsafe(method(runDeadline:))]
         fn run_deadline(&self, _arg: Option<&AnyObject>) {
             let teardown = self.shutdown();
@@ -824,6 +842,7 @@ impl AppDelegate {
             }),
             run: opts.run,
             notices: RefCell::new(Notices::default()),
+            settings: RefCell::new(Settings::default()),
             stats,
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
@@ -832,14 +851,7 @@ impl AppDelegate {
 
     /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
     /// `Wake`'i ister, link `Session`'ı ister, `Waker` link'ten doğar.
-    fn start_session(
-        &self,
-        mtm: MainThreadMarker,
-        grid: Grid,
-        view: &BateriView,
-        settings: &Settings,
-        theme: Theme,
-    ) {
+    fn start_session(&self, mtm: MainThreadMarker, grid: Grid, view: &BateriView, theme: Theme) {
         let session = Session::spawn(
             SessionOptions {
                 // Duman ve ölçüm koşularında shell sabit: sonuç kullanıcının
@@ -870,7 +882,7 @@ impl AppDelegate {
                 cols: grid.cols,
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
-                scrollback: settings.scrollback,
+                scrollback: self.ivars().settings.borrow().scrollback,
                 theme,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
@@ -917,18 +929,18 @@ impl AppDelegate {
         let _ = self.ivars().link.set(link);
     }
 
-    /// Açılışta ayarları okur ve seçilen temayı çözer; tanıları alt başlığa
-    /// kaynak kaynak verir.
+    /// Açılışta ayarları okur, [`Ivars::settings`]'e yazar ve seçilen temayı
+    /// — `"system"` ise görünüme göre — çözer; tanıları alt başlığa kaynak
+    /// kaynak verir.
     ///
     /// Süreli koşuda yükleyici **hiç çağrılmaz** ([`Inputs::Hermetic`]) ve
-    /// tema gömülü `bateri`: `Settings::default()`'un adı da oraya çözülürdü,
-    /// ama o eşitlik varsayılan değiştiği gün (007 phase-3, `"system"`)
-    /// bozulur ve süreli koşu sistemin görünümünü okumaya başlardı. Bozuk
-    /// dosya pencereyi açık bırakır, varsayılanlarla
-    /// ([`settings::Loaded::at_launch`], [`settings::ThemeLoaded::at_launch`]).
-    fn load_settings(&self) -> (Settings, Theme) {
+    /// tema gömülü `bateri`, görünüm okunmadan: `Settings::default()` artık
+    /// `"system"` ve ona çözülseydi duman makinenin açık modundan etkilenirdi.
+    /// Bozuk dosya pencereyi açık bırakır, varsayılanlarla
+    /// ([`settings::Loaded::at_launch`], [`AppDelegate::choose_theme`]).
+    fn load_settings(&self) -> Theme {
         let Inputs::User { config_root } = self.inputs() else {
-            return (Settings::default(), Theme::BATERI);
+            return Theme::BATERI;
         };
         // Ev dizini çözülemedi: dosya aranamıyor ve bu da görünür olmalı —
         // Dock'tan açılışta stderr'i kimse görmez, kullanıcının ayarları
@@ -944,10 +956,77 @@ impl AppDelegate {
             ),
         };
         self.post_notices(Source::Settings, messages);
+        let theme = self.choose_theme(config_root.as_deref(), &settings);
+        self.ivars().settings.replace(settings);
+        theme
+    }
+
+    /// Ayarların o anki görünüm için seçtiği temayı çözer ve tema yuvasını
+    /// yeniler — açılışın ve görünüm değişiminin **ortak** yolu. Kullanılamayan
+    /// temanın yerine görünüme uyan gömülü tema gelir
+    /// ([`settings::ThemeLoaded::or_embedded`]); ekrandaki temayı tutmak
+    /// görünüm değişiminde öteki görünümün temasını bırakırdı.
+    fn choose_theme(&self, config_root: Option<&Path>, settings: &Settings) -> Theme {
+        let dark = self.dark_appearance();
         let (theme, messages) =
-            settings::load_theme(config_root.as_deref(), &settings.theme).at_launch();
+            settings::load_theme(config_root, settings.theme_for(dark)).or_embedded(dark);
         self.post_notices(Source::Theme, messages);
-        (settings, theme)
+        theme
+    }
+
+    /// Görünüm değişiminin uygulayıcısı: tema sistemi izliyorsa görünüme uyan
+    /// temayı açılışla aynı yoldan ([`AppDelegate::choose_theme`]) seçer ve
+    /// oturuma takas eder.
+    ///
+    /// Üç kapı, sırayla:
+    /// - **Süreli koşu** ([`Inputs::Hermetic`]): görünüm yok sayılır, tema
+    ///   `bateri` kalır — `make duman` makinenin açık modundan etkilenmez.
+    /// - **Oturum yok:** view pencereye takılırken de bu bildirimi alabilir,
+    ///   `start_session`'dan önce. Açılışın teması zaten `load_settings`'te
+    ///   görünümden seçiliyor.
+    /// - **Sabit tema** (`theme = "{ad}"`): görünüm temaya dokunmaz. Bildirim
+    ///   vurgu rengi ya da kontrast değişiminde de geliyor; dosyayı her
+    ///   seferinde yeniden okumanın sebebi yok.
+    ///
+    /// Tema aynı çıkarsa (`light_theme` ile `dark_theme` aynı ad, ya da
+    /// görünüm dışı bir bildirim) takas no-op ve kare istenmez
+    /// (`Session::set_theme`). Tema yuvası yine yeniden yazılır: bu okuma o
+    /// kaynağın güncel hâli.
+    fn apply_appearance(&self) {
+        let Inputs::User { config_root } = self.inputs() else {
+            return;
+        };
+        let Some(session) = self.ivars().session.get() else {
+            return;
+        };
+        // Ödünç `choose_theme`'in sonunda düşüyor; oradaki `post_notices`
+        // yalnız `notices`'i ödünç alıyor, `settings`'e dokunmuyor.
+        let theme = {
+            let settings = self.ivars().settings.borrow();
+            if !settings.follows_system() {
+                return;
+            }
+            self.choose_theme(config_root.as_deref(), &settings)
+        };
+        session.set_theme(theme);
+    }
+
+    /// Uygulamanın etkin görünümü koyu mu.
+    ///
+    /// `NSApp`'ten okunuyor, view'dan değil: pencere ve view görünümü
+    /// uygulamadan miras alıyor ve hiçbiri kendi görünümünü kurmuyor, yani
+    /// değer aynı. `bestMatchFromAppearancesWithNames` "koyu mu" sorusunun
+    /// AppKit'teki yolu — ad karşılaştırması yüksek kontrastlı koyu
+    /// görünümü (`NSAppearanceNameAccessibilityHighContrastDarkAqua`) açık
+    /// sayardı.
+    fn dark_appearance(&self) -> bool {
+        let appearance = NSApplication::sharedApplication(self.mtm()).effectiveAppearance();
+        // SAFETY: AppKit'in dışa açtığı iki sabit `NSString`; süreç boyunca
+        // yaşıyorlar ve yalnız okunuyorlar (`NSRunLoopCommonModes` emsali).
+        let (aqua, dark_aqua) = unsafe { (NSAppearanceNameAqua, NSAppearanceNameDarkAqua) };
+        appearance
+            .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&[aqua, dark_aqua]))
+            .is_some_and(|best| &*best == dark_aqua)
     }
 
     /// Kullanıcının dünyasına açılan girişlerin kararı ([`Inputs`]).

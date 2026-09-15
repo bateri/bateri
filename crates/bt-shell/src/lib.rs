@@ -8,7 +8,9 @@
 //! kabuğun hangi dizinde ve hangi yerelle açılacağına (`child`) ve kapanış
 //! sırasına da bu crate karar verir. Ayar dosyasını okuyan (`settings`) ve
 //! tanısını pencere alt başlığında gösteren (`notices`) de burası; ayrıştırma
-//! `bt-core`'da. Tek pencere; sekme, bölme, menü ve IME sonraki setlerde.
+//! `bt-core`'da. Sistemin açık/koyu görünümünü okuyup temayı seçen de
+//! (`app`, view'dan hedefsiz eylemle). Tek pencere; sekme, bölme, menü ve IME
+//! sonraki setlerde.
 
 pub(crate) mod app;
 mod child;

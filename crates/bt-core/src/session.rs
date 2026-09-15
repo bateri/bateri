@@ -13,7 +13,7 @@
 //! doğar. `theme` bu sıranın dışında bir **yaprak** kilittir: tutulurken başka
 //! hiçbir kilit alınmaz, yani hangi kilidin altında alındığı önemsizdir —
 //! `frame` kopyasını `term`'den önce alıp bırakır, renk sorusu `term`
-//! tutulurken okur.
+//! tutulurken okur, `set_theme` tek başına yazar.
 
 use std::collections::HashMap;
 use std::io;
@@ -436,8 +436,8 @@ struct AdapterInner {
     /// var: `frame()` kopyayı `Term` kilidinden **önce** alır (kilidin
     /// altında renk çözümüne ikinci bir muteks sokmasın), renk sorusu `Term`
     /// kilidi tutulurken alır. Biri ötekini içeriden hiç tutmadığı için sıra
-    /// çakışmaz. Mutex, çünkü tema takas edilebilir (`plan.md` → R3.1); takası
-    /// yazan ilk tüketici sistem görünümü (007 phase-3).
+    /// çakışmaz. Mutex, çünkü tema takas edilebilir; yazanı
+    /// [`Session::set_theme`], o da kilidi tek başına alır.
     theme: Mutex<Theme>,
 }
 
@@ -1306,6 +1306,31 @@ impl Session {
         *lock(&self.adapter.0.theme)
     }
 
+    /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve
+    /// imleç sıradaki karede yeni temadan.
+    ///
+    /// **Aynı tema no-op:** ne yazılır ne kare istenir. Çağıranı (sistem
+    /// görünümü) yalnız açık/koyu değişiminde değil vurgu rengi ya da
+    /// kontrast ayarında da uyanıyor; koşulsuz kare boşta sıfır kareyi
+    /// bozardı.
+    ///
+    /// Kare **istenmek zorunda**: alacritty'nin hasarı okunmuyor (kapı
+    /// `dirty` bayrağı), yani takası çizime taşıyan başka bir sinyal yok.
+    /// Yaprak kilit `request_frame`'den önce düşüyor; `Term` kilidine
+    /// dokunulmuyor. Açık bir `frame()` kopyasını zaten aldıysa en çok bir
+    /// kare eski renkle çizer ve bu çağrının kare isteği onu düzeltir.
+    pub fn set_theme(&self, theme: Theme) {
+        let changed = {
+            let mut current = lock(&self.adapter.0.theme);
+            let changed = *current != theme;
+            *current = theme;
+            changed
+        };
+        if changed {
+            self.request_frame();
+        }
+    }
+
     /// Hasarı uzaktan işaretleyebilen tutamak.
     ///
     /// Oturumun kendisine referans **vermez** ve bu kasıtlı: tutamağı tutan
@@ -2141,15 +2166,18 @@ mod tests {
                 .find(|c| c.col == col)
                 .unwrap_or_else(|| panic!("{col}. sütun karede yok: {cells:?}"))
         };
-        // `0xd8d9dd × 2/3`, vte'nin `f32` çarpımı ve kesmesiyle.
+        // Temanın `dim` rolü: `0xd8d9dd × 2/3`, vte'nin `f32` çarpımı ve
+        // kesmesiyle. Rol bir değer, kural değişince yerinde kaldı.
         let dim_foreground = LinearRgba::from_srgb(0x90, 0x90, 0x93);
         let a = at_col(0);
         assert_eq!((a.fg, a.bg), (dim_foreground, None), "{a:?}");
-        // `0xd16d6a × 2/3`.
+        // `0xd16d6a`, zemin `0x1a1c21`'e doğru üçte bir: kanal başına
+        // `(2·kaynak + zemin) / 3`, kesmeyle. 007 phase-3'e kadar `× 2/3`'tü
+        // (`0x8b4846`); değişikliğin tek izi bu satır.
         let b = at_col(2);
         assert_eq!(
             (b.fg, b.bg),
-            (LinearRgba::from_srgb(0x8b, 0x48, 0x46), None),
+            (LinearRgba::from_srgb(0x94, 0x52, 0x51), None),
             "{b:?}"
         );
         // Ters videoda sönük ön plan arka plana geçer; ön plan paletin arka
@@ -2176,9 +2204,9 @@ mod tests {
         );
 
         let cells = wait_cells(&session, &wake, 1);
-        // Elle yazılı: `0xd16d6a × 2/3` (bkz.
+        // Elle yazılı: `0xd16d6a`'nın zemine karışmış sönüğü (bkz.
         // `dim_colors_on_the_draw_path_are_pinned`).
-        assert_eq!(cells[0].bg, Some(LinearRgba::from_srgb(0x8b, 0x48, 0x46)));
+        assert_eq!(cells[0].bg, Some(LinearRgba::from_srgb(0x94, 0x52, 0x51)));
         // Sönük olmayan kırmızıdan gerçekten farklı.
         assert_ne!(cells[0].bg, Some(color::linear_rgba(THEME.default(1))));
         // Ters videoda ön plan hücrenin arka planından gelir ve **sönmez**:
@@ -2393,6 +2421,53 @@ mod tests {
         let needle: String = replies.bytes().map(|b| format!("{b:02x}")).collect();
         wait_ink(&session, &wake, &needle);
         assert_eq!(session.theme(), theme);
+    }
+
+    #[test]
+    fn set_theme_repaints_from_the_new_theme() {
+        // Takas kare istemeli ve sıradaki kare **yeni** temanın zeminini
+        // atlamalı. `b`'nin arka planı truecolor ile koyu temanın zemini
+        // (`#1a1c21`): koyu temada çizilmiyor, açık temaya geçince zeminden
+        // ayrık bir renk olup boyanıyor — atlama kararı eski temada kalsaydı
+        // `b` yine `None` dönerdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf 'a\\033[48;2;26;28;33mb\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+        let cells = wait_frame(&session, &wake, |cells| glyph_text(cells) == "ab");
+        let dark_bg = LinearRgba::from_srgb(0x1a, 0x1c, 0x21);
+        assert!(cells.iter().all(|c| c.bg.is_none()), "{cells:?}");
+        assert!(
+            session.frame(|_| ()).is_none(),
+            "takastan önce kare kalmamalı"
+        );
+
+        // Aynı tema no-op: kare istenmez.
+        session.set_theme(THEME);
+        assert!(session.frame(|_| ()).is_none(), "aynı tema kare istedi");
+
+        let light = Theme::BATERI_LIGHT;
+        let before = wake.wait_wakes(0, Duration::ZERO);
+        session.set_theme(light);
+        assert!(
+            wake.wait_wakes(before + 1, Duration::ZERO) > before,
+            "takas uyandırmadı"
+        );
+        assert_eq!(session.theme(), light);
+        let mut cells = Vec::new();
+        assert!(
+            session.frame(|c| cells.push(c)).is_some(),
+            "takas kare istemedi"
+        );
+        let at_col = |col| *cells.iter().find(|c| c.col == col).expect("hücre karede");
+        let (a, b) = (at_col(0), at_col(1));
+        assert_eq!(
+            (a.fg, a.bg),
+            (color::linear_rgba(light.default(256)), None),
+            "{a:?}"
+        );
+        assert_eq!(b.bg, Some(dark_bg), "{b:?}");
     }
 
     /// `needle` mürekkepte görünene kadar kare bekler; `od` satırı bölünmüş
@@ -2958,9 +3033,9 @@ mod tests {
         );
         // `DIM` kuralı çevirmeden sonra da aynı: sönüklük `cell.fg`'den doğan
         // renge gider. Seçilmemişte o renk arka plan, seçilide yine ön plan.
-        // Elle yazılı: `0xd16d6a × 2/3` (bkz.
+        // Elle yazılı: `0xd16d6a`'nın zemine karışmış sönüğü (bkz.
         // `dim_colors_on_the_draw_path_are_pinned`).
-        let dim_red = LinearRgba::from_srgb(0x8b, 0x48, 0x46);
+        let dim_red = LinearRgba::from_srgb(0x94, 0x52, 0x51);
         assert_eq!(drawn[&2], (Some(green), dim_red), "{drawn:?}");
         assert_eq!(drawn[&3], (Some(dim_red), green), "{drawn:?}");
 
@@ -3787,6 +3862,55 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         reader.join().unwrap();
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_set_theme_and_frame() {
+        // Takas yaprak kilidi **yazıyor**, üç okuyanla birlikte: okuyucu
+        // thread renk sorusunda (`Term` kilidi altında), ana thread `frame()`'de
+        // ve link'in `theme()`'inde. Takas eden thread `set_theme`'in
+        // `request_frame`'ini de yarıştırıyor. Kilit sırası bozulursa sınama
+        // asılı kalır (bkz. `race_color_request_and_frame`).
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "stty -icanon -echo; cat </dev/tty >/dev/null & \
+             while :; do printf '\\033]11;?\\007\\033[2;31mx\\033[0m'; sleep 0.01; done",
+            Arc::clone(&wake),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let swapper = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut swaps = 0u64;
+                while Instant::now() < deadline {
+                    let theme = if swaps % 2 == 0 {
+                        Theme::BATERI_LIGHT
+                    } else {
+                        THEME
+                    };
+                    session.set_theme(theme);
+                    swaps += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                swaps
+            })
+        };
+
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            if session.frame(|_| ()).is_some() {
+                frames += 1;
+                let theme = session.theme();
+                assert!(theme == THEME || theme == Theme::BATERI_LIGHT);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(swapper.join().unwrap() > 0, "hiç takas olmadı");
         assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();

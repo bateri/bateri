@@ -14,8 +14,10 @@ use std::sync::Arc;
 use bt_core::{CellHalf, SelectionPoint, Session, Wheel};
 use bt_gpu::CellMetrics;
 use objc2::rc::Retained;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventPhase, NSPasteboard, NSView};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSApplication, NSEvent, NSEventModifierFlags, NSEventPhase, NSPasteboard, NSView,
+};
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect};
 
 use crate::clipboard;
@@ -173,6 +175,29 @@ define_class!(
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
+        }
+
+        /// Etkin görünüm değişti (sistemin açık/koyu ayarı): kararı app
+        /// delegate'e **hedefsiz eylemle** iletir.
+        ///
+        /// View temayı bilmez ve delegate'e referans tutmaz — tek referansı
+        /// oturum (`ViewIvars`). Hedefsiz eylem responder zincirinden geçip
+        /// `appearanceDidChange:`'i tanımlayan app delegate'e varır; pencere
+        /// key olmasa da (kullanıcı Sistem Ayarları'nda) zincirin sonu
+        /// `NSApp` ve onun delegate'i.
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn view_did_change_effective_appearance(&self) {
+            // SAFETY: `NSView`'un kendi uygulaması argümansız ve dönüşsüz;
+            // bir geçersiz kılma noktası, ama zinciri kırmamak için çağrılıyor.
+            let _: () = unsafe { msg_send![super(self), viewDidChangeEffectiveAppearance] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            // SAFETY: seçici geçerli; hedef `None` → responder zinciri. Alıcısı
+            // `AppDelegate::appearance_did_change`, tek `Option<&AnyObject>`
+            // argüman alıyor ve gönderene bakmıyor. Alıcı yoksa `false` döner
+            // ve görünüm değişimi sessizce yok sayılır — doğru sonuç.
+            let _ = unsafe {
+                app.sendAction_to_from(sel!(appearanceDidChange:), None, Some(self.as_ref()))
+            };
         }
 
         /// View'ın y ekseni üstten: fare noktası grid yönünde gelir.

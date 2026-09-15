@@ -17,7 +17,9 @@ dosyayı elle oluşturmak yeterli. Dosya başka bir yere sembolik bağ olabilir
 (dotfile deposu); bağın hedefi okunur.
 
 Değişiklik — ayar dosyasında da tema dosyasında da — **uygulamayı yeniden
-açınca** geçerli olur.
+açınca** geçerli olur. Sistemin açık/koyu görünümü ise **anında** izlenir:
+tema `"system"` iken (varsayılan) Sistem Ayarları'nda görünüm değişince
+pencere de değişir, kabuk yaşamaya devam eder.
 
 ## Hata olursa
 
@@ -42,9 +44,13 @@ kopya yolu kalır.
 | geçersiz TOML | **bütün** ayarlar varsayılan, uyarı satırı gösterir |
 | bir anahtarın değeri kabul edilmiyor | yalnız o anahtar varsayılan (ya da sınırı), uyarı |
 | tanınmayan anahtar ya da bölüm | sessizce yoksayılır |
-| seçilen tema bulunamıyor | `bateri` teması, uyarı |
-| tema dosyası okunamıyor ya da geçersiz TOML | `bateri` teması, uyarı (aynı adlı gömülü tema **kullanılmaz**) |
+| seçilen tema bulunamıyor | görünüme uyan gömülü tema (koyuda `bateri`, açıkta `bateri-light`), uyarı |
+| tema dosyası okunamıyor ya da geçersiz TOML | görünüme uyan gömülü tema, uyarı (aynı adlı gömülü tema **kullanılmaz**) |
 | tema dosyasında bir renk kabul edilmiyor | yalnız o renk `bateri`'ninki, uyarı |
+
+Tema kuralı görünüm değişiminde de aynı: yeni görünümün teması
+kullanılamıyorsa o görünüme uyan gömülü tema gelir — pencere öteki
+görünümün temasında kalmaz.
 
 "Geçersiz TOML" sözdizimi hatasından geniştir: aynı anahtarı iki kez yazmak
 ve TOML'un tam sayı sınırını (9 223 372 036 854 775 807) aşan bir sayı da
@@ -80,20 +86,36 @@ Bölüm satır içi de yazılabilir: `terminal = { scrollback = 5000 }`.
 
 ```toml
 [appearance]
-theme = "bateri"
+theme = "system"
+light_theme = "bateri-light"
+dark_theme = "bateri"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
 |---|---|---|---|
-| `theme` | metin, tema adı | `"bateri"` | kullanılacak renk teması |
+| `theme` | `"system"` ya da tema adı | `"system"` | kullanılacak renk teması |
+| `light_theme` | tema adı | `"bateri-light"` | `theme = "system"` iken açık görünümün teması |
+| `dark_theme` | tema adı | `"bateri"` | `theme = "system"` iken koyu görünümün teması |
 
+- `theme = "system"` temayı macOS'un görünümüne bırakır: açıkta
+  `light_theme`, koyuda `dark_theme`. Görünüm değişince tema anında değişir.
+- `theme = "{ad}"` görünümden bağımsız sabit bir temadır; `light_theme` ve
+  `dark_theme` o sırada okunmaz ama yerinde kalır — `"system"`'e dönünce
+  çift geri gelir.
+- `"system"` bir tema adı değildir: `themes/system.toml` seçilemez, ve
+  `light_theme`/`dark_theme` bu değeri kabul etmez (kendi varsayılanına
+  döner, uyarı verir).
 - Ad önce `~/.config/bateri/themes/{ad}.toml` olarak aranır, yoksa gömülü
-  temalar arasında. Bugün gömülü tek tema var: `bateri`.
+  temalar arasında. Gömülü iki tema var: `bateri` (koyu) ve `bateri-light`
+  (açık).
 - Aynı adlı bir dosya gömülü temayı **gölgeler**: `themes/bateri.toml`
   yazan kullanıcı gömülü `bateri`'yi değil kendi dosyasını görür.
-- Hiçbir yerde bulunamayan ad `bateri`'ye döner ve uyarı verir.
-- Boş ad ya da `/` içeren ad (`"../x"`) kabul edilmez, `"bateri"` olur ve
-  uyarı verir: tema `themes/` dizininin dışından okunmaz.
+- Hiçbir yerde bulunamayan ad görünüme uyan gömülü temaya döner (koyuda
+  `bateri`, açıkta `bateri-light`) ve uyarı verir; açılışta da görünüm
+  değişince de.
+- Boş ad ya da `/` içeren ad (`"../x"`) kabul edilmez, anahtarın
+  varsayılanına döner ve uyarı verir: tema `themes/` dizininin dışından
+  okunmaz.
 
 ## Temalar
 
@@ -130,8 +152,14 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   ve uyarı verir; öteki renkler yine okunur.
 - Tanınmayan anahtar sessizce yoksayılır. Sonraki sürümlerin dört durum rolü
   (başarı, uyarı, hata, bilgi) bu yüzden bugünden yazılabilir.
-- Adlı ve 256 renkli sönük metin bugün hâlâ rengin üçte ikisine iner; `dim`
-  yalnız varsayılan ön planın sönüğüdür.
+- **Sönük metin** (SGR 2) iki yoldan gelir. Varsayılan ön plan sönükse
+  temanın `dim` rengi kullanılır. Adlı ve 256 renkli metnin sönüğü ise bir
+  kuraldır: renk temanın `background`'una doğru üçte bir yol alır — koyu
+  temada koyulaşır, açık temada açılır. Siyah zeminde bu, alacritty'nin ve
+  vte'nin "rengin üçte ikisi" kuralıyla aynıdır.
+- `dim` de her anahtar gibi eksikse `bateri`'den gelir (`#909093`): açık bir
+  temada `dim` yazılmazsa sönük varsayılan metin koyu temanın grisiyle
+  çizilir.
 
 ### Gömülü `bateri`
 
@@ -162,6 +190,37 @@ bright_cyan = "#96caca"
 bright_white = "#e6e7ea"
 ```
 
-Blok bir sınamayla gömülü temaya bağlıdır
-(`documented_bateri_block_is_the_embedded_theme`): gömülü tema değişip bu
-blok değişmezse sınama düşer.
+### Gömülü `bateri-light`
+
+Açık görünümün varsayılanı. Açık zeminde okunur kalsın diye sarı ve
+camgöbeği koyu, doygun tonlarda; beyaz (`white`, `bright_white`) adının
+anlamını korur ve açık uçta durur.
+
+```toml
+background = "#f5f6f8"
+foreground = "#24262c"
+dim = "#696b70"
+accent = "#3d6aa8"
+
+[ansi]
+black = "#2b2e35"
+red = "#b5423d"
+green = "#3b7a3b"
+yellow = "#8f6a00"
+blue = "#3a66a6"
+magenta = "#8a4c9c"
+cyan = "#23787f"
+white = "#b9bbc1"
+bright_black = "#70737b"
+bright_red = "#c9504a"
+bright_green = "#4a8f4a"
+bright_yellow = "#a67c00"
+bright_blue = "#4a78ba"
+bright_magenta = "#9d5db0"
+bright_cyan = "#2f8a92"
+bright_white = "#dcdee3"
+```
+
+İki blok da bir sınamayla gömülü temasına bağlıdır
+(`documented_blocks_are_the_embedded_themes`): gömülü tema değişip blok
+değişmezse sınama düşer.

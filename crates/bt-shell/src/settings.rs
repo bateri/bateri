@@ -151,13 +151,27 @@ pub(crate) fn load_theme(root: Option<&Path>, name: &str) -> ThemeLoaded {
 }
 
 impl ThemeLoaded {
-    /// Açılışın kuralı: kullanılamayan temanın yerine gömülü `bateri`, ve
-    /// bunu söyleyen ileti.
-    pub(crate) fn at_launch(self) -> (Theme, Vec<String>) {
+    /// Temanın **bir görünüm için** seçildiği anın kuralı — açılış ve görünüm
+    /// değişimi: kullanılamayan temanın yerine görünüme uyan gömülü tema
+    /// (koyuda `bateri`, açıkta `bateri-light`) ve bunu söyleyen ileti.
+    ///
+    /// Yedek, dosyasız bir kullanıcının o görünümde göreceği tema
+    /// (`Settings::default().theme_for(dark)`): açık modda `light_theme`'ini
+    /// yanlış yazan kullanıcıya koyu bir pencere açmak hatayı ikinci bir
+    /// sürprizle büyütürdü. Görünüm değişiminde "ekrandaki tema kalır"
+    /// denemez — ekrandaki tema öteki görünümün teması (`dark_theme` bozukken
+    /// açıktan koyuya dönen pencere açık kalırdı). "Önceki tema kalır" kuralı
+    /// görünüm aynıyken tema dosyasının bozulduğu canlı yenilemenin (phase-4).
+    pub(crate) fn or_embedded(self, dark: bool) -> (Theme, Vec<String>) {
         match self {
             ThemeLoaded::Found(theme, messages) => (theme, messages),
             ThemeLoaded::Failed(message) => {
-                (Theme::BATERI, vec![format!("{message}; using bateri")])
+                let defaults = Settings::default();
+                let name = defaults.theme_for(dark);
+                // Varsayılan adların ikisi de gömülü (`Theme::embedded`'in
+                // sınaması); `BATERI` yalnız o tablo bozulursa.
+                let theme = Theme::embedded(name).unwrap_or(Theme::BATERI);
+                (theme, vec![format!("{message}; using {name}")])
             }
         }
     }
@@ -320,6 +334,10 @@ mod tests {
         );
     }
 
+    /// Tema sınamalarının görünümü: koyu. Yedeği görünüme bağlı olan sınama
+    /// ikisini de açıkça veriyor.
+    const DARK: bool = true;
+
     /// Kökün altına `themes/{name}.toml` yazar.
     fn write_theme(root: &TempRoot, name: &str, text: &str) {
         let dir = root.0.join(THEMES_DIR);
@@ -330,11 +348,11 @@ mod tests {
     #[test]
     fn embedded_theme_without_user_file() {
         let root = TempRoot::new("theme-embedded");
-        let (theme, notices) = load_theme(Some(&root.0), "bateri").at_launch();
+        let (theme, notices) = load_theme(Some(&root.0), "bateri").or_embedded(DARK);
         assert_eq!((theme, notices), (Theme::BATERI, Vec::new()));
         // Ev dizini yoksa da gömülüler çözülür.
         assert_eq!(
-            load_theme(None, "bateri").at_launch(),
+            load_theme(None, "bateri").or_embedded(DARK),
             (Theme::BATERI, Vec::new())
         );
     }
@@ -343,7 +361,7 @@ mod tests {
     fn user_theme_shadows_the_embedded_one() {
         let root = TempRoot::new("theme-shadow");
         write_theme(&root, "bateri", "background = \"#ffffff\"\n");
-        let (theme, notices) = load_theme(Some(&root.0), "bateri").at_launch();
+        let (theme, notices) = load_theme(Some(&root.0), "bateri").or_embedded(DARK);
         assert_eq!(notices, Vec::<String>::new());
         assert_eq!(
             theme,
@@ -362,7 +380,7 @@ mod tests {
             "paper",
             "[ansi]\nred = \"red\"\nblue = \"#0000ff\"\n",
         );
-        let (theme, notices) = load_theme(Some(&root.0), "paper").at_launch();
+        let (theme, notices) = load_theme(Some(&root.0), "paper").or_embedded(DARK);
         assert_eq!(theme.ansi[4], 0x0000ff);
         assert_eq!(theme.ansi[1], Theme::BATERI.ansi[1]);
         assert_eq!(
@@ -376,9 +394,47 @@ mod tests {
     #[test]
     fn missing_theme_falls_back_to_bateri_with_notice() {
         let root = TempRoot::new("theme-missing");
-        let (theme, notices) = load_theme(Some(&root.0), "paper").at_launch();
+        let (theme, notices) = load_theme(Some(&root.0), "paper").or_embedded(DARK);
         assert_eq!(theme, Theme::BATERI);
         assert_eq!(notices, ["theme \"paper\" not found; using bateri"]);
+    }
+
+    #[test]
+    fn fallback_follows_the_appearance() {
+        // Açık modda bulunamayan tema koyu bir pencere açmıyor: yedek,
+        // dosyasız kullanıcının o görünümde göreceği gömülü tema.
+        let root = TempRoot::new("theme-fallback-light");
+        let (theme, notices) = load_theme(Some(&root.0), "paper").or_embedded(false);
+        assert_eq!(theme, Theme::BATERI_LIGHT);
+        assert_eq!(notices, ["theme \"paper\" not found; using bateri-light"]);
+        assert_eq!(
+            load_theme(Some(&root.0), "bateri-light").or_embedded(false),
+            (Theme::BATERI_LIGHT, Vec::new())
+        );
+    }
+
+    #[test]
+    fn appearance_switches_never_leave_the_other_appearances_theme() {
+        // `/code-review`'un senaryosu: `dark_theme` bulunamıyor, pencere
+        // koyu → açık → koyu gidip geliyor. Her geçiş temayı o görünüm için
+        // yeniden seçiyor; bozuk koyu tema açık temayı ekranda **bırakmıyor**,
+        // gömülü koyuya düşüyor. Açık geçiş tema yuvasını boşaltıyor.
+        let root = TempRoot::new("theme-switches");
+        let settings = Settings {
+            dark_theme: "ink".to_owned(),
+            ..Settings::default()
+        };
+        let pick = |dark| load_theme(Some(&root.0), settings.theme_for(dark)).or_embedded(dark);
+        for _ in 0..2 {
+            assert_eq!(
+                pick(true),
+                (
+                    Theme::BATERI,
+                    vec!["theme \"ink\" not found; using bateri".to_owned()]
+                )
+            );
+            assert_eq!(pick(false), (Theme::BATERI_LIGHT, Vec::new()));
+        }
     }
 
     #[test]
@@ -390,7 +446,7 @@ mod tests {
         write_theme(&root, "bateri", "background = \"#ffffff\n");
         let loaded = load_theme(Some(&root.0), "bateri");
         assert!(matches!(loaded, ThemeLoaded::Failed(_)), "{loaded:?}");
-        let (theme, notices) = loaded.at_launch();
+        let (theme, notices) = loaded.or_embedded(DARK);
         assert_eq!(theme, Theme::BATERI);
         assert_eq!(notices.len(), 1);
         assert!(
@@ -402,7 +458,7 @@ mod tests {
         std::fs::create_dir_all(root.0.join(THEMES_DIR).join("paper.toml"))
             .expect("dizin kurulamadı");
         assert_eq!(
-            load_theme(Some(&root.0), "paper").at_launch().1,
+            load_theme(Some(&root.0), "paper").or_embedded(DARK).1,
             ["themes/paper.toml could not be read: not a regular file; using bateri"]
         );
     }
