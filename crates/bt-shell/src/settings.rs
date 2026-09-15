@@ -222,13 +222,13 @@ fn read_text(path: &Path) -> Text {
 }
 
 /// `{root}/settings.toml`'u okur — açılışın okuması: kabul edilmeyen değer
-/// varsayılanını alır.
+/// varsayılanını alır (`osc52` hariç, o kapalıya düşer).
 pub(crate) fn load(root: &Path) -> Loaded {
     load_keeping(root, &Settings::default())
 }
 
 /// Kayıt anının okuması: kabul edilmeyen değer `current`'inkini alır
-/// ([`Settings::parse_keeping`]). Yanlış türde kaydedilmiş bir `scrollback`
+/// ([`Settings::parse_keeping`]; `osc52` hariç, o kapalıya düşer). Yanlış türde kaydedilmiş bir `scrollback`
 /// varsayılana düşseydi geçmişi geri dönülmez kırpardı.
 ///
 /// Boş dosya (yalnız boşluk) dosyasızlık sayılır. Yerinde kaydeden editör
@@ -351,17 +351,22 @@ fn notice(diagnostic: &Diagnostic) -> String {
 impl Loaded {
     /// Açılışın kuralı: kullanılacak ayarlar ve alt başlığa gidecek tanılar.
     ///
-    /// Okunamayan ya da ayrıştırılamayan dosyada **varsayılanlar**: pencere
-    /// yine açılmalı, bozuk bir dosya terminali kilitlememeli. Ayrıştırılan
-    /// dosyada her anahtar kendi değerini ya da varsayılanını zaten aldı.
+    /// Okunamayan ya da ayrıştırılamayan dosyada **varsayılanlar**, OSC 52
+    /// kapalı ([`Settings::for_unusable_file`]): pencere yine açılmalı, bozuk
+    /// bir dosya terminali kilitlememeli, ama dosyadaki `osc52 = "off"`
+    /// okunamadı diye pano açığa düşmemeli. Dosya yoksa düz varsayılanlar.
+    /// Ayrıştırılan dosyada her anahtar kendi değerini ya da varsayılanını
+    /// zaten aldı.
     pub(crate) fn at_launch(self) -> (Settings, Vec<String>) {
         match self {
             Loaded::Missing => (Settings::default(), Vec::new()),
             Loaded::Unreadable(err) => (
-                Settings::default(),
+                Settings::for_unusable_file(),
                 vec![format!("{FILE_NAME} could not be read: {err}")],
             ),
-            Loaded::Unparseable(diagnostic) => (Settings::default(), vec![notice(&diagnostic)]),
+            Loaded::Unparseable(diagnostic) => {
+                (Settings::for_unusable_file(), vec![notice(&diagnostic)])
+            }
             Loaded::Parsed(parsed) => (
                 parsed.settings,
                 parsed.diagnostics.iter().map(notice).collect(),
@@ -624,7 +629,8 @@ mod tests {
         let loaded = load(&root.0);
         assert!(matches!(loaded, Loaded::Unreadable(_)), "{loaded:?}");
         let (settings, notices) = loaded.at_launch();
-        assert_eq!(settings, Settings::default());
+        // Okunamayan dosyanın `osc52 = "off"`'u olabilir: pano kapalıya düşer.
+        assert_eq!(settings, Settings::for_unusable_file());
         assert_eq!(notices.len(), 1);
         assert_eq!(
             notices,
@@ -640,7 +646,7 @@ mod tests {
         let loaded = load(&root.0);
         assert!(matches!(loaded, Loaded::Unreadable(_)), "{loaded:?}");
         let (settings, notices) = loaded.at_launch();
-        assert_eq!(settings, Settings::default());
+        assert_eq!(settings, Settings::for_unusable_file());
         assert_eq!(
             notices,
             ["settings.toml could not be read: symbolic link points to a missing file"]
@@ -665,7 +671,8 @@ mod tests {
         let loaded = load(&root.0);
         assert!(matches!(loaded, Loaded::Unparseable(_)), "{loaded:?}");
         let (settings, notices) = loaded.at_launch();
-        assert_eq!(settings, Settings::default());
+        // Bütün ayarlar varsayılan, OSC 52 hariç: kapalıya düşer.
+        assert_eq!(settings, Settings::for_unusable_file());
         assert_eq!(notices.len(), 1);
         assert!(
             notices[0].starts_with("settings.toml: line 1: invalid TOML: "),

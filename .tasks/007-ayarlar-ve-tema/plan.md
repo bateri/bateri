@@ -59,7 +59,9 @@ görünümünü izlesin.
   sıfırlanır.
 - **R9** — OSC 52: `[clipboard] osc52 = "off" | "copy"`, varsayılan `copy`,
   tanınmayan değer ve açılışta ayrıştırılamayan dosya → `off`; `Wake`'e yeni
-  çağrı, kilitsiz tek yuva (son yazma kazanır), `p`/`s` yoksayılır.
+  çağrı, kilitsiz tek yuva (son yazma kazanır). (phase-8'de değişti: `p`/`s`
+  yoksayılmıyor, genel panoya yazıyor — Neovim `*` kaydını `p` yolluyor ve
+  macOS'ta tek pano var.)
 - **R10** — `docs/AYARLAR.md` ilk anahtarla doğar ve her phase'de o phase'in
   anahtarları, davranışı ve sınırlarıyla büyür.
 
@@ -130,5 +132,5 @@ BT_RUN_SECONDS: yükleyici, izleme, görünüm, menü dolumu KAPALI → Theme::B
 | phase-5 | ✅ |
 | phase-6 | ✅ |
 | phase-7 | ✅ |
-| phase-8 | |
+| phase-8 | ✅ |
 | kapı | |

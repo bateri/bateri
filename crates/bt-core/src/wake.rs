@@ -23,9 +23,12 @@
 /// `(EventLoop, State)` çifti `"PTY teardown"` thread'inde kalır ve o çift
 /// `Adapter` üzerinden bu nesnenin bir `Arc` kopyasını taşır: son kopya
 /// oraya düşerse **`Wake::drop` o thread'de koşar**. Dolayısıyla uygulayanın
-/// `Drop`'u da bloklamaz — özellikle ana kuyruğa senkron iş atmaz (bugünkü
-/// tek uygulayan `bt-gpu`'nun `Waker`'ı ve orada tam böyle bir alan var:
-/// `MainThreadBound<Retained<CAMetalDisplayLink>>`).
+/// `Drop`'u da bloklamaz — özellikle ana kuyruğa senkron iş atmaz (üretimdeki
+/// uygulayan `bt-shell`'in `ShellWake`'i; taşıdığı `bt-gpu` `Waker`'ında tam
+/// böyle bir alan var: `MainThreadBound<Retained<CAMetalDisplayLink>>`).
+///
+/// Çağrıların hiçbirinin varsayılan gövdesi yok: yeni bir çağrı eklendiğinde
+/// uygulayan onu unutamasın, derleme söylesin.
 pub trait Wake: Send + Sync + 'static {
     /// Grid değişti; bir kare gerekebilir.
     fn wake(&self);
@@ -33,4 +36,19 @@ pub trait Wake: Send + Sync + 'static {
     /// Shell çocuğu bitti. `code` yalnız normal çıkışta doludur; sinyalle
     /// ölen çocukta `None`'dur.
     fn child_exit(&self, code: Option<i32>);
+
+    /// Terminaldeki uygulama OSC 52 ile panoya `text` yazmak istedi (ssh'taki
+    /// vim'in kopyası). Yalnız `Osc52::Copy` kipinde gelir; `text` boş
+    /// değildir. Dizinin hedefi (`c`, `p`, `s`) taşınmıyor: tek panolu bir
+    /// platformda ayrım yok (`Adapter`'ın kolu).
+    ///
+    /// Üstteki üç yasak burada da geçerli ve en çok burada sınanır: panoya
+    /// yazmak `Term` kilidi altında yapılamayacak kadar yavaş olabilir (metin
+    /// sınırsız), yani uygulayan metni kilitsiz bir yuvaya koyup yazmayı başka
+    /// bir thread'e bırakır. Durmadan OSC 52 basan bir uygulama bu çağrıyı
+    /// saniyede yüzlerce kez yapabilir; uygulayanın kuyruğa sınırsız iş
+    /// yığmaması onun işi.
+    ///
+    /// Kapanış sırasında gelen yazmanın panoya ulaşmaması zararsızdır.
+    fn copy_to_clipboard(&self, text: String);
 }

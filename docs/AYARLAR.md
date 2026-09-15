@@ -6,8 +6,9 @@ dosya bozukken ne olacağının **tek sahibidir**; kod tarafındaki karşılığ
 `crates/bt-core/src/settings.rs` ve `theme.rs` (ayrıştırma),
 `crates/bt-shell/src/settings.rs` (okuma ve tema adının çözümü),
 `watch.rs` (dosyaların izlenmesi), `menu.rs` ve `zoom.rs` (View menüsü:
-tema seçimi ve geçici punto), `crates/bt-atlas/src/font.rs` (font ailesinin
-bulunması).
+tema seçimi ve geçici punto), `clipboard.rs` ve `app.rs`'in `ShellWake`'i
+(OSC 52'nin yuvası, ana kuyruğa geçişi ve panoya yazması),
+`crates/bt-atlas/src/font.rs` (font ailesinin bulunması).
 
 ## Dosyanın yeri
 
@@ -80,6 +81,11 @@ dark_theme = "bateri"
 # family = "Menlo"
 # Size in points.
 size = 13
+
+[clipboard]
+# Lets programs in the terminal, also over ssh, copy text to the clipboard
+# (OSC 52): "copy" allows it, "off" does not. They can never read it.
+osc52 = "copy"
 ```
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
@@ -143,9 +149,9 @@ kopya yolu kalır.
 | açılışta | sonuç |
 |---|---|
 | dosya yok | varsayılanlar, uyarı yok |
-| dosya okunamıyor (izin, UTF-8 olmayan içerik, düz dosya değil, hedefi olmayan sembolik bağ) | varsayılanlar, uyarı |
-| geçersiz TOML | **bütün** ayarlar varsayılan, uyarı satırı gösterir |
-| bir anahtarın değeri kabul edilmiyor | yalnız o anahtar varsayılan (ya da sınırı), uyarı |
+| dosya okunamıyor (izin, UTF-8 olmayan içerik, düz dosya değil, hedefi olmayan sembolik bağ) | varsayılanlar, yalnız `osc52` **kapalı**; uyarı |
+| geçersiz TOML | **bütün** ayarlar varsayılan, yalnız `osc52` **kapalı**; uyarı satırı gösterir |
+| bir anahtarın değeri kabul edilmiyor | yalnız o anahtar varsayılan (ya da sınırı; `osc52` için kapalı), uyarı |
 | tanınmayan anahtar ya da bölüm | sessizce yoksayılır |
 | seçilen tema bulunamıyor | görünüme uyan gömülü tema (koyuda `bateri`, açıkta `bateri-light`), uyarı |
 | tema dosyası okunamıyor ya da geçersiz TOML | görünüme uyan gömülü tema, uyarı (aynı adlı gömülü tema **kullanılmaz**) |
@@ -164,7 +170,7 @@ ekranı bozmaz, uyarı çıkar ve dosyayı düzeltip kaydedince uyarı kalkar.
 |---|---|
 | ayar dosyası geçersiz TOML ya da okunamıyor | **hiçbir ayar değişmez**, uyarı |
 | ayar dosyası silindi ya da boşaltıldı | ayarlar değişmez, uyarı yok; varsayılanlar uygulamayı yeniden açınca gelir |
-| bir anahtarın değeri kabul edilmiyor | o anahtar **değişmez**, uyarı; tavanı aşan `scrollback` tavana iner |
+| bir anahtarın değeri kabul edilmiyor | o anahtar **değişmez**, uyarı; tavanı aşan `scrollback` tavana iner, kabul edilmeyen `osc52` **kapanır** |
 | anahtar dosyadan silindi | o anahtar varsayılanına döner |
 | seçilen tema bulunamıyor, dosyası okunamıyor ya da geçersiz TOML | **ekrandaki tema kalır**, uyarı |
 | font ailesi bulunamıyor | varsayılan font, uyarı; adı düzeltip kaydedince uyarı kalkar |
@@ -185,6 +191,12 @@ dosyanın tamamını geçersiz yapar.
 
 Tanınmayan anahtarın sessiz kalması bilerek: sonraki sürümlerin anahtarını
 bugünkü sürüm hata diye göstermemeli.
+
+`osc52`'nin kuralın dışında kalması da bilerek: dosya okunamayınca ya da
+değeri yanlış yazılınca (`"of"`) kullanıcının onu kapatıp kapatmadığı
+bilinemez, ve yanlış tahmin öteki anahtarlarda ekranda görünürken burada
+görünmez — uzaktaki bir program panoya sessizce yazabilirdi. Kapalıya düşmek
+geri alınabilir: dosyayı düzeltip kaydetmek yeter.
 
 ## Anahtarlar
 
@@ -302,6 +314,40 @@ gider.
 - **Actual Size** dosyadaki `size`'a döner.
 - Dosyada `size`'ı değiştirip kaydetmek geçici farkı bırakır: yazdığınız
   punto görünür. `family` ya da başka bir anahtarı değiştirmek farkı korur.
+
+### `[clipboard]`
+
+```toml
+[clipboard]
+osc52 = "copy"
+```
+
+| anahtar | tür | varsayılan | anlamı |
+|---|---|---|---|
+| `osc52` | `"copy"` ya da `"off"` | `"copy"` | terminaldeki programın panoya yazıp yazamayacağı |
+
+- **OSC 52**, bir programın terminal üzerinden panoya metin yazma dizisidir.
+  En bilinen kullanımı ssh'la bağlanılan makinedeki vim ya da tmux: orada
+  kopyalanan metin bu Mac'in panosuna gelir, uzak makinenin panoya erişimi
+  olmasa da. `"copy"` buna izin verir, `"off"` diziyi yoksayar.
+- Yazılan pano, Cmd-C'nin yazdığı **genel panodur**. Program art arda çok
+  sayıda kopya yollarsa yalnız sonuncusu panoda kalır.
+- **Okuma yönü yok**, hiçbir değerle açılmaz: terminaldeki bir program
+  panonuzdaki metni okuyamaz. Bu yüzden `"paste"` gibi bir değer yoktur.
+- **Bedeli:** `"copy"` iken arka planda koşan bir program da (uzaktaki dahil)
+  panoya yazabilir ve sizin kopyaladığınızı değiştirebilir. İstemiyorsanız
+  `"off"`.
+- Dizinin hedefi fark etmez: birincil seçime (`p`, `s`) yazan dizi de genel
+  panoya yazar. macOS'ta tek pano var; vim'de `*` ile `+` burada aynı panodur
+  ve Neovim `*`'ı `p` diye yollar, yani `clipboard=unnamed` ayarlı bir
+  Neovim'in ssh'taki kopyası da gelir. Boş metin panoyu silmez, yoksayılır.
+- Çok büyük bir kopya (yüzlerce megabayt) panoya yazılırken pencere o süre
+  boyunca donar; boyut sınırı yok.
+- Tanınmayan değer (`"paste"`, `"Copy"`, `true`) ve `[clipboard]`'ın bölüm
+  olmaması **kapalıya** düşer ve uyarı verir — öteki anahtarlar gibi
+  varsayılana (açık) değil; açılışta okunamayan ya da geçersiz ayar dosyası
+  da (bkz. [Hata olursa](#hata-olursa)).
+- Kaydettiğiniz anda geçerli olur; açık programı yeniden başlatmak gerekmez.
 
 ## Temalar
 

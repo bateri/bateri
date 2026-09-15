@@ -32,7 +32,7 @@ use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, RenderableContent, Term};
+use alacritty_terminal::term::{Config, Osc52 as TermOsc52, RenderableContent, Term};
 use alacritty_terminal::tty::{self, Pty, Shell};
 use alacritty_terminal::vte::ansi::CursorShape;
 
@@ -218,13 +218,30 @@ pub struct SessionOptions {
 /// (alacritty `term/mod.rs:499-516`): tek bir alanı taşıyan bir çağrı ötekileri
 /// varsayılana geri çekerdi ve geçmişin kırpılması geri dönülmez
 /// (`grid/mod.rs:154-158`). Seçenekler bu yüzden hep **birlikte** gider ve
-/// `Config`'e tek fonksiyonda (`term_config`) iner. OSC 52 kipi (007
-/// phase-8) buraya girer.
+/// `Config`'e tek fonksiyonda (`term_config`) iner: `osc52` değişimi geçmişi
+/// kırpmaz, `scrollback` değişimi OSC 52'yi açmaz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalOptions {
     /// Geçmişte tutulan satır. Tavanı ayar ayrıştırıcısının kuralı
     /// (`settings::SCROLLBACK_MAX`); buraya ondan geçmiş değer gelir.
     pub scrollback: usize,
+    /// Uygulamanın OSC 52 ile panoya yazıp yazamayacağı.
+    pub osc52: Osc52,
+}
+
+/// OSC 52'nin kipi: terminaldeki uygulama (ssh'taki vim de) panoya yazabilir mi.
+///
+/// alacritty'nin aynı adlı tipi yeniden ihraç edilmiyor (`lib.rs`) ve dört
+/// değerinin ikisi burada **temsil edilemiyor**: okuma yönü yok (006 Karar 5
+/// — uzaktaki bir program kullanıcının panosunu okuyamamalı). Varsayılan
+/// değer bu tipin değil ayar modelinin kararı (`Settings::default`), tip
+/// `Default` almıyor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Osc52 {
+    /// Dizi yoksayılır.
+    Off,
+    /// Yalnız yazma: dizi [`Wake::copy_to_clipboard`]'a gider.
+    Copy,
 }
 
 /// alacritty `Config`'ini seçeneklerin **tamamından** kurar — açılışın
@@ -232,12 +249,16 @@ pub struct TerminalOptions {
 /// tek yolu.
 ///
 /// Geri kalan alanlar (`semantic_escape_chars`, imleç biçimleri,
-/// `kitty_keyboard`, `osc52`) alacritty'nin varsayılanında: onları hiçbir yer
+/// `kitty_keyboard`) alacritty'nin varsayılanında: onları hiçbir yer
 /// kurmuyor, yani iki çağrı arasında da oynamıyorlar.
 /// `term_config_keeps_every_other_field` bunu çiviliyor.
 fn term_config(options: TerminalOptions) -> Config {
     Config {
         scrolling_history: options.scrollback,
+        osc52: match options.osc52 {
+            Osc52::Off => TermOsc52::Disabled,
+            Osc52::Copy => TermOsc52::OnlyCopy,
+        },
         ..Config::default()
     }
 }
@@ -536,11 +557,46 @@ impl EventListener for Adapter {
                 let size = *lock(&self.0.size);
                 self.reply(format(size));
             }
-            // Başlık, zil ve pano bu sette yok; bilinmeyen dizi gibi sessizce
+            // OSC 52 yazma yönü. Olay yalnız `Osc52::Copy`'de doğuyor (kapıyı
+            // alacritty `Config` üzerinden tutuyor, `term_config`), `Term`
+            // kilidi tutulurken geliyor — `Wake` sözleşmesi kolu taşıyor.
+            //
+            // **Hedef ayrımı yok:** `c` de `p`/`s` (birincil seçim) de genel
+            // panoya gidiyor. macOS'ta tek pano var ve vim'in `*` ile `+`
+            // kaydı orada aynı panodur; Neovim'in OSC 52 sağlayıcısı ise `*`'ı
+            // `p` diye yolluyor. `clipboard=unnamed`'lı (macOS dotfile'larının
+            // olağanı) bir kullanıcının ssh'taki kopyası `p`'yi düşürseydik
+            // sessizce kaybolurdu. (alacritty macOS'ta seçimi düşürüyor; burada
+            // bilerek ayrılıyoruz.)
+            //
+            // Boş metin iletilmez: `\e]52;c;\a` xterm'de panoyu **temizler**
+            // ve uzaktaki bir programın kullanıcının panosunu silmesi bir
+            // yazma değil. Pano köprüsünün kendi kapısı da boş yazmayı
+            // reddediyor; burada elenmesi, köprünün son-yazma-kazanır
+            // yuvasında önceki gerçek metnin boş bir metinle ezilmemesi için.
+            //
+            // **Bilinen sınır:** metnin boyu sınırsız. vte'nin OSC tamponu
+            // `std`'de tavansız ve çözme bu değişiklikten önce de `Term`
+            // kilidi altında yapılıyordu (alacritty'nin varsayılanı
+            // `OnlyCopy`'ydi, olay burada düşüyordu); eklenen maliyet, panoya
+            // yazmanın ana thread'de metnin boyuyla uzaması. Yüzlerce
+            // megabaytlık bir kopya pencereyi o yazma süresince durdurur. Bir
+            // tavan seçilmiş bir sayı ister; sel gibi çıktı basan bir program
+            // pencereyi zaten meşgul edebiliyor.
+            Event::ClipboardStore(_, text) => {
+                if !text.is_empty() {
+                    self.0.wake.copy_to_clipboard(text);
+                }
+            }
+            // Başlık ve zil bu sette yok; bilinmeyen dizi gibi sessizce
             // düşerler (`CLAUDE.md` → PTY yolunda panik yok). "Yoksayılır ve
             // LOGLANIR" kuralının ikinci yarısı borç: `tracing` henüz
             // bağımlılık değil, workspace'te hiçbir logger yok — alacritty'nin
             // kendi `log::error!` satırları da bu yüzden yere düşüyor.
+            //
+            // `ClipboardLoad` OSC 52'nin okuma yönü ve yok (006 Karar 5):
+            // `Osc52::OnlyCopy` onu zaten üretmiyor, kol bir sürüm değişikliğine
+            // karşı boş.
             //
             // `MouseCursorDirty` `Term::scroll_display`'in **tek** olayı ve
             // burada yutuluyor: kaydırmanın karesini o değil
@@ -551,7 +607,6 @@ impl EventListener for Adapter {
             Event::Title(_)
             | Event::ResetTitle
             | Event::Bell
-            | Event::ClipboardStore(..)
             | Event::ClipboardLoad(..)
             | Event::MouseCursorDirty
             | Event::CursorBlinkingChange
@@ -1836,11 +1891,20 @@ mod tests {
     /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
     const THEME: Theme = Theme::BATERI;
 
-    /// Uyandırmaları sayar ve sınamanın beklemesine izin verir.
+    /// Uyandırmaları sayar, pano yazmalarını kaydeder ve sınamanın
+    /// beklemesine izin verir.
     #[derive(Default)]
     struct TestWake {
-        state: Mutex<(u32, Option<Option<i32>>)>,
+        state: Mutex<TestWakeState>,
         cond: Condvar,
+    }
+
+    #[derive(Default)]
+    struct TestWakeState {
+        wakes: u32,
+        exit: Option<Option<i32>>,
+        /// [`Wake::copy_to_clipboard`]'ın metinleri, geliş sırasıyla.
+        copies: Vec<String>,
     }
 
     impl TestWake {
@@ -1849,9 +1913,9 @@ mod tests {
             let state = self.state.lock().unwrap();
             let (state, _) = self
                 .cond
-                .wait_timeout_while(state, timeout, |(count, _)| *count < target)
+                .wait_timeout_while(state, timeout, |state| state.wakes < target)
                 .unwrap();
-            state.0
+            state.wakes
         }
 
         /// Çocuk ölene kadar bekler; zaman aşımında `None`.
@@ -1859,20 +1923,33 @@ mod tests {
             let state = self.state.lock().unwrap();
             let (state, _) = self
                 .cond
-                .wait_timeout_while(state, timeout, |(_, code)| code.is_none())
+                .wait_timeout_while(state, timeout, |state| state.exit.is_none())
                 .unwrap();
-            state.1
+            state.exit
+        }
+
+        /// Şimdiye kadar gelen pano metinleri.
+        fn copies(&self) -> Vec<String> {
+            self.state.lock().unwrap().copies.clone()
         }
     }
 
     impl Wake for TestWake {
         fn wake(&self) {
-            self.state.lock().unwrap().0 += 1;
+            self.state.lock().unwrap().wakes += 1;
             self.cond.notify_all();
         }
 
         fn child_exit(&self, code: Option<i32>) {
-            self.state.lock().unwrap().1 = Some(code);
+            self.state.lock().unwrap().exit = Some(code);
+            self.cond.notify_all();
+        }
+
+        // Sınamanın uygulayıcısı kilit alıyor, `wake` gibi: sözleşmenin
+        // "kilit almaz" yasağı üretim içindir, buradaki muteks yapraktır ve
+        // tutulurken `Session`'a girilmez.
+        fn copy_to_clipboard(&self, text: String) {
+            self.state.lock().unwrap().copies.push(text);
             self.cond.notify_all();
         }
     }
@@ -1913,7 +1990,10 @@ mod tests {
             cols,
             rows: 10,
             cell_px: (9, 18),
-            terminal: TerminalOptions { scrollback: 100 },
+            terminal: TerminalOptions {
+                scrollback: 100,
+                osc52: Osc52::Copy,
+            },
             theme: THEME,
         }
     }
@@ -2532,28 +2612,52 @@ mod tests {
     #[test]
     fn term_config_keeps_every_other_field() {
         // `set_options` `Config`'in tamamını değiştiriyor: bir seçeneğin
-        // değişimi öteki alanları oynatmamalı. Bugün bizim tek alanımız
-        // `scrollback`; geri kalanı alacritty'nin varsayılanında kalmalı —
-        // `..Config::default()`'u ikinci bir yerde yazan bir çağrı buradan
-        // geçmez ama bu kurucuyu bozan bir değişiklik burada düşer. OSC 52
-        // (phase-8) gelince iki alan birbirini korur.
-        let before = term_config(TerminalOptions { scrollback: 100 });
-        let after = term_config(TerminalOptions { scrollback: 7 });
-        assert_eq!(after.scrolling_history, 7);
+        // değişimi öteki alanları oynatmamalı. Bizim iki alanımız birbirini
+        // koruyor — `osc52` değişimi geçmişi kırpmıyor, `scrollback` değişimi
+        // OSC 52'yi açmıyor — ve geri kalanı alacritty'nin varsayılanında
+        // kalıyor. `..Config::default()`'u ikinci bir yerde yazan bir çağrı
+        // buradan geçmez ama bu kurucuyu bozan bir değişiklik burada düşer.
+        let options = TerminalOptions {
+            scrollback: 100,
+            osc52: Osc52::Off,
+        };
+        let before = term_config(options);
         assert_eq!(
-            Config {
-                scrolling_history: before.scrolling_history,
-                ..after
-            },
-            before
+            (before.scrolling_history, before.osc52),
+            (100, TermOsc52::Disabled)
         );
+
+        let scrolled = term_config(TerminalOptions {
+            scrollback: 7,
+            ..options
+        });
         assert_eq!(
-            Config {
-                scrolling_history: Config::default().scrolling_history,
-                ..before
-            },
-            Config::default()
+            (scrolled.scrolling_history, scrolled.osc52),
+            (7, TermOsc52::Disabled),
+            "scrollback değişimi OSC 52'yi açtı"
         );
+
+        let copying = term_config(TerminalOptions {
+            osc52: Osc52::Copy,
+            ..options
+        });
+        assert_eq!(
+            (copying.scrolling_history, copying.osc52),
+            (100, TermOsc52::OnlyCopy),
+            "osc52 değişimi geçmişi oynattı"
+        );
+
+        // İki alanın dışında hiçbir şey kurulmuyor.
+        for config in [before, scrolled, copying] {
+            assert_eq!(
+                Config {
+                    scrolling_history: Config::default().scrolling_history,
+                    osc52: Config::default().osc52,
+                    ..config
+                },
+                Config::default()
+            );
+        }
     }
 
     #[test]
@@ -2576,7 +2680,10 @@ mod tests {
         let _ = session.frame(|_| ());
 
         let before = wake.wait_wakes(0, Duration::ZERO);
-        session.set_terminal_options(TerminalOptions { scrollback: 10 });
+        session.set_terminal_options(TerminalOptions {
+            scrollback: 10,
+            osc52: Osc52::Copy,
+        });
         {
             let term = session.term.lock();
             assert_eq!(term.history_size(), 10);
@@ -2595,6 +2702,82 @@ mod tests {
         session.write(b"\n");
         wait_ink(&session, &wake, "end");
         assert_eq!(session.term.lock().history_size(), 10);
+    }
+
+    /// `osc52` kipiyle açılan bir oturum; geri kalanı [`test_options`].
+    fn spawn_with_osc52(script: &str, osc52: Osc52, wake: Arc<TestWake>) -> Session {
+        let options = test_options(sh(script), 40);
+        let options = SessionOptions {
+            terminal: TerminalOptions {
+                osc52,
+                ..options.terminal
+            },
+            ..options
+        };
+        Session::spawn(options, wake).unwrap()
+    }
+
+    // OSC 52 sınamalarının yükleri base64 (alacritty `STANDARD`, dolgulu):
+    // `aGVsbG8=` = "hello", `c2Vs` = "sel", `b2Zm` = "off", `b24=` = "on".
+    //
+    // Olumsuz iddialar "şu kadar bekledim, gelmedi" değil: diziden **sonra**
+    // basılan iğne karede görününce dizi ayrıştırılmış demek (`Term` sırayla
+    // işliyor), pano kaydına o anda bakılıyor.
+
+    #[test]
+    fn osc52_store_reaches_wake_for_every_target_but_not_empty() {
+        // macOS'ta tek pano: `p` ve `s` de (Neovim'in `*` kaydı `p` yolluyor)
+        // `c` gibi `Wake`'e ulaşır; iki sonlandırıcı (BEL, ST) da. Boş metin
+        // panoyu silerdi, düşer — sırası kayıtta görülüyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_osc52(
+            "printf '\\033]52;p;c2Vs\\007\\033]52;s;b24=\\033\\\\\\033]52;c;\\007\
+             \\033]52;c;aGVsbG8=\\007end'; sleep 5",
+            Osc52::Copy,
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "end");
+        assert_eq!(wake.copies(), ["sel", "on", "hello"]);
+    }
+
+    #[test]
+    fn osc52_off_reaches_nothing() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_osc52(
+            "printf '\\033]52;c;aGVsbG8=\\007end'; sleep 5",
+            Osc52::Off,
+            Arc::clone(&wake),
+        );
+        wait_ink(&session, &wake, "end");
+        assert_eq!(wake.copies(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn set_terminal_options_switches_osc52_live() {
+        // Kip canlı değişiyor: `Term::set_options` `Config`'in tamamını
+        // değiştiriyor ve alacritty kapıyı her dizide ondan okuyor. Açılışta
+        // açık, kapatılınca dizi düşüyor, yeniden açılınca geçiyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_osc52(
+            "read _; printf '\\033]52;c;b2Zm\\007one'; \
+             read _; printf '\\033]52;c;b24=\\007two'; sleep 5",
+            Osc52::Copy,
+            Arc::clone(&wake),
+        );
+        let options = |osc52| TerminalOptions {
+            scrollback: 100,
+            osc52,
+        };
+
+        session.set_terminal_options(options(Osc52::Off));
+        session.write(b"\n");
+        wait_ink(&session, &wake, "one");
+        assert_eq!(wake.copies(), Vec::<String>::new());
+
+        session.set_terminal_options(options(Osc52::Copy));
+        session.write(b"\n");
+        wait_ink(&session, &wake, "two");
+        assert_eq!(wake.copies(), ["on"]);
     }
 
     /// `needle` mürekkepte görünene kadar kare bekler; `od` satırı bölünmüş
@@ -4048,13 +4231,15 @@ mod tests {
     fn race_set_terminal_options_and_frame() {
         // `set_terminal_options` `Term` kilidini ana thread'den alıyor ve
         // `set_options` o kilit altında `Adapter`'a başlık olayı yolluyor;
-        // okuyucu thread aynı kilitte satır basıp geçmişi büyütüyor, kaydıran
-        // thread ofseti oynatıyor. Tavan iki değer arasında gidip gelirken
-        // geçmiş ve ofset kırpılıyor. Başlık kolu bir gün kilit alırsa sınama
-        // asılı kalır (bkz. `race_color_request_and_frame`).
+        // okuyucu thread aynı kilitte satır basıp geçmişi büyütüyor ve OSC 52
+        // ile `Wake::copy_to_clipboard`'u çağırıyor, kaydıran thread ofseti
+        // oynatıyor. Tavan iki değer arasında gidip gelirken geçmiş ve ofset
+        // kırpılıyor; OSC 52 kipi ayrı bir ritimle açılıp kapanıyor ki iki
+        // alanın bütün birleşimleri yarışsın. Başlık ya da pano kolu bir gün
+        // kilit alırsa sınama asılı kalır (bkz. `race_color_request_and_frame`).
         let wake = Arc::new(TestWake::default());
         let session = Arc::new(spawn_session(
-            "while :; do printf 'x\\n'; sleep 0.005; done",
+            "while :; do printf 'x\\n\\033]52;c;aGVsbG8=\\007'; sleep 0.005; done",
             Arc::clone(&wake),
         ));
 
@@ -4065,7 +4250,12 @@ mod tests {
                 let mut sets = 0u64;
                 while Instant::now() < deadline {
                     let scrollback = if sets % 2 == 0 { 5 } else { 50 };
-                    session.set_terminal_options(TerminalOptions { scrollback });
+                    let osc52 = if sets % 6 < 3 {
+                        Osc52::Copy
+                    } else {
+                        Osc52::Off
+                    };
+                    session.set_terminal_options(TerminalOptions { scrollback, osc52 });
                     let _ = session.scroll_page(1);
                     sets += 1;
                     std::thread::sleep(Duration::from_millis(1));
@@ -4085,6 +4275,12 @@ mod tests {
         assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         assert!(session.term.lock().history_size() <= 50);
+        // Pano kolu gerçekten yarıştı: kipin yarısı açıkken iki saniyede
+        // yüzlerce dizi basılıyor.
+        assert!(
+            wake.copies().iter().any(|text| text == "hello"),
+            "yarış boyunca pano kolu hiç koşmadı"
+        );
         session.shutdown();
     }
 }

@@ -10,6 +10,8 @@
 //! yapılacağı çağıranın kararı (açılışta varsayılanlar, canlı yenilemede
 //! hiçbir şey). Ayrıştırılıyorsa her anahtar ya geçerli değerini ya
 //! varsayılanını alır; kabul edilmeyen değer bir [`Diagnostic`] bırakır.
+//! **Tek istisna `clipboard.osc52`:** kabul edilmeyen değeri varsayılanı
+//! (açık) değil kapalıyı alır ([`Settings::parse_keeping`]'in doc'u).
 //! **Bilinmeyen anahtar ve bölüm sessizce yoksayılır:** sonraki setlerin
 //! anahtarı (`[motion]`) bugünkü sürümde tanı üretmemeli.
 //!
@@ -24,7 +26,7 @@ use std::fmt;
 
 use toml_edit::{Document, Item, TableLike};
 
-use crate::session::TerminalOptions;
+use crate::session::{Osc52, TerminalOptions};
 
 /// Kaydırma geçmişinin tavanı: **alacritty uygulamasının** sınırı.
 ///
@@ -108,6 +110,8 @@ pub struct Settings {
     pub dark_theme: String,
     /// `[font] family` ve `size`.
     pub font: FontOptions,
+    /// `[clipboard] osc52`: `"copy"` ya da `"off"`.
+    pub osc52: Osc52,
 }
 
 impl Default for Settings {
@@ -116,6 +120,12 @@ impl Default for Settings {
     /// `scrollback` 006'ya kadar `bt-shell`'in `SCROLLBACK` sabitiydi; değer
     /// aynı kaldı, sahibi buraya taşındı. Tema sistemin görünümünü izler:
     /// açıkta gömülü `bateri-light`, koyuda gömülü `bateri`.
+    ///
+    /// OSC 52 **açık** (`copy`): ssh'taki vim'in kopyasının yerel panoya
+    /// gelmesi terminalden beklenen davranış ve alacritty'nin de varsayılanı.
+    /// Bedeli: arka planda koşan uzak bir program da panoya yazabilir; okuyamaz.
+    /// Kullanılamayan bir dosyada açılıştaki değer bu değil
+    /// ([`Settings::for_unusable_file`]).
     fn default() -> Self {
         Self {
             scrollback: 10_000,
@@ -123,6 +133,7 @@ impl Default for Settings {
             light_theme: "bateri-light".to_owned(),
             dark_theme: "bateri".to_owned(),
             font: FontOptions::default(),
+            osc52: Osc52::Copy,
         }
     }
 }
@@ -201,12 +212,37 @@ dark_theme = "bateri"
 # family = "Menlo"
 # Size in points.
 size = 13
+
+[clipboard]
+# Lets programs in the terminal, also over ssh, copy text to the clipboard
+# (OSC 52): "copy" allows it, "off" does not. They can never read it.
+osc52 = "copy"
 "#;
+
+    /// Dosya **var ama kullanılamıyor** (okunamıyor ya da geçersiz TOML)
+    /// iken açılışın ayarları: varsayılanlar, yalnız OSC 52 **kapalı**.
+    ///
+    /// Dosyada kullanıcının `osc52 = "off"`'u olabilir ve okunamayan bir
+    /// dosya bunu söyleyemiyor: pano uzaktaki bir programa kapalıya düşer,
+    /// açığa değil (`discussion.md` → Karar 5). Geri kalan her anahtarın
+    /// yanlış tahmini zararsız ve görünür (tema, punto); OSC 52'ninki sessiz.
+    /// Dosya düzelip kaydedilince canlı yenileme dosyadaki değeri uygular.
+    ///
+    /// Dosya **yoksa** bu değil, [`Settings::default`]: kullanıcı hiçbir şey
+    /// söylememiş. Kararı veren (`bt-shell`'in yükleyicisi) ikisini ayırıyor;
+    /// değerin sahibi burası, varsayılanların sahibi olduğu için.
+    pub fn for_unusable_file() -> Self {
+        Self {
+            osc52: Osc52::Off,
+            ..Self::default()
+        }
+    }
 
     /// `settings.toml`'un metni → değerler + tanılar, ya da ayrıştırılamadı.
     ///
     /// `Err` **yalnız** geçersiz TOML'da; anahtar düzeyindeki her sorun
-    /// `Ok`'un tanı listesine düşer ve o anahtar varsayılanını alır.
+    /// `Ok`'un tanı listesine düşer ve o anahtar varsayılanını alır
+    /// (`osc52` kapalıyı, [`Settings::parse_keeping`]).
     ///
     /// Geçersiz TOML sözdiziminden geniş: yinelenen anahtar ve TOML'un
     /// tam sayı sınırını (`i64`) aşan sayı da belgenin tamamını düşürüyor —
@@ -230,6 +266,12 @@ size = 13
     /// istiyor) ve tavanı aşan değer tavana kırpılır (niyet belli). Bölüm
     /// yanlış türdeyse (`terminal = 5`) bölümün bütün anahtarları kabul
     /// edilmemiş sayılır.
+    ///
+    /// **Tek istisna `clipboard.osc52`:** kabul edilmeyen değeri `fallback`'i
+    /// değil `"off"`'u alır, bölüm yanlış türdeyse de. Kuralın sebebi geri
+    /// alınamayan uygulamaydı ve OSC 52'yi kapatmak geri alınabilir; tersi,
+    /// `"of"` diye yanlış yazılmış bir kapatmanın panoyu sessizce açık
+    /// tutması, değil (`discussion.md` → Karar 5).
     pub fn parse_keeping(text: &str, fallback: &Settings) -> Result<Parsed, Diagnostic> {
         let doc = document(text)?;
         let mut parsed = Parsed {
@@ -307,6 +349,19 @@ size = 13
             }
             None => {}
         }
+        // `fallback` bilerek okunmuyor: kabul edilmeyen değer kapalıya düşüyor
+        // (yukarıdaki doc'un istisnası).
+        match section(text, root, "clipboard", &mut parsed.diagnostics) {
+            Some(clipboard) => {
+                if let Some(item) = clipboard.get("osc52") {
+                    parsed.settings.osc52 = osc52(text, item, &mut parsed.diagnostics);
+                }
+            }
+            None if root.contains_key("clipboard") => {
+                parsed.settings.osc52 = Osc52::Off;
+            }
+            None => {}
+        }
         Ok(parsed)
     }
 
@@ -334,6 +389,7 @@ size = 13
     pub fn terminal(&self) -> TerminalOptions {
         TerminalOptions {
             scrollback: self.scrollback,
+            osc52: self.osc52,
         }
     }
 
@@ -639,6 +695,28 @@ fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagn
     value
 }
 
+/// `clipboard.osc52`: tam olarak `"copy"` ya da `"off"`; başka her şey
+/// `"off"` ve tanı.
+///
+/// Büyük/küçük harf duyarlı, tema adları gibi: `"Copy"` bir yazım hatası ve
+/// hata kapalıya düşüyor. Okuma yönünün değerleri (`"paste"`, alacritty'nin
+/// `"copy_paste"`'i) de tanınmıyor — okuma yönü yok (006 Karar 5).
+fn osc52(text: &str, item: &Item, diagnostics: &mut Vec<Diagnostic>) -> Osc52 {
+    const KEY: &str = "clipboard.osc52";
+    let found = match item.as_str() {
+        Some("copy") => return Osc52::Copy,
+        Some("off") => return Osc52::Off,
+        Some(value) => format!("{value:?}"),
+        None => kind(item).to_owned(),
+    };
+    diagnostics.push(Diagnostic {
+        key: Some(KEY),
+        line: item.span().and_then(|span| line_of(text, span.start)),
+        message: format!("`{KEY}` must be \"copy\" or \"off\", found {found}; using \"off\""),
+    });
+    Osc52::Off
+}
+
 /// Bayt konumunun 1'den başlayan satırı.
 ///
 /// `toml_edit`'in kendi çevirisi (`translate_position`) crate'e özel;
@@ -721,6 +799,7 @@ mod tests {
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
             ("font", "size"),
+            ("clipboard", "osc52"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -863,7 +942,13 @@ mod tests {
                 font: false
             }
         );
-        assert_eq!(after.terminal(), TerminalOptions { scrollback: 20 });
+        assert_eq!(
+            after.terminal(),
+            TerminalOptions {
+                scrollback: 20,
+                osc52: Osc52::Copy
+            }
+        );
         // Tema adları terminal seçeneği değil: tema her kayıtta yeniden
         // çözülüyor (`bt-shell`), fark onu kapılamıyor.
         let themed = clean("[terminal]\nscrollback = 500\n[appearance]\ntheme = \"paper\"\n");
@@ -882,6 +967,7 @@ mod tests {
             light_theme: "chalk".to_owned(),
             dark_theme: "ink".to_owned(),
             font: FontOptions::default(),
+            osc52: Osc52::Copy,
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -1037,6 +1123,105 @@ mod tests {
         // Açıkça yazılan varsayılan bir fark değil: kayıt atlası yeniden
         // kurdurmaz.
         assert_eq!(Settings::default().changes(&before), Changes::default());
+    }
+
+    #[test]
+    fn osc52_is_read() {
+        // Dosyada yoksa açık: ssh'taki vim'in kopyası kutudan çıktığı gibi
+        // çalışsın.
+        assert_eq!(clean("").osc52, Osc52::Copy);
+        assert_eq!(clean("[clipboard]\nosc52 = \"copy\"\n").osc52, Osc52::Copy);
+        assert_eq!(clean("[clipboard]\nosc52 = \"off\"\n").osc52, Osc52::Off);
+        assert_eq!(clean("clipboard = { osc52 = \"off\" }\n").osc52, Osc52::Off);
+    }
+
+    #[test]
+    fn unrecognized_osc52_is_off_with_diagnostic() {
+        // Kapalıya düşer: okuma yönünün adı, büyük harfli yazım, `false`,
+        // sayı ve bölüm — hiçbiri varsayılana (açık) dönmüyor.
+        for (value, found) in [
+            ("\"paste\"", "\"paste\""),
+            ("\"Copy\"", "\"Copy\""),
+            ("false", "a boolean"),
+            ("1", "an integer"),
+            ("{ mode = \"copy\" }", "a section"),
+        ] {
+            let (settings, diagnostic) = rejected(&format!("[clipboard]\nosc52 = {value}\n"));
+            assert_eq!(
+                settings,
+                Settings {
+                    osc52: Osc52::Off,
+                    ..Settings::default()
+                },
+                "{value}"
+            );
+            assert_eq!(diagnostic.key, Some("clipboard.osc52"), "{value}");
+            assert_eq!(diagnostic.line, Some(2), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`clipboard.osc52` must be \"copy\" or \"off\", found {found}; using \"off\""
+                )
+            );
+        }
+        // Bölüm yanlış türde: anahtarı kabul edilmemiş sayılıyor, yine kapalı.
+        let (settings, diagnostic) = rejected("clipboard = \"copy\"\n");
+        assert_eq!(settings.osc52, Osc52::Off);
+        assert_eq!(diagnostic.key, Some("clipboard"));
+    }
+
+    #[test]
+    fn rejected_osc52_is_off_even_when_the_given_settings_copy() {
+        // Kayıt anının "geçerli değeri tut" kuralının tek istisnası:
+        // `"of"` diye yanlış yazılmış bir kapatma panoyu açık tutmamalı.
+        let current = Settings::default();
+        assert_eq!(current.osc52, Osc52::Copy);
+        for text in ["[clipboard]\nosc52 = \"of\"\n", "clipboard = 5\n"] {
+            let parsed = Settings::parse_keeping(text, &current).expect("ayrıştırılabilir metin");
+            assert_eq!(parsed.settings.osc52, Osc52::Off, "{text}");
+            assert_eq!(parsed.diagnostics.len(), 1, "{text}");
+        }
+        // Dosyadan silinen anahtar ise varsayılana döner: kabul edilmeyen
+        // bir değer yok, kullanıcı varsayılanı istiyor.
+        let off = Settings {
+            osc52: Osc52::Off,
+            ..Settings::default()
+        };
+        let parsed = Settings::parse_keeping("", &off).expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.osc52, Osc52::Copy);
+    }
+
+    #[test]
+    fn osc52_change_is_a_terminal_change() {
+        // Canlı değişim terminal seçeneklerinin **tamamıyla** gidiyor:
+        // `scrollback` yanında taşınıyor, onu varsayılana çekmiyor.
+        let before = clean("[terminal]\nscrollback = 500\n");
+        let after = clean("[terminal]\nscrollback = 500\n[clipboard]\nosc52 = \"off\"\n");
+        assert_eq!(
+            before.changes(&after),
+            Changes {
+                terminal: true,
+                font: false
+            }
+        );
+        assert_eq!(
+            after.terminal(),
+            TerminalOptions {
+                scrollback: 500,
+                osc52: Osc52::Off
+            }
+        );
+    }
+
+    #[test]
+    fn unusable_file_closes_osc52_only() {
+        assert_eq!(
+            Settings::for_unusable_file(),
+            Settings {
+                osc52: Osc52::Off,
+                ..Settings::default()
+            }
+        );
     }
 
     #[test]

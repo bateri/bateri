@@ -23,8 +23,10 @@ rasterize eder; hücre ölçüsü oradan gelir ve `bt-gpu`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
 çizer. `bt-shell` klavyeyi PTY'ye akıtır; fareyle seçim, pano, geçmişte
 kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
-Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; `settings.toml`'u
-okur (bugün `scrollback`, tema seçimi ve font), Theme ▸'nin seçimini oraya
+Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
+OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
+`settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ve
+`osc52`), Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
 anında** uygulanır (`watch`: vnode kaynakları; `Session::set_theme`,
@@ -72,10 +74,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
-| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
+| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52; 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
-| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini ve yereli (politika, `child`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`; vnode kaynakları: ayar izleme), `libc` (yalnız bekçinin `write` + `_exit`'i) |
+| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini ve yereli (politika, `child`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`, OSC 52'nin pano işi; vnode kaynakları: ayar izleme), `libc` (yalnız bekçinin `write` + `_exit`'i) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -184,7 +186,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   `bt-core::settings`'te saf, okuma ve izleme `bt-shell`'de. İzleme kaynağı
   okumadan **önce** kurulur ve her olayda yeniden kurulur; kayıt anında
   kullanılamayan dosya hiçbir şeyi, kabul edilmeyen değer kendi anahtarını
-  değiştirmez (`Settings::parse_keeping`). Süreli koşu
+  değiştirmez (`Settings::parse_keeping`). **Tek istisna `osc52`:**
+  kabul edilmeyen değeri ve açılışta kullanılamayan dosya (ya da
+  çözülemeyen ev dizini) panoyu **kapalıya** düşürür
+  (`Settings::for_unusable_file`) — yanlış tahmini görünmeyen tek anahtar. Süreli koşu
   (`BT_RUN_SECONDS`) dosyayı **hiç okumaz ve izlemez**: dalın tek yeri
   `bt-shell`'in `app::Inputs`'u.
 - **Shell entegrasyonu** üç kabuk içindir (zsh `ZDOTDIR`, bash `--rcfile`
