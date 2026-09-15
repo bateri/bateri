@@ -22,8 +22,10 @@ Dosya yoksa her şey varsayılanıyla çalışır ve hiçbir uyarı çıkmaz.
 Dosya başka bir yere sembolik bağ olabilir (dotfile deposu); bağın hedefi
 okunur.
 
-Uygulama bu dosyaya yalnız bir yerden yazar: **View ▸ Theme ▸** ile tema
-seçince `[appearance] theme` satırını (bkz. [View ▸ Theme ▸](#view--theme-)).
+Uygulama bu dosyaya iki yerden yazar: **Settings…** dosya yokken şablonu
+yaratır, **View ▸ Theme ▸** ile tema seçince `[appearance] theme` satırını
+yazar (bkz. [View ▸ Theme ▸](#view--theme-)). Var olan dosyanın başka hiçbir
+satırına dokunulmaz.
 
 Değişiklik **kaydettiğiniz anda** geçerli olur — ayar dosyasında da,
 kullanılan temanın dosyasında da; kabuk ve içindeki program yaşamaya devam
@@ -154,7 +156,7 @@ kopya yolu kalır.
 | bir anahtarın değeri kabul edilmiyor | yalnız o anahtar varsayılan (ya da sınırı; `osc52` için kapalı), uyarı |
 | tanınmayan anahtar ya da bölüm | sessizce yoksayılır |
 | seçilen tema bulunamıyor | görünüme uyan gömülü tema (koyuda `bateri`, açıkta `bateri-light`), uyarı |
-| tema dosyası okunamıyor ya da geçersiz TOML | görünüme uyan gömülü tema, uyarı (aynı adlı gömülü tema **kullanılmaz**) |
+| tema dosyası okunamıyor, boş ya da geçersiz TOML | görünüme uyan gömülü tema, uyarı (aynı adlı gömülü tema **kullanılmaz**) |
 | tema dosyasında bir renk kabul edilmiyor | yalnız o renk `bateri`'ninki, uyarı |
 | font ailesi bulunamıyor | varsayılan font (SF Mono, yoksa Menlo), uyarı |
 | font ailesi eşaralıklı değil | aile yine kullanılır, uyarı |
@@ -172,7 +174,7 @@ ekranı bozmaz, uyarı çıkar ve dosyayı düzeltip kaydedince uyarı kalkar.
 | ayar dosyası silindi ya da boşaltıldı | ayarlar değişmez, uyarı yok; varsayılanlar uygulamayı yeniden açınca gelir |
 | bir anahtarın değeri kabul edilmiyor | o anahtar **değişmez**, uyarı; tavanı aşan `scrollback` tavana iner, kabul edilmeyen `osc52` **kapanır** |
 | anahtar dosyadan silindi | o anahtar varsayılanına döner |
-| seçilen tema bulunamıyor, dosyası okunamıyor ya da geçersiz TOML | **ekrandaki tema kalır**, uyarı |
+| seçilen tema bulunamıyor, dosyası okunamıyor, boş ya da geçersiz TOML | **ekrandaki tema kalır**, uyarı |
 | font ailesi bulunamıyor | varsayılan font, uyarı; adı düzeltip kaydedince uyarı kalkar |
 
 Menüden tema seçerken dosya geçersiz ya da okunamıyorsa dosyaya **yazılmaz**;
@@ -341,8 +343,8 @@ osc52 = "copy"
   panoya yazar. macOS'ta tek pano var; vim'de `*` ile `+` burada aynı panodur
   ve Neovim `*`'ı `p` diye yollar, yani `clipboard=unnamed` ayarlı bir
   Neovim'in ssh'taki kopyası da gelir. Boş metin panoyu silmez, yoksayılır.
-- Çok büyük bir kopya (yüzlerce megabayt) panoya yazılırken pencere o süre
-  boyunca donar; boyut sınırı yok.
+- Kopyanın boyut sınırı yok. Pano yazılırken pencere yeni kare çizmez; çok
+  büyük bir kopyada bu fark edilebilir (hangi boyutta olduğu ölçülmedi).
 - Tanınmayan değer (`"paste"`, `"Copy"`, `true`) ve `[clipboard]`'ın bölüm
   olmaması **kapalıya** düşer ve uyarı verir — öteki anahtarlar gibi
   varsayılana (açık) değil; açılışta okunamayan ya da geçersiz ayar dosyası
@@ -380,8 +382,16 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 
 - **Her anahtar opsiyoneldir.** Eksik anahtar gömülü `bateri` temasından
   gelir; yalnız zemini değiştiren iki satırlık bir dosya geçerli bir temadır.
-- Kabul edilmeyen renk (`"red"`, `"#12345"`, sayı) `bateri`'nin değerini alır
-  ve uyarı verir; öteki renkler yine okunur.
+- Gömülü bir temayı **gölgeleyen** dosyada (`themes/bateri-light.toml`) eksik
+  anahtar o gömülü temanın kendisinden gelir: yalnız `accent` yazmak açık
+  temayı yalnız imleciyle değiştirir.
+- Kabul edilmeyen renk (`"red"`, `"#12345"`, sayı) tabanın (`bateri` ya da
+  gölgelenen gömülü tema) değerini alır ve uyarı verir; öteki renkler yine
+  okunur.
+- **Boş dosya** (ya da yalnız boşluk) kullanılamaz sayılır: çoğu editör
+  kaydederken dosyayı önce boşaltır ve kaydın ortasında pencere tabana
+  çakmamalı. Kaydettiğiniz anda ekrandaki tema kalır, açılışta görünüme uyan
+  gömülü tema gelir; ikisinde de uyarı çıkar.
 - Tanınmayan anahtar sessizce yoksayılır. Sonraki sürümlerin dört durum rolü
   (başarı, uyarı, hata, bilgi) bu yüzden bugünden yazılabilir.
 - **Sönük metin** (SGR 2) iki yoldan gelir. Varsayılan ön plan sönükse

@@ -14,8 +14,8 @@
 //!   bayat tanıtıcıyı düşürsün.
 //! - **Dosya** (`WRITE | EXTEND | ATTRIB | DELETE | RENAME`): yerinde yazma
 //!   (`>>`, nano), yazmadan boşaltma (`: >`) ve sembolik bağın **hedefindeki**
-//!   kayıt dizine iz bırakmaz. Dosya `std` ile salt okunur açılır ve açılış
-//!   bağı izler; kaynak hedefe bağlanır.
+//!   kayıt dizine iz bırakmaz. Dosya `O_EVTONLY` ile açılır (yalnız olay
+//!   tanıtıcısı) ve açılış bağı izler; kaynak hedefe bağlanır.
 //!
 //! **Kurulum tek atımlık.** Kaynak olaydan sonra da yaşar ama baktığı inode
 //! artık yolda olmayabilir (üstüne taşınan dosya). Çağıran her olayda
@@ -34,8 +34,9 @@
 //! koşmakta olan işleyici o sırada context'i okuyor olabilir.
 
 use std::ffi::c_void;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -130,7 +131,16 @@ fn arm(
     };
     // Açılamayan yol (izin) sessizce izlenmez: okuyucu aynı yolu okurken
     // hatayı zaten alt başlığa yazıyor.
-    let file = File::open(path).ok()?;
+    //
+    // `O_EVTONLY`, salt okunur değil (`/code-review` bulgusu): tanıtıcı yalnız
+    // olay içindir. Okuma tanıtıcısı bağın hedefi harici bir diskteyse onu
+    // "kullanımda" tutup çıkarılmasını engeller ve iCloud'dan tahliye edilmiş
+    // bir dosyada her yeniden kurulumda indirmeyi tetikleyebilirdi.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_EVTONLY)
+        .open(path)
+        .ok()?;
     let fd = file.as_raw_fd();
     let context = Box::into_raw(Box::new(Context {
         _file: file,

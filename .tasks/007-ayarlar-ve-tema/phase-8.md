@@ -22,6 +22,8 @@ _Requirements: R9, R5, R10_
   - `Adapter`: `ClipboardStore(Clipboard, metin)` → `Wake`'in yeni çağrısı;
     `ClipboardStore(Selection, …)` (`p`/`s`) yoksayılır — macOS'ta birincil
     seçim yok, genel panoya yazmak kullanıcının panosunu sessizce ezerdi.
+    *(Uygulamada değişti: `p`/`s` de genel panoya gidiyor — Uygulama
+    Notları.)*
     `ClipboardLoad` düşmeye devam eder (okuma yönü yok, `OnlyCopy` onu
     zaten üretmiyor).
   - `TestWake` (`:1739`) yeni çağrıyı uygular ve metni kaydeder.
@@ -48,7 +50,8 @@ _Requirements: R9, R5, R10_
 - `Config` kurucusu: `osc52` değişince `scrollback` korunur, tersi de
   (phase-4'ün sınaması iki alana genişler).
 - `Adapter`: OSC 52 `c` dizisi `TestWake`'e metni ulaştırır; `p` dizisi
-  ulaştırmaz; `osc52 = "off"` iken `c` dizisi de ulaştırmaz.
+  ulaştırmaz; `osc52 = "off"` iken `c` dizisi de ulaştırmaz. *(Uygulamada
+  değişti: `p` de ulaştırır, boş metin ulaştırmaz.)*
 - Yuva: art arda çok sayıda metin → tek iş, son metin yazılır; dışarıdan
   verilen panoya (genel pano değil).
 - `make test-yaris` iki profilde yeşil (okuyucu thread yolu).
@@ -77,12 +80,15 @@ _Requirements: R9, R5, R10_
   `bt-core` / `bt-shell` satırları ve "Ayarlar" maddesi (`osc52` istisnası)
   güncellendi.
 - `make duman` jetonları değişmedi: `kare=1 hucre=8 glif=6 kural=15`.
-- **Bekleyen göz kontrolü** `[elle]`: bateri içinde
-  `printf '\033]52;c;aGVsbG8=\a'` → `pbpaste` "hello"; ssh'taki vim/tmux'un
-  kopyası yerel panoya gelir; `osc52 = "off"` kaydedince aynı dizi panoya
-  dokunmaz. Uçtan uca zincir (`ShellWake` → ana kuyruk → genel pano) gerçek
-  pencere ve kullanıcının panosu ister; parçaları sınamada (`Adapter` iletimi
-  `TestWake`'le, yuva ve teslim benzersiz panoyla).
+- **Göz kontrolü** (set kapısı sırasında, gerçek pencere ve genel pano):
+  geçici `HOME` + `ZDOTDIR`'daki `.zshrc` OSC 52 basıyor, `pbpaste`
+  yokluyor. Ayar dosyası yokken `c` ve ardından `p` (Neovim'in `*`'ı) kopyası
+  panoya geldi; `osc52 = "off"` yazılı dosyayla açılışta `c` dizisi panoya
+  dokunmadı. Panodaki metin önce kaydedilip sonra geri yazıldı.
+  **Bekleyen** `[elle]`: ssh üstünden gerçek vim/Neovim/tmux kopyası (uzak
+  makine yok) ve `osc52`'yi uygulama **açıkken** değiştirip kaydetmek
+  (canlı geçiş `set_terminal_options_switches_osc52_live`'da sınanıyor,
+  pencerede değil).
 
 ## Checklist
 

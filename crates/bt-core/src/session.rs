@@ -579,10 +579,10 @@ impl EventListener for Adapter {
             // `std`'de tavansız ve çözme bu değişiklikten önce de `Term`
             // kilidi altında yapılıyordu (alacritty'nin varsayılanı
             // `OnlyCopy`'ydi, olay burada düşüyordu); eklenen maliyet, panoya
-            // yazmanın ana thread'de metnin boyuyla uzaması. Yüzlerce
-            // megabaytlık bir kopya pencereyi o yazma süresince durdurur. Bir
-            // tavan seçilmiş bir sayı ister; sel gibi çıktı basan bir program
-            // pencereyi zaten meşgul edebiliyor.
+            // yazmanın ana thread'de metnin boyuyla uzaması — çok büyük bir
+            // kopyada pencere yazma bitene kadar kare çizemez, eşiği
+            // ölçülmedi. Bir tavan seçilmiş bir sayı ister; sel gibi çıktı
+            // basan bir program pencereyi zaten meşgul edebiliyor.
             Event::ClipboardStore(_, text) => {
                 if !text.is_empty() {
                     self.0.wake.copy_to_clipboard(text);

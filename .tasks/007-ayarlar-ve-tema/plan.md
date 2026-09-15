@@ -133,4 +133,4 @@ BT_RUN_SECONDS: yükleyici, izleme, görünüm, menü dolumu KAPALI → Theme::B
 | phase-6 | ✅ |
 | phase-7 | ✅ |
 | phase-8 | ✅ |
-| kapı | |
+| kapı | ✅ |
