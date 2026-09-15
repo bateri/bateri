@@ -10,7 +10,10 @@
 //! sorgusu (`bracketed_paste`).
 //! Kilit **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
 //! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa kilitlenme
-//! doğar.
+//! doğar. `theme` bu sıranın dışında bir **yaprak** kilittir: tutulurken başka
+//! hiçbir kilit alınmaz, yani hangi kilidin altında alındığı önemsizdir —
+//! `frame` kopyasını `term`'den önce alıp bırakır, renk sorusu `term`
+//! tutulurken okur.
 
 use std::collections::HashMap;
 use std::io;
@@ -32,7 +35,7 @@ use alacritty_terminal::term::{Config, RenderableContent, Term};
 use alacritty_terminal::tty::{self, Pty, Shell};
 use alacritty_terminal::vte::ansi::CursorShape;
 
-use crate::color::{self, LinearRgba};
+use crate::color::{self, LinearRgba, Theme};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
 use crate::wake::Wake;
 
@@ -201,6 +204,8 @@ pub struct SessionOptions {
     /// uygulamaları (sixel, kitty) bunu okur.
     pub cell_px: (u16, u16),
     pub scrollback: usize,
+    /// Açılış teması; hangi temanın seçileceği uygulamanın kararı.
+    pub theme: Theme,
 }
 
 /// Hasarı işaretlemenin oturumdan bağımsız yolu; [`Session::dirty_flag`] verir.
@@ -424,16 +429,27 @@ struct AdapterInner {
     dirty: Arc<AtomicBool>,
     /// PTY'nin bildiği son boyut; `TextAreaSizeRequest` bunu yanıtlar.
     size: Mutex<WindowSize>,
+    /// Paletin tek kaynağı; [`Session::theme`] okur.
+    ///
+    /// **Yaprak kilit** (`size` emsali): tutulurken başka kilit alınmaz ve
+    /// tutan taraf yalnız kopyalar — `Theme` `Copy`, 80 bayt. İki okuyanı
+    /// var: `frame()` kopyayı `Term` kilidinden **önce** alır (kilidin
+    /// altında renk çözümüne ikinci bir muteks sokmasın), renk sorusu `Term`
+    /// kilidi tutulurken alır. Biri ötekini içeriden hiç tutmadığı için sıra
+    /// çakışmaz. Mutex, çünkü tema takas edilebilir (`plan.md` → R3.1); takası
+    /// yazan ilk tüketici sistem görünümü (007 phase-3).
+    theme: Mutex<Theme>,
 }
 
 impl Adapter {
-    fn new(wake: Arc<dyn Wake>, size: WindowSize) -> Self {
+    fn new(wake: Arc<dyn Wake>, size: WindowSize, theme: Theme) -> Self {
         Self(Arc::new(AdapterInner {
             wake,
             sender: OnceLock::new(),
             // Açılış karesi: pencere ilk kez boyansın diye kirli başlar.
             dirty: Arc::new(AtomicBool::new(true)),
             size: Mutex::new(size),
+            theme: Mutex::new(theme),
         }))
     }
 
@@ -467,16 +483,21 @@ impl EventListener for Adapter {
             Event::PtyWrite(text) => self.reply(text),
             // Renk sorusu `Term` kilidi tutulurken gelir; tabloyu okumak için
             // kilidi geri istemek kilitlenme olurdu (kilit yeniden girilebilir
-            // değil, `try_lock` da aynı thread'de hep düşer). Paletin
-            // varsayılanıyla yanıtlıyoruz.
+            // değil, `try_lock` da aynı thread'de hep düşer). Temanın
+            // paletiyle yanıtlıyoruz — tema yaprak kilitte, alması serbest.
             //
             // **Bilinen sınır:** uygulama OSC 4/10/11 ile bir rengi
             // değiştirip sonra sorarsa eski değeri alır — "önce ata, sonra
             // sor" yaygın bir örüntüdür (arka planı okuyup açık/koyu tema
             // seçen editörler). Çizim yolu tabloyu doğru okuyor, yalnız
-            // yanıt yolu okumuyor; ikisi ayrışıyor. Gerçek çözüm paletin
-            // sahipliğinin alacritty'den bize geçmesi, yani 00X tema seti.
-            Event::ColorRequest(index, format) => self.reply(format(color::default(index))),
+            // yanıt yolu okumuyor; ikisi ayrışıyor. Kökü temada değil
+            // alacritty'de: uygulamanın yazdığı `Colors` tablosu `Term`'ün
+            // içinde, yani bu kilidin arkasında. Tema seti (007) sınırı
+            // kapsam dışı bıraktı; çaresi tablonun `Term` dışına bir kopyası.
+            Event::ColorRequest(index, format) => {
+                let theme = *lock(&self.0.theme);
+                self.reply(format(theme.default(index)));
+            }
             Event::TextAreaSizeRequest(format) => {
                 let size = *lock(&self.0.size);
                 self.reply(format(size));
@@ -727,7 +748,7 @@ impl Session {
         };
         let pty = tty::new(&pty_options, size, 0)?;
 
-        let adapter = Adapter::new(wake, size);
+        let adapter = Adapter::new(wake, size, options.theme);
         let config = Config {
             scrolling_history: options.scrollback,
             ..Config::default()
@@ -756,9 +777,9 @@ impl Session {
 
     /// Çizilecek kareyi verir: yeni içerik yoksa `None` ve **hiç iterasyon**.
     ///
-    /// Kilit bir kez alınır. Hasar "çizilsin mi"ye karar verir, "ne
-    /// çizileceğine" değil: drawable içeriği korunmadığı için her karede tam
-    /// grid taranır.
+    /// `Term` kilidi bir kez alınır; temanın kopyası ondan önce. Hasar
+    /// "çizilsin mi"ye karar verir, "ne çizileceğine" değil: drawable içeriği
+    /// korunmadığı için her karede tam grid taranır.
     ///
     /// `sink` jeneriktir: hücre başına dinamik çağrı yerine satır içine
     /// alınır. **`Term` kilidi tutulurken** çağrılır ve kilit yeniden girilebilir
@@ -774,6 +795,12 @@ impl Session {
         if !self.adapter.0.dirty.swap(false, Ordering::AcqRel) {
             return None;
         }
+        // Tema `Term` kilidinden **önce** ve kopya olarak: yaprak kilit
+        // kare boyunca tutulmaz, `Term` kilidinin altına ikinci bir muteks
+        // girmez. Kopya ile kilit arasına düşen bir takas en çok bir kare
+        // eski renkle çizer; takası yazan zaten kare istiyor.
+        let theme = *lock(&self.adapter.0.theme);
+        let background = theme.background_rgb();
         let term = self.term.lock();
 
         let rows = term.screen_lines() as i32;
@@ -887,12 +914,16 @@ impl Session {
             // ters videoda o renk arka plan olmuştur. "Ters video" burada
             // seçimin çevirdiği `inverse`: seçili ters videolu hücrede sönüklük
             // yeniden ön plana döner.
-            let mut back = color::resolve(if inverse { cell.fg } else { cell.bg }, colors);
-            if inverse && dim {
-                back = color::dim(back);
-            }
+            //
+            // Kural `color::resolve_fg`'de tek: iki dal aynı fonksiyondan
+            // geçiyor, ters videolu dal sönük rolü unutamıyor.
+            let back = if inverse {
+                color::resolve_fg(cell.fg, dim, colors, &theme)
+            } else {
+                color::resolve(cell.bg, colors, &theme)
+            };
             // Varsayılan arka plan çizilmez; `None` onun adı.
-            let bg = (back != color::BG_RGB).then(|| color::linear_rgba(back));
+            let bg = (back != background).then(|| color::linear_rgba(back));
 
             // `HIDDEN` (`\e[8m`) "mürekkep yok" demek ve **tek bir `let`**
             // (yukarıdaki `hidden`): hem glyph'i hem kuralları düşürüyor, hem
@@ -931,10 +962,11 @@ impl Session {
             // tamamı çizilmiyor. Koşulsuz: alan adının söylediği şey olmalı,
             // yoksa kural çizgisi mürekkepsiz bir hücrede arka plan rengiyle
             // çizilir, yani görünmez olurdu.
-            let mut fore = color::resolve(if inverse { cell.bg } else { cell.fg }, colors);
-            if !inverse && dim {
-                fore = color::dim(fore);
-            }
+            let fore = if inverse {
+                color::resolve(cell.bg, colors, &theme)
+            } else {
+                color::resolve_fg(cell.fg, dim, colors, &theme)
+            };
             // **Beş bayrak ayrı ayrı sorulur ve kıvrımlı önce gelir.**
             // `UNDERCURL` `UNDERLINE`'ı **içermez**: `Attr::Undercurl` önce
             // `ALL_UNDERLINES`'ı siliyor, sonra yalnız kendini ekliyor
@@ -979,7 +1011,7 @@ impl Session {
             let underline_color = (underline != UnderlineStyle::None)
                 .then(|| cell.underline_color())
                 .flatten()
-                .map(|c| color::linear_rgba(color::resolve(c, colors)));
+                .map(|c| color::linear_rgba(color::resolve(c, colors, &theme)));
 
             let col = indexed.point.column.0 as u16;
             // İmlecin altındaki hücre **ters** çiziliyor. İmleç bloğu opak ve
@@ -996,7 +1028,7 @@ impl Session {
             // çizgi büsbütün kaybolurdu.
             let (fore, underline_color) =
                 if cursor.visible && (col, row) == (cursor.col, cursor.row) {
-                    (color::BG_RGB, None)
+                    (background, None)
                 } else {
                     (fore, underline_color)
                 };
@@ -1262,6 +1294,16 @@ impl Session {
     /// varmaz — kopyaladıktan sonra vurgu ekranda kalır (alacritty de öyle).
     pub fn selection_text(&self) -> Option<String> {
         self.term.lock().selection_to_string()
+    }
+
+    /// Oturumun o anki teması, kopya olarak — `bt-gpu`'nun clear ve imleç
+    /// rengi buradan okunur, `frame()`'in zemin atlaması ve renk sorusunun
+    /// yanıtıyla **aynı** kaynaktan.
+    ///
+    /// Yaprak kilidi alır ve bırakır; `Term` kilidine dokunmaz, `frame()`'in
+    /// `sink`'inden de çağrılabilir.
+    pub fn theme(&self) -> Theme {
+        *lock(&self.adapter.0.theme)
     }
 
     /// Hasarı uzaktan işaretleyebilen tutamak.
@@ -1707,6 +1749,9 @@ mod tests {
 
     use super::*;
 
+    /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
+    const THEME: Theme = Theme::BATERI;
+
     /// Uyandırmaları sayar ve sınamanın beklemesine izin verir.
     #[derive(Default)]
     struct TestWake {
@@ -1785,6 +1830,7 @@ mod tests {
             rows: 10,
             cell_px: (9, 18),
             scrollback: 100,
+            theme: THEME,
         }
     }
 
@@ -1861,7 +1907,7 @@ mod tests {
             backs.iter().map(|c| c.col).collect::<Vec<_>>(),
             (0..8).collect::<Vec<_>>()
         );
-        let red = Some(color::linear_rgba(color::default(1)));
+        let red = Some(color::linear_rgba(THEME.default(1)));
         assert!(backs.iter().all(|c| c.bg == red), "{backs:?}");
     }
 
@@ -1929,7 +1975,7 @@ mod tests {
             "{cells:?}"
         );
         // SGR 58 yalnız sonuncuda; ondan öncekiler ön plana düşüyor.
-        let red = Some(color::linear_rgba(color::default(196)));
+        let red = Some(color::linear_rgba(THEME.default(196)));
         assert_eq!(
             rules.iter().map(|c| c.underline_color).collect::<Vec<_>>(),
             vec![None, None, None, None, None, None, red],
@@ -2027,7 +2073,7 @@ mod tests {
         );
         assert_eq!(
             cell.fg,
-            color::linear_rgba(color::BG_RGB),
+            THEME.background_linear(),
             "imleç hücresinde ön plan tersine dönmeli: {cell:?}"
         );
     }
@@ -2073,6 +2119,53 @@ mod tests {
     }
 
     #[test]
+    fn dim_colors_on_the_draw_path_are_pinned() {
+        // Sönük renklerin bekçisi **çizim yolundan** geçiyor ve beklenen
+        // değerleri elle yazılı: paletten hesaplanan bir beklenti
+        // sönüklük kuralı değişince kendisi de değişir ve kuralın değiştiğini
+        // hiçbir sınama görmezdi. Üç hâl: varsayılan ön plan, adlı renk ve
+        // ters video (sönüklük orada arka plana gidiyor).
+        //
+        // Sütunlar: 0 sönük varsayılan, 2 sönük kırmızı, 4 sönük ters video;
+        // imleç 5. sütunda, hiçbirinin rengini çevirmiyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033[2mA\\033[0m \\033[2;31mB\\033[0m \\033[2;7mC\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+
+        let cells = wait_frame(&session, &wake, |cells| glyph_text(cells) == "ABC");
+        let at_col = |col| {
+            *cells
+                .iter()
+                .find(|c| c.col == col)
+                .unwrap_or_else(|| panic!("{col}. sütun karede yok: {cells:?}"))
+        };
+        // `0xd8d9dd × 2/3`, vte'nin `f32` çarpımı ve kesmesiyle.
+        let dim_foreground = LinearRgba::from_srgb(0x90, 0x90, 0x93);
+        let a = at_col(0);
+        assert_eq!((a.fg, a.bg), (dim_foreground, None), "{a:?}");
+        // `0xd16d6a × 2/3`.
+        let b = at_col(2);
+        assert_eq!(
+            (b.fg, b.bg),
+            (LinearRgba::from_srgb(0x8b, 0x48, 0x46), None),
+            "{b:?}"
+        );
+        // Ters videoda sönük ön plan arka plana geçer; ön plan paletin arka
+        // planı ve **sönmez**.
+        let c = at_col(4);
+        assert_eq!(
+            (c.fg, c.bg),
+            (
+                LinearRgba::from_srgb(0x1a, 0x1c, 0x21),
+                Some(dim_foreground)
+            ),
+            "{c:?}"
+        );
+    }
+
+    #[test]
     fn dim_flag_darkens_background_in_inverse_video() {
         let wake = Arc::new(TestWake::default());
         // DIM + INVERSE + kırmızı ön plan: ön plan arka plan olur ve sönük
@@ -2083,16 +2176,15 @@ mod tests {
         );
 
         let cells = wait_cells(&session, &wake, 1);
-        assert_eq!(
-            cells[0].bg,
-            Some(color::linear_rgba(color::dim(color::default(1))))
-        );
+        // Elle yazılı: `0xd16d6a × 2/3` (bkz.
+        // `dim_colors_on_the_draw_path_are_pinned`).
+        assert_eq!(cells[0].bg, Some(LinearRgba::from_srgb(0x8b, 0x48, 0x46)));
         // Sönük olmayan kırmızıdan gerçekten farklı.
-        assert_ne!(cells[0].bg, Some(color::linear_rgba(color::default(1))));
+        assert_ne!(cells[0].bg, Some(color::linear_rgba(THEME.default(1))));
         // Ters videoda ön plan hücrenin arka planından gelir ve **sönmez**:
         // `DIM` yalnız `cell.fg`'den doğan renge uygulanıyor.
         assert_eq!(cells[0].ch, Some('x'));
-        assert_eq!(cells[0].fg, color::linear_rgba(color::BG_RGB));
+        assert_eq!(cells[0].fg, THEME.background_linear());
     }
 
     #[test]
@@ -2116,8 +2208,8 @@ mod tests {
         // İmleç 0. sütunda: oradaki harf arka plan rengine döner, komşusu
         // dönmez. İkisini birden sınamak "hepsini terse çevirdim" hatasını da
         // yakalıyor.
-        assert_eq!(a.fg, color::linear_rgba(color::BG_RGB), "{cells:?}");
-        assert_ne!(b.fg, color::linear_rgba(color::BG_RGB), "{cells:?}");
+        assert_eq!(a.fg, THEME.background_linear(), "{cells:?}");
+        assert_ne!(b.fg, THEME.background_linear(), "{cells:?}");
     }
 
     #[test]
@@ -2172,7 +2264,7 @@ mod tests {
 
         // İki yeşil hücre: shell girdiyi okuyup geri yazabildi.
         let cells = wait_cells(&session, &wake, 2);
-        let green = Some(color::linear_rgba(color::default(2)));
+        let green = Some(color::linear_rgba(THEME.default(2)));
         assert!(backgrounds(&cells).all(|c| c.bg == green), "{cells:?}");
     }
 
@@ -2256,6 +2348,51 @@ mod tests {
             child_output(options),
             "env=reached|xterm-256color|truecolor;"
         );
+    }
+
+    #[test]
+    fn color_request_is_answered_from_the_theme() {
+        // Renk sorusunun yanıtı çizimle **aynı temadan**: gömülü olmayan bir
+        // temayla açılıp zemin (OSC 11) ve kırmızı (OSC 4;1) soruluyor. Yanıt
+        // çocuğun stdin'ine PTY'den döner; `od` onu hex'e döküyor.
+        //
+        // `-icanon` şart: yanıtta satır sonu yok ve kanonik kip onu satır
+        // bitene kadar tutardı. `-echo` da: yankılanan yanıt ekrana basılıp
+        // mürekkebi kirletirdi. `-N` baytı iki yanıtın toplamına bağlıyor ki
+        // `od` blok dolmasını beklemeden dökümü bitirsin.
+        let theme = Theme {
+            background: 0x123456,
+            ansi: {
+                let mut ansi = THEME.ansi;
+                ansi[1] = 0xabcdef;
+                ansi
+            },
+            ..THEME
+        };
+        let reply = |osc: &str, hex: u32| {
+            let (r, g, b) = (hex >> 16 & 0xff, hex >> 8 & 0xff, hex & 0xff);
+            format!("\x1b]{osc};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07")
+        };
+        let replies = reply("11", 0x123456) + &reply("4;1", 0xabcdef);
+        let script = format!(
+            "stty -icanon -echo; printf '\\033]11;?\\007\\033]4;1;?\\007'; \
+             od -An -tx1 -N {}; sleep 5",
+            replies.len()
+        );
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(
+            SessionOptions {
+                theme,
+                ..test_options(sh(&script), 200)
+            },
+            wake.clone(),
+        )
+        .unwrap();
+
+        // Boşluklar mürekkep değil: `od`'nin satırları tek hex dizisine iner.
+        let needle: String = replies.bytes().map(|b| format!("{b:02x}")).collect();
+        wait_ink(&session, &wake, &needle);
+        assert_eq!(session.theme(), theme);
     }
 
     /// `needle` mürekkepte görünene kadar kare bekler; `od` satırı bölünmüş
@@ -2793,8 +2930,8 @@ mod tests {
             Arc::clone(&wake),
         );
         assert_eq!(wait_cells(&session, &wake, 5).len(), 5);
-        let red = color::default(1);
-        let green = color::linear_rgba(color::default(2));
+        let red = THEME.default(1);
+        let green = color::linear_rgba(THEME.default(2));
         let colors = |session: &Session| {
             let mut cells = Vec::new();
             assert!(session.frame(|c| cells.push(c)).is_some());
@@ -2821,7 +2958,9 @@ mod tests {
         );
         // `DIM` kuralı çevirmeden sonra da aynı: sönüklük `cell.fg`'den doğan
         // renge gider. Seçilmemişte o renk arka plan, seçilide yine ön plan.
-        let dim_red = color::linear_rgba(color::dim(red));
+        // Elle yazılı: `0xd16d6a × 2/3` (bkz.
+        // `dim_colors_on_the_draw_path_are_pinned`).
+        let dim_red = LinearRgba::from_srgb(0x8b, 0x48, 0x46);
         assert_eq!(drawn[&2], (Some(green), dim_red), "{drawn:?}");
         assert_eq!(drawn[&3], (Some(dim_red), green), "{drawn:?}");
 
@@ -3315,7 +3454,7 @@ mod tests {
                 "{what}: kalkan vurgu kare istemedi"
             );
             // Vurgu gerçekten gitti: beş hücre yeniden kendi kırmızısında.
-            let red = Some(color::linear_rgba(color::default(1)));
+            let red = Some(color::linear_rgba(THEME.default(1)));
             assert_eq!(
                 backgrounds(&cells).filter(|c| c.bg == red).count(),
                 5,
@@ -3602,6 +3741,54 @@ mod tests {
             wake.wait_wakes(1, Duration::ZERO) > 0,
             "hiç uyandırma gelmedi"
         );
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_color_request_and_frame() {
+        // Temanın yaprak kilidini iki thread birlikte alıyor: okuyucu renk
+        // sorusunu `Term` kilidi **altında**, ana thread `frame()`'de `Term`
+        // kilidinden **önce** ve `theme()`'de tek başına. Kilit sırası
+        // bozulursa sınama düşmez, **asılı kalır** — belirti koşunun
+        // bitmemesi.
+        //
+        // Yanıtlar arka plandaki `cat`'e akıyor: okunmayan yanıt girdi
+        // kuyruğunu doldurur ve sınama kilit değil kuyruk ölçerdi. `</dev/tty`
+        // şart: etkileşimsiz kabuk arka plan işine stdin olarak `/dev/null`
+        // veriyor, yalın `cat` hemen çıkar ve hiçbir şey emmez (PTY'de
+        // denendi).
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "stty -icanon -echo; cat </dev/tty >/dev/null & \
+             while :; do printf '\\033]11;?\\007\\033]4;1;?\\007\\033[42mx\\033[0m'; sleep 0.01; done",
+            Arc::clone(&wake),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let reader = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut seen = 0;
+                while Instant::now() < deadline {
+                    assert_eq!(session.theme(), THEME);
+                    let _ = session.resize(40 + (seen % 2) as u16, 10, (9, 18));
+                    seen += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+        };
+
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            if session.frame(|_| ()).is_some() {
+                frames += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        reader.join().unwrap();
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }
 }

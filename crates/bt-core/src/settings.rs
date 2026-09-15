@@ -14,6 +14,9 @@
 //! anahtarı (`[motion]`) bugünkü sürümde tanı üretmemeli.
 //!
 //! Ayrıştırıcı önceki `Settings`'i bilmez; fark almak çağıranın işi.
+//!
+//! Tanı tipi ve TOML yardımcıları tema dosyasının ayrıştırıcısıyla (`theme`)
+//! ortak: iki dosyanın hata dili aynı olsun.
 
 use std::fmt;
 
@@ -42,15 +45,22 @@ pub(crate) const SCROLLBACK_MAX: usize = 100_000;
 pub struct Settings {
     /// `[terminal] scrollback`: geçmişte tutulan satır, `0..=SCROLLBACK_MAX`.
     pub scrollback: usize,
+    /// `[appearance] theme`: tema **adı** — `themes/{ad}.toml` ya da gömülü
+    /// bir tema. Ad biçim olarak geçerli (boş değil, `/` yok); var olup
+    /// olmadığı dosya sistemi ister ve `bt-shell`'in ad çözümünde.
+    pub theme: String,
 }
 
 impl Default for Settings {
     /// Dosya yokken ve anahtar eksikken geçerli olan değerler.
     ///
     /// `scrollback` 006'ya kadar `bt-shell`'in `SCROLLBACK` sabitiydi; değer
-    /// aynı kaldı, sahibi buraya taşındı.
+    /// aynı kaldı, sahibi buraya taşındı. `theme` gömülü koyu tema.
     fn default() -> Self {
-        Self { scrollback: 10_000 }
+        Self {
+            scrollback: 10_000,
+            theme: "bateri".to_owned(),
+        }
     }
 }
 
@@ -100,13 +110,7 @@ impl Settings {
     /// `scrollback = 99999999999999999999` tavana kırpılamaz, çünkü değer
     /// hiç okunamıyor. `docs/AYARLAR.md` bunu söylüyor.
     pub fn parse(text: &str) -> Result<Parsed, Diagnostic> {
-        // `Document` (değişmez belge) `DocumentMut` değil: konumlar yalnız
-        // ayrıştırılmış belgede duruyor ve tanının satırı onlardan geliyor.
-        let doc = Document::parse(text).map_err(|err| Diagnostic {
-            key: None,
-            line: err.span().and_then(|span| line_of(text, span.start)),
-            message: format!("invalid TOML: {}", parser_reason(err.message())),
-        })?;
+        let doc = document(text)?;
         let mut parsed = Parsed {
             settings: Settings::default(),
             diagnostics: Vec::new(),
@@ -119,15 +123,34 @@ impl Settings {
                 }
             }
         }
+        if let Some(appearance) = section(text, root, "appearance", &mut parsed.diagnostics) {
+            if let Some(item) = appearance.get("theme") {
+                if let Some(value) = theme_name(text, item, &mut parsed.diagnostics) {
+                    parsed.settings.theme = value;
+                }
+            }
+        }
         Ok(parsed)
     }
+}
+
+/// Metni TOML belgesine ayrıştırır; ayrıştırılamıyorsa tek satırlık tanı.
+///
+/// `Document` (değişmez belge) `DocumentMut` değil: konumlar yalnız
+/// ayrıştırılmış belgede duruyor ve tanının satırı onlardan geliyor.
+pub(crate) fn document(text: &str) -> Result<Document<&str>, Diagnostic> {
+    Document::parse(text).map_err(|err| Diagnostic {
+        key: None,
+        line: err.span().and_then(|span| line_of(text, span.start)),
+        message: format!("invalid TOML: {}", parser_reason(err.message())),
+    })
 }
 
 /// Bir bölümü okur; bölüm değilse (`terminal = 5`) tanı bırakır ve `None`.
 ///
 /// `TableLike`: `[terminal]` başlığı da `terminal = { scrollback = 1 }`
 /// satır içi tablosu da aynı bölümdür.
-fn section<'a>(
+pub(crate) fn section<'a>(
     text: &str,
     root: &'a toml_edit::Table,
     name: &'static str,
@@ -185,12 +208,43 @@ fn scrollback(text: &str, item: &Item, diagnostics: &mut Vec<Diagnostic>) -> Opt
     Some(value)
 }
 
+/// `appearance.theme`: bir tema adı.
+///
+/// Adın yalnız **biçimi** sınanıyor: boş ad ve `/` içeren ad varsayılana
+/// döner. `/` adı `themes/` dizininin dışına taşırdı — `"../settings"`
+/// ayar dosyasının kendisini tema diye okuturdu. NUL da dosya yolu olamaz.
+/// Adın bir temaya çözülüp çözülmediği `bt-shell`'in işi.
+fn theme_name(text: &str, item: &Item, diagnostics: &mut Vec<Diagnostic>) -> Option<String> {
+    const KEY: &str = "appearance.theme";
+    let line = item.span().and_then(|span| line_of(text, span.start));
+    let default = Settings::default().theme;
+    let reject = |message: String| Diagnostic {
+        key: Some(KEY),
+        line,
+        message,
+    };
+    let Some(name) = item.as_str() else {
+        diagnostics.push(reject(format!(
+            "`{KEY}` must be a string, found {}; using \"{default}\"",
+            kind(item)
+        )));
+        return None;
+    };
+    if name.is_empty() || name.contains(['/', '\0']) {
+        diagnostics.push(reject(format!(
+            "`{KEY}` must be a theme name without `/`, found {name:?}; using \"{default}\""
+        )));
+        return None;
+    }
+    Some(name.to_owned())
+}
+
 /// Bayt konumunun 1'den başlayan satırı.
 ///
 /// `toml_edit`'in kendi çevirisi (`translate_position`) crate'e özel;
 /// ayrıştırıcının verdiği konum her zaman metnin içinde ama `get` yine de
 /// sınırın dışını `None`'a çeviriyor, dilimleme paniği yok.
-fn line_of(text: &str, offset: usize) -> Option<usize> {
+pub(crate) fn line_of(text: &str, offset: usize) -> Option<usize> {
     let before = text.as_bytes().get(..offset)?;
     Some(before.iter().filter(|&&byte| byte == b'\n').count() + 1)
 }
@@ -208,7 +262,7 @@ fn parser_reason(message: &str) -> &str {
 }
 
 /// Tanı metninde bulunan değerin türü.
-fn kind(item: &Item) -> &'static str {
+pub(crate) fn kind(item: &Item) -> &'static str {
     match item {
         Item::None => "nothing",
         Item::Table(_) => "a section",
@@ -287,6 +341,39 @@ mod tests {
         assert_eq!(settings.scrollback, SCROLLBACK_MAX);
         assert_eq!(diagnostic.key, Some("terminal.scrollback"));
         assert_eq!(diagnostic.line, Some(2));
+    }
+
+    #[test]
+    fn theme_name_is_read() {
+        assert_eq!(clean("[appearance]\ntheme = \"paper\"\n").theme, "paper");
+        assert_eq!(clean("").theme, "bateri");
+        // Bölüm satır içi de yazılabilir; komşu bölüm okumayı bozmaz.
+        let settings = clean("appearance = { theme = \"a b.c\" }\n[terminal]\nscrollback = 3\n");
+        assert_eq!((settings.theme.as_str(), settings.scrollback), ("a b.c", 3));
+    }
+
+    #[test]
+    fn theme_name_outside_themes_dir_falls_back() {
+        let (settings, diagnostic) = rejected("[appearance]\ntheme = \"../settings\"\n");
+        assert_eq!(settings.theme, "bateri");
+        assert_eq!(diagnostic.key, Some("appearance.theme"));
+        assert_eq!(diagnostic.line, Some(2));
+        assert_eq!(
+            diagnostic.message,
+            "`appearance.theme` must be a theme name without `/`, found \"../settings\"; using \"bateri\""
+        );
+        assert_eq!(rejected("[appearance]\ntheme = \"\"\n").0.theme, "bateri");
+        assert_eq!(
+            rejected("[appearance]\ntheme = \"a\\u0000\"\n").0.theme,
+            "bateri"
+        );
+
+        let (settings, diagnostic) = rejected("[appearance]\ntheme = 3\n");
+        assert_eq!(settings.theme, "bateri");
+        assert_eq!(
+            diagnostic.message,
+            "`appearance.theme` must be a string, found an integer; using \"bateri\""
+        );
     }
 
     #[test]

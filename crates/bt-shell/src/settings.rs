@@ -1,5 +1,6 @@
-//! Ayar dosyasının yükleyicisi: kök dizindeki `settings.toml`'u okur ve
-//! `bt-core`'un saf ayrıştırıcısına verir.
+//! Ayar ve tema dosyalarının yükleyicisi: kök dizindeki `settings.toml`'u ve
+//! `themes/{ad}.toml`'u okur, `bt-core`'un saf ayrıştırıcılarına verir; tema
+//! **adını** bir temaya çözen de burası ([`load_theme`]).
 //!
 //! Kök **parametre**: üretimde `$HOME/.config/bateri/` ([`config_root`]),
 //! sınamada geçici bir dizin — hiçbir sınama gerçek `HOME`'u okumaz. Süreli
@@ -21,10 +22,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use bt_core::{Diagnostic, Parsed, Settings};
+use bt_core::{Diagnostic, Parsed, Settings, Theme};
 
 /// Ayar dosyasının adı; tanı metinleri de kullanıcıya bu adla söylüyor.
 pub(crate) const FILE_NAME: &str = "settings.toml";
+
+/// Kullanıcı temalarının dizini, kökün altında.
+const THEMES_DIR: &str = "themes";
 
 /// Üretimdeki kök: `{ev}/.config/bateri/`.
 ///
@@ -48,37 +52,114 @@ pub(crate) enum Loaded {
     Parsed(Parsed),
 }
 
-/// `{root}/settings.toml`'u okur.
-pub(crate) fn load(root: &Path) -> Loaded {
-    let path = root.join(FILE_NAME);
+/// Bir metin dosyasının okunuşu — ayar ve tema dosyasının ortak kapısı.
+enum Text {
+    Missing,
+    Unreadable(io::Error),
+    Read(String),
+}
+
+/// `path`'i okur; "dosya yok" ile "okunamadı"yı ayırır.
+fn read_text(path: &Path) -> Text {
     // `metadata` bağı izliyor: hedefin türü soruluyor, bağın değil.
-    match std::fs::metadata(&path) {
+    match std::fs::metadata(path) {
         // Kırık bağ da `NotFound` veriyor; ama dosya `ls`'te görünüyor ve
         // "hiç ayar yok" diye susmak kullanıcıyı neden işlemediğini aramaya
         // bırakırdı (dotfile yöneticisinin taşınmış deposu).
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return match std::fs::symlink_metadata(&path) {
+            return match std::fs::symlink_metadata(path) {
                 Ok(_) => {
-                    Loaded::Unreadable(io::Error::other("symbolic link points to a missing file"))
+                    Text::Unreadable(io::Error::other("symbolic link points to a missing file"))
                 }
-                Err(_) => Loaded::Missing,
+                Err(_) => Text::Missing,
             };
         }
-        Err(err) => return Loaded::Unreadable(err),
+        Err(err) => return Text::Unreadable(err),
         // FIFO okumayı sonsuza dek bekletir, `/dev/zero` belleği bitirir.
         Ok(meta) if !meta.is_file() => {
-            return Loaded::Unreadable(io::Error::other("not a regular file"));
+            return Text::Unreadable(io::Error::other("not a regular file"));
         }
         Ok(_) => {}
     }
-    match std::fs::read_to_string(&path) {
+    match std::fs::read_to_string(path) {
         // Denetimle okuma arasında silindi: dosya yok hâli.
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Loaded::Missing,
-        Err(err) => Loaded::Unreadable(err),
-        Ok(text) => match Settings::parse(&text) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Text::Missing,
+        Err(err) => Text::Unreadable(err),
+        Ok(text) => Text::Read(text),
+    }
+}
+
+/// `{root}/settings.toml`'u okur.
+pub(crate) fn load(root: &Path) -> Loaded {
+    match read_text(&root.join(FILE_NAME)) {
+        Text::Missing => Loaded::Missing,
+        Text::Unreadable(err) => Loaded::Unreadable(err),
+        Text::Read(text) => match Settings::parse(&text) {
             Ok(parsed) => Loaded::Parsed(parsed),
             Err(diagnostic) => Loaded::Unparseable(diagnostic),
         },
+    }
+}
+
+/// Bir tema adının çözümü.
+#[derive(Debug)]
+pub(crate) enum ThemeLoaded {
+    /// Kullanıcı dosyasından ya da gömülü temalardan bulundu; iletiler
+    /// dosyada kabul edilmeyen renkler (alt başlığa hazır biçimde).
+    Found(Theme, Vec<String>),
+    /// Kullanılamadı: dosya okunamadı ya da ayrıştırılamadı, ya da ad hiçbir
+    /// yerde yok. Tek ileti; hangi temanın geçerli kalacağı çağıranın kuralı.
+    Failed(String),
+}
+
+/// Tema adını çözer: önce `{root}/themes/{ad}.toml`, sonra gömülü temalar.
+///
+/// `root` `None` → ev dizini çözülemedi, yalnız gömülüler. Dosya
+/// `Theme::BATERI`'nin üstüne okunur: eksik anahtar oradan gelir
+/// (`docs/AYARLAR.md` → Temalar).
+///
+/// **Dosya var ama kullanılamıyorsa gömülüye düşülmez**: bozuk bir
+/// `themes/bateri.toml` sessizce gömülü `bateri`'yi açsaydı kullanıcı
+/// dosyasının neden işlemediğini göremezdi. Dosya **yoksa** gömülü aranır —
+/// gölgelenmemiş ad budur.
+///
+/// Adın biçimi (`/` yok, boş değil) `bt-core`'da zaten sınandı; burada yeniden
+/// sınanmıyor, `Settings`'ten gelmeyen bir ad bu fonksiyona hiç verilmiyor.
+pub(crate) fn load_theme(root: Option<&Path>, name: &str) -> ThemeLoaded {
+    if let Some(root) = root {
+        let file = format!("{THEMES_DIR}/{name}.toml");
+        match read_text(&root.join(&file)) {
+            Text::Missing => {}
+            Text::Unreadable(err) => {
+                return ThemeLoaded::Failed(format!("{file} could not be read: {err}"));
+            }
+            Text::Read(text) => {
+                return match Theme::parse(&text, &Theme::BATERI) {
+                    Ok((theme, diagnostics)) => ThemeLoaded::Found(
+                        theme,
+                        diagnostics.iter().map(|d| format!("{file}: {d}")).collect(),
+                    ),
+                    Err(diagnostic) => ThemeLoaded::Failed(format!("{file}: {diagnostic}")),
+                };
+            }
+        }
+    }
+    match Theme::embedded(name) {
+        Some(theme) => ThemeLoaded::Found(theme, Vec::new()),
+        None => ThemeLoaded::Failed(format!("theme \"{name}\" not found")),
+    }
+}
+
+impl ThemeLoaded {
+    /// Açılışın kuralı: kullanılamayan temanın yerine gömülü `bateri`, ve
+    /// bunu söyleyen ileti.
+    pub(crate) fn at_launch(self) -> (Theme, Vec<String>) {
+        match self {
+            ThemeLoaded::Found(theme, messages) => (theme, messages),
+            ThemeLoaded::Failed(message) => {
+                (Theme::BATERI, vec![format!("{message}; using bateri")])
+            }
+        }
     }
 }
 
@@ -194,7 +275,7 @@ mod tests {
             .expect("yazılamadı");
         std::os::unix::fs::symlink(root.0.join("real.toml"), root.0.join(FILE_NAME))
             .expect("bağ kurulamadı");
-        assert_eq!(load(&root.0).at_launch().0, Settings { scrollback: 7 });
+        assert_eq!(load(&root.0).at_launch().0.scrollback, 7);
     }
 
     #[test]
@@ -219,7 +300,13 @@ mod tests {
             .expect("yazılamadı");
         assert_eq!(
             load(&root.0).at_launch(),
-            (Settings { scrollback: 2500 }, Vec::new())
+            (
+                Settings {
+                    scrollback: 2500,
+                    ..Settings::default()
+                },
+                Vec::new()
+            )
         );
 
         std::fs::write(root.0.join(FILE_NAME), "[terminal]\nscrollback = true\n")
@@ -230,6 +317,93 @@ mod tests {
         assert!(
             notices[0].starts_with("settings.toml: line 2: `terminal.scrollback`"),
             "{notices:?}"
+        );
+    }
+
+    /// Kökün altına `themes/{name}.toml` yazar.
+    fn write_theme(root: &TempRoot, name: &str, text: &str) {
+        let dir = root.0.join(THEMES_DIR);
+        std::fs::create_dir_all(&dir).expect("tema dizini kurulamadı");
+        std::fs::write(dir.join(format!("{name}.toml")), text).expect("yazılamadı");
+    }
+
+    #[test]
+    fn embedded_theme_without_user_file() {
+        let root = TempRoot::new("theme-embedded");
+        let (theme, notices) = load_theme(Some(&root.0), "bateri").at_launch();
+        assert_eq!((theme, notices), (Theme::BATERI, Vec::new()));
+        // Ev dizini yoksa da gömülüler çözülür.
+        assert_eq!(
+            load_theme(None, "bateri").at_launch(),
+            (Theme::BATERI, Vec::new())
+        );
+    }
+
+    #[test]
+    fn user_theme_shadows_the_embedded_one() {
+        let root = TempRoot::new("theme-shadow");
+        write_theme(&root, "bateri", "background = \"#ffffff\"\n");
+        let (theme, notices) = load_theme(Some(&root.0), "bateri").at_launch();
+        assert_eq!(notices, Vec::<String>::new());
+        assert_eq!(
+            theme,
+            Theme {
+                background: 0xffffff,
+                ..Theme::BATERI
+            }
+        );
+    }
+
+    #[test]
+    fn user_theme_reports_its_bad_colors_with_the_file_name() {
+        let root = TempRoot::new("theme-diagnostics");
+        write_theme(
+            &root,
+            "paper",
+            "[ansi]\nred = \"red\"\nblue = \"#0000ff\"\n",
+        );
+        let (theme, notices) = load_theme(Some(&root.0), "paper").at_launch();
+        assert_eq!(theme.ansi[4], 0x0000ff);
+        assert_eq!(theme.ansi[1], Theme::BATERI.ansi[1]);
+        assert_eq!(
+            notices,
+            [
+                "themes/paper.toml: line 2: `ansi.red` must be a color like \"#rrggbb\", found \"red\"; using #d16d6a"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_theme_falls_back_to_bateri_with_notice() {
+        let root = TempRoot::new("theme-missing");
+        let (theme, notices) = load_theme(Some(&root.0), "paper").at_launch();
+        assert_eq!(theme, Theme::BATERI);
+        assert_eq!(notices, ["theme \"paper\" not found; using bateri"]);
+    }
+
+    #[test]
+    fn broken_user_theme_does_not_fall_to_the_embedded_one() {
+        // Aynı adlı gömülü tema var, ama bozuk dosya onu açmıyor: sonuç yine
+        // `bateri` olsa da **ileti** dosyayı söylüyor. Gömülü adı olmayan bir
+        // temayla aynı kural (ikinci yarı).
+        let root = TempRoot::new("theme-broken");
+        write_theme(&root, "bateri", "background = \"#ffffff\n");
+        let loaded = load_theme(Some(&root.0), "bateri");
+        assert!(matches!(loaded, ThemeLoaded::Failed(_)), "{loaded:?}");
+        let (theme, notices) = loaded.at_launch();
+        assert_eq!(theme, Theme::BATERI);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].starts_with("themes/bateri.toml: line 1: invalid TOML: ")
+                && notices[0].ends_with("; using bateri"),
+            "{notices:?}"
+        );
+
+        std::fs::create_dir_all(root.0.join(THEMES_DIR).join("paper.toml"))
+            .expect("dizin kurulamadı");
+        assert_eq!(
+            load_theme(Some(&root.0), "paper").at_launch().1,
+            ["themes/paper.toml could not be read: not a regular file; using bateri"]
         );
     }
 }

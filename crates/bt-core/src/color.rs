@@ -1,13 +1,15 @@
 //! Renk çözümü: bir hücrenin `Color`'ı ile ekrandaki RGBA arasındaki tek yol.
 //!
-//! Tema modeli (sekiz rol, palet dosyaları) 00X'te gelir; burası o gelene
-//! kadar tek sahiptir. Renderer palet bilmez: `frame()` çözülmüş RGBA verir.
+//! Paletin sahibi [`Theme`]: zemin, ön plan, sönük ön plan, imleç ve 16 ANSI
+//! rengi tek değerde. Renderer palet bilmez: `frame()` çözülmüş RGBA verir,
+//! clear ve imleç rengini de aynı temadan alır. Tema dosyasının ayrıştırıcısı
+//! `theme` modülünde.
 //!
 //! Renkler `0xRRGGBB` olarak yazılır — palet her yerde böyle yazılır ve
 //! `Rgb { r, g, b }` üçlüsü onaltı satırlık bir tabloyu okunmaz eder.
 
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::vte::ansi::{Color, Rgb};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
 /// Çizim hedefinin uzayındaki renk: **lineer** RGBA.
 ///
@@ -49,50 +51,141 @@ impl LinearRgba {
 
     /// GPU'ya giden dört bileşen.
     ///
-    /// `const`: `DEFAULT_BG` gibi sabitlerin derleme zamanında da açılması
-    /// gerekiyor.
+    /// `const`: `Theme::BATERI.background_linear()` gibi sabitlerin derleme
+    /// zamanında da açılması gerekiyor (`bt-gpu`'nun sınamaları).
     pub const fn to_array(self) -> [f32; 4] {
         self.0
     }
 }
 
-/// Varsayılan arka plan, **lineer** RGBA (`linear_rgba`, crate-içi).
-/// **Tek sahibi burasıdır**: pencerenin clear rengi de,
-/// `frame()`'in "bu hücre varsayılan, çizilmesin" kararı da buradan okur. İki
-/// yerde dursaydı biri değişince pencere ile hücreler ayrı renk olurdu.
-pub const DEFAULT_BG: LinearRgba = linear_rgba(rgb(BG));
+/// Bir renk teması: **tek kaynak**.
+///
+/// Pencerenin clear rengi ([`Theme::background_linear`]), `frame()`'in "bu
+/// hücre varsayılan, çizilmesin" kararı, imleç bloğu
+/// ([`Theme::accent_linear`]) ve uygulamanın renk sorusuna (OSC 10/11) verilen
+/// yanıt hep aynı değerden okunur. İki yerde dursalardı biri değişince
+/// pencere ile hücreler ayrı renk olurdu.
+///
+/// Sekiz rollü modelin 007'de tüketicisi olan dördü burada; dört durum rolü
+/// 013 ile gelir. Alanlar `0xRRGGBB` (üst bayt okunmaz) ve `pub`: tip bir
+/// kayıt, `Settings` gibi; geçerliliğini kuran yol tema ayrıştırıcısı
+/// ([`Theme::parse`]). Alacritty'nin `Rgb`'si `pub` yüzde görünmez.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Theme {
+    /// Varsayılan arka plan; pencerenin zemini.
+    pub background: u32,
+    /// Varsayılan ön plan.
+    pub foreground: u32,
+    /// Sönük (SGR 2) varsayılan ön plan. Adlı ve dolaylı renklerin sönüğü
+    /// bugün hâlâ `× 2/3` ([`dim`]); bu rol yalnız varsayılan ön planın.
+    pub dim: u32,
+    /// Vurgu; bugün imleç bloğu.
+    pub accent: u32,
+    /// 16 ANSI rengi: siyah, kırmızı, yeşil, sarı, mavi, macenta, camgöbeği,
+    /// beyaz, sonra aynı sırada parlak sekizlisi.
+    pub ansi: [u32; 16],
+}
 
-/// İmleç bloğunun rengi, **lineer** RGBA (`linear_rgba`, crate-içi). Renderer'da
-/// sabit durmasın diye burada: renk kararı
-/// paletin, çizim kararı renderer'ın.
-pub const DEFAULT_CURSOR: LinearRgba = linear_rgba(rgb(CURSOR));
+impl Theme {
+    /// Gömülü koyu tema — ayar dosyası yokken ve süreli koşuda geçerli olan.
+    ///
+    /// ANSI tonları nötr gri taban üstünde doygunluğu kırılmış renkler.
+    /// Siyah bilerek arka plandan ayrıdır — `\e[40m` çizilmeyen bir hücre
+    /// değil, görünür bir blok olmalı. `dim`, `foreground × 2/3`'ün vte
+    /// çarpımıyla (`f32`, kesme) sonucu: 006'ya kadar sönük ön plan böyle
+    /// hesaplanıyordu ve ekran bit bit aynı kaldı.
+    ///
+    /// `const`: `bt-gpu`'nun sınamaları clear ve imleç rengini `const`
+    /// bağlamda buradan alıyor. sRGB tablosunun `const` olmasının gerekçesi
+    /// de bu.
+    // Satır başına dörtlü düzen ve sağdaki ad yorumları taşıyıcı bilgidir:
+    // rengin hangi ANSI adına düştüğü ancak bu hizadan okunuyor. rustfmt
+    // tabloyu tek sütuna açıp hizayı yok ediyor.
+    #[rustfmt::skip]
+    pub const BATERI: Theme = Theme {
+        background: 0x1a1c21,
+        foreground: 0xd8d9dd,
+        dim: 0x909093,
+        accent: 0x7a9cc6,
+        ansi: [
+            0x22252b, 0xd16d6a, 0x8bb58b, 0xd6b16a, // siyah   kırmızı  yeşil    sarı
+            0x7a9cc6, 0xb08ec0, 0x79b3b3, 0xc8c9cc, // mavi    macenta  camgöbeği beyaz
+            0x4a4e57, 0xe58b88, 0xa4cba4, 0xe8c988, // parlak sekizlisi, aynı sırada
+            0x9bb8dc, 0xc9aad8, 0x96caca, 0xe6e7ea,
+        ],
+    };
 
-/// Varsayılan arka planın `Rgb` hâli; `frame()` karşılaştırmayı burada yapar,
-/// f32 eşitliği aramaz.
-pub(crate) const BG_RGB: Rgb = rgb(BG);
+    /// Uygulamaya gömülü temalar, adıyla. Kullanıcının `themes/{ad}.toml`'u
+    /// aynı adı gölgeler; o karar `bt-shell`'in ad çözümünde.
+    pub fn embedded(name: &str) -> Option<Theme> {
+        EMBEDDED
+            .iter()
+            .find(|(embedded, _)| *embedded == name)
+            .map(|(_, theme)| *theme)
+    }
+
+    /// Pencerenin clear rengi, **lineer** RGBA.
+    pub const fn background_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.background))
+    }
+
+    /// İmleç bloğunun rengi, **lineer** RGBA. Renderer'da sabit durmasın diye
+    /// burada: renk kararı temanın, çizim kararı renderer'ın.
+    pub const fn accent_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.accent))
+    }
+
+    /// Paletin `index` numaralı rengi. Numaralandırma alacritty'nin
+    /// `term::color` tablosudur: 0..16 ANSI, 16..232 küp, 232..256 gri rampa,
+    /// 256+ rol renkleri.
+    ///
+    /// Soğuk değil: taze bir oturumda `Colors` tablosu boştur (yalnız OSC
+    /// 4/10/11 doldurur), yani `resolve` her hücrede buraya düşer.
+    #[inline]
+    pub(crate) fn default(&self, index: usize) -> Rgb {
+        match index {
+            0..=15 => rgb(self.ansi[index]), // audit: kol indeksi 0..16'ya bağlar
+            16..=231 => {
+                let n = index - 16;
+                Rgb {
+                    r: CUBE[n / 36],
+                    g: CUBE[(n / 6) % 6],
+                    b: CUBE[n % 6],
+                }
+            }
+            232..=255 => {
+                let v = 8 + 10 * (index - 232) as u8; // audit: kol bağlar, en çok 238
+                Rgb { r: v, g: v, b: v }
+            }
+            256 => rgb(self.foreground),
+            257 => rgb(self.background),
+            258 => rgb(self.accent),
+            // 259..=266 sönük ANSI sekizlisi, 267 parlak ön plan, 268 sönük ön
+            // plan.
+            259..=266 => rgb(self.ansi[index - 259]) * DIM,
+            267 => rgb(self.foreground),
+            268 => rgb(self.dim),
+            // Tablo 269 girdilik; buraya düşen bir indeks alacritty'nin
+            // değişmesi demektir. Renk yerine arka plan verip sessiz kalırız,
+            // panik etmeyiz.
+            _ => rgb(self.background),
+        }
+    }
+
+    /// Varsayılan arka planın `Rgb` hâli; `frame()` karşılaştırmayı bununla
+    /// yapar, f32 eşitliği aramaz.
+    pub(crate) const fn background_rgb(&self) -> Rgb {
+        rgb(self.background)
+    }
+}
+
+/// Gömülü temaların tablosu; [`Theme::embedded`] okur.
+const EMBEDDED: [(&str, Theme); 1] = [("bateri", Theme::BATERI)];
 
 /// Sönük (`DIM`) renklerin çarpanı. Çarpma vte'nin `impl Mul<f32> for Rgb`'si
 /// (`vte/src/ansi.rs`, yorumu birebir "the default dim is just *2/3"): `f32`'de
 /// hesaplar ve `clamp(0.0, 255.0)` uygular, yani kanal taşması diye bir sınıf yok.
 const DIM: f32 = 2.0 / 3.0;
-
-const BG: u32 = 0x1a1c21;
-const FG: u32 = 0xd8d9dd;
-const CURSOR: u32 = 0x7a9cc6;
-
-/// 16 ANSI rengi; nötr gri taban üstünde doygunluğu kırılmış tonlar. Siyah
-/// bilerek arka plandan ayrıdır — `\e[40m` çizilmeyen bir hücre değil, görünür
-/// bir blok olmalı.
-// Satır başına dörtlü düzen ve sağdaki ad yorumları taşıyıcı bilgidir:
-// rengin hangi ANSI adına düştüğü ancak bu hizadan okunuyor. rustfmt tabloyu
-// tek sütuna açıp hizayı yok ediyor.
-#[rustfmt::skip]
-const ANSI: [u32; 16] = [
-    0x22252b, 0xd16d6a, 0x8bb58b, 0xd6b16a, // siyah   kırmızı  yeşil    sarı
-    0x7a9cc6, 0xb08ec0, 0x79b3b3, 0xc8c9cc, // mavi    macenta  camgöbeği beyaz
-    0x4a4e57, 0xe58b88, 0xa4cba4, 0xe8c988, // parlak sekizlisi, aynı sırada
-    0x9bb8dc, 0xc9aad8, 0x96caca, 0xe6e7ea,
-];
 
 /// 6×6×6 renk küpünün kanal basamakları (xterm sözleşmesi).
 const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
@@ -100,61 +193,40 @@ const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
 /// Hücrenin rengini ekranın rengine çevirir.
 ///
 /// `colors` uygulamanın OSC 4/10/11 ile değiştirdiği tablodur ve girdileri
-/// `None` olabilir; boş girdide bizim varsayılan paletimize düşülür.
+/// `None` olabilir; boş girdide temanın paletine düşülür.
 ///
-/// `#[inline]`: `linear_rgba` ile aynı sıcak yol ve aynı gerekçe. `default`
-/// ile **birlikte** işaretlenir; yalnız biri alınırsa çağrı ötekine kayar.
+/// `#[inline]`: `linear_rgba` ile aynı sıcak yol ve aynı gerekçe.
+/// `Theme::default` ile **birlikte** işaretlenir; yalnız biri alınırsa çağrı
+/// ötekine kayar.
 #[inline]
-pub(crate) fn resolve(color: Color, colors: &Colors) -> Rgb {
+pub(crate) fn resolve(color: Color, colors: &Colors, theme: &Theme) -> Rgb {
     let index = match color {
         Color::Spec(spec) => return spec,
         Color::Named(named) => named as usize,
         Color::Indexed(index) => index as usize,
     };
     // Tablo 269 girdilik; `NamedColor` en çok 268, `Indexed` en çok 255.
-    colors[index].unwrap_or_else(|| default(index)) // audit: indeks sınırlı
+    colors[index].unwrap_or_else(|| theme.default(index)) // audit: indeks sınırlı
 }
 
-/// Rengi sönük (`DIM`) hâline indirir.
+/// Hücrenin **`fg`'sinden doğan** rengi, sönüklük dahil çözer.
 ///
-/// `#[inline]`: tek çarpma, ama `resolve`/`default` ile aynı sıcak yolda ve
-/// aynı sebeple (LTO kapalı) crate sınırında çağrıya dönüşüyordu.
-#[inline]
-pub(crate) fn dim(color: Rgb) -> Rgb {
-    color * DIM
-}
-
-/// Paletin `index` numaralı rengi. Numaralandırma alacritty'nin `term::color`
-/// tablosudur: 0..16 ANSI, 16..232 küp, 232..256 gri rampa, 256+ rol renkleri.
+/// Sönüklüğün tek kuralı burada, çünkü iki yerde uygulanıyor: normal hücrede
+/// ön plana, ters videoda arka plana (`Session::frame`). İki dala ayrı ayrı
+/// yazılsaydı biri değişip öteki eski kalabilirdi.
 ///
-/// Soğuk değil: taze bir oturumda `Colors` tablosu boştur (yalnız OSC 4/10/11
-/// doldurur), yani `resolve` her hücrede buraya düşer.
+/// Varsayılan ön plan sönükse çözümden **önce** temanın `dim` rolü alınır —
+/// alacritty uygulamasının `DimForeground`'ı. Sonucu: OSC 10 ile değişmiş bir
+/// ön plan sönük hücrede o rengin sönüğü değil, rolün kendisi olur (alacritty
+/// de öyle). Öteki renkler çözülür ve `× 2/3` iner.
+///
+/// `#[inline]`: `resolve` ile aynı sıcak yol.
 #[inline]
-pub(crate) fn default(index: usize) -> Rgb {
-    match index {
-        0..=15 => rgb(ANSI[index]), // audit: kol indeksi 0..16'ya bağlar
-        16..=231 => {
-            let n = index - 16;
-            Rgb {
-                r: CUBE[n / 36],
-                g: CUBE[(n / 6) % 6],
-                b: CUBE[n % 6],
-            }
-        }
-        232..=255 => {
-            let v = 8 + 10 * (index - 232) as u8; // audit: kol bağlar, en çok 238
-            Rgb { r: v, g: v, b: v }
-        }
-        256 => rgb(FG),
-        257 => rgb(BG),
-        258 => rgb(CURSOR),
-        // 259..=266 sönük ANSI sekizlisi, 267 parlak ön plan, 268 sönük ön plan.
-        259..=266 => rgb(ANSI[index - 259]) * DIM,
-        267 => rgb(FG),
-        268 => rgb(FG) * DIM,
-        // Tablo 269 girdilik; buraya düşen bir indeks alacritty'nin değişmesi
-        // demektir. Renk yerine arka plan verip sessiz kalırız, panik etmeyiz.
-        _ => rgb(BG),
+pub(crate) fn resolve_fg(color: Color, dim: bool, colors: &Colors, theme: &Theme) -> Rgb {
+    match color {
+        Color::Named(NamedColor::Foreground) if dim => rgb(theme.dim),
+        color if dim => resolve(color, colors, theme) * DIM,
+        color => resolve(color, colors, theme),
     }
 }
 
@@ -172,9 +244,10 @@ const fn rgb(hex: u32) -> Rgb {
 /// Tablo, elle bakılan bir sabit listesi **değil**, türetilmiş bir veridir:
 /// `srgb_table_follows_transfer_function` her girdiyi formüle bağlar.
 /// Tablo olmasının sebebi `const`luk — `powf` stable'da `const` değil, oysa
-/// `DEFAULT_BG` ve `DEFAULT_CURSOR` `const`.
+/// [`Theme::background_linear`] ve [`Theme::accent_linear`] `const fn`.
 // rustfmt tabloyu girdi başına bir satıra açıyor: 64 satır 256 olur ve
-// dosyanın geri kalanı okunmaz hâle gelir. `ANSI` tablosuyla aynı gerekçe.
+// dosyanın geri kalanı okunmaz hâle gelir. `Theme::BATERI`'nin ANSI
+// tablosuyla aynı gerekçe.
 #[rustfmt::skip]
 const SRGB_LINEAR: [f32; 256] = [
     0.0, 0.000303527, 0.000607054, 0.000910581,
@@ -268,13 +341,55 @@ pub(crate) const fn linear_rgba(color: Rgb) -> LinearRgba {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alacritty_terminal::vte::ansi::NamedColor;
+
+    const THEME: Theme = Theme::BATERI;
 
     #[test]
     fn default_background_has_one_source() {
-        // Hücrenin `Named(Background)`'ı ile pencerenin clear rengi aynı
-        // sabitten gelmeli; ayrılırlarsa boş hücreler pencereden farklı boyanır.
-        assert_eq!(default(NamedColor::Background as usize), BG_RGB);
+        // Hücrenin `Named(Background)`'ı, `frame()`'in atlama kararı ve
+        // pencerenin clear rengi temanın **aynı** alanından gelmeli;
+        // ayrılırlarsa boş hücreler pencereden farklı boyanır.
+        let background = rgb(THEME.background);
+        assert_eq!(THEME.default(NamedColor::Background as usize), background);
+        assert_eq!(THEME.background_rgb(), background);
+        assert_eq!(THEME.background_linear(), linear_rgba(background));
+        // İmleç de rolünden: renk sorusunun yanıtı ile çizilen blok ayrışmasın.
+        assert_eq!(
+            THEME.default(NamedColor::Cursor as usize),
+            rgb(THEME.accent)
+        );
+        assert_eq!(THEME.accent_linear(), linear_rgba(rgb(THEME.accent)));
+    }
+
+    #[test]
+    fn bateri_palette_is_pinned() {
+        // Paletin 19 değeri **elle yazılmış** bir listeye bağlı: tablodan
+        // hesaplanan bir beklenti, tabloya düşen yazım hatasını kendisi de
+        // taşırdı. Değerleri bilerek değiştiren bu listeyi de değiştirir.
+        #[rustfmt::skip]
+        const EXPECTED: [(usize, u32); 19] = [
+            (0, 0x22252b), (1, 0xd16d6a), (2, 0x8bb58b), (3, 0xd6b16a),
+            (4, 0x7a9cc6), (5, 0xb08ec0), (6, 0x79b3b3), (7, 0xc8c9cc),
+            (8, 0x4a4e57), (9, 0xe58b88), (10, 0xa4cba4), (11, 0xe8c988),
+            (12, 0x9bb8dc), (13, 0xc9aad8), (14, 0x96caca), (15, 0xe6e7ea),
+            (256, 0xd8d9dd), // ön plan
+            (257, 0x1a1c21), // arka plan
+            (258, 0x7a9cc6), // imleç
+        ];
+        for (index, hex) in EXPECTED {
+            assert_eq!(THEME.default(index), rgb(hex), "{index}");
+        }
+    }
+
+    #[test]
+    fn embedded_themes_are_found_by_name() {
+        assert_eq!(Theme::embedded("bateri"), Some(Theme::BATERI));
+        assert_eq!(
+            Theme::embedded("Bateri"),
+            None,
+            "ad büyük-küçük harfe duyarlı"
+        );
+        assert_eq!(Theme::embedded(""), None);
     }
 
     #[test]
@@ -308,27 +423,55 @@ mod tests {
 
     #[test]
     fn palette_indices_follow_xterm() {
-        assert_eq!(default(1), rgb(ANSI[1]));
+        assert_eq!(THEME.default(1), rgb(THEME.ansi[1]));
         // 16 = küpün başı (0,0,0), 231 = sonu (255,255,255).
-        assert_eq!(default(16), rgb(0x000000));
-        assert_eq!(default(231), rgb(0xffffff));
+        assert_eq!(THEME.default(16), rgb(0x000000));
+        assert_eq!(THEME.default(231), rgb(0xffffff));
         // Gri rampa 8'den başlar, 10'ar artar.
-        assert_eq!(default(232), rgb(0x080808));
-        assert_eq!(default(255), rgb(0xeeeeee));
+        assert_eq!(THEME.default(232), rgb(0x080808));
+        assert_eq!(THEME.default(255), rgb(0xeeeeee));
     }
 
     #[test]
     fn dim_colors_are_darker_than_source() {
         // Sönük sekizli ANSI 0..8'in, sönük ön plan da ön planın altında kalır.
         for index in 259..=266 {
-            let dimmed = default(index);
-            let bright = default(index - 259);
+            let dimmed = THEME.default(index);
+            let bright = THEME.default(index - 259);
             assert!(dimmed.r < bright.r || bright.r == 0, "{index}");
             assert!(dimmed.g <= bright.g && dimmed.b <= bright.b, "{index}");
         }
-        assert!(default(268).r < default(256).r);
+        assert!(THEME.default(268).r < THEME.default(256).r);
         // Kırmızının sönüğü: 209/109/106 → 139/72/70. vte f32'de çarpıp kırpar.
-        assert_eq!(default(260), rgb(0x8b4846));
+        assert_eq!(THEME.default(260), rgb(0x8b4846));
+        // `dim` rolü 006'nın hesabının donmuş hâli: `foreground × 2/3`.
+        assert_eq!(rgb(THEME.dim), rgb(THEME.foreground) * DIM);
+    }
+
+    #[test]
+    fn dim_default_foreground_takes_the_role() {
+        // Rol çözümden **önce**: tabloda (OSC 10) ön plan değişmiş olsa da
+        // sönük varsayılan ön plan temanın `dim`'i. Rol bilerek ön planın
+        // `× 2/3`'ünden ayrık seçildi ki iki yol karışınca sınama görsün.
+        let theme = Theme {
+            dim: 0x123456,
+            ..THEME
+        };
+        let mut colors = Colors::default();
+        colors[NamedColor::Foreground] = Some(rgb(0xffffff));
+        let foreground = Color::Named(NamedColor::Foreground);
+        assert_eq!(resolve_fg(foreground, true, &colors, &theme), rgb(0x123456));
+        // Sönük olmayan ön plan tabloyu okur.
+        assert_eq!(
+            resolve_fg(foreground, false, &colors, &theme),
+            rgb(0xffffff)
+        );
+        // Adlı renk çözülüp `× 2/3` iner; rol ona dokunmaz.
+        let red = Color::Named(NamedColor::Red);
+        assert_eq!(
+            resolve_fg(red, true, &colors, &theme),
+            rgb(THEME.ansi[1]) * DIM
+        );
     }
 
     #[test]
@@ -336,11 +479,13 @@ mod tests {
         let mut colors = Colors::default();
         let custom = rgb(0x010203);
         colors[1] = Some(custom);
-        assert_eq!(resolve(Color::Named(NamedColor::Red), &colors), custom);
-        assert_eq!(resolve(Color::Indexed(1), &colors), custom);
+        let red = Color::Named(NamedColor::Red);
+        assert_eq!(resolve(red, &colors, &THEME), custom);
+        assert_eq!(resolve(Color::Indexed(1), &colors, &THEME), custom);
         // Doğrudan verilen renk tabloya hiç sormaz.
-        assert_eq!(resolve(Color::Spec(rgb(ANSI[2])), &colors), rgb(ANSI[2]));
-        // Tabloda olmayan girdi paletten gelir.
-        assert_eq!(resolve(Color::Indexed(2), &colors), rgb(ANSI[2]));
+        let green = rgb(THEME.ansi[2]);
+        assert_eq!(resolve(Color::Spec(green), &colors, &THEME), green);
+        // Tabloda olmayan girdi temadan gelir.
+        assert_eq!(resolve(Color::Indexed(2), &colors, &THEME), green);
     }
 }
