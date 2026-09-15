@@ -50,13 +50,16 @@ test:
 
 # Pencereyi açar, BT_RUN_SECONDS dolunca kare, hücre, glyph, kural çizgisi ve
 # atlas yuvası sayısına bakar:
-# kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I kapanis=clean \
-#   profil=debug ornek=off pipeline=ok
+# kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C \
+#   hareket=M sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
 # İlk dördünden (kare, hucre, glif, kural) BİRİ 0 ise kırmızı; `yuva`, `yuk`,
-# `istek` ve `profil` kapı değil, sayaç ve etiket.
-# `kare` ayrıca ÜST SINIRLI (bkz. app.rs IDLE_FRAME_LIMIT): boşta sıfır kareyi
-# bozan değişikliğin belirtisi eksik kare değil FAZLA karedir. `yuva` bir kapı
-# değil sayaç — eşiği ölçülmedi, ölçülmemiş sayı kapıya yazılmaz.
+# `istek`, `hareket`, `sessiz` ve `profil` kapı değil, sayaç ve etiket.
+# ÜST SINIR `icerik`te, `kare`de DEĞİL (bkz. app.rs IDLE_FRAME_LIMIT): boşta
+# sıfır kareyi bozan değişikliğin belirtisi eksik kare değil FAZLA karedir, ama
+# meşru bir animasyon da `kare`yi şişirir — sınır bu yüzden çizilmeye KARAR
+# VERİLEN içerik karesini sayıyor. `yuva` bir kapı değil sayaç — eşiği
+# ölçülmedi, ölçülmemiş sayı kapıya yazılmaz; `sessiz` (son kareyle deadline
+# arasındaki süre, hiç kare yoksa `none`) da öyle, eşiği ölçülene kadar sayaç.
 # `kapanis` KISMEN kapı: panik kolları kırmızı düşürür, kayıtlı borç olan iki
 # kol düşürmez — bağlansaydı kapı bilinen bir borç yüzünden kırmızı düşerdi.
 # `ornek=off` = ölçüm kapısı (BT_FRAME_STATS) kapalıydı; ölçüm jetonları o
