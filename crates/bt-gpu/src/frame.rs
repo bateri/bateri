@@ -316,12 +316,12 @@ mod tests {
     // yani bu sınamalar renk uzayından bağımsız. Uzayı sınayan yer
     // `renderer.rs` → `cell_bg_paints_pixels_on_the_gpu`.
     //
-    // Paletin iki ayrık sabiti; adları rolleri değil kaynakları söylüyor.
-    // Burada bakılan şey renk değil düzen, o yüzden renk uydurmaya
+    // Gömülü temanın iki ayrık rengi; adları rolleri değil kaynakları
+    // söylüyor. Burada bakılan şey renk değil düzen, o yüzden renk uydurmaya
     // (`LinearRgba::from_srgb`) gerek yok — `renderer.rs`'in offscreen
     // sınamaları onu üç ayrık ton gerektirdikleri için kullanıyor.
-    const BG: LinearRgba = bt_core::DEFAULT_BG;
-    const CURSOR: LinearRgba = bt_core::DEFAULT_CURSOR;
+    const BG: LinearRgba = bt_core::Theme::BATERI.background_linear();
+    const CURSOR: LinearRgba = bt_core::Theme::BATERI.accent_linear();
 
     fn bg_cell(col: u16, row: u16) -> Cell {
         Cell {

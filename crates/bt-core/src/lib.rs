@@ -3,11 +3,12 @@
 //! VT durum makinesi, grid, scrollback, PTY ve okuyucu thread burada yaşar;
 //! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`,
-//! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Wake` ve ayar
-//! modelinin `Settings`, `Parsed`, `Diagnostic`'i görür (tam liste aşağıdaki
-//! `pub use` bloğu). Kendi grid'imize geçiş (00X) bu sınırın arkasında yapılır
-//! ve renderer'ı bilmez. `toml_edit` de aynı biçimde içeride kalır: ayar
-//! modelinin `pub` yüzünde TOML tipi yok.
+//! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Theme`,
+//! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`'i görür (tam
+//! liste aşağıdaki `pub use` bloğu). Kendi grid'imize geçiş (00X) bu sınırın
+//! arkasında yapılır ve renderer'ı bilmez. `toml_edit` de aynı biçimde içeride
+//! kalır: ayar modelinin ve tema dosyasının `pub` yüzünde TOML tipi yok;
+//! temanın renkleri `0xRRGGBB`, alacritty'nin `Rgb`'si değil.
 //!
 //! Sözleşme: bu crate macOS'a özgü hiçbir kütüphane görmez — `objc2*`,
 //! `core-text`, `metal` yok — ve Linux'ta derlenebilir kalır; Vulkan kapısı
@@ -22,9 +23,10 @@ mod color;
 mod input;
 mod session;
 mod settings;
+mod theme;
 mod wake;
 
-pub use color::{DEFAULT_BG, DEFAULT_CURSOR, LinearRgba};
+pub use color::{LinearRgba, Theme};
 pub use input::Arrow;
 pub use session::{
     Cell, CellHalf, Cursor, DirtyFlag, SHUTDOWN_GRACE, SelectionPoint, Session, SessionOptions,

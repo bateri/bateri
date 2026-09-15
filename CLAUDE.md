@@ -23,7 +23,8 @@ rasterize eder; hücre ölçüsü oradan gelir ve `bt-gpu`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
 çizer. `bt-shell` klavyeyi PTY'ye akıtır; fareyle seçim, pano, geçmişte
 kaydırma ve kapanış sırası ondadır; açılışta `settings.toml`'u okur (bugün
-yalnız `scrollback`). `make kur` `bateri.app` paketini üretir.
+`scrollback` ve tema adı) ve temayı `themes/{ad}.toml`'dan ya da gömülü
+`bateri`'den çözer. `make kur` `bateri.app` paketini üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri
 aynı commit'te düzelir.
@@ -109,7 +110,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **Renk uzayı sınırı geçer.** Çizim hedefi `BGRA8Unorm_sRGB`: donanım
   fragment çıktısını **lineer** sayar ve yazarken sRGB'ye kodlar. Bu yüzden
   `bt-core` sınırdan lineer float verir (`color::linear_rgba`) ve `MTLClearColor`
-  da aynı kaynaktan beslenir. İkisi **birlikte** değişir; biri lineerleşmeden
+  da aynı temadan (`Theme::background_linear`) beslenir. İkisi **birlikte** değişir; biri lineerleşmeden
   ötekine geçilirse palet `0x1a1c21`'den `0x5a5d65` griye açılır ve belirti
   sessizdir. Gören tek bekçi `cell_bg_paints_pixels_on_the_gpu` ve ancak **ara
   ton** bir renkle görür: `0.0` ve `1.0` sRGB transfer fonksiyonunun sabit
@@ -155,9 +156,16 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   `bt-shell`'de (`child`), `bt-core` yalnız geçirir
   (`SessionOptions.working_directory`, `.env`). Sebep Dock'tan açılış:
   LaunchServices süreci `cwd=/` ile başlatıyor ve launchd'nin ortamında `LANG` yok.
-- **Tema = sekiz rol:** arka plan, ön plan, dim, accent ve dört durum. Materyal
-  yüzey (grain, sheen) bunun üstüne ayrı bir katmandır ve `substrate` shader'ı
-  çizer. Palet dosyaları `~/.config/bateri/themes/*.toml`.
+- **Tema = sekiz rol:** arka plan, ön plan, dim, accent ve dört durum. Bugün
+  dördü tüketiliyor — `background`, `foreground`, `dim` (SGR 2'li varsayılan ön
+  plan), `accent` (imleç) — ve yanlarında `[ansi]`'nin 16 rengi; durum rolleri
+  013 ile gelir. `bt_core::Theme` paletin **tek kaynağı**: zemin atlaması,
+  clear, imleç ve renk sorusunun yanıtı aynı değerden. `Adapter`'da **yaprak
+  kilit** altında durur; `frame()` kopyayı `Term` kilidinden önce alır.
+  Materyal yüzey (grain, sheen) bunun üstüne ayrı bir katmandır ve `substrate`
+  shader'ı çizer. Palet dosyaları `~/.config/bateri/themes/*.toml`, her
+  anahtar opsiyonel ve eksiği gömülü `bateri`'den; biçim `docs/AYARLAR.md` →
+  Temalar.
 - **Ayarlar** `~/.config/bateri/settings.toml`; bilinmeyen anahtar korunur,
   anahtar silinmez, ayar penceresi dosyayı yeniden yazar ama tanımadığını bırakır.
   Anahtarlar, varsayılanlar ve hata davranışı (pencere alt başlığı)

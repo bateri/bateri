@@ -77,21 +77,73 @@ Sıra commit'in içinde de önemli: **bekçiler önce**, bugünkü kodda yeşil.
 
 ## Yayın Etkisi
 
-- **tema / materyal biçimi** — ilk tema biçimi; gömülü tek tema `bateri`.
-- **ayar şeması** — `[appearance] theme`.
-- **ölçüm bekliyor:** `frame()`'e giren tema kilidinin kare süresine etkisi
+- **tema / materyal biçimi** — ilk tema biçimi: kökte `background`,
+  `foreground`, `dim`, `accent`; `[ansi]`'de `black`…`white`,
+  `bright_black`…`bright_white`; renk `"#rrggbb"`, her anahtar opsiyonel,
+  eksiği gömülü `bateri`'den. Gömülü tek tema `bateri`; kullanıcı dizini
+  `~/.config/bateri/themes/`. Geriye dönük okunacak eski biçim yok.
+- **ayar şeması** — `[appearance] theme`, varsayılan `"bateri"` (phase-3
+  `"system"` yapar); `docs/AYARLAR.md` → `[appearance]` ve Temalar.
+- **ölçüm bekliyor:** `frame()`'e giren tema kilidinin ve link'in dolu
+  karede `session.theme()` ile aldığı ikinci kilidin kare süresine etkisi
   (`cpu` aralıkları).
-- `CLAUDE.md` iki madde; `bt-core` `lib.rs` başlık yorumu.
+- `CLAUDE.md`: bugünkü hâl, "Renk uzayı" (`MTLClearColor` temadan) ve "Tema
+  = sekiz rol" maddeleri; `bt-core` `lib.rs` başlık yorumu (`Theme`).
 
 ## Checklist
 
-- [ ] Palet ve çizim yolu sönük renk bekçileri (önce, yeşil)
-- [ ] `Theme`, `Theme::BATERI`, sabitlerin kalkması, yorumlar
-- [ ] Tema ayrıştırıcı (taban üstüne)
-- [ ] `Adapter` yaprak kilidi, `frame()` sırası, `dim` rolü dalı, renk sorgusu
-- [ ] `link.rs` ve bt-gpu sınamaları temadan
-- [ ] `bt-shell` ad çözümü ve tema yuvası
-- [ ] Test: ayrıştırma, ad çözümü, renk sorgusu, `AYARLAR.md` bloğu
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi (paylaşılan durum)
-- [ ] Yayın etkisi yazıldı
+- [x] Palet ve çizim yolu sönük renk bekçileri (önce, yeşil)
+- [x] `Theme`, `Theme::BATERI`, sabitlerin kalkması, yorumlar
+- [x] Tema ayrıştırıcı (taban üstüne)
+- [x] `Adapter` yaprak kilidi, `frame()` sırası, `dim` rolü dalı, renk sorgusu
+- [x] `link.rs` ve bt-gpu sınamaları temadan
+- [x] `bt-shell` ad çözümü ve tema yuvası
+- [x] Test: ayrıştırma, ad çözümü, renk sorgusu, `AYARLAR.md` bloğu
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi (paylaşılan durum)
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+- **Bekçiler eski kodda yeşildi**, sonra aynı literal değerlerle yeşil
+  kaldı. Sönük bekçisi mutasyonla sınandı (`DIM = 0.5` → kırmızı); var olan
+  `dim_flag_darkens_background_in_inverse_video` da literal değere bağlandı.
+- **`Theme` alanları `pub u32`** (`0xRRGGBB`), lineer karşılıkları
+  `background_linear`/`accent_linear` `const fn`; `default(index)`
+  crate-içi (alacritty `Rgb` döner). `renderer.rs`'in beklenen baytları
+  artık elle değil `Theme::BATERI`'nin alanlarından. Gömülü temalar
+  `Theme::embedded(ad)`.
+- **`Session::set_theme` yazılmadı:** tüketicisi yok; kilit takasa hazır,
+  yazan ilk yol phase-3'ün görünüm değişimi.
+- **Sönük kural tek yardımcıda** (`color::resolve_fg`), normal ve ters videolu
+  dal ondan geçiyor. **Bit bit aynı olmayan tek köşe:** OSC 10 ile değişmiş
+  ön plan + SGR 2 artık tablonun renginin `× 2/3`'ü değil `dim` rolü
+  (alacritty uygulamasının `DimForeground`'ı da böyle).
+- **Tema adının biçimi `bt-core`'da sınanıyor:** boş, `/` ya da NUL içeren ad
+  `"bateri"` + tanı (`"../settings"` ayar dosyasını tema diye okuturdu).
+- **Kullanıcı tema dosyası var ama kullanılamıyorsa gömülüye düşülmüyor:**
+  okunamayan ya da ayrıştırılamayan `themes/bateri.toml` gömülü `bateri`'yi
+  sessizce açmıyor; açılışta `bateri` + dosyayı söyleyen tanı. Gömülüye
+  yalnız dosya **yoksa** bakılıyor.
+- **Ortak kod:** `Diagnostic` ve TOML yardımcıları (`document`, `section`,
+  `line_of`, `kind`) `bt-core`'da iki ayrıştırıcıya ortak; `Theme::parse`
+  `(Theme, Vec<Diagnostic>)` döner. `bt-shell`'de dosya okuma tek kapı
+  (`read_text`), tema çözümü `ThemeLoaded::{Found, Failed}` + `at_launch`.
+- **Renk sorgusu sınaması PTY yolundan:** `EventLoopSender` dışarıdan
+  kurulamıyor (alanları private). Çocuk `stty -icanon -echo` + `od -N` ile
+  yanıtı döküyor; mutasyonla sınandı (yanıt `Theme::BATERI`'den → kırmızı).
+  Ek yarış sınaması `race_color_request_and_frame`.
+- **Duman:** ilk koşu `glif=7` (006 phase-4c'de kayıtlı gürültü); HEAD ve
+  sonraki üç koşu `kare=1 hucre=8 glif=6 kural=15`.
+- **Göz kontrolü geçici `HOME`'la yapıldı:** `theme = "paper"` + kısmi tema
+  dosyası açılışta açık zemin ve kırmızı imleçle açıldı, bozuk `ansi.red`
+  alt başlıkta dosya adıyla göründü; ayarsız ev dizininde ekran bugünkü koyu
+  tema, alt başlık boş.
+- **`/code-review` (high) kararları.** Düzeltilen: yarış sınamasının arka
+  plan `cat`'i stdin olarak `/dev/null` alıyordu (etkileşimsiz kabuk), yanıtlar
+  hiç emilmiyordu → `cat </dev/tty`, PTY'de denendi; kilitlenmede sınamanın
+  düşmeyip asılı kaldığını söyleyen yorum düzeldi. Kilit sırası, sönük kural,
+  renk sorusu yanıtları, ad biçimi ve süreli koşunun teması temiz bulundu.
+  **Not (bulgu değil):** `dim`'i yazmayan kullanıcı teması `bateri`'nin
+  `#909093`'ünü alıyor, kendi ön planının sönüğünü değil — Karar 3 (A), belgede
+  yazılı.

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
-use bt_core::{DEFAULT_BG, DEFAULT_CURSOR, DirtyFlag, Session};
+use bt_core::{DirtyFlag, Session};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -355,7 +355,11 @@ define_class!(
                 link.setPaused(true);
                 return;
             };
-            frame.push_cursor(cursor, DEFAULT_CURSOR);
+            // Clear ve imleç rengi oturumun temasından: `frame()`'in zemin
+            // atlaması ve renk sorusunun yanıtıyla aynı kaynak. Tema yalnız
+            // dolu karede okunuyor — boştaki callback yukarıda döndü.
+            let theme = iv.session.theme();
+            frame.push_cursor(cursor, theme.accent_linear());
             // Birinci aralık burada kapanıyor — `push_cursor`'dan **sonra**:
             // imleci listeye koymak sink işidir, encode değil. Damga bir satır
             // yukarıda alınsaydı `cpu_encode` `draw`'ın yanında onu da ölçer
@@ -366,9 +370,12 @@ define_class!(
             // `frame()` bayrağı çizim başlamadan tüketti; hata hâlinde geri
             // dikilmezse bu içerik bir daha istenmez ve pencere bayat kalır.
             // Senkron ve asenkron hata aynı kapıdan geçiyor.
-            let drawn = iv
-                .renderer
-                .draw(&update.drawable(), DEFAULT_BG, &frame, &iv.completion);
+            let drawn = iv.renderer.draw(
+                &update.drawable(),
+                theme.background_linear(),
+                &frame,
+                &iv.completion,
+            );
             // Encode aralığı `draw`'ın dönüşüyle kapanıyor: ikinci damga
             // buraya, karar dallarından **önce** düşüyor.
             let spans = spans.map(|(t0, t1)| (t1 - t0, Instant::now() - t1));

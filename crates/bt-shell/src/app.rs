@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use bt_core::{Session, SessionOptions, Settings, Teardown, Wake, load_shell, smoke_shell};
+use bt_core::{Session, SessionOptions, Settings, Teardown, Theme, Wake, load_shell, smoke_shell};
 use bt_gpu::{CellMetrics, DisplayLink, MIN_SAMPLES, Renderer, Stats, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -338,14 +338,14 @@ define_class!(
             //
             // Ayarlar üç sınırın arasında okunuyor: pencere ivar'a girdikten
             // **sonra** (tanı alt başlığa yazılabilsin), geometriden ve
-            // oturumdan **önce** — `scrollback` `SessionOptions`'a giriyor ve
-            // font ayarı (007 phase-5) hücre ölçüsünü, yani ilk grid'i ve
-            // kabuğun gördüğü ilk `TIOCSWINSZ`'yi belirleyecek.
-            let settings = self.load_settings();
+            // oturumdan **önce** — `scrollback` ve tema `SessionOptions`'a
+            // giriyor ve font ayarı (007 phase-5) hücre ölçüsünü, yani ilk
+            // grid'i ve kabuğun gördüğü ilk `TIOCSWINSZ`'yi belirleyecek.
+            let (settings, theme) = self.load_settings();
             let grid = self
                 .sync_geometry()
                 .expect("pencere ve contentView kuruldu");
-            self.start_session(mtm, grid, &view, &settings);
+            self.start_session(mtm, grid, &view, &settings, theme);
 
             if let Some(run) = self.ivars().run {
                 // block2 yok: zamanlayıcı performSelector ile.
@@ -838,6 +838,7 @@ impl AppDelegate {
         grid: Grid,
         view: &BateriView,
         settings: &Settings,
+        theme: Theme,
     ) {
         let session = Session::spawn(
             SessionOptions {
@@ -870,6 +871,7 @@ impl AppDelegate {
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
                 scrollback: settings.scrollback,
+                theme,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );
@@ -915,20 +917,24 @@ impl AppDelegate {
         let _ = self.ivars().link.set(link);
     }
 
-    /// Açılışta ayarları okur; tanıları alt başlığa verir.
+    /// Açılışta ayarları okur ve seçilen temayı çözer; tanıları alt başlığa
+    /// kaynak kaynak verir.
     ///
-    /// Süreli koşuda yükleyici **hiç çağrılmaz** ([`Inputs::Hermetic`]).
-    /// Bozuk dosya pencereyi açık bırakır, varsayılanlarla
-    /// ([`settings::Loaded::at_launch`]).
-    fn load_settings(&self) -> Settings {
+    /// Süreli koşuda yükleyici **hiç çağrılmaz** ([`Inputs::Hermetic`]) ve
+    /// tema gömülü `bateri`: `Settings::default()`'un adı da oraya çözülürdü,
+    /// ama o eşitlik varsayılan değiştiği gün (007 phase-3, `"system"`)
+    /// bozulur ve süreli koşu sistemin görünümünü okumaya başlardı. Bozuk
+    /// dosya pencereyi açık bırakır, varsayılanlarla
+    /// ([`settings::Loaded::at_launch`], [`settings::ThemeLoaded::at_launch`]).
+    fn load_settings(&self) -> (Settings, Theme) {
         let Inputs::User { config_root } = self.inputs() else {
-            return Settings::default();
+            return (Settings::default(), Theme::BATERI);
         };
         // Ev dizini çözülemedi: dosya aranamıyor ve bu da görünür olmalı —
         // Dock'tan açılışta stderr'i kimse görmez, kullanıcının ayarları
         // sessizce yok sayılmış olurdu.
-        let (settings, messages) = match config_root {
-            Some(root) => settings::load(&root).at_launch(),
+        let (settings, messages) = match &config_root {
+            Some(root) => settings::load(root).at_launch(),
             None => (
                 Settings::default(),
                 vec![format!(
@@ -938,7 +944,10 @@ impl AppDelegate {
             ),
         };
         self.post_notices(Source::Settings, messages);
-        settings
+        let (theme, messages) =
+            settings::load_theme(config_root.as_deref(), &settings.theme).at_launch();
+        self.post_notices(Source::Theme, messages);
+        (settings, theme)
     }
 
     /// Kullanıcının dünyasına açılan girişlerin kararı ([`Inputs`]).

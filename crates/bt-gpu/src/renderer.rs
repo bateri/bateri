@@ -866,17 +866,22 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    use bt_core::{Cell, Cursor, UnderlineStyle};
+    use bt_core::{Cell, Cursor, Theme, UnderlineStyle};
 
     use super::*;
     use crate::stats::Stats;
+
+    /// Gömülü temanın zemini ve vurgusu: üretimde clear ve imleç rengi bu
+    /// iki rolden geliyor (`link.rs`), sınamalar da aynı kaynaktan.
+    const BACKGROUND: LinearRgba = Theme::BATERI.background_linear();
+    const ACCENT: LinearRgba = Theme::BATERI.accent_linear();
 
     /// Yalnız arka planı olan hücre; `ch: None` glyph üretmez.
     fn bg_cell(col: u16, row: u16, bg: LinearRgba) -> Cell {
         Cell {
             col,
             row,
-            fg: bt_core::DEFAULT_BG,
+            fg: BACKGROUND,
             bg: Some(bg),
             ..Default::default()
         }
@@ -1144,7 +1149,7 @@ mod tests {
         frame.clear((8, 8));
         frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
         let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        r.encode_pass(&cmd, &texture, bt_core::DEFAULT_BG, &frame)
+        r.encode_pass(&cmd, &texture, BACKGROUND, &frame)
             .expect("pass encode edilemedi");
         // SAFETY: blok geçerli ve `completion` çağrı boyunca yaşıyor.
         unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&completion.0)) };
@@ -1194,27 +1199,29 @@ mod tests {
         frame.clear((8, 8));
         frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
         frame.push(bg_cell(1, 1, LinearRgba::from_srgb(0x00, 0xff, 0x00)));
-        frame.push(bg_cell(0, 1, bt_core::DEFAULT_BG));
+        frame.push(bg_cell(0, 1, BACKGROUND));
 
-        // Clear rengi de **ara ton**, ve bilerek paletten: üretimde pencerenin
+        // Clear rengi de **ara ton**, ve bilerek temadan: üretimde pencerenin
         // görünen zemininin tamamı bu yoldan geliyor (`frame()` varsayılan
-        // arka planlı hücreleri eliyor, `link.rs` clear'a `DEFAULT_BG` veriyor).
+        // arka planlı hücreleri eliyor, `link.rs` clear'a temanın zeminini
+        // veriyor).
         // Saf mavi bırakılsaydı `MTLClearColor`'ın sRGB hedefteki semantiği
         // sınanmamış kalırdı: onu "hedefin uzayına çevireyim" diye bir kez
         // daha kodlayan biri pencere zeminini karartır, hücreleri doğru
         // bırakır ve bütün sınamalar yeşil geçerdi.
         //
-        // Clear **`DEFAULT_CURSOR`**, `DEFAULT_BG` değil: `DEFAULT_BG` hücrede
-        // kullanıldı ve iki yolun ayrı ayrı kanıtlanması ayrık iki renk ister.
-        // Buraya `DEFAULT_BG` "düzeltilirse" sınama hücre yolu ile clear
-        // yolunu birbirinden ayırt edemez hâle gelir.
-        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_CURSOR, &frame);
+        // Clear **vurgu** (`ACCENT`), zemin değil: zemin hücrede kullanıldı ve
+        // iki yolun ayrı ayrı kanıtlanması ayrık iki renk ister. Buraya
+        // `BACKGROUND` "düzeltilirse" sınama hücre yolu ile clear yolunu
+        // birbirinden ayırt edemez hâle gelir.
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
         let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
         assert_eq!(pixel(2, 2), (255, 0, 0), "ilk hücre sol üstte kırmızı");
         assert_eq!(pixel(12, 12), (0, 255, 0), "ikinci hücre sağ altta yeşil");
-        // Paletin baytları burada elle yazılı (`BG` ve `CURSOR` `bt-core`'da
-        // private). Tema modeli geldiğinde bu üçlüler onunla birlikte
-        // güncellenir; bugün onları kaynağa bağlayacak bir `pub` yol yok.
+        // Beklenen bayt temanın **yazıldığı** bayt: `Theme`'in alanları
+        // `0xRRGGBB`. Değerlerin kendisini `bt-core`'un palet bekçisi elle
+        // yazılı listeye bağlıyor; buradaki iddia değer değil round-trip.
+        let srgb = |hex: u32| ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
         let close_to = |seen: (u8, u8, u8), expected: (u8, u8, u8), what: &str| {
             // ±1: 8-bit sRGB kodlaması yuvarlama taşır ve Metal spec'i bit
             // birebirlik değil doğruluk sınırı verir. Bit aransaydı kapı
@@ -1232,8 +1239,16 @@ mod tests {
         // `0x1a1c21` `0x5a5d65` griye açılır — geçişin sessiz kalabileceği
         // tek yer burasıydı; saf kırmızı ve yeşil bunu göremez, ikisi de
         // sRGB transfer fonksiyonunun sabit noktaları.
-        close_to(pixel(2, 12), (0x1a, 0x1c, 0x21), "hücre ara tonu");
-        close_to(pixel(12, 2), (0x7a, 0x9c, 0xc6), "boş çeyrek clear rengi");
+        close_to(
+            pixel(2, 12),
+            srgb(Theme::BATERI.background),
+            "hücre ara tonu",
+        );
+        close_to(
+            pixel(12, 2),
+            srgb(Theme::BATERI.accent),
+            "boş çeyrek clear rengi",
+        );
     }
 
     #[test]
@@ -1270,7 +1285,7 @@ mod tests {
         }
         assert_eq!(frame.glyph_count(), 2);
 
-        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let (m, dot) = (
             cell_rows(&pixels, EDGE, (cw, ch), 0).concat(),
             cell_rows(&pixels, EDGE, (cw, ch), 1).concat(),
@@ -1338,7 +1353,7 @@ mod tests {
             let mut frame = Frame::default();
             frame.clear((cw, ch));
             frame.push(glyph_cell(col, glyph, None));
-            render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+            render_offscreen(&r, EDGE, BACKGROUND, &frame);
 
             let now = r.atlas_occupancy();
             assert_eq!(now.0, used + 1, "{glyph:?} bir yuva açmalıydı: {now:?}");
@@ -1374,7 +1389,7 @@ mod tests {
         assert_eq!(frame.rule_count(), 2);
         assert_eq!(frame.glyph_count(), 0, "kural hücresi mürekkep üretmez");
 
-        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let uniform = |row: &Vec<(u8, u8, u8)>| row.iter().all(|p| *p == row[0]);
         let single = cell_rows(&pixels, EDGE, (cw, ch), 0);
         let curl = cell_rows(&pixels, EDGE, (cw, ch), 1);
@@ -1412,7 +1427,7 @@ mod tests {
             ..rule_cell(1, UnderlineStyle::Single)
         });
 
-        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let plain = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();
         let colored = cell_rows(&pixels, EDGE, (cw, ch), 1).concat();
 
@@ -1470,7 +1485,7 @@ mod tests {
             });
         }
 
-        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let plain = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();
         let bold = cell_rows(&pixels, EDGE, (cw, ch), 1).concat();
         assert_ne!(plain, bold, "kalın `M` düz `M` ile aynı çizildi");
@@ -1499,7 +1514,7 @@ mod tests {
             red,
         );
 
-        let pixels = render_offscreen(&r, EDGE, bt_core::DEFAULT_BG, &frame);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let cell = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();
         assert!(
             cell.contains(&(0xff, 0xff, 0xff)),
@@ -1529,13 +1544,13 @@ mod tests {
             col: 0,
             row: 0,
             ch: Some('x'),
-            fg: bt_core::DEFAULT_CURSOR,
+            fg: ACCENT,
             bg: None,
             ..Default::default()
         });
 
         let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        let result = r.encode_pass(&cmd, &texture, bt_core::DEFAULT_BG, &frame);
+        let result = r.encode_pass(&cmd, &texture, BACKGROUND, &frame);
         assert!(
             matches!(result, Err(GpuError::NoAtlas)),
             "atlassız kare sessizce geçti: {result:?}"
