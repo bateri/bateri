@@ -12,7 +12,7 @@
 //! bu ayrımın üstüne kurulur. Unix PTY (`libc`, `rustix`) serbesttir, o kapıyı
 //! kapatmaz.
 //!
-//! Denetim `/audit` mercek 1'dedir (`.claude/skills/audit/SKILL.md`) ve
+//! Denetim `make denetim`'dedir (`Makefile`, her `make hepsi`'de koşar) ve
 //! bağımlılık düzeyinde bir vekildir; gerçek kapı
 //! `--target x86_64-unknown-linux-gnu` ile derlemedir, `rustup` gelene kadar kapalı.
 

@@ -3,17 +3,44 @@ CARGO ?= cargo
 # Prerequisite sırası yalnız seri make'te garantidir; -j altında "en ucuz kapı
 # önce" ve "sürüm başta" sözü bozulur.
 .NOTPARALLEL:
-.PHONY: hepsi fmt clippy test shader duman terminfo test-yaris kur
+.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris kur
 
 # Definition of done. Homebrew rustc pin'li değil (rust-toolchain.toml bilinçli
 # olarak yok): bir `brew upgrade` sonrası gelen clippy kırmızısını kod
 # kırmızısından ayırmak için sürüm başta basılır.
 hepsi:
 	@rustc --version
-	@$(MAKE) --no-print-directory fmt clippy test
+	@$(MAKE) --no-print-directory fmt denetim clippy test
 
 fmt:
 	$(CARGO) fmt --all -- --check
+
+# Proje kurallarının mekanik yarısı (`/audit`'ten taşındı): ajansız ve
+# saniyeler içinde, her `make hepsi`'de. Yargı isteyen mercekler `/audit`'te
+# kalır ve set sonunda bir kez koşar (`.claude/is-akisi/proje.md`).
+# - Katman: `cargo tree` Cargo.toml'daki sözleşmeyi, grep kaynağa sızan
+#   çağrıyı görür (`cfg` arkasındaki kullanım ağaçta görünmeyebilir). Kaynak
+#   grep'i yorum satırlarını düşürür: bt-core'un başlık yorumu "objc2 yok" der.
+#   bt-atlas'ta `objc2-core-*` serbest, yalnız `objc2` çekirdeği yasak.
+# - Panik: bt-core'un sınama dışı kodunda unwrap/expect/panic!/unreachable!
+#   yok; bilinçli olanın satırında `// audit: {neden}` durur. Tarama satır
+#   başındaki ilk `#[cfg(test)]`'te durur, çünkü sınama modülü dosyanın sonunda.
+# - Shell: `assets/shell/` altında kullanıcı rc dosyasına yazan satır yok.
+# - Bağımlılık DÜŞÜRMEZ, uyarır: bilinçli bir bağımlılık kararı da Cargo.lock'u
+#   değiştirir; kararın kaydını `/audit` arar.
+denetim:
+	@fail=0; \
+	if $(CARGO) tree -p bt-core -e normal | grep -E "objc2|core-text|core-graphics|metal"; then echo "denetim: bt-core platform kütüphanesine bağlanıyor"; fail=1; fi; \
+	if $(CARGO) tree -p bt-atlas -e normal | grep -E "(^|[ ─])objc2 v"; then echo "denetim: bt-atlas objc2 çekirdeğine bağlanıyor"; fail=1; fi; \
+	if $(CARGO) tree -p bt-gpu -e normal | grep -E "bt-shell"; then echo "denetim: bt-gpu yukarı, bt-shell'e bağlanıyor"; fail=1; fi; \
+	if grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"; then echo "denetim: bt-core kaynağında platform çağrısı var"; fail=1; fi; \
+	for f in crates/bt-core/src/*.rs; do \
+		awk -v file="$$f" '/^[[:space:]]*#\[cfg\(test\)\]/{exit} /\.unwrap\(\)|\.expect\(|panic!|unreachable!/ && !/\/\/ audit: / && !/^[[:space:]]*\/\//{print file":"NR": "$$0; hit=1} END{exit hit}' "$$f" \
+			|| { echo "denetim: bt-core'da gerekçesiz panik yolu ($$f)"; fail=1; }; \
+	done; \
+	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshrc|\.zprofile|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "denetim: shell entegrasyonu kullanıcı rc dosyasına yazıyor"; fail=1; fi; \
+	git diff --quiet HEAD -- Cargo.lock $$(git ls-files '*Cargo.toml') || echo "denetim: uyarı — Cargo.toml/Cargo.lock HEAD'den farklı; bağımlılık kararı kayıtlı mı?"; \
+	test $$fail -eq 0 && echo "denetim: temiz"
 
 clippy:
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
