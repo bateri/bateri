@@ -72,18 +72,62 @@ _Requirements: R1, R1.1, R1.2, R1.3, R2, R10_
   Karar. `Cargo.lock` değişir.
 - **ayar şeması** — `[terminal] scrollback` (varsayılan bugünkü değer);
   `docs/AYARLAR.md` doğar.
-- `CLAUDE.md` bağımlılık satırı; `bt-core` `lib.rs` başlık yorumu.
+- `CLAUDE.md` bağımlılık satırı, "Ayarlar" maddesi ve bugünkü hâl; `bt-core`
+  ve `bt-shell` `lib.rs` başlık yorumları.
+- **app bundle / lisans** — yeni paketlerin hepsi MIT seçilebilir; atıf
+  mevcut MIT bildirim borcuna eklenir (`docs/YOL-HARITASI.md`), yeni dosya
+  yok.
 
 ## Checklist
 
-- [ ] Alt başlık görünürlüğü göz kontrolü (ilk adım)
-- [ ] `toml_edit` bağlandı, karar yorumu yazıldı
-- [ ] `bt-core::settings` ayrıştırıcı ve `Settings`
-- [ ] `bt-shell` yükleyici (kök parametre) ve hermetik tek dal
-- [ ] `scrollback` `Settings`'ten; `SCROLLBACK` sabiti kalktı
-- [ ] Alt başlık yuvası ve tek sahip fonksiyon; stderr
-- [ ] Test: ayrıştırma hâlleri, geçici dizinde yükleyici, hermetik karar
-- [ ] `docs/AYARLAR.md`, `CLAUDE.md`
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi (`Cargo.lock`)
-- [ ] Yayın etkisi yazıldı
+- [x] Alt başlık görünürlüğü göz kontrolü (ilk adım)
+- [x] `toml_edit` bağlandı, karar yorumu yazıldı
+- [x] `bt-core::settings` ayrıştırıcı ve `Settings`
+- [x] `bt-shell` yükleyici (kök parametre) ve hermetik tek dal
+- [x] `scrollback` `Settings`'ten; `SCROLLBACK` sabiti kalktı
+- [x] Alt başlık yuvası ve tek sahip fonksiyon; stderr
+- [x] Test: ayrıştırma hâlleri, geçici dizinde yükleyici, hermetik karar
+- [x] `docs/AYARLAR.md`, `CLAUDE.md`
+- [x] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi (`Cargo.lock`)
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+- **Alt başlık başlığın yanında, aynı satırda** çiziliyor ("bateri – …"),
+  altında değil: pencerede araç çubuğu yok. Tanı metni bu yüzden tek satır
+  (`Diagnostic`'in `Display`'i) ve birden çok tanıda "ilk (+N daha)".
+- **`toml_edit` yalnız `parse`.** Biçim koruyan yazma `display` ister ve o
+  `toml_writer`'ı `Cargo.lock`'a sokar: phase-7'ye riskli kutusu eklendi.
+- **`Cargo.lock`'a 13 paket girdi, 7'si derleniyor** (`toml_edit`,
+  `toml_parser`, `toml_datetime`, `winnow`, `indexmap`, `hashbrown`,
+  `equivalent`). `serde_core`, `serde_derive`, `syn`, `quote`, `proc-macro2`,
+  `unicode-ident` `toml_datetime`'ın zayıf `serde_core?/std` özelliği yüzünden
+  kilitte duruyor, `cargo tree -p bt-core`'da yok. Yedisi de MIT
+  seçilebilir; atıf, `CLAUDE.md`'deki mevcut MIT bildirim borcuna düşer.
+- **`scrollback` tavanının kaynağı alacritty uygulaması**
+  (`alacritty/src/config/scrolling.rs`, `MAX_SCROLLBACK_LINES = 100_000`),
+  `alacritty_terminal` değil — sabit `bt-core`'a kaynağıyla kopyalandı.
+  Tavanı aşan değer **tavana** kırpılır ve tanı bırakır (niyet "çok geçmiş");
+  negatif ya da tam sayı olmayan varsayılana döner.
+- **Hermetik dal `app::Inputs`** (`Hermetic` | `User { config_root }`);
+  ev dizini çözülemezse `config_root: None`, stderr'e bir satır, alt başlık
+  yok. Ev dizini `child::home()`'dan (`working_directory` ile aynı çözüm).
+- **Alt başlıktaki tanı İngilizce** (phase metni "Türkçe tanı metni"
+  diyordu): pencerede görünen metin UI dizgisi, `CLAUDE.md` → Dil'e bu
+  ayrım bir cümleyle yazıldı; stderr aynı metni basıyor.
+- **Ayarlar geometriden ve oturumdan önce okunuyor:** phase-5'in fontu
+  ilk grid'i belirleyecek. `Inputs` saklanmıyor, her soruşta `run`'dan
+  türüyor (ikinci kopya olmasın).
+- **`/code-review` kararları.** Düzeltilen: ev dizini çözülemezse tanı alt
+  başlığa da gidiyor; kırık sembolik bağ "dosya yok" değil okunamadı; düz
+  dosya olmayan yol (FIFO, dizin) okunmadan eleniyor; `[[terminal]]` kendi
+  adıyla; ayrıştırıcı iletisinin "expected …" listesi kesiliyor; tanı biçimi
+  tek yardımcıda; `SCROLLBACK_MAX` `pub(crate)`; `AYARLAR.md`'ye `i64`
+  sınırı, tam ekran, yol düzeltmesi; yeni paketler lisans borcu maddesine
+  adıyla. **Waive:** ana thread'de sınırsız okuma (iCloud'dan tahliye
+  edilmiş hedef, takılmış ağ ev dizini) — bilinen sınır olarak
+  `bt-shell/src/settings.rs` doc'unda; `i64`'ü aşan `scrollback` tavana
+  kırpılamıyor (değer ayrıştırıcıda düşüyor), belgelendi. **Red:** tavanı
+  `Session`'da da zorlamak — tavan kullanıcı girdisinin kuralı, oturumun
+  değişmezi değil.

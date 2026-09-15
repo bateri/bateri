@@ -105,7 +105,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 - **Üçüncü taraf bildirimlerinin geri kalanı.** 006 yalnız `alacritty_terminal`'ın
   (Apache-2.0) borcunu kapattı. macOS ağacındaki diğer dış paketlerin çoğu
   MIT ya da MIT seçeneği taşıyor (`objc2` ailesinin dördü yalnız MIT) ve MIT
-  de bildirimin kopyalarla gitmesini istiyor. Paket **dağıtılmadan önce**
+  de bildirimin kopyalarla gitmesini istiyor. 007 phase-1 `toml_edit` ile
+  yedi paket ekledi, yedisi de MIT seçilebilir: `toml_edit`, `toml_parser`,
+  `toml_datetime`, `winnow`, `indexmap`, `hashbrown`, `equivalent`. Paket **dağıtılmadan önce**
   toplanmalı → imza/notarization/Sparkle ile gelecek dağıtım seti. Aynı set
   indirilen kopyada Gatekeeper'ın gerçek davranışını da görmeli (kanıt ve
   açık soru: 006 `phase-4.md` → Uygulama Notları).

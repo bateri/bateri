@@ -14,6 +14,9 @@ _Requirements: R8, R1, R1.2, R2, R10_
   kullanıcının yorumları, boş satırları, anahtar sırası ve tanımadığımız
   anahtarlar yerinde kalır; bölüm yoksa eklenir. Ayrıştırılamayan metin →
   hata, metin **üretilmez**. `toml_edit` yalnız `bt-core`'da kalır.
+- **Kök `Cargo.toml`** — `toml_edit`'e `display` feature'ı (yazma onu
+  ister): `toml_writer` `Cargo.lock`'a girer, **phase riskli** (phase-1
+  yalnız `parse`'ı açtı, Uygulama Notları).
 - **`crates/bt-shell/src/menu.rs`** — **View** menüsü:
   - **Theme ▸** alt menüsü, `NSMenuDelegate`'in `menuNeedsUpdate:`'i ile
     **açılırken** doldurulur: "Match System", ayırıcı, gömülü temalar,
@@ -72,6 +75,8 @@ Geçici punto: fark ayar değişince sıfırlanır; Actual Size farkı sıfırla
   `appearance.theme`); "tanımadığını bırakır" sözleşmesi sınamayla bağlı.
 - `CLAUDE.md` "Ayarlar" maddesi: dosyayı yazan ayar penceresi değil, Tema
   menüsü.
+- **bağımlılık feature'ı** — `toml_edit` `display`; `Cargo.lock`'a
+  `toml_writer` girer (kararın kendisi phase-1'de kayıtlı, crate aynı).
 
 ## Checklist
 
@@ -83,4 +88,5 @@ Geçici punto: fark ayar değişince sıfırlanır; Actual Size farkı sıfırla
 - [ ] Test: yazma (yorum, bölüm, çift, ret), symlink, dosya yok, punto farkı
 - [ ] `docs/AYARLAR.md`, `CLAUDE.md`
 - [ ] Doğrulama geçti (`make hepsi` + `make duman`)
+- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi (`Cargo.lock`: `toml_writer`)
 - [ ] Yayın etkisi yazıldı

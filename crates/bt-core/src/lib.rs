@@ -3,9 +3,11 @@
 //! VT durum makinesi, grid, scrollback, PTY ve okuyucu thread burada yaşar;
 //! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`,
-//! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba` ve `Wake` görür
-//! (tam liste aşağıdaki `pub use` bloğu). Kendi grid'imize geçiş (00X) bu sınırın
-//! arkasında yapılır ve renderer'ı bilmez.
+//! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Wake` ve ayar
+//! modelinin `Settings`, `Parsed`, `Diagnostic`'i görür (tam liste aşağıdaki
+//! `pub use` bloğu). Kendi grid'imize geçiş (00X) bu sınırın arkasında yapılır
+//! ve renderer'ı bilmez. `toml_edit` de aynı biçimde içeride kalır: ayar
+//! modelinin `pub` yüzünde TOML tipi yok.
 //!
 //! Sözleşme: bu crate macOS'a özgü hiçbir kütüphane görmez — `objc2*`,
 //! `core-text`, `metal` yok — ve Linux'ta derlenebilir kalır; Vulkan kapısı
@@ -19,6 +21,7 @@
 mod color;
 mod input;
 mod session;
+mod settings;
 mod wake;
 
 pub use color::{DEFAULT_BG, DEFAULT_CURSOR, LinearRgba};
@@ -27,6 +30,7 @@ pub use session::{
     Cell, CellHalf, Cursor, DirtyFlag, SHUTDOWN_GRACE, SelectionPoint, Session, SessionOptions,
     Teardown, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
+pub use settings::{Diagnostic, Parsed, Settings};
 pub use wake::Wake;
 
 /// Hücre sabit boyuttadır ve sabit burada bağlanır: **alacritty'nin** hücresi

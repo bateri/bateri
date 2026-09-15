@@ -2,13 +2,14 @@
 //! shell oturumunu başlatır, kareyi süren display link'i bağlar ve kapanış
 //! sırasını yürütür. Çizim çağrısı burada **yok**, bu dosyanın işi bağlamak.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use bt_core::{Session, SessionOptions, Teardown, Wake, load_shell, smoke_shell};
+use bt_core::{Session, SessionOptions, Settings, Teardown, Wake, load_shell, smoke_shell};
 use bt_gpu::{CellMetrics, DisplayLink, MIN_SAMPLES, Renderer, Stats, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -20,15 +21,13 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSArray, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
-    NSRect, NSRunLoopCommonModes, NSSize, ns_string,
+    NSRect, NSRunLoopCommonModes, NSSize, NSString, ns_string,
 };
 
-use crate::child;
+use crate::notices::{Notices, Source};
 use crate::view::BateriView;
 use crate::{Options, Run, Workload};
-
-/// Kaydırma geçmişi satır sayısı; ayar dosyası (00X) gelene kadar sabit.
-const SCROLLBACK: usize = 10_000;
+use crate::{child, settings};
 
 /// Boşta sıfır karenin bekçisi: [`Workload::Smoke`] yükünde pencere ilk
 /// çizimden sonra ~`run_seconds` saniye boşta duruyor.
@@ -114,6 +113,41 @@ const SCROLLBACK: usize = 10_000;
 /// [`Workload::Load`] yükünde üst sınır **yok** — orada kare akışı işin
 /// kendisi.
 const IDLE_FRAME_LIMIT: u64 = 8;
+
+/// Kullanıcının dünyasına açılan girişlerin **tek** dalı.
+///
+/// Süreli koşu (`make duman`, ölçüm) ayar dosyasını, dosya izlemeyi, sistemin
+/// açık/koyu görünümünü ve Tema menüsünün `themes/`'ten dolmasını görmez:
+/// kapının sonucu o makinenin `~/.config/bateri/`'sine bağlı olmasın. Bugün
+/// yalnız ilki var; sonraki girişler de bu değere bakar, kendi
+/// `run.is_some()` koşulunu yazmaz — dört ayrı koşuldan birinin unutulduğu
+/// gün kapı sessizce kullanıcının dosyasına bağlanırdı
+/// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1).
+///
+/// Bedeli: dosyadan ekrana giden kabloyu hiçbir kapı görmüyor; onu geçici
+/// dizindeki sınamalar (`settings`) ve göz kontrolü taşıyor.
+///
+/// **Saklanmıyor**, her soruşta [`AppDelegate::inputs`] ile `Ivars.run`'dan
+/// türüyor: ayrı bir ivar aynı kararın ikinci kopyası olurdu ve ikisinin
+/// ayrıştığı gün süreli bir koşu kullanıcının dosyasını okurdu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Inputs {
+    /// Süreli koşu: gömülü varsayılanlar, dışarıdan hiçbir şey.
+    Hermetic,
+    /// Kullanıcının oturumu. `config_root` `None` → ev dizini çözülemedi ve
+    /// ayar dosyası aranmıyor.
+    User { config_root: Option<PathBuf> },
+}
+
+/// [`Inputs`]'un kararı — saf, sınanıyor.
+fn decide_inputs(run: Option<Run>, home: Option<PathBuf>) -> Inputs {
+    match run {
+        Some(_) => Inputs::Hermetic,
+        None => Inputs::User {
+            config_root: home.as_deref().map(settings::config_root),
+        },
+    }
+}
 
 /// Pencere geometrisi + hücre ölçüsünden türeyen grid.
 ///
@@ -228,6 +262,8 @@ pub(crate) struct Ivars {
     /// Süreli koşunun tarifi; `None` → kullanıcının kendi oturumu. Deadline,
     /// bekçi, sabit shell ve rapor **hep birlikte** buna bağlı.
     run: Option<Run>,
+    /// Alt başlığın yuvaları; yazanı yalnız [`AppDelegate::post_notices`].
+    notices: RefCell<Notices>,
     /// Ölçüm defteri — kapı kapalıyken `None` ve hiç ayrılmamış.
     ///
     /// `bt-gpu`'nun tipi ama sahibi burası: `DisplayLink` ile tamamlanma bloğu
@@ -299,10 +335,17 @@ define_class!(
             // dönmesi programlama hatası olurdu ve yedek bir ölçü uydurmak
             // hücre boyutu için ikinci bir kaynak doğururdu — tek kaynak
             // `Renderer::cell_metrics`.
+            //
+            // Ayarlar üç sınırın arasında okunuyor: pencere ivar'a girdikten
+            // **sonra** (tanı alt başlığa yazılabilsin), geometriden ve
+            // oturumdan **önce** — `scrollback` `SessionOptions`'a giriyor ve
+            // font ayarı (007 phase-5) hücre ölçüsünü, yani ilk grid'i ve
+            // kabuğun gördüğü ilk `TIOCSWINSZ`'yi belirleyecek.
+            let settings = self.load_settings();
             let grid = self
                 .sync_geometry()
                 .expect("pencere ve contentView kuruldu");
-            self.start_session(mtm, grid, &view);
+            self.start_session(mtm, grid, &view, &settings);
 
             if let Some(run) = self.ivars().run {
                 // block2 yok: zamanlayıcı performSelector ile.
@@ -780,6 +823,7 @@ impl AppDelegate {
                 waker: OnceLock::new(),
             }),
             run: opts.run,
+            notices: RefCell::new(Notices::default()),
             stats,
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
@@ -788,7 +832,13 @@ impl AppDelegate {
 
     /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
     /// `Wake`'i ister, link `Session`'ı ister, `Waker` link'ten doğar.
-    fn start_session(&self, mtm: MainThreadMarker, grid: Grid, view: &BateriView) {
+    fn start_session(
+        &self,
+        mtm: MainThreadMarker,
+        grid: Grid,
+        view: &BateriView,
+        settings: &Settings,
+    ) {
         let session = Session::spawn(
             SessionOptions {
                 // Duman ve ölçüm koşularında shell sabit: sonuç kullanıcının
@@ -819,7 +869,7 @@ impl AppDelegate {
                 cols: grid.cols,
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
-                scrollback: SCROLLBACK,
+                scrollback: settings.scrollback,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );
@@ -863,6 +913,56 @@ impl AppDelegate {
         // Açılış karesi: `Session` kirli doğar, link'i bir kez elle açıyoruz.
         link.request_frame();
         let _ = self.ivars().link.set(link);
+    }
+
+    /// Açılışta ayarları okur; tanıları alt başlığa verir.
+    ///
+    /// Süreli koşuda yükleyici **hiç çağrılmaz** ([`Inputs::Hermetic`]).
+    /// Bozuk dosya pencereyi açık bırakır, varsayılanlarla
+    /// ([`settings::Loaded::at_launch`]).
+    fn load_settings(&self) -> Settings {
+        let Inputs::User { config_root } = self.inputs() else {
+            return Settings::default();
+        };
+        // Ev dizini çözülemedi: dosya aranamıyor ve bu da görünür olmalı —
+        // Dock'tan açılışta stderr'i kimse görmez, kullanıcının ayarları
+        // sessizce yok sayılmış olurdu.
+        let (settings, messages) = match config_root {
+            Some(root) => settings::load(&root).at_launch(),
+            None => (
+                Settings::default(),
+                vec![format!(
+                    "home directory not found; {} is not read",
+                    settings::FILE_NAME
+                )],
+            ),
+        };
+        self.post_notices(Source::Settings, messages);
+        settings
+    }
+
+    /// Kullanıcının dünyasına açılan girişlerin kararı ([`Inputs`]).
+    fn inputs(&self) -> Inputs {
+        decide_inputs(self.ivars().run, child::home())
+    }
+
+    /// Pencere alt başlığının **tek** yazanı: kaynağın yuvasını yeniler,
+    /// tanıları `bateri:` önekiyle stderr'e basar ve alt başlığı kurar.
+    ///
+    /// Alt başlığa yazan ikinci bir yol olursa yuvalar anlamını yitirir: biri
+    /// ötekinin tanısını sessizce ezer.
+    fn post_notices(&self, source: Source, messages: Vec<String>) {
+        for message in &messages {
+            eprintln!("bateri: {message}");
+        }
+        let subtitle = {
+            let mut notices = self.ivars().notices.borrow_mut();
+            notices.replace(source, messages);
+            notices.subtitle()
+        };
+        if let Some(window) = self.ivars().window.get() {
+            window.setSubtitle(&NSString::from_str(&subtitle));
+        }
     }
 
     /// Kapanış sırasının **tek** yeri; her çıkış yolu buradan geçer
@@ -1299,6 +1399,31 @@ mod tests {
             Verdict::MissingCounter {
                 required: "dördü de >0 olmalı"
             }
+        );
+    }
+
+    #[test]
+    fn timed_run_does_not_see_the_user() {
+        // Süreli koşu yükleyiciyi çağırmaz: ev dizini çözülse bile karar
+        // `Hermetic`. `make duman` jetonları bu satıra yaslanıyor.
+        let home = Some(PathBuf::from("/Users/someone"));
+        for workload in [Workload::Smoke, Workload::Load] {
+            let run = Run {
+                seconds: 3,
+                workload,
+                stats_since: None,
+            };
+            assert_eq!(decide_inputs(Some(run), home.clone()), Inputs::Hermetic);
+        }
+        assert_eq!(
+            decide_inputs(None, home),
+            Inputs::User {
+                config_root: Some(PathBuf::from("/Users/someone/.config/bateri"))
+            }
+        );
+        assert_eq!(
+            decide_inputs(None, None),
+            Inputs::User { config_root: None }
         );
     }
 

@@ -44,9 +44,10 @@ type CompletionBlock = RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTLCommandBuffe
 /// `rustc` düşer — çalışma zamanına kalan tek şey fonksiyon adlarıdır.
 static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/default.metallib"));
 
-/// Mantıksal font puntosu; `font_size`/`family` ayarları (00X) gelene kadar
-/// sabit — ölçülmüş bir sayı değil, seçilmiş bir varsayılan. `SCROLLBACK`
-/// (`bt-shell`) ile aynı örüntü: ayar modeli gelince sabit ölü doğar.
+/// Mantıksal font puntosu; `[font] size`/`family` ayarları (007 phase-5)
+/// gelene kadar sabit — ölçülmüş bir sayı değil, seçilmiş bir varsayılan.
+/// `bt-shell`'in eski `SCROLLBACK` sabiti aynı örüntüydü ve 007 phase-1'de
+/// ayar modeline (`bt_core::Settings`) geçti; bu sabit de öyle ölecek.
 ///
 /// [`Renderer::cell_metrics`] puntoyu **parametre almıyor**: alsaydı bir ayar
 /// değeri her yeniden boyutlandırmada çağrı yoluna girer ve varsayılanın

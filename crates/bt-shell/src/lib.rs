@@ -6,13 +6,16 @@
 //! `bt-gpu`'nun ritmidir. Klavye buradan PTY'ye akar (`keys`, `view`,
 //! `clipboard`), fare de buradan oturuma (seçim ve kaydırma, `view`);
 //! kabuğun hangi dizinde ve hangi yerelle açılacağına (`child`) ve kapanış
-//! sırasına da bu crate karar verir. Tek pencere; sekme, bölme, menü ve IME
-//! sonraki setlerde.
+//! sırasına da bu crate karar verir. Ayar dosyasını okuyan (`settings`) ve
+//! tanısını pencere alt başlığında gösteren (`notices`) de burası; ayrıştırma
+//! `bt-core`'da. Tek pencere; sekme, bölme, menü ve IME sonraki setlerde.
 
 pub(crate) mod app;
 mod child;
 mod clipboard;
 mod keys;
+mod notices;
+mod settings;
 mod view;
 
 use std::rc::Rc;

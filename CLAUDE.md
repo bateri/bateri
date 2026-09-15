@@ -22,7 +22,8 @@ rasterize eder; hücre ölçüsü oradan gelir ve `bt-gpu`
 `R8Unorm` dokuya bağlar, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
 çizer. `bt-shell` klavyeyi PTY'ye akıtır; fareyle seçim, pano, geçmişte
-kaydırma ve kapanış sırası ondadır. `make kur` `bateri.app` paketini üretir.
+kaydırma ve kapanış sırası ondadır; açılışta `settings.toml`'u okur (bugün
+yalnız `scrollback`). `make kur` `bateri.app` paketini üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri
 aynı commit'te düzelir.
@@ -86,7 +87,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   ayrıştırıcımızı yazmıyoruz — `bt-core` onu **kapsüller**, `pub` API'de
   alacritty tipi görünmez), `objc2` ailesi (CoreText ve CoreGraphics dahil;
   servo ailesi `core-text` ikinci bir CF sarmalayıcı yığını olacağı için
-  **reddedildi**), `toml` + `serde`, `tracing`. `Cargo.lock` depodadır.
+  **reddedildi**), `toml_edit` (ayar ve tema dosyası, yalnız `bt-core`'da;
+  `toml` + `serde` yerine, çünkü menüden yazılan dosyada yorum ve bilinmeyen
+  anahtar yerinde kalmalı — `.tasks/007-ayarlar-ve-tema/discussion.md` →
+  Karar), `tracing`. `Cargo.lock` depodadır.
   `alacritty_terminal` **Apache-2.0**: lisans metni
   `assets/bundle/THIRD-PARTY-LICENSES.txt` ile pakete girer, atfı
   `Credits.html`'de durur; atıf isteyen yeni bağımlılık da o iki dosyaya
@@ -156,6 +160,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   çizer. Palet dosyaları `~/.config/bateri/themes/*.toml`.
 - **Ayarlar** `~/.config/bateri/settings.toml`; bilinmeyen anahtar korunur,
   anahtar silinmez, ayar penceresi dosyayı yeniden yazar ama tanımadığını bırakır.
+  Anahtarlar, varsayılanlar ve hata davranışı (pencere alt başlığı)
+  `docs/AYARLAR.md`'de; ayrıştırma `bt-core::settings`'te saf, okuma
+  `bt-shell`'de. Süreli koşu (`BT_RUN_SECONDS`) dosyayı **hiç okumaz**: dalın
+  tek yeri `bt-shell`'in `app::Inputs`'u.
 - **Shell entegrasyonu** üç kabuk içindir (zsh `ZDOTDIR`, bash `--rcfile`
   sarmalayıcısı, fish `vendor_conf.d`) ve kullanıcının rc dosyasına **asla**
   dokunmaz. Komut blokları OSC 133 işaretlerinden okunur.
@@ -180,7 +188,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   üçü de kod değildir:** tanı metni (stderr, `assert!` gerekçeleri, `make
   duman`'ın düşen koşuda bastığı açıklama); `Makefile` hedefleri (projenin
   komut yüzeyi); süreli koşunun jeton satırındaki **anahtarlar** (`kare=`,
-  `hucre=`, …). Jeton satırı bir **makine sözleşmesidir**: anahtar Türkçe ve
+  `hucre=`, …). Pencerede görünen tanı (alt başlıktaki ayar hatası) tanı
+  metni değil **UI dizgisidir**, İngilizce; stderr'e aynı metin kopyalanır.
+  Jeton satırı bir **makine sözleşmesidir**: anahtar Türkçe ve
   donmuş, **değer İngilizce**, tanı metni satırın dışında (gerekçe
   `Report::token_line`'ın doc'unda). Depo geneli kural: **jeton silinmez,
   eklenir** — okuyan taraf tanımadığı jetonu atlayabilir, kaybolanı arayamaz.

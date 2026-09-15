@@ -33,6 +33,13 @@ use objc2_foundation::NSLocale;
 /// UTF-8 olmayan bir `HOME`: `std` onu olduğu gibi alıyor, alacritty
 /// (`env::var`) passwd'ye düşüyor.
 pub(crate) fn working_directory() -> Option<PathBuf> {
+    home()
+}
+
+/// Kullanıcının ev dizini, [`working_directory`] ile **aynı çözümle**: ayar
+/// dizini (`~/.config/bateri/`) de buradan türüyor ve kabuğun `$HOME`'u ile
+/// ayarın okunduğu ev iki ayrı kuralla ayrışmasın.
+pub(crate) fn home() -> Option<PathBuf> {
     home_directory(std::env::home_dir())
 }
 
