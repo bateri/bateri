@@ -6,8 +6,9 @@
 //! `frame`, `resize`, seçim yolu (`set_selection`, `update_selection`,
 //! `clear_selection`, `selection_text`), kaydırma yolu (`scroll_wheel`,
 //! `scroll_page`), kullanıcı girdisinin gönderimi (`send_input`: seçimin
-//! temizliği, dibe dönüş ve okun kip sorusu aynı kilitte) ve `paste`'in kip
-//! sorgusu (`bracketed_paste`).
+//! temizliği, dibe dönüş ve okun kip sorusu aynı kilitte), `paste`'in kip
+//! sorgusu (`bracketed_paste`) ve terminal seçeneklerinin canlı değişimi
+//! (`set_terminal_options`).
 //! Kilit **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
 //! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa kilitlenme
 //! doğar. `theme` bu sıranın dışında bir **yaprak** kilittir: tutulurken başka
@@ -203,9 +204,42 @@ pub struct SessionOptions {
     /// Bir hücrenin piksel boyutu; PTY'ye `TIOCSWINSZ` ile gider, grafik
     /// uygulamaları (sixel, kitty) bunu okur.
     pub cell_px: (u16, u16),
-    pub scrollback: usize,
+    /// Açılışın terminal seçenekleri; sonra [`Session::set_terminal_options`]
+    /// değiştirir.
+    pub terminal: TerminalOptions,
     /// Açılış teması; hangi temanın seçileceği uygulamanın kararı.
     pub theme: Theme,
+}
+
+/// Oturum yaşarken değişebilen terminal seçenekleri — alacritty `Config`'inin
+/// **bizim kurduğumuz** alanları.
+///
+/// Ayrı bir tip, çünkü `Term::set_options` `Config`'in **tamamını** değiştirir
+/// (alacritty `term/mod.rs:499-516`): tek bir alanı taşıyan bir çağrı ötekileri
+/// varsayılana geri çekerdi ve geçmişin kırpılması geri dönülmez
+/// (`grid/mod.rs:154-158`). Seçenekler bu yüzden hep **birlikte** gider ve
+/// `Config`'e tek fonksiyonda (`term_config`) iner. OSC 52 kipi (007
+/// phase-8) buraya girer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalOptions {
+    /// Geçmişte tutulan satır. Tavanı ayar ayrıştırıcısının kuralı
+    /// (`settings::SCROLLBACK_MAX`); buraya ondan geçmiş değer gelir.
+    pub scrollback: usize,
+}
+
+/// alacritty `Config`'ini seçeneklerin **tamamından** kurar — açılışın
+/// (`Session::spawn`) ve canlı değişimin ([`Session::set_terminal_options`])
+/// tek yolu.
+///
+/// Geri kalan alanlar (`semantic_escape_chars`, imleç biçimleri,
+/// `kitty_keyboard`, `osc52`) alacritty'nin varsayılanında: onları hiçbir yer
+/// kurmuyor, yani iki çağrı arasında da oynamıyorlar.
+/// `term_config_keeps_every_other_field` bunu çiviliyor.
+fn term_config(options: TerminalOptions) -> Config {
+    Config {
+        scrolling_history: options.scrollback,
+        ..Config::default()
+    }
 }
 
 /// Hasarı işaretlemenin oturumdan bağımsız yolu; [`Session::dirty_flag`] verir.
@@ -749,10 +783,7 @@ impl Session {
         let pty = tty::new(&pty_options, size, 0)?;
 
         let adapter = Adapter::new(wake, size, options.theme);
-        let config = Config {
-            scrolling_history: options.scrollback,
-            ..Config::default()
-        };
+        let config = term_config(options.terminal);
         let term = Arc::new(FairMutex::new(Term::new(config, &grid, adapter.clone())));
 
         let event_loop = EventLoop::new(
@@ -1331,6 +1362,34 @@ impl Session {
         }
     }
 
+    /// Terminal seçeneklerini değiştirir ve kare ister — ayar dosyasının canlı
+    /// yenilemesi.
+    ///
+    /// **Değişimi çağıran süzer** (`bt-shell`, `Settings::changes`): burada
+    /// "aynı mı" sorusu yok ve güncel seçenekler saklanmıyor, tek sahipleri
+    /// uygulamanın ayarları. Aynı değerle çağrı zararsız ama boşuna: `Term`
+    /// kilidi, bütün ekranın hasarı ve bir kare.
+    ///
+    /// `Config` seçeneklerin tamamından kuruluyor (`term_config`); geçmiş
+    /// küçülünce alacritty fazla satırları **hemen** siler ve kaydırma ofsetini
+    /// yeni tavana kırpar — büyütmek silineni geri getirmez. Seçim o satırlarda
+    /// kaldıysa `Selection::to_range` onu grid'e kırpıyor, çizim ve kopyalama
+    /// panik görmez.
+    ///
+    /// Kare **istenmek zorunda**: ofset değişmiş olabilir ve alacritty'nin
+    /// hasarı okunmuyor. İstek `Term` kilidi bırakıldıktan sonra
+    /// ([`Session::request_frame`]).
+    ///
+    /// **Kilit altında giden olay:** `Term::set_options` başlık olayını
+    /// (`Title`/`ResetTitle`) `Term` kilidi **tutulurken** `Adapter`'a
+    /// yolluyor. O kol bugün boş; bir gün başlık çizilirse kolu kilit
+    /// almamalı — `Wake` sözleşmesiyle aynı yasak, yoksa bu çağrı kendi
+    /// kendini kilitler (`race_set_terminal_options_and_frame` asılı kalır).
+    pub fn set_terminal_options(&self, options: TerminalOptions) {
+        self.term.lock().set_options(term_config(options));
+        self.request_frame();
+    }
+
     /// Hasarı uzaktan işaretleyebilen tutamak.
     ///
     /// Oturumun kendisine referans **vermez** ve bu kasıtlı: tutamağı tutan
@@ -1854,7 +1913,7 @@ mod tests {
             cols,
             rows: 10,
             cell_px: (9, 18),
-            scrollback: 100,
+            terminal: TerminalOptions { scrollback: 100 },
             theme: THEME,
         }
     }
@@ -2468,6 +2527,74 @@ mod tests {
             "{a:?}"
         );
         assert_eq!(b.bg, Some(dark_bg), "{b:?}");
+    }
+
+    #[test]
+    fn term_config_keeps_every_other_field() {
+        // `set_options` `Config`'in tamamını değiştiriyor: bir seçeneğin
+        // değişimi öteki alanları oynatmamalı. Bugün bizim tek alanımız
+        // `scrollback`; geri kalanı alacritty'nin varsayılanında kalmalı —
+        // `..Config::default()`'u ikinci bir yerde yazan bir çağrı buradan
+        // geçmez ama bu kurucuyu bozan bir değişiklik burada düşer. OSC 52
+        // (phase-8) gelince iki alan birbirini korur.
+        let before = term_config(TerminalOptions { scrollback: 100 });
+        let after = term_config(TerminalOptions { scrollback: 7 });
+        assert_eq!(after.scrolling_history, 7);
+        assert_eq!(
+            Config {
+                scrolling_history: before.scrolling_history,
+                ..after
+            },
+            before
+        );
+        assert_eq!(
+            Config {
+                scrolling_history: Config::default().scrolling_history,
+                ..before
+            },
+            Config::default()
+        );
+    }
+
+    #[test]
+    fn set_terminal_options_trims_history_and_repaints() {
+        // On satırlık ekranda altmış satır: geçmiş elliyi aşar (tavan 100).
+        // Pencere geçmişe kaydırılmışken tavan ona inince hem geçmiş hem
+        // kaydırma ofseti kırpılmalı ve ekrandaki satırlar değiştiği için
+        // kare istenmeli — alacritty'nin hasarı okunmuyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "lines() { i=0; while [ $i -lt 60 ]; do echo $i; i=$((i + 1)); done; }; \
+             lines; read _; lines; printf end; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until("geçmiş dolmadı", Duration::from_secs(5), || {
+            session.term.lock().history_size() >= 50
+        });
+        wait_settled(&session);
+        assert_eq!(session.scroll_page(4), Some(40));
+        let _ = session.frame(|_| ());
+
+        let before = wake.wait_wakes(0, Duration::ZERO);
+        session.set_terminal_options(TerminalOptions { scrollback: 10 });
+        {
+            let term = session.term.lock();
+            assert_eq!(term.history_size(), 10);
+            assert_eq!(term.grid().display_offset(), 10);
+        }
+        assert!(
+            wake.wait_wakes(before + 1, Duration::ZERO) > before,
+            "seçenek değişimi uyandırmadı"
+        );
+        assert!(
+            session.frame(|_| ()).is_some(),
+            "seçenek değişimi kare istemedi"
+        );
+
+        // Yeni tavan kalıcı: sonraki altmış satır geçmişi yine ona kırpıyor.
+        session.write(b"\n");
+        wait_ink(&session, &wake, "end");
+        assert_eq!(session.term.lock().history_size(), 10);
     }
 
     /// `needle` mürekkepte görünene kadar kare bekler; `od` satırı bölünmüş
@@ -3913,6 +4040,51 @@ mod tests {
         assert!(swapper.join().unwrap() > 0, "hiç takas olmadı");
         assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_set_terminal_options_and_frame() {
+        // `set_terminal_options` `Term` kilidini ana thread'den alıyor ve
+        // `set_options` o kilit altında `Adapter`'a başlık olayı yolluyor;
+        // okuyucu thread aynı kilitte satır basıp geçmişi büyütüyor, kaydıran
+        // thread ofseti oynatıyor. Tavan iki değer arasında gidip gelirken
+        // geçmiş ve ofset kırpılıyor. Başlık kolu bir gün kilit alırsa sınama
+        // asılı kalır (bkz. `race_color_request_and_frame`).
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "while :; do printf 'x\\n'; sleep 0.005; done",
+            Arc::clone(&wake),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let setter = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut sets = 0u64;
+                while Instant::now() < deadline {
+                    let scrollback = if sets % 2 == 0 { 5 } else { 50 };
+                    session.set_terminal_options(TerminalOptions { scrollback });
+                    let _ = session.scroll_page(1);
+                    sets += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                sets
+            })
+        };
+
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            if session.frame(|_| ()).is_some() {
+                frames += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(setter.join().unwrap() > 0, "hiç seçenek değişmedi");
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
+        assert!(session.term.lock().history_size() <= 50);
         session.shutdown();
     }
 }

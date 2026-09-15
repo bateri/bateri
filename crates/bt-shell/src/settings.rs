@@ -8,9 +8,12 @@
 //!
 //! Sonuç dört ayrı hâl taşır ve [`Settings::default`]'a **çökertilmez**:
 //! "dosya yok" sessiz ve doğru bir hâl, "ayrıştırılamadı" ise canlı
-//! yenilemede hiçbir şey uygulamamayı (007 phase-4) ve açılışta OSC 52'yi
-//! kapatmayı (phase-8) gerektiriyor. Hangi hâlde ne yapılacağı çağıranın
-//! kuralı; açılışın kuralı [`Loaded::at_launch`].
+//! yenilemede hiçbir şey uygulamamayı ve açılışta OSC 52'yi kapatmayı
+//! (phase-8) gerektiriyor. Hangi hâlde ne yapılacağı çağıranın kuralı;
+//! açılışınki [`Loaded::at_launch`], kayıt anınınki [`Loaded::live`]. Tema
+//! adının iki kuralı da aynı ikilik: [`ThemeLoaded::or_embedded`],
+//! [`ThemeLoaded::or_current`]. İzlenen yollar da buradan
+//! ([`watched_paths`], [`theme_path`]): okunan yolla izlenen yol ayrışmasın.
 //!
 //! **Bilinen sınır — okuma ana thread'de ve sınırsız bekler.** Düz dosya
 //! olmayan yol (FIFO, `/dev/zero`'ya bağ, dizin) okunmadan elenir; ama iCloud
@@ -38,10 +41,38 @@ pub(crate) fn config_root(home: &Path) -> PathBuf {
     home.join(".config").join("bateri")
 }
 
+/// Kökün izlenen yolları (`watch`): kökün kendisi, `themes/` ve
+/// `settings.toml`. Etkin tema dosyası ayrı ([`theme_path`]): adı ayarlardan
+/// ve görünümden türüyor, ayrı kurulup ayrı yenileniyor.
+///
+/// Kök ve `themes/` dizin olarak dosya doğumunu, silinmesini ve üstüne
+/// taşınmasını; `settings.toml` dosya olarak yerinde yazmayı ve bağın
+/// hedefindeki kaydı veriyor. Olmayan yol kaynak doğurmaz.
+pub(crate) fn watched_paths(root: &Path) -> [PathBuf; 3] {
+    [
+        root.to_path_buf(),
+        root.join(THEMES_DIR),
+        root.join(FILE_NAME),
+    ]
+}
+
+/// Kullanıcı temasının kökten göreli yolu — tanı metni de dosyayı bu adla
+/// söylüyor.
+fn theme_file(name: &str) -> String {
+    format!("{THEMES_DIR}/{name}.toml")
+}
+
+/// `{root}/themes/{ad}.toml`: [`load_theme`]'in okuduğu ve izleyicinin
+/// etkin tema için kurduğu dosya. Gömülü tema seçiliyse dosya yoktur ve
+/// kaynak kurulmaz.
+pub(crate) fn theme_path(root: &Path, name: &str) -> PathBuf {
+    root.join(theme_file(name))
+}
+
 /// Bir okumanın sonucu.
 #[derive(Debug)]
 pub(crate) enum Loaded {
-    /// Dosya yok: kullanıcı hiç ayar yazmamış. Tanı **yok**.
+    /// Dosya yok ya da boş: kullanıcı hiç ayar yazmamış. Tanı **yok**.
     Missing,
     /// Dosya var ama okunamadı: izin, düz dosya değil (dizin, FIFO), kırık
     /// sembolik bağ, UTF-8 olmayan içerik.
@@ -89,12 +120,26 @@ fn read_text(path: &Path) -> Text {
     }
 }
 
-/// `{root}/settings.toml`'u okur.
+/// `{root}/settings.toml`'u okur — açılışın okuması: kabul edilmeyen değer
+/// varsayılanını alır.
 pub(crate) fn load(root: &Path) -> Loaded {
+    load_keeping(root, &Settings::default())
+}
+
+/// Kayıt anının okuması: kabul edilmeyen değer `current`'inkini alır
+/// ([`Settings::parse_keeping`]). Yanlış türde kaydedilmiş bir `scrollback`
+/// varsayılana düşseydi geçmişi geri dönülmez kırpardı.
+///
+/// Boş dosya (yalnız boşluk) dosyasızlık sayılır. Yerinde kaydeden editör
+/// önce boşaltıyor (`O_TRUNC`) sonra yazıyor, boşaltma da olay veriyor: arada
+/// okunan boş dosya varsayılan `scrollback`'i uygulasaydı geçmiş geri dönülmez
+/// kırpılırdı. Açılışta ikisi zaten aynıydı (varsayılanlar, tanısız).
+pub(crate) fn load_keeping(root: &Path, current: &Settings) -> Loaded {
     match read_text(&root.join(FILE_NAME)) {
         Text::Missing => Loaded::Missing,
+        Text::Read(text) if text.trim().is_empty() => Loaded::Missing,
         Text::Unreadable(err) => Loaded::Unreadable(err),
-        Text::Read(text) => match Settings::parse(&text) {
+        Text::Read(text) => match Settings::parse_keeping(&text, current) {
             Ok(parsed) => Loaded::Parsed(parsed),
             Err(diagnostic) => Loaded::Unparseable(diagnostic),
         },
@@ -127,7 +172,7 @@ pub(crate) enum ThemeLoaded {
 /// sınanmıyor, `Settings`'ten gelmeyen bir ad bu fonksiyona hiç verilmiyor.
 pub(crate) fn load_theme(root: Option<&Path>, name: &str) -> ThemeLoaded {
     if let Some(root) = root {
-        let file = format!("{THEMES_DIR}/{name}.toml");
+        let file = theme_file(name);
         match read_text(&root.join(&file)) {
             Text::Missing => {}
             Text::Unreadable(err) => {
@@ -160,8 +205,9 @@ impl ThemeLoaded {
     /// yanlış yazan kullanıcıya koyu bir pencere açmak hatayı ikinci bir
     /// sürprizle büyütürdü. Görünüm değişiminde "ekrandaki tema kalır"
     /// denemez — ekrandaki tema öteki görünümün teması (`dark_theme` bozukken
-    /// açıktan koyuya dönen pencere açık kalırdı). "Önceki tema kalır" kuralı
-    /// görünüm aynıyken tema dosyasının bozulduğu canlı yenilemenin (phase-4).
+    /// açıktan koyuya dönen pencere açık kalırdı). "Ekrandaki tema kalır"
+    /// kuralı görünüm aynıyken dosyanın kaydedildiği canlı yenilemenin
+    /// ([`ThemeLoaded::or_current`]).
     pub(crate) fn or_embedded(self, dark: bool) -> (Theme, Vec<String>) {
         match self {
             ThemeLoaded::Found(theme, messages) => (theme, messages),
@@ -172,6 +218,24 @@ impl ThemeLoaded {
                 // sınaması); `BATERI` yalnız o tablo bozulursa.
                 let theme = Theme::embedded(name).unwrap_or(Theme::BATERI);
                 (theme, vec![format!("{message}; using {name}")])
+            }
+        }
+    }
+
+    /// Canlı yenilemenin kuralı — görünüm aynı, bir dosya kaydedildi:
+    /// kullanılamayan tema **takas edilmez** (`None`), ekrandaki tema kalır ve
+    /// ileti bunu söyler.
+    ///
+    /// Görünüme uyan gömülü temaya düşmek ([`ThemeLoaded::or_embedded`])
+    /// burada düzenlemeyi cezalandırırdı: yarım kaydedilmiş bir tema dosyası
+    /// ya da yazılırken eksik kalan bir ad pencereyi her kayıtta gömülü temaya
+    /// çakıp geri döndürürdü. Kural adın ayar dosyasında değişmesinde de aynı
+    /// — ikisi de düzenleme anı. Yeniden açılışta görünümün kuralı geçerli.
+    pub(crate) fn or_current(self) -> (Option<Theme>, Vec<String>) {
+        match self {
+            ThemeLoaded::Found(theme, messages) => (Some(theme), messages),
+            ThemeLoaded::Failed(message) => {
+                (None, vec![format!("{message}; keeping the current theme")])
             }
         }
     }
@@ -203,31 +267,61 @@ impl Loaded {
             ),
         }
     }
+
+    /// Canlı yenilemenin kuralı: uygulanacak ayarlar (`None` → **hiçbir
+    /// şey** uygulanmaz, geçerli ayarlar kalır) ve ayar yuvasının tanıları.
+    ///
+    /// - **Ayrıştırılamayan ya da okunamayan dosya** → `None` + tanı. Yarım
+    ///   kayıt (eksik tırnak) ekranı bozmaz; düzeltilen kayıt uygulanır.
+    ///   Açılıştan farkı bu: orada varsayılanlarla açmak zorunlu.
+    /// - **Dosya yok** → `None`, tanısız. Editörler kaydı çoğu zaman "eskiyi
+    ///   kenara taşı, yenisini yaz" diye yapıyor (vim'in yedeği) ve arada yol
+    ///   bir an yok; varsayılanları uygulamak her kayıtta pencereyi çakardı.
+    ///   Boş dosya da bu kol ([`load_keeping`]). Bedeli: dosyayı gerçekten
+    ///   silen ya da boşaltan kullanıcı varsayılanları yeniden açılışta görür
+    ///   (`docs/AYARLAR.md`).
+    pub(crate) fn live(self) -> (Option<Settings>, Vec<String>) {
+        match self {
+            Loaded::Missing => (None, Vec::new()),
+            Loaded::Unreadable(err) => {
+                (None, vec![format!("{FILE_NAME} could not be read: {err}")])
+            }
+            Loaded::Unparseable(diagnostic) => (None, vec![notice(&diagnostic)]),
+            Loaded::Parsed(parsed) => (
+                Some(parsed.settings),
+                parsed.diagnostics.iter().map(notice).collect(),
+            ),
+        }
+    }
+}
+
+/// Sınamaya özel geçici kök; süreç kimliği paralel koşan iki `cargo test`'i
+/// ayırıyor. `tempfile` bir bağımlılık kararı olurdu. İzleme sınamaları
+/// (`watch`) da kullanıyor; ad önekleri çakışmasın.
+#[cfg(test)]
+pub(crate) struct TempRoot(pub(crate) PathBuf);
+
+#[cfg(test)]
+impl TempRoot {
+    pub(crate) fn new(name: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("bateri-settings-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("geçici kök kurulamadı");
+        Self(path)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Sınamaya özel geçici kök; süreç kimliği paralel koşan iki `cargo
-    /// test`'i ayırıyor. `tempfile` bir bağımlılık kararı olurdu.
-    struct TempRoot(PathBuf);
-
-    impl TempRoot {
-        fn new(name: &str) -> Self {
-            let path =
-                std::env::temp_dir().join(format!("bateri-settings-{}-{name}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("geçici kök kurulamadı");
-            Self(path)
-        }
-    }
-
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn config_root_is_under_dot_config() {
@@ -460,6 +554,158 @@ mod tests {
         assert_eq!(
             load_theme(Some(&root.0), "paper").or_embedded(DARK).1,
             ["themes/paper.toml could not be read: not a regular file; using bateri"]
+        );
+    }
+
+    #[test]
+    fn live_reload_applies_nothing_from_a_broken_or_missing_file() {
+        let root = TempRoot::new("live");
+        // Dosya yok (editörün kaydı arasında da): uygulanacak bir şey yok ve
+        // bu bir hata değil.
+        assert_eq!(load(&root.0).live(), (None, Vec::new()));
+
+        // Yarım kayıt: hiçbir şey uygulanmıyor, yuva satırı söylüyor.
+        std::fs::write(root.0.join(FILE_NAME), "[appearance]\ntheme = \"paper\n")
+            .expect("yazılamadı");
+        let (settings, notices) = load(&root.0).live();
+        assert_eq!(settings, None);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].starts_with("settings.toml: line 2: invalid TOML: "),
+            "{notices:?}"
+        );
+
+        // Okunamayan dosya da (bağın hedefi taşındı) hiçbir şey uygulamıyor.
+        std::fs::remove_file(root.0.join(FILE_NAME)).expect("silinemedi");
+        std::os::unix::fs::symlink(root.0.join("moved.toml"), root.0.join(FILE_NAME))
+            .expect("bağ kurulamadı");
+        assert_eq!(
+            load(&root.0).live(),
+            (
+                None,
+                vec![
+                    "settings.toml could not be read: symbolic link points to a missing file"
+                        .to_owned()
+                ]
+            )
+        );
+
+        // Düzeltilen kayıt tanılarıyla uygulanıyor.
+        std::fs::remove_file(root.0.join(FILE_NAME)).expect("silinemedi");
+        std::fs::write(
+            root.0.join(FILE_NAME),
+            "[terminal]\nscrollback = 5\n[appearance]\ntheme = 3\n",
+        )
+        .expect("yazılamadı");
+        let (settings, notices) = load(&root.0).live();
+        assert_eq!(settings.map(|s| s.scrollback), Some(5));
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].starts_with("settings.toml: line 4: `appearance.theme`"),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn live_reload_keeps_current_values_for_rejected_keys() {
+        // Yüz binlik geçmiş açıkken `scrollback` yanlış türde kaydedildi:
+        // kayıt anında değer geçerli ayardan geliyor, fark boş kalıyor ve
+        // geçmiş kırpılmıyor. Açılıştaki okuma aynı dosyada varsayılana düşer.
+        let root = TempRoot::new("live-rejected");
+        std::fs::write(
+            root.0.join(FILE_NAME),
+            "[terminal]\nscrollback = \"100000\"\n",
+        )
+        .expect("yazılamadı");
+        let current = Settings {
+            scrollback: 100_000,
+            ..Settings::default()
+        };
+        let (settings, notices) = load_keeping(&root.0, &current).live();
+        let settings = settings.expect("ayrıştırılan dosya uygulanır");
+        assert_eq!(current.changes(&settings), bt_core::Changes::default());
+        assert_eq!(
+            notices,
+            [
+                "settings.toml: line 2: `terminal.scrollback` must be an integer, found a string; using 100000"
+            ]
+        );
+        assert_eq!(load(&root.0).at_launch().0.scrollback, 10_000);
+    }
+
+    #[test]
+    fn live_reload_applies_nothing_from_an_empty_file() {
+        // Yerinde kaydeden editör dosyayı önce boşaltıyor (`O_TRUNC`), sonra
+        // yazıyor; boşaltma olay veriyor. Arada okunan boş dosya varsayılan
+        // `scrollback`'i uygulasaydı geçmişin fazlası geri dönülmez silinirdi.
+        let root = TempRoot::new("live-empty");
+        for text in ["", "\n  \n"] {
+            std::fs::write(root.0.join(FILE_NAME), text).expect("yazılamadı");
+            let loaded = load_keeping(&root.0, &Settings::default());
+            assert!(matches!(loaded, Loaded::Missing), "{text:?}: {loaded:?}");
+            assert_eq!(loaded.live(), (None, Vec::new()), "{text:?}");
+            // Açılışta boş dosya dosyasızlıkla zaten aynıydı.
+            assert_eq!(
+                load(&root.0).at_launch(),
+                (Settings::default(), Vec::new()),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_reload_keeps_the_current_theme_when_unusable() {
+        // Canlı yenilemede kullanılamayan tema takas edilmiyor: yarım
+        // kaydedilmiş tema dosyası gömülü temaya çakmıyor.
+        let root = TempRoot::new("live-theme");
+        write_theme(&root, "paper", "background = \"#ffffff\n");
+        let (theme, notices) = load_theme(Some(&root.0), "paper").or_current();
+        assert_eq!(theme, None);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].starts_with("themes/paper.toml: line 1: invalid TOML: ")
+                && notices[0].ends_with("; keeping the current theme"),
+            "{notices:?}"
+        );
+        assert_eq!(
+            load_theme(Some(&root.0), "ink").or_current(),
+            (
+                None,
+                vec!["theme \"ink\" not found; keeping the current theme".to_owned()]
+            )
+        );
+
+        // Düzeltilen dosya takas ediliyor, yuva boşalıyor.
+        write_theme(&root, "paper", "background = \"#ffffff\"\n");
+        assert_eq!(
+            load_theme(Some(&root.0), "paper").or_current(),
+            (
+                Some(Theme {
+                    background: 0xffffff,
+                    ..Theme::BATERI
+                }),
+                Vec::new()
+            )
+        );
+    }
+
+    #[test]
+    fn watched_paths_follow_the_layout() {
+        // İzleyicinin yolları okuyucunun okuduğu yollarla aynı: biri
+        // değişip öteki kalırsa kaydı hiçbir kaynak görmez ve belirti
+        // sessizdir.
+        let root = Path::new("/r");
+        assert_eq!(
+            watched_paths(root),
+            [
+                PathBuf::from("/r"),
+                PathBuf::from("/r/themes"),
+                PathBuf::from("/r/settings.toml")
+            ]
+        );
+        assert_eq!(
+            theme_path(root, "paper"),
+            PathBuf::from("/r/themes/paper.toml")
         );
     }
 }
