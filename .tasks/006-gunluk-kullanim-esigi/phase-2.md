@@ -218,4 +218,4 @@ toparlanır, `cargo clean` gerekmez.
 - [x] `/code-review` çalıştırıldı, bulgular giderildi
 - [x] `/audit` çalıştırıldı, bulgular giderildi
 - [x] Yayın etkisi "Yayın Etkisi" bölümüne yazıldı
-- Commit: 97b9c2c
+- [x] Commit: 97b9c2c
