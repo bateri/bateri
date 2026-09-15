@@ -8,7 +8,7 @@
 | 004 | [yazi-bicimleri](004-yazi-bicimleri/) | 🔨 | `main`'de — kalın/eğik yüzler, beş alt çizgi, üstü çizili; teslim bekliyor: `/measure` (dört iddia kancayla ölçülebilir, #4'ün yarısı bench ister) — `teslim.md` |
 | 005 | [olcum-kancalari](005-olcum-kancalari/) | 🔨 | `main`'de — ölçüm kancaları (`BT_FRAME_STATS`, `BT_SCROLL_TEST`), sınırlı kapanış, `IDLE_FRAME_LIMIT` = 8; teslim bekliyor: kare süresi ve açılış ailesinin `/measure`'ı — `teslim.md` |
 | 006 | [gunluk-kullanim-esigi](006-gunluk-kullanim-esigi/) | 🟢 | `main`'de — seçim, pano, geçmişte kaydırma, `bateri.app`, ev dizini ve UTF-8 yereli; iki bilinçli `[~]` `teslim.md`'de |
-| 007 | [ayarlar-ve-tema](007-ayarlar-ve-tema/) | 🔨 | canlı ayar dosyası, açık/koyu tema, font, ana menü, OSC 52 yazma yönü |
+| 007 | [ayarlar-ve-tema](007-ayarlar-ve-tema/) | 🔨 | 8 phase ve set kapısı tamam; teslim bekliyor: dört göz kontrolü `[elle]`, iki `/measure` iddiası — `teslim.md` |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
