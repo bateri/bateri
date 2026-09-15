@@ -46,27 +46,33 @@ bulunamaz.
 
 | # | İş | Neden bu sırada |
 |---|---|---|
-| 007 | ayarlar + sekiz rollü tema + font seçimi | Font bugün sabit (`FALLBACK = "Menlo"`), renkler alacritty'nin varsayılan paletinden geliyor. Eşikten **sonra** çünkü neye ihtiyaç olduğu kullanırken daha iyi görülür. 006'dan ertelenen OSC 52 yazma yönünün `NSPasteboard` köprüsü de burada: ayar anahtarıyla gelir (`006/discussion.md` → Karar) |
-| 008 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür |
-| 009 | sekme + bölme | |
-| 010 | shell entegrasyonu (zsh/bash/fish) + OSC 133 | Kullanıcının rc dosyasına **asla** dokunulmaz: zsh `ZDOTDIR` sarmalayıcısı, bash `--rcfile`, fish `vendor_conf.d`. OSC 133 alacritty'de **yok**, `bt-core`'a eklenir |
-| 011 | komut blokları | OSC 133 işaretlerinden okunur; `frame()` sınırına kanca ister |
-| 012 | Input Dock | **Zincirin en ucu, kısayolu yok.** Pencere altında sabit ayrı satır editörü; zsh ZLE kancalarına, OSC 133'e ve komut bloklarına birden oturuyor. Ayrıca yazmayı devralan uygulamaları (Claude, Codex, REPL) davranıştan tespit edip alanı geri vermesi gerekiyor — bu, blokların çalışıyor olmasını varsayar |
+| 007 | ayarlar + sekiz rollü tema + font seçimi | Font bugün sabit (`FALLBACK = "Menlo"`), renkler alacritty'nin varsayılan paletinden geliyor. Eşikten **sonra** çünkü neye ihtiyaç olduğu kullanırken daha iyi görülür. 006'dan ertelenen OSC 52 yazma yönünün `NSPasteboard` köprüsü de burada: ayar anahtarıyla gelir (`006/discussion.md` → Karar). **Görünüşün temeli:** materyal yüzey (009) tema rollerine, hareketin ayarları (008) bu setin ayar dosyasına yaslanır |
+| 008 | hareket altyapısı + imleç animasyonu | Metalterm'i ekranda tanıtan üç şeyden biri (renk, imleç, yüzey) ve shell entegrasyonuna **bağlı değil**. Animasyon saati, yay fiziği, her animasyonun durma koşulu, `reduce_motion` ve sistemin Hareketi Azalt ayarı (`CLAUDE.md` → boşta sıfır kare). İlk tüketici imleç: Snap/Ease/Spring önce, Smear/Squash/Phosphor/Arc sonra. **İlk animasyondan önce** aşağıdaki "boşta kare kapısı yavaş bir animasyonu kaçırır" borcu çözülür — yoksa ilk animasyon tam o kör noktaya düşer. Ayarları 007'nin dosyasından okur. İmleç genişliği için 010'u beklemez: hücrenin geniş olduğu bilgisi grid'de zaten var. Yumuşak kaydırma ve çıktı gelince tamponun kayması aynı altyapının ikinci tüketicisi; sete sığmazsa hemen ardından |
+| 009 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır |
+| 010 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 008–009 öne alındığı için TUI çerçeveleri iki set daha bozuk görünür — bilerek |
+| 011 | sekme + bölme | |
+| 012 | shell entegrasyonu (zsh/bash/fish) + OSC 133 | Kullanıcının rc dosyasına **asla** dokunulmaz: zsh `ZDOTDIR` sarmalayıcısı, bash `--rcfile`, fish `vendor_conf.d`. OSC 133 alacritty'de **yok**, `bt-core`'a eklenir |
+| 013 | komut blokları (+ blok animasyonları) | OSC 133 işaretlerinden okunur; `frame()` sınırına kanca ister; blok şeridi ve kalkma animasyonları 008'in altyapısıyla gelir |
+| 014 | Input Dock (+ yazma animasyonları) | **Zincirin en ucu, kısayolu yok.** Pencere altında sabit ayrı satır editörü; zsh ZLE kancalarına, OSC 133'e ve komut bloklarına birden oturuyor. Ayrıca yazmayı devralan uygulamaları (Claude, Codex, REPL) davranıştan tespit edip alanı geri vermesi gerekiyor — bu, blokların çalışıyor olmasını varsayar. Tuş vuruşu ve silme animasyonları (`keypress`, `delete_mode`) burada: "bu harfi kullanıcı mı yazdı?" sorusunun kesin cevabı dock'ta, ızgarada yalnız tahmin |
 
-Sonrası (sırasız): hareket/motion, materyal yüzey (`substrate` shader'ı,
-grain/sheen), palet ve arama overlay'leri, durum çubuğu, Sparkle ile
-güncelleme.
+Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
+animasyonu), Sparkle ile güncelleme.
 
-> **Açık soru — hareket/motion nereye oturur?** Kullanıcı 2026-09-14'te
-> "animasyon senaryolarına bu rfc bitince bir değerlendireceğiz" dedi;
-> değerlendirme henüz yapılmadı. Orkestratörün önerisi (**kullanıcı
-> onaylamadı**): hareket toplu bir set değil, parça parça gelsin —
-> (1) altyapı + imleç kayması 008'den sonra, çünkü ayarlar (007) ve geniş
-> glyph (008) o zaman oturmuş olur ve aşağıdaki "boşta kare kapısı yavaş bir
-> animasyonu kaçırır" borcu ilk animasyondan **önce** çözülmeli;
-> (2) blok animasyonları 011 (komut blokları) ile; (3) yazma animasyonları
-> (tuş vuruşu, silme) 012 (Input Dock) ile. Yukarıdaki sıra bu öneri yüzünden
-> **değişmedi**; karar verilince gerekçesiyle değişir.
+> **Sıra değişti (2026-09-15, kullanıcı kararı).** Kullanıcı Metalterm'in
+> asıl değerini "animasyonlar, görünüş" diye koydu; eski sıra hareketi ve
+> materyali Input Dock'tan sonraya, sırasız bir listeye bırakıyordu. Renk,
+> imleç ve yüzey Metalterm'i ekranda tanıtan üç şey ve üçü de shell
+> entegrasyonuna bağlı değil — o yüzden 007–009. Hareket toplu bir set
+> değil, parça parça: altyapı + imleç 008'de, blok animasyonları 013'te,
+> yazma animasyonları 014'te. Orkestratörün bir önceki önerisindeki
+> "imleç, emoji setinden sonra (genişlik kesinleşsin)" gerekçesi zayıftı —
+> geniş hücre bilgisi grid'de — ve düştü. Bedeli: emoji ve kutu çizimi iki
+> set gecikir.
+>
+> **Numara kayması.** Bu tarihten önceki belgelerde 008 = emoji/geniş/kutu,
+> 009 = sekme/bölme, 010 = shell entegrasyonu, 011 = komut blokları, 012 =
+> Input Dock; bugün sırasıyla 010, 011, 012, 013, 014. Kapanmış setlerin
+> dosyaları (ör. 006'da "sekme/bölme (009)") tarihli kayıttır, düzeltilmedi.
 
 ## Sete bağlanmamış borçlar
 
@@ -93,10 +99,10 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 - **Boşta kare kapısı yavaş bir animasyonu kaçırır.** 005 phase-3 sınırı
   ölçümle büyüttü; bedeli, kapının algılama tabanının yükselmesi oldu — durma
   koşulu unutulmuş yavaş bir blink bugün yeşil geçer. Bu depoda öyle bir
-  animasyon **yok**, ama hareket/motion seti tam bunu getirecek. Sayılar,
+  animasyon **yok**, ama 008 (hareket altyapısı) tam bunu getirecek. Sayılar,
   mekanizma ve aday çözüm (`istek=`'i orana çevirip kapıya bağlamak; eşiği
   **ölçülmedi**) `bt-shell`'in `IDLE_FRAME_LIMIT` doc'unda; set açılınca bu
-  madde onun `context.md`'sine taşınır → hareket/motion. Aynı sabit 006
+  madde onun `context.md`'sine taşınır → 008, ilk animasyondan önce. Aynı sabit 006
   phase-5'te görünür pencerede yeniden ölçüldü ve değişmedi; bu madde o
   ölçümle **kapanmadı**, algılama tabanı aynı — **tek sabit, iki ayrı iş**.
 - **About paneli erişilemiyor.** 006 phase-4 atfı AppKit'in standart About
