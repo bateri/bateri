@@ -308,6 +308,12 @@ fn notify_settings_changed() {
 /// türü tanımasa da o türü kimse açmayabilir; o zaman varsayılan **metin**
 /// editörü (`open -t`, çoğu makinede TextEdit). İkincisi bir alt süreç ve
 /// dönüşü bekleniyor: `open` işi LaunchServices'e verip hemen çıkıyor.
+///
+/// **Bilinen sınır — ana thread bekler.** `open` editörü soğuk açarken
+/// dönmüyor ve display link ana thread'de: o arada pencere kare çizmez, tuş
+/// işlenmez (`/code-review` bulgusu, 007 kapıda waive). Yalnız `.toml`'u
+/// sahiplenen uygulama yokken ve kullanıcının kendi tıklamasında; odak zaten
+/// editöre geçiyor. Beklememek hatanın alt başlığa yolunu keserdi.
 fn open_in_editor(path: &Path) -> bool {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
     if NSWorkspace::sharedWorkspace().openURL(&url) {

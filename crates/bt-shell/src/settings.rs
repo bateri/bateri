@@ -260,14 +260,23 @@ pub(crate) enum ThemeLoaded {
 
 /// Tema adını çözer: önce `{root}/themes/{ad}.toml`, sonra gömülü temalar.
 ///
-/// `root` `None` → ev dizini çözülemedi, yalnız gömülüler. Dosya
-/// `Theme::BATERI`'nin üstüne okunur: eksik anahtar oradan gelir
-/// (`docs/AYARLAR.md` → Temalar).
+/// `root` `None` → ev dizini çözülemedi, yalnız gömülüler. Dosyanın eksik
+/// anahtarı **tabandan** gelir: gömülü bir temayı gölgeleyen dosyada o
+/// temanın kendisi, başka adda `Theme::BATERI` (`docs/AYARLAR.md` → Temalar).
+/// Gölgeleyen `themes/bateri-light.toml`'a yalnız `accent` yazan kullanıcı
+/// açık temayı kırmızı imleçle bekliyor; koyu tabandan okunsaydı açık modda
+/// koyu zemin alırdı (`/code-review` bulgusu).
 ///
 /// **Dosya var ama kullanılamıyorsa gömülüye düşülmez**: bozuk bir
 /// `themes/bateri.toml` sessizce gömülü `bateri`'yi açsaydı kullanıcı
 /// dosyasının neden işlemediğini göremezdi. Dosya **yoksa** gömülü aranır —
 /// gölgelenmemiş ad budur.
+///
+/// **Boş dosya kullanılamaz sayılır**, `settings.toml`'un kuralıyla
+/// ([`load_keeping`]): yerinde kaydeden editör dosyayı önce boşaltıyor ve
+/// kaydın ortasında okunan boş tema tabanın kendisi olurdu — canlı yenileme
+/// pencereyi o anda koyu tabana çakardı. Kayıt anında ekrandaki tema kalır
+/// ([`ThemeLoaded::or_current`]), açılışta görünüme uyan gömülü tema gelir.
 ///
 /// Adın biçimi (`/` yok, boş değil) `bt-core`'da zaten sınandı; burada yeniden
 /// sınanmıyor, `Settings`'ten gelmeyen bir ad bu fonksiyona hiç verilmiyor.
@@ -279,8 +288,12 @@ pub(crate) fn load_theme(root: Option<&Path>, name: &str) -> ThemeLoaded {
             Text::Unreadable(err) => {
                 return ThemeLoaded::Failed(format!("{file} could not be read: {err}"));
             }
+            Text::Read(text) if text.trim().is_empty() => {
+                return ThemeLoaded::Failed(format!("{file} is empty"));
+            }
             Text::Read(text) => {
-                return match Theme::parse(&text, &Theme::BATERI) {
+                let base = Theme::embedded(name).unwrap_or(Theme::BATERI);
+                return match Theme::parse(&text, &base) {
                     Ok((theme, diagnostics)) => ThemeLoaded::Found(
                         theme,
                         diagnostics.iter().map(|d| format!("{file}: {d}")).collect(),
@@ -743,6 +756,54 @@ mod tests {
                 ..Theme::BATERI
             }
         );
+
+        // Açık gömülü temayı gölgeleyen dosyanın tabanı açık tema
+        // (`/code-review` bulgusu): yalnız imleci değiştiren kullanıcı açık
+        // modda koyu zemin almamalı. Gölgelemeyen adın tabanı `bateri` kalır.
+        write_theme_file(&root, "bateri-light", "accent = \"#ff0000\"\n");
+        write_theme_file(&root, "paper", "accent = \"#ff0000\"\n");
+        let light = load_theme(Some(&root.0), "bateri-light").or_embedded(false);
+        assert_eq!(
+            light,
+            (
+                Theme {
+                    accent: 0xff0000,
+                    ..Theme::BATERI_LIGHT
+                },
+                Vec::new()
+            )
+        );
+        let paper = load_theme(Some(&root.0), "paper").or_embedded(false);
+        assert_eq!(
+            paper.0,
+            Theme {
+                accent: 0xff0000,
+                ..Theme::BATERI
+            }
+        );
+    }
+
+    #[test]
+    fn empty_user_theme_is_unusable() {
+        // Yerinde kaydeden editör dosyayı önce boşaltıyor: kaydın ortasında
+        // okunan boş tema koyu tabanın kendisi olur ve canlı yenileme
+        // pencereyi ona çakardı (`/code-review` bulgusu). `settings.toml`'un
+        // kuralı: boş dosya kullanılamaz.
+        let root = TempRoot::new("theme-empty");
+        write_theme_file(&root, "paper", " \n");
+        assert_eq!(
+            load_theme(Some(&root.0), "paper").or_current(),
+            (
+                None,
+                vec!["themes/paper.toml is empty; keeping the current theme".to_owned()]
+            )
+        );
+        // Açılışta görünüme uyan gömülü tema; gölgelenen adın gömülüsüne
+        // sessizce düşülmez (bozuk dosyanın kuralı).
+        write_theme_file(&root, "bateri", "");
+        let (theme, notices) = load_theme(Some(&root.0), "bateri").or_embedded(false);
+        assert_eq!(theme, Theme::BATERI_LIGHT);
+        assert_eq!(notices, ["themes/bateri.toml is empty; using bateri-light"]);
     }
 
     #[test]

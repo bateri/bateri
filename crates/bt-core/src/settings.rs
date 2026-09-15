@@ -418,7 +418,8 @@ osc52 = "copy"
     /// - **Ayrıştırılamayan metin `Err`**, yeni metin üretilmez: dosya
     ///   kullanıcının yarım işi ve üstüne yazmak onu silerdi. Aynı sebeple
     ///   bölüm olmayan bir `appearance` (`appearance = 1`, `[[appearance]]`)
-    ///   ve bölüm olan bir `theme` (`[appearance.theme]`) de `Err`: yerlerine
+    ///   ve bölüm olan bir `theme` (`[appearance.theme]`, `theme = { … }`) de
+    ///   `Err`: yerlerine
     ///   yazmak içeriklerini silerdi. Kabul edilmeyen türdeki bir değer
     ///   (`theme = 3`) ise değişir — kullanıcı bir tema seçti.
     ///
@@ -432,8 +433,13 @@ osc52 = "copy"
         // Ret konumlu belgede: `into_mut` konumları düşürüyor, tanının satırı
         // onlardan geliyor.
         let mut refused = Vec::new();
+        // Satır içi tablo (`theme = { … }`) da bir bölüm: `is_value` onu
+        // geçirirdi ve yerine yazmak `[appearance.theme]`'in reddedildiği
+        // içeriği bu yazılışta sessizce silerdi (`/code-review` bulgusu).
         if let Some(appearance) = section(text, parsed.as_table(), SECTION, &mut refused)
-            && let Some(item) = appearance.get("theme").filter(|item| !item.is_value())
+            && let Some(item) = appearance
+                .get("theme")
+                .filter(|item| !item.is_value() || item.is_inline_table())
         {
             refused.push(Diagnostic {
                 key: Some(KEY),
@@ -478,12 +484,17 @@ osc52 = "copy"
         // `toml_edit` satır sonlarını LF yazıyor. İlk satırı CRLF olan dosya
         // CRLF kalıyor; yoksa tek bir seçim dotfile deposunda bütün dosyayı
         // değişmiş gösterirdi. Karışık satır sonlu dosya ilk satırınkini alır.
+        //
+        // Önce LF'ye indirilip sonra çevriliyor (`/code-review` bulgusu):
+        // `toml_edit` çok satırlı metnin **içindeki** `\r\n`'i olduğu gibi
+        // bırakıyor ve doğrudan çeviri onu `\r\r\n` yapardı — geçersiz TOML,
+        // yani dosyaya bir daha yazılamaz ve hiçbir kayıt uygulanmazdı.
         let crlf = text
             .find('\n')
             .is_some_and(|end| text.as_bytes()[..end].ends_with(b"\r"));
         let written = doc.to_string();
         Ok(if crlf {
-            written.replace('\n', "\r\n")
+            written.replace("\r\n", "\n").replace('\n', "\r\n")
         } else {
             written
         })
@@ -1427,6 +1438,13 @@ cursor = \"spring\"
             Settings::with_theme("[font]\r\nsize = 14\r\n", "paper").expect("yazılabilir metin"),
             "[font]\r\nsize = 14\r\n\r\n[appearance]\r\ntheme = \"paper\"\r\n"
         );
+        // `/code-review` bulgusu: çok satırlı metnin içindeki `\r\n`'i
+        // `toml_edit` ham bırakıyor; çeviri onu `\r\r\n` yapıp dosyayı
+        // geçersiz bırakıyordu. Sonuç ayrıştırılabilir ve metin aynı.
+        let text = "[appearance]\r\ntheme = \"a\"\r\n[notes]\r\nnote = \"\"\"x\r\ny\"\"\"\r\n";
+        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        assert_eq!(written, text.replace("\"a\"", "\"paper\""));
+        assert_eq!(clean(&written).theme, "paper");
     }
 
     #[test]
@@ -1473,10 +1491,16 @@ cursor = \"spring\"
             assert_eq!(err.key, Some("appearance"), "{text}");
             assert!(err.message.contains("must be a section"), "{err}");
         }
-        // Tablo olan `theme`: yerine değer yazmak alt tabloyu silerdi.
-        let err = Settings::with_theme("[appearance.theme]\nx = 1\n", "paper")
-            .expect_err("tema bir bölüm");
-        assert_eq!(err.key, Some("appearance.theme"));
+        // Tablo olan `theme`: yerine değer yazmak alt tabloyu silerdi — iki
+        // yazılışı da (`/code-review` bulgusu: satır içi hâl geçiyordu).
+        for text in [
+            "[appearance.theme]\nx = 1\n",
+            "[appearance]\ntheme = { light = \"paper\" }\n",
+        ] {
+            let err = Settings::with_theme(text, "paper").expect_err("tema bir bölüm");
+            assert_eq!(err.key, Some("appearance.theme"), "{text}");
+            assert!(err.message.contains("found a section"), "{err}");
+        }
     }
 
     #[test]

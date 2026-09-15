@@ -40,5 +40,6 @@ objc2-quartz-core = { workspace = true, features = ["CALayer"] }
 # (ayar ve tema dosyasının izlenmesi, `watch`, 007 phase-4): fonksiyon
 # işaretçili işleyiciyle, `block2` kenarı yok.
 dispatch2 = { workspace = true }
-# Yalnız bekçi thread'in `write` + `_exit`'i; gerekçesi workspace manifest'inde.
+# Bekçi thread'in `write` + `_exit`'i ve izleme kaynaklarının `O_EVTONLY`'si
+# (`watch`, 007 kapı); gerekçesi workspace manifest'inde.
 libc = { workspace = true }
