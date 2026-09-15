@@ -21,14 +21,15 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationDelegate,
-    NSBackingStoreType, NSEvent, NSMenu, NSMenuDelegate, NSMenuItem, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
+    NSBackingStoreType, NSEvent, NSMenu, NSMenuDelegate, NSMenuItem, NSPasteboard, NSWindow,
+    NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
     NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL, ns_string,
 };
 
+use crate::clipboard::PendingCopy;
 use crate::notices::{Notices, Source, font_messages};
 use crate::view::BateriView;
 use crate::watch::{Notify, Watch};
@@ -216,6 +217,10 @@ fn split_into_grid(width_px: f64, height_px: f64, cell: CellMetrics) -> Grid {
 /// birikmiş olur.
 struct ShellWake {
     waker: OnceLock<Waker>,
+    /// OSC 52'nin ana kuyruğa bekleyen metni. `Arc`, çünkü ana kuyruğun işi
+    /// `'static` ister ve `Wake`'in çağrısı yalnız `&self` veriyor; iş
+    /// `ShellWake`'i değil yalnız yuvayı tutar.
+    pending_copy: Arc<PendingCopy>,
 }
 
 impl Wake for ShellWake {
@@ -253,6 +258,21 @@ impl Wake for ShellWake {
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
             NSApplication::sharedApplication(mtm).terminate(None);
         });
+    }
+
+    fn copy_to_clipboard(&self, text: String) {
+        // Okuyucu thread, `Term` kilidi tutuluyor: metin kilitsiz yuvaya,
+        // ana kuyruğa en çok **bir** iş (`PendingCopy`'nin doc'u). Yuvada
+        // bekleyen metin varsa onu alacak iş zaten kuyrukta.
+        //
+        // Pano genel pano, Cmd-C'ninkiyle aynı (`view.rs` → `copy:`); işin
+        // sırası `child_exit`'inkiyle aynı gerekçeden: ana kuyruk.
+        if self.pending_copy.put(text) {
+            let pending = Arc::clone(&self.pending_copy);
+            DispatchQueue::main().exec_async(move || {
+                pending.deliver(&NSPasteboard::generalPasteboard());
+            });
+        }
     }
 }
 
@@ -1006,6 +1026,7 @@ impl AppDelegate {
             session: OnceCell::new(),
             wake: Arc::new(ShellWake {
                 waker: OnceLock::new(),
+                pending_copy: Arc::default(),
             }),
             run: opts.run,
             notices: RefCell::new(Notices::default()),
@@ -1122,14 +1143,16 @@ impl AppDelegate {
         };
         // Ev dizini çözülemedi: dosya aranamıyor ve bu da görünür olmalı —
         // Dock'tan açılışta stderr'i kimse görmez, kullanıcının ayarları
-        // sessizce yok sayılmış olurdu.
+        // sessizce yok sayılmış olurdu. Okunamayan dosyanın kuralı
+        // (`Loaded::at_launch`): dosyada `osc52 = "off"` olabilir, pano
+        // kapalıya düşer.
         let (settings, messages) = match &config_root {
             Some(root) => {
                 self.watch_config(root);
                 settings::load(root).at_launch()
             }
             None => (
-                Settings::default(),
+                Settings::for_unusable_file(),
                 vec![format!(
                     "home directory not found; {} is not read",
                     settings::FILE_NAME

@@ -5,7 +5,8 @@
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`,
 //! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Theme`,
 //! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`'i görür (tam
-//! liste aşağıdaki `pub use` bloğu). Kendi grid'imize geçiş (00X) bu sınırın
+//! liste aşağıdaki `pub use` bloğu). `Osc52` alacritty'nin aynı adlı tipinin
+//! karşılığı, kendisi değil. Kendi grid'imize geçiş (00X) bu sınırın
 //! arkasında yapılır ve renderer'ı bilmez. `toml_edit` de aynı biçimde içeride
 //! kalır: ayar modelinin ve tema dosyasının `pub` yüzünde TOML tipi yok;
 //! temanın renkleri `0xRRGGBB`, alacritty'nin `Rgb`'si değil.
@@ -29,8 +30,8 @@ mod wake;
 pub use color::{LinearRgba, Theme};
 pub use input::Arrow;
 pub use session::{
-    Cell, CellHalf, Cursor, DirtyFlag, SHUTDOWN_GRACE, SelectionPoint, Session, SessionOptions,
-    Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
+    Cell, CellHalf, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, SelectionPoint, Session,
+    SessionOptions, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{Changes, Diagnostic, FontOptions, Parsed, SYSTEM_THEME, Settings};
 pub use wake::Wake;
