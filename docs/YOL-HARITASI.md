@@ -47,7 +47,7 @@ bulunamaz.
 | # | İş | Neden bu sırada |
 |---|---|---|
 | 007 | ayarlar + sekiz rollü tema + font seçimi | Görünüşün temeli: 008 ayar dosyasına, 009 tema rollerine yaslanır. Set açıldı → `.tasks/007-ayarlar-ve-tema/context.md` |
-| 008 | hareket altyapısı + imleç animasyonu | Metalterm'i ekranda tanıtan üç şeyden biri (renk, imleç, yüzey) ve shell entegrasyonuna **bağlı değil**. Animasyon saati, yay fiziği, her animasyonun durma koşulu, `reduce_motion` ve sistemin Hareketi Azalt ayarı (`CLAUDE.md` → boşta sıfır kare). İlk tüketici imleç: Snap/Ease/Spring önce, Smear/Squash/Phosphor/Arc sonra. **İlk animasyondan önce** aşağıdaki "boşta kare kapısı yavaş bir animasyonu kaçırır" borcu çözülür — yoksa ilk animasyon tam o kör noktaya düşer. Ayarları 007'nin dosyasından okur. İmleç genişliği için 010'u beklemez: hücrenin geniş olduğu bilgisi grid'de zaten var. Yumuşak kaydırma ve çıktı gelince tamponun kayması aynı altyapının ikinci tüketicisi; sete sığmazsa hemen ardından |
+| 008 | hareket altyapısı + imleç animasyonu | Metalterm'i ekranda tanıtan üç şeyden biri (renk, imleç, yüzey) ve shell entegrasyonuna **bağlı değil**. İlk tüketici imleç; boşta kare kapısının yavaş animasyon borcu da bu setin içinde kapanıyor. Set açıldı → `.tasks/008-hareket-ve-imlec/context.md`. Yumuşak kaydırma ve çıktı gelince tamponun kayması aynı altyapının ikinci tüketicisi; sete sığmazsa hemen ardından |
 | 009 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır |
 | 010 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 008–009 öne alındığı için TUI çerçeveleri iki set daha bozuk görünür — bilerek |
 | 011 | sekme + bölme | |
@@ -93,15 +93,6 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   **sete bağlanmadı** — `bt-core`'un kapanış tasarımına meşru biçimde dokunan
   ilk set toplar. Ayrıntısı ve çürütülmüş çaresi `CLAUDE.md`'nin kapanış
   maddesinde; artık **ölçülebilir** de (`kapanis=abandoned`).
-- **Boşta kare kapısı yavaş bir animasyonu kaçırır.** 005 phase-3 sınırı
-  ölçümle büyüttü; bedeli, kapının algılama tabanının yükselmesi oldu — durma
-  koşulu unutulmuş yavaş bir blink bugün yeşil geçer. Bu depoda öyle bir
-  animasyon **yok**, ama 008 (hareket altyapısı) tam bunu getirecek. Sayılar,
-  mekanizma ve aday çözüm (`istek=`'i orana çevirip kapıya bağlamak; eşiği
-  **ölçülmedi**) `bt-shell`'in `IDLE_FRAME_LIMIT` doc'unda; set açılınca bu
-  madde onun `context.md`'sine taşınır → 008, ilk animasyondan önce. Aynı sabit 006
-  phase-5'te görünür pencerede yeniden ölçüldü ve değişmedi; bu madde o
-  ölçümle **kapanmadı**, algılama tabanı aynı — **tek sabit, iki ayrı iş**.
 - **Üçüncü taraf bildirimlerinin geri kalanı.** 006 yalnız `alacritty_terminal`'ın
   (Apache-2.0) borcunu kapattı. macOS ağacındaki diğer dış paketlerin çoğu
   MIT ya da MIT seçeneği taşıyor (`objc2` ailesinin dördü yalnız MIT) ve MIT

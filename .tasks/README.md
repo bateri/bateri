@@ -9,6 +9,7 @@
 | 005 | [olcum-kancalari](005-olcum-kancalari/) | 🔨 | `main`'de — ölçüm kancaları (`BT_FRAME_STATS`, `BT_SCROLL_TEST`), sınırlı kapanış, `IDLE_FRAME_LIMIT` = 8; teslim bekliyor: kare süresi ve açılış ailesinin `/measure`'ı — `teslim.md` |
 | 006 | [gunluk-kullanim-esigi](006-gunluk-kullanim-esigi/) | 🟢 | `main`'de — seçim, pano, geçmişte kaydırma, `bateri.app`, ev dizini ve UTF-8 yereli; iki bilinçli `[~]` `teslim.md`'de |
 | 007 | [ayarlar-ve-tema](007-ayarlar-ve-tema/) | 🟢 | `main`'de — canlı ayar dosyası, açık/koyu tema, font, ana menü, OSC 52 kopyası; iki bilinçli `[~]` `teslim.md`'de |
+| 008 | [hareket-ve-imlec](008-hareket-ve-imlec/) | 📐 | hareket altyapısı + imleç kayması; boşta kare kapısının yavaş animasyon borcu da burada |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
