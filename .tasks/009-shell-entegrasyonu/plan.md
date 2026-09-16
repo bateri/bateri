@@ -112,7 +112,7 @@ kabuk zsh mi? ──► evet               Session::spawn
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | phase-3 | |
 | phase-4 | |

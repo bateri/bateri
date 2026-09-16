@@ -44,11 +44,43 @@ yok (betik sonraki phase'lerde) · app bundle yok · yeni bağımlılık yok.
 `bt-core`'un platformsuzluğu korunuyor: tarayıcı saf bayt işi, `libc` bile
 görmüyor.
 
+## Uygulama Notları
+
+- **Sonlandırıcı iki değil dört.** `vte-0.15.0`'ın `advance_osc_string`'i
+  diziyi `BEL`, `CAN` (0x18), `SUB` (0x1A) **ve çıplak `ESC`** ile bitiriyor;
+  sonuncusunda `ESC \`'in `\`'ini beklemeden dağıtıyor. Aynı kaynaktan ikinci
+  bir parite kuralı: dizinin içindeki C0 baytları (0x00–0x06, 0x08–0x17, 0x19,
+  0x1C–0x1F) yüke **girmiyor**. İkisi de tarayıcıya girdi ve sınandı —
+  çerçeveleme ızgarayla aynı olmasaydı iki taraf aynı akıştan iki farklı hikâye
+  okurdu.
+- **Üst sınır yalnız `133` gövdesine uygulanıyor.** Numara kararı `;`'da
+  veriliyor; `133` olmayan dizi tampona hiç dokunmadan atlanıyor. Aksi hâlde
+  her meşru OSC 52 kopyası (kilobayt, megabayt) "sınırı aşan dizi" yoluna
+  düşerdi ve sınırın ayırt ettiği bir şey kalmazdı. Sınır 256 bayt ve
+  **tasarım sabiti**, ölçüm değil (gerekçesi `PAYLOAD_LIMIT`'in doc'unda).
+- **`D;abc` işareti düşürmüyor, yalnız kodu bilinmiyor.** Plan "bozuk yük
+  yoksayılır" diyor; yoksayılan, tanınmayan **işaret** (`133;Z`, `133;AB`,
+  boş yük). Okunamayan bir parametre komutun bittiği bilgisini çürütmez ve
+  düşürseydik durum sonsuza kadar "çalışıyor"da asılı kalırdı.
+- **Yuva `AdapterInner`'da değil `Session`'da.** Phase "`Adapter`'ın yaprak
+  kilidinde" diyordu; `Adapter` alacritty'nin **olaylarını** karşılıyor ve bu
+  duruma hiç dokunmuyor — işaretler olaydan değil ham bayttan geliyor. Kilit
+  yine yaprak, `Arc` çünkü phase-2 onu okuyucu thread'ine taşıyacak.
+- **`ShellPhase` dört değerli** (`Prompt`/`Input`/`Running`/`Finished`), yani
+  `A` ile `B` ayrı: "prompt çiziliyor" ile "kullanıcı yazıyor" sınırı Input
+  Dock'un ilk sorusu ve ayrımı şimdi tutmak bedava.
+- **`#![allow(dead_code)]`** modülün başında: tarayıcıyı besleyen taraf
+  phase-2'de iniyor, bugün tek çağıranı sınamalar. **Satır phase-2'de kalkar.**
+- **Test-first sırası bozuldu:** sınamalar ve gövde birlikte yazıldı. Yerine
+  daha güçlü bir kanıt kondu — üç mutasyon (çıplak `ESC` sonlandırıcısı
+  kaldırıldı, üst sınır kaldırıldı, `133` kararı erken verilmedi) tek tek
+  denendi ve her biri kendi sınamasını kırmızıya düşürdü.
+
 ## Checklist
 
-- [ ] Tarayıcı: durum makinesi, bölünmüş dizi, üst sınır
-- [ ] `ShellState` + yaprak kilitteki yuva + `Session::shell_state()`
-- [ ] Test: dört işaret, çıkış kodu, bölünmüş dizi, iki sonlandırıcı, bozuk
-      yük, üst sınır aşımı, "besleyen yokken durum yok"
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] Yayın etkisi yazıldı
+- [x] Tarayıcı: durum makinesi, bölünmüş dizi, üst sınır
+- [x] `ShellState` + yaprak kilitteki yuva + `Session::shell_state()`
+- [x] Test: dört işaret, çıkış kodu, bölünmüş dizi (her bayt sınırında), iki
+      sonlandırıcı, bozuk yük, üst sınır aşımı, "besleyen yokken durum yok"
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] Yayın etkisi yazıldı
