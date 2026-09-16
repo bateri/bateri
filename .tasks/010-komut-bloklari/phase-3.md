@@ -56,13 +56,64 @@ _Requirements: R5, R5.1, R5.2_
 - Tema biçimi, shell entegrasyonu, terminfo, bundle: değişiklik yok.
 - Yeni bağımlılık yok. Ölçüm iddiası yok.
 
+## Uygulama Notları
+
+- **Pay ayrı bir sabit değil, `CellMetrics`'in alanı oldu.** Phase "tek
+  sabitten üç tüketiciye" diyordu; sabiti üç yerin okuması "tek kaynak"
+  değil, tek kaynağın **üç kopyası** olurdu — biri tazelenip öteki
+  kalabilirdi. Alan olunca ayrışma yapısal olarak imkânsız: `cols` hesabı,
+  `Frame::pos_at` ve `point_to_cell` aynı **değeri** taşıyan tek yapıdan
+  okuyor. `CellMetrics::new` üçüncü bir argüman aldı ve tipin doc'u
+  "hücre ölçüsü"nden "ızgaranın piksel geometrisi"ne genişledi.
+- **`GUTTER_PT = 8.0` ve `private`.** `docs/ARASTIRMA.md` Metalterm'in
+  `command_gutter`'ını bir **ayar** olarak sayıyor ama genişliğini vermiyor;
+  değer bu yüzden ürün kararı (şerit artı iki yanında nefes payı) ve tipik
+  punto/ölçekte `cols`'tan en çok bir sütun götürüyor. Ölçülmüş bir sayı
+  değil, `docs/OLCUMLER.md`'nin konusu da değil. `private` olması bilinçli:
+  sabiti okuyan ikinci bir yer, tipin önlediği ayrışmayı geri getirirdi.
+- **Payı ekleyen tek satır `Frame::pos_at`.** Dört tüketici (arka plan,
+  glyph, kural, imleç) zaten o satırdan geçiyordu; ikinci bir yerde
+  eklenseydi pay iki kez uygulanırdı. `cell.metal` `it.pos + corner *
+  cell_px` diyor, yani shader payı hiç görmüyor — `make shader` gerekmedi.
+- **Offscreen GPU sınamaları dördüncü tüketici çıktı.** `cell_rows`
+  örnekleme noktasını `col * cw + x` ile kuruyor, yani orijini sıfır
+  varsayıyor: sıfır olmayan bir pay o noktaları kaydırır ve on dört sınama
+  hücre yerine clear rengini okurdu (gutter 8 px, `cw ≈ 9 px`'te tam bu
+  olurdu). Çare sınamaları payla uyumlu kılmak değil, **payı sıfır vermek**:
+  onların konusu payın geometrisi değil, GPU'nun hangi rengi hangi hücreye
+  boyadığı. Aynı gerekçe `frame.rs` ile `view.rs`'in sahneleri için de
+  geçerli; payın kendi sınamaları ayrı ve adıyla anılıyor.
+- **`resize`'ın kabul kapısı payı da doğru taşıyor** ve bu bir tesadüf
+  değil: pay da hücre ölçüsü de ölçeğin fonksiyonu ve `cell_metrics` ikisini
+  **tek çağrıda** veriyor, yani pay hücre ölçüsü değişmeden değişemez. Kapı
+  ayrılsaydı reddedilen bir boyutta pay yeni, ızgara eski kalırdı. Gerekçe
+  `DisplayLink::resize`'ın doc'una yazıldı, yoksa yarın sessizce kırılırdı.
+- **Dar pencerede yeni bir alt sınır getirilmedi.** Çıkarma `f64`'te
+  yapılıyor: paydan dar pencerede fark negatife iniyor, bölme negatif kalıyor
+  ve `as u16` sıfıra doyuruyor — sıfır sütunu `Session::resize` zaten
+  yoksayıyor. Aynı çıkarma `u16`'da yapılsaydı **taşar** ve 65535'e yakın bir
+  sütunla o boyda bir `TIOCSWINSZ` üretirdi; `a_window_narrower_than_the_gutter_yields_no_columns`
+  o kırılmanın bekçisi.
+- **Phase'in beklediği `split_into_grid` düşüşü olmadı.** Sabit ölçülü
+  sınamalar paya sıfır verdiği için mekanik olarak geçtiler; düzeltilen tek
+  şey `metrics()` yardımcısının imzası. `cols`'un bir azalması üretimde
+  gerçek, sınamada değil — ve payı sorgulayan sınama onu kendi adıyla
+  (`the_gutter_costs_columns`) tutuyor.
+
 ## Checklist
 
-- [ ] Gutter genişliği `bt-gpu`'da tek sabit, ölçekle birlikte yayımlanıyor
-- [ ] `cols` hesabı payı düşüyor
-- [ ] Çizim orijini paydan sonra başlıyor
-- [ ] Fare eşlemesi payı çıkarıyor; `view.rs` doc'u düzeldi
-- [ ] Test: `point_to_cell` payın içinde ve ilk sütunda doğru sonuç
-- [ ] Test: `split_into_grid` yeni ölçülerle; dar pencerede `cols` alt sınırı
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
-- [ ] Yayın etkisi yazıldı
+- [x] Gutter genişliği `bt-gpu`'da tek sabit, ölçekle birlikte yayımlanıyor
+      (`CellMetrics::GUTTER_PT` → `cell_metrics(scale)` → `CellMetrics.gutter_px`)
+- [x] `cols` hesabı payı düşüyor (`split_into_grid`, çıkarma `f64`'te)
+- [x] Çizim orijini paydan sonra başlıyor (`Frame::pos_at`, tek satır)
+- [x] Fare eşlemesi payı çıkarıyor; `point_to_cell` doc'u düzeldi
+- [x] Test: `point_to_cell` payın içinde ve ilk sütunda doğru sonuç
+      (`the_gutter_shifts_the_grid_origin`)
+- [x] Test: `split_into_grid` yeni ölçülerle; dar pencerede `cols` alt sınırı
+      (`the_gutter_costs_columns`, `a_window_narrower_than_the_gutter_yields_no_columns`)
+- [x] Test: `Frame` orijini — dört tüketici de pay kadar kayıyor, boyut kaymıyor
+      (`the_gutter_offsets_every_pixel_position`, `a_zero_gutter_leaves_the_origin_at_the_edge`)
+- [x] Doğrulama geçti (`make hepsi` + `make duman`: `kare=29 hucre=8 glif=6
+      kural=15 icerik=2 hareket=27 sessiz=1750.84ms kapanis=clean` — jetonlar
+      oynamadı, yani pay ızgaraya sızmadı)
+- [x] Yayın etkisi yazıldı

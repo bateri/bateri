@@ -27,9 +27,17 @@ use crate::keys::{KeyInput, encode_key, page_scroll};
 
 /// Fare noktası → seçim ucu. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
 ///
-/// `view_px` view koordinatında (nokta), `cell_px` fiziksel piksel, `scale`
+/// `view_px` view koordinatında (nokta), `metrics` fiziksel piksel, `scale`
 /// backing ölçeği: ölçü `bt-gpu`'dan fiziksel geldiği için fare de önce
-/// fiziksel piksele çıkar, sonra bölünür.
+/// fiziksel piksele çıkar, **sol payı düşer**, sonra bölünür. Pay `cols`
+/// hesabıyla (`split_into_grid`) ve çizim orijiniyle (`Frame::pos_at`) aynı
+/// `CellMetrics`'ten geliyor; üçü ayrışsaydı belirti "fare bir sütun kayıyor"
+/// olurdu (010 Karar 3).
+///
+/// Payın **içine** düşen tıklama ilk sütuna kırpılır, yani seçim payda
+/// başlamaz: çıkarmadan sonra x negatif kalır ve aşağıdaki iki dil kuralı onu
+/// 0. hücrenin sol yarısına yapıştırır — grid'in solundaki noktayla aynı yol,
+/// ayrı bir kırpma dalı yok.
 ///
 /// **Adı "hücre" kaldı, dönen şey hücre + yarısı**: yarı hücrenin içindeki
 /// yerin ikinci yarısı, ayrı bir soru değil — `col` ile aynı bölmeden çıkar.
@@ -54,7 +62,7 @@ use crate::keys::{KeyInput, encode_key, page_scroll};
 /// bırakırdı (`dragging_left_of_the_grid_clamps_to_the_left_half` bekçisi).
 pub(crate) fn point_to_cell(
     view_px: (f64, f64),
-    cell_px: (u16, u16),
+    metrics: CellMetrics,
     scale: f64,
     cols: u16,
     rows: u16,
@@ -62,11 +70,12 @@ pub(crate) fn point_to_cell(
     if cols == 0 || rows == 0 {
         return None;
     }
-    let (cell_w, cell_h) = (f64::from(cell_px.0), f64::from(cell_px.1));
+    let (cell_px_w, cell_px_h) = metrics.cell_px();
+    let (cell_w, cell_h) = (f64::from(cell_px_w), f64::from(cell_px_h));
     // View `isFlipped`, yani y grid yönünde (üstten) geliyor: tersine çevirme
     // yok. Grid'in boyunu view değil `cols`/`rows` söylüyor — pencere kenar
     // boşluğundaki nokta son hücreye yapışsın.
-    let x = view_px.0 * scale;
+    let x = view_px.0 * scale - f64::from(metrics.gutter_px());
     let row = ((view_px.1 * scale / cell_h) as u16).min(rows - 1);
     let col = (x / cell_w) as u16;
     let (col, half) = if col < cols {
@@ -460,7 +469,7 @@ impl BateriView {
         let (metrics, (cols, rows)) = self.ivars().metrics.get()?;
         let point = self.convertPoint_fromView(in_window, None);
         let scale = self.window()?.backingScaleFactor();
-        point_to_cell((point.x, point.y), metrics.cell_px(), scale, cols, rows)
+        point_to_cell((point.x, point.y), metrics, scale, cols, rows)
     }
 
     /// Pencere kaydı; basılı bir sürükleme varsa seçimin ucunu farenin **yeni**
@@ -498,10 +507,21 @@ impl BateriView {
 mod tests {
     use super::*;
 
+    /// Sahnelerin ızgara ölçüsü; pay **argüman**, çünkü sorulan iki ayrı şey
+    /// var: hücre aritmetiği (pay sıfır) ve payın kendisi.
+    fn grid(gutter: u16) -> CellMetrics {
+        CellMetrics::new(9, 18, gutter).expect("sıfır olmayan hücre")
+    }
+
     /// Testlerin ortak sahnesi: 100×33 grid, 9×18 hücre, @2x.
     /// View 450×297 nokta eder.
+    ///
+    /// **Sol pay bu sahnede sıfır** ve bu bilinçli: aşağıdaki sınamaların
+    /// sorduğu şey hücre ile yarısının aritmetiği, ve beklenen x değerlerini
+    /// pay kadar kaydırmak o gerekçeleri okunmaz hâle getirirdi. Payın kendi
+    /// sınaması `the_gutter_shifts_the_grid_origin`.
     fn scene_point(view_px: (f64, f64)) -> Option<SelectionPoint> {
-        point_to_cell(view_px, (9, 18), 2.0, 100, 33)
+        point_to_cell(view_px, grid(0), 2.0, 100, 33)
     }
 
     /// Sahnenin hücresi ve yarısı ayrı okunuyor: hücre testleri hücreye, yarı
@@ -607,11 +627,59 @@ mod tests {
     }
 
     #[test]
+    fn the_gutter_shifts_the_grid_origin() {
+        // Sahne: 9×18 hücre, @2x, **8 fiziksel piksel** pay. View'da pay
+        // 4 nokta, hücre 4.5 nokta eder.
+        let at = |x: f64| point_to_cell((x, 9.0), grid(8), 2.0, 100, 33);
+        let cell = |point: Option<SelectionPoint>| point.map(|p| (p.col, p.half));
+
+        // Payın **içi** ilk sütuna kırpılır ve sol yarıda kalır: seçim payda
+        // başlamaz. Ayrı bir kırpma dalı yok — çıkarmadan sonra x negatif
+        // ve `as u16` onu sıfıra doyuruyor, `%` de negatif artığı sol yarıya
+        // yazıyor (grid'in solundaki noktayla aynı yol).
+        assert_eq!(cell(at(0.0)), Some((0, CellHalf::Left)), "payın sol ucu");
+        assert_eq!(cell(at(2.0)), Some((0, CellHalf::Left)), "payın ortası");
+
+        // Payın solundaki nokta da aynı yere yapışır: grid'in solundan
+        // başlayan sürükleme ilk harfi seçime katmalı.
+        assert_eq!(cell(at(-1.0)), Some((0, CellHalf::Left)), "payın solu");
+
+        // Payın bittiği yer 0. sütunun **başı**: metnin ilk karakterine
+        // tıklamak ilk sütunu verir.
+        assert_eq!(cell(at(4.0)), Some((0, CellHalf::Left)), "payın bitişi");
+        assert_eq!(cell(at(8.5)), Some((1, CellHalf::Left)), "bir hücre sonra");
+
+        // **Kaymayı gören iki nokta.** Pay hücre genişliğinden dar olduğu
+        // için çoğu x paylı da paysız da aynı sütuna düşüyor ve yalnız yarısı
+        // değişiyor; sütunun gerçekten oynadığı yerler bunlar. Paysız sahne
+        // aynı soruyu sorup farklı cevap veriyor — sınamayı ayıran şey bu,
+        // yoksa pay hiç uygulanmasa da geçerdi.
+        assert_eq!(cell(at(5.0)), Some((0, CellHalf::Left)), "paylı");
+        assert_eq!(
+            point_to_cell((5.0, 9.0), grid(0), 2.0, 100, 33).map(|p| (p.col, p.half)),
+            Some((1, CellHalf::Left)),
+            "paysız aynı nokta bir sonraki sütun"
+        );
+
+        // Sağ kenar: pay sütunları sağa ittiği için grid'in sağ ucu da pay
+        // kadar geç bitiyor. Paysız sahnede aynı nokta grid'i **taşar** ve
+        // son sütunun sağ yarısına kırpılır; paylı sahnede hâlâ 99. sütunun
+        // içinde. Payın `cols` hesabıyla aynı kaynaktan geldiğinin kanıtı da
+        // bu: ikisi ayrışsaydı son sütun ya erken biterdi ya taşardı.
+        assert_eq!(cell(at(451.5)), Some((99, CellHalf::Left)), "paylı sağ uç");
+        assert_eq!(
+            point_to_cell((451.5, 9.0), grid(0), 2.0, 100, 33).map(|p| (p.col, p.half)),
+            Some((99, CellHalf::Right)),
+            "paysız aynı nokta grid'i taşar"
+        );
+    }
+
+    #[test]
     fn empty_grid_has_no_cell() {
         // Simge durumundaki pencere sıfır sütun/satır verebilir: yapışacak bir
         // son hücre yok.
-        assert_eq!(point_to_cell((1.0, 1.0), (9, 18), 2.0, 0, 33), None);
-        assert_eq!(point_to_cell((1.0, 1.0), (9, 18), 2.0, 100, 0), None);
+        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 2.0, 0, 33), None);
+        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 2.0, 100, 0), None);
     }
 
     #[test]
@@ -689,8 +757,8 @@ mod tests {
         // Aynı view noktası iki ölçekte iki ayrı hücre: ölçü fiziksel
         // pikselden geliyor ve ölçek çarpanı atlanırsa retina makinede seçim
         // yarı kayar.
-        let at1x = point_to_cell((90.0, 150.0), (9, 18), 1.0, 100, 33);
-        let at2x = point_to_cell((90.0, 150.0), (9, 18), 2.0, 100, 33);
+        let at1x = point_to_cell((90.0, 150.0), grid(0), 1.0, 100, 33);
+        let at2x = point_to_cell((90.0, 150.0), grid(0), 2.0, 100, 33);
         assert_eq!(
             (at1x.map(|p| (p.col, p.row)), at2x.map(|p| (p.col, p.row))),
             (Some((10, 8)), Some((20, 16)))

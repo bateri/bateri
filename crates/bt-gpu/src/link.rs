@@ -350,10 +350,10 @@ struct LinkIvars {
     /// (piksel dörtgenleri) phase-4'te `Frame`'in kendi alanı olacak; bu
     /// tampon ona **girdi**, kendisi değil.
     blocks: RefCell<Blocks>,
-    /// Demet değil `CellMetrics`: ölçü `Renderer::cell_metrics`'ten
-    /// `bt-shell` üzerinden buraya tip olarak geliyor ve **saklanırken de**
-    /// tip kalıyor. Saklanan bu değer yalnız `Frame::clear`'a girerken
-    /// demete iniyor, çünkü kare kurucusu `#[repr(C)]` tarafına sayı yazıyor.
+    /// Demet değil `CellMetrics`: ızgara geometrisi (hücre ölçüsü **ve** sol
+    /// pay) `Renderer::cell_metrics`'ten `bt-shell` üzerinden buraya tip
+    /// olarak geliyor, **saklanırken de** tip kalıyor ve `Frame::clear`'a da
+    /// tip olarak giriyor — çizim orijini payı oradan okuyor.
     /// (`resize`'ın `Session::resize`'a geçirdiği demet başka bir değer:
     /// oraya **gelen** ölçü gider, saklanan değil — kabul edilmeyen bir
     /// boyut buraya hiç yazılmaz.)
@@ -572,7 +572,7 @@ define_class!(
                 }
                 return;
             }
-            frame.clear(iv.cell.get().cell_px());
+            frame.clear(iv.cell.get());
             // CPU **iki** aralık ölçülüyor, bir değil: kilit beklemesi
             // `session.frame`'in içinde, encode ise `draw`'ın. Tek aralık
             // ikisini toplar ve ayrımı yok eder (R3.1).
@@ -974,6 +974,11 @@ impl DisplayLink {
     /// boyut yoksayılıyor (simge durumundaki pencere 0 sütun hesaplatır) ve
     /// onu burada uygulamak grid'i eski ölçüde bırakıp çizimi yeni ölçüye
     /// kaydırırdı — PTY'nin bildiği `TIOCSWINSZ` ile de ayrışırdı.
+    /// **Sol pay aynı kapıdan geçiyor** ve bu doğru: ikisi de ölçeğin
+    /// fonksiyonu (`Renderer::cell_metrics` tek çağrıda veriyor), yani pay
+    /// hücre ölçüsü değişmeden değişemez. Kapı ayrılsaydı reddedilen bir
+    /// boyutta pay yeni, ızgara eski kalır ve glyph'ler `cols` hesabından
+    /// kayardı.
     /// **İmleç bu karede snap'ler.** Geometri değişiminde imleç hareket
     /// etmedi, altındaki ızgara hareket etti (008 Karar 5) — animasyon onu
     /// olmadığı bir yerden geliyormuş gibi gösterirdi. Bayrak koşulsuz
