@@ -346,9 +346,10 @@ struct LinkIvars {
     ///
     /// `Frame`'in **içinde değil yanında**: aynı çağrıda `frame.push`
     /// kapatması da tampon da ödünç alınıyor ve ikisi tek `RefCell`'de
-    /// olsaydı çalışma zamanında panik ederdi. Şeridi çizecek liste
-    /// (piksel dörtgenleri) phase-4'te `Frame`'in kendi alanı olacak; bu
-    /// tampon ona **girdi**, kendisi değil.
+    /// olsaydı çalışma zamanında panik ederdi. Şeridi çizecek liste (piksel
+    /// dörtgenleri) `Frame`'in kendi `stripes` alanı; bu tampon ona **girdi**,
+    /// kendisi değil — `Frame::push_block` aralıkları buradan okuyup oraya
+    /// çeviriyor.
     blocks: RefCell<Blocks>,
     /// Demet değil `CellMetrics`: ızgara geometrisi (hücre ölçüsü **ve** sol
     /// pay) `Renderer::cell_metrics`'ten `bt-shell` üzerinden buraya tip
@@ -990,11 +991,17 @@ impl DisplayLink {
     /// boyut yoksayılıyor (simge durumundaki pencere 0 sütun hesaplatır) ve
     /// onu burada uygulamak grid'i eski ölçüde bırakıp çizimi yeni ölçüye
     /// kaydırırdı — PTY'nin bildiği `TIOCSWINSZ` ile de ayrışırdı.
-    /// **Sol pay aynı kapıdan geçiyor** ve bu doğru: ikisi de ölçeğin
-    /// fonksiyonu (`Renderer::cell_metrics` tek çağrıda veriyor), yani pay
-    /// hücre ölçüsü değişmeden değişemez. Kapı ayrılsaydı reddedilen bir
+    /// **Sol pay aynı kapıdan geçiyor.** Kapı ayrılsaydı reddedilen bir
     /// boyutta pay yeni, ızgara eski kalır ve glyph'ler `cols` hesabından
-    /// kayardı.
+    /// kayardı. Payın hücre ölçüsüyle **birlikte** değişmesi ise bir kod
+    /// değişmezi değil, bugünkü ölçeklerin sonucu (`/audit`, 010 kapı): ikisi
+    /// de ölçeğin fonksiyonu (`Renderer::cell_metrics` tek çağrıda veriyor)
+    /// ama `round(8.0 * scale)` ile `round_up(cell_w * scale)` ayrı
+    /// fonksiyonlar. macOS'un tam sayılı backing ölçeklerinde (1.0, 2.0)
+    /// ayrışamıyorlar; kesirli bir ölçek gelirse yalnız payı değişen bir
+    /// metrik `Session::resize`'ın "zaten aynı" dalına takılıp düşerdi ve
+    /// `Frame::pos_at` ile `point_to_cell` bir kare boyunca ayrışırdı.
+    /// Kapanacağı yer o ölçeğin geldiği gün burasıdır.
     /// **İmleç bu karede snap'ler.** Geometri değişiminde imleç hareket
     /// etmedi, altındaki ızgara hareket etti (008 Karar 5) — animasyon onu
     /// olmadığı bir yerden geliyormuş gibi gösterirdi. Bayrak koşulsuz

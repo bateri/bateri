@@ -1,4 +1,13 @@
-//! Kabuğun bastığı OSC 133 işaretleri ve onların tuttuğu oturum durumu.
+//! Kabuğun bastığı OSC 133 işaretleri, onların tuttuğu oturum durumu ve
+//! **komut bloğu defteri**.
+//!
+//! Üç sorumluluk, tek modül: baytlardan işaret çıkarmak ([`parse_mark`]),
+//! işaretlerden oturum safhası tutmak ([`ShellState`]) ve blok kimliği başına
+//! akıbet tutup şeridin çizilip çizilmeyeceğine karar vermek ([`BlockLog`],
+//! [`ShellLog::stripe`]). Üçü aynı yerde, çünkü üçünü de **aynı** işaret akışı
+//! besliyor; ayrılsalardı `D`'nin çıkış kodu bir modülden ötekine elden ele
+//! geçerdi. Defterin tavanı `scrollback`'ten türüyor ve "bilinmeyen kimlik
+//! çizilmez" kararı da burada — renderer'ın göreceği tek şey çözülmüş renk.
 //!
 //! Bu modül **saf**: elinde ne `Session`, ne `Wake`, ne kilit var. Bayt
 //! dilimi girer, işaret çıkar. Tarayıcının hiçbir kare isteyememesi bir kural
@@ -161,7 +170,31 @@ impl BlockLog {
         Self {
             entries: VecDeque::new(),
             first: 0,
-            capacity: scrollback.max(BLOCK_LOG_FLOOR),
+            capacity: Self::capacity_for(scrollback),
+        }
+    }
+
+    /// Tavanın `scrollback`'ten türemesi — [`BlockLog::new`] ile
+    /// [`BlockLog::set_capacity`]'nin **tek** kaynağı.
+    ///
+    /// İki yerde ayrı ayrı yazılsaydı taban (`BLOCK_LOG_FLOOR`) birinde
+    /// unutulabilir ve canlı küçültülen bir `scrollback` defteri sıfıra
+    /// indirebilirdi.
+    fn capacity_for(scrollback: usize) -> usize {
+        scrollback.max(BLOCK_LOG_FLOOR)
+    }
+
+    /// `scrollback` kayıt anında değişince tavanı da taşır.
+    ///
+    /// Tavan eskiden yalnız oturum doğarken belirleniyordu ve `scrollback`
+    /// **canlı uygulanan** bir ayar: büyütülen geçmişin fazlası renksiz
+    /// kalıyordu (`/code-review`, 010 kapı). Küçültmede fazlalık en eskiden
+    /// atılıyor — halkanın kendi tahliye kuralı, ikinci bir politika yok.
+    fn set_capacity(&mut self, scrollback: usize) {
+        self.capacity = Self::capacity_for(scrollback);
+        while self.entries.len() > self.capacity {
+            self.entries.pop_front();
+            self.first = self.first.wrapping_add(1);
         }
     }
 
@@ -243,6 +276,12 @@ impl ShellLog {
             state: None,
             blocks: BlockLog::new(scrollback),
         }
+    }
+
+    /// `scrollback` kayıt anında değiştiğinde defterin tavanını taşır;
+    /// oturum durumuna (`state`) dokunmaz.
+    pub(crate) fn set_scrollback(&mut self, scrollback: usize) {
+        self.blocks.set_capacity(scrollback);
     }
 
     /// İşareti hem duruma hem deftere uygular; ilk işaret durumu **doğurur**.
@@ -519,10 +558,12 @@ fn parse_mark(payload: &[u8]) -> Option<Mark> {
         b"D" => {
             let mut exit = None;
             let mut id = None;
-            // Kod **konuma** bağlı (ilk alan), kimlik **ada** (`aid=`). Konum
-            // sorusu bu yüzden ada bakan koldan sonra sorulur: `D;aid=7`
-            // kodsuz ama kimlikli geçerli bir yüktür ve ilk alanı körlemesine
-            // koda saysaydık kimliği yutardı.
+            // Kod **konuma** bağlı (ilk alan), kimlik **ada** — ve o ad
+            // `BLOCK_ID_FIELD`, yani `bt_block=`; `aid=` **değil** (gerekçe
+            // aşağıda, `block_id`'nin doc'unda: yabancı bir `aid` bizim
+            // sayacımızla karışmamalı). Konum sorusu bu yüzden ada bakan koldan
+            // sonra sorulur: `D;bt_block=7` kodsuz ama kimlikli geçerli bir
+            // yüktür ve ilk alanı körlemesine koda saysaydık kimliği yutardı.
             for (index, field) in fields.enumerate() {
                 if let Some(value) = block_id(field) {
                     id = Some(value);

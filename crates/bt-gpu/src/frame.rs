@@ -202,7 +202,7 @@ pub(crate) struct Frame {
     /// Komut bloklarının sol paydaki şeritleri; arka planlarla **aynı**
     /// pipeline'dan ama ayrı listede.
     ///
-    /// Ayrılığın sebebi çizim sırası değil ömür (`plan.md` → R4.1): `bg`'ye
+    /// Ayrılığın sebebi çizim sırası değil ömür (010 → R4.1): `bg`'ye
     /// girseydi ya sayılmadan girerdi — [`Frame::move_cursor`]'ın
     /// `truncate(bg_count)`'u onu her hareket karesinde siler ve şerit imleç
     /// kaydıkça **titrerdi** — ya da sayılarak girer ve `hucre=` jetonunun
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn stripes_stay_out_of_the_cell_count_and_survive_motion_frames() {
-        // Phase'in asıl sözleşmesi (R4.1): şerit `bg`'ye **girmiyor**. Girip
+        // Phase'in asıl sözleşmesi (010 → R4.1): şerit `bg`'ye **girmiyor**. Girip
         // sayılmasaydı `move_cursor`'ın kırpması onu her hareket karesinde
         // siler ve şerit imleç kaydıkça titrerdi; sayılsaydı `hucre=` jetonu
         // hücre olmayan bir şeyi de sayar ve duman kapısının anlamı kayardı.

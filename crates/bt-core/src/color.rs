@@ -1,9 +1,11 @@
 //! Renk çözümü: bir hücrenin `Color`'ı ile ekrandaki RGBA arasındaki tek yol.
 //!
-//! Paletin sahibi [`Theme`]: zemin, ön plan, sönük ön plan, imleç ve 16 ANSI
-//! rengi tek değerde. Renderer palet bilmez: `frame()` çözülmüş RGBA verir,
-//! clear ve imleç rengini de aynı temadan alır. Tema dosyasının ayrıştırıcısı
-//! `theme` modülünde.
+//! Paletin sahibi [`Theme`]: zemin, ön plan, sönük ön plan, vurgu (imleç ve
+//! koşan komut bloğu), iki durum rengi (başarı, hata) ve 16 ANSI rengi tek
+//! değerde — sekiz rollü modelin bugün tüketilen altısı. Renderer palet
+//! bilmez: `frame()` çözülmüş RGBA verir, clear, imleç ve blok şeridinin
+//! rengini de aynı temadan alır. Tema dosyasının ayrıştırıcısı `theme`
+//! modülünde.
 //!
 //! Renkler `0xRRGGBB` olarak yazılır — palet her yerde böyle yazılır ve
 //! `Rgb { r, g, b }` üçlüsü onaltı satırlık bir tabloyu okunmaz eder.

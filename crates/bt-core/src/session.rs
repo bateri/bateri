@@ -14,11 +14,18 @@
 //! doğar. `theme` ve `shell` bu sıranın dışında birer **yaprak** kilittir:
 //! tutulurken başka hiçbir kilit alınmaz, yani hangi kilidin altında alındığı
 //! önemsizdir — `frame` temanın kopyasını `term`'den önce alıp bırakır, renk
-//! sorusu `term` tutulurken okur, `set_theme` tek başına yazar; `shell`'i
-//! okuyucu thread'i tek başına yazar, `shell_state` tek başına okur, `frame`'in
-//! ikinci fazı (blok şeritleri) ise **`term` bırakıldıktan sonra** okur.
-//! Sıranın tersi yasak: yaprak kilit `term`'ün altına girdiği gün okuyucu
-//! thread ile kare yolu ters sırada kilitlenebilir olurdu.
+//! sorusu `term` tutulurken okur, `set_theme` tek başına yazar.
+//!
+//! `shell` için kural tek yönlüdür ve yönü şudur: **`shell` tutulurken `term`
+//! alınmaz.** Okuyucu thread `shell`'i zaten `term`'ün *altında* yazıyor —
+//! alacritty `pty_read` boyunca terminal lease'ini elinde tutuyor
+//! (`event_loop.rs`, `_terminal_lease`) ve bizim `TappedPty::read`'imiz o
+//! guard altında koşuyor — yani `term` → `shell` sırası okuyucunun kendi
+//! sırası ve kilitlenemez. Kapanabilecek tek döngünün öteki kenarı ters yön
+//! olurdu, o yüzden `frame`'in ikinci fazı (blok şeritleri) `shell`'i **`term`
+//! bırakıldıktan sonra** alıyor, `shell_state` ve `set_terminal_options` da
+//! öyle. (`/audit`, 010 kapı: buradaki eski gerekçe yasağı ters yöne koyuyordu
+//! ve okuyucunun kendi sırasını tehlikeli gösteriyordu.)
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -1329,8 +1336,22 @@ impl Session {
             };
             // **Faz 1.** Çıpa okuması da kapıdan sonra (R3.4), ön planla aynı
             // gerekçeyle: `hyperlink()` yan tabloya (`CellExtra`) iniyor ve
-            // çizilmeyen hücre için ödenmemeli. `extra` yokken erken dönüyor,
-            // yani çizilen hücre başına maliyet tek bir boş kontrol.
+            // çizilmeyen hücre için ödenmemeli — kapının üstünde olsaydı boş
+            // bir 80×24 ızgarada ~1900 hücrede ödenirdi, altında ~50'de.
+            //
+            // **Maliyet `extra`sız hücrede** bir boş kontrol, `extra`lı hücrede
+            // bir `Arc` klonu: alacritty `hyperlink()`'i `Option<Hyperlink>`
+            // **döndürüyor** ve `CellExtra.hyperlink` alanı `pub` değil, yani
+            // ödünç veren bir yol yok. Prompt'un her hücresi bağlantılı olduğu
+            // için üç satırlık bir prompt kare başına birkaç yüz atomik sayaç
+            // turu ediyor (`/code-review`, 010 kapı). Kapatmanın yolu
+            // alacritty'de bir `&Hyperlink` erişimcisi; ölçülmüş bir ihtiyaç
+            // beklemeden yukarı akım değiştirilmedi.
+            //
+            // **Kapının bedeli** (aynı bulgu): tamamı varsayılan zeminli
+            // boşluktan oluşan bir prompt satırı kapıdan geçmez, yani çıpa
+            // vermez ve blok o satırdan değil sonraki dolu satırdan başlar.
+            // Çok satırlı, ilk satırı boşluk dolgusu olan bir PS1'de görünür.
             //
             // Önek eşleşmesi yabancı bağlantıları da eliyor: `ls --hyperlink`
             // ya da bir `man` sayfasının `file://`'ı buraya düşmez.
@@ -1441,9 +1462,17 @@ impl Session {
     /// Faz 2: çıpalardan blok aralıkları, defterden renkler.
     ///
     /// Ayrı fonksiyon, çünkü **kilit rejimi ayrı**: burada yalnız `shell`
-    /// yaprak kilidi alınıyor ve `Term` kilidi çoktan düşmüş olmalı.
-    /// [`Session::frame`]'in gövdesinde dursaydı araya giren bir düzenleme
-    /// onu kilidin altına kolayca kaydırabilirdi.
+    /// yaprak kilidi alınıyor ve `Term` kilidi çoktan düşmüş olmalı. Garantiyi
+    /// tip sistemi vermiyor, **çağrı yeri** veriyor: [`Session::frame`] guard'ı
+    /// açıkça `drop` ediyor ve bu fonksiyon guard'ı parametre olarak almıyor,
+    /// yani buraya bir `Term` guard'ı taşımanın yolu imzayı değiştirmekten
+    /// geçer.
+    ///
+    /// Sırayı zorunlu kılan şey `Term` → `shell` yönünün tehlikesi **değil**
+    /// (okuyucu thread zaten o sırada alıyor, bkz. modül başlığı); burada
+    /// `Term`'ün bırakılmış olmasının sebebi kilidi kare boyunca tutmamak —
+    /// renk çözümü ızgarayı hiç okumuyor ve `Term`'i tutarak yapılsaydı
+    /// okuyucu thread'i boşuna bekletirdi.
     fn resolve_blocks(&self, blocks: &mut Blocks, last_row: u16, offset: i32, theme: &Theme) {
         // Yıkım: aşağıdaki kapatma yalnız `resolved`'ı ödünç alsın, döngü
         // `anchors`'ı okuyabilsin. Tek bir `&mut blocks` ikisini de tutar ve
@@ -1476,6 +1505,18 @@ impl Session {
             // bloğuna aittir: prompt yukarı kaymış, akan çıktı ekranı
             // doldurmuş. `Input`'ta (ve `Prompt`/`Finished`'de) çizilmez —
             // hangi bloğa ait olduğunu söyleyen tek şey çıpa ve o görünmüyor.
+            //
+            // **Bilinen sınır — `Running`'de takılı kabuk** (`/code-review`,
+            // 010 kapı). Bu kol `Running`'in geçici olduğunu varsayıyor; `exec
+            // zsh` onu kalıcı kılıyor: `preexec` `C` basıyor, yeniden doğan
+            // kabuk kullanıcının `ZDOTDIR`'ını miras alıp sarmalayıcıyı hiç
+            // yüklemiyor (gerekçe `BlockLog::start`'ın doc'unda) ve `D` hiç
+            // gelmiyor. Eski çıpalar ekrandan kayınca bu kol her içerik
+            // karesinde bütün payı vurgu rengine boyar ve yeni sekmeye kadar
+            // öyle kalır. bt-core'da ne saat ne de exec sinyali var; çare
+            // sarmalayıcının exec'i takip etmesi ve 009'un `ZDOTDIR`
+            // sözleşmesine dokunuyor — bash/fish setine borç
+            // (`docs/YOL-HARITASI.md`).
             //
             // Kaydırma kapısı planda yoktu ve bu tezin kendisinden geliyor:
             // geçmişe kaydırılmış bir pencerede (offset > 0) görünen satırlar
@@ -1516,8 +1557,20 @@ impl Session {
         for (at, &(id, row)) in anchors.iter().enumerate() {
             // Bloğun sonu bir sonraki kimliğin **bir üstü**; sonuncunun sonu
             // pencerenin altı.
+            //
+            // `checked_sub`, `saturating_sub` değil (`/code-review`, 010 kapı):
+            // sonraki çıpa 0. satırdaysa bu bloğun çizecek pikseli **yok** ve
+            // doyurma onu `end = 0`'a çevirip `push`'un `end < first_row`
+            // kapısından kaçırıyordu — bir satırlık, yanlış renkte bir şerit.
+            // Bugün üstüne doğru olanı çizildiği için piksel doğru çıkıyordu,
+            // yani belirti listenin sırası değişene kadar görünmezdi.
             let end = match anchors.get(at + 1) {
-                Some(&(_, next)) => next.saturating_sub(1),
+                Some(&(_, next)) => {
+                    let Some(end) = next.checked_sub(1) else {
+                        continue;
+                    };
+                    end
+                }
                 None => last_row,
             };
             push(id, row, end);
@@ -1861,7 +1914,15 @@ impl Session {
     /// almamalı — `Wake` sözleşmesiyle aynı yasak, yoksa bu çağrı kendi
     /// kendini kilitler (`race_set_terminal_options_and_frame` asılı kalır).
     pub fn set_terminal_options(&self, options: TerminalOptions) {
+        let scrollback = options.scrollback;
         self.term.lock().set_options(term_config(options));
+        // Blok defterinin tavanı da `scrollback`'ten türüyor ve o ayar **canlı
+        // uygulanıyor**: burada taşınmasaydı büyütülen geçmişin fazlası
+        // renksiz kalırdı (`/code-review`, 010 kapı). Kilit sırası zorunlu —
+        // `Term` guard'ı bir üstteki ifadenin sonunda düştü, yaprak kilit
+        // ondan **sonra** alınıyor; ters sıra okuyucu thread'in sırasıyla
+        // (`Term` → `shell`) döngü kapatırdı.
+        lock(&self.shell).set_scrollback(scrollback);
         self.request_frame();
     }
 
@@ -2559,7 +2620,19 @@ mod tests {
             Arc::clone(&wake),
         );
         // Satırlar: 0 `$ cmd1`, 1 `out1`, 2 `$ cmd2`, 3 `out2`, 4 `$ `.
-        let blocks = wait_blocks(&session, &wake, |blocks| blocks.len() == 2);
+        //
+        // Hazırlık ölçütü sayıya **ek olarak** ikinci bloğun sonunu da pinliyor
+        // (`/code-review`, 010 kapı): `TappedPty::read` işaretleri ızgaradan
+        // önce deftere yazıyor ve bir PTY okuması `printf`'in ortasından
+        // bölünebilir. Yalnız `len() == 2` sorulsaydı "iki prompt ekranda,
+        // `out2` ve üçüncü prompt henüz değil" ara durumu da ölçütü geçerdi:
+        // ikinci blok o anda pencerenin dibine kadar uzanır (`last_row == 9`)
+        // ve alttaki eşitlik `(2, 3)` beklerken düşerdi. Kardeş sınama
+        // (`the_region_above_the_first_anchor…`) aynı sebeple `last_row`
+        // pinliyor.
+        let blocks = wait_blocks(&session, &wake, |blocks| {
+            blocks.len() == 2 && blocks[1].last_row == 3
+        });
         assert_eq!(
             spans(&blocks),
             [(0, 1, THEME.success_linear()), (2, 3, THEME.error_linear()),]
@@ -4969,11 +5042,15 @@ mod tests {
         // tararken `shell` kilidini alıyor (ve aynı turda `Term`'ü de tutuyor,
         // alacritty ilk turdan sonra kilidi tutarak okuyor), ana thread ise
         // `shell_state()` ile yalnız `shell`'i, `frame()` ile **önce** `Term`'ü
-        // sonra `shell`'i alıyor. İkisi ters sırada kilitlenirse bu sınama
-        // **asılı kalır** — yaprak kilit iddiasının (modül başlığı) tek
-        // mekanik bekçisi bu. 010 ile `frame()`'in ikinci fazı da bu kapıdan
-        // geçiyor: `shell`'i `Term`'ün altında alan bir düzenleme burada
-        // kalırdı.
+        // sonra `shell`'i alıyor.
+        //
+        // **Neyi tutuyor, neyi tutmuyor** (`/audit`, 010 kapı): bu sınama
+        // `shell`'i **tutarken `Term` isteyen** bir düzenlemede asılır — yasak
+        // olan tek yön o. `shell`'i `Term`'ün altında alan bir düzenleme ise
+        // burada **kalmaz** ve kalmamalı: okuyucu thread zaten öyle alıyor
+        // (yukarıdaki parantez) ve o sıra kilitlenemez. Eski yorum tersini
+        // iddia ediyordu, yani falsifiye edilebilir ama yanlış bir bekçi
+        // iddiasıydı.
         let wake = Arc::new(TestWake::default());
         let session = Arc::new(spawn_session(
             // Dört işaret de akıyor: prompt, komut başlangıcı, çalışma ve
