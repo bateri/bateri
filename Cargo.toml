@@ -80,6 +80,15 @@ toml_edit = { version = "0.25", default-features = false, features = ["parse", "
 # yalnız `bt-shell`'in bağımlılık listesine bir kenar ekleniyor. Kararın kaydı:
 # .tasks/002-vt-motoru/phase-4.md → Uygulama Notları.
 libc = "0.2"
+# `EventedReadWrite`'ı uygulayabilmek için (`bt-core::session`'ın `TappedPty`'si):
+# trait'in üç kayıt metodu imzasında `Poller`, `Event` ve `PollMode` geçiriyor ve
+# alacritty bu crate'i yeniden ihraç ETMİYOR (yalnız `vte`'yi ediyor), yani
+# tipleri adlandırmanın başka yolu yok. `libc` emsali: yeni bir crate DEĞİL —
+# grafta zaten vardı (alacritty PTY'yi onunla yokluyor), sürüm sınırı onunkiyle
+# aynı (3.8) ve aynı 3.11'e çözülüyor; `Cargo.lock`'ta yalnız `bt-core`'un
+# bağımlılık listesine bir kenar ekleniyor. Kararın kaydı:
+# .tasks/009-shell-entegrasyonu/phase-2.md → Uygulama Notları.
+polling = "3.8"
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }

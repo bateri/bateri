@@ -18,6 +18,7 @@
 //! okuyucu thread'i tek başına yazar, `shell_state` tek başına okur.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use alacritty_terminal::event::{Event, EventListener, WindowSize};
+use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Line, Point, Side};
@@ -34,12 +35,18 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Osc52 as TermOsc52, RenderableContent, Term};
-use alacritty_terminal::tty::{self, Pty, Shell};
+// `EventedReadWrite` ada geliyor çünkü `io::Read` gövdesi `Pty::reader()`'ı
+// çağırıyor, yani kendi impl bloğunun dışından; `EventedPty` ve `io::Read`
+// gelmiyor, onların tek çağrı yeri kendi impl blokları.
+use alacritty_terminal::tty::{self, EventedReadWrite as _, Pty, Shell};
 use alacritty_terminal::vte::ansi::CursorShape;
+// `Event` adı bu modülde alacritty'nin olayına ait; `polling`'inki `TappedPty`
+// dışında hiç geçmediği için ada gelen o, takma alan o.
+use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
-use crate::shell::ShellState;
+use crate::shell::{Scanner, ShellState};
 use crate::wake::Wake;
 
 /// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
@@ -665,9 +672,104 @@ impl EventListener for Adapter {
     }
 }
 
+/// Okuma yolundan geçen baytları tarayan `Pty`.
+///
+/// `EventLoop` PTY tipinde jenerik; araya giren tek şey bu sarmalayıcı ve
+/// **baytlara dokunmuyor** — [`io::Read::read`] içerideki `Pty`'den ne
+/// okuduysa aynen döndürüyor, yalnız dönmeden önce dilimi tarayıcıya
+/// gösteriyor. Ayrıştırıcı bu yüzden bugünküyle birebir aynı akışı görüyor.
+///
+/// **`Reader = Self` kararın çekirdeği.** `Pty::reader()` `&mut File`
+/// döndürüyor, yani okuyucuyu devretmek için ödünç yetiyor: taramak için
+/// **ikinci bir fd'ye gerek yok**. Panelin "`pty.file().try_clone()` zorunlu"
+/// itirazı bu yüzden reddedildi (`discussion.md` → Muhakeme) ve kazancı,
+/// ölçülmüş kapanış dengesinin (`SIGHUP` penceresi, `kapanis=`) bu phase'de
+/// gerçekten **dokunulmamış** kalması. Sarmalayıcı `Pty`'yi sahipleniyor, yani
+/// `Drop`'un sırası da aynı.
+///
+/// Bu, [`Session::shutdown`]'ın borç olarak kaydettiği `try_clone`'u ne
+/// çürütür ne engeller: oradaki dup **master'ı `wait` bloklarken boşaltmak**
+/// için, okumayı devretmek için değil, ve yeri yine `Session::spawn` —
+/// içerideki `pty` sarmalanmadan önce. İki iş ayrı; ikisini tek cümlede
+/// karıştıran bir okuma borcu kapanmış sanır.
+///
+/// `pub` değil: katman kuralı gereği dışarıya alacritty tipi sızmaz.
+struct TappedPty {
+    pty: Pty,
+    scanner: Scanner,
+    /// [`Session::shell`]'in aynı yuvası. Yazan **yalnız** burası (okuyucu
+    /// thread'i), okuyan [`Session::shell_state`].
+    shell: Arc<Mutex<Option<ShellState>>>,
+}
+
+impl io::Read for TappedPty {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.pty.reader().read(buf)?;
+        // Yalnız **bu turda** okunan dilim taranır; `EventLoop` tamponu
+        // biriktirerek okuyor (`buf[unprocessed..]`) ve baştan taramak aynı
+        // baytı iki kez işarete çevirirdi.
+        //
+        // Kilit yalnız işaret çıkınca alınıyor: olağan akışta closure hiç
+        // çağrılmıyor, yani kabuk çıktısının hızlı yolu kilitsiz.
+        self.scanner.feed(&buf[..read], |mark| {
+            ShellState::apply(&mut lock(&self.shell), mark);
+        });
+        Ok(read)
+    }
+}
+
+impl tty::EventedReadWrite for TappedPty {
+    type Reader = Self;
+    type Writer = File;
+
+    unsafe fn register(
+        &mut self,
+        poll: &Arc<Poller>,
+        interest: PollingEvent,
+        poll_opts: PollMode,
+    ) -> io::Result<()> {
+        // fd kaydı içerideki `Pty`'nin: hazır olma sinyali, token'lar ve çocuk
+        // olayının boru hattı dokunulmadan kalıyor.
+        unsafe { self.pty.register(poll, interest, poll_opts) }
+    }
+
+    fn reregister(
+        &mut self,
+        poll: &Arc<Poller>,
+        interest: PollingEvent,
+        poll_opts: PollMode,
+    ) -> io::Result<()> {
+        self.pty.reregister(poll, interest, poll_opts)
+    }
+
+    fn deregister(&mut self, poll: &Arc<Poller>) -> io::Result<()> {
+        self.pty.deregister(poll)
+    }
+
+    fn reader(&mut self) -> &mut Self {
+        self
+    }
+
+    fn writer(&mut self) -> &mut File {
+        self.pty.writer()
+    }
+}
+
+impl tty::EventedPty for TappedPty {
+    fn next_child_event(&mut self) -> Option<tty::ChildEvent> {
+        self.pty.next_child_event()
+    }
+}
+
+impl OnResize for TappedPty {
+    fn on_resize(&mut self, window_size: WindowSize) {
+        self.pty.on_resize(window_size);
+    }
+}
+
 /// Okuyucu thread'in tutamağı. `join()` döngüyü ve PTY'yi geri verir;
 /// `SIGHUP` bu ikilinin düşmesiyle gider.
-type Reader = JoinHandle<(EventLoop<Pty, Adapter>, State)>;
+type Reader = JoinHandle<(EventLoop<TappedPty, Adapter>, State)>;
 
 /// [`Session::shutdown`]'ın çocuğa tanıdığı süre.
 ///
@@ -868,8 +970,8 @@ pub struct Session {
     ///
     /// `Adapter`'da değil `Session`'da, çünkü `Adapter` alacritty'nin
     /// olaylarını karşılıyor ve bu duruma **hiç** dokunmuyor; işaretler
-    /// olaylardan değil ham bayt akışından geliyor. `Arc`, çünkü akışı tarayan
-    /// taraf (sarmalayıcı, phase-2) bu yuvayı okuyucu thread'ine taşıyacak.
+    /// olaylardan değil ham bayt akışından geliyor. `Arc`, çünkü aynı yuvanın
+    /// öteki ucu [`TappedPty`] ile okuyucu thread'inde.
     shell: Arc<Mutex<Option<ShellState>>>,
 }
 
@@ -897,6 +999,14 @@ impl Session {
             ..Default::default()
         };
         let pty = tty::new(&pty_options, size, 0)?;
+        // Yuva `EventLoop`'tan **önce** doğuyor: bir ucu sarmalayıcıyla okuyucu
+        // thread'ine gidiyor, öteki ucu `Session`'da kalıyor.
+        let shell = Arc::new(Mutex::new(None));
+        let pty = TappedPty {
+            pty,
+            scanner: Scanner::new(),
+            shell: Arc::clone(&shell),
+        };
 
         let adapter = Adapter::new(wake, size, options.theme);
         let config = term_config(options.terminal);
@@ -919,7 +1029,7 @@ impl Session {
             sender,
             adapter,
             reader: Mutex::new(Some(event_loop.spawn())),
-            shell: Arc::new(Mutex::new(None)),
+            shell,
         })
     }
 
@@ -1992,6 +2102,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::shell::ShellPhase;
 
     /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
     const THEME: Theme = Theme::BATERI;
@@ -2116,15 +2227,44 @@ mod tests {
     }
 
     #[test]
-    fn shell_state_stays_empty_without_a_feeder() {
-        // Tarayıcı var ama akışa henüz bağlı değil (phase-2'nin işi); yuvanın
-        // boş kalması "entegrasyon yok" cevabının kendisi. Kabuk gerçekten
-        // işaret bassa bile bugün görünmemeli, yoksa sonraki phase'in bağladığı
-        // yol hiç sınanmamış olur.
+    fn shell_state_stays_empty_without_marks() {
+        // Tarayıcı artık akışa bağlı, ama işaret basmayan bir kabukta yuva boş
+        // kalmalı: `None`'ın anlamı "besleyen yok" değil **"entegrasyon yok"**
+        // ve bu sette gerçek kabukların çoğu böyle (zsh betiği phase-3'te
+        // iniyor, SSH'ın öte tarafında hiç inmiyor).
         let wake = Arc::new(TestWake::default());
-        let session = spawn_session("printf '\\033]133;A\\007'", Arc::clone(&wake));
+        let session = spawn_session("printf 'merhaba'; sleep 5", Arc::clone(&wake));
         wait_settled(&session);
         assert_eq!(session.shell_state(), None);
+    }
+
+    #[test]
+    fn marks_from_the_stream_walk_the_shell_state() {
+        // Tek bir gerçek PTY turunda iki iddia birden: durum işaretleri
+        // izliyor **ve** baytlar aynen geçiyor. İkincisi ızgaradan okunuyor —
+        // ekranda `abcd` varsa hem tarayıcı akışı tüketmemiş hem de dizinin
+        // çerçevesi `vte`'ninkiyle aynı hizada (ayrı hizalasaydı işaretin bir
+        // parçası harf olarak basılırdı).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf 'ab\\033]133;A\\007\\033]133;B\\007cd\\033]133;C\\007\\033]133;D;3\\007'; \
+             sleep 5",
+            Arc::clone(&wake),
+        );
+
+        // Beklenen satır `wait_frame`'in ölçütü: gelmezse orada, zaman aşımının
+        // mesajıyla düşer.
+        wait_frame(&session, &wake, |cells| row_text(cells, 0) == "abcd");
+
+        let finished = ShellState {
+            phase: ShellPhase::Finished,
+            last_exit: Some(3),
+        };
+        wait_until(
+            "işaretler duruma düşmedi",
+            Duration::from_secs(5),
+            || session.shell_state() == Some(finished),
+        );
     }
 
     #[test]

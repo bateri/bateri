@@ -79,7 +79,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
-| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread, OSC (7/8/9/52; 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`) serbest; kapı Linux hedefiyle derlemedir |
+| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread (PTY okuma yolu **taranıyor**: araya giren sarmalayıcı baytları aynen geçirir, geçerken OSC 133 işaretlerini çeker), OSC (7/8/9/52; 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini ve yereli (politika, `child`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`, OSC 52'nin pano işi; vnode kaynakları: ayar izleme), `libc` (yalnız bekçinin `write` + `_exit`'i ve izlemenin `O_EVTONLY`'si) |
@@ -103,7 +103,12 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   **reddedildi**), `toml_edit` (ayar ve tema dosyası, yalnız `bt-core`'da;
   `toml` + `serde` yerine, çünkü menüden yazılan dosyada yorum ve bilinmeyen
   anahtar yerinde kalmalı — `.tasks/007-ayarlar-ve-tema/discussion.md` →
-  Karar), `tracing`. `Cargo.lock` depodadır.
+  Karar), `tracing`. `polling` **yeni bir crate değil**, `libc` gibi: grafta
+  zaten vardı (alacritty PTY'yi onunla yokluyor) ve `bt-core`'un listesine
+  yalnız bir kenar ekliyor — `EventedReadWrite`'ı uygulamak imzadaki
+  `Poller`/`Event`/`PollMode`'u adlandırmayı gerektiriyor ve alacritty onları
+  yeniden ihraç etmiyor (`.tasks/009-shell-entegrasyonu/phase-2.md` → Uygulama
+  Notları). `Cargo.lock` depodadır.
   `alacritty_terminal` **Apache-2.0**: lisans metni
   `assets/bundle/THIRD-PARTY-LICENSES.txt` ile pakete girer, atfı
   `Credits.html`'de durur; atıf isteyen yeni bağımlılık da o iki dosyaya

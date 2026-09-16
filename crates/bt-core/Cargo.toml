@@ -7,4 +7,5 @@ license.workspace = true
 
 [dependencies]
 alacritty_terminal = { workspace = true }
+polling = { workspace = true }
 toml_edit = { workspace = true }
