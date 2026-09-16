@@ -95,6 +95,13 @@ const EASE_DURATION: f32 = 0.18;
 // ekranda kesilen bir kaymada değil.
 const _: () = assert!(EASE_DURATION < TIME_CEILING);
 
+// Belirmenin "duraksama" ölçütü `dt`'nin kırpılmasına **yaslanıyor**
+// (`Motion::sync`): link uyuduktan sonraki ilk kare `DT_MAX` kadar sayılıyor ve
+// bunun bir duraksama sayılması için kırpmanın belirmeden uzun olması şart.
+// Ters çevrilseydi uykudan uyanan imleç hiç belirmezdi ve belirti "bazen
+// belirmiyor" gibi sinsi olurdu.
+const _: () = assert!(FADE_DURATION < DT_MAX);
+
 /// Hareketi Azalt açıkken belirmenin süresi, saniye — **seçilmiş bir sayı,
 /// ölçülmüş değil.**
 ///
@@ -181,6 +188,14 @@ struct State {
     /// Hedef kurulalı beri geçen süre; süre tavanının **ve** `ease`'in ilerleme
     /// operandı.
     elapsed: f32,
+    /// Son **hedef değişiminden** beri geçen süre — yalnız [`Mode::Fade`]'in
+    /// operandı ve `elapsed`'in kopyası değil: o, belirmenin kendi saati;
+    /// bu, iki hareket **arasındaki** boşluk.
+    ///
+    /// Belirmenin "yeniden başlar mı" sorusu buna bakıyor (`Motion::sync`):
+    /// duraksamadan sonraki hareket yeni bir belirmedir, akan çıktının her
+    /// karede oynattığı imleç değil.
+    since_move: f32,
 }
 
 impl Motion {
@@ -241,9 +256,33 @@ impl Motion {
         match &mut self.state {
             Some(state) if animated && !scrolled && !geometry => {
                 if state.target != target {
+                    // **Belirme duraksamadan sonra yeniden başlar, her
+                    // karede değil** (`/code-review` bulgusu). Kayan iki
+                    // stilde saati koşulsuz sıfırlamak doğru: yeni hedef yeni
+                    // bir yol demek. Belirmede ise saat yolu değil
+                    // **opaklığı** sürüyor ve koşulsuz sıfırlama Hareketi
+                    // Azalt'ı tersine çeviriyordu: akan çıktıda her içerik
+                    // karesi hedefi oynattığı için alfa sıfıra çakılıyor ve
+                    // imleç **hiç görünmüyordu**. "Yalnız yerleşmişken
+                    // sıfırla" da çare değil — o hâlde imleç 90 ms'de bir
+                    // yeniden belirir, yani ~11 Hz'de **yanıp söner**; titreme
+                    // kaldırmaya çalıştığımız hareketten beterdir, üstelik
+                    // erişilebilirlik ayarının içinde.
+                    //
+                    // Ayıran ölçüt hareketler arasındaki boşluk: `FADE_DURATION`
+                    // kadar duraksamadan sonraki hareket **ayrı** bir
+                    // harekettir ve belirmeyi hak eder; daha sık gelen hedef
+                    // değişimi tek bir akışın parçasıdır ve opaklığı
+                    // tazelemez. Eşik olarak belirmenin kendi süresi
+                    // kullanılıyor — ikinci bir sabit, ikinci bir gerekçe
+                    // isterdi.
+                    let resumed = state.since_move >= FADE_DURATION;
+                    state.since_move = 0.0;
                     state.from = state.pos;
                     state.target = target;
-                    state.elapsed = 0.0;
+                    if mode != Mode::Fade || resumed {
+                        state.elapsed = 0.0;
+                    }
                     if mode == Mode::Fade {
                         state.pos = target;
                     }
@@ -257,6 +296,7 @@ impl Motion {
                     from: target,
                     target,
                     elapsed: 0.0,
+                    since_move: 0.0,
                 });
             }
         }
@@ -361,6 +401,7 @@ impl Motion {
         };
         let dt = dt.clamp(0.0, DT_MAX);
         state.elapsed += dt;
+        state.since_move += dt;
         match mode {
             // İkisinde de `sync` zaten hedefe oturttu; ilerletilecek konum
             // yok. `Fade`'de ilerleyen şey `elapsed`'in kendisi, çünkü
@@ -621,6 +662,7 @@ mod tests {
             from: [0.0; 2],
             target: [200.0, 0.0],
             elapsed: TIME_CEILING,
+            since_move: TIME_CEILING,
         };
         assert!(
             far.settled(Mode::Spring),
@@ -687,6 +729,7 @@ mod tests {
             from: [pos, 0.0],
             target: [target, 0.0],
             elapsed: 0.0,
+            since_move: 0.0,
         });
         for _ in 0..60 {
             motion.advance(TICK);
@@ -985,7 +1028,9 @@ mod tests {
         assert_eq!(motion.alpha(), 1.0, "yerleşen belirme opak değil");
 
         // Süre **mesafeden bağımsız** ve `FADE_DURATION` kadar: `ease`'in
-        // saatiyle aynı biçim, yalnız sabit ayrı.
+        // saatiyle aynı biçim, yalnız sabit ayrı. `run_to_rest` aradaki
+        // duraksamayı da veriyor, yani bu hareket "ayrı bir hareket" sayılıp
+        // yeniden beliriyor (`Motion::sync`'in duraksama ölçütü).
         for (col, row) in [(1u16, 0u16), (200, 60)] {
             let mut motion = fading();
             run_to_rest(&mut motion, TICK);
@@ -1058,6 +1103,57 @@ mod tests {
         // Aynı değeri yeniden yazmak ve yerleşmiş imleç no-op.
         assert!(!motion.set_reduce(true), "aynı değer kare istedi");
         assert!(!motion.set_reduce(false), "yerleşmiş imleç kare istedi");
+    }
+
+    #[test]
+    fn a_cursor_that_keeps_moving_still_becomes_visible_while_fading() {
+        // `/code-review` bulgusu ve indirgemenin **tersine döndüğü** yer:
+        // her hedef değişimi saati sıfırlasaydı hızla oynayan bir imleç
+        // 90 ms'yi hiç dolduramaz, yani Hareketi Azalt imleci yanıp söner
+        // (yazarken) ya da tamamen kaybederdi (akan çıktıda).
+        //
+        // Senaryo akan çıktı: her karede bir hücre ilerleyen imleç.
+        let mut motion = fading();
+        let mut col = 10;
+        for _ in 0..30 {
+            motion.advance(TICK);
+            col += 1;
+            motion.sync(col, 4, true, 0, false);
+        }
+        assert_eq!(
+            motion.alpha(),
+            1.0,
+            "akan çıktıda imleç saydam kaldı: opaklık {}",
+            motion.alpha()
+        );
+        // Konum her zaman hedefte: belirme kaymıyor.
+        assert_eq!(motion.position(), Some([f32::from(col), 4.0]));
+        // Ve yerleşiyor — link bu imleç için sonsuza uyanık kalmıyor.
+        assert!(motion.settled(), "belirme yerleşmedi");
+
+        // Akışın içindeki bir sonraki hareket de belirmeyi tazelemiyor:
+        // 90 ms'de bir yeniden belirmek ~11 Hz'de bir titreme demekti.
+        motion.advance(TICK);
+        motion.sync(col + 1, 4, true, 0, false);
+        assert_eq!(
+            motion.alpha(),
+            1.0,
+            "akıştaki hareket yeniden belirdi (titreme)"
+        );
+        assert!(motion.settled(), "akıştaki hareket link'i uyandırdı");
+
+        // **Duraksamadan sonraki** hareket ayrı bir harekettir ve beliriyor:
+        // indirgemenin sözü burada duruyor. Uykudan uyanan link'in ilk karesi
+        // de buraya düşüyor — `dt` `DT_MAX`'e kırpılıyor ve kırpma belirmeden
+        // uzun (dosya başındaki `const _`).
+        motion.advance(DT_MAX);
+        motion.sync(col + 2, 4, true, 0, false);
+        assert_eq!(
+            motion.alpha(),
+            0.0,
+            "duraksamadan sonraki hareket belirmedi"
+        );
+        assert!(!motion.settled(), "belirme hiç başlamadı");
     }
 
     #[test]
@@ -1140,6 +1236,7 @@ mod tests {
             from: [pos, 0.0],
             target: [pos + 0.5, 0.0],
             elapsed: 0.0,
+            since_move: 0.0,
         });
         motion.advance(TICK);
         assert!(motion.settled(), "yay taşma kırpmasıyla oturmadı");

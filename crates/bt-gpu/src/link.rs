@@ -105,7 +105,9 @@ struct WakerInner {
     /// `istek ≈ kare + 2` ilişkisi tam bu yüzden **008'de geçersizleşti**;
     /// sayıların kendisi (o günkü koşuların gözlemi) duruyor, yeni hâli
     /// `icerik` üstünden **ölçüldü** (008 phase-6, otuz sağlıklı koşu):
-    /// `istek=4` sabitken `icerik` `2`–`3`, `kare` ise 27–30.
+    /// `istek` otuzunda da `4` iken `icerik` `2`–`3`, `kare` ise 27–30. Sayaç
+    /// yine de **sabit değil** — sonraki bir koşu `3` verdi, muhtemelen bu
+    /// gövdenin birleştirmesi yüzünden; ölçülmedi.
     ///
     /// Bir **sayaç, kapı değil**: eşiği ölçülmedi ve ölçülmemiş sayı kapıya
     /// yazılmaz (`yuva=` ile aynı kural). Ölçülen (2026-09-12, debug, bu
@@ -539,6 +541,18 @@ define_class!(
                     // çizim hatası, kaymanın süre tavanı (0,7 sn) dolana kadar
                     // tazeleme hızında hata satırı basardı — `FailureStreak`
                     // tam bunu önlemek için yazılmıştı.
+                    //
+                    // **Yalnız senkron hata** (`/code-review` bulgusu):
+                    // tamamlanma bloğundan gelen asenkron hata da
+                    // `draw_failed`'i çağırıyor ama dönüşünü kullanamıyor —
+                    // `iv.motion` ana thread'e bağlı bir `Cell` ve blok başka
+                    // bir thread'de koşuyor. O yolda animasyonun durağı
+                    // `finish()` değil **süre tavanı**, yani bütçe bitse de
+                    // hata satırı en çok 0,7 saniye sürer. Kapatmanın yolu
+                    // belli (bloktan dikilen, callback'in tükettiği atomik bir
+                    // "bitir" bayrağı) ve bedeli de belli: `Motion`'a ikinci
+                    // bir giriş noktası. Ölçülmüş bir ihtiyaç beklemeden
+                    // atılmadı.
                     Err(e) => {
                         if iv.retry.draw_failed(&e) {
                             motion.finish();
@@ -618,7 +632,12 @@ define_class!(
                     // Sessizliğin tabanı da yalnız **yola çıkan** karede
                     // tazeleniyor ve aynı sebeple: encode edilemeyen kare
                     // ekranda hiçbir şey değiştirmedi.
-                    iv.last_frame_at.set(Some(update.targetTimestamp()));
+                    // Damga callback'in başında alınan `now`; ikinci bir
+                    // `targetTimestamp()` çağrısı aynı değeri döndürür ama
+                    // `dt`'nin tabanıyla `sessiz=`'in tabanını iki ayrı
+                    // okumaya bağlardı — `last_update_at`'in doc'unun adıyla
+                    // yasakladığı şey (`/code-review` bulgusu).
+                    iv.last_frame_at.set(Some(now));
                     if let Some((stats, (cpu_frame, cpu_encode))) = iv.stats.as_ref().zip(spans) {
                         stats.record_cpu(cpu_frame, cpu_encode);
                     }
@@ -764,10 +783,14 @@ impl DisplayLink {
     /// Boşta sıfır kare kapısının operandı: çizilmeye **karar verilen** içerik
     /// karesi. Rapor bunu `icerik=` jetonuyla basıyor.
     ///
-    /// `kare` ile ilişkisi tek yönlü: hatasız biten her kare bir içerik
-    /// karesiydi, tersi değil — yani **`kare ≤ icerik`**. Farkı encode
-    /// edilemeyen kareler ve uçuşta kalanlar açar; sağlıklı bir koşuda ikisi
-    /// eşit (gerekçe `bt-shell`'in `IDLE_FRAME_LIMIT` doc'unda).
+    /// `kare` ile arasında **sıra ilişkisi yok** ve ikisini karıştırmak
+    /// kapıyı yanlış okumak demek: hareket karesi de bir komut tamponu
+    /// commit ediyor, yani `kare`'ye yazılıp buraya yazılmıyor
+    /// ([`Self::motion_frames`]). Ölçülen sağlıklı duman koşusu `kare` 27–30
+    /// iken `icerik` 2–3 (`docs/OLCUMLER.md` → `## Boşta kare`); farkın büyük
+    /// kısmı imleç kayması, kalanı encode edilemeyen ve uçuşta kalan kareler.
+    /// Kırmızı bir koşuyu okuyan taraf da bunu kullanıyor: üçü birden yüksekse
+    /// hasar akıyor, yalnız `kare` yüksekse animasyon yerleşmiyor.
     pub fn content_frames(&self) -> u64 {
         self.delegate.ivars().content_frames.get()
     }

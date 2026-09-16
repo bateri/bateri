@@ -1769,8 +1769,12 @@ mod tests {
         // hücre yerine kare, ya da hücre yerine iki hücre. Yakalamadığı, `<`
         // ile `<=` farkı: `[[position]]` fragment merkezini veriyor (x + 0.5)
         // ve hiçbir fragment tam sınıra düşmüyor (shader'da yazılı).
-        // Phase-3'te dikdörtgen hücreler arasına oturunca aynı sınama ara
-        // konumu kendiliğinden sorar.
+        //
+        // **Ara konum da soruluyor** (`/audit` bulgusu): hareket geldiğinden
+        // beri `at` kesirli olabiliyor ve "kendiliğinden sorulur" diye
+        // bırakılan kol aslında hiç koşmuyordu — iki offscreen sınaması da
+        // tam sayı konum veriyordu, yani kesirli dikdörtgeni yalnız CPU
+        // birim sınamaları görüyordu.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         const EDGE: usize = 64;
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
@@ -1794,6 +1798,29 @@ mod tests {
         assert!(
             first_column.contains(&(0xff, 0xff, 0xff)),
             "komşunun ilk sütunu da ezildi: dikdörtgen hücresinden taşıyor — {first_column:?}"
+        );
+
+        // İki hücrenin **ortasında** duran imleç: dikdörtgen artık iki
+        // hücreye de taşıyor ve bu doğru — ama genişliği hâlâ bir hücre, yani
+        // ikinci hücrenin **son** sütunu dokunulmadan kalmalı. Ölçünün kare
+        // ya da iki hücre olduğu bir kusur burada da yakalanır, üstelik
+        // kesirli konumda.
+        let mut frame = Frame::default();
+        frame.clear((cw, ch));
+        frame.push(rule_cell(0, UnderlineStyle::Single));
+        frame.push(rule_cell(1, UnderlineStyle::Single));
+        let mut cursor = cursor_at(0, BACKGROUND);
+        cursor.col = 0;
+        frame.push_cursor(cursor, [0.5, 0.0], ACCENT, 1.0);
+
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+        let last_column: Vec<(u8, u8, u8)> = cell_rows(&pixels, EDGE, (cw, ch), 1)
+            .iter()
+            .map(|row| row[usize::from(cw) - 1])
+            .collect();
+        assert!(
+            last_column.contains(&(0xff, 0xff, 0xff)),
+            "yarım hücre kaymış imleç iki hücreyi birden ezdi: {last_column:?}"
         );
     }
 
