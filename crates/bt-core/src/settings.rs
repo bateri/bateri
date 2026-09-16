@@ -13,7 +13,7 @@
 //! **Tek istisna `clipboard.osc52`:** kabul edilmeyen değeri varsayılanı
 //! (açık) değil kapalıyı alır ([`Settings::parse_keeping`]'in doc'u).
 //! **Bilinmeyen anahtar ve bölüm sessizce yoksayılır:** sonraki setlerin
-//! anahtarı (`[motion]`) bugünkü sürümde tanı üretmemeli.
+//! anahtarı (`[motion] keypress`) bugünkü sürümde tanı üretmemeli.
 //!
 //! Ayrıştırıcı önceki ayarları yalnız kabul edilmeyen değerin yerine geçecek
 //! değer olarak görür ([`Settings::parse_keeping`], kayıt anı); fark almak
@@ -84,6 +84,44 @@ impl Default for FontOptions {
     }
 }
 
+/// `[motion] cursor_motion`: imlecin hücreler arasında nasıl gittiği.
+///
+/// Ayar modelinde yaşıyor ([`FontOptions`] ve `Osc52` emsali) ama tüketicisi
+/// `bt-gpu`: `bt-shell` çözülmüş değeri renderer'ın ritmine veriyor. Buradaki
+/// tek bilgi **hangi stil**; sürelerin ve yay katsayılarının sahibi
+/// `bt_gpu::motion` — sayıların ayar modelinde durması onları iki yerden
+/// değiştirilebilir kılardı.
+///
+/// `Default` **`Spring`** (008 Karar 6): set'in ürün gerekçesi "the reference'i
+/// ekranda tanıtan üç şeyden biri" ve varsayılanı `Snap` yapmak özelliği
+/// kapalı sevk etmek olurdu. Varsayılanın tek sahibi burası olduğu için
+/// hermetik süreli koşu da (ayar dosyası okumuyor) bu değeri alıyor —
+/// `make duman`'ın `hareket > 0` gerekliliği tam buna yaslanıyor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorMotion {
+    /// Anında: imleç hedef hücrede doğar, animasyon hiç başlamaz.
+    Snap,
+    /// Sabit süre, taşma yok — mesafeden bağımsız.
+    Ease,
+    /// Kritik sönümlü yay; süre mesafeyle büyür.
+    #[default]
+    Spring,
+}
+
+impl CursorMotion {
+    /// Ayar dosyasındaki yazılışı — tanı metninin "using …" yarısı buradan.
+    ///
+    /// Ayrıştırıcının kabul ettiği dizgilerle **aynı** olmak zorunda
+    /// ([`cursor_motion`]): tanı kullanıcıya geçerli bir değer göstermeli.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Snap => "snap",
+            Self::Ease => "ease",
+            Self::Spring => "spring",
+        }
+    }
+}
+
 /// Kullanıcının değiştirebildiği her şey — ayrıştırılmış ve doğrulanmış.
 ///
 /// Alanlar `pub`: tip bir kayıt, davranış taşımıyor. Değerin geçerliliğini
@@ -112,6 +150,8 @@ pub struct Settings {
     pub font: FontOptions,
     /// `[clipboard] osc52`: `"copy"` ya da `"off"`.
     pub osc52: Osc52,
+    /// `[motion] cursor_motion`: imlecin kayma stili.
+    pub cursor_motion: CursorMotion,
 }
 
 impl Default for Settings {
@@ -134,6 +174,7 @@ impl Default for Settings {
             dark_theme: "bateri".to_owned(),
             font: FontOptions::default(),
             osc52: Osc52::Copy,
+            cursor_motion: CursorMotion::default(),
         }
     }
 }
@@ -217,6 +258,11 @@ size = 13
 # Lets programs in the terminal, also over ssh, copy text to the clipboard
 # (OSC 52): "copy" allows it, "off" does not. They can never read it.
 osc52 = "copy"
+
+[motion]
+# How the cursor travels between cells: "spring" glides and eases into place,
+# "ease" glides for a fixed time, "snap" jumps there at once.
+cursor_motion = "spring"
 "#;
 
     /// Dosya **var ama kullanılamıyor** (okunamıyor ya da geçersiz TOML)
@@ -362,6 +408,18 @@ osc52 = "copy"
             }
             None => {}
         }
+        match section(text, root, "motion", &mut parsed.diagnostics) {
+            Some(motion) => {
+                if let Some(item) = motion.get("cursor_motion") {
+                    parsed.settings.cursor_motion =
+                        cursor_motion(text, item, fallback.cursor_motion, &mut parsed.diagnostics);
+                }
+            }
+            None if root.contains_key("motion") => {
+                parsed.settings.cursor_motion = fallback.cursor_motion;
+            }
+            None => {}
+        }
         Ok(parsed)
     }
 
@@ -403,6 +461,7 @@ osc52 = "copy"
         Changes {
             terminal: self.terminal() != new.terminal(),
             font: self.font != new.font,
+            motion: self.cursor_motion != new.cursor_motion,
         }
     }
 
@@ -516,6 +575,11 @@ pub struct Changes {
     /// [`Settings::font`] değişti: renderer'a gider, hücre ölçüsü ve grid
     /// yeniden hesaplanır.
     pub font: bool,
+    /// [`Settings::cursor_motion`] değişti: kareyi süren ritme gider
+    /// (`bt_gpu::DisplayLink::set_cursor_motion`). Terminalden ve fonttan ayrı
+    /// bir alan, çünkü stil ne oturumu ne hücre ölçüsünü ilgilendiriyor —
+    /// ikisine de bağlansaydı bir stil değişimi grid'i yeniden kurdururdu.
+    pub motion: bool,
 }
 
 /// Metni TOML belgesine ayrıştırır; ayrıştırılamıyorsa tek satırlık tanı.
@@ -728,6 +792,41 @@ fn osc52(text: &str, item: &Item, diagnostics: &mut Vec<Diagnostic>) -> Osc52 {
     Osc52::Off
 }
 
+/// `motion.cursor_motion`: tam olarak `"snap"`, `"ease"` ya da `"spring"`.
+///
+/// Kabul edilmeyen değer `fallback`'i alır ve tanı bırakır, yani **öteki
+/// anahtarların kuralı**. `clipboard.osc52`'nin "kapalıya düş" istisnası
+/// buraya geçmiyor (008 Karar 6): o istisnanın gerekçesi yanlış tahminin
+/// **sessiz** olmasıydı — burada yanlış tahminin belirtisi ekranda kayan (ya
+/// da kaymayan) bir imleç, yani kullanıcı ne olduğunu görüyor.
+///
+/// Büyük/küçük harf duyarlı, tema adları ve `osc52` gibi: `"Spring"` bir
+/// yazım hatası.
+fn cursor_motion(
+    text: &str,
+    item: &Item,
+    fallback: CursorMotion,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> CursorMotion {
+    const KEY: &str = "motion.cursor_motion";
+    let found = match item.as_str() {
+        Some("snap") => return CursorMotion::Snap,
+        Some("ease") => return CursorMotion::Ease,
+        Some("spring") => return CursorMotion::Spring,
+        Some(value) => format!("{value:?}"),
+        None => kind(item).to_owned(),
+    };
+    diagnostics.push(Diagnostic {
+        key: Some(KEY),
+        line: item.span().and_then(|span| line_of(text, span.start)),
+        message: format!(
+            "`{KEY}` must be \"snap\", \"ease\" or \"spring\", found {found}; using \"{}\"",
+            fallback.name()
+        ),
+    });
+    fallback
+}
+
 /// Bayt konumunun 1'den başlayan satırı.
 ///
 /// `toml_edit`'in kendi çevirisi (`translate_position`) crate'e özel;
@@ -811,6 +910,7 @@ mod tests {
             ("appearance", "dark_theme"),
             ("font", "size"),
             ("clipboard", "osc52"),
+            ("motion", "cursor_motion"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -950,7 +1050,8 @@ mod tests {
             before.changes(&after),
             Changes {
                 terminal: true,
-                font: false
+                font: false,
+                motion: false
             }
         );
         assert_eq!(
@@ -979,6 +1080,7 @@ mod tests {
             dark_theme: "ink".to_owned(),
             font: FontOptions::default(),
             osc52: Osc52::Copy,
+            cursor_motion: CursorMotion::Spring,
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -1125,6 +1227,7 @@ mod tests {
         let font_only = Changes {
             terminal: false,
             font: true,
+            motion: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
         assert_eq!(
@@ -1212,7 +1315,8 @@ mod tests {
             before.changes(&after),
             Changes {
                 terminal: true,
-                font: false
+                font: false,
+                motion: false
             }
         );
         assert_eq!(
@@ -1222,6 +1326,83 @@ mod tests {
                 osc52: Osc52::Off
             }
         );
+    }
+
+    #[test]
+    fn cursor_motion_is_read() {
+        // Dosyada yoksa `spring`: özelliği kapalı sevk etmemek kararın kendisi
+        // (008 Karar 6).
+        assert_eq!(clean("").cursor_motion, CursorMotion::Spring);
+        assert_eq!(
+            clean("[motion]\ncursor_motion = \"snap\"\n").cursor_motion,
+            CursorMotion::Snap
+        );
+        assert_eq!(
+            clean("[motion]\ncursor_motion = \"ease\"\n").cursor_motion,
+            CursorMotion::Ease
+        );
+        assert_eq!(
+            clean("motion = { cursor_motion = \"spring\" }\n").cursor_motion,
+            CursorMotion::Spring
+        );
+    }
+
+    #[test]
+    fn unrecognized_cursor_motion_keeps_its_own_key() {
+        // `osc52`'nin "kabul edilmeyen değer kapalıya düşer" istisnası buraya
+        // **geçmiyor**: yanlış tahminin bedeli görünür bir animasyon, sessiz
+        // bir pano sızıntısı değil (008 Karar 6). Yani kural öteki
+        // anahtarlarınki — anahtar kendi değerinde kalır, yanında tanı.
+        for (value, found) in [
+            ("\"sprong\"", "\"sprong\""),
+            ("\"Spring\"", "\"Spring\""),
+            ("true", "a boolean"),
+            ("{ style = \"snap\" }", "a section"),
+        ] {
+            let (settings, diagnostic) = rejected(&format!("[motion]\ncursor_motion = {value}\n"));
+            assert_eq!(settings, Settings::default(), "{value}");
+            assert_eq!(diagnostic.key, Some("motion.cursor_motion"), "{value}");
+            assert_eq!(diagnostic.line, Some(2), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`motion.cursor_motion` must be \"snap\", \"ease\" or \"spring\", \
+found {found}; using \"spring\""
+                )
+            );
+        }
+        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar:
+        // ekrandaki stil bir yazım hatasıyla değişmemeli.
+        let current = Settings {
+            cursor_motion: CursorMotion::Ease,
+            ..Settings::default()
+        };
+        let parsed = Settings::parse_keeping("[motion]\ncursor_motion = \"sprong\"\n", &current)
+            .expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.cursor_motion, CursorMotion::Ease);
+        assert!(parsed.diagnostics[0].message.ends_with("using \"ease\""));
+        // Bölüm yanlış türde: anahtarı kabul edilmemiş sayılıyor.
+        let parsed =
+            Settings::parse_keeping("motion = 5\n", &current).expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.cursor_motion, CursorMotion::Ease);
+        assert_eq!(parsed.diagnostics[0].key, Some("motion"));
+    }
+
+    #[test]
+    fn cursor_motion_change_is_a_motion_change() {
+        // Kendi farkı: stil renderer'ın ritmine gidiyor, oturuma ya da fonta
+        // değil — ikisini de kıpırdatmamalı.
+        let before = clean("");
+        let after = clean("[motion]\ncursor_motion = \"snap\"\n");
+        assert_eq!(
+            before.changes(&after),
+            Changes {
+                terminal: false,
+                font: false,
+                motion: true
+            }
+        );
+        assert_eq!(after.changes(&after), Changes::default());
     }
 
     #[test]
@@ -1308,17 +1489,23 @@ mod tests {
 
     #[test]
     fn unknown_keys_and_sections_are_silent() {
+        // Sonraki setlerin anahtarları bugün tanı üretmemeli: `keypress` ve
+        // `intensity` referansın `[motion]` bölümünde var, bizde yok
+        // (008 → Kapsam dışı).
         let text = "\
 future = true
 [terminal]
 scrollback = 42
 shape = \"block\"
 [motion]
-cursor = \"spring\"
+keypress = \"pop\"
+intensity = 0.5
 [font]
 line_height = 1.2
 ";
-        assert_eq!(clean(text).scrollback, 42);
+        let settings = clean(text);
+        assert_eq!(settings.scrollback, 42);
+        assert_eq!(settings.cursor_motion, CursorMotion::Spring);
     }
 
     #[test]

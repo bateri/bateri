@@ -735,11 +735,13 @@ struct Counters {
     /// hareketi içeriyor (`bt_core::smoke_shell`), yani sıfır "animasyon hiç
     /// koşmadı" demek — tıpkı `hucre=0`'ın "shell çıktısı yok" demesi gibi.
     ///
-    /// **Gizli bağ:** bu gereklilik hermetik koşunun imleç stilinin
-    /// **animasyonlu** olmasına dayanıyor. Bugün tutuyor çünkü stil sabit
-    /// kodlu `spring`; ayar geldiğinde (phase-4) varsayılan bir gün `snap`
-    /// olursa kapı sessizce düşer. O gün ya hermetik koşunun stili koşuda
-    /// açıkça sabitlenir ya bu cümle o değişikliğin önünde durur.
+    /// **Gizli bağ, artık adıyla:** bu gereklilik hermetik koşunun imleç
+    /// stilinin **animasyonlu** olmasına dayanıyor ve o stil
+    /// `bt_core::Settings::default().cursor_motion`, yani varsayılanların tek
+    /// sahibinden geliyor (süreli koşu ayar dosyasını okumuyor,
+    /// [`Inputs::Hermetic`]). Varsayılan bir gün `CursorMotion::Snap` olursa
+    /// bu kapı sessizce düşer — o değişiklik ya hermetik koşunun stilini
+    /// koşuda açıkça sabitlemek zorunda ya bu cümleyi karşısında bulacak.
     motion: u64,
 }
 
@@ -1261,6 +1263,11 @@ impl AppDelegate {
             self.ivars().wake.waker.set(link.waker()).is_ok(),
             "waker ikinci kez kuruldu"
         );
+        // İmlecin stili de ayarın: link `CursorMotion::default()` ile doğuyor
+        // ve buradaki çağrı onu dosyanın (ya da hermetik koşuda
+        // `Settings::default()`'un) değerine çekiyor. `set_font`'un yeri
+        // `load_settings` ama stilinki olamaz: link o an henüz yok.
+        link.set_cursor_motion(self.ivars().settings.borrow().cursor_motion);
         // Açılış karesi: `Session` kirli doğar, link'i bir kez elle açıyoruz.
         link.request_frame();
         let _ = self.ivars().link.set(link);
@@ -1347,7 +1354,8 @@ impl AppDelegate {
     ///   ([`settings::load_keeping`]) ve fark alınır: terminal seçenekleri
     ///   **tamamıyla** oturuma gider; font geçici punto farkıyla renderer'a
     ///   gider ([`AppDelegate::apply_font`]) — `size` değiştiyse fark
-    ///   sıfırlanarak ([`Zoom::after_reload`]). Dosya okunup uygulanınca yazma
+    ///   sıfırlanarak ([`Zoom::after_reload`]); imleç stili link'e gider
+    ///   ([`bt_gpu::DisplayLink::set_cursor_motion`]). Dosya okunup uygulanınca yazma
     ///   yuvası da boşalır: Theme ▸'nin reddettiği dosya düzeltildiyse ret
     ///   artık doğru değil.
     /// - **Tema her olayda yeniden çözülüyor**, ayar dosyası bozuk olsa da
@@ -1385,6 +1393,16 @@ impl AppDelegate {
             };
             if changes.terminal {
                 session.set_terminal_options(new.terminal());
+            }
+            // Stil link'e gidiyor, oturuma değil: hangi kareyi çizeceğimizi
+            // değil **nasıl** çizeceğimizi değiştiriyor. Link `start_session`
+            // içinde doğuyor ve bu yol ondan sonra koşuyor, ama sıra bir
+            // sözleşme değil: yuva boşsa açılış çağrısı zaten aynı değeri
+            // verecek.
+            if changes.motion {
+                if let Some(link) = self.ivars().link.get() {
+                    link.set_cursor_motion(new.cursor_motion);
+                }
             }
             self.ivars().zoom.set(zoom);
             self.ivars().settings.replace(new);
@@ -2296,7 +2314,11 @@ mod tests {
     #[test]
     fn timed_run_does_not_see_the_user() {
         // Süreli koşu yükleyiciyi çağırmaz: ev dizini çözülse bile karar
-        // `Hermetic`. `make duman` jetonları bu satıra yaslanıyor.
+        // `Hermetic`. `make duman` jetonları bu satıra yaslanıyor — `hucre=`
+        // ve `glif=` makinenin fontuna, `hareket=` de makinenin
+        // `[motion] cursor_motion`'ına bağlanmıyor. Hermetik koşuda stil
+        // `Settings::default()`'tan geliyor (`start_session`), yani
+        // varsayılanların tek sahibinden.
         let home = Some(PathBuf::from("/Users/someone"));
         for workload in [Workload::Smoke, Workload::Load] {
             let run = Run {
