@@ -103,6 +103,13 @@ cursor_motion = "spring"
 # Whether to tone animations down to a short fade: "system" follows the macOS
 # Reduce Motion setting, "on" and "off" decide it here.
 reduce_motion = "system"
+
+[shell]
+# Whether bateri sets up the shell so it can report where prompts and commands
+# begin and end: "auto" does it for shells bateri knows, "off" never does.
+# Unlike every other key here, this one only takes effect in shells started
+# after the change; shells already open keep what they were started with.
+integration = "auto"
 ```
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
@@ -416,6 +423,62 @@ reduce_motion = "system"
 - Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa hedefinde
   bitirilir — açarken de kapatırken de imleç ışınlanmaz.
 - Tanınmayan değer (`"yes"`, `"System"`, `true`) yalnız bu anahtarı etkiler.
+
+### `[shell]`
+
+```toml
+[shell]
+integration = "auto"
+```
+
+| anahtar | tür | varsayılan | anlamı |
+|---|---|---|---|
+| `integration` | `"auto"` ya da `"off"` | `"auto"` | kabuğa entegrasyon kurulsun mu |
+
+Entegrasyon, kabuğun terminale "prompt burada başladı, komut burada koştu, şu
+kodla bitti" demesini sağlar. Bugün yalnız **zsh** için var; başka bir kabukta
+(bash, fish) `"auto"` da hiçbir şey yapmaz ve terminal olduğu gibi çalışır.
+
+- **`"auto"`** — kabuk zsh ise `ZDOTDIR` bateri'nin kendi dizinini gösterir.
+  O dizindeki dosyalar **sizin** başlangıç dosyalarınızı yükler, `ZDOTDIR`'ı
+  özgün değerine geri koyar (yoksa siler) ve kabuğun kendi kancalarına
+  işaretleri ekler. Komut geçmişiniz (`HISTFILE`) de kendi dizininde kalır.
+- **`"off"`** — hiçbir şey kurulmaz.
+- **Dosyalarınıza yazılmaz.** Ne `.zshrc`'ye ne başka bir rc dosyasına tek
+  satır eklenir; entegrasyon yalnız bir ortam değişkenidir, yani kapatmak iz
+  bırakmaz.
+- Başka bir aracın kurduğu **gerçek** OSC 133 işaretleri `"off"` iken de
+  okunur: anahtarın anlamı "sarmalayıcıyı kurma", "işaretleri görmezden gel"
+  değil.
+- SSH ile uzak bir makineye geçtiğinizde orada bizim betiğimiz yoktur ve
+  işaretler gelmez. Bu bir arıza değil; terminal olağan hâlinde çalışır.
+
+**Bu anahtar öteki anahtarlar gibi kayıt anında uygulanmaz** — tek istisna
+budur. Entegrasyon kabuk **doğarken** kuruluyor, dosyayı kaydettiğinizde kabuk
+çoktan doğmuş oluyor: değer **sonraki oturumda** geçerli olur, açık pencere
+etkilenmez.
+
+Uygulama açılmıyorsa (bozuk bir kabuk yapılandırması yüzünden pencere hemen
+kapanıyorsa) anahtarı **elle** kapatabilirsiniz; bateri'ye hiç ihtiyaç yok.
+Başka bir terminalden dosyayı açın:
+
+```sh
+open -e ~/.config/bateri/settings.toml
+```
+
+`[shell]` bölümü varsa `integration` satırını `"off"` yapın; yoksa dosyanın
+sonuna iki satır ekleyin:
+
+```toml
+[shell]
+integration = "off"
+```
+
+Bölümü **iki kez** yazmayın: TOML aynı bölümün tekrarını kabul etmez ve dosya
+bütünüyle okunamaz hâle gelir (başlık çubuğu bunu söyler).
+
+- Tanınmayan değer (`"on"`, `"Auto"`, `false`) yalnız bu anahtarı etkiler
+  (açılışta `"auto"`) ve uyarı görünür.
 
 ## Temalar
 
