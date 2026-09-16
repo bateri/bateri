@@ -7,7 +7,8 @@
 //! Neden var: `alacritty_terminal` Apache-2.0 ve lisans metni `.app` ile
 //! birlikte gitmek zorunda. Metin ya da atıf silinirse hiçbir derleme,
 //! clippy ya da duman koşusu kızarmaz — ihlal **sessiz** olur. Bu sınama
-//! `make hepsi`'de koşar ve girdileri (`assets/bundle/`) denetler.
+//! `make hepsi`'de koşar ve girdileri (`assets/bundle/`, `assets/shell/`)
+//! denetler.
 //!
 //! Kapsamadığı: girdilerin pakete **kopyalanıp kopyalanmadığı**. Ürün yalnız
 //! `make kur`'da doğuyor ve onu `kur`'un kendi denetimi görüyor; burada
@@ -24,6 +25,11 @@ fn asset(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/bundle")
         .join(name)
+}
+
+/// zsh sarmalayıcısının girdi dizini (`assets/shell/zsh`).
+fn shell_asset_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell/zsh")
 }
 
 fn read_asset(name: &str) -> String {
@@ -97,6 +103,45 @@ fn info_plist_template_derives_version_and_minimum_os() {
         Some("@VERSION@")
     );
     assert_eq!(plist_value("CFBundleVersion").as_deref(), Some("@VERSION@"));
+}
+
+/// zsh sarmalayıcısının envanteri **tam olarak** bu beş dosya.
+///
+/// "Eksiği yok" yarısını `bt-shell` de soruyor (`child::zsh_wrapper_dir`'in
+/// sınaması); buranın tek başına gördüğü yarı **fazlası**. İki türü var ve
+/// ikisi de sessiz:
+///
+/// - `make kur` betikleri elle yazılmış iki listeden geçiriyor (kopya ve
+///   `cmp`). Listelere düşmemiş yeni bir girdi pakete hiç girmez, ürün
+///   denetimi de onu aramaz — kapı yeşil kalır, sarmalayıcı eksik kurulur.
+/// - Dizine **yazan** bir kol: ZDOTDIR oturum boyunca bir süre burayı
+///   gösteriyor ve 009 phase-3'te `/etc/zshrc` bir kez gerçekten
+///   `.zsh_history` doğurdu. Kullanıcının verisi ürüne girecek yoldu.
+///
+/// `.DS_Store` sayılmıyor: Finder üretiyor, depoya girmiyor (`.gitignore`) ve
+/// kopya satırı adları tek tek saydığı için pakete sızamıyor. Kapının kod
+/// doğruyken düşmesi, gördüğü kusurdan pahalı olurdu.
+#[test]
+fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
+    let dir = shell_asset_dir();
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{} okunamadı: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("dizin girdisi okunamadı")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name != ".DS_Store")
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        [".zlogin", ".zprofile", ".zshenv", ".zshrc", "bateri.zsh"],
+        "assets/shell/zsh envanteri değişti; `make kur`'un kopya ve cmp \
+         listeleri de güncellenmeli"
+    );
 }
 
 /// Apache-2.0 §4(a): alıcıya lisansın bir kopyası verilir. Atıf metni
