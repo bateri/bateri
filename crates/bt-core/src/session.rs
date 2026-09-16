@@ -101,8 +101,10 @@ pub struct Cell {
     /// rengi kullanır; alt çizgi ise [`Cell::underline_color`] doluysa onu,
     /// boşsa bunu — SGR'de üstü çizilinin ayrı bir rengi yok.
     ///
-    /// İmlecin altındaki hücrede **ters**: değer paletin arka planıdır, çünkü
-    /// imleç bloğu opak ve glyph'in altında (`plan.md` → R4.1).
+    /// İmleç bunu **ezmez**: hücre imlecin altında da kendi rengiyle geçer,
+    /// bloğun örttüğü pikselleri çizen [`Cursor::text`] ile boyar (bkz.
+    /// [`Cursor`]). Eskiden imlecin durduğu hücrede paletin arka planına
+    /// çevriliyordu.
     pub fg: LinearRgba,
     /// `None` = varsayılan arka plan, çizilmez. `Frame` yalnız `Some`
     /// gördüğünde `bg_count`'u artırır: `hucre=K` jetonunun anlamı bit bit
@@ -120,9 +122,9 @@ pub struct Cell {
     /// birebir aynı örüntü: seyrek veri `Option`'da, varsayılanı olan
     /// tarafın adı `None`.
     ///
-    /// **İmlecin altındaki hücrede her zaman `None`**: [`Cell::fg`] orada
-    /// tersine döndüğü için çizgi de onunla birlikte dönsün. Ayrıntısı
-    /// [`Session::frame`]'in imleç dalında.
+    /// İmleç bunu **düşürmez**: bloğun altında kalan çizgi rengini
+    /// [`Cursor::text`]'ten alıyor ve bu bir piksel kararı (bkz. [`Cursor`]).
+    /// Eskiden imlecin durduğu hücrede koşulsuz `None`'a düşüyordu.
     pub underline_color: Option<LinearRgba>,
     /// SGR 9; `HIDDEN` hücrede `false`.
     pub strikeout: bool,
@@ -154,18 +156,33 @@ impl Default for Cell {
     }
 }
 
-/// İmlecin karedeki yeri.
+/// İmlecin karedeki yeri **ve bloğunun altında kalan metnin rengi**.
 ///
 /// `row` her zaman görünür pencereye kırpılıdır. Kaydırma geçmişine bakarken
 /// ([`Session::scroll_wheel`]) imleç ekranın dışına çıkar; o durumda
 /// `visible` kapanır ve `row` gerçek satırı değil kırpılmış değeri taşır.
 /// Kaydırmanın kendisi imleç konumunu okumuyor; konuma güvenen ilk tüketici
 /// (IME) çıkmadan önce buranın sözleşmesini genişletmeli.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// **Karar burada, boyama orada.** İmleç bloğu opak ve altındaki harfi
+/// örtüyor; harf kendi ön planıyla kalsaydı açık gri, açık mavi bloğun üstüne
+/// düşer ve okunmazdı. "Altındaki metin ne renk olmalı" bir terminal
+/// semantiğidir ve bu crate'in kararı — [`Cursor::text`] onu sınırdan
+/// geçiriyor. Hangi **piksellerin** o rengi alacağı çizenin işi: blok iki
+/// hücre arasındayken (008) sınır hücrenin ortasından geçer ve bu crate o
+/// sınırı göremez. Eskiden karar hücreye yazılıyordu (imlecin durduğu
+/// hücrenin `fg`'si zemine çevriliyor, `underline_color`'ı düşürülüyordu);
+/// o hâlde yarım örtülen hücrenin harfi görünmez oluyordu.
+///
+/// [`Eq`] yok: renk `f32` taşıyor (emsali `FontOptions`).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cursor {
     pub col: u16,
     pub row: u16,
     pub visible: bool,
+    /// Bloğun altında kalan metnin (glyph **ve** kural çizgilerinin) rengi,
+    /// **lineer** RGBA; bugünkü değeri temanın zemini.
+    pub text: LinearRgba,
 }
 
 /// Oturumun açılış ayarları.
@@ -867,6 +884,14 @@ impl Session {
     /// "çizilsin mi"ye karar verir, "ne çizileceğine" değil: drawable içeriği
     /// korunmadığı için her karede tam grid taranır.
     ///
+    /// Dönüşteki [`Cursor`] imlecin yerini **ve** bloğunun altında kalan
+    /// metnin rengini taşır: **karar burada, boyama orada**. Hücreler imleci
+    /// hiç bilmiyor — hiçbiri onun yüzünden rengini değiştirmiyor — ve
+    /// bloğun örttüğü pikselleri çizen eziyor. Ayrımın sebebi hücrenin
+    /// bölünemeyişi: blok iki hücre arasındayken (008) sınır hücrenin
+    /// ortasından geçer ve burada verilecek bir hücre kararı o sınırı
+    /// göremez.
+    ///
     /// `sink` jeneriktir: hücre başına dinamik çağrı yerine satır içine
     /// alınır. **`Term` kilidi tutulurken** çağrılır ve kilit yeniden girilebilir
     /// değildir: `Session`'a geri giren bir sink (`resize`, `frame`) kendi
@@ -899,13 +924,14 @@ impl Session {
         } = term.renderable_content();
         let offset = display_offset as i32;
 
-        // İmleç döngüden **önce** çözülüyor: altındaki hücrenin ön planı ona
-        // bağlı (aşağıda) ve o karar hücre çizilirken verilmek zorunda.
-        // Şekil ve grid noktası ayrı tutuluyor: `Cursor` ikisini de taşımıyor
-        // ve aşağıdaki `contains_cell` blok imlecin sınır istisnasını
-        // soruyor. İstisna **imlecin durduğu** hücre içindir — oraya hücrenin
-        // kendi noktası verilince her seçimin ilk ve son hücresi vurgusuz
-        // kalıyordu.
+        // İmleç döngüden **önce** çözülüyor, ama artık hücrelerin rengi için
+        // değil: blok altındaki metin bir piksel işi oldu (bkz. [`Cursor`]) ve
+        // karar hücre başına değil kare başına bir kez veriliyor. Döngünün
+        // imleçten hâlâ istediği tek şey `contains_cell`'in sorduğu blok
+        // imleç istisnası, o yüzden şekil ve grid noktası ayrı tutuluyor:
+        // `Cursor` ikisini de taşımıyor. İstisna **imlecin durduğu** hücre
+        // içindir — oraya hücrenin kendi noktası verilince her seçimin ilk ve
+        // son hücresi vurgusuz kalıyordu.
         let cursor_shape = cursor.shape;
         let cursor_point = cursor.point;
         let cursor_row = cursor.point.line.0 + offset;
@@ -914,6 +940,11 @@ impl Session {
             row: cursor_row.clamp(0, rows.saturating_sub(1)) as u16,
             // Kaydırma geçmişine bakarken imleç ekranın dışına çıkar.
             visible: cursor.shape != CursorShape::Hidden && (0..rows).contains(&cursor_row),
+            // Blok opak ve altındaki metni örtüyor: zemin rengi onu yeniden
+            // okunur kılıyor. Kaynak `theme`, hücrelerinkiyle **aynı** —
+            // ayrışsalardı imlecin altındaki harf bloğa değil eski bir palete
+            // göre seçilirdi.
+            text: color::linear_rgba(background),
         };
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
@@ -954,16 +985,17 @@ impl Session {
             let flags = cell.flags;
             let dim = flags.contains(Flags::DIM);
             let hidden = flags.contains(Flags::HIDDEN);
-            // Seçim vurgusu ters videodur — yeni shader/uniform yok, emsali
-            // imleç tersine çevirme (aşağıda). `^`, `||` değil: seçim ters
+            // Seçim vurgusu ters videodur — yeni shader/uniform yok, hücrenin
+            // kendi iki rengi takaslanıyor. `^`, `||` değil: seçim ters
             // videoyu **çevirir**, seçili ters videolu hücre normal renklerine
             // döner. `||` ile ters videolu bir satırın (vim durum satırı, tmux
             // çubuğu) seçimi hiç görünmüyordu — seçili hücre seçilmemişle aynı
             // renkteydi. Emsal alacritty: hücreyi önce `INVERSE` için takaslıyor,
             // sonra varsayılan seçim renkleri (`CellBackground`/`CellForeground`)
             // takaslanmış iki rengi bir kez daha takaslıyor. İmlecin altındaki
-            // hücreyle seçim çakışırsa imleç kazanır (onun dalı aşağıda
-            // koşulsuz ve bu değişkenden geçmiyor).
+            // hücreyle seçim çakışırsa imleç kazanır: seçim hücrenin
+            // renklerini takaslıyor, imleç ise bloğun **piksellerini** eziyor
+            // (bkz. [`Cursor`]) ve sonuncu söz çizenin.
             //
             // Gizli metin seçilince de vurgulanmaz: `HIDDEN` "çizme" demek ve
             // seçim onu delseydi gizli hücrenin yeri boyalı bir blok olarak
@@ -975,9 +1007,8 @@ impl Session {
             // veriliyor — hücrenin noktası verilince istisna her uca
             // uygulanıyordu), ve aralık bir spacer'da başlarsa geniş
             // karakterin baş hücresi de vurgulanır. Seçimin ortasındaki imleç
-            // hücresi seçili sayılır ve `inverse`'i çevrilir, ama imlecin
-            // rengi bu değişkenden geçmiyor: değişen yalnız opak bloğun
-            // altında kalan arka plan.
+            // hücresi seçili sayılır ve `inverse`'i çevrilir; görünen sonuç
+            // yalnız opak bloğun altında kalan arka plandır.
             // `set_selection` spacer'dan başlayan aralık kurmaz (`anchor`
             // spacer'ı `Right` yapıyor), ama seçimden sonra satır yeniden
             // yazılıp o hücre spacer olursa aralık orada başlar.
@@ -1100,24 +1131,13 @@ impl Session {
                 .map(|c| color::linear_rgba(color::resolve(c, colors, &theme)));
 
             let col = indexed.point.column.0 as u16;
-            // İmlecin altındaki hücre **ters** çiziliyor. İmleç bloğu opak ve
-            // glyph'lerin altında (`plan.md` → R4.1); harf kendi ön planıyla
-            // kalsaydı açık gri, açık mavi bloğun üstüne düşer ve okunmazdı.
-            // Kararı `bt-core` veriyor çünkü kararın adı terminal
-            // semantiğidir; `bt-gpu`'nun bileceği bir şey değil.
-            // **Alt çizgi rengi de tersine dönüyor** — daha doğrusu düşüyor:
-            // `None` "çizen taraf `fg`'yi kullansın" demek ve `fg` zaten
-            // tersine döndü. Düşmeseydi SGR 58'li bir hücrede imleç bloğunun
-            // üstündeki çizgi terminalin seçtiği renkte kalır, üstü çizili ise
-            // (`fg`'yi kullanıyor) tersine dönerdi: aynı hücrede iki kural, iki
-            // farklı davranış. Rengin imleç bloğuna yakın düştüğü durumda
-            // çizgi büsbütün kaybolurdu.
-            let (fore, underline_color) =
-                if cursor.visible && (col, row) == (cursor.col, cursor.row) {
-                    (background, None)
-                } else {
-                    (fore, underline_color)
-                };
+            // İmlecin altındaki hücreye burada **dokunulmuyor**: hücre kendi
+            // renkleriyle sınırdan geçiyor, bloğun altında kalan pikselleri
+            // [`Cursor::text`] ile çizen ezecek. Eskiden bu satırlarda hücrenin
+            // `fg`'si zemine çevriliyor ve `underline_color`'ı düşürülüyordu;
+            // hücre bölünemediği için yarım örtülen hücrenin **tamamı** ters
+            // çizilirdi — 008'in kaydırdığı imlecin hedef hücresi henüz
+            // örtülmeden görünmez olurdu.
             sink(Cell {
                 col,
                 row,
@@ -2197,52 +2217,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_cell_drops_the_underline_color() {
-        // İmlecin altındaki hücrede `fg` tersine dönüyor; SGR 58 rengi
-        // dönmeseydi aynı hücredeki iki kural iki farklı davranış gösterirdi —
-        // üstü çizili `fg`'yi kullandığı için ters, alt çizgi terminalin
-        // seçtiği renkte. Rengin imleç bloğuna yakın düştüğü durumda çizgi
-        // büsbütün kaybolurdu ve bunu hiçbir sayaç göremezdi.
-        let wake = Arc::new(TestWake::default());
-        // `\033[D` imleci X'in üstüne geri getiriyor.
-        let session = spawn_session(
-            "printf '\\033[4;58;5;196mX\\033[0m\\033[D'; sleep 5",
-            Arc::clone(&wake),
-        );
-
-        // Ölçüt **imlecin varışı**: PTY okuması X ile `\033[D` arasında
-        // bölünebilir ve o karede imleç hâlâ bir sağdadır. Hücre listesine
-        // bağlanan bir ölçüt o kareyi kabul edip yanlış hücreyi doğrulardı.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut seen = 0;
-        let cell = loop {
-            assert!(Instant::now() < deadline, "imleç X hücresine dönmedi");
-            seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
-            let mut cells = Vec::new();
-            let Some(cursor) = session.frame(|c| cells.push(c)) else {
-                continue;
-            };
-            if cursor.visible && (cursor.col, cursor.row) == (0, 0) {
-                if let Some(cell) = cells.iter().copied().find(|c| c.ch == Some('X')) {
-                    break cell;
-                }
-            }
-        };
-
-        // Kuralın kendisi duruyor — düşen yalnız rengi.
-        assert_eq!(cell.underline, UnderlineStyle::Single, "{cell:?}");
-        assert_eq!(
-            cell.underline_color, None,
-            "imleç hücresinde SGR 58 rengi düşmeli: {cell:?}"
-        );
-        assert_eq!(
-            cell.fg,
-            THEME.background_linear(),
-            "imleç hücresinde ön plan tersine dönmeli: {cell:?}"
-        );
-    }
-
-    #[test]
     fn underlined_space_cell_passes_sink() {
         // Altı çizili boşluk: `bg: None`, `ch: None` — ama bir kural var,
         // yani atlama koşulundan **geçmeli**. `ch` `Some(' ')` olsaydı atlas
@@ -2355,28 +2329,59 @@ mod tests {
     }
 
     #[test]
-    fn char_under_cursor_is_drawn_inverted() {
-        // İmleç bloğu opak ve glyph'in altında; harf kendi ön planıyla
-        // kalsaydı açık gri, açık mavi bloğun üstüne düşer ve okunmazdı.
-        // `bt-gpu` bunu göremez — imleci ayrı listede, hücreyi ayrı listede
-        // çiziyor ve ikisinin çakıştığını bilmiyor.
+    fn cursor_carries_the_text_color_and_leaves_cells_alone() {
+        // Sınırın bu tarafındaki iddia: **karar burada, boyama orada.** Renk
+        // `Cursor` ile geçiyor ve imlecin durduğu hücre hiçbir şey
+        // kaybetmiyor — ne kendi ön planını ne SGR 58'ini. Geri dönüş
+        // (hücreyi burada ters çevirmek) `bt-gpu`'nun piksel sınamalarından
+        // **geçerdi**: iki kez çevrilen renk aynı piksele varır. Görünen
+        // belirti yalnız yarım örtülen hücrede çıkardı (008 → Karar 3) ve o
+        // hücreyi hiçbir sınama göremez, çünkü hücre bölünemiyor.
         let wake = Arc::new(TestWake::default());
-        // İmleç yazılan metnin **sonunda** durur; hücreyi imlecin altına
-        // sokmak için geri sarıyoruz (`\b`).
+        // `\033[D` imleci X'in üstüne geri getiriyor; X hem mürekkep hem SGR
+        // 58'li bir kural taşıyor, yani eski dalın düşürdüğü iki değer de
+        // burada.
         let session = spawn_session(
-            "printf '\\033[41mAB\\033[0m\\b\\b'; sleep 5",
+            "printf '\\033[4;58;5;196m\\033[31mX\\033[0m\\033[D'; sleep 5",
             Arc::clone(&wake),
         );
 
-        let cells = wait_cells(&session, &wake, 2);
-        let a = cells.iter().find(|c| c.col == 0).expect("ilk hücre");
-        let b = cells.iter().find(|c| c.col == 1).expect("ikinci hücre");
-        assert_eq!((a.ch, b.ch), (Some('A'), Some('B')), "{cells:?}");
-        // İmleç 0. sütunda: oradaki harf arka plan rengine döner, komşusu
-        // dönmez. İkisini birden sınamak "hepsini terse çevirdim" hatasını da
-        // yakalıyor.
-        assert_eq!(a.fg, THEME.background_linear(), "{cells:?}");
-        assert_ne!(b.fg, THEME.background_linear(), "{cells:?}");
+        // Ölçüt **imlecin varışı**: PTY okuması X ile `\033[D` arasında
+        // bölünebilir ve o karede imleç hâlâ bir sağdadır. Hücre listesine
+        // bağlanan bir ölçüt o kareyi kabul edip yanlış hücreyi doğrulardı.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = 0;
+        let (cursor, cell) = loop {
+            assert!(Instant::now() < deadline, "imleç X hücresine dönmedi");
+            seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
+            let mut cells = Vec::new();
+            let Some(cursor) = session.frame(|c| cells.push(c)) else {
+                continue;
+            };
+            if cursor.visible && (cursor.col, cursor.row) == (0, 0) {
+                if let Some(cell) = cells.iter().copied().find(|c| c.ch == Some('X')) {
+                    break (cursor, cell);
+                }
+            }
+        };
+
+        assert_eq!(
+            cursor.text,
+            THEME.background_linear(),
+            "blok altındaki metin temanın zemininde olmalı: {cursor:?}"
+        );
+        // Hücre imleci hiç görmemiş gibi: kendi kırmızısı ve kendi SGR 58'i.
+        assert_eq!(cell.underline, UnderlineStyle::Single, "{cell:?}");
+        assert_eq!(
+            cell.fg,
+            color::linear_rgba(THEME.default(1)),
+            "imleç hücrenin ön planını ezdi: {cell:?}"
+        );
+        assert_eq!(
+            cell.underline_color,
+            Some(color::linear_rgba(THEME.default(196))),
+            "imleç hücrenin SGR 58 rengini düşürdü: {cell:?}"
+        );
     }
 
     #[test]

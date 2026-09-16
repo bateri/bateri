@@ -23,6 +23,22 @@ static_assert(sizeof(GlyphInstance) == 32, "GlyphInstance stride 32 olmalı");
 static_assert(__builtin_offsetof(GlyphInstance, uv0) == 8, "uv0@8");
 static_assert(__builtin_offsetof(GlyphInstance, rgba) == 16, "rgba@16");
 
+// Rust karşılığı: bt_gpu::frame::CursorBlock,
+// #[repr(C)] { rect: [f32; 4], rgba: [f32; 4] }.
+//
+// İmlecin piksel dikdörtgeni ve bloğun ALTINDA kalan metnin rengi. Kare
+// boyunca tek değer, o yüzden instance değil uniform. Dikdörtgen min/max:
+// fragment testi toplama yapmadan iki karşılaştırmaya iniyor. Görünmez imleç
+// dejenere bir dikdörtgendir (hepsi sıfır) — ayrı bir bayrak yok, çünkü bayrak
+// ile dikdörtgen ayrışabilen iki gerçek olurdu.
+struct CursorBlock {
+    float4 rect;  // x0, y0, x1, y1 — piksel, sol üst başlangıçlı
+    float4 rgba;  // lineer; kaynağı bt_core::Cursor::text
+};
+
+static_assert(sizeof(CursorBlock) == 32, "CursorBlock 32 bayt olmalı");
+static_assert(__builtin_offsetof(CursorBlock, rgba) == 16, "rgba@16");
+
 struct Out {
     float4 position [[position]];
     // uv interpolasyon İSTER: dörtlünün içinde atlas yuvasını tarıyor.
@@ -55,7 +71,8 @@ vertex Out cell_vertex(uint vid [[vertex_id]],
 // Atlas R8Unorm: tek kanal kapsama (alfa). Renk instance'tan gelir, dokudan
 // değil — atlas glyph başına bir maske tutuyor, bir görüntü değil.
 fragment float4 cell_fragment(Out in [[stage_in]],
-                              texture2d<float> atlas [[texture(0)]]) {
+                              texture2d<float> atlas [[texture(0)]],
+                              constant CursorBlock& cursor [[buffer(0)]]) {
     // `nearest`, `linear` DEĞİL. Birebir oturan olağan durumda ikisi aynı
     // sonucu verir (fragment merkezleri texel merkezlerine düşer). Ayrıştıkları
     // karede — ölçek değişimiyle bir sonraki geometri olayı arasında — fark
@@ -67,6 +84,25 @@ fragment float4 cell_fragment(Out in [[stage_in]],
     // rastgele kapsama okumaz.
     constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
     float coverage = atlas.sample(s, in.uv).r;
+    // İmleç bloğunun altındaki metin (glyph VE kural çizgisi) rengini
+    // uniform'dan alır: blok opak ve altındaki harf kendi ön planıyla kalsaydı
+    // okunmazdı. Karar bt-core'un (bt_core::Cursor::text), burası yalnız "bu
+    // fragment dikdörtgenin içinde mi" diye soruyor — ve bu soru PİKSEL
+    // başına sorulduğu için blok iki hücre arasındayken (008) hücrenin yarısı
+    // ezilir, yarısı kendi rengiyle kalır. `[[position]]` sol üst başlangıçlı
+    // ve instance pozisyonlarıyla aynı uzayda.
+    //
+    // Sınır yarı açık: [x0, x1) — komşu hücrenin ilk sütunu bu bloğa ait
+    // değil. `<=` bugün AYNI sonucu verir ve bunu sınayan bir bekçi yok:
+    // `[[position]]` fragment **merkezini** veriyor (x + 0.5), yani hiçbir
+    // fragment tam sınıra düşmüyor. Yarı açık yazılmasının sebebi gelecek —
+    // hareket ara konumları dikdörtgeni yarım piksellere oturtacak ve orada
+    // iki biçim ayrışır.
+    float2 p = in.position.xy;
+    bool inside = all(p >= cursor.rect.xy) && all(p < cursor.rect.zw);
+    // Yalnız RGB eziliyor: alfa aşağıda kapsamayla çarpılıyor ve uniform'un
+    // alfası 1.0 değilse glyph'in kenarı sessizce inceltilirdi.
+    float3 rgb = inside ? cursor.rgba.rgb : in.rgba.rgb;
     // Ön çarpımsız: blend src_alpha/one_minus_src_alpha ile eşleşiyor.
-    return float4(in.rgba.rgb, in.rgba.a * coverage);
+    return float4(rgb, in.rgba.a * coverage);
 }

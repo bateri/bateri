@@ -66,6 +66,37 @@ const _: () = assert!(size_of::<GlyphInstance>() == 32);
 const _: () = assert!(offset_of!(GlyphInstance, uv0) == 8);
 const _: () = assert!(offset_of!(GlyphInstance, rgba) == 16);
 
+/// `shaders/cell.metal` → `CursorBlock` ile alan alan aynı: imlecin **piksel**
+/// dikdörtgeni ve bloğun altında kalan metnin rengi.
+///
+/// Instance değil **uniform**: kare boyunca tek imleç var ve `cell`
+/// pipeline'ından geçen her fragment ona bakıyor. İki değer tek `#[repr(C)]`
+/// yapıda çünkü ikisi tek soruyu yanıtlıyor ("bu fragment bloğun altında mı,
+/// altındaysa ne renk") ve tek binding tek düzen sözleşmesi demek — ayrı
+/// bağlansalardı çivilenecek bir ofset de kalmazdı.
+///
+/// Dikdörtgen min/max (`x0, y0, x1, y1`), köşe+boyut değil: fragment testi
+/// toplama yapmadan iki karşılaştırmaya iniyor. **Görünmez imleç dejenere bir
+/// dikdörtgendir** (hepsi sıfır: `x >= 0 && x < 0` hiçbir fragment için doğru
+/// değil) — shader'da ikinci bir bayrak yok, çünkü bayrak ile dikdörtgen
+/// ayrışabilen iki gerçek olurdu.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct CursorBlock {
+    /// `[x0, y0, x1, y1]`, piksel; sol üst başlangıçlı — fragment'in
+    /// `[[position]]`'ı ile aynı uzay.
+    rect: [f32; 4],
+    /// Bloğun altında kalan metnin **lineer** RGBA'sı; `Instance.rgba` ile
+    /// aynı uzay ve aynı uyarı. Kaynağı `bt_core::Cursor::text`, yani karar
+    /// `bt-core`'un.
+    rgba: [f32; 4],
+}
+
+// `Instance` ile aynı gerekçe, aynı ikili bağ; MSL tarafının kendi
+// `static_assert`'leri var.
+const _: () = assert!(size_of::<CursorBlock>() == 32);
+const _: () = assert!(offset_of!(CursorBlock, rgba) == 16);
+
 /// Çizilecek bir glyph — **uv'siz**.
 ///
 /// Karakterin hangi yuvaya düştüğü burada bilinmiyor ve bilinmemeli: yuva
@@ -152,6 +183,15 @@ pub(crate) struct Frame {
     /// çizilir (üstü çizili, altındaki harfin üstünden geçmeli).
     rules: Vec<RuleCell>,
     cell_px: (f32, f32),
+    /// İmlecin piksel dikdörtgeni ve blok altındaki metin rengi; `cell`
+    /// pipeline'ının uniform'u.
+    ///
+    /// Liste değil **alan**: kare başına tek imleç var ve [`Frame::clear`] onu
+    /// dejenereye döndürüyor. Alan olması hareket karesinin de şartı
+    /// (`plan.md` → Karar 4): o yol `bg`'yi `bg_count`'a kırpıp
+    /// [`Frame::push_cursor`]'ı yeni konumla yeniden çağırıyor, yani ikinci
+    /// çağrı birincinin üstüne yazmak zorunda.
+    cursor: CursorBlock,
     /// Çizilen **arka plan** instance'ı sayısı; imleç sayılmaz.
     ///
     /// `make duman`'ın `hucre=K` jetonu bunu okur: sink'in hücre ürettiğinin
@@ -172,6 +212,11 @@ impl Frame {
         self.glyphs.clear();
         self.rules.clear();
         self.bg_count = 0;
+        // Dikdörtgen de sıfırlanmalı: kalsaydı imlecin sönmesi (`\e[?25l`) ya
+        // da geçmişe kayması bloğu ekrandan kaldırır ama **altındaki metnin
+        // rengini** eski yerinde bırakırdı — zemin renginde bir harf, yani
+        // görünmez bir hücre.
+        self.cursor = CursorBlock::default();
         self.cell_px = (f32::from(cell_px.0), f32::from(cell_px.1));
     }
 
@@ -234,19 +279,41 @@ impl Frame {
     }
 
     /// İmleç bloğu; `bg_count`'a **girmez** ve görünmez imleç çizilmez.
+    ///
+    /// İki şey birden yazıyor ve bilerek tek çağrıda: bloğun kendisi arka plan
+    /// listesine bir dikdörtgen olarak (`rgba` — temanın vurgusu), bloğun
+    /// **altında kalan metnin** rengi ise `cell` pipeline'ının uniform'una
+    /// (`cursor.text` — `bt-core`'un kararı). İkisi ayrı çağrı olsaydı biri
+    /// çağrılıp öteki unutulabilirdi ve belirti sessiz olurdu: imleç doğru
+    /// yerde, altındaki harf okunmaz.
     pub(crate) fn push_cursor(&mut self, cursor: Cursor, rgba: LinearRgba) {
         if !cursor.visible {
             return;
         }
+        let pos = self.pos(cursor.col, cursor.row);
         self.bg.push(Instance {
-            pos: self.pos(cursor.col, cursor.row),
+            pos,
             size: [self.cell_px.0, self.cell_px.1],
             rgba: rgba.to_array(),
         });
+        self.cursor = CursorBlock {
+            rect: [
+                pos[0],
+                pos[1],
+                pos[0] + self.cell_px.0,
+                pos[1] + self.cell_px.1,
+            ],
+            rgba: cursor.text.to_array(),
+        };
     }
 
     pub(crate) fn bg_count(&self) -> usize {
         self.bg_count
+    }
+
+    /// Bu karenin imleç uniform'u; görünmez imleçte dejenere dikdörtgen.
+    pub(crate) fn cursor_block(&self) -> &CursorBlock {
+        &self.cursor
     }
 
     /// Bu karede çizilecek glyph sayısı; `make duman`'ın `glif=G` jetonu.
@@ -322,6 +389,18 @@ mod tests {
     // sınamaları onu üç ayrık ton gerektirdikleri için kullanıyor.
     const BG: LinearRgba = bt_core::Theme::BATERI.background_linear();
     const CURSOR: LinearRgba = bt_core::Theme::BATERI.accent_linear();
+    /// Blok altındaki metnin rengi; üretimde temanın zemini (`bt-core` →
+    /// `Cursor::text`). Burada bloğun renginden **ayrık** olması yetiyor.
+    const TEXT: LinearRgba = BG;
+
+    fn cursor(col: u16, row: u16, visible: bool) -> Cursor {
+        Cursor {
+            col,
+            row,
+            visible,
+            text: TEXT,
+        }
+    }
 
     fn bg_cell(col: u16, row: u16) -> Cell {
         Cell {
@@ -340,14 +419,7 @@ mod tests {
 
         frame.push(bg_cell(0, 0));
         frame.push(bg_cell(1, 0));
-        frame.push_cursor(
-            Cursor {
-                col: 5,
-                row: 2,
-                visible: true,
-            },
-            CURSOR,
-        );
+        frame.push_cursor(cursor(5, 2, true), CURSOR);
 
         // Üç dikdörtgen çizilir ama `hucre=K` yalnız ikisini sayar.
         assert_eq!(frame.bg_instances().len(), 3);
@@ -362,15 +434,45 @@ mod tests {
     fn invisible_cursor_is_not_drawn() {
         let mut frame = Frame::default();
         frame.clear((9, 18));
-        frame.push_cursor(
-            Cursor {
-                col: 0,
-                row: 0,
-                visible: false,
-            },
-            CURSOR,
-        );
+        frame.push_cursor(cursor(0, 0, false), CURSOR);
         assert!(frame.bg_instances().is_empty());
+        // Uniform da dokunulmadan kalır: dejenere dikdörtgen "blok yok"
+        // demenin tek yolu, shader'da ikinci bir bayrak yok.
+        assert_eq!(frame.cursor_block(), &CursorBlock::default());
+    }
+
+    #[test]
+    fn cursor_block_covers_its_cell_and_clears_with_the_frame() {
+        // Dikdörtgen bloğun **kendi** instance'ıyla aynı hücreye oturmalı:
+        // ayrışsalardı blok bir yerde, altındaki metnin rengi başka bir yerde
+        // olurdu ve ikisi de sessizce yanlış çizerdi.
+        let mut frame = Frame::default();
+        frame.clear((9, 18));
+        frame.push_cursor(cursor(3, 2, true), CURSOR);
+
+        let block = *frame.cursor_block();
+        assert_eq!(block.rect, [27.0, 36.0, 36.0, 54.0]);
+        assert_eq!(
+            block.rgba,
+            TEXT.to_array(),
+            "metin rengi `Cursor`'dan gelir"
+        );
+        let instance = frame.bg_instances().last().expect("blok instance'ı");
+        assert_eq!(
+            [
+                instance.pos[0],
+                instance.pos[1],
+                instance.pos[0] + instance.size[0],
+                instance.pos[1] + instance.size[1],
+            ],
+            block.rect,
+            "dikdörtgen bloğun instance'ıyla ayrıştı"
+        );
+
+        // `clear` uniform'u da sıfırlar: sönen imleç (`\e[?25l`) bloğu
+        // kaldırır ama rengi eski hücrede bırakırsa orası görünmez olur.
+        frame.clear((9, 18));
+        assert_eq!(frame.cursor_block(), &CursorBlock::default());
     }
 
     #[test]
