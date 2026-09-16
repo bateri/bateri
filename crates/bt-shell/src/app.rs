@@ -49,16 +49,15 @@ use crate::{child, settings};
 /// kayması `kare`'yi meşru olarak ~24'e çıkarır, `icerik`'i hiç artırmaz
 /// (`.tasks/008-hareket-ve-imlec/discussion.md` → Karar 2).
 ///
-/// **Aşağıdaki iki ölçüm geçerliliğini koruyor ve bu değişiklik ölçüm
-/// beklemiyor.** İlişki tek yönlü — hatasız biten her kare bir içerik
-/// karesiydi, tersi değil: **`kare ≤ icerik`**. Yani yeni ifade eskisinden
-/// *daha sıkı* ve sıkılaşma aslında ölçülmüş paya giriyor: sağlıklı bir
-/// koşuda ikisi **eşit**, çünkü farkı yalnız encode edilemeyen kareler
-/// ([`bt_gpu`]'nun `FailureStreak`'i zaten en çok bir yeniden deneme veriyor)
-/// ve deadline'da uçuşta kalanlar açar — rapor
-/// [`AppDelegate::shutdown`]'dan sonra koşuyor ve o `link.stop()`'u çağırdığı
-/// için uçuşta kare kalmıyor. En kötü hâlde bir karelik kayma; ölçülen
-/// sağlıklı tavan `4` ile sınır `8` arasındaki pay onu fazlasıyla yutuyor.
+/// **İki sayacın ilişkisi hareketle birlikte koptu** (`/code-review`
+/// bulgusu): operand değiştiğinde "hatasız biten her kare bir içerik
+/// karesiydi" diye yazılmıştı ve o cümle phase-1'de doğruydu, phase-3'ten
+/// sonra **değil** — hareket karesi de bir komut tamponu commit ediyor, yani
+/// `kare`'yi artırıp `icerik`'i artırmıyor. Yön bugün tersine bile dönmüş
+/// durumda: ölçülen sağlıklı duman koşusu `kare` 27–30 iken `icerik` 2–3
+/// (aşağıdaki 008 satırı). Yani sınır **daha gevşek** bir sayacın üstünde
+/// duruyor, daha sıkı değil — ve bu yüzden taşınan değil **yeniden ölçülen**
+/// bir sayı gerekiyordu; phase-6 onu ölçtü.
 ///
 /// **Sayı iki kez ölçüldü; ikincisi görünür pencerede ve onu değiştirmedi.**
 /// Koşu tabloları, ortam ve yöntem `docs/OLCUMLER.md` → `## Boşta kare`'de;
@@ -153,8 +152,10 @@ use crate::{child, settings};
 /// düzelttiği şey bir sayı değil bir mekanizma: hareket kareleri `Waker`'a
 /// hiç dokunmuyor (`bt_gpu::link` modül başlığı), yani `kare`'yi şişirirken
 /// `istek`'i şişirmiyorlar. İlişkinin yeni hâli **ölçüldü** (phase-6, otuz
-/// sağlıklı koşu): `istek=4` sabit, `icerik` `2`–`3`, yani `istek ≈ icerik +
-/// 1..2` — `kare` ise 27–30, ondan tamamen kopmuş durumda.
+/// sağlıklı koşu): `istek` otuz koşunun hepsinde `4`, `icerik` `2`–`3`, yani
+/// `istek ≈ icerik + 1..2` — `kare` ise 27–30, ondan tamamen kopmuş durumda.
+/// (Sonraki bir koşuda `istek=3` görüldü ve nedeni ölçülmedi; kayıt
+/// `docs/OLCUMLER.md`'de.)
 /// Ölçüm yükünde `istek` ile `kare` üç mertebe ayrışıyor (bkz. `bt_gpu`'nun
 /// `requests` sayacı); oran olarak bir kapı kurulabilir ama o ölçülmedi.
 ///
@@ -176,9 +177,12 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// koşuda küçük. Taban bu yüzden "en düşük sağlıklı gözlemin en çok yarısı
 /// **ve** en yüksek bozuk gözlemin üstünde" ve aralığın **en büyük** ucundan
 /// seçiliyor — ortadan seçilen bir sayı kapıyı yavaş sızıntıya körleştirirdi.
-/// Türetme (2026-09-16, otuz sağlıklı koşu): en düşük sağlıklı `1745,95 ms`
-/// → tavan `872,97 ms`; en yüksek bozuk `129,25 ms`. `870` o aralığın en
-/// büyük on milisaniyelik adımı.
+/// Türetme (2026-09-16, otuz yedi sağlıklı koşu): en düşük sağlıklı
+/// `1742,29 ms` → tavan `871,14 ms`; en yüksek bozuk `129,25 ms`. `870` o
+/// aralığın en büyük on milisaniyelik adımı — yani **tavanın 1 ms altında**.
+/// Bunun bedeli dar bir yeniden türetme tetiği: üç saniyelik sağlıklı bir
+/// koşu `1740 ms`'nin altına inerse bozulan şey kapı değil **kuralın
+/// kendisi** olur (kapının payı hâlâ iki kat) ve sayı yeniden türetilmelidir.
 ///
 /// **Üç sayı birbirine bağlı ve gerekçeleri aynı blokta**
 /// (`docs/OLCUMLER.md` → `## Boşta kare`): `BT_RUN_SECONDS`'ın 3'ü,
@@ -741,6 +745,15 @@ define_class!(
         /// no-op (`Motion::set_reduce`).
         #[unsafe(method(accessibilityDisplayDidChange:))]
         fn accessibility_display_did_change(&self, _note: Option<&AnyObject>) {
+            // audit: bu yol ana thread'i **yapısal olarak** garanti etmiyor —
+            // `NSNotificationCenter` gözlemcisi yayınlayan thread'de senkron
+            // ateşliyor ve `NSWorkspace`'in merkezi bunu sözleşmeye bağlamıyor
+            // (`/audit` bulgusu). Altındaki iş ise ana thread varsayıyor:
+            // `settings`'in `RefCell`'i ve link'in `Cell<Motion>`'ı. İddia bu
+            // yüzden kodda duruyor — yanlışsa belirti sessiz bir veri yarışı
+            // değil, burada patlayan bir panik olur.
+            let _mtm = MainThreadMarker::new()
+                .expect("erişilebilirlik bildirimi ana thread'de bekleniyor");
             self.apply_reduce_motion();
         }
 
@@ -1176,11 +1189,14 @@ enum Verdict {
     /// Son kareyle deadline arasındaki sessizlik ölçülmüş tabanın altında —
     /// ya da hiç kare çizilmedi ([`QUIET_FLOOR`]).
     ///
-    /// Kapının **son katı**: yukarıdaki iki kol sızıntıyı ya hızından
-    /// (`ExcessFrames`) ya da hareket altyapısından (`MotionUnsettled`)
-    /// tanıyor; bu ise ikisini de atlayan bir yolu — altyapıya uğramadan,
-    /// sınırı aşmayacak kadar seyrek kare isteyen kodu — yalnız bıraktığı
-    /// izden tanıyor. Bu yüzden en sonda: daha temel arıza önce.
+    /// Sızıntı kollarının **sonuncusu** (arkasında yalnız
+    /// [`ShutdownPanicked`](Verdict::ShutdownPanicked) var, o da koşunun
+    /// ölçtüğü şeyi değil kapanış yolunu anlatıyor): yukarıdaki iki kol
+    /// sızıntıyı ya hızından (`ExcessFrames`) ya da hareket altyapısından
+    /// (`MotionUnsettled`) tanıyor; bu ise ikisini de atlayan bir yolu —
+    /// altyapıya uğramadan, sınırı aşmayacak kadar seyrek kare isteyen kodu —
+    /// yalnız bıraktığı izden tanıyor. Sıranın gerekçesi `verdict`'in
+    /// gövdesinde, kolları `a_short_tail_fails_the_gate` çiviliyor.
     QuietTooShort {
         floor: Duration,
     },
@@ -1221,11 +1237,15 @@ fn verdict(
     // Panik **en sonda** soruluyor ve bu kolların sırası bir tanı tercihi,
     // kapı kararı değil: hangi kol seçilirse seçilsin koşu kırmızı ve çıkış 1.
     // Sıra "daha temel arıza önce" diye kuruldu — eksik sayaç (bir halka hiç
-    // çalışmadı) > akan kare > yerleşmeyen animasyon > kapanış paniği. Panik
+    // çalışmadı) > akan kare > yerleşmeyen animasyon > kısa kuyruk > kapanış
+    // paniği. Sızıntının üç kolu kendi aralarında **tanıma gücüne** göre
+    // sıralı: `icerik` onu sayısından, yerleşme sorusu altyapısından tanıyor;
+    // kuyruk ise yalnız bıraktığı izden, yani en az şey söyleyen o. Panik
     // en sonda, çünkü ötekiler koşunun **ölçtüğü** şeyin bozulduğunu söylüyor;
     // panik koşu bittikten sonraki yolu. İkisi birden olduğunda satır yalnız
     // ilkini yazıyor, ama `kapanis=` jetonu zaten ikincisini taşıyor —
-    // `motion_and_panic_report_the_more_fundamental_fault` bu sırayı çiviliyor.
+    // `motion_and_panic_report_the_more_fundamental_fault` ve
+    // `a_short_tail_fails_the_gate` bu sırayı çiviliyor.
     // Ters çevirmek `ExcessFrames`'in bugünkü sırasını da bozardı.
     let panicked = match teardown {
         Some(Teardown::ReaderPanicked) => Some("okuyucu thread"),
@@ -2096,10 +2116,11 @@ mod tests {
     use super::*;
 
     /// Sağlıklı bir duman koşusunun **ölçülen** kuyruğu (2026-09-16, otuz
-    /// koşunun en düşüğü: `1745,95 ms`). Kapıyı sormayan sınamalar bunu
-    /// veriyor ki `sessiz` kolu onların sorduğu şeyi gölgelemesin; kolun
-    /// kendi sınamaları aşağıda ve tabanı adıyla anıyor.
-    const HEALTHY_QUIET: Option<Duration> = Some(Duration::from_millis(1745));
+    /// yedi koşunun en düşüğü: `1742,29 ms`; sahibi `docs/OLCUMLER.md`).
+    /// Kapıyı sormayan sınamalar bunu veriyor ki `sessiz` kolu onların
+    /// sorduğu şeyi gölgelemesin; kolun kendi sınamaları aşağıda ve tabanı
+    /// adıyla anıyor.
+    const HEALTHY_QUIET: Option<Duration> = Some(Duration::from_millis(1742));
 
     fn metrics(w: u16, h: u16) -> CellMetrics {
         CellMetrics::new(w, h).expect("sıfır olmayan hücre")
@@ -2501,7 +2522,7 @@ mod tests {
         let short = Verdict::QuietTooShort { floor: QUIET_FLOOR };
 
         // Ölçülen yavaş sızıntının kuyruğu (en yükseği `129,25 ms`) ve
-        // ölçülen sağlıklı kuyruğun en düşüğü (`1745,95 ms`): kapı ikisinin
+        // ölçülen sağlıklı kuyruğun en düşüğü (`1742,29 ms`): kapı ikisinin
         // arasından geçiyor ve iki dağılım da kendi tarafında kalıyor.
         assert_eq!(smoke(Some(Duration::from_millis(130))), short);
         assert_eq!(smoke(HEALTHY_QUIET), Verdict::Pass);
@@ -2557,6 +2578,20 @@ mod tests {
                 Some(Duration::ZERO),
             ),
             Verdict::MotionUnsettled
+        );
+        // Panik **kuyruktan da sonra**: ötekiler koşunun ölçtüğü şeyin
+        // bozulduğunu söylüyor, panik koşu bittikten sonraki yolu ve
+        // `kapanis=` jetonu onu zaten taşıyor. Kombinasyonun kendi sınaması
+        // olmadan "en sonda" iddiası yalnız bir yorum cümlesi olurdu.
+        assert_eq!(
+            verdict(
+                good,
+                Workload::Smoke,
+                Some(Teardown::ReaderPanicked),
+                settled,
+                Some(Duration::ZERO),
+            ),
+            short
         );
     }
 

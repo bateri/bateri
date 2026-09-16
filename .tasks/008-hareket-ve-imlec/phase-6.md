@@ -59,11 +59,14 @@ _Requirements: R7_
 shader yok · terminfo yok · ayar şeması yok · tema yok · shell entegrasyonu
 yok · app bundle yok · yeni bağımlılık yok.
 
-Ölçülmüş iki sabit değişiyor ya da doğuyor; ikisi de bu commit'te **tek
-başına** iniyor (kod değişikliğiyle aynı commit'e girerse regresyonu
-maskeler). `docs/OLCUMLER.md` bu türün sahibi; `Measured`'ın doc'unda emanet
-duran "dürüst sınırlar" listesinden `acilis=` ile ilgili olan yarı, ölçüm
-sırasında o dosyaya taşınır.
+Ölçülmüş iki sabit bu commit'te **tek başına** iniyor (kod değişikliğiyle
+aynı commit'e girerse regresyonu maskeler). *(Sonuç: biri **doğdu** —
+`QUIET_FLOOR` `870 ms`; öteki ölçüldü ve **oynamadı** — `IDLE_FRAME_LIMIT`
+`8`.)* `docs/OLCUMLER.md` bu türün sahibi. *(Sonuç: `Measured`'ın "dürüst
+sınırlar" listesi **taşınmadı** — bu koşuların hepsi `ornek=off`, yani açılış
+ölçülmedi ve dosyanın kendi kuralı taşımayı o türün ilk ölçümüne bağlıyor.
+Taşınan tek kalem phase-3'ün `/code-review` borcu: `ornek=` ile `gpu_ornek=`
+farklı kare popülasyonu sayıyor.)*
 
 ## Checklist
 

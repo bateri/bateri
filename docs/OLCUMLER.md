@@ -258,6 +258,12 @@ hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke istek=4 kapanis=clean profil={deb
 | release · paket (`open`) · 3 sn | 10 | `2` ×7, `3` ×3 | `29` ×7, `30` ×2, `27` ×1 | `27` ×8, `26` ×1, `25` ×1 | 1746,88 – 1757,29 |
 | debug · `cargo run` · 5 sn | 5 | `3` ×5 | `30` ×5 | `27` ×5 | 3742,95 – 3755,83 |
 | release · paket (`open`) · 5 sn | 5 | `3` ×5 | `30` ×3, `29` ×2 | `27` ×3, `26` ×2 | 3746,16 – 3754,35 |
+| **doğrulama koşuları** · 3 sn (kapı indikten sonra; `bt-gpu` değişmemiş) | 7 | `3` ×6, `2` ×1 | `30` ×6, `29` ×1 | `27` ×7 | 1742,29 – 1754,42 |
+
+Son satır dağılımın **parçasıdır**, ayrı bir kol değil: gürültü kuralı hiçbir
+sağlıklı koşuyu düşürmüyor ve bu yedi koşu türetmenin bağlayıcı ucunu
+1745,95'ten **1742,29**'a indiriyor (dördü debug `make duman`, üçü release
+paket).
 
 **Bozuk koşular** (3 sn, debug; hızlı sızıntı ayrıca release pakette):
 
@@ -277,12 +283,20 @@ sınırın kendisine bakılarak seçildi — sınırın türetmesine sokmak dair
 olurdu (her indirimden sonra biraz daha yavaş bir sızıntı yine altta kalır).
 O sızıntı sınıfının doğru cevabı sınırı kısmak değil, aşağıdaki alt sınır.
 
-**Türetme — `QUIET_FLOOR = 870 ms` doğdu.** En düşük sağlıklı gözlem
-`1745,95 ms` → tavan `872,97 ms`; en yüksek bozuk gözlem `129,25 ms` → taban
-onun üstünde olmalı. Kuralın izin verdiği aralık `(129,25 · 872,97]` ve jeton
-ters çalıştığı için **en büyük** uç seçildi: on milisaniyelik adımlarla
+**Türetme — `QUIET_FLOOR = 870 ms` doğdu.** Otuz yedi sağlıklı koşunun en
+düşüğü `1742,29 ms` → tavan `871,14 ms`; en yüksek bozuk gözlem `129,25 ms` →
+taban onun üstünde olmalı. Kuralın izin verdiği aralık `(129,25 · 871,14]` ve
+jeton ters çalıştığı için **en büyük** uç seçildi: on milisaniyelik adımlarla
 `870 ms`. Sağlıklı dağılıma payı tam iki kat, yakaladığı en yavaş sızıntı
 ~1,15 Hz — `IDLE_FRAME_LIMIT`'in ~3 Hz'lik tabanından **2,6 kat** duyarlı.
+
+**Taban tavanın 1 ms altında ve bu bilerek:** jetonun kuralı duyarlılığı
+büyütmeyi ödüllendiriyor, yani aralığın ortasından seçilen bir sayı kapıyı
+boşuna kısıtlardı. Bedeli, **yeniden türetme tetiğinin dar** olması: 3
+saniyelik sağlıklı bir koşu `1740 ms`'nin altına inerse kuralın kendisi
+bozulur (kapı değil — kapının payı hâlâ iki kat) ve `QUIET_FLOOR` yeniden
+türetilmelidir. Bugüne kadarki otuz yedi koşunun bandı `1742,29 – 1757,29 ms`,
+yani 15 ms.
 
 **Kapının ateşlediği gösterildi.** `QUIET_FLOOR` indikten sonra yavaş sızıntı
 mutasyonu tekrar koşuldu: üç koşunun ikisi `QuietTooShort` (120,95 ve
@@ -291,8 +305,8 @@ sağlıklı koşu yeşil (`sessiz=1742,29 ms`).
 
 **Gözlemler — yorum değil, kayıt:**
 
-- **Sağlıklı kuyruk şaşırtıcı derecede dar:** otuz koşunun tamamı
-  1745,95 – 1757,29 ms, yani 11 ms'lik bir bant. Yapısal olarak beklenen de
+- **Sağlıklı kuyruk şaşırtıcı derecede dar:** otuz yedi koşunun tamamı
+  1742,29 – 1757,29 ms, yani 15 ms'lik bir bant. Yapısal olarak beklenen de
   bu: `3 sn − (1 sn uyku + ~0,25 sn yerleşme)`. Kapının payı bu yüzden
   gürültüden değil **tasarımdan** geliyor.
 - **Profil ayrışması döndü.** 006'da `kare` debug'da çoğunlukla `1`, release
@@ -309,6 +323,13 @@ sağlıklı koşu yeşil (`sessiz=1742,29 ms`).
   **yeşil** geçti.
 - **Bozuk koşu yine tam tazeleme hızında:** 3 saniyede 353–358 kare ≈ saniyede
   118–119; 006'daki gibi kısılma görülmedi.
+- **`istek=` düşündüğüm kadar sabit değil.** Otuz ölçüm koşusunun ve yedi
+  doğrulama koşusunun tamamı `4` verdi, ama kapı indikten sonraki bir koşu
+  `3` bastı ve peşinden gelen altı koşu yine `4`. Ayıklanmadı (gürültü
+  kuralı): nedeni **ölçülmedi**, akla yatkın mekanizma `Waker`'ın
+  birleştirmesi — `pending` bayrağı zaten diklken gelen ikinci uyandırma
+  sayaca giriyor ama yeni bir dispatch doğurmuyor, yani yavaş bir açılışta
+  iki talep tek kareye düşebilir. Jeton bir kapı değil, bu yüzden koşu yeşil.
 - **Beş saniyelik koşular sınırları zorlamadı:** `icerik` yine `3`, `sessiz`
   ~3,75 sn. Kuyruk süreyle doğrusal büyüyor, yani taban 3 saniyelik reçeteye
   bağlı ve orada en dar hâlinde.

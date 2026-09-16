@@ -70,12 +70,12 @@ test:
 # ölçülmedi, ölçülmemiş sayı kapıya yazılmaz.
 # ALT SINIR `sessiz`te (son kareyle deadline arasındaki süre; hiç kare yoksa
 # `none` ve o da kırmızı): 008 phase-6'da ÖLÇÜLDÜ ve kapıya bağlandı
-# (app.rs QUIET_FLOOR, bugün 870 ms). Kuralı ötekilerin TERSİ — sağlıklı koşuda
-# büyük, sızıntıda küçük — ve kapının en duyarlı katı: periyodu tabandan kısa
-# HER sızıntıyı görüyor (~1,15 Hz), `icerik` sınırı ancak ~3 Hz'in üstünü.
-# Yarım saniyede bir kare isteyen bir sızıntı `icerik=8` ile sınırı aşmıyor ve
-# bu kol olmadan YEŞİL geçiyordu (ölçülen kanıt docs/OLCUMLER.md'de).
-# Taban `BT_RUN_SECONDS`ın 3'üne ve smoke_shell'in 1 sn uykusuna BAĞLI: süreyi
+# (app.rs QUIET_FLOOR; sayının ve türetmesinin sahibi docs/OLCUMLER.md).
+# Kuralı ötekilerin TERSİ — sağlıklı koşuda büyük, sızıntıda küçük — ve kapının
+# en duyarlı katı: periyodu tabandan kısa HER sızıntıyı görüyor, `icerik` sınırı
+# ise ancak yeterince hızlı olanı. Sınırın altında kalacak kadar seyrek kare
+# isteyen bir sızıntı bu kol olmadan YEŞİL geçiyordu (ölçülen kanıt o dosyada).
+# Taban `BT_RUN_SECONDS`ın süresine ve smoke_shell'in uykusuna BAĞLI: süreyi
 # kısaltan onu da yeniden türetmeli, yoksa kapı kod doğruyken düşer.
 # `kapanis` KISMEN kapı: panik kolları kırmızı düşürür, kayıtlı borç olan iki
 # kol düşürmez — bağlansaydı kapı bilinen bir borç yüzünden kırmızı düşerdi.

@@ -8,7 +8,10 @@ dosya bozukken ne olacağının **tek sahibidir**; kod tarafındaki karşılığ
 `watch.rs` (dosyaların izlenmesi), `menu.rs` ve `zoom.rs` (View menüsü:
 tema seçimi ve geçici punto), `clipboard.rs` ve `app.rs`'in `ShellWake`'i
 (OSC 52'nin yuvası, ana kuyruğa geçişi ve panoya yazması),
-`crates/bt-atlas/src/font.rs` (font ailesinin bulunması).
+`crates/bt-atlas/src/font.rs` (font ailesinin bulunması),
+`crates/bt-gpu/src/motion.rs` ve `link.rs` (imleç hareketinin ve Hareketi
+Azalt'ın uygulanması; üç değerli ayarın tek `bool`'a indiği yer
+`app.rs`'in `resolve_reduce_motion`'ı).
 
 ## Dosyanın yeri
 
@@ -390,7 +393,7 @@ reduce_motion = "system"
   onu hedefinde bitirir, öteki iki stil kaymayı bulunduğu yerden devralır:
   imleç hiçbir stil değişiminde ışınlanmaz.
 - Tanınmayan değer (`"sprong"`, `"Spring"`, `true`) yalnız bu anahtarı
-  etkiler: stil olduğu gibi kalır ve uyarı görünür.
+  etkiler (açılışta `"spring"`, kayıt anında ekrandaki stil) ve uyarı görünür.
 
 `reduce_motion` animasyonların kısılıp kısılmayacağını söyler:
 
@@ -402,6 +405,11 @@ reduce_motion = "system"
 - Kısıldığında imleç kaymaz: yeni hücresinde **kısa bir belirmeyle** (90 ms)
   görünür, eski hücresinde iz bırakmaz. Kısılan şey kaymanın kendisi, imlecin
   görünürlüğü değil.
+- Belirme **duraksamadan sonraki** harekete aittir. Arka arkaya gelen
+  hareketlerde — yazarken ya da çıktı akarken — imleç tam opak kalır, yeni
+  yerine sessizce geçer: her harekette yeniden belirmek saniyede on kez
+  yanıp sönmek olurdu ve titreme, kaldırmaya çalıştığımız hareketten
+  beterdir.
 - `cursor_motion = "snap"` bunun **üstündedir**: hareketi zaten kapatmış
   olan kullanıcıya Hareketi Azalt bir belirme *eklemez*.
 - Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa hedefinde

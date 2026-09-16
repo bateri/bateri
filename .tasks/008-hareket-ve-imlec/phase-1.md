@@ -77,6 +77,11 @@ bloğu artık eksik kalıyor; yeni satır biçimi ve sayıların türetmesi
   bir karelik kayma ve ölçülen tavan `4` ile sınır `8` arasındaki pay onu
   yutuyor. Dört duman koşusunda dördünde de `kare == icerik` (2, 2, 2, 1).
   `IDLE_FRAME_LIMIT` doc'una doğru yönüyle yazıldı.
+  *(Sonradan çürüdü — phase-3 hareket karesini getirince "hatasız biten her
+  kare bir içerik karesiydi" yanlışlandı: hareket karesi de commit ediyor,
+  yani `kare`'yi artırıp `icerik`'i artırmıyor. Ölçülen sağlıklı koşu
+  `kare` 27–30 iken `icerik` 2–3. Sınır bu yüzden taşınamadı, phase-6'da
+  **yeniden ölçüldü**; iki doc kapı commit'inde düzeltildi.)*
 - **`sessiz=` saati kapanıştan önce okunuyor**, planın söylemediği bir yer.
   `shutdown()` `SHUTDOWN_GRACE` kadar (yarım saniye) bekliyor ve ölçüm
   koşularının dörtte birinde gerçekten bekliyor (`kapanis=abandoned`); sonra

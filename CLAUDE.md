@@ -49,8 +49,8 @@ make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
                   # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C hareket=M sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
-                  # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT (= 8, ölçülmüş; türetmesi sabitin doc'unda) ise,
-                  # sessiz < QUIET_FLOOR (= 870 ms, ölçülmüş) ya da sessiz=none ise ya da deadline'da animasyon yerleşmemişse kırmızı.
+                  # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT ise, sessiz < QUIET_FLOOR ya da sessiz=none ise
+                  # ya da deadline'da animasyon yerleşmemişse kırmızı. iki sınır da ölçülmüş; değerleri ve türetmeleri sabitlerin doc'unda.
                   # üst sınır kare'de değil icerik'te: icerik çizilmeye karar verilen kare, kare GPU'nun bitirdiği — animasyon ikincisini meşru olarak şişirir.
                   # sessiz'in kuralı ters (sağlıklıda büyük) ve kapının en duyarlı katı: icerik sınırının göremediği yavaş sızıntıyı o görüyor.
                   # yuva/yuk/istek/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
@@ -134,7 +134,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   200 ms'lik bir imleç kayması `kare`'yi meşru olarak şişirir. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
   animasyonu 90 ms'lik bir **belirmeye** indirir — imleç kaymaz, yeni yerinde
-  belirir. İndirgemenin tek yeri `bt-gpu::motion` (`Mode::Fade`); üç değerli
+  belirir. Belirme **duraksamadan sonraki** harekete ait: akan çıktıda ya da
+  yazarken imleç tam opak kalır, yoksa saniyede on kez yanıp sönerdi.
+  İndirgemenin tek yeri `bt-gpu::motion` (`Mode::Fade`); üç değerli
   ayar ile sistemin cevabı `bt-shell`'de tek `bool`'a iniyor, `bt-gpu` AppKit
   görmüyor. `cursor_motion = "snap"` bunun üstündedir: hareketi zaten kapatmış
   olana erişilebilirlik ayarı animasyon *eklemez*.

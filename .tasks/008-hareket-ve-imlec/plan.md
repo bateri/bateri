@@ -104,7 +104,7 @@ icerik++                           link uyanık kalır (yerleşene kadar)
 | phase-4 | ✅ |
 | phase-5 | ✅ |
 | phase-6 | ✅ |
-| kapı | |
+| kapı | ✅ |
 
 phase-2'nin `/code-review`'undan çıkan tek bulgu phase-1'in kodundaydı ve
 kendi commit'iyle indi (phase açmadı): `applicationWillTerminate:` ölçüm

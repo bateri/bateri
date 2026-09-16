@@ -79,6 +79,34 @@ animasyonu), Sparkle ile güncelleme.
 Bunlar kendi setlerini hak etmiyor; yukarıdaki setlerden birine yamanırlar.
 Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 
+- **Hareket karesi ucuz değil.** 008 Karar 4 hareket karesinde grid'i yeniden
+  taramayı önlüyor (`Frame::move_cursor` listeleri koruyor) ama encode yolu
+  korunan listeyi yine de **baştan kuruyor**: `AtlasTexture::prepare` her
+  glyph ve kural için yuvayı yeniden çözüyor, `instance_buffer` her karede
+  yeni bir `MTLBuffer` ayırıyor. Bedel hücre sayısıyla büyüyor ve kayma
+  boyunca her karede yeniden ödeniyor — kaç kare olduğunu jetonun `hareket=`
+  sayacı söylüyor (`/code-review`, 008 kapısı). Çare biçimi belli — listeler değişmedikçe örnek tamponunu
+  saklamak, kirli bayrağı `Frame::clear`'da dikmek — ama **ölçüm bekliyor**:
+  kare süresi hiç ölçülmedi (`docs/OLCUMLER.md` → `## Kare süresi`) ve
+  ölçülmemiş bir kazanç için yeni bir önbellek eklenmiyor. Aynı ölçümün
+  ikinci sorusu: `cell_bg` geçişi 90 ms'lik belirme uğruna **tamamen**
+  harmanlamaya açıldı (`Blend::Opaque` kalktı), yani opak arka plan dörtgenleri
+  de harmanlama biriminden geçiyor; alternatif imleci ayrı bir çağrıda
+  çizmek.
+- **Tema kare başına iki kez okunuyor.** `Session::frame` kopyayı `Term`
+  kilidinden önce kendi içinde alıyor, `link.rs` aynı karede `session.theme()`
+  ile ikinci kez alıyor; araya düşen bir `set_theme` o kareyi hücreler eski,
+  clear ile imleç yeni paletteyken çizer. Tek kare sürer ve kendini düzeltir
+  (tema değişimi zaten kare istiyor), ama "palet tek kaynak" cümlesini
+  harfiyen ihlal ediyor (`/audit`, 008 kapısı; 008 öncesinden beri var).
+  Çaresi ucuz: `frame()` kullandığı temayı döndürsün.
+- **Ayar ayrıştırmasının beş kopyası.** `osc52`, `cursor_motion` ve
+  `reduce_motion` aynı "şu üç dizgeden biri, değilse tanı bırak ve
+  varsayılana düş" örüntüsünü elle tekrarlıyor; her enum'un `name()`'i de
+  ayrıştırıcının kollarıyla **elle** eşleşiyor (`/code-review`, 008 kapısı).
+  Dördüncü anahtar altıncı kopyayı doğurur. Çare bir yardımcı
+  (`(anahtar, &[(dizge, değer)], varsayılan)`), yeri bir sonraki ayar seti —
+  yeni anahtar eklemeden yapılırsa hiçbir davranış değişmez.
 - **Logger yok.** `tracing` bağlanmadı; yoksayılan olaylar (başlık, zil, pano)
   ve alacritty'nin `log` satırları **sessizce** düşüyor. Hata ayıklamayı
   körleştiriyor, o yüzden erken yamanmalı. 005 doğal adayıydı — ölçüm
