@@ -48,12 +48,12 @@ bulunamaz.
 |---|---|---|
 | 007 | ayarlar + sekiz rollü tema + font seçimi | Görünüşün temeli: 008 ayar dosyasına, 009 tema rollerine yaslanır. Set açıldı → `.tasks/007-ayarlar-ve-tema/context.md` |
 | 008 | hareket altyapısı + imleç animasyonu | Metalterm'i ekranda tanıtan üç şeyden biri (renk, imleç, yüzey) ve shell entegrasyonuna **bağlı değil**. İlk tüketici imleç; boşta kare kapısının yavaş animasyon borcu da bu setin içinde kapanıyor. Set açıldı → `.tasks/008-hareket-ve-imlec/context.md`. *(Sonradan: borç phase-6'da **ölçüyle** kapandı — `sessiz ≥ QUIET_FLOOR` kapısı yavaş sızıntıyı görüyor, dağılımlar `docs/OLCUMLER.md` → `## Boşta kare`. **Kapanmayan yarısı:** kapı sızıntıyı ancak periyodu tabandan kısaysa görüyor, yani hareket saatini atlayıp saniyede bir kare isteyen bir kodu hiçbir sayı tutmuyor — onu yapısal kural (`bt-gpu::link` modül başlığı: zamana bağlı kare talebinin tek yolu hareket saatidir) ve `/audit` tutuyor.)* Yumuşak kaydırma ve çıktı gelince tamponun kayması aynı altyapının ikinci tüketicisi; sete sığmazsa hemen ardından |
-| 009 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır |
-| 010 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 008–009 öne alındığı için TUI çerçeveleri iki set daha bozuk görünür — bilerek |
-| 011 | sekme + bölme | |
-| 012 | shell entegrasyonu (zsh/bash/fish) + OSC 133 | Kullanıcının rc dosyasına **asla** dokunulmaz: zsh `ZDOTDIR` sarmalayıcısı, bash `--rcfile`, fish `vendor_conf.d`. OSC 133 alacritty'de **yok**, `bt-core`'a eklenir |
-| 013 | komut blokları (+ blok animasyonları) | OSC 133 işaretlerinden okunur; `frame()` sınırına kanca ister; blok şeridi ve kalkma animasyonları 008'in altyapısıyla gelir |
-| 014 | Input Dock (+ yazma animasyonları) | **Zincirin en ucu, kısayolu yok.** Pencere altında sabit ayrı satır editörü; zsh ZLE kancalarına, OSC 133'e ve komut bloklarına birden oturuyor. Ayrıca yazmayı devralan uygulamaları (Claude, Codex, REPL) davranıştan tespit edip alanı geri vermesi gerekiyor — bu, blokların çalışıyor olmasını varsayar. Tuş vuruşu ve silme animasyonları (`keypress`, `delete_mode`) burada: "bu harfi kullanıcı mı yazdı?" sorusunun kesin cevabı dock'ta, ızgarada yalnız tahmin |
+| 009 | shell entegrasyonu (zsh) + OSC 133 komut durumu | Kullanıcının rc dosyasına **asla** dokunulmaz: zsh `ZDOTDIR` sarmalayıcısı; bash `--rcfile` ve fish `vendor_conf.d` sonraki sette. OSC 133 alacritty'de **yok** — `vte` onu `Handler`'a hiç vermeden düşürüyor, yani `bt-core` baytı `Pty`'yi saran bir dinleyiciden görüyor. **Sıra 2026-09-16'da öne alındı** (kullanıcı kararı: Input Dock'a hızlı varmak). Set açıldı → `.tasks/009-shell-entegrasyonu/context.md` |
+| 010 | komut blokları (+ blok animasyonları) | OSC 133 işaretlerinden okunur; `frame()` sınırına kanca ister; blok şeridi ve kalkma animasyonları 008'in altyapısıyla gelir |
+| 011 | Input Dock (+ yazma animasyonları) | **Zincirin en ucu, kısayolu yok.** Pencere altında sabit ayrı satır editörü; zsh ZLE kancalarına, OSC 133'e ve komut bloklarına birden oturuyor. Ayrıca yazmayı devralan uygulamaları (Claude, Codex, REPL) davranıştan tespit edip alanı geri vermesi gerekiyor — bu, blokların çalışıyor olmasını varsayar. Tuş vuruşu ve silme animasyonları (`keypress`, `delete_mode`) burada: "bu harfi kullanıcı mı yazdı?" sorusunun kesin cevabı dock'ta, ızgarada yalnız tahmin |
+| 012 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
+| 013 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **beş set** boyunca bozuk görünür — bilerek |
+| 014 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
 animasyonu), Sparkle ile güncelleme.
@@ -73,6 +73,13 @@ animasyonu), Sparkle ile güncelleme.
 > 009 = sekme/bölme, 010 = shell entegrasyonu, 011 = komut blokları, 012 =
 > Input Dock; bugün sırasıyla 010, 011, 012, 013, 014. Kapanmış setlerin
 > dosyaları (ör. 006'da "sekme/bölme (009)") tarihli kayıttır, düzeltilmedi.
+>
+> **İkinci kayma (2026-09-16).** Sıra kullanıcı kararıyla Input Dock'a doğru
+> kısaltıldı: shell entegrasyonu 012'den **009**'a çekildi, komut blokları
+> 010, Input Dock 011 oldu; materyal yüzey, emoji/geniş/kutu ve sekme/bölme
+> sırasıyla 012, 013, 014'e ertelendi. Gerekçeleri değişmedi — yalnız sıraları.
+> Bu tarihten önceki belgelerde (ör. 008'in dosyaları) eski numaralar geçer ve
+> düzeltilmedi; tarihli kayıt böyle okunur.
 
 ## Sete bağlanmamış borçlar
 

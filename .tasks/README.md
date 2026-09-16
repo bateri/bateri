@@ -10,6 +10,7 @@
 | 006 | [gunluk-kullanim-esigi](006-gunluk-kullanim-esigi/) | 🟢 | `main`'de — seçim, pano, geçmişte kaydırma, `bateri.app`, ev dizini ve UTF-8 yereli; iki bilinçli `[~]` `teslim.md`'de |
 | 007 | [ayarlar-ve-tema](007-ayarlar-ve-tema/) | 🟢 | `main`'de — canlı ayar dosyası, açık/koyu tema, font, ana menü, OSC 52 kopyası; iki bilinçli `[~]` `teslim.md`'de |
 | 008 | [hareket-ve-imlec](008-hareket-ve-imlec/) | 🟢 | `main`'de — imleç kayıyor: hareket altyapısı, üç stil, Hareketi Azalt ve ölçülmüş sessizlik kapısı (`QUIET_FLOOR`) |
+| 009 | [shell-entegrasyonu](009-shell-entegrasyonu/) | 📐 | zsh entegrasyonu + OSC 133 komut durumu; seviyeli entegrasyon sözleşmesi |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
