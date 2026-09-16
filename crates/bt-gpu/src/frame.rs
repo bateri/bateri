@@ -171,10 +171,15 @@ fn rule_kind(underline: UnderlineStyle) -> Option<RuleKind> {
 /// sona eklenir). Glyph'ler ayrı listede ve ikinci pipeline'la, imlecin de
 /// üstüne çizilir — imleç opak ve altındaki harfi örterdi.
 ///
-/// Uzun ömürlüdür: display link onu ivar'da tutar, her kare `clear` ile
-/// yeniden doldurur. Bu yüzden hücre piksel boyutu **alan değil `clear`'ın
-/// parametresidir** — kurucuda dondurulsaydı ekran ölçeği değiştiğinde
-/// (`windowDidChangeBackingProperties:`) sessizce bayatlardı.
+/// Uzun ömürlüdür: display link onu ivar'da tutar ve **içerik** karesinde
+/// `clear` ile yeniden doldurur. Bu yüzden hücre piksel boyutu **alan değil
+/// `clear`'ın parametresidir** — kurucuda dondurulsaydı ekran ölçeği
+/// değiştiğinde (`windowDidChangeBackingProperties:`) sessizce bayatlardı.
+///
+/// **Her kare `clear` görmüyor ve bu 008'in getirdiği ayrım:** hareket karesi
+/// grid'i kirli bulmadan çiziyor, yani listeyi temizleyemez —
+/// [`Frame::move_cursor`] onu koruyarak yalnız imleci taşıyor. `clear`'ın
+/// çağrıldığı tek yer içerik karesi.
 #[derive(Default)]
 pub(crate) struct Frame {
     bg: Vec<Instance>,
@@ -286,11 +291,16 @@ impl Frame {
     /// (`cursor.text` — `bt-core`'un kararı). İkisi ayrı çağrı olsaydı biri
     /// çağrılıp öteki unutulabilirdi ve belirti sessiz olurdu: imleç doğru
     /// yerde, altındaki harf okunmaz.
-    pub(crate) fn push_cursor(&mut self, cursor: Cursor, rgba: LinearRgba) {
+    ///
+    /// **Konum `cursor`'dan gelmiyor, `at`'ten** ve hücre biriminde `f32`:
+    /// kayan imleç iki hücre arasındayken tam sayı değil. `cursor` yine de
+    /// gerekli, çünkü ötekiler (`visible`, `text`) `bt-core`'un kararı ve
+    /// konuma bağlı değil — ara konum çizenin, hedef sınırın.
+    pub(crate) fn push_cursor(&mut self, cursor: Cursor, at: [f32; 2], rgba: LinearRgba) {
         if !cursor.visible {
             return;
         }
-        let pos = self.pos(cursor.col, cursor.row);
+        let pos = self.pos_at(at);
         self.bg.push(Instance {
             pos,
             size: [self.cell_px.0, self.cell_px.1],
@@ -305,6 +315,22 @@ impl Frame {
             ],
             rgba: cursor.text.to_array(),
         };
+    }
+
+    /// **Hareket karesinin tek ucu**: listeyi koruyarak imleci taşır.
+    ///
+    /// Grid kirli değil, yani glyph ve kural listeleri hâlâ geçerli — onları
+    /// yeniden kurmak `Term` kilidine saniyede 120 kez girmek olurdu ve
+    /// "render yolu bloklanmaz" ile tam orada kavga ederdi (008 Karar 4).
+    /// Arka plan listesi `bg_count`'a kırpılıyor: kırpılan tek şey önceki
+    /// karenin imleci, çünkü [`Frame::push`] arka planları imleçten **önce**
+    /// eklemek zorunda ve bunu bir `debug_assert` tutuyor. Kırpma o bekçiyi
+    /// geçerli bırakıyor — liste her hâlükârda "önce arka planlar, sonra
+    /// imleç" düzeninde kalıyor.
+    pub(crate) fn move_cursor(&mut self, cursor: Cursor, at: [f32; 2], rgba: LinearRgba) {
+        self.bg.truncate(self.bg_count);
+        self.cursor = CursorBlock::default();
+        self.push_cursor(cursor, at, rgba);
     }
 
     pub(crate) fn bg_count(&self) -> usize {
@@ -369,9 +395,18 @@ impl Frame {
     /// olduğu için formülün dallara kopyalanma ihtimali de kalmadı; imleç
     /// yolu ([`Frame::push_cursor`]) aynı fonksiyondan geçen ikinci çağıran.
     fn pos(&self, col: u16, row: u16) -> [f32; 2] {
+        self.pos_at([f32::from(col), f32::from(row)])
+    }
+
+    /// [`Frame::pos`]'un kesirli hâli — imleç iki hücre arasındayken.
+    ///
+    /// Formülün **tek** kopyası burası; tam sayı yolu buradan geçiyor ki
+    /// kayan imleç ile duran hücre aynı aritmetiği paylaşsın. Ayrışsalardı
+    /// yerleşmiş imleç altındaki harften yarım piksel kayabilirdi.
+    fn pos_at(&self, at: [f32; 2]) -> [f32; 2] {
         let (w, h) = self.cell_px;
         debug_assert!(w > 0.0 && h > 0.0, "clear(cell_px) çağrılmadı");
-        [f32::from(col) * w, f32::from(row) * h]
+        [at[0] * w, at[1] * h]
     }
 }
 
@@ -399,7 +434,20 @@ mod tests {
             row,
             visible,
             text: TEXT,
+            // Kaydırma kararı hareketin işi (`motion.rs`); bu listeyi
+            // ilgilendirmiyor, çünkü konum zaten dışarıdan geliyor.
+            display_offset: 0,
         }
+    }
+
+    /// İmleci **kendi** hücresine çizer: yerleşmiş (animasyonsuz) hâl.
+    /// Ara konumu sınayan tek yer `cursor_slides_between_cells`.
+    fn push_settled(frame: &mut Frame, cursor: Cursor) {
+        frame.push_cursor(
+            cursor,
+            [f32::from(cursor.col), f32::from(cursor.row)],
+            CURSOR,
+        );
     }
 
     fn bg_cell(col: u16, row: u16) -> Cell {
@@ -419,7 +467,7 @@ mod tests {
 
         frame.push(bg_cell(0, 0));
         frame.push(bg_cell(1, 0));
-        frame.push_cursor(cursor(5, 2, true), CURSOR);
+        push_settled(&mut frame, cursor(5, 2, true));
 
         // Üç dikdörtgen çizilir ama `hucre=K` yalnız ikisini sayar.
         assert_eq!(frame.bg_instances().len(), 3);
@@ -434,7 +482,7 @@ mod tests {
     fn invisible_cursor_is_not_drawn() {
         let mut frame = Frame::default();
         frame.clear((9, 18));
-        frame.push_cursor(cursor(0, 0, false), CURSOR);
+        push_settled(&mut frame, cursor(0, 0, false));
         assert!(frame.bg_instances().is_empty());
         // Uniform da dokunulmadan kalır: dejenere dikdörtgen "blok yok"
         // demenin tek yolu, shader'da ikinci bir bayrak yok.
@@ -448,7 +496,7 @@ mod tests {
         // olurdu ve ikisi de sessizce yanlış çizerdi.
         let mut frame = Frame::default();
         frame.clear((9, 18));
-        frame.push_cursor(cursor(3, 2, true), CURSOR);
+        push_settled(&mut frame, cursor(3, 2, true));
 
         let block = *frame.cursor_block();
         assert_eq!(block.rect, [27.0, 36.0, 36.0, 54.0]);
@@ -472,6 +520,59 @@ mod tests {
         // `clear` uniform'u da sıfırlar: sönen imleç (`\e[?25l`) bloğu
         // kaldırır ama rengi eski hücrede bırakırsa orası görünmez olur.
         frame.clear((9, 18));
+        assert_eq!(frame.cursor_block(), &CursorBlock::default());
+    }
+
+    #[test]
+    fn cursor_slides_between_cells() {
+        // Ara konum: blok iki hücre arasındayken dikdörtgen de kesirli
+        // piksele oturmalı. Tam sayıya yuvarlansaydı kayma hücre hücre
+        // zıplar ve animasyonun tamamı görünmez olurdu.
+        let mut frame = Frame::default();
+        frame.clear((10, 20));
+        frame.push_cursor(cursor(3, 2, true), [2.5, 1.25], CURSOR);
+        assert_eq!(frame.cursor_block().rect, [25.0, 25.0, 35.0, 45.0]);
+        assert_eq!(frame.bg_instances()[0].pos, [25.0, 25.0]);
+    }
+
+    #[test]
+    fn a_motion_frame_keeps_the_lists_and_moves_only_the_cursor() {
+        // Hareket karesinin sözleşmesi: grid kirli değil, yani glyph ve kural
+        // listeleri geçerli kalmalı; kırpılan tek şey önceki karenin imleci.
+        // Kırpma olmasaydı her hareket karesi listeye bir dikdörtgen daha
+        // eklerdi — 200 ms'lik bir kaymada yirmi dört hayalet imleç.
+        let mut frame = Frame::default();
+        frame.clear((8, 16));
+        frame.push(bg_cell(0, 0));
+        frame.push(Cell {
+            col: 1,
+            row: 0,
+            ch: Some('b'),
+            fg: CURSOR,
+            bg: Some(BG),
+            underline: UnderlineStyle::Single,
+            ..Default::default()
+        });
+        push_settled(&mut frame, cursor(0, 0, true));
+        let (cells, glyphs, rules) = (frame.bg_count(), frame.glyph_count(), frame.rule_count());
+        assert_eq!((cells, glyphs, rules), (2, 1, 1));
+
+        for _ in 0..3 {
+            frame.move_cursor(cursor(5, 0, true), [4.5, 0.0], CURSOR);
+            // Üç sayacın üçü de oynamadı: `hucre=8 glif=6 kural=15` duman
+            // koşusunda hareket karesiyle bitse bile aynı kalmalı.
+            assert_eq!(frame.bg_count(), cells);
+            assert_eq!(frame.glyph_count(), glyphs);
+            assert_eq!(frame.rule_count(), rules);
+            // Listede tam olarak bir imleç var, üç değil.
+            assert_eq!(frame.bg_instances().len(), cells + 1);
+        }
+        assert_eq!(frame.cursor_block().rect, [36.0, 0.0, 44.0, 16.0]);
+
+        // Görünmez imleçle gelen hareket karesi bloğu **kaldırır**: uniform
+        // eski yerinde kalsaydı orada zemin renginde bir harf dururdu.
+        frame.move_cursor(cursor(5, 0, false), [4.5, 0.0], CURSOR);
+        assert_eq!(frame.bg_instances().len(), cells);
         assert_eq!(frame.cursor_block(), &CursorBlock::default());
     }
 

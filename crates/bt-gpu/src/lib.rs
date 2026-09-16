@@ -22,6 +22,7 @@
 mod error;
 mod frame;
 mod link;
+mod motion;
 mod renderer;
 mod stats;
 mod surface;

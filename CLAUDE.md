@@ -47,7 +47,8 @@ make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
                   # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C hareket=M sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
-                  # ilk dördünden biri 0 ise ya da icerik > IDLE_FRAME_LIMIT (= 8, ölçülmüş; türetmesi sabitin doc'unda) ise kırmızı.
+                  # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT (= 8, ölçülmüş; türetmesi sabitin doc'unda) ise
+                  # ya da deadline'da animasyon yerleşmemişse kırmızı.
                   # üst sınır kare'de değil icerik'te: icerik çizilmeye karar verilen kare, kare GPU'nun bitirdiği — animasyon ikincisini meşru olarak şişirir.
                   # yuva/yuk/istek/hareket/sessiz/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
@@ -123,7 +124,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   sessizdir. Gören tek bekçi `cell_bg_paints_pixels_on_the_gpu` ve ancak **ara
   ton** bir renkle görür: `0.0` ve `1.0` sRGB transfer fonksiyonunun sabit
   noktalarıdır.
-- **Boşta sıfır kare.** Kirli satır yoksa frame gönderilmez. Her animasyon bir
+- **Boşta sıfır kare.** Kirli satır **ve** yerleşmemiş animasyon yoksa frame
+  gönderilmez; kare istemenin iki yolu var ve ikincisi kimseyi uyandırmıyor
+  (`bt-gpu::link` modül başlığı: zamana bağlı kare talebinin tek yolu hareket
+  saatidir). Kapı bu yüzden `kare`'ye değil **içerik** karesine bakıyor —
+  200 ms'lik bir imleç kayması `kare`'yi meşru olarak şişirir. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
   animasyonu 90 ms'lik solmaya indirir.
 - **Kapanış sınırlı bekler, çocuk yine de ölmeyebilir.**
