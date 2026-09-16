@@ -58,14 +58,53 @@ _Requirements: R2.1, R2.2, R2.3_
 söylüyorsa bu commit'te düzelir. Ölçüm iddiası yok: fragment başına bir
 dikdörtgen testinin maliyeti **ölçülmedi** ve iddia edilmiyor.
 
+## Uygulama Notları
+
+- **Uniform tek `#[repr(C)]` yapı** (`CursorBlock { rect, rgba }`), iki ayrı
+  binding değil. "`static_assert`'ler" cümlesi ancak bir yapı için anlamlı:
+  iki `float4` ayrı bağlansaydı çivilenecek bir ofset kalmazdı. Fragment
+  aşamasının `[[buffer(0)]]`'ı — indeksler vertex'inkinden ayrı bir alan,
+  gerekçesi `fragment_uniform`'un doc'unda.
+- **`char_under_cursor_is_drawn_inverted` taşınmadı, tersine çevrildi.**
+  `bt-core`'da kalan yeni sınama
+  (`cursor_carries_the_text_color_and_leaves_cells_alone`) R2.1'i koruyor:
+  karar sınırdan geçiyor **ve** hücre dokunulmadan kalıyor. Sebep: geri dönüş
+  (hücreyi yine `bt-core`'da ters çevirmek) `bt-gpu`'nun piksel
+  sınamalarından **geçerdi** — iki kez çevrilen renk aynı piksele varır ve
+  belirti yalnız yarım örtülen hücrede, yani phase-3'te çıkardı.
+- **Sınırın yarı açıklığı sınanmıyor** ve iddia da edilmiyor. `<` yazıldı ama
+  `<=` ile ayrışmıyor: `[[position]]` fragment **merkezini** veriyor (x + 0.5)
+  ve hiçbir fragment tam sınıra düşmüyor. Mutasyonla doğrulandı (kapalı sınır
+  hiçbir sınamayı kırmadı); shader yorumu ve sınama bunu söylüyor.
+- **`cursor_rect_stops_at_its_own_cell` glyph yerine kural bandına bağlandı.**
+  İlk hâli komşu hücrenin `M`'inde tam kaplanan piksel arıyordu ve kırmızı
+  düştü: varsayılan puntoda o glyph'in hiçbir pikseli `0xff`'e varmıyor. Kural
+  bandı hücre genişliğince tam kaplıyor, yani sınır sorusu fontun hangi
+  pikseli boyadığına bağlı kalmıyor.
+- **`rule_over_cursor_stays_visible`'a `text = WHITE` verildi**: o sınamanın
+  sorduğu şey çizim **sırası**, renk değil; iddiaları bit bit korundu.
+- **İki doc daha düzeldi** (phase'in saydığı üçün dışında): `Cell::fg` ve
+  `Cell::underline_color` kalkan dalı anlatıyordu ("imlecin altındaki hücrede
+  ters" / "her zaman `None`").
+- **`CLAUDE.md` dokunulmadı**: "Bugünkü hâl" paragrafı imleç bloğunun nerede
+  çözüldüğünü söylemiyor, yani düzeltilecek bir çelişki yok.
+- **Bekçiler mutasyonla doğrulandı**: shader'ın ezme dalı kapatılınca iki
+  sınama kırmızı, dikdörtgen iki hücre genişletilince iki sınama kırmızı.
+
 ## Checklist
 
-- [ ] `Cursor` metin rengini taşır; `frame()`'in ters çevirme dalı kalkar
-- [ ] `cell.metal`: iki uniform + dikdörtgen testi; `static_assert`'ler
-- [ ] `renderer.rs`: fragment uniform'ları, Rust tarafı assert'leri
-- [ ] `frame.rs`: `push_cursor` dikdörtgen + renk; `bg_count` değişmez
-- [ ] İki sınama `bt-gpu`'ya taşındı ve piksel üstünden soruyor
-- [ ] Test: imleç altındaki harf ve kural çizgisi piksel olarak bugünküyle aynı
-- [ ] Doğrulama geçti (`make hepsi` + `make shader` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
-- [ ] Yayın etkisi yazıldı
+- [x] `Cursor` metin rengini taşır; `frame()`'in ters çevirme dalı kalkar
+- [x] `cell.metal`: iki uniform + dikdörtgen testi; `static_assert`'ler
+- [x] `renderer.rs`: fragment uniform'ları, Rust tarafı assert'leri
+- [x] `frame.rs`: `push_cursor` dikdörtgen + renk; `bg_count` değişmez
+- [x] İki sınama `bt-gpu`'ya taşındı ve piksel üstünden soruyor
+      (biri tersine çevrilip `bt-core`'da kaldı, bkz. Uygulama Notları)
+- [x] Test: imleç altındaki harf ve kural çizgisi piksel olarak bugünküyle aynı
+- [x] Doğrulama geçti (`make hepsi` + `make shader` + `make duman`:
+      `hucre=8 glif=6 kural=15`, `icerik=1`)
+- [x] Riskli phase: `/code-review` koştu — bu phase'in diff'inde bulgu yok
+      (piksel uzayı zinciri, fragment binding alanı, dejenere dikdörtgen ve
+      alfa yolu ayrı ayrı doğrulandı). Tek bulgu setin **phase-1** kodunda
+      (`app.rs` kapanış yolunda ölçüm kapısı kapalıyken saat okuması) ve kendi
+      commit'iyle indi.
+- [x] Yayın etkisi yazıldı

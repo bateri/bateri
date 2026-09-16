@@ -11,6 +11,13 @@
 //! kalır: ayar modelinin ve tema dosyasının `pub` yüzünde TOML tipi yok;
 //! temanın renkleri `0xRRGGBB`, alacritty'nin `Rgb`'si değil.
 //!
+//! Sınırın taşıdığı şey **karar**, piksel değil: `Cursor` imlecin yerini ve
+//! bloğunun altında kalan metnin rengini veriyor ("imleç altındaki metin
+//! okunur kalmalı" bir terminal semantiğidir), o rengi hangi piksellerin
+//! alacağını çizen biliyor — **karar burada, boyama orada**. Ayrımın ölçütü
+//! hücrenin bölünebilirliği: blok iki hücre arasındayken sınır hücrenin
+//! ortasından geçer ve burada verilecek bir hücre kararı onu göremez.
+//!
 //! Sözleşme: bu crate macOS'a özgü hiçbir kütüphane görmez — `objc2*`,
 //! `core-text`, `metal` yok — ve Linux'ta derlenebilir kalır; Vulkan kapısı
 //! bu ayrımın üstüne kurulur. Unix PTY (`libc`, `rustix`) serbesttir, o kapıyı

@@ -634,6 +634,10 @@ impl Renderer {
         vertex_uniform(enc, &viewport_px, 1);
         vertex_uniform(enc, &frame.cell_px(), 2);
         vertex_uniform(enc, &uv_size, 3);
+        // Fragment'in tampon indeksleri **ayrı bir alan**: vertex'in 0'ı
+        // instance tamponu, fragment'in 0'ı imleç bloğu. Düzeni `CursorBlock`'un
+        // `offset_of` assert'leri `cell.metal`'e bağlıyor.
+        fragment_uniform(enc, frame.cursor_block(), 0);
         // SAFETY: tampon ve doku bu blok boyunca yaşıyor; doku indeksi
         // `cell.metal`'in `[[texture(0)]]` bildirimiyle aynı.
         unsafe {
@@ -661,6 +665,20 @@ fn vertex_uniform<T>(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, value: &
     // kopyalıyor; uzunluk `T`'nin kendi baytı.
     unsafe {
         enc.setVertexBytes_length_atIndex(NonNull::from(value).cast(), size_of_val(value), index);
+    }
+}
+
+/// [`vertex_uniform`]'ın fragment aşaması kardeşi; aynı sözleşme, aynı sınır.
+///
+/// İki aşamanın tampon indeksleri **ayrı alanlardır**: fragment'in `0`'ı
+/// vertex'in `0`'ıyla (instance tamponu) çakışmaz. Ayrı fonksiyon olmasının
+/// sebebi de bu — tek bir sarmalayıcıya aşamayı parametre yapmak, çağrı
+/// yerinde indeksin hangi alana ait olduğunu okunmaz kılardı.
+fn fragment_uniform<T>(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, value: &T, index: usize) {
+    // SAFETY: `value` çağrı boyunca yaşıyor ve Metal baytları encode anında
+    // kopyalıyor; uzunluk `T`'nin kendi baytı.
+    unsafe {
+        enc.setFragmentBytes_length_atIndex(NonNull::from(value).cast(), size_of_val(value), index);
     }
 }
 
@@ -1606,6 +1624,148 @@ mod tests {
         assert_ne!(plain, bold, "kalın `M` düz `M` ile aynı çizildi");
     }
 
+    /// Görünür imleç; blok altındaki metin rengi çağrıda söyleniyor çünkü her
+    /// sınama onu ayrı bir iddia için seçiyor.
+    fn cursor_at(col: u16, text: LinearRgba) -> Cursor {
+        Cursor {
+            col,
+            row: 0,
+            visible: true,
+            text,
+        }
+    }
+
+    #[test]
+    fn glyph_under_the_cursor_takes_the_cursor_text_color() {
+        // `bt-core`'dan inen iddia (`char_under_cursor_is_drawn_inverted`),
+        // artık piksel üstünden: blok altındaki harf `Cursor::text` ile
+        // çiziliyor, kendi ön planıyla değil.
+        //
+        // Ölçüt **eşitlik**, "farklı" değil: imleç hücresi (A), aynı harfin
+        // metin rengiyle ve blok renkli bir arka planın üstüne çizilmiş
+        // hâliyle (B) **bit bit** aynı olmalı. İkisi aynı iki geçişten aynı
+        // parametrelerle geçiyor, yani eşitlik meşru bir talep — ve kapsamanın
+        // yarım olduğu kenar piksellerini de kapsıyor: alfa yolu ezilseydi
+        // (RGB yerine RGBA yazılsaydı) kenarlar ayrışırdı.
+        //
+        // C kolu negatif kontrol: imleçsiz, kendi ön planıyla çizilmiş aynı
+        // harf. A == C olsaydı "eziliyor" iddiası boş olurdu.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 3);
+
+        let mut frame = Frame::default();
+        frame.clear((cw, ch));
+        // A: imlecin altında, harfin kendi ön planı beyaz.
+        frame.push(glyph_cell(0, 'M', None));
+        // B: imleçsiz ama harf zaten metin renginde, arka planı blok rengi.
+        frame.push(Cell {
+            fg: BACKGROUND,
+            ..glyph_cell(1, 'M', Some(ACCENT))
+        });
+        // C: imleçsiz, kendi ön planıyla, aynı blok renkli zeminin üstünde.
+        frame.push(glyph_cell(2, 'M', Some(ACCENT)));
+        frame.push_cursor(cursor_at(0, BACKGROUND), ACCENT);
+
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+        let cell = |col| cell_rows(&pixels, EDGE, (cw, ch), col).concat();
+        let (a, b, c) = (cell(0), cell(1), cell(2));
+
+        assert_eq!(
+            a, b,
+            "imleç altındaki harf metin rengiyle çizilmedi (A ≠ B)"
+        );
+        assert_ne!(a, c, "imleç dikdörtgeni harfin rengini hiç ezmedi (A = C)");
+    }
+
+    #[test]
+    fn cursor_rect_stops_at_its_own_cell() {
+        // Dikdörtgenin **dışı** dokunulmaz kalmalı: ezme hücrenin kendisiyle
+        // sınırlı, kareyle değil. Yakaladığı kusur dikdörtgenin **ölçüsü** —
+        // hücre yerine kare, ya da hücre yerine iki hücre. Yakalamadığı, `<`
+        // ile `<=` farkı: `[[position]]` fragment merkezini veriyor (x + 0.5)
+        // ve hiçbir fragment tam sınıra düşmüyor (shader'da yazılı).
+        // Phase-3'te dikdörtgen hücreler arasına oturunca aynı sınama ara
+        // konumu kendiliğinden sorar.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+
+        // Sınırı soran şey **kural**, glyph değil: band hücrenin ilk
+        // sütununu da tam kaplıyor, yani "o sütun ezildi mi" sorusu fontun
+        // hangi pikseli boyadığına bağlı kalmıyor (glyph'in ilk sütunu boş
+        // olabilir ve sınama sessizce hiçbir şey sormaz).
+        let mut frame = Frame::default();
+        frame.clear((cw, ch));
+        frame.push(rule_cell(0, UnderlineStyle::Single));
+        frame.push(rule_cell(1, UnderlineStyle::Single));
+        frame.push_cursor(cursor_at(0, BACKGROUND), ACCENT);
+
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+        // Komşunun **ilk sütunu**: dikdörtgenin `x1`'i tam oraya düşüyor.
+        let first_column: Vec<(u8, u8, u8)> = cell_rows(&pixels, EDGE, (cw, ch), 1)
+            .iter()
+            .map(|row| row[0])
+            .collect();
+        assert!(
+            first_column.contains(&(0xff, 0xff, 0xff)),
+            "komşunun ilk sütunu da ezildi: dikdörtgen hücresinden taşıyor — {first_column:?}"
+        );
+    }
+
+    #[test]
+    fn rule_under_the_cursor_takes_the_cursor_text_color() {
+        // `bt-core`'dan inen ikinci iddia
+        // (`cursor_cell_drops_the_underline_color`), piksel üstünden.
+        // Eskiden `frame()` imleç hücresinin SGR 58 rengini **düşürüyordu**;
+        // artık hücre rengini koruyor ve dikdörtgen onu piksel olarak eziyor.
+        // Sonuç aynı: blok altındaki çizgi de metin rengine dönüyor, yani
+        // aynı hücredeki alt çizgi ile üstü çizili aynı davranıyor.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let mut frame = Frame::default();
+        frame.clear((cw, ch));
+        // İki hücrede aynı SGR 58'li çizgi; imleç yalnız birinde.
+        for col in [0, 1] {
+            frame.push(Cell {
+                underline_color: Some(red),
+                ..rule_cell(col, UnderlineStyle::Single)
+            });
+        }
+        frame.push_cursor(cursor_at(0, BACKGROUND), ACCENT);
+
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+        let under = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();
+        let plain = cell_rows(&pixels, EDGE, (cw, ch), 1).concat();
+
+        let srgb = |hex: u32| ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let background = srgb(Theme::BATERI.background);
+        // Kontrol: imleçsiz hücrede çizgi hâlâ SGR 58'in kırmızısı.
+        assert!(
+            plain.contains(&(0xff, 0x00, 0x00)),
+            "imleçsiz hücrede SGR 58 rengi kayboldu: {plain:?}"
+        );
+        assert!(
+            !under.contains(&(0xff, 0x00, 0x00)),
+            "blok altındaki çizgi SGR 58 rengini korudu: {under:?}"
+        );
+        // Yön de sorulmalı: "kırmızı yok" tek başına hiç çizilmemiş bir
+        // kuralda da doğrudur. Tam kaplanan band metin rengini veriyor —
+        // ±1 tolerans, çünkü zemin bir **ara ton** ve 8-bit sRGB kodlaması
+        // yuvarlama taşır (emsali `cell_bg_paints_pixels_on_the_gpu`).
+        assert!(
+            under.iter().any(|p| {
+                p.0.abs_diff(background.0) <= 1
+                    && p.1.abs_diff(background.1) <= 1
+                    && p.2.abs_diff(background.2) <= 1
+            }),
+            "blok altındaki çizgi metin renginde çizilmedi: {under:?}"
+        );
+    }
+
     #[test]
     fn rule_over_cursor_stays_visible() {
         // Çizim sırası: arka planlar **ve imleç**, sonra glyph'ler, sonra
@@ -1620,14 +1780,11 @@ mod tests {
         let mut frame = Frame::default();
         frame.clear((cw, ch));
         frame.push(rule_cell(0, UnderlineStyle::Single));
-        frame.push_cursor(
-            Cursor {
-                col: 0,
-                row: 0,
-                visible: true,
-            },
-            red,
-        );
+        // Metin rengi bilerek kuralın kendi rengiyle **aynı** (beyaz): bu
+        // sınamanın sorduğu şey renk değil **sıra**, ve dikdörtgenin ezmesi
+        // onu bulandırmamalı. Rengin ezildiğini soran yer
+        // `rule_under_the_cursor_takes_the_cursor_text_color`.
+        frame.push_cursor(cursor_at(0, WHITE), red);
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let cell = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();
