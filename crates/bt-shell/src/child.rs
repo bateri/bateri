@@ -233,11 +233,27 @@ pub(crate) fn is_zsh(shell: &Path) -> bool {
 /// derlenmiyor — sevk edilen binary'nin bir geliştirme makinesindeki yola
 /// düşmesi, ürünü o makineye bağlamak olurdu.
 pub(crate) fn zsh_wrapper_dir() -> Option<PathBuf> {
-    bundle_shell_dir().and_then(wrapper_dir).or_else(|| {
-        cfg!(debug_assertions)
-            .then(repo_shell_dir)
-            .and_then(wrapper_dir)
-    })
+    bundle_shell_dir()
+        .and_then(wrapper_dir)
+        .or_else(repo_wrapper_dir)
+}
+
+/// Deponun `assets/shell/zsh`'i — **yalnız debug derlemede var**.
+///
+/// `#[cfg]`, `cfg!` değil (`/code-review`, 009 kapısı): ikincisi bir çalışma
+/// zamanı `bool`'u, yani `env!("CARGO_MANIFEST_DIR")` ile gömülen geliştirme
+/// makinesinin mutlak yolu release binary'sinde de tip denetiminden ve kod
+/// üretiminden geçiyordu; onu ürünün dışında tutan şey dilin garantisi değil
+/// LLVM'in ölü kod elemesiydi. Yukarıdaki doc'un "release'te o kol hiç
+/// derlenmiyor" cümlesi ancak bu ayrımla doğru.
+#[cfg(debug_assertions)]
+fn repo_wrapper_dir() -> Option<PathBuf> {
+    wrapper_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell"))
+}
+
+#[cfg(not(debug_assertions))]
+fn repo_wrapper_dir() -> Option<PathBuf> {
+    None
 }
 
 /// `{shell}/zsh`, yalnız gövde okunabilir bir dosyaysa.
@@ -255,15 +271,6 @@ fn bundle_shell_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let contents = exe.parent()?.parent()?;
     Some(contents.join("Resources/shell"))
-}
-
-/// Deponun `assets/shell`'i, crate'in kendi yolundan.
-///
-/// `CARGO_MANIFEST_DIR` derleme zamanında gömülüyor, yani bu yol derlendiği
-/// makinenin yolu — [`zsh_wrapper_dir`]'in onu yalnız debug'da sormasının
-/// sebebi bu.
-fn repo_shell_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell")
 }
 
 /// BCP 47 dil etiketinin dil alt etiketi: `tr-TR` → `tr`, `zh-Hans-CN` →
@@ -495,7 +502,7 @@ mod tests {
         // de `source`'u yarıda bırakır; kabuğu bırakmamalı.
         write(
             cfg.join(".zshrc"),
-            "PS1='$ '\nbateri_bozuk_komut_yok\nif then fi\n",
+            "PS1='$ '\nbateri_missing_command\nif then fi\n",
         );
         // `path`'teki indeks makineye bağlı (kalıtılan PATH'in uzunluğu), o
         // yüzden **varlık** basılıyor: `> 0` deterministik.

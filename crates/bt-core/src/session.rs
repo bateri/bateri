@@ -730,6 +730,13 @@ impl tty::EventedReadWrite for TappedPty {
     ) -> io::Result<()> {
         // fd kaydı içerideki `Pty`'nin: hazır olma sinyali, token'lar ve çocuk
         // olayının boru hattı dokunulmadan kalıyor.
+        //
+        // SAFETY: trait'in koşulu "kaynaklar kayıtlarını **aşmalı**".
+        // Kaydedilen fd'lerin sahibi `self.pty` ve onun sahibi de `self`:
+        // sarmalayıcı `Pty`'yi **değer olarak** taşıyor, ödünç almıyor. İkisi
+        // birlikte `EventLoop`'a taşınıyor ve `deregister` de aynı `self`
+        // üzerinden geçtiği için kayıt, kaynağın düşmesinden önce kalkıyor.
+        // `TappedPty`'nin `Pty`'yi geri verdiği bir yol yok.
         unsafe { self.pty.register(poll, interest, poll_opts) }
     }
 
@@ -4551,6 +4558,57 @@ mod tests {
             wake.copies().iter().any(|text| text == "hello"),
             "yarış boyunca pano kolu hiç koşmadı"
         );
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_shell_state_and_frame() {
+        // 009 okuyucu thread ile ana thread arasına **beşinci** paylaşılan
+        // muteksi soktu (`Session.shell`) ama `race_*` ailesine karşılığını
+        // eklememişti (`/audit`, 009 kapısı): dört çiftin her birinin bir
+        // sınaması var, bu çiftin yoktu.
+        //
+        // Yarışan iki yol: okuyucu thread `TappedPty::read` içinde OSC 133
+        // tararken `shell` kilidini alıyor (ve aynı turda `Term`'ü de tutuyor,
+        // alacritty ilk turdan sonra kilidi tutarak okuyor), ana thread ise
+        // `shell_state()` ile yalnız `shell`'i, `frame()` ile yalnız `Term`'ü
+        // alıyor. İkisi ters sırada kilitlenirse bu sınama **asılı kalır** —
+        // yaprak kilit iddiasının (modül başlığı) tek mekanik bekçisi bu.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            // Dört işaret de akıyor: prompt, komut başlangıcı, çalışma ve
+            // çıkış kodu. `sleep` yok — tarayıcıyı chunk sınırlarıyla da
+            // yorsun diye akış kesintisiz.
+            "while :; do printf '\\033]133;A\\007$ \\033]133;B\\007\
+             \\033]133;C\\007out\\n\\033]133;D;0\\007'; done",
+            Arc::clone(&wake),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let reader = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut seen = 0u64;
+                while Instant::now() < deadline {
+                    if session.shell_state().is_some() {
+                        seen += 1;
+                    }
+                }
+                seen
+            })
+        };
+
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            if frame_if_damaged(&session, |_| ()).is_some() {
+                frames += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(reader.join().unwrap() > 0, "kabuk durumu hiç okunmadı");
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }
 }

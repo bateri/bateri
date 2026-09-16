@@ -11,7 +11,10 @@ tema seçimi ve geçici punto), `clipboard.rs` ve `app.rs`'in `ShellWake`'i
 `crates/bt-atlas/src/font.rs` (font ailesinin bulunması),
 `crates/bt-gpu/src/motion.rs` ve `link.rs` (imleç hareketinin ve Hareketi
 Azalt'ın uygulanması; üç değerli ayarın tek `bool`'a indiği yer
-`app.rs`'in `resolve_reduce_motion`'ı).
+`app.rs`'in `resolve_reduce_motion`'ı), `crates/bt-shell/src/child.rs`
+(hangi kabuk koşuyor, sarmalayıcı betiği nerede) ve `app.rs`'in
+`shell_integration_env`'i (shell entegrasyonu kurulacak mı ve hangi ortamla);
+betiğin kendisi `assets/shell/zsh/`.
 
 ## Dosyanın yeri
 
@@ -32,7 +35,8 @@ satırına dokunulmaz.
 
 Değişiklik **kaydettiğiniz anda** geçerli olur — ayar dosyasında da,
 kullanılan temanın dosyasında da; kabuk ve içindeki program yaşamaya devam
-eder. Editörün kaydı nasıl yaptığı fark etmez (yerinde yazma, boşaltma,
+eder. Tek istisna [`[shell] integration`](#shell): kabuk çoktan doğduğu için
+o anahtar sonraki oturumda geçerlidir. Editörün kaydı nasıl yaptığı fark etmez (yerinde yazma, boşaltma,
 geçici dosya ve üstüne taşıma, sembolik bağın hedefine yazma). Sistemin açık/koyu
 görünümü de anında izlenir: tema `"system"` iken (varsayılan) Sistem
 Ayarları'nda görünüm değişince pencere de değişir.
@@ -460,7 +464,19 @@ etkilenmez.
 
 Uygulama açılmıyorsa (bozuk bir kabuk yapılandırması yüzünden pencere hemen
 kapanıyorsa) anahtarı **elle** kapatabilirsiniz; bateri'ye hiç ihtiyaç yok.
-Başka bir terminalden dosyayı açın:
+Başka bir terminalden başlayın.
+
+Entegrasyon varsayılan olarak açık olduğu için ayar dosyanız **hiç
+olmayabilir** — Settings…'i bir kez bile açmadıysanız yoktur. Önce o hâli
+geçin; dosya yoksa tek komut yeter ve gerisini okumanıza gerek kalmaz:
+
+```sh
+mkdir -p ~/.config/bateri
+[ -e ~/.config/bateri/settings.toml ] || printf '[shell]\nintegration = "off"\n' \
+  > ~/.config/bateri/settings.toml
+```
+
+Dosya zaten varsa onu açın:
 
 ```sh
 open -e ~/.config/bateri/settings.toml
