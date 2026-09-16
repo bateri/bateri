@@ -2,7 +2,8 @@
 //!
 //! VT durum makinesi, grid, scrollback, PTY ve okuyucu thread burada yaşar;
 //! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
-//! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`,
+//! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`, `Block`,
+//! `Blocks`,
 //! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Theme`,
 //! `ShellState`, `ShellPhase`,
 //! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`, `CursorMotion`,
@@ -17,8 +18,11 @@
 //! bloğunun altında kalan metnin rengini veriyor ("imleç altındaki metin
 //! okunur kalmalı" bir terminal semantiğidir), o rengi hangi piksellerin
 //! alacağını çizen biliyor — **karar burada, boyama orada**. Ayrımın ölçütü
-//! hücrenin bölünebilirliği: blok iki hücre arasındayken sınır hücrenin
+//! hücrenin bölünebilirliği: imleç bloğu iki hücre arasındayken sınır hücrenin
 //! ortasından geçer ve burada verilecek bir hücre kararı onu göremez.
+//! Komut bloğu (`Block`) aynı kuralın ikinci örneği: sınırdan satır aralığı ve
+//! renk geçer, çıkış kodu geçmez — renderer'da escape dizisi ya da çıkış kodu
+//! tanıyan bir dal yanlış yerdedir.
 //!
 //! Sözleşme: bu crate macOS'a özgü hiçbir kütüphane görmez — `objc2*`,
 //! `core-text`, `metal` yok — ve Linux'ta derlenebilir kalır; Vulkan kapısı
@@ -40,8 +44,9 @@ mod wake;
 pub use color::{LinearRgba, Theme};
 pub use input::Arrow;
 pub use session::{
-    Cell, CellHalf, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, SelectionPoint, Session,
-    SessionOptions, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
+    Block, Blocks, Cell, CellHalf, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, SelectionPoint,
+    Session, SessionOptions, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell,
+    smoke_shell,
 };
 pub use settings::{
     Changes, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion, SYSTEM_THEME, Settings,

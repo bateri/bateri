@@ -157,8 +157,15 @@ __bateri_hooks() {
 
 # Prompt çizilmeden önce: biten komutun kodu (`D`), sonra prompt başlangıcı (`A`).
 __bateri_precmd() {
-  # İLK satır olmak zorunda: sonraki her komut `$?`'ı ezer.
+  # İLK satır olmak zorunda: sonraki her komut `$?`'ı ezer — `emulate` dahil,
+  # o yüzden o da bunun ALTINDA.
   local code=$?
+  # Kancanın gövdesi kullanıcının seçenekleriyle koşuyor ve aşağıdaki
+  # `psvar[9]` bir DİZİ İNDEKSİ: `KSH_ARRAYS` açıkken atama zsh'in 10.
+  # yuvasına düşerken `%9v` hâlâ 9.'yu okur, yani çıpa boş kimlik taşır ve
+  # bloklar TANISIZ kaybolur (`/code-review`, 010 phase-2; `zsh -f` ile
+  # doğrulandı). `-L` fonksiyon yereldir, dönüşte geri alınır.
+  emulate -L zsh
   # `D` BİTEN bloğu kapatıyor, yani kimliği sayaç artmadan ÖNCEKİ değer.
   if (( __bateri_ran )); then
     __bateri_ran=0
@@ -195,7 +202,14 @@ __bateri_precmd() {
   # Sağ taraf TIRNAKLI: `[[ ]]` içinde tırnaksız sağ işlenen glob desenidir.
   local anchor_open=$'%{\e]8;;bateri://block/%9v\a%}'
   local anchor_close=$'%{\e]8;;\a%}'
-  [[ $PS1 == "$anchor_open"* ]] || PS1=$anchor_open$PS1
+  # Nöbet İÇERME sorar, konum değil (`/code-review`, 010 phase-2): `B` ekinin
+  # nöbetiyle aynı biçim. Önek testi PS1'e BAŞKASI dokunduğunda idempotan
+  # değil — her precmd'de PS1'i süsleyen bir tema (virtualenv, git bilgisi)
+  # ekimizi başa taşımaz, biz de her turda bir yenisini eklerdik ve PS1
+  # oturum boyunca sınırsız büyürdü. Ek hâlâ önce basılmaya ÇALIŞIYOR
+  # (aşağıdaki gerekçe), ama araya giren bir önek yüzünden ikinci bir çıpa
+  # doğurmuyor.
+  [[ $PS1 == *"$anchor_open"* ]] || PS1=$anchor_open$PS1
   # `B` prompt'un SONU, yani bir kanca değil prompt'un kendisi.
   # `%{…%}` "sıfır genişlik" demek; olmasaydı zsh kaçış dizisini basılan
   # karakter sayar ve satır kaydırma bozulurdu. Her prompt'ta yeniden
@@ -203,7 +217,8 @@ __bateri_precmd() {
   # bizim ekimizi siler. Koşul da onun için — aynı ek iki kez girmesin.
   [[ $PS1 == *$'\e]133;B\a'* ]] || PS1=$PS1$'%{\e]133;B\a%}'
   # Çıpanın kapanışı en SONDA: prompt'un bütün hücreleri kimliği taşısın.
-  [[ $PS1 == *"$anchor_close" ]] || PS1=$PS1$anchor_close
+  # Nöbet yine içerme sorar, sonek değil — açılışla aynı gerekçe.
+  [[ $PS1 == *"$anchor_close"* ]] || PS1=$PS1$anchor_close
 }
 
 # Komut koşmadan hemen önce: çıktı burada başlıyor (`C`).

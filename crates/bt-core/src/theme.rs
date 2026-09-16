@@ -8,8 +8,8 @@
 //! gelir — kullanıcı gömülü bir temayı kopyalayıp yalnız değiştirdiğini
 //! bırakabilir. Hata kuralı ayar dosyasınınkiyle aynı: ayrıştırılamayan metin
 //! ayrı sonuç (`Err`), ayrıştırılan metinde kabul edilmeyen renk tabandaki
-//! değeri alır ve tanı bırakır, bilinmeyen anahtar sessiz — 013'ün durum
-//! rolleri bugünkü sürümde hata sayılmamalı.
+//! değeri alır ve tanı bırakır, bilinmeyen anahtar sessiz — 013'ün kalan durum
+//! rolleri (uyarı, bilgi) bugünkü sürümde hata sayılmamalı.
 
 use toml_edit::TableLike;
 
@@ -41,7 +41,8 @@ impl Theme {
     /// Tema dosyasının metni → `base`'in üstüne okunmuş tema + tanılar, ya da
     /// ayrıştırılamadı.
     ///
-    /// Roller (`background`, `foreground`, `dim`, `accent`) kökte, 16 renk
+    /// Roller (`background`, `foreground`, `dim`, `accent`, `success`,
+    /// `error`) kökte, 16 renk
     /// `[ansi]` bölümünde; renk `"#rrggbb"` (büyük harf de olur). `Err` yalnız
     /// geçersiz TOML'da, ayar dosyasındaki anlamıyla.
     ///
@@ -59,6 +60,8 @@ impl Theme {
             ("foreground", &mut theme.foreground),
             ("dim", &mut theme.dim),
             ("accent", &mut theme.accent),
+            ("success", &mut theme.success),
+            ("error", &mut theme.error),
         ];
         for (key, slot) in roles {
             read_color(text, root, key, key, slot, &mut diagnostics);
@@ -128,6 +131,8 @@ mod tests {
         foreground: 0x000002,
         dim: 0x000003,
         accent: 0x000004,
+        success: 0x000005,
+        error: 0x000006,
         ansi: [
             0x000010, 0x000011, 0x000012, 0x000013, 0x000014, 0x000015, 0x000016, 0x000017,
             0x000018, 0x000019, 0x00001a, 0x00001b, 0x00001c, 0x00001d, 0x00001e, 0x00001f,
@@ -212,12 +217,34 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_silent() {
-        // 013'ün durum rolleri ve başka terminallerin ek anahtarları.
+        // 013'ün **kalan** durum rolleri ve başka terminallerin ek anahtarları.
+        // Sentinel 010'da değişti: `success` artık bilinen bir anahtar ve
+        // sınama onu örnek olarak kullansaydı sessizce hiçbir şey sormaz olurdu.
         let theme = clean(
-            "name = \"x\"\nsuccess = \"#00ff00\"\n[ansi]\nred = \"#ff0000\"\norange = 1\n[meta]\n",
+            "name = \"x\"\nwarning = \"#00ff00\"\n[ansi]\nred = \"#ff0000\"\norange = 1\n[meta]\n",
             &Theme::BATERI,
         );
         assert_eq!(theme.ansi[1], 0xff0000);
+    }
+
+    #[test]
+    fn status_roles_are_read_and_inherited() {
+        // Yazılan rol okunuyor…
+        let theme = clean("success = \"#0a0b0c\"\n", &SENTINEL);
+        assert_eq!(
+            theme,
+            Theme {
+                success: 0x0a0b0c,
+                ..SENTINEL
+            }
+        );
+        // …yazılmayan rol tabandan geliyor. 010'un göç cümlesi bu: kendi
+        // temasını yazmış kullanıcı iki rolü gömülü `bateri`'den miras alır.
+        let inherited = clean("background = \"#ffffff\"\n", &Theme::BATERI);
+        assert_eq!(
+            (inherited.success, inherited.error),
+            (Theme::BATERI.success, Theme::BATERI.error)
+        );
     }
 
     #[test]

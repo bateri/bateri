@@ -90,11 +90,11 @@ pub enum ShellPhase {
     Finished,
 }
 
-/// Bir bloğun akıbeti — şeridin rengini bu belirler.
+/// Bir bloğun akıbeti — defterin tuttuğu ham kayıt.
 ///
 /// `Pending`, "koşuyor" **demek değil**: boş bir prompt'a basılan Enter da
 /// `A` doğurur ama hiç komut koşmadığı için `D` gelmez. İkisini ayırt eden
-/// bilgi [`ShellState::phase`]'te ve ayrımı yapacak olan kare yolu; defter
+/// bilgi [`ShellState::phase`]'te ve ayrımı yapan [`ShellLog::stripe`]; defter
 /// yalnız gördüğünü kaydeder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -102,6 +102,22 @@ pub(crate) enum Outcome {
     Pending,
     /// `D` geldi; kabuk kodu okunamayacak şekilde bastıysa `None`.
     Finished(Option<i32>),
+}
+
+/// Bir bloğun **çizilebilir** durumu; renge [`crate::Session::frame`]'de
+/// temadan iniyor.
+///
+/// Üç değer, çünkü bugün çizilen üç renk var. Çizilmeyen durumun adı bu enum'da
+/// değil, onu üreten fonksiyonun `None`'ı: "bilinmeyen hiçbir hâlde çizilmez"
+/// bir renk seçimi değil, çizim kararı.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stripe {
+    /// Komut koşuyor — rengi temanın `accent`'ı.
+    Running,
+    /// Sıfır çıkış koduyla bitti.
+    Success,
+    /// Sıfırdan farklı çıkış koduyla bitti.
+    Error,
 }
 
 /// Defterin en az tutacağı blok sayısı.
@@ -187,13 +203,17 @@ impl BlockLog {
     }
 
     /// Bloğun akıbeti; defterde yoksa `None` ve o hâlde şerit çizilmez.
-    ///
-    /// **Bu phase'de yalnız sınamalar okuyor** ve kapı bu yüzden `cfg(test)`:
-    /// üretim tüketicisi kare yolu ve o phase-2'de geliyor. `allow(dead_code)`
-    /// ile açık bırakılsaydı aynı susturma sonraki gerçek ölü kodu da örterdi.
-    #[cfg(test)]
     fn get(&self, id: u32) -> Option<Outcome> {
         self.index_of(id).map(|at| self.entries[at])
+    }
+
+    /// Defterin **en son açtığı** blok; defter boşken `None`.
+    ///
+    /// Kimlikler bitişik ve artan olduğu için son kayıt son `A`'dır — "koşan
+    /// blok hangisi" sorusunun tek yanıtı bu ([`ShellLog::running`]).
+    fn last(&self) -> Option<(u32, Outcome)> {
+        let at = self.entries.len().checked_sub(1)?;
+        Some((self.first.wrapping_add(at as u32), self.entries[at]))
     }
 
     /// Kimliğin halkadaki yeri; aralığın dışındaki kimlik `None`.
@@ -253,6 +273,52 @@ impl ShellLog {
                     self.blocks.finish(id, exit);
                 }
             }
+        }
+    }
+
+    /// **Koşan** bloğun kimliği; yoksa `None`.
+    ///
+    /// İki koşul birlikte: safha `Running` **ve** defterin son kaydı hâlâ açık.
+    /// İkincisi olmasaydı kimliksiz bir `A`'dan sonra gelen `C` safhayı
+    /// `Running`'e alır, defterin son kaydı ise bir önceki (bitmiş) blok olur
+    /// ve o blok koşuyormuş gibi boyanırdı.
+    pub(crate) fn running(&self) -> Option<u32> {
+        if self.state?.phase != ShellPhase::Running {
+            return None;
+        }
+        match self.blocks.last()? {
+            (id, Outcome::Pending) => Some(id),
+            (_, Outcome::Finished(_)) => None,
+        }
+    }
+
+    /// Bir bloğun şeridi; `None` → **çizilmez**.
+    ///
+    /// Defter ile safhanın birleştiği tek yer ve ikisi zaten aynı yaprak
+    /// kilidin altında — ayrı dursalardı kare, bir işaretin iki yarısı
+    /// arasında tutarsız bir çift okuyabilirdi.
+    ///
+    /// Koşan bloğun rengi **defterden değil safhadan** gelir ([`Self::running`]
+    /// parametresi imzada bu yüzden var, kurallı tek istisna o): `D` henüz
+    /// gelmediği için defterdeki kaydı `Pending` ve `Pending`'in kendisi
+    /// "koşuyor" demek değil.
+    ///
+    /// Çizilmeyen dört durum tek `match`'te, çünkü dördü de aynı tezin
+    /// parçası — bilinmeyeni yanlış çizmemek:
+    ///
+    /// - kimlik defterde yok (halka dolaştı ya da hiç görülmedi),
+    /// - `Pending` ama koşmuyor (boş prompt'a basılan Enter, bekleyen prompt),
+    /// - `Finished(None)`: komut bitti ama kod okunamadı — "bitti" için
+    ///   nötr bir rol yok ve olmayan rolü `accent` ile taklit etmek koşmayan
+    ///   bloğu koşuyor göstermek olurdu.
+    pub(crate) fn stripe(&self, id: u32, running: Option<u32>) -> Option<Stripe> {
+        if running == Some(id) {
+            return Some(Stripe::Running);
+        }
+        match self.blocks.get(id)? {
+            Outcome::Finished(Some(0)) => Some(Stripe::Success),
+            Outcome::Finished(Some(_)) => Some(Stripe::Error),
+            Outcome::Finished(None) | Outcome::Pending => None,
         }
     }
 }
