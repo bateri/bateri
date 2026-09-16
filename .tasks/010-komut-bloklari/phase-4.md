@@ -119,7 +119,9 @@ _Requirements: R4, R4.1, R4.2, R4.3_
 - [x] Doğrulama geçti (`make hepsi` + `make duman`: `kare=30 hucre=8 glif=6
       kural=15 icerik=3 hareket=27 sessiz=1750.64ms kapanis=clean` — jetonlar
       oynamadı, şerit yolu kapının dışında)
-- [~] Gerçek zsh oturumunda gözle kontrol (Kabul'ün son maddesi) — kullanıcı
-      set kapısında bakacak; `make kur` gerektiriyor ve phase'in kodu ondan
-      bağımsız doğrulandı
+- [x] Gerçek zsh oturumunda gözle kontrol (Kabul'ün son maddesi) — `make kur`
+      sonrası doğrulandı: şerit genişliği ve renkler piksel ölçümüyle onaylandı,
+      ayrıntısı `teslim.md` → B.2. Koşan bloğun pencerenin dibine kadar uzaması
+      plana uygun ama iyi görünmüyor; düzeltmesi 011'e bırakıldı (içerik tabana
+      yapışınca aralık kendiliğinden kısalıyor)
 - [x] Yayın etkisi yazıldı

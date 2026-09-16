@@ -82,9 +82,26 @@ Phase-4'ün Kabul listesinin tek açık maddesi (`[~]`). `bateri.app`'i açıp:
 - **Şeridin genişliği.** Planda bir sayı yoktu; payın ortasındaki yarısı
   seçildi (iki yanında dörtte birlik nefes payı) ve bu setin **tek
   uydurulmuş ürün kararı**. İnce ya da kalın geliyorsa oran `Frame::push_block`
-  içinde tek satır — bu setin kapanışında düzeltilmesi en ucuz olduğu yer.
+  içinde tek satır.
 - Tema değiştirince (View ▸ Theme ▸) şerit **aynı karede** yeni palete
   geçmeli.
+
+**Sonuç (2026-09-17, açık temada ölçüldü).** Üçü de doğru:
+
+- **Genişlik onaylandı.** Pay `x=112..127` (16 fiziksel piksel = 8pt @2x),
+  şerit `x=116..123` — payın tam ortasındaki yarısı, iki yanında 4'er piksel.
+  Ekran görüntüsünden piksel ölçümüyle doğrulandı.
+- **Renkler doğru ve prompt'un kendi renginden bağımsız.** İyi tanık: `false`
+  düştükten sonraki prompt'un `→` oku **kırmızı**, ama o satırın şeridi
+  **yeşil**, çünkü orada koşan `sleep 3` başarılı oldu. Ölçülen değerler
+  temanın `#3b7a3b`/`#b5423d`/`#3d6aa8`'i (ekran görüntüsü Display P3'e
+  çevirdiği için sayılar birebir değil, sapma üçünde de aynı yönde).
+- **Koşan blok mavi ve pencerenin dibine kadar uzuyor** — plan böyle diyor
+  (`son bloğun sonu pencerenin altıdır`) ama çıktısız bir komutta boş ekrana
+  uzun bir bar çiziyor. **Bu sette düzeltilmedi ve düzeltilmemeli:** kullanıcı
+  kararıyla içerik 011'de tabana yapışacak (`docs/YOL-HARITASI.md` → 011), ve o
+  düzende aralık kendiliğinden kısalıyor. Şeridi ayrıca yamamak aynı şeyi iki
+  kez çözmek olurdu.
 
 ### B.3 Kullanıcı temaları `[elle]`
 
@@ -108,10 +125,11 @@ düşüşün kendisi — kullanıcıya söylenecek bir şey varsa "yeni sekme a�
 
 ### Yayın Checklist
 
-- [ ] `make kur` koştu, paket tazelendi (B.1)
-- [ ] Gerçek zsh oturumunda şeritler doğrulandı; **şerit genişliği onaylandı**
-      ya da oran değiştirildi (B.2)
-- [ ] Kendi teması olan kullanıcı varsa iki rol eklendi (B.3)
+- [x] `make kur` koştu, paket tazelendi (B.1)
+- [x] Gerçek zsh oturumunda şeritler doğrulandı; şerit genişliği **onaylandı**
+      (B.2) — koşan bloğun uzunluğu bilinçli olarak 011'e bırakıldı
+- [ ] Kendi teması olan kullanıcı varsa iki rol eklendi (B.3) — kullanıcı
+      temasınız yoksa yapılacak bir şey yok
 
 ## Bilinen sınırlar
 
