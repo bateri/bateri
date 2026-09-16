@@ -26,7 +26,8 @@ make kur             # release paket de aynı kapılara tabi; paket yolunu doğr
 
 - `make hepsi`: `denetim: temiz`, clippy uyarısız, sınamalar yeşil.
 - `make duman`: jeton satırı basılır ve beş sayaç da sıfırın üstünde olur.
-  Bugünkü sabit sayaçlar `hucre=8 glif=6 kural=15 yuva=13/2048 istek=4`.
+  Bugünkü sabit sayaçlar `hucre=8 glif=6 kural=15 yuva=13/2048`; `istek`
+  3–4 (çoğunlukla 4, gerekçesi ölçüm kaydında).
   Kapının iki sınırı `icerik ≤ IDLE_FRAME_LIMIT` ve `sessiz ≥ QUIET_FLOOR`;
   ikisinin de değeri, türetmesi ve ölçüm koşuları
   [`docs/OLCUMLER.md` → `## Boşta kare`](../../docs/OLCUMLER.md) → 2026-09-16

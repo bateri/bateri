@@ -405,11 +405,12 @@ reduce_motion = "system"
 - Kısıldığında imleç kaymaz: yeni hücresinde **kısa bir belirmeyle** (90 ms)
   görünür, eski hücresinde iz bırakmaz. Kısılan şey kaymanın kendisi, imlecin
   görünürlüğü değil.
-- Belirme **duraksamadan sonraki** harekete aittir. Arka arkaya gelen
-  hareketlerde — yazarken ya da çıktı akarken — imleç tam opak kalır, yeni
-  yerine sessizce geçer: her harekette yeniden belirmek saniyede on kez
-  yanıp sönmek olurdu ve titreme, kaldırmaya çalıştığımız hareketten
-  beterdir.
+- Belirme **duraksamadan sonraki** harekete aittir: normal yazma hızında her
+  harf imleci yeni yerinde kısa bir belirmeyle gösterir. Hareketler
+  belirmenin süresinden daha sık geldiğinde — çıktı akarken ya da çok hızlı
+  yazarken — imleç tam opak kalır ve yeni yerine sessizce geçer; yoksa
+  saniyede on kereden hızlı bir titreme doğardı (eski davranışta imleç akan
+  çıktıda büsbütün görünmez oluyordu).
 - `cursor_motion = "snap"` bunun **üstündedir**: hareketi zaten kapatmış
   olan kullanıcıya Hareketi Azalt bir belirme *eklemez*.
 - Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa hedefinde

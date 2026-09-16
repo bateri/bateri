@@ -87,6 +87,18 @@ geliyor; 90 ms **seçilmiş** bir sayıdır ve doc'u bunu söyler.
 
 Sapmalar; planın söylemediği ya da başka türlü öngördüğü yerler.
 
+- *(Sonradan, set kapısında — `/code-review` bulgusu.)* **Belirme her hedef
+  değişiminde yeniden başlıyordu ve bu, indirgemeyi tersine çeviriyordu:**
+  akan çıktıda imleç her içerik karesinde yeni bir hücreye geçtiği için alfa
+  sıfıra çakılıyor, yani Hareketi Azalt açıkken imleç **hiç görünmüyordu**.
+  Kural "duraksamadan sonraki hareket belirir"e çevrildi (`State.since_move`
+  + `Motion::sync`); ölçütü belirmenin kendi süresi, yani ikinci bir sabit
+  gerekmedi ve `dt` kırpmasına yaslanıyor (`assert!(FADE_DURATION < DT_MAX)`).
+  Normal yazma hızında davranış **değişmedi** (her harf beliriyor); değişen
+  tek şey, belirmeden sık gelen hareketlerin artık opaklığı sıfırlamaması.
+  Bu phase'in `reduce_motion_fades_in_place_instead_of_sliding` sınaması
+  aynı iddiayı koruyor, yanına akan çıktı kolu eklendi.
+
 - **İndirgeme dördüncü bir *kip*, dördüncü bir stil değil.** `Motion`'a bir
   `reduce` bayrağı girdi ve stille birlikte `Motion::mode`'da tek karara
   iniyor (`Mode::Snap|Ease|Spring|Fade`). `State::settled` artık stili değil

@@ -120,6 +120,13 @@ Sapmalar; planın söylemediği ya da başka türlü öngördüğü yerler.
   Pencere iki kolda da ekranda; bozuk koşunun 119 kare/sn'si kapının açık
   olduğunu ayrıca gösteriyor. Makine ölçüm başlarken pilde ve %17'deydi —
   ölçüm prize takılana kadar bekletildi.
+- **Reddedilen bulgu (set kapısı, gerekçesiyle):** `/code-review` hermetik
+  koşunun imleç stilini koda sabitlemeyi önerdi — `hareket > 0` kapısı bugün
+  ürünün varsayılanının **animasyonlu** olmasına yaslanıyor. Sabitlenmedi:
+  varsayılan bir gün `snap` olursa bugünkü davranış `make duman`'ı kırmızıya
+  düşürüyor ve o kırmızı yanlış yeri gösterse de **görülüyor**; sabitlenseydi
+  ürün sessizce animasyonsuzlaşırken kapı yeşil kalırdı. Bağ `Counters::motion`
+  doc'unda adıyla yazılı ve tetiği orada bekliyor.
 - **Ölçülen sayılar** `docs/OLCUMLER.md` → `## Boşta kare` → 2026-09-16
   girişinde; buraya kopyalanmıyor. Kapıya inen iki sabit: `IDLE_FRAME_LIMIT`
   `8` (değişmedi), `QUIET_FLOOR` `870 ms` (yeni).

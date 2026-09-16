@@ -46,7 +46,9 @@ görebilecek hâle gelsin — **ilk animasyondan önce**.
   bırakır. Süreli koşu `[motion]`'ı **okumaz**.
 - **R6 — Reduce Motion.** `"system"` iken `NSWorkspace`'ten okunur ve canlı
   izlenir; açıkken her animasyon 90 ms'lik belirmeye iner. Süreli koşu sistem
-  ayarını **okumaz**.
+  ayarını **okumaz**. *(Kapıda daraldı: belirme **duraksamadan sonraki**
+  harekete ait. Belirmeden sık gelen hareketler — akan çıktı — opaklığı
+  sıfırlamıyor, yoksa imleç görünmez oluyordu; phase-5 → Uygulama Notları.)*
 - **R7 — Süreli kapı ölçümle iner.** `sessiz=` dağılımı ve
   `IDLE_FRAME_LIMIT`'in yeni türetmesi ölçülür, `docs/OLCUMLER.md`'ye yazılır;
   kapı (`sessiz ≥ T`) kod phase'lerinden **ayrı** commit'le iner.
@@ -109,3 +111,7 @@ icerik++                           link uyanık kalır (yerleşene kadar)
 phase-2'nin `/code-review`'undan çıkan tek bulgu phase-1'in kodundaydı ve
 kendi commit'iyle indi (phase açmadı): `applicationWillTerminate:` ölçüm
 kapısı kapalıyken de saat okuyordu.
+
+Set kapısının bulguları `kapı` commit'ine girdi; kapıdan sonra çıkan tek
+düzeltme (belge çelişkisi: "yazarken imleç opak kalır" normal yazma hızında
+doğru değil) phase açmadan ayrı bir commit'le indi.

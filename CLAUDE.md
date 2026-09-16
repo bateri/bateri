@@ -134,8 +134,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   200 ms'lik bir imleç kayması `kare`'yi meşru olarak şişirir. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
   animasyonu 90 ms'lik bir **belirmeye** indirir — imleç kaymaz, yeni yerinde
-  belirir. Belirme **duraksamadan sonraki** harekete ait: akan çıktıda ya da
-  yazarken imleç tam opak kalır, yoksa saniyede on kez yanıp sönerdi.
+  belirir. Belirme **duraksamadan sonraki** harekete ait: belirme süresinden
+  sık gelen hareketlerde (akan çıktı) imleç opak kalır, yoksa alfa sıfıra
+  çakılır ve imleç büsbütün kaybolurdu.
   İndirgemenin tek yeri `bt-gpu::motion` (`Mode::Fade`); üç değerli
   ayar ile sistemin cevabı `bt-shell`'de tek `bool`'a iniyor, `bt-gpu` AppKit
   görmüyor. `cursor_motion = "snap"` bunun üstündedir: hareketi zaten kapatmış
