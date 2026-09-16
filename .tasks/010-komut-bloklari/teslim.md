@@ -39,8 +39,8 @@ dörtgeni. `make terminfo` girdisi yok.
 - `make duman` — jetonlar **oynamamalı**: `hucre=8 glif=6 kural=15`,
   `kapanis=clean`, `icerik` sınırın altında, `sessiz` tabanın üstünde. Şerit
   bu kapının **dışında**: `smoke_shell` OSC 133 basmıyor, yani blok yok. Son
-  koşu: `kare=30 hucre=8 glif=6 kural=15 icerik=3 hareket=27 sessiz=1750.64ms
-  kapanis=clean`.
+  koşu (işaret tasarımından sonra): `kare=29 hucre=8 glif=6 kural=15 icerik=2
+  hareket=27 sessiz=1751.67ms kapanis=clean`.
 - `make kur` — çıkış 0; `Info.plist`, ikon, lisans ve `Contents/Resources/shell`
   altındaki betik denetimden geçmeli.
 
@@ -140,8 +140,8 @@ düşüşün kendisi — kullanıcıya söylenecek bir şey varsa "yeni sekme a�
 - [x] `make kur` koştu, paket tazelendi (B.1)
 - [x] Gerçek zsh oturumunda işaretler doğrulandı; genişlik **onaylandı**
       (B.2) — ve gözle kontrol tasarımı değiştirdi: işaret bölge değil komut satırı
-- [ ] Kendi teması olan kullanıcı varsa iki rol eklendi (B.3) — kullanıcı
-      temasınız yoksa yapılacak bir şey yok
+- [x] Kendi teması olan kullanıcı varsa iki rol eklendi (B.3) — **no-op**:
+      `~/.config/bateri/themes/` yok, gömülü temalar kullanılıyor
 
 ## Bilinen sınırlar
 
