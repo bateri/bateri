@@ -60,16 +60,66 @@ _Requirements: R4, R4.1, R4.2, R4.3_
 - Ayar şeması, shell entegrasyonu, terminfo, bundle: değişiklik yok.
   Yeni bağımlılık yok. Ölçüm iddiası yok.
 
+## Uygulama Notları
+
+- **Şerit genişliği planda yoktu ve bir sabit doğurmadı.** `docs/ARASTIRMA.md`
+  Metalterm'in `command_gutter`'ını bir ayar olarak sayıyor ama genişlik
+  vermiyor; phase-3 payı "şerit artı iki yanında nefes payı" diye tanımlamıştı.
+  `push_block` o cümlenin aritmetiği oldu: şerit payın **ortasındaki yarısı**,
+  iki yanında dörtte birlik nefes. İkinci bir pt sabiti eklenmedi — eklenseydi
+  ölçek değiştiğinde payla ayrışır ve şerit paydan taşardı, yani
+  `CellMetrics`'in payın ikinci okuyucusunu yasaklama gerekçesi birebir geri
+  gelirdi.
+- **Şerit `pos_at`'ten geçmiyor.** O satır payı ızgaranın orijinine ekliyor;
+  şerit ise payın **kendi içinde** duruyor. Geçseydi ilk sütunun üstüne düşer
+  ve metni örterdi — Karar 3a'nın ayırdığı payın tamamı boşa giderdi. Bu
+  `pos_at`'in "pay yalnız burada eklenir" cümlesine bir istisna değil: şerit o
+  cümlenin konusu olan **ızgara** koordinatı değil.
+- **`encode_bg` ikiye bölünmedi, ortak gövdeye indi.** Plan "ayrı draw call"
+  diyordu ve ilk refleks `encode_bg`'nin ikizini yazmaktı; iki gövde
+  kopyalanınca buffer indeksi ya da pipeline seçimi ayrışabilir ve belirti
+  yalnız bir listede görünürdü. `encode_quads(instances)` ortak yol oldu,
+  `encode_stripes` ile `encode_bg` ona hangi listeyi verdiklerini söylüyor.
+- **Şeridin sayacı yok ve bu bilinçli.** Üç kardeşi (`bg_count`,
+  `glyph_count`, `rule_count`) duman jetonları ve jeton satırı bir makine
+  sözleşmesi. Dördüncü bir jeton açmak reçete OSC 133 basmadığı için hep sıfır
+  okuyan, yani hiçbir şey söylemeyen bir kapı olurdu; var olan bir jetona
+  girmek `hucre=`'nin anlamını kaydırırdı. Şeridin tek bekçisi bu yüzden
+  offscreen piksel okuması — düşerse şeridin çizildiğini söyleyen başka hiçbir
+  şey kalmıyor ve sınamanın doc'u bunu yazıyor.
+- **Ters aralık `debug_assert`, release'te doyuruyor.** `last_row < first_row`
+  `bt-core`'da bir kusur olurdu; sessizce bir satırlık şerit çizmek onu
+  saklardı. Çizim yolunda panik yok, o yüzden bekçi debug'da gürültülü,
+  release'te `saturating_sub` ile bir satıra doyuruyor.
+- **Hareket karesi yoluna tek satır bile eklenmedi** ve bu "animasyon yok"
+  maddesinin kanıtı: `move_cursor` şerit listesine dokunmuyor, yani ızgara
+  değişmedikçe şerit olduğu gibi kalıyor. Ayrı liste kararının (Karar, phase
+  gövdesi) ödediği şey tam olarak buydu.
+- **Offscreen sınaması payı sıfır **vermiyor**.** Kardeşlerinin `grid()`
+  yardımcısı payı sıfır kuruyor (phase-3'ün notu: `cell_rows` orijini sıfır
+  varsayıyor) ama şeridin sorusu tam olarak payın geometrisi: sınama
+  `CellMetrics::new(4, 4, 8)` ile kuruluyor ve `pixel_at` ile pay bölgesinden
+  okuyor. İki blok, iki durum rengi — tek şerit `inst[0]`'ı stride'dan bağımsız
+  okur, yani 32'den kayan bir stride görünmezdi.
+
 ## Checklist
 
-- [ ] `Frame`'de şerit için ayrı liste; `bg`/`bg_count` ve `move_cursor`
+- [x] `Frame`'de şerit için ayrı liste; `bg`/`bg_count` ve `move_cursor`
       dokunulmadı
-- [ ] Renderer'da ayrı draw call, mevcut `cell_bg` pipeline'ı
-- [ ] `link.rs` blok aralıklarını aktarıyor; animasyon eklenmedi
-- [ ] Test: `Frame` — şerit listesi `bg_count`'a girmiyor, `move_cursor`
+- [x] Renderer'da ayrı draw call, mevcut `cell_bg` pipeline'ı
+- [x] `link.rs` blok aralıklarını aktarıyor; animasyon eklenmedi
+- [x] Test: `Frame` — şerit listesi `bg_count`'a girmiyor, `move_cursor`
       şeridi silmiyor
-- [ ] Test: offscreen çizim — şerit pikselleri doğru renkte (ara ton bir
+      (`stripes_stay_out_of_the_cell_count_and_survive_motion_frames`,
+      `a_stripe_spans_its_rows_inside_the_gutter`)
+- [x] Test: offscreen çizim — şerit pikselleri doğru renkte (ara ton bir
       renkle; `0.0`/`1.0` sRGB'nin sabit noktaları)
-- [ ] `CLAUDE.md` ve `docs/YOL-HARITASI.md` güncellendi
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
-- [ ] Yayın etkisi yazıldı
+      (`command_stripes_paint_the_gutter_on_the_gpu`)
+- [x] `CLAUDE.md` ve `docs/YOL-HARITASI.md` güncellendi
+- [x] Doğrulama geçti (`make hepsi` + `make duman`: `kare=30 hucre=8 glif=6
+      kural=15 icerik=3 hareket=27 sessiz=1750.64ms kapanis=clean` — jetonlar
+      oynamadı, şerit yolu kapının dışında)
+- [~] Gerçek zsh oturumunda gözle kontrol (Kabul'ün son maddesi) — kullanıcı
+      set kapısında bakacak; `make kur` gerektiriyor ve phase'in kodu ondan
+      bağımsız doğrulandı
+- [x] Yayın etkisi yazıldı

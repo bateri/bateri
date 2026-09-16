@@ -39,8 +39,10 @@ kabuk çoktan doğduğu için **sonraki oturumda** geçerlidir. Kabuk zsh ise
 `Contents/Resources/shell`'inden, debug'da depodan) ve kabuğun bastığı OSC 133
 işaretleri `Session::shell_state()`'te birikir; her prompt bir blok kimliği
 basar, `frame()` o kimlikleri prompt'un OSC 8 çıpasından okuyup blokları satır
-aralığı ve şerit rengi olarak sınırdan verir — **çizen taraf henüz yok**, dock
-da yok. `make kur` `bateri.app` paketini üretir.
+aralığı ve şerit rengi olarak sınırdan verir; `bt-gpu` şeridi ızgaranın solunda
+ayrılan paya `cell_bg` pipeline'ıyla çizer — **animasyonsuz**, şerit anında
+belirir. Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app`
+paketini üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri
 aynı commit'te düzelir.
@@ -233,7 +235,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   değildir ve kullanıcının özgün `ZDOTDIR`'ını geri koyar; gerekçeler
   `assets/shell/zsh/bateri.zsh`'in başlığında. Komut durumu OSC 133
   işaretlerinden okunur ve `Session::shell_state()`'te durur; satıra
-  çıpalanması (bloklar) henüz yok.
+  çıpalanması prompt'un OSC 8 bağlantısıyla, yani blok kimliği hücrelerde
+  taşınır. bash ve fish betikleri doğduğunda çıpa satırı onlara da yazılır —
+  yoksa o kabuklarda blok yok, şerit de yok.
 - **Ölçülmemiş sayı yazılmaz.** Tek sahip `docs/OLCUMLER.md` (dosyanın başı
   hangi türün sayısı olduğunu söyler); ölçüm bir kapı değildir, `/measure` ile
   kullanıcı ister. Zaman kancaları env'dir: `BT_SCROLL_TEST` yükü seçer (boşta

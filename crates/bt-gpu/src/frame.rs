@@ -4,17 +4,20 @@
 //! burada piksele çevrilir ve GPU'nun göreceği düzene girer. Renderer "ne
 //! çizileceğini" buradan okur, "ne anlama geldiğini" bilmez.
 //!
-//! Üç liste, iki pipeline: arka planlar (ve imleç) `cell_bg`'nin, glyph'ler ve
-//! kural çizgileri `cell`'in. Ayrı durmalarının sebebi çizim sırası —
-//! glyph'ler arka planların, kurallar da glyph'lerin **üstüne** gelmek zorunda
-//! ve tek listede sıra hücre hücre karışırdı. Glyph ile kuralın ayrı listede
-//! olması da aynı cümlenin devamı: ikisi aynı pipeline'dan geçiyor ama üstü
-//! çizili, altındaki harften sonra çizilmeli.
+//! Dört liste, iki pipeline: komut bloğu şeritleri, arka planlar (ve imleç)
+//! `cell_bg`'nin, glyph'ler ve kural çizgileri `cell`'in. Ayrı durmalarının
+//! sebebi çizim sırası — glyph'ler arka planların, kurallar da glyph'lerin
+//! **üstüne** gelmek zorunda ve tek listede sıra hücre hücre karışırdı. Glyph
+//! ile kuralın ayrı listede olması da aynı cümlenin devamı: ikisi aynı
+//! pipeline'dan geçiyor ama üstü çizili, altındaki harften sonra çizilmeli.
+//! Şerit `cell_bg`'yi arka planlarla paylaşıyor ama listesi ayrı ve gerekçesi
+//! sıra değil **ömür**: [`Frame::move_cursor`] arka plan listesini kırpıyor,
+//! şerit ise hareket karesinde olduğu gibi kalmalı (bkz. [`Frame::stripes`]).
 
 use std::mem::offset_of;
 
 use bt_atlas::{Face, RuleKind};
-use bt_core::{Cell, Cursor, LinearRgba, UnderlineStyle};
+use bt_core::{Block, Cell, Cursor, LinearRgba, UnderlineStyle};
 
 use crate::renderer::CellMetrics;
 
@@ -196,6 +199,16 @@ fn rule_kind(underline: UnderlineStyle) -> Option<RuleKind> {
 /// çağrıldığı tek yer içerik karesi.
 #[derive(Default)]
 pub(crate) struct Frame {
+    /// Komut bloklarının sol paydaki şeritleri; arka planlarla **aynı**
+    /// pipeline'dan ama ayrı listede.
+    ///
+    /// Ayrılığın sebebi çizim sırası değil ömür (`plan.md` → R4.1): `bg`'ye
+    /// girseydi ya sayılmadan girerdi — [`Frame::move_cursor`]'ın
+    /// `truncate(bg_count)`'u onu her hareket karesinde siler ve şerit imleç
+    /// kaydıkça **titrerdi** — ya da sayılarak girer ve `hucre=` jetonunun
+    /// anlamı kayardı ("çizilen hücre" artık hücre olmayan bir şeyi de
+    /// sayardı). Üçüncü bir liste ikisini de temsil edilemez kılıyor.
+    stripes: Vec<Instance>,
     bg: Vec<Instance>,
     glyphs: Vec<GlyphCell>,
     /// Kural çizgileri; glyph'lerle **aynı** pipeline'dan ama onlardan sonra
@@ -240,6 +253,7 @@ impl Frame {
     /// kaymış" olurdu.
     pub(crate) fn clear(&mut self, metrics: CellMetrics) {
         let cell_px = metrics.cell_px();
+        self.stripes.clear();
         self.bg.clear();
         self.glyphs.clear();
         self.rules.clear();
@@ -311,6 +325,47 @@ impl Frame {
         }
     }
 
+    /// Bir komut bloğunun şeridi: sol payın ortasına, bloğun satır aralığı
+    /// boyunca uzanan bir dikdörtgen.
+    ///
+    /// **Renk üretilmiyor, taşınıyor.** `bt-core` "hangi satırlar, hangi renk"
+    /// sorusunu çözülmüş veriyor ([`Block`]); burada çıkış kodu tanıyan bir dal
+    /// yanlış yerde olurdu (`CLAUDE.md` → karar burada, boyama orada).
+    ///
+    /// Genişlik **paydan türüyor**, ikinci bir sabitten değil: payın ortasındaki
+    /// yarısı, iki yanında dörtte birlik nefes payı. `CellMetrics::GUTTER_PT`'nin
+    /// doc'u payı "şerit artı iki yanında nefes payı" diye tanımlıyor ve bu
+    /// satır o cümlenin aritmetiği. Ayrı bir pt sabiti eklenseydi ölçek
+    /// değiştiğinde ikisi ayrışır ve şerit paydan taşardı — `CellMetrics`'in
+    /// payın ikinci okuyucusunu bilerek yasaklamasıyla aynı gerekçe.
+    ///
+    /// [`Frame::pos_at`]'ten **geçmiyor** ve geçmemeli: o satır payı ızgaranın
+    /// orijinine ekliyor, şerit ise payın **kendi içinde** duruyor. Oradan
+    /// geçseydi şerit ilk sütunun üstüne düşer ve metni örterdi (Karar 3a'nın
+    /// tam olarak önlediği şey).
+    ///
+    /// Sıfır payda dikdörtgen dejenere doğar (sıfır genişlik) ve hiçbir
+    /// fragment üretmez — görünmez imleçle aynı sessiz çıkış, ikinci bir
+    /// bayrak yok.
+    pub(crate) fn push_block(&mut self, block: Block) {
+        let h = self.cell_px.1;
+        debug_assert!(h > 0.0, "clear(metrics) çağrılmadı");
+        // Sınırın sözleşmesi aralığın boş olamayacağı; ters aralık `bt-core`'da
+        // bir kusur olurdu ve burada sessizce bir satırlık şerit çizmek onu
+        // saklardı. Çizim yolunda panik yok, bekçi bu yüzden `debug_assert`
+        // ve `saturating_sub` release'te aralığı bir satıra doyuruyor.
+        debug_assert!(block.first_row <= block.last_row, "ters blok aralığı");
+        let top = f32::from(block.first_row) * h;
+        // `last_row` **dahil**: aralık bir satırlıksa yükseklik tam bir hücre.
+        // `+ 1` düşseydi tek satırlık blok (prompt beklerken) hiç görünmezdi.
+        let rows = f32::from(block.last_row.saturating_sub(block.first_row)) + 1.0;
+        self.stripes.push(Instance {
+            pos: [self.gutter_px / 4.0, top],
+            size: [self.gutter_px / 2.0, rows * h],
+            rgba: block.stripe.to_array(),
+        });
+    }
+
     /// İmleç bloğu; `bg_count`'a **girmez** ve görünmez imleç çizilmez.
     ///
     /// İki şey birden yazıyor ve bilerek tek çağrıda: bloğun kendisi arka plan
@@ -368,6 +423,10 @@ impl Frame {
     /// eklemek zorunda ve bunu bir `debug_assert` tutuyor. Kırpma o bekçiyi
     /// geçerli bırakıyor — liste her hâlükârda "önce arka planlar, sonra
     /// imleç" düzeninde kalıyor.
+    ///
+    /// **Şerit listesine dokunmuyor** ve bu da aynı cümlenin parçası: ızgara
+    /// değişmediyse blokların satır aralığı da değişmedi, yani şerit de
+    /// değişmemeli. Şerit ayrı listede olmasaydı bu kırpma onu silerdi.
     pub(crate) fn move_cursor(
         &mut self,
         cursor: Cursor,
@@ -423,6 +482,19 @@ impl Frame {
 
     pub(crate) fn bg_instances(&self) -> &[Instance] {
         &self.bg
+    }
+
+    /// Bu karenin komut bloğu şeritleri.
+    ///
+    /// Sayacı **yok** ve bilerek: üç kardeşi (`bg_count`, `glyph_count`,
+    /// `rule_count`) `make duman`'ın jetonları ve jeton satırı bir makine
+    /// sözleşmesi. Şerit oraya girseydi ya yeni bir jeton açardı — duman
+    /// reçetesi OSC 133 basmadığı için değeri hep sıfır olurdu, yani hiçbir
+    /// şey söylemeyen bir kapı — ya da var olan bir jetonun anlamını
+    /// kaydırırdı. Şeridin kanıtı sayaç değil, `renderer.rs`'in offscreen
+    /// piksel okuması.
+    pub(crate) fn stripes(&self) -> &[Instance] {
+        &self.stripes
     }
 
     pub(crate) fn glyphs(&self) -> &[GlyphCell] {
@@ -757,6 +829,75 @@ mod tests {
         frame.clear(grid(9, 18));
         frame.push(bg_cell(3, 2));
         assert_eq!(frame.bg_instances()[0].pos, [27.0, 36.0]);
+    }
+
+    /// Şeridin rengi: temanın durum rolü, `frame()` sınırının çözüp verdiği
+    /// değerle aynı kaynak (`bt-core` → `Block::stripe`).
+    const SUCCESS: LinearRgba = bt_core::Theme::BATERI.success_linear();
+
+    fn block(first_row: u16, last_row: u16) -> Block {
+        Block {
+            first_row,
+            last_row,
+            stripe: SUCCESS,
+        }
+    }
+
+    #[test]
+    fn a_stripe_spans_its_rows_inside_the_gutter() {
+        // Şeridin iki iddiası da sessizce bozulabilir: (1) dikey aralık
+        // `last_row` **dahil** — `+ 1` düşerse prompt beklerken duran tek
+        // satırlık blok hiç görünmez; (2) yatay olarak payın **içinde** durur —
+        // `pos_at`'ten geçseydi ilk sütunun üstüne düşer ve metni örterdi, yani
+        // Karar 3a'nın ayırdığı payın tamamı boşa giderdi.
+        let mut frame = Frame::default();
+        frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
+        frame.push_block(block(1, 3));
+
+        let stripe = frame.stripes()[0];
+        assert_eq!(stripe.pos[1], 18.0, "şerit ilk satırından başlamalı");
+        assert_eq!(stripe.size[1], 54.0, "üç satır, `last_row` dahil");
+        assert_eq!(stripe.rgba, SUCCESS.to_array(), "renk sınırdan gelir");
+        // Pay içinde ve ortalanmış: sol kenarı payın dörtte biri, sağ kenarı
+        // dörtte üçü. Payı aşsaydı 0. sütunun arka planına girerdi.
+        assert_eq!(stripe.pos[0], f32::from(GUTTER) / 4.0);
+        assert_eq!(stripe.pos[0] + stripe.size[0], f32::from(GUTTER) * 0.75);
+
+        // Tek satırlık blok tam bir hücre boyunda.
+        frame.push_block(block(5, 5));
+        assert_eq!(frame.stripes()[1].size[1], 18.0);
+
+        frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
+        assert!(
+            frame.stripes().is_empty(),
+            "`clear` şeritleri de boşaltmalı"
+        );
+    }
+
+    #[test]
+    fn stripes_stay_out_of_the_cell_count_and_survive_motion_frames() {
+        // Phase'in asıl sözleşmesi (R4.1): şerit `bg`'ye **girmiyor**. Girip
+        // sayılmasaydı `move_cursor`'ın kırpması onu her hareket karesinde
+        // siler ve şerit imleç kaydıkça titrerdi; sayılsaydı `hucre=` jetonu
+        // hücre olmayan bir şeyi de sayar ve duman kapısının anlamı kayardı.
+        let mut frame = Frame::default();
+        frame.clear(CellMetrics::new(8, 16, GUTTER).expect("ölçü"));
+        frame.push(bg_cell(0, 0));
+        frame.push_block(block(0, 2));
+        push_settled(&mut frame, cursor(0, 0, true));
+
+        assert_eq!(frame.bg_count(), 1, "şerit hücre sayılmamalı");
+        assert_eq!(frame.bg_instances().len(), 2, "bir hücre, bir imleç");
+        assert_eq!(frame.stripes().len(), 1);
+
+        let stripes = frame.stripes().to_vec();
+        for _ in 0..3 {
+            frame.move_cursor(cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
+            // Izgara değişmedi, yani blokların satır aralığı da değişmedi:
+            // şerit hareket karesinde olduğu gibi kalmalı.
+            assert_eq!(frame.stripes(), stripes, "hareket karesi şeridi oynattı");
+            assert_eq!(frame.bg_count(), 1);
+        }
     }
 
     #[test]
