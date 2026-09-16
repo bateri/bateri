@@ -92,6 +92,11 @@ size = 13
 # Lets programs in the terminal, also over ssh, copy text to the clipboard
 # (OSC 52): "copy" allows it, "off" does not. They can never read it.
 osc52 = "copy"
+
+[motion]
+# How the cursor travels between cells: "spring" glides and eases into place,
+# "ease" glides for a fixed time, "snap" jumps there at once.
+cursor_motion = "spring"
 ```
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
@@ -354,6 +359,33 @@ osc52 = "copy"
   varsayılana (açık) değil; açılışta okunamayan ya da geçersiz ayar dosyası
   da (bkz. [Hata olursa](#hata-olursa)).
 - Kaydettiğiniz anda geçerli olur; açık programı yeniden başlatmak gerekmez.
+
+### `[motion]`
+
+```toml
+[motion]
+cursor_motion = "spring"
+```
+
+| anahtar | tür | varsayılan | anlamı |
+|---|---|---|---|
+| `cursor_motion` | `"snap"`, `"ease"` ya da `"spring"` | `"spring"` | imlecin hücreler arasında nasıl gittiği |
+
+- **`"spring"`** — imleç yeni yerine bir yayla kayar ve yavaşlayarak oturur;
+  hedefi aşmaz. Uzak bir sıçrama yakın bir sıçramadan biraz uzun sürer.
+- **`"ease"`** — kayma **sabit** sürer, mesafe ne olursa olsun; sonuna doğru
+  yavaşlar, hedefi aşmaz.
+- **`"snap"`** — kayma yok, imleç doğrudan yeni hücrede görünür. Hareketi
+  tamamen kapatmanın yolu bu.
+- **İmlecin kendi hareketi** kayar; **altındaki ızgaranın** hareketi kaymaz.
+  Yani geçmişte kaydırmak (tekerlek), pencereyi boyutlandırmak, fontu ya da
+  puntoyu değiştirmek ve imleci gizleyip geri açan bir program (vim, less)
+  imleci kaydırmadan yerine koyar — orada imleç hareket etmiş değildir.
+- Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa `"snap"`
+  onu hedefinde bitirir, öteki iki stil kaymayı bulunduğu yerden devralır:
+  imleç hiçbir stil değişiminde ışınlanmaz.
+- Tanınmayan değer (`"sprong"`, `"Spring"`, `true`) yalnız bu anahtarı
+  etkiler: stil olduğu gibi kalır ve uyarı görünür.
 
 ## Temalar
 

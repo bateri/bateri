@@ -12,6 +12,15 @@
 //! katlı: konum+hız eşiği **ya da** süre tavanı. İkincisi kemer — birincisini
 //! hiç sağlamayan bir parametre seti (aşırı düşük sönümleme, sonsuz salınım)
 //! link'i sonsuza uyanık tutardı.
+//!
+//! **Üç stil, tek durum makinesi** ([`bt_core::CursorMotion`]): `Snap`
+//! animasyonu hiç başlatmaz (yani hareket karesi de doğmaz), `Ease` sabit
+//! süreli ve yapısal olarak taşmasız, `Spring` kritik sönümlü yay. Stil
+//! ayardan geliyor ve **çözülmüş** olarak: `bt-shell` dosyayı okuyor, burası
+//! yalnız fiziği biliyor. Süreler ve katsayılar **seçilmiş** sayılardır,
+//! ölçülmüş değil; hepsi bu dosyanın başında, doc'larıyla.
+
+use bt_core::CursorMotion;
 
 /// Yay sertliği, rad/s. **Seçilmiş bir sayı, ölçülmüş değil.**
 ///
@@ -63,6 +72,22 @@ const TIME_CEILING: f32 = 0.7;
 /// bir göz kırpması arasında; yine seçilmiş.
 const DT_MAX: f32 = 0.1;
 
+/// `ease` stilinin kayma süresi, saniye — **seçilmiş bir sayı, ölçülmüş
+/// değil.**
+///
+/// [`OMEGA`]'nın bir hücrelik ~230 ms'sinin biraz altında: `ease`'in ayırt
+/// edici yanı süresinin **mesafeden bağımsız** olması, yani uzak sıçramada
+/// yaydan hızlı, yakın sıçramada ona yakın. Değer [`TIME_CEILING`]'in altında
+/// kalmak zorunda, yoksa kemer meşru bir `ease` kaymasını keserdi
+/// (`ease_settles_well_inside_the_ceiling`).
+const EASE_DURATION: f32 = 0.18;
+
+// `ease`'in durma koşulu kendi saati, yani süre tavanının kemeri ona
+// **uygulanmıyor**; iki sayının sırası bu yüzden bir yorum cümlesi değil bir
+// şart. Tavanı `ease`'in altına düşüren bir gelecek değişiklik burada patlar,
+// ekranda kesilen bir kaymada değil.
+const _: () = assert!(EASE_DURATION < TIME_CEILING);
+
 /// İmlecin kaymasının durumu.
 ///
 /// `Option`'ın içi "uçuşta bir imleç var" demek; `None` hem ilk kare hem de
@@ -71,6 +96,14 @@ const DT_MAX: f32 = 0.1;
 /// ayrışabilen iki gerçek olurdu.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Motion {
+    /// Kullanıcının seçtiği stil ([`Motion::set_style`]).
+    ///
+    /// Varsayılanı **burada yok**: `Default` türetiliyor ve değeri
+    /// [`bt_core::CursorMotion`]'ın `Default`'undan alıyor. Buraya bir
+    /// `Spring` yazılsaydı varsayılanın ikinci bir sahibi doğardı ve ayar
+    /// modelininkiyle sessizce ayrışabilirdi — hermetik süreli koşu tam da o
+    /// değeri alıyor (`hareket > 0` kapısı ona yaslanıyor).
+    style: CursorMotion,
     state: Option<State>,
     /// Son kareden görülen kaydırma ofseti; `None` → henüz hiç kare yok.
     ///
@@ -84,10 +117,20 @@ pub(crate) struct Motion {
 struct State {
     /// Hücre biriminde `(sütun, satır)`; tam sayı olmak zorunda değil.
     pos: [f32; 2],
-    /// Hücre/saniye.
+    /// Hücre/saniye. `ease`'de **hep sıfır**: o stilin konumu zamanın
+    /// fonksiyonu, hızın entegrali değil.
     vel: [f32; 2],
+    /// Kaymanın başladığı yer — yalnız `ease`'in operandı.
+    ///
+    /// Yay hızı taşıdığı için geçmişe ihtiyaç duymuyor; `ease` ise konumu
+    /// `from → target` arasında `elapsed`'e göre **yeniden hesaplıyor**, yani
+    /// çıkış noktasını unutamaz. Uçuşta hedef değişince (ya da stil
+    /// değişince) burası bulunulan konuma çekiliyor: yoksa imleç eski
+    /// başlangıçtan yeniden başlar, yani geri sıçrardı.
+    from: [f32; 2],
     target: [f32; 2],
-    /// Hedef kurulalı beri geçen süre; süre tavanının operandı.
+    /// Hedef kurulalı beri geçen süre; süre tavanının **ve** `ease`'in ilerleme
+    /// operandı.
     elapsed: f32,
 }
 
@@ -109,6 +152,10 @@ impl Motion {
     /// oynatmayan içerik kareleri (renk değişimi, alt satıra yazı) saniyede
     /// onlarca gelebiliyor ve her biri süre tavanını sıfırlasaydı tavan hiç
     /// dolmazdı — kemerin kendisi kopardı.
+    ///
+    /// **`CursorMotion::Snap` beşinci bir snap hâli değil, hepsinin üstü:**
+    /// o stilde her `sync` anında oturuyor, yani animasyon hiç başlamıyor ve
+    /// `settled()` hiç `false` olmuyor — hareket karesi de doğmuyor.
     pub(crate) fn sync(&mut self, col: u16, row: u16, visible: bool, offset: i32, geometry: bool) {
         let scrolled = self.offset != Some(offset);
         self.offset = Some(offset);
@@ -116,10 +163,14 @@ impl Motion {
             self.state = None;
             return;
         }
+        // Guard'dan **önce** okunuyor: `self.state`'in ödüncü altında ikinci
+        // bir alanı okumak match guard'ında kabul edilmiyor.
+        let animated = self.style != CursorMotion::Snap;
         let target = [f32::from(col), f32::from(row)];
         match &mut self.state {
-            Some(state) if !scrolled && !geometry => {
+            Some(state) if animated && !scrolled && !geometry => {
                 if state.target != target {
+                    state.from = state.pos;
                     state.target = target;
                     state.elapsed = 0.0;
                 }
@@ -129,11 +180,56 @@ impl Motion {
                 *state = Some(State {
                     pos: target,
                     vel: [0.0; 2],
+                    from: target,
                     target,
                     elapsed: 0.0,
                 });
             }
         }
+    }
+
+    /// Kullanıcı stili değiştirdi (ayar dosyası kaydedildi).
+    ///
+    /// Dönüş: **uçuştaki bir kayma bu çağrıda bitirildi mi**. Çağıran bunu
+    /// bilmek zorunda, çünkü link'in "hasar yok" dalı yerleşmiş bir
+    /// animasyonda hiç çizmeden uyuyor — `Snap`'e geçen kullanıcının imleci
+    /// aksi hâlde ara hücrede asılı kalır ve ancak alakasız bir içerik karesi
+    /// onu yerine koyardı (`Renderer::set_font`'un "değişti mi" dönüşüyle aynı
+    /// örüntü; aynı stili yeniden yazan kayıt no-op).
+    ///
+    /// **Işınlama yok.** `Snap` uçuştaki kaymayı **hedefinde** bitiriyor
+    /// ([`Motion::finish`]); öteki iki stil kaymayı bulunduğu yerden
+    /// devralıyor — `from` bulunulan konuma, `elapsed` sıfıra çekiliyor.
+    /// Devralmasaydı `ease` eski çıkış noktasından yeniden başlar, yani imleç
+    /// geri sıçrardı; yay ise hızı koruduğu için zaten sorunsuz, ama iki stil
+    /// için iki ayrı kural yazmanın kazandırdığı bir şey yok.
+    ///
+    /// **"Uçuşta mı" sorusu eski stille sorulmak zorunda** ve bu bir sıra
+    /// inceliği değil, ışınlamanın kendisi: durma koşulu stile göre
+    /// değişiyor ([`State::settled`]), yani stil önce yazılırsa 180 ms'den
+    /// uzun uçmuş bir yay `ease`'in saatine göre "yerleşmiş" görünür, devir
+    /// atlanır ve sıradaki `advance` `t = 1` ile imleci hedefe atar — hem de
+    /// **çizmeden**, çünkü link o kareyi yerleşmiş sayıp uyuyor. `snap`'te
+    /// giderilen kusurun bu yoldan geri gelmiş hâli
+    /// (`a_long_spring_flight_does_not_teleport_when_the_style_changes`).
+    pub(crate) fn set_style(&mut self, style: CursorMotion) -> bool {
+        if self.style == style {
+            return false;
+        }
+        let in_flight = !self.settled();
+        self.style = style;
+        if !in_flight {
+            return false;
+        }
+        if style == CursorMotion::Snap {
+            self.finish();
+            return true;
+        }
+        if let Some(state) = &mut self.state {
+            state.from = state.pos;
+            state.elapsed = 0.0;
+        }
+        false
     }
 
     /// Fiziği `dt` saniye ilerletir. `dt` **burada** kırpılıyor, çağıranda
@@ -145,37 +241,19 @@ impl Motion {
     /// bloğun dikdörtgeni altındaki glyph'le sub-piksel ayrışırdı — hiçbir
     /// sayaç görmez, göz görür.
     pub(crate) fn advance(&mut self, dt: f32) {
+        let style = self.style;
         let Some(state) = &mut self.state else {
             return;
         };
         let dt = dt.clamp(0.0, DT_MAX);
         state.elapsed += dt;
-        for axis in 0..2 {
-            let before = state.pos[axis] - state.target[axis];
-            let (after, vel) = critically_damped(before, state.vel[axis], dt);
-            // **Taşma kırpması** — kapalı formun tek başına vermediği garanti.
-            //
-            // ζ = 1 "durgun hâlden taşma yok" demek; [`Motion::sync`] ise
-            // uçuşta hızı **bilerek** koruyor (momentum) ve o hız hedefin
-            // ötesine taşıyabiliyor: `(d + c·t)e^{-ωt}` ifadesi
-            // `|v| > OMEGA × kalan mesafe` olduğunda sıfırı geçiyor. Ölçülen
-            // en kötü hâl, uzun bir sıçramanın ortasında yapılan küçük bir
-            // hedef düzeltmesinde **0,87 hücre** — neredeyse tam bir hücre,
-            // yani gözle görülür bir geri tepme. 008 Karar 6 bunu adıyla
-            // yasaklıyor ("kritik sönümlemeye yakın, **taşma yok**), o yüzden
-            // hedefi geçen eksen hedefte durduruluyor.
-            //
-            // Sert bir duruş değil: kırpmanın ateşlediği an imleç zaten tam
-            // hedefin üstünde, yani görünen şey "vardı ve durdu".
-            if before != 0.0 && (before < 0.0) != (after < 0.0) {
-                state.pos[axis] = state.target[axis];
-                state.vel[axis] = 0.0;
-            } else {
-                state.pos[axis] = state.target[axis] + after;
-                state.vel[axis] = vel;
-            }
+        match style {
+            // `sync` zaten hedefe oturttu; ilerletilecek bir şey yok.
+            CursorMotion::Snap => {}
+            CursorMotion::Ease => state.ease(),
+            CursorMotion::Spring => state.spring(dt),
         }
-        if state.settled() {
+        if state.settled(style) {
             state.pos = state.target;
             state.vel = [0.0; 2];
         }
@@ -184,12 +262,13 @@ impl Motion {
     /// Uçuştaki kaymayı **hedefinde bitirir** — animasyonun ilerleyemeyeceği
     /// anlar için.
     ///
-    /// Bugünkü tek çağıranı örtülen pencere: link duruyor, yani `advance` bir
-    /// daha koşmuyor ve durum sonsuza kadar "yerleşmemiş" kalırdı. Bedeli iki
-    /// katlı olurdu — süreli koşu deadline'da `MotionUnsettled` deyip
-    /// **kod doğruyken** kırmızı düşer ve tanı "bir durma koşulu bozuk" diye
-    /// yanlış yeri gösterirdi; örtülme kalkınca da imleç, kullanıcının hiç
-    /// görmediği bir noktadan kayarak gelirdi.
+    /// Bugünkü çağıranları örtülen pencere ve `snap`'e geçen ayar. Örtülmede
+    /// link duruyor, yani `advance` bir daha koşmuyor ve durum sonsuza kadar
+    /// "yerleşmemiş" kalırdı. Bedeli iki katlı olurdu — süreli koşu
+    /// deadline'da `MotionUnsettled` deyip **kod doğruyken** kırmızı düşer ve
+    /// tanı "bir durma koşulu bozuk" diye yanlış yeri gösterirdi; örtülme
+    /// kalkınca da imleç, kullanıcının hiç görmediği bir noktadan kayarak
+    /// gelirdi.
     ///
     /// Snap politikasının zaten söylediği şey (008 Karar 5): görünürlük
     /// dönüşü animasyonsuz. Burada yalnız aynı kural bir kare erken
@@ -197,6 +276,7 @@ impl Motion {
     pub(crate) fn finish(&mut self) {
         if let Some(state) = &mut self.state {
             state.pos = state.target;
+            state.from = state.target;
             state.vel = [0.0; 2];
             state.elapsed = 0.0;
         }
@@ -214,12 +294,76 @@ impl Motion {
     /// yok. Süreli koşunun kapısı (`Verdict::MotionUnsettled`) da bunu
     /// okuyor.
     pub(crate) fn settled(&self) -> bool {
-        self.state.is_none_or(|state| state.settled())
+        self.state.is_none_or(|state| state.settled(self.style))
     }
 }
 
 impl State {
-    fn settled(&self) -> bool {
+    /// `ease`: konum **zamanın fonksiyonu** — `from`'dan `target`'a kübik
+    /// yavaşlama (`1 − (1−t)³`).
+    ///
+    /// Taşmanın yapısal olarak imkânsız olduğu yer burası: ifade `t ∈ [0,1]`
+    /// için monoton ve `1`'i geçmiyor, yani yayın gerektirdiği taşma kırpması
+    /// bu stilde hiç gerekmiyor. Hız da entegre edilmiyor (`vel` sıfır kalır);
+    /// ödediği bedel `from`'u hatırlamak.
+    fn ease(&mut self) {
+        let t = (self.elapsed / EASE_DURATION).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        for axis in 0..2 {
+            self.pos[axis] = self.from[axis] + (self.target[axis] - self.from[axis]) * eased;
+        }
+    }
+
+    /// `spring`: kritik sönümlü yayın bir adımı.
+    fn spring(&mut self, dt: f32) {
+        for axis in 0..2 {
+            let before = self.pos[axis] - self.target[axis];
+            let (after, vel) = critically_damped(before, self.vel[axis], dt);
+            // **Taşma kırpması** — kapalı formun tek başına vermediği garanti.
+            //
+            // ζ = 1 "durgun hâlden taşma yok" demek; [`Motion::sync`] ise
+            // uçuşta hızı **bilerek** koruyor (momentum) ve o hız hedefin
+            // ötesine taşıyabiliyor: `(d + c·t)e^{-ωt}` ifadesi
+            // `|v| > OMEGA × kalan mesafe` olduğunda sıfırı geçiyor. Ölçülen
+            // en kötü hâl, uzun bir sıçramanın ortasında yapılan küçük bir
+            // hedef düzeltmesinde **0,87 hücre** — neredeyse tam bir hücre,
+            // yani gözle görülür bir geri tepme. 008 Karar 6 bunu adıyla
+            // yasaklıyor ("kritik sönümlemeye yakın, **taşma yok**), o yüzden
+            // hedefi geçen eksen hedefte durduruluyor.
+            //
+            // Sert bir duruş değil: kırpmanın ateşlediği an imleç zaten tam
+            // hedefin üstünde, yani görünen şey "vardı ve durdu".
+            if before != 0.0 && (before < 0.0) != (after < 0.0) {
+                self.pos[axis] = self.target[axis];
+                self.vel[axis] = 0.0;
+            } else {
+                self.pos[axis] = self.target[axis] + after;
+                self.vel[axis] = vel;
+            }
+        }
+    }
+
+    /// Durma koşulu; stile göre **iki ayrı soru**.
+    ///
+    /// `ease`'inki saattir ve bu onun tanımı: kayma [`EASE_DURATION`] sürer,
+    /// mesafe ne olursa olsun. Eşiğe bağlansaydı süre sessizce mesafeye
+    /// bağlanırdı (kübik yavaşlamada kalan mesafe eşiğin altına kısa
+    /// sıçramada erken, uzun sıçramada geç iniyor), yani stilin adı yalan
+    /// söylerdi.
+    ///
+    /// Yayınki iki katlı: konum+hız eşiği **veya** süre tavanı. `snap`
+    /// eşikten geçiyor — `sync` onu zaten hedefe oturttuğu için ilk soruda
+    /// `true`.
+    fn settled(&self, style: CursorMotion) -> bool {
+        if style == CursorMotion::Ease {
+            // "Saat doldu" **ya da** gidecek yol yok. İkinci koşul şart:
+            // anında oturan imleç (snap hâlleri, [`Motion::finish`]) `from`'u
+            // da hedefe koyuyor ve tek başına saate bakan bir kural onu
+            // [`EASE_DURATION`] boyunca "yerleşmemiş" sayardı — link hiçbir
+            // şeyi değiştirmeyen kareler çizerdi, üstelik her `sync`'te
+            // yeniden.
+            return self.elapsed >= EASE_DURATION || self.from == self.target;
+        }
         // Süre tavanı **veya** eşik; ikisi de tek başına yeterli.
         self.elapsed >= TIME_CEILING
             || (0..2).all(|axis| {
@@ -255,13 +399,21 @@ mod tests {
     /// 120 Hz'lik bir kare; sınamaların ortak adımı.
     const TICK: f32 = 1.0 / 120.0;
 
-    fn moving() -> Motion {
+    /// `(0,0)`'dan `(10,4)`'e uçuşta bir imleç, **verilen stille**.
+    fn moving_with(style: CursorMotion) -> Motion {
         let mut motion = Motion::default();
+        motion.set_style(style);
         // İlk `sync` snap: durum yok.
         motion.sync(0, 0, true, 0, false);
         assert!(motion.settled(), "ilk kare animasyon başlattı");
         motion.sync(10, 4, true, 0, false);
         motion
+    }
+
+    /// Yayın fiziğini sınayanların ortak kurulumu; varsayılan zaten `Spring`
+    /// ama sınamanın neyi ölçtüğü çağrı yerinde yazılı olmalı.
+    fn moving() -> Motion {
+        moving_with(CursorMotion::Spring)
     }
 
     /// `settled` olana kadar ilerletir; kaç kare sürdüğünü döndürür.
@@ -309,16 +461,20 @@ mod tests {
         let far = State {
             pos: [0.0; 2],
             vel: [0.0; 2],
+            from: [0.0; 2],
             target: [200.0, 0.0],
             elapsed: TIME_CEILING,
         };
-        assert!(far.settled(), "süre tavanı dolmuş koşuyu durdurmadı");
+        assert!(
+            far.settled(CursorMotion::Spring),
+            "süre tavanı dolmuş koşuyu durdurmadı"
+        );
         assert!(
             !State {
                 elapsed: TIME_CEILING - TICK,
                 ..far
             }
-            .settled(),
+            .settled(CursorMotion::Spring),
             "tavan dolmadan durdu: kemer erken ateşliyor"
         );
     }
@@ -371,6 +527,7 @@ mod tests {
         motion.state = Some(State {
             pos: [pos, 0.0],
             vel: [vel, 0.0],
+            from: [pos, 0.0],
             target: [target, 0.0],
             elapsed: 0.0,
         });
@@ -483,6 +640,158 @@ mod tests {
         motion.sync(40, 20, true, 0, false);
         assert!(motion.settled(), "görünürlük dönüşü animasyon başlattı");
         assert_eq!(motion.position(), Some([40.0, 20.0]));
+    }
+
+    #[test]
+    fn snap_never_starts_an_animation() {
+        // Stilin tanımı: kayma yok. Sonucu yalnız görsel değil muhasebe de —
+        // `settled()` hiç `false` olmadığı için link "hasar yok" dalında
+        // uyuyor, yani `hareket=0`.
+        let mut motion = moving_with(CursorMotion::Snap);
+        assert!(motion.settled(), "snap animasyon başlattı");
+        assert_eq!(motion.position(), Some([10.0, 4.0]));
+
+        // Uçuşun her ihtimali: uzak sıçrama, tek hücre, aynı hücre.
+        for (col, row) in [(400, 0), (11, 4), (11, 4), (0, 0)] {
+            motion.sync(col, row, true, 0, false);
+            assert!(motion.settled(), "({col},{row}) snap'te animasyon başlattı");
+            assert_eq!(motion.position(), Some([f32::from(col), f32::from(row)]));
+        }
+    }
+
+    #[test]
+    fn ease_takes_the_same_time_at_every_distance() {
+        // `ease`'in yaydan ayrıldığı tek yer bu: süre mesafeden bağımsız.
+        // Yay 1 hücrede ~230 ms, 400 hücrede ~460 ms harcıyor (`OMEGA`).
+        for (col, row) in [(1, 0), (200, 60), (10, 4)] {
+            let mut motion = moving_with(CursorMotion::Ease);
+            motion.sync(0, 0, true, 0, true);
+            motion.sync(col, row, true, 0, false);
+            assert!(!motion.settled(), "hedef değişimi animasyon başlatmadı");
+            let frames = run_to_rest(&mut motion, TICK);
+            let expected = (EASE_DURATION / TICK).ceil() as u32;
+            assert_eq!(
+                frames, expected,
+                "({col},{row}) sabit sürede yerleşmedi: {frames} kare"
+            );
+            assert_eq!(
+                motion.position(),
+                Some([f32::from(col), f32::from(row)]),
+                "yerleşen imleç tam hücreye oturmadı"
+            );
+        }
+    }
+
+    #[test]
+    fn ease_approaches_the_target_without_overshooting() {
+        // Taşmanın **yapısal** olarak imkânsız olduğu stil: konum
+        // `from → target` arasında monoton ilerliyor, hız entegre edilmiyor.
+        // Yaydaki kırpmanın karşılığı burada bir sınama, bir dal değil.
+        let mut motion = moving_with(CursorMotion::Ease);
+        let mut last = 0.0;
+        for _ in 0..40 {
+            motion.advance(TICK);
+            let pos = motion.position().expect("uçuşta")[0];
+            assert!(pos >= last, "ease geri gitti: {last} → {pos}");
+            assert!(pos <= 10.0, "ease hedefi aştı: {pos}");
+            last = pos;
+        }
+    }
+
+    #[test]
+    fn ease_settles_well_inside_the_ceiling() {
+        // `ease`'in durma koşulu kendi saati, yani süre tavanı ona
+        // uygulanmıyor; sıra bozulursa kemer meşru bir kaymayı keserdi.
+        // Sabitlerin yanındaki `const` assert bunu derlemeye, bu sınama da
+        // gerçek bir koşuya bağlıyor.
+        let mut motion = moving_with(CursorMotion::Ease);
+        run_to_rest(&mut motion, TICK);
+        let elapsed = motion.state.expect("yerleşti").elapsed;
+        assert!(elapsed < TIME_CEILING, "tavan ease'i kesti: {elapsed}s");
+    }
+
+    #[test]
+    fn switching_to_snap_finishes_the_flight_and_asks_for_a_frame() {
+        // Kayma ortasında `snap`'e geçen kullanıcı: imleç ara hücrede asılı
+        // kalamaz. Dönüş `true`, çünkü link'in "hasar yok" dalı yerleşmiş
+        // animasyonda hiç çizmeden uyuyor — kareyi isteyen o dönüş.
+        let mut motion = moving();
+        motion.advance(TICK);
+        assert!(!motion.settled());
+
+        assert!(motion.set_style(CursorMotion::Snap), "kare istenmedi");
+        assert!(motion.settled(), "snap'e geçiş kaymayı bitirmedi");
+        assert_eq!(motion.position(), Some([10.0, 4.0]));
+
+        // Yerleşmiş bir imleçte ve aynı stilde no-op: kare istemek boşa bir
+        // uyandırma olurdu.
+        assert!(
+            !motion.set_style(CursorMotion::Snap),
+            "aynı stil kare istedi"
+        );
+        assert!(
+            !motion.set_style(CursorMotion::Spring),
+            "yerleşmiş imleç kare istedi"
+        );
+    }
+
+    #[test]
+    fn switching_style_in_flight_does_not_teleport() {
+        // Stil değişimi bir hedef değişimi değil: imleç bulunduğu yerden
+        // devam etmeli. `ease` çıkış noktasını hatırladığı için asıl risk
+        // orada — `from` tazelenmeseydi imleç eski başlangıca geri sıçrardı.
+        for style in [CursorMotion::Ease, CursorMotion::Spring] {
+            let mut motion = moving_with(match style {
+                CursorMotion::Ease => CursorMotion::Spring,
+                _ => CursorMotion::Ease,
+            });
+            for _ in 0..8 {
+                motion.advance(TICK);
+            }
+            let before = motion.position().expect("uçuşta");
+            assert!(before[0] > 0.0, "hiç ilerlemedi: {before:?}");
+
+            assert!(!motion.set_style(style), "stil değişimi kare istedi");
+            assert_eq!(motion.position(), Some(before), "stil değişimi ışınladı");
+            // Ve kayma yeni stille sonlanıyor, takılmıyor.
+            run_to_rest(&mut motion, TICK);
+            assert_eq!(motion.position(), Some([10.0, 4.0]));
+        }
+    }
+
+    #[test]
+    fn a_long_spring_flight_does_not_teleport_when_the_style_changes() {
+        // Stil değişiminin en sinsi hâli: yay `EASE_DURATION`'dan uzun
+        // uçmuşken `ease`'e geçmek. Durma koşulu stile göre değiştiği için
+        // "uçuşta mı" sorusu **eski** stille sorulmazsa kayma yerleşmiş
+        // görünür, devir atlanır ve sıradaki kare imleci hedefe atar — üstelik
+        // link o kareyi çizmeden uyuduğu için imleç ara hücrede kalır.
+        let mut motion = moving();
+        for _ in 0..25 {
+            motion.advance(TICK);
+        }
+        let elapsed = motion.state.expect("uçuşta").elapsed;
+        assert!(
+            elapsed > EASE_DURATION,
+            "senaryo kurulmadı: yay {elapsed}s uçtu, eşik {EASE_DURATION}s"
+        );
+        let before = motion.position().expect("uçuşta");
+        assert!(!motion.settled(), "yay bu noktada yerleşmiş olmamalı");
+
+        assert!(!motion.set_style(CursorMotion::Ease), "stil kare istedi");
+        assert!(
+            !motion.settled(),
+            "stil değişimi kaymayı yerleşmiş gösterdi: ışınlama bir kare sonra"
+        );
+        motion.advance(TICK);
+        let after = motion.position().expect("uçuşta");
+        let remaining = 10.0 - before[0];
+        assert!(
+            after[0] - before[0] < remaining,
+            "tek adımda hedefe atladı: {before:?} → {after:?}"
+        );
+        run_to_rest(&mut motion, TICK);
+        assert_eq!(motion.position(), Some([10.0, 4.0]));
     }
 
     #[test]

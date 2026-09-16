@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use bt_core::{Cursor, DirtyFlag, Session, Theme};
+use bt_core::{Cursor, CursorMotion, DirtyFlag, Session, Theme};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -818,6 +818,31 @@ impl DisplayLink {
             motion.finish();
             iv.motion.set(motion);
             self.link.setPaused(true);
+        }
+    }
+
+    /// İmlecin kayma stili değişti: kullanıcı `settings.toml`'u kaydetti ya da
+    /// pencere açılıyor (`bt-shell` çözülmüş değeri veriyor,
+    /// `Renderer::set_font` emsali — `bt-gpu` ayar dosyası görmez).
+    ///
+    /// **Kare istemesinin sebebi "hasar yok" dalının şekli:** orada yerleşmiş
+    /// bir animasyon hiç çizmeden link'i uyutuyor. `snap`'e geçen kullanıcının
+    /// uçuştaki imleci hedefinde bitiriliyor ([`Motion::set_style`]) ama o
+    /// yeni konum ekrana ancak bir kare çizilirse düşer — istenmeseydi imleç
+    /// ara hücrede asılı kalır ve onu yerine koyan şey alakasız bir shell
+    /// çıktısı olurdu. İstek yalnız gerçekten bitirilen kaymada gidiyor:
+    /// aynı stili yeniden yazan kayıt ve yerleşmiş bir imleç no-op
+    /// (`Session::set_theme`'in aynı stili takas etmeme kuralı).
+    ///
+    /// Öteki iki stile geçiş kare istemiyor: uçuştaki kayma sürüyorsa link
+    /// zaten uyanık ve sıradaki hareket karesi yeni stili uyguluyor.
+    pub fn set_cursor_motion(&self, style: CursorMotion) {
+        let iv = self.delegate.ivars();
+        let mut motion = iv.motion.get();
+        let finished = motion.set_style(style);
+        iv.motion.set(motion);
+        if finished {
+            self.request_frame();
         }
     }
 
