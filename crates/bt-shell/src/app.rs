@@ -519,7 +519,18 @@ define_class!(
             // Damga kapanıştan **önce**, `runDeadline:`'daki gerekçeyle:
             // `shutdown()` yarım saniyeye kadar bekleyebiliyor ve o bekleme
             // sessizliğe yazılırsa jeton ölçtüğünü sandığı şeyi ölçmez.
-            let quiet = self.ivars().link.get().and_then(DisplayLink::quiet_since);
+            //
+            // Kapı **okumadan önce** soruluyor: `quiet_since` bir saat okuması
+            // (`CACurrentMediaTime`) ve süresiz koşuda bu değer atılacak.
+            // "Kapı kapalıyken tek bir saat okuması bile yok" (`CLAUDE.md`)
+            // Cmd-Q yolunda da geçerli; aşağıdaki `if let` tek başına değeri
+            // atıyordu ama okumayı engellemiyordu.
+            let quiet = self
+                .ivars()
+                .run
+                .is_some()
+                .then(|| self.ivars().link.get().and_then(DisplayLink::quiet_since))
+                .flatten();
             let teardown = self.shutdown();
             // Duman koşusu deadline'a varmadan da bitebilir: shell kendi
             // çıkarsa (`BT_RUN_SECONDS` betiğin uykusundan uzunsa, ya da
