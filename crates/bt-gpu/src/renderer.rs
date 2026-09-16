@@ -139,11 +139,20 @@ pub struct Renderer {
     /// `queue.device()` mesajı atmaya gerek yok.
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    /// Hücre arka planlarını ve imleci çizen pipeline; instanced quad, blend yok.
+    /// Hücre arka planlarını ve imleci çizen pipeline; instanced quad.
+    ///
+    /// **Alfa blend açık ve tek müşterisi imleç:** arka planların alfası her
+    /// zaman `1.0` ([`bt_core::LinearRgba`]'nın tek kurucusu öyle yazıyor),
+    /// yani onlar için blend'in sonucu opak yazmayla birebir aynı. Belirme
+    /// (Hareketi Azalt) imlecin dikdörtgenini `1.0`'ın altına indiren tek yol
+    /// ve o dikdörtgen bu listenin **son** instance'ı, yani altındaki hücre
+    /// arka planının üstüne karışıyor.
     cell_bg: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    /// Glyph'leri çizen pipeline; aynı quad, atlas örneklemesi ve alfa blend.
-    /// Ayrı pipeline çünkü ayrı shader çifti ve ayrı blend durumu: tek
-    /// pipeline'da blend'i açmak arka planları da karıştırırdı.
+    /// Glyph'leri çizen pipeline; aynı quad, atlas örneklemesi.
+    ///
+    /// Ayrı pipeline çünkü **ayrı shader çifti**: fragment atlası örnekliyor
+    /// ve imleç uniform'unu okuyor. (Blend durumu artık ikisinde de aynı, yani
+    /// ayrılığın sebebi değil.)
     cell: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Son **gönderilen** karedeki arka plan hücresi sayısı; `make duman`'ın
     /// `hucre=K` jetonu. `frames`'in yanında duruyor çünkü ikisi de aynı
@@ -221,23 +230,13 @@ impl Renderer {
         let library = device
             .newLibraryWithData_error(&data)
             .map_err(GpuError::Library)?;
-        let cell_bg = pipeline(
-            &device,
-            &library,
-            "cell_bg_vertex",
-            "cell_bg_fragment",
-            Blend::Opaque,
-        )?;
+        // Arka planlar opak (alfaları `1.0`), yani blend onlar için no-op;
+        // açık olmasının tek sebebi imlecin belirmesi (bkz. `cell_bg` alanı).
+        let cell_bg = pipeline(&device, &library, "cell_bg_vertex", "cell_bg_fragment")?;
         // Glyph'ler arka planların üstüne **karışarak** geliyor: atlas bir
         // kapsama maskesi, renk instance'tan. Blend lineer uzayda koşuyor ve
         // sebebi tam olarak bu (`PIXEL_FORMAT` → `_sRGB`).
-        let cell = pipeline(
-            &device,
-            &library,
-            "cell_vertex",
-            "cell_fragment",
-            Blend::Alpha,
-        )?;
+        let cell = pipeline(&device, &library, "cell_vertex", "cell_fragment")?;
         let queue = device.newCommandQueue().ok_or(GpuError::NoCommandQueue)?;
 
         Ok(Self {
@@ -682,26 +681,23 @@ fn fragment_uniform<T>(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, value:
     }
 }
 
-/// Pipeline'ın karıştırma durumu.
-enum Blend {
-    /// Opak: kaynak hedefin üstüne yazar.
-    Opaque,
-    /// Ön çarpımsız alfa; `cell.metal` alfayı atlasın kapsamasından üretiyor.
-    Alpha,
-}
-
-/// Bir vertex/fragment çiftinden render pipeline.
+/// Bir vertex/fragment çiftinden render pipeline; **ön çarpımsız alfa blend**.
 ///
 /// Adlar **ayrı ayrı** parametre, `{name}_vertex` diye türetilmiyor: hata
 /// varyantı eksik sembolün kendisini taşıyor ve türetilmiş bir ad "ikisinden
 /// biri" demekle yetinirdi — metallib'de hangisinin olmadığını okuyanın
 /// aramasına bırakırdı.
+///
+/// Blend **parametre değil**: iki pipeline da onu istiyor ve sebepleri ayrı —
+/// `cell` alfayı atlasın kapsamasından üretiyor, `cell_bg`'de imlecin
+/// belirmesi ([`crate::motion`]) dikdörtgeni saydamlaştırıyor. Bir `enum`
+/// parametresi 008 phase-5'e kadar iki değer taşıyordu; tek değere düşünce
+/// hem kendisi hem tek `if`'i kalktı.
 fn pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     library: &ProtocolObject<dyn MTLLibrary>,
     vs_name: &'static str,
     fs_name: &'static str,
-    blend: Blend,
 ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, GpuError> {
     let vs = library
         .newFunctionWithName(&NSString::from_str(vs_name))
@@ -716,21 +712,19 @@ fn pipeline(
     // SAFETY: indeks 0 her render pipeline'da vardır.
     let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
     att.setPixelFormat(Renderer::PIXEL_FORMAT);
-    if let Blend::Alpha = blend {
-        att.setBlendingEnabled(true);
-        att.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-        att.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-        // Alfa kanalının **kaynak çarpanı `One`**, `SourceAlpha` değil.
-        // Fragment ön çarpımsız veriyor (`rgb`, `a = kapsama`): renk için
-        // doğru olan `sa·src + (1-sa)·dst`, ama aynı çarpanı alfaya uygulamak
-        // `sa² + (1-sa)·dst_a` eder ve yarı kapsamalı bir kenarda hedefin
-        // alfası 1'den 0.75'e düşer. `CAMetalLayer` `opaque` bayrağını
-        // taşımıyor, yani compositor o deliği onurlandırır ve harflerin
-        // kenarından pencerenin arkası sızar. `One` ile `sa + (1-sa)·dst_a`,
-        // dst_a = 1 iken 1 kalır.
-        att.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-        att.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    }
+    att.setBlendingEnabled(true);
+    att.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+    att.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    // Alfa kanalının **kaynak çarpanı `One`**, `SourceAlpha` değil.
+    // Fragment ön çarpımsız veriyor (`rgb`, `a = kapsama`): renk için
+    // doğru olan `sa·src + (1-sa)·dst`, ama aynı çarpanı alfaya uygulamak
+    // `sa² + (1-sa)·dst_a` eder ve yarı kapsamalı bir kenarda hedefin
+    // alfası 1'den 0.75'e düşer. `CAMetalLayer` `opaque` bayrağını
+    // taşımıyor, yani compositor o deliği onurlandırır ve harflerin
+    // kenarından pencerenin arkası sızar. `One` ile `sa + (1-sa)·dst_a`,
+    // dst_a = 1 iken 1 kalır.
+    att.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+    att.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     device
         .newRenderPipelineStateWithDescriptor_error(&desc)
         .map_err(GpuError::Pipeline)
@@ -1642,7 +1636,12 @@ mod tests {
     /// İmleci **kendi** hücresine çizer: bu sınamaların hepsi yerleşmiş bloğa
     /// bakıyor, ara konuma değil (onun sınaması `frame.rs`'te).
     fn push_settled(frame: &mut Frame, cursor: Cursor, rgba: LinearRgba) {
-        frame.push_cursor(cursor, [f32::from(cursor.col), f32::from(cursor.row)], rgba);
+        frame.push_cursor(
+            cursor,
+            [f32::from(cursor.col), f32::from(cursor.row)],
+            rgba,
+            1.0,
+        );
     }
 
     #[test]
@@ -1686,6 +1685,81 @@ mod tests {
             "imleç altındaki harf metin rengiyle çizilmedi (A ≠ B)"
         );
         assert_ne!(a, c, "imleç dikdörtgeni harfin rengini hiç ezmedi (A = C)");
+    }
+
+    #[test]
+    fn cursor_alpha_is_blended_on_the_gpu() {
+        // Hareketi Azalt'ın belirmesi (008 phase-5) **GPU'da** karışıyor:
+        // `cell_bg` pipeline'ı bu phase'de harmanlı oldu ve `cell` fragment'i
+        // ezme yerine `mix` yapıyor. `frame.rs`'in sayacı alfanın listeye
+        // yazıldığını gösteriyor ama boyandığını gösteremez — depo kuralının
+        // ("CPU sayacı GPU'nun boyadığını kanıtlamaz") tam karşılığı.
+        //
+        // Ölçüt iki uçta **eşitlik**, ortada **sıra**: renk beklentisini
+        // hesaplamak lineer karışımı sRGB'ye kodlamak olurdu ve o tablo
+        // burada yok. Uçlar zaten daha keskin bir iddia — alfa hiç
+        // okunmasaydı üç kare de aynı çıkardı.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
+
+        // Tek hücre, tek imleç: uniform kare başına **tek** değer, yani üç
+        // opaklık üç ayrı kare demek.
+        let render = |alpha: Option<f32>| {
+            let mut frame = Frame::default();
+            frame.clear((cw, ch));
+            frame.push(glyph_cell(0, 'M', None));
+            if let Some(alpha) = alpha {
+                frame.push_cursor(cursor_at(0, BACKGROUND), [0.0, 0.0], ACCENT, alpha);
+            }
+            cell_rows(
+                &render_offscreen(&r, EDGE, BACKGROUND, &frame),
+                EDGE,
+                (cw, ch),
+                0,
+            )
+            .concat()
+        };
+        let (none, clear, half, opaque) = (
+            render(None),
+            render(Some(0.0)),
+            render(Some(0.5)),
+            render(Some(1.0)),
+        );
+
+        // Alfa sıfır = imleç **hiç yok**: blok da altındaki harfin rengi de
+        // dokunulmadan kalmalı. Harmanlama kapalı olsaydı burası opak bir
+        // dikdörtgen olurdu.
+        assert_eq!(clear, none, "alfa 0 imleci yine de opak çizdi");
+        // Alfa bir = bu phase'den **önceki** hâl: yerleşmiş imleçte görsel
+        // sonuç değişmedi.
+        assert_ne!(opaque, none, "alfa 1 imleci hiç çizmedi");
+
+        let mut strictly_between = 0usize;
+        for (i, (&mid, (&off, &on))) in half.iter().zip(clear.iter().zip(opaque.iter())).enumerate()
+        {
+            for c in 0..3 {
+                let (m, a, b) = (
+                    [mid.0, mid.1, mid.2][c],
+                    [off.0, off.1, off.2][c],
+                    [on.0, on.1, on.2][c],
+                );
+                let (lo, hi) = (a.min(b), a.max(b));
+                assert!(
+                    (lo..=hi).contains(&m),
+                    "piksel {i} bileşen {c}: {m} iki ucun ({lo}, {hi}) dışında"
+                );
+                if m > lo && m < hi {
+                    strictly_between += 1;
+                }
+            }
+        }
+        // Ara kare uçlardan birine **eşit olmamalı**: eşit olsaydı alfa ikili
+        // bir bayrak gibi davranıyor, gerçekten karışmıyor olurdu.
+        assert!(
+            strictly_between > 0,
+            "alfa 0.5 iki uçtan birine düştü: karışım yok"
+        );
     }
 
     #[test]

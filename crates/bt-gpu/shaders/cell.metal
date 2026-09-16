@@ -33,7 +33,11 @@ static_assert(__builtin_offsetof(GlyphInstance, rgba) == 16, "rgba@16");
 // ile dikdörtgen ayrışabilen iki gerçek olurdu.
 struct CursorBlock {
     float4 rect;  // x0, y0, x1, y1 — piksel, sol üst başlangıçlı
-    float4 rgba;  // lineer; kaynağı bt_core::Cursor::text
+    // Lineer; rgb'nin kaynağı bt_core::Cursor::text. ALFA BİR RENK DEĞİL, bu
+    // karedeki imleç opaklığı (bt_gpu::motion::Motion::alpha): Hareketi Azalt
+    // açıkken imleç yeni hücresinde belirir ve bloğun alfasıyla AYNI değer
+    // buraya da yazılır. Aşağıda karışım çarpanı olarak okunuyor.
+    float4 rgba;
 };
 
 static_assert(sizeof(CursorBlock) == 32, "CursorBlock 32 bayt olmalı");
@@ -100,9 +104,16 @@ fragment float4 cell_fragment(Out in [[stage_in]],
     // iki biçim ayrışır.
     float2 p = in.position.xy;
     bool inside = all(p >= cursor.rect.xy) && all(p < cursor.rect.zw);
-    // Yalnız RGB eziliyor: alfa aşağıda kapsamayla çarpılıyor ve uniform'un
-    // alfası 1.0 değilse glyph'in kenarı sessizce inceltilirdi.
-    float3 rgb = inside ? cursor.rgba.rgb : in.rgba.rgb;
+    // Ezme değil KARIŞIM ve çarpanı uniform'un alfası: blok belirirken
+    // (Hareketi Azalt) harf de onunla birlikte belirmeli, yoksa henüz
+    // görünmeyen bir bloğun rengine boyanır — zeminin üstünde zemin renginde
+    // bir harf. Belirme dışında alfa 1.0, yani karışım tam ezmeye iniyor ve
+    // sonuç bu satırın eski hâliyle birebir aynı.
+    //
+    // Karışım YALNIZ RGB'de: çıkıştaki alfa aşağıda kapsamadan geliyor ve
+    // imlecin opaklığı oraya da sızsaydı glyph'in kenarı sessizce
+    // inceltilirdi. Bloğun kendi saydamlığını cell_bg pipeline'ı çiziyor.
+    float3 rgb = mix(in.rgba.rgb, cursor.rgba.rgb, inside ? cursor.rgba.a : 0.0);
     // Ön çarpımsız: blend src_alpha/one_minus_src_alpha ile eşleşiyor.
     return float4(rgb, in.rgba.a * coverage);
 }

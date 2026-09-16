@@ -11,8 +11,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bt_core::{
-    FontOptions, SYSTEM_THEME, Session, SessionOptions, Settings, Teardown, Theme, Wake,
-    load_shell, smoke_shell,
+    FontOptions, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings, Teardown, Theme,
+    Wake, load_shell, smoke_shell,
 };
 use bt_gpu::{CellMetrics, DisplayLink, MIN_SAMPLES, Renderer, Stats, Surface, Waker};
 use dispatch2::DispatchQueue;
@@ -23,6 +23,7 @@ use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationDelegate,
     NSBackingStoreType, NSEvent, NSMenu, NSMenuDelegate, NSMenuItem, NSPasteboard, NSWindow,
     NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask, NSWorkspace,
+    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
     NSArray, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
@@ -156,7 +157,8 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// Kullanıcının dünyasına açılan girişlerin **tek** dalı.
 ///
 /// Süreli koşu (`make duman`, ölçüm) ayar dosyasını, dosya izlemeyi, sistemin
-/// açık/koyu görünümünü ve Tema menüsünün `themes/`'ten dolmasını görmez:
+/// açık/koyu görünümünü, Hareketi Azalt ayarını ve Tema menüsünün
+/// `themes/`'ten dolmasını görmez:
 /// kapının sonucu o makinenin `~/.config/bateri/`'sine bağlı olmasın: dosyayı
 /// okuyup izlemeyi kuran [`AppDelegate::load_settings`] ve
 /// [`AppDelegate::reload_settings`], görünümü okuyan
@@ -164,9 +166,16 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// `menuNeedsUpdate:`. Dosyayı yaratan "Settings…"
 /// ([`AppDelegate::edit_settings`]) ve yazan tema seçimi
 /// ([`AppDelegate::save_theme`]) de bu değere bakar, kendi `run.is_some()`
-/// koşulunu yazmaz — dört ayrı koşuldan birinin unutulduğu gün kapı sessizce
+/// koşulunu yazmaz — beş ayrı koşuldan birinin unutulduğu gün kapı sessizce
 /// kullanıcının dosyasına bağlanırdı
 /// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1).
+///
+/// **Beşincisi Hareketi Azalt** ([`resolve_reduce_motion`], 008 phase-5) ve
+/// dalı ayar dosyasında değil sistemde: `NSWorkspace`'in erişilebilirlik
+/// ayarı okunsaydı `make duman`'ın `hareket=` jetonu ölçen makinenin
+/// erişilebilirlik tercihine bağlanır, yani kapı bir makinede yeşil bir
+/// makinede kırmızı düşerdi. Gözlemciyi kuran
+/// [`AppDelegate::observe_reduce_motion`] de aynı değere bakıyor.
 ///
 /// Bedeli: dosyadan ekrana giden kabloyu hiçbir kapı görmüyor; onu geçici
 /// dizindeki sınamalar (`settings`) ve göz kontrolü taşıyor.
@@ -190,6 +199,35 @@ fn decide_inputs(run: Option<Run>, home: Option<PathBuf>) -> Inputs {
         None => Inputs::User {
             config_root: home.as_deref().map(settings::config_root),
         },
+    }
+}
+
+/// Üç değerli `[motion] reduce_motion` + sistemin cevabı → tek `bool`.
+///
+/// **Birleştirme burada, çünkü sistemi gören katman burası:** `bt-gpu` AppKit
+/// görmüyor (`CLAUDE.md` → katman tablosu) ve `bt-core`'un ayar modeli zaten
+/// bir dosyanın karşılığı, bir erişilebilirlik ayarının değil. Aşağıya
+/// **çözülmüş** bir `bool` iniyor (`Renderer::set_font` emsali).
+///
+/// `system` bir **closure**, `bool` değil: `"on"`/`"off"` diyen kullanıcının
+/// oturumunda `NSWorkspace`'e hiç gidilmiyor. Süreli koşu da hiç gitmiyor ve
+/// bu bir tembellik değil kapı — [`Inputs::Hermetic`]'te `make duman`'ın
+/// satırı ölçen makinenin erişilebilirlik ayarına bağlanırdı.
+///
+/// Saf ve bu yüzden sınanabilir: gerçek bir `AppDelegate` gerekmiyor
+/// (`hermetic_run_does_not_read_reduce_motion`).
+fn resolve_reduce_motion(
+    inputs: &Inputs,
+    setting: ReduceMotion,
+    system: impl FnOnce() -> bool,
+) -> bool {
+    if let Inputs::Hermetic = inputs {
+        return false;
+    }
+    match setting {
+        ReduceMotion::On => true,
+        ReduceMotion::Off => false,
+        ReduceMotion::System => system(),
     }
 }
 
@@ -646,6 +684,19 @@ define_class!(
         #[unsafe(method(settingsDidChange:))]
         fn settings_did_change(&self, _sender: Option<&AnyObject>) {
             self.reload_settings();
+        }
+
+        /// macOS'un erişilebilirlik görüntü ayarları değişti; gönderen
+        /// `NSWorkspace`'in **kendi** bildirim merkezi
+        /// ([`AppDelegate::observe_reduce_motion`]).
+        ///
+        /// Bildirim Hareketi Azalt'a özel değil — kontrast, saydamlık ve renk
+        /// ayrımı da buradan geliyor. Ayırt etmeye gerek yok: aşağıdaki yol
+        /// değeri yeniden okuyor ve değişmediyse link'e giden çağrı zaten
+        /// no-op (`Motion::set_reduce`).
+        #[unsafe(method(accessibilityDisplayDidChange:))]
+        fn accessibility_display_did_change(&self, _note: Option<&AnyObject>) {
+            self.apply_reduce_motion();
         }
 
         /// bateri ▸ Settings… (Cmd-,), hedefsiz menü öğesinden (`menu`).
@@ -1271,6 +1322,11 @@ impl AppDelegate {
         // Açılış karesi: `Session` kirli doğar, link'i bir kez elle açıyoruz.
         link.request_frame();
         let _ = self.ivars().link.set(link);
+        // Hareketi Azalt link yuvaya girdikten **sonra**: kurulum aynı
+        // zamanda ilk değeri uyguluyor ve `apply_reduce_motion` link'i
+        // yuvadan okuyor (stilin `set_cursor_motion`'ı elindeki `link`'i
+        // kullanabiliyordu, bu yol kullanamaz — üç çağıranı ortak).
+        self.observe_reduce_motion();
     }
 
     /// Açılışta ayarları okur, [`Ivars::settings`]'e yazar ve seçilen temayı
@@ -1399,13 +1455,22 @@ impl AppDelegate {
             // içinde doğuyor ve bu yol ondan sonra koşuyor, ama sıra bir
             // sözleşme değil: yuva boşsa açılış çağrısı zaten aynı değeri
             // verecek.
-            if changes.motion {
+            let motion_changed = changes.motion;
+            if motion_changed {
                 if let Some(link) = self.ivars().link.get() {
                     link.set_cursor_motion(new.cursor_motion);
                 }
             }
             self.ivars().zoom.set(zoom);
             self.ivars().settings.replace(new);
+            // Ayarlar yazıldıktan **sonra**: `apply_reduce_motion` üç
+            // çağıranın ortak yolu ve değeri yuvadan okuyor, elindeki `new`'den
+            // değil. Stilin yolu ayrı kaldı çünkü o link'i doğrudan alıyor;
+            // ikisini birleştirmek bu yolu `new`'e bağlar ve sistem
+            // bildiriminden çağrılamaz hâle getirirdi.
+            if motion_changed {
+                self.apply_reduce_motion();
+            }
             // Ayarlar ve fark yazıldıktan **sonra**: `apply_font` ikisini de
             // okuyor.
             if changes.font {
@@ -1587,6 +1652,59 @@ impl AppDelegate {
             self.choose_theme(config_root.as_deref(), &settings)
         };
         session.set_theme(theme);
+    }
+
+    /// Sistemin Hareketi Azalt ayarını izlemeye başlar — **yalnız kullanıcının
+    /// oturumunda** ([`Inputs`]).
+    ///
+    /// Bildirim `NSWorkspace`'in **kendi** merkezinden geliyor, varsayılan
+    /// `NSNotificationCenter`'dan değil; Apple bunu böyle yayınlıyor ve yanlış
+    /// merkeze abone olmak sessizce hiç haber almamak olurdu.
+    ///
+    /// Gözlemci **sökülmüyor**: `AppDelegate` sürecin ömrü boyunca yaşıyor
+    /// (`run()`'daki `Retained`) ve merkez onu zaten sahiplenmeden tutuyor.
+    /// Açık/koyu görünümün izlendiği yol (`viewDidChangeEffectiveAppearance`)
+    /// de aynı biçimde sökülmüyor.
+    fn observe_reduce_motion(&self) {
+        let Inputs::User { .. } = self.inputs() else {
+            return;
+        };
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: `accessibilityDisplayDidChange:` bu sınıfta tanımlı ve tek
+        // `Option<&AnyObject>` argüman alıyor; `self` sürecin ömrü boyunca
+        // yaşıyor, yani merkezin sahiplenmeyen referansı asarak kalmıyor.
+        // Sabit `NSString` AppKit'in dışa açtığı ad (`NSRunLoopCommonModes`
+        // emsali).
+        unsafe {
+            center.addObserver_selector_name_object(
+                self,
+                sel!(accessibilityDisplayDidChange:),
+                Some(NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification),
+                None,
+            );
+        }
+        self.apply_reduce_motion();
+    }
+
+    /// Hareketi Azalt'ın **çözülmüş** değerini link'e verir: ayarın üç değeri
+    /// ile sistemin cevabı [`resolve_reduce_motion`]'da birleşiyor.
+    ///
+    /// Üç çağıranı var ve üçü de aynı soruyu yeniden soruyor: açılış
+    /// ([`AppDelegate::observe_reduce_motion`]), sistem bildirimi ve ayar
+    /// dosyasının kaydı ([`AppDelegate::reload_settings`]). Değer
+    /// değişmediyse çağrı no-op (`bt_gpu::DisplayLink::set_reduce_motion`),
+    /// yani üç yolu birleştirmeye gerek yok.
+    ///
+    /// Link yoksa sessizce döner: sistem bildirimi `start_session`'dan önce
+    /// de düşebilir ve açılış çağrısı aynı değeri zaten verecek.
+    fn apply_reduce_motion(&self) {
+        let Some(link) = self.ivars().link.get() else {
+            return;
+        };
+        let setting = self.ivars().settings.borrow().reduce_motion;
+        link.set_reduce_motion(resolve_reduce_motion(&self.inputs(), setting, || {
+            NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+        }));
     }
 
     /// Uygulamanın etkin görünümü koyu mu.
@@ -2338,6 +2456,38 @@ mod tests {
             decide_inputs(None, None),
             Inputs::User { config_root: None }
         );
+    }
+
+    #[test]
+    fn hermetic_run_does_not_read_reduce_motion() {
+        // `Inputs`'un beşinci koşulu (008 phase-5): süreli koşu sistemin
+        // Hareketi Azalt ayarını **okumaz**. Okusaydı `make duman`'ın
+        // `hareket=` jetonu ölçen makinenin erişilebilirlik tercihine
+        // bağlanırdı — bir makinede yeşil, bir makinede kırmızı düşen bir kapı.
+        // Closure'ın paniği bunu "okumadı" iddiasından daha keskin sınıyor:
+        // dönüşü `false` sabitlemek, okuyup yok sayan bir kodu da geçirirdi.
+        for setting in [ReduceMotion::System, ReduceMotion::On, ReduceMotion::Off] {
+            assert!(
+                !resolve_reduce_motion(&Inputs::Hermetic, setting, || panic!(
+                    "süreli koşu sistem ayarını okudu"
+                )),
+                "{setting:?} hermetik koşuda hareketi kıstı"
+            );
+        }
+
+        let user = Inputs::User { config_root: None };
+        // `"on"` ve `"off"` kendileri karar veriyor: sisteme hiç gidilmiyor.
+        assert!(resolve_reduce_motion(&user, ReduceMotion::On, || panic!(
+            "\"on\" sistem ayarını okudu"
+        )));
+        assert!(!resolve_reduce_motion(&user, ReduceMotion::Off, || panic!(
+            "\"off\" sistem ayarını okudu"
+        )));
+        // `"system"` yalnız sistemin dediğini yapar.
+        assert!(resolve_reduce_motion(&user, ReduceMotion::System, || true));
+        assert!(!resolve_reduce_motion(&user, ReduceMotion::System, || {
+            false
+        }));
     }
 
     #[test]

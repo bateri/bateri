@@ -268,11 +268,18 @@ impl Retry {
     /// Kare çizilemedi. İlk hatada bir kare daha istenir; art arda
     /// ikincisinde **hiçbir şey yapılmaz** ve durak kendiliğinden devreye
     /// girer (bkz. [`FailureStreak`]).
-    fn draw_failed(&self, e: &GpuError) {
+    ///
+    /// Dönüş: **bütçe bitti mi** (`false` → bir kare daha istendi). Hasar
+    /// yolunda çağıranın buna bakmasına gerek yok, durak orada bayrağın
+    /// dikilmemesiyle geliyor; **hareket yolunda gerekiyor**, çünkü oradaki
+    /// durak hasar değil animasyonun yerleşmesi (`needs_update`).
+    fn draw_failed(&self, e: &GpuError) -> bool {
         eprintln!("bateri: kare çizilemedi: {e}");
         if self.streak.failed() {
             self.waker.wake();
+            return false;
         }
+        true
     }
 }
 
@@ -294,6 +301,13 @@ impl FailureStreak {
     /// `false`: bayrak dikilmediği için sıradaki callback "hasar yok" bulur,
     /// link'i uyutur ve sıradaki `Wakeup` beklenir. Bu olmadan kalıcı bir
     /// hata "dik, dene, düş" döngüsünü tazeleme hızında sonsuza çevirirdi.
+    ///
+    /// **008'den beri bu tek başına yetmiyor:** "hasar yok" dalı artık
+    /// koşulsuz uyumuyor, yerleşmemiş bir animasyon varken hareket karesi
+    /// çiziyor. Bütçe bitince o dal da animasyonu bitiriyor
+    /// ([`crate::motion::Motion::finish`]) — yoksa kalıcı bir hata, kaymanın
+    /// süre tavanı dolana kadar tazeleme hızında hata satırı basardı. İki
+    /// durak birlikte: bayrak dikilmiyor **ve** bekleyen animasyon kalmıyor.
     fn failed(&self) -> bool {
         self.0.fetch_add(1, Ordering::AcqRel) == 0
     }
@@ -486,7 +500,7 @@ define_class!(
                 // saniyede 120 kez girmek "render yolu bloklanmaz" ile tam
                 // burada kavga ederdi.
                 if let (Some(at), Some(cursor)) = (motion.position(), iv.last_cursor.get()) {
-                    frame.move_cursor(cursor, at, theme.accent_linear());
+                    frame.move_cursor(cursor, at, theme.accent_linear(), motion.alpha());
                 }
                 // CPU örneği **yazılmıyor** ve bu bir eksiklik değil:
                 // `cpu_kare` `session.frame`'in kilit beklemesini ölçüyor ve
@@ -505,21 +519,31 @@ define_class!(
                 // karelerini de içeriyor) ve iki sütunun p95'i imleç kayan
                 // bir koşuda doğrudan karşılaştırılamaz. `docs/OLCUMLER.md`
                 // → `## Yöntem` bunu phase-6'da yazacak.
-                if iv
-                    .renderer
-                    .draw(
-                        &update.drawable(),
-                        theme.background_linear(),
-                        &frame,
-                        &iv.completion,
-                    )
-                    .inspect_err(|e| iv.retry.draw_failed(e))
-                    .is_ok()
-                {
+                match iv.renderer.draw(
+                    &update.drawable(),
+                    theme.background_linear(),
+                    &frame,
+                    &iv.completion,
+                ) {
                     // Hareket karesi de **yola çıkan** bir kare: `sessiz=`
                     // yerleşmeden sonraki kuyruğu ölçmeli, animasyonun
                     // başladığı anı değil.
-                    iv.last_frame_at.set(Some(now));
+                    Ok(()) => iv.last_frame_at.set(Some(now)),
+                    // **Bu dalın kendi durağı** (`/code-review` bulgusu):
+                    // hasar yolunda durak bayrağın dikilmemesiydi, burada
+                    // öyle olamaz — "hasar yok" dalı yerleşmemiş animasyon
+                    // varken uyumuyor. Bütçe bitince animasyon hedefinde
+                    // bitiriliyor, yani sıradaki callback hem hasar hem
+                    // bekleyen hareket bulamayıp uyuyor. Olmasaydı kalıcı bir
+                    // çizim hatası, kaymanın süre tavanı (0,7 sn) dolana kadar
+                    // tazeleme hızında hata satırı basardı — `FailureStreak`
+                    // tam bunu önlemek için yazılmıştı.
+                    Err(e) => {
+                        if iv.retry.draw_failed(&e) {
+                            motion.finish();
+                            iv.motion.set(motion);
+                        }
+                    }
                 }
                 return;
             }
@@ -565,7 +589,7 @@ define_class!(
             );
             iv.motion.set(motion);
             if let Some(at) = motion.position() {
-                frame.push_cursor(cursor, at, theme.accent_linear());
+                frame.push_cursor(cursor, at, theme.accent_linear(), motion.alpha());
             }
             // Birinci aralık burada kapanıyor — `push_cursor`'dan **sonra**:
             // imleci listeye koymak sink işidir, encode değil. Damga bir satır
@@ -598,7 +622,11 @@ define_class!(
                         stats.record_cpu(cpu_frame, cpu_encode);
                     }
                 }
-                Err(e) => iv.retry.draw_failed(&e),
+                // Dönüş burada okunmuyor: bu dalın durağı bayrağın
+                // dikilmemesi ve o `draw_failed`'in kendi içinde.
+                Err(e) => {
+                    iv.retry.draw_failed(&e);
+                }
             }
         }
     }
@@ -676,7 +704,9 @@ impl DisplayLink {
                         stats.record_gpu(cmd.GPUStartTime(), cmd.GPUEndTime());
                     }
                 }
-                Err(e) => retry.draw_failed(&e),
+                Err(e) => {
+                    retry.draw_failed(&e);
+                }
             })
         };
         let delegate = LinkDelegate::new(
@@ -840,6 +870,26 @@ impl DisplayLink {
         let iv = self.delegate.ivars();
         let mut motion = iv.motion.get();
         let finished = motion.set_style(style);
+        iv.motion.set(motion);
+        if finished {
+            self.request_frame();
+        }
+    }
+
+    /// Hareketi Azalt açıldı ya da kapandı — `bt-shell` **çözülmüş** değeri
+    /// veriyor: üç değerli `reduce_motion` ile sistemin cevabını o birleştiriyor
+    /// ve `bt-gpu` ne ayar dosyası ne `NSWorkspace` görüyor
+    /// ([`DisplayLink::set_cursor_motion`] ile aynı örüntü).
+    ///
+    /// **İki yön de kare isteyebilir** ve sebebi yine "hasar yok" dalının
+    /// şekli: uçuştaki animasyon her iki yönde de hedefinde bitiriliyor
+    /// ([`crate::motion::Motion::set_reduce`]) ve yerleşmiş bir animasyon o
+    /// dalda hiç çizilmeden uyuyor — istenmeseydi imleç ara hücrede ya da yarı
+    /// saydam asılı kalırdı. Yerleşmiş imleçte ve aynı değerde no-op.
+    pub fn set_reduce_motion(&self, reduce: bool) {
+        let iv = self.delegate.ivars();
+        let mut motion = iv.motion.get();
+        let finished = motion.set_reduce(reduce);
         iv.motion.set(motion);
         if finished {
             self.request_frame();

@@ -122,6 +122,38 @@ impl CursorMotion {
     }
 }
 
+/// `[motion] reduce_motion`: animasyonların kısılıp kısılmayacağı.
+///
+/// **`bool` değil** ve sebebi bu dosyanın kendi kuralı: en olası seçim
+/// "sistemi izle" ve `bool`'da onu ifade etmenin tek yolu anahtarı **silmek**
+/// olurdu — burada anahtar silinmiyor, bilinmeyen anahtar bile korunuyor.
+/// Üç değerli dizgi üçünü de yazılı tutuyor.
+///
+/// Sistemin cevabını okumak `bt-shell`'in işi (`NSWorkspace`); buradaki tek
+/// bilgi kullanıcının **hangisini** istediği. Üçünün tek `bool`'a indiği yer
+/// de orası, çünkü `bt-gpu` AppKit görmüyor (`CLAUDE.md` → katman tablosu).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReduceMotion {
+    /// macOS'un Hareketi Azalt ayarını izle.
+    #[default]
+    System,
+    /// Sistem ne derse desin kıs.
+    On,
+    /// Sistem ne derse desin kısma.
+    Off,
+}
+
+impl ReduceMotion {
+    /// Ayar dosyasındaki yazılışı; [`CursorMotion::name`] ile aynı gerekçe.
+    fn name(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// Kullanıcının değiştirebildiği her şey — ayrıştırılmış ve doğrulanmış.
 ///
 /// Alanlar `pub`: tip bir kayıt, davranış taşımıyor. Değerin geçerliliğini
@@ -152,6 +184,8 @@ pub struct Settings {
     pub osc52: Osc52,
     /// `[motion] cursor_motion`: imlecin kayma stili.
     pub cursor_motion: CursorMotion,
+    /// `[motion] reduce_motion`: animasyonlar kısılsın mı.
+    pub reduce_motion: ReduceMotion,
 }
 
 impl Default for Settings {
@@ -175,6 +209,7 @@ impl Default for Settings {
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::default(),
+            reduce_motion: ReduceMotion::default(),
         }
     }
 }
@@ -263,6 +298,9 @@ osc52 = "copy"
 # How the cursor travels between cells: "spring" glides and eases into place,
 # "ease" glides for a fixed time, "snap" jumps there at once.
 cursor_motion = "spring"
+# Whether to tone animations down to a short fade: "system" follows the macOS
+# Reduce Motion setting, "on" and "off" decide it here.
+reduce_motion = "system"
 "#;
 
     /// Dosya **var ama kullanılamıyor** (okunamıyor ya da geçersiz TOML)
@@ -414,9 +452,14 @@ cursor_motion = "spring"
                     parsed.settings.cursor_motion =
                         cursor_motion(text, item, fallback.cursor_motion, &mut parsed.diagnostics);
                 }
+                if let Some(item) = motion.get("reduce_motion") {
+                    parsed.settings.reduce_motion =
+                        reduce_motion(text, item, fallback.reduce_motion, &mut parsed.diagnostics);
+                }
             }
             None if root.contains_key("motion") => {
                 parsed.settings.cursor_motion = fallback.cursor_motion;
+                parsed.settings.reduce_motion = fallback.reduce_motion;
             }
             None => {}
         }
@@ -461,7 +504,8 @@ cursor_motion = "spring"
         Changes {
             terminal: self.terminal() != new.terminal(),
             font: self.font != new.font,
-            motion: self.cursor_motion != new.cursor_motion,
+            motion: self.cursor_motion != new.cursor_motion
+                || self.reduce_motion != new.reduce_motion,
         }
     }
 
@@ -575,10 +619,17 @@ pub struct Changes {
     /// [`Settings::font`] değişti: renderer'a gider, hücre ölçüsü ve grid
     /// yeniden hesaplanır.
     pub font: bool,
-    /// [`Settings::cursor_motion`] değişti: kareyi süren ritme gider
-    /// (`bt_gpu::DisplayLink::set_cursor_motion`). Terminalden ve fonttan ayrı
-    /// bir alan, çünkü stil ne oturumu ne hücre ölçüsünü ilgilendiriyor —
+    /// `[motion]` bölümü değişti: kareyi süren ritme gider
+    /// (`bt_gpu::DisplayLink::set_cursor_motion`,
+    /// `bt_gpu::DisplayLink::set_reduce_motion`). Terminalden ve fonttan ayrı
+    /// bir alan, çünkü hareket ne oturumu ne hücre ölçüsünü ilgilendiriyor —
     /// ikisine de bağlansaydı bir stil değişimi grid'i yeniden kurdururdu.
+    ///
+    /// İki anahtar **tek** alanda: ikisi de aynı yere, aynı çağrı yerinde
+    /// gidiyor ve ayrı alanlar çağıranda tek bir `if` yerine iki tane
+    /// yazdırırdı. [`Settings::reduce_motion`] üç değerli olduğu için
+    /// `bt-shell` onu yine de çözmek zorunda; fark yalnız "bir şey değişti"
+    /// diyor.
     pub motion: bool,
 }
 
@@ -827,6 +878,37 @@ fn cursor_motion(
     fallback
 }
 
+/// `motion.reduce_motion`: tam olarak `"system"`, `"on"` ya da `"off"`.
+///
+/// [`cursor_motion`] ile aynı kural ve aynı gerekçe: kabul edilmeyen değer
+/// `fallback`'i alır ve tanı bırakır. Burada da yanlış tahminin belirtisi
+/// görünür (imleç kayar ya da kaymaz), yani `clipboard.osc52`'nin "kapalıya
+/// düş" istisnası buraya da geçmiyor.
+fn reduce_motion(
+    text: &str,
+    item: &Item,
+    fallback: ReduceMotion,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> ReduceMotion {
+    const KEY: &str = "motion.reduce_motion";
+    let found = match item.as_str() {
+        Some("system") => return ReduceMotion::System,
+        Some("on") => return ReduceMotion::On,
+        Some("off") => return ReduceMotion::Off,
+        Some(value) => format!("{value:?}"),
+        None => kind(item).to_owned(),
+    };
+    diagnostics.push(Diagnostic {
+        key: Some(KEY),
+        line: item.span().and_then(|span| line_of(text, span.start)),
+        message: format!(
+            "`{KEY}` must be \"system\", \"on\" or \"off\", found {found}; using \"{}\"",
+            fallback.name()
+        ),
+    });
+    fallback
+}
+
 /// Bayt konumunun 1'den başlayan satırı.
 ///
 /// `toml_edit`'in kendi çevirisi (`translate_position`) crate'e özel;
@@ -911,6 +993,7 @@ mod tests {
             ("font", "size"),
             ("clipboard", "osc52"),
             ("motion", "cursor_motion"),
+            ("motion", "reduce_motion"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -1081,6 +1164,7 @@ mod tests {
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::Spring,
+            reduce_motion: ReduceMotion::System,
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -1394,6 +1478,90 @@ found {found}; using \"spring\""
         // değil — ikisini de kıpırdatmamalı.
         let before = clean("");
         let after = clean("[motion]\ncursor_motion = \"snap\"\n");
+        assert_eq!(
+            before.changes(&after),
+            Changes {
+                terminal: false,
+                font: false,
+                motion: true
+            }
+        );
+        assert_eq!(after.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn reduce_motion_is_read() {
+        // Dosyada yoksa `system`: en olası seçim "sistemi izle" ve anahtarın
+        // üç değerli olmasının sebebi de bu (`ReduceMotion`).
+        assert_eq!(clean("").reduce_motion, ReduceMotion::System);
+        assert_eq!(
+            clean("[motion]\nreduce_motion = \"on\"\n").reduce_motion,
+            ReduceMotion::On
+        );
+        assert_eq!(
+            clean("[motion]\nreduce_motion = \"off\"\n").reduce_motion,
+            ReduceMotion::Off
+        );
+        assert_eq!(
+            clean("motion = { reduce_motion = \"system\" }\n").reduce_motion,
+            ReduceMotion::System
+        );
+        // İki anahtar birbirini ezmiyor: aynı bölümde ikisi de okunuyor.
+        let both = clean("[motion]\ncursor_motion = \"ease\"\nreduce_motion = \"on\"\n");
+        assert_eq!(both.cursor_motion, CursorMotion::Ease);
+        assert_eq!(both.reduce_motion, ReduceMotion::On);
+    }
+
+    #[test]
+    fn unrecognized_reduce_motion_keeps_its_own_key() {
+        // `cursor_motion` ile aynı kural: anahtar kendi değerinde kalır,
+        // yanında tanı — ve **yalnız kendi** anahtarı etkilenir.
+        for (value, found) in [
+            ("\"yes\"", "\"yes\""),
+            ("\"System\"", "\"System\""),
+            ("true", "a boolean"),
+        ] {
+            let text = format!("[motion]\ncursor_motion = \"snap\"\nreduce_motion = {value}\n");
+            let (settings, diagnostic) = rejected(&text);
+            assert_eq!(
+                settings,
+                Settings {
+                    cursor_motion: CursorMotion::Snap,
+                    ..Settings::default()
+                },
+                "{value}"
+            );
+            assert_eq!(diagnostic.key, Some("motion.reduce_motion"), "{value}");
+            assert_eq!(diagnostic.line, Some(3), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`motion.reduce_motion` must be \"system\", \"on\" or \"off\", \
+found {found}; using \"system\""
+                )
+            );
+        }
+        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
+        let current = Settings {
+            reduce_motion: ReduceMotion::Off,
+            ..Settings::default()
+        };
+        let parsed = Settings::parse_keeping("[motion]\nreduce_motion = \"yes\"\n", &current)
+            .expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.reduce_motion, ReduceMotion::Off);
+        assert!(parsed.diagnostics[0].message.ends_with("using \"off\""));
+        // Bölüm yanlış türde: iki anahtar da kabul edilmemiş sayılıyor.
+        let parsed =
+            Settings::parse_keeping("motion = 5\n", &current).expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.reduce_motion, ReduceMotion::Off);
+    }
+
+    #[test]
+    fn reduce_motion_change_is_a_motion_change() {
+        // `cursor_motion` ile **aynı** farka düşüyor: ikisi de aynı yere,
+        // aynı çağrı yerinde gidiyor (`Changes::motion`).
+        let before = clean("");
+        let after = clean("[motion]\nreduce_motion = \"on\"\n");
         assert_eq!(
             before.changes(&after),
             Changes {

@@ -4,7 +4,8 @@
 //! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`,
 //! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Theme`,
-//! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`, `CursorMotion`'ı görür (tam
+//! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`, `CursorMotion`,
+//! `ReduceMotion`'ı görür (tam
 //! liste aşağıdaki `pub use` bloğu). `Osc52` alacritty'nin aynı adlı tipinin
 //! karşılığı, kendisi değil. Kendi grid'imize geçiş (00X) bu sınırın
 //! arkasında yapılır ve renderer'ı bilmez. `toml_edit` de aynı biçimde içeride
@@ -41,7 +42,7 @@ pub use session::{
     SessionOptions, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
-    Changes, CursorMotion, Diagnostic, FontOptions, Parsed, SYSTEM_THEME, Settings,
+    Changes, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion, SYSTEM_THEME, Settings,
 };
 pub use wake::Wake;
 
