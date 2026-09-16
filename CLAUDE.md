@@ -25,14 +25,15 @@ pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgiler
 kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
 Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
-`settings.toml`'u okur (bugün `scrollback`, tema seçimi, font, `osc52` ve
-`cursor_motion`), Theme ▸'nin seçimini oraya
+`settings.toml`'u okur (bugün `scrollback`, tema seçimi, font, `osc52`,
+`cursor_motion` ve `reduce_motion`), Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
 anında** uygulanır (`watch`: vnode kaynakları; `Session::set_theme`,
 `Session::set_terminal_options`, `Renderer::set_font`,
-`DisplayLink::set_cursor_motion`); varsayılan tema
-sistemin açık/koyu görünümünü de canlı izler. `make kur` `bateri.app` paketini üretir.
+`DisplayLink::set_cursor_motion`, `DisplayLink::set_reduce_motion`);
+varsayılan tema sistemin açık/koyu görünümünü, `reduce_motion = "system"` de
+sistemin Hareketi Azalt ayarını canlı izler. `make kur` `bateri.app` paketini üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri
 aynı commit'te düzelir.
@@ -131,7 +132,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   saatidir). Kapı bu yüzden `kare`'ye değil **içerik** karesine bakıyor —
   200 ms'lik bir imleç kayması `kare`'yi meşru olarak şişirir. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
-  animasyonu 90 ms'lik solmaya indirir.
+  animasyonu 90 ms'lik bir **belirmeye** indirir — imleç kaymaz, yeni yerinde
+  belirir. İndirgemenin tek yeri `bt-gpu::motion` (`Mode::Fade`); üç değerli
+  ayar ile sistemin cevabı `bt-shell`'de tek `bool`'a iniyor, `bt-gpu` AppKit
+  görmüyor. `cursor_motion = "snap"` bunun üstündedir: hareketi zaten kapatmış
+  olana erişilebilirlik ayarı animasyon *eklemez*.
 - **Kapanış sınırlı bekler, çocuk yine de ölmeyebilir.**
   `Session::shutdown()` `SIGHUP`'tan sonra `join`'i ve `Pty`'nin düşmesini ayrı
   bir thread'e alır ve en çok `SHUTDOWN_GRACE` (yarım saniye) bekler; sinyali yutan ya da

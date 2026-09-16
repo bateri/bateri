@@ -97,6 +97,9 @@ osc52 = "copy"
 # How the cursor travels between cells: "spring" glides and eases into place,
 # "ease" glides for a fixed time, "snap" jumps there at once.
 cursor_motion = "spring"
+# Whether to tone animations down to a short fade: "system" follows the macOS
+# Reduce Motion setting, "on" and "off" decide it here.
+reduce_motion = "system"
 ```
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
@@ -365,11 +368,13 @@ osc52 = "copy"
 ```toml
 [motion]
 cursor_motion = "spring"
+reduce_motion = "system"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
 |---|---|---|---|
 | `cursor_motion` | `"snap"`, `"ease"` ya da `"spring"` | `"spring"` | imlecin hücreler arasında nasıl gittiği |
+| `reduce_motion` | `"system"`, `"on"` ya da `"off"` | `"system"` | animasyonların kısılıp kısılmayacağı |
 
 - **`"spring"`** — imleç yeni yerine bir yayla kayar ve yavaşlayarak oturur;
   hedefi aşmaz. Uzak bir sıçrama yakın bir sıçramadan biraz uzun sürer.
@@ -386,6 +391,22 @@ cursor_motion = "spring"
   imleç hiçbir stil değişiminde ışınlanmaz.
 - Tanınmayan değer (`"sprong"`, `"Spring"`, `true`) yalnız bu anahtarı
   etkiler: stil olduğu gibi kalır ve uyarı görünür.
+
+`reduce_motion` animasyonların kısılıp kısılmayacağını söyler:
+
+- **`"system"`** — macOS'un Sistem Ayarları ▸ Erişilebilirlik ▸ Görüntü ▸
+  Hareketi Azalt ayarını izler. Ayarı açıp kapatmak bateri'yi yeniden
+  başlatmadan etkiler.
+- **`"on"`** — sistem kapalıyken de kısar, **`"off"`** sistem açıkken de
+  kısmaz. İkisi sistemi hiç okumaz.
+- Kısıldığında imleç kaymaz: yeni hücresinde **kısa bir belirmeyle** (90 ms)
+  görünür, eski hücresinde iz bırakmaz. Kısılan şey kaymanın kendisi, imlecin
+  görünürlüğü değil.
+- `cursor_motion = "snap"` bunun **üstündedir**: hareketi zaten kapatmış
+  olan kullanıcıya Hareketi Azalt bir belirme *eklemez*.
+- Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa hedefinde
+  bitirilir — açarken de kapatırken de imleç ışınlanmaz.
+- Tanınmayan değer (`"yes"`, `"System"`, `true`) yalnız bu anahtarı etkiler.
 
 ## Temalar
 
