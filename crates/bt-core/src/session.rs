@@ -259,6 +259,13 @@ pub struct Block {
 pub struct Blocks {
     /// Faz 1'in topladığı çıpalar: `(blok kimliği, ilk satır)`, satır sırasıyla.
     anchors: Vec<(u32, u16)>,
+    /// Pencerenin üstünde kalan en yakın çıpanın kimliği
+    /// ([`Session::anchor_above`]); pencerenin üst bölgesinin sahibi.
+    ///
+    /// Faz 1'de, yani `Term` kilidi altında doldurulur: scrollback'i okumak
+    /// ızgaraya dokunmak demek. `Option`, çünkü üstte çıpa olmayabilir —
+    /// oturumun ilk bloğu, ya da entegrasyonsuz bir kabuk.
+    above: Option<u32>,
     /// Faz 2'nin ürettiği liste; çizen taraf yalnız bunu görür.
     resolved: Vec<Block>,
 }
@@ -1162,6 +1169,7 @@ impl Session {
         let theme = *lock(&self.adapter.0.theme);
         let background = theme.background_rgb();
         blocks.anchors.clear();
+        blocks.above = None;
         blocks.resolved.clear();
         let term = self.term.lock();
 
@@ -1445,6 +1453,12 @@ impl Session {
                 strikeout,
             });
         }
+        // Pencerenin üstündeki çıpa da **kilit altında** okunuyor: scrollback
+        // ızgaranın parçası. Alternatif ekranda hiç sorulmuyor — orada blok
+        // yok ve `Line(-offset - 1)` vim'in tamponunun arkasını gösterirdi.
+        blocks.above = (!alt_screen)
+            .then(|| Self::anchor_above(&term, offset))
+            .flatten();
         drop(term);
 
         // **Faz 2**, `Term` kilidi düştükten sonra: kimlikler kabuk
@@ -1457,6 +1471,45 @@ impl Session {
             self.resolve_blocks(blocks, last_row, offset, &theme);
         }
         cursor
+    }
+
+    /// Pencerenin **üstünde** kalan en yakın blok çıpası.
+    ///
+    /// Bir satırın hangi bloğa ait olduğunu söyleyen tek şey çıpa, ve çıpa
+    /// yalnız prompt satırlarında. Uzun bir çıktının ortasına kaydırıldığında
+    /// pencerede hiç prompt kalmıyor: bu fonksiyon olmadan o pencere
+    /// **renksiz** kalıyordu ve aynı satır kaydırma konumuna göre bir şeritli
+    /// bir şeritsiz görünüyordu — gelip giden bir gösterge, olmayandan kötü
+    /// (kullanıcı bulgusu, 010 teslim). Veri zaten scrollback'te duruyor;
+    /// eksik olan tek şey oraya bakmaktı.
+    ///
+    /// **Yalnız 0. sütun okunuyor.** Çıpayı açan OSC 8 prompt'un ilk
+    /// karakterinden önce basılıyor (`bateri.zsh`'in PS1 öneki), yani satırın
+    /// ilk hücresi onu taşımak zorunda; satırın tamamını taramak aynı yanıt
+    /// için sütun sayısı kadar daha fazla iş olurdu. Sarılan prompt satırının
+    /// devamı da aynı kimliği taşıyor, yani sarma bu okumayı bozmuyor.
+    ///
+    /// **Maliyet** kaydırma mesafesiyle doğru orantılı ve satır başına bir boş
+    /// kontrol: en kötü hâl (üstünde hiç çıpa olmayan dolu bir scrollback)
+    /// `scrollback` kadar hücre okuması eder. Üst sınır konmadı çünkü her
+    /// sınır, mesafe aşıldığında şeridi yeniden kaybettirirdi — kusurun
+    /// kendisi bu.
+    fn anchor_above(term: &Term<Adapter>, offset: i32) -> Option<u32> {
+        let grid = term.grid();
+        let topmost = grid.topmost_line().0;
+        // Pencerenin ilk satırı `Line(-offset)`; tarama onun **bir üstünden**
+        // başlıyor. Görünen satırların çıpaları faz 1'de zaten toplandı.
+        let mut line = -offset - 1;
+        while line >= topmost {
+            if let Some(id) = grid[Line(line)][Column(0)]
+                .hyperlink()
+                .and_then(|link| block_id(link.uri()))
+            {
+                return Some(id);
+            }
+            line -= 1;
+        }
+        None
     }
 
     /// Faz 2: çıpalardan blok aralıkları, defterden renkler.
@@ -1477,7 +1530,12 @@ impl Session {
         // Yıkım: aşağıdaki kapatma yalnız `resolved`'ı ödünç alsın, döngü
         // `anchors`'ı okuyabilsin. Tek bir `&mut blocks` ikisini de tutar ve
         // ödünç denetleyicisi haklı olarak reddeder.
-        let Blocks { anchors, resolved } = blocks;
+        let Blocks {
+            anchors,
+            above,
+            resolved,
+        } = blocks;
+        let above = *above;
         let shell = lock(&self.shell);
         let running = shell.running();
         let mut push = |id: u32, first_row: u16, end: u16| {
@@ -1518,7 +1576,22 @@ impl Session {
             // sözleşmesine dokunuyor — bash/fish setine borç
             // (`docs/YOL-HARITASI.md`).
             //
-            // Kaydırma kapısı planda yoktu ve bu tezin kendisinden geliyor:
+            // **Önce üstteki çıpa.** Uzun bir çıktının ortasına kaydırıldığında
+            // pencerede prompt kalmıyor ama satırların sahibi belirsiz değil:
+            // yukarıda bir yerde duran çıpa onu söylüyor
+            // ([`Session::anchor_above`]). Eskiden bu kol hiçbir şey çizmiyordu
+            // ve aynı satır kaydırma konumuna göre bir şeritli bir şeritsiz
+            // görünüyordu (kullanıcı bulgusu, 010 teslim).
+            if let Some(id) = above {
+                push(id, 0, last_row);
+                return;
+            }
+            // Üstte çıpa da yoksa geriye tek tahmin kalıyor: kabuk `Running`'se
+            // pencere son `A`'nın bloğunun. Bu kol artık yalnız çıpanın
+            // **hiç** olmadığı hâlde koşuyor — entegrasyonun ortasında
+            // başladığı, ya da halkanın dolaştığı oturum.
+            //
+            // Kaydırma kapısı burada duruyor ve tezin kendisinden geliyor:
             // geçmişe kaydırılmış bir pencerede (offset > 0) görünen satırlar
             // koşan komutun değil, çok daha eski bir bloğun çıktısı olabilir.
             // Dipteyken böyle bir belirsizlik yok — koşan prompt'tan sonrası
@@ -1542,15 +1615,25 @@ impl Session {
         // prompt: p10k'nın `TRANSIENT_PROMPT`'ı biten komutun prompt satırını
         // kendi `PROMPT`'uyla yeniden basıyor, yani çıpa yalnız **canlı**
         // prompt'ta kalıyor; o hâlde tek çıpa görünür ve üstündeki bütün
-        // pencere — birden çok bloğun çıktısı — `N−1`'in rengine boyanır.
+        // pencere — birden çok bloğun çıktısı — tek bir bloğun rengine
+        // boyanır. `anchor_above` sınırı **daraltıyor** ama kapatmıyor: artık
+        // rengi veren, tahmin edilen `N−1` değil scrollback'te gerçekten duran
+        // çıpa, yani o çıpaya kadarki bölge doğru. Yanlış kalan yer çıpası
+        // silinmiş blokların arası; ayırt edecek veri ızgarada yok.
         // Ayırt edecek veri ızgarada yok: çıpasız bir prompt satırı ile çıktı
         // satırı aynı görünüyor. "En az iki çıpa iste" gibi bir nöbet, tam da
         // en sık meşru durumu (uzun çıktı, tek görünür prompt) öldürürdü.
         // Kapatan iş `B`'nin asıl tüketicisi, yani prompt'u terminalin çizmesi
         // (011) — geçici prompt o zaman bizim kararımız olur.
         // (`/code-review`, 010 phase-2.)
+        // Kimlik **ölçülmüş** olanı, türetilmiş olan yalnız yedek: üstteki
+        // çıpa okunabildiyse bölgenin sahibi odur. `first_id - 1` tahmini
+        // ancak scrollback'te çıpa kalmadığında (halka değil, ızgara dolaştı)
+        // devreye giriyor. Ölçülmüş kimlik geçici prompt'ta da doğru olanı
+        // veriyor: `TRANSIENT_PROMPT` biten prompt'un çıpasını siliyor, yani
+        // üstteki çıpa gerçekten o bölgenin sahibi.
         if first_row > 0
-            && let Some(previous) = first_id.checked_sub(1)
+            && let Some(previous) = above.or_else(|| first_id.checked_sub(1))
         {
             push(previous, 0, first_row - 1);
         }
@@ -2661,6 +2744,47 @@ mod tests {
             blocks.len() == 1 && blocks[0].last_row == 8
         });
         assert_eq!(spans(&blocks), [(0, 8, THEME.success_linear())]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn scrolling_into_a_long_output_keeps_its_stripe() {
+        // **Kullanıcı bulgusu (010 teslim).** `seq 1 150` gibi uzun bir
+        // çıktının ortasına kaydırıldığında pencerede hiç prompt kalmıyor.
+        // Eskiden bu hâlde hiçbir şey çizilmiyordu ve aynı satır kaydırma
+        // konumuna göre bir şeritli bir şeritsiz görünüyordu — gelip giden bir
+        // gösterge, olmayandan kötü. Satırların sahibi aslında belirsiz değil:
+        // yukarıda duran çıpa onu söylüyor ve `anchor_above` oraya bakıyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '{}cmd1\\033]133;C\\007'; \
+                 i=0; while [ $i -lt 25 ]; do printf 'out\\r\\n'; i=$((i + 1)); done; \
+                 printf '\\033]133;D;0;bt_block=1\\007{}'; sleep 5",
+                anchored_prompt(1),
+                anchored_prompt(2),
+            ),
+            Arc::clone(&wake),
+        );
+        // Dipte: son satır ikinci prompt (çizilmiyor, `Pending`), üstündeki
+        // dokuz satır birinci bloğun çıktısı.
+        let blocks = wait_blocks(&session, &wake, |blocks| {
+            blocks.len() == 1 && blocks[0].last_row == 8
+        });
+        assert_eq!(spans(&blocks), [(0, 8, THEME.success_linear())]);
+
+        // On satır yukarı: 27 satırlık içerikte pencere tamamen `out`
+        // satırlarına düşüyor, yani görünür çıpa **yok**. `wait_blocks` değil
+        // doğrudan `frame`: çıktı çoktan tamam, beklenecek bir şey yok ve
+        // `scroll_display` hasar dikmiyor.
+        let mut blocks = Blocks::default();
+        session.term.lock().scroll_display(Scroll::Delta(10));
+        session.frame(|_| (), &mut blocks);
+        assert_eq!(
+            spans(blocks.as_slice()),
+            [(0, 9, THEME.success_linear())],
+            "kaydırınca şerit kayboldu"
+        );
         session.shutdown();
     }
 

@@ -102,6 +102,13 @@ Phase-4'ün Kabul listesinin tek açık maddesi (`[~]`). `bateri.app`'i açıp:
   kararıyla içerik 011'de tabana yapışacak (`docs/YOL-HARITASI.md` → 011), ve o
   düzende aralık kendiliğinden kısalıyor. Şeridi ayrıca yamamak aynı şeyi iki
   kez çözmek olurdu.
+- **Kaydırınca şerit kayboluyordu — düzeltildi** (`Session::anchor_above`).
+  `seq 1 150` gibi uzun bir çıktının ortasına kaydırıldığında pencerede hiç
+  prompt kalmıyordu, yani çıpa da yoktu ve kod bilerek hiçbir şey çizmiyordu;
+  sonuç aynı satırın kaydırma konumuna göre bir şeritli bir şeritsiz
+  görünmesiydi. Satırların sahibi aslında belirsiz değil — yukarıda duran çıpa
+  onu söylüyor — ve `frame()` artık oraya bakıyor. Bu, mavi bar'ın aksine
+  011'in yutmadığı bir kusurdu: kaydırma her düzende var.
 
 ### B.3 Kullanıcı temaları `[elle]`
 
