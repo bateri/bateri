@@ -325,8 +325,8 @@ impl Frame {
         }
     }
 
-    /// Bir komut bloğunun şeridi: sol payın ortasına, bloğun satır aralığı
-    /// boyunca uzanan bir dikdörtgen.
+    /// Bir komut bloğunun işareti: sol payın ortasına, **komutun kendi
+    /// satırına** çizilen bir dikdörtgen.
     ///
     /// **Renk üretilmiyor, taşınıyor.** `bt-core` "hangi satırlar, hangi renk"
     /// sorusunu çözülmüş veriyor ([`Block`]); burada çıkış kodu tanıyan bir dal
@@ -350,18 +350,12 @@ impl Frame {
     pub(crate) fn push_block(&mut self, block: Block) {
         let h = self.cell_px.1;
         debug_assert!(h > 0.0, "clear(metrics) çağrılmadı");
-        // Sınırın sözleşmesi aralığın boş olamayacağı; ters aralık `bt-core`'da
-        // bir kusur olurdu ve burada sessizce bir satırlık şerit çizmek onu
-        // saklardı. Çizim yolunda panik yok, bekçi bu yüzden `debug_assert`
-        // ve `saturating_sub` release'te aralığı bir satıra doyuruyor.
-        debug_assert!(block.first_row <= block.last_row, "ters blok aralığı");
-        let top = f32::from(block.first_row) * h;
-        // `last_row` **dahil**: aralık bir satırlıksa yükseklik tam bir hücre.
-        // `+ 1` düşseydi tek satırlık blok (prompt beklerken) hiç görünmezdi.
-        let rows = f32::from(block.last_row.saturating_sub(block.first_row)) + 1.0;
+        // Yükseklik tam bir hücre: işaret komutun satırını gösteriyor, bir
+        // aralığı değil (`bt_core::Block`). Satır aralığı sınırı geçmiyor,
+        // yani burada doğrulanacak bir "ters aralık" da kalmadı.
         self.stripes.push(Instance {
-            pos: [self.gutter_px / 4.0, top],
-            size: [self.gutter_px / 2.0, rows * h],
+            pos: [self.gutter_px / 4.0, f32::from(block.row) * h],
+            size: [self.gutter_px / 2.0, h],
             rgba: block.stripe.to_array(),
         });
     }
@@ -835,42 +829,37 @@ mod tests {
     /// değerle aynı kaynak (`bt-core` → `Block::stripe`).
     const SUCCESS: LinearRgba = bt_core::Theme::BATERI.success_linear();
 
-    fn block(first_row: u16, last_row: u16) -> Block {
+    fn block(row: u16) -> Block {
         Block {
-            first_row,
-            last_row,
+            row,
             stripe: SUCCESS,
         }
     }
 
     #[test]
-    fn a_stripe_spans_its_rows_inside_the_gutter() {
-        // Şeridin iki iddiası da sessizce bozulabilir: (1) dikey aralık
-        // `last_row` **dahil** — `+ 1` düşerse prompt beklerken duran tek
-        // satırlık blok hiç görünmez; (2) yatay olarak payın **içinde** durur —
-        // `pos_at`'ten geçseydi ilk sütunun üstüne düşer ve metni örterdi, yani
-        // Karar 3a'nın ayırdığı payın tamamı boşa giderdi.
+    fn a_mark_covers_one_row_inside_the_gutter() {
+        // İşaretin iki iddiası da sessizce bozulabilir: (1) dikey olarak tam
+        // **bir hücre** — komutun satırını gösteriyor, bir aralığı değil; (2)
+        // yatay olarak payın **içinde** durur — `pos_at`'ten geçseydi ilk
+        // sütunun üstüne düşer ve metni örterdi, yani Karar 3a'nın ayırdığı
+        // payın tamamı boşa giderdi.
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
-        frame.push_block(block(1, 3));
+        frame.push_block(block(2));
 
-        let stripe = frame.stripes()[0];
-        assert_eq!(stripe.pos[1], 18.0, "şerit ilk satırından başlamalı");
-        assert_eq!(stripe.size[1], 54.0, "üç satır, `last_row` dahil");
-        assert_eq!(stripe.rgba, SUCCESS.to_array(), "renk sınırdan gelir");
+        let mark = frame.stripes()[0];
+        assert_eq!(mark.pos[1], 36.0, "işaret kendi satırında başlamalı");
+        assert_eq!(mark.size[1], 18.0, "tam bir hücre boyunda");
+        assert_eq!(mark.rgba, SUCCESS.to_array(), "renk sınırdan gelir");
         // Pay içinde ve ortalanmış: sol kenarı payın dörtte biri, sağ kenarı
         // dörtte üçü. Payı aşsaydı 0. sütunun arka planına girerdi.
-        assert_eq!(stripe.pos[0], f32::from(GUTTER) / 4.0);
-        assert_eq!(stripe.pos[0] + stripe.size[0], f32::from(GUTTER) * 0.75);
-
-        // Tek satırlık blok tam bir hücre boyunda.
-        frame.push_block(block(5, 5));
-        assert_eq!(frame.stripes()[1].size[1], 18.0);
+        assert_eq!(mark.pos[0], f32::from(GUTTER) / 4.0);
+        assert_eq!(mark.pos[0] + mark.size[0], f32::from(GUTTER) * 0.75);
 
         frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
         assert!(
             frame.stripes().is_empty(),
-            "`clear` şeritleri de boşaltmalı"
+            "`clear` işaretleri de boşaltmalı"
         );
     }
 
@@ -883,7 +872,7 @@ mod tests {
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(8, 16, GUTTER).expect("ölçü"));
         frame.push(bg_cell(0, 0));
-        frame.push_block(block(0, 2));
+        frame.push_block(block(0));
         push_settled(&mut frame, cursor(0, 0, true));
 
         assert_eq!(frame.bg_count(), 1, "şerit hücre sayılmamalı");

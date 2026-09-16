@@ -1468,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn command_stripes_paint_the_gutter_on_the_gpu() {
+    fn command_marks_paint_the_gutter_on_the_gpu() {
         // Şeridin GPU tarafı: `Frame::stripes` bir **CPU** listesi ve kardeş
         // sayaçların aksine duman jetonu bile yok — bu sınama düşerse şeridin
         // çizildiğini söyleyen başka hiçbir bekçi kalmıyor.
@@ -1486,15 +1486,14 @@ mod tests {
         // Izgara 8'den başlıyor, yani 4 px'lik iki sütun payın sağında.
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(4, 4, GUTTER).expect("ölçü"));
-        // İki blok, iki durum rengi: üst yarı başarılı, alt yarı başarısız.
+        // İki işaret, iki durum rengi: 0. satır başarılı, 3. satır başarısız.
+        // Aradaki iki satır (çıktı) **işaretsiz** kalmalı.
         frame.push_block(Block {
-            first_row: 0,
-            last_row: 1,
+            row: 0,
             stripe: Theme::BATERI.success_linear(),
         });
         frame.push_block(Block {
-            first_row: 2,
-            last_row: 3,
+            row: 3,
             stripe: Theme::BATERI.error_linear(),
         });
         // Izgaranın ilk hücresi: şeridin ona **değmediğini** gösteren tanık.
@@ -1516,18 +1515,22 @@ mod tests {
             );
         };
 
-        close_to(pixel(4, 2), srgb(Theme::BATERI.success), "üst şerit");
-        close_to(pixel(4, 13), srgb(Theme::BATERI.error), "alt şerit");
-        // Aralık `last_row` dahil: ikinci satır da üst şeridin rengi olmalı.
-        close_to(pixel(4, 6), srgb(Theme::BATERI.success), "ikinci satır");
+        close_to(pixel(4, 2), srgb(Theme::BATERI.success), "ilk komut");
+        close_to(pixel(4, 13), srgb(Theme::BATERI.error), "ikinci komut");
+        // **Çıktı satırları işaretsiz** (kullanıcı kararı, 010 teslim): 1. ve
+        // 2. satırın payında clear rengi olmalı. Bu, işaretin bir hücre
+        // boyunda kaldığının tek piksel kanıtı — yükseklik satır aralığına
+        // dönerse burası düşer.
+        close_to(pixel(4, 6), srgb(Theme::BATERI.accent), "çıktı satırı");
+        close_to(pixel(4, 9), srgb(Theme::BATERI.accent), "çıktı satırı");
 
-        // Nefes payı: şeridin iki yanı da clear rengi. Şerit payı doldursaydı
+        // Nefes payı: işaretin iki yanı da clear rengi. İşaret payı doldursaydı
         // (ya da `pos_at`'ten geçip ızgaraya kaysaydı) bu iki satır düşerdi.
         close_to(pixel(0, 2), srgb(Theme::BATERI.accent), "payın solu");
         close_to(pixel(7, 2), srgb(Theme::BATERI.accent), "payın sağı");
 
         // Izgara payın sağında ve dokunulmamış: ilk hücre beyaz kaldı.
-        assert_eq!(pixel(9, 2), (255, 255, 255), "ilk hücre şeridin altında");
+        assert_eq!(pixel(9, 2), (255, 255, 255), "ilk hücre işaretin sağında");
     }
 
     #[test]

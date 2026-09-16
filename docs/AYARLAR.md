@@ -521,9 +521,9 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 | `background` | varsayılan arka plan, pencerenin zemini |
 | `foreground` | varsayılan ön plan |
 | `dim` | sönük (SGR 2) yazılmış varsayılan ön plan |
-| `accent` | vurgu; imleç ve **koşan** komut bloğunun şeridi |
-| `success` | durum: başarı; sıfır çıkış koduyla biten komut bloğunun şeridi |
-| `error` | durum: hata; sıfırdan farklı çıkış koduyla biten bloğun şeridi |
+| `accent` | vurgu; imleç ve **koşan** komutun işareti |
+| `success` | durum: başarı; sıfır çıkış koduyla biten komutun işareti |
+| `error` | durum: hata; sıfırdan farklı çıkış koduyla biten komutun işareti |
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |
 | `[ansi]` `bright_black` … `bright_white` | ANSI 8–15, aynı sırada |
 
@@ -548,7 +548,7 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   vte'nin "rengin üçte ikisi" kuralıyla aynıdır.
 - `dim`, `success` ve `error` de her anahtar gibi eksikse `bateri`'den gelir:
   açık bir temada `dim` yazılmazsa sönük varsayılan metin koyu temanın grisiyle
-  (`#909093`), `success`/`error` yazılmazsa blok şeritleri koyu temanın yeşil
+  (`#909093`), `success`/`error` yazılmazsa komut işaretleri koyu temanın yeşil
   ve kırmızısıyla çizilir.
 
 ### Gömülü `bateri`

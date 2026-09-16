@@ -4,9 +4,9 @@
 > [phase-3.md](phase-3.md) · [phase-4.md](phase-4.md)
 
 Kabuğun bastığı OSC 133 işaretleri ilk kez ürüne dönüştü: her komut, sol
-kenarda çıkış koduna göre renklenen bir şeritle kendi bloğu olarak görünüyor.
+kenarda çıkış koduna göre renklenen bir işaretle kendi satırında görünüyor.
 Dışarıya üç şey değişti — zsh sarmalayıcısı her prompt'a bir blok kimliği
-basıyor (eski betikle açılmış oturumlarda çıpa yok, yani şerit de yok), tema
+basıyor (eski betikle açılmış oturumlarda çıpa yok, yani işaret de yok), tema
 biçimi iki yeni rol kazandı (`success`, `error`) ve ızgara soldan sabit bir pay
 kadar daralıyor, yani `cols` tipik punto/ölçekte **bir** sütun azalabiliyor.
 Ayar anahtarı eklenmedi, `TERM` değişmedi, yeni bağımlılık yok.
@@ -24,10 +24,10 @@ make duman
 `test-yaris` paylaşılan duruma dokunulduğu için (okuyucu thread ↔ kare yolu;
 kapı commit'i `set_terminal_options`'a bir yaprak kilit daha ekledi), `kur`
 `assets/shell/*` değiştiği için (betik pakete kopyalanıp `cmp` ile
-denetleniyor), `duman` pencereyi açan davranış değiştiği için (pay + şerit).
+denetleniyor), `duman` pencereyi açan davranış değiştiği için (pay + işaret).
 
 `make shader` **gerekmiyor**: `.metal` dosyaları ve `#[repr(C)]` düzenleri bu
-sette hiç değişmedi — şerit mevcut `cell_bg` pipeline'ının genel piksel
+sette hiç değişmedi — işaret mevcut `cell_bg` pipeline'ının genel piksel
 dörtgeni. `make terminfo` girdisi yok.
 
 ### Beklenen çıktı
@@ -73,42 +73,47 @@ make kur
 
 Phase-4'ün Kabul listesinin tek açık maddesi (`[~]`). `bateri.app`'i açıp:
 
-- `false` ↵ → şerit **kırmızı** (`error`); `true` ↵ → **sakin yeşil**
+- `false` ↵ → işaret **kırmızı** (`error`); `true` ↵ → **sakin yeşil**
   (`success`); komut koşarken **mavi** (`accent`).
-- Şerit **prompt satırından** başlıyor mu — blok komutun kendisini de
-  kapsamalı, yalnız çıktısını değil.
-- Geçmişe kaydırınca şeritler satırlarıyla birlikte gidiyor mu; pencereyi
-  **yatay** boyutlandırınca prompt satırlarında kalıyorlar mı.
+- İşaret komutun satırında mı ve **yalnız** orada mı — çıktının solu boş
+  kalmalı.
+- Geçmişe kaydırınca işaretler satırlarıyla birlikte gidiyor mu; pencereyi
+  **yatay** boyutlandırınca komut satırlarında kalıyorlar mı.
 - **Şeridin genişliği.** Planda bir sayı yoktu; payın ortasındaki yarısı
   seçildi (iki yanında dörtte birlik nefes payı) ve bu setin **tek
   uydurulmuş ürün kararı**. İnce ya da kalın geliyorsa oran `Frame::push_block`
   içinde tek satır.
-- Tema değiştirince (View ▸ Theme ▸) şerit **aynı karede** yeni palete
+- Tema değiştirince (View ▸ Theme ▸) işaret **aynı karede** yeni palete
   geçmeli.
 
 **Sonuç (2026-09-17, açık temada ölçüldü).** Üçü de doğru:
 
 - **Genişlik onaylandı.** Pay `x=112..127` (16 fiziksel piksel = 8pt @2x),
-  şerit `x=116..123` — payın tam ortasındaki yarısı, iki yanında 4'er piksel.
+  işaret `x=116..123` — payın tam ortasındaki yarısı, iki yanında 4'er piksel.
   Ekran görüntüsünden piksel ölçümüyle doğrulandı.
 - **Renkler doğru ve prompt'un kendi renginden bağımsız.** İyi tanık: `false`
   düştükten sonraki prompt'un `→` oku **kırmızı**, ama o satırın şeridi
   **yeşil**, çünkü orada koşan `sleep 3` başarılı oldu. Ölçülen değerler
   temanın `#3b7a3b`/`#b5423d`/`#3d6aa8`'i (ekran görüntüsü Display P3'e
   çevirdiği için sayılar birebir değil, sapma üçünde de aynı yönde).
-- **Koşan blok mavi ve pencerenin dibine kadar uzuyor** — plan böyle diyor
-  (`son bloğun sonu pencerenin altıdır`) ama çıktısız bir komutta boş ekrana
-  uzun bir bar çiziyor. **Bu sette düzeltilmedi ve düzeltilmemeli:** kullanıcı
-  kararıyla içerik 011'de tabana yapışacak (`docs/YOL-HARITASI.md` → 011), ve o
-  düzende aralık kendiliğinden kısalıyor. Şeridi ayrıca yamamak aynı şeyi iki
-  kez çözmek olurdu.
-- **Kaydırınca şerit kayboluyordu — düzeltildi** (`Session::anchor_above`).
-  `seq 1 150` gibi uzun bir çıktının ortasına kaydırıldığında pencerede hiç
-  prompt kalmıyordu, yani çıpa da yoktu ve kod bilerek hiçbir şey çizmiyordu;
-  sonuç aynı satırın kaydırma konumuna göre bir şeritli bir şeritsiz
-  görünmesiydi. Satırların sahibi aslında belirsiz değil — yukarıda duran çıpa
-  onu söylüyor — ve `frame()` artık oraya bakıyor. Bu, mavi bar'ın aksine
-  011'in yutmadığı bir kusurdu: kaydırma her düzende var.
+- **Tasarım değişti: bölge değil işaret** (kullanıcı kararı, gözle kontrol
+  sonrası). İşaret artık komutun **kendi satırında** duruyor, çıktısının solunu
+  boyamıyor. Değişiklik estetik değil yapısal — "bu satır hangi bloğun"
+  sorusunun cevabı ancak çıpası görünen satırlar için **biliniyor**, ve bölge
+  boyamak onu tahmine çeviriyordu. Üç sonucu:
+  - **Koşan komutun pencereyi dibe kadar boyaması bitti**: `sleep 3` artık tek
+    bir mavi işaret, otuz satırlık bar değil.
+  - **İki bilinen sınır temsil edilemez oldu.** `exec zsh` sonrası payın
+    kalıcı boyanması ve geçici prompt'ta (`TRANSIENT_PROMPT`) üst bölgenin
+    yanlış renklenmesi — ikisi de bölge kollarından doğuyordu, o kollar
+    silindi. Borç kaleminde yalnız `psvar[9]` kaldı.
+  - **`Session::anchor_above` silindi.** Kaydırınca işaretin kaybolması bu
+    tasarımda kusur değil: komut satırı ekranda değilse işaret de yok ve aynı
+    satır her kaydırma konumunda aynı görünüyor. Tutarlılık, telafiden ucuz.
+- **`>` şekli 011'e bırakıldı** (kullanıcı kararı). İşaretin dikdörtgen yerine
+  chevron olması `bt-atlas`'a yedinci bir sprite türü ister; ve 011'de prompt'u
+  terminal çizdiğinde `>` zaten **prompt'un kendisi** olacak, yani karar oraya
+  ait.
 
 ### B.3 Kullanıcı temaları `[elle]`
 
@@ -127,30 +132,32 @@ error   = "#b5423d"
 ### B.4 Açık oturumlar `[elle]`
 
 Betik güncellendi: **açık** pencereler eski betikle koşmaya devam eder ve
-onlarda çıpa yok, yani şerit yok. Yeni pencere yenisini alır. Hata değil, geri
+onlarda çıpa yok, yani işaret yok. Yeni pencere yenisini alır. Hata değil, geri
 düşüşün kendisi — kullanıcıya söylenecek bir şey varsa "yeni sekme aç".
 
 ### Yayın Checklist
 
 - [x] `make kur` koştu, paket tazelendi (B.1)
-- [x] Gerçek zsh oturumunda şeritler doğrulandı; şerit genişliği **onaylandı**
-      (B.2) — koşan bloğun uzunluğu bilinçli olarak 011'e bırakıldı
+- [x] Gerçek zsh oturumunda işaretler doğrulandı; genişlik **onaylandı**
+      (B.2) — ve gözle kontrol tasarımı değiştirdi: işaret bölge değil komut satırı
 - [ ] Kendi teması olan kullanıcı varsa iki rol eklendi (B.3) — kullanıcı
       temasınız yoksa yapılacak bir şey yok
 
 ## Bilinen sınırlar
 
-Üçü de kayıtlı ve hiçbiri yanlış çizmiyor — **çizmiyor**:
+Biri kaldı ve yanlış çizmiyor — **çizmiyor**:
 
-- **Geçici prompt** (`TRANSIENT_PROMPT`, p10k): çıpa yalnız canlı prompt'ta
-  kaldığı için pencerenin üstü yanlış renk alabilir. Kapatan iş 011 (prompt'u
-  terminalin çizmesi). Gerekçe `resolve_blocks`'ta.
-- **`exec zsh` sonrası pay kalıcı vurgu rengi**: yeniden doğan kabuk
-  sarmalayıcıyı yüklemiyor, `D` hiç gelmiyor ve kabuk `Running`'de takılı
-  kalıyor. Borç listesinde (`docs/YOL-HARITASI.md`), çaresi bash/fish setinde.
 - **`psvar[9]`** geç kayıt olan bir `precmd` hook'uyla silinebilir (zsh-defer,
-  p10k instant-prompt sonu): bütün çıpalar sessizce düşer, blok da şerit de
-  olmaz. Aynı borç kaleminde.
+  p10k instant-prompt sonu): bütün çıpalar sessizce düşer, blok da işaret de
+  olmaz. Borç listesinde (`docs/YOL-HARITASI.md`), çaresi bash/fish setinde.
+
+**İkisi kapandı** ve ikisini de aynı şey kapattı — işaretin bölge değil satır
+olması. `exec zsh` sonrası payın kalıcı boyanması ve geçici prompt'ta
+(`TRANSIENT_PROMPT`) üst bölgenin yanlış renklenmesi, ikisi de "bu bölge şu
+bloğun" tahmininden doğuyordu; o kollar silindi. Geçici prompt'un kalan etkisi
+artık yanlış renk değil **eksik işaret**: p10k biten komutun prompt satırını
+kendi `PROMPT`'uyla yeniden basınca çıpa gidiyor, yani o komut işaretsiz
+kalıyor. Kapatan iş yine 011 (prompt'u terminalin çizmesi).
 
 ## Geri Alma
 

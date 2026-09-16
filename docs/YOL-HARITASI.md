@@ -86,16 +86,12 @@ animasyonu), Sparkle ile güncelleme.
 Bunlar kendi setlerini hak etmiyor; yukarıdaki setlerden birine yamanırlar.
 Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 
-- **Çıpa kaybının iki kolu — bash/fish setiyle birlikte.** İkisi de 010'un
-  kapısında (`/code-review`) çıktı ve ikisi de sarmalayıcının sözleşmesine
-  dokunuyor, o yüzden çaresi betiklerin doğduğu sete ait.
-  **(a) `exec zsh` sonrası pay kalıcı vurgu rengi:** `preexec` `C` basıyor,
-  yeniden doğan kabuk kullanıcının `ZDOTDIR`'ını miras alıp sarmalayıcıyı
-  yüklemiyor, `D` hiç gelmiyor ve `Session::frame`'in çıpasız kolu "komut
-  koşuyor" diye bütün payı boyuyor. Çare sarmalayıcının exec'i takip etmesi
-  (`BATERI_ZDOTDIR`'ı koruyup yeniden dikmek). Kayıt `resolve_blocks`'un
-  "bilinen sınır" bloğunda.
-  **(b) `psvar[9]` geç kayıt olan bir `precmd` hook'uyla silinebilir:**
+- **`psvar[9]` geç kayıt olan bir `precmd` hook'uyla silinebilir —
+  bash/fish setiyle birlikte.** 010'un kapısında (`/code-review`) çıktı ve
+  sarmalayıcının sözleşmesine dokunuyor, o yüzden çaresi betiklerin doğduğu
+  sete ait. *(Aynı kalemde duran `exec zsh` kusuru — payın kalıcı boyanması —
+  010'un sonunda **kapandı**: işaret bölge değil komut satırı olunca boyanacak
+  bölge kalmadı.)*
   `add-zsh-hook` sırası yalnız `.zshrc` koşarken kayıt olanlar için garanti;
   zsh-defer ya da p10k'nın instant-prompt sonu gibi ilk prompt'ta kayıt olan
   bir hook `psvar=(…)` yazarsa `%9v` boşa genişler ve bütün çıpalar sessizce
