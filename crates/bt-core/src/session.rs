@@ -46,7 +46,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
-use crate::shell::{Scanner, ShellState};
+use crate::shell::{Scanner, ShellLog, ShellState};
 use crate::wake::Wake;
 
 /// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
@@ -699,7 +699,7 @@ struct TappedPty {
     scanner: Scanner,
     /// [`Session::shell`]'in aynı yuvası. Yazan **yalnız** burası (okuyucu
     /// thread'i), okuyan [`Session::shell_state`].
-    shell: Arc<Mutex<Option<ShellState>>>,
+    shell: Arc<Mutex<ShellLog>>,
 }
 
 impl io::Read for TappedPty {
@@ -712,7 +712,7 @@ impl io::Read for TappedPty {
         // Kilit yalnız işaret çıkınca alınıyor: olağan akışta closure hiç
         // çağrılmıyor, yani kabuk çıktısının hızlı yolu kilitsiz.
         self.scanner.feed(&buf[..read], |mark| {
-            ShellState::apply(&mut lock(&self.shell), mark);
+            lock(&self.shell).apply(mark);
         });
         Ok(read)
     }
@@ -969,17 +969,18 @@ pub struct Session {
     /// Okuyucu thread; `shutdown()` alır, `Drop` de çağırır. `Option`
     /// "kapandı" demenin ve iki kez join etmemenin yoludur.
     reader: Mutex<Option<Reader>>,
-    /// Kabuğun OSC 133 ile bildirdiği durum; yokluğu "entegrasyon yok" demek.
+    /// Kabuğun OSC 133 ile bildirdiği durum ve blok defteri.
     ///
     /// **Yaprak kilit** (`theme` emsali): tutulurken başka kilit alınmaz ve
-    /// tutan taraf yalnız kopyalar — [`ShellState`] `Copy` ve küçük. Yazanı
-    /// okuyucu thread'i, okuyanı [`Session::shell_state`].
+    /// tutan taraf yalnız kopyalar — [`ShellState`] `Copy` ve küçük, defterden
+    /// de kimlik başına tek bir akıbet okunuyor. Yazanı okuyucu thread'i,
+    /// okuyanı [`Session::shell_state`] ile kare yolu.
     ///
     /// `Adapter`'da değil `Session`'da, çünkü `Adapter` alacritty'nin
     /// olaylarını karşılıyor ve bu duruma **hiç** dokunmuyor; işaretler
     /// olaylardan değil ham bayt akışından geliyor. `Arc`, çünkü aynı yuvanın
     /// öteki ucu [`TappedPty`] ile okuyucu thread'inde.
-    shell: Arc<Mutex<Option<ShellState>>>,
+    shell: Arc<Mutex<ShellLog>>,
 }
 
 impl Session {
@@ -1008,7 +1009,9 @@ impl Session {
         let pty = tty::new(&pty_options, size, 0)?;
         // Yuva `EventLoop`'tan **önce** doğuyor: bir ucu sarmalayıcıyla okuyucu
         // thread'ine gidiyor, öteki ucu `Session`'da kalıyor.
-        let shell = Arc::new(Mutex::new(None));
+        // Defterin tavanı `scrollback`'ten: blok başına en az bir satır düştüğü
+        // için geçmişte görünebilecek blok sayısının üst sınırı odur.
+        let shell = Arc::new(Mutex::new(ShellLog::new(options.terminal.scrollback)));
         let pty = TappedPty {
             pty,
             scanner: Scanner::new(),
@@ -1611,7 +1614,7 @@ impl Session {
     /// `Term` kilidine dokunmaz, `frame()`'in `sink`'inden de çağrılabilir —
     /// ve `frame()` imzası bu yüzden değişmedi.
     pub fn shell_state(&self) -> Option<ShellState> {
-        *lock(&self.shell)
+        lock(&self.shell).state
     }
 
     /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve

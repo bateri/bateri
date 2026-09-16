@@ -140,6 +140,17 @@ __bateri_hooks() {
   # komutun ardından basılır. Boş satıra basılan Enter yeni bir prompt doğurur
   # ama biten bir komut yoktur.
   typeset -g __bateri_ran=0
+  # Blok sayacı. Her prompt bir blok açar ve kimliği hem OSC 133'e
+  # (`bt_block=`) hem prompt'un hücrelerine (OSC 8) girer; terminal bloğun
+  # hangi satırda başladığını böyle ÖĞRENMEZ, her karede IZGARADAN OKUR.
+  # `__bateri_restore` bunu silmiyor: yükleyicinin izleri gidiyor, kancaların
+  # oturum durumu değil.
+  #
+  # ALAN ADI BİZE ÖZEL, `aid` DEĞİL: şartnamede `aid` "uygulama kimliği"dir ve
+  # genellikle pid taşır, yani oturum boyunca SABİTTİR. Sayacımızı oraya
+  # yazsaydık şartnameye uyan başka bir entegrasyonun sabit değeri bizim
+  # defterimizle karışırdı.
+  typeset -g __bateri_block=0
   add-zsh-hook precmd __bateri_precmd
   add-zsh-hook preexec __bateri_preexec
 }
@@ -148,17 +159,51 @@ __bateri_hooks() {
 __bateri_precmd() {
   # İLK satır olmak zorunda: sonraki her komut `$?`'ı ezer.
   local code=$?
+  # `D` BİTEN bloğu kapatıyor, yani kimliği sayaç artmadan ÖNCEKİ değer.
   if (( __bateri_ran )); then
     __bateri_ran=0
-    print -nr -- $'\e]133;D;'$code$'\a'
+    print -nr -- $'\e]133;D;'$code$';bt_block='$__bateri_block$'\a'
   fi
-  print -nr -- $'\e]133;A\a'
+  (( __bateri_block++ ))
+  # Kimliği prompt'a taşıyan yuva; `%9v` aşağıdaki çıpada onu okuyor. İndeks
+  # iki yerde geçiyor ve birlikte değişmek zorunda.
+  #
+  # YÜKSEK İNDEKS BİLEREK: `psvar` kullanıcının ad alanı ve alışıldık kullanım
+  # baştan birkaç yuva. Kancamız `add-zsh-hook` ile SONA eklendiği için
+  # kullanıcının precmd'lerinden sonra koşuyor — `psvar`'ı toptan kuran bir
+  # tema bizim yuvamızı ezemiyor.
+  psvar[9]=$__bateri_block
+  print -nr -- $'\e]133;A;bt_block='$__bateri_block$'\a'
+  # ÇIPA: prompt'un hücrelerine binen, kimlik taşıyan bir OSC 8 bağlantısı.
+  # Terminal bloğun hangi satırda başladığını hatırlamıyor, her karede
+  # ızgaradan okuyor — bu yüzden satır kaydırmadan, pencere yeniden
+  # akıtmasından (reflow) ve geçmiş dolduktan sonra da doğru kalıyor.
+  #
+  # DEĞER GÖMÜLMÜYOR, `%9v` ile prompt anında genişliyor: ek SABİT kalınca
+  # aşağıdaki "zaten var mı" nöbeti çalışıyor. Kimlik URI'ye yazılsaydı ek her
+  # prompt'ta değişir, nöbet tutamaz ve PS1 her seferinde yıkıcı biçimde
+  # sökülüp yeniden kurulurdu — PS1'i kendisi kuran temalarla tam da kaçtığımız
+  # yarış. Açılışı `print` ile basmak da çözüm DEĞİL: zsh prompt'u precmd
+  # koşmadan yeniden çiziyor (SIGWINCH, Ctrl-L, `zle reset-prompt`) ve o
+  # hücreler çıpasız yazılırdı.
+  #
+  # Açılış ÖNEKTİR: OSC 8 iç içe geçmiyor, yeni URI öncekini değiştiriyor —
+  # kendi prompt'unda bağlantı kullanan bir tema varsa ondan ÖNCEKİ hücreler
+  # bizim çıpamızı taşır. Temanın bağlantısı ilk karakterde başlıyorsa çıpa
+  # hiç doğmaz ve şerit çizilmez; bilinen sınır, yanlış çizim değil.
+  #
+  # Sağ taraf TIRNAKLI: `[[ ]]` içinde tırnaksız sağ işlenen glob desenidir.
+  local anchor_open=$'%{\e]8;;bateri://block/%9v\a%}'
+  local anchor_close=$'%{\e]8;;\a%}'
+  [[ $PS1 == "$anchor_open"* ]] || PS1=$anchor_open$PS1
   # `B` prompt'un SONU, yani bir kanca değil prompt'un kendisi.
   # `%{…%}` "sıfır genişlik" demek; olmasaydı zsh kaçış dizisini basılan
   # karakter sayar ve satır kaydırma bozulurdu. Her prompt'ta yeniden
   # denenmesinin sebebi temalar: PS1'i her precmd'de yeniden kuran bir tema
   # bizim ekimizi siler. Koşul da onun için — aynı ek iki kez girmesin.
   [[ $PS1 == *$'\e]133;B\a'* ]] || PS1=$PS1$'%{\e]133;B\a%}'
+  # Çıpanın kapanışı en SONDA: prompt'un bütün hücreleri kimliği taşısın.
+  [[ $PS1 == *"$anchor_close" ]] || PS1=$PS1$anchor_close
 }
 
 # Komut koşmadan hemen önce: çıktı burada başlıyor (`C`).
