@@ -555,7 +555,7 @@ impl Renderer {
         // Metal "released without endEncoding" istisnası atar ve süreci
         // öldürür — `NoBuffer`'ı zarifçe döndürme amacının tam tersi.
         //
-        // Sıra çizim sırasıdır (R4.1): önce komut bloğu şeritleri, sonra arka
+        // Sıra çizim sırasıdır (003 → R4.1): önce komut bloğu şeritleri, sonra arka
         // planlar **ve imleç**, sonra glyph'ler, en sonda kurallar (son ikisi
         // `encode_glyphs`'te, aynı pipeline'da). Ters olsaydı imleç altındaki
         // harfi örterdi — imleç opak ve `Frame`'in arka plan listesinin
@@ -572,8 +572,8 @@ impl Renderer {
         // ayrışabilen iki tanım demekti.
         let viewport_px: [f32; 2] = [texture.width() as f32, texture.height() as f32];
         let result = self
-            .encode_stripes(&enc, frame, viewport_px)
-            .and_then(|()| self.encode_bg(&enc, frame, viewport_px))
+            .encode_quads(&enc, frame.stripes(), viewport_px)
+            .and_then(|()| self.encode_quads(&enc, frame.bg_instances(), viewport_px))
             .and_then(|()| self.encode_glyphs(&enc, frame, viewport_px));
         enc.endEncoding();
         result
@@ -604,38 +604,15 @@ impl Renderer {
         .ok_or(GpuError::NoInstanceBuffer)
     }
 
-    /// Komut bloğu şeritlerini tek bir instanced çizim çağrısına encode eder.
-    ///
-    /// **Yeni pipeline yok** (R4.2): şerit `cell_bg`'nin genel piksel
-    /// dörtgeninden başka bir şey değil — konum, boyut, lineer renk. Kendi
-    /// çağrısı olmasının sebebi listesinin ayrı olması ([`Frame::stripes`]),
-    /// düzeninin farklı olması değil.
-    fn encode_stripes(
-        &self,
-        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-        frame: &Frame,
-        viewport_px: [f32; 2],
-    ) -> Result<(), GpuError> {
-        self.encode_quads(enc, frame.stripes(), viewport_px)
-    }
-
-    /// Arka planları (ve imleci) tek bir instanced çizim çağrısına encode eder.
-    fn encode_bg(
-        &self,
-        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-        frame: &Frame,
-        viewport_px: [f32; 2],
-    ) -> Result<(), GpuError> {
-        self.encode_quads(enc, frame.bg_instances(), viewport_px)
-    }
-
     /// `cell_bg` pipeline'ının tek çizim yolu: dilimi tampona koyar ve
     /// instanced bir dörtlü çizer.
     ///
-    /// İki çağıranı ([`Renderer::encode_stripes`], [`Renderer::encode_bg`])
-    /// ayrı **listeler** taşıyor ama aynı düzeni: kopyalanmış iki gövde,
-    /// buffer indeksleri ya da pipeline seçimi ayrıştığında sessizce yanlış
-    /// çizerdi ve belirti yalnız bir listede görünürdü.
+    /// **Yeni pipeline yok** (010 → R4.2): şerit de arka plan da aynı genel piksel
+    /// dörtgeni — konum, boyut, lineer renk. İkisinin ayrı çağrı olmasının
+    /// sebebi listelerinin ayrı olması ([`Frame::stripes`]), düzenlerinin
+    /// farklı olması değil; hangi listenin hangi sırada geçtiğini çağrı yeri
+    /// ([`Renderer::encode_pass`]) söylüyor. Liste başına bir sarmalayıcı
+    /// metot yazmak yalnız eşlenecek yüzey üretirdi (`/code-review`, 010 kapı).
     fn encode_quads(
         &self,
         enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
