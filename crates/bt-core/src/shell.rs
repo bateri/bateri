@@ -16,7 +16,10 @@
 //! iki farklı hikâye okur. `vte-0.15.0/src/lib.rs`'in durum tablosundan
 //! çıkan üç kural:
 //!
-//! - Dizi `ESC ]` ile başlar (`advance_esc`, `0x5D`).
+//! - Dizi `ESC ]` ile başlar (`advance_esc`, `0x5D`) — ve `ESC` ile `]`
+//!   arasına bayt girebilir: `advance_esc` C0'ların 0x18/0x1A dışındakilerini
+//!   `execute` edip **durumu değiştirmiyor**, 0x7F'ten büyük baytları hiç
+//!   tanımıyor. Yani `ESC \r ] 133;A BEL` ızgarada geçerli bir işaret.
 //! - Diziyi **dört** bayt bitirir: `BEL` (0x07), `CAN` (0x18), `SUB` (0x1A) ve
 //!   **çıplak `ESC`** (0x1B). Sonuncusu sürprizdir: `advance_osc_string` ESC'i
 //!   görünce diziyi `ESC \`'in `\`'ini beklemeden **hemen** dağıtıyor. Yani
@@ -25,11 +28,6 @@
 //! - Dizinin içindeki C0 kontrol baytları (0x00–0x06, 0x08–0x17, 0x19,
 //!   0x1C–0x1F) **yüke girmez**; `vte` onları sessizce atıyor. Biz de atıyoruz,
 //!   yoksa satır sonu yapıştırılmış bir `D;0\r` yükü bizde bozuk görünürdü.
-
-// Tarayıcıyı akışa bağlayan taraf (`Pty` sarmalayıcısı) phase-2'de iniyor; o
-// gelene kadar buradaki her şeyin tek çağıranı bu modülün sınamaları. **Satır
-// phase-2'de kalkar** — kalıcı olsaydı gerçekten ölen kodu da saklardı.
-#![allow(dead_code)]
 
 /// Kabuğun akışa bastığı tek bir OSC 133 işareti.
 ///
@@ -201,15 +199,21 @@ impl Scanner {
                     self.state = ScanState::Escape;
                 }
             }
-            // `vte::advance_esc`: `]` diziyi açar, `ESC` yerinde sayar, kalan
-            // her şey (CSI, DCS, tek harfli kaçışlar) bizi ilgilendirmiyor.
+            // `vte::advance_esc`: `]` diziyi açar, kalan her şey (CSI, DCS,
+            // tek harfli kaçışlar) bizi ilgilendirmiyor.
             ScanState::Escape => match byte {
                 b']' => {
                     self.state = ScanState::Number;
                     self.number = 0;
                     self.has_digit = false;
                 }
-                0x1b => {}
+                // `advance_esc`'in `Escape`'te **bırakan** baytları: `ESC`'in
+                // kendisi, C0'ların 0x18/0x1A dışındakileri (`execute`
+                // ediliyor, durum değişmiyor) ve 0x7F'ten büyük her şey (son
+                // `_ => ()` kolu). Ground'a düşseydik bunların ardından gelen
+                // `]` bizim için yeni bir dizi açmazdı ve ızgaranın geçerli
+                // saydığı `ESC \r ] 133;A BEL` işareti bizde kaybolurdu.
+                0x00..=0x17 | 0x19 | 0x1b | 0x1c..=0x1f | 0x7f.. => {}
                 _ => self.state = ScanState::Ground,
             },
             ScanState::Number => match byte {
@@ -395,6 +399,21 @@ mod tests {
                 "bölünme noktası {at}"
             );
         }
+    }
+
+    #[test]
+    fn escape_survives_the_bytes_vte_executes_in_place() {
+        // `advance_esc` bu baytlarda `Escape`'te kalıyor, yani ardından gelen
+        // `]` diziyi gerçekten açıyor. Ground'a düşen bir tarayıcı işareti
+        // sessizce kaybeder ve durum ızgaradan ayrılırdı.
+        assert_eq!(marks(b"\x1b\r]133;A\x07"), vec![Mark::PromptStart]);
+        assert_eq!(marks(b"\x1b\x07]133;B\x07"), vec![Mark::PromptEnd]);
+        assert_eq!(marks(b"\x1b\x80]133;C\x07"), vec![Mark::CommandStart]);
+
+        // Ve `Escape`'i gerçekten **bitiren** iki C0'da (0x18, 0x1A) dizi
+        // açılmıyor — `advance_esc` onları Ground'a götürüyor.
+        assert_eq!(marks(b"\x1b\x18]133;A\x07"), vec![]);
+        assert_eq!(marks(b"\x1b\x1a]133;A\x07"), vec![]);
     }
 
     #[test]
