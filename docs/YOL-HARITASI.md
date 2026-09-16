@@ -100,6 +100,20 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   harmanlamaya açıldı (`Blend::Opaque` kalktı), yani opak arka plan dörtgenleri
   de harmanlama biriminden geçiyor; alternatif imleci ayrı bir çağrıda
   çizmek.
+- **Duman kapısı hiç görünmemiş pencerede yanlış tanı veriyor.** Pencere ön
+  plana gelmeden açılan bir koşuda (ajanın kabuğu, `cargo run` arka planda)
+  display link callback vermiyor: `advance` bir daha koşmuyor, hareket 1
+  karede kalıyor ve deadline `Verdict::MotionUnsettled` deyip **"bir durma
+  koşulu bozuk"** diye kodu suçluyor. Ölçüldü (009 phase-4): aynı commit
+  kullanıcının kendi terminalinde `kare=29 hareket=27 kapanis=clean` ile
+  yeşil, ajanın kabuğunda üç koşu da kırmızı; `2af9d87`'de de aynı. Örtülme
+  kolu (`set_visible(false)` → `Motion::finish`) deliği kapatmıyor, çünkü o
+  kol örtülme **bildirimine** bağlı ve hiç görünmemiş pencerede bildirim yok
+  — `Motion::finish`'in doc'u sonucu zaten tarif ediyor. Çarenin yönü belli
+  (deadline'da pencere hiç görünmediyse hareket kapısı muaf, `Workload`
+  muafiyetinin emsali) ama kapıyı gevşetiyor: gerçek bir durma koşulu
+  kusurunu da örtmemeli. `make duman`'ın belgelenmiş tek kaçış hâli başsız
+  ortamdaki `ATLANDI`; bu üçüncü hâl hiçbir yerde yazılı değil.
 - **Tema kare başına iki kez okunuyor.** `Session::frame` kopyayı `Term`
   kilidinden önce kendi içinde alıyor, `link.rs` aynı karede `session.theme()`
   ile ikinci kez alıyor; araya düşen bir `set_theme` o kareyi hücreler eski,

@@ -26,14 +26,19 @@ kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
 Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font, `osc52`,
-`cursor_motion` ve `reduce_motion`), Theme ▸'nin seçimini oraya
+`cursor_motion`, `reduce_motion` ve `shell.integration`), Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
 anında** uygulanır (`watch`: vnode kaynakları; `Session::set_theme`,
 `Session::set_terminal_options`, `Renderer::set_font`,
 `DisplayLink::set_cursor_motion`, `DisplayLink::set_reduce_motion`);
 varsayılan tema sistemin açık/koyu görünümünü, `reduce_motion = "system"` de
-sistemin Hareketi Azalt ayarını canlı izler. `make kur` `bateri.app` paketini üretir.
+sistemin Hareketi Azalt ayarını canlı izler; tek istisna `shell.integration`,
+kabuk çoktan doğduğu için **sonraki oturumda** geçerlidir. Kabuk zsh ise
+`bt-shell` sarmalayıcıyı `ZDOTDIR` ile kurar (betik `.app`'in
+`Contents/Resources/shell`'inden, debug'da depodan) ve kabuğun bastığı OSC 133
+işaretleri `Session::shell_state()`'te birikir — ürün yüzeyi (blok, dock) henüz
+yok. `make kur` `bateri.app` paketini üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri
 aynı commit'te düzelir.
@@ -56,7 +61,7 @@ make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı bas
                   # yuva/yuk/istek/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
-make kur          # release derler, target/release/bateri.app'i kurar ve içeriğini denetler (Info.plist, ikon, lisans); imza yok
+make kur          # release derler, target/release/bateri.app'i kurar ve içeriğini denetler (Info.plist, ikon, lisans, shell betiği); imza yok
 ```
 
 Girdisi henüz olmayan hedefler "henüz yok" deyip kırmızı düşer; listesi
@@ -79,10 +84,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
-| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread (PTY okuma yolu **taranıyor**: araya giren sarmalayıcı baytları aynen geçirir, geçerken OSC 133 işaretlerini çeker), OSC (7/8/9/52; 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**: komut blokları `frame()` sınırına kanca isteyecek | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir |
+| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread (PTY okuma yolu **taranıyor**: araya giren sarmalayıcı baytları aynen geçirir, geçerken OSC 133 işaretlerini çeker), OSC (7/8/9/52; 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**, tarayıcı bu yüzden bizim: okuma yolunda çekilir, `ShellState`'e yazılır ve `Session::shell_state()` ile ayrı bir sorgudan okunur — `frame()` imzası değişmedi | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
-| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini ve yereli (politika, `child`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`, OSC 52'nin pano işi; vnode kaynakları: ayar izleme), `libc` (bekçinin `write` + `_exit`'i, izlemenin `O_EVTONLY`'si, kabuğun passwd kaydı için `getpwuid_r`) |
+| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini, yereli, hangi kabuğun koşacağı ve shell entegrasyonunun `ZDOTDIR` politikası (hepsi `child`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`, OSC 52'nin pano işi; vnode kaynakları: ayar izleme), `libc` (bekçinin `write` + `_exit`'i, izlemenin `O_EVTONLY`'si, kabuğun passwd kaydı için `getpwuid_r`) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -215,9 +220,16 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   (`Settings::for_unusable_file`) — yanlış tahmini görünmeyen tek anahtar. Süreli koşu
   (`BT_RUN_SECONDS`) dosyayı **hiç okumaz ve izlemez**: dalın tek yeri
   `bt-shell`'in `app::Inputs`'u.
-- **Shell entegrasyonu** üç kabuk içindir (zsh `ZDOTDIR`, bash `--rcfile`
-  sarmalayıcısı, fish `vendor_conf.d`) ve kullanıcının rc dosyasına **asla**
-  dokunmaz. Komut blokları OSC 133 işaretlerinden okunur.
+- **Shell entegrasyonu bugün yalnız zsh'tir** (`ZDOTDIR`); bash (`--rcfile`) ve
+  fish (`vendor_conf.d`) sonraki settedir. Kullanıcının rc dosyasına **asla**
+  yazılmaz — kapısı `make denetim` ve listesi zsh'in beş dosyasını da kapsar.
+  Betik `assets/shell/` altında **kaynaktır**, üretilmez: `make kur` onu
+  pakete kopyalar ve kopyayı `cmp` ile denetler, `make hepsi` de girdi
+  dizininin envanterini (`bundle_assets`). Sarmalayıcı hiçbir kolda ölümcül
+  değildir ve kullanıcının özgün `ZDOTDIR`'ını geri koyar; gerekçeler
+  `assets/shell/zsh/bateri.zsh`'in başlığında. Komut durumu OSC 133
+  işaretlerinden okunur ve `Session::shell_state()`'te durur; satıra
+  çıpalanması (bloklar) henüz yok.
 - **Ölçülmemiş sayı yazılmaz.** Tek sahip `docs/OLCUMLER.md` (dosyanın başı
   hangi türün sayısı olduğunu söyler); ölçüm bir kapı değildir, `/measure` ile
   kullanıcı ister. Zaman kancaları env'dir: `BT_SCROLL_TEST` yükü seçer (boşta

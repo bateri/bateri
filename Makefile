@@ -26,6 +26,10 @@ fmt:
 #   yok; bilinçli olanın satırında `// audit: {neden}` durur. Tarama satır
 #   başındaki ilk `#[cfg(test)]`'te durur, çünkü sınama modülü dosyanın sonunda.
 # - Shell: `assets/shell/` altında kullanıcı rc dosyasına yazan satır yok.
+#   Liste zsh'in BEŞ dosyasını da taşıyor: sarmalayıcının yönlendirdiği
+#   dosyalar tam olarak onlar ve kapı, adı listede olmayan dosya için soruyu
+#   hiç sormuyor. `.zlogout` bizde bir dosya olmasa da listede — kapı bizim
+#   dizinimizi değil kullanıcının dosyalarını koruyor.
 # - Bağımlılık DÜŞÜRMEZ, uyarır: bilinçli bir bağımlılık kararı da Cargo.lock'u
 #   değiştirir; kararın kaydını `/audit` arar.
 denetim:
@@ -38,7 +42,7 @@ denetim:
 		awk -v file="$$f" '/^[[:space:]]*#\[cfg\(test\)\]/{exit} /\.unwrap\(\)|\.expect\(|panic!|unreachable!/ && !/\/\/ audit: / && !/^[[:space:]]*\/\//{print file":"NR": "$$0; hit=1} END{exit hit}' "$$f" \
 			|| { echo "denetim: bt-core'da gerekçesiz panik yolu ($$f)"; fail=1; }; \
 	done; \
-	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshrc|\.zprofile|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "denetim: shell entegrasyonu kullanıcı rc dosyasına yazıyor"; fail=1; fi; \
+	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshenv|\.zprofile|\.zshrc|\.zlogin|\.zlogout|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "denetim: shell entegrasyonu kullanıcı rc dosyasına yazıyor"; fail=1; fi; \
 	git diff --quiet HEAD -- Cargo.lock $$(git ls-files '*Cargo.toml') || echo "denetim: uyarı — Cargo.toml/Cargo.lock HEAD'den farklı; bağımlılık kararı kayıtlı mı?"; \
 	test $$fail -eq 0 && echo "denetim: temiz"
 
@@ -120,7 +124,7 @@ test-yaris:
 # yerine taşınır: yerinde kurulsaydı düşen bir koşu Dock'un gösterdiği yolda
 # lisanssız ya da ikonsuz, açılabilir bir paket bırakırdı.
 #
-# Girdilerin İÇERİĞİNİ (`assets/bundle/`) `make hepsi` içindeki
+# Girdilerin İÇERİĞİNİ (`assets/bundle/`, `assets/shell/`) `make hepsi` içindeki
 # `bundle_assets` sınar; buradaki denetim ÜRÜNÜ sınar: girdi yerinde durup
 # pakete kopyalanmasa sınama yeşil kalırdı. Denetimin listesi kopya
 # satırlarından bilerek ayrı yazılıyor — aynı değişkenden okusaydı kopyadan
@@ -168,6 +172,15 @@ kur:
 	iconutil -c icns $(ICONSET) -o $(STAGE)/Contents/Resources/$(ICON).icns
 	rm -rf $(ICONSET)
 	cp assets/bundle/Credits.html assets/bundle/THIRD-PARTY-LICENSES.txt $(STAGE)/Contents/Resources/
+	@# Sarmalayıcı dosya dosya kopyalanıyor, `cp -R assets/shell` ile DEĞİL:
+	@# ZDOTDIR bizim dizinimizi gösterdiği sürece oraya yazan bir kol (009
+	@# phase-3'te `/etc/zshrc` bir kez `.zsh_history` doğurdu) ya da bir
+	@# `.DS_Store` özyinelemeli kopyayla sessizce ürüne girerdi. Dizinin
+	@# envanterinin TAM olarak bu beş dosya olduğunu `bundle_assets` sınar.
+	mkdir -p $(STAGE)/Contents/Resources/shell/zsh
+	cp assets/shell/zsh/.zshenv assets/shell/zsh/.zprofile assets/shell/zsh/.zshrc \
+		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh \
+		$(STAGE)/Contents/Resources/shell/zsh/
 	@c=$(STAGE)/Contents; fail() { echo "kur: içerik denetimi düştü — $$1"; exit 1; }; \
 	key() { plutil -extract "$$1" raw $$c/Info.plist 2>/dev/null; }; \
 	plutil -lint -s $$c/Info.plist || fail "Info.plist geçersiz"; \
@@ -178,6 +191,9 @@ kur:
 	test -s "$$c/Resources/$$(key CFBundleIconFile).icns" || fail "ikon pakette yok"; \
 	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f pakette yok ya da girdiden farklı"; \
+	done; \
+	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh; do \
+		cmp -s assets/shell/$$f $$c/Resources/shell/$$f || fail "shell/$$f pakette yok ya da girdiden farklı"; \
 	done; \
 	rm -rf $(APP) && mv $(STAGE) $(APP) && \
 	echo "kur: $(APP) (sürüm $(VERSION), taban macOS $$minos)"

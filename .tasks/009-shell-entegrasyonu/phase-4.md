@@ -58,13 +58,59 @@ Türetilmiş dosya yok: betik **kaynaktır**, üretilmez.
 shader yok · terminfo yok · ayar şeması yok (anahtar phase-3'te) · tema yok ·
 yeni bağımlılık yok.
 
+## Uygulama Notları
+
+- **Kopya `cp -R assets/shell` değil, adları tek tek sayan bir liste.**
+  Özyinelemeli kopya dizinde **ne bulursa** onu ürüne sokar ve bu dizin
+  yazılabilir bir hedef: 009 phase-3'te `/etc/zshrc` orada bir kez gerçekten
+  `.zsh_history` doğurdu. Kullanıcının komut geçmişinin `.app`'e girmesi,
+  betiğin eksik girmesinden daha sessiz bir kusur olurdu.
+- **Girdi denetimi "var mı" değil **envanter** oldu.** Plan "betik `assets/`
+  altında var ve okunabilir" diyordu; o iddiayı `bt-shell` zaten koruyor
+  (`the_zsh_wrapper_ships_with_the_crate`, beş dosyanın beşini de arıyor) ve
+  kopyası buraya ikinci bir sahip getirirdi. Bu sınamanın tek başına gördüğü
+  yarı **fazlalık**: `kur` elle yazılmış iki liste (kopya + `cmp`) taşıyor,
+  yani listelere düşmemiş yeni bir girdi pakete hiç girmez ve **iki kapı da
+  yeşil kalır**. Aynı sınama yukarıdaki artık dosyayı da görüyor.
+  `.DS_Store` dışarıda: Finder üretiyor, depoya girmiyor ve kopya listesi
+  adları saydığı için pakete sızamıyor — kapının kod doğruyken düşmesi
+  gördüğü kusurdan pahalı olurdu.
+- **`proje.md`'ye yeni satır değil, var olan satırın koşulu genişledi.**
+  `assets/shell/*` aynı komutu (`make kur`) tetikliyor; ikinci bir satır
+  "hangi değişiklik `kur`'u gerektirir" sorusuna iki sahip verirdi.
+- **`make duman` ön plana gelmeyen pencerede kırmızı düşüyor ve tanısı yanlış
+  yeri gösteriyor.** Ajanın kabuğundan (arka planda açılan pencere) üç koşu da
+  `Verdict::MotionUnsettled` verdi: hareket karesi **1**, sonrasında ~1,95 sn
+  sessizlik. Aynı kırmızı `2af9d87`'de (009 hiç başlamadan önce) da
+  tekrarlıyor, yani setin diff'inden gelmiyordu; kullanıcının kendi
+  terminalindeki koşu **yeşil** (`kare=29 hareket=27 icerik=2
+  sessiz=1748.85ms kapanis=clean`). Sebep vsync: pencere hiç görünür olmadan
+  link callback vermiyor, `advance` bir daha koşmuyor ve durum yerleşmemiş
+  kalıyor. Örtülme kolu bunu kapatıyor (`set_visible(false)` →
+  `Motion::finish`) ama o kol **örtülme bildirimi geldiğinde** koşuyor; hiç
+  görünmemiş pencerede bildirim yok. `Motion::finish`'in doc'u bu sonucu
+  zaten tarif ediyor — "tanı 'bir durma koşulu bozuk' diye yanlış yeri
+  gösterirdi" — yani bilinen bir kenar, yalnız kapanmamış. Kapsamı 009
+  değil: kapının kendi davranışı, ayrı ele alınır (`docs/YOL-HARITASI.md`).
+
 ## Checklist
 
-- [ ] `make kur`: kopya + içerik denetimi
-- [ ] `bundle_assets`: girdi denetimi
-- [ ] `make denetim`: rc dosya listesi genişletildi
-- [ ] `proje.md` doğrulama tablosu + `CLAUDE.md`
-- [ ] Test: betiksiz paket `make kur`'u düşürüyor; rc'ye yazan betik
-      `denetim`'i düşürüyor
-- [ ] Doğrulama geçti (`make hepsi` + `make kur` + `make duman`)
-- [ ] Yayın etkisi yazıldı
+- [x] `make kur`: kopya + içerik denetimi
+- [x] `bundle_assets`: girdi denetimi (envanter — gerekçe Uygulama Notları'nda)
+- [x] `make denetim`: rc dosya listesi genişletildi
+- [x] `proje.md` doğrulama tablosu + `CLAUDE.md`
+- [x] Test: betiksiz paket `make kur`'u düşürüyor (kopya satırı kapatıldı →
+      `kur: içerik denetimi düştü — shell/zsh/.zshenv pakette yok ya da
+      girdiden farklı`, çıkış 2, önceki paket `$(STAGE)` sayesinde yerinde
+      kaldı); rc'ye yazan betik `denetim`'i düşürüyor (`~/.zlogout`'a yazan
+      geçici dosya); envanter sınaması fazladan `.zsh_history` ile kırmızı
+- [x] Doğrulama geçti: `make hepsi`, `make kur` ve `make duman`
+      (`kare=29 hucre=8 glif=6 kural=15 yuva=13/2048 istek=4 icerik=2
+      hareket=27 sessiz=1748.85ms kapanis=clean`) — duman'ı kullanıcı kendi
+      terminalinde koşturdu; neden ajanın kabuğunda kırmızı düştüğü Uygulama
+      Notları'nda
+- [x] Paketten açılan oturumda entegrasyon kuruluyor (kullanıcı, gerçek
+      pencere: `print -l $precmd_functions` → `omz_termsupport_precmd`,
+      `iterm2_precmd`, `__bateri_precmd` — kancamız **en sonda**). Release'te
+      depo kolu hiç derlenmiyor, yani betiğin bulunması paket yolunun kanıtı
+- [x] Yayın etkisi yazıldı
