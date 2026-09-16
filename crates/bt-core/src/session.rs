@@ -183,6 +183,21 @@ pub struct Cursor {
     /// Bloğun altında kalan metnin (glyph **ve** kural çizgilerinin) rengi,
     /// **lineer** RGBA; bugünkü değeri temanın zemini.
     pub text: LinearRgba,
+    /// Bu karenin kaydırma ofseti — imlecin **kendi** hareketini ızgaranın
+    /// kaymasından ayıran tek sinyal.
+    ///
+    /// Konum değil bir **kimlik**: çizen taraf onu iki kare arasında
+    /// karşılaştırıyor, sayı olarak kullanmıyor. Gereken sebep 008'in snap
+    /// kuralı (Karar 5): imlecin kendi hareketi animasyonlu, altındaki
+    /// dünyanın kayması anında. İkisi `row`'dan **ayırt edilemez** — geçmişe
+    /// üç satır kaydırmak imleci ekranda üç satır aşağı taşır, tıpkı üç kez
+    /// enter'a basmak gibi. Ofset oynadıysa imleç hareket etmedi, ızgara
+    /// hareket etti.
+    ///
+    /// Bu alan, yukarıdaki "konuma güvenen ilk tüketici sözleşmeyi
+    /// genişletmeli" cümlesinin karşılığıdır; genişleten tüketici hareket
+    /// oldu, IME değil.
+    pub display_offset: i32,
 }
 
 /// Oturumun açılış ayarları.
@@ -335,10 +350,26 @@ impl DirtyFlag {
 /// Bu hâliyle sınamalar, uygulamanın gerçekten koştuğu betiği doğruluyor.
 ///
 /// Ölçüm yükü için [`load_shell`]: bu fonksiyon duman sayılarının sahibi
-/// olduğu için ikinci bir yük **buraya eklenmez**. Süre parametresi, ikinci
-/// bir `printf`, "bir de şu kadar satır bas" — hiçbiri; her biri sekiz
-/// hücreyi, altı glyph'i ya da on beş kuralı oynatır ve oynattığında üç
-/// sınama ile `make duman` aynı anda ama ayrı ayrı yalan söyler.
+/// olduğu için ikinci bir yük **buraya eklenmez**. Süre parametresi, "bir de
+/// şu kadar satır bas" — hiçbiri; her biri sekiz hücreyi, altı glyph'i ya da
+/// on beş kuralı oynatır ve oynattığında üç sınama ile `make duman` aynı anda
+/// ama ayrı ayrı yalan söyler.
+///
+/// **İkinci `printf` bir istisnadır ve tam olarak bir şey yapar: imleci
+/// kıpırdatır.** `\033[H` hiçbir hücre yazmıyor — sekiz arka plan, altı glyph
+/// ve on beş kural bit bit yerinde — ama imleci `\n`'in bıraktığı satırdan
+/// ekranın başına alıyor, yani her koşuda **bir** imleç hareketi doğuyor.
+/// Kapının `hareket > 0` gerekliliği buna dayanıyor (008 Karar 8): onsuz
+/// imleç yalnız çıktının kendisiyle oynardı ve ilk karenin çıktıdan önce mi
+/// sonra mı düştüğü koşudan koşuya değişiyor (`kare=1↔2`), yani kapı
+/// animasyonun koştuğunu göremeyebilirdi.
+///
+/// **Aradaki uyku cömert (1 s) ve bu bir pay değil, kapının şartı.** Açılış
+/// süresi (`acilis=`) ölçülmedi; `\033[H` ilk içerik karesinden **önce**
+/// işlenirse imleç zaten hedefte doğar, hareket hiç başlamaz ve `hareket > 0`
+/// kod doğruyken kırmızı düşer. Uykuyu kısaltmak bu yarışı geri getirir.
+/// Üç saniyelik koşuda 1 s uyku + yerleşme `sessiz=`'e rahat bir kuyruk
+/// bırakıyor.
 pub fn smoke_shell() -> (String, Vec<String>) {
     (
         "/bin/sh".to_owned(),
@@ -347,7 +378,7 @@ pub fn smoke_shell() -> (String, Vec<String>) {
             "-c".to_owned(),
             "printf '\\033[41;1;4m bateri \\033[0m\\033[4m \\033[0;4:2m \\033[0;4:3m \
              \\033[0;4:4m \\033[0;4:5m \\033[0;9m \\033[0;4:3;58;5;196m \\033[0m\\n'; \
-             sleep 10"
+             sleep 1; printf '\\033[H'; sleep 10"
                 .to_owned(),
         ],
     )
@@ -878,7 +909,18 @@ impl Session {
         })
     }
 
-    /// Çizilecek kareyi verir: yeni içerik yoksa `None` ve **hiç iterasyon**.
+    /// Çizilecek kareyi verir — **koşulsuz tarar**, hasar sormaz.
+    ///
+    /// Hasar sorusu [`Session::take_damage`]'de ve bilerek ayrı: çağıran
+    /// tarama başlamadan **önce** karar vermek zorunda. Sebep hareket karesi
+    /// (`bt-gpu`) — grid kirli değilken de çizilen bir kare var ve o yol
+    /// çizim listesini **temizlemeden** kullanıyor; iki soru tek çağrıda
+    /// kalsaydı liste temizlendikten sonra "aslında hasar yokmuş" öğrenilir
+    /// ve hareket karesi boş bir ekrana bakardı.
+    ///
+    /// İkisi **birlikte** çağrılır ve sıra zorunlu: `take_damage()` `true`
+    /// derse `frame()`. Tersi (hasarsız `frame()`) yanlış değil ama boşuna —
+    /// `Term` kilidini alır ve aynı kareyi yeniden kurar.
     ///
     /// `Term` kilidi bir kez alınır; temanın kopyası ondan önce. Hasar
     /// "çizilsin mi"ye karar verir, "ne çizileceğine" değil: drawable içeriği
@@ -897,15 +939,7 @@ impl Session {
     /// değildir: `Session`'a geri giren bir sink (`resize`, `frame`) kendi
     /// kendini kilitler. Sink'in işi tamponu doldurmaktır, başka bir şey değil —
     /// `Wake` ile aynı sözleşme.
-    pub fn frame(&self, mut sink: impl FnMut(Cell)) -> Option<Cursor> {
-        // Bayrak kilit istemez, kilit ise ucuz değil: `FairMutex::lock()` iki
-        // muteks alır ve okuyucu thread PTY'den okumaya başlamadan önce
-        // aynı sıraya giriyor. Boştaki kare o sıraya hiç girmesin.
-        // Swap ile lock arasına düşen bir `Wakeup` bayrağı yeniden diker;
-        // en kötüsü fazladan bir kare, kaçan kare değil.
-        if !self.adapter.0.dirty.swap(false, Ordering::AcqRel) {
-            return None;
-        }
+    pub fn frame(&self, mut sink: impl FnMut(Cell)) -> Cursor {
         // Tema `Term` kilidinden **önce** ve kopya olarak: yaprak kilit
         // kare boyunca tutulmaz, `Term` kilidinin altına ikinci bir muteks
         // girmez. Kopya ile kilit arasına düşen bir takas en çok bir kare
@@ -945,6 +979,11 @@ impl Session {
             // ayrışsalardı imlecin altındaki harf bloğa değil eski bir palete
             // göre seçilirdi.
             text: color::linear_rgba(background),
+            // Aynı `RenderableContent`'ten, yani `row`'u kuran ofsetin ta
+            // kendisi: ikisi ayrı okunsaydı araya düşen bir kaydırma
+            // "ofset aynı ama satır oynadı" diye yanlış bir animasyon
+            // başlatırdı.
+            display_offset: offset,
         };
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
@@ -1154,7 +1193,24 @@ impl Session {
             });
         }
 
-        Some(cursor)
+        cursor
+    }
+
+    /// Hasarı **tüketir**: `true` → çizilecek yeni içerik var.
+    ///
+    /// [`Session::frame`]'in içinden çıkarıldı ve gerekçesi orada. Burada
+    /// duran yarısı maliyet: bayrak kilit istemez, kilit ise ucuz değil —
+    /// `FairMutex::lock()` iki muteks alır ve okuyucu thread PTY'den okumaya
+    /// başlamadan önce aynı sıraya giriyor. Boştaki kare o sıraya hiç
+    /// girmesin.
+    ///
+    /// Swap ile `frame()`'in kilidi arasına düşen bir `Wakeup` bayrağı
+    /// yeniden diker; en kötüsü fazladan bir kare, kaçan kare değil.
+    ///
+    /// **Tüketen tek yer burası olmalı.** İki çağıran arka arkaya sorarsa
+    /// ikincisi `false` alır ve o karenin içeriği çizilmeden kalır.
+    pub fn take_damage(&self) -> bool {
+        self.adapter.0.dirty.swap(false, Ordering::AcqRel)
     }
 
     /// Fareyle seçimin iki ucu — aralık modeli burada yaşar, çünkü "hangi
@@ -1911,6 +1967,18 @@ mod tests {
     /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
     const THEME: Theme = Theme::BATERI;
 
+    /// Hasar sorusu + tarama, eski `frame()`'in şekliyle: `None` → kare
+    /// istenmedi.
+    ///
+    /// Üretimde ikisi ayrı çağrılıyor ([`Session::take_damage`]'in doc'u
+    /// sebebi yazıyor), ama bu sınamaların sorduğu şey neredeyse hep "bu olay
+    /// kare istedi mi" — yani tek ifade. Ayrı ayrı yazılsalardı her sınama
+    /// aynı iki satırı kopyalar ve hasarı yanlışlıkla iki kez tüketen bir
+    /// sınama kendi kendini sessizce yeşile çevirirdi.
+    fn frame_if_damaged(session: &Session, sink: impl FnMut(Cell)) -> Option<Cursor> {
+        session.take_damage().then(|| session.frame(sink))
+    }
+
     /// Uyandırmaları sayar, pano yazmalarını kaydeder ve sınamanın
     /// beklemesine izin verir.
     #[derive(Default)]
@@ -2058,7 +2126,7 @@ mod tests {
             );
             seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
             cells.clear();
-            if session.frame(|c| cells.push(c)).is_some() && ready(&cells) {
+            if frame_if_damaged(session, |c| cells.push(c)).is_some() && ready(&cells) {
                 return cells;
             }
         }
@@ -2252,7 +2320,7 @@ mod tests {
         // İkinci çağrı hasarsız: ne kare ne iterasyon. Kapı düşseydi aynı üç
         // hücre yeniden emilir ve sayaç büyürdü.
         let mut count = 0;
-        assert!(session.frame(|_| count += 1).is_none());
+        assert!(frame_if_damaged(&session, |_| count += 1).is_none());
         assert_eq!(count, 0, "hasarsız kare sink'i çağırdı");
     }
 
@@ -2355,7 +2423,7 @@ mod tests {
             assert!(Instant::now() < deadline, "imleç X hücresine dönmedi");
             seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
             let mut cells = Vec::new();
-            let Some(cursor) = session.frame(|c| cells.push(c)) else {
+            let Some(cursor) = frame_if_damaged(&session, |c| cells.push(c)) else {
                 continue;
             };
             if cursor.visible && (cursor.col, cursor.row) == (0, 0) {
@@ -2583,13 +2651,16 @@ mod tests {
         let dark_bg = LinearRgba::from_srgb(0x1a, 0x1c, 0x21);
         assert!(cells.iter().all(|c| c.bg.is_none()), "{cells:?}");
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "takastan önce kare kalmamalı"
         );
 
         // Aynı tema no-op: kare istenmez.
         session.set_theme(THEME);
-        assert!(session.frame(|_| ()).is_none(), "aynı tema kare istedi");
+        assert!(
+            frame_if_damaged(&session, |_| ()).is_none(),
+            "aynı tema kare istedi"
+        );
 
         let light = Theme::BATERI_LIGHT;
         let before = wake.wait_wakes(0, Duration::ZERO);
@@ -2601,7 +2672,7 @@ mod tests {
         assert_eq!(session.theme(), light);
         let mut cells = Vec::new();
         assert!(
-            session.frame(|c| cells.push(c)).is_some(),
+            frame_if_damaged(&session, |c| cells.push(c)).is_some(),
             "takas kare istemedi"
         );
         let at_col = |col| *cells.iter().find(|c| c.col == col).expect("hücre karede");
@@ -2682,7 +2753,7 @@ mod tests {
         });
         wait_settled(&session);
         assert_eq!(session.scroll_page(4), Some(40));
-        let _ = session.frame(|_| ());
+        let _ = frame_if_damaged(&session, |_| ());
 
         let before = wake.wait_wakes(0, Duration::ZERO);
         session.set_terminal_options(TerminalOptions {
@@ -2699,7 +2770,7 @@ mod tests {
             "seçenek değişimi uyandırmadı"
         );
         assert!(
-            session.frame(|_| ()).is_some(),
+            frame_if_damaged(&session, |_| ()).is_some(),
             "seçenek değişimi kare istemedi"
         );
 
@@ -2818,9 +2889,9 @@ mod tests {
     /// 20 ms: ilk `None` o gecikmiş `Wakeup`'tan önce düşmüş olabilir.
     fn wait_settled(session: &Session) {
         wait_until("kare akışı durulmadı", Duration::from_secs(2), || {
-            session.frame(|_| ()).is_none() && {
+            frame_if_damaged(session, |_| ()).is_none() && {
                 std::thread::sleep(Duration::from_millis(20));
-                session.frame(|_| ()).is_none()
+                frame_if_damaged(session, |_| ()).is_none()
             }
         });
     }
@@ -2930,7 +3001,7 @@ mod tests {
         // atması için bir nefes bekleniyor; sonra kare olmamalı.
         std::thread::sleep(Duration::from_millis(300));
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "boş paste kare doğurdu — PTY'ye bayt gitmiş"
         );
     }
@@ -2942,8 +3013,8 @@ mod tests {
 
         // Açılış karesi: grid boş ama pencere bir kez boyanmalı (bayrak
         // `Adapter::new`'da `true` başlıyor).
-        assert!(session.frame(|_| ()).is_some());
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
 
         // Simge durumuna inen pencere `bounds()`'tan sıfır hesaplatabilir.
         // Bu boyut grid'e HİÇ ulaşmamalı: 1 sütuna kırpmak alacritty'de
@@ -2955,16 +3026,16 @@ mod tests {
         assert!(!session.resize(80, 0, (9, 18)));
         assert!(!session.resize(0, 0, (9, 18)));
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "dejenere boyut grid'e ulaştı"
         );
 
         // Gerçek boyut değişimi hasar işaretler.
         assert!(session.resize(80, 24, (9, 18)));
-        assert!(session.frame(|_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
         // Aynı boyut ikinci kez: değişiklik yok, hasar yok.
         assert!(!session.resize(80, 24, (9, 18)));
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
         // Yalnız hücre piksel boyutu değişse de bu bir değişikliktir: PTY'ye
         // giden `TIOCSWINSZ` onu taşıyor (Retina'ya taşınan pencere).
         assert!(session.resize(80, 24, (18, 36)));
@@ -3104,22 +3175,28 @@ mod tests {
         // yolu `update_selection` ve kapısı aynı; ikisi de aşağıda sınanıyor.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("sleep 5", Arc::clone(&wake));
-        assert!(session.frame(|_| ()).is_some());
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
 
         // Sürüklemesiz tık: seçim boş doğar, önceki seçim de yoktu — çizilecek
         // bir şey değişmedi.
         session.set_selection(at(2, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
-        assert!(session.frame(|_| ()).is_none(), "boş seçim kare istememeli");
+        assert!(
+            frame_if_damaged(&session, |_| ()).is_none(),
+            "boş seçim kare istememeli"
+        );
 
         session.set_selection(at(0, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
-        assert!(session.frame(|_| ()).is_some(), "yeni aralık kare istemeli");
-        assert!(session.frame(|_| ()).is_none());
+        assert!(
+            frame_if_damaged(&session, |_| ()).is_some(),
+            "yeni aralık kare istemeli"
+        );
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
 
         // Hücre sınırı geçildi, aralık aynı: 2. sütunda bitiyor.
         session.set_selection(at(0, 0, CellHalf::Left), at(3, 0, CellHalf::Left));
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "aynı aralık kare istememeli"
         );
         // Sürüklemenin kendi yolu: uç ters yönde geri döndü, aralık yine aynı.
@@ -3127,23 +3204,23 @@ mod tests {
         // kare isterdi.
         session.update_selection(at(2, 0, CellHalf::Right));
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "aynı aralığa sürükleme kare istememeli"
         );
         session.update_selection(at(4, 0, CellHalf::Right));
         assert!(
-            session.frame(|_| ()).is_some(),
+            frame_if_damaged(&session, |_| ()).is_some(),
             "aralığı büyüten sürükleme kare istemeli"
         );
 
         // Temizle, sonra yine sürüklemesiz tık: saklanan seçim boş, temizlemek
         // ekrandan bir şey silmez.
         session.clear_selection();
-        assert!(session.frame(|_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
         session.set_selection(at(1, 0, CellHalf::Left), at(1, 0, CellHalf::Left));
         session.clear_selection();
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "boş seçimi temizlemek kare istememeli"
         );
     }
@@ -3157,11 +3234,14 @@ mod tests {
         // hücreyi** seçiyor. Yarının kuralına göre hiçbir şey seçilmemeli.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("sleep 5", Arc::clone(&wake));
-        assert!(session.frame(|_| ()).is_some());
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
 
         session.set_selection(at(39, 0, CellHalf::Right), at(0, 1, CellHalf::Left));
-        assert!(session.frame(|_| ()).is_none(), "boş seçim kare istememeli");
+        assert!(
+            frame_if_damaged(&session, |_| ()).is_none(),
+            "boş seçim kare istememeli"
+        );
         assert_eq!(session.selection_text(), None);
     }
 
@@ -3178,7 +3258,7 @@ mod tests {
         );
         assert_eq!(wait_cells(&session, &wake, 1).len(), 1);
         session.set_selection(at(0, 0, CellHalf::Left), at(0, 0, CellHalf::Right));
-        assert!(session.frame(|_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
 
         // `read` satır sonunu bekliyor; gelince 30 satır `x`'i geçmişe iter.
         // Hazır: son satır (`30`) görünür.
@@ -3187,7 +3267,7 @@ mod tests {
 
         session.set_selection(at(5, 5, CellHalf::Left), at(5, 5, CellHalf::Left));
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "geçmişteki seçimin yerine boş seçim kare istememeli"
         );
         // Kare istenmedi ama seçim **değişti**: iki taraf da görünmez olduğu için
@@ -3196,7 +3276,7 @@ mod tests {
         // bakmıyor.
         assert_eq!(session.selection_text(), None);
         session.clear_selection();
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
     }
 
     #[test]
@@ -3211,12 +3291,12 @@ mod tests {
         // satıra kuruluyor — boş seçim (haklı olarak) kare istemez.
         let mut plain = Vec::new();
         session.set_selection(at(0, 9, CellHalf::Left), at(1, 9, CellHalf::Right));
-        assert!(session.frame(|c| plain.push(c)).is_some());
+        assert!(frame_if_damaged(&session, |c| plain.push(c)).is_some());
         let plain_fg = plain.iter().find(|c| c.col == 0).expect("a hücresi").fg;
 
         session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
         let mut next = Vec::new();
-        assert!(session.frame(|c| next.push(c)).is_some());
+        assert!(frame_if_damaged(&session, |c| next.push(c)).is_some());
         for col in 0..5 {
             let cell = next
                 .iter()
@@ -3235,26 +3315,26 @@ mod tests {
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("sleep 5", Arc::clone(&wake));
         // Açılış karesi + sessizlik: shell çıktı üretmiyor.
-        assert!(session.frame(|_| ()).is_some());
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
 
         session.set_selection(at(0, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
         assert!(
-            session.frame(|_| ()).is_some(),
+            frame_if_damaged(&session, |_| ()).is_some(),
             "seçim kirli bayrağını dikmeli"
         );
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
 
         session.clear_selection();
         assert!(
-            session.frame(|_| ()).is_some(),
+            frame_if_damaged(&session, |_| ()).is_some(),
             "temizleme de kare istemeli"
         );
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
         // Boş seçimi temizlemek sessiz: bayrak dikilmez, kare istenmez.
         session.clear_selection();
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "boş temizleme kare istememeli"
         );
     }
@@ -3290,7 +3370,7 @@ mod tests {
         assert_eq!(session.selection_text().as_deref(), Some("ell"));
 
         let mut next = Vec::new();
-        assert!(session.frame(|c| next.push(c)).is_some());
+        assert!(frame_if_damaged(&session, |c| next.push(c)).is_some());
         // Seçili üç hücre boyalı, seçili olmayan iki hücre boyasız. `h`
         // vurgusuz karede eleniyordu (`bg: None, ch: Some` — `ch`'si var ama
         // bu döngü bg'ye bakıyor); seçim onu karesine sokmaz, sokmamalı.
@@ -3324,7 +3404,7 @@ mod tests {
         let green = color::linear_rgba(THEME.default(2));
         let colors = |session: &Session| {
             let mut cells = Vec::new();
-            assert!(session.frame(|c| cells.push(c)).is_some());
+            assert!(frame_if_damaged(session, |c| cells.push(c)).is_some());
             cells
                 .iter()
                 .map(|c| (c.col, (c.bg, c.fg)))
@@ -3391,7 +3471,7 @@ mod tests {
             .fg;
         let highlighted = |session: &Session, col: u16| {
             let mut next = Vec::new();
-            session.frame(|c| next.push(c));
+            frame_if_damaged(session, |c| next.push(c));
             next.iter()
                 .find(|c| c.col == col)
                 .is_some_and(|c| c.bg == Some(plain_fg))
@@ -3485,39 +3565,37 @@ mod tests {
         // açılmaz ve kaydırma, ilgisiz bir PTY çıktısı gelene kadar boyanmazdı.
         assert!(wakes(&wake) > woken, "kaydırma uyandırmadı");
         let mut cells = Vec::new();
-        let cursor = session
-            .frame(|c| cells.push(c))
-            .expect("kaydırma kare istemeli");
+        let cursor = frame_if_damaged(&session, |c| cells.push(c)).expect("kaydırma kare istemeli");
         // Pencere gerçekten geriye gitti: en üst satır `22` değil `19`. İmleç
         // dipteki satırla birlikte pencerenin altına düştü.
         assert_eq!(row_text(&cells, 0), "19", "{cells:?}");
         assert!(!cursor.visible, "{cursor:?}");
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
 
         // Geçmişin tepesine: 21 - 3 = 18 satır daha. `i32::MAX` taşma
         // bekçisi — alacritty ofseti `i32`'de topluyor (`offset + count`),
         // kırpılmayan bir delta debug derlemesinde panik, sürümde ters yöne
         // sarma olurdu. Giriş yolunda panik yok.
         assert_eq!(scroll(&session, i32::MAX), Wheel::Scrolled(18));
-        assert!(session.frame(|_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
         // Tepede kaymayan tekerlek **kare istemez**: trackpad momentumu
         // tepede de olay yağdırır ve her biri boş bir kare olurdu.
         let woken = wakes(&wake);
         assert_eq!(scroll(&session, 1), Wheel::Scrolled(0));
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "kaymayan kaydırma kare istedi"
         );
         assert_eq!(wakes(&wake), woken, "kaymayan kaydırma uyandırdı");
 
         // Dibe dönüş ters yönde aynı yol: imleç yeniden görünür.
         assert_eq!(scroll(&session, i32::MIN), Wheel::Scrolled(-21));
-        let cursor = session.frame(|_| ()).expect("dibe dönüş kare istemeli");
+        let cursor = frame_if_damaged(&session, |_| ()).expect("dibe dönüş kare istemeli");
         assert!(cursor.visible, "{cursor:?}");
 
         // Sayfa = görünen satır sayısı (10), `Term`'den; kırpma aynı gövdede.
         assert_eq!(session.scroll_page(1), Some(10));
-        assert!(session.frame(|_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
         assert_eq!(session.scroll_page(i32::MAX), Some(11));
         assert_eq!(session.scroll_page(-1), Some(-10));
 
@@ -3735,7 +3813,7 @@ mod tests {
             });
         assert_eq!(scroll(&plain, 3), Wheel::Ignored);
         assert!(
-            plain.frame(|_| ()).is_none(),
+            frame_if_damaged(&plain, |_| ()).is_none(),
             "yoksayılan tekerlek kare istedi"
         );
         expect_sent(&plain, &wake, b"");
@@ -3752,7 +3830,10 @@ mod tests {
         });
         let woken = wakes(&wake);
         assert_eq!(scroll(&arrows, 3), Wheel::Sent);
-        assert!(arrows.frame(|_| ()).is_none(), "ok kare istedi");
+        assert!(
+            frame_if_damaged(&arrows, |_| ()).is_none(),
+            "ok kare istedi"
+        );
         assert_eq!(wakes(&wake), woken, "ok uyandırdı");
 
         let (reports, wake) = dump_session(40, "printf '\\033[?1000h\\033[?1006h'", |mode| {
@@ -3760,7 +3841,10 @@ mod tests {
         });
         let woken = wakes(&wake);
         assert_eq!(scroll(&reports, 1), Wheel::Sent);
-        assert!(reports.frame(|_| ()).is_none(), "rapor kare istedi");
+        assert!(
+            frame_if_damaged(&reports, |_| ()).is_none(),
+            "rapor kare istedi"
+        );
         assert_eq!(wakes(&wake), woken, "rapor uyandırdı");
     }
 
@@ -3780,7 +3864,7 @@ mod tests {
         assert_eq!(display_offset(&session), 0, "yazma dibe döndürmedi");
         // Kare `write` dönmeden istenmiş olmalı — yankının `Wakeup`'ını
         // beklemeden: dönüş, okuyucu thread'in işi değil.
-        let cursor = session.frame(|_| ()).expect("dibe dönüş kare istemeli");
+        let cursor = frame_if_damaged(&session, |_| ()).expect("dibe dönüş kare istemeli");
         assert!(cursor.visible, "{cursor:?}");
 
         // Yapıştırma da aynı kapıdan: `paste` → `write_owned`.
@@ -3794,7 +3878,7 @@ mod tests {
         session.write_arrow(Arrow::Up);
         assert_eq!(display_offset(&session), 0, "ok tuşu dibe döndürmedi");
         assert!(
-            session.frame(|_| ()).is_some(),
+            frame_if_damaged(&session, |_| ()).is_some(),
             "ok tuşunun dibe dönüşü kare istemeli"
         );
 
@@ -3840,7 +3924,7 @@ mod tests {
             // hiçbir şey basmıyor — isteyebilecek tek aday temizliğin kendisi.
             let mut cells = Vec::new();
             assert!(
-                session.frame(|c| cells.push(c)).is_some(),
+                frame_if_damaged(session, |c| cells.push(c)).is_some(),
                 "{what}: kalkan vurgu kare istemedi"
             );
             // Vurgu gerçekten gitti: beş hücre yeniden kendi kırmızısında.
@@ -3870,7 +3954,7 @@ mod tests {
         wait_settled(&session);
         session.write(b"x");
         assert!(
-            session.frame(|_| ()).is_none(),
+            frame_if_damaged(&session, |_| ()).is_none(),
             "boş seçimin temizliği kare istedi"
         );
 
@@ -3899,7 +3983,7 @@ mod tests {
         history.write(b"x");
         assert_eq!(history.selection_text(), None);
         assert!(
-            history.frame(|_| ()).is_none(),
+            frame_if_damaged(&history, |_| ()).is_none(),
             "görünmeyen seçimin temizliği kare istedi"
         );
     }
@@ -3980,11 +4064,11 @@ mod tests {
         // güncelleme yalnız var olan seçimin ucunu taşır.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("sleep 5", Arc::clone(&wake));
-        assert!(session.frame(|_| ()).is_some());
+        assert!(frame_if_damaged(&session, |_| ()).is_some());
 
         session.update_selection(at(3, 0, CellHalf::Right));
         assert_eq!(session.selection_text(), None);
-        assert!(session.frame(|_| ()).is_none());
+        assert!(frame_if_damaged(&session, |_| ()).is_none());
     }
 
     #[test]
@@ -4114,7 +4198,7 @@ mod tests {
 
         let mut frames = 0u64;
         while Instant::now() < deadline {
-            if session.frame(|_| ()).is_some() {
+            if frame_if_damaged(&session, |_| ()).is_some() {
                 frames += 1;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -4171,7 +4255,7 @@ mod tests {
 
         let mut frames = 0u64;
         while Instant::now() < deadline {
-            if session.frame(|_| ()).is_some() {
+            if frame_if_damaged(&session, |_| ()).is_some() {
                 frames += 1;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -4218,7 +4302,7 @@ mod tests {
 
         let mut frames = 0u64;
         while Instant::now() < deadline {
-            if session.frame(|_| ()).is_some() {
+            if frame_if_damaged(&session, |_| ()).is_some() {
                 frames += 1;
                 let theme = session.theme();
                 assert!(theme == THEME || theme == Theme::BATERI_LIGHT);
@@ -4271,7 +4355,7 @@ mod tests {
 
         let mut frames = 0u64;
         while Instant::now() < deadline {
-            if session.frame(|_| ()).is_some() {
+            if frame_if_damaged(&session, |_| ()).is_some() {
                 frames += 1;
             }
             std::thread::sleep(Duration::from_millis(1));

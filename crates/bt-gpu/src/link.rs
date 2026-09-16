@@ -1,9 +1,23 @@
 //! Kareyi süren şey: `CAMetalDisplayLink` ve onu uzaktan açan `Waker`.
 //!
 //! Sözleşme tek cümlede: **link paused durur.** Yeni içerik geldiğinde
-//! (`Wake::wake` → [`Waker`]) açılır, hasar tükenince callback onu geri
-//! kapatır. "Boşta sıfır kare" bu iki satırda yaşıyor; her `setPaused(false)`
-//! bir gerekçe ister ve her kare bir durma koşulu taşır.
+//! (`Wake::wake` → [`Waker`]) açılır, hasar **ve hareket** tükenince callback
+//! onu geri kapatır. "Boşta sıfır kare" bu iki satırda yaşıyor; her
+//! `setPaused(false)` bir gerekçe ister ve her kare bir durma koşulu taşır.
+//!
+//! **Kareyi isteyen iki şey var ve ikincisi uyandırmaz** (008):
+//!
+//! - **Hasar** — `Waker` üzerinden, başka bir thread'den, bayrak dikerek.
+//! - **Hareket** ([`crate::motion`]) — kimseyi uyandırmadan, çünkü zaten
+//!   uyanık olan callback'in kendisi karar veriyor: yerleşmemiş bir animasyon
+//!   varken `needs_update` uyumayı reddediyor.
+//!
+//! İkincisi `Waker`'a **dokunmamak zorunda**: [`Waker::wake`] hasar bayrağını
+//! koşulsuz dikiyor, yani oradan istenen bir hareket karesi kendini "içerik"
+//! diye saydırır, grid'i boşuna yeniden taratır ve boşta sıfır kare kapısının
+//! operandını (`icerik=`) şişirirdi. Sözleşmenin sonucu: **zamana bağlı kare
+//! talebinin tek yolu hareket saatidir.** Yeni bir animasyon (blink, yumuşak
+//! kaydırma) buraya girer, `Waker`'a değil.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -11,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use bt_core::{DirtyFlag, Session};
+use bt_core::{Cursor, DirtyFlag, Session, Theme};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -25,15 +39,21 @@ use objc2_quartz_core::{
 };
 
 use crate::frame::Frame;
+use crate::motion::Motion;
 use crate::renderer::{CellMetrics, Completion};
 use crate::stats::Stats;
 use crate::{GpuError, Renderer, Surface};
 
-/// **Kare istemenin tek tanımı**: hasar bayrağını dik, link'i aç.
+/// **Hasardan kare istemenin tek tanımı**: hasar bayrağını dik, link'i aç.
 ///
 /// Her thread'den çağrılabilir; `Clone`, `Send + Sync`. İkisini ayrı ayrı
 /// yapan ikinci bir yol bilerek yok — bayraksız açılan link "hasar yok" deyip
 /// anında geri uyur, uyandırılmayan bayrak da kimseyi çizmeye çağırmaz.
+///
+/// **Zamana bağlı kare buradan istenmez** (modül başlığı): hareket, uyanık
+/// callback'in kendi kararı. Buraya bağlanan bir animasyon her karesine hasar
+/// diker ve `icerik=` sayacını — yani boşta sıfır kare kapısını — kendi
+/// karelerinden doldururdu.
 #[derive(Clone)]
 pub struct Waker {
     inner: Arc<WakerInner>,
@@ -78,6 +98,13 @@ struct WakerInner {
     /// Sayı bu yüzden "kare üretebilecek talep" değil "istenen kare"; kalıcı
     /// bir çizim hatası onu şişirir ve okuyan taraf bunu `kare` ile
     /// karşılaştırarak ayırt eder.
+    ///
+    /// **Ne saymıyor: hareket karesini.** Animasyon `Waker`'a hiç dokunmuyor
+    /// (modül başlığı), yani bu sayaç `icerik`'e yakın kalırken `kare`
+    /// animasyon boyunca ondan kopuyor. Aşağıdaki "duman yükü" ölçümünün
+    /// `istek ≈ kare + 2` ilişkisi tam bu yüzden **008'de geçersizleşti**;
+    /// sayıların kendisi (o günkü koşuların gözlemi) duruyor, ilişkinin yeni
+    /// hâli `icerik` üstünden ve henüz **ölçülmedi**.
     ///
     /// Bir **sayaç, kapı değil**: eşiği ölçülmedi ve ölçülmemiş sayı kapıya
     /// yazılmaz (`yuva=` ile aynı kural). Ölçülen (2026-09-12, debug, bu
@@ -326,11 +353,56 @@ struct LinkIvars {
     content_frames: Cell<u64>,
     /// **Hareket** karesi: hasar yok ama yerleşmemiş bir animasyon var.
     ///
-    /// Bu phase'de kanıtlanabilir şekilde **hep `0`** — artıran yol henüz yok
-    /// ve jetonu basan sınama bunu satırın kendisinde arıyor. Muhasebe
-    /// hareket kodundan **önce** iniyor ki ilk kayma iki değişikliği tek
-    /// commit'e sıkıştırmasın.
+    /// `content_frames`'in kardeşi ve bilerek ondan ayrı: ikisi de çizilen
+    /// kare sayıyor ama yalnız biri boşta sıfır kare kapısının operandı.
+    /// Süreli koşu bunu `hareket=` diye basıyor ve duman kapısının
+    /// **gerekli** sayacı (reçetede bir imleç hareketi var, bkz.
+    /// `bt_core::smoke_shell`).
     motion_frames: Cell<u64>,
+    /// İmlecin kayması — kareyi zamana bağlayan tek şey.
+    ///
+    /// `Cell`, `RefCell` değil: [`crate::motion::Motion`] `Copy` ve ona
+    /// dokunan tek yer bu callback (ana thread). `RefCell` çalışırdı ama
+    /// `frame` ödüncünün yanında ikinci bir çalışma-zamanı ödüncü demek
+    /// olurdu ve kazandırdığı hiçbir şey yok.
+    motion: Cell<Motion>,
+    /// Geometri (pencere, font, zoom) oynadı: sıradaki içerik karesi imleci
+    /// animasyonsuz taşısın.
+    ///
+    /// Bayrak, çünkü [`DisplayLink::resize`] callback değil — hücre ölçüsünü
+    /// değiştiren yol ile onu çizen yol ayrı anlarda koşuyor ve aradaki kareyi
+    /// yalnız bu bayrak bağlıyor. Sıradaki içerik karesi onu **tüketir**:
+    /// tüketilmeseydi geometriden sonraki her kare snap'lerdi.
+    geometry_changed: Cell<bool>,
+    /// Bir önceki callback'in damgası; `dt`'nin tabanı.
+    ///
+    /// Kaynağı `last_frame_at` ile **aynı** (`update.targetTimestamp()`) ve
+    /// bu şart: iki ayrı taban iki ayrı zaman yaratır ve `sessiz=` ile
+    /// animasyonun saati birbirini tutmazdı. Saat okuması yok, alan kopyası.
+    ///
+    /// `last_frame_at`'ten ayrı bir alan, çünkü o yalnız **yola çıkan**
+    /// karede tazeleniyor; `dt` ise encode edilemeyen karede de ilerlemeli,
+    /// yoksa bir hatadan sonra animasyon o kadar süreyi tek adımda atlardı.
+    last_update_at: Cell<Option<f64>>,
+    /// İçerik karesinde okunan temanın kopyası — hareket karesinin paleti.
+    ///
+    /// Hareket karesi `session.theme()`'i **çağırmıyor**: o yaprak bir kilit
+    /// alıyor ve hareket karesinin `Session`'a hiç dokunmaması tasarımın
+    /// kendisi (008 Karar 4). Tema takası zaten kare istiyor
+    /// (`Session::set_theme`), yani bir sonraki kare içerik karesi olur ve
+    /// kopya orada tazelenir.
+    theme: Cell<Theme>,
+    /// Son içerik karesinin imleci — hareket karesinin `visible` ve `text`
+    /// kaynağı.
+    ///
+    /// Konumu **kullanılmıyor**: kayan imlecin yeri `Motion`'da, burası yalnız
+    /// `bt-core`'un konuma bağlı olmayan iki kararını taşıyor. İkisi `Motion`'a
+    /// kopyalanmadı çünkü orası saf bir fizik modülü; renk ve görünürlük
+    /// terminal semantiği (`CLAUDE.md` → renderer'a terminal semantiği
+    /// eklenmez).
+    ///
+    /// `None` → henüz hiç içerik karesi çizilmedi; o hâlde hareket de yok.
+    last_cursor: Cell<Option<Cursor>>,
     /// Son **çizilen** karenin damgası (`CAMetalDisplayLinkUpdate`'in hedef
     /// sunum anı), `sessiz=` jetonunun tabanı.
     ///
@@ -370,9 +442,87 @@ define_class!(
                 link.setPaused(true);
                 return;
             }
+            // Zamanın tabanı: damga bir **alan kopyası**, saat okuması değil
+            // (bkz. `LinkIvars::last_frame_at`). `sessiz=` ile animasyonun
+            // saati aynı yerden okunuyor — iki taban iki ayrı zaman yaratırdı.
+            let now = update.targetTimestamp();
+            // İlk karede `dt` yok: `0.0` ile başlamak, bilinmeyen bir aralığı
+            // uydurmaktan iyi. Kırpmayı `Motion::advance` yapıyor ve orada
+            // olması şart (gerekçe `motion::DT_MAX`).
+            let dt = iv
+                .last_update_at
+                .replace(Some(now))
+                .map_or(0.0, |prev| (now - prev) as f32);
             // audit: callback ana thread'e bağlı ve yeniden girilmez; sink
             // `Session`'a geri girmiyor, yani ikinci bir ödünç doğmuyor.
             let mut frame = iv.frame.borrow_mut();
+            let mut motion = iv.motion.get();
+            // **Hasar sorusu taramadan önce** (008 Karar 4): hareket karesi
+            // listeyi temizlemeden kullanıyor, yani "temizlensin mi" kararı
+            // `clear`'dan önce verilmek zorunda. `Session::frame`'in eski
+            // `Option`'ı tam bu sırayı imkânsız kılıyordu.
+            if !iv.session.take_damage() {
+                // Hasar yok. İki ihtimal kaldı ve ikisi de burada bitiyor.
+                motion.advance(dt);
+                if motion.settled() {
+                    // Boşta sıfır kare: yeni içerik de yerleşmemiş animasyon
+                    // da yok, link uyur. Sıradaki `Wakeup` onu `Waker`
+                    // üzerinden geri açar.
+                    //
+                    // Örnek de **yazılmıyor** ve bu bir dal değil, yolun
+                    // şekli: bu karede `draw` hiç koşmadı, "encode = 0 ns"
+                    // diye sahte bir örnek p95'i aşağı çekerdi.
+                    iv.motion.set(motion);
+                    link.setPaused(true);
+                    return;
+                }
+                // **Hareket karesi.** `Waker`'a dokunulmuyor (modül başlığı):
+                // link zaten uyanık ve bu callback'in kendisi onu sürdürüyor.
+                iv.motion.set(motion);
+                iv.motion_frames.set(iv.motion_frames.get() + 1);
+                let theme = iv.theme.get();
+                // Liste korunuyor, yalnız imleç taşınıyor: grid kirli değil,
+                // yani glyph ve kural listeleri hâlâ geçerli. `Term` kilidine
+                // saniyede 120 kez girmek "render yolu bloklanmaz" ile tam
+                // burada kavga ederdi.
+                if let (Some(at), Some(cursor)) = (motion.position(), iv.last_cursor.get()) {
+                    frame.move_cursor(cursor, at, theme.accent_linear());
+                }
+                // CPU örneği **yazılmıyor** ve bu bir eksiklik değil:
+                // `cpu_kare` `session.frame`'in kilit beklemesini ölçüyor ve
+                // bu karede o iş hiç yok. Bir `truncate` + `push_cursor`'un
+                // mikrosaniyesi aynı sütuna girseydi p95'i aşağı çekerdi —
+                // "sahte örnek" yasağının aynısı.
+                //
+                // **GPU sütunu buna uymuyor ve uyamaz:** tamamlanma bloğu
+                // komut tamponuna bağlı (`Renderer::draw`) ve hareket karesi
+                // de bir komut tamponu commit ediyor, yani `record_gpu` bu
+                // kareleri **görüyor**. Blok aynı zamanda `FailureStreak`'i
+                // besliyor; hareket karesini ondan muaf tutmak çizim hatasını
+                // görünmez kılardı, yani ayrılık kasıtlı değil **yapısal**.
+                // Sonucu bir ölçüm kapsamı kalemi: `ornek=` ile `gpu_ornek=`
+                // farklı kare popülasyonlarını sayıyor (GPU'nunki hareket
+                // karelerini de içeriyor) ve iki sütunun p95'i imleç kayan
+                // bir koşuda doğrudan karşılaştırılamaz. `docs/OLCUMLER.md`
+                // → `## Yöntem` bunu phase-6'da yazacak.
+                if iv
+                    .renderer
+                    .draw(
+                        &update.drawable(),
+                        theme.background_linear(),
+                        &frame,
+                        &iv.completion,
+                    )
+                    .inspect_err(|e| iv.retry.draw_failed(e))
+                    .is_ok()
+                {
+                    // Hareket karesi de **yola çıkan** bir kare: `sessiz=`
+                    // yerleşmeden sonraki kuyruğu ölçmeli, animasyonun
+                    // başladığı anı değil.
+                    iv.last_frame_at.set(Some(now));
+                }
+                return;
+            }
             frame.clear(iv.cell.get().cell_px());
             // CPU **iki** aralık ölçülüyor, bir değil: kilit beklemesi
             // `session.frame`'in içinde, encode ise `draw`'ın. Tek aralık
@@ -382,31 +532,41 @@ define_class!(
             // de closure'ı yalnız dolu tarafta koşturuyor, yani kapalı kapının
             // bedeli bir dallanma.
             let t0 = iv.stats.is_some().then(Instant::now);
-            // Hasar yoksa encode ve commit'i hiç yapmıyoruz. Drawable'ı bu
-            // tasarruf kapsamaz: `CAMetalDisplayLink` onu callback'ten ÖNCE
-            // alıp `update`'in içine koyuyor, `drawable()`'ı çağırmamak alımı
-            // iptal etmiyor. (Bu yüzden `nextDrawable`'ın `Option`'ı ve onun
-            // `GpuError::NoDrawable`'ı da kalktı: `update.drawable()` başlıkta
-            // `nonnull` ve objc2 onu `Option`suz üretiyor.)
-            let Some(cursor) = iv.session.frame(|cell| frame.push(cell)) else {
-                // Boşta sıfır kare: yeni içerik yok, link uyur. Sıradaki
-                // `Wakeup` onu `Waker` üzerinden geri açar.
-                //
-                // Örnek de **yazılmıyor** ve bu bir dal değil, yolun şekli:
-                // bu karede `draw` hiç koşmadı, "encode = 0 ns" diye sahte bir
-                // örnek p95'i aşağı çekerdi.
-                link.setPaused(true);
-                return;
-            };
+            // Drawable'ı boştaki tasarruf kapsamaz: `CAMetalDisplayLink` onu
+            // callback'ten ÖNCE alıp `update`'in içine koyuyor, `drawable()`'ı
+            // çağırmamak alımı iptal etmiyor. (Bu yüzden `nextDrawable`'ın
+            // `Option`'ı ve onun `GpuError::NoDrawable`'ı da kalktı:
+            // `update.drawable()` başlıkta `nonnull` ve objc2 onu `Option`suz
+            // üretiyor.)
+            let cursor = iv.session.frame(|cell| frame.push(cell));
             // Kapının operandı burada artıyor: hasar bulundu, kare çizilecek.
             // `kare`'den önce ve ondan bağımsız — GPU'nun bitirmesini
             // beklemiyor (bkz. `LinkIvars::content_frames`).
             iv.content_frames.set(iv.content_frames.get() + 1);
             // Clear ve imleç rengi oturumun temasından: `frame()`'in zemin
             // atlaması ve renk sorusunun yanıtıyla aynı kaynak. Tema yalnız
-            // dolu karede okunuyor — boştaki callback yukarıda döndü.
+            // dolu karede okunuyor — boştaki callback yukarıda döndü — ve
+            // hareket karesi için saklanıyor.
             let theme = iv.session.theme();
-            frame.push_cursor(cursor, theme.accent_linear());
+            iv.theme.set(theme);
+            iv.last_cursor.set(Some(cursor));
+            // Sıra zorunlu: önce geçen süre eski hedefe işlenir, sonra yeni
+            // hedef kurulur. Ters sırada `dt` yeni hedefe uygulanır ve imleç
+            // bir kare boyunca gitmediği bir yöne doğru hızlanırdı.
+            motion.advance(dt);
+            motion.sync(
+                cursor.col,
+                cursor.row,
+                cursor.visible,
+                cursor.display_offset,
+                // Geometri bayrağı burada **tüketiliyor**: tüketilmeseydi
+                // bir pencere sürüklemesinden sonraki her kare snap'lerdi.
+                iv.geometry_changed.replace(false),
+            );
+            iv.motion.set(motion);
+            if let Some(at) = motion.position() {
+                frame.push_cursor(cursor, at, theme.accent_linear());
+            }
             // Birinci aralık burada kapanıyor — `push_cursor`'dan **sonra**:
             // imleci listeye koymak sink işidir, encode değil. Damga bir satır
             // yukarıda alınsaydı `cpu_encode` `draw`'ın yanında onu da ölçer
@@ -476,6 +636,10 @@ impl DisplayLink {
         cell: CellMetrics,
         stats: Option<Arc<Stats>>,
     ) -> Self {
+        // Açılış teması: ilk içerik karesi onu zaten tazeleyecek, ama alanın
+        // `Option` olması için bir sebep yok — oturumun teması her an geçerli
+        // bir cevap.
+        let theme = session.theme();
         let link =
             CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), surface.layer());
         let waker = Waker {
@@ -528,7 +692,15 @@ impl DisplayLink {
                 cell: Cell::new(cell),
                 content_frames: Cell::new(0),
                 motion_frames: Cell::new(0),
+                motion: Cell::new(Motion::default()),
+                geometry_changed: Cell::new(false),
                 last_frame_at: Cell::new(None),
+                last_update_at: Cell::new(None),
+                // İlk içerik karesine kadar kullanılmıyor: hareket karesi
+                // ancak `Motion`'da bir konum varsa çiziyor ve orayı dolduran
+                // tek yer içerik karesi — o da temayı tazeliyor.
+                theme: Cell::new(theme),
+                last_cursor: Cell::new(None),
             },
         );
         link.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -571,10 +743,26 @@ impl DisplayLink {
 
     /// Yerleşmemiş animasyon yüzünden çizilen kare — `hareket=` jetonu.
     ///
-    /// Bugün hep `0`: artıran yol bu phase'de yok (bkz.
-    /// [`LinkIvars::motion_frames`]).
+    /// Duman kapısının **gerekli** sayacı: reçetede bir imleç hareketi var
+    /// (`bt_core::smoke_shell`), yani sıfır "animasyon hiç koşmadı" demek.
+    /// `icerik=`'e girmiyor ve bu kapının kendisi (008 Karar 2).
     pub fn motion_frames(&self) -> u64 {
         self.delegate.ivars().motion_frames.get()
+    }
+
+    /// Animasyon durdu mu — kapının **ölçüm istemeyen** yarısı.
+    ///
+    /// Süreli koşu bunu deadline'da bir kez soruyor: `false` ise koşu kırmızı
+    /// (`Verdict::MotionUnsettled`). Hızdan bağımsız olması bütün değeri —
+    /// `IDLE_FRAME_LIMIT` ancak yeterince hızlı bir sızıntıyı görüyor, bu
+    /// soru ise durma koşulu unutulmuş **her** animasyonu görüyor, ne kadar
+    /// yavaş olursa olsun.
+    ///
+    /// Gördüğünün sınırı: yalnız [`crate::motion`]'dan geçen animasyonlar.
+    /// Altyapıyı atlayıp kendi kendine kare isteyen bir yolu bu soru göremez;
+    /// onun kapısı `sessiz=`'in ölçülmüş eşiği (phase-6).
+    pub fn motion_settled(&self) -> bool {
+        self.delegate.ivars().motion.get().settled()
     }
 
     /// Son çizilen kareden bu yana geçen süre — `sessiz=` jetonu.
@@ -621,6 +809,14 @@ impl DisplayLink {
         if visible {
             self.request_frame();
         } else {
+            // Uçuştaki kayma **hedefinde bitiriliyor**: link duracağı için
+            // `advance` bir daha koşmaz ve animasyon sonsuza kadar
+            // "yerleşmemiş" kalırdı — süreli koşu deadline'da kod doğruyken
+            // `MotionUnsettled` derdi. Gerekçenin tamamı [`Motion::finish`]'te.
+            let iv = self.delegate.ivars();
+            let mut motion = iv.motion.get();
+            motion.finish();
+            iv.motion.set(motion);
             self.link.setPaused(true);
         }
     }
@@ -659,11 +855,17 @@ impl DisplayLink {
     /// boyut yoksayılıyor (simge durumundaki pencere 0 sütun hesaplatır) ve
     /// onu burada uygulamak grid'i eski ölçüde bırakıp çizimi yeni ölçüye
     /// kaydırırdı — PTY'nin bildiği `TIOCSWINSZ` ile de ayrışırdı.
+    /// **İmleç bu karede snap'ler.** Geometri değişiminde imleç hareket
+    /// etmedi, altındaki ızgara hareket etti (008 Karar 5) — animasyon onu
+    /// olmadığı bir yerden geliyormuş gibi gösterirdi. Bayrak koşulsuz
+    /// dikiliyor, `Session::resize`'ın kabulüne bağlı değil: hücre ölçüsü
+    /// değişmese de pencere oynamış olabilir.
     pub fn resize(&self, cols: u16, rows: u16, cell: CellMetrics) {
         let iv = self.delegate.ivars();
         if iv.session.resize(cols, rows, cell.cell_px()) {
             iv.cell.set(cell);
         }
+        iv.geometry_changed.set(true);
         self.request_frame();
     }
 }

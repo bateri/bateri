@@ -1632,7 +1632,17 @@ mod tests {
             row: 0,
             visible: true,
             text,
+            // Kaydırma kararı hareketin işi (`motion.rs`); burada çizilen
+            // piksel sorgulanıyor ve konum zaten `push_settled` ile hedefin
+            // kendisi.
+            display_offset: 0,
         }
+    }
+
+    /// İmleci **kendi** hücresine çizer: bu sınamaların hepsi yerleşmiş bloğa
+    /// bakıyor, ara konuma değil (onun sınaması `frame.rs`'te).
+    fn push_settled(frame: &mut Frame, cursor: Cursor, rgba: LinearRgba) {
+        frame.push_cursor(cursor, [f32::from(cursor.col), f32::from(cursor.row)], rgba);
     }
 
     #[test]
@@ -1665,7 +1675,7 @@ mod tests {
         });
         // C: imleçsiz, kendi ön planıyla, aynı blok renkli zeminin üstünde.
         frame.push(glyph_cell(2, 'M', Some(ACCENT)));
-        frame.push_cursor(cursor_at(0, BACKGROUND), ACCENT);
+        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let cell = |col| cell_rows(&pixels, EDGE, (cw, ch), col).concat();
@@ -1699,7 +1709,7 @@ mod tests {
         frame.clear((cw, ch));
         frame.push(rule_cell(0, UnderlineStyle::Single));
         frame.push(rule_cell(1, UnderlineStyle::Single));
-        frame.push_cursor(cursor_at(0, BACKGROUND), ACCENT);
+        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         // Komşunun **ilk sütunu**: dikdörtgenin `x1`'i tam oraya düşüyor.
@@ -1735,7 +1745,7 @@ mod tests {
                 ..rule_cell(col, UnderlineStyle::Single)
             });
         }
-        frame.push_cursor(cursor_at(0, BACKGROUND), ACCENT);
+        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let under = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();
@@ -1784,7 +1794,7 @@ mod tests {
         // sınamanın sorduğu şey renk değil **sıra**, ve dikdörtgenin ezmesi
         // onu bulandırmamalı. Rengin ezildiğini soran yer
         // `rule_under_the_cursor_takes_the_cursor_text_color`.
-        frame.push_cursor(cursor_at(0, WHITE), red);
+        push_settled(&mut frame, cursor_at(0, WHITE), red);
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let cell = cell_rows(&pixels, EDGE, (cw, ch), 0).concat();

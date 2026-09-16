@@ -137,11 +137,17 @@ use crate::{child, settings};
 ///
 /// Sınırın **çizilen** kare üstünde durmasının sebebi adı: "boşta sıfır kare"
 /// çizim hakkında bir söz. `istek=` daha erken bir yerde sayıyor ama kapı
-/// değil — eşiği ölçülmedi ve **duman yükünde** ölçülen ilişki
-/// (`istek ≈ kare + 2`, hem sağlıklı hem bozuk koşuda) onu daha ayırt edici
-/// yapmıyor.
-/// Ölçüm yükünde ikisi üç mertebe ayrışıyor (bkz. `bt_gpu`'nun `requests`
-/// sayacı); oran olarak bir kapı kurulabilir ama o ölçülmedi.
+/// değil — eşiği ölçülmedi.
+///
+/// **Ölçülen `istek ≈ kare + 2` ilişkisi 008'de geçersizleşti** ve cümlenin
+/// düzelttiği şey bir sayı değil bir mekanizma: hareket kareleri `Waker`'a
+/// hiç dokunmuyor (`bt_gpu::link` modül başlığı), yani `kare`'yi şişirirken
+/// `istek`'i şişirmiyorlar. Bugünkü sağlıklı duman koşusu bunu satırın
+/// kendisinde gösteriyor — `kare=26` iken `istek=4`. İlişki artık
+/// `istek ≈ icerik + 2`; **ölçülmüş bir iddia değil**, tek koşuluk bir
+/// gözlem ve yeniden ölçümü phase-6'nın işi.
+/// Ölçüm yükünde `istek` ile `kare` üç mertebe ayrışıyor (bkz. `bt_gpu`'nun
+/// `requests` sayacı); oran olarak bir kapı kurulabilir ama o ölçülmedi.
 ///
 /// [`Workload::Load`] yükünde üst sınır **yok** — orada kare akışı işin
 /// kendisi.
@@ -722,6 +728,31 @@ struct Counters {
     glyphs: usize,
     /// Son karede çizilen alt çizgi / üstü çizili.
     rules: usize,
+    /// Yerleşmemiş animasyon yüzünden çizilen kare.
+    ///
+    /// `content`'in kardeşi ve kapıda **ters yönde**: `content`'in bir üst
+    /// sınırı var, bunun bir **alt** sınırı (`> 0`). Duman reçetesi bir imleç
+    /// hareketi içeriyor (`bt_core::smoke_shell`), yani sıfır "animasyon hiç
+    /// koşmadı" demek — tıpkı `hucre=0`'ın "shell çıktısı yok" demesi gibi.
+    ///
+    /// **Gizli bağ:** bu gereklilik hermetik koşunun imleç stilinin
+    /// **animasyonlu** olmasına dayanıyor. Bugün tutuyor çünkü stil sabit
+    /// kodlu `spring`; ayar geldiğinde (phase-4) varsayılan bir gün `snap`
+    /// olursa kapı sessizce düşer. O gün ya hermetik koşunun stili koşuda
+    /// açıkça sabitlenir ya bu cümle o değişikliğin önünde durur.
+    motion: u64,
+}
+
+/// Deadline'da animasyonun hâli — kapının **ölçüm istemeyen** yarısı.
+///
+/// `bool` değil ve sebebi çağrı yeri: [`verdict`] zaten beş sayı alıyor ve
+/// çıplak bir `true` orada hangi soruyu yanıtladığını söylemezdi. [`Counters`]
+/// da değil, çünkü bu bir sayı değil bir **durum**: yerleşmemiş animasyon
+/// koşuyu kırmızı düşürüyor, sayısı değil varlığı önemli.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MotionState {
+    Settled,
+    Unsettled,
 }
 
 /// Ölçüm defterinin kapanıştaki özeti: halkadan okunmuş, henüz biçimlenmemiş.
@@ -778,8 +809,10 @@ struct Counters {
 ///   kapanış maddesinde.
 /// - **Açık kalem (cevaplanmamış soru) — `kare` ile `istek` iki yükte apayrı
 ///   davranıyor** ve mekanizması **ölçülmedi** (kapı mı yutuyor, ana thread
-///   mi doyuyor, sistem mi link'i kısıyor): duman yükünde `istek ≈ kare + 2`,
-///   ölçüm yükünde ikisi **mertebelerce** ayrışıyor. Üstüne, ölçüm yükünün
+///   mi doyuyor, sistem mi link'i kısıyor): duman yükünde `istek ≈ icerik + 2`
+///   (008'e kadar `kare + 2` diye ölçülmüştü; hareket kareleri `Waker`'a
+///   dokunmadığı için `kare` o ilişkiden koptu), ölçüm yükünde ikisi
+///   **mertebelerce** ayrışıyor. Üstüne, ölçüm yükünün
 ///   kendisi **aynı komut ve aynı derlemeyle** iki farklı rejim verdi: `kare`
 ///   bir koşuda onlarda, başka bir koşuda yüzlerde. En olası değişken pencere
 ///   görünürlüğü ama **doğrulanmadı** (bkz. [`IDLE_FRAME_LIMIT`]). Bir kare
@@ -848,10 +881,6 @@ struct Report {
     workload: Workload,
     /// Koşu boyunca istenen kare — çizilen değil.
     requests: u64,
-    /// Yerleşmemiş animasyon yüzünden çizilen kare. Bu phase'de hep `0`;
-    /// [`Counters`]'ta **değil**, çünkü kapı onu henüz sormuyor (soracağı yer
-    /// `.tasks/008-hareket-ve-imlec/phase-3.md`).
-    motion: u64,
     /// Son çizilen kareyle deadline arasındaki süre; `None` → hiç kare
     /// çizilmedi (`sessiz=none`). Sayaç, kapı değil — eşiği ölçülmedi
     /// ([`bt_gpu::DisplayLink::quiet_since`]).
@@ -887,6 +916,7 @@ impl Report {
             cells,
             glyphs,
             rules,
+            motion,
         } = self.counters;
         let (used, total) = self.atlas;
         // `profil=` kapı kapalıyken de basılıyor: `make duman` **debug**
@@ -908,7 +938,6 @@ yuva={used}/{total} yuk={workload} istek={requests} icerik={content} \
 hareket={motion} sessiz={quiet} kapanis={teardown} profil={profile}",
             workload = self.workload.token(),
             requests = self.requests,
-            motion = self.motion,
             // **`sessiz=0` değil:** sıfır, "deadline anında kare akıyordu"
             // demek ve hiç kare çizilmemiş bir koşuyla karışırdı — `ornek=off`
             // ile aynı kural, uydurulmuş bir sayı yerine yokluğun kendi
@@ -1010,6 +1039,21 @@ enum Verdict {
     ExcessFrames {
         limit: u64,
     },
+    /// Deadline'da yerleşmemiş bir animasyon vardı: durma koşulu bozulmuş.
+    ///
+    /// [`ExcessFrames`](Verdict::ExcessFrames)'in **tamamlayıcısı**, kopyası
+    /// değil: o, sınırı aşacak kadar hızlı akan kareyi görüyor ve üç saniyelik
+    /// bir koşuda ancak ~3 Hz'in üstünü yakalıyor; bu ise hızdan **bağımsız**.
+    /// Durma koşulu unutulmuş 0,2 Hz'lik bir animasyon hiçbir kare sınırını
+    /// aşmaz ama deadline'da hâlâ yerleşmemiş olur ve pil sözleşmesini tam da
+    /// o ihlal eder.
+    ///
+    /// Yalnız [`Workload::Smoke`]'ta soruluyor: ölçüm yükü deadline'a kadar
+    /// çıktı akıtıyor, yani son satırla birlikte imleç hedef değiştiriyor ve
+    /// deadline yayın ortasına düşüyor. O kola bağlansaydı her ölçüm koşusu
+    /// kod doğruyken kırmızı düşerdi — `ExcessFrames`'in aynı kolda muaf
+    /// olmasının gerekçesiyle aynı.
+    MotionUnsettled,
     /// Kapanış yolunda **panik** oldu. Sayaçlar yerinde olabilir ama koşu
     /// yeşil geçemez: projenin "PTY ve ayrıştırma yolunda panik yok" kuralı
     /// ihlal edilmiş demektir ve `kapanis=` jetonunu **hiç kimse okumasa**
@@ -1029,17 +1073,29 @@ enum Verdict {
 /// Karar [`AppDelegate::report_and_exit`]'in gövdesinde kalsaydı sınırın
 /// yönünü (8 mi 180 mi, `Load` muaf mı) yalnız `make duman` bilirdi ve hiçbir
 /// sınamada yazılı olmazdı.
-fn verdict(counters: Counters, workload: Workload, teardown: Option<Teardown>) -> Verdict {
+fn verdict(
+    counters: Counters,
+    workload: Workload,
+    teardown: Option<Teardown>,
+    motion: MotionState,
+) -> Verdict {
     let Counters {
         frames: n,
         content: c,
         cells: k,
         glyphs: g,
         rules: r,
+        motion: m,
     } = counters;
-    // Panik **sayaçlardan önce** sorulmuyor: eksik bir sayaç daha temel bir
-    // arıza ve okuyanı önce oraya göndermek doğru. Ama sayaçlar yerindeyse
-    // panik yeşile dönüşemez.
+    // Panik **en sonda** soruluyor ve bu kolların sırası bir tanı tercihi,
+    // kapı kararı değil: hangi kol seçilirse seçilsin koşu kırmızı ve çıkış 1.
+    // Sıra "daha temel arıza önce" diye kuruldu — eksik sayaç (bir halka hiç
+    // çalışmadı) > akan kare > yerleşmeyen animasyon > kapanış paniği. Panik
+    // en sonda, çünkü ötekiler koşunun **ölçtüğü** şeyin bozulduğunu söylüyor;
+    // panik koşu bittikten sonraki yolu. İkisi birden olduğunda satır yalnız
+    // ilkini yazıyor, ama `kapanis=` jetonu zaten ikincisini taşıyor —
+    // `motion_and_panic_report_the_more_fundamental_fault` bu sırayı çiviliyor.
+    // Ters çevirmek `ExcessFrames`'in bugünkü sırasını da bozardı.
     let panicked = match teardown {
         Some(Teardown::ReaderPanicked) => Some("okuyucu thread"),
         Some(Teardown::Panicked) => Some("kapanış thread'i"),
@@ -1068,14 +1124,21 @@ fn verdict(counters: Counters, workload: Workload, teardown: Option<Teardown>) -
         // akıyor mu" sorusunu ise çizilmeye karar verilen kare — sonraki
         // phase'in hareket kareleri `kare`'yi meşru olarak şişirecek.
         Workload::Smoke => {
-            if n == 0 || k == 0 || g == 0 || r == 0 {
+            // `hareket` beşinci gereklilik ve ötekilerle aynı sınıfta: duman
+            // reçetesinde bir imleç hareketi var (`bt_core::smoke_shell`),
+            // yani sıfır "animasyon yolu hiç koşmadı" demek. Yerleşme sorusu
+            // ondan **sonra**: hiç koşmamış bir animasyon zaten yerleşiktir
+            // ve okuyanı yanlış arızaya göndermemek gerek.
+            if n == 0 || k == 0 || g == 0 || r == 0 || m == 0 {
                 Verdict::MissingCounter {
-                    required: "dördü de >0 olmalı",
+                    required: "beşi de >0 olmalı",
                 }
             } else if c > IDLE_FRAME_LIMIT {
                 Verdict::ExcessFrames {
                     limit: IDLE_FRAME_LIMIT,
                 }
+            } else if motion == MotionState::Unsettled {
+                Verdict::MotionUnsettled
             } else if let Some(which) = panicked {
                 Verdict::ShutdownPanicked { which }
             } else {
@@ -1663,6 +1726,16 @@ impl AppDelegate {
             cells: k,
             glyphs: g,
             rules: r,
+            motion: link.map_or(0, DisplayLink::motion_frames),
+        };
+        // Yerleşme bir **sayı değil durum**, o yüzden `Counters`'ın dışında.
+        // Link yoksa (oturum hiç doğmadı) bekleyen animasyon da yok: sayaç
+        // yarısı (`hareket=0`) zaten `MissingCounter` veriyor ve okuyanı
+        // "animasyon durmadı" diye yanlış arızaya göndermemek gerek.
+        let motion = if link.is_none_or(DisplayLink::motion_settled) {
+            MotionState::Settled
+        } else {
+            MotionState::Unsettled
         };
         // Beşinci jeton `yuva=U/T` bir kapı değil, bir **sayaç**: atlasın kaç
         // yuvasının dolduğunu söylüyor ve `/measure` doluluk oranını ondan
@@ -1676,7 +1749,6 @@ impl AppDelegate {
             atlas: renderer.atlas_occupancy(),
             workload: run.workload,
             requests: link.map_or(0, DisplayLink::requests),
-            motion: link.map_or(0, DisplayLink::motion_frames),
             quiet,
             teardown,
             // Kapı kapalıysa defter hiç doğmadı; `Option` bunu taşıyor ve
@@ -1688,12 +1760,12 @@ impl AppDelegate {
         // biçiminde değil, yoksa `kare=` arayan bir CI adımı düşen koşudan
         // kare sayısı okurdu.
         let secs = run.seconds;
-        match verdict(counters, run.workload, teardown) {
+        match verdict(counters, run.workload, teardown, motion) {
             Verdict::Pass => {
                 println!("{}", report.token_line());
                 std::process::exit(0);
             }
-            // Ayrı ileti, çünkü ayrı arıza: burada dört sayacın dördü de
+            // Ayrı ileti, çünkü ayrı arıza: burada beş sayacın beşi de
             // yerinde ve okuyanı sıfır aramaya göndermek zaman kaybettirirdi.
             // Sınırı aşan sayı `icerik`, ama satır `kare` ile `istek`'i de
             // söylüyor: üçü birlikte okunduğunda arıza "hasar akıyor" mu
@@ -1705,7 +1777,15 @@ impl AppDelegate {
                 c = counters.content,
             ),
             Verdict::MissingCounter { required } => eprintln!(
-                "bateri: {secs} saniyelik koşuda çizilen kare {n}, üretilen hücre {k}, çizilen glif {g}, çizilen kural {r} ({required})"
+                "bateri: {secs} saniyelik koşuda çizilen kare {n}, üretilen hücre {k}, çizilen glif {g}, çizilen kural {r}, hareket karesi {m} ({required})",
+                m = counters.motion,
+            ),
+            // Durma koşulu bozuldu. Sayaçlar yerinde ve kare sınırı aşılmamış
+            // olabilir — yavaş bir animasyon ikisini de geçer; kırmızıyı
+            // düşüren şey deadline'da hâlâ uçuşta olması.
+            Verdict::MotionUnsettled => eprintln!(
+                "bateri: {secs} saniyelik koşunun sonunda animasyon hâlâ yerleşmemişti — bir durma koşulu bozuk (çizilen hareket karesi {m})",
+                m = counters.motion,
             ),
             // Sayaçlar yerinde ama kapanış yolunda panik var: jeton satırı
             // basılmıyor ki `kare=` arayan bir CI adımı bu koşuyu ölçüm
@@ -1787,7 +1867,6 @@ mod tests {
             atlas: (13, 2048),
             workload,
             requests: 4,
-            motion: 0,
             quiet: Some(Duration::from_millis(2950)),
             teardown: Some(Teardown::Clean),
             measured: None,
@@ -1801,6 +1880,9 @@ mod tests {
             cells: 8,
             glyphs: 6,
             rules: 15,
+            // Reçetedeki imleç hareketinin izi; sıfır olsaydı kapı
+            // `MissingCounter` derdi (bkz. `Counters::motion`).
+            motion: 3,
         }
     }
 
@@ -1838,10 +1920,8 @@ mod tests {
         assert!(line.ends_with(" pipeline=ok"), "{line}");
 
         // Üç yeni anahtar da **kalıcı**: sözleşme bugünden sonra onları da
-        // "silinmez" tarafına alıyor. `hareket=0` bu phase'de kanıtlanabilir
-        // bir sıfır — artıran yol henüz yok — ve sonraki setin kırmızı
-        // düşürebileceği tek yer burası.
-        for token in ["icerik=1", "hareket=0", "sessiz=2950.00ms"] {
+        // "silinmez" tarafına alıyor.
+        for token in ["icerik=1", "hareket=3", "sessiz=2950.00ms"] {
             assert!(line.contains(token), "{token} yok: {line}");
         }
 
@@ -1860,6 +1940,7 @@ mod tests {
                 cells: 0,
                 glyphs: 12,
                 rules: 0,
+                motion: 0,
             },
             Workload::Load,
         )
@@ -1945,10 +2026,14 @@ mod tests {
             cells,
             glyphs,
             rules,
+            // Sağlıklı bir duman koşusunun izi; bu sınamanın sorduğu şey
+            // `icerik` sınırı, hareketin kendi kapısı aşağıda.
+            motion: 3,
         };
         let clean = Some(Teardown::Clean);
-        let smoke = |n, k, g, r| verdict(counters(n, k, g, r), Workload::Smoke, clean);
-        let load = |n, k, g, r| verdict(counters(n, k, g, r), Workload::Load, clean);
+        let settled = MotionState::Settled;
+        let smoke = |n, k, g, r| verdict(counters(n, k, g, r), Workload::Smoke, clean, settled);
+        let load = |n, k, g, r| verdict(counters(n, k, g, r), Workload::Load, clean, settled);
         let excess = Verdict::ExcessFrames {
             limit: IDLE_FRAME_LIMIT,
         };
@@ -1965,9 +2050,11 @@ mod tests {
                     cells: 8,
                     glyphs: 6,
                     rules: 15,
+                    motion: 3,
                 },
                 Workload::Smoke,
                 clean,
+                settled,
             )
         };
         assert_eq!(mixed(200, 1), Verdict::Pass, "hareket karesi kapıya girmez");
@@ -2008,7 +2095,7 @@ mod tests {
         assert_eq!(
             smoke(200, 0, 6, 15),
             Verdict::MissingCounter {
-                required: "dördü de >0 olmalı"
+                required: "beşi de >0 olmalı"
             }
         );
 
@@ -2016,15 +2103,131 @@ mod tests {
         // `MissingCounter` olmalı, `ExcessFrames` değil: düşen koşu okuyanı
         // doğru arızaya göndermeli.
         for (got, required) in [
-            (smoke(0, 8, 6, 15), "dördü de >0 olmalı"),
-            (smoke(1, 0, 6, 15), "dördü de >0 olmalı"),
-            (smoke(1, 8, 0, 15), "dördü de >0 olmalı"),
-            (smoke(1, 8, 6, 0), "dördü de >0 olmalı"),
+            (smoke(0, 8, 6, 15), "beşi de >0 olmalı"),
+            (smoke(1, 0, 6, 15), "beşi de >0 olmalı"),
+            (smoke(1, 8, 0, 15), "beşi de >0 olmalı"),
+            (smoke(1, 8, 6, 0), "beşi de >0 olmalı"),
             (load(0, 0, 1836, 0), "kare ve glif >0 olmalı"),
             (load(3, 0, 0, 0), "kare ve glif >0 olmalı"),
         ] {
             assert_eq!(got, Verdict::MissingCounter { required });
         }
+    }
+
+    #[test]
+    fn an_unsettled_animation_fails_the_gate() {
+        // Kapının **ölçüm istemeyen** yarısı ve `IDLE_FRAME_LIMIT`'in
+        // göremediği sızıntı sınıfı: sayaçların hepsi yerinde, kare sınırı
+        // aşılmamış — yavaş bir animasyon ikisini de geçer — ama deadline'da
+        // hâlâ uçuşta. Phase-3'ün kabulündeki "geçici mutasyon: `settled` hep
+        // `false`" senaryosunun saf hâli.
+        let good = Counters {
+            frames: 1,
+            content: 1,
+            cells: 8,
+            glyphs: 6,
+            rules: 15,
+            motion: 3,
+        };
+        let clean = Some(Teardown::Clean);
+        assert_eq!(
+            verdict(good, Workload::Smoke, clean, MotionState::Unsettled),
+            Verdict::MotionUnsettled
+        );
+        assert_eq!(
+            verdict(good, Workload::Smoke, clean, MotionState::Settled),
+            Verdict::Pass
+        );
+
+        // **Ölçüm yükü muaf**: `Load` deadline'a kadar çıktı akıtıyor, yani
+        // son satırla birlikte imleç hedef değiştiriyor ve deadline yayın
+        // ortasına düşüyor. Bağlansaydı her ölçüm koşusu kod doğruyken
+        // kırmızı düşerdi.
+        assert_eq!(
+            verdict(
+                Counters {
+                    cells: 0,
+                    rules: 0,
+                    motion: 0,
+                    ..good
+                },
+                Workload::Load,
+                clean,
+                MotionState::Unsettled,
+            ),
+            Verdict::Pass
+        );
+
+        // Hiç hareket karesi çizilmemişse arıza **yerleşmeme değil eksik
+        // sayaç**: duman reçetesinde bir imleç hareketi var, yani sıfır
+        // "animasyon yolu hiç koşmadı" demek ve okuyanı oraya göndermeli.
+        assert_eq!(
+            verdict(
+                Counters { motion: 0, ..good },
+                Workload::Smoke,
+                clean,
+                MotionState::Settled,
+            ),
+            Verdict::MissingCounter {
+                required: "beşi de >0 olmalı"
+            }
+        );
+
+        // Kare sınırı yerleşmeden **önce** geliyor: ikisi birden bozuksa
+        // okuyan taraf önce akan kareyi görsün.
+        assert_eq!(
+            verdict(
+                Counters {
+                    content: IDLE_FRAME_LIMIT + 1,
+                    ..good
+                },
+                Workload::Smoke,
+                clean,
+                MotionState::Unsettled,
+            ),
+            Verdict::ExcessFrames {
+                limit: IDLE_FRAME_LIMIT
+            }
+        );
+    }
+
+    #[test]
+    fn motion_and_panic_report_the_more_fundamental_fault() {
+        // Kolların sırası bir **tanı** tercihi: iki arıza birdenken koşu her
+        // hâlükârda kırmızı, ama satır hangisini yazacak? `/code-review`
+        // bulgusu bu kombinasyonun hiç sınanmamış olmasıydı.
+        //
+        // Yerleşmeme koşunun **ölçtüğü** şeyin bozulduğunu söylüyor, panik
+        // koşu bittikten sonraki yolu; okuyanı önce ilkine göndermek doğru ve
+        // `kapanis=` jetonu ikincisini zaten taşıyor. Ters çevirmek
+        // `ExcessFrames`'in bugünkü sırasını da bozardı.
+        let good = Counters {
+            frames: 1,
+            content: 1,
+            cells: 8,
+            glyphs: 6,
+            rules: 15,
+            motion: 3,
+        };
+        assert_eq!(
+            verdict(
+                good,
+                Workload::Smoke,
+                Some(Teardown::Panicked),
+                MotionState::Unsettled,
+            ),
+            Verdict::MotionUnsettled
+        );
+        // Panik tek başınayken yine görülüyor: sıra onu **yutmuyor**.
+        assert!(matches!(
+            verdict(
+                good,
+                Workload::Smoke,
+                Some(Teardown::Panicked),
+                MotionState::Settled,
+            ),
+            Verdict::ShutdownPanicked { .. }
+        ));
     }
 
     #[test]
@@ -2039,18 +2242,20 @@ mod tests {
             cells: 8,
             glyphs: 6,
             rules: 15,
+            motion: 3,
         };
+        let settled = MotionState::Settled;
         for teardown in [Teardown::ReaderPanicked, Teardown::Panicked] {
             assert!(
                 matches!(
-                    verdict(good, Workload::Smoke, Some(teardown)),
+                    verdict(good, Workload::Smoke, Some(teardown), settled),
                     Verdict::ShutdownPanicked { .. }
                 ),
                 "{teardown:?} yeşil geçemez"
             );
             assert!(
                 matches!(
-                    verdict(good, Workload::Load, Some(teardown)),
+                    verdict(good, Workload::Load, Some(teardown), settled),
                     Verdict::ShutdownPanicked { .. }
                 ),
                 "{teardown:?} ölçüm yükünde de yeşil geçemez"
@@ -2067,7 +2272,10 @@ mod tests {
             Some(Teardown::AlreadyDone),
             None,
         ] {
-            assert_eq!(verdict(good, Workload::Smoke, teardown), Verdict::Pass);
+            assert_eq!(
+                verdict(good, Workload::Smoke, teardown, settled),
+                Verdict::Pass
+            );
         }
 
         // Eksik sayaç panikten **önce** geliyor: okuyanı önce daha temel
@@ -2076,10 +2284,11 @@ mod tests {
             verdict(
                 Counters { frames: 0, ..good },
                 Workload::Smoke,
-                Some(Teardown::Panicked)
+                Some(Teardown::Panicked),
+                settled,
             ),
             Verdict::MissingCounter {
-                required: "dördü de >0 olmalı"
+                required: "beşi de >0 olmalı"
             }
         );
     }

@@ -52,8 +52,17 @@ test:
 # atlas yuvası sayısına bakar:
 # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C \
 #   hareket=M sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
-# İlk dördünden (kare, hucre, glif, kural) BİRİ 0 ise kırmızı; `yuva`, `yuk`,
-# `istek`, `hareket`, `sessiz` ve `profil` kapı değil, sayaç ve etiket.
+# İlk dördünden (kare, hucre, glif, kural) ya da `hareket`ten BİRİ 0 ise
+# kırmızı; `yuva`, `yuk`, `istek`, `sessiz` ve `profil` kapı değil, sayaç ve
+# etiket. `hareket` 008'de sayaçlıktan gerekliliğe geçti: duman reçetesinde bir
+# imleç hareketi var (bt-core smoke_shell), yani 0 "animasyon yolu hiç koşmadı"
+# demek. Gizli bağı da orada yazılı — gereklilik varsayılan imleç stilinin
+# ANIMASYONLU olmasına dayanıyor.
+# İKİNCİ ANİMASYON KAPISI JETONDA GÖRÜNMEZ: deadline'da yerleşmemiş bir
+# animasyon varsa koşu kırmızı düşer (app.rs Verdict::MotionUnsettled) ve satır
+# hiç basılmaz — karar `verdict`te, çünkü jeton satırı yalnız yeşil koşuda
+# basılıyor. Hızdan bağımsız olması bütün değeri: `icerik` sınırı ancak
+# yeterince hızlı bir sızıntıyı görüyor.
 # ÜST SINIR `icerik`te, `kare`de DEĞİL (bkz. app.rs IDLE_FRAME_LIMIT): boşta
 # sıfır kareyi bozan değişikliğin belirtisi eksik kare değil FAZLA karedir, ama
 # meşru bir animasyon da `kare`yi şişirir — sınır bu yüzden çizilmeye KARAR
