@@ -81,6 +81,13 @@ use crate::{child, settings};
 /// genişletti; sınırı oynatacak bir gözlem yok — düşürmek 005'in sağlıklı
 /// `4`'ünü yeniden ölçmeden geçersiz saymak olurdu.
 ///
+/// - **008 phase-6 (2026-09-16, debug + release paket):** operand `kare`'den
+///   `icerik`'e geçtikten sonraki **ilk** ölçüm, yani üstteki iki satırın
+///   sayıları artık başka bir sayacın. Otuz sağlıklı koşuda `icerik` en çok
+///   `3`, bozuk kolda (koşulsuz `wake()`) en az `357`. Kural iki uçta da
+///   sağlanıyor ve sınırı **oynatan bir gözlem yok**: `8`, `3`'ün iki
+///   katından (`6`) büyük ve `357`'nin çok altında.
+///
 /// **Kapıya bağlanan profil debug**, çünkü gözetimsiz koşan tek bağlam
 /// `make duman` ve o debug derliyor. Release paketi de aynı sınıra tabi (kapı
 /// profilden bağımsız) ve dağılımı ayrı ölçüldü; aynı sayı ikisini de taşıyor.
@@ -106,16 +113,18 @@ use crate::{child, settings};
 /// kuruyor ve ikisi de buradan bağımsız: (a) deadline'da **yerleşmemiş**
 /// animasyon varsa koşu kırmızı — hızdan bağımsız, ölçüm istemez, ama yalnız
 /// hareket altyapısından geçen animasyonları görür; (b) son kareyle deadline
-/// arasındaki sessizlik (`sessiz=` jetonu) ölçülmüş bir alt sınırla kapıya
-/// bağlanır — altyapıyı atlayan sızıntıyı da görür. İkincisi ölçüm bekliyor
-/// ve o inene kadar `sessiz=` bir **sayaç**
-/// (`.tasks/008-hareket-ve-imlec/phase-6.md`).
+/// arasındaki sessizlik ([`QUIET_FLOOR`]) — altyapıyı atlayan sızıntıyı da
+/// görür ve **ölçüldü** (phase-6): kapının en duyarlı katı artık o, çünkü
+/// periyodu 870 ms'den kısa her sızıntıyı yakalıyor, bu sayı ise ancak
+/// 3 Hz'in üstünü.
 ///
-/// **Sağlıklı koşudaki 1↔2 oynamasının mekanizması ölçülmedi.** Kare talebi
-/// (`istek=`) iki ölçümde de **sabit** kaldı (2–3), yani fazladan kare
-/// fazladan **talepten** gelmiyor — geometri/örtülme kancaları olsaydı
-/// `istek` de artardı. 006'da oynama profile göre ayrıştı (debug çoğunlukla
-/// `1`, release paket çoğunlukla `2`) ve talep yine ayrışmadı. Geriye
+/// **Sağlıklı koşudaki oynamanın mekanizması ölçülmedi.** Kare talebi
+/// (`istek=`) üç ölçümde de **sabit** kaldı (006'da 2–3, 008'de 4), yani
+/// fazladan kare fazladan **talepten** gelmiyor — geometri/örtülme kancaları
+/// olsaydı `istek` de artardı. Oynama üç ölçümde de profile göre ayrıştı ama
+/// yönü 008'de **döndü**: 006'da `kare` debug'da çoğunlukla `1`, release
+/// pakette `2` idi; 008'de `icerik` debug'da çoğunlukla `3`, release pakette
+/// `2`. Talep yine ayrışmadı. Geriye
 /// taleplerin birleşip birleşmemesi kalıyor (açılış karesi shell'in ilk
 /// baytlarından önce çizildiyse ikinci bir kare gerekir; profil farkı onu
 /// `acilis=` ile sınayabilir, sınanmadı) ama bu bir **hipotez**, ölçüm değil.
@@ -143,16 +152,52 @@ use crate::{child, settings};
 /// **Ölçülen `istek ≈ kare + 2` ilişkisi 008'de geçersizleşti** ve cümlenin
 /// düzelttiği şey bir sayı değil bir mekanizma: hareket kareleri `Waker`'a
 /// hiç dokunmuyor (`bt_gpu::link` modül başlığı), yani `kare`'yi şişirirken
-/// `istek`'i şişirmiyorlar. Bugünkü sağlıklı duman koşusu bunu satırın
-/// kendisinde gösteriyor — `kare=26` iken `istek=4`. İlişki artık
-/// `istek ≈ icerik + 2`; **ölçülmüş bir iddia değil**, tek koşuluk bir
-/// gözlem ve yeniden ölçümü phase-6'nın işi.
+/// `istek`'i şişirmiyorlar. İlişkinin yeni hâli **ölçüldü** (phase-6, otuz
+/// sağlıklı koşu): `istek=4` sabit, `icerik` `2`–`3`, yani `istek ≈ icerik +
+/// 1..2` — `kare` ise 27–30, ondan tamamen kopmuş durumda.
 /// Ölçüm yükünde `istek` ile `kare` üç mertebe ayrışıyor (bkz. `bt_gpu`'nun
 /// `requests` sayacı); oran olarak bir kapı kurulabilir ama o ölçülmedi.
 ///
 /// [`Workload::Load`] yükünde üst sınır **yok** — orada kare akışı işin
 /// kendisi.
 const IDLE_FRAME_LIMIT: u64 = 8;
+
+/// Duman koşusunun sonunda beklenen **en az** sessizlik: son çizilen kareyle
+/// deadline arası (`sessiz=` jetonu). Altı kırmızı, `sessiz=none` de kırmızı.
+///
+/// [`IDLE_FRAME_LIMIT`]'in **tamamlayıcısı, kopyası değil.** O, üç saniyede
+/// sekizden fazla içerik karesi çizen bir sızıntıyı görüyor, yani ancak ~3
+/// Hz'in üstünü; bu ise **periyodu** bu değerden kısa olan her sızıntıyı
+/// görüyor (~1,15 Hz'in üstü). Ölçülen boşluk tam da buydu: yarım saniyelik
+/// bir sızıntı `icerik=8` ile sınırı **aşmadan** geçiyor ve o koşu bugün
+/// yeşil düşüyordu (`docs/OLCUMLER.md` → `## Boşta kare`, "yavaş sızıntı").
+///
+/// **Kuralın yönü bu jetonda ters:** sağlıklı koşuda `sessiz` büyük, bozuk
+/// koşuda küçük. Taban bu yüzden "en düşük sağlıklı gözlemin en çok yarısı
+/// **ve** en yüksek bozuk gözlemin üstünde" ve aralığın **en büyük** ucundan
+/// seçiliyor — ortadan seçilen bir sayı kapıyı yavaş sızıntıya körleştirirdi.
+/// Türetme (2026-09-16, otuz sağlıklı koşu): en düşük sağlıklı `1745,95 ms`
+/// → tavan `872,97 ms`; en yüksek bozuk `129,25 ms`. `870` o aralığın en
+/// büyük on milisaniyelik adımı.
+///
+/// **Üç sayı birbirine bağlı ve gerekçeleri aynı blokta**
+/// (`docs/OLCUMLER.md` → `## Boşta kare`): `BT_RUN_SECONDS`'ın 3'ü,
+/// [`bt_core::smoke_shell`]'in 1 saniyelik uykusu ve bu taban. Sessizlik
+/// `koşu süresi − (uyku + yerleşme)` kadar, yani **ikisinden biri oynarsa bu
+/// sayı da oynamak zorunda**: `BT_RUN_SECONDS=2` ile kuyruk ~0,75 saniyeye
+/// iner ve kapı kod doğruyken düşer. Üçü üç dosyaya dağılırsa biri
+/// oynadığında kapı sessizce kırılganlaşır.
+///
+/// **Bilinen yanlış pozitif** ([`IDLE_FRAME_LIMIT`]'inkiyle aynı kök):
+/// koşunun son `QUIET_FLOOR`'unda pencereyi sürüklemek, örtüp açmak ya da
+/// ekranı uyandırmak meşru bir kare doğurur ve kuyruğu sıfırlar. Kalıcı çare
+/// aynı: geometri kaynaklı kareleri sayaç dışında tutmak (kayıtlı borç,
+/// `docs/YOL-HARITASI.md`).
+///
+/// Yalnız [`Workload::Smoke`]'ta soruluyor: ölçüm yükü deadline'a kadar çıktı
+/// akıtıyor, yani orada sessizlik sıfıra yakın olmak **zorunda**
+/// ([`Verdict::MotionUnsettled`]'ın aynı kolda muaf olmasının gerekçesiyle).
+const QUIET_FLOOR: Duration = Duration::from_millis(870);
 
 /// Kullanıcının dünyasına açılan girişlerin **tek** dalı.
 ///
@@ -746,7 +791,9 @@ define_class!(
             // bekliyor ve ölçüm koşularının dörtte birinde gerçekten
             // bekliyor (`kapanis=abandoned`). Sonra okunsaydı `sessiz=`
             // "son kare → deadline" değil "son kare → kapanışın sonu" olurdu
-            // ve phase-6'nın dağılımına kapanış değişkenliği karışırdı.
+            // ve kapının tabanına kapanış değişkenliği karışırdı
+            // ([`QUIET_FLOOR`] ölçülen dağılımın yarısında duruyor; yarım
+            // saniyelik bir kapanış beklemesi o payı tek başına yerdi).
             let quiet = self.ivars().link.get().and_then(DisplayLink::quiet_since);
             let teardown = self.shutdown();
             // Zamanlayıcı yalnız `run` doluyken kuruldu; `if let` burada bir
@@ -862,9 +909,10 @@ enum MotionState {
 ///   kapanış maddesinde.
 /// - **Açık kalem (cevaplanmamış soru) — `kare` ile `istek` iki yükte apayrı
 ///   davranıyor** ve mekanizması **ölçülmedi** (kapı mı yutuyor, ana thread
-///   mi doyuyor, sistem mi link'i kısıyor): duman yükünde `istek ≈ icerik + 2`
-///   (008'e kadar `kare + 2` diye ölçülmüştü; hareket kareleri `Waker`'a
-///   dokunmadığı için `kare` o ilişkiden koptu), ölçüm yükünde ikisi
+///   mi doyuyor, sistem mi link'i kısıyor): duman yükünde
+///   `istek ≈ icerik + 1..2` (2026-09-16 ölçümü; 008'e kadar `kare + 2` diye
+///   ölçülmüştü, hareket kareleri `Waker`'a dokunmadığı için `kare` o
+///   ilişkiden koptu), ölçüm yükünde ikisi
 ///   **mertebelerce** ayrışıyor. Üstüne, ölçüm yükünün
 ///   kendisi **aynı komut ve aynı derlemeyle** iki farklı rejim verdi: `kare`
 ///   bir koşuda onlarda, başka bir koşuda yüzlerde. En olası değişken pencere
@@ -935,8 +983,8 @@ struct Report {
     /// Koşu boyunca istenen kare — çizilen değil.
     requests: u64,
     /// Son çizilen kareyle deadline arasındaki süre; `None` → hiç kare
-    /// çizilmedi (`sessiz=none`). Sayaç, kapı değil — eşiği ölçülmedi
-    /// ([`bt_gpu::DisplayLink::quiet_since`]).
+    /// çizilmedi (`sessiz=none`). **Kapı** ([`QUIET_FLOOR`]): duman yükünde
+    /// tabanın altı da `None` de kırmızı.
     quiet: Option<Duration>,
     /// Kapanışın sonucu; `None` → oturum hiç doğmamıştı.
     teardown: Option<Teardown>,
@@ -1050,6 +1098,24 @@ fn ms(value: Duration) -> String {
     format!("{:.2}ms", value.as_secs_f64() * 1e3)
 }
 
+/// Sessizliğin **tanı** hâli: jeton değil, cümlenin içinde okunan bir öbek.
+///
+/// Jeton satırı yalnız yeşil koşuda basılıyor ([`Report::token_line`]), yani
+/// düşen bir koşunun `sessiz`i hiçbir yerde görünmüyordu. `sessiz ≥ T` kapısı
+/// ise **iki** dağılımdan türüyor ve ikincisi tam olarak düşen koşuların:
+/// kasıtlı bozulmuş bir kol `sessiz`ini basmasaydı `T` tek yandan türetilir,
+/// yani alt sınırı ölçülmemiş bir sayı olurdu (008 phase-6).
+///
+/// Ayrı fonksiyon olmasının sebebi jeton sözleşmesi: satırın `sessiz=`'i
+/// makine tarafından okunuyor ve bu öbek ona **benzememeli** — `sessiz=`
+/// arayan bir CI adımı düşen koşudan sayı okumasın.
+fn quiet_phrase(quiet: Option<Duration>) -> String {
+    quiet.map_or_else(
+        || "hiç çizilen kare yok".to_owned(),
+        |q| format!("son kareden sonra {} sessizlik", ms(q)),
+    )
+}
+
 /// `kapanis=` jetonunun değeri.
 ///
 /// Sınır dolan koşu ve panikle biten okuyucu bugüne kadar **yeşil bir
@@ -1107,6 +1173,17 @@ enum Verdict {
     /// kod doğruyken kırmızı düşerdi — `ExcessFrames`'in aynı kolda muaf
     /// olmasının gerekçesiyle aynı.
     MotionUnsettled,
+    /// Son kareyle deadline arasındaki sessizlik ölçülmüş tabanın altında —
+    /// ya da hiç kare çizilmedi ([`QUIET_FLOOR`]).
+    ///
+    /// Kapının **son katı**: yukarıdaki iki kol sızıntıyı ya hızından
+    /// (`ExcessFrames`) ya da hareket altyapısından (`MotionUnsettled`)
+    /// tanıyor; bu ise ikisini de atlayan bir yolu — altyapıya uğramadan,
+    /// sınırı aşmayacak kadar seyrek kare isteyen kodu — yalnız bıraktığı
+    /// izden tanıyor. Bu yüzden en sonda: daha temel arıza önce.
+    QuietTooShort {
+        floor: Duration,
+    },
     /// Kapanış yolunda **panik** oldu. Sayaçlar yerinde olabilir ama koşu
     /// yeşil geçemez: projenin "PTY ve ayrıştırma yolunda panik yok" kuralı
     /// ihlal edilmiş demektir ve `kapanis=` jetonunu **hiç kimse okumasa**
@@ -1131,6 +1208,7 @@ fn verdict(
     workload: Workload,
     teardown: Option<Teardown>,
     motion: MotionState,
+    quiet: Option<Duration>,
 ) -> Verdict {
     let Counters {
         frames: n,
@@ -1192,6 +1270,13 @@ fn verdict(
                 }
             } else if motion == MotionState::Unsettled {
                 Verdict::MotionUnsettled
+            } else if quiet.is_none_or(|q| q < QUIET_FLOOR) {
+                // `None` de buraya düşüyor ve ayrı bir kol **değil**: ikisi de
+                // "koşunun sonunda sessizlik yoktu" diyor ve ileti hangisi
+                // olduğunu `quiet_phrase` ile zaten söylüyor. Ayrı bir varyant
+                // kapıya ikinci bir karar eklemeden yalnız ikinci bir ad
+                // eklerdi.
+                Verdict::QuietTooShort { floor: QUIET_FLOOR }
             } else if let Some(which) = panicked {
                 Verdict::ShutdownPanicked { which }
             } else {
@@ -1896,7 +1981,7 @@ impl AppDelegate {
         // biçiminde değil, yoksa `kare=` arayan bir CI adımı düşen koşudan
         // kare sayısı okurdu.
         let secs = run.seconds;
-        match verdict(counters, run.workload, teardown, motion) {
+        match verdict(counters, run.workload, teardown, motion, quiet) {
             Verdict::Pass => {
                 println!("{}", report.token_line());
                 std::process::exit(0);
@@ -1908,19 +1993,36 @@ impl AppDelegate {
             // (üçü de yüksek) yoksa "hareket yerleşmiyor" mu (`kare` yüksek,
             // `icerik` değil) ayırt edilebiliyor.
             Verdict::ExcessFrames { limit } => eprintln!(
-                "bateri: boşta sıfır kare bozuldu — {secs} saniyelik koşuda {c} içerik karesi çizildi (toplam kare {n}, kare talebi {}), üst sınır {limit}",
+                "bateri: boşta sıfır kare bozuldu — {secs} saniyelik koşuda {c} içerik karesi çizildi (toplam kare {n}, kare talebi {}, {}), üst sınır {limit}",
                 report.requests,
+                quiet_phrase(report.quiet),
                 c = counters.content,
             ),
             Verdict::MissingCounter { required } => eprintln!(
-                "bateri: {secs} saniyelik koşuda çizilen kare {n}, üretilen hücre {k}, çizilen glif {g}, çizilen kural {r}, hareket karesi {m} ({required})",
+                "bateri: {secs} saniyelik koşuda çizilen kare {n}, içerik karesi {c}, üretilen hücre {k}, çizilen glif {g}, çizilen kural {r}, hareket karesi {m}, {} ({required})",
+                quiet_phrase(report.quiet),
+                c = counters.content,
                 m = counters.motion,
             ),
             // Durma koşulu bozuldu. Sayaçlar yerinde ve kare sınırı aşılmamış
             // olabilir — yavaş bir animasyon ikisini de geçer; kırmızıyı
             // düşüren şey deadline'da hâlâ uçuşta olması.
             Verdict::MotionUnsettled => eprintln!(
-                "bateri: {secs} saniyelik koşunun sonunda animasyon hâlâ yerleşmemişti — bir durma koşulu bozuk (çizilen hareket karesi {m})",
+                "bateri: {secs} saniyelik koşunun sonunda animasyon hâlâ yerleşmemişti — bir durma koşulu bozuk (çizilen hareket karesi {m}, {})",
+                quiet_phrase(report.quiet),
+                m = counters.motion,
+            ),
+            // Sızıntı ne sınırı aştı ne de hareket altyapısından geçti: geriye
+            // bıraktığı iz kaldı. İleti tabanı **ve** ölçüleni birlikte
+            // söylüyor, çünkü ikisi arasındaki fark sızıntının periyodunu
+            // veriyor — okuyan taraf "ne kadar sık kare istiyor" sorusunu
+            // satırdan yanıtlayabilsin.
+            Verdict::QuietTooShort { floor } => eprintln!(
+                "bateri: {secs} saniyelik koşunun sonunda kare akıyordu — {} (en az {} beklenir; içerik karesi {c}, hareket karesi {m}, kare talebi {})",
+                quiet_phrase(report.quiet),
+                ms(floor),
+                report.requests,
+                c = counters.content,
                 m = counters.motion,
             ),
             // Sayaçlar yerinde ama kapanış yolunda panik var: jeton satırı
@@ -1992,6 +2094,12 @@ impl AppDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sağlıklı bir duman koşusunun **ölçülen** kuyruğu (2026-09-16, otuz
+    /// koşunun en düşüğü: `1745,95 ms`). Kapıyı sormayan sınamalar bunu
+    /// veriyor ki `sessiz` kolu onların sorduğu şeyi gölgelemesin; kolun
+    /// kendi sınamaları aşağıda ve tabanı adıyla anıyor.
+    const HEALTHY_QUIET: Option<Duration> = Some(Duration::from_millis(1745));
 
     fn metrics(w: u16, h: u16) -> CellMetrics {
         CellMetrics::new(w, h).expect("sıfır olmayan hücre")
@@ -2092,13 +2200,25 @@ mod tests {
         //
         // Bu kol jeton satırında **erişilemez** — kare çizilmemişse `kare=0`
         // ve kapı `MissingCounter` diyor, yani satır hiç basılmıyor. Yine de
-        // sınanıyor: `Report` onu temsil edebiliyor ve phase-6 eşiği kapıya
-        // bağladığında ayırt edilmesi gereken ilk şey bu olacak.
+        // sınanıyor: `Report` onu temsil edebiliyor ve kapının `sessiz` kolu
+        // `None`'ı tabanın altıyla aynı sepete koyuyor
+        // (`a_short_tail_fails_the_gate`).
         let mut r = report(smoke_counters(), Workload::Smoke);
         r.quiet = None;
         let line = r.token_line();
         assert!(line.contains(" sessiz=none "), "{line}");
         assert!(!line.contains("sessiz=0"), "{line}");
+    }
+
+    #[test]
+    fn quiet_phrase_stays_out_of_the_token_contract() {
+        // Tanı öbeği düşen koşunun **tek** `sessiz` kaydı (jeton satırı yalnız
+        // yeşilde basılıyor), ama jeton gibi görünmemeli: `sessiz=` arayan bir
+        // okuyucu düşen koşudan sayı okumamalı.
+        let phrase = quiet_phrase(Some(Duration::from_millis(1745)));
+        assert!(phrase.contains("1745.00ms"), "{phrase}");
+        assert!(!phrase.contains("sessiz="), "{phrase}");
+        assert_eq!(quiet_phrase(None), "hiç çizilen kare yok");
     }
 
     #[test]
@@ -2168,8 +2288,24 @@ mod tests {
         };
         let clean = Some(Teardown::Clean);
         let settled = MotionState::Settled;
-        let smoke = |n, k, g, r| verdict(counters(n, k, g, r), Workload::Smoke, clean, settled);
-        let load = |n, k, g, r| verdict(counters(n, k, g, r), Workload::Load, clean, settled);
+        let smoke = |n, k, g, r| {
+            verdict(
+                counters(n, k, g, r),
+                Workload::Smoke,
+                clean,
+                settled,
+                HEALTHY_QUIET,
+            )
+        };
+        let load = |n, k, g, r| {
+            verdict(
+                counters(n, k, g, r),
+                Workload::Load,
+                clean,
+                settled,
+                HEALTHY_QUIET,
+            )
+        };
         let excess = Verdict::ExcessFrames {
             limit: IDLE_FRAME_LIMIT,
         };
@@ -2191,6 +2327,7 @@ mod tests {
                 Workload::Smoke,
                 clean,
                 settled,
+                HEALTHY_QUIET,
             )
         };
         assert_eq!(mixed(200, 1), Verdict::Pass, "hareket karesi kapıya girmez");
@@ -2267,11 +2404,23 @@ mod tests {
         };
         let clean = Some(Teardown::Clean);
         assert_eq!(
-            verdict(good, Workload::Smoke, clean, MotionState::Unsettled),
+            verdict(
+                good,
+                Workload::Smoke,
+                clean,
+                MotionState::Unsettled,
+                HEALTHY_QUIET
+            ),
             Verdict::MotionUnsettled
         );
         assert_eq!(
-            verdict(good, Workload::Smoke, clean, MotionState::Settled),
+            verdict(
+                good,
+                Workload::Smoke,
+                clean,
+                MotionState::Settled,
+                HEALTHY_QUIET
+            ),
             Verdict::Pass
         );
 
@@ -2290,6 +2439,7 @@ mod tests {
                 Workload::Load,
                 clean,
                 MotionState::Unsettled,
+                HEALTHY_QUIET,
             ),
             Verdict::Pass
         );
@@ -2303,6 +2453,7 @@ mod tests {
                 Workload::Smoke,
                 clean,
                 MotionState::Settled,
+                HEALTHY_QUIET,
             ),
             Verdict::MissingCounter {
                 required: "beşi de >0 olmalı"
@@ -2320,10 +2471,92 @@ mod tests {
                 Workload::Smoke,
                 clean,
                 MotionState::Unsettled,
+                HEALTHY_QUIET,
             ),
             Verdict::ExcessFrames {
                 limit: IDLE_FRAME_LIMIT
             }
+        );
+    }
+
+    #[test]
+    fn a_short_tail_fails_the_gate() {
+        // Kapının üçüncü katı ve tek ölçülmüş eşiği: sayaçlar yerinde, içerik
+        // karesi sınırın **altında**, animasyon yerleşmiş — ama son kareyle
+        // deadline arası kısa, yani koşunun sonunda hâlâ kare akıyordu.
+        // Ölçülen senaryosu yarım saniyelik sızıntı: `icerik=8` ile sınırı
+        // aşmıyor ve bu kol olmadan **yeşil** düşüyordu
+        // (`docs/OLCUMLER.md` → `## Boşta kare`).
+        let good = Counters {
+            frames: 30,
+            content: 3,
+            cells: 8,
+            glyphs: 6,
+            rules: 15,
+            motion: 27,
+        };
+        let clean = Some(Teardown::Clean);
+        let settled = MotionState::Settled;
+        let smoke = |quiet| verdict(good, Workload::Smoke, clean, settled, quiet);
+        let short = Verdict::QuietTooShort { floor: QUIET_FLOOR };
+
+        // Ölçülen yavaş sızıntının kuyruğu (en yükseği `129,25 ms`) ve
+        // ölçülen sağlıklı kuyruğun en düşüğü (`1745,95 ms`): kapı ikisinin
+        // arasından geçiyor ve iki dağılım da kendi tarafında kalıyor.
+        assert_eq!(smoke(Some(Duration::from_millis(130))), short);
+        assert_eq!(smoke(HEALTHY_QUIET), Verdict::Pass);
+        // Tabanın kendisi geçer, bir milisaniye altı düşer.
+        assert_eq!(smoke(Some(QUIET_FLOOR)), Verdict::Pass);
+        assert_eq!(smoke(Some(QUIET_FLOOR - Duration::from_millis(1))), short);
+        // `sessiz=none` uydurulmuş bir sıfır değil ama kapı için aynı yanıt:
+        // hiç kare çizilmemiş bir koşunun sessizliği de ölçülemez.
+        assert_eq!(smoke(None), short);
+
+        // **Ölçüm yükü muaf** ve gerekçesi `MotionUnsettled`'ınkiyle aynı:
+        // `Load` deadline'a kadar çıktı akıtıyor, yani orada sessizlik sıfıra
+        // yakın olmak zorunda. Bağlansaydı her ölçüm koşusu kırmızı düşerdi.
+        assert_eq!(
+            verdict(
+                Counters {
+                    cells: 0,
+                    rules: 0,
+                    motion: 0,
+                    ..good
+                },
+                Workload::Load,
+                clean,
+                settled,
+                Some(Duration::ZERO),
+            ),
+            Verdict::Pass
+        );
+
+        // Sıra: üçü de bozuksa satır en temel arızayı yazar. Sessizlik en
+        // sonda, çünkü ötekiler sızıntıyı **adıyla** tanıyor.
+        assert_eq!(
+            verdict(
+                Counters {
+                    content: IDLE_FRAME_LIMIT + 1,
+                    ..good
+                },
+                Workload::Smoke,
+                clean,
+                settled,
+                Some(Duration::ZERO),
+            ),
+            Verdict::ExcessFrames {
+                limit: IDLE_FRAME_LIMIT
+            }
+        );
+        assert_eq!(
+            verdict(
+                good,
+                Workload::Smoke,
+                clean,
+                MotionState::Unsettled,
+                Some(Duration::ZERO),
+            ),
+            Verdict::MotionUnsettled
         );
     }
 
@@ -2351,6 +2584,7 @@ mod tests {
                 Workload::Smoke,
                 Some(Teardown::Panicked),
                 MotionState::Unsettled,
+                HEALTHY_QUIET,
             ),
             Verdict::MotionUnsettled
         );
@@ -2361,6 +2595,7 @@ mod tests {
                 Workload::Smoke,
                 Some(Teardown::Panicked),
                 MotionState::Settled,
+                HEALTHY_QUIET,
             ),
             Verdict::ShutdownPanicked { .. }
         ));
@@ -2384,14 +2619,20 @@ mod tests {
         for teardown in [Teardown::ReaderPanicked, Teardown::Panicked] {
             assert!(
                 matches!(
-                    verdict(good, Workload::Smoke, Some(teardown), settled),
+                    verdict(
+                        good,
+                        Workload::Smoke,
+                        Some(teardown),
+                        settled,
+                        HEALTHY_QUIET
+                    ),
                     Verdict::ShutdownPanicked { .. }
                 ),
                 "{teardown:?} yeşil geçemez"
             );
             assert!(
                 matches!(
-                    verdict(good, Workload::Load, Some(teardown), settled),
+                    verdict(good, Workload::Load, Some(teardown), settled, HEALTHY_QUIET),
                     Verdict::ShutdownPanicked { .. }
                 ),
                 "{teardown:?} ölçüm yükünde de yeşil geçemez"
@@ -2409,7 +2650,7 @@ mod tests {
             None,
         ] {
             assert_eq!(
-                verdict(good, Workload::Smoke, teardown, settled),
+                verdict(good, Workload::Smoke, teardown, settled, HEALTHY_QUIET),
                 Verdict::Pass
             );
         }
@@ -2422,6 +2663,7 @@ mod tests {
                 Workload::Smoke,
                 Some(Teardown::Panicked),
                 settled,
+                HEALTHY_QUIET,
             ),
             Verdict::MissingCounter {
                 required: "beşi de >0 olmalı"

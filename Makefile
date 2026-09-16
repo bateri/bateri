@@ -53,7 +53,7 @@ test:
 # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C \
 #   hareket=M sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
 # İlk dördünden (kare, hucre, glif, kural) ya da `hareket`ten BİRİ 0 ise
-# kırmızı; `yuva`, `yuk`, `istek`, `sessiz` ve `profil` kapı değil, sayaç ve
+# kırmızı; `yuva`, `yuk`, `istek` ve `profil` kapı değil, sayaç ve
 # etiket. `hareket` 008'de sayaçlıktan gerekliliğe geçti: duman reçetesinde bir
 # imleç hareketi var (bt-core smoke_shell), yani 0 "animasyon yolu hiç koşmadı"
 # demek. Gizli bağı da orada yazılı — gereklilik varsayılan imleç stilinin
@@ -67,8 +67,16 @@ test:
 # sıfır kareyi bozan değişikliğin belirtisi eksik kare değil FAZLA karedir, ama
 # meşru bir animasyon da `kare`yi şişirir — sınır bu yüzden çizilmeye KARAR
 # VERİLEN içerik karesini sayıyor. `yuva` bir kapı değil sayaç — eşiği
-# ölçülmedi, ölçülmemiş sayı kapıya yazılmaz; `sessiz` (son kareyle deadline
-# arasındaki süre, hiç kare yoksa `none`) da öyle, eşiği ölçülene kadar sayaç.
+# ölçülmedi, ölçülmemiş sayı kapıya yazılmaz.
+# ALT SINIR `sessiz`te (son kareyle deadline arasındaki süre; hiç kare yoksa
+# `none` ve o da kırmızı): 008 phase-6'da ÖLÇÜLDÜ ve kapıya bağlandı
+# (app.rs QUIET_FLOOR, bugün 870 ms). Kuralı ötekilerin TERSİ — sağlıklı koşuda
+# büyük, sızıntıda küçük — ve kapının en duyarlı katı: periyodu tabandan kısa
+# HER sızıntıyı görüyor (~1,15 Hz), `icerik` sınırı ancak ~3 Hz'in üstünü.
+# Yarım saniyede bir kare isteyen bir sızıntı `icerik=8` ile sınırı aşmıyor ve
+# bu kol olmadan YEŞİL geçiyordu (ölçülen kanıt docs/OLCUMLER.md'de).
+# Taban `BT_RUN_SECONDS`ın 3'üne ve smoke_shell'in 1 sn uykusuna BAĞLI: süreyi
+# kısaltan onu da yeniden türetmeli, yoksa kapı kod doğruyken düşer.
 # `kapanis` KISMEN kapı: panik kolları kırmızı düşürür, kayıtlı borç olan iki
 # kol düşürmez — bağlansaydı kapı bilinen bir borç yüzünden kırmızı düşerdi.
 # `ornek=off` = ölçüm kapısı (BT_FRAME_STATS) kapalıydı; ölçüm jetonları o

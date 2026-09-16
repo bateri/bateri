@@ -47,8 +47,9 @@ pub use bt_gpu::GpuError;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Workload {
     /// `make duman`: tek atış, sonra boşta. `hucre`/`glif`/`kural`
-    /// sayılarının kaynağı ve boşta sıfır karenin bekçisi — kare sayısı
-    /// burada **üst sınırlıdır** (`app::IDLE_FRAME_LIMIT`).
+    /// sayılarının kaynağı ve boşta sıfır karenin bekçisi — içerik karesi
+    /// burada **üst sınırlı** (`app::IDLE_FRAME_LIMIT`), koşunun sonundaki
+    /// sessizlik ise **alt sınırlı** (`app::QUIET_FLOOR`).
     Smoke,
     /// `BT_SCROLL_TEST`: koşu boyunca akan çıktı. Kare akışı işin kendisi,
     /// üst sınır yok.
