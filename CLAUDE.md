@@ -49,10 +49,11 @@ make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
                   # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C hareket=M sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
-                  # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT (= 8, ölçülmüş; türetmesi sabitin doc'unda) ise
-                  # ya da deadline'da animasyon yerleşmemişse kırmızı.
+                  # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT (= 8, ölçülmüş; türetmesi sabitin doc'unda) ise,
+                  # sessiz < QUIET_FLOOR (= 870 ms, ölçülmüş) ya da sessiz=none ise ya da deadline'da animasyon yerleşmemişse kırmızı.
                   # üst sınır kare'de değil icerik'te: icerik çizilmeye karar verilen kare, kare GPU'nun bitirdiği — animasyon ikincisini meşru olarak şişirir.
-                  # yuva/yuk/istek/hareket/sessiz/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
+                  # sessiz'in kuralı ters (sağlıklıda büyük) ve kapının en duyarlı katı: icerik sınırının göremediği yavaş sızıntıyı o görüyor.
+                  # yuva/yuk/istek/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler, target/release/bateri.app'i kurar ve içeriğini denetler (Info.plist, ikon, lisans); imza yok

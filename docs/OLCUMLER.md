@@ -47,30 +47,49 @@ hangisinin kancası olduğu `/measure` skill'inin tablosunda.
 - Önceki ölçümle karşılaştırırken tek bir koşu değil iki dağılım yan yana
   konur; bir uçtaki tek gözlem, öbür dağılımın ortasına düşüyorsa fark sayılmaz.
 
-### Boşta kare (`IDLE_FRAME_LIMIT`)
+### Boşta kare (`IDLE_FRAME_LIMIT` ve `QUIET_FLOOR`)
 
 `make duman` yükünde (`Workload::Smoke`) pencere ilk çizimden sonra boşta
-durur ve kapı `kare` jetonunu bir üst sınırla karşılaştırır. Sınır iki
-dağılımdan türer ve ikisi de ölçülür:
+durur ve kapı **iki** ölçülmüş sayıya bakar: çizilen içerik karesi bir üst
+sınırın altında (`icerik ≤ IDLE_FRAME_LIMIT`), son kareyle deadline
+arasındaki sessizlik bir alt sınırın üstünde (`sessiz ≥ QUIET_FLOOR`,
+`sessiz=none` de kırmızı) olmalı. İkisi de aynı iki dağılımdan türer:
 
 - **Sağlıklı:** değiştirilmemiş HEAD. Profil başına en az on koşu, `BT_RUN_SECONDS=3`
   (kapının koştuğu süre), kıyas için birkaç `5` saniyelik koşu.
-- **Bozuk:** boşta sıfır kareyi kasıtlı bozan geçici bir mutasyon —
-  `crates/bt-gpu/src/link.rs`'te `needs_update`'in sonuna koşulsuz
-  `iv.waker.wake();`. Profil başına en az üç koşu. Mutasyon **commit'e girmez**;
-  geri alındığı `git diff` boşluğuyla gösterilir ve iki derleme de geri
-  alındıktan sonra yenilenir (yoksa `target/` altında bozuk bir paket kalır).
+- **Bozuk:** boşta sıfır kareyi kasıtlı bozan geçici bir mutasyon. Profil
+  başına en az üç koşu. Mutasyon **commit'e girmez**; geri alındığı `git diff`
+  boşluğuyla gösterilir ve iki derleme de geri alındıktan sonra yenilenir
+  (yoksa `target/` altında bozuk bir paket kalır). Üç mutasyonun üçü de ayrı
+  bir sızıntı sınıfını temsil ediyor ve gövdeleri "Nasıl yeniden ölçülür"de:
+  **hızlı sızıntı** (her karede hasar), **yavaş sızıntı** (yarım saniyede bir
+  kare talebi) ve **durma koşulu** (`settled()` hep `false`).
 
-Sınırın kuralı: **en yüksek sağlıklı gözlemin en az iki katı ve en düşük bozuk
-gözlemin altında.** İki koşul çelişirse sınır oynatılmaz, iş durur: sağlıklı
-dağılım bozuk dağılıma yaklaştıysa kusur sayıda değil koddadır. Sınır bu iki
-koşulun **zorladığı** kadar oynar, fazlası değil: bozuk dağılımın altında
-kalan her büyütme kuralı sağlar ama kapının algılama tabanını yükseltir
-(yavaş bir sızıntı yeşil geçer; bkz. `IDLE_FRAME_LIMIT`'in doc'u).
+**Üst sınırın kuralı:** en yüksek sağlıklı gözlemin en az iki katı ve en düşük
+bozuk gözlemin altında. İki koşul çelişirse sınır oynatılmaz, iş durur:
+sağlıklı dağılım bozuk dağılıma yaklaştıysa kusur sayıda değil koddadır. Sınır
+bu iki koşulun **zorladığı** kadar oynar, fazlası değil: bozuk dağılımın
+altında kalan her büyütme kuralı sağlar ama kapının algılama tabanını
+yükseltir (yavaş bir sızıntı yeşil geçer; bkz. `IDLE_FRAME_LIMIT`'in doc'u).
+
+**Alt sınırın kuralı ters yönde işler** ve bu jetonun bütün farkı orada:
+sağlıklı koşuda `sessiz` **büyük**, bozuk koşuda küçük. Taban "en düşük
+sağlıklı gözlemin en çok yarısı ve en yüksek bozuk gözlemin üstünde" ve
+aralığın **en büyük** ucundan seçilir — üst sınırda büyütmek kapıyı
+körleştirirken burada duyarlılığı **artırıyor**: yakalanan en yavaş sızıntının
+periyodu ≈ tabanın kendisi, yani ortadan seçilen bir sayı kapıyı boşuna
+kısıtlar.
+
+**Üç sayı tek bloktan okunur ve birlikte oynar:** `BT_RUN_SECONDS`'ın 3'ü,
+`bt_core::smoke_shell`'in 1 saniyelik uykusu ve `QUIET_FLOOR`. Kuyruk yapısal
+olarak `koşu süresi − (uyku + yerleşme)`; yerleşme ~0,25 sn olduğu için 3
+saniyelik koşuda ~1,75 sn. Süreyi 2'ye indiren ya da uykuyu uzatan biri tabanı
+da yeniden türetmek zorunda, yoksa kapı kod doğruyken düşer. Üçü üç dosyaya
+dağılırsa biri oynadığında kapı sessizce kırılganlaşır.
 
 Kapı debug'a bağlıdır (gerekçesi `IDLE_FRAME_LIMIT`'in doc'unda), ama release
-paketi de aynı sınıra tabi olduğu için onun dağılımı da ölçülür: sınır iki
-profili birden taşımalıdır.
+paketi de aynı sınırlara tabi olduğu için onun dağılımı da ölçülür: sayılar
+iki profili birden taşımalıdır.
 
 ### Kare süresi ve açılış
 
@@ -78,6 +97,16 @@ Sayı yok. Kancanın (`BT_FRAME_STATS`) dürüst sınırları — her biri **kap
 ya da **açık kalem** diye etiketli — bugün hâlâ `crates/bt-shell/src/app.rs`'te
 `Measured`'ın doc'unda emaneten duruyor; bu türün ilk ölçümü onları buraya
 taşır. Eksik bir kopya sessizce ayrışacağı için şimdiden kopyalanmadı.
+
+Listenin **dışından** bir kapsam kalemi 008'de doğdu ve o türü ölçmeye
+gerek olmadan biliniyor, o yüzden burada: **`ornek=` ile `gpu_ornek=` aynı
+kare popülasyonunu saymıyor.** Hareket karesi CPU örneği yazmıyor (o karede
+`session.frame` hiç koşmuyor, sahte örnek p95'i aşağı çekerdi) ama bir komut
+tamponu commit ediyor, yani GPU'nun tamamlanma bloğu onu **görüyor**. Ayrılık
+yapısal: aynı blok `FailureStreak`'i de besliyor ve hareket karesini ondan
+muaf tutmak çizim hatasını görünmez kılardı. Sonucu, imleç kayan bir koşuda
+iki sütunun p95'i **doğrudan karşılaştırılamaz**; gerekçesi
+`bt-gpu/src/link.rs`'te hareket karesinin gövdesinde.
 
 ## Nasıl yeniden ölçülür
 
@@ -121,8 +150,35 @@ for i in $(seq 1 $N); do  # release paket — LaunchServices yolu
 done
 ```
 
-Bozuk kol için önce yukarıdaki mutasyon uygulanır; ardından
-`git checkout -- crates/bt-gpu/src/link.rs` ve `git diff` boş. Sağlıklı kolun
+Bozuk kolun **üç** mutasyonu var; üçü de `git checkout` ile geri alınır ve
+`git diff` boş kalır. Hangisinin hangi kapıyı ateşlediği ölçümün kendi
+kaydında, gövdeleri burada:
+
+1. **Hızlı sızıntı** — `crates/bt-gpu/src/link.rs`'te `needs_update`'in
+   sonuna, `match drawn { … }`'den sonra koşulsuz `iv.waker.wake();`. Her
+   çizilen kare hasar diker, yani sıradaki callback'te de hasar bulunur:
+   tazeleme hızında **içerik** karesi. **Uyarı — 008'de düşürdüğü kol
+   değişti:** kalıcı hasar "hasar yok" dalını hiç çalıştırmıyor, yani
+   `hareket=0` ve kapı `ExcessFrames`'ten **önce** `MissingCounter` diyor.
+   Satırdaki `içerik karesi` sayısı yine de okunuyor (tanı onu basıyor).
+2. **Yavaş sızıntı** — aynı dosyada, "hasar yok + yerleşti" dalında
+   `link.setPaused(true)`'dan **önce**:
+
+   ```rust
+   let w = iv.waker.clone();
+   let _ = DispatchQueue::main().after(
+       DispatchTime::try_from(Duration::from_millis(500)).unwrap(),
+       move || w.wake(),
+   );
+   ```
+
+   (`use dispatch2::DispatchTime` gerekir.) Yarım saniyede bir içerik karesi:
+   üç saniyede `icerik=8`, yani **üst sınırı aşmıyor** — bu kolu yalnız
+   `sessiz` görüyor ve `QUIET_FLOOR` inmeden önce yeşil geçiyordu.
+3. **Durma koşulu** — `crates/bt-gpu/src/motion.rs`'te `Motion::settled`'ın
+   gövdesine `&& false`. Animasyon hiç yerleşmez: `Verdict::MotionUnsettled`.
+
+Her mutasyondan sonra `git checkout -- {dosya}` ve `git diff` boş. Sağlıklı kolun
 5 saniyelik kıyası aynı döngülerde `BT_RUN_SECONDS=5` ile koşar (debug'da
 `make duman` yerine Makefile tarifinin aynısı:
 `env -u BT_SCROLL_TEST -u BT_FRAME_STATS BT_RUN_SECONDS=5 cargo run -q -p bateri`).
@@ -164,7 +220,98 @@ doğrulanmadı), boyutundan tanınır.
 
 ## Boşta kare
 
-**Sınır: `8`** (`crates/bt-shell/src/app.rs` → `IDLE_FRAME_LIMIT`).
+**Üst sınır: `icerik ≤ 8`** (`crates/bt-shell/src/app.rs` → `IDLE_FRAME_LIMIT`).
+**Alt sınır: `sessiz ≥ 870 ms`** (aynı dosya → `QUIET_FLOOR`).
+
+### 2026-09-16 — imleç hareketi, iki sınır, debug + release paket (008 phase-6)
+
+Neden: 008 imlece animasyon getirdi ve kapının operandı `kare`'den `icerik`'e
+geçti (phase-1), yani aşağıdaki iki ölçümün sayıları **başka bir sayacın**
+sayıları. Aynı sette hareket kareleri `kare`'yi meşru olarak şişirdiği için
+kapının üçüncü bir kata ihtiyacı doğdu: altyapıyı atlayıp yavaşça kare isteyen
+kodu ne `icerik` sınırı ne de yerleşme sorusu görüyor.
+
+**Ortam**
+
+| | |
+|---|---|
+| commit | `c3fb4d4` + phase-6'nın tanı düzeltmesi (çalışma ağacında; ölçülen kod `bt-gpu` tarafında **değişmemiş**) |
+| makine | Apple M1 Pro, 32 GB |
+| sistem | macOS 26.4.1 (25E253); rustc 1.88.0 (Homebrew) |
+| güç | prizde (`AC Power`), pil %13 → şarj oluyor, `lowpowermode 0` |
+| ekran | dahili, ölçek 2 (1512×982 pt); `maximumFramesPerSecond=120` |
+| pencere | içerik 900×600 pt; yoklama çerçeveyi 900×632 pt ölçtü. Hücre sayısı **ölçülmedi** |
+| görünürlük | yoklama debug ve paket kollarının birer koşusunda: `kCGWindowIsOnscreen=true`, 900×632. Öndeki uygulama **pakette `bateri`, debug'da değil** (`cargo run` yolu bu oturumda öne çıkmadı; 006'da çıkmıştı) |
+| kullanıcı | makineye dokunulmuyor; **tarayıcı açıktı** (debug kolunun yoklamasında öndeki uygulama oydu) — yöntemin "tarayıcı kapalı" şartından sapma, kayda geçiyor |
+
+**Sabit jetonlar.** Otuz sağlıklı koşunun **hepsinde**:
+
+```
+hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke istek=4 kapanis=clean profil={debug|release} ornek=off pipeline=ok
+```
+
+**Sağlıklı koşular** (hepsi yeşil):
+
+| profil · yol · süre | n | `icerik` | `kare` | `hareket` | `sessiz` (ms) |
+|---|---|---|---|---|---|
+| debug · `make duman` · 3 sn | 10 | `3` ×9, `2` ×1 | `30` ×9, `29` ×1 | `27` ×10 | 1745,95 – 1755,25 |
+| release · paket (`open`) · 3 sn | 10 | `2` ×7, `3` ×3 | `29` ×7, `30` ×2, `27` ×1 | `27` ×8, `26` ×1, `25` ×1 | 1746,88 – 1757,29 |
+| debug · `cargo run` · 5 sn | 5 | `3` ×5 | `30` ×5 | `27` ×5 | 3742,95 – 3755,83 |
+| release · paket (`open`) · 5 sn | 5 | `3` ×5 | `30` ×3, `29` ×2 | `27` ×3, `26` ×2 | 3746,16 – 3754,35 |
+
+**Bozuk koşular** (3 sn, debug; hızlı sızıntı ayrıca release pakette):
+
+| mutasyon | n | düşen kol | `icerik` | `kare` | `sessiz` |
+|---|---|---|---|---|---|
+| hızlı sızıntı · debug | 3 | `MissingCounter` (`hareket=0`) | 357, 358, 358 | 357, 358, 358 | 0,00 ms |
+| hızlı sızıntı · release paket | 3 | `MissingCounter` (`hareket=0`) | ölçülmedi (tanı o gün `icerik` basmıyordu) | 355, 353, 356 | 0,00 ms |
+| yavaş sızıntı · debug | 3 | **hiçbiri — koşu yeşildi** | 8, 8, 8 | 34 ×3 | 105,96 · 122,17 · 129,25 ms |
+| durma koşulu · debug | 3 | `MotionUnsettled` | ölçülmedi | 352, 353, 354 (hareket karesi) | 0,00 ms |
+
+**Türetme — `IDLE_FRAME_LIMIT` oynamadı.** En yüksek sağlıklı `icerik` `3`, en
+düşük bozuk `357`. Kural (`≥ 2×3 = 6` ve `< 357`) bugünkü `8` ile sağlanıyor,
+yani sınırı **zorlayan bir gözlem yok**. Yavaş sızıntının `icerik=8`'i sınırın
+tam üstünde duruyor ve kuralı okuyunca sınırı `7`'ye indirmek gerekirdi; o
+gözlem **bilerek** dışarıda bırakıldı, çünkü mutasyonun periyodu (500 ms)
+sınırın kendisine bakılarak seçildi — sınırın türetmesine sokmak dairesel
+olurdu (her indirimden sonra biraz daha yavaş bir sızıntı yine altta kalır).
+O sızıntı sınıfının doğru cevabı sınırı kısmak değil, aşağıdaki alt sınır.
+
+**Türetme — `QUIET_FLOOR = 870 ms` doğdu.** En düşük sağlıklı gözlem
+`1745,95 ms` → tavan `872,97 ms`; en yüksek bozuk gözlem `129,25 ms` → taban
+onun üstünde olmalı. Kuralın izin verdiği aralık `(129,25 · 872,97]` ve jeton
+ters çalıştığı için **en büyük** uç seçildi: on milisaniyelik adımlarla
+`870 ms`. Sağlıklı dağılıma payı tam iki kat, yakaladığı en yavaş sızıntı
+~1,15 Hz — `IDLE_FRAME_LIMIT`'in ~3 Hz'lik tabanından **2,6 kat** duyarlı.
+
+**Kapının ateşlediği gösterildi.** `QUIET_FLOOR` indikten sonra yavaş sızıntı
+mutasyonu tekrar koşuldu: üç koşunun ikisi `QuietTooShort` (120,95 ve
+116,95 ms), biri `ExcessFrames` (`icerik=9`) ile kırmızı düştü. Aynı derlemede
+sağlıklı koşu yeşil (`sessiz=1742,29 ms`).
+
+**Gözlemler — yorum değil, kayıt:**
+
+- **Sağlıklı kuyruk şaşırtıcı derecede dar:** otuz koşunun tamamı
+  1745,95 – 1757,29 ms, yani 11 ms'lik bir bant. Yapısal olarak beklenen de
+  bu: `3 sn − (1 sn uyku + ~0,25 sn yerleşme)`. Kapının payı bu yüzden
+  gürültüden değil **tasarımdan** geliyor.
+- **Profil ayrışması döndü.** 006'da `kare` debug'da çoğunlukla `1`, release
+  pakette `2` idi; burada `icerik` debug'da çoğunlukla `3`, release pakette
+  `2`. `istek` üç ölçümde de sabit (bugün `4`), yani fark yine **talepten**
+  gelmiyor. Mekanizması yine **ölçülmedi**.
+- **Hızlı sızıntı artık başka bir kolu düşürüyor.** 006'da `ExcessFrames`
+  veriyordu; 008'de kalıcı hasar "hasar yok" dalını hiç çalıştırmadığı için
+  `hareket=0` ve kapı daha temel arızayı (`MissingCounter`) yazıyor. Reçete
+  bu yüzden güncellendi — tarifin "hangi kolu ateşler" cümlesi bir
+  **gözlemdi**, sözleşme değil.
+- **Yavaş sızıntı kolu, kapının bu sette neden büyüdüğünün kanıtı:** üç
+  koşunun üçü de, `icerik` sınırı ve yerleşme sorusu yerinde dururken
+  **yeşil** geçti.
+- **Bozuk koşu yine tam tazeleme hızında:** 3 saniyede 353–358 kare ≈ saniyede
+  118–119; 006'daki gibi kısılma görülmedi.
+- **Beş saniyelik koşular sınırları zorlamadı:** `icerik` yine `3`, `sessiz`
+  ~3,75 sn. Kuyruk süreyle doğrusal büyüyor, yani taban 3 saniyelik reçeteye
+  bağlı ve orada en dar hâlinde.
 
 ### 2026-09-15 — görünür pencere, debug + release paket (006 phase-5)
 

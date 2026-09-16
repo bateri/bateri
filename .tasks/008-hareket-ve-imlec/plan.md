@@ -103,7 +103,7 @@ icerik++                           link uyanık kalır (yerleşene kadar)
 | phase-3 | ✅ |
 | phase-4 | ✅ |
 | phase-5 | ✅ |
-| phase-6 | |
+| phase-6 | ✅ |
 | kapı | |
 
 phase-2'nin `/code-review`'undan çıkan tek bulgu phase-1'in kodundaydı ve

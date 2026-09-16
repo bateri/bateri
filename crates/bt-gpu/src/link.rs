@@ -103,8 +103,9 @@ struct WakerInner {
     /// (modül başlığı), yani bu sayaç `icerik`'e yakın kalırken `kare`
     /// animasyon boyunca ondan kopuyor. Aşağıdaki "duman yükü" ölçümünün
     /// `istek ≈ kare + 2` ilişkisi tam bu yüzden **008'de geçersizleşti**;
-    /// sayıların kendisi (o günkü koşuların gözlemi) duruyor, ilişkinin yeni
-    /// hâli `icerik` üstünden ve henüz **ölçülmedi**.
+    /// sayıların kendisi (o günkü koşuların gözlemi) duruyor, yeni hâli
+    /// `icerik` üstünden **ölçüldü** (008 phase-6, otuz sağlıklı koşu):
+    /// `istek=4` sabitken `icerik` `2`–`3`, `kare` ise 27–30.
     ///
     /// Bir **sayaç, kapı değil**: eşiği ölçülmedi ve ölçülmemiş sayı kapıya
     /// yazılmaz (`yuva=` ile aynı kural). Ölçülen (2026-09-12, debug, bu
@@ -517,8 +518,8 @@ define_class!(
                 // Sonucu bir ölçüm kapsamı kalemi: `ornek=` ile `gpu_ornek=`
                 // farklı kare popülasyonlarını sayıyor (GPU'nunki hareket
                 // karelerini de içeriyor) ve iki sütunun p95'i imleç kayan
-                // bir koşuda doğrudan karşılaştırılamaz. `docs/OLCUMLER.md`
-                // → `## Yöntem` bunu phase-6'da yazacak.
+                // bir koşuda doğrudan karşılaştırılamaz. Kalem
+                // `docs/OLCUMLER.md` → `## Yöntem`'de yazılı.
                 match iv.renderer.draw(
                     &update.drawable(),
                     theme.background_linear(),
@@ -790,7 +791,7 @@ impl DisplayLink {
     ///
     /// Gördüğünün sınırı: yalnız [`crate::motion`]'dan geçen animasyonlar.
     /// Altyapıyı atlayıp kendi kendine kare isteyen bir yolu bu soru göremez;
-    /// onun kapısı `sessiz=`'in ölçülmüş eşiği (phase-6).
+    /// onun kapısı [`Self::quiet_since`]'ın ölçülmüş eşiği.
     pub fn motion_settled(&self) -> bool {
         self.delegate.ivars().motion.get().settled()
     }
@@ -809,9 +810,16 @@ impl DisplayLink {
     /// `sessiz=0.00ms`'i "deadline anında kare akıyordu" diye okumalı,
     /// "tam o anda çizildi" diye değil.
     ///
-    /// Bir **sayaç, kapı değil**: eşiği (`sessiz ≥ T`) ölçülmedi ve ölçülmemiş
-    /// sayı kapıya yazılmaz (`yuva=`/`istek=` ile aynı kural). Ölçümü ve
-    /// kapıya bağlanması `.tasks/008-hareket-ve-imlec/phase-6.md`'de.
+    /// **Kapının en duyarlı katı** ve `bt-gpu`'nun dışında değerlendiriliyor:
+    /// eşik ölçülmüş bir sözleşme (`bt-shell`'in `QUIET_FLOOR`'u, 008 phase-6)
+    /// ve duman yükünde altı kırmızı. Buradaki sorumluluk yalnız sayıyı
+    /// dürüstçe üretmek — `None` "hiç kare çizilmedi", `0.00ms` "deadline
+    /// anında kare akıyordu".
+    ///
+    /// Gördüğünün sınırı [`Self::motion_settled`]'ınkinin tümleyeni: o,
+    /// altyapıdan geçen animasyonu hızından bağımsız görüyor; bu ise
+    /// altyapıyı atlayan **her** kare kaynağını görüyor, ama yalnız periyodu
+    /// eşikten kısaysa.
     pub fn quiet_since(&self) -> Option<Duration> {
         let last = self.delegate.ivars().last_frame_at.get()?;
         Some(Duration::try_from_secs_f64(CACurrentMediaTime() - last).unwrap_or(Duration::ZERO))
