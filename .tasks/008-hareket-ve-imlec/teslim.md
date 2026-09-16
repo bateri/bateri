@@ -87,7 +87,7 @@ içindeki commit'lerde güncellendi.
 - [x] Shader: `make shader` + `#[repr(C)]` uyumu
 - [x] Ölçüm: `docs/OLCUMLER.md` → `## Boşta kare` 2026-09-16 girişi
 - [x] Belge: `CLAUDE.md`, `Makefile`, `proje.md`, `AYARLAR.md`, `YOL-HARITASI.md`
-- [ ] `/ship`: `make hepsi` + commit + `main`'e push
+- [x] `/ship`: `make hepsi` + commit + `main`'e push
 
 ## Geri Alma
 
