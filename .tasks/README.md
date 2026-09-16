@@ -11,7 +11,7 @@
 | 007 | [ayarlar-ve-tema](007-ayarlar-ve-tema/) | 🟢 | `main`'de — canlı ayar dosyası, açık/koyu tema, font, ana menü, OSC 52 kopyası; iki bilinçli `[~]` `teslim.md`'de |
 | 008 | [hareket-ve-imlec](008-hareket-ve-imlec/) | 🟢 | `main`'de — imleç kayıyor: hareket altyapısı, üç stil, Hareketi Azalt ve ölçülmüş sessizlik kapısı (`QUIET_FLOOR`) |
 | 009 | [shell-entegrasyonu](009-shell-entegrasyonu/) | 🔨 | `main`'de — zsh sarmalayıcısı ve OSC 133 komut durumu; teslim bekliyor: `/measure` (tarayıcının akış maliyeti) — `teslim.md` |
-| 010 | [komut-bloklari](010-komut-bloklari/) | 🔨 | OSC 133 işaretlerinin ilk ürün yüzeyi: blok şeridi, çıkış kodu rengi, satıra çıpalanma |
+| 010 | [komut-bloklari](010-komut-bloklari/) | 🔨 | `main`'de — OSC 133'ün ilk ürün yüzeyi: blok şeridi, çıkış kodu rengi, satıra çıpalanma; dört phase tamam, teslim bekliyor: gerçek oturumda gözle kontrol ve şerit genişliğinin onayı (`[elle]`) — `teslim.md` |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
