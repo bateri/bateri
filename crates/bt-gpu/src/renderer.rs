@@ -87,16 +87,25 @@ struct AtlasTexture {
     instances: Vec<GlyphInstance>,
 }
 
-/// Hücrenin **fiziksel piksel** ölçüsü (ölçek uygulanmış); `bt-shell` grid
-/// boyutunu ve PTY'ye giden `TIOCSWINSZ`'i bundan türetir.
+/// Izgaranın **fiziksel piksel** geometrisi (ölçek uygulanmış): hücre ölçüsü
+/// **ve** sol pay. `bt-shell` grid boyutunu, PTY'ye giden `TIOCSWINSZ`'i ve
+/// fare çevirisini bundan türetir.
 ///
-/// Alan `private` ve kurucusu sıfırı eleyen [`CellMetrics::new`]: bu tipin işi
-/// bir demeti adlandırmak değil, **taşımak**. `pub` bir alan olsaydı
-/// `CellMetrics { cell_px: (0, 0) }` `bt-shell`'den kurulabilirdi ve
+/// **İkisi neden tek tipte:** pay `cols` hesabına, çizim orijinine ve fare
+/// eşlemesine birden giriyor (010 Karar 3). Üçü ayrı bir sabitten okusaydı
+/// bir kare boyunca ayrışabilirlerdi ve belirti "fare bir sütun kayıyor"
+/// olurdu — sessiz değil ama geç fark edilen türden. Burada ayrışamazlar:
+/// üçü de **aynı değeri** taşıyan tek bir yapıdan okuyor.
+///
+/// Alanlar `private` ve kurucusu sıfırı eleyen [`CellMetrics::new`]: bu tipin
+/// işi bir demeti adlandırmak değil, **taşımak**. `pub` bir alan olsaydı
+/// `CellMetrics { cell_px: (0, 0), .. }` `bt-shell`'den kurulabilirdi ve
 /// `900.0 / 0.0` → `inf`, `inf as u16` → `65535`, yani 65535×65535'lik bir
 /// grid ile o boyda bir `TIOCSWINSZ`. `Session::resize` yalnız sıfır grid'i
 /// eliyor; bu sessizce geçerdi. Şimdi geçemiyor: **≥ 1 garantisi tipin
 /// içinde**, kaynağı `bt_atlas::Metrics` (`font::round_up` 1'e kırpar).
+/// Pay aynı garantiyi **istemiyor**: bölen değil çıkan, ve sıfır payı meşru
+/// bir cevap (bkz. [`CellMetrics::gutter_px`]).
 ///
 /// `bt_atlas::Metrics`'i yeniden ihraç **etmiyor**: `bt-shell`'in bir
 /// `bt-atlas` tipi görmesi katman tablosunu bulanıklaştırırdı (`CLAUDE.md`),
@@ -105,32 +114,64 @@ struct AtlasTexture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellMetrics {
     cell_px: (u16, u16),
+    gutter_px: u16,
 }
 
 impl CellMetrics {
-    /// Sıfır bileşen yoksa ölçü, varsa `None`.
+    /// Komut bloğu şeridinin oturduğu sol payın **nokta** cinsinden genişliği;
+    /// fiziksel piksele [`Renderer::cell_metrics`] çeviriyor ve **tek** yer
+    /// orası.
     ///
-    /// Alan `private` ama kurucu `pub`: garanti "kimse kuramasın" ile değil
+    /// Ayar değil sabit (010 Karar 6): `command_gutter` bu sette bilerek yok,
+    /// çünkü kayıt anında uygulanan bir ayar üç tüketiciyi aynı karede
+    /// güncellemeye zorluyordu. Değeri ürün kararı — şerit artı iki yanında
+    /// nefes payı — ve tipik punto/ölçekte `cols`'tan **en çok bir** sütun
+    /// götürüyor; ölçülmüş bir sayı değil, o yüzden `docs/OLCUMLER.md`'nin
+    /// konusu da değil.
+    ///
+    /// `private`: payı okuyan herkes onu [`CellMetrics`] ile **taşıyor**,
+    /// sabitten değil. İkinci bir okuyucu tam da tipin önlediği ayrışmayı
+    /// geri getirirdi.
+    const GUTTER_PT: f64 = 8.0;
+
+    /// Hücre ölçüsünün sıfır bileşeni yoksa geometri, varsa `None`.
+    ///
+    /// Alanlar `private` ama kurucu `pub`: garanti "kimse kuramasın" ile değil
     /// **"kuran sıfırı geçiremesin"** ile sağlanıyor. Aradaki fark sınamada
     /// görünür — `bt-shell`'in grid aritmetiği bir Metal device kurmadan
     /// sınanabilir kalıyor, oysa yalnız `Renderer::cell_metrics`'in
-    /// kurabildiği bir tip o testleri GPU'ya bağlardı.
-    pub fn new(width: u16, height: u16) -> Option<Self> {
+    /// kurabildiği bir tip o testleri GPU'ya bağlardı. Payın **argüman**
+    /// olması aynı gerekçenin devamı: gövdeye gizlenmiş bir sabit, payı
+    /// sorgulayan sınamaları da GPU'ya bağlardı.
+    pub fn new(width: u16, height: u16, gutter: u16) -> Option<Self> {
         (width > 0 && height > 0).then_some(Self {
             cell_px: (width, height),
+            gutter_px: gutter,
         })
     }
 
     /// (genişlik, yükseklik).
     ///
     /// Tip `bt-gpu` ile `bt-shell` arasında **taşınıyor**; demet yalnız
-    /// değerin tipi bırakmak zorunda olduğu üç yerde açılıyor: sayıya dönüp
-    /// bölmeye girerken (`split_into_grid`), `bt-core`'a geçerken
-    /// (`SessionOptions.cell_px`, `Session::resize` — `bt-core` `bt-gpu`'yu
-    /// göremez, katman kuralının bedeli bu) ve `#[repr(C)]` kare kurucusuna
-    /// girerken (`Frame::clear`). Bunların dışında demet dolaşmaz.
+    /// değerin tipi bırakmak zorunda olduğu yerlerde açılıyor: sayıya dönüp
+    /// bölmeye girerken (`split_into_grid`, `point_to_cell`, tekerleğin satır
+    /// birimi) ve `bt-core`'a geçerken (`SessionOptions.cell_px`,
+    /// `Session::resize` — `bt-core` `bt-gpu`'yu göremez, katman kuralının
+    /// bedeli bu). Bunların dışında demet dolaşmaz; `Frame::clear` tipin
+    /// **kendisini** alıyor, çünkü orijini de ondan okuyor.
     pub fn cell_px(self) -> (u16, u16) {
         self.cell_px
+    }
+
+    /// Solda ayrılan payın genişliği; ızgara buradan **sonra** başlar.
+    ///
+    /// Sıfır olabilir ve bu bir hata değil: payı sıfır olan bir geometri
+    /// "ızgara kenardan başlıyor" demektir ve çıkarma da bölme de o değerle
+    /// doğru çalışır. Üretimde sıfır yalnız dejenere ölçekte çıkar
+    /// ([`Renderer::cell_metrics`]); sınamalar payın konu olmadığı yerde
+    /// bilerek sıfır veriyor.
+    pub fn gutter_px(self) -> u16 {
+        self.gutter_px
     }
 }
 
@@ -257,25 +298,34 @@ impl Renderer {
         Surface::new(&self.device, Self::PIXEL_FORMAT)
     }
 
-    /// Verilen backing ölçeğinde hücre ölçüsü.
+    /// Verilen backing ölçeğinde ızgara geometrisi: hücre ölçüsü ve sol pay.
     ///
     /// `scale` parametre çünkü ekran ölçeği çalışırken değişebilir
     /// (`windowDidChangeBackingProperties:`, harici ekran) ve atlas ölçeği
     /// önbellek anahtarının parçası olarak taşır: aynı `Renderer` iki ölçekte
     /// iki farklı metrik verir. @1x rasterize edilmiş bir glyph @2x'te
     /// hatasız bulanıklaşır ve belirti yalnız iki ekranlı makinede görünür.
+    /// Pay da aynı ölçeğe bağlı ve **aynı çağrıdan** çıkıyor: ikisi ayrı
+    /// çağrılardan gelseydi ölçek değişiminde bir kare boyunca ayrışabilirlerdi.
     ///
     /// `bt-shell` `bt-atlas`'ı görmüyor, metrik buradan geçiyor; katman
     /// tablosu (`CLAUDE.md`) değişmeden `CELL_PX` yer tutucusu ölebildi.
     pub fn cell_metrics(&self, scale: f64) -> CellMetrics {
         let (w, h) = self.sync_atlas(scale).cell_px;
+        // `as u16` doygun: NaN ve negatif ölçek sıfır pay verir (ızgara
+        // kenardan başlar, `split_into_grid` ile fare eşlemesi ikisi de doğru
+        // çalışır), dev ölçek 65535'te durur. Yuvarlama hücreninkiyle aynı
+        // yönde değil ama olması da gerekmiyor: pay bölen değil çıkan, bir
+        // piksel oynaması ızgarayı kaydırmaz, yalnız payı bir piksel
+        // değiştirir.
+        let gutter = (CellMetrics::GUTTER_PT * scale).round() as u16;
         // audit: `bt_atlas::Metrics.cell_px` çıplak bir `pub` alan, yani ≥ 1
         // garantisi bir crate ötede (`font::round_up` 1'e kırpar) ve tipin
         // kendisi taşımıyor. Yapı gövdesiyle kurmak bu boşluğu sessiz
         // bırakırdı; `expect` onu programlama hatasına çevirir. Panik yolu
         // değil: PTY okuma ve ayrıştırma bu satırdan geçmez, burası
         // pencere geometrisi yolu.
-        CellMetrics::new(w, h).expect("bt-atlas hücre ölçüsünü 1'e kırpar")
+        CellMetrics::new(w, h, gutter).expect("bt-atlas hücre ölçüsünü 1'e kırpar")
     }
 
     /// Atlasın yuva doluluğu: (kullanılan, toplam).
@@ -944,6 +994,18 @@ mod tests {
     const BACKGROUND: LinearRgba = Theme::BATERI.background_linear();
     const ACCENT: LinearRgba = Theme::BATERI.accent_linear();
 
+    /// Sol payı **sıfır** olan ızgara ölçüsü.
+    ///
+    /// Offscreen sınamaların örnekleme noktası `cell_rows`'ta `col * cw + x`,
+    /// yani orijini sıfır varsayıyor: sıfır olmayan bir pay o noktaları
+    /// kaydırır ve sınamalar hücre yerine clear rengini okurdu. Sıfır burada
+    /// bir kolaylık değil **doğru soru**: bu sınamaların konusu payın
+    /// geometrisi değil, GPU'nun hangi rengi hangi hücreye boyadığı. Payın
+    /// orijine eklendiğini `frame.rs` tarafında `pos` sınamaları tutuyor.
+    fn grid(width: u16, height: u16) -> CellMetrics {
+        CellMetrics::new(width, height, 0).expect("sıfır olmayan hücre")
+    }
+
     /// Yalnız arka planı olan hücre; `ch: None` glyph üretmez.
     fn bg_cell(col: u16, row: u16, bg: LinearRgba) -> Cell {
         Cell {
@@ -1043,9 +1105,20 @@ mod tests {
         // Tipin taşıdığı tek garanti bu. Düşerse `bt-shell`'in bölmesi
         // `inf` verir, `inf as u16` 65535 eder ve `Session::resize`'ın sıfır
         // kapısına takılmadan 65535×65535'lik bir `TIOCSWINSZ` geçer.
-        assert!(CellMetrics::new(0, 18).is_none());
-        assert!(CellMetrics::new(9, 0).is_none());
-        assert_eq!(CellMetrics::new(9, 18).expect("ölçü").cell_px(), (9, 18));
+        assert!(CellMetrics::new(0, 18, 8).is_none());
+        assert!(CellMetrics::new(9, 0, 8).is_none());
+        let metrics = CellMetrics::new(9, 18, 8).expect("ölçü");
+        assert_eq!(metrics.cell_px(), (9, 18));
+        assert_eq!(metrics.gutter_px(), 8);
+        // Pay **eliyor değil taşınıyor**: bölen değil çıkan, ve sıfır pay
+        // "ızgara kenardan başlıyor" demek. Sıfırı burada da elemek, payı
+        // konu etmeyen her sınamayı uydurma bir değer yazmaya zorlardı.
+        assert_eq!(
+            CellMetrics::new(9, 18, 0)
+                .expect("sıfır pay meşru")
+                .gutter_px(),
+            0
+        );
     }
 
     #[test]
@@ -1273,7 +1346,7 @@ mod tests {
         const EDGE: usize = 16;
         let texture = target_texture(&r, EDGE);
         let mut frame = Frame::default();
-        frame.clear((8, 8));
+        frame.clear(grid(8, 8));
         frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
         let cmd = r.queue.commandBuffer().expect("komut tamponu");
         r.encode_pass(&cmd, &texture, BACKGROUND, &frame)
@@ -1323,7 +1396,7 @@ mod tests {
         // sRGB transfer fonksiyonunun sabit noktaları, yani kırmızı ve yeşil
         // lineerleştirme olsa da olmasa da aynı baytı verir.
         let mut frame = Frame::default();
-        frame.clear((8, 8));
+        frame.clear(grid(8, 8));
         frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
         frame.push(bg_cell(1, 1, LinearRgba::from_srgb(0x00, 0xff, 0x00)));
         frame.push(bg_cell(0, 1, BACKGROUND));
@@ -1406,7 +1479,7 @@ mod tests {
         // doldurur, `.` yalnız tabanına küçük bir nokta koyar.
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
         let mut frame = Frame::default();
-        frame.clear((cw, ch));
+        frame.clear(grid(cw, ch));
         for (col, glyph) in [(0u16, 'M'), (1, '.')] {
             frame.push(glyph_cell(col, glyph, Some(red)));
         }
@@ -1478,7 +1551,7 @@ mod tests {
         let mut used = base.0;
         for (col, glyph) in [(0u16, 'M'), (1, '.')] {
             let mut frame = Frame::default();
-            frame.clear((cw, ch));
+            frame.clear(grid(cw, ch));
             frame.push(glyph_cell(col, glyph, None));
             render_offscreen(&r, EDGE, BACKGROUND, &frame);
 
@@ -1510,7 +1583,7 @@ mod tests {
         // hücreyi çöple dolduran bir kodda da geçerdi. İkisi birlikte "kıvrım
         // dalgalı **ve** düz çizgi düz" diyor.
         let mut frame = Frame::default();
-        frame.clear((cw, ch));
+        frame.clear(grid(cw, ch));
         frame.push(rule_cell(0, UnderlineStyle::Single));
         frame.push(rule_cell(1, UnderlineStyle::Curl));
         assert_eq!(frame.rule_count(), 2);
@@ -1546,7 +1619,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
         let mut frame = Frame::default();
-        frame.clear((cw, ch));
+        frame.clear(grid(cw, ch));
         // Sol hücre kontrol: aynı çizgi, SGR 58 **yok** → ön plan rengi.
         frame.push(rule_cell(0, UnderlineStyle::Single));
         frame.push(Cell {
@@ -1600,7 +1673,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
         let mut frame = Frame::default();
-        frame.clear((cw, ch));
+        frame.clear(grid(cw, ch));
         for (col, bold) in [(0u16, false), (1, true)] {
             frame.push(Cell {
                 col,
@@ -1664,7 +1737,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 3);
 
         let mut frame = Frame::default();
-        frame.clear((cw, ch));
+        frame.clear(grid(cw, ch));
         // A: imlecin altında, harfin kendi ön planı beyaz.
         frame.push(glyph_cell(0, 'M', None));
         // B: imleçsiz ama harf zaten metin renginde, arka planı blok rengi.
@@ -1707,7 +1780,7 @@ mod tests {
         // opaklık üç ayrı kare demek.
         let render = |alpha: Option<f32>| {
             let mut frame = Frame::default();
-            frame.clear((cw, ch));
+            frame.clear(grid(cw, ch));
             frame.push(glyph_cell(0, 'M', None));
             if let Some(alpha) = alpha {
                 frame.push_cursor(cursor_at(0, BACKGROUND), [0.0, 0.0], ACCENT, alpha);
@@ -1784,7 +1857,7 @@ mod tests {
         // hangi pikseli boyadığına bağlı kalmıyor (glyph'in ilk sütunu boş
         // olabilir ve sınama sessizce hiçbir şey sormaz).
         let mut frame = Frame::default();
-        frame.clear((cw, ch));
+        frame.clear(grid(cw, ch));
         frame.push(rule_cell(0, UnderlineStyle::Single));
         frame.push(rule_cell(1, UnderlineStyle::Single));
         push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
@@ -1806,7 +1879,7 @@ mod tests {
         // ya da iki hücre olduğu bir kusur burada da yakalanır, üstelik
         // kesirli konumda.
         let mut frame = Frame::default();
-        frame.clear((cw, ch));
+        frame.clear(grid(cw, ch));
         frame.push(rule_cell(0, UnderlineStyle::Single));
         frame.push(rule_cell(1, UnderlineStyle::Single));
         let mut cursor = cursor_at(0, BACKGROUND);
@@ -1838,7 +1911,7 @@ mod tests {
 
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
         let mut frame = Frame::default();
-        frame.clear((cw, ch));
+        frame.clear(grid(cw, ch));
         // İki hücrede aynı SGR 58'li çizgi; imleç yalnız birinde.
         for col in [0, 1] {
             frame.push(Cell {
@@ -1889,7 +1962,7 @@ mod tests {
 
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
         let mut frame = Frame::default();
-        frame.clear((cw, ch));
+        frame.clear(grid(cw, ch));
         frame.push(rule_cell(0, UnderlineStyle::Single));
         // Metin rengi bilerek kuralın kendi rengiyle **aynı** (beyaz): bu
         // sınamanın sorduğu şey renk değil **sıra**, ve dikdörtgenin ezmesi
@@ -1922,7 +1995,7 @@ mod tests {
         let texture = target_texture(&r, EDGE);
 
         let mut frame = Frame::default();
-        frame.clear((8, 16));
+        frame.clear(grid(8, 16));
         frame.push(Cell {
             col: 0,
             row: 0,

@@ -376,17 +376,23 @@ pub(crate) struct Grid {
     pub(crate) cell: CellMetrics,
 }
 
-/// Piksel geometrisi + hücre ölçüsü → grid.
+/// Piksel geometrisi + ızgara ölçüsü → grid.
 ///
 /// `sync_geometry`'den ayrı duruyor çünkü saf olan tek parça bu; geri
-/// kalanı pencere ve layer, yani sınanamaz. Hücre ölçüsü **argüman**: bu
-/// gövdeye gizlenmiş bir sabit `cell_metrics_come_from_outside`'i düşürür.
+/// kalanı pencere ve layer, yani sınanamaz. Ölçü **argüman**: bu gövdeye
+/// gizlenmiş bir sabit `cell_metrics_come_from_outside`'i düşürür.
 ///
 /// Kapsamı bu kadar, daha fazlası değil: `CELL_PX`'in asıl durduğu satır
 /// `sync_geometry`'deki `cell_metrics(scale)` çağrısıydı ve orası bir
 /// pencere ile Metal device istediği için sınanmıyor. `CellMetrics::new`
-/// bilerek `pub`, yani oraya yazılacak bir `CellMetrics::new(9, 18)` yer
+/// bilerek `pub`, yani oraya yazılacak bir `CellMetrics::new(9, 18, 8)` yer
 /// tutucuyu diriltir ve buradaki iki sınama yeşil kalır.
+///
+/// **Sol pay sütunlardan düşülür** (010 Karar 3): şerit metnin üstüne
+/// binmesin. Pay her zaman ayrılıyor — entegrasyonsuz oturumda (bash/fish,
+/// `shell.integration = false`, SSH) boş kalması kabul edilen bedel;
+/// alternatifi ilk prompt'ta bir SIGWINCH ve üç tüketicinin aynı anda
+/// güncellenmesiydi. Satırlar payı görmez: pay yalnız solda.
 fn split_into_grid(width_px: f64, height_px: f64, cell: CellMetrics) -> Grid {
     let (cell_w, cell_h) = cell.cell_px();
     // `as u16` f64'te doygundur (NaN ve negatif → 0, büyük → 65535) ve kesme
@@ -396,8 +402,16 @@ fn split_into_grid(width_px: f64, height_px: f64, cell: CellMetrics) -> Grid {
     // kurucusu (`CellMetrics::new`) sıfırı eliyor; üretimdeki kaynağı
     // `Renderer::cell_metrics`, oranın garantisi de `bt-atlas`'ın ≥ 1
     // kırpması.
+    //
+    // Çıkarma **`f64`'te** ve bu bir tercih değil şart: paydan dar bir
+    // pencerede fark negatife iner, bölme negatif kalır ve `as u16` onu
+    // sıfıra doyurur — yani mevcut davranış (sıfır sütun, `Session::resize`
+    // yoksayar) korunur. Aynı çıkarma `u16`'da yapılsaydı **taşar** ve
+    // 65535'e yakın bir sütun sayısı, o boyda bir `TIOCSWINSZ` üretirdi.
+    // Yeni bir alt sınır bilerek getirilmiyor: zincirin sonu zaten doğru.
+    let usable_width = width_px - f64::from(cell.gutter_px());
     Grid {
-        cols: (width_px / f64::from(cell_w)) as u16,
+        cols: (usable_width / f64::from(cell_w)) as u16,
         rows: (height_px / f64::from(cell_h)) as u16,
         cell,
     }
@@ -2211,8 +2225,10 @@ mod tests {
     /// adıyla anıyor.
     const HEALTHY_QUIET: Option<Duration> = Some(Duration::from_millis(1742));
 
-    fn metrics(w: u16, h: u16) -> CellMetrics {
-        CellMetrics::new(w, h).expect("sıfır olmayan hücre")
+    /// Izgara ölçüsü; pay **argüman**, çünkü `split_into_grid`'un sorduğu iki
+    /// ayrı şey var: hücre bölmesi (pay sıfır) ve payın sütunlardan düşülmesi.
+    fn metrics(w: u16, h: u16, gutter: u16) -> CellMetrics {
+        CellMetrics::new(w, h, gutter).expect("sıfır olmayan hücre")
     }
 
     fn report(counters: Counters, workload: Workload) -> Report {
@@ -2375,10 +2391,43 @@ mod tests {
         // Yer tutucunun ölmüş olmasının sınanabilir hâli: aynı pencere, iki
         // farklı hücre ölçüsü, iki farklı grid. Gövdeye geri sızan bir sabit
         // ikisini eşitler ve bu sınama düşer.
-        let narrow = split_into_grid(900.0, 600.0, metrics(9, 18));
-        let wide = split_into_grid(900.0, 600.0, metrics(18, 36));
+        // Pay sıfır: sorulan şey hücre ölçüsünün grid'i belirlediği, payın
+        // etkisi değil. Payın kendi sınaması `the_gutter_costs_columns`.
+        let narrow = split_into_grid(900.0, 600.0, metrics(9, 18, 0));
+        let wide = split_into_grid(900.0, 600.0, metrics(18, 36, 0));
         assert_eq!((narrow.cols, narrow.rows), (100, 33));
         assert_eq!((wide.cols, wide.rows), (50, 16));
+    }
+
+    #[test]
+    fn the_gutter_costs_columns() {
+        // Sol pay sütunlardan düşülür (010 Karar 3): şerit metnin üstüne
+        // binmesin. 900 piksel, 9 piksel hücre → paysız 100 sütun; 8 piksel
+        // pay bir sütun götürür, 9 piksel (tam bir hücre) de bir.
+        let plain = split_into_grid(900.0, 600.0, metrics(9, 18, 0));
+        let gutter = split_into_grid(900.0, 600.0, metrics(9, 18, 8));
+        assert_eq!(plain.cols, 100);
+        assert_eq!(gutter.cols, 99, "pay bir sütun götürür");
+        // Satırlar payı **görmez**: pay yalnız solda ve dikey geometriye
+        // dokunmuyor.
+        assert_eq!(gutter.rows, plain.rows);
+        // Pay ölçüyle birlikte taşınıyor: grid'i kuran değer onu geri veriyor
+        // ve çizim orijini ile fare eşlemesi aynı değeri okuyor.
+        assert_eq!(gutter.cell.gutter_px(), 8);
+    }
+
+    #[test]
+    fn a_window_narrower_than_the_gutter_yields_no_columns() {
+        // Kabul: yeni bir alt sınır **getirilmiyor**, mevcut zincir doğru
+        // cevabı veriyor. Çıkarma `f64`'te negatife iniyor, bölme negatif
+        // kalıyor ve `as u16` sıfıra doyuruyor; sıfır sütunu `Session::resize`
+        // zaten yoksayıyor. Aynı çıkarma `u16`'da yapılsaydı **taşar** ve
+        // 65535'e yakın bir sütunla o boyda bir `TIOCSWINSZ` üretirdi — bu
+        // sınamanın bekçilik ettiği kırılma o.
+        let g = split_into_grid(4.0, 600.0, metrics(9, 18, 8));
+        assert_eq!(g.cols, 0);
+        // Satırlar ayakta: dar pencere yalnız sütunları eliyor.
+        assert_eq!(g.rows, 33);
     }
 
     #[test]
@@ -3025,7 +3074,7 @@ mod tests {
         // Simge durumuna alınan pencere 0×0 bounds verir; `Session::resize`
         // sıfır grid'i yoksayıyor ama buraya gelen yolun panik etmemesi
         // gerekiyor — bölme değil, `as u16` doygunluğu taşıyor.
-        let g = split_into_grid(0.0, 0.0, metrics(9, 18));
+        let g = split_into_grid(0.0, 0.0, metrics(9, 18, 8));
         assert_eq!((g.cols, g.rows), (0, 0));
     }
 }

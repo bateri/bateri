@@ -16,6 +16,8 @@ use std::mem::offset_of;
 use bt_atlas::{Face, RuleKind};
 use bt_core::{Cell, Cursor, LinearRgba, UnderlineStyle};
 
+use crate::renderer::CellMetrics;
+
 /// `shaders/cell_bg.metal` → `Instance` ile alan alan aynı.
 ///
 /// Crate dışına açılmaz: bu bir GPU bayt düzeni, `bt-core`'un `Cell`'i ise
@@ -183,9 +185,10 @@ fn rule_kind(underline: UnderlineStyle) -> Option<RuleKind> {
 /// üstüne çizilir — imleç opak ve altındaki harfi örterdi.
 ///
 /// Uzun ömürlüdür: display link onu ivar'da tutar ve **içerik** karesinde
-/// `clear` ile yeniden doldurur. Bu yüzden hücre piksel boyutu **alan değil
-/// `clear`'ın parametresidir** — kurucuda dondurulsaydı ekran ölçeği
-/// değiştiğinde (`windowDidChangeBackingProperties:`) sessizce bayatlardı.
+/// `clear` ile yeniden doldurur. Bu yüzden ızgara geometrisi (hücre ölçüsü ve
+/// sol pay) **alan değil `clear`'ın parametresidir** — kurucuda
+/// dondurulsaydı ekran ölçeği değiştiğinde
+/// (`windowDidChangeBackingProperties:`) sessizce bayatlardı.
 ///
 /// **Her kare `clear` görmüyor ve bu 008'in getirdiği ayrım:** hareket karesi
 /// grid'i kirli bulmadan çiziyor, yani listeyi temizleyemez —
@@ -199,6 +202,13 @@ pub(crate) struct Frame {
     /// çizilir (üstü çizili, altındaki harfin üstünden geçmeli).
     rules: Vec<RuleCell>,
     cell_px: (f32, f32),
+    /// Izgaranın sol payı: her hücrenin x'i buradan **sonra** başlar.
+    ///
+    /// `cell_px` ile aynı gerekçeyle alan değil [`Frame::clear`]'ın taşıdığı
+    /// bir değer (ikisi de tek [`CellMetrics`] ile geliyor): ölçek değişince
+    /// ikisi birlikte tazelenir. Ayrı bir sabitten okunsaydı `cols` hesabıyla
+    /// ayrışabilirdi — üçünün tek kaynağı olması 010 Karar 3'ün şartı.
+    gutter_px: f32,
     /// İmlecin piksel dikdörtgeni ve blok altındaki metin rengi; `cell`
     /// pipeline'ının uniform'u.
     ///
@@ -221,9 +231,15 @@ pub(crate) struct Frame {
 // Kare listesi bir GPU ayrıntısıdır; `bt-shell`'in onu görmesi için bir sebep
 // yok ve görmezse yanlış hücre boyutuyla dolduramaz.
 impl Frame {
-    /// Tamponları boşaltır ve bu karenin hücre piksel boyutunu kurar. Ayrılan
+    /// Tamponları boşaltır ve bu karenin ızgara geometrisini kurar. Ayrılan
     /// yer korunur: kare başına yeniden ayırma yok.
-    pub(crate) fn clear(&mut self, cell_px: (u16, u16)) {
+    ///
+    /// Demet değil [`CellMetrics`]: hücre ölçüsü ile sol pay aynı çağrıdan
+    /// geliyor ve burada da birlikte yazılıyorlar. Ayrı iki parametre olsaydı
+    /// biri tazelenip öteki unutulabilirdi ve belirti "glyph'ler pay kadar
+    /// kaymış" olurdu.
+    pub(crate) fn clear(&mut self, metrics: CellMetrics) {
+        let cell_px = metrics.cell_px();
         self.bg.clear();
         self.glyphs.clear();
         self.rules.clear();
@@ -234,6 +250,7 @@ impl Frame {
         // görünmez bir hücre.
         self.cursor = CursorBlock::default();
         self.cell_px = (f32::from(cell_px.0), f32::from(cell_px.1));
+        self.gutter_px = f32::from(metrics.gutter_px());
     }
 
     /// Sink'in tek girişi: hücrenin arka planı varsa boyanır, mürekkebi varsa
@@ -433,10 +450,14 @@ impl Frame {
     /// Formülün **tek** kopyası burası; tam sayı yolu buradan geçiyor ki
     /// kayan imleç ile duran hücre aynı aritmetiği paylaşsın. Ayrışsalardı
     /// yerleşmiş imleç altındaki harften yarım piksel kayabilirdi.
+    ///
+    /// Sol pay da **yalnız burada** ekleniyor: 0. sütun payın bittiği yerde
+    /// başlıyor ve arka plan, glyph, kural, imleç dördü de bu satırdan
+    /// geçiyor. İkinci bir yerde eklenseydi pay iki kez uygulanırdı.
     fn pos_at(&self, at: [f32; 2]) -> [f32; 2] {
         let (w, h) = self.cell_px;
-        debug_assert!(w > 0.0 && h > 0.0, "clear(cell_px) çağrılmadı");
-        [at[0] * w, at[1] * h]
+        debug_assert!(w > 0.0 && h > 0.0, "clear(metrics) çağrılmadı");
+        [self.gutter_px + at[0] * w, at[1] * h]
     }
 }
 
@@ -461,6 +482,20 @@ mod tests {
     /// (`crate::motion::Motion::alpha`). Belirmeyi sınayan tek yer
     /// `cursor_alpha_reaches_the_block_and_the_text`.
     const OPAQUE: f32 = 1.0;
+
+    /// Sol payı **sıfır** olan ızgara ölçüsü: bu modüldeki sınamaların çoğu
+    /// listelerin düzenini soruyor, orijini değil, ve sıfır pay onların
+    /// beklenen piksellerini hücre aritmetiğinde tutuyor. Payın kendi
+    /// sınamaları [`GUTTER`]'ı kullanıyor ve adıyla anıyor.
+    fn grid(width: u16, height: u16) -> CellMetrics {
+        CellMetrics::new(width, height, 0).expect("sıfır olmayan hücre")
+    }
+
+    /// Payı sorgulayan sınamaların ölçüsü. Değer üretimdekiyle aynı olmak
+    /// zorunda değil — sorulan şey "pay orijine ekleniyor mu", genişliği
+    /// değil — ve hücre genişliğinden **ayrık** seçildi ki iki çarpanın
+    /// yanlışlıkla örtüşmesi sınamayı sessizce geçirmesin.
+    const GUTTER: u16 = 7;
 
     fn cursor(col: u16, row: u16, visible: bool) -> Cursor {
         Cursor {
@@ -498,7 +533,7 @@ mod tests {
     #[test]
     fn frame_bg_count_excludes_cursor() {
         let mut frame = Frame::default();
-        frame.clear((9, 18));
+        frame.clear(grid(9, 18));
 
         frame.push(bg_cell(0, 0));
         frame.push(bg_cell(1, 0));
@@ -508,7 +543,7 @@ mod tests {
         assert_eq!(frame.bg_instances().len(), 3);
         assert_eq!(frame.bg_count(), 2);
 
-        frame.clear((9, 18));
+        frame.clear(grid(9, 18));
         assert_eq!(frame.bg_count(), 0);
         assert!(frame.bg_instances().is_empty());
     }
@@ -516,7 +551,7 @@ mod tests {
     #[test]
     fn invisible_cursor_is_not_drawn() {
         let mut frame = Frame::default();
-        frame.clear((9, 18));
+        frame.clear(grid(9, 18));
         push_settled(&mut frame, cursor(0, 0, false));
         assert!(frame.bg_instances().is_empty());
         // Uniform da dokunulmadan kalır: dejenere dikdörtgen "blok yok"
@@ -530,7 +565,7 @@ mod tests {
         // ayrışsalardı blok bir yerde, altındaki metnin rengi başka bir yerde
         // olurdu ve ikisi de sessizce yanlış çizerdi.
         let mut frame = Frame::default();
-        frame.clear((9, 18));
+        frame.clear(grid(9, 18));
         push_settled(&mut frame, cursor(3, 2, true));
 
         let block = *frame.cursor_block();
@@ -554,7 +589,7 @@ mod tests {
 
         // `clear` uniform'u da sıfırlar: sönen imleç (`\e[?25l`) bloğu
         // kaldırır ama rengi eski hücrede bırakırsa orası görünmez olur.
-        frame.clear((9, 18));
+        frame.clear(grid(9, 18));
         assert_eq!(frame.cursor_block(), &CursorBlock::default());
     }
 
@@ -567,7 +602,7 @@ mod tests {
         // bir hücre; belirti de tam olarak o hücreyle sınırlı, hiçbir sayaç
         // görmez.
         let mut frame = Frame::default();
-        frame.clear((9, 18));
+        frame.clear(grid(9, 18));
         frame.push_cursor(cursor(3, 2, true), [3.0, 2.0], CURSOR, 0.25);
 
         let instance = frame.bg_instances().last().expect("blok instance'ı");
@@ -583,7 +618,7 @@ mod tests {
         assert_eq!(frame.cursor_block().rgba[..3], TEXT.to_array()[..3]);
 
         // Yerleşmiş imleç opak ve o hâlde iki dizi de temanın kendisi.
-        frame.clear((9, 18));
+        frame.clear(grid(9, 18));
         push_settled(&mut frame, cursor(3, 2, true));
         assert_eq!(
             frame.bg_instances().last().expect("blok").rgba,
@@ -598,7 +633,7 @@ mod tests {
         // piksele oturmalı. Tam sayıya yuvarlansaydı kayma hücre hücre
         // zıplar ve animasyonun tamamı görünmez olurdu.
         let mut frame = Frame::default();
-        frame.clear((10, 20));
+        frame.clear(grid(10, 20));
         frame.push_cursor(cursor(3, 2, true), [2.5, 1.25], CURSOR, OPAQUE);
         assert_eq!(frame.cursor_block().rect, [25.0, 25.0, 35.0, 45.0]);
         assert_eq!(frame.bg_instances()[0].pos, [25.0, 25.0]);
@@ -611,7 +646,7 @@ mod tests {
         // Kırpma olmasaydı her hareket karesi listeye bir dikdörtgen daha
         // eklerdi — 200 ms'lik bir kaymada yirmi dört hayalet imleç.
         let mut frame = Frame::default();
-        frame.clear((8, 16));
+        frame.clear(grid(8, 16));
         frame.push(bg_cell(0, 0));
         frame.push(Cell {
             col: 1,
@@ -647,14 +682,15 @@ mod tests {
 
     #[test]
     fn clear_updates_cell_size() {
-        // `cell_px`'in `clear`'ın parametresi olmasının tek sebebi bu: alan
-        // olsaydı ekran ölçeği değişince bayatlardı ve hiçbir sınama görmezdi.
+        // Izgara ölçüsünün `clear`'ın parametresi olmasının tek sebebi bu:
+        // alan olsaydı ekran ölçeği değişince bayatlardı ve hiçbir sınama
+        // görmezdi. Pay da aynı çağrıdan geliyor, yani aynı bekçinin altında.
         let mut frame = Frame::default();
-        frame.clear((9, 18));
+        frame.clear(grid(9, 18));
         frame.push(bg_cell(1, 1));
         assert_eq!(frame.bg_instances()[0].pos, [9.0, 18.0]);
 
-        frame.clear((18, 36));
+        frame.clear(grid(18, 36));
         frame.push(bg_cell(1, 1));
         assert_eq!(frame.bg_instances()[0].pos, [18.0, 36.0]);
         assert_eq!(frame.bg_instances()[0].size, [18.0, 36.0]);
@@ -663,7 +699,7 @@ mod tests {
     #[test]
     fn grid_coords_convert_to_pixels() {
         let mut frame = Frame::default();
-        frame.clear((9, 18));
+        frame.clear(grid(9, 18));
         frame.push(bg_cell(3, 2));
         assert_eq!(
             frame.bg_instances()[0],
@@ -676,12 +712,60 @@ mod tests {
     }
 
     #[test]
+    fn the_gutter_offsets_every_pixel_position() {
+        // Sol pay (010 Karar 3) çizim orijinine `pos_at`'te **bir kez**
+        // ekleniyor; dört tüketicinin (arka plan, glyph, kural, imleç) hepsi
+        // o satırdan geçtiği için dördü de aynı kadar kayıyor. İki yerde
+        // eklenseydi biri payı iki kez uygular ve belirti "glyph arka
+        // planından kaymış" olurdu.
+        let mut frame = Frame::default();
+        frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
+        frame.push(Cell {
+            col: 3,
+            row: 2,
+            ch: Some('x'),
+            fg: CURSOR,
+            bg: Some(BG),
+            underline: UnderlineStyle::Single,
+            ..Default::default()
+        });
+        push_settled(&mut frame, cursor(1, 0, true));
+
+        let shifted = [f32::from(GUTTER) + 27.0, 36.0];
+        assert_eq!(frame.bg_instances()[0].pos, shifted, "arka plan");
+        assert_eq!(frame.glyphs()[0].pos, shifted, "glyph");
+        assert_eq!(frame.rules()[0].pos, shifted, "kural");
+        // İmleç de aynı satırdan geçiyor: 1. sütun payın 9 piksel sağında.
+        assert_eq!(
+            frame.cursor_block().rect[0],
+            f32::from(GUTTER) + 9.0,
+            "imleç"
+        );
+
+        // **Boyut kaymıyor, yalnız konum**: pay ızgarayı iteliyor, hücreyi
+        // büyütmüyor.
+        assert_eq!(frame.bg_instances()[0].size, [9.0, 18.0]);
+    }
+
+    #[test]
+    fn a_zero_gutter_leaves_the_origin_at_the_edge() {
+        // Payın sıfırı meşru bir cevap (entegrasyonsuz bir gelecekte ya da
+        // dejenere ölçekte): ızgara kenardan başlar ve aritmetik payın
+        // eklenmediği hâline birebir döner. Bu modüldeki öteki sınamaların
+        // `grid()` üzerinden dayandığı sözleşme de bu.
+        let mut frame = Frame::default();
+        frame.clear(grid(9, 18));
+        frame.push(bg_cell(3, 2));
+        assert_eq!(frame.bg_instances()[0].pos, [27.0, 36.0]);
+    }
+
+    #[test]
     fn inkless_cell_yields_background_without_glyph() {
         // `hucre=K` ile `glif=G`'yi ayıran satır bu: `" bateri "` sekiz arka
         // planlı hücredir ama altı glyph'tir. İkisi tek sayaçtan okunsaydı
         // duman kapısı ikisinden birini hiç sormamış olurdu.
         let mut frame = Frame::default();
-        frame.clear((8, 16));
+        frame.clear(grid(8, 16));
         frame.push(bg_cell(0, 0)); // mürekkepsiz
         frame.push(Cell {
             col: 1,
@@ -713,7 +797,7 @@ mod tests {
             }
         );
 
-        frame.clear((8, 16));
+        frame.clear(grid(8, 16));
         assert_eq!(frame.glyph_count(), 0);
     }
 
@@ -725,7 +809,7 @@ mod tests {
         // plandan, ikisi aynı hücrede buluşabilir — ve `clear` kural listesini
         // de boşaltır (üç listenin üçü de aynı çağrıda sıfırlanmalı).
         let mut frame = Frame::default();
-        frame.clear((8, 16));
+        frame.clear(grid(8, 16));
 
         frame.push(bg_cell(0, 0));
         assert_eq!(frame.rule_count(), 0, "kuralsız hücre kural üretti");
@@ -759,7 +843,7 @@ mod tests {
             ]
         );
 
-        frame.clear((8, 16));
+        frame.clear(grid(8, 16));
         assert_eq!(frame.rule_count(), 0);
     }
 
