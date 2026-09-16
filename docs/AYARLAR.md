@@ -513,7 +513,7 @@ bateri – themes/paper.toml: line 3: `ansi.red` must be a color like "#rrggbb",
 
 ### Biçim
 
-Dört rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
+Altı rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
 bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 
 | anahtar | anlamı |
@@ -521,7 +521,9 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 | `background` | varsayılan arka plan, pencerenin zemini |
 | `foreground` | varsayılan ön plan |
 | `dim` | sönük (SGR 2) yazılmış varsayılan ön plan |
-| `accent` | vurgu; bugün imleç |
+| `accent` | vurgu; imleç ve **koşan** komut bloğunun şeridi |
+| `success` | durum: başarı; sıfır çıkış koduyla biten komut bloğunun şeridi |
+| `error` | durum: hata; sıfırdan farklı çıkış koduyla biten bloğun şeridi |
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |
 | `[ansi]` `bright_black` … `bright_white` | ANSI 8–15, aynı sırada |
 
@@ -537,16 +539,17 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   kaydederken dosyayı önce boşaltır ve kaydın ortasında pencere tabana
   çakmamalı. Kaydettiğiniz anda ekrandaki tema kalır, açılışta görünüme uyan
   gömülü tema gelir; ikisinde de uyarı çıkar.
-- Tanınmayan anahtar sessizce yoksayılır. Sonraki sürümlerin dört durum rolü
-  (başarı, uyarı, hata, bilgi) bu yüzden bugünden yazılabilir.
+- Tanınmayan anahtar sessizce yoksayılır. Sonraki sürümlerin kalan iki durum
+  rolü (uyarı, bilgi) bu yüzden bugünden yazılabilir.
 - **Sönük metin** (SGR 2) iki yoldan gelir. Varsayılan ön plan sönükse
   temanın `dim` rengi kullanılır. Adlı ve 256 renkli metnin sönüğü ise bir
   kuraldır: renk temanın `background`'una doğru üçte bir yol alır — koyu
   temada koyulaşır, açık temada açılır. Siyah zeminde bu, alacritty'nin ve
   vte'nin "rengin üçte ikisi" kuralıyla aynıdır.
-- `dim` de her anahtar gibi eksikse `bateri`'den gelir (`#909093`): açık bir
-  temada `dim` yazılmazsa sönük varsayılan metin koyu temanın grisiyle
-  çizilir.
+- `dim`, `success` ve `error` de her anahtar gibi eksikse `bateri`'den gelir:
+  açık bir temada `dim` yazılmazsa sönük varsayılan metin koyu temanın grisiyle
+  (`#909093`), `success`/`error` yazılmazsa blok şeritleri koyu temanın yeşil
+  ve kırmızısıyla çizilir.
 
 ### Gömülü `bateri`
 
@@ -557,6 +560,8 @@ background = "#1a1c21"
 foreground = "#d8d9dd"
 dim = "#909093"
 accent = "#7a9cc6"
+success = "#8bb58b"
+error = "#d16d6a"
 
 [ansi]
 black = "#22252b"
@@ -588,6 +593,8 @@ background = "#f5f6f8"
 foreground = "#24262c"
 dim = "#696b70"
 accent = "#3d6aa8"
+success = "#3b7a3b"
+error = "#b5423d"
 
 [ansi]
 black = "#2b2e35"

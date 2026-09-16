@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use bt_core::{Cursor, CursorMotion, DirtyFlag, Session, Theme};
+use bt_core::{Blocks, Cursor, CursorMotion, DirtyFlag, Session, Theme};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -340,6 +340,16 @@ struct LinkIvars {
     /// Kare listesi uzun ömürlü: her karede `clear` ile dolar, ayrılan yer
     /// korunur (kare başına yeniden ayırma yok).
     frame: RefCell<Frame>,
+    /// Komut bloklarının tamponu; `frame` ile aynı gerekçeyle uzun ömürlü —
+    /// `Session::frame` onu her karede boşaltıp yeniden dolduruyor ve ayrılan
+    /// yer korunuyor.
+    ///
+    /// `Frame`'in **içinde değil yanında**: aynı çağrıda `frame.push`
+    /// kapatması da tampon da ödünç alınıyor ve ikisi tek `RefCell`'de
+    /// olsaydı çalışma zamanında panik ederdi. Şeridi çizecek liste
+    /// (piksel dörtgenleri) phase-4'te `Frame`'in kendi alanı olacak; bu
+    /// tampon ona **girdi**, kendisi değil.
+    blocks: RefCell<Blocks>,
     /// Demet değil `CellMetrics`: ölçü `Renderer::cell_metrics`'ten
     /// `bt-shell` üzerinden buraya tip olarak geliyor ve **saklanırken de**
     /// tip kalıyor. Saklanan bu değer yalnız `Frame::clear`'a girerken
@@ -577,7 +587,9 @@ define_class!(
             // `Option`'ı ve onun `GpuError::NoDrawable`'ı da kalktı:
             // `update.drawable()` başlıkta `nonnull` ve objc2 onu `Option`suz
             // üretiyor.)
-            let cursor = iv.session.frame(|cell| frame.push(cell));
+            let cursor = iv
+                .session
+                .frame(|cell| frame.push(cell), &mut iv.blocks.borrow_mut());
             // Kapının operandı burada artıyor: hasar bulundu, kare çizilecek.
             // `kare`'den önce ve ondan bağımsız — GPU'nun bitirmesini
             // beklemiyor (bkz. `LinkIvars::content_frames`).
@@ -739,6 +751,7 @@ impl DisplayLink {
                 completion,
                 stats,
                 frame: RefCell::new(Frame::default()),
+                blocks: RefCell::new(Blocks::default()),
                 cell: Cell::new(cell),
                 content_frames: Cell::new(0),
                 motion_frames: Cell::new(0),

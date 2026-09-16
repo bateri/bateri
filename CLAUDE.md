@@ -37,8 +37,10 @@ sistemin Hareketi Azalt ayarını canlı izler; tek istisna `shell.integration`,
 kabuk çoktan doğduğu için **sonraki oturumda** geçerlidir. Kabuk zsh ise
 `bt-shell` sarmalayıcıyı `ZDOTDIR` ile kurar (betik `.app`'in
 `Contents/Resources/shell`'inden, debug'da depodan) ve kabuğun bastığı OSC 133
-işaretleri `Session::shell_state()`'te birikir — ürün yüzeyi (blok, dock) henüz
-yok. `make kur` `bateri.app` paketini üretir.
+işaretleri `Session::shell_state()`'te birikir; her prompt bir blok kimliği
+basar, `frame()` o kimlikleri prompt'un OSC 8 çıpasından okuyup blokları satır
+aralığı ve şerit rengi olarak sınırdan verir — **çizen taraf henüz yok**, dock
+da yok. `make kur` `bateri.app` paketini üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri
 aynı commit'te düzelir.
@@ -84,7 +86,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
-| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread (PTY okuma yolu **taranıyor**: araya giren sarmalayıcı baytları aynen geçirir, geçerken OSC 133 işaretlerini çeker), OSC (7/8/9/52; 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**, tarayıcı bu yüzden bizim: okuma yolunda çekilir, `ShellState`'e yazılır ve `Session::shell_state()` ile ayrı bir sorgudan okunur — `frame()` imzası değişmedi | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir |
+| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread (PTY okuma yolu **taranıyor**: araya giren sarmalayıcı baytları aynen geçirir, geçerken OSC 133 işaretlerini çeker), OSC (7/8/9/52; 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, tekerlek raporu), ayar modeli, shell bağlamı. OSC 133 alacritty'de **yok**, tarayıcı bu yüzden bizim: okuma yolunda çekilir, `ShellState`'e yazılır ve `Session::shell_state()` ile ayrı bir sorgudan okunur. Komut blokları `frame()` sınırından **çözülmüş** geçer (satır aralığı + renk, çıkış kodu değil): kimlik prompt'un OSC 8 çıpasından `Term` kilidi altında toplanır, renk kilit bırakıldıktan sonra kabuk defterinden çözülür | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, kutu çizim karakterleri, font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini, yereli, hangi kabuğun koşacağı ve sarmalayıcı betiğinin yeri (`child`), entegrasyonun kurulup kurulmayacağı ve `ZDOTDIR`/`BATERI_ZDOTDIR` çifti (`app::shell_integration_env`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`, OSC 52'nin pano işi; vnode kaynakları: ayar izleme), `libc` (bekçinin `write` + `_exit`'i, izlemenin `O_EVTONLY`'si, kabuğun passwd kaydı için `getpwuid_r`) |
@@ -190,10 +192,12 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   (`SessionOptions.working_directory`, `.env`). Sebep Dock'tan açılış:
   LaunchServices süreci `cwd=/` ile başlatıyor ve launchd'nin ortamında `LANG` yok.
 - **Tema = sekiz rol:** arka plan, ön plan, dim, accent ve dört durum. Bugün
-  dördü tüketiliyor — `background`, `foreground`, `dim` (SGR 2'li varsayılan ön
-  plan), `accent` (imleç) — ve yanlarında `[ansi]`'nin 16 rengi; durum rolleri
-  013 ile gelir. `bt_core::Theme` paletin **tek kaynağı**: zemin atlaması,
-  clear, imleç ve renk sorusunun yanıtı aynı değerden. `Adapter`'da **yaprak
+  altısı tüketiliyor — `background`, `foreground`, `dim` (SGR 2'li varsayılan ön
+  plan), `accent` (imleç **ve** koşan komut bloğunun şeridi), `success` ve
+  `error` (biten bloğun şeridi) — ve yanlarında `[ansi]`'nin 16 rengi; kalan iki
+  durum rolü (uyarı, bilgi) 013 ile gelir. Çizilmeyen rol eklenmiyor.
+  `bt_core::Theme` paletin **tek kaynağı**: zemin atlaması,
+  clear, imleç, blok şeridi ve renk sorusunun yanıtı aynı değerden. `Adapter`'da **yaprak
   kilit** altında durur; `frame()` kopyayı `Term` kilidinden önce alır,
   `set_theme` tek başına yazar ve kare ister (aynı temada no-op). Sönük
   (SGR 2) adlı renk temanın zeminine doğru üçte bir karışır

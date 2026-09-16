@@ -14,8 +14,11 @@
 //! doğar. `theme` ve `shell` bu sıranın dışında birer **yaprak** kilittir:
 //! tutulurken başka hiçbir kilit alınmaz, yani hangi kilidin altında alındığı
 //! önemsizdir — `frame` temanın kopyasını `term`'den önce alıp bırakır, renk
-//! sorusu `term` tutulurken okur, `set_theme` tek başına yazar; `shell`'i de
-//! okuyucu thread'i tek başına yazar, `shell_state` tek başına okur.
+//! sorusu `term` tutulurken okur, `set_theme` tek başına yazar; `shell`'i
+//! okuyucu thread'i tek başına yazar, `shell_state` tek başına okur, `frame`'in
+//! ikinci fazı (blok şeritleri) ise **`term` bırakıldıktan sonra** okur.
+//! Sıranın tersi yasak: yaprak kilit `term`'ün altına girdiği gün okuyucu
+//! thread ile kare yolu ters sırada kilitlenebilir olurdu.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -46,7 +49,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
-use crate::shell::{Scanner, ShellLog, ShellState};
+use crate::shell::{Scanner, ShellLog, ShellState, Stripe};
 use crate::wake::Wake;
 
 /// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
@@ -207,6 +210,57 @@ pub struct Cursor {
     /// genişletmeli" cümlesinin karşılığıdır; genişleten tüketici hareket
     /// oldu, IME değil.
     pub display_offset: i32,
+}
+
+/// Bir komut bloğunun karedeki izi: kapladığı satır aralığı ve şeridinin
+/// rengi.
+///
+/// **Çözülmüş geçer.** Çıkış kodu, blok kimliği ve kabuğun safhası bu sınırı
+/// geçmez; çizen taraf "hangi satırlar, hangi renk" sorusunun yanıtını alır,
+/// "neden o renk" sorusunu sormaz — `CLAUDE.md`'nin **karar burada, boyama
+/// orada** kuralı. Renderer'da çıkış kodu tanıyan bir dal yanlış yerdedir.
+///
+/// Satırlar **görünür pencere** cinsinden ve ikisi de dahil; hücrelerle aynı
+/// `display_offset`'ten çıkıyorlar, yani şerit kaydırmada bir kare geride
+/// kalmaz.
+///
+/// [`Eq`] yok: renk `f32` taşıyor ([`Cursor`] emsali).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Block {
+    /// Bloğun ilk satırı — prompt'un kendisi. Şerit komutu da kapsar, yalnız
+    /// çıktısını değil.
+    pub first_row: u16,
+    /// Bloğun son satırı, **dahil**: bir sonraki bloğun bir üstü, sonuncuda
+    /// pencerenin altı.
+    pub last_row: u16,
+    /// Şeridin rengi, **lineer** RGBA.
+    pub stripe: LinearRgba,
+}
+
+/// [`Session::frame`]'in blok listesi ve iki fazın arasındaki ara defter —
+/// çağıranın karelere yaydığı tampon.
+///
+/// **Kare başına ayırma yok:** iki `Vec` de her karede `clear()` ile boşalır
+/// ve ayrılan yeri korur. Çağıranda yaşamasının sebebi bu; `frame()`'in
+/// içinde doğsaydı her kare iki ayırma ederdi.
+///
+/// Ara defter (çıpalar: `(kimlik, ilk satır)`) burada ve **görünmez**: faz 1
+/// `Term` kilidi altında onu dolduruyor, faz 2 kilit bırakıldıktan sonra
+/// defterden renklendirip [`Blocks::as_slice`]'ı üretiyor. Kimlik ve çıkış
+/// kodu sınırı geçmediği için tip opak.
+#[derive(Debug, Default)]
+pub struct Blocks {
+    /// Faz 1'in topladığı çıpalar: `(blok kimliği, ilk satır)`, satır sırasıyla.
+    anchors: Vec<(u32, u16)>,
+    /// Faz 2'nin ürettiği liste; çizen taraf yalnız bunu görür.
+    resolved: Vec<Block>,
+}
+
+impl Blocks {
+    /// Bu karede çizilecek bloklar, satır sırasıyla.
+    pub fn as_slice(&self) -> &[Block] {
+        &self.resolved
+    }
 }
 
 /// Oturumun açılış ayarları.
@@ -935,6 +989,19 @@ fn visible_range<T>(selection: Option<&Selection>, term: &Term<T>) -> Option<Sel
     (range.end.line >= top && range.start.line <= bottom).then_some(range)
 }
 
+/// Prompt hücresine iliştirilmiş OSC 8 bağlantısından blok kimliği; bizim
+/// olmayan bağlantı `None`.
+///
+/// Şema **bize özel** (`bateri://block/`) ve kapı bu önek: `ls --hyperlink`'in
+/// `file://`'ı, bir `man` sayfasının `https://`'i ya da kullanıcının kendi
+/// prompt'undaki bağlantı buradan geçmez. Kimliği basan taraf
+/// `assets/shell/zsh/bateri.zsh`.
+///
+/// Kimlik `u32` ve ondalık: betiğin sayacı `%9v` ile genişliyor, yani metin.
+fn block_id(uri: &str) -> Option<u32> {
+    uri.strip_prefix("bateri://block/")?.parse().ok()
+}
+
 /// [`Session::scroll_wheel`]'in cevabı: tekerlek nereye gitti.
 ///
 /// `Option<i32>` değil, çünkü `bt-shell` üç cevapta üç ayrı şey yapıyor:
@@ -1073,16 +1140,30 @@ impl Session {
     /// değildir: `Session`'a geri giren bir sink (`resize`, `frame`) kendi
     /// kendini kilitler. Sink'in işi tamponu doldurmaktır, başka bir şey değil —
     /// `Wake` ile aynı sözleşme.
-    pub fn frame(&self, mut sink: impl FnMut(Cell)) -> Cursor {
+    ///
+    /// `blocks` **iki fazlıdır** ve sırası zorunlu. Faz 1, `Term` kilidi
+    /// altında: prompt hücrelerinin OSC 8 çıpasından blok kimliği çekilir ve
+    /// `(kimlik, ilk satır)` çiftleri toplanır. Faz 2, kilit **bırakıldıktan
+    /// sonra**: kimlikler kabuk defterinden renklendirilir. Ters sıra bu
+    /// modülün yazılı kuralını çiğnerdi — yaprak kilit (`shell`) `Term`
+    /// kilidinin altına girmez.
+    pub fn frame(&self, mut sink: impl FnMut(Cell), blocks: &mut Blocks) -> Cursor {
         // Tema `Term` kilidinden **önce** ve kopya olarak: yaprak kilit
         // kare boyunca tutulmaz, `Term` kilidinin altına ikinci bir muteks
         // girmez. Kopya ile kilit arasına düşen bir takas en çok bir kare
         // eski renkle çizer; takası yazan zaten kare istiyor.
         let theme = *lock(&self.adapter.0.theme);
         let background = theme.background_rgb();
+        blocks.anchors.clear();
+        blocks.resolved.clear();
         let term = self.term.lock();
 
         let rows = term.screen_lines() as i32;
+        // Alternatif ekranda blok **yok**: vim'in tamponunda prompt da komut da
+        // yok, oradaki satırlar hiçbir bloğa ait değil. Bayrak kilidin altında
+        // okunup faz 2'ye taşınıyor; yalnız çıpa toplamayı kapatmak yetmezdi,
+        // çıpasız pencerenin geri düşüşü (aşağıda) tam ekranı boyardı.
+        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
         let RenderableContent {
             display_iter,
             cursor,
@@ -1246,6 +1327,23 @@ impl Session {
             let Ok(row) = u16::try_from(row) else {
                 continue;
             };
+            // **Faz 1.** Çıpa okuması da kapıdan sonra (R3.4), ön planla aynı
+            // gerekçeyle: `hyperlink()` yan tabloya (`CellExtra`) iniyor ve
+            // çizilmeyen hücre için ödenmemeli. `extra` yokken erken dönüyor,
+            // yani çizilen hücre başına maliyet tek bir boş kontrol.
+            //
+            // Önek eşleşmesi yabancı bağlantıları da eliyor: `ls --hyperlink`
+            // ya da bir `man` sayfasının `file://`'ı buraya düşmez.
+            if !alt_screen && let Some(id) = cell.hyperlink().and_then(|link| block_id(link.uri()))
+            {
+                // Çıpa prompt'un **bütün** hücrelerinde; ilk satırı isteyen
+                // taraf yalnız değişimi kaydediyor. Aynı kimliğin ikinci kez
+                // görünmesi (araya başka bir kimlik girdikten sonra) yeni bir
+                // çıpa sayılır: satırlar artan, aralıklar tutarlı kalır.
+                if blocks.anchors.last().map(|&(last, _)| last) != Some(id) {
+                    blocks.anchors.push((id, row));
+                }
+            }
             // Ön plan **ancak burada** çözülüyor — atlama kapısından sonra.
             // Kapıdan önce olsaydı `Term` kilidi tutulurken çizilmeyen her
             // hücre için de ödenirdi ve boş grid'de hücrelerin neredeyse
@@ -1326,8 +1424,104 @@ impl Session {
                 strikeout,
             });
         }
+        drop(term);
 
+        // **Faz 2**, `Term` kilidi düştükten sonra: kimlikler kabuk
+        // defterinden renklendirilir. `rows` burada `u16`: `screen_lines`
+        // pozitif ve satırlar zaten `u16::try_from` ile bağlandı.
+        let Ok(last_row) = u16::try_from(rows - 1) else {
+            return cursor;
+        };
+        if !alt_screen {
+            self.resolve_blocks(blocks, last_row, offset, &theme);
+        }
         cursor
+    }
+
+    /// Faz 2: çıpalardan blok aralıkları, defterden renkler.
+    ///
+    /// Ayrı fonksiyon, çünkü **kilit rejimi ayrı**: burada yalnız `shell`
+    /// yaprak kilidi alınıyor ve `Term` kilidi çoktan düşmüş olmalı.
+    /// [`Session::frame`]'in gövdesinde dursaydı araya giren bir düzenleme
+    /// onu kilidin altına kolayca kaydırabilirdi.
+    fn resolve_blocks(&self, blocks: &mut Blocks, last_row: u16, offset: i32, theme: &Theme) {
+        // Yıkım: aşağıdaki kapatma yalnız `resolved`'ı ödünç alsın, döngü
+        // `anchors`'ı okuyabilsin. Tek bir `&mut blocks` ikisini de tutar ve
+        // ödünç denetleyicisi haklı olarak reddeder.
+        let Blocks { anchors, resolved } = blocks;
+        let shell = lock(&self.shell);
+        let running = shell.running();
+        let mut push = |id: u32, first_row: u16, end: u16| {
+            // Sıfır yükseklikli aralık: aynı satırda başlayan iki çıpa. Şerit
+            // çizecek pikseli olmayan bir blok listeye girmez.
+            if end < first_row {
+                return;
+            }
+            let Some(stripe) = shell.stripe(id, running) else {
+                return;
+            };
+            resolved.push(Block {
+                first_row,
+                last_row: end,
+                stripe: match stripe {
+                    Stripe::Running => theme.accent_linear(),
+                    Stripe::Success => theme.success_linear(),
+                    Stripe::Error => theme.error_linear(),
+                },
+            });
+        };
+
+        let Some(&(first_id, first_row)) = anchors.first() else {
+            // **Çıpasız pencere.** Kabuk `Running`'se pencere son `A`'nın
+            // bloğuna aittir: prompt yukarı kaymış, akan çıktı ekranı
+            // doldurmuş. `Input`'ta (ve `Prompt`/`Finished`'de) çizilmez —
+            // hangi bloğa ait olduğunu söyleyen tek şey çıpa ve o görünmüyor.
+            //
+            // Kaydırma kapısı planda yoktu ve bu tezin kendisinden geliyor:
+            // geçmişe kaydırılmış bir pencerede (offset > 0) görünen satırlar
+            // koşan komutun değil, çok daha eski bir bloğun çıktısı olabilir.
+            // Dipteyken böyle bir belirsizlik yok — koşan prompt'tan sonrası
+            // tanım gereği koşan bloğun.
+            if offset == 0
+                && let Some(id) = running
+            {
+                push(id, 0, last_row);
+            }
+            return;
+        };
+
+        // **Pencerenin üstü.** İlk görünür çıpa `N` ise üstündeki satırlar
+        // `N−1`'in: o blok yukarıda, geçmişte başlamış. `N−1` defterde yoksa
+        // (halka dolaştı, ya da `N` oturumun ilk bloğu) bölge **çizilmez**.
+        //
+        // **Bilinen sınır — kuralın dayanağı "her prompt çıpasını taşır".**
+        // Çıpa kaybı *tekdüze* olduğunda (kendi OSC 8'i ilk karakterde başlayan
+        // bir tema) hiçbir çıpa doğmaz ve yukarıdaki geri düşüş koşar; ama
+        // kayıp *aralıklı* olursa bu kol yanlış renk verir. Örneği geçici
+        // prompt: p10k'nın `TRANSIENT_PROMPT`'ı biten komutun prompt satırını
+        // kendi `PROMPT`'uyla yeniden basıyor, yani çıpa yalnız **canlı**
+        // prompt'ta kalıyor; o hâlde tek çıpa görünür ve üstündeki bütün
+        // pencere — birden çok bloğun çıktısı — `N−1`'in rengine boyanır.
+        // Ayırt edecek veri ızgarada yok: çıpasız bir prompt satırı ile çıktı
+        // satırı aynı görünüyor. "En az iki çıpa iste" gibi bir nöbet, tam da
+        // en sık meşru durumu (uzun çıktı, tek görünür prompt) öldürürdü.
+        // Kapatan iş `B`'nin asıl tüketicisi, yani prompt'u terminalin çizmesi
+        // (011) — geçici prompt o zaman bizim kararımız olur.
+        // (`/code-review`, 010 phase-2.)
+        if first_row > 0
+            && let Some(previous) = first_id.checked_sub(1)
+        {
+            push(previous, 0, first_row - 1);
+        }
+        for (at, &(id, row)) in anchors.iter().enumerate() {
+            // Bloğun sonu bir sonraki kimliğin **bir üstü**; sonuncunun sonu
+            // pencerenin altı.
+            let end = match anchors.get(at + 1) {
+                Some(&(_, next)) => next.saturating_sub(1),
+                None => last_row,
+            };
+            push(id, row, end);
+        }
     }
 
     /// Hasarı **tüketir**: `true` → çizilecek yeni içerik var.
@@ -1611,8 +1805,9 @@ impl Session {
     /// cevap veriyor.
     ///
     /// [`Session::theme`] ile aynı şekil: yaprak kilidi alır ve bırakır,
-    /// `Term` kilidine dokunmaz, `frame()`'in `sink`'inden de çağrılabilir —
-    /// ve `frame()` imzası bu yüzden değişmedi.
+    /// `Term` kilidine dokunmaz, `frame()`'in `sink`'inden de çağrılabilir.
+    /// Aynı yaprak kilidi `frame()` de alıyor (010, faz 2) ama `Term` kilidini
+    /// bıraktıktan **sonra**; ikisi hiçbir yerde iç içe girmiyor.
     pub fn shell_state(&self) -> Option<ShellState> {
         lock(&self.shell).state
     }
@@ -2125,8 +2320,23 @@ mod tests {
     /// kare istedi mi" — yani tek ifade. Ayrı ayrı yazılsalardı her sınama
     /// aynı iki satırı kopyalar ve hasarı yanlışlıkla iki kez tüketen bir
     /// sınama kendi kendini sessizce yeşile çevirirdi.
+    ///
+    /// Blok tamponu **burada doğup burada ölüyor**: bu sınamaların sorduğu şey
+    /// kare isteğiydi, blok değil. Blokları okuyan sınamalar
+    /// [`blocks_if_damaged`] ile tamponu kendileri tutar.
     fn frame_if_damaged(session: &Session, sink: impl FnMut(Cell)) -> Option<Cursor> {
-        session.take_damage().then(|| session.frame(sink))
+        session
+            .take_damage()
+            .then(|| session.frame(sink, &mut Blocks::default()))
+    }
+
+    /// [`frame_if_damaged`]'in blok soran kardeşi: tamponu çağıran tutar,
+    /// böylece sınama hem hücreleri hem şeritleri görebilir.
+    fn blocks_if_damaged(session: &Session, blocks: &mut Blocks) -> bool {
+        session.take_damage() && {
+            session.frame(|_| (), blocks);
+            true
+        }
     }
 
     /// Uyandırmaları sayar, pano yazmalarını kaydeder ve sınamanın
@@ -2275,6 +2485,189 @@ mod tests {
             Duration::from_secs(5),
             || session.shell_state() == Some(finished),
         );
+    }
+
+    /// `printf`'e girecek bir **çıpalı prompt**: OSC 133 `A` (kimlikli), OSC 8
+    /// ile sarılmış `$ ` ve `B`. Betiğin (`assets/shell/zsh/bateri.zsh`)
+    /// bastığı dizilerin aynısı, PS1 genişletmesi olmadan.
+    fn anchored_prompt(id: u32) -> String {
+        format!(
+            "\\033]133;A;bt_block={id}\\007\
+             \\033]8;;bateri://block/{id}\\007$ \\033]8;;\\007\
+             \\033]133;B\\007"
+        )
+    }
+
+    /// Komutun koşup bitmesi: `C` (kullanıcının Enter'ı), bir satır çıktı,
+    /// kodlu `D`. İki satır sonu de gerçek akıştan: biri Enter'ın, biri
+    /// çıktının.
+    fn ran(id: u32, code: i32, out: &str) -> String {
+        format!("\\033]133;C\\007\\r\\n{out}\\r\\n\\033]133;D;{code};bt_block={id}\\007")
+    }
+
+    /// Beklenen şekle varan ilk karenin bloklarını verir.
+    ///
+    /// [`wait_frame`] ile aynı örüntü ve aynı gerekçe: ölçüt sınamanın
+    /// kendisinde, zaman aşımı burada. Tampon döngü boyunca **aynı**, yani
+    /// yeniden kullanımı da sınanıyor — bir karenin artığı ötekine sızsaydı
+    /// ölçütler tutmazdı.
+    fn wait_blocks(
+        session: &Session,
+        wake: &TestWake,
+        ready: impl Fn(&[Block]) -> bool,
+    ) -> Vec<Block> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut blocks = Blocks::default();
+        let mut seen = 0;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "beklenen bloklar gelmedi: {:?}",
+                blocks.as_slice()
+            );
+            seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
+            if blocks_if_damaged(session, &mut blocks) && ready(blocks.as_slice()) {
+                return blocks.as_slice().to_vec();
+            }
+        }
+    }
+
+    /// Blokların satır aralıkları ve renkleri, karşılaştırması okunur olsun
+    /// diye üçlü demet.
+    fn spans(blocks: &[Block]) -> Vec<(u16, u16, LinearRgba)> {
+        blocks
+            .iter()
+            .map(|b| (b.first_row, b.last_row, b.stripe))
+            .collect()
+    }
+
+    #[test]
+    fn blocks_end_one_row_above_the_next_anchor() {
+        // Üç prompt, çünkü sonuncusu **çizilmiyor**: `A` geldi, `D` gelmedi ve
+        // kabuk `Input`'ta, yani `Pending` ama koşmuyor. İki prompt'la sınama
+        // "iki blok" yerine bir blok görür ve sınırın kuralını hiç sormazdı.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '{}cmd1{}{}cmd2{}{}'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out1"),
+                anchored_prompt(2),
+                ran(2, 1, "out2"),
+                anchored_prompt(3),
+            ),
+            Arc::clone(&wake),
+        );
+        // Satırlar: 0 `$ cmd1`, 1 `out1`, 2 `$ cmd2`, 3 `out2`, 4 `$ `.
+        let blocks = wait_blocks(&session, &wake, |blocks| blocks.len() == 2);
+        assert_eq!(
+            spans(&blocks),
+            [(0, 1, THEME.success_linear()), (2, 3, THEME.error_linear()),]
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_region_above_the_first_anchor_belongs_to_the_previous_block() {
+        // İlk prompt geçmişe kayıyor (10 satırlık pencere, 12 satır çıktı):
+        // ikinci çıpanın **üstündeki** satırlar birinci bloğun.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '{}cmd1\\033]133;C\\007'; \
+                 for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'out\\r\\n'; done; \
+                 printf '\\033]133;D;0;bt_block=1\\007{}'; sleep 5",
+                anchored_prompt(1),
+                anchored_prompt(2),
+            ),
+            Arc::clone(&wake),
+        );
+        // Son satır ikinci prompt, üstündeki dokuz satır birinci bloğun
+        // çıktısı; ikinci blok `Pending` olduğu için çizilmiyor.
+        let blocks = wait_blocks(&session, &wake, |blocks| {
+            blocks.len() == 1 && blocks[0].last_row == 8
+        });
+        assert_eq!(spans(&blocks), [(0, 8, THEME.success_linear())]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn an_unknown_previous_block_is_not_drawn() {
+        // Oturumun **ilk** bloğu: üstündeki satırlar `N−1`'in ama `N−1` hiç
+        // görülmedi (defterin `first`'ü `N`). Bilinmeyen çizilmez — halka
+        // dolaştığında da aynı kol koşuyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf 'eski\\r\\n{}cmd{}'; sleep 5",
+                anchored_prompt(7),
+                ran(7, 0, "out"),
+            ),
+            Arc::clone(&wake),
+        );
+        // Satır 0 `eski`, satır 1 çıpa. Tek blok, satır 0'ı kapsamıyor ve
+        // sonuncu olduğu için pencerenin altına kadar iniyor.
+        let blocks = wait_blocks(&session, &wake, |blocks| blocks.len() == 1);
+        assert_eq!(spans(&blocks), [(1, 9, THEME.success_linear())]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_window_without_anchors_follows_the_shell_phase() {
+        // Çıpa yok, çünkü prompt geçmişe kaydı — koşan komutun çıktısı ekranı
+        // doldurmuş. Kabuk `Running`'se pencerenin tamamı son `A`'nın bloğu.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033]133;A;bt_block=1\\007\\033]133;B\\007\\033]133;C\\007'; \
+             for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'out\\r\\n'; done; sleep 5",
+            Arc::clone(&wake),
+        );
+        let blocks = wait_blocks(&session, &wake, |blocks| blocks.len() == 1);
+        assert_eq!(spans(&blocks), [(0, 9, THEME.accent_linear())]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_window_without_anchors_is_empty_at_the_prompt() {
+        // Aynı pencere, `Input` safhasında: hangi bloğa ait olduğunu söyleyen
+        // tek şey çıpa ve o görünmüyor. **Bilinmeyen çizilmez.**
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033]133;A;bt_block=1\\007\\033]133;C\\007out\\r\\n\
+             \\033]133;D;0;bt_block=1\\007\\033]133;A;bt_block=2\\007\\033]133;B\\007'; \
+             sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until("kabuk `Input`'a geçmedi", Duration::from_secs(5), || {
+            session.shell_state().map(|s| s.phase) == Some(ShellPhase::Input)
+        });
+        wait_settled(&session);
+        let mut blocks = Blocks::default();
+        session.frame(|_| (), &mut blocks);
+        assert_eq!(blocks.as_slice(), []);
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_alternate_screen_has_no_blocks() {
+        // vim'in tamponunda ne prompt var ne komut; oradaki satırlar hiçbir
+        // bloğa ait değil. Geri düşüş kolu da kapalı olmalı: kabuk `Running`
+        // ve çıpa yok, yani kapı yalnız çıpa toplamayı kesseydi tam ekran
+        // boyanırdı.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '{}vim\\033]133;C\\007\\033[?1049hduzenleyici\\r\\n'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| row_text(cells, 0) == "duzenleyici");
+        wait_settled(&session);
+        let mut blocks = Blocks::default();
+        session.frame(|_| (), &mut blocks);
+        assert_eq!(blocks.as_slice(), []);
+        session.shutdown();
     }
 
     #[test]
@@ -4575,9 +4968,12 @@ mod tests {
         // Yarışan iki yol: okuyucu thread `TappedPty::read` içinde OSC 133
         // tararken `shell` kilidini alıyor (ve aynı turda `Term`'ü de tutuyor,
         // alacritty ilk turdan sonra kilidi tutarak okuyor), ana thread ise
-        // `shell_state()` ile yalnız `shell`'i, `frame()` ile yalnız `Term`'ü
-        // alıyor. İkisi ters sırada kilitlenirse bu sınama **asılı kalır** —
-        // yaprak kilit iddiasının (modül başlığı) tek mekanik bekçisi bu.
+        // `shell_state()` ile yalnız `shell`'i, `frame()` ile **önce** `Term`'ü
+        // sonra `shell`'i alıyor. İkisi ters sırada kilitlenirse bu sınama
+        // **asılı kalır** — yaprak kilit iddiasının (modül başlığı) tek
+        // mekanik bekçisi bu. 010 ile `frame()`'in ikinci fazı da bu kapıdan
+        // geçiyor: `shell`'i `Term`'ün altında alan bir düzenleme burada
+        // kalırdı.
         let wake = Arc::new(TestWake::default());
         let session = Arc::new(spawn_session(
             // Dört işaret de akıyor: prompt, komut başlangıcı, çalışma ve

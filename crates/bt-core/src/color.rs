@@ -66,8 +66,11 @@ impl LinearRgba {
 /// yanıt hep aynı değerden okunur. İki yerde dursalardı biri değişince
 /// pencere ile hücreler ayrı renk olurdu.
 ///
-/// Sekiz rollü modelin 007'de tüketicisi olan dördü burada; dört durum rolü
-/// 013 ile gelir. Alanlar `0xRRGGBB` (üst bayt okunmaz) ve `pub`: tip bir
+/// Sekiz rollü modelin altısı burada: 007'nin dördü ve 010'un iki durum rolü
+/// (`success`, `error`). Kalan iki durum rolü (uyarı, bilgi) 013'e kalıyor —
+/// **çizilmeyen rol eklenmiyor**, çünkü tüketicisi olmayan bir anahtar tema
+/// dosyasına girdiği gün biçim sözü verir ve sözün karşılığı yoktur.
+/// Alanlar `0xRRGGBB` (üst bayt okunmaz) ve `pub`: tip bir
 /// kayıt, `Settings` gibi; geçerliliğini kuran yol tema ayrıştırıcısı
 /// ([`Theme::parse`]). Alacritty'nin `Rgb`'si `pub` yüzde görünmez.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,8 +83,13 @@ pub struct Theme {
     /// bir kuraldan, zemine karıştırarak gelir ([`dim_toward`]); bu rol
     /// yalnız varsayılan ön planın.
     pub dim: u32,
-    /// Vurgu; bugün imleç bloğu.
+    /// Vurgu; bugün imleç bloğu **ve koşan komut bloğunun şeridi**.
     pub accent: u32,
+    /// Durum: başarı. Bugün sıfır çıkış koduyla biten komut bloğunun şeridi.
+    pub success: u32,
+    /// Durum: hata. Bugün sıfırdan farklı çıkış koduyla biten komut bloğunun
+    /// şeridi.
+    pub error: u32,
     /// 16 ANSI rengi: siyah, kırmızı, yeşil, sarı, mavi, macenta, camgöbeği,
     /// beyaz, sonra aynı sırada parlak sekizlisi.
     pub ansi: [u32; 16],
@@ -97,6 +105,11 @@ impl Theme {
     /// hesaplanıyordu. Rol bir değer, kural değil — 007 phase-3'te adlı
     /// renklerin sönüğü zemine karışmaya başladığında bu değer yerinde kaldı.
     ///
+    /// `success` ve `error` paletin yeşili ile kırmızısının **kendisi**:
+    /// `accent`'ın maviye eşit olmasıyla aynı emsal. Rolün ayrı bir alan olma
+    /// sebebi değerin farklı olması değil, kullanıcının şeridi metin renklerine
+    /// dokunmadan değiştirebilmesi.
+    ///
     /// `const`: `bt-gpu`'nun sınamaları clear ve imleç rengini `const`
     /// bağlamda buradan alıyor. sRGB tablosunun `const` olmasının gerekçesi
     /// de bu.
@@ -109,6 +122,8 @@ impl Theme {
         foreground: 0xd8d9dd,
         dim: 0x909093,
         accent: 0x7a9cc6,
+        success: 0x8bb58b,
+        error: 0xd16d6a,
         ansi: [
             0x22252b, 0xd16d6a, 0x8bb58b, 0xd6b16a, // siyah   kırmızı  yeşil    sarı
             0x7a9cc6, 0xb08ec0, 0x79b3b3, 0xc8c9cc, // mavi    macenta  camgöbeği beyaz
@@ -144,6 +159,8 @@ impl Theme {
         foreground: 0x24262c,
         dim: 0x696b70,
         accent: 0x3d6aa8,
+        success: 0x3b7a3b,
+        error: 0xb5423d,
         ansi: [
             0x2b2e35, 0xb5423d, 0x3b7a3b, 0x8f6a00, // siyah   kırmızı  yeşil    sarı
             0x3a66a6, 0x8a4c9c, 0x23787f, 0xb9bbc1, // mavi    macenta  camgöbeği beyaz
@@ -176,6 +193,16 @@ impl Theme {
     /// burada: renk kararı temanın, çizim kararı renderer'ın.
     pub const fn accent_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.accent))
+    }
+
+    /// Başarıyla biten bloğun şerit rengi, **lineer** RGBA.
+    pub const fn success_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.success))
+    }
+
+    /// Hatayla biten bloğun şerit rengi, **lineer** RGBA.
+    pub const fn error_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.error))
     }
 
     /// Paletin `index` numaralı rengi. Numaralandırma alacritty'nin
