@@ -84,7 +84,7 @@ make kur
 
 ### Yayın Checklist
 
-- [ ] B.1 `/ship` — `main`'e push
+- [x] B.1 `/ship` — `main`'e push
 - [ ] B.2 `/measure` — tarayıcının akış maliyeti (ölçüm bekliyor; kapı değil)
 - [ ] B.3 `make kur` — sevk paketi gerekiyorsa
 
