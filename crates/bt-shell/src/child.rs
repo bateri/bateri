@@ -478,19 +478,49 @@ mod tests {
             home.join(".zshenv"),
             "export ZDOTDIR=$HOME/cfg\nexport SEEN_ZSHENV=1\n",
         );
-        write(cfg.join(".zprofile"), "export SEEN_ZPROFILE=1\n");
+        // R3.5'in pini. `typeset` fonksiyon içinde **yereldir**: kullanıcının
+        // dosyası fonksiyondan `source` edilirse bu iki satır dönüşte silinir
+        // ve belirti sessizdir. Seçilen deyim uydurma değil — Homebrew, asdf,
+        // pyenv ve nvm PATH'i tam böyle kuruyor, yani kusur o araçların
+        // bateri'de kaybolması demekti (009 phase-5, ölçüm o dosyada).
+        write(
+            cfg.join(".zprofile"),
+            "export SEEN_ZPROFILE=1\n\
+             typeset -U path\n\
+             path+=(/opt/probe)\n\
+             typeset -A probe_map=(k v)\n\
+             export SEEN_ARGC=$#\n",
+        );
         // Kasıtlı bozuk: olmayan bir komut **ve** bir sözdizimi hatası. İkisi
         // de `source`'u yarıda bırakır; kabuğu bırakmamalı.
         write(
             cfg.join(".zshrc"),
             "PS1='$ '\nbateri_bozuk_komut_yok\nif then fi\n",
         );
+        // `path`'teki indeks makineye bağlı (kalıtılan PATH'in uzunluğu), o
+        // yüzden **varlık** basılıyor: `> 0` deterministik.
         write(
             cfg.join(".zlogin"),
-            "print -r -- \"$ZDOTDIR $SEEN_ZSHENV $SEEN_ZPROFILE $HISTFILE\" >| $HOME/zlogin\n",
+            "print -r -- \"$ZDOTDIR $SEEN_ZSHENV $SEEN_ZPROFILE $HISTFILE \
+             $((${path[(I)/opt/probe]} > 0)) ${${(t)probe_map}:-yok} $SEEN_ARGC\" \
+             >| $HOME/zlogin\n",
         );
 
-        let wrapper = zsh_wrapper_dir().expect("sarmalayıcı bulunamadı");
+        // Sarmalayıcı depodan **kopyalanıyor**, depo dizini `ZDOTDIR` olarak
+        // verilmiyor (`/code-review`, 009 kapısı): `ZDOTDIR` oturum boyunca
+        // bir süre bizi gösteriyor ve `HISTFILE` düzeltmesi gerilerse zsh
+        // oraya `.zsh_history` bırakır. Depo yolunda bu, çalışma kopyasını
+        // kirletmenin ötesinde **başka bir crate'in** sınamasını
+        // (`zsh_wrapper_inventory_is_exactly_what_the_bundle_copies`, `bateri`)
+        // kalıcı kırmızıya çevirirdi — üstelik ayrı bir test binary'sinde,
+        // yani belirti rastgele bir koşuda görünürdü.
+        let source = zsh_wrapper_dir().expect("sarmalayıcı bulunamadı");
+        let wrapper = root.0.join("wrapper");
+        std::fs::create_dir_all(&wrapper).expect("sarmalayıcı kopyası kurulamadı");
+        for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin", "bateri.zsh"] {
+            std::fs::copy(source.join(file), wrapper.join(file))
+                .unwrap_or_else(|e| panic!("{file} kopyalanamadı: {e}"));
+        }
         let session = Session::spawn(
             SessionOptions {
                 // `-l -i`: bizim oturumumuzun hâli (alacritty `login` ile
@@ -547,16 +577,43 @@ mod tests {
         let seen = home.join("zlogin");
         wait_until("kullanıcının .zlogin'i okunmadı", || seen.is_file());
         let seen = std::fs::read_to_string(&seen).expect("zlogin izi okunamadı");
+        // Son üç alan R3.5: `typeset -U path` ile eklenen dizin `path`'te
+        // duruyor, `typeset -A` dizisi hâlâ bir association ve kullanıcının
+        // dosyası konumsal parametre görmüyor. Üçü de fonksiyon içinden
+        // `source` edilen bir dosyada başarısız olur.
         assert_eq!(
             seen.trim(),
-            format!("{0} 1 1 {0}/.zsh_history", cfg.display()),
-            "ZDOTDIR ya da HISTFILE geri konmadı, ya da dosyalar yüklenmedi"
+            format!("{0} 1 1 {0}/.zsh_history 1 association 0", cfg.display()),
+            "ZDOTDIR/HISTFILE geri konmadı, kullanıcının dosyaları yüklenmedi \
+             ya da dosya zsh'in okuduğu bağlamda okunmadı (`typeset` yerel \
+             kaldı / konumsal parametre sızdı)"
         );
         // Kusurun kendi izi: geçmiş **bizim** dizinimize yazılmış olmamalı.
+        //
+        // Kapanışı BEKLEMEK zorunlu (`/code-review`, 009 kapısı): zsh
+        // `$HISTFILE`'ı **çıkışta** yazıyor (zincirde `inc_append_history` ya
+        // da `share_history` kuran yok). `exit`ten mikrosaniyeler sonra
+        // bakan bir iddia yarışı her seferinde kazanır ve kusur gerilese de
+        // yeşil kalırdı — tuzağın kendisi tuzağa düşerdi.
+        //
+        // Senkron noktası **olayın kendisi**: geçmiş dosyasının kullanıcının
+        // dizininde belirmesi. İki aday reddedildi — `reader_alive()`
+        // `shutdown()` okuyucuyu `take` ettiği için dönüşte zaten `false`,
+        // `Teardown::Clean` ise burada garanti değil (ölçüldü: `Abandoned`
+        // geliyor; çıkışın içinde takılan çocuk kapanışı asamıyor, kayıtlı
+        // borç — `CLAUDE.md` → Kapanış). Beklenen olay aynı zamanda
+        // **pozitif** iddia: negatif iddia tek başına "doğru yere yazıldı"
+        // ile "hiç yazılmadı"yı ayırt edemezdi, ikisi de sarmalayıcının
+        // dizinini boş bırakır.
+        wait_until(
+            "komut geçmişi kullanıcının dizinine yazılmadı",
+            || cfg.join(".zsh_history").is_file(),
+        );
         assert!(
             !wrapper.join(".zsh_history").exists(),
             "komut geçmişi sarmalayıcının dizinine yazıldı"
         );
+        session.shutdown();
     }
 
     #[test]

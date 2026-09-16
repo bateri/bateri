@@ -104,9 +104,10 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   plana gelmeden açılan bir koşuda (ajanın kabuğu, `cargo run` arka planda)
   display link callback vermiyor: `advance` bir daha koşmuyor, hareket 1
   karede kalıyor ve deadline `Verdict::MotionUnsettled` deyip **"bir durma
-  koşulu bozuk"** diye kodu suçluyor. Ölçüldü (009 phase-4): aynı commit
-  kullanıcının kendi terminalinde `kare=29 hareket=27 kapanis=clean` ile
-  yeşil, ajanın kabuğunda üç koşu da kırmızı; `2af9d87`'de de aynı. Örtülme
+  koşulu bozuk"** diye kodu suçluyor. Ölçüldü (jeton satırı
+  `.tasks/009-shell-entegrasyonu/phase-4.md`'de): aynı commit kullanıcının
+  kendi terminalinde yeşil, ajanın kabuğunda üç koşu da kırmızı; `2af9d87`'de
+  de aynı. Örtülme
   kolu (`set_visible(false)` → `Motion::finish`) deliği kapatmıyor, çünkü o
   kol örtülme **bildirimine** bağlı ve hiç görünmemiş pencerede bildirim yok
   — `Motion::finish`'in doc'u sonucu zaten tarif ediyor. Çarenin yönü belli

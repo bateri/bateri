@@ -40,6 +40,12 @@ setin (bloklar, Input Dock) üstüne kurulacağı durum ve onun sınanmış yolu
   - **R3.4** — Kullanıcının rc dosyalarına **yazılmaz** (`make denetim`
     kapısı; listesi `.zshenv`/`.zlogin`/`.zlogout`'u kapsayacak şekilde
     genişletilir).
+  - **R3.5** — Kullanıcının dosyası zsh'in onu okuduğu **bağlamda** okunur:
+    `typeset`/`local` bildirimleri global kalır (fonksiyon içinden
+    `source` edilmez) ve konumsal parametreler boştur. Sarmalayıcının hiçbir
+    kolu — atlanmış `.zshenv`, kendine dönük `ZDOTDIR`, yalnız `.zshenv`
+    okuyan kabuk — kullanıcının `ZDOTDIR`'ını kaybetmez. *(Set yürürken
+    `/code-review` buldu; gerekçe phase-5.)*
 - **R4 — Kabuk kararı ve hermetiklik.**
   - **R4.1** — Hangi kabuğun koştuğu **spawn'dan önce** `bt-shell`'de çözülür
     (`child`); alacritty'nin `$SHELL` sırasıyla paritesi doc'ta yazılıdır.
@@ -116,4 +122,5 @@ kabuk zsh mi? ──► evet               Session::spawn
 | phase-2 | ✅ |
 | phase-3 | ✅ |
 | phase-4 | ✅ |
+| phase-5 | ✅ |
 | kapı | |
