@@ -11,10 +11,11 @@
 //! (`set_terminal_options`).
 //! Kilit **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
 //! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa kilitlenme
-//! doğar. `theme` bu sıranın dışında bir **yaprak** kilittir: tutulurken başka
-//! hiçbir kilit alınmaz, yani hangi kilidin altında alındığı önemsizdir —
-//! `frame` kopyasını `term`'den önce alıp bırakır, renk sorusu `term`
-//! tutulurken okur, `set_theme` tek başına yazar.
+//! doğar. `theme` ve `shell` bu sıranın dışında birer **yaprak** kilittir:
+//! tutulurken başka hiçbir kilit alınmaz, yani hangi kilidin altında alındığı
+//! önemsizdir — `frame` temanın kopyasını `term`'den önce alıp bırakır, renk
+//! sorusu `term` tutulurken okur, `set_theme` tek başına yazar; `shell`'i de
+//! okuyucu thread'i tek başına yazar, `shell_state` tek başına okur.
 
 use std::collections::HashMap;
 use std::io;
@@ -38,6 +39,7 @@ use alacritty_terminal::vte::ansi::CursorShape;
 
 use crate::color::{self, LinearRgba, Theme};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
+use crate::shell::ShellState;
 use crate::wake::Wake;
 
 /// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
@@ -858,6 +860,17 @@ pub struct Session {
     /// Okuyucu thread; `shutdown()` alır, `Drop` de çağırır. `Option`
     /// "kapandı" demenin ve iki kez join etmemenin yoludur.
     reader: Mutex<Option<Reader>>,
+    /// Kabuğun OSC 133 ile bildirdiği durum; yokluğu "entegrasyon yok" demek.
+    ///
+    /// **Yaprak kilit** (`theme` emsali): tutulurken başka kilit alınmaz ve
+    /// tutan taraf yalnız kopyalar — [`ShellState`] `Copy` ve küçük. Yazanı
+    /// okuyucu thread'i, okuyanı [`Session::shell_state`].
+    ///
+    /// `Adapter`'da değil `Session`'da, çünkü `Adapter` alacritty'nin
+    /// olaylarını karşılıyor ve bu duruma **hiç** dokunmuyor; işaretler
+    /// olaylardan değil ham bayt akışından geliyor. `Arc`, çünkü akışı tarayan
+    /// taraf (sarmalayıcı, phase-2) bu yuvayı okuyucu thread'ine taşıyacak.
+    shell: Arc<Mutex<Option<ShellState>>>,
 }
 
 impl Session {
@@ -906,6 +919,7 @@ impl Session {
             sender,
             adapter,
             reader: Mutex::new(Some(event_loop.spawn())),
+            shell: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1466,6 +1480,21 @@ impl Session {
     /// `sink`'inden de çağrılabilir.
     pub fn theme(&self) -> Theme {
         *lock(&self.adapter.0.theme)
+    }
+
+    /// Kabuğun OSC 133 ile bildirdiği durum, kopya olarak — hiç işaret
+    /// gelmediyse `None`.
+    ///
+    /// `None`'ın anlamı **"entegrasyon yok"**: kabuk bizim sarmalayıcımızla
+    /// açılmadı, kullanıcı ayarla kapattı ya da oturum SSH ile başka bir
+    /// makineye geçti. Üçü de arıza değil sessiz geri düşüş, bu yüzden üçü tek
+    /// cevap veriyor.
+    ///
+    /// [`Session::theme`] ile aynı şekil: yaprak kilidi alır ve bırakır,
+    /// `Term` kilidine dokunmaz, `frame()`'in `sink`'inden de çağrılabilir —
+    /// ve `frame()` imzası bu yüzden değişmedi.
+    pub fn shell_state(&self) -> Option<ShellState> {
+        *lock(&self.shell)
     }
 
     /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve
@@ -2084,6 +2113,18 @@ mod tests {
             },
             theme: THEME,
         }
+    }
+
+    #[test]
+    fn shell_state_stays_empty_without_a_feeder() {
+        // Tarayıcı var ama akışa henüz bağlı değil (phase-2'nin işi); yuvanın
+        // boş kalması "entegrasyon yok" cevabının kendisi. Kabuk gerçekten
+        // işaret bassa bile bugün görünmemeli, yoksa sonraki phase'in bağladığı
+        // yol hiç sınanmamış olur.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf '\\033]133;A\\007'", Arc::clone(&wake));
+        wait_settled(&session);
+        assert_eq!(session.shell_state(), None);
     }
 
     #[test]

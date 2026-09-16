@@ -4,6 +4,7 @@
 //! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`,
 //! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Theme`,
+//! `ShellState`, `ShellPhase`,
 //! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`, `CursorMotion`,
 //! `ReduceMotion`'ı görür (tam
 //! liste aşağıdaki `pub use` bloğu). `Osc52` alacritty'nin aynı adlı tipinin
@@ -32,6 +33,7 @@ mod color;
 mod input;
 mod session;
 mod settings;
+mod shell;
 mod theme;
 mod wake;
 
@@ -44,6 +46,7 @@ pub use session::{
 pub use settings::{
     Changes, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion, SYSTEM_THEME, Settings,
 };
+pub use shell::{ShellPhase, ShellState};
 pub use wake::Wake;
 
 /// Hücre sabit boyuttadır ve sabit burada bağlanır: **alacritty'nin** hücresi
