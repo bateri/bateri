@@ -3,7 +3,7 @@
 //! sırasını yürütür. Çizim çağrısı burada **yok**, bu dosyanın işi bağlamak.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::ffi::c_void;
+use std::ffi::{OsString, c_void};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -304,7 +304,7 @@ fn shell_integration_env(
     setting: ShellIntegration,
     shell: impl FnOnce() -> Option<PathBuf>,
     script_dir: impl FnOnce() -> Option<PathBuf>,
-    zdotdir: Option<String>,
+    zdotdir: Option<OsString>,
 ) -> Vec<(String, String)> {
     if matches!(inputs, Inputs::Hermetic) || setting == ShellIntegration::Off {
         return Vec::new();
@@ -320,11 +320,37 @@ fn shell_integration_env(
     let Some(dir) = script_dir().and_then(|dir| dir.into_os_string().into_string().ok()) else {
         return Vec::new();
     };
+    // Kullanıcının özgün `ZDOTDIR`'ı: betik onu geri koyacak. Üç kol da
+    // "ikinci çift gitmesin" diyor ama gerekçeleri ayrı:
+    let original = match zdotdir {
+        // Boş değer tanımsız sayılıyor (`decide_locale`'in kuralı) — boş bir
+        // `ZDOTDIR`'ı "geri koymak" `$HOME`'u işaret eden bir değişken
+        // yaratmak olurdu.
+        None => None,
+        Some(value) if value.is_empty() => None,
+        Some(value) => match value.into_string() {
+            // **Kendine dönük değer** (`/code-review`, 009 kapısı): ortamdaki
+            // `ZDOTDIR` zaten betiğin dizinini gösteriyorsa (elle kurulmuş ya
+            // da sızmış) onu "kullanıcının özgün değeri" diye geri vermek,
+            // betiğe kendi `.zshenv`'ini yeniden yükletir ve zsh'in `FUNCNEST`
+            // sınırına kadar özyineler; oturum `ZDOTDIR`'sız kalır. Betikte de
+            // bir kat var, bu ilk kat.
+            Ok(value) if value == dir => None,
+            Ok(value) => Some(value),
+            // **UTF-8 olmayan değer entegrasyonu tümden reddediyor** ve bu
+            // kol `var` yerine `var_os` istemesinin sebebi (`/code-review`,
+            // 009 kapısı): `var().ok()` onu `None`'a düşürüyordu, yani
+            // "kullanıcının `ZDOTDIR`'ı yoktu" sayılıyor ve betik oturumun
+            // sonunda değişkeni **siliyordu** — kullanıcının bütün
+            // yapılandırması tanısız kaybolurdu. Komşu her kenar (UTF-8
+            // olmayan betik yolu, tanınmayan `$SHELL`) entegrasyonu
+            // reddederek geri düşüyor; `decide_locale` de "yok" ile
+            // "kullanılamaz"ı bilerek ayırıyor.
+            Err(_) => return Vec::new(),
+        },
+    };
     let mut env = vec![("ZDOTDIR".to_owned(), dir)];
-    // Kullanıcının özgün `ZDOTDIR`'ı: betik onu geri koyacak. Boş değer
-    // tanımsız sayılıyor (`decide_locale`'in kuralı) — boş bir `ZDOTDIR`'ı
-    // "geri koymak" `$HOME`'u işaret eden bir değişken yaratmak olurdu.
-    if let Some(original) = zdotdir.filter(|value| !value.is_empty()) {
+    if let Some(original) = original {
         env.push(("BATERI_ZDOTDIR".to_owned(), original));
     }
     env
@@ -1434,7 +1460,7 @@ impl AppDelegate {
                         self.ivars().settings.borrow().shell_integration,
                         child::shell,
                         child::zsh_wrapper_dir,
-                        std::env::var("ZDOTDIR").ok(),
+                        std::env::var_os("ZDOTDIR"),
                     ))
                     .collect(),
                 cols: grid.cols,
@@ -2855,7 +2881,7 @@ mod tests {
                 setting,
                 || panic!("süreli koşu kabuğu çözdü"),
                 || panic!("süreli koşu betiği aradı"),
-                Some("/home/someone/zsh".to_owned()),
+                Some("/home/someone/zsh".into()),
             );
             assert!(env.is_empty(), "{setting:?} hermetik koşuda ortam ekledi");
         }
@@ -2925,7 +2951,7 @@ mod tests {
             ShellIntegration::Auto,
             shell,
             dir,
-            Some(String::new()),
+            Some(OsString::new()),
         );
         assert_eq!(env.len(), 1, "boş ZDOTDIR geri konacak değer sayıldı");
         // Kullanıcının `ZDOTDIR`'ı var: betik onu geri koyabilsin diye ikinci
@@ -2936,7 +2962,7 @@ mod tests {
             ShellIntegration::Auto,
             shell,
             dir,
-            Some("/home/someone/zsh".to_owned()),
+            Some("/home/someone/zsh".into()),
         );
         assert_eq!(
             env,
@@ -2944,6 +2970,53 @@ mod tests {
                 ("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned()),
                 ("BATERI_ZDOTDIR".to_owned(), "/home/someone/zsh".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn a_self_referential_zdotdir_is_not_handed_back() {
+        // Ortamdaki `ZDOTDIR` zaten **betiğin kendi dizini**: geri konacak bir
+        // "kullanıcı değeri" yok. Verilseydi betik kendi `.zshenv`'ini yeniden
+        // yükler ve zsh'in `FUNCNEST` sınırına kadar özyinelerdi; ölçülen
+        // sonuç 336 satır hata ve `ZDOTDIR`'sız kalan bir oturumdu
+        // (`/code-review`, 009 kapısı).
+        let user = Inputs::User { config_root: None };
+        let (shell, dir) = zsh_and_dir();
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            shell,
+            dir,
+            Some("/opt/bateri/shell/zsh".into()),
+        );
+        assert_eq!(
+            env,
+            vec![("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned())],
+            "kendine dönük ZDOTDIR betiğe geri verildi"
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_zdotdir_refuses_the_integration() {
+        // "Yok" ile "kullanılamaz" ayrı: `var().ok()` ikisini birleştiriyordu
+        // ve sonuç sessiz bir veri kaybıydı — betik "kullanıcının yoktu"
+        // sanıp oturum sonunda `ZDOTDIR`'ı **siler**, yani kullanıcının bütün
+        // yapılandırması tanısız kaybolurdu. Entegrasyonu hiç kurmamak,
+        // komşu kenarların (UTF-8 olmayan betik yolu, tanınmayan `$SHELL`)
+        // zaten seçtiği geri düşüş.
+        use std::os::unix::ffi::OsStringExt as _;
+        let user = Inputs::User { config_root: None };
+        let (shell, dir) = zsh_and_dir();
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            shell,
+            dir,
+            Some(OsString::from_vec(vec![0x2f, 0xff, 0xfe])),
+        );
+        assert!(
+            env.is_empty(),
+            "UTF-8 olmayan ZDOTDIR ile sarmalayıcı kuruldu"
         );
     }
 

@@ -1,8 +1,17 @@
 # bateri'nin zsh sarmalayıcısı — ortak gövde.
 #
 # Yükleyeni bizim ZDOTDIR'ımızdaki dört dosya (`.zshenv`, `.zprofile`,
-# `.zshrc`, `.zlogin`); her biri birkaç satır, mantığın tamamı burada. Dört
-# kopya dördüncü düzeltmede ayrışırdı.
+# `.zshrc`, `.zlogin`). Gövde ZDOTDIR takasını ve kancaları tutuyor; `source`
+# **burada değil**, her dosyanın kendi en üst seviyesinde.
+#
+# KULLANICININ DOSYASI FONKSİYON İÇİNDEN `source` EDİLMEZ (009 phase-5) ve bu
+# kuralın bedeli ölçüldü: zsh'te fonksiyon içindeki `typeset` YERELDİR, yani
+# `typeset -U path; path+=(…)` — Homebrew, asdf, pyenv ve nvm'in standart PATH
+# deyimi — dönüşte silinirdi. Belirti sessiz: kullanıcının araçları yalnız
+# bateri'de kaybolur, her başka terminalde çalışır. Aynı sınır konumsal
+# parametreleri de bozuyordu (dosya `$#`'i 1 görüyordu). Bu yüzden gövde iki
+# parçaya ayrıldı: [`__bateri_begin`] hazırlar, dosya top-level `source`
+# yapar, [`__bateri_end`] toplar.
 #
 # SÖZLEŞME (kuran taraf `bt-shell`'in `app::shell_integration_env`'i):
 #   ZDOTDIR         bu dizin
@@ -10,6 +19,12 @@
 #                   da yoktu; geri koyarken ZDOTDIR silinir, $HOME'a
 #                   eşitlenmez — ihraç edilen bir ZDOTDIR ile hiç olmayan
 #                   ZDOTDIR çocuklar için farklı şeyler.
+#
+# BİLİNEN VE SINIRLI FARK: top-level `source` içinde zsh `$0`'ı yüklenen
+# dosyanın yoluna kuruyor; gerçek başlangıçta kabuğun adı olurdu. Çaresi
+# `function_argzero`'yu geçici kapatmak olurdu — kullanıcının kodunun
+# etrafında option çevirmek, tam da kaçındığımız görünmez mutasyon. kitty'nin
+# sarmalayıcısı da aynı farkı kabul ediyor.
 #
 # HİÇBİR KOLDA ÖLÜMCÜL DEĞİL: `exit` yok, kullanıcının her dosyası korunarak
 # okunuyor. Gerekçe sert — çocuk ölünce uygulama kapanıyor (`bt-shell`'in
@@ -20,7 +35,7 @@
 #
 # SİSTEMİN rc dosyaları (`/etc/zshrc`) her aşamada bizimkinden ÖNCE okunuyor
 # ve o sırada ZDOTDIR bizi gösteriyor. Yazan tek kalem `HISTFILE` ve
-# [`__bateri_load`] onu düzeltiyor. Kalan kalem salt okunur ve bilerek
+# [`__bateri_begin`] onu düzeltiyor. Kalan kalem salt okunur ve bilerek
 # bırakıldı: `/etc/zshrc` `${ZDOTDIR:-$HOME}/.zkbd/${TERM}-${VENDOR}`
 # arıyor, yani `~/.zkbd` ile tuş bağlaması üretmiş bir kullanıcı onu
 # yükleyemez ve terminfo'dan gelen varsayılana düşer. Çaresi sistemin rc
@@ -42,7 +57,17 @@
 # Bir kez saptanıyor: `.zshenv` her zsh'te okunuyor ve ortam değişkenini
 # oradan alıp siliyoruz.
 if (( ! ${+__bateri_had} )); then
-  if [[ -n ${BATERI_ZDOTDIR} ]]; then
+  # KENDİNE DÖNÜK DEĞER REDDEDİLİYOR: `BATERI_ZDOTDIR` bizim dizinimizi
+  # gösteriyorsa "kullanıcının özgün değeri"ni değil kendimizi geri koyardık
+  # — `__bateri_begin` kendi `.zshenv`'imizi yeniden yükler ve zsh'in
+  # FUNCNEST sınırına kadar özyineler (ölçüldü: 336 satır hata, oturum
+  # ZDOTDIR'sız kalıyor). Kapının ilk katı Rust tarafında
+  # (`shell_integration_env`); bu ikinci kat, ortamı elle kuran hâller için.
+  # Sağ taraf TIRNAKLI: `[[ ]]` içinde tırnaksız sağ işlenen bir **glob
+  # deseni**, düz metin değil. Paket `/Applications/[dev] bateri.app/…` gibi
+  # bir yolda dursaydı desen kendi düz değeriyle eşleşmez, kapı açılır ve tam
+  # da önlediği özyinelemeye düşerdik (`/code-review`, 009 phase-5).
+  if [[ -n ${BATERI_ZDOTDIR} && ${BATERI_ZDOTDIR:A} != "${__bateri_dir:A}" ]]; then
     __bateri_had=1
     __bateri_user=$BATERI_ZDOTDIR
   else
@@ -52,17 +77,13 @@ if (( ! ${+__bateri_had} )); then
   unset BATERI_ZDOTDIR
 fi
 
-# Kullanıcının aynı adlı başlangıç dosyasını yükler.
+# Kullanıcının aynı adlı başlangıç dosyasını yüklemeye HAZIRLAR; yüklemeyi
+# çağıran dosya kendi en üst seviyesinde yapar.
 #
 # ZDOTDIR yükleme boyunca KULLANICININ değerini taşıyor ve bunun iki sebebi
 # var: dosyanın kendisi `$ZDOTDIR`'ı doğru görsün, ve o dosyadan doğan alt
 # süreçler (brew shellenv, nvm, direnv) bizim dizinimizi miras almasın.
-#
-# Dönüşte değer YENİDEN OKUNUYOR: bir kullanıcının ZDOTDIR'ı olmasının en
-# yaygın yolu `~/.zshenv` içinde onu atamaktır. Okumasaydık kalan dosyaları
-# eski dizinden arar, yani tam da kullanıcının taşıdığı yapılandırmayı
-# kaçırırdık.
-__bateri_load() {
+__bateri_begin() {
   if (( __bateri_had )); then
     ZDOTDIR=$__bateri_user
   else
@@ -79,12 +100,24 @@ __bateri_load() {
   if [[ -n $HISTFILE && $HISTFILE == "$__bateri_dir"/* ]]; then
     HISTFILE=${ZDOTDIR:-$HOME}/${HISTFILE#"$__bateri_dir"/}
   fi
+  # `typeset -g`: değeri okuyacak olan, bu fonksiyon değil ÇAĞIRAN dosyanın
+  # en üst seviyesi. `-r` okunamayan dosyayı (yok, izin yok) boş değerle
+  # eler; `source`'un kendi hatası da ölümcül değil — sözdizimi hatası o
+  # dosyayı bırakır, kabuğu değil.
   local file=${ZDOTDIR:-$HOME}/$1
-  # `-r` okunamayan dosyayı (yok, izin yok) sessizce atlar; `source`'un kendi
-  # hatası da ölümcül değil — sözdizimi hatası o dosyayı bırakır, kabuğu değil.
   if [[ -r $file ]]; then
-    source $file
+    typeset -g __bateri_file=$file
+  else
+    typeset -g __bateri_file=
   fi
+}
+
+# Yükleme bitti: kullanıcının değerini yeniden okur ve ZDOTDIR'ı bize alır.
+#
+# Değer YENİDEN OKUNUYOR: bir kullanıcının ZDOTDIR'ı olmasının en yaygın yolu
+# `~/.zshenv` içinde onu atamaktır. Okumasaydık kalan dosyaları eski dizinden
+# arar, yani tam da kullanıcının taşıdığı yapılandırmayı kaçırırdık.
+__bateri_end() {
   if (( ${+ZDOTDIR} )); then
     __bateri_had=1
     __bateri_user=$ZDOTDIR
@@ -93,6 +126,7 @@ __bateri_load() {
     __bateri_user=$HOME
   fi
   ZDOTDIR=$__bateri_dir
+  unset __bateri_file
 }
 
 # OSC 133 işaretlerini zsh'in kendi kancalarına bağlar.
@@ -135,17 +169,17 @@ __bateri_preexec() {
 
 # Kullanıcının ZDOTDIR'ını KALICI olarak geri koyar ve izlerimizi siler.
 #
-# Çağıranı `.zshrc` ile `.zlogin`, hangisi okunursa. İkisi birden koşmuyor:
-# `.zshrc` geri koyduktan sonra zsh `.zlogin`'i artık kullanıcının dizininde
-# arıyor.
+# Çağıranı `.zshrc` ile `.zlogin`, hangisi okunursa; ayrıca `.zshenv`, bizim
+# dosyalarımızdan başkasının okunmayacağı kabuklarda (`no_rcs`; ya da ne
+# etkileşimli ne login olan `zsh -c`).
 __bateri_restore() {
   if (( __bateri_had )); then
     export ZDOTDIR=$__bateri_user
   else
     unset ZDOTDIR
   fi
-  unset __bateri_dir __bateri_user __bateri_had
+  unset __bateri_dir __bateri_user __bateri_had __bateri_file
   # Kancalar kalıyor, yükleyici gidiyor: ilki oturum boyunca çalışıyor,
   # ikincisinin işi bitti ve kullanıcının ad alanında durmasının anlamı yok.
-  unfunction __bateri_load __bateri_hooks __bateri_restore
+  unfunction __bateri_begin __bateri_end __bateri_hooks __bateri_restore
 }
