@@ -42,6 +42,8 @@ objc2-quartz-core = { workspace = true, features = ["CALayer"] }
 # (ayar ve tema dosyasının izlenmesi, `watch`, 007 phase-4): fonksiyon
 # işaretçili işleyiciyle, `block2` kenarı yok.
 dispatch2 = { workspace = true }
-# Bekçi thread'in `write` + `_exit`'i ve izleme kaynaklarının `O_EVTONLY`'si
-# (`watch`, 007 kapı); gerekçesi workspace manifest'inde.
+# Bekçi thread'in `write` + `_exit`'i, izleme kaynaklarının `O_EVTONLY`'si
+# (`watch`, 007 kapı) ve kabuğun passwd kaydı (`child::passwd_shell`,
+# `getpwuid_r`, 009 phase-3: Dock'tan açılışta `$SHELL` yok ve alacritty de
+# aynı sıraya düşüyor). Gerekçesi workspace manifest'inde.
 libc = { workspace = true }

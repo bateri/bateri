@@ -154,6 +154,40 @@ impl ReduceMotion {
     }
 }
 
+/// `[shell] integration`: kabuğa sarmalayıcımız kurulsun mu.
+///
+/// Anahtarın anlamı dar ve bilerek öyle: **"sarmalayıcıyı kurma"**. İşaretleri
+/// ayrıştırmak her hâlde serbest kalıyor — başka bir aracın (ya da SSH'ın öte
+/// tarafındaki bir kurulumun) bastığı gerçek OSC 133'ü görmek zarar değil
+/// kazanç, ve kapatmanın gerekçesi de o değil.
+///
+/// **Kayıt anında uygulanmayan tek ayar** ve bu, "ayar kayıt anında
+/// uygulanır" sözleşmesinin ilk istisnası: sarmalayıcı kabuğun **doğuşunda**
+/// kuruluyor, dosya kaydedildiğinde kabuk çoktan doğmuş oluyor. Bu yüzden
+/// [`Changes`]'e kol takılmıyor ve `docs/AYARLAR.md` anahtarın **sonraki
+/// oturumda** geçerli olduğunu kendi satırında söylüyor (009 Karar 5).
+///
+/// Tüketicisi `bt-shell` ([`CursorMotion`] emsali): kararı o veriyor, çünkü
+/// hangi kabuğun koştuğunu ve betiğin nerede olduğunu gören taraf o.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShellIntegration {
+    /// Tanıdığımız bir kabuksa sarmalayıcı kurulur; değilse hiçbir şey olmaz.
+    #[default]
+    Auto,
+    /// Sarmalayıcı hiç kurulmaz.
+    Off,
+}
+
+impl ShellIntegration {
+    /// Ayar dosyasındaki yazılışı; tanı metni bunu basıyor.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// Kullanıcının değiştirebildiği her şey — ayrıştırılmış ve doğrulanmış.
 ///
 /// Alanlar `pub`: tip bir kayıt, davranış taşımıyor. Değerin geçerliliğini
@@ -186,6 +220,9 @@ pub struct Settings {
     pub cursor_motion: CursorMotion,
     /// `[motion] reduce_motion`: animasyonlar kısılsın mı.
     pub reduce_motion: ReduceMotion,
+    /// `[shell] integration`: kabuk sarmalayıcısı kurulsun mu. **Sonraki
+    /// oturumda** geçerli ([`ShellIntegration`]).
+    pub shell_integration: ShellIntegration,
 }
 
 impl Default for Settings {
@@ -210,6 +247,7 @@ impl Default for Settings {
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::default(),
             reduce_motion: ReduceMotion::default(),
+            shell_integration: ShellIntegration::default(),
         }
     }
 }
@@ -301,6 +339,13 @@ cursor_motion = "spring"
 # Whether to tone animations down to a short fade: "system" follows the macOS
 # Reduce Motion setting, "on" and "off" decide it here.
 reduce_motion = "system"
+
+[shell]
+# Whether bateri sets up the shell so it can report where prompts and commands
+# begin and end: "auto" does it for shells bateri knows, "off" never does.
+# Unlike every other key here, this one only takes effect in shells started
+# after the change; shells already open keep what they were started with.
+integration = "auto"
 "#;
 
     /// Dosya **var ama kullanılamıyor** (okunamıyor ya da geçersiz TOML)
@@ -460,6 +505,22 @@ reduce_motion = "system"
             None if root.contains_key("motion") => {
                 parsed.settings.cursor_motion = fallback.cursor_motion;
                 parsed.settings.reduce_motion = fallback.reduce_motion;
+            }
+            None => {}
+        }
+        match section(text, root, "shell", &mut parsed.diagnostics) {
+            Some(shell) => {
+                if let Some(item) = shell.get("integration") {
+                    parsed.settings.shell_integration = shell_integration(
+                        text,
+                        item,
+                        fallback.shell_integration,
+                        &mut parsed.diagnostics,
+                    );
+                }
+            }
+            None if root.contains_key("shell") => {
+                parsed.settings.shell_integration = fallback.shell_integration;
             }
             None => {}
         }
@@ -909,6 +970,38 @@ fn reduce_motion(
     fallback
 }
 
+/// `shell.integration`: tam olarak `"auto"` ya da `"off"`.
+///
+/// [`cursor_motion`] ile aynı kural: kabul edilmeyen değer `fallback`'i alır
+/// ve tanı bırakır. `clipboard.osc52`'nin "kapalıya düş" istisnası buraya
+/// geçmiyor ve gerekçe bu anahtarda daha da net — kapalıya düşmek, yanlış
+/// yazımın bedelini **özelliği kaybetmek** yaparken güvenlik adına hiçbir şey
+/// kazandırmazdı: sarmalayıcı kullanıcının kendi dosyalarını yüklüyor,
+/// kurulması bir risk değil.
+fn shell_integration(
+    text: &str,
+    item: &Item,
+    fallback: ShellIntegration,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> ShellIntegration {
+    const KEY: &str = "shell.integration";
+    let found = match item.as_str() {
+        Some("auto") => return ShellIntegration::Auto,
+        Some("off") => return ShellIntegration::Off,
+        Some(value) => format!("{value:?}"),
+        None => kind(item).to_owned(),
+    };
+    diagnostics.push(Diagnostic {
+        key: Some(KEY),
+        line: item.span().and_then(|span| line_of(text, span.start)),
+        message: format!(
+            "`{KEY}` must be \"auto\" or \"off\", found {found}; using \"{}\"",
+            fallback.name()
+        ),
+    });
+    fallback
+}
+
 /// Bayt konumunun 1'den başlayan satırı.
 ///
 /// `toml_edit`'in kendi çevirisi (`translate_position`) crate'e özel;
@@ -994,6 +1087,7 @@ mod tests {
             ("clipboard", "osc52"),
             ("motion", "cursor_motion"),
             ("motion", "reduce_motion"),
+            ("shell", "integration"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -1165,6 +1259,7 @@ mod tests {
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::Spring,
             reduce_motion: ReduceMotion::System,
+            shell_integration: ShellIntegration::Auto,
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -1571,6 +1666,72 @@ found {found}; using \"system\""
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn shell_integration_is_read() {
+        assert_eq!(clean("").shell_integration, ShellIntegration::Auto);
+        assert_eq!(
+            clean("[shell]\nintegration = \"auto\"\n").shell_integration,
+            ShellIntegration::Auto
+        );
+        assert_eq!(
+            clean("[shell]\nintegration = \"off\"\n").shell_integration,
+            ShellIntegration::Off
+        );
+        assert_eq!(
+            clean("shell = { integration = \"off\" }\n").shell_integration,
+            ShellIntegration::Off
+        );
+    }
+
+    #[test]
+    fn unrecognized_shell_integration_keeps_its_own_key() {
+        // `cursor_motion` ile aynı kural: anahtar kendi değerinde kalır,
+        // yanında tanı. `osc52`'nin "kapalıya düş" istisnası buraya geçmiyor.
+        for (value, found) in [
+            ("\"on\"", "\"on\""),
+            ("\"Auto\"", "\"Auto\""),
+            ("false", "a boolean"),
+        ] {
+            let (settings, diagnostic) = rejected(&format!("[shell]\nintegration = {value}\n"));
+            assert_eq!(settings, Settings::default(), "{value}");
+            assert_eq!(diagnostic.key, Some("shell.integration"), "{value}");
+            assert_eq!(diagnostic.line, Some(2), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`shell.integration` must be \"auto\" or \"off\", \
+found {found}; using \"auto\""
+                )
+            );
+        }
+        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
+        let current = Settings {
+            shell_integration: ShellIntegration::Off,
+            ..Settings::default()
+        };
+        let parsed = Settings::parse_keeping("[shell]\nintegration = \"on\"\n", &current)
+            .expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.shell_integration, ShellIntegration::Off);
+        assert!(parsed.diagnostics[0].message.ends_with("using \"off\""));
+        // Bölüm yanlış türde: anahtar da kabul edilmemiş sayılıyor.
+        let parsed =
+            Settings::parse_keeping("shell = 5\n", &current).expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.shell_integration, ShellIntegration::Off);
+    }
+
+    #[test]
+    fn shell_integration_is_not_a_live_change() {
+        // Sözleşmenin tek istisnası ve sınaması burada: anahtar değişse bile
+        // `Changes` boş kalıyor, çünkü kabuk çoktan doğmuş ve uygulanacak bir
+        // şey yok. Bir gün `Changes`'e kol takılırsa burası kızarır ve
+        // `docs/AYARLAR.md`'nin "sonraki oturumda geçerli" cümlesi de
+        // düzeltilmek zorunda kalır.
+        let before = clean("");
+        let after = clean("[shell]\nintegration = \"off\"\n");
+        assert_ne!(before.shell_integration, after.shell_integration);
+        assert_eq!(before.changes(&after), Changes::default());
     }
 
     #[test]

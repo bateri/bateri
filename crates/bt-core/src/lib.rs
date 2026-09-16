@@ -45,6 +45,7 @@ pub use session::{
 };
 pub use settings::{
     Changes, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion, SYSTEM_THEME, Settings,
+    ShellIntegration,
 };
 pub use shell::{ShellPhase, ShellState};
 pub use wake::Wake;

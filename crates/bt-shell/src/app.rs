@@ -11,8 +11,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bt_core::{
-    FontOptions, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings, Teardown, Theme,
-    Wake, load_shell, smoke_shell,
+    FontOptions, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings, ShellIntegration,
+    Teardown, Theme, Wake, load_shell, smoke_shell,
 };
 use bt_gpu::{CellMetrics, DisplayLink, MIN_SAMPLES, Renderer, Stats, Surface, Waker};
 use dispatch2::DispatchQueue;
@@ -278,6 +278,56 @@ fn resolve_reduce_motion(
         ReduceMotion::Off => false,
         ReduceMotion::System => system(),
     }
+}
+
+/// Shell entegrasyonunun çocuğa eklediği ortam — kurulmuyorsa boş.
+///
+/// **Kararın tamamı burada ve saf**: hangi kabuk, hangi ayar, betik nerede.
+/// Yeri `child` değil `app`, çünkü kapının ilk katı [`Inputs`] ve o bu modüle
+/// özel ([`resolve_reduce_motion`] emsali; orada da sistemi okuyan taraf
+/// `bt-shell` ama kararı `Inputs` kapılıyor).
+///
+/// `shell` ve `script_dir` birer **closure**: süreli koşuda ve `"off"` diyen
+/// kullanıcının oturumunda ikisine de hiç gidilmiyor. Süreli koşununki bir
+/// tembellik değil **kapı** — `make duman`'ın sonucu ölçen makinenin kabuk
+/// yapılandırmasına bağlanırdı ve kapıyı closure'ı panikleyen bir sınama
+/// tutuyor (`hermetic_run_does_not_set_up_shell_integration`).
+///
+/// `zdotdir` **eager**: kendi sürecimizin ortamı, kullanıcının dünyasına
+/// açılan bir giriş değil ve hermetik kolda değeri çocuğa zaten hiç ulaşmıyor.
+///
+/// Dönüş `Vec`, `Option` değil: kurulan ortam bir çift değil **iki** çift
+/// olabiliyor (kullanıcının özgün `ZDOTDIR`'ı varsa ikincisi de gider) ve
+/// çağıran onu `locale_env()`'in yanına zincirliyor.
+fn shell_integration_env(
+    inputs: &Inputs,
+    setting: ShellIntegration,
+    shell: impl FnOnce() -> Option<PathBuf>,
+    script_dir: impl FnOnce() -> Option<PathBuf>,
+    zdotdir: Option<String>,
+) -> Vec<(String, String)> {
+    if matches!(inputs, Inputs::Hermetic) || setting == ShellIntegration::Off {
+        return Vec::new();
+    }
+    // Tanımadığımız kabuk sessizce geri düşüyor: terminal bugünkü gibi
+    // çalışıyor, yalnız işaret gelmiyor.
+    if !shell().is_some_and(|shell| child::is_zsh(&shell)) {
+        return Vec::new();
+    }
+    // UTF-8 olmayan yol da aynı sessiz geri düşüş: `SessionOptions.env`
+    // `String` istiyor ve entegrasyonsuz bir oturum, yarım kurulmuş bir
+    // `ZDOTDIR`'dan iyi.
+    let Some(dir) = script_dir().and_then(|dir| dir.into_os_string().into_string().ok()) else {
+        return Vec::new();
+    };
+    let mut env = vec![("ZDOTDIR".to_owned(), dir)];
+    // Kullanıcının özgün `ZDOTDIR`'ı: betik onu geri koyacak. Boş değer
+    // tanımsız sayılıyor (`decide_locale`'in kuralı) — boş bir `ZDOTDIR`'ı
+    // "geri koymak" `$HOME`'u işaret eden bir değişken yaratmak olurdu.
+    if let Some(original) = zdotdir.filter(|value| !value.is_empty()) {
+        env.push(("BATERI_ZDOTDIR".to_owned(), original));
+    }
+    env
 }
 
 /// Pencere geometrisi + hücre ölçüsünden türeyen grid.
@@ -1373,7 +1423,20 @@ impl AppDelegate {
                 // değil — `printf` ile `sleep`, `date` ile `printf`; yolları
                 // mutlak ya da `PATH`'ten, çıktıları ASCII.
                 working_directory: child::working_directory(),
-                env: child::locale_env().into_iter().collect(),
+                // Shell entegrasyonu yerelin yanında, aynı haritada: ikisi de
+                // çocuğa **eklenen** ortam ve ikisi de yalnız çocuğa gidiyor.
+                // Anahtarları ayrık (`LANG` ↔ `ZDOTDIR`), yani sıranın
+                // önemi yok.
+                env: child::locale_env()
+                    .into_iter()
+                    .chain(shell_integration_env(
+                        &self.inputs(),
+                        self.ivars().settings.borrow().shell_integration,
+                        child::shell,
+                        child::zsh_wrapper_dir,
+                        std::env::var("ZDOTDIR").ok(),
+                    ))
+                    .collect(),
                 cols: grid.cols,
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
@@ -2765,6 +2828,123 @@ mod tests {
         assert!(!resolve_reduce_motion(&user, ReduceMotion::System, || {
             false
         }));
+    }
+
+    /// Entegrasyonun kurulduğu kolun sabit girdisi: zsh + gövdeli bir dizin.
+    fn zsh_and_dir() -> (
+        impl FnOnce() -> Option<PathBuf>,
+        impl FnOnce() -> Option<PathBuf>,
+    ) {
+        (
+            || Some(PathBuf::from("/bin/zsh")),
+            || Some(PathBuf::from("/opt/bateri/shell/zsh")),
+        )
+    }
+
+    #[test]
+    fn hermetic_run_does_not_set_up_shell_integration() {
+        // `Inputs`'un altıncı koşulu (009 phase-3): süreli koşu entegrasyonu
+        // **hiç kurmaz**. Kursaydı `make duman`'ın sonucu ölçen makinenin
+        // kabuk yapılandırmasına bağlanırdı — kullanıcının `.zshrc`'si
+        // pencereye tek bir bayt bassa `hucre=8` düşerdi. Closure'ın paniği
+        // "kurmadı" iddiasından keskin: boş dönüşü sabitlemek, kabuğu çözüp
+        // sonucu atan bir kodu da geçirirdi.
+        for setting in [ShellIntegration::Auto, ShellIntegration::Off] {
+            let env = shell_integration_env(
+                &Inputs::Hermetic,
+                setting,
+                || panic!("süreli koşu kabuğu çözdü"),
+                || panic!("süreli koşu betiği aradı"),
+                Some("/home/someone/zsh".to_owned()),
+            );
+            assert!(env.is_empty(), "{setting:?} hermetik koşuda ortam ekledi");
+        }
+    }
+
+    #[test]
+    fn shell_integration_off_asks_nothing() {
+        // `"off"` kendi başına karar veriyor: ne kabuk çözülüyor ne betik
+        // aranıyor. Anahtarın anlamı "sarmalayıcıyı kurma" ve o iş burada
+        // bitiyor — işaretleri ayrıştıran yol (`bt-core`) bu koldan geçmiyor,
+        // yani başka bir aracın bastığı gerçek OSC 133 yine okunuyor.
+        let env = shell_integration_env(
+            &Inputs::User { config_root: None },
+            ShellIntegration::Off,
+            || panic!("\"off\" kabuğu çözdü"),
+            || panic!("\"off\" betiği aradı"),
+            None,
+        );
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn shell_integration_needs_zsh_and_a_script() {
+        let user = Inputs::User { config_root: None };
+        // Tanımadığımız kabuk: betik bile aranmıyor, çünkü kuracak bir şey yok.
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            || Some(PathBuf::from("/bin/bash")),
+            || panic!("zsh olmayan kabukta betik arandı"),
+            None,
+        );
+        assert!(env.is_empty(), "bash'e sarmalayıcı kuruldu");
+        // Kabuk hiç çözülemedi (passwd okunamadı, `$SHELL` yok): aynı sessiz
+        // geri düşüş.
+        let env = shell_integration_env(&user, ShellIntegration::Auto, || None, || None, None);
+        assert!(env.is_empty(), "kabuksuz oturuma sarmalayıcı kuruldu");
+        // Kabuk zsh ama betik yok (eksik paket): entegrasyonsuz bir oturum,
+        // yarım kurulmuş bir `ZDOTDIR`'dan iyi — kullanıcının yapılandırması
+        // hiç yüklenmemiş olurdu.
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            || Some(PathBuf::from("/bin/zsh")),
+            || None,
+            None,
+        );
+        assert!(env.is_empty(), "betiksiz ZDOTDIR kuruldu");
+    }
+
+    #[test]
+    fn shell_integration_hands_the_original_zdotdir_to_the_script() {
+        let user = Inputs::User { config_root: None };
+        // Kullanıcının `ZDOTDIR`'ı yok: betiğe yalnız kendi dizinimiz gidiyor
+        // ve `BATERI_ZDOTDIR`'ın **yokluğu** "kullanıcının da yoktu" demek.
+        let (shell, dir) = zsh_and_dir();
+        let env = shell_integration_env(&user, ShellIntegration::Auto, shell, dir, None);
+        assert_eq!(
+            env,
+            vec![("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned())]
+        );
+        // Boş değer tanımsız sayılıyor (`decide_locale`'in kuralı): "geri
+        // koymak" `$HOME`'u gösteren bir değişken yaratmak olurdu.
+        let (shell, dir) = zsh_and_dir();
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            shell,
+            dir,
+            Some(String::new()),
+        );
+        assert_eq!(env.len(), 1, "boş ZDOTDIR geri konacak değer sayıldı");
+        // Kullanıcının `ZDOTDIR`'ı var: betik onu geri koyabilsin diye ikinci
+        // çift de gidiyor.
+        let (shell, dir) = zsh_and_dir();
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            shell,
+            dir,
+            Some("/home/someone/zsh".to_owned()),
+        );
+        assert_eq!(
+            env,
+            vec![
+                ("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned()),
+                ("BATERI_ZDOTDIR".to_owned(), "/home/someone/zsh".to_owned()),
+            ]
+        );
     }
 
     #[test]
