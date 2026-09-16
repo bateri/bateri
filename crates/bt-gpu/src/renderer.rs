@@ -26,7 +26,7 @@ use objc2_metal::{
 };
 use objc2_quartz_core::CAMetalDrawable;
 
-use crate::frame::{Frame, GlyphCell, GlyphInstance, RuleCell};
+use crate::frame::{Frame, GlyphCell, GlyphInstance, Instance, RuleCell};
 use crate::{GpuError, Surface};
 
 /// `addCompletedHandler:`e verilen blok; [`Renderer::completion`] kurar.
@@ -555,17 +555,25 @@ impl Renderer {
         // Metal "released without endEncoding" istisnası atar ve süreci
         // öldürür — `NoBuffer`'ı zarifçe döndürme amacının tam tersi.
         //
-        // Sıra çizim sırasıdır (R4.1): önce arka planlar **ve imleç**, sonra
-        // glyph'ler, en sonda kurallar (ikisi de `encode_glyphs`'te, aynı
-        // pipeline'da). Ters olsaydı imleç altındaki harfi örterdi — imleç
-        // opak ve `Frame`'in arka plan listesinin sonunda; imlecin üstündeki
-        // alt çizgi de aynı sıradan bedavaya görünür kalıyor.
+        // Sıra çizim sırasıdır (R4.1): önce komut bloğu şeritleri, sonra arka
+        // planlar **ve imleç**, sonra glyph'ler, en sonda kurallar (son ikisi
+        // `encode_glyphs`'te, aynı pipeline'da). Ters olsaydı imleç altındaki
+        // harfi örterdi — imleç opak ve `Frame`'in arka plan listesinin
+        // sonunda; imlecin üstündeki alt çizgi de aynı sıradan bedavaya
+        // görünür kalıyor.
+        //
+        // Şeridin **başta** olması bir örtüşme kararı değil katman kararı: pay
+        // ızgaranın solunda ayrılmış bir bölge ve hiçbir hücre oraya
+        // düşmüyor (`Frame::push_block`), yani bugün sıra piksel farkı
+        // üretmiyor. Zemin katmanı olarak en altta durması ileride paya bir
+        // şey daha çizen kişinin doğru varsayımla başlamasını sağlıyor.
         // Viewport tek yerde türetiliyor: iki encoder da aynı dokuya çiziyor
         // ve ayrı ayrı sormaları kare başına iki fazladan objc mesajı ile
         // ayrışabilen iki tanım demekti.
         let viewport_px: [f32; 2] = [texture.width() as f32, texture.height() as f32];
         let result = self
-            .encode_bg(&enc, frame, viewport_px)
+            .encode_stripes(&enc, frame, viewport_px)
+            .and_then(|()| self.encode_bg(&enc, frame, viewport_px))
             .and_then(|()| self.encode_glyphs(&enc, frame, viewport_px));
         enc.endEncoding();
         result
@@ -596,6 +604,21 @@ impl Renderer {
         .ok_or(GpuError::NoInstanceBuffer)
     }
 
+    /// Komut bloğu şeritlerini tek bir instanced çizim çağrısına encode eder.
+    ///
+    /// **Yeni pipeline yok** (R4.2): şerit `cell_bg`'nin genel piksel
+    /// dörtgeninden başka bir şey değil — konum, boyut, lineer renk. Kendi
+    /// çağrısı olmasının sebebi listesinin ayrı olması ([`Frame::stripes`]),
+    /// düzeninin farklı olması değil.
+    fn encode_stripes(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        frame: &Frame,
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
+        self.encode_quads(enc, frame.stripes(), viewport_px)
+    }
+
     /// Arka planları (ve imleci) tek bir instanced çizim çağrısına encode eder.
     fn encode_bg(
         &self,
@@ -603,9 +626,25 @@ impl Renderer {
         frame: &Frame,
         viewport_px: [f32; 2],
     ) -> Result<(), GpuError> {
-        let instances = frame.bg_instances();
+        self.encode_quads(enc, frame.bg_instances(), viewport_px)
+    }
+
+    /// `cell_bg` pipeline'ının tek çizim yolu: dilimi tampona koyar ve
+    /// instanced bir dörtlü çizer.
+    ///
+    /// İki çağıranı ([`Renderer::encode_stripes`], [`Renderer::encode_bg`])
+    /// ayrı **listeler** taşıyor ama aynı düzeni: kopyalanmış iki gövde,
+    /// buffer indeksleri ya da pipeline seçimi ayrıştığında sessizce yanlış
+    /// çizerdi ve belirti yalnız bir listede görünürdü.
+    fn encode_quads(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        instances: &[Instance],
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
         // Sıfır uzunluklu `newBufferWithBytes` Metal doğrulamasında geçersiz;
-        // hücresiz karede clear yükü tek başına yeter.
+        // hücresiz karede clear yükü tek başına yeter. Şerit tarafında bu dal
+        // **normal hâl**: entegrasyonsuz oturumda hiç blok yok.
         if instances.is_empty() {
             return Ok(());
         }
@@ -984,7 +1023,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    use bt_core::{Cell, Cursor, Theme, UnderlineStyle};
+    use bt_core::{Block, Cell, Cursor, Theme, UnderlineStyle};
 
     use super::*;
     use crate::stats::Stats;
@@ -1449,6 +1488,69 @@ mod tests {
             srgb(Theme::BATERI.accent),
             "boş çeyrek clear rengi",
         );
+    }
+
+    #[test]
+    fn command_stripes_paint_the_gutter_on_the_gpu() {
+        // Şeridin GPU tarafı: `Frame::stripes` bir **CPU** listesi ve kardeş
+        // sayaçların aksine duman jetonu bile yok — bu sınama düşerse şeridin
+        // çizildiğini söyleyen başka hiçbir bekçi kalmıyor.
+        //
+        // Dört iddia birden: (1) şerit payın içinde, ızgaranın değil; (2) iki
+        // yanında nefes payı var, yani payı doldurmuyor; (3) renk sınırdan
+        // geldiği gibi çıkıyor (**ara ton**, yani sRGB geçişinin de bekçisi);
+        // (4) iki şerit ayrı renklerle çizilebiliyor — tek şerit `inst[0]`'ı
+        // stride'dan bağımsız okur, yani 32'den kayan bir stride GÖRÜNMEZDİ.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 16;
+        const GUTTER: u16 = 8;
+
+        // Pay 8 px: şerit x ∈ [2, 6), iki yanında 2'şer piksel nefes.
+        // Izgara 8'den başlıyor, yani 4 px'lik iki sütun payın sağında.
+        let mut frame = Frame::default();
+        frame.clear(CellMetrics::new(4, 4, GUTTER).expect("ölçü"));
+        // İki blok, iki durum rengi: üst yarı başarılı, alt yarı başarısız.
+        frame.push_block(Block {
+            first_row: 0,
+            last_row: 1,
+            stripe: Theme::BATERI.success_linear(),
+        });
+        frame.push_block(Block {
+            first_row: 2,
+            last_row: 3,
+            stripe: Theme::BATERI.error_linear(),
+        });
+        // Izgaranın ilk hücresi: şeridin ona **değmediğini** gösteren tanık.
+        frame.push(bg_cell(0, 0, WHITE));
+
+        // Clear dört rengin de dışında: şeridin bulunmadığı her piksel bunu
+        // okumalı ve "şerit payı doldurdu" hatası clear ile ayırt edilebilsin.
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
+        let srgb = |hex: u32| ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        // ±1: 8-bit sRGB kodlaması yuvarlama taşır
+        // (`cell_bg_paints_pixels_on_the_gpu` ile aynı gerekçe).
+        let close_to = |seen: (u8, u8, u8), expected: (u8, u8, u8), what: &str| {
+            assert!(
+                seen.0.abs_diff(expected.0) <= 1
+                    && seen.1.abs_diff(expected.1) <= 1
+                    && seen.2.abs_diff(expected.2) <= 1,
+                "{what}: {seen:02x?} ≠ {expected:02x?}"
+            );
+        };
+
+        close_to(pixel(4, 2), srgb(Theme::BATERI.success), "üst şerit");
+        close_to(pixel(4, 13), srgb(Theme::BATERI.error), "alt şerit");
+        // Aralık `last_row` dahil: ikinci satır da üst şeridin rengi olmalı.
+        close_to(pixel(4, 6), srgb(Theme::BATERI.success), "ikinci satır");
+
+        // Nefes payı: şeridin iki yanı da clear rengi. Şerit payı doldursaydı
+        // (ya da `pos_at`'ten geçip ızgaraya kaysaydı) bu iki satır düşerdi.
+        close_to(pixel(0, 2), srgb(Theme::BATERI.accent), "payın solu");
+        close_to(pixel(7, 2), srgb(Theme::BATERI.accent), "payın sağı");
+
+        // Izgara payın sağında ve dokunulmamış: ilk hücre beyaz kaldı.
+        assert_eq!(pixel(9, 2), (255, 255, 255), "ilk hücre şeridin altında");
     }
 
     #[test]

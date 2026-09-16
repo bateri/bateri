@@ -590,6 +590,22 @@ define_class!(
             let cursor = iv
                 .session
                 .frame(|cell| frame.push(cell), &mut iv.blocks.borrow_mut());
+            // Şeritler hücrelerle **aynı** karede ve aynı `frame()` çağrısından:
+            // ayrı bir sorgudan okunsalardı kaydırma karesinde bir kare geride
+            // kalırlardı (010 discussion.md → Karar 2). Sink içinde değil
+            // sonrasında, çünkü blok listesi hücre hücre değil kare başına
+            // çözülüyor — ve `borrow_mut` yukarıdaki ifadenin sonunda düştüğü
+            // için buradaki `borrow` çakışmıyor.
+            //
+            // **Animasyon yok** (Karar 5): şerit anında beliriyor, `motion`
+            // ikinci bir tüketici kazanmıyor ve bu yol hiçbir kare istemiyor —
+            // boşta sıfır kare sözleşmesi dokunulmadan kalıyor. Hareket
+            // karesinin yolu (yukarıda, `move_cursor`) buraya hiç uğramıyor;
+            // ızgara değişmediği için şerit de değişmemeli ve `Frame` onu
+            // koruyor.
+            for block in iv.blocks.borrow().as_slice() {
+                frame.push_block(*block);
+            }
             // Kapının operandı burada artıyor: hasar bulundu, kare çizilecek.
             // `kare`'den önce ve ondan bağımsız — GPU'nun bitirmesini
             // beklemiyor (bkz. `LinkIvars::content_frames`).
