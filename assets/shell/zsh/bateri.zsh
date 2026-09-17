@@ -19,6 +19,9 @@
 #                   da yoktu; geri koyarken ZDOTDIR silinir, $HOME'a
 #                   eşitlenmez — ihraç edilen bir ZDOTDIR ile hiç olmayan
 #                   ZDOTDIR çocuklar için farklı şeyler.
+#   BATERI_PROMPT   `shell` ise prompt kullanıcınındır (`[shell] prompt`).
+#                   Yokluğu varsayılan, yani prompt TERMİNALİN: değişken
+#                   yalnız kullanıcı geri istediğinde gönderiliyor.
 #
 # BİLİNEN VE SINIRLI FARK: top-level `source` içinde zsh `$0`'ı yüklenen
 # dosyanın yoluna kuruyor; gerçek başlangıçta kabuğun adı olurdu. Çaresi
@@ -75,6 +78,22 @@ if (( ! ${+__bateri_had} )); then
     __bateri_user=$HOME
   fi
   unset BATERI_ZDOTDIR
+  # PROMPT'UN SAHİBİ. Ortam değişkeni yalnız kullanıcı prompt'unu geri
+  # istediğinde geliyor (`shell_integration_env`), yani yokluğu "terminal"
+  # demek — tanınmayan bir değer de oraya düşüyor, çünkü bu uçta bir tanı
+  # yeri yok ve varsayılana düşmek görünür bir sonuç (kullanıcı prompt'unu
+  # göremez, yanlış yazdığını anlar).
+  #
+  # `unset`: değişken yalnız BİZE ait ve alt süreçlere sızmasının anlamı yok
+  # (`BATERI_ZDOTDIR` emsali). Değeri saklayan kabuk değişkeni kancaların
+  # oturum durumu, yani `__bateri_restore` onu SİLMİYOR (`__bateri_block`
+  # gibi).
+  if [[ $BATERI_PROMPT == shell ]]; then
+    __bateri_prompt=shell
+  else
+    __bateri_prompt=terminal
+  fi
+  unset BATERI_PROMPT
 fi
 
 # Kullanıcının aynı adlı başlangıç dosyasını yüklemeye HAZIRLAR; yüklemeyi
@@ -151,6 +170,32 @@ __bateri_hooks() {
   # yazsaydık şartnameye uyan başka bir entegrasyonun sabit değeri bizim
   # defterimizle karışırdı.
   typeset -g __bateri_block=0
+  # ÇIPA: prompt'un hücrelerine binen, kimlik taşıyan bir OSC 8 bağlantısı.
+  # Terminal bloğun hangi satırda başladığını hatırlamıyor, her karede
+  # ızgaradan okuyor — bu yüzden satır kaydırmadan, pencere yeniden
+  # akıtmasından (reflow) ve geçmiş dolduktan sonra da doğru kalıyor.
+  #
+  # DEĞER GÖMÜLMÜYOR, `%9v` ile prompt anında genişliyor: PS1'e eklenen parça
+  # SABİT kalınca `shell` kolunun "zaten var mı" nöbeti çalışıyor. Kimlik
+  # URI'ye yazılsaydı ek her prompt'ta değişir, nöbet tutamaz ve PS1 her
+  # seferinde yıkıcı biçimde sökülüp yeniden kurulurdu — PS1'i kendisi kuran
+  # temalarla tam da kaçtığımız yarış. Açılışı `print` ile basmak da çözüm
+  # DEĞİL: zsh prompt'u precmd koşmadan yeniden çiziyor (SIGWINCH, Ctrl-L,
+  # `zle reset-prompt`) ve o hücreler çıpasız yazılırdı.
+  #
+  # Açılış ÖNEKTİR: OSC 8 iç içe geçmiyor, yeni URI öncekini değiştiriyor —
+  # `shell` kolunda kendi prompt'unda bağlantı kullanan bir tema varsa ondan
+  # ÖNCEKİ hücreler bizim çıpamızı taşır. Temanın bağlantısı ilk karakterde
+  # başlıyorsa çıpa hiç doğmaz ve şerit çizilmez; bilinen sınır, yanlış çizim
+  # değil.
+  typeset -g __bateri_anchor=$'%{\e]8;;bateri://block/%9v\a%}'
+  # Prompt TERMİNALİN olduğunda PS1'in tamamı: iki sıfır genişlikli işaret ve
+  # tek bir görünür karakter bile yok. `>` dock'ta çiziliyor (`bt-core`'un
+  # `dock::SIGIL`'i), yani prompt'un yerini terminalin kendi işareti alıyor.
+  #
+  # `%{…%}` "sıfır genişlik" demek; olmasaydı zsh kaçış dizisini basılan
+  # karakter sayar ve satır kaydırma bozulurdu.
+  typeset -g __bateri_ps1=$__bateri_anchor$'%{\e]133;B\a%}'
   add-zsh-hook precmd __bateri_precmd
   add-zsh-hook preexec __bateri_preexec
   # AYNA: ZLE'nin görüntü durumu her satır çiziminde terminale gidiyor.
@@ -213,49 +258,105 @@ __bateri_precmd() {
   # tema bizim yuvamızı ezemiyor.
   psvar[9]=$__bateri_block
   print -nr -- $'\e]133;A;bt_block='$__bateri_block$'\a'
-  # ÇIPA: prompt'un hücrelerine binen, kimlik taşıyan bir OSC 8 bağlantısı.
-  # Terminal bloğun hangi satırda başladığını hatırlamıyor, her karede
-  # ızgaradan okuyor — bu yüzden satır kaydırmadan, pencere yeniden
-  # akıtmasından (reflow) ve geçmiş dolduktan sonra da doğru kalıyor.
-  #
-  # DEĞER GÖMÜLMÜYOR, `%9v` ile prompt anında genişliyor: ek SABİT kalınca
-  # aşağıdaki "zaten var mı" nöbeti çalışıyor. Kimlik URI'ye yazılsaydı ek her
-  # prompt'ta değişir, nöbet tutamaz ve PS1 her seferinde yıkıcı biçimde
-  # sökülüp yeniden kurulurdu — PS1'i kendisi kuran temalarla tam da kaçtığımız
-  # yarış. Açılışı `print` ile basmak da çözüm DEĞİL: zsh prompt'u precmd
-  # koşmadan yeniden çiziyor (SIGWINCH, Ctrl-L, `zle reset-prompt`) ve o
-  # hücreler çıpasız yazılırdı.
-  #
-  # Açılış ÖNEKTİR: OSC 8 iç içe geçmiyor, yeni URI öncekini değiştiriyor —
-  # kendi prompt'unda bağlantı kullanan bir tema varsa ondan ÖNCEKİ hücreler
-  # bizim çıpamızı taşır. Temanın bağlantısı ilk karakterde başlıyorsa çıpa
-  # hiç doğmaz ve şerit çizilmez; bilinen sınır, yanlış çizim değil.
-  #
-  # Sağ taraf TIRNAKLI: `[[ ]]` içinde tırnaksız sağ işlenen glob desenidir.
-  local anchor_open=$'%{\e]8;;bateri://block/%9v\a%}'
-  local anchor_close=$'%{\e]8;;\a%}'
+  __bateri_prompt_set
+}
+
+# Prompt'u bu oturumun sahibine göre kurar; çağıranı `precmd`.
+#
+# İKİ KOL, tek fark PS1'in SAHİBİ:
+#
+# - `terminal` (varsayılan): PS1 bütünüyle BİZİM ve görünür genişliği sıfır.
+#   Kullanıcının prompt'u çizilmiyor; yerine dock'un `>` işareti geçiyor.
+#   `RPS1`/`RPROMPT` de boşalıyor ve bu bir ayrıntı değil ZORUNLU: sağ prompt
+#   PS1'den bağımsız yaşıyor, yalnız PS1'i sıfırlamak ekranın sağında asılı
+#   bir tema parçası bırakırdı.
+# - `shell`: kullanıcının prompt'u yerinde, biz yalnız işaretleri EKLİYORUZ
+#   (010'un yolu). Dock KAPANMIYOR — dock kabuğun prompt'unu değil ZLE'nin
+#   tamponunu çiziyor ve ikisinin ayrı olması kasıtlı: prompt'unu geri almak
+#   isteyen kullanıcı dock'tan vazgeçmek zorunda kalmamalı.
+__bateri_prompt_set() {
+  if [[ $__bateri_prompt == terminal ]]; then
+    PS1=$__bateri_ps1
+    RPS1=
+    RPROMPT=
+    return 0
+  fi
   # Nöbet İÇERME sorar, konum değil (`/code-review`, 010 phase-2): `B` ekinin
   # nöbetiyle aynı biçim. Önek testi PS1'e BAŞKASI dokunduğunda idempotan
   # değil — her precmd'de PS1'i süsleyen bir tema (virtualenv, git bilgisi)
   # ekimizi başa taşımaz, biz de her turda bir yenisini eklerdik ve PS1
-  # oturum boyunca sınırsız büyürdü. Ek hâlâ önce basılmaya ÇALIŞIYOR
-  # (aşağıdaki gerekçe), ama araya giren bir önek yüzünden ikinci bir çıpa
-  # doğurmuyor.
-  [[ $PS1 == *"$anchor_open"* ]] || PS1=$anchor_open$PS1
-  # `B` prompt'un SONU, yani bir kanca değil prompt'un kendisi.
-  # `%{…%}` "sıfır genişlik" demek; olmasaydı zsh kaçış dizisini basılan
-  # karakter sayar ve satır kaydırma bozulurdu. Her prompt'ta yeniden
-  # denenmesinin sebebi temalar: PS1'i her precmd'de yeniden kuran bir tema
-  # bizim ekimizi siler. Koşul da onun için — aynı ek iki kez girmesin.
+  # oturum boyunca sınırsız büyürdü.
+  #
+  # Sağ taraf TIRNAKLI: `[[ ]]` içinde tırnaksız sağ işlenen glob desenidir.
+  [[ $PS1 == *"$__bateri_anchor"* ]] || PS1=$__bateri_anchor$PS1
+  # `B` prompt'un SONU, yani bir kanca değil prompt'un kendisi. Her prompt'ta
+  # yeniden denenmesinin sebebi temalar: PS1'i her precmd'de yeniden kuran bir
+  # tema bizim ekimizi siler. Koşul da onun için — aynı ek iki kez girmesin.
   [[ $PS1 == *$'\e]133;B\a'* ]] || PS1=$PS1$'%{\e]133;B\a%}'
-  # Çıpanın kapanışı en SONDA: prompt'un bütün hücreleri kimliği taşısın.
-  # Nöbet yine içerme sorar, sonek değil — açılışla aynı gerekçe.
-  [[ $PS1 == *"$anchor_close"* ]] || PS1=$PS1$anchor_close
 }
 
-# Komut koşmadan hemen önce: çıktı burada başlıyor (`C`).
+# Temanın geri yazdığı prompt'u geri alır; çağıranı aynanın ZLE kancası.
+#
+# NEDEN PRECMD YETMİYOR: p10k ve starship PS1'i `precmd`'den SONRA, kendi ZLE
+# kancalarından yeniden kuruyor ve `zle reset-prompt`'luyor — precmd'de
+# yazdığımız değer ekrandan siliniyor. Aynı yerden dayatılmazsa tema kazanır.
+#
+# NEDEN TEK BAŞINA DA YETMİYOR — ÖLÇÜLDÜ, seçilmedi: ZLE kancasından atanan
+# PS1 kendiliğinden HİÇBİR ŞEY yapmıyor. Prompt `line-init` koşmadan önce
+# basılıyor ve zsh genişlettiği hâli tutuyor; `zsh -i` PTY probe'unda kancadan
+# atanan değer ekranda hiç görünmedi. Etkili olmasının tek yolu
+# `zle reset-prompt`. Yani ikisi BİRLİKTE gerekiyor: precmd ilk basımı
+# doğru yapıyor, bu kanca temanın geri yazdığını geri alıyor.
+#
+# PRECMD'İ ATMANIN İKİ BEDELİ ÖLÇÜLDÜ ve ikisi de precmd'yi hak ettiriyor:
+# (1) yalnız `precmd`'den kuran bir temada (starship) prompt ilk basımda
+# zaten doğru olur ve nöbet hiç sıfırlamaz — precmd olmasaydı HER prompt bir
+# `reset-prompt` yeniden çizimi öderdi; (2) `zle -N zle-line-init` diyen bir
+# eklenti dağıtıcıyı ezerse (bu dosyanın en muhtemel saydığı sınır) bu kanca
+# büsbütün susar ve prompt geri gelirdi. Tersi de doğru: yalnız precmd
+# kalsaydı p10k prompt'u geri yazardı.
+#
+# NÖBET PING-PONG'U KESİYOR: `reset-prompt` yeni bir çizim doğuruyor, o çizim
+# de `line-pre-redraw`'ı yeniden çağırıyor. Koşulsuz bir sıfırlama kendi
+# kendini besleyen bir döngü olurdu; nöbetle prompt başına TEK sıfırlama
+# ölçüldü.
+#
+# `shell` kolunda SUSUYOR: prompt'unu geri isteyen kullanıcının temasıyla
+# kavga etmenin anlamı yok.
+__bateri_prompt_guard() {
+  [[ $__bateri_prompt == terminal ]] || return 0
+  [[ $PS1 == "$__bateri_ps1" && -z $RPS1 && -z $RPROMPT ]] && return 0
+  PS1=$__bateri_ps1
+  RPS1=
+  RPROMPT=
+  zle reset-prompt
+}
+
+# Komut koşmadan hemen önce: çıpa kapanıyor, çıktı başlıyor (`C`).
 __bateri_preexec() {
   __bateri_ran=1
+  # ÇIPANIN KAPANIŞI BURADA, PROMPT'UN SONUNDA DEĞİL — ve bu, sıfır genişlikli
+  # PS1'in zorunlu eşlikçisi: PS1 artık hiçbir hücre yazmıyor, yani kapanış
+  # PS1'in sonunda kalsaydı ÇIPAYI TAŞIYAN HÜCRE HİÇ DOĞMAZDI. Blok şeridi de
+  # giriş satırının bastırılması da o hücreden türüyor (`Session::frame`),
+  # yani ikisi birden sessizce ölürdü.
+  #
+  # Bağlantı `Input` boyunca AÇIK kalıyor: ZLE'nin yazdığı her hücre kimliği
+  # taşıyor. Komutun ÇIKTISI taşımıyor, çünkü kapanış çıktıdan hemen önce —
+  # işaret komutun kendi satırında, çıktısında değil.
+  #
+  # KOŞULSUZ, iki kolda da: `shell` kolunda da giriş satırı bastırılıyor
+  # (dock kapanmıyor) ve o da aynı çıpaya bakıyor.
+  #
+  # BİLİNEN SINIR: `preexec` koşmayan yollarda (Ctrl-C, boş satıra Enter)
+  # bağlantı bir sonraki prompt'un PS1 genişlemesine kadar açık kalıyor.
+  # Ölçüldü: o pencerede yalnız kullanıcının kendi `precmd` kancalarının
+  # bastığı hücreler var ve onlar ÖNCEKİ bloğun kimliğini taşıyor — kancamız
+  # `add-zsh-hook` ile sona eklendiği için onlardan sonra koşuyoruz, yani
+  # daha erken kapatmanın yolu yok. Yön güvenli: fazladan bir şerit işareti
+  # çizilir, bastırma ise etkilenmez (o bloğun kimliği artık yazılan blok
+  # değil).
+  print -nr -- $'\e]8;;\a'
   print -nr -- $'\e]133;C\a'
 }
 
@@ -347,6 +448,12 @@ __bateri_b64() {
 # onun satır düzenlemesinin ortasında koşuyor.
 __bateri_dock_redraw() {
   emulate -L zsh
+  # PROMPT'UN DAYATILMASI, aynadan ÖNCE ve aynı kancadan: gerekçesi
+  # `__bateri_prompt_guard`'ın başlığında. Aynanın kendi yük kapısının
+  # üstünde, çünkü prompt'un sahipliği yükün uzunluğuna bağlı değil — taşan
+  # bir satırda ayna susarken temanın prompt'u geri gelseydi belirti de
+  # açıklanamaz olurdu.
+  __bateri_prompt_guard
   # Kayıtlar satır sonuyla ayrılıyor; çözücü gövdeyi `lines()` ile okuyor.
   # Birleştirme kapıdan ÖNCE, çünkü dördüncü gövde de kapıya tabi.
   local REPLY entries=${(F)region_highlight} pre buf post highlights

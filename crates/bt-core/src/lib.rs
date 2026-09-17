@@ -52,8 +52,8 @@ pub use session::{
     smoke_shell,
 };
 pub use settings::{
-    Changes, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion, SYSTEM_THEME, Settings,
-    ShellIntegration,
+    Changes, CursorMotion, Diagnostic, FontOptions, Parsed, Prompt, ReduceMotion, SYSTEM_THEME,
+    Settings, ShellIntegration,
 };
 pub use shell::{
     DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle, ShellPhase,
