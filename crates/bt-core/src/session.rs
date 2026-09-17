@@ -1225,6 +1225,24 @@ impl Session {
         // eski renkle çizer; takası yazan zaten kare istiyor.
         let theme = *lock(&self.adapter.0.theme);
         let background = theme.background_rgb();
+        // **Bastırma kararı da `Term` kilidinden önce** ve temayla aynı
+        // gerekçe: yaprak kilit (`shell`) `Term` kilidinin altına girmez
+        // (modül başlığı). Tek okuma, çünkü safha ile aynanın durumu tek
+        // yüklemde birleşiyor (`ShellLog::suppressed_input`); ayrı
+        // okumalardan alınsalardı safha `Input`, ayna `Live` görünür ve ikisi
+        // **aynı ana** ait olmazdı.
+        //
+        // **Sağladığı şey bu kadar ve fazlası iddia edilmiyor:** `frame()` ile
+        // [`Session::dock`] aynı kareyi çizerken yaprak kilidi **ayrı ayrı**
+        // alıyor (`bt_gpu::link`). İkisinin arasına düşen bir `line-finish`
+        // ızgarası bastırılmış, dock'u boşalmış **bir** kare doğurur —
+        // kullanıcının Enter'a bastığı an. Bir karelik ve kapatmanın yolu iki
+        // çağrıyı tek kilit turuna indirmek, yani `bt-gpu` sınırını
+        // değiştirmek; bilinen sınır olarak duruyor (012 phase-4).
+        //
+        // Kopya ile `Term` kilidi arasına düşen bir işaret de en çok bir kare
+        // eski kararla çizer; işareti yazan zaten kare istiyor.
+        let suppressed_block = lock(&self.shell).suppressed_input();
         blocks.anchors.clear();
         blocks.resolved.clear();
         let term = self.term.lock();
@@ -1268,6 +1286,43 @@ impl Session {
         // Doluluk sayısının çizilen yarısı; döngü onu atlama kapısından
         // **sonra** büyütüyor (bkz. aşağıda).
         let mut drawn_rows = 0u16;
+        // Bastırmanın **üst** ucu: yazılmakta olan bloğun çıpasını taşıyan ilk
+        // satır. Döngü içinde doğuyor, çünkü cevabı ancak ızgara biliyor —
+        // hangi satırda olduğu kabuğun bildiği bir şey değil, her karede
+        // çıpadan okunuyor (010'un tezi; kaydırma ve reflow sonrası da doğru
+        // kalmasının sebebi bu).
+        //
+        // Çıpası pencerede **görünmeyen** blok `None` bırakır ve bastırma hiç
+        // koşmaz: geriye kaydırılmış bir pencerede giriş satırı zaten
+        // görünmüyor, görünüyorsa da eksik değil fazla göstermek güvenli olan.
+        let mut suppress_from: Option<u16> = None;
+        // Bastırmanın **alt** ucu. İmlecin satırı **yetmiyor**: ZLE caret'i
+        // tamponun içinde serbestçe gezdiriyor ve sarmalı bir satırda Ctrl-A
+        // ya da yukarı ok imleci ilk satıra alınca kuyruk aşağıdaki
+        // satırlarda kalır — dock bütün tamponu gösterirken ızgara kuyruğu
+        // gösterir, yani phase'in kapatmaya geldiği çift görüntü geri döner
+        // ve **kalıcı** olur (`/code-review`, phase-4).
+        //
+        // Uç kesin veriden çıkıyor, davranıştan sezilmiyor: caret'in sütunu
+        // ızgaradan, arkasındaki karakter sayısı aynadan. Son karakterin
+        // sütunu `cursor_col + chars_after - 1`, satır farkı da onun `cols`'a
+        // bölümü; `saturating_sub(1)` şart, çünkü satırı **tam dolduran**
+        // metin bir satır fazla verirdi ve o satır tamamlama listesinin ilki
+        // olurdu.
+        //
+        // **Hatası yönlü ve bu bilinçli:** `BUFFER`'da satır sonu (PS2,
+        // Esc-Enter) ya da geniş glyph varsa gerçek satır sayısı hesaptan
+        // büyüktür, yani **eksik** bastırılır — sızıntı o satırlarla sınırlı
+        // kalır, fazla bastırma olmaz. Tek fazla-bastırma yolu bayat ayna
+        // (`line-pre-redraw` çizimden önce koşuyor) ve o bir karelik.
+        let suppress_to = suppressed_block.map(|input| {
+            let cols = usize::from(term.columns().max(1) as u16);
+            let last = usize::from(cursor_col).saturating_add(input.chars_after_cursor);
+            let below = u16::try_from(last.saturating_sub(1) / cols).unwrap_or(u16::MAX);
+            cursor_screen_row
+                .saturating_add(below)
+                .min(grid_rows.saturating_sub(1))
+        });
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
         // bayrak sormuyor. Biri `HIDDEN` (`\e[8m`) ve o bu maskede **değil**:
@@ -1401,7 +1456,6 @@ impl Session {
             // pencereyi verdiği için boş ızgara da "dolu" görünür ve içerik
             // hiç ötelenmezdi. `saturating_add`: `row < rows ≤ u16::MAX`, yani
             // taşma temsil edilemez ama sarma sessiz olurdu.
-            drawn_rows = drawn_rows.max(row.saturating_add(1));
             // **Faz 1.** Çıpa okuması da kapıdan sonra (R3.4), ön planla aynı
             // gerekçeyle: `hyperlink()` yan tabloya (`CellExtra`) iniyor ve
             // çizilmeyen hücre için ödenmemeli — kapının üstünde olsaydı boş
@@ -1432,7 +1486,33 @@ impl Session {
                 if blocks.anchors.last().map(|&(last, _)| last) != Some(id) {
                     blocks.anchors.push((id, row));
                 }
+                // Bastırmanın üst ucu aynı okumadan: yazılmakta olan bloğun
+                // **ilk** çıpa satırı. `get_or_insert` ikinci satırı yazmıyor
+                // — çok satırlı bir prompt'ta aralık en üstten başlamalı.
+                if suppressed_block.is_some_and(|input| input.block == id) {
+                    suppress_from.get_or_insert(row);
+                }
             }
+            // **Bastırma: giriş satırı ızgarada çizilmez** (R3.1). Aralık
+            // prompt'un çıpa satırından imlecin satırına ve **bütün
+            // sütunlar**: sütun aritmetiği yapılsaydı prompt'un bittiği sütun
+            // sink'e bilinmek zorunda kalırdı ve o bilgi burada yok.
+            //
+            // **Kapı çıpa taramasından SONRA** ve sıra zorunlu (R3.2): naif
+            // bir bastırma satırı tümden atlar, çıpayı da öldürür ve blok
+            // şeridi kaybolurdu. Tarama glyph üretiminden bağımsız koşuyor;
+            // bekçisi `a_suppressed_input_line_keeps_the_block_stripe`.
+            //
+            // **`drawn_rows`'un da üstünde**: bastırılan satır doluluğa
+            // sayılmaz, yoksa 011'in tabana yapışması çizilmeyen bir satır
+            // için yer ayırır ve dock ile içerik arasında boş bir şerit
+            // kalırdı.
+            if let (Some(from), Some(to)) = (suppress_from, suppress_to)
+                && (from..=to).contains(&row)
+            {
+                continue;
+            }
+            drawn_rows = drawn_rows.max(row.saturating_add(1));
             // Ön plan **ancak burada** çözülüyor — atlama kapısından sonra.
             // Kapıdan önce olsaydı `Term` kilidi tutulurken çizilmeyen her
             // hücre için de ödenirdi ve boş grid'de hücrelerin neredeyse
@@ -1521,10 +1601,21 @@ impl Session {
         // yalnız kayıt kuruluyor. Yer değiştirmesinin alternatifi
         // `content_rows`'u sıfırla doğurup sonra düzeltmekti ve o, bir kare
         // boyunca yanlış olan bir alan demekti.
+        // Döngünün kapısıyla **aynı** soru, tek yerde: aralığın üstü altının
+        // altında kalırsa (çıpa imlecin aşağısında) aralık boştur ve hiçbir
+        // hücre bastırılmamıştır. Ayrı ayrı sorulsaydı o dejenere hâlde imleç
+        // gizlenir ve doluluk düşerdi — bastırılmamış bir satır için ödenen
+        // iki bedel.
+        let suppressed =
+            matches!((suppress_from, suppress_to), (Some(from), Some(to)) if from <= to);
         let cursor = Cursor {
             col: cursor_col,
             row: cursor_screen_row,
-            visible: cursor_visible,
+            // **Bastırılan satırın imleci de çizilmez.** Caret dock'ta
+            // (`Dock::caret`) ve ikisi birden çizilseydi kullanıcı iki caret
+            // görürdü — üstelik ızgaradaki, altındaki harf bastırıldığı için
+            // boş bir blok olarak dururdu.
+            visible: cursor_visible && !suppressed,
             // Blok opak ve altındaki metni örtüyor: zemin rengi onu yeniden
             // okunur kılıyor. Kaynak `theme`, hücrelerinkiyle **aynı** —
             // ayrışsalardı imlecin altındaki harf bloğa değil eski bir palete
@@ -1541,6 +1632,17 @@ impl Session {
             // [`Cursor::content_rows`]'ta.
             content_rows: if alt_screen {
                 grid_rows
+            } else if suppressed {
+                // **Bastırılan satır doluluğa sayılmaz** ve imleç terimi de
+                // düşüyor: imleç bastırılan aralığın içinde, onu saymak
+                // çizilmeyen satırı geri eklemek olurdu. Uzun bir komut
+                // birkaç satıra sarsa da bedel değişmiyor — aralığın tamamı
+                // dışarıda.
+                //
+                // Taban 1: bütün pencerenin bastırıldığı dejenere hâlde
+                // (ilk prompt, üstünde hiç çıktı yok) `drawn_rows` sıfır
+                // kalır ve `content_rows`'un `1..=rows` sözleşmesi bozulurdu.
+                drawn_rows.max(1)
             } else {
                 drawn_rows.max(cursor_screen_row.saturating_add(1))
             },
@@ -2441,7 +2543,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::shell::{DockStatus, ShellPhase};
+    use crate::shell::{DockFault, DockState, DockStatus, ShellPhase};
 
     /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
     const THEME: Theme = Theme::BATERI;
@@ -2630,6 +2732,225 @@ mod tests {
              \\033]8;;bateri://block/{id}\\007$ \\033]8;;\\007\
              \\033]133;B\\007"
         )
+    }
+
+    /// ZLE'nin aynasının bir karesi: `u` kolu, gövdeler base64.
+    ///
+    /// Betiğin (`assets/shell/zsh/bateri.zsh`) `__bateri_dock_redraw`'unun
+    /// bastığı dizinin aynısı; `PREDISPLAY`, `POSTDISPLAY` ve
+    /// `region_highlight` boş, çünkü bastırmanın kapısı aynanın **durumu**,
+    /// içeriği değil.
+    fn mirror(buffer_b64: &str, cursor: usize) -> String {
+        format!("\\033]8133;u;{cursor};;{buffer_b64};;\\007")
+    }
+
+    /// Bitmiş bir blok + yazılmakta olan bir satır; aynanın kolu çağırandan.
+    ///
+    /// Üç satır doğuyor: `$ cmd1` (blok 1, başarıyla bitmiş), `out` ve
+    /// `$ ls -la` (blok 2, kullanıcı hâlâ yazıyor). Bastırmanın bütün
+    /// sınamaları bu ızgarayı paylaşıyor — ayrıştıkları tek şey `tail`.
+    fn spawn_typing_session(tail: &str, wake: Arc<TestWake>) -> Session {
+        spawn_session(
+            &format!(
+                "printf '{}cmd1{}{}ls -la{tail}'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out"),
+                anchored_prompt(2),
+            ),
+            wake,
+        )
+    }
+
+    /// Tek bir satırın mürekkebi, sütun sırasında.
+    ///
+    /// [`glyph_text`] bastırma sınamalarına yetmiyor: boşluk hücresi sink'e
+    /// hiç girmediği için `"ls -la"` ızgarada dursa bile metinde `"ls-la"`
+    /// görünür ve `contains` **sessizce** yanlış cevap verir. Bastırmanın
+    /// iddiası zaten satır bazlı — "bu satırda hücre var mı, yok mu".
+    fn row_glyphs(cells: &[Cell], row: u16) -> String {
+        let mut row_cells: Vec<&Cell> = cells.iter().filter(|cell| cell.row == row).collect();
+        row_cells.sort_by_key(|cell| cell.col);
+        row_cells.iter().filter_map(|cell| cell.ch).collect()
+    }
+
+    /// Ayna beklenen duruma **ve** kabuk `Input`'a gelene kadar bekler.
+    ///
+    /// İkisi birden, çünkü bastırmanın yüklemi ikisinin birleşimi
+    /// (`ShellLog::suppressed_input`); yalnız birini beklemek sınamayı
+    /// yarışa açardı.
+    ///
+    /// **`Idle` beklemek tek başına hiçbir şey sormaz:** o, [`DockStatus`]'ün
+    /// `#[default]`'u, yani hiç ayna gelmemiş bir oturumda da doğru. Bırakma
+    /// kolunu sınayan yer önce `Live`'ı geçmek zorunda — yoksa `u` yükünü
+    /// büsbütün düşüren bir regresyon sınamayı **yeşil** bırakırdı.
+    fn wait_mirror(session: &Session, status: DockStatus) {
+        let mut state = DockState::default();
+        wait_until(
+            "ayna beklenen duruma gelmedi",
+            Duration::from_secs(5),
+            || {
+                session.dock_state(&mut state);
+                state.status == status
+                    && session.shell_state().map(|s| s.phase) == Some(ShellPhase::Input)
+            },
+        );
+        wait_settled(session);
+    }
+
+    #[test]
+    fn the_input_line_leaves_the_grid_while_the_dock_shows_it() {
+        // Bastırmanın kendisi (R3.1): ayna canlıyken kullanıcının yazdığı
+        // satır ızgaraya **hiç** düşmüyor, çünkü onu dock çiziyor. phase-3'ün
+        // bıraktığı çift görüntü burada kapanıyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_typing_session(&mirror("bHMgLWxh", 6), Arc::clone(&wake));
+        wait_mirror(&session, DockStatus::Live);
+
+        let mut cells = Vec::new();
+        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        assert_eq!(row_glyphs(&cells, 0), "$cmd1", "geçmiş kayboldu");
+        assert_eq!(row_glyphs(&cells, 1), "out", "çıktı kayboldu");
+        // Giriş satırı **tamamen** boş: prompt'un `$`'ı da gitti, çünkü aralık
+        // çıpa satırından başlıyor ve `$ ` o satırda. Bilinçli ara durum —
+        // prompt'u phase-5 devralıyor.
+        assert_eq!(row_glyphs(&cells, 2), "", "giriş satırı ızgarada");
+        // **İmleç de çizilmiyor**: caret dock'ta ve ikisi birden çizilseydi
+        // kullanıcı iki caret görürdü.
+        assert!(!cursor.visible, "{cursor:?}");
+        // **Doluluk bastırılan satırı saymıyor**: iki satır çizildi, üçüncüsü
+        // bastırıldı. Sayılsaydı dock ile içerik arasında boş bir şerit
+        // kalırdı.
+        assert_eq!(cursor.content_rows, 2, "{cursor:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_suppressed_input_line_keeps_the_block_stripe() {
+        // **R3.2'nin bekçisi.** Naif bir bastırma (satırı döngüde tümden
+        // atlamak) çıpayı da öldürür ve bitmiş bloğun şeridi kaybolurdu;
+        // belirti sessiz olurdu, çünkü şeridi çizen taraf "kimlik yok" ile
+        // "blok yok"u ayırt etmiyor. Kapı bu yüzden çıpa taramasından
+        // **sonra**.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_typing_session(&mirror("bHMgLWxh", 6), Arc::clone(&wake));
+        wait_mirror(&session, DockStatus::Live);
+
+        let mut blocks = Blocks::default();
+        session.frame(|_| (), &mut blocks);
+        let rows: Vec<u16> = blocks.as_slice().iter().map(|block| block.row).collect();
+        assert_eq!(rows, [0], "bastırma blok şeridini düşürdü: {blocks:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_grid_keeps_the_input_line_when_the_mirror_cannot_show_it() {
+        // Gösteremediğimiz satır ızgarada **kalmak zorunda** (R1.2): aşımda
+        // dock boş ve bastırma da yapılsaydı kullanıcı yazdığını hiçbir yerde
+        // görmezdi. `Idle` ile `Unavailable`'ı ayıran varyantın tükettiği yer
+        // burası — ve ZLE'nin beş değişkenin dışında çizdiği kipler
+        // (`CORRECT`'in `[nyae]`'i, `read` istemi) aynı kapıdan `Idle` ile
+        // geçiyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_typing_session("\\033]8133;o\\007", Arc::clone(&wake));
+        wait_mirror(&session, DockStatus::Unavailable(DockFault::Overflow));
+
+        let mut cells = Vec::new();
+        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        assert_eq!(
+            row_glyphs(&cells, 2),
+            "$ls-la",
+            "ayna gösteremiyorken ızgara da bastırıldı"
+        );
+        assert!(cursor.visible, "{cursor:?}");
+        assert_eq!(cursor.content_rows, 3, "{cursor:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_wrapped_input_line_is_suppressed_below_the_cursor_row_too() {
+        // **`/code-review`'un orta bulgusu.** Aralığın altı eskiden imlecin
+        // satırıydı; ZLE caret'i tamponun içinde serbestçe gezdirdiği için
+        // sarmalı bir satırda Ctrl-A (ya da yukarı ok) imleci ilk satıra
+        // alınca kuyruk aşağıdaki satırlarda **kalıyordu** — dock bütün
+        // tamponu, ızgara da kuyruğu gösteriyordu. Kalıcı çift görüntü, yani
+        // tam da bu phase'in kapatmaya geldiği şey.
+        //
+        // Ölçüt satır 4: bastırma girişin son satırında **durmak** zorunda,
+        // yoksa tamamlama listesini de yutardı.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_cols(
+            sh(&format!(
+                // 20 sütun: `$ ` + 30 karakter iki satıra sarıyor (2 ve 3).
+                // Sonra dördüncü satıra ZLE'nin girişin dışında çizdiği bir
+                // şey (tamamlama listesi emsali), sonra imleç girişin **ilk**
+                // satırına, metnin başına (`\033[2A` iki yukarı, `\033[3G`
+                // üçüncü sütun).
+                "printf '{}cmd1{}{}{}\\r\\nlist-item\\033[2A\\033[3G{}'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out"),
+                anchored_prompt(2),
+                "abcdefghijklmnopqrstuvwxyz0123",
+                mirror("YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIz", 0),
+            )),
+            20,
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+
+        let mut cells = Vec::new();
+        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        assert_eq!(row_glyphs(&cells, 2), "", "girişin ilk satırı ızgarada");
+        assert_eq!(row_glyphs(&cells, 3), "", "sarmalı kuyruk ızgarada sızdı");
+        assert_eq!(
+            row_glyphs(&cells, 4),
+            "list-item",
+            "bastırma girişin son satırında durmadı"
+        );
+        assert_eq!(cursor.content_rows, 5, "{cursor:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_grid_takes_the_input_line_back_when_zle_lets_go() {
+        // **Bırakma kolunun bekçisi (R3.3).** ZLE satırı bıraktığında
+        // (`line-finish` → `e` → `Idle`) bastırma kalkıyor ve yazılan şey
+        // ızgaranın sıradan bir satırı oluyor. Gerçek hayatta bu yol iki kez
+        // geçiliyor: Enter'da ve `CORRECT`'in `[nyae]`'inde — ikincisinde
+        // `line-finish` istemden **önce** koşuyor (probe'la doğrulandı), yani
+        // ızgara devralmış oluyor ve ayrı bir tetiğe gerek kalmıyor.
+        //
+        // **Geçiş sınanıyor, son hâl değil.** `Idle` [`DockStatus`]'ün
+        // varsayılanı, yani ona *doğrudan* varan bir sınama `u` yükünü
+        // büsbütün düşüren bir regresyonda bile yeşil kalırdı. Ayna bu yüzden
+        // önce `Live` oluyor, bastırma orada doğrulanıyor, `e` ondan **sonra**
+        // geliyor: gerçek hayattaki sıranın (yaz → Enter) ta kendisi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '{}cmd1{}{}ls -la{}'; sleep 1; printf '\\033]8133;e\\007'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out"),
+                anchored_prompt(2),
+                mirror("bHMgLWxh", 6),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        let mut live = Vec::new();
+        session.frame(|cell| live.push(cell), &mut Blocks::default());
+        assert_eq!(row_glyphs(&live, 2), "", "ayna canlıyken bastırma yok");
+
+        wait_mirror(&session, DockStatus::Idle);
+        let mut cells = Vec::new();
+        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        assert_eq!(
+            row_glyphs(&cells, 2),
+            "$ls-la",
+            "ZLE satırı bıraktı ama ızgara hâlâ bastırılıyor"
+        );
+        assert!(cursor.visible, "{cursor:?}");
+        assert_eq!(cursor.content_rows, 3, "{cursor:?}");
+        session.shutdown();
     }
 
     /// Komutun koşup bitmesi: `C` (kullanıcının Enter'ı), bir satır çıktı,

@@ -252,6 +252,12 @@ mod tests {
             postdisplay: postdisplay.into(),
             cursor,
             highlights: Vec::new(),
+            // Çözücünün saydığı uzunluk; burada elle kuruluyor çünkü bu
+            // modülün sınamaları tele hiç uğramıyor. `render` okumuyor —
+            // tüketicisi bastırma (`ShellLog::suppressed_input`).
+            display_chars: predisplay.chars().count()
+                + buffer.chars().count()
+                + postdisplay.chars().count(),
         }
     }
 
