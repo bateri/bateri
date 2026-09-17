@@ -12,6 +12,7 @@
 | 008 | [hareket-ve-imlec](008-hareket-ve-imlec/) | 🟢 | `main`'de — imleç kayıyor: hareket altyapısı, üç stil, Hareketi Azalt ve ölçülmüş sessizlik kapısı (`QUIET_FLOOR`) |
 | 009 | [shell-entegrasyonu](009-shell-entegrasyonu/) | 🔨 | `main`'de — zsh sarmalayıcısı ve OSC 133 komut durumu; teslim bekliyor: `/measure` (tarayıcının akış maliyeti) — `teslim.md` |
 | 010 | [komut-bloklari](010-komut-bloklari/) | 🟢 | `main`'de — OSC 133'ün ilk ürün yüzeyi: komut işareti, çıkış kodu rengi, satıra çıpalanma. Gözle kontrol tasarımı değiştirdi: işaret bölge değil komut satırı, ve `>` şekli 011'e bırakıldı |
+| 011 | [input-dock](011-input-dock/) | 📐 | Input Dock + tabana yapışık içerik + yumuşak kayma + prompt'u terminalin devralması; yedi kararın altısı kapalı, plan bekliyor |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
