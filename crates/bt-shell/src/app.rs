@@ -796,7 +796,7 @@ define_class!(
             let grid = self
                 .sync_geometry()
                 .expect("pencere ve contentView kuruldu");
-            self.start_session(mtm, grid, &view, theme, integration);
+            self.start_session(mtm, grid, &view, theme, integration, birth > 0);
 
             if let Some(run) = self.ivars().run {
                 // block2 yok: zamanlayıcı performSelector ile.
@@ -1626,6 +1626,7 @@ impl AppDelegate {
         view: &BateriView,
         theme: Theme,
         integration: Vec<(String, String)>,
+        dock: bool,
     ) {
         let session = Session::spawn(
             SessionOptions {
@@ -1666,6 +1667,11 @@ impl AppDelegate {
                 cell_px: grid.cell.cell_px(),
                 terminal: self.ivars().settings.borrow().terminal(),
                 theme,
+                // Dock'un **varlığı**, payı değil: `bt-core` caret'i ona göre
+                // devrediyor. Aynı doğum kararının öteki tüketicisi
+                // `dock_rows_at_birth`; ikisi çağıranda tek ifadeden çıkıyor
+                // (`didFinishLaunching`'in `birth`'ü), yani ayrışamazlar.
+                dock,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );

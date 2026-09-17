@@ -69,13 +69,24 @@ alternatif ekrandan çıkış orada dock doğurmuyor.
 Giriş satırı ızgarada **çizilmiyor**: kabuk `Input` safhasındayken ve ayna
 canlıyken (`ShellLog::suppressed_input`; karar `Term` kilidinden **önce**
 okunuyor, `Theme` örüntüsü) yazılmakta olan bloğun çıpa satırından imlecin
-satırına kadar hücreler sink'e uğramıyor, imleç de çizilmiyor — caret dock'ta.
+satırına kadar hücreler sink'e uğramıyor — caret dock'ta.
 Kapı çıpa taramasından **sonra**, yoksa blok şeridi de ölürdü. Ayna
 gösteremiyorsa (`Unavailable`), ZLE satırı bırakmışsa (`Idle`) ya da ayna
 **bayatsa** bastırma **yok**: gösteremediğimiz satır ızgarada kalmak zorunda.
 Bayatlık kip sezerek değil iki kesin veriyi karşılaştırarak anlaşılıyor —
 ızgaranın son mürekkebi ile aynanınki (`DockState::last_ink`); yanlış alarmın
 yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez. Gerekçesi
+**Caret'in yeri ayrı ve çok daha geniş bir soru**, hücrelerin bastırılmasıyla
+karıştırılmıyor: sahibini tek bir yüklem söylüyor (`shell::caret_home`) ve onu
+hem dock hem ızgara okuyor, yani ikisi ancak birlikte değişiyor — ne iki caret
+ne sıfır caret mümkün. Komut koşarken (`Running`) ve ayna gösterilemiyorken
+(`Unavailable`) ızgaranın, **kalan her hâlde dock'un** — kabuğun henüz hiç
+konuşmadığı açılış ve iki komut arası (`Finished`) dahil, çünkü sıçrayan bir
+caret tam da o pencerelerde görülüyordu. Üç ön koşul: pencerenin dock'u olacak
+(`SessionOptions::dock`; yoksa devralacak kimse yok), alternatif ekranda
+olmayacak (dock zaten kalkıyor) ve bastırılan bir satır varsa tazelik kapısı
+geçilecek. Metinsiz dock satırı caret'siz değil: `Live` olmayan aynada caret
+satırın başında duruyor. Bastırmanın kendi gerekçesi
 ölçülmüş: `bracketed-paste-magic` yapıştırmayı `zle -U` ile kuyruğa geri
 basıyor, ZLE typeahead varken redisplay'i atlıyor ve ayna bir sonraki tuşa
 kadar güncellenmiyor. Aynı ölçüm yapıştırmaya **dar bir istisna** getirdi:
