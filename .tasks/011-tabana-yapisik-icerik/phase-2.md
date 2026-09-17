@@ -60,17 +60,82 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7_
   `sessiz ≥ QUIET_FLOOR`.
 - Kayma yerleştikten sonra **kare istenmiyor** (boşta sıfır kare).
 
+## Uygulama Notları
+
+- **Öteleme `State`'in üçüncü ekseni olmadı, ayrı bir tip oldu** (`Slide`).
+  Sebep kip: imleç Hareketi Azalt'ta **belirirken** öteleme **snap**'liyor
+  (R2.3), yani `since_move` (belirmenin saati) ötelemenin alanı değil.
+  Paylaşılan şey fizik: kübik yavaşlama, yayın taşma kırpması ve eşik yolu
+  üç serbest fonksiyona çıkarıldı (`ease_axis`, `spring_axis`, `axis_settled`)
+  ve `State` de onlardan geçiyor. Taşma kırpmasının **tek kopya** kalması
+  önemliydi — ikinci bir kopya, hedefi aşan bir ızgaranın geri tepmesini
+  sessizce geri getirirdi.
+- **Piksel aygıt ızgarasına yuvarlanıyor** (`Frame::set_origin_rows`) ve bu
+  plandaki bir kalem değildi, yolun şeklinden çıktı: link'in "hasar yok" dalı
+  animasyonun **yerleştiği** kareyi hiç çizmeden uyuyor, yani ekranda kalan son
+  kare yerleşmeden bir adım öncesi. İmleç için bu yarım pikselin altında bir
+  fark (`POS_EPSILON`), **bütün metin** için her Enter'dan sonra yarım piksel
+  kaymış — yani bulanık — bir ekran olurdu. Yuvarlama kaymayı da
+  keskinleştiriyor: metin tam piksel adımlarıyla ilerliyor. Yerleşmiş hâlde
+  kimlik, yani phase-1'in üç bekçisi dokunulmadan geçti.
+  Bekçi `a_sliding_origin_lands_on_whole_device_pixels`.
+- **İmlecin ekran uzayına taşınması `push_cursor`'un işaretini çevirdi.**
+  phase-1'de instance ham `pos`, dikdörtgen `pos + origin` idi; bugün instance
+  `pos − origin` (viewport onu geri veriyor), dikdörtgen ham `pos`. Aritmetik
+  aynı pikseli veriyor, değişen tek şey `at`'in hangi uzayda geldiği. Bekçi
+  yeniden adlandırıldı
+  (`the_cursor_rect_keeps_the_screen_row_and_the_instance_gives_the_origin_back`)
+  ve sayıları **aynı** kaldı — testin hedefi `[0,2]`'den `[0,4]`'e, yani grid
+  satırı + ötelemeye çevrildi.
+- **`sync`'in `!visible` erken dönüşü ötelemeyi atlıyordu.** Öteleme artık
+  guard'dan **önce** ve koşulsuz kuruluyor: imleci gizleyip çıktı akıtan bir
+  betikte (vim değil, `tput civis` ile çalışan bir betik) içerik yanlış yerde
+  donardı. İmlecin görünürlüğü ızgaranın nerede durduğuna karar veremez.
+  Bekçi `a_hidden_cursor_does_not_freeze_the_origin`.
+- **Geometri de ötelemeyi snap'liyor**, yalnız tekerlek değil (R2.6). Plan
+  yalnız `display_offset`'i sayıyordu ama `docs/AYARLAR.md`'nin bu phase'de
+  ayrılan cümlesi ("boyutlandırma ve punto değişimi kaymıyor") tetiği zaten
+  söylüyordu: pencereyi yeniden boyutlandırmak `rows`'u oynatıyor, yani hedef
+  sıçrıyor ve animasyon onu içerik büyümesi sanardı.
+- **`kayma=` kapıya girmedi ve girmemesi iyi oldu: ölçüldü, `0`.** Reçete
+  (`bt_core::smoke_shell`) tek `printf` + `\033[2G`, yani iki içerik karesinin
+  ilki geometri snap'i, ikincisi **yalnız sütun** değişimi — doluluk
+  (`content_rows`) hiç oynamıyor, dolayısıyla kayma da hiç doğmuyor. Jetonu
+  kapıya yazmış olsaydık kod doğruyken kırmızı düşerdi. Satırda olmasının
+  sebebi tanı: kırmızı bir koşuda `hareket` ile birlikte okununca hangi
+  animatörün yerleşmediği ayırt ediliyor.
+  **Kapsam kalemi, adıyla:** kayma yolunun gerçek pencerede koşan bir bekçisi
+  **yok** — duman reçetesi onu tetiklemiyor, kanıtı birim sınamaları ve göz
+  kontrolü. Reçeteyi kaymayı tetikleyecek biçimde değiştirmek `hucre/glif/kural`
+  ve `sessiz`'in ölçülmüş sözleşmesine dokunurdu (R3.1: ayrı commit), o yüzden
+  bu phase'de yapılmadı.
+- **Yeni satır alt kenardan yükseliyor.** Tek `setViewport` (R1.1) dört listeyi
+  birden kaydırdığı için kayma boyunca öteleme hedefinden büyük kalıyor ve en
+  alt satırın bir kısmı o karelerde pencerenin altında oluyor. "Yeni satır
+  yerinde belirsin, ötekiler kaysın" bu mimaride temsil edilebilir bir şey
+  değil; tespit `set_origin`'in doc'una yazıldı.
+- **Bir sınama kendi varsayımımı çürüttü.** Hareketi Azalt bekçisinin ilk hâli
+  Enter'ın imleci beliritmesini bekliyordu; oysa R2.1'in tamamı tam olarak
+  bunun **olmaması**: Enter'da imlecin ekran satırı hiç değişmiyor, yani
+  belirme de doğmuyor. Sınama imlece sütun da değiştirtecek biçimde
+  düzeltildi — düşen sınama koddaki değil testteki hatayı gösterdi.
+
 ## Yayın Etkisi
 
-- **Ölçüm bekliyor: kayma animasyonunun yerleşme süresi ve `sessiz` bandına
-  etkisi.** `QUIET_FLOOR`'un payı dar — `docs/OLCUMLER.md`'de ölçülen en düşük
-  sağlıklı `sessiz` 1742,29 ms, türetmenin tabanı 1740 ms. Sayı **uydurulmaz**;
-  `/measure` kapatır.
+- **Ölçüm bekliyor: kayma animasyonunun yerleşme süresi.** Duman koşusu onu
+  **göremiyor** (reçete kayma üretmiyor, `kayma=0`), yani bu iddianın tek
+  kapatıcısı `/measure`. `sessiz` bandına etkisi ise bu koşuda **yok**:
+  1748,29 ms ölçüldü, taban 870 ms.
 - **Jeton sözleşmesi büyüyor:** `kayma=` eklendi, hiçbir jeton silinmedi.
   Anahtar Türkçe ve donmuş, değer İngilizce.
 - **Belge:** `docs/AYARLAR.md` (`[motion]`), `CLAUDE.md`'nin indirgeme cümlesi
-  ve `Cursor::display_offset`'in doc'u **aynı commit'te** düzelir — üçü de bu
-  phase olmadan doğruydu.
+  ve `Cursor::display_offset`'in doc'u **aynı commit'te** düzeldi — üçü de bu
+  phase olmadan doğruydu. Yanlarına phase dosyasının saymadığı ama aynı
+  kuralın yakaladığı dördü eklendi: `CLAUDE.md`'nin "Bugünkü hâl"
+  paragrafındaki **animasyonsuz** cümlesi ve duman jeton satırı (`kayma=`),
+  `motion.rs`'in modül başlığı ile `Motion::position`'ın "hücre birimi"
+  cümlesi, `Frame::origin_px`'in "hareket karesinde korunuyor" cümlesi (artık
+  ikinci yazma noktası onu tazeliyor) ve `push_cursor`'ın iki uzay paragrafı.
 - **Ayar şeması:** **değişmiyor**. Yeni anahtar yok; kayma `cursor_motion`'ı
   izliyor. (`feed_lift` bilinçli olarak **reddedildi** — `discussion.md` →
   Muhakeme 2. tur, kabul 7.)
@@ -85,14 +150,35 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7_
 
 ## Checklist
 
-- [ ] Origin `Motion` içinde, `settled()` kapısında
-- [ ] İmlecin hedefi ekran uzayında; Enter'da sıçrama yok
-- [ ] Hareketi Azalt'ta snap; `display_offset` oynadıysa snap
-- [ ] Durma koşulu yazılı, `content_rows`'un monoton olmadığı hesaba katıldı
-- [ ] Hasarsız kolda origin'in ikinci yazma noktası
-- [ ] `kayma=` jetonu; `hareket` saf imleç tanığı
-- [ ] Test: kayma ortasında `point_to_cell` tutarlı (R2.7)
-- [ ] Test: kayma yerleştikten sonra kare istenmiyor
-- [ ] `docs/AYARLAR.md`, `CLAUDE.md` ve `Cursor::display_offset` doc'u düzeltildi
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
-- [ ] Yayın etkisi yazıldı ("ölçüm bekliyor" satırı dahil)
+- [x] Origin `Motion` içinde (`Slide`), `settled()` kapısında;
+      `cursor_settled`/`origin_settled` ikisini ayrı sorabiliyor
+- [x] İmlecin hedefi ekran uzayında (`row + origin_rows`); Enter'da sıçrama yok
+      (`the_cursor_does_not_move_while_the_origin_slides`)
+- [x] Hareketi Azalt'ta snap (`Motion::origin_mode`); `display_offset` **ve**
+      geometri oynadıysa snap
+- [x] Durma koşulu yazılı (`Slide::settled`), `content_rows`'un monoton
+      olmadığı hesaba katıldı (`a_shrinking_content_settles_too`)
+- [x] Hasarsız kolda origin'in ikinci yazma noktası (`set_origin`, tek
+      fonksiyon iki çağrı yeri)
+- [x] `kayma=` jetonu; `hareket` saf imleç tanığı. Kapı `hareket > 0` kaldı,
+      `kayma` sayaç (eşiği ölçülmedi)
+- [x] Test: kayma ortasında `point_to_cell` tutarlı (R2.7) —
+      `the_origin_shifts_the_grid_down_and_the_blank_area_clamps`'in yarım
+      hücrelik kolu; tutarlılığın kendisi **yapısal** (tek `set_origin` hem
+      viewport'u hem `Origin`'i yazıyor) ve sınama fonksiyonun tam satır
+      varsayımı olmadığını çiviliyor
+- [x] Test: kayma yerleştikten sonra kare istenmiyor
+      (`the_origin_settles_and_then_lets_the_link_sleep`)
+- [x] `docs/AYARLAR.md`, `CLAUDE.md` ve `Cursor::display_offset` doc'u
+      düzeltildi (yanlarında dört doc borcu daha, bkz. Yayın Etkisi)
+- [x] Doğrulama geçti: `make hepsi` yeşil (exit 0) ve `make duman`
+      kullanıcının gerçek penceresinde yeşil — `kare=29 hucre=8 glif=6
+      kural=15 icerik=2 hareket=27 kayma=0 sessiz=1748.29ms kapanis=clean`.
+      Üç sayaç oynamadı, `icerik` phase-0/1'deki `2`'de kaldı ve `sessiz`
+      tabanın (870 ms) iki katının üstünde. `kayma=0`'ın gerekçesi Uygulama
+      Notları'nda — reçete ötelemeyi hiç oynatmıyor
+- [x] Yayın etkisi yazıldı ("ölçüm bekliyor" satırı dahil)
+- [x] Göz kontrolü (kullanıcı, gerçek pencere): Enter, `clear`, vim giriş/çıkış,
+      tekerlek, kayma ortasında tıklama, `cursor_motion = "snap"`, Hareketi
+      Azalt — yedisi de beklendiği gibi; tasarımı değiştiren bulgu yok
+      (010'un aksine)

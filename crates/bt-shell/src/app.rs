@@ -944,6 +944,17 @@ struct Counters {
     /// bu kapı sessizce düşer — o değişiklik ya hermetik koşunun stilini
     /// koşuda açıkça sabitlemek zorunda ya bu cümleyi karşısında bulacak.
     motion: u64,
+    /// Yerleşmemiş **kayma** (içeriğin ötelemesi) yüzünden çizilen kare.
+    ///
+    /// `motion`'ın kardeşi ve **kapıda yok**: reçetenin imleç hareketi
+    /// garantili (`bt_core::smoke_shell`) ama kaymanın orada doğup doğmayacağı
+    /// ölçülmedi ve ölçülmemiş sayı kapıya yazılmaz. Satırda olmasının sebebi
+    /// tanı: kırmızı bir koşuda `hareket` ile birlikte okunduğunda hangi
+    /// animatörün yerleşmediği ayırt edilebiliyor.
+    ///
+    /// İkisi toplanıp çizilen kareyi **vermiyor**: aynı karede ikisi birden
+    /// artabilir.
+    slide: u64,
 }
 
 /// Deadline'da animasyonun hâli — kapının **ölçüm istemeyen** yarısı.
@@ -1121,6 +1132,7 @@ impl Report {
             glyphs,
             rules,
             motion,
+            slide,
         } = self.counters;
         let (used, total) = self.atlas;
         // `profil=` kapı kapalıyken de basılıyor: `make duman` **debug**
@@ -1132,14 +1144,16 @@ impl Report {
         } else {
             "release"
         };
-        // `icerik`/`hareket`/`sessiz` üçlüsü `istek=`'in yanına giriyor: dördü
-        // de kare **muhasebesi** ve satırı okuyan taraf onları bir arada
-        // istiyor. Baştaki dört sayaç yerinde kalmak **zorunda**
-        // (`smoke_counts_unchanged`).
+        // `icerik`/`hareket`/`kayma`/`sessiz` dörtlüsü `istek=`'in yanına
+        // giriyor: hepsi kare **muhasebesi** ve satırı okuyan taraf onları bir
+        // arada istiyor. `kayma` `hareket`'in yanında, çünkü ikisi aynı soruyu
+        // iki animatör için yanıtlıyor. Baştaki dört sayaç yerinde kalmak
+        // **zorunda** (`smoke_counts_unchanged`).
         let mut line = format!(
             "kare={frames} hucre={cells} glif={glyphs} kural={rules} \
 yuva={used}/{total} yuk={workload} istek={requests} icerik={content} \
-hareket={motion} sessiz={quiet} kapanis={teardown} profil={profile}",
+hareket={motion} kayma={slide} sessiz={quiet} kapanis={teardown} \
+profil={profile}",
             workload = self.workload.token(),
             requests = self.requests,
             // **`sessiz=0` değil:** sıfır, "deadline anında kare akıyordu"
@@ -1323,6 +1337,9 @@ fn verdict(
         glyphs: g,
         rules: r,
         motion: m,
+        // Kapıda **yok** ve bu bilinçli: reçetenin kayma üretip üretmediği
+        // ölçülmedi ([`Counters::slide`]). Jeton yine de basılıyor — tanı için.
+        slide: _,
     } = counters;
     // Panik **en sonda** soruluyor ve bu kolların sırası bir tanı tercihi,
     // kapı kararı değil: hangi kol seçilirse seçilsin koşu kırmızı ve çıkış 1.
@@ -2076,6 +2093,7 @@ impl AppDelegate {
             glyphs: g,
             rules: r,
             motion: link.map_or(0, DisplayLink::motion_frames),
+            slide: link.map_or(0, DisplayLink::slide_frames),
         };
         // Yerleşme bir **sayı değil durum**, o yüzden `Counters`'ın dışında.
         // Link yoksa (oturum hiç doğmadı) bekleyen animasyon da yok: sayaç
@@ -2258,6 +2276,9 @@ mod tests {
             // Reçetedeki imleç hareketinin izi; sıfır olsaydı kapı
             // `MissingCounter` derdi (bkz. `Counters::motion`).
             motion: 3,
+            // Kaymanın izi. `motion`'dan farklı bir sayı **bilerek**: ikisi
+            // aynı karelerin sayısı değil, iki ayrı animatörün tanığı.
+            slide: 2,
         }
     }
 
@@ -2294,9 +2315,10 @@ mod tests {
         }
         assert!(line.ends_with(" pipeline=ok"), "{line}");
 
-        // Üç yeni anahtar da **kalıcı**: sözleşme bugünden sonra onları da
-        // "silinmez" tarafına alıyor.
-        for token in ["icerik=1", "hareket=3", "sessiz=2950.00ms"] {
+        // Dört yeni anahtar da **kalıcı**: sözleşme bugünden sonra onları da
+        // "silinmez" tarafına alıyor. `kayma=` 011 ile geldi ve `hareket=`'in
+        // yanına girdi — jeton **silinmez, eklenir**.
+        for token in ["icerik=1", "hareket=3", "kayma=2", "sessiz=2950.00ms"] {
             assert!(line.contains(token), "{token} yok: {line}");
         }
 
@@ -2316,6 +2338,7 @@ mod tests {
                 glyphs: 12,
                 rules: 0,
                 motion: 0,
+                slide: 0,
             },
             Workload::Load,
         )
@@ -2449,6 +2472,7 @@ mod tests {
             // Sağlıklı bir duman koşusunun izi; bu sınamanın sorduğu şey
             // `icerik` sınırı, hareketin kendi kapısı aşağıda.
             motion: 3,
+            slide: 2,
         };
         let clean = Some(Teardown::Clean);
         let settled = MotionState::Settled;
@@ -2487,6 +2511,7 @@ mod tests {
                     glyphs: 6,
                     rules: 15,
                     motion: 3,
+                    slide: 2,
                 },
                 Workload::Smoke,
                 clean,
@@ -2565,6 +2590,7 @@ mod tests {
             glyphs: 6,
             rules: 15,
             motion: 3,
+            slide: 2,
         };
         let clean = Some(Teardown::Clean);
         assert_eq!(
@@ -2598,6 +2624,7 @@ mod tests {
                     cells: 0,
                     rules: 0,
                     motion: 0,
+                    slide: 0,
                     ..good
                 },
                 Workload::Load,
@@ -2658,6 +2685,7 @@ mod tests {
             glyphs: 6,
             rules: 15,
             motion: 27,
+            slide: 2,
         };
         let clean = Some(Teardown::Clean);
         let settled = MotionState::Settled;
@@ -2685,6 +2713,7 @@ mod tests {
                     cells: 0,
                     rules: 0,
                     motion: 0,
+                    slide: 0,
                     ..good
                 },
                 Workload::Load,
@@ -2755,6 +2784,7 @@ mod tests {
             glyphs: 6,
             rules: 15,
             motion: 3,
+            slide: 2,
         };
         assert_eq!(
             verdict(
@@ -2792,6 +2822,7 @@ mod tests {
             glyphs: 6,
             rules: 15,
             motion: 3,
+            slide: 2,
         };
         let settled = MotionState::Settled;
         for teardown in [Teardown::ReaderPanicked, Teardown::Panicked] {

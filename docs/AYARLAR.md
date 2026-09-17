@@ -394,12 +394,15 @@ reduce_motion = "system"
   hedefi aşmaz. Uzak bir sıçrama yakın bir sıçramadan biraz uzun sürer.
 - **`"ease"`** — kayma **sabit** sürer, mesafe ne olursa olsun; sonuna doğru
   yavaşlar, hedefi aşmaz.
-- **`"snap"`** — kayma yok, imleç doğrudan yeni hücrede görünür. Hareketi
-  tamamen kapatmanın yolu bu.
-- **İmlecin kendi hareketi** kayar; **altındaki ızgaranın** hareketi kaymaz.
-  Yani geçmişte kaydırmak (tekerlek), pencereyi boyutlandırmak, fontu ya da
-  puntoyu değiştirmek ve imleci gizleyip geri açan bir program (vim, less)
-  imleci kaydırmadan yerine koyar — orada imleç hareket etmiş değildir.
+- **`"snap"`** — kayma yok, imleç doğrudan yeni hücrede görünür ve içerik de
+  anında yerine gider. Hareketi tamamen kapatmanın yolu bu.
+- Aynı stil **içeriğin yükselmesini** de sürer: bateri içeriği pencerenin
+  tabanına yaslar, yani yeni bir satır geldiğinde geçmiş yukarı kayar ve imleç
+  dipteki satırında durur. Kayan şey bütün ızgaradır, imleç değil.
+- **Izgaranın başka sebeple yer değiştirmesi kaymaz:** geçmişte kaydırmak
+  (tekerlek), pencereyi boyutlandırmak, fontu ya da puntoyu değiştirmek ve
+  imleci gizleyip geri açan bir program (vim, less) her şeyi animasyonsuz
+  yerine koyar — orada hareket eden şey içerik değil, pencerenin kendisidir.
 - Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa `"snap"`
   onu hedefinde bitirir, öteki iki stil kaymayı bulunduğu yerden devralır:
   imleç hiçbir stil değişiminde ışınlanmaz.
@@ -416,6 +419,8 @@ reduce_motion = "system"
 - Kısıldığında imleç kaymaz: yeni hücresinde **kısa bir belirmeyle** (90 ms)
   görünür, eski hücresinde iz bırakmaz. Kısılan şey kaymanın kendisi, imlecin
   görünürlüğü değil.
+- İçeriğin yükselmesi kısıldığında **belirmez, anında yerine gider**: her yeni
+  satırda bütün ekranın belirmesi, kısmaya çalıştığı hareketten beter olurdu.
 - Belirme **duraksamadan sonraki** harekete aittir: normal yazma hızında her
   harf imleci yeni yerinde kısa bir belirmeyle gösterir. Hareketler
   belirmenin süresinden daha sık geldiğinde — çıktı akarken ya da çok hızlı

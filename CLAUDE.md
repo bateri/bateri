@@ -48,7 +48,12 @@ görünen satırlar için biliniyor ve bölge boyamak onu tahmine çevirirdi.
 sınırdan verir (`Cursor::content_rows`; alternatif ekranda ızgaranın tamamı),
 `DisplayLink` onu `rows - content_rows` ile ötelemeye çevirir ve `encode_pass`
 tek bir `setViewport` ile iki pipeline'ı birden kaydırır — dört liste ve imleç
-aynı yerden, **animasyonsuz** (kayma sıradaki settedir). Ötelemenin tek sahibi
+aynı yerden. Öteleme **yumuşak kayar**: `bt-gpu::motion`'ın ikinci animatörü
+(`Slide`) onu imleçle aynı stil ve aynı `settled()` kapısı altında sürer, imlecin
+hedefi de **ekran satırıdır** (`row + origin`), yani Enter'da imleç dipteki
+satırında durur ve geçmiş arkasından yukarı akar. Piksel aygıt ızgarasına
+yuvarlanır (`Frame::set_origin_rows`): kaymanın durduğu kare ekranda kalıcı ve
+kesirli bir piksel bütün metni bulanıklaştırırdı. Ötelemenin tek sahibi
 kare yolu; fare eşlemesi onu `bt_gpu::Origin` ile **çizilen** değerden okur.
 Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app` paketini
 üretir.
@@ -66,12 +71,13 @@ make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
-                  # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C hareket=M sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
+                  # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C hareket=M kayma=S sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
                   # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT ise, sessiz < QUIET_FLOOR ya da sessiz=none ise
                   # ya da deadline'da animasyon yerleşmemişse kırmızı. iki sınır da ölçülmüş; değerleri ve türetmeleri sabitlerin doc'unda.
                   # üst sınır kare'de değil icerik'te: icerik çizilmeye karar verilen kare, kare GPU'nun bitirdiği — animasyon ikincisini meşru olarak şişirir.
                   # sessiz'in kuralı ters (sağlıklıda büyük) ve kapının en duyarlı katı: icerik sınırının göremediği yavaş sızıntıyı o görüyor.
-                  # yuva/yuk/istek/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
+                  # yuva/yuk/istek/kayma/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
+                  # hareket ile kayma iki ayrı animatörün tanığı (imleç / içeriğin ötelemesi): aynı karede ikisi birden artabilir, toplamları kare değildir.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler, target/release/bateri.app'i kurar ve içeriğini denetler (Info.plist, ikon, lisans, shell betiği); imza yok
@@ -155,9 +161,12 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   (`bt-gpu::link` modül başlığı: zamana bağlı kare talebinin tek yolu hareket
   saatidir). Kapı bu yüzden `kare`'ye değil **içerik** karesine bakıyor —
   200 ms'lik bir imleç kayması `kare`'yi meşru olarak şişirir. Her animasyon bir
-  durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı her
-  animasyonu 90 ms'lik bir **belirmeye** indirir — imleç kaymaz, yeni yerinde
-  belirir. Belirme **duraksamadan sonraki** harekete ait: belirme süresinden
+  durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı
+  **imleci** 90 ms'lik bir **belirmeye** indirir — imleç kaymaz, yeni yerinde
+  belirir — ve içeriğin ötelemesini **snap**'ler, çünkü her yeni satırda bütün
+  ekranın belirmesi indirgemeye çalıştığı hareketten beter olurdu (kip iki,
+  yer bir: `Motion::origin_mode`). Belirme **duraksamadan sonraki** harekete
+  ait: belirme süresinden
   sık gelen hareketlerde (akan çıktı) imleç opak kalır, yoksa alfa sıfıra
   çakılır ve imleç büsbütün kaybolurdu.
   İndirgemenin tek yeri `bt-gpu::motion` (`Mode::Fade`); üç değerli
