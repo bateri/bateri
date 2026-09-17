@@ -11,8 +11,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bt_core::{
-    FontOptions, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings, ShellIntegration,
-    Teardown, Theme, Wake, load_shell, smoke_shell,
+    FontOptions, Prompt, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings,
+    ShellIntegration, Teardown, Theme, Wake, load_shell, smoke_shell,
 };
 use bt_gpu::{
     CellMetrics, DOCK_ROWS, DisplayLink, Layout, MIN_SAMPLES, Renderer, Stats, Surface, Waker,
@@ -311,6 +311,7 @@ fn resolve_reduce_motion(
 fn shell_integration_env(
     inputs: &Inputs,
     setting: ShellIntegration,
+    prompt: Prompt,
     shell: impl FnOnce() -> Option<PathBuf>,
     script_dir: impl FnOnce() -> Option<PathBuf>,
     zdotdir: Option<OsString>,
@@ -361,6 +362,14 @@ fn shell_integration_env(
     let mut env = vec![("ZDOTDIR".to_owned(), dir)];
     if let Some(original) = original {
         env.push(("BATERI_ZDOTDIR".to_owned(), original));
+    }
+    // **Yalnız kullanıcı prompt'unu geri istediğinde gönderiliyor**
+    // (`BATERI_ZDOTDIR`'ın koşullu olmasıyla aynı biçim): varsayılan kolda
+    // ortama tek bayt eklemiyoruz ve betiğin "değişken yok → prompt terminalin"
+    // kuralı varsayılanın **tek** kaydı oluyor. İki yerde yazılsaydı biri
+    // değiştiğinde öteki sessizce eskirdi.
+    if prompt == Prompt::Shell {
+        env.push(("BATERI_PROMPT".to_owned(), prompt.name().to_owned()));
     }
     env
 }
@@ -707,9 +716,16 @@ define_class!(
             // Geometriden **önce**: ızgara yüksekliği dock payını görmeli,
             // yoksa kabuk açılışta bir satır fazlasıyla doğar ve ilk kare
             // düzeltme için bir `TIOCSWINSZ` yer.
+            // İki anahtar **tek ödünçten**: ayrı `borrow()`'lar arasına düşen
+            // bir yeniden yükleme ikisini farklı dosyadan okuyabilirdi.
+            let (setting, prompt) = {
+                let settings = self.ivars().settings.borrow();
+                (settings.shell_integration, settings.prompt)
+            };
             let integration = shell_integration_env(
                 &self.inputs(),
-                self.ivars().settings.borrow().shell_integration,
+                setting,
+                prompt,
                 child::shell,
                 child::zsh_wrapper_dir,
                 std::env::var_os("ZDOTDIR"),
@@ -3070,6 +3086,7 @@ mod tests {
             let env = shell_integration_env(
                 &Inputs::Hermetic,
                 setting,
+                Prompt::Terminal,
                 || panic!("süreli koşu kabuğu çözdü"),
                 || panic!("süreli koşu betiği aradı"),
                 Some("/home/someone/zsh".into()),
@@ -3087,6 +3104,7 @@ mod tests {
         let env = shell_integration_env(
             &Inputs::User { config_root: None },
             ShellIntegration::Off,
+            Prompt::Terminal,
             || panic!("\"off\" kabuğu çözdü"),
             || panic!("\"off\" betiği aradı"),
             None,
@@ -3101,6 +3119,7 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
+            Prompt::Terminal,
             || Some(PathBuf::from("/bin/bash")),
             || panic!("zsh olmayan kabukta betik arandı"),
             None,
@@ -3108,7 +3127,14 @@ mod tests {
         assert!(env.is_empty(), "bash'e sarmalayıcı kuruldu");
         // Kabuk hiç çözülemedi (passwd okunamadı, `$SHELL` yok): aynı sessiz
         // geri düşüş.
-        let env = shell_integration_env(&user, ShellIntegration::Auto, || None, || None, None);
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            Prompt::Terminal,
+            || None,
+            || None,
+            None,
+        );
         assert!(env.is_empty(), "kabuksuz oturuma sarmalayıcı kuruldu");
         // Kabuk zsh ama betik yok (eksik paket): entegrasyonsuz bir oturum,
         // yarım kurulmuş bir `ZDOTDIR`'dan iyi — kullanıcının yapılandırması
@@ -3116,6 +3142,7 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
+            Prompt::Terminal,
             || Some(PathBuf::from("/bin/zsh")),
             || None,
             None,
@@ -3129,7 +3156,14 @@ mod tests {
         // Kullanıcının `ZDOTDIR`'ı yok: betiğe yalnız kendi dizinimiz gidiyor
         // ve `BATERI_ZDOTDIR`'ın **yokluğu** "kullanıcının da yoktu" demek.
         let (shell, dir) = zsh_and_dir();
-        let env = shell_integration_env(&user, ShellIntegration::Auto, shell, dir, None);
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            Prompt::Terminal,
+            shell,
+            dir,
+            None,
+        );
         assert_eq!(
             env,
             vec![("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned())]
@@ -3140,6 +3174,7 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
+            Prompt::Terminal,
             shell,
             dir,
             Some(OsString::new()),
@@ -3151,6 +3186,7 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
+            Prompt::Terminal,
             shell,
             dir,
             Some("/home/someone/zsh".into()),
@@ -3165,6 +3201,61 @@ mod tests {
     }
 
     #[test]
+    fn only_a_shell_prompt_is_announced_to_the_script() {
+        // **Varsayılanın tek kaydı betikte.** `"terminal"` kolunda ortama tek
+        // bayt eklenmiyor: betiğin "değişken yok → prompt terminalin" kuralı
+        // varsayılanı tek başına taşıyor. Burada da bir değer gönderilseydi
+        // varsayılan iki yerde yazılı olur ve biri değişince öteki sessizce
+        // eskirdi.
+        let user = Inputs::User { config_root: None };
+        let (shell, dir) = zsh_and_dir();
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            Prompt::Terminal,
+            shell,
+            dir,
+            None,
+        );
+        assert!(
+            !env.iter().any(|(key, _)| key == "BATERI_PROMPT"),
+            "varsayılan prompt ortama yazıldı"
+        );
+
+        // `"shell"`: kullanıcı prompt'unu geri istedi. Değer `Prompt::name`'den
+        // geliyor, yani ayar dosyasındaki yazılışla **aynı** dizgi.
+        let (shell, dir) = zsh_and_dir();
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Auto,
+            Prompt::Shell,
+            shell,
+            dir,
+            None,
+        );
+        assert_eq!(
+            env,
+            vec![
+                ("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned()),
+                ("BATERI_PROMPT".to_owned(), "shell".to_owned()),
+            ]
+        );
+
+        // Entegrasyon kapalıysa prompt anahtarı **hiç sorulmuyor**: sarmalayıcı
+        // kurulmadan prompt'u kim çizdiğinin bir anlamı yok ve `"off"`'un
+        // "hiçbir şey kurulmaz" sözü mutlak.
+        let env = shell_integration_env(
+            &user,
+            ShellIntegration::Off,
+            Prompt::Shell,
+            || panic!("\"off\" kabuğu çözdü"),
+            || panic!("\"off\" betiği aradı"),
+            None,
+        );
+        assert!(env.is_empty());
+    }
+
+    #[test]
     fn a_self_referential_zdotdir_is_not_handed_back() {
         // Ortamdaki `ZDOTDIR` zaten **betiğin kendi dizini**: geri konacak bir
         // "kullanıcı değeri" yok. Verilseydi betik kendi `.zshenv`'ini yeniden
@@ -3176,6 +3267,7 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
+            Prompt::Terminal,
             shell,
             dir,
             Some("/opt/bateri/shell/zsh".into()),
@@ -3201,6 +3293,7 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
+            Prompt::Terminal,
             shell,
             dir,
             Some(OsString::from_vec(vec![0x2f, 0xff, 0xfe])),

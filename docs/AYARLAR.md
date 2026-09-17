@@ -114,6 +114,11 @@ reduce_motion = "system"
 # Unlike every other key here, this one only takes effect in shells started
 # after the change; shells already open keep what they were started with.
 integration = "auto"
+# Who draws the prompt on the input line: "terminal" hides the shell's prompt
+# and marks the line with bateri's own sign, "shell" keeps the prompt you have
+# configured. Either way the input line itself stays in the dock at the bottom
+# of the window. Like integration, this only takes effect in new shells.
+prompt = "terminal"
 ```
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
@@ -442,11 +447,13 @@ reduce_motion = "system"
 ```toml
 [shell]
 integration = "auto"
+prompt = "terminal"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
 |---|---|---|---|
 | `integration` | `"auto"` ya da `"off"` | `"auto"` | kabuğa entegrasyon kurulsun mu |
+| `prompt` | `"terminal"` ya da `"shell"` | `"terminal"` | giriş satırının prompt'unu kim çiziyor |
 
 Entegrasyon, kabuğun terminale "prompt burada başladı, komut burada koştu, şu
 kodla bitti" demesini sağlar. Bugün yalnız **zsh** için var; başka bir kabukta
@@ -504,6 +511,50 @@ bütünüyle okunamaz hâle gelir (başlık çubuğu bunu söyler).
 
 - Tanınmayan değer (`"on"`, `"Auto"`, `false`) yalnız bu anahtarı etkiler
   (açılışta `"auto"`) ve uyarı görünür.
+
+#### `prompt` — prompt'u kim çiziyor
+
+Entegrasyonlu bir zsh oturumunda yazdığınız satır ızgarada değil, pencerenin
+altındaki **dock**'ta durur. `prompt` yalnız şunu sorar: o satırın başında
+**sizin prompt'unuz** mu görünsün, yoksa bateri'nin kendi işareti mi.
+
+- **`"terminal"` (varsayılan)** — kabuğunuzun `PS1` ve `RPS1`'i görünmez olur;
+  yerine dock'ta `>` işareti çizilir ve işaret komutun durumunu renkle söyler
+  (koşuyor, başarılı, hatalı).
+- **`"shell"`** — prompt'unuz olduğu gibi kalır. p10k, starship ya da elle
+  yazdığınız `PS1` neyse o.
+
+**Dock iki değerde de durur.** Dock kabuğun prompt'unu değil, satır
+düzenleyicinin tamponunu çiziyor; prompt'unuzu geri almak için dock'tan
+vazgeçmeniz gerekmez. Komut blokları, işaretler ve renkler de iki değerde de
+çalışır.
+
+**`integration` gibi, bu anahtar da kayıt anında uygulanmaz:** değer **sonraki
+oturumda** geçerli olur, açık pencere etkilenmez.
+
+- Tanınmayan değer (`"zsh"`, `"Terminal"`, `false`) yalnız bu anahtarı etkiler
+  (açılışta `"terminal"`) ve uyarı görünür.
+
+##### Prompt'unuzu geri almak
+
+Varsayılan `"terminal"` olduğu için, kurulu bir prompt'u olan herkes
+güncellemeden sonra onu **göremez**. Geri almanın yolu tek satır:
+
+```toml
+[shell]
+prompt = "shell"
+```
+
+`[shell]` bölümü dosyanızda zaten varsa satırı **onun içine** ekleyin; bölümü
+ikinci kez yazmayın (TOML aynı bölümün tekrarını kabul etmez ve dosya bütünüyle
+okunamaz hâle gelir). Sonra yeni bir pencere açın.
+
+`integration = "off"` de prompt'u geri verir ama **orantısız**: entegrasyonu
+büsbütün kapatır, yani komut bloklarını, dock'u ve işaretleri de öldürür.
+İstediğiniz yalnız prompt'sa `prompt = "shell"` doğru anahtardır.
+
+Prompt yalnız **zsh**'te devralınır. bash, fish, SSH'ın öte tarafı ve
+`integration = "off"` oturumu prompt'unuzu zaten olduğu gibi gösterir.
 
 ## Temalar
 

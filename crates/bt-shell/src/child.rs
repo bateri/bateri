@@ -288,7 +288,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bt_core::{
-        Osc52, Session, SessionOptions, ShellPhase, ShellState, TerminalOptions, Theme, Wake,
+        Blocks, DockState, DockStatus, Osc52, Prompt, Session, SessionOptions, ShellPhase,
+        ShellState, TerminalOptions, Theme, Wake,
     };
 
     use super::*;
@@ -451,6 +452,230 @@ mod tests {
         panic!("{message}");
     }
 
+    /// Sarmalayıcının deponun dışına alınmış kopyası; `ZDOTDIR` olarak bu
+    /// verilir, depo dizini **değil**.
+    ///
+    /// Gerekçe (`/code-review`, 009 kapısı): `ZDOTDIR` oturum boyunca bir süre
+    /// bizi gösteriyor ve `HISTFILE` düzeltmesi gerilerse zsh oraya
+    /// `.zsh_history` bırakır. Depo yolunda bu, çalışma kopyasını kirletmenin
+    /// ötesinde **başka bir crate'in** sınamasını
+    /// (`zsh_wrapper_inventory_is_exactly_what_the_bundle_copies`, `bateri`)
+    /// kalıcı kırmızıya çevirirdi — üstelik ayrı bir test binary'sinde, yani
+    /// belirti rastgele bir koşuda görünürdü.
+    fn copy_wrapper(into: &Path) -> PathBuf {
+        let source = zsh_wrapper_dir().expect("sarmalayıcı bulunamadı");
+        let wrapper = into.join("wrapper");
+        std::fs::create_dir_all(&wrapper).expect("sarmalayıcı kopyası kurulamadı");
+        for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin", "bateri.zsh"] {
+            std::fs::copy(source.join(file), wrapper.join(file))
+                .unwrap_or_else(|e| panic!("{file} kopyalanamadı: {e}"));
+        }
+        wrapper
+    }
+
+    /// Bu karede çizilen metin, satır satır — mürekkepsiz sütun boşluk.
+    ///
+    /// `Cell`'leri sırayla dizmek **yetmezdi**: boşluk hücresi sink'e hiç
+    /// uğramıyor, yani `"$ ls"` ile `"$ls"` aynı dizgiye inerdi ve "prompt
+    /// çizilmedi" iddiası her hâlde yeşil kalırdı (012 phase-4'ün ölçtüğü
+    /// tuzak).
+    fn screen(session: &Session, blocks: &mut Blocks) -> Vec<String> {
+        let mut rows: Vec<Vec<char>> = Vec::new();
+        session.frame(
+            |cell| {
+                let row = usize::from(cell.row);
+                let col = usize::from(cell.col);
+                if rows.len() <= row {
+                    rows.resize(row + 1, Vec::new());
+                }
+                if rows[row].len() <= col {
+                    rows[row].resize(col + 1, ' ');
+                }
+                rows[row][col] = cell.ch.unwrap_or(' ');
+            },
+            blocks,
+        );
+        rows.into_iter()
+            .map(|row| row.into_iter().collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_terminal_takes_the_prompt_and_the_block_survives_it() {
+        // **Setin en sessiz kusurunun bekçisi** (012 phase-5): sıfır genişlikli
+        // `PS1` hiçbir hücre yazmıyor, yani çıpanın kapanışı `PS1`'in sonunda
+        // kalsaydı çıpayı taşıyan hücre **hiç doğmazdı** — blok şeridi de
+        // giriş satırının bastırılması da o hücreden türüyor ve ikisi birden
+        // sessizce ölürdü. Üstelik `make hepsi`, `make duman` ve `make kur`
+        // üçü de yeşil kalırdı: duman `/bin/sh` koşuyor, öteki sınamalar
+        // çıpayı elle basıyor. Gerçek zsh'ten başka tanığı yok.
+        //
+        // İki iddia bir turda: kullanıcının prompt'u ızgarada **yok**, ve
+        // yazılan komut yine de bir blok doğuruyor.
+        let root = TempRoot::new("prompt-terminal");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("sahte ev dizini kurulamadı");
+        // Prompt uzun ve **benzersiz**: kısa bir `$ ` ekranda başka
+        // sebeplerle de belirebilirdi, yani iddia kendi kendini kandırırdı.
+        std::fs::write(home.join(".zshrc"), "PS1='ZSHPROMPTXY> '\nRPS1='RIGHTXY'\n")
+            .expect(".zshrc yazılamadı");
+        let wrapper = copy_wrapper(&root.0);
+
+        let session = Session::spawn(
+            SessionOptions {
+                command: Some((
+                    "/bin/zsh".to_owned(),
+                    vec!["-l".to_owned(), "-i".to_owned()],
+                )),
+                working_directory: Some(home.clone()),
+                env: HashMap::from([
+                    ("HOME".to_owned(), home.display().to_string()),
+                    ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
+                ]),
+                cols: 40,
+                rows: 10,
+                cell_px: (9, 18),
+                terminal: TerminalOptions {
+                    scrollback: 100,
+                    osc52: Osc52::Off,
+                },
+                theme: Theme::BATERI,
+            },
+            Arc::new(SilentWake),
+        )
+        .expect("oturum açılamadı");
+
+        wait_until("prompt işaretleri gelmedi", || {
+            session.shell_state()
+                == Some(ShellState {
+                    phase: ShellPhase::Input,
+                    last_exit: None,
+                })
+        });
+
+        // **Yazma anı: bastırma yeni çıpa biçimi altında hâlâ çalışıyor mu.**
+        // R4.2 teli değiştirdi — çıpa `Input` boyunca açık, yani ZLE'nin
+        // yazdığı **her** hücre kimlik taşıyor. phase-4'ün bütün birim
+        // bekçileri çıpayı prompt'un sonunda kapanan **eski** biçimle kuruyor
+        // (`anchored_prompt`), yani yeni biçime özgü bir regresyonu hiçbiri
+        // göremez: bastırma yazarken ölse ızgara ile dock aynı satırı birden
+        // gösterirdi — phase-4'ün kapatmaya geldiği çift görüntü — ve üç kapı
+        // da yeşil kalırdı. Tanığı yalnız gerçek zsh.
+        session.write(b"true");
+        wait_until("ayna yazılan satırı göstermedi", || {
+            let mut mirror = DockState::default();
+            session.dock_state(&mut mirror);
+            mirror.status == DockStatus::Live && mirror.buffer == "true"
+        });
+        let typing = screen(&session, &mut Blocks::default()).join("\n");
+        assert!(
+            !typing.contains("true"),
+            "yazılmakta olan satır ızgarada da çizildi (çift görüntü):\n{typing}"
+        );
+
+        // **İddialar komut koştuktan SONRA ve bu sıra zorunlu** — ölçüldü:
+        // boştaki prompt'ta "çizilmedi" demek yükü olmayan bir iddia, çünkü
+        // phase-4'ün bastırması kullanıcının prompt'unu **zaten** gizliyor
+        // (aralık çıpa satırından imlecin satırına ve prompt o aralıkta).
+        // Devri geri alan bir regresyonda bile yeşil kalıyordu, üstelik
+        // zamanlamaya duyarlıydı: ayna `Live` olmadan alınan kare prompt'u
+        // görür ve iddia **rastgele** kırmızıya düşerdi.
+        //
+        // Koşmuş bir komutun satırı bastırmanın dışında (bastırma yalnız
+        // **yazılmakta olan** bloğu kapatıyor), yani cevabı kesin: devir
+        // varsa satır `true`, yoksa `ZSHPROMPTXY> true`.
+        session.write(b"\n");
+        wait_until("komutun çıkış kodu duruma düşmedi", || {
+            session
+                .shell_state()
+                .is_some_and(|state| state.last_exit == Some(0))
+        });
+
+        let mut blocks = Blocks::default();
+        let drawn = screen(&session, &mut blocks).join("\n");
+        // `RPS1` ayrı sorulur: `PS1`'i sıfırlayıp sağ prompt'u unutmak
+        // ekranın sağında asılı bir tema parçası bırakırdı ve `PS1` iddiası
+        // bunu görmezdi.
+        assert!(
+            !drawn.contains("ZSHPROMPTXY"),
+            "kullanıcının prompt'u ızgarada çizildi:\n{drawn}"
+        );
+        assert!(
+            !drawn.contains("RIGHTXY"),
+            "kullanıcının sağ prompt'u ızgarada çizildi:\n{drawn}"
+        );
+        // Komutun satırı duruyor: "prompt görünmüyor" iddiasının **ekran
+        // gerçekten çizildi** yarısı. Olmasaydı boş bir ızgara da yukarıdaki
+        // iki iddiayı geçerdi.
+        assert!(drawn.contains("true"), "komutun satırı çizilmedi:\n{drawn}");
+        // Çıpası `preexec`'ten kapanan bloğun işareti komutun satırında.
+        assert!(
+            !blocks.as_slice().is_empty(),
+            "sıfır genişlikli prompt'ta blok doğmadı — çıpayı taşıyan hücre \
+             yok. `anchor_close` `preexec`'te mi?\nızgara:\n{drawn}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_shell_keeps_the_prompt_when_the_user_asks_for_it() {
+        // `prompt = "shell"`in öteki ucu: ortama `BATERI_PROMPT=shell`
+        // düşünce kullanıcının prompt'u **yerinde** kalıyor. Anahtarın bütün
+        // varlık sebebi bu ve tek tanığı gerçek zsh — `shell_integration_env`
+        // yalnız çiftin gönderildiğini görüyor, betiğin onu okuduğunu değil.
+        let root = TempRoot::new("prompt-shell");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("sahte ev dizini kurulamadı");
+        std::fs::write(home.join(".zshrc"), "PS1='ZSHPROMPTXY> '\n").expect(".zshrc yazılamadı");
+        let wrapper = copy_wrapper(&root.0);
+
+        let session = Session::spawn(
+            SessionOptions {
+                command: Some((
+                    "/bin/zsh".to_owned(),
+                    vec!["-l".to_owned(), "-i".to_owned()],
+                )),
+                working_directory: Some(home.clone()),
+                env: HashMap::from([
+                    ("HOME".to_owned(), home.display().to_string()),
+                    ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
+                    // Değer elle değil `Prompt::name`'den: `shell_integration_env`
+                    // de onu gönderiyor, yani sınama telin **gerçek** değerini
+                    // kullanıyor ve dizgi bir gün değişirse iki uç birlikte
+                    // değişiyor.
+                    ("BATERI_PROMPT".to_owned(), Prompt::Shell.name().to_owned()),
+                ]),
+                cols: 40,
+                rows: 10,
+                cell_px: (9, 18),
+                terminal: TerminalOptions {
+                    scrollback: 100,
+                    osc52: Osc52::Off,
+                },
+                theme: Theme::BATERI,
+            },
+            Arc::new(SilentWake),
+        )
+        .expect("oturum açılamadı");
+
+        wait_until("prompt işaretleri gelmedi", || {
+            session.shell_state()
+                == Some(ShellState {
+                    phase: ShellPhase::Input,
+                    last_exit: None,
+                })
+        });
+        // Defter **her turda** yeniden: `wait_until` `Fn` istiyor ve sınamada
+        // kare başına ayırmanın bir maliyeti yok (üretimdeki gerekçesi
+        // `Blocks`'un doc'unda).
+        wait_until("kullanıcının prompt'u ızgarada çizilmedi", || {
+            screen(&session, &mut Blocks::default())
+                .join("\n")
+                .contains("ZSHPROMPTXY")
+        });
+        session.shutdown();
+    }
+
     #[test]
     fn the_zsh_wrapper_loads_the_users_files_and_reports_marks() {
         // Setin **asıl** sınaması: gerçek bir zsh, gerçek bir PTY ve gerçek
@@ -513,21 +738,7 @@ mod tests {
              >| $HOME/zlogin\n",
         );
 
-        // Sarmalayıcı depodan **kopyalanıyor**, depo dizini `ZDOTDIR` olarak
-        // verilmiyor (`/code-review`, 009 kapısı): `ZDOTDIR` oturum boyunca
-        // bir süre bizi gösteriyor ve `HISTFILE` düzeltmesi gerilerse zsh
-        // oraya `.zsh_history` bırakır. Depo yolunda bu, çalışma kopyasını
-        // kirletmenin ötesinde **başka bir crate'in** sınamasını
-        // (`zsh_wrapper_inventory_is_exactly_what_the_bundle_copies`, `bateri`)
-        // kalıcı kırmızıya çevirirdi — üstelik ayrı bir test binary'sinde,
-        // yani belirti rastgele bir koşuda görünürdü.
-        let source = zsh_wrapper_dir().expect("sarmalayıcı bulunamadı");
-        let wrapper = root.0.join("wrapper");
-        std::fs::create_dir_all(&wrapper).expect("sarmalayıcı kopyası kurulamadı");
-        for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin", "bateri.zsh"] {
-            std::fs::copy(source.join(file), wrapper.join(file))
-                .unwrap_or_else(|e| panic!("{file} kopyalanamadı: {e}"));
-        }
+        let wrapper = copy_wrapper(&root.0);
         let session = Session::spawn(
             SessionOptions {
                 // `-l -i`: bizim oturumumuzun hâli (alacritty `login` ile

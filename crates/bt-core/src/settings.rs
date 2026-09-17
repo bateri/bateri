@@ -188,6 +188,44 @@ impl ShellIntegration {
     }
 }
 
+/// `[shell] prompt`: giriş satırının prompt'unu kim çiziyor.
+///
+/// **Entegrasyondan ayrı anahtar ve bu kasıtlı** (012 Karar 7a): prompt'unu
+/// geri isteyen kullanıcının tek çıkışı `integration = "off"` olsaydı bedel
+/// orantısız olurdu — komut blokları da, dock da, işaretler de ölürdü. Burada
+/// yalnız prompt'un sahibi değişiyor.
+///
+/// [`ShellIntegration`] ile **aynı sınıf**: sarmalayıcı kararı kabuğun
+/// doğuşunda bir ortam değişkeniyle taşıyor, yani değer **sonraki oturumda**
+/// geçerli. [`Changes`]'e kol takılmamasının sebebi de o.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Prompt {
+    /// Prompt terminalin: kabuğun `PS1` ve `RPS1`'i sıfır görünür genişliğe
+    /// iner, yerini dock'un `>` işareti alır.
+    #[default]
+    Terminal,
+    /// Prompt kabuğun: kullanıcının prompt'u yerinde kalır.
+    ///
+    /// **Dock'u kapatmıyor**: dock kabuğun prompt'unu değil ZLE'nin tamponunu
+    /// çiziyor ve ikisinin ayrı olması kasıtlı.
+    Shell,
+}
+
+impl Prompt {
+    /// Ayar dosyasındaki yazılışı; tanı metni bunu basıyor.
+    ///
+    /// Komşularından farklı olarak `pub`: aynı dizgi sarmalayıcıya giden
+    /// `BATERI_PROMPT`'un **değeri** (`bt-shell`'in `shell_integration_env`'i).
+    /// Tek kaynak olması bilerek — ayar dosyasındaki yazılış ile telin değeri
+    /// ayrı yazılsaydı biri değiştiğinde öteki sessizce eskirdi.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Shell => "shell",
+        }
+    }
+}
+
 /// Kullanıcının değiştirebildiği her şey — ayrıştırılmış ve doğrulanmış.
 ///
 /// Alanlar `pub`: tip bir kayıt, davranış taşımıyor. Değerin geçerliliğini
@@ -223,6 +261,9 @@ pub struct Settings {
     /// `[shell] integration`: kabuk sarmalayıcısı kurulsun mu. **Sonraki
     /// oturumda** geçerli ([`ShellIntegration`]).
     pub shell_integration: ShellIntegration,
+    /// `[shell] prompt`: prompt'u terminal mi kabuk mu çiziyor. **Sonraki
+    /// oturumda** geçerli ([`Prompt`]).
+    pub prompt: Prompt,
 }
 
 impl Default for Settings {
@@ -248,6 +289,7 @@ impl Default for Settings {
             cursor_motion: CursorMotion::default(),
             reduce_motion: ReduceMotion::default(),
             shell_integration: ShellIntegration::default(),
+            prompt: Prompt::default(),
         }
     }
 }
@@ -346,6 +388,11 @@ reduce_motion = "system"
 # Unlike every other key here, this one only takes effect in shells started
 # after the change; shells already open keep what they were started with.
 integration = "auto"
+# Who draws the prompt on the input line: "terminal" hides the shell's prompt
+# and marks the line with bateri's own sign, "shell" keeps the prompt you have
+# configured. Either way the input line itself stays in the dock at the bottom
+# of the window. Like integration, this only takes effect in new shells.
+prompt = "terminal"
 "#;
 
     /// Dosya **var ama kullanılamıyor** (okunamıyor ya da geçersiz TOML)
@@ -518,9 +565,14 @@ integration = "auto"
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = shell.get("prompt") {
+                    parsed.settings.prompt =
+                        prompt(text, item, fallback.prompt, &mut parsed.diagnostics);
+                }
             }
             None if root.contains_key("shell") => {
                 parsed.settings.shell_integration = fallback.shell_integration;
+                parsed.settings.prompt = fallback.prompt;
             }
             None => {}
         }
@@ -1002,6 +1054,31 @@ fn shell_integration(
     fallback
 }
 
+/// `shell.prompt`: tam olarak `"terminal"` ya da `"shell"`.
+///
+/// [`shell_integration`] ile aynı kural: kabul edilmeyen değer `fallback`'i
+/// alır ve tanı bırakır. `clipboard.osc52`'nin "kapalıya düş" istisnası buraya
+/// da geçmiyor — yanlış tahminin belirtisi ekranda duran (ya da durmayan) bir
+/// prompt, yani kullanıcı ne olduğunu **görüyor**.
+fn prompt(text: &str, item: &Item, fallback: Prompt, diagnostics: &mut Vec<Diagnostic>) -> Prompt {
+    const KEY: &str = "shell.prompt";
+    let found = match item.as_str() {
+        Some("terminal") => return Prompt::Terminal,
+        Some("shell") => return Prompt::Shell,
+        Some(value) => format!("{value:?}"),
+        None => kind(item).to_owned(),
+    };
+    diagnostics.push(Diagnostic {
+        key: Some(KEY),
+        line: item.span().and_then(|span| line_of(text, span.start)),
+        message: format!(
+            "`{KEY}` must be \"terminal\" or \"shell\", found {found}; using \"{}\"",
+            fallback.name()
+        ),
+    });
+    fallback
+}
+
 /// Bayt konumunun 1'den başlayan satırı.
 ///
 /// `toml_edit`'in kendi çevirisi (`translate_position`) crate'e özel;
@@ -1088,6 +1165,7 @@ mod tests {
             ("motion", "cursor_motion"),
             ("motion", "reduce_motion"),
             ("shell", "integration"),
+            ("shell", "prompt"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -1260,6 +1338,7 @@ mod tests {
             cursor_motion: CursorMotion::Spring,
             reduce_motion: ReduceMotion::System,
             shell_integration: ShellIntegration::Auto,
+            prompt: Prompt::Terminal,
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -1732,6 +1811,85 @@ found {found}; using \"auto\""
         let after = clean("[shell]\nintegration = \"off\"\n");
         assert_ne!(before.shell_integration, after.shell_integration);
         assert_eq!(before.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn prompt_is_read() {
+        assert_eq!(clean("").prompt, Prompt::Terminal);
+        assert_eq!(
+            clean("[shell]\nprompt = \"terminal\"\n").prompt,
+            Prompt::Terminal
+        );
+        assert_eq!(clean("[shell]\nprompt = \"shell\"\n").prompt, Prompt::Shell);
+        // Satır içi tablo aynı bölüm.
+        assert_eq!(
+            clean("shell = { prompt = \"shell\" }\n").prompt,
+            Prompt::Shell
+        );
+        // İki anahtar birbirinden bağımsız: prompt'unu geri alan kullanıcı
+        // entegrasyonu kapatmış olmuyor — ayrı anahtar olmasının bütün sebebi
+        // bu (012 Karar 7a).
+        let settings = clean("[shell]\nprompt = \"shell\"\n");
+        assert_eq!(settings.shell_integration, ShellIntegration::Auto);
+    }
+
+    #[test]
+    fn unrecognized_prompt_keeps_its_own_key() {
+        // `shell.integration` ile aynı kural: anahtar kendi değerinde kalır,
+        // yanında tanı; komşu anahtar etkilenmez.
+        for (value, found) in [
+            ("\"zsh\"", "\"zsh\""),
+            ("\"Terminal\"", "\"Terminal\""),
+            ("false", "a boolean"),
+        ] {
+            let (settings, diagnostic) = rejected(&format!("[shell]\nprompt = {value}\n"));
+            assert_eq!(settings, Settings::default(), "{value}");
+            assert_eq!(diagnostic.key, Some("shell.prompt"), "{value}");
+            assert_eq!(diagnostic.line, Some(2), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`shell.prompt` must be \"terminal\" or \"shell\", \
+found {found}; using \"terminal\""
+                )
+            );
+        }
+        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
+        let current = Settings {
+            prompt: Prompt::Shell,
+            ..Settings::default()
+        };
+        let parsed =
+            Settings::parse_keeping("[shell]\nprompt = \"zsh\"\n", &current).expect("ayrıştırılır");
+        assert_eq!(parsed.settings.prompt, Prompt::Shell);
+        assert!(parsed.diagnostics[0].message.ends_with("using \"shell\""));
+        // Bölüm yanlış türde: anahtar da kabul edilmemiş sayılıyor.
+        let parsed = Settings::parse_keeping("shell = 5\n", &current).expect("ayrıştırılır");
+        assert_eq!(parsed.settings.prompt, Prompt::Shell);
+    }
+
+    #[test]
+    fn prompt_is_not_a_live_change() {
+        // `shell.integration` ile **aynı sınıf**: karar kabuğun doğuşunda bir
+        // ortam değişkeniyle taşınıyor, yani kayıt anında uygulanacak bir şey
+        // yok. `Changes`'e bir gün kol takılırsa burası kızarır ve
+        // `docs/AYARLAR.md`'nin "sonraki oturumda geçerli" cümlesi de
+        // düzeltilmek zorunda kalır.
+        let before = clean("");
+        let after = clean("[shell]\nprompt = \"shell\"\n");
+        assert_ne!(before.prompt, after.prompt);
+        assert_eq!(before.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn unrecognized_prompt_leaves_integration_alone() {
+        // Aynı bölümde iki anahtar: birinin reddi ötekini düşürmemeli.
+        let parsed = Settings::parse("[shell]\nprompt = \"zsh\"\nintegration = \"off\"\n")
+            .expect("ayrıştırılır");
+        assert_eq!(parsed.settings.shell_integration, ShellIntegration::Off);
+        assert_eq!(parsed.settings.prompt, Prompt::Terminal);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert_eq!(parsed.diagnostics[0].key, Some("shell.prompt"));
     }
 
     #[test]

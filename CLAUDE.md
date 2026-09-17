@@ -26,15 +26,17 @@ kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
 Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font, `osc52`,
-`cursor_motion`, `reduce_motion` ve `shell.integration`), Theme ▸'nin seçimini oraya
+`cursor_motion`, `reduce_motion`, `shell.integration` ve `shell.prompt`),
+Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
 anında** uygulanır (`watch`: vnode kaynakları; `Session::set_theme`,
 `Session::set_terminal_options`, `Renderer::set_font`,
 `DisplayLink::set_cursor_motion`, `DisplayLink::set_reduce_motion`);
 varsayılan tema sistemin açık/koyu görünümünü, `reduce_motion = "system"` de
-sistemin Hareketi Azalt ayarını canlı izler; tek istisna `shell.integration`,
-kabuk çoktan doğduğu için **sonraki oturumda** geçerlidir. Kabuk zsh ise
+sistemin Hareketi Azalt ayarını canlı izler; tek istisna `[shell]` bölümü
+(`integration` ve `prompt`), kabuk çoktan doğduğu için **sonraki oturumda**
+geçerlidir. Kabuk zsh ise
 `bt-shell` sarmalayıcıyı `ZDOTDIR` ile kurar (betik `.app`'in
 `Contents/Resources/shell`'inden, debug'da depodan) ve kabuğun bastığı OSC 133
 işaretleri `Session::shell_state()`'te birikir. Aynı betik her satır çiziminde
@@ -64,9 +66,22 @@ kadar güncellenmiyor. Aynı ölçüm yapıştırmaya **dar bir istisna** getird
 dock satırın sahibiyken tek satırlık ve kontrol karakteri taşımayan yük
 bracketed sarmadan akıtılıyor (`Session::can_be_typed`) — satır sonu yoksa
 hiçbir şey kendiliğinden çalışmaz, kontrol karakteri yoksa hiçbir bağlama
-tetiklenmez, yani sarmanın koruduğu iki şey de koşulun dışında. Prompt **hâlâ
-kabuğun** — `PS1` basılıyor, yalnız bastırılıyor; sıfır genişliğe inmesi ve
-`>`'in prompt yerine geçmesi sonraki phase'in. Her prompt bir blok kimliği
+tetiklenmez, yani sarmanın koruduğu iki şey de koşulun dışında. Prompt artık
+**terminalin**: `PS1` ile `RPS1` sıfır görünür genişliğe iniyor ve prompt'un
+yerini dock'un `>` işareti alıyor. Dayatma **iki yerden** ve ikisi de zorunlu —
+`precmd` ilk basımı doğru yapıyor, aynanın ZLE kancası temanın geri yazdığını
+`zle reset-prompt` ile geri alıyor (p10k/starship `PS1`'i `precmd`'den **sonra**,
+kendi ZLE kancalarından kuruyor; ölçüldü: kancadan atanan `PS1` `reset-prompt`
+olmadan ekranı hiç etkilemiyor, çünkü prompt `line-init` koşmadan basılıyor ve
+zsh genişlettiği hâli tutuyor). Nöbet prompt başına **tek** sıfırlama bırakıyor,
+yoksa `reset-prompt` kendi kancasını besler. `[shell] prompt = "shell"`
+prompt'u kullanıcıya geri veriyor ve **dock'u kapatmıyor** — dock kabuğun
+prompt'unu değil ZLE'nin tamponunu çiziyor; `shell.integration` ile aynı sınıf,
+yani **sonraki oturumda** geçerli. Çıpanın kapanışı `PS1`'in sonunda değil
+**`preexec`'te**: sıfır genişlikli prompt hiçbir hücre yazmadığı için kapanış
+orada kalsaydı çıpayı taşıyan hücre hiç doğmaz, blok şeridi **ve** bastırma
+birlikte sessizce ölürdü. Bağlantı `Input` boyunca açık, komutun çıktısında
+kapalı. Her prompt bir blok kimliği
 basar, `frame()` o kimlikleri prompt'un OSC 8 çıpasından okuyup blokları
 **komutun satırı ve rengi** olarak sınırdan verir; `bt-gpu` o işareti
 ızgaranın solunda ayrılan paya `cell_bg` pipeline'ıyla çizer —
