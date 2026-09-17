@@ -153,6 +153,38 @@ __bateri_hooks() {
   typeset -g __bateri_block=0
   add-zsh-hook precmd __bateri_precmd
   add-zsh-hook preexec __bateri_preexec
+  # AYNA: ZLE'nin görüntü durumu her satır çiziminde terminale gidiyor.
+  #
+  # `zle -N zle-line-pre-redraw` DEĞİL: o bağlama tek sahiplidir ve
+  # zsh-syntax-highlighting ile zsh-autosuggestions aynı widget'ı istiyor —
+  # son yazan ötekini düşürürdü (011 ölçtü). `add-zle-hook-widget` yerine bir
+  # dağıtıcı kurup hepsini sırayla çağırıyor.
+  #
+  # NÖBET KANCANIN KENDİSİNDE: `add-zle-hook-widget` aynı widget'ı iki kez
+  # eklemiyor (`zstyle` listesinde içerme sorar), yani `PS1`'in eklerinde
+  # elle yazdığımız nöbetin karşılığı burada hazır. Doğrulandı: iki kez
+  # kaydedip `add-zle-hook-widget -L line-pre-redraw` listesi tek satır.
+  #
+  # BİZDEN SONRA KAYIT OLAN EKLENTİ: `add-zle-hook-widget` sona ekliyor, yani
+  # bizim kancamız kullanıcının eklentilerinden SONRA koşuyor ve onların
+  # `region_highlight`/`POSTDISPLAY` katkısını görüyor. Bunun iki bilinen
+  # sınırı var ve ikisi de belirtisiz: (1) kaydını erteleyen bir eklenti
+  # (zsh-defer) bizden sonra gelir ve katkısı aynaya bir çizim GEÇ düşer;
+  # (2) `zle -N zle-line-<kanca>` diyen bir eklenti dağıtıcının kendisini ezer
+  # ve o kancaya bağlı her şey — bizimki dahil — sessizce ölür. Üç kancadan
+  # hangisi ezilirse o kol susuyor ve belirtileri ayrı: `line-pre-redraw`
+  # giderse dock donar, `line-init` giderse prompt anında boş kalır,
+  # `line-finish` giderse biten komut aynada asılı durur. `line-init` en
+  # muhtemel olanı — kullanıcı rc'lerinde imleç şekli için yaygın.
+  #
+  # `line-init` DE BAĞLI ve bu bir süs değil: `line-pre-redraw` yalnız satır
+  # DEĞİŞİNCE koşuyor, prompt'un ilk (boş) çiziminde değil — gerçek bir
+  # oturumda gözlendi, ilk ayna ancak ilk tuş vuruşunda geliyordu. Onsuz dock
+  # prompt anında ölü kalır ve ilk harfte birden belirirdi.
+  autoload -Uz add-zle-hook-widget
+  add-zle-hook-widget line-init __bateri_dock_redraw
+  add-zle-hook-widget line-pre-redraw __bateri_dock_redraw
+  add-zle-hook-widget line-finish __bateri_dock_finish
 }
 
 # Prompt çizilmeden önce: biten komutun kodu (`D`), sonra prompt başlangıcı (`A`).
@@ -225,6 +257,127 @@ __bateri_precmd() {
 __bateri_preexec() {
   __bateri_ran=1
   print -nr -- $'\e]133;C\a'
+}
+
+# ── ZLE'nin görüntü aynası ───────────────────────────────────────────────
+#
+# TEL BİÇİMİ (çözücüsü `bt-core`'un `parse_dock`'u; ikisi birlikte değişir):
+#
+#   ESC ] 8133 ; u ; CURSOR ; b64(PREDISPLAY) ; b64(BUFFER) ;
+#                             b64(POSTDISPLAY) ; b64(region_highlight) BEL
+#   ESC ] 8133 ; e BEL   satır bitti (`line-finish`)
+#   ESC ] 8133 ; o BEL   görüntü aynaya sığmıyor (aşağıdaki kapı)
+#
+# GÖVDELER base64: kullanıcının yazdığı metnin içinde `;`, `ESC` ve C0
+# baytları olabilir ve üçü de dizinin çerçevesini bozar. base64'ün alfabesinde
+# üçünden hiçbiri yok.
+
+# base64 alfabesi, indeks sırasında.
+typeset -ga __bateri_b64_table
+__bateri_b64_table=( {A..Z} {a..z} {0..9} + / )
+
+# Aynanın taşıyacağı en uzun görüntü, KARAKTER.
+#
+# Sayı türetildi, seçilmedi — ve terminal tarafındaki `DOCK_PAYLOAD_LIMIT`
+# (64 KiB) ile AYNI bütçenin öteki ucu: o sınır "4096 karakter × en kötü 4
+# bayt UTF-8 × base64'ün 4/3 şişmesi" aritmetiğinden çıkmıştı, bu onun
+# karakter cinsinden hâli.
+#
+# NEDEN BU UÇTA DA BİR KAPI VAR: kodlama saf zsh ve maliyeti girdinin
+# uzunluğuyla doğrusal — üstelik her TUŞ VURUŞUNDA ödeniyor. Kapı olmasaydı
+# yapıştırılmış bir blok terminalin zaten reddedeceği bir yükü kodlamak için
+# harcanır, yani bedeli öder karşılığını alamazdık. Aşımda ayna "gösteremiyorum"
+# diyor ve giriş satırı ızgarada kalıyor; kullanıcı yazdığını yine görüyor.
+typeset -g __bateri_dock_limit=4096
+
+# `$1`'i base64'e çevirir; sonuç `REPLY`'de.
+#
+# FORK YOK: kodlama tuş başına koşuyor ve bir `base64` süreci doğurmak bu
+# yolun en pahalı kalemi olurdu. `nomultibyte` her elemanı bir BAYT yapıyor —
+# base64 baytların kodlaması, karakterlerin değil.
+#
+# BAYT DEĞERİ ÖNCE SKALERE ALINIYOR (`x=$bytes[i]`, sonra `#x`), doğrudan
+# `##${bytes[i]}` ile DEĞİL: aritmetiğin `##` biçimi kaçış dizisi yorumluyor
+# ve ters bölü baytı (`\`) 92 yerine 32 okunuyordu — komut satırında sık geçen
+# bir bayt için sessiz bir bozulma.
+#
+# DOLGU BASILMIYOR: çözücü dolgulu ve dolgusuz gövdeyi birlikte okuyor
+# (`decode_base64`'ün doc'u) ve basmamak tuş başına birkaç bayt eksiltiyor.
+__bateri_b64() {
+  emulate -L zsh
+  setopt nomultibyte
+  REPLY=
+  [[ -n $1 ]] || return 0
+  local -a bytes
+  bytes=( ${(s::)1} )
+  local -i n=$#bytes i v rest
+  local out= x y z
+  for (( i = 1; i <= n; i += 3 )); do
+    rest=$(( n - i + 1 ))
+    x=$bytes[i]
+    v=$(( #x << 16 ))
+    if (( rest > 1 )); then
+      y=$bytes[i+1]
+      v=$(( v | (#y << 8) ))
+    fi
+    if (( rest > 2 )); then
+      z=$bytes[i+2]
+      v=$(( v | #z ))
+    fi
+    out+=${__bateri_b64_table[$(( (v >> 18 & 63) + 1 ))]}
+    out+=${__bateri_b64_table[$(( (v >> 12 & 63) + 1 ))]}
+    (( rest > 1 )) && out+=${__bateri_b64_table[$(( (v >> 6 & 63) + 1 ))]}
+    (( rest > 2 )) && out+=${__bateri_b64_table[$(( (v & 63) + 1 ))]}
+  done
+  REPLY=$out
+}
+
+# ZLE'nin görüntü durumunu aynaya basar; kancası `line-init` ve
+# `line-pre-redraw` (ilki prompt'un ilk çizimi, ikincisi her değişiklik).
+#
+# BEŞ DEĞİŞKEN, biri eksik olsa ayna kullanıcının gördüğünden az gösterirdi:
+# `POSTDISPLAY` autosuggestions'ın önerisi, `region_highlight` de syntax
+# highlighting'in rengi.
+#
+# `emulate -L zsh` ZORUNLU: gövde kullanıcının seçenekleriyle koşuyor ve
+# aşağısı hem dizi indeksine (`KSH_ARRAYS`) hem de çok baytlı `${#...}`
+# sayımına bağlı. `-L` fonksiyon yereldir, dönüşte geri alınır.
+#
+# `REPLY` YEREL: kullanıcının ad alanında yaşayan bir değişken ve kancamız
+# onun satır düzenlemesinin ortasında koşuyor.
+__bateri_dock_redraw() {
+  emulate -L zsh
+  # Kayıtlar satır sonuyla ayrılıyor; çözücü gövdeyi `lines()` ile okuyor.
+  # Birleştirme kapıdan ÖNCE, çünkü dördüncü gövde de kapıya tabi.
+  local REPLY entries=${(F)region_highlight} pre buf post highlights
+  # Kapı KODLAMADAN ÖNCE, çünkü bütün anlamı kodlamadan kaçınmak — ve DÖRT
+  # gövdeyi birden ölçüyor. `region_highlight` ayrı sayılıyor, toplama
+  # girmiyor: sözdizimi vurgusu jeton başına bir kayıt bırakıyor, yani uzun
+  # bir satırda metnin kendisiyle aynı mertebede ve **kendi başına** sınırı
+  # aşabilir (`DOCK_PAYLOAD_LIMIT`'in türetmesi de onu metnin yanında ayrı bir
+  # terim sayıyor).
+  if (( ${#PREDISPLAY} + ${#BUFFER} + ${#POSTDISPLAY} > __bateri_dock_limit
+        || ${#entries} > __bateri_dock_limit )); then
+    print -nr -- $'\e]8133;o\a'
+    return 0
+  fi
+  __bateri_b64 "$PREDISPLAY"; pre=$REPLY
+  __bateri_b64 "$BUFFER"; buf=$REPLY
+  __bateri_b64 "$POSTDISPLAY"; post=$REPLY
+  __bateri_b64 "$entries"; highlights=$REPLY
+  # `$CURSOR` KARAKTER ofsetidir ve teli de karakter istiyor — `BUFFER`'ın
+  # başından sayılan hâli olduğu gibi gidiyor, `PREDISPLAY`'e kaydırmayı
+  # sınırın öteki tarafı yapıyor (`DockState::cursor`'ın doc'u).
+  print -nr -- $'\e]8133;u;'$CURSOR';'$pre';'$buf';'$post';'$highlights$'\a'
+}
+
+# `line-finish`: ZLE satırı bıraktı, ayna kapanıyor.
+#
+# OLMASAYDI son `BUFFER` asılı kalırdı: Enter'dan sonra dock koşan komutun
+# satırını göstermeye devam ederdi.
+__bateri_dock_finish() {
+  emulate -L zsh
+  print -nr -- $'\e]8133;e\a'
 }
 
 # Kullanıcının ZDOTDIR'ını KALICI olarak geri koyar ve izlerimizi siler.

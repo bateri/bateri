@@ -856,7 +856,7 @@ impl Scanner {
                     on_event(ScanEvent::Dock(match outcome {
                         DockOutcome::Update => DockEvent::Update(&self.line),
                         DockOutcome::End => DockEvent::End,
-                        DockOutcome::Malformed => DockEvent::Unavailable(DockFault::Malformed),
+                        DockOutcome::Unavailable(fault) => DockEvent::Unavailable(fault),
                     }));
                 } else if is_ignored(byte) {
                 } else if self.dock.len() == DOCK_PAYLOAD_LIMIT {
@@ -965,7 +965,7 @@ fn number<T: std::str::FromStr>(field: &[u8]) -> Option<T> {
 enum DockOutcome {
     Update,
     End,
-    Malformed,
+    Unavailable(DockFault),
 }
 
 /// Ayna yükünü çözer ve `line`'a yazar.
@@ -975,9 +975,11 @@ enum DockOutcome {
 /// ```text
 /// ESC ] 8133 ; u ; {CURSOR} ; {PREDISPLAY} ; {BUFFER} ; {POSTDISPLAY} ; {region_highlight} BEL
 /// ESC ] 8133 ; e BEL
+/// ESC ] 8133 ; o BEL
 /// ```
 ///
-/// `u` satırı tazeler, `e` (`line-finish`) kapatır. **Fazladan alan
+/// `u` satırı tazeler, `e` (`line-finish`) kapatır, `o` kabuğun "bu görüntü
+/// aynaya sığmıyor" demesidir. **Fazladan alan
 /// yoksayılır** — [`parse_mark`]'ın bilinmeyen anahtar-değeri tolere etmesiyle
 /// aynı gerekçe: phase-4'ün özel kip sinyali bu ayrıştırıcıyı yeniden açmadan
 /// eklenebilmeli.
@@ -995,23 +997,37 @@ enum DockOutcome {
 fn parse_dock(payload: &[u8], decoded: &mut Vec<u8>, line: &mut DockState) -> DockOutcome {
     let mut fields = payload.split(|&b| b == b';');
     let Some(op) = fields.next() else {
-        return DockOutcome::Malformed;
+        return unavailable(line, DockFault::Malformed);
     };
     match op {
         b"e" => DockOutcome::End,
+        // **Aşımın kabuk tarafındaki ucu.** [`DOCK_PAYLOAD_LIMIT`] yükü burada
+        // keserken kabuk onu **kodlamış** oluyor; `o` kodlamadan önce
+        // ölçtüğünü söylüyor. İkisi aynı bütçenin iki yakası ve ayrı ayrı
+        // gerekli: bu uç kabuğun tuş başına harcadığı zamanı, öteki uç bizim
+        // belleğimizi koruyor. Sonucu aynı olmak **zorunda**, yoksa sınırın
+        // hangi tarafta tutulduğu kullanıcıya farklı davranış olarak yansırdı.
+        b"o" => unavailable(line, DockFault::Overflow),
         b"u" => match decode_line(&mut fields, decoded, line) {
             Some(()) => DockOutcome::Update,
-            None => {
-                // Durum da yazılıyor: `decode_line` daha ilk satırda `Live`
-                // diyor ve yarım kalan bir çözüm onu olduğu gibi bırakırsa
-                // tarayıcının tamponu "canlı" adı altında boş metin taşırdı.
-                line.reset();
-                line.status = DockStatus::Unavailable(DockFault::Malformed);
-                DockOutcome::Malformed
-            }
+            // Durum da yazılıyor: `decode_line` daha ilk satırda `Live` diyor
+            // ve yarım kalan bir çözüm onu olduğu gibi bırakırsa tarayıcının
+            // tamponu "canlı" adı altında boş metin taşırdı.
+            None => unavailable(line, DockFault::Malformed),
         },
-        _ => DockOutcome::Malformed,
+        _ => unavailable(line, DockFault::Malformed),
     }
+}
+
+/// Tamponu boşaltır, durumu yazar ve sonucu döndürür.
+///
+/// Üç çağıran da aynı şeyi yapmak zorunda: gösteremediğimiz bir satırın metni
+/// tamponda kalırsa sonraki okuma "bu metin taze mi" sorusunu akıl yürütmeyle
+/// yanıtlamak zorunda kalır.
+fn unavailable(line: &mut DockState, fault: DockFault) -> DockOutcome {
+    line.reset();
+    line.status = DockStatus::Unavailable(fault);
+    DockOutcome::Unavailable(fault)
 }
 
 /// `u` yükünün beş alanını `line`'a çözer; eksik ya da bozuk alanda `None`.
@@ -1818,6 +1834,157 @@ mod tests {
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0], DockSnapshot::Unavailable(DockFault::Overflow));
         assert!(matches!(&seen[1], DockSnapshot::Update(line) if line.buffer == "ok"));
+    }
+
+    /// Kabuk betiğinin (`assets/shell/zsh/bateri.zsh`) yolu.
+    ///
+    /// Sınama onu **kaynağından** koşturuyor, paketten değil: `make kur`
+    /// kopyayı `cmp` ile denetliyor, yani ikisinin aynılığının kapısı orada.
+    fn script_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell/zsh")
+    }
+
+    /// Betiğin verilen ZLE durumu için bastığı baytlar.
+    ///
+    /// **Kodlayan gerçekten zsh.** Bu sınamaların tuttuğu şey `parse_dock`'un
+    /// doğruluğu değil — onun kendi sınamaları var — telin **iki ucunun**
+    /// aynı biçimi konuşması: kodlayıcı kabukta, çözücü burada ve ikisi ayrı
+    /// dillerde yazılı.
+    ///
+    /// `zsh -f`: kullanıcının hiçbir başlangıç dosyası okunmuyor, yani sonuç
+    /// makinede kurulu eklentilerden bağımsız.
+    ///
+    /// **Değerler ortamdan geçiyor**, betiğe gömülü değil: taşınan şey tam da
+    /// `;`, `ESC`, ters bölü ve tırnak gibi baytlar ve onları bir zsh
+    /// dizgisine gömmek sınamayı alıntılama kurallarının sınamasına
+    /// çevirirdi.
+    ///
+    /// Betik koşamıyorsa (zsh yok) sınama **düşer**, atlanmaz: bt-core Linux
+    /// hedefiyle *derleniyor*, sınamaları macOS'ta koşuyor ve orada
+    /// `/bin/zsh` her zaman var.
+    fn script_output(
+        cursor: usize,
+        pre: &str,
+        buffer: &str,
+        post: &str,
+        highlights: &[&str],
+    ) -> Vec<u8> {
+        run_script(
+            "source $ZDOTDIR/bateri.zsh
+             PREDISPLAY=$T_PRE BUFFER=$T_BUF POSTDISPLAY=$T_POST CURSOR=$T_CURSOR
+             region_highlight=( ${(f)T_HL} )
+             __bateri_dock_redraw",
+            &[
+                ("T_CURSOR", &cursor.to_string()),
+                ("T_PRE", pre),
+                ("T_BUF", buffer),
+                ("T_POST", post),
+                ("T_HL", &highlights.join("\n")),
+            ],
+        )
+    }
+
+    fn run_script(body: &str, env: &[(&str, &str)]) -> Vec<u8> {
+        let mut command = std::process::Command::new("zsh");
+        command
+            .args(["-f", "-c", body])
+            .env("ZDOTDIR", script_path());
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let output = command.output().expect("zsh koşmadı");
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "betik temiz koşmadı: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    #[test]
+    fn the_script_encodes_what_the_scanner_decodes() {
+        // Gövdeler base64 tam da bu baytlar için: `;` alanı, `ESC` diziyi
+        // bitirirdi. Ters bölü de burada — kodlayıcının ilk taslağı onu
+        // aritmetiğin `##` biçimiyle okuyor ve 92 yerine 32 görüyordu.
+        let buffer = "echo 'a;b' \\ \u{1b}[0m çığır";
+        let line = dock_line(&script_output(
+            5,
+            "❯ ",
+            buffer,
+            " --dry-run",
+            &[
+                "P0 2 fg=blue",
+                "0 4 fg=green,bold memo=zsh-syntax-highlighting",
+            ],
+        ));
+
+        assert_eq!(line.status, DockStatus::Live);
+        assert_eq!(line.predisplay, "❯ ");
+        assert_eq!(line.buffer, buffer);
+        assert_eq!(line.postdisplay, " --dry-run");
+        // `$CURSOR` 5, `PREDISPLAY` iki karakter: görüntü uzayında 7.
+        assert_eq!(line.cursor, 7);
+        assert_eq!(line.highlights.len(), 2);
+        assert_eq!(line.highlights[0].start, 0);
+        assert_eq!(line.highlights[0].end, 2);
+        assert_eq!(line.highlights[1].start, 2);
+        assert_eq!(line.highlights[1].end, 6);
+        assert!(line.highlights[1].style.bold);
+    }
+
+    #[test]
+    fn the_script_encodes_every_padding_remainder() {
+        // base64 üçer bayt öğütüyor; artığı 0, 1 ve 2 olan üç uzunluk da
+        // sınanıyor. UTF-8 karakter başına birden çok bayt, yani "karakter
+        // sayısı" ile "bayt sayısı" burada ayrışıyor.
+        for text in ["abc", "abcd", "abcde", "ç", "çi", "çığ", "😀"] {
+            let line = dock_line(&script_output(0, "", text, "", &[]));
+            assert_eq!(line.buffer, text, "metin: {text}");
+        }
+        // Boş görüntü de geçerli: prompt çizilir çizilmez gelen ilk ayna bu.
+        let line = dock_line(&script_output(0, "", "", "", &[]));
+        assert_eq!(line.buffer, "");
+        assert_eq!(line.status, DockStatus::Live);
+    }
+
+    #[test]
+    fn the_script_closes_the_mirror_when_the_line_is_finished() {
+        let bytes = run_script("source $ZDOTDIR/bateri.zsh; __bateri_dock_finish", &[]);
+        assert_eq!(dock_events(&bytes), vec![DockSnapshot::End]);
+    }
+
+    #[test]
+    fn a_line_too_long_to_mirror_is_refused_before_it_is_encoded() {
+        // Kabuk tarafındaki kapı: kodlama tuş başına koşuyor ve maliyeti
+        // uzunlukla doğrusal, yani terminalin zaten reddedeceği bir yükü
+        // kodlamak boşa harcanan zamandır. İki ucun sonucu **aynı** olmalı
+        // (`DockFault::Overflow`), yoksa sınırın hangi tarafta tutulduğu
+        // kullanıcıya farklı davranış olarak yansırdı.
+        let long = "x".repeat(4097);
+        assert_eq!(
+            dock_events(&script_output(0, "", &long, "", &[])),
+            vec![DockSnapshot::Unavailable(DockFault::Overflow)]
+        );
+
+        // Sınırın altındaki satır aynada; kapı sessizce daralmıyor.
+        let fits = "x".repeat(4096);
+        assert_eq!(
+            dock_line(&script_output(0, "", &fits, "", &[])).buffer,
+            fits
+        );
+
+        // **Dördüncü gövde de kapıya tabi.** Sözdizimi vurgusu jeton başına bir
+        // kayıt bırakıyor, yani kısa bir metnin yanında `region_highlight`
+        // kendi başına sınırı aşabilir; kapı yalnız metni ölçseydi yorumu
+        // gerçekten yaptığından fazlasını iddia ederdi.
+        let many: Vec<String> = (0..200)
+            .map(|at| format!("{at} {at} fg=green memo=zsh-syntax-highlighting"))
+            .collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert_eq!(
+            dock_events(&script_output(0, "", "ls", "", &many)),
+            vec![DockSnapshot::Unavailable(DockFault::Overflow)]
+        );
     }
 
     #[test]
