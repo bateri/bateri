@@ -1,11 +1,16 @@
-//! Aynanın çizilecek hâli: [`DockState`] → dock hücreleri.
+//! Dock'un çizilecek hâli: [`DockState`] ile [`DockContext`] → dock hücreleri.
 //!
 //! [`crate::Session::frame`]'in ızgara için yaptığını dock için bu modül
 //! yapıyor ve aynı kuralla: **karar burada, boyama orada**. Sınırdan metin
-//! değil **hücreler** geçiyor (renk, biçim, sütun), caret'in sütunu ve
-//! yüzeyin iki rengi; kabuğun safhası, `region_highlight`'ın sözdizimi ve
-//! `PREDISPLAY`/`POSTDISPLAY` ayrımı bu tarafta kalıyor — çizen taraf
-//! "ne anlama geldiğini" bilmiyor.
+//! değil **hücreler** geçiyor (renk, biçim, sütun, satır), caret'in sütunu ve
+//! yüzeyin iki rengi; kabuğun safhası, `region_highlight`'ın sözdizimi,
+//! `PREDISPLAY`/`POSTDISPLAY` ayrımı **ve bağlam satırının taşma kuralı** bu
+//! tarafta kalıyor — çizen taraf "ne anlama geldiğini" bilmiyor. Taşmanın
+//! burada durması bir yer tercihi değil: hangi yarının kısalacağı
+//! (yol kısalır, dal kısalmaz) bir ürün kararı, piksel kararı değil.
+//!
+//! **İki satır, iki ömür:** üst satır aynadan doğuyor ve tuş başına
+//! tazeleniyor, alt satır bağlamdan ve prompt başına.
 //!
 //! Gövde **saf**: kilit almıyor, `Session` görmüyor. Tek çağıranı
 //! [`crate::Session::dock`] ve o yaprak kilidi alıp bırakıyor; sınamalar
@@ -13,7 +18,9 @@
 
 use crate::color::{self, LinearRgba, Theme};
 use crate::session::{Cell, UnderlineStyle};
-use crate::shell::{DockState, DockStatus, HighlightColor, HighlightStyle, ShellPhase, ShellState};
+use crate::shell::{
+    DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ShellPhase, ShellState,
+};
 
 /// Dock'un karedeki yüzeyi — hücrelerin **dışında** kalan her şey, çözülmüş.
 ///
@@ -41,7 +48,24 @@ const SIGIL: char = '>';
 ///
 /// Sabit, çünkü işaret **tek** karakter ve ayna onu görmüyor — aynanın
 /// `PREDISPLAY`'i kabuğun prompt'u, bu ise terminalin kendi işareti.
+///
+/// **Bağlam satırı da buradan başlıyor**, sıfırdan değil: iki satır tek sol
+/// kenarı paylaşınca göz onları tek blok okuyor ve `>` işareti payda asılı
+/// kalıyor — prompt tasarımlarının olağan hizası. Kazanılacak iki sütun,
+/// yolun zaten soldan kısaldığı bir satırda ödenmeye değmiyor.
 const TEXT_COL: u16 = 2;
+
+/// Bağlam satırının iki yanını ayıran işaret; iki yanında birer boşluk.
+const SEPARATOR: &str = " | ";
+
+/// Bağlam satırının dock-yerel satır numarası; giriş satırının **altı**.
+///
+/// `DOCK_ROWS`'un ikinci satırı ve orası bu crate'te değil `bt-gpu`'da
+/// sayılıyor; buradaki sabit onun tüketicisi, ikinci bir kaynak değil.
+const CONTEXT_ROW: u16 = 1;
+
+/// Soldan kısaltılmış yolun başındaki işaret.
+const ELLIPSIS: char = '…';
 
 /// Aynayı bu karenin dock hücrelerine çevirir.
 ///
@@ -57,6 +81,7 @@ const TEXT_COL: u16 = 2;
 /// biriminde: geniş glyph bu sette henüz yok (`CLAUDE.md`).
 pub(crate) fn render(
     state: &DockState,
+    context: &DockContext,
     shell: Option<ShellState>,
     theme: &Theme,
     cols: u16,
@@ -78,6 +103,10 @@ pub(crate) fn render(
         fg: sigil_color(shell, theme),
         ..Cell::default()
     });
+    // Bağlam satırı aynanın **durumundan önce**: dizin ve dal ZLE satırı
+    // düzenlemese de doğru ve kullanıcı komut koşarken de onlara bakıyor.
+    // Aşağıdaki `Live` kapısının altında kalsaydı her komutta kaybolurdu.
+    render_context(context, theme, cols, &mut sink);
 
     // `Live` olmayan ayna metin çizdirmiyor ve ikisi de doğru cevap: `Idle`'da
     // ZLE satır düzenlemiyor, `Unavailable`'da gösteremediğimiz bir satır var
@@ -129,6 +158,80 @@ pub(crate) fn render(
         // audit: `skip`'in tanımı gereği `cursor - skip < available ≤ cols`.
         caret: Some(TEXT_COL + (state.cursor - skip) as u16),
         ..surface
+    }
+}
+
+/// Dock'un **alt** satırı: `{tam yol} | {dal}`, sol altta ve sönük.
+///
+/// **Taşmada yol soldan kısalır, dal asla kısalmaz.** Gerekçe iki ayrı:
+/// yolun bilgisi kuyruğunda (hangi klasördesin), yani baştan kesmek en
+/// bilgilendirici yarıyı atardı; dalın ise **hiçbir** yarısı atılamaz —
+/// kısaltılmış bir dal adı (`mai…`) kullanıcıya başka bir dalda olduğunu
+/// düşündürebilir ve bu, bu deponun yasakladığı "sessizce yanlış" sınıfı.
+///
+/// Kısaltma **karakter** biriminde ve bileşen sınırına yaslanmıyor: sınıra
+/// yaslamak kullanılabilir sütunların bir kısmını boş bırakırdı ve kazancı
+/// zevk, kaybı bilgi olurdu. Geniş glyph bu sette yok (`CLAUDE.md`).
+///
+/// **Ayraç iki yan da doluysa çizilir.** Depo olmayan dizinde asılı bir `|`
+/// "dal okunamadı" derdi; okunacak dal yok.
+fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut impl FnMut(Cell)) {
+    let available = usize::from(cols.saturating_sub(TEXT_COL));
+    if available == 0 {
+        return;
+    }
+    let branch_chars = context.branch.chars().count();
+    let path_chars = context.cwd.chars().count();
+    // Bütçe **önce dala** ayrılıyor; yol kalanı alıyor. Ayraç da yolun
+    // tarafında sayılıyor, çünkü yol düşerse ayraç da düşüyor.
+    let path_budget = if branch_chars == 0 {
+        available
+    } else {
+        available
+            .saturating_sub(branch_chars)
+            .saturating_sub(SEPARATOR.chars().count())
+    };
+
+    // `skip` yolun **başından** atılan karakter sayısı; `mark` kısaltmanın
+    // görünür işareti. Yol hiç çizilmiyorsa ikisi de baştan susuyor.
+    let (mark, skip) = if path_budget == 0 || path_chars == 0 {
+        (None, path_chars)
+    } else if path_chars <= path_budget {
+        (None, 0)
+    } else {
+        // İşaretin kendisi de bir sütun: kuyruktan `path_budget - 1` karakter.
+        (Some(ELLIPSIS), path_chars - (path_budget - 1))
+    };
+    let shows_path = mark.is_some() || skip < path_chars;
+    let separator = if shows_path && branch_chars > 0 {
+        SEPARATOR
+    } else {
+        ""
+    };
+
+    let line = mark
+        .into_iter()
+        .chain(context.cwd.chars().skip(skip))
+        .chain(separator.chars())
+        .chain(context.branch.chars());
+    // `take` son kapı: dal tek başına pencereden geniş olabilir (çok dar bir
+    // pencere) ve o hâlde sığan kadarı çiziliyor — taşan hücre ızgaranın
+    // sağından dışarı yazardı.
+    for (offset, ch) in line.take(available).enumerate() {
+        // Boşluk glyph üretmiyor (`cell`'in kuralı); ayracın iki yanı da
+        // buradan eleniyor.
+        if ch == ' ' {
+            continue;
+        }
+        sink(Cell {
+            // audit: `offset < available ≤ cols` ve `cols` `u16`; toplam taşamaz.
+            col: TEXT_COL + offset as u16,
+            row: CONTEXT_ROW,
+            ch: Some(ch),
+            // Bütün satır sönük: bağlam okunur ama giriş satırıyla yarışmaz.
+            fg: theme.dim_linear(),
+            ..Cell::default()
+        });
     }
 }
 
@@ -267,21 +370,39 @@ mod tests {
         }
     }
 
-    /// Çizilen hücreler, sütun sırasıyla.
+    /// Bağlamsız çizim: yol da dal da boş (bu modülün eski sınamalarının hâli).
     fn draw(state: &DockState, cols: u16) -> (Vec<Cell>, Dock) {
+        draw_with(state, &DockContext::default(), cols)
+    }
+
+    /// Çizilen hücreler, sütun sırasıyla.
+    fn draw_with(state: &DockState, context: &DockContext, cols: u16) -> (Vec<Cell>, Dock) {
         let mut cells = Vec::new();
-        let dock = render(state, None, &THEME, cols, |cell| cells.push(cell));
+        let dock = render(state, context, None, &THEME, cols, |cell| cells.push(cell));
         (cells, dock)
     }
 
-    /// Satırın **sütun sütun** görüntüsü: hiç hücre üretilmeyen sütun da
+    fn context(cwd: &str, branch: &str) -> DockContext {
+        DockContext {
+            cwd: cwd.into(),
+            branch: branch.into(),
+        }
+    }
+
+    /// Giriş satırının **sütun sütun** görüntüsü.
+    fn text(cells: &[Cell]) -> String {
+        row_text(cells, 0)
+    }
+
+    /// Bir satırın **sütun sütun** görüntüsü: hiç hücre üretilmeyen sütun da
     /// mürekkepsiz hücre de boşluk. Hücreleri sırayla dizmek yetmezdi —
     /// işaretle metin arasındaki nefes payı (hiç hücre üretmiyor) o dizgide
     /// görünmez ve sütun aritmetiği sınanmamış kalırdı.
-    fn text(cells: &[Cell]) -> String {
-        let width = cells.iter().map(|cell| cell.col + 1).max().unwrap_or(0);
+    fn row_text(cells: &[Cell], row: u16) -> String {
+        let on_row = || cells.iter().filter(|cell| cell.row == row);
+        let width = on_row().map(|cell| cell.col + 1).max().unwrap_or(0);
         let mut line = vec![' '; usize::from(width)];
-        for cell in cells {
+        for cell in on_row() {
             line[usize::from(cell.col)] = cell.ch.unwrap_or(' ');
         }
         line.into_iter().collect()
@@ -371,9 +492,16 @@ mod tests {
         let state = live("", "", "", 0);
         let color = |shell| {
             let mut first = None;
-            render(&state, shell, &THEME, COLS, |cell| {
-                first.get_or_insert(cell.fg);
-            });
+            render(
+                &state,
+                &DockContext::default(),
+                shell,
+                &THEME,
+                COLS,
+                |cell| {
+                    first.get_or_insert(cell.fg);
+                },
+            );
             first.expect("işaret her hâlde çizilir")
         };
         assert_eq!(color(None), THEME.accent_linear());
@@ -460,6 +588,78 @@ mod tests {
         let (cells, dock) = draw(&live("", "ls", "", 2), TEXT_COL);
         assert_eq!(text(&cells), ">");
         assert_eq!(dock.caret, None);
+    }
+
+    #[test]
+    fn the_context_line_sits_under_the_input_and_is_dim() {
+        let (cells, _) = draw_with(&live("", "ls", "", 2), &context("/tmp/x", "main"), COLS);
+        assert_eq!(text(&cells), "> ls");
+        // Yol, ayraç, dal — yan yana ve giriş metniyle **aynı** sol kenarda.
+        assert_eq!(row_text(&cells, 1), "  /tmp/x | main");
+        // Satırın tamamı sönük: bağlam okunur ama giriş satırıyla yarışmaz.
+        for cell in cells.iter().filter(|cell| cell.row == 1) {
+            assert_eq!(cell.fg, THEME.dim_linear(), "bağlam sönük değil");
+        }
+    }
+
+    #[test]
+    fn the_context_line_lives_even_when_the_mirror_does_not() {
+        // Bağlam aynanın ömrüne bağlı değil: komut koşarken ZLE satırı
+        // bırakıyor (`Idle`) ama dizin hâlâ doğru ve kullanıcı ona bakıyor.
+        for status in [
+            DockStatus::Idle,
+            DockStatus::Unavailable(DockFault::Overflow),
+        ] {
+            let state = DockState {
+                status,
+                ..live("", "ls", "", 2)
+            };
+            let (cells, _) = draw_with(&state, &context("/tmp/x", "main"), COLS);
+            assert_eq!(text(&cells), ">", "{status:?} metin çizdirdi");
+            assert_eq!(row_text(&cells, 1), "  /tmp/x | main", "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_branch_takes_the_separator_with_it() {
+        // Depo olmayan dizinde yalnız yol; asılı bir ayraç "dal okunamadı" der
+        // ve o yanlış olurdu.
+        let state = live("", "", "", 0);
+        let (cells, _) = draw_with(&state, &context("/tmp/x", ""), COLS);
+        assert_eq!(row_text(&cells, 1), "  /tmp/x");
+        // Simetrik: yol yokken (henüz OSC 7 gelmedi) de ayraç yok.
+        let (cells, _) = draw_with(&state, &context("", "main"), COLS);
+        assert_eq!(row_text(&cells, 1), "  main");
+        // İkisi de yoksa satır hiç doğmuyor.
+        let (cells, _) = draw_with(&state, &DockContext::default(), COLS);
+        assert_eq!(row_text(&cells, 1), "");
+    }
+
+    #[test]
+    fn a_narrow_dock_trims_the_path_from_the_left_and_keeps_the_branch() {
+        // Kuyruk daha bilgilendirici: hangi depodasın sondaki bileşenlerde
+        // yazıyor. Dal **asla** kısalmıyor — kısaltılmış bir dal adı yanlış
+        // dalda olduğunu düşündürürdü.
+        let state = live("", "", "", 0);
+        let path = "/a/bb/ccc/dddd";
+
+        // 20 sütun: metne 18 kalıyor, ` | main` yedisini alıyor, yola 11 —
+        // yani `…` ile birlikte son on karakter.
+        let (cells, _) = draw_with(&state, &context(path, "main"), 20);
+        assert_eq!(row_text(&cells, 1), "  …b/ccc/dddd | main");
+
+        // Yol için yer kalmayınca yalnız dal kalıyor, ayraçsız: kırpılacak
+        // şey dal değil.
+        let (cells, _) = draw_with(&state, &context(path, "main"), 9);
+        assert_eq!(row_text(&cells, 1), "  main");
+
+        // Dal bile sığmıyorsa sığan kadarı çiziliyor; taşma yok.
+        let (cells, _) = draw_with(&state, &context(path, "main"), 4);
+        assert_eq!(row_text(&cells, 1), "  ma");
+
+        // Sığan yol kısalmıyor ve `…` eklenmiyor.
+        let (cells, _) = draw_with(&state, &context(path, "main"), 40);
+        assert_eq!(row_text(&cells, 1), "  /a/bb/ccc/dddd | main");
     }
 
     #[test]

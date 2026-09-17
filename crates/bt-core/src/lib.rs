@@ -6,7 +6,8 @@
 //! `Blocks`,
 //! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Theme`,
 //! `ShellState`, `ShellPhase`, aynanın `DockState`, `DockStatus`, `DockFault`,
-//! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, dock yüzeyinin `Dock`'unu,
+//! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, bağlam satırının
+//! `DockContext`'ini, dock yüzeyinin `Dock`'unu,
 //! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`, `CursorMotion`,
 //! `ReduceMotion`'ı görür (tam
 //! liste aşağıdaki `pub use` bloğu). `Osc52` alacritty'nin aynı adlı tipinin
@@ -56,8 +57,8 @@ pub use settings::{
     Settings, ShellIntegration,
 };
 pub use shell::{
-    DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle, ShellPhase,
-    ShellState,
+    DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle,
+    ShellPhase, ShellState,
 };
 pub use wake::Wake;
 

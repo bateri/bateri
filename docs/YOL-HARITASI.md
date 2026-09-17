@@ -116,6 +116,17 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   `%9v` boşa genişlerse bedel artık yalnız kayıp şerit değil — bastırma hiç
   koşmaz ve kullanıcı yazdığını **iki yerde** görür (ızgarada + dock'ta).
   Belirti hâlâ sessiz ve hâlâ yanlış çizim değil, ama artık görünür.
+- **Git dalı prompt başına bir fork.** 012 phase-6 dalı `precmd`'de
+  `git rev-parse --abbrev-ref HEAD` ile okuyor (detached HEAD'de ikinci bir
+  çağrı, kısa SHA için). Terminal kendi `git` sürecini doğurmuyor ve bu
+  bilinçli — dal kabuğun bildiği bir şey — ama bedel **her prompt'ta** ödeniyor
+  ve büyük depoda hissediliyor; p10k'nın `gitstatusd` daemon'ı tam da bunun
+  için var. Çaresi bir önbellek (dizin + `.git/HEAD` damgası) ya da bir daemon
+  ve ikisi de kendi tasarımını ister. **Ölçüm de borç:** maliyet ölçülmedi ve
+  ölçecek kanca yok (`BT_INPUT_LATENCY_SAMPLES`), yani `/measure` bugün
+  kapatamaz; kullanıcının göreceği tek yüzey "büyük depoda prompt gecikmesi".
+  Yamandığı yer belli değil; dock'un bağlam satırını elden geçiren ilk set
+  doğal ev.
 - **Blok animasyonları.** 010 Karar 5 şeridin belirmesini setten **çıkardı**:
   şerit bugün anında beliriyor. Gerekçe animasyonun zorluğu değil, bedeli —
   `bt-gpu::motion` ikinci bir tüketici kazanır, `Mode::Fade`'in "indirgemenin

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use bt_core::{Blocks, Cursor, CursorMotion, DirtyFlag, DockState, Session, Theme};
+use bt_core::{Blocks, Cursor, CursorMotion, DirtyFlag, DockContext, DockState, Session, Theme};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -401,6 +401,11 @@ struct LinkIvars {
     /// Dock'u olmayan pencerede hiç dokunulmuyor: boş bir `DockState` üç boş
     /// dizgi ve boş bir `Vec`, yani ayırmıyor da.
     dock: RefCell<DockState>,
+    /// Bağlam satırının tamponu; `dock` ile aynı gerekçe ve aynı ömür.
+    ///
+    /// Ayrı tampon, çünkü ayrı ömür: ayna `line-finish`'te sıfırlanıyor,
+    /// dizin ile dal prompt'tan prompt'a duruyor (`bt_core::DockContext`).
+    dock_context: RefCell<DockContext>,
     /// Dock kaç satır; `0` → bu pencerede dock yok.
     ///
     /// **Oturumun sabiti**, `Cell` değil düz alan: ayrım oturum doğarken
@@ -759,9 +764,12 @@ define_class!(
             // sıfır kare sözleşmesi dokunulmadan kalıyor.
             if iv.dock_rows > 0 {
                 let mut dock_state = iv.dock.borrow_mut();
-                let dock = iv.session.dock(iv.cols.get(), &mut dock_state, |cell| {
-                    frame.push_dock(cell);
-                });
+                let mut dock_context = iv.dock_context.borrow_mut();
+                let dock =
+                    iv.session
+                        .dock(iv.cols.get(), &mut dock_state, &mut dock_context, |cell| {
+                            frame.push_dock(cell)
+                        });
                 if let Some(col) = dock.caret {
                     frame.push_dock_caret(col, dock.caret_text, theme.accent_linear());
                 }
@@ -994,6 +1002,7 @@ impl DisplayLink {
                 frame: RefCell::new(Frame::default()),
                 blocks: RefCell::new(Blocks::default()),
                 dock: RefCell::new(DockState::default()),
+                dock_context: RefCell::new(DockContext::default()),
                 dock_rows: layout.dock_rows,
                 cols: Cell::new(layout.cols),
                 cell: Cell::new(layout.cell),

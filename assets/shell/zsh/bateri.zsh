@@ -259,6 +259,48 @@ __bateri_precmd() {
   psvar[9]=$__bateri_block
   print -nr -- $'\e]133;A;bt_block='$__bateri_block$'\a'
   __bateri_prompt_set
+  # DOCK'UN BAĞLAM SATIRI. Prompt başına, tuş başına DEĞİL: ikisi de değişmek
+  # için bir komut bekliyor (`cd`, `git checkout`) ve o komut bittiğinde
+  # buradayız.
+  __bateri_cwd
+  __bateri_branch_print
+}
+
+# Çalışma dizinini OSC 7 ile bildirir.
+#
+# YETKİ BÖLÜMÜ BOŞ (`file:///…`), `file://$HOST…` DEĞİL: terminal tarafındaki
+# kapı adlı her host'u yabancı sayıyor (`LOCAL_AUTHORITIES`) ve bunun sebebi
+# bir eksiklik değil, bir bağımlılık kararı — ad karşılaştırması `bt-core`'a
+# `gethostname` demek. Boş yetkiyle basınca kapı hiçbir zaman bir ad
+# uyuşmasına bağlı olmuyor: makine yeniden adlandırılsa da dizin görünür.
+#
+# YÜZDE KODLAMASI ZORUNLU: `$PWD` içinde boşluk, `%`, `;` ve çok baytlı
+# karakterler olabilir; `;` OSC alanını, kontrol baytları diziyi bozardı.
+__bateri_cwd() {
+  emulate -L zsh
+  local REPLY
+  __bateri_percent "$PWD"
+  print -nr -- $'\e]7;file://'$REPLY$'\a'
+}
+
+# Git dalını aynanın kanalından gönderir; depo değilse gövde BOŞ.
+#
+# TEK FORK, olağan hâlde: `--abbrev-ref` depo dışında da tek çağrı, detached
+# HEAD'de ikinci bir çağrı kısa SHA için. Bedel PROMPT başına ve büyük depoda
+# hissedilir — p10k'nın `gitstatusd` daemon'ı bu yüzden var; hızlandırma ayrı
+# bir iş (`plan.md` → Kapsam Dışı).
+#
+# `command`: kullanıcının `git` alias'ı ya da fonksiyonu araya girmesin.
+__bateri_branch_print() {
+  emulate -L zsh
+  local REPLY ref
+  ref=$(command git rev-parse --abbrev-ref HEAD 2>/dev/null)
+  # `HEAD` bir dal adı değil, detached HEAD'in cevabı: yerine kısa SHA.
+  if [[ $ref == HEAD ]]; then
+    ref=$(command git rev-parse --short HEAD 2>/dev/null)
+  fi
+  __bateri_b64 "$ref"
+  print -nr -- $'\e]8133;b;'$REPLY$'\a'
 }
 
 # Prompt'u bu oturumun sahibine göre kurar; çağıranı `precmd`.
@@ -429,6 +471,40 @@ __bateri_b64() {
     out+=${__bateri_b64_table[$(( (v >> 12 & 63) + 1 ))]}
     (( rest > 1 )) && out+=${__bateri_b64_table[$(( (v >> 6 & 63) + 1 ))]}
     (( rest > 2 )) && out+=${__bateri_b64_table[$(( (v & 63) + 1 ))]}
+  done
+  REPLY=$out
+}
+
+# Onaltılık haneler, yüzde kodlamasının iki basamağı için.
+typeset -ga __bateri_hex
+__bateri_hex=( 0 1 2 3 4 5 6 7 8 9 A B C D E F )
+
+# `$1`'i yüzde kodlar (RFC 3986'nın "unreserved" kümesi + `/`); sonuç `REPLY`'de.
+#
+# FORK YOK, `__bateri_b64` ile aynı gerekçe ve aynı iki incelik: `nomultibyte`
+# her elemanı bir BAYT yapıyor (yüzde kodlaması baytların, karakterlerin
+# değil) ve bayt değeri önce skalere alınıyor (`x=…`, sonra `#x`) — aritmetiğin
+# `##` biçimi kaçış dizisi yorumluyor ve ters bölüyü 92 yerine 32 okuyor.
+#
+# `/` KODLANMIYOR: yol ayracı ve kodlanmış bir `/` yolu tek bir bileşen gibi
+# gösterirdi. Çözen taraf ikisini de okuyor, yani bu bir zorunluk değil
+# okunabilirlik: kullanıcının yolu bize de insan gözüyle bakılabilir kalıyor.
+__bateri_percent() {
+  emulate -L zsh
+  setopt nomultibyte
+  REPLY=
+  [[ -n $1 ]] || return 0
+  local -a bytes
+  bytes=( ${(s::)1} )
+  local out= x
+  local -i v
+  for x in $bytes; do
+    if [[ $x == [A-Za-z0-9/._~-] ]]; then
+      out+=$x
+    else
+      v=$(( #x ))
+      out+='%'${__bateri_hex[$(( (v >> 4) + 1 ))]}${__bateri_hex[$(( (v & 15) + 1 ))]}
+    fi
   done
   REPLY=$out
 }

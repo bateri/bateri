@@ -57,7 +57,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
-use crate::shell::{DockState, Scanner, ShellLog, ShellState, Stripe};
+use crate::shell::{DockContext, DockState, Scanner, ShellLog, ShellState, Stripe};
 use crate::wake::Wake;
 
 /// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
@@ -1026,6 +1026,29 @@ pub struct SelectionPoint {
 ///
 /// Bayrak okuması kırpılmış noktadan — `pub` API'ye grid dışı bir sütun
 /// gelirse indeksleme paniklemesin.
+fn anchor<T>(term: &Term<T>, at: SelectionPoint) -> (Point, Side) {
+    let offset = term.grid().display_offset() as i32;
+    let (point, half) = (viewport_point((at.col, at.row), offset), at.half);
+    let flags = term.grid()[point.grid_clamp(term, Boundary::Grid)].flags;
+    let side = if flags.contains(Flags::WIDE_CHAR) {
+        Side::Left
+    } else if flags.contains(Flags::WIDE_CHAR_SPACER) {
+        Side::Right
+    } else {
+        match half {
+            CellHalf::Left => Side::Left,
+            CellHalf::Right => Side::Right,
+        }
+    };
+    if side == Side::Right
+        && point.column == term.last_column()
+        && point.line < term.bottommost_line()
+    {
+        return (Point::new(point.line + 1, Column(0)), Side::Left);
+    }
+    (point, side)
+}
+
 /// Bir ekran satırının **son mürekkepli** karakteri; boş satırda `None`.
 ///
 /// Bastırmanın tazelik kapısının ızgara yarısı ([`DockState::last_ink`] öteki
@@ -1048,29 +1071,6 @@ fn last_ink_in_row<T>(term: &Term<T>, row: u16, offset: i32) -> Option<char> {
             || cell.c == ' ';
         (!blank).then_some(cell.c)
     })
-}
-
-fn anchor<T>(term: &Term<T>, at: SelectionPoint) -> (Point, Side) {
-    let offset = term.grid().display_offset() as i32;
-    let (point, half) = (viewport_point((at.col, at.row), offset), at.half);
-    let flags = term.grid()[point.grid_clamp(term, Boundary::Grid)].flags;
-    let side = if flags.contains(Flags::WIDE_CHAR) {
-        Side::Left
-    } else if flags.contains(Flags::WIDE_CHAR_SPACER) {
-        Side::Right
-    } else {
-        match half {
-            CellHalf::Left => Side::Left,
-            CellHalf::Right => Side::Right,
-        }
-    };
-    if side == Side::Right
-        && point.column == term.last_column()
-        && point.line < term.bottommost_line()
-    {
-        return (Point::new(point.line + 1, Column(0)), Side::Left);
-    }
-    (point, side)
 }
 
 /// Seçimin **ekranda** çizilen aralığı — `frame()`, kare kapısı ve temizleme
@@ -2089,14 +2089,23 @@ impl Session {
     /// (`bt-shell`, entegrasyon kuruldu mu) kararlaşıyor ve bu crate onu
     /// bilmiyor — bilseydi "kabuk entegrasyonu kuruldu mu" sorusunun ikinci
     /// bir kaydı doğardı.
-    pub fn dock(&self, cols: u16, into: &mut DockState, sink: impl FnMut(Cell)) -> Dock {
+    pub fn dock(
+        &self,
+        cols: u16,
+        into: &mut DockState,
+        context: &mut DockContext,
+        sink: impl FnMut(Cell),
+    ) -> Dock {
         let theme = *lock(&self.adapter.0.theme);
         let shell = {
             let shell = lock(&self.shell);
             into.clone_from(&shell.dock);
+            // Bağlam **aynı kilit turunda**: ayrı bir turda alınsaydı araya
+            // düşen bir prompt dizini yeni, dalı eski bir satırla eşleştirirdi.
+            context.clone_from(&shell.context);
             shell.state
         };
-        dock::render(into, shell, &theme, cols, sink)
+        dock::render(into, context, shell, &theme, cols, sink)
     }
 
     /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve
@@ -2646,7 +2655,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::shell::{DockFault, DockState, DockStatus, ShellPhase};
+    use crate::shell::{DockContext, DockFault, DockState, DockStatus, ShellPhase};
 
     /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
     const THEME: Theme = Theme::BATERI;
@@ -5928,12 +5937,17 @@ mod tests {
         // asılırdı. `dock_state()`'in tek kilitli hâli okuyucu thread'de
         // yarışmaya devam ediyor, yani iki şekil aynı anda sınanıyor.
         let mut dock = DockState::default();
+        let mut context = DockContext::default();
         let mut frames = 0u64;
         let mut docked = 0u64;
         while Instant::now() < deadline {
             if frame_if_damaged(&session, |_| ()).is_some() {
                 frames += 1;
-                if session.dock(80, &mut dock, |_| ()).caret.is_some() {
+                if session
+                    .dock(80, &mut dock, &mut context, |_| ())
+                    .caret
+                    .is_some()
+                {
                     docked += 1;
                 }
             }
