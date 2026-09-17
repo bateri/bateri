@@ -2360,18 +2360,34 @@ impl Session {
     /// elle yazabileceği düz bir metin: onu yazılmış girdi gibi akıtmak
     /// tanımı gereği aynı sonucu verir.
     ///
-    /// **Üç koşul da zorunlu ve en dar hâliyle:**
+    /// **Dört koşul da zorunlu ve en dar hâliyle:**
     ///
     /// - Dock satırın sahibi ([`ShellLog::suppressed_input`], yani safha
     ///   `Input` **ve** ayna `Live`). Değilse hiç dokunulmuyor: vim, `less`,
     ///   `read` ve entegrasyonsuz oturum bugünkü korumalı yolda kalıyor.
+    /// - ZLE **ekleme** keymap'inde ([`DockState::insert_keymap`]).
     /// - Yük geçerli UTF-8 — pano metni zaten `String`'den geliyor, ama
     ///   ölçüt baytta değil **karakterde** olmalı.
     /// - Hiç kontrol karakteri yok. [`char::is_control`] C0'ı da C1'i de
     ///   kapsıyor; satır sonu, sekme ve `ESC` üçü de bu testin içinde, yani
     ///   ayrıca sayılmıyorlar.
+    ///
+    /// **Keymap koşulu sonradan eklendi ve eksikliği bir kusurdu**
+    /// (`/code-review`, 012 phase-6): üstteki "kullanıcı elle yazsa aynı
+    /// sonucu verirdi" cümlesi her basılabilir baytın `self-insert`'e bağlı
+    /// olmasını varsayıyor ve o varsayım yalnız ekleme keymap'inde doğru.
+    /// `bindkey -v` kullanan biri Esc'e bastığında ZLE `vicmd`'ye geçiyor ama
+    /// safha hâlâ `Input`, ayna hâlâ `Live`, blok hâlâ açık — yani kapı
+    /// açılıyordu ve baytlar **komut** olarak yorumlanıyordu: panodaki `dd`
+    /// satırı siler, `x` karakter siler, `p` kill-ring'i yapıştırır. Hiçbiri
+    /// çalışmıyor (satır sonu yok) ama tampon sessizce değişiyordu. İki sarılı
+    /// yol (`bracketed-paste` ve `bracketed-paste-magic`) her keymap'te
+    /// harfi harfine ekliyor, yani istisna kapanınca davranış doğruya dönüyor.
     fn can_be_typed(&self, bytes: &[u8]) -> bool {
-        if lock(&self.shell).suppressed_input().is_none() {
+        if !lock(&self.shell)
+            .suppressed_input()
+            .is_some_and(|input| input.insert_keymap)
+        {
             return false;
         }
         std::str::from_utf8(bytes).is_ok_and(|text| !text.chars().any(char::is_control))
@@ -2852,8 +2868,12 @@ mod tests {
     /// bastığı dizinin aynısı; `PREDISPLAY`, `POSTDISPLAY` ve
     /// `region_highlight` boş, çünkü bastırmanın kapısı aynanın **durumu**,
     /// içeriği değil.
+    ///
+    /// Keymap alanı `bWFpbg==`, yani `main`: ZLE'nin olağan hâli ve
+    /// yapıştırmanın dar istisnasının koşulu
+    /// ([`Session::can_be_typed`]). Onu sınayan kol kendi dizisini kuruyor.
     fn mirror(buffer_b64: &str, cursor: usize) -> String {
-        format!("\\033]8133;u;{cursor};;{buffer_b64};;\\007")
+        format!("\\033]8133;u;{cursor};;{buffer_b64};;;bWFpbg==\\007")
     }
 
     /// Bitmiş bir blok + yazılmakta olan bir satır; aynanın kolu çağırandan.
@@ -4228,11 +4248,15 @@ mod tests {
     /// Dock'un satırın sahibi olduğu bir çocuk: 2004 açık, çıpalı prompt,
     /// canlı ayna — sonra `od` stdin'i hex'e döküyor.
     fn spawn_docked_od(wake: Arc<TestWake>) -> Session {
+        spawn_docked_od_in(wake, &mirror("", 0))
+    }
+
+    /// [`spawn_docked_od`]'nin keymap'i çağırandan gelen hâli.
+    fn spawn_docked_od_in(wake: Arc<TestWake>, mirror: &str) -> Session {
         spawn_session(
             &format!(
-                "printf '\\033[?2004h{}{}'; exec od -An -tx1",
+                "printf '\\033[?2004h{}{mirror}'; exec od -An -tx1",
                 anchored_prompt(1),
-                mirror("", 0),
             ),
             wake,
         )
@@ -4262,6 +4286,51 @@ mod tests {
         assert!(
             !glyph_text(&cells).contains("1b5b3230307e"),
             "dock satırın sahibiyken düz metin sarıldı: {cells:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn paste_stays_wrapped_outside_an_insert_keymap() {
+        // **İstisnanın dördüncü koşulu.** `bindkey -v` kullanan biri Esc'e
+        // bastığında ZLE `vicmd`'ye geçiyor; safha hâlâ `Input`, ayna hâlâ
+        // `Live`, blok hâlâ açık — yani öteki üç koşul da sağlanıyor. Ham
+        // akıtsaydık baytlar **komut** olurdu: panodaki `dd` satırı siler.
+        // Sarılı yol her keymap'te harfi harfine ekliyor, doğru cevap o
+        // (`/code-review`, 012 phase-6).
+        let wake = Arc::new(TestWake::default());
+        // `dmljbWQ=` = `vicmd`.
+        let session = spawn_docked_od_in(Arc::clone(&wake), "\\033]8133;u;0;;;;;dmljbWQ=\\007");
+        wait_bracketed_mode(&session);
+        wait_mirror(&session, DockStatus::Live);
+
+        session.paste(b"abcdefghijklmnopqrst".to_vec());
+        session.write(b"\n");
+        let cells = wait_ink(&session, &wake, "6162");
+        assert!(
+            glyph_text(&cells).contains("1b5b3230307e"),
+            "vicmd'de yapıştırma sarılmadı: {cells:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn paste_stays_wrapped_when_the_mirror_carries_no_keymap() {
+        // **Eski betikle koşan pencere** (`plan.md` → Göç): keymap alanı yok,
+        // yani hangi keymap'te olduğumuzu bilmiyoruz. Bilmemek istisnayı
+        // **kapatıyor** — phase-5 öncesinin sarılı yoluna dönüyoruz, ki bu her
+        // keymap'te doğru.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_od_in(Arc::clone(&wake), "\\033]8133;u;0;;;;\\007");
+        wait_bracketed_mode(&session);
+        wait_mirror(&session, DockStatus::Live);
+
+        session.paste(b"abcdefghijklmnopqrst".to_vec());
+        session.write(b"\n");
+        let cells = wait_ink(&session, &wake, "6162");
+        assert!(
+            glyph_text(&cells).contains("1b5b3230307e"),
+            "keymap'siz aynada yapıştırma sarılmadı: {cells:?}"
         );
         session.shutdown();
     }

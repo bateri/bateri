@@ -367,6 +367,9 @@ mod tests {
                 .chain(postdisplay.chars())
                 .filter(|ch| !ch.is_whitespace())
                 .next_back(),
+            // Bu modül okumuyor (tüketicisi `Session::can_be_typed`); canlı
+            // bir satırın olağan hâli ekleme keymap'i.
+            insert_keymap: true,
         }
     }
 
