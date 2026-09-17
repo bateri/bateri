@@ -1,21 +1,27 @@
 //! Kabuğun bastığı OSC işaretleri, onların tuttuğu oturum durumu, **komut
 //! bloğu defteri** ve **ZLE'nin görüntü aynası**.
 //!
-//! Tarayıcının **iki kolu** var ve ikisi de aynı bayt akışından besleniyor:
+//! Tarayıcının **üç kolu** var ve üçü de aynı bayt akışından besleniyor:
 //! [`MARK_OSC`] oturumun safhasını ve blok kimliklerini taşır, [`DOCK_OSC`]
-//! satır düzenleyicinin (ZLE) o anki görüntüsünü. İkisi tek durum makinesinde,
-//! çünkü akış tek: ayrı tarayıcılar aynı diziyi iki kez çerçevelerdi ve
-//! çerçeveleme kuralının (aşağıdaki üç madde) iki kopyası doğardı.
+//! satır düzenleyicinin (ZLE) o anki görüntüsünü, [`CWD_OSC`] de çalışma
+//! dizinini. Üçü tek durum makinesinde, çünkü akış tek: ayrı tarayıcılar aynı
+//! diziyi üç kez çerçevelerdi ve çerçeveleme kuralının (aşağıdaki üç madde)
+//! üç kopyası doğardı.
 //!
-//! Dört sorumluluk, tek modül: baytlardan işaret çıkarmak ([`parse_mark`]),
+//! Beş sorumluluk, tek modül: baytlardan işaret çıkarmak ([`parse_mark`]),
 //! işaretlerden oturum safhası tutmak ([`ShellState`]), blok kimliği başına
 //! akıbet tutup şeridin çizilip çizilmeyeceğine karar vermek ([`BlockLog`],
-//! [`ShellLog::stripe`]) ve aynanın beş değişkenini çözülmüş bir kayda
-//! indirmek ([`DockState`]). Dördü aynı yerde, çünkü dördünü de **aynı**
-//! işaret akışı besliyor; ayrılsalardı `D`'nin çıkış kodu bir modülden ötekine
-//! elden ele geçerdi. Defterin tavanı `scrollback`'ten türüyor ve "bilinmeyen
+//! [`ShellLog::stripe`]), aynanın beş değişkenini çözülmüş bir kayda
+//! indirmek ([`DockState`]) ve dock'un bağlam satırını — dizin ile dal —
+//! tutmak ([`DockContext`]). Beşi aynı yerde, çünkü beşini de **aynı** işaret
+//! akışı besliyor; ayrılsalardı `D`'nin çıkış kodu bir modülden ötekine elden
+//! ele geçerdi. Defterin tavanı `scrollback`'ten türüyor ve "bilinmeyen
 //! kimlik çizilmez" kararı da burada — renderer'ın göreceği tek şey çözülmüş
 //! renk.
+//!
+//! **Ayna ile bağlamın ömrü ayrı** ve bu ayrım tiplere yazılı: [`DockState`]
+//! tuş başına geliyor ve `line-finish`'te sıfırlanıyor, [`DockContext`]
+//! prompt başına geliyor ve komut koşarken de ekranda kalıyor.
 //!
 //! Bu modül **saf**: elinde ne `Session`, ne `Wake`, ne kilit var. Bayt
 //! dilimi girer, işaret çıkar. Tarayıcının hiçbir kare isteyememesi bir kural
@@ -26,12 +32,15 @@
 //! **Neden kendi tarayıcımız var:** `vte` OSC 133'ü tanımıyor ve `Handler`
 //! trait'inde "bilinmeyen OSC" kancası yok, yani `Term`'ü saran bir tip bile
 //! bu diziyi göremiyor (`.tasks/009-shell-entegrasyonu/context.md` → Kanıt).
-//! Baytları ayrıştırıcıya giderken tarıyoruz. Aynı gerekçe [`DOCK_OSC`] için
-//! de geçerli: `vte` onu **tanımıyor**, yükü `osc_dispatch`'in `_` koluna
-//! düşürüp atıyor (`vte-0.15.0/src/ansi.rs`, `unhandled`). Yük bütünüyle
-//! oraya ulaşıyor — `osc_raw` `std` altında sınırsız bir `Vec` ve 1024'lük
-//! `MAX_OSC_RAW` yalnız `no_std` kolunda geçerli — ama ulaştığı yerde
-//! okunmuyor.
+//! Baytları ayrıştırıcıya giderken tarıyoruz. Aynı gerekçe [`DOCK_OSC`] ve
+//! [`CWD_OSC`] için de geçerli: `vte` ikisini de **tanımıyor**, yükü
+//! `osc_dispatch`'in `_` koluna düşürüp atıyor (`vte-0.15.0/src/ansi.rs`,
+//! `unhandled`; yorumladığı numaralar 0, 2, 4, 8, 10–12, 22, 50, 52, 104 ve
+//! 110–112). Yük bütünüyle oraya ulaşıyor — `osc_raw` `std` altında sınırsız
+//! bir `Vec` ve 1024'lük `MAX_OSC_RAW` yalnız `no_std` kolunda geçerli — ama
+//! ulaştığı yerde okunmuyor. Dizin için bu, alacritty'nin bir olayının
+//! **düşmesi** değil: OSC 7 hiçbir olay doğurmuyor, yani `Event::Title`'ın
+//! boş kolu bu kolun yerine geçemezdi.
 //!
 //! **Bedeli adıyla:** o `_` kolu yükü düşürmeden önce bayt başına bir
 //! `write!` ile tanı dizgisi kuruyor ve dizgiyi `debug!`'tan **önce**
@@ -265,6 +274,45 @@ impl DockState {
     }
 }
 
+/// Dock'un **bağlam satırı**: çalışma dizini ve git dalı.
+///
+/// [`DockState`]'ten **ayrı bir tip** ve bu ayrım zorunlu, bir düzen tercihi
+/// değil: ayna tuş başına geliyor ve `line-finish`'te sıfırlanıyor
+/// ([`DockState::reset`]), bağlam ise **prompt başına** geliyor ve komut
+/// koşarken de ekranda kalmak zorunda. Tek tipte dursalardı aynanın her
+/// sıfırlaması bağlamı da silerdi — kullanıcı Enter'a bastığı anda dizin
+/// kaybolurdu. Ayrıca aynanın kaydı tarayıcıda `clone_from` ile toptan
+/// tazeleniyor ve dizin **başka bir koldan** (OSC 7) geliyor: tek tipte
+/// her ayna güncellemesi dizini üstüne yazardı.
+///
+/// [`DockState`] ile aynı tampon disiplini: `clone_from` kapasiteleri
+/// koruyor, yani kare başına ayırma yok.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DockContext {
+    /// Kabuğun çalışma dizini, **tam yol**; OSC 7'den geliyor ve hiç
+    /// gelmediyse boş.
+    pub cwd: String,
+    /// Git dalı; depo değilse ya da okunamadıysa **boş**. Detached HEAD'de
+    /// dal yerine kısa SHA — kabuk hangisi olduğunu söylemiyor, yalnız
+    /// gösterilecek adı gönderiyor.
+    pub branch: String,
+}
+
+impl Clone for DockContext {
+    fn clone(&self) -> Self {
+        let mut fresh = Self::default();
+        fresh.clone_from(self);
+        fresh
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.cwd.clear();
+        self.cwd.push_str(&source.cwd);
+        self.branch.clear();
+        self.branch.push_str(&source.branch);
+    }
+}
+
 /// Aynanın o anki hâli — dock'un çizilip çizilmeyeceğinin tek yanıtı.
 ///
 /// `Unavailable` ayrı bir varyant, `Idle`'ın içinde **değil**: ikisi aynı
@@ -488,6 +536,9 @@ pub(crate) struct ShellLog {
     /// aynanın çeliştiği bir anda yakalayabilirdi — `Input` safhasında
     /// ızgarayı bastırıp dock'a bir önceki satırı çizmek gibi.
     pub(crate) dock: DockState,
+    /// Dock'un bağlam satırı: dizin ve dal. Aynanın **yanında**, içinde değil
+    /// ([`DockContext`]); aynı kilit, ayrı ömür.
+    pub(crate) context: DockContext,
 }
 
 /// Bastırılacak giriş satırının iki ucu; `Copy`.
@@ -523,6 +574,7 @@ impl ShellLog {
             state: None,
             blocks: BlockLog::new(scrollback),
             dock: DockState::default(),
+            context: DockContext::default(),
         }
     }
 
@@ -571,6 +623,14 @@ impl ShellLog {
         match event {
             ScanEvent::Mark(mark) => self.apply(mark),
             ScanEvent::Dock(event) => self.apply_dock(event),
+            // Dizin **kabul edilmiş** geliyor: şemayı, yetkiyi ve yüzde
+            // çözmeyi tarayıcı yaptı, buraya yalnız çizilebilir bir yol
+            // ulaşıyor. Reddedilen bir OSC 7 hiç olay doğurmuyor, yani eski
+            // yol yerinde kalıyor — yanlış yol göstermektense bayat yol.
+            ScanEvent::Cwd(path) => {
+                self.context.cwd.clear();
+                self.context.cwd.push_str(path);
+            }
         }
     }
 
@@ -590,6 +650,14 @@ impl ShellLog {
             DockEvent::Unavailable(fault) => {
                 self.dock.reset();
                 self.dock.status = DockStatus::Unavailable(fault);
+            }
+            // Dal aynanın **kanalından** geliyor ama aynanın durumu değil:
+            // `status`'a ve metne dokunmuyor. Boş gövde "depo değil" demek ve
+            // dalı **siliyor** — bir önceki deponun dalı yeni dizinde asılı
+            // kalsaydı kullanıcı yanlış dalda olduğunu sanırdı.
+            DockEvent::Branch(branch) => {
+                self.context.branch.clear();
+                self.context.branch.push_str(branch);
             }
         }
     }
@@ -734,6 +802,35 @@ const PAYLOAD_LIMIT: usize = 256;
 /// kalıyor — kullanıcı yazdığını yine görüyor, yalnız dock'ta değil.
 const DOCK_PAYLOAD_LIMIT: usize = 64 * 1024;
 
+/// Dizin kolunun OSC numarası — bizim seçimimiz değil, uyduğumuz sözleşme.
+///
+/// `7` "çalışma dizini" için fiilî standart: iTerm2, kitty, WezTerm, GNOME
+/// Terminal ve VS Code aynı numarayı okuyor, oh-my-zsh'in `termsupport.zsh`'i
+/// de aynı numarayı basıyor. Kendi numaramızı seçseydik yalnız kendi
+/// betiğimizin bastığını görürdük.
+///
+/// **`vte` onu tanımıyor** ve bu, [`DOCK_OSC`] ile aynı durum: yük
+/// `osc_dispatch`'in `unhandled` koluna düşüp atılıyor
+/// (`vte-0.15.0/src/ansi.rs`; yorumlanan numaralar 0, 2, 4, 8, 10–12, 22, 50,
+/// 52, 104 ve 110–112). Yani "alacritty'nin `Title` olayı sessizce düşüyor"
+/// değil — **hiçbir olay doğmuyor**; dizin ancak bu kolla görülebiliyor.
+const CWD_OSC: u32 = 7;
+
+/// `ESC ] 7 ;` yükünün üst sınırı, bayt.
+///
+/// Sayı türetildi, seçilmedi ([`DOCK_PAYLOAD_LIMIT`] emsali):
+///
+/// - macOS'ta bir yolun tavanı `PATH_MAX`, yani 1024 bayt.
+/// - En kötü hâlde her bayt yüzde kodlu → 3072.
+/// - Üstüne `file://` şeması ile yetki bölümü.
+/// - Yuvarlanmış tavan: **4 KiB**.
+///
+/// **Aşımın sonucu sessiz** ve bu, aynanın görünür aşımından (`DockFault`)
+/// bilerek ayrı: gösteremediğimiz bir giriş satırı kullanıcının yazdığını
+/// kaybettirir, gösteremediğimiz bir dizin ise yalnız bir önceki değeri
+/// ekranda bırakır ve sonraki prompt onu tazeler.
+const CWD_PAYLOAD_LIMIT: usize = 4 * 1024;
+
 /// Numara önekinin makul üst sınırı; aşan dizi bizim değildir.
 ///
 /// `ESC ]` ardından rakam basıp sonlandırıcı basmayan bir akışta sayaç
@@ -769,6 +866,8 @@ enum Arm {
     Mark,
     /// [`DOCK_OSC`] — ayna kolu.
     Dock,
+    /// [`CWD_OSC`] — dizin kolu.
+    Cwd,
 }
 
 /// Tarayıcının dışarıya verdiği olay.
@@ -783,6 +882,10 @@ enum Arm {
 pub(crate) enum ScanEvent<'a> {
     Mark(Mark),
     Dock(DockEvent<'a>),
+    /// Çalışma dizini, **kabul edilmiş ve çözülmüş** tam yol. Reddedilen bir
+    /// URI hiç olay doğurmuyor: "dizin okunamadı" diye bir hâl yok, çünkü
+    /// doğru cevap eskisini bırakmak.
+    Cwd(&'a str),
 }
 
 /// Ayna kolunun olayları.
@@ -794,6 +897,9 @@ pub(crate) enum DockEvent<'a> {
     /// Ayna geldi ama okunamadı. **Sinyal burada**: bugünkü `Skip` kolu
     /// çağırana hiçbir şey söylemiyordu (R1.2).
     Unavailable(DockFault),
+    /// Git dalı; boş gövde "depo değil" demek. Aynanın kanalından geliyor
+    /// (`precmd` basıyor) ama aynanın **durumuna** dokunmuyor.
+    Branch(&'a str),
 }
 
 /// İki OSC numarasını akışın içinden çeken durum makinesi.
@@ -814,10 +920,17 @@ pub(crate) struct Scanner {
     payload: Vec<u8>,
     /// `8133;` sonrası yük. Ayrı tampon, ayrı sınır (yukarıda).
     dock: Vec<u8>,
+    /// `7;` sonrası yük. Üçüncü tampon, üçüncü sınır — aynı gerekçe: bir
+    /// tampon üç sınıra birden uyamaz.
+    cwd: Vec<u8>,
     /// base64 çıktısının indiği ara tampon; her alanda yeniden kullanılır.
     decoded: Vec<u8>,
     /// Aynanın çözülmüş hâli — [`DockEvent::Update`]'in ödünç verdiği tampon.
     line: DockState,
+    /// Çözülmüş dizin — [`ScanEvent::Cwd`]'in ödünç verdiği tampon.
+    path: String,
+    /// Çözülmüş dal — [`DockEvent::Branch`]'in ödünç verdiği tampon.
+    branch: String,
     /// Toplanan OSC numarası ve hiç rakam görülüp görülmediği.
     number: u32,
     has_digit: bool,
@@ -833,8 +946,14 @@ impl Scanner {
             // satırlarda tam da onu yapardı. Oturum başına 64 KiB, grid'in
             // yanında ölçülemeyecek kadar küçük.
             dock: Vec::with_capacity(DOCK_PAYLOAD_LIMIT),
+            // Dizin kolu prompt **başına** koşuyor, tuş başına değil; tampon
+            // yine de baştan ayrılıyor, çünkü ölçüsü 4 KiB ve büyüyerek gelen
+            // bir tampon ilk prompt'larda ayırma yapardı.
+            cwd: Vec::with_capacity(CWD_PAYLOAD_LIMIT),
             decoded: Vec::new(),
             line: DockState::default(),
+            path: String::new(),
+            branch: String::new(),
             number: 0,
             has_digit: false,
         }
@@ -912,6 +1031,10 @@ impl Scanner {
                             self.dock.clear();
                             ScanState::Payload(Arm::Dock)
                         }
+                        (true, CWD_OSC) => {
+                            self.cwd.clear();
+                            ScanState::Payload(Arm::Cwd)
+                        }
                         _ => ScanState::Skip,
                     };
                 }
@@ -939,12 +1062,18 @@ impl Scanner {
             ScanState::Payload(Arm::Dock) => {
                 if is_terminator(byte) {
                     // Çözme `close`'dan **önce**: `close` tamponu boşaltıyor.
-                    let outcome = parse_dock(&self.dock, &mut self.decoded, &mut self.line);
+                    let outcome = parse_dock(
+                        &self.dock,
+                        &mut self.decoded,
+                        &mut self.line,
+                        &mut self.branch,
+                    );
                     self.close(byte);
                     on_event(ScanEvent::Dock(match outcome {
                         DockOutcome::Update => DockEvent::Update(&self.line),
                         DockOutcome::End => DockEvent::End,
                         DockOutcome::Unavailable(fault) => DockEvent::Unavailable(fault),
+                        DockOutcome::Branch => DockEvent::Branch(&self.branch),
                     }));
                 } else if is_ignored(byte) {
                 } else if self.dock.len() == DOCK_PAYLOAD_LIMIT {
@@ -955,6 +1084,24 @@ impl Scanner {
                     on_event(ScanEvent::Dock(DockEvent::Unavailable(DockFault::Overflow)));
                 } else {
                     self.dock.push(byte);
+                }
+            }
+            ScanState::Payload(Arm::Cwd) => {
+                if is_terminator(byte) {
+                    // Çözme `close`'dan **önce**: `close` tamponu boşaltıyor.
+                    let read = parse_cwd(&self.cwd, &mut self.decoded, &mut self.path);
+                    self.close(byte);
+                    if read.is_some() {
+                        on_event(ScanEvent::Cwd(&self.path));
+                    }
+                } else if is_ignored(byte) {
+                } else if self.cwd.len() == CWD_PAYLOAD_LIMIT {
+                    // Aşım **sessiz**, aynanın aksine: gösteremediğimiz bir
+                    // dizin eski değeri ekranda bırakıyor ve sonraki prompt
+                    // onu tazeliyor (`CWD_PAYLOAD_LIMIT`'in doc'u).
+                    self.state = ScanState::Skip;
+                } else {
+                    self.cwd.push(byte);
                 }
             }
             ScanState::Skip => {
@@ -971,6 +1118,7 @@ impl Scanner {
     fn close(&mut self, terminator: u8) {
         self.payload.clear();
         self.dock.clear();
+        self.cwd.clear();
         self.state = if terminator == 0x1b {
             ScanState::Escape
         } else {
@@ -1024,6 +1172,84 @@ fn parse_mark(payload: &[u8]) -> Option<Mark> {
     }
 }
 
+/// Bu makineyi gösteren yetki (authority) değerleri.
+///
+/// **Adlı her host yabancı sayılıyor** ve bu, "kendi ad'ımızla karşılaştır"
+/// yerine bilinçli seçildi: karşılaştırma `gethostname` demek, o da `bt-core`'a
+/// yeni bir bağımlılık kenarı demek (`proje.md` → Yayın etkisi: yeni bağımlılık
+/// mimari karardır). Kendi betiğimiz bu yüzden **boş yetkiyle** basıyor
+/// (`file:///…`), yani kapı hiçbir zaman bir ad uyuşmasına bağlı değil —
+/// makine yeniden adlandırılınca sessizce kapanmıyor.
+///
+/// **Bilinen sınır:** `file://$HOST$PWD` basan üçüncü taraf kancalar
+/// (oh-my-zsh'in `termsupport.zsh`'i gibi) yoksayılıyor. Kayıp yalnız komutun
+/// *ortasında* yapılan bir `cd`'nin canlı yansıması; dizin bir sonraki
+/// prompt'ta kendi `precmd`'imizden zaten geliyor. İstenirse çare yine
+/// bağımlılık değil politika: `bt-shell` (elinde `libc` var) adı okur ve
+/// `SessionOptions` ile geçirir — `decide_locale` emsali.
+const LOCAL_AUTHORITIES: [&str; 2] = ["", "localhost"];
+
+/// `7;` sonrasındaki URI'yi çizilebilir bir yola çevirir; tanımadığını
+/// **yoksayar** (`None`).
+///
+/// **Yük alanlara bölünmüyor** ([`parse_mark`] ve [`parse_dock`]'un aksine):
+/// `;` bir dosya adında geçerli bir karakter ve yükü bölseydik `/tmp/a;b`
+/// yolunu `/tmp/a` diye okurduk.
+///
+/// Reddedilen her hâlin sonucu aynı ve **panik değil yoksayma**
+/// (`CLAUDE.md` → PTY yolunda panik yok): şema `file:` değil, yetki bu makine
+/// değil, yol `/` ile başlamıyor, yüzde kaçışı bozuk ya da sonuç UTF-8 değil.
+fn parse_cwd(payload: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option<()> {
+    // Şema harf duyarsız (RFC 3986 §3.1); `file:` beş bayt.
+    let rest = payload
+        .get(..5)
+        .filter(|head| head.eq_ignore_ascii_case(b"file:"))?;
+    let rest = &payload[rest.len()..];
+    // Yetki bölümü **zorunlu**: `file:/tmp` biçimi geçerli bir URI ama onu da
+    // kabul etmek "yetki yok" ile "yetki boş"u tek kola indirirdi ve pratikte
+    // hiçbir kabuk basmıyor.
+    let rest = rest.strip_prefix(b"//".as_slice())?;
+    let at = rest.iter().position(|&b| b == b'/')?;
+    let (authority, path) = rest.split_at(at);
+    let authority = std::str::from_utf8(authority).ok()?;
+    if !LOCAL_AUTHORITIES
+        .iter()
+        .any(|local| authority.eq_ignore_ascii_case(local))
+    {
+        return None;
+    }
+
+    decoded.clear();
+    decode_percent(path, decoded)?;
+    let text = std::str::from_utf8(decoded).ok()?;
+    into.clear();
+    into.push_str(text);
+    Some(())
+}
+
+/// Yüzde kaçışlarını çözer; `%` iki onaltılık haneyle **gelmek zorunda**.
+///
+/// Bozuk bir kaçışı olduğu gibi geçirmek de bir seçenekti ve reddedildi:
+/// `%zz` taşıyan bir yol ya kodlayıcının bozulduğunu ya da yükün bizim
+/// olmadığını söyler; ikisinde de doğru cevap yolu hiç göstermemek.
+fn decode_percent(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
+    let mut rest = input;
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte != b'%' {
+            out.push(byte);
+            rest = tail;
+            continue;
+        }
+        let digits = tail.get(..2)?;
+        let high = char::from(digits[0]).to_digit(16)?;
+        let low = char::from(digits[1]).to_digit(16)?;
+        // audit: iki onaltılık hane en çok 0xff; `u8`'e sığar.
+        out.push((high * 16 + low) as u8);
+        rest = &tail[2..];
+    }
+    Some(())
+}
+
 /// Blok kimliğini taşıyan **bize özel** alan adı.
 ///
 /// **`aid` DEĞİL** ve bu ayrım kritik: `aid` semantic-prompts şartnamesinde
@@ -1054,6 +1280,7 @@ enum DockOutcome {
     Update,
     End,
     Unavailable(DockFault),
+    Branch,
 }
 
 /// Ayna yükünü çözer ve `line`'a yazar.
@@ -1064,10 +1291,17 @@ enum DockOutcome {
 /// ESC ] 8133 ; u ; {CURSOR} ; {PREDISPLAY} ; {BUFFER} ; {POSTDISPLAY} ; {region_highlight} BEL
 /// ESC ] 8133 ; e BEL
 /// ESC ] 8133 ; o BEL
+/// ESC ] 8133 ; b ; {dal} BEL
 /// ```
 ///
 /// `u` satırı tazeler, `e` (`line-finish`) kapatır, `o` kabuğun "bu görüntü
-/// aynaya sığmıyor" demesidir. **Fazladan alan
+/// aynaya sığmıyor" demesidir, `b` de dock'un bağlam satırındaki dalı taşır.
+///
+/// **`b` aynanın kanalında ama aynanın parçası değil:** tuş başına değil
+/// **prompt başına** geliyor (`precmd`) ve satırın durumuna dokunmuyor. Kendi
+/// OSC numarasını hak etmiyor — dizinin aksine (`CWD_OSC`) dal için bir
+/// sözleşme yok, yani yeni bir numara yalnız bizim betiğimizin bastığı ikinci
+/// bir kanal olurdu. **Fazladan alan
 /// yoksayılır** — [`parse_mark`]'ın bilinmeyen anahtar-değeri tolere etmesiyle
 /// aynı gerekçe: phase-4'ün özel kip sinyali bu ayrıştırıcıyı yeniden açmadan
 /// eklenebilmeli.
@@ -1082,13 +1316,41 @@ enum DockOutcome {
 /// Bozuk yükte `line` **boşaltılıyor**: yarım yazılmış bir kayıt hiçbir yere
 /// yayılmıyor (`Malformed` → [`ShellLog::apply_dock`] zaten sıfırlıyor) ama
 /// tamponu kirli bırakmak sonraki okumayı akıl yürütme borcuna çevirirdi.
-fn parse_dock(payload: &[u8], decoded: &mut Vec<u8>, line: &mut DockState) -> DockOutcome {
+fn parse_dock(
+    payload: &[u8],
+    decoded: &mut Vec<u8>,
+    line: &mut DockState,
+    branch: &mut String,
+) -> DockOutcome {
     let mut fields = payload.split(|&b| b == b';');
     let Some(op) = fields.next() else {
         return unavailable(line, DockFault::Malformed);
     };
     match op {
         b"e" => DockOutcome::End,
+        // Dalın bozukluğu aynayı düşürmüyor: `Unavailable` "giriş satırını
+        // gösteremiyorum" demek ve ızgarayı devreye sokuyor, oysa okunamayan
+        // bir dal yalnız bağlam satırının bir yarısı. Bozuk gövde dalı
+        // **boşaltıyor** — yanlış dal göstermektense dalsız bir satır.
+        //
+        // **Alanın hiç olmaması da aynı kapıdan geçiyor** (`b` ile `b;`
+        // arasındaki fark bir kodlayıcı ayrıntısı ve ikisi de "dal yok"
+        // demek). Bir zamanlar bu kol `Malformed` döndürüyordu ve o, tam da
+        // üstteki cümlenin yasakladığı şeydi: kesilmiş bir `b` dizisi giriş
+        // satırını dock'tan düşürüp ızgaraya geri gönderiyordu
+        // (`/code-review`, 012 phase-6).
+        b"b" => {
+            branch.clear();
+            if let Some(field) = fields.next() {
+                decoded.clear();
+                if decode_base64(field, decoded).is_some()
+                    && let Ok(text) = std::str::from_utf8(decoded)
+                {
+                    branch.push_str(text);
+                }
+            }
+            DockOutcome::Branch
+        }
         // **Aşımın kabuk tarafındaki ucu.** [`DOCK_PAYLOAD_LIMIT`] yükü burada
         // keserken kabuk onu **kodlamış** oluyor; `o` kodlamadan önce
         // ölçtüğünü söylüyor. İkisi aynı bütçenin iki yakası ve ayrı ayrı
@@ -1738,6 +2000,7 @@ mod tests {
         Update(DockState),
         End,
         Unavailable(DockFault),
+        Branch(String),
     }
 
     fn dock_events_of_chunks(chunks: &[&[u8]]) -> Vec<DockSnapshot> {
@@ -1750,6 +2013,7 @@ mod tests {
                         DockEvent::Update(line) => DockSnapshot::Update(line.clone()),
                         DockEvent::End => DockSnapshot::End,
                         DockEvent::Unavailable(fault) => DockSnapshot::Unavailable(fault),
+                        DockEvent::Branch(branch) => DockSnapshot::Branch(branch.to_owned()),
                     });
                 }
             });
@@ -1933,6 +2197,142 @@ mod tests {
         assert!(matches!(&seen[1], DockSnapshot::Update(line) if line.buffer == "ok"));
     }
 
+    /// Dizin kolunun çözdüğü yollar.
+    fn cwd_events(bytes: &[u8]) -> Vec<String> {
+        let mut scanner = Scanner::new();
+        let mut seen = Vec::new();
+        scanner.feed(bytes, |event| {
+            if let ScanEvent::Cwd(path) = event {
+                seen.push(path.to_owned());
+            }
+        });
+        seen
+    }
+
+    #[test]
+    fn the_cwd_arm_decodes_a_percent_encoded_path() {
+        // Yüzde çözme: boşluk ve çok baytlı karakter.
+        assert_eq!(
+            cwd_events(b"\x1b]7;file:///Users/a%20b/%C3%A7\x07"),
+            ["/Users/a b/ç"]
+        );
+        // İki yetki de bu makine: boş ve `localhost`.
+        assert_eq!(cwd_events(b"\x1b]7;file://localhost/tmp\x07"), ["/tmp"]);
+        // Şema harf duyarsız (RFC 3986).
+        assert_eq!(cwd_events(b"\x1b]7;FILE:///tmp\x07"), ["/tmp"]);
+        // Yük alanlara **bölünmüyor**: `;` taşıyan bir yol geçerli.
+        assert_eq!(cwd_events(b"\x1b]7;file:///tmp/a;b\x07"), ["/tmp/a;b"]);
+        // Kodlanmamış bir yol da okunuyor: yüzde kodlaması zorunlu değil.
+        assert_eq!(cwd_events(b"\x1b]7;file:///tmp/plain\x07"), ["/tmp/plain"]);
+    }
+
+    #[test]
+    fn a_named_host_or_a_broken_uri_is_ignored() {
+        // Hepsinin tek yanıtı: hiçbir olay. Yön güvenli — eski yol ekranda
+        // kalıyor, başkasının makinesindeki yol bizimmiş gibi çizilmiyor.
+        for sequence in [
+            &b"\x1b]7;file://remote.example/tmp\x07"[..], // yabancı host
+            b"\x1b]7;/tmp\x07",                           // şema yok
+            b"\x1b]7;http://host/tmp\x07",                // yabancı şema
+            b"\x1b]7;file:/tmp\x07",                      // yetki bölümü yok
+            b"\x1b]7;file://localhost\x07",               // yol yok
+            b"\x1b]7;file:///tmp/%zz\x07",                // bozuk yüzde
+            b"\x1b]7;file:///tmp/%e0%80\x07",             // UTF-8 değil
+            b"\x1b]7;\x07",                               // boş yük
+        ] {
+            assert!(
+                cwd_events(sequence).is_empty(),
+                "dizi geçti: {}",
+                String::from_utf8_lossy(sequence)
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_cwd_payload_is_dropped_and_the_next_sequence_survives() {
+        // Aşım **sessiz** (ayna kolunun aksine): dizin görünmeyen bir ayrıntı
+        // değil, eski değeri ekranda duruyor ve sonraki prompt onu tazeliyor.
+        let mut stream = b"\x1b]7;file:///".to_vec();
+        stream.extend(std::iter::repeat_n(b'a', CWD_PAYLOAD_LIMIT + 1));
+        stream.push(0x07);
+        stream.extend_from_slice(b"\x1b]7;file:///tmp\x07");
+
+        assert_eq!(cwd_events(&stream), ["/tmp"]);
+    }
+
+    #[test]
+    fn the_branch_op_touches_only_the_branch() {
+        // Dal aynanın kanalından geliyor ama aynanın **durumu** değil: `b`
+        // metni de `Live`/`Idle` ayrımını da olduğu gibi bırakmalı, yoksa
+        // prompt başına gelen dal her satırı bir kareliğine söndürürdü.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        scanner.feed(&dock_update(2, "% ", "ls", "", &[]), |event| {
+            log.apply_scan(event);
+        });
+        scanner.feed(
+            format!("\x1b]8133;b;{}\x07", b64(b"main")).as_bytes(),
+            |event| log.apply_scan(event),
+        );
+
+        assert_eq!(log.context.branch, "main");
+        assert_eq!(log.dock.status, DockStatus::Live);
+        assert_eq!(log.dock.buffer, "ls");
+
+        // Depo değilse gövde boş ve dal silinir — bir önceki deponun dalı
+        // yeni dizinde asılı kalmamalı.
+        scanner.feed(b"\x1b]8133;b;\x07", |event| log.apply_scan(event));
+        assert_eq!(log.context.branch, "");
+        assert_eq!(log.dock.status, DockStatus::Live);
+    }
+
+    #[test]
+    fn a_broken_branch_never_drops_the_mirror() {
+        // Dalın iki bozulma biçimi de yalnız dalı düşürmeli: `Unavailable`
+        // "giriş satırını gösteremiyorum" demek ve ızgarayı devreye sokardı —
+        // yani kesilmiş bir dal dizisi yüzünden kullanıcı yazdığını dock'ta
+        // değil ızgarada görürdü (`/code-review`, 012 phase-6).
+        for sequence in [
+            &b"\x1b]8133;b\x07"[..], // alan hiç yok
+            b"\x1b]8133;b;!!!!\x07", // base64 alfabesi dışı
+            b"\x1b]8133;b;gA\x07",   // geçerli base64, geçersiz UTF-8
+        ] {
+            let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+            let mut scanner = Scanner::new();
+            scanner.feed(&dock_update(2, "% ", "ls", "", &[]), |event| {
+                log.apply_scan(event);
+            });
+            scanner.feed(sequence, |event| log.apply_scan(event));
+
+            assert_eq!(
+                log.dock.status,
+                DockStatus::Live,
+                "dizi aynayı düşürdü: {}",
+                String::from_utf8_lossy(sequence)
+            );
+            assert_eq!(log.dock.buffer, "ls");
+            assert_eq!(log.context.branch, "");
+        }
+    }
+
+    #[test]
+    fn the_cwd_survives_a_finished_line() {
+        // Bağlam satırı aynanın ömrüne bağlı değil: `line-finish` metni
+        // siliyor ama dizin ile dal bir sonraki prompt'a kadar duruyor.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        let mut stream = b"\x1b]7;file:///tmp\x07".to_vec();
+        stream.extend_from_slice(format!("\x1b]8133;b;{}\x07", b64(b"main")).as_bytes());
+        stream.extend_from_slice(&dock_update(0, "", "ls", "", &[]));
+        stream.extend_from_slice(b"\x1b]8133;e\x07");
+        scanner.feed(&stream, |event| log.apply_scan(event));
+
+        assert_eq!(log.dock.status, DockStatus::Idle);
+        assert_eq!(log.dock.buffer, "");
+        assert_eq!(log.context.cwd, "/tmp");
+        assert_eq!(log.context.branch, "main");
+    }
+
     /// Kabuk betiğinin (`assets/shell/zsh/bateri.zsh`) yolu.
     ///
     /// Sınama onu **kaynağından** koşturuyor, paketten değil: `make kur`
@@ -2085,25 +2485,93 @@ mod tests {
     }
 
     #[test]
-    fn the_two_arms_do_not_touch_each_others_buffers() {
+    fn the_script_prints_a_cwd_the_scanner_decodes() {
+        // Kodlayan gerçekten zsh, çözen burası: yüzde kodlaması iki uçta ayrı
+        // dillerde yazılı ve taşıdığı baytlar tam da URI'yi bozabilecek olanlar
+        // (boşluk, `%`, `;`, çok baytlı karakter).
+        //
+        // Dizinler **gerçekten yaratılıyor**: `PWD`'yi elle atamak kabuğun
+        // kendi değerini sınamak olmaktan çıkarırdı — zsh onu başlangıçta
+        // kendisi kuruyor.
+        let root = std::env::temp_dir().join(format!("bateri-cwd-{}", std::process::id()));
+        let names = ["plain", "a b", "a%b", "a;b", "çığır", "😀"];
+        for name in names {
+            std::fs::create_dir_all(root.join(name)).expect("dizin yaratılamadı");
+        }
+
+        for name in names {
+            let path = root.join(name);
+            let path = path.to_string_lossy().into_owned();
+            let bytes = run_script(
+                "source $ZDOTDIR/bateri.zsh; cd -q -- $T_DIR; __bateri_cwd",
+                &[("T_DIR", &path)],
+            );
+            assert_eq!(cwd_events(&bytes), [path.clone()], "yol: {path}");
+        }
+
+        // Kök dizin: yolun tek karakter olduğu kenar.
+        let bytes = run_script("source $ZDOTDIR/bateri.zsh; cd -q -- /; __bateri_cwd", &[]);
+        assert_eq!(cwd_events(&bytes), ["/"]);
+
+        std::fs::remove_dir_all(&root).expect("geçici dizin silinemedi");
+    }
+
+    #[test]
+    fn the_script_prints_the_branch_from_the_repository() {
+        // Depo yokken dal boş; ayraç da onunla birlikte düşüyor
+        // (`dock::render`). Geçici dizin **depo değil**, yani bu kol deponun
+        // varlığına değil yokluğuna tanık.
+        let outside = std::env::temp_dir();
+        let bytes = run_script(
+            "source $ZDOTDIR/bateri.zsh; cd -q -- $T_DIR; __bateri_branch_print",
+            &[("T_DIR", &outside.to_string_lossy())],
+        );
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        scanner.feed(&bytes, |event| log.apply_scan(event));
+        assert_eq!(log.context.branch, "");
+
+        // Deponun içinde dal adı geliyor. Kendi depomuz: `git` yoksa sınama
+        // atlanmıyor, dal boş kalır ve iddia da onu söyler.
+        let inside = script_path();
+        let bytes = run_script(
+            "source $ZDOTDIR/bateri.zsh; cd -q -- $T_DIR; __bateri_branch_print",
+            &[("T_DIR", &inside.to_string_lossy())],
+        );
+        scanner.feed(&bytes, |event| log.apply_scan(event));
+        assert!(
+            !log.context.branch.is_empty(),
+            "depo içinde dal boş kaldı: {:?}",
+            log.context.branch
+        );
+    }
+
+    #[test]
+    fn the_three_arms_do_not_touch_each_others_buffers() {
         // Aynanın geniş sınırı 133'ün dar sınırını gevşetmemeli; 133'ün dar
-        // sınırı da aynayı kesmemeli. Tamponların ayrı olmasının kanıtı.
+        // sınırı da aynayı kesmemeli. Dizin kolunun sınırı da üçüncü bir
+        // bütçe. Tamponların ayrı olmasının kanıtı.
         let mut scanner = Scanner::new();
         let mut marks = Vec::new();
         let mut lines = Vec::new();
+        let mut paths = Vec::new();
         let mut stream = dock_update(2, "", "ls", "", &[]);
         stream.extend_from_slice(b"\x1b]133;B\x07");
+        stream.extend_from_slice(b"\x1b]7;file:///tmp\x07");
         stream.extend_from_slice(&dock_update(3, "", "lsx", "", &[]));
         scanner.feed(&stream, |event| match event {
             ScanEvent::Mark(mark) => marks.push(mark),
             ScanEvent::Dock(DockEvent::Update(line)) => lines.push(line.buffer.clone()),
             ScanEvent::Dock(_) => {}
+            ScanEvent::Cwd(path) => paths.push(path.to_owned()),
         });
 
         assert_eq!(marks, vec![Mark::PromptEnd]);
         assert_eq!(lines, vec!["ls".to_string(), "lsx".to_string()]);
+        assert_eq!(paths, vec!["/tmp".to_string()]);
         assert_eq!(scanner.payload.capacity(), PAYLOAD_LIMIT);
         assert_eq!(scanner.dock.capacity(), DOCK_PAYLOAD_LIMIT);
+        assert_eq!(scanner.cwd.capacity(), CWD_PAYLOAD_LIMIT);
     }
 
     #[test]

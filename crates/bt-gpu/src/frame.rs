@@ -226,12 +226,10 @@ pub(crate) struct DockSurface {
 
 /// Dock'un yüksekliği, **satır**: giriş satırı + bağlam satırı.
 ///
-/// İki, çünkü dock'un tasarımı iki satır (`plan.md` → Hedef) ve ikincisi
-/// (`[klasör] | [dal]`) phase-6'da doluyor. **Şimdiden ayrılıyor**: pay
-/// ızgaranın yüksekliğinden düşülüyor, yani sonradan büyütmek kullanıcının
-/// penceresini bir satır kısaltan ikinci bir `TIOCSWINSZ` demekti.
-/// Boş kalan alt satır bilinçli bir ara durum, phase-3'ün bıraktığı ikinci
-/// kalem (birincisi çift görüntü).
+/// İki, çünkü dock'un tasarımı iki satır (`plan.md` → Hedef): üstte
+/// `>` + ZLE'nin görüntüsü, altta `[klasör] | [dal]`. Pay ızgaranın
+/// yüksekliğinden düşülüyor, yani sayıyı sonradan büyütmek kullanıcının
+/// penceresini bir satır kısaltan ikinci bir `TIOCSWINSZ` demek.
 ///
 /// Bu crate'in sabiti çünkü çizen bu crate; `bt-shell` onu ızgara
 /// aritmetiğinde (`split_into_grid`) **tüketiyor** ve ikinci bir kopya
