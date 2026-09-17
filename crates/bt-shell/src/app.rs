@@ -1639,15 +1639,24 @@ impl AppDelegate {
                 //
                 // Dallanma **yükü** soruyor, süreyi değil: aynı `Run` hem
                 // deadline'ı hem bekçiyi kuruyor ve yük onlardan bağımsız.
-                command: self.ivars().run.map(|run| match run.workload {
-                    Workload::Smoke => smoke_shell(),
-                    // Yükün süresi deadline'la aynı: kısa kalırsa pencere
-                    // koşunun kuyruğunda boşa düşer ve ölçüm boşta kare
-                    // örnekler. Süresiz yük artık **temsil edilemiyor** —
-                    // `Run` süreyi yükün yanında taşıyor, o yüzden eski
-                    // `unwrap_or(0)` ve onu savunan `debug_assert` düştü.
-                    Workload::Load => load_shell(run.seconds),
-                }),
+                //
+                // Süresiz oturumda komut artık **`None` değil**: kabuğu
+                // alacritty'nin yolundan birebir ama `-q` ile doğuruyoruz,
+                // yani `login(1)`'in `Last login:` banner'ı ızgaraya hiç
+                // düşmüyor ([`child::login_command`]). Kullanıcı ya da kabuk
+                // çözülemezse `None`'a düşüyor ve eski yol geri geliyor.
+                command: match self.ivars().run {
+                    None => child::login_command(),
+                    Some(run) => Some(match run.workload {
+                        Workload::Smoke => smoke_shell(),
+                        // Yükün süresi deadline'la aynı: kısa kalırsa pencere
+                        // koşunun kuyruğunda boşa düşer ve ölçüm boşta kare
+                        // örnekler. Süresiz yük artık **temsil edilemiyor** —
+                        // `Run` süreyi yükün yanında taşıyor, o yüzden eski
+                        // `unwrap_or(0)` ve onu savunan `debug_assert` düştü.
+                        Workload::Load => load_shell(run.seconds),
+                    }),
+                },
                 // Dizin ve yerel **her** oturumda aynı kuralla, süreli koşu
                 // dahil: karar tek kollu (`discussion.md` → Karar 6 eki,
                 // "istisnasız") ve iki sabit betik de dizine ve yerele bağlı

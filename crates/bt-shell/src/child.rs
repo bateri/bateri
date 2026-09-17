@@ -177,12 +177,25 @@ pub(crate) fn shell() -> Option<PathBuf> {
 }
 
 /// Kullanıcının passwd kaydındaki kabuk (`pw_shell`); okunamazsa `None`.
+fn passwd_shell() -> Option<String> {
+    passwd_field(|entry| entry.pw_shell)
+}
+
+/// Kullanıcının passwd kaydındaki adı (`pw_name`); okunamazsa `None`.
+fn passwd_name() -> Option<String> {
+    passwd_field(|entry| entry.pw_name)
+}
+
+/// passwd kaydından **tek** bir alan; okunamazsa `None`.
 ///
 /// `getpwuid_r`, `getpwuid` değil: ikincisi süreç genelinde paylaşılan statik
 /// bir tampon döndürüyor ve başka bir thread'in çağrısı onu tazeliyor.
 /// Tampon alacritty'nin `ShellUser::from_env`'iyle aynı 1024 bayt; sığmayan
-/// kayıt `ERANGE` ile düşer ve entegrasyon kurulmaz.
-fn passwd_shell() -> Option<String> {
+/// kayıt `ERANGE` ile düşer.
+///
+/// Alanı çağıran seçiyor ki `unsafe` muhakemesi **tek** yerde kalsın: iki
+/// kopya, ikisi de kendi `getpwuid_r`'ını çağıran iki blok demekti.
+fn passwd_field(pick: impl Fn(&libc::passwd) -> *mut std::ffi::c_char) -> Option<String> {
     let mut buf = [0; 1024];
     let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
     let mut found: *mut libc::passwd = std::ptr::null_mut();
@@ -198,16 +211,80 @@ fn passwd_shell() -> Option<String> {
             &mut found,
         )
     };
-    if status != 0 || found.is_null() || entry.pw_shell.is_null() {
+    if status != 0 || found.is_null() {
         return None;
     }
-    // SAFETY: `found` null değil, yani `entry` dolduruldu ve `pw_shell`
+    let field = pick(&entry);
+    if field.is_null() {
+        return None;
+    }
+    // SAFETY: `found` null değil, yani `entry` dolduruldu ve seçilen alan
     // `buf`'un içinde NUL ile biten bir dizgiyi gösteriyor. Dilim `buf`
     // yaşarken okunuyor ve hemen sahipli bir `String`'e kopyalanıyor.
-    let shell = unsafe { CStr::from_ptr(entry.pw_shell) };
-    // UTF-8 olmayan kabuk yolu `None`: `SessionOptions.env` `String` istiyor
-    // ve entegrasyonun kurulmaması doğru geri düşüş.
-    shell.to_str().ok().map(str::to_owned)
+    let value = unsafe { CStr::from_ptr(field) };
+    // UTF-8 olmayan değer `None`: sınırın öteki tarafı (`SessionOptions`)
+    // `String` istiyor ve geri düşüşler zaten kurulu.
+    value.to_str().ok().map(str::to_owned)
+}
+
+/// macOS'ta kabuğu doğuran komut — alacritty'nin `default_shell_command`'ının
+/// **`-q`'lu** eşi; `None` → alacritty'nin kendi yolu.
+///
+/// Tek fark `-q` ve tek amacı o: `login(1)` her oturumda `Last login: …`
+/// banner'ını basıyor ve o satır ızgaranın ilk satırında duruyor. Bateri'de
+/// prompt terminalin ve ızgara komutların; açılışta oraya düşen bir sistem
+/// satırı kimsenin yazmadığı bir bloktur.
+///
+/// **Neden `~/.hushlogin` yazmıyoruz:** kullanıcının ev dizinindeki dosyalara
+/// yazmak bu deponun yasağı (`make denetim`) ve banner'ı susturmak için
+/// kullanıcının makinesinde kalıcı bir iz bırakmak, bir terminalin
+/// kendi penceresi için isteyebileceği şeyin çok ötesinde. alacritty'nin
+/// `-q`'yu koşullu ekleme sebebi de zaten o dosyayı **aramak**; biz koşulu
+/// kaldırıyoruz, mekanizmayı değil.
+///
+/// Geri kalan her şey **parite** ve kasıtlı: `-flp` bayrakları, argv[0]'ı
+/// `-zsh` yapan `exec -a`, ve o `exec -a`'yı koşturan `/bin/zsh` (alacritty'nin
+/// notu: `sh`'ta `exec -a` yok). Politika bizde, çözüm parite hâlinde —
+/// [`home`] ve [`shell`] ile aynı örüntü.
+///
+/// **Çözülemeyen kullanıcı ya da kabuk `None`'a düşüyor** ve oturum
+/// alacritty'nin kendi yoluyla açılıyor: banner geri gelir, pencere çalışır.
+/// Ters yön — komutu yarım kurup yine de vermek — açılmayan bir terminal
+/// demekti.
+pub(crate) fn login_command() -> Option<(String, Vec<String>)> {
+    login_command_from(shell(), std::env::var("USER").ok().or_else(passwd_name))
+}
+
+/// [`login_command`]'ın **saf** yarısı: çözülmüş girdilerden komut.
+///
+/// Ayrı fonksiyon, çünkü sınanabilen kısım bu — ötekinin cevabı sınama
+/// sürecinin `$USER`'ına ve `$SHELL`'ine bağlı ve o ikisi enjekte edilemiyor.
+/// Geri düşüşün **iki** kolu var (kullanıcı ve kabuk) ve ikisi de burada
+/// sınanıyor: `?` zinciri onları doğru yapıyor ama sınanmamış bir doğruluk
+/// sonraki düzenlemede sessizce kaybolabilirdi.
+fn login_command_from(
+    shell: Option<PathBuf>,
+    user: Option<String>,
+) -> Option<(String, Vec<String>)> {
+    let shell = shell?;
+    Some(login_argv(shell.to_str()?, &user?))
+}
+
+/// Çözülmüş kullanıcı ve kabuktan argv.
+fn login_argv(shell: &str, user: &str) -> (String, Vec<String>) {
+    // `rsplit` her zaman en az bir parça verir; boş bir `$SHELL`'de o parça da
+    // boş olur ve `exec -a -` ile açılan oturum alacritty'de de bozuktu.
+    let name = shell.rsplit('/').next().unwrap_or(shell);
+    (
+        "/usr/bin/login".to_owned(),
+        vec![
+            "-qflp".to_owned(),
+            user.to_owned(),
+            "/bin/zsh".to_owned(),
+            "-fc".to_owned(),
+            format!("exec -a -{name} {shell}"),
+        ],
+    )
 }
 
 /// Kabuk zsh mi: yolun son parçası tam olarak `zsh`.
@@ -284,6 +361,8 @@ fn primary_language(tag: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -310,6 +389,45 @@ mod tests {
 
     fn pair(key: &str, value: &str) -> Option<(String, String)> {
         Some((key.to_owned(), value.to_owned()))
+    }
+
+    #[test]
+    fn the_login_command_always_silences_the_banner() {
+        // Bütün değişiklik bu tek harfte: `-q` olmadan `login(1)` her oturumda
+        // `Last login: …` basıyor ve o satır ızgaranın ilk satırında kalıyor.
+        // alacritty aynı bayrağı yalnız `~/.hushlogin` **varsa** ekliyor; biz
+        // koşulu kaldırdık, çünkü alternatifi kullanıcının ev dizinine dosya
+        // yazmaktı ve o bu deponun yasağı.
+        let (program, args) = login_argv("/bin/zsh", "someone");
+        assert_eq!(program, "/usr/bin/login");
+        assert_eq!(args[0], "-qflp", "banner susturulmadı");
+
+        // Geri kalanı **parite** ve sınamanın ikinci yarısı o: argv[0]'ı `-zsh`
+        // yapan `exec -a`, onu koşturan `/bin/zsh` (`sh`'ta `exec -a` yok) ve
+        // kullanıcı adı alacritty'nin yazdığı sırada.
+        assert_eq!(args[1], "someone");
+        assert_eq!(args[2], "/bin/zsh");
+        assert_eq!(args[3], "-fc");
+        assert_eq!(args[4], "exec -a -zsh /bin/zsh");
+
+        // Kabuğun **adı** yolun son parçası: Homebrew'un zsh'i de aynı kabuk ve
+        // argv[0] yine `-zsh` olmalı, yoksa login kabuğu login kabuğu saymazdı.
+        let (_, args) = login_argv("/opt/homebrew/bin/zsh", "someone");
+        assert_eq!(args[4], "exec -a -zsh /opt/homebrew/bin/zsh");
+    }
+
+    #[test]
+    fn an_unresolved_user_or_shell_falls_back_to_the_default_command() {
+        // **Geri düşüşün yönü:** komutu yarım kurup yine de vermek açılmayan
+        // bir terminal demekti. `None` alacritty'nin kendi yolunu geri
+        // getiriyor — banner döner ama pencere çalışır, ve o takas doğru yönde.
+        assert!(login_command_from(Some("/bin/zsh".into()), Some("someone".into())).is_some());
+        assert!(login_command_from(None, Some("someone".into())).is_none());
+        assert!(login_command_from(Some("/bin/zsh".into()), None).is_none());
+        // UTF-8 olmayan kabuk yolu da aynı kol: sınırın öteki tarafı `String`
+        // istiyor ve tahmin etmek yanlış kabuğu doğurmak olurdu.
+        let raw = PathBuf::from(OsString::from_vec(vec![0x2f, 0x62, 0xff]));
+        assert!(login_command_from(Some(raw), Some("someone".into())).is_none());
     }
 
     #[test]
