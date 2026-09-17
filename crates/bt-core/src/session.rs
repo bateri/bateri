@@ -217,6 +217,38 @@ pub struct Cursor {
     /// genişletmeli" cümlesinin karşılığıdır; genişleten tüketici hareket
     /// oldu, IME değil.
     pub display_offset: i32,
+    /// İçeriğin tepeden kaç satır tuttuğu: `0..content_rows` aralığında
+    /// çizilecek bir şey var, altı boş. Her zaman `1..=rows`.
+    ///
+    /// **Fact, ofset değil.** Çizen taraf bunu `rows - content_rows` ile
+    /// ötelemeye çeviriyor; "içerik tabana yapışır" bir yerleşim kararı ve
+    /// `bt-gpu`'nun — bu crate yalnız kaç satırın dolu olduğunu söylüyor
+    /// (`CLAUDE.md` → karar burada, boyama orada; buradaki karar "hangi satır
+    /// dolu", "nereye yapışacağı" değil).
+    ///
+    /// **İki kaynaktan birden doğuyor ve ikisi de gerekli**
+    /// ([`Session::frame`]): çizilen en büyük satır ile imlecin satırı. İmleç
+    /// tek başına yetmez — imleci yukarı taşıyan bir ilerleme çubuğu içeriği
+    /// aşağı iterdi; çizilen satır tek başına yetmez — tamamı varsayılan
+    /// zeminli boşluktan oluşan bir prompt satırı atlama kapısından geçmiyor
+    /// ve giriş satırı boşluğa düşerdi.
+    ///
+    /// **Monoton değil:** imleci yukarı taşıyıp alt satırı `\e[K` ile silen
+    /// bir program onu daraltıp genişletebilir. Değeri animasyona bağlayan
+    /// taraf durma koşulunu bu salınıma göre yazmak zorunda.
+    ///
+    /// Alternatif ekranda `rows`, yani öteleme sıfır: vim ve htop ızgaranın
+    /// tamamını sahipleniyor.
+    pub content_rows: u16,
+    /// Bu karenin ızgara yüksekliği — [`Cursor::content_rows`]'un ölçeği.
+    ///
+    /// Redundant görünüyor (çizen taraf grid'i kendisi kurdu) ama değil:
+    /// **aynı okumadan** geliyor. Tek alternatifi çizen tarafın kendi
+    /// kopyasıydı ve o kopya `Session::resize`'ın **ret kolunda** ayrışırdı —
+    /// dejenere bir boyut oturum tarafından yoksayılıyor, oysa çizen tarafın
+    /// kopyası onu yazmış olurdu ve öteleme bir kare boyunca yanlış ızgara
+    /// yüksekliğinden hesaplanırdı.
+    pub rows: u16,
 }
 
 /// Bir komut bloğunun karedeki izi: **komutun satırı** ve o komutun rengi.
@@ -1217,22 +1249,19 @@ impl Session {
         let cursor_shape = cursor.shape;
         let cursor_point = cursor.point;
         let cursor_row = cursor.point.line.0 + offset;
-        let cursor = Cursor {
-            col: cursor.point.column.0 as u16,
-            row: cursor_row.clamp(0, rows.saturating_sub(1)) as u16,
-            // Kaydırma geçmişine bakarken imleç ekranın dışına çıkar.
-            visible: cursor.shape != CursorShape::Hidden && (0..rows).contains(&cursor_row),
-            // Blok opak ve altındaki metni örtüyor: zemin rengi onu yeniden
-            // okunur kılıyor. Kaynak `theme`, hücrelerinkiyle **aynı** —
-            // ayrışsalardı imlecin altındaki harf bloğa değil eski bir palete
-            // göre seçilirdi.
-            text: color::linear_rgba(background),
-            // Aynı `RenderableContent`'ten, yani `row`'u kuran ofsetin ta
-            // kendisi: ikisi ayrı okunsaydı araya düşen bir kaydırma
-            // "ofset aynı ama satır oynadı" diye yanlış bir animasyon
-            // başlatırdı.
-            display_offset: offset,
-        };
+        let cursor_col = cursor.point.column.0 as u16;
+        // Kırpılmış ekran satırı; iki tüketicisi var ve ikisi de kırpılmışını
+        // istiyor — [`Cursor::row`]'un sözleşmesi ve aşağıdaki doluluk sayısı.
+        let cursor_screen_row = cursor_row.clamp(0, rows.saturating_sub(1)) as u16;
+        // Kaydırma geçmişine bakarken imleç ekranın dışına çıkar.
+        let cursor_visible = cursor.shape != CursorShape::Hidden && (0..rows).contains(&cursor_row);
+        // Izgara yüksekliği `u16` olarak giriyor (`GridSize::for_spawn` 1'e
+        // kırpar, `Session::resize` sıfırı eler), yani kesme kayıpsız ve
+        // değer **en az 1**: `content_rows`'un `1..=rows` sözleşmesi buradan.
+        let grid_rows = u16::try_from(rows).unwrap_or(u16::MAX);
+        // Doluluk sayısının çizilen yarısı; döngü onu atlama kapısından
+        // **sonra** büyütüyor (bkz. aşağıda).
+        let mut drawn_rows = 0u16;
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
         // bayrak sormuyor. Biri `HIDDEN` (`\e[8m`) ve o bu maskede **değil**:
@@ -1360,6 +1389,13 @@ impl Session {
             let Ok(row) = u16::try_from(row) else {
                 continue;
             };
+            // **Doluluk sayısının çizilen yarısı** ([`Cursor::content_rows`]):
+            // atlama kapısından **sonra**, yani yalnız gerçekten çizilen
+            // satırlar sayılıyor. Kapıdan önce olsaydı `display_iter` bütün
+            // pencereyi verdiği için boş ızgara da "dolu" görünür ve içerik
+            // hiç ötelenmezdi. `saturating_add`: `row < rows ≤ u16::MAX`, yani
+            // taşma temsil edilemez ama sarma sessiz olurdu.
+            drawn_rows = drawn_rows.max(row.saturating_add(1));
             // **Faz 1.** Çıpa okuması da kapıdan sonra (R3.4), ön planla aynı
             // gerekçeyle: `hyperlink()` yan tabloya (`CellExtra`) iniyor ve
             // çizilmeyen hücre için ödenmemeli — kapının üstünde olsaydı boş
@@ -1471,6 +1507,44 @@ impl Session {
                 strikeout,
             });
         }
+
+        // **İmleç döngüden sonra kuruluyor** ve sebebi tek bir alan:
+        // `content_rows` ancak döngü bitince biliniyor. Girdilerinin tamamı
+        // (şekil, nokta, satır, görünürlük) döngüden **önce** çözüldü, yani
+        // yukarıdaki "imleç döngüden önce çözülüyor" cümlesi ayakta; burada
+        // yalnız kayıt kuruluyor. Yer değiştirmesinin alternatifi
+        // `content_rows`'u sıfırla doğurup sonra düzeltmekti ve o, bir kare
+        // boyunca yanlış olan bir alan demekti.
+        let cursor = Cursor {
+            col: cursor_col,
+            row: cursor_screen_row,
+            visible: cursor_visible,
+            // Blok opak ve altındaki metni örtüyor: zemin rengi onu yeniden
+            // okunur kılıyor. Kaynak `theme`, hücrelerinkiyle **aynı** —
+            // ayrışsalardı imlecin altındaki harf bloğa değil eski bir palete
+            // göre seçilirdi.
+            text: color::linear_rgba(background),
+            // Aynı `RenderableContent`'ten, yani `row`'u kuran ofsetin ta
+            // kendisi: ikisi ayrı okunsaydı araya düşen bir kaydırma
+            // "ofset aynı ama satır oynadı" diye yanlış bir animasyon
+            // başlatırdı.
+            display_offset: offset,
+            // **Alternatif ekranda ızgaranın tamamı**, yani öteleme sıfır:
+            // vim ve htop bütün satırları sahipleniyor (bayrak kilidin altında
+            // zaten okundu). Ana ekranda iki kaynağın maksimumu; gerekçesi
+            // [`Cursor::content_rows`]'ta.
+            content_rows: if alt_screen {
+                grid_rows
+            } else {
+                drawn_rows.max(cursor_screen_row.saturating_add(1))
+            },
+            rows: grid_rows,
+        };
+        debug_assert!(
+            (1..=grid_rows).contains(&cursor.content_rows),
+            "doluluk sayısı ızgaranın dışında: {} / {grid_rows}",
+            cursor.content_rows
+        );
         drop(term);
 
         // **Faz 2**, `Term` kilidi düştükten sonra: kimlikler kabuk
@@ -4167,6 +4241,126 @@ mod tests {
     /// sınamalarının ortak çağrısı; işaretçi o dalda okunmuyor.
     fn scroll(session: &Session, lines: i32) -> Wheel {
         session.scroll_wheel(lines, at(0, 0, CellHalf::Left), false)
+    }
+
+    /// Hasar sormadan bu anın imleç kaydı.
+    ///
+    /// [`frame_if_damaged`]'ten ayrı, çünkü sorulan şey kare isteği değil
+    /// **kaydın içeriği**: doluluk sayısı kirli olmayan bir karede de doğru
+    /// olmak zorunda (hareket karesi onu `link.rs`'te korunan bir değerden
+    /// okuyor). Hasarsız `frame()` meşru, yalnız boşuna — doc'u öyle yazıyor.
+    fn cursor_now(session: &Session) -> Cursor {
+        session.frame(|_| (), &mut Blocks::default())
+    }
+
+    #[test]
+    fn content_rows_count_the_drawn_rows_and_the_cursor_row() {
+        // Tabana yapışmanın tek girdisi (`Cursor::content_rows`): `bt-gpu` onu
+        // `rows - content_rows` ile ötelemeye çeviriyor. `stty -echo`: prompt
+        // yok, ekranda tam olarak yazdığımız var.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("stty -echo; printf 'a\\nb\\n'; sleep 5", Arc::clone(&wake));
+        wait_ink(&session, &wake, "ab");
+
+        let cursor = cursor_now(&session);
+        // Izgara aynı okumadan geliyor: çizen tarafın kendi kopyası
+        // `Session::resize`'ın ret kolunda ayrışırdı (`Cursor::rows`).
+        assert_eq!(cursor.rows, 10, "{cursor:?}");
+        // `a` 0. satırda, `b` 1.'de, imleç 2.'de: üç satır dolu, yedi boş.
+        assert_eq!(cursor.row, 2, "{cursor:?}");
+        assert_eq!(cursor.content_rows, 3, "{cursor:?}");
+    }
+
+    #[test]
+    fn content_rows_need_both_halves() {
+        // İki kaynağın **ikisi de** gerekli ve her biri ötekinin körlüğünü
+        // kapatıyor; biri unutulursa belirti sessiz bir yerleşim kusuru olur.
+        let wake = Arc::new(TestWake::default());
+
+        // (1) İmleç yarısı olmasa: mürekkebi olmayan satırlar atlama
+        // kapısından geçmiyor, yani giriş satırı boşluğa düşerdi. `a` tek
+        // dolu satır ama imleç üç satır aşağıda.
+        let empty_tail = spawn_session(
+            "stty -echo; printf 'a\\n\\n\\n'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_ink(&empty_tail, &wake, "a");
+        let cursor = cursor_now(&empty_tail);
+        assert_eq!(cursor.row, 3, "{cursor:?}");
+        assert_eq!(
+            cursor.content_rows, 4,
+            "imleç yarısı düştü: boş satırlar sayılmadı ({cursor:?})"
+        );
+
+        // (2) Çizilen yarısı olmasa: imleci yukarı taşıyan bir ilerleme
+        // çubuğu (`\e[H`) içeriği aşağı iterdi. Üç satır dolu, imleç 0.'da.
+        let wake = Arc::new(TestWake::default());
+        let cursor_up = spawn_session(
+            "stty -echo; printf 'a\\nb\\nc\\n\\033[H'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_ink(&cursor_up, &wake, "abc");
+        let cursor = cursor_now(&cursor_up);
+        assert_eq!(cursor.row, 0, "{cursor:?}");
+        assert_eq!(
+            cursor.content_rows, 3,
+            "çizilen yarısı düştü: imleç içeriği aşağı itti ({cursor:?})"
+        );
+    }
+
+    #[test]
+    fn the_alternate_screen_owns_every_row() {
+        // vim ve htop ızgaranın tamamını sahipleniyor: doluluk `rows`, yani
+        // öteleme sıfır. Tam ekran bir uygulamanın boş bıraktığı alt satırlar
+        // yüzünden içeriğin aşağı kaymasını bu kol önlüyor.
+        let (session, _wake) = dump_session(40, "printf '\\033[?1049h'", |mode| {
+            mode.contains(TermMode::ALT_SCREEN)
+        });
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.content_rows, cursor.rows, "{cursor:?}");
+    }
+
+    #[test]
+    fn content_rows_come_from_the_visible_window_while_scrolled() {
+        // **Geçmişte kaydırırken de içerik tabana yapışık kalır.** Doluluk
+        // görünür satırlardan doğuyor, yani `display_offset > 0` iken kural
+        // aynı: temizlenmiş bir pencerede tekerleğin ilk çentiği iki satırlık
+        // içerik gösterir ve ikisi dipte durur. Alternatifi ("ofset
+        // kaydırmada 0'a donar") tekerleğe dokunur dokunmaz içeriğin tavana
+        // sıçraması demekti.
+        //
+        // `\e[2J\e[H` geçmişi silmiyor, yalnız görünen pencereyi: `seq`'in 30
+        // satırı defterde duruyor ve kaydırılacak bir yer var.
+        // İki adım **`read` ile sıralanıyor**: tek betikte arka arkaya
+        // yazılsalardı ikisi aynı PTY okumasında gelebilir ve "geçmiş doldu"
+        // ölçütü hiç gözlenmezdi — sınama boş bir ekranı temiz sanıp
+        // kaydıracak yer bulamazdı (emsal
+        // `set_terminal_options_switches_osc52_live`).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+
+        session.write(b"\n");
+        // Ölçüt doluluğun kendisi: tek dolu satır imlecin satırı.
+        wait_until("ekran temizlenmedi", Duration::from_secs(5), || {
+            cursor_now(&session).content_rows == 1
+        });
+        assert_eq!(display_offset(&session), 0);
+
+        // Bir çentik geriye: geçmişin son satırı 0. satıra, imleç 1.'ye.
+        assert_eq!(scroll(&session, 1), Wheel::Scrolled(1));
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.display_offset, 1, "{cursor:?}");
+        assert_eq!(cursor.content_rows, 2, "{cursor:?}");
+
+        // Pencere geçmişle dolunca öteleme kendiliğinden sıfıra iner: doluluk
+        // `rows`'a çıkıyor ve bunu zorlayan bir dal yok.
+        assert!(matches!(scroll(&session, 20), Wheel::Scrolled(n) if n > 0));
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.content_rows, cursor.rows, "{cursor:?}");
     }
 
     #[test]

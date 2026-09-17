@@ -1522,6 +1522,11 @@ impl AppDelegate {
             self.ivars().wake.waker.set(link.waker()).is_ok(),
             "waker ikinci kez kuruldu"
         );
+        // Fare eşlemesinin dikey orijini: `set_metrics` gibi pencere değil
+        // **kare** yolundan geliyor, o yüzden link doğduktan sonra ve bir kez.
+        // Fare böylece çizilen ötelemeyi okuyor; ikinci bir hesap "tıklama bir
+        // satır kayıyor" demekti (`bt_gpu::Origin`).
+        view.attach_origin(link.origin());
         // İmlecin stili de ayarın: link `CursorMotion::default()` ile doğuyor
         // ve buradaki çağrı onu dosyanın (ya da hermetik koşuda
         // `Settings::default()`'un) değerine çekiyor. `set_font`'un yeri

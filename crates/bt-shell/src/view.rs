@@ -13,7 +13,7 @@ use std::cell::OnceCell;
 use std::sync::Arc;
 
 use bt_core::{CellHalf, SelectionPoint, Session, Wheel};
-use bt_gpu::CellMetrics;
+use bt_gpu::{CellMetrics, Origin};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -27,12 +27,19 @@ use crate::keys::{KeyInput, encode_key, page_scroll};
 
 /// Fare noktası → seçim ucu. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
 ///
-/// `view_px` view koordinatında (nokta), `metrics` fiziksel piksel, `scale`
-/// backing ölçeği: ölçü `bt-gpu`'dan fiziksel geldiği için fare de önce
-/// fiziksel piksele çıkar, **sol payı düşer**, sonra bölünür. Pay `cols`
-/// hesabıyla (`split_into_grid`) ve çizim orijiniyle (`Frame::pos_at`) aynı
-/// `CellMetrics`'ten geliyor; üçü ayrışsaydı belirti "fare bir sütun kayıyor"
-/// olurdu (010 Karar 3).
+/// `view_px` view koordinatında (nokta), `metrics` ve `origin_px` fiziksel
+/// piksel, `scale` backing ölçeği: ölçü `bt-gpu`'dan fiziksel geldiği için
+/// fare de önce fiziksel piksele çıkar, **sol payı ve dikey orijini düşer**,
+/// sonra bölünür. Pay `cols` hesabıyla (`split_into_grid`) ve çizim
+/// orijiniyle (`Frame::pos_at`) aynı `CellMetrics`'ten geliyor; üçü
+/// ayrışsaydı belirti "fare bir sütun kayıyor" olurdu (010 Karar 3).
+///
+/// `origin_px` aynı cümlenin dikey yarısı ve kaynağı da tek
+/// ([`bt_gpu::Origin`]): **çizilen** karenin orijini, kare yolunun yazdığı
+/// değer. İkinci bir hesap olsaydı belirti "fare bir satır kayıyor" olurdu ve
+/// kayma animasyonu boyunca (phase-2) her karede başka bir satır kayardı.
+/// Parametre, alan değil: fonksiyon saf kalıyor ve orijini konu etmeyen
+/// sınamalar `0.0` geçiyor.
 ///
 /// Payın **içine** düşen tıklama ilk sütuna kırpılır, yani seçim payda
 /// başlamaz: çıkarmadan sonra x negatif kalır ve aşağıdaki iki dil kuralı onu
@@ -63,6 +70,7 @@ use crate::keys::{KeyInput, encode_key, page_scroll};
 pub(crate) fn point_to_cell(
     view_px: (f64, f64),
     metrics: CellMetrics,
+    origin_px: f64,
     scale: f64,
     cols: u16,
     rows: u16,
@@ -76,7 +84,14 @@ pub(crate) fn point_to_cell(
     // yok. Grid'in boyunu view değil `cols`/`rows` söylüyor — pencere kenar
     // boşluğundaki nokta son hücreye yapışsın.
     let x = view_px.0 * scale - f64::from(metrics.gutter_px());
-    let row = ((view_px.1 * scale / cell_h) as u16).min(rows - 1);
+    // Dikey orijin de payla aynı şekilde düşülüyor ve **`f64`'te**: tabana
+    // yapışmada boş alan **üstte** ve oraya yapılan tıklamada fark negatife
+    // iner. `u16`'da yapılsaydı taşar ve pencerenin üst yarısına yapılan
+    // tıklama son satırı seçerdi; `f64`'te negatif kalıyor ve `as u16` onu
+    // sıfıra **doyuruyor** — payın yatayda kullandığı yolun aynısı, ayrı bir
+    // kırpma dalı yok.
+    let y = view_px.1 * scale - origin_px;
+    let row = ((y / cell_h) as u16).min(rows - 1);
     let col = (x / cell_w) as u16;
     let (col, half) = if col < cols {
         (col, cell_half(x, cell_w))
@@ -180,6 +195,19 @@ pub(crate) struct ViewIvars {
     /// ama değil: `start_session`'a ve `DisplayLink::resize`'a giden değerlerin
     /// aynısı, aynı çağrı yerinde yazılıyor.
     metrics: std::cell::Cell<Option<(CellMetrics, (u16, u16))>>,
+    /// Çizilen karenin dikey orijini — kare yolunun yazdığı gövdenin okuma
+    /// ucu ([`bt_gpu::Origin`]).
+    ///
+    /// `metrics`'in yanında ama onun **içinde değil**: o üçlü pencere
+    /// olaylarında tazeleniyor (`set_metrics`), orijin ise kare başına
+    /// değişiyor. İçine konsaydı fare, tabana yapışmayı bir sonraki yeniden
+    /// boyutlandırmaya kadar görmezdi.
+    ///
+    /// `OnceCell`: link oturumla birlikte bir kez doğuyor ve gövdesi ondan
+    /// sonra hiç değişmiyor — değişen şey gövdenin **içeriği** ve onu kare
+    /// yolu yazıyor. Yokken (link kurulmadan önceki tek pencere) orijin
+    /// sıfırdır ve çizim de tavana yapışıktır, yani ikisi tutarlı.
+    origin: OnceCell<Origin>,
 }
 
 define_class!(
@@ -424,6 +452,7 @@ impl BateriView {
             dragging: std::cell::Cell::new(false),
             scroll_carry: std::cell::Cell::new(0.0),
             metrics: std::cell::Cell::new(None),
+            origin: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
         // set edildi.
@@ -449,6 +478,20 @@ impl BateriView {
             .set(Some((grid.cell, (grid.cols, grid.rows))));
     }
 
+    /// Fare çevirisinin dikey orijinini bağlar; link doğduktan hemen sonra,
+    /// bir kez.
+    ///
+    /// `set_metrics`'ten ayrı çağrı, çünkü kaynağı ayrı: o üçlü pencere
+    /// geometrisinden, bu link'ten geliyor ve link `set_metrics`'ten sonra
+    /// kuruluyor (`app::start_session`). İkinci çağrı sessizce düşseydi fare
+    /// eski gövdeyi, yani sonsuza kadar sıfır bir orijin okurdu.
+    pub(crate) fn attach_origin(&self, origin: Origin) {
+        assert!(
+            self.ivars().origin.set(origin).is_ok(),
+            "orijin ikinci kez bağlandı"
+        );
+    }
+
     /// Oturum + olayın altındaki uç (hücre ve yarısı). Üçü (`session`, ölçü,
     /// grid) birlikte yoksa `None`: yarım bilgiyle seçim başlatılamaz.
     fn session_cell(&self, event: &NSEvent) -> Option<(Arc<Session>, SelectionPoint)> {
@@ -469,7 +512,17 @@ impl BateriView {
         let (metrics, (cols, rows)) = self.ivars().metrics.get()?;
         let point = self.convertPoint_fromView(in_window, None);
         let scale = self.window()?.backingScaleFactor();
-        point_to_cell((point.x, point.y), metrics, scale, cols, rows)
+        // Orijin **çizilen** karenin değeri: link yoksa (ilk pencere) sıfır ve
+        // çizim de tavana yapışık, yani ikisi tutarlı.
+        let origin_px = self.ivars().origin.get().map_or(0.0, Origin::px);
+        point_to_cell(
+            (point.x, point.y),
+            metrics,
+            f64::from(origin_px),
+            scale,
+            cols,
+            rows,
+        )
     }
 
     /// Pencere kaydı; basılı bir sürükleme varsa seçimin ucunu farenin **yeni**
@@ -521,7 +574,7 @@ mod tests {
     /// pay kadar kaydırmak o gerekçeleri okunmaz hâle getirirdi. Payın kendi
     /// sınaması `the_gutter_shifts_the_grid_origin`.
     fn scene_point(view_px: (f64, f64)) -> Option<SelectionPoint> {
-        point_to_cell(view_px, grid(0), 2.0, 100, 33)
+        point_to_cell(view_px, grid(0), 0.0, 2.0, 100, 33)
     }
 
     /// Sahnenin hücresi ve yarısı ayrı okunuyor: hücre testleri hücreye, yarı
@@ -630,7 +683,7 @@ mod tests {
     fn the_gutter_shifts_the_grid_origin() {
         // Sahne: 9×18 hücre, @2x, **8 fiziksel piksel** pay. View'da pay
         // 4 nokta, hücre 4.5 nokta eder.
-        let at = |x: f64| point_to_cell((x, 9.0), grid(8), 2.0, 100, 33);
+        let at = |x: f64| point_to_cell((x, 9.0), grid(8), 0.0, 2.0, 100, 33);
         let cell = |point: Option<SelectionPoint>| point.map(|p| (p.col, p.half));
 
         // Payın **içi** ilk sütuna kırpılır ve sol yarıda kalır: seçim payda
@@ -656,7 +709,7 @@ mod tests {
         // yoksa pay hiç uygulanmasa da geçerdi.
         assert_eq!(cell(at(5.0)), Some((0, CellHalf::Left)), "paylı");
         assert_eq!(
-            point_to_cell((5.0, 9.0), grid(0), 2.0, 100, 33).map(|p| (p.col, p.half)),
+            point_to_cell((5.0, 9.0), grid(0), 0.0, 2.0, 100, 33).map(|p| (p.col, p.half)),
             Some((1, CellHalf::Left)),
             "paysız aynı nokta bir sonraki sütun"
         );
@@ -668,18 +721,58 @@ mod tests {
         // bu: ikisi ayrışsaydı son sütun ya erken biterdi ya taşardı.
         assert_eq!(cell(at(451.5)), Some((99, CellHalf::Left)), "paylı sağ uç");
         assert_eq!(
-            point_to_cell((451.5, 9.0), grid(0), 2.0, 100, 33).map(|p| (p.col, p.half)),
+            point_to_cell((451.5, 9.0), grid(0), 0.0, 2.0, 100, 33).map(|p| (p.col, p.half)),
             Some((99, CellHalf::Right)),
             "paysız aynı nokta grid'i taşar"
         );
     }
 
     #[test]
+    fn the_origin_shifts_the_grid_down_and_the_blank_area_clamps() {
+        // Payın dikey ikizi ve **`u16` tuzağının asıl yeri**: tabana
+        // yapışmada boş alan üstte, yani pencerenin üst yarısına yapılan
+        // tıklamada fark negatife iniyor. `u16`'da yapılsaydı taşar ve o
+        // tıklama son satırı seçerdi — sürüklemenin başı ekranın dibine
+        // fırlardı. `f64`'te negatif kalıyor ve `as u16` sıfıra doyuruyor.
+        //
+        // Sahne: 9×18 hücre, @2x, **180 fiziksel piksel** orijin — yani on
+        // satırlık boş alan, ardından içerik. View'da orijin 90 nokta eder,
+        // hücre 9 nokta.
+        const ORIGIN_PX: f64 = 180.0;
+        let at = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX, 2.0, 100, 33);
+        let row = |point: Option<SelectionPoint>| point.map(|p| p.row);
+
+        // Boş alanın tamamı 0. satıra yapışır: üst kenar, ortası ve orijinin
+        // bittiği yerin bir öncesi. Ayrı bir kırpma dalı yok.
+        assert_eq!(row(at(0.0)), Some(0), "üst kenar");
+        assert_eq!(row(at(45.0)), Some(0), "boş alanın ortası");
+        assert_eq!(row(at(89.0)), Some(0), "içeriğin bir öncesi");
+
+        // Orijinin bittiği yer 0. satırın **başı**: içeriğin ilk satırına
+        // tıklamak ilk satırı verir, bir sonraki hücre bir sonraki satırı.
+        assert_eq!(row(at(90.0)), Some(0), "içeriğin başı");
+        assert_eq!(row(at(99.0)), Some(1), "bir satır sonra");
+
+        // **Kaymayı gören nokta:** orijinsiz sahne aynı soruyu sorup farklı
+        // cevap veriyor. Bu satır olmasa orijin hiç uygulanmasa da sınama
+        // geçerdi — payın kendi sınamasındaki ayrımın aynısı.
+        assert_eq!(
+            row(point_to_cell((0.0, 99.0), grid(0), 0.0, 2.0, 100, 33)),
+            Some(11),
+            "orijinsiz aynı nokta on bir satır aşağıda"
+        );
+
+        // Alt taşma hâlâ son satıra kırpılıyor: orijin alt kenarın kuralını
+        // değiştirmiyor, yalnız başlangıcı iteliyor.
+        assert_eq!(row(at(600.0)), Some(32), "alt taşma");
+    }
+
+    #[test]
     fn empty_grid_has_no_cell() {
         // Simge durumundaki pencere sıfır sütun/satır verebilir: yapışacak bir
         // son hücre yok.
-        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 2.0, 0, 33), None);
-        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 2.0, 100, 0), None);
+        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 0.0, 2.0, 0, 33), None);
+        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 0.0, 2.0, 100, 0), None);
     }
 
     #[test]
@@ -757,8 +850,8 @@ mod tests {
         // Aynı view noktası iki ölçekte iki ayrı hücre: ölçü fiziksel
         // pikselden geliyor ve ölçek çarpanı atlanırsa retina makinede seçim
         // yarı kayar.
-        let at1x = point_to_cell((90.0, 150.0), grid(0), 1.0, 100, 33);
-        let at2x = point_to_cell((90.0, 150.0), grid(0), 2.0, 100, 33);
+        let at1x = point_to_cell((90.0, 150.0), grid(0), 0.0, 1.0, 100, 33);
+        let at2x = point_to_cell((90.0, 150.0), grid(0), 0.0, 2.0, 100, 33);
         assert_eq!(
             (at1x.map(|p| (p.col, p.row)), at2x.map(|p| (p.col, p.row))),
             (Some((10, 8)), Some((20, 16)))

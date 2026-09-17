@@ -78,14 +78,68 @@ kabul 4).
    hücrenin `pos.y`'si eşit. Karar 7'nin üç kör noktasından bugün bekçisi
    olmayan üçüncüsü bu.
 
+## Uygulama Notları
+
+- **`Cursor` `rows`'u da taşıyor, yalnız `content_rows`'u değil.** Plan
+  ötelemeyi `link.rs`'te (`rows - content_rows`) hesaplatıyor ama çizen tarafın
+  `rows`'u yoktu: `DisplayLink` yalnız `CellMetrics` tutuyor, satır sayısı
+  `resize`'ın parametresi. Kendi kopyasını tutmak `Session::resize`'ın **ret
+  kolunda** ayrışırdı — dejenere boyut oturum tarafından yoksayılıyor, oysa
+  kopya yazılmış olurdu ve öteleme bir kare boyunca yanlış ızgara
+  yüksekliğinden çıkardı. İki alan **aynı `renderable_content()` okumasından**
+  geliyor, yani ayrışamıyorlar. Yerleşim kararı (`rows - content_rows`) plandaki
+  yerinde, `link.rs`'te kaldı.
+- **`setViewport` kanaryası tuttu** ve negatif kontrolle doğrulandı: `originY`
+  sıfıra çivilendiğinde iki bekçi de kırmızı düşüyor, geri alınınca ikisi de
+  yeşil. Metal taşan viewport'u kırpıyor (`originY 8 + boy 16 = 24 > 16`
+  doğrulama hatası vermiyor, alt bölge sarmıyor). Uniform yoluna dönülmedi,
+  `.metal` dosyalarına dokunulmadı, phase **riskli değil**.
+- **Üretimde kırpma hiç devreye girmiyor** ve bunu ötelemenin tanımı veriyor:
+  içerik `0..content_rows`, öteleme `rows - content_rows`, yani en alt dolu
+  satır tam `rows`'ta bitiyor. Kırpma yalnız bekçinin kurduğu yapay sahnede
+  konuşuyor; değişmez `set_origin`'in doc'una yazıldı.
+- **İmlecin dikdörtgeni ötelemeyi CPU'da alıyor** (checklist'teki kalem) ve bu
+  phase-2'de **düşmüyor**. 2. tur muhakemesi (kabul 6) "3c'nin `CursorBlock.rect`
+  zorunlu ayrıntısı düşer" diyordu; düşen şey *gerekçe*, satır değil: imleç
+  ekran uzayına taşındığında instance'ın konumu `ekran_satırı - origin` olur ve
+  rect yine `instance + origin` = ekran satırı. Formül iki phase'de aynı,
+  değişen tek şey `at`'in nereden geldiği.
+- **Fare tesisatı `Rc<Cell<f32>>` oldu** ve plandaki gibi atomiksiz;
+  `bt_gpu::Origin` adıyla ihraç edildi, `DisplayLink::origin()` `waker()`
+  örüntüsünü izliyor. `view` onu `set_metrics`'ten **ayrı** bir çağrıyla
+  (`attach_origin`) alıyor: kaynağı ayrı (pencere değil kare yolu) ve link
+  `set_metrics`'ten sonra doğuyor. `point_to_cell` `origin_px`'i **parametre**
+  olarak aldı, alan olarak değil — fonksiyon saf kaldı ve orijini konu etmeyen
+  sınamalar `0.0` geçiyor.
+- **İmleç kaydı döngüden sonra kuruluyor.** `content_rows` ancak sink döngüsü
+  bitince biliniyor; alternatif onu sıfırla doğurup sonra düzeltmekti, yani bir
+  kare boyunca yanlış olan bir alan. Girdilerin tamamı (şekil, nokta, satır,
+  görünürlük) döngüden **önce** çözülüyor, yani "imleç döngüden önce çözülüyor"
+  cümlesi ayakta.
+- **Bilinen ara durum: Enter'da imleç bir satır üstten kayıyor.** Öteleme bu
+  phase'de **anında** iniyor (animasyon yok) ama `Motion` imleci hâlâ **grid**
+  uzayında sürüyor: Enter'da grid satırı `r → r+1` olurken doluluk da bir
+  büyüyor, yani ilk karede ekran y'si `(rows-2)·h` — dipteki satırın bir üstü —
+  ve yay onu aşağı indiriyor. Yerleşmiş hâl iki uçta da doğru (`(rows-1)·h`),
+  oynayan yalnız geçiş. **Kasıtlı olarak yamanmadı:** çaresi R2.1, yani imlecin
+  hedefinin ekran uzayına taşınması; burada `content_rows` değişimini snap
+  tetiğine bağlamak phase-2'nin sileceği bir churn olurdu. `cursor_motion =
+  "snap"` ve Hareketi Azalt bu geçişi hiç göstermiyor. Göz kontrolünde
+  görülecek tek gerileme bu ve phase-2'nin ilk kabul maddesi tam olarak onu
+  kapatıyor.
+- **İki sınama kendi tuzağını buldu.** Kaydırma bekçisi ilk hâlinde yarışa
+  girdi (`seq` geçmişi oluşmadan "ekran temiz" ölçütü tuttu, `Scrolled(0)`):
+  iki adım `read` ile sıralandı. Glyph dikişi `GpuError::NoAtlas` ile düştü:
+  atlasın anahtarının ölçek yarısı pencereden geliyor ve sınamanın penceresi
+  yok, `cell_metrics(1.0)` eklendi.
+
 ## Yayın Etkisi
 
-- **shader:** `.metal` **değişmiyor** (`setViewport` yolu), `make shader`
-  gerekmiyor ve `#[repr(C)]` ↔ MSL düzeni dokunulmadan kalıyor.
-  **Kanarya şartı:** Metal'in drawable'ı aşan viewport'u scissor'la kırptığı
-  doğrulanmalı. Tutmazsa vertex uniform yoluna dönülür ve o zaman `make shader`
-  **girer**, phase **riskli** olur, `#[repr(C)]` denetimi yapılır — kalan
-  kalemler (rect'in CPU'da kaydırılması, ikinci yazma noktası) **aynı**.
+- **shader:** `.metal` **değişmedi** (`setViewport` yolu), `make shader`
+  gerekmedi ve `#[repr(C)]` ↔ MSL düzeni dokunulmadan kaldı.
+  **Kanarya tuttu:** Metal taşan viewport'u kırpıyor, negatif kontrolle
+  doğrulandı (bkz. Uygulama Notları). Uniform yoluna dönülmedi, yani phase
+  **riskli değil** ve `/code-review` set sonunu bekliyor.
 - **Belge:** `docs/YOL-HARITASI.md` **bu phase'in işi değil** — set açılırken
   (`/rfc`, 2. tur) yeniden yazıldı: 011 satırı yeni kapsamıyla, dock için 012
   satırı, üçüncü numara kayması ve iki bilinen hatanın düzeltmesi
@@ -100,15 +154,28 @@ kabul 4).
 
 ## Checklist
 
-- [ ] `content_rows` `frame()`'de toplanıyor, alt ekranda 0
-- [ ] Origin `DisplayLink`'te, `setViewport` iki pipeline'ı kaydırıyor
-- [ ] `CursorBlock.rect` CPU'da kaydırılıyor; `pos_at`/`push_block` değişmedi
-- [ ] `point_to_cell` origin'i `DisplayLink`'ten `f64`'te okuyor
-- [ ] Test: üç bekçi (iki pipeline dikişi + imleç eşitliği)
-- [ ] `setViewport` kanaryası doğrulandı; tutmadıysa uniform yoluna dönüldü
-      ve phase riskli işaretlendi
-- [ ] `CLAUDE.md`'nin "Bugünkü hâl" paragrafı içeriğin tabana yaslandığını
+- [x] `content_rows` `frame()`'de toplanıyor, alt ekranda ızgaranın tamamı
+      (öteleme 0); `rows` da aynı okumadan geçiyor (bkz. Uygulama Notları)
+- [x] Origin `DisplayLink`'te, `setViewport` iki pipeline'ı kaydırıyor
+- [x] `CursorBlock.rect` CPU'da kaydırılıyor; `pos_at`/`push_block` değişmedi
+- [x] `point_to_cell` origin'i `DisplayLink`'ten (`bt_gpu::Origin`) `f64`'te
+      okuyor
+- [x] Test: üç bekçi — `content_sticks_to_the_bottom_for_cell_bg`,
+      `…_for_glyphs`, `the_cursor_rect_carries_the_origin_but_the_instance_does_not`;
+      yanlarında `bt-core`'un dört doluluk sınaması ve `view`'ın orijin sınaması
+- [x] `setViewport` kanaryası doğrulandı (negatif kontrol: `originY` sıfıra
+      çivilendiğinde iki bekçi de kırmızı); uniform yoluna dönülmedi, phase
+      riskli değil
+- [x] `CLAUDE.md`'nin "Bugünkü hâl" paragrafı içeriğin tabana yaslandığını
       söylüyor (yol haritası set açılırken güncellendi, burada iş yok)
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`; uniform yoluna dönüldüyse
-      ayrıca `make shader`)
-- [ ] Yayın etkisi yazıldı
+- [x] Doğrulama geçti: `make hepsi` yeşil (exit 0) ve `make duman` kullanıcının
+      gerçek penceresinde yeşil — `kare=29 hucre=8 glif=6 kural=15 icerik=2
+      hareket=27 sessiz=1749.31ms kapanis=clean`. Üç sayaç oynamadı ve
+      **`icerik` phase-0'daki `2`'de kaldı**: öteleme çizim zamanı, yani yeni
+      içerik karesi doğurmuyor
+- [x] Yayın etkisi yazıldı
+- [x] Göz kontrolü (kullanıcı, gerçek pencere): prompt açılışta **dipte**;
+      `vim` ve benzeri tam ekran uygulamalar normal kullanılıyor (ızgara
+      tavana dönüyor); üstteki boş alandan başlayan sürükleme metnin **ilk
+      satırından** seçiyor, dibe fırlamıyor — `u16` taşma tuzağının gözle
+      karşılığı da kapandı

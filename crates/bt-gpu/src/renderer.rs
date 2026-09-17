@@ -22,7 +22,7 @@ use objc2_metal::{
     MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
     MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
     MTLResourceOptions, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
-    MTLTextureUsage,
+    MTLTextureUsage, MTLViewport,
 };
 use objc2_quartz_core::CAMetalDrawable;
 
@@ -571,6 +571,32 @@ impl Renderer {
         // ve ayrı ayrı sormaları kare başına iki fazladan objc mesajı ile
         // ayrışabilen iki tanım demekti.
         let viewport_px: [f32; 2] = [texture.width() as f32, texture.height() as f32];
+        // **Dikey öteleme burada, tek satırda ve iki pipeline birden.**
+        // `Frame` onu listelere işlemiyor (gerekçe `Frame::origin_px`): sink
+        // hücreyi basma anında pişiriyor, doluluk sayısı ise döngü bitince
+        // doğuyor. Viewport dönüşümü NDC'den pencere koordinatına geçerken
+        // uygulanıyor, yani arka plan, glyph, kural ve şerit dördü de aynı
+        // miktarda kayıyor — shader'a ve `#[repr(C)]` düzenine dokunmadan.
+        //
+        // **Boy dokunun boyu kalıyor** ve `viewport_px` uniform'u da: ikisi
+        // NDC ölçeğinin iki yarısı ve ayrışırlarsa ızgara ezilir (shader
+        // pikseli dokunun boyuna göre normalize ediyor, viewport ise NDC'yi
+        // kendi boyuna geriyor). Öteleme bu yüzden viewport'u dokunun
+        // **altına** taşırıyor; taşan fragment'leri Metal kırpıyor
+        // ("Fragments that lie outside of the viewport are clipped",
+        // `MTLRenderCommandEncoder`). Kanaryası `content_sticks_to_the_bottom_*`
+        // sınamaları: üst bölge clear rengiyle kalmalı, alt bölge boyanmalı.
+        //
+        // `znear`/`zfar` Metal'in varsayılanı (0..1): kırpma düzlemleri
+        // konumu değiştirmiyor, ama `setViewport` hepsini birden istiyor.
+        enc.setViewport(MTLViewport {
+            originX: 0.0,
+            originY: f64::from(frame.origin_px()),
+            width: f64::from(viewport_px[0]),
+            height: f64::from(viewport_px[1]),
+            znear: 0.0,
+            zfar: 1.0,
+        });
         let result = self
             .encode_quads(&enc, frame.stripes(), viewport_px)
             .and_then(|()| self.encode_quads(&enc, frame.bg_instances(), viewport_px))
@@ -1467,6 +1493,117 @@ mod tests {
         );
     }
 
+    /// Bir dörtgen bölgenin pikselleri, [`pixel_at`]'in üçlüsüyle.
+    ///
+    /// Ad, tipin karmaşıklığı için değil okunurluk için: iki bekçi de "bu
+    /// bölge hangi rengi taşıyor" diye soruyor ve imzada `Vec<(u8, u8, u8)>`
+    /// çifti o soruyu söylemiyordu.
+    type Band = Vec<(u8, u8, u8)>;
+
+    /// Ötelenmiş bir karede 0. satırın hücresi, ötelendiği yerde boyanmış mı
+    /// ve **eski yeri** clear rengiyle mi kalmış.
+    ///
+    /// İki bekçinin ortak gövdesi: kurulum (8 px hücre, 16 px doku, bir satır
+    /// öteleme) ve iki bölgenin okunması. Kopyalansaydı "üst bölge boş kaldı"
+    /// yarısı birinde unutulabilirdi — ve o yarı olmadan sınama, ötelemeyi
+    /// **yok sayan** bir kodu da geçirir: alt bölgede zaten hücre yok diye
+    /// bakmazdı.
+    ///
+    /// Dönüş `(üst bölge, alt bölge)`, satır satır: iddia hangi bölgenin hangi
+    /// rengi taşıdığı.
+    fn origin_shifted_halves(r: &Renderer, frame: &mut Frame, clear: LinearRgba) -> (Band, Band) {
+        const EDGE: usize = 16;
+        const CELL: usize = 8;
+        // Bir satır öteleme: 0. satırın hücresi y ∈ [0, 8) yerine [8, 16)'ya
+        // düşmeli. `set_origin_rows` piksele `clear`'ın hücre boyuyla
+        // çeviriyor, yani ölçü bu çağrıdan **önce** kurulmuş olmalı.
+        frame.set_origin_rows(1.0);
+        assert_eq!(frame.origin_px(), CELL as f32, "öteleme piksele çevrilmedi");
+        let pixels = render_offscreen(r, EDGE, clear, frame);
+        let band = |y0: usize| {
+            (y0..y0 + CELL)
+                .flat_map(|y| (0..CELL).map(move |x| (x, y)))
+                .map(|(x, y)| pixel_at(&pixels, EDGE, x, y))
+                .collect::<Vec<_>>()
+        };
+        (band(0), band(CELL))
+    }
+
+    #[test]
+    fn content_sticks_to_the_bottom_for_cell_bg() {
+        // **Bu setin CPU→GPU dikişi.** Öteleme `setViewport` ile GPU'da
+        // uygulanıyor, yani iki CPU listesini birbirine karşı ölçen bir sınama
+        // inşa gereği doğru olan bir şeyi sınardı (`discussion.md` → Muhakeme
+        // 2. tur, kabul 4). Sorulan şey boyanan **pikselin** kaydığı.
+        //
+        // Aynı zamanda `setViewport` kanaryası: viewport dokunun altına
+        // taşıyor (origin 8 + boy 16 = 24 > 16) ve Metal'in taşan fragment'i
+        // kırpması şart. Kırpmasaydı ya doğrulama hatası düşerdi ya alt bölge
+        // sarardı; ikisi de burada görünür.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 8));
+        frame.push(bg_cell(0, 0, red));
+
+        // Clear **vurgu**: hücrenin rengiyle ayrık olmak zorunda, yoksa
+        // "hücre kaydı" ile "her yer clear" ayırt edilemez.
+        let (top, bottom) = origin_shifted_halves(&r, &mut frame, ACCENT);
+        assert!(
+            bottom.iter().all(|&p| p == (255, 0, 0)),
+            "0. satırın hücresi bir satır aşağıda boyanmadı: {bottom:02x?}"
+        );
+        assert!(
+            top.iter().all(|&p| p != (255, 0, 0)),
+            "hücre eski satırında da kaldı: {top:02x?}"
+        );
+    }
+
+    #[test]
+    fn content_sticks_to_the_bottom_for_glyphs() {
+        // Kardeşinin `cell` pipeline'ı için ikizi ve **bu setin asıl riski**:
+        // iki pipeline ayrı `setRenderPipelineState` çağrısı ve ayrı shader
+        // çifti, yani birinin ötelenip ötekinin ötelenmemesi temsil edilebilir
+        // bir hâl — üstelik `make hepsi`'yi yeşil bırakan bir hâl. Tek satırlık
+        // `setViewport` ikisini birden kaydırıyor; bu sınama onu koda bağlıyor,
+        // yorum cümlesine değil.
+        //
+        // Glyph ölçüsü atlasın hücresine bağlı **değil**: sorulan şey dörtlünün
+        // konumu ve 8 px hücreyle atlas yuvası esner, bozulmaz.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        // "Önce metriği sor": atlasın anahtarının ölçek yarısı pencereden
+        // gelir, bu sınamanın penceresi yok ve söylenmezse kare
+        // `GpuError::NoAtlas` ile düşer. Dönen ölçü **kullanılmıyor** — dörtlü
+        // 8 px, yani atlas yuvası esner; sorulan şey konum, çözünürlük değil.
+        r.cell_metrics(1.0);
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 8));
+        // Arka plansız `M`: iddia yalnız `cell` pipeline'ına ait olsun.
+        // `cell_bg` listesi boş kaldığı için üst bölgede tek tanık clear.
+        frame.push(glyph_cell(0, 'M', None));
+        assert_eq!(frame.bg_count(), 0, "arka plan iddiaya karışmamalı");
+
+        let (top, bottom) = origin_shifted_halves(&r, &mut frame, BACKGROUND);
+        let clear = {
+            let hex = Theme::BATERI.background;
+            ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+        };
+        // Glyph'in tam baytı aranmıyor (emsal `glyphs_paint_pixels_on_the_gpu`):
+        // sorulan şey "clear'dan farklı bir piksel hangi bölgede".
+        assert!(
+            bottom.iter().any(|&p| p.0.abs_diff(clear.0) > 1
+                || p.1.abs_diff(clear.1) > 1
+                || p.2.abs_diff(clear.2) > 1),
+            "glyph bir satır aşağıda çizilmedi: {bottom:02x?}"
+        );
+        assert!(
+            top.iter().all(|&p| p.0.abs_diff(clear.0) <= 1
+                && p.1.abs_diff(clear.1) <= 1
+                && p.2.abs_diff(clear.2) <= 1),
+            "glyph eski satırında da kaldı: {top:02x?}"
+        );
+    }
+
     #[test]
     fn command_marks_paint_the_gutter_on_the_gpu() {
         // Şeridin GPU tarafı: `Frame::stripes` bir **CPU** listesi ve kardeş
@@ -1785,6 +1922,11 @@ mod tests {
             // piksel sorgulanıyor ve konum zaten `push_settled` ile hedefin
             // kendisi.
             display_offset: 0,
+            // Öteleme `set_origin_rows`'un işi ve bu iki alan onun girdisi;
+            // orijini konu eden sınamalar (`content_sticks_to_the_bottom_*`)
+            // onu doğrudan söylüyor. Dolu ızgara, yani öteleme sıfır.
+            content_rows: 1,
+            rows: 1,
         }
     }
 

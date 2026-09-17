@@ -197,6 +197,43 @@ impl Waker {
     }
 }
 
+/// Çizilen karenin dikey orijini, piksel — **kare yolu yazar, fare yolu
+/// okur**.
+///
+/// Değerin **tek sahibi** [`DisplayLink`]: hesabı `Session::frame` yapıyor
+/// (`bt_core::Cursor::content_rows`, tek hesap) ama ötelemeye çeviren ve
+/// çizime sokan kare yolu, yani okuyan taraf da oradan okumak zorunda —
+/// ikinci bir hesap, "fare bir satır kayıyor" diye görünen bir ayrışma
+/// demekti.
+///
+/// **Atomik değil, `Cell`** ve bu bir kısayol değil ölçülü bir gerçek: link
+/// callback'i ana run loop'a eklendiği için ana thread'de koşuyor
+/// ([`LinkDelegate`] `MainThreadOnly`) ve `point_to_cell`'in çağıranı da
+/// (NSView fare olayı) ana thread'de. İki taraf aynı thread'de, yani yarış
+/// yok. `Arc<AtomicU32>`'ye kaçmak atomik gerekiyormuş gibi yazmak olurdu ve
+/// `make test-yaris`'in "paylaşılan durum" tetiğini gerekçesiz geri
+/// getirirdi (`.tasks/011-tabana-yapisik-icerik/discussion.md` → Karar 4 eki).
+///
+/// `Rc` bu yüzden `Send` değil ve olmamalı: tipin kendisi "ana thread"i
+/// söylüyor.
+///
+/// Okunan değer **son çizilen karenin** orijini. Bayatlık değil tasarım:
+/// tıklama ekrandaki piksele yapılıyor ve o piksel o karede çizildi.
+#[derive(Clone, Default)]
+pub struct Origin(Rc<Cell<f32>>);
+
+impl Origin {
+    /// Çizilen karenin dikey orijini, **fiziksel piksel**.
+    pub fn px(&self) -> f32 {
+        self.0.get()
+    }
+
+    /// Yalnız kare yolu yazar; `pub` değil ve olmamalı.
+    fn set(&self, px: f32) {
+        self.0.set(px);
+    }
+}
+
 /// Kare istemenin açık/kapalı kapısı — **durma politikasının tamamı**.
 ///
 /// `FailureStreak` gibi ayrı bir tip ve aynı sebeple: ObjC'siz, kilitsiz ve
@@ -359,6 +396,13 @@ struct LinkIvars {
     /// oraya **gelen** ölçü gider, saklanan değil — kabul edilmeyen bir
     /// boyut buraya hiç yazılmaz.)
     cell: Cell<CellMetrics>,
+    /// Çizilen karenin dikey orijini; fare yolu bu gövdeyi paylaşıyor.
+    ///
+    /// `Frame::origin_px`'in ikizi değil **yayını**: kare listesi bu crate'in
+    /// içinde (`pub(crate)`) ve `bt-shell`'in onu görmesi için bir sebep yok,
+    /// oysa fare eşlemesi çizilen orijini görmek **zorunda**. İkisini tek
+    /// çağrı yazıyor ([`LinkDelegate::set_origin`]), yani ayrışamazlar.
+    origin: Origin,
     /// **İçerik** karesi: `session.frame()` hasar buldu ve kare çizilmeye
     /// karar verildi. Boşta sıfır kare kapısının operandı bu.
     ///
@@ -591,6 +635,11 @@ define_class!(
             let cursor = iv
                 .session
                 .frame(|cell| frame.push(cell), &mut iv.blocks.borrow_mut());
+            // **Orijin `frame()` döndükten sonra** ve bu sıra zorunlu: doluluk
+            // sayısı sink döngüsü bitmeden bilinmiyor (`Frame::origin_px`).
+            // `push_cursor`'dan **önce** olmak da zorunlu — imlecin
+            // dikdörtgeni ötelemeyi CPU'da alıyor.
+            self.set_origin(&mut frame, cursor);
             // Şeritler hücrelerle **aynı** karede ve aynı `frame()` çağrısından:
             // ayrı bir sorgudan okunsalardı kaydırma karesinde bir kare geride
             // kalırlardı (010 discussion.md → Karar 2). Sink içinde değil
@@ -682,6 +731,33 @@ define_class!(
 );
 
 impl LinkDelegate {
+    /// Bu karenin dikey orijini: doluluk sayısı → satır → piksel.
+    ///
+    /// **İçerik tabana yapışır** kararı burada, `bt-core`'da değil: o taraf
+    /// yalnız kaç satırın dolu olduğunu söylüyor (`Cursor::content_rows`),
+    /// nereye yapışacağı bir yerleşim kararı ve çizenin
+    /// (`CLAUDE.md` → karar burada, boyama orada).
+    ///
+    /// `saturating_sub`: sözleşme `content_rows ≤ rows` (`bt-core`'da
+    /// `debug_assert`) ve doyma sürüm derlemesinde ötelemeyi sıfıra, yani
+    /// bugünkü tavana yapışık yerleşime düşürüyor — sarma ızgarayı ekranın
+    /// dışına atardı.
+    ///
+    /// **İki tüketiciye tek yazma.** Piksel değeri `Frame`'den geri okunuyor,
+    /// yeniden hesaplanmıyor: viewport ile fare eşlemesinin aynı sayıyı
+    /// görmesi bu satırın işi.
+    ///
+    /// **Üretimde hiçbir içerik kırpılmıyor** ve bunu ötelemenin *tanımı*
+    /// veriyor, `setViewport`'un kırpması değil: içerik `0..content_rows`
+    /// aralığında, öteleme `rows - content_rows`, yani en alt dolu satırın
+    /// bittiği yer tam `rows` satır. Keyfi bir öteleme (ya da `content_rows`'u
+    /// büyüten bir kusur) alt satırları dokunun dışına taşırdı ve belirti
+    /// "son satır yok" olurdu.
+    fn set_origin(&self, frame: &mut Frame, cursor: Cursor) {
+        frame.set_origin_rows(f32::from(cursor.rows.saturating_sub(cursor.content_rows)));
+        self.ivars().origin.set(frame.origin_px());
+    }
+
     fn new(mtm: MainThreadMarker, ivars: LinkIvars) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ivars);
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
@@ -770,6 +846,11 @@ impl DisplayLink {
                 frame: RefCell::new(Frame::default()),
                 blocks: RefCell::new(Blocks::default()),
                 cell: Cell::new(cell),
+                // Sıfır: ilk içerik karesine kadar öteleme yok ve o kare
+                // değeri söylüyor. Fare yolu bu arada tavana yapışık
+                // ızgarayı okuyor, yani açılıştaki tek karelik pencerede de
+                // çizilenle aynı şeyi görüyor.
+                origin: Origin::default(),
                 content_frames: Cell::new(0),
                 motion_frames: Cell::new(0),
                 motion: Cell::new(Motion::default()),
@@ -800,6 +881,16 @@ impl DisplayLink {
     /// Başka thread'lerden kare istemenin yolu; `Wake` uygulaması bunu tutar.
     pub fn waker(&self) -> Waker {
         self.waker.clone()
+    }
+
+    /// Çizilen karenin dikey orijinini okuyan uç; fare eşlemesi bunu tutar.
+    ///
+    /// [`Self::waker`] ile aynı örüntü — paylaşılan gövdenin kopyası — ama
+    /// yönü ters: `Waker` dışarıdan **yazılıyor**, bu dışarıdan **okunuyor**.
+    /// Yazma tarafı bilerek dışarı açılmıyor: orijinin tek sahibi kare yolu
+    /// ([`Origin`]).
+    pub fn origin(&self) -> Origin {
+        self.delegate.ivars().origin.clone()
     }
 
     /// Koşu boyunca istenen kare sayısı — çizilen değil, **istenen**.

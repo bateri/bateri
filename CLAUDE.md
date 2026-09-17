@@ -44,6 +44,12 @@ basar, `frame()` o kimlikleri prompt'un OSC 8 çıpasından okuyup blokları
 **animasyonsuz**, işaret anında belirir. İşaret komutun kendi satırında,
 çıktısında **değil**: hangi satırın hangi bloğa ait olduğu ancak çıpası
 görünen satırlar için biliniyor ve bölge boyamak onu tahmine çevirirdi.
+**İçerik pencerenin tabanına yaslanır**: `frame()` kaç satırın dolu olduğunu
+sınırdan verir (`Cursor::content_rows`; alternatif ekranda ızgaranın tamamı),
+`DisplayLink` onu `rows - content_rows` ile ötelemeye çevirir ve `encode_pass`
+tek bir `setViewport` ile iki pipeline'ı birden kaydırır — dört liste ve imleç
+aynı yerden, **animasyonsuz** (kayma sıradaki settedir). Ötelemenin tek sahibi
+kare yolu; fare eşlemesi onu `bt_gpu::Origin` ile **çizilen** değerden okur.
 Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app` paketini
 üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
