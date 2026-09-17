@@ -111,6 +111,11 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   bir hook `psvar=(…)` yazarsa `%9v` boşa genişler ve bütün çıpalar sessizce
   düşer (blok yok, şerit yok — yanlış çizim değil). Çare prompt'taki genişlemeyi
   `psvar`'dan çıkarmak, yani R1.1'in `psvar` kararını yeniden açmak.
+  **012 phase-4 bu borcu büyüttü:** giriş satırının bastırılması da aynı
+  çıpadan türüyor (`suppressed_input` kimliği verir, satırı çıpa bulur), yani
+  `%9v` boşa genişlerse bedel artık yalnız kayıp şerit değil — bastırma hiç
+  koşmaz ve kullanıcı yazdığını **iki yerde** görür (ızgarada + dock'ta).
+  Belirti hâlâ sessiz ve hâlâ yanlış çizim değil, ama artık görünür.
 - **Blok animasyonları.** 010 Karar 5 şeridin belirmesini setten **çıkardı**:
   şerit bugün anında beliriyor. Gerekçe animasyonun zorluğu değil, bedeli —
   `bt-gpu::motion` ikinci bir tüketici kazanır, `Mode::Fade`'in "indirgemenin

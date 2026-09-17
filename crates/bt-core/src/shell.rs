@@ -204,6 +204,15 @@ pub struct DockState {
     /// `region_highlight` — görüntünün renklendirilmiş aralıkları,
     /// [`Highlight::start`]'ın doc'undaki tek uzaya **normalize edilmiş**.
     pub highlights: Vec<Highlight>,
+    /// `PREDISPLAY ++ BUFFER ++ POSTDISPLAY`'in karakter sayısı —
+    /// [`Self::cursor`] ile aynı uzayın boyu.
+    ///
+    /// **Saklanıyor, çünkü zaten sayılmış:** çözücü ofsetleri kırpmak için üç
+    /// uzunluğu da hesaplıyor. Tüketicisi [`ShellLog::suppressed_input`] ve
+    /// oradan `Session::frame` — bastırılan aralığın **alt** ucu bundan
+    /// türüyor. Kare başına yeniden saymak `frame()`'in `Term` kilidi
+    /// öncesine O(n) bir gezinti eklerdi.
+    pub display_chars: usize,
 }
 
 impl Clone for DockState {
@@ -222,6 +231,7 @@ impl Clone for DockState {
         self.postdisplay.clear();
         self.postdisplay.push_str(&source.postdisplay);
         self.cursor = source.cursor;
+        self.display_chars = source.display_chars;
         self.highlights.clear();
         self.highlights.extend_from_slice(&source.highlights);
     }
@@ -237,6 +247,7 @@ impl DockState {
         self.buffer.clear();
         self.postdisplay.clear();
         self.cursor = 0;
+        self.display_chars = 0;
         self.highlights.clear();
     }
 }
@@ -466,6 +477,21 @@ pub(crate) struct ShellLog {
     pub(crate) dock: DockState,
 }
 
+/// Bastırılacak giriş satırının iki ucu; `Copy`.
+///
+/// Aralığın **üstünü** kimlik verir (çıpası o satırda), **altını** imlecin
+/// arkasında kalan metin. İkisi tek kayıtta, çünkü ikisi de aynı yaprak kilit
+/// turundan çıkıyor; ayrı okunsalardı farklı anlara ait olabilirlerdi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SuppressedInput {
+    /// Yazılmakta olan bloğun kimliği; **satırı** [`crate::Session::frame`]
+    /// çıpadan bulur — kabuk hangi satırda olduğunu bilmiyor.
+    pub(crate) block: u32,
+    /// Caret'ten **sonra** gelen karakter sayısı; girişin imleç satırının
+    /// altında kaç satır daha sürdüğü bundan çıkıyor.
+    pub(crate) chars_after_cursor: usize,
+}
+
 impl ShellLog {
     pub(crate) fn new(scrollback: usize) -> Self {
         Self {
@@ -555,6 +581,41 @@ impl ShellLog {
         }
         match self.blocks.last()? {
             (id, Outcome::Pending) => Some(id),
+            (_, Outcome::Finished(_)) => None,
+        }
+    }
+
+    /// Kullanıcının **şu an yazdığı** bloğun kimliği — giriş satırı ızgaradan
+    /// bastırılacaksa `Some`, değilse `None`.
+    ///
+    /// [`crate::Session::frame`] bunu `Term` kilidinden **önce** okuyor
+    /// ([`crate::Theme`] ile aynı örüntü) ve dönen kimlikle çıpa satırını
+    /// buluyor: bastırılacak aralık o satırdan imlecin satırına.
+    ///
+    /// **Üç koşul birlikte ve üçü de zorunlu:**
+    ///
+    /// - Safha `Input` — kullanıcı yazıyor. `Prompt`'ta ZLE henüz satırı
+    ///   almadı, `Running`/`Finished`'da yazdığı şey çoktan ızgaranın kalıcı
+    ///   içeriği oldu.
+    /// - Ayna `Live` — satırı **başka bir yerde** gösterebiliyoruz. `Idle` ve
+    ///   `Unavailable` ayrı ayrı doğru cevaplar: ilkinde ZLE satır
+    ///   düzenlemiyor (`line-finish` geldi), ikincisinde gösteremediğimiz bir
+    ///   satır var ve ızgarada kalması **şart**, yoksa kullanıcı yazdığını
+    ///   hiçbir yerde görmez (R1.2). Kapının bu katı [`DockStatus`]'ün varlık
+    ///   sebebi.
+    /// - Defterin son kaydı hâlâ açık — [`Self::running`]'in ikinci koşulunun
+    ///   aynısı ve aynı gerekçeyle: kimliksiz bir `A`'dan sonra gelen `B`
+    ///   safhayı `Input`'a alır, defterin son kaydı ise bir önceki (bitmiş)
+    ///   blok olur ve bastırma **yanlış** satırdan başlardı.
+    pub(crate) fn suppressed_input(&self) -> Option<SuppressedInput> {
+        if self.state?.phase != ShellPhase::Input || self.dock.status != DockStatus::Live {
+            return None;
+        }
+        match self.blocks.last()? {
+            (block, Outcome::Pending) => Some(SuppressedInput {
+                block,
+                chars_after_cursor: self.dock.display_chars.saturating_sub(self.dock.cursor),
+            }),
             (_, Outcome::Finished(_)) => None,
         }
     }
@@ -1053,6 +1114,7 @@ fn decode_line<'a>(
     line.cursor = predisplay_chars
         .checked_add(cursor_in_buffer)?
         .min(text_chars);
+    line.display_chars = display_chars;
 
     decoded.clear();
     decode_base64(fields.next()?, decoded)?;

@@ -39,6 +39,19 @@ _Requirements: R4.1, R4.2, R4.3_
 promptsuz bir terminal bırakır ve `make hepsi`, `make duman`, `make kur`
 **üçü de yeşil** kalır — prompt yolunu hiçbir kapı görmüyor.
 
+**R4.1 ile R4.2 aynı commit'te iner** (phase-4'ün devir notu). phase-4'ün
+bastırma aralığı **çıpayı taşıyan hücreden** türüyor; sıfır genişlikli `PS1`
+hiçbir hücre yazmadığı için `anchor_close` `PS1`'in sonunda kalırsa kullanıcının
+yazdığı hücreler çıpasız kalır, bastırma **ve** blok şeridi sessizce ölür. R4.2
+(`anchor_close` → `preexec`) tam da bunu kapatıyor; ayrı inerlerse aralarında
+kör bir hâl var ve üç kapı yine yeşil.
+
+**Aralığın alt ucu çıpadan bulunamaz, aritmetikten bulunur.** R4.2 bağlantıyı
+`Input` boyunca açık bıraktığı için ZLE'nin yazdığı **her şey** çıpayı taşır —
+tamamlama listesi dahil. "Son çıpa satırı" ölçütü bu yüzden listeyi de yutar;
+phase-4'ün `SuppressedInput::chars_after_cursor` hesabı yerinde kalır ve alt
+ucun tek kaynağı odur.
+
 ## Kabul
 
 - Kullanıcının prompt'u ızgarada görünmüyor; yerine dock'ta `>` var.
