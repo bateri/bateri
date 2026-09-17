@@ -2754,6 +2754,92 @@ mod tests {
         session.shutdown();
     }
 
+    /// Sarmalayıcının kaynak dizini (`assets/shell/zsh`).
+    fn wrapper_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell/zsh")
+    }
+
+    /// Kullanıcının hiçbir başlangıç dosyasının bulunmadığı bir `HOME`.
+    ///
+    /// Sarmalayıcı kullanıcının dosyalarını **okuyor** (`__bateri_begin`),
+    /// yani gerçek bir ev dizini sınamayı makinede kurulu eklentilere
+    /// bağlardı: çalışan bir sınama başka birinin `.zshrc`'siyle kırmızıya
+    /// düşerdi.
+    fn empty_home(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bateri-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("geçici ev dizini kurulamadı");
+        dir
+    }
+
+    /// Ayna beklenen hâle gelene kadar bekler; tampon çağıranın.
+    ///
+    /// [`wait_frame`] ile aynı örüntü: ölçüt sınamada, zaman aşımı burada.
+    /// Tampon döngü boyunca **aynı**, yani yeniden kullanımı da sınanıyor.
+    fn wait_dock(session: &Session, dock: &mut DockState, ready: impl Fn(&DockState) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            session.dock_state(dock);
+            if ready(dock) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "ayna beklenen hâle gelmedi: {dock:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn the_mirror_follows_a_real_zle_session() {
+        // Betiğin kendi sınamaları (`shell.rs`) kodlayıcıyı ZLE olmadan
+        // koşturuyor; burada sınanan **tesisat**: kanca gerçekten bağlanıyor
+        // mu, gerçek bir satır düzenlemesinde koşuyor mu, bastığı dizi
+        // ızgaranın akışından geçip aynaya varıyor mu.
+        let home = empty_home("dock");
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(("/bin/zsh".into(), vec!["-i".into()]), 40);
+        options
+            .env
+            .insert("HOME".into(), home.display().to_string());
+        options
+            .env
+            .insert("ZDOTDIR".into(), wrapper_dir().display().to_string());
+        let session = Session::spawn(options, wake).unwrap();
+
+        let mut dock = DockState::default();
+
+        // İlk ayna prompt çizilir çizilmez geliyor: `line-pre-redraw` boş
+        // tamponda da koşuyor. Phase-4'ün bastırma kararı buna dayanacak —
+        // gelmeseydi prompt anında dock ölü kalırdı.
+        wait_dock(&session, &mut dock, |dock| {
+            dock.status == DockStatus::Live && dock.buffer.is_empty()
+        });
+
+        // Komut BİLEREK uzun sürüyor: biten satırın ardından gelen yeni
+        // prompt aynayı hemen yeniden açar ve aşağıdaki `Idle` penceresi
+        // ölçülemeyecek kadar dar kalırdı. Sınama uykunun bitmesini
+        // beklemiyor, yalnız pencereyi genişletiyor.
+        let typed = "echo çığır; sleep 3";
+        session.write(typed.as_bytes());
+        wait_dock(&session, &mut dock, |dock| dock.buffer == typed);
+        // İmleç de akıyor ve **karakter** sayıyor: çok baytlı harfler bayt
+        // sayılsaydı caret satırın sonunu aşardı.
+        assert_eq!(
+            dock.cursor,
+            dock.predisplay.chars().count() + typed.chars().count()
+        );
+
+        // Enter: `line-finish` aynayı kapatıyor.
+        session.write(b"\r");
+        wait_dock(&session, &mut dock, |dock| {
+            dock.status == DockStatus::Idle && dock.buffer.is_empty()
+        });
+
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn a_window_without_anchors_is_empty_at_the_prompt() {
         // Aynı pencere, `Input` safhasında: hangi bloğa ait olduğunu söyleyen

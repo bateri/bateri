@@ -37,7 +37,10 @@ sistemin Hareketi Azalt ayarını canlı izler; tek istisna `shell.integration`,
 kabuk çoktan doğduğu için **sonraki oturumda** geçerlidir. Kabuk zsh ise
 `bt-shell` sarmalayıcıyı `ZDOTDIR` ile kurar (betik `.app`'in
 `Contents/Resources/shell`'inden, debug'da depodan) ve kabuğun bastığı OSC 133
-işaretleri `Session::shell_state()`'te birikir; her prompt bir blok kimliği
+işaretleri `Session::shell_state()`'te birikir. Aynı betik her satır çiziminde
+ZLE'nin görüntüsünü (`PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlight`,
+`CURSOR`) OSC 8133 ile aynalıyor ve o `Session::dock_state()`'te duruyor —
+**çizen henüz yok**, dock yüzeyi sonraki phase'in. Her prompt bir blok kimliği
 basar, `frame()` o kimlikleri prompt'un OSC 8 çıpasından okuyup blokları
 **komutun satırı ve rengi** olarak sınırdan verir; `bt-gpu` o işareti
 ızgaranın solunda ayrılan paya `cell_bg` pipeline'ıyla çizer —
