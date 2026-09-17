@@ -51,10 +51,14 @@ tek bir `setViewport` ile iki pipeline'ı birden kaydırır — dört liste ve i
 aynı yerden. Öteleme **yumuşak kayar**: `bt-gpu::motion`'ın ikinci animatörü
 (`Slide`) onu imleçle aynı stil ve aynı `settled()` kapısı altında sürer, imlecin
 hedefi de **ekran satırıdır** (`row + origin`), yani Enter'da imleç dipteki
-satırında durur ve geçmiş arkasından yukarı akar. Piksel aygıt ızgarasına
+satırında durur ve geçmiş arkasından yukarı akar. Kayma **yalnız içeriğin
+kendi büyümesi** içindir: tekerlek, geometri (pencere/font/punto) ve alternatif
+ekran geçişi ötelemeyi **snap**'ler, yoksa vim'e girmek bütün ızgarayı
+pencerenin altından süzerdi. Piksel aygıt ızgarasına
 yuvarlanır (`Frame::set_origin_rows`): kaymanın durduğu kare ekranda kalıcı ve
 kesirli bir piksel bütün metni bulanıklaştırırdı. Ötelemenin tek sahibi
-kare yolu; fare eşlemesi onu `bt_gpu::Origin` ile **çizilen** değerden okur.
+kare yolu; fare eşlemesi onu `bt_gpu::Origin` ile **encode edilen** değerden
+okur.
 Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app` paketini
 üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe

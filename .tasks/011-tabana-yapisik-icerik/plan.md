@@ -127,4 +127,4 @@ encode_pass: setViewport(originY)  ──► cell_bg + cell, ikisi birden   (R1.
 | phase-0 | ✅ |
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| kapı | |
+| kapı | ✅ |

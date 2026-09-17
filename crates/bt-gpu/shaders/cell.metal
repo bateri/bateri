@@ -94,7 +94,13 @@ fragment float4 cell_fragment(Out in [[stage_in]],
     // fragment dikdörtgenin içinde mi" diye soruyor — ve bu soru PİKSEL
     // başına sorulduğu için blok iki hücre arasındayken (008) hücrenin yarısı
     // ezilir, yarısı kendi rengiyle kalır. `[[position]]` sol üst başlangıçlı
-    // ve instance pozisyonlarıyla aynı uzayda.
+    // ama instance pozisyonlarıyla **aynı uzayda değil**: 011'den beri
+    // `setViewport` ızgarayı içerik tabana yapışsın diye öteliyor, yani
+    // instance uzayı dönüşümden ÖNCE, `[[position]]` SONRA ve ikisi tam
+    // öteleme kadar ayrı. İmleç dikdörtgeni bu yüzden asimetrik doldurulur
+    // (`Frame::push_cursor`: instance `pos - origin`, dikdörtgen ham `pos`) ve
+    // asimetriyi "düzelten" bir sadeleştirme imlecin altındaki metnin rengini
+    // başka bir satıra taşır.
     //
     // Sınır yarı açık: [x0, x1) — komşu hücrenin ilk sütunu bu bloğa ait
     // değil. `<=` bugün AYNI sonucu verir ve bunu sınayan bir bekçi yok:

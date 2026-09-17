@@ -114,6 +114,21 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7_
   alt satırın bir kısmı o karelerde pencerenin altında oluyor. "Yeni satır
   yerinde belirsin, ötekiler kaysın" bu mimaride temsil edilebilir bir şey
   değil; tespit `set_origin`'in doc'una yazıldı.
+- **Set kapısı bir davranış kusuru yakaladı: alternatif ekran geçişi
+  kayıyordu.** vim/less/htop'a girmek doluluğu bir hamlede `rows`'a fırlatıyor,
+  yani öteleme neredeyse bütün ızgara kadar sıçrıyor ve animasyon onu içeriğin
+  kendi büyümesi sanıyordu — vim'in arayüzü pencerenin altından süzülerek
+  giriyor, çıkışta kabuk aşağı iniyordu. **Göz kontrolünde gözden kaçtı**
+  (listede "vim gir/çık" maddesi vardı ve geçti sayıldı); yakalayan şey
+  `/code-review` ile denetimin iki merceği oldu, üçü birbirinden bağımsız aynı
+  çareyi önerdi. Ders, kapının phase'den sonra koşmasının değerine dair: göz
+  kontrolü "çalışıyor mu" diye bakıyor, kapı "doğru sebeple mi" diye.
+  Çare `Cursor::alt_screen` + `Motion::sync`'in üçüncü snap tetiği; parametre
+  `geometry`'den `relocated`'a genişledi, çünkü ikisi de "ızgara kendi büyümesi
+  dışında bir sebeple oynadı" demek ve ayrı parametre iki `match` guard'ına da
+  ayrı ayrı girmeyi gerektirirdi (clippy'nin argüman sınırı da sekizinci
+  parametreyi reddederdi). Bekçi
+  `switching_to_the_alternate_screen_snaps_the_origin`.
 - **Bir sınama kendi varsayımımı çürüttü.** Hareketi Azalt bekçisinin ilk hâli
   Enter'ın imleci beliritmesini bekliyordu; oysa R2.1'in tamamı tam olarak
   bunun **olmaması**: Enter'da imlecin ekran satırı hiç değişmiyor, yani
@@ -180,5 +195,11 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7_
 - [x] Yayın etkisi yazıldı ("ölçüm bekliyor" satırı dahil)
 - [x] Göz kontrolü (kullanıcı, gerçek pencere): Enter, `clear`, vim giriş/çıkış,
       tekerlek, kayma ortasında tıklama, `cursor_motion = "snap"`, Hareketi
-      Azalt — yedisi de beklendiği gibi; tasarımı değiştiren bulgu yok
-      (010'un aksine)
+      Azalt — yedisi de geçti sayıldı, ama **vim geçişindeki kayma gözden
+      kaçtı** ve set kapısı yakaladı (bkz. Uygulama Notları)
+- [~] `Slide`/`State` ikizliği sadeleştirilmedi (`/code-review` bulgusu,
+      **waive**): `State`'in `elapsed`'i ve `since_move`'u iki eksen arasında
+      **paylaşılıyor**, yani `[Slide; 2]` onları ikiler ya da üçüncü bir şekil
+      ister; fiziğin kendisi zaten tek kopya (`ease_axis`/`spring_axis`/
+      `axis_settled`) ve tekrarlanan şey kabuk. Kalite kalemi, kusur değil —
+      `/simplify`'ın şeridi, kullanıcı isterse

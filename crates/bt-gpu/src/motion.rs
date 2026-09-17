@@ -283,7 +283,12 @@ impl Motion {
     /// - **ilk kare** — `state` yok,
     /// - **görünmezken açılan imleç** — görünmezlik `state`'i boşalttı,
     /// - **geçmişte kaydırma** — ofset oynadı,
-    /// - **geometri** (pencere, font, zoom) — çağıran `geometry` diyor.
+    /// - **ızgaranın yer değiştirmesi** — çağıran `relocated` diyor: geometri
+    ///   (pencere, font, zoom) ya da alternatif ekran geçişi. İkisi tek
+    ///   parametrede, çünkü ayrımları burada bir fark yaratmıyor — ikisi de
+    ///   "ızgara kendi büyümesi dışında bir sebeple oynadı" demek — ve ayrı
+    ///   parametre olsalardı aşağıdaki iki guard'a da ayrı ayrı girmeleri
+    ///   gerekirdi.
     ///
     /// Ortak gerekçe: bunların hiçbirinde imleç hareket etmedi, **altındaki
     /// ızgara** hareket etti. Animasyon uydurmak imleci olmadığı bir yerden
@@ -324,15 +329,15 @@ impl Motion {
         origin_rows: u16,
         visible: bool,
         offset: i32,
-        geometry: bool,
+        relocated: bool,
     ) {
         let scrolled = self.offset != Some(offset);
         self.offset = Some(offset);
         // Ötelemenin snap tetiği imlecinkinin **alt kümesi değil ikizi**:
-        // tekerlek (R2.6) ve geometri (pencere, font, punto) ikisini de
-        // snap'liyor. `docs/AYARLAR.md`'nin "altındaki ızgaranın hareketi
-        // kaymaz" cümlesi tam olarak bu iki tetik.
-        self.sync_origin(f32::from(origin_rows), scrolled || geometry);
+        // tekerlek (R2.6), geometri (pencere, font, punto) ve alternatif ekran
+        // geçişi üçünü de snap'liyor. `docs/AYARLAR.md`'nin "Izgaranın başka
+        // sebeple yer değiştirmesi kaymaz" maddesi tam olarak bu üç tetik.
+        self.sync_origin(f32::from(origin_rows), scrolled || relocated);
         if !visible {
             self.state = None;
             return;
@@ -343,7 +348,7 @@ impl Motion {
         let animated = mode != Mode::Snap;
         let target = [f32::from(col), f32::from(row.saturating_add(origin_rows))];
         match &mut self.state {
-            Some(state) if animated && !scrolled && !geometry => {
+            Some(state) if animated && !scrolled && !relocated => {
                 if state.target != target {
                     // **Belirme duraksamadan sonra yeniden başlar, her
                     // karede değil** (`/code-review` bulgusu). Kayan iki
@@ -394,9 +399,12 @@ impl Motion {
     /// Ötelemenin hedefi: [`Motion::sync`]'in tek eksenli yarısı.
     ///
     /// Snap hâlleri imlecinkilerle **aynı sınıf** ve aynı gerekçe: ilk kare,
-    /// tekerlek ve geometri. Üçünde de içerik kendi büyümesiyle yükselmedi —
-    /// ızgara başka bir sebeple yer değiştirdi ve animasyon uydurmak onu
-    /// gelmediği bir yerden geliyormuş gibi gösterirdi.
+    /// tekerlek, geometri ve alternatif ekran geçişi. Dördünde de içerik kendi
+    /// büyümesiyle yükselmedi — ızgara başka bir sebeple yer değiştirdi ve
+    /// animasyon uydurmak onu gelmediği bir yerden geliyormuş gibi gösterirdi.
+    /// Sonuncusu en görünürü: alternatif ekrana girmek doluluğu bir hamlede
+    /// `rows`'a fırlatıyor, yani snap'lenmezse vim'in arayüzü pencerenin
+    /// altından süzülerek girer ve çıkışta kabuk aşağı inerdi.
     ///
     /// **Aynı hedefe yeniden hedeflemek no-op** ([`Motion::sync`] ile aynı
     /// şart): içeriği büyütmeyen kareler (renk değişimi, satır içi yazı)
@@ -1571,11 +1579,38 @@ mod tests {
     }
 
     #[test]
+    fn switching_to_the_alternate_screen_snaps_the_origin() {
+        // Alternatif ekrana girmek doluluğu bir hamlede `rows`'a fırlatıyor
+        // (`bt_core::Cursor::alt_screen`), yani öteleme neredeyse bütün ızgara
+        // kadar sıçrıyor. Snap'lenmezse vim'in arayüzü pencerenin altından
+        // süzülerek girer, çıkışta kabuk aşağı inerdi — kayma **dipten eklenen
+        // satırlar** için, ekranın sahibinin değişmesi o sınıfa girmiyor.
+        // Çağıran iki tetiği tek parametrede veriyor (`relocated`).
+        let mut motion = after_enter();
+        run_to_rest(&mut motion, TICK);
+
+        // Girişte: doluluk `rows`'a fırladı, öteleme 0'a düştü.
+        motion.sync(0, 0, 0, true, 0, true);
+        assert!(motion.settled(), "alternatif ekrana giriş kayma başlattı");
+        assert_eq!(motion.origin(), 0.0);
+
+        // Çıkışta: kabuk geri geldi, öteleme tabana döndü.
+        motion.sync(0, 3, 26, true, 0, true);
+        assert!(motion.settled(), "alternatif ekrandan çıkış kayma başlattı");
+        assert_eq!(motion.origin(), 26.0);
+
+        // Ve tetik geçtikten sonra içeriğin kendi büyümesi yine kayıyor:
+        // snap'i doğuran şey mesafe değil, ızgaranın başka sebeple oynaması.
+        motion.sync(0, 3, 25, true, 0, false);
+        assert!(!motion.origin_settled(), "içerik büyümesi snap'lendi");
+    }
+
+    #[test]
     fn scrolling_and_geometry_snap_the_origin() {
-        // R2.6 ve `docs/AYARLAR.md`'nin "altındaki ızgaranın hareketi kaymaz"
-        // cümlesi: tekerlek parmağı takip eder (008 Karar 5), pencere/font/
-        // punto değişimi de ızgarayı animasyonsuz taşır. İkisinde de içerik
-        // kendi büyümesiyle yükselmedi.
+        // R2.6 ve `docs/AYARLAR.md`'nin "Izgaranın başka sebeple yer
+        // değiştirmesi kaymaz" maddesi: tekerlek parmağı takip eder (008
+        // Karar 5), pencere/font/punto değişimi de ızgarayı animasyonsuz
+        // taşır. İkisinde de içerik kendi büyümesiyle yükselmedi.
         let mut motion = after_enter();
         run_to_rest(&mut motion, TICK);
 

@@ -400,9 +400,14 @@ reduce_motion = "system"
   tabanına yaslar, yani yeni bir satır geldiğinde geçmiş yukarı kayar ve imleç
   dipteki satırında durur. Kayan şey bütün ızgaradır, imleç değil.
 - **Izgaranın başka sebeple yer değiştirmesi kaymaz:** geçmişte kaydırmak
-  (tekerlek), pencereyi boyutlandırmak, fontu ya da puntoyu değiştirmek ve
-  imleci gizleyip geri açan bir program (vim, less) her şeyi animasyonsuz
-  yerine koyar — orada hareket eden şey içerik değil, pencerenin kendisidir.
+  (tekerlek), pencereyi boyutlandırmak, fontu ya da puntoyu değiştirmek ve tam
+  ekran bir uygulamaya girip çıkmak (vim, less, htop) her şeyi animasyonsuz
+  yerine koyar. Ortak sebep: bunların hiçbirinde içerik kendi büyümesiyle
+  yükselmedi, ızgara başka bir sebeple yer değiştirdi.
+- **`clear` bunun istisnası:** dolu bir ekranı temizlemek prompt'u yukarıdan
+  aşağıya kaydırır. Doluluğun bir hamlede daralması ile satır satır daralması
+  bugün ayırt edilmiyor ve ayırmanın ölçülmüş bir eşiği yok; o ölçülene kadar
+  `clear` kayan tarafta kalıyor.
 - Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa `"snap"`
   onu hedefinde bitirir, öteki iki stil kaymayı bulunduğu yerden devralır:
   imleç hiçbir stil değişiminde ışınlanmaz.

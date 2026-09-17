@@ -929,7 +929,9 @@ struct Counters {
     glyphs: usize,
     /// Son karede çizilen alt çizgi / üstü çizili.
     rules: usize,
-    /// Yerleşmemiş animasyon yüzünden çizilen kare.
+    /// Yerleşmemiş **imleç** animasyonu yüzünden çizilen kare — `slide`'ın
+    /// ikizi değil tamamlayıcısı: ötekini yalnız öteleme, bunu yalnız imleç
+    /// artırıyor ve bir karede ikisi birden artabilir.
     ///
     /// `content`'in kardeşi ve kapıda **ters yönde**: `content`'in bir üst
     /// sınırı var, bunun bir **alt** sınırı (`> 0`). Duman reçetesi bir imleç

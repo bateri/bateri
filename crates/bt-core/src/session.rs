@@ -255,6 +255,19 @@ pub struct Cursor {
     /// kopyası onu yazmış olurdu ve öteleme bir kare boyunca yanlış ızgara
     /// yüksekliğinden hesaplanırdı.
     pub rows: u16,
+    /// Bu kare alternatif ekrandan mı geliyor (vim, htop, less, man).
+    ///
+    /// [`Cursor::content_rows`]'tan **türetilemez**: alternatif ekranda değer
+    /// `rows`'a eşit, ama ana ekranda da dolu bir pencere aynı sayıyı verir ve
+    /// ikisi ayırt edilemez.
+    ///
+    /// Tüketicisi ötelemenin animasyonu: geçiş **snap**'lemeli. Alternatif
+    /// ekrana girmek doluluğu bir hamlede `rows`'a fırlatıyor, yani öteleme
+    /// neredeyse bütün ızgara kadar sıçrıyor; animasyon onu içeriğin kendi
+    /// büyümesi sanır ve vim'in arayüzü pencerenin altından süzülerek girerdi
+    /// (çıkışta da kabuk aşağı inerdi). Kayma **dipten eklenen satırlar**
+    /// içindir; ekranın sahibinin değişmesi o sınıfa girmiyor.
+    pub alt_screen: bool,
 }
 
 /// Bir komut bloğunun karedeki izi: **komutun satırı** ve o komutun rengi.
@@ -477,29 +490,28 @@ impl DirtyFlag {
 ///
 /// **Hareket saf yatay ve bu bir sözleşme** (011 phase-0). Eskiden `\033[H`
 /// idi, yani saf **dikey**: imleci (satır 1, sütun 0)'dan (0, 0)'a alıyordu.
-/// İçerik tabana yapıştıktan sonra o hedef hiçbir ekran hareketi üretmiyor —
-/// ofset `max(çizilen en büyük satır, imleç satırı)`'dan doğduğu için imleci
-/// yukarı taşımak ofseti aynı miktarda aşağı kaydırıyor ve imlecin **ekran**
-/// satırı değişmeden kalıyor. Kapı o hâlde kod doğruyken kırmızı düşerdi.
-/// Sütunu **da** oynatan bir CUP (`\033[1;4H`) de çare değil: satırı
-/// değiştirdiği an `content_rows` oynuyor, ofsetin kimliği değişiyor ve
-/// [`crate::Cursor::display_offset`]'in kuralı gereği hareket **snap**'e
-/// düşüyor — `Motion::sync` snap'i eksen başına değil konumun tamamına
-/// uyguluyor, yani sütun bileşeni de ölüyor. Satır sabit kalmak **zorunda**;
-/// değiştiren bir hedef jetonu sessizce sıfırlar.
+/// İçerik tabana yapıştıktan sonra o hedef **`hareket=`'i sıfırlıyor**: ofset
+/// `max(çizilen en büyük satır, imleç satırı)`'dan doğduğu için imleci yukarı
+/// taşımak ofseti aynı miktarda aşağı kaydırıyor ve imlecin **ekran** satırı
+/// değişmeden kalıyor — `Motion::sync`'in hedefi tam olarak o satır. Ekran
+/// büsbütün hareketsiz **değil** (doluluk daraldığı için öteleme bir satır
+/// kayar, `kayma=`), ama kapının gereklilik saydığı sayaç imlecinki ve o 0'a
+/// düşerdi. Satır sabit kalmak **zorunda**; değiştiren bir hedef jetonu
+/// sessizce sıfırlar.
 ///
 /// **Mesafe de sözleşmenin parçası: tam bir hücre.** Eski `\033[H` bir satır
 /// taşıyordu; yatay karşılığı bir **sütun** olmak zorunda, çünkü yay uzak
 /// sıçramayı daha uzun uçuruyor ve yerleşme süresi `sessiz=` jetonunun
-/// kuyruğundan yiyor. Ölçüldü (011 phase-0): `\033[4G` (üç sütun) `hareket`'i
-/// 27'den 32'ye, `sessiz`i ~1742 ms'den 1706 ms'ye taşıdı ve `QUIET_FLOOR`'un
-/// türetme kuralını ("en düşük sağlıklı gözlemin **en çok yarısı**",
-/// `docs/OLCUMLER.md` → Boşta kare) 870 > 853 ile ihlal etti — kapı o koşuda
-/// hâlâ yeşildi, yani kusur jetonun arkasında saklanıyordu. Sütunu büyüten
-/// biri `QUIET_FLOOR`'u yeniden türetmek zorunda.
+/// kuyruğundan yiyor. Üç sütunla (`\033[4G`) ölçüldüğünde taban
+/// `QUIET_FLOOR`'un **kendi türetme kuralını** ihlal eder hâle geliyordu ("en
+/// düşük sağlıklı gözlemin en çok yarısı") — kapı o koşuda hâlâ yeşildi, yani
+/// kusur jetonun arkasında saklanıyordu. Sayıların ve türetmenin sahibi
+/// `docs/OLCUMLER.md` → Boşta kare; mesafeyi büyüten biri `QUIET_FLOOR`'u
+/// oradan yeniden türetmek zorunda ve reçetenin mesafesi o bloğun **dördüncü**
+/// bağlı girdisidir.
 ///
 /// **Aradaki uyku cömert (1 s) ve bu bir pay değil, kapının şartı.** Açılış
-/// süresi (`acilis=`) ölçülmedi; `\033[H` ilk içerik karesinden **önce**
+/// süresi (`acilis=`) ölçülmedi; `\033[2G` ilk içerik karesinden **önce**
 /// işlenirse imleç zaten hedefte doğar, hareket hiç başlamaz ve `hareket > 0`
 /// kod doğruyken kırmızı düşer. Uykuyu kısaltmak bu yarışı geri getirir.
 /// Üç saniyelik koşuda 1 s uyku + yerleşme `sessiz=`'e rahat bir kuyruk
@@ -1545,6 +1557,7 @@ impl Session {
                 drawn_rows.max(cursor_screen_row.saturating_add(1))
             },
             rows: grid_rows,
+            alt_screen,
         };
         debug_assert!(
             (1..=grid_rows).contains(&cursor.content_rows),

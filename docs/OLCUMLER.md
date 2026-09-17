@@ -80,12 +80,16 @@ körleştirirken burada duyarlılığı **artırıyor**: yakalanan en yavaş sı
 periyodu ≈ tabanın kendisi, yani ortadan seçilen bir sayı kapıyı boşuna
 kısıtlar.
 
-**Üç sayı tek bloktan okunur ve birlikte oynar:** `BT_RUN_SECONDS`'ın 3'ü,
-`bt_core::smoke_shell`'in 1 saniyelik uykusu ve `QUIET_FLOOR`. Kuyruk yapısal
-olarak `koşu süresi − (uyku + yerleşme)`; yerleşme ~0,25 sn olduğu için 3
-saniyelik koşuda ~1,75 sn. Süreyi 2'ye indiren ya da uykuyu uzatan biri tabanı
-da yeniden türetmek zorunda, yoksa kapı kod doğruyken düşer. Üçü üç dosyaya
-dağılırsa biri oynadığında kapı sessizce kırılganlaşır.
+**Dört sayı tek bloktan okunur ve birlikte oynar:** `BT_RUN_SECONDS`'ın 3'ü,
+`bt_core::smoke_shell`'in 1 saniyelik uykusu, aynı reçetenin **imleç sıçrama
+mesafesi** (bugün bir sütun, `\033[2G`) ve `QUIET_FLOOR`. Kuyruk yapısal olarak
+`koşu süresi − (uyku + yerleşme)`; yerleşme ~0,25 sn olduğu için 3 saniyelik
+koşuda ~1,75 sn. Süreyi 2'ye indiren, uykuyu uzatan **ya da mesafeyi büyüten**
+biri tabanı da yeniden türetmek zorunda, yoksa kapı kod doğruyken düşer.
+Dördüncüsü 011 phase-0'da keşfedildi ve en sinsisi: yay uzak sıçramayı daha
+uzun uçuruyor, yerleşme uzuyor ve kuyruktan yiyor — üç sütunla ölçülen koşuda
+kapı **hâlâ yeşildi**, yani ihlal jetonun arkasında saklanıyordu. Dördü dört
+dosyaya dağılırsa biri oynadığında kapı sessizce kırılganlaşır.
 
 Kapı debug'a bağlıdır (gerekçesi `IDLE_FRAME_LIMIT`'in doc'unda), ama release
 paketi de aynı sınırlara tabi olduğu için onun dağılımı da ölçülür: sayılar
