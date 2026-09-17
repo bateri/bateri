@@ -50,10 +50,11 @@ bulunamaz.
 | 008 | hareket altyapısı + imleç animasyonu | Metalterm'i ekranda tanıtan üç şeyden biri (renk, imleç, yüzey) ve shell entegrasyonuna **bağlı değil**. İlk tüketici imleç; boşta kare kapısının yavaş animasyon borcu da bu setin içinde kapanıyor. Set açıldı → `.tasks/008-hareket-ve-imlec/context.md`. *(Sonradan: borç phase-6'da **ölçüyle** kapandı — `sessiz ≥ QUIET_FLOOR` kapısı yavaş sızıntıyı görüyor, dağılımlar `docs/OLCUMLER.md` → `## Boşta kare`. **Kapanmayan yarısı:** kapı sızıntıyı ancak periyodu tabandan kısaysa görüyor, yani hareket saatini atlayıp saniyede bir kare isteyen bir kodu hiçbir sayı tutmuyor — onu yapısal kural (`bt-gpu::link` modül başlığı: zamana bağlı kare talebinin tek yolu hareket saatidir) ve `/audit` tutuyor.)* Yumuşak kaydırma ve çıktı gelince tamponun kayması aynı altyapının ikinci tüketicisi; sete sığmazsa hemen ardından |
 | 009 | shell entegrasyonu (zsh) + OSC 133 komut durumu | Kullanıcının rc dosyasına **asla** dokunulmaz: zsh `ZDOTDIR` sarmalayıcısı; bash `--rcfile` ve fish `vendor_conf.d` sonraki sette. OSC 133 alacritty'de **yok** — `vte` onu `Handler`'a hiç vermeden düşürüyor, yani `bt-core` baytı `Pty`'yi saran bir dinleyiciden görüyor. **Sıra 2026-09-16'da öne alındı** (kullanıcı kararı: Input Dock'a hızlı varmak). Set açıldı → `.tasks/009-shell-entegrasyonu/context.md` |
 | 010 | komut blokları | OSC 133 işaretlerinden okunur; `frame()` sınırına kanca ister; blok şeridi 008'in altyapısıyla gelir. **Kapandı** → `.tasks/010-komut-bloklari/`. *(Sonradan: "(+ blok animasyonları)" bu setten **çıktı** — Karar 5, aşağıdaki borç listesinde.)* |
-| 011 | Input Dock (+ yazma animasyonları) + **tabana yapışık içerik** | **Kullanıcı kararı (2026-09-17):** içerik tabandan tavana doğru büyümeli — ekran dolmadan önce de tabana yapışık dursun, yukarıda birikmesin. Dock'la aynı fikrin parçası: yazılan yer altta sabit, geçmiş üstünde yukarı akıyor, ve ekran dolmadan da dolduktan sonra da aynı görünüyor (bugün ikisi iki ayrı his). **010'un açık kalemini bu kapatıyor:** koşan bloğun şeridi "prompt'tan pencerenin dibine" uzanıyor ve boş ekranda uzun bir bar oluyor; içerik tabana yapışınca aralık kendiliğinden kısalıyor, yani şerit ayrıca yamanmadı. **Bedeli üç kalem:** (a) her yeni satır bütün ekranı iteceği için içerik kısayken kirli satır takibi devre dışı kalıyor, ekran dolana kadar her satır tam kare; (b) alternatif ekran dışarıda kalmalı (vim/htop ızgaranın tamamını sahipleniyor); (c) dikey ofset çizim orijini, fare eşlemesi, seçim ve imleç için **tek** yapıdan okunmalı — 010 Karar 3'ün sol pay için çözdüğü problemin aynısı, üç kopya ayrışır. **Zincirin en ucu, kısayolu yok.** Pencere altında sabit ayrı satır editörü; zsh ZLE kancalarına, OSC 133'e ve komut bloklarına birden oturuyor. Ayrıca yazmayı devralan uygulamaları (Claude, Codex, REPL) davranıştan tespit edip alanı geri vermesi gerekiyor — bu, blokların çalışıyor olmasını varsayar. Tuş vuruşu ve silme animasyonları (`keypress`, `delete_mode`) burada: "bu harfi kullanıcı mı yazdı?" sorusunun kesin cevabı dock'ta, ızgarada yalnız tahmin |
-| 012 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
-| 013 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **beş set** boyunca bozuk görünür — bilerek |
-| 014 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
+| 011 | **tabana yapışık içerik** + yumuşak kayma | **Kullanıcı kararı (2026-09-17):** içerik tabandan tavana doğru büyümeli — ekran dolmadan önce de tabana yapışık dursun, yukarıda birikmesin. Bugün dolmamış ve dolmuş ekran **iki ayrı his**; bu set ikisini tek hisse indiriyor ve yeni satır geldiğinde kayma **animasyonlu** oluyor. **Saf yerleşim işi:** kabuk betiğine, OSC 133'e ve 010'a hiç dokunmuyor. **Bedeli üç kalem:** (a) alternatif ekran dışarıda kalmalı (vim/htop ızgaranın tamamını sahipleniyor); (b) dikey ofsetin **tek sahibi** olmalı — çizim orijini, fare eşlemesi ve imleç aynı değeri okur, üç kopya ayrışır; (c) kayma `bt-gpu::motion`'ın **ikinci tüketicisi**, yani durma koşulu ve Hareketi Azalt indirgemesi onun da sorusu. Set açıldı → `.tasks/011-tabana-yapisik-icerik/context.md`. *(Kapsam iki turda daraldı: Input Dock ve prompt'un devri **012**'ye ayrıldı — gerekçe o setin kaydında.)* |
+| 012 | Input Dock + prompt'un devri (+ yazma animasyonları) | **Zincirin en ucu, kısayolu yok.** Pencere altında sabit ayrı satır editörü; zsh ZLE kancalarına, OSC 133'e ve komut bloklarına birden oturuyor. Tek tutarlı iş, çünkü dördü aynı cümlenin parçası: prompt'u kabuk değil terminal çizer (PS1/RPS1 sıfır görünür genişlik), `>` **o zaman** çizilebilir (bugünkü `Frame`'de temsil edilemiyor — pay glyph almıyor, `GlyphInstance`'ın boyu kare başına tek uniform), blok çıpası komut metnine taşınır (`anchor_close` → `preexec`; alacritty kaynağında doğrulandı, kimlik zaten `bt_block=` ile akışta) ve dock **ayna** olur — tuşlar yine PTY'ye gider, ZLE `BUFFER`'ı geri bildirir, yani Tab/geçmiş/Ctrl-R ZLE'de kalır. Tuş vuruşu ve silme animasyonları (`keypress`, `delete_mode`) burada: "bu harfi kullanıcı mı yazdı?" sorusunun kesin cevabı dock'ta, ızgarada yalnız tahmin. **Ödenmemiş bedeli kayıtlı:** aynanın görsel dikişi — ZLE'nin `BUFFER` olmayan çıktısı (tamamlama listesi, `menu-select`, `bck-i-search`, `zle -M`) aynada yok, ızgaraya düşüyor; ve kullanıcının p10k/starship prompt'u **çizilmez**, geri dönüş bugün hep-ya-hiç (`shell.integration = "off"`). Hazırlığı 011'in ikinci turunda yapıldı → `.tasks/011-tabana-yapisik-icerik/discussion.md` (Karar 8, 10, 12 ve `## Muhakeme — 2. tur`). |
+| 013 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
+| 014 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **beş set** boyunca bozuk görünür — bilerek |
+| 015 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
 animasyonu), Sparkle ile güncelleme.
@@ -80,6 +81,19 @@ animasyonu), Sparkle ile güncelleme.
 > sırasıyla 012, 013, 014'e ertelendi. Gerekçeleri değişmedi — yalnız sıraları.
 > Bu tarihten önceki belgelerde (ör. 008'in dosyaları) eski numaralar geçer ve
 > düzeltilmedi; tarihli kayıt böyle okunur.
+>
+> **Üçüncü kayma (2026-09-17).** 011 açıldıktan sonra **kapsamı** daraldı, sırası
+> değil: Input Dock ve prompt'un devri 011'den çıkıp kendi setine (**012**)
+> ayrıldı, materyal yüzey / emoji-geniş-kutu / sekme-bölme sırasıyla **013, 014,
+> 015**'e kaydı. Gerekçe iki turluk panelden çıktı ve setin kaydında duruyor
+> (`.tasks/011-tabana-yapisik-icerik/discussion.md` → Karar 8 ve Karar 2 eki):
+> `>` bugünkü `Frame`'de temsil edilemiyor, yani prompt devralınıp yerine bir
+> şey konamıyor; ve dock'un gerçek karşılığı (ayna) üç katmanda yeni tesisat
+> istiyor. Prompt'un devri, `>`, çıpanın taşınması ve dock **birbirine kilitli**
+> olduğu için dördü tek sete gitti. Bedeli açık: Input Dock bir set daha
+> gecikiyor. Karşılığı, 011'in kabuk betiğine ve 010'a hiç dokunmadan inmesi.
+> **Slug da değişti** (`011-input-dock` → `011-tabana-yapisik-icerik`); numara
+> yeniden kullanılmıyor, `input-dock` adı 012'ye kalıyor.
 
 ## Sete bağlanmamış borçlar
 
@@ -105,6 +119,10 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   kapının koruduğu şey bu yoldan tehdit altında değil. Yamandığı yer belli
   değil: hareketin ikinci tüketicisi (yumuşak kaydırma, 008'in artığı) geldiğinde
   aynı sete girmesi doğal olur.
+  *(2026-09-17: o ikinci tüketici **011** oldu — içeriğin origin'i `Motion`'ın
+  içine giriyor. Şeridin belirmesi 011'e **alınmadı**: set bilerek saf yerleşim
+  işi tutuldu ve şerit 012'de prompt işaretiyle birlikte zaten elden geçecek.
+  Yani bu borcun doğal evi artık 012.)*
 - **Hareket karesi ucuz değil.** 008 Karar 4 hareket karesinde grid'i yeniden
   taramayı önlüyor (`Frame::move_cursor` listeleri koruyor) ama encode yolu
   korunan listeyi yine de **baştan kuruyor**: `AtlasTexture::prepare` her
@@ -119,6 +137,11 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   harmanlamaya açıldı (`Blend::Opaque` kalktı), yani opak arka plan dörtgenleri
   de harmanlama biriminden geçiyor; alternatif imleci ayrı bir çağrıda
   çizmek.
+  *(2026-09-17: 011'in kayma animasyonu bu borcu **büyütüyor** — ekran dolana
+  kadar her yeni satır bir kayma kuyruğu doğuruyor ve kuyruğun her karesi bu
+  bedeli yeniden ödüyor. Sayısı 011'in yeni `kayma=` jetonunda görünecek.
+  Borç yine de 011'e alınmadı: çaresi bir önbellek ve **ölçülmemiş bir kazanç
+  için önbellek eklenmiyor** — önce `/measure`.)*
 - **Duman kapısı hiç görünmemiş pencerede yanlış tanı veriyor.** Pencere ön
   plana gelmeden açılan bir koşuda (ajanın kabuğu, `cargo run` arka planda)
   display link callback vermiyor: `advance` bir daha koşmuyor, hareket 1

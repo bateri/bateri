@@ -103,11 +103,17 @@ tarıyor (`session.rs:1123`, `Term::damage()` bilinçli reddedilmiş). Ofset
 zaten çiziliyor. Tek risk kaymanın animasyonlu yapılmasıdır — o zaman durma
 koşulu ve `reduce_motion` indirgemesi gerekir.
 
-## Setin taşıdığı beş iş
+## Setin taşıdığı iki iş
 
-Kullanıcı kararlarıyla (bkz. `discussion.md` → Karar) kapsam yol haritasının
-yazdığından da genişledi. Bu set beş iş taşıyor ve **ikisi birbirine
-kilitli**:
+> **Kapsam 2026-09-17'de ikinci turda daraldı** (`discussion.md` → Karar,
+> 2. tur). Aşağıdaki beş işten **ilk ikisi** bu sette; 3, 4 ve 5 — prompt'un
+> devri, çıpanın yeniden kurulması ve Input Dock — **012'ye** taşındı. Gerekçe
+> iki bulgu: `>` bugünkü `Frame`'de temsil edilemiyor (yani prompt devralınıp
+> yerine bir şey konamıyor) ve üçü de yalnızca prompt devralındığı için var.
+> Liste tarihli kayıt olarak duruyor, çünkü 012'nin girdisi bu.
+
+Kullanıcı kararlarıyla kapsam önce yol haritasının yazdığından da genişlemişti.
+O hâliyle set beş iş taşıyordu ve **ikisi birbirine kilitliydi**:
 
 1. **Tabana yapışık içerik** — saf yerleşim; ofset çizim zamanı uniform (3c).
 2. **Yumuşak kayma** — içeriğin kayması animasyonlu (5b). `bt-gpu::motion`
@@ -123,7 +129,13 @@ kilitli**:
 5. **Input Dock** — pencerenin altında satır editörü; girdi yönlendirmesi
    (`view.rs:374` ile `Session::write` arası), satır ayırma ve safha kapısı.
 
-**Cevapsız kalan mekanizma soruları** (plan yazılmadan çözülmeli):
+**Mekanizma soruları — dördü de ikinci turda cevaplandı ve artık 012'nin
+girdisi** (`discussion.md` → Karar 8, 10, 12 ve `## Muhakeme — 2. tur`):
+dock ayna olmalı (asıl model zsh'in tek-tuş prompt'larında ölümcül); safha
+kapısı hem "koşan komut girdi bekliyor" hem "yazmayı devralan uygulama"
+sorusunu birden çözüyor, yani `ECHO` ve `ALT_SCREEN` yoklaması düşüyor; `B`
+zaten sıfır genişlikte, hiçbir yere taşınmıyor. Aşağısı o turdan önceki
+hâliyle duruyor:
 
 - **Dock "ayna" mı "asıl" mı?** Tampon dock'ta olursa Tab tamamlama,
   Yukarı-geçmiş ve Ctrl-R kaybolur (üçü de ZLE'de) ve yeniden yazılmaları
