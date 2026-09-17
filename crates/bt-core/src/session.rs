@@ -1363,6 +1363,23 @@ impl Session {
             // satırı iki yerde görür; sessizce kaybetmez.
             (last_ink_in_row(&term, to, offset) == input.last_ink).then_some(to)
         });
+        // Aralığın **üst tabanı**, aynı aritmetiğin öteki yönü: caret'ten
+        // önceki metin imlecin satırının üstünde kaç satır tutuyor.
+        //
+        // Üstü yalnız çıpaya bağlamak yetmiyordu: çıpa prompt'un satırında
+        // duruyor ve imleç oradan uzaklaşırsa (arada bir şey basılırsa,
+        // `zle -I`'nin iş bildirimi gibi) aradaki satırlar girişin olmadığı
+        // hâlde bastırılırdı — gözlendi, bir `od` dökümü bütünüyle
+        // kayboluyordu. İki aday arasından **alttaki** seçiliyor: çıpa
+        // satırı, ya da aynanın hesapladığı ilk satır.
+        let suppress_floor = suppressed_block.map_or(0, |input| {
+            let cols = usize::from(term.columns().max(1) as u16);
+            let above = input
+                .chars_before_cursor
+                .saturating_sub(usize::from(cursor_col))
+                .div_ceil(cols);
+            cursor_screen_row.saturating_sub(u16::try_from(above).unwrap_or(u16::MAX))
+        });
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
         // bayrak sormuyor. Biri `HIDDEN` (`\e[8m`) ve o bu maskede **değil**:
@@ -1548,7 +1565,7 @@ impl Session {
             // için yer ayırır ve dock ile içerik arasında boş bir şerit
             // kalırdı.
             if let (Some(from), Some(to)) = (suppress_from, suppress_to)
-                && (from..=to).contains(&row)
+                && (from.max(suppress_floor)..=to).contains(&row)
             {
                 continue;
             }
@@ -1646,8 +1663,10 @@ impl Session {
         // hücre bastırılmamıştır. Ayrı ayrı sorulsaydı o dejenere hâlde imleç
         // gizlenir ve doluluk düşerdi — bastırılmamış bir satır için ödenen
         // iki bedel.
-        let suppressed =
-            matches!((suppress_from, suppress_to), (Some(from), Some(to)) if from <= to);
+        let suppressed = matches!(
+            (suppress_from, suppress_to),
+            (Some(from), Some(to)) if from.max(suppress_floor) <= to
+        );
         let cursor = Cursor {
             col: cursor_col,
             row: cursor_screen_row,
@@ -2268,6 +2287,11 @@ impl Session {
     /// sorgulanır. `session.write`'a doğrudan yapıştırma baytı verilmez —
     /// sarmalayan bu fonksiyondur.
     ///
+    /// Sarmanın **tek istisnası** [`Session::can_be_typed`]: dock satırın
+    /// sahibiyken, satır sonu ve kontrol karakteri taşımayan bir yük
+    /// yazılmış girdi gibi akıtılır. Gerekçesi ve neden güvenliği
+    /// düşürmediği orada.
+    ///
     /// Boş yapıştırma iki dalda da sessizdir: sarma dalı bile boş
     /// `\e[200~\e[201~` çifti yazmaz, çünkü sıfır baytlık bir `Msg::Input`
     /// yazıcıyı kilitler (`write_owned`'ın kapısı). Boş olmayan yapıştırma
@@ -2284,7 +2308,9 @@ impl Session {
         if bytes.is_empty() {
             return;
         }
-        if self.bracketed_paste() {
+        // Sarma sorgusu **önce ve tek başına**: iki kilit (`Term`, sonra
+        // `shell`) ardışık alınıyor, iç içe değil.
+        if self.bracketed_paste() && !self.can_be_typed(&bytes) {
             let mut wrapped = Vec::with_capacity(bytes.len() + 12);
             // `b"\e[200~"` yazılamaz: `\e` Rust kaçışı değil. Altı baytın
             // altısı da ASCII, `extend_from_slice` kopyalar.
@@ -2303,6 +2329,43 @@ impl Session {
             // Ham dal sıfır kopya: sahiplenen bayt doğrudan kanala gider.
             self.write_owned(bytes);
         }
+    }
+
+    /// Yapıştırma **yazılmış girdi gibi** akıtılabilir mi — sarmanın dar
+    /// istisnası.
+    ///
+    /// **Neden bir istisna var.** Dock canlıyken sarılı yapıştırma zsh'in
+    /// `bracketed-paste-magic`'ine düşüyor ve o widget, yapıştırdığını
+    /// vurgulu gösterip **bir sonraki tuşa kadar bekliyor**
+    /// (`zle .read-command`, zsh 5.9 kaynağı). O sürede ZLE'nin görüntü
+    /// kancası koşmadığı için ayna bayat kalıyor, tazelik kapısı bastırmayı
+    /// bırakıyor ve kullanıcının yapıştırdığı metin dock yerine ızgarada
+    /// beliriyor — giriş satırının sahibi bir tuşluk süre dock olmuyor.
+    /// Kabuk tarafında beş çare ölçüldü ve yalnız bu sonuncusu çalışıyor
+    /// (012 phase-4 → Uygulama Notları).
+    ///
+    /// **Güvenlik neden kaybolmuyor.** Sarmanın koruduğu iki şey de koşulun
+    /// dışında kalıyor: satır sonu yoksa hiçbir satır kendiliğinden
+    /// **çalışmaz** ([`Session::paste`]'in varlık sebebi), kontrol karakteri
+    /// yoksa hiçbir tuş bağlaması tetiklenmez. Geriye kalan, kullanıcının
+    /// elle yazabileceği düz bir metin: onu yazılmış girdi gibi akıtmak
+    /// tanımı gereği aynı sonucu verir.
+    ///
+    /// **Üç koşul da zorunlu ve en dar hâliyle:**
+    ///
+    /// - Dock satırın sahibi ([`ShellLog::suppressed_input`], yani safha
+    ///   `Input` **ve** ayna `Live`). Değilse hiç dokunulmuyor: vim, `less`,
+    ///   `read` ve entegrasyonsuz oturum bugünkü korumalı yolda kalıyor.
+    /// - Yük geçerli UTF-8 — pano metni zaten `String`'den geliyor, ama
+    ///   ölçüt baytta değil **karakterde** olmalı.
+    /// - Hiç kontrol karakteri yok. [`char::is_control`] C0'ı da C1'i de
+    ///   kapsıyor; satır sonu, sekme ve `ESC` üçü de bu testin içinde, yani
+    ///   ayrıca sayılmıyorlar.
+    fn can_be_typed(&self, bytes: &[u8]) -> bool {
+        if lock(&self.shell).suppressed_input().is_none() {
+            return false;
+        }
+        std::str::from_utf8(bytes).is_ok_and(|text| !text.chars().any(char::is_control))
     }
 
     /// DECSET 2004 (bracketed paste) set mi — kipi `Term`'den, kilit altında
@@ -4151,6 +4214,62 @@ mod tests {
         // ham bayt bu sınamada da `write`'a değmiyor.
         session.paste(PASTE_PAYLOAD.to_vec());
         wait_ink(&session, &wake, "1b5b3230317e");
+    }
+
+    /// Dock'un satırın sahibi olduğu bir çocuk: 2004 açık, çıpalı prompt,
+    /// canlı ayna — sonra `od` stdin'i hex'e döküyor.
+    fn spawn_docked_od(wake: Arc<TestWake>) -> Session {
+        spawn_session(
+            &format!(
+                "printf '\\033[?2004h{}{}'; exec od -An -tx1",
+                anchored_prompt(1),
+                mirror("", 0),
+            ),
+            wake,
+        )
+    }
+
+    #[test]
+    fn paste_is_typed_when_the_dock_owns_the_line() {
+        // **Sarmanın dar istisnası.** Dock canlıyken sarılı yapıştırma zsh'in
+        // `bracketed-paste-magic`'ine düşüyor, o da bir sonraki tuşa kadar
+        // bekliyor ve ayna bayat kaldığı için metin dock yerine ızgarada
+        // beliriyor. Satır sonu ve kontrol karakteri taşımayan yük yazılmış
+        // girdi gibi gidiyor: güvenliğin koruduğu iki şey de koşulun dışında.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_od(Arc::clone(&wake));
+        wait_bracketed_mode(&session);
+        wait_mirror(&session, DockStatus::Live);
+
+        session.paste(b"abcdefghijklmnopqrst".to_vec());
+        // **Satır sonu `paste()`'ten değil `write()`'tan**: yükün kendisinde
+        // satır sonu olsaydı istisnanın koşulu bozulurdu, ama kanonik kipteki
+        // tty satır sonu görmeden `od`'ye tek bayt vermez. Ayrı bir `write`
+        // tamponu akıtıyor ve sarma kapısına hiç uğramıyor.
+        session.write(b"\n");
+        // `6162` = "ab". Sarılsaydı dökümde ondan **önce** açılış iğnesi
+        // (`1b5b3230307e`) dururdu; aynı hücrelerde yokluğu ölçüt.
+        let cells = wait_ink(&session, &wake, "6162");
+        assert!(
+            !glyph_text(&cells).contains("1b5b3230307e"),
+            "dock satırın sahibiyken düz metin sarıldı: {cells:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn paste_stays_wrapped_when_it_carries_a_newline() {
+        // İstisnanın **sınırı** ve varlık sebebi: satır sonu taşıyan yük ham
+        // gitseydi kullanıcı Cmd-V'ye basar basmaz satır çalışırdı. Dock
+        // canlı olsa bile sarma duruyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_od(Arc::clone(&wake));
+        wait_bracketed_mode(&session);
+        wait_mirror(&session, DockStatus::Live);
+
+        session.paste(PASTE_PAYLOAD.to_vec());
+        wait_ink(&session, &wake, "1b5b3230307e");
+        session.shutdown();
     }
 
     #[test]
