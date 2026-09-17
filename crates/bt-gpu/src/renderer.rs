@@ -26,7 +26,7 @@ use objc2_metal::{
 };
 use objc2_quartz_core::CAMetalDrawable;
 
-use crate::frame::{Frame, GlyphCell, GlyphInstance, Instance, RuleCell};
+use crate::frame::{CursorBlock, Frame, GlyphCell, GlyphInstance, Instance, RuleCell};
 use crate::{GpuError, Surface};
 
 /// `addCompletedHandler:`e verilen blok; [`Renderer::completion`] kurar.
@@ -600,9 +600,86 @@ impl Renderer {
         let result = self
             .encode_quads(&enc, frame.stripes(), viewport_px)
             .and_then(|()| self.encode_quads(&enc, frame.bg_instances(), viewport_px))
-            .and_then(|()| self.encode_glyphs(&enc, frame, viewport_px));
+            .and_then(|()| {
+                self.encode_glyphs(
+                    &enc,
+                    frame.glyphs(),
+                    frame.rules(),
+                    frame.cursor_block(),
+                    frame.cell_px(),
+                    viewport_px,
+                )
+            })
+            .and_then(|()| self.encode_dock(&enc, frame, viewport_px));
         enc.endEncoding();
         result
+    }
+
+    /// Dock yüzeyi: **ikinci koordinat uzayı**, ızgaranın üstüne.
+    ///
+    /// Ayrı bir `setViewport` ve gerekçesi yapısal: dock ötelemeden muaf olmak
+    /// zorunda ve muafiyeti aritmetikle kurmak (`- origin_px`) **çalışmaz** —
+    /// [`Frame::clear`] ötelemeyi sıfırlıyor, `set_origin_rows` ise sink'ten
+    /// sonra çağrılıyor, yani dock hücreleri basılırken o değer henüz
+    /// bilinmiyor. Kendi viewport'u olunca dock listeleri ötelemeyi hiç
+    /// görmüyor; kaymanın yerleşip yerleşmemesi dock'u ilgilendirmiyor.
+    ///
+    /// Orijin dokunun **altına** yaslanıyor (`yükseklik − dock payı`): dock
+    /// pencerenin dibinde duruyor ve ızgaranın altında kalan artık şerit
+    /// (hücre boyuna bölünmeden artan piksel) dock ile içerik arasında kalıyor.
+    /// Boy ve `viewport_px` uniform'u dokunun boyu kalıyor — ızgara
+    /// viewport'uyla aynı gerekçe: ikisi NDC ölçeğinin iki yarısı ve
+    /// ayrışırlarsa yüzey ezilir.
+    ///
+    /// **Sıra: ızgaranın üç encode'undan sonra.** Kayma boyunca ızgaranın
+    /// öteleme hedefi aşılıyor ve en alt satır dock'un üstüne taşıyor
+    /// (`LinkDelegate::set_origin`); dock'un opak zemini onu örtüyor. Ters
+    /// sırada taşan satır dock'un metninin üstünde görünürdü.
+    fn encode_dock(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        frame: &Frame,
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
+        // Dock'u olmayan pencere (entegrasyonsuz kabuk, süreli koşu) ikinci
+        // viewport'u hiç kurmuyor: `hucre=8 glif=6 kural=15` duman
+        // sözleşmesinin ölçüldüğü yol bu daldan geçmiyor.
+        if frame.dock().is_none() {
+            return Ok(());
+        }
+        // **Sıfırda kırpılıyor**: dock'tan alçak bir pencerede (simge durumuna
+        // inerken ya da kullanıcı pencereyi dibe kadar kısarken) fark negatife
+        // iner ve negatif bir `originY` Metal'in doğrulamasına düşerdi — süreci
+        // öldüren bir istisna, oysa doğru cevap dejenere: dock pencerenin
+        // tamamını kaplar. Izgaranın payı zaten sıfır satıra inmiş oluyor
+        // (`split_into_grid`) ve `Session::resize` o boyutu yoksayıyor.
+        let origin_y = (viewport_px[1] - frame.dock_px()).max(0.0);
+        enc.setViewport(MTLViewport {
+            originX: 0.0,
+            originY: f64::from(origin_y),
+            width: f64::from(viewport_px[0]),
+            height: f64::from(viewport_px[1]),
+            znear: 0.0,
+            zfar: 1.0,
+        });
+        // Zemin ve ayraç önce: dock'un kendi arka planları (vurgu aralıkları,
+        // caret) onların üstüne gelmek zorunda.
+        self.encode_quads(enc, &frame.dock_ground(viewport_px[0]), viewport_px)
+            .and_then(|()| self.encode_quads(enc, frame.dock_bg(), viewport_px))
+            .and_then(|()| {
+                self.encode_glyphs(
+                    enc,
+                    frame.dock_glyphs(),
+                    frame.dock_rules(),
+                    // Caret'in dikdörtgeni fragment'in `[[position]]`'ı ile
+                    // karşılaştırılıyor ve o koordinat viewport dönüşümünden
+                    // **sonraki**; dock listeleri ise dock-yerel. İki uzayı
+                    // birleştiren tek satır bu.
+                    &frame.dock_cursor().shifted_y(origin_y),
+                    frame.cell_px(),
+                    viewport_px,
+                )
+            })
     }
 
     /// Instance dilimini kare başına yeni bir Metal tamponuna kopyalar.
@@ -685,10 +762,12 @@ impl Renderer {
     fn encode_glyphs(
         &self,
         enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-        frame: &Frame,
+        glyphs: &[GlyphCell],
+        rules: &[RuleCell],
+        cursor: &CursorBlock,
+        cell_px: [f32; 2],
         viewport_px: [f32; 2],
     ) -> Result<(), GpuError> {
-        let (glyphs, rules) = (frame.glyphs(), frame.rules());
         // Kapı ikisini birden soruyor: yalnız kural taşıyan bir kare (boş bir
         // satırın altındaki kıvrım) buradan geçmeli, hiçbir şey taşımayan kare
         // ise sıfır uzunluklu `newBufferWithBytes`'a ulaşmamalı.
@@ -723,12 +802,12 @@ impl Renderer {
         enc.setRenderPipelineState(&self.cell);
         // İndeksler `cell.metal`'in `[[buffer(n)]]` bildirimleriyle aynı.
         vertex_uniform(enc, &viewport_px, 1);
-        vertex_uniform(enc, &frame.cell_px(), 2);
+        vertex_uniform(enc, &cell_px, 2);
         vertex_uniform(enc, &uv_size, 3);
         // Fragment'in tampon indeksleri **ayrı bir alan**: vertex'in 0'ı
         // instance tamponu, fragment'in 0'ı imleç bloğu. Düzeni `CursorBlock`'un
         // `offset_of` assert'leri `cell.metal`'e bağlıyor.
-        fragment_uniform(enc, frame.cursor_block(), 0);
+        fragment_uniform(enc, cursor, 0);
         // SAFETY: tampon ve doku bu blok boyunca yaşıyor; doku indeksi
         // `cell.metal`'in `[[texture(0)]]` bildirimiyle aynı.
         unsafe {
@@ -1668,6 +1747,132 @@ mod tests {
 
         // Izgara payın sağında ve dokunulmamış: ilk hücre beyaz kaldı.
         assert_eq!(pixel(9, 2), (255, 255, 255), "ilk hücre işaretin sağında");
+    }
+
+    #[test]
+    fn the_dock_paints_the_bottom_band_and_the_sliding_grid_cannot_reach_it() {
+        // **Phase-3'ün CPU→GPU dikişi.** İkinci `setViewport` iki şeyi birden
+        // iddia ediyor ve ikisi de yalnız pikselden okunabiliyor: dock
+        // dokunun **altına** yaslanıyor, ve ızgaranın ötelemesi onu
+        // oynatmıyor. İkisini iki CPU listesini karşılaştırarak sormak inşa
+        // gereği doğru olanı sınamak olurdu (`content_sticks_to_the_bottom_*`
+        // ile aynı gerekçe).
+        //
+        // Üçüncü iddia kaymanın taşması: `LinkDelegate::set_origin`'in doc'u
+        // "kayma boyunca öteleme hedefinden büyük, en alt satırın bir kısmı
+        // pencerenin altında kalıyor" diyor — dock gelince o parça dock'un
+        // **üstüne** düşüyor ve onu örten tek şey opak zemin. Ötelenmiş kare
+        // bu yüzden aynı bantta yine dock'un renklerini vermeli.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 16;
+        const CELL: u16 = 8;
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let green = LinearRgba::from_srgb(0x00, 0xff, 0x00);
+        let blue = LinearRgba::from_srgb(0x00, 0x00, 0xff);
+        // Üç renk de **doygun**: sRGB transfer fonksiyonunun sabit noktaları,
+        // yani bayt eşitlikle sorulabiliyor. Renk uzayının kendi bekçisi
+        // `cell_bg_paints_pixels_on_the_gpu` ve orada ara ton var.
+
+        // Tek satırlık dock: 8 piksel, yani doku ikiye bölünüyor — üstte
+        // ızgara, altta dock. `DOCK_ROWS` burada **kullanılmıyor** ve bilerek:
+        // renderer kaç satır olduğunu bilmiyor, yalnız verilen payı çiziyor.
+        let mut frame = Frame::default();
+        frame.clear(grid(CELL, CELL));
+        frame.push(bg_cell(0, 0, red));
+        frame.push_dock(bg_cell(0, 0, blue));
+        frame.open_dock(1, green, WHITE);
+
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
+
+        // Üst yarı ızgaranın: 0. satırın hücresi orada.
+        assert_eq!(pixel(2, 2), (255, 0, 0), "ızgara hücresi üst yarıda değil");
+        // Alt yarı dock'un: hücresi solda, zemini onun sağında **doku
+        // genişliğince**. Zemin yalnız ızgaranın sütunlarını kaplasaydı
+        // sağdaki artık şerit clear rengiyle kalırdı.
+        assert_eq!(pixel(2, 12), (0, 0, 255), "dock hücresi boyanmadı");
+        assert_eq!(pixel(14, 12), (0, 255, 0), "dock zemini dokuyu kaplamadı");
+        // Ayraç dock'un en üst pikselinde ve zeminden ayrı: ikisi tek
+        // dikdörtgene inseydi sınır kaybolurdu.
+        assert_eq!(
+            pixel(14, 8),
+            (255, 255, 255),
+            "ayraç dock'un tepesinde değil"
+        );
+
+        // **Aynı kare, bir satır ötelenmiş.** Izgaranın hücresi alt yarıya
+        // taşıyor (`content_sticks_to_the_bottom_for_cell_bg`'nin kurulumu) ve
+        // tam dock'un üstüne düşüyor. Dock ondan **sonra** çizildiği ve zemini
+        // opak olduğu için alt yarı hiç kırmızı görmemeli; dock'un kendisi de
+        // yerinden oynamamalı.
+        frame.set_origin_rows(1.0);
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
+        assert_eq!(pixel(2, 12), (0, 0, 255), "dock ötelemeyle birlikte kaydı");
+        assert_eq!(pixel(14, 12), (0, 255, 0), "dock zemini ötelemeyle kaydı");
+        assert!(
+            (8..EDGE).all(|y| (0..EDGE).all(|x| pixel(x, y) != (255, 0, 0))),
+            "kayan ızgara dock'un üstünde göründü"
+        );
+        // Izgaranın eski yeri boşaldı: öteleme gerçekten uygulandı, yoksa
+        // yukarıdaki iddia ötelemeyi **yok sayan** bir kodla da geçerdi.
+        assert_ne!(pixel(2, 2), (255, 0, 0), "ızgara ötelenmedi");
+    }
+
+    #[test]
+    fn the_dock_draws_glyphs_and_its_own_caret() {
+        // Dock'un ikinci pipeline'ı: glyph'ler ve caret. Caret'in dikdörtgeni
+        // fragment'in `[[position]]`'ı ile karşılaştırılıyor ve o koordinat
+        // viewport dönüşümünden **sonraki**, oysa dock listeleri dock-yerel —
+        // ikisini `CursorBlock::shifted_y` birleştiriyor. Kayma unutulsaydı
+        // caret'in altındaki harf **ızgarada**, dock'un üstünde bir satırda
+        // zemin rengine boyanırdı: `make hepsi`'yi yeşil bırakan, gözle
+        // "bir hücre görünmez oldu" diye fark edilen bir kusur.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let mut frame = Frame::default();
+        frame.clear(grid(cw, ch));
+        // Izgaranın son satırı dock'un üstünde kalıyor; dock **tek** satır ve
+        // dokunun dibinde.
+        frame.push_dock(glyph_cell(0, 'M', Some(red)));
+        frame.push_dock_caret(0, BACKGROUND, WHITE);
+        frame.open_dock(1, red, WHITE);
+
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        // Dock dokunun **dibine** yaslı, tepeden hücre sayarak değil: ofset
+        // `yükseklik − dock payı`. Tepeden sayılsaydı ızgaranın son satırı ile
+        // dock arasında kalan artık şerit (hücre boyuna bölünmeden artan
+        // piksel) kadar kayardı ve bant yanlış yeri okurdu.
+        let top = EDGE - usize::from(ch);
+        let cell: Vec<_> = (0..usize::from(ch))
+            .flat_map(|y| (0..usize::from(cw)).map(move |x| (x, y)))
+            .map(|(x, y)| pixel_at(&pixels, EDGE, x, top + y))
+            .collect();
+
+        // İki iddia ve ikincisi **tam olarak kaymanın bekçisi**: caret opak
+        // beyaz bloğunu dock'un satırına çiziyor, altındaki `M` ise zemin
+        // rengine boyanıyor. Kayma unutulsaydı dikdörtgen dock-yerel kalır,
+        // yani ızgaranın ilk satırıyla karşılaştırılırdı: blok yine burada
+        // çizilirdi (o instance viewport'tan geçiyor) ama harf kendi ön
+        // planıyla, yani **beyaz** çizilirdi ve hücre beyazla tekdüze kalırdı.
+        // Harf kaybolur, hiçbir sayaç görmezdi.
+        const WHITE_PX: (u8, u8, u8) = (0xff, 0xff, 0xff);
+        assert!(
+            cell.contains(&WHITE_PX),
+            "caret bloğu dock'un satırında çizilmedi: {cell:?}"
+        );
+        // Tam bayt aranmıyor: glyph kapsaması kenarlarda yarım ve en koyu
+        // piksel bile zemine ancak yaklaşıyor (`glyph_differs_from_cell_background`
+        // ile aynı gerekçe — kapı sistem fontunun sürümüne rehin olmamalı).
+        // Sorulan şey farkın **yönü**: zemin (`0x1a1c21`) beyazdan koyu.
+        let darkest = cell.iter().map(|p| p.0).min().expect("hücre boş değil");
+        assert!(
+            darkest < 0x80,
+            "caret'in altındaki glyph zemin rengine boyanmadı: {cell:?}"
+        );
     }
 
     #[test]
