@@ -55,6 +55,7 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
+use crate::dock::{self, Dock};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
 use crate::shell::{DockState, Scanner, ShellLog, ShellState, Stripe};
 use crate::wake::Wake;
@@ -1904,6 +1905,37 @@ impl Session {
     /// kapasitesini koruyor ve sabit durumda ayırma **sıfır** (R1.3).
     pub fn dock_state(&self, into: &mut DockState) {
         into.clone_from(&lock(&self.shell).dock);
+    }
+
+    /// Dock'un bu karedeki hücrelerini sink'e basar ve yüzeyini verir.
+    ///
+    /// [`Session::frame`]'in dock karşılığı ve aynı sözleşme: sınırdan
+    /// **çözülmüş** hücreler geçiyor (renk, biçim, sütun), kabuğun safhası ve
+    /// `region_highlight`'ın sözdizimi geçmiyor. Karar burada, boyama orada.
+    ///
+    /// **`Term` kilidine hiç dokunmuyor**: dock ızgarayı okumuyor, aynayı
+    /// okuyor. Yaprak kilit bir kez alınıp bırakılıyor ve ikisi de (ayna +
+    /// safha) aynı okumadan çıkıyor — ayrı çağrılardan alınsalardı araya düşen
+    /// bir işaret `>`'i bir kareliğine metinle çelişen bir renge boyardı.
+    /// Tema kopyası kilitten **önce**, `frame()`'deki örüntünün aynısı.
+    ///
+    /// `into` çağıranın tamponu ([`Session::dock_state`] ile aynı gerekçe:
+    /// kare başına ayırma yok). `cols` ızgaranın genişliği; dock aynı
+    /// sütunları kullanıyor ve taşan satırı pencerelemek için gerekiyor
+    /// ([`crate::dock::render`]).
+    ///
+    /// **Dock'u olmayan pencere bunu hiç çağırmıyor**: ayrım oturum doğarken
+    /// (`bt-shell`, entegrasyon kuruldu mu) kararlaşıyor ve bu crate onu
+    /// bilmiyor — bilseydi "kabuk entegrasyonu kuruldu mu" sorusunun ikinci
+    /// bir kaydı doğardı.
+    pub fn dock(&self, cols: u16, into: &mut DockState, sink: impl FnMut(Cell)) -> Dock {
+        let theme = *lock(&self.adapter.0.theme);
+        let shell = {
+            let shell = lock(&self.shell);
+            into.clone_from(&shell.dock);
+            shell.state
+        };
+        dock::render(into, shell, &theme, cols, sink)
     }
 
     /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve
@@ -5384,15 +5416,26 @@ mod tests {
             })
         };
 
+        // Kare yolu üretimdeki sırayı izliyor: ızgara, sonra dock. `dock()`
+        // **iki** kilidi ardışık alıyor (tema, sonra `shell`) ve ikisi de
+        // yaprak; iç içe girseler ya da `Term` tutulurken alınsalar burası
+        // asılırdı. `dock_state()`'in tek kilitli hâli okuyucu thread'de
+        // yarışmaya devam ediyor, yani iki şekil aynı anda sınanıyor.
+        let mut dock = DockState::default();
         let mut frames = 0u64;
+        let mut docked = 0u64;
         while Instant::now() < deadline {
             if frame_if_damaged(&session, |_| ()).is_some() {
                 frames += 1;
+                if session.dock(80, &mut dock, |_| ()).caret.is_some() {
+                    docked += 1;
+                }
             }
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(reader.join().unwrap() > 0, "ayna hiç okunmadı");
         assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
+        assert!(docked > 0, "kare yolu aynayı hiç canlı görmedi");
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }

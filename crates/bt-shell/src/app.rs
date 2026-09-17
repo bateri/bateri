@@ -14,7 +14,9 @@ use bt_core::{
     FontOptions, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings, ShellIntegration,
     Teardown, Theme, Wake, load_shell, smoke_shell,
 };
-use bt_gpu::{CellMetrics, DisplayLink, MIN_SAMPLES, Renderer, Stats, Surface, Waker};
+use bt_gpu::{
+    CellMetrics, DOCK_ROWS, DisplayLink, Layout, MIN_SAMPLES, Renderer, Stats, Surface, Waker,
+};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -399,8 +401,16 @@ pub(crate) struct Grid {
 /// binmesin. Pay her zaman ayrılıyor — entegrasyonsuz oturumda (bash/fish,
 /// `shell.integration = false`, SSH) boş kalması kabul edilen bedel;
 /// alternatifi ilk prompt'ta bir SIGWINCH ve üç tüketicinin aynı anda
-/// güncellenmesiydi. Satırlar payı görmez: pay yalnız solda.
-fn split_into_grid(width_px: f64, height_px: f64, cell: CellMetrics) -> Grid {
+/// güncellenmesiydi.
+///
+/// **Dock payı satırlardan düşülür** (012) ve sol payın tersine **koşullu**:
+/// dock yalnız entegrasyonlu zsh oturumunda var ve karar oturum doğarken
+/// veriliyor (`AppDelegate::dock_rows`). Payı koşulsuz ayırmak dock'u olmayan
+/// pencereden sebepsiz iki satır götürürdü — sol payın sekiz noktasıyla
+/// kıyaslanmayacak bir bedel. Koşullu olabilmesinin sebebi de o: ayrım koşu
+/// boyunca oynamıyor, yani düşülen pay da oynamıyor ve komut başına bir
+/// `TIOCSWINSZ` doğmuyor.
+fn split_into_grid(width_px: f64, height_px: f64, cell: CellMetrics, dock_rows: u16) -> Grid {
     let (cell_w, cell_h) = cell.cell_px();
     // `as u16` f64'te doygundur (NaN ve negatif → 0, büyük → 65535) ve kesme
     // tam olarak istediğimiz taban yuvarlama; sıfır sütun/satırı
@@ -417,9 +427,14 @@ fn split_into_grid(width_px: f64, height_px: f64, cell: CellMetrics) -> Grid {
     // 65535'e yakın bir sütun sayısı, o boyda bir `TIOCSWINSZ` üretirdi.
     // Yeni bir alt sınır bilerek getirilmiyor: zincirin sonu zaten doğru.
     let usable_width = width_px - f64::from(cell.gutter_px());
+    // Dock payı da **`f64`'te** ve aynı gerekçeyle: dock'tan alçak bir
+    // pencerede fark negatife iner, bölme negatif kalır ve `as u16` onu sıfıra
+    // doyurur — `Session::resize` o boyutu zaten yoksayıyor. `u16`'da
+    // yapılsaydı taşar ve 65535 satırlık bir `TIOCSWINSZ` üretirdi.
+    let usable_height = height_px - f64::from(dock_rows) * f64::from(cell_h);
     Grid {
         cols: (usable_width / f64::from(cell_w)) as u16,
-        rows: (height_px / f64::from(cell_h)) as u16,
+        rows: (usable_height / f64::from(cell_h)) as u16,
         cell,
     }
 }
@@ -588,6 +603,24 @@ pub(crate) struct Ivars {
     /// `bt-gpu`'nun tipi ama sahibi burası: `DisplayLink` ile tamamlanma bloğu
     /// birer kopyasını yazıyor, kapanışta okuyan (rapor) bu kopya.
     stats: Option<Arc<Stats>>,
+    /// Dock kaç satır; `0` → bu pencerede dock yok.
+    ///
+    /// **Oturum doğarken kararlaşıyor ve koşu boyunca oynamıyor** (012 → R5.1):
+    /// kaynağı entegrasyonun kurulup kurulmadığı, yani `shell_integration_env`
+    /// ve o `didFinishLaunching`'te **bir kez** çağrılıyor. Yuva o yüzden var:
+    /// `sync_geometry` her pencere olayında koşuyor ve ızgara yüksekliğini
+    /// hesaplarken cevabı bilmek zorunda; ikinci kez sormak, iki çağrının
+    /// ayrışabildiği bir gelecekte "pencere iki satır kaybetti ama dock yok"
+    /// demekti.
+    ///
+    /// Sonucu: `/bin/sh` koşan duman reçetesi dock **almıyor**, yani
+    /// `smoke_shell` ve ona bağlı `hucre=8 glif=6 kural=15` sözleşmesi
+    /// dokunulmadan kalıyor.
+    ///
+    /// `Cell`, `OnceCell` değil: açılış öncesi değeri `0` ve o **doğru** cevap
+    /// (henüz oturum yok, ilk kare de yok); `OnceCell` bu yolu bir `unwrap`
+    /// ile kapatırdı.
+    dock_rows: Cell<u16>,
 }
 
 define_class!(
@@ -667,10 +700,27 @@ define_class!(
             // giriyor, font ayarı da hücre ölçüsünü, yani ilk grid'i ve
             // kabuğun gördüğü ilk `TIOCSWINSZ`'yi belirliyor.
             let theme = self.load_settings();
+            // Entegrasyon **bir kez** soruluyor ve iki cevabı birden veriyor:
+            // çocuğun ortamı ile dock'un varlığı. İki ayrı çağrı olsaydı
+            // ikisi ayrışabilirdi — pencereden iki satır giden ama dock'u
+            // olmayan (ya da tersi) bir oturum, ve belirti sessiz olurdu.
+            // Geometriden **önce**: ızgara yüksekliği dock payını görmeli,
+            // yoksa kabuk açılışta bir satır fazlasıyla doğar ve ilk kare
+            // düzeltme için bir `TIOCSWINSZ` yer.
+            let integration = shell_integration_env(
+                &self.inputs(),
+                self.ivars().settings.borrow().shell_integration,
+                child::shell,
+                child::zsh_wrapper_dir,
+                std::env::var_os("ZDOTDIR"),
+            );
+            self.ivars()
+                .dock_rows
+                .set(if integration.is_empty() { 0 } else { DOCK_ROWS });
             let grid = self
                 .sync_geometry()
                 .expect("pencere ve contentView kuruldu");
-            self.start_session(mtm, grid, &view, theme);
+            self.start_session(mtm, grid, &view, theme, integration);
 
             if let Some(run) = self.ivars().run {
                 // block2 yok: zamanlayıcı performSelector ile.
@@ -1455,6 +1505,9 @@ impl AppDelegate {
             config_watch: RefCell::new(None),
             theme_watch: RefCell::new(None),
             stats,
+            // Açılışta dock yok: kararı `didFinishLaunching` veriyor ve
+            // geometriyi ondan sonra hesaplıyor.
+            dock_rows: Cell::new(0),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
@@ -1462,7 +1515,14 @@ impl AppDelegate {
 
     /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
     /// `Wake`'i ister, link `Session`'ı ister, `Waker` link'ten doğar.
-    fn start_session(&self, mtm: MainThreadMarker, grid: Grid, view: &BateriView, theme: Theme) {
+    fn start_session(
+        &self,
+        mtm: MainThreadMarker,
+        grid: Grid,
+        view: &BateriView,
+        theme: Theme,
+        integration: Vec<(String, String)>,
+    ) {
         let session = Session::spawn(
             SessionOptions {
                 // Duman ve ölçüm koşularında shell sabit: sonuç kullanıcının
@@ -1493,16 +1553,10 @@ impl AppDelegate {
                 // çocuğa **eklenen** ortam ve ikisi de yalnız çocuğa gidiyor.
                 // Anahtarları ayrık (`LANG` ↔ `ZDOTDIR`), yani sıranın
                 // önemi yok.
-                env: child::locale_env()
-                    .into_iter()
-                    .chain(shell_integration_env(
-                        &self.inputs(),
-                        self.ivars().settings.borrow().shell_integration,
-                        child::shell,
-                        child::zsh_wrapper_dir,
-                        std::env::var_os("ZDOTDIR"),
-                    ))
-                    .collect(),
+                // Entegrasyonun ortamı **çağırandan** geliyor: aynı cevap
+                // dock'un varlığını da belirliyor (`didFinishLaunching`) ve
+                // burada ikinci kez sorulsaydı iki karar ayrışabilirdi.
+                env: child::locale_env().into_iter().chain(integration).collect(),
                 cols: grid.cols,
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
@@ -1534,7 +1588,11 @@ impl AppDelegate {
             &self.ivars().surface,
             Rc::clone(&self.ivars().renderer),
             session,
-            grid.cell,
+            Layout {
+                cols: grid.cols,
+                dock_rows: self.ivars().dock_rows.get(),
+                cell: grid.cell,
+            },
             self.ivars().stats.clone(),
         );
         // Uyandırma yolu kapanmadan kare istemiyoruz: aradaki bir `Wakeup`
@@ -2242,7 +2300,12 @@ impl AppDelegate {
         let renderer = &self.ivars().renderer;
         let cell = renderer.cell_metrics(scale);
         self.post_notices(Source::Font, font_messages(renderer.font_notice()));
-        Some(split_into_grid(width_px, height_px, cell))
+        Some(split_into_grid(
+            width_px,
+            height_px,
+            cell,
+            self.ivars().dock_rows.get(),
+        ))
     }
 }
 
@@ -2262,6 +2325,12 @@ mod tests {
     fn metrics(w: u16, h: u16, gutter: u16) -> CellMetrics {
         CellMetrics::new(w, h, gutter).expect("sıfır olmayan hücre")
     }
+
+    /// Dock'suz pencere: entegrasyonsuz oturumun (ve duman reçetesinin) hâli.
+    /// Sütun ve satır aritmetiğini sorgulayan sınamalar bunu veriyor ki dock
+    /// payı onların beklediği sayılara karışmasın; payın kendi sınaması
+    /// aşağıda ve `DOCK_ROWS`'u adıyla anıyor.
+    const NO_DOCK: u16 = 0;
 
     fn report(counters: Counters, workload: Workload) -> Report {
         Report {
@@ -2430,8 +2499,8 @@ mod tests {
         // ikisini eşitler ve bu sınama düşer.
         // Pay sıfır: sorulan şey hücre ölçüsünün grid'i belirlediği, payın
         // etkisi değil. Payın kendi sınaması `the_gutter_costs_columns`.
-        let narrow = split_into_grid(900.0, 600.0, metrics(9, 18, 0));
-        let wide = split_into_grid(900.0, 600.0, metrics(18, 36, 0));
+        let narrow = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK);
+        let wide = split_into_grid(900.0, 600.0, metrics(18, 36, 0), NO_DOCK);
         assert_eq!((narrow.cols, narrow.rows), (100, 33));
         assert_eq!((wide.cols, wide.rows), (50, 16));
     }
@@ -2441,8 +2510,8 @@ mod tests {
         // Sol pay sütunlardan düşülür (010 Karar 3): şerit metnin üstüne
         // binmesin. 900 piksel, 9 piksel hücre → paysız 100 sütun; 8 piksel
         // pay bir sütun götürür, 9 piksel (tam bir hücre) de bir.
-        let plain = split_into_grid(900.0, 600.0, metrics(9, 18, 0));
-        let gutter = split_into_grid(900.0, 600.0, metrics(9, 18, 8));
+        let plain = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK);
+        let gutter = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK);
         assert_eq!(plain.cols, 100);
         assert_eq!(gutter.cols, 99, "pay bir sütun götürür");
         // Satırlar payı **görmez**: pay yalnız solda ve dikey geometriye
@@ -2454,6 +2523,34 @@ mod tests {
     }
 
     #[test]
+    fn the_dock_costs_rows_and_only_when_there_is_one() {
+        // Dock payı **satırlardan** düşülür ve sol payın tersine koşullu:
+        // dock'u olmayan pencereden (entegrasyonsuz kabuk, duman reçetesi)
+        // tek satır bile gitmemeli — `smoke_shell`'in `hucre=8 glif=6`
+        // sözleşmesi o pencerede ölçülüyor.
+        let without = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK);
+        let with = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS);
+        assert_eq!(without.rows, 33);
+        assert_eq!(with.rows, 33 - DOCK_ROWS, "dock payı satırlardan düşmedi");
+        // Sütunlar dock'u **görmez**: dock ızgarayla aynı sütunları kullanıyor
+        // ve payı yalnız dikeyde.
+        assert_eq!(with.cols, without.cols);
+    }
+
+    #[test]
+    fn a_window_shorter_than_the_dock_yields_no_rows() {
+        // `a_window_narrower_than_the_gutter_yields_no_columns`'ın dikey
+        // ikizi ve aynı kırılmaya bekçi: çıkarma `f64`'te negatife iniyor ve
+        // `as u16` sıfıra doyuruyor. `u16`'da yapılsaydı taşar ve 65535
+        // satırlık bir `TIOCSWINSZ` üretirdi. Sıfır satırı `Session::resize`
+        // zaten yoksayıyor.
+        let g = split_into_grid(900.0, 20.0, metrics(9, 18, 8), DOCK_ROWS);
+        assert_eq!(g.rows, 0);
+        // Sütunlar ayakta: alçak pencere yalnız satırları eliyor.
+        assert_eq!(g.cols, 99);
+    }
+
+    #[test]
     fn a_window_narrower_than_the_gutter_yields_no_columns() {
         // Kabul: yeni bir alt sınır **getirilmiyor**, mevcut zincir doğru
         // cevabı veriyor. Çıkarma `f64`'te negatife iniyor, bölme negatif
@@ -2461,7 +2558,7 @@ mod tests {
         // zaten yoksayıyor. Aynı çıkarma `u16`'da yapılsaydı **taşar** ve
         // 65535'e yakın bir sütunla o boyda bir `TIOCSWINSZ` üretirdi — bu
         // sınamanın bekçilik ettiği kırılma o.
-        let g = split_into_grid(4.0, 600.0, metrics(9, 18, 8));
+        let g = split_into_grid(4.0, 600.0, metrics(9, 18, 8), NO_DOCK);
         assert_eq!(g.cols, 0);
         // Satırlar ayakta: dar pencere yalnız sütunları eliyor.
         assert_eq!(g.rows, 33);
@@ -3119,7 +3216,7 @@ mod tests {
         // Simge durumuna alınan pencere 0×0 bounds verir; `Session::resize`
         // sıfır grid'i yoksayıyor ama buraya gelen yolun panik etmemesi
         // gerekiyor — bölme değil, `as u16` doygunluğu taşıyor.
-        let g = split_into_grid(0.0, 0.0, metrics(9, 18, 8));
+        let g = split_into_grid(0.0, 0.0, metrics(9, 18, 8), NO_DOCK);
         assert_eq!((g.cols, g.rows), (0, 0));
     }
 }

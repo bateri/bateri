@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use bt_core::{Blocks, Cursor, CursorMotion, DirtyFlag, Session, Theme};
+use bt_core::{Blocks, Cursor, CursorMotion, DirtyFlag, DockState, Session, Theme};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -394,6 +394,29 @@ struct LinkIvars {
     /// kendisi değil — `Frame::push_block` aralıkları buradan okuyup oraya
     /// çeviriyor.
     blocks: RefCell<Blocks>,
+    /// Aynanın tamponu; `blocks` ile aynı gerekçeyle uzun ömürlü —
+    /// [`Session::dock`] onu her karede yerinde tazeliyor ve kapasitesi
+    /// duruyor, yani kare başına ayırma yok.
+    ///
+    /// Dock'u olmayan pencerede hiç dokunulmuyor: boş bir `DockState` üç boş
+    /// dizgi ve boş bir `Vec`, yani ayırmıyor da.
+    dock: RefCell<DockState>,
+    /// Dock kaç satır; `0` → bu pencerede dock yok.
+    ///
+    /// **Oturumun sabiti**, `Cell` değil düz alan: ayrım oturum doğarken
+    /// kararlaşıyor (`bt-shell`, entegrasyon kuruldu mu) ve koşu boyunca
+    /// oynamıyor. Oynasaydı ızgara yüksekliği de oynardı — yani bir
+    /// `TIOCSWINSZ` — ve o bedel komut başına ödenirdi; alternatif ekranın
+    /// dock'u kaldırması (phase-7) bilinçli olarak **geçiş başına** bir bedel.
+    dock_rows: u16,
+    /// Izgaranın genişliği, sütun; dock'un taşan satırı pencerelemesi için
+    /// [`Session::dock`]'a giriyor.
+    ///
+    /// `Cell`: [`DisplayLink::resize`] yazıyor, içerik karesi okuyor — ikisi
+    /// de ana thread. `cell` ile **ayrı** duruyor çünkü kaynakları ayrı:
+    /// hücre ölçüsü yalnız oturum boyutu kabul ederse tazeleniyor, sütun
+    /// sayısı ise pencerenin kendi cevabı.
+    cols: Cell<u16>,
     /// Demet değil `CellMetrics`: ızgara geometrisi (hücre ölçüsü **ve** sol
     /// pay) `Renderer::cell_metrics`'ten `bt-shell` üzerinden buraya tip
     /// olarak geliyor, **saklanırken de** tip kalıyor ve `Frame::clear`'a da
@@ -723,6 +746,29 @@ define_class!(
             if let Some(at) = motion.position() {
                 frame.push_cursor(cursor, at, theme.accent_linear(), motion.alpha());
             }
+            // **Dock ızgaradan sonra** ve bu sıra iki kez zorunlu: listeye
+            // girme sırası çizim sırası (dock'un opak zemini kaymanın taşan
+            // alt satırını örtmeli) ve `Frame::clear` ötelemeyi sıfırladığı
+            // için sink'in içinde bir öteleme emsali kullanılamazdı — dock'un
+            // muafiyeti ikinci `setViewport`'la, yani encode'da kuruluyor.
+            //
+            // Ayna her tuş vuruşunda kare istiyor: yük ayrıştırıcıya da
+            // ulaşıyor ve alacritty işlenen her bayt için `Event::Wakeup`
+            // basıyor, yani `dirty` bu kola girmeden önce zaten dikilmiş
+            // oluyor. Dock bu yüzden kendi kare talebini taşımıyor — boşta
+            // sıfır kare sözleşmesi dokunulmadan kalıyor.
+            if iv.dock_rows > 0 {
+                let mut dock_state = iv.dock.borrow_mut();
+                let dock = iv.session.dock(iv.cols.get(), &mut dock_state, |cell| {
+                    frame.push_dock(cell);
+                });
+                if let Some(col) = dock.caret {
+                    frame.push_dock_caret(col, dock.caret_text, theme.accent_linear());
+                }
+                // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
+                // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
+                frame.open_dock(iv.dock_rows, dock.ground, dock.separator);
+            }
             // Birinci aralık burada kapanıyor — `push_cursor`'dan **sonra**:
             // imleci listeye koymak sink işidir, encode değil. Damga bir satır
             // yukarıda alınsaydı `cpu_encode` `draw`'ın yanında onu da ölçer
@@ -854,6 +900,32 @@ pub struct DisplayLink {
     waker: Waker,
 }
 
+/// Kare yolunun **açılış geometrisi**: ızgaranın genişliği, dock payı ve
+/// hücre ölçüsü.
+///
+/// Üçü tek tip, çünkü üçü de aynı yerden (`bt-shell`'in `Grid`'i ve dock
+/// kararı) aynı anda doğuyor ve [`DisplayLink::new`]'a birlikte giriyor.
+/// Ayrı parametreler olsalardı imza yedi argümanı aşıyordu — ama asıl kazanç
+/// o değil: bir tip, "bu üçü birlikte değişir" cümlesini imzada söylüyor.
+///
+/// Satır sayısı **yok** ve bilerek: ızgaranın yüksekliği oturumun
+/// (`SessionOptions.rows`) ve kare yolu onu `Cursor::rows` ile **aynı
+/// okumadan** alıyor (`bt_core::Cursor::rows`'un doc'u). İkinci bir kopya tam
+/// olarak orada yasaklanmış.
+#[derive(Clone, Copy, Debug)]
+pub struct Layout {
+    /// Izgaranın genişliği, sütun; dock'un taşan satırı pencerelemesi için
+    /// gerekiyor. [`DisplayLink::resize`] tazeliyor.
+    pub cols: u16,
+    /// Dock kaç satır; `0` → bu pencerede dock yok.
+    ///
+    /// **Oturumun sabiti** (012 → R5.1): ayrım oturum doğarken kararlaşıyor
+    /// ve koşu boyunca oynamıyor, o yüzden `resize`'da karşılığı yok.
+    pub dock_rows: u16,
+    /// Hücre ölçüsü ve sol pay; `Frame::clear`'ın taşıdığı değer.
+    pub cell: CellMetrics,
+}
+
 impl DisplayLink {
     /// Ana thread'de kurulur: link ana run loop'a eklenir ve callback'in ana
     /// thread'de koşacağı sözleşmesi böyle doğar.
@@ -862,7 +934,7 @@ impl DisplayLink {
         surface: &Surface,
         renderer: Rc<Renderer>,
         session: Arc<Session>,
-        cell: CellMetrics,
+        layout: Layout,
         stats: Option<Arc<Stats>>,
     ) -> Self {
         // Açılış teması: ilk içerik karesi onu zaten tazeleyecek, ama alanın
@@ -921,7 +993,10 @@ impl DisplayLink {
                 stats,
                 frame: RefCell::new(Frame::default()),
                 blocks: RefCell::new(Blocks::default()),
-                cell: Cell::new(cell),
+                dock: RefCell::new(DockState::default()),
+                dock_rows: layout.dock_rows,
+                cols: Cell::new(layout.cols),
+                cell: Cell::new(layout.cell),
                 // Sıfır: ilk içerik karesine kadar öteleme yok ve o kare
                 // değeri söylüyor. Fare yolu bu arada tavana yapışık
                 // ızgarayı okuyor, yani açılıştaki tek karelik pencerede de
@@ -1191,6 +1266,12 @@ impl DisplayLink {
         if iv.session.resize(cols, rows, cell.cell_px()) {
             iv.cell.set(cell);
         }
+        // Sütun sayısı **kapının dışında**: dock'un pencerelemesi çizilen
+        // genişliği görmeli ve reddedilen bir boyutta (simge durumundaki
+        // pencere) `cols` zaten sıfır — dock o karede metin çizmiyor
+        // (`bt_core::dock::render`), yani ızgaranın eski ölçüde kalmasıyla
+        // çelişen bir şey yapmıyor.
+        iv.cols.set(cols);
         iv.geometry_changed.set(true);
         self.request_frame();
     }

@@ -6,7 +6,7 @@
 //! `Blocks`,
 //! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Theme`,
 //! `ShellState`, `ShellPhase`, aynanın `DockState`, `DockStatus`, `DockFault`,
-//! `Highlight`, `HighlightStyle`, `HighlightColor`'ı,
+//! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, dock yüzeyinin `Dock`'unu,
 //! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`, `CursorMotion`,
 //! `ReduceMotion`'ı görür (tam
 //! liste aşağıdaki `pub use` bloğu). `Osc52` alacritty'nin aynı adlı tipinin
@@ -35,6 +35,7 @@
 //! `--target x86_64-unknown-linux-gnu` ile derlemedir, `rustup` gelene kadar kapalı.
 
 mod color;
+mod dock;
 mod input;
 mod session;
 mod settings;
@@ -43,6 +44,7 @@ mod theme;
 mod wake;
 
 pub use color::{LinearRgba, Theme};
+pub use dock::Dock;
 pub use input::Arrow;
 pub use session::{
     Block, Blocks, Cell, CellHalf, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, SelectionPoint,

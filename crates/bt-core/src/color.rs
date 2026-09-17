@@ -197,6 +197,48 @@ impl Theme {
         linear_rgba(rgb(self.accent))
     }
 
+    /// Varsayılan ön plan, **lineer** RGBA; dock'un yazdığı metnin rengi.
+    ///
+    /// Izgara bu yoldan geçmiyor — orada renk hücrenin `Color`'ından
+    /// [`resolve_fg`] ile çözülüyor. Dock'un hücresinin `Color`'ı yok: ayna
+    /// düz metin taşıyor ve varsayılanı rolün kendisi.
+    pub const fn foreground_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.foreground))
+    }
+
+    /// Sönük ön plan, **lineer** RGBA; dock'ta öneri kuyruğunun
+    /// (`POSTDISPLAY`) rengi.
+    ///
+    /// Rol yeni değil, okuyucusu yeni: SGR 2'li varsayılan ön plan da
+    /// ([`resolve_fg`]) buradan geliyor. Öneri "henüz yazılmamış metin" ve
+    /// sönüklüğün tanımı — zeminle arasındaki farkı azalt — tam olarak onu
+    /// anlatıyor.
+    pub const fn dim_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.dim))
+    }
+
+    /// Dock'u ızgaradan ayıran saç çizgisinin rengi, **lineer** RGBA.
+    ///
+    /// **Yeni bir rol değil, türetilmiş bir değer** (`CLAUDE.md` → çizilmeyen
+    /// rol eklenmiyor): sönük ön planın zemine bir kez daha karışmış hâli.
+    /// Kural [`dim_toward`]'ın kendisi, yani ayrı bir zevk sabiti girmiyor —
+    /// ayraç, temanın en sessiz mürekkebinin de sönüğü olmalı: görülmeli ama
+    /// okunacak bir şey olmamalı.
+    pub const fn separator_linear(&self) -> LinearRgba {
+        linear_rgba(dim_toward(rgb(self.dim), self.background_rgb()))
+    }
+
+    /// Paletin `index` numaralı renginin **lineer** RGBA'sı.
+    ///
+    /// [`resolve`]'un `Colors` tablosuz kardeşi ve tek çağıranı dock: aynanın
+    /// `region_highlight`'ı numara taşıyor, uygulamanın OSC 4 ile değiştirdiği
+    /// tablo ise `Term` kilidinin arkasında (`Event::ColorRequest`'in bilinen
+    /// sınırıyla aynı kök). **Bilinen sınır:** OSC 4 ile değiştirilmiş bir
+    /// paleti dock görmez, temanınkini çizer.
+    pub(crate) fn indexed_linear(&self, index: u8) -> LinearRgba {
+        linear_rgba(self.default(index as usize))
+    }
+
     /// Başarıyla biten bloğun şerit rengi, **lineer** RGBA.
     pub const fn success_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.success))
@@ -440,6 +482,16 @@ const SRGB_LINEAR: [f32; 256] = [
 #[inline]
 pub(crate) const fn linear_rgba(color: Rgb) -> LinearRgba {
     LinearRgba::from_srgb(color.r, color.g, color.b)
+}
+
+/// `0xRRGGBB` → **lineer** RGBA.
+///
+/// Tek çağıranı aynanın `#rrggbb` yazan `region_highlight` kaydı
+/// ([`crate::shell::HighlightColor::Rgb`]): o renk palete hiç uğramıyor,
+/// kabuk onu doğrudan söylüyor. Paletin yazıldığı biçimle (`0xRRGGBB`) aynı
+/// olması tesadüf değil — temanın alanları da öyle.
+pub(crate) const fn linear_hex(hex: u32) -> LinearRgba {
+    linear_rgba(rgb(hex))
 }
 
 #[cfg(test)]

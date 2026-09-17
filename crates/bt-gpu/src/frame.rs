@@ -102,6 +102,32 @@ pub(crate) struct CursorBlock {
 const _: () = assert!(size_of::<CursorBlock>() == 32);
 const _: () = assert!(offset_of!(CursorBlock, rgba) == 16);
 
+impl CursorBlock {
+    /// Dikdörtgeni dikey olarak kaydırır — **dock'un caret'i için**.
+    ///
+    /// Alan eklemeden: dikdörtgen fragment'in `[[position]]`'ı ile
+    /// karşılaştırılıyor ve o koordinat viewport dönüşümünden **sonraki**,
+    /// yani her zaman ekranın uzayı. Dock'un listeleri ise kendi uzayında
+    /// (satır 0 = dock'un tepesi) doğuyor ve onları ekrana taşıyan şey ikinci
+    /// `setViewport`. İki uzayı birleştiren tek satır bu: dikdörtgen
+    /// viewport'tan geçmediği için ötelemeyi **CPU'da** alıyor.
+    ///
+    /// Izgaranın imleci bunun tam tersini yapıyor ([`Frame::push_cursor`]):
+    /// orada dikdörtgen ekran satırında doğuyor ve ötelemeyi **instance**
+    /// geri veriyor. Asimetri değil aynı kuralın iki yüzü — hangi tarafın
+    /// viewport'tan geçtiği neyin düzeltileceğini belirliyor.
+    ///
+    /// Dejenere dikdörtgen (görünmez caret) kaydırılınca da dejenere kalır:
+    /// `0 + dy >= 0 + dy` hiçbir fragment için doğru değil.
+    pub(crate) fn shifted_y(self, dy: f32) -> Self {
+        let [x0, y0, x1, y1] = self.rect;
+        Self {
+            rect: [x0, y0 + dy, x1, y1 + dy],
+            ..self
+        }
+    }
+}
+
 /// Çizilecek bir glyph — **uv'siz**.
 ///
 /// Karakterin hangi yuvaya düştüğü burada bilinmiyor ve bilinmemeli: yuva
@@ -180,6 +206,46 @@ fn rule_kind(underline: UnderlineStyle) -> Option<RuleKind> {
     }
 }
 
+/// Dock'un kare başına tek olan değerleri: kaç satır ve iki rengi.
+///
+/// Satır sayısı **oturumun sabiti** ama burada kare başına yeniden yazılıyor
+/// ([`Frame::clear`] onu da sıfırlıyor): tek alternatifi `Frame`'e kurucuda
+/// girmesiydi ve o, hücre ölçüsünün `clear`'ın parametresi olmasıyla aynı
+/// gerekçeyle reddedildi — kurucuda donan bir geometri ekran ölçeği ya da
+/// oturum değişince sessizce bayatlar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DockSurface {
+    /// Dock'un yüksekliği, **satır**. Piksele [`Frame::dock_px`] çeviriyor.
+    rows: u16,
+    /// Yüzeyin zemini; **opak** (`bt_core::Dock::ground`). Kayma boyunca
+    /// ızgaranın taşan alt satırı bunun altında kalıyor.
+    ground: [f32; 4],
+    /// Dock'u ızgaradan ayıran saç çizgisi.
+    separator: [f32; 4],
+}
+
+/// Dock'un yüksekliği, **satır**: giriş satırı + bağlam satırı.
+///
+/// İki, çünkü dock'un tasarımı iki satır (`plan.md` → Hedef) ve ikincisi
+/// (`[klasör] | [dal]`) phase-6'da doluyor. **Şimdiden ayrılıyor**: pay
+/// ızgaranın yüksekliğinden düşülüyor, yani sonradan büyütmek kullanıcının
+/// penceresini bir satır kısaltan ikinci bir `TIOCSWINSZ` demekti.
+/// Boş kalan alt satır bilinçli bir ara durum, phase-3'ün bıraktığı ikinci
+/// kalem (birincisi çift görüntü).
+///
+/// Bu crate'in sabiti çünkü çizen bu crate; `bt-shell` onu ızgara
+/// aritmetiğinde (`split_into_grid`) **tüketiyor** ve ikinci bir kopya
+/// tutmuyor — payın `CellMetrics` ile taşınmasıyla aynı disiplin.
+pub const DOCK_ROWS: u16 = 2;
+
+/// Ayracın kalınlığı, **piksel**.
+///
+/// Ölçekle çarpılmıyor ve bu bilinçli: saç çizgisi bir çizgidir, @2x'te iki
+/// piksel olması onu kalınlaştırırdı — retina ekranın kazandırdığı incelik tam
+/// da bu. Ölçülmüş bir sayı değil, bir tasarım sabiti (`CellMetrics::GUTTER_PT`
+/// emsali).
+const SEPARATOR_PX: f32 = 1.0;
+
 /// Tek karede çizilecekler.
 ///
 /// Hücre arka planları ve imleç aynı listede yaşar: ikisi de aynı pipeline'la
@@ -255,6 +321,28 @@ pub(crate) struct Frame {
     /// [`Frame::push_cursor`]'ı yeni konumla yeniden çağırıyor, yani ikinci
     /// çağrı birincinin üstüne yazmak zorunda.
     cursor: CursorBlock,
+    /// Dock yüzeyi: pencerenin altındaki **ikinci koordinat uzayı**.
+    ///
+    /// `Option`, çünkü dock oturum doğarken kararlaşıyor (entegrasyonlu zsh mi)
+    /// ve `None` "bu pencerede dock yok" demek — `bt-shell` ızgara
+    /// yüksekliğini de ona göre hesaplıyor. Boş bir dock'la `None` arasındaki
+    /// fark görünür: boş dock zeminini çiziyor, `None` hiçbir şey çizmiyor.
+    dock: Option<DockSurface>,
+    /// Dock'un kendi arka planları **ve caret'i**; ızgaranın `bg`'sinin ikizi.
+    ///
+    /// Ayrı liste olması `stripes` ile **aynı** gerekçe ve bir derece daha
+    /// zorunlu: [`Frame::move_cursor`]'ın `truncate(bg_count)`'u `bg`'ye giren
+    /// her şeyi her hareket karesinde siler, yani dock ızgaranın imleci
+    /// kaydıkça **titrerdi**. Sayaçlara da girmiyor (`bg_count`,
+    /// `glyph_count`, `rule_count`): `hucre=8 glif=6 kural=15` duman
+    /// sözleşmesi dock'suz bir kabukta ölçülüyor ve anlamı bit bit korunmalı.
+    dock_bg: Vec<Instance>,
+    dock_glyphs: Vec<GlyphCell>,
+    dock_rules: Vec<RuleCell>,
+    /// Dock'un caret'i; ızgaranınkiyle **aynı uniform slot'u**, ayrı encode
+    /// çağrısı. Shader değişmiyor — [`CursorBlock`]'a alan eklemek iki
+    /// taraftaki `stride 32` assert'ini kırardı.
+    dock_cursor: CursorBlock,
     /// Çizilen **arka plan** instance'ı sayısı; imleç sayılmaz.
     ///
     /// `make duman`'ın `hucre=K` jetonu bunu okur: sink'in hücre ürettiğinin
@@ -282,6 +370,14 @@ impl Frame {
         self.glyphs.clear();
         self.rules.clear();
         self.bg_count = 0;
+        // Dock da içerik karesinin sözleşmesinde: yüzeyi **her karede**
+        // yeniden açılıyor (`Frame::open_dock`). Korunsaydı dock'u olmayan bir
+        // oturumda son karenin yüzeyi ekranda asılı kalırdı.
+        self.dock = None;
+        self.dock_bg.clear();
+        self.dock_glyphs.clear();
+        self.dock_rules.clear();
+        self.dock_cursor = CursorBlock::default();
         // Dikdörtgen de sıfırlanmalı: kalsaydı imlecin sönmesi (`\e[?25l`) ya
         // da geçmişe kayması bloğu ekrandan kaldırır ama **altındaki metnin
         // rengini** eski yerinde bırakırdı — zemin renginde bir harf, yani
@@ -502,6 +598,161 @@ impl Frame {
         self.bg.truncate(self.bg_count);
         self.cursor = CursorBlock::default();
         self.push_cursor(cursor, at, rgba, alpha);
+    }
+
+    /// Dock'un bir hücresi; [`Frame::push`]'un ikizi ama **dock-yerel**
+    /// koordinatta ve sayaçlara girmeden.
+    ///
+    /// Satır `bt-core`'dan dock-yerel geliyor (0 = giriş satırı) ve burada da
+    /// öyle kalıyor: dock'u ekrana taşıyan şey ikinci `setViewport`
+    /// ([`crate::Renderer`]), aritmetik değil. Ötelemeyi (`origin_px`) hiç
+    /// görmemesi de bundan — muafiyet **yapısal**, çıkarmayla değil.
+    ///
+    /// Sol payı ızgarayla paylaşıyor ([`Frame::pos_at`]): dock'un sütunları
+    /// ızgaranınkilerle hizalı ve şeridin ayrıldığı pay dock'ta da boş kalıyor.
+    pub(crate) fn push_dock(&mut self, cell: Cell) {
+        let pos = self.pos(cell.col, cell.row);
+        if let Some(bg) = cell.bg {
+            // Caret listenin **sonuna** ekleniyor ([`Frame::push_dock_caret`]);
+            // ondan sonra gelen bir arka plan onu gömerdi. Izgara tarafında
+            // aynı bekçiyi `bg_count` tutuyor.
+            debug_assert_eq!(
+                self.dock_cursor,
+                CursorBlock::default(),
+                "dock arka planı caret'ten sonra eklendi: caret gömülür"
+            );
+            self.dock_bg.push(Instance {
+                pos,
+                size: [self.cell_px.0, self.cell_px.1],
+                rgba: bg.to_array(),
+            });
+        }
+        if let Some(ch) = cell.ch {
+            self.dock_glyphs.push(GlyphCell {
+                pos,
+                ch,
+                face: face(cell.bold, cell.italic),
+                rgba: cell.fg.to_array(),
+            });
+        }
+        if let Some(kind) = rule_kind(cell.underline) {
+            self.dock_rules.push(RuleCell {
+                pos,
+                kind,
+                rgba: cell.underline_color.unwrap_or(cell.fg).to_array(),
+            });
+        }
+        if cell.strikeout {
+            self.dock_rules.push(RuleCell {
+                pos,
+                kind: RuleKind::Strike,
+                rgba: cell.fg.to_array(),
+            });
+        }
+    }
+
+    /// Dock'un caret'i: bloğun dikdörtgeni **ve** altında kalan metnin rengi.
+    ///
+    /// [`Frame::push_cursor`]'ın dock ikizi ve iki farkı var. Birincisi konum:
+    /// caret hücrede duruyor, iki hücre arasında değil — dock'un kendi
+    /// animasyonu bu sette yok (`plan.md` → Kapsam Dışı: tuş vuruşu
+    /// animasyonları). İkincisi uzay: instance de dikdörtgen de **dock-yerel**
+    /// doğuyor ve dikdörtgeni ekrana taşıyan tek yer encode
+    /// ([`CursorBlock::shifted_y`]).
+    pub(crate) fn push_dock_caret(&mut self, col: u16, text: LinearRgba, rgba: LinearRgba) {
+        let pos = self.pos(col, 0);
+        self.dock_bg.push(Instance {
+            pos,
+            size: [self.cell_px.0, self.cell_px.1],
+            rgba: rgba.to_array(),
+        });
+        self.dock_cursor = CursorBlock {
+            rect: [
+                pos[0],
+                pos[1],
+                pos[0] + self.cell_px.0,
+                pos[1] + self.cell_px.1,
+            ],
+            rgba: text.to_array(),
+        };
+    }
+
+    /// Dock yüzeyini bu kare için açar: kaç satır ve iki rengi.
+    ///
+    /// Hücrelerden **sonra** çağrılıyor ve bu bir sıra tercihi değil zorunluk:
+    /// renkler `bt-core`'un dock çağrısından dönüyor ve o çağrı hücreleri
+    /// sink'e basarken doğuruyor onları. `Frame` bu yüzden yüzeyi hücrelerden
+    /// bağımsız tutuyor — listeler doluyken `dock` hâlâ `None` olabilir ve o
+    /// hâlde hiçbir şey çizilmez, yani "yarım açılmış dock" temsil edilemez.
+    pub(crate) fn open_dock(&mut self, rows: u16, ground: LinearRgba, separator: LinearRgba) {
+        self.dock = Some(DockSurface {
+            rows,
+            ground: ground.to_array(),
+            separator: separator.to_array(),
+        });
+    }
+
+    /// Bu karenin dock yüzeyi; `None` → dock yok, ikinci viewport kurulmaz.
+    pub(crate) fn dock(&self) -> Option<DockSurface> {
+        self.dock
+    }
+
+    /// Dock'un yüksekliği, piksel; ikinci viewport'un orijinini ve caret'in
+    /// kaymasını veren tek sayı. Dock yoksa sıfır.
+    pub(crate) fn dock_px(&self) -> f32 {
+        self.dock
+            .map_or(0.0, |dock| f32::from(dock.rows) * self.cell_px.1)
+    }
+
+    /// Dock'un zemini ve ayracı, **verilen genişlikte**.
+    ///
+    /// Genişlik argüman, çünkü `Frame` dokunun boyunu bilmiyor ve bilmemeli:
+    /// listeler hücre ızgarasından doğuyor, yüzey ise pencerenin **tamamını**
+    /// kaplamak zorunda. Aritmetiğin burada durması dikdörtgenin
+    /// `renderer.rs`'te elle kurulmasını önlüyor — orada kurulsaydı `Instance`
+    /// düzeninin ikinci bir yazarı olurdu.
+    ///
+    /// Zemin **opak** ve tam genişlik: kayma boyunca ızgaranın taşan alt
+    /// satırı dock'un üstüne düşüyor (`LinkDelegate::set_origin`'in yazdığı
+    /// taşma) ve onu örten tek şey bu dikdörtgen.
+    pub(crate) fn dock_ground(&self, width_px: f32) -> [Instance; 2] {
+        let dock = self.dock.unwrap_or(DockSurface {
+            rows: 0,
+            ground: [0.0; 4],
+            separator: [0.0; 4],
+        });
+        [
+            Instance {
+                pos: [0.0, 0.0],
+                size: [width_px, f32::from(dock.rows) * self.cell_px.1],
+                rgba: dock.ground,
+            },
+            // Ayraç zeminin **üstünde** ve dock'un en üst pikselinde: ızgara
+            // ile dock arasındaki sınır orası.
+            Instance {
+                pos: [0.0, 0.0],
+                size: [width_px, SEPARATOR_PX],
+                rgba: dock.separator,
+            },
+        ]
+    }
+
+    pub(crate) fn dock_bg(&self) -> &[Instance] {
+        &self.dock_bg
+    }
+
+    pub(crate) fn dock_glyphs(&self) -> &[GlyphCell] {
+        &self.dock_glyphs
+    }
+
+    pub(crate) fn dock_rules(&self) -> &[RuleCell] {
+        &self.dock_rules
+    }
+
+    /// Dock'un caret uniform'u, **dock-yerel**; ekrana taşıyan
+    /// [`CursorBlock::shifted_y`].
+    pub(crate) fn dock_cursor(&self) -> &CursorBlock {
+        &self.dock_cursor
     }
 
     pub(crate) fn bg_count(&self) -> usize {
@@ -1036,6 +1287,155 @@ mod tests {
             assert_eq!(frame.stripes(), stripes, "hareket karesi şeridi oynattı");
             assert_eq!(frame.bg_count(), 1);
         }
+    }
+
+    /// Dock'un bir hücresi; ızgaranın [`bg_cell`]'inin dock ikizi.
+    fn dock_cell(col: u16) -> Cell {
+        Cell {
+            col,
+            row: 0,
+            ch: Some('x'),
+            fg: CURSOR,
+            bg: Some(BG),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_dock_keeps_its_own_lists_and_stays_out_of_the_counters() {
+        // Phase'in birinci sözleşmesi: dock listeleri `bg`'ye **girmiyor**.
+        // Girselerdi `move_cursor`'ın `truncate(bg_count)`'u onları her hareket
+        // karesinde siler ve dock, imleç kaydıkça **titrerdi** — şeridin ayrı
+        // liste olma gerekçesinin aynısı, bir derece daha görünür belirtiyle.
+        // Sayaçlara girmemesi ikinci sözleşme: `hucre=8 glif=6 kural=15` duman
+        // koşusunda ölçülüyor ve anlamı bit bit korunmalı.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16));
+        frame.push(bg_cell(0, 0));
+        push_settled(&mut frame, cursor(0, 0, true));
+        frame.push_dock(dock_cell(0));
+        frame.push_dock(Cell {
+            underline: UnderlineStyle::Single,
+            ..dock_cell(1)
+        });
+        frame.push_dock_caret(2, TEXT, CURSOR);
+        frame.open_dock(2, BG, CURSOR);
+
+        assert_eq!(frame.bg_count(), 1, "dock hücre sayıldı");
+        assert_eq!(frame.glyph_count(), 0, "dock glyph sayıldı");
+        assert_eq!(frame.rule_count(), 0, "dock kural sayıldı");
+        assert_eq!(frame.bg_instances().len(), 2, "bir hücre, bir imleç");
+
+        let (dock_bg, dock_glyphs, dock_rules) = (
+            frame.dock_bg().to_vec(),
+            frame.dock_glyphs().to_vec(),
+            frame.dock_rules().to_vec(),
+        );
+        assert_eq!(dock_bg.len(), 3, "iki hücre, bir caret");
+        assert_eq!(dock_glyphs.len(), 2);
+        assert_eq!(dock_rules.len(), 1);
+
+        let caret = *frame.dock_cursor();
+        for _ in 0..3 {
+            frame.move_cursor(cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
+            assert_eq!(frame.dock_bg(), dock_bg, "hareket karesi dock'u oynattı");
+            assert_eq!(frame.dock_glyphs(), dock_glyphs);
+            assert_eq!(frame.dock_rules(), dock_rules);
+            assert_eq!(frame.dock_cursor(), &caret, "hareket karesi caret'i sildi");
+            assert!(frame.dock().is_some(), "hareket karesi yüzeyi kapattı");
+        }
+
+        // `clear` **hepsini** boşaltıyor: korunan bir yüzey, dock'u olmayan
+        // bir oturumun penceresinde asılı kalırdı.
+        frame.clear(grid(8, 16));
+        assert!(frame.dock().is_none());
+        assert!(frame.dock_bg().is_empty());
+        assert!(frame.dock_glyphs().is_empty());
+        assert!(frame.dock_rules().is_empty());
+        assert_eq!(frame.dock_cursor(), &CursorBlock::default());
+    }
+
+    #[test]
+    fn the_dock_never_reads_the_origin() {
+        // Muafiyet **yapısal**: dock listeleri dock-yerel doğuyor ve ötelemeyi
+        // hiç görmüyor; ekrana taşıyan şey ikinci `setViewport`. Aritmetikle
+        // kurulamazdı — `clear` ötelemeyi sıfırlıyor ve `set_origin_rows`
+        // sink'ten sonra çağrılıyor, yani dock hücreleri basılırken değer
+        // henüz bilinmiyor. Bu sınama o bağımsızlığı CPU tarafında çiviliyor;
+        // pikselin tanığı `renderer.rs`'te.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16));
+        frame.push_dock(dock_cell(1));
+        frame.push_dock_caret(1, TEXT, CURSOR);
+        let (settled_bg, settled_caret) = (frame.dock_bg()[0], *frame.dock_cursor());
+
+        // Aynı kare, iki satır ötelenmiş: ızgaranın hücresi kayar, dock'unki
+        // kaymaz.
+        frame.clear(grid(8, 16));
+        frame.set_origin_rows(2.0);
+        frame.push_dock(dock_cell(1));
+        frame.push_dock_caret(1, TEXT, CURSOR);
+        assert_eq!(frame.dock_bg()[0], settled_bg, "dock ötelemeyi yedi");
+        assert_eq!(frame.dock_cursor(), &settled_caret);
+        // Izgaranın imleci **aynı karede** ötelemeyi görüyor: ikisinin ayrı
+        // uzaylarda olduğu iddiası ancak ikisi birden sorulunca kanıtlanır.
+        frame.push_cursor(cursor(0, 0, true), [0.0, 2.0], CURSOR, OPAQUE);
+        assert_eq!(
+            frame.cursor_block().rect[1],
+            2.0 * 16.0,
+            "ızgaranın imleci ekran satırında değil"
+        );
+    }
+
+    #[test]
+    fn the_dock_ground_spans_the_given_width() {
+        // Genişlik argüman, çünkü `Frame` dokunun boyunu bilmiyor: listeler
+        // hücre ızgarasından doğuyor, yüzey ise pencerenin **tamamını**
+        // kaplamak zorunda. Zemin opak olmalı — kayma boyunca ızgaranın taşan
+        // alt satırı onun altında kalıyor.
+        let mut frame = Frame::default();
+        frame.clear(grid(9, 18));
+        frame.open_dock(2, BG, CURSOR);
+        assert_eq!(frame.dock_px(), 36.0, "iki satır piksele çevrilmedi");
+
+        let [ground, separator] = frame.dock_ground(500.0);
+        assert_eq!(ground.pos, [0.0, 0.0], "zemin sol paydan başlamamalı");
+        assert_eq!(ground.size, [500.0, 36.0]);
+        assert_eq!(ground.rgba, BG.to_array());
+        assert_eq!(ground.rgba[3], 1.0, "zemin saydam: taşan satır görünür");
+        // Ayraç dock'un **en üst** pikselinde: ızgarayla sınır orası.
+        assert_eq!(separator.pos, [0.0, 0.0]);
+        assert_eq!(separator.size, [500.0, SEPARATOR_PX]);
+        assert_eq!(separator.rgba, CURSOR.to_array());
+
+        // Dock'suz kare hiçbir yükseklik vermiyor: ikinci viewport kurulmaz.
+        frame.clear(grid(9, 18));
+        assert_eq!(frame.dock_px(), 0.0);
+    }
+
+    #[test]
+    fn a_shifted_caret_keeps_its_width_and_stays_degenerate_when_invisible() {
+        // Dock'un caret'i dikdörtgenini **CPU'da** ötelenerek ekrana taşıyor
+        // (ızgaranınkinin tam tersi: orada instance ötelemeyi geri veriyor).
+        // İki iddia sessizce bozulabilir: kaymanın boyu değiştirmemesi ve
+        // dejenere (görünmez) dikdörtgenin kaydırılınca da dejenere kalması —
+        // ikincisi bozulsaydı caret'i olmayan bir dock'ta bir hücre genişliğinde
+        // bir bant, altındaki metni zemin rengine boyardı.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16));
+        frame.push_dock_caret(3, TEXT, CURSOR);
+        let shifted = frame.dock_cursor().shifted_y(100.0);
+        assert_eq!(shifted.rect, [24.0, 100.0, 32.0, 116.0]);
+
+        let empty = CursorBlock::default().shifted_y(100.0);
+        assert_eq!(
+            empty.rect[0], empty.rect[2],
+            "dejenere dikdörtgen genişlik kazandı"
+        );
+        assert_eq!(
+            empty.rect[1], empty.rect[3],
+            "dejenere dikdörtgen boy kazandı"
+        );
     }
 
     #[test]
