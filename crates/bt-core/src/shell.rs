@@ -213,6 +213,17 @@ pub struct DockState {
     /// türüyor. Kare başına yeniden saymak `frame()`'in `Term` kilidi
     /// öncesine O(n) bir gezinti eklerdi.
     pub display_chars: usize,
+    /// Görüntünün **son boşluk olmayan** karakteri; boş satırda `None`.
+    ///
+    /// Bastırmanın **tazelik kapısı** bunu kullanıyor: ızgaradaki giriş
+    /// satırının son mürekkepli hücresiyle karşılaştırılıyor ve uyuşmazsa
+    /// ayna bayat sayılıp bastırma bırakılıyor. Boşluk **dışlanıyor**, çünkü
+    /// boşluk hücresi sınırdan hiç geçmiyor (`frame()`'in atlama kapısı) ve
+    /// `ls ` yazan kullanıcıda her karede yanlış alarm verirdi.
+    ///
+    /// Burada saklanıyor, çünkü çözücünün metni zaten elinde; kare başına
+    /// yeniden taramak `Term` kilidi öncesine O(n) eklerdi.
+    pub last_ink: Option<char>,
 }
 
 impl Clone for DockState {
@@ -232,6 +243,7 @@ impl Clone for DockState {
         self.postdisplay.push_str(&source.postdisplay);
         self.cursor = source.cursor;
         self.display_chars = source.display_chars;
+        self.last_ink = source.last_ink;
         self.highlights.clear();
         self.highlights.extend_from_slice(&source.highlights);
     }
@@ -248,6 +260,7 @@ impl DockState {
         self.postdisplay.clear();
         self.cursor = 0;
         self.display_chars = 0;
+        self.last_ink = None;
         self.highlights.clear();
     }
 }
@@ -490,6 +503,9 @@ pub(crate) struct SuppressedInput {
     /// Caret'ten **sonra** gelen karakter sayısı; girişin imleç satırının
     /// altında kaç satır daha sürdüğü bundan çıkıyor.
     pub(crate) chars_after_cursor: usize,
+    /// Görüntünün son mürekkebi ([`DockState::last_ink`]) — tazelik kapısının
+    /// aynadaki yarısı.
+    pub(crate) last_ink: Option<char>,
 }
 
 impl ShellLog {
@@ -615,6 +631,7 @@ impl ShellLog {
             (block, Outcome::Pending) => Some(SuppressedInput {
                 block,
                 chars_after_cursor: self.dock.display_chars.saturating_sub(self.dock.cursor),
+                last_ink: self.dock.last_ink,
             }),
             (_, Outcome::Finished(_)) => None,
         }
@@ -1115,6 +1132,14 @@ fn decode_line<'a>(
         .checked_add(cursor_in_buffer)?
         .min(text_chars);
     line.display_chars = display_chars;
+    // Sondan ilk boşluk olmayan karakter; üç gövde görüntü sırasında.
+    line.last_ink = line
+        .predisplay
+        .chars()
+        .chain(line.buffer.chars())
+        .chain(line.postdisplay.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .next_back();
 
     decoded.clear();
     decode_base64(fields.next()?, decoded)?;

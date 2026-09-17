@@ -1026,6 +1026,30 @@ pub struct SelectionPoint {
 ///
 /// Bayrak okuması kırpılmış noktadan — `pub` API'ye grid dışı bir sütun
 /// gelirse indeksleme paniklemesin.
+/// Bir ekran satırının **son mürekkepli** karakteri; boş satırda `None`.
+///
+/// Bastırmanın tazelik kapısının ızgara yarısı ([`DockState::last_ink`] öteki
+/// yarısı). Mürekkep ölçütü [`Session::frame`]'in atlama kapısıyla **aynı**
+/// olmak zorunda — boşluk, spacer ve gizli hücre saymıyor — yoksa iki taraf
+/// aynı satıra bakıp farklı cevap verir.
+///
+/// Nokta `grid_clamp` ile kırpılıyor: kaydırılmış pencerede satır geçmişe
+/// düşebilir ve indeksleme panik yasağının altında (`CLAUDE.md`).
+fn last_ink_in_row<T>(term: &Term<T>, row: u16, offset: i32) -> Option<char> {
+    let line = Point::new(Line(i32::from(row) - offset), Column(0))
+        .grid_clamp(term, Boundary::Grid)
+        .line;
+    (0..term.columns()).rev().find_map(|col| {
+        let cell = &term.grid()[line][Column(col)];
+        let blank = cell.flags.contains(Flags::HIDDEN)
+            || cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER))
+            || cell.c == ' ';
+        (!blank).then_some(cell.c)
+    })
+}
+
 fn anchor<T>(term: &Term<T>, at: SelectionPoint) -> (Point, Side) {
     let offset = term.grid().display_offset() as i32;
     let (point, half) = (viewport_point((at.col, at.row), offset), at.half);
@@ -1315,13 +1339,29 @@ impl Session {
         // büyüktür, yani **eksik** bastırılır — sızıntı o satırlarla sınırlı
         // kalır, fazla bastırma olmaz. Tek fazla-bastırma yolu bayat ayna
         // (`line-pre-redraw` çizimden önce koşuyor) ve o bir karelik.
-        let suppress_to = suppressed_block.map(|input| {
+        let suppress_to = suppressed_block.and_then(|input| {
             let cols = usize::from(term.columns().max(1) as u16);
             let last = usize::from(cursor_col).saturating_add(input.chars_after_cursor);
             let below = u16::try_from(last.saturating_sub(1) / cols).unwrap_or(u16::MAX);
-            cursor_screen_row
+            let to = cursor_screen_row
                 .saturating_add(below)
-                .min(grid_rows.saturating_sub(1))
+                .min(grid_rows.saturating_sub(1));
+            // **Tazelik kapısı.** Bastırma aynanın *güncel* olduğuna
+            // güveniyor ve bunu sınayan hiçbir şey yoktu: ayna bayatlarsa
+            // ızgara gizlenir, dock eski metni gösterir ve kullanıcı
+            // yazdığını **hiçbir yerde** görmez. Ölçülmüş örneği
+            // `bracketed-paste-magic`: yapıştırılan metni `zle -U` ile
+            // kuyruğa geri basıyor, ZLE typeahead varken redisplay'i atlıyor
+            // ve `line-pre-redraw` — dolayısıyla aynamız — bir sonraki tuşa
+            // kadar hiç koşmuyor. Kabuk tarafında üç çare ölçüldü ve üçü de
+            // kapalı (kancayı yeniden bağlamak, widget'ı sarmalamak,
+            // eklentinin `paste-finish`'i — sonuncusunda `BUFFER` henüz boş).
+            //
+            // Kapı **kip sezmiyor**, iki kesin veriyi karşılaştırıyor:
+            // ızgaranın son mürekkebi ile aynanınki. Yanlış alarmın yönü
+            // güvenli — bastırmayı bırakır, yani en kötü ihtimalle kullanıcı
+            // satırı iki yerde görür; sessizce kaybetmez.
+            (last_ink_in_row(&term, to, offset) == input.last_ink).then_some(to)
         });
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
@@ -2863,6 +2903,32 @@ mod tests {
         );
         assert!(cursor.visible, "{cursor:?}");
         assert_eq!(cursor.content_rows, 3, "{cursor:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_stale_mirror_leaves_the_input_line_in_the_grid() {
+        // **Tazelik kapısı.** Bastırma aynanın güncel olduğuna güveniyor;
+        // güvenmenin bedeli, ayna bayatlarsa kullanıcının yazdığını **hiçbir
+        // yerde** görmemesi. Ölçülmüş örneği `bracketed-paste-magic`:
+        // yapıştırılan metni `zle -U` ile kuyruğa geri basıyor, ZLE typeahead
+        // varken redisplay'i atlıyor ve ayna bir sonraki tuşa kadar
+        // güncellenmiyor.
+        //
+        // Burada aynı hâl elle kuruluyor: ızgarada `ls -la`, aynada onun bir
+        // önceki hâli (`ls`). Kapı uyuşmazlığı görüp bastırmayı bırakmalı.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_typing_session(&mirror("bHM", 2), Arc::clone(&wake));
+        wait_mirror(&session, DockStatus::Live);
+
+        let mut cells = Vec::new();
+        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        assert_eq!(
+            row_glyphs(&cells, 2),
+            "$ls-la",
+            "ayna bayatken ızgara da bastırıldı: kullanıcı yazdığını hiçbir yerde görmez"
+        );
+        assert!(cursor.visible, "{cursor:?}");
         session.shutdown();
     }
 

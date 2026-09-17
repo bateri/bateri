@@ -258,6 +258,12 @@ mod tests {
             display_chars: predisplay.chars().count()
                 + buffer.chars().count()
                 + postdisplay.chars().count(),
+            last_ink: predisplay
+                .chars()
+                .chain(buffer.chars())
+                .chain(postdisplay.chars())
+                .filter(|ch| !ch.is_whitespace())
+                .next_back(),
         }
     }
 
