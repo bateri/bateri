@@ -75,18 +75,24 @@ gösteremiyorsa (`Unavailable`), ZLE satırı bırakmışsa (`Idle`) ya da ayna
 **bayatsa** bastırma **yok**: gösteremediğimiz satır ızgarada kalmak zorunda.
 Bayatlık kip sezerek değil iki kesin veriyi karşılaştırarak anlaşılıyor —
 ızgaranın son mürekkebi ile aynanınki (`DockState::last_ink`); yanlış alarmın
-yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez. Gerekçesi
-**Caret'in yeri ayrı ve çok daha geniş bir soru**, hücrelerin bastırılmasıyla
-karıştırılmıyor: sahibini tek bir yüklem söylüyor (`shell::caret_home`) ve onu
-hem dock hem ızgara okuyor, yani ikisi ancak birlikte değişiyor — ne iki caret
-ne sıfır caret mümkün. Komut koşarken (`Running`) ve ayna gösterilemiyorken
-(`Unavailable`) ızgaranın, **kalan her hâlde dock'un** — kabuğun henüz hiç
-konuşmadığı açılış ve iki komut arası (`Finished`) dahil, çünkü sıçrayan bir
-caret tam da o pencerelerde görülüyordu. Üç ön koşul: pencerenin dock'u olacak
-(`SessionOptions::dock`; yoksa devralacak kimse yok), alternatif ekranda
-olmayacak (dock zaten kalkıyor) ve bastırılan bir satır varsa tazelik kapısı
-geçilecek. Metinsiz dock satırı caret'siz değil: `Live` olmayan aynada caret
-satırın başında duruyor. Bastırmanın kendi gerekçesi
+yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez.
+**Devrin tek yüklemi var** (`shell::caret_home` + üç ön koşul) ve **üç
+tüketicisi**: hangi hücrelerin atlanacağı, imlecin çizilip çizilmeyeceği ve
+**doluluk sayısı**. Üçü ayrı sorulduğunda ayrışıyorlardı ve belirti ölçüldü:
+boş prompt'ta hiçbir hücre çıpayı taşımadığı için satır çizilmiyor ama
+doluluğa **giriyordu**, ilk tuşta çıpa doğunca doluluk bir satır düşüyor ve
+ızgaranın tamamı oynuyordu — satır gizliydi ama yer kaplıyordu. Tek yüklem
+`display: none` veriyor. Caret'in sahibi satırın nerede çizildiğine uyuyor:
+komut koşarken (`Running`), ayna gösterilemiyorken (`Unavailable`) ve ZLE
+satırı bırakmışken (`Input` + `Idle`; `CORRECT`'in `[nyae]`'i, R3.3) ızgaranın;
+**kalan her hâlde dock'un** — kabuğun henüz hiç konuşmadığı açılış, prompt
+çizilirken ve iki komut arası (`Finished`, içinde bir `git` fork'u) dahil,
+çünkü sıçrayan caret tam da o pencerelerde görülüyordu. Üç ön koşul:
+pencerenin dock'u olacak (`SessionOptions::dock`; yoksa devralacak kimse yok
+ve satır da imleç de ızgarada kalır), alternatif ekranda olmayacak (dock zaten
+kalkıyor) ve bastırılan bir satır varsa tazelik kapısı geçilecek. Metinsiz dock
+satırı caret'siz değil: `Live` olmayan aynada caret satırın başında duruyor.
+Bastırmanın kendi gerekçesi
 ölçülmüş: `bracketed-paste-magic` yapıştırmayı `zle -U` ile kuyruğa geri
 basıyor, ZLE typeahead varken redisplay'i atlıyor ve ayna bir sonraki tuşa
 kadar güncellenmiyor. Aynı ölçüm yapıştırmaya **dar bir istisna** getirdi:

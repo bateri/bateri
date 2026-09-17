@@ -18,9 +18,18 @@ Set yürürken gerçek pencerede iki kusur çıktı (kullanıcı, ekran görünt
    da olduğu için `Finished` penceresi kısa değil.
 2. **Izgarada açılış artığı.** `login(1)`'in `Last login: …` banner'ı ilk
    satırda duruyor.
+3. **Giriş satırı yer kaplıyor.** Dock'a ilk harf yazılınca ızgaranın tamamı
+   bir satır oynuyor, silinince geri dönüyor. Kullanıcının teşhisi birebir:
+   "css visibility hidden gibi takılıyor, bize display none lazım."
 
-İkisi ayrı mekanizma, tek şikâyet: "sadece dock aktifleşecek ve ızgara
-tertemiz olacak."
+Üçü ayrı belirti, tek şikâyet: "sadece dock aktifleşecek ve ızgara tertemiz
+olacak."
+
+Üçüncüsünün sebebi ilkinin kardeşi: devir üç ayrı yerde ayrı ayrı
+soruluyordu — hücreler çıpaya, imleç kendi kapısına, doluluk sayısı
+bastırmaya. Boş prompt'ta hiçbir hücre çıpayı taşımadığı için satır
+çizilmiyor ama **doluluğa giriyordu**; ilk tuşta çıpa doğuyor, bastırma
+başlıyor ve doluluk bir satır düşüyordu.
 
 ## Değişiklikler
 
@@ -31,15 +40,21 @@ tertemiz olacak."
   - `Running` → `Grid`: komut çalışıyor, satırın sahibi o.
   - `Unavailable` → `Grid`: gösteremediğimiz bir satır var, ızgarada kalmalı
     (R1.2'nin aynı gerekçesi).
+  - `Input` + `Idle` → `Grid`: ZLE satırı **bıraktı** ve bastırma da orada
+    kalkıyor (R3.3: `CORRECT`'in `[nyae]`'i). Caret satırı izlemek zorunda.
   - Kalan her hâl → `Dock`. **Kabuğun hiç konuşmamış olması (`state == None`)
     dahil**: açılış tam da o hâl ve caret'in oraya ait olması gereken an.
 - **`crates/bt-core/src/dock.rs`** — dock, caret'in sahibiyken onu **her
   hâlde** çiziyor: ayna `Live` ise hesaplanan sütunda, değilse `TEXT_COL`'da
   (boş satırın başı).
-- **`crates/bt-core/src/session.rs`** — ızgara, caret'in sahibi değilken
-  imleci çizmiyor. `SessionOptions.dock` ile oturum "bu pencerenin dock'u var"
-  bilgisini alıyor; alternatif ekranda dock kalktığı için orada ızgara yine
-  sahip (`alt_screen` zaten kilidin altında).
+- **`crates/bt-core/src/session.rs`** — devir **tek yüklemde** (`caret_in_dock`,
+  döngüden önce) ve **üç tüketicisi** ona bağlı: atlanan hücreler, imlecin
+  görünürlüğü ve `content_rows`. Sonuncusu kusurun kendisiydi —
+  `display: none`, `visibility: hidden` değil. `SessionOptions.dock` ile oturum
+  "bu pencerenin dock'u var" bilgisini alıyor; alternatif ekranda dock kalktığı
+  için orada ızgara yine sahip (`alt_screen` zaten kilidin altında).
+  Bastırma da artık `self.dock`'a bağlı: dock'suz pencerede satırı gizlemek
+  onu hiçbir yerde göstermemek olurdu.
 - **`crates/bt-shell/src/child.rs`** — `login(1)` **her zaman `-q`** ile:
   banner yok. alacritty'nin macOS yolunun paritesi (`home` ve `shell` emsali:
   politika bizde, çözüm parite hâlinde), ve çözülemeyen bir kullanıcı/kabuk
@@ -71,6 +86,8 @@ tertemiz olacak."
   görünmüyor.
 - Alternatif ekranda (vim, htop, `less`) caret ızgarada ve dock yok.
 - Ayna gösteremiyorsa (`Unavailable`) caret ızgarada — satır orada.
+- **Dock'a ilk harf yazınca ızgara oynamıyor**, silince de oynamıyor: giriş
+  satırı hiç yer kaplamıyor.
 - **phase-7'den devreden gözle testi:** vim, htop, `less` gir/çık; `git log`'da
   dock yerinde kalıyor.
 
@@ -96,6 +113,7 @@ tertemiz olacak."
 - [x] Test: `Running`'de caret ızgarada, dock'ta yok
 - [x] Test: `Finished`/açılışta caret dock'ta, ızgarada yok
 - [x] Test: `Unavailable`'da caret ızgarada
+- [x] Test: ilk tuşta `content_rows` değişmiyor (kusurun kendisi)
 - [x] Test: `login` komutu `-q` taşıyor (argv'nin tamamı, parite dahil)
 - [x] Test: çözülemeyen kullanıcı/kabuk/UTF-8 dışı yol `None`'a düşüyor
 - [ ] Gerçek pencerede gözle: açılış, komut, vim/htop/less (phase-7'den devir)
