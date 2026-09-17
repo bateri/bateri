@@ -44,7 +44,13 @@ ZLE'nin görüntüsünü (`PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlig
 `CURSOR`) OSC 8133 ile aynalıyor; `Session::dock()` onu **çözülmüş** dock
 hücrelerine çevirip sınırdan veriyor ve `bt-gpu` pencerenin altındaki **ikinci
 bir `setViewport`**'la çiziyor — kendi listeleri, kendi caret'i, opak zemini ve
-ızgaradan ayıran saç çizgisiyle. Dock ötelemeden **yapısal olarak** muaf:
+ızgaradan ayıran saç çizgisiyle. Payı `DOCK_ROWS * cell_h` **artı iki nefes
+payı** (`bt_gpu::dock_px`; formülün tek kopyası orada, `split_into_grid` onu
+tüketiyor): iki satır saç çizgisine yapışınca dock bakılamaz duruyordu. Payın
+kaynağı sol payın ta kendisi (`CellMetrics::gutter_px`) — ikinci bir tasarım
+sabiti yok, aynı içi girinti iki eksende ve punto büyüyünce pay da büyüyor.
+Saç çizgisi payın **üstünde**, viewport'un tepesinde. Dock ötelemeden
+**yapısal olarak** muaf:
 listeleri dock-yerel doğuyor, ekrana taşıyan şey o ikinci viewport. Üst
 satırında `>` işareti (safha rengiyle), metin, sönük öneri,
 `region_highlight` renkleri ve caret var; alt satırında **bağlam** —

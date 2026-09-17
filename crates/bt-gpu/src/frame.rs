@@ -215,7 +215,7 @@ fn rule_kind(underline: UnderlineStyle) -> Option<RuleKind> {
 /// oturum değişince sessizce bayatlar.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DockSurface {
-    /// Dock'un yüksekliği, **satır**. Piksele [`Frame::dock_px`] çeviriyor.
+    /// Dock'un yüksekliği, **satır**. Piksel karşılığı `px`.
     rows: u16,
     /// Yüzeyin zemini; **opak** (`bt_core::Dock::ground`). Kayma boyunca
     /// ızgaranın taşan alt satırı bunun altında kalıyor.
@@ -235,6 +235,41 @@ pub(crate) struct DockSurface {
 /// aritmetiğinde (`split_into_grid`) **tüketiyor** ve ikinci bir kopya
 /// tutmuyor — payın `CellMetrics` ile taşınmasıyla aynı disiplin.
 pub const DOCK_ROWS: u16 = 2;
+
+/// Dock'un kapladığı yükseklik, **piksel**; `dock_rows == 0` ise sıfır.
+///
+/// Formülün **tek** kopyası burası ve iki tüketicisi var: ızgaranın satır
+/// aritmetiği (`bt_shell`'in `split_into_grid`'i) ve ikinci viewport'un
+/// orijini ([`Frame::dock_px`]). Ayrı ayrı yazılsalardı yeniden boyutlandırmada
+/// bir kare boyunca ayrışırlardı — `DOCK_ROWS`'un `bt-shell` tarafından
+/// tüketilmesiyle aynı disiplin.
+///
+/// **Nefes payı satırların üstünde ve altında** (`2 *`): iki satır saç
+/// çizgisine yapışınca dock "çirkin" duruyordu (kullanıcı, 012 phase-9).
+/// Kullanıcı bitişik + nefes paylı görünümü seçti, ayrık yüzeyi değil.
+///
+/// Payın kaynağı **sol payın ta kendisi** ([`CellMetrics::gutter_px`]): ikinci
+/// bir tasarım sabiti uydurulmadı, aynı içi girinti iki eksende kullanılıyor.
+/// Sabit bir piksel sayısı da olmazdı — Cmd +/− ile punto büyüyünce pay aynı
+/// kalır ve oran bozulurdu; `gutter_px` ölçekle zaten çarpılıyor.
+pub fn dock_px(dock_rows: u16, cell: CellMetrics) -> f32 {
+    dock_height(
+        dock_rows,
+        f32::from(cell.cell_px().1),
+        f32::from(cell.gutter_px()),
+    )
+}
+
+/// Formülün gövdesi, ham sayılarla: [`dock_px`] ile [`Frame`] aynı aritmetiği
+/// paylaşsın diye ayrı. `Frame` [`CellMetrics`]'i alan olarak tutamıyor
+/// (kurucusu sıfırı eliyor, yani `Default`'u yok), ama iki bileşeni zaten
+/// elinde.
+fn dock_height(rows: u16, cell_h: f32, pad: f32) -> f32 {
+    if rows == 0 {
+        return 0.0;
+    }
+    f32::from(rows) * cell_h + 2.0 * pad
+}
 
 /// Ayracın kalınlığı, **piksel**.
 ///
@@ -609,7 +644,7 @@ impl Frame {
     /// Sol payı ızgarayla paylaşıyor ([`Frame::pos_at`]): dock'un sütunları
     /// ızgaranınkilerle hizalı ve şeridin ayrıldığı pay dock'ta da boş kalıyor.
     pub(crate) fn push_dock(&mut self, cell: Cell) {
-        let pos = self.pos(cell.col, cell.row);
+        let pos = self.dock_pos(cell.col, cell.row);
         if let Some(bg) = cell.bg {
             // Caret listenin **sonuna** ekleniyor ([`Frame::push_dock_caret`]);
             // ondan sonra gelen bir arka plan onu gömerdi. Izgara tarafında
@@ -658,7 +693,7 @@ impl Frame {
     /// doğuyor ve dikdörtgeni ekrana taşıyan tek yer encode
     /// ([`CursorBlock::shifted_y`]).
     pub(crate) fn push_dock_caret(&mut self, col: u16, text: LinearRgba, rgba: LinearRgba) {
-        let pos = self.pos(col, 0);
+        let pos = self.dock_pos(col, 0);
         self.dock_bg.push(Instance {
             pos,
             size: [self.cell_px.0, self.cell_px.1],
@@ -698,8 +733,18 @@ impl Frame {
     /// Dock'un yüksekliği, piksel; ikinci viewport'un orijinini ve caret'in
     /// kaymasını veren tek sayı. Dock yoksa sıfır.
     pub(crate) fn dock_px(&self) -> f32 {
-        self.dock
-            .map_or(0.0, |dock| f32::from(dock.rows) * self.cell_px.1)
+        self.dock.map_or(0.0, |dock| {
+            dock_height(dock.rows, self.cell_px.1, self.gutter_px)
+        })
+    }
+
+    /// Dock içeriğinin dock-yerel dikey kayması: **nefes payı**.
+    ///
+    /// Saç çizgisi viewport'un tepesinde (y = 0) kalıyor ve pay onun
+    /// **altında** başlıyor; üstüne pay koymak çizgiyi ızgaranın içine
+    /// sokardı.
+    fn dock_pad(&self) -> f32 {
+        self.gutter_px
     }
 
     /// Dock'un zemini ve ayracı, **verilen genişlikte**.
@@ -721,8 +766,14 @@ impl Frame {
         });
         [
             Instance {
+                // Zemin **paylar dahil** bütün yüzeyi kaplıyor: pay kadar
+                // eksik bir dikdörtgen, kayma boyunca taşan ızgara satırını
+                // tam da nefes payının olduğu yerde gösterirdi.
                 pos: [0.0, 0.0],
-                size: [width_px, f32::from(dock.rows) * self.cell_px.1],
+                size: [
+                    width_px,
+                    dock_height(dock.rows, self.cell_px.1, self.gutter_px),
+                ],
                 rgba: dock.ground,
             },
             // Ayraç zeminin **üstünde** ve dock'un en üst pikselinde: ızgara
@@ -829,6 +880,16 @@ impl Frame {
     /// yolu ([`Frame::push_cursor`]) aynı fonksiyondan geçen ikinci çağıran.
     fn pos(&self, col: u16, row: u16) -> [f32; 2] {
         self.pos_at([f32::from(col), f32::from(row)])
+    }
+
+    /// [`Frame::pos`]'un dock hâli: aynı sütun aritmetiği, **artı nefes payı**.
+    ///
+    /// Payın eklendiği **tek** yer burası ve gerekçesi sol payınkiyle aynı
+    /// ([`Frame::pos_at`]): arka plan, glyph, kural ve caret dördü de bu
+    /// satırdan geçiyor, ikinci bir yerde eklenseydi pay iki kez uygulanırdı.
+    fn dock_pos(&self, col: u16, row: u16) -> [f32; 2] {
+        let [x, y] = self.pos(col, row);
+        [x, y + self.dock_pad()]
     }
 
     /// [`Frame::pos`]'un kesirli hâli — imleç iki hücre arasındayken.
@@ -1409,6 +1470,54 @@ mod tests {
         // Dock'suz kare hiçbir yükseklik vermiyor: ikinci viewport kurulmaz.
         frame.clear(grid(9, 18));
         assert_eq!(frame.dock_px(), 0.0);
+    }
+
+    #[test]
+    fn the_dock_breathes_above_and_below_its_rows() {
+        // **Nefes payı** (012 phase-9, kullanıcı: "padding top yok resmen").
+        // İki satırın üstünde ve altında pay var, kaynağı da sol payın ta
+        // kendisi — ikinci bir tasarım sabiti uydurulmadı.
+        let mut frame = Frame::default();
+        frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
+        frame.open_dock(2, BG, CURSOR);
+        // 2×18 + 2×GUTTER = 36 + 14 = 50.
+        assert_eq!(frame.dock_px(), 50.0, "pay yüksekliğe girmedi");
+
+        // **Zemin payları da kaplıyor**: pay kadar eksik bir dikdörtgen,
+        // kayma boyunca taşan ızgara satırını tam da nefes payında gösterirdi.
+        let [ground, separator] = frame.dock_ground(500.0);
+        assert_eq!(ground.size, [500.0, 50.0]);
+        // Saç çizgisi payın **üstünde**, viewport'un tepesinde: ızgarayla
+        // sınır orası ve payı onun üstüne koymak çizgiyi ızgaraya sokardı.
+        assert_eq!(separator.pos, [0.0, 0.0]);
+
+        // İçerik payın altından başlıyor: ilk satır y = pay.
+        frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
+        frame.push_dock(Cell {
+            col: 0,
+            row: 0,
+            ch: Some('x'),
+            ..Cell::default()
+        });
+        frame.open_dock(2, BG, CURSOR);
+        assert_eq!(
+            frame.dock_glyphs()[0].pos[1],
+            f32::from(GUTTER),
+            "içerik paya inmedi"
+        );
+        // İkinci satır bir hücre aşağıda, yani pay **bir kez** uygulanıyor.
+        frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
+        frame.push_dock(Cell {
+            col: 0,
+            row: 1,
+            ch: Some('x'),
+            ..Cell::default()
+        });
+        assert_eq!(
+            frame.dock_glyphs()[0].pos[1],
+            f32::from(GUTTER) + 18.0,
+            "pay iki kez uygulandı"
+        );
     }
 
     #[test]

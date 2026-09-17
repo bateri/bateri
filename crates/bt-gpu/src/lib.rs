@@ -28,7 +28,7 @@ mod stats;
 mod surface;
 
 pub use error::GpuError;
-pub use frame::DOCK_ROWS;
+pub use frame::{DOCK_ROWS, dock_px};
 pub use link::{DisplayLink, Layout, Origin, Waker};
 pub use renderer::{CellMetrics, FontNotice, Renderer};
 pub use stats::{MIN_SAMPLES, Samples, Stats};
