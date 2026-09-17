@@ -114,7 +114,7 @@ use crate::{child, settings};
 /// hareket altyapısından geçen animasyonları görür; (b) son kareyle deadline
 /// arasındaki sessizlik ([`QUIET_FLOOR`]) — altyapıyı atlayan sızıntıyı da
 /// görür ve **ölçüldü** (phase-6): kapının en duyarlı katı artık o, çünkü
-/// periyodu 870 ms'den kısa her sızıntıyı yakalıyor, bu sayı ise ancak
+/// periyodu 868 ms'den kısa her sızıntıyı yakalıyor, bu sayı ise ancak
 /// 3 Hz'in üstünü.
 ///
 /// **Sağlıklı koşudaki oynamanın mekanizması ölçülmedi.** Kare talebi
@@ -177,16 +177,23 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// koşuda küçük. Taban bu yüzden "en düşük sağlıklı gözlemin en çok yarısı
 /// **ve** en yüksek bozuk gözlemin üstünde" ve aralığın **en büyük** ucundan
 /// seçiliyor — ortadan seçilen bir sayı kapıyı yavaş sızıntıya körleştirirdi.
-/// Türetme (2026-09-16, otuz yedi sağlıklı koşu): en düşük sağlıklı
-/// `1742,29 ms` → tavan `871,14 ms`; en yüksek bozuk `129,25 ms`. `870` o
-/// aralığın en büyük on milisaniyelik adımı — yani **tavanın 1 ms altında**.
-/// Bunun bedeli dar bir yeniden türetme tetiği: üç saniyelik sağlıklı bir
-/// koşu `1740 ms`'nin altına inerse bozulan şey kapı değil **kuralın
-/// kendisi** olur (kapının payı hâlâ iki kat) ve sayı yeniden türetilmelidir.
+/// Türetme (2026-09-17, yirmi sağlıklı koşu): en düşük sağlıklı
+/// `1737,12 ms` → tavan `868,56 ms`; en yüksek bozuk `129,25 ms` (2026-09-16).
+/// `868` o aralığın en büyük tam milisaniyesi.
 ///
-/// **Üç sayı birbirine bağlı ve gerekçeleri aynı blokta**
+/// **Bir kez zaten tetiklendi ve bu sabitin asıl dersi o.** 2026-09-16'nın
+/// türetmesi `1742,29 ms`'lik bir uçtan `870`'i vermişti; 011'in duman
+/// reçetesini değiştirmesinden sonra yirmi koşuluk yeniden gözlem bandın
+/// alt ucunu `1737,12`'ye indirdi ve `870` kuralın tavanını **1,44 ms**
+/// aştı. Kapı o koşularda yeşildi — aşım payda saklanıyordu, sayıda değil.
+/// Ders: bu sabitin tetiği dar ve **sessiz**; üç saniyelik sağlıklı bir koşu
+/// `1737 ms`'nin altına inerse bozulan şey kapı değil **kuralın kendisi**
+/// olur ve sayı `/measure` ile yeniden türetilmelidir.
+///
+/// **Dört sayı birbirine bağlı ve gerekçeleri aynı blokta**
 /// (`docs/OLCUMLER.md` → `## Boşta kare`): `BT_RUN_SECONDS`'ın 3'ü,
-/// [`bt_core::smoke_shell`]'in 1 saniyelik uykusu ve bu taban. Sessizlik
+/// [`bt_core::smoke_shell`]'in 1 saniyelik uykusu, aynı reçetenin imleç
+/// sıçrama **mesafesi** (011) ve bu taban. Sessizlik
 /// `koşu süresi − (uyku + yerleşme)` kadar, yani **ikisinden biri oynarsa bu
 /// sayı da oynamak zorunda**: `BT_RUN_SECONDS=2` ile kuyruk ~0,75 saniyeye
 /// iner ve kapı kod doğruyken düşer. Üçü üç dosyaya dağılırsa biri
@@ -201,7 +208,7 @@ const IDLE_FRAME_LIMIT: u64 = 8;
 /// Yalnız [`Workload::Smoke`]'ta soruluyor: ölçüm yükü deadline'a kadar çıktı
 /// akıtıyor, yani orada sessizlik sıfıra yakın olmak **zorunda**
 /// ([`Verdict::MotionUnsettled`]'ın aynı kolda muaf olmasının gerekçesiyle).
-const QUIET_FLOOR: Duration = Duration::from_millis(870);
+const QUIET_FLOOR: Duration = Duration::from_millis(868);
 
 /// Kullanıcının dünyasına açılan girişlerin **tek** dalı.
 ///

@@ -140,10 +140,13 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7_
 
 ## Yayın Etkisi
 
-- **Ölçüm bekliyor: kayma animasyonunun yerleşme süresi.** Duman koşusu onu
-  **göremiyor** (reçete kayma üretmiyor, `kayma=0`), yani bu iddianın tek
-  kapatıcısı `/measure`. `sessiz` bandına etkisi ise bu koşuda **yok**:
-  1748,29 ms ölçüldü, taban 870 ms.
+- **Ölçüm koştu (2026-09-17, `/measure`) ve iddia ikiye ayrıldı.** `sessiz`
+  bandına etkisi **yok**, yirmi koşuyla doğrulandı — ama aynı ölçüm tabanın
+  kendi türetme kuralını ihlal ettiğini gösterdi ve `QUIET_FLOOR` 870 → 868
+  indi (ayrı commit; sayılar `docs/OLCUMLER.md` → `## Boşta kare` →
+  2026-09-17). Kaymanın **yerleşme süresi** ölçülemedi: kanca yok, `kayma=`
+  kare sayıyor ve ne duman ne yük yükü ötelemeyi tetikliyor. Borç yol
+  haritasında.
 - **Jeton sözleşmesi büyüyor:** `kayma=` eklendi, hiçbir jeton silinmedi.
   Anahtar Türkçe ve donmuş, değer İngilizce.
 - **Belge:** `docs/AYARLAR.md` (`[motion]`), `CLAUDE.md`'nin indirgeme cümlesi

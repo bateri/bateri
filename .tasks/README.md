@@ -12,7 +12,7 @@
 | 008 | [hareket-ve-imlec](008-hareket-ve-imlec/) | 🟢 | `main`'de — imleç kayıyor: hareket altyapısı, üç stil, Hareketi Azalt ve ölçülmüş sessizlik kapısı (`QUIET_FLOOR`) |
 | 009 | [shell-entegrasyonu](009-shell-entegrasyonu/) | 🔨 | `main`'de — zsh sarmalayıcısı ve OSC 133 komut durumu; teslim bekliyor: `/measure` (tarayıcının akış maliyeti) — `teslim.md` |
 | 010 | [komut-bloklari](010-komut-bloklari/) | 🟢 | `main`'de — OSC 133'ün ilk ürün yüzeyi: komut işareti, çıkış kodu rengi, satıra çıpalanma. Gözle kontrol tasarımı değiştirdi: işaret bölge değil komut satırı, ve `>` şekli 011'e bırakıldı |
-| 011 | [tabana-yapisik-icerik](011-tabana-yapisik-icerik/) | 🔨 | `main`'de — içerik pencerenin tabanına yaslanıyor ve yeni satırda yumuşak kayıyor; üç phase + kapı tamam, teslim bekliyor: `/measure` (kayma yerleşme süresi ve reçetenin iki bandı) — `teslim.md`. Kayma tek yönlü: büyüyen içerik süzülür, daralan anında oturur; yön kuralı gözle kontrolden çıktı |
+| 011 | [tabana-yapisik-icerik](011-tabana-yapisik-icerik/) | 🟢 | `main`'de — içerik tabana yaslanıyor ve **tek yönlü** kayıyor: büyüyen içerik süzülür, daralan anında oturur (yön kuralı gözle kontrolden çıktı). `/measure` bandı yeniden gözledi ve `QUIET_FLOOR`'u 870 → 868 indirdi; bir bilinçli `[~]` `teslim.md`'de (kaymanın yerleşme süresi — kanca yok) |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

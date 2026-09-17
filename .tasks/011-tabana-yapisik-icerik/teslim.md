@@ -46,7 +46,7 @@ değişmesi **beklenmiyor**, ama hareket saatine dokunan bir değişiklikten son
 
 - `make hepsi` — `denetim: temiz`, clippy uyarısız, beş crate yeşil.
 - `make duman` — üç sayaç **oynamamalı** (`hucre=8 glif=6 kural=15`), `icerik`
-  `IDLE_FRAME_LIMIT`'in altında, `sessiz` tabanın (870 ms) üstünde,
+  `IDLE_FRAME_LIMIT`'in altında, `sessiz` tabanın (868 ms) üstünde,
   `kapanis=clean`. Son koşu (phase-2, kullanıcının gerçek penceresi):
 
   ```
@@ -80,24 +80,27 @@ sayı işlenmedi.
 
 ### B.1 Bekleyen ölçümler `[komut]`
 
-İki kalem, ikisi de `/measure`'ın işi — sayı uydurulmadı:
+İki kalem vardı; **biri koştu, biri koşamadı** (2026-09-17, `/measure`):
 
-1. **Kayma animasyonunun yerleşme süresi.** Duman koşusu onu **göremiyor**
-   (reçete ötelemeyi oynatmıyor, `kayma=0`), yani tek kapatıcısı ölçüm.
-   `sessiz` bandına etkisi bu koşuda yok: 1748,29 ms ölçüldü, taban 870 ms.
-2. **`hareket` ve `sessiz` bantlarının yeniden gözlenmesi** (phase-0). Reçete
-   değişti; `hucre/glif/kural` sabit kaldı ama iki bandın sahibi
-   `docs/OLCUMLER.md` → `## Boşta kare` ve orayı yalnız `/measure` yazar.
-   **Kapı bir sahiplik ihlali kapattı:** phase-0'ın iki gözlemi
-   (`\033[4G` ile `hareket=32`/`sessiz=1706,21 ms`, `\033[2G` ile
-   `hareket=27`/`sessiz=1752,07 ms`) `smoke_shell`'in doc'unda bir koşu tablosu
-   olarak duruyordu; oradan kaldırıldı ve sayılar şimdilik yalnız
-   `phase-0.md`'de (defter). `/measure` onları `docs/OLCUMLER.md`'ye taşımalı —
-   dosyanın kendi gürültü kuralı gereği tek koşu değil, profil başına en az on.
-
-```sh
-/measure
-```
+1. **Kayma animasyonunun yerleşme süresi — ÖLÇÜLEMEDİ, kanca yok.** `kayma=`
+   bir **kare** sayacı, süre değil; duman reçetesi ötelemeyi hiç oynatmıyor
+   (`kayma=0`) ve yük yükü de tetikleyemedi — PTY 256'lık öbeklerle dolduğu
+   için ekran **ilk içerik karesinde** zaten dolu, öteleme hedefi 0'da doğuyor
+   ve hiç oynamıyor (ölçüldü: `yuk=load`, n=2, `kayma=0`). Yapısal yarısı
+   kanıtlı (denetim merceği: son içerik karesinden sonra en çok `TIME_CEILING`
+   = 0,7 sn), ampirik süre değil. Kapatmanın yolu kod: ötelemenin
+   başlangıç→yerleşme damgası ya da satırları **aralıklı** ekleyen üçüncü bir
+   yük. Kalem `docs/YOL-HARITASI.md`'ye yazıldı.
+2. **`hareket` ve `sessiz` bantlarının yeniden gözlenmesi — KOŞTU** (yirmi
+   sağlıklı koşu, 10 debug + 10 release paket). `hareket=27` oynamadı, yani
+   phase-0'ın tek koşuyla verdiği karar ayakta. **Ama band bir kusur
+   gösterdi:** en düşük `sessiz` 1737,12 ms çıktı ve yarısı (868,56)
+   `QUIET_FLOOR = 870`'in altına düştü — taban kendi türetme kuralını ihlal
+   ediyordu. Sabit **868 ms**'ye indirildi; kapı o koşularda yeşildi, yani
+   aşım payda saklanıyordu. Dağılım, gerekçe ve karşıt okuma
+   `docs/OLCUMLER.md` → `## Boşta kare` → 2026-09-17. Sabitin değişimi
+   **ayrı commit**'le indi (`proje.md`: ölçülmüş sözleşme kod phase'leriyle
+   aynı commit'te oynamaz).
 
 ### B.2 Yön kuralının göz kontrolü `[elle]`
 
@@ -116,8 +119,12 @@ pencerede bakılmalı:
 
 - [x] Yön kuralının göz kontrolü yapıldı (B.2) — vim girişi süzülüyor, çıkış
       ve dolu ekranda `clear` anında oturuyor; kullanıcı onayladı
-- [ ] `/measure` koştu; kayma yerleşme süresi ve iki bandın yeni gözlemi
-      `docs/OLCUMLER.md`'ye işlendi (B.1)
+- [x] `/measure` koştu; `hareket`/`sessiz` bandı yirmi koşuyla yeniden
+      gözlendi ve `docs/OLCUMLER.md`'ye işlendi — `QUIET_FLOOR` 870 → 868 (B.1)
+- [~] Kayma yerleşme süresi **ölçülemedi: kanca yok** (B.1/1). `kayma=` kare
+      sayıyor, süre değil; ne duman ne yük yükü ötelemeyi tetikliyor. Yapısal
+      sınırı kanıtlı (0,7 sn tavan), ampirik süresi borç —
+      `docs/YOL-HARITASI.md`
 
 ## Bilinen sınırlar
 

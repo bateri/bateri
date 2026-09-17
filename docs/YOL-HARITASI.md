@@ -123,6 +123,18 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   içine giriyor. Şeridin belirmesi 011'e **alınmadı**: set bilerek saf yerleşim
   işi tutuldu ve şerit 012'de prompt işaretiyle birlikte zaten elden geçecek.
   Yani bu borcun doğal evi artık 012.)*
+- **Kaymanın yerleşme süresinin kancası yok.** 011 ikinci animatörü
+  (`Slide`) getirdi ve `kayma=` jetonu onu sayıyor, ama **kare** sayıyor, süre
+  değil — üstelik ölçüm harness'ının iki yükü de onu tetiklemiyor: duman
+  reçetesi ötelemeyi hiç oynatmıyor, yük yükü ise PTY'yi 256'lık öbeklerle
+  doyurduğu için ekran ilk içerik karesinde zaten dolu (ölçüldü 2026-09-17,
+  `kayma=0`). Yani ötelemenin animasyon yolunun **gerçek pencerede koşan
+  tanığı yok**; yapısal sınırı kanıtlı (son içerik karesinden sonra en çok
+  `TIME_CEILING` = 0,7 sn) ama ampirik süresi bilinmiyor. İki yol var ve
+  hangisinin ucuz olduğu açılınca tartışılır: ötelemenin başlangıç→yerleşme
+  damgasını tutan bir kanca, ya da satırları **aralıklı** ekleyen üçüncü bir
+  yük (`Workload`). İkincisi duman reçetesinin ölçülmüş sözleşmesine
+  dokunmadan yeni bir tanık doğurur.
 - **Ötelemenin yön kuralının ölçülmemiş yarısı.** 011 kapı sonrası gözle
   kontrolle kayma tek yöne indirildi: içerik büyürken süzülüyor, daralırken
   snap'liyor. Kabul edilmiş bedeli art arda satır yazıp silen bir program

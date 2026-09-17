@@ -225,7 +225,89 @@ doğrulanmadı), boyutundan tanınır.
 ## Boşta kare
 
 **Üst sınır: `icerik ≤ 8`** (`crates/bt-shell/src/app.rs` → `IDLE_FRAME_LIMIT`).
-**Alt sınır: `sessiz ≥ 870 ms`** (aynı dosya → `QUIET_FLOOR`).
+**Alt sınır: `sessiz ≥ 868 ms`** (aynı dosya → `QUIET_FLOOR`; 2026-09-17'de
+870'ten indirildi, gerekçe aşağıda).
+
+### 2026-09-17 — duman reçetesi değişti, band yeniden gözlendi (011)
+
+Neden: 011 phase-0 reçetenin imleç sıçramasını dikeyden yataya çevirdi
+(`\033[H` → `\033[2G`) ve mesafe `QUIET_FLOOR`'un **dördüncü bağlı
+girdisi** (bkz. `## Yöntem` → Boşta kare). Phase-0 tek koşuyla "band yerinde"
+demişti; bu ölçüm bandın kendisini yirmi koşuyla yeniden gözlüyor. **Üst sınır
+değişmedi; alt sınır aşağıdaki bulgu üzerine 870'ten 868 ms'ye yeniden
+türetildi.**
+
+**Ortam**
+
+| | |
+|---|---|
+| commit | `4c291ee` (çalışma ağacı temiz) |
+| makine | Apple M1 Pro, 32 GB |
+| sistem | macOS 26.4.1 (25E253); rustc 1.88.0 (Homebrew) |
+| güç | prizde (`AC Power`), pil %100 dolu, `lowpowermode 0` |
+| ekran | 2026-09-16 koşusuyla aynı makine; Hz ve pencere boyutu bu turda **yoklanmadı** |
+| kullanıcı | makineye dokunulmadı; tarayıcı ve IDE indeksleyici kapalı |
+
+**Sabit jetonlar.** Yirmi sağlıklı koşunun **hepsinde**:
+
+```
+hucre=8 glif=6 kural=15 yuva=13/2048 yuk=smoke istek=4 hareket=27 kayma=0 kapanis=clean ornek=off pipeline=ok
+```
+
+**Sağlıklı koşular** (hepsi yeşil):
+
+| profil · yol · süre | n | `icerik` | `kare` | `sessiz` (ms) |
+|---|---|---|---|---|
+| debug · `make duman` · 3 sn | 10 | `2` ×10 | `29` ×10 | 1737,12 – 1751,58 (ort. 1745,02) |
+| release · paket (`open`) · 3 sn | 10 | `3` ×10 | `30` ×10 | 1739,36 – 1756,28 (ort. 1748,61) |
+
+Bozuk kol **koşulmadı**: sınırları doğuran dağılım 2026-09-16'da ölçüldü ve bu
+tur onu yeniden türetmiyor, yalnız sağlıklı bandın yerini soruyor.
+
+**`hareket=27` oynamadı** — reçetenin yatay hedefi dikeyle aynı sayıda hareket
+karesi üretiyor, yani phase-0'ın tek koşuyla verdiği karar yirmi koşuda da
+ayakta.
+
+**İki sayaç kaydı, ikisi de sınırın çok altında:** `icerik` debug'da 2026-09-16'nın
+`3` ×9'undan **`2` ×10**'a, release'te `2` ×7'den **`3` ×10**'a geçti. İkisi de
+`IDLE_FRAME_LIMIT = 8`'in çok altında ve yön profiller arasında ters, yani
+bir sızıntı imzası değil; ayrımın sebebi aranmadı.
+
+**Bulgu: alt sınır kendi türetme kuralının dışına düşmüştü → 870'ten 868'e.**
+Kural "en düşük sağlıklı gözlemin **en çok yarısı**"; en düşük gözlem
+**1737,12 ms** ve yarısı **868,56 ms**, oysa `QUIET_FLOOR` 870 ms idi. Aşım
+**1,44 ms** (‰1,7). Kapı bu koşularda yeşildi — `sessiz` hiç 1737'nin altına
+inmedi — yani kusur yine jetonun arkasındaydı: kuralın istediği ×2 güvenlik
+payı ×1,997'ye inmişti. Yeni değer dosyanın kendi seçim kuralından geliyor
+(*"aralığın en büyük ucundan"*): 868,56'nın altındaki en büyük tam milisaniye
+**868**. Bozuk kolun en yüksek gözlemi (yavaş sızıntı, 129,25 ms) hâlâ çok
+altta, yani duyarlılık kaybı yok.
+
+**Karşıt okuma kayda geçiyor:** ‰1,7'lik bir sapma için donmuş bir sabiti
+oynatmak fazla titiz görülebilir ve payın ×2'den ×1,997'ye inmesinin pratik
+sonucu yok. Yine de indirildi, çünkü "en çok yarısı" bir yaklaşıklık değil
+**bağ**; bir kez "yaklaşık" okunursa bir daha hiçbir şeyi bağlamaz — phase-0
+aynı türden bir aşımı (o gün 17 ms) kusur sayıp reçeteyi değiştirmişti.
+
+Taban 2026-09-16'da **1742,29 ms**'lik bağlayıcı uçtan türetilmişti (yarısı
+871,15 → 870 seçildi). Bu turun üç gözlemi (1737,12 · 1738,94 · 1739,36) o
+ucun **altında** ve gürültü kuralını geçiyor: üçü de önceki dağılımın ortasına
+değil, **tamamının altına** düşüyor. Bandın ~5 ms aşağı kayması reçete
+değişiminden mi yoksa daha derin bir kuyruk örneklemesinden mi, bu veriyle
+ayırt edilemez — ikisi de aynı düzeltmeyi gerektiriyor.
+
+**`kayma=` hiçbir koşuda ateşlenmedi** ve yük yükü de onu tetikleyemedi
+(`yuk=load`, n=2: `kare=355`/`351`, `icerik=355`/`351`, **`kayma=0`**).
+Sebebi yapısal: yük PTY'yi 256'lık öbeklerle doyuruyor, yani ekran **ilk
+içerik karesinde** zaten dolu; öteleme hedefi 0'da doğuyor ve hiç oynamıyor.
+Aynı koşuda `hareket=0` — imlecin ekran satırı da dipte sabit. (O kolun
+`kapanis=abandoned`'ı **beklenen**, kusur değil: yük `sleep` değil deadline'a
+kadar yazıyor, yani çocuk `SHUTDOWN_GRACE` içinde ölmüyor ve arkada
+bırakılıyor.) Sonuç bir
+**kapsam kalemi**: ötelemenin animasyon yolunun gerçek pencerede koşan tanığı
+yok, kanıtı birim sınamaları ve göz kontrolü (011 phase-2, `/measure`
+2026-09-17). Yerleşme **süresi** ayrıca ölçülemedi: `kayma=` kare sayıyor,
+süre değil — kanca yok.
 
 ### 2026-09-16 — imleç hareketi, iki sınır, debug + release paket (008 phase-6)
 
