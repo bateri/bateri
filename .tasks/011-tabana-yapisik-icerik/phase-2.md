@@ -114,21 +114,24 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7_
   alt satırın bir kısmı o karelerde pencerenin altında oluyor. "Yeni satır
   yerinde belirsin, ötekiler kaysın" bu mimaride temsil edilebilir bir şey
   değil; tespit `set_origin`'in doc'una yazıldı.
-- **Set kapısı bir davranış kusuru yakaladı: alternatif ekran geçişi
-  kayıyordu.** vim/less/htop'a girmek doluluğu bir hamlede `rows`'a fırlatıyor,
-  yani öteleme neredeyse bütün ızgara kadar sıçrıyor ve animasyon onu içeriğin
-  kendi büyümesi sanıyordu — vim'in arayüzü pencerenin altından süzülerek
-  giriyor, çıkışta kabuk aşağı iniyordu. **Göz kontrolünde gözden kaçtı**
-  (listede "vim gir/çık" maddesi vardı ve geçti sayıldı); yakalayan şey
-  `/code-review` ile denetimin iki merceği oldu, üçü birbirinden bağımsız aynı
-  çareyi önerdi. Ders, kapının phase'den sonra koşmasının değerine dair: göz
-  kontrolü "çalışıyor mu" diye bakıyor, kapı "doğru sebeple mi" diye.
-  Çare `Cursor::alt_screen` + `Motion::sync`'in üçüncü snap tetiği; parametre
-  `geometry`'den `relocated`'a genişledi, çünkü ikisi de "ızgara kendi büyümesi
-  dışında bir sebeple oynadı" demek ve ayrı parametre iki `match` guard'ına da
-  ayrı ayrı girmeyi gerektirirdi (clippy'nin argüman sınırı da sekizinci
-  parametreyi reddederdi). Bekçi
-  `switching_to_the_alternate_screen_snaps_the_origin`.
+- **Ötelemenin bir yönü var ve bunu ancak iki tur sonra gördük.** Set kapısı
+  alternatif ekran geçişinin kaymasını **kusur** okudu ve ikisini birden
+  snap'ledi (`Cursor::alt_screen` + üçüncü snap tetiği). Kullanıcı ikinci tur
+  göz kontrolünde itiraz etti: vim'e **girerken** süzülmesini beğenmişti; hiç
+  söz etmediği şey çıkıştı. Ayrım oradan çıktı — öteleme `rows - content_rows`,
+  yani hedefin düşmesi içeriğin **gelmesi** (hoş), yükselmesi **düşmesi**
+  (tuhaf). Kural mesafeye değil **işarete** bakıyor ve bu bir kazanç: eşik
+  ölçülmemiş bir sayı olurdu, yön bedava. Dolu ekranda `clear`'ın kayması da
+  aynı kuralla kapandı — kapıda "ölçüm ister" diye borç yazılmıştı, gerekmedi.
+  `alt_screen` bayrağı **geri alındı**, çünkü yön kuralı onu gereksiz kılıyor.
+  Bekçi `a_growing_origin_slides_and_a_shrinking_one_snaps`.
+  **Ders kapının değil turların:** phase-2'nin göz kontrolü "kaçırmadı",
+  beğendi; kapı koda bakıp kusur sandı; doğruyu kullanıcının ikinci turu
+  söyledi. Gözle kontrol bir kapı değil, bir **sohbet**.
+- **Kabul edilmiş bedel:** art arda satır yazıp silen bir program (spinner)
+  büyürken kayıp daralırken zıplıyor — simetrik salınım yerine testere.
+  Alternatifi o ölçülmemiş eşik olduğu için kabul edildi;
+  `docs/YOL-HARITASI.md`'ye kalem olarak yazıldı.
 - **Bir sınama kendi varsayımımı çürüttü.** Hareketi Azalt bekçisinin ilk hâli
   Enter'ın imleci beliritmesini bekliyordu; oysa R2.1'in tamamı tam olarak
   bunun **olmaması**: Enter'da imlecin ekran satırı hiç değişmiyor, yani
@@ -195,8 +198,8 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7_
 - [x] Yayın etkisi yazıldı ("ölçüm bekliyor" satırı dahil)
 - [x] Göz kontrolü (kullanıcı, gerçek pencere): Enter, `clear`, vim giriş/çıkış,
       tekerlek, kayma ortasında tıklama, `cursor_motion = "snap"`, Hareketi
-      Azalt — yedisi de geçti sayıldı, ama **vim geçişindeki kayma gözden
-      kaçtı** ve set kapısı yakaladı (bkz. Uygulama Notları)
+      Azalt — yedisi de geçti. İkinci tur (kapı sonrası) kaymanın **yönünü**
+      ayırdı: büyüme süzülür, daralma anında oturur (bkz. Uygulama Notları)
 - [~] `Slide`/`State` ikizliği sadeleştirilmedi (`/code-review` bulgusu,
       **waive**): `State`'in `elapsed`'i ve `since_move`'u iki eksen arasında
       **paylaşılıyor**, yani `[Slide; 2]` onları ikiler ya da üçüncü bir şekil

@@ -36,11 +36,11 @@ Koşullu hedeflerin geri kalanı **gerekmiyor** ve ikisi de bilinçli:
 - **`make kur`** — `assets/bundle/*`, `assets/shell/*`, `crates/bateri` ve
   `kur` hedefi değişmedi. **`make terminfo`** girdisi yok.
 
-**Kapı commit'i belge düzeltmekle kalmadı, davranış da değiştirdi:** alternatif
-ekran geçişi (vim, less, htop, man) artık ötelemeyi **snap**'liyor. Reçete
-alternatif ekrana girmediği için jetonların oynaması **beklenmiyor**, ama
-hareket saatine dokunan bir değişiklikten sonra `make duman`'ın bir kez daha
-koşması ucuz bir teminat.
+**Kapı ve ardındaki yön düzeltmesi davranış değiştirdi:** kayma artık tek
+yönlü — içerik büyüyünce süzülüyor, daralınca (vim'den çıkış, dolu ekranda
+`clear`) anında oturuyor. Reçete ötelemeyi hiç oynatmadığı için jetonların
+değişmesi **beklenmiyor**, ama hareket saatine dokunan bir değişiklikten sonra
+`make duman`'ın bir kez daha koşması ucuz bir teminat.
 
 ### Beklenen çıktı
 
@@ -99,23 +99,23 @@ sayı işlenmedi.
 /measure
 ```
 
-### B.2 Kapı sonrası göz kontrolü `[elle]`
+### B.2 Yön kuralının göz kontrolü `[elle]`
 
-Kapı commit'i **davranış** değiştirdi (alternatif ekran geçişi artık snap) ve
-o davranışa gerçek pencerede henüz bakılmadı. Sebebi de kayıtlı: phase-2'nin
-göz kontrolü vim geçişindeki kaymayı **kaçırdı**, kusuru kapı yakaladı — aynı
-sette bir kez yanılan gözle kontrol ikinci turu hak ediyor.
+Kayma yönü kullanıcının ikinci tur göz kontrolünden çıktı (vim'e **girerken**
+süzülmesi beğenilmişti); kural yazıldıktan sonra üç senaryosuna gerçek
+pencerede bakılmalı:
 
-- `vim` gir/çık → ızgara **anında** yerine geçmeli, süzülme yok. `less` ve
-  `htop` aynı.
-- Dolu ekranda `clear` → prompt **kayarak** dibe iniyor. Bu bilinen sınır,
-  kusur değil; hissi görüp borcun ne zaman kapanacağına karar vermek için.
-- İsteğe bağlı: aynı oturumda `make duman`. Reçete alternatif ekrana girmiyor,
-  yani jetonların oynaması beklenmiyor.
+- `vim`/`less`/`htop` **gir** → ızgara süzülerek yukarı geliyor (istenen).
+- Aynılarından **çık** → kabuk süzülmüyor, anında yerine oturuyor.
+- Dolu ekranda `clear` → prompt **anında** dibe oturuyor, kayarak inmiyor.
+  Bu kuralın tek yeni tanığı; kapıda borç yazılmıştı, yön onu kapattı.
+- İsteğe bağlı: aynı oturumda `make duman`. Reçete ötelemeyi oynatmıyor, yani
+  jetonların değişmesi beklenmiyor.
 
 ### Yayın Checklist
 
-- [ ] Kapı sonrası göz kontrolü yapıldı (B.2)
+- [x] Yön kuralının göz kontrolü yapıldı (B.2) — vim girişi süzülüyor, çıkış
+      ve dolu ekranda `clear` anında oturuyor; kullanıcı onayladı
 - [ ] `/measure` koştu; kayma yerleşme süresi ve iki bandın yeni gözlemi
       `docs/OLCUMLER.md`'ye işlendi (B.1)
 
@@ -124,15 +124,13 @@ sette bir kez yanılan gözle kontrol ikinci turu hak ediyor.
 Dördü de tasarım kararı, kusur değil — ikisinin adı planda, ikisi yolun
 şeklinden çıktı:
 
-- **Dolu ekranda `clear` kayıyor.** Prompt yukarıdan aşağıya süzülüyor, çünkü
-  doluluk bir hamlede daralıyor ve animasyon bunu içeriğin kendi hareketi
-  sayıyor. Alternatif ekran geçişi kapı commit'inde snap'lendi ama `clear`
-  aynı çareye girmiyor: orada ayırt edici bir bayrak yok, ayıracak tek şey bir
-  **mesafe eşiği** ve o ölçülmemiş bir sayı olurdu. "İçerik daralıyorsa
-  snap'le" kuralı da reddedildi — R2.4'ün salınan çıktısında (imleci yukarı
-  taşıyıp `\e[K` ile silen program) düşüş anında, yükseliş animasyonlu olur ve
-  testere üretirdi. **Borç** `docs/YOL-HARITASI.md` → Sete bağlanmamış
-  borçlar'da; açılmış bir seti yok.
+- **Yön kuralının ölçülmemiş yarısı.** Kayma tek yöne indirildi (büyüme
+  süzülür, daralma anında oturur) ve bunun kabul edilmiş bir bedeli var: art
+  arda satır yazıp silen bir program — spinner, çok satırlı ilerleme çubuğu —
+  büyürken kayıp daralırken zıplıyor, yani simetrik bir salınım yerine testere.
+  Gerçek bir örnekte rahatsız ederse çare yön değil **mesafe** eşiği olur ve o
+  ölçülmemiş bir sayı. Kalem `docs/YOL-HARITASI.md` → Sete bağlanmamış
+  borçlar'da.
 
 - **Kayma yolunun gerçek pencerede koşan bekçisi yok.** Duman reçetesi onu
   tetiklemiyor; kanıtı birim sınamaları ve göz kontrolü. Reçeteyi kaymayı

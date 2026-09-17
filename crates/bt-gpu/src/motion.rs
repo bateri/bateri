@@ -283,12 +283,7 @@ impl Motion {
     /// - **ilk kare** — `state` yok,
     /// - **görünmezken açılan imleç** — görünmezlik `state`'i boşalttı,
     /// - **geçmişte kaydırma** — ofset oynadı,
-    /// - **ızgaranın yer değiştirmesi** — çağıran `relocated` diyor: geometri
-    ///   (pencere, font, zoom) ya da alternatif ekran geçişi. İkisi tek
-    ///   parametrede, çünkü ayrımları burada bir fark yaratmıyor — ikisi de
-    ///   "ızgara kendi büyümesi dışında bir sebeple oynadı" demek — ve ayrı
-    ///   parametre olsalardı aşağıdaki iki guard'a da ayrı ayrı girmeleri
-    ///   gerekirdi.
+    /// - **geometri** (pencere, font, zoom) — çağıran `geometry` diyor.
     ///
     /// Ortak gerekçe: bunların hiçbirinde imleç hareket etmedi, **altındaki
     /// ızgara** hareket etti. Animasyon uydurmak imleci olmadığı bir yerden
@@ -329,15 +324,15 @@ impl Motion {
         origin_rows: u16,
         visible: bool,
         offset: i32,
-        relocated: bool,
+        geometry: bool,
     ) {
         let scrolled = self.offset != Some(offset);
         self.offset = Some(offset);
-        // Ötelemenin snap tetiği imlecinkinin **alt kümesi değil ikizi**:
-        // tekerlek (R2.6), geometri (pencere, font, punto) ve alternatif ekran
-        // geçişi üçünü de snap'liyor. `docs/AYARLAR.md`'nin "Izgaranın başka
-        // sebeple yer değiştirmesi kaymaz" maddesi tam olarak bu üç tetik.
-        self.sync_origin(f32::from(origin_rows), scrolled || relocated);
+        // Ötelemenin snap tetiği imlecinkini **kapsıyor**: tekerlek (R2.6) ve
+        // geometri ikisini de snap'liyor, ötelemenin bir de kendi yön kapısı
+        // var ([`Motion::sync_origin`]). `docs/AYARLAR.md`'nin "Izgaranın başka
+        // sebeple yer değiştirmesi kaymaz" maddesi bu iki tetik.
+        self.sync_origin(f32::from(origin_rows), scrolled || geometry);
         if !visible {
             self.state = None;
             return;
@@ -348,7 +343,7 @@ impl Motion {
         let animated = mode != Mode::Snap;
         let target = [f32::from(col), f32::from(row.saturating_add(origin_rows))];
         match &mut self.state {
-            Some(state) if animated && !scrolled && !relocated => {
+            Some(state) if animated && !scrolled && !geometry => {
                 if state.target != target {
                     // **Belirme duraksamadan sonra yeniden başlar, her
                     // karede değil** (`/code-review` bulgusu). Kayan iki
@@ -399,12 +394,24 @@ impl Motion {
     /// Ötelemenin hedefi: [`Motion::sync`]'in tek eksenli yarısı.
     ///
     /// Snap hâlleri imlecinkilerle **aynı sınıf** ve aynı gerekçe: ilk kare,
-    /// tekerlek, geometri ve alternatif ekran geçişi. Dördünde de içerik kendi
-    /// büyümesiyle yükselmedi — ızgara başka bir sebeple yer değiştirdi ve
-    /// animasyon uydurmak onu gelmediği bir yerden geliyormuş gibi gösterirdi.
-    /// Sonuncusu en görünürü: alternatif ekrana girmek doluluğu bir hamlede
-    /// `rows`'a fırlatıyor, yani snap'lenmezse vim'in arayüzü pencerenin
-    /// altından süzülerek girer ve çıkışta kabuk aşağı inerdi.
+    /// tekerlek ve geometri. Üçünde de içerik kendi büyümesiyle yükselmedi —
+    /// ızgara başka bir sebeple yer değiştirdi ve animasyon uydurmak onu
+    /// gelmediği bir yerden geliyormuş gibi gösterirdi.
+    ///
+    /// **Dördüncüsü ötelemenin kendine ait: yön.** Yalnız **düşen** hedef
+    /// kayar, yükselen snap'ler. Öteleme `rows - content_rows`, yani hedefin
+    /// düşmesi içeriğin **büyümesi** (grid yukarı akar), yükselmesi
+    /// **daralması** (grid aşağı iner). Yukarı akış içeriğin *gelmesi* gibi
+    /// okunuyor ve hoşa gidiyor; aşağı iniş *düşmesi* gibi okunuyor ve
+    /// tuhaf — kabuğun vim'den çıkarken aşağı süzülmesi, dolu bir ekranda
+    /// `clear`'ın prompt'u tepeden dibe indirmesi. Kural bu yüzden mesafeye
+    /// değil **işarete** bakıyor: eşik ölçülmemiş bir sayı olurdu, yön
+    /// bedava (gözle kontrol, 011 kapı sonrası).
+    ///
+    /// Bunun bir bedeli var ve adı konmuş: art arda satır yazıp silen bir
+    /// program (spinner) büyürken kayıp daralırken zıplar. Simetrik bir
+    /// salınım yerine testere; gözle kontrolde kabul edildi, çünkü tek
+    /// alternatifi o ölçülmemiş eşikti.
     ///
     /// **Aynı hedefe yeniden hedeflemek no-op** ([`Motion::sync`] ile aynı
     /// şart): içeriği büyütmeyen kareler (renk değişimi, satır içi yazı)
@@ -423,7 +430,11 @@ impl Motion {
         let mode = self.origin_mode();
         let animated = mode != Mode::Snap;
         match &mut self.origin {
-            Some(slide) if animated && !snap => {
+            // `<=`, `<` değil: **eşit** hedef hiçbir yöne gitmiyor ve içerideki
+            // no-op'a düşmeli. `<` yazılsaydı hedefi değişmeyen her kare snap
+            // koluna girer, uçuştaki kaymayı her karede yeniden kurar ve
+            // animasyonu büsbütün öldürürdü.
+            Some(slide) if animated && !snap && target <= slide.target => {
                 if slide.target != target {
                     slide.from = slide.pos;
                     slide.target = target;
@@ -1579,30 +1590,33 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_the_alternate_screen_snaps_the_origin() {
-        // Alternatif ekrana girmek doluluğu bir hamlede `rows`'a fırlatıyor
-        // (`bt_core::Cursor::alt_screen`), yani öteleme neredeyse bütün ızgara
-        // kadar sıçrıyor. Snap'lenmezse vim'in arayüzü pencerenin altından
-        // süzülerek girer, çıkışta kabuk aşağı inerdi — kayma **dipten eklenen
-        // satırlar** için, ekranın sahibinin değişmesi o sınıfa girmiyor.
-        // Çağıran iki tetiği tek parametrede veriyor (`relocated`).
+    fn a_growing_origin_slides_and_a_shrinking_one_snaps() {
+        // **Yön kuralı** (011 kapı sonrası, gözle kontrol): öteleme
+        // `rows - content_rows`, yani hedefin **düşmesi** içeriğin büyümesi
+        // (grid yukarı akar) ve **yükselmesi** daralması (grid aşağı iner).
+        // Yukarı akış içeriğin gelmesi gibi okunuyor, aşağı iniş düşmesi gibi.
         let mut motion = after_enter();
         run_to_rest(&mut motion, TICK);
 
-        // Girişte: doluluk `rows`'a fırladı, öteleme 0'a düştü.
-        motion.sync(0, 0, 0, true, 0, true);
-        assert!(motion.settled(), "alternatif ekrana giriş kayma başlattı");
+        // vim'e giriş: doluluk bir hamlede `rows`'a fırlıyor, öteleme 0'a
+        // **düşüyor** — arayüz süzülerek geliyor ve bu isteniyor.
+        motion.sync(0, 0, 0, true, 0, false);
+        assert!(!motion.origin_settled(), "büyüyen içerik snap'lendi");
+        run_to_rest(&mut motion, TICK);
         assert_eq!(motion.origin(), 0.0);
 
-        // Çıkışta: kabuk geri geldi, öteleme tabana döndü.
-        motion.sync(0, 3, 26, true, 0, true);
-        assert!(motion.settled(), "alternatif ekrandan çıkış kayma başlattı");
+        // vim'den çıkış: doluluk daralıyor, öteleme **yükseliyor** — kabuk
+        // aşağı süzülmüyor, anında yerine oturuyor.
+        motion.sync(0, 3, 26, true, 0, false);
+        assert!(motion.origin_settled(), "daralan içerik kaydı");
         assert_eq!(motion.origin(), 26.0);
 
-        // Ve tetik geçtikten sonra içeriğin kendi büyümesi yine kayıyor:
-        // snap'i doğuran şey mesafe değil, ızgaranın başka sebeple oynaması.
-        motion.sync(0, 3, 25, true, 0, false);
-        assert!(!motion.origin_settled(), "içerik büyümesi snap'lendi");
+        // Dolu ekranda `clear` aynı sınıf: öteleme tepeden dibe yükseliyor.
+        motion.sync(0, 0, 0, true, 0, false);
+        run_to_rest(&mut motion, TICK);
+        motion.sync(0, 0, 29, true, 0, false);
+        assert!(motion.origin_settled(), "clear kayarak indi");
+        assert_eq!(motion.origin(), 29.0);
     }
 
     #[test]
@@ -1654,12 +1668,24 @@ mod tests {
         // sonlu; salınımın kendisi sürerse o kareleri isteyen şey animasyon
         // değil, salınımı üreten çıktının hasarı olur.
         let mut motion = after_enter();
+        let mut previous = 26u16;
         for origin in [26u16, 27, 25, 27, 26] {
             motion.advance(TICK);
             motion.sync(0, 29 - origin, origin, true, 0, false);
-            let frames = run_to_rest(&mut motion, TICK);
-            assert!(frames > 0, "öteleme {origin} için hiç kare koşmadı");
+            // İddia **yerleşmektir**, kaç kare koştuğu değil: yön kuralından
+            // beri salınımın iki yarısı iki yoldan geçiyor — daralan yön
+            // (hedef yükseliyor) hiç kare koşmadan oturuyor, büyüyen yön
+            // kayarak. R2.4'ün istediği ikisinin de **sonlu** olması.
+            if origin > previous {
+                assert!(
+                    motion.origin_settled(),
+                    "daralan içerik ({previous} → {origin}) kaydı"
+                );
+            }
+            run_to_rest(&mut motion, TICK);
+            assert!(motion.origin_settled(), "öteleme {origin} yerleşmedi");
             assert_eq!(motion.origin(), f32::from(origin));
+            previous = origin;
         }
     }
 

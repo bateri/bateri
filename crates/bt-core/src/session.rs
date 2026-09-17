@@ -255,19 +255,6 @@ pub struct Cursor {
     /// kopyası onu yazmış olurdu ve öteleme bir kare boyunca yanlış ızgara
     /// yüksekliğinden hesaplanırdı.
     pub rows: u16,
-    /// Bu kare alternatif ekrandan mı geliyor (vim, htop, less, man).
-    ///
-    /// [`Cursor::content_rows`]'tan **türetilemez**: alternatif ekranda değer
-    /// `rows`'a eşit, ama ana ekranda da dolu bir pencere aynı sayıyı verir ve
-    /// ikisi ayırt edilemez.
-    ///
-    /// Tüketicisi ötelemenin animasyonu: geçiş **snap**'lemeli. Alternatif
-    /// ekrana girmek doluluğu bir hamlede `rows`'a fırlatıyor, yani öteleme
-    /// neredeyse bütün ızgara kadar sıçrıyor; animasyon onu içeriğin kendi
-    /// büyümesi sanır ve vim'in arayüzü pencerenin altından süzülerek girerdi
-    /// (çıkışta da kabuk aşağı inerdi). Kayma **dipten eklenen satırlar**
-    /// içindir; ekranın sahibinin değişmesi o sınıfa girmiyor.
-    pub alt_screen: bool,
 }
 
 /// Bir komut bloğunun karedeki izi: **komutun satırı** ve o komutun rengi.
@@ -1557,7 +1544,6 @@ impl Session {
                 drawn_rows.max(cursor_screen_row.saturating_add(1))
             },
             rows: grid_rows,
-            alt_screen,
         };
         debug_assert!(
             (1..=grid_rows).contains(&cursor.content_rows),

@@ -648,9 +648,6 @@ mod tests {
             // yani `link.rs`'in okuduğu yer. Dolu ızgara, yani öteleme sıfır.
             content_rows: 1,
             rows: 1,
-            // Ekranın sahibi de bu listenin dışında: tetiği `link.rs` okuyup
-            // `Motion`'a veriyor, `Frame` yalnız çizilmiş ötelemeyi görüyor.
-            alt_screen: false,
         }
     }
 

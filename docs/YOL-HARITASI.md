@@ -123,17 +123,13 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   içine giriyor. Şeridin belirmesi 011'e **alınmadı**: set bilerek saf yerleşim
   işi tutuldu ve şerit 012'de prompt işaretiyle birlikte zaten elden geçecek.
   Yani bu borcun doğal evi artık 012.)*
-- **Dolu ekranda `clear` kayıyor.** 011 ötelemeyi üç tetikte snap'liyor
-  (tekerlek, geometri, alternatif ekran geçişi) ama `clear` hiçbirine
-  girmiyor: doluluk bir hamlede daralıyor, animasyon bunu içeriğin kendi
-  hareketi sanıyor ve prompt yukarıdan aşağıya süzülüyor. Ayırt edici bir
-  bayrak yok — "içerik daraldıysa snap'le" kuralı **reddedildi**, çünkü
-  R2.4'ün salınan çıktısında (imleci yukarı taşıyıp `\e[K` ile silen program)
-  düşüş anında, yükseliş animasyonlu olur ve testere üretir. Kalan tek yol bir
-  **mesafe eşiği** ve o ölçülmemiş bir sayı; borcun kapanması ya bir ölçüme
-  (kaç satırlık sıçrama "kendi büyümesi" değildir) ya da `bt-core`'un ED
-  (`\e[2J`) olayını sınırdan bir bayrak olarak vermesine bağlı. İkincisi daha
-  temiz ama sınıra yeni alan ekliyor, yani kendi gerekçesini hak ediyor.
+- **Ötelemenin yön kuralının ölçülmemiş yarısı.** 011 kapı sonrası gözle
+  kontrolle kayma tek yöne indirildi: içerik büyürken süzülüyor, daralırken
+  snap'liyor. Kabul edilmiş bedeli art arda satır yazıp silen bir program
+  (spinner, çok satırlı ilerleme çubuğu) — büyürken kayıp daralırken zıplıyor,
+  yani simetrik bir salınım yerine testere. Gerçek bir örnekte rahatsız
+  ediyorsa çaresi yön değil **mesafe** eşiği olur ve o ölçülmemiş bir sayı;
+  ölçüm olmadan değiştirilmez.
 - **Hareket karesi ucuz değil.** 008 Karar 4 hareket karesinde grid'i yeniden
   taramayı önlüyor (`Frame::move_cursor` listeleri koruyor) ama encode yolu
   korunan listeyi yine de **baştan kuruyor**: `AtlasTexture::prepare` her

@@ -51,10 +51,12 @@ tek bir `setViewport` ile iki pipeline'ı birden kaydırır — dört liste ve i
 aynı yerden. Öteleme **yumuşak kayar**: `bt-gpu::motion`'ın ikinci animatörü
 (`Slide`) onu imleçle aynı stil ve aynı `settled()` kapısı altında sürer, imlecin
 hedefi de **ekran satırıdır** (`row + origin`), yani Enter'da imleç dipteki
-satırında durur ve geçmiş arkasından yukarı akar. Kayma **yalnız içeriğin
-kendi büyümesi** içindir: tekerlek, geometri (pencere/font/punto) ve alternatif
-ekran geçişi ötelemeyi **snap**'ler, yoksa vim'e girmek bütün ızgarayı
-pencerenin altından süzerdi. Piksel aygıt ızgarasına
+satırında durur ve geçmiş arkasından yukarı akar. Kayma **tek yönlüdür**:
+içerik büyüyünce (hedef düşünce) süzülür, daralınca (vim'den çıkış, dolu
+ekranda `clear`) **snap**'ler — yukarı akış içeriğin gelmesi, aşağı iniş
+düşmesi gibi okunuyor; ölçüt mesafe değil işaret, çünkü eşik ölçülmemiş bir
+sayı olurdu. Tekerlek ve geometri (pencere/font/punto) ayrıca snap'ler.
+Piksel aygıt ızgarasına
 yuvarlanır (`Frame::set_origin_rows`): kaymanın durduğu kare ekranda kalıcı ve
 kesirli bir piksel bütün metni bulanıklaştırırdı. Ötelemenin tek sahibi
 kare yolu; fare eşlemesi onu `bt_gpu::Origin` ile **encode edilen** değerden

@@ -399,15 +399,14 @@ reduce_motion = "system"
 - Aynı stil **içeriğin yükselmesini** de sürer: bateri içeriği pencerenin
   tabanına yaslar, yani yeni bir satır geldiğinde geçmiş yukarı kayar ve imleç
   dipteki satırında durur. Kayan şey bütün ızgaradır, imleç değil.
-- **Izgaranın başka sebeple yer değiştirmesi kaymaz:** geçmişte kaydırmak
-  (tekerlek), pencereyi boyutlandırmak, fontu ya da puntoyu değiştirmek ve tam
-  ekran bir uygulamaya girip çıkmak (vim, less, htop) her şeyi animasyonsuz
-  yerine koyar. Ortak sebep: bunların hiçbirinde içerik kendi büyümesiyle
-  yükselmedi, ızgara başka bir sebeple yer değiştirdi.
-- **`clear` bunun istisnası:** dolu bir ekranı temizlemek prompt'u yukarıdan
-  aşağıya kaydırır. Doluluğun bir hamlede daralması ile satır satır daralması
-  bugün ayırt edilmiyor ve ayırmanın ölçülmüş bir eşiği yok; o ölçülene kadar
-  `clear` kayan tarafta kalıyor.
+- **Yalnız yukarı kayar.** İçerik büyüyünce (yeni satır, `vim`/`less` gibi tam
+  ekran bir uygulamanın açılması) ızgara yukarı **süzülerek** gelir; içerik
+  daralınca (o uygulamadan çıkmak, dolu bir ekranda `clear`, silinen satırlar)
+  **anında** yerine oturur. Sebebi his: yukarı akış içeriğin gelmesi gibi
+  okunuyor, aşağı iniş düşmesi gibi.
+- **Izgaranın başka sebeple yer değiştirmesi de kaymaz:** geçmişte kaydırmak
+  (tekerlek), pencereyi boyutlandırmak, fontu ya da puntoyu değiştirmek. Orada
+  hareket eden şey içerik değil, pencerenin kendisidir.
 - Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa `"snap"`
   onu hedefinde bitirir, öteki iki stil kaymayı bulunduğu yerden devralır:
   imleç hiçbir stil değişiminde ışınlanmaz.
