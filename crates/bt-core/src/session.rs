@@ -1441,6 +1441,31 @@ impl Session {
                 .div_ceil(cols);
             cursor_screen_row.saturating_sub(u16::try_from(above).unwrap_or(u16::MAX))
         });
+        // **Devrin tek yüklemi ve üç tüketicisi var**: hangi hücrelerin
+        // atlanacağı, imlecin çizilip çizilmeyeceği ve **doluluk sayısı**.
+        // Üçü de "giriş satırı ızgaranın mı, dock'un mu" sorusunun yanıtına
+        // bağlı ve ayrı ayrı sorulduklarında ayrışıyorlardı — gözlenen kusur
+        // tam da o ayrışmaydı (012 phase-8, kullanıcı): boş prompt'ta hiçbir
+        // hücre çıpayı taşımadığı için satır **çizilmiyor ama doluluğa
+        // giriyordu**, ilk tuşta çıpa doğunca doluluk bir satır düşüyor ve
+        // bütün ızgara oynuyordu. Yazınca aşağı, silince yukarı.
+        //
+        // Üç ön koşul ve üçü de zorunlu:
+        //
+        // - `self.dock` — pencerenin devralacak bir yüzeyi var. Yoksa ne
+        //   caret'i ne satırı verecek kimse var; dock'suz pencerede satırı
+        //   gizlemek kullanıcının yazdığını **hiçbir yerde** göstermemek olurdu.
+        // - `!alt_screen` — alternatif ekranda dock kalkıyor (phase-7).
+        // - Bastırılan bir satır varsa **tazelik kapısı**: `suppress_to` onu
+        //   taşıyor (bayat aynada `None`). Bastırılan satır yokken sorulacak
+        //   bir tazelik de yok — dock metin değil boş bir caret gösteriyor.
+        //
+        // Aralığın boş olduğu dejenere hâl (çıpa imlecin aşağısında) dışarıda:
+        // `suppress_floor` imlecin satırının üstünde.
+        let caret_in_dock = self.dock
+            && !alt_screen
+            && caret_home == CaretHome::Dock
+            && (suppressed_block.is_none() || suppress_to.is_some_and(|to| suppress_floor <= to));
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
         // bayrak sormuyor. Biri `HIDDEN` (`\e[8m`) ve o bu maskede **değil**:
@@ -1625,7 +1650,8 @@ impl Session {
             // sayılmaz, yoksa 011'in tabana yapışması çizilmeyen bir satır
             // için yer ayırır ve dock ile içerik arasında boş bir şerit
             // kalırdı.
-            if let (Some(from), Some(to)) = (suppress_from, suppress_to)
+            if caret_in_dock
+                && let (Some(from), Some(to)) = (suppress_from, suppress_to)
                 && (from.max(suppress_floor)..=to).contains(&row)
             {
                 continue;
@@ -1719,51 +1745,6 @@ impl Session {
         // yalnız kayıt kuruluyor. Yer değiştirmesinin alternatifi
         // `content_rows`'u sıfırla doğurup sonra düzeltmekti ve o, bir kare
         // boyunca yanlış olan bir alan demekti.
-        // Döngünün kapısıyla **aynı** soru, tek yerde: aralığın üstü altının
-        // altında kalırsa (çıpa imlecin aşağısında) aralık boştur ve hiçbir
-        // hücre bastırılmamıştır. Ayrı ayrı sorulsaydı o dejenere hâlde imleç
-        // gizlenir ve doluluk düşerdi — bastırılmamış bir satır için ödenen
-        // iki bedel.
-        let suppressed = matches!(
-            (suppress_from, suppress_to),
-            (Some(from), Some(to)) if from.max(suppress_floor) <= to
-        );
-        // **İmlecin kapısı hücrelerinkinden ayrı ve çok daha geniş.** Hücreler
-        // hangi satırların atlanacağını bilmek zorunda, yani çıpaya
-        // (`suppress_from`) bağlılar; caret'in yeri ise bir satır aralığı
-        // sorusu bile değil: sahibini [`crate::shell::caret_home`] söylüyor ve
-        // dock'un çizdiği caret de **aynı** yüklemden çıkıyor. İkisi ancak
-        // birlikte değişebilir, yani ne iki caret ne sıfır caret mümkün.
-        //
-        // Ayrım gözlenen iki kusurun çaresi ve ikisi de "caret sıçrıyor"un
-        // yüzleri:
-        //
-        // - **Boş prompt'ta hiçbir hücre çıpayı taşımıyor.** Sıfır genişlikli
-        //   `PS1` hücre yazmıyor, kullanıcı da henüz yazmadı — `suppress_from`
-        //   `None` kalıyor ve ızgara, dock'un caret'inin yanında ikinci bir
-        //   imleç çiziyordu (gözlendi; 012 phase-7).
-        // - **Ayna henüz yokken caret ızgaradaydı.** Açılışta (zsh'in rc
-        //   süresi) ve her komuttan sonra (`Finished`; `precmd`'in `git`
-        //   fork'unu içeriyor) bastırma zaten çalışmıyor ve caret prompt gelince
-        //   ızgaradan dock'a **sıçrıyordu** (gözlendi; 012 phase-8). O
-        //   pencerelerin ikisinde de `caret_home` dock diyor.
-        //
-        // Üç koşul birlikte ve üçü de zorunlu:
-        //
-        // - `self.dock` — pencerenin devralacak bir yüzeyi var. Yoksa gizlemek
-        //   pencereyi caret'siz bırakırdı (duman reçetesi: `/bin/sh`).
-        // - `!alt_screen` — alternatif ekranda dock **kaldırılıyor** (phase-7),
-        //   yani vim'in imleci ızgarada.
-        // - Bastırılan bir satır varsa **tazelik kapısı**: `suppress_to` onu
-        //   taşıyor (bayat aynada `None`), yani gösteremediğimiz satırın imleci
-        //   ızgarada kalıyor. Aralığın boş olduğu dejenere hâl (çıpa imlecin
-        //   aşağısında) de dışarıda: `suppress_floor` imlecin satırının üstünde.
-        //   Bastırılan satır **yokken** sorulacak bir tazelik de yok — dock
-        //   metin değil boş bir caret gösteriyor.
-        let caret_in_dock = self.dock
-            && !alt_screen
-            && caret_home == CaretHome::Dock
-            && (suppressed_block.is_none() || suppress_to.is_some_and(|to| suppress_floor <= to));
         let cursor = Cursor {
             col: cursor_col,
             row: cursor_screen_row,
@@ -1788,12 +1769,20 @@ impl Session {
             // [`Cursor::content_rows`]'ta.
             content_rows: if alt_screen {
                 grid_rows
-            } else if suppressed {
-                // **Bastırılan satır doluluğa sayılmaz** ve imleç terimi de
-                // düşüyor: imleç bastırılan aralığın içinde, onu saymak
-                // çizilmeyen satırı geri eklemek olurdu. Uzun bir komut
-                // birkaç satıra sarsa da bedel değişmiyor — aralığın tamamı
-                // dışarıda.
+            } else if caret_in_dock {
+                // **Giriş satırı yer de kaplamıyor** — `display: none`, gizli
+                // bir satır değil. İmleç terimi burada düşüyor, çünkü imleç
+                // ızgarada değil: sayılsaydı çizilmeyen bir satır için yer
+                // ayrılır ve son çıktı satırı ile dock arasında boş bir şerit
+                // kalırdı.
+                //
+                // **Kapı bastırmayla değil devirle aynı** ve fark ölçülebilir
+                // bir kusurdu (gözlendi; kullanıcı): boş prompt'ta hiçbir hücre
+                // çıpayı taşımıyor, yani bastırma çalışmıyor ama satır yine
+                // çizilmiyordu — doluluk ise imleci sayıyordu. İlk tuşta çıpa
+                // doğuyor, bastırma başlıyor ve doluluk **bir satır**
+                // düşüyordu: ızgaranın tamamı yazarken aşağı, silerken yukarı
+                // oynuyordu. Kapılar tek yükleme bağlanınca oynama kalmıyor.
                 //
                 // Taban 1: bütün pencerenin bastırıldığı dejenere hâlde
                 // (ilk prompt, üstünde hiç çıktı yok) `drawn_rows` sıfır
@@ -2901,7 +2890,12 @@ mod tests {
     /// yok ve orada imleci gizlemek pencereyi caret'siz bırakırdı. Sınamaların
     /// varsayılanı dock'suz ([`test_options`]).
     fn spawn_docked_session(script: &str, wake: Arc<TestWake>) -> Session {
-        let mut options = test_options(sh(script), 40);
+        spawn_docked_with_cols(script, 40, wake)
+    }
+
+    /// [`spawn_docked_session`]'ın genişliği çağırandan gelen hâli.
+    fn spawn_docked_with_cols(script: &str, cols: u16, wake: Arc<TestWake>) -> Session {
+        let mut options = test_options(sh(script), cols);
         options.dock = true;
         Session::spawn(options, wake).unwrap()
     }
@@ -3098,6 +3092,56 @@ mod tests {
     }
 
     #[test]
+    fn the_first_keystroke_does_not_move_the_grid() {
+        // **Gözlenen kusur** (kullanıcı, 012 phase-8): `ls` çıktısı duran bir
+        // pencerede dock'a bir harf yazınca ızgaranın tamamı bir satır aşağı,
+        // silince bir satır yukarı oynuyordu. Kullanıcının teşhisi birebir
+        // doğruydu: satır çizilmiyor ama **yer kaplıyordu** — `visibility:
+        // hidden`, oysa `display: none` gerek.
+        //
+        // Sebep iki kapının ayrışmasıydı. Boş prompt'ta sıfır genişlikli `PS1`
+        // hiçbir hücre yazmıyor, yani çıpayı taşıyan hücre yok ve bastırma
+        // çalışmıyor; doluluk sayısı da imlecin satırını sayıyordu. İlk tuşta
+        // hücre doğuyor, çıpa beliriyor, bastırma başlıyor ve doluluk bir
+        // satır düşüyordu.
+        //
+        // Ölçülen şey **fark**, mutlak sayı değil: doluluk ilk tuşta
+        // değişmemeli.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                // Çıktı, sonra **hücresiz** prompt (çıpa açık kalıyor), sonra
+                // boş ayna. İkinci `printf` kullanıcının ilk tuşu: harf
+                // ızgaraya düşüyor (çıpayı o taşıyacak) ve ayna onu bildiriyor.
+                "printf 'out\\r\\n\\033]133;A;bt_block=1\\007\
+                 \\033]8;;bateri://block/1\\007\\033]133;B\\007{}'; sleep 1; \
+                 printf 'l{}'; sleep 5",
+                mirror("", 0),
+                mirror("bA==", 1),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        let empty = session.frame(|_| (), &mut Blocks::default());
+
+        wait_until("ilk tuş aynaya düşmedi", Duration::from_secs(3), || {
+            let mut dock = DockState::default();
+            session.dock_state(&mut dock);
+            dock.status == DockStatus::Live && dock.buffer == "l"
+        });
+        let typed = session.frame(|_| (), &mut Blocks::default());
+
+        assert_eq!(
+            empty.content_rows, typed.content_rows,
+            "ilk tuşta ızgara oynadı: {empty:?} → {typed:?}"
+        );
+        // Ve oynamamasının sebebi satırın **hiç** yer kaplamaması: yalnız
+        // çıktının satırı sayılıyor, giriş satırı değil.
+        assert_eq!(typed.content_rows, 1, "giriş satırı yer kapladı: {typed:?}");
+        session.shutdown();
+    }
+
+    #[test]
     fn the_grid_keeps_no_cursor_before_the_dock_comes_alive() {
         // **Gözlenen kusur** (kullanıcı, 012 phase-8): pencere açılırken —
         // zsh'in rc'si koşarken, henüz hiçbir işaret gelmemişken — caret
@@ -3279,8 +3323,8 @@ mod tests {
         // Ölçüt satır 4: bastırma girişin son satırında **durmak** zorunda,
         // yoksa tamamlama listesini de yutardı.
         let wake = Arc::new(TestWake::default());
-        let session = spawn_with_cols(
-            sh(&format!(
+        let session = spawn_docked_with_cols(
+            &format!(
                 // 20 sütun: `$ ` + 30 karakter iki satıra sarıyor (2 ve 3).
                 // Sonra dördüncü satıra ZLE'nin girişin dışında çizdiği bir
                 // şey (tamamlama listesi emsali), sonra imleç girişin **ilk**
@@ -3292,7 +3336,7 @@ mod tests {
                 anchored_prompt(2),
                 "abcdefghijklmnopqrstuvwxyz0123",
                 mirror("YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIz", 0),
-            )),
+            ),
             20,
             Arc::clone(&wake),
         );
@@ -3326,7 +3370,7 @@ mod tests {
         // önce `Live` oluyor, bastırma orada doğrulanıyor, `e` ondan **sonra**
         // geliyor: gerçek hayattaki sıranın (yaz → Enter) ta kendisi.
         let wake = Arc::new(TestWake::default());
-        let session = spawn_session(
+        let session = spawn_docked_session(
             &format!(
                 "printf '{}cmd1{}{}ls -la{}'; sleep 1; printf '\\033]8133;e\\007'; sleep 5",
                 anchored_prompt(1),

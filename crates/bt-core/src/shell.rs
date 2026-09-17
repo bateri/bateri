@@ -587,24 +587,41 @@ pub(crate) enum CaretHome {
 /// kopyalarını (`Option<ShellState>` + [`DockStatus`]) taşıyor ve aynı yanıtı
 /// vermek zorunda. Defter üstündeki yüzü [`ShellLog::caret_home`].
 ///
-/// **Izgaraya dönen iki hâl ve ikisi de kesin:**
+/// **Kural tek cümle: caret satırın nerede çizildiğine uyar.** Giriş satırı
+/// ızgaradaysa caret de ızgarada, dock'taysa dock'ta. Üç hâl ızgaranın:
 ///
 /// - `Running` — komut koşuyor. Satırın sahibi o: `cat`'in beklediği girdi,
 ///   `ssh`'ın parola istemi ve vim'in kendi imleci ızgarada yaşıyor.
 /// - `Unavailable` — gösteremediğimiz bir satır var ve ızgarada duruyor
 ///   (R1.2); caret'i de orada durmalı, yoksa kullanıcı yazdığı yeri göremez.
+/// - `Input` + `Idle` — kabuk "kullanıcı yazıyor" diyor ama ZLE satırı
+///   **bırakmış**. Bastırma da tam burada kalkıyor (R3.3): `CORRECT`'in
+///   `[nyae]` sorusu, `zle -M` mesajı, `line-finish` ile Enter arası. Satır
+///   ızgaraya döndüğü için caret de dönmek zorunda.
 ///
 /// **Kalan her hâl dock'un ve `state == None` buna dahil.** Açılışta (zsh'in rc
-/// süresi) ve her komutun bitişiyle yeni prompt arasında (`Finished`; içinde
-/// `precmd`'in `git rev-parse` fork'u var) henüz ayna yok. Kapıyı "kabuk en az
-/// bir kez konuştu mu"ya bağlamak caret'i o pencerelerde ızgarada bırakır ve
-/// prompt gelince **sıçratırdı** — düzeltilen kusur buydu. Bedeli bilinen bir
-/// sınır: entegrasyon kurulu ama betik sessizce ölürse caret dock'ta kalır ve
-/// yazdıkça kıpırdamaz. Yanıltıcı ama görünür (dock boş, blok şeridi yok),
-/// yani bu deponun yasakladığı "sessizce yanlış" sınıfına girmiyor.
+/// süresi), prompt çizilirken (`Prompt`) ve her komutun bitişiyle yeni prompt
+/// arasında (`Finished`; içinde `precmd`'in `git rev-parse` fork'u var) ortada
+/// bir giriş satırı **yok** — dock boş bir caret gösteriyor ve kullanıcının
+/// yazmaya başlayacağı yer orası. Kapıyı "kabuk en az bir kez konuştu mu"ya
+/// bağlamak caret'i o pencerelerde ızgarada bırakır ve prompt gelince
+/// **sıçratırdı** — düzeltilen kusur buydu.
+///
+/// **Bilinen pencere:** `B` prompt'un içinde basılıyor, ayna ise ZLE'nin
+/// `line-init`'inde doğuyor; arada safha `Input` ama durum `Idle`, yani caret
+/// bir an ızgarada. Pencere zsh'in kendi açılışı kadar — fork yok, I/O yok — ve
+/// kapatmanın yolu "ayna hiç gelmedi" ile "ZLE bıraktı"yı ayıran yeni bir
+/// durum tutmak. Ölçülmüş bir belirti olmadan o durumu eklemiyoruz; giderilen
+/// pencere (`Finished`, bir `git` fork'u) bunun kat kat üstünde.
+///
+/// **İkinci bilinen sınır:** entegrasyon kurulu ama betik sessizce ölürse caret
+/// dock'ta kalır ve yazdıkça kıpırdamaz. Yanıltıcı ama görünür (dock boş, blok
+/// şeridi yok), yani bu deponun yasakladığı "sessizce yanlış" sınıfına girmiyor.
 pub(crate) fn caret_home(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
     match (shell.map(|state| state.phase), status) {
-        (Some(ShellPhase::Running), _) | (_, DockStatus::Unavailable(_)) => CaretHome::Grid,
+        (Some(ShellPhase::Running), _)
+        | (_, DockStatus::Unavailable(_))
+        | (Some(ShellPhase::Input), DockStatus::Idle) => CaretHome::Grid,
         _ => CaretHome::Dock,
     }
 }
