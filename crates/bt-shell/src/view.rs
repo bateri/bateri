@@ -765,6 +765,24 @@ mod tests {
         // Alt taşma hâlâ son satıra kırpılıyor: orijin alt kenarın kuralını
         // değiştirmiyor, yalnız başlangıcı iteliyor.
         assert_eq!(row(at(600.0)), Some(32), "alt taşma");
+
+        // **Kaymanın ortası da meşru bir orijin** (R2.7): fare çizilen değeri
+        // okuyor ve o değer kayma boyunca satır sınırında durmuyor. Burada
+        // yarım hücre (9 fiziksel piksel) eklenmiş: içeriğin ilk satırı artık
+        // yarım hücre aşağıda ve eski sınır bir satır yukarıya düşüyor.
+        // Fonksiyonun tam satır varsayımı yok — olsaydı belirti "kayarken
+        // tıklama bir satır şaşıyor" olurdu.
+        let mid = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX + 9.0, 2.0, 100, 33);
+        assert_eq!(
+            row(mid(99.0)),
+            Some(0),
+            "kayma ortasında içeriğin ilk satırı"
+        );
+        assert_eq!(
+            row(mid(103.5)),
+            Some(1),
+            "yarım hücre sonra bir satır aşağı"
+        );
     }
 
     #[test]

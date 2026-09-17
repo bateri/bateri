@@ -406,12 +406,12 @@ struct LinkIvars {
     /// **İçerik** karesi: `session.frame()` hasar buldu ve kare çizilmeye
     /// karar verildi. Boşta sıfır kare kapısının operandı bu.
     ///
-    /// `kare`'den (GPU'nun hatasız bitirdiği kare) ayrı bir sayı ve ayrılığın
-    /// sebebi sonraki phase: **hareket** karesi de çizilen bir karedir, yani
-    /// `kare`'yi artırır, ama grid kirli değildir — 200 ms'lik bir imleç
-    /// kayması 120 Hz'de ~24 kare eder ve `kare ≤ IDLE_FRAME_LIMIT` kapısı kod
-    /// doğruyken kırmızı düşerdi. Kapı bu yüzden "boştaki **içerik** karesi"ne
-    /// bağlanıyor; sınırın sayısı değil **operandı** değişti.
+    /// `kare`'den (GPU'nun hatasız bitirdiği kare) ayrı bir sayı: **hareket**
+    /// ve **kayma** kareleri de çizilen karelerdir, yani `kare`'yi artırırlar,
+    /// ama grid kirli değildir — 200 ms'lik bir imleç kayması 120 Hz'de ~24
+    /// kare eder ve `kare ≤ IDLE_FRAME_LIMIT` kapısı kod doğruyken kırmızı
+    /// düşerdi. Kapı bu yüzden "boştaki **içerik** karesi"ne bağlanıyor;
+    /// sınırın sayısı değil **operandı** değişti.
     ///
     /// Çıkarma (`kare − hareket`) bilerek yok: `kare` Metal'in tamamlanma
     /// thread'inde, bu sayaç ana thread'de artıyor, yani deadline animasyonun
@@ -431,7 +431,18 @@ struct LinkIvars {
     /// **gerekli** sayacı (reçetede bir imleç hareketi var, bkz.
     /// `bt_core::smoke_shell`).
     motion_frames: Cell<u64>,
-    /// İmlecin kayması — kareyi zamana bağlayan tek şey.
+    /// **Kayma** karesi: hasar yok ama ötelemenin animasyonu yerleşmemiş.
+    ///
+    /// [`Self::motion_frames`]'in kardeşi ve ondan ayrı, çünkü iki animatör
+    /// var ve kırmızı bir koşuyu okuyan taraf hangisinin yerleşmediğini
+    /// satırdan görmeli. Aynı karede ikisi birden artabilir — sayılar toplanıp
+    /// çizilen kareyi vermiyor, her biri kendi animatörünün tanığı.
+    ///
+    /// Kapıya **girmiyor**: duman reçetesi bir imleç hareketi içeriyor
+    /// (`bt_core::smoke_shell`) ama tabana yapışık içerikte tek satırlık bir
+    /// prompt kayma üretmeyebilir — ölçülmemiş bir eşiği kapıya yazmıyoruz.
+    slide_frames: Cell<u64>,
+    /// İmlecin ve içeriğin kayması — kareyi zamana bağlayan tek şey.
     ///
     /// `Cell`, `RefCell` değil: [`crate::motion::Motion`] `Copy` ve ona
     /// dokunan tek yer bu callback (ana thread). `RefCell` çalışırdı ama
@@ -551,8 +562,23 @@ define_class!(
                 // **Hareket karesi.** `Waker`'a dokunulmuyor (modül başlığı):
                 // link zaten uyanık ve bu callback'in kendisi onu sürdürüyor.
                 iv.motion.set(motion);
-                iv.motion_frames.set(iv.motion_frames.get() + 1);
+                // İki sayaç, iki animatör: `hareket=` yalnız imlecin,
+                // `kayma=` yalnız ötelemenin tanığı. Aynı karede ikisi birden
+                // artabilir; toplamları çizilen kare sayısı **değil**.
+                if !motion.cursor_settled() {
+                    iv.motion_frames.set(iv.motion_frames.get() + 1);
+                }
+                if !motion.origin_settled() {
+                    iv.slide_frames.set(iv.slide_frames.get() + 1);
+                }
                 let theme = iv.theme.get();
+                // **Ötelemenin ikinci yazma noktası** (R2.5). Bu kolda
+                // `frame()` de `clear` de çağrılmıyor, yani öteleme
+                // **korunuyor** — ama animasyonun tanımı iki içerik karesi
+                // arasında *değişmek* ve korunan bir değer değişemez.
+                // `move_cursor`'dan **önce**: imlecin dikdörtgeni bu ötelemeyi
+                // pişiriyor.
+                self.set_origin(&mut frame, motion.origin());
                 // Liste korunuyor, yalnız imleç taşınıyor: grid kirli değil,
                 // yani glyph ve kural listeleri hâlâ geçerli. `Term` kilidine
                 // saniyede 120 kez girmek "render yolu bloklanmaz" ile tam
@@ -635,11 +661,6 @@ define_class!(
             let cursor = iv
                 .session
                 .frame(|cell| frame.push(cell), &mut iv.blocks.borrow_mut());
-            // **Orijin `frame()` döndükten sonra** ve bu sıra zorunlu: doluluk
-            // sayısı sink döngüsü bitmeden bilinmiyor (`Frame::origin_px`).
-            // `push_cursor`'dan **önce** olmak da zorunlu — imlecin
-            // dikdörtgeni ötelemeyi CPU'da alıyor.
-            self.set_origin(&mut frame, cursor);
             // Şeritler hücrelerle **aynı** karede ve aynı `frame()` çağrısından:
             // ayrı bir sorgudan okunsalardı kaydırma karesinde bir kare geride
             // kalırlardı (010 discussion.md → Karar 2). Sink içinde değil
@@ -674,6 +695,7 @@ define_class!(
             motion.sync(
                 cursor.col,
                 cursor.row,
+                origin_target(cursor),
                 cursor.visible,
                 cursor.display_offset,
                 // Geometri bayrağı burada **tüketiliyor**: tüketilmeseydi
@@ -681,6 +703,11 @@ define_class!(
                 iv.geometry_changed.replace(false),
             );
             iv.motion.set(motion);
+            // **Öteleme `sync`'ten sonra** ve bu sıra zorunlu: çizilecek değer
+            // hedef değil animasyonun bu karedeki yeri. `push_cursor`'dan
+            // **önce** olmak da zorunlu — imlecin dikdörtgeni bu ötelemeyi
+            // pişiriyor.
+            self.set_origin(&mut frame, motion.origin());
             if let Some(at) = motion.position() {
                 frame.push_cursor(cursor, at, theme.accent_linear(), motion.alpha());
             }
@@ -731,30 +758,30 @@ define_class!(
 );
 
 impl LinkDelegate {
-    /// Bu karenin dikey orijini: doluluk sayısı → satır → piksel.
+    /// Bu karede **çizilecek** dikey orijin: animasyonun bu andaki satırı →
+    /// piksel.
     ///
-    /// **İçerik tabana yapışır** kararı burada, `bt-core`'da değil: o taraf
-    /// yalnız kaç satırın dolu olduğunu söylüyor (`Cursor::content_rows`),
-    /// nereye yapışacağı bir yerleşim kararı ve çizenin
-    /// (`CLAUDE.md` → karar burada, boyama orada).
-    ///
-    /// `saturating_sub`: sözleşme `content_rows ≤ rows` (`bt-core`'da
-    /// `debug_assert`) ve doyma sürüm derlemesinde ötelemeyi sıfıra, yani
-    /// bugünkü tavana yapışık yerleşime düşürüyor — sarma ızgarayı ekranın
-    /// dışına atardı.
+    /// **İki yazma noktası, tek fonksiyon** (R2.5): içerik karesi `sync`'ten
+    /// sonra, hareket karesi `move_cursor`'dan önce çağırıyor. İkinci bir
+    /// hesap "fare bir satır kayıyor" diye görünen bir ayrışma demekti.
     ///
     /// **İki tüketiciye tek yazma.** Piksel değeri `Frame`'den geri okunuyor,
     /// yeniden hesaplanmıyor: viewport ile fare eşlemesinin aynı sayıyı
-    /// görmesi bu satırın işi.
+    /// görmesi bu satırın işi — kayma boyunca da (R2.7).
     ///
     /// **Üretimde hiçbir içerik kırpılmıyor** ve bunu ötelemenin *tanımı*
     /// veriyor, `setViewport`'un kırpması değil: içerik `0..content_rows`
     /// aralığında, öteleme `rows - content_rows`, yani en alt dolu satırın
     /// bittiği yer tam `rows` satır. Keyfi bir öteleme (ya da `content_rows`'u
     /// büyüten bir kusur) alt satırları dokunun dışına taşırdı ve belirti
-    /// "son satır yok" olurdu.
-    fn set_origin(&self, frame: &mut Frame, cursor: Cursor) {
-        frame.set_origin_rows(f32::from(cursor.rows.saturating_sub(cursor.content_rows)));
+    /// "son satır yok" olurdu. **Kayma boyunca öteleme hedefinden büyük** —
+    /// içerik yukarı akıyor — yani en alt satırın bir kısmı o karelerde
+    /// pencerenin altında kalıyor: yeni satır alt kenardan yükselerek geliyor
+    /// ve kayma bitince tam yerine oturuyor. Tek `setViewport`'un (R1.1)
+    /// doğrudan sonucu: dört liste birden kayıyor, yani yeni satırın yerinde
+    /// belirip ötekilerin kayması temsil edilebilir bir şey değil.
+    fn set_origin(&self, frame: &mut Frame, origin_rows: f32) {
+        frame.set_origin_rows(origin_rows);
         self.ivars().origin.set(frame.origin_px());
     }
 
@@ -763,6 +790,24 @@ impl LinkDelegate {
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
     }
+}
+
+/// Bu karenin öteleme **hedefi**, satır: içerik tabana yapışsın diye ızgaranın
+/// kaç satırı üstte boş kalacak.
+///
+/// **İçerik tabana yapışır** kararı burada, `bt-core`'da değil: o taraf yalnız
+/// kaç satırın dolu olduğunu söylüyor (`Cursor::content_rows`), nereye
+/// yapışacağı bir yerleşim kararı ve çizenin (`CLAUDE.md` → karar burada,
+/// boyama orada).
+///
+/// `saturating_sub`: sözleşme `content_rows ≤ rows` (`bt-core`'da
+/// `debug_assert`) ve doyma sürüm derlemesinde ötelemeyi sıfıra, yani tavana
+/// yapışık yerleşime düşürüyor — sarma ızgarayı ekranın dışına atardı.
+///
+/// **Hedef, çizilen değer değil:** aradaki farkı `crate::motion` kapatıyor
+/// (kayma) ve çizen taraf ötelemeyi ondan okuyor ([`LinkDelegate::set_origin`]).
+fn origin_target(cursor: Cursor) -> u16 {
+    cursor.rows.saturating_sub(cursor.content_rows)
 }
 
 /// Ekranın tazeleme ritmine bağlı kare sürücüsü.
@@ -853,6 +898,7 @@ impl DisplayLink {
                 origin: Origin::default(),
                 content_frames: Cell::new(0),
                 motion_frames: Cell::new(0),
+                slide_frames: Cell::new(0),
                 motion: Cell::new(Motion::default()),
                 geometry_changed: Cell::new(false),
                 last_frame_at: Cell::new(None),
@@ -923,6 +969,15 @@ impl DisplayLink {
     /// `icerik=`'e girmiyor ve bu kapının kendisi (008 Karar 2).
     pub fn motion_frames(&self) -> u64 {
         self.delegate.ivars().motion_frames.get()
+    }
+
+    /// Yerleşmemiş **kayma** yüzünden çizilen kare — `kayma=` jetonu.
+    ///
+    /// [`Self::motion_frames`]'in kardeşi, toplananı değil: aynı karede ikisi
+    /// birden artabilir. Bir **sayaç, kapı değil** — eşiği ölçülmedi
+    /// ([`LinkIvars::slide_frames`]).
+    pub fn slide_frames(&self) -> u64 {
+        self.delegate.ivars().slide_frames.get()
     }
 
     /// Animasyon durdu mu — kapının **ölçüm istemeyen** yarısı.

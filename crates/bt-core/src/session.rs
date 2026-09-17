@@ -213,6 +213,12 @@ pub struct Cursor {
     /// enter'a basmak gibi. Ofset oynadıysa imleç hareket etmedi, ızgara
     /// hareket etti.
     ///
+    /// **011'den beri iki animatörü birden snap'liyor.** İçeriğin ötelemesi de
+    /// (`content_rows`) kayıyor ve aynı ayrımı istiyor: enter'la yükselen
+    /// içerik yumuşak kayar, tekerlekle gezilen geçmiş **kaymaz** — parmak
+    /// neyi sürüklüyorsa onu görmeli. Kural aynı kaldı, tüketicisi ikiye
+    /// çıktı.
+    ///
     /// Bu alan, yukarıdaki "konuma güvenen ilk tüketici sözleşmeyi
     /// genişletmeli" cümlesinin karşılığıdır; genişleten tüketici hareket
     /// oldu, IME değil.
