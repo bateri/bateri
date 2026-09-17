@@ -54,7 +54,10 @@ Saç çizgisi payın **üstünde**, viewport'un tepesinde. Dock ötelemeden
 listeleri dock-yerel doğuyor, ekrana taşıyan şey o ikinci viewport. Üst
 satırında `>` işareti (safha rengiyle), metin, sönük öneri,
 `region_highlight` renkleri ve caret var; alt satırında **bağlam** —
-`{tam yol} | {dal}`, sol altta ve sönük. Bağlamın iki ucu iki ayrı yerden:
+`{tam yol} | {dal}`, sol altta ve sönük — **dock'un sol kenarından**, giriş
+metninin hizasından değil: metinle hizalanınca sebepsiz girintili görünüyordu
+ve bağlam giriş satırının devamı değil, dock'un altbilgisi. İki satırın arasında
+da boşluk var (dış payın yarısı). Bağlamın iki ucu iki ayrı yerden:
 dizin **OSC 7**'den (tarayıcının üçüncü kolu; `file://` yetkisi boş ya da
 `localhost` olmalı, adlı host yabancı sayılır), dal aynanın kanalından
 (`8133;b`, `precmd`'de bir `git rev-parse` fork'u). İkisi de aynanın

@@ -268,7 +268,21 @@ fn dock_height(rows: u16, cell_h: f32, pad: f32) -> f32 {
     if rows == 0 {
         return 0.0;
     }
-    f32::from(rows) * cell_h + 2.0 * pad
+    f32::from(rows) * cell_h + 2.0 * pad + f32::from(rows - 1) * dock_row_gap(pad)
+}
+
+/// Dock satırlarının **arasındaki** boşluk, piksel.
+///
+/// Giriş satırı ile bağlam satırı bitişikti ve iki ayrı şey olduklarını
+/// söylemiyordu (kullanıcı, 012 phase-9: "input ile path satırı arasına da
+/// boşluk ver"). Ayrı bir sabit değil, dış payın **yarısı**: tipografinin
+/// olağan hiyerarşisi (dış boşluk içtekinden büyük) ve tek bir orana bağlı, o
+/// da yine tek bir tasarım sabitine (`CellMetrics::GUTTER_PT`).
+///
+/// Yuvarlanıyor, çünkü aygıt ızgarasına oturmayan bir kayma bütün dock
+/// metnini bulanıklaştırırdı — `Frame::set_origin_rows`'un aynı gerekçesi.
+fn dock_row_gap(pad: f32) -> f32 {
+    (pad * 0.5).round()
 }
 
 /// Ayracın kalınlığı, **piksel**.
@@ -889,7 +903,8 @@ impl Frame {
     /// satırdan geçiyor, ikinci bir yerde eklenseydi pay iki kez uygulanırdı.
     fn dock_pos(&self, col: u16, row: u16) -> [f32; 2] {
         let [x, y] = self.pos(col, row);
-        [x, y + self.dock_pad()]
+        let pad = self.dock_pad();
+        [x, y + pad + f32::from(row) * dock_row_gap(pad)]
     }
 
     /// [`Frame::pos`]'un kesirli hâli — imleç iki hücre arasındayken.
@@ -1480,13 +1495,14 @@ mod tests {
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
         frame.open_dock(2, BG, CURSOR);
-        // 2×18 + 2×GUTTER = 36 + 14 = 50.
-        assert_eq!(frame.dock_px(), 50.0, "pay yüksekliğe girmedi");
+        // 2×18 + 2×GUTTER + 1×(GUTTER/2) = 36 + 14 + 4 = 54: iki dış pay ve
+        // satırların **arasındaki** boşluk.
+        assert_eq!(frame.dock_px(), 54.0, "pay yüksekliğe girmedi");
 
         // **Zemin payları da kaplıyor**: pay kadar eksik bir dikdörtgen,
         // kayma boyunca taşan ızgara satırını tam da nefes payında gösterirdi.
         let [ground, separator] = frame.dock_ground(500.0);
-        assert_eq!(ground.size, [500.0, 50.0]);
+        assert_eq!(ground.size, [500.0, 54.0]);
         // Saç çizgisi payın **üstünde**, viewport'un tepesinde: ızgarayla
         // sınır orası ve payı onun üstüne koymak çizgiyi ızgaraya sokardı.
         assert_eq!(separator.pos, [0.0, 0.0]);
@@ -1513,10 +1529,12 @@ mod tests {
             ch: Some('x'),
             ..Cell::default()
         });
+        // İkinci satır bir hücre **artı satır arası boşluk** aşağıda; dış pay
+        // ona bir kez daha uygulanmıyor.
         assert_eq!(
             frame.dock_glyphs()[0].pos[1],
-            f32::from(GUTTER) + 18.0,
-            "pay iki kez uygulandı"
+            f32::from(GUTTER) + 18.0 + 4.0,
+            "satır arası boşluk ya da dış pay yanlış uygulandı"
         );
     }
 

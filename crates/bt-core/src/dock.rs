@@ -50,14 +50,21 @@ const SIGIL: char = '>';
 /// Sabit, çünkü işaret **tek** karakter ve ayna onu görmüyor — aynanın
 /// `PREDISPLAY`'i kabuğun prompt'u, bu ise terminalin kendi işareti.
 ///
-/// **Bağlam satırı da buradan başlıyor**, sıfırdan değil: iki satır tek sol
-/// kenarı paylaşınca göz onları tek blok okuyor ve `>` işareti payda asılı
-/// kalıyor — prompt tasarımlarının olağan hizası. Kazanılacak iki sütun,
-/// yolun zaten soldan kısaldığı bir satırda ödenmeye değmiyor.
+/// **Yalnız giriş satırının hizası**; bağlam satırı sol kenardan başlıyor
+/// ([`CONTEXT_COL`]).
 const TEXT_COL: u16 = 2;
 
 /// Bağlam satırının iki yanını ayıran işaret; iki yanında birer boşluk.
 const SEPARATOR: &str = " | ";
+
+/// Bağlam satırının başladığı sütun: dock'un **sol kenarı**.
+///
+/// Giriş satırının metniyle değil, `>` işaretiyle hizalı. [`TEXT_COL`]'dan
+/// başlasaydı — ve başlıyordu — bağlam satırı sebepsiz girintili görünürdü
+/// (kullanıcı, 012 phase-9: "bu path gösterimi niye indenti var gibi"): metnin
+/// hizası işaretin açtığı boşluğu bir girinti gibi okutuyor, oysa bağlam
+/// giriş satırının devamı değil, dock'un **altbilgisi**.
+const CONTEXT_COL: u16 = 0;
 
 /// Bağlam satırının dock-yerel satır numarası; giriş satırının **altı**.
 ///
@@ -189,7 +196,7 @@ pub(crate) fn render(
 /// **Ayraç iki yan da doluysa çizilir.** Depo olmayan dizinde asılı bir `|`
 /// "dal okunamadı" derdi; okunacak dal yok.
 fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut impl FnMut(Cell)) {
-    let available = usize::from(cols.saturating_sub(TEXT_COL));
+    let available = usize::from(cols.saturating_sub(CONTEXT_COL));
     if available == 0 {
         return;
     }
@@ -254,7 +261,7 @@ fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut im
         }
         sink(Cell {
             // audit: `offset < available ≤ cols` ve `cols` `u16`; toplam taşamaz.
-            col: TEXT_COL + offset as u16,
+            col: CONTEXT_COL + offset as u16,
             row: CONTEXT_ROW,
             ch: Some(ch),
             // Bütün satır sönük: bağlam okunur ama giriş satırıyla yarışmaz.
@@ -691,8 +698,10 @@ mod tests {
     fn the_context_line_sits_under_the_input_and_is_dim() {
         let (cells, _) = draw_with(&live("", "ls", "", 2), &context("/tmp/x", "main"), COLS);
         assert_eq!(text(&cells), "> ls");
-        // Yol, ayraç, dal — yan yana ve giriş metniyle **aynı** sol kenarda.
-        assert_eq!(row_text(&cells, 1), "  /tmp/x | main");
+        // Yol, ayraç, dal — yan yana ve dock'un **sol kenarında**, yani `>`
+        // işaretiyle hizalı. Giriş metniyle hizalansaydı bağlam sebepsiz
+        // girintili görünürdü (bkz. [`CONTEXT_COL`]).
+        assert_eq!(row_text(&cells, 1), "/tmp/x | main");
         // Satırın tamamı sönük: bağlam okunur ama giriş satırıyla yarışmaz.
         for cell in cells.iter().filter(|cell| cell.row == 1) {
             assert_eq!(cell.fg, THEME.dim_linear(), "bağlam sönük değil");
@@ -713,7 +722,7 @@ mod tests {
             };
             let (cells, _) = draw_with(&state, &context("/tmp/x", "main"), COLS);
             assert_eq!(text(&cells), ">", "{status:?} metin çizdirdi");
-            assert_eq!(row_text(&cells, 1), "  /tmp/x | main", "{status:?}");
+            assert_eq!(row_text(&cells, 1), "/tmp/x | main", "{status:?}");
         }
     }
 
@@ -723,10 +732,10 @@ mod tests {
         // ve o yanlış olurdu.
         let state = live("", "", "", 0);
         let (cells, _) = draw_with(&state, &context("/tmp/x", ""), COLS);
-        assert_eq!(row_text(&cells, 1), "  /tmp/x");
+        assert_eq!(row_text(&cells, 1), "/tmp/x");
         // Simetrik: yol yokken (henüz OSC 7 gelmedi) de ayraç yok.
         let (cells, _) = draw_with(&state, &context("", "main"), COLS);
-        assert_eq!(row_text(&cells, 1), "  main");
+        assert_eq!(row_text(&cells, 1), "main");
         // İkisi de yoksa satır hiç doğmuyor.
         let (cells, _) = draw_with(&state, &DockContext::default(), COLS);
         assert_eq!(row_text(&cells, 1), "");
@@ -740,29 +749,39 @@ mod tests {
         let state = live("", "", "", 0);
         let path = "/a/bb/ccc/dddd";
 
-        // 20 sütun: metne 18 kalıyor, ` | main` yedisini alıyor, yola 11 —
-        // yani `…` ile birlikte son on karakter.
+        // 20 sütun: bağlam sol kenardan başladığı için yirmisi de onun,
+        // ` | main` yedisini alıyor, yola 13 — yani `…` ile birlikte son on
+        // iki karakter. Sol kenara çekilmek yola **iki sütun kazandırdı**.
         let (cells, _) = draw_with(&state, &context(path, "main"), 20);
-        assert_eq!(row_text(&cells, 1), "  …b/ccc/dddd | main");
+        assert_eq!(row_text(&cells, 1), "…/bb/ccc/dddd | main");
 
-        // Yol için yer kalmayınca yalnız dal kalıyor, ayraçsız: kırpılacak
-        // şey dal değil.
+        // Daralınca kırpılan hep yol: dokuz sütunda ondan `…d` kalıyor,
+        // `main` bütün duruyor.
         let (cells, _) = draw_with(&state, &context(path, "main"), 9);
-        assert_eq!(row_text(&cells, 1), "  main");
+        assert_eq!(row_text(&cells, 1), "…d | main");
+
+        // Yol için tek sütun bile kalmayınca yalnız dal kalıyor, ayraçsız:
+        // kırpılacak şey dal değil.
+        let (cells, _) = draw_with(&state, &context(path, "main"), 7);
+        assert_eq!(row_text(&cells, 1), "main");
+
+        // Dal **tam** sığdığında yolu tümden düşürüyor: bütçe önce dalın.
+        let (cells, _) = draw_with(&state, &context(path, "main"), 4);
+        assert_eq!(row_text(&cells, 1), "main");
 
         // **Dal bile sığmıyorsa hiç çizilmiyor**, kırpılmıyor: `main`'i `ma`
         // diye göstermek kullanıcıya var olmayan bir dalda olduğunu söylerdi.
         // Kalan genişlik yolun ve onun kısaltması işaretli.
-        let (cells, _) = draw_with(&state, &context(path, "main"), 4);
-        assert_eq!(row_text(&cells, 1), "  …d");
+        let (cells, _) = draw_with(&state, &context(path, "main"), 3);
+        assert_eq!(row_text(&cells, 1), "…dd");
         // Dal sığmıyor ve yol da yoksa satır büsbütün boş — yanlış bir şey
         // göstermektense hiçbir şey.
-        let (cells, _) = draw_with(&state, &context("", "main"), 4);
+        let (cells, _) = draw_with(&state, &context("", "main"), 3);
         assert_eq!(row_text(&cells, 1), "");
 
         // Sığan yol kısalmıyor ve `…` eklenmiyor.
         let (cells, _) = draw_with(&state, &context(path, "main"), 40);
-        assert_eq!(row_text(&cells, 1), "  /a/bb/ccc/dddd | main");
+        assert_eq!(row_text(&cells, 1), "/a/bb/ccc/dddd | main");
     }
 
     #[test]
