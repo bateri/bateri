@@ -222,6 +222,26 @@ pub(crate) struct Frame {
     /// ikisi birlikte tazelenir. Ayrı bir sabitten okunsaydı `cols` hesabıyla
     /// ayrışabilirdi — üçünün tek kaynağı olması 010 Karar 3'ün şartı.
     gutter_px: f32,
+    /// Izgaranın dikey orijini, piksel: içerik bu kadar **aşağıdan** başlar.
+    ///
+    /// `gutter_px`'in dikey ikizi ama **listelere işlenmiyor**:
+    /// [`Frame::pos_at`] onu görmüyor ve görmemeli. Sebep sıra — sink döngünün
+    /// içinde koşuyor ve hücreyi basma anında `Instance`'a pişiriyor, oysa
+    /// doluluk sayısı ancak döngü bitince doğuyor
+    /// (`bt_core::Cursor::content_rows`). Öteleme bu yüzden **çizim zamanı**
+    /// uygulanıyor: `setViewport` dört listeyi birden kaydırıyor
+    /// ([`crate::Renderer`]) ve instance başına maliyeti sıfır.
+    ///
+    /// Tek istisna imlecin uniform'u: `CursorBlock`'un dikdörtgeni fragment'in
+    /// `[[position]]`'ı ile karşılaştırılıyor ve o koordinat viewport
+    /// dönüşümünden **sonraki** koordinat, yani rect'e öteleme CPU'da
+    /// ekleniyor ([`Frame::push_cursor`]).
+    ///
+    /// Satır değil **piksel** ve `f32`: kayma animasyonu (phase-2) onu kesirli
+    /// tutacak. [`Frame::clear`] sıfırlıyor, yani içerik karesi değeri her
+    /// karede yeniden söylemek zorunda; hareket karesi `clear` çağırmadığı için
+    /// orada **korunuyor**.
+    origin_px: f32,
     /// İmlecin piksel dikdörtgeni ve blok altındaki metin rengi; `cell`
     /// pipeline'ının uniform'u.
     ///
@@ -265,6 +285,32 @@ impl Frame {
         self.cursor = CursorBlock::default();
         self.cell_px = (f32::from(cell_px.0), f32::from(cell_px.1));
         self.gutter_px = f32::from(metrics.gutter_px());
+        // Orijin **sıfırlanıyor**, geometriden gelmiyor: kaynağı bu karenin
+        // doluluk sayısı ve o ancak sink döngüsü bitince biliniyor. Sıfırda
+        // bırakmak "bu kare daha söylemedi" demek ve söylemeyen bir kare
+        // bugünkü (tavana yapışık) yerleşimi çiziyor — sessiz bir yanlış
+        // ötelemeden iyi.
+        self.origin_px = 0.0;
+    }
+
+    /// Bu karenin dikey orijini, **satır** cinsinden: içerik bu kadar aşağıdan
+    /// başlar.
+    ///
+    /// Satır alıyor piksel saklıyor, çünkü çeviri hücre boyunu ister ve o
+    /// yalnız burada (`clear`'ın yazdığı `cell_px`). Çağıranın (`link.rs`)
+    /// pikselle uğraşması hücre ölçüsünün ikinci bir okuyucusu demekti.
+    ///
+    /// Kesirli değer meşru: kayma animasyonu (phase-2) iki satır arasında
+    /// duruyor ve viewport ile imleç dikdörtgeni kesirli ofseti bedava
+    /// taşıyor.
+    pub(crate) fn set_origin_rows(&mut self, rows: f32) {
+        debug_assert!(self.cell_px.1 > 0.0, "clear(metrics) çağrılmadı");
+        self.origin_px = rows * self.cell_px.1;
+    }
+
+    /// Bu karenin dikey orijini, piksel; `setViewport`'un `originY`'si.
+    pub(crate) fn origin_px(&self) -> f32 {
+        self.origin_px
     }
 
     /// Sink'in tek girişi: hücrenin arka planı varsa boyanır, mürekkebi varsa
@@ -396,13 +442,17 @@ impl Frame {
             size: [self.cell_px.0, self.cell_px.1],
             rgba: with_alpha(rgba, alpha),
         });
+        // **Dikdörtgen ötelemeyi CPU'da alıyor, instance almıyor** ve bu bir
+        // asimetri değil iki ayrı uzay: instance vertex aşamasından, yani
+        // `setViewport`'tan geçiyor ve ötelemeyi GPU'da yiyor; rect ise
+        // fragment'in `[[position]]`'ı ile karşılaştırılıyor ve o koordinat
+        // dönüşümden **sonraki** koordinat. Eklenmezse imleç doğru yerde
+        // çizilir ama altındaki metnin rengi `origin_px` kadar yukarıdaki
+        // satırda kalır: orada zemin renginde bir harf, yani görünmez bir
+        // hücre; imlecin kendi harfi ise ön planıyla, yani okunmaz.
+        let top = pos[1] + self.origin_px;
         self.cursor = CursorBlock {
-            rect: [
-                pos[0],
-                pos[1],
-                pos[0] + self.cell_px.0,
-                pos[1] + self.cell_px.1,
-            ],
+            rect: [pos[0], top, pos[0] + self.cell_px.0, top + self.cell_px.1],
             rgba: with_alpha(cursor.text, alpha),
         };
     }
@@ -572,6 +622,11 @@ mod tests {
             // Kaydırma kararı hareketin işi (`motion.rs`); bu listeyi
             // ilgilendirmiyor, çünkü konum zaten dışarıdan geliyor.
             display_offset: 0,
+            // Doluluk sayısı da bu listeyi ilgilendirmiyor: ötelemeyi
+            // `set_origin_rows` söylüyor ve bu iki alan onun **girdisi**,
+            // yani `link.rs`'in okuduğu yer. Dolu ızgara, yani öteleme sıfır.
+            content_rows: 1,
+            rows: 1,
         }
     }
 
@@ -811,6 +866,54 @@ mod tests {
         // **Boyut kaymıyor, yalnız konum**: pay ızgarayı iteliyor, hücreyi
         // büyütmüyor.
         assert_eq!(frame.bg_instances()[0].size, [9.0, 18.0]);
+    }
+
+    #[test]
+    fn the_cursor_rect_carries_the_origin_but_the_instance_does_not() {
+        // **Karar 7'nin bekçisiz kalan üçüncü belirtisi.** İmlecin
+        // dikdörtgeni ile onun `bg` instance'ı iki ayrı uzayda yaşıyor:
+        // instance vertex aşamasından, yani `setViewport`'tan geçiyor ve
+        // ötelemeyi GPU'da yiyor; dikdörtgen fragment'in `[[position]]`'ı ile
+        // karşılaştırılıyor ve o koordinat dönüşümden **sonraki** koordinat.
+        // Unutulursa imleç doğru yerde görünür ama altındaki metnin rengi
+        // `origin_px` kadar yukarıdaki satıra düşer — `make hepsi`'yi yeşil
+        // bırakan, gözle "bir hücre görünmez oldu" diye fark edilen bir kusur.
+        //
+        // İki öteleme sınanıyor ve sıfır olmayanı asıl olan: sıfırda iki taraf
+        // eşit ve `+ origin_px`'i tümden silen bir kod da geçer.
+        let mut frame = Frame::default();
+        frame.clear(grid(9, 18));
+        frame.push(bg_cell(0, 2));
+        push_settled(&mut frame, cursor(0, 2, true));
+        let cell_y = frame.bg_instances()[0].pos[1];
+        assert_eq!(cell_y, 36.0);
+        assert_eq!(
+            frame.cursor_block().rect[1],
+            cell_y,
+            "ötelemesiz karede dikdörtgen hücreyle aynı satırda"
+        );
+
+        // Aynı kare, iki satır ötelenmiş. İmleci yeniden basmak şart:
+        // dikdörtgen `push_cursor` anındaki ötelemeyi pişiriyor ve üretimde de
+        // sıra öyle (`link.rs` orijini `frame()`'in dönüşünde, imleçten
+        // **önce** yazıyor).
+        frame.set_origin_rows(2.0);
+        frame.move_cursor(cursor(0, 2, true), [0.0, 2.0], CURSOR, OPAQUE);
+        assert_eq!(
+            frame.bg_instances()[1].pos[1],
+            cell_y,
+            "instance ötelemeyi CPU'da almamalı: onu viewport uyguluyor"
+        );
+        assert_eq!(
+            frame.cursor_block().rect[1],
+            cell_y + 36.0,
+            "dikdörtgen ötelemeyi almadı: blok altındaki metin eski satırda kalır"
+        );
+        assert_eq!(
+            frame.cursor_block().rect[3],
+            cell_y + 36.0 + 18.0,
+            "dikdörtgenin altı da aynı kadar kaymalı: yoksa boyu değişir"
+        );
     }
 
     #[test]
