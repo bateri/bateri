@@ -19,7 +19,8 @@
 use crate::color::{self, LinearRgba, Theme};
 use crate::session::{Cell, UnderlineStyle};
 use crate::shell::{
-    DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ShellPhase, ShellState,
+    CaretHome, DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ShellPhase,
+    ShellState, caret_home,
 };
 
 /// Dock'un karedeki yüzeyi — hücrelerin **dışında** kalan her şey, çözülmüş.
@@ -87,7 +88,7 @@ pub(crate) fn render(
     cols: u16,
     mut sink: impl FnMut(Cell),
 ) -> Dock {
-    let surface = Dock {
+    let mut surface = Dock {
         ground: theme.background_linear(),
         separator: theme.separator_linear(),
         caret: None,
@@ -96,6 +97,10 @@ pub(crate) fn render(
     if cols == 0 {
         return surface;
     }
+    // **Caret'in sahibi metinden önce ve metinden bağımsız soruluyor.** Sorunun
+    // tek sahibi [`caret_home`]; ızgara da aynı yüklemi okuyup imlecini
+    // gizliyor, yani ikisi ancak birlikte değişebilir.
+    let owned = caret_home(shell, state.status) == CaretHome::Dock;
     sink(Cell {
         col: 0,
         row: 0,
@@ -108,15 +113,23 @@ pub(crate) fn render(
     // Aşağıdaki `Live` kapısının altında kalsaydı her komutta kaybolurdu.
     render_context(context, theme, cols, &mut sink);
 
+    let available = usize::from(cols.saturating_sub(TEXT_COL));
+    if available == 0 {
+        return surface;
+    }
     // `Live` olmayan ayna metin çizdirmiyor ve ikisi de doğru cevap: `Idle`'da
     // ZLE satır düzenlemiyor, `Unavailable`'da gösteremediğimiz bir satır var
     // ve alanları zaten boş (`DockState::reset`). Ayrımı tüketen yer phase-4'ün
     // bastırma kararı, burası değil.
+    //
+    // **Caret yine de çizilebilir**: metni olmayan bir satır caret'siz bir
+    // satır demek değil. Açılışta ve iki komut arasında ayna `Idle` ve dock
+    // boş, ama kullanıcının yazmaya başlayacağı yer orası — imleci o
+    // pencerelerde ızgarada tutmak caret'i prompt gelince sıçratırdı.
     if state.status != DockStatus::Live {
-        return surface;
-    }
-    let available = usize::from(cols.saturating_sub(TEXT_COL));
-    if available == 0 {
+        if owned {
+            surface.caret = Some(TEXT_COL);
+        }
         return surface;
     }
     // Caret sağ kenarı geçince görüntü **soldan** kayıyor; caret son sütunda
@@ -156,7 +169,7 @@ pub(crate) fn render(
 
     Dock {
         // audit: `skip`'in tanımı gereği `cursor - skip < available ≤ cols`.
-        caret: Some(TEXT_COL + (state.cursor - skip) as u16),
+        caret: owned.then(|| TEXT_COL + (state.cursor - skip) as u16),
         ..surface
     }
 }
@@ -401,6 +414,21 @@ mod tests {
         (cells, dock)
     }
 
+    /// Safhanın caret'e etkisini soran sınamalar için: kabuğun durumu
+    /// çağırandan.
+    fn draw_as(state: &DockState, shell: Option<ShellState>, cols: u16) -> (Vec<Cell>, Dock) {
+        let mut cells = Vec::new();
+        let dock = render(
+            state,
+            &DockContext::default(),
+            shell,
+            &THEME,
+            cols,
+            |cell| cells.push(cell),
+        );
+        (cells, dock)
+    }
+
     fn context(cwd: &str, branch: &str) -> DockContext {
         DockContext {
             cwd: cwd.into(),
@@ -558,8 +586,9 @@ mod tests {
 
     #[test]
     fn an_idle_or_unavailable_mirror_draws_only_the_sigil() {
-        // İkisi de metin çizdirmiyor **ve caret vermiyor**: düzenlenmeyen bir
-        // satırın caret'i ekranda ikinci bir imleç olurdu.
+        // İkisi de **metin** çizdirmiyor: `Idle`'da ZLE satır düzenlemiyor,
+        // `Unavailable`'da alanlar zaten boş. Caret ayrı bir soru ve yanıtları
+        // ayrışıyor — bkz. aşağıdaki iki sınama.
         for status in [
             DockStatus::Idle,
             DockStatus::Unavailable(DockFault::Overflow),
@@ -568,10 +597,59 @@ mod tests {
                 status,
                 ..live("% ", "ls", "", 2)
             };
-            let (cells, dock) = draw(&state, COLS);
+            let (cells, _) = draw(&state, COLS);
             assert_eq!(text(&cells), ">", "{status:?} metin çizdirdi");
-            assert_eq!(dock.caret, None, "{status:?} caret verdi");
         }
+    }
+
+    #[test]
+    fn an_idle_mirror_still_keeps_the_caret_unless_a_command_runs() {
+        // **Metinsiz satır caret'siz satır demek değil.** Açılışta ve iki komut
+        // arasında ayna `Idle`, ama kullanıcının yazmaya başlayacağı yer dock.
+        // Caret'i o pencerelerde ızgarada tutmak, prompt gelince **sıçratırdı**
+        // — gözlenen kusur buydu (012 phase-8).
+        let state = DockState {
+            status: DockStatus::Idle,
+            ..live("% ", "ls", "", 2)
+        };
+        for shell in [
+            None,
+            Some(ShellState {
+                phase: ShellPhase::Prompt,
+                last_exit: None,
+            }),
+            Some(ShellState {
+                phase: ShellPhase::Finished,
+                last_exit: Some(0),
+            }),
+        ] {
+            let (_, dock) = draw_as(&state, shell, COLS);
+            assert_eq!(dock.caret, Some(TEXT_COL), "{shell:?} caret vermedi");
+        }
+        // Komut koşarken satırın sahibi ızgara: `cat`'in beklediği girdi ve
+        // `ssh`'ın parola istemi orada yaşıyor.
+        let (_, dock) = draw_as(
+            &state,
+            Some(ShellState {
+                phase: ShellPhase::Running,
+                last_exit: None,
+            }),
+            COLS,
+        );
+        assert_eq!(dock.caret, None, "koşan komutta dock caret verdi");
+    }
+
+    #[test]
+    fn an_unavailable_mirror_leaves_the_caret_to_the_grid() {
+        // Gösteremediğimiz satır ızgarada duruyor (R1.2); caret'i de orada
+        // durmalı, yoksa kullanıcı yazdığı yeri göremez. `Idle`'dan ayrıldığı
+        // tek nokta bu ve [`DockStatus`]'ün varlık sebebi de bu ayrım.
+        let state = DockState {
+            status: DockStatus::Unavailable(DockFault::Overflow),
+            ..live("% ", "ls", "", 2)
+        };
+        let (_, dock) = draw_as(&state, None, COLS);
+        assert_eq!(dock.caret, None);
     }
 
     #[test]

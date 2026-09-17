@@ -562,6 +562,53 @@ pub(crate) struct ShellLog {
     pub(crate) context: DockContext,
 }
 
+/// Caret'in sahibi: ızgara mı, dock mu.
+///
+/// **Tek yüklem, iki tüketici.** [`crate::dock::render`] caret'i çizmek için,
+/// [`crate::Session::frame`] ızgaranın imlecini gizlemek için soruyor; ikisi
+/// ayrı ayrı yazılsaydı aynı karede iki caret (ya da hiç caret) doğardı —
+/// gözlenen kusur tam da buydu (012 phase-8).
+///
+/// **Bu, giriş satırının bastırılmasından ayrı bir sorudur.** Bastırma hangi
+/// **hücrelerin** atlanacağını soruyor ve cevabı çıpaya bağlı;
+/// burada sorulan şey caret'in **yeri** ve çıpayla ilgisi yok — sıfır
+/// genişlikli prompt hiçbir hücre yazmadığı için çıpa yokken de caret dock'un.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaretHome {
+    /// Izgara çiziyor.
+    Grid,
+    /// Dock çiziyor.
+    Dock,
+}
+
+/// Caret'in sahibini safha ile aynanın durumundan çözer.
+///
+/// Serbest fonksiyon ve defteri görmüyor: [`crate::dock::render`] defteri değil
+/// kopyalarını (`Option<ShellState>` + [`DockStatus`]) taşıyor ve aynı yanıtı
+/// vermek zorunda. Defter üstündeki yüzü [`ShellLog::caret_home`].
+///
+/// **Izgaraya dönen iki hâl ve ikisi de kesin:**
+///
+/// - `Running` — komut koşuyor. Satırın sahibi o: `cat`'in beklediği girdi,
+///   `ssh`'ın parola istemi ve vim'in kendi imleci ızgarada yaşıyor.
+/// - `Unavailable` — gösteremediğimiz bir satır var ve ızgarada duruyor
+///   (R1.2); caret'i de orada durmalı, yoksa kullanıcı yazdığı yeri göremez.
+///
+/// **Kalan her hâl dock'un ve `state == None` buna dahil.** Açılışta (zsh'in rc
+/// süresi) ve her komutun bitişiyle yeni prompt arasında (`Finished`; içinde
+/// `precmd`'in `git rev-parse` fork'u var) henüz ayna yok. Kapıyı "kabuk en az
+/// bir kez konuştu mu"ya bağlamak caret'i o pencerelerde ızgarada bırakır ve
+/// prompt gelince **sıçratırdı** — düzeltilen kusur buydu. Bedeli bilinen bir
+/// sınır: entegrasyon kurulu ama betik sessizce ölürse caret dock'ta kalır ve
+/// yazdıkça kıpırdamaz. Yanıltıcı ama görünür (dock boş, blok şeridi yok),
+/// yani bu deponun yasakladığı "sessizce yanlış" sınıfına girmiyor.
+pub(crate) fn caret_home(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
+    match (shell.map(|state| state.phase), status) {
+        (Some(ShellPhase::Running), _) | (_, DockStatus::Unavailable(_)) => CaretHome::Grid,
+        _ => CaretHome::Dock,
+    }
+}
+
 /// Bastırılacak giriş satırının iki ucu; `Copy`.
 ///
 /// Aralığın **üstünü** kimlik verir (çıpası o satırda), **altını** imlecin
@@ -742,6 +789,15 @@ impl ShellLog {
             }),
             (_, Outcome::Finished(_)) => None,
         }
+    }
+
+    /// Caret'in bu an kimin — [`caret_home`]'un defter üstündeki yüzü.
+    ///
+    /// [`crate::Session::frame`] bunu [`Self::suppressed_input`] ile **aynı
+    /// kilit turunda** okuyor: ayrı turlardan alınsalardı ikisi ayrı ana ait
+    /// olurdu.
+    pub(crate) fn caret_home(&self) -> CaretHome {
+        caret_home(self.state, self.dock.status)
     }
 
     /// Bir bloğun şeridi; `None` → **çizilmez**.

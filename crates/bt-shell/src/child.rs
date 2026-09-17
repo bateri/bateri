@@ -540,6 +540,9 @@ mod tests {
                     osc52: Osc52::Off,
                 },
                 theme: Theme::BATERI,
+                // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
+                // dock alırdı.
+                dock: true,
             },
             Arc::new(SilentWake),
         )
@@ -653,6 +656,9 @@ mod tests {
                     osc52: Osc52::Off,
                 },
                 theme: Theme::BATERI,
+                // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
+                // dock alırdı.
+                dock: true,
             },
             Arc::new(SilentWake),
         )
@@ -761,6 +767,9 @@ mod tests {
                     osc52: Osc52::Off,
                 },
                 theme: Theme::BATERI,
+                // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
+                // dock alırdı.
+                dock: true,
             },
             Arc::new(SilentWake),
         )

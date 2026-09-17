@@ -57,7 +57,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
-use crate::shell::{DockContext, DockState, Scanner, ShellLog, ShellState, Stripe};
+use crate::shell::{CaretHome, DockContext, DockState, Scanner, ShellLog, ShellState, Stripe};
 use crate::wake::Wake;
 
 /// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
@@ -353,6 +353,20 @@ pub struct SessionOptions {
     pub terminal: TerminalOptions,
     /// Açılış teması; hangi temanın seçileceği uygulamanın kararı.
     pub theme: Theme,
+    /// Bu pencerenin dock'u var mı — yani caret'i ızgaradan devralacak ikinci
+    /// bir yüzey çizilecek mi.
+    ///
+    /// **İkinci bir kaynak değil, ikinci bir tüketici.** Kararı uygulama
+    /// veriyor (entegrasyon kuruldu mu) ve aynı karar dock'un çizim payını da
+    /// belirliyor; ikisi çağıranda **tek** ifadeden çıkıyor
+    /// (`bt_shell::app`'in `birth`'ü). Burada ayrı bir alan olmasının sebebi
+    /// katman yönü: pay `bt-gpu`'nun geometrisi, caret ise bu crate'in kare
+    /// kararı ve `bt-core` yukarıyı göremiyor.
+    ///
+    /// `false` iken [`Session::frame`] imleci **hiçbir hâlde** gizlemiyor:
+    /// dock'u olmayan pencerede caret'i devralacak kimse yok ve gizlemek
+    /// pencereyi caret'siz bırakırdı. Duman reçetesi (`/bin/sh`) tam da bu kol.
+    pub dock: bool,
 }
 
 /// Oturum yaşarken değişebilen terminal seçenekleri — alacritty `Config`'inin
@@ -1161,6 +1175,12 @@ pub struct Session {
     /// (`alacritty_terminal`'ın `pty_read`'i) ve arkasından bir içerik karesi
     /// geliyor.
     alt_screen: AtomicBool,
+    /// Pencerenin dock'u var mı ([`SessionOptions::dock`]).
+    ///
+    /// Doğumda kararlaşıyor ve bir daha değişmiyor, o yüzden ne kilit ne
+    /// atomik: `[shell] integration` **sonraki oturumda** geçerli (`CLAUDE.md`)
+    /// ve dock'un varlığı ona bağlı.
+    dock: bool,
 }
 
 impl Session {
@@ -1222,6 +1242,7 @@ impl Session {
             shell,
             // Açılışta alternatif ekran yok; ilk içerik karesi zaten yazacak.
             alt_screen: AtomicBool::new(false),
+            dock: options.dock,
         })
     }
 
@@ -1286,7 +1307,14 @@ impl Session {
         //
         // Kopya ile `Term` kilidi arasına düşen bir işaret de en çok bir kare
         // eski kararla çizer; işareti yazan zaten kare istiyor.
-        let suppressed_block = lock(&self.shell).suppressed_input();
+        //
+        // **Caret'in sahibi aynı turdan**: ayrı bir `lock()` ile sorulsaydı iki
+        // cevap iki ana ait olurdu ve aralarına düşen bir `line-finish` imleci
+        // gizlenmiş **ve** dock'u boşalmış bir kare doğururdu.
+        let (suppressed_block, caret_home) = {
+            let log = lock(&self.shell);
+            (log.suppressed_input(), log.caret_home())
+        };
         blocks.anchors.clear();
         blocks.resolved.clear();
         let term = self.term.lock();
@@ -1692,25 +1720,42 @@ impl Session {
             (suppress_from, suppress_to),
             (Some(from), Some(to)) if from.max(suppress_floor) <= to
         );
-        // **İmlecin kapısı hücrelerinkinden ayrı ve daha geniş.** Hücreler
+        // **İmlecin kapısı hücrelerinkinden ayrı ve çok daha geniş.** Hücreler
         // hangi satırların atlanacağını bilmek zorunda, yani çıpaya
         // (`suppress_from`) bağlılar; caret'in yeri ise bir satır aralığı
-        // sorusu değil: dock satırın sahibiyse caret **dock'ta**, nokta.
+        // sorusu bile değil: sahibini [`crate::shell::caret_home`] söylüyor ve
+        // dock'un çizdiği caret de **aynı** yüklemden çıkıyor. İkisi ancak
+        // birlikte değişebilir, yani ne iki caret ne sıfır caret mümkün.
         //
-        // Ayrım bir incelik değil, gözlenen bir kusurun çaresi: **boş
-        // prompt'ta hiçbir hücre çıpayı taşımıyor.** Sıfır genişlikli `PS1`
-        // hücre yazmıyor ve kullanıcı henüz bir şey yazmadığı için ZLE de
-        // yazmıyor — yani `suppress_from` `None` kalıyor ve ızgara, dock'un
-        // caret'inin yanında **ikinci bir imleç** çiziyordu (gözlendi, boş
-        // prompt; 012 phase-7). Çıpa tam da hücre doğunca (ilk tuşta)
-        // beliriyor, yani kusur en sık görülen hâlde — boşta bekleyen
-        // prompt'ta — duruyordu.
+        // Ayrım gözlenen iki kusurun çaresi ve ikisi de "caret sıçrıyor"un
+        // yüzleri:
         //
-        // Tazelik kapısı **burada da geçerli**: `suppress_to` onu taşıyor
-        // (bayat aynada `None`), yani gösteremediğimiz bir satırda imleç
-        // ızgarada kalıyor. Aralığın boş olduğu dejenere hâl (çıpa imlecin
-        // aşağısında) de dışarıda: `suppress_floor` imlecin satırının üstünde.
-        let caret_in_dock = suppress_to.is_some_and(|to| suppress_floor <= to);
+        // - **Boş prompt'ta hiçbir hücre çıpayı taşımıyor.** Sıfır genişlikli
+        //   `PS1` hücre yazmıyor, kullanıcı da henüz yazmadı — `suppress_from`
+        //   `None` kalıyor ve ızgara, dock'un caret'inin yanında ikinci bir
+        //   imleç çiziyordu (gözlendi; 012 phase-7).
+        // - **Ayna henüz yokken caret ızgaradaydı.** Açılışta (zsh'in rc
+        //   süresi) ve her komuttan sonra (`Finished`; `precmd`'in `git`
+        //   fork'unu içeriyor) bastırma zaten çalışmıyor ve caret prompt gelince
+        //   ızgaradan dock'a **sıçrıyordu** (gözlendi; 012 phase-8). O
+        //   pencerelerin ikisinde de `caret_home` dock diyor.
+        //
+        // Üç koşul birlikte ve üçü de zorunlu:
+        //
+        // - `self.dock` — pencerenin devralacak bir yüzeyi var. Yoksa gizlemek
+        //   pencereyi caret'siz bırakırdı (duman reçetesi: `/bin/sh`).
+        // - `!alt_screen` — alternatif ekranda dock **kaldırılıyor** (phase-7),
+        //   yani vim'in imleci ızgarada.
+        // - Bastırılan bir satır varsa **tazelik kapısı**: `suppress_to` onu
+        //   taşıyor (bayat aynada `None`), yani gösteremediğimiz satırın imleci
+        //   ızgarada kalıyor. Aralığın boş olduğu dejenere hâl (çıpa imlecin
+        //   aşağısında) de dışarıda: `suppress_floor` imlecin satırının üstünde.
+        //   Bastırılan satır **yokken** sorulacak bir tazelik de yok — dock
+        //   metin değil boş bir caret gösteriyor.
+        let caret_in_dock = self.dock
+            && !alt_screen
+            && caret_home == CaretHome::Dock
+            && (suppressed_block.is_none() || suppress_to.is_some_and(|to| suppress_floor <= to));
         let cursor = Cursor {
             col: cursor_col,
             row: cursor_screen_row,
@@ -2841,6 +2886,18 @@ mod tests {
         spawn_with_command(sh(script), wake)
     }
 
+    /// Dock'u **olan** oturum: caret'i devralacak bir yüzey var, yani
+    /// [`Session::frame`] ızgaranın imlecini gizleyebilir.
+    ///
+    /// Ayrı yardımcı, çünkü ayrım gerçek: entegrasyonsuz bir pencerede dock
+    /// yok ve orada imleci gizlemek pencereyi caret'siz bırakırdı. Sınamaların
+    /// varsayılanı dock'suz ([`test_options`]).
+    fn spawn_docked_session(script: &str, wake: Arc<TestWake>) -> Session {
+        let mut options = test_options(sh(script), 40);
+        options.dock = true;
+        Session::spawn(options, wake).unwrap()
+    }
+
     /// `/bin/sh -c script` komutu.
     fn sh(script: &str) -> (String, Vec<String>) {
         ("/bin/sh".into(), vec!["-c".into(), script.into()])
@@ -2871,6 +2928,11 @@ mod tests {
                 osc52: Osc52::Copy,
             },
             theme: THEME,
+            // Varsayılan **dock'suz**: sınamaların çoğu `/bin/sh` koşuyor ve
+            // gerçek uygulamada o oturum dock almıyor. Caret'i devralacak bir
+            // yüzeyi olduğunu iddia eden sınama bunu `spawn_docked_*` ile
+            // açıkça söylüyor.
+            dock: false,
         }
     }
 
@@ -2946,7 +3008,7 @@ mod tests {
     /// `$ ls -la` (blok 2, kullanıcı hâlâ yazıyor). Bastırmanın bütün
     /// sınamaları bu ızgarayı paylaşıyor — ayrıştıkları tek şey `tail`.
     fn spawn_typing_session(tail: &str, wake: Arc<TestWake>) -> Session {
-        spawn_session(
+        spawn_docked_session(
             &format!(
                 "printf '{}cmd1{}{}ls -la{tail}'; sleep 5",
                 anchored_prompt(1),
@@ -3008,7 +3070,7 @@ mod tests {
         // Bu yüzden prompt burada **hücresiz** kuruluyor — `anchored_prompt`
         // `$ ` bastığı için kusuru hiç göstermezdi.
         let wake = Arc::new(TestWake::default());
-        let session = spawn_session(
+        let session = spawn_docked_session(
             &format!(
                 "printf '\\033]133;A;bt_block=1\\007\
                  \\033]8;;bateri://block/1\\007\\033]133;B\\007{}'; sleep 5",
@@ -3023,6 +3085,81 @@ mod tests {
         assert!(
             !cursor.visible,
             "boş prompt'ta ızgara ikinci bir imleç çizdi: {cursor:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_grid_keeps_no_cursor_before_the_dock_comes_alive() {
+        // **Gözlenen kusur** (kullanıcı, 012 phase-8): pencere açılırken —
+        // zsh'in rc'si koşarken, henüz hiçbir işaret gelmemişken — caret
+        // ızgaradaydı ve prompt gelince dock'a **sıçrıyordu**. Aynı pencere her
+        // komuttan sonra da açılıyor (`Finished`, içinde `precmd`'in `git`
+        // fork'u var), yani kusur açılışa özgü değil, her komutta tekrarlıyor.
+        //
+        // Ayna burada `Idle` ve kabuk hiç konuşmadı: eski kapı ("bastırılacak
+        // bir blok var mı") bu hâlde hiçbir şey sormuyordu.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session("printf 'hazir'; sleep 5", Arc::clone(&wake));
+        wait_until("çıktı gelmedi", Duration::from_secs(2), || {
+            let mut cells = Vec::new();
+            session.frame(|cell| cells.push(cell), &mut Blocks::default());
+            !cells.is_empty()
+        });
+
+        let cursor = session.frame(|_| (), &mut Blocks::default());
+        assert!(
+            !cursor.visible,
+            "dock canlanmadan ızgarada imleç var: {cursor:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_running_command_takes_the_cursor_back_to_the_grid() {
+        // Değişmezin öteki ucu ve gizlemenin dizginı: komut koşarken satırın
+        // sahibi ızgara. `cat`'in beklediği girdi, `ssh`'ın parola istemi ve
+        // `read`'in satırı orada yaşıyor — caret dock'ta kalsaydı kullanıcı
+        // yazdığı yeri göremezdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}{}\\033]133;C\\007'; sleep 5",
+                anchored_prompt(1),
+                mirror("", 0),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until("komut koşmadı", Duration::from_secs(2), || {
+            session.shell_state().map(|s| s.phase) == Some(ShellPhase::Running)
+        });
+
+        let cursor = session.frame(|_| (), &mut Blocks::default());
+        assert!(cursor.visible, "koşan komutta ızgara imleçsiz: {cursor:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_session_without_a_dock_always_keeps_its_own_cursor() {
+        // **Gizlemenin ön koşulu devralacak bir yüzeyin olması.** Dock'suz
+        // pencerede caret'i alacak kimse yok ve gizlemek pencereyi caret'siz
+        // bırakırdı. Kurulum bilerek [`an_empty_prompt_keeps_its_caret_in_the_dock_alone`]
+        // ile aynı — tek fark dock'un yokluğu, yani sınanan şey tam olarak o.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '\\033]133;A;bt_block=1\\007\
+                 \\033]8;;bateri://block/1\\007\\033]133;B\\007{}'; sleep 5",
+                mirror("", 0),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+
+        let cursor = session.frame(|_| (), &mut Blocks::default());
+        assert!(
+            cursor.visible,
+            "dock'suz pencere caret'siz kaldı: {cursor:?}"
         );
         session.shutdown();
     }
@@ -4379,7 +4516,7 @@ mod tests {
 
     /// [`spawn_docked_od`]'nin keymap'i çağırandan gelen hâli.
     fn spawn_docked_od_in(wake: Arc<TestWake>, mirror: &str) -> Session {
-        spawn_session(
+        spawn_docked_session(
             &format!(
                 "printf '\\033[?2004h{}{mirror}'; exec od -An -tx1",
                 anchored_prompt(1),
