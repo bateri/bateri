@@ -14,5 +14,7 @@
 | 010 | [komut-bloklari](010-komut-bloklari/) | 🟢 | `main`'de — OSC 133'ün ilk ürün yüzeyi: komut işareti, çıkış kodu rengi, satıra çıpalanma. Gözle kontrol tasarımı değiştirdi: işaret bölge değil komut satırı, ve `>` şekli 011'e bırakıldı |
 | 011 | [tabana-yapisik-icerik](011-tabana-yapisik-icerik/) | 🟢 | `main`'de — içerik tabana yaslanıyor ve **tek yönlü** kayıyor: büyüyen içerik süzülür, daralan anında oturur (yön kuralı gözle kontrolden çıktı). `/measure` bandı yeniden gözledi ve `QUIET_FLOOR`'u 870 → 868 indirdi; bir bilinçli `[~]` `teslim.md`'de (kaymanın yerleşme süresi — kanca yok) |
 
+| 012 | [input-dock](012-input-dock/) | 📐 | Giriş satırı terminalin olsun: prompt'un devri, `>`, ayna modeli Input Dock ve çıpanın preexec'e taşınması. Model 011'de seçildi (ayna); bu setin işi aynanın görsel dikişi, dock alanı ve kapsam |
+
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
