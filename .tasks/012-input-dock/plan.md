@@ -148,7 +148,7 @@ bt-shell
 | phase-4 | ✅ |
 | phase-5 | ✅ |
 | phase-6 | ✅ |
-| phase-7 | |
+| phase-7 | ✅ |
 | kapı | |
 
 phase-6'nın `/code-review`'ından çıkan **tek commit'lik düzeltme** (phase

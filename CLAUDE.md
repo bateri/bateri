@@ -58,6 +58,14 @@ duruyor. Taşmada yol **soldan** kısalır (`…` önekiyle), dal asla kısalmaz
 karar `bt-core`'da, çizen taraf yalnız hücreleri alır. Dock payı ızgaranın satırlarından
 düşülüyor ve **yalnız entegrasyonlu zsh oturumunda** ayrılıyor — ayrım oturum
 doğarken kararlaşıyor, yani `/bin/sh` koşan duman reçetesi dock almıyor.
+**Alternatif ekranda dock kalkıyor** (vim, htop, `less`): `frame()` bayrağı
+`Term` kilidi altındayken yayınlıyor (`Session::alt_screen`), kare yolu onu her
+karede karşılaştırıyor ve değişince `bt-shell`'e enjekte edilmiş haberciyi
+çağırıyor; resize **çizilen karenin içinde değil**, `dispatch2` ana kuyruğunun
+bir sonraki turunda koşuyor. Bedel komut başına değil **geçiş başına**: `git
+log` gibi alternatif ekrana girmeyen komutlar hiç resize görmüyor. Dock'u
+olmayan pencerede haberci **hiç kurulmuyor**, yani yol yapısal olarak kapalı ve
+alternatif ekrandan çıkış orada dock doğurmuyor.
 Giriş satırı ızgarada **çizilmiyor**: kabuk `Input` safhasındayken ve ayna
 canlıyken (`ShellLog::suppressed_input`; karar `Term` kilidinden **önce**
 okunuyor, `Theme` örüntüsü) yazılmakta olan bloğun çıpa satırından imlecin

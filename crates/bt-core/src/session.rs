@@ -1143,6 +1143,24 @@ pub struct Session {
     /// olaylardan değil ham bayt akışından geliyor. `Arc`, çünkü aynı yuvanın
     /// öteki ucu [`TappedPty`] ile okuyucu thread'inde.
     shell: Arc<Mutex<ShellLog>>,
+    /// Uygulama alternatif ekranda mı — [`Session::frame`]'in yayınladığı,
+    /// [`Session::alt_screen`]'in okuduğu değer.
+    ///
+    /// **Atomik, kilit değil** ve sebebi tek: okuyanı kare yolu, kare başına.
+    /// `Term` kilidini ikinci kez almak (emsali `bracketed_paste`) kare başına
+    /// ikinci bir kilit turu demekti ve o kilit okuyucunun ayrıştırma
+    /// lease'inin arkasında bekleyebiliyor. Yazan **tek** yer `frame()` ve
+    /// orada kilit zaten tutuluyor, yani `Relaxed` yetiyor: değerin
+    /// görünürlüğü karenin kendi sırasına bağlı, başka bir veriyle
+    /// eşlenmiyor.
+    ///
+    /// **"Son karedeki hâl" demek**, "şu andaki" değil — ve bu bir eksiklik
+    /// değil, istenen şey: tüketicisi ızgara yüksekliğini o karenin
+    /// `content_rows`'uyla tutarlı tutmak zorunda. Bayat kalamıyor, çünkü
+    /// `?1049h`/`l` baytları da her okuma turu gibi `Wakeup` doğuruyor
+    /// (`alacritty_terminal`'ın `pty_read`'i) ve arkasından bir içerik karesi
+    /// geliyor.
+    alt_screen: AtomicBool,
 }
 
 impl Session {
@@ -1202,6 +1220,8 @@ impl Session {
             adapter,
             reader: Mutex::new(Some(event_loop.spawn())),
             shell,
+            // Açılışta alternatif ekran yok; ilk içerik karesi zaten yazacak.
+            alt_screen: AtomicBool::new(false),
         })
     }
 
@@ -1277,6 +1297,11 @@ impl Session {
         // okunup faz 2'ye taşınıyor; yalnız çıpa toplamayı kapatmak yetmezdi,
         // çıpasız pencerenin geri düşüşü (aşağıda) tam ekranı boyardı.
         let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        // Bayrak sınırın öteki tarafına da **buradan** geçiyor
+        // ([`Session::alt_screen`]): kilidi zaten elimizde ve okunan değer tam
+        // da bu karenin `content_rows`'uyla tutarlı olan değer. İkinci bir
+        // sorgu kilidi kare başına bir kez daha alırdı.
+        self.alt_screen.store(alt_screen, Ordering::Relaxed);
         let RenderableContent {
             display_iter,
             cursor,
@@ -1667,6 +1692,25 @@ impl Session {
             (suppress_from, suppress_to),
             (Some(from), Some(to)) if from.max(suppress_floor) <= to
         );
+        // **İmlecin kapısı hücrelerinkinden ayrı ve daha geniş.** Hücreler
+        // hangi satırların atlanacağını bilmek zorunda, yani çıpaya
+        // (`suppress_from`) bağlılar; caret'in yeri ise bir satır aralığı
+        // sorusu değil: dock satırın sahibiyse caret **dock'ta**, nokta.
+        //
+        // Ayrım bir incelik değil, gözlenen bir kusurun çaresi: **boş
+        // prompt'ta hiçbir hücre çıpayı taşımıyor.** Sıfır genişlikli `PS1`
+        // hücre yazmıyor ve kullanıcı henüz bir şey yazmadığı için ZLE de
+        // yazmıyor — yani `suppress_from` `None` kalıyor ve ızgara, dock'un
+        // caret'inin yanında **ikinci bir imleç** çiziyordu (gözlendi, boş
+        // prompt; 012 phase-7). Çıpa tam da hücre doğunca (ilk tuşta)
+        // beliriyor, yani kusur en sık görülen hâlde — boşta bekleyen
+        // prompt'ta — duruyordu.
+        //
+        // Tazelik kapısı **burada da geçerli**: `suppress_to` onu taşıyor
+        // (bayat aynada `None`), yani gösteremediğimiz bir satırda imleç
+        // ızgarada kalıyor. Aralığın boş olduğu dejenere hâl (çıpa imlecin
+        // aşağısında) de dışarıda: `suppress_floor` imlecin satırının üstünde.
+        let caret_in_dock = suppress_to.is_some_and(|to| suppress_floor <= to);
         let cursor = Cursor {
             col: cursor_col,
             row: cursor_screen_row,
@@ -1674,7 +1718,7 @@ impl Session {
             // (`Dock::caret`) ve ikisi birden çizilseydi kullanıcı iki caret
             // görürdü — üstelik ızgaradaki, altındaki harf bastırıldığı için
             // boş bir blok olarak dururdu.
-            visible: cursor_visible && !suppressed,
+            visible: cursor_visible && !caret_in_dock,
             // Blok opak ve altındaki metni örtüyor: zemin rengi onu yeniden
             // okunur kılıyor. Kaynak `theme`, hücrelerinkiyle **aynı** —
             // ayrışsalardı imlecin altındaki harf bloğa değil eski bir palete
@@ -2055,6 +2099,26 @@ impl Session {
     /// bıraktıktan **sonra**; ikisi hiçbir yerde iç içe girmiyor.
     pub fn shell_state(&self) -> Option<ShellState> {
         lock(&self.shell).state
+    }
+
+    /// Uygulama alternatif ekranda mı — **son karedeki** hâl.
+    ///
+    /// Kendi sorgusu, [`Cursor`]'ın alanı **değil**: `Cursor` bir kare kaydı
+    /// (imlecin yeri, doluluk), bu ise oturumun o andaki gerçeği ve tüketicisi
+    /// çizim değil **pencere geometrisi** — dock alternatif ekranda kalkıyor
+    /// (012 → R5.2). `Cursor`'a eklenseydi kare başına doğan bir kayda oturum
+    /// ömrü olan bir bilgi binerdi.
+    ///
+    /// Kilit **almıyor**: değeri [`Session::frame`] `Term` kilidi altındayken
+    /// yayınlıyor ([`Session::alt_screen`] alanının doc'u). Yani cevap
+    /// çizilen son kareyle tutarlı ve sorgunun bedeli bir atomik okuma.
+    ///
+    /// **Çağıran resize'ı burada yapmaz.** Değer kare yolundan okunuyor ve
+    /// pencere geometrisini kare çizilirken değiştirmek (drawable boyutu,
+    /// ızgara, `DisplayLink` yerleşimi) tam da o karenin altını oymak olurdu;
+    /// çağrı bir sonraki ana kuyruk turuna bırakılır (`bt-shell`).
+    pub fn alt_screen(&self) -> bool {
+        self.alt_screen.load(Ordering::Relaxed)
     }
 
     /// ZLE'nin görüntü aynası, `into`'ya **yerinde** kopyalanır.
@@ -2927,6 +2991,40 @@ mod tests {
             },
         );
         wait_settled(session);
+    }
+
+    #[test]
+    fn an_empty_prompt_keeps_its_caret_in_the_dock_alone() {
+        // **Gözlenen kusur** (kullanıcı, 012 phase-7): boşta bekleyen bir
+        // prompt'ta ızgara dock'un caret'inin yanında **ikinci bir imleç**
+        // çiziyordu. Sebebi zincirin en başındaydı: sıfır genişlikli `PS1`
+        // hiçbir hücre yazmıyor ve kullanıcı da henüz bir şey yazmadığı için
+        // ZLE yazmıyor — yani çıpayı **taşıyan hücre yok**, `suppress_from`
+        // `None` kalıyor ve hücre kapısıyla birlikte imleç kapısı da
+        // açılmıyordu.
+        //
+        // Çare kapıları ayırmak: hücreler hangi satırların atlanacağını
+        // bilmek zorunda (çıpa), caret'in yeri ise bir satır sorusu değil.
+        // Bu yüzden prompt burada **hücresiz** kuruluyor — `anchored_prompt`
+        // `$ ` bastığı için kusuru hiç göstermezdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "printf '\\033]133;A;bt_block=1\\007\
+                 \\033]8;;bateri://block/1\\007\\033]133;B\\007{}'; sleep 5",
+                // Boş tampon, imleç başta: kullanıcının hiçbir şey yazmadığı an.
+                mirror("", 0),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+
+        let cursor = session.frame(|_| (), &mut Blocks::default());
+        assert!(
+            !cursor.visible,
+            "boş prompt'ta ızgara ikinci bir imleç çizdi: {cursor:?}"
+        );
+        session.shutdown();
     }
 
     #[test]
@@ -4180,6 +4278,34 @@ mod tests {
             assert!(Instant::now() < deadline, "{what}");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn the_alternate_screen_flag_crosses_the_boundary_with_the_frame() {
+        // **Bayrağı yayınlayan `frame()`**, ayrı bir sorgu değil: değer
+        // çizilen karenin `content_rows`'uyla tutarlı olmak zorunda (dock'un
+        // payı ondan düşülüyor). Sınama tam da o sözleşmeyi tutuyor —
+        // `?1049h` baytlarından sonra bir **kare** koşmadan cevabın
+        // değişmemesi doğru, değişmesi kuralın bozulması olurdu.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf 'normal'; sleep 0.3; printf '\\033[?1049h'; sleep 0.3; \
+             printf '\\033[?1049l'; sleep 5",
+            Arc::clone(&wake),
+        );
+        assert!(!session.alt_screen(), "açılışta alternatif ekran");
+
+        let seen = |want: bool, what: &str| {
+            wait_until(what, Duration::from_secs(5), || {
+                // Kareyi **biz** koşuyoruz: bayrak ancak kare yolundan
+                // yayınlanıyor ve üretimde de öyle (display link).
+                frame_if_damaged(&session, |_| ());
+                session.alt_screen() == want
+            });
+        };
+        seen(true, "alternatif ekrana girilmedi");
+        seen(false, "alternatif ekrandan çıkılmadı");
+        session.shutdown();
     }
 
     /// 2004 kipi set olana kadar bekler: erken giden bir `paste` ham yazardı
