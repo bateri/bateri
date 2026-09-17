@@ -5,7 +5,8 @@
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`, `Block`,
 //! `Blocks`,
 //! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Theme`,
-//! `ShellState`, `ShellPhase`,
+//! `ShellState`, `ShellPhase`, aynanın `DockState`, `DockStatus`, `DockFault`,
+//! `Highlight`, `HighlightStyle`, `HighlightColor`'ı,
 //! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`, `CursorMotion`,
 //! `ReduceMotion`'ı görür (tam
 //! liste aşağıdaki `pub use` bloğu). `Osc52` alacritty'nin aynı adlı tipinin
@@ -52,7 +53,10 @@ pub use settings::{
     Changes, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion, SYSTEM_THEME, Settings,
     ShellIntegration,
 };
-pub use shell::{ShellPhase, ShellState};
+pub use shell::{
+    DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle, ShellPhase,
+    ShellState,
+};
 pub use wake::Wake;
 
 /// Hücre sabit boyuttadır ve sabit burada bağlanır: **alacritty'nin** hücresi

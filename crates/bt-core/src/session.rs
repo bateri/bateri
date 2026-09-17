@@ -56,7 +56,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
-use crate::shell::{Scanner, ShellLog, ShellState, Stripe};
+use crate::shell::{DockState, Scanner, ShellLog, ShellState, Stripe};
 use crate::wake::Wake;
 
 /// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
@@ -835,8 +835,8 @@ impl io::Read for TappedPty {
         //
         // Kilit yalnız işaret çıkınca alınıyor: olağan akışta closure hiç
         // çağrılmıyor, yani kabuk çıktısının hızlı yolu kilitsiz.
-        self.scanner.feed(&buf[..read], |mark| {
-            lock(&self.shell).apply(mark);
+        self.scanner.feed(&buf[..read], |event| {
+            lock(&self.shell).apply_scan(event);
         });
         Ok(read)
     }
@@ -1895,6 +1895,17 @@ impl Session {
         lock(&self.shell).state
     }
 
+    /// ZLE'nin görüntü aynası, `into`'ya **yerinde** kopyalanır.
+    ///
+    /// [`Self::shell_state`] ile aynı kilit örüntüsü — yaprak kilidi alır ve
+    /// bırakır, `Term` kilidine dokunmaz — ama dönüş şekli farklı ve sebebi
+    /// tek: [`DockState`] `Copy` değil, üç dizgi ile bir liste taşıyor.
+    /// Kopyayı döndürseydi kare başına dört ayırma doğardı; `into` kendi
+    /// kapasitesini koruyor ve sabit durumda ayırma **sıfır** (R1.3).
+    pub fn dock_state(&self, into: &mut DockState) {
+        into.clone_from(&lock(&self.shell).dock);
+    }
+
     /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve
     /// imleç sıradaki karede yeni temadan.
     ///
@@ -2398,7 +2409,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::shell::ShellPhase;
+    use crate::shell::{DockStatus, ShellPhase};
 
     /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
     const THEME: Theme = Theme::BATERI;
@@ -5246,6 +5257,55 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(reader.join().unwrap() > 0, "kabuk durumu hiç okunmadı");
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_dock_state_and_frame() {
+        // 012 aynı yaprak kilide **üçüncü** kaydı (`ShellLog.dock`) ekledi ve
+        // onu yazan yol yeni: tarayıcı artık base64 çözüp kilidin altında
+        // `clone_from` yapıyor, yani kilit altında geçen süre işaret kolundan
+        // uzun. `race_shell_state_and_frame`'in çiftini ayna için tekrarlıyor.
+        //
+        // Kilit sırası iddiası aynı: `dock_state()` yalnız `shell`'i alıyor,
+        // `frame()` önce `Term`'ü sonra `shell`'i. `shell` tutulurken `Term`
+        // isteyen bir düzenleme burada asılır.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            // Ayna dizisi ile işaret dizisi **birlikte** akıyor: iki kol tek
+            // tarayıcıda ve tek kilitte buluşuyor.
+            "while :; do printf '\\033]8133;u;2;;bHM=;;\\007\\033]133;B\\007\
+             \\033]8133;e\\007'; done",
+            Arc::clone(&wake),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let reader = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut into = DockState::default();
+                let mut seen = 0u64;
+                while Instant::now() < deadline {
+                    session.dock_state(&mut into);
+                    if into.status != DockStatus::Idle {
+                        seen += 1;
+                    }
+                }
+                seen
+            })
+        };
+
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            if frame_if_damaged(&session, |_| ()).is_some() {
+                frames += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(reader.join().unwrap() > 0, "ayna hiç okunmadı");
         assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
