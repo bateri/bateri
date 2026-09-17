@@ -113,6 +113,33 @@ _Requirements: R3.1, R3.2, R3.3_
   hücresi sink'e hiç girmediği için `"ls -la"` ızgarada dururken bile metin
   `"ls-la"` görünüyor, yani `!contains("ls -la")` **her hâlde** doğru. Satır
   bazlı `row_glyphs` yazıldı; iddia zaten satır bazlıydı.
+- **Tazelik kapısı — gözle kontrolün getirdiği ikinci commit.** Bastırma
+  aynanın *güncel* olduğuna güveniyordu ve bunu sınayan hiçbir şey yoktu;
+  ayna bayatlarsa ızgara gizlenir, dock eski metni gösterir ve kullanıcı
+  yazdığını **hiçbir yerde** görmez. Kullanıcı bunu Cmd-V ile buldu.
+  - **Sebep ölçüldü:** `bracketed-paste-magic` (zsh contrib, `$widgets`
+    çıktısıyla doğrulandı) yapıştırılan metni `zle -U` ile kuyruğa geri
+    basıyor; ZLE typeahead varken redisplay'i atlıyor, `line-pre-redraw` o
+    turda hiç koşmuyor ve ayna bir sonraki tuşa kadar güncellenmiyor. Çıplak
+    (köşeli parantezsiz) yapıştırmada ayna anında geliyor, yani tetikleyen
+    şey bizim bracketed paste göndermemiz.
+  - **Kabuk tarafında üç çare denendi ve üçü de kapalı çıktı:** kancayı
+    yeniden bağlamak (kanca zaten bağlı, koşmuyor), `bracketed-paste`
+    widget'ını sarmalamak (sarmalandığı doğrulandı, ayna yine gelmedi),
+    eklentinin kendi `paste-finish` zstyle'ı (koşuyor ama o anda `BUFFER`
+    **hâlâ boş** — metin `$PASTED`'de, ekleme sonra).
+  - **Çare terminalde ve kabuktan bağımsız:** ızgaranın son mürekkepli
+    hücresi aynanın son karakteriyle (`DockState::last_ink`) uyuşmuyorsa
+    bastırma bırakılıyor. Kip sezmiyor, iki kesin veriyi karşılaştırıyor;
+    yanlış alarmın yönü güvenli (satırı iki yerde gösterir, sessizce
+    kaybetmez) ve `zle -U` kullanan her eklenti aynı kapıdan geçiyor.
+    Bekçisi `a_stale_mirror_leaves_the_input_line_in_the_grid`, yük taşıdığı
+    kapıyı kaldırarak doğrulandı.
+  - **`ARASTIRMA.md` yeniden okundu:** Metalterm de Input Dock'u "zsh ZLE
+    kancalarıyla" sürüyor, yani mimari yol **aynı** — "ızgaradan çiziyor
+    olmalı" ilk çıkarımı yanlıştı ve kayda geçmedi. Onun bu kusura
+    takılmamasının en olası açıklaması Cmd-V'yi kendisinin yakalaması
+    (envanterdeki "sabit ayrı satır editörü"); **çıkarım, kanıt değil.**
 - **Bilinen sınır — çok satırlı `BUFFER` ve bir karelik pencere.** Alt ucun
   aritmetiği `BUFFER`'daki satır sonunu (PS2, Esc-Enter) saymıyor; o hâlde
   gerçek satır sayısı hesaptan büyük ve kuyruk kısmen sızıyor. Yön güvenli
@@ -137,6 +164,12 @@ _Requirements: R3.1, R3.2, R3.3_
   Ekran doluyken (`content_rows == rows`) hiç doğmuyor. Gözle kontrol
   bekliyor; görünürse bu bir zevk kararı (satırı saymaya devam etmek uzun
   sarmalı komutta birkaç boş satır ayırırdı) ve kullanıcıya sorulur.
+- **Açık kalan ürün sorusu (kullanıcıya).** Tazelik kapısı yapıştırmada
+  devreye girdiği için satır **bir tuş boyunca ızgarada** duruyor, sonraki
+  tuşta dock devralıyor: kaybolma kapandı, kısa bir zıplama kaldı. Kökten
+  çaresi Cmd-V'nin köşeli parantezleri atlaması olurdu ve o, 2004 kipinin
+  sözleşmesine dokunur (vim'de yapıştırma bozulur) — yani karar phase-4'ün
+  değil, kullanıcının.
 
 ### `/code-review` (riskli phase) — 4 bulgu, 4 giderildi
 

@@ -53,8 +53,14 @@ canlıyken (`ShellLog::suppressed_input`; karar `Term` kilidinden **önce**
 okunuyor, `Theme` örüntüsü) yazılmakta olan bloğun çıpa satırından imlecin
 satırına kadar hücreler sink'e uğramıyor, imleç de çizilmiyor — caret dock'ta.
 Kapı çıpa taramasından **sonra**, yoksa blok şeridi de ölürdü. Ayna
-gösteremiyorsa (`Unavailable`) ya da ZLE satırı bırakmışsa (`Idle`) bastırma
-**yok**: gösteremediğimiz satır ızgarada kalmak zorunda. Prompt **hâlâ
+gösteremiyorsa (`Unavailable`), ZLE satırı bırakmışsa (`Idle`) ya da ayna
+**bayatsa** bastırma **yok**: gösteremediğimiz satır ızgarada kalmak zorunda.
+Bayatlık kip sezerek değil iki kesin veriyi karşılaştırarak anlaşılıyor —
+ızgaranın son mürekkebi ile aynanınki (`DockState::last_ink`); yanlış alarmın
+yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez. Gerekçesi
+ölçülmüş: `bracketed-paste-magic` yapıştırmayı `zle -U` ile kuyruğa geri
+basıyor, ZLE typeahead varken redisplay'i atlıyor ve ayna bir sonraki tuşa
+kadar güncellenmiyor. Prompt **hâlâ
 kabuğun** — `PS1` basılıyor, yalnız bastırılıyor; sıfır genişliğe inmesi ve
 `>`'in prompt yerine geçmesi sonraki phase'in. Her prompt bir blok kimliği
 basar, `frame()` o kimlikleri prompt'un OSC 8 çıpasından okuyup blokları
