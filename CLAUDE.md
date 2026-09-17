@@ -71,10 +71,14 @@ yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez. Gerekçesi
 ölçülmüş: `bracketed-paste-magic` yapıştırmayı `zle -U` ile kuyruğa geri
 basıyor, ZLE typeahead varken redisplay'i atlıyor ve ayna bir sonraki tuşa
 kadar güncellenmiyor. Aynı ölçüm yapıştırmaya **dar bir istisna** getirdi:
-dock satırın sahibiyken tek satırlık ve kontrol karakteri taşımayan yük
-bracketed sarmadan akıtılıyor (`Session::can_be_typed`) — satır sonu yoksa
-hiçbir şey kendiliğinden çalışmaz, kontrol karakteri yoksa hiçbir bağlama
-tetiklenmez, yani sarmanın koruduğu iki şey de koşulun dışında. Prompt artık
+dock satırın sahibiyken, **ZLE ekleme keymap'indeyken**, tek satırlık ve
+kontrol karakteri taşımayan yük bracketed sarmadan akıtılıyor
+(`Session::can_be_typed`) — satır sonu yoksa hiçbir şey kendiliğinden
+çalışmaz, kontrol karakteri yoksa hiçbir bağlama tetiklenmez, yani sarmanın
+koruduğu iki şey de koşulun dışında. Keymap koşulu şart: `vicmd`'de aynı
+baytlar metin değil **komut** olurdu (panodaki `dd` satırı siler) ve keymap
+aynanın altıncı gövdesiyle geliyor; bilinmeyen ya da hiç gelmemiş keymap
+istisnayı **kapatıyor**. Prompt artık
 **terminalin**: `PS1` ile `RPS1` sıfır görünür genişliğe iniyor ve prompt'un
 yerini dock'un `>` işareti alıyor. Dayatma **iki yerden** ve ikisi de zorunlu —
 `precmd` ilk basımı doğru yapıyor, aynanın ZLE kancası temanın geri yazdığını

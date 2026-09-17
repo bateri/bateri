@@ -150,3 +150,9 @@ bt-shell
 | phase-6 | ✅ |
 | phase-7 | |
 | kapı | |
+
+phase-6'nın `/code-review`'ından çıkan **tek commit'lik düzeltme** (phase
+açmadı, `duzen.md` → Ek phase eşiği): `can_be_typed`'ın yapıştırma istisnası
+`vicmd`'de de açılıyordu — panodaki `dd` satırı silerdi. Ayna artık `$KEYMAP`'i
+altıncı gövdede taşıyor ve istisna yalnız ekleme keymap'lerinde açılıyor;
+bilinmeyen ya da eksik keymap onu kapatıyor.

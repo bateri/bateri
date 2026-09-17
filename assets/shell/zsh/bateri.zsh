@@ -407,9 +407,17 @@ __bateri_preexec() {
 # TEL BİÇİMİ (çözücüsü `bt-core`'un `parse_dock`'u; ikisi birlikte değişir):
 #
 #   ESC ] 8133 ; u ; CURSOR ; b64(PREDISPLAY) ; b64(BUFFER) ;
-#                             b64(POSTDISPLAY) ; b64(region_highlight) BEL
+#                             b64(POSTDISPLAY) ; b64(region_highlight) ;
+#                             b64(KEYMAP) BEL
 #   ESC ] 8133 ; e BEL   satır bitti (`line-finish`)
 #   ESC ] 8133 ; o BEL   görüntü aynaya sığmıyor (aşağıdaki kapı)
+#   ESC ] 8133 ; b ; b64(dal) BEL   bağlam satırının dalı (`precmd`)
+#
+# KEYMAP ALTINCI GÖVDE ve taşıdığı şey bir POLİTİKA DEĞİL, ZLE'nin durumu:
+# hangi keymap'lerin "yazılan tuş metne dönüşür" anlamına geldiğine karar veren
+# taraf terminal (`bt-core`, `insert_keymap`). Adı olduğu gibi gönderiyoruz,
+# çünkü `bindkey -N` ile kullanıcı kendi keymap'ini yaratabiliyor ve bu uçta
+# onu sınıflandıracak bilgi yok. base64, çünkü o ad `;` taşıyabilir.
 #
 # GÖVDELER base64: kullanıcının yazdığı metnin içinde `;`, `ESC` ve C0
 # baytları olabilir ve üçü de dizinin çerçevesini bozar. base64'ün alfabesinde
@@ -532,7 +540,7 @@ __bateri_dock_redraw() {
   __bateri_prompt_guard
   # Kayıtlar satır sonuyla ayrılıyor; çözücü gövdeyi `lines()` ile okuyor.
   # Birleştirme kapıdan ÖNCE, çünkü dördüncü gövde de kapıya tabi.
-  local REPLY entries=${(F)region_highlight} pre buf post highlights
+  local REPLY entries=${(F)region_highlight} pre buf post highlights keymap
   # Kapı KODLAMADAN ÖNCE, çünkü bütün anlamı kodlamadan kaçınmak — ve DÖRT
   # gövdeyi birden ölçüyor. `region_highlight` ayrı sayılıyor, toplama
   # girmiyor: sözdizimi vurgusu jeton başına bir kayıt bırakıyor, yani uzun
@@ -548,10 +556,14 @@ __bateri_dock_redraw() {
   __bateri_b64 "$BUFFER"; buf=$REPLY
   __bateri_b64 "$POSTDISPLAY"; post=$REPLY
   __bateri_b64 "$entries"; highlights=$REPLY
+  # KEYMAP kapının DIŞINDA sayılıyor: en uzun keymap adı bir avuç bayt ve onu
+  # yük bütçesine katmak, sınırı taşan bir satırda aynanın susmasına ikinci bir
+  # gerekçe eklerdi.
+  __bateri_b64 "$KEYMAP"; keymap=$REPLY
   # `$CURSOR` KARAKTER ofsetidir ve teli de karakter istiyor — `BUFFER`'ın
   # başından sayılan hâli olduğu gibi gidiyor, `PREDISPLAY`'e kaydırmayı
   # sınırın öteki tarafı yapıyor (`DockState::cursor`'ın doc'u).
-  print -nr -- $'\e]8133;u;'$CURSOR';'$pre';'$buf';'$post';'$highlights$'\a'
+  print -nr -- $'\e]8133;u;'$CURSOR';'$pre';'$buf';'$post';'$highlights';'$keymap$'\a'
 }
 
 # `line-finish`: ZLE satırı bıraktı, ayna kapanıyor.

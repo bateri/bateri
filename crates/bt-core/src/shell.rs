@@ -233,6 +233,23 @@ pub struct DockState {
     /// Burada saklanıyor, çünkü çözücünün metni zaten elinde; kare başına
     /// yeniden taramak `Term` kilidi öncesine O(n) eklerdi.
     pub last_ink: Option<char>,
+    /// ZLE **ekleme** keymap'inde mi: basılan basılabilir tuş metne dönüşüyor
+    /// mu ([`INSERT_KEYMAPS`]).
+    ///
+    /// Tek tüketicisi yapıştırmanın dar istisnası
+    /// ([`crate::Session::can_be_typed`]) ve orada zorunlu: istisnanın bütün
+    /// gerekçesi "bu metni kullanıcı elle yazsa aynı sonucu verirdi" ve o
+    /// cümle yalnız ekleme keymap'inde doğru. `vicmd`'de aynı baytlar komut —
+    /// panodaki `dd` satırı siler.
+    ///
+    /// **Ad değil `bool`:** sınırdan çözülmüş geçiyor (`DockState`'in geri
+    /// kalanıyla aynı kural) ve adı saklamak kare başına bir `String` daha
+    /// tutmak olurdu. Sınıflandırma çözme anında, tek yerde.
+    ///
+    /// Varsayılanı `false` ve bu **güvenli yön**: alanı hiç göndermeyen eski
+    /// bir betikle koşan pencere (`plan.md` → Göç) istisnayı kaybeder, yani
+    /// sarılı yapıştırmaya — phase-5 öncesinin davranışına — döner.
+    pub insert_keymap: bool,
 }
 
 impl Clone for DockState {
@@ -253,6 +270,7 @@ impl Clone for DockState {
         self.cursor = source.cursor;
         self.display_chars = source.display_chars;
         self.last_ink = source.last_ink;
+        self.insert_keymap = source.insert_keymap;
         self.highlights.clear();
         self.highlights.extend_from_slice(&source.highlights);
     }
@@ -270,6 +288,9 @@ impl DockState {
         self.cursor = 0;
         self.display_chars = 0;
         self.last_ink = None;
+        // Güvenli yön: gösteremediğimiz bir satırın keymap'i de bilinmiyor ve
+        // "bilmiyorum" yapıştırmayı sarılı yola göndermeli.
+        self.insert_keymap = false;
         self.highlights.clear();
     }
 }
@@ -566,6 +587,13 @@ pub(crate) struct SuppressedInput {
     /// Görüntünün son mürekkebi ([`DockState::last_ink`]) — tazelik kapısının
     /// aynadaki yarısı.
     pub(crate) last_ink: Option<char>,
+    /// ZLE ekleme keymap'inde mi ([`DockState::insert_keymap`]); yapıştırmanın
+    /// dar istisnasının üçüncü koşulu.
+    ///
+    /// Aynı kayıtta, çünkü aynı yaprak kilit turundan çıkıyor: ayrı okunsaydı
+    /// keymap ile safha farklı anlara ait olabilir ve istisna, kullanıcının
+    /// çoktan `vicmd`'ye geçtiği bir satırda açık kalabilirdi.
+    pub(crate) insert_keymap: bool,
 }
 
 impl ShellLog {
@@ -710,6 +738,7 @@ impl ShellLog {
                 chars_after_cursor: self.dock.display_chars.saturating_sub(self.dock.cursor),
                 chars_before_cursor: self.dock.cursor,
                 last_ink: self.dock.last_ink,
+                insert_keymap: self.dock.insert_keymap,
             }),
             (_, Outcome::Finished(_)) => None,
         }
@@ -1422,8 +1451,33 @@ fn decode_line<'a>(
             .lines()
             .filter_map(|entry| parse_highlight(entry, predisplay_chars, display_chars)),
     );
+
+    // KEYMAP **opsiyonel alan** ve bu, telin "fazladan alan yoksayılır"
+    // kuralının ters yönü: alan phase-6'nın kapısında eklendi ve açık bir
+    // pencere hâlâ eski betikle koşuyor olabilir (`plan.md` → Göç). Yokluğu
+    // yükü bozmuyor, yalnız `false` bırakıyor — yani yapıştırma sarılı yola
+    // döner. Yön güvenli: eksik bilgi istisnayı **kapatıyor**, açmıyor.
+    line.insert_keymap = fields.next().is_some_and(|field| {
+        decoded.clear();
+        decode_base64(field, decoded).is_some()
+            && std::str::from_utf8(decoded).is_ok_and(|name| INSERT_KEYMAPS.contains(&name))
+    });
     Some(())
 }
+
+/// Basılan tuşun **metne dönüştüğü** zsh keymap'leri.
+///
+/// Liste bir **izin listesi** ve öyle olmak zorunda: tanımadığımız bir keymap
+/// (`bindkey -N` ile kullanıcının yarattığı, ya da zsh'in ileride ekleyeceği
+/// biri) ekleme keymap'i **sayılmıyor** ve yapıştırma sarılı yoldan gidiyor.
+/// Yasak listesi olsaydı her yeni keymap adı sessizce istisnaya girerdi.
+///
+/// Üçü de aynı şeyi söylüyor ama üç ayrı yoldan: `main` zsh'in etkin
+/// bağlamasının takma adı (emacs kipinde de vi'nin **ekleme** kipinde de
+/// rapor edilen değer bu), `emacs` ile `viins` de doğrudan adlandırılmış
+/// hâlleri. Dışarıda kalanlar: `vicmd` (tuşlar komut), `visual`, `viopp`,
+/// `isearch` ve `command` — hiçbirinde basılan bayt metne dönüşmüyor.
+const INSERT_KEYMAPS: [&str; 3] = ["main", "emacs", "viins"];
 
 /// base64 alanını çözer ve `into`'ya **kapasitesini koruyarak** yazar.
 fn decode_text(field: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option<()> {
@@ -2287,6 +2341,34 @@ mod tests {
     }
 
     #[test]
+    fn the_keymap_field_opens_the_gate_only_for_insert_keymaps() {
+        // İzin listesi: tanıdığımız üç ad geçiyor, geri kalan **her şey**
+        // (komut keymap'i, kullanıcının `bindkey -N` ile yarattığı ad, hiç
+        // gelmemiş alan) kapalı. Yön güvenli — bilmemek istisnayı kapatıyor
+        // (`Session::can_be_typed`).
+        let with = |keymap: &str| {
+            let sequence = format!(
+                "\x1b]8133;u;0;;{};;;{}\x07",
+                b64(b"ls"),
+                b64(keymap.as_bytes())
+            );
+            dock_line(sequence.as_bytes()).insert_keymap
+        };
+        for keymap in ["main", "emacs", "viins"] {
+            assert!(with(keymap), "{keymap} ekleme keymap'i sayılmadı");
+        }
+        for keymap in ["vicmd", "visual", "viopp", "isearch", "command", "mine", ""] {
+            assert!(!with(keymap), "{keymap} ekleme keymap'i sayıldı");
+        }
+        // Alan hiç yoksa (eski betik) kapı kapalı, ama yük **bozuk değil**:
+        // satır yine çiziliyor.
+        let line = dock_line(&dock_update(0, "", "ls", "", &[]));
+        assert_eq!(line.status, DockStatus::Live);
+        assert_eq!(line.buffer, "ls");
+        assert!(!line.insert_keymap);
+    }
+
+    #[test]
     fn a_broken_branch_never_drops_the_mirror() {
         // Dalın iki bozulma biçimi de yalnız dalı düşürmeli: `Unavailable`
         // "giriş satırını gösteremiyorum" demek ve ızgarayı devreye sokardı —
@@ -2369,7 +2451,7 @@ mod tests {
         run_script(
             "source $ZDOTDIR/bateri.zsh
              PREDISPLAY=$T_PRE BUFFER=$T_BUF POSTDISPLAY=$T_POST CURSOR=$T_CURSOR
-             region_highlight=( ${(f)T_HL} )
+             region_highlight=( ${(f)T_HL} ) KEYMAP=$T_KEYMAP
              __bateri_dock_redraw",
             &[
                 ("T_CURSOR", &cursor.to_string()),
@@ -2377,6 +2459,9 @@ mod tests {
                 ("T_BUF", buffer),
                 ("T_POST", post),
                 ("T_HL", &highlights.join("\n")),
+                // `$KEYMAP` ZLE'nin parametresi ve kanca dışında boş; sınama
+                // onu elle kuruyor ki telin altıncı gövdesi de koşsun.
+                ("T_KEYMAP", "main"),
             ],
         )
     }
@@ -2427,6 +2512,9 @@ mod tests {
         assert_eq!(line.highlights[1].start, 2);
         assert_eq!(line.highlights[1].end, 6);
         assert!(line.highlights[1].style.bold);
+        // Altıncı gövde de telden geçiyor: kabuk `$KEYMAP`'i basıyor ve
+        // çözücü onu ekleme kapısına çeviriyor.
+        assert!(line.insert_keymap, "keymap gövdesi telde kayboldu");
     }
 
     #[test]
