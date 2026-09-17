@@ -1,13 +1,21 @@
-//! Kabuğun bastığı OSC 133 işaretleri, onların tuttuğu oturum durumu ve
-//! **komut bloğu defteri**.
+//! Kabuğun bastığı OSC işaretleri, onların tuttuğu oturum durumu, **komut
+//! bloğu defteri** ve **ZLE'nin görüntü aynası**.
 //!
-//! Üç sorumluluk, tek modül: baytlardan işaret çıkarmak ([`parse_mark`]),
-//! işaretlerden oturum safhası tutmak ([`ShellState`]) ve blok kimliği başına
+//! Tarayıcının **iki kolu** var ve ikisi de aynı bayt akışından besleniyor:
+//! [`MARK_OSC`] oturumun safhasını ve blok kimliklerini taşır, [`DOCK_OSC`]
+//! satır düzenleyicinin (ZLE) o anki görüntüsünü. İkisi tek durum makinesinde,
+//! çünkü akış tek: ayrı tarayıcılar aynı diziyi iki kez çerçevelerdi ve
+//! çerçeveleme kuralının (aşağıdaki üç madde) iki kopyası doğardı.
+//!
+//! Dört sorumluluk, tek modül: baytlardan işaret çıkarmak ([`parse_mark`]),
+//! işaretlerden oturum safhası tutmak ([`ShellState`]), blok kimliği başına
 //! akıbet tutup şeridin çizilip çizilmeyeceğine karar vermek ([`BlockLog`],
-//! [`ShellLog::stripe`]). Üçü aynı yerde, çünkü üçünü de **aynı** işaret akışı
-//! besliyor; ayrılsalardı `D`'nin çıkış kodu bir modülden ötekine elden ele
-//! geçerdi. Defterin tavanı `scrollback`'ten türüyor ve "bilinmeyen kimlik
-//! çizilmez" kararı da burada — renderer'ın göreceği tek şey çözülmüş renk.
+//! [`ShellLog::stripe`]) ve aynanın beş değişkenini çözülmüş bir kayda
+//! indirmek ([`DockState`]). Dördü aynı yerde, çünkü dördünü de **aynı**
+//! işaret akışı besliyor; ayrılsalardı `D`'nin çıkış kodu bir modülden ötekine
+//! elden ele geçerdi. Defterin tavanı `scrollback`'ten türüyor ve "bilinmeyen
+//! kimlik çizilmez" kararı da burada — renderer'ın göreceği tek şey çözülmüş
+//! renk.
 //!
 //! Bu modül **saf**: elinde ne `Session`, ne `Wake`, ne kilit var. Bayt
 //! dilimi girer, işaret çıkar. Tarayıcının hiçbir kare isteyememesi bir kural
@@ -18,7 +26,29 @@
 //! **Neden kendi tarayıcımız var:** `vte` OSC 133'ü tanımıyor ve `Handler`
 //! trait'inde "bilinmeyen OSC" kancası yok, yani `Term`'ü saran bir tip bile
 //! bu diziyi göremiyor (`.tasks/009-shell-entegrasyonu/context.md` → Kanıt).
-//! Baytları ayrıştırıcıya giderken tarıyoruz.
+//! Baytları ayrıştırıcıya giderken tarıyoruz. Aynı gerekçe [`DOCK_OSC`] için
+//! de geçerli: `vte` onu **tanımıyor**, yükü `osc_dispatch`'in `_` koluna
+//! düşürüp atıyor (`vte-0.15.0/src/ansi.rs`, `unhandled`). Yük bütünüyle
+//! oraya ulaşıyor — `osc_raw` `std` altında sınırsız bir `Vec` ve 1024'lük
+//! `MAX_OSC_RAW` yalnız `no_std` kolunda geçerli — ama ulaştığı yerde
+//! okunmuyor.
+//!
+//! **Bedeli adıyla:** o `_` kolu yükü düşürmeden önce bayt başına bir
+//! `write!` ile tanı dizgisi kuruyor ve dizgiyi `debug!`'tan **önce**
+//! kurduğu için log seviyesi bunu kısa devre yapmıyor. Yani aynanın her tuş
+//! vuruşu ayrıştırıcı tarafında yük uzunluğuyla orantılı bir ayırma daha
+//! doğuruyor.
+//!
+//! Bu bizim kusurumuz değil, alacritty'nin **tanımadığı her** OSC'ye
+//! davranışı; biz yalnız o yola sık uğrayan bir dizi soktuk. Kaçışı iki:
+//! diziyi akıştan **çıkarmak** (tarayıcının "baytlara dokunmaz" sözünü bozar
+//! ve dizi chunk sınırını aşabildiği için yerinde yapılamaz) ya da taşıyıcıyı
+//! **DCS**'e çevirmek (`put` yükü ne tamponluyor ne formatlıyor; `discussion.md`
+//! → Karar 5'te **değerlendirilmemiş** bir alternatif, 5b gibi elenmiş değil).
+//! İkisi de ölçüm sonrasının işi: maliyet **kare yolunda değil** okuyucu
+//! thread'inde ve aynı tuş vuruşunun kabuk tarafındaki base64 kodlaması zaten
+//! baskın terim. Bilinen sınır olarak duruyor; ölçümü R6.2'nin (tuş başına
+//! maliyet) borcunda.
 //!
 //! **Çerçeveleme `vte` ile paritelidir** ve bu zorunlu: tarayıcının gördüğü
 //! dizi sınırı ile ızgaranın gördüğü aynı olmalı, yoksa iki taraf aynı akıştan
@@ -85,7 +115,7 @@ pub struct ShellState {
 /// Kabuğun o anki safhası — dört işaretin her birine bir tane.
 ///
 /// `A` ve `B` **birleştirilmedi**: "prompt çiziliyor" ile "kullanıcı yazıyor"
-/// arasındaki sınır, Input Dock'un (014) ilk sorusu. Ayrımı burada tutmak
+/// arasındaki sınır, Input Dock'un (012) ilk sorusu. Ayrımı burada tutmak
 /// bedava, sonradan geri kazanmak değil.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellPhase {
@@ -127,6 +157,167 @@ pub(crate) enum Stripe {
     Success,
     /// Sıfırdan farklı çıkış koduyla bitti.
     Error,
+}
+
+/// ZLE'nin görüntü aynası — dock'un çizeceği her şey, **çözülmüş**.
+///
+/// Beş değişken taşınıyor ([`DOCK_OSC`]'un yükü) ve burada üç dizgi, bir
+/// sütun ve bir aralık listesine iniyor. Yalnız `BUFFER` taşınsaydı bastırma
+/// bilgi kaybına dönerdi: `POSTDISPLAY` autosuggestions'ın önerisi,
+/// `region_highlight` de syntax highlighting'in rengi — ikisi de en yaygın iki
+/// eklenti ve dock onlarsız kullanıcının gördüğünden **eksik** olurdu
+/// (`discussion.md` → Karar 8b).
+///
+/// **Yeniden kullanılan tampondur, kayıt değil.** Tarayıcı her tuş vuruşunda
+/// kendi kopyasını yerinde tazeliyor, [`ShellLog`] onu [`Clone::clone_from`]
+/// ile kilidin altına alıyor ve [`crate::Session::dock_state`] yine
+/// `clone_from` ile dışarı veriyor; üç adımda da dizgiler `clear()` +
+/// `push_str` ile kapasitelerini koruyor. Sabit durumda tuş başına **sıfır**
+/// ayırma var — ölçüt `CLAUDE.md`'nin kare başına maliyet kuralı ve bu tip
+/// kare başına okunuyor.
+///
+/// `Clone` elle yazıldı: `derive` yalnız `clone`'u üretir ve varsayılan
+/// `clone_from` "`*self = source.clone()`"dır, yani bu tipin tek önemli
+/// özelliğini — kapasiteyi yeniden kullanmasını — sessizce kaybederdi.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DockState {
+    /// Dock çizilebilir mi ve çizilemiyorsa neden.
+    pub status: DockStatus,
+    /// `PREDISPLAY` — ZLE'nin satırın **önüne** koyduğu, düzenlenemeyen metin.
+    pub predisplay: String,
+    /// `BUFFER` — kullanıcının yazdığı, düzenlenebilir metin.
+    pub buffer: String,
+    /// `POSTDISPLAY` — satırın **arkasına** eklenen, düzenlenemeyen metin;
+    /// bugünkü tek üreticisi zsh-autosuggestions'ın önerisi.
+    pub postdisplay: String,
+    /// Caret'in **karakter** ofseti, [`Highlight::start`] ile **aynı uzayda**:
+    /// `PREDISPLAY ++ BUFFER ++ POSTDISPLAY` dizgisinin başından sayılıyor.
+    ///
+    /// zsh'in `$CURSOR`'ı `BUFFER`'ın başından sayar; kaydırma sınırın bu
+    /// tarafında yapılıyor ki iki ofset alanı tek uzayda kalsın. İkisi ayrı
+    /// uzaylarda dursaydı çizen taraf birini `PREDISPLAY` uzunluğuyla
+    /// kaydırmayı unuttuğu anda caret'i prompt boyu kadar kaydırırdı — ve
+    /// `PREDISPLAY` boş olmadığı için bu **her satırda** olurdu.
+    ///
+    /// Bayt değil karakter: dock'un sorusu "kaçıncı hücreye çizeyim".
+    pub cursor: usize,
+    /// `region_highlight` — görüntünün renklendirilmiş aralıkları,
+    /// [`Highlight::start`]'ın doc'undaki tek uzaya **normalize edilmiş**.
+    pub highlights: Vec<Highlight>,
+}
+
+impl Clone for DockState {
+    fn clone(&self) -> Self {
+        let mut fresh = Self::default();
+        fresh.clone_from(self);
+        fresh
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.status = source.status;
+        self.predisplay.clear();
+        self.predisplay.push_str(&source.predisplay);
+        self.buffer.clear();
+        self.buffer.push_str(&source.buffer);
+        self.postdisplay.clear();
+        self.postdisplay.push_str(&source.postdisplay);
+        self.cursor = source.cursor;
+        self.highlights.clear();
+        self.highlights.extend_from_slice(&source.highlights);
+    }
+}
+
+impl DockState {
+    /// Metni ve aralıkları boşaltır; kapasiteler durur.
+    ///
+    /// Durumu **çağıran** yazar: bayat metni bırakmamak her iki çağıranın da
+    /// (`End`, `Unavailable`) ortak işi, hangi duruma geçileceği değil.
+    fn reset(&mut self) {
+        self.predisplay.clear();
+        self.buffer.clear();
+        self.postdisplay.clear();
+        self.cursor = 0;
+        self.highlights.clear();
+    }
+}
+
+/// Aynanın o anki hâli — dock'un çizilip çizilmeyeceğinin tek yanıtı.
+///
+/// `Unavailable` ayrı bir varyant, `Idle`'ın içinde **değil**: ikisi aynı
+/// şeyi göstermiyor. `Idle`'da çizilecek bir satır yok (ZLE düzenlemiyor),
+/// `Unavailable`'da **var ama gösteremiyoruz** — ve fark phase-4'ün bastırma
+/// kararını belirliyor: gösteremediğimiz satır ızgarada durmalı, yoksa
+/// kullanıcı yazdığını hiçbir yerde görmez. Bugünkü `Skip` kolunun çağırana
+/// sinyal vermemesi tam da bu belirtiyi doğuruyordu (R1.2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DockStatus {
+    /// ZLE satır düzenlemiyor: hiç ayna gelmedi ya da `line-finish` geldi.
+    #[default]
+    Idle,
+    /// Alanlar taze ve geçerli.
+    Live,
+    /// Ayna geldi ama okunamadı; alanlar **boş**.
+    Unavailable(DockFault),
+}
+
+/// Aynanın neden okunamadığı.
+///
+/// İkisi ayrı, çünkü ikisi ayrı şeyi söylüyor: `Overflow` sınırın dar
+/// olduğunu (ve sınır [`DOCK_PAYLOAD_LIMIT`]'in doc'unda türetilmiş bir
+/// tasarım sayısı), `Malformed` kanalın bozulduğunu. Tek varyanta
+/// indirilseydi "sınırı büyütmem mi gerek" sorusunun yanıtı kaybolurdu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockFault {
+    /// Yük [`DOCK_PAYLOAD_LIMIT`]'i aştı.
+    Overflow,
+    /// Yük çözülemedi: alan sayısı, base64 ya da UTF-8.
+    Malformed,
+}
+
+/// `region_highlight`'ın bir kaydı: görüntünün bir aralığı ve stili.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Highlight {
+    /// Aralığın başı, **karakter** ofseti.
+    ///
+    /// Uzay tek ve normalize: ofsetler `PREDISPLAY ++ BUFFER ++ POSTDISPLAY`
+    /// dizgisinin başından sayılıyor. zsh iki uzay kullanıyor — kayıt `P` ile
+    /// başlıyorsa ofset `PREDISPLAY`'in, başlamıyorsa `BUFFER`'ın başından
+    /// (`zshzle(1)`, `region_highlight`) — ve ikisini sınırın **bu** tarafında
+    /// birleştirmek çizen tarafı `PREDISPLAY`'in uzunluğunu bilmekten
+    /// kurtarıyor. R1.3'ün "çözülmüş geçer"i budur.
+    pub start: usize,
+    /// Aralığın sonu, dışlamalı.
+    pub end: usize,
+    pub style: HighlightStyle,
+}
+
+/// Bir aralığın stili — zsh'in "character highlighting" spesifikasyonunun
+/// bizim tanıdığımız yarısı.
+///
+/// Tanınmayan bileşen (`blink`, `dim`, bilinmeyen bir ad) **sessizce düşer**,
+/// kaydı düşürmez: aynanın işi kullanıcının gördüğünü taşımak ve tanımadığımız
+/// bir niteliğe takılıp bütün aralığı renksiz bırakmak bilgiyi büsbütün
+/// kaybetmek olurdu.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HighlightStyle {
+    pub fg: Option<HighlightColor>,
+    pub bg: Option<HighlightColor>,
+    pub bold: bool,
+    pub underline: bool,
+    /// `standout` — zsh'in ters video'su; SGR 7'nin karşılığı.
+    pub standout: bool,
+}
+
+/// Bir stil bileşeninin rengi; temaya **burada** bağlanmıyor.
+///
+/// Çözüm `frame()`'de, [`crate::Theme`] elde olduğunda: renk uzayı sınırı
+/// geçerken lineerleşiyor (`CLAUDE.md` → Renk uzayı) ve bu modülün teması yok.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HighlightColor {
+    /// 0–255; ilk 16'sı temanın [`crate::Theme::ansi`]'si, üstü 256 renk küpü.
+    Indexed(u8),
+    /// `#rrggbb` → `0xRRGGBB`.
+    Rgb(u32),
 }
 
 /// Defterin en az tutacağı blok sayısı.
@@ -268,6 +459,11 @@ pub(crate) struct ShellLog {
     /// Kabuğun o anki durumu; `None` = entegrasyon yok.
     pub(crate) state: Option<ShellState>,
     pub(crate) blocks: BlockLog,
+    /// ZLE'nin görüntü aynası. Aynı kilidin altında, çünkü aynı akıştan
+    /// besleniyor ve aynı kare okuyor: ayrı bir kilit, kareyi safha ile
+    /// aynanın çeliştiği bir anda yakalayabilirdi — `Input` safhasında
+    /// ızgarayı bastırıp dock'a bir önceki satırı çizmek gibi.
+    pub(crate) dock: DockState,
 }
 
 impl ShellLog {
@@ -275,6 +471,7 @@ impl ShellLog {
         Self {
             state: None,
             blocks: BlockLog::new(scrollback),
+            dock: DockState::default(),
         }
     }
 
@@ -311,6 +508,37 @@ impl ShellLog {
                 if let Some(id) = id {
                     self.blocks.finish(id, exit);
                 }
+            }
+        }
+    }
+
+    /// Tarayıcının çıkardığı olayı doğru kola uygular.
+    ///
+    /// Tek giriş noktası, çünkü okuyucu thread'i kilidi **olay başına** alıyor
+    /// ve iki ayrı çağrı iki ayrı kilit turu demek olurdu.
+    pub(crate) fn apply_scan(&mut self, event: ScanEvent<'_>) {
+        match event {
+            ScanEvent::Mark(mark) => self.apply(mark),
+            ScanEvent::Dock(event) => self.apply_dock(event),
+        }
+    }
+
+    /// Ayna olayını [`Self::dock`]'a uygular.
+    ///
+    /// Çizilemeyen iki hâlde (`End`, `Unavailable`) metin **boşaltılıyor**:
+    /// bayat bir satır bırakmak, phase-4'te ızgara bastırılırken dock'un bir
+    /// önceki komutu göstermesi demek olurdu — kullanıcının yazdığıyla
+    /// gördüğünün sessizce ayrılması, bu deponun yasakladığı belirti sınıfı.
+    fn apply_dock(&mut self, event: DockEvent<'_>) {
+        match event {
+            DockEvent::Update(staged) => self.dock.clone_from(staged),
+            DockEvent::End => {
+                self.dock.reset();
+                self.dock.status = DockStatus::Idle;
+            }
+            DockEvent::Unavailable(fault) => {
+                self.dock.reset();
+                self.dock.status = DockStatus::Unavailable(fault);
             }
         }
     }
@@ -362,6 +590,35 @@ impl ShellLog {
     }
 }
 
+/// İşaret kolunun OSC numarası — FinalTerm'ün "semantic prompt"u.
+///
+/// Bizim seçimimiz değil, uyduğumuz sözleşme: iTerm2, kitty, WezTerm, VS Code
+/// ve Ghostty aynı numarayı okuyor, yani betiğimiz onların altında da blok
+/// üretiyor.
+const MARK_OSC: u32 = 133;
+
+/// Ayna kolunun OSC numarası — **bizim** dizimiz.
+///
+/// Sayının kendisi bir karar ve iki ölçütü var:
+///
+/// **Çakışmamalı.** Dışlama listesi elle hatırlanmadı, grep'lendi:
+/// ayrıştırıcımızın (`vte-0.15.0/src/ansi.rs`, `osc_dispatch`) yorumladığı
+/// numaralar 0, 2, 4, 8, 10–12, 22, 50, 52, 104 ve 110–112; geri kalan her
+/// şey `unhandled` koluna düşüyor. Üstüne yaygın entegrasyonların sahipli
+/// numaraları: 7 (cwd), 9 (ConEmu/Windows Terminal), 133, 633 (VS Code), 777
+/// (urxvt), 1337 (iTerm2/WezTerm), 9278 (Warp), 30001–30002 (kitty). 8133
+/// hiçbirinde yok.
+///
+/// **Kısa olmalı.** Numara tuş **başına** akışa giriyor (R6.2); altı haneli
+/// bir sayı her vuruşta iki bayt fazla demek. Dört hane, `133`'ün ikinci kolu
+/// olduğunu söyleyen bir önekle: `8133`.
+///
+/// **Başka terminalde ne olur:** pratikte hiçbir şey, çünkü sarmalayıcı
+/// yalnız bateri'nin `ZDOTDIR`'ı altında yükleniyor — yabancı bir terminal bu
+/// diziyi hiç görmüyor. Tek istisna bateri'nin **içinde** koşan `tmux`/`screen`
+/// ve ikisi de tanımadığı OSC'yi düşürüyor.
+const DOCK_OSC: u32 = 8133;
+
 /// `ESC ] 133 ;` yükünün üst sınırı, bayt.
 ///
 /// **Tasarım sabiti, ölçüm değil.** Standart yükler tek harf ile birkaç
@@ -370,6 +627,24 @@ impl ShellLog {
 /// değil, bozuk ya da kötü niyetli bir akışın sonlandırıcı basmadan belleği
 /// büyütmesini engellemek — sınırı aşan dizi düşürülür ve tarayıcı boşa döner.
 const PAYLOAD_LIMIT: usize = 256;
+
+/// `ESC ] 8133 ;` yükünün üst sınırı, bayt.
+///
+/// [`PAYLOAD_LIMIT`] (256) bu kol için **yanlış**: bir komut satırı onu tek
+/// başına aşar. Sayı türetildi, seçilmedi:
+///
+/// - 4096 karakterlik bir giriş — 200 sütunluk bir pencerede yirmi satır,
+///   elle yazılan bir komut satırının mertebelerce üstü.
+/// - En kötü hâlde karakter başına 4 bayt UTF-8 → 16 KiB.
+/// - base64'ün 4/3 şişmesi → ~21 KiB.
+/// - `region_highlight` aynı mertebede: sözdizimi vurgusu jeton başına bir
+///   kayıt bırakıyor ve kayıt başına ~30 bayt.
+/// - Yuvarlanmış tavan: **64 KiB**.
+///
+/// **Neyi yönetiyor:** doğruluğu değil, dock'un *kullanılabilirliğini*. Aşan
+/// bir satır [`DockFault::Overflow`] ile görünür oluyor ve giriş ızgarada
+/// kalıyor — kullanıcı yazdığını yine görüyor, yalnız dock'ta değil.
+const DOCK_PAYLOAD_LIMIT: usize = 64 * 1024;
 
 /// Numara önekinin makul üst sınırı; aşan dizi bizim değildir.
 ///
@@ -388,23 +663,73 @@ enum ScanState {
     Escape,
     /// `ESC ]` görüldü, OSC numarası toplanıyor.
     Number,
-    /// `ESC ] 133 ;` görüldü, yük toplanıyor.
-    Payload,
+    /// Bizim bir numaramız ve `;` görüldü; yük o kolun tamponuna toplanıyor.
+    Payload(Arm),
     /// Bizim dizimiz değil (ya da sınırı aştı): sonlandırıcıya kadar atlanıyor.
     Skip,
 }
 
-/// OSC 133'ü akışın içinden çeken durum makinesi.
+/// Tarayıcının iki kolu; yük hangi tampona ve hangi ayrıştırıcıya gidiyor.
 ///
-/// **Numara kararı erken veriliyor:** `133` olmayan her dizi tampona
+/// Durumun içinde taşınıyor, ayrı bir alanda değil: yük toplanırken kolun
+/// **her zaman** belli olması tipin şekliyle garanti — ayrı bir alan
+/// `Ground`'da da anlamlı görünür ve "hangi koldayız" sorusu iki yerden
+/// yanıtlanabilirdi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arm {
+    /// [`MARK_OSC`] — işaret kolu.
+    Mark,
+    /// [`DOCK_OSC`] — ayna kolu.
+    Dock,
+}
+
+/// Tarayıcının dışarıya verdiği olay.
+///
+/// İki kol tek `enum`'da, çünkü tek çağrı: okuyucu thread'i kilidi olay
+/// başına alıyor ve iki ayrı callback iki ayrı kilit turu doğururdu.
+///
+/// `Update` **ödünç veriyor**, sahiplenmiyor: aynanın çözülmüş hâli
+/// tarayıcının kendi tamponunda duruyor ve tüketici onu kilidin altında
+/// `clone_from` ile alıyor. Sahiplenseydi tuş başına üç `String` ile bir
+/// `Vec` doğardı ([`DockState`]'in doc'u).
+pub(crate) enum ScanEvent<'a> {
+    Mark(Mark),
+    Dock(DockEvent<'a>),
+}
+
+/// Ayna kolunun olayları.
+pub(crate) enum DockEvent<'a> {
+    /// Satır tazelendi; çözülmüş hâli ödünçte.
+    Update(&'a DockState),
+    /// `line-finish`: ZLE satırı bıraktı.
+    End,
+    /// Ayna geldi ama okunamadı. **Sinyal burada**: bugünkü `Skip` kolu
+    /// çağırana hiçbir şey söylemiyordu (R1.2).
+    Unavailable(DockFault),
+}
+
+/// İki OSC numarasını akışın içinden çeken durum makinesi.
+///
+/// **Numara kararı erken veriliyor:** bizim olmayan her dizi tampona
 /// dokunmadan `Skip`'e düşer. Aksi hâlde her meşru OSC 52 kopyası (kilobayt,
 /// megabayt) "sınırı aşan dizi" yoluna girer ve sınırın ayırt ettiği şey
 /// kalmazdı.
+///
+/// **İki kolun tamponu ayrı.** Tek tampon paylaşılsaydı ya 133'ün dar sınırı
+/// aynayı keser ya da aynanın geniş sınırı 133'ün koruduğu şeyi (sonlandırıcı
+/// basmayan bir akışın belleği büyütmesi) bırakırdı — bir tampon iki sınıra
+/// birden uyamaz.
 pub(crate) struct Scanner {
     state: ScanState,
     /// `133;` sonrası yük; yalnız bizim dizimiz için dolar ve her dizide
     /// `clear()` ile yeniden kullanılır — dizi başına ayırma yok.
     payload: Vec<u8>,
+    /// `8133;` sonrası yük. Ayrı tampon, ayrı sınır (yukarıda).
+    dock: Vec<u8>,
+    /// base64 çıktısının indiği ara tampon; her alanda yeniden kullanılır.
+    decoded: Vec<u8>,
+    /// Aynanın çözülmüş hâli — [`DockEvent::Update`]'in ödünç verdiği tampon.
+    line: DockState,
     /// Toplanan OSC numarası ve hiç rakam görülüp görülmediği.
     number: u32,
     has_digit: bool,
@@ -415,16 +740,23 @@ impl Scanner {
         Self {
             state: ScanState::Ground,
             payload: Vec::with_capacity(PAYLOAD_LIMIT),
+            // Ayna tamponu **baştan** ayrılıyor, 133'ünki gibi: sabit durumda
+            // tuş başına ayırma olmamalı ve büyüyerek gelen bir tampon ilk
+            // satırlarda tam da onu yapardı. Oturum başına 64 KiB, grid'in
+            // yanında ölçülemeyecek kadar küçük.
+            dock: Vec::with_capacity(DOCK_PAYLOAD_LIMIT),
+            decoded: Vec::new(),
+            line: DockState::default(),
             number: 0,
             has_digit: false,
         }
     }
 
-    /// Dilimi tarar ve bulduğu her işareti `on_mark`'a verir.
+    /// Dilimi tarar ve bulduğu her olayı `on_event`'e verir.
     ///
     /// Baytlara **dokunmaz**: dilim `&[u8]`, dönüşte çağıran onu olduğu gibi
     /// ayrıştırıcıya geçirir.
-    pub(crate) fn feed(&mut self, bytes: &[u8], mut on_mark: impl FnMut(Mark)) {
+    pub(crate) fn feed(&mut self, bytes: &[u8], mut on_event: impl FnMut(ScanEvent<'_>)) {
         let mut rest = bytes;
         while !rest.is_empty() {
             // Boşta hızlı yol: dizinin dışındayken tamponu bayt bayt
@@ -442,11 +774,11 @@ impl Scanner {
             }
             let byte = rest[0];
             rest = &rest[1..];
-            self.step(byte, &mut on_mark);
+            self.step(byte, &mut on_event);
         }
     }
 
-    fn step(&mut self, byte: u8, on_mark: &mut impl FnMut(Mark)) {
+    fn step(&mut self, byte: u8, on_event: &mut impl FnMut(ScanEvent<'_>)) {
         match self.state {
             // `advance_ground` ile aynı: buraya yalnız hızlı yol düşerse gelinir.
             ScanState::Ground => {
@@ -483,22 +815,30 @@ impl Scanner {
                     }
                 }
                 b';' => {
-                    self.state = if self.has_digit && self.number == 133 {
-                        self.payload.clear();
-                        ScanState::Payload
-                    } else {
-                        ScanState::Skip
+                    self.state = match (self.has_digit, self.number) {
+                        (true, MARK_OSC) => {
+                            self.payload.clear();
+                            ScanState::Payload(Arm::Mark)
+                        }
+                        (true, DOCK_OSC) => {
+                            self.dock.clear();
+                            ScanState::Payload(Arm::Dock)
+                        }
+                        _ => ScanState::Skip,
                     };
                 }
-                _ if is_terminator(byte) => self.finish(byte, None, on_mark),
+                _ if is_terminator(byte) => self.close(byte),
                 // `vte` bu baytları yüke almadan atıyor; parite için biz de.
                 _ if is_ignored(byte) => {}
                 _ => self.state = ScanState::Skip,
             },
-            ScanState::Payload => {
+            ScanState::Payload(Arm::Mark) => {
                 if is_terminator(byte) {
                     let mark = parse_mark(&self.payload);
-                    self.finish(byte, mark, on_mark);
+                    self.close(byte);
+                    if let Some(mark) = mark {
+                        on_event(ScanEvent::Mark(mark));
+                    }
                 } else if is_ignored(byte) {
                 } else if self.payload.len() == PAYLOAD_LIMIT {
                     // Sınırı aşan dizi düşer; sonlandırıcıya kadar atlanır ki
@@ -508,9 +848,30 @@ impl Scanner {
                     self.payload.push(byte);
                 }
             }
+            ScanState::Payload(Arm::Dock) => {
+                if is_terminator(byte) {
+                    // Çözme `close`'dan **önce**: `close` tamponu boşaltıyor.
+                    let outcome = parse_dock(&self.dock, &mut self.decoded, &mut self.line);
+                    self.close(byte);
+                    on_event(ScanEvent::Dock(match outcome {
+                        DockOutcome::Update => DockEvent::Update(&self.line),
+                        DockOutcome::End => DockEvent::End,
+                        DockOutcome::Malformed => DockEvent::Unavailable(DockFault::Malformed),
+                    }));
+                } else if is_ignored(byte) {
+                } else if self.dock.len() == DOCK_PAYLOAD_LIMIT {
+                    // 133'ün sessiz düşüşünün aksine aşım **anında** bildirilir:
+                    // tüketici "gösteremiyorum" diyebilsin diye (R1.2). Dizinin
+                    // kalanı yine atlanır ki arkasından geleni görelim.
+                    self.state = ScanState::Skip;
+                    on_event(ScanEvent::Dock(DockEvent::Unavailable(DockFault::Overflow)));
+                } else {
+                    self.dock.push(byte);
+                }
+            }
             ScanState::Skip => {
                 if is_terminator(byte) {
-                    self.finish(byte, None, on_mark);
+                    self.close(byte);
                 }
             }
         }
@@ -519,16 +880,14 @@ impl Scanner {
     /// Diziyi kapatır ve sonlandırıcının kendisine göre bir sonraki duruma
     /// geçer: çıplak `ESC` diziyi bitirir **ve** yeni bir kaçışı açar
     /// (`vte::advance_osc_string`, `0x1B` kolu).
-    fn finish(&mut self, terminator: u8, mark: Option<Mark>, on_mark: &mut impl FnMut(Mark)) {
+    fn close(&mut self, terminator: u8) {
         self.payload.clear();
+        self.dock.clear();
         self.state = if terminator == 0x1b {
             ScanState::Escape
         } else {
             ScanState::Ground
         };
-        if let Some(mark) = mark {
-            on_mark(mark);
-        }
     }
 }
 
@@ -599,6 +958,256 @@ fn number<T: std::str::FromStr>(field: &[u8]) -> Option<T> {
     std::str::from_utf8(field).ok()?.parse().ok()
 }
 
+/// [`parse_dock`]'un üç sonucu; olaya [`Scanner::step`] çeviriyor.
+///
+/// Ayrı bir tip, çünkü `parse_dock` `DockEvent`'i **üretemez**: `Update`
+/// varyantı `line`'ı ödünç alıyor ve fonksiyon onu `&mut` tutuyor.
+enum DockOutcome {
+    Update,
+    End,
+    Malformed,
+}
+
+/// Ayna yükünü çözer ve `line`'a yazar.
+///
+/// **Tel biçimi** (alanlar `;` ile, gövdeler base64):
+///
+/// ```text
+/// ESC ] 8133 ; u ; {CURSOR} ; {PREDISPLAY} ; {BUFFER} ; {POSTDISPLAY} ; {region_highlight} BEL
+/// ESC ] 8133 ; e BEL
+/// ```
+///
+/// `u` satırı tazeler, `e` (`line-finish`) kapatır. **Fazladan alan
+/// yoksayılır** — [`parse_mark`]'ın bilinmeyen anahtar-değeri tolere etmesiyle
+/// aynı gerekçe: phase-4'ün özel kip sinyali bu ayrıştırıcıyı yeniden açmadan
+/// eklenebilmeli.
+///
+/// **Neden base64:** gövdeler kullanıcının yazdığı metin, yani içlerinde `;`,
+/// `ESC` ve C0 baytları olabilir — üçü de dizinin çerçevesini bozar. base64'ün
+/// alfabesinde üçünden hiçbiri yok, yani çerçeveleme kuralları (yukarıdaki üç
+/// madde) gövdeye hiç dokunmuyor. Kodlayan taraf saf zsh; fork yok.
+///
+/// `region_highlight` kayıtları gövdenin içinde satır sonuyla ayrılıyor.
+///
+/// Bozuk yükte `line` **boşaltılıyor**: yarım yazılmış bir kayıt hiçbir yere
+/// yayılmıyor (`Malformed` → [`ShellLog::apply_dock`] zaten sıfırlıyor) ama
+/// tamponu kirli bırakmak sonraki okumayı akıl yürütme borcuna çevirirdi.
+fn parse_dock(payload: &[u8], decoded: &mut Vec<u8>, line: &mut DockState) -> DockOutcome {
+    let mut fields = payload.split(|&b| b == b';');
+    let Some(op) = fields.next() else {
+        return DockOutcome::Malformed;
+    };
+    match op {
+        b"e" => DockOutcome::End,
+        b"u" => match decode_line(&mut fields, decoded, line) {
+            Some(()) => DockOutcome::Update,
+            None => {
+                // Durum da yazılıyor: `decode_line` daha ilk satırda `Live`
+                // diyor ve yarım kalan bir çözüm onu olduğu gibi bırakırsa
+                // tarayıcının tamponu "canlı" adı altında boş metin taşırdı.
+                line.reset();
+                line.status = DockStatus::Unavailable(DockFault::Malformed);
+                DockOutcome::Malformed
+            }
+        },
+        _ => DockOutcome::Malformed,
+    }
+}
+
+/// `u` yükünün beş alanını `line`'a çözer; eksik ya da bozuk alanda `None`.
+fn decode_line<'a>(
+    fields: &mut impl Iterator<Item = &'a [u8]>,
+    decoded: &mut Vec<u8>,
+    line: &mut DockState,
+) -> Option<()> {
+    line.status = DockStatus::Live;
+    // İmleç alanı tel sırasında önce geliyor ama normalize edilmesi
+    // `PREDISPLAY` çözülene kadar bekliyor.
+    let cursor_in_buffer: usize = number(fields.next()?)?;
+    decode_text(fields.next()?, decoded, &mut line.predisplay)?;
+    decode_text(fields.next()?, decoded, &mut line.buffer)?;
+    decode_text(fields.next()?, decoded, &mut line.postdisplay)?;
+
+    // Üç uzunluk da burada: ofsetlerin tek uzaya inmesi ([`Highlight::start`])
+    // ve görüntünün dışına taşan bir ofsetin kırpılması bunları istiyor.
+    let predisplay_chars = line.predisplay.chars().count();
+    let text_chars = predisplay_chars + line.buffer.chars().count();
+    let display_chars = text_chars + line.postdisplay.chars().count();
+    // `$CURSOR` en çok `$#BUFFER`'dır; kırpma kabuğun sözüne güvenmemek için.
+    line.cursor = predisplay_chars
+        .checked_add(cursor_in_buffer)?
+        .min(text_chars);
+
+    decoded.clear();
+    decode_base64(fields.next()?, decoded)?;
+    let entries = std::str::from_utf8(decoded).ok()?;
+    line.highlights.clear();
+    line.highlights.extend(
+        entries
+            .lines()
+            .filter_map(|entry| parse_highlight(entry, predisplay_chars, display_chars)),
+    );
+    Some(())
+}
+
+/// base64 alanını çözer ve `into`'ya **kapasitesini koruyarak** yazar.
+fn decode_text(field: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option<()> {
+    decoded.clear();
+    decode_base64(field, decoded)?;
+    let text = std::str::from_utf8(decoded).ok()?;
+    into.clear();
+    into.push_str(text);
+    Some(())
+}
+
+/// `region_highlight`'ın bir kaydı: `[P]{başlangıç} {bitiş} {spec} [memo=…]`.
+///
+/// `memo=` ve tanınmayan kuyruk alanları yoksayılıyor (`zshzle(1)` onları
+/// serbest bırakıyor).
+///
+/// **Aralık `display_chars`'a kırpılıyor ve boş kalan düşüyor.** Çizen tarafa
+/// metnin dışını gösteren bir ofset taşımak orada bir `panic` (ya da sessiz
+/// bir kırpma) borcu doğururdu ve taşan ofset varsayımsal değil: bayat bir
+/// `BUFFER` anlık görüntüsünden `region_highlight` kuran her eklenti üretir.
+/// Ters aralık da aynı kapıdan düşüyor.
+fn parse_highlight(
+    entry: &str,
+    predisplay_chars: usize,
+    display_chars: usize,
+) -> Option<Highlight> {
+    let mut parts = entry.split_whitespace();
+    let first = parts.next()?;
+    // `P` öneki ofseti `PREDISPLAY`'in başına bağlıyor; öneksizi `BUFFER`'ın.
+    let (start_text, shift) = match first.strip_prefix('P') {
+        Some(rest) => (rest, 0),
+        None => (first, predisplay_chars),
+    };
+    let start = start_text
+        .parse::<usize>()
+        .ok()?
+        .checked_add(shift)?
+        .min(display_chars);
+    let end = parts
+        .next()?
+        .parse::<usize>()
+        .ok()?
+        .checked_add(shift)?
+        .min(display_chars);
+    let style = parse_style(parts.next()?);
+    (start < end).then_some(Highlight { start, end, style })
+}
+
+/// zsh'in adlı renkleri, `HighlightColor::Indexed` sırasıyla.
+const HIGHLIGHT_COLOR_NAMES: [&str; 8] = [
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+];
+
+/// `fg=red,bold` gibi bir spec'i stile çevirir; tanınmayan bileşen düşer.
+fn parse_style(spec: &str) -> HighlightStyle {
+    let mut style = HighlightStyle::default();
+    for part in spec.split(',') {
+        match part {
+            "bold" => style.bold = true,
+            "underline" => style.underline = true,
+            "standout" => style.standout = true,
+            _ => {
+                if let Some(value) = part.strip_prefix("fg=") {
+                    style.fg = parse_highlight_color(value);
+                } else if let Some(value) = part.strip_prefix("bg=") {
+                    style.bg = parse_highlight_color(value);
+                }
+            }
+        }
+    }
+    style
+}
+
+/// `#rrggbb`, `0`–`255` ya da adlı renk; `default` ve tanınmayan → `None`.
+fn parse_highlight_color(value: &str) -> Option<HighlightColor> {
+    if let Some(hex) = value.strip_prefix('#') {
+        return (hex.len() == 6)
+            .then(|| u32::from_str_radix(hex, 16).ok())
+            .flatten()
+            .map(HighlightColor::Rgb);
+    }
+    if let Ok(index) = value.parse::<u8>() {
+        return Some(HighlightColor::Indexed(index));
+    }
+    let at = HIGHLIGHT_COLOR_NAMES
+        .iter()
+        .position(|&name| name == value)?;
+    Some(HighlightColor::Indexed(at as u8))
+}
+
+/// base64 alfabesinde olmayan baytın tablodaki karşılığı.
+const B64_INVALID: u8 = 0xff;
+
+/// `bayt → 6 bit` çözüm tablosu; alfabe dışı her bayt [`B64_INVALID`].
+const B64_DECODE: [u8; 256] = {
+    let mut table = [B64_INVALID; 256];
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut at = 0;
+    while at < alphabet.len() {
+        table[alphabet[at] as usize] = at as u8;
+        at += 1;
+    }
+    table
+};
+
+/// base64'ü `out`'a çözer; bozuk girdide `None` ve `out` yarım kalabilir
+/// (çağıran onu kullanmıyor).
+///
+/// **Elle yazıldı:** bir base64 crate'i mimari karardır (`proje.md` → Yayın
+/// etkisi) ve bu phase onu açmıyor; tablo + `chunks_exact` otuz satır.
+///
+/// **Dolgu opsiyonel.** Kodlayan taraf saf zsh ve dolgu basmayan bir uygulama
+/// da geçerli base64 üretir; dolguyu şart koşmak kanalı kodlayıcının bir
+/// uygulama ayrıntısına bağlardı. Dolgudan sonra gövde uzunluğu 4'e bölünmeli
+/// ya da 2/3 artık bırakmalı — 1 artık base64 değildir.
+fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
+    let body = match input {
+        [rest @ .., b'=', b'='] => rest,
+        [rest @ .., b'='] => rest,
+        rest => rest,
+    };
+    let mut chunks = body.chunks_exact(4);
+    for chunk in chunks.by_ref() {
+        let a = b64_value(chunk[0])?;
+        let b = b64_value(chunk[1])?;
+        let c = b64_value(chunk[2])?;
+        let d = b64_value(chunk[3])?;
+        // Maskeler **zorunlu**, süs değil: altı bitlik bir değeri maskesiz
+        // kaydırmak `u8`'i taşırır ve debug'da panik olur — `bt-core`'da
+        // gerekçesiz panik yok (`CLAUDE.md`).
+        out.push((a << 2) | (b >> 4));
+        out.push(((b & 0x0f) << 4) | (c >> 2));
+        out.push(((c & 0x03) << 6) | d);
+    }
+    match chunks.remainder() {
+        [] => Some(()),
+        [a, b] => {
+            let (a, b) = (b64_value(*a)?, b64_value(*b)?);
+            out.push((a << 2) | (b >> 4));
+            Some(())
+        }
+        [a, b, c] => {
+            let (a, b, c) = (b64_value(*a)?, b64_value(*b)?, b64_value(*c)?);
+            out.push((a << 2) | (b >> 4));
+            out.push(((b & 0x0f) << 4) | (c >> 2));
+            Some(())
+        }
+        // Tek artık base64 değildir: altı bit bir bayt etmiyor.
+        _ => None,
+    }
+}
+
+fn b64_value(byte: u8) -> Option<u8> {
+    match B64_DECODE[byte as usize] {
+        B64_INVALID => None,
+        value => Some(value),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,7 +1218,11 @@ mod tests {
         let mut scanner = Scanner::new();
         let mut seen = Vec::new();
         for chunk in chunks {
-            scanner.feed(chunk, |mark| seen.push(mark));
+            scanner.feed(chunk, |event| {
+                if let ScanEvent::Mark(mark) = event {
+                    seen.push(mark);
+                }
+            });
         }
         seen
     }
@@ -785,7 +1398,11 @@ mod tests {
 
         let mut scanner = Scanner::new();
         let mut seen = Vec::new();
-        scanner.feed(&stream, |mark| seen.push(mark));
+        scanner.feed(&stream, |event| {
+            if let ScanEvent::Mark(mark) = event {
+                seen.push(mark);
+            }
+        });
 
         assert_eq!(seen, vec![Mark::PromptEnd]);
         assert_eq!(scanner.payload.capacity(), PAYLOAD_LIMIT);
@@ -800,7 +1417,11 @@ mod tests {
 
         let mut scanner = Scanner::new();
         let mut seen = Vec::new();
-        scanner.feed(&stream, |mark| seen.push(mark));
+        scanner.feed(&stream, |event| {
+            if let ScanEvent::Mark(mark) = event {
+                seen.push(mark);
+            }
+        });
 
         assert_eq!(seen, vec![Mark::PromptStart { id: None }]);
         assert_eq!(scanner.payload.capacity(), PAYLOAD_LIMIT);
@@ -956,6 +1577,327 @@ mod tests {
             id: None,
         });
         assert_eq!(log.blocks.get(1), Some(Outcome::Finished(Some(0))));
+    }
+
+    /// Testlerin kodlayıcısı — üretimde karşılığı kabuğun saf zsh kolu.
+    fn b64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let (a, b, c) = (
+                u32::from(chunk[0]),
+                chunk.get(1).map_or(0, |&b| u32::from(b)),
+                chunk.get(2).map_or(0, |&b| u32::from(b)),
+            );
+            let word = a << 16 | b << 8 | c;
+            for slot in 0..4 {
+                if slot <= chunk.len() {
+                    out.push(ALPHABET[(word >> (18 - 6 * slot) & 0x3f) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    /// Ayna dizisi; `highlights` satır sonuyla birleştirilip base64'lenir.
+    fn dock_update(
+        cursor: usize,
+        pre: &str,
+        buffer: &str,
+        post: &str,
+        highlights: &[&str],
+    ) -> Vec<u8> {
+        format!(
+            "\x1b]8133;u;{cursor};{};{};{};{}\x07",
+            b64(pre.as_bytes()),
+            b64(buffer.as_bytes()),
+            b64(post.as_bytes()),
+            b64(highlights.join("\n").as_bytes()),
+        )
+        .into_bytes()
+    }
+
+    /// `DockEvent` ödünç verdiği için sınamalar sahiplenilmiş bir kopya tutar.
+    #[derive(Debug, PartialEq, Eq)]
+    enum DockSnapshot {
+        Update(DockState),
+        End,
+        Unavailable(DockFault),
+    }
+
+    fn dock_events_of_chunks(chunks: &[&[u8]]) -> Vec<DockSnapshot> {
+        let mut scanner = Scanner::new();
+        let mut seen = Vec::new();
+        for chunk in chunks {
+            scanner.feed(chunk, |event| {
+                if let ScanEvent::Dock(event) = event {
+                    seen.push(match event {
+                        DockEvent::Update(line) => DockSnapshot::Update(line.clone()),
+                        DockEvent::End => DockSnapshot::End,
+                        DockEvent::Unavailable(fault) => DockSnapshot::Unavailable(fault),
+                    });
+                }
+            });
+        }
+        seen
+    }
+
+    fn dock_events(bytes: &[u8]) -> Vec<DockSnapshot> {
+        dock_events_of_chunks(&[bytes])
+    }
+
+    /// Bir güncellemenin tek `DockState`'i; başka bir şey geldiyse düşer.
+    fn dock_line(bytes: &[u8]) -> DockState {
+        match dock_events(bytes).pop() {
+            Some(DockSnapshot::Update(line)) => line,
+            other => panic!("güncelleme bekleniyordu, gelen: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_dock_arm_decodes_the_five_variables() {
+        let line = dock_line(&dock_update(
+            3,
+            "❯ ",
+            "git sta",
+            "tus",
+            &["0 3 fg=green,bold"],
+        ));
+        assert_eq!(line.status, DockStatus::Live);
+        assert_eq!(line.predisplay, "❯ ");
+        assert_eq!(line.buffer, "git sta");
+        assert_eq!(line.postdisplay, "tus");
+        // `$CURSOR` 3, `PREDISPLAY` iki karakter: görüntü uzayında 5.
+        assert_eq!(line.cursor, 5);
+        assert_eq!(
+            line.highlights,
+            vec![Highlight {
+                // `PREDISPLAY` iki karakter: öneksiz ofset onun ardından sayılır.
+                start: 2,
+                end: 5,
+                style: HighlightStyle {
+                    fg: Some(HighlightColor::Indexed(2)),
+                    bold: true,
+                    ..HighlightStyle::default()
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn highlight_offsets_collapse_into_one_space() {
+        // `P` öneki ofseti PREDISPLAY'in başına bağlıyor, öneksizi BUFFER'ın:
+        // ikisi de görüntünün başından sayılan tek uzaya iniyor (R1.3).
+        let line = dock_line(&dock_update(
+            0,
+            "ab",
+            "cd",
+            "",
+            &["P0 2 fg=red", "0 2 bg=4"],
+        ));
+        assert_eq!(line.highlights[0].start, 0);
+        assert_eq!(line.highlights[0].end, 2);
+        assert_eq!(
+            line.highlights[0].style.fg,
+            Some(HighlightColor::Indexed(1))
+        );
+        assert_eq!(line.highlights[1].start, 2);
+        assert_eq!(line.highlights[1].end, 4);
+        assert_eq!(
+            line.highlights[1].style.bg,
+            Some(HighlightColor::Indexed(4))
+        );
+    }
+
+    #[test]
+    fn a_highlight_keeps_what_it_understands_and_drops_the_rest() {
+        // `memo=` serbest bir kuyruk alanı, `blink` tanımadığımız bir nitelik;
+        // ikisi de kaydı düşürmemeli — düşseydi bütün aralık renksiz kalırdı.
+        let line = dock_line(&dock_update(
+            0,
+            "",
+            "xy",
+            "",
+            &["0 2 fg=#ff8800,underline,blink memo=zsh-syntax-highlighting"],
+        ));
+        assert_eq!(
+            line.highlights,
+            vec![Highlight {
+                start: 0,
+                end: 2,
+                style: HighlightStyle {
+                    fg: Some(HighlightColor::Rgb(0xff8800)),
+                    underline: true,
+                    ..HighlightStyle::default()
+                },
+            }]
+        );
+
+        // Ters aralık ve okunamayan ofset kaydı düşürüyor, diziyi değil.
+        let line = dock_line(&dock_update(0, "", "xy", "", &["5 1 fg=red", "a b fg=red"]));
+        assert_eq!(line.highlights, vec![]);
+    }
+
+    #[test]
+    fn offsets_never_point_past_the_mirrored_text() {
+        // Bayat bir `BUFFER` anlık görüntüsünden kurulan `region_highlight`
+        // metnin dışını gösterebiliyor; çizen tarafa taşımak orada bir kırpma
+        // ya da panik borcu doğururdu.
+        let line = dock_line(&dock_update(
+            0,
+            "ab",
+            "cd",
+            "",
+            &["0 99 fg=red", "50 60 fg=red"],
+        ));
+        assert_eq!(line.highlights.len(), 1);
+        assert_eq!(line.highlights[0].start, 2);
+        assert_eq!(line.highlights[0].end, 4);
+
+        // İmleç de kabuğun sözüne bırakılmıyor: en çok `BUFFER`'ın sonu.
+        assert_eq!(dock_line(&dock_update(99, "ab", "cd", "ef", &[])).cursor, 4);
+    }
+
+    #[test]
+    fn the_dock_end_closes_the_mirror() {
+        assert_eq!(dock_events(b"\x1b]8133;e\x07"), vec![DockSnapshot::End]);
+    }
+
+    #[test]
+    fn extra_trailing_fields_are_tolerated() {
+        // İleriye dönük alan: phase-4'ün özel kip sinyali bu ayrıştırıcıyı
+        // yeniden açmadan eklenebilmeli.
+        let mut sequence = dock_update(1, "", "ab", "", &[]);
+        sequence.pop();
+        sequence.extend_from_slice(b";mode=isearch\x07");
+        assert_eq!(dock_line(&sequence).buffer, "ab");
+    }
+
+    #[test]
+    fn padding_is_optional() {
+        // Kodlayan taraf saf zsh; dolguyu şart koşmak kanalı onun bir uygulama
+        // ayrıntısına bağlardı.
+        let padded = dock_line(&dock_update(0, "", "abcd", "", &[]));
+        let bare = dock_line(b"\x1b]8133;u;0;;YWJjZA;;\x07");
+        assert_eq!(padded.buffer, "abcd");
+        assert_eq!(bare.buffer, "abcd");
+    }
+
+    #[test]
+    fn a_broken_payload_is_reported_not_panicked() {
+        // Üç bozulma, tek yanıt: gösteremiyoruz.
+        for sequence in [
+            &b"\x1b]8133;u;0;;!!!!;;\x07"[..], // base64 alfabesi dışı
+            &b"\x1b]8133;u;0;;YQ;\x07"[..],    // alan eksik
+            &b"\x1b]8133;u;abc;;;;\x07"[..],   // imleç sayı değil
+            &b"\x1b]8133;u;0;;gA;;\x07"[..],   // geçersiz UTF-8
+            &b"\x1b]8133;z\x07"[..],           // tanınmayan işlem
+            &b"\x1b]8133;\x07"[..],            // boş yük
+        ] {
+            assert_eq!(
+                dock_events(sequence),
+                vec![DockSnapshot::Unavailable(DockFault::Malformed)],
+                "dizi: {:?}",
+                String::from_utf8_lossy(sequence)
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_dock_payload_is_visible_and_the_next_sequence_survives() {
+        // 133'ün sessiz düşüşünün aksine aşım çağırana **bir sonuç** döner
+        // (R1.2); ardından gelen sağlam dizi yine görülür.
+        let mut stream = b"\x1b]8133;u;0;;".to_vec();
+        stream.extend(std::iter::repeat_n(b'A', DOCK_PAYLOAD_LIMIT + 1));
+        stream.push(0x07);
+        stream.extend_from_slice(&dock_update(1, "", "ok", "", &[]));
+
+        let seen = dock_events(&stream);
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], DockSnapshot::Unavailable(DockFault::Overflow));
+        assert!(matches!(&seen[1], DockSnapshot::Update(line) if line.buffer == "ok"));
+    }
+
+    #[test]
+    fn the_two_arms_do_not_touch_each_others_buffers() {
+        // Aynanın geniş sınırı 133'ün dar sınırını gevşetmemeli; 133'ün dar
+        // sınırı da aynayı kesmemeli. Tamponların ayrı olmasının kanıtı.
+        let mut scanner = Scanner::new();
+        let mut marks = Vec::new();
+        let mut lines = Vec::new();
+        let mut stream = dock_update(2, "", "ls", "", &[]);
+        stream.extend_from_slice(b"\x1b]133;B\x07");
+        stream.extend_from_slice(&dock_update(3, "", "lsx", "", &[]));
+        scanner.feed(&stream, |event| match event {
+            ScanEvent::Mark(mark) => marks.push(mark),
+            ScanEvent::Dock(DockEvent::Update(line)) => lines.push(line.buffer.clone()),
+            ScanEvent::Dock(_) => {}
+        });
+
+        assert_eq!(marks, vec![Mark::PromptEnd]);
+        assert_eq!(lines, vec!["ls".to_string(), "lsx".to_string()]);
+        assert_eq!(scanner.payload.capacity(), PAYLOAD_LIMIT);
+        assert_eq!(scanner.dock.capacity(), DOCK_PAYLOAD_LIMIT);
+    }
+
+    #[test]
+    fn a_dock_sequence_split_at_every_byte_survives() {
+        let sequence = dock_update(1, "p", "ab", "c", &["0 1 fg=red"]);
+        let expected = dock_line(&sequence);
+        for at in 0..=sequence.len() {
+            let (head, tail) = sequence.split_at(at);
+            let seen = dock_events_of_chunks(&[head, tail]);
+            assert_eq!(
+                seen,
+                vec![DockSnapshot::Update(expected.clone())],
+                "bölünme noktası {at}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_log_clears_the_mirror_when_it_cannot_be_drawn() {
+        // Bayat metin bırakmak, ızgara bastırılırken dock'un bir önceki
+        // komutu göstermesi demek olurdu.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let staged = DockState {
+            status: DockStatus::Live,
+            buffer: "git status".to_string(),
+            cursor: 10,
+            ..DockState::default()
+        };
+        log.apply_scan(ScanEvent::Dock(DockEvent::Update(&staged)));
+        assert_eq!(log.dock.buffer, "git status");
+
+        log.apply_scan(ScanEvent::Dock(DockEvent::Unavailable(DockFault::Overflow)));
+        assert_eq!(
+            log.dock.status,
+            DockStatus::Unavailable(DockFault::Overflow)
+        );
+        assert_eq!(log.dock.buffer, "");
+        assert_eq!(log.dock.cursor, 0);
+
+        log.apply_scan(ScanEvent::Dock(DockEvent::Update(&staged)));
+        log.apply_scan(ScanEvent::Dock(DockEvent::End));
+        assert_eq!(log.dock.status, DockStatus::Idle);
+        assert_eq!(log.dock.buffer, "");
+    }
+
+    #[test]
+    fn the_mirror_reuses_its_buffers() {
+        // R1.3'ün ölçütü: sabit durumda tuş başına ayırma yok. Kapasitenin
+        // ikinci turda büyümemesi bunun gözlenebilir yüzü.
+        let mut scanner = Scanner::new();
+        let long = "x".repeat(200);
+        let sequence = dock_update(0, "", &long, "", &[]);
+        scanner.feed(&sequence, |_| {});
+        let capacity = scanner.line.buffer.capacity();
+        for _ in 0..10 {
+            scanner.feed(&sequence, |_| {});
+        }
+        assert_eq!(scanner.line.buffer.capacity(), capacity);
     }
 
     #[test]
