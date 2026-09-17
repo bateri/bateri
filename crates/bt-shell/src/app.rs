@@ -414,11 +414,15 @@ pub(crate) struct Grid {
 ///
 /// **Dock payı satırlardan düşülür** (012) ve sol payın tersine **koşullu**:
 /// dock yalnız entegrasyonlu zsh oturumunda var ve karar oturum doğarken
-/// veriliyor (`AppDelegate::dock_rows`). Payı koşulsuz ayırmak dock'u olmayan
-/// pencereden sebepsiz iki satır götürürdü — sol payın sekiz noktasıyla
-/// kıyaslanmayacak bir bedel. Koşullu olabilmesinin sebebi de o: ayrım koşu
-/// boyunca oynamıyor, yani düşülen pay da oynamıyor ve komut başına bir
-/// `TIOCSWINSZ` doğmuyor.
+/// veriliyor (`AppDelegate::dock_rows_at_birth`). Payı koşulsuz ayırmak dock'u
+/// olmayan pencereden sebepsiz iki satır götürürdü — sol payın sekiz
+/// noktasıyla kıyaslanmayacak bir bedel.
+///
+/// **Pay koşu boyunca oynuyor** (R5.2): alternatif ekranda sıfıra iniyor,
+/// çıkışta doğum değerine dönüyor (`dock_rows_for`, `altScreenDidChange:`).
+/// Oynamanın bedeli bir `TIOCSWINSZ` ve o bedel **komut başına değil geçiş
+/// başına** ödeniyor — `git log` gibi alternatif ekrana girmeyen komutlar
+/// bayrağı hiç oynatmıyor, yani bu fonksiyon da yeniden çağrılmıyor.
 fn split_into_grid(width_px: f64, height_px: f64, cell: CellMetrics, dock_rows: u16) -> Grid {
     let (cell_w, cell_h) = cell.cell_px();
     // `as u16` f64'te doygundur (NaN ve negatif → 0, büyük → 65535) ve kesme
@@ -540,6 +544,50 @@ fn notify_settings_changed() {
     let _ = unsafe { app.sendAction_to_from(sel!(settingsDidChange:), None, None) };
 }
 
+/// `bt-gpu`'nun alternatif ekran habercisi: işi **ana kuyruğa** atar.
+///
+/// Çağrısı kare yolundan, yani zaten ana thread'den geliyor — kuyruk bir
+/// thread geçişi için değil, **bir tur ertelemek** için: çağrıldığı an kare
+/// çizilmiş durumda ve pencere geometrisini (drawable ölçüsü, ızgara,
+/// `DisplayLink` yerleşimi) orada değiştirmek çizilen karenin altını oymak
+/// olurdu.
+///
+/// Hiçbir şey yakalamıyor ve yük taşımıyor (`notify_settings_changed`
+/// emsali): alıcı gerçeği yeniden okuyor, yani birbirini kovalayan iki geçiş
+/// (vim aç-kapa) bayat bir değerle davranamıyor. Yakalamamak ayrıca
+/// `DisplayLink` ile delegate arasında bir referans çemberi açmıyor — link
+/// delegate'in ivar'ında duruyor.
+fn notify_alt_screen_changed() {
+    DispatchQueue::main().exec_async(|| {
+        // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+        let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+        let app = NSApplication::sharedApplication(mtm);
+        // SAFETY: seçici geçerli; hedef `None` → responder zinciri. Alıcısı
+        // `AppDelegate::alt_screen_did_change`, tek `Option<&AnyObject>`
+        // argüman alıyor ve gönderene bakmıyor.
+        //
+        // Alıcı yoksa `false` döner ve olay düşer. **Bir sonraki geçiş onu
+        // kendiliğinden düzeltmez:** düşen bildirim bir *çıkış* ise pay `0`'da
+        // kalır ve sıradaki *giriş* aynı `0`'ı hesaplar, yani alıcının kapısı
+        // no-op der — dock ancak tam bir giriş+çıkış turundan sonra geri
+        // gelir. Bugün ulaşılamaz bir dal: hedefsiz eylem responder zinciriyle
+        // app delegate'e her zaman varıyor (`/code-review`, 012 phase-7).
+        let _ = unsafe { app.sendAction_to_from(sel!(altScreenDidChange:), None, None) };
+    });
+}
+
+/// Bu anın dock payı: alternatif ekranda **sıfır**, değilse doğum değeri.
+///
+/// Doğum değeri ayrı bir girdi ve bu zorunlu: entegrasyonsuz bir oturumda
+/// (`birth == 0`) alternatif ekrandan çıkmak dock **doğurmamalı**. Tek bir
+/// `dock_rows` alanı üstüne yazılsaydı `DOCK_ROWS` sabitinden geri kurmak
+/// gerekirdi ve o, olmayan bir dock'u var etmenin tam yolu.
+///
+/// Saf: `bt-shell`'in AppKit'siz sınanabilen tek yarısı burası.
+fn dock_rows_for(alt_screen: bool, birth: u16) -> u16 {
+    if alt_screen { 0 } else { birth }
+}
+
 /// Dosyayı kullanıcının editöründe açar; hiçbir yol açamadıysa `false`.
 ///
 /// Önce dosya türünün varsayılan uygulaması (`NSWorkspace`, Finder'da çift
@@ -629,7 +677,19 @@ pub(crate) struct Ivars {
     /// `Cell`, `OnceCell` değil: açılış öncesi değeri `0` ve o **doğru** cevap
     /// (henüz oturum yok, ilk kare de yok); `OnceCell` bu yolu bir `unwrap`
     /// ile kapatırdı.
+    ///
+    /// **Bu alan o anki pay**, doğum değeri değil: alternatif ekranda sıfıra
+    /// iniyor ve çıkışta geri geliyor (R5.2). Doğum değeri ayrı bir alanda
+    /// ([`Ivars::dock_rows_at_birth`]) ve ikisinin ayrı durması şart — yoksa
+    /// alternatif ekrandan çıkış, dock'u hiç olmayan bir pencerede dock
+    /// doğururdu.
     dock_rows: Cell<u16>,
+    /// Oturum doğarken kararlaşan dock payı: entegrasyon kurulduysa
+    /// `DOCK_ROWS`, kurulmadıysa `0` (R5.1).
+    ///
+    /// Koşu boyunca **oynamıyor**; alternatif ekranın geri getireceği değer bu
+    /// ve tek yazanı oturumun doğumu.
+    dock_rows_at_birth: Cell<u16>,
 }
 
 define_class!(
@@ -730,9 +790,9 @@ define_class!(
                 child::zsh_wrapper_dir,
                 std::env::var_os("ZDOTDIR"),
             );
-            self.ivars()
-                .dock_rows
-                .set(if integration.is_empty() { 0 } else { DOCK_ROWS });
+            let birth = if integration.is_empty() { 0 } else { DOCK_ROWS };
+            self.ivars().dock_rows_at_birth.set(birth);
+            self.ivars().dock_rows.set(birth);
             let grid = self
                 .sync_geometry()
                 .expect("pencere ve contentView kuruldu");
@@ -896,6 +956,33 @@ define_class!(
         #[unsafe(method(settingsDidChange:))]
         fn settings_did_change(&self, _sender: Option<&AnyObject>) {
             self.reload_settings();
+        }
+
+        /// Alternatif ekran değişti: dock kalkıyor ya da iniyor.
+        ///
+        /// Gönderen kare yolunun habercisi ([`notify_alt_screen_changed`]) ve
+        /// bu metot **bir sonraki ana kuyruk turunda** koşuyor — çizilmiş bir
+        /// karenin altını oymamak için.
+        ///
+        /// **Gerçeği yeniden okuyor**, bildirimin taşıdığına bakmıyor: iki
+        /// geçiş birbirini kovalarsa (vim aç-kapa) kuyrukta bekleyen iki iş de
+        /// aynı, güncel cevabı görür. Değişmemişse **hiçbir şey yapmıyor** —
+        /// "geçiş başına bir resize" (R5.3) iddiasını tutan kapı bu.
+        #[unsafe(method(altScreenDidChange:))]
+        fn alt_screen_did_change(&self, _sender: Option<&AnyObject>) {
+            let Some(session) = self.ivars().session.get() else {
+                return;
+            };
+            let wanted = dock_rows_for(
+                session.alt_screen(),
+                self.ivars().dock_rows_at_birth.get(),
+            );
+            if self.ivars().dock_rows.replace(wanted) == wanted {
+                return;
+            }
+            // Pay, ızgara ve link **tek blokta**: kare yolu da ana thread'de,
+            // yani araya bir kare giremiyor ve yarım bir durum çizilmiyor.
+            self.refresh_geometry();
         }
 
         /// macOS'un erişilebilirlik görüntü ayarları değişti; gönderen
@@ -1524,6 +1611,7 @@ impl AppDelegate {
             // Açılışta dock yok: kararı `didFinishLaunching` veriyor ve
             // geometriyi ondan sonra hesaplıyor.
             dock_rows: Cell::new(0),
+            dock_rows_at_birth: Cell::new(0),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
@@ -1610,6 +1698,13 @@ impl AppDelegate {
                 cell: grid.cell,
             },
             self.ivars().stats.clone(),
+            // **Yol yalnız dock'u olan pencerede kuruluyor** ve bu yapısal
+            // (R5.1): dock'suz bir oturumda alternatif ekran geçişi hiçbir
+            // şeyi değiştiremeyeceği için nöbet de yok. Bir koşulla
+            // kapatılsaydı "hiç resize yok" iddiası bir dalın doğruluğuna
+            // bağlı kalırdı.
+            (self.ivars().dock_rows_at_birth.get() > 0)
+                .then(|| Box::new(notify_alt_screen_changed) as Box<dyn Fn()>),
         );
         // Uyandırma yolu kapanmadan kare istemiyoruz: aradaki bir `Wakeup`
         // sessizce düşerdi.
@@ -2281,7 +2376,12 @@ impl AppDelegate {
             view.set_metrics(grid);
         }
         if let Some(link) = self.ivars().link.get() {
-            link.resize(grid.cols, grid.rows, grid.cell);
+            link.resize(
+                grid.cols,
+                grid.rows,
+                grid.cell,
+                self.ivars().dock_rows.get(),
+            );
         }
     }
 
@@ -2551,6 +2651,20 @@ mod tests {
         // Sütunlar dock'u **görmez**: dock ızgarayla aynı sütunları kullanıyor
         // ve payı yalnız dikeyde.
         assert_eq!(with.cols, without.cols);
+    }
+
+    #[test]
+    fn the_alternate_screen_takes_the_dock_and_gives_it_back() {
+        // Alternatif ekranda pay sıfır, çıkışta **doğum değeri** geri geliyor.
+        assert_eq!(dock_rows_for(true, DOCK_ROWS), 0);
+        assert_eq!(dock_rows_for(false, DOCK_ROWS), DOCK_ROWS);
+        // **Doğum değeri ayrı bir girdi olmasının sebebi bu satır:**
+        // dock'u hiç olmayan bir pencerede (entegrasyonsuz kabuk, duman
+        // reçetesi) alternatif ekrandan çıkmak dock **doğurmamalı**. Tek bir
+        // alanın üstüne yazılsaydı geri getirilecek değer `DOCK_ROWS`
+        // sabitinden kurulur ve tam da bu pencere dock kazanırdı.
+        assert_eq!(dock_rows_for(true, NO_DOCK), 0);
+        assert_eq!(dock_rows_for(false, NO_DOCK), 0);
     }
 
     #[test]

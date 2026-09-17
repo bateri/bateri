@@ -408,12 +408,38 @@ struct LinkIvars {
     dock_context: RefCell<DockContext>,
     /// Dock kaç satır; `0` → bu pencerede dock yok.
     ///
-    /// **Oturumun sabiti**, `Cell` değil düz alan: ayrım oturum doğarken
-    /// kararlaşıyor (`bt-shell`, entegrasyon kuruldu mu) ve koşu boyunca
-    /// oynamıyor. Oynasaydı ızgara yüksekliği de oynardı — yani bir
-    /// `TIOCSWINSZ` — ve o bedel komut başına ödenirdi; alternatif ekranın
-    /// dock'u kaldırması (phase-7) bilinçli olarak **geçiş başına** bir bedel.
-    dock_rows: u16,
+    /// **`Cell`, çünkü artık oynuyor:** dock alternatif ekranda kalkıyor ve
+    /// inince geri geliyor (R5.2), yani değer [`DisplayLink::resize`] ile
+    /// tazeleniyor. Oynamanın bedeli ızgara yüksekliği, yani bir
+    /// `TIOCSWINSZ` — ve o bedel **komut başına değil geçiş başına**
+    /// ödeniyor (R5.3): `git log` gibi alternatif ekrana girmeyen komutlar
+    /// hiç resize görmüyor.
+    ///
+    /// Sıfır **iki ayrı şeyi** anlatıyor ve ikisi de "dock çizilmez" demek:
+    /// pencerede hiç dock yok (entegrasyonsuz oturum) ya da bu an alternatif
+    /// ekrandayız. Ayrımı burada tutmak gerekmiyor — doğum değerinin sahibi
+    /// `bt-shell` ve geri getirecek olan da o.
+    dock_rows: Cell<u16>,
+    /// Alternatif ekranın **son görülen** hâli; nöbet bununla karşılaştırıyor.
+    alt_screen: Cell<bool>,
+    /// Alternatif ekran değişince çağrılan haberci; `None` → bu pencerede yol
+    /// hiç çalışmıyor.
+    ///
+    /// **Enjekte ediliyor, çağrı değil** (`bt_core::Wake` emsali): `bt-gpu`
+    /// `bt-shell`'i göremez, katman yönü tek. Kapanış `bt-shell`'de kuruluyor
+    /// ve aynı üç yasağı taşıyor: ana thread'de koşar, **bloklamaz** ve
+    /// pencere geometrisini **yerinde değiştirmez** — yalnız ana kuyruğa iş
+    /// atar. Sebep bu fonksiyonun çağrıldığı yer: kare tam da çizilmiş
+    /// durumda ve drawable ölçüsünü, ızgarayı, yerleşimi orada değiştirmek
+    /// çizilen karenin altını oymak olurdu.
+    ///
+    /// **Yük taşımıyor.** Haberci koştuğunda gerçeği yeniden okuyor, yani
+    /// birbirini kovalayan iki geçiş (vim aç-kapa) bayat bir değerle
+    /// davranamıyor.
+    ///
+    /// Dock'u olmayan pencerede `None` ve bu **yapısal**: yol o oturumda hiç
+    /// kurulmuyor, bir koşulla kapatılmıyor.
+    alt_screen_changed: Option<Box<dyn Fn()>>,
     /// Izgaranın genişliği, sütun; dock'un taşan satırı pencerelemesi için
     /// [`Session::dock`]'a giriyor.
     ///
@@ -762,7 +788,8 @@ define_class!(
             // basıyor, yani `dirty` bu kola girmeden önce zaten dikilmiş
             // oluyor. Dock bu yüzden kendi kare talebini taşımıyor — boşta
             // sıfır kare sözleşmesi dokunulmadan kalıyor.
-            if iv.dock_rows > 0 {
+            let dock_rows = iv.dock_rows.get();
+            if dock_rows > 0 {
                 let mut dock_state = iv.dock.borrow_mut();
                 let mut dock_context = iv.dock_context.borrow_mut();
                 let dock =
@@ -775,7 +802,7 @@ define_class!(
                 }
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
-                frame.open_dock(iv.dock_rows, dock.ground, dock.separator);
+                frame.open_dock(dock_rows, dock.ground, dock.separator);
             }
             // Birinci aralık burada kapanıyor — `push_cursor`'dan **sonra**:
             // imleci listeye koymak sink işidir, encode değil. Damga bir satır
@@ -822,11 +849,40 @@ define_class!(
                     iv.retry.draw_failed(&e);
                 }
             }
+            // **Alternatif ekran nöbeti, ölçüm damgalarından sonra.** Kapı
+            // bir karşılaştırma ve bir atomik okuma; haberci ancak geçişte
+            // (vim açılır/kapanır) koşuyor, yani olağan karede bedeli yok.
+            // Damgaların dışında, çünkü geçiş karesinde bir `dispatch` maliyeti
+            // `cpu_encode`'a binerdi ve o jeton çizimin süresini iddia ediyor.
+            self.notice_alt_screen();
         }
     }
 );
 
 impl LinkDelegate {
+    /// Alternatif ekran değiştiyse haberciyi çağırır; değişmediyse hiçbir şey.
+    ///
+    /// **Kapı burada, haberciye değil**: habercinin kendisi ana kuyruğa iş
+    /// atıyor ve her karede bir iş atmak boşta sıfır kare sözleşmesini
+    /// (`CLAUDE.md`) sessizce bozardı — kuyruğa düşen her iş ana thread'i
+    /// uyandırıyor. Karşılaştırma bir `Cell` okuması, yani olağan karede bu
+    /// fonksiyonun bedeli ölçülemez.
+    ///
+    /// Son görülen değer **haberci çağrılmadan önce** yazılıyor: haberci
+    /// senkron koşup (sınamada) buraya geri dönseydi ters sıra ikinci bir
+    /// bildirim doğururdu.
+    fn notice_alt_screen(&self) {
+        let iv = self.ivars();
+        let Some(notify) = iv.alt_screen_changed.as_ref() else {
+            return;
+        };
+        let now = iv.session.alt_screen();
+        if iv.alt_screen.replace(now) == now {
+            return;
+        }
+        notify();
+    }
+
     /// Bu karede **çizilecek** dikey orijin: animasyonun bu andaki satırı →
     /// piksel.
     ///
@@ -927,8 +983,12 @@ pub struct Layout {
     pub cols: u16,
     /// Dock kaç satır; `0` → bu pencerede dock yok.
     ///
-    /// **Oturumun sabiti** (012 → R5.1): ayrım oturum doğarken kararlaşıyor
-    /// ve koşu boyunca oynamıyor, o yüzden `resize`'da karşılığı yok.
+    /// **Doğum değeri oturumun sabiti** (R5.1: entegrasyon kuruldu mu) ama
+    /// bu alan onun *o andaki* hâli: alternatif ekranda dock kalkıyor ve
+    /// çıkışta iniyor (R5.2), yani [`DisplayLink::resize`] onu da taşıyor.
+    /// Sıfıra düşüren iki ayrı sebebi ayırt etmek `bt-shell`'in işi —
+    /// entegrasyonsuz bir oturumda alternatif ekrandan çıkmak dock
+    /// **doğurmamalı**.
     pub dock_rows: u16,
     /// Hücre ölçüsü ve sol pay; `Frame::clear`'ın taşıdığı değer.
     pub cell: CellMetrics,
@@ -944,10 +1004,15 @@ impl DisplayLink {
         session: Arc<Session>,
         layout: Layout,
         stats: Option<Arc<Stats>>,
+        alt_screen_changed: Option<Box<dyn Fn()>>,
     ) -> Self {
         // Açılış teması: ilk içerik karesi onu zaten tazeleyecek, ama alanın
         // `Option` olması için bir sebep yok — oturumun teması her an geçerli
-        // bir cevap.
+        // bir cevap. Alternatif ekranın açılış hâli de aynı sebeple okunuyor:
+        // nöbetin ilk karşılaştırması bir değere ihtiyaç duyuyor ve "henüz
+        // bilmiyorum" hâli, doğumda alternatif ekranda olmayan bir oturum için
+        // ilk karede sahte bir geçiş üretirdi.
+        let alt_screen = session.alt_screen();
         let theme = session.theme();
         let link =
             CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), surface.layer());
@@ -1003,7 +1068,9 @@ impl DisplayLink {
                 blocks: RefCell::new(Blocks::default()),
                 dock: RefCell::new(DockState::default()),
                 dock_context: RefCell::new(DockContext::default()),
-                dock_rows: layout.dock_rows,
+                dock_rows: Cell::new(layout.dock_rows),
+                alt_screen: Cell::new(alt_screen),
+                alt_screen_changed,
                 cols: Cell::new(layout.cols),
                 cell: Cell::new(layout.cell),
                 // Sıfır: ilk içerik karesine kadar öteleme yok ve o kare
@@ -1270,11 +1337,16 @@ impl DisplayLink {
     /// olmadığı bir yerden geliyormuş gibi gösterirdi. Bayrak koşulsuz
     /// dikiliyor, `Session::resize`'ın kabulüne bağlı değil: hücre ölçüsü
     /// değişmese de pencere oynamış olabilir.
-    pub fn resize(&self, cols: u16, rows: u16, cell: CellMetrics) {
+    pub fn resize(&self, cols: u16, rows: u16, cell: CellMetrics, dock_rows: u16) {
         let iv = self.delegate.ivars();
         if iv.session.resize(cols, rows, cell.cell_px()) {
             iv.cell.set(cell);
         }
+        // Dock payı **kapının dışında** ve `cols` ile aynı gerekçe: reddedilen
+        // bir boyutta (simge durumundaki pencere) dock zaten hiçbir şey
+        // çizmiyor, ama payı eski değerde bırakmak alternatif ekrandan
+        // çıkarken dock'u bir kare geç geri getirirdi.
+        iv.dock_rows.set(dock_rows);
         // Sütun sayısı **kapının dışında**: dock'un pencerelemesi çizilen
         // genişliği görmeli ve reddedilen bir boyutta (simge durumundaki
         // pencere) `cols` zaten sıfır — dock o karede metin çizmiyor

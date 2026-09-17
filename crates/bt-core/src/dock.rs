@@ -184,12 +184,23 @@ fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut im
     let path_chars = context.cwd.chars().count();
     // Bütçe **önce dala** ayrılıyor; yol kalanı alıyor. Ayraç da yolun
     // tarafında sayılıyor, çünkü yol düşerse ayraç da düşüyor.
-    let path_budget = if branch_chars == 0 {
-        available
-    } else {
+    //
+    // **Sığmayan dal kırpılmıyor, düşüyor.** Dalın "hiçbir yarısı atılamaz"
+    // kuralının (yukarıdaki doc) dejenere genişlikteki karşılığı bu: `release/2.1`
+    // dalını on iki sütunda `release` diye göstermek, kullanıcıya **var
+    // olmayan bir dalda** olduğunu söylerdi ve işaret koymak (`rele…`) da onu
+    // düzeltmezdi — kısalmış bir dal adı zaten yanlış okunabilir. Hiç
+    // göstermemek bilgi kaybı ama yanlış bilgi değil; o genişlikte pencere
+    // zaten okunmuyor (`/code-review`, 012 phase-7).
+    let shows_branch = branch_chars > 0 && branch_chars <= available;
+    let path_budget = if shows_branch {
         available
             .saturating_sub(branch_chars)
             .saturating_sub(SEPARATOR.chars().count())
+    } else {
+        // Dal çizilmiyorsa genişliğin tamamı yolun: onun kısaltması **işaretli**
+        // (`…`), yani yanlış okunamaz.
+        available
     };
 
     // `skip` yolun **başından** atılan karakter sayısı; `mark` kısaltmanın
@@ -203,7 +214,7 @@ fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut im
         (Some(ELLIPSIS), path_chars - (path_budget - 1))
     };
     let shows_path = mark.is_some() || skip < path_chars;
-    let separator = if shows_path && branch_chars > 0 {
+    let separator = if shows_path && shows_branch {
         SEPARATOR
     } else {
         ""
@@ -213,10 +224,15 @@ fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut im
         .into_iter()
         .chain(context.cwd.chars().skip(skip))
         .chain(separator.chars())
-        .chain(context.branch.chars());
-    // `take` son kapı: dal tek başına pencereden geniş olabilir (çok dar bir
-    // pencere) ve o hâlde sığan kadarı çiziliyor — taşan hücre ızgaranın
-    // sağından dışarı yazardı.
+        .chain(
+            shows_branch
+                .then(|| context.branch.chars())
+                .into_iter()
+                .flatten(),
+        );
+    // `take` bir bekçi, bir politika değil: yukarıdaki bütçe zaten `available`
+    // sütunu aşmıyor. Sağdan taşan bir hücre ızgaranın dışına yazardı ve o
+    // aritmetik hatası burada sessizce durur.
     for (offset, ch) in line.take(available).enumerate() {
         // Boşluk glyph üretmiyor (`cell`'in kuralı); ayracın iki yanı da
         // buradan eleniyor.
@@ -656,9 +672,15 @@ mod tests {
         let (cells, _) = draw_with(&state, &context(path, "main"), 9);
         assert_eq!(row_text(&cells, 1), "  main");
 
-        // Dal bile sığmıyorsa sığan kadarı çiziliyor; taşma yok.
+        // **Dal bile sığmıyorsa hiç çizilmiyor**, kırpılmıyor: `main`'i `ma`
+        // diye göstermek kullanıcıya var olmayan bir dalda olduğunu söylerdi.
+        // Kalan genişlik yolun ve onun kısaltması işaretli.
         let (cells, _) = draw_with(&state, &context(path, "main"), 4);
-        assert_eq!(row_text(&cells, 1), "  ma");
+        assert_eq!(row_text(&cells, 1), "  …d");
+        // Dal sığmıyor ve yol da yoksa satır büsbütün boş — yanlış bir şey
+        // göstermektense hiçbir şey.
+        let (cells, _) = draw_with(&state, &context("", "main"), 4);
+        assert_eq!(row_text(&cells, 1), "");
 
         // Sığan yol kısalmıyor ve `…` eklenmiyor.
         let (cells, _) = draw_with(&state, &context(path, "main"), 40);
