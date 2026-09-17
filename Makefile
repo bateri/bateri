@@ -55,10 +55,13 @@ test:
 # Pencereyi açar, BT_RUN_SECONDS dolunca kare, hücre, glyph, kural çizgisi ve
 # atlas yuvası sayısına bakar:
 # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C \
-#   hareket=M sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
+#   hareket=M kayma=S sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
 # İlk dördünden (kare, hucre, glif, kural) ya da `hareket`ten BİRİ 0 ise
-# kırmızı; `yuva`, `yuk`, `istek` ve `profil` kapı değil, sayaç ve
-# etiket. `hareket` 008'de sayaçlıktan gerekliliğe geçti: duman reçetesinde bir
+# kırmızı; `yuva`, `yuk`, `istek`, `kayma` ve `profil` kapı değil, sayaç ve
+# etiket. `kayma` içeriğin ötelemesinin tanığı (011) ve reçete onu tetiklemediği
+# için 0 bekleniyor; satırda olma sebebi tanı, `hareket` ile birlikte okununca
+# hangi animatörün yerleşmediğini ayırt ediyor.
+# `hareket` 008'de sayaçlıktan gerekliliğe geçti: duman reçetesinde bir
 # imleç hareketi var (bt-core smoke_shell), yani 0 "animasyon yolu hiç koşmadı"
 # demek. Gizli bağı da orada yazılı — gereklilik varsayılan imleç stilinin
 # ANIMASYONLU olmasına dayanıyor.

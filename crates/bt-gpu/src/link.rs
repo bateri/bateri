@@ -217,8 +217,14 @@ impl Waker {
 /// `Rc` bu yüzden `Send` değil ve olmamalı: tipin kendisi "ana thread"i
 /// söylüyor.
 ///
-/// Okunan değer **son çizilen karenin** orijini. Bayatlık değil tasarım:
-/// tıklama ekrandaki piksele yapılıyor ve o piksel o karede çizildi.
+/// Okunan değer **son encode edilen karenin** orijini. Bayatlık değil tasarım:
+/// tıklama ekrandaki piksele yapılıyor ve o piksel o karede çizildi. Yayın bu
+/// yüzden `draw`'ın `Ok` kolunda ([`LinkDelegate::publish_origin`]) —
+/// encode edilemeyen kare ekranda hiçbir şeyi değiştirmedi ve onun ötelemesini
+/// yayınlamak fareyi görünmeyen bir ızgaraya göre çevirirdi. "Çizilen" değil
+/// "encode edilen": `Ok` commit demek, sunum değil, ve asenkron tamamlanma
+/// yine düşebilir — kalan pencere tek kare, çünkü `draw_failed` hasar bayrağını
+/// geri dikiyor ve sıradaki kare aynı ötelemeyle yeniden çiziliyor.
 #[derive(Clone, Default)]
 pub struct Origin(Rc<Cell<f32>>);
 
@@ -457,6 +463,18 @@ struct LinkIvars {
     /// yalnız bu bayrak bağlıyor. Sıradaki içerik karesi onu **tüketir**:
     /// tüketilmeseydi geometriden sonraki her kare snap'lerdi.
     geometry_changed: Cell<bool>,
+    /// Bir önceki içerik karesinin alternatif ekran hâli
+    /// ([`bt_core::Cursor::alt_screen`]) — **değişimi** ötelemeyi snap'liyor.
+    ///
+    /// `geometry_changed` gibi bir bayrak değil, bir **kopya**: geometri
+    /// dışarıdan gelen bir olay (`resize`) ve kendini bir kez duyuruyor;
+    /// ekranın sahibi ise her karede okunan bir hâl ve tetik onun iki kare
+    /// arasındaki farkı. Kaynağı yok, tüketilmiyor — karşılaştırılıp
+    /// tazeleniyor.
+    ///
+    /// Başlangıcı `false`: ilk kare ana ekrandan doğuyor ve `Motion` zaten o
+    /// karede snap'liyor (`origin` `None`), yani yanlış bir tetik doğuramaz.
+    alt_screen: Cell<bool>,
     /// Bir önceki callback'in damgası; `dt`'nin tabanı.
     ///
     /// Kaynağı `last_frame_at` ile **aynı** (`update.targetTimestamp()`) ve
@@ -559,7 +577,8 @@ define_class!(
                     link.setPaused(true);
                     return;
                 }
-                // **Hareket karesi.** `Waker`'a dokunulmuyor (modül başlığı):
+                // **Hareket karesi** (imleç ya da öteleme, ikisi de olabilir).
+                // `Waker`'a dokunulmuyor (modül başlığı):
                 // link zaten uyanık ve bu callback'in kendisi onu sürdürüyor.
                 iv.motion.set(motion);
                 // İki sayaç, iki animatör: `hareket=` yalnız imlecin,
@@ -611,8 +630,13 @@ define_class!(
                 ) {
                     // Hareket karesi de **yola çıkan** bir kare: `sessiz=`
                     // yerleşmeden sonraki kuyruğu ölçmeli, animasyonun
-                    // başladığı anı değil.
-                    Ok(()) => iv.last_frame_at.set(Some(now)),
+                    // başladığı anı değil. Öteleme de burada yayınlanıyor —
+                    // kayma karelerinin fare eşlemesini tazeleyen tek yer bu
+                    // kol.
+                    Ok(()) => {
+                        self.publish_origin(&frame);
+                        iv.last_frame_at.set(Some(now));
+                    }
                     // **Bu dalın kendi durağı** (`/code-review` bulgusu):
                     // hasar yolunda durak bayrağın dikilmemesiydi, burada
                     // öyle olamaz — "hasar yok" dalı yerleşmemiş animasyon
@@ -692,15 +716,24 @@ define_class!(
             // hedef kurulur. Ters sırada `dt` yeni hedefe uygulanır ve imleç
             // bir kare boyunca gitmediği bir yöne doğru hızlanırdı.
             motion.advance(dt);
+            // İki tetik tek parametrede birleşiyor, çünkü `Motion` ikisini de
+            // aynı cümlenin parçası sayıyor: ızgara **kendi büyümesi dışında**
+            // bir sebeple yer değiştirdi. Ayrı parametre olsalardı `sync`'in
+            // iki `match` guard'ına da ayrı ayrı girmeleri gerekirdi ve
+            // birinin unutulması sessiz bir kusur olurdu.
+            //
+            // Geometri bayrağı burada **tüketiliyor** (tüketilmeseydi bir
+            // pencere sürüklemesinden sonraki her kare snap'lerdi); ekranın
+            // sahibi ise karşılaştırılıp **tazeleniyor** — biri olay, öteki
+            // hâl. `replace` ikisinde de aynı çağrı, anlamı ayrı.
+            let switched_screen = iv.alt_screen.replace(cursor.alt_screen) != cursor.alt_screen;
             motion.sync(
                 cursor.col,
                 cursor.row,
                 origin_target(cursor),
                 cursor.visible,
                 cursor.display_offset,
-                // Geometri bayrağı burada **tüketiliyor**: tüketilmeseydi
-                // bir pencere sürüklemesinden sonraki her kare snap'lerdi.
-                iv.geometry_changed.replace(false),
+                iv.geometry_changed.replace(false) || switched_screen,
             );
             iv.motion.set(motion);
             // **Öteleme `sync`'ten sonra** ve bu sıra zorunlu: çizilecek değer
@@ -734,6 +767,9 @@ define_class!(
                 // Örnek yalnız **yola çıkan** karede yazılır: encode
                 // edilemeyen kare hiçbir şey ölçmedi.
                 Ok(()) => {
+                    // Öteleme de yalnız burada yayınlanıyor: fare eşlemesi
+                    // ekranda duran karenin ötelemesini okumalı.
+                    self.publish_origin(&frame);
                     // Sessizliğin tabanı da yalnız **yola çıkan** karede
                     // tazeleniyor ve aynı sebeple: encode edilemeyen kare
                     // ekranda hiçbir şey değiştirmedi.
@@ -780,8 +816,24 @@ impl LinkDelegate {
     /// ve kayma bitince tam yerine oturuyor. Tek `setViewport`'un (R1.1)
     /// doğrudan sonucu: dört liste birden kayıyor, yani yeni satırın yerinde
     /// belirip ötekilerin kayması temsil edilebilir bir şey değil.
+    ///
+    /// **Fare eşlemesine yayınlamıyor.** Öteleme kareye burada pişiyor ama
+    /// [`Origin`]'e ancak `draw` `Ok` dönünce yazılıyor
+    /// ([`Self::publish_origin`]): encode edilemeyen karede ekranda önceki
+    /// kare kalır ve tıklama onun ötelemesine göre çevrilmeli.
     fn set_origin(&self, frame: &mut Frame, origin_rows: f32) {
         frame.set_origin_rows(origin_rows);
+    }
+
+    /// Çizilen ötelemeyi fare eşlemesine yayınla — yalnız `draw` `Ok` dönünce.
+    ///
+    /// Ayrı bir adım, çünkü [`Origin`]'in sözleşmesi **encode edilen** kareyi
+    /// söylüyor: `Err` kolunda ekranda önceki kare kalıyor ve o kareyi
+    /// yayınlamak tıklamayı ekranda olmayan bir ötelemeye göre çevirirdi.
+    /// Aralığı daraltıyor, kapatmıyor — `Ok` "commit edildi" demek, "ekranda"
+    /// demek değil; asenkron tamamlanma yine düşebilir ve sözleşme bu yüzden
+    /// "çizilen" değil "encode edilen" diyor.
+    fn publish_origin(&self, frame: &Frame) {
         self.ivars().origin.set(frame.origin_px());
     }
 
@@ -901,6 +953,7 @@ impl DisplayLink {
                 slide_frames: Cell::new(0),
                 motion: Cell::new(Motion::default()),
                 geometry_changed: Cell::new(false),
+                alt_screen: Cell::new(false),
                 last_frame_at: Cell::new(None),
                 last_update_at: Cell::new(None),
                 // İlk içerik karesine kadar kullanılmıyor: hareket karesi
@@ -962,7 +1015,9 @@ impl DisplayLink {
         self.delegate.ivars().content_frames.get()
     }
 
-    /// Yerleşmemiş animasyon yüzünden çizilen kare — `hareket=` jetonu.
+    /// Yerleşmemiş **imleç** animasyonu yüzünden çizilen kare — `hareket=`
+    /// jetonu. 011'den beri saf imleç tanığı: yalnız kayma yüzünden çizilen
+    /// kareyi `kayma=` sayıyor ve bu sayaç onları görmüyor.
     ///
     /// Duman kapısının **gerekli** sayacı: reçetede bir imleç hareketi var
     /// (`bt_core::smoke_shell`), yani sıfır "animasyon hiç koşmadı" demek.

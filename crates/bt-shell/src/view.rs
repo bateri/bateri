@@ -194,6 +194,16 @@ pub(crate) struct ViewIvars {
     /// değişince tazeleniyor (`set_metrics`). Ayrı bir kopya gibi görünüyor
     /// ama değil: `start_session`'a ve `DisplayLink::resize`'a giden değerlerin
     /// aynısı, aynı çağrı yerinde yazılıyor.
+    ///
+    /// **Dikeyde `origin` ile aynı kareden gelmiyor** ve bu bilinen bir
+    /// geçiş: bu üçlü pencere olayında (`set_metrics`), öteleme ise sıradaki
+    /// **kare** yolunda tazeleniyor. Aradaki tek karede `rows` yeni, öteleme
+    /// eski olur — ama ekranda duran kare de eski, yani `origin`'in eskiliği
+    /// doğru olanı; ayrışan tek şey alt kenara yapılan tıklamanın kırpılma
+    /// sınırı. Geometri ötelemeyi zaten snap'lediği için pencere bir karede
+    /// kapanıyor. Dejenere boyut bu geçişi hiç doğurmuyor: oturum onu
+    /// reddediyor (`Session::resize`) ve `point_to_cell` sıfır satır/sütunda
+    /// `None` dönüyor, yani iki taraf da aynı yerde susuyor.
     metrics: std::cell::Cell<Option<(CellMetrics, (u16, u16))>>,
     /// Çizilen karenin dikey orijini — kare yolunun yazdığı gövdenin okuma
     /// ucu ([`bt_gpu::Origin`]).

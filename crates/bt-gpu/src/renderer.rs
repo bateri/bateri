@@ -1927,6 +1927,9 @@ mod tests {
             // onu doğrudan söylüyor. Dolu ızgara, yani öteleme sıfır.
             content_rows: 1,
             rows: 1,
+            // Aynı sebeple ilgisiz: bu alan animasyonun snap tetiği, çizilen
+            // piksel değil.
+            alt_screen: false,
         }
     }
 
