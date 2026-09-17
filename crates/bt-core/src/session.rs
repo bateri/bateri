@@ -315,9 +315,17 @@ impl Blocks {
 /// Oturumun açılış ayarları.
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
-    /// `None` → kullanıcının `$SHELL`'i login kabuk olarak; `Some((program,
-    /// args))` → tam olarak o komut (duman ve sınamalar bunu kullanır ki
-    /// sonuç kullanıcının rc dosyasına bağlı olmasın).
+    /// `Some((program, args))` → tam olarak o komut; `None` → alacritty'nin
+    /// kendi varsayılanı (macOS'ta `/usr/bin/login …`, kullanıcının `$SHELL`'i
+    /// login kabuk olarak).
+    ///
+    /// **`None` artık istisna, kural değil.** Üç ayrı çağıran `Some` veriyor ve
+    /// gerekçeleri ayrı: süreli koşu sonucun kullanıcının rc dosyasına bağlı
+    /// olmasını istemiyor (`smoke_shell`/`load_shell`), sınamalar aynı sebeple,
+    /// normal oturum ise `login`'e `-q` geçirebilmek için komutu **kendi**
+    /// kuruyor (`bt_shell::child::login_command`; `Last login:` banner'ı
+    /// ızgaraya düşmesin diye). `None` o üçüncünün kullanıcı ya da kabuk
+    /// çözülemediğinde düştüğü geri yol — banner döner, oturum çalışır.
     pub command: Option<(String, Vec<String>)>,
     /// Çocuğun başlangıç dizini. `None` → bizim sürecimizin dizinini miras
     /// alır.

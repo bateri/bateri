@@ -292,6 +292,16 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   `bt-shell`'de (`child`), `bt-core` yalnız geçirir
   (`SessionOptions.working_directory`, `.env`). Sebep Dock'tan açılış:
   LaunchServices süreci `cwd=/` ile başlatıyor ve launchd'nin ortamında `LANG` yok.
+- **Kabuğu doğuran komutu da biz kuruyoruz** (`child::login_command`) ve
+  alacritty'nin macOS yolundan **tek** farkı var: `login(1)` her zaman `-q`
+  alıyor, yani `Last login: …` banner'ı ızgaraya hiç düşmüyor (ölçüldü:
+  `-flp` basıyor, `-qflp` basmıyor). alacritty `-q`'yu yalnız `~/.hushlogin`
+  varsa ekliyor; koşulu kaldırdık çünkü alternatifi kullanıcının ev dizinine
+  dosya yazmaktı ve o yasak. Geri kalan her şey parite: `-flp`, argv[0]'ı
+  `-zsh` yapan `exec -a` ve onu koşturan `/bin/zsh`. Kullanıcı ya da kabuk
+  çözülemezse komut `None`'a düşer ve alacritty'nin kendi yolu geri gelir —
+  banner döner, pencere çalışır. Süreli koşu (`BT_RUN_SECONDS`) bu yola
+  **uğramaz**: kendi sabit betiğini verir.
 - **Tema = sekiz rol:** arka plan, ön plan, dim, accent ve dört durum. Bugün
   altısı tüketiliyor — `background`, `foreground`, `dim` (SGR 2'li varsayılan ön
   plan), `accent` (imleç **ve** koşan komut bloğunun şeridi), `success` ve

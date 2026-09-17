@@ -88,15 +88,16 @@ tertemiz olacak."
 
 ## Checklist
 
-- [ ] `caret_home` tek yüklem; `dock::render` ve `Session::frame` onu tüketiyor
-- [ ] Dock caret'i `Live` değilken de çiziyor (`TEXT_COL`)
-- [ ] Izgara, caret'in sahibi değilken imleci çizmiyor
-- [ ] `SessionOptions.dock` doğum kararından geliyor (tek ifade, iki tüketici)
-- [ ] `login -q`: banner yok; çözülemeyen kullanıcı/kabuk `None`'a düşüyor
-- [ ] Test: `Running`'de caret ızgarada, dock'ta yok
-- [ ] Test: `Finished`/açılışta caret dock'ta, ızgarada yok
-- [ ] Test: `Unavailable`'da caret ızgarada
-- [ ] Test: `login` komutu `-q` taşıyor; çözülemeyen hâl `None`
+- [x] `caret_home` tek yüklem; `dock::render` ve `Session::frame` onu tüketiyor
+- [x] Dock caret'i `Live` değilken de çiziyor (`TEXT_COL`)
+- [x] Izgara, caret'in sahibi değilken imleci çizmiyor
+- [x] `SessionOptions.dock` doğum kararından geliyor (tek ifade, iki tüketici)
+- [x] `login -q`: banner yok; çözülemeyen kullanıcı/kabuk `None`'a düşüyor
+- [x] Test: `Running`'de caret ızgarada, dock'ta yok
+- [x] Test: `Finished`/açılışta caret dock'ta, ızgarada yok
+- [x] Test: `Unavailable`'da caret ızgarada
+- [x] Test: `login` komutu `-q` taşıyor (argv'nin tamamı, parite dahil)
+- [x] Test: çözülemeyen kullanıcı/kabuk/UTF-8 dışı yol `None`'a düşüyor
 - [ ] Gerçek pencerede gözle: açılış, komut, vim/htop/less (phase-7'den devir)
 - [ ] Doğrulama geçti (`make hepsi` + `make kur` + `make duman`)
-- [ ] Yayın etkisi yazıldı
+- [x] Yayın etkisi yazıldı
