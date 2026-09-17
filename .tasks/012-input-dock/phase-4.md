@@ -164,12 +164,25 @@ _Requirements: R3.1, R3.2, R3.3_
   Ekran doluyken (`content_rows == rows`) hiç doğmuyor. Gözle kontrol
   bekliyor; görünürse bu bir zevk kararı (satırı saymaya devam etmek uzun
   sarmalı komutta birkaç boş satır ayırırdı) ve kullanıcıya sorulur.
-- **Açık kalan ürün sorusu (kullanıcıya).** Tazelik kapısı yapıştırmada
-  devreye girdiği için satır **bir tuş boyunca ızgarada** duruyor, sonraki
-  tuşta dock devralıyor: kaybolma kapandı, kısa bir zıplama kaldı. Kökten
-  çaresi Cmd-V'nin köşeli parantezleri atlaması olurdu ve o, 2004 kipinin
-  sözleşmesine dokunur (vim'de yapıştırma bozulur) — yani karar phase-4'ün
-  değil, kullanıcının.
+- **Yapıştırmanın dar istisnası — kullanıcı kararı.** Tazelik kapısı
+  kaybolmayı kapattı ama satır bir tuş boyunca ızgarada kalıyordu; kullanıcı
+  kökten çözümü seçti. `Session::paste` artık **dock satırın sahibiyken**
+  (`suppressed_input`), yük **tek satırsa** ve **hiç kontrol karakteri
+  taşımıyorsa** sarmadan akıtıyor — `bracketed-paste-magic` hiç devreye
+  girmiyor, metin doğrudan dock'a düşüyor. Güvenlik kaybı yok ve gerekçe
+  sarmanın kendi varlık sebebinden türüyor: satır sonu yoksa hiçbir şey
+  kendiliğinden **çalışmaz**, kontrol karakteri yoksa hiçbir tuş bağlaması
+  tetiklenmez; geriye kullanıcının elle yazabileceği düz metin kalıyor.
+  Kalan her hâl (çok satırlı yapıştırma, vim, `less`, dock'suz oturum)
+  bugünkü korumalı yolda. Bekçileri `paste_is_typed_when_the_dock_owns_the_line`
+  ve `paste_stays_wrapped_when_it_carries_a_newline`.
+- **Aralığın üst ucu da sınırlandı — istisnanın sınaması getirdi.** Üst uç
+  yalnız çıpaya bağlıydı; çıpa prompt'un satırında durduğu için imleç oradan
+  uzaklaşınca (arada bir şey basılırsa) aradaki satırlar girişin olmadığı
+  hâlde bastırılıyordu. Sınamada bütün bir `od` dökümü kayboldu. Üst uç artık
+  iki adayın **alttakini** seçiyor: çıpa satırı, ya da aynanın caret öncesi
+  metninden hesaplanan ilk satır (`chars_before_cursor`). Daraltma yönü
+  güvenli — az bastırır, fazla göstermez.
 
 ### `/code-review` (riskli phase) — 4 bulgu, 4 giderildi
 

@@ -503,6 +503,15 @@ pub(crate) struct SuppressedInput {
     /// Caret'ten **sonra** gelen karakter sayısı; girişin imleç satırının
     /// altında kaç satır daha sürdüğü bundan çıkıyor.
     pub(crate) chars_after_cursor: usize,
+    /// Caret'ten **önce** gelen karakter sayısı ([`DockState::cursor`]);
+    /// girişin imleç satırının üstünde kaç satır sürdüğü bundan çıkıyor.
+    ///
+    /// Aralığın üstünü yalnız çıpaya bağlamak **yetmiyor**: çıpa prompt'un
+    /// satırında duruyor ve imleç oradan uzaklaşırsa (araya başka bir şey
+    /// basılırsa) ikisinin arasındaki satırlar girişin değil, yine de
+    /// bastırılırdı. Ayna kaç satır tuttuğunu biliyor; üst uç ikisinin
+    /// **alttakini** seçiyor.
+    pub(crate) chars_before_cursor: usize,
     /// Görüntünün son mürekkebi ([`DockState::last_ink`]) — tazelik kapısının
     /// aynadaki yarısı.
     pub(crate) last_ink: Option<char>,
@@ -631,6 +640,7 @@ impl ShellLog {
             (block, Outcome::Pending) => Some(SuppressedInput {
                 block,
                 chars_after_cursor: self.dock.display_chars.saturating_sub(self.dock.cursor),
+                chars_before_cursor: self.dock.cursor,
                 last_ink: self.dock.last_ink,
             }),
             (_, Outcome::Finished(_)) => None,

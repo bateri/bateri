@@ -60,7 +60,11 @@ Bayatlık kip sezerek değil iki kesin veriyi karşılaştırarak anlaşılıyor
 yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez. Gerekçesi
 ölçülmüş: `bracketed-paste-magic` yapıştırmayı `zle -U` ile kuyruğa geri
 basıyor, ZLE typeahead varken redisplay'i atlıyor ve ayna bir sonraki tuşa
-kadar güncellenmiyor. Prompt **hâlâ
+kadar güncellenmiyor. Aynı ölçüm yapıştırmaya **dar bir istisna** getirdi:
+dock satırın sahibiyken tek satırlık ve kontrol karakteri taşımayan yük
+bracketed sarmadan akıtılıyor (`Session::can_be_typed`) — satır sonu yoksa
+hiçbir şey kendiliğinden çalışmaz, kontrol karakteri yoksa hiçbir bağlama
+tetiklenmez, yani sarmanın koruduğu iki şey de koşulun dışında. Prompt **hâlâ
 kabuğun** — `PS1` basılıyor, yalnız bastırılıyor; sıfır genişliğe inmesi ve
 `>`'in prompt yerine geçmesi sonraki phase'in. Her prompt bir blok kimliği
 basar, `frame()` o kimlikleri prompt'un OSC 8 çıpasından okuyup blokları
