@@ -444,7 +444,11 @@ fn split_into_grid(width_px: f64, height_px: f64, cell: CellMetrics, dock_rows: 
     // pencerede fark negatife iner, bölme negatif kalır ve `as u16` onu sıfıra
     // doyurur — `Session::resize` o boyutu zaten yoksayıyor. `u16`'da
     // yapılsaydı taşar ve 65535 satırlık bir `TIOCSWINSZ` üretirdi.
-    let usable_height = height_px - f64::from(dock_rows) * f64::from(cell_h);
+    // Formül **bt-gpu'nun** ([`bt_gpu::dock_px`]): dock'un payı satırların
+    // yanında iki nefes payı da taşıyor ve burada yeniden yazılsaydı yeniden
+    // boyutlandırmada bir kare boyunca ayrışırdı — `DOCK_ROWS`'u tüketmekle
+    // aynı disiplin, ikinci bir kopya tutulmuyor.
+    let usable_height = height_px - f64::from(bt_gpu::dock_px(dock_rows, cell));
     Grid {
         cols: (usable_width / f64::from(cell_w)) as u16,
         rows: (usable_height / f64::from(cell_h)) as u16,
@@ -2661,11 +2665,33 @@ mod tests {
         // sözleşmesi o pencerede ölçülüyor.
         let without = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK);
         let with = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS);
+        // 600 / 18 = 33.3 → 33.
         assert_eq!(without.rows, 33);
-        assert_eq!(with.rows, 33 - DOCK_ROWS, "dock payı satırlardan düşmedi");
+        // Dock **iki satır artı iki nefes payı** götürüyor: 2×18 + 2×8 = 52 px,
+        // yani 548 / 18 = 30.4 → 30. Pay bu metrikte üçüncü bir satırı da
+        // yiyor ve bu beklenen — sayı `DOCK_ROWS`'a değil `bt_gpu::dock_px`'e
+        // bağlı, ikisi ayrışırsa bu satır kızarır.
+        assert_eq!(with.rows, 30, "dock payı satırlardan düşmedi");
         // Sütunlar dock'u **görmez**: dock ızgarayla aynı sütunları kullanıyor
         // ve payı yalnız dikeyde.
         assert_eq!(with.cols, without.cols);
+    }
+
+    #[test]
+    fn the_dock_breathing_room_scales_with_the_gutter() {
+        // Nefes payı **türetilmiş**, seçilmiş değil: kaynağı sol payın ta
+        // kendisi. Sabit bir piksel sayısı olsaydı Cmd +/− ile punto büyürken
+        // pay aynı kalır ve oran bozulurdu; bu sınama tam da o bağı tutuyor.
+        let tight = split_into_grid(900.0, 600.0, metrics(9, 18, 0), DOCK_ROWS);
+        let loose = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS);
+        // Paysız dock yalnız satırlarını götürür: 600 − 36 = 564 → 31.
+        assert_eq!(tight.rows, 31);
+        assert!(
+            loose.rows < tight.rows,
+            "pay büyüdü ama dock aynı yeri kapladı: {} / {}",
+            loose.rows,
+            tight.rows
+        );
     }
 
     #[test]
