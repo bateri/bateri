@@ -30,6 +30,19 @@ _Requirements: R3.1, R3.2_
 - `smoke_shell`'e bağlı üç sınama (`hucre/glif/kural` sayılarının sahibi)
   değişmeden geçiyor.
 
+## Uygulama Notları
+
+- **Mesafe sözleşmenin parçası çıktı; `\033[4G` değil `\033[2G`.** Plan "satırı
+  koru, sütunu oynat" diyordu ama **kaç sütun** olduğunu söylemiyordu. Üç
+  sütunla koşuldu: `hareket` 27 → **32**, `sessiz` ~1742 → **1706,21 ms**.
+  Kapı yine de yeşildi (`QUIET_FLOOR` 870 ms), yani kusur jetonun **arkasında
+  saklanıyordu** — ama `docs/OLCUMLER.md`'nin türetme kuralı "taban en düşük
+  sağlıklı gözlemin **en çok yarısı**" diyor ve 1706,21'in yarısı 853,1 < 870,
+  yani sabit kendi kuralını ihlal eder hâle gelmişti. Sebep yapısal: yay uzak
+  sıçramayı daha uzun uçuruyor, yerleşme ~0,25 sn'den ~0,29 sn'ye çıkıyor ve
+  kuyruktan yiyor. Tek sütuna inince eski bant birebir geri geldi
+  (`hareket=27`, `sessiz=1752,07 ms`). Gerekçe `smoke_shell`'in doc'una yazıldı.
+
 ## Yayın Etkisi
 
 - **Ölçülmüş sözleşme değişiyor.** `make duman`'ın reçetesi bir sözleşme;
@@ -45,7 +58,10 @@ _Requirements: R3.1, R3.2_
 
 ## Checklist
 
-- [ ] `\033[H` → `\033[4G`, doc'un gerekçesi güncellendi
-- [ ] Test: `make duman` jeton satırı; `hucre=8 glif=6 kural=15` ve `hareket > 0`
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
-- [ ] Yayın etkisi yazıldı
+- [x] `\033[H` → `\033[2G`, doc'un gerekçesi güncellendi (mesafe de
+      sözleşme: bkz. Uygulama Notları)
+- [x] Test: `make duman` jeton satırı — `kare=29 hucre=8 glif=6 kural=15
+      icerik=2 hareket=27 sessiz=1752.07ms kapanis=clean`
+- [x] Doğrulama geçti (`make hepsi` + `make duman`; duman kullanıcının
+      gerçek penceresinde koştu)
+- [x] Yayın etkisi yazıldı

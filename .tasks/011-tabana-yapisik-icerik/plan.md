@@ -54,16 +54,19 @@ indiriyor.
     Bekçisi: kayma ortasında `point_to_cell`'in döndürdüğü satır, o karede
     çizilen origin'le tutarlı.
 - **R3** — Duman kapısı anlamlı kalır.
-  - **R3.1** — Reçetenin hedefi **satırı korur, yalnız sütunu oynatır**
-    (`\033[4G`); değişiklik **kod phase'lerinden ayrı commit**'le iner.
+  - **R3.1** — Reçetenin hedefi **satırı korur, yalnız sütunu oynatır** ve
+    mesafesi **tam bir hücre** (`\033[2G`); değişiklik **kod phase'lerinden
+    ayrı commit**'le iner. Mesafe sözleşmenin parçası: üç sütun `sessiz`i
+    `QUIET_FLOOR`'un türetme kuralının altına indiriyor (phase-0 → Uygulama
+    Notları).
   - **R3.2** — `hucre=8 glif=6 kural=15` oynamaz; `icerik ≤ IDLE_FRAME_LIMIT`
     ve `sessiz ≥ QUIET_FLOOR` korunur.
 
 ## Yaklaşım
 
-1. **Reçete önce, tek başına.** `smoke_shell`'in ikinci `printf`'i `\033[4G`
+1. **Reçete önce, tek başına.** `smoke_shell`'in ikinci `printf`'i `\033[2G`
    olur. Bugünkü kodda da hareket üretiyor (imleç satır 1'de kalıyor, sütun
-   0→3), yani tek başına doğrulanabilir; ve tabana yapışma indiğinde `\033[H`
+   0→1), yani tek başına doğrulanabilir; ve tabana yapışma indiğinde `\033[H`
    sıfır ekran hareketi üreteceği için kapıyı **kod doğruyken** kırmızıdan
    kurtarır. Ayrı commit: ölçülmüş bir sözleşme kod değişikliğiyle aynı
    commit'te oynarsa regresyonu maskeler.
@@ -121,7 +124,7 @@ encode_pass: setViewport(originY)  ──► cell_bg + cell, ikisi birden   (R1.
 
 | Phase | Durum |
 |-------|-------|
-| phase-0 | |
+| phase-0 | ✅ |
 | phase-1 | |
 | phase-2 | |
 | kapı | |

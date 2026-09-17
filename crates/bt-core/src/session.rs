@@ -429,13 +429,36 @@ impl DirtyFlag {
 /// ama ayrı ayrı yalan söyler.
 ///
 /// **İkinci `printf` bir istisnadır ve tam olarak bir şey yapar: imleci
-/// kıpırdatır.** `\033[H` hiçbir hücre yazmıyor — sekiz arka plan, altı glyph
-/// ve on beş kural bit bit yerinde — ama imleci `\n`'in bıraktığı satırdan
-/// ekranın başına alıyor, yani her koşuda **bir** imleç hareketi doğuyor.
-/// Kapının `hareket > 0` gerekliliği buna dayanıyor (008 Karar 8): onsuz
-/// imleç yalnız çıktının kendisiyle oynardı ve ilk karenin çıktıdan önce mi
-/// sonra mı düştüğü koşudan koşuya değişiyor (`kare=1↔2`), yani kapı
-/// animasyonun koştuğunu göremeyebilirdi.
+/// kıpırdatır.** `\033[2G` hiçbir hücre yazmıyor — sekiz arka plan, altı glyph
+/// ve on beş kural bit bit yerinde — ama imleci `\n`'in bıraktığı satırın
+/// başından aynı satırın ikinci sütununa alıyor, yani her koşuda **bir**
+/// imleç hareketi doğuyor. Kapının `hareket > 0` gerekliliği buna dayanıyor
+/// (008 Karar 8): onsuz imleç yalnız çıktının kendisiyle oynardı ve ilk
+/// karenin çıktıdan önce mi sonra mı düştüğü koşudan koşuya değişiyor
+/// (`kare=1↔2`), yani kapı animasyonun koştuğunu göremeyebilirdi.
+///
+/// **Hareket saf yatay ve bu bir sözleşme** (011 phase-0). Eskiden `\033[H`
+/// idi, yani saf **dikey**: imleci (satır 1, sütun 0)'dan (0, 0)'a alıyordu.
+/// İçerik tabana yapıştıktan sonra o hedef hiçbir ekran hareketi üretmiyor —
+/// ofset `max(çizilen en büyük satır, imleç satırı)`'dan doğduğu için imleci
+/// yukarı taşımak ofseti aynı miktarda aşağı kaydırıyor ve imlecin **ekran**
+/// satırı değişmeden kalıyor. Kapı o hâlde kod doğruyken kırmızı düşerdi.
+/// Sütunu **da** oynatan bir CUP (`\033[1;4H`) de çare değil: satırı
+/// değiştirdiği an `content_rows` oynuyor, ofsetin kimliği değişiyor ve
+/// [`crate::Cursor::display_offset`]'in kuralı gereği hareket **snap**'e
+/// düşüyor — `Motion::sync` snap'i eksen başına değil konumun tamamına
+/// uyguluyor, yani sütun bileşeni de ölüyor. Satır sabit kalmak **zorunda**;
+/// değiştiren bir hedef jetonu sessizce sıfırlar.
+///
+/// **Mesafe de sözleşmenin parçası: tam bir hücre.** Eski `\033[H` bir satır
+/// taşıyordu; yatay karşılığı bir **sütun** olmak zorunda, çünkü yay uzak
+/// sıçramayı daha uzun uçuruyor ve yerleşme süresi `sessiz=` jetonunun
+/// kuyruğundan yiyor. Ölçüldü (011 phase-0): `\033[4G` (üç sütun) `hareket`'i
+/// 27'den 32'ye, `sessiz`i ~1742 ms'den 1706 ms'ye taşıdı ve `QUIET_FLOOR`'un
+/// türetme kuralını ("en düşük sağlıklı gözlemin **en çok yarısı**",
+/// `docs/OLCUMLER.md` → Boşta kare) 870 > 853 ile ihlal etti — kapı o koşuda
+/// hâlâ yeşildi, yani kusur jetonun arkasında saklanıyordu. Sütunu büyüten
+/// biri `QUIET_FLOOR`'u yeniden türetmek zorunda.
 ///
 /// **Aradaki uyku cömert (1 s) ve bu bir pay değil, kapının şartı.** Açılış
 /// süresi (`acilis=`) ölçülmedi; `\033[H` ilk içerik karesinden **önce**
@@ -451,7 +474,7 @@ pub fn smoke_shell() -> (String, Vec<String>) {
             "-c".to_owned(),
             "printf '\\033[41;1;4m bateri \\033[0m\\033[4m \\033[0;4:2m \\033[0;4:3m \
              \\033[0;4:4m \\033[0;4:5m \\033[0;9m \\033[0;4:3;58;5;196m \\033[0m\\n'; \
-             sleep 1; printf '\\033[H'; sleep 10"
+             sleep 1; printf '\\033[2G'; sleep 10"
                 .to_owned(),
         ],
     )
