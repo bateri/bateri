@@ -401,11 +401,14 @@ impl Renderer {
         let family = font.family.as_deref();
         let mut slot = self.atlas.borrow_mut();
         let atlas_tex = slot.get_or_insert_with(|| AtlasTexture {
-            atlas: Atlas::new(family, font.size, scale),
+            atlas: Atlas::new(family, font.size, scale, font.line_height),
             texture: None,
             instances: Vec::new(),
         });
-        if atlas_tex.atlas.ensure(family, font.size, scale) {
+        if atlas_tex
+            .atlas
+            .ensure(family, font.size, scale, font.line_height)
+        {
             atlas_tex.texture = None;
         }
         // Ödünç değil **metrik** dönüyor: atlas ödüncünün bir çağrı sınırını

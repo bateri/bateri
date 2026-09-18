@@ -113,13 +113,17 @@ pub struct Atlas {
     tofu: Vec<u8>,
 }
 
-/// Atlasın anahtarı: bu üçünden biri değişirse metrik, raster ve yuva
+/// Atlasın anahtarı: bu dördünden biri değişirse metrik, raster ve yuva
 /// eşlemesi geçersizdir.
+///
+/// `line_height` de anahtarın parçası, çünkü hücre yüksekliğini o da
+/// belirliyor: yuva boyu değişince bütün raster geçersiz.
 #[derive(Debug, PartialEq)]
 struct Key {
     family: Option<String>,
     point_size: f64,
     scale: f64,
+    line_height: f64,
 }
 
 impl Key {
@@ -127,14 +131,18 @@ impl Key {
     /// sıçrıyor, aralarında yorumlanacak bir yakınlık yok. Aile adı olduğu gibi
     /// — `"menlo"` ile `"Menlo"` aynı fontu açsa da ayrı anahtar; bedeli tek
     /// bir yeniden kurulum.
-    fn is(&self, family: Option<&str>, point_size: f64, scale: f64) -> bool {
-        self.family.as_deref() == family && self.point_size == point_size && self.scale == scale
+    fn is(&self, family: Option<&str>, point_size: f64, scale: f64, line_height: f64) -> bool {
+        self.family.as_deref() == family
+            && self.point_size == point_size
+            && self.scale == scale
+            && self.line_height == line_height
     }
 }
 
 impl Atlas {
     /// `family` ayarın aile adı (`None` → zincir), `point_size` mantıksal
-    /// punto, `scale` ekranın backing ölçeği.
+    /// punto, `scale` ekranın backing ölçeği, `line_height` satır aralığı
+    /// çarpanı (`1.0` → fontun kendi aralığı).
     ///
     /// Punto ile ölçek **çarpılıp** fonta girer: metrik ve raster aynı fiziksel
     /// piksel uzayında doğar, yani ölçek önbellek anahtarının parçasıdır. Aile
@@ -144,13 +152,13 @@ impl Atlas {
     /// Bulunamayan aile **hata değil**: zincirdeki font açılır ve
     /// [`Atlas::font_issue`] bunu söyler. Terminal fontsuz açılamaz; yanlış
     /// yazılmış bir ad pencereyi kapatmamalı.
-    pub fn new(family: Option<&str>, point_size: f64, scale: f64) -> Self {
+    pub fn new(family: Option<&str>, point_size: f64, scale: f64, line_height: f64) -> Self {
         let (faces, font_issue) =
             Faces::from_chain(family, effective_point_size(point_size, scale));
         // Metrik **yalnız düz yüzden**: hücre ızgarası yüze göre oynayamaz.
         // Kalın glyph aynı yuvaya rasterize olur ve bir piksel kırpılabilir —
         // her terminal bunu böyle yapıyor.
-        let metrics = font::metrics(faces.get(Face::Regular));
+        let metrics = font::metrics(faces.get(Face::Regular), line_height);
         let (w, h) = metrics.cell_px;
         // `w`/`h` en az 1 (`font::round_up`), yani bölme güvenli; `max(1)` de
         // hücrenin dokudan büyük olduğu uç için.
@@ -162,6 +170,7 @@ impl Atlas {
                 family: family.map(str::to_owned),
                 point_size,
                 scale,
+                line_height,
             },
             font_issue,
             grid,
@@ -172,7 +181,7 @@ impl Atlas {
         }
     }
 
-    /// Anahtar ([`Atlas::new`]'in aile/punto/ölçek üçlüsü) değiştiyse atlası
+    /// Anahtar ([`Atlas::new`]'in dörtlüsü) değiştiyse atlası
     /// yeniden kurar ve `true` döner.
     ///
     /// `true` aynı zamanda **"dokuyu yeniden ayır"** demektir: metrik ve
@@ -182,11 +191,17 @@ impl Atlas {
     /// ayar dosyası; bu metot iki kancanın da karşılığı ve yeniden kurma
     /// kararını çağıranın hatırlamasına bırakmıyor.
     #[must_use = "true ise atlas yeniden kuruldu: yuva eşlemesi ve doku boyutu değişmiş olabilir, doku da yeniden ayrılmalı"]
-    pub fn ensure(&mut self, family: Option<&str>, point_size: f64, scale: f64) -> bool {
-        if self.key.is(family, point_size, scale) {
+    pub fn ensure(
+        &mut self,
+        family: Option<&str>,
+        point_size: f64,
+        scale: f64,
+        line_height: f64,
+    ) -> bool {
+        if self.key.is(family, point_size, scale, line_height) {
             return false;
         }
-        *self = Self::new(family, point_size, scale);
+        *self = Self::new(family, point_size, scale, line_height);
         true
     }
 
@@ -443,7 +458,7 @@ mod tests {
 
     /// Zincirle kurulan atlas — ayarda aile yokken üretimin kurduğu.
     fn atlas(point_size: f64, scale: f64) -> Atlas {
-        Atlas::new(None, point_size, scale)
+        Atlas::new(None, point_size, scale, 1.0)
     }
 
     #[test]
@@ -639,6 +654,78 @@ mod tests {
     }
 
     #[test]
+    fn line_height_grows_the_cell_and_keeps_the_glyph_centred() {
+        // `[font] line_height` (kullanıcı: "satır aralarını biraz daha
+        // açabilir miyiz? hatta bu bir değişken olabiliyor mu?").
+        //
+        // Üç iddia ve üçü de sessizce bozulabilir:
+        let tight = atlas(POINT_SIZE, 1.0).metrics();
+        let airy = Atlas::new(None, POINT_SIZE, 1.0, 1.5).metrics();
+
+        // (1) **Yalnız yükseklik büyüyor.** Genişlik fontun advance'ından
+        //     geliyor ve satır aralığıyla hiç ilgisi yok; büyüseydi eşaralıklı
+        //     ızgara bozulur, metin seyrekleşirdi.
+        assert_eq!(airy.cell_px.0, tight.cell_px.0, "genişlik de büyüdü");
+        assert!(
+            airy.cell_px.1 > tight.cell_px.1,
+            "yükseklik büyümedi: {tight:?} → {airy:?}"
+        );
+
+        // (2) **Fazlalık altta ve üstte eşit.** Taban çizgisinin indiği kadar
+        //     altta da yer açılmalı; tek yana eklenseydi metin hücrenin içinde
+        //     kayar ve çarpan büyüdükçe kayma büyürdü. `±1`: fazlalık tek
+        //     sayıysa yarısı aşağı yuvarlanıyor.
+        let extra = airy.cell_px.1 - tight.cell_px.1;
+        let above = airy.baseline_px - tight.baseline_px;
+        let below = extra - above;
+        assert!(
+            above.abs_diff(below) <= 1,
+            "fazlalık eşit dağılmadı: üstte {above}, altta {below}"
+        );
+
+        // (3) **Kurallar tabanla birlikte iniyor.** İkisi de tabandan
+        //     ölçülüyor; ayrı bir düzeltme eklenseydi çarpan büyüdükçe alt
+        //     çizgi harften kopardı.
+        assert_eq!(
+            airy.underline_px.0 - tight.underline_px.0,
+            above,
+            "alt çizgi tabanla inmedi"
+        );
+        assert_eq!(
+            airy.strikeout_px.0 - tight.strikeout_px.0,
+            above,
+            "üstü çizili tabanla inmedi"
+        );
+
+        // (4) **`1.0` no-op.** Varsayılan yol fazladan bir piksel bile
+        //     oynatmamalı, yoksa ayarı hiç yazmayan kullanıcının ızgarası
+        //     sessizce değişirdi.
+        assert_eq!(Atlas::new(None, POINT_SIZE, 1.0, 1.0).metrics(), tight);
+    }
+
+    #[test]
+    fn a_taller_line_still_fits_the_descender() {
+        // [`descender_fits_in_the_cell`]'in çarpanlı hâli: satır aralığı
+        // açılınca 'g' alta doğru kaymamalı. Taban çizgisi fazlalığın yarısı
+        // kadar iniyor, yani altta kalan boşluk da **büyüyor** — kırpma
+        // ihtimali azalıyor, artmıyor. Yine de sınanıyor: aritmetik ters
+        // kurulsaydı (fazlalığın tamamı üste) alt boşluk aynı kalır ve
+        // yuvarlama bir pikseli yiyebilirdi.
+        let mut a = Atlas::new(None, POINT_SIZE, 1.0, 1.5);
+        let m = a.metrics();
+        let (_, upload) = a.slot(Sprite::Char('g'), Face::Regular);
+        let bytes = upload.expect("yeni yuva").bytes;
+        let w = usize::from(m.cell_px.0);
+        let has_ink = |row: usize| bytes[row * w..(row + 1) * w].iter().any(|&b| b > 0);
+        assert!(
+            !has_ink(usize::from(m.cell_px.1) - 1),
+            "açık satır aralığında 'g' hücrenin dibine dayandı"
+        );
+        // Ve üstte de boşluk var: fazlalık tek yana gitmedi.
+        assert!(!has_ink(0), "açık satır aralığında glyph tepeye dayandı");
+    }
+
+    #[test]
     fn descender_fits_in_the_cell() {
         // Taban çizgisi ile yükseklik **ayrı ayrı** yuvarlanmasaydı
         // (`round_up(ascent + descent + leading)` tek seferde) alta fontun
@@ -762,12 +849,12 @@ mod tests {
         let mut a = atlas(POINT_SIZE, 1.0);
         a.slot(Sprite::Char('A'), Face::Regular);
         assert!(
-            !a.ensure(None, POINT_SIZE, 1.0),
+            !a.ensure(None, POINT_SIZE, 1.0, 1.0),
             "aynı anahtar yeniden kurmamalı"
         );
         assert_eq!(a.occupancy().0, 2, "yuvalar korunmalı");
         assert!(
-            a.ensure(None, POINT_SIZE, 2.0),
+            a.ensure(None, POINT_SIZE, 2.0, 1.0),
             "ölçek değişti: yeniden kurulmalı"
         );
         assert_eq!(a.occupancy().0, 1, "yeni atlasta yalnız tofu");
@@ -782,29 +869,29 @@ mod tests {
         let mut a = atlas(POINT_SIZE, 1.0);
         a.slot(Sprite::Char('A'), Face::Regular);
         assert!(
-            !a.ensure(None, POINT_SIZE, 1.0),
+            !a.ensure(None, POINT_SIZE, 1.0, 1.0),
             "aynı anahtar yeniden kurmamalı"
         );
         assert!(
-            a.ensure(Some("Monaco"), POINT_SIZE, 1.0),
+            a.ensure(Some("Monaco"), POINT_SIZE, 1.0, 1.0),
             "aile değişti: yeniden kurulmalı"
         );
         assert_eq!(a.occupancy().0, 1, "yeni atlasta yalnız tofu");
         a.slot(Sprite::Char('A'), Face::Regular);
         assert!(
-            !a.ensure(Some("Monaco"), POINT_SIZE, 1.0),
+            !a.ensure(Some("Monaco"), POINT_SIZE, 1.0, 1.0),
             "aynı aile yeniden kurmamalı"
         );
         assert_eq!(a.occupancy().0, 2, "yuvalar korunmalı");
         assert!(
-            a.ensure(None, POINT_SIZE, 1.0),
+            a.ensure(None, POINT_SIZE, 1.0, 1.0),
             "zincire dönüş de bir değişim"
         );
     }
 
     #[test]
     fn missing_family_opens_the_chain_and_says_so() {
-        let a = Atlas::new(Some(MISSING_FAMILY), POINT_SIZE, 1.0);
+        let a = Atlas::new(Some(MISSING_FAMILY), POINT_SIZE, 1.0, 1.0);
         let (_, chain) = font::open_default(POINT_SIZE);
         assert_eq!(
             a.font_issue(),
@@ -824,7 +911,7 @@ mod tests {
         // (ölçüldü); birebir karşılaştırma bulunan fontu "yok" sayar ve
         // zincire düşerdi.
         for name in ["Menlo", "menlo", "MENLO"] {
-            let a = Atlas::new(Some(name), POINT_SIZE, 1.0);
+            let a = Atlas::new(Some(name), POINT_SIZE, 1.0, 1.0);
             assert_eq!(a.font_issue(), None, "{name}");
         }
     }
@@ -832,7 +919,7 @@ mod tests {
     #[test]
     fn proportional_family_opens_with_a_warning() {
         // Helvetica her macOS'ta var ve eşaralıklı değil.
-        let mut a = Atlas::new(Some("Helvetica"), POINT_SIZE, 1.0);
+        let mut a = Atlas::new(Some("Helvetica"), POINT_SIZE, 1.0, 1.0);
         assert_eq!(
             a.font_issue(),
             Some(&FontIssue::NotMonospaced {

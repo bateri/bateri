@@ -25,7 +25,7 @@ pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgiler
 kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
 Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
-`settings.toml`'u okur (bugün `scrollback`, tema seçimi, font, `osc52`,
+`settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı, `osc52`,
 `cursor_motion`, `reduce_motion` ve `shell.integration`),
 Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü

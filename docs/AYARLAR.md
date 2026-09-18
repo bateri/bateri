@@ -94,6 +94,9 @@ dark_theme = "bateri"
 # family = "Menlo"
 # Size in points.
 size = 13
+# Line spacing as a multiple of the font's own: 1 is the font's own spacing,
+# 1.4 is airy. Below 1 is refused — it would clip the tails of g and y.
+line_height = 1.0
 
 [clipboard]
 # Lets programs in the terminal, also over ssh, copy text to the clipboard
@@ -297,12 +300,14 @@ dark_theme = "bateri"
 [font]
 family = "Menlo"
 size = 13
+line_height = 1.0
 ```
 
 | anahtar | tür | varsayılan | anlamı |
 |---|---|---|---|
 | `family` | metin | yok (SF Mono, yoksa Menlo) | yazı ailesi |
 | `size` | sayı, `0`'dan büyük | `13` | punto |
+| `line_height` | sayı, `1` – `2` | `1.0` | satır aralığı çarpanı |
 
 - `family` bir **aile adıdır**, Font Kitabı'nda görünen ad (`"JetBrains
   Mono"`, `"Menlo"`); büyük/küçük harf fark etmez. Tek bir yüzün PostScript
@@ -324,6 +329,17 @@ size = 13
   4–144; dışındaki değer en yakın sınır gibi çizilir. Uyarı yok, çünkü aynı
   değer pencere ekran değiştirdikçe sınırın bir içinde bir dışında
   kalabilirdi.
+- `line_height` satır aralığını **fontun kendi aralığının katı** olarak
+  verir: `1.0` fontun istediği aralık, `1.4` ferah. Fazlalık satırın altına ve
+  üstüne **eşit** dağılır, yani harfler hücrenin ortasında kalır; alt çizgi ve
+  üstü çizili de birlikte iner.
+- **`1`'in altına inilmez** ve bu bir kısıtlama değil koruma: fontun
+  istediğinden kısa bir satır `g j p q y` harflerinin kuyruğunu keser.
+  Üst sınır `2`, çünkü hücre büyüdükçe glyph atlasına sığan karakter sayısı
+  düşer (aşağıdaki maddeyle aynı bütçe). Aralık dışındaki değer varsayılana
+  döner ve uyarı verir.
+- Satır aralığı **kayıt anında** uygulanır, punto gibi; Cmd +/− puntoyu
+  oynatır, çarpan olduğu yerde kalır ve yeni puntoya göre ölçeklenir.
 - Çok büyük puntoda glyph atlası çabuk dolar: dolduktan sonra ekranda ilk
   kez görünen karakterler kutu (□) olarak çizilir. Punto küçültülünce ya da
   uygulama yeniden açılınca geçer.
