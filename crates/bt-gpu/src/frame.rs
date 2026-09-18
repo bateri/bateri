@@ -271,16 +271,33 @@ fn dock_height(rows: u16, cell_h: f32, pad: f32) -> f32 {
 
 /// Dock satırlarının **arasındaki** boşluk, piksel.
 ///
-/// Giriş satırı ile bağlam satırı bitişikti ve iki ayrı şey olduklarını
-/// söylemiyordu (kullanıcı, 012 phase-9: "input ile path satırı arasına da
-/// boşluk ver"). Ayrı bir sabit değil, dış payın **yarısı**: tipografinin
-/// olağan hiyerarşisi (dış boşluk içtekinden büyük) ve tek bir orana bağlı, o
-/// da yine tek bir tasarım sabitine (`CellMetrics::GUTTER_PT`).
+/// Dış payın **iki katı** ve bu sayı bir zevk değil, tek bir kuralın sonucu:
+/// araya bir saç çizgisi girdiği için her satır kendi **bandı** oldu ve bandın
+/// içi simetrik olmalı. Çizginin iki yanına birer `pad` düşünce dock'un dört
+/// boşluğu da eşitleniyor:
+///
+/// ```text
+///   ─────────── üst saç çizgisi
+///        pad
+///   giriş satırı
+///        pad
+///   ─────────── satır arası çizgi
+///        pad
+///   bağlam satırı
+///        pad
+///   ─────────── dock'un dibi
+/// ```
+///
+/// phase-9'da `pad / 2`'ydi ve gerekçesi "dış boşluk içtekinden büyük"tü. O
+/// kural **gruplar** için doğru ama burada grup yok: çizgi iki satırı iki ayrı
+/// şeye çeviriyor ve o hâlde giriş satırının üstünde `pad`, altında `pad / 2`
+/// kalıyordu — kullanıcı gördü ("alttan ve üstten çizgiler aynı uzaklıkta
+/// olmalı"), üstelik görmesi gerekmeyen bir şeydi.
 ///
 /// Yuvarlanıyor, çünkü aygıt ızgarasına oturmayan bir kayma bütün dock
 /// metnini bulanıklaştırırdı — `Frame::set_origin_rows`'un aynı gerekçesi.
 fn dock_row_gap(pad: f32) -> f32 {
-    (pad * 0.5).round()
+    (pad * 2.0).round()
 }
 
 /// Ayracın kalınlığı, **piksel**.
@@ -1639,18 +1656,32 @@ mod tests {
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
         frame.open_dock(2, BG, CURSOR);
-        // 2×18 + 2×GUTTER + 1×(GUTTER/2) = 36 + 14 + 4 = 54: iki dış pay ve
-        // satırların **arasındaki** boşluk.
-        assert_eq!(frame.dock_px(), 54.0, "pay yüksekliğe girmedi");
+        // 2×18 + 2×GUTTER + 1×(2×GUTTER) = 36 + 14 + 14 = 64. Satır arası
+        // boşluk dış payın **iki katı**, çünkü ortasından bir çizgi geçiyor:
+        // çizginin iki yanına birer pay düşünce dört boşluk da eşitleniyor.
+        assert_eq!(frame.dock_px(), 64.0, "pay yüksekliğe girmedi");
 
         // **Zemin payları da kaplıyor**: pay kadar eksik bir dikdörtgen,
         // kayma boyunca taşan ızgara satırını tam da nefes payında gösterirdi.
         let [ground, separator, divider] = frame.dock_ground(500.0);
-        assert_eq!(ground.size, [500.0, 54.0]);
-        // Satır arası çizgi boşluğun **ortasında**: pay 7, hücre 18, boşluk 4
-        // → 7 + 18 + (4 − 1)/2 = 26,5 → 27. Kenara konsaydı bir satıra
+        assert_eq!(ground.size, [500.0, 64.0]);
+        // Satır arası çizgi boşluğun **ortasında**: pay 7, hücre 18, boşluk 14
+        // → 7 + 18 + (14 − 1)/2 = 31,5 → 32. Kenara konsaydı bir satıra
         // yapışır ve ona ait görünürdü.
-        assert_eq!(divider.pos, [0.0, 27.0]);
+        assert_eq!(divider.pos, [0.0, 32.0]);
+        // **Ritim eşit — piksel piksel yazılı.** `pad` 7, hücre 18, boşluk 14,
+        // çizgi 1 px. Kutular: üst çizgi [0,1], giriş [7,25], ara çizgi
+        // [32,33], bağlam [39,57], dip 64. Aradaki dört boşluk sırayla
+        // 6, 7, 6, 7 — fark çizgilerin **kendi** pikselinden ve 31,5'in
+        // yuvarlanmasından geliyor, formülden değil. Bir piksel eşitlenemez:
+        // boşluk çift (14), çizgi tek (1), yani merkez hep yarım piksele
+        // düşüyor. Eski hâlde bu boşluklar 6, 1, 1, 7 idi.
+        assert_eq!(GUTTER, 7, "üstteki piksel tablosu bu paya bağlı");
+        let row1_top = f32::from(GUTTER) + 18.0 + dock_row_gap(f32::from(GUTTER));
+        assert_eq!(row1_top, 39.0);
+        assert_eq!(divider.pos[1] - (f32::from(GUTTER) + 18.0), 7.0);
+        assert_eq!(row1_top - (divider.pos[1] + SEPARATOR_PX), 6.0);
+        assert_eq!(frame.dock_px() - (row1_top + 18.0), 7.0);
         assert_eq!(divider.size, [500.0, SEPARATOR_PX]);
         // Saç çizgisi payın **üstünde**, viewport'un tepesinde: ızgarayla
         // sınır orası ve payı onun üstüne koymak çizgiyi ızgaraya sokardı.
@@ -1682,7 +1713,7 @@ mod tests {
         // ona bir kez daha uygulanmıyor.
         assert_eq!(
             frame.dock_glyphs()[0].pos[1],
-            f32::from(GUTTER) + 18.0 + 4.0,
+            f32::from(GUTTER) + 18.0 + 2.0 * f32::from(GUTTER),
             "satır arası boşluk ya da dış pay yanlış uygulandı"
         );
     }

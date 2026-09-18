@@ -252,12 +252,12 @@ fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut im
     // aradığı bilgi "hangi klasördeyim"; üst dizinler onu yerleştiren bağlam.
     // İkisi aynı tonda olunca göz son bileşeni aramak zorunda kalıyordu.
     //
-    // Sönük olan **yeni bir renk değil**: sönüğün sönüğü, yani ayracın ta
-    // kendisi (`Theme::separator_linear` — "temanın en sessiz mürekkebi",
-    // kendi doc'u öyle diyor). İkinci bir zevk sabiti girmiyor, hiyerarşi tek
-    // kuraldan (`dim_toward`) iki kez geçerek doğuyor.
+    // Sönük olan **yeni bir renk değil**: sönüğün sönüğü
+    // (`Theme::quiet_linear`), yani aynı kuralın (`dim_toward`) ikinci
+    // uygulaması. Saç çizgisi bir adım daha ötede ve orada durmasının sebebi
+    // var: o **mürekkep değil**, bu hâlâ okunması gereken bir yol.
     let normal = theme.dim_linear();
-    let quiet = theme.separator_linear();
+    let quiet = theme.quiet_linear();
     // Son bileşenin yoldaki **karakter** sırası: son `/`'ten sonrası.
     // Bölme yok, `char_indices` değil `enumerate`: aşağıdaki `skip` de
     // karakter sayıyor ve ikisi aynı birimde olmak zorunda.
@@ -770,7 +770,7 @@ mod tests {
                 .fg
         };
         let normal = THEME.dim_linear();
-        let quiet = THEME.separator_linear();
+        let quiet = THEME.quiet_linear();
         assert_ne!(normal, quiet, "iki kademe aynı renge düştü: ayrım görünmez");
         for col in 0..=4 {
             assert_eq!(tone(col), quiet, "`/tmp/` öne çıktı ({col}. sütun)");

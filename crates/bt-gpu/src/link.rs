@@ -1466,14 +1466,14 @@ mod tests {
         // sayıya yuvarlasaydık caret bir hücreye kadar yukarıda dururdu.
         let cell = CellMetrics::new(9, 18, 8).expect("ölçü");
         // 600 px pencere, iki satırlık dock: 2×18 satır + 2×8 dış pay +
-        // 1×4 satır arası = 56, yani band 544'te başlıyor.
+        // 1×16 satır arası = 68, yani band 532'de başlıyor.
         let dock_top = 600.0 - crate::frame::dock_px(2, cell);
-        assert_eq!(dock_top, 544.0);
+        assert_eq!(dock_top, 532.0);
 
         let [col, row] = dock_caret_at(3, dock_top, cell);
         assert_eq!(col, 3.0, "sütun ızgarayla aynı uzayda");
-        // Caret bandın **ilk satırında**, yani dış payın altında: (544+8)/18.
-        assert_eq!(row, 552.0 / 18.0);
+        // Caret bandın **ilk satırında**, yani dış payın altında: (532+8)/18.
+        assert_eq!(row, 540.0 / 18.0);
         // Ve o satır ızgaranın son satırının (548/18 = 30.4) **altında**:
         // yuvarlansaydı ikisi çakışırdı.
         assert!(row > dock_top / 18.0, "caret banda inmedi");
