@@ -319,7 +319,7 @@ pub(crate) struct Frame {
     /// kaydıkça **titrerdi** — ya da sayılarak girer ve `hucre=` jetonunun
     /// anlamı kayardı ("çizilen hücre" artık hücre olmayan bir şeyi de
     /// sayardı). Üçüncü bir liste ikisini de temsil edilemez kılıyor.
-    stripes: Vec<Instance>,
+    stripes: Vec<RuleCell>,
     bg: Vec<Instance>,
     glyphs: Vec<GlyphCell>,
     /// Kural çizgileri; glyph'lerle **aynı** pipeline'dan ama onlardan sonra
@@ -568,12 +568,32 @@ impl Frame {
     pub(crate) fn push_block(&mut self, block: Block) {
         let h = self.cell_px.1;
         debug_assert!(h > 0.0, "clear(metrics) çağrılmadı");
+        // **İşaret artık bir dikdörtgen değil, dock'un chevron'unun ta
+        // kendisi** (012 phase-9, kullanıcı: "ızgara kısmında sonuç renk
+        // kutuları da bu yeni > olacak, renkleri aynı kalacak"). İkisi zaten
+        // aynı şeyi söylüyordu — safha renginde bir prompt işareti — ve iki
+        // ayrı şekille çizilmeleri bir tasarım kararı değil, bir kalıntıydı.
+        //
+        // Sprite tam bir hücre boyunda (`cell` pipeline'ının sabit yuvası) ama
+        // ink'i hücrenin ortasına toplu (`bt_atlas::raster::chevron`), yani
+        // sol payın içinde kalıyor.
+        //
+        // **Payın ortasına** alınıyor, sol kenarına değil: pay bir hücreden
+        // geniş olabilir (üretimde 8pt'ye karşı ~7.8pt, yani neredeyse eşit;
+        // ama font ve ölçek ikisini ayırabilir) ve sola yaslanmış bir işaret
+        // payın sağında boşluk bırakırdı. Dar payda fark negatife iner ve
+        // kırpılıyor — işaret o hâlde 0. sütuna bir miktar girer, ki
+        // görünmemesinden iyidir.
+        //
         // Yükseklik tam bir hücre: işaret komutun satırını gösteriyor, bir
         // aralığı değil (`bt_core::Block`). Satır aralığı sınırı geçmiyor,
         // yani burada doğrulanacak bir "ters aralık" da kalmadı.
-        self.stripes.push(Instance {
-            pos: [self.gutter_px / 4.0, f32::from(block.row) * h],
-            size: [self.gutter_px / 2.0, h],
+        self.stripes.push(RuleCell {
+            pos: [
+                ((self.gutter_px - self.cell_px.0) / 2.0).max(0.0),
+                f32::from(block.row) * h,
+            ],
+            kind: RuleKind::Chevron,
             rgba: block.stripe.to_array(),
         });
     }
@@ -725,6 +745,21 @@ impl Frame {
                 rgba: cell.fg.to_array(),
             });
         }
+    }
+
+    /// Dock'un prompt işareti: ilk satırın ilk sütununda, safha renginde.
+    ///
+    /// Ayrı çağrı, çünkü işaret bir **hücre değil** — `bt-core` sınırdan yalnız
+    /// rengini veriyor (`bt_core::Dock::sigil`) ve şekli bu katmanın kararı.
+    /// Karakter olarak geçseydi kullanıcının fontunun `>`'ü çizilirdi; oysa
+    /// işaret terminalin kendisi ve ızgaranın blok işaretiyle **aynı** sprite
+    /// ([`Frame::push_block`]).
+    pub(crate) fn push_dock_sigil(&mut self, rgba: LinearRgba) {
+        self.dock_rules.push(RuleCell {
+            pos: self.dock_pos(0, 0),
+            kind: RuleKind::Chevron,
+            rgba: rgba.to_array(),
+        });
     }
 
     /// Dock yüzeyini bu kare için açar: kaç satır ve iki rengi.
@@ -914,7 +949,7 @@ impl Frame {
     /// şey söylemeyen bir kapı — ya da var olan bir jetonun anlamını
     /// kaydırırdı. Şeridin kanıtı sayaç değil, `renderer.rs`'in offscreen
     /// piksel okuması.
-    pub(crate) fn stripes(&self) -> &[Instance] {
+    pub(crate) fn stripes(&self) -> &[RuleCell] {
         &self.stripes
     }
 
@@ -1378,23 +1413,31 @@ mod tests {
 
     #[test]
     fn a_mark_covers_one_row_inside_the_gutter() {
-        // İşaretin iki iddiası da sessizce bozulabilir: (1) dikey olarak tam
-        // **bir hücre** — komutun satırını gösteriyor, bir aralığı değil; (2)
-        // yatay olarak payın **içinde** durur — `pos_at`'ten geçseydi ilk
-        // sütunun üstüne düşer ve metni örterdi, yani Karar 3a'nın ayırdığı
-        // payın tamamı boşa giderdi.
+        // İşaretin üç iddiası da sessizce bozulabilir: (1) **dock'un
+        // chevron'uyla aynı sprite** — ikisi de safha renginde prompt işareti
+        // ve ayrı şekillerle çizilmeleri bir kalıntıydı; (2) kendi satırında
+        // başlar — komutun satırını gösteriyor, bir aralığı değil; (3) sol
+        // paya hizalıdır — `pos_at`'ten geçseydi ilk sütunun üstüne düşer ve
+        // metni örterdi, yani Karar 3a'nın ayırdığı payın tamamı boşa giderdi.
+        // Sprite tam bir hücre boyunda ama ink'i ortasında toplu
+        // (`bt_atlas::raster::chevron`), yani payın içinde kalıyor.
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
         frame.push_block(block(2));
 
         let mark = frame.stripes()[0];
+        assert_eq!(mark.kind, RuleKind::Chevron, "işaret hâlâ dikdörtgen");
         assert_eq!(mark.pos[1], 36.0, "işaret kendi satırında başlamalı");
-        assert_eq!(mark.size[1], 18.0, "tam bir hücre boyunda");
         assert_eq!(mark.rgba, SUCCESS.to_array(), "renk sınırdan gelir");
-        // Pay içinde ve ortalanmış: sol kenarı payın dörtte biri, sağ kenarı
-        // dörtte üçü. Payı aşsaydı 0. sütunun arka planına girerdi.
-        assert_eq!(mark.pos[0], f32::from(GUTTER) / 4.0);
-        assert_eq!(mark.pos[0] + mark.size[0], f32::from(GUTTER) * 0.75);
+        // Pay 8, hücre 9: fark negatif, yani işaret sol kenardan başlıyor.
+        assert_eq!(mark.pos[0], 0.0, "dar payda işaret kırpılmadı");
+        // Paydan dar bir hücrede işaret **ortalanıyor**: pay 12, hücre 4 →
+        // iki yanında 4'er piksel.
+        frame.clear(CellMetrics::new(4, 18, 12).expect("ölçü"));
+        frame.push_block(block(0));
+        assert_eq!(frame.stripes()[0].pos[0], 4.0, "işaret payda ortalanmadı");
+        frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
+        frame.push_block(block(2));
 
         frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
         assert!(

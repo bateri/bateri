@@ -49,7 +49,7 @@ pub const TOFU: u16 = 0;
 /// Kural sprite'larına ayrılan yuva payı — [`RuleKind`]'ın varyant sayısı.
 ///
 /// Kapasitenin bu kadarı karakterlere kapalı. Bkz. [`Atlas::slot`].
-const RULE_RESERVE: u16 = 6;
+const RULE_RESERVE: u16 = 7;
 
 /// Atlas dokusunun hedeflenen kenarı, piksel.
 ///
@@ -925,6 +925,7 @@ mod tests {
             RuleKind::Dotted,
             RuleKind::Dashed,
             RuleKind::Strike,
+            RuleKind::Chevron,
         ] {
             let bytes = slot_bytes_of(&mut a, Sprite::Rule(kind), Face::Regular);
             assert!(bytes.iter().any(|&b| b > 0), "{kind:?} hiç piksel boyamadı");
@@ -948,6 +949,57 @@ mod tests {
         // yoksa altı çeşit dört yüzle yirmi dört yuva harcardı.
         let bold = a.slot(Sprite::Rule(RuleKind::Single), Face::BoldItalic).0;
         assert_eq!(regular, bold, "kural yüze göre ayrı yuva tuttu");
+    }
+
+    #[test]
+    fn the_chevron_points_right_and_sits_on_the_x_height() {
+        // **İşaret terminalin kendisi, fontun değil** (012 phase-9): `>`
+        // karakteri yerine yordamsal bir chevron. Üç iddia, üçü de sessizce
+        // bozulabilir.
+        let mut a = atlas(POINT_SIZE, 1.0);
+        let m = a.metrics();
+        let (w, h) = (usize::from(m.cell_px.0), usize::from(m.cell_px.1));
+        let bytes = slot_bytes_of(&mut a, Sprite::Rule(RuleKind::Chevron), Face::Regular);
+
+        // Her satırın en sağdaki boyalı sütunu: chevron sağa açıldığı için bu
+        // dizi ortaya doğru artıp sonra azalmalı — tepe noktası ortada.
+        let rights: Vec<Option<usize>> = (0..h)
+            .map(|y| (0..w).rev().find(|&x| bytes[y * w + x] > 0))
+            .collect();
+        let apex_row = rights
+            .iter()
+            .enumerate()
+            .filter_map(|(y, right)| right.map(|x| (x, y)))
+            .max()
+            .expect("chevron hiç piksel boyamadı")
+            .1;
+
+        // **Dikey merkez üstü çizilinin merkezi**, yani x-height'ın ortası:
+        // hücrenin geometrik merkezi taban çizgisinin altına düşer ve işaret
+        // metne göre alçak görünürdü.
+        let center = usize::from(m.strikeout_px.0) + usize::from(m.strikeout_px.1) / 2;
+        assert!(
+            apex_row.abs_diff(center) <= 1,
+            "tepe x-height merkezinde değil: {apex_row} / {center}"
+        );
+
+        // **Ink hücrenin ortasına toplanıyor.** Izgarada işaret sol payın
+        // içinde çiziliyor ve pay bir hücreden dar olabilir; taşsaydı komut
+        // metninin ilk harfine binerdi.
+        let painted: Vec<usize> = (0..w)
+            .filter(|&x| (0..h).any(|y| bytes[y * w + x] > 0))
+            .collect();
+        let (left, right) = (painted[0], painted[painted.len() - 1]);
+        assert!(left > 0, "chevron sol kenara yapıştı: {left}");
+        assert!(right < w - 1, "chevron sağ kenara yapıştı: {right}");
+
+        // Ve simetrik: `>` işaretinin iki kolu aynı.
+        let above = (0..center).filter(|&y| rights[y].is_some()).count();
+        let below = (center + 1..h).filter(|&y| rights[y].is_some()).count();
+        assert!(
+            above.abs_diff(below) <= 1,
+            "kollar simetrik değil: {above} / {below}"
+        );
     }
 
     #[test]

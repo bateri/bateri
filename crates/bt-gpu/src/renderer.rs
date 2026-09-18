@@ -598,7 +598,23 @@ impl Renderer {
             zfar: 1.0,
         });
         let result = self
-            .encode_quads(&enc, frame.stripes(), viewport_px)
+            // **Blok işaretleri artık sprite**, dikdörtgen değil: dock'un
+            // chevron'uyla aynı şekil, aynı renk sözlüğü. Kendi encode'u var
+            // ve en altta kalıyor — işaret sol payda duruyor, yani hücrelerin
+            // arka planıyla hiç kesişmiyor.
+            //
+            // Ters çevirme dikdörtgeni **dejenere** veriliyor: caret sol paya
+            // hiç gitmiyor ve gerçeğini geçirmek iddiayı "caret payın üstünden
+            // geçerse işaretin rengi dönsün"e genişletirdi — istenen bir şey
+            // değil.
+            .encode_glyphs(
+                &enc,
+                &[],
+                frame.stripes(),
+                &CursorBlock::default(),
+                frame.cell_px(),
+                viewport_px,
+            )
             .and_then(|()| self.encode_quads(&enc, frame.bg_instances(), viewport_px))
             // **Caret arka planlardan sonra, glyph'lerden önce**: blok opak ve
             // altındaki harf onun üstüne, `cursor_block`'un ters çevirdiği
@@ -1701,68 +1717,85 @@ mod tests {
 
     #[test]
     fn command_marks_paint_the_gutter_on_the_gpu() {
-        // Şeridin GPU tarafı: `Frame::stripes` bir **CPU** listesi ve kardeş
-        // sayaçların aksine duman jetonu bile yok — bu sınama düşerse şeridin
+        // İşaretin GPU tarafı: `Frame::stripes` bir **CPU** listesi ve kardeş
+        // sayaçların aksine duman jetonu bile yok — bu sınama düşerse işaretin
         // çizildiğini söyleyen başka hiçbir bekçi kalmıyor.
         //
-        // Dört iddia birden: (1) şerit payın içinde, ızgaranın değil; (2) iki
-        // yanında nefes payı var, yani payı doldurmuyor; (3) renk sınırdan
-        // geldiği gibi çıkıyor (**ara ton**, yani sRGB geçişinin de bekçisi);
-        // (4) iki şerit ayrı renklerle çizilebiliyor — tek şerit `inst[0]`'ı
-        // stride'dan bağımsız okur, yani 32'den kayan bir stride GÖRÜNMEZDİ.
+        // **İşaret artık bir sprite**, dikdörtgen değil: dock'un chevron'uyla
+        // aynı şekil (012 phase-9, kullanıcı: "sonuç renk kutuları da bu yeni
+        // > olacak"). Şeklin kendi bekçisi `bt-atlas`'ta; buranın işi boru
+        // hattı — doğru satır, doğru renk, payın içinde.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
-        const EDGE: usize = 16;
-        const GUTTER: u16 = 8;
+        const EDGE: usize = 64;
+        // Hücre **atlasın kendi ölçüsünde**: sprite'ı dörtte bir ölçeğe
+        // indirmek kapsamayı eritir ve sınama şekli değil ölçeklemeyi ölçerdi.
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+        assert!(usize::from(ch) * 3 <= EDGE, "üç satır dokuya sığmıyor");
+        // Pay **bir hücre**: işaret payda tam ortalanıyor.
+        let gutter = cw;
 
-        // Pay 8 px: şerit x ∈ [2, 6), iki yanında 2'şer piksel nefes.
-        // Izgara 8'den başlıyor, yani 4 px'lik iki sütun payın sağında.
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(4, 4, GUTTER).expect("ölçü"));
-        // İki işaret, iki durum rengi: 0. satır başarılı, 3. satır başarısız.
-        // Aradaki iki satır (çıktı) **işaretsiz** kalmalı.
+        frame.clear(CellMetrics::new(cw, ch, gutter).expect("ölçü"));
+        // İki işaret, iki durum rengi: 0. satır başarılı, 2. satır başarısız.
+        // Aradaki satır (çıktı) **işaretsiz** kalmalı.
         frame.push_block(Block {
             row: 0,
             stripe: Theme::BATERI.success_linear(),
         });
         frame.push_block(Block {
-            row: 3,
+            row: 2,
             stripe: Theme::BATERI.error_linear(),
         });
-        // Izgaranın ilk hücresi: şeridin ona **değmediğini** gösteren tanık.
+        // Izgaranın ilk hücresi: işaretin ona **değmediğini** gösteren tanık.
         frame.push(bg_cell(0, 0, WHITE));
 
-        // Clear dört rengin de dışında: şeridin bulunmadığı her piksel bunu
-        // okumalı ve "şerit payı doldurdu" hatası clear ile ayırt edilebilsin.
+        // Clear üç rengin de dışında: işaretin bulunmadığı her piksel bunu
+        // okumalı ve "işaret payı aştı" hatası clear ile ayırt edilebilsin.
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
         let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
         let srgb = |hex: u32| ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
-        // ±1: 8-bit sRGB kodlaması yuvarlama taşır
-        // (`cell_bg_paints_pixels_on_the_gpu` ile aynı gerekçe).
-        let close_to = |seen: (u8, u8, u8), expected: (u8, u8, u8), what: &str| {
-            assert!(
-                seen.0.abs_diff(expected.0) <= 1
-                    && seen.1.abs_diff(expected.1) <= 1
-                    && seen.2.abs_diff(expected.2) <= 1,
-                "{what}: {seen:02x?} ≠ {expected:02x?}"
-            );
+
+        // Kenar yumuşatma yüzünden **eşitlik sorulamaz**: sprite'ın yalnız
+        // çekirdeği tam kapsama veriyor. İddia bu yüzden mesafeye bakıyor —
+        // bandın clear'dan en uzak pikseli hangi işaret rengine yakın.
+        let distance = |a: (u8, u8, u8), b: (u8, u8, u8)| {
+            i32::from(a.0).abs_diff(i32::from(b.0)).pow(2)
+                + i32::from(a.1).abs_diff(i32::from(b.1)).pow(2)
+                + i32::from(a.2).abs_diff(i32::from(b.2)).pow(2)
         };
+        let clear = srgb(Theme::BATERI.accent);
+        let band = usize::from(ch);
+        let boldest = |row: usize| {
+            (0..usize::from(gutter))
+                .flat_map(|x| (row * band..(row + 1) * band).map(move |y| (x, y)))
+                .map(|(x, y)| pixel(x, y))
+                .max_by_key(|&seen| distance(seen, clear))
+                .expect("bant boş")
+        };
+        let (success, error) = (srgb(Theme::BATERI.success), srgb(Theme::BATERI.error));
+        let first = boldest(0);
+        assert!(
+            distance(first, success) < distance(first, error),
+            "ilk komut başarı renginde değil: {first:02x?}"
+        );
+        let second = boldest(2);
+        assert!(
+            distance(second, error) < distance(second, success),
+            "ikinci komut hata renginde değil: {second:02x?}"
+        );
+        // **Çıktı satırı işaretsiz** (kullanıcı kararı, 010 teslim): payı clear
+        // rengiyle **aynı** kalmalı, tek bir mürekkep pikseli bile yok. Bu,
+        // işaretin bir hücre boyunda kaldığının tek piksel kanıtı — yükseklik
+        // satır aralığına dönerse burası düşer.
+        assert_eq!(boldest(1), clear, "çıktı satırı işaret aldı");
 
-        close_to(pixel(4, 2), srgb(Theme::BATERI.success), "ilk komut");
-        close_to(pixel(4, 13), srgb(Theme::BATERI.error), "ikinci komut");
-        // **Çıktı satırları işaretsiz** (kullanıcı kararı, 010 teslim): 1. ve
-        // 2. satırın payında clear rengi olmalı. Bu, işaretin bir hücre
-        // boyunda kaldığının tek piksel kanıtı — yükseklik satır aralığına
-        // dönerse burası düşer.
-        close_to(pixel(4, 6), srgb(Theme::BATERI.accent), "çıktı satırı");
-        close_to(pixel(4, 9), srgb(Theme::BATERI.accent), "çıktı satırı");
-
-        // Nefes payı: işaretin iki yanı da clear rengi. İşaret payı doldursaydı
-        // (ya da `pos_at`'ten geçip ızgaraya kaysaydı) bu iki satır düşerdi.
-        close_to(pixel(0, 2), srgb(Theme::BATERI.accent), "payın solu");
-        close_to(pixel(7, 2), srgb(Theme::BATERI.accent), "payın sağı");
-
-        // Izgara payın sağında ve dokunulmamış: ilk hücre beyaz kaldı.
-        assert_eq!(pixel(9, 2), (255, 255, 255), "ilk hücre işaretin sağında");
+        // Izgara payın sağında ve dokunulmamış: ilk hücre beyaz kaldı. Sprite
+        // tam bir hücre boyunda ama ink'i ortasında toplu, yani payı aşmıyor.
+        assert_eq!(
+            pixel(usize::from(gutter) + usize::from(cw) / 2, band / 2),
+            (255, 255, 255),
+            "ilk hücre işaretin sağında"
+        );
     }
 
     #[test]

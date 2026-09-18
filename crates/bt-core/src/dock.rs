@@ -40,10 +40,17 @@ pub struct Dock {
     /// Caret bloğunun altında kalan metnin rengi — ızgaradaki
     /// [`crate::Cursor::text`] ile aynı kural ve aynı değer.
     pub caret_text: LinearRgba,
+    /// Prompt işaretinin rengi: kabuğun safhası.
+    ///
+    /// **Renk geçiyor, şekil geçmiyor.** İşaret bir hücre değil: sınırdan bir
+    /// karakter olarak geçerse kullanıcının fontunun `>`'ü çizilir, oysa o
+    /// terminalin kendi işareti (`bt_atlas::RuleKind::Chevron`). Karar burada
+    /// — hangi renk, yani kabuk ne yapıyor — boyama orada.
+    ///
+    /// Izgaranın blok şeridiyle **aynı sözlük** ([`crate::Block::stripe`]) ve
+    /// artık aynı şekil: ikisi de safha renginde bir prompt işareti.
+    pub sigil: LinearRgba,
 }
-
-/// Giriş işareti; dock'un ilk sütununda durur.
-const SIGIL: char = '>';
 
 /// Metnin başladığı sütun: işaret bir hücre, bir hücre de nefes payı.
 ///
@@ -100,6 +107,7 @@ pub(crate) fn render(
         separator: theme.separator_linear(),
         caret: None,
         caret_text: theme.background_linear(),
+        sigil: sigil_color(shell, theme),
     };
     if cols == 0 {
         return surface;
@@ -108,13 +116,9 @@ pub(crate) fn render(
     // tek sahibi [`caret_home`]; ızgara da aynı yüklemi okuyup imlecini
     // gizliyor, yani ikisi ancak birlikte değişebilir.
     let owned = caret_home(shell, state.status) == CaretHome::Dock;
-    sink(Cell {
-        col: 0,
-        row: 0,
-        ch: Some(SIGIL),
-        fg: sigil_color(shell, theme),
-        ..Cell::default()
-    });
+    // İşaret **sink'ten geçmiyor**: bir hücre değil, yüzeyin bir alanı
+    // ([`Dock::sigil`]). Hücre olsaydı kullanıcının fontunun `>`'ü çizilirdi.
+    //
     // Bağlam satırı aynanın **durumundan önce**: dizin ve dal ZLE satırı
     // düzenlemese de doğru ve kullanıcı komut koşarken de onlara bakıyor.
     // Aşağıdaki `Live` kapısının altında kalsaydı her komutta kaybolurdu.
@@ -467,14 +471,16 @@ mod tests {
         // `cursor` **görüntü** uzayında (`DockState::cursor` normalize edilmiş
         // geliyor): `% ` iki karakter, imleç `ls -la`'nın sonunda, yani 8.
         let (cells, dock) = draw(&live("% ", "ls -la", "", 8), COLS);
-        assert_eq!(text(&cells), "> % ls -la");
-        // `>` + `%lsla` + `-`: vurgusuz iki boşluk hiçbir şey çizmiyor ve
-        // sink'e de uğramıyor (`frame()`'in atlama kapısının dock karşılığı).
-        assert_eq!(cells.len(), 7, "boşluklar hücre üretti");
-        assert_eq!(cells[0].col, 0, "işaret ilk sütunda");
+        // İşaret **hücre değil**: yüzeyin bir alanı ([`Dock::sigil`]) ve
+        // şeklini `bt-gpu` çiziyor. Metin bu yüzden iki sütun boşlukla
+        // başlıyor — işaretin ve nefes payının yeri.
+        assert_eq!(text(&cells), "  % ls -la");
+        // `%lsla` + `-`: vurgusuz iki boşluk hiçbir şey çizmiyor ve sink'e de
+        // uğramıyor (`frame()`'in atlama kapısının dock karşılığı).
+        assert_eq!(cells.len(), 6, "boşluklar hücre üretti");
         // `PREDISPLAY`'in ilk karakteri metnin ilk sütununda: iki dizgi tek
         // görüntü ve aralarında boşluk yok.
-        assert_eq!(cells[1].col, TEXT_COL);
+        assert_eq!(cells[0].col, TEXT_COL);
         // Caret `CURSOR`'ın görüntü uzayındaki yeri (`DockState::cursor`
         // zaten normalize): `% ` iki karakter, imleç `ls -la`'nın sonunda.
         assert_eq!(dock.caret, Some(TEXT_COL + 8));
@@ -507,7 +513,7 @@ mod tests {
         let (cells, _) = draw(&state, COLS);
 
         let green = THEME.indexed_linear(2);
-        for cell in &cells[1..5] {
+        for cell in &cells[0..4] {
             assert_eq!(cell.fg, green, "aralık boyanmadı");
             assert!(cell.bold);
         }
@@ -542,22 +548,11 @@ mod tests {
 
     #[test]
     fn the_sigil_takes_the_phase_color() {
-        // `>` işareti safhayı söylüyor ve sözlük blok şeridininkiyle aynı.
+        // İşaret safhayı söylüyor ve sözlük blok şeridininkiyle aynı — artık
+        // şekil de aynı (`bt_atlas::RuleKind::Chevron`). Sınırdan yalnız renk
+        // geçiyor: karakter geçseydi kullanıcının fontunun `>`'ü çizilirdi.
         let state = live("", "", "", 0);
-        let color = |shell| {
-            let mut first = None;
-            render(
-                &state,
-                &DockContext::default(),
-                shell,
-                &THEME,
-                COLS,
-                |cell| {
-                    first.get_or_insert(cell.fg);
-                },
-            );
-            first.expect("işaret her hâlde çizilir")
-        };
+        let color = |shell| draw_as(&state, shell, COLS).1.sigil;
         assert_eq!(color(None), THEME.accent_linear());
         assert_eq!(
             color(Some(ShellState {
@@ -605,7 +600,7 @@ mod tests {
                 ..live("% ", "ls", "", 2)
             };
             let (cells, _) = draw(&state, COLS);
-            assert_eq!(text(&cells), ">", "{status:?} metin çizdirdi");
+            assert_eq!(text(&cells), "", "{status:?} metin çizdirdi");
         }
     }
 
@@ -669,13 +664,13 @@ mod tests {
 
         // Caret satırın **sonunda**, yani son harfin bir sağındaki boş
         // sütunda: pencereye yedi harf ile caret'in yeri sığıyor.
-        assert_eq!(text(&cells), "> tuvwxyz", "pencere sağ uca yapışmadı");
+        assert_eq!(text(&cells), "  tuvwxyz", "pencere sağ uca yapışmadı");
         // Caret son sütunda: `cols - 1`. Bir ötesi pencerenin dışı olurdu.
         assert_eq!(dock.caret, Some(cols - 1));
 
         // Caret başa dönünce pencere de başa döner.
         let (cells, dock) = draw(&live("", &buffer, "", 0), cols);
-        assert_eq!(text(&cells), "> abcdefgh");
+        assert_eq!(text(&cells), "  abcdefgh");
         assert_eq!(dock.caret, Some(TEXT_COL));
     }
 
@@ -690,14 +685,14 @@ mod tests {
         assert_eq!(dock.caret, None);
 
         let (cells, dock) = draw(&live("", "ls", "", 2), TEXT_COL);
-        assert_eq!(text(&cells), ">");
+        assert_eq!(text(&cells), "");
         assert_eq!(dock.caret, None);
     }
 
     #[test]
     fn the_context_line_sits_under_the_input_and_is_dim() {
         let (cells, _) = draw_with(&live("", "ls", "", 2), &context("/tmp/x", "main"), COLS);
-        assert_eq!(text(&cells), "> ls");
+        assert_eq!(text(&cells), "  ls");
         // Yol, ayraç, dal — yan yana ve dock'un **sol kenarında**, yani `>`
         // işaretiyle hizalı. Giriş metniyle hizalansaydı bağlam sebepsiz
         // girintili görünürdü (bkz. [`CONTEXT_COL`]).
@@ -721,7 +716,7 @@ mod tests {
                 ..live("", "ls", "", 2)
             };
             let (cells, _) = draw_with(&state, &context("/tmp/x", "main"), COLS);
-            assert_eq!(text(&cells), ">", "{status:?} metin çizdirdi");
+            assert_eq!(text(&cells), "", "{status:?} metin çizdirdi");
             assert_eq!(row_text(&cells, 1), "/tmp/x | main", "{status:?}");
         }
     }
