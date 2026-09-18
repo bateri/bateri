@@ -16,6 +16,7 @@
 | 012 | [input-dock](012-input-dock/) | 🔨 | `main`'de — giriş satırı terminalin: dock ZLE'yi aynalıyor, prompt devredildi (`PS1` sıfır genişlik, `>` bizim chevron'umuz), çıpa `preexec`'e taşındı. 9 phase tamam; teslim bekliyor — gözle kontrol ve `make duman` kullanıcıda, üç ölçüm iddiası kanca borcuna takılı — `teslim.md` |
 | 013 | [komut-suresi](013-komut-suresi/) | 🔨 | `main`'de — bir saniyeyi geçen komutların süresi komut satırının sağ ucunda, koşarken canlı. Kare talebinin **üçüncü** sebebi doğdu (**saat**) ve `bt-gpu::link`'in sözleşmesi üçe tamamlandı: koşan komutu olan pencere artık "boşta" sayılmıyor. 2 phase tamam; teslim bekliyor — gözle kontrol ve `make duman` kullanıcıda, bir ölçüm iddiası yük borcuna takılı — `teslim.md` |
 | 014 | [imlec-stilleri](014-imlec-stilleri/) | 🔨 | DECSCUSR'ın üç şekli (blok/alt çizgi/dikey çubuk) ve blink; ikisi tek sette çünkü protokol onları tek dizide birleştiriyor. Asıl soru blink'in kare kaynağı: hareket karesi olmalı ama tetiği saat — ve 013'ün saati blink açıkken sayacı durduruyor, bu set onu düzeltmek zorunda |
+| 015 | [imlec-cilasi](015-imlec-cilasi/) | 📐 | Caret'in yüzeyi ve devri: köşe yarıçapı, yumuşak gölge, odak kaybında içi boş imleç — üçü de caret'e kendi çizim pipeline'ını vermenin sonucu. Yanına ölçülmüş bir kusur: hızlı komutta caret yukarı çıkıp geri iniyor (`ls` koşarken safha 44 ms sürüyor, animasyon 230 ms'de yerleşiyor) |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
