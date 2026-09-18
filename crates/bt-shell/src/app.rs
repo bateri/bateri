@@ -2688,12 +2688,13 @@ mod tests {
         // 600 / 18 = 33.3 → 33.
         assert_eq!(without.rows, 33);
         // Dock **iki satır, iki nefes payı ve bir satır arası** götürüyor:
-        // 2×18 + 2×8 + 4 = 56 px, yani 544 / 18 = 30.2 → 30. Satır arası
-        // (`dock_row_gap`, dış payın yarısı) hesaba girmezse 52 px çıkar ve o
-        // da 30'a yuvarlanır — yani bu satır yanlış formülle de yeşil kalır.
+        // 2×18 + 2×8 + 16 = 68 px, yani 532 / 18 = 29.5 → 29. Satır arası
+        // (`dock_row_gap`) dış payın **iki katı**, çünkü ortasından bir çizgi
+        // geçiyor ve çizginin iki yanına birer pay düşüyor; hesaba girmezse
+        // 52 px çıkar, o da 30 satır verir ve fark **görünür** olur.
         // Sayının kaynağı `DOCK_ROWS` değil `bt_gpu::dock_px`; ikisi
         // ayrışırsa burası kızarır.
-        assert_eq!(with.rows, 30, "dock payı satırlardan düşmedi");
+        assert_eq!(with.rows, 29, "dock payı satırlardan düşmedi");
         // Sütunlar dock'u **görmez**: dock ızgarayla aynı sütunları kullanıyor
         // ve payı yalnız dikeyde.
         assert_eq!(with.cols, without.cols);

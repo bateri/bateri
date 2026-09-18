@@ -61,7 +61,12 @@ sabiti yok, aynı içi girinti iki eksende ve punto büyüyünce pay da büyüyo
 Saç çizgisi payın **üstünde**, viewport'un tepesinde; **ikincisi** iki satırın
 arasındaki boşluğun ortasında, aynı renk ve aynı kalınlıkta — boşluk ayrımı
 önerir, çizgi söyler. Kenara değil ortaya konuyor, yoksa bir satıra yapışır ve
-ona ait görünürdü. Dock ötelemeden
+ona ait görünürdü. Satır arası boşluk bu yüzden dış payın **iki katı**: çizgi
+her satırı kendi bandı yaptığı için bandın içi simetrik olmalı ve çizginin iki
+yanına birer pay düşünce dock'un dört boşluğu da eşitleniyor (kalan ±1 px
+çizgilerin kendi kalınlığından). phase-9'un `pad / 2`'si "dış boşluk içtekinden
+büyük" kuralındandı; o kural **gruplar** için doğru, araya çizgi girince grup
+kalmıyor. Dock ötelemeden
 **yapısal olarak** muaf:
 listeleri dock-yerel doğuyor, ekrana taşıyan şey o ikinci viewport. Üst
 satırında prompt işareti (safha rengiyle), metin, sönük öneri,
@@ -69,8 +74,11 @@ satırında prompt işareti (safha rengiyle), metin, sönük öneri,
 `{tam yol} | {dal}`, sol altta ve sönük; **içinde iki kademe** — yolun son
 bileşeni (aktif klasör) ile dal öne çıkıyor, üst dizinler ve ayraç geri
 çekiliyor, çünkü aranan bilgi "hangi klasördeyim". Soluk ton yeni bir renk
-değil, sönüğün sönüğü: ayracın ta kendisi (`Theme::separator_linear`), yani
-hiyerarşi tek kuraldan (`dim_toward`) iki kez geçerek doğuyor. Kökte ve eğik
+değil (`Theme::quiet_linear`), aynı kuralın (`dim_toward`) ikinci uygulaması.
+Zincir **üç kademe**: `dim` → `quiet` (üst dizinler) → `separator` (saç
+çizgileri). Çizgiler bir adım daha ötede, çünkü **mürekkep değiller**: yan
+yanaki en sessiz metinle aynı ağırlıkta olsalardı göz onları da okunacak bir
+şey sanardı. Kökte ve eğik
 çizgisiz yolda ayrım yok, tamamı öne çıkıyor — yanlışın yönü güvenli.
 Satır **dock'un sol kenarından**, giriş
 metninin hizasından değil: metinle hizalanınca sebepsiz girintili görünüyordu

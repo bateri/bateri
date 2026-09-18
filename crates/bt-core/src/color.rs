@@ -217,15 +217,36 @@ impl Theme {
         linear_rgba(rgb(self.dim))
     }
 
-    /// Dock'u ızgaradan ayıran saç çizgisinin rengi, **lineer** RGBA.
+    /// Sönüğün sönüğü — **okunması gereken ama öne çıkmayan** metin.
     ///
     /// **Yeni bir rol değil, türetilmiş bir değer** (`CLAUDE.md` → çizilmeyen
-    /// rol eklenmiyor): sönük ön planın zemine bir kez daha karışmış hâli.
-    /// Kural [`dim_toward`]'ın kendisi, yani ayrı bir zevk sabiti girmiyor —
-    /// ayraç, temanın en sessiz mürekkebinin de sönüğü olmalı: görülmeli ama
-    /// okunacak bir şey olmamalı.
-    pub const fn separator_linear(&self) -> LinearRgba {
+    /// rol eklenmiyor): sönük ön planın zemine bir kez daha karışmış hâli,
+    /// kural yine [`dim_toward`].
+    ///
+    /// Tek tüketicisi dock'un bağlam satırındaki **üst dizinler**: aktif
+    /// klasör ile dal `dim`'de kalırken onları taşıyan yol geri çekiliyor.
+    /// Hâlâ mürekkep, yani okunabilir olmak zorunda — [`separator_linear`]
+    /// bir adım daha sönük ve o artık mürekkep değil.
+    pub const fn quiet_linear(&self) -> LinearRgba {
         linear_rgba(dim_toward(rgb(self.dim), self.background_rgb()))
+    }
+
+    /// Saç çizgilerinin rengi, **lineer** RGBA.
+    ///
+    /// Aynı kuralın **üçüncü** uygulaması ([`dim_linear`] → [`quiet_linear`] →
+    /// burası): üç kademe de tek bir `dim_toward` zincirinden doğuyor, ayrı
+    /// bir zevk sabiti girmiyor.
+    ///
+    /// Bir adım fazlası bilinçli ve ölçütü şu: ayraç **mürekkep değil**.
+    /// `quiet_linear`'da durulsaydı çizgiler yanlarındaki en sessiz metinle
+    /// aynı ağırlıkta olurdu ve göz onları da okunacak bir şey sanırdı
+    /// (kullanıcı, 012: "çizgilerin renklerini daha da koyult, bu kadar belli
+    /// olmasın"). Görülmeli ama okunacak bir şey olmamalı.
+    pub const fn separator_linear(&self) -> LinearRgba {
+        linear_rgba(dim_toward(
+            dim_toward(rgb(self.dim), self.background_rgb()),
+            self.background_rgb(),
+        ))
     }
 
     /// Paletin `index` numaralı renginin **lineer** RGBA'sı.
