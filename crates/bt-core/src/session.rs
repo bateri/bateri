@@ -1574,11 +1574,38 @@ impl Session {
             // `set_selection` spacer'dan başlayan aralık kurmaz (`anchor`
             // spacer'ı `Right` yapıyor), ama seçimden sonra satır yeniden
             // yazılıp o hücre spacer olursa aralık orada başlar.
+            // **Seçim içeriği vurgular, içerik yaratmaz.** Aralık boş
+            // hücreleri de kapsıyor ve onları ters çevirmek "burada bir şey
+            // var" demek oluyordu: boş ekranda fareyi sürükleyen kullanıcı
+            // koca bir blok görüyor, üstelik o seçim **hiçbir şey
+            // kopyalamıyor** (gözlendi, 2026-09-18). Vurgu ile metnin
+            // ayrışması bu deponun yasakladığı sınıf — göz "seçtim" derken
+            // pano boş geliyor.
+            //
+            // Ölçüt "mürekkep" **değil** "çizilir mi": zemin de sütunu işgal
+            // ediyor (013 Karar 7'nin aynısı). Ters videolu bir boşluk —
+            // vim'in durum satırı, tmux çubuğu — mürekkepsizdir ama
+            // görünürdür ve seçilince vurgulanmalıdır; varsayılan zeminli boş
+            // bir hücre ise görünmezdir ve seçim onu görünür kılmamalıdır.
+            // İkisini ayıran şey aşağıdaki atlama koşulunun **ta kendisi**,
+            // yalnız seçim uygulanmadan önceki hâliyle sorulmuş hâli.
+            //
+            // Satır taraması yok: soru hücrenin kendisine sorulabiliyor.
+            let plain_inverse = flags.contains(Flags::INVERSE);
+            let plain_back = if plain_inverse {
+                color::resolve_fg(cell.fg, dim, colors, &theme)
+            } else {
+                color::resolve(cell.bg, colors, &theme)
+            };
+            let ch = (!hidden && !flags.intersects(SPACERS) && cell.c != ' ').then_some(cell.c);
+            let ruled = !hidden && flags.intersects(RULES);
+            let drawable = plain_back != background || ch.is_some() || ruled;
             let selected = !hidden
+                && drawable
                 && selected_range
                     .as_ref()
                     .is_some_and(|range| range.contains_cell(&indexed, cursor_point, cursor_shape));
-            let inverse = flags.contains(Flags::INVERSE) ^ selected;
+            let inverse = plain_inverse ^ selected;
 
             // **Arka plan önce**: atlama koşulunun ağır yarısı bu ve boş
             // grid'de hücrelerin neredeyse tamamı burada eleniyor. Ön plan
@@ -1596,26 +1623,19 @@ impl Session {
             //
             // Kural `color::resolve_fg`'de tek: iki dal aynı fonksiyondan
             // geçiyor, ters videolu dal sönük rolü unutamıyor.
-            let back = if inverse {
-                color::resolve_fg(cell.fg, dim, colors, &theme)
+            // Seçim `plain_back`'i takaslıyor; seçilmemiş hücrede ikinci bir
+            // çözüm yok, `plain_back` zaten cevap.
+            let back = if selected {
+                if inverse {
+                    color::resolve_fg(cell.fg, dim, colors, &theme)
+                } else {
+                    color::resolve(cell.bg, colors, &theme)
+                }
             } else {
-                color::resolve(cell.bg, colors, &theme)
+                plain_back
             };
             // Varsayılan arka plan çizilmez; `None` onun adı.
             let bg = (back != background).then(|| color::linear_rgba(back));
-
-            // `HIDDEN` (`\e[8m`) "mürekkep yok" demek ve **tek bir `let`**
-            // (yukarıdaki `hidden`): hem glyph'i hem kuralları düşürüyor, hem
-            // de seçim vurgusunu dışlıyor. Üç ayrı ifadeye yazılsaydı biri
-            // sonradan değişip ötekiler eski kalabilirdi ve belirti "gizli
-            // metin altı çizgisinden/vurgusundan okunuyor" olurdu.
-            let ch = (!hidden && !flags.intersects(SPACERS) && cell.c != ' ').then_some(cell.c);
-            // Kapının kural yarısı tek maske testi; **hangi** çeşit olduğu
-            // kapıdan sonra sorulur (aşağıda). `!hidden` maskenin dışında
-            // değil içinde: dışarıda kalsaydı gizli ve altı çizili bir hücre
-            // kapıdan geçer, aşağıda `None`'a çözülür ve `sink`'e çizilecek
-            // hiçbir şeyi olmadan varırdı.
-            let ruled = !hidden && flags.intersects(RULES);
 
             // Atlama koşulu: ne boyanacak bir arka plan, ne çizilecek bir
             // mürekkep, ne de bir kural çizgisi. Boş grid'de bu koşul her
@@ -5690,6 +5710,28 @@ mod tests {
             (Some(color::linear_rgba(red)), green),
             "{drawn:?}"
         );
+    }
+
+    #[test]
+    fn selecting_empty_space_paints_nothing() {
+        // **Ölçülmüş kusur** (kullanıcı, 2026-09-18): boş ekranda fareyi
+        // sürüklemek koca bir vurgu bloğu doğuruyordu ve o seçim hiçbir şey
+        // kopyalamıyordu — göz "seçtim" derken pano boş geliyordu. İçerik
+        // tabana yaslandığı için (011) blok pencerenin ortasından başlıyor ve
+        // "gözükenin altında ayrı bir alan varmış" gibi okunuyordu.
+        //
+        // Seçim içeriği vurgular, içerik yaratmaz: hiç hücre çizilmemeli.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf 'ab'; sleep 5", Arc::clone(&wake));
+        wait_frame(&session, &wake, |cells| cells.len() == 2);
+
+        // Aralık metni, sağındaki boş kuyruğu **ve** altındaki iki boş satırı
+        // kapsıyor. Çizilen tek şey metnin kendisi olmalı.
+        session.set_selection(at(0, 0, CellHalf::Left), at(10, 2, CellHalf::Right));
+        let mut cells = Vec::new();
+        assert!(frame_if_damaged(&session, |c| cells.push(c)).is_some());
+        let drawn: Vec<_> = cells.iter().map(|c| (c.row, c.col)).collect();
+        assert_eq!(drawn, vec![(0, 0), (0, 1)], "boş hücre boyandı: {cells:?}");
     }
 
     #[test]

@@ -214,6 +214,12 @@ yuvarlanır (`Frame::set_origin_rows`): kaymanın durduğu kare ekranda kalıcı
 kesirli bir piksel bütün metni bulanıklaştırırdı. Ötelemenin tek sahibi
 kare yolu; fare eşlemesi onu `bt_gpu::Origin` ile **encode edilen** değerden
 okur.
+**Seçim içeriği vurgular, içerik yaratmaz**: vurgu yalnız seçim olmasaydı da
+çizilecek hücrelere uygulanıyor, yani boş ekranda fareyi sürüklemek hiçbir şey
+boyamıyor ve gözün gördüğü ile panonun verdiği ayrışmıyor. Ölçüt "mürekkep"
+değil **çizilirlik** — ters videolu bir boşluk (vim'in durum satırı, tmux
+çubuğu) mürekkepsizdir ama görünürdür ve seçilince vurgulanır; varsayılan
+zeminli boş hücre görünmezdir ve seçim onu görünür kılmaz.
 Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app` paketini
 üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
