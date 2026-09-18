@@ -25,7 +25,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use bt_core::{Blocks, Cursor, CursorMotion, DirtyFlag, DockContext, DockState, Session, Theme};
+use bt_core::{
+    Blocks, Cursor, CursorMotion, DirtyFlag, DockContext, DockState, LinearRgba, Session, Theme,
+};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -33,7 +35,8 @@ use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_cl
 use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
 // Yalnız tamamlanma bloğunun GPU damgaları için: `GPUStartTime`/`GPUEndTime`
 // `MTLCommandBuffer` protokolünde ve trait kapsamda olmadan çağrılamaz.
-use objc2_metal::MTLCommandBuffer;
+use objc2_metal::{MTLCommandBuffer, MTLTexture};
+use objc2_quartz_core::CAMetalDrawable;
 use objc2_quartz_core::{
     CACurrentMediaTime, CAMetalDisplayLink, CAMetalDisplayLinkDelegate, CAMetalDisplayLinkUpdate,
 };
@@ -545,7 +548,20 @@ struct LinkIvars {
     /// eklenmez).
     ///
     /// `None` → henüz hiç içerik karesi çizilmedi; o hâlde hareket de yok.
+    ///
+    /// **Caret ızgaranın olmayabilir:** dock devraldığında rengi oradan
+    /// geliyor (`bt_core::Dock::caret_text`). İki kaynağın ortak yanı konuma
+    /// bağlı olmaması, o yüzden ikisi de bu alana yazılıyor
+    /// ([`LinkIvars::last_caret_text`]) ve hareket karesi hangisinin yazdığını
+    /// sormuyor.
     last_cursor: Cell<Option<Cursor>>,
+    /// Caret bloğunun altında kalan metnin rengi, son içerik karesinden.
+    ///
+    /// Hareket karesi `bt-core`'a hiç gitmiyor ve bu değeri oradan alamaz;
+    /// `last_cursor`'ın ikizi ama **iki kaynaklı** — ızgaranın imleci ya da
+    /// dock'un caret'i, hangisi o karede caret'in evi ise. `None` → o karede
+    /// caret yok.
+    last_caret_text: Cell<Option<LinearRgba>>,
     /// Son **çizilen** karenin damgası (`CAMetalDisplayLinkUpdate`'in hedef
     /// sunum anı), `sessiz=` jetonunun tabanı.
     ///
@@ -644,8 +660,8 @@ define_class!(
                 // yani glyph ve kural listeleri hâlâ geçerli. `Term` kilidine
                 // saniyede 120 kez girmek "render yolu bloklanmaz" ile tam
                 // burada kavga ederdi.
-                if let (Some(at), Some(cursor)) = (motion.position(), iv.last_cursor.get()) {
-                    frame.move_cursor(cursor, at, theme.accent_linear(), motion.alpha());
+                if let (Some(at), Some(text)) = (motion.position(), iv.last_caret_text.get()) {
+                    frame.move_caret(at, text, theme.accent_linear(), motion.alpha());
                 }
                 // CPU örneği **yazılmıyor** ve bu bir eksiklik değil:
                 // `cpu_kare` `session.frame`'in kilit beklemesini ölçüyor ve
@@ -754,34 +770,12 @@ define_class!(
             let theme = iv.session.theme();
             iv.theme.set(theme);
             iv.last_cursor.set(Some(cursor));
-            // Sıra zorunlu: önce geçen süre eski hedefe işlenir, sonra yeni
-            // hedef kurulur. Ters sırada `dt` yeni hedefe uygulanır ve imleç
-            // bir kare boyunca gitmediği bir yöne doğru hızlanırdı.
-            motion.advance(dt);
-            motion.sync(
-                cursor.col,
-                cursor.row,
-                origin_target(cursor),
-                cursor.visible,
-                cursor.display_offset,
-                // Geometri bayrağı burada **tüketiliyor**: tüketilmeseydi
-                // bir pencere sürüklemesinden sonraki her kare snap'lerdi.
-                iv.geometry_changed.replace(false),
-            );
-            iv.motion.set(motion);
-            // **Öteleme `sync`'ten sonra** ve bu sıra zorunlu: çizilecek değer
-            // hedef değil animasyonun bu karedeki yeri. `push_cursor`'dan
-            // **önce** olmak da zorunlu — imlecin dikdörtgeni bu ötelemeyi
-            // pişiriyor.
-            self.set_origin(&mut frame, motion.origin());
-            if let Some(at) = motion.position() {
-                frame.push_cursor(cursor, at, theme.accent_linear(), motion.alpha());
-            }
-            // **Dock ızgaradan sonra** ve bu sıra iki kez zorunlu: listeye
-            // girme sırası çizim sırası (dock'un opak zemini kaymanın taşan
-            // alt satırını örtmeli) ve `Frame::clear` ötelemeyi sıfırladığı
-            // için sink'in içinde bir öteleme emsali kullanılamazdı — dock'un
-            // muafiyeti ikinci `setViewport`'la, yani encode'da kuruluyor.
+            // **Dock artık imleçten ÖNCE** ve sıra zorunlu: caret'in hedefi
+            // dock'un caret'ini de sorabilmeli (`Dock::caret`), yani o cevap
+            // `motion.sync`'ten önce elde olmak zorunda. Listeye girme sırası
+            // çizim sırasını **belirlemiyor** — dock'un kendi listeleri ve
+            // kendi encode'u var (`Renderer::encode_pass`), yani sıra orada
+            // sabit ve buradaki sıra yalnız veri bağımlılığı.
             //
             // Ayna her tuş vuruşunda kare istiyor: yük ayrıştırıcıya da
             // ulaşıyor ve alacritty işlenen her bayt için `Event::Wakeup`
@@ -789,6 +783,16 @@ define_class!(
             // oluyor. Dock bu yüzden kendi kare talebini taşımıyor — boşta
             // sıfır kare sözleşmesi dokunulmadan kalıyor.
             let dock_rows = iv.dock_rows.get();
+            // Dock bandının tepesi, **pencere uzayında**: caret'in hedefi de
+            // çizim yuvası da ona bağlı. Yükseklik dokudan okunuyor, çünkü tek
+            // doğru kaynağı o — `rows * cell_h` artık şeridi (yüksekliğin
+            // hücre boyuna bölünmesinden artan piksel) görmezdi ve caret bir
+            // hücreye kadar yukarıda dururdu. `Renderer::encode_dock` viewport
+            // orijinini aynı çıkarmayla kuruyor, yani ikisi aynı satır.
+            let viewport_height = update.drawable().texture().height() as f32;
+            let dock_top = viewport_height - crate::frame::dock_px(dock_rows, iv.cell.get());
+            frame.set_dock_top(dock_top);
+            let mut dock_caret = None;
             if dock_rows > 0 {
                 let mut dock_state = iv.dock.borrow_mut();
                 let mut dock_context = iv.dock_context.borrow_mut();
@@ -797,12 +801,56 @@ define_class!(
                         .dock(iv.cols.get(), &mut dock_state, &mut dock_context, |cell| {
                             frame.push_dock(cell)
                         });
-                if let Some(col) = dock.caret {
-                    frame.push_dock_caret(col, dock.caret_text, theme.accent_linear());
-                }
+                dock_caret = dock.caret.map(|col| (col, dock.caret_text));
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
                 frame.open_dock(dock_rows, dock.ground, dock.separator);
+            }
+            // **Caret'in tek hedefi.** İki ev var ve ikisi de aynı animatöre
+            // giriyor: dock devraldıysa oraya, almadıysa ızgaradaki imlece.
+            // Ayrı animatörler olsaydı dock'ta kayma hiç olmaz, devir de bir
+            // ışınlanma kalırdı — kullanıcının iki ayrı şikâyeti, tek sebep.
+            //
+            // Öncelik dock'ta: `bt-core` caret'in sahibini zaten tek bir
+            // yüklemde kararlaştırıyor (`shell::caret_home`) ve ızgaranın
+            // imlecini o hâlde görünmez veriyor, yani ikisi aynı anda `Some`
+            // olamaz. Yine de sıra yazılı duruyor ki bir gün olursa dock
+            // kazansın — caret'in iki yerde çizilmesindense yanlış yerde
+            // çizilmesi görünür bir kusurdur.
+            let caret = dock_caret
+                .map(|(col, text)| (dock_caret_at(col, dock_top, iv.cell.get()), text))
+                .or_else(|| {
+                    cursor.visible.then(|| {
+                        (
+                            [
+                                f32::from(cursor.col),
+                                f32::from(cursor.row.saturating_add(origin_target(cursor))),
+                            ],
+                            cursor.text,
+                        )
+                    })
+                });
+            iv.last_caret_text.set(caret.map(|(_, text)| text));
+            // Sıra zorunlu: önce geçen süre eski hedefe işlenir, sonra yeni
+            // hedef kurulur. Ters sırada `dt` yeni hedefe uygulanır ve imleç
+            // bir kare boyunca gitmediği bir yöne doğru hızlanırdı.
+            motion.advance(dt);
+            motion.sync(
+                caret.map(|(at, _)| at),
+                origin_target(cursor),
+                cursor.display_offset,
+                // Geometri bayrağı burada **tüketiliyor**: tüketilmeseydi
+                // bir pencere sürüklemesinden sonraki her kare snap'lerdi.
+                iv.geometry_changed.replace(false),
+            );
+            iv.motion.set(motion);
+            // **Öteleme `sync`'ten sonra** ve bu sıra zorunlu: çizilecek değer
+            // hedef değil animasyonun bu karedeki yeri. `push_caret`'ten
+            // **önce** olmak da zorunlu — caret'in dikdörtgeni bu ötelemeyi
+            // pişiriyor.
+            self.set_origin(&mut frame, motion.origin());
+            if let (Some(at), Some((_, text))) = (motion.position(), caret) {
+                frame.push_caret(at, text, theme.accent_linear(), motion.alpha());
             }
             // Birinci aralık burada kapanıyor — `push_cursor`'dan **sonra**:
             // imleci listeye koymak sink işidir, encode değil. Damga bir satır
@@ -951,6 +999,23 @@ fn origin_target(cursor: Cursor) -> u16 {
     cursor.rows.saturating_sub(cursor.content_rows)
 }
 
+/// Dock caret'inin hedefi, **ekran hücresi** cinsinden — [`Motion`]'ın uzayı.
+///
+/// Dikey bileşen tam sayı **değil** ve olamaz: dock bandı nefes payı kadar
+/// aşağıdan başlıyor ve bandın kendisi de ızgaranın hücre ızgarasına oturmuyor
+/// (yükseklik hücre boyuna tam bölünmediğinde aradaki artık şerit dock ile
+/// içerik arasında kalıyor, `Renderer::encode_dock`). Kesirli hedef bu yüzden
+/// bir kaçamak değil doğru cevap.
+///
+/// **Neden piksel değil de hücre:** `Motion`'ın yay sabitleri ve durma eşiği
+/// hücre biriminde ayarlı. Uzayı piksele çevirmek o eşiği sessizce değiştirir
+/// ve animasyonun hissi ölçülmemiş bir sayıya bağlanırdı.
+fn dock_caret_at(col: u16, dock_top_px: f32, cell: CellMetrics) -> [f32; 2] {
+    let cell_h = f32::from(cell.cell_px().1);
+    let pad = f32::from(cell.gutter_px());
+    [f32::from(col), (dock_top_px + pad) / cell_h]
+}
+
 /// Ekranın tazeleme ritmine bağlı kare sürücüsü.
 ///
 /// Sahiplik zinciri: bu yapı link'i ve delegate'i tutar, delegate `Session`'ı
@@ -1090,6 +1155,7 @@ impl DisplayLink {
                 // tek yer içerik karesi — o da temayı tazeliyor.
                 theme: Cell::new(theme),
                 last_cursor: Cell::new(None),
+                last_caret_text: Cell::new(None),
             },
         );
         link.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -1373,6 +1439,28 @@ impl Drop for DisplayLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dock_caret_target_lands_on_the_band_not_the_grid_row() {
+        // **Kesirli hedef bir kaçamak değil, doğru cevap.** Dock bandı iki
+        // yerden ızgaranın hücre ızgarasından kayıyor: nefes payı kadar
+        // aşağıdan başlıyor ve bandın kendisi de pencerenin yüksekliği hücre
+        // boyuna tam bölünmediğinde artan şeridin altında duruyor. Hedefi tam
+        // sayıya yuvarlasaydık caret bir hücreye kadar yukarıda dururdu.
+        let cell = CellMetrics::new(9, 18, 8).expect("ölçü");
+        // 600 px pencere, iki satırlık dock: 2×18 satır + 2×8 dış pay +
+        // 1×4 satır arası = 56, yani band 544'te başlıyor.
+        let dock_top = 600.0 - crate::frame::dock_px(2, cell);
+        assert_eq!(dock_top, 544.0);
+
+        let [col, row] = dock_caret_at(3, dock_top, cell);
+        assert_eq!(col, 3.0, "sütun ızgarayla aynı uzayda");
+        // Caret bandın **ilk satırında**, yani dış payın altında: (544+8)/18.
+        assert_eq!(row, 552.0 / 18.0);
+        // Ve o satır ızgaranın son satırının (548/18 = 30.4) **altında**:
+        // yuvarlansaydı ikisi çakışırdı.
+        assert!(row > dock_top / 18.0, "caret banda inmedi");
+    }
 
     #[test]
     fn stopped_gate_does_not_reopen_on_visibility() {

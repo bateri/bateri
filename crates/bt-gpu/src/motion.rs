@@ -304,13 +304,16 @@ impl Motion {
     /// bitince atlardı — hiçbir sayaç görmeyen bir kusur, çünkü hareket
     /// karesi de kare de doğru sayıda.
     ///
-    /// **`row` grid satırı, hedef ekran satırı.** İkisini `origin_rows`
-    /// ayırıyor ve toplama burada yapılıyor, çağıranda değil: imlecin
-    /// ötelemeden **muaf** olması bu setin R2.1'i ve iki yerde yazılsaydı
-    /// ayrışabilirdi. Toplam her zaman ızgaranın içinde —
-    /// `content_rows > cursor_row` olduğu için `row + (rows - content_rows)`
-    /// en çok `rows - 1` — ama `saturating_add` dejenere bir kareyi de
-    /// sarmadan geçiriyor.
+    /// **Hedef `at`, ekran hücresi cinsinden ve çağıran hesaplıyor.** Eskiden
+    /// imza `(col, row, origin_rows)` alıp toplamı burada yapıyordu; artık
+    /// caret'in **iki evi** var (ızgara ve dock) ve dock'un satırı bir tam
+    /// sayı değil — dock nefes payı kadar aşağıdan başlıyor, yani hedef
+    /// kesirli. Tek animatörün iki evi olması bu setin 9. phase'i: caret
+    /// ızgarada yazarken süzülüyorsa dock'ta da süzülmeli ve ikisi arasında
+    /// da — üç ayrı davranış değil, tek bir hareket.
+    ///
+    /// `None` → hiçbir evde caret yok (imleci gizleyen program, dock'suz ve
+    /// görünmez imleç); durum düşüyor.
     ///
     /// **Öteleme `visible`'dan önce ve koşulsuz kuruluyor.** İmleci gizleyen
     /// bir program (vim değil, `tput civis` ile çalışan bir betik) çıktı
@@ -319,10 +322,8 @@ impl Motion {
     /// veremez.
     pub(crate) fn sync(
         &mut self,
-        col: u16,
-        row: u16,
+        at: Option<[f32; 2]>,
         origin_rows: u16,
-        visible: bool,
         offset: i32,
         geometry: bool,
     ) {
@@ -333,15 +334,14 @@ impl Motion {
         // var ([`Motion::sync_origin`]). `docs/AYARLAR.md`'nin "Izgaranın başka
         // sebeple yer değiştirmesi kaymaz" maddesi bu iki tetik.
         self.sync_origin(f32::from(origin_rows), scrolled || geometry);
-        if !visible {
+        let Some(target) = at else {
             self.state = None;
             return;
-        }
+        };
         // Guard'dan **önce** okunuyor: `self.state`'in ödüncü altında ikinci
         // bir alanı okumak match guard'ında kabul edilmiyor.
         let mode = self.mode();
         let animated = mode != Mode::Snap;
-        let target = [f32::from(col), f32::from(row.saturating_add(origin_rows))];
         match &mut self.state {
             Some(state) if animated && !scrolled && !geometry => {
                 if state.target != target {
@@ -870,9 +870,9 @@ mod tests {
         let mut motion = Motion::default();
         motion.set_style(style);
         // İlk `sync` snap: durum yok.
-        motion.sync(0, 0, 0, true, 0, false);
+        motion.sync(Some([0.0, 0.0]), 0, 0, false);
         assert!(motion.settled(), "ilk kare animasyon başlattı");
-        motion.sync(10, 4, 0, true, 0, false);
+        motion.sync(Some([10.0, 4.0]), 0, 0, false);
         motion
     }
 
@@ -895,14 +895,61 @@ mod tests {
     }
 
     #[test]
+    fn the_handover_to_the_dock_is_one_animation_not_two() {
+        // **Kullanıcının iki şikâyeti, tek sebep** (012 phase-9): `sleep 5`
+        // bitince caret dock'a *ışınlanıyordu* ve dock'ta yazarken sağa sola
+        // hiç kaymıyordu. İkisi de dock caret'inin animatöre hiç uğramamasından
+        // geliyordu; artık iki ev de aynı hedefin iki değeri.
+        let mut motion = moving();
+        motion.finish();
+        assert!(motion.settled(), "kurulum yerleşmedi");
+
+        // Dock ızgaranın **altında** ve hedefi kesirli: nefes payı hücre
+        // ızgarasına oturmuyor.
+        motion.sync(Some([2.0, 12.4]), 0, 0, false);
+        assert!(!motion.settled(), "devir animasyon başlatmadı: ışınlanma");
+        let steps = run_to_rest(&mut motion, TICK);
+        assert!(steps > 1, "devir tek karede bitti: {steps}");
+        assert_eq!(motion.position(), Some([2.0, 12.4]), "devir hedefe varmadı");
+
+        // Dock'un **içinde** yazmak da aynı animasyon: sütun değişiyor, satır
+        // değişmiyor. Eskiden bu hiç hareket üretmiyordu.
+        motion.sync(Some([3.0, 12.4]), 0, 0, false);
+        assert!(!motion.settled(), "dock'ta yazarken caret kaymadı");
+        run_to_rest(&mut motion, TICK);
+        assert_eq!(motion.position(), Some([3.0, 12.4]));
+    }
+
+    #[test]
+    fn the_handover_snaps_when_motion_is_off() {
+        // Devir üçüncü bir kip doğurmuyor: `snap` onu da anında oturtuyor,
+        // yoksa hareketi kapatmış kullanıcıya animasyon **eklemiş** olurduk.
+        let mut motion = moving_with(CursorMotion::Snap);
+        motion.sync(Some([2.0, 12.4]), 0, 0, false);
+        assert!(motion.settled(), "snap stilinde devir animasyon başlattı");
+        assert_eq!(motion.position(), Some([2.0, 12.4]));
+    }
+
+    #[test]
+    fn a_caretless_frame_drops_the_state_wherever_it_was() {
+        // `None` "hiçbir evde caret yok" demek: imleci gizleyen program ya da
+        // ayna gösterilemiyorken dock'suz pencere. Durum düşmeli, yoksa
+        // caret'siz bir karede eski blok ekranda asılı kalırdı.
+        let mut motion = moving();
+        motion.sync(None, 0, 0, false);
+        assert!(motion.settled());
+        assert_eq!(motion.position(), None);
+    }
+
+    #[test]
     fn every_start_settles_in_finite_steps() {
         // Durma koşulunun kendisi: hangi mesafeden başlarsa başlasın sonlu
         // adımda duruyor. Bu sınama olmadan "boşta sıfır kare" sözleşmesi
         // yalnız bir yorum cümlesi olurdu.
         for (col, row) in [(1, 0), (0, 1), (200, 60), (10, 4)] {
             let mut motion = Motion::default();
-            motion.sync(0, 0, 0, true, 0, false);
-            motion.sync(col, row, 0, true, 0, false);
+            motion.sync(Some([0.0, 0.0]), 0, 0, false);
+            motion.sync(Some([col as f32, row as f32]), 0, 0, false);
             assert!(!motion.settled(), "hedef değişimi animasyon başlatmadı");
             let frames = run_to_rest(&mut motion, TICK);
             assert!(
@@ -911,7 +958,7 @@ mod tests {
             );
             assert_eq!(
                 motion.position(),
-                Some([f32::from(col), f32::from(row)]),
+                Some([col as f32, row as f32]),
                 "yerleşen imleç tam hücreye oturmadı"
             );
         }
@@ -957,7 +1004,7 @@ mod tests {
         let before = motion.state.expect("uçuşta").vel;
         assert!(before[0] > 0.0, "hiç hızlanmadı: {before:?}");
 
-        motion.sync(20, 4, 0, true, 0, false);
+        motion.sync(Some([20.0, 4.0]), 0, 0, false);
         let after = motion.state.expect("uçuşta").vel;
         assert_eq!(after, before, "retarget hızı sıfırladı");
         assert_eq!(
@@ -974,8 +1021,8 @@ mod tests {
         // uzun bir sıçramanın ortasındaki küçük bir düzeltme hedefin ötesine
         // taşırdı — kırpma olmadan ölçülen en kötü hâl 0,87 hücreydi.
         let mut motion = Motion::default();
-        motion.sync(0, 0, 0, true, 0, false);
-        motion.sync(10, 0, 0, true, 0, false);
+        motion.sync(Some([0.0, 0.0]), 0, 0, false);
+        motion.sync(Some([10.0, 0.0]), 0, 0, false);
         for _ in 0..6 {
             motion.advance(TICK);
         }
@@ -1017,8 +1064,8 @@ mod tests {
         // sonunda görünür bir snap olurdu — ve hiçbir sayaç görmezdi.
         for distance in [200u16, 400] {
             let mut motion = Motion::default();
-            motion.sync(0, 0, 0, true, 0, false);
-            motion.sync(distance, 0, 0, true, 0, false);
+            motion.sync(Some([0.0, 0.0]), 0, 0, false);
+            motion.sync(Some([distance as f32, 0.0]), 0, 0, false);
             let frames = run_to_rest(&mut motion, TICK);
             let elapsed = motion.state.expect("yerleşti").elapsed;
             assert!(
@@ -1037,7 +1084,7 @@ mod tests {
             motion.advance(TICK);
         }
         let elapsed = motion.state.expect("uçuşta").elapsed;
-        motion.sync(10, 4, 0, true, 0, false);
+        motion.sync(Some([10.0, 4.0]), 0, 0, false);
         assert_eq!(motion.state.expect("uçuşta").elapsed, elapsed);
     }
 
@@ -1064,12 +1111,12 @@ mod tests {
         let mut motion = moving();
         run_to_rest(&mut motion, TICK);
 
-        motion.sync(10, 7, 0, true, 3, false);
+        motion.sync(Some([10.0, 7.0]), 0, 3, false);
         assert!(motion.settled(), "kaydırma animasyon başlattı");
         assert_eq!(motion.position(), Some([10.0, 7.0]));
 
         // Aynı satır değişimi ofset **sabitken** animasyonlu.
-        motion.sync(10, 4, 0, true, 3, false);
+        motion.sync(Some([10.0, 4.0]), 0, 3, false);
         assert!(!motion.settled(), "imlecin kendi hareketi snap'ledi");
     }
 
@@ -1088,7 +1135,7 @@ mod tests {
 
         // Örtülme kalkınca gelen içerik karesi aynı hedefi bildiriyor:
         // animasyon yeniden başlamamalı.
-        motion.sync(10, 4, 0, true, 0, false);
+        motion.sync(Some([10.0, 4.0]), 0, 0, false);
         assert!(motion.settled(), "görünürlük dönüşü animasyon başlattı");
     }
 
@@ -1096,16 +1143,16 @@ mod tests {
     fn geometry_and_visibility_snap() {
         // Geometri: pencere/font/zoom oynadı, ızgara kaydı.
         let mut motion = moving();
-        motion.sync(3, 1, 0, true, 0, true);
+        motion.sync(Some([3.0, 1.0]), 0, 0, true);
         assert!(motion.settled(), "geometri animasyon başlattı");
         assert_eq!(motion.position(), Some([3.0, 1.0]));
 
         // Görünmezlik durumu boşaltır; geri açılan imleç yeni yerinde doğar.
         // TUI'ler tam bunu yapıyor: çizerken imleci gizleyip taşıyorlar.
-        motion.sync(3, 1, 0, false, 0, false);
+        motion.sync(None, 0, 0, false);
         assert!(motion.settled());
         assert_eq!(motion.position(), None, "görünmez imleç konum verdi");
-        motion.sync(40, 20, 0, true, 0, false);
+        motion.sync(Some([40.0, 20.0]), 0, 0, false);
         assert!(motion.settled(), "görünürlük dönüşü animasyon başlattı");
         assert_eq!(motion.position(), Some([40.0, 20.0]));
     }
@@ -1121,9 +1168,9 @@ mod tests {
 
         // Uçuşun her ihtimali: uzak sıçrama, tek hücre, aynı hücre.
         for (col, row) in [(400, 0), (11, 4), (11, 4), (0, 0)] {
-            motion.sync(col, row, 0, true, 0, false);
+            motion.sync(Some([col as f32, row as f32]), 0, 0, false);
             assert!(motion.settled(), "({col},{row}) snap'te animasyon başlattı");
-            assert_eq!(motion.position(), Some([f32::from(col), f32::from(row)]));
+            assert_eq!(motion.position(), Some([col as f32, row as f32]));
         }
     }
 
@@ -1133,8 +1180,8 @@ mod tests {
         // Yay 1 hücrede ~230 ms, 400 hücrede ~460 ms harcıyor (`OMEGA`).
         for (col, row) in [(1, 0), (200, 60), (10, 4)] {
             let mut motion = moving_with(CursorMotion::Ease);
-            motion.sync(0, 0, 0, true, 0, true);
-            motion.sync(col, row, 0, true, 0, false);
+            motion.sync(Some([0.0, 0.0]), 0, 0, true);
+            motion.sync(Some([col as f32, row as f32]), 0, 0, false);
             assert!(!motion.settled(), "hedef değişimi animasyon başlatmadı");
             let frames = run_to_rest(&mut motion, TICK);
             let expected = (EASE_DURATION / TICK).ceil() as u32;
@@ -1144,7 +1191,7 @@ mod tests {
             );
             assert_eq!(
                 motion.position(),
-                Some([f32::from(col), f32::from(row)]),
+                Some([col as f32, row as f32]),
                 "yerleşen imleç tam hücreye oturmadı"
             );
         }
@@ -1266,9 +1313,9 @@ mod tests {
     fn fading() -> Motion {
         let mut motion = Motion::default();
         motion.set_reduce(true);
-        motion.sync(0, 0, 0, true, 0, false);
+        motion.sync(Some([0.0, 0.0]), 0, 0, false);
         assert!(motion.settled(), "ilk kare belirme başlattı");
-        motion.sync(10, 4, 0, true, 0, false);
+        motion.sync(Some([10.0, 4.0]), 0, 0, false);
         motion
     }
 
@@ -1302,7 +1349,7 @@ mod tests {
         for (col, row) in [(1u16, 0u16), (200, 60)] {
             let mut motion = fading();
             run_to_rest(&mut motion, TICK);
-            motion.sync(col, row, 0, true, 0, false);
+            motion.sync(Some([col as f32, row as f32]), 0, 0, false);
             let frames = run_to_rest(&mut motion, TICK);
             assert_eq!(
                 frames,
@@ -1323,19 +1370,19 @@ mod tests {
         run_to_rest(&mut motion, TICK);
 
         // Kaydırma, geometri ve görünürlük dönüşü: üçü de anında ve opak.
-        motion.sync(10, 7, 0, true, 3, false);
+        motion.sync(Some([10.0, 7.0]), 0, 3, false);
         assert!(motion.settled(), "kaydırma belirme başlattı");
         assert_eq!(motion.alpha(), 1.0);
-        motion.sync(3, 1, 0, true, 3, true);
+        motion.sync(Some([3.0, 1.0]), 0, 3, true);
         assert!(motion.settled(), "geometri belirme başlattı");
         assert_eq!(motion.alpha(), 1.0);
-        motion.sync(3, 1, 0, false, 3, false);
-        motion.sync(40, 20, 0, true, 3, false);
+        motion.sync(None, 0, 3, false);
+        motion.sync(Some([40.0, 20.0]), 0, 3, false);
         assert!(motion.settled(), "görünürlük dönüşü belirme başlattı");
         assert_eq!(motion.alpha(), 1.0);
 
         // Aynı hücreye yeniden hedefleme de belirme değil.
-        motion.sync(40, 20, 0, true, 3, false);
+        motion.sync(Some([40.0, 20.0]), 0, 3, false);
         assert!(motion.settled(), "yerinde duran imleç belirdi");
     }
 
@@ -1347,8 +1394,8 @@ mod tests {
         let mut motion = Motion::default();
         motion.set_style(CursorMotion::Snap);
         motion.set_reduce(true);
-        motion.sync(0, 0, 0, true, 0, false);
-        motion.sync(10, 4, 0, true, 0, false);
+        motion.sync(Some([0.0, 0.0]), 0, 0, false);
+        motion.sync(Some([10.0, 4.0]), 0, 0, false);
         assert!(motion.settled(), "snap + reduce animasyon başlattı");
         assert_eq!(motion.position(), Some([10.0, 4.0]));
         assert_eq!(motion.alpha(), 1.0, "snap imleci yarı saydam çizildi");
@@ -1386,7 +1433,7 @@ mod tests {
         for _ in 0..30 {
             motion.advance(TICK);
             col += 1;
-            motion.sync(col, 4, 0, true, 0, false);
+            motion.sync(Some([col as f32, 4.0]), 0, 0, false);
         }
         assert_eq!(
             motion.alpha(),
@@ -1395,14 +1442,14 @@ mod tests {
             motion.alpha()
         );
         // Konum her zaman hedefte: belirme kaymıyor.
-        assert_eq!(motion.position(), Some([f32::from(col), 4.0]));
+        assert_eq!(motion.position(), Some([col as f32, 4.0]));
         // Ve yerleşiyor — link bu imleç için sonsuza uyanık kalmıyor.
         assert!(motion.settled(), "belirme yerleşmedi");
 
         // Akışın içindeki bir sonraki hareket de belirmeyi tazelemiyor:
         // 90 ms'de bir yeniden belirmek ~11 Hz'de bir titreme demekti.
         motion.advance(TICK);
-        motion.sync(col + 1, 4, 0, true, 0, false);
+        motion.sync(Some([(col + 1) as f32, 4.0]), 0, 0, false);
         assert_eq!(
             motion.alpha(),
             1.0,
@@ -1415,7 +1462,7 @@ mod tests {
         // de buraya düşüyor — `dt` `DT_MAX`'e kırpılıyor ve kırpma belirmeden
         // uzun (dosya başındaki `const _`).
         motion.advance(DT_MAX);
-        motion.sync(col + 2, 4, 0, true, 0, false);
+        motion.sync(Some([(col + 2) as f32, 4.0]), 0, 0, false);
         assert_eq!(
             motion.alpha(),
             0.0,
@@ -1535,9 +1582,9 @@ mod tests {
     /// 29 — dipteki satır.
     fn after_enter() -> Motion {
         let mut motion = Motion::default();
-        motion.sync(0, 2, 27, true, 0, false);
+        motion.sync(Some([0.0, 29.0]), 27, 0, false);
         assert!(motion.settled(), "ilk kare animasyon başlattı");
-        motion.sync(0, 3, 26, true, 0, false);
+        motion.sync(Some([0.0, 29.0]), 26, 0, false);
         motion
     }
 
@@ -1585,7 +1632,7 @@ mod tests {
         // Ve yerleşen kayma bir daha uyanmıyor: aynı hedefi bildiren içerik
         // kareleri (renk değişimi, imleç yanıp sönmesi) kaymayı yeniden
         // başlatmamalı.
-        motion.sync(0, 3, 26, true, 0, false);
+        motion.sync(Some([0.0, 29.0]), 26, 0, false);
         assert!(motion.settled(), "aynı hedef kaymayı yeniden başlattı");
     }
 
@@ -1600,21 +1647,21 @@ mod tests {
 
         // vim'e giriş: doluluk bir hamlede `rows`'a fırlıyor, öteleme 0'a
         // **düşüyor** — arayüz süzülerek geliyor ve bu isteniyor.
-        motion.sync(0, 0, 0, true, 0, false);
+        motion.sync(Some([0.0, 0.0]), 0, 0, false);
         assert!(!motion.origin_settled(), "büyüyen içerik snap'lendi");
         run_to_rest(&mut motion, TICK);
         assert_eq!(motion.origin(), 0.0);
 
         // vim'den çıkış: doluluk daralıyor, öteleme **yükseliyor** — kabuk
         // aşağı süzülmüyor, anında yerine oturuyor.
-        motion.sync(0, 3, 26, true, 0, false);
+        motion.sync(Some([0.0, 29.0]), 26, 0, false);
         assert!(motion.origin_settled(), "daralan içerik kaydı");
         assert_eq!(motion.origin(), 26.0);
 
         // Dolu ekranda `clear` aynı sınıf: öteleme tepeden dibe yükseliyor.
-        motion.sync(0, 0, 0, true, 0, false);
+        motion.sync(Some([0.0, 0.0]), 0, 0, false);
         run_to_rest(&mut motion, TICK);
-        motion.sync(0, 0, 29, true, 0, false);
+        motion.sync(Some([0.0, 29.0]), 29, 0, false);
         assert!(motion.origin_settled(), "clear kayarak indi");
         assert_eq!(motion.origin(), 29.0);
     }
@@ -1628,17 +1675,17 @@ mod tests {
         let mut motion = after_enter();
         run_to_rest(&mut motion, TICK);
 
-        motion.sync(0, 3, 20, true, 1, false);
+        motion.sync(Some([0.0, 23.0]), 20, 1, false);
         assert!(motion.settled(), "kaydırma kayma başlattı");
         assert_eq!(motion.origin(), 20.0);
 
-        motion.sync(0, 3, 10, true, 1, true);
+        motion.sync(Some([0.0, 13.0]), 10, 1, true);
         assert!(motion.settled(), "geometri kayma başlattı");
         assert_eq!(motion.origin(), 10.0);
 
         // Ama ofset **sabitken** aynı değişim kayıyor: snap'i doğuran şey
         // hedefin kendisi değil, ızgaranın başka bir sebeple oynaması.
-        motion.sync(0, 3, 9, true, 1, false);
+        motion.sync(Some([0.0, 12.0]), 9, 1, false);
         assert!(!motion.origin_settled(), "içerik büyümesi snap'ledi");
     }
 
@@ -1650,7 +1697,7 @@ mod tests {
         let mut motion = after_enter();
         run_to_rest(&mut motion, TICK);
 
-        motion.sync(0, 4, 25, false, 0, false);
+        motion.sync(None, 25, 0, false);
         assert_eq!(motion.position(), None, "görünmez imleç konum verdi");
         assert!(
             !motion.origin_settled(),
@@ -1671,7 +1718,12 @@ mod tests {
         let mut previous = 26u16;
         for origin in [26u16, 27, 25, 27, 26] {
             motion.advance(TICK);
-            motion.sync(0, 29 - origin, origin, true, 0, false);
+            motion.sync(
+                Some([0 as f32, (29 - origin + origin) as f32]),
+                origin,
+                0,
+                false,
+            );
             // İddia **yerleşmektir**, kaç kare koştuğu değil: yön kuralından
             // beri salınımın iki yarısı iki yoldan geçiyor — daralan yön
             // (hedef yükseliyor) hiç kare koşmadan oturuyor, büyüyen yön
@@ -1697,12 +1749,12 @@ mod tests {
         // kuralı yerinde — **yer** aynı, **kip** iki.
         let mut motion = Motion::default();
         motion.set_reduce(true);
-        motion.sync(0, 2, 27, true, 0, false);
+        motion.sync(Some([0.0, 29.0]), 27, 0, false);
         // İmleç **sütun da** değiştiriyor: Enter'da ekran satırı hiç
         // oynamadığı için (R2.1) tek başına bir satır ilerlemesi belirme de
         // doğurmaz — sınamanın iki kipi ayırt edebilmesi için imlecin
         // gerçekten yer değiştirmesi gerek.
-        motion.sync(5, 3, 26, true, 0, false);
+        motion.sync(Some([5.0, 29.0]), 26, 0, false);
         assert_eq!(motion.origin(), 26.0, "öteleme belirmeye kalktı");
         assert!(motion.origin_settled(), "öteleme kaydı");
         // İmleç ise belirmenin içinde: aynı karede iki ayrı kip.
@@ -1725,8 +1777,8 @@ mod tests {
         // duruyor — `docs/AYARLAR.md` onu yazıyor.
         let mut motion = Motion::default();
         motion.set_style(CursorMotion::Snap);
-        motion.sync(0, 2, 27, true, 0, false);
-        motion.sync(0, 3, 26, true, 0, false);
+        motion.sync(Some([0.0, 29.0]), 27, 0, false);
+        motion.sync(Some([0.0, 29.0]), 26, 0, false);
         assert!(motion.settled(), "snap kayma başlattı");
         assert_eq!(motion.origin(), 26.0);
 
@@ -1785,8 +1837,8 @@ mod tests {
         // zaten snap olduğu için belirti yok, ama ters yönde (gizliyken
         // kaydırma **olmadığında**) yanlış snap üretirdi.
         let mut motion = Motion::default();
-        motion.sync(0, 0, 0, false, 5, false);
-        motion.sync(0, 0, 0, true, 5, false);
+        motion.sync(None, 0, 5, false);
+        motion.sync(Some([0.0, 0.0]), 0, 5, false);
         assert_eq!(motion.offset, Some(5));
     }
 }

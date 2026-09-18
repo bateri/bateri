@@ -17,7 +17,7 @@
 use std::mem::offset_of;
 
 use bt_atlas::{Face, RuleKind};
-use bt_core::{Block, Cell, Cursor, LinearRgba, UnderlineStyle};
+use bt_core::{Block, Cell, LinearRgba, UnderlineStyle};
 
 use crate::renderer::CellMetrics;
 
@@ -102,28 +102,26 @@ pub(crate) struct CursorBlock {
 const _: () = assert!(size_of::<CursorBlock>() == 32);
 const _: () = assert!(offset_of!(CursorBlock, rgba) == 16);
 
-impl CursorBlock {
-    /// Dikdörtgeni dikey olarak kaydırır — **dock'un caret'i için**.
-    ///
-    /// Alan eklemeden: dikdörtgen fragment'in `[[position]]`'ı ile
-    /// karşılaştırılıyor ve o koordinat viewport dönüşümünden **sonraki**,
-    /// yani her zaman ekranın uzayı. Dock'un listeleri ise kendi uzayında
-    /// (satır 0 = dock'un tepesi) doğuyor ve onları ekrana taşıyan şey ikinci
-    /// `setViewport`. İki uzayı birleştiren tek satır bu: dikdörtgen
-    /// viewport'tan geçmediği için ötelemeyi **CPU'da** alıyor.
-    ///
-    /// Izgaranın imleci bunun tam tersini yapıyor ([`Frame::push_cursor`]):
-    /// orada dikdörtgen ekran satırında doğuyor ve ötelemeyi **instance**
-    /// geri veriyor. Asimetri değil aynı kuralın iki yüzü — hangi tarafın
-    /// viewport'tan geçtiği neyin düzeltileceğini belirliyor.
-    ///
-    /// Dejenere dikdörtgen (görünmez caret) kaydırılınca da dejenere kalır:
-    /// `0 + dy >= 0 + dy` hiçbir fragment için doğru değil.
-    pub(crate) fn shifted_y(self, dy: f32) -> Self {
-        let [x0, y0, x1, y1] = self.rect;
-        Self {
-            rect: [x0, y0 + dy, x1, y1 + dy],
-            ..self
+/// Caret'in bu karedeki instance'ı: yeri ve rengi.
+///
+/// Ayrı bir tip, çünkü caret'in **iki yuvası** var (ızgara ve dock) ve ikisi
+/// de aynı veriyi taşıyor; iki `Option<Instance>` tutmak `size`'ı iki kez
+/// yazmak olurdu. Hücre boyu `Frame`'in kendi alanı, o yüzden burada yok.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Caret {
+    /// Sol üst köşe, **pencere uzayında** piksel.
+    at: [f32; 2],
+    /// Bloğun rengi; alfa belirme kipinde pişmiş olarak geliyor.
+    rgba: [f32; 4],
+}
+
+impl Caret {
+    /// Instance'a çevirir; hücre boyunu çağıran veriyor.
+    fn instance(self, cell_px: (f32, f32)) -> Instance {
+        Instance {
+            pos: self.at,
+            size: [cell_px.0, cell_px.1],
+            rgba: self.rgba,
         }
     }
 }
@@ -335,6 +333,20 @@ pub(crate) struct Frame {
     /// ikisi birlikte tazelenir. Ayrı bir sabitten okunsaydı `cols` hesabıyla
     /// ayrışabilirdi — üçünün tek kaynağı olması 010 Karar 3'ün şartı.
     gutter_px: f32,
+    /// Dock bandının tepesi, **pencere uzayında piksel**; dock yoksa
+    /// sonsuz (caret hiçbir zaman dock yuvasına düşmez).
+    ///
+    /// Çağıran yazıyor ([`Frame::set_dock_top`]), çünkü dokunun boyunu bilen
+    /// tek yer kare yolu; `Frame` listelerin uzayını biliyor, pencereninkini
+    /// değil ([`Frame::dock_ground`]'un genişliği argüman almasıyla aynı
+    /// gerekçe).
+    dock_top_px: f32,
+    /// Caret'in ızgara yuvası: ızgaranın arka planlarından sonra, glyph'lerinden
+    /// önce çizilir.
+    grid_caret: Option<Caret>,
+    /// Caret'in dock yuvası: dock'un opak zemininden sonra çizilir, yani her
+    /// şeyin üstünde.
+    dock_caret: Option<Caret>,
     /// Izgaranın dikey orijini, piksel: içerik bu kadar **aşağıdan** başlar.
     ///
     /// `gutter_px`'in dikey ikizi ama **listelere işlenmiyor**:
@@ -389,7 +401,6 @@ pub(crate) struct Frame {
     /// Dock'un caret'i; ızgaranınkiyle **aynı uniform slot'u**, ayrı encode
     /// çağrısı. Shader değişmiyor — [`CursorBlock`]'a alan eklemek iki
     /// taraftaki `stride 32` assert'ini kırardı.
-    dock_cursor: CursorBlock,
     /// Çizilen **arka plan** instance'ı sayısı; imleç sayılmaz.
     ///
     /// `make duman`'ın `hucre=K` jetonu bunu okur: sink'in hücre ürettiğinin
@@ -424,14 +435,19 @@ impl Frame {
         self.dock_bg.clear();
         self.dock_glyphs.clear();
         self.dock_rules.clear();
-        self.dock_cursor = CursorBlock::default();
-        // Dikdörtgen de sıfırlanmalı: kalsaydı imlecin sönmesi (`\e[?25l`) ya
-        // da geçmişe kayması bloğu ekrandan kaldırır ama **altındaki metnin
-        // rengini** eski yerinde bırakırdı — zemin renginde bir harf, yani
-        // görünmez bir hücre.
-        self.cursor = CursorBlock::default();
+        // Dikdörtgen de sıfırlanıyor ([`Frame::clear_caret`]): kalsaydı
+        // imlecin sönmesi (`\e[?25l`) ya da geçmişe kayması bloğu ekrandan
+        // kaldırır ama **altındaki metnin rengini** eski yerinde bırakırdı —
+        // zemin renginde bir harf, yani görünmez bir hücre.
+        self.clear_caret();
         self.cell_px = (f32::from(cell_px.0), f32::from(cell_px.1));
         self.gutter_px = f32::from(metrics.gutter_px());
+        // **Sonsuz**, sıfır değil: sıfır "dock bandı pencerenin tepesinde"
+        // demek olurdu ve her caret dock yuvasına düşerdi. Çağıran her içerik
+        // karesinde üstüne yazıyor ([`Frame::set_dock_top`]); hareket karesi
+        // `clear` çağırmadığı için değeri **koruyor** ve caret'in yuva kararı
+        // animasyon boyunca aynı bandı görüyor.
+        self.dock_top_px = f32::INFINITY;
         // Orijin **sıfırlanıyor**, geometriden gelmiyor: kaynağı bu karenin
         // doluluk sayısı ve o ancak sink döngüsü bitince biliniyor. Sıfırda
         // bırakmak "bu kare daha söylemedi" demek ve söylemeyen bir kare
@@ -587,38 +603,44 @@ impl Frame {
     /// henüz görünmeyen bir bloğun rengine boyanırdı — zeminin üstünde zemin
     /// renginde bir harf, yani okunmayan bir hücre. Belirme dışında `1.0`,
     /// yani bu yol her kare aynı iki değeri taşıyor.
-    pub(crate) fn push_cursor(
+    pub(crate) fn push_caret(
         &mut self,
-        cursor: Cursor,
         at: [f32; 2],
+        text: LinearRgba,
         rgba: LinearRgba,
         alpha: f32,
     ) {
-        if !cursor.visible {
-            return;
-        }
         let pos = self.pos_at(at);
-        // **Instance ötelemeyi geri veriyor, dikdörtgen hiç almıyor** ve bu bir
-        // asimetri değil iki ayrı uzay: instance vertex aşamasından, yani
-        // `setViewport`'tan geçiyor ve ötelemeyi GPU'da **geri alıyor**; rect
-        // ise fragment'in `[[position]]`'ı ile karşılaştırılıyor ve o koordinat
-        // dönüşümden **sonraki**, yani zaten ekran koordinatı. `at` ekran
-        // satırı olduğu için ikisi de aynı piksele düşüyor: instance
-        // `pos − origin` çizilip viewport'ta `+ origin` alıyor, rect `pos`.
-        //
-        // Çıkarma unutulursa imleç öteleme kadar aşağıda çizilir; ekleme
-        // unutulursa (rect'e öteleme konursa) altındaki metnin rengi başka bir
-        // satıra düşer: orada zemin renginde bir harf, yani görünmez bir hücre.
-        self.bg.push(Instance {
-            pos: [pos[0], pos[1] - self.origin_px],
-            size: [self.cell_px.0, self.cell_px.1],
-            rgba: with_alpha(rgba, alpha),
-        });
         let top = pos[1];
+        // **Dikdörtgen pencere uzayında ve iki glyph encode'una da gidiyor.**
+        // Fragment'in `[[position]]`'ı ile karşılaştırılıyor ve o koordinat
+        // viewport dönüşümünden **sonraki**, yani hem ızgaranın hem dock'un
+        // glyph'leri için aynı uzay. `at` ekran satırı olduğu için çevirme
+        // gerekmiyor — eskiden dock'un kendi dikdörtgeni vardı ve encode onu
+        // `shifted_y` ile taşıyordu; tek caret o çeviriyi büsbütün kaldırdı.
         self.cursor = CursorBlock {
             rect: [pos[0], top, pos[0] + self.cell_px.0, top + self.cell_px.1],
-            rgba: with_alpha(cursor.text, alpha),
+            rgba: with_alpha(text, alpha),
         };
+        // **Yuva seçimi boyacı algoritmasının zorunluluğu.** Blok, üstünde
+        // duracağı yüzeyin zemininden **sonra** ama glyph'lerinden **önce**
+        // çizilmek zorunda: ızgaranın yuvasında kalsaydı dock'un opak zemini
+        // onu örterdi, dock'un yuvasında kalsaydı ızgaranın harfini boyardı.
+        // Ölçüt örtüşme: caret dock bandına bir piksel bile girdiyse dock'un
+        // yuvasına geçiyor ve orada **en üstte** kalıyor — devir karelerinde
+        // yarısı kırpılmış bir blok görünmesin diye.
+        //
+        // Tek caret, tek dikdörtgen, tek instance; değişen yalnız hangi
+        // encode'a girdiği.
+        let caret = Caret {
+            at: pos,
+            rgba: with_alpha(rgba, alpha),
+        };
+        if top + self.cell_px.1 > self.dock_top_px {
+            self.dock_caret = Some(caret);
+        } else {
+            self.grid_caret = Some(caret);
+        }
     }
 
     /// **Hareket karesinin tek ucu**: listeyi koruyarak imleci taşır.
@@ -635,16 +657,27 @@ impl Frame {
     /// **Şerit listesine dokunmuyor** ve bu da aynı cümlenin parçası: ızgara
     /// değişmediyse blokların satır aralığı da değişmedi, yani şerit de
     /// değişmemeli. Şerit ayrı listede olmasaydı bu kırpma onu silerdi.
-    pub(crate) fn move_cursor(
+    pub(crate) fn move_caret(
         &mut self,
-        cursor: Cursor,
         at: [f32; 2],
+        text: LinearRgba,
         rgba: LinearRgba,
         alpha: f32,
     ) {
-        self.bg.truncate(self.bg_count);
+        self.clear_caret();
+        self.push_caret(at, text, rgba, alpha);
+    }
+
+    /// Caret'in üç yuvasını da boşaltır: iki instance ve dikdörtgen.
+    ///
+    /// Ayrı fonksiyon, çünkü iki çağıranı var ve ikisi de **hepsini** boşaltmak
+    /// zorunda: [`Frame::clear`] (yeni kare) ve [`Frame::move_caret`] (hareket
+    /// karesi). Biri unutulsaydı devir karesinde caret iki yerde birden
+    /// çizilirdi — yuva değişiyor ama eskisi temizlenmiyor.
+    fn clear_caret(&mut self) {
+        self.grid_caret = None;
+        self.dock_caret = None;
         self.cursor = CursorBlock::default();
-        self.push_cursor(cursor, at, rgba, alpha);
     }
 
     /// Dock'un bir hücresi; [`Frame::push`]'un ikizi ama **dock-yerel**
@@ -660,14 +693,10 @@ impl Frame {
     pub(crate) fn push_dock(&mut self, cell: Cell) {
         let pos = self.dock_pos(cell.col, cell.row);
         if let Some(bg) = cell.bg {
-            // Caret listenin **sonuna** ekleniyor ([`Frame::push_dock_caret`]);
-            // ondan sonra gelen bir arka plan onu gömerdi. Izgara tarafında
-            // aynı bekçiyi `bg_count` tutuyor.
-            debug_assert_eq!(
-                self.dock_cursor,
-                CursorBlock::default(),
-                "dock arka planı caret'ten sonra eklendi: caret gömülür"
-            );
+            // Caret artık bu listede **değil**: kendi yuvası var ve encode onu
+            // dock'un arka planlarından sonra çiziyor ([`Frame::push_caret`]),
+            // yani "caret'ten sonra arka plan eklenmesin" bekçisine de gerek
+            // kalmadı — sıra listede değil encode'da.
             self.dock_bg.push(Instance {
                 pos,
                 size: [self.cell_px.0, self.cell_px.1],
@@ -696,32 +725,6 @@ impl Frame {
                 rgba: cell.fg.to_array(),
             });
         }
-    }
-
-    /// Dock'un caret'i: bloğun dikdörtgeni **ve** altında kalan metnin rengi.
-    ///
-    /// [`Frame::push_cursor`]'ın dock ikizi ve iki farkı var. Birincisi konum:
-    /// caret hücrede duruyor, iki hücre arasında değil — dock'un kendi
-    /// animasyonu bu sette yok (`plan.md` → Kapsam Dışı: tuş vuruşu
-    /// animasyonları). İkincisi uzay: instance de dikdörtgen de **dock-yerel**
-    /// doğuyor ve dikdörtgeni ekrana taşıyan tek yer encode
-    /// ([`CursorBlock::shifted_y`]).
-    pub(crate) fn push_dock_caret(&mut self, col: u16, text: LinearRgba, rgba: LinearRgba) {
-        let pos = self.dock_pos(col, 0);
-        self.dock_bg.push(Instance {
-            pos,
-            size: [self.cell_px.0, self.cell_px.1],
-            rgba: rgba.to_array(),
-        });
-        self.dock_cursor = CursorBlock {
-            rect: [
-                pos[0],
-                pos[1],
-                pos[0] + self.cell_px.0,
-                pos[1] + self.cell_px.1,
-            ],
-            rgba: text.to_array(),
-        };
     }
 
     /// Dock yüzeyini bu kare için açar: kaç satır ve iki rengi.
@@ -814,8 +817,47 @@ impl Frame {
 
     /// Dock'un caret uniform'u, **dock-yerel**; ekrana taşıyan
     /// [`CursorBlock::shifted_y`].
-    pub(crate) fn dock_cursor(&self) -> &CursorBlock {
-        &self.dock_cursor
+    /// Caret'in ızgara yuvası; `None` → caret bu karede ızgarada değil.
+    pub(crate) fn grid_caret(&self) -> Option<Instance> {
+        self.grid_caret.map(|caret| {
+            let mut instance = caret.instance(self.cell_px);
+            // **Ötelemeyi geri veriyor** ve bu bir asimetri değil: bu yuva
+            // ızgaranın viewport'undan geçiyor, o da `+ origin_px` uyguluyor.
+            // Dikdörtgen ise fragment'in `[[position]]`'ı ile karşılaştırılıyor
+            // ve o koordinat dönüşümden **sonraki**, yani pencere uzayı — orada
+            // çıkarma yok. Dock yuvasının ikizi aynı işi `origin_y` ile yapıyor
+            // ([`Frame::dock_caret`]).
+            //
+            // Çıkarma unutulursa caret öteleme kadar aşağıda çizilir; ekleme
+            // unutulursa (dikdörtgene öteleme konursa) altındaki harfin rengi
+            // başka bir satıra düşer — zemin renginde bir harf, yani görünmez
+            // bir hücre. Okuma anında yapılıyor, çünkü `origin_px` `push_caret`
+            // ile encode arasında hâlâ değişebilir (`set_origin_rows` sink'ten
+            // sonra çağrılıyor).
+            instance.pos[1] -= self.origin_px;
+            instance
+        })
+    }
+
+    /// Caret'in dock yuvası, **dock-yerel** koordinatta; `None` → caret bu
+    /// karede dock bandında değil.
+    ///
+    /// Instance pencere uzayında doğuyor ([`Frame::push_caret`]) ve dock
+    /// viewport'u `origin_y` kadar aşağıdan başlıyor: farkı burada geri
+    /// veriyoruz. Çeviriyi `Frame`'in yapması `dock_ground`'un genişliği
+    /// argüman almasıyla aynı disiplin — `Instance` düzeninin ikinci bir
+    /// yazarı doğmasın.
+    pub(crate) fn dock_caret(&self, origin_y: f32) -> Option<Instance> {
+        self.dock_caret.map(|caret| {
+            let mut instance = caret.instance(self.cell_px);
+            instance.pos[1] -= origin_y;
+            instance
+        })
+    }
+
+    /// Dock bandının tepesini bu kare için yazar; caret'in yuvasını o belirliyor.
+    pub(crate) fn set_dock_top(&mut self, top_px: f32) {
+        self.dock_top_px = top_px;
     }
 
     pub(crate) fn bg_count(&self) -> usize {
@@ -925,6 +967,8 @@ impl Frame {
 
 #[cfg(test)]
 mod tests {
+    use bt_core::Cursor;
+
     use super::*;
 
     // Uçlar bilerek: `0.0`/`1.0` sRGB transfer fonksiyonunun sabit noktaları,
@@ -959,6 +1003,23 @@ mod tests {
     /// yanlışlıkla örtüşmesi sınamayı sessizce geçirmesin.
     const GUTTER: u16 = 7;
 
+    /// Eski `Frame::push_cursor` imzasının sınama kabuğu: tek caret API'sine
+    /// çeviriyor. Sınamaların çoğu `Cursor` ile konuşuyor ve o kayıt hâlâ
+    /// `bt-core`'un sınır tipi; değişen yalnız `Frame`'in iç yuvası.
+    fn push_cursor(frame: &mut Frame, cursor: Cursor, at: [f32; 2], rgba: LinearRgba, alpha: f32) {
+        if cursor.visible {
+            frame.push_caret(at, cursor.text, rgba, alpha);
+        }
+    }
+
+    /// `Frame::move_cursor`'ın sınama kabuğu; görünmez imleç caret'i siliyor.
+    fn move_cursor(frame: &mut Frame, cursor: Cursor, at: [f32; 2], rgba: LinearRgba, alpha: f32) {
+        frame.move_caret(at, cursor.text, rgba, alpha);
+        if !cursor.visible {
+            frame.clear_caret();
+        }
+    }
+
     fn cursor(col: u16, row: u16, visible: bool) -> Cursor {
         Cursor {
             col,
@@ -979,7 +1040,8 @@ mod tests {
     /// İmleci **kendi** hücresine çizer: yerleşmiş (animasyonsuz) hâl.
     /// Ara konumu sınayan tek yer `cursor_slides_between_cells`.
     fn push_settled(frame: &mut Frame, cursor: Cursor) {
-        frame.push_cursor(
+        push_cursor(
+            frame,
             cursor,
             [f32::from(cursor.col), f32::from(cursor.row)],
             CURSOR,
@@ -1006,9 +1068,13 @@ mod tests {
         frame.push(bg_cell(1, 0));
         push_settled(&mut frame, cursor(5, 2, true));
 
-        // Üç dikdörtgen çizilir ama `hucre=K` yalnız ikisini sayar.
-        assert_eq!(frame.bg_instances().len(), 3);
+        // Caret artık arka plan listesine **hiç girmiyor**: kendi yuvası var
+        // ve encode onu ayrı çiziyor. `hucre=K` ile listenin boyu bu yüzden
+        // artık aynı sayı — sayacın imleci dışlaması eskiden bir çıkarmaydı,
+        // şimdi yapısal.
+        assert_eq!(frame.bg_instances().len(), 2);
         assert_eq!(frame.bg_count(), 2);
+        assert!(frame.grid_caret().is_some(), "caret çizilmiyor");
 
         frame.clear(grid(9, 18));
         assert_eq!(frame.bg_count(), 0);
@@ -1042,7 +1108,7 @@ mod tests {
             TEXT.to_array(),
             "metin rengi `Cursor`'dan gelir"
         );
-        let instance = frame.bg_instances().last().expect("blok instance'ı");
+        let instance = frame.grid_caret().expect("blok instance'ı");
         assert_eq!(
             [
                 instance.pos[0],
@@ -1070,9 +1136,9 @@ mod tests {
         // görmez.
         let mut frame = Frame::default();
         frame.clear(grid(9, 18));
-        frame.push_cursor(cursor(3, 2, true), [3.0, 2.0], CURSOR, 0.25);
+        push_cursor(&mut frame, cursor(3, 2, true), [3.0, 2.0], CURSOR, 0.25);
 
-        let instance = frame.bg_instances().last().expect("blok instance'ı");
+        let instance = frame.grid_caret().expect("blok instance'ı");
         assert_eq!(instance.rgba[3], 0.25, "blok opaklığı taşınmadı");
         assert_eq!(
             frame.cursor_block().rgba[3],
@@ -1087,10 +1153,7 @@ mod tests {
         // Yerleşmiş imleç opak ve o hâlde iki dizi de temanın kendisi.
         frame.clear(grid(9, 18));
         push_settled(&mut frame, cursor(3, 2, true));
-        assert_eq!(
-            frame.bg_instances().last().expect("blok").rgba,
-            CURSOR.to_array()
-        );
+        assert_eq!(frame.grid_caret().expect("blok").rgba, CURSOR.to_array());
         assert_eq!(frame.cursor_block().rgba, TEXT.to_array());
     }
 
@@ -1101,9 +1164,9 @@ mod tests {
         // zıplar ve animasyonun tamamı görünmez olurdu.
         let mut frame = Frame::default();
         frame.clear(grid(10, 20));
-        frame.push_cursor(cursor(3, 2, true), [2.5, 1.25], CURSOR, OPAQUE);
+        push_cursor(&mut frame, cursor(3, 2, true), [2.5, 1.25], CURSOR, OPAQUE);
         assert_eq!(frame.cursor_block().rect, [25.0, 25.0, 35.0, 45.0]);
-        assert_eq!(frame.bg_instances()[0].pos, [25.0, 25.0]);
+        assert_eq!(frame.grid_caret().expect("caret").pos, [25.0, 25.0]);
     }
 
     #[test]
@@ -1129,21 +1192,24 @@ mod tests {
         assert_eq!((cells, glyphs, rules), (2, 1, 1));
 
         for _ in 0..3 {
-            frame.move_cursor(cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
+            move_cursor(&mut frame, cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
             // Üç sayacın üçü de oynamadı: `hucre=8 glif=6 kural=15` duman
             // koşusunda hareket karesiyle bitse bile aynı kalmalı.
             assert_eq!(frame.bg_count(), cells);
             assert_eq!(frame.glyph_count(), glyphs);
             assert_eq!(frame.rule_count(), rules);
-            // Listede tam olarak bir imleç var, üç değil.
-            assert_eq!(frame.bg_instances().len(), cells + 1);
+            // Liste imleçten **bağımsız**: caret kendi yuvasında ve hareket
+            // karesi onu oraya yazıyor, arka planlara dokunmadan.
+            assert_eq!(frame.bg_instances().len(), cells);
+            assert!(frame.grid_caret().is_some(), "hareket karesi caret'i sildi");
         }
         assert_eq!(frame.cursor_block().rect, [36.0, 0.0, 44.0, 16.0]);
 
         // Görünmez imleçle gelen hareket karesi bloğu **kaldırır**: uniform
         // eski yerinde kalsaydı orada zemin renginde bir harf dururdu.
-        frame.move_cursor(cursor(5, 0, false), [4.5, 0.0], CURSOR, OPAQUE);
+        move_cursor(&mut frame, cursor(5, 0, false), [4.5, 0.0], CURSOR, OPAQUE);
         assert_eq!(frame.bg_instances().len(), cells);
+        assert!(frame.grid_caret().is_none(), "görünmez imleç blok bıraktı");
         assert_eq!(frame.cursor_block(), &CursorBlock::default());
     }
 
@@ -1246,9 +1312,9 @@ mod tests {
         // dikdörtgen `push_cursor` anındaki ötelemeyi pişiriyor ve üretimde de
         // sıra öyle (`link.rs` orijini imleçten **önce** yazıyor).
         frame.set_origin_rows(2.0);
-        frame.move_cursor(cursor(0, 2, true), [0.0, 4.0], CURSOR, OPAQUE);
+        move_cursor(&mut frame, cursor(0, 2, true), [0.0, 4.0], CURSOR, OPAQUE);
         assert_eq!(
-            frame.bg_instances()[1].pos[1],
+            frame.grid_caret().expect("caret").pos[1],
             cell_y,
             "instance ötelemeyi geri vermedi: viewport onu bir kez daha ekler"
         );
@@ -1350,12 +1416,12 @@ mod tests {
         push_settled(&mut frame, cursor(0, 0, true));
 
         assert_eq!(frame.bg_count(), 1, "şerit hücre sayılmamalı");
-        assert_eq!(frame.bg_instances().len(), 2, "bir hücre, bir imleç");
+        assert_eq!(frame.bg_instances().len(), 1, "caret arka plana sızdı");
         assert_eq!(frame.stripes().len(), 1);
 
         let stripes = frame.stripes().to_vec();
         for _ in 0..3 {
-            frame.move_cursor(cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
+            move_cursor(&mut frame, cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
             // Izgara değişmedi, yani blokların satır aralığı da değişmedi:
             // şerit hareket karesinde olduğu gibi kalmalı.
             assert_eq!(frame.stripes(), stripes, "hareket karesi şeridi oynattı");
@@ -1392,30 +1458,30 @@ mod tests {
             underline: UnderlineStyle::Single,
             ..dock_cell(1)
         });
-        frame.push_dock_caret(2, TEXT, CURSOR);
         frame.open_dock(2, BG, CURSOR);
 
         assert_eq!(frame.bg_count(), 1, "dock hücre sayıldı");
         assert_eq!(frame.glyph_count(), 0, "dock glyph sayıldı");
         assert_eq!(frame.rule_count(), 0, "dock kural sayıldı");
-        assert_eq!(frame.bg_instances().len(), 2, "bir hücre, bir imleç");
+        // Caret artık `bg`'de **değil**: kendi yuvası var ve encode onu ayrı
+        // çiziyor. Arka plan listesinde yalnız hücrenin kendisi kalıyor.
+        assert_eq!(frame.bg_instances().len(), 1, "caret arka plana sızdı");
+        assert!(frame.grid_caret().is_some(), "caret ızgara yuvasında değil");
 
         let (dock_bg, dock_glyphs, dock_rules) = (
             frame.dock_bg().to_vec(),
             frame.dock_glyphs().to_vec(),
             frame.dock_rules().to_vec(),
         );
-        assert_eq!(dock_bg.len(), 3, "iki hücre, bir caret");
+        assert_eq!(dock_bg.len(), 2, "caret dock arka planına sızdı");
         assert_eq!(dock_glyphs.len(), 2);
         assert_eq!(dock_rules.len(), 1);
 
-        let caret = *frame.dock_cursor();
         for _ in 0..3 {
-            frame.move_cursor(cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
+            move_cursor(&mut frame, cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
             assert_eq!(frame.dock_bg(), dock_bg, "hareket karesi dock'u oynattı");
             assert_eq!(frame.dock_glyphs(), dock_glyphs);
             assert_eq!(frame.dock_rules(), dock_rules);
-            assert_eq!(frame.dock_cursor(), &caret, "hareket karesi caret'i sildi");
             assert!(frame.dock().is_some(), "hareket karesi yüzeyi kapattı");
         }
 
@@ -1426,7 +1492,8 @@ mod tests {
         assert!(frame.dock_bg().is_empty());
         assert!(frame.dock_glyphs().is_empty());
         assert!(frame.dock_rules().is_empty());
-        assert_eq!(frame.dock_cursor(), &CursorBlock::default());
+        assert!(frame.grid_caret().is_none(), "clear caret'i bırakmadı");
+        assert!(frame.dock_caret(0.0).is_none());
     }
 
     #[test]
@@ -1440,20 +1507,17 @@ mod tests {
         let mut frame = Frame::default();
         frame.clear(grid(8, 16));
         frame.push_dock(dock_cell(1));
-        frame.push_dock_caret(1, TEXT, CURSOR);
-        let (settled_bg, settled_caret) = (frame.dock_bg()[0], *frame.dock_cursor());
+        let settled_bg = frame.dock_bg()[0];
 
         // Aynı kare, iki satır ötelenmiş: ızgaranın hücresi kayar, dock'unki
         // kaymaz.
         frame.clear(grid(8, 16));
         frame.set_origin_rows(2.0);
         frame.push_dock(dock_cell(1));
-        frame.push_dock_caret(1, TEXT, CURSOR);
         assert_eq!(frame.dock_bg()[0], settled_bg, "dock ötelemeyi yedi");
-        assert_eq!(frame.dock_cursor(), &settled_caret);
         // Izgaranın imleci **aynı karede** ötelemeyi görüyor: ikisinin ayrı
         // uzaylarda olduğu iddiası ancak ikisi birden sorulunca kanıtlanır.
-        frame.push_cursor(cursor(0, 0, true), [0.0, 2.0], CURSOR, OPAQUE);
+        push_cursor(&mut frame, cursor(0, 0, true), [0.0, 2.0], CURSOR, OPAQUE);
         assert_eq!(
             frame.cursor_block().rect[1],
             2.0 * 16.0,
@@ -1539,27 +1603,41 @@ mod tests {
     }
 
     #[test]
-    fn a_shifted_caret_keeps_its_width_and_stays_degenerate_when_invisible() {
-        // Dock'un caret'i dikdörtgenini **CPU'da** ötelenerek ekrana taşıyor
-        // (ızgaranınkinin tam tersi: orada instance ötelemeyi geri veriyor).
-        // İki iddia sessizce bozulabilir: kaymanın boyu değiştirmemesi ve
-        // dejenere (görünmez) dikdörtgenin kaydırılınca da dejenere kalması —
-        // ikincisi bozulsaydı caret'i olmayan bir dock'ta bir hücre genişliğinde
-        // bir bant, altındaki metni zemin rengine boyardı.
+    fn the_caret_picks_its_slot_from_the_dock_band() {
+        // **Tek caret, iki yuva.** Blok, üstünde duracağı yüzeyin zemininden
+        // sonra ama glyph'lerinden önce çizilmek zorunda; ızgarada kalsaydı
+        // dock'un opak zemini onu örter, dock'ta kalsaydı ızgaranın harfini
+        // boyardı. Ölçüt **örtüşme**, merkez değil: devir karelerinde yarısı
+        // kırpılmış bir blok görünmesin diye banda değen caret yukarı değil
+        // aşağı yuvarlanıyor.
         let mut frame = Frame::default();
         frame.clear(grid(8, 16));
-        frame.push_dock_caret(3, TEXT, CURSOR);
-        let shifted = frame.dock_cursor().shifted_y(100.0);
-        assert_eq!(shifted.rect, [24.0, 100.0, 32.0, 116.0]);
+        frame.set_dock_top(64.0);
 
-        let empty = CursorBlock::default().shifted_y(100.0);
-        assert_eq!(
-            empty.rect[0], empty.rect[2],
-            "dejenere dikdörtgen genişlik kazandı"
+        // Bandın tamamen üstünde: ızgaranın yuvası.
+        frame.push_caret([3.0, 2.0], TEXT, CURSOR, OPAQUE);
+        assert!(
+            frame.grid_caret().is_some(),
+            "caret ızgara yuvasına düşmedi"
         );
-        assert_eq!(
-            empty.rect[1], empty.rect[3],
-            "dejenere dikdörtgen boy kazandı"
+        assert!(frame.dock_caret(64.0).is_none(), "caret iki yuvada birden");
+
+        // Banda **değdiği** anda dock'un yuvası — henüz yarısı ızgarada olsa da.
+        frame.move_caret([3.0, 3.5], TEXT, CURSOR, OPAQUE);
+        assert!(frame.grid_caret().is_none(), "eski yuva temizlenmedi");
+        let caret = frame.dock_caret(64.0).expect("caret dock yuvasında değil");
+        // Instance pencere uzayında doğuyor (y = 3.5 × 16 = 56) ve dock
+        // viewport'u 64'ten başlıyor: fark **negatif**, yani caret bandın
+        // üstünde çiziliyor. Devrin ortasındaki kare tam olarak bu.
+        assert_eq!(caret.pos[1], -8.0, "dock-yerel çeviri yanlış");
+
+        // `clear` bandı da sıfırlıyor: dock'u olmayan bir sonraki karede caret
+        // yine ızgaranın yuvasına düşmeli.
+        frame.clear(grid(8, 16));
+        frame.push_caret([3.0, 40.0], TEXT, CURSOR, OPAQUE);
+        assert!(
+            frame.grid_caret().is_some(),
+            "dock'suz karede caret dock yuvasına düştü"
         );
     }
 
