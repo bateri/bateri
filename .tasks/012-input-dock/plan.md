@@ -158,6 +158,7 @@ bt-shell
 | phase-9 | ✅ |
 | kapı | [~] 8 bulgu; 5'i düzeltildi, 3'ü ertelendi (gerekçe `teslim.md`) |
 | phase-10 | ✅ |
+| phase-11 | ✅ |
 
 phase-6'nın `/code-review`'ından çıkan **tek commit'lik düzeltme** (phase
 açmadı, `duzen.md` → Ek phase eşiği): `can_be_typed`'ın yapıştırma istisnası

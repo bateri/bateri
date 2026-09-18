@@ -146,8 +146,16 @@ koruduğu iki şey de koşulun dışında. Keymap koşulu şart: `vicmd`'de ayn�
 baytlar metin değil **komut** olurdu (panodaki `dd` satırı siler) ve keymap
 aynanın altıncı gövdesiyle geliyor; bilinmeyen ya da hiç gelmemiş keymap
 istisnayı **kapatıyor**. Prompt artık
-**terminalin**: `PS1` ile `RPS1` sıfır görünür genişliğe iniyor ve prompt'un
-yerini dock'un `>` işareti alıyor. Dayatma **iki yerden** ve ikisi de zorunlu —
+**terminalin**: `RPS1` sıfır görünür genişliğe iniyor, `PS1` ise **iki sütuna**
+— iki sıfır genişlikli işaret artı iki **gerçek** boşluk. O iki sütun ızgaranın
+blok işaretinin yeri: chevron 0. sütuna oturuyor, komut 2.'den başlıyor ve
+dock'un prompt işareti de 0. sütunda, metni de 2.'de. **Hiza hesaplanmıyor**,
+iki işaret de `Frame::pos`'tan geçiyor. Boşluklar bir çizim hilesi değil gerçek
+genişlik ve alternatifi komut satırını çizerken kaydırmaktı: o yol fare
+eşlemesini o satırda kaydırır, tam genişlikteki komutu taşırır ve zsh'in satır
+sarmasını yanlışlardı. Sayı iki yerde yaşıyor (betikteki boşluklar ve
+`dock::TEXT_COL`) ve bir sınama ikisini bağlıyor. Yan kazanç: boşluklar çıpayı
+taşıdığı için boş promptta da çıpalı bir hücre var. Dayatma **iki yerden** ve ikisi de zorunlu —
 `precmd` ilk basımı doğru yapıyor, aynanın ZLE kancası temanın geri yazdığını
 `zle reset-prompt` ile geri alıyor (p10k/starship `PS1`'i `precmd`'den **sonra**,
 kendi ZLE kancalarından kuruyor; ölçüldü: kancadan atanan `PS1` `reset-prompt`

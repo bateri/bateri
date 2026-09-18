@@ -557,28 +557,27 @@ impl Frame {
         }
     }
 
-    /// Bir komut bloğunun işareti: sol payın ortasına, **komutun kendi
-    /// satırına** çizilen bir dikdörtgen.
+    /// Bir komut bloğunun işareti: **0. sütuna**, komutun kendi satırına
+    /// çizilen chevron.
     ///
     /// **Renk üretilmiyor, taşınıyor.** `bt-core` "hangi satırlar, hangi renk"
     /// sorusunu çözülmüş veriyor ([`Block`]); burada çıkış kodu tanıyan bir dal
     /// yanlış yerde olurdu (`CLAUDE.md` → karar burada, boyama orada).
     ///
-    /// Genişlik **paydan türüyor**, ikinci bir sabitten değil: payın ortasındaki
-    /// yarısı, iki yanında dörtte birlik nefes payı. `CellMetrics::GUTTER_PT`'nin
-    /// doc'u payı "şerit artı iki yanında nefes payı" diye tanımlıyor ve bu
-    /// satır o cümlenin aritmetiği. Ayrı bir pt sabiti eklenseydi ölçek
-    /// değiştiğinde ikisi ayrışır ve şerit paydan taşardı — `CellMetrics`'in
-    /// payın ikinci okuyucusunu bilerek yasaklamasıyla aynı gerekçe.
+    /// [`Frame::pos`]'tan **geçiyor** ve geçmesi şart: dock'un prompt işareti
+    /// de aynı satırdan geçiyor (`dock::render`, sütun 0), yani iki işaretin
+    /// hizası hesaplanan bir şey değil, tek formülün sonucu. Ayrı bir
+    /// aritmetikle yerleştirildiği sürece — payın ortasında — dock'unkinden
+    /// yarım pay kadar solda duruyordu.
     ///
-    /// [`Frame::pos_at`]'ten **geçmiyor** ve geçmemeli: o satır payı ızgaranın
-    /// orijinine ekliyor, şerit ise payın **kendi içinde** duruyor. Oradan
-    /// geçseydi şerit ilk sütunun üstüne düşer ve metni örterdi (Karar 3a'nın
-    /// tam olarak önlediği şey).
+    /// İşaretin oturduğu sütun **boş**, çünkü prompt gerçekten iki sütun geniş
+    /// (`assets/shell/zsh/bateri.zsh` → `__bateri_ps1`, `dock::TEXT_COL` ile
+    /// aynı sayı). İşaret komutun harfini örtmüyor ve çizim terminale yalan
+    /// söylemiyor — alternatifi komut satırını çizerken kaydırmaktı ve fare
+    /// eşlemesini de satır sarmayı da bozardı.
     ///
-    /// Sıfır payda dikdörtgen dejenere doğar (sıfır genişlik) ve hiçbir
-    /// fragment üretmez — görünmez imleçle aynı sessiz çıkış, ikinci bir
-    /// bayrak yok.
+    /// Sprite tam bir hücre boyunda (`cell` pipeline'ının sabit yuvası) ama
+    /// ink'i hücrenin ortasına toplu (`bt_atlas::raster::chevron`).
     pub(crate) fn push_block(&mut self, block: Block) {
         let h = self.cell_px.1;
         debug_assert!(h > 0.0, "clear(metrics) çağrılmadı");
@@ -592,21 +591,23 @@ impl Frame {
         // ink'i hücrenin ortasına toplu (`bt_atlas::raster::chevron`), yani
         // sol payın içinde kalıyor.
         //
-        // **Payın ortasına** alınıyor, sol kenarına değil: pay bir hücreden
-        // geniş olabilir (üretimde 8pt'ye karşı ~7.8pt, yani neredeyse eşit;
-        // ama font ve ölçek ikisini ayırabilir) ve sola yaslanmış bir işaret
-        // payın sağında boşluk bırakırdı. Dar payda fark negatife iner ve
-        // kırpılıyor — işaret o hâlde 0. sütuna bir miktar girer, ki
-        // görünmemesinden iyidir.
+        // **0. SÜTUNDA, payın içinde değil.** Dock'un prompt işareti de orada
+        // (`dock::render`, sütun 0), yani iki işaretin hizası hesaplanmıyor —
+        // ikisi de `Frame::pos`'tan geçiyor ve aynı formülden doğuyor. Payın
+        // ortasına konduğu sürece dock'un işaretinden yarım pay kadar solda
+        // duruyordu ve kullanıcı bunu gördü.
+        //
+        // Sütunu komuta çarpmıyor, çünkü prompt artık **gerçekten** iki sütun
+        // geniş (`assets/shell/zsh/bateri.zsh` → `__bateri_ps1`): komut
+        // metni 2. sütundan başlıyor ve işaret 0.'daki boşluğun üstüne
+        // düşüyor. Çizim terminale yalan söylemiyor, o yüzden fare eşlemesi
+        // ve satır sarma dokunulmadan kalıyor.
         //
         // Yükseklik tam bir hücre: işaret komutun satırını gösteriyor, bir
         // aralığı değil (`bt_core::Block`). Satır aralığı sınırı geçmiyor,
         // yani burada doğrulanacak bir "ters aralık" da kalmadı.
         self.stripes.push(RuleCell {
-            pos: [
-                ((self.gutter_px - self.cell_px.0) / 2.0).max(0.0),
-                f32::from(block.row) * h,
-            ],
+            pos: self.pos(0, block.row),
             kind: RuleKind::Chevron,
             rgba: block.stripe.to_array(),
         });
@@ -1461,15 +1462,12 @@ mod tests {
     }
 
     #[test]
-    fn a_mark_covers_one_row_inside_the_gutter() {
+    fn a_mark_covers_one_row_and_lines_up_with_the_dock_sigil() {
         // İşaretin üç iddiası da sessizce bozulabilir: (1) **dock'un
         // chevron'uyla aynı sprite** — ikisi de safha renginde prompt işareti
         // ve ayrı şekillerle çizilmeleri bir kalıntıydı; (2) kendi satırında
-        // başlar — komutun satırını gösteriyor, bir aralığı değil; (3) sol
-        // paya hizalıdır — `pos_at`'ten geçseydi ilk sütunun üstüne düşer ve
-        // metni örterdi, yani Karar 3a'nın ayırdığı payın tamamı boşa giderdi.
-        // Sprite tam bir hücre boyunda ama ink'i ortasında toplu
-        // (`bt_atlas::raster::chevron`), yani payın içinde kalıyor.
+        // başlar — komutun satırını gösteriyor, bir aralığı değil; (3) **0.
+        // sütunda**, yani dock'un prompt işaretiyle aynı x'te (012 phase-11).
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
         frame.push_block(block(2));
@@ -1478,15 +1476,33 @@ mod tests {
         assert_eq!(mark.kind, RuleKind::Chevron, "işaret hâlâ dikdörtgen");
         assert_eq!(mark.pos[1], 36.0, "işaret kendi satırında başlamalı");
         assert_eq!(mark.rgba, SUCCESS.to_array(), "renk sınırdan gelir");
-        // Pay 8, hücre 9: fark negatif, yani işaret sol kenardan başlıyor.
-        assert_eq!(mark.pos[0], 0.0, "dar payda işaret kırpılmadı");
-        // Paydan dar bir hücrede işaret **ortalanıyor**: pay 12, hücre 4 →
-        // iki yanında 4'er piksel.
-        frame.clear(CellMetrics::new(4, 18, 12).expect("ölçü"));
-        frame.push_block(block(0));
-        assert_eq!(frame.stripes()[0].pos[0], 4.0, "işaret payda ortalanmadı");
+        // **Hiza hesaplanmıyor, tek formülden doğuyor.** Dock'un işareti de
+        // 0. sütunda ve o da `Frame::pos`'tan geçiyor; ikisi ayrı aritmetikle
+        // yerleştirildiği sürece yarım pay kadar ayrı duruyorlardı.
         frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
-        frame.push_block(block(2));
+        frame.push_dock(Cell {
+            col: 0,
+            row: 0,
+            ch: Some('>'),
+            ..Cell::default()
+        });
+        frame.push_block(block(0));
+        assert_eq!(
+            frame.stripes()[0].pos[0],
+            frame.dock_glyphs()[0].pos[0],
+            "ızgaranın işareti dock'unkiyle aynı sütunda değil"
+        );
+        // Pay değişince de aynı: ikisi de aynı paydan geçiyor.
+        frame.clear(CellMetrics::new(4, 18, 12).expect("ölçü"));
+        frame.push_dock(Cell {
+            col: 0,
+            row: 0,
+            ch: Some('>'),
+            ..Cell::default()
+        });
+        frame.push_block(block(0));
+        assert_eq!(frame.stripes()[0].pos[0], 12.0, "işaret paydan geçmedi");
+        assert_eq!(frame.stripes()[0].pos[0], frame.dock_glyphs()[0].pos[0]);
 
         frame.clear(CellMetrics::new(9, 18, GUTTER).expect("ölçü"));
         assert!(
