@@ -937,6 +937,45 @@ pub(crate) const COUNTER_FLOOR: Duration = Duration::from_secs(1);
 /// (`12s`); ikincisinde ondalık okunmuyor, gürültü ediyor.
 const COUNTER_TENTHS_UNTIL: Duration = Duration::from_secs(10);
 
+/// Sayacın çözünürlüğü — **koşan** ile **bitmiş** komutta ayrı, ve ayrımın
+/// sebebi hem okuma hem pil.
+///
+/// Koşan sayaç her değişiminde bir kare istiyor (013 phase-2, saat). Onda bir
+/// gösterseydi ilk on saniye boyunca **saniyede on kare** ederdi, oysa o
+/// pencerede sorulan soru "asıldı mı" ve ondalık gürültüden ibaret. Bitmiş
+/// değer ise donmuş: hiçbir kareye mal olmuyor ve orada ondalık gerçek bilgi
+/// taşıyor — iki koşuyu karşılaştıran için `2.1s` ile `2.9s` fark eder.
+///
+/// Görünen sonuç: sayaç `1s, 2s, 3s` diye ilerliyor ve komut bitince `3.4s`
+/// diye **oturuyor**. Sıçrama değil, kesinleşme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Precision {
+    /// Koşan komut: tam saniye.
+    Whole,
+    /// Bitmiş komut: on saniyenin altında onda bir.
+    Tenths,
+}
+
+/// Koşan sayacın bir sonraki **görünür** değişimine kalan süre.
+///
+/// Saatin tek girdisi (013 phase-2) ve biçimin doğrudan sonucu: koşan sayaç
+/// tam saniye gösterdiği için sınır bir sonraki tam saniye. Biçim değişirse
+/// burası da değişmek zorunda ve ikisi yan yana duruyor — `bt-gpu` "ne zaman"
+/// sorusunu hiç sormuyor, yalnız verilen süreyi bekliyor.
+///
+/// Eşiğin altında bir sonraki değişim sayacın **belirmesi**: `sleep 5`'in
+/// ilk karesi eşikten önce çizilirse saat 1 saniyeye kuruluyor, 16 ms'ye
+/// değil.
+pub(crate) fn next_tick(elapsed: Duration) -> Duration {
+    if elapsed < COUNTER_FLOOR {
+        return COUNTER_FLOOR - elapsed;
+    }
+    // `subsec_nanos()` her zaman bir saniyenin altında, yani çıkarma taşmıyor
+    // ve tam saniyede sonuç tam bir saniye — sıfır süreli bir saat kurup
+    // callback'i döngüye sokmuyor.
+    Duration::from_secs(1) - Duration::from_nanos(u64::from(elapsed.subsec_nanos()))
+}
+
 /// Sayacın metni — **yığında**, kare başına ayırma yok.
 ///
 /// `String` olsaydı koşan her blok için her karede bir ayırma ederdi: metin
@@ -959,7 +998,7 @@ impl Counter {
     /// Dört kademe ve hepsi okuma sorusundan: onda bir, saniye, dakika, saat.
     /// Kırpma **yuvarlamanın yerine** bilinçli — `1.9s` yazarken 2.0 saniyeyi
     /// geçmiş bir komut olmasın; sayaç ileri değil geri dürüst olur.
-    pub(crate) fn new(duration: Duration) -> Self {
+    pub(crate) fn new(duration: Duration, precision: Precision) -> Self {
         let mut counter = Self {
             text: [0; Self::CAPACITY],
             len: 0,
@@ -969,7 +1008,7 @@ impl Counter {
         // dolmasıdır — o da yukarıdaki tavanla temsil edilemez, bekçisi
         // `the_longest_counter_fits_the_buffer`. Sonucu yutmak yerine
         // `debug_assert` ile bağlanıyor: PTY yolunda panik yok.
-        let written = if duration < COUNTER_TENTHS_UNTIL {
+        let written = if precision == Precision::Tenths && duration < COUNTER_TENTHS_UNTIL {
             let tenths = duration.as_millis() / 100;
             write!(counter, "{}.{}s", tenths / 10, tenths % 10)
         } else if secs < 60 {
@@ -2979,7 +3018,11 @@ mod tests {
     /// tasarımın dışında — ve hiçbir derleyici onu görmez.
     #[test]
     fn the_counter_reads_its_four_tiers() {
-        let text = |ms| Counter::new(Duration::from_millis(ms)).as_str().to_owned();
+        let text = |ms| {
+            Counter::new(Duration::from_millis(ms), Precision::Tenths)
+                .as_str()
+                .to_owned()
+        };
 
         // Onda bir: eşiğin hemen üstünden 10 saniyenin hemen altına.
         assert_eq!(text(1_000), "1.0s");
@@ -3003,6 +3046,33 @@ mod tests {
         assert_eq!(text(3_720_000), "1h 02m");
     }
 
+    /// **Koşan sayaç ondalık göstermiyor**, bitmiş olan gösteriyor.
+    ///
+    /// Ayrımın sebebi hem okuma hem pil: koşan sayacın her değişimi bir kare
+    /// istiyor, yani onda bir ilk on saniyede **saniyede on kare** ederdi.
+    /// Kademe kaldırılırsa burası kızarır ve saat sessizce 10 Hz'e çıkardı.
+    #[test]
+    fn a_running_counter_costs_one_frame_a_second() {
+        let elapsed = Duration::from_millis(3_400);
+        assert_eq!(
+            Counter::new(elapsed, Precision::Whole).as_str(),
+            "3s",
+            "koşan sayaç ondalık gösteriyor"
+        );
+        assert_eq!(Counter::new(elapsed, Precision::Tenths).as_str(), "3.4s");
+
+        // Tik tam saniyeye kuruluyor: 3.4 saniyede 600 ms kaldı.
+        assert_eq!(next_tick(elapsed), Duration::from_millis(600));
+        // Tam saniyede sıfır değil **bir** saniye: sıfır süreli bir saat
+        // callback'i döngüye sokardı.
+        assert_eq!(next_tick(Duration::from_secs(3)), Duration::from_secs(1));
+        // Eşiğin altında bir sonraki değişim sayacın **belirmesi**.
+        assert_eq!(
+            next_tick(Duration::from_millis(200)),
+            Duration::from_millis(800)
+        );
+    }
+
     /// Tamponun tavanı temsil edilebilir en uzun metni alıyor.
     ///
     /// [`Counter::CAPACITY`] bir tahmin değil türetme: süre `u32` milisaniye,
@@ -3011,7 +3081,10 @@ mod tests {
     /// kırpılırdı.
     #[test]
     fn the_longest_counter_fits_the_buffer() {
-        let longest = Counter::new(Duration::from_millis(u64::from(u32::MAX)));
+        let longest = Counter::new(
+            Duration::from_millis(u64::from(u32::MAX)),
+            Precision::Tenths,
+        );
         assert_eq!(longest.as_str(), "1193h 02m");
         assert!(
             longest.as_str().len() <= Counter::CAPACITY,

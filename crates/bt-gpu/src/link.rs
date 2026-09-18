@@ -5,19 +5,34 @@
 //! onu geri kapatır. "Boşta sıfır kare" bu iki satırda yaşıyor; her
 //! `setPaused(false)` bir gerekçe ister ve her kare bir durma koşulu taşır.
 //!
-//! **Kareyi isteyen iki şey var ve ikincisi uyandırmaz** (008):
+//! **Kareyi isteyen üç şey var** (008, 013):
 //!
 //! - **Hasar** — `Waker` üzerinden, başka bir thread'den, bayrak dikerek.
 //! - **Hareket** ([`crate::motion`]) — kimseyi uyandırmadan, çünkü zaten
 //!   uyanık olan callback'in kendisi karar veriyor: yerleşmemiş bir animasyon
 //!   varken `needs_update` uyumayı reddediyor.
+//! - **Saat** ([`LinkDelegate::arm_clock`]) — link uyumaya giderken kurulan
+//!   tek bir gecikmeli uyandırma; süresi ve durma koşulu `bt-core`'dan
+//!   (`Cursor::next_tick`).
 //!
-//! İkincisi `Waker`'a **dokunmamak zorunda**: [`Waker::wake`] hasar bayrağını
+//! **Hareket `Waker`'a dokunmamak zorunda:** [`Waker::wake`] hasar bayrağını
 //! koşulsuz dikiyor, yani oradan istenen bir hareket karesi kendini "içerik"
 //! diye saydırır, grid'i boşuna yeniden taratır ve boşta sıfır kare kapısının
-//! operandını (`icerik=`) şişirirdi. Sözleşmenin sonucu: **zamana bağlı kare
-//! talebinin tek yolu hareket saatidir.** Yeni bir animasyon (blink, yumuşak
-//! kaydırma) buraya girer, `Waker`'a değil.
+//! operandını (`icerik=`) şişirirdi. Yani: **animasyonun zamana bağlı kare
+//! talebi hareket saatinden geçer.** Yeni bir animasyon (blink, yumuşak
+//! kaydırma) oraya girer, `Waker`'a değil.
+//!
+//! **Saat bunun istisnası değil, başka bir şey.** Animasyon aynı içeriği
+//! farklı çizer; saat **içeriğin kendisini** değiştirir (koşan komutun süre
+//! sayacı: ızgaranın çizilen çıktısı gerçekten başkalaşıyor). Bu yüzden
+//! `Waker` üzerinden gitmesi ve `icerik=` sayması **doğrudur** — yasağın
+//! koruduğu şey bunun tersiydi. Ayıran ölçüt üç şart: içerik gerçekten
+//! değişecek, periyodu ekran hızından **çok** düşük olacak ve **adlandırılmış
+//! bir durma koşulu** taşıyacak. Üçünü sağlamayan zamana bağlı talep buraya
+//! da giremez.
+//!
+//! Sözleşmenin sonucu tek cümlede: koşan komutu olan pencere **boşta
+//! değildir**; kalan her pencere boştadır ve sıfır kare çizer.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -28,7 +43,7 @@ use std::time::{Duration, Instant};
 use bt_core::{
     Blocks, Cursor, CursorMotion, DirtyFlag, DockContext, DockState, LinearRgba, Session, Theme,
 };
-use dispatch2::{DispatchQueue, MainThreadBound};
+use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -53,10 +68,14 @@ use crate::{GpuError, Renderer, Surface};
 /// yapan ikinci bir yol bilerek yok — bayraksız açılan link "hasar yok" deyip
 /// anında geri uyur, uyandırılmayan bayrak da kimseyi çizmeye çağırmaz.
 ///
-/// **Zamana bağlı kare buradan istenmez** (modül başlığı): hareket, uyanık
+/// **Animasyon buradan kare istemez** (modül başlığı): hareket, uyanık
 /// callback'in kendi kararı. Buraya bağlanan bir animasyon her karesine hasar
 /// diker ve `icerik=` sayacını — yani boşta sıfır kare kapısını — kendi
 /// karelerinden doldururdu.
+///
+/// **Saat ise buradan geçer** ([`LinkDelegate::arm_clock`]) ve çelişki değil:
+/// sayacın tiki içeriği gerçekten değiştiriyor, yani `icerik=` sayması
+/// yerinde. Ayıran üç şart modül başlığında.
 #[derive(Clone)]
 pub struct Waker {
     inner: Arc<WakerInner>,
@@ -555,6 +574,29 @@ struct LinkIvars {
     /// ([`LinkIvars::last_caret_text`]) ve hareket karesi hangisinin yazdığını
     /// sormuyor.
     last_cursor: Cell<Option<Cursor>>,
+    /// **Saat**: son içerik karesinin söylediği bir sonraki tik; `None` →
+    /// ilerletecek sayaç yok ve saat sönük.
+    ///
+    /// Kaynağı `Cursor::next_tick`, yani karar `bt-core`'un. Burada yalnız
+    /// **bekleme** yaşıyor: link uyumaya giderken bu süre doluysa bir tik
+    /// kuruluyor ([`LinkDelegate::arm_clock`]).
+    ///
+    /// Hareket karesi bu değeri tazelemiyor (o kol `bt-core`'a hiç gitmiyor),
+    /// yani uzun bir animasyondan sonra kurulan tik bir animasyon boyu geç
+    /// kalabilir. Bedeli en fazla bir sayaç kademesinin gecikmesi ve yol
+    /// kendini düzeltiyor: geçmiş bir süre anında ateşler, bir içerik karesi
+    /// doğar ve saat taze değerle yeniden kurulur.
+    next_tick: Cell<Option<Duration>>,
+    /// Kurulmuş tikin kuşağı — eskiyen tik kendini tanıyıp sussun diye.
+    ///
+    /// `DispatchQueue::after` iptal edilemiyor, yani araya bir içerik karesi
+    /// girip saati yeniden kurduğunda eski tik yine ateşlenir. Kuşak
+    /// eşleşmiyorsa o tik geçersizdir ve `Waker`'a dokunmaz; yoksa her
+    /// yeniden kurulum bir fazladan içerik karesi doğururdu.
+    ///
+    /// `Arc<AtomicU64>`, çünkü kapatma `Send` olmak zorunda — ateşleyen taraf
+    /// ana kuyruk olsa da `after`'ın imzası öyle istiyor.
+    clock_generation: Arc<AtomicU64>,
     /// Caret bloğunun altında kalan metnin rengi, son içerik karesinden.
     ///
     /// Hareket karesi `bt-core`'a hiç gitmiyor ve bu değeri oradan alamaz;
@@ -633,6 +675,11 @@ define_class!(
                     // diye sahte bir örnek p95'i aşağı çekerdi.
                     iv.motion.set(motion);
                     link.setPaused(true);
+                    // **Saat yalnız burada kuruluyor** ve yeri zorunlu: link
+                    // ancak yapacak başka işi kalmayınca uyuyor, yani tik de
+                    // ancak o an gerekiyor. Uyanıkken kurulsaydı her içerik
+                    // karesi bir tik daha dikerdi.
+                    self.arm_clock();
                     return;
                 }
                 // **Hareket karesi** (imleç ya da öteleme, ikisi de olabilir).
@@ -770,6 +817,9 @@ define_class!(
             let theme = iv.session.theme();
             iv.theme.set(theme);
             iv.last_cursor.set(Some(cursor));
+            // **Saatin tek tazelendiği yer.** Hareket karesi `bt-core`'a hiç
+            // gitmiyor, yani bu değeri yalnız içerik karesi bilebilir.
+            iv.next_tick.set(cursor.next_tick);
             // **Dock artık imleçten ÖNCE** ve sıra zorunlu: caret'in hedefi
             // dock'un caret'ini de sorabilmeli (`Dock::caret`), yani o cevap
             // `motion.sync`'ten önce elde olmak zorunda. Listeye girme sırası
@@ -991,6 +1041,51 @@ impl LinkDelegate {
         self.ivars().origin.set(frame.origin_px());
     }
 
+    /// **Saat**: kare talebinin üçüncü sebebi (modül başlığı).
+    ///
+    /// Link uyumaya giderken çağrılıyor. İlerletilecek bir sayaç varsa
+    /// ([`LinkIvars::next_tick`]) süre dolunca `Waker` üzerinden **içerik**
+    /// karesi isteniyor — ve hasar bayrağını dikmesi burada **doğru**:
+    /// ızgaranın çizilen çıktısı gerçekten değişiyor, yani `icerik=` sayması
+    /// yerinde. Hareketin yasağı bunun tersini korumak içindi (hareket
+    /// karesinin kendini içerik diye saydırması).
+    ///
+    /// Durma koşulu `None`: komut bitti, koşan bloğun çıpası ekrandan çıktı ya
+    /// da entegrasyon hiç yok. Üçünde de tik kurulmuyor ve pencere boşta sıfır
+    /// kareye dönüyor.
+    ///
+    /// **Kapı kapalıyken kurulmuyor:** örtülü pencerede zaten
+    /// `setPaused(true)` daha yukarıdan dönüyor, yani görünmeyen bir sayacı
+    /// güncellemek için kimse uyanmıyor. Görünürlük dönünce `Gate` bir kare
+    /// istiyor ve saat oradan yeniden kuruluyor.
+    fn arm_clock(&self) {
+        let iv = self.ivars();
+        let Some(delay) = iv.next_tick.get() else {
+            return;
+        };
+        let Ok(when) = DispatchTime::try_from(delay) else {
+            // Temsil edilemeyecek kadar uzak bir tik: sayaç ilerlemez ama
+            // pencere de dönmeyecek bir kareyi beklemez. `Counter`'ın tavanı
+            // (~1193 saat) bunu zaten temsil edilemez kılıyor.
+            return;
+        };
+        // Kuşak **kurulumda** artıyor: bu andan sonra ateşlenen her eski tik
+        // kendini tanıyıp susar.
+        let generation = iv.clock_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let token = Arc::clone(&iv.clock_generation);
+        let waker = iv.waker.clone();
+        // Hata kolu bugün temsil edilmiyor (`dispatch2` koşulsuz `Ok` dönüyor)
+        // ama imza fallible ve sonucu yutmanın bedeli bilinir olmalı: düşen
+        // bir tik yalnız sayacı durdurur — bir sonraki hasar karesi link'i
+        // uyandırır, uyku noktasında saat yeniden kurulur. Panik etmek PTY
+        // yolunda olmasa da render yolunda bir pencereyi öldürürdü.
+        let _ = DispatchQueue::main().after(when, move || {
+            if token.load(Ordering::Relaxed) == generation {
+                waker.wake();
+            }
+        });
+    }
+
     fn new(mtm: MainThreadMarker, ivars: LinkIvars) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ivars);
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
@@ -1172,6 +1267,8 @@ impl DisplayLink {
                 // tek yer içerik karesi — o da temayı tazeliyor.
                 theme: Cell::new(theme),
                 last_cursor: Cell::new(None),
+                next_tick: Cell::new(None),
+                clock_generation: Arc::new(AtomicU64::new(0)),
                 last_caret_text: Cell::new(None),
             },
         );

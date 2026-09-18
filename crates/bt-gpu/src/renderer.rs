@@ -2204,6 +2204,7 @@ mod tests {
     /// sınama onu ayrı bir iddia için seçiyor.
     fn cursor_at(col: u16, text: LinearRgba) -> Cursor {
         Cursor {
+            next_tick: None,
             col,
             row: 0,
             visible: true,

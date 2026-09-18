@@ -58,8 +58,8 @@ use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
 use crate::shell::{
-    COUNTER_FLOOR, CaretHome, Counter, DockContext, DockState, Scanner, ShellLog, ShellState,
-    Stripe,
+    COUNTER_FLOOR, CaretHome, Counter, DockContext, DockState, Precision, Scanner, ShellLog,
+    ShellState, Stripe,
 };
 use crate::wake::Wake;
 
@@ -267,6 +267,24 @@ pub struct Cursor {
     /// kopyası onu yazmış olurdu ve öteleme bir kare boyunca yanlış ızgara
     /// yüksekliğinden hesaplanırdı.
     pub rows: u16,
+    /// Bu karenin çizdiği süre sayacı ne kadar sonra **başka bir şey**
+    /// gösterecek; ilerletecek sayaç yoksa `None`.
+    ///
+    /// Kare talebinin **üçüncü** sebebi olan saatin tek girdisi
+    /// (`bt-gpu::link` modül başlığı). Hasar grid'in değişmesine, hareket
+    /// yerleşmemiş bir animasyona bağlı; koşan komutun sayacı ikisine de
+    /// uymuyor — PTY'den bayt gelmiyor ve ekran hızında ilerletilecek bir şey
+    /// yok.
+    ///
+    /// **"Ne zaman" sorusunun cevabı burada, çizen tarafta değil:** sınır
+    /// biçimin bir sonucu (koşan sayaç tam saniye gösteriyor) ve biçim bu
+    /// crate'in kararı. `bt-gpu` yalnız verilen süreyi bekliyor, hesap
+    /// yapmıyor — "karar burada, boyama orada"nın zaman eksenindeki hâli.
+    ///
+    /// **`None` durma koşuludur** ve üç yoldan doğuyor: komut bitti, koşan
+    /// bloğun çıpası bu karede görünmüyor (yukarı kaydı), ya da entegrasyon
+    /// hiç yok. Üçünde de saat sönüyor ve pencere boşta sıfır kareye dönüyor.
+    pub next_tick: Option<Duration>,
 }
 
 /// Bir komut bloğunun karedeki izi: **komutun satırı** ve o komutun rengi.
@@ -1788,7 +1806,7 @@ impl Session {
         // yalnız kayıt kuruluyor. Yer değiştirmesinin alternatifi
         // `content_rows`'u sıfırla doğurup sonra düzeltmekti ve o, bir kare
         // boyunca yanlış olan bir alan demekti.
-        let cursor = Cursor {
+        let mut cursor = Cursor {
             col: cursor_col,
             row: cursor_screen_row,
             // **Bastırılan satırın imleci de çizilmez.** Caret dock'ta
@@ -1843,6 +1861,10 @@ impl Session {
                 drawn_rows.max(cursor_screen_row.saturating_add(1))
             },
             rows: grid_rows,
+            // Faz 2 dolduruyor: koşan bloğun çıpasının bu karede **görünüp
+            // görünmediği** ancak orada biliniyor ve saatin durma koşulu tam
+            // olarak o.
+            next_tick: None,
         };
         debug_assert!(
             (1..=grid_rows).contains(&cursor.content_rows),
@@ -1858,8 +1880,13 @@ impl Session {
         // değil sözleşmenin devamı: sink'in sırası sözleşmesiz (`Cell` kendi
         // satır/sütununu taşıyor) ve süre ızgarada değil kabuk defterinde
         // yaşıyor, yani `Term`'ü tutarak okunacak hiçbir şey yok.
+        //
+        // **Alternatif ekranda saat de yok:** dal hiç koşmuyor, yani
+        // `next_tick` `None` kalıyor. vim'in içinde koşan bir komutun sayacı
+        // zaten çizilmiyor ve görünmeyen bir sayı için kare istemek boşta
+        // sıfır kare sözleşmesini bozardı.
         if !alt_screen {
-            self.resolve_blocks(blocks, &theme, grid_cols, &mut sink);
+            cursor.next_tick = self.resolve_blocks(blocks, &theme, grid_cols, &mut sink);
         }
         cursor
     }
@@ -1892,7 +1919,7 @@ impl Session {
         theme: &Theme,
         cols: u16,
         mut sink: impl FnMut(Cell),
-    ) {
+    ) -> Option<Duration> {
         // Yıkım: aşağıdaki kapatma yalnız `resolved`'ı ödünç alsın, döngü
         // `anchors`'ı okuyabilsin. Tek bir `&mut blocks` ikisini de tutar ve
         // ödünç denetleyicisi haklı olarak reddeder.
@@ -1900,35 +1927,57 @@ impl Session {
         let shell = lock(&self.shell);
         let running = shell.running();
         let counter_fg = theme.dim_linear();
+        // **Saatin durma koşulu burada doğuyor** (013 phase-2): koşan bloğun
+        // çıpası bu karede görünmüyorsa (yukarı kaymış, alternatif ekran)
+        // sayaç da çizilmiyor, yani ilerletecek bir şey yok ve saat sönüyor.
+        // Kimlik defterde olup ekranda olmadığında kare istemek, kimsenin
+        // görmediği bir sayıyı güncellemek olurdu.
+        let mut next_tick = None;
         for &(id, row, last_ink) in anchors.iter() {
             // **Sayaç şeritten bağımsız.** Kodu okunamamış bir blok
             // (`Finished { exit: None }`) şerit **almıyor** ("bilinmeyen
             // çizilmez") ama süresi biliniyor; onu da gizlemek bilinen bir
             // şeyi saklamak olurdu.
-            if let Some(duration) = shell.duration(id, running)
-                && duration >= COUNTER_FLOOR
-            {
-                let counter = Counter::new(duration);
-                let text = counter.as_str();
-                if let Some(start) = Self::counter_col(text.chars().count(), last_ink, cols) {
-                    for (offset, ch) in text.chars().enumerate() {
-                        sink(Cell {
-                            col: start.saturating_add(offset as u16),
-                            row,
-                            ch: Some(ch),
-                            fg: counter_fg,
-                            // Zemin **yok**: sayaç ızgaranın üstünde yüzen bir
-                            // rozet değil, satırın sağ ucundaki boş hücrelere
-                            // yazılmış metin. Zemin verilseydi seçim
-                            // vurgusunun ve ters çevrilmiş imlecin üstüne
-                            // basardı.
-                            bg: None,
-                            bold: false,
-                            italic: false,
-                            underline: UnderlineStyle::None,
-                            underline_color: None,
-                            strikeout: false,
-                        });
+            if let Some(duration) = shell.duration(id, running) {
+                let live = running == Some(id);
+                // Saat **eşikten bağımsız** kuruluyor: eşiğin altındaki koşan
+                // komut henüz sayaç çizmiyor ama bir saniye dolunca çizecek,
+                // yani o anı kaçırmamak için de bir kare gerekiyor.
+                if live {
+                    next_tick = Some(crate::shell::next_tick(duration));
+                }
+                // Eşiğin altı çizilmiyor ama **döngüden çıkılmıyor**: şerit
+                // aşağıda, süreden bağımsız çözülüyor.
+                if duration >= COUNTER_FLOOR {
+                    let counter = Counter::new(
+                        duration,
+                        if live {
+                            Precision::Whole
+                        } else {
+                            Precision::Tenths
+                        },
+                    );
+                    let text = counter.as_str();
+                    if let Some(start) = Self::counter_col(text.chars().count(), last_ink, cols) {
+                        for (offset, ch) in text.chars().enumerate() {
+                            sink(Cell {
+                                col: start.saturating_add(offset as u16),
+                                row,
+                                ch: Some(ch),
+                                fg: counter_fg,
+                                // Zemin **yok**: sayaç ızgaranın üstünde yüzen
+                                // bir rozet değil, satırın sağ ucundaki boş
+                                // hücrelere yazılmış metin. Zemin verilseydi
+                                // seçim vurgusunun ve ters çevrilmiş imlecin
+                                // üstüne basardı.
+                                bg: None,
+                                bold: false,
+                                italic: false,
+                                underline: UnderlineStyle::None,
+                                underline_color: None,
+                                strikeout: false,
+                            });
+                        }
                     }
                 }
             }
@@ -1947,6 +1996,7 @@ impl Session {
                 },
             });
         }
+        next_tick
     }
 
     /// Süre sayacının başlayacağı sütun; sığmıyorsa `None` ve sayaç o satırda
@@ -3177,27 +3227,41 @@ mod tests {
             Arc::clone(&wake),
         );
 
-        // Sayaç eşiği geçince doğuyor; ölçüt "sağ uçta mürekkep var mı".
-        let deadline = Instant::now() + Duration::from_secs(8);
-        let cells = loop {
-            assert!(Instant::now() < deadline, "sayaç gelmedi");
-            let mut cells = Vec::new();
-            session.frame(|cell| cells.push(cell), &mut Blocks::default());
-            if cells.iter().any(|cell| cell.row == 0 && cell.col >= 30) {
-                break cells;
+        // Satırın sağ ucundaki sayaç; komut satırı henüz basılmamışsa `None`
+        // (oturum yeni doğdu), sayaç henüz eşiği geçmemişse boş dizgi.
+        let read_counter =
+            |cells: &[Cell]| Some(row_glyphs(cells, 0).strip_prefix("$ls-la")?.to_owned());
+        let poll = |ready: &dyn Fn(&str) -> bool, what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                assert!(Instant::now() < deadline, "{what} gelmedi");
+                let mut cells = Vec::new();
+                session.frame(|cell| cells.push(cell), &mut Blocks::default());
+                if read_counter(&cells).is_some_and(|counter| ready(&counter)) {
+                    return cells;
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            std::thread::sleep(Duration::from_millis(50));
         };
 
-        // Genişlik 40 (`spawn_docked_session`), metin `"1.2s"` gibi dört
-        // harfli, yani 36. sütundan başlıyor. Tam sayı yazılmıyor: süre
-        // gerçek saatten geliyor ve `1.2`/`1.3` arası yarış olurdu; **biçimi**
-        // sınayan yer `the_counter_reads_its_four_tiers`.
-        let counter = row_glyphs(&cells, 0);
-        let counter = counter.strip_prefix("$ls-la").expect("komut satırı bozuk");
+        // **Koşarken tam saniye.** Ondalık gösterseydi saat ilk on saniye
+        // boyunca saniyede on kare isterdi (`Precision`'ın doc'u).
+        let running = poll(&|counter| !counter.is_empty(), "koşan sayaç");
+        let counter = read_counter(&running).expect("komut satırı bozuk");
         assert!(
-            counter.len() == 4 && counter.ends_with('s') && counter.contains('.'),
-            "sayaç beklenen biçimde değil: {counter:?}"
+            counter.ends_with('s') && !counter.contains('.'),
+            "koşan sayaç ondalık gösteriyor: {counter:?}"
+        );
+
+        // **Bitince ondalık.** Değer artık donmuş, yani hiçbir kareye mal
+        // olmuyor ve ondalık gerçek bilgi taşıyor. Tam sayı yazılmıyor: süre
+        // gerçek saatten geliyor ve `1.2`/`1.3` arası yarış olurdu — **biçimi**
+        // sınayan yer `the_counter_reads_its_four_tiers`.
+        let cells = poll(&|counter| counter.contains('.'), "bitmiş sayaç");
+        let counter = read_counter(&cells).expect("komut satırı bozuk");
+        assert!(
+            counter.len() == 4 && counter.ends_with('s'),
+            "bitmiş sayaç beklenen biçimde değil: {counter:?}"
         );
 
         let leftmost = cells
@@ -3244,6 +3308,55 @@ mod tests {
             "$ls-la",
             "eşiğin altındaki komut sayaç doğurdu"
         );
+        session.shutdown();
+    }
+
+    /// Saat komutla birlikte kuruluyor ve komutla birlikte sönüyor.
+    ///
+    /// **Durma koşulunun bekçisi.** `next_tick` komut bittikten sonra da dolu
+    /// kalsaydı pencere sonsuza kadar saniyede bir kare isterdi ve belirti
+    /// sessiz olurdu: uygulama çalışır, pil gider. Hiçbir sayaç bunu görmez —
+    /// `make duman`'ın reçetesi entegrasyonsuz koştuğu için kapı da göremez.
+    #[test]
+    fn the_clock_runs_with_the_command_and_stops_with_it() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}sleep 2\\033]133;C\\007'; sleep 1.2; \
+                 printf '\\033]133;D;0;bt_block=1\\007'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+
+        // Komut koşarken saat kurulu. Tik bir saniyeyi **aşmıyor**: koşan
+        // sayaç tam saniye gösteriyor, yani bir sonraki değişim en geç bir
+        // saniye sonra.
+        let mut tick = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && tick.is_none() {
+            tick = session.frame(|_| (), &mut Blocks::default()).next_tick;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let tick = tick.expect("komut koşarken saat kurulmadı");
+        assert!(
+            tick <= Duration::from_secs(1),
+            "tik bir saniyeyi aştı: {tick:?}"
+        );
+
+        // `D` gelince saat sönüyor.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "komut bitti, saat sönmedi");
+            if session
+                .frame(|_| (), &mut Blocks::default())
+                .next_tick
+                .is_none()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         session.shutdown();
     }
 

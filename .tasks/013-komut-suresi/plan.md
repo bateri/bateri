@@ -56,10 +56,14 @@ sabit son süre. Bir saniyenin altındakiler hiç görünmesin.
    koşar. `BlockLog`'un doc'undaki girdi başına bayt bütçesi 8 → 16 çıkıyor
    (`Option<i32>` + `u32`), 10 000 scrollback'te 80 KB → 160 KB; sayı
    doc'ta güncellenir.
-5. **Biçim:** 10 saniyenin altında onda birli (`1.4s`), üstünde tam saniye
-   (`12s`), dakikadan sonra `1m 05s`, saatten sonra `1h 02m`. Gerekçe okuma
-   sorusu: on saniyenin altında soru "ne kadar sürdü", üstünde "asıldı mı" —
-   ikincisinde ondalık gürültü.
+5. **Biçim:** dakikadan sonra `1m 05s`, saatten sonra `1h 02m`. On saniyenin
+   altında onda bir (`1.4s`) **yalnız bitmiş** komutta; koşan sayaç her zaman
+   tam saniye (`3s`). Gerekçe iki katlı: okuma sorusu değişiyor (koşarken
+   "asıldı mı", bitince "ne kadar sürdü") **ve** koşan sayacın her değişimi
+   bir kare istiyor — onda bir, ilk on saniyede saniyede on kare ederdi.
+   Görünen sonuç sıçrama değil kesinleşme: `1s, 2s, 3s` → `3.4s`.
+   *(phase-2'de düzeltildi; phase-1 ayrımsız inmişti ve maliyeti
+   hesaplanmamıştı.)*
 6. **Renk `dim`.** Sayaç bloğun **üstverisi**, komutun parçası değil; dock'un
    bağlam satırıyla aynı sınıf ve aynı rolden besleniyor.
 7. **Çakışmada sayaç kaybeder.** Komutun mürekkebi sayacın alanına giriyorsa
@@ -96,5 +100,5 @@ sarmalayıcı betiğe tek bayt eklenmiyor.
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | ⬜ |
+| phase-2 | ✅ |
 | kapı | ⬜ |

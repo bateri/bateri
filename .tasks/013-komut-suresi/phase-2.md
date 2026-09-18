@@ -79,14 +79,35 @@ karesinin "kendini içerik diye saydırması". Sayaç tiki ise gerçekten içeri
   entegrasyonlu bir ölçüm yükü bugün tanımlı değil.
 - ayar şeması, tema, terminfo, kabuk betiği, shader, yeni bağımlılık: yok.
 
+## Uygulama Notları
+
+- **Biçim kararı düzeltildi (plan Karar 5).** phase-1 onda biri koşan sayaçta
+  da gösteriyordu ve maliyeti hesaplanmamıştı: her değişim bir kare istediği
+  için ilk on saniye **saniyede on kare** ederdi — setin kendi "saniyede bir"
+  gerekçesiyle çelişiyordu. `Precision::{Whole, Tenths}` ayrımı girdi; koşan
+  sayaç tam saniye, bitmiş değer onda bir. Bedelsiz, çünkü bitmiş değer donmuş.
+- **Saat uyku noktasında kuruluyor**, içerik karesinde değil. Uyanıkken
+  kurulsaydı her içerik karesi bir tik daha dikerdi; link ancak yapacak işi
+  kalmayınca uyuduğu için tik de tam o an gerekiyor. Sonuç: aynı anda en çok
+  bir tik.
+- **Kuşak sayacı** (`clock_generation`) gerekli çıktı: `DispatchQueue::after`
+  iptal edilemiyor, yani araya giren bir hasar karesi saati yeniden kurduğunda
+  eski tik yine ateşleniyor. Kuşak eşleşmeyince susuyor — yoksa her yeniden
+  kurulum fazladan bir içerik karesi doğururdu.
+- **Alternatif ekranda saat yok:** `resolve_blocks` dalı hiç koşmuyor, yani
+  `next_tick` `None` kalıyor. Ayrı bir kol yazılmadı, yapısal olarak kapalı.
+- **`after`'ın `Result`'ı** yutuluyor ve gerekçesi kodda: düşen bir tik yalnız
+  sayacı durdurur, bir sonraki hasar karesi saati yeniden kurar.
+
 ## Checklist
 
-- [ ] `Cursor.next_tick` + `frame()` onu türetiyor
-- [ ] Saat kaynağı `link.rs`'te; dikme/iptal tek yerde
-- [ ] Test: `next_tick` eşiğin altında `None`, üstünde dolu
-- [ ] Test: komut bitince `next_tick` `None`
-- [ ] `link.rs` modül başlığı üç sebebi sayıyor
-- [ ] `CLAUDE.md` "boşta sıfır kare" maddesi güncel
+- [x] `Cursor.next_tick` + `frame()` onu türetiyor
+- [x] Saat kaynağı `link.rs`'te; dikme/iptal tek yerde
+- [x] Test: `next_tick` eşiğin altında `None`, üstünde dolu
+- [x] Test: komut bitince `next_tick` `None`
+- [x] Test: koşan sayaç tam saniye, bitmiş olan onda bir
+- [x] `link.rs` modül başlığı üç sebebi sayıyor
+- [x] `CLAUDE.md` "boşta sıfır kare" maddesi güncel
 - [ ] Gerçek pencerede gözle: `sleep 5`, sonra boşta kare yok
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] Yayın etkisi yazıldı
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] Yayın etkisi yazıldı

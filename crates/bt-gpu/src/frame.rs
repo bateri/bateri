@@ -1105,6 +1105,7 @@ mod tests {
 
     fn cursor(col: u16, row: u16, visible: bool) -> Cursor {
         Cursor {
+            next_tick: None,
             col,
             row,
             visible,

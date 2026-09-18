@@ -311,10 +311,19 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   zevk kararıyla körleştirirdi ve tam da öyle olacaktı. Clear yolunun tanığı
   ayrı ve hâlâ temadan (`accent`); ikisinin farklı renk olması şart, yoksa
   hücre yolu ile clear yolu birbirinden ayırt edilemez.
-- **Boşta sıfır kare.** Kirli satır **ve** yerleşmemiş animasyon yoksa frame
-  gönderilmez; kare istemenin iki yolu var ve ikincisi kimseyi uyandırmıyor
-  (`bt-gpu::link` modül başlığı: zamana bağlı kare talebinin tek yolu hareket
-  saatidir). Kapı bu yüzden `kare`'ye değil **içerik** karesine bakıyor —
+- **Boşta sıfır kare.** Kirli satır, yerleşmemiş animasyon **ve** ilerleyen
+  bir süre sayacı yoksa frame gönderilmez; kare istemenin **üç** yolu var
+  (`bt-gpu::link` modül başlığı): **hasar** (`Waker`), **hareket** (uyanık
+  callback'in kendi kararı, kimseyi uyandırmaz) ve **saat** (link uyumaya
+  giderken kurulan tek gecikmeli uyandırma; süresi ve durma koşulu
+  `bt-core`'dan, `Cursor::next_tick`). Animasyonun zamana bağlı kare talebi
+  hareket saatinden geçer, `Waker`'dan **değil** — oradan istenen bir hareket
+  karesi kendini "içerik" diye saydırırdı. Saat bunun istisnası değil başka
+  bir şey: animasyon aynı içeriği farklı çizer, saat **içeriğin kendisini**
+  değiştirir (koşan komutun süre sayacı), yani `icerik=` sayması doğrudur.
+  Ölçütü üç şart — içerik gerçekten değişecek, periyodu ekran hızından çok
+  düşük olacak, adlandırılmış bir durma koşulu taşıyacak. **Koşan komutu olan
+  pencere boşta değildir.** Kapı bu yüzden `kare`'ye değil **içerik** karesine bakıyor —
   200 ms'lik bir imleç kayması `kare`'yi meşru olarak şişirir. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı
   **imleci** 90 ms'lik bir **belirmeye** indirir — imleç kaymaz, yeni yerinde
