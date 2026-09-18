@@ -600,6 +600,12 @@ impl Renderer {
         let result = self
             .encode_quads(&enc, frame.stripes(), viewport_px)
             .and_then(|()| self.encode_quads(&enc, frame.bg_instances(), viewport_px))
+            // **Caret arka planlardan sonra, glyph'lerden önce**: blok opak ve
+            // altındaki harf onun üstüne, `cursor_block`'un ters çevirdiği
+            // renkle çiziliyor. Bu yuva caret ızgaradayken doluyor; dock
+            // bandına girmişse liste boş ve instance aşağıdaki dock
+            // encode'unda çiziliyor ([`Frame::push_caret`]).
+            .and_then(|()| self.encode_quads(&enc, frame.grid_caret().as_slice(), viewport_px))
             .and_then(|()| {
                 self.encode_glyphs(
                     &enc,
@@ -666,6 +672,15 @@ impl Renderer {
         // caret) onların üstüne gelmek zorunda.
         self.encode_quads(enc, &frame.dock_ground(viewport_px[0]), viewport_px)
             .and_then(|()| self.encode_quads(enc, frame.dock_bg(), viewport_px))
+            // Caret'in dock yuvası: opak zeminden **sonra** (yoksa zemin onu
+            // örterdi) ve glyph'lerden **önce** (yoksa harfi boyardı).
+            // Instance pencere uzayında doğuyor, viewport ise dock-yerel:
+            // farkı burada geri veriyoruz. Devir karelerinde caret dock'un
+            // bandına taşıyor ve bu encode en sonda olduğu için her şeyin
+            // üstünde kalıyor — yarısı kırpılmış bir blok görünmüyor.
+            .and_then(|()| {
+                self.encode_quads(enc, frame.dock_caret(origin_y).as_slice(), viewport_px)
+            })
             .and_then(|()| {
                 self.encode_glyphs(
                     enc,
@@ -673,9 +688,10 @@ impl Renderer {
                     frame.dock_rules(),
                     // Caret'in dikdörtgeni fragment'in `[[position]]`'ı ile
                     // karşılaştırılıyor ve o koordinat viewport dönüşümünden
-                    // **sonraki**; dock listeleri ise dock-yerel. İki uzayı
-                    // birleştiren tek satır bu.
-                    &frame.dock_cursor().shifted_y(origin_y),
+                    // **sonraki**, yani pencere uzayı — ızgaranınkiyle **aynı**
+                    // dikdörtgen. Tek caret, tek ters çevirme: caret ızgaradaysa
+                    // dock'un glyph'leri onunla zaten kesişmiyor.
+                    frame.cursor_block(),
                     frame.cell_px(),
                     viewport_px,
                 )
@@ -1838,7 +1854,13 @@ mod tests {
         // Izgaranın son satırı dock'un üstünde kalıyor; dock **tek** satır ve
         // dokunun dibinde.
         frame.push_dock(glyph_cell(0, 'M', Some(red)));
-        frame.push_dock_caret(0, BACKGROUND, WHITE);
+        // Caret **tek** ve pencere uzayında: dock bandının tepesini verip onu
+        // bandın ilk satırına koyuyoruz. Yuvayı `Frame` seçiyor
+        // (`Frame::push_caret`) ve encode onu dock'un zemininden sonra
+        // çiziyor — bu sınamanın gördüğü piksel tam da o sıranın tanığı.
+        let dock_top = (EDGE - usize::from(ch)) as f32;
+        frame.set_dock_top(dock_top);
+        frame.push_caret([0.0, dock_top / f32::from(ch)], BACKGROUND, WHITE, 1.0);
         frame.open_dock(1, red, WHITE);
 
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
@@ -2138,12 +2160,14 @@ mod tests {
     /// İmleci **kendi** hücresine çizer: bu sınamaların hepsi yerleşmiş bloğa
     /// bakıyor, ara konuma değil (onun sınaması `frame.rs`'te).
     fn push_settled(frame: &mut Frame, cursor: Cursor, rgba: LinearRgba) {
-        frame.push_cursor(
-            cursor,
-            [f32::from(cursor.col), f32::from(cursor.row)],
-            rgba,
-            1.0,
-        );
+        if cursor.visible {
+            frame.push_caret(
+                [f32::from(cursor.col), f32::from(cursor.row)],
+                cursor.text,
+                rgba,
+                1.0,
+            );
+        }
     }
 
     #[test]
@@ -2212,7 +2236,7 @@ mod tests {
             frame.clear(grid(cw, ch));
             frame.push(glyph_cell(0, 'M', None));
             if let Some(alpha) = alpha {
-                frame.push_cursor(cursor_at(0, BACKGROUND), [0.0, 0.0], ACCENT, alpha);
+                frame.push_caret([0.0, 0.0], BACKGROUND, ACCENT, alpha);
             }
             cell_rows(
                 &render_offscreen(&r, EDGE, BACKGROUND, &frame),
@@ -2313,7 +2337,7 @@ mod tests {
         frame.push(rule_cell(1, UnderlineStyle::Single));
         let mut cursor = cursor_at(0, BACKGROUND);
         cursor.col = 0;
-        frame.push_cursor(cursor, [0.5, 0.0], ACCENT, 1.0);
+        frame.push_caret([0.5, 0.0], cursor.text, ACCENT, 1.0);
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let last_column: Vec<(u8, u8, u8)> = cell_rows(&pixels, EDGE, (cw, ch), 1)

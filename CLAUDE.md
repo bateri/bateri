@@ -44,7 +44,17 @@ ZLE'nin görüntüsünü (`PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlig
 `CURSOR`) OSC 8133 ile aynalıyor; `Session::dock()` onu **çözülmüş** dock
 hücrelerine çevirip sınırdan veriyor ve `bt-gpu` pencerenin altındaki **ikinci
 bir `setViewport`**'la çiziyor — kendi listeleri, kendi caret'i, opak zemini ve
-ızgaradan ayıran saç çizgisiyle. Payı `DOCK_ROWS * cell_h` **artı iki nefes
+ızgaradan ayıran saç çizgisiyle. **Caret tek**: ızgaranın imleci ile dock'un
+caret'i aynı animatörün (`bt-gpu::motion`) iki hedefi, yani dock'ta yazarken de
+süzülüyor ve devir bir ışınlanma değil bir kayma. Hedef **ekran hücresi**
+cinsinden ve dock'unki kesirli — band nefes payı kadar aşağıdan başlıyor ve
+artık şeridin altında duruyor; yuvarlansaydı caret bir hücre yukarıda dururdu.
+Çizim **yuvası** konuma göre seçiliyor (`Frame::push_caret`): blok, üstünde
+duracağı yüzeyin zemininden sonra ama glyph'lerinden önce çizilmek zorunda,
+yani ızgarada kalsaydı dock'un opak zemini onu örter, dock'ta kalsaydı
+ızgaranın harfini boyardı. Ölçüt örtüşme — banda değen caret dock yuvasına
+geçiyor ve orada en üstte kalıyor. Ters çevirme dikdörtgeni **tek** ve pencere
+uzayında, iki glyph encode'una da aynısı gidiyor. Payı `DOCK_ROWS * cell_h` **artı iki nefes
 payı** (`bt_gpu::dock_px`; formülün tek kopyası orada, `split_into_grid` onu
 tüketiyor): iki satır saç çizgisine yapışınca dock bakılamaz duruyordu. Payın
 kaynağı sol payın ta kendisi (`CellMetrics::gutter_px`) — ikinci bir tasarım

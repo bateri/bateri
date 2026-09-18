@@ -97,11 +97,11 @@ Gerçek pencerede üç kusur, üçü de kullanıcıdan:
 - [x] Pay sol paydan (`gutter_px`) türetiliyor; formülün tek kopyası `bt_gpu::dock_px`
 - [ ] Punto değişince pay ölçekleniyor (gözle)
 - [x] Test: `split_into_grid` payı düşüyor; dejenere yükseklik kırpılıyor
-- [ ] `Motion` dock'u hedef olarak alıyor; `visible=false` durumu düşürmüyor
-- [ ] `settled()` dock ayağını sayıyor
-- [ ] Test: dock'a devir animasyonu sonlu adımda yerleşiyor
-- [ ] Test: snap ve belirme kipleri dock ayağında da geçerli
-- [ ] Caret tek kez çiziliyor; ters çevirme iki encode'a da gidiyor
+- [x] `Motion` dock'u hedef olarak alıyor; `visible=false` durumu düşürmüyor
+- [x] `settled()` dock ayağını sayıyor
+- [x] Test: dock'a devir animasyonu sonlu adımda yerleşiyor
+- [x] Test: snap ve belirme kipleri dock ayağında da geçerli
+- [x] Caret tek kez çiziliyor; ters çevirme iki encode'a da gidiyor
 - [ ] Chevron yordamsal, `Face::Regular`'a çivili, kendi payı var
 - [ ] Test: chevron fonttan bağımsız (aile değişince aynı sprite)
 - [ ] Gerçek pencerede gözle: yazma, `sleep 5`, punto değişimi, vim gir-çık
