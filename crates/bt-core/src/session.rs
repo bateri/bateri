@@ -2060,9 +2060,24 @@ impl Session {
     ///
     /// Ölçüt en az **bir boş hücre**: sayaç komutun son harfine yapışırsa
     /// ikisi tek kelime gibi okunur.
+    ///
+    /// **Sağ kenarda da bir hücre boş kalıyor** ve sebebi simetri: ızgara sol
+    /// kenardan bir pay bırakıyor (`CellMetrics::gutter_px`, 8 pt — kabaca bir
+    /// hücre), sağdan bırakmıyor (`split_into_grid` yalnız bir pay düşüyor).
+    /// Son sütuna oturan sayaç bu yüzden pencerenin kenarına **yapışıyordu**;
+    /// gözlendi (kullanıcı). Payı hücre cinsinden vermek kararın burada
+    /// kalmasını sağlıyor — piksel `bt-core`'un bilmediği bir birim — ve
+    /// sonuç iki yanı da bir hücre boş, yani sayaç yüzer gibi duruyor.
+    ///
+    /// **Izgaranın kendi sağ kenarı hâlâ paysız** ve bu bilinçli: uzun bir
+    /// çıktı satırının kenara dayanması terminalin olağan davranışı, sayaç
+    /// ise bizim koyduğumuz bir işaret. Payı ızgaranın tamamına vermek
+    /// `split_into_grid`'i, yani PTY'ye bildirilen sütun sayısını değiştirir.
     fn counter_col(len: usize, last_col: u16, cols: u16) -> Option<u16> {
         let len = u16::try_from(len).ok()?;
-        let start = cols.checked_sub(len)?;
+        // Sağdaki pay `len`'in üstüne: sayaç `cols - 1`'e değil `cols - 2`'ye
+        // kadar uzanıyor.
+        let start = cols.checked_sub(len.checked_add(1)?)?;
         // `last_col` hiç dolu hücresi olmayan satırda 0 ve o hâlde de doğru
         // çalışıyor: 0. sütun boşsa sayaç yine 1'den itibaren serbest.
         (start > last_col.saturating_add(1)).then_some(start)
@@ -3235,30 +3250,33 @@ mod tests {
         )
     }
 
-    /// Sayaç komutun metnine **değmiyor**, ve sığmayınca kendisi düşüyor.
+    /// Sayacın **iki yanı da boş**: komuta da pencerenin kenarına da değmiyor.
     ///
-    /// Çakışma kuralının tek yeri burası ve ölçütü kesin: sayaç ile son
-    /// mürekkep arasında en az bir boş hücre. Kural gevşetilirse uzun bir
-    /// komutun son harfleri sessizce bir sayıya dönerdi — belirti "komutum
-    /// yanlış görünüyor" diye okunur ve sayacı kimse suçlamazdı.
+    /// Çakışma kuralının tek yeri burası ve ölçütü kesin. Sol yanı
+    /// gevşetilirse uzun bir komutun son harfleri sessizce bir sayıya dönerdi;
+    /// sağ yanı gevşetilirse sayaç pencere kenarına yapışırdı (gözlendi,
+    /// kullanıcı) ve ızgaranın sol payıyla uyumsuz dururdu.
     #[test]
-    fn the_counter_yields_the_row_to_the_command() {
-        // Bol yer: 80 sütunluk satırda dört harflik sayaç en sağda.
-        assert_eq!(Session::counter_col(4, 10, 80), Some(76));
+    fn the_counter_keeps_a_cell_on_both_sides() {
+        // 80 sütun, dört harflik sayaç: son sütun (79) **boş pay**, yani
+        // sayaç 75–78'i kaplıyor ve 75'ten başlıyor.
+        assert_eq!(Session::counter_col(4, 10, 80), Some(75));
 
-        // **Sınırın iki yakası.** Sayaç 76'da başlıyor; 75. sütun boşluk payı.
-        assert_eq!(Session::counter_col(4, 74, 80), Some(76));
+        // **Sol sınırın iki yakası.** 74. sütun boşluk payı.
+        assert_eq!(Session::counter_col(4, 73, 80), Some(75));
         assert_eq!(
-            Session::counter_col(4, 75, 80),
+            Session::counter_col(4, 74, 80),
             None,
             "sayaç komutun harfine yapıştı"
         );
 
-        // Hiç mürekkebi olmayan satır (boş prompt): sayaç serbest.
-        assert_eq!(Session::counter_col(4, 0, 80), Some(76));
+        // Hiç dolu hücresi olmayan satır (boş prompt): sayaç serbest.
+        assert_eq!(Session::counter_col(4, 0, 80), Some(75));
 
-        // Satıra sığmıyor: çıkarma taşmıyor, sayaç düşüyor.
+        // Satıra sığmıyor: çıkarmaların ikisi de taşmıyor, sayaç düşüyor.
         assert_eq!(Session::counter_col(10, 0, 5), None);
+        // Tam sığıyor ama sağ paya yer kalmıyor: yine düşüyor.
+        assert_eq!(Session::counter_col(4, 0, 4), None);
     }
 
     /// Bir saniyeyi geçen komutun süresi satırın sağ ucunda ve **sönük**.
@@ -3326,7 +3344,11 @@ mod tests {
             .filter(|cell| cell.row == 0 && cell.col >= 30)
             .map(|cell| cell.col)
             .min();
-        assert_eq!(leftmost, Some(40 - 4), "sayaç sağa yaslanmadı");
+        assert_eq!(
+            leftmost,
+            Some(40 - 4 - 1),
+            "sayaç sağa yaslanmadı ya da kenar payını yemedi"
+        );
 
         // Renk: bloğun **üstverisi**, komutun parçası değil.
         let dim = Theme::BATERI.dim_linear();
