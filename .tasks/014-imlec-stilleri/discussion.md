@@ -391,6 +391,19 @@ Sadelik ile codebase-fit aynı kusuru **birbirinden bağımsız** çıkardı (M1
   ön koşulu** ve kullanıcıda (`[elle]`); sonucu bu bölüme ikinci bir madde
   olarak yazılır. Mimari zaten bir seçeneği eledi: sürekli nefes her karede
   değişir, yani Seçenek A'ya geri döner.
+- **İmlecin kendi tema rolü var** (2026-09-18, kullanıcı onayı): caret
+  `accent`'ten değil yeni `cursor` rolünden besleniyor ve gömülü temalarda
+  altın. Reddedilen: `accent`'i altın yapmak — tek değer değişirdi ama koşan
+  komut şeridi ve OSC 10/11 cevabı da onunla giderdi, yani iki ayrı şey tek
+  değere bağlı kalırdı. Rol ayrımı ANSI 258'i de gerçek bir role bağlıyor.
+  → **phase-3**.
+- **Köşe yarıçapı ve gölge bu sete girmiyor** (2026-09-18): kullanıcı istedi,
+  kendi setine gidiyor. Ayrımın ölçütü **risk sınıfı** — 014'ün hiçbir işi
+  shader'a dokunmuyor, bu yeni bir Metal pipeline ve yeni bir `#[repr(C)] ↔
+  .metal` sözleşmesi demek (`proje.md` onu ayrı bir "riskli phase" sayıyor).
+  Üstelik setin tasarımını panel **şekiller ve blink için** onayladı; pipeline
+  değişikliği önlerinden geçmedi ve orada gerçek tasarım soruları var. Aynı
+  yetenek içi boş imleci de getiriyor, yani üçü tek işin sonucu.
 - **Set bölünmedi.** Sadelik merceğinin "014 = şekiller, 015 = blink" önerisi
   biçimde reddedildi, özünde kabul: risk ayrımını tek set içinde iki phase
   veriyor ve kullanıcının istediği şey blink.

@@ -90,6 +90,15 @@ bir durma koşuluyla.
   - **R11.2** — `term_config_keeps_every_other_field` fixture'ı **varsayılan
     olmayan** bir şekil taşır; varsayılanla doldurulursa guard'ın vaadi
     sessizce yalan olur.
+- **R13 — İmlecin kendi tema rolü var.** Caret rengini `accent`'ten değil
+  `cursor` rolünden alır; koşan komut bloğunun şeridi `accent`'te kalır.
+  - **R13.1** — Tema dosyası **geriye dönük okunur**: anahtar opsiyonel ve
+    eksikse `accent`'e düşer, yani bugün yazılmış bir kullanıcı teması
+    değişmeden çalışır.
+  - **R13.2** — ANSI 258 (imleç rengi yuvası) yeni rolü söyler; bugün
+    `accent`'e takma addı.
+  - **R13.3** — Gömülü iki tema (`bateri`, `bateri-light`) rolü **altın**
+    tonuyla dolduruyor; değer bir zevk kararı, ölçüm değil.
 - **R12 — Sözleşme kodla aynı commit'te güncellenir:** `link.rs` modül
   başlığı (saatin **iki tadı**), `Waker` ve `requests` doc'ları,
   `Counters::motion` doc'u, `Cursor::next_tick`'in "'Ne zaman' sorusunun cevabı
@@ -146,6 +155,11 @@ bir durma koşuluyla.
    **sesli** kırılıyor (`sessiz < QUIET_FLOOR` → kırmızı).
 8. **Hareketi Azalt blink'i kapatır** (R10). Karar erişilebilirlik sözünden
    çıktı, sadeleşme yan kazanç.
+10. **İmlecin kendi rolü var, `accent` paylaşılmıyor** (R13). Caret ile koşan
+   komut şeridi aynı değerden beslenince "imleci altın yap" isteği şeridi de
+   altın yapıyordu. Ayrım ayrıca ANSI 258'i gerçek bir role bağlıyor ve
+   ilerideki OSC 12'yi (terminfo'da `Cs` ilan ediyoruz, uygulamıyoruz) doğal
+   kılıyor. Bedeli yazılı: "tema = sekiz rol" cümlesi **dokuza** çıkıyor.
 9. **Blink'in görüntüsü (sert / sınırlı geçiş) referans bakışından sonra
    kararlaşır** — phase-2'nin ön koşulu, kullanıcıda. Sürekli nefes mimari
    olarak elendi. *Bakışın sonucu phase-2'nin **şeklini** değiştirebilir:*
@@ -165,6 +179,16 @@ bir durma koşuluyla.
 - **İçi boş imleç ve odak.** `HollowBlock` bloğa düşüyor; odağın sınırdan
   geçmesi ve odaksız pencerenin içi boş caret'i ayrı bir set (008'de de
   kapsam dışıydı).
+- **Caret'in köşe yarıçapı ve gölgesi.** Kullanıcı istedi (2026-09-18) ve
+  **kendi setine** gidiyor. Gerekçe risk sınıfı: caret bugün `cell_bg`'nin
+  düz dörtgen pipeline'ında bir `Instance` ve o tampon **ızgara boyunda**
+  (`#[repr(C)]`, iki taraflı `static_assert`, stride 32) — tek bir caret için
+  oraya alan eklemek bütün arka plan hücrelerine bindirmek olurdu. Doğru yol
+  caret'e kendi küçük pipeline'ını vermek, yani yeni bir `.metal` fonksiyonu
+  ve yeni bir düzen sözleşmesi: 014'ün hiçbir işi shader'a dokunmuyor, bu
+  dokunuyor. Referansta emsali var (`ShapeInstance` + `fill`/`stroke`/
+  `strokeW`/`radius`/`squareCorners`, `docs/ARASTIRMA.md` → İmleç) ve aynı
+  yetenek **içi boş imleci** de getiriyor — üçü tek işin sonucu.
 - **İmleç rengi (OSC 12).** İlan ettiğimiz terminfo `Cs`/`Cr` taşıyor ve
   `Event::ColorRequest` sorguyu yanıtlıyor, ama caret'i boyayan yol rengi
   `theme.accent_linear()`'dan alıyor — OSC 12 ile yazılan renk çizime hiç
@@ -196,6 +220,7 @@ kaydedilecek bedel şu: materyal yüzeyin yazılı ön koşulu (kare süresi tab
 | Phase | İş | Neden bu sırada |
 |-------|-----|-----------------|
 | phase-1 | Şekiller: `Cursor` alanı, `term_config`, `[terminal] cursor`, çizim | **Kare altyapısına sıfır dokunuş** ve kendi başına ürün: vim insert modda beam görünür. Tek başına doğrulanabilir — kapının hiçbir katı caret dikdörtgeninin boyutuna bakmıyor. Riskin tamamı phase-2'ye erteleniyor |
+| phase-3 | İmlecin tema rolü: `cursor` | Küçük, görünür ve shader'a dokunmuyor. Sona bırakıldı çünkü setin omurgası blink; renk ondan bağımsız ve tek başına doğrulanabilir |
 | phase-2 | Blink: `Waker::resume`, uyku testinin üçüncü sorusu, son tarihli saat, faz tipi, `[terminal] cursor_blink`, Reduce Motion dışlaması, sözleşme | Tek mimari risk burada ve phase-1 yeşilken tek başına sınanır. **Ön koşulu `[elle]` referans bakışı** (Karar 9) |
 
 **phase-1'den sonraki ara durum tutarlı:** `\e[5 q` gönderen vim'de kullanıcı
@@ -220,4 +245,5 @@ Frame şekli saklar                  arm_clock: min(iki deadline)
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | |
+| phase-3 | |
 | kapı | |
