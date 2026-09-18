@@ -198,7 +198,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "line 1: `background` must be a color like \"#rrggbb\", found \"#12345\"; using #1a1c21",
+                "line 1: `background` must be a color like \"#rrggbb\", found \"#12345\"; using #000000",
                 "line 3: `ansi.red` must be a color like \"#rrggbb\", found an integer; using #d16d6a",
                 "line 4: `ansi.green` must be a color like \"#rrggbb\", found \"#+12345\"; using #8bb58b",
             ]

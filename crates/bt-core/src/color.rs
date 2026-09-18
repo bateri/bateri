@@ -19,7 +19,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 /// tarafında "sRGB olmayan hedef" bir `const`la (`Renderer::PIXEL_FORMAT`)
 /// kapatıldı, ama sınırın bu tarafında renk çıplak bir `[f32; 4]`'tü ve uzayı
 /// yalnız bir yorum söylüyordu. Oraya sRGB-kodlu bir float (`c / 255.0`)
-/// yazan renk açılır — `0x1a1c21` `0x5a5d65` griye — ve belirti sessizdir.
+/// yazan renk açılır — ara ton `0x1a1c21` `0x5a5d65` griye — ve belirti sessizdir.
 /// Alan private ve tek kurucusu [`LinearRgba::from_srgb`], yani dönüşüm
 /// tipin içinde: uzayı artık bir yorum değil tip taşıyor.
 ///
@@ -120,7 +120,7 @@ impl Theme {
     // tabloyu tek sütuna açıp hizayı yok ediyor.
     #[rustfmt::skip]
     pub const BATERI: Theme = Theme {
-        background: 0x1a1c21,
+        background: 0x000000,
         foreground: 0xd8d9dd,
         dim: 0x909093,
         accent: 0x7a9cc6,
@@ -467,7 +467,7 @@ const SRGB_LINEAR: [f32; 256] = [
 /// Ad uzayı taşıyor çünkü bu depoda sessizce yanlış olabilecek tek şey bir
 /// float'ın hangi uzayda olduğu: çizim hedefi `BGRA8Unorm_sRGB` ve donanım
 /// fragment çıktısını lineer sayıp yazarken kodluyor. Burada `c / 255.0`
-/// dönseydi palet `0x1a1c21`'den `0x5a5d65` griye açılırdı; bunu gören tek
+/// dönseydi palet açılırdı (ara ton `0x1a1c21` → `0x5a5d65` gri); bunu gören tek
 /// bekçi `bt-gpu`'nun `cell_bg_paints_pixels_on_the_gpu` sınamasıdır ve
 /// ancak **ara ton** bir renkle görüyor.
 ///
@@ -529,7 +529,7 @@ mod tests {
             (8, 0x4a4e57), (9, 0xe58b88), (10, 0xa4cba4), (11, 0xe8c988),
             (12, 0x9bb8dc), (13, 0xc9aad8), (14, 0x96caca), (15, 0xe6e7ea),
             (256, 0xd8d9dd), // ön plan
-            (257, 0x1a1c21), // arka plan
+            (257, 0x000000), // arka plan
             (258, 0x7a9cc6), // imleç
         ];
         for (index, hex) in EXPECTED {
@@ -643,9 +643,11 @@ mod tests {
         // Koyu temada kırmızının sönüğü kararır, açık temada açılır.
         assert!(sum(Theme::BATERI.default(260)) < sum(Theme::BATERI.default(1)));
         assert!(sum(Theme::BATERI_LIGHT.default(260)) > sum(Theme::BATERI_LIGHT.default(1)));
-        // Elle yazılı: `(2·0xd1 + 0x1a) / 3`, `(2·0x6d + 0x1c) / 3`,
-        // `(2·0x6a + 0x21) / 3`, tam sayı bölmesiyle.
-        assert_eq!(THEME.default(260), rgb(0x945251));
+        // Elle yazılı: `(2·0xd1 + 0) / 3`, `(2·0x6d + 0) / 3`, `(2·0x6a + 0) / 3`,
+        // tam sayı bölmesiyle. Zemin **saf siyah** olduğu için karışım terimi
+        // düşüyor ve sönükleştirme vte'nin `× 2/3`'üne indirgeniyor — aynı
+        // özdeşliği [`dim_on_black_is_vte`] bütün kanal değerleri için bağlıyor.
+        assert_eq!(THEME.default(260), rgb(0x8b4846));
     }
 
     #[test]
