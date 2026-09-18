@@ -183,7 +183,8 @@ Aynı komutun **süresi** de oradan geliyor: `C` ile `D` arası ölçülüp deft
 yazılıyor ve bir saniyeyi geçenler komut satırının **sağ ucunda**, sönük, sıradan
 hücreler olarak sınırdan çıkıyor — yeni bir sınır tipi yok, `bt-gpu` onu
 ızgaranın herhangi bir harfinden ayırt etmiyor. Koşan komutta sayaç tam saniye
-(`3s`), bitince onda bire oturuyor (`3.4s`): koşan sayacın her değişimi bir kare
+(`3s`, `45s`), bitince **dakikaya kadar** onda bire oturuyor (`3.4s`, `45.3s`;
+dakikadan sonra `1m 05s`): koşan sayacın her değişimi bir kare
 istiyor, donmuş değer istemiyor. Komutun mürekkebiyle arasında bir boş hücre
 kalmıyorsa sayaç **çizilmiyor** — kullanıcının yazdığı örtülmez. Sayacı
 ilerleten şey kare talebinin üçüncü sebebi, **saat** (`Cursor::next_tick`).

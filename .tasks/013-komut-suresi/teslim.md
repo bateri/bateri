@@ -3,7 +3,8 @@
 ## Ne indi
 
 Bir saniyeyi geçen komutların süresi, komut satırının **sağ ucunda**, sönük:
-koşarken saniyede bir ilerleyen canlı bir sayaç, bitince donan son değer.
+koşarken saniyede bir ilerleyen canlı bir sayaç, bitince **ondalığıyla** donan
+son değer (`45s` koşuyor → `45.3s` oturuyor).
 
 - **Defter** (`bt-core::shell`): `Outcome::Finished` çıkış kodunun yanına geçen
   süreyi de taşıyor; başlangıç anı `ShellLog`'da **tek** alan.
@@ -69,7 +70,7 @@ yol haritasının "iki katına" dediği bütçe).
 | # | Şerit | Ne | Neden |
 |---|---|---|---|
 | 1 | `[komut]` | `make kur` | **Doğruluk için gerekmiyor** (kabuk betiği değişmedi), ama `.app`'te görmek için gerekiyor: açık pencereler eski binary'yle koşuyor |
-| 2 | `[elle]` | `sleep 5` koştur | Sayaç 1. saniyede belirmeli, `1s 2s 3s 4s` diye ilerlemeli, bitince `5.0s` gibi bir değere oturmalı |
+| 2 | `[elle]` | `sleep 5` koştur | Sayaç 1. saniyede belirmeli, `1s 2s 3s 4s` diye ilerlemeli, bitince `5.0s` gibi **ondalıklı** bir değere oturmalı. `sleep 45` de aynı: koşarken `45s`, bitince `45.3s` |
 | 3 | `[elle]` | **En değerli kontrol.** `sleep 5` bittikten sonra pencereye dokunma | Kare istenmemeli — saatin **durma koşulu**. Kapıda düzeltilen kusurun (bekleyen tikin iptal edilmemesi) **tek tanığı bu**: sınamalar `next_tick`'in `None`'a düştüğünü kanıtlıyor ama `arm_clock`'ın gerçekten sustuğunu kanıtlayamıyor — o kod `bt-gpu`'da, ana thread'de ve koşum altyapısı yok. Şüphe varsa `BT_RUN_SECONDS` + `BT_FRAME_STATS` ile `icerik=` bak |
 | 4 | `[elle]` | `ls` gibi hızlı bir komut | Hiç sayaç çıkmamalı (eşik) |
 | 5 | `[elle]` | Pencereyi daraltıp uzun bir komut yaz | Sayaç kaybolmalı, komut metni **bozulmamalı** |

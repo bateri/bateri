@@ -63,14 +63,18 @@ sabit son süre. Bir saniyenin altındakiler hiç görünmesin.
    80 KB → 120 KB. Sayı `const` assert ile bağlandı — yazılıp
    doğrulanmamış bir bütçe bir alan eklendiğinde sessizce eskirdi ve
    nitekim ilk yazımda 16 diye yanlış yazılmıştı.
-5. **Biçim:** dakikadan sonra `1m 05s`, saatten sonra `1h 02m`. On saniyenin
-   altında onda bir (`1.4s`) **yalnız bitmiş** komutta; koşan sayaç her zaman
-   tam saniye (`3s`). Gerekçe iki katlı: okuma sorusu değişiyor (koşarken
-   "asıldı mı", bitince "ne kadar sürdü") **ve** koşan sayacın her değişimi
-   bir kare istiyor — onda bir, ilk on saniyede saniyede on kare ederdi.
+5. **Biçim:** dakikadan sonra `1m 05s`, saatten sonra `1h 02m`. Dakikanın
+   altında onda bir (`1.4s`, `45.3s`) **yalnız bitmiş** komutta; koşan sayaç
+   her zaman tam saniye (`3s`, `45s`). Gerekçe iki katlı: okuma sorusu
+   değişiyor (koşarken "asıldı mı", bitince "ne kadar sürdü") **ve** koşan
+   sayacın her değişimi bir kare istiyor — onda bir saniyede on kare ederdi.
+   Bitmiş değer donmuş olduğu için orada ondalığın bedeli **sıfır**, o yüzden
+   sınır dakika: on saniyelik bir tavan bedeli olmayan bir bilgiyi sebepsiz
+   kısardı. Dakikadan sonra düşüyor — `1m 05.3s` hem uzun hem okunmuyor.
    Görünen sonuç sıçrama değil kesinleşme: `1s, 2s, 3s` → `3.4s`.
-   *(phase-2'de düzeltildi; phase-1 ayrımsız inmişti ve maliyeti
-   hesaplanmamıştı.)*
+   *(İki turda oturdu: ayrım phase-2'de geldi — phase-1 ayrımsız inmişti ve
+   maliyeti hesaplanmamıştı; ondalığın tavanı 10 sn → 60 sn kullanıcı
+   kararıyla açıldı.)*
 6. **Renk `dim`.** Sayaç bloğun **üstverisi**, komutun parçası değil; dock'un
    bağlam satırıyla aynı sınıf ve aynı rolden besleniyor.
 7. **Çakışmada sayaç kaybeder.** Satırın son **dolu** hücresi sayacın alanına

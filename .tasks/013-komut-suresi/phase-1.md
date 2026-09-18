@@ -42,12 +42,12 @@ hâlâ kapsamda, yani sayaç hücreleri için ikinci bir yola gerek yok.
   Kullanıcının yazdığını örtmek yerine sayacı gizlemek; yön güvenli ve ölçütü
   kesin. *(Kapıda daraltıldı: ölçüt "mürekkep" değil "dolu" — seçim vurgusu
   ve geniş glyph'in ikinci yarısı da sütunu işgal ediyor.)*
-- **Biçim okuma sorusuna göre:** 10 saniyenin altında onda birli (`1.4s`),
-  üstünde tam saniye (`12s`), dakikadan sonra `1m 05s`, saatten sonra
-  `1h 02m`. Altındaki soru "ne kadar sürdü", üstündeki "asıldı mı" — ikincide
-  ondalık gürültü. Metin yığın tamponunda üretiliyor, kare başına `String`
-  yok. *(phase-2'de daraltıldı: onda bir **yalnız bitmiş** komutta kalıyor,
-  koşan sayaç her zaman tam saniye — gerekçesi orada.)*
+- **Biçim okuma sorusuna göre:** dakikanın altında onda birli (`1.4s`,
+  `45.3s`), dakikadan sonra `1m 05s`, saatten sonra `1h 02m`. Metin yığın
+  tamponunda üretiliyor, kare başına `String` yok. *(İki turda oturdu:
+  ondalık phase-2'de **yalnız bitmiş** komutta indirildi — koşan sayaç her
+  zaman tam saniye, gerekçesi orada; tavanı da 10 sn'den 60 sn'ye kullanıcı
+  kararıyla açıldı.)*
 - **Renk `dim`.** Sayaç bloğun üstverisi, komutun parçası değil — dock'un
   bağlam satırıyla aynı sınıf ve aynı rolden.
 - **Eşik `1s` tasarım sabiti**, ölçüm değil: `docs/OLCUMLER.md`'ye girmiyor.
@@ -66,7 +66,7 @@ hâlâ kapsamda, yani sayaç hücreleri için ikinci bir yola gerek yok.
   - `ShellLog::duration(id, running) -> Option<Duration>` — biten blokta
     kayıtlı süre, koşan blokta `running_since`'in yaşı.
   - `Counter` — sayacın metnini **yığında** üreten tip (`fmt::Write`, kare
-    başına ayırma yok); yanında `COUNTER_FLOOR` ve `COUNTER_TENTHS_UNTIL`.
+    başına ayırma yok); yanında `COUNTER_FLOOR` ve `Precision`.
 - **`crates/bt-core/src/session.rs`**
   - `Blocks::anchors`: `Vec<(u32, u16, u16)>`; faz 1 satırın son **dolu**
     sütununu da kaydediyor (mürekkep, zemin ya da kural çizgisi).

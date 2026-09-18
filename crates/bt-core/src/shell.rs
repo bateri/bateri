@@ -967,28 +967,28 @@ fn millis(duration: Duration) -> u32 {
 /// (`docs/ARASTIRMA.md` → `command_duration_threshold`); bizde bugün sabit.
 pub(crate) const COUNTER_FLOOR: Duration = Duration::from_secs(1);
 
-/// Onda birin bırakıldığı sınır.
-///
-/// Altında sorulan şey "ne kadar sürdü" (`1.4s`), üstünde "asıldı mı"
-/// (`12s`); ikincisinde ondalık okunmuyor, gürültü ediyor.
-const COUNTER_TENTHS_UNTIL: Duration = Duration::from_secs(10);
-
 /// Sayacın çözünürlüğü — **koşan** ile **bitmiş** komutta ayrı, ve ayrımın
 /// sebebi hem okuma hem pil.
 ///
 /// Koşan sayaç her değişiminde bir kare istiyor (013 phase-2, saat). Onda bir
-/// gösterseydi ilk on saniye boyunca **saniyede on kare** ederdi, oysa o
-/// pencerede sorulan soru "asıldı mı" ve ondalık gürültüden ibaret. Bitmiş
-/// değer ise donmuş: hiçbir kareye mal olmuyor ve orada ondalık gerçek bilgi
-/// taşıyor — iki koşuyu karşılaştıran için `2.1s` ile `2.9s` fark eder.
+/// gösterseydi **saniyede on kare** ederdi, oysa koşarken sorulan soru
+/// "asıldı mı" ve ondalık gürültüden ibaret. Bitmiş değer ise **donmuş**:
+/// hiçbir kareye mal olmuyor, yani orada ondalığın bedeli sıfır ve bilgisi
+/// gerçek — iki koşuyu karşılaştıran için `2.1s` ile `2.9s` fark eder.
 ///
 /// Görünen sonuç: sayaç `1s, 2s, 3s` diye ilerliyor ve komut bitince `3.4s`
 /// diye **oturuyor**. Sıçrama değil, kesinleşme.
+///
+/// **Ondalığın sınırı saniye kademesi, on saniye değil** (kullanıcı kararı):
+/// bitmiş `45s` de `45.3s` olarak oturuyor, çünkü "asıl sayı" sorusu on
+/// saniyeden sonra da geçerli ve bedeli yok. Dakika kademesinden itibaren
+/// ondalık düşüyor — `1m 05.3s` hem uzun hem okunmuyor; orada aranan şey
+/// zaten kaba büyüklük.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Precision {
     /// Koşan komut: tam saniye.
     Whole,
-    /// Bitmiş komut: on saniyenin altında onda bir.
+    /// Bitmiş komut: dakikanın altında onda bir.
     Tenths,
 }
 
@@ -1055,7 +1055,7 @@ impl Counter {
         // dolmasıdır — o da yukarıdaki tavanla temsil edilemez, bekçisi
         // `the_longest_counter_fits_the_buffer`. Sonucu yutmak yerine
         // `debug_assert` ile bağlanıyor: PTY yolunda panik yok.
-        let written = if precision == Precision::Tenths && duration < COUNTER_TENTHS_UNTIL {
+        let written = if precision == Precision::Tenths && secs < 60 {
             let tenths = duration.as_millis() / 100;
             write!(counter, "{}.{}s", tenths / 10, tenths % 10)
         } else if secs < 60 {
@@ -3071,19 +3071,23 @@ mod tests {
                 .to_owned()
         };
 
-        // Onda bir: eşiğin hemen üstünden 10 saniyenin hemen altına.
+        // **Bitmiş değerde ondalık, saniye kademesinin tamamında.** Eşiğin
+        // hemen üstünden dakikanın hemen altına: sınır on saniye **değil**
+        // (kullanıcı kararı) — donmuş bir değerde ondalığın bedeli yok ve
+        // "asıl sayı" sorusu on saniyeden sonra da geçerli.
         assert_eq!(text(1_000), "1.0s");
         assert_eq!(text(1_449), "1.4s");
         assert_eq!(text(9_999), "9.9s");
+        assert_eq!(text(10_000), "10.0s");
+        assert_eq!(text(45_300), "45.3s");
+        assert_eq!(text(59_999), "59.9s");
         // Kırpma, yuvarlama değil: 1.49 saniye "1.4s", "1.5s" değil. Sayaç
         // ileri değil geri dürüst olsun.
         assert_eq!(text(1_499), "1.4s");
 
-        // Saniye.
-        assert_eq!(text(10_000), "10s");
-        assert_eq!(text(59_999), "59s");
-
-        // Dakika; saniye iki hane, yoksa "1m 5s" ile "1m 50s" karışır.
+        // Dakikadan itibaren ondalık düşüyor: `1m 05.3s` hem uzun hem
+        // okunmuyor, orada aranan şey kaba büyüklük. Saniye iki hane, yoksa
+        // "1m 5s" ile "1m 50s" karışır.
         assert_eq!(text(60_000), "1m 00s");
         assert_eq!(text(65_000), "1m 05s");
         assert_eq!(text(3_599_999), "59m 59s");
@@ -3096,8 +3100,11 @@ mod tests {
     /// **Koşan sayaç ondalık göstermiyor**, bitmiş olan gösteriyor.
     ///
     /// Ayrımın sebebi hem okuma hem pil: koşan sayacın her değişimi bir kare
-    /// istiyor, yani onda bir ilk on saniyede **saniyede on kare** ederdi.
-    /// Kademe kaldırılırsa burası kızarır ve saat sessizce 10 Hz'e çıkardı.
+    /// istiyor, yani onda bir **saniyede on kare** ederdi. Ayrım kaldırılırsa
+    /// burası kızarır ve saat sessizce 10 Hz'e çıkardı.
+    ///
+    /// İki uçta da sınanıyor, çünkü ondalık artık dakikaya kadar uzanıyor:
+    /// koşan `45s` ile bitmiş `45.3s` aynı süreden doğuyor.
     #[test]
     fn a_running_counter_costs_one_frame_a_second() {
         let elapsed = Duration::from_millis(3_400);
@@ -3107,6 +3114,15 @@ mod tests {
             "koşan sayaç ondalık gösteriyor"
         );
         assert_eq!(Counter::new(elapsed, Precision::Tenths).as_str(), "3.4s");
+
+        // Onda birin eski tavanının (10 sn) üstü: koşan hâlâ tam saniye.
+        let long = Duration::from_millis(45_300);
+        assert_eq!(
+            Counter::new(long, Precision::Whole).as_str(),
+            "45s",
+            "koşan sayaç on saniyeden sonra da tam saniye kalmalı"
+        );
+        assert_eq!(Counter::new(long, Precision::Tenths).as_str(), "45.3s");
 
         // Tik tam saniyeye kuruluyor: 3.4 saniyede 600 ms kaldı.
         assert_eq!(next_tick(elapsed), Duration::from_millis(600));
