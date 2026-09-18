@@ -84,6 +84,30 @@ arc, bleed, unravel, recede, sublime`; silme için `smooth | shatter`; buffer
 lift için `off | smooth | spring`. Site yedi imleç stili sayıyor: Snap, Ease,
 Spring, Smear, Squash, Phosphor, Arc.
 
+**Ayar penceresinin Motion sekmesi (ekran görüntüsü, 18 Eylül 2026, 0.1.10).**
+Binary'den okunan tek liste meğer efektlere **dağılmış** bir birleşimmiş;
+panelin kendi dökümü:
+
+| efekt | açıklaması (panelden) | değerler |
+|---|---|---|
+| Buffer lift | vertical movement when output advances | `off`, `smooth`, `spring` |
+| Keypress | per-glyph arrival while you type | `off`, `fade`, `rise`, `pop`, `extrude`, `heat`, `echo`, `drop`, `ink`, `squeeze` |
+| Status bar | path, counters, and width changes | `off`, `on` |
+| Erase | the glyph you delete with Backspace | `off`, `iris`, `undertow`, `echo`, `bleed`, `unravel`, `recede`, `sublime`, `shatter` |
+| Cursor motion | caret between cells | `snap`, `ease`, `spring`, `smear`, `squash`, `phosphor`, `arc` |
+| Smooth scrolling | disable for Mos or external scrollers | aç/kapa |
+
+Bölümün başlığı bir tasarım kuralı söylüyor: *"each effect has one clear owner
+— speed applies across the section"*. `TIMING` altında iki şey var: **Speed**
+(*"multiplier on every duration"*, ekranda **240 ms**) ve **Reduce motion**
+(`off`/`on`/`system`).
+
+**Blink bu panelde YOK** ve bu, bizim için kaydın en değerli satırı: referans
+animasyon saydığı her efekti burada topluyor, blink ise `[typography]`'de
+"Shape"in yanında düz bir anahtar. Yani referansta blink bir animasyon değil,
+**sert bir aç/kapa**. (`blinkAlpha`'nın `float` olması bunu çürütmüyor: 0 ile 1
+arasında bir değer taşıyabilen bir alan, 0 ve 1'i de taşır.)
+
 | anahtar | ne |
 |---|---|
 | `cursor_motion` | alt hücre interpolasyonlu imleç kayması |

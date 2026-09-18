@@ -370,7 +370,22 @@ Sadelik ile codebase-fit aynı kusuru **birbirinden bağımsız** çıkardı (M1
   seçmeden boşta-değil bir pencere doğururdu).
   *Not:* varsayılan `"off"` olduğu için S2'nin zaman aşımı yalnız **açan**
   kullanıcıyı ilgilendiriyor — ama açmayı güvenli kılan şey tam da o.
-- **Görüntü (sert / sınırlı geçiş): açık bırakıldı, önce referansa bakılacak.**
+- **Görüntü: SERT aç/kapa** (2026-09-18, referans bakışından sonra).
+  Kullanıcı Metalterm'in Motion panelini getirdi ve cevap doğrudan çıktı:
+  **blink o panelde yok.** Referans animasyon saydığı her efekti orada
+  topluyor — Buffer lift, Keypress, Status bar, Erase, Cursor motion, Smooth
+  scrolling — her birinin adlandırılmış stilleri ve bölüm genelinde tek bir
+  süre çarpanı var (*"each effect has one clear owner — speed applies across
+  the section"*). Blink ise `[typography]`'de, "Shape"in yanında düz bir
+  anahtar. Yani referans blink'i bir animasyon olarak **görmüyor**.
+  Sınırlı geçiş reddedildi: mimari bedeli (her flip'te ekran hızında kısa bir
+  animasyon, `Motion`'a girme zorunluluğu ve R10'un "ikinci alfa yazarı
+  doğmaz" kazancının kaybı) karşılığında referansta izi bile yok.
+  `blinkAlpha`'nın `float` olması bunu çürütmüyor — 0 ile 1 arasını taşıyan
+  bir alan 0 ve 1'i de taşır. Kayıt: `docs/ARASTIRMA.md` → Hareket.
+  *(Aşağıdaki madde bu kararın alınmadan önceki hâli; tarihli kayıt böyle
+  okunur.)*
+- ~~**Görüntü (sert / sınırlı geçiş): açık bırakıldı, önce referansa bakılacak.**~~
   `docs/ARASTIRMA.md` yalnız anahtarı listeliyor, blink'in neye benzediğine
   dair veri yok; materyaldeki yöntemin aynısı uygulanacak. Bakış **phase-2'nin
   ön koşulu** ve kullanıcıda (`[elle]`); sonucu bu bölüme ikinci bir madde
