@@ -58,12 +58,21 @@ payı** (`bt_gpu::dock_px`; formülün tek kopyası orada, `split_into_grid` onu
 tüketiyor): iki satır saç çizgisine yapışınca dock bakılamaz duruyordu. Payın
 kaynağı sol payın ta kendisi (`CellMetrics::gutter_px`) — ikinci bir tasarım
 sabiti yok, aynı içi girinti iki eksende ve punto büyüyünce pay da büyüyor.
-Saç çizgisi payın **üstünde**, viewport'un tepesinde. Dock ötelemeden
+Saç çizgisi payın **üstünde**, viewport'un tepesinde; **ikincisi** iki satırın
+arasındaki boşluğun ortasında, aynı renk ve aynı kalınlıkta — boşluk ayrımı
+önerir, çizgi söyler. Kenara değil ortaya konuyor, yoksa bir satıra yapışır ve
+ona ait görünürdü. Dock ötelemeden
 **yapısal olarak** muaf:
 listeleri dock-yerel doğuyor, ekrana taşıyan şey o ikinci viewport. Üst
 satırında prompt işareti (safha rengiyle), metin, sönük öneri,
 `region_highlight` renkleri ve caret var; alt satırında **bağlam** —
-`{tam yol} | {dal}`, sol altta ve sönük — **dock'un sol kenarından**, giriş
+`{tam yol} | {dal}`, sol altta ve sönük; **içinde iki kademe** — yolun son
+bileşeni (aktif klasör) ile dal öne çıkıyor, üst dizinler ve ayraç geri
+çekiliyor, çünkü aranan bilgi "hangi klasördeyim". Soluk ton yeni bir renk
+değil, sönüğün sönüğü: ayracın ta kendisi (`Theme::separator_linear`), yani
+hiyerarşi tek kuraldan (`dim_toward`) iki kez geçerek doğuyor. Kökte ve eğik
+çizgisiz yolda ayrım yok, tamamı öne çıkıyor — yanlışın yönü güvenli.
+Satır **dock'un sol kenarından**, giriş
 metninin hizasından değil: metinle hizalanınca sebepsiz girintili görünüyordu
 ve bağlam giriş satırının devamı değil, dock'un altbilgisi. İki satırın arasında
 da boşluk var (dış payın yarısı). Bağlamın iki ucu iki ayrı yerden:
