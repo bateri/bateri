@@ -367,8 +367,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bt_core::{
-        Blocks, DockState, DockStatus, Osc52, Session, SessionOptions, ShellPhase,
-        ShellState, TerminalOptions, Theme, Wake,
+        Blocks, DockState, DockStatus, Osc52, Session, SessionOptions, ShellPhase, ShellState,
+        TerminalOptions, Theme, Wake,
     };
 
     use super::*;
@@ -740,8 +740,8 @@ mod tests {
 
     #[test]
     fn the_shell_keeps_the_prompt_when_the_user_asks_for_it() {
-        // `prompt = "shell"`in öteki ucu: ortama `BATERI_PROMPT=shell`
-        // düşünce kullanıcının prompt'u **yerinde** kalıyor. Anahtarın bütün
+        // `integration = "blocks"`in öteki ucu: ortama `BATERI_DOCK=off`
+        // düşünce kullanıcının prompt'u **yerinde** kalıyor. Kademenin bütün
         // varlık sebebi bu ve tek tanığı gerçek zsh — `shell_integration_env`
         // yalnız çiftin gönderildiğini görüyor, betiğin onu okuduğunu değil.
         let root = TempRoot::new("prompt-shell");
@@ -760,8 +760,9 @@ mod tests {
                 env: HashMap::from([
                     ("HOME".to_owned(), home.display().to_string()),
                     ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
-                    // `blocks` kademesinin teli: betik `PS1`'i sıfırlamıyor.
-                    ("BATERI_PROMPT".to_owned(), "shell".to_owned()),
+                    // `blocks` kademesinin teli: dock yok, yani betik ne
+                    // `PS1`'i sıfırlıyor ne aynayı kuruyor ne dalı basıyor.
+                    ("BATERI_DOCK".to_owned(), "off".to_owned()),
                 ]),
                 cols: 40,
                 rows: 10,
@@ -794,6 +795,22 @@ mod tests {
                 .join("\n")
                 .contains("ZSHPROMPTXY")
         });
+        // **VE AYNA HİÇ KURULMADI.** Bu kademede dock yok, yani aynanın
+        // okuyucusu da yok; kancalar yine de kurulsaydı her tuş vuruşunda beş
+        // değişken base64'e kodlanıp akışa yazılır ve karşılığında hiçbir şey
+        // çizilmezdi. Tanığı `DockState`: prompt çoktan basıldı (yukarıdaki
+        // iki bekleme geçti), yani ayna gelecekse gelmişti.
+        //
+        // Ölçüt `Live` **olmaması**: kanal hiç konuşmadıysa durum doğuştan
+        // geldiği gibi kalır. `Unavailable` da kabul değil — o "ayna var ama
+        // gösteremedik" demek olurdu.
+        let mut dock = DockState::default();
+        session.dock_state(&mut dock);
+        assert_eq!(
+            dock.status,
+            DockStatus::Idle,
+            "dock'suz kademede ayna kuruldu: tuş başına bedel, karşılığı yok"
+        );
         session.shutdown();
     }
 
