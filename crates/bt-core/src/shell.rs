@@ -78,6 +78,8 @@
 //!   yoksa satır sonu yapıştırılmış bir `D;0\r` yükü bizde bozuk görünürdü.
 
 use std::collections::VecDeque;
+use std::fmt::{self, Write as _};
+use std::time::{Duration, Instant};
 
 /// Kabuğun akışa bastığı tek bir OSC 133 işareti.
 ///
@@ -148,8 +150,21 @@ pub enum ShellPhase {
 pub(crate) enum Outcome {
     /// `A` geldi, `D` gelmedi.
     Pending,
-    /// `D` geldi; kabuk kodu okunamayacak şekilde bastıysa `None`.
-    Finished(Option<i32>),
+    /// `D` geldi; kabuk kodu okunamayacak şekilde bastıysa `exit` `None`.
+    Finished {
+        exit: Option<i32>,
+        /// `C` ile `D` arasında geçen süre, milisaniye.
+        ///
+        /// Bloğun **kendi içinde**, yan tabloda değil: akıbetle aynı ömre
+        /// sahip ve halkanın tahliyesi ikisini birlikte atıyor. `u32` tavanı
+        /// 49 gün; ondan uzun süren komutun sayacı doyuyor, sarmıyor.
+        ///
+        /// Süreyi hiç görmemiş blokta sıfır: `C` gelmeden `D` gelirse
+        /// (kimliksiz `A`'dan sonra gelen `D`, ya da entegrasyonun yarısı)
+        /// uydurulmuş bir süre yazmak yerine eşiğin altına düşülüyor, yani
+        /// sayaç çizilmiyor.
+        elapsed_ms: u32,
+    },
 }
 
 /// Bir bloğun **çizilebilir** durumu; renge [`crate::Session::frame`]'de
@@ -437,7 +452,8 @@ const BLOCK_LOG_FLOOR: usize = 256;
 /// az bir satır (prompt) düştüğü için geçmişte görünebilecek blok sayısının
 /// üst sınırı odur. Sabit bir tavan seçilseydi ya scrollback'in altında kalıp
 /// hâlâ ekranda olan blokları renksiz bırakır ya da boşuna yer tutardı.
-/// Kayıt başına 8 bayt: varsayılan 10 000 satırda 80 KB.
+/// Kayıt başına 16 bayt: varsayılan 10 000 satırda 160 KB. (013'e kadar 8
+/// bayttı; [`Outcome::Finished`] çıkış kodunun yanına geçen süreyi de aldı.)
 /// **Bilinen sınır:** tavan oturum doğarken belirleniyor; `scrollback` canlı
 /// büyütülürse halka büyümüyor ve aradaki fark kadar eski blok rengini
 /// kaybediyor — şerit **çizilmez**, yanlış çizilmez.
@@ -512,10 +528,11 @@ impl BlockLog {
         self.entries.push_back(Outcome::Pending);
     }
 
-    /// `D` ile kapanan bloğun kodunu işler; defterde olmayan kimlik yoksayılır.
-    fn finish(&mut self, id: u32, exit: Option<i32>) {
+    /// `D` ile kapanan bloğun kodunu ve süresini işler; defterde olmayan
+    /// kimlik yoksayılır.
+    fn finish(&mut self, id: u32, exit: Option<i32>, elapsed_ms: u32) {
         if let Some(at) = self.index_of(id) {
-            self.entries[at] = Outcome::Finished(exit);
+            self.entries[at] = Outcome::Finished { exit, elapsed_ms };
         }
     }
 
@@ -560,6 +577,16 @@ pub(crate) struct ShellLog {
     /// Dock'un bağlam satırı: dizin ve dal. Aynanın **yanında**, içinde değil
     /// ([`DockContext`]); aynı kilit, ayrı ömür.
     pub(crate) context: DockContext,
+    /// Koşan komutun başlangıç anı; komut koşmuyorken `None`.
+    ///
+    /// **Tek alan, blok başına değil:** aynı anda tek komut koşar, çünkü
+    /// `C` ile `D` arasında kabuk bir sonraki prompt'u basmıyor. Defterin her
+    /// girdisine bir `Instant` koymak 10 000 satırlık scrollback'te sekme
+    /// başına ödenen ölü bir bedel olurdu.
+    ///
+    /// `Instant`, sistem saati değil: kullanıcı saati değiştirse ya da yaz
+    /// saati geçse bile süre geriye akmaz.
+    pub(crate) running_since: Option<Instant>,
 }
 
 /// Caret'in sahibi: ızgara mı, dock mu.
@@ -667,6 +694,7 @@ impl ShellLog {
             blocks: BlockLog::new(scrollback),
             dock: DockState::default(),
             context: DockContext::default(),
+            running_since: None,
         }
     }
 
@@ -694,14 +722,27 @@ impl ShellLog {
                 }
             }
             Mark::PromptEnd => state.phase = ShellPhase::Input,
-            Mark::CommandStart => state.phase = ShellPhase::Running,
+            Mark::CommandStart => {
+                state.phase = ShellPhase::Running;
+                // Saatin tek dikildiği yer. `C` komutun **çalışmaya
+                // başladığını** söylüyor; prompt'un basılması ya da
+                // kullanıcının yazdığı süre sayaca girmemeli.
+                self.running_since = Some(Instant::now());
+            }
             Mark::CommandEnd { exit, id } => {
                 state.phase = ShellPhase::Finished;
                 // Kodu **her hâlde** tazeliyoruz: okunamayan bir kodu eskisiyle
                 // doldurmak, biten komutu başkasının koduyla etiketlemek olurdu.
                 state.last_exit = exit;
+                // Saat burada tükeniyor ve `take` zorunlu: kalsaydı iki komut
+                // arasında (`Finished` safhası, içinde bir `git` fork'u)
+                // bitmiş bir komut hâlâ koşuyormuş gibi sayılırdı.
+                let elapsed = self
+                    .running_since
+                    .take()
+                    .map_or(0, |since| millis(since.elapsed()));
                 if let Some(id) = id {
-                    self.blocks.finish(id, exit);
+                    self.blocks.finish(id, exit, elapsed);
                 }
             }
         }
@@ -766,7 +807,7 @@ impl ShellLog {
         }
         match self.blocks.last()? {
             (id, Outcome::Pending) => Some(id),
-            (_, Outcome::Finished(_)) => None,
+            (_, Outcome::Finished { .. }) => None,
         }
     }
 
@@ -804,7 +845,7 @@ impl ShellLog {
                 last_ink: self.dock.last_ink,
                 insert_keymap: self.dock.insert_keymap,
             }),
-            (_, Outcome::Finished(_)) => None,
+            (_, Outcome::Finished { .. }) => None,
         }
     }
 
@@ -841,10 +882,122 @@ impl ShellLog {
             return Some(Stripe::Running);
         }
         match self.blocks.get(id)? {
-            Outcome::Finished(Some(0)) => Some(Stripe::Success),
-            Outcome::Finished(Some(_)) => Some(Stripe::Error),
-            Outcome::Finished(None) | Outcome::Pending => None,
+            Outcome::Finished { exit: Some(0), .. } => Some(Stripe::Success),
+            Outcome::Finished { exit: Some(_), .. } => Some(Stripe::Error),
+            Outcome::Finished { exit: None, .. } | Outcome::Pending => None,
         }
+    }
+
+    /// Bloğun **çizilebilir** süresi; sayaç doğurmayan her hâlde `None`.
+    ///
+    /// İki kaynak, tek soru: koşan blokta saatin yaşı, biten blokta defterin
+    /// kaydı. Ayrı ayrı sorulsaydı çağıran "bu blok koşuyor mu" sorusunu
+    /// ikinci kez sormak zorunda kalırdı ve [`Self::stripe`] ile ayrışabilirdi
+    /// — ikisi de `running`'i **dışarıdan** alıyor, yani aynı karede aynı
+    /// yanıta bakıyorlar.
+    ///
+    /// Eşik burada **uygulanmıyor**: "bir saniyeyi geçti mi" bir çizim kararı
+    /// ve çizen taraf ([`crate::Session::frame`]) veriyor. Burada uygulansaydı
+    /// saatin bir sonraki tikini hesaplayan yol da eşiği ikinci kez bilmek
+    /// zorunda kalırdı.
+    pub(crate) fn duration(&self, id: u32, running: Option<u32>) -> Option<Duration> {
+        if running == Some(id) {
+            // Koşan blok ama saat yok: entegrasyonun yarısı geldi (`A` var,
+            // `C` yok). Uydurulmuş bir süre yerine sayaç yok.
+            return self.running_since.map(|since| since.elapsed());
+        }
+        match self.blocks.get(id)? {
+            Outcome::Finished { elapsed_ms, .. } => Some(Duration::from_millis(elapsed_ms.into())),
+            Outcome::Pending => None,
+        }
+    }
+}
+
+/// [`Duration`]'ı milisaniyeye indirir, doyurarak.
+///
+/// `as` ile daraltma sarardı: 49 günden uzun süren bir komut (nohup'lanmış bir
+/// derleme, unutulmuş bir `tail -f`) sayacı sıfırdan başlatırdı. Doyma yanlış
+/// ama **monoton**; sarma yanlış ve şaşırtıcı.
+fn millis(duration: Duration) -> u32 {
+    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
+}
+
+/// Sayacın eşiği — bundan kısa süren komut hiç sayaç doğurmaz.
+///
+/// **Tasarım sabiti, ölçüm değil** (`docs/OLCUMLER.md`'ye girmez): her `ls`'in
+/// yanında `0.01s` yazması gürültü olurdu, bir saniyeyi geçen komut ise iki
+/// soru doğuruyor — koşarken "asıldı mı", bitince "ne kadar sürdü" — ve
+/// ikisinin cevabı aynı sayı. Referans ürün aynı eşiği ayara açıyor
+/// (`docs/ARASTIRMA.md` → `command_duration_threshold`); bizde bugün sabit.
+pub(crate) const COUNTER_FLOOR: Duration = Duration::from_secs(1);
+
+/// Onda birin bırakıldığı sınır.
+///
+/// Altında sorulan şey "ne kadar sürdü" (`1.4s`), üstünde "asıldı mı"
+/// (`12s`); ikincisinde ondalık okunmuyor, gürültü ediyor.
+const COUNTER_TENTHS_UNTIL: Duration = Duration::from_secs(10);
+
+/// Sayacın metni — **yığında**, kare başına ayırma yok.
+///
+/// `String` olsaydı koşan her blok için her karede bir ayırma ederdi: metin
+/// saniyede bir değişiyor ama her karede yeniden üretiliyor.
+///
+/// Tavan temsil edilebilir en uzun metinden geliyor ve sabit bir tahmin değil:
+/// süre `u32` milisaniye, yani en çok ~1193 saat, yani en uzun metin
+/// `"1193h 03m"` — dokuz bayt. Tampon bir sınama ile bağlı
+/// ([`the_longest_counter_fits_the_buffer`]).
+pub(crate) struct Counter {
+    text: [u8; Counter::CAPACITY],
+    len: usize,
+}
+
+impl Counter {
+    const CAPACITY: usize = 12;
+
+    /// Süreyi metne çevirir.
+    ///
+    /// Dört kademe ve hepsi okuma sorusundan: onda bir, saniye, dakika, saat.
+    /// Kırpma **yuvarlamanın yerine** bilinçli — `1.9s` yazarken 2.0 saniyeyi
+    /// geçmiş bir komut olmasın; sayaç ileri değil geri dürüst olur.
+    pub(crate) fn new(duration: Duration) -> Self {
+        let mut counter = Self {
+            text: [0; Self::CAPACITY],
+            len: 0,
+        };
+        let secs = duration.as_secs();
+        // `write!` bir `fmt::Result` döndürüyor ve tek hata kolu tamponun
+        // dolmasıdır — o da yukarıdaki tavanla temsil edilemez, bekçisi
+        // `the_longest_counter_fits_the_buffer`. Sonucu yutmak yerine
+        // `debug_assert` ile bağlanıyor: PTY yolunda panik yok.
+        let written = if duration < COUNTER_TENTHS_UNTIL {
+            let tenths = duration.as_millis() / 100;
+            write!(counter, "{}.{}s", tenths / 10, tenths % 10)
+        } else if secs < 60 {
+            write!(counter, "{secs}s")
+        } else if secs < 3600 {
+            write!(counter, "{}m {:02}s", secs / 60, secs % 60)
+        } else {
+            write!(counter, "{}h {:02}m", secs / 3600, (secs / 60) % 60)
+        };
+        debug_assert!(written.is_ok(), "sayaç tamponu doldu: {duration:?}");
+        counter
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        // Yazan tek yol `write_str` ve o `&str` alıyor, yani tampon her zaman
+        // geçerli UTF-8. Bozuk kol boş dizgiye düşüyor: sayaç için panik
+        // etmek, PTY yolunda panik yasağının ihlali olurdu.
+        std::str::from_utf8(&self.text[..self.len]).unwrap_or("")
+    }
+}
+
+impl fmt::Write for Counter {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(fmt::Error)?;
+        let slot = self.text.get_mut(self.len..end).ok_or(fmt::Error)?;
+        slot.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
     }
 }
 
@@ -2003,6 +2156,18 @@ mod tests {
         log.apply(Mark::CommandEnd { exit, id: Some(id) });
     }
 
+    /// Bloğun kaydettiği çıkış kodu; defterde yoksa ya da hâlâ açıksa `None`.
+    ///
+    /// Aşağıdaki sınamalar **kodu** soruyor, süreyi değil: geçen süre gerçek
+    /// saatten geliyor ve eşitlenemez. `Outcome`'ın tamamıyla karşılaştırmak
+    /// onları saate bağımlı ve kırılgan yapardı.
+    fn exit_of(log: &ShellLog, id: u32) -> Option<Option<i32>> {
+        match log.blocks.get(id)? {
+            Outcome::Finished { exit, .. } => Some(exit),
+            Outcome::Pending => None,
+        }
+    }
+
     #[test]
     fn the_log_remembers_each_block_by_its_id() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -2010,8 +2175,8 @@ mod tests {
         run_block(&mut log, 2, Some(130));
         log.apply(Mark::PromptStart { id: Some(3) });
 
-        assert_eq!(log.blocks.get(1), Some(Outcome::Finished(Some(0))));
-        assert_eq!(log.blocks.get(2), Some(Outcome::Finished(Some(130))));
+        assert_eq!(exit_of(&log, 1), Some(Some(0)));
+        assert_eq!(exit_of(&log, 2), Some(Some(130)));
         // Açık ama kapanmamış: koşuyor ya da boş prompt.
         assert_eq!(log.blocks.get(3), Some(Outcome::Pending));
         assert_eq!(log.blocks.get(4), None);
@@ -2036,11 +2201,8 @@ mod tests {
         // Düşen bloğun rengi yok; kare yolu onu **çizmez**, yanlış çizmez.
         assert_eq!(log.blocks.get(1), None);
         assert_eq!(log.blocks.get(2), None);
-        assert_eq!(log.blocks.get(3), Some(Outcome::Finished(Some(0))));
-        assert_eq!(
-            log.blocks.get(BLOCK_LOG_FLOOR as u32 + 2),
-            Some(Outcome::Finished(Some(0)))
-        );
+        assert_eq!(exit_of(&log, 3), Some(Some(0)));
+        assert_eq!(exit_of(&log, BLOCK_LOG_FLOOR as u32 + 2), Some(Some(0)));
     }
 
     #[test]
@@ -2053,7 +2215,7 @@ mod tests {
         run_block(&mut log, 2, Some(0));
         run_block(&mut log, 1, Some(3));
 
-        assert_eq!(log.blocks.get(1), Some(Outcome::Finished(Some(3))));
+        assert_eq!(exit_of(&log, 1), Some(Some(3)));
         assert_eq!(log.blocks.get(2), None);
     }
 
@@ -2085,7 +2247,7 @@ mod tests {
             exit: Some(1),
             id: None,
         });
-        assert_eq!(log.blocks.get(1), Some(Outcome::Finished(Some(0))));
+        assert_eq!(exit_of(&log, 1), Some(Some(0)));
     }
 
     /// Testlerin kodlayıcısı — üretimde karşılığı kabuğun saf zsh kolu.
@@ -2807,9 +2969,92 @@ mod tests {
             run_block(&mut log, id, Some(0));
         }
         // Taban olsaydı bu blok çoktan düşmüş olurdu.
-        assert_eq!(
-            log.blocks.get(BLOCK_LOG_FLOOR as u32 + 1),
-            Some(Outcome::Finished(Some(0)))
+        assert_eq!(exit_of(&log, BLOCK_LOG_FLOOR as u32 + 1), Some(Some(0)));
+    }
+
+    /// Sayacın dört kademesi; sınırların **iki yakası** da sınanıyor.
+    ///
+    /// Kademe sınırında bir `<` yerine `<=` yazmak belirtisi olmayan bir kusur
+    /// olurdu: `10s` yerine `10.0s` yazan bir sayaç yanlış değil, yalnız
+    /// tasarımın dışında — ve hiçbir derleyici onu görmez.
+    #[test]
+    fn the_counter_reads_its_four_tiers() {
+        let text = |ms| Counter::new(Duration::from_millis(ms)).as_str().to_owned();
+
+        // Onda bir: eşiğin hemen üstünden 10 saniyenin hemen altına.
+        assert_eq!(text(1_000), "1.0s");
+        assert_eq!(text(1_449), "1.4s");
+        assert_eq!(text(9_999), "9.9s");
+        // Kırpma, yuvarlama değil: 1.49 saniye "1.4s", "1.5s" değil. Sayaç
+        // ileri değil geri dürüst olsun.
+        assert_eq!(text(1_499), "1.4s");
+
+        // Saniye.
+        assert_eq!(text(10_000), "10s");
+        assert_eq!(text(59_999), "59s");
+
+        // Dakika; saniye iki hane, yoksa "1m 5s" ile "1m 50s" karışır.
+        assert_eq!(text(60_000), "1m 00s");
+        assert_eq!(text(65_000), "1m 05s");
+        assert_eq!(text(3_599_999), "59m 59s");
+
+        // Saat.
+        assert_eq!(text(3_600_000), "1h 00m");
+        assert_eq!(text(3_720_000), "1h 02m");
+    }
+
+    /// Tamponun tavanı temsil edilebilir en uzun metni alıyor.
+    ///
+    /// [`Counter::CAPACITY`] bir tahmin değil türetme: süre `u32` milisaniye,
+    /// yani en çok ~1193 saat. Tavan küçültülürse `Counter::new`'in
+    /// `debug_assert`'ü burada patlar — sürüm derlemesinde metin sessizce
+    /// kırpılırdı.
+    #[test]
+    fn the_longest_counter_fits_the_buffer() {
+        let longest = Counter::new(Duration::from_millis(u64::from(u32::MAX)));
+        assert_eq!(longest.as_str(), "1193h 02m");
+        assert!(
+            longest.as_str().len() <= Counter::CAPACITY,
+            "sayaç tamponu en uzun metni almıyor: {}",
+            longest.as_str()
         );
+    }
+
+    /// `C` görmeden `D` gelen blok **sıfır** süre kaydeder, uydurma değil.
+    ///
+    /// Yol gerçek: kimliksiz bir `A`'dan sonra gelen `D`, ya da entegrasyonun
+    /// yarısını basan bir kabuk. Sıfır eşiğin altında kalıyor, yani sayaç
+    /// çizilmiyor — "bilinmeyen çizilmez" kuralının süre kolu.
+    #[test]
+    fn a_command_that_never_started_records_no_time() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply(Mark::PromptStart { id: Some(1) });
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+
+        let duration = log.duration(1, None).expect("biten blokta süre olmalı");
+        assert_eq!(duration, Duration::ZERO);
+        assert!(duration < COUNTER_FLOOR, "sıfır süre eşiği geçmemeli");
+    }
+
+    /// Saat `D`'de **tükeniyor**: iki komut arası koşan bir komut yok.
+    ///
+    /// `take` yerine okuma yapılsaydı `Finished` safhasında (içinde bir `git`
+    /// fork'u) bitmiş komut hâlâ sayıyormuş gibi görünürdü ve phase-2'de saat
+    /// hiç durmazdı.
+    #[test]
+    fn the_clock_is_spent_when_the_command_ends() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply(Mark::PromptStart { id: Some(1) });
+        log.apply(Mark::CommandStart);
+        assert!(log.running_since.is_some(), "`C` saati dikmeliydi");
+
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert!(log.running_since.is_none(), "`D` saati tüketmeliydi");
     }
 }
