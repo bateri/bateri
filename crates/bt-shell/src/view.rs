@@ -573,7 +573,7 @@ mod tests {
     /// Sahnelerin ızgara ölçüsü; pay **argüman**, çünkü sorulan iki ayrı şey
     /// var: hücre aritmetiği (pay sıfır) ve payın kendisi.
     fn grid(gutter: u16) -> CellMetrics {
-        CellMetrics::new(9, 18, gutter).expect("sıfır olmayan hücre")
+        CellMetrics::new(9, 18, gutter, 1).expect("sıfır olmayan hücre")
     }
 
     /// Testlerin ortak sahnesi: 100×33 grid, 9×18 hücre, @2x.

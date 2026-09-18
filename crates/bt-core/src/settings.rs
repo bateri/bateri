@@ -132,6 +132,47 @@ impl CursorMotion {
     }
 }
 
+/// `[terminal] cursor`: imlecin **şekli** — DECSCUSR'ın üç biçimi.
+///
+/// Bölüm `[motion]` **değil**: şekil hareket değil, terminalin durum
+/// makinesinin bir parçası. `[terminal]`'da duruyor çünkü dosya kodu
+/// aynalıyor — değer [`TerminalOptions`] ile `Session`'a iniyor ve orada
+/// alacritty'nin `default_cursor_style`'ı oluyor. Referans anahtarı kendi
+/// `[typography]`'sinde tutuyor (`docs/ARASTIRMA.md` → İmleç); adını aldık,
+/// yerini değil.
+///
+/// **Bu ayar yalnız varsayılanı söyler.** Uygulama DECSCUSR (`\e[5 q`) ya da
+/// OSC 50 ile şekli değiştirebilir ve o sözü dinleniyor: vim insert modda
+/// çubuk isterse çubuk olur. Kullanıcının burada yazdığı şey, kimse bir şey
+/// istemediğindeki hâl.
+///
+/// `Hidden` ve `HollowBlock` **temsil edilmiyor**: ilki bir şekil değil
+/// görünürlük (`\e[?25l`) ve `Cursor::visible` onu zaten taşıyor; ikincisi
+/// odak kaybının hâli ve odak bugün sınırdan geçmiyor
+/// (`.tasks/014-imlec-stilleri/plan.md` → Kapsam Dışı).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaretShape {
+    /// Hücreyi dolduran blok — alacritty'nin de varsayılanı.
+    #[default]
+    Block,
+    /// Hücrenin altında ince bir çizgi.
+    Underline,
+    /// Hücrenin solunda ince bir dikey çubuk.
+    Beam,
+}
+
+impl CaretShape {
+    /// Ayar dosyasındaki yazılışı; ayrıştırıcının kabul ettikleriyle **aynı**
+    /// olmak zorunda ([`caret_shape`]).
+    fn name(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Underline => "underline",
+            Self::Beam => "beam",
+        }
+    }
+}
+
 /// `[motion] reduce_motion`: animasyonların kısılıp kısılmayacağı.
 ///
 /// **`bool` değil** ve sebebi bu dosyanın kendi kuralı: en olası seçim
@@ -253,6 +294,9 @@ const RETIRED: &[(&str, &str)] = &[(
 pub struct Settings {
     /// `[terminal] scrollback`: geçmişte tutulan satır, `0..=SCROLLBACK_MAX`.
     pub scrollback: usize,
+    /// `[terminal] cursor`: imlecin **varsayılan** şekli; uygulama DECSCUSR
+    /// ile üstüne yazabilir ([`CaretShape`]).
+    pub cursor: CaretShape,
     /// `[appearance] theme`: [`SYSTEM_THEME`] ya da tema **adı** —
     /// `themes/{ad}.toml` ya da gömülü bir tema. Ad biçim olarak geçerli (boş
     /// değil, `/` yok); var olup olmadığı dosya sistemi ister ve `bt-shell`'in
@@ -294,6 +338,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             scrollback: 10_000,
+            cursor: CaretShape::default(),
             theme: SYSTEM_THEME.to_owned(),
             light_theme: "bateri-light".to_owned(),
             dark_theme: "bateri".to_owned(),
@@ -364,6 +409,10 @@ impl Settings {
 [terminal]
 # Lines of history kept above the screen, from 0 to 100000.
 scrollback = 10000
+# The cursor's default shape: "block" fills the cell, "underline" sits below
+# it, "beam" stands at its left edge. Programs such as vim may ask for a
+# different shape while they run; this is the shape when none is asked for.
+cursor = "block"
 
 [appearance]
 # "system" follows the macOS light/dark appearance. Any other value is a theme
@@ -475,9 +524,14 @@ integration = "auto"
                     parsed.settings.scrollback =
                         scrollback(text, item, fallback.scrollback, &mut parsed.diagnostics);
                 }
+                if let Some(item) = terminal.get("cursor") {
+                    parsed.settings.cursor =
+                        caret_shape(text, item, fallback.cursor, &mut parsed.diagnostics);
+                }
             }
             None if root.contains_key("terminal") => {
                 parsed.settings.scrollback = fallback.scrollback;
+                parsed.settings.cursor = fallback.cursor;
             }
             None => {}
         }
@@ -627,6 +681,7 @@ integration = "auto"
         TerminalOptions {
             scrollback: self.scrollback,
             osc52: self.osc52,
+            cursor: self.cursor,
         }
     }
 
@@ -1054,6 +1109,37 @@ fn cursor_motion(
     fallback
 }
 
+/// `terminal.cursor`: tam olarak `"block"`, `"underline"` ya da `"beam"`.
+///
+/// [`cursor_motion`] ile aynı kural ve aynı gerekçe: kabul edilmeyen değer
+/// `fallback`'i alır ve tanı bırakır. Yanlış tahminin belirtisi ekrandaki
+/// imlecin şekli, yani kullanıcı ne olduğunu görüyor — `clipboard.osc52`'nin
+/// "kapalıya düş" istisnası buraya geçmiyor.
+fn caret_shape(
+    text: &str,
+    item: &Item,
+    fallback: CaretShape,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> CaretShape {
+    const KEY: &str = "terminal.cursor";
+    let found = match item.as_str() {
+        Some("block") => return CaretShape::Block,
+        Some("underline") => return CaretShape::Underline,
+        Some("beam") => return CaretShape::Beam,
+        Some(value) => format!("{value:?}"),
+        None => kind(item).to_owned(),
+    };
+    diagnostics.push(Diagnostic {
+        key: Some(KEY),
+        line: item.span().and_then(|span| line_of(text, span.start)),
+        message: format!(
+            "`{KEY}` must be \"block\", \"underline\" or \"beam\", found {found}; using \"{}\"",
+            fallback.name()
+        ),
+    });
+    fallback
+}
+
 /// `motion.reduce_motion`: tam olarak `"system"`, `"on"` ya da `"off"`.
 ///
 /// [`cursor_motion`] ile aynı kural ve aynı gerekçe: kabul edilmeyen değer
@@ -1196,6 +1282,7 @@ mod tests {
         let doc = document(Settings::TEMPLATE).expect("şablon TOML");
         for (section, key) in [
             ("terminal", "scrollback"),
+            ("terminal", "cursor"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -1352,7 +1439,8 @@ mod tests {
             after.terminal(),
             TerminalOptions {
                 scrollback: 20,
-                osc52: Osc52::Copy
+                osc52: Osc52::Copy,
+                cursor: CaretShape::default(),
             }
         );
         // Tema adları terminal seçeneği değil: tema her kayıtta yeniden
@@ -1369,6 +1457,7 @@ mod tests {
         // ayarlarınkini alıyor ve tanı **onu** söylüyor.
         let current = Settings {
             scrollback: 100_000,
+            cursor: CaretShape::default(),
             theme: "paper".to_owned(),
             light_theme: "chalk".to_owned(),
             dark_theme: "ink".to_owned(),
@@ -1622,9 +1711,42 @@ mod tests {
             after.terminal(),
             TerminalOptions {
                 scrollback: 500,
-                osc52: Osc52::Off
+                osc52: Osc52::Off,
+                cursor: CaretShape::default(),
             }
         );
+    }
+
+    #[test]
+    fn cursor_shape_is_read() {
+        // Dosyada yoksa `block`: alacritty'nin varsayılanıyla aynı, yani
+        // ayar gelmeden önceki davranış birebir korunuyor.
+        assert_eq!(clean("").cursor, CaretShape::Block);
+        assert_eq!(
+            clean("[terminal]\ncursor = \"underline\"\n").cursor,
+            CaretShape::Underline
+        );
+        // Satır içi tablo aynı bölüm.
+        assert_eq!(
+            clean("terminal = { cursor = \"beam\" }").cursor,
+            CaretShape::Beam
+        );
+        // Tanınmayan değer anahtarı **değiştirmiyor** ve tanı bırakıyor;
+        // büyük/küçük harf duyarlı.
+        for text in [
+            "[terminal]\ncursor = \"bar\"\n",
+            "[terminal]\ncursor = \"Block\"\n",
+        ] {
+            let (settings, diagnostic) = rejected(text);
+            assert_eq!(settings.cursor, CaretShape::Block, "{text}");
+            assert_eq!(diagnostic.key, Some("terminal.cursor"), "{text}");
+        }
+        // Bölüm **bölüm değilse** (ör. `terminal = 1`) anahtar fallback'e
+        // düşüyor — `scrollback`'in ikinci kolunun aynısı. Tanı bölümün
+        // kendisine ait, anahtara değil.
+        let (settings, diagnostic) = rejected("terminal = 1");
+        assert_eq!(settings.cursor, CaretShape::Block);
+        assert_eq!(diagnostic.key, Some("terminal"));
     }
 
     #[test]

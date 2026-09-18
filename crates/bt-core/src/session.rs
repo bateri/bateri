@@ -49,7 +49,7 @@ use alacritty_terminal::term::{Config, Osc52 as TermOsc52, RenderableContent, Te
 // çağırıyor, yani kendi impl bloğunun dışından; `EventedPty` ve `io::Read`
 // gelmiyor, onların tek çağrı yeri kendi impl blokları.
 use alacritty_terminal::tty::{self, EventedReadWrite as _, Pty, Shell};
-use alacritty_terminal::vte::ansi::CursorShape;
+use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle};
 // `Event` adı bu modülde alacritty'nin olayına ait; `polling`'inki `TappedPty`
 // dışında hiç geçmediği için ada gelen o, takma alan o.
 use polling::{Event as PollingEvent, PollMode, Poller};
@@ -57,6 +57,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
+use crate::settings::CaretShape;
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockState, Precision, Scanner, ShellLog,
     ShellState, Stripe,
@@ -211,6 +212,15 @@ pub struct Cursor {
     /// gizlemesiyle de, geçmişe kaydırmayla da görünmez olur ve o hâllerde
     /// devralan kimse yoktur.
     pub caret_in_dock: bool,
+    /// Caret'in **şekli** — uygulamanın DECSCUSR'ı ya da ayarın varsayılanı.
+    ///
+    /// `visible` ile ayrı sorular: bu "hangi biçim", o "çizilecek mi".
+    /// Görünmezlik burada temsil edilmiyor (`Hidden` bloğa düşüyor,
+    /// [`caret_shape_of`]) — iki yerde temsil edilen bir gerçek ayrışır ve
+    /// belirti "gizli imleç çiziliyor" olurdu.
+    ///
+    /// Dock'un caret'i de aynı alandan besleniyor: caret tek, şekli de tek.
+    pub shape: CaretShape,
     /// Bloğun altında kalan metnin (glyph **ve** kural çizgilerinin) rengi,
     /// **lineer** RGBA; bugünkü değeri temanın zemini.
     pub text: LinearRgba,
@@ -428,6 +438,32 @@ pub struct TerminalOptions {
     pub scrollback: usize,
     /// Uygulamanın OSC 52 ile panoya yazıp yazamayacağı.
     pub osc52: Osc52,
+    /// İmlecin **varsayılan** şekli; uygulamanın DECSCUSR'ı üstüne yazar.
+    pub cursor: CaretShape,
+}
+
+/// [`CaretShape`]'i alacritty'nin şekline çevirir — `term_config`'in tek
+/// kullanıcısı, ayrı bir `impl` hak etmiyor.
+fn caret_shape(shape: CaretShape) -> CursorShape {
+    match shape {
+        CaretShape::Block => CursorShape::Block,
+        CaretShape::Underline => CursorShape::Underline,
+        CaretShape::Beam => CursorShape::Beam,
+    }
+}
+
+/// Alacritty'nin şeklini sınırın şekline çevirir — `frame()`'in kullandığı yön.
+///
+/// `Hidden` ve `HollowBlock` **bloğa düşüyor** ve ikisi de adlandırılmış
+/// karar: ilkini [`Cursor::visible`] zaten taşıyor (iki yerde temsil edilen
+/// bir gerçek ayrışır), ikincisi odak kaybının hâli ve odak bugün sınırdan
+/// geçmiyor — içi boş imleç kendi setini bekliyor.
+fn caret_shape_of(shape: CursorShape) -> CaretShape {
+    match shape {
+        CursorShape::Underline => CaretShape::Underline,
+        CursorShape::Beam => CaretShape::Beam,
+        CursorShape::Block | CursorShape::HollowBlock | CursorShape::Hidden => CaretShape::Block,
+    }
 }
 
 /// OSC 52'nin kipi: terminaldeki uygulama (ssh'taki vim de) panoya yazabilir mi.
@@ -459,6 +495,14 @@ fn term_config(options: TerminalOptions) -> Config {
         osc52: match options.osc52 {
             Osc52::Off => TermOsc52::Disabled,
             Osc52::Copy => TermOsc52::OnlyCopy,
+        },
+        // **Yalnız varsayılan.** Uygulamanın DECSCUSR'ı (`\e[5 q`) bunu
+        // ezer ve ezmeli: vim insert modda çubuk istiyor. `blinking` phase-1
+        // için varsayılanında (`false`) kalıyor — blink phase-2'nin işi ve
+        // okunmayan bir anahtarı şimdiden yazmak yanlış olurdu.
+        default_cursor_style: CursorStyle {
+            shape: caret_shape(options.cursor),
+            blinking: false,
         },
         ..Config::default()
     }
@@ -1860,6 +1904,12 @@ impl Session {
             // buradaki üç ön koşulu (pencerenin dock'u, alternatif ekran,
             // tazelik) bilmiyordu — ve bayat aynada **iki caret** doğuyordu.
             caret_in_dock,
+            // Şekil döngüden **önce** okundu (`cursor_shape`) ve oradan
+            // geliyor: `RenderableCursor` onu `Term::cursor_style()`'dan
+            // çözüyor, yani DECSCUSR ile ayarın varsayılanı zaten birleşmiş
+            // hâlde. İkinci bir `cursor_style()` çağrısı aynı değeri ikinci
+            // kez okumak olurdu.
+            shape: caret_shape_of(cursor_shape),
             // Blok opak ve altındaki metni örtüyor: zemin rengi onu yeniden
             // okunur kılıyor. Kaynak `theme`, hücrelerinkiyle **aynı** —
             // ayrışsalardı imlecin altındaki harf bloğa değil eski bir palete
@@ -3177,6 +3227,7 @@ mod tests {
             terminal: TerminalOptions {
                 scrollback: 100,
                 osc52: Osc52::Copy,
+                cursor: CaretShape::default(),
             },
             theme: THEME,
             // Varsayılan **dock'suz**: sınamaların çoğu `/bin/sh` koşuyor ve
@@ -4826,6 +4877,12 @@ mod tests {
         let options = TerminalOptions {
             scrollback: 100,
             osc52: Osc52::Off,
+            // **Varsayılan olmayan** bilerek: fixture varsayılanla
+            // doldurulursa `default_cursor_style` zaten `Config::default()`'a
+            // eşit olur, aşağıdaki döngü onu sıfırlama listesine eklemeden
+            // geçer ve guard'ın vaadi ("bu alanların dışında hiçbir şey
+            // kurulmuyor") sessizce yalan olurdu.
+            cursor: CaretShape::Beam,
         };
         let before = term_config(options);
         assert_eq!(
@@ -4853,12 +4910,30 @@ mod tests {
             "osc52 değişimi geçmişi oynattı"
         );
 
-        // İki alanın dışında hiçbir şey kurulmuyor.
-        for config in [before, scrolled, copying] {
+        let shaped = term_config(TerminalOptions {
+            cursor: CaretShape::Underline,
+            ..options
+        });
+        assert_eq!(
+            (shaped.scrolling_history, shaped.osc52),
+            (100, TermOsc52::Disabled),
+            "şekil değişimi başka alanı oynattı"
+        );
+        assert_eq!(
+            shaped.default_cursor_style.shape,
+            CursorShape::Underline,
+            "şekil ayardan gelmedi"
+        );
+        // Blink phase-2'nin işi: phase-1 onu varsayılanında bırakıyor.
+        assert!(!shaped.default_cursor_style.blinking, "blink kuruldu");
+
+        // **Üç** alanın dışında hiçbir şey kurulmuyor.
+        for config in [before, scrolled, copying, shaped] {
             assert_eq!(
                 Config {
                     scrolling_history: Config::default().scrolling_history,
                     osc52: Config::default().osc52,
+                    default_cursor_style: Config::default().default_cursor_style,
                     ..config
                 },
                 Config::default()
@@ -4889,6 +4964,7 @@ mod tests {
         session.set_terminal_options(TerminalOptions {
             scrollback: 10,
             osc52: Osc52::Copy,
+            cursor: CaretShape::default(),
         });
         {
             let term = session.term.lock();
@@ -4973,6 +5049,7 @@ mod tests {
         let options = |osc52| TerminalOptions {
             scrollback: 100,
             osc52,
+            cursor: CaretShape::default(),
         };
 
         session.set_terminal_options(options(Osc52::Off));
@@ -6749,7 +6826,11 @@ mod tests {
                     } else {
                         Osc52::Off
                     };
-                    session.set_terminal_options(TerminalOptions { scrollback, osc52 });
+                    session.set_terminal_options(TerminalOptions {
+                        scrollback,
+                        osc52,
+                        cursor: CaretShape::default(),
+                    });
                     let _ = session.scroll_page(1);
                     sets += 1;
                     std::thread::sleep(Duration::from_millis(1));
