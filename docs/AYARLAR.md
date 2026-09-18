@@ -624,7 +624,8 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 | `background` | varsayılan arka plan, pencerenin zemini |
 | `foreground` | varsayılan ön plan |
 | `dim` | sönük (SGR 2) yazılmış varsayılan ön plan |
-| `accent` | vurgu; imleç ve **koşan** komutun işareti |
+| `accent` | vurgu; **koşan** komutun işareti |
+| `cursor` | imleç bloğunun rengi |
 | `success` | durum: başarı; sıfır çıkış koduyla biten komutun işareti |
 | `error` | durum: hata; sıfırdan farklı çıkış koduyla biten komutun işareti |
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |
@@ -634,7 +635,12 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   gelir; yalnız zemini değiştiren iki satırlık bir dosya geçerli bir temadır.
 - Gömülü bir temayı **gölgeleyen** dosyada (`themes/bateri-light.toml`) eksik
   anahtar o gömülü temanın kendisinden gelir: yalnız `accent` yazmak açık
-  temayı yalnız imleciyle değiştirir.
+  temayı yalnız koşan komutun işaretiyle değiştirir.
+- **`cursor`'ın tek istisnası var:** eksikse tabandan değil **`accent`'ten**
+  gelir. Rol sonradan doğdu ve ondan önce imleç `accent` rengindeydi; tabandan
+  doldurulsaydı eski bir tema dosyası tek harf değişmeden başka görünürdü —
+  gömülü temanın altın imleci, kullanıcının seçtiği vurgunun yerine geçerdi.
+  İmlecini ayırmak isteyen anahtarı yazar.
 - Kabul edilmeyen renk (`"red"`, `"#12345"`, sayı) tabanın (`bateri` ya da
   gölgelenen gömülü tema) değerini alır ve uyarı verir; öteki renkler yine
   okunur.
@@ -663,6 +669,7 @@ background = "#000000"
 foreground = "#d8d9dd"
 dim = "#909093"
 accent = "#7a9cc6"
+cursor = "#d9b063"
 success = "#8bb58b"
 error = "#d16d6a"
 
@@ -696,6 +703,7 @@ background = "#f5f6f8"
 foreground = "#24262c"
 dim = "#696b70"
 accent = "#3d6aa8"
+cursor = "#8a6512"
 success = "#3b7a3b"
 error = "#b5423d"
 

@@ -126,6 +126,8 @@ R4.4, R11.2, R12 (şekil yarısı)_
 - [x] Test: `[terminal] cursor` round-trip + tanınmayan değerin tanısı
 - [x] `docs/AYARLAR.md`, `CLAUDE.md`, `docs/YOL-HARITASI.md` (kayma notu)
 - [x] Doğrulama geçti (`make hepsi`)
-- [ ] `make duman` (kullanıcıda — ajanın kabuğunda yanlış tanıyla kırmızı
-      düşüyor)
+- [x] `make duman` — kullanıcı koştu (2026-09-19), yeşil:
+      `kare=29 hucre=8 glif=6 kural=15 icerik=2 hareket=27 sessiz=1755.67ms
+      kapanis=clean`. `icerik` blink'ten önceki değerinde ve `sessiz` tabanın
+      iki katı: saat hermetik koşuda hiç kurulmuyor.
 - [x] Yayın etkisi yazıldı

@@ -168,5 +168,8 @@ yapıyordu) ve faz karesinden sonra link'in bir vsync fazladan açık kalması.
 - [x] Doğrulama geçti (`make hepsi`)
 - [x] `make test-yaris` (paylaşılan durum: `Waker`'a ikinci giriş noktası)
 - [x] Riskli phase: `/code-review` koştu, bulgular giderildi
-- [ ] `make duman` (kullanıcıda)
+- [x] `make duman` — kullanıcı koştu (2026-09-19), yeşil:
+      `kare=29 hucre=8 glif=6 kural=15 icerik=2 hareket=27 sessiz=1755.67ms
+      kapanis=clean`. `icerik` blink'ten önceki değerinde ve `sessiz` tabanın
+      iki katı: saat hermetik koşuda hiç kurulmuyor.
 - [x] Yayın etkisi yazıldı

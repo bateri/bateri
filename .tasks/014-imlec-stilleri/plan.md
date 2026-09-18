@@ -254,5 +254,5 @@ Frame şekli saklar                  arm_clock: min(iki deadline)
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| phase-3 | |
+| phase-3 | ✅ |
 | kapı | |

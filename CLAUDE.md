@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `bateri`, macOS için GPU'nun (Metal 3) çizdiği bir terminal emülatörüdür. Rust
 ile yazılır; AppKit ve Metal'e `objc2` ailesi üzerinden **doğrudan** bağlanır,
 Swift katmanı yoktur. Referans ürün Metalterm'dir (metalterm.dev, kapalı
-kaynak): komut blokları, sekiz rollü tema modeli, grain/sheen ile materyal
+kaynak): komut blokları, dokuz rollü tema modeli, grain/sheen ile materyal
 yüzeyler, fizik tabanlı imleç hareketi ve boşta sıfır kare. Referansın binary
 incelemesinden çıkan mimari, özellik ve ayar envanteri `docs/ARASTIRMA.md`'dedir;
 bir işe başlamadan önce ilgili bölümüne bakılır, sıfırdan keşfedilmez.
@@ -417,11 +417,17 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   çözülemezse komut `None`'a düşer ve alacritty'nin kendi yolu geri gelir —
   banner döner, pencere çalışır. Süreli koşu (`BT_RUN_SECONDS`) bu yola
   **uğramaz**: kendi sabit betiğini verir.
-- **Tema = sekiz rol:** arka plan, ön plan, dim, accent ve dört durum. Bugün
-  altısı tüketiliyor — `background`, `foreground`, `dim` (SGR 2'li varsayılan ön
-  plan), `accent` (imleç **ve** koşan komut bloğunun şeridi), `success` ve
-  `error` (biten bloğun şeridi) — ve yanlarında `[ansi]`'nin 16 rengi; kalan iki
-  durum rolü (uyarı, bilgi) 014 ile gelir. Çizilmeyen rol eklenmiyor.
+- **Tema = dokuz rol:** arka plan, ön plan, dim, accent, cursor ve dört durum.
+  Bugün yedisi tüketiliyor — `background`, `foreground`, `dim` (SGR 2'li
+  varsayılan ön plan), `accent` (koşan komut bloğunun şeridi), `cursor` (imleç
+  bloğu **ve** ANSI 258'in cevabı), `success` ve `error` (biten bloğun şeridi)
+  — ve yanlarında `[ansi]`'nin 16 rengi; kalan iki durum rolü (uyarı, bilgi)
+  sonraki setlerde gelir. Çizilmeyen rol eklenmiyor. `cursor` **014'te
+  ayrıldı**: ikisi tek değerden beslenirken "imleci altın yap" isteği koşan
+  komutun şeridini de altın yapıyordu, ve 258 yuvası zaten `accent`'e takma
+  addı. Tema dosyasında **opsiyonel ve eksikte `accent`'e düşüyor**, tabana
+  değil — rolden önce yazılmış bir kullanıcı teması tek harf değişmeden aynı
+  görünmeli.
   `bt_core::Theme` paletin **tek kaynağı**: zemin atlaması,
   clear, imleç, blok şeridi ve renk sorusunun yanıtı aynı değerden. `Adapter`'da **yaprak
   kilit** altında durur; `frame()` kopyayı `Term` kilidinden önce alır,

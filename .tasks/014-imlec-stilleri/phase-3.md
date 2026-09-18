@@ -45,6 +45,29 @@ _Requirements: R13, R13.1, R13.2, R13.3_
 - Gömülü açık tema (`bateri-light`) kendi altınını taşıyor: koyu temanın
   tonu açık zeminde okunmaz olurdu.
 
+## Uygulama Notları
+
+- **Altın iki ton, tek değil.** İmleç bloğu opak ve altındaki harf **zemin
+  rengiyle** çiziliyor, yani renk hem zemine hem kendi üstündeki zemin renkli
+  harfe karşı okunur olmalı: koyu temada açık altın (`#d9b063`, paletin kendi
+  sarı ailesinden ama ondan ayrık), açık temada koyu bronz (`#8a6512`) —
+  koyunun tonu beyaz zeminde harfi yutardı. İkisi de zevk kararı, ölçüm değil.
+- **Eksik anahtarın `accent`'e düşmesi `parse`'ın sırasına yazıldı**, ayrı bir
+  "var mı" sorusuna değil: `accent` okunduktan sonra yuva ona eşitleniyor,
+  anahtar varsa `read_color` üstüne yazıyor. Kabul edilmeyen değer yuvayı
+  bırakıyor, yani yine `accent` — yönü güvenli.
+- **Bir sınamanın adı değişti** ve bu bilinçli: `empty_theme_is_the_base`
+  artık `empty_theme_is_the_base_except_the_cursor`. "Boş dosya tabanın
+  aynısıdır" değişmezi `cursor` için **tasarım gereği** geçerli değil ve eski
+  ad bunu gizlerdi.
+- **Yedi sınama fixture'ı güncellendi** (`bt-core` beşi, `bt-shell` ikisi):
+  hepsi "yalnız şunu yazan tema dosyası" kuruyordu ve `cursor`'ın `accent`'i
+  izlemesi beklentilerini kaydırdı. Hiçbiri zayıflatılmadı — beklenen değer
+  kuralın kendisiyle değiştirildi.
+- **Belgedeki tema blokları da güncellendi** ve bu bir sınamanın söylediği
+  şeydi (`documented_blocks_are_the_embedded_themes`): blok `cursor` taşımasaydı
+  onu kopyalayan kullanıcı gömülü paletin imlecini **alamazdı**.
+
 ## Yayın Etkisi
 
 - **tema biçimi** — `cursor` anahtarı eklendi, **opsiyonel**, eksikte
@@ -59,13 +82,13 @@ _Requirements: R13, R13.1, R13.2, R13.3_
 
 ## Checklist
 
-- [ ] `bt-core`: `Theme.cursor` + `cursor_linear()`; iki gömülü tema dolduruldu
-- [ ] `bt-core`: ANSI 258 yeni role bağlandı, OSC 10/11 `accent`'te kaldı
-- [ ] `bt-core`: tema dosyası `cursor`'ı opsiyonel okuyor, eksikte `accent`
-- [ ] `bt-gpu`: iki caret çağrı yeri `cursor_linear()` okuyor
-- [ ] Test: anahtarsız tema → `cursor == accent` (geriye dönük okuma)
-- [ ] Test: anahtarlı tema → rolü kullanıyor, `accent` değişmiyor
-- [ ] Test: ANSI 258 yeni rolü veriyor
-- [ ] `docs/AYARLAR.md`, `CLAUDE.md`
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] Yayın etkisi yazıldı
+- [x] `bt-core`: `Theme.cursor` + `cursor_linear()`; iki gömülü tema dolduruldu
+- [x] `bt-core`: ANSI 258 yeni role bağlandı, OSC 10/11 `accent`'te kaldı
+- [x] `bt-core`: tema dosyası `cursor`'ı opsiyonel okuyor, eksikte `accent`
+- [x] `bt-gpu`: iki caret çağrı yeri `cursor_linear()` okuyor
+- [x] Test: anahtarsız tema → `cursor == accent` (geriye dönük okuma)
+- [x] Test: anahtarlı tema → rolü kullanıyor, `accent` değişmiyor
+- [x] Test: ANSI 258 yeni rolü veriyor
+- [x] `docs/AYARLAR.md`, `CLAUDE.md`
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] Yayın etkisi yazıldı
