@@ -30,11 +30,14 @@ bir durma koşuluyla.
 - **R3 — Şekil hareket karesinde kaybolmaz.** `Frame` şekli kendi alanında
   tutar: `push_caret` yazar, `move_caret` korur. Kaybolması **temsil edilemez**
   olmalı — yoksa beam ilk sönüp yanışta bloğa dönerdi.
-- **R4 — Ayarlar.** `[cursor] shape` (varsayılan `"block"`) ve `[cursor] blink`
-  (`"auto" | "on" | "off"`, varsayılan `"off"`).
+- **R4 — Ayarlar.** `[terminal] cursor` (varsayılan `"block"`) ve
+  `[terminal] cursor_blink` (`"auto" | "on" | "off"`, varsayılan `"off"`).
+  Bölüm seçimi kodu aynalıyor (ikisi de `TerminalOptions`'a iniyor) ve
+  anahtar adları referansınkiler; bölüm **zaten var** (`scrollback`), yani
+  ayrıştırıcıya yeni bir bölüm kolu eklenmiyor.
   - **R4.1** — İkisi de `TerminalOptions`'a iner; `Changes`'e **yeni alan
     eklenmez** (`Changes::terminal` zaten kapıyı tutuyor).
-  - **R4.2** — Üç değerli `blink` `default_cursor_style`'a **sığmaz** ve
+  - **R4.2** — Üç değerli `cursor_blink` `default_cursor_style`'a **sığmaz** ve
     birleşme yeri yazılıdır: `"auto"` orada çözülür (`blinking: false`,
     uygulama açar), `"on"` ve `"off"` ise **ezmedir** — `\e[2 q` gelse de
     `"on"` yanar, `\e[5 q` gelse de `"off"` söner. Ezme `frame()`'de,
@@ -43,8 +46,8 @@ bir durma koşuluyla.
     sessizce `"auto"`'ya indirir.
   - **R4.3** — Kabul edilmeyen değer kendi anahtarını değiştirmez ve tanı
     bırakır (`cursor_motion` örüntüsü; `osc52` istisnası buraya **geçmez**).
-  - **R4.4** — phase-1 `blink`'i şemaya da `docs/AYARLAR.md`'ye de **koymaz**:
-    okunmayan ama belgelenmiş bir anahtar en kötü ara durumdur.
+  - **R4.4** — phase-1 `cursor_blink`'i şemaya da `docs/AYARLAR.md`'ye de
+    **koymaz**: okunmayan ama belgelenmiş bir anahtar en kötü ara durumdur.
 - **R5 — Blink bir hareket karesidir.** `Waker::resume()` hasar **dikmez**;
   blink `icerik=`'i artırmaz ve `Term` kilidine girmez.
 - **R6 — Uyku testi üç soru sorar.** Faz değişimi tek atımlıktır ve
@@ -123,8 +126,14 @@ bir durma koşuluyla.
    olduğunu söyler, süreler ve katsayılar `bt_gpu::motion`'ındır.
 4. **Durma koşulu S1 + S2** (uygulama + hareketsizlik). Gerekçe ve reddedilen
    S3 `discussion.md → Karar`'da.
-5. **`blink` üç değerli, varsayılan `"off"`.** Pencerenin kalıcı olarak
+5. **`cursor_blink` üç değerli, varsayılan `"off"`.** Pencerenin kalıcı olarak
    boşta-değil olması kullanıcının **seçtiği** bir şey olmalı.
+5b. **Anahtarlar `[terminal]` altında** ve adları referansınkiler (`cursor`,
+   `cursor_blink`). Bölüm kodu aynalıyor: ikisi de `TerminalOptions`'a iniyor
+   ve `Changes::terminal` zaten o kapıyı tutuyor. Referansın kendi yerleşimi
+   `[typography]` ama bizde o bölüm yok (`[font]` var) ve imleç şekli bir font
+   özelliği değil; kendi `[cursor]` bölümümüzü açmak da imleç ayarlarını üç
+   yere dağıtırdı (`cursor_motion` `[motion]`'da kalıyor, anahtar silinmez).
 6. **Yeni jeton eklenmiyor.** Blink karesinin CPU tanığı yok ve bu **yazılıyor**:
    varsayılan kapalıyken kapının hiçbir katı bozuk bir blink'i görmez — koruma
    bir jeton değil **varsayılanın kendisi**. Emsal `app.rs:1185-1196`
@@ -163,16 +172,15 @@ bir durma koşuluyla.
 - **`saat=` / `blink=` jetonu** (Karar 6).
 - **Smear/Squash/Phosphor/Arc** hareket stilleri, `intensity`/`duration`
   çarpanları — 008'in kapsam dışısı olarak duruyor.
-- **`cursor_motion`'ın `[cursor]`'a taşınması.** Anahtar silinmez; taşıma
+- **`cursor_motion`'ın `[terminal]`'a taşınması.** Anahtar silinmez; taşıma
   ayrı bir iştir ve bu set yapmıyor.
 
 ## Göç
 
-**Ayar tarafı:** iki yeni anahtar, silinen anahtar yok, bilinmeyen anahtar
-korunuyor. `[cursor]` bugüne kadar "bilinmeyen bölüm" olarak sessizce
-yoksayılıyordu — elinde o bölümü taşıyan bir dosya olan kullanıcı için davranış
-"yoksayılıyor"dan "uygulanıyor"a geçer; tanınmayan **değer** tanı bırakır,
-dosyayı bozmaz.
+**Ayar tarafı:** `[terminal]`'a iki yeni anahtar; silinen anahtar yok,
+bilinmeyen anahtar korunuyor. Bölüm zaten okunuyor (`scrollback`), yani
+"bilinmeyen bölüm birden uygulanmaya başladı" durumu **yok** — göçün yükü
+sıfır. Tanınmayan **değer** kendi anahtarını değiştirmez ve tanı bırakır.
 
 **`make kur` gerekmiyor:** kabuk betiği, terminfo, jeton satırı ve app bundle
 değişmiyor. Şekil ve blink tamamen terminalin kendi işi.
@@ -187,8 +195,8 @@ kaydedilecek bedel şu: materyal yüzeyin yazılı ön koşulu (kare süresi tab
 
 | Phase | İş | Neden bu sırada |
 |-------|-----|-----------------|
-| phase-1 | Şekiller: `Cursor` alanı, `term_config`, `[cursor] shape`, çizim | **Kare altyapısına sıfır dokunuş** ve kendi başına ürün: vim insert modda beam görünür. Tek başına doğrulanabilir — kapının hiçbir katı caret dikdörtgeninin boyutuna bakmıyor. Riskin tamamı phase-2'ye erteleniyor |
-| phase-2 | Blink: `Waker::resume`, uyku testinin üçüncü sorusu, son tarihli saat, faz tipi, `[cursor] blink`, Reduce Motion dışlaması, sözleşme | Tek mimari risk burada ve phase-1 yeşilken tek başına sınanır. **Ön koşulu `[elle]` referans bakışı** (Karar 9) |
+| phase-1 | Şekiller: `Cursor` alanı, `term_config`, `[terminal] cursor`, çizim | **Kare altyapısına sıfır dokunuş** ve kendi başına ürün: vim insert modda beam görünür. Tek başına doğrulanabilir — kapının hiçbir katı caret dikdörtgeninin boyutuna bakmıyor. Riskin tamamı phase-2'ye erteleniyor |
+| phase-2 | Blink: `Waker::resume`, uyku testinin üçüncü sorusu, son tarihli saat, faz tipi, `[terminal] cursor_blink`, Reduce Motion dışlaması, sözleşme | Tek mimari risk burada ve phase-1 yeşilken tek başına sınanır. **Ön koşulu `[elle]` referans bakışı** (Karar 9) |
 
 **phase-1'den sonraki ara durum tutarlı:** `\e[5 q` gönderen vim'de kullanıcı
 yanıp sönmeyen bir **beam** görür. Bugün yanıp sönmeyen bir **blok** görüyor —
@@ -202,7 +210,7 @@ Cursor { shape, … }                 Cursor { blink: bool, … }
 term_config.default_cursor_style    Waker::resume()  (hasar dikmez)
 Caret ölçüsü + CursorBlock.rect     uyku testi: settled() && !flipped
 Frame şekli saklar                  arm_clock: min(iki deadline)
-[cursor] shape                      [cursor] blink  +  Reduce Motion kapısı
+[terminal] cursor                   [terminal] cursor_blink + Reduce Motion
                                     sözleşme: saatin iki tadı
 ```
 

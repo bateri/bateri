@@ -21,13 +21,15 @@ R4.4, R11.2, R12 (şekil yarısı)_
 - **`crates/bt-core/src/session.rs` → `term_config`** — `default_cursor_style`
   artık `TerminalOptions`'tan kuruluyor, `..Config::default()`'a bırakılmıyor.
   Phase-1 yalnız **şekli** yazar; `blinking` varsayılanında (`false`) kalır.
-- **`crates/bt-core/src/settings.rs`** — `[cursor] shape`, varsayılan
+- **`crates/bt-core/src/settings.rs`** — `[terminal] cursor`, varsayılan
   `"block"`. Örüntü `cursor_motion`'ın aynısı: kendi enum'u, private `name()`,
-  `fallback` + `Diagnostic`. İki kol da yazılır (bölümün `Some`'ı **ve**
-  `None if root.contains_key("cursor")`). `TEMPLATE` satırı ve şablon anahtar
-  listesi sınaması. **`Changes`'e alan eklenmez** — `Changes::terminal` zaten
-  `TerminalOptions`'ı tamamıyla taşıyor. **`blink` bu phase'de yok**: ne
-  şemada, ne `TEMPLATE`'te, ne belgede (R4.4).
+  `fallback` + `Diagnostic`. Bölüm **zaten var** (`scrollback`), yani iki kol
+  da (bölümün `Some`'ı ve `None if root.contains_key("terminal")`) yazılı —
+  yeni anahtar ikisine de eklenir, yeni bölüm kolu açılmaz. `TEMPLATE` satırı
+  ve şablon anahtar listesi sınaması. **`Changes`'e alan eklenmez** —
+  `Changes::terminal` zaten `TerminalOptions`'ı tamamıyla taşıyor.
+  **`cursor_blink` bu phase'de yok**: ne şemada, ne `TEMPLATE`'te, ne belgede
+  (R4.4).
 - **`crates/bt-gpu/src/frame.rs`** — üç iş:
   1. `Caret` bir **ölçü** kazanır; `instance()` artık boyutu koşulsuz
      `cell_px`'e çivilemez.
@@ -46,7 +48,7 @@ R4.4, R11.2, R12 (şekil yarısı)_
   caret'in ölçüsünü taşıyan çağrı yerleri. Şekil `bt-core`'dan geliyor;
   **kalınlık** `bt_atlas`'ın alt çizgi metriğinden (R2.2), chevron emsali —
   ikinci bir tasarım sabiti uydurulmaz.
-- **`docs/AYARLAR.md`** — `[cursor] shape`: değerler, varsayılan, tanınmayan
+- **`docs/AYARLAR.md`** — `[terminal] cursor`: değerler, varsayılan, tanınmayan
   değerin davranışı. Şablon bloğu `Settings::TEMPLATE` ile birebir kalmalı
   (`documented_template_is_the_template`).
 - **`CLAUDE.md`** — "Bugünkü hâl"deki imleç cümlesi ("her koşulda dolu bir
@@ -64,7 +66,7 @@ R4.4, R11.2, R12 (şekil yarısı)_
   devam eder ve zeminin altında kalmaz (R2.1'in tanığı; daraltma yanlış yerde
   yapılırsa bu sınama kızarır).
 - Dar caret'in altındaki harf hâlâ ters çevrilir, ama yalnız şeridin altında.
-- `[cursor] shape = "beam"` kayıt anında uygulanır; tanınmayan değer anahtarı
+- `[terminal] cursor = "beam"` kayıt anında uygulanır; tanınmayan değer anahtarı
   **değiştirmez** ve tanı bırakır.
 - **`term_config_keeps_every_other_field` fixture'ı varsayılan olmayan bir
   şekil taşır** (R11.2). Varsayılanla doldurulursa son döngü onu reset
@@ -76,9 +78,9 @@ R4.4, R11.2, R12 (şekil yarısı)_
 
 ## Yayın Etkisi
 
-- **ayar şeması** — `[cursor] shape` eklendi; silinen anahtar yok, bilinmeyen
+- **ayar şeması** — `[terminal] cursor` eklendi; silinen anahtar yok, bilinmeyen
   anahtar korunuyor. `docs/AYARLAR.md` ve `Settings::TEMPLATE` birlikte.
-  `blink` **bilerek yok** (phase-2).
+  `cursor_blink` **bilerek yok** (phase-2).
 - **`CLAUDE.md`** — imleç cümlesi ve anahtar envanteri.
 - **belge** — `docs/YOL-HARITASI.md` beşinci kayma notu (014→015→016→017).
 - shader: **yok** — `.metal` değişmiyor, `#[repr(C)]` düzeni değişmiyor
@@ -93,7 +95,7 @@ R4.4, R11.2, R12 (şekil yarısı)_
       `HollowBlock` bloğa düşüyor
 - [ ] `bt-core`: `term_config` `default_cursor_style`'ı `TerminalOptions`'tan
       kuruyor
-- [ ] `bt-core`: `[cursor] shape` ayrıştırma, iki kol, `TEMPLATE`
+- [ ] `bt-core`: `[terminal] cursor` ayrıştırma, iki kol, `TEMPLATE`
 - [ ] `bt-gpu`: `Caret` ölçüsü, daraltmanın yeri, `Frame`'in şekil alanı,
       `CursorBlock.rect`
 - [ ] `bt-gpu`: kalınlık `bt_atlas`'ın alt çizgi metriğinden
@@ -101,7 +103,7 @@ R4.4, R11.2, R12 (şekil yarısı)_
       yuvasına geçmesi**, `move_caret`'ın şekli koruması
 - [ ] Test: `term_config_keeps_every_other_field` fixture'ı varsayılan
       **olmayan** şekil taşıyor ve reset listesi genişledi
-- [ ] Test: `[cursor] shape` round-trip + tanınmayan değerin tanısı
+- [ ] Test: `[terminal] cursor` round-trip + tanınmayan değerin tanısı
 - [ ] `docs/AYARLAR.md`, `CLAUDE.md`, `docs/YOL-HARITASI.md` (kayma notu)
 - [ ] Doğrulama geçti (`make hepsi`)
 - [ ] `make duman` (kullanıcıda — ajanın kabuğunda yanlış tanıyla kırmızı

@@ -192,8 +192,9 @@ ve `Changes::terminal` zaten *"seçenekler `Session`'a tamamıyla gider"* diyor.
 Blink de aynı yere iniyor (`default_cursor_style.blinking`). Yani:
 `TerminalOptions`'a iki alan, `Changes` dokunulmamış.
 
-Bölüm adı **`[cursor]`**: `shape` ve `blink`. Referansın düz adlarını bölümle
-niteleyip `[motion] cursor_motion` tekrarına düşmüyor.
+Bölüm adı **`[terminal]`**, anahtarlar **`cursor`** ve **`cursor_blink`**.
+*(İlk yazımda `[cursor] shape` + `blink` önerilmişti; referans incelemesi onu
+çürüttü — bkz. aşağıda Karar.)*
 
 ### 5. Blink karesi jeton satırında nasıl görünür? → ✅ karar: **görünmez, ve bu yazılır**
 
@@ -239,7 +240,7 @@ yokluğuydu (OSC 133 hiç basılmıyor), buradaki "reçetede dört baytlık bir 
 dizisi yok" — bir `printf` uzaklıkta. Kabul edilebilir, çünkü kırılırsa
 **sesli** kırılıyor (`sessiz < QUIET_FLOOR` → kırmızı), sessizce değil.
 
-**Önerim: `shape = "block"`, `blink` üç değerli ve varsayılan `"off"`.**
+**Önerim: `cursor = "block"`, `cursor_blink` üç değerli ve varsayılan `"off"`.**
 Şekil varsayılanı alacritty paritesi; blink varsayılanı kapalı, çünkü
 "pencere kalıcı olarak boşta değil" durumu kullanıcının **seçtiği** bir şey
 olmalı, sessizce gelen bir varsayılan değil.
@@ -311,7 +312,7 @@ Sadelik ile codebase-fit aynı kusuru **birbirinden bağımsız** çıkardı (M1
   `Waker` doc'u, `requests`'in "Ne saymıyor: hareket karesini" cümlesi ve
   `Cursor::next_tick`'in "'Ne zaman' sorusunun cevabı burada" cümlesi (saat iki
   deadline'ı `min()`'leyince daralacak).
-- **M14 — phase-1 `blink` anahtarını şemaya/belgeye koymamalı** (işletme):
+- **M14 — phase-1 `cursor_blink` anahtarını şemaya/belgeye koymamalı** (işletme):
   okunmayan ama belgelenmiş anahtar en kötü ara durum.
 
 **Reddedilenler:**
@@ -352,8 +353,18 @@ Sadelik ile codebase-fit aynı kusuru **birbirinden bağımsız** çıkardı (M1
   *Neden S1 tek başına yetmedi:* blink'i bu deponun merkezî vaadiyle
   barıştıran tek şey bir durma koşuludur; S1'de vi modunda bekleyen pencere
   kalıcı olarak boşta-değil kalırdı.
-- **Ayar: `[cursor] blink` üç değerli** (`"auto" | "on" | "off"`),
-  **varsayılan `"off"`**; `[cursor] shape` varsayılan `"block"`.
+- **Ayar: `[terminal] cursor_blink` üç değerli** (`"auto" | "on" | "off"`),
+  **varsayılan `"off"`**; `[terminal] cursor` varsayılan `"block"`.
+  *Bölüm kararı referans incelemesinden sonra düzeltildi (2026-09-18, ikinci
+  tur):* referansta anahtarlar `[typography]` altında ve arayüzde "Shape" /
+  "Blink" diye etiketli (`docs/ARASTIRMA.md` → İmleç). Bizde `[typography]`
+  yok, karşılığı `[font]` — ama imleç şekli bir font özelliği değil. Kendi
+  `[cursor]` bölümümüzü açmak da imleç ayarlarını **üç** yere dağıtırdı
+  (`cursor_motion` `[motion]`'da kalıyor; anahtar silinmez). `[terminal]`
+  seçildi çünkü **dosya kodu aynalıyor**: ikisi de `TerminalOptions`'a iniyor,
+  `Changes::terminal` zaten o kapıyı tutuyor ve bölüm hâlihazırda var
+  (`scrollback`), yani ayrıştırıcıya yeni bölüm kolu eklenmiyor. Anahtar
+  **adları** referansınkiler kalıyor.
   Reddedilenler: **basit bool** ("uygulamayı izle" hiç mümkün olmazdı, vi
   modunun isteği tamamen yutulurdu), **varsayılan `"auto"`** (kullanıcı
   seçmeden boşta-değil bir pencere doğururdu).

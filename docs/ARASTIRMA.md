@@ -103,6 +103,47 @@ Ayar anahtarlarının tamamı (binary'den): `appearance.theme`,
 `restore_windows`, `bell`, `clipboard.osc52`, `keyboard.left_option`,
 `right_option`, `renderer.energy_saving`, `frame_cap`, `substitute_spinner`.
 
+## İmleç (`cursor`, `cursor_blink`) — ikinci tur, aynı build (18 Eylül 2026)
+
+Aynı 0.1.10 binary'sinin ikinci incelemesi; 014 seti için arandı. Yeni sürüm
+değil, aynı kaydın tamamlanması.
+
+- **Bölüm `[typography]`**, kendi başına bir `[cursor]` bölümü **yok**.
+  Kurulu `~/.config/metalterm/settings.toml` `[typography] cursor = "block"`
+  taşıyor ve binary'de `typography` anahtarı geçiyor (`ui_zoom`'un yanında).
+- **Ayar penceresinin etiketleri anahtarlarla birebir:** anahtar listesi
+  `… font_size, line_height, family, ui_scale, cursor, cursor_blink, shell …`
+  ile etiket listesi `… Text size, Line height, Font, UI scale, Shape, Blink,
+  Shell …` aynı sırada. Yani `cursor` → **"Shape"**, `cursor_blink` →
+  **"Blink"**.
+- **`blinkAlpha` bir uniform**, shader'da hesaplanan bir şey değil: `cell`
+  pipeline'ının `Uniforms` yapısında tek `float` olarak duruyor (komşuları
+  `typedMs`, `bleedRight`, `flagsMask`, `ulColours`). Yani fazı **CPU
+  hesaplıyor** ve kare başına veriyor — `timeMs` uniform'u elinin altında
+  olmasına rağmen shader'a bırakmamışlar. **Uyarı:** komşuları hücre düzeyi
+  alanlar olduğu için bu uniform'un imlece mi yoksa SGR 5 (yanıp sönen metin)
+  özniteliğine mi hizmet ettiği string'lerden **ayırt edilemedi**.
+- **İmleç muhtemelen `shape` pipeline'ından çiziliyor:**
+  `ShapeInstance { origin, size, strokeCol, birthMs }` ve fragment girdileri
+  `fill`, `stroke`, `strokeW`, `radius`, `squareCorners`, `anim`,
+  `ditherPhase`. Instance başına **`size`** ve **`strokeW`** taşıması iki şeyi
+  ucuz kılıyor: şekil (beam/underline = dar `size`) ve **içi boş imleç**
+  (yalnız `stroke`). `cell` pipeline'ının `Uniforms`'unda imleç dikdörtgeni
+  **yok** — bizim `CursorBlock` yaklaşımımızdan ayrıldıkları yer burası.
+- **Odak izleniyor:** `NSWindowDidBecomeKeyNotification` ve
+  `NSWindowDidResignKeyNotification` binary'de; içi boş imleç / odakta durma
+  davranışıyla tutarlı.
+- **OSC 12/112 uygulanmış.** Sürüm notu dizgesi: *"Cursor colour. OSC 12/112 is
+  stored in the terminal model and the grid renderer honours the override; the
+  input dock keeps its own terminal-owned caret colour."* Bizde bu boşluk açık
+  (`.tasks/014-imlec-stilleri/context.md` → Kanıt).
+- **Crate düzeni bizimkinin aynısı** (`mt-atlas`, `mt-core`, `mt-gpu`,
+  `mt-shell`) ve panic yolları binary'de. **Ayrı bir blink modülü yok**;
+  `crates/mt-gpu/src/motion.rs` var.
+- **Belirlenemedi:** blink'in sert mi (alfa 1 ↔ 0) yoksa yumuşak mı (rampa)
+  olduğu ve periyodu. `blinkAlpha`'nın `float` olması yumuşağa **izin veriyor**
+  ama kanıtlamıyor; sert bir geçiş de aynı alanı kullanırdı. Gözle bakılacak.
+
 ## Ürün özellikleri (site + sürüm notları)
 
 Komut blokları (süre, kırmızı gutter), komut paleti (⌘⇧P; ayar, tema, sekme,
