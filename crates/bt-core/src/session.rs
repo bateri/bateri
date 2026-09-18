@@ -6929,7 +6929,13 @@ mod tests {
         // `frame()` önce `Term`'ü sonra `shell`'i. `shell` tutulurken `Term`
         // isteyen bir düzenleme burada asılır.
         let wake = Arc::new(TestWake::default());
-        let session = Arc::new(spawn_session(
+        // **Dock'lu oturum şart** ve bu sınama bir dönem onsuz koştu: caret'in
+        // devri `SessionOptions::dock`'a bağlandığında (012, "Devri tek
+        // kaynağa bağla") `spawn_session`'ın dock'suz varsayılanı bu iddiayı
+        // ulaşılamaz kıldı — sınama sessizce değil **kırmızı** kaldı, ama
+        // `make test-yaris` koşullu olduğu için fark edilmedi. Bisect: ilk
+        // kırmızı commit `3273647`.
+        let session = Arc::new(spawn_docked_session(
             // Ayna dizisi ile işaret dizisi **birlikte** akıyor: iki kol tek
             // tarayıcıda ve tek kilitte buluşuyor.
             "while :; do printf '\\033]8133;u;2;;bHM=;;\\007\\033]133;B\\007\
