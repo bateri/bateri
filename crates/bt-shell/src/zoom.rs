@@ -37,6 +37,10 @@ impl Zoom {
         FontOptions {
             family: font.family.clone(),
             size: self.size(font),
+            // Punto geçici, satır aralığı **değil**: Cmd +/− puntoyu
+            // oynatıyor ve çarpan zaten ona göre ölçekleniyor (hücre
+            // yüksekliği fontun metriğinden türüyor).
+            line_height: font.line_height,
         }
     }
 
@@ -89,6 +93,7 @@ mod tests {
         FontOptions {
             family: Some("Menlo".to_owned()),
             size,
+            line_height: 1.0,
         }
     }
 
@@ -112,6 +117,7 @@ mod tests {
         let other = FontOptions {
             family: None,
             size: 13.0,
+            line_height: 1.0,
         };
         assert_eq!(zoom.after_reload(&font(13.0), &other), zoom);
         assert_eq!(zoom.after_reload(&font(13.0), &font(13.0)), zoom);

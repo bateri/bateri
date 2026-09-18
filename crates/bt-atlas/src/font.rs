@@ -346,7 +346,17 @@ pub(crate) fn glyph_index(font: &CTFont, ch: char) -> Option<CGGlyph> {
 }
 
 /// Hücre ölçüsünü fontun kendi metriğinden türetir.
-pub(crate) fn metrics(font: &CTFont) -> Metrics {
+///
+/// `line_height` kullanıcının satır aralığı çarpanı (`[font] line_height`,
+/// taban `1.0`). Fazlalık glyph'in **altına ve üstüne eşit** dağılıyor: yarısı
+/// taban çizgisini aşağı itiyor, kalanı altta kalıyor. Tek yana eklenseydi
+/// metin hücresinin içinde yukarı ya da aşağı kayar ve satır aralığı açıldıkça
+/// bu kayma büyürdü.
+///
+/// Alt çizgi ve üstü çizili **kendiliğinden** takip ediyor: ikisi de tabandan
+/// ölçülüyor ve taban zaten kaymış oluyor. Ayrı bir düzeltme eklenseydi
+/// çarpan büyüdükçe çizgiler harften kopardı.
+pub(crate) fn metrics(font: &CTFont, line_height: f64) -> Metrics {
     // SAFETY: `font` canlı; üçü de saf okuma.
     let (ascent, descent, leading) = unsafe { (font.ascent(), font.descent(), font.leading()) };
     // Yükseklik iki parçanın **ayrı ayrı** yuvarlanıp toplanmasıyla bulunuyor,
@@ -357,11 +367,17 @@ pub(crate) fn metrics(font: &CTFont) -> Metrics {
     // altındaki son kapsama satırı; belirti "yazı biraz garip" olurdu. Sayılar
     // font sürümüne bağlı ve eskiyebilir, **iddia eskimez**: bekçisi
     // `descender_fits_in_the_cell` ve o metriği fontun kendisinden okuyor.
-    let baseline = round_up(ascent);
+    let natural = round_up(ascent).saturating_add(round_up(descent + leading));
+    // Çarpan **hücreye** uygulanıyor, ascent'e değil: ölçüt satırlar arası
+    // mesafe ve o mesafenin fontça tanımı `ascent + descent + leading`.
+    // `1.0`'da fazlalık sıfır, yani bu yol varsayılanda bir no-op.
+    let extra = round_up(f64::from(natural) * (line_height - 1.0));
+    let above = extra / 2;
+    let baseline = round_up(ascent).saturating_add(above);
     let cell_px = (
         round_up(space_advance(font)),
         // `saturating_add`: iki parça da `u16::MAX`'e kadar çıkabiliyor.
-        baseline.saturating_add(round_up(descent + leading)),
+        natural.saturating_add(extra),
     );
     // SAFETY: `font` canlı; üçü de saf okuma.
     let (u_pos, u_thick, x_h) = unsafe {

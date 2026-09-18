@@ -71,6 +71,15 @@ pub struct FontOptions {
     /// Mantıksal punto. Ölçekle çarpılmış hâlinin kırpması `bt-atlas`'ta ve
     /// **sessiz**; buradaki kural yalnız "sonlu ve sıfırdan büyük".
     pub size: f64,
+    /// Satır yüksekliği çarpanı: hücre, fontun kendi
+    /// `ascent + descent + leading`'inin bu katı olur ve fazlalık glyph'in
+    /// **altına ve üstüne eşit** dağılır (taban çizgisi de o kadar iniyor).
+    ///
+    /// Taban `1.0` ve **altına inilmiyor**: fontun istediğinden kısa bir hücre
+    /// `g j p q y` altındaki kapsamayı kırpardı ve bunun kendi bekçisi var
+    /// (`bt-atlas`'ta `descender_fits_in_the_cell`). Ayarın bir bekçiyi
+    /// delmesi, ayarın kendisinden önemli.
+    pub line_height: f64,
 }
 
 impl Default for FontOptions {
@@ -80,6 +89,7 @@ impl Default for FontOptions {
         Self {
             family: None,
             size: 13.0,
+            line_height: 1.0,
         }
     }
 }
@@ -370,6 +380,9 @@ dark_theme = "bateri"
 # family = "Menlo"
 # Size in points.
 size = 13
+# Line spacing as a multiple of the font's own: 1 is the font's own spacing,
+# 1.4 is airy. Below 1 is refused — it would clip the tails of g and y.
+line_height = 1.0
 
 [clipboard]
 # Lets programs in the terminal, also over ssh, copy text to the clipboard
@@ -519,6 +532,10 @@ integration = "auto"
                 if let Some(item) = font.get("size") {
                     parsed.settings.font.size =
                         font_size(text, item, fallback.font.size, diagnostics);
+                }
+                if let Some(item) = font.get("line_height") {
+                    parsed.settings.font.line_height =
+                        line_height(text, item, fallback.font.line_height, diagnostics);
                 }
             }
             None if root.contains_key("font") => {
@@ -910,6 +927,46 @@ fn font_family(
 /// Üst sınır **yok**: kırpma `punto × ölçek`'e bağlı ve `bt-atlas`'ta sessiz
 /// (`discussion.md` → Karar 4). Burada bir tavan olsaydı iki sahibi olurdu
 /// ve pencere ekran değiştirdikçe tanı gelip giderdi.
+/// `font.line_height`: `1.0` ile [`MAX_LINE_HEIGHT`] arasında bir çarpan.
+///
+/// [`font_size`]'ın aksine **iki uçlu**. Alt uç fontun kendi metriğinin
+/// altına inmeyi yasaklıyor (bkz. [`FontOptions::line_height`]); üst uç keyfi
+/// değil bir bütçe: her yuva `cell_w × cell_h` bayt ve atlas sabit boyutlu,
+/// yani çarpan büyüdükçe atlasa sığan glyph sayısı düşüyor. Sınırsız bırakmak
+/// tofu'ya düşen bir terminal demekti ve belirti ancak uzun bir oturumdan
+/// sonra görünürdü.
+fn line_height(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagnostic>) -> f64 {
+    const KEY: &str = "font.line_height";
+    let line = item.span().and_then(|span| line_of(text, span.start));
+    let reject = |message: String| Diagnostic {
+        key: Some(KEY),
+        line,
+        message,
+    };
+    let value = match (item.as_float(), item.as_integer()) {
+        (Some(value), _) => value,
+        (None, Some(value)) => value as f64,
+        (None, None) => {
+            diagnostics.push(reject(format!(
+                "`{KEY}` must be a number, found {}; using {fallback}",
+                kind(item)
+            )));
+            return fallback;
+        }
+    };
+    if !(value.is_finite() && (1.0..=MAX_LINE_HEIGHT).contains(&value)) {
+        diagnostics.push(reject(format!(
+            "`{KEY}` must be a number between 1 and {MAX_LINE_HEIGHT}, \
+found {value}; using {fallback}"
+        )));
+        return fallback;
+    }
+    value
+}
+
+/// Satır yüksekliği çarpanının tavanı — atlas bütçesi (bkz. [`line_height`]).
+pub const MAX_LINE_HEIGHT: f64 = 2.0;
+
 fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagnostic>) -> f64 {
     const KEY: &str = "font.size";
     let line = item.span().and_then(|span| line_of(text, span.start));
@@ -1143,6 +1200,7 @@ mod tests {
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
             ("font", "size"),
+            ("font", "line_height"),
             ("clipboard", "osc52"),
             ("motion", "cursor_motion"),
             ("motion", "reduce_motion"),
@@ -1370,14 +1428,16 @@ mod tests {
             clean("").font,
             FontOptions {
                 family: None,
-                size: 13.0
+                size: 13.0,
+                line_height: 1.0
             }
         );
         assert_eq!(
             clean("[font]\nfamily = \"Monaco\"\nsize = 14.5\n").font,
             FontOptions {
                 family: Some("Monaco".to_owned()),
-                size: 14.5
+                size: 14.5,
+                line_height: 1.0
             }
         );
         // Tam sayı da punto: kullanıcının ilk yazacağı `size = 14`.
@@ -1436,6 +1496,7 @@ mod tests {
             font: FontOptions {
                 family: Some("Monaco".to_owned()),
                 size: 18.0,
+                line_height: 1.0,
             },
             ..Settings::default()
         };
@@ -1791,6 +1852,38 @@ found {found}; using \"auto\""
         let after = clean("[shell]\nintegration = \"off\"\n");
         assert_ne!(before.shell_integration, after.shell_integration);
         assert_eq!(before.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn line_height_is_read_and_bounded() {
+        assert_eq!(clean("").font.line_height, 1.0, "varsayılan fontun kendi");
+        assert_eq!(clean("[font]\nline_height = 1.4\n").font.line_height, 1.4);
+        // Tam sayı da çarpan: kullanıcının yazacağı `line_height = 2`.
+        assert_eq!(clean("[font]\nline_height = 2\n").font.line_height, 2.0);
+
+        // **İki uçlu ve iki ucun gerekçesi ayrı.** Alt uç bir bekçiyi
+        // koruyor: fontun istediğinden kısa hücre `g` ve `y` kuyruklarını
+        // kırpardı (`bt-atlas`'ta `descender_fits_in_the_cell`). Üst uç bir
+        // bütçe: yuva `cell_w × cell_h` bayt ve atlas sabit boyutlu, yani
+        // çarpan büyüdükçe sığan glyph sayısı düşüyor.
+        for value in ["0.9", "0", "-1", "2.5", "1e9"] {
+            let (settings, diagnostic) = rejected(&format!("[font]\nline_height = {value}\n"));
+            assert_eq!(settings, Settings::default(), "{value}");
+            assert_eq!(diagnostic.key, Some("font.line_height"), "{value}");
+            assert!(
+                diagnostic.message.contains("between 1 and 2"),
+                "{value}: {}",
+                diagnostic.message
+            );
+        }
+        // Sayı olmayan değer de kendi anahtarında kalıyor.
+        let (_, diagnostic) = rejected("[font]\nline_height = \"big\"\n");
+        assert!(diagnostic.message.contains("must be a number"));
+
+        // Komşu anahtar düşmüyor: reddedilen çarpan puntoyu etkilemez.
+        let parsed = Settings::parse("[font]\nline_height = 9\nsize = 18\n").expect("ayrıştırılır");
+        assert_eq!(parsed.settings.font.size, 18.0);
+        assert_eq!(parsed.settings.font.line_height, 1.0);
     }
 
     #[test]
