@@ -981,4 +981,69 @@ mod tests {
         // "kurulu" derdi.
         assert!(!locale_installed("../../../usr"));
     }
+
+    /// **Gerçek zsh'te komutun süresi ekrana düşüyor mu** (013).
+    ///
+    /// `bt-core`'un bütün sayaç sınamaları OSC 133'ü **elle** basıyor; gerçek
+    /// betiğin sırası (çıpa `preexec`'te kapanıyor, `D` ile bir sonraki `A`
+    /// aynı `precmd`'de) hiçbirinde denenmiyor. Kullanıcı "bitince süre
+    /// gözükmüyor" dedi ve hiçbir kapı kızarmadı — tanığı yalnız bu.
+    #[test]
+    fn a_real_zsh_command_shows_its_duration() {
+        let root = TempRoot::new("duration-terminal");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("sahte ev dizini kurulamadı");
+        std::fs::write(home.join(".zshrc"), "").expect(".zshrc yazılamadı");
+        let wrapper = copy_wrapper(&root.0);
+
+        let session = Session::spawn(
+            SessionOptions {
+                command: Some((
+                    "/bin/zsh".to_owned(),
+                    vec!["-l".to_owned(), "-i".to_owned()],
+                )),
+                working_directory: Some(home.clone()),
+                env: HashMap::from([
+                    ("HOME".to_owned(), home.display().to_string()),
+                    ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
+                ]),
+                cols: 40,
+                rows: 10,
+                cell_px: (9, 18),
+                terminal: TerminalOptions {
+                    scrollback: 100,
+                    osc52: Osc52::Off,
+                },
+                theme: Theme::BATERI,
+                dock: true,
+            },
+            Arc::new(SilentWake),
+        )
+        .expect("oturum açılamadı");
+
+        wait_until("prompt işaretleri gelmedi", || {
+            session.shell_state()
+                == Some(ShellState {
+                    phase: ShellPhase::Input,
+                    last_exit: None,
+                })
+        });
+
+        // Eşiği **geçen** bir komut: bir saniyenin altı zaten sayaç
+        // doğurmuyor ve sınama onu kusur sanardı.
+        session.write(b"sleep 2\n");
+        wait_until("komut bitmedi", || {
+            session
+                .shell_state()
+                .is_some_and(|state| state.last_exit == Some(0))
+        });
+
+        // Sayaç bitmiş değerde ondalıklı: `2.0s` gibi. Ekranın tamamında
+        // arıyoruz, çünkü satırın yeri tabana yaslanmaya göre oynuyor.
+        wait_until("bitmiş komutun süresi ekranda görünmedi", || {
+            let drawn = screen(&session, &mut Blocks::default()).join("\n");
+            drawn.contains("2.0s") || drawn.contains("2.1s")
+        });
+        session.shutdown();
+    }
 }
