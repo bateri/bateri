@@ -1773,14 +1773,30 @@ fn decode_line<'a>(
         .chars()
         .chain(line.buffer.chars())
         .chain(line.postdisplay.chars())
-        // **Ölçüt `' '`, `is_whitespace()` değil** ve bu bilerek dar: kapının
-        // öteki yarısı ızgarayı tarıyor (`Session::last_ink_in_row`) ve o da
-        // `frame()`'in atlama kapısına çivili — orada mürekkepsizlik yalnız
-        // boşluk, spacer ve gizli hücre. `is_whitespace()` deseydik satır sonu
-        // NBSP (U+00A0, U+2007, U+3000) taşıyan bir tamponda ayna önceki
-        // harfi, ızgara NBSP'yi söyler, ikisi hiç eşleşmez ve satır kalıcı
-        // olarak **bayat** sayılırdı: hem ızgarada hem dock'ta çizilirdi.
-        .filter(|ch| *ch != ' ')
+        // **Ölçüt `' '` ve `'\t'`; `is_whitespace()` değil** ve bu bilerek
+        // dar: kapının öteki yarısı ızgarayı tarıyor
+        // (`Session::last_ink_in_row`) ve o da `frame()`'in atlama kapısına
+        // çivili — orada mürekkepsizlik yalnız boşluk, spacer ve gizli hücre.
+        // `is_whitespace()` deseydik satır sonu NBSP (U+00A0, U+2007, U+3000)
+        // taşıyan bir tamponda ayna önceki harfi, ızgara NBSP'yi söyler,
+        // ikisi hiç eşleşmez ve satır kalıcı olarak **bayat** sayılırdı: hem
+        // ızgarada hem dock'ta çizilirdi.
+        //
+        // **Sekme ise tersi ve ölçüldü** (kullanıcı, 2026-09-18): ayna **ham**
+        // tamponu taşıyor, ızgara ise **çizilmiş** hâli tutuyor. Terminal
+        // sekmeyi boşluğa açtığı için o karakter hücreye hiç ulaşmıyor —
+        // gerçek zsh'te boş satırda Tab `BUFFER='\t'` yapıyor, yani ayna
+        // `Some('\t')`, ızgara `None` diyor ve kapı düşüyordu. Belirtisi
+        // görünürdü: bastırma kalkıyor, caret dock'tan ızgaraya sıçrıyordu.
+        // Sekmeyi de mürekkepsiz saymak iki yarıyı yeniden eşitliyor — `"ls\t"`
+        // ikisinde de `'s'`, `"\t"` ikisinde de `None`.
+        //
+        // **Kalan sınır, adıyla:** ham kontrol karakteri (Ctrl-V ile basılan
+        // `\x01`) ZLE'de `^A` diye çiziliyor, yani ızgara `'A'` derken ayna
+        // `'\x01'` der ve kapı yine düşer. Ölçülmedi ve düzeltilmedi; yönü
+        // güvenli (bastırma kalkar, satır iki yerde görünür, sessizce
+        // kaybolmaz) ve gerçek bir tampona girmesi Ctrl-V gerektiriyor.
+        .filter(|ch| *ch != ' ' && *ch != '\t')
         .next_back();
 
     decoded.clear();
@@ -2554,6 +2570,33 @@ mod tests {
         sequence.pop();
         sequence.extend_from_slice(b";mode=isearch\x07");
         assert_eq!(dock_line(&sequence).buffer, "ab");
+    }
+
+    #[test]
+    fn a_tab_in_the_buffer_carries_no_ink() {
+        // **Ölçülmüş kusur** (kullanıcı, 2026-09-18): dock boşken Tab'a
+        // basınca caret dock'tan ızgaraya sıçrıyordu. Zincir gerçek zsh'te
+        // ölçüldü — Tab `BUFFER='\t'` yapıyor, ayna `Some('\t')` diyordu,
+        // ızgara ise sekmeyi boşluğa açtığı için `None`; tazelik kapısı
+        // (`Session::frame`) eşleşmeyince bastırma kalkıyor ve caret'in sahibi
+        // değişiyordu.
+        assert_eq!(dock_line(&dock_update(1, "", "\t", "", &[])).last_ink, None);
+        // Sekme **sondayken** de önceki harfi bırakmalı: ızgarada o satırın
+        // son mürekkebi yine `s`.
+        assert_eq!(
+            dock_line(&dock_update(3, "", "ls\t", "", &[])).last_ink,
+            Some('s')
+        );
+        // Sekmenin önündeki metin etkilenmiyor.
+        assert_eq!(
+            dock_line(&dock_update(3, "", "\tls", "", &[])).last_ink,
+            Some('s')
+        );
+        // Boşluğun kuralı değişmedi ve mürekkep hâlâ mürekkep.
+        assert_eq!(
+            dock_line(&dock_update(3, "", "ls ", "", &[])).last_ink,
+            Some('s')
+        );
     }
 
     #[test]
