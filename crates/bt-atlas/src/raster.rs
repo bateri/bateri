@@ -106,6 +106,19 @@ pub enum RuleKind {
     Dotted,
     Dashed,
     Strike,
+    /// Prompt işareti: `>` yerine geçen chevron.
+    ///
+    /// **Bir kural çizgisi değil ama aynı aileden** ve burada olmasının sebebi
+    /// mekanizma: bu enum yordamsal çizilen sprite'ların kümesi — fonttan
+    /// gelmiyor, yüzden bağımsız ([`crate::Face::Regular`]'a çivili) ve
+    /// atlasta kendi payını tutuyor. Beşi alt çizgi, biri üstü çizili, biri
+    /// de bu.
+    ///
+    /// Fonttan bir `>` **almıyoruz** ve sebebi ürün kararı: işaret terminalin
+    /// kendi işareti, kullanıcının fontunun değil. Font değişince prompt'un
+    /// şekli değişmemeli (012 phase-9, kullanıcı: "bunu daha hoş kendin
+    /// çizebilir misin").
+    Chevron,
 }
 
 /// Bir hücreye sığan tam dalga sayısı.
@@ -181,7 +194,83 @@ pub(crate) fn draw_rule(kind: RuleKind, m: Metrics, target: &mut [u8]) {
             band(target, m, position, thickness, p, (p * 2 / 3).max(1));
         }
         RuleKind::Curl => curl(target, m, position, thickness),
+        RuleKind::Chevron => chevron(target, m),
     }
+}
+
+/// Prompt işareti: iki kolu ortada birleşen bir chevron.
+///
+/// **Dikey merkezi üstü çizili metriğinden.** Yeni bir sayı uydurmaya gerek
+/// yok: üstü çizili çizgisi tam da x-height'ın ortasında duruyor, yani
+/// küçük harflerin optik merkezi. İşaret oraya oturunca metinle aynı hizada
+/// okunuyor; hücrenin geometrik merkezi taban çizgisinin altına düşer ve
+/// işaret metne göre alçak görünürdü.
+///
+/// **Yüksekliği x-height, genişliği onun yarısı.** İlki de türetilmiş: üstü
+/// çizili merkezi ile taban çizgisi arasındaki mesafe x-height'ın yarısı, yani
+/// kolların dikey açıklığı doğrudan fontun kendi ölçüsünden geliyor. Oran
+/// 1:2 chevron'un olağan tipografik oranı ve tek bir sayı — ikinci bir
+/// tasarım sabiti doğmuyor.
+///
+/// **Kalınlık alt çizginin kalınlığı.** İkinci bir kalınlık sayısı iki kaynak
+/// olurdu ve punto/ölçek değişiminde ayrışırdı.
+///
+/// Ink yatayda hücrenin ortasına toplanıyor ve genişliği hücrenin yarısını
+/// aşmıyor: işaret ızgarada **sol payın içinde** çiziliyor
+/// (`bt_gpu::Frame::push_block`) ve pay bir hücreden dar olabilir. Taşsaydı
+/// komut metninin ilk harfine binerdi.
+fn chevron(target: &mut [u8], m: Metrics) {
+    let (w, h) = m.cell_wh();
+    let (strike_top, strike_thick) = m.strikeout_px;
+    let center_y = f32::from(strike_top) + f32::from(strike_thick) / 2.0;
+    // x-height'ın yarısı; taban çizgisi merkezin altında olmasaydı (dejenere
+    // metrik) kollar sıfıra iner ve işaret hiç çizilmez — panik değil, boşluk.
+    let half_h = (f32::from(m.baseline_px) - center_y).max(0.0);
+    let half_w = half_h / 2.0;
+    let center_x = w as f32 / 2.0;
+    // Yarı kalınlık: kapsama mesafeden hesaplanıyor, yani çizginin **ekseni**
+    // ile piksel merkezi arasındaki uzaklık.
+    let half_stroke = f32::from(m.underline_px.1).max(1.0) / 2.0;
+
+    // Kolların uçları ve tepe noktası. `>` sola açık: uçlar solda, tepe sağda.
+    let apex = (center_x + half_w, center_y);
+    let upper = (center_x - half_w, center_y - half_h);
+    let lower = (center_x - half_w, center_y + half_h);
+
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let distance = distance_to_segment(px, py, upper, apex)
+                .min(distance_to_segment(px, py, apex, lower));
+            // Yarım piksellik geçiş bandı: `band`'in kenar yumuşatmasıyla aynı
+            // sertlik. Daha genişi işareti bulanıklaştırır, daha darı
+            // merdivenlendirir.
+            let value = (half_stroke + 0.5 - distance).clamp(0.0, 1.0);
+            // audit: `y < h` ve `x < w`, yani indeks `w * h`'nin altında.
+            target[y * w + x] = (value * 255.0).round() as u8;
+        }
+    }
+}
+
+/// Bir noktanın doğru parçasına uzaklığı; chevron'un kenar yumuşatması buna
+/// bakıyor.
+///
+/// CG **kullanmıyor**, `band` ve `curl` ile aynı gerekçe: çizim deterministik
+/// kalıyor (sınama tam yapı assert edebiliyor), başarısızlık dalı doğmuyor ve
+/// font hiç sorulmuyor.
+fn distance_to_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (abx, aby) = (b.0 - a.0, b.1 - a.1);
+    let (apx, apy) = (px - a.0, py - a.1);
+    let length = abx * abx + aby * aby;
+    // Dejenere parça (sıfır uzunluk) uç noktaya uzaklığa iniyor: `half_h`
+    // sıfır olduğunda bu dal koşuyor ve bölme hiç yapılmıyor.
+    let t = if length > 0.0 {
+        ((apx * abx + apy * aby) / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (dx, dy) = (apx - t * abx, apy - t * aby);
+    (dx * dx + dy * dy).sqrt()
 }
 
 /// İstenen periyodu hücre genişliğini **tam bölen** en yakın değere yuvarlar.

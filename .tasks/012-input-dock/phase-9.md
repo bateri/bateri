@@ -62,8 +62,9 @@ Gerçek pencerede üç kusur, üçü de kullanıcıdan:
 - **`crates/bt-atlas`** — yeni bir yordamsal sprite (chevron). `Face::Regular`'a
   çivili (`Sprite::Rule` emsali), kendi yuva payı var. Dikey ortalaması hücrenin
   değil **x-height**'ın merkezi.
-- **`crates/bt-core/src/dock.rs`** — işaret artık karakter değil; sınırdan
-  hangi kanalla geçtiği alt çizgi emsaline bakılarak seçiliyor.
+- **`crates/bt-core/src/dock.rs`** — işaret artık **hücre değil**: sınırdan
+  yalnız rengi geçiyor (`Dock::sigil`), şekli `bt-gpu`'nun kararı. Aynı sprite
+  ızgaranın blok işaretini de çiziyor — kullanıcının istediği birleşme.
 
 ## Kabul
 
@@ -102,8 +103,8 @@ Gerçek pencerede üç kusur, üçü de kullanıcıdan:
 - [x] Test: dock'a devir animasyonu sonlu adımda yerleşiyor
 - [x] Test: snap ve belirme kipleri dock ayağında da geçerli
 - [x] Caret tek kez çiziliyor; ters çevirme iki encode'a da gidiyor
-- [ ] Chevron yordamsal, `Face::Regular`'a çivili, kendi payı var
-- [ ] Test: chevron fonttan bağımsız (aile değişince aynı sprite)
+- [x] Chevron yordamsal, `Face::Regular`'a çivili, kendi payı var
+- [x] Test: chevron'un şekli, dikey hizası ve paya sığması bağlı
 - [ ] Gerçek pencerede gözle: yazma, `sleep 5`, punto değişimi, vim gir-çık
 - [ ] Doğrulama geçti (`make hepsi` + `make kur` + `make duman`)
 - [ ] Yayın etkisi yazıldı

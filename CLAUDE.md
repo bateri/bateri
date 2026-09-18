@@ -15,9 +15,9 @@ bir işe başlamadan önce ilgili bölümüne bakılır, sıfırdan keşfedilmez
 **Bugünkü hâl** (hangi setin neyi getirdiği `.tasks/README.md`'de): `bt-core`
 shell'i çalıştırır ve kareyi `frame()` sınırından verir — karakter, ön plan
 rengi ve biçim (`bold`, `italic`, `underline`, `underline_color`,
-`strikeout`). `bt-atlas` CoreText ile dört font yüzünün glyph'lerini ve altı
-kural sprite'ını (beş alt çizgi + üstü çizili) sabit yuva ızgarasında
-rasterize eder; hücre ölçüsü oradan gelir ve `bt-gpu`
+`strikeout`). `bt-atlas` CoreText ile dört font yüzünün glyph'lerini ve yedi
+yordamsal sprite'ı (beş alt çizgi, üstü çizili ve prompt chevron'u) sabit yuva
+ızgarasında rasterize eder; hücre ölçüsü oradan gelir ve `bt-gpu`
 `Renderer::cell_metrics(scale)` ile yeniden yayınlar. `bt-gpu` atlası
 `R8Unorm` dokuya bağlar, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
@@ -62,7 +62,7 @@ sabiti yok, aynı içi girinti iki eksende ve punto büyüyünce pay da büyüyo
 Saç çizgisi payın **üstünde**, viewport'un tepesinde. Dock ötelemeden
 **yapısal olarak** muaf:
 listeleri dock-yerel doğuyor, ekrana taşıyan şey o ikinci viewport. Üst
-satırında `>` işareti (safha rengiyle), metin, sönük öneri,
+satırında prompt işareti (safha rengiyle), metin, sönük öneri,
 `region_highlight` renkleri ve caret var; alt satırında **bağlam** —
 `{tam yol} | {dal}`, sol altta ve sönük — **dock'un sol kenarından**, giriş
 metninin hizasından değil: metinle hizalanınca sebepsiz girintili görünüyordu
@@ -140,8 +140,14 @@ birlikte sessizce ölürdü. Bağlantı `Input` boyunca açık, komutun çıktı
 kapalı. Her prompt bir blok kimliği
 basar, `frame()` o kimlikleri prompt'un OSC 8 çıpasından okuyup blokları
 **komutun satırı ve rengi** olarak sınırdan verir; `bt-gpu` o işareti
-ızgaranın solunda ayrılan paya `cell_bg` pipeline'ıyla çizer —
-**animasyonsuz**, işaret anında belirir. İşaret komutun kendi satırında,
+ızgaranın solunda ayrılan paya çizer — **animasyonsuz**, işaret anında belirir.
+Şekli dock'un prompt işaretinin **ta kendisi** (`bt_atlas::RuleKind::Chevron`):
+ikisi de safha renginde bir prompt işareti ve ayrı şekillerle çizilmeleri bir
+kalıntıydı. İşaret fonttan **alınmıyor**, yordamsal çiziliyor — kullanıcının
+fontu değişince prompt'un şekli değişmemeli; dikey merkezi üstü çizili
+metriğinden, yani x-height'ın ortasından, kalınlığı da alt çizginin
+kalınlığından geliyor (ikinci bir sayı uydurulmadı). `bt-core` sınırdan yalnız
+**rengini** veriyor (`Dock::sigil`, `Block::stripe`); şekil boyamanın kararı. İşaret komutun kendi satırında,
 çıktısında **değil**: hangi satırın hangi bloğa ait olduğu ancak çıpası
 görünen satırlar için biliniyor ve bölge boyamak onu tahmine çevirirdi.
 **İçerik pencerenin tabanına yaslanır**: `frame()` kaç satırın dolu olduğunu

@@ -802,6 +802,7 @@ define_class!(
                             frame.push_dock(cell)
                         });
                 dock_caret = dock.caret.map(|col| (col, dock.caret_text));
+                frame.push_dock_sigil(dock.sigil);
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
                 frame.open_dock(dock_rows, dock.ground, dock.separator);
