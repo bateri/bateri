@@ -163,9 +163,33 @@ pub(crate) enum Outcome {
         /// (kimliksiz `A`'dan sonra gelen `D`, ya da entegrasyonun yarısı)
         /// uydurulmuş bir süre yazmak yerine eşiğin altına düşülüyor, yani
         /// sayaç çizilmiyor.
+        ///
+        /// **Bilinen sınır: ölçülen şey komutun kendisi değil, `C` ile `D`
+        /// arası.** İki işareti de basan kancalarımız `add-zsh-hook` ile
+        /// **sona** ekleniyor (gerekçeleri `bateri.zsh`'te: `preexec`'te
+        /// çıpanın kapanışı, `precmd`'de `psvar` yuvası), yani kullanıcının
+        /// kendi kancaları ikisinden de önce koşuyor. Sonuç iki yönlü ve
+        /// kısmen birbirini götürüyor: `C` geç basılıyor (süre kısalır), `D`
+        /// kullanıcının `precmd`'lerinden sonra basılıyor (süre uzar). Pay
+        /// kancaların süresi kadar — starship gibi prompt başına bir binary
+        /// koşturan kurulumda on milisaniyeler.
+        ///
+        /// **Kendi işimiz payın içinde değil:** `D` `precmd`'in ilk işi —
+        /// dalın `git` fork'undan, OSC 7'den ve `psvar`'dan **önce**.
         elapsed_ms: u32,
     },
 }
+
+/// Defterin girdi başına bütçesi — [`BlockLog`]'un doc'undaki sayının
+/// **doğrulanmış** hâli.
+///
+/// Rust `Option<i32>`'nin etiketindeki niche'i [`Outcome`]'ın ayrımı için
+/// kullanıyor, yani boyut elle toplanabilir bir sayı değil (elle 16 çıkıyor ve
+/// ilk yazımda öyle yazılmıştı): `Finished`'a bir alan eklemek 12'yi sessizce
+/// büyütür ve 10 000 satırlık scrollback'te sekme başına ödenen bellek de
+/// öyle. Assert kırılınca hem burası hem `BlockLog`'un bütçe cümlesi aynı
+/// commit'te güncellenir.
+const _: () = assert!(size_of::<Outcome>() == 12);
 
 /// Bir bloğun **çizilebilir** durumu; renge [`crate::Session::frame`]'de
 /// temadan iniyor.
@@ -452,8 +476,11 @@ const BLOCK_LOG_FLOOR: usize = 256;
 /// az bir satır (prompt) düştüğü için geçmişte görünebilecek blok sayısının
 /// üst sınırı odur. Sabit bir tavan seçilseydi ya scrollback'in altında kalıp
 /// hâlâ ekranda olan blokları renksiz bırakır ya da boşuna yer tutardı.
-/// Kayıt başına 16 bayt: varsayılan 10 000 satırda 160 KB. (013'e kadar 8
-/// bayttı; [`Outcome::Finished`] çıkış kodunun yanına geçen süreyi de aldı.)
+/// Kayıt başına 12 bayt: varsayılan 10 000 satırda 120 KB. (013'e kadar 8
+/// bayttı; [`Outcome::Finished`] çıkış kodunun yanına geçen süreyi de aldı.
+/// Sayı [`Outcome`]'ın yanındaki `const` assert ile bağlı — yazılıp
+/// doğrulanmamış bir bütçe tam da bu satırda sessizce eskirdi.)
+///
 /// **Bilinen sınır:** tavan oturum doğarken belirleniyor; `scrollback` canlı
 /// büyütülürse halka büyümüyor ve aradaki fark kadar eski blok rengini
 /// kaybediyor — şerit **çizilmez**, yanlış çizilmez.
@@ -717,6 +744,15 @@ impl ShellLog {
         match mark {
             Mark::PromptStart { id } => {
                 state.phase = ShellPhase::Prompt;
+                // **Saatin ikinci sıfırlama noktası ve bir savunma kolu.**
+                // Prompt basılıyorsa hiçbir komut koşmuyor, yani buradaki saat
+                // tanım gereği bayat. Yalnız `D` tüketseydi kaybolan bir `D`
+                // (yarıda kesilmiş OSC, kimliksiz kapanış) saati ayakta
+                // bırakır ve **sonraki** bloğun `D`'si onu tüketirdi: anlık
+                // bir komut "4m 12s" sürmüş görünürdü (`/code-review`, 013
+                // kapı). Sıfırlamanın yönü güvenli — en kötüsü sayacın hiç
+                // çıkmaması, uydurulmuş bir süre değil.
+                self.running_since = None;
                 if let Some(id) = id {
                     self.blocks.start(id);
                 }
@@ -970,10 +1006,21 @@ pub(crate) fn next_tick(elapsed: Duration) -> Duration {
     if elapsed < COUNTER_FLOOR {
         return COUNTER_FLOOR - elapsed;
     }
-    // `subsec_nanos()` her zaman bir saniyenin altında, yani çıkarma taşmıyor
-    // ve tam saniyede sonuç tam bir saniye — sıfır süreli bir saat kurup
-    // callback'i döngüye sokmuyor.
-    Duration::from_secs(1) - Duration::from_nanos(u64::from(elapsed.subsec_nanos()))
+    // **Kademe başına ayrı çözünürlük.** Saat kademesinde metin (`1h 07m`)
+    // dakikada bir değişiyor; saniyede bir uyandırmak bir saatte 3540
+    // **aynı** kareyi çizdirirdi (`/code-review`, 013 kapı) ve modül
+    // başlığına yeni yazdığımız "içerik gerçekten değişecek" şartını ilk
+    // ihlal eden biz olurduk.
+    let period = if elapsed.as_secs() < 3600 {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(60)
+    };
+    // Bir sonraki tam sınıra kalan süre. Kalan sıfırsa tam periyot dönüyor:
+    // sıfır süreli bir saat callback'i döngüye sokardı.
+    let since =
+        Duration::from_nanos(u64::try_from(elapsed.as_nanos() % period.as_nanos()).unwrap_or(0));
+    period - since
 }
 
 /// Sayacın metni — **yığında**, kare başına ayırma yok.
@@ -3070,6 +3117,63 @@ mod tests {
         assert_eq!(
             next_tick(Duration::from_millis(200)),
             Duration::from_millis(800)
+        );
+    }
+
+    /// Saat kademesinde tik **dakikada bir**, saniyede bir değil.
+    ///
+    /// Metin (`1h 07m`) dakikada bir değişiyor; saniyede bir uyandırmak bir
+    /// saatte 3540 **aynı** kareyi çizdirirdi ve modül başlığına yazdığımız
+    /// "içerik gerçekten değişecek" şartını ilk ihlal eden biz olurduk
+    /// (`/code-review`, 013 kapı).
+    #[test]
+    fn the_hour_tier_ticks_once_a_minute() {
+        // 1 saat 7 dakika 20 saniye: bir sonraki dakikaya 40 saniye.
+        let elapsed = Duration::from_secs(3600 + 7 * 60 + 20);
+        assert_eq!(Counter::new(elapsed, Precision::Whole).as_str(), "1h 07m");
+        assert_eq!(next_tick(elapsed), Duration::from_secs(40));
+
+        // Tam dakikada sıfır değil **bir dakika**: sıfır süreli bir saat
+        // callback'i döngüye sokardı.
+        assert_eq!(
+            next_tick(Duration::from_secs(3600)),
+            Duration::from_secs(60)
+        );
+
+        // Sınırın altı hâlâ saniyede bir: `59m 59s` her saniye değişiyor.
+        assert_eq!(next_tick(Duration::from_secs(3599)), Duration::from_secs(1));
+    }
+
+    /// Kaybolan bir `D` **sonraki** bloğa yazılmıyor.
+    ///
+    /// Saat yalnız `D`'de tüketilseydi yarıda kesilmiş bir OSC'den sonra
+    /// bayat `Instant` ayakta kalır ve bir sonraki bloğun `D`'si onu
+    /// tüketirdi: anlık bir komut dakikalarca sürmüş görünürdü
+    /// (`/code-review`, 013 kapı). `A` ikinci sıfırlama noktası.
+    #[test]
+    fn a_lost_command_end_does_not_charge_the_next_block() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        // 1. blok koşuyor ama `D`'si hiç gelmiyor.
+        log.apply(Mark::PromptStart { id: Some(1) });
+        log.apply(Mark::CommandStart);
+        assert!(log.running_since.is_some());
+
+        // 2. bloğun prompt'u: saat burada sıfırlanmalı.
+        log.apply(Mark::PromptStart { id: Some(2) });
+        assert!(
+            log.running_since.is_none(),
+            "`A` bayat saati temizlemeliydi"
+        );
+
+        // 2. blok `C` görmeden kapanıyor (kabuk yine de `D` basıyor).
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(2),
+        });
+        assert_eq!(
+            log.duration(2, None),
+            Some(Duration::ZERO),
+            "kaybolan `D` sonraki bloğa süre yazdı"
         );
     }
 
