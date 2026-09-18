@@ -11,8 +11,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bt_core::{
-    FontOptions, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings,
-    ShellIntegration, Teardown, Theme, Wake, load_shell, smoke_shell,
+    FontOptions, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings, ShellIntegration,
+    Teardown, Theme, Wake, load_shell, smoke_shell,
 };
 use bt_gpu::{
     CellMetrics, DOCK_ROWS, DisplayLink, Layout, MIN_SAMPLES, Renderer, Stats, Surface, Waker,
@@ -368,11 +368,12 @@ fn shell_integration_env(
     // varsayılanın **tek** kaydı oluyor. İki yerde yazılsaydı biri
     // değiştiğinde öteki sessizce eskirdi.
     //
-    // Değişkenin adı prompt'u söylüyor çünkü betiğin yaptığı iş o: `PS1`'i
-    // sıfırlamıyor. Dock'un açılmaması kararı **bu tarafta** ve kabuğa hiç
-    // sorulmuyor (`ShellIntegration::wants_dock`).
+    // Değişkenin adı kararı söylüyor, sonucunu değil: betik ondan **üç** şey
+    // türetiyor (prompt sıfırlansın mı, ayna kurulsun mu, dal basılsın mı) ve
+    // üçü de "bu oturumda dock var mı"nın cevabı. Kararı terminal veriyor,
+    // kabuğa sorulmuyor (`ShellIntegration::wants_dock`).
     if !setting.wants_dock() {
-        env.push(("BATERI_PROMPT".to_owned(), "shell".to_owned()));
+        env.push(("BATERI_DOCK".to_owned(), "off".to_owned()));
     }
     env
 }
@@ -3336,13 +3337,7 @@ mod tests {
         assert!(env.is_empty(), "bash'e sarmalayıcı kuruldu");
         // Kabuk hiç çözülemedi (passwd okunamadı, `$SHELL` yok): aynı sessiz
         // geri düşüş.
-        let env = shell_integration_env(
-            &user,
-            ShellIntegration::Auto,
-            || None,
-            || None,
-            None,
-        );
+        let env = shell_integration_env(&user, ShellIntegration::Auto, || None, || None, None);
         assert!(env.is_empty(), "kabuksuz oturuma sarmalayıcı kuruldu");
         // Kabuk zsh ama betik yok (eksik paket): entegrasyonsuz bir oturum,
         // yarım kurulmuş bir `ZDOTDIR`'dan iyi — kullanıcının yapılandırması
@@ -3363,13 +3358,7 @@ mod tests {
         // Kullanıcının `ZDOTDIR`'ı yok: betiğe yalnız kendi dizinimiz gidiyor
         // ve `BATERI_ZDOTDIR`'ın **yokluğu** "kullanıcının da yoktu" demek.
         let (shell, dir) = zsh_and_dir();
-        let env = shell_integration_env(
-            &user,
-            ShellIntegration::Auto,
-            shell,
-            dir,
-            None,
-        );
+        let env = shell_integration_env(&user, ShellIntegration::Auto, shell, dir, None);
         assert_eq!(
             env,
             vec![("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned())]
@@ -3413,16 +3402,10 @@ mod tests {
         // eskirdi.
         let user = Inputs::User { config_root: None };
         let (shell, dir) = zsh_and_dir();
-        let env = shell_integration_env(
-            &user,
-            ShellIntegration::Auto,
-            shell,
-            dir,
-            None,
-        );
+        let env = shell_integration_env(&user, ShellIntegration::Auto, shell, dir, None);
         assert!(
-            !env.iter().any(|(key, _)| key == "BATERI_PROMPT"),
-            "varsayılan prompt ortama yazıldı"
+            !env.iter().any(|(key, _)| key == "BATERI_DOCK"),
+            "varsayılan kademe ortama bir şey yazdı"
         );
 
         // `"blocks"`: sarmalayıcı **kuruluyor** (bloklar ve işaretler için) ama
@@ -3430,18 +3413,12 @@ mod tests {
         // değişken; dock payının ayrılmaması ayrı bir karar ve bu tarafta
         // (`ShellIntegration::wants_dock`, `birth`).
         let (shell, dir) = zsh_and_dir();
-        let env = shell_integration_env(
-            &user,
-            ShellIntegration::Blocks,
-            shell,
-            dir,
-            None,
-        );
+        let env = shell_integration_env(&user, ShellIntegration::Blocks, shell, dir, None);
         assert_eq!(
             env,
             vec![
                 ("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned()),
-                ("BATERI_PROMPT".to_owned(), "shell".to_owned()),
+                ("BATERI_DOCK".to_owned(), "off".to_owned()),
             ]
         );
 

@@ -1147,7 +1147,6 @@ mod tests {
             ("motion", "cursor_motion"),
             ("motion", "reduce_motion"),
             ("shell", "integration"),
-            ("shell", "prompt"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -1761,7 +1760,7 @@ found {found}; using \"system\""
             assert_eq!(
                 diagnostic.message,
                 format!(
-                    "`shell.integration` must be \"auto\" or \"off\", \
+                    "`shell.integration` must be \"auto\", \"blocks\" or \"off\", \
 found {found}; using \"auto\""
                 )
             );
@@ -1857,18 +1856,6 @@ found {found}; using \"auto\""
         assert!(ShellIntegration::Auto.wants_dock());
         assert!(!ShellIntegration::Blocks.wants_dock());
         assert!(!ShellIntegration::Off.wants_dock());
-    }
-
-    #[test]
-    fn unrecognized_integration_names_all_three() {
-        let (settings, diagnostic) = rejected("[shell]\nintegration = \"yes\"\n");
-        assert_eq!(settings, Settings::default());
-        assert_eq!(diagnostic.key, Some("shell.integration"));
-        assert_eq!(
-            diagnostic.message,
-            "`shell.integration` must be \"auto\", \"blocks\" or \"off\", \
-found \"yes\"; using \"auto\""
-        );
     }
 
     #[test]

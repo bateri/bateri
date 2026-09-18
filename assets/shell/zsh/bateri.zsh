@@ -19,12 +19,11 @@
 #                   da yoktu; geri koyarken ZDOTDIR silinir, $HOME'a
 #                   eşitlenmez — ihraç edilen bir ZDOTDIR ile hiç olmayan
 #                   ZDOTDIR çocuklar için farklı şeyler.
-#   BATERI_PROMPT   `shell` ise prompt kullanıcınındır ve bu oturumda DOCK
-#                   YOK (`[shell] integration = "blocks"`). Yokluğu
-#                   varsayılan, yani prompt TERMİNALİN ve dock var: değişken
-#                   yalnız o kademede gönderiliyor. Dock kararı terminalin
-#                   tarafında veriliyor, burada sorulmuyor — betiğin işi
-#                   yalnız PS1'i sıfırlayıp sıfırlamamak.
+#   BATERI_DOCK     `off` ise bu oturumda DOCK YOK
+#                   (`[shell] integration = "blocks"`): prompt kullanıcının
+#                   kalır ve dock'u besleyen kollar hiç kurulmaz. Yokluğu
+#                   varsayılan, yani dock VAR. Kararı terminal veriyor,
+#                   burada sorulmuyor.
 #
 # BİLİNEN VE SINIRLI FARK: top-level `source` içinde zsh `$0`'ı yüklenen
 # dosyanın yoluna kuruyor; gerçek başlangıçta kabuğun adı olurdu. Çaresi
@@ -81,22 +80,27 @@ if (( ! ${+__bateri_had} )); then
     __bateri_user=$HOME
   fi
   unset BATERI_ZDOTDIR
-  # PROMPT'UN SAHİBİ. Ortam değişkeni yalnız kullanıcı prompt'unu geri
-  # istediğinde geliyor (`shell_integration_env`), yani yokluğu "terminal"
-  # demek — tanınmayan bir değer de oraya düşüyor, çünkü bu uçta bir tanı
-  # yeri yok ve varsayılana düşmek görünür bir sonuç (kullanıcı prompt'unu
-  # göremez, yanlış yazdığını anlar).
+  # BU OTURUMDA DOCK VAR MI. Tek değişken, çünkü tek karar: dock varsa giriş
+  # satırı TERMİNALİN — prompt sıfırlanır, ZLE aynalanır, bağlamın dalı
+  # basılır. Dock yoksa üçü de anlamsız ve üçü de KAPANIR; ayrı ayrı
+  # sorulsalardı "prompt terminalin ama dock yok" gibi tutarsız bir hâl
+  # mümkün olurdu — 012 phase-10 tam da onu kapattı.
+  #
+  # Ortam değişkeni yalnız dock'suz kademede geliyor
+  # (`shell_integration_env`), yani yokluğu "dock var" demek. Tanınmayan bir
+  # değer de oraya düşüyor: bu uçta tanı basacak yer yok ve varsayılana
+  # düşmek GÖRÜNÜR bir sonuç (kullanıcı dock'u görür, yanlış yazdığını anlar).
   #
   # `unset`: değişken yalnız BİZE ait ve alt süreçlere sızmasının anlamı yok
   # (`BATERI_ZDOTDIR` emsali). Değeri saklayan kabuk değişkeni kancaların
   # oturum durumu, yani `__bateri_restore` onu SİLMİYOR (`__bateri_block`
   # gibi).
-  if [[ $BATERI_PROMPT == shell ]]; then
-    __bateri_prompt=shell
+  if [[ $BATERI_DOCK == off ]]; then
+    __bateri_dock=0
   else
-    __bateri_prompt=terminal
+    __bateri_dock=1
   fi
-  unset BATERI_PROMPT
+  unset BATERI_DOCK
 fi
 
 # Kullanıcının aynı adlı başlangıç dosyasını yüklemeye HAZIRLAR; yüklemeyi
@@ -229,10 +233,18 @@ __bateri_hooks() {
   # DEĞİŞİNCE koşuyor, prompt'un ilk (boş) çiziminde değil — gerçek bir
   # oturumda gözlendi, ilk ayna ancak ilk tuş vuruşunda geliyordu. Onsuz dock
   # prompt anında ölü kalır ve ilk harfte birden belirirdi.
-  autoload -Uz add-zle-hook-widget
-  add-zle-hook-widget line-init __bateri_dock_redraw
-  add-zle-hook-widget line-pre-redraw __bateri_dock_redraw
-  add-zle-hook-widget line-finish __bateri_dock_finish
+  #
+  # DOCK YOKSA HİÇ KURULMUYOR. Aynanın tek tüketicisi dock; `blocks`
+  # kademesinde kancalar kurulsaydı her tuş vuruşunda beş değişken base64'e
+  # kodlanıp akışa yazılır ve okuyan kimse olmazdı. Tuş başına ödenen bir
+  # bedelin karşılıksız kalması, ölçülmemiş olsa bile kabul edilebilir
+  # değil — hele maliyetin şekli zaten borç listesinde dururken.
+  if (( __bateri_dock )); then
+    autoload -Uz add-zle-hook-widget
+    add-zle-hook-widget line-init __bateri_dock_redraw
+    add-zle-hook-widget line-pre-redraw __bateri_dock_redraw
+    add-zle-hook-widget line-finish __bateri_dock_finish
+  fi
 }
 
 # Prompt çizilmeden önce: biten komutun kodu (`D`), sonra prompt başlangıcı (`A`).
@@ -265,8 +277,13 @@ __bateri_precmd() {
   # DOCK'UN BAĞLAM SATIRI. Prompt başına, tuş başına DEĞİL: ikisi de değişmek
   # için bir komut bekliyor (`cd`, `git checkout`) ve o komut bittiğinde
   # buradayız.
+  # OSC 7 KALIYOR, DALIN FORK'U KALMIYOR. İkisi de bugün yalnız dock'un bağlam
+  # satırını besliyor ama bedelleri kıyaslanamaz: OSC 7 tek bir `print` ve
+  # STANDART bir dizi (yeni sekmeyi aynı dizinde açmak gibi işlerin yolu, yani
+  # dock'tan bağımsız bir geleceği var). Dal ise prompt başına bir `git`
+  # FORK'U ve tek tüketicisi dock — dock yokken ödenmesi saf israf.
   __bateri_cwd
-  __bateri_branch_print
+  (( __bateri_dock )) && __bateri_branch_print
 }
 
 # Çalışma dizinini OSC 7 ile bildirir.
@@ -315,12 +332,12 @@ __bateri_branch_print() {
 #   `RPS1`/`RPROMPT` de boşalıyor ve bu bir ayrıntı değil ZORUNLU: sağ prompt
 #   PS1'den bağımsız yaşıyor, yalnız PS1'i sıfırlamak ekranın sağında asılı
 #   bir tema parçası bırakırdı.
-# - `shell`: kullanıcının prompt'u yerinde, biz yalnız işaretleri EKLİYORUZ
-#   (010'un yolu). Dock KAPANMIYOR — dock kabuğun prompt'unu değil ZLE'nin
-#   tamponunu çiziyor ve ikisinin ayrı olması kasıtlı: prompt'unu geri almak
-#   isteyen kullanıcı dock'tan vazgeçmek zorunda kalmamalı.
+# - dock YOKSA (`integration = "blocks"`): kullanıcının prompt'u yerinde, biz
+#   yalnız işaretleri EKLİYORUZ (010'un yolu). Bir dönem "prompt kullanıcının
+#   ama dock yine de açık" diye üçüncü bir hâl vardı ve ekranda İKİ PROMPT
+#   üretiyordu; tek karara indirildi (012 phase-10).
 __bateri_prompt_set() {
-  if [[ $__bateri_prompt == terminal ]]; then
+  if (( __bateri_dock )); then
     PS1=$__bateri_ps1
     RPS1=
     RPROMPT=
@@ -366,10 +383,10 @@ __bateri_prompt_set() {
 # kendini besleyen bir döngü olurdu; nöbetle prompt başına TEK sıfırlama
 # ölçüldü.
 #
-# `shell` kolunda SUSUYOR: prompt'unu geri isteyen kullanıcının temasıyla
+# DOCK'SUZ KOLDA SUSUYOR: prompt'unu geri isteyen kullanıcının temasıyla
 # kavga etmenin anlamı yok.
 __bateri_prompt_guard() {
-  [[ $__bateri_prompt == terminal ]] || return 0
+  (( __bateri_dock )) || return 0
   [[ $PS1 == "$__bateri_ps1" && -z $RPS1 && -z $RPROMPT ]] && return 0
   PS1=$__bateri_ps1
   RPS1=
