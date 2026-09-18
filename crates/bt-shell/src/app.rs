@@ -2667,10 +2667,12 @@ mod tests {
         let with = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS);
         // 600 / 18 = 33.3 → 33.
         assert_eq!(without.rows, 33);
-        // Dock **iki satır artı iki nefes payı** götürüyor: 2×18 + 2×8 = 52 px,
-        // yani 548 / 18 = 30.4 → 30. Pay bu metrikte üçüncü bir satırı da
-        // yiyor ve bu beklenen — sayı `DOCK_ROWS`'a değil `bt_gpu::dock_px`'e
-        // bağlı, ikisi ayrışırsa bu satır kızarır.
+        // Dock **iki satır, iki nefes payı ve bir satır arası** götürüyor:
+        // 2×18 + 2×8 + 4 = 56 px, yani 544 / 18 = 30.2 → 30. Satır arası
+        // (`dock_row_gap`, dış payın yarısı) hesaba girmezse 52 px çıkar ve o
+        // da 30'a yuvarlanır — yani bu satır yanlış formülle de yeşil kalır.
+        // Sayının kaynağı `DOCK_ROWS` değil `bt_gpu::dock_px`; ikisi
+        // ayrışırsa burası kızarır.
         assert_eq!(with.rows, 30, "dock payı satırlardan düşmedi");
         // Sütunlar dock'u **görmez**: dock ızgarayla aynı sütunları kullanıyor
         // ve payı yalnız dikeyde.

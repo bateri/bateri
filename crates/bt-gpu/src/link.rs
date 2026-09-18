@@ -653,7 +653,7 @@ define_class!(
                 // `frame()` de `clear` de çağrılmıyor, yani öteleme
                 // **korunuyor** — ama animasyonun tanımı iki içerik karesi
                 // arasında *değişmek* ve korunan bir değer değişemez.
-                // `move_cursor`'dan **önce**: imlecin dikdörtgeni bu ötelemeyi
+                // `move_caret`'dan **önce**: imlecin dikdörtgeni bu ötelemeyi
                 // pişiriyor.
                 self.set_origin(&mut frame, motion.origin());
                 // Liste korunuyor, yalnız imleç taşınıyor: grid kirli değil,
@@ -665,7 +665,7 @@ define_class!(
                 }
                 // CPU örneği **yazılmıyor** ve bu bir eksiklik değil:
                 // `cpu_kare` `session.frame`'in kilit beklemesini ölçüyor ve
-                // bu karede o iş hiç yok. Bir `truncate` + `push_cursor`'un
+                // bu karede o iş hiç yok. Bir `truncate` + `push_caret`'un
                 // mikrosaniyesi aynı sütuna girseydi p95'i aşağı çekerdi —
                 // "sahte örnek" yasağının aynısı.
                 //
@@ -753,7 +753,7 @@ define_class!(
             // **Animasyon yok** (Karar 5): şerit anında beliriyor, `motion`
             // ikinci bir tüketici kazanmıyor ve bu yol hiçbir kare istemiyor —
             // boşta sıfır kare sözleşmesi dokunulmadan kalıyor. Hareket
-            // karesinin yolu (yukarıda, `move_cursor`) buraya hiç uğramıyor;
+            // karesinin yolu (yukarıda, `move_caret`) buraya hiç uğramıyor;
             // ızgara değişmediği için şerit de değişmemeli ve `Frame` onu
             // koruyor.
             for block in iv.blocks.borrow().as_slice() {
@@ -791,16 +791,28 @@ define_class!(
             // orijinini aynı çıkarmayla kuruyor, yani ikisi aynı satır.
             let viewport_height = update.drawable().texture().height() as f32;
             let dock_top = viewport_height - crate::frame::dock_px(dock_rows, iv.cell.get());
-            frame.set_dock_top(dock_top);
             let mut dock_caret = None;
             if dock_rows > 0 {
+                // **Yalnız dock varken yazılıyor.** `dock_rows == 0`'da formül
+                // tam `viewport_height` verir ve o bir eşik değil pencerenin
+                // dibi: dibe değen bir caret dock yuvasına düşer, `encode_dock`
+                // da dock olmadığı için erken döner — caret sessizce
+                // kaybolurdu. Yazılmazsa `clear`'ın koyduğu sonsuz kalıyor,
+                // yani kapı yapısal (`Frame::dock_top_px`'in doc'u bunu
+                // söylüyor ve söylediği doğru olmak zorunda).
+                frame.set_dock_top(dock_top);
                 let mut dock_state = iv.dock.borrow_mut();
                 let mut dock_context = iv.dock_context.borrow_mut();
-                let dock =
-                    iv.session
-                        .dock(iv.cols.get(), &mut dock_state, &mut dock_context, |cell| {
-                            frame.push_dock(cell)
-                        });
+                // Devrin cevabı `frame()`'den geliyor, dock yeniden
+                // hesaplamıyor: üç ön koşulu (dock'u olan pencere, alternatif
+                // ekran, aynanın tazeliği) yalnız o biliyor.
+                let dock = iv.session.dock(
+                    iv.cols.get(),
+                    &mut dock_state,
+                    &mut dock_context,
+                    cursor.caret_in_dock,
+                    |cell| frame.push_dock(cell),
+                );
                 dock_caret = dock.caret.map(|col| (col, dock.caret_text));
                 frame.push_dock_sigil(dock.sigil);
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
@@ -812,11 +824,15 @@ define_class!(
             // Ayrı animatörler olsaydı dock'ta kayma hiç olmaz, devir de bir
             // ışınlanma kalırdı — kullanıcının iki ayrı şikâyeti, tek sebep.
             //
-            // Öncelik dock'ta: `bt-core` caret'in sahibini zaten tek bir
-            // yüklemde kararlaştırıyor (`shell::caret_home`) ve ızgaranın
-            // imlecini o hâlde görünmez veriyor, yani ikisi aynı anda `Some`
-            // olamaz. Yine de sıra yazılı duruyor ki bir gün olursa dock
-            // kazansın — caret'in iki yerde çizilmesindense yanlış yerde
+            // Öncelik dock'ta ve ikisi aynı anda `Some` **olamıyor**: devrin
+            // cevabı tek yerde hesaplanıp (`Session::frame`) hem ızgaranın
+            // `visible`'ına hem dock'un caret'ine aynı değerden veriliyor
+            // (`Cursor::caret_in_dock`). Bu cümle bir zamanlar yanlıştı:
+            // `dock::render` yüklemi kendi çağırıyor, `frame()`'in üç ön
+            // koşulunu bilmiyordu ve bayat aynada ikisi birden doğuyordu —
+            // aşağıdaki `.or_else` dock'u seçince taze satır caret'siz
+            // kalıyordu (set kapısı, `/code-review`). Sıra yine de yazılı
+            // duruyor: caret'in iki yerde çizilmesindense yanlış yerde
             // çizilmesi görünür bir kusurdur.
             let caret = dock_caret
                 .map(|(col, text)| (dock_caret_at(col, dock_top, iv.cell.get()), text))
@@ -853,7 +869,7 @@ define_class!(
             if let (Some(at), Some((_, text))) = (motion.position(), caret) {
                 frame.push_caret(at, text, theme.accent_linear(), motion.alpha());
             }
-            // Birinci aralık burada kapanıyor — `push_cursor`'dan **sonra**:
+            // Birinci aralık burada kapanıyor — `push_caret`'dan **sonra**:
             // imleci listeye koymak sink işidir, encode değil. Damga bir satır
             // yukarıda alınsaydı `cpu_encode` `draw`'ın yanında onu da ölçer
             // ve jetonun adı yalan söylerdi. Çift tek bir `Option`'da taşınıyor
@@ -936,7 +952,7 @@ impl LinkDelegate {
     /// piksel.
     ///
     /// **İki yazma noktası, tek fonksiyon** (R2.5): içerik karesi `sync`'ten
-    /// sonra, hareket karesi `move_cursor`'dan önce çağırıyor. İkinci bir
+    /// sonra, hareket karesi `move_caret`'dan önce çağırıyor. İkinci bir
     /// hesap "fare bir satır kayıyor" diye görünen bir ayrışma demekti.
     ///
     /// **İki tüketiciye tek yazma.** Piksel değeri `Frame`'den geri okunuyor,

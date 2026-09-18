@@ -1873,7 +1873,7 @@ mod tests {
         // Dock'un ikinci pipeline'ı: glyph'ler ve caret. Caret'in dikdörtgeni
         // fragment'in `[[position]]`'ı ile karşılaştırılıyor ve o koordinat
         // viewport dönüşümünden **sonraki**, oysa dock listeleri dock-yerel —
-        // ikisini `CursorBlock::shifted_y` birleştiriyor. Kayma unutulsaydı
+        // ikisini `Frame::dock_caret(origin_y)` birleştiriyor. Kayma unutulsaydı
         // caret'in altındaki harf **ızgarada**, dock'un üstünde bir satırda
         // zemin rengine boyanırdı: `make hepsi`'yi yeşil bırakan, gözle
         // "bir hücre görünmez oldu" diye fark edilen bir kusur.
@@ -2177,6 +2177,8 @@ mod tests {
             col,
             row: 0,
             visible: true,
+            // Bu sınamalar pikseli soruyor; devir `link`'in sorusu.
+            caret_in_dock: false,
             text,
             // Kaydırma kararı hareketin işi (`motion.rs`); burada çizilen
             // piksel sorgulanıyor ve konum zaten `push_settled` ile hedefin

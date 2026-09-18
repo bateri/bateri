@@ -11,7 +11,7 @@
 //! ile kuralın ayrı listede olması da aynı cümlenin devamı: ikisi aynı
 //! pipeline'dan geçiyor ama üstü çizili, altındaki harften sonra çizilmeli.
 //! Şerit `cell_bg`'yi arka planlarla paylaşıyor ama listesi ayrı ve gerekçesi
-//! sıra değil **ömür**: [`Frame::move_cursor`] arka plan listesini kırpıyor,
+//! sıra değil **ömür**: [`Frame::move_caret`] arka plan listesini kırpıyor,
 //! şerit ise hareket karesinde olduğu gibi kalmalı (bkz. [`Frame::stripes`]).
 
 use std::mem::offset_of;
@@ -306,7 +306,7 @@ const SEPARATOR_PX: f32 = 1.0;
 ///
 /// **Her kare `clear` görmüyor ve bu 008'in getirdiği ayrım:** hareket karesi
 /// grid'i kirli bulmadan çiziyor, yani listeyi temizleyemez —
-/// [`Frame::move_cursor`] onu koruyarak yalnız imleci taşıyor. `clear`'ın
+/// [`Frame::move_caret`] onu koruyarak yalnız imleci taşıyor. `clear`'ın
 /// çağrıldığı tek yer içerik karesi.
 #[derive(Default)]
 pub(crate) struct Frame {
@@ -314,7 +314,7 @@ pub(crate) struct Frame {
     /// pipeline'dan ama ayrı listede.
     ///
     /// Ayrılığın sebebi çizim sırası değil ömür (010 → R4.1): `bg`'ye
-    /// girseydi ya sayılmadan girerdi — [`Frame::move_cursor`]'ın
+    /// girseydi ya sayılmadan girerdi — [`Frame::move_caret`]'ın
     /// `truncate(bg_count)`'u onu her hareket karesinde siler ve şerit imleç
     /// kaydıkça **titrerdi** — ya da sayılarak girer ve `hucre=` jetonunun
     /// anlamı kayardı ("çizilen hücre" artık hücre olmayan bir şeyi de
@@ -359,7 +359,7 @@ pub(crate) struct Frame {
     ///
     /// Tek istisna imleç: hedefi **ekran** satırı ve ötelemeden muaf, yani
     /// onun instance'ı ötelemeyi CPU'da **geri veriyor**, dikdörtgeni ise
-    /// hiç almıyor ([`Frame::push_cursor`]).
+    /// hiç almıyor ([`Frame::push_caret`]).
     ///
     /// Satır değil **piksel** ve `f32`: kayma iki satır arasında duruyor.
     /// Değerin kendisi yine de **aygıt pikseline yuvarlı**
@@ -377,7 +377,7 @@ pub(crate) struct Frame {
     /// Liste değil **alan**: kare başına tek imleç var ve [`Frame::clear`] onu
     /// dejenereye döndürüyor. Alan olması hareket karesinin de şartı
     /// (`plan.md` → Karar 4): o yol `bg`'yi `bg_count`'a kırpıp
-    /// [`Frame::push_cursor`]'ı yeni konumla yeniden çağırıyor, yani ikinci
+    /// [`Frame::push_caret`]'ı yeni konumla yeniden çağırıyor, yani ikinci
     /// çağrı birincinin üstüne yazmak zorunda.
     cursor: CursorBlock,
     /// Dock yüzeyi: pencerenin altındaki **ikinci koordinat uzayı**.
@@ -390,7 +390,7 @@ pub(crate) struct Frame {
     /// Dock'un kendi arka planları **ve caret'i**; ızgaranın `bg`'sinin ikizi.
     ///
     /// Ayrı liste olması `stripes` ile **aynı** gerekçe ve bir derece daha
-    /// zorunlu: [`Frame::move_cursor`]'ın `truncate(bg_count)`'u `bg`'ye giren
+    /// zorunlu: [`Frame::move_caret`]'ın `truncate(bg_count)`'u `bg`'ye giren
     /// her şeyi her hareket karesinde siler, yani dock ızgaranın imleci
     /// kaydıkça **titrerdi**. Sayaçlara da girmiyor (`bg_count`,
     /// `glyph_count`, `rule_count`): `hucre=8 glif=6 kural=15` duman
@@ -398,9 +398,6 @@ pub(crate) struct Frame {
     dock_bg: Vec<Instance>,
     dock_glyphs: Vec<GlyphCell>,
     dock_rules: Vec<RuleCell>,
-    /// Dock'un caret'i; ızgaranınkiyle **aynı uniform slot'u**, ayrı encode
-    /// çağrısı. Shader değişmiyor — [`CursorBlock`]'a alan eklemek iki
-    /// taraftaki `stride 32` assert'ini kırardı.
     /// Çizilen **arka plan** instance'ı sayısı; imleç sayılmaz.
     ///
     /// `make duman`'ın `hucre=K` jetonu bunu okur: sink'in hücre ürettiğinin
@@ -850,8 +847,6 @@ impl Frame {
         &self.dock_rules
     }
 
-    /// Dock'un caret uniform'u, **dock-yerel**; ekrana taşıyan
-    /// [`CursorBlock::shifted_y`].
     /// Caret'in ızgara yuvası; `None` → caret bu karede ızgarada değil.
     pub(crate) fn grid_caret(&self) -> Option<Instance> {
         self.grid_caret.map(|caret| {
@@ -968,7 +963,7 @@ impl Frame {
     /// push edilen **her** hücrede koşuyor: `clear` çağrılmadan push edilen
     /// hücre sıfır boyutlu doğar ve ekranda sessizce kaybolur. Tek çağrı
     /// olduğu için formülün dallara kopyalanma ihtimali de kalmadı; imleç
-    /// yolu ([`Frame::push_cursor`]) aynı fonksiyondan geçen ikinci çağıran.
+    /// yolu ([`Frame::push_caret`]) aynı fonksiyondan geçen ikinci çağıran.
     fn pos(&self, col: u16, row: u16) -> [f32; 2] {
         self.pos_at([f32::from(col), f32::from(row)])
     }
@@ -1060,6 +1055,8 @@ mod tests {
             col,
             row,
             visible,
+            // Bu modül ızgaranın listelerini sınıyor; devir `link`'in sorusu.
+            caret_in_dock: false,
             text: TEXT,
             // Kaydırma kararı hareketin işi (`motion.rs`); bu listeyi
             // ilgilendirmiyor, çünkü konum zaten dışarıdan geliyor.

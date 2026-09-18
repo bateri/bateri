@@ -200,6 +200,14 @@ pub struct Cursor {
     pub col: u16,
     pub row: u16,
     pub visible: bool,
+    /// Caret'i bu karede **dock** devraldı mı.
+    ///
+    /// Devrin tek yükleminin (`shell::caret_home` + üç ön koşul) sınırdan
+    /// geçen hâli: [`Session::dock`] onu **argüman** olarak alıyor ve yeniden
+    /// hesaplamıyor. `!visible` ile karıştırılmamalı — imleç uygulamanın
+    /// gizlemesiyle de, geçmişe kaydırmayla da görünmez olur ve o hâllerde
+    /// devralan kimse yoktur.
+    pub caret_in_dock: bool,
     /// Bloğun altında kalan metnin (glyph **ve** kural çizgilerinin) rengi,
     /// **lineer** RGBA; bugünkü değeri temanın zemini.
     pub text: LinearRgba,
@@ -1460,12 +1468,16 @@ impl Session {
         //   taşıyor (bayat aynada `None`). Bastırılan satır yokken sorulacak
         //   bir tazelik de yok — dock metin değil boş bir caret gösteriyor.
         //
-        // Aralığın boş olduğu dejenere hâl (çıpa imlecin aşağısında) dışarıda:
-        // `suppress_floor` imlecin satırının üstünde.
+        // Burada `suppress_floor <= suppress_to` diye bir karşılaştırma
+        // **yok** ve olmamalı: ikisi de imlecin satırından türüyor
+        // (`floor = row - above`, `to = row + below`), yani karşılaştırma hiç
+        // yanlış olamaz — totolojiydi ve kontrol ettiğini sandığı dejenere
+        // hâli (çıpa imlecin aşağısında) ifade bile edemiyordu. O hâlin
+        // gerçek kapısı atlama döngüsünde: `from.max(suppress_floor)`.
         let caret_in_dock = self.dock
             && !alt_screen
             && caret_home == CaretHome::Dock
-            && (suppressed_block.is_none() || suppress_to.is_some_and(|to| suppress_floor <= to));
+            && (suppressed_block.is_none() || suppress_to.is_some());
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
         // bayrak sormuyor. Biri `HIDDEN` (`\e[8m`) ve o bu maskede **değil**:
@@ -1753,6 +1765,14 @@ impl Session {
             // görürdü — üstelik ızgaradaki, altındaki harf bastırıldığı için
             // boş bir blok olarak dururdu.
             visible: cursor_visible && !caret_in_dock,
+            // **Devrin cevabı sınırdan geçiyor, ikinci kez hesaplanmıyor.**
+            // `visible` bu soruyu yanıtlamıyor: imleç uygulamanın gizlemesiyle
+            // (`\e[?25l`) ya da geçmişe kaydırmayla da görünmez olur ve o iki
+            // hâlde caret'i devralan kimse yok. İkisi ayrı sorulduğunda
+            // ayrışıyorlardı — `dock::render` yalnız `caret_home`'u biliyordu,
+            // buradaki üç ön koşulu (pencerenin dock'u, alternatif ekran,
+            // tazelik) bilmiyordu — ve bayat aynada **iki caret** doğuyordu.
+            caret_in_dock,
             // Blok opak ve altındaki metni örtüyor: zemin rengi onu yeniden
             // okunur kılıyor. Kaynak `theme`, hücrelerinkiyle **aynı** —
             // ayrışsalardı imlecin altındaki harf bloğa değil eski bir palete
@@ -2200,6 +2220,7 @@ impl Session {
         cols: u16,
         into: &mut DockState,
         context: &mut DockContext,
+        caret_in_dock: bool,
         sink: impl FnMut(Cell),
     ) -> Dock {
         let theme = *lock(&self.adapter.0.theme);
@@ -2211,7 +2232,7 @@ impl Session {
             context.clone_from(&shell.context);
             shell.state
         };
-        dock::render(into, context, shell, &theme, cols, sink)
+        dock::render(into, context, shell, &theme, cols, caret_in_dock, sink)
     }
 
     /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve
@@ -3308,6 +3329,25 @@ mod tests {
             "ayna bayatken ızgara da bastırıldı: kullanıcı yazdığını hiçbir yerde görmez"
         );
         assert!(cursor.visible, "{cursor:?}");
+        // **Ve dock caret'i almıyor.** Set kapısının (`/code-review`) bulgusu
+        // tam buradaydı: sahiplik ikinci kez `dock::render`'ın içinde
+        // hesaplanıyordu ve o çağrı tazelik kapısını **bilmiyordu**, yani bu
+        // karede ızgara imlecini gösterirken dock da caret'ini veriyordu.
+        // Çizen taraf dock'u tercih ettiği için (`link.rs`) kullanıcının
+        // yazdığı taze satır caret'siz, caret de bayat metnin üstünde
+        // kalıyordu — bastırmanın kurtardığı satırı devir geri kaybediyordu.
+        assert!(!cursor.caret_in_dock, "{cursor:?}");
+        let dock = session.dock(
+            40,
+            &mut DockState::default(),
+            &mut DockContext::default(),
+            cursor.caret_in_dock,
+            |_| (),
+        );
+        assert!(
+            dock.caret.is_none(),
+            "bayat aynada iki caret: ızgara gösteriyor, dock da sahipleniyor"
+        );
         session.shutdown();
     }
 
@@ -6325,10 +6365,13 @@ mod tests {
         let mut frames = 0u64;
         let mut docked = 0u64;
         while Instant::now() < deadline {
-            if frame_if_damaged(&session, |_| ()).is_some() {
+            // Devrin cevabı üretimdeki gibi `frame()`'den geliyor: `dock()`
+            // onu yeniden hesaplasaydı iki kilit turu arasında ayrışabilirdi
+            // ve bu sınama tam da o ayrışmanın koşullarını zorluyor.
+            if let Some(cursor) = frame_if_damaged(&session, |_| ()) {
                 frames += 1;
                 if session
-                    .dock(80, &mut dock, &mut context, |_| ())
+                    .dock(80, &mut dock, &mut context, cursor.caret_in_dock, |_| ())
                     .caret
                     .is_some()
                 {

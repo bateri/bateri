@@ -651,7 +651,7 @@ impl Motion {
     /// İmlecin bu karedeki opaklığı; belirme dışında **her zaman `1.0`**.
     ///
     /// Blok da altındaki metnin rengi de bununla çarpılıyor
-    /// (`Frame::push_cursor`): ikisi ayrılsaydı harf, henüz görünmeyen bir
+    /// (`Frame::push_caret`): ikisi ayrılsaydı harf, henüz görünmeyen bir
     /// bloğun rengine boyanırdı — zeminin üstünde zemin renginde bir harf,
     /// yani okunmayan bir hücre.
     ///
