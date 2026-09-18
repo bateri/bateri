@@ -993,7 +993,23 @@ mod tests {
         let root = TempRoot::new("duration-terminal");
         let home = root.0.join("home");
         std::fs::create_dir_all(&home).expect("sahte ev dizini kurulamadı");
-        std::fs::write(home.join(".zshrc"), "").expect(".zshrc yazılamadı");
+        // **İKİNCİ BİR OSC 133 KAYNAĞI** — iTerm2'nin
+        // `~/.iterm2_shell_integration.zsh`'ının taklidi. Sahte değil
+        // temsilî: kullanıcının makinesinde ölçülen dizinin aynısını üretiyor
+        // (kimliksiz `C` ve `D`, bizimkilerden önce). VS Code ve Ghostty de
+        // aynı protokolü basıyor, yani bu kurulum **yaygın**.
+        //
+        // Boş bir `.zshrc` ile sınamak, kullanıcıların çoğunun yaşamadığı bir
+        // dünyayı sınamaktı: süre sıfıra düşüyordu ve hiçbir kapı görmüyordu.
+        std::fs::write(
+            home.join(".zshrc"),
+            "autoload -Uz add-zsh-hook\n\
+             foreign_preexec() { printf '\\033]133;C;\\007' }\n\
+             foreign_precmd() { printf '\\033]133;D;%s\\007' \"$?\" }\n\
+             add-zsh-hook preexec foreign_preexec\n\
+             add-zsh-hook precmd foreign_precmd\n",
+        )
+        .expect(".zshrc yazılamadı");
         let wrapper = copy_wrapper(&root.0);
 
         let session = Session::spawn(
@@ -1021,25 +1037,23 @@ mod tests {
         )
         .expect("oturum açılamadı");
 
+        // **Yalnız safha sorulur, `last_exit` değil:** yabancı kaynak daha
+        // ilk prompt'ta bir `D;0` basıyor, yani `last_exit` açılışta da dolu.
+        // Ön koşulu ona bağlamak sınamayı gerçek dünyada hiç başlatmazdı.
         wait_until("prompt işaretleri gelmedi", || {
-            session.shell_state()
-                == Some(ShellState {
-                    phase: ShellPhase::Input,
-                    last_exit: None,
-                })
+            session
+                .shell_state()
+                .is_some_and(|state| state.phase == ShellPhase::Input)
         });
 
         // Eşiği **geçen** bir komut: bir saniyenin altı zaten sayaç
         // doğurmuyor ve sınama onu kusur sanardı.
+        //
+        // Bitişi `last_exit` ile beklemiyoruz (yukarıdaki gerekçe): ölçüt
+        // doğrudan **aranan şeyin kendisi**, yani süre ekranda mı. Sayaç
+        // bitmiş değerde ondalıklı (`2.0s`); ekranın tamamında arıyoruz,
+        // çünkü satırın yeri tabana yaslanmaya göre oynuyor.
         session.write(b"sleep 2\n");
-        wait_until("komut bitmedi", || {
-            session
-                .shell_state()
-                .is_some_and(|state| state.last_exit == Some(0))
-        });
-
-        // Sayaç bitmiş değerde ondalıklı: `2.0s` gibi. Ekranın tamamında
-        // arıyoruz, çünkü satırın yeri tabana yaslanmaya göre oynuyor.
         wait_until("bitmiş komutun süresi ekranda görünmedi", || {
             let drawn = screen(&session, &mut Blocks::default()).join("\n");
             drawn.contains("2.0s") || drawn.contains("2.1s")

@@ -63,7 +63,8 @@ yol haritasının "iki katına" dediği bütçe).
 - Sınamalar: biçimin dört kademesi, en uzun metnin tampona sığması, koşan ile
   bitmiş sayacın çözünürlük ayrımı, eşiğin altında sayaç olmaması, sağa
   yaslanma ve `dim` rengi, çakışmada sayacın düşmesi, saatin komutla kurulup
-  komutla sönmesi.
+  komutla sönmesi; **ikinci bir OSC 133 kaynağının saati çalmaması** (hem
+  birim hem gerçek zsh düzeyinde).
 
 ## B. Elle / komutla
 
@@ -95,6 +96,13 @@ yol haritasının "iki katına" dediği bütçe).
   (`1.2s`); o dar aralıkta ikisi bir iki kare arayla görülüyor. Kusur değil
   **kesinleşme** — gerekçesi `Precision`'ın doc'unda. Hata diye bildirilmesin
   diye burada yazılı.
+- **İkinci bir OSC 133 kaynağı varsa ne oluyor.** iTerm2'nin shell
+  entegrasyonu (`~/.iterm2_shell_integration.zsh`), VS Code ve Ghostty aynı
+  protokolü basıyor; kuruluysa her komut **iki** `C` ve **iki** `D` doğuruyor.
+  Saat artık yalnız **kimlik taşıyan** `D`'de tüketiliyor ve ilk `C` kazanıyor,
+  yani süre doğru ölçülüyor. Kalan bedel kozmetik: yabancı kaynağın kimliksiz
+  `D`'si `last_exit`'i de tazeliyor, yani o alan açılışta bile dolu olabiliyor.
+  Sayacı etkilemiyor.
 - **Geçmişe dönük süre yok.** Set indiğinde açık olan pencerelerin daha önce
   koşmuş komutları süresiz kalır — defterde yok, uydurulmuyor.
 - **`QUIET_FLOOR` ile tik periyodu ilkesel olarak uyumsuz.** Kapı "son içerik

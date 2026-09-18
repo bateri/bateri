@@ -760,24 +760,46 @@ impl ShellLog {
             Mark::PromptEnd => state.phase = ShellPhase::Input,
             Mark::CommandStart => {
                 state.phase = ShellPhase::Running;
-                // Saatin tek dikildiği yer. `C` komutun **çalışmaya
-                // başladığını** söylüyor; prompt'un basılması ya da
-                // kullanıcının yazdığı süre sayaca girmemeli.
-                self.running_since = Some(Instant::now());
+                // Saatin dikildiği yer: `C` komutun **çalışmaya başladığını**
+                // söylüyor; prompt'un basılması ya da kullanıcının yazdığı
+                // süre sayaca girmemeli.
+                //
+                // **İlk `C` kazanıyor, sonrakiler ezmiyor.** Kullanıcının
+                // kabuğunda ikinci bir OSC 133 kaynağı olabilir (iTerm2'nin
+                // `~/.iterm2_shell_integration.zsh`'ı, VS Code, Ghostty) ve o
+                // da `C` basar — ölçüldü, kullanıcının makinesinde komut
+                // başına **iki** `C` geliyor. Üzerine yazsaydık süre ikinci
+                // işaretten başlardı; daha kötüsü, komut ortasında gelen bir
+                // `C` (iTerm2 `precmd`'inin ^C kolu) saati sıfırlardı.
+                // Sıfırlamanın tek yeri prompt (`A`).
+                self.running_since.get_or_insert_with(Instant::now);
             }
             Mark::CommandEnd { exit, id } => {
                 state.phase = ShellPhase::Finished;
                 // Kodu **her hâlde** tazeliyoruz: okunamayan bir kodu eskisiyle
                 // doldurmak, biten komutu başkasının koduyla etiketlemek olurdu.
                 state.last_exit = exit;
-                // Saat burada tükeniyor ve `take` zorunlu: kalsaydı iki komut
-                // arasında (`Finished` safhası, içinde bir `git` fork'u)
-                // bitmiş bir komut hâlâ koşuyormuş gibi sayılırdı.
-                let elapsed = self
-                    .running_since
-                    .take()
-                    .map_or(0, |since| millis(since.elapsed()));
+                // **Saati yalnız BİZİM `D`'miz tüketiyor**, yani kimlik
+                // taşıyan kapanış. Kimliksiz bir `D` bizim defterimize
+                // yazamıyor (`blocks.finish` çağrılmıyor); saati yine de
+                // tüketseydi ölçtüğümüz süre **çöpe giderdi**.
+                //
+                // Bu varsayımsal değil, kullanıcının makinesinde ölçüldü:
+                // iTerm2'nin shell entegrasyonu kuruluyken her komut iki `D`
+                // doğuruyor — önce onun kimliksizi, sonra bizimki. Kimliksiz
+                // olan saati alıyor, bizimki boş buluyor ve süre **sıfır**
+                // yazılıyordu; sayaç eşiğin altında kaldığı için hiç
+                // çizilmiyordu. Belirti tam da buydu: "bitince süre
+                // gözükmüyor".
+                //
+                // `take` yine zorunlu ama artık kimliğin içinde: kalsaydı iki
+                // komut arasında (`Finished` safhası, içinde bir `git`
+                // fork'u) bitmiş bir komut hâlâ koşuyormuş gibi sayılırdı.
                 if let Some(id) = id {
+                    let elapsed = self
+                        .running_since
+                        .take()
+                        .map_or(0, |since| millis(since.elapsed()));
                     self.blocks.finish(id, exit, elapsed);
                 }
             }
@@ -3190,6 +3212,44 @@ mod tests {
             log.duration(2, None),
             Some(Duration::ZERO),
             "kaybolan `D` sonraki bloğa süre yazdı"
+        );
+    }
+
+    /// **İkinci bir OSC 133 kaynağı saati çalmıyor.**
+    ///
+    /// Kullanıcının kabuğunda iTerm2'nin entegrasyonu kuruluysa
+    /// (`~/.iterm2_shell_integration.zsh`) her komut **iki** `C` ve **iki**
+    /// `D` doğuruyor; onunki kimliksiz, bizimki `bt_block=` taşıyor. Dizi
+    /// gerçek bir makinede ölçüldü ve aynen budur.
+    ///
+    /// Kimliksiz `D` saati tüketiyordu: bizimki boş buluyor, süre **sıfır**
+    /// yazılıyor ve sayaç eşiğin altında kalıp hiç çizilmiyordu. Kullanıcının
+    /// gördüğü kusur buydu ve hiçbir sınama göremiyordu, çünkü hepsi tek
+    /// kaynaklı bir akış varsayıyordu.
+    #[test]
+    fn a_foreign_integration_does_not_steal_the_clock() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply(Mark::PromptStart { id: Some(1) });
+        log.apply(Mark::PromptEnd);
+        // İki `C`: yabancı + bizim. İlki kazanmalı.
+        log.apply(Mark::CommandStart);
+        log.apply(Mark::CommandStart);
+        std::thread::sleep(Duration::from_millis(60));
+        // İki `D`: önce yabancının kimliksizi, sonra bizimki.
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: None,
+        });
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        log.apply(Mark::PromptStart { id: Some(2) });
+
+        let measured = log.duration(1, None).expect("biten blokta süre olmalı");
+        assert!(
+            measured >= Duration::from_millis(50),
+            "yabancı `D` saati çaldı, süre sıfıra düştü: {measured:?}"
         );
     }
 
