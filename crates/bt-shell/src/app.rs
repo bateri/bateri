@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bt_core::{
-    FontOptions, Prompt, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings,
+    FontOptions, ReduceMotion, SYSTEM_THEME, Session, SessionOptions, Settings,
     ShellIntegration, Teardown, Theme, Wake, load_shell, smoke_shell,
 };
 use bt_gpu::{
@@ -311,12 +311,11 @@ fn resolve_reduce_motion(
 fn shell_integration_env(
     inputs: &Inputs,
     setting: ShellIntegration,
-    prompt: Prompt,
     shell: impl FnOnce() -> Option<PathBuf>,
     script_dir: impl FnOnce() -> Option<PathBuf>,
     zdotdir: Option<OsString>,
 ) -> Vec<(String, String)> {
-    if matches!(inputs, Inputs::Hermetic) || setting == ShellIntegration::Off {
+    if matches!(inputs, Inputs::Hermetic) || !setting.installs_wrapper() {
         return Vec::new();
     }
     // Tanımadığımız kabuk sessizce geri düşüyor: terminal bugünkü gibi
@@ -363,13 +362,17 @@ fn shell_integration_env(
     if let Some(original) = original {
         env.push(("BATERI_ZDOTDIR".to_owned(), original));
     }
-    // **Yalnız kullanıcı prompt'unu geri istediğinde gönderiliyor**
-    // (`BATERI_ZDOTDIR`'ın koşullu olmasıyla aynı biçim): varsayılan kolda
-    // ortama tek bayt eklemiyoruz ve betiğin "değişken yok → prompt terminalin"
-    // kuralı varsayılanın **tek** kaydı oluyor. İki yerde yazılsaydı biri
+    // **Yalnız `blocks` kademesinde gönderiliyor** (`BATERI_ZDOTDIR`'ın
+    // koşullu olmasıyla aynı biçim): varsayılan kolda ortama tek bayt
+    // eklemiyoruz ve betiğin "değişken yok → prompt terminalin" kuralı
+    // varsayılanın **tek** kaydı oluyor. İki yerde yazılsaydı biri
     // değiştiğinde öteki sessizce eskirdi.
-    if prompt == Prompt::Shell {
-        env.push(("BATERI_PROMPT".to_owned(), prompt.name().to_owned()));
+    //
+    // Değişkenin adı prompt'u söylüyor çünkü betiğin yaptığı iş o: `PS1`'i
+    // sıfırlamıyor. Dock'un açılmaması kararı **bu tarafta** ve kabuğa hiç
+    // sorulmuyor (`ShellIntegration::wants_dock`).
+    if !setting.wants_dock() {
+        env.push(("BATERI_PROMPT".to_owned(), "shell".to_owned()));
     }
     env
 }
@@ -580,6 +583,26 @@ fn notify_alt_screen_changed() {
     });
 }
 
+/// Oturum doğarken ayrılacak dock payı (R5.1).
+///
+/// **İki koşul da gerekli ve ayrı sorular.** `integration` boşsa sarmalayıcı
+/// hiç kurulmadı — hermetik koşu, `"off"`, tanımadığımız kabuk, UTF-8 olmayan
+/// betik yolu — yani dock'u dolduracak ayna yok. `wants_dock` ise
+/// **kullanıcının seçimi**: `"blocks"` kademesinde sarmalayıcı kuruluyor
+/// (bloklar ve işaretler onun bütün gerekçesi) ama giriş satırı ızgarada
+/// kalıyor, yani pay ayrılmıyor.
+///
+/// Birini ötekinden türetmek 012 phase-10'un kapattığı kusuru geri getirirdi:
+/// ekranda **iki prompt** (kullanıcınınki ızgarada, dock'unki altta) ve
+/// ikisi arasında sıçrayan bir caret.
+fn dock_rows_at_birth(integration: &[(String, String)], setting: ShellIntegration) -> u16 {
+    if integration.is_empty() || !setting.wants_dock() {
+        0
+    } else {
+        DOCK_ROWS
+    }
+}
+
 /// Bu anın dock payı: alternatif ekranda **sıfır**, değilse doğum değeri.
 ///
 /// Doğum değeri ayrı bir girdi ve bu zorunlu: entegrasyonsuz bir oturumda
@@ -782,19 +805,15 @@ define_class!(
             // düzeltme için bir `TIOCSWINSZ` yer.
             // İki anahtar **tek ödünçten**: ayrı `borrow()`'lar arasına düşen
             // bir yeniden yükleme ikisini farklı dosyadan okuyabilirdi.
-            let (setting, prompt) = {
-                let settings = self.ivars().settings.borrow();
-                (settings.shell_integration, settings.prompt)
-            };
+            let setting = self.ivars().settings.borrow().shell_integration;
             let integration = shell_integration_env(
                 &self.inputs(),
                 setting,
-                prompt,
                 child::shell,
                 child::zsh_wrapper_dir,
                 std::env::var_os("ZDOTDIR"),
             );
-            let birth = if integration.is_empty() { 0 } else { DOCK_ROWS };
+            let birth = dock_rows_at_birth(&integration, setting);
             self.ivars().dock_rows_at_birth.set(birth);
             self.ivars().dock_rows.set(birth);
             let grid = self
@@ -3232,6 +3251,42 @@ mod tests {
     }
 
     #[test]
+    fn blocks_keeps_the_wrapper_and_drops_the_dock() {
+        // **012 phase-10'un kabul kriteri.** `"blocks"` kademesinde sarmalayıcı
+        // kuruluyor — `ZDOTDIR` gidiyor, yani bloklar ve işaretler çalışıyor —
+        // ama pencere **dock'suz** doğuyor: giriş satırı da prompt da
+        // ızgarada kalıyor.
+        let user = Inputs::User { config_root: None };
+        let (shell, dir) = zsh_and_dir();
+        let env = shell_integration_env(&user, ShellIntegration::Blocks, shell, dir, None);
+        assert!(
+            env.iter().any(|(key, _)| key == "ZDOTDIR"),
+            "blocks sarmalayıcıyı kurmadı: bloklar da ölürdü"
+        );
+        assert_eq!(
+            dock_rows_at_birth(&env, ShellIntegration::Blocks),
+            0,
+            "blocks kademesinde dock payı ayrıldı: ekranda iki prompt olurdu"
+        );
+
+        // `"auto"` aynı ortamı kuruyor ve payı **ayırıyor**: iki kademeyi
+        // ayıran şey ortam değil, bu karar.
+        let (shell, dir) = zsh_and_dir();
+        let env = shell_integration_env(&user, ShellIntegration::Auto, shell, dir, None);
+        assert_eq!(dock_rows_at_birth(&env, ShellIntegration::Auto), DOCK_ROWS);
+
+        // Sarmalayıcı hiç kurulmadıysa kademe ne olursa olsun pay yok:
+        // dolduracak ayna yok.
+        for setting in [
+            ShellIntegration::Auto,
+            ShellIntegration::Blocks,
+            ShellIntegration::Off,
+        ] {
+            assert_eq!(dock_rows_at_birth(&[], setting), 0, "{setting:?}");
+        }
+    }
+
+    #[test]
     fn hermetic_run_does_not_set_up_shell_integration() {
         // `Inputs`'un altıncı koşulu (009 phase-3): süreli koşu entegrasyonu
         // **hiç kurmaz**. Kursaydı `make duman`'ın sonucu ölçen makinenin
@@ -3243,7 +3298,6 @@ mod tests {
             let env = shell_integration_env(
                 &Inputs::Hermetic,
                 setting,
-                Prompt::Terminal,
                 || panic!("süreli koşu kabuğu çözdü"),
                 || panic!("süreli koşu betiği aradı"),
                 Some("/home/someone/zsh".into()),
@@ -3261,7 +3315,6 @@ mod tests {
         let env = shell_integration_env(
             &Inputs::User { config_root: None },
             ShellIntegration::Off,
-            Prompt::Terminal,
             || panic!("\"off\" kabuğu çözdü"),
             || panic!("\"off\" betiği aradı"),
             None,
@@ -3276,7 +3329,6 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
-            Prompt::Terminal,
             || Some(PathBuf::from("/bin/bash")),
             || panic!("zsh olmayan kabukta betik arandı"),
             None,
@@ -3287,7 +3339,6 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
-            Prompt::Terminal,
             || None,
             || None,
             None,
@@ -3299,7 +3350,6 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
-            Prompt::Terminal,
             || Some(PathBuf::from("/bin/zsh")),
             || None,
             None,
@@ -3316,7 +3366,6 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
-            Prompt::Terminal,
             shell,
             dir,
             None,
@@ -3331,7 +3380,6 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
-            Prompt::Terminal,
             shell,
             dir,
             Some(OsString::new()),
@@ -3343,7 +3391,6 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
-            Prompt::Terminal,
             shell,
             dir,
             Some("/home/someone/zsh".into()),
@@ -3369,7 +3416,6 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
-            Prompt::Terminal,
             shell,
             dir,
             None,
@@ -3379,13 +3425,14 @@ mod tests {
             "varsayılan prompt ortama yazıldı"
         );
 
-        // `"shell"`: kullanıcı prompt'unu geri istedi. Değer `Prompt::name`'den
-        // geliyor, yani ayar dosyasındaki yazılışla **aynı** dizgi.
+        // `"blocks"`: sarmalayıcı **kuruluyor** (bloklar ve işaretler için) ama
+        // giriş satırı ile prompt kabuğun kalıyor. Betiğe giden tek fark bu
+        // değişken; dock payının ayrılmaması ayrı bir karar ve bu tarafta
+        // (`ShellIntegration::wants_dock`, `birth`).
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(
             &user,
-            ShellIntegration::Auto,
-            Prompt::Shell,
+            ShellIntegration::Blocks,
             shell,
             dir,
             None,
@@ -3398,13 +3445,11 @@ mod tests {
             ]
         );
 
-        // Entegrasyon kapalıysa prompt anahtarı **hiç sorulmuyor**: sarmalayıcı
-        // kurulmadan prompt'u kim çizdiğinin bir anlamı yok ve `"off"`'un
-        // "hiçbir şey kurulmaz" sözü mutlak.
+        // `"off"` üç kademenin dışında: sarmalayıcı kurulmadan prompt'u kim
+        // çizdiğinin bir anlamı yok ve "hiçbir şey kurulmaz" sözü mutlak.
         let env = shell_integration_env(
             &user,
             ShellIntegration::Off,
-            Prompt::Shell,
             || panic!("\"off\" kabuğu çözdü"),
             || panic!("\"off\" betiği aradı"),
             None,
@@ -3424,7 +3469,6 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
-            Prompt::Terminal,
             shell,
             dir,
             Some("/opt/bateri/shell/zsh".into()),
@@ -3450,7 +3494,6 @@ mod tests {
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
-            Prompt::Terminal,
             shell,
             dir,
             Some(OsString::from_vec(vec![0x2f, 0xff, 0xfe])),
