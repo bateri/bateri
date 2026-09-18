@@ -19,8 +19,7 @@
 use crate::color::{self, LinearRgba, Theme};
 use crate::session::{Cell, UnderlineStyle};
 use crate::shell::{
-    CaretHome, DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ShellPhase,
-    ShellState, caret_home,
+    DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ShellPhase, ShellState,
 };
 
 /// Dock'un karedeki yüzeyi — hücrelerin **dışında** kalan her şey, çözülmüş.
@@ -100,6 +99,7 @@ pub(crate) fn render(
     shell: Option<ShellState>,
     theme: &Theme,
     cols: u16,
+    owned: bool,
     mut sink: impl FnMut(Cell),
 ) -> Dock {
     let mut surface = Dock {
@@ -112,10 +112,14 @@ pub(crate) fn render(
     if cols == 0 {
         return surface;
     }
-    // **Caret'in sahibi metinden önce ve metinden bağımsız soruluyor.** Sorunun
-    // tek sahibi [`caret_home`]; ızgara da aynı yüklemi okuyup imlecini
-    // gizliyor, yani ikisi ancak birlikte değişebilir.
-    let owned = caret_home(shell, state.status) == CaretHome::Dock;
+    // **Caret'in sahibi burada sorulmuyor, cevabı hazır geliyor** (`owned`).
+    // Eskiden burada [`caret_home`] ikinci kez çağrılıyordu ve o çağrı
+    // `Session::frame`'in üç ön koşulunu (pencerenin dock'u var mı,
+    // alternatif ekranda mıyız, ayna taze mi) **bilmiyordu**: bayat aynada
+    // ızgara imlecini görünür verirken dock da caret'ini veriyordu, çizen
+    // taraf dock'u seçiyor ve kullanıcının yazdığı taze satır caret'siz
+    // kalıyordu. Yüklem tek, hesabı da tek — ve aynı değişiklik iki ayrı
+    // kilit turundan türetme yarışını da kapatıyor.
     // İşaret **sink'ten geçmiyor**: bir hücre değil, yüzeyin bir alanı
     // ([`Dock::sigil`]). Hücre olsaydı kullanıcının fontunun `>`'ü çizilirdi.
     //
@@ -379,7 +383,9 @@ fn resolve(color: HighlightColor, theme: &Theme) -> LinearRgba {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::{DockFault, Highlight};
+    // Sahiplik artık `render`'ın argümanı; yüklemi yalnız burası çağırıyor,
+    // üretimde cevabı `Session::frame` veriyor.
+    use crate::shell::{CaretHome, DockFault, Highlight, caret_home};
 
     const THEME: Theme = Theme::BATERI;
 
@@ -421,7 +427,13 @@ mod tests {
     /// Çizilen hücreler, sütun sırasıyla.
     fn draw_with(state: &DockState, context: &DockContext, cols: u16) -> (Vec<Cell>, Dock) {
         let mut cells = Vec::new();
-        let dock = render(state, context, None, &THEME, cols, |cell| cells.push(cell));
+        // Sahiplik sınamanın girdisi değil: üretimde `Session::frame` veriyor,
+        // burada aynı yüklemden türetiliyor ki bu modülün sınamaları
+        // devrin kuralını değil **çizimi** sınasın.
+        let owned = caret_home(None, state.status) == CaretHome::Dock;
+        let dock = render(state, context, None, &THEME, cols, owned, |cell| {
+            cells.push(cell)
+        });
         (cells, dock)
     }
 
@@ -429,12 +441,14 @@ mod tests {
     /// çağırandan.
     fn draw_as(state: &DockState, shell: Option<ShellState>, cols: u16) -> (Vec<Cell>, Dock) {
         let mut cells = Vec::new();
+        let owned = caret_home(shell, state.status) == CaretHome::Dock;
         let dock = render(
             state,
             &DockContext::default(),
             shell,
             &THEME,
             cols,
+            owned,
             |cell| cells.push(cell),
         );
         (cells, dock)

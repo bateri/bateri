@@ -1512,7 +1512,14 @@ fn decode_line<'a>(
         .chars()
         .chain(line.buffer.chars())
         .chain(line.postdisplay.chars())
-        .filter(|ch| !ch.is_whitespace())
+        // **Ölçüt `' '`, `is_whitespace()` değil** ve bu bilerek dar: kapının
+        // öteki yarısı ızgarayı tarıyor (`Session::last_ink_in_row`) ve o da
+        // `frame()`'in atlama kapısına çivili — orada mürekkepsizlik yalnız
+        // boşluk, spacer ve gizli hücre. `is_whitespace()` deseydik satır sonu
+        // NBSP (U+00A0, U+2007, U+3000) taşıyan bir tamponda ayna önceki
+        // harfi, ızgara NBSP'yi söyler, ikisi hiç eşleşmez ve satır kalıcı
+        // olarak **bayat** sayılırdı: hem ızgarada hem dock'ta çizilirdi.
+        .filter(|ch| *ch != ' ')
         .next_back();
 
     decoded.clear();

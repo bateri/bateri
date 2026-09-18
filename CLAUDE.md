@@ -95,9 +95,9 @@ gösteremiyorsa (`Unavailable`), ZLE satırı bırakmışsa (`Idle`) ya da ayna
 Bayatlık kip sezerek değil iki kesin veriyi karşılaştırarak anlaşılıyor —
 ızgaranın son mürekkebi ile aynanınki (`DockState::last_ink`); yanlış alarmın
 yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez.
-**Devrin tek yüklemi var** (`shell::caret_home` + üç ön koşul) ve **üç
-tüketicisi**: hangi hücrelerin atlanacağı, imlecin çizilip çizilmeyeceği ve
-**doluluk sayısı**. Üçü ayrı sorulduğunda ayrışıyorlardı ve belirti ölçüldü:
+**Devrin tek yüklemi var** (`shell::caret_home` + üç ön koşul) ve **dört
+tüketicisi**: hangi hücrelerin atlanacağı, imlecin çizilip çizilmeyeceği,
+**doluluk sayısı** ve **dock'un caret'i**. Üçü ayrı sorulduğunda ayrışıyorlardı ve belirti ölçüldü:
 boş prompt'ta hiçbir hücre çıpayı taşımadığı için satır çizilmiyor ama
 doluluğa **giriyordu**, ilk tuşta çıpa doğunca doluluk bir satır düşüyor ve
 ızgaranın tamamı oynuyordu — satır gizliydi ama yer kaplıyordu. Tek yüklem
@@ -109,7 +109,14 @@ satırı bırakmışken (`Input` + `Idle`; `CORRECT`'in `[nyae]`'i, R3.3) ızgar
 çünkü sıçrayan caret tam da o pencerelerde görülüyordu. Üç ön koşul:
 pencerenin dock'u olacak (`SessionOptions::dock`; yoksa devralacak kimse yok
 ve satır da imleç de ızgarada kalır), alternatif ekranda olmayacak (dock zaten
-kalkıyor) ve bastırılan bir satır varsa tazelik kapısı geçilecek. Metinsiz dock
+kalkıyor) ve bastırılan bir satır varsa tazelik kapısı geçilecek. Cevap
+**hesaplandığı yerden geçiyor**, ikinci kez türetilmiyor: `frame()` onu
+`Cursor::caret_in_dock` ile veriyor, `Session::dock` argüman olarak alıyor.
+Dock kendi başına sorduğunda üç ön koşulu bilmiyordu ve bayat aynada **iki
+caret** doğuyordu — ızgara imlecini gösterirken dock da sahipleniyor, çizen
+taraf dock'u seçiyor ve kullanıcının yazdığı taze satır caret'siz kalıyordu
+(set kapısı, 012). Aynı tekleştirme iki ayrı kilit turundan türetme yarışını da
+kapattı. Metinsiz dock
 satırı caret'siz değil: `Live` olmayan aynada caret satırın başında duruyor.
 Bastırmanın kendi gerekçesi
 ölçülmüş: `bracketed-paste-magic` yapıştırmayı `zle -U` ile kuyruğa geri

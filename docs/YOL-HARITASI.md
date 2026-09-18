@@ -127,6 +127,26 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   kapatamaz; kullanıcının göreceği tek yüzey "büyük depoda prompt gecikmesi".
   Yamandığı yer belli değil; dock'un bağlam satırını elden geçiren ilk set
   doğal ev.
+- **Bastırmanın tazelik kapısı prompt hücrelerini de sayıyor.** 012 set
+  kapısının (`/code-review`) iki bulgusu tek köke bağlı: kapı ızgara satırının
+  **tamamının** son mürekkebini aynanınkiyle karşılaştırıyor, oysa ayna
+  prompt'u hiç taşımıyor. `prompt = "terminal"`'de `PS1` sıfır genişlikli
+  olduğu için sorun görünmüyor; `prompt = "shell"`'de ve kullanıcının
+  `precmd`'si prompt satırına bir şey bastığında kapı boş prompt'ta "bayat",
+  ilk tuştan sonra "taze" diyor — yani satır her prompt'ta bir kez yanıp
+  sönüyor. Üstelik bastırma **satır geneli** (`from..=to` bütün sütunları
+  atlıyor) ve çıpa kullanıcının `PS1`'inin önüne ekleniyor, yani
+  `prompt = "shell"` seçen kullanıcı prompt'unu ilk tuşta kaybediyor —
+  `docs/AYARLAR.md`'nin vaadinin tersi. Çaresi bir tasarım kararı (kapı
+  yalnız çıpa sütunundan sonrasını mı saysın, mod'a mı baksın) ve kip'e
+  bağlı olduğu için tek satırlık değil. Yamandığı yer: prompt devrini elden
+  geçiren ilk set.
+- **Bastırılan satır, altında bir şey çizilince boş şerit bırakıyor.** Aynı
+  kapının küçük bulgusu: `suppress_to` yalnız tamponun kendi satırlarını
+  kapsıyor, ZLE'nin **altına** bastığı tamamlama listesi ya da `zle -M`
+  mesajı çiziliyor ve doluluk sayısı onları sayınca bastırılan satır arada
+  görünür bir boşluk oluyor. `display: none` yalnız giriş satırı son çizilen
+  satırken tam. Aynanın görsel dikişi borcunun (012 satırı) görünür belirtisi.
 - **Blok animasyonları.** 010 Karar 5 şeridin belirmesini setten **çıkardı**:
   şerit bugün anında beliriyor. Gerekçe animasyonun zorluğu değil, bedeli —
   `bt-gpu::motion` ikinci bir tüketici kazanır, `Mode::Fade`'in "indirgemenin

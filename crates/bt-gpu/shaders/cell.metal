@@ -98,9 +98,11 @@ fragment float4 cell_fragment(Out in [[stage_in]],
     // `setViewport` ızgarayı içerik tabana yapışsın diye öteliyor, yani
     // instance uzayı dönüşümden ÖNCE, `[[position]]` SONRA ve ikisi tam
     // öteleme kadar ayrı. İmleç dikdörtgeni bu yüzden asimetrik doldurulur
-    // (`Frame::push_cursor`: instance `pos - origin`, dikdörtgen ham `pos`) ve
+    // (`Frame::grid_caret`: instance `pos - origin`, dikdörtgen ham `pos`) ve
     // asimetriyi "düzelten" bir sadeleştirme imlecin altındaki metnin rengini
-    // başka bir satıra taşır.
+    // başka bir satıra taşır. Çıkarma **okuma anında** yapılıyor, çünkü
+    // öteleme caret sink'e girdikten sonra hâlâ değişebiliyor; dock yuvasının
+    // ikizi aynı işi `origin_y` ile yapar (`Frame::dock_caret`).
     //
     // Sınır yarı açık: [x0, x1) — komşu hücrenin ilk sütunu bu bloğa ait
     // değil. `<=` bugün AYNI sonucu verir ve bunu sınayan bir bekçi yok:

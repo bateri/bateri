@@ -107,4 +107,4 @@ Gerçek pencerede üç kusur, üçü de kullanıcıdan:
 - [x] Test: chevron'un şekli, dikey hizası ve paya sığması bağlı
 - [ ] Gerçek pencerede gözle: yazma, `sleep 5`, punto değişimi, vim gir-çık
 - [ ] Doğrulama geçti (`make hepsi` + `make kur` + `make duman`)
-- [ ] Yayın etkisi yazıldı
+- [x] Yayın etkisi yazıldı

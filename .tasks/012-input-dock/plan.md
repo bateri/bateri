@@ -149,8 +149,9 @@ bt-shell
 | phase-5 | ✅ |
 | phase-6 | ✅ |
 | phase-7 | ✅ |
-| phase-8 | 🔨 |
-| kapı | |
+| phase-8 | ✅ |
+| phase-9 | ✅ |
+| kapı | [~] 8 bulgu; 5'i düzeltildi, 3'ü ertelendi (gerekçe `teslim.md`) |
 
 phase-6'nın `/code-review`'ından çıkan **tek commit'lik düzeltme** (phase
 açmadı, `duzen.md` → Ek phase eşiği): `can_be_typed`'ın yapıştırma istisnası
@@ -163,3 +164,10 @@ pencerede iki kusur görüldü — caret dock canlanana kadar ızgaradaydı ve h
 prompt'ta oraya sıçrıyordu, `login(1)`'in `Last login:` banner'ı da ızgaranın
 ilk satırında duruyordu. Birden çok crate'e dokunuyor, kendi gözle testi ve
 kendi yayın etkisi var.
+
+**phase-9 da plandan sonra açıldı** (aynı eşik): dock'un yüzü gerçek pencerede
+üç kusur verdi — satırların nefes payı yoktu, caret dock'a **ışınlanıyor** ve
+dock'ta hiç kaymıyordu, `>` de kullanıcının fontundan geliyordu. Üçü tek
+sete girdi çünkü ortak kökleri var: dock'un geometrisi tek formülden (`dock_px`)
+türüyor, caret tek nesneye indi ve işaret sınırdan hücre olarak değil **renk**
+olarak geçmeye başladı. Dört crate'e birden dokunuyor.
