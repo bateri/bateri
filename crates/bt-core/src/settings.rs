@@ -455,26 +455,29 @@ impl Settings {
     /// Metin İngilizce: kullanıcının açtığı dosya bir UI dizgisi
     /// (`CLAUDE.md` → Dil).
     pub const TEMPLATE: &str = r#"# bateri settings. Changes apply as soon as you save this file.
-# A key you delete goes back to its default.
+# A key you delete goes back to its default. Values are case-sensitive; one
+# that is not understood leaves its key alone and says so under the title.
 
 [terminal]
-# Lines of history kept above the screen, from 0 to 100000.
+# 0 to 100000. Lines of history kept above the screen.
 scrollback = 10000
-# The cursor's default shape: "block" fills the cell, "underline" sits below
-# it, "beam" stands at its left edge. Programs such as vim may ask for a
-# different shape while they run; this is the shape when none is asked for.
+# "block" | "underline" | "beam". The cursor's default shape: block fills the
+# cell, underline sits below it, beam stands at its left edge. Programs such as
+# vim may ask for a different shape while they run; this is the shape when none
+# is asked for.
 cursor = "block"
-# Whether the cursor blinks: "auto" follows what the program asks for, "on"
-# always blinks, "off" never does. Blinking asks for two frames a second for
-# as long as the window is focused, so it is off unless you choose it.
+# "auto" | "on" | "off". Whether the cursor blinks: auto follows what the
+# program asks for, on and off decide it here. Blinking asks for two frames a
+# second, so it is off unless you choose it; with it on, it stops on its own
+# 15 seconds after the last keystroke and comes back with the next one.
 cursor_blink = "off"
 
 [appearance]
-# "system" follows the macOS light/dark appearance. Any other value is a theme
-# used in both: a file themes/NAME.toml next to this one, or a built-in theme,
-# "bateri" (dark) or "bateri-light" (light).
+# "system" or a theme name. "system" follows the macOS light/dark appearance;
+# any other value is a theme used in both — a file themes/NAME.toml next to
+# this one, or a built-in theme, "bateri" (dark) or "bateri-light" (light).
 theme = "system"
-# The themes used while theme = "system".
+# Theme names, used while theme = "system".
 light_theme = "bateri-light"
 dark_theme = "bateri"
 
@@ -482,32 +485,33 @@ dark_theme = "bateri"
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
 # Menlo when SF Mono is not installed.
 # family = "Menlo"
-# Size in points.
+# Greater than 0. Size in points.
 size = 13
-# Line spacing as a multiple of the font's own: 1 is the font's own spacing,
-# 1.4 is airy. Below 1 is refused — it would clip the tails of g and y.
+# 1 to 2. Line spacing as a multiple of the font's own: 1 is the font's own
+# spacing, 1.4 is airy. Below 1 is refused — it would clip the tails of g and y.
 line_height = 1.0
 
 [clipboard]
-# Lets programs in the terminal, also over ssh, copy text to the clipboard
-# (OSC 52): "copy" allows it, "off" does not. They can never read it.
+# "copy" | "off". Lets programs in the terminal, also over ssh, copy text to
+# the clipboard (OSC 52): copy allows it, off does not. They can never read it.
 osc52 = "copy"
 
 [motion]
-# How the cursor travels between cells: "spring" glides and eases into place,
-# "ease" glides for a fixed time, "snap" jumps there at once.
+# "snap" | "ease" | "spring". How the cursor travels between cells: spring
+# glides and eases into place, ease glides for a fixed time, snap jumps there
+# at once.
 cursor_motion = "spring"
-# Whether to tone animations down to a short fade: "system" follows the macOS
-# Reduce Motion setting, "on" and "off" decide it here.
+# "system" | "on" | "off". Whether to tone animations down to a short fade:
+# system follows the macOS Reduce Motion setting, on and off decide it here.
 reduce_motion = "system"
 
 [shell]
-# Whether bateri sets up the shell so it can report where prompts and commands
-# begin and end. "auto" does it for shells bateri knows, and on those shells it
-# also moves the line you type into the dock at the bottom of the window and
-# draws the prompt itself. "blocks" keeps command blocks and marks but leaves
-# the line and the prompt to your shell, the way a terminal normally works.
-# "off" never sets anything up.
+# "auto" | "blocks" | "off". Whether bateri sets up the shell so it can report
+# where prompts and commands begin and end. auto does it for shells bateri
+# knows, and on those shells it also moves the line you type into the dock at
+# the bottom of the window and draws the prompt itself. blocks keeps command
+# blocks and marks but leaves the line and the prompt to your shell, the way a
+# terminal normally works. off never sets anything up.
 # Unlike every other key here, this one only takes effect in shells started
 # after the change; shells already open keep what they were started with.
 integration = "auto"
