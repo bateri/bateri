@@ -77,8 +77,10 @@ sabit son süre. Bir saniyenin altındakiler hiç görünmesin.
    kararıyla açıldı.)*
 6. **Renk `dim`.** Sayaç bloğun **üstverisi**, komutun parçası değil; dock'un
    bağlam satırıyla aynı sınıf ve aynı rolden besleniyor.
-7. **Çakışmada sayaç kaybeder.** Satırın son **dolu** hücresi sayacın alanına
-   giriyorsa sayaç o satırda **hiç çizilmez**. Kullanıcının yazdığı metin
+7. **Sayacın iki yanı da boş.** Satırın son **dolu** hücresi sayacın alanına
+   giriyorsa sayaç o satırda **hiç çizilmez**; sağ kenarda da bir hücre pay
+   kalıyor, çünkü ızgara soldan pay bırakıp sağdan bırakmıyor ve son sütuna
+   oturan sayaç pencere kenarına yapışıyordu (gözlendi, kullanıcı). Kullanıcının yazdığı metin
    hiçbir koşulda örtülmez; yön güvenli. Ölçüt "mürekkep" değil "dolu", çünkü
    zemin de sütunu işgal ediyor: seçili bir satırda boş kuyruk hücreleri ters
    çevrilmiş zemin alıyor ve sayaç onların üstüne düşseydi sönük ön plan

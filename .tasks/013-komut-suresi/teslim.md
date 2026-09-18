@@ -11,7 +11,8 @@ son değer (`45s` koşuyor → `45.3s` oturuyor).
 - **Sayaç** (`bt-core::session`): yeni sınır tipi yok — `resolve_blocks` metni
   yığın tamponunda üretip mevcut sink'e hücre basıyor, `bt-gpu` onu sıradan bir
   harften ayırt etmiyor. Satırın son **dolu** hücresine değecekse
-  **çizilmiyor** — komut metni de seçim vurgusu da örtülmüyor.
+  **çizilmiyor** — komut metni de seçim vurgusu da örtülmüyor — ve sağ kenarda
+  bir hücre pay bırakıyor, yani iki yanı da boş.
 - **Saat** (`bt-gpu::link`): kare talebinin **üçüncü** sebebi. Süresi ve durma
   koşulu `bt-core`'dan (`Cursor::next_tick`).
 
