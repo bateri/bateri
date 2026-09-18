@@ -3368,6 +3368,42 @@ mod tests {
         session.shutdown();
     }
 
+    /// Süre **sonraki prompt geldikten sonra da** duruyor.
+    ///
+    /// Gerçek zsh'te `D` ile bir sonraki `A` aynı `precmd`'de arka arkaya
+    /// basılıyor (`bateri.zsh` → `__bateri_precmd`), yani kullanıcının
+    /// gördüğü hâl "bitmiş blok + yeni prompt". Öteki sınamalar `D`'de
+    /// duruyordu ve bu pencereyi hiç denemiyordu.
+    #[test]
+    fn a_finished_duration_survives_the_next_prompt() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}ls -la\\033]133;C\\007\\r\\nout\\r\\n'; sleep 2.5; \
+                 printf '\\033]133;D;0;bt_block=1\\007{}'; sleep 5",
+                anchored_prompt(1),
+                anchored_prompt(2),
+            ),
+            Arc::clone(&wake),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            assert!(Instant::now() < deadline, "bitmiş süre görünmedi");
+            let mut cells = Vec::new();
+            session.frame(|cell| cells.push(cell), &mut Blocks::default());
+            let row = row_glyphs(&cells, 0);
+            if let Some(counter) = row.strip_prefix("$ls-la")
+                && counter.contains('.')
+            {
+                assert!(counter.ends_with('s'), "bitmiş sayaç bozuk: {counter:?}");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        session.shutdown();
+    }
+
     /// Sayaç sığmıyorsa **saat de kurulmuyor**.
     ///
     /// Dar bir pencerede uzun bir komut sayacı hiç çizdirmiyor; saat yine de
