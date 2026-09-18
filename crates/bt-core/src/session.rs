@@ -510,12 +510,19 @@ fn term_config(options: TerminalOptions) -> Config {
             Osc52::Copy => TermOsc52::OnlyCopy,
         },
         // **Yalnız varsayılan.** Uygulamanın DECSCUSR'ı (`\e[5 q`) bunu
-        // ezer ve ezmeli: vim insert modda çubuk istiyor. `blinking` burada
-        // **her zaman `false`**: `"auto"`nun tabanı o ve `"on"`/`"off"` birer
-        // ezme, yani config'de temsil edilemiyorlar (`AdapterInner::blink`).
+        // ezer ve ezmeli: vim insert modda çubuk istiyor.
+        //
+        // **`blinking` yalnız `Auto`'nun tabanı.** `"on"` ve `"off"` birer ezme
+        // ve config'de temsil edilemiyorlar (`AdapterInner::blink`) — buraya
+        // yazılan bir "hep sönsün" uygulamanın `\e[2 q`'suyla susturulurdu.
+        //
+        // Taban **`true`** ve bu kullanıcı bildirimiyle düzeldi (2026-09-19):
+        // `false` iken `"auto"` düz bir promptta `"off"` ile **birebir aynıydı**
+        // — ne zsh ne bizim betiğimiz DECSCUSR/DECSET 12 göndermiyor, yani
+        // hiçbir şey blink istemiyordu ve üç değerden ikisi ayırt edilemiyordu.
         default_cursor_style: CursorStyle {
             shape: caret_shape(options.cursor),
-            blinking: false,
+            blinking: matches!(options.blink, CursorBlink::Auto),
         },
         ..Config::default()
     }
@@ -5012,7 +5019,18 @@ mod tests {
         // Fixture `On` taşıdığı için bu iddia gerçekten bir kapı.
         assert!(
             !shaped.default_cursor_style.blinking,
-            "blink config'e yazıldı"
+            "ezme config'e yazıldı"
+        );
+        // `Auto`'nun tabanı ise **açık**: kapalı olsaydı hiçbir şey blink
+        // istemediği için `"auto"` düz promptta `"off"` ile aynı olurdu
+        // (kullanıcı bildirdi, 2026-09-19).
+        let auto = term_config(TerminalOptions {
+            blink: CursorBlink::Auto,
+            ..options
+        });
+        assert!(
+            auto.default_cursor_style.blinking,
+            "auto'nun tabanı kapalı: off'tan ayırt edilemez"
         );
 
         // **Üç** alanın dışında hiçbir şey kurulmuyor.
