@@ -3,7 +3,7 @@
 > İlgili: [plan.md](plan.md) · [phase-1.md](phase-1.md) · [phase-2.md](phase-2.md) ·
 > [phase-3.md](phase-3.md) · [phase-4.md](phase-4.md) · [phase-5.md](phase-5.md) ·
 > [phase-6.md](phase-6.md) · [phase-7.md](phase-7.md) · [phase-8.md](phase-8.md) ·
-> [phase-9.md](phase-9.md)
+> [phase-9.md](phase-9.md) · [phase-10.md](phase-10.md)
 
 Giriş satırı artık terminalin: pencerenin altında kendi yüzeyi olan bir **dock**
 var, ZLE'nin tamponunu aynalıyor ve prompt'u kabuk değil terminal çiziyor
@@ -11,7 +11,9 @@ var, ZLE'nin tamponunu aynalıyor ve prompt'u kabuk değil terminal çiziyor
 alıyor). Dışarıya görünen dört göç var ve dördü de kullanıcının ekranında:
 **kurulu prompt kaybediliyor** (p10k/starship çizilmiyor), **`Last login:`
 banner'ı kalkıyor**, giriş satırı ızgarada **çizilmiyor** ve imleç
-dock'a taşınıyor. Ayar şeması bir anahtar büyüdü (`[shell] prompt`), kabuk
+dock'a taşınıyor. Prompt'unu geri isteyenin anahtarı
+`[shell] integration = "blocks"`: sarmalayıcı kurulu kalır, yani **bloklar ve
+işaretler yaşar**, ama dock açılmaz. Kabuk
 betiği ve tel biçimi değişti (`make kur` zorunlu), jeton satırı **değişmedi**
 ve yeni bağımlılık yok. `TERM`, terminfo, tema biçimi ve shader dokunulmadı.
 
@@ -24,7 +26,7 @@ make test-yaris   # phase-1 ve phase-7 paylaşılan duruma dokundu
 make duman        # gerçek pencere ister; başsız kabukta yanlış tanıyla düşer
 ```
 
-`make hepsi` her phase'in kapısıydı ve `8f2e177`'de yeşil. Koşullu hedeflerin
+`make hepsi` her phase'in kapısıydı ve phase-10'da da yeşil. Koşullu hedeflerin
 üçü de **tetiklendi**:
 
 - **`make kur`** — `assets/shell/zsh/bateri.zsh` üç kez değişti (phase-2 aynayı
@@ -92,14 +94,12 @@ Ayrıca phase-9'un `push_cursor → push_caret` yeniden adlandırmasından kalan
 ajanın kabuğunda `make duman` yanlış tanıyla kırmızı düşüyor.
 
 - [x] `make hepsi` yeşil (kapı commit'i; `make shader` de koştu, `.metal` yorumu değişti)
-- [ ] 🚧 **BLOKLAYICI — `prompt = "shell"` gerçekten prompt'u geri veriyor mu?**
-      Mekanizma doğrulandı, gerçek pencerede **doğrulanmadı**: çıpa
-      kullanıcının `PS1`'inin önüne ekleniyor (`bateri.zsh:333`) ve bastırma
-      satır geneli (`session.rs:1655`), yani `PS1` bastırılan satırda kalıyor;
-      dock da yalnız `>` + `BUFFER` çiziyor. Beklenen kusur: prompt boş satırda
-      görünür, **ilk tuşta kaybolur**. phase-5'in ana teslimi ve gözle kontrol
-      kutusu hiç işaretlenmemişti. Kırmızı çıkarsa `/ship` yok — kendi phase'ini
-      ister (kökü #3 ile aynı)
+- [ ] **Üç kademe** (phase-10): `integration = "auto"` dock'lu ve bizim
+      prompt'umuzla; `"blocks"` dock'suz, **sizin prompt'unuz** ve bloklar
+      çalışıyor; `"off"` hiçbiri. Kullanıcının iki karesi tekrar edilince
+      ekranda **tek** prompt olmalı
+- [ ] Dosyada kalan `prompt = "shell"` satırı davranışı değiştirmiyor ve alt
+      başlıkta emekli olduğu söyleniyor
 - [ ] `make kur` yeşil
 - [ ] `make test-yaris` yeşil
 - [ ] `make duman` yeşil ve jetonlar yukarıdaki sözleşmeye uyuyor
@@ -111,8 +111,9 @@ ajanın kabuğunda `make duman` yanlış tanıyla kırmızı düşüyor.
       dock'a **kayarak** iniyor; kayma ortasında pencere uyumuyor (phase-9)
 - [ ] **Gözle: ZLE yüzeyleri** — Tab tamamlama, Ctrl-R, `CORRECT` istemi
       (phase-4)
-- [ ] **Gözle: kurulu prompt** — p10k/starship kuruluyken prompt devredilmiş,
-      `[shell] prompt = "shell"` geri veriyor (phase-5)
+- [ ] **Gözle: kurulu prompt** — p10k/starship kuruluyken `"auto"` prompt'u
+      devralmış; `"blocks"` onu olduğu gibi geri veriyor **ve blok şeritleri
+      hâlâ çiziliyor** (phase-5 + phase-10)
 - [ ] **Gözle: alternatif ekran** — vim/htop/`less` gir-çık; dock kalkıyor,
       çıkışta geri geliyor, `git log` dock'u koruyor (phase-7)
 - [ ] **Gözle: punto** — Cmd +/−/0 ile dock payı ölçekleniyor (phase-9)
@@ -153,10 +154,14 @@ Sayı yazılmadı; `docs/OLCUMLER.md`'ye bu setten hiçbir değer girmedi.
 
 Sürüm notuna dört kalem girer — dördü de kullanıcının ekranında görünür:
 
-1. **Kurulu prompt çizilmiyor.** Varsayılan `[shell] prompt = "terminal"`.
-   Geri dönüş `prompt = "shell"` ve **dock'u kapatmıyor**; `shell.integration =
-   "off"` de bir çıkış ama blokları da öldürüyor, yani orantısız. Her ikisi de
-   **sonraki oturumda** geçerli.
+1. **Kurulu prompt çizilmiyor.** Varsayılan `[shell] integration = "auto"`
+   prompt'u terminale devrediyor ve satırı dock'a taşıyor. Geri dönüş
+   `integration = "blocks"`: blokları ve işaretleri **korur**, yalnız dock'u
+   bırakır. `"off"` de prompt'u geri verir ama blokları da öldürür, yani
+   orantısız. İkisi de **sonraki oturumda** geçerli.
+   **`[shell] prompt` emekli** (phase-10): eskiden ayrı bir anahtardı, ekranda
+   iki prompt üretiyordu; dosyada kalması zararsız ama okunmuyor ve bir uyarı
+   görünüyor.
 2. **`Last login:` kalktı.** `login(1)` her zaman `-q` alıyor. Geri isteyen
    için bugün anahtar **yok**.
 3. **Giriş satırı ızgarada çizilmiyor**, dock'ta. Ayna gösteremiyorsa
