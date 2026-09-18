@@ -26,7 +26,7 @@ kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
 Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı, `osc52`,
-`cursor_motion`, `reduce_motion` ve `shell.integration`),
+`cursor`, `cursor_motion`, `reduce_motion` ve `shell.integration`),
 Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
@@ -45,7 +45,14 @@ hücrelerine çevirip sınırdan veriyor ve `bt-gpu` pencerenin altındaki **iki
 bir `setViewport`**'la çiziyor — kendi listeleri, kendi caret'i, opak zemini ve
 ızgaradan ayıran saç çizgisiyle. **Caret tek**: ızgaranın imleci ile dock'un
 caret'i aynı animatörün (`bt-gpu::motion`) iki hedefi, yani dock'ta yazarken de
-süzülüyor ve devir bir ışınlanma değil bir kayma. Hedef **ekran hücresi**
+süzülüyor ve devir bir ışınlanma değil bir kayma. **Şekli de tek** ve sınırdan
+geliyor (`Cursor::shape`): DECSCUSR'ın üç biçimi — blok, alt çizgi, dikey
+çubuk — uygulamanın isteğiyle, o susunca `[terminal] cursor` ile. İnce
+şekillerde **boyanan dörtlü ile ters çevirme dikdörtgeni birlikte** daralıyor
+(`bt_gpu::frame::caret_rect`, tek yer iki tüketici), kalınlık fontun kendi alt
+çizgi metriğinden (`CellMetrics::rule_px`) ve daraltma yuva seçiminden
+**sonra**, yoksa alt çizgi caret'i dock bandına değmez ve zeminin altında
+kalırdı. Hedef **ekran hücresi**
 cinsinden ve dock'unki kesirli — band nefes payı kadar aşağıdan başlıyor ve
 artık şeridin altında duruyor; yuvarlansaydı caret bir hücre yukarıda dururdu.
 Çizim **yuvası** konuma göre seçiliyor (`Frame::push_caret`): blok, üstünde

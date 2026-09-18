@@ -76,6 +76,26 @@ R4.4, R11.2, R12 (şekil yarısı)_
   dikdörtgeninin boyutuna bakmıyor ve `hareket > 0` imlecin **hedefine**
   bakıyor, şekil onu değiştirmiyor.
 
+## Uygulama Notları
+
+- **Şeklin kaynağı `Term::cursor_style()` değil `RenderableCursor.shape`
+  oldu.** İkisi aynı değer — alacritty `renderable_content()`'i şekli zaten
+  `cursor_style()`'dan çözüyor — ve o okuma döngüden önce **zaten vardı**
+  (`cursor_shape`, `Hidden` kapısı için). İkinci bir çağrı aynı değeri ikinci
+  kez okumak olurdu. **phase-2 için not:** `RenderableCursor` blink bitini
+  taşımıyor, yani phase-2 `Term::cursor_style()`'ı gerçekten çağırmak zorunda.
+- **Kalınlık `CellMetrics`'e yeni bir alan olarak girdi** (`rule_px`), kurucuya
+  **açık parametre** olarak: sessiz bir varsayılan bu deponun yasakladığı sınıf
+  ve 20 çağrı yeri mekanik olarak güncellendi. Değer `bt_atlas::Metrics`'in
+  `underline_px.1`'i, yani chevron'un da aldığı metrik.
+- **Alt çizgi caret'i hücrenin dibinde**, fontun alt çizgi *konumunda* değil.
+  R2.2 yalnız **kalınlığı** metriğe bağlıyor; konum olarak fontun alt çizgisi
+  taban çizgisinin hemen altı ve caret orada `g`'nin kuyruğunu keserdi. Hücre
+  dibi uydurulmuş bir sayı değil, hücrenin kenarı.
+- **Geometrinin tek sahibi `caret_rect`** oldu; boyanan dörtlü ile ters çevirme
+  dikdörtgeni onu paylaşıyor. İlk taslakta ikisi ayrı hesaplanıyordu ve
+  `caret_shapes_narrow_both_rectangles` tam o ayrışmayı tutuyor.
+
 ## Yayın Etkisi
 
 - **ayar şeması** — `[terminal] cursor` eklendi; silinen anahtar yok, bilinmeyen
@@ -91,21 +111,21 @@ R4.4, R11.2, R12 (şekil yarısı)_
 
 ## Checklist
 
-- [ ] `bt-core`: `Cursor.shape` + kendi enum'u; `Hidden` taşınmıyor,
+- [x] `bt-core`: `Cursor.shape` + kendi enum'u; `Hidden` taşınmıyor,
       `HollowBlock` bloğa düşüyor
-- [ ] `bt-core`: `term_config` `default_cursor_style`'ı `TerminalOptions`'tan
+- [x] `bt-core`: `term_config` `default_cursor_style`'ı `TerminalOptions`'tan
       kuruyor
-- [ ] `bt-core`: `[terminal] cursor` ayrıştırma, iki kol, `TEMPLATE`
-- [ ] `bt-gpu`: `Caret` ölçüsü, daraltmanın yeri, `Frame`'in şekil alanı,
+- [x] `bt-core`: `[terminal] cursor` ayrıştırma, iki kol, `TEMPLATE`
+- [x] `bt-gpu`: `Caret` ölçüsü, daraltmanın yeri, `Frame`'in şekil alanı,
       `CursorBlock.rect`
-- [ ] `bt-gpu`: kalınlık `bt_atlas`'ın alt çizgi metriğinden
-- [ ] Test: üç şeklin dikdörtgeni (`frame`), **underline caret'in dock
+- [x] `bt-gpu`: kalınlık `bt_atlas`'ın alt çizgi metriğinden
+- [x] Test: üç şeklin dikdörtgeni (`frame`), **underline caret'in dock
       yuvasına geçmesi**, `move_caret`'ın şekli koruması
-- [ ] Test: `term_config_keeps_every_other_field` fixture'ı varsayılan
+- [x] Test: `term_config_keeps_every_other_field` fixture'ı varsayılan
       **olmayan** şekil taşıyor ve reset listesi genişledi
-- [ ] Test: `[terminal] cursor` round-trip + tanınmayan değerin tanısı
-- [ ] `docs/AYARLAR.md`, `CLAUDE.md`, `docs/YOL-HARITASI.md` (kayma notu)
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] Test: `[terminal] cursor` round-trip + tanınmayan değerin tanısı
+- [x] `docs/AYARLAR.md`, `CLAUDE.md`, `docs/YOL-HARITASI.md` (kayma notu)
+- [x] Doğrulama geçti (`make hepsi`)
 - [ ] `make duman` (kullanıcıda — ajanın kabuğunda yanlış tanıyla kırmızı
       düşüyor)
-- [ ] Yayın etkisi yazıldı
+- [x] Yayın etkisi yazıldı

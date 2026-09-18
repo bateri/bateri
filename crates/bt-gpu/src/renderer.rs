@@ -115,6 +115,7 @@ struct AtlasTexture {
 pub struct CellMetrics {
     cell_px: (u16, u16),
     gutter_px: u16,
+    rule_px: u16,
 }
 
 impl CellMetrics {
@@ -143,10 +144,11 @@ impl CellMetrics {
     /// kurabildiği bir tip o testleri GPU'ya bağlardı. Payın **argüman**
     /// olması aynı gerekçenin devamı: gövdeye gizlenmiş bir sabit, payı
     /// sorgulayan sınamaları da GPU'ya bağlardı.
-    pub fn new(width: u16, height: u16, gutter: u16) -> Option<Self> {
+    pub fn new(width: u16, height: u16, gutter: u16, rule: u16) -> Option<Self> {
         (width > 0 && height > 0).then_some(Self {
             cell_px: (width, height),
             gutter_px: gutter,
+            rule_px: rule,
         })
     }
 
@@ -172,6 +174,16 @@ impl CellMetrics {
     /// bilerek sıfır veriyor.
     pub fn gutter_px(self) -> u16 {
         self.gutter_px
+    }
+
+    /// Kural çizgisinin kalınlığı, piksel — fontun **kendi** alt çizgi
+    /// metriği (`bt_atlas::Metrics::underline_px`'in ikinci bileşeni).
+    ///
+    /// İnce caret'lerin (alt çizgi, dikey çubuk) genişliği buradan geliyor ve
+    /// ikinci bir tasarım sabiti uydurulmuyor — chevron'un kalınlığı da aynı
+    /// metrikten. Punto ya da font değişince caret de onunla değişiyor.
+    pub fn rule_px(self) -> u16 {
+        self.rule_px
     }
 }
 
@@ -311,7 +323,8 @@ impl Renderer {
     /// `bt-shell` `bt-atlas`'ı görmüyor, metrik buradan geçiyor; katman
     /// tablosu (`CLAUDE.md`) değişmeden `CELL_PX` yer tutucusu ölebildi.
     pub fn cell_metrics(&self, scale: f64) -> CellMetrics {
-        let (w, h) = self.sync_atlas(scale).cell_px;
+        let metrics = self.sync_atlas(scale);
+        let (w, h) = metrics.cell_px;
         // `as u16` doygun: NaN ve negatif ölçek sıfır pay verir (ızgara
         // kenardan başlar, `split_into_grid` ile fare eşlemesi ikisi de doğru
         // çalışır), dev ölçek 65535'te durur. Yuvarlama hücreninkiyle aynı
@@ -325,7 +338,8 @@ impl Renderer {
         // bırakırdı; `expect` onu programlama hatasına çevirir. Panik yolu
         // değil: PTY okuma ve ayrıştırma bu satırdan geçmez, burası
         // pencere geometrisi yolu.
-        CellMetrics::new(w, h, gutter).expect("bt-atlas hücre ölçüsünü 1'e kırpar")
+        CellMetrics::new(w, h, gutter, metrics.underline_px.1)
+            .expect("bt-atlas hücre ölçüsünü 1'e kırpar")
     }
 
     /// Atlasın yuva doluluğu: (kullanılan, toplam).
@@ -1140,7 +1154,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    use bt_core::{Block, Cell, Cursor, Theme, UnderlineStyle};
+    use bt_core::{Block, CaretShape, Cell, Cursor, Theme, UnderlineStyle};
 
     use super::*;
     use crate::stats::Stats;
@@ -1176,7 +1190,7 @@ mod tests {
     /// geometrisi değil, GPU'nun hangi rengi hangi hücreye boyadığı. Payın
     /// orijine eklendiğini `frame.rs` tarafında `pos` sınamaları tutuyor.
     fn grid(width: u16, height: u16) -> CellMetrics {
-        CellMetrics::new(width, height, 0).expect("sıfır olmayan hücre")
+        CellMetrics::new(width, height, 0, 1).expect("sıfır olmayan hücre")
     }
 
     /// Yalnız arka planı olan hücre; `ch: None` glyph üretmez.
@@ -1278,16 +1292,16 @@ mod tests {
         // Tipin taşıdığı tek garanti bu. Düşerse `bt-shell`'in bölmesi
         // `inf` verir, `inf as u16` 65535 eder ve `Session::resize`'ın sıfır
         // kapısına takılmadan 65535×65535'lik bir `TIOCSWINSZ` geçer.
-        assert!(CellMetrics::new(0, 18, 8).is_none());
-        assert!(CellMetrics::new(9, 0, 8).is_none());
-        let metrics = CellMetrics::new(9, 18, 8).expect("ölçü");
+        assert!(CellMetrics::new(0, 18, 8, 1).is_none());
+        assert!(CellMetrics::new(9, 0, 8, 1).is_none());
+        let metrics = CellMetrics::new(9, 18, 8, 1).expect("ölçü");
         assert_eq!(metrics.cell_px(), (9, 18));
         assert_eq!(metrics.gutter_px(), 8);
         // Pay **eliyor değil taşınıyor**: bölen değil çıkan, ve sıfır pay
         // "ızgara kenardan başlıyor" demek. Sıfırı burada da elemek, payı
         // konu etmeyen her sınamayı uydurma bir değer yazmaya zorlardı.
         assert_eq!(
-            CellMetrics::new(9, 18, 0)
+            CellMetrics::new(9, 18, 0, 1)
                 .expect("sıfır pay meşru")
                 .gutter_px(),
             0
@@ -1752,7 +1766,7 @@ mod tests {
         let gutter = cw;
 
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(cw, ch, gutter).expect("ölçü"));
+        frame.clear(CellMetrics::new(cw, ch, gutter, 1).expect("ölçü"));
         // İki işaret, iki durum rengi: 0. satır başarılı, 2. satır başarısız.
         // Aradaki satır (çıktı) **işaretsiz** kalmalı.
         frame.push_block(Block {
@@ -1923,7 +1937,13 @@ mod tests {
         // çiziyor — bu sınamanın gördüğü piksel tam da o sıranın tanığı.
         let dock_top = (EDGE - usize::from(ch)) as f32;
         frame.set_dock_top(dock_top);
-        frame.push_caret([0.0, dock_top / f32::from(ch)], BACKGROUND, WHITE, 1.0);
+        frame.push_caret(
+            [0.0, dock_top / f32::from(ch)],
+            BACKGROUND,
+            WHITE,
+            1.0,
+            CaretShape::Block,
+        );
         frame.open_dock(1, red, WHITE);
 
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
@@ -2210,6 +2230,7 @@ mod tests {
             visible: true,
             // Bu sınamalar pikseli soruyor; devir `link`'in sorusu.
             caret_in_dock: false,
+            shape: CaretShape::Block,
             text,
             // Kaydırma kararı hareketin işi (`motion.rs`); burada çizilen
             // piksel sorgulanıyor ve konum zaten `push_settled` ile hedefin
@@ -2232,6 +2253,7 @@ mod tests {
                 cursor.text,
                 rgba,
                 1.0,
+                cursor.shape,
             );
         }
     }
@@ -2302,7 +2324,7 @@ mod tests {
             frame.clear(grid(cw, ch));
             frame.push(glyph_cell(0, 'M', None));
             if let Some(alpha) = alpha {
-                frame.push_caret([0.0, 0.0], BACKGROUND, ACCENT, alpha);
+                frame.push_caret([0.0, 0.0], BACKGROUND, ACCENT, alpha, CaretShape::Block);
             }
             cell_rows(
                 &render_offscreen(&r, EDGE, BACKGROUND, &frame),
@@ -2403,7 +2425,7 @@ mod tests {
         frame.push(rule_cell(1, UnderlineStyle::Single));
         let mut cursor = cursor_at(0, BACKGROUND);
         cursor.col = 0;
-        frame.push_caret([0.5, 0.0], cursor.text, ACCENT, 1.0);
+        frame.push_caret([0.5, 0.0], cursor.text, ACCENT, 1.0, cursor.shape);
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let last_column: Vec<(u8, u8, u8)> = cell_rows(&pixels, EDGE, (cw, ch), 1)

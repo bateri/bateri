@@ -901,7 +901,13 @@ define_class!(
             // pişiriyor.
             self.set_origin(&mut frame, motion.origin());
             if let (Some(at), Some((_, text))) = (motion.position(), caret) {
-                frame.push_caret(at, text, theme.accent_linear(), motion.alpha());
+                frame.push_caret(
+                    at,
+                    text,
+                    theme.accent_linear(),
+                    motion.alpha(),
+                    cursor.shape,
+                );
             }
             // Birinci aralık burada kapanıyor — `push_caret`'dan **sonra**:
             // imleci listeye koymak sink işidir, encode değil. Damga bir satır
@@ -1558,7 +1564,7 @@ mod tests {
         // aşağıdan başlıyor ve bandın kendisi de pencerenin yüksekliği hücre
         // boyuna tam bölünmediğinde artan şeridin altında duruyor. Hedefi tam
         // sayıya yuvarlasaydık caret bir hücreye kadar yukarıda dururdu.
-        let cell = CellMetrics::new(9, 18, 8).expect("ölçü");
+        let cell = CellMetrics::new(9, 18, 8, 1).expect("ölçü");
         // 600 px pencere, iki satırlık dock: 2×18 satır + 2×8 dış pay +
         // 1×16 satır arası = 68, yani band 532'de başlıyor.
         let dock_top = 600.0 - crate::frame::dock_px(2, cell);

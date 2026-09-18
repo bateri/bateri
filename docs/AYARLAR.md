@@ -78,6 +78,10 @@ değeri yerinde değiştirip kaydetmek yeter.
 [terminal]
 # Lines of history kept above the screen, from 0 to 100000.
 scrollback = 10000
+# The cursor's default shape: "block" fills the cell, "underline" sits below
+# it, "beam" stands at its left edge. Programs such as vim may ask for a
+# different shape while they run; this is the shape when none is asked for.
+cursor = "block"
 
 [appearance]
 # "system" follows the macOS light/dark appearance. Any other value is a theme
@@ -240,11 +244,13 @@ geri alınabilir: dosyayı düzeltip kaydetmek yeter.
 ```toml
 [terminal]
 scrollback = 10000
+cursor = "block"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
 |---|---|---|---|
 | `scrollback` | tam sayı, `0`–`100000` | `10000` | geçmişte tutulan satır sayısı |
+| `cursor` | `"block"` \| `"underline"` \| `"beam"` | `"block"` | imlecin **varsayılan** şekli |
 
 - `100000`'den büyük değer **`100000`** olur ve uyarı verir. Sınır
   alacritty'nin kendi ayar sınırı (`MAX_SCROLLBACK_LINES`); ölçülmüş bir
@@ -255,6 +261,14 @@ scrollback = 10000
 - Değer uygulama açıkken değişince **hemen** uygulanır: küçültmek fazla
   satırları o anda siler, sonra büyütmek silineni geri getirmez. Yazarken
   kendiliğinden kaydeden bir editörde ara değer de (`100000` → `1`) kayıttır.
+
+`cursor` yalnız **varsayılanı** söyler: terminaldeki uygulama DECSCUSR
+(`\e[5 q`) ile şekli değiştirebilir ve o söz dinlenir — vim insert modda
+çubuk isterse çubuk olur, çıkarken bloğa döner. Buradaki değer, kimse bir şey
+istemediğindeki hâl. Tanınmayan değer (`"bar"`, `"Block"`) anahtarı
+**değiştirmez** ve uyarı verir; büyük/küçük harf duyarlı. İnce şekillerin
+kalınlığı fontun kendi alt çizgi metriğinden gelir, yani punto ya da font
+değişince caret de onunla değişir.
 
 Bölüm satır içi de yazılabilir: `terminal = { scrollback = 5000 }`.
 `[[terminal]]` (bölüm dizisi) bölüm sayılmaz ve uyarı verir.
