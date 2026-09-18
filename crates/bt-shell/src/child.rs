@@ -367,7 +367,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bt_core::{
-        Blocks, DockState, DockStatus, Osc52, Prompt, Session, SessionOptions, ShellPhase,
+        Blocks, DockState, DockStatus, Osc52, Session, SessionOptions, ShellPhase,
         ShellState, TerminalOptions, Theme, Wake,
     };
 
@@ -760,11 +760,8 @@ mod tests {
                 env: HashMap::from([
                     ("HOME".to_owned(), home.display().to_string()),
                     ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
-                    // Değer elle değil `Prompt::name`'den: `shell_integration_env`
-                    // de onu gönderiyor, yani sınama telin **gerçek** değerini
-                    // kullanıyor ve dizgi bir gün değişirse iki uç birlikte
-                    // değişiyor.
-                    ("BATERI_PROMPT".to_owned(), Prompt::Shell.name().to_owned()),
+                    // `blocks` kademesinin teli: betik `PS1`'i sıfırlamıyor.
+                    ("BATERI_PROMPT".to_owned(), "shell".to_owned()),
                 ]),
                 cols: 40,
                 rows: 10,

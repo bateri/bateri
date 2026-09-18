@@ -19,9 +19,12 @@
 #                   da yoktu; geri koyarken ZDOTDIR silinir, $HOME'a
 #                   eşitlenmez — ihraç edilen bir ZDOTDIR ile hiç olmayan
 #                   ZDOTDIR çocuklar için farklı şeyler.
-#   BATERI_PROMPT   `shell` ise prompt kullanıcınındır (`[shell] prompt`).
-#                   Yokluğu varsayılan, yani prompt TERMİNALİN: değişken
-#                   yalnız kullanıcı geri istediğinde gönderiliyor.
+#   BATERI_PROMPT   `shell` ise prompt kullanıcınındır ve bu oturumda DOCK
+#                   YOK (`[shell] integration = "blocks"`). Yokluğu
+#                   varsayılan, yani prompt TERMİNALİN ve dock var: değişken
+#                   yalnız o kademede gönderiliyor. Dock kararı terminalin
+#                   tarafında veriliyor, burada sorulmuyor — betiğin işi
+#                   yalnız PS1'i sıfırlayıp sıfırlamamak.
 #
 # BİLİNEN VE SINIRLI FARK: top-level `source` içinde zsh `$0`'ı yüklenen
 # dosyanın yoluna kuruyor; gerçek başlangıçta kabuğun adı olurdu. Çaresi

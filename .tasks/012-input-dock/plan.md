@@ -51,8 +51,13 @@ uygulama (vim, htop) pencereyi **tamamen** geri alır.
     `precmd`'den **sonra** kendi kancalarından kuruyor.
   - **R4.2** — Blok çıpası `preexec`'e taşınır (`anchor_close` → `preexec`;
     alacritty kaynağında doğrulandı, 011 Karar 10a).
-  - **R4.3** — `prompt` ayar anahtarı: `"terminal"` (varsayılan) ya da
-    `"shell"`. Kullanıcı prompt'unu entegrasyonu kapatmadan geri alabilir.
+  - **R4.3** — Kullanıcı prompt'unu **entegrasyonu kapatmadan** geri alabilir.
+    *(phase-10'da yeniden yazıldı. Önce ayrı bir `prompt` anahtarıydı
+    (`"terminal"` | `"shell"`); gerçek pencerede ekranda iki prompt üretti ve
+    caret ikisi arasında sıçradı. Artık `integration`'ın üçüncü değeri:
+    `"blocks"` sarmalayıcıyı kurar — bloklar ve işaretler kalır — ama dock
+    açılmaz ve satır da prompt da ızgarada durur. `prompt` emekli: korunur,
+    okunmaz, tanı bırakır.)*
 - **R5** — Dock alternatif ekranda kalkar.
   - **R5.1** — Ayırma oturum doğarken karara bağlanır (entegrasyon kuruldu mu);
     koşu boyunca oynamaz, yani `/bin/sh` koşan duman reçetesi dock almaz ve
@@ -152,6 +157,7 @@ bt-shell
 | phase-8 | ✅ |
 | phase-9 | ✅ |
 | kapı | [~] 8 bulgu; 5'i düzeltildi, 3'ü ertelendi (gerekçe `teslim.md`) |
+| phase-10 | ✅ |
 
 phase-6'nın `/code-review`'ından çıkan **tek commit'lik düzeltme** (phase
 açmadı, `duzen.md` → Ek phase eşiği): `can_be_typed`'ın yapıştırma istisnası
@@ -171,3 +177,14 @@ dock'ta hiç kaymıyordu, `>` de kullanıcının fontundan geliyordu. Üçü tek
 sete girdi çünkü ortak kökleri var: dock'un geometrisi tek formülden (`dock_px`)
 türüyor, caret tek nesneye indi ve işaret sınırdan hücre olarak değil **renk**
 olarak geçmeye başladı. Dört crate'e birden dokunuyor.
+
+**phase-10 da plandan sonra açıldı ve bir kararı geri alıyor.** Kullanıcı
+`prompt = "shell"`'i gerçek pencerede denedi: ekranda **iki prompt** çıktı
+(kendisininki ızgarada, dock'unki altta) ve ilk tuşta kendi prompt'u kayboldu.
+**Karar 7a geri alındı** — amacı (prompt'unu geri isteyen bloklarını
+kaybetmesin) korunuyor, mekanizması değişiyor: ayrı anahtar değil,
+`integration`'ın üçüncü değeri. Gerekçe kullanıcının cümlesi: "prompt aktifken
+dock'ın olmasının anlamı yok". Birleştirmenin ikinci dayanağı yapısal — bash ve
+fish betikleri doğduğunda o kabuklarda işaretler olacak ama dock olmayacak,
+yani "entegrasyon var, dock yok" hâli zaten var olacak. R4.3 bu phase'de
+yeniden yazılıyor.

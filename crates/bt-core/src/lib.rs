@@ -53,7 +53,7 @@ pub use session::{
     smoke_shell,
 };
 pub use settings::{
-    Changes, CursorMotion, Diagnostic, FontOptions, Parsed, Prompt, ReduceMotion, SYSTEM_THEME,
+    Changes, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion, SYSTEM_THEME,
     Settings, ShellIntegration,
 };
 pub use shell::{

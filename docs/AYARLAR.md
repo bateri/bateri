@@ -110,15 +110,14 @@ reduce_motion = "system"
 
 [shell]
 # Whether bateri sets up the shell so it can report where prompts and commands
-# begin and end: "auto" does it for shells bateri knows, "off" never does.
+# begin and end. "auto" does it for shells bateri knows, and on those shells it
+# also moves the line you type into the dock at the bottom of the window and
+# draws the prompt itself. "blocks" keeps command blocks and marks but leaves
+# the line and the prompt to your shell, the way a terminal normally works.
+# "off" never sets anything up.
 # Unlike every other key here, this one only takes effect in shells started
 # after the change; shells already open keep what they were started with.
 integration = "auto"
-# Who draws the prompt on the input line: "terminal" hides the shell's prompt
-# and marks the line with bateri's own sign, "shell" keeps the prompt you have
-# configured. Either way the input line itself stays in the dock at the bottom
-# of the window. Like integration, this only takes effect in new shells.
-prompt = "terminal"
 ```
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
@@ -447,22 +446,32 @@ reduce_motion = "system"
 ```toml
 [shell]
 integration = "auto"
-prompt = "terminal"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
 |---|---|---|---|
-| `integration` | `"auto"` ya da `"off"` | `"auto"` | kabuğa entegrasyon kurulsun mu |
-| `prompt` | `"terminal"` ya da `"shell"` | `"terminal"` | giriş satırının prompt'unu kim çiziyor |
+| `integration` | `"auto"`, `"blocks"` ya da `"off"` | `"auto"` | kabuğa entegrasyon kurulsun mu, ve ne kadarı |
+
+> **Emekli anahtar:** `[shell] prompt` artık okunmuyor; yerini
+> `integration = "blocks"` aldı. Dosyanızda kalması zararsız (hiçbir anahtar
+> silinmez) ama bir uyarı görürsünüz — gerekçesi
+> [Prompt'unuzu geri almak](#promptunuzu-geri-almak).
 
 Entegrasyon, kabuğun terminale "prompt burada başladı, komut burada koştu, şu
 kodla bitti" demesini sağlar. Bugün yalnız **zsh** için var; başka bir kabukta
 (bash, fish) `"auto"` da hiçbir şey yapmaz ve terminal olduğu gibi çalışır.
 
-- **`"auto"`** — kabuk zsh ise `ZDOTDIR` bateri'nin kendi dizinini gösterir.
-  O dizindeki dosyalar **sizin** başlangıç dosyalarınızı yükler, `ZDOTDIR`'ı
-  özgün değerine geri koyar (yoksa siler) ve kabuğun kendi kancalarına
-  işaretleri ekler. Komut geçmişiniz (`HISTFILE`) de kendi dizininde kalır.
+- **`"auto"` (varsayılan)** — kabuk zsh ise `ZDOTDIR` bateri'nin kendi dizinini
+  gösterir. O dizindeki dosyalar **sizin** başlangıç dosyalarınızı yükler,
+  `ZDOTDIR`'ı özgün değerine geri koyar (yoksa siler) ve kabuğun kendi
+  kancalarına işaretleri ekler. Komut geçmişiniz (`HISTFILE`) de kendi
+  dizininde kalır. Aynalayabilen kabukta (bugün yalnız zsh) **dock** da açılır:
+  yazdığınız satır pencerenin altına iner ve prompt'u bateri çizer.
+- **`"blocks"`** — aynı kurulum, ama **giriş satırı sizin kalır**: dock
+  açılmaz, yazdığınız satır ızgarada durur ve prompt'unuz (p10k, starship,
+  elle yazdığınız `PS1`) olduğu gibi görünür. Komut blokları, işaretler ve
+  renkler çalışmaya devam eder. bash ve fish desteği geldiğinde o kabuklar
+  zaten böyle çalışacak — dock satır düzenleyicinin aynasına bağlı.
 - **`"off"`** — hiçbir şey kurulmaz.
 - **Dosyalarınıza yazılmaz.** Ne `.zshrc`'ye ne başka bir rc dosyasına tek
   satır eklenir; entegrasyon yalnız bir ortam değişkenidir, yani kapatmak iz
@@ -512,48 +521,31 @@ bütünüyle okunamaz hâle gelir (başlık çubuğu bunu söyler).
 - Tanınmayan değer (`"on"`, `"Auto"`, `false`) yalnız bu anahtarı etkiler
   (açılışta `"auto"`) ve uyarı görünür.
 
-#### `prompt` — prompt'u kim çiziyor
-
-Entegrasyonlu bir zsh oturumunda yazdığınız satır ızgarada değil, pencerenin
-altındaki **dock**'ta durur. `prompt` yalnız şunu sorar: o satırın başında
-**sizin prompt'unuz** mu görünsün, yoksa bateri'nin kendi işareti mi.
-
-- **`"terminal"` (varsayılan)** — kabuğunuzun `PS1` ve `RPS1`'i görünmez olur;
-  yerine dock'ta `>` işareti çizilir ve işaret komutun durumunu renkle söyler
-  (koşuyor, başarılı, hatalı).
-- **`"shell"`** — prompt'unuz olduğu gibi kalır. p10k, starship ya da elle
-  yazdığınız `PS1` neyse o.
-
-**Dock iki değerde de durur.** Dock kabuğun prompt'unu değil, satır
-düzenleyicinin tamponunu çiziyor; prompt'unuzu geri almak için dock'tan
-vazgeçmeniz gerekmez. Komut blokları, işaretler ve renkler de iki değerde de
-çalışır.
-
-**`integration` gibi, bu anahtar da kayıt anında uygulanmaz:** değer **sonraki
-oturumda** geçerli olur, açık pencere etkilenmez.
-
-- Tanınmayan değer (`"zsh"`, `"Terminal"`, `false`) yalnız bu anahtarı etkiler
-  (açılışta `"terminal"`) ve uyarı görünür.
-
 ##### Prompt'unuzu geri almak
 
-Varsayılan `"terminal"` olduğu için, kurulu bir prompt'u olan herkes
-güncellemeden sonra onu **göremez**. Geri almanın yolu tek satır:
+Varsayılan `"auto"` olduğu için, kurulu bir prompt'u olan herkes güncellemeden
+sonra onu **göremez**: `"auto"` prompt'u terminale devrediyor ve yazdığınız
+satırı dock'a taşıyor. Geri almanın yolu tek satır:
 
 ```toml
 [shell]
-prompt = "shell"
+integration = "blocks"
 ```
 
 `[shell]` bölümü dosyanızda zaten varsa satırı **onun içine** ekleyin; bölümü
 ikinci kez yazmayın (TOML aynı bölümün tekrarını kabul etmez ve dosya bütünüyle
 okunamaz hâle gelir). Sonra yeni bir pencere açın.
 
-`integration = "off"` de prompt'u geri verir ama **orantısız**: entegrasyonu
-büsbütün kapatır, yani komut bloklarını, dock'u ve işaretleri de öldürür.
-İstediğiniz yalnız prompt'sa `prompt = "shell"` doğru anahtardır.
+`"blocks"` komut bloklarını ve işaretleri **korur** — kaybettiğiniz tek şey
+dock. `integration = "off"` de prompt'u geri verir ama orantısız: entegrasyonu
+büsbütün kapatır, yani blokları ve işaretleri de öldürür.
 
-Prompt yalnız **zsh**'te devralınır. bash, fish, SSH'ın öte tarafı ve
+**Prompt ve dock tek karardır ve bu kasıtlı.** Bir dönem ayrı bir `prompt`
+anahtarı vardı; ekranda **iki prompt** çıkıyordu (sizinki ızgarada, dock'unki
+altta) ve imleç ikisi arasında sıçrıyordu. "Prompt benim olsun" demek zaten
+"satır ızgarada kalsın" demek olduğu için anahtar emekliye ayrıldı.
+
+Devir yalnız **zsh**'te oluyor. bash, fish, SSH'ın öte tarafı ve
 `integration = "off"` oturumu prompt'unuzu zaten olduğu gibi gösterir.
 
 ## Temalar

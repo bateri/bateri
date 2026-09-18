@@ -26,7 +26,7 @@ kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
 Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font, `osc52`,
-`cursor_motion`, `reduce_motion`, `shell.integration` ve `shell.prompt`),
+`cursor_motion`, `reduce_motion` ve `shell.integration`),
 Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
@@ -34,9 +34,8 @@ anında** uygulanır (`watch`: vnode kaynakları; `Session::set_theme`,
 `Session::set_terminal_options`, `Renderer::set_font`,
 `DisplayLink::set_cursor_motion`, `DisplayLink::set_reduce_motion`);
 varsayılan tema sistemin açık/koyu görünümünü, `reduce_motion = "system"` de
-sistemin Hareketi Azalt ayarını canlı izler; tek istisna `[shell]` bölümü
-(`integration` ve `prompt`), kabuk çoktan doğduğu için **sonraki oturumda**
-geçerlidir. Kabuk zsh ise
+sistemin Hareketi Azalt ayarını canlı izler; tek istisna `[shell] integration`,
+kabuk çoktan doğduğu için **sonraki oturumda** geçerlidir. Kabuk zsh ise
 `bt-shell` sarmalayıcıyı `ZDOTDIR` ile kurar (betik `.app`'in
 `Contents/Resources/shell`'inden, debug'da depodan) ve kabuğun bastığı OSC 133
 işaretleri `Session::shell_state()`'te birikir. Aynı betik her satır çiziminde
@@ -97,7 +96,7 @@ Bayatlık kip sezerek değil iki kesin veriyi karşılaştırarak anlaşılıyor
 yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez.
 **Devrin tek yüklemi var** (`shell::caret_home` + üç ön koşul) ve **dört
 tüketicisi**: hangi hücrelerin atlanacağı, imlecin çizilip çizilmeyeceği,
-**doluluk sayısı** ve **dock'un caret'i**. Üçü ayrı sorulduğunda ayrışıyorlardı ve belirti ölçüldü:
+**doluluk sayısı** ve **dock'un caret'i**. Ayrı sorulduklarında ayrışıyorlardı ve belirti ölçüldü:
 boş prompt'ta hiçbir hücre çıpayı taşımadığı için satır çizilmiyor ama
 doluluğa **giriyordu**, ilk tuşta çıpa doğunca doluluk bir satır düşüyor ve
 ızgaranın tamamı oynuyordu — satır gizliydi ama yer kaplıyordu. Tek yüklem
@@ -137,10 +136,17 @@ yerini dock'un `>` işareti alıyor. Dayatma **iki yerden** ve ikisi de zorunlu 
 kendi ZLE kancalarından kuruyor; ölçüldü: kancadan atanan `PS1` `reset-prompt`
 olmadan ekranı hiç etkilemiyor, çünkü prompt `line-init` koşmadan basılıyor ve
 zsh genişlettiği hâli tutuyor). Nöbet prompt başına **tek** sıfırlama bırakıyor,
-yoksa `reset-prompt` kendi kancasını besler. `[shell] prompt = "shell"`
-prompt'u kullanıcıya geri veriyor ve **dock'u kapatmıyor** — dock kabuğun
-prompt'unu değil ZLE'nin tamponunu çiziyor; `shell.integration` ile aynı sınıf,
-yani **sonraki oturumda** geçerli. Çıpanın kapanışı `PS1`'in sonunda değil
+yoksa `reset-prompt` kendi kancasını besler. Prompt'unu geri isteyen
+kullanıcının anahtarı `[shell] integration = "blocks"`: sarmalayıcı yine
+kuruluyor, yani **bloklar ve işaretler kalıyor**, ama dock hiç açılmıyor ve
+satır da prompt da ızgarada duruyor. Prompt ile dock'un **tek karar** olması
+ölçüldü: bir dönem ayrı bir `prompt` anahtarı vardı ve ekranda iki prompt
+üretiyordu (kullanıcınınki ızgarada, dock'unki altta), caret de ikisi arasında
+sıçrıyordu — "prompt benim olsun" demek zaten "satır ızgarada" demek. Anahtar
+**emekli**: dosyada korunuyor, okunmuyor, görülünce tanı bırakıyor. Kademenin
+dock istemediği kararı terminalin tarafında (`ShellIntegration::wants_dock`),
+kabuğa hiç sorulmuyor; `blocks` üstelik bash ve fish betikleri doğduğunda o
+kabukların **zaten** olacağı hâl — dock ZLE'nin aynasına bağlı. Çıpanın kapanışı `PS1`'in sonunda değil
 **`preexec`'te**: sıfır genişlikli prompt hiçbir hücre yazmadığı için kapanış
 orada kalsaydı çıpayı taşıyan hücre hiç doğmaz, blok şeridi **ve** bastırma
 birlikte sessizce ölürdü. Bağlantı `Input` boyunca açık, komutun çıktısında
