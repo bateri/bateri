@@ -26,7 +26,8 @@ kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
 Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı, `osc52`,
-`cursor`, `cursor_motion`, `reduce_motion` ve `shell.integration`),
+`cursor`, `cursor_blink`, `cursor_motion`, `reduce_motion` ve
+`shell.integration`),
 Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt
@@ -335,17 +336,26 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   hücre yolu ile clear yolu birbirinden ayırt edilemez.
 - **Boşta sıfır kare.** Kirli satır, yerleşmemiş animasyon **ve** ilerleyen
   bir süre sayacı yoksa frame gönderilmez; kare istemenin **üç** yolu var
-  (`bt-gpu::link` modül başlığı): **hasar** (`Waker`), **hareket** (uyanık
+  (`bt-gpu::link` modül başlığı): **hasar** (`Waker::wake`), **hareket** (uyanık
   callback'in kendi kararı, kimseyi uyandırmaz) ve **saat** (link uyumaya
-  giderken kurulan tek gecikmeli uyandırma; süresi ve durma koşulu
-  `bt-core`'dan, `Cursor::next_tick`). Animasyonun zamana bağlı kare talebi
+  giderken kurulan tek gecikmeli uyandırma). Saatin **iki tadı** var ve tadını
+  bekleyen işin cinsi belirliyor: *içerik tadı* hasar diker (koşan komutun süre
+  sayacı; süresi ve durma koşulu `bt-core`'dan, `Cursor::next_tick`), *hareket
+  tadı* dikmez (`Waker::resume`; imlecin yanıp sönmesi, fazın sahibi
+  `bt-gpu::blink`). Kurulan uyandırma yine **tek**: iki son tarihten yakın
+  olanı seçiliyor, çünkü `after` iptal edilemiyor. Animasyonun zamana bağlı kare talebi
   hareket saatinden geçer, `Waker`'dan **değil** — oradan istenen bir hareket
   karesi kendini "içerik" diye saydırırdı. Saat bunun istisnası değil başka
   bir şey: animasyon aynı içeriği farklı çizer, saat **içeriğin kendisini**
   değiştirir (koşan komutun süre sayacı), yani `icerik=` sayması doğrudur.
   Ölçütü üç şart — içerik gerçekten değişecek, periyodu ekran hızından çok
-  düşük olacak, adlandırılmış bir durma koşulu taşıyacak. **Koşan komutu olan
-  pencere boşta değildir.** Kapı bu yüzden `kare`'ye değil **içerik** karesine bakıyor —
+  düşük olacak, adlandırılmış bir durma koşulu taşıyacak. **Koşan komutu ya da sönen bir
+  imleci olan pencere boşta değildir.** İkisi de adlandırılmış bir durma
+  koşulu taşıyor: komut biter, blink ise varsayılan **kapalıdır**
+  (`[terminal] cursor_blink`) ve açıkken bile klavye sessizliğinden sonra
+  durur — durduğunda fazı **açık** bırakır, yoksa imleç bir sonraki hasara
+  kadar kaybolurdu. Hareketi Azalt açıkken blink hiç başlamaz: erişilebilirlik
+  ayarı animasyon *eklemez*. Kapı bu yüzden `kare`'ye değil **içerik** karesine bakıyor —
   200 ms'lik bir imleç kayması `kare`'yi meşru olarak şişirir. Her animasyon bir
   durma koşulu taşır; `reduce_motion` ve sistemin Reduce Motion ayarı
   **imleci** 90 ms'lik bir **belirmeye** indirir — imleç kaymaz, yeni yerinde

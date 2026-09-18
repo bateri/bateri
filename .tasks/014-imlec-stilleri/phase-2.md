@@ -73,6 +73,64 @@ R10, R11.1, R12 (blink yarısı)_
 - `make duman` yeşil: hermetik koşu ayar okumuyor ve reçete `/bin/sh` koşup
   DECSCUSR göndermiyor, yani varsayılan kapalıyken saat hiç armed olmuyor.
 
+## Uygulama Notları
+
+- **`last_cursor` ivar'ı öldü.** Tek okuyucusu `arm_clock`'tı; saat son tarihe
+  geçince okuyanı kalmadı ve kaldırıldı. Bırakılsaydı aynı gerçeğin ikinci
+  kopyası olurdu — 013'ün kapısında tam bu sebeple bir alan silinmişti.
+- **Saatin seçim mantığı saf bir fonksiyona çıkarıldı** (`due_clock`), çünkü
+  sınanamıyordu: `arm_clock` ObjC sınıfına bağlı ve gerçek bir pencere
+  istiyor. 013'ün regresyon bekçisi (`a_blinking_cursor_does_not_starve_the_
+  duration_counter`) ancak bu ayrımdan sonra yazılabildi.
+- **Hareketi Azalt için `mode()` değil ham bayrak** (`Motion::reduce`):
+  `Snap` stilinde `mode()` `Fade` dönmüyor ama indirgeme yine açık ve blink
+  yine kapanmalı.
+- **`Event::CursorBlinkingChange`'e dokunulmadı ve gerek de yok.** DECSCUSR
+  baytları PTY'den geliyor, alacritty onları işleyince `Event::Wakeup`
+  yolluyor ve hasar bayrağını diken o (`AdapterInner`'ın doc'u) — yani başka
+  çıktı üretmeyen bir `\e[5 q` bile bir içerik karesi doğuruyor ve
+  `cursor_style()` orada yeniden okunuyor. `discussion.md` bunu zaten
+  "gereklilik değil doğrulama kalemi" diye kaydetmişti.
+- **Phase dışı, ama phase'in kapısını tıkıyordu:** `make test-yaris` bu
+  phase'den **önce** kırmızıydı ve sebebi blink değildi. `git bisect` ile
+  bulundu (`3273647`, 012): `race_dock_state_and_frame` dock'u olmayan bir
+  oturumdan dock caret'i bekliyordu. Kendi commit'iyle düzeltildi
+  (`ccadf55`), phase'in commit'ine karışmadı.
+
+### Kapı (`/code-review`, riskli phase)
+
+**11 bulgu, 11'i düzeltildi.** Dördü gerçek davranış kusuruydu ve hiçbirini
+bir sayaç görmezdi:
+
+- **Ayar pencere doğarken yutuluyordu.** `Adapter::new` blink'i varsayılanında
+  kuruyor, `Session::spawn` onu hiç yazmıyordu; tek yazıcı
+  `set_terminal_options` olduğu için özellik **her açılışta ölü** kalıyor,
+  kullanıcı ayar dosyasını alakasız bir sebeple yeniden kaydedince
+  "kendiliğinden düzeliyordu". Tema zaten `Adapter::new`'dan geçiyordu; blink
+  de oradan geçiyor artık. Bekçisi `the_blink_setting_reaches_the_first_frame`.
+- **Akan çıktıda faz donuyordu.** `advance` yalnız "hasar yok" dalından
+  çağrılıyordu, yani `cargo build` gibi sürekli çıktıda faz hiç ilerlemiyor —
+  ve **sönük fazda** donabiliyordu: caret çıktı boyunca görünmez kalırdı.
+  İçerik dalı da fazı ilerletiyor artık (dönen değer atılıyor, kare zaten
+  çiziliyor).
+- **Gizli imleç saati açık tutuyordu.** `\e[?25l` gönderen bir TUI'de hiçbir
+  caret çizilmiyor ama blink armed kalıyor, pencere saniyede iki kez uyanıp
+  **birebir aynı** kareyi çiziyordu; TUI'nin kendi çıktısı `IDLE_STOP`'u da
+  tazelediği için sızıntı sınırsızdı. Ölçüt `visible` **olamaz** (dock devrinde
+  `false`, ona bakmak dock'ta blink'i öldürürdü): `cursor_visible ||
+  caret_in_dock`. Bekçisi `a_hidden_cursor_does_not_blink`.
+- **Hareketi Azalt boştaki blink'i durdurmuyordu.** `set_reduce_motion` yalnız
+  yarıda kalan bir animasyon varsa kare istiyordu; blink `Motion`'ın dışında
+  yaşadığı ve kapısı yalnız **içerik** karesinde okunduğu için boştaki pencerede
+  hiç uygulanmıyordu. Artık değişimin kendisi kare istiyor.
+
+Kalanlar: `Blink::default()`'in `lit`'i kendi değişmezini çiğniyordu (elle
+yazıldı), iki sınama boş iddia taşıyordu (`content_deadline` saf yardımcıya
+çıkarıldı; `term_config` fixture'ı `CursorBlink::On` aldı), üç bayat doc
+(`settled()`'ın doc'u `reduce()`'a kaymıştı, `content_deadline` ölü
+`last_cursor`'ın doc'unu miras almıştı, `last_caret_text` hâlâ ona atıf
+yapıyordu) ve faz karesinden sonra link'in bir vsync fazladan açık kalması.
+
 ## Yayın Etkisi
 
 - **ayar şeması** — `[terminal] cursor_blink` eklendi; silinen anahtar yok.
@@ -92,23 +150,23 @@ R10, R11.1, R12 (blink yarısı)_
 
 ## Checklist
 
-- [ ] `bt-core`: `[terminal] cursor_blink` (üç değerli, varsayılan `"off"`),
+- [x] `bt-core`: `[terminal] cursor_blink` (üç değerli, varsayılan `"off"`),
       `TerminalOptions` ikinci alan
-- [ ] `bt-core`: `Cursor.blink` — `Term::cursor_style()` + `"on"`/`"off"`
+- [x] `bt-core`: `Cursor.blink` — `Term::cursor_style()` + `"on"`/`"off"`
       ezmesi `frame()`'de
-- [ ] `bt-gpu`: `blink.rs` — mutlak son tarih, alfa, kendi içerik damgası
-- [ ] `bt-gpu`: `Waker::resume()` (hasar dikmiyor, `requests` artmıyor)
-- [ ] `bt-gpu`: uyku testinin üçüncü sorusu — tek atımlık, `settled()`'dan önce
-- [ ] `bt-gpu`: `arm_clock` son tarih + `min` + `None` temizliği
-- [ ] `bt-gpu`: alfa çarpımı iki çağrı yerinde; Hareketi Azalt kapısı
-- [ ] Test: faz mutlak son tarihten geliyor (uzun uykuda tek adımda dönüyor)
-- [ ] Test: **013'ün sayacı blink açıkken tikliyor** (regresyon bekçisi)
-- [ ] Test: `None` deadline'ı temizliyor; durma fazı "açık"a bırakıyor
-- [ ] Test: `cursor_blink` round-trip, `"on"`/`"off"` ezmesi, tanınmayan değer
-- [ ] Sözleşme ve belgeler (`link.rs` başlığı, `CLAUDE.md`, `docs/AYARLAR.md`,
+- [x] `bt-gpu`: `blink.rs` — mutlak son tarih, alfa, kendi içerik damgası
+- [x] `bt-gpu`: `Waker::resume()` (hasar dikmiyor, `requests` artmıyor)
+- [x] `bt-gpu`: uyku testinin üçüncü sorusu — tek atımlık, `settled()`'dan önce
+- [x] `bt-gpu`: `arm_clock` son tarih + `min` + `None` temizliği
+- [x] `bt-gpu`: alfa çarpımı iki çağrı yerinde; Hareketi Azalt kapısı
+- [x] Test: faz mutlak son tarihten geliyor (uzun uykuda tek adımda dönüyor)
+- [x] Test: **013'ün sayacı blink açıkken tikliyor** (regresyon bekçisi)
+- [x] Test: `None` deadline'ı temizliyor; durma fazı "açık"a bırakıyor
+- [x] Test: `cursor_blink` round-trip, `"on"`/`"off"` ezmesi, tanınmayan değer
+- [x] Sözleşme ve belgeler (`link.rs` başlığı, `CLAUDE.md`, `docs/AYARLAR.md`,
       `Counters::motion`, `Waker`/`requests`, `Cursor::next_tick`)
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] `make test-yaris` (paylaşılan durum: `Waker`'a ikinci giriş noktası)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] `make test-yaris` (paylaşılan durum: `Waker`'a ikinci giriş noktası)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
 - [ ] `make duman` (kullanıcıda)
-- [ ] Yayın etkisi yazıldı
+- [x] Yayın etkisi yazıldı

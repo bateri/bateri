@@ -19,6 +19,7 @@
 //! defterin yanında tanımlı, `bt-shell` onu `taban=` diye **basıyor** ama
 //! değerini kendisi seçmiyor.
 
+mod blink;
 mod error;
 mod frame;
 mod link;

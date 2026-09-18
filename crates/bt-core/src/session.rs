@@ -57,7 +57,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
-use crate::settings::CaretShape;
+use crate::settings::{CaretShape, CursorBlink};
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockState, Precision, Scanner, ShellLog,
     ShellState, Stripe,
@@ -221,6 +221,14 @@ pub struct Cursor {
     ///
     /// Dock'un caret'i de aynı alandan besleniyor: caret tek, şekli de tek.
     pub shape: CaretShape,
+    /// Caret bu an yanıp sönüyor mu — **karar**, faz değil.
+    ///
+    /// Fazın kendisi (şu an açık mı kapalı mı) boyayan tarafın işi: hareket
+    /// karesi `bt-core`'a hiç uğramıyor ve burada üretilen bir faz o kola
+    /// ulaşamazdı. Buradan geçen şey yalnız "sönsün mü" ve iki kaynağın
+    /// birleşimi: uygulamanın DECSCUSR/DECSET 12 isteği ile kullanıcının
+    /// `[terminal] cursor_blink` ayarı ([`CursorBlink::resolve`]).
+    pub blink: bool,
     /// Bloğun altında kalan metnin (glyph **ve** kural çizgilerinin) rengi,
     /// **lineer** RGBA; bugünkü değeri temanın zemini.
     pub text: LinearRgba,
@@ -286,9 +294,12 @@ pub struct Cursor {
     /// uymuyor — PTY'den bayt gelmiyor ve ekran hızında ilerletilecek bir şey
     /// yok.
     ///
-    /// **"Ne zaman" sorusunun cevabı burada, çizen tarafta değil:** sınır
-    /// biçimin bir sonucu (koşan sayaç tam saniye gösteriyor) ve biçim bu
-    /// crate'in kararı. `bt-gpu` yalnız verilen süreyi bekliyor, hesap
+    /// **"İçerik ne zaman değişecek" sorusunun cevabı burada, çizen tarafta
+    /// değil:** sınır biçimin bir sonucu (koşan sayaç tam saniye gösteriyor)
+    /// ve biçim bu crate'in kararı. Soru **daraltılmış**: saat artık iki son
+    /// tarihi birleştiriyor ve ötekinin — imlecin yanıp sönme fazının —
+    /// sahibi boyayan taraf (`bt_gpu::blink`), çünkü hareket karesi buraya hiç
+    /// uğramıyor. `bt-gpu` yalnız verilen süreyi bekliyor, hesap
     /// yapmıyor — "karar burada, boyama orada"nın zaman eksenindeki hâli.
     ///
     /// **`None` durma koşuludur** ve üç yoldan doğuyor: komut bitti, koşan
@@ -440,6 +451,8 @@ pub struct TerminalOptions {
     pub osc52: Osc52,
     /// İmlecin **varsayılan** şekli; uygulamanın DECSCUSR'ı üstüne yazar.
     pub cursor: CaretShape,
+    /// İmleç yanıp söner mi; `Auto` uygulamayı izler, ötekiler **ezer**.
+    pub blink: CursorBlink,
 }
 
 /// [`CaretShape`]'i alacritty'nin şekline çevirir — `term_config`'in tek
@@ -497,9 +510,9 @@ fn term_config(options: TerminalOptions) -> Config {
             Osc52::Copy => TermOsc52::OnlyCopy,
         },
         // **Yalnız varsayılan.** Uygulamanın DECSCUSR'ı (`\e[5 q`) bunu
-        // ezer ve ezmeli: vim insert modda çubuk istiyor. `blinking` phase-1
-        // için varsayılanında (`false`) kalıyor — blink phase-2'nin işi ve
-        // okunmayan bir anahtarı şimdiden yazmak yanlış olurdu.
+        // ezer ve ezmeli: vim insert modda çubuk istiyor. `blinking` burada
+        // **her zaman `false`**: `"auto"`nun tabanı o ve `"on"`/`"off"` birer
+        // ezme, yani config'de temsil edilemiyorlar (`AdapterInner::blink`).
         default_cursor_style: CursorStyle {
             shape: caret_shape(options.cursor),
             blinking: false,
@@ -777,10 +790,22 @@ struct AdapterInner {
     /// çakışmaz. Mutex, çünkü tema takas edilebilir; yazanı
     /// [`Session::set_theme`], o da kilidi tek başına alır.
     theme: Mutex<Theme>,
+    /// İmlecin yanıp sönme ayarı — **yaprak kilit**, temanın komşusu.
+    ///
+    /// Neden `Term`'ün `Config`'inde değil: `"on"`/`"off"` birer **ezme** ve
+    /// alacritty onu ifade edemiyor — uygulamanın `cursor_style`'ı
+    /// `default_cursor_style`'ı her zaman yeniyor (`Term::cursor_style`), yani
+    /// config'e yazılan bir "hep sönsün" `\e[2 q` ile susturulurdu. Karar
+    /// `frame()`'de, `cursor_style()` okunduktan **sonra** uygulanıyor
+    /// ([`CursorBlink::resolve`]).
+    ///
+    /// Kopya `Term` kilidinden **önce** alınıyor, temanınkiyle aynı turda ve
+    /// aynı gerekçeyle: yaprak kilit `Term`'ün altına girmez.
+    blink: Mutex<CursorBlink>,
 }
 
 impl Adapter {
-    fn new(wake: Arc<dyn Wake>, size: WindowSize, theme: Theme) -> Self {
+    fn new(wake: Arc<dyn Wake>, size: WindowSize, theme: Theme, blink: CursorBlink) -> Self {
         Self(Arc::new(AdapterInner {
             wake,
             sender: OnceLock::new(),
@@ -788,6 +813,7 @@ impl Adapter {
             dirty: Arc::new(AtomicBool::new(true)),
             size: Mutex::new(size),
             theme: Mutex::new(theme),
+            blink: Mutex::new(blink),
         }))
     }
 
@@ -1305,7 +1331,10 @@ impl Session {
             shell: Arc::clone(&shell),
         };
 
-        let adapter = Adapter::new(wake, size, options.theme);
+        // **Blink de açılışta geçiyor**, temanın yanında: tek yazıcısı
+        // `set_terminal_options` olsaydı ayar yalnız oturum içinde bir kayıttan
+        // **sonra** uygulanır, taze pencerede sessizce yok sayılırdı.
+        let adapter = Adapter::new(wake, size, options.theme, options.terminal.blink);
         let config = term_config(options.terminal);
         let term = Arc::new(FairMutex::new(Term::new(config, &grid, adapter.clone())));
 
@@ -1376,6 +1405,9 @@ impl Session {
         // girmez. Kopya ile kilit arasına düşen bir takas en çok bir kare
         // eski renkle çizer; takası yazan zaten kare istiyor.
         let theme = *lock(&self.adapter.0.theme);
+        // Temanın komşusu, aynı turda ve aynı gerekçeyle: yaprak kilit `Term`'ün
+        // altına girmez.
+        let blink = *lock(&self.adapter.0.blink);
         let background = theme.background_rgb();
         // **Bastırma kararı da `Term` kilidinden önce** ve temayla aynı
         // gerekçe: yaprak kilit (`shell`) `Term` kilidinin altına girmez
@@ -1435,6 +1467,13 @@ impl Session {
         // içindir — oraya hücrenin kendi noktası verilince her seçimin ilk ve
         // son hücresi vurgusuz kalıyordu.
         let cursor_shape = cursor.shape;
+        // **Blink iki kaynağın birleşimi ve birleşme yeri burası.**
+        // `RenderableCursor` blink bitini taşımıyor (yalnız `shape` ve
+        // `point`), yani `cursor_style()` ayrıca soruluyor — phase-1'in şekli
+        // oradan almamasının sebebi de buydu, o değer zaten çözülmüş geliyor.
+        // Kullanıcının ayarı **sonra** uygulanıyor: `"on"`/`"off"` birer ezme
+        // ve config'e yazılamıyorlar (`AdapterInner::blink`).
+        let requested_blink = blink.resolve(term.cursor_style().blinking);
         let cursor_point = cursor.point;
         let cursor_row = cursor.point.line.0 + offset;
         let cursor_col = cursor.point.column.0 as u16;
@@ -1910,6 +1949,14 @@ impl Session {
             // hâlde. İkinci bir `cursor_style()` çağrısı aynı değeri ikinci
             // kez okumak olurdu.
             shape: caret_shape_of(cursor_shape),
+            // **Çizilmeyen caret sönmez.** Ölçüt `visible` değil "bir yerde
+            // caret var mı": `visible` dock devrinde `false` oluyor
+            // (`cursor_visible && !caret_in_dock`) ve ona bakmak dock'ta
+            // yazarken blink'i öldürürdü. Gizli imleçte (`\e[?25l`, htop)
+            // ise hiçbir caret çizilmiyor ve blink'in açık kalması pencereyi
+            // saniyede iki kez uyandırıp **birebir aynı** kareyi çizdirirdi —
+            // R9'un "imleç gizlenir" durma koşulu bu satır.
+            blink: requested_blink && (cursor_visible || caret_in_dock),
             // Blok opak ve altındaki metni örtüyor: zemin rengi onu yeniden
             // okunur kılıyor. Kaynak `theme`, hücrelerinkiyle **aynı** —
             // ayrışsalardı imlecin altındaki harf bloğa değil eski bir palete
@@ -2563,6 +2610,10 @@ impl Session {
     /// kendini kilitler (`race_set_terminal_options_and_frame` asılı kalır).
     pub fn set_terminal_options(&self, options: TerminalOptions) {
         let scrollback = options.scrollback;
+        // Blink `Term`'ün config'inde temsil edilemiyor (`AdapterInner::blink`),
+        // o yüzden yaprak kilide yazılıyor. **`Term` kilidinden önce**: ters
+        // sıra okuyucu thread'in sırasıyla döngü kapatırdı.
+        *lock(&self.adapter.0.blink) = options.blink;
         self.term.lock().set_options(term_config(options));
         // Blok defterinin tavanı da `scrollback`'ten türüyor ve o ayar **canlı
         // uygulanıyor**: burada taşınmasaydı büyütülen geçmişin fazlası
@@ -3182,6 +3233,14 @@ mod tests {
         spawn_with_command(sh(script), wake)
     }
 
+    /// Blink'i **açılıştan** açık oturum: ayarın `Session::spawn` yolundan
+    /// geçtiğini sınayan tek kurulum.
+    fn spawn_blinking_session(script: &str, wake: Arc<TestWake>) -> Session {
+        let mut options = test_options(sh(script), 40);
+        options.terminal.blink = CursorBlink::On;
+        Session::spawn(options, wake).unwrap()
+    }
+
     /// Dock'u **olan** oturum: caret'i devralacak bir yüzey var, yani
     /// [`Session::frame`] ızgaranın imlecini gizleyebilir.
     ///
@@ -3228,6 +3287,7 @@ mod tests {
                 scrollback: 100,
                 osc52: Osc52::Copy,
                 cursor: CaretShape::default(),
+                blink: CursorBlink::default(),
             },
             theme: THEME,
             // Varsayılan **dock'suz**: sınamaların çoğu `/bin/sh` koşuyor ve
@@ -4283,6 +4343,23 @@ mod tests {
         wait_frame(session, wake, |cells| backgrounds(cells).count() == count)
     }
 
+    /// [`wait_frame`]'in ikizi ama **imleci** döndürür: sınır kaydının
+    /// hücre olmayan yarısını soran sınamalar için.
+    fn wait_cursor(session: &Session, wake: &TestWake, ready: impl Fn(&[Cell]) -> bool) -> Cursor {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = 0;
+        loop {
+            assert!(Instant::now() < deadline, "beklenen kare gelmedi");
+            seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
+            let mut cells = Vec::new();
+            if let Some(cursor) = frame_if_damaged(session, |c| cells.push(c))
+                && ready(&cells)
+            {
+                return cursor;
+            }
+        }
+    }
+
     /// `ready` "bu kare beklediğim kare" diyene kadar bekler.
     ///
     /// Ölçütün parametre olmasının sebebi PTY okumasının bölünebilmesi:
@@ -4881,8 +4958,11 @@ mod tests {
             // doldurulursa `default_cursor_style` zaten `Config::default()`'a
             // eşit olur, aşağıdaki döngü onu sıfırlama listesine eklemeden
             // geçer ve guard'ın vaadi ("bu alanların dışında hiçbir şey
-            // kurulmuyor") sessizce yalan olurdu.
+            // kurulmuyor") sessizce yalan olurdu. Aynısı blink için de
+            // geçerli: `Off` varsayılan olduğu için aşağıdaki "blink
+            // kurulmadı" iddiası onunla **boş** kalırdı.
             cursor: CaretShape::Beam,
+            blink: CursorBlink::On,
         };
         let before = term_config(options);
         assert_eq!(
@@ -4912,6 +4992,7 @@ mod tests {
 
         let shaped = term_config(TerminalOptions {
             cursor: CaretShape::Underline,
+            blink: CursorBlink::default(),
             ..options
         });
         assert_eq!(
@@ -4924,8 +5005,15 @@ mod tests {
             CursorShape::Underline,
             "şekil ayardan gelmedi"
         );
-        // Blink phase-2'nin işi: phase-1 onu varsayılanında bırakıyor.
-        assert!(!shaped.default_cursor_style.blinking, "blink kuruldu");
+        // **Blink config'e yazılmıyor ve yazılmamalı.** `"on"`/`"off"` birer
+        // ezme ve alacritty onları ifade edemiyor (`AdapterInner::blink`);
+        // buraya `matches!(options.blink, On)` yazan bir sadeleştirme
+        // uygulamanın `\e[2 q`'suyla susturulabilir bir "hep sönsün" üretirdi.
+        // Fixture `On` taşıdığı için bu iddia gerçekten bir kapı.
+        assert!(
+            !shaped.default_cursor_style.blinking,
+            "blink config'e yazıldı"
+        );
 
         // **Üç** alanın dışında hiçbir şey kurulmuyor.
         for config in [before, scrolled, copying, shaped] {
@@ -4965,6 +5053,7 @@ mod tests {
             scrollback: 10,
             osc52: Osc52::Copy,
             cursor: CaretShape::default(),
+            blink: CursorBlink::default(),
         });
         {
             let term = session.term.lock();
@@ -5050,6 +5139,7 @@ mod tests {
             scrollback: 100,
             osc52,
             cursor: CaretShape::default(),
+            blink: CursorBlink::default(),
         };
 
         session.set_terminal_options(options(Osc52::Off));
@@ -5809,6 +5899,33 @@ mod tests {
         assert!(frame_if_damaged(&session, |c| cells.push(c)).is_some());
         let drawn: Vec<_> = cells.iter().map(|c| (c.row, c.col)).collect();
         assert_eq!(drawn, vec![(0, 0), (0, 1)], "boş hücre boyandı: {cells:?}");
+    }
+
+    #[test]
+    fn the_blink_setting_reaches_the_first_frame() {
+        // **Ölçülmüş kusur** (`/code-review`, 014 phase-2): `Adapter::new`
+        // blink'i varsayılanında kuruyordu ve `Session::spawn` ayarı hiç
+        // yazmıyordu. Tek yazıcı `set_terminal_options` olduğu için özellik
+        // taze pencerede sessizce ölü kalıyor, ancak kullanıcı ayar dosyasını
+        // **yeniden kaydedince** hayat buluyordu — yani her açılışta bozuk,
+        // alakasız bir düzenlemeden sonra "kendiliğinden düzeliyor".
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_blinking_session("printf 'ab'; sleep 5", Arc::clone(&wake));
+        let cursor = wait_cursor(&session, &wake, |cells| cells.len() == 2);
+        assert!(cursor.blink, "ayar ilk kareye ulaşmadı");
+    }
+
+    #[test]
+    fn a_hidden_cursor_does_not_blink() {
+        // **R9'un "imleç gizlenir" durma koşulu.** Çizilmeyen bir caret sönmez:
+        // açık kalsaydı `\e[?25l` gönderen bir TUI'de pencere saniyede iki kez
+        // uyanıp **birebir aynı** kareyi çizerdi ve `IDLE_STOP` de hiç
+        // dolmazdı, çünkü TUI'nin kendi çıktısı sayacı tazeliyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_blinking_session("printf 'ab\\033[?25l'; sleep 5", Arc::clone(&wake));
+        let cursor = wait_cursor(&session, &wake, |cells| cells.len() == 2);
+        assert!(!cursor.visible, "imleç gizlenmedi");
+        assert!(!cursor.blink, "gizli imleç sönmeye devam ediyor");
     }
 
     #[test]
@@ -6830,6 +6947,7 @@ mod tests {
                         scrollback,
                         osc52,
                         cursor: CaretShape::default(),
+                        blink: CursorBlink::default(),
                     });
                     let _ = session.scroll_page(1);
                     sets += 1;

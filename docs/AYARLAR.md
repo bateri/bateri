@@ -82,6 +82,10 @@ scrollback = 10000
 # it, "beam" stands at its left edge. Programs such as vim may ask for a
 # different shape while they run; this is the shape when none is asked for.
 cursor = "block"
+# Whether the cursor blinks: "auto" follows what the program asks for, "on"
+# always blinks, "off" never does. Blinking asks for two frames a second for
+# as long as the window is focused, so it is off unless you choose it.
+cursor_blink = "off"
 
 [appearance]
 # "system" follows the macOS light/dark appearance. Any other value is a theme
@@ -245,12 +249,14 @@ geri alınabilir: dosyayı düzeltip kaydetmek yeter.
 [terminal]
 scrollback = 10000
 cursor = "block"
+cursor_blink = "off"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
 |---|---|---|---|
 | `scrollback` | tam sayı, `0`–`100000` | `10000` | geçmişte tutulan satır sayısı |
 | `cursor` | `"block"` \| `"underline"` \| `"beam"` | `"block"` | imlecin **varsayılan** şekli |
+| `cursor_blink` | `"auto"` \| `"on"` \| `"off"` | `"off"` | imleç yanıp söner mi |
 
 - `100000`'den büyük değer **`100000`** olur ve uyarı verir. Sınır
   alacritty'nin kendi ayar sınırı (`MAX_SCROLLBACK_LINES`); ölçülmüş bir
@@ -269,6 +275,17 @@ istemediğindeki hâl. Tanınmayan değer (`"bar"`, `"Block"`) anahtarı
 **değiştirmez** ve uyarı verir; büyük/küçük harf duyarlı. İnce şekillerin
 kalınlığı fontun kendi alt çizgi metriğinden gelir, yani punto ya da font
 değişince caret de onunla değişir.
+
+`cursor_blink` üç değerli, çünkü iki ayrı soru var: `"auto"` uygulamanın
+isteğini dinler (vim'in `\e[5 q`'su söndürür), `"on"` her zaman söner,
+`"off"` hiç söndürmez — ikisi de uygulamanın dediğini **ezer**.
+
+Varsayılan `"off"` ve bu bir ürün kararı: yanıp sönen imleç pencereyi kalıcı
+olarak meşgul tutar (saniyede iki kare) ve bu terminalin ana vaadi boşta hiç
+kare çizmemek. Açtığında bedeli sınırlı kalıyor — yazmayı bıraktıktan 15 saniye
+sonra blink **duruyor** ve imleç görünür hâlde kalıyor; ilk tuşta geri geliyor.
+Hareketi Azalt açıkken blink hiç başlamaz: erişilebilirlik ayarı animasyon
+*eklemez*.
 
 Bölüm satır içi de yazılabilir: `terminal = { scrollback = 5000 }`.
 `[[terminal]]` (bölüm dizisi) bölüm sayılmaz ve uyarı verir.
