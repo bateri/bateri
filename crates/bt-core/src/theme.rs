@@ -41,8 +41,8 @@ impl Theme {
     /// Tema dosyasının metni → `base`'in üstüne okunmuş tema + tanılar, ya da
     /// ayrıştırılamadı.
     ///
-    /// Roller (`background`, `foreground`, `dim`, `accent`, `success`,
-    /// `error`) kökte, 16 renk
+    /// Roller (`background`, `foreground`, `dim`, `accent`, `cursor`,
+    /// `success`, `error`) kökte, 16 renk
     /// `[ansi]` bölümünde; renk `"#rrggbb"` (büyük harf de olur). `Err` yalnız
     /// geçersiz TOML'da, ayar dosyasındaki anlamıyla.
     ///
@@ -66,6 +66,25 @@ impl Theme {
         for (key, slot) in roles {
             read_color(text, root, key, key, slot, &mut diagnostics);
         }
+        // **`cursor` eksikse `accent`'e düşüyor**, tabana değil: rol 014'te
+        // doğdu ve ondan önce yazılmış bir kullanıcı teması imlecini
+        // `accent`'ten alıyordu. Tabana düşseydi o dosyalar tek harf
+        // değişmeden **başka görünürdü** — gömülü temanın altını, kullanıcının
+        // seçtiği vurgunun yerine geçerdi.
+        //
+        // Sıra bu yüzden zorunlu: eşitleme `accent` okunduktan **sonra**, kendi
+        // okumasından **önce**. Anahtar varsa `read_color` üstüne yazıyor;
+        // kabul edilmeyen değer yuvayı bırakıyor, yani yine `accent` — yanlışın
+        // yönü güvenli.
+        theme.cursor = theme.accent;
+        read_color(
+            text,
+            root,
+            "cursor",
+            "cursor",
+            &mut theme.cursor,
+            &mut diagnostics,
+        );
         if let Some(ansi) = section(text, root, "ansi", &mut diagnostics) {
             for ((key, path), slot) in ANSI_KEYS.into_iter().zip(&mut theme.ansi) {
                 read_color(text, ansi, key, path, slot, &mut diagnostics);
@@ -131,6 +150,7 @@ mod tests {
         foreground: 0x000002,
         dim: 0x000003,
         accent: 0x000004,
+        cursor: 0x000007,
         success: 0x000005,
         error: 0x000006,
         ansi: [
@@ -146,9 +166,43 @@ mod tests {
     }
 
     #[test]
-    fn empty_theme_is_the_base() {
-        assert_eq!(clean("", &SENTINEL), SENTINEL);
-        assert_eq!(clean("# yalnız yorum\n", &Theme::BATERI), Theme::BATERI);
+    fn empty_theme_is_the_base_except_the_cursor() {
+        // **`cursor` tabandan gelmiyor, `accent`'i izliyor** ve bu bilerek
+        // (014 R13.1): rol 014'te doğdu, ondan önce yazılmış her kullanıcı
+        // teması imlecini `accent`'ten alıyordu. Tabandan doldurulsaydı o
+        // dosyalar tek harf değişmeden başka görünürdü — gömülü temanın altını
+        // kullanıcının seçtiği vurgunun yerine geçerdi.
+        assert_eq!(
+            clean("", &SENTINEL),
+            Theme {
+                cursor: SENTINEL.accent,
+                ..SENTINEL
+            }
+        );
+        assert_eq!(
+            clean("# yalnız yorum\n", &Theme::BATERI),
+            Theme {
+                cursor: Theme::BATERI.accent,
+                ..Theme::BATERI
+            }
+        );
+    }
+
+    #[test]
+    fn the_cursor_role_is_optional_and_follows_accent() {
+        // Anahtar **varsa** kendi değeri; `accent`'e dokunmuyor.
+        let theme = clean("accent = \"#ff0000\"\ncursor = \"#00ff00\"\n", &SENTINEL);
+        assert_eq!((theme.accent, theme.cursor), (0xff0000, 0x00ff00));
+        // **Yoksa** `accent` — tabanın kendi imleç rengi değil.
+        let theme = clean("accent = \"#ff0000\"\n", &SENTINEL);
+        assert_eq!((theme.accent, theme.cursor), (0xff0000, 0xff0000));
+        // Kabul edilmeyen değer yuvayı bırakıyor, yani yine `accent`; yönü
+        // güvenli ve tanı bırakıyor.
+        let (theme, diagnostics) =
+            Theme::parse("accent = \"#ff0000\"\ncursor = \"yeşil\"\n", &SENTINEL)
+                .expect("ayrıştırılabilir metin");
+        assert_eq!(theme.cursor, 0xff0000);
+        assert_eq!(diagnostics.len(), 1, "tanı yok: {diagnostics:?}");
     }
 
     #[test]
@@ -162,6 +216,8 @@ mod tests {
             Theme {
                 background: 0xffffff,
                 accent: 0xff0000,
+                // Anahtar yok → `accent`'i izliyor.
+                cursor: 0xff0000,
                 ansi: {
                     let mut ansi = Theme::BATERI.ansi;
                     ansi[15] = 0x010203;
@@ -193,7 +249,14 @@ mod tests {
             &Theme::BATERI,
         )
         .expect("ayrıştırılabilir metin");
-        assert_eq!(theme, Theme::BATERI);
+        // `cursor` anahtarı yok, yani `accent`'i izliyor; kalan her şey taban.
+        assert_eq!(
+            theme,
+            Theme {
+                cursor: Theme::BATERI.accent,
+                ..Theme::BATERI
+            }
+        );
         let lines: Vec<_> = diagnostics.iter().map(ToString::to_string).collect();
         assert_eq!(
             lines,
@@ -210,7 +273,14 @@ mod tests {
     fn ansi_of_wrong_type_is_diagnosed() {
         let (theme, diagnostics) =
             Theme::parse("ansi = \"#ffffff\"\n", &Theme::BATERI).expect("ayrıştırılabilir metin");
-        assert_eq!(theme, Theme::BATERI);
+        // `cursor` anahtarı yok, yani `accent`'i izliyor; kalan her şey taban.
+        assert_eq!(
+            theme,
+            Theme {
+                cursor: Theme::BATERI.accent,
+                ..Theme::BATERI
+            }
+        );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].key, Some("ansi"));
     }
@@ -235,6 +305,8 @@ mod tests {
             theme,
             Theme {
                 success: 0x0a0b0c,
+                // Anahtar yok → `accent`'i izliyor, tabanın imleç rengini değil.
+                cursor: SENTINEL.accent,
                 ..SENTINEL
             }
         );

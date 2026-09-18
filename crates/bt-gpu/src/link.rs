@@ -777,7 +777,7 @@ define_class!(
                     frame.move_caret(
                         at,
                         text,
-                        theme.accent_linear(),
+                        theme.cursor_linear(),
                         motion.alpha() * iv.blink.get().alpha(),
                     );
                 }
@@ -1025,7 +1025,7 @@ define_class!(
                 frame.push_caret(
                     at,
                     text,
-                    theme.accent_linear(),
+                    theme.cursor_linear(),
                     motion.alpha() * blink.alpha(),
                     cursor.shape,
                 );

@@ -85,8 +85,24 @@ pub struct Theme {
     /// bir kuraldan, zemine karıştırarak gelir ([`dim_toward`]); bu rol
     /// yalnız varsayılan ön planın.
     pub dim: u32,
-    /// Vurgu; bugün imleç bloğu **ve koşan komut bloğunun şeridi**.
+    /// Vurgu; bugün **koşan komut bloğunun şeridi**.
+    ///
+    /// İmleç artık burada değil ([`Theme::cursor`]): ikisi tek değerden
+    /// beslenirken "imleci altın yap" isteği şeridi de altın yapıyordu.
     pub accent: u32,
+    /// İmleç bloğunun rengi — ANSI 258'in ("imleç rengi") karşılığı.
+    ///
+    /// Ayrı bir rol, çünkü ayrı bir sorunun cevabı: `accent` "hangi şey öne
+    /// çıksın", bu "caret nerede". 258 yuvası bugüne kadar `accent`'e takma
+    /// addı ve o bir kalıntıydı — terminfo'da `Cs` ilan ediyoruz, yani
+    /// uygulamanın imleç rengini değiştirebilmesi (OSC 12) de bu rolün
+    /// üstüne kurulacak.
+    ///
+    /// **Blok opak ve altındaki harf zemin rengiyle çiziliyor**
+    /// (`Session::frame`), yani bu rengin zemine karşı **ve** kendi üstündeki
+    /// zemin renkli harfe karşı okunur olması gerekiyor: koyu temada açık,
+    /// açık temada koyu bir altın.
+    pub cursor: u32,
     /// Durum: başarı. Bugün sıfır çıkış koduyla biten komut bloğunun şeridi.
     pub success: u32,
     /// Durum: hata. Bugün sıfırdan farklı çıkış koduyla biten komut bloğunun
@@ -124,6 +140,11 @@ impl Theme {
         foreground: 0xd8d9dd,
         dim: 0x909093,
         accent: 0x7a9cc6,
+        // Altın; paletin kendi sarı ailesinden (`0xd6b16a`/`0xe8c988`) ama
+        // ondan ayrık, yoksa imleç "sarı metin" gibi okunurdu. **Zevk kararı,
+        // ölçüm değil.** Siyah zeminde açık olmak zorunda: altındaki harf
+        // zemin rengiyle, yani siyahla çiziliyor.
+        cursor: 0xd9b063,
         success: 0x8bb58b,
         error: 0xd16d6a,
         ansi: [
@@ -161,6 +182,10 @@ impl Theme {
         foreground: 0x24262c,
         dim: 0x696b70,
         accent: 0x3d6aa8,
+        // Açık temada altın **koyu**: blok opak ve altındaki harf zeminle
+        // (neredeyse beyaz) çiziliyor, yani açık bir altında harf kaybolurdu.
+        // Koyu temanın tonu doğrudan taşınamaz; aynı ailenin bronzu.
+        cursor: 0x8a6512,
         success: 0x3b7a3b,
         error: 0xb5423d,
         ansi: [
@@ -193,6 +218,12 @@ impl Theme {
 
     /// İmleç bloğunun rengi, **lineer** RGBA. Renderer'da sabit durmasın diye
     /// burada: renk kararı temanın, çizim kararı renderer'ın.
+    /// İmleç bloğunun rengi, lineer — çizim hedefi sRGB kodlamayı kendi
+    /// yapıyor ([`linear_rgba`]).
+    pub const fn cursor_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.cursor))
+    }
+
     pub const fn accent_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.accent))
     }
@@ -294,7 +325,9 @@ impl Theme {
             }
             256 => rgb(self.foreground),
             257 => rgb(self.background),
-            258 => rgb(self.accent),
+            // İmleç rengi: kendi rolünden. Bugüne kadar `accent`'e takma
+            // addı ve iki ayrı soru tek değerden cevaplanıyordu.
+            258 => rgb(self.cursor),
             // 259..=266 sönük ANSI sekizlisi, 267 parlak ön plan, 268 sönük ön
             // plan.
             259..=266 => dim_toward(rgb(self.ansi[index - 259]), self.background_rgb()),
@@ -530,10 +563,11 @@ mod tests {
         assert_eq!(THEME.default(NamedColor::Background as usize), background);
         assert_eq!(THEME.background_rgb(), background);
         assert_eq!(THEME.background_linear(), linear_rgba(background));
-        // İmleç de rolünden: renk sorusunun yanıtı ile çizilen blok ayrışmasın.
+        // İmleç de **kendi** rolünden: renk sorusunun yanıtı ile çizilen blok
+        // ayrışmasın. 258 bugüne kadar `accent`'e takma addı (014 phase-3).
         assert_eq!(
             THEME.default(NamedColor::Cursor as usize),
-            rgb(THEME.accent)
+            rgb(THEME.cursor)
         );
         assert_eq!(THEME.accent_linear(), linear_rgba(rgb(THEME.accent)));
     }
@@ -551,7 +585,7 @@ mod tests {
             (12, 0x9bb8dc), (13, 0xc9aad8), (14, 0x96caca), (15, 0xe6e7ea),
             (256, 0xd8d9dd), // ön plan
             (257, 0x000000), // arka plan
-            (258, 0x7a9cc6), // imleç
+            (258, 0xd9b063), // imleç
         ];
         for (index, hex) in EXPECTED {
             assert_eq!(THEME.default(index), rgb(hex), "{index}");
@@ -570,7 +604,7 @@ mod tests {
             (12, 0x4a78ba), (13, 0x9d5db0), (14, 0x2f8a92), (15, 0xdcdee3),
             (256, 0x24262c), // ön plan
             (257, 0xf5f6f8), // arka plan
-            (258, 0x3d6aa8), // imleç
+            (258, 0x8a6512), // imleç
             (268, 0x696b70), // sönük ön plan
         ];
         let light = Theme::BATERI_LIGHT;
