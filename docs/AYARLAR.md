@@ -608,7 +608,7 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 Bir temaya başlamanın en kısa yolu bunu kopyalayıp değiştirmek:
 
 ```toml
-background = "#1a1c21"
+background = "#000000"
 foreground = "#d8d9dd"
 dim = "#909093"
 accent = "#7a9cc6"

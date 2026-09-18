@@ -3987,13 +3987,16 @@ mod tests {
         let dim_foreground = LinearRgba::from_srgb(0x90, 0x90, 0x93);
         let a = at_col(0);
         assert_eq!((a.fg, a.bg), (dim_foreground, None), "{a:?}");
-        // `0xd16d6a`, zemin `0x1a1c21`'e doğru üçte bir: kanal başına
-        // `(2·kaynak + zemin) / 3`, kesmeyle. 007 phase-3'e kadar `× 2/3`'tü
-        // (`0x8b4846`); değişikliğin tek izi bu satır.
+        // `0xd16d6a`, zemine doğru üçte bir: kanal başına
+        // `(2·kaynak + zemin) / 3`, kesmeyle. Kural 007 phase-3'te `× 2/3`'ten
+        // buna geçti; sayı **yine** `0x8b4846` ama aynı kural, çünkü `bateri`nin
+        // zemini artık saf siyah ve karışım terimi düşüyor. Kuralın kendisi
+        // açık temada ayrışıyor ve orada sınanıyor
+        // ([`color::tests::dim_colors_move_toward_the_background`]).
         let b = at_col(2);
         assert_eq!(
             (b.fg, b.bg),
-            (LinearRgba::from_srgb(0x94, 0x52, 0x51), None),
+            (LinearRgba::from_srgb(0x8b, 0x48, 0x46), None),
             "{b:?}"
         );
         // Ters videoda sönük ön plan arka plana geçer; ön plan paletin arka
@@ -4002,7 +4005,7 @@ mod tests {
         assert_eq!(
             (c.fg, c.bg),
             (
-                LinearRgba::from_srgb(0x1a, 0x1c, 0x21),
+                LinearRgba::from_srgb(0x00, 0x00, 0x00),
                 Some(dim_foreground)
             ),
             "{c:?}"
@@ -4022,7 +4025,7 @@ mod tests {
         let cells = wait_cells(&session, &wake, 1);
         // Elle yazılı: `0xd16d6a`'nın zemine karışmış sönüğü (bkz.
         // `dim_colors_on_the_draw_path_are_pinned`).
-        assert_eq!(cells[0].bg, Some(LinearRgba::from_srgb(0x94, 0x52, 0x51)));
+        assert_eq!(cells[0].bg, Some(LinearRgba::from_srgb(0x8b, 0x48, 0x46)));
         // Sönük olmayan kırmızıdan gerçekten farklı.
         assert_ne!(cells[0].bg, Some(color::linear_rgba(THEME.default(1))));
         // Ters videoda ön plan hücrenin arka planından gelir ve **sönmez**:
@@ -4279,11 +4282,11 @@ mod tests {
         // `b` yine `None` dönerdi.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session(
-            "printf 'a\\033[48;2;26;28;33mb\\033[0m'; sleep 5",
+            "printf 'a\\033[48;2;0;0;0mb\\033[0m'; sleep 5",
             Arc::clone(&wake),
         );
         let cells = wait_frame(&session, &wake, |cells| glyph_text(cells) == "ab");
-        let dark_bg = LinearRgba::from_srgb(0x1a, 0x1c, 0x21);
+        let dark_bg = LinearRgba::from_srgb(0x00, 0x00, 0x00);
         assert!(cells.iter().all(|c| c.bg.is_none()), "{cells:?}");
         assert!(
             frame_if_damaged(&session, |_| ()).is_none(),
@@ -5198,7 +5201,7 @@ mod tests {
         // renge gider. Seçilmemişte o renk arka plan, seçilide yine ön plan.
         // Elle yazılı: `0xd16d6a`'nın zemine karışmış sönüğü (bkz.
         // `dim_colors_on_the_draw_path_are_pinned`).
-        let dim_red = LinearRgba::from_srgb(0x94, 0x52, 0x51);
+        let dim_red = LinearRgba::from_srgb(0x8b, 0x48, 0x46);
         assert_eq!(drawn[&2], (Some(green), dim_red), "{drawn:?}");
         assert_eq!(drawn[&3], (Some(dim_red), green), "{drawn:?}");
 

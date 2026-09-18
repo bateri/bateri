@@ -277,10 +277,15 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   fragment çıktısını **lineer** sayar ve yazarken sRGB'ye kodlar. Bu yüzden
   `bt-core` sınırdan lineer float verir (`color::linear_rgba`) ve `MTLClearColor`
   da aynı temadan (`Theme::background_linear`) beslenir. İkisi **birlikte** değişir; biri lineerleşmeden
-  ötekine geçilirse palet `0x1a1c21`'den `0x5a5d65` griye açılır ve belirti
+  ötekine geçilirse palet açılır (`0x1a1c21` ara tonu `0x5a5d65` griye) ve belirti
   sessizdir. Gören tek bekçi `cell_bg_paints_pixels_on_the_gpu` ve ancak **ara
   ton** bir renkle görür: `0.0` ve `1.0` sRGB transfer fonksiyonunun sabit
-  noktalarıdır.
+  noktalarıdır. **Bekçinin ara tonu bu yüzden temadan gelmiyor**
+  (`renderer::tests::MIDTONE`): `bateri`'nin zemini artık **saf siyah**, yani
+  sabit noktanın ta kendisi — tanığı temanın zeminine bağlı bırakmak onu bir
+  zevk kararıyla körleştirirdi ve tam da öyle olacaktı. Clear yolunun tanığı
+  ayrı ve hâlâ temadan (`accent`); ikisinin farklı renk olması şart, yoksa
+  hücre yolu ile clear yolu birbirinden ayırt edilemez.
 - **Boşta sıfır kare.** Kirli satır **ve** yerleşmemiş animasyon yoksa frame
   gönderilmez; kare istemenin iki yolu var ve ikincisi kimseyi uyandırmıyor
   (`bt-gpu::link` modül başlığı: zamana bağlı kare talebinin tek yolu hareket

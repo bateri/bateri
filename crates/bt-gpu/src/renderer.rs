@@ -1147,6 +1147,23 @@ mod tests {
     const BACKGROUND: LinearRgba = Theme::BATERI.background_linear();
     const ACCENT: LinearRgba = Theme::BATERI.accent_linear();
 
+    /// sRGB lineerleştirmesinin **hücre yolundaki** tanığı: bir ara ton.
+    ///
+    /// Bilerek temadan DEĞİL. Bekçinin duyarlılığı bir zevk değerine bağlı
+    /// kalamaz: `0.0` ve `1.0` sRGB transfer fonksiyonunun sabit noktaları,
+    /// yani zemin saf siyaha çekildiği gün (öyle oldu) bu iddia lineerleştirme
+    /// olsa da olmasa da geçerdi ve tek bekçi sessizce körleşirdi. Değer eski
+    /// zeminin ta kendisi — kaydı `CLAUDE.md`'de aynı sayıyla duruyor.
+    const MIDTONE_SRGB: u32 = 0x1a1c21;
+    const MIDTONE: LinearRgba = {
+        let (r, g, b) = (
+            (MIDTONE_SRGB >> 16) as u8,
+            (MIDTONE_SRGB >> 8) as u8,
+            MIDTONE_SRGB as u8,
+        );
+        LinearRgba::from_srgb(r, g, b)
+    };
+
     /// Sol payı **sıfır** olan ızgara ölçüsü.
     ///
     /// Offscreen sınamaların örnekleme noktası `cell_rows`'ta `col * cw + x`,
@@ -1552,7 +1569,7 @@ mod tests {
         frame.clear(grid(8, 8));
         frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
         frame.push(bg_cell(1, 1, LinearRgba::from_srgb(0x00, 0xff, 0x00)));
-        frame.push(bg_cell(0, 1, BACKGROUND));
+        frame.push(bg_cell(0, 1, MIDTONE));
 
         // Clear rengi de **ara ton**, ve bilerek temadan: üretimde pencerenin
         // görünen zemininin tamamı bu yoldan geliyor (`frame()` varsayılan
@@ -1588,15 +1605,11 @@ mod tests {
         };
         // sRGB round-trip: `linear_rgba`'nın lineerleştirmesi ile donanımın
         // yazarken yaptığı kodlama birbirini tersine çevirmeli, yani ekrana
-        // giden bayt paletin yazıldığı bayt olmalı. Lineerleştirme düşerse
-        // `0x1a1c21` `0x5a5d65` griye açılır — geçişin sessiz kalabileceği
-        // tek yer burasıydı; saf kırmızı ve yeşil bunu göremez, ikisi de
-        // sRGB transfer fonksiyonunun sabit noktaları.
-        close_to(
-            pixel(2, 12),
-            srgb(Theme::BATERI.background),
-            "hücre ara tonu",
-        );
+        // giden bayt yazılan bayt olmalı. Lineerleştirme düşerse `MIDTONE`
+        // (`0x1a1c21`) `0x5a5d65` griye açılır — geçişin sessiz kalabileceği
+        // tek yer burası; saf kırmızı, yeşil **ve artık zemin de** bunu
+        // göremez, üçü de sRGB transfer fonksiyonunun sabit noktaları.
+        close_to(pixel(2, 12), srgb(MIDTONE_SRGB), "hücre ara tonu");
         close_to(
             pixel(12, 2),
             srgb(Theme::BATERI.accent),
@@ -1922,7 +1935,7 @@ mod tests {
         // Tam bayt aranmıyor: glyph kapsaması kenarlarda yarım ve en koyu
         // piksel bile zemine ancak yaklaşıyor (`glyph_differs_from_cell_background`
         // ile aynı gerekçe — kapı sistem fontunun sürümüne rehin olmamalı).
-        // Sorulan şey farkın **yönü**: zemin (`0x1a1c21`) beyazdan koyu.
+        // Sorulan şey farkın **yönü**: zemin (siyah) beyazdan koyu.
         let darkest = cell.iter().map(|p| p.0).min().expect("hücre boş değil");
         assert!(
             darkest < 0x80,
