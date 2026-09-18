@@ -751,6 +751,36 @@ mod tests {
     }
 
     #[test]
+    fn the_shell_prompt_is_as_wide_as_the_dock_indent() {
+        // **İki kaynak, tek sayı.** Dock'un metni işaretten `TEXT_COL` sütun
+        // sonra başlıyor; ızgarada aynı hizayı veren şey zsh betiğinin
+        // prompt'u, çünkü komut orada gerçekten o kadar içeriden başlıyor
+        // (012 phase-11). Sabit paylaşılamıyor — biri Rust, biri kabuk — ama
+        // ayrışmaları **sessiz** olurdu: ızgara ile dock farklı sütundan
+        // başlar, kimse kızarmaz.
+        //
+        // Ölçüt tırnak içindeki boşluk sayısı. Boşluklar `%{…%}` dışında
+        // olmak zorunda (zsh onları saymalı); içeri alınsalardı genişlik
+        // sıfıra döner ve işaret komutun ilk harfini örterdi.
+        let script = include_str!("../../../assets/shell/zsh/bateri.zsh");
+        let line = script
+            .lines()
+            .find(|line| line.contains("__bateri_ps1="))
+            .expect("betikte `__bateri_ps1` ataması yok");
+        let spaces = format!("'{}'", " ".repeat(usize::from(TEXT_COL)));
+        assert!(
+            line.contains(&spaces),
+            "prompt genişliği `TEXT_COL` ({TEXT_COL}) ile ayrışmış: {line}"
+        );
+        // Bir fazlası da geçmesin: `contains` tek başına "en az" derdi.
+        let wider = format!("'{}'", " ".repeat(usize::from(TEXT_COL) + 1));
+        assert!(
+            !line.contains(&wider),
+            "prompt bir sütun daha geniş: {line}"
+        );
+    }
+
+    #[test]
     fn the_context_line_sits_under_the_input_and_is_dim() {
         let (cells, _) = draw_with(&live("", "ls", "", 2), &context("/tmp/x", "main"), COLS);
         assert_eq!(text(&cells), "  ls");

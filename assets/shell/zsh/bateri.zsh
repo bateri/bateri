@@ -196,13 +196,29 @@ __bateri_hooks() {
   # başlıyorsa çıpa hiç doğmaz ve şerit çizilmez; bilinen sınır, yanlış çizim
   # değil.
   typeset -g __bateri_anchor=$'%{\e]8;;bateri://block/%9v\a%}'
-  # Prompt TERMİNALİN olduğunda PS1'in tamamı: iki sıfır genişlikli işaret ve
-  # tek bir görünür karakter bile yok. `>` dock'ta çiziliyor (`bt-core`'un
-  # `dock::SIGIL`'i), yani prompt'un yerini terminalin kendi işareti alıyor.
+  # Prompt TERMİNALİN olduğunda PS1: iki sıfır genişlikli işaret ve **iki
+  # gerçek boşluk**. `>` dock'ta ve ızgarada terminalin kendisi çiziyor, ama
+  # ızgarada onu koyacak yer lazım — o yer bu iki sütun.
   #
-  # `%{…%}` "sıfır genişlik" demek; olmasaydı zsh kaçış dizisini basılan
-  # karakter sayar ve satır kaydırma bozulurdu.
-  typeset -g __bateri_ps1=$__bateri_anchor$'%{\e]133;B\a%}'
+  # BOŞLUKLAR ÇİZİM HİLESİ DEĞİL, GERÇEK GENİŞLİK. Alternatifi komut satırını
+  # çizerken iki sütun sağa kaydırmaktı ve üç şeyi birden bozardı: fare
+  # eşlemesi o satırda kayardı, tam genişlikteki bir komutun son iki karakteri
+  # ekrandan taşardı ve zsh satır sarmayı yanlış hesaplardı. Prompt gerçekten
+  # iki sütunsa üçü de kendiliğinden doğru — zsh zaten prompt genişliğini
+  # biliyor.
+  #
+  # SAYI `bt-core`'un `dock::TEXT_COL`'u ile AYNI olmak zorunda: dock'un metni
+  # de işaretten iki sütun sonra başlıyor ve ikisi ayrışırsa ızgara ile dock
+  # farklı sütundan başlar. Sabit paylaşılamıyor (biri zsh, biri Rust), o
+  # yüzden bir sınama bu satırı okuyup sayıyı bağlıyor.
+  #
+  # SIRA: çıpa → boşluklar → `B`. `B` prompt'un SONU, yani girdinin başladığı
+  # yer; boşluklar ondan önce olmak zorunda. Çıpa en başta, çünkü açtığı
+  # bağlantıyı boşluklar da taşıyor — ve bu bir yan kazanç: boş promptta bile
+  # çıpalı bir hücre var, oysa sıfır genişlikli PS1'de hiç yoktu.
+  #
+  # `%{…%}` "sıfır genişlik" demek; boşluklar bilerek DIŞARIDA, sayılmalılar.
+  typeset -g __bateri_ps1=$__bateri_anchor'  '$'%{\e]133;B\a%}'
   add-zsh-hook precmd __bateri_precmd
   add-zsh-hook preexec __bateri_preexec
   # AYNA: ZLE'nin görüntü durumu her satır çiziminde terminale gidiyor.

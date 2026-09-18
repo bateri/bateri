@@ -1744,7 +1744,8 @@ mod tests {
         // indirmek kapsamayı eritir ve sınama şekli değil ölçeklemeyi ölçerdi.
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
         assert!(usize::from(ch) * 3 <= EDGE, "üç satır dokuya sığmıyor");
-        // Pay **bir hücre**: işaret payda tam ortalanıyor.
+        // Pay bir hücre; işaret artık payda değil **0. sütunda** (012
+        // phase-11), yani pay saf sol kenar boşluğu.
         let gutter = cw;
 
         let mut frame = Frame::default();
@@ -1759,8 +1760,9 @@ mod tests {
             row: 2,
             stripe: Theme::BATERI.error_linear(),
         });
-        // Izgaranın ilk hücresi: işaretin ona **değmediğini** gösteren tanık.
-        frame.push(bg_cell(0, 0, WHITE));
+        // Komutun **ilk harfinin** hücresi: 2. sütun, çünkü prompt gerçekten
+        // iki sütun geniş (`__bateri_ps1`). İşaretin ona değmediğinin tanığı.
+        frame.push(bg_cell(2, 0, WHITE));
 
         // Clear üç rengin de dışında: işaretin bulunmadığı her piksel bunu
         // okumalı ve "işaret payı aştı" hatası clear ile ayırt edilebilsin.
@@ -1778,8 +1780,11 @@ mod tests {
         };
         let clear = srgb(Theme::BATERI.accent);
         let band = usize::from(ch);
+        // İşaretin bandı **0. sütun**, pay değil: pay artık boş.
+        let mark_x = usize::from(gutter)..usize::from(gutter) + usize::from(cw);
         let boldest = |row: usize| {
-            (0..usize::from(gutter))
+            mark_x
+                .clone()
                 .flat_map(|x| (row * band..(row + 1) * band).map(move |y| (x, y)))
                 .map(|(x, y)| pixel(x, y))
                 .max_by_key(|&seen| distance(seen, clear))
@@ -1802,13 +1807,22 @@ mod tests {
         // satır aralığına dönerse burası düşer.
         assert_eq!(boldest(1), clear, "çıktı satırı işaret aldı");
 
-        // Izgara payın sağında ve dokunulmamış: ilk hücre beyaz kaldı. Sprite
-        // tam bir hücre boyunda ama ink'i ortasında toplu, yani payı aşmıyor.
+        // **Komutun harfi dokunulmamış:** 2. sütun beyaz kaldı. İşaret bir
+        // hücre boyunda ve 0. sütunda; prompt iki sütun geniş olduğu için
+        // aradaki 1. sütun da boş, yani işaret metne hiçbir ölçekte değmiyor.
         assert_eq!(
-            pixel(usize::from(gutter) + usize::from(cw) / 2, band / 2),
+            pixel(
+                usize::from(gutter) + 2 * usize::from(cw) + usize::from(cw) / 2,
+                band / 2
+            ),
             (255, 255, 255),
-            "ilk hücre işaretin sağında"
+            "komutun ilk harfi işaretin sağında değil"
         );
+        // **Sol pay boş.** İşaret oradan 0. sütuna taşındı; payda mürekkep
+        // kalsaydı iki işaret arasındaki hiza yine bozuk olurdu.
+        for x in 0..usize::from(gutter) {
+            assert_eq!(pixel(x, band / 2), clear, "sol payda mürekkep var");
+        }
     }
 
     #[test]
