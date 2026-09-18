@@ -166,7 +166,16 @@ bir durma koşuluyla.
    sınırlı geçiş seçilirse her flip kısa bir ekran-hızı animasyon ister, yani
    `Motion`'a girer, `hareket=` sayar ve R10'un "ikinci alfa yazarı doğmaz"
    kazancıyla çarpışır. Bu yüzden `phase-2.md` **bakış bitmeden yazılmaz**.
-10. **Faz yalnız zamana bağlıdır; içerik karesi ona dokunmaz.** Alternatifi
+10. **Faz zamana bağlıdır; içerik karesi ona dokunmaz, ama caret'in
+   hareketi dokunur** *(ikinci yarısı canlı kullanımdan geldi, 2026-09-19)*.
+   Her içerik karesinde açığa çekmek 013 ile çarpışıyordu — koşan komutun
+   sayacı saniyede bir içerik karesi üretiyor ve blink'in ritmi komut
+   koşarken bozulurdu. Ama hiç dokunmamak da yanlıştı: yazarken imleç
+   sönüyordu ve bu her editörün tersi. Ölçüt **caret'in hedefinin
+   kıpırdaması**: sayaç onu kıpırdatmıyor, yazmak kıpırdatıyor. Tuş vuruşunun
+   kendisi tetik değil — o `bt-shell`→`bt-gpu` sinyali isterdi.
+
+10b. *(Eski hâli, tarihli kayıt olarak)* **Faz yalnız zamana bağlıdır.** Alternatifi
    "her içerik karesinde fazı açığa çek" idi (tuşa basınca imleç görünsün) ve
    013 ile çarpışıyor: koşan komutun sayacı saniyede bir içerik karesi üretiyor,
    yani blink'in ritmi komut boyunca bozulurdu. Bedeli kabul ediliyor ve

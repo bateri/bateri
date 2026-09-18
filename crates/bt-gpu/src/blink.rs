@@ -104,6 +104,27 @@ impl Blink {
         }
     }
 
+    /// Caret kıpırdadı: fazı **açığa** çekip sayacı baştan başlatır.
+    ///
+    /// **Yazarken imleç sönmez** ve bu kullanıcı bildirimiyle geldi
+    /// (2026-09-19): tuşa basarken imlecin bir yandan sönüp yanması "yazma ile
+    /// blink'in aynı anda olması" diye okundu ve haklı — her editör ve terminal
+    /// yazarken caret'i sabit tutar, duraksayınca sönmeye döner.
+    ///
+    /// **Tetik caret'in hareketi**, tuş vuruşunun kendisi değil ve bu bilerek:
+    /// tuş `bt-shell`'den `bt-gpu`'ya ayrı bir sinyal isterdi, oysa hareket
+    /// zaten bu modülün elinde. Ayrım da doğru yerde duruyor — koşan bir
+    /// komutun süre sayacı caret'i **kıpırdatmıyor**, yani `sleep 5` boyunca
+    /// blink bozulmadan sürüyor; akan çıktı ise kıpırdatıyor ve orada caret'in
+    /// sabit kalması zaten istenen.
+    pub(crate) fn wake(&mut self, now: f64) {
+        if !self.enabled {
+            return;
+        }
+        self.lit = true;
+        self.next_flip = Some(now + HALF_PERIOD);
+    }
+
     /// Zamanı ilerletir; dönen değer **bu karede faz değişti mi**.
     ///
     /// Tek atımlık ve `link.rs`'in uyku testinde `motion.settled()`'ın erken
@@ -203,6 +224,32 @@ mod tests {
         assert_eq!(blink.next_flip(), None, "durduktan sonra saat kuruldu");
         // Bir daha kare istemiyor: durma tek atımlık.
         assert!(!blink.advance(IDLE_STOP + 10.0));
+    }
+
+    #[test]
+    fn typing_keeps_the_caret_lit() {
+        // Caret kıpırdayınca faz açığa dönüyor ve sayaç baştan başlıyor, yani
+        // yazmaya devam eden kullanıcı imleci **hiç** sönük görmüyor.
+        let mut blink = Blink::default();
+        blink.content_frame(0.0, true);
+        assert!(blink.advance(HALF_PERIOD), "faz sönmedi");
+        assert_eq!(blink.alpha(), 0.0);
+
+        blink.wake(HALF_PERIOD);
+        assert_eq!(blink.alpha(), 1.0, "yazarken imleç sönük kaldı");
+        assert_eq!(blink.next_flip(), Some(2.0 * HALF_PERIOD));
+        // Yarım periyot dolmadan tekrar yazmak sayacı yine öteliyor.
+        blink.wake(1.5 * HALF_PERIOD);
+        assert!(!blink.advance(2.0 * HALF_PERIOD), "sayaç ötelenmedi");
+        assert_eq!(blink.alpha(), 1.0);
+    }
+
+    #[test]
+    fn a_disabled_blink_ignores_the_caret_moving() {
+        let mut blink = Blink::default();
+        blink.content_frame(0.0, false);
+        blink.wake(1.0);
+        assert_eq!(blink.next_flip(), None, "kapalı blink saat kurdu");
     }
 
     #[test]

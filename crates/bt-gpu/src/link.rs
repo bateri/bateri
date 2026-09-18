@@ -654,6 +654,13 @@ struct LinkIvars {
     /// yüzden ikisi de bu alana yazılıyor ve hareket karesi hangisinin
     /// yazdığını sormuyor. `None` → o karede caret yok.
     last_caret_text: Cell<Option<LinearRgba>>,
+    /// Son içerik karesindeki caret'in **hedefi**; blink'in "yazıyor mu"
+    /// sorusunun tek kaynağı ([`Blink::wake`]).
+    ///
+    /// Konum `Motion`'da da var ama orası **ara** konumu tutuyor (animasyon
+    /// sürerken her karede başka bir değer); burada duran hedefin kendisi ve
+    /// karşılaştırma ancak onunla anlamlı.
+    last_caret_at: Cell<Option<[f32; 2]>>,
     /// Son **çizilen** karenin damgası (`CAMetalDisplayLinkUpdate`'in hedef
     /// sunum anı), `sessiz=` jetonunun tabanı.
     ///
@@ -891,22 +898,6 @@ define_class!(
             // hareket karesi için saklanıyor.
             let theme = iv.session.theme();
             iv.theme.set(theme);
-            // **Blink'in iki girdisi de burada tazeleniyor.** Ayarın ve
-            // uygulamanın birleşimi `bt-core`'dan geliyor (`Cursor::blink`);
-            // Hareketi Azalt onu **kapatıyor** — erişilebilirlik ayarı
-            // animasyon *eklemez* (`CLAUDE.md`) ve yan kazancı yapısal:
-            // `Mode::Fade` ile blink birbirini dışladığı için `alpha()`
-            // kanalına ikinci bir yazar doğmuyor.
-            let mut blink = iv.blink.get();
-            blink.content_frame(now, cursor.blink && !motion.reduce());
-            // **Faz burada da ilerliyor** ve dönen değer atılıyor: kare zaten
-            // çiziliyor, ayrıca bir uyandırma gerekmiyor. Olmasaydı akan
-            // çıktıda (her callback hasar buluyor) faz **donardı** — üstelik
-            // sönük fazda donabilirdi ve caret çıktı boyunca görünmezdi;
-            // `content_frame`'in "en çok yarım periyot" sözü ancak bu satırla
-            // doğru.
-            blink.advance(now);
-            iv.blink.set(blink);
             // Süre sayacının tiki **mutlak** damgaya çevriliyor; `None`
             // bekleyen son tarihi temizliyor.
             iv.content_deadline
@@ -989,6 +980,29 @@ define_class!(
                     })
                 });
             iv.last_caret_text.set(caret.map(|(_, text)| text));
+            // **Blink caret'ten SONRA** ve sıra zorunlu: "yazıyor mu"
+            // sorusunun cevabı caret'in hedefinin kıpırdaması ve o hedef
+            // ancak burada belli oluyor.
+            //
+            // Ayarın ve uygulamanın birleşimi `bt-core`'dan geliyor
+            // (`Cursor::blink`); Hareketi Azalt onu **kapatıyor** —
+            // erişilebilirlik ayarı animasyon *eklemez* (`CLAUDE.md`) ve yan
+            // kazancı yapısal: `Mode::Fade` ile blink birbirini dışladığı için
+            // `alpha()` kanalına ikinci bir yazar doğmuyor.
+            let at = caret.map(|(at, _)| at);
+            let moved = iv.last_caret_at.replace(at) != at;
+            let mut blink = iv.blink.get();
+            blink.content_frame(now, cursor.blink && !motion.reduce());
+            // Caret kıpırdadıysa faz açığa dönüyor: yazarken imleç sönmez.
+            if moved {
+                blink.wake(now);
+            }
+            // **Faz burada da ilerliyor** ve dönen değer atılıyor: kare zaten
+            // çiziliyor, ayrıca bir uyandırma gerekmiyor. Olmasaydı akan
+            // çıktıda (her callback hasar buluyor) faz **donardı** — üstelik
+            // sönük fazda donabilirdi ve caret çıktı boyunca görünmezdi.
+            blink.advance(now);
+            iv.blink.set(blink);
             // Sıra zorunlu: önce geçen süre eski hedefe işlenir, sonra yeni
             // hedef kurulur. Ters sırada `dt` yeni hedefe uygulanır ve imleç
             // bir kare boyunca gitmediği bir yöne doğru hızlanırdı.
@@ -1384,6 +1398,7 @@ impl DisplayLink {
                 blink: Cell::new(Blink::default()),
                 clock_generation: Arc::new(AtomicU64::new(0)),
                 last_caret_text: Cell::new(None),
+                last_caret_at: Cell::new(None),
             },
         );
         link.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

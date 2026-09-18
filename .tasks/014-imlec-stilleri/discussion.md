@@ -340,6 +340,23 @@ Sadelik ile codebase-fit aynı kusuru **birbirinden bağımsız** çıkardı (M1
 
 ## Karar (2026-09-18, kullanıcı onayı)
 
+> **İki düzeltme, canlı kullanımdan (2026-09-19).** Kullanıcı blink'i denedi ve
+> ikisi de tasarım kusuruydu, kod değil:
+>
+> - **`"auto"` düz promptta `"off"` ile birebir aynıydı.** Ne zsh ne bizim
+>   sarmalayıcımız DECSCUSR/DECSET 12 gönderiyor, yani "uygulamayı izle"
+>   pratikte "hiç sönme" demekti ve üç değerden ikisi ayırt edilemiyordu.
+>   `Auto`'nun config tabanı **açık** oldu: promptta söner, vim'in `\e[2 q`'su
+>   durdurur. `"on"` onu bile dinlemez, `"off"` hiç sönmez — üçü artık ayrı.
+> - **Yazarken imleç sönüyordu.** Her editör ve terminal yazarken caret'i sabit
+>   tutar; kullanıcı bunu "yazma ile blink'in aynı anda olması garip" diye
+>   bildirdi. Karar 10 ("faz yalnız zamana bağlı") **daraltıldı**: tetik
+>   caret'in **hareketi**. Tuş vuruşunun kendisi değil, çünkü o
+>   `bt-shell`→`bt-gpu` sinyali isterdi; hareket zaten `bt-gpu`'nun elinde.
+>   Ayrım da doğru yerde: koşan komutun süre sayacı caret'i kıpırdatmıyor
+>   (`sleep 5` boyunca blink bozulmuyor), akan çıktı kıpırdatıyor ve orada
+>   caret'in sabit kalması zaten istenen.
+
 - **Seçilen: Seçenek C** (saat, hareket tadında) — panelin tamamladığı beş
   parçasıyla. Reddedilenler: **A** (link hiç uyumaz, kapı `MotionUnsettled`
   ile kırmızı düşer), **B** (`link.rs:18-23` blink'i adıyla `Waker`'dan
