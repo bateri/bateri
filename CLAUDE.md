@@ -380,7 +380,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   altısı tüketiliyor — `background`, `foreground`, `dim` (SGR 2'li varsayılan ön
   plan), `accent` (imleç **ve** koşan komut bloğunun şeridi), `success` ve
   `error` (biten bloğun şeridi) — ve yanlarında `[ansi]`'nin 16 rengi; kalan iki
-  durum rolü (uyarı, bilgi) 013 ile gelir. Çizilmeyen rol eklenmiyor.
+  durum rolü (uyarı, bilgi) 014 ile gelir. Çizilmeyen rol eklenmiyor.
   `bt_core::Theme` paletin **tek kaynağı**: zemin atlaması,
   clear, imleç, blok şeridi ve renk sorusunun yanıtı aynı değerden. `Adapter`'da **yaprak
   kilit** altında durur; `frame()` kopyayı `Term` kilidinden önce alır,

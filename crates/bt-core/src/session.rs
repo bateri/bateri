@@ -57,7 +57,10 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
-use crate::shell::{CaretHome, DockContext, DockState, Scanner, ShellLog, ShellState, Stripe};
+use crate::shell::{
+    COUNTER_FLOOR, CaretHome, Counter, DockContext, DockState, Scanner, ShellLog, ShellState,
+    Stripe,
+};
 use crate::wake::Wake;
 
 /// Alt çizgi çeşidi — beşi birbirini **dışlıyor**.
@@ -301,14 +304,20 @@ pub struct Block {
 /// ve ayrılan yeri korur. Çağıranda yaşamasının sebebi bu; `frame()`'in
 /// içinde doğsaydı her kare iki ayırma ederdi.
 ///
-/// Ara defter (çıpalar: `(kimlik, ilk satır)`) burada ve **görünmez**: faz 1
-/// `Term` kilidi altında onu dolduruyor, faz 2 kilit bırakıldıktan sonra
-/// defterden renklendirip [`Blocks::as_slice`]'ı üretiyor. Kimlik ve çıkış
-/// kodu sınırı geçmediği için tip opak.
+/// Ara defter (çıpalar: `(kimlik, ilk satır, son mürekkep sütunu)`) burada ve
+/// **görünmez**: faz 1 `Term` kilidi altında onu dolduruyor, faz 2 kilit
+/// bırakıldıktan sonra defterden renklendirip [`Blocks::as_slice`]'ı
+/// üretiyor. Kimlik, çıkış kodu ve sütun sınırı geçmediği için tip opak.
 #[derive(Debug, Default)]
 pub struct Blocks {
-    /// Faz 1'in topladığı çıpalar: `(blok kimliği, satır)`, satır sırasıyla.
-    anchors: Vec<(u32, u16)>,
+    /// Faz 1'in topladığı çıpalar: `(blok kimliği, satır, son mürekkep
+    /// sütunu)`, satır sırasıyla.
+    ///
+    /// Üçüncü alan süre sayacının çakışma ölçütü: sayaç komutun metnine
+    /// değecekse çizilmiyor. Faz 1'de toplanmasının sebebi kilit rejimi —
+    /// sütun ızgara bilgisi ve faz 2 `Term`'ü çoktan bırakmış oluyor; ikinci
+    /// bir tarama kilidi yeniden almak demekti.
+    anchors: Vec<(u32, u16, u16)>,
     /// Faz 2'nin ürettiği liste; çizen taraf yalnız bunu görür.
     resolved: Vec<Block>,
 }
@@ -1376,6 +1385,9 @@ impl Session {
         // kırpar, `Session::resize` sıfırı eler), yani kesme kayıpsız ve
         // değer **en az 1**: `content_rows`'un `1..=rows` sözleşmesi buradan.
         let grid_rows = u16::try_from(rows).unwrap_or(u16::MAX);
+        // Aynı gerekçeyle genişlik: süre sayacı sağa yaslanıyor ve ölçüsü
+        // `Term` kilidi düştükten sonra gerekiyor, yani buradan taşınıyor.
+        let grid_cols = u16::try_from(term.columns()).unwrap_or(u16::MAX);
         // Doluluk sayısının çizilen yarısı; döngü onu atlama kapısından
         // **sonra** büyütüyor (bkz. aşağıda).
         let mut drawn_rows = 0u16;
@@ -1638,8 +1650,11 @@ impl Session {
                 // taraf yalnız değişimi kaydediyor. Aynı kimliğin ikinci kez
                 // görünmesi (araya başka bir kimlik girdikten sonra) yeni bir
                 // çıpa sayılır: satırlar artan, aralıklar tutarlı kalır.
-                if blocks.anchors.last().map(|&(last, _)| last) != Some(id) {
-                    blocks.anchors.push((id, row));
+                if blocks.anchors.last().map(|&(last, ..)| last) != Some(id) {
+                    // Son mürekkep sütunu sıfırdan başlıyor: hiç mürekkebi
+                    // olmayan komut satırında (boş prompt) sayaç sağda,
+                    // kimseye değmeden duruyor.
+                    blocks.anchors.push((id, row, 0));
                 }
                 // Bastırmanın üst ucu aynı okumadan: yazılmakta olan bloğun
                 // **ilk** çıpa satırı. `get_or_insert` ikinci satırı yazmıyor
@@ -1727,6 +1742,22 @@ impl Session {
                 .map(|c| color::linear_rgba(color::resolve(c, colors, &theme)));
 
             let col = indexed.point.column.0 as u16;
+            // **Süre sayacının çakışma ölçütü**, faz 1'de toplanıyor: komut
+            // satırının son mürekkepli sütunu. `display_iter` satır sırasıyla
+            // geldiği ve komutun bütün hücreleri çıpayı taşıdığı (kapanış
+            // `preexec`'te) için aranan çıpa her zaman **sonuncusu**; liste
+            // taranmıyor.
+            //
+            // Ölçüt `ch`'in kendisi: yukarıda (`let ch`) gizli hücre, geniş
+            // karakterin dolgusu ve boşluk zaten `None`'a düşüyor, yani
+            // "mürekkep var mı" sorusunun cevabı çoktan verilmiş. İkinci bir
+            // ölçüt yazılsaydı ikisi ayrışabilirdi.
+            if let Some((_, anchor_row, last_ink)) = blocks.anchors.last_mut()
+                && *anchor_row == row
+                && ch.is_some()
+            {
+                *last_ink = (*last_ink).max(col);
+            }
             // İmlecin altındaki hücreye burada **dokunulmuyor**: hücre kendi
             // renkleriyle sınırdan geçiyor, bloğun altında kalan pikselleri
             // [`Cursor::text`] ile çizen ezecek. Eskiden bu satırlarda hücrenin
@@ -1821,9 +1852,14 @@ impl Session {
         drop(term);
 
         // **Faz 2**, `Term` kilidi düştükten sonra: kimlikler kabuk
-        // defterinden renklendirilir.
+        // defterinden renklendirilir ve süre sayaçları basılır.
+        //
+        // Sayaç hücreleri kilit **düştükten sonra** doğuyor ve bu bir kusur
+        // değil sözleşmenin devamı: sink'in sırası sözleşmesiz (`Cell` kendi
+        // satır/sütununu taşıyor) ve süre ızgarada değil kabuk defterinde
+        // yaşıyor, yani `Term`'ü tutarak okunacak hiçbir şey yok.
         if !alt_screen {
-            self.resolve_blocks(blocks, &theme);
+            self.resolve_blocks(blocks, &theme, grid_cols, &mut sink);
         }
         cursor
     }
@@ -1850,14 +1886,52 @@ impl Session {
     /// üçünün de kendi bilinen kusuru vardı. İşaret bölge değil satır olunca
     /// (bkz. [`Block`]) soru sorulmuyor bile: çıpası görünen satır
     /// işaretlenir, görünmeyen işaretlenmez.
-    fn resolve_blocks(&self, blocks: &mut Blocks, theme: &Theme) {
+    fn resolve_blocks(
+        &self,
+        blocks: &mut Blocks,
+        theme: &Theme,
+        cols: u16,
+        mut sink: impl FnMut(Cell),
+    ) {
         // Yıkım: aşağıdaki kapatma yalnız `resolved`'ı ödünç alsın, döngü
         // `anchors`'ı okuyabilsin. Tek bir `&mut blocks` ikisini de tutar ve
         // ödünç denetleyicisi haklı olarak reddeder.
         let Blocks { anchors, resolved } = blocks;
         let shell = lock(&self.shell);
         let running = shell.running();
-        for &(id, row) in anchors.iter() {
+        let counter_fg = theme.dim_linear();
+        for &(id, row, last_ink) in anchors.iter() {
+            // **Sayaç şeritten bağımsız.** Kodu okunamamış bir blok
+            // (`Finished { exit: None }`) şerit **almıyor** ("bilinmeyen
+            // çizilmez") ama süresi biliniyor; onu da gizlemek bilinen bir
+            // şeyi saklamak olurdu.
+            if let Some(duration) = shell.duration(id, running)
+                && duration >= COUNTER_FLOOR
+            {
+                let counter = Counter::new(duration);
+                let text = counter.as_str();
+                if let Some(start) = Self::counter_col(text.chars().count(), last_ink, cols) {
+                    for (offset, ch) in text.chars().enumerate() {
+                        sink(Cell {
+                            col: start.saturating_add(offset as u16),
+                            row,
+                            ch: Some(ch),
+                            fg: counter_fg,
+                            // Zemin **yok**: sayaç ızgaranın üstünde yüzen bir
+                            // rozet değil, satırın sağ ucundaki boş hücrelere
+                            // yazılmış metin. Zemin verilseydi seçim
+                            // vurgusunun ve ters çevrilmiş imlecin üstüne
+                            // basardı.
+                            bg: None,
+                            bold: false,
+                            italic: false,
+                            underline: UnderlineStyle::None,
+                            underline_color: None,
+                            strikeout: false,
+                        });
+                    }
+                }
+            }
             // Defterin tanımadığı kimlik (halka dolaştı, sayaç sıfırlandı) ve
             // koşmayan `Pending` (boş prompt'a basılan Enter, bekleyen prompt)
             // `None` döner: **bilinmeyen çizilmez**, 010'un savunma tezi.
@@ -1873,6 +1947,24 @@ impl Session {
                 },
             });
         }
+    }
+
+    /// Süre sayacının başlayacağı sütun; sığmıyorsa `None` ve sayaç o satırda
+    /// **hiç** çizilmez.
+    ///
+    /// **Çakışmada sayaç kaybeder** (013 Karar 7): kullanıcının yazdığı komut
+    /// hiçbir koşulda örtülmez. Tersi seçilseydi uzun bir komutun son
+    /// harfleri sessizce bir sayıya dönerdi ve belirti "komutum yanlış
+    /// görünüyor" diye okunurdu.
+    ///
+    /// Ölçüt en az **bir boş hücre**: sayaç komutun son harfine yapışırsa
+    /// ikisi tek kelime gibi okunur.
+    fn counter_col(len: usize, last_ink: u16, cols: u16) -> Option<u16> {
+        let len = u16::try_from(len).ok()?;
+        let start = cols.checked_sub(len)?;
+        // `last_ink` hiç mürekkep olmayan satırda 0 ve o hâlde de doğru
+        // çalışıyor: 0. sütun boşsa sayaç yine 1'den itibaren serbest.
+        (start > last_ink.saturating_add(1)).then_some(start)
     }
 
     /// Hasarı **tüketir**: `true` → çizilecek yeni içerik var.
@@ -3040,6 +3132,119 @@ mod tests {
             ),
             wake,
         )
+    }
+
+    /// Sayaç komutun metnine **değmiyor**, ve sığmayınca kendisi düşüyor.
+    ///
+    /// Çakışma kuralının tek yeri burası ve ölçütü kesin: sayaç ile son
+    /// mürekkep arasında en az bir boş hücre. Kural gevşetilirse uzun bir
+    /// komutun son harfleri sessizce bir sayıya dönerdi — belirti "komutum
+    /// yanlış görünüyor" diye okunur ve sayacı kimse suçlamazdı.
+    #[test]
+    fn the_counter_yields_the_row_to_the_command() {
+        // Bol yer: 80 sütunluk satırda dört harflik sayaç en sağda.
+        assert_eq!(Session::counter_col(4, 10, 80), Some(76));
+
+        // **Sınırın iki yakası.** Sayaç 76'da başlıyor; 75. sütun boşluk payı.
+        assert_eq!(Session::counter_col(4, 74, 80), Some(76));
+        assert_eq!(
+            Session::counter_col(4, 75, 80),
+            None,
+            "sayaç komutun harfine yapıştı"
+        );
+
+        // Hiç mürekkebi olmayan satır (boş prompt): sayaç serbest.
+        assert_eq!(Session::counter_col(4, 0, 80), Some(76));
+
+        // Satıra sığmıyor: çıkarma taşmıyor, sayaç düşüyor.
+        assert_eq!(Session::counter_col(10, 0, 5), None);
+    }
+
+    /// Bir saniyeyi geçen komutun süresi satırın sağ ucunda ve **sönük**.
+    ///
+    /// Saat gerçek: betik `C` ile `D` arasında uyuyor, yani sınama
+    /// `Instant`'in yakalandığı yolu da geçiyor. Sahte bir süre enjekte
+    /// edilseydi `apply`'ın iki kolu (dikme ve tüketme) sınanmadan kalırdı.
+    #[test]
+    fn a_slow_command_shows_its_duration_at_the_right_edge() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}ls -la\\033]133;C\\007\\r\\nout\\r\\n'; sleep 1.2; \
+                 printf '\\033]133;D;0;bt_block=1\\007'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+
+        // Sayaç eşiği geçince doğuyor; ölçüt "sağ uçta mürekkep var mı".
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let cells = loop {
+            assert!(Instant::now() < deadline, "sayaç gelmedi");
+            let mut cells = Vec::new();
+            session.frame(|cell| cells.push(cell), &mut Blocks::default());
+            if cells.iter().any(|cell| cell.row == 0 && cell.col >= 30) {
+                break cells;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+
+        // Genişlik 40 (`spawn_docked_session`), metin `"1.2s"` gibi dört
+        // harfli, yani 36. sütundan başlıyor. Tam sayı yazılmıyor: süre
+        // gerçek saatten geliyor ve `1.2`/`1.3` arası yarış olurdu; **biçimi**
+        // sınayan yer `the_counter_reads_its_four_tiers`.
+        let counter = row_glyphs(&cells, 0);
+        let counter = counter.strip_prefix("$ls-la").expect("komut satırı bozuk");
+        assert!(
+            counter.len() == 4 && counter.ends_with('s') && counter.contains('.'),
+            "sayaç beklenen biçimde değil: {counter:?}"
+        );
+
+        let leftmost = cells
+            .iter()
+            .filter(|cell| cell.row == 0 && cell.col >= 30)
+            .map(|cell| cell.col)
+            .min();
+        assert_eq!(leftmost, Some(40 - 4), "sayaç sağa yaslanmadı");
+
+        // Renk: bloğun **üstverisi**, komutun parçası değil.
+        let dim = Theme::BATERI.dim_linear();
+        assert!(
+            cells
+                .iter()
+                .filter(|cell| cell.row == 0 && cell.col >= 30)
+                .all(|cell| cell.fg == dim && cell.bg.is_none()),
+            "sayaç sönük renkte ve zeminsiz olmalı"
+        );
+        session.shutdown();
+    }
+
+    /// Bir saniyenin altındaki komut **hiç** sayaç doğurmuyor.
+    ///
+    /// Talebin özü bu: her `ls`'in yanında `0.01s` yazması gürültü olurdu.
+    /// Eşik kaldırılırsa burası kızarır.
+    #[test]
+    fn a_quick_command_shows_no_duration() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}ls -la{}'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out"),
+            ),
+            Arc::clone(&wake),
+        );
+
+        // Bloğun bittiğini görene kadar bekle, sonra satırın tamamına bak.
+        let cells = wait_frame(&session, &wake, |cells| {
+            row_glyphs(cells, 1).contains("out")
+        });
+        assert_eq!(
+            row_glyphs(&cells, 0),
+            "$ls-la",
+            "eşiğin altındaki komut sayaç doğurdu"
+        );
+        session.shutdown();
     }
 
     /// Tek bir satırın mürekkebi, sütun sırasında.
