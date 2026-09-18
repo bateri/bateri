@@ -322,17 +322,17 @@ pub struct Block {
 /// ve ayrılan yeri korur. Çağıranda yaşamasının sebebi bu; `frame()`'in
 /// içinde doğsaydı her kare iki ayırma ederdi.
 ///
-/// Ara defter (çıpalar: `(kimlik, ilk satır, son mürekkep sütunu)`) burada ve
+/// Ara defter (çıpalar: `(kimlik, ilk satır, son dolu sütun)`) burada ve
 /// **görünmez**: faz 1 `Term` kilidi altında onu dolduruyor, faz 2 kilit
 /// bırakıldıktan sonra defterden renklendirip [`Blocks::as_slice`]'ı
 /// üretiyor. Kimlik, çıkış kodu ve sütun sınırı geçmediği için tip opak.
 #[derive(Debug, Default)]
 pub struct Blocks {
-    /// Faz 1'in topladığı çıpalar: `(blok kimliği, satır, son mürekkep
-    /// sütunu)`, satır sırasıyla.
+    /// Faz 1'in topladığı çıpalar: `(blok kimliği, satır, son dolu sütun)`,
+    /// satır sırasıyla.
     ///
-    /// Üçüncü alan süre sayacının çakışma ölçütü: sayaç komutun metnine
-    /// değecekse çizilmiyor. Faz 1'de toplanmasının sebebi kilit rejimi —
+    /// Üçüncü alan süre sayacının çakışma ölçütü: sayaç komutun metnine ya
+    /// da seçim vurgusuna değecekse çizilmiyor. Faz 1'de toplanmasının sebebi kilit rejimi —
     /// sütun ızgara bilgisi ve faz 2 `Term`'ü çoktan bırakmış oluyor; ikinci
     /// bir tarama kilidi yeniden almak demekti.
     anchors: Vec<(u32, u16, u16)>,
@@ -1766,15 +1766,33 @@ impl Session {
             // `preexec`'te) için aranan çıpa her zaman **sonuncusu**; liste
             // taranmıyor.
             //
-            // Ölçüt `ch`'in kendisi: yukarıda (`let ch`) gizli hücre, geniş
-            // karakterin dolgusu ve boşluk zaten `None`'a düşüyor, yani
-            // "mürekkep var mı" sorusunun cevabı çoktan verilmiş. İkinci bir
-            // ölçüt yazılsaydı ikisi ayrışabilirdi.
-            if let Some((_, anchor_row, last_ink)) = blocks.anchors.last_mut()
+            // Ölçüt **mürekkep değil doluluk**: bu sütunda görünen bir şey
+            // var mı. Buraya varan her hücre atlama kapısını geçmiştir, yani
+            // ya zemini, ya mürekkebi, ya da bir kural çizgisi vardır —
+            // üçünün de sütunu işgal ediyor.
+            //
+            // Ayrım iki gerçek kusuru kapatıyor (`/code-review`, 013 kapı):
+            //
+            // - **Seçim.** Seçili satırda boş kuyruk hücreleri de zemin
+            //   alıyor; ölçüt yalnız mürekkep olsaydı sayaç onların üstüne
+            //   düşer ve sönük ön plan ters çevrilmiş zeminde okunmaz olurdu.
+            //   Şimdi sayaç seçime de yol veriyor — komut metnine verdiği
+            //   yolun aynısı.
+            // - **Geniş glyph.** İkinci yarısı ayrı bir hücre ve kendi başına
+            //   kapıdan geçmiyor, ama sütunu işgal ediyor. Öncüsünden
+            //   `col + 1` diye kaydediliyor; yoksa `çç` ile biten bir komutta
+            //   sayaç vaat ettiği bir hücrelik payı yerdi. Bugün görünmüyor
+            //   (geniş glyph henüz çizilmiyor) ama aritmetik **şimdi** yanlış
+            //   olurdu ve 015 onu görünür kılardı.
+            if let Some((_, anchor_row, last_col)) = blocks.anchors.last_mut()
                 && *anchor_row == row
-                && ch.is_some()
             {
-                *last_ink = (*last_ink).max(col);
+                let end = if flags.contains(Flags::WIDE_CHAR) {
+                    col.saturating_add(1)
+                } else {
+                    col
+                };
+                *last_col = (*last_col).max(end);
             }
             // İmlecin altındaki hücreye burada **dokunulmuyor**: hücre kendi
             // renkleriyle sınırdan geçiyor, bloğun altında kalan pikselleri
@@ -1933,22 +1951,27 @@ impl Session {
         // Kimlik defterde olup ekranda olmadığında kare istemek, kimsenin
         // görmediği bir sayıyı güncellemek olurdu.
         let mut next_tick = None;
-        for &(id, row, last_ink) in anchors.iter() {
+        let mut counted_row = None;
+        for &(id, row, last_col) in anchors.iter() {
             // **Sayaç şeritten bağımsız.** Kodu okunamamış bir blok
             // (`Finished { exit: None }`) şerit **almıyor** ("bilinmeyen
             // çizilmez") ama süresi biliniyor; onu da gizlemek bilinen bir
             // şeyi saklamak olurdu.
             if let Some(duration) = shell.duration(id, running) {
                 let live = running == Some(id);
-                // Saat **eşikten bağımsız** kuruluyor: eşiğin altındaki koşan
-                // komut henüz sayaç çizmiyor ama bir saniye dolunca çizecek,
-                // yani o anı kaçırmamak için de bir kare gerekiyor.
-                if live {
-                    next_tick = Some(crate::shell::next_tick(duration));
-                }
+                // Aynı satırda ikinci bir çıpa: sayaç **bir kez** çiziliyor.
+                // `last_col` yalnız son çıpaya işleniyor (döngünün
+                // `last_mut`'u), yani öncekiler sıfır mürekkeple geçip aynı
+                // sütunlara ikinci bir sayaç basardı — üst üste binen
+                // glyph'ler. zsh'in `PROMPT_SP`'si bunu pratikte zor
+                // doğuruyor ama savunma yorumda değil kodda olmalı
+                // (`/code-review`, 013 kapı).
+                let taken = counted_row == Some(row);
                 // Eşiğin altı çizilmiyor ama **döngüden çıkılmıyor**: şerit
                 // aşağıda, süreden bağımsız çözülüyor.
-                if duration >= COUNTER_FLOOR {
+                let drawn = if taken {
+                    false
+                } else if duration >= COUNTER_FLOOR {
                     let counter = Counter::new(
                         duration,
                         if live {
@@ -1958,27 +1981,55 @@ impl Session {
                         },
                     );
                     let text = counter.as_str();
-                    if let Some(start) = Self::counter_col(text.chars().count(), last_ink, cols) {
-                        for (offset, ch) in text.chars().enumerate() {
-                            sink(Cell {
-                                col: start.saturating_add(offset as u16),
-                                row,
-                                ch: Some(ch),
-                                fg: counter_fg,
-                                // Zemin **yok**: sayaç ızgaranın üstünde yüzen
-                                // bir rozet değil, satırın sağ ucundaki boş
-                                // hücrelere yazılmış metin. Zemin verilseydi
-                                // seçim vurgusunun ve ters çevrilmiş imlecin
-                                // üstüne basardı.
-                                bg: None,
-                                bold: false,
-                                italic: false,
-                                underline: UnderlineStyle::None,
-                                underline_color: None,
-                                strikeout: false,
-                            });
+                    match Self::counter_col(text.chars().count(), last_col, cols) {
+                        Some(start) => {
+                            for (offset, ch) in text.chars().enumerate() {
+                                sink(Cell {
+                                    col: start.saturating_add(offset as u16),
+                                    row,
+                                    // **Boşluk glyph değil.** Izgara yolu da
+                                    // `' '`i `None`'a düşürüyor (`let ch`) ve
+                                    // sebebi orada yazılı: boşluk atlasta bir
+                                    // yuva, tamponda bir instance ve GPU'da
+                                    // tamamen şeffaf bir dörtlü harcardı.
+                                    // `1m 05s`'in boşluğu için ödenmesin —
+                                    // üstelik `yuva=` jetonunu da şişirirdi
+                                    // (`/code-review`, 013 kapı).
+                                    ch: (ch != ' ').then_some(ch),
+                                    fg: counter_fg,
+                                    // Zemin **yok**: sayaç ızgaranın üstünde
+                                    // yüzen bir rozet değil, satırın sağ
+                                    // ucundaki boş hücrelere yazılmış metin.
+                                    // Zemin verilseydi seçim vurgusunun ve
+                                    // ters çevrilmiş imlecin üstüne basardı.
+                                    bg: None,
+                                    bold: false,
+                                    italic: false,
+                                    underline: UnderlineStyle::None,
+                                    underline_color: None,
+                                    strikeout: false,
+                                });
+                            }
+                            counted_row = Some(row);
+                            true
                         }
+                        // Sığmadı: sayaç bu satırda **hiç** çizilmiyor ve
+                        // `drawn` yanlış kalıyor, yani saat de kurulmuyor.
+                        None => false,
                     }
+                } else {
+                    false
+                };
+                // **Saat yalnız görünen bir şey için kuruluyor.** İki meşru
+                // hâl var: sayaç çizildi (bir sonraki kademede değişecek) ya
+                // da süre henüz eşiğin altında (bir saniye dolunca
+                // **belirecek**). Sığmadığı için çizilmeyen sayaç üçüncü bir
+                // hâl ve orada uyanmak, kimsenin görmediği bir sayıyı
+                // güncellemek olurdu — üstelik metin yalnız uzadığı için
+                // sonradan sığması da beklenmiyor (pencere genişlerse zaten
+                // hasar doğuyor ve karar yeniden veriliyor).
+                if live && (drawn || duration < COUNTER_FLOOR) {
+                    next_tick = Some(crate::shell::next_tick(duration));
                 }
             }
             // Defterin tanımadığı kimlik (halka dolaştı, sayaç sıfırlandı) ve
@@ -2003,18 +2054,18 @@ impl Session {
     /// **hiç** çizilmez.
     ///
     /// **Çakışmada sayaç kaybeder** (013 Karar 7): kullanıcının yazdığı komut
-    /// hiçbir koşulda örtülmez. Tersi seçilseydi uzun bir komutun son
+    /// hiçbir koşulda örtülmez — seçim vurgusu da öyle. Tersi seçilseydi uzun bir komutun son
     /// harfleri sessizce bir sayıya dönerdi ve belirti "komutum yanlış
     /// görünüyor" diye okunurdu.
     ///
     /// Ölçüt en az **bir boş hücre**: sayaç komutun son harfine yapışırsa
     /// ikisi tek kelime gibi okunur.
-    fn counter_col(len: usize, last_ink: u16, cols: u16) -> Option<u16> {
+    fn counter_col(len: usize, last_col: u16, cols: u16) -> Option<u16> {
         let len = u16::try_from(len).ok()?;
         let start = cols.checked_sub(len)?;
-        // `last_ink` hiç mürekkep olmayan satırda 0 ve o hâlde de doğru
+        // `last_col` hiç dolu hücresi olmayan satırda 0 ve o hâlde de doğru
         // çalışıyor: 0. sütun boşsa sayaç yine 1'den itibaren serbest.
-        (start > last_ink.saturating_add(1)).then_some(start)
+        (start > last_col.saturating_add(1)).then_some(start)
     }
 
     /// Hasarı **tüketir**: `true` → çizilecek yeni içerik var.
@@ -3220,7 +3271,13 @@ mod tests {
         let wake = Arc::new(TestWake::default());
         let session = spawn_docked_session(
             &format!(
-                "printf '{}ls -la\\033]133;C\\007\\r\\nout\\r\\n'; sleep 1.2; \
+                // Uyku **1,2 değil 2,5 saniye**: koşan sayaç ancak eşikten
+                // (1 sn) sonra doğuyor, yani 1,2'de "koşuyor" penceresi ~200
+                // ms kalıyordu ve yüklü bir makinede yoklama onu atlayıp ilk
+                // örneği `D`'den sonra alabiliyordu — sonra da "koşan sayaç
+                // ondalık gösteriyor" diye düşüyordu (`/code-review`, 013
+                // kapı). 2,5'te pencere ~1,5 saniye.
+                "printf '{}ls -la\\033]133;C\\007\\r\\nout\\r\\n'; sleep 2.5; \
                  printf '\\033]133;D;0;bt_block=1\\007'; sleep 5",
                 anchored_prompt(1),
             ),
@@ -3308,6 +3365,45 @@ mod tests {
             "$ls-la",
             "eşiğin altındaki komut sayaç doğurdu"
         );
+        session.shutdown();
+    }
+
+    /// Sayaç sığmıyorsa **saat de kurulmuyor**.
+    ///
+    /// Dar bir pencerede uzun bir komut sayacı hiç çizdirmiyor; saat yine de
+    /// kurulsaydı pencere sonsuza kadar saniyede bir uyanır ve **hiçbir
+    /// pikseli** değiştirmezdi (`/code-review`, 013 kapı). Eşiğin altı ayrı:
+    /// orada sayaç henüz yok ama bir saniye dolunca **belirecek**, yani tik
+    /// meşru.
+    #[test]
+    fn a_counter_that_does_not_fit_does_not_arm_the_clock() {
+        let wake = Arc::new(TestWake::default());
+        // Genişlik 40; komut metni sağ uca kadar uzuyor, yani hiçbir sayaç
+        // sığmıyor.
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}{}\\033]133;C\\007'; sleep 5",
+                anchored_prompt(1),
+                "x".repeat(38),
+            ),
+            Arc::clone(&wake),
+        );
+
+        // Eşiğin altında tik **var** (sayaç belirecek), üstünde **yok**
+        // (sayaç hiç çizilmeyecek). İkinci hâli beklemek yeterli: birincisi
+        // zaten `the_clock_runs_with_the_command_and_stops_with_it`'in işi.
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            assert!(Instant::now() < deadline, "sığmayan sayaç saati söndürmedi");
+            let mut cells = Vec::new();
+            let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+            // Komut satırı gerçekten sağ uca dayanmış olmalı, yoksa sınama
+            // sığmama kolunu hiç denemeden yeşil geçerdi.
+            if row_glyphs(&cells, 0).len() >= 38 && cursor.next_tick.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         session.shutdown();
     }
 

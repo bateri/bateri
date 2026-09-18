@@ -29,14 +29,18 @@ karesinin "kendini içerik diye saydırması". Sayaç tiki ise gerçekten içeri
 
 - **Bir sonraki tiki `bt-core` söyler.** `Cursor` yeni bir alan alıyor:
   `next_tick: Option<Duration>` — bu karenin çizdiği sayaç ne kadar sonra
-  başka bir şey gösterecek. "Ne zaman değişecek" biçimin bir sonucu (ilk 10
-  saniyede onda bir, sonra saniye) ve biçim `bt-core`'un kararı; `bt-gpu`
-  hesaplamıyor, bekliyor. `None` = koşan sayaç yok = **durma koşulu**.
+  başka bir şey gösterecek. "Ne zaman değişecek" biçimin doğrudan sonucu ve
+  **kademe başına ayrı**: saatin altında bir sonraki tam saniye, saatin
+  üstünde bir sonraki tam dakika (`1h 07m` dakikada bir değişiyor). Biçim
+  `bt-core`'un kararı olduğu için çözünürlük de orada; `bt-gpu` hesaplamıyor,
+  bekliyor. `None` = koşan sayaç yok = **durma koşulu**.
 - **Saatin yeri `bt-gpu`**, link'in yanı. Kare talebi link'in işi, `dispatch2`
   orada zaten var (metallib, ana kuyruk) ve sözleşmenin yazılı olduğu modül
   orası. `bt-shell` bu sete hiç girmiyor.
-- **Saat yeniden dikilir, biriktirilmez.** Her kare bir sonraki tiki yeniden
-  söylüyor ve bekleyen eski talep iptal ediliyor; iki tik üst üste binmiyor.
+- **Tik birikmiyor.** Saat yalnız link uyumaya giderken kuruluyor, yani aynı
+  anda en çok bir bekleyen tik var. `DispatchQueue::after` **iptal
+  edilemediği** için araya bir hasar karesi girip saati yeniden kurduğunda
+  eski tik yine ateşleniyor; kuşak numarasını doğrulayıp susuyor.
 - **Saat armed değilken hiç okunmuyor.** `next_tick` `None` ise tek bir saat
   okuması bile yok — boşta sıfır kare kapısının operandı büyümüyor.
 - **Sözleşme aynı commit'te güncelleniyor:** `bt-gpu::link`'in modül başlığı
@@ -48,9 +52,9 @@ karesinin "kendini içerik diye saydırması". Sayaç tiki ise gerçekten içeri
 
 - **`crates/bt-core/src/session.rs`** — `Cursor.next_tick: Option<Duration>`;
   `frame()` onu koşan bloğun yaşından ve biçimin kademesinden türetiyor.
-- **`crates/bt-gpu/src/link.rs`** — saat kaynağı: `next_tick` dolu ise o süre
-  sonrası için bir uyandırma dikiliyor, boşsa bekleyen iptal ediliyor. Modül
-  başlığı üç sebebi sayıyor.
+- **`crates/bt-gpu/src/link.rs`** — saat kaynağı (`LinkDelegate::arm_clock`):
+  link uyumaya giderken `next_tick` doluysa o süre sonrası için bir uyandırma
+  dikiliyor. Modül başlığı üç sebebi sayıyor ve ayıran üç şartı yazıyor.
 - **`CLAUDE.md`** — "boşta sıfır kare" maddesi üçe tamamlanıyor.
 
 ## Kabul
@@ -98,6 +102,21 @@ karesinin "kendini içerik diye saydırması". Sayaç tiki ise gerçekten içeri
   `next_tick` `None` kalıyor. Ayrı bir kol yazılmadı, yapısal olarak kapalı.
 - **`after`'ın `Result`'ı** yutuluyor ve gerekçesi kodda: düşen bir tik yalnız
   sayacı durdurur, bir sonraki hasar karesi saati yeniden kurar.
+- **Kilit kapsamı bir tık genişledi** (denetim, 4. mercek — bulgu değil kayıt):
+  `resolve_blocks` artık `sink`'i `shell` yaprak kilidi altında çağırıyor ve
+  `sink` `bt-gpu`'da bir `Vec::push` (ayırma yapabilir). Öncesinde kilit yalnız
+  ucuz çözüm döngüsünü kapsıyordu. Ölçek mikrosaniye ve kare başına en çok bir
+  avuç hücre; okuyucu thread aynı kilide olay başına giriyor, yani bedel
+  görünür değil ama **kayıtlı** olmalı. `Term` kilidi zaten düşmüş durumda,
+  yani kilit sırası kuralı etkilenmiyor.
+- **Ölçülen şey komutun kendisi değil, `C`–`D` arası.** Kancalarımız
+  `add-zsh-hook` ile sona ekleniyor (gerekçeleri betikte), yani kullanıcının
+  kendi kancaları ikisinden de önce koşuyor: `C` geç basılıyor (süre kısalır),
+  `D` kullanıcının `precmd`'lerinden sonra basılıyor (uzar). Kendi işimiz payın
+  **dışında** — `D` `precmd`'in ilk işi, dalın `git` fork'undan önce.
+  Düzeltilmedi: kancayı ikiye bölmek betiği değiştirir (`make kur` zorunlu
+  olur) ve pay gösterilen 0,1 saniyelik kademenin altında kalıyor. Sınır
+  `Outcome::elapsed_ms`'in doc'unda ve `teslim.md`'de.
 
 ## Checklist
 
@@ -108,6 +127,6 @@ karesinin "kendini içerik diye saydırması". Sayaç tiki ise gerçekten içeri
 - [x] Test: koşan sayaç tam saniye, bitmiş olan onda bir
 - [x] `link.rs` modül başlığı üç sebebi sayıyor
 - [x] `CLAUDE.md` "boşta sıfır kare" maddesi güncel
-- [ ] Gerçek pencerede gözle: `sleep 5`, sonra boşta kare yok
+- [~] Gerçek pencerede gözle: `sleep 5`, sonra boşta kare yok — **kullanıcıda**, `teslim.md` B.2-B.3 (`make duman` ajanın kabuğunda yanlış tanıyla düşüyor)
 - [x] Doğrulama geçti (`make hepsi`)
 - [x] Yayın etkisi yazıldı

@@ -14,7 +14,7 @@
 | 010 | [komut-bloklari](010-komut-bloklari/) | 🟢 | `main`'de — OSC 133'ün ilk ürün yüzeyi: komut işareti, çıkış kodu rengi, satıra çıpalanma. Gözle kontrol tasarımı değiştirdi: işaret bölge değil komut satırı, ve `>` şekli 011'e bırakıldı |
 | 011 | [tabana-yapisik-icerik](011-tabana-yapisik-icerik/) | 🟢 | `main`'de — içerik tabana yaslanıyor ve **tek yönlü** kayıyor: büyüyen içerik süzülür, daralan anında oturur (yön kuralı gözle kontrolden çıktı). `/measure` bandı yeniden gözledi ve `QUIET_FLOOR`'u 870 → 868 indirdi; bir bilinçli `[~]` `teslim.md`'de (kaymanın yerleşme süresi — kanca yok) |
 | 012 | [input-dock](012-input-dock/) | 🔨 | `main`'de — giriş satırı terminalin: dock ZLE'yi aynalıyor, prompt devredildi (`PS1` sıfır genişlik, `>` bizim chevron'umuz), çıpa `preexec`'e taşındı. 9 phase tamam; teslim bekliyor — gözle kontrol ve `make duman` kullanıcıda, üç ölçüm iddiası kanca borcuna takılı — `teslim.md` |
-| 013 | [komut-suresi](013-komut-suresi/) | 🔨 | Bir saniyeyi geçen komutların süresi, komut satırının sağ ucunda; koşarken canlı. İki phase: defter + sayaç hücreleri, sonra **saat** — kare talebinin üçüncü sebebi ve `bt-gpu::link`'in sözleşmesinin üçe tamamlanması |
+| 013 | [komut-suresi](013-komut-suresi/) | 🔨 | `main`'de — bir saniyeyi geçen komutların süresi komut satırının sağ ucunda, koşarken canlı. Kare talebinin **üçüncü** sebebi doğdu (**saat**) ve `bt-gpu::link`'in sözleşmesi üçe tamamlandı: koşan komutu olan pencere artık "boşta" sayılmıyor. 2 phase tamam; teslim bekliyor — gözle kontrol ve `make duman` kullanıcıda, bir ölçüm iddiası yük borcuna takılı — `teslim.md` |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

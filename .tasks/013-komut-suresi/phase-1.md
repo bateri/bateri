@@ -33,18 +33,21 @@ hâlâ kapsamda, yani sayaç hücreleri için ikinci bir yola gerek yok.
   `resolve_blocks` metni üretip mevcut `sink`'e hücre basıyor. `bt-gpu` onu
   ızgaranın herhangi bir harfinden ayırt etmiyor, yani çizen tarafta tek satır
   kod değişmiyor.
-- **Son mürekkep sütunu faz 1'de toplanıyor.** `Blocks::anchors` üçüncü bir
-  alan alıyor: `(kimlik, satır, son mürekkep sütunu)`. Tip **opak**, yani
+- **Son dolu sütun faz 1'de toplanıyor.** `Blocks::anchors` üçüncü bir
+  alan alıyor: `(kimlik, satır, son dolu sütun)`. Tip **opak**, yani
   `pub` API değişmiyor. İkinci bir tarama yapılsaydı `Term` kilidi yeniden
   alınırdı.
-- **Çakışmada sayaç kaybeder.** Sayaç ile komutun son mürekkebi arasında en az
-  bir boş hücre kalmıyorsa sayaç o satırda **hiç** çizilmiyor. Kullanıcının
-  yazdığını örtmek yerine sayacı gizlemek; yön güvenli ve ölçütü kesin.
+- **Çakışmada sayaç kaybeder.** Sayaç ile satırın son **dolu** hücresi arasında
+  en az bir boş hücre kalmıyorsa sayaç o satırda **hiç** çizilmiyor.
+  Kullanıcının yazdığını örtmek yerine sayacı gizlemek; yön güvenli ve ölçütü
+  kesin. *(Kapıda daraltıldı: ölçüt "mürekkep" değil "dolu" — seçim vurgusu
+  ve geniş glyph'in ikinci yarısı da sütunu işgal ediyor.)*
 - **Biçim okuma sorusuna göre:** 10 saniyenin altında onda birli (`1.4s`),
   üstünde tam saniye (`12s`), dakikadan sonra `1m 05s`, saatten sonra
   `1h 02m`. Altındaki soru "ne kadar sürdü", üstündeki "asıldı mı" — ikincide
   ondalık gürültü. Metin yığın tamponunda üretiliyor, kare başına `String`
-  yok.
+  yok. *(phase-2'de daraltıldı: onda bir **yalnız bitmiş** komutta kalıyor,
+  koşan sayaç her zaman tam saniye — gerekçesi orada.)*
 - **Renk `dim`.** Sayaç bloğun üstverisi, komutun parçası değil — dock'un
   bağlam satırıyla aynı sınıf ve aynı rolden.
 - **Eşik `1s` tasarım sabiti**, ölçüm değil: `docs/OLCUMLER.md`'ye girmiyor.
@@ -53,8 +56,10 @@ hâlâ kapsamda, yani sayaç hücreleri için ikinci bir yola gerek yok.
 
 - **`crates/bt-core/src/shell.rs`**
   - `Outcome::Finished` → `{ exit: Option<i32>, elapsed_ms: u32 }`.
-  - `BlockLog`'un doc'undaki bütçe: kayıt başına 8 → 16 bayt, 10 000 satırda
-    80 → 160 KB.
+  - `BlockLog`'un doc'undaki bütçe: kayıt başına 8 → **12** bayt, 10 000
+    satırda 80 → 120 KB. `const` assert ile bağlı — elle toplandığında 16
+    çıkıyor ve ilk yazımda öyle yazılmıştı; Rust `Option<i32>`'nin
+    etiketindeki niche'i `Outcome`'ın ayrımı için kullanıyor.
   - `BlockLog::finish(id, exit, elapsed_ms)`.
   - `ShellLog.running_since: Option<Instant>`; `CommandStart` dikiyor,
     `CommandEnd` tüketiyor.
@@ -63,8 +68,8 @@ hâlâ kapsamda, yani sayaç hücreleri için ikinci bir yola gerek yok.
   - `Counter` — sayacın metnini **yığında** üreten tip (`fmt::Write`, kare
     başına ayırma yok); yanında `COUNTER_FLOOR` ve `COUNTER_TENTHS_UNTIL`.
 - **`crates/bt-core/src/session.rs`**
-  - `Blocks::anchors`: `Vec<(u32, u16, u16)>`; faz 1 satırın son mürekkep
-    sütununu da kaydediyor.
+  - `Blocks::anchors`: `Vec<(u32, u16, u16)>`; faz 1 satırın son **dolu**
+    sütununu da kaydediyor (mürekkep, zemin ya da kural çizgisi).
   - `resolve_blocks` `&mut sink` alıyor ve eşiği geçen blokların sayacını
     sağa yaslayarak basıyor.
 
@@ -83,7 +88,7 @@ hâlâ kapsamda, yani sayaç hücreleri için ikinci bir yola gerek yok.
   değişmiyor.
 - **`make duman` etkilenmiyor:** reçete `/bin/sh` koşuyor, OSC 133 yok, blok
   yok, sayaç yok. Jeton satırına dokunulmuyor.
-- **Bellek:** blok defteri 80 KB → 160 KB (varsayılan 10 000 scrollback,
+- **Bellek:** blok defteri 80 KB → 120 KB (varsayılan 10 000 scrollback,
   sekme başına). `BlockLog`'un doc'unda yazılı.
 - **Göç yok:** set indiğinde açık olan pencerelerin daha önce koşmuş
   komutları süresiz kalır — defterde yok, uydurulmuyor.
@@ -94,7 +99,7 @@ hâlâ kapsamda, yani sayaç hücreleri için ikinci bir yola gerek yok.
 - [x] `Outcome::Finished` süreyi taşıyor; defterin bayt bütçesi doc'ta güncel
 - [x] `running_since` tek alan; `C` dikiyor, `D` tüketiyor
 - [x] Biçim fonksiyonu + `COUNTER_FLOOR`
-- [x] `anchors` son mürekkep sütununu taşıyor
+- [x] `anchors` son **dolu** sütunu taşıyor (mürekkep, zemin, kural)
 - [x] `resolve_blocks` sayacı sağa yaslayarak basıyor
 - [x] Test: bir saniyenin altındaki komut sayaç doğurmuyor
 - [x] Test: eşiği geçen komutun süresi doğru sütunda ve `dim` renginde

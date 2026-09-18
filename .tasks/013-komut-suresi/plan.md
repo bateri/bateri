@@ -50,12 +50,19 @@ sabit son süre. Bir saniyenin altındakiler hiç görünmesin.
    `dispatch2` orada zaten var ve sözleşmenin yazılı olduğu modül orası.
    `bt-shell` bu sete hiç girmiyor.
 3. **Bir sonraki tiki `bt-core` söyler**, `bt-gpu` hesaplamaz. "Ne zaman
-   değişecek" biçimin bir sonucudur (ilk 10 saniyede onda bir, sonra saniye)
-   ve biçim `bt-core`'un kararı. `bt-gpu` yalnız süreyi bekler.
+   değişecek" biçimin doğrudan sonucudur ve **kademe başına ayrı**: saatin
+   altında metin saniyede bir değişiyor (sınır bir sonraki tam saniye),
+   saatin üstünde dakikada bir (`1h 07m`), yani sınır bir sonraki tam dakika.
+   Biçim `bt-core`'un kararı olduğu için çözünürlük de orada; `bt-gpu` yalnız
+   verilen süreyi bekler. *(Kademe ayrımı kapıda geldi: saniyede bir
+   uyandırmak saat kademesinde 3540 aynı kare ederdi — `/code-review`.)*
 4. **Tek `running_since`, blok başına `Instant` değil.** Aynı anda tek komut
-   koşar. `BlockLog`'un doc'undaki girdi başına bayt bütçesi 8 → 16 çıkıyor
-   (`Option<i32>` + `u32`), 10 000 scrollback'te 80 KB → 160 KB; sayı
-   doc'ta güncellenir.
+   koşar. `BlockLog`'un doc'undaki girdi başına bayt bütçesi 8 → **12**
+   çıkıyor (elle toplanan 16 değil: Rust `Option<i32>`'nin etiketindeki
+   niche'i `Outcome`'ın ayrımı için kullanıyor), 10 000 scrollback'te
+   80 KB → 120 KB. Sayı `const` assert ile bağlandı — yazılıp
+   doğrulanmamış bir bütçe bir alan eklendiğinde sessizce eskirdi ve
+   nitekim ilk yazımda 16 diye yanlış yazılmıştı.
 5. **Biçim:** dakikadan sonra `1m 05s`, saatten sonra `1h 02m`. On saniyenin
    altında onda bir (`1.4s`) **yalnız bitmiş** komutta; koşan sayaç her zaman
    tam saniye (`3s`). Gerekçe iki katlı: okuma sorusu değişiyor (koşarken
@@ -66,9 +73,13 @@ sabit son süre. Bir saniyenin altındakiler hiç görünmesin.
    hesaplanmamıştı.)*
 6. **Renk `dim`.** Sayaç bloğun **üstverisi**, komutun parçası değil; dock'un
    bağlam satırıyla aynı sınıf ve aynı rolden besleniyor.
-7. **Çakışmada sayaç kaybeder.** Komutun mürekkebi sayacın alanına giriyorsa
-   sayaç o satırda **hiç çizilmez**. Kullanıcının yazdığı metin hiçbir koşulda
-   örtülmez; yön güvenli.
+7. **Çakışmada sayaç kaybeder.** Satırın son **dolu** hücresi sayacın alanına
+   giriyorsa sayaç o satırda **hiç çizilmez**. Kullanıcının yazdığı metin
+   hiçbir koşulda örtülmez; yön güvenli. Ölçüt "mürekkep" değil "dolu", çünkü
+   zemin de sütunu işgal ediyor: seçili bir satırda boş kuyruk hücreleri ters
+   çevrilmiş zemin alıyor ve sayaç onların üstüne düşseydi sönük ön plan
+   okunmaz olurdu. Geniş glyph'in ikinci yarısı da aynı sebeple sayılıyor.
+   *(Kapıda daraltıldı — `/code-review`.)*
 8. **Eşik `1s` bir tasarım sabiti**, ölçüm değil — `docs/OLCUMLER.md`'ye
    girmez. Ayara bağlanması ayrı bir iş (referansta
    `command_duration_threshold` var, `docs/ARASTIRMA.md:98`); bu set ayar
@@ -101,4 +112,4 @@ sarmalayıcı betiğe tek bayt eklenmiyor.
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| kapı | ⬜ |
+| kapı | ✅ 13 bulgu, 13'ü düzeltildi (`/code-review`); `make denetim` temiz |

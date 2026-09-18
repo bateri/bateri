@@ -179,6 +179,14 @@ kapalı. Her prompt bir blok kimliği
 basar, `frame()` o kimlikleri prompt'un OSC 8 çıpasından okuyup blokları
 **komutun satırı ve rengi** olarak sınırdan verir; `bt-gpu` o işareti
 ızgaranın solunda ayrılan paya çizer — **animasyonsuz**, işaret anında belirir.
+Aynı komutun **süresi** de oradan geliyor: `C` ile `D` arası ölçülüp deftere
+yazılıyor ve bir saniyeyi geçenler komut satırının **sağ ucunda**, sönük, sıradan
+hücreler olarak sınırdan çıkıyor — yeni bir sınır tipi yok, `bt-gpu` onu
+ızgaranın herhangi bir harfinden ayırt etmiyor. Koşan komutta sayaç tam saniye
+(`3s`), bitince onda bire oturuyor (`3.4s`): koşan sayacın her değişimi bir kare
+istiyor, donmuş değer istemiyor. Komutun mürekkebiyle arasında bir boş hücre
+kalmıyorsa sayaç **çizilmiyor** — kullanıcının yazdığı örtülmez. Sayacı
+ilerleten şey kare talebinin üçüncü sebebi, **saat** (`Cursor::next_tick`).
 Şekli dock'un prompt işaretinin **ta kendisi** (`bt_atlas::RuleKind::Chevron`):
 ikisi de safha renginde bir prompt işareti ve ayrı şekillerle çizilmeleri bir
 kalıntıydı. İşaret fonttan **alınmıyor**, yordamsal çiziliyor — kullanıcının
@@ -395,7 +403,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   kilit** altında durur; `frame()` kopyayı `Term` kilidinden önce alır,
   `set_theme` tek başına yazar ve kare ister (aynı temada no-op). Sönük
   (SGR 2) adlı renk temanın zeminine doğru üçte bir karışır
-  (`color::dim_toward`); `dim` rolü yalnız varsayılan ön planın.
+  (`color::dim_toward`); `dim` rolü varsayılan ön planın **ve** blok
+  üstverisinin — komut süresi sayacı (013) ile dock'un bağlam satırı aynı
+  rolden besleniyor, çünkü üçü de "okunacak metnin bir adım gerisi".
   Materyal yüzey (grain, sheen) bunun üstüne ayrı bir katmandır ve `substrate`
   shader'ı çizer. Palet dosyaları `~/.config/bateri/themes/*.toml`, her
   anahtar opsiyonel ve eksiği gömülü `bateri`'den; biçim `docs/AYARLAR.md` →

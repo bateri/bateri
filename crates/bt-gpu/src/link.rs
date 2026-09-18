@@ -574,19 +574,6 @@ struct LinkIvars {
     /// ([`LinkIvars::last_caret_text`]) ve hareket karesi hangisinin yazdığını
     /// sormuyor.
     last_cursor: Cell<Option<Cursor>>,
-    /// **Saat**: son içerik karesinin söylediği bir sonraki tik; `None` →
-    /// ilerletecek sayaç yok ve saat sönük.
-    ///
-    /// Kaynağı `Cursor::next_tick`, yani karar `bt-core`'un. Burada yalnız
-    /// **bekleme** yaşıyor: link uyumaya giderken bu süre doluysa bir tik
-    /// kuruluyor ([`LinkDelegate::arm_clock`]).
-    ///
-    /// Hareket karesi bu değeri tazelemiyor (o kol `bt-core`'a hiç gitmiyor),
-    /// yani uzun bir animasyondan sonra kurulan tik bir animasyon boyu geç
-    /// kalabilir. Bedeli en fazla bir sayaç kademesinin gecikmesi ve yol
-    /// kendini düzeltiyor: geçmiş bir süre anında ateşler, bir içerik karesi
-    /// doğar ve saat taze değerle yeniden kurulur.
-    next_tick: Cell<Option<Duration>>,
     /// Kurulmuş tikin kuşağı — eskiyen tik kendini tanıyıp sussun diye.
     ///
     /// `DispatchQueue::after` iptal edilemiyor, yani araya bir içerik karesi
@@ -817,9 +804,6 @@ define_class!(
             let theme = iv.session.theme();
             iv.theme.set(theme);
             iv.last_cursor.set(Some(cursor));
-            // **Saatin tek tazelendiği yer.** Hareket karesi `bt-core`'a hiç
-            // gitmiyor, yani bu değeri yalnız içerik karesi bilebilir.
-            iv.next_tick.set(cursor.next_tick);
             // **Dock artık imleçten ÖNCE** ve sıra zorunlu: caret'in hedefi
             // dock'un caret'ini de sorabilmeli (`Dock::caret`), yani o cevap
             // `motion.sync`'ten önce elde olmak zorunda. Listeye girme sırası
@@ -1044,7 +1028,7 @@ impl LinkDelegate {
     /// **Saat**: kare talebinin üçüncü sebebi (modül başlığı).
     ///
     /// Link uyumaya giderken çağrılıyor. İlerletilecek bir sayaç varsa
-    /// ([`LinkIvars::next_tick`]) süre dolunca `Waker` üzerinden **içerik**
+    /// (`Cursor::next_tick`) süre dolunca `Waker` üzerinden **içerik**
     /// karesi isteniyor — ve hasar bayrağını dikmesi burada **doğru**:
     /// ızgaranın çizilen çıktısı gerçekten değişiyor, yani `icerik=` sayması
     /// yerinde. Hareketin yasağı bunun tersini korumak içindi (hareket
@@ -1060,7 +1044,24 @@ impl LinkDelegate {
     /// istiyor ve saat oradan yeniden kuruluyor.
     fn arm_clock(&self) {
         let iv = self.ivars();
-        let Some(delay) = iv.next_tick.get() else {
+        // **Kuşak her uyku noktasında artıyor, tik kurulmasa da.** `after`
+        // iptal edilemiyor; iptalin tek yolu bekleyen tikin kendi kuşağını
+        // geçersiz bulması. Artış `next_tick`'in `None`'ına takılsaydı komut
+        // bittikten sonra bekleyen tik hâlâ geçerli sayılır ve bir kare
+        // fazladan istenirdi — yani durma koşulu bir saniyeye kadar geç
+        // işlerdi (`/code-review`, 013 kapı). İptal bu satırın ta kendisi.
+        let generation = iv.clock_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        // **Tek kaynak:** son içerik karesinin `Cursor`'ı. Ayrı bir alanda
+        // saklansaydı aynı değerin iki kopyası olur ve `last_cursor`'ı
+        // tazeleyip ötekini unutan bir yol saatin başka bir karenin tikini
+        // beklemesine yol açardı (`/code-review`, 013 kapı).
+        //
+        // Hareket karesi `Cursor`'ı tazelemiyor (o kol `bt-core`'a hiç
+        // gitmiyor), yani uzun bir animasyondan sonra kurulan tik bir
+        // animasyon boyu geç kalabilir. Yol kendini düzeltiyor: geçmiş bir
+        // süre anında ateşler, bir içerik karesi doğar, saat taze değerle
+        // yeniden kurulur.
+        let Some(delay) = iv.last_cursor.get().and_then(|cursor| cursor.next_tick) else {
             return;
         };
         let Ok(when) = DispatchTime::try_from(delay) else {
@@ -1069,9 +1070,6 @@ impl LinkDelegate {
             // (~1193 saat) bunu zaten temsil edilemez kılıyor.
             return;
         };
-        // Kuşak **kurulumda** artıyor: bu andan sonra ateşlenen her eski tik
-        // kendini tanıyıp susar.
-        let generation = iv.clock_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let token = Arc::clone(&iv.clock_generation);
         let waker = iv.waker.clone();
         // Hata kolu bugün temsil edilmiyor (`dispatch2` koşulsuz `Ok` dönüyor)
@@ -1267,7 +1265,6 @@ impl DisplayLink {
                 // tek yer içerik karesi — o da temayı tazeliyor.
                 theme: Cell::new(theme),
                 last_cursor: Cell::new(None),
-                next_tick: Cell::new(None),
                 clock_generation: Arc::new(AtomicU64::new(0)),
                 last_caret_text: Cell::new(None),
             },
