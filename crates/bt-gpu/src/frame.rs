@@ -1164,6 +1164,7 @@ mod tests {
             // Bu modül ızgaranın listelerini sınıyor; devir `link`'in sorusu.
             caret_in_dock: false,
             shape: CaretShape::Block,
+            blink: false,
             text: TEXT,
             // Kaydırma kararı hareketin işi (`motion.rs`); bu listeyi
             // ilgilendirmiyor, çünkü konum zaten dışarıdan geliyor.

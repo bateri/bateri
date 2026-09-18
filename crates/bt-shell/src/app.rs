@@ -1129,6 +1129,16 @@ struct Counters {
     /// [`Inputs::Hermetic`]). Varsayılan bir gün `CursorMotion::Snap` olursa
     /// bu kapı sessizce düşer — o değişiklik ya hermetik koşunun stilini
     /// koşuda açıkça sabitlemek zorunda ya bu cümleyi karşısında bulacak.
+    ///
+    /// **Blink'i saymıyor** (014 phase-2): imlecin yanıp sönmesi
+    /// `bt_gpu::motion`'ın dışında yaşıyor, yani `cursor_settled()` onu hiç
+    /// görmüyor ve bu sayaç artmıyor. Blink karesinin **hiçbir CPU tanığı
+    /// yok** — `istek=` de artmıyor (`Waker::resume` sayaca dokunmuyor),
+    /// `icerik=` de (tasarımın amacı bu). Jeton **bilerek eklenmedi**
+    /// (`cpu_elenen=` emsali, aşağıda): varsayılan kapalı olduğu için
+    /// gözlenebilir her koşuda sıfır basardı ve jeton silinmiyor, ekleniyor.
+    /// Bozuk bir blink'i kapının hiçbir katı görmez; **koruma bir jeton değil
+    /// varsayılanın kendisi** ve bu, setin `teslim.md`'sinde yazılı.
     motion: u64,
     /// Yerleşmemiş **kayma** (içeriğin ötelemesi) yüzünden çizilen kare.
     ///

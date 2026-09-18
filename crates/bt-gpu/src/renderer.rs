@@ -2231,6 +2231,7 @@ mod tests {
             // Bu sınamalar pikseli soruyor; devir `link`'in sorusu.
             caret_in_dock: false,
             shape: CaretShape::Block,
+            blink: false,
             text,
             // Kaydırma kararı hareketin işi (`motion.rs`); burada çizilen
             // piksel sorgulanıyor ve konum zaten `push_settled` ile hedefin

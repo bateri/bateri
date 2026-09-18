@@ -687,6 +687,15 @@ impl Motion {
         self.cursor_settled() && self.origin_settled()
     }
 
+    /// Hareketi Azalt açık mı — blink'in kapısı ([`crate::blink`]).
+    ///
+    /// [`Motion::mode`] değil **ham bayrak**: `Snap` stilinde `mode()` `Fade`
+    /// dönmüyor ama indirgeme yine açık ve blink yine kapanmalı.
+    /// Erişilebilirlik ayarı animasyon **eklemez** (`CLAUDE.md`).
+    pub(crate) fn reduce(&self) -> bool {
+        self.reduce
+    }
+
     /// Yalnız imlecin animasyonu durdu mu — `hareket=` jetonunun tanığı.
     ///
     /// Durum yokken `true`: çizilecek bir imleç yoksa bekleyecek bir şey de

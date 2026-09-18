@@ -367,8 +367,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bt_core::{
-        Blocks, CaretShape, DockState, DockStatus, Osc52, Session, SessionOptions, ShellPhase,
-        ShellState, TerminalOptions, Theme, Wake,
+        Blocks, CaretShape, CursorBlink, DockState, DockStatus, Osc52, Session, SessionOptions,
+        ShellPhase, ShellState, TerminalOptions, Theme, Wake,
     };
 
     use super::*;
@@ -657,6 +657,7 @@ mod tests {
                     scrollback: 100,
                     osc52: Osc52::Off,
                     cursor: CaretShape::default(),
+                    blink: CursorBlink::default(),
                 },
                 theme: Theme::BATERI,
                 // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
@@ -772,6 +773,7 @@ mod tests {
                     scrollback: 100,
                     osc52: Osc52::Off,
                     cursor: CaretShape::default(),
+                    blink: CursorBlink::default(),
                 },
                 theme: Theme::BATERI,
                 // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
@@ -900,6 +902,7 @@ mod tests {
                     scrollback: 100,
                     osc52: Osc52::Off,
                     cursor: CaretShape::default(),
+                    blink: CursorBlink::default(),
                 },
                 theme: Theme::BATERI,
                 // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
@@ -1033,6 +1036,7 @@ mod tests {
                     scrollback: 100,
                     osc52: Osc52::Off,
                     cursor: CaretShape::default(),
+                    blink: CursorBlink::default(),
                 },
                 theme: Theme::BATERI,
                 dock: true,

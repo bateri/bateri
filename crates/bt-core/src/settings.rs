@@ -132,6 +132,54 @@ impl CursorMotion {
     }
 }
 
+/// `[terminal] cursor_blink`: imleç yanıp söner mi.
+///
+/// **Üç değerli, çünkü iki soru var:** uygulamanın isteği dinlensin mi
+/// ([`Self::Auto`]) yoksa kullanıcının dediği her şeyi ezsin mi
+/// ([`Self::On`]/[`Self::Off`]). İki değerli olsaydı `false` "uygulama da
+/// söndüremesin" mi yoksa "varsayılan kapalı" mı demek olduğu belirsiz kalırdı
+/// — ve vi modunda `\e[5 q` gönderen bir zsh kurulumu, kullanıcı kapalı
+/// yazmışken imleci yakardı.
+///
+/// **Varsayılan [`Self::Off`]** ve bu bir ürün kararı: yanıp sönen imleç
+/// pencereyi **kalıcı olarak boşta-değil** yapıyor (saniyede iki kare) ve bu
+/// depo on üç set boyunca "boşta sıfır kare"yi savundu. Bedeli kullanıcının
+/// **seçtiği** bir şey olmalı, sessizce gelen bir varsayılan değil. Hermetik
+/// süreli koşu da (ayar dosyası okumuyor) bu değeri alıyor, yani `make
+/// duman`'ın sessizlik kapısı yapısal olarak bağışık.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorBlink {
+    /// Uygulamanın dediği: DECSCUSR'ın tek sayıları ve DECSET 12 açar.
+    Auto,
+    /// Her zaman söner; uygulamanın `\e[2 q`'su bile durduramaz.
+    On,
+    /// Hiç sönmez; uygulamanın `\e[5 q`'su bile başlatamaz.
+    #[default]
+    Off,
+}
+
+impl CursorBlink {
+    /// Ayar dosyasındaki yazılışı; ayrıştırıcının kabul ettikleriyle **aynı**
+    /// olmak zorunda ([`cursor_blink`]).
+    fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// Uygulamanın söylediğiyle kullanıcının dediğini birleştirir — **tek
+    /// yer**, `Session::frame` onu buradan soruyor.
+    pub(crate) fn resolve(self, requested: bool) -> bool {
+        match self {
+            Self::Auto => requested,
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
+}
+
 /// `[terminal] cursor`: imlecin **şekli** — DECSCUSR'ın üç biçimi.
 ///
 /// Bölüm `[motion]` **değil**: şekil hareket değil, terminalin durum
@@ -297,6 +345,8 @@ pub struct Settings {
     /// `[terminal] cursor`: imlecin **varsayılan** şekli; uygulama DECSCUSR
     /// ile üstüne yazabilir ([`CaretShape`]).
     pub cursor: CaretShape,
+    /// `[terminal] cursor_blink`: imleç yanıp söner mi ([`CursorBlink`]).
+    pub cursor_blink: CursorBlink,
     /// `[appearance] theme`: [`SYSTEM_THEME`] ya da tema **adı** —
     /// `themes/{ad}.toml` ya da gömülü bir tema. Ad biçim olarak geçerli (boş
     /// değil, `/` yok); var olup olmadığı dosya sistemi ister ve `bt-shell`'in
@@ -339,6 +389,7 @@ impl Default for Settings {
         Self {
             scrollback: 10_000,
             cursor: CaretShape::default(),
+            cursor_blink: CursorBlink::default(),
             theme: SYSTEM_THEME.to_owned(),
             light_theme: "bateri-light".to_owned(),
             dark_theme: "bateri".to_owned(),
@@ -413,6 +464,10 @@ scrollback = 10000
 # it, "beam" stands at its left edge. Programs such as vim may ask for a
 # different shape while they run; this is the shape when none is asked for.
 cursor = "block"
+# Whether the cursor blinks: "auto" follows what the program asks for, "on"
+# always blinks, "off" never does. Blinking asks for two frames a second for
+# as long as the window is focused, so it is off unless you choose it.
+cursor_blink = "off"
 
 [appearance]
 # "system" follows the macOS light/dark appearance. Any other value is a theme
@@ -528,10 +583,15 @@ integration = "auto"
                     parsed.settings.cursor =
                         caret_shape(text, item, fallback.cursor, &mut parsed.diagnostics);
                 }
+                if let Some(item) = terminal.get("cursor_blink") {
+                    parsed.settings.cursor_blink =
+                        cursor_blink(text, item, fallback.cursor_blink, &mut parsed.diagnostics);
+                }
             }
             None if root.contains_key("terminal") => {
                 parsed.settings.scrollback = fallback.scrollback;
                 parsed.settings.cursor = fallback.cursor;
+                parsed.settings.cursor_blink = fallback.cursor_blink;
             }
             None => {}
         }
@@ -682,6 +742,7 @@ integration = "auto"
             scrollback: self.scrollback,
             osc52: self.osc52,
             cursor: self.cursor,
+            blink: self.cursor_blink,
         }
     }
 
@@ -1140,6 +1201,35 @@ fn caret_shape(
     fallback
 }
 
+/// `terminal.cursor_blink`: tam olarak `"auto"`, `"on"` ya da `"off"`.
+///
+/// [`caret_shape`] ile aynı kural: kabul edilmeyen değer `fallback`'i alır ve
+/// tanı bırakır.
+fn cursor_blink(
+    text: &str,
+    item: &Item,
+    fallback: CursorBlink,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> CursorBlink {
+    const KEY: &str = "terminal.cursor_blink";
+    let found = match item.as_str() {
+        Some("auto") => return CursorBlink::Auto,
+        Some("on") => return CursorBlink::On,
+        Some("off") => return CursorBlink::Off,
+        Some(value) => format!("{value:?}"),
+        None => kind(item).to_owned(),
+    };
+    diagnostics.push(Diagnostic {
+        key: Some(KEY),
+        line: item.span().and_then(|span| line_of(text, span.start)),
+        message: format!(
+            "`{KEY}` must be \"auto\", \"on\" or \"off\", found {found}; using \"{}\"",
+            fallback.name()
+        ),
+    });
+    fallback
+}
+
 /// `motion.reduce_motion`: tam olarak `"system"`, `"on"` ya da `"off"`.
 ///
 /// [`cursor_motion`] ile aynı kural ve aynı gerekçe: kabul edilmeyen değer
@@ -1283,6 +1373,7 @@ mod tests {
         for (section, key) in [
             ("terminal", "scrollback"),
             ("terminal", "cursor"),
+            ("terminal", "cursor_blink"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -1441,6 +1532,7 @@ mod tests {
                 scrollback: 20,
                 osc52: Osc52::Copy,
                 cursor: CaretShape::default(),
+                blink: CursorBlink::default(),
             }
         );
         // Tema adları terminal seçeneği değil: tema her kayıtta yeniden
@@ -1458,6 +1550,7 @@ mod tests {
         let current = Settings {
             scrollback: 100_000,
             cursor: CaretShape::default(),
+            cursor_blink: CursorBlink::default(),
             theme: "paper".to_owned(),
             light_theme: "chalk".to_owned(),
             dark_theme: "ink".to_owned(),
@@ -1713,6 +1806,7 @@ mod tests {
                 scrollback: 500,
                 osc52: Osc52::Off,
                 cursor: CaretShape::default(),
+                blink: CursorBlink::default(),
             }
         );
     }
@@ -1747,6 +1841,35 @@ mod tests {
         let (settings, diagnostic) = rejected("terminal = 1");
         assert_eq!(settings.cursor, CaretShape::Block);
         assert_eq!(diagnostic.key, Some("terminal"));
+    }
+
+    #[test]
+    fn cursor_blink_is_read() {
+        // Dosyada yoksa `off`: yanıp sönen imleç pencereyi kalıcı olarak
+        // meşgul tutuyor ve bu kullanıcının **seçtiği** bir şey olmalı.
+        assert_eq!(clean("").cursor_blink, CursorBlink::Off);
+        assert_eq!(
+            clean("[terminal]\ncursor_blink = \"auto\"\n").cursor_blink,
+            CursorBlink::Auto
+        );
+        assert_eq!(
+            clean("terminal = { cursor_blink = \"on\" }").cursor_blink,
+            CursorBlink::On
+        );
+        let (settings, diagnostic) = rejected("[terminal]\ncursor_blink = \"yes\"\n");
+        assert_eq!(settings.cursor_blink, CursorBlink::Off);
+        assert_eq!(diagnostic.key, Some("terminal.cursor_blink"));
+    }
+
+    #[test]
+    fn the_blink_setting_overrides_what_the_program_asks() {
+        // `auto` uygulamayı izliyor; ötekiler **eziyor** ve ezmenin iki yönü
+        // de şart: `\e[5 q` gönderen vim `off`'u delememeli, `\e[2 q`
+        // gönderen bir program da `on`'u susturmamalı.
+        assert!(CursorBlink::Auto.resolve(true));
+        assert!(!CursorBlink::Auto.resolve(false));
+        assert!(CursorBlink::On.resolve(false), "on ezmedi");
+        assert!(!CursorBlink::Off.resolve(true), "off ezmedi");
     }
 
     #[test]
