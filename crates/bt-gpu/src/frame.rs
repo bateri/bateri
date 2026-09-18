@@ -807,7 +807,7 @@ impl Frame {
     /// Zemin **opak** ve tam genişlik: kayma boyunca ızgaranın taşan alt
     /// satırı dock'un üstüne düşüyor (`LinkDelegate::set_origin`'in yazdığı
     /// taşma) ve onu örten tek şey bu dikdörtgen.
-    pub(crate) fn dock_ground(&self, width_px: f32) -> [Instance; 2] {
+    pub(crate) fn dock_ground(&self, width_px: f32) -> [Instance; 3] {
         let dock = self.dock.unwrap_or(DockSurface {
             rows: 0,
             ground: [0.0; 4],
@@ -832,7 +832,42 @@ impl Frame {
                 size: [width_px, SEPARATOR_PX],
                 rgba: dock.separator,
             },
+            // **İkinci ayraç: giriş satırı ile bağlam satırı arasında.** Aynı
+            // renk ve aynı kalınlık, çünkü aynı şeyi söylüyor — "bunlar ayrı
+            // iki yüzey". phase-9 araya boşluk koymuştu; boşluk ayrımı
+            // *önerir*, çizgi **söyler** (kullanıcı istedi).
+            //
+            // Yeri boşluğun **ortası**, üst ya da alt kenarı değil: kenara
+            // konsaydı bir satıra yapışır ve ona ait görünürdü. Ortada
+            // durunca iki satır da ondan eşit uzaklıkta.
+            //
+            // `rows < 2` iken yüksekliği **sıfır**: ayrılacak iki satır yok.
+            // Dizinin boyu sabit kalıyor ki çağıran kolu dallanmasın; sıfır
+            // yükseklikli dikdörtgen hiç fragment üretmiyor.
+            Instance {
+                pos: [0.0, self.dock_row_divider_y(dock.rows)],
+                size: [width_px, if dock.rows < 2 { 0.0 } else { SEPARATOR_PX }],
+                rgba: dock.separator,
+            },
         ]
+    }
+
+    /// İki dock satırını ayıran çizginin **üst** kenarı, dock-yerel piksel.
+    ///
+    /// Satırların yerleşimi [`Frame::dock_pos`]'ta: `r`. satır
+    /// `pad + r·(cell_h + gap)` yüksekliğinde başlıyor, yani boşluk
+    /// `pad + cell_h` ile `pad + cell_h + gap` arasında. Çizgi o aralığın
+    /// ortasına oturuyor.
+    fn dock_row_divider_y(&self, rows: u16) -> f32 {
+        if rows < 2 {
+            return 0.0;
+        }
+        let pad = self.dock_pad();
+        let gap = dock_row_gap(pad);
+        // Yuvarlanıyor: aygıt ızgarasına oturmayan bir saç çizgisi iki piksele
+        // yayılıp soluklaşırdı — `SEPARATOR_PX`'in ölçekle çarpılmama
+        // gerekçesiyle aynı yerden.
+        (pad + self.cell_px.1 + (gap - SEPARATOR_PX) * 0.5).round()
     }
 
     pub(crate) fn dock_bg(&self) -> &[Instance] {
@@ -1576,7 +1611,7 @@ mod tests {
         frame.open_dock(2, BG, CURSOR);
         assert_eq!(frame.dock_px(), 36.0, "iki satır piksele çevrilmedi");
 
-        let [ground, separator] = frame.dock_ground(500.0);
+        let [ground, separator, divider] = frame.dock_ground(500.0);
         assert_eq!(ground.pos, [0.0, 0.0], "zemin sol paydan başlamamalı");
         assert_eq!(ground.size, [500.0, 36.0]);
         assert_eq!(ground.rgba, BG.to_array());
@@ -1585,6 +1620,11 @@ mod tests {
         assert_eq!(separator.pos, [0.0, 0.0]);
         assert_eq!(separator.size, [500.0, SEPARATOR_PX]);
         assert_eq!(separator.rgba, CURSOR.to_array());
+        // İkinci ayraç iki satırın **arasında** ve aynı renkte. Paysız bu
+        // ölçüde satır arası boşluk sıfır, yani çizgi tam satır sınırında.
+        assert_eq!(divider.pos, [0.0, 18.0]);
+        assert_eq!(divider.size, [500.0, SEPARATOR_PX]);
+        assert_eq!(divider.rgba, CURSOR.to_array());
 
         // Dock'suz kare hiçbir yükseklik vermiyor: ikinci viewport kurulmaz.
         frame.clear(grid(9, 18));
@@ -1605,8 +1645,13 @@ mod tests {
 
         // **Zemin payları da kaplıyor**: pay kadar eksik bir dikdörtgen,
         // kayma boyunca taşan ızgara satırını tam da nefes payında gösterirdi.
-        let [ground, separator] = frame.dock_ground(500.0);
+        let [ground, separator, divider] = frame.dock_ground(500.0);
         assert_eq!(ground.size, [500.0, 54.0]);
+        // Satır arası çizgi boşluğun **ortasında**: pay 7, hücre 18, boşluk 4
+        // → 7 + 18 + (4 − 1)/2 = 26,5 → 27. Kenara konsaydı bir satıra
+        // yapışır ve ona ait görünürdü.
+        assert_eq!(divider.pos, [0.0, 27.0]);
+        assert_eq!(divider.size, [500.0, SEPARATOR_PX]);
         // Saç çizgisi payın **üstünde**, viewport'un tepesinde: ızgarayla
         // sınır orası ve payı onun üstüne koymak çizgiyi ızgaraya sokardı.
         assert_eq!(separator.pos, [0.0, 0.0]);

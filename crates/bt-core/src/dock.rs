@@ -248,20 +248,66 @@ fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut im
         ""
     };
 
+    // **Yolun son bileşeni öne çıkıyor, öncesi geri çekiliyor.** Kullanıcının
+    // aradığı bilgi "hangi klasördeyim"; üst dizinler onu yerleştiren bağlam.
+    // İkisi aynı tonda olunca göz son bileşeni aramak zorunda kalıyordu.
+    //
+    // Sönük olan **yeni bir renk değil**: sönüğün sönüğü, yani ayracın ta
+    // kendisi (`Theme::separator_linear` — "temanın en sessiz mürekkebi",
+    // kendi doc'u öyle diyor). İkinci bir zevk sabiti girmiyor, hiyerarşi tek
+    // kuraldan (`dim_toward`) iki kez geçerek doğuyor.
+    let normal = theme.dim_linear();
+    let quiet = theme.separator_linear();
+    // Son bileşenin yoldaki **karakter** sırası: son `/`'ten sonrası.
+    // Bölme yok, `char_indices` değil `enumerate`: aşağıdaki `skip` de
+    // karakter sayıyor ve ikisi aynı birimde olmak zorunda.
+    let head_end = context
+        .cwd
+        .chars()
+        .enumerate()
+        .filter(|(_, ch)| *ch == '/')
+        .map(|(index, _)| index + 1)
+        .last()
+        .unwrap_or(0);
+    // Son bileşen boşsa (`/`, ya da sondaki eğik çizgi) ayrım yapılmıyor:
+    // yolun tamamı öne çıkıyor. Yanlışın yönü güvenli — fazla vurgulamak
+    // bilgiyi gizlemez, hepsini soluklaştırmak gizlerdi.
+    let head_end = if head_end >= path_chars { 0 } else { head_end };
+
     let line = mark
+        // Kısaltma işareti atılan **üst** dizinlerin yerinde duruyor, yani
+        // onlarla aynı tonda.
+        .map(|ch| (ch, quiet))
         .into_iter()
-        .chain(context.cwd.chars().skip(skip))
-        .chain(separator.chars())
+        .chain(
+            context
+                .cwd
+                .chars()
+                .skip(skip)
+                .enumerate()
+                .map(|(offset, ch)| {
+                    (
+                        ch,
+                        if skip + offset < head_end {
+                            quiet
+                        } else {
+                            normal
+                        },
+                    )
+                }),
+        )
+        // Ayraç bir bölme işareti, içerik değil: en sessiz tonda.
+        .chain(separator.chars().map(|ch| (ch, quiet)))
         .chain(
             shows_branch
-                .then(|| context.branch.chars())
+                .then(|| context.branch.chars().map(|ch| (ch, normal)))
                 .into_iter()
                 .flatten(),
         );
     // `take` bir bekçi, bir politika değil: yukarıdaki bütçe zaten `available`
     // sütunu aşmıyor. Sağdan taşan bir hücre ızgaranın dışına yazardı ve o
     // aritmetik hatası burada sessizce durur.
-    for (offset, ch) in line.take(available).enumerate() {
+    for (offset, (ch, fg)) in line.take(available).enumerate() {
         // Boşluk glyph üretmiyor (`cell`'in kuralı); ayracın iki yanı da
         // buradan eleniyor.
         if ch == ' ' {
@@ -272,8 +318,9 @@ fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut im
             col: CONTEXT_COL + offset as u16,
             row: CONTEXT_ROW,
             ch: Some(ch),
-            // Bütün satır sönük: bağlam okunur ama giriş satırıyla yarışmaz.
-            fg: theme.dim_linear(),
+            // Satırın tamamı sönük kalıyor — bağlam okunur ama giriş satırıyla
+            // yarışmaz — ve **içinde** ikinci bir kademe var (yukarıda).
+            fg,
             ..Cell::default()
         });
     }
@@ -711,9 +758,41 @@ mod tests {
         // işaretiyle hizalı. Giriş metniyle hizalansaydı bağlam sebepsiz
         // girintili görünürdü (bkz. [`CONTEXT_COL`]).
         assert_eq!(row_text(&cells, 1), "/tmp/x | main");
-        // Satırın tamamı sönük: bağlam okunur ama giriş satırıyla yarışmaz.
-        for cell in cells.iter().filter(|cell| cell.row == 1) {
-            assert_eq!(cell.fg, THEME.dim_linear(), "bağlam sönük değil");
+        // **Satırın içinde iki kademe var.** Aranan bilgi "hangi klasördeyim",
+        // yani yolun son bileşeni; üst dizinler onu yerleştiren bağlam ve
+        // geri çekiliyor. Dal da aranan bilgi, o yüzden öne çıkanla aynı
+        // tonda. Ayraç bölme işareti, içerik değil.
+        let tone = |col: u16| {
+            cells
+                .iter()
+                .find(|cell| cell.row == 1 && cell.col == col)
+                .unwrap_or_else(|| panic!("bağlam satırında {col}. sütun yok"))
+                .fg
+        };
+        let normal = THEME.dim_linear();
+        let quiet = THEME.separator_linear();
+        assert_ne!(normal, quiet, "iki kademe aynı renge düştü: ayrım görünmez");
+        for col in 0..=4 {
+            assert_eq!(tone(col), quiet, "`/tmp/` öne çıktı ({col}. sütun)");
+        }
+        assert_eq!(tone(5), normal, "aktif klasör (`x`) geri çekildi");
+        assert_eq!(tone(7), quiet, "ayraç içerik gibi çizildi");
+        for col in 9..=12 {
+            assert_eq!(tone(col), normal, "dal geri çekildi ({col}. sütun)");
+        }
+    }
+
+    #[test]
+    fn a_rootless_or_root_path_is_all_foreground() {
+        // İki dejenere hâl ve ikisinde de "son bileşen" ayrımı anlamsız:
+        // kökte (`/`) ayrımı yapacak bir üst dizin yok, eğik çizgisiz bir
+        // yolda da. Yanlışın yönü **güvenli**: tamamı öne çıkıyor. Ters
+        // seçim (tamamı soluk) kullanıcının aradığı tek bilgiyi gizlerdi.
+        for path in ["/", "tmp"] {
+            let (cells, _) = draw_with(&live("", "", "", 0), &context(path, ""), COLS);
+            for cell in cells.iter().filter(|cell| cell.row == 1) {
+                assert_eq!(cell.fg, THEME.dim_linear(), "{path}: {cell:?}");
+            }
         }
     }
 
