@@ -227,7 +227,7 @@ pub enum CaretShape {
 /// Değer **seçilmiş, ölçülmemiş** ve 015'te iki tur gözle indi (0.18 → 0.10):
 /// blok caret hücre genişliğinden kısa ve daha büyük bir yarıçap onu
 /// dikdörtgen olmaktan çıkarıp hapa çeviriyordu.
-pub const CURSOR_RADIUS: f32 = 0.10;
+pub const CURSOR_RADIUS: f64 = 0.10;
 
 /// İmlecin **gölge gücü** varsayılanı; `1.0` = tasarımın kendi ölçüsü.
 ///
@@ -239,7 +239,7 @@ pub const CURSOR_RADIUS: f32 = 0.10;
 ///
 /// `bt-gpu`'daki iki sabit **taban olarak yerinde kalıyor**; bu yalnız onların
 /// çarpanı, yani "ikinci bir tasarım sabiti yok" kuralı korunuyor.
-pub const CURSOR_GLOW: f32 = 1.0;
+pub const CURSOR_GLOW: f64 = 1.0;
 
 /// Blink'in **yarım periyodu** varsayılanı, saniye.
 ///
@@ -262,8 +262,16 @@ const CURSOR_BLINK_RANGE: std::ops::RangeInclusive<f64> = 0.05..=5.0;
 /// Yarıçabın kabul aralığı; yarım = hücrenin yarısı, ötesi anlamsız.
 const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
 
-/// Gölge çarpanının kabul aralığı. Üst uç **seçilmiş, ölçülmemiş**: 3.0'da
-/// alfa 0.30 eder, yani 015'te reddedilen neonun (0.35) hâlâ altında.
+/// Gölge çarpanının kabul aralığı — **seçilmiş, ölçülmemiş**.
+///
+/// Çarpan **iki ekseni birden** ölçekliyor ve tavanın gerekçesi ikisini de
+/// saymalı (`/code-review`): 3.0'da alfa 0.30 (015'te reddedilen 0.35'in
+/// altında) ama yayılma `1.2 × gutter_px`, yani `CARET_GLOW_RATIO`'nun
+/// doc'unda "gölge değil neon" diye kaydedilen "sol payın tamamı"nın **üstü**.
+///
+/// Tavan yine de orada, çünkü **varsayılanın zevki ile tavanın işi ayrı**:
+/// reddedilen şey o görüntünün *varsayılan* olmasıydı. Tavan kullanıcının
+/// açıkça seçtiği uca yer bırakıyor ve tek görevi sınırsızlığı kesmek.
 const CURSOR_GLOW_RANGE: std::ops::RangeInclusive<f64> = 0.0..=3.0;
 
 /// `[terminal] cursor_unfocused`: odakta olmayan pencerede imleç ne olsun.
@@ -281,12 +289,23 @@ pub enum UnfocusedCaret {
 }
 
 impl UnfocusedCaret {
-    /// Ayar dosyasındaki yazılışı; ayrıştırıcının kabul ettikleriyle **aynı**.
+    /// Ayar dosyasındaki yazılışların **tek listesi**: ayrıştırıcı da
+    /// [`Self::name`] de buradan okuyor.
+    ///
+    /// İki yerde yazılsaydı bir varyantın yazılışını değiştirmek, kullanıcıya
+    /// **ayrıştırıcının reddettiği** bir değer öneren bir tanı üretirdi —
+    /// `docs/YOL-HARITASI.md`'nin borcu bu kusuru adıyla sayıyor ("her
+    /// enum'un `name()`'i de ayrıştırıcının kollarıyla elle eşleşiyor") ve
+    /// yeni bir enum'da onu tekrarlamanın gerekçesi yok.
+    const NAMES: &'static [(&'static str, Self)] =
+        &[("hollow", Self::Hollow), ("solid", Self::Solid)];
+
+    /// Ayar dosyasındaki yazılışı.
     fn name(self) -> &'static str {
-        match self {
-            Self::Hollow => "hollow",
-            Self::Solid => "solid",
-        }
+        Self::NAMES
+            .iter()
+            .find(|(_, value)| *value == self)
+            .map_or("hollow", |(name, _)| *name)
     }
 }
 
@@ -299,9 +318,15 @@ impl UnfocusedCaret {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaretStyle {
     /// Köşe yarıçapı, hücre **yüksekliğinin** oranı.
-    pub radius_ratio: f32,
+    ///
+    /// `f64`, `f32` değil ve sebebi **tanı metni**: `ranged_float` geri
+    /// düşülen değeri mesaja basıyor ve `f64::from(0.10f32)`
+    /// `0.10000000149011612` ediyor — kullanıcı yazdığı sayıyı değil float
+    /// gürültüsünü görürdü (`/code-review`). Daraltma `bt-gpu` sınırında,
+    /// kare başına değil bir kez.
+    pub radius_ratio: f64,
     /// Gölgenin gücü; `0.0` kapalı, `1.0` tasarımın kendi ölçüsü.
-    pub glow: f32,
+    pub glow: f64,
     /// Odakta olmayan pencerede imlecin hâli.
     pub unfocused: UnfocusedCaret,
 }
@@ -733,9 +758,9 @@ integration = "auto"
                         item,
                         "terminal.cursor_radius",
                         CURSOR_RADIUS_RANGE,
-                        f64::from(fallback.caret.radius_ratio),
+                        fallback.caret.radius_ratio,
                         &mut parsed.diagnostics,
-                    ) as f32;
+                    );
                 }
                 if let Some(item) = terminal.get("cursor_blink_interval") {
                     parsed.settings.blink_interval = ranged_float(
@@ -752,10 +777,7 @@ integration = "auto"
                         text,
                         item,
                         "terminal.cursor_unfocused",
-                        &[
-                            ("hollow", UnfocusedCaret::Hollow),
-                            ("solid", UnfocusedCaret::Solid),
-                        ],
+                        UnfocusedCaret::NAMES,
                         fallback.caret.unfocused,
                         fallback.caret.unfocused.name(),
                         &mut parsed.diagnostics,
@@ -767,9 +789,9 @@ integration = "auto"
                         item,
                         "terminal.cursor_glow",
                         CURSOR_GLOW_RANGE,
-                        f64::from(fallback.caret.glow),
+                        fallback.caret.glow,
                         &mut parsed.diagnostics,
-                    ) as f32;
+                    );
                 }
             }
             None if root.contains_key("terminal") => {
@@ -1428,10 +1450,6 @@ fn caret_shape(
     fallback
 }
 
-/// `terminal.cursor_blink`: tam olarak `"auto"`, `"on"` ya da `"off"`.
-///
-/// [`caret_shape`] ile aynı kural: kabul edilmeyen değer `fallback`'i alır ve
-/// tanı bırakır.
 /// Adlandırılmış seçenek anahtarının **ortak gövdesi**: listedeki adlardan
 /// biri değilse anahtar kendi değerinde kalır ve tanı bırakılır.
 ///
@@ -1483,6 +1501,10 @@ fn named_enum<T: Copy>(
     fallback
 }
 
+/// `terminal.cursor_blink`: tam olarak `"auto"`, `"on"` ya da `"off"`.
+///
+/// [`caret_shape`] ile aynı kural: kabul edilmeyen değer `fallback`'i alır ve
+/// tanı bırakır.
 fn cursor_blink(
     text: &str,
     item: &Item,
@@ -2449,6 +2471,27 @@ found {found}; using \"auto\""
             diagnostic.message.contains("\"hollow\" or \"solid\""),
             "tanı beklenen listeyi saymıyor: {}",
             diagnostic.message
+        );
+    }
+
+    #[test]
+    fn a_rejected_caret_number_names_the_value_the_user_kept() {
+        // **Tanı metni kullanıcının yazdığı sayıyı göstermeli**, float
+        // gürültüsünü değil (`/code-review`): `CaretStyle` `f32` iken
+        // `f64::from(0.10f32)` `0.10000000149011612` ediyordu ve mesaj
+        // "using 0.10000000149011612" diyordu. Kardeş sınamalar (font, tema)
+        // mesajın tamamını sınıyor; bu anahtar yalnız `key`'e bakıyordu ve
+        // kusur oradan sızdı.
+        let (_, diagnostic) = rejected("[terminal]\ncursor_radius = 1.5\n");
+        assert_eq!(
+            diagnostic.message,
+            "`terminal.cursor_radius` must be a number between 0 and 0.5, \
+found 1.5; using 0.1"
+        );
+        let (_, diagnostic) = rejected("[terminal]\ncursor_glow = 9\n");
+        assert_eq!(
+            diagnostic.message,
+            "`terminal.cursor_glow` must be a number between 0 and 3, found 9; using 1"
         );
     }
 

@@ -2440,7 +2440,7 @@ mod tests {
         // oradan geçen bir eşitlik yuvarlaklığı sınardı. Gövdede eşitlik hâlâ
         // **bit bit**; köşenin ve halenin kendi bekçileri ayrı
         // ([`the_caret_corner_is_rounded`], [`the_caret_glow_spills_but_stops`]).
-        let inset = caret_radius_px((cw, ch), bt_core::CURSOR_RADIUS);
+        let inset = caret_radius_px((cw, ch), bt_core::CURSOR_RADIUS as f32);
         let cell = |col| cell_body(&pixels, EDGE, (cw, ch), col, inset);
         let (a, b, c) = (cell(0), cell(1), cell(2));
 
@@ -2616,7 +2616,7 @@ mod tests {
         let at = usize::from(GUTTER) + usize::from(cw) + 2;
         assert!(at < EDGE, "örnekleme noktası dokuya sığmıyor");
 
-        let sample = |glow: f32| {
+        let sample = |glow: f64| {
             let mut frame = Frame::default();
             frame.clear(
                 grid_with_gutter(cw, ch, GUTTER),
@@ -2714,7 +2714,7 @@ mod tests {
         // halkanın kalınlığı `rule_px` ve köşeyi yarıçap yiyor; sabit bir 3
         // ya büyük puntoda halkayı örneklemin içine alır ya da dar hücrede
         // aralığı boşaltıp hiçbir şey iddia etmeyen bir eşitliğe düşerdi.
-        let inset = caret_radius_px((cw, ch), bt_core::CURSOR_RADIUS)
+        let inset = caret_radius_px((cw, ch), bt_core::CURSOR_RADIUS as f32)
             + usize::from(r.cell_metrics(1.0).rule_px()).max(1);
         assert!(
             inset * 2 < usize::from(cw).min(usize::from(ch)),

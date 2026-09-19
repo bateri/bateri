@@ -270,6 +270,23 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   (tema değişimi zaten kare istiyor), ama "palet tek kaynak" cümlesini
   harfiyen ihlal ediyor (`/audit`, 008 kapısı; 008 öncesinden beri var).
   Çaresi ucuz: `frame()` kullandığı temayı döndürsün.
+- **Doc yorumunun altına kod sokmak sessizce doc çalıyor.** 015 ve 016'da
+  **dört kez** oldu (`set_reduce_motion`, `apply_reduce_motion`,
+  `cursor_blink`, `set_focused`): yeni bir fonksiyon var olanın doc bloğu ile
+  gövdesi arasına girince doc yeni fonksiyona geçiyor, eskisi **doc'suz**
+  kalıyor ve yeni fonksiyonun doc'u bambaşka bir şeyi anlatıyor. `rustdoc`
+  şikâyet etmiyor, `clippy` yalnız araya **boş satır** girerse görüyor
+  (`empty_line_after_doc_comments`). Çaresi bir kapı: `make denetim`'e "doc
+  bloğu ile `fn`/`pub` arasında başka bir öğe yok" taraması ya da her eklemede
+  `git diff`'te doc sınırını gözle doğrulamak. Şimdilik ikincisi, yani
+  **kural yazılı ama mekanik değil**.
+- **`docs/AYARLAR.md`'nin bölüm örnekleri hiçbir sınamayla bağlı değil.**
+  `### Şablon` bloğu `TEMPLATE` ile bayt bayt çivili
+  (`documented_template_is_the_template`) ama `## Anahtarlar` altındaki bölüm
+  örnekleri (`### [terminal]`'ın küçük `toml` bloğu gibi) serbest: 016'da dört
+  anahtar eklendi ve o blok üç anahtarda kaldı, `/audit` görene kadar sessiz
+  bayatladı. Çare ya aynı türden bir sınama (bölüm örneği şablonun o bölümünün
+  alt kümesi olmalı) ya da örnekleri büsbütün kaldırıp tabloya güvenmek.
 - **Var olan ayar dosyası yeni anahtarları hiç görmüyor.** Şablon kullanıcının
   diskine **yalnız dosya yokken** yazılıyor (`settings::create_if_missing`);
   var olan dosyaya yazan tek yol View ▸ Theme ▸ ve o da yalnız

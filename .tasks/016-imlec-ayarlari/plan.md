@@ -141,4 +141,4 @@ dosyası olan kullanıcı hiçbir fark görmüyor. `TEMPLATE` büyüyor ama
 | phase-1 | ✅ |
 | phase-2 | ✅ |
 | phase-3 | ✅ |
-| kapı | |
+| kapı | ✅ |

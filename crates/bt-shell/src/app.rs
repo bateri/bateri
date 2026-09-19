@@ -1806,11 +1806,7 @@ impl AppDelegate {
         // okunuyor, elde kalan `link`'ten değil: `observe_reduce_motion` ile
         // aynı gerekçe — link o çağrıda yuvaya taşındı. `set_caret_style`
         // aynı değerde no-op, yani kayıt anı yoluyla çakışmıyor.
-        if let Some(link) = self.ivars().link.get() {
-            let settings = self.ivars().settings.borrow();
-            link.set_caret_style(settings.caret);
-            link.set_blink_interval(settings.blink_interval);
-        }
+        self.apply_caret(&self.ivars().settings.borrow());
         // **Odak da tohumlanıyor** ve gerekçesi aynı sıralama: pencere
         // `makeKeyAndOrderFront` ile key oluyor, yani `windowDidBecomeKey:`
         // link yuvaya girmeden **önce** düşüyor ve o çağrı sessizce atılıyor.
@@ -1961,13 +1957,7 @@ impl AppDelegate {
             // girmiyor ve `changes.terminal`'a binselerdi bir yarıçap
             // değişimi oturumu baştan kurdururdu.
             if changes.caret {
-                if let Some(link) = self.ivars().link.get() {
-                    link.set_caret_style(new.caret);
-                    // Tek `Changes` alanı, iki çağrı: varış yerleri ayrı
-                    // (çizim sayıları `Frame`'e, periyot `blink`'e) ama
-                    // ikisi de aynı kaydın sonucu — emsal `Changes::motion`.
-                    link.set_blink_interval(new.blink_interval);
-                }
+                self.apply_caret(&new);
             }
             self.ivars().zoom.set(zoom);
             self.ivars().settings.replace(new);
@@ -2205,6 +2195,28 @@ impl AppDelegate {
     ///
     /// Link yoksa sessizce döner: sistem bildirimi `start_session`'dan önce
     /// de düşebilir ve açılış çağrısı aynı değeri zaten verecek.
+    /// İmlecin ayardan inen değerlerini link'e verir.
+    ///
+    /// **Açılış ile kayıt anı aynı koddan geçiyor** ve gerekçesi bir kusur
+    /// sınıfı (`/code-review`, 016): iki liste ayrı yazılsaydı sapabilirlerdi
+    /// — yalnız tohumlanan bir anahtar kayıt anında uygulanmaz, yalnız
+    /// yeniden yüklenen bir anahtar açılışta varsayılanda kalırdı. İkisi de
+    /// sessiz ve `plan.md` o sınıfı adıyla sayıyor ("yarısı inen anahtar
+    /// hiçbir kapıda görünmez").
+    ///
+    /// Tek `Changes::caret` alanı, iki çağrı: varış yerleri ayrı (çizim
+    /// sayıları `Frame`'e, periyot `bt_gpu::blink`'e) ama ikisi de aynı
+    /// kaydın sonucu — emsal `Changes::motion`'ın iki anahtarı.
+    ///
+    /// Link yoksa sessizce dönüyor; `apply_reduce_motion` ile aynı gerekçe.
+    fn apply_caret(&self, settings: &Settings) {
+        let Some(link) = self.ivars().link.get() else {
+            return;
+        };
+        link.set_caret_style(settings.caret);
+        link.set_blink_interval(settings.blink_interval);
+    }
+
     fn apply_reduce_motion(&self) {
         let Some(link) = self.ivars().link.get() else {
             return;

@@ -272,6 +272,10 @@ geri alınabilir: dosyayı düzeltip kaydetmek yeter.
 scrollback = 10000
 cursor = "block"
 cursor_blink = "off"
+cursor_radius = 0.10
+cursor_glow = 1.0
+cursor_unfocused = "hollow"
+cursor_blink_interval = 0.5
 ```
 
 | anahtar | tür | varsayılan | anlamı |
@@ -279,6 +283,10 @@ cursor_blink = "off"
 | `scrollback` | tam sayı, `0`–`100000` | `10000` | geçmişte tutulan satır sayısı |
 | `cursor` | `"block"` \| `"underline"` \| `"beam"` | `"block"` | imlecin **varsayılan** şekli |
 | `cursor_blink` | `"auto"` \| `"on"` \| `"off"` | `"off"` | imleç yanıp söner mi |
+| `cursor_radius` | ondalık, `0.0`–`0.5` | `0.10` | imleç köşesinin yuvarlaklığı, hücre **yüksekliğinin** oranı |
+| `cursor_glow` | ondalık, `0.0`–`3.0` | `1.0` | imlecin çevresindeki gölgenin gücü; `0` kapatır |
+| `cursor_unfocused` | `"hollow"` \| `"solid"` | `"hollow"` | pencere odakta değilken imleç: `hollow` içini boşaltır, `solid` dokunmaz |
+| `cursor_blink_interval` | ondalık, `0.05`–`5.0` | `0.5` | blink'in **yarım** periyodu, saniye |
 
 - `100000`'den büyük değer **`100000`** olur ve uyarı verir. Sınır
   alacritty'nin kendi ayar sınırı (`MAX_SCROLLBACK_LINES`); ölçülmüş bir
@@ -315,6 +323,26 @@ hiçbir şey çizmediyse blink **duruyor** ve imleç görünür hâlde kalıyor;
 `tail -f` gibi akan bir çıktı blink'i ayakta tutar.
 Hareketi Azalt açıkken blink hiç başlamaz: erişilebilirlik ayarı animasyon
 *eklemez*.
+
+`cursor_radius` ve `cursor_glow` imlecin **görünüşünü** ölçekler, yeni bir
+ölçü tanımlamaz: yarıçap hücre **yüksekliğinin** oranı, `cursor_glow` ise
+tasarımın kendi gölge ölçüsünün çarpanı — `1.0` varsayılan görüntü, `0`
+gölgeyi kapatır. İkisi de punto ile büyür, yani Cmd +/− imleci orantılı
+bırakır. Gölge **tek sayı**, yayılma ve koyuluk ayrı ayrı değil: ikisi tek bir
+his ve ayrı verilseydi "hiçbir şeyin geniş halesi" gibi anlamsız hâller
+yazılabilirdi.
+
+`cursor_unfocused` pencere odakta değilken imlecin ne olacağını söyler:
+`"hollow"` içini boşaltıp çerçeveye çevirir, `"solid"` hiç dokunmaz. Blink'e
+**etkisi yok** — odakta olmayan pencerede blink her hâlde durur, o ayrı bir
+sinyal.
+
+`cursor_blink_interval` blink'in **yarım** periyodu: imleç bu kadar açık, bu
+kadar kapalı kalır. Kısaltmanın bedeli doğrusal — `0.25` saniyede dört kare
+ister — ve alt sınır (`0.05`) tavanı orada durdurur. Bu anahtarın yanlış
+değeri `make duman`'ın sessizlik katına **yakalanmaz**: süreli koşu ayar
+dosyasını hiç okumaz ve blink varsayılanı kapalıdır, yani tek koruma kabul
+aralığının kendisidir.
 
 Bölüm satır içi de yazılabilir: `terminal = { scrollback = 5000 }`.
 `[[terminal]]` (bölüm dizisi) bölüm sayılmaz ve uyarı verir.
