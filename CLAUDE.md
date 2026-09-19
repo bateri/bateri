@@ -133,7 +133,20 @@ satırı bırakmışken (`Input` + `Idle`; `CORRECT`'in `[nyae]`'i, R3.3) ızgar
 çünkü sıçrayan caret tam da o pencerelerde görülüyordu. Üç ön koşul:
 pencerenin dock'u olacak (`SessionOptions::dock`; yoksa devralacak kimse yok
 ve satır da imleç de ızgarada kalır), alternatif ekranda olmayacak (dock zaten
-kalkıyor) ve bastırılan bir satır varsa tazelik kapısı geçilecek. Cevap
+kalkıyor) ve bastırılan bir satır varsa tazelik kapısı geçilecek.
+**Dock→Grid yönü tutuluyor** (`shell::HANDOVER_HOLD`, histerezis): yüklem
+`Grid` dese de cevap kısa bir süre `Dock` kalıyor ve o süre içinde geri
+dönerse devir **hiç olmamış** sayılıyor. Sebebi ölçülmüş: `ls` gibi hızlı bir
+komutta safha 44 ms sürüyor, imleç animasyonu 230 ms'de yerleşiyor, yani caret
+dock'tan çıkıp yarı yolda geri dönüyordu ve göz bunu bir zıplama olarak
+okuyordu. Tutmanın kalanı saate **`min`'lenerek** giriyor (`shell::sooner`),
+yazarak değil: süre sayacının tiki de aynı yuvayı kullanıyor ve ezilseydi
+koşan komutun sayacı donardı. Ters yön (Grid→Dock) **tutulmuyor** — komut
+bitince caret ızgarada asılı kalsaydı kullanıcı yazmaya başladığında dock'ta
+caret'siz bir satır görürdü, yani yanlışın yönü güvenli değil. Aynanın
+**arızası** da tutmanın dışında (`Unavailable`): gösteremediğimiz satır
+ızgarada duruyor, caret'i de orada durmalı, ve arıza zaten bir sıçrama
+üretmiyor. Cevap
 **hesaplandığı yerden geçiyor**, ikinci kez türetilmiyor: `frame()` onu
 `Cursor::caret_in_dock` ile veriyor, `Session::dock` argüman olarak alıyor.
 Dock kendi başına sorduğunda üç ön koşulu bilmiyordu ve bayat aynada **iki

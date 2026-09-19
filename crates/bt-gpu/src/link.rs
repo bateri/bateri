@@ -622,10 +622,16 @@ struct LinkIvars {
     /// (`Session::set_theme`), yani bir sonraki kare içerik karesi olur ve
     /// kopya orada tazelenir.
     theme: Cell<Theme>,
-    /// Süre sayacının bir sonraki tikinin **mutlak** zamanı.
+    /// `bt-core`'un istediği bir sonraki **içerik** tikinin mutlak zamanı.
     ///
-    /// `None` → ilerletilecek bir sayaç yok: komut bitti, koşan bloğun çıpası
-    /// ekrandan çıktı ya da entegrasyon hiç yok.
+    /// İki kaynağı var ve `bt-core` yakın olanı seçip veriyor
+    /// (`bt_core::shell::sooner`): koşan komutun süre sayacı ve dock'lu bir
+    /// pencerede caret devrinin **tutması**. `bt-gpu` ikisini ayırt etmiyor —
+    /// ikisi de içeriği değiştiriyor, yani `icerik=` sayması doğru.
+    ///
+    /// `None` → beklenen bir şey yok: komut bitti, koşan bloğun çıpası
+    /// ekrandan çıktı, entegrasyon hiç yok ya da bekleyen bir devir tutması
+    /// kalmadı.
     ///
     /// **Son tarih, süre değil** ve bu blink'in getirdiği zorunluluk: eski
     /// hâlde `arm_clock` her uyku noktasında `Cursor::next_tick`'i baştan
