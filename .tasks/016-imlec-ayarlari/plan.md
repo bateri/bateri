@@ -139,6 +139,6 @@ dosyası olan kullanıcı hiçbir fark görmüyor. `TEMPLATE` büyüyor ama
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | phase-3 | ✅ |
 | kapı | |

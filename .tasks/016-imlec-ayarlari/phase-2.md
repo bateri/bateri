@@ -46,7 +46,23 @@ _Requirements: R1, R1.3, R1.4, R2, R3, R3.2, R3.3, R4, R5, R7, R8_
 
 ## Uygulama Notları
 
-<!-- Kodlanırken doldurulacak. -->
+- **Periyot `CaretStyle`'a girmedi, kendi alanı oldu.** Varış yerleri ayrı:
+  çizim sayıları `Frame`'e (`clear`'ın ikinci argümanı), periyot
+  `bt_gpu::blink`'e. `Changes::caret` ikisini birden taşıyor ve `bt-shell`
+  tek `if` içinde iki çağrı yapıyor — emsal `Changes::motion`'ın iki anahtarı.
+- **Setter saat okumuyor.** İlk yazışta `CFAbsoluteTimeGetCurrent` kullandım
+  ve geri aldım: deponun tek zaman tabanı display link'in damgası
+  (`update.targetTimestamp()`) ve setter callback'in dışında koşuyor. Değer
+  bir yuvaya (`blink_interval: Cell<f64>`) konuyor, **kare yolunda**
+  uygulanıyor — `set_half_period(now, ...)` `content_frame`'den hemen önce,
+  aynı `now` ile.
+- **Tik yeniden kurulmak zorunda** ve bekçisi yazıldı: `next_flip` mutlak bir
+  son tarih, yani yalnız alanı yazmak kaydedilen ritmi **bir flip
+  geciktirirdi**. Aynı değerde no-op — yoksa her ayar kaydı fazı sıfırlar ve
+  kaydeden kullanıcı imleci sürekli açığa çekerdi.
+- **Kapalı blink'te periyot değişimi tik doğurmuyor** (ikinci bekçi):
+  doğursaydı kapalı bir blink saat kurar ve boşta sıfır kare sözleşmesi
+  sessizce kırılırdı.
 
 ## Yayın Etkisi
 
@@ -68,21 +84,22 @@ _Requirements: R1, R1.3, R1.4, R2, R3, R3.2, R3.3, R4, R5, R7, R8_
 
 ## Checklist
 
-- [ ] `settings.rs`: üçüncü anahtar, `ranged_float` ile (phase-1'inkini
-      tüketiyor), varsayılan `pub const`
-- [ ] `blink.rs`: `HALF_PERIOD` alana döndü, modül saf ve kilitsiz kaldı
-- [ ] `blink.rs`: setter `next_flip`'i **yeniden kuruyor** (mutlak son tarih)
-- [ ] `blink.rs`: `IDLE_STOP` `const` kaldı
-- [ ] `link.rs`: değişimde kare isteniyor (kurulmuş `after` iptal edilemiyor)
-- [ ] `app.rs`: açılış tohumu ve kayıt anı (phase-1'in yolunu tüketiyor)
-- [ ] Test: periyot değişince `next_flip` yeniden kuruluyor, eski ritimde
-      bir flip gelmiyor
-- [ ] Test: aralık dışı değer kendi anahtarını değiştirmiyor + tanı
-- [ ] Test: `IDLE_STOP` davranışı değişmedi
-- [ ] Test: şablon/varsayılan çifti (`template_is_the_defaults`)
-- [ ] `CLAUDE.md`, `docs/AYARLAR.md`
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] `settings.rs`: anahtar `ranged_float` ile (phase-1'inkini tüketiyor),
+      varsayılan `pub const` ve `bt-gpu` onu import ediyor
+- [x] `blink.rs`: `HALF_PERIOD` alana döndü, modül saf ve kilitsiz kaldı
+- [x] `blink.rs`: setter `next_flip`'i **yeniden kuruyor** (mutlak son tarih)
+- [x] `blink.rs`: `IDLE_STOP` `const` kaldı
+- [x] `link.rs`: değişimde kare isteniyor; periyot yuvada bekleyip **kare
+      yolunda** uygulanıyor (tek zaman tabanı)
+- [x] `app.rs`: açılış tohumu ve kayıt anı (phase-1'in yolunu tüketiyor)
+- [x] Test: periyot değişince `next_flip` yeniden kuruluyor; aynı değerde
+      no-op; kapalı blink'te tik doğmuyor
+- [x] Test: aralık dışı değer kendi anahtarını değiştirmiyor + tanı
+- [x] Test: `IDLE_STOP` davranışı değişmedi (mevcut bekçiler)
+- [x] Test: şablon/varsayılan çifti (`template_is_the_defaults`)
+- [x] `CLAUDE.md`, `docs/AYARLAR.md`
+- [x] Doğrulama geçti (`make hepsi` — exit 0)
 - [ ] `make duman` (kullanıcıda)
 - [ ] **Gözle kontrol:** `cursor_blink = "on"` iken periyodu değiştirip kaydet
       — ritim **hemen** değişmeli, bir flip gecikmeden
-- [ ] Yayın etkisi yazıldı
+- [x] Yayın etkisi yazıldı

@@ -399,8 +399,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   imleci olan pencere boşta değildir** — ve **odakta olmayan pencerede blink
   hiç koşmuyor**, yani orada saat de kurulmuyor (015 R7.4). İkisi de adlandırılmış bir durma
   koşulu taşıyor: komut biter, blink ise varsayılan **kapalıdır**
-  (`[terminal] cursor_blink`) ve açıkken bile klavye sessizliğinden sonra
-  durur — durduğunda fazı **açık** bırakır, yoksa imleç bir sonraki hasara
+  (`[terminal] cursor_blink`), periyodu ayardan gelir
+  (`cursor_blink_interval`; kısaltmanın bedeli doğrusal ve **kapı onu
+  göremiyor** — süreli koşu ayar okumuyor, tek koruma kabul aralığı) ve
+  açıkken bile klavye sessizliğinden sonra durur — durduğunda fazı **açık** bırakır, yoksa imleç bir sonraki hasara
   kadar kaybolurdu. Hareketi Azalt açıkken blink hiç başlamaz: erişilebilirlik
   ayarı animasyon *eklemez*. Kapı bu yüzden `kare`'ye değil **içerik** karesine bakıyor —
   200 ms'lik bir imleç kayması `kare`'yi meşru olarak şişirir. Her animasyon bir

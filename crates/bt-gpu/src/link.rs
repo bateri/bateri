@@ -672,6 +672,13 @@ struct LinkIvars {
     /// yaşıyor ve varsayılanının tek sahibi orası; uğramadığı yer
     /// `TerminalOptions`/`Session`, yani terminalin durum makinesi.
     caret_style: Cell<CaretStyle>,
+    /// Blink'in **istenen** yarım periyodu, saniye ([`DisplayLink::set_blink_interval`]).
+    ///
+    /// Ayrı yuva, çünkü uygulanması bir **kare damgası** istiyor: `Blink`'in
+    /// tiki mutlak bir son tarih ve yeniden kurulurken `now` gerekiyor.
+    /// Değeri burada bekletip kare yolunda uygulamak tek zaman tabanını
+    /// koruyor.
+    blink_interval: Cell<f64>,
     /// Kurulmuş tikin kuşağı — eskiyen tik kendini tanıyıp sussun diye.
     ///
     /// `DispatchQueue::after` iptal edilemiyor, yani araya bir içerik karesi
@@ -1039,6 +1046,10 @@ define_class!(
             // imleci koruyor; bu onun üçüncü tüketicisi. Yan kazancı boşta
             // sıfır kare tarafında: odaksız boş pencere saat kurmuyor.
             let focused = iv.focused.get();
+            // **Ayarın periyodu burada uygulanıyor** ve `content_frame`'den
+            // önce: tik mutlak bir son tarih, yani yeniden kurulurken bu
+            // karenin damgası gerekiyor. Aynı değerde no-op.
+            blink.set_half_period(now, iv.blink_interval.get());
             blink.content_frame(now, cursor.blink && !motion.reduce() && focused);
             // Caret kıpırdadıysa faz açığa dönüyor: yazarken imleç sönmez.
             if moved {
@@ -1452,6 +1463,7 @@ impl DisplayLink {
                 blink: Cell::new(Blink::default()),
                 focused: Cell::new(true),
                 caret_style: Cell::new(CaretStyle::default()),
+                blink_interval: Cell::new(bt_core::CURSOR_BLINK_INTERVAL),
                 clock_generation: Arc::new(AtomicU64::new(0)),
                 last_caret_text: Cell::new(None),
                 last_caret_at: Cell::new(None),
@@ -1678,6 +1690,27 @@ impl DisplayLink {
     pub fn set_caret_style(&self, style: CaretStyle) {
         let iv = self.delegate.ivars();
         if iv.caret_style.replace(style) == style {
+            return;
+        }
+        self.request_frame();
+    }
+
+    /// Blink'in yarım periyodu değişti — `bt-shell` ayar dosyasından veriyor.
+    ///
+    /// **Bekleyen tik yeniden kuruluyor** ([`crate::blink::Blink::set_half_period`])
+    /// ve kare isteniyor; ikisi de zorunlu. Kurulmuş bir `after` **iptal
+    /// edilemiyor** (`arm_clock`), yani uyuyan bir pencerede yalnız alanı
+    /// yazmak yeni ritmi bir sonraki flip'e kadar geciktirirdi — kullanıcı
+    /// kaydeder, hiçbir şey olmaz.
+    ///
+    /// **Değer yuvaya konuyor, tik burada kurulmuyor**: bu yol callback'in
+    /// dışında koşuyor ve elinde bir kare damgası yok. Deponun tek zaman
+    /// tabanı display link'in damgası (`update.targetTimestamp()`); burada bir
+    /// saat okumak ikinci bir zaman yaratırdı. Uygulama kare yolunda, istenen
+    /// kare geldiğinde.
+    pub fn set_blink_interval(&self, half_period: f64) {
+        let iv = self.delegate.ivars();
+        if iv.blink_interval.replace(half_period) == half_period {
             return;
         }
         self.request_frame();

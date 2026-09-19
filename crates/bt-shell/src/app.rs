@@ -1807,7 +1807,9 @@ impl AppDelegate {
         // aynı gerekçe — link o çağrıda yuvaya taşındı. `set_caret_style`
         // aynı değerde no-op, yani kayıt anı yoluyla çakışmıyor.
         if let Some(link) = self.ivars().link.get() {
-            link.set_caret_style(self.ivars().settings.borrow().caret);
+            let settings = self.ivars().settings.borrow();
+            link.set_caret_style(settings.caret);
+            link.set_blink_interval(settings.blink_interval);
         }
         // **Odak da tohumlanıyor** ve gerekçesi aynı sıralama: pencere
         // `makeKeyAndOrderFront` ile key oluyor, yani `windowDidBecomeKey:`
@@ -1961,6 +1963,10 @@ impl AppDelegate {
             if changes.caret {
                 if let Some(link) = self.ivars().link.get() {
                     link.set_caret_style(new.caret);
+                    // Tek `Changes` alanı, iki çağrı: varış yerleri ayrı
+                    // (çizim sayıları `Frame`'e, periyot `blink`'e) ama
+                    // ikisi de aynı kaydın sonucu — emsal `Changes::motion`.
+                    link.set_blink_interval(new.blink_interval);
                 }
             }
             self.ivars().zoom.set(zoom);

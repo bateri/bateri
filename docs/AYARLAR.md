@@ -103,6 +103,10 @@ cursor_glow = 1.0
 # hollow empties it to an outline, solid leaves it as it is. Either way a
 # blinking cursor stops blinking until the window is focused again.
 cursor_unfocused = "hollow"
+# 0.05 to 5.0. Half the blink period in seconds: the cursor stays lit this
+# long, then dark this long. Shorter costs more frames — 0.25 asks for four a
+# second — and 0.5 is a blink you notice without it tiring the eye.
+cursor_blink_interval = 0.5
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
