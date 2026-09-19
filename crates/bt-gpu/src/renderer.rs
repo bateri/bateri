@@ -646,11 +646,19 @@ impl Renderer {
                 viewport_px,
             )
             .and_then(|()| self.encode_quads(&enc, frame.bg_instances(), viewport_px))
-            // **Caret arka planlardan sonra, glyph'lerden önce**: blok opak ve
-            // altındaki harf onun üstüne, `cursor_block`'un ters çevirdiği
-            // renkle çiziliyor. Bu yuva caret ızgaradayken doluyor; dock
-            // bandına girmişse liste boş ve instance aşağıdaki dock
-            // encode'unda çiziliyor ([`Frame::push_caret`]).
+            // **Caret arka planlardan sonra, glyph'lerden önce** ve gerekçe
+            // **dolu** caret'e ait: blok opak, altındaki harf onun üstüne ve
+            // `cursor_block`'un ters çevirdiği renkle çiziliyor. Caret kendi
+            // pipeline'ına taşındı (015 phase-2) ama sıradaki yeri değişmedi.
+            //
+            // **İçi boş caret'te gerekçenin iki yarısı da düşüyor** (dolgu yok,
+            // `CursorBlock` dejenere) ve bedeli kayıtlı: hücrenin kenarına
+            // mürekkep koyan bir glyph halkanın üstüne çiziliyor. Bugün seyrek
+            // (kutu çizim henüz yok), 018'de görünür olacak — bilinen sınır,
+            // `.tasks/015-imlec-cilasi/phase-3.md`.
+            //
+            // Bu yuva caret ızgaradayken doluyor; dock bandına girmişse liste
+            // boş ve instance aşağıdaki dock encode'unda ([`Frame::push_caret`]).
             .and_then(|()| {
                 self.encode_caret(
                     &enc,
@@ -1510,6 +1518,17 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// Bir pikselin üç kanalının toplamı — "boyandı mı" sorusunun renk
+    /// tablosu gerektirmeyen hâli.
+    ///
+    /// Ortak yardımcı, çünkü caret sınamalarının hepsi aynı soruyu soruyor ve
+    /// her biri kendi kopyasını taşıyordu (`/code-review`): bir düzeltme
+    /// kopyaların birinde unutulabilirdi.
+    fn brightness(pixels: &[u8], edge: usize, x: usize, y: usize) -> u32 {
+        let (r8, g8, b8) = pixel_at(pixels, edge, x, y);
+        u32::from(r8) + u32::from(g8) + u32::from(b8)
     }
 
     /// Hücrenin **orta bandı**: üstten ve alttan yarıçap kadar çekilmiş,
@@ -2483,14 +2502,7 @@ mod tests {
         frame.force_caret_sdf([radius, 0.0, 0.0, 0.0]);
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
 
-        let sum = |x, y| {
-            let (r8, g8, b8) = pixel_at(&pixels, EDGE, x, y);
-            u32::from(r8) + u32::from(g8) + u32::from(b8)
-        };
-        // Referans caret'in **dışından** (`/code-review`): önceki hâli
-        // karşılaştırmayı caret'in kendi karşı köşesiyle yapıyordu ve SDF
-        // simetrik olduğu için iki köşenin `d`'si her zaman eşit — iddia
-        // hiçbir yarıçapta düşemeyen bir totolojiydi.
+        let sum = |x, y| brightness(&pixels, EDGE, x, y);
         let clear = sum(EDGE - 1, EDGE - 1);
         let middle = sum(usize::from(cw) / 2, usize::from(ch) / 2);
         assert!(middle > clear, "caret'in ortası boyanmamış");
@@ -2519,10 +2531,7 @@ mod tests {
         frame.force_caret_sdf([0.0, stroke, 0.0, 0.0]);
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
 
-        let sum = |x, y| {
-            let (r8, g8, b8) = pixel_at(&pixels, EDGE, x, y);
-            u32::from(r8) + u32::from(g8) + u32::from(b8)
-        };
+        let sum = |x, y| brightness(&pixels, EDGE, x, y);
         let clear = sum(EDGE - 1, EDGE - 1);
         let edge = sum(0, usize::from(ch) / 2);
         let middle = sum(usize::from(cw) / 2, usize::from(ch) / 2);
@@ -2602,8 +2611,7 @@ mod tests {
                 true,
             );
             let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
-            let (r8, g8, b8) = pixel_at(&pixels, EDGE, at, y);
-            u32::from(r8) + u32::from(g8) + u32::from(b8)
+            brightness(&pixels, EDGE, at, y)
         };
 
         // Sönük caret hiç çizilmiyor, yani o noktada clear rengi kalıyor;
@@ -2644,7 +2652,15 @@ mod tests {
         );
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
-        let inset = 3;
+        // **İçeri çekme üretimden türüyor**, sabit değil (`/code-review`):
+        // halkanın kalınlığı `rule_px` ve köşeyi yarıçap yiyor; sabit bir 3
+        // ya büyük puntoda halkayı örneklemin içine alır ya da dar hücrede
+        // aralığı boşaltıp hiçbir şey iddia etmeyen bir eşitliğe düşerdi.
+        let inset = caret_radius_px((cw, ch)) + usize::from(r.cell_metrics(1.0).rule_px()).max(1);
+        assert!(
+            inset * 2 < usize::from(cw).min(usize::from(ch)),
+            "içeri çekme hücreyi yuttu"
+        );
         let interior = |col: usize| {
             let (cwu, chu) = (usize::from(cw), usize::from(ch));
             (inset..chu - inset)
@@ -2682,10 +2698,7 @@ mod tests {
         );
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
 
-        let sum = |x, y| {
-            let (r8, g8, b8) = pixel_at(&pixels, EDGE, x, y);
-            u32::from(r8) + u32::from(g8) + u32::from(b8)
-        };
+        let sum = |x, y| brightness(&pixels, EDGE, x, y);
         let clear = sum(EDGE - 1, EDGE - 1);
         assert!(
             sum(0, usize::from(ch) / 2) > clear,

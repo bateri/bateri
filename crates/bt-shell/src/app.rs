@@ -906,20 +906,6 @@ define_class!(
         // düşürür, yani `windowDidDeminiaturize:` bunun altkümesi olurdu.
         // Genel sinyalin üstüne özel durum dizmek, listenin hiç kapanmaması
         // demek (tam ekran, Space, `unhide`, ekran uyanması...).
-        // **Odak yolu.** Odakta olmayan pencerede caret'in içi boşalıyor ve
-        // blink duruyor; ikisi de `bt-gpu`'nun kararı, `bt-core` odağı hiç
-        // görmüyor (015 R7). Pencere delegate'i zaten bizde, yani iki metot
-        // yetiyor.
-        #[unsafe(method(windowDidBecomeKey:))]
-        fn window_did_become_key(&self, _n: &NSNotification) {
-            self.apply_focus(true);
-        }
-
-        #[unsafe(method(windowDidResignKey:))]
-        fn window_did_resign_key(&self, _n: &NSNotification) {
-            self.apply_focus(false);
-        }
-
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
             // Bildirim iki yönde de gelir; örtülmeye GİDERKEN kare istemek
@@ -932,6 +918,24 @@ define_class!(
             if let Some(link) = self.ivars().link.get() {
                 link.set_visible(visible);
             }
+        }
+
+        // **Odak yolu.** Odakta olmayan pencerede caret'in içi boşalıyor ve
+        // blink duruyor; ikisi de `bt-gpu`'nun kararı, `bt-core` odağı hiç
+        // görmüyor (015 R7).
+        //
+        // Yukarıdaki "tek kanca yetiyor" gerekçesi **buraya geçmiyor**: orada
+        // örtülme ile simge durumu aynı genel sinyalin (`occlusionState`) iki
+        // hâli, burada iki ayrı olgu var ve AppKit ikisini ayrı bildirimlerle
+        // veriyor — birleştirecek genel bir sinyal yok.
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _n: &NSNotification) {
+            self.apply_focus(true);
+        }
+
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _n: &NSNotification) {
+            self.apply_focus(false);
         }
     }
 
@@ -1798,6 +1802,16 @@ impl AppDelegate {
         // yuvadan okuyor (stilin `set_cursor_motion`'ı elindeki `link`'i
         // kullanabiliyordu, bu yol kullanamaz — üç çağıranı ortak).
         self.observe_reduce_motion();
+        // **Odak da tohumlanıyor** ve gerekçesi aynı sıralama: pencere
+        // `makeKeyAndOrderFront` ile key oluyor, yani `windowDidBecomeKey:`
+        // link yuvaya girmeden **önce** düşüyor ve o çağrı sessizce atılıyor.
+        // Tohumlama olmasaydı arka planda açılan bir pencerede (`open -g`,
+        // login item, başka uygulama öndeyken betikten açılış) hiçbir bildirim
+        // gelmez ve `focused` `true` kalırdı: odaksız pencere dolu caret
+        // çizer ve blink saatini kurardı (`/code-review`).
+        if let Some(window) = self.ivars().window.get() {
+            self.apply_focus(window.isKeyWindow());
+        }
     }
 
     /// Açılışta ayarları okur, [`Ivars::settings`]'e yazar ve seçilen temayı
@@ -2168,6 +2182,16 @@ impl AppDelegate {
     ///
     /// Link yoksa sessizce döner: sistem bildirimi `start_session`'dan önce
     /// de düşebilir ve açılış çağrısı aynı değeri zaten verecek.
+    fn apply_reduce_motion(&self) {
+        let Some(link) = self.ivars().link.get() else {
+            return;
+        };
+        let setting = self.ivars().settings.borrow().reduce_motion;
+        link.set_reduce_motion(resolve_reduce_motion(&self.inputs(), setting, || {
+            NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+        }));
+    }
+
     /// Odak değişti — `bt-gpu`'ya iletir.
     ///
     /// **Hermetik koşuda hiç çağrılmıyor** (R7.1) ve kapı burada, `bt-gpu`'nun
@@ -2180,22 +2204,16 @@ impl AppDelegate {
     /// Link yoksa sessizce dönüyor: key olayı `start_session`'dan önce de
     /// düşebilir ve o hâlde varsayılan (`true`) zaten doğru.
     fn apply_focus(&self, focused: bool) {
-        if matches!(self.inputs(), Inputs::Hermetic) {
+        // Kapı `run` **bayrağına** bakıyor, `inputs()`'a değil: `inputs()`
+        // `child::home()`'u argüman olarak çözüyor (passwd kaydına kadar
+        // gidebilir) ve odak her uygulama geçişinde değişiyor. `apply_reduce_motion`
+        // orada `inputs()` kullanabiliyor çünkü seyrek çağrılıyor; bu yol değil.
+        if self.ivars().run.is_some() {
             return;
         }
         if let Some(link) = self.ivars().link.get() {
             link.set_focused(focused);
         }
-    }
-
-    fn apply_reduce_motion(&self) {
-        let Some(link) = self.ivars().link.get() else {
-            return;
-        };
-        let setting = self.ivars().settings.borrow().reduce_motion;
-        link.set_reduce_motion(resolve_reduce_motion(&self.inputs(), setting, || {
-            NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
-        }));
     }
 
     /// Uygulamanın etkin görünümü koyu mu.

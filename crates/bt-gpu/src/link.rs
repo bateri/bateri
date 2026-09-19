@@ -1626,6 +1626,23 @@ impl DisplayLink {
     /// ([`crate::motion::Motion::set_reduce`]) ve yerleşmiş bir animasyon o
     /// dalda hiç çizilmeden uyuyor — istenmeseydi imleç ara hücrede ya da yarı
     /// saydam asılı kalırdı. Yerleşmiş imleçte ve aynı değerde no-op.
+    pub fn set_reduce_motion(&self, reduce: bool) {
+        let iv = self.delegate.ivars();
+        let mut motion = iv.motion.get();
+        let changed = motion.reduce() != reduce;
+        let finished = motion.set_reduce(reduce);
+        iv.motion.set(motion);
+        // **Değişimin kendisi kare istiyor, yalnız yarıda kalan animasyon
+        // değil.** Eski hâl `Motion` her animasyonun sahibiyken doğruydu;
+        // blink onun dışında yaşıyor ve kapısı yalnız **içerik** karesinde
+        // okunuyor (`Cursor::blink` ile birleşiyor). Boştaki bir pencerede
+        // Hareketi Azalt açılınca kare istenmezse blink sönmeye devam ederdi —
+        // `CLAUDE.md`'nin "açıkken blink hiç başlamaz" sözü yalan olurdu.
+        if finished || changed {
+            self.request_frame();
+        }
+    }
+
     /// Pencere odağı değişti — `bt-shell`'in `NSWindowDelegate`'i veriyor.
     ///
     /// **Aynı değerde no-op** (R7.2; emsal [`crate::Session::set_theme`]):
@@ -1642,23 +1659,6 @@ impl DisplayLink {
             return;
         }
         self.request_frame();
-    }
-
-    pub fn set_reduce_motion(&self, reduce: bool) {
-        let iv = self.delegate.ivars();
-        let mut motion = iv.motion.get();
-        let changed = motion.reduce() != reduce;
-        let finished = motion.set_reduce(reduce);
-        iv.motion.set(motion);
-        // **Değişimin kendisi kare istiyor, yalnız yarıda kalan animasyon
-        // değil.** Eski hâl `Motion` her animasyonun sahibiyken doğruydu;
-        // blink onun dışında yaşıyor ve kapısı yalnız **içerik** karesinde
-        // okunuyor (`Cursor::blink` ile birleşiyor). Boştaki bir pencerede
-        // Hareketi Azalt açılınca kare istenmezse blink sönmeye devam ederdi —
-        // `CLAUDE.md`'nin "açıkken blink hiç başlamaz" sözü yalan olurdu.
-        if finished || changed {
-            self.request_frame();
-        }
     }
 
     /// Ritmi **kalıcı olarak** keser: uyandırma mandalı iner, link durur ve
