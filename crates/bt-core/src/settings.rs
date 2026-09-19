@@ -241,6 +241,24 @@ pub const CURSOR_RADIUS: f32 = 0.10;
 /// çarpanı, yani "ikinci bir tasarım sabiti yok" kuralı korunuyor.
 pub const CURSOR_GLOW: f32 = 1.0;
 
+/// Blink'in **yarım periyodu** varsayılanı, saniye.
+///
+/// **Varsayılanın tek sahibi burası** ([`CURSOR_RADIUS`] ile aynı gerekçe):
+/// `bt-gpu` bunu import ediyor. Değer **seçilmiş, ölçülmemiş** — hedefi
+/// "yanıp söndüğü fark edilsin ama göz yormasın" ve bedeli doğrusal: 250 ms
+/// saniyede dört kare eder.
+pub const CURSOR_BLINK_INTERVAL: f64 = 0.5;
+
+/// Blink periyodunun kabul aralığı, saniye — **seçilmiş, ölçülmemiş**.
+///
+/// Alt uç tavanı durduruyor: 50 ms'lik bir yarım periyot saniyede 20 kare
+/// eder ve altına inmek terminali stroboskopa çevirirdi. **Kapı bunu
+/// göremiyor** ve bu yazılı olsun: süreli koşu ayar dosyasını hiç okumuyor,
+/// blink varsayılanı da kapalı, yani bozuk bir periyot `make duman`'ın
+/// `sessiz=` katını **hiçbir koşulda** kızartmaz (014 `teslim.md`: "koruma
+/// bir jeton değil varsayılanın kendisi"). Tek koruma bu aralık.
+const CURSOR_BLINK_RANGE: std::ops::RangeInclusive<f64> = 0.05..=5.0;
+
 /// Yarıçabın kabul aralığı; yarım = hücrenin yarısı, ötesi anlamsız.
 const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
 
@@ -436,9 +454,15 @@ pub struct Settings {
     pub cursor: CaretShape,
     /// `[terminal] cursor_blink`: imleç yanıp söner mi ([`CursorBlink`]).
     pub cursor_blink: CursorBlink,
-    /// `[terminal] cursor_radius` + `cursor_glow`: imlecin çizim sayıları
-    /// ([`CaretStyle`]). `TerminalOptions`'a girmiyor.
+    /// `[terminal] cursor_radius` + `cursor_glow` + `cursor_unfocused`:
+    /// imlecin çizim sayıları ([`CaretStyle`]). `TerminalOptions`'a girmiyor.
     pub caret: CaretStyle,
+    /// `[terminal] cursor_blink_interval`: blink'in **yarım periyodu**, saniye.
+    ///
+    /// [`Self::caret`]'ten ayrı alan, çünkü varış yeri ayrı: çizim sayıları
+    /// `Frame`'e, bu `bt_gpu::blink`'e gidiyor. `Changes::caret` ikisini
+    /// birden taşıyor — emsal `Changes::motion`'ın iki anahtarı.
+    pub blink_interval: f64,
     /// `[appearance] theme`: [`SYSTEM_THEME`] ya da tema **adı** —
     /// `themes/{ad}.toml` ya da gömülü bir tema. Ad biçim olarak geçerli (boş
     /// değil, `/` yok); var olup olmadığı dosya sistemi ister ve `bt-shell`'in
@@ -483,6 +507,7 @@ impl Default for Settings {
             cursor: CaretShape::default(),
             cursor_blink: CursorBlink::default(),
             caret: CaretStyle::default(),
+            blink_interval: CURSOR_BLINK_INTERVAL,
             theme: SYSTEM_THEME.to_owned(),
             light_theme: "bateri-light".to_owned(),
             dark_theme: "bateri".to_owned(),
@@ -578,6 +603,10 @@ cursor_glow = 1.0
 # hollow empties it to an outline, solid leaves it as it is. Either way a
 # blinking cursor stops blinking until the window is focused again.
 cursor_unfocused = "hollow"
+# 0.05 to 5.0. Half the blink period in seconds: the cursor stays lit this
+# long, then dark this long. Shorter costs more frames — 0.25 asks for four a
+# second — and 0.5 is a blink you notice without it tiring the eye.
+cursor_blink_interval = 0.5
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
@@ -708,6 +737,16 @@ integration = "auto"
                         &mut parsed.diagnostics,
                     ) as f32;
                 }
+                if let Some(item) = terminal.get("cursor_blink_interval") {
+                    parsed.settings.blink_interval = ranged_float(
+                        text,
+                        item,
+                        "terminal.cursor_blink_interval",
+                        CURSOR_BLINK_RANGE,
+                        fallback.blink_interval,
+                        &mut parsed.diagnostics,
+                    );
+                }
                 if let Some(item) = terminal.get("cursor_unfocused") {
                     parsed.settings.caret.unfocused = named_enum(
                         text,
@@ -738,6 +777,7 @@ integration = "auto"
                 parsed.settings.cursor = fallback.cursor;
                 parsed.settings.cursor_blink = fallback.cursor_blink;
                 parsed.settings.caret = fallback.caret;
+                parsed.settings.blink_interval = fallback.blink_interval;
             }
             None => {}
         }
@@ -904,7 +944,7 @@ integration = "auto"
             font: self.font != new.font,
             motion: self.cursor_motion != new.cursor_motion
                 || self.reduce_motion != new.reduce_motion,
-            caret: self.caret != new.caret,
+            caret: self.caret != new.caret || self.blink_interval != new.blink_interval,
         }
     }
 
@@ -1615,6 +1655,7 @@ mod tests {
             ("terminal", "cursor_radius"),
             ("terminal", "cursor_glow"),
             ("terminal", "cursor_unfocused"),
+            ("terminal", "cursor_blink_interval"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -1794,6 +1835,7 @@ mod tests {
             cursor: CaretShape::default(),
             cursor_blink: CursorBlink::default(),
             caret: CaretStyle::default(),
+            blink_interval: CURSOR_BLINK_INTERVAL,
             theme: "paper".to_owned(),
             light_theme: "chalk".to_owned(),
             dark_theme: "ink".to_owned(),

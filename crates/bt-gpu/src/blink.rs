@@ -32,7 +32,10 @@
 /// Periyodu kısaltmanın bedeli doğrusal: 250 ms'lik bir yarım periyot saniyede
 /// dört kare eder. Uzatmanın bedeli yok ama imleç "yanıp sönüyor" gibi
 /// okunmaz olur.
-const HALF_PERIOD: f64 = 0.5;
+/// **Varsayılanın tek sahibi `bt-core`** (016 R2): periyot artık bir ayar
+/// (`[terminal] cursor_blink_interval`) ve iki literal olsaydı dosyasız
+/// kullanıcı ile süreli koşu iki ayrı ritme bağlanırdı.
+const HALF_PERIOD: f64 = bt_core::CURSOR_BLINK_INTERVAL;
 
 /// Klavye sessizliğinden sonra blink'in durma süresi, saniye — **seçilmiş,
 /// ölçülmüş değil**; kaynağı kitty'nin `cursor_stop_blinking_after`
@@ -63,6 +66,13 @@ pub(crate) struct Blink {
     next_flip: Option<f64>,
     /// Son **içerik** karesinin damgası; [`IDLE_STOP`]'un tabanı.
     last_content_at: Option<f64>,
+    /// Yarım periyot, saniye — ayardan geliyor
+    /// (`[terminal] cursor_blink_interval`).
+    ///
+    /// Alan, `const` değil: kullanıcı kayıt anında değiştirebiliyor. Modülün
+    /// saflığı bozulmuyor — `Blink` hâlâ `Copy` ve `Cell` içinde yaşıyor,
+    /// emsal `Motion::set_style`.
+    half_period: f64,
 }
 
 impl Default for Blink {
@@ -77,6 +87,7 @@ impl Default for Blink {
             lit: true,
             next_flip: None,
             last_content_at: None,
+            half_period: HALF_PERIOD,
         }
     }
 }
@@ -96,11 +107,11 @@ impl Blink {
             // Kapanış fazı **açığa** bırakıyor (R9.1); açılış bir sonraki
             // yarım periyottan başlıyor.
             self.lit = true;
-            self.next_flip = enabled.then_some(now + HALF_PERIOD);
+            self.next_flip = enabled.then_some(now + self.half_period);
         } else if enabled && self.next_flip.is_none() {
             // Hareketsizlikten dönüş: sayaç yukarıda tazelendi, tik yeniden
             // kuruluyor.
-            self.next_flip = Some(now + HALF_PERIOD);
+            self.next_flip = Some(now + self.half_period);
         }
     }
 
@@ -122,7 +133,7 @@ impl Blink {
             return;
         }
         self.lit = true;
-        self.next_flip = Some(now + HALF_PERIOD);
+        self.next_flip = Some(now + self.half_period);
     }
 
     /// Zamanı ilerletir; dönen değer **bu karede faz değişti mi**.
@@ -155,8 +166,25 @@ impl Blink {
         // **Mutlak**, `due + HALF_PERIOD` değil `now + HALF_PERIOD`: uzun bir
         // uykudan sonra geçmişte kalmış bir tabandan saymak, arka arkaya
         // birkaç tiki hemen ateşlerdi.
-        self.next_flip = Some(now + HALF_PERIOD);
+        self.next_flip = Some(now + self.half_period);
         true
+    }
+
+    /// Periyodu değiştirir ve bekleyen tiki **yeniden kurar**.
+    ///
+    /// Yeniden kurmak şart, çünkü [`Blink::next_flip`] **mutlak** bir son
+    /// tarih: yalnız alanı yazmak, kaydedilen yeni ritmin bir flip **gecikmesi**
+    /// demek olurdu — kullanıcı kaydeder, hiçbir şey olmaz, sonraki sönmede
+    /// birden değişir. Aynı değerde hiçbir şey yapılmıyor, yoksa her ayar
+    /// kaydı fazı sıfırlardı.
+    pub(crate) fn set_half_period(&mut self, now: f64, half_period: f64) {
+        if self.half_period == half_period {
+            return;
+        }
+        self.half_period = half_period;
+        if self.next_flip.is_some() {
+            self.next_flip = Some(now + half_period);
+        }
     }
 
     /// Caret'in bu karedeki opaklığı; blink kapalıyken **her zaman `1.0`**.
@@ -208,6 +236,39 @@ mod tests {
         assert_eq!(blink.alpha(), 0.0);
         assert!(blink.advance(2.0 * HALF_PERIOD));
         assert_eq!(blink.alpha(), 1.0);
+    }
+
+    #[test]
+    fn a_new_interval_rebuilds_the_pending_tick() {
+        // **Yeniden kurmak şart**: `next_flip` mutlak bir son tarih, yani
+        // yalnız alanı yazmak kaydedilen ritmi bir flip **geciktirirdi** —
+        // kullanıcı kaydeder, hiçbir şey olmaz, sonraki sönmede birden
+        // değişir.
+        let mut blink = Blink::default();
+        blink.content_frame(0.0, true);
+        assert_eq!(blink.next_flip(), Some(0.5), "varsayılan yarım periyot");
+
+        // 2.0'da periyot kısalıyor: tik **o andan** itibaren yeniden kuruluyor.
+        blink.set_half_period(2.0, 0.1);
+        assert_eq!(blink.next_flip(), Some(2.1));
+        assert!(blink.advance(2.1), "yeni ritimde dönmedi");
+        assert_eq!(blink.next_flip(), Some(2.2), "yeni periyot sürmüyor");
+
+        // Aynı değer **hiçbir şey yapmıyor**: her ayar kaydı fazı
+        // sıfırlasaydı kaydeden kullanıcı imleci sürekli açığa çekerdi.
+        let before = blink;
+        blink.set_half_period(5.0, 0.1);
+        assert_eq!(blink, before, "aynı periyot fazı kıpırdattı");
+    }
+
+    #[test]
+    fn an_interval_change_while_stopped_arms_nothing() {
+        // Bekleyen tik yokken (blink kapalı ya da hareketsizlikte durmuş)
+        // periyot değişimi **tik doğurmamalı**: doğursaydı kapalı bir blink
+        // saat kurar ve boşta sıfır kare sözleşmesi kırılırdı.
+        let mut blink = Blink::default();
+        blink.set_half_period(1.0, 0.2);
+        assert_eq!(blink.next_flip(), None, "kapalı blink tik kurdu");
     }
 
     #[test]
