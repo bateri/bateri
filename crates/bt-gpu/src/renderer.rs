@@ -192,14 +192,16 @@ pub struct Renderer {
     /// `queue.device()` mesajı atmaya gerek yok.
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    /// Hücre arka planlarını ve imleci çizen pipeline; instanced quad.
+    /// Hücre arka planlarını, blok şeritlerini ve dock zeminini çizen
+    /// pipeline; instanced quad.
     ///
-    /// **Alfa blend açık ve tek müşterisi imleç:** arka planların alfası her
-    /// zaman `1.0` ([`bt_core::LinearRgba`]'nın tek kurucusu öyle yazıyor),
-    /// yani onlar için blend'in sonucu opak yazmayla birebir aynı. Belirme
-    /// (Hareketi Azalt) imlecin dikdörtgenini `1.0`'ın altına indiren tek yol
-    /// ve o dikdörtgen bu listenin **son** instance'ı, yani altındaki hücre
-    /// arka planının üstüne karışıyor.
+    /// **İmleç artık burada değil** (015 phase-2): caret kendi fragment'ine
+    /// taşındı ([`Renderer::caret`]). Blend bu pipeline'da açık kalıyor ama
+    /// **bugün müşterisi yok** — arka planların alfası her zaman `1.0`
+    /// ([`bt_core::LinearRgba`]'nın tek kurucusu öyle yazıyor), yani sonuç
+    /// opak yazmayla birebir aynı. Açık bırakılmasının sebebi alfayı
+    /// isteyecek ilk tüketicinin (seçim vurgusu, dock zemini) bu pipeline'dan
+    /// geçecek olması; kapatmak o günü sessiz bir kusura çevirirdi.
     cell_bg: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Glyph'leri çizen pipeline; aynı quad, atlas örneklemesi.
     ///
@@ -207,6 +209,13 @@ pub struct Renderer {
     /// ve imleç uniform'unu okuyor. (Blend durumu artık ikisinde de aynı, yani
     /// ayrılığın sebebi değil.)
     cell: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Caret'i çizen pipeline; **aynı vertex**, ayrı fragment.
+    ///
+    /// Üçüncü pipeline olmasının sebebi `cell_bg`'den ayrı bir şekil dili:
+    /// yuvarlak köşe, kenar ve hale bir SDF istiyor ve o hesabı her arka plan
+    /// dörtgenine ödetmek kare başına binlerce fragment'e bedel bindirirdi.
+    /// Vertex paylaşılıyor, yani ikinci bir köşe yolu yok (R2).
+    caret: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Son **gönderilen** karedeki arka plan hücresi sayısı; `make duman`'ın
     /// `hucre=K` jetonu. `frames`'in yanında duruyor çünkü ikisi de aynı
     /// soruya bakan tanı sayaçları ve tek yerden okunmaları gerekiyor.
@@ -290,10 +299,14 @@ impl Renderer {
         // kapsama maskesi, renk instance'tan. Blend lineer uzayda koşuyor ve
         // sebebi tam olarak bu (`PIXEL_FORMAT` → `_sRGB`).
         let cell = pipeline(&device, &library, "cell_vertex", "cell_fragment")?;
+        // Caret: `cell_bg_vertex`'i paylaşıyor, fragment'i ayrı. Blend zaten
+        // açık ve burada **zorunlu** — hale tanımı gereği yarı saydam.
+        let caret = pipeline(&device, &library, "cell_bg_vertex", "caret_fragment")?;
         let queue = device.newCommandQueue().ok_or(GpuError::NoCommandQueue)?;
 
         Ok(Self {
             device,
+            caret,
             queue,
             cell_bg,
             cell,
@@ -638,7 +651,15 @@ impl Renderer {
             // renkle çiziliyor. Bu yuva caret ızgaradayken doluyor; dock
             // bandına girmişse liste boş ve instance aşağıdaki dock
             // encode'unda çiziliyor ([`Frame::push_caret`]).
-            .and_then(|()| self.encode_quads(&enc, frame.grid_caret().as_slice(), viewport_px))
+            .and_then(|()| {
+                self.encode_caret(
+                    &enc,
+                    frame.grid_caret().as_slice(),
+                    frame.caret_core(),
+                    frame.caret_sdf(),
+                    viewport_px,
+                )
+            })
             .and_then(|()| {
                 self.encode_glyphs(
                     &enc,
@@ -712,7 +733,13 @@ impl Renderer {
             // bandına taşıyor ve bu encode en sonda olduğu için her şeyin
             // üstünde kalıyor — yarısı kırpılmış bir blok görünmüyor.
             .and_then(|()| {
-                self.encode_quads(enc, frame.dock_caret(origin_y).as_slice(), viewport_px)
+                self.encode_caret(
+                    enc,
+                    frame.dock_caret(origin_y).as_slice(),
+                    frame.caret_core(),
+                    frame.caret_sdf(),
+                    viewport_px,
+                )
             })
             .and_then(|()| {
                 self.encode_glyphs(
@@ -736,7 +763,7 @@ impl Renderer {
     /// Kare başına yeni tampon: üçlü tamponlama bilinçli olarak reddedildi
     /// (002 discussion.md → Muhakeme), `/measure` sonrası yeniden bakılır.
     /// Komut tamponu buffer'ı tamamlanana kadar tutar. Karar **burada** tek
-    /// yerde: iki pipeline da bu fonksiyondan geçiyor, yani değişirse ikisi
+    /// yerde: her çizim yolu bu fonksiyondan geçiyor, yani değişirse hepsi
     /// birden değişir.
     fn instance_buffer<T>(
         &self,
@@ -778,14 +805,60 @@ impl Renderer {
             return Ok(());
         }
         // Düzen `Instance`'ın `offset_of` assert'leriyle `cell_bg.metal`'e bağlı.
-        let buffer = self.instance_buffer(instances)?;
-
         enc.setRenderPipelineState(&self.cell_bg);
-        // İndeksler `cell_bg.metal`'in `[[buffer(0)]]` / `[[buffer(1)]]`
-        // bildirimleriyle aynı.
+        self.draw_quads(enc, instances, viewport_px)
+    }
+
+    /// Caret'i encode eder — [`Renderer::encode_quads`]'ın kardeşi, tek farkı
+    /// üçüncü pipeline ve iki fragment uniform'u.
+    ///
+    /// Dilim ya boş ya **tek** elemanlı: caret kare başına tek dörtgen ve iki
+    /// yuvadan yalnız biri dolu ([`Frame::push_caret`]). `&[Instance]` alması
+    /// yine de doğru — `as_slice()` çağrı yerlerinde `Option`'ı dilime
+    /// çeviriyor ve boş dal `encode_quads`'takiyle aynı sebeple erken dönüyor
+    /// (sıfır uzunluklu `newBufferWithBytes` Metal doğrulamasında geçersiz).
+    fn encode_caret(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        instances: &[Instance],
+        core: [f32; 4],
+        shape: [f32; 4],
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
+        if instances.is_empty() {
+            return Ok(());
+        }
+        // **Uniform kare başına tek, instance sayısı değil.** İki caret
+        // girdiği gün ikisi de aynı `core` dikdörtgenine göre SDF hesaplar ve
+        // ikincisi ya boş ya tuhaf kırpılmış çıkar — sessiz bir kusur
+        // (`/code-review`). Sözleşme doc'ta yazılıydı, artık koda da bağlı.
+        debug_assert!(instances.len() == 1, "caret kare başına tek dörtgen");
+        enc.setRenderPipelineState(&self.caret);
+        // İndeksler `cell_bg.metal`'deki `caret_fragment`'in bildirimleriyle
+        // aynı; fragment'in tampon alanı vertex'inkinden **ayrı**.
+        fragment_uniform(enc, &core, 0);
+        fragment_uniform(enc, &shape, 1);
+        self.draw_quads(enc, instances, viewport_px)
+    }
+
+    /// İki çizim yolunun **ortak gövdesi**: tampon + vertex uniform'u + çizim.
+    ///
+    /// Ayrı fonksiyon, çünkü kare başına tampon ayırma kararı tek yerde
+    /// kalmalı ([`Renderer::instance_buffer`]'ın doc'u bunu söylüyordu ve
+    /// caret kendi encode'unu kazanınca gövde ikiye kopyalanmıştı). Üçlü
+    /// tamponlamaya geçilirse ya da çizim çağrısı değişirse tek yer değişiyor.
+    ///
+    /// Pipeline ve fragment uniform'ları **çağıranın**: ikisi de yola göre
+    /// ayrışan tek şey.
+    fn draw_quads(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        instances: &[Instance],
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
+        let buffer = self.instance_buffer(instances)?;
         vertex_uniform(enc, &viewport_px, 1);
-        // SAFETY: tampon bu blok boyunca yaşıyor; dörtlü köşe vertex_id'den
-        // türetildiği için vertex buffer'da köşe verisi yok.
+        // SAFETY: tampon bu blok boyunca yaşıyor; köşe verisi `vertex_id`'den.
         unsafe {
             enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
             enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
@@ -908,7 +981,7 @@ fn fragment_uniform<T>(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, value:
 /// biri" demekle yetinirdi — metallib'de hangisinin olmadığını okuyanın
 /// aramasına bırakırdı.
 ///
-/// Blend **parametre değil**: iki pipeline da onu istiyor ve sebepleri ayrı —
+/// Blend **parametre değil**: üç pipeline da onu istiyor ve sebepleri ayrı —
 /// `cell` alfayı atlasın kapsamasından üretiyor, `cell_bg`'de imlecin
 /// belirmesi ([`crate::motion`]) dikdörtgeni saydamlaştırıyor. Bir `enum`
 /// parametresi 008 phase-5'e kadar iki değer taşıyordu; tek değere düşünce
@@ -1193,6 +1266,13 @@ mod tests {
         CellMetrics::new(width, height, 0, 1).expect("sıfır olmayan hücre")
     }
 
+    /// Payı **sıfır olmayan** ızgara: halenin payı sol paydan türüyor
+    /// ([`Frame::glow_px`]), yani paysız bir ızgarada hale hiç doğmuyor ve
+    /// onu sınayan hiçbir şey göremez.
+    fn grid_with_gutter(width: u16, height: u16, gutter: u16) -> CellMetrics {
+        CellMetrics::new(width, height, gutter, 1).expect("sıfır olmayan hücre")
+    }
+
     /// Yalnız arka planı olan hücre; `ch: None` glyph üretmez.
     fn bg_cell(col: u16, row: u16, bg: LinearRgba) -> Cell {
         Cell {
@@ -1430,6 +1510,43 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// Hücrenin **orta bandı**: üstten ve alttan yarıçap kadar çekilmiş,
+    /// genişliği tam.
+    ///
+    /// Caret'in köşesi yuvarlandığından (015 phase-2) köşe pikselleri artık
+    /// bloğun rengi değil; oradan geçen bir eşitlik iddiası **yuvarlaklığı**
+    /// sınar, dolguyu değil. Çekme iddiayı zayıflatmıyor **ayırıyor**: bantta
+    /// eşitlik hâlâ bit bit, köşenin kendi bekçisi ayrı
+    /// ([`the_caret_corner_is_rounded`]).
+    ///
+    /// **Yalnız satırlar çekiliyor, sütunlar değil:** yuvarlaklık köşelerde
+    /// ve `radius` ile `ch - radius` arasındaki her satırda şekil hücrenin
+    /// **tam genişliğini** kaplıyor. Sütunları da çekmek dar hücrede bandı
+    /// büsbütün yutardı (yarıçap hücre yüksekliğinden türüyor ve dar bir
+    /// hücrede genişliğin yarısına yaklaşabiliyor).
+    fn cell_body(
+        pixels: &[u8],
+        edge: usize,
+        cell_px: (u16, u16),
+        col: usize,
+        inset: usize,
+    ) -> Vec<(u8, u8, u8)> {
+        let (cw, ch) = (usize::from(cell_px.0), usize::from(cell_px.1));
+        assert!(inset * 2 < ch, "içeri çekme hücreyi yutuyor");
+        (inset..ch - inset)
+            .flat_map(|y| (0..cw).map(move |x| (x, y)))
+            .map(|(x, y)| pixel_at(pixels, edge, col * cw + x, y))
+            .collect()
+    }
+
+    /// Caret'in köşe yarıçapı bu hücre ölçüsünde kaç piksel — sınamaların
+    /// çekme payı. **Üretimin kendi fonksiyonundan** okuyor, kopyasından
+    /// değil: formül üç yerde yazılıydı ve biri değişince bekçi sessizce
+    /// gevşerdi (`/code-review`).
+    fn caret_radius_px(cell_px: (u16, u16)) -> usize {
+        crate::frame::caret_radius_px((f32::from(cell_px.0), f32::from(cell_px.1))).ceil() as usize
     }
 
     /// Offscreen sınamaların ortak kurulumu: hücre ölçüsü + sığma kontrolü.
@@ -2292,7 +2409,13 @@ mod tests {
         push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
-        let cell = |col| cell_rows(&pixels, EDGE, (cw, ch), col).concat();
+        // **İddia ikiye ayrıldı, toleransa çevrilmedi** (015 phase-2): caret'in
+        // köşesi artık yuvarlak, yani köşe pikselleri bloğun rengi değil ve
+        // oradan geçen bir eşitlik yuvarlaklığı sınardı. Gövdede eşitlik hâlâ
+        // **bit bit**; köşenin ve halenin kendi bekçileri ayrı
+        // ([`the_caret_corner_is_rounded`], [`the_caret_glow_spills_but_stops`]).
+        let inset = caret_radius_px((cw, ch));
+        let cell = |col| cell_body(&pixels, EDGE, (cw, ch), col, inset);
         let (a, b, c) = (cell(0), cell(1), cell(2));
 
         assert_eq!(
@@ -2300,6 +2423,187 @@ mod tests {
             "imleç altındaki harf metin rengiyle çizilmedi (A ≠ B)"
         );
         assert_ne!(a, c, "imleç dikdörtgeni harfin rengini hiç ezmedi (A = C)");
+    }
+
+    #[test]
+    fn a_degenerate_caret_shape_paints_the_old_rectangle() {
+        // **Geri alma yolunun bekçisi** (R8): "yarıçap 0, hale 0" desteklenen
+        // ve sınanan bir hâl olmalı, yani çıktısı 014'ün düz dörtgeniyle bit
+        // bit aynı. Ancak GPU söyleyebilir — dejenere kolda fragment `step`,
+        // açık kolda `smoothstep` kullanıyor ve ikisinin kenar pikselleri
+        // ayrışır. `smoothstep` o kola sızarsa burası kızarır.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+
+        let mut frame = Frame::default();
+        frame.clear(grid(cw, ch));
+        frame.force_caret_sdf([0.0; 4]);
+        // A: caret, dejenere şekille. B: aynı rengin düz arka planı — yani
+        // caret'in kendi pipeline'ından önceki hâli.
+        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
+        frame.push(bg_cell(1, 0, ACCENT));
+
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+        let cell = |col| cell_rows(&pixels, EDGE, (cw, ch), col).concat();
+        assert_eq!(
+            cell(0),
+            cell(1),
+            "dejenere caret düz dörtgenden ayrıştı: geri alma yolu bozuk"
+        );
+    }
+
+    #[test]
+    fn the_caret_corner_is_rounded() {
+        // Yarıçapın kendi bekçisi. `glyph_under_the_cursor_...` köşeleri
+        // bilerek dışarıda bırakıyor (orta bant); yuvarlaklığın **gerçekten**
+        // olduğunu söyleyen tek yer burası.
+        //
+        // **Referans caret'in DIŞINDAN** (`/code-review`): önceki hâli
+        // karşılaştırmayı caret'in kendi karşı köşesiyle yapıyordu ve SDF
+        // simetrik olduğu için iki köşenin `d`'si her zaman eşit — iddia
+        // hiçbir yarıçap değerinde düşemeyen bir totolojiydi. Ölçü de artık
+        // "eşit/farklı" değil **boyanma oranı**: köşe merkezden belirgin
+        // biçimde daha sönük olmalı.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
+
+        let mut frame = Frame::default();
+        frame.clear(grid(cw, ch));
+        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
+        // **Yarıçap açıkça veriliyor, üretim oranından alınmıyor.** Sınanan
+        // şey shader'ın yuvarlaması; üretim oranı (`CARET_RADIUS_RATIO`) bir
+        // zevk sayısı ve 1x'te ~1.6 px'e denk geliyor, yani köşe pikselinin
+        // çoğu hâlâ boyalı — o oranla kurulan bir eşik hücre boyuna göre
+        // kızarır ve bekçi zamanla yalancı olurdu.
+        let radius = f32::from(cw.min(ch)) / 2.0;
+        frame.force_caret_sdf([radius, 0.0, 0.0, 0.0]);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+
+        let sum = |x, y| {
+            let (r8, g8, b8) = pixel_at(&pixels, EDGE, x, y);
+            u32::from(r8) + u32::from(g8) + u32::from(b8)
+        };
+        // Referans caret'in **dışından** (`/code-review`): önceki hâli
+        // karşılaştırmayı caret'in kendi karşı köşesiyle yapıyordu ve SDF
+        // simetrik olduğu için iki köşenin `d`'si her zaman eşit — iddia
+        // hiçbir yarıçapta düşemeyen bir totolojiydi.
+        let clear = sum(EDGE - 1, EDGE - 1);
+        let middle = sum(usize::from(cw) / 2, usize::from(ch) / 2);
+        assert!(middle > clear, "caret'in ortası boyanmamış");
+        assert_eq!(sum(0, 0), clear, "köşe boyalı: shader yuvarlamıyor");
+    }
+
+    #[test]
+    fn a_hollow_caret_paints_only_its_edge() {
+        // **Kenar kolu ölü sevk edilmesin** (`/code-review`). `caret_shape()`
+        // `stroke`'u bu sürümde sabit 0 veriyor, yani shader'ın `stroke > 0`
+        // dalı hiç koşmamış olurdu ve phase-3 onu "zaten yazılmış ve geçmiş"
+        // sanarak açardı. Sınama o dalı **şimdi** sürüyor.
+        //
+        // İkinci iş: `body -= inner` çıkarması kalın bir kenarda gövdeyi
+        // tümden sıfırlayabilir. Kenar burada hücrenin dörtte biri, yani
+        // ortası gerçekten boş kalmalı ama caret görünmez olmamalı.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
+
+        let mut frame = Frame::default();
+        frame.clear(grid(cw, ch));
+        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
+        // Yarıçap ve hale kapalı; sınanan tek şey kenar bandı.
+        let stroke = (f32::from(cw) / 4.0).max(1.0);
+        frame.force_caret_sdf([0.0, stroke, 0.0, 0.0]);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+
+        let sum = |x, y| {
+            let (r8, g8, b8) = pixel_at(&pixels, EDGE, x, y);
+            u32::from(r8) + u32::from(g8) + u32::from(b8)
+        };
+        let clear = sum(EDGE - 1, EDGE - 1);
+        let edge = sum(0, usize::from(ch) / 2);
+        let middle = sum(usize::from(cw) / 2, usize::from(ch) / 2);
+        assert!(edge > clear, "içi boş caret'in kenarı da çizilmedi");
+        assert_eq!(middle, clear, "içi boş caret'in ortası boyalı");
+    }
+
+    #[test]
+    fn the_caret_glow_spills_but_stops() {
+        // **Hale dikdörtgenin DIŞINDA örnekleniyor** (R6): içeriden bakan bir
+        // sınama haleyi göremez, çünkü orada gövde zaten opak.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        // Pay sınamada **üretimdekinden geniş** (varsayılan ~8): hale
+        // söndükçe (0.35 → 0.10) 8 bitlik hedefte fark kuantalamaya
+        // gömülüyor ve bekçi körleşiyor. Geniş pay örneklenen noktayı
+        // halenin tepesine yaklaştırıyor; sınanan şey oran, mutlak piksel değil.
+        const GUTTER: u16 = 16;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
+
+        let mut frame = Frame::default();
+        frame.clear(grid_with_gutter(cw, ch, GUTTER));
+        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+
+        // Caret payın sağından başlıyor: x ∈ [GUTTER, GUTTER + cw].
+        let right = usize::from(GUTTER) + usize::from(cw);
+        // Pay üretimdeki türetmenin **aynısı**: oran değişince bekçi de
+        // kayar, yoksa hale küçülünce sınama boş bir noktaya bakardı.
+        let pad = (f32::from(GUTTER) * crate::frame::CARET_GLOW_RATIO) as usize;
+        let y = usize::from(ch) / 2;
+        assert!(
+            right + pad + 2 < EDGE,
+            "örnekleme noktaları dokuya sığmıyor"
+        );
+
+        // Referans **uzaktan**: halenin ulaşamayacağı köşe. Sınırın hemen
+        // ötesini referans almak dairesel olurdu — o nokta zaten sınanan şey.
+        let clear = pixel_at(&pixels, EDGE, EDGE - 1, EDGE - 1);
+        let inside_glow = pixel_at(&pixels, EDGE, right + pad / 2, y);
+        assert_ne!(inside_glow, clear, "dikdörtgenin dışında hale yok");
+        assert_eq!(
+            pixel_at(&pixels, EDGE, right + pad + 2, y),
+            clear,
+            "hale payın ötesinde de boyuyor: sınırsız"
+        );
+    }
+
+    #[test]
+    fn the_caret_glow_fades_with_the_caret() {
+        // Hale caret'in kendi alfasıyla **çarpılıyor**, yani blink sönerken
+        // hale de sönüyor (R6). Bekçi yine **dışarıdan** örnekliyor:
+        // `cursor_alpha_is_blended_on_the_gpu` yalnız caret'in kendi hücresine
+        // bakıyor ve bu belirtiyi göremez.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        // Geniş pay: kardeş bekçiyle aynı gerekçe (kuantalama).
+        const GUTTER: u16 = 16;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
+        let y = usize::from(ch) / 2;
+        let pad = (f32::from(GUTTER) * crate::frame::CARET_GLOW_RATIO) as usize;
+        let at = usize::from(GUTTER) + usize::from(cw) + pad / 2;
+        // `pixel_at` x'i sınırlamıyor: taşan bir indeks panik değil **bir alt
+        // satırın** pikselini okur, yani sınama sessizce yanlış iddia eder
+        // (`/code-review`). `fitting_cell_px` payı hiç görmüyor.
+        assert!(at < EDGE, "örnekleme noktası dokuya sığmıyor");
+
+        let sample = |alpha: f32| {
+            let mut frame = Frame::default();
+            frame.clear(grid_with_gutter(cw, ch, GUTTER));
+            frame.push_caret([0.0, 0.0], BACKGROUND, ACCENT, alpha, CaretShape::Block);
+            let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+            let (r8, g8, b8) = pixel_at(&pixels, EDGE, at, y);
+            u32::from(r8) + u32::from(g8) + u32::from(b8)
+        };
+
+        // Sönük caret hiç çizilmiyor, yani o noktada clear rengi kalıyor;
+        // sıralama üç uçta da kesin ve renk tablosu gerektirmiyor.
+        let (dark, half, full) = (sample(0.0), sample(0.5), sample(1.0));
+        assert!(
+            dark < half && half < full,
+            "hale caret'in alfasını izlemiyor: {dark} / {half} / {full}"
+        );
     }
 
     #[test]
