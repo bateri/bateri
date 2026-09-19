@@ -99,6 +99,10 @@ cursor_radius = 0.10
 # 1 is the designed amount. It scales both how far the shadow reaches and how
 # dark it is, because those two are one feeling, not two.
 cursor_glow = 1.0
+# "hollow" | "solid". What the cursor does while the window is not focused:
+# hollow empties it to an outline, solid leaves it as it is. Either way a
+# blinking cursor stops blinking until the window is focused again.
+cursor_unfocused = "hollow"
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;

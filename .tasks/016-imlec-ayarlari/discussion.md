@@ -215,3 +215,28 @@ doc'una bu cümle ekleniyor, ayna betimleyici olarak işaretleniyor.
   ayarladığını adlandırıyor, hangi struct'ın taşıdığını değil.
 - **Reddedilenler:** `[motion]`'a taşımak (yarıçap ve gölge hareket değil),
   üç bölüme bölmek (imleç ayarları dağılırdı), `IDLE_STOP`'u açmak.
+
+
+## Karar 6: odaksız imlecin görünüşü (2026-09-20, kullanıcı)
+
+**Karar: ayara açılıyor** — `[terminal] cursor_unfocused`, varsayılan
+`"hollow"` (bugünkü davranış), alternatifi `"solid"`.
+
+**Nasıl geldi:** kullanıcı odak kaybında içi boşalan imleci günlük kullanımda
+yadırgadı ve "böyle mi olması lazımdı anlamadım" diye sordu. Soru kusur raporu
+diye okunup bir tanı turu koşuldu; **ölçüm davranışın doğru ve anında
+olduğunu** gösterdi (her `apply_focus`'u hemen bir içerik karesi izliyor, kapı
+hep açık). Yani mesele kusur değil **zevk**.
+
+Üç seçenek sunuldu ve kullanıcı üçüncüyü seçti:
+
+1. Kalsın — macOS terminallerinin ortak davranışı.
+2. Kalksın — tek satır, kod azalır.
+3. **Ayar olsun** — tesisat zaten phase-1'de kuruldu, bir anahtar daha.
+
+**Gerekçe:** set tam da imlecin görünüşünü kullanıcıya vermek için açıldı;
+"beğenmezsem kapatırım" demek onun işi, bizim değil.
+
+**Yan kazanç, adıyla:** tanı turu gerçek ama **latent** bir kusur buldu —
+hareket karesi odağın bayat kopyasını taşıyordu (`ddf6c4f`). Kullanıcının
+gördüğü şey o değildi ve bu kayda geçsin: düzeltme doğru, teşhis yanlıştı.

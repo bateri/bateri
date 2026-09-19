@@ -270,10 +270,29 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   (tema değişimi zaten kare istiyor), ama "palet tek kaynak" cümlesini
   harfiyen ihlal ediyor (`/audit`, 008 kapısı; 008 öncesinden beri var).
   Çaresi ucuz: `frame()` kullandığı temayı döndürsün.
+- **Var olan ayar dosyası yeni anahtarları hiç görmüyor.** Şablon kullanıcının
+  diskine **yalnız dosya yokken** yazılıyor (`settings::create_if_missing`);
+  var olan dosyaya yazan tek yol View ▸ Theme ▸ ve o da yalnız
+  `[appearance] theme` satırını değiştiriyor. Sonuç: her yeni anahtarla
+  kullanıcının dosyası bir adım geriye düşüyor — **yeni anahtarlar yok** ve
+  **eski yorumlar bayat** kalıyor (016'da iki kez elle tazelendi: kullanıcının
+  `cursor_blink` açıklaması hâlâ 014 öncesi metni taşıyordu). Belirti sessiz:
+  anahtarı bilmeyen onu arayamaz. Çare eksik anahtarları **yorumlarıyla**
+  dolduran bir yol; `toml_edit` zaten bunun için seçildi (yorumlar ve bilinmeyen
+  anahtarlar yerinde kalsın diye), yani altyapı hazır. **Var olan dosyaya
+  yazmak yeni bir yazma yolu**, yani mimari karar: kimin tetiklediği (açılış mı,
+  Settings… mi), yedek alınıp alınmayacağı ve kullanıcının sildiği bir
+  anahtarın geri gelip gelmeyeceği kararlaşmadan inmez. Kaynak: 016
+  `phase-1.md`/`phase-3.md` → Uygulama Notları.
 - **Ayar ayrıştırmasının beş kopyası.** `osc52`, `cursor_motion` ve
   `reduce_motion` aynı "şu üç dizgeden biri, değilse tanı bırak ve
   varsayılana düş" örüntüsünü elle tekrarlıyor; her enum'un `name()`'i de
   ayrıştırıcının kollarıyla **elle** eşleşiyor (`/code-review`, 008 kapısı).
+  *(2026-09-20, 016: yardımcı **doğdu** — `named_enum`, `cursor_unfocused` ile
+  birlikte. Beş kopya taşınmadı, çünkü her birinin tanı cümlesi kendi
+  sözcükleriyle yazılı ve taşımak mesajları tek turda değiştirirdi. Ondalık
+  tarafın ikizi `ranged_float` da aynı sette doğdu ve `line_height` ona
+  **taşındı**; `font_size` tek uçlu olduğu için kaldı.)*
   Dördüncü anahtar altıncı kopyayı doğurur. Çare bir yardımcı
   (`(anahtar, &[(dizge, değer)], varsayılan)`), yeri bir sonraki ayar seti —
   yeni anahtar eklemeden yapılırsa hiçbir davranış değişmez.

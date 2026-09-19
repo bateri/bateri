@@ -70,7 +70,9 @@ büyütüp caret'i dock yuvasına kaydırsaydı caret ızgaranın glyph'lerinden
 çizilir ve altındaki harfi boyardı. `caret_rect` bu yüzden **iki** dikdörtgen
 veriyor — boyanan ve ters çevirmenin opak içi; dolu caret'te eşitler. "Yarıçap 0, hale 0" kolu **desteklenen ve sınanan** bir hâl:
 çıktısı düz dörtgenle bit bit aynı ve geri alma yolu o.
-**Odakta olmayan pencerede caret'in içi boşalıyor** ve blink duruyor: kenar
+**Odakta olmayan pencerede caret'in içi boşalıyor** (`[terminal]
+cursor_unfocused`; `"solid"` bunu kapatıyor ve blink'in durmasına
+**dokunmuyor** — iki ayrı sinyal) ve blink duruyor: kenar
 kalınlığı yine `rule_px`, ters çevirme ise **kalkıyor** — boyanmayan bir
 pikselin altındaki harf kendi rengiyle kalmak zorunda, yoksa çerçevenin
 ortasındaki metin zemin renginde çizilir ve görünmez olurdu. `caret_rect`'in

@@ -2471,6 +2471,7 @@ mod tests {
             CaretStyle {
                 radius_ratio: 0.0,
                 glow: 0.0,
+                ..CaretStyle::default()
             },
         );
         // A: caret, dejenere şekille. B: aynı rengin düz arka planı — yani
@@ -2516,6 +2517,7 @@ mod tests {
                 // Dar kenarın yarısı: blok bir stadyuma dönüyor.
                 radius_ratio: 0.5,
                 glow: 0.0,
+                ..CaretStyle::default()
             },
         );
         push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
@@ -2621,6 +2623,7 @@ mod tests {
                 CaretStyle {
                     radius_ratio: 0.0,
                     glow,
+                    ..CaretStyle::default()
                 },
             );
             push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);

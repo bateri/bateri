@@ -17,7 +17,7 @@
 use std::mem::offset_of;
 
 use bt_atlas::{Face, RuleKind};
-use bt_core::{Block, CaretShape, CaretStyle, Cell, LinearRgba, UnderlineStyle};
+use bt_core::{Block, CaretShape, CaretStyle, Cell, LinearRgba, UnderlineStyle, UnfocusedCaret};
 
 use crate::renderer::CellMetrics;
 
@@ -843,7 +843,13 @@ impl Frame {
         // hiçbir şey — üstelik kenar kalınlığı `rule_px` ve şeridin kendi
         // kalınlığı da o, yani çıkarma gövdeyi tümden yutardı. O şekillerde
         // odaksızlığın sinyali blink'in durması.
-        let hollow = !focused && matches!(shape, CaretShape::Block);
+        //
+        // **Üçüncü terim kullanıcının** (`[terminal] cursor_unfocused`):
+        // `"solid"` içi boşalmayı kapatıyor ve blink'e **dokunmuyor** — odakta
+        // blink'in durması 015'in ayrı kararı, ikisi ayrı sinyal.
+        let hollow = !focused
+            && matches!(shape, CaretShape::Block)
+            && self.caret_style.unfocused == UnfocusedCaret::Hollow;
         self.caret_hollow = hollow;
         self.caret_focused = focused;
         let pos = self.pos_at(at);
@@ -1536,6 +1542,34 @@ mod tests {
             [0.0; 4],
             "ters çevirme kalkmalıydı"
         );
+    }
+
+    #[test]
+    fn the_unfocused_setting_keeps_the_caret_solid() {
+        // `[terminal] cursor_unfocused = "solid"`: odak gitse de içi boşalmıyor
+        // ve **ters çevirme de duruyor** — ikisi tek karardan.
+        let mut frame = Frame::default();
+        frame.clear(
+            grid(9, 18),
+            CaretStyle {
+                unfocused: UnfocusedCaret::Solid,
+                ..CaretStyle::default()
+            },
+        );
+        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
+        assert_eq!(frame.caret_sdf()[1], 0.0, "solid iken içi boşaldı");
+        assert_ne!(
+            frame.cursor_block().rect,
+            [0.0; 4],
+            "solid iken ters çevirme kalktı"
+        );
+
+        // Varsayılan (`hollow`) aynı girdide boşaltıyor: ayrım gerçekten
+        // anahtardan geliyor, başka bir şeyden değil.
+        let mut lit = Frame::default();
+        lit.clear(grid(9, 18), CaretStyle::default());
+        lit.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
+        assert!(lit.caret_sdf()[1] > 0.0, "hollow iken içi dolu kaldı");
     }
 
     #[test]

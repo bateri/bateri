@@ -248,6 +248,30 @@ const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
 /// alfa 0.30 eder, yani 015'te reddedilen neonun (0.35) hâlâ altında.
 const CURSOR_GLOW_RANGE: std::ops::RangeInclusive<f64> = 0.0..=3.0;
 
+/// `[terminal] cursor_unfocused`: odakta olmayan pencerede imleç ne olsun.
+///
+/// 015 odak kaybında imlecin içini boşaltıyor; bu anahtar onu kapatıyor.
+/// **Blink'e dokunmuyor** — odakta blink'in durması ayrı bir sinyal ve ayrı
+/// bir karar (015 R7.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnfocusedCaret {
+    /// İçi boşalır: çerçeve kalır, dolgu gider. Bugünkü davranış.
+    #[default]
+    Hollow,
+    /// Hiç değişmez; odaksızlığın tek işareti blink'in durması.
+    Solid,
+}
+
+impl UnfocusedCaret {
+    /// Ayar dosyasındaki yazılışı; ayrıştırıcının kabul ettikleriyle **aynı**.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hollow => "hollow",
+            Self::Solid => "solid",
+        }
+    }
+}
+
 /// `[terminal] cursor_radius` ve `cursor_glow`: imlecin **çizim** sayıları.
 ///
 /// `TerminalOptions`'a **girmiyor** ve `Session` görmüyor: ikisi de terminalin
@@ -260,6 +284,8 @@ pub struct CaretStyle {
     pub radius_ratio: f32,
     /// Gölgenin gücü; `0.0` kapalı, `1.0` tasarımın kendi ölçüsü.
     pub glow: f32,
+    /// Odakta olmayan pencerede imlecin hâli.
+    pub unfocused: UnfocusedCaret,
 }
 
 impl Default for CaretStyle {
@@ -267,6 +293,7 @@ impl Default for CaretStyle {
         Self {
             radius_ratio: CURSOR_RADIUS,
             glow: CURSOR_GLOW,
+            unfocused: UnfocusedCaret::default(),
         }
     }
 }
@@ -547,6 +574,10 @@ cursor_radius = 0.10
 # 1 is the designed amount. It scales both how far the shadow reaches and how
 # dark it is, because those two are one feeling, not two.
 cursor_glow = 1.0
+# "hollow" | "solid". What the cursor does while the window is not focused:
+# hollow empties it to an outline, solid leaves it as it is. Either way a
+# blinking cursor stops blinking until the window is focused again.
+cursor_unfocused = "hollow"
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
@@ -676,6 +707,20 @@ integration = "auto"
                         f64::from(fallback.caret.radius_ratio),
                         &mut parsed.diagnostics,
                     ) as f32;
+                }
+                if let Some(item) = terminal.get("cursor_unfocused") {
+                    parsed.settings.caret.unfocused = named_enum(
+                        text,
+                        item,
+                        "terminal.cursor_unfocused",
+                        &[
+                            ("hollow", UnfocusedCaret::Hollow),
+                            ("solid", UnfocusedCaret::Solid),
+                        ],
+                        fallback.caret.unfocused,
+                        fallback.caret.unfocused.name(),
+                        &mut parsed.diagnostics,
+                    );
                 }
                 if let Some(item) = terminal.get("cursor_glow") {
                     parsed.settings.caret.glow = ranged_float(
@@ -1347,6 +1392,57 @@ fn caret_shape(
 ///
 /// [`caret_shape`] ile aynı kural: kabul edilmeyen değer `fallback`'i alır ve
 /// tanı bırakır.
+/// Adlandırılmış seçenek anahtarının **ortak gövdesi**: listedeki adlardan
+/// biri değilse anahtar kendi değerinde kalır ve tanı bırakılır.
+///
+/// Ayrı fonksiyon, çünkü aynı kalıp depoda **beş kez** elle yazılmış
+/// (`osc52`, `cursor_motion`, `reduce_motion`, `cursor_blink`, `caret_shape`)
+/// ve `docs/YOL-HARITASI.md`'nin kayıtlı borcu altıncı kopyayı adıyla
+/// öngörüyor: *"Dördüncü anahtar altıncı kopyayı doğurur."*
+///
+/// **Beş kopya bu sette taşınmadı** — her birinin tanı cümlesi kendi
+/// sözcükleriyle yazılı ve taşımak mesajları bir turda değiştirirdi; emsal
+/// `ranged_float`'ın `font_size`'ı bırakması.
+///
+/// Büyük/küçük harf **duyarlı**: `"Hollow"` bir yazım hatası ve sessizce
+/// kabul edilmesi kullanıcıyı yanıltırdı.
+fn named_enum<T: Copy>(
+    text: &str,
+    item: &Item,
+    key: &'static str,
+    names: &[(&str, T)],
+    fallback: T,
+    fallback_name: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> T {
+    let found = match item.as_str() {
+        Some(value) => {
+            if let Some((_, picked)) = names.iter().find(|(name, _)| *name == value) {
+                return *picked;
+            }
+            format!("{value:?}")
+        }
+        None => kind(item).to_owned(),
+    };
+    let expected = match names {
+        [] => String::new(),
+        [(one, _)] => format!("{one:?}"),
+        [rest @ .., (last, _)] => format!(
+            "{} or {last:?}",
+            rest.iter()
+                .map(|(name, _)| format!("{name:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    diagnostics.push(Diagnostic {
+        key: Some(key),
+        line: item.span().and_then(|span| line_of(text, span.start)),
+        message: format!("`{key}` must be {expected}, found {found}; using \"{fallback_name}\""),
+    });
+    fallback
+}
+
 fn cursor_blink(
     text: &str,
     item: &Item,
@@ -1518,6 +1614,7 @@ mod tests {
             ("terminal", "cursor_blink"),
             ("terminal", "cursor_radius"),
             ("terminal", "cursor_glow"),
+            ("terminal", "cursor_unfocused"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -2288,6 +2385,29 @@ found {found}; using \"auto\""
             );
             assert_eq!(diagnostic.key, Some("terminal.cursor_radius"), "{value}");
         }
+    }
+
+    #[test]
+    fn the_unfocused_caret_key_is_read_and_diagnosed() {
+        assert_eq!(clean("").caret.unfocused, UnfocusedCaret::Hollow);
+        assert_eq!(
+            clean("[terminal]\ncursor_unfocused = \"solid\"\n")
+                .caret
+                .unfocused,
+            UnfocusedCaret::Solid
+        );
+
+        // Büyük/küçük harf duyarlı ve kabul edilmeyen değer kendi anahtarını
+        // değiştirmiyor; beklenen liste **tanıda** yazılı olmalı, yoksa
+        // kullanıcı doğru yazılışı dosyadan aramak zorunda kalır.
+        let (settings, diagnostic) = rejected("[terminal]\ncursor_unfocused = \"Solid\"\n");
+        assert_eq!(settings.caret.unfocused, UnfocusedCaret::Hollow);
+        assert_eq!(diagnostic.key, Some("terminal.cursor_unfocused"));
+        assert!(
+            diagnostic.message.contains("\"hollow\" or \"solid\""),
+            "tanı beklenen listeyi saymıyor: {}",
+            diagnostic.message
+        );
     }
 
     #[test]

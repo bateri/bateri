@@ -66,6 +66,22 @@ değiştirilebilsin: zevk sayısı için derleme döngüsü yanlış araç.
   anı, `TEMPLATE`, `docs/AYARLAR.md`. Yarısı inen anahtar hiçbir kapıda
   görünmez — şablona girip ayrıştırılmayan anahtar **sessizce** yoksayılır,
   `Changes` alanı unutulan anahtar yalnız sonraki açılışta uygulanır.
+- **R9 — Odaksız imlecin görünüşü ayara açılır.** `[terminal] cursor_unfocused`,
+  `"hollow"` (varsayılan, bugünkü davranış) ya da `"solid"`.
+  - **Kapsam büyümesi ve kaydı burada** (2026-09-20, kullanıcı): 015 odak
+    kaybında imlecin içini boşaltıyor ve kullanıcı bunu günlük kullanımda
+    yadırgadı ("böyle mi olması lazımdı anlamadım"). Ölçüm davranışın **doğru
+    ve anında** olduğunu gösterdi, yani mesele kusur değil **zevk** — ve
+    zevkin yeri bu set.
+  - **R9.1** — `CaretStyle`'ın üçüncü alanı; yeni bir tesisat **doğmuyor**
+    (`Changes::caret`, `set_caret_style`, `clear`'ın ikinci argümanı hepsi
+    phase-1'de kuruldu).
+  - **R9.2** — `"solid"` yalnız **içi boşalmayı** kapatıyor; blink'in odakta
+    durması (R7.4, 015) **değişmiyor**. İkisi ayrı sinyal ve ayrı karar.
+  - **R9.3** — Enum ayrıştırıcısı için `named_enum` yardımcısı doğuyor.
+    `docs/YOL-HARITASI.md`'nin kayıtlı borcu ("ayar ayrıştırmasının beş
+    kopyası") bu anahtarın **altıncı kopyayı** doğuracağını adıyla söylüyor;
+    beş kopyanın taşınması **ayrı iş**.
 - **R8 — Belgeler kodla aynı commit'te.** `TEMPLATE` (kullanıcının diskine
   yazılıyor), `docs/AYARLAR.md`'nin Şablon bloğu **bayt bayt aynı**
   (`documented_template_is_the_template`), `[terminal]` tablosu ve prozası,
@@ -116,6 +132,7 @@ dosyası olan kullanıcı hiçbir fark görmüyor. `TEMPLATE` büyüyor ama
 |-------|-----|-----------------|
 | phase-1 | Yüzey ikilisi (`cursor_radius`, `cursor_glow`) | Kullanıcının ölçülmüş sürtünmesi burada; shader'a dokunmuyor ve tek tesisat |
 | phase-2 | `cursor_blink_interval` | Ayrı modül (`blink.rs`) ve ayrı risk: saat yeniden kurulmalı |
+| phase-3 | `cursor_unfocused` | Sonradan eklendi (kullanıcı, 2026-09-20). phase-1'in tesisatını **tüketiyor**, yeni yol açmıyor; o yüzden en ucuzu ve sırası serbest |
 
 ## Durum
 
@@ -123,4 +140,5 @@ dosyası olan kullanıcı hiçbir fark görmüyor. `TEMPLATE` büyüyor ama
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | |
+| phase-3 | ✅ |
 | kapı | |
