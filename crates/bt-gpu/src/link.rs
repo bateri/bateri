@@ -26,7 +26,7 @@
 //! diye saydırır, grid'i boşuna yeniden taratır ve boşta sıfır kare kapısının
 //! operandını (`icerik=`) şişirirdi. Yani: **animasyonun zamana bağlı kare
 //! talebi hareket saatinden geçer.** Yeni bir animasyon (blink, yumuşak
-//! kaydırma) oraya girer, `Waker`'a değil.
+//! kaydırma) oraya girer, [`Waker::wake`]'e değil.
 //!
 //! **Saatin içerik tadı yasağın istisnası değil, başka bir şey.** Animasyon
 //! aynı içeriği farklı çizer; saat **içeriğin kendisini** değiştirir (koşan
@@ -86,14 +86,20 @@ use crate::{GpuError, Renderer, Surface};
 
 /// **Hasardan kare istemenin tek tanımı**: hasar bayrağını dik, link'i aç.
 ///
-/// Her thread'den çağrılabilir; `Clone`, `Send + Sync`. İkisini ayrı ayrı
-/// yapan ikinci bir yol bilerek yok — bayraksız açılan link "hasar yok" deyip
-/// anında geri uyur, uyandırılmayan bayrak da kimseyi çizmeye çağırmaz.
+/// Her thread'den çağrılabilir; `Clone`, `Send + Sync`.
 ///
-/// **Animasyon buradan kare istemez** (modül başlığı): hareket, uyanık
-/// callback'in kendi kararı. Buraya bağlanan bir animasyon her karesine hasar
-/// diker ve `icerik=` sayacını — yani boşta sıfır kare kapısını — kendi
-/// karelerinden doldururdu.
+/// **İkinci bir kapı var ve bilerek** ([`Waker::resume`]): o hasar dikmeden
+/// açıyor. Uzun süre "ikisini ayrı ayrı yapan yol bilerek yok" yazıyordu ve
+/// gerekçesi doğruydu — bayraksız açılan link "hasar yok" deyip anında geri
+/// uyar. 014 o gerekçeyi **karşıladı**: uyanan callback'in "hasar yok" dalında
+/// artık yapacak bir işi olabiliyor (blink'in faz değişimi), yani link boşuna
+/// uyanmıyor. Bayraksız açmanın tek meşru sebebi bu.
+///
+/// **Animasyon [`Waker::wake`]'ten kare istemez** (modül başlığı): hareket,
+/// uyanık callback'in kendi kararı. Bu kapıya bağlanan bir animasyon her
+/// karesine hasar diker ve `icerik=` sayacını — yani boşta sıfır kare kapısını
+/// — kendi karelerinden doldururdu. Yasağın öznesi **bu fonksiyon**, tipin
+/// kendisi değil.
 ///
 /// **Saat ise buradan geçer** ([`LinkDelegate::arm_clock`]) ve çelişki değil:
 /// sayacın tiki içeriği gerçekten değiştiriyor, yani `icerik=` sayması
@@ -146,7 +152,7 @@ struct WakerInner {
     /// **Ne saymıyor: hareket karesini** — ne uyanık callback'in kendi
     /// kararıyla çizdiğini, ne de saatin hareket tadıyla ([`Waker::resume`])
     /// uyandırdığını; `resume` bu sayaca bilerek dokunmuyor. Animasyon
-    /// `Waker`'a hiç dokunmuyor
+    /// [`Waker::wake`]'e hiç dokunmuyor
     /// (modül başlığı), yani bu sayaç `icerik`'e yakın kalırken `kare`
     /// animasyon boyunca ondan kopuyor. Aşağıdaki "duman yükü" ölçümünün
     /// `istek ≈ kare + 2` ilişkisi tam bu yüzden **008'de geçersizleşti**;
@@ -1154,16 +1160,22 @@ impl LinkDelegate {
 
     /// **Saat**: kare talebinin üçüncü sebebi (modül başlığı).
     ///
-    /// Link uyumaya giderken çağrılıyor. İlerletilecek bir sayaç varsa
-    /// (`Cursor::next_tick`) süre dolunca `Waker` üzerinden **içerik**
-    /// karesi isteniyor — ve hasar bayrağını dikmesi burada **doğru**:
-    /// ızgaranın çizilen çıktısı gerçekten değişiyor, yani `icerik=` sayması
-    /// yerinde. Hareketin yasağı bunun tersini korumak içindi (hareket
-    /// karesinin kendini içerik diye saydırması).
+    /// Link uyumaya giderken çağrılıyor ve **iki tadı** var
+    /// ([`due_clock`] hangisinin dolduğuna bakıyor):
     ///
-    /// Durma koşulu `None`: komut bitti, koşan bloğun çıpası ekrandan çıktı ya
-    /// da entegrasyon hiç yok. Üçünde de tik kurulmuyor ve pencere boşta sıfır
-    /// kareye dönüyor.
+    /// - **İçerik tadı** — ilerletilecek bir süre sayacı varsa
+    ///   (`Cursor::next_tick`) [`Waker::wake`] ile isteniyor ve hasar bayrağını
+    ///   dikmesi **doğru**: ızgaranın çizilen çıktısı gerçekten değişiyor, yani
+    ///   `icerik=` sayması yerinde.
+    /// - **Hareket tadı** — blink'in faz değişimi [`Waker::resume`] ile, hasar
+    ///   **dikmeden**: ızgara değişmiyor, yalnız caret'in alfası. Hareketin
+    ///   yasağı bunun tersini korumak içindi (hareket karesinin kendini içerik
+    ///   diye saydırması), yani bu kol yasağa uyuyor.
+    ///
+    /// Durma koşulu **ikisinde de** `None`: sayaç tarafında komut bitti, çıpa
+    /// ekrandan çıktı ya da entegrasyon hiç yok; blink tarafında ayar kapalı,
+    /// caret çizilmiyor ya da hareketsizlik süresi doldu. İkisi birden `None`
+    /// ise tik kurulmuyor ve pencere boşta sıfır kareye dönüyor.
     ///
     /// **Kapı kapalıyken kurulmuyor:** örtülü pencerede zaten
     /// `setPaused(true)` daha yukarıdan dönüyor, yani görünmeyen bir sayacı
