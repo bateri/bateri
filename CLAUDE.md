@@ -428,9 +428,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   sonraki setlerde gelir. Çizilmeyen rol eklenmiyor. `cursor` **014'te
   ayrıldı**: ikisi tek değerden beslenirken "imleci altın yap" isteği koşan
   komutun şeridini de altın yapıyordu, ve 258 yuvası zaten `accent`'e takma
-  addı. Tema dosyasında **opsiyonel ve eksikte `accent`'e düşüyor**, tabana
-  değil — rolden önce yazılmış bir kullanıcı teması tek harf değişmeden aynı
-  görünmeli.
+  addı. Tema dosyasının kuralı **istisnasız**: her anahtar opsiyonel ve eksik
+  olan gömülü tabandan geliyor, `cursor` da. Bir dönem eksikte `accent`'i
+  izliyordu ("rolden önce yazılmış tema dosyaları değişmesin"); uygulama
+  yayınlanmadığı için koruduğu kimse yoktu ve yirmiden fazla anahtar içinde
+  **tek** istisnaydı.
   `bt_core::Theme` paletin **tek kaynağı**: zemin atlaması,
   clear, imleç, blok şeridi ve renk sorusunun yanıtı aynı değerden. `Adapter`'da **yaprak
   kilit** altında durur; `frame()` kopyayı `Term` kilidinden önce alır,

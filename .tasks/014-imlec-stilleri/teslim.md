@@ -111,17 +111,21 @@ make test-yaris     # exit 0
 `make kur` **gerekmiyor**: kabuk betiği, terminfo, jeton satırı ve app bundle
 değişmedi.
 
-## Kullanıcı kararı bekleyen
+## Sonradan değişen karar: tema kuralı istisnasız
 
-**Tema dosyasında `cursor` eksikse `accent`'e düşüyor** — gerekçesi "rolden
-önce yazılmış tema dosyaları tek harf değişmeden aynı görünsün". Ama kural
-**yeni** dosyaları da vuruyor: `themes/bateri.toml`'a tek satır
-`background = "#101010"` yazan biri imleci altından maviye çevirir ve gömülü
-altını geri almanın yolu hex'i elle yazmaktır.
+Set `cursor` rolünü **eksikte `accent`'e düşecek** şekilde sevk etmişti;
+gerekçesi "rolden önce yazılmış tema dosyaları tek harf değişmeden aynı
+görünsün"dü. Kullanıcı kararı (2026-09-19): **tek kural, istisna yok** — her
+anahtar gibi `cursor` de eksikse gömülü tabandan gelir.
 
-İkisi aynı anda olamaz (eski dosyaların görüntüsünü korumak ↔ yeni dosyaların
-gömülü rolü miras alması); bugünkü kural birincisini seçiyor. Kullanıcının
-tema dosyası yok, yani pratikte etkisiz — ama kural kalıcı.
+Gerekçe: korunan şey yayınlanmamış bir uygulamanın var olmayan eski tema
+dosyalarıydı, bedeli ise yirmiden fazla anahtar içinde **tek** bir anahtarın
+başka davranmasıydı. Kural ayrıca **yeni** dosyaları da vuruyordu:
+`themes/bateri.toml`'a tek satır `background = "#101010"` yazan biri imleci
+altından maviye çeviriyordu.
+
+Uygulaması 014'ün kodunu **sadeleştirdi** — `theme.rs`'teki özel durum bloğu
+kalktı, `cursor` `roles` dizisine sıradan bir satır olarak girdi.
 
 ## Bilinen sınırlar
 
@@ -155,8 +159,9 @@ tema dosyası yok, yani pratikte etkisiz — ama kural kalıcı.
 - **Ayar şeması:** `cursor` ve `cursor_blink` **silinmez**; geri alınırsa
   emekli edilir (dosyada korunur, okunmaz, görülünce tanı bırakır) — 009'un
   `prompt` anahtarı emsali.
-- **Tema biçimi:** `cursor` rolü opsiyonel ve eksikte `accent`'e düşüyor, yani
-  geri alınsa da kullanıcı tema dosyaları **değişmeden** okunmaya devam eder.
+- **Tema biçimi:** `cursor` rolü opsiyonel ve eksikte gömülü tabandan geliyor,
+  yani geri alınsa da kullanıcı tema dosyaları okunmaya devam eder; yalnız
+  imleç eski rengine döner.
 - **Belge:** `CLAUDE.md`, `docs/AYARLAR.md`, `docs/ARASTIRMA.md` ve
   `docs/YOL-HARITASI.md` aynı commit'lerde; revert onları da geri alır.
 

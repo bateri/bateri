@@ -643,14 +643,12 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 - **Her anahtar opsiyoneldir.** Eksik anahtar gömülü `bateri` temasından
   gelir; yalnız zemini değiştiren iki satırlık bir dosya geçerli bir temadır.
 - Gömülü bir temayı **gölgeleyen** dosyada (`themes/bateri-light.toml`) eksik
-  anahtar o gömülü temanın kendisinden gelir — `cursor` hariç (bir alttaki
-  madde): yalnız `accent` yazmak koşan komutun işaretini **ve imleci** birden
-  değiştirir.
-- **`cursor`'ın tek istisnası var:** eksikse tabandan değil **`accent`'ten**
-  gelir. Rol sonradan doğdu ve ondan önce imleç `accent` rengindeydi; tabandan
-  doldurulsaydı eski bir tema dosyası tek harf değişmeden başka görünürdü —
-  gömülü temanın altın imleci, kullanıcının seçtiği vurgunun yerine geçerdi.
-  İmlecini ayırmak isteyen anahtarı yazar.
+  anahtar o gömülü temanın kendisinden gelir; gölgelemeyen bir adın tabanı
+  `bateri` kalır.
+- **Kuralın istisnası yok**, `cursor`'ın da: yalnız `accent` yazan bir dosyada
+  imleç gömülü temanın imleci olarak kalır. İmlecini ayırmak isteyen `cursor`
+  yazar — yirmiden fazla anahtar içinde tek bir anahtarın başka davranması,
+  kazandırdığından çok şaşırtırdı.
 - Kabul edilmeyen renk (`"red"`, `"#12345"`, sayı) tabanın (`bateri` ya da
   gölgelenen gömülü tema) değerini alır ve uyarı verir; öteki renkler yine
   okunur.
