@@ -906,6 +906,20 @@ define_class!(
         // düşürür, yani `windowDidDeminiaturize:` bunun altkümesi olurdu.
         // Genel sinyalin üstüne özel durum dizmek, listenin hiç kapanmaması
         // demek (tam ekran, Space, `unhide`, ekran uyanması...).
+        // **Odak yolu.** Odakta olmayan pencerede caret'in içi boşalıyor ve
+        // blink duruyor; ikisi de `bt-gpu`'nun kararı, `bt-core` odağı hiç
+        // görmüyor (015 R7). Pencere delegate'i zaten bizde, yani iki metot
+        // yetiyor.
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _n: &NSNotification) {
+            self.apply_focus(true);
+        }
+
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _n: &NSNotification) {
+            self.apply_focus(false);
+        }
+
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
             // Bildirim iki yönde de gelir; örtülmeye GİDERKEN kare istemek
@@ -2154,6 +2168,26 @@ impl AppDelegate {
     ///
     /// Link yoksa sessizce döner: sistem bildirimi `start_session`'dan önce
     /// de düşebilir ve açılış çağrısı aynı değeri zaten verecek.
+    /// Odak değişti — `bt-gpu`'ya iletir.
+    ///
+    /// **Hermetik koşuda hiç çağrılmıyor** (R7.1) ve kapı burada, `bt-gpu`'nun
+    /// varsayılanında değil: `DisplayLink`'in `focused`'ı zaten `true`
+    /// doğuyor ama o tek başına yetmez — `make duman` koşarken açılan bir
+    /// Spotlight `windowDidResignKey:` doğurur, o da kare ister ve kapı bir
+    /// makinede yeşil bir makinede kırmızı düşerdi. Emsal
+    /// [`resolve_reduce_motion`]'ın `Inputs`'a bakması.
+    ///
+    /// Link yoksa sessizce dönüyor: key olayı `start_session`'dan önce de
+    /// düşebilir ve o hâlde varsayılan (`true`) zaten doğru.
+    fn apply_focus(&self, focused: bool) {
+        if matches!(self.inputs(), Inputs::Hermetic) {
+            return;
+        }
+        if let Some(link) = self.ivars().link.get() {
+            link.set_focused(focused);
+        }
+    }
+
     fn apply_reduce_motion(&self) {
         let Some(link) = self.ivars().link.get() else {
             return;

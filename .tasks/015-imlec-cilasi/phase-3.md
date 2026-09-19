@@ -70,7 +70,28 @@ _Requirements: R7, R7.1, R7.2, R7.3, R7.4, R5, R10_
 
 ## Uygulama Notları
 
-<!-- Kodlanırken doldurulacak. -->
+- **`caret_painted_rect` ayrıldı.** Boyanan dikdörtgen odağa **bağlı değil**
+  (içi boş caret aynı yeri kaplıyor, yalnız içini boyamıyor), oysa tek
+  fonksiyon kalsaydı `Caret::instance` ona sahte bir `hollow: false`
+  geçirirdi. Şimdi odağa bağlı olan tek şey opak iç ve bu imzadan okunuyor.
+- **`move_caret` odağı `caret_hollow`'dan geri türetiyor.** Hareket karesi
+  `bt-shell`'e hiç gitmiyor; alan olmasaydı odaksız pencerede caret ilk
+  kaymada dolardı — şeklin (`caret_shape`) birebir aynı gerekçesi.
+- **`set_focused` ile blink'in `AND`'i birim sınamayla çivilenemedi:**
+  ikisi de `DisplayLink` örneği istiyor ve sınamalarda hiç kurulmuyor
+  (`DisplayLink::new` gerçek bir view/`CAMetalDisplayLink` istiyor).
+  **Emsal ve sınır aynı:** `set_reduce_motion`'ın da sınaması yok. Çivilenen
+  yarı `Frame` ve piksel düzeyinde — içi boşluğun kendisi, ters çevirmenin
+  kalkması, ince şekillerin muafiyeti ve hareket karesinin koruması.
+  Blink'in dayandığı değişmez (`enabled=false` → `lit=true`,
+  `next_flip=None`) zaten `blink.rs`'te iki sınamayla çivili; odak onun
+  **üçüncü tüketicisi**, yeni bir mekanizma değil.
+- **Kenar kolu phase-2'de sınanmıştı** (`a_hollow_caret_paints_only_its_edge`,
+  `/code-review` bulgusu). Bu phase onu üretim yolundan da bağladı
+  (`an_unfocused_caret_paints_a_ring_through_the_production_path`): ikisi bir
+  arada olmasa "kol çalışıyor ama odak onu hiç açmıyor" hâli sessiz kalırdı.
+- **`.metal` değişmedi**, yani bu phase riskli değil: kenar kolu phase-2'de
+  yazılmıştı, burada yalnız `stroke` sıfırdan `rule_px`'e çıkıyor.
 
 ## Yayın Etkisi
 
@@ -90,21 +111,23 @@ _Requirements: R7, R7.1, R7.2, R7.3, R7.4, R5, R10_
 
 ## Checklist
 
-- [ ] `app.rs`: `windowDidBecomeKey:` / `windowDidResignKey:` → `set_focused`
-- [ ] `app.rs`: hermetik koşuda **çağrı yapılmıyor** (R7.1, kapı çağrı yerinde)
-- [ ] `link.rs`: `focused` biti, blink kapısının üçüncü terimi
-- [ ] `link.rs`: `set_focused` değişimde kare istiyor, aynı değerde **no-op**
-- [ ] `frame.rs`: odaksızda `caret_rect`'in **opak içi boş**; `CursorBlock`'u
+- [x] `app.rs`: `windowDidBecomeKey:` / `windowDidResignKey:` → `set_focused`
+- [x] `app.rs`: hermetik koşuda **çağrı yapılmıyor** (R7.1, kapı çağrı yerinde)
+- [x] `link.rs`: `focused` biti, blink kapısının üçüncü terimi
+- [x] `link.rs`: `set_focused` değişimde kare istiyor, aynı değerde **no-op**
+- [x] `frame.rs`: odaksızda `caret_rect`'in **opak içi boş**; `CursorBlock`'u
       besleyen tek şey o
-- [ ] `cell_bg.metal`: kenar yolu `rule_px` ile açık, dolgu alfası 0
-- [ ] Test: odaksız glyph **ön plan renginde**
-      (`glyph_under_the_cursor_takes_the_cursor_text_color`'ın kardeşi)
-- [ ] Test: halka örneği — kenarda imleç rengi, ortada zemin
-- [ ] Test: `set_focused` aynı değerde `requests` sayacını kımıldatmıyor
-- [ ] Test: odaksız + `blink = on` → `next_flip()` `None`, saat kurulmuyor
-- [ ] `CLAUDE.md`, iki bayat doc
-- [ ] Doğrulama geçti (`make hepsi` + `make shader`)
+- [x] `cell_bg.metal`: kenar yolu `rule_px` ile açık (shader phase-2'de yazıldı)
+- [x] Test: odaksız glyph **ön plan renginde**
+      (`a_hollow_caret_leaves_the_glyph_its_own_color`)
+- [x] Test: halka örneği — üretim yolundan **ve** shader kolundan (ikisi ayrı)
+- [~] Test: `set_focused` no-op — **`DisplayLink` sınamalarda kurulamıyor**;
+      emsal `set_reduce_motion`, onun da sınaması yok (Uygulama Notları)
+- [~] Test: odaksız blink — aynı sınır; dayandığı değişmez `blink.rs`'te
+      iki sınamayla çivili ve odak onun üçüncü tüketicisi
+- [x] `CLAUDE.md`, iki bayat doc
+- [x] Doğrulama geçti (`make hepsi` exit 0 + `make shader` exit 0)
 - [ ] `make duman` (kullanıcıda) — koşu sırasında başka pencereye geçilerek
 - [ ] **Gözle kontrol:** odak gidince içi boşalma ve blink'in durması; dock'ta
       aynısı; beam/underline'da yalnız blink'in durması
-- [ ] Yayın etkisi yazıldı
+- [x] Yayın etkisi yazıldı

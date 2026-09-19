@@ -648,6 +648,19 @@ struct LinkIvars {
     content_deadline: Cell<Option<f64>>,
     /// İmlecin yanıp sönmesi; fazın sahibi boyayan taraf ([`crate::blink`]).
     blink: Cell<Blink>,
+    /// Pencere **odakta mı** — `bt-shell`'in cevabı.
+    ///
+    /// `bt-core`'a hiç girmiyor (R7): odak bir pencere olgusu ve terminalin
+    /// durumuyla ilgisi yok. `bt-gpu` onu iki yerde okuyor — blink'in kapısı
+    /// ve caret'in içinin boşalması.
+    ///
+    /// Varsayılan `true` ve **hermetik koşuda hiç yazılmıyor**: süreli koşu
+    /// (`BT_RUN_SECONDS`) odağı okumuyor, yani `make duman` bir makinede
+    /// yeşil bir makinede kırmızı düşmüyor. Kapı çağrı yerinde
+    /// (`bt-shell`'in delegate'i), varsayılanda değil — varsayılan tek başına
+    /// yetmezdi, çünkü koşu sırasında açılan bir Spotlight
+    /// `windowDidResignKey:` doğurup kare isterdi.
+    focused: Cell<bool>,
     /// Kurulmuş tikin kuşağı — eskiyen tik kendini tanıyıp sussun diye.
     ///
     /// `DispatchQueue::after` iptal edilemiyor, yani araya bir içerik karesi
@@ -1004,7 +1017,14 @@ define_class!(
             let at = caret.map(|(at, _)| at);
             let moved = iv.last_caret_at.replace(at) != at;
             let mut blink = iv.blink.get();
-            blink.content_frame(now, cursor.blink && !motion.reduce());
+            // **Üçüncü terim odak** (R7.4): odakta olmayan pencerede blink
+            // duruyor ve imleç görünür kalıyor. Yeni bir mekanizma değil —
+            // "kapalı blink görünür kalır" değişmezi (`content_frame`,
+            // `enabled=false` → `lit=true`, `next_flip=None`) bugün gizli
+            // imleci koruyor; bu onun üçüncü tüketicisi. Yan kazancı boşta
+            // sıfır kare tarafında: odaksız boş pencere saat kurmuyor.
+            let focused = iv.focused.get();
+            blink.content_frame(now, cursor.blink && !motion.reduce() && focused);
             // Caret kıpırdadıysa faz açığa dönüyor: yazarken imleç sönmez.
             if moved {
                 blink.wake(now);
@@ -1040,6 +1060,7 @@ define_class!(
                     theme.cursor_linear(),
                     motion.alpha() * blink.alpha(),
                     cursor.shape,
+                    focused,
                 );
             }
             // Birinci aralık burada kapanıyor — `push_caret`'dan **sonra**:
@@ -1414,6 +1435,7 @@ impl DisplayLink {
                 theme: Cell::new(theme),
                 content_deadline: Cell::new(None),
                 blink: Cell::new(Blink::default()),
+                focused: Cell::new(true),
                 clock_generation: Arc::new(AtomicU64::new(0)),
                 last_caret_text: Cell::new(None),
                 last_caret_at: Cell::new(None),
@@ -1604,6 +1626,24 @@ impl DisplayLink {
     /// ([`crate::motion::Motion::set_reduce`]) ve yerleşmiş bir animasyon o
     /// dalda hiç çizilmeden uyuyor — istenmeseydi imleç ara hücrede ya da yarı
     /// saydam asılı kalırdı. Yerleşmiş imleçte ve aynı değerde no-op.
+    /// Pencere odağı değişti — `bt-shell`'in `NSWindowDelegate`'i veriyor.
+    ///
+    /// **Aynı değerde no-op** (R7.2; emsal [`crate::Session::set_theme`]):
+    /// açılıştaki `windowDidBecomeKey:` tam bu yola düşüyor ve bedava bir
+    /// içerik karesi yazardı.
+    ///
+    /// **Değişimin kendisi kare istiyor** ve gerekçesi `set_reduce_motion`'ın
+    /// aynısı: caret'in içi boşalacak ya da dolacak, blink duracak ya da
+    /// başlayacak — boştaki bir pencere bunların hiçbirini bir sonraki hasara
+    /// kadar göstermezdi.
+    pub fn set_focused(&self, focused: bool) {
+        let iv = self.delegate.ivars();
+        if iv.focused.replace(focused) == focused {
+            return;
+        }
+        self.request_frame();
+    }
+
     pub fn set_reduce_motion(&self, reduce: bool) {
         let iv = self.delegate.ivars();
         let mut motion = iv.motion.get();

@@ -70,7 +70,18 @@ büyütüp caret'i dock yuvasına kaydırsaydı caret ızgaranın glyph'lerinden
 çizilir ve altındaki harfi boyardı. `caret_rect` bu yüzden **iki** dikdörtgen
 veriyor — boyanan ve ters çevirmenin opak içi; bugün eşitler, içi boş imleçte
 ayrılacaklar. "Yarıçap 0, hale 0" kolu **desteklenen ve sınanan** bir hâl:
-çıktısı düz dörtgenle bit bit aynı ve geri alma yolu o. Hedef **ekran hücresi**
+çıktısı düz dörtgenle bit bit aynı ve geri alma yolu o.
+**Odakta olmayan pencerede caret'in içi boşalıyor** ve blink duruyor: kenar
+kalınlığı yine `rule_px`, ters çevirme ise **kalkıyor** — boyanmayan bir
+pikselin altındaki harf kendi rengiyle kalmak zorunda, yoksa çerçevenin
+ortasındaki metin zemin renginde çizilir ve görünmez olurdu. `caret_rect`'in
+iki dikdörtgeni tam burada ayrılıyor: boyanan duruyor, opak iç boşalıyor.
+İçi boşalma **yalnız bloğa**; alt çizgi ve dikey çubuk zaten `rule_px`
+kalınlığında birer şerit ve çıkarma onları büsbütün yutardı, o şekillerde
+sinyal blink'in durması. Odak `bt-core`'a **hiç girmiyor**
+(`DisplayLink::set_focused`; `CaretShape`'e de eklenmedi — o enum ayar
+dosyasının sözlüğü, odak ona dik bir eksen) ve hermetik koşuda **hiç
+okunmuyor**: kapı çağrı yerinde, `bt-shell`'in pencere delegate'inde. Hedef **ekran hücresi**
 cinsinden ve dock'unki kesirli — band nefes payı kadar aşağıdan başlıyor ve
 artık şeridin altında duruyor; yuvarlansaydı caret bir hücre yukarıda dururdu.
 Çizim **yuvası** konuma göre seçiliyor (`Frame::push_caret`): blok, üstünde
@@ -383,7 +394,8 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   sayması doğrudur.
   Ölçütü üç şart — içerik gerçekten değişecek, periyodu ekran hızından çok
   düşük olacak, adlandırılmış bir durma koşulu taşıyacak. **Koşan komutu ya da sönen bir
-  imleci olan pencere boşta değildir.** İkisi de adlandırılmış bir durma
+  imleci olan pencere boşta değildir** — ve **odakta olmayan pencerede blink
+  hiç koşmuyor**, yani orada saat de kurulmuyor (015 R7.4). İkisi de adlandırılmış bir durma
   koşulu taşıyor: komut biter, blink ise varsayılan **kapalıdır**
   (`[terminal] cursor_blink`) ve açıkken bile klavye sessizliğinden sonra
   durur — durduğunda fazı **açık** bırakır, yoksa imleç bir sonraki hasara
