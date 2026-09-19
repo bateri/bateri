@@ -99,10 +99,15 @@ _Requirements: R7, R7.1, R7.2, R7.3, R7.4, R5, R10_
   Yeni uniform alanı yok, düzen sözleşmesi phase-2'den.
 - **belge** — `CLAUDE.md` (caret + boşta sıfır kare), `session.rs` ve
   `Cursor::blink`'in bayat doc'ları.
-- **bilinen sınır, iki madde:** underline ve beam odaksızda **şekil
+- **bilinen sınır, üç madde:** underline ve beam odaksızda **şekil
   değiştirmiyor** (sinyalleri blink'in durması); odak `bt-core`'a girmediği
   için `frame()` sınırından okunamıyor, yani bir sınama odağı yalnız
-  `bt-gpu` düzeyinde görebiliyor.
+  `bt-gpu` düzeyinde görebiliyor; ve **hücrenin kenarına mürekkep koyan bir
+  glyph içi boş caret'in halkasının üstüne çiziliyor** — çizim sırasının
+  gerekçesi (blok opak, altındaki harf ters çevrilmiş renkle) içi boş caret'te
+  iki yarısıyla birden düşüyor. Bugün seyrek (kutu çizim henüz yok), 018'de
+  görünür olacak; çaresi caret'i içi boşken glyph'lerden **sonra** encode
+  etmek ve o yuva seçimini yeniden açıyor (`/code-review`).
 - **ölçüm iddiası yok.** "Pil kazancı" ölçülmedi ve bu set kanca doğurmuyor;
   yön koddan kanıtlı (saat kurulmuyor), büyüklüğü değil.
 - ayar şeması / tema / terminfo / app bundle / yeni bağımlılık: yok.

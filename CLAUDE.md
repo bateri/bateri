@@ -61,15 +61,14 @@ kalırdı. **Yüzeyi kendi fragment'inin**: köşesi yuvarlak ve çevresinde haf
 bir hale var, ikisi de yuvarlak dikdörtgenin imzalı mesafesinden
 (`shaders/cell_bg.metal` → `caret_fragment`). Sayılar uydurulmuyor —
 yarıçap hücre **yüksekliğinin** oranı (üç şeklin ortak tek boyutu o), hale
-payı sol paydan türüyor (`CellMetrics::gutter_px`'in yarısı, aynı içi
-girintinin üçüncü kullanımı) ve kenar kalınlığı yine `rule_px`; punto büyüyünce üçü
+payı sol paydan türüyor (`CellMetrics::gutter_px`'in beşte ikisi, aynı içi
+girintinin üçüncü kullanımı; oran iki tur gözle indi) ve kenar kalınlığı yine `rule_px`; punto büyüyünce üçü
 birden büyüyor. Hale caret'in **kendi alfasıyla** çarpılıyor, yani blink
 sönerken hale de sönüyor ve ikinci bir yol yok. Dörtlü hale payı kadar
 **şişiyor** ama **yuva seçimi şişmemiş dikdörtgene bakıyor**: hale ayak izini
 büyütüp caret'i dock yuvasına kaydırsaydı caret ızgaranın glyph'lerinden sonra
 çizilir ve altındaki harfi boyardı. `caret_rect` bu yüzden **iki** dikdörtgen
-veriyor — boyanan ve ters çevirmenin opak içi; bugün eşitler, içi boş imleçte
-ayrılacaklar. "Yarıçap 0, hale 0" kolu **desteklenen ve sınanan** bir hâl:
+veriyor — boyanan ve ters çevirmenin opak içi; dolu caret'te eşitler. "Yarıçap 0, hale 0" kolu **desteklenen ve sınanan** bir hâl:
 çıktısı düz dörtgenle bit bit aynı ve geri alma yolu o.
 **Odakta olmayan pencerede caret'in içi boşalıyor** ve blink duruyor: kenar
 kalınlığı yine `rule_px`, ters çevirme ise **kalkıyor** — boyanmayan bir
@@ -165,9 +164,10 @@ kalkıyor) ve bastırılan bir satır varsa tazelik kapısı geçilecek.
 **Dock→Grid yönü tutuluyor** (`shell::HANDOVER_HOLD`, histerezis): yüklem
 `Grid` dese de cevap kısa bir süre `Dock` kalıyor ve o süre içinde geri
 dönerse devir **hiç olmamış** sayılıyor. Sebebi ölçülmüş: `ls` gibi hızlı bir
-komutta safha 44 ms sürüyor, imleç animasyonu 230 ms'de yerleşiyor, yani caret
-dock'tan çıkıp yarı yolda geri dönüyordu ve göz bunu bir zıplama olarak
-okuyordu. Tutmanın kalanı saate **`min`'lenerek** giriyor (`shell::sooner`),
+komutun safhası imleç animasyonunun yerleşmesinden **çok daha kısa sürüyor**
+(ikisi de ölçüldü, sayıları `.tasks/015-imlec-cilasi/context.md` → Kanıt),
+yani caret dock'tan çıkıp yarı yolda geri dönüyordu ve göz bunu bir zıplama
+olarak okuyordu. Tutmanın kalanı saate **`min`'lenerek** giriyor (`shell::sooner`),
 yazarak değil: süre sayacının tiki de aynı yuvayı kullanıyor ve ezilseydi
 koşan komutun sayacı donardı. Ters yön (Grid→Dock) **tutulmuyor** — komut
 bitince caret ızgarada asılı kalsaydı kullanıcı yazmaya başladığında dock'ta
