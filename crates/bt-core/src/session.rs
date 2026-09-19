@@ -1452,6 +1452,8 @@ impl Session {
         let term = self.term.lock();
 
         let rows = term.screen_lines() as i32;
+        // Geçmişin **uzunluğu değil varlığı** soruluyor: kapı ikili.
+        let history = term.grid().history_size();
         // Alternatif ekranda blok **yok**: vim'in tamponunda prompt da komut da
         // yok, oradaki satırlar hiçbir bloğa ait değil. Bayrak kilidin altında
         // okunup faz 2'ye taşınıyor; yalnız çıpa toplamayı kapatmak yetmezdi,
@@ -2006,6 +2008,25 @@ impl Session {
             // zaten okundu). Ana ekranda iki kaynağın maksimumu; gerekçesi
             // [`Cursor::content_rows`]'ta.
             content_rows: if alt_screen {
+                grid_rows
+            } else if history > 0 {
+                // **Geçmiş varsa ekran dolu sayılır.** Tabana yapışmanın
+                // gerekçesi "ekran dolmadan içerik tepede birikmesin"di ve o
+                // gerekçe yalnız geçmiş **yokken** geçerli: geçmiş varsa
+                // ızgaranın üstünde gösterilecek satırlar zaten var ve
+                // öteleme onların yerine boşluk koyar.
+                //
+                // Belirti ölçüldü (kullanıcı, ekran görüntüsüyle): `ls`'in
+                // çıktısından sonra Tab'a basıp tamamlama listesini iptal
+                // etmek ekranı siliyor, geriye tek satır mürekkep kalıyor ve
+                // o satır dibe yapışıyordu — üstünde kocaman bir boşluk, oysa
+                // çıktının tamamı bir tık yukarıda, scrollback'te duruyor.
+                // Hiçbir şey kaybolmuyordu ama "çıktım gitti" gibi okunuyordu.
+                //
+                // Geçiş **sıçrama üretmiyor**: ilk satır ancak ekran dolunca
+                // geçmişe düşüyor ve o anda `drawn_rows` zaten `grid_rows`,
+                // yani öteleme çoktan sıfır. Kapı yalnız ekranın sonradan
+                // **boşaldığı** hâlde (silme dizileri) devreye giriyor.
                 grid_rows
             } else if caret_in_dock {
                 // **Giriş satırı yer de kaplamıyor** — `display: none`, gizli
@@ -3924,6 +3945,37 @@ mod tests {
         assert_eq!(
             cursor.next_tick, None,
             "bekleyen tutma yokken saat sönmeli: {cursor:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_screen_emptied_over_history_does_not_stick_to_the_bottom() {
+        // **Ölçülmüş belirti** (kullanıcı, ekran görüntüsüyle): `ls`'in
+        // çıktısından sonra Tab'a basıp tamamlama listesini iptal etmek
+        // ekranı siliyor; geriye tek satır mürekkep kalıyor ve o satır dibe
+        // yapışıp üstünde kocaman bir boşluk bırakıyordu. Çıktının tamamı bir
+        // tık yukarıda, scrollback'te duruyordu — hiçbir şey kaybolmuyor ama
+        // "çıktım gitti" gibi okunuyor.
+        //
+        // Reçete belirtinin kendisi: ekranı taşıracak kadar satır bas (geçmiş
+        // dolsun), sonra ekranı sil ve tek satır yaz.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "i=1; while [ $i -le 20 ]; do echo line$i; i=$((i+1)); done; \
+             printf '\\033[H\\033[J'; printf 'tail\\n'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until("silinmiş ekran gelmedi", Duration::from_secs(5), || {
+            let mut cells = Vec::new();
+            session.frame(|cell| cells.push(cell), &mut Blocks::default());
+            row_glyphs(&cells, 0) == "tail"
+        });
+
+        let cursor = session.frame(|_| (), &mut Blocks::default());
+        assert_eq!(
+            cursor.content_rows, cursor.rows,
+            "geçmiş varken ekran dibe yapıştı: üstünde gösterilecek satır var {cursor:?}"
         );
         session.shutdown();
     }
@@ -6262,21 +6314,28 @@ mod tests {
     }
 
     #[test]
-    fn content_rows_come_from_the_visible_window_while_scrolled() {
-        // **Geçmişte kaydırırken de içerik tabana yapışık kalır.** Doluluk
-        // görünür satırlardan doğuyor, yani `display_offset > 0` iken kural
-        // aynı: temizlenmiş bir pencerede tekerleğin ilk çentiği iki satırlık
-        // içerik gösterir ve ikisi dipte durur. Alternatifi ("ofset
-        // kaydırmada 0'a donar") tekerleğe dokunur dokunmaz içeriğin tavana
-        // sıçraması demekti.
+    fn a_window_with_history_is_full_however_it_is_scrolled() {
+        // **Tabana yaslama yalnız geçmiş boşken.** Scrollback'te satır varsa
+        // ızgaranın üstünde gösterilecek içerik zaten var ve öteleme onların
+        // yerine boşluk koyar; doluluk `rows`'a çıkıyor, tekerlek nereye
+        // getirirse getirsin.
+        //
+        // **Bu sınama 011'in tersini söylüyordu** ("geçmişte kaydırırken de
+        // içerik tabana yapışık kalır") ve beklenti 2026-09-19'da kullanıcı
+        // kararıyla değişti. Gerekçe ölçülmüş bir belirti: tamamlama listesini
+        // iptal etmek ekranı siliyor, geriye tek satır mürekkep kalıyor ve o
+        // satır dibe yapışıp üstünde kocaman bir boşluk bırakıyordu — çıktı
+        // kaybolmuş gibi okunuyordu, oysa bir tık yukarıda duruyor.
+        // 011'in kuralı **ilk ekran dolana kadar** aynen sürüyor ve bekçisi
+        // duruyor: `content_rows_count_the_drawn_rows_and_the_cursor_row`
+        // geçmişsiz bir ekranda üç dolu satır bekliyor ve bu değişiklikten
+        // etkilenmedi.
         //
         // `\e[2J\e[H` geçmişi silmiyor, yalnız görünen pencereyi: `seq`'in 30
         // satırı defterde duruyor ve kaydırılacak bir yer var.
         // İki adım **`read` ile sıralanıyor**: tek betikte arka arkaya
         // yazılsalardı ikisi aynı PTY okumasında gelebilir ve "geçmiş doldu"
-        // ölçütü hiç gözlenmezdi — sınama boş bir ekranı temiz sanıp
-        // kaydıracak yer bulamazdı (emsal
-        // `set_terminal_options_switches_osc52_live`).
+        // ölçütü hiç gözlenmezdi (emsal `set_terminal_options_switches_osc52_live`).
         let wake = Arc::new(TestWake::default());
         let session = spawn_session(
             "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; sleep 5",
@@ -6285,20 +6344,21 @@ mod tests {
         wait_seq_tail(&session, &wake);
 
         session.write(b"\n");
-        // Ölçüt doluluğun kendisi: tek dolu satır imlecin satırı.
+        // Ölçüt: ekran silindi (tek dolu satır imlecin satırı) ama doluluk
+        // **yine de** `rows` — geçmiş kapısı devrede.
         wait_until("ekran temizlenmedi", Duration::from_secs(5), || {
-            cursor_now(&session).content_rows == 1
+            let cursor = cursor_now(&session);
+            cursor.row == 0 && cursor.content_rows == cursor.rows
         });
         assert_eq!(display_offset(&session), 0);
 
-        // Bir çentik geriye: geçmişin son satırı 0. satıra, imleç 1.'ye.
+        // Tekerlek pencereyi gezdiriyor ama doluluk kımıldamıyor: pencere
+        // geçmişin üstünde ve her hâlde dolu.
         assert_eq!(scroll(&session, 1), Wheel::Scrolled(1));
         let cursor = cursor_now(&session);
         assert_eq!(cursor.display_offset, 1, "{cursor:?}");
-        assert_eq!(cursor.content_rows, 2, "{cursor:?}");
+        assert_eq!(cursor.content_rows, cursor.rows, "{cursor:?}");
 
-        // Pencere geçmişle dolunca öteleme kendiliğinden sıfıra iner: doluluk
-        // `rows`'a çıkıyor ve bunu zorlayan bir dal yok.
         assert!(matches!(scroll(&session, 20), Wheel::Scrolled(n) if n > 0));
         let cursor = cursor_now(&session);
         assert_eq!(cursor.content_rows, cursor.rows, "{cursor:?}");
