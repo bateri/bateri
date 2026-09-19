@@ -17,6 +17,7 @@
 | 013 | [komut-suresi](013-komut-suresi/) | 🔨 | `main`'de — bir saniyeyi geçen komutların süresi komut satırının sağ ucunda, koşarken canlı. Kare talebinin **üçüncü** sebebi doğdu (**saat**) ve `bt-gpu::link`'in sözleşmesi üçe tamamlandı: koşan komutu olan pencere artık "boşta" sayılmıyor. 2 phase tamam; teslim bekliyor — gözle kontrol ve `make duman` kullanıcıda, bir ölçüm iddiası yük borcuna takılı — `teslim.md` |
 | 014 | [imlec-stilleri](014-imlec-stilleri/) | 🟢 | `main`'de — imleç uygulamanın istediği şekli alıyor (blok/alt çizgi/çubuk), istenirse sönüyor ve rengini kendi tema rolünden alıyor. Saat ikinci bir tat kazandı: hasar dikmeyen uyandırma, saniyede iki kare. 3 phase + kapı tamam (13 + 1 bulgu), gözle kontrol geçti. Bir tema kuralı kullanıcı kararı bekliyor — `teslim.md` |
 | 015 | [imlec-cilasi](015-imlec-cilasi/) | 🔨 | 3 phase tamam, kapı geçti; teslim bekliyor — `make duman` ve gözle kontrol kullanıcıda (`teslim.md` → B) |
+| 016 | [imlec-ayarlari](016-imlec-ayarlari/) | 📐 | İmlecin görünüşü ve blink ritmi ayarlardan: köşe yarıçapı, hale payı/alfası, blink periyodu ve durma sayacı. Opacity/fade **kapsam dışı** — kullanıcı bedeli duyunca çıkardı |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
