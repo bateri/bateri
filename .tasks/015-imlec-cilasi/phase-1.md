@@ -166,5 +166,7 @@ tartılır: hızlı komuttaki kazanç yavaş komuttaki iki bölünmeye değer mi
 - [x] Doğrulama geçti (`make hepsi` — exit 0)
 - [x] `make test-yaris` (paylaşılan durum: `ShellLog`'a yeni alan) — exit 0
 - [x] Riskli phase (`test-yaris` gerekti): `/code-review` koştu — 12 bulgu, 9 düzeltildi, 3 gözle karara bırakıldı
-- [ ] `make duman` (kullanıcıda)
+- [x] `make duman` (kullanıcıda, 2026-09-19): `kare=29 hucre=8 glif=6 kural=15
+      icerik=2 hareket=27 sessiz=1749.52ms kapanis=clean` — 014'ün tabanıyla
+      **bire bir aynı**, yani set hermetik koşuya tek kare eklemedi
 - [x] Yayın etkisi yazıldı

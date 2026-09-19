@@ -194,7 +194,9 @@ artık imleci çizmiyor, `instance_buffer`'ın "iki pipeline"ı, `pipeline()`'ı
 - [x] `CLAUDE.md`, `lib.rs` başlığı
 - [x] Doğrulama geçti (`make hepsi` exit 0 + `make shader` exit 0)
 - [x] Riskli phase: `/code-review` koştu — 15 bulgu, 11 giderildi, 4 bilinen sınıra
-- [ ] `make duman` (kullanıcıda)
+- [x] `make duman` (kullanıcıda, 2026-09-19): `kare=29 hucre=8 glif=6 kural=15
+      icerik=2 hareket=27 sessiz=1749.52ms kapanis=clean` — 014'ün tabanıyla
+      **bire bir aynı**, yani set hermetik koşuya tek kare eklemedi
 - [ ] **Gözle kontrol:** yarıçap ve halenin görüntüsü; seçili hücrenin üstündeki
       caret'in köşeleri (Karar 4'ün geçerlilik koşulunun tek görünür yeri);
       halenin komşu seçim vurgusunu soldurması

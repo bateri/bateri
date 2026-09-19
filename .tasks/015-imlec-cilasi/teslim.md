@@ -67,7 +67,11 @@ make test-yaris     # exit 0  (ShellLog'a iki yeni alan)
 - [x] `make test-yaris` yeşil (phase-1 `ShellLog`'a alan ekledi)
 - [x] `/code-review` — phase-2'de ve set aralığında; 27 bulgu, 26 giderildi
 - [x] `/audit` — `make denetim` temiz, 2 bulgu giderildi
-- [ ] `make duman` — **kullanıcıda** (aşağıda B.1)
+- [x] `make duman` — **kullanıcı koştu** (2026-09-19): `kare=29 hucre=8 glif=6
+      kural=15 icerik=2 hareket=27 sessiz=1749.52ms kapanis=clean`. 014'ün
+      tabanıyla **bire bir aynı** — üçüncü pipeline, devrin saati ve odak
+      kapısı hermetik koşuya tek kare eklemedi (reçetede dock yok, odak hiç
+      okunmuyor, `hucre=` caret'i zaten saymıyor)
 - [ ] **Gözle kontrol** — **kullanıcıda** (aşağıda B.2)
 
 ### Ölçüm bekleyen iddia
@@ -110,7 +114,7 @@ düşürmemeli.
 
 ### Yayın Checklist
 
-- [ ] B.1 `make duman` (başka pencereye geçerek)
+- [x] B.1 `make duman` — jetonlar temiz; pencere geçişi ayrıca doğrulanacak
 - [ ] B.2 gözle kontrol — beş madde
 - [ ] `/ship`
 

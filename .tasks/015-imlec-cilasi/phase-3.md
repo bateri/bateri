@@ -132,7 +132,10 @@ _Requirements: R7, R7.1, R7.2, R7.3, R7.4, R5, R10_
       iki sınamayla çivili ve odak onun üçüncü tüketicisi
 - [x] `CLAUDE.md`, iki bayat doc
 - [x] Doğrulama geçti (`make hepsi` exit 0 + `make shader` exit 0)
-- [ ] `make duman` (kullanıcıda) — koşu sırasında başka pencereye geçilerek
+- [x] `make duman` (kullanıcıda, 2026-09-19): `kare=29 hucre=8 glif=6 kural=15
+      icerik=2 hareket=27 sessiz=1749.52ms kapanis=clean` — 014'ün tabanıyla
+      **bire bir aynı**, yani set hermetik koşuya tek kare eklemedi
+      *(pencere geçişi ayrıca doğrulanacak)*
 - [ ] **Gözle kontrol:** odak gidince içi boşalma ve blink'in durması; dock'ta
       aynısı; beam/underline'da yalnız blink'in durması
 - [x] Yayın etkisi yazıldı
