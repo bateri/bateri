@@ -183,9 +183,14 @@ impl CursorBlink {
 /// `[terminal] cursor`: imlecin **şekli** — DECSCUSR'ın üç biçimi.
 ///
 /// Bölüm `[motion]` **değil**: şekil hareket değil, terminalin durum
-/// makinesinin bir parçası. `[terminal]`'da duruyor çünkü dosya kodu
-/// aynalıyor — değer [`TerminalOptions`] ile `Session`'a iniyor ve orada
-/// alacritty'nin `default_cursor_style`'ı oluyor. Referans anahtarı kendi
+/// makinesinin bir parçası. `[terminal]`'da duruyor ve aynı bölümde değer
+/// [`TerminalOptions`] ile `Session`'a iniyor, orada alacritty'nin
+/// `default_cursor_style`'ı oluyor.
+///
+/// **O ayna betimleyici, buyurucu değil** (016): `[clipboard] osc52` de
+/// `TerminalOptions`'a giriyor, `[terminal] cursor_radius` ise girmiyor.
+/// Bölüm kullanıcının **neyi ayarladığını** adlandırıyor, hangi struct'ın
+/// taşıdığını değil. Referans anahtarı kendi
 /// `[typography]`'sinde tutuyor (`docs/ARASTIRMA.md` → İmleç); adını aldık,
 /// yerini değil.
 ///
@@ -207,6 +212,63 @@ pub enum CaretShape {
     Underline,
     /// Hücrenin solunda ince bir dikey çubuk.
     Beam,
+}
+
+/// İmlecin **köşe yarıçapı** varsayılanı, hücre yüksekliğinin oranı.
+///
+/// **Varsayılanların tek sahibi burası** ve bu bir tesisat kararı: `bt-gpu`
+/// aynı sabiti **import ediyor** (`Frame::default()` ve piksel bekçileri).
+/// İki literal olsaydı bekçiler kendi tutarlılığını sınar, sevk edilen imleç
+/// başka ölçüde olsa da yeşil geçerdi — sessiz kırılmanın tarifi
+/// (`/plan-review`, 016). Emsal [`FontOptions`]'ın doc'u: *"renderer'ın kendi
+/// sabiti olsaydı süreli koşunun fontu ile dosyasız kullanıcınınki iki ayrı
+/// sayıya bağlanırdı"*.
+///
+/// Değer **seçilmiş, ölçülmemiş** ve 015'te iki tur gözle indi (0.18 → 0.10):
+/// blok caret hücre genişliğinden kısa ve daha büyük bir yarıçap onu
+/// dikdörtgen olmaktan çıkarıp hapa çeviriyordu.
+pub const CURSOR_RADIUS: f32 = 0.10;
+
+/// İmlecin **gölge gücü** varsayılanı; `1.0` = tasarımın kendi ölçüsü.
+///
+/// **Tek sayı, iki değil** (`/plan-review`, 016): hale payı ile alfası 015'te
+/// aynı iki göz turunda **aynı yönde** indi (pay 1.0 → 0.5 → 0.4, alfa
+/// 0.35 → 0.14 → 0.10), yani kullanıcı iki eksende değil tek histe gezindi.
+/// Ayrı anahtarlar ayrıca anlamsız hâl üretirdi: `pay = 2, alfa = 0` hiçbir
+/// şeyin halesini boyayan bir dörtlü demek.
+///
+/// `bt-gpu`'daki iki sabit **taban olarak yerinde kalıyor**; bu yalnız onların
+/// çarpanı, yani "ikinci bir tasarım sabiti yok" kuralı korunuyor.
+pub const CURSOR_GLOW: f32 = 1.0;
+
+/// Yarıçabın kabul aralığı; yarım = hücrenin yarısı, ötesi anlamsız.
+const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
+
+/// Gölge çarpanının kabul aralığı. Üst uç **seçilmiş, ölçülmemiş**: 3.0'da
+/// alfa 0.30 eder, yani 015'te reddedilen neonun (0.35) hâlâ altında.
+const CURSOR_GLOW_RANGE: std::ops::RangeInclusive<f64> = 0.0..=3.0;
+
+/// `[terminal] cursor_radius` ve `cursor_glow`: imlecin **çizim** sayıları.
+///
+/// `TerminalOptions`'a **girmiyor** ve `Session` görmüyor: ikisi de terminalin
+/// durumu değil, saf boyama. Yol `cursor_motion` emsali —
+/// `Settings::changes` farkı buluyor, `bt-shell` `bt_gpu::DisplayLink`'e
+/// iletiyor, kayıt anında uygulanıyor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaretStyle {
+    /// Köşe yarıçapı, hücre **yüksekliğinin** oranı.
+    pub radius_ratio: f32,
+    /// Gölgenin gücü; `0.0` kapalı, `1.0` tasarımın kendi ölçüsü.
+    pub glow: f32,
+}
+
+impl Default for CaretStyle {
+    fn default() -> Self {
+        Self {
+            radius_ratio: CURSOR_RADIUS,
+            glow: CURSOR_GLOW,
+        }
+    }
 }
 
 impl CaretShape {
@@ -347,6 +409,9 @@ pub struct Settings {
     pub cursor: CaretShape,
     /// `[terminal] cursor_blink`: imleç yanıp söner mi ([`CursorBlink`]).
     pub cursor_blink: CursorBlink,
+    /// `[terminal] cursor_radius` + `cursor_glow`: imlecin çizim sayıları
+    /// ([`CaretStyle`]). `TerminalOptions`'a girmiyor.
+    pub caret: CaretStyle,
     /// `[appearance] theme`: [`SYSTEM_THEME`] ya da tema **adı** —
     /// `themes/{ad}.toml` ya da gömülü bir tema. Ad biçim olarak geçerli (boş
     /// değil, `/` yok); var olup olmadığı dosya sistemi ister ve `bt-shell`'in
@@ -390,6 +455,7 @@ impl Default for Settings {
             scrollback: 10_000,
             cursor: CaretShape::default(),
             cursor_blink: CursorBlink::default(),
+            caret: CaretStyle::default(),
             theme: SYSTEM_THEME.to_owned(),
             light_theme: "bateri-light".to_owned(),
             dark_theme: "bateri".to_owned(),
@@ -473,6 +539,14 @@ cursor = "block"
 # unless you choose it; with it on, it stops on its own 15 seconds after the
 # window last drew anything and comes back with the next output or keystroke.
 cursor_blink = "off"
+# 0.0 to 0.5. How round the cursor's corners are, as a fraction of the cell's
+# height: 0 is a sharp rectangle, 0.5 rounds a block into a stadium. It scales
+# with the font size, so a larger point size keeps the same look.
+cursor_radius = 0.10
+# 0.0 to 3.0. How strong the soft shadow around the cursor is: 0 turns it off,
+# 1 is the designed amount. It scales both how far the shadow reaches and how
+# dark it is, because those two are one feeling, not two.
+cursor_glow = 1.0
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
@@ -593,11 +667,32 @@ integration = "auto"
                     parsed.settings.cursor_blink =
                         cursor_blink(text, item, fallback.cursor_blink, &mut parsed.diagnostics);
                 }
+                if let Some(item) = terminal.get("cursor_radius") {
+                    parsed.settings.caret.radius_ratio = ranged_float(
+                        text,
+                        item,
+                        "terminal.cursor_radius",
+                        CURSOR_RADIUS_RANGE,
+                        f64::from(fallback.caret.radius_ratio),
+                        &mut parsed.diagnostics,
+                    ) as f32;
+                }
+                if let Some(item) = terminal.get("cursor_glow") {
+                    parsed.settings.caret.glow = ranged_float(
+                        text,
+                        item,
+                        "terminal.cursor_glow",
+                        CURSOR_GLOW_RANGE,
+                        f64::from(fallback.caret.glow),
+                        &mut parsed.diagnostics,
+                    ) as f32;
+                }
             }
             None if root.contains_key("terminal") => {
                 parsed.settings.scrollback = fallback.scrollback;
                 parsed.settings.cursor = fallback.cursor;
                 parsed.settings.cursor_blink = fallback.cursor_blink;
+                parsed.settings.caret = fallback.caret;
             }
             None => {}
         }
@@ -764,6 +859,7 @@ integration = "auto"
             font: self.font != new.font,
             motion: self.cursor_motion != new.cursor_motion
                 || self.reduce_motion != new.reduce_motion,
+            caret: self.caret != new.caret,
         }
     }
 
@@ -889,6 +985,15 @@ pub struct Changes {
     /// `bt-shell` onu yine de çözmek zorunda; fark yalnız "bir şey değişti"
     /// diyor.
     pub motion: bool,
+    /// [`Settings::caret`] değişti: imlecin çizim sayıları `bt-gpu`'ya gider
+    /// (`bt_gpu::DisplayLink::set_caret_style`).
+    ///
+    /// **`terminal`'dan ayrı alan** ve bu şart: `changes.terminal` bugün
+    /// `self.terminal() != new.terminal()`'in ta kendisi, yani
+    /// `TerminalOptions`'ın farkı. Bu iki anahtar oraya **girmiyor**; aynı
+    /// alana binselerdi bir yarıçap değişimi `TerminalOptions`'ı baştan
+    /// `Session`'a gönderirdi.
+    pub caret: bool,
 }
 
 /// Metni TOML belgesine ayrıştırır; ayrıştırılamıyorsa tek satırlık tanı.
@@ -1058,10 +1163,40 @@ fn font_family(
 /// tofu'ya düşen bir terminal demekti ve belirti ancak uzun bir oturumdan
 /// sonra görünürdü.
 fn line_height(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagnostic>) -> f64 {
-    const KEY: &str = "font.line_height";
+    ranged_float(
+        text,
+        item,
+        "font.line_height",
+        1.0..=MAX_LINE_HEIGHT,
+        fallback,
+        diagnostics,
+    )
+}
+
+/// Aralıklı ondalık anahtarın **ortak gövdesi**: sayı değilse ya da aralık
+/// dışındaysa anahtar kendi değerinde kalır ve tanı bırakılır.
+///
+/// Ayrı fonksiyon, çünkü aynı ~35 satır depoda **iki kez elle** yazılmıştı
+/// (`line_height`, `font_size`) ve 016 üç anahtar daha getiriyordu — yardımcı
+/// adlandırılmasa üç kopya daha doğardı (`/plan-review`).
+///
+/// **Kırpma yok, red var:** aralık dışı değer sessizce uca çekilseydi
+/// kullanıcı yanlış yazdığını hiç görmezdi. Deponun kuralı bu
+/// ([`Settings::parse_keeping`]).
+///
+/// `font_size` **taşınmadı**: tek uçlu (`> 0`) ve tanı metni bu kalıba
+/// girmiyor; zorlamak mesajı bozardı.
+fn ranged_float(
+    text: &str,
+    item: &Item,
+    key: &'static str,
+    range: std::ops::RangeInclusive<f64>,
+    fallback: f64,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> f64 {
     let line = item.span().and_then(|span| line_of(text, span.start));
     let reject = |message: String| Diagnostic {
-        key: Some(KEY),
+        key: Some(key),
         line,
         message,
     };
@@ -1070,16 +1205,17 @@ fn line_height(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Dia
         (None, Some(value)) => value as f64,
         (None, None) => {
             diagnostics.push(reject(format!(
-                "`{KEY}` must be a number, found {}; using {fallback}",
+                "`{key}` must be a number, found {}; using {fallback}",
                 kind(item)
             )));
             return fallback;
         }
     };
-    if !(value.is_finite() && (1.0..=MAX_LINE_HEIGHT).contains(&value)) {
+    if !(value.is_finite() && range.contains(&value)) {
         diagnostics.push(reject(format!(
-            "`{KEY}` must be a number between 1 and {MAX_LINE_HEIGHT}, \
-found {value}; using {fallback}"
+            "`{key}` must be a number between {} and {}, found {value}; using {fallback}",
+            range.start(),
+            range.end()
         )));
         return fallback;
     }
@@ -1380,6 +1516,8 @@ mod tests {
             ("terminal", "scrollback"),
             ("terminal", "cursor"),
             ("terminal", "cursor_blink"),
+            ("terminal", "cursor_radius"),
+            ("terminal", "cursor_glow"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -1529,7 +1667,8 @@ mod tests {
             Changes {
                 terminal: true,
                 font: false,
-                motion: false
+                motion: false,
+                caret: false
             }
         );
         assert_eq!(
@@ -1557,6 +1696,7 @@ mod tests {
             scrollback: 100_000,
             cursor: CaretShape::default(),
             cursor_blink: CursorBlink::default(),
+            caret: CaretStyle::default(),
             theme: "paper".to_owned(),
             light_theme: "chalk".to_owned(),
             dark_theme: "ink".to_owned(),
@@ -1715,6 +1855,7 @@ mod tests {
             terminal: false,
             font: true,
             motion: false,
+            caret: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
         assert_eq!(
@@ -1803,7 +1944,8 @@ mod tests {
             Changes {
                 terminal: true,
                 font: false,
-                motion: false
+                motion: false,
+                caret: false
             }
         );
         assert_eq!(
@@ -1949,7 +2091,8 @@ found {found}; using \"spring\""
             Changes {
                 terminal: false,
                 font: false,
-                motion: true
+                motion: true,
+                caret: false
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -2033,7 +2176,8 @@ found {found}; using \"system\""
             Changes {
                 terminal: false,
                 font: false,
-                motion: true
+                motion: true,
+                caret: false
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -2103,6 +2247,65 @@ found {found}; using \"auto\""
         let after = clean("[shell]\nintegration = \"off\"\n");
         assert_ne!(before.shell_integration, after.shell_integration);
         assert_eq!(before.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn caret_style_is_read_and_bounded() {
+        // **Varsayılan bugünkü görüntü:** dosyası olmayan kullanıcı 015'in
+        // sevk ettiği imleci görüyor ve `bt-gpu` aynı sabitleri import ediyor
+        // (016 R2) — iki literal olsaydı piksel bekçileri kör kalırdı.
+        assert_eq!(clean("").caret, CaretStyle::default());
+        assert_eq!(
+            (
+                CaretStyle::default().radius_ratio,
+                CaretStyle::default().glow
+            ),
+            (CURSOR_RADIUS, CURSOR_GLOW)
+        );
+
+        let read = clean("[terminal]\ncursor_radius = 0.3\ncursor_glow = 0\n").caret;
+        assert_eq!((read.radius_ratio, read.glow), (0.3, 0.0));
+        // Tam sayı da geçerli: kullanıcının yazacağı `cursor_glow = 2`.
+        assert_eq!(clean("[terminal]\ncursor_glow = 2\n").caret.glow, 2.0);
+    }
+
+    #[test]
+    fn a_rejected_caret_number_keeps_its_own_key() {
+        // **Kırpma yok, red var** (016 R1.3): aralık dışı değer sessizce uca
+        // çekilseydi kullanıcı yanlış yazdığını hiç görmezdi. Reddedilen
+        // anahtar kendi varsayılanında kalıyor, **komşusu okunuyor**.
+        for value in ["1.5", "-0.1", "\"big\""] {
+            let (settings, diagnostic) = rejected(&format!(
+                "[terminal]\ncursor_radius = {value}\ncursor_glow = 2.0\n"
+            ));
+            assert_eq!(
+                settings.caret.radius_ratio, CURSOR_RADIUS,
+                "{value} kendi anahtarını değiştirdi"
+            );
+            assert_eq!(
+                settings.caret.glow, 2.0,
+                "{value} komşu anahtarı da düşürdü"
+            );
+            assert_eq!(diagnostic.key, Some("terminal.cursor_radius"), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_caret_change_is_its_own_field() {
+        // `changes.terminal` bugün `terminal() != terminal()`'in ta kendisi ve
+        // bu iki anahtar `TerminalOptions`'a **girmiyor**; aynı alana
+        // binselerdi bir yarıçap değişimi oturumu baştan kurdururdu.
+        let before = clean("");
+        let after = clean("[terminal]\ncursor_radius = 0.2\n");
+        let changes = before.changes(&after);
+        assert!(changes.caret, "imleç farkı görülmedi");
+        assert!(!changes.terminal, "yarıçap oturumu yeniden kurduruyor");
+        assert!(!changes.font && !changes.motion);
+
+        // Ters yön: terminal anahtarı değişince imleç alanı kımıldamıyor.
+        let scrolled = clean("[terminal]\nscrollback = 50\n");
+        let changes = before.changes(&scrolled);
+        assert!(changes.terminal && !changes.caret, "{changes:?}");
     }
 
     #[test]

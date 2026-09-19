@@ -60,7 +60,30 @@ _Requirements: R1, R1.1, R1.2, R1.3, R1.4, R2, R2.1, R3, R3.1, R3.2, R3.3, R4, R
 
 ## Uygulama Notları
 
-<!-- Kodlanırken doldurulacak. -->
+- **`line_height` de `ranged_float`'a taşındı** (phase "ayrı karar" demişti).
+  Şekli birebir aynıydı — iki uçlu aralık, aynı tanı cümlesi — ve taşındıktan
+  sonra 49 ayar sınaması **değişmeden** geçti, yani mesaj bayt bayt aynı
+  kaldı. `font_size` **taşınmadı**: tek uçlu (`> 0`) ve tanı metni bu kalıba
+  girmiyor; zorlamak mesajı bozardı. Kayıtlı borcun (`docs/YOL-HARITASI.md` →
+  "ayar ayrıştırmasının beş kopyası") **ondalık yarısı** böylece kapandı, enum
+  yarısı duruyor.
+- **Varsayılanlar `f32`, aralıklar `f64`.** `as_float` `f64` veriyor ve
+  `ranged_float` orada çalışıyor; dönüşüm ayrıştırma anında **bir kez**
+  yapılıyor, kare başına değil.
+- **Açılış tohumu link'i yuvadan okuyor**, elde kalan `link`'ten değil:
+  `let _ = self.ivars().link.set(link)` değeri taşıyor ve derleyici bunu
+  gösterdi. `observe_reduce_motion`'ın yanına konması da bu yüzden doğru yer.
+- **`docs/AYARLAR.md`'nin şablon bloğu kaynaktan senkronlandı**, elle değil:
+  `documented_template_is_the_template` bayt bayt eşitlik istiyor ve dosyada
+  `cursor_blink = "off"` **iki kez** geçiyor (biri proza), yani hedefli bir
+  düzenleme yanlış bloğu vurabilirdi.
+- **R6 beklenenden geniş kapandı:** yarıçap **ve** dejenere kol artık gerçek
+  yoldan sürülüyor (`CaretStyle`), çünkü ikisi de kullanıcı ayarı oldu.
+  `force_caret_sdf` yalnız **kenara** kaldı — o hâlâ ayardan sürülemiyor
+  (odak biti `bt-gpu`'da).
+- **Yeni bekçi: `the_glow_setting_reaches_the_pixels`.** `Settings` sınamaları
+  değerin **okunduğunu** gösteriyor; boyandığını yalnız piksel gösterir ve bu
+  ikisi arasındaki tel hiç sınanmamış olurdu.
 
 ## Yayın Etkisi
 
@@ -79,22 +102,23 @@ _Requirements: R1, R1.1, R1.2, R1.3, R1.4, R2, R2.1, R3, R3.1, R3.2, R3.3, R4, R
 
 ## Checklist
 
-- [ ] `settings.rs`: `pub const` varsayılanlar, `CaretStyle`, `Changes.caret`
-- [ ] `settings.rs`: `ranged_float` **adıyla** doğdu (R4)
-- [ ] `settings.rs`: `TEMPLATE`'e iki satır, yorumlar aralığı söylüyor
-- [ ] `settings.rs`: `CaretShape`'in doc'u — ayna betimleyici (R1.4)
-- [ ] `frame.rs`: sabitler **taban**, oran çarpan; `clear`'ın ikinci argümanı
-- [ ] `frame.rs`: `CellMetrics`'e dokunulmadı
-- [ ] `link.rs`: `Cell<CaretStyle>` + `set_caret_style`, değişimde kare
-- [ ] `app.rs`: açılış tohumu **ve** kayıt anı
-- [ ] `bt-gpu` varsayılanı `bt-core`'un const'undan **import ediyor** (R2)
-- [ ] Test: aralık dışı değer kendi anahtarını değiştirmiyor + tanı
-- [ ] Test: `Changes.caret` yalnız bu iki anahtar değişince doğru
-- [ ] Test: `template_is_the_defaults` ve `documented_template_is_the_template`
-- [ ] Test: yarıçap/hale **gerçek yoldan** sürülüyor, `caret_sdf_override`
-      yalnız kenar için kaldı (R6)
-- [ ] `docs/AYARLAR.md` (tablo + proza + Şablon), `CLAUDE.md`
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] `settings.rs`: `pub const` varsayılanlar, `CaretStyle`, `Changes.caret`
+- [x] `settings.rs`: `ranged_float` **adıyla** doğdu (R4); `line_height` de ona taşındı
+- [x] `settings.rs`: `TEMPLATE`'e iki satır, yorumlar aralığı söylüyor
+- [x] `settings.rs`: `CaretShape`'in doc'u — ayna betimleyici (R1.4)
+- [x] `frame.rs`: sabitler **taban**, oran çarpan; `clear`'ın ikinci argümanı
+- [x] `frame.rs`: `CellMetrics`'e dokunulmadı
+- [x] `link.rs`: `Cell<CaretStyle>` + `set_caret_style`, değişimde kare
+- [x] `app.rs`: açılış tohumu **ve** kayıt anı
+- [x] `bt-gpu` varsayılanı `bt-core`'un const'undan **import ediyor** (R2)
+- [x] Test: aralık dışı değer kendi anahtarını değiştirmiyor + tanı (komşusu okunuyor)
+- [x] Test: `Changes.caret` yalnız bu iki anahtar değişince doğru (iki yönlü)
+- [x] Test: `template_is_the_defaults` (liste büyüdü) ve `documented_template_is_the_template`
+- [x] Test: yarıçap/hale **ve dejenere kol** gerçek yoldan sürülüyor;
+      `force_caret_sdf` yalnız kenar için kaldı (R6). Ayrıca
+      `the_glow_setting_reaches_the_pixels` — ayarın piksele indiğinin kanıtı
+- [x] `docs/AYARLAR.md` (tablo + Şablon bloğu kaynaktan senkron), `CLAUDE.md`
+- [x] Doğrulama geçti (`make hepsi` — exit 0)
 - [ ] `make duman` (kullanıcıda) — jetonlar değişmemeli
 - [ ] **Gözle kontrol:** ayarı kaydedince **boştaki** pencerede de değişiyor
-- [ ] Yayın etkisi yazıldı
+- [x] Yayın etkisi yazıldı

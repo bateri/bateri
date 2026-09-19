@@ -91,6 +91,14 @@ cursor = "block"
 # unless you choose it; with it on, it stops on its own 15 seconds after the
 # window last drew anything and comes back with the next output or keystroke.
 cursor_blink = "off"
+# 0.0 to 0.5. How round the cursor's corners are, as a fraction of the cell's
+# height: 0 is a sharp rectangle, 0.5 rounds a block into a stadium. It scales
+# with the font size, so a larger point size keeps the same look.
+cursor_radius = 0.10
+# 0.0 to 3.0. How strong the soft shadow around the cursor is: 0 turns it off,
+# 1 is the designed amount. It scales both how far the shadow reaches and how
+# dark it is, because those two are one feeling, not two.
+cursor_glow = 1.0
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;

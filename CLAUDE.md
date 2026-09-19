@@ -30,8 +30,8 @@ kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
 Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı, `osc52`,
-`cursor`, `cursor_blink`, `cursor_motion`, `reduce_motion` ve
-`shell.integration`),
+`cursor`, `cursor_blink`, `cursor_radius`, `cursor_glow`, `cursor_motion`,
+`reduce_motion` ve `shell.integration`),
 Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
 `bateri`/`bateri-light`'tan çözer. Ayar ve etkin tema dosyası **kayıt

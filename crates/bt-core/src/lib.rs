@@ -53,8 +53,8 @@ pub use session::{
     smoke_shell,
 };
 pub use settings::{
-    CaretShape, Changes, CursorBlink, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion,
-    SYSTEM_THEME, Settings, ShellIntegration,
+    CURSOR_GLOW, CURSOR_RADIUS, CaretShape, CaretStyle, Changes, CursorBlink, CursorMotion,
+    Diagnostic, FontOptions, Parsed, ReduceMotion, SYSTEM_THEME, Settings, ShellIntegration,
 };
 pub use shell::{
     DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle,

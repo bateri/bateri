@@ -1802,6 +1802,13 @@ impl AppDelegate {
         // yuvadan okuyor (stilin `set_cursor_motion`'ı elindeki `link`'i
         // kullanabiliyordu, bu yol kullanamaz — üç çağıranı ortak).
         self.observe_reduce_motion();
+        // İmlecin çizim sayıları da açılışta bir kez iniyor ve **yuvadan**
+        // okunuyor, elde kalan `link`'ten değil: `observe_reduce_motion` ile
+        // aynı gerekçe — link o çağrıda yuvaya taşındı. `set_caret_style`
+        // aynı değerde no-op, yani kayıt anı yoluyla çakışmıyor.
+        if let Some(link) = self.ivars().link.get() {
+            link.set_caret_style(self.ivars().settings.borrow().caret);
+        }
         // **Odak da tohumlanıyor** ve gerekçesi aynı sıralama: pencere
         // `makeKeyAndOrderFront` ile key oluyor, yani `windowDidBecomeKey:`
         // link yuvaya girmeden **önce** düşüyor ve o çağrı sessizce atılıyor.
@@ -1944,6 +1951,16 @@ impl AppDelegate {
             if motion_changed {
                 if let Some(link) = self.ivars().link.get() {
                     link.set_cursor_motion(new.cursor_motion);
+                }
+            }
+            // İmlecin çizim sayıları da link'e, aynı gerekçeyle: **nasıl**
+            // çizdiğimizi değiştiriyorlar, hangi kareyi çizdiğimizi değil.
+            // `Changes::caret` ayrı bir alan, çünkü bunlar `TerminalOptions`'a
+            // girmiyor ve `changes.terminal`'a binselerdi bir yarıçap
+            // değişimi oturumu baştan kurdururdu.
+            if changes.caret {
+                if let Some(link) = self.ivars().link.get() {
+                    link.set_caret_style(new.caret);
                 }
             }
             self.ivars().zoom.set(zoom);
