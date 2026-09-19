@@ -39,8 +39,9 @@ _Requirements: R2, R2.1, R2.2, R2.3, R3, R4, R5, R6, R8, R9, R10_
   `const` doc'unda "seçilmiş, ölçülmemiş" **ve hangi metriğin neden yetmediği**.
 - **`CLAUDE.md` ve `crates/bt-gpu/src/lib.rs` başlığı** — pipeline sayısı ikiden
   üçe çıkıyor ve caret'in çizimi artık kendi fragment'inde.
-- **`docs/YOL-HARITASI.md`** — **altıncı kayma** notu (015 bu set oldu; materyal
-  → 016, emoji → 017, sekme/bölme → 018) ve setin kendi satırı.
+- **`docs/YOL-HARITASI.md`** — dokunulmuyor: altıncı kayma notu ve 015'in kendi
+  satırı **2026-09-19'da yazıldı** (klavye seti sıraya girerken aynı tablo
+  düzeltildi). Burada tekrar edilirse iki yerden yazılan bir satır olur.
 
 ## Kabul
 
@@ -70,8 +71,8 @@ _Requirements: R2, R2.1, R2.2, R2.3, R3, R4, R5, R6, R8, R9, R10_
 
 - **shader** — `.metal` değişti: `make shader` koştu mu; yeni uniform'un Rust
   karşılığıyla **alan alan** aynı olduğu iki taraflı assert'le bağlı mı.
-- **belge** — `CLAUDE.md`, `bt-gpu/src/lib.rs` başlığı, `docs/YOL-HARITASI.md`
-  (altıncı kayma + satır), iki bayat doc.
+- **belge** — `CLAUDE.md`, `bt-gpu/src/lib.rs` başlığı, iki bayat doc.
+  `docs/YOL-HARITASI.md` **bu phase'in işi değil**, zaten yazıldı.
 - **seçilmiş sayı:** türetilemeyen kalırsa `const` doc'unda gerekçesiyle;
   `docs/OLCUMLER.md`'nin konusu değil (estetik sabit, emsali `OMEGA` /
   `FADE_DURATION`).
@@ -96,7 +97,7 @@ _Requirements: R2, R2.1, R2.2, R2.3, R3, R4, R5, R6, R8, R9, R10_
 - [ ] Test: hale sınırı — dikdörtgenin **dışı** örnekleniyor
 - [ ] Test: hale blink alfasıyla sönüyor (yine **dışarıdan** örnekleyerek)
 - [ ] İki piksel sınamasının iddiası **ikiye ayrıldı** (toleransa çevrilmedi)
-- [ ] `CLAUDE.md`, `lib.rs` başlığı, `docs/YOL-HARITASI.md`
+- [ ] `CLAUDE.md`, `lib.rs` başlığı
 - [ ] Doğrulama geçti (`make hepsi` + `make shader`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
 - [ ] `make duman` (kullanıcıda)

@@ -54,9 +54,11 @@ bulunamaz.
 | 012 | Input Dock + prompt'un devri | **Zincirin en ucu, kısayolu yok.** Pencere altında sabit ayrı satır editörü; zsh ZLE kancalarına, OSC 133'e ve komut bloklarına birden oturuyor. Tek tutarlı iş, çünkü dördü aynı cümlenin parçası: prompt'u kabuk değil terminal çizer (PS1/RPS1 sıfır görünür genişlik), `>` **o zaman** çizilebilir (bugünkü `Frame`'de temsil edilemiyor — pay glyph almıyor, `GlyphInstance`'ın boyu kare başına tek uniform), blok çıpası komut metnine taşınır (`anchor_close` → `preexec`; alacritty kaynağında doğrulandı, kimlik zaten `bt_block=` ile akışta) ve dock **ayna** olur — tuşlar yine PTY'ye gider, ZLE `BUFFER`'ı geri bildirir, yani Tab/geçmiş/Ctrl-R ZLE'de kalır. *(2026-09-17, 012 açılırken: tuş vuruşu ve silme animasyonları — `keypress`, `delete_mode` — setten **çıkarıldı**. "Bu harfi kullanıcı mı yazdı" sorusunun cevabı hâlâ dock'ta, ama aynanın gerekçesi onlara **bağlı değil**: ayrı bir yüzeyde giriş satırını çizmek zaten içeriğini bilmeyi gerektiriyor, yani ayna dock'un ön şartı. Animasyonlar aynanın üstüne kurulur ve kendi setine gider.)* **Ödenmemiş bedeli kayıtlı:** aynanın görsel dikişi — ZLE'nin `BUFFER` olmayan çıktısı (tamamlama listesi, `menu-select`, `bck-i-search`, `zle -M`) aynada yok, ızgaraya düşüyor; ve kullanıcının p10k/starship prompt'u **çizilmez**, geri dönüş bugün hep-ya-hiç (`shell.integration = "off"`). Hazırlığı 011'in ikinci turunda yapıldı → `.tasks/011-tabana-yapisik-icerik/discussion.md` (Karar 8, 10, 12 ve `## Muhakeme — 2. tur`). |
 | 013 | komut süresi sayacı | 010'un blok defterinin üstüne ince bir katman: bir saniyeyi geçen komutların süresi komut satırının sağ ucunda, koşarken canlı. Kendi seti olmasının sebebi kapsamı değil **bedeli** — canlı sayaç kare talebinin üçüncü sebebini (**saat**) doğuruyor ve `bt-gpu::link`'in modül başlığındaki yazılı sözleşmeyi üçe tamamlıyor; ayrıca blok defterinin girdi başına bayt bütçesini 8'den 12 bayta çıkarıyor (`const` assert ile bağlı). Referansta karşılığı var (`docs/ARASTIRMA.md`: satır 98 `command_duration_threshold`, satır 108 "Komut blokları (süre, kırmızı gutter)"); eşiğin ayara bağlanması bu sette **yok**. Set açıldı → `.tasks/013-komut-suresi/context.md` |
 | 014 | imleç stilleri (DECSCUSR) + blink | DECSCUSR'ın üç şekli ile blink tek sette, çünkü protokol onları tek dizide birleştiriyor (altı değer = 3 şekil × {sabit, yanıp sönen}). 008'de adıyla ertelenmişti ve gerekçesi de yazılıydı: blink **ilk süresiz animasyon** olurdu. Kendi setini hak etmesinin sebebi o: blink içerik değil **hareket** karesi ve tetiği 013'ün saati — yani `Waker`'a hasar dikmeyen ikinci bir kol, saatin "süre" yerine "son tarih" tutması ve blink'e adlandırılmış bir durma koşulu. Şekiller bedavaya geliyor (`Term::cursor_style()` ikisini birden veriyor) ve kare altyapısına hiç dokunmuyor. Set açıldı → `.tasks/014-imlec-stilleri/plan.md` |
-| 015 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
-| 016 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **beş set** boyunca bozuk görünür — bilerek |
-| 017 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
+| 015 | imleç cilası | 014'ün üstüne ince bir katman ve **üç isteği tek sete** topluyor: caret'in yüzeyi (köşe yarıçapı + hale), odak kaybında içi boş imleç, ve ölçülmüş bir kusur — hızlı komutta caret dock'tan ızgaraya çıkıp geri iniyor (`ls` koşarken safha 44 ms sürüyor, animasyon 230 ms'de yerleşiyor). Kendi setini hak etmesinin sebebi yüzey yarısı: caret `cell_bg`'nin düz dörtgeninden çıkıp **kardeş bir fragment**'e taşınıyor, yani `bt-gpu` üçüncü pipeline'ını kazanıyor. Set açıldı → `.tasks/015-imlec-cilasi/plan.md` |
+| 016 | klavye: macOS metin kısayolları | **Kullanıcı isteği (2026-09-19):** Option+oklar kelime atlamıyor, Option+Delete kelime silmiyor, Cmd+Delete satırı silmiyor — "bu kısayollar yok diye pratiklik çok azalıyor". Borcun kendisi yeni değil, aşağıdaki **Klavye kalanları** maddesinde 006'dan beri yazılı; sete bağlanması yeni. **İçinde iki ayrı problem var ve tek set olmalarının sebebi bu:** Option'ın terminal karşılığı **var** (Meta: `\eb`, `\e\x7f` — zsh onları zaten biliyor, biz göndermiyoruz), Cmd'nin **yok** (hiçbir kaçış dizisi Cmd'yi kodlamıyor, üstelik `view::reaches_terminal` Command'lı her tuşu yapısal olarak kesiyor). İkisi aynı dosyada (`bt-shell/keys.rs` + `view.rs`) ve aynı sınama yüzeyinde buluşuyor. **Tek gerçek karar:** Option'ı Meta yapmak Option+harf bileşimini (`∫ ç é`) bitirir; referansın çaresi üç kipli bir ayar ve sol/sağ Option'ın ayrılması (`docs/ARASTIRMA.md`: `keyboard.left_option` / `right_option`, "Option tuşu modları (auto/macOS/Esc+)"). Home/End bedavaya geliyor. **Ölçüm borcu baştan yazılı:** Cmd+Delete'in karşılığı (`\x15`?) gerçek zsh'te doğrulanmadan yazılmaz — zsh'in `kill-whole-line`'ı bash'in `unix-line-discard`'ı değil |
+| 017 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
+| 018 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek |
+| 019 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
 animasyonu), Sparkle ile güncelleme.
@@ -119,6 +121,20 @@ animasyonu), Sparkle ile güncelleme.
 > — dördüncü kaymanın "ertelenmesi ölçüm baskısını da erteledi" cümlesi
 > bugün ikinci kez geçerli. Bu tarihten önceki belgelerde eski numaralar geçer
 > ve düzeltilmedi; tarihli kayıt böyle okunur.
+>
+> **Altıncı kayma (2026-09-19).** Araya **iki** set girdi: **015 imleç cilası**
+> ve **016 klavye**; materyal yüzey / emoji-geniş-kutu / sekme-bölme sırasıyla
+> **017, 018, 019**'a kaydı. Gerekçeleri değişmedi, yalnız sıraları. İkisi de
+> kullanıcıdan geldi ve ikisi de **günlük kullanımda hissedilen** kusurlar:
+> 015'in çekirdeği ölçülmüş bir sıçrama (hızlı komutta caret çıkıp iniyor),
+> 016'nınki "kısayollar yok diye pratiklik çok azalıyor". Kendi setlerini hak
+> etmelerinin sebebi yine kapsamları değil bedelleri — 015 `bt-gpu`'ya üçüncü
+> bir pipeline ekliyor, 016 `view::reaches_terminal`'ın Command kapısını ve
+> `encode_key`'in imzasını açıyor, yani ikisi de yamanacak düzeltme değil.
+> **Materyalin bedeli üçüncü kez ödeniyor:** yazılı ön koşulu (kare süresi
+> tabanı `/measure` ile bu setten önce alınmış olmalı) bir kez daha
+> erteleniyor. Bu tarihten önceki belgelerde eski numaralar geçer ve
+> düzeltilmedi; tarihli kayıt böyle okunur.
 
 ## Sete bağlanmamış borçlar
 
@@ -308,6 +324,11 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   klavyede doğrulanmadı; aday çare `charactersIgnoringModifiers`'ı
   `encode_key`'e geçirmek. Kaynak: 006 `phase-4d.md` → Uygulama Notları ve
   orkestratör kararı (WAIVE (1)); 006 `phase-3b.md` → Kapsam dışı.
+  **2026-09-19'da sete bağlandı → 016** (yukarıdaki tablo). Madde burada
+  kalıyor çünkü set henüz açılmadı; açılınca ayrıntısı `context.md`'sine taşınır
+  ve burası tek satıra iner. 016 bunun üstüne kullanıcının asıl isteğini
+  ekliyor: Option'ın Meta olması ve Cmd'nin adı konmuş bir izin listesiyle
+  terminale ulaşması.
 - **Yerel ara kolu.** Kabuğun dili `preferredLanguages`'ın yalnız dil alt
   etiketinden alınıyor, etiketin kendi bölgesi atılıyor: `en-GB` dili + `TR`
   bölgesi → `en_TR` kurulu değil → `LANG=en_US.UTF-8`, oysa `en_GB.UTF-8`
