@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
@@ -206,8 +206,8 @@ pub struct Cursor {
     pub visible: bool,
     /// Caret'i bu karede **dock** devraldı mı.
     ///
-    /// Devrin tek yükleminin (`shell::caret_home` + üç ön koşul) sınırdan
-    /// geçen hâli: [`Session::dock`] onu **argüman** olarak alıyor ve yeniden
+    /// Devrin tek yükleminin (`shell::caret_home` + üç ön koşul + **tutma**)
+    /// sınırdan geçen hâli: [`Session::dock`] onu **argüman** olarak alıyor ve yeniden
     /// hesaplamıyor. `!visible` ile karıştırılmamalı — imleç uygulamanın
     /// gizlemesiyle de, geçmişe kaydırmayla da görünmez olur ve o hâllerde
     /// devralan kimse yoktur.
@@ -302,9 +302,15 @@ pub struct Cursor {
     /// uğramıyor. `bt-gpu` yalnız verilen süreyi bekliyor, hesap
     /// yapmıyor — "karar burada, boyama orada"nın zaman eksenindeki hâli.
     ///
-    /// **`None` durma koşuludur** ve üç yoldan doğuyor: komut bitti, koşan
-    /// bloğun çıpası bu karede görünmüyor (yukarı kaydı), ya da entegrasyon
-    /// hiç yok. Üçünde de saat sönüyor ve pencere boşta sıfır kareye dönüyor.
+    /// **İki kaynağı var ve yakın olanı kazanıyor** (`shell::sooner`): koşan
+    /// komutun süre sayacı ve caret devrinin **tutması** (015 phase-1). İkincisi
+    /// tek atımlık; birleştirme yazma değil `min`, yoksa biri ötekini sessizce
+    /// söndürürdü.
+    ///
+    /// **`None` durma koşuludur** ve dört yoldan doğuyor: komut bitti, koşan
+    /// bloğun çıpası bu karede görünmüyor (yukarı kaydı), entegrasyon hiç yok,
+    /// ya da bekleyen bir devir tutması kalmadı. Dördünde de saat sönüyor ve
+    /// pencere boşta sıfır kareye dönüyor.
     pub next_tick: Option<Duration>,
 }
 
@@ -1437,9 +1443,9 @@ impl Session {
         // **Caret'in sahibi aynı turdan**: ayrı bir `lock()` ile sorulsaydı iki
         // cevap iki ana ait olurdu ve aralarına düşen bir `line-finish` imleci
         // gizlenmiş **ve** dock'u boşalmış bir kare doğururdu.
-        let (suppressed_block, caret_home) = {
+        let (suppressed_block, caret) = {
             let log = lock(&self.shell);
-            (log.suppressed_input(), log.caret_home())
+            (log.suppressed_input(), log.caret(Instant::now()))
         };
         blocks.anchors.clear();
         blocks.resolved.clear();
@@ -1569,9 +1575,10 @@ impl Session {
                 .div_ceil(cols);
             cursor_screen_row.saturating_sub(u16::try_from(above).unwrap_or(u16::MAX))
         });
-        // **Devrin tek yüklemi ve üç tüketicisi var**: hangi hücrelerin
-        // atlanacağı, imlecin çizilip çizilmeyeceği ve **doluluk sayısı**.
-        // Üçü de "giriş satırı ızgaranın mı, dock'un mu" sorusunun yanıtına
+        // **Devrin tek yüklemi ve dört tüketicisi var**: hangi hücrelerin
+        // atlanacağı, imlecin çizilip çizilmeyeceği, **doluluk sayısı** ve
+        // dock'un kendi caret'i (`Session::dock`'a argüman olarak gidiyor).
+        // Dördü de "giriş satırı ızgaranın mı, dock'un mu" sorusunun yanıtına
         // bağlı ve ayrı ayrı sorulduklarında ayrışıyorlardı — gözlenen kusur
         // tam da o ayrışmaydı (012 phase-8, kullanıcı): boş prompt'ta hiçbir
         // hücre çıpayı taşımadığı için satır **çizilmiyor ama doluluğa
@@ -1596,7 +1603,7 @@ impl Session {
         // gerçek kapısı atlama döngüsünde: `from.max(suppress_floor)`.
         let caret_in_dock = self.dock
             && !alt_screen
-            && caret_home == CaretHome::Dock
+            && caret.home == CaretHome::Dock
             && (suppressed_block.is_none() || suppress_to.is_some());
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
@@ -2049,6 +2056,27 @@ impl Session {
         // sıfır kare sözleşmesini bozardı.
         if !alt_screen {
             cursor.next_tick = self.resolve_blocks(blocks, &theme, grid_cols, &mut sink);
+        }
+        // **Devrin tutması saate `min`'lenerek giriyor, yazarak değil.**
+        // `resolve_blocks` `next_tick`'i doğrudan **eziyordu** ve o yol koşan
+        // bloğun çıpasının görünür olmasına bağlı; devir buna bağlanamaz.
+        // Emsal, iki son tarihi tek saatte birleştiren `arm_clock` (014
+        // phase-2): yakın olan kazanır, uzak olan kaybolmaz.
+        //
+        // Üç ön koşulun ikisi burada tekrar soruluyor (`self.dock`,
+        // `!alt_screen`), çünkü tutma ancak `caret_in_dock`'u çevirebildiğinde
+        // bir kare hak ediyor: dock'u olmayan ya da alternatif ekrandaki
+        // pencerede cevap zaten `Grid` ve beklenen hiçbir şey yok.
+        //
+        // **Üçüncü ön koşul (tazelik) sorulmuyor ve sorulamaz da:** tutma
+        // yalnız ham cevap `Grid` iken doluyor, ham cevabın `Grid` olması ise
+        // `Running`, `Unavailable` ya da `Input`+`Idle` demek;
+        // `suppressed_input()` ise yalnız `Input`+`Live`'da dolu. İkisi
+        // **ayrık**, yani tutma sürerken `suppressed_block` her zaman `None`.
+        // Değişmez bu yüzden güçlü hâlinde yazılabiliyor: tutma boyunca
+        // `caret_in_dock == self.dock && !alt_screen && home == Dock`.
+        if self.dock && !alt_screen {
+            cursor.next_tick = crate::shell::sooner(cursor.next_tick, caret.hold_left);
         }
         cursor
     }
@@ -3837,8 +3865,66 @@ mod tests {
             session.shell_state().map(|s| s.phase) == Some(ShellPhase::Running)
         });
 
+        // **Devir tutma süresi kadar gecikiyor** (015 R1.1): yüklem `Running`
+        // der demez değil, `HANDOVER_HOLD` dolunca ızgaraya geçiyor. Bekleme
+        // bu sınamayı aynı zamanda "tutma gerçekten doluyor"un bekçisi
+        // yapıyor — süresiz tutma burayı kızdırır.
+        wait_until("caret ızgaraya dönmedi", Duration::from_secs(2), || {
+            session.frame(|_| (), &mut Blocks::default()).visible
+        });
         let cursor = session.frame(|_| (), &mut Blocks::default());
         assert!(cursor.visible, "koşan komutta ızgara imleçsiz: {cursor:?}");
+        session.shutdown();
+    }
+
+    /// **Tutma gerçekten bir kare istiyor.** Bağlayan tek satırın bekçisi.
+    ///
+    /// `sooner` ile `hold_left` ayrı ayrı çivili, ama ikisini `Cursor`'a
+    /// bağlayan satır silinse hiçbiri kızarmazdı: entegrasyon sınamaları
+    /// `frame()`'i döngüde çağırdığı için saati **atlıyorlar**. Bedeli
+    /// koşan komutu olmayan kolda görünür — `CORRECT`'in `[nyae]`'i,
+    /// `zle -M`, `line-finish` ile Enter arası — çünkü orada başka bir son
+    /// tarih yok: saat hiç kurulmaz, link uyur ve caret bir sonraki tuşa
+    /// kadar dock'ta kalırdı.
+    ///
+    /// Defter **doğrudan** sürülüyor: tutma penceresi 150 ms ve PTY'nin
+    /// zamanlamasına bırakılsaydı sınama yüklü bir makinede açığa düşerdi.
+    #[test]
+    fn a_held_handover_asks_for_a_frame() {
+        let wake = Arc::new(TestWake::default());
+        // Betik sessiz: okuyucu thread araya işaret sokmasın.
+        let session = spawn_docked_session("sleep 5", Arc::clone(&wake));
+
+        // Prompt → giriş → `line-finish`: ham cevap `Grid`, tutma başlıyor.
+        {
+            use crate::shell::{DockEvent, Mark, ScanEvent};
+            let mut log = lock(&session.shell);
+            log.apply_scan(ScanEvent::Mark(Mark::PromptStart { id: None }));
+            log.apply_scan(ScanEvent::Mark(Mark::PromptEnd));
+            log.apply_scan(ScanEvent::Dock(DockEvent::End));
+        }
+        let cursor = session.frame(|_| (), &mut Blocks::default());
+        assert!(cursor.caret_in_dock, "tutma devri gizlemeliydi: {cursor:?}");
+        let tick = cursor.next_tick.expect("tutma kare istemedi");
+        assert!(
+            tick <= crate::shell::HANDOVER_HOLD && !tick.is_zero(),
+            "tik tutmanın kalanı olmalı, oysa {tick:?}"
+        );
+
+        // Komut bitti: ham cevap `Dock`'a döndü, saat sönmeli.
+        {
+            use crate::shell::{Mark, ScanEvent};
+            let mut log = lock(&session.shell);
+            log.apply_scan(ScanEvent::Mark(Mark::CommandEnd {
+                exit: Some(0),
+                id: None,
+            }));
+        }
+        let cursor = session.frame(|_| (), &mut Blocks::default());
+        assert_eq!(
+            cursor.next_tick, None,
+            "bekleyen tutma yokken saat sönmeli: {cursor:?}"
+        );
         session.shutdown();
     }
 
@@ -4056,6 +4142,13 @@ mod tests {
         assert_eq!(row_glyphs(&live, 2), "", "ayna canlıyken bastırma yok");
 
         wait_mirror(&session, DockStatus::Idle);
+        // Bastırma **anında** kalkıyor (`suppressed_input` aynanın `Live`
+        // olmasını istiyor), caret ise tutma kadar gecikiyor (015 R1.1) —
+        // ikisi ayrı yüklem ve ayrı hızda. `content_rows` caret'e bağlı,
+        // yani ölçüm devir gerçekleştikten sonra alınmalı.
+        wait_until("caret ızgaraya dönmedi", Duration::from_secs(2), || {
+            session.frame(|_| (), &mut Blocks::default()).visible
+        });
         let mut cells = Vec::new();
         let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
         assert_eq!(

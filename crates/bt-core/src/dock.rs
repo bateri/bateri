@@ -476,8 +476,10 @@ mod tests {
         let mut cells = Vec::new();
         // Sahiplik sınamanın girdisi değil: üretimde `Session::frame` veriyor,
         // burada aynı yüklemden türetiliyor ki bu modülün sınamaları
-        // devrin kuralını değil **çizimi** sınasın.
-        let owned = caret_home(None, state.status) == CaretHome::Dock;
+        // devrin kuralını değil **çizimi** sınasın. Tutma da bu yüzden kapalı
+        // (`held: false`): histerezis devrin **ne zaman** görüneceğini
+        // değiştiriyor, çizimini değil.
+        let owned = caret_home(None, state.status, false) == CaretHome::Dock;
         let dock = render(state, context, None, &THEME, cols, owned, |cell| {
             cells.push(cell)
         });
@@ -488,7 +490,7 @@ mod tests {
     /// çağırandan.
     fn draw_as(state: &DockState, shell: Option<ShellState>, cols: u16) -> (Vec<Cell>, Dock) {
         let mut cells = Vec::new();
-        let owned = caret_home(shell, state.status) == CaretHome::Dock;
+        let owned = caret_home(shell, state.status, false) == CaretHome::Dock;
         let dock = render(
             state,
             &DockContext::default(),

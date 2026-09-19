@@ -614,6 +614,18 @@ pub(crate) struct ShellLog {
     /// `Instant`, sistem saati değil: kullanıcı saati değiştirse ya da yaz
     /// saati geçse bile süre geriye akmaz.
     pub(crate) running_since: Option<Instant>,
+    /// Devrin **ham** cevabı, en son gözlendiği hâliyle.
+    ///
+    /// Damga [`Self::apply_scan`]'de tutuluyor — tek giriş noktası ve yaprak
+    /// kilidin altında, yani `Term`'e hiç dokunmadan. Kare yolunda tutulsaydı
+    /// iki kare arası hiç işaret gelmeyen bir pencerede damga hiç kıpırdamaz,
+    /// gelen bir işaret de iki kare arasında **iz bırakmadan** geçerdi.
+    caret_raw: CaretHome,
+    /// [`Self::caret_raw`] en son ne zaman **değişti**.
+    ///
+    /// Değişmeyen gözlem damgayı kıpırdatmıyor: her tuş vuruşu bir ayna olayı
+    /// doğuruyor ve damga onlarla tazelenseydi tutma hiç dolmazdı.
+    caret_since: Instant,
 }
 
 /// Caret'in sahibi: ızgara mı, dock mu.
@@ -635,11 +647,91 @@ pub(crate) enum CaretHome {
     Dock,
 }
 
-/// Caret'in sahibini safha ile aynanın durumundan çözer.
+/// Dock→Grid devrinin **tutulma süresi** (histerezis).
 ///
-/// Serbest fonksiyon ve defteri görmüyor: [`crate::dock::render`] defteri değil
-/// kopyalarını (`Option<ShellState>` + [`DockStatus`]) taşıyor ve aynı yanıtı
-/// vermek zorunda. Defter üstündeki yüzü [`ShellLog::caret_home`].
+/// **Seçilmiş, ölçülmemiş.** İki ucu da gerekçeli: alt sınır ölçülmüş
+/// (`context.md` → Kanıt: `ls` koşarken safha 44 ms sürüyor, yani 44 ms'nin
+/// altındaki her tutma `ls`'i hiç yakalamaz) ve buradaki değer onun üç katından
+/// fazla — `git status` sınıfı komutlar da kapsansın. Üst sınırın emsali 013:
+/// bir saniyeyi geçmeyen komutun sayacı **gösterilmiyor**, yani kullanıcının
+/// "koşuyor" saydığı eşik zaten bir saniye; tutma onun çok altında kalmalı ki
+/// gerçekten koşan komut caret'ini ızgarada göstersin.
+///
+/// **Üçüncü sayıyla ilişkisi yazılı olmalı:** imleç animasyonu ~230 ms'de
+/// yerleşiyor (`bt_gpu::motion`, `OMEGA`'nın doc'u) ve bu değer onun
+/// **altında**. Sonucu şu: dolan her tutma caret'i animatör hâlâ yoldayken
+/// serbest bırakıyor, yani tutmayı aşan komutlarda tek bir temiz hedefleme
+/// iki hedeflemeye bölünüyor. Bilinen bedel, `.tasks/015-imlec-cilasi/phase-1.md`
+/// → Bilinen sınırlar; değeri değiştiren bu ilişkiyi hesaba katmalı. Emsal
+/// `bt_gpu::motion`'ın `const _: () = assert!(EASE_DURATION < TIME_CEILING)`'ı
+/// — orada iki sayı aynı crate'te olduğu için şart derleyiciye yazılabiliyor,
+/// burada crate sınırı geçtiği için yalnız bu cümle var.
+///
+/// `docs/OLCUMLER.md`'nin konusu **değil**: bu bir his eşiği, ölçüm değil
+/// (emsal `FADE_DURATION`).
+pub(crate) const HANDOVER_HOLD: Duration = Duration::from_millis(150);
+
+/// İki son tarihten **yakın** olanı; ikisi de boşsa boş.
+///
+/// Serbest ve saf, **sınanabilirlik için**: `min`'in sessizce yazmaya (ezmeye)
+/// dönmesi iki yönde de görünmez bir kusur olurdu — ya koşan komutun sayacı
+/// donar ya devir hiç gerçekleşmez. Emsal `bt_gpu::link`'in `due_clock`'u,
+/// o da tam bu sebeple saf bir yardımcıya çıkarılmıştı.
+pub(crate) fn sooner(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Devrin bir andaki cevabı: caret'in sahibi ve tutmanın kalanı.
+///
+/// **Tek kayıt, çünkü tek `now`.** İkisi ayrı ayrı sorulsaydı iki farklı ana
+/// ait olurlardı; [`SuppressedInput`] ile aynı gerekçe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CaretDecision {
+    /// Caret'i bu karede kim çiziyor.
+    pub(crate) home: CaretHome,
+    /// Tutma **cevabı çevirirken** kalan süre; saate yalnız bu giriyor.
+    /// `None` → tutma yok, yani istenecek bir kare de yok.
+    pub(crate) hold_left: Option<Duration>,
+}
+
+/// Devrin **ham** cevabı: safha ile aynanın durumundan, tutma uygulanmadan.
+///
+/// Ayrı fonksiyon, çünkü damganın izlediği şey budur ([`ShellLog::observe_caret`]):
+/// tutma damgadan türüyor ve damgaya geri beslenemez — beslenseydi tutma kendi
+/// kendini süresiz uzatırdı.
+fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
+    match (shell.map(|state| state.phase), status) {
+        (Some(ShellPhase::Running), _)
+        | (_, DockStatus::Unavailable(_))
+        | (Some(ShellPhase::Input), DockStatus::Idle) => CaretHome::Grid,
+        _ => CaretHome::Dock,
+    }
+}
+
+/// Caret'in sahibini safha, aynanın durumu ve **tutma** ile çözer.
+///
+/// Serbest fonksiyon ve defteri görmüyor; üretimde tek çağıranı
+/// [`ShellLog::caret`], sınamalar yükleme kurmadan yüklemi sorabilsin diye
+/// serbest kaldı.
+///
+/// `held` = Dock→Grid devri şu an **tutuluyor mu** (histerezis, R1.1). Tutmanın
+/// süresi ve damgası defterde ([`HANDOVER_HOLD`], [`ShellLog::caret`]); buraya
+/// yalnız kararı geliyor, çünkü bu fonksiyon saat görmüyor.
+///
+/// **Yalnız Dock→Grid yönü tutulur.** Ters yön geciktirilseydi komut bitince
+/// caret ızgarada asılı kalır, kullanıcı yazmaya başladığında dock'ta
+/// caret'siz bir satır görürdü — yanlışın yönü güvenli değil.
+///
+/// **`Unavailable` tutmanın dışında.** O kolun gerekçesi aşağıda yazılı ve
+/// koşulsuz: gösteremediğimiz satır ızgarada duruyor, caret'i de orada
+/// durmalı, *yoksa kullanıcı yazdığı yeri göremez*. Üstelik arıza bir sıçrama
+/// **üretmiyor** — kullanıcı geri silmeden ayna `Live`'a dönmüyor — yani
+/// tutmanın orada kazancı sıfır, bedeli caret'in 150 ms boş bir dock'ta
+/// durması olurdu. Carve-out yüklemin **içinde**, çünkü dışarıda olsaydı
+/// `caret_home(_, Unavailable, true)` `Dock` döner ve yüklem yalan söylerdi.
 ///
 /// **Kural tek cümle: caret satırın nerede çizildiğine uyar.** Giriş satırı
 /// ızgaradaysa caret de ızgarada, dock'taysa dock'ta. Üç hâl ızgaranın:
@@ -667,16 +759,17 @@ pub(crate) enum CaretHome {
 /// kapatmanın yolu "ayna hiç gelmedi" ile "ZLE bıraktı"yı ayıran yeni bir
 /// durum tutmak. Ölçülmüş bir belirti olmadan o durumu eklemiyoruz; giderilen
 /// pencere (`Finished`, bir `git` fork'u) bunun kat kat üstünde.
+/// *(015 phase-1: pencere artık **tutmanın içinde eriyor** — zsh'in `line-init`'i
+/// [`HANDOVER_HOLD`]'un çok altında, yani o an hiç raporlanmıyor. Yukarıdaki
+/// kayıt tarihli ve duruyor: pencerenin kendisi kapanmadı, görünmez oldu.)*
 ///
 /// **İkinci bilinen sınır:** entegrasyon kurulu ama betik sessizce ölürse caret
 /// dock'ta kalır ve yazdıkça kıpırdamaz. Yanıltıcı ama görünür (dock boş, blok
 /// şeridi yok), yani bu deponun yasakladığı "sessizce yanlış" sınıfına girmiyor.
-pub(crate) fn caret_home(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
-    match (shell.map(|state| state.phase), status) {
-        (Some(ShellPhase::Running), _)
-        | (_, DockStatus::Unavailable(_))
-        | (Some(ShellPhase::Input), DockStatus::Idle) => CaretHome::Grid,
-        _ => CaretHome::Dock,
+pub(crate) fn caret_home(shell: Option<ShellState>, status: DockStatus, held: bool) -> CaretHome {
+    match caret_home_raw(shell, status) {
+        CaretHome::Grid if held && !matches!(status, DockStatus::Unavailable(_)) => CaretHome::Dock,
+        home => home,
     }
 }
 
@@ -722,6 +815,10 @@ impl ShellLog {
             dock: DockState::default(),
             context: DockContext::default(),
             running_since: None,
+            // Açılışta caret dock'un (`caret_home_raw(None, Idle)`), yani ilk
+            // devir her zaman Dock→Grid yönünde ve tutma ona uygulanabilir.
+            caret_raw: CaretHome::Dock,
+            caret_since: Instant::now(),
         }
     }
 
@@ -823,6 +920,22 @@ impl ShellLog {
                 self.context.cwd.push_str(path);
             }
         }
+        self.observe_caret();
+    }
+
+    /// Devrin ham cevabını damgalar; **değişmediyse damga kıpırdamaz**.
+    fn observe_caret(&mut self) {
+        let raw = caret_home(self.state, self.dock.status, false);
+        if raw != self.caret_raw {
+            self.caret_raw = raw;
+            // **Saat yalnız değişimde okunuyor.** `apply_scan` okuyucu
+            // thread'in olay başına giriş noktası: her tuş vuruşu bir ayna
+            // olayı, her prompt bir OSC 7 ve bir dal olayı doğuruyor ve
+            // bunların ezici çoğunluğu ham cevabı değiştirmiyor. Okuma
+            // dışarıda kalsaydı hepsi bedelsiz sanılan bir `Instant::now()`
+            // öderdi.
+            self.caret_since = Instant::now();
+        }
     }
 
     /// Ayna olayını [`Self::dock`]'a uygular.
@@ -907,13 +1020,41 @@ impl ShellLog {
         }
     }
 
-    /// Caret'in bu an kimin — [`caret_home`]'un defter üstündeki yüzü.
+    /// Caret'in bu an kimin ve tutmanın kalanı — [`caret_home`]'un defter
+    /// üstündeki yüzü.
     ///
     /// [`crate::Session::frame`] bunu [`Self::suppressed_input`] ile **aynı
     /// kilit turunda** okuyor: ayrı turlardan alınsalardı ikisi ayrı ana ait
-    /// olurdu.
-    pub(crate) fn caret_home(&self) -> CaretHome {
-        caret_home(self.state, self.dock.status)
+    /// olurdu. Aynı gerekçe `home` ile `hold_left`'i de tek kayda topluyor —
+    /// ikisi de tek bir `now`'dan çıkıyor.
+    ///
+    /// **Kalan süre yalnız tutma cevabı çevirirken doluyor.** Ham cevap zaten
+    /// `Dock` ise ortada beklenen bir şey yok ve boşta bir pencereye kare
+    /// istemek boşta sıfır kare sözleşmesini bozardı. Saatin üç şartı da
+    /// burada karşılanıyor: içerik gerçekten değişiyor (caret yer değiştiriyor
+    /// **ve** doluluk sayısı oynuyor), tek atımlık, ve durma koşulu
+    /// adlandırılmış — tutma doldu ya da yüklem `Dock`'a geri döndü.
+    pub(crate) fn caret(&self, now: Instant) -> CaretDecision {
+        let held = HANDOVER_HOLD
+            .checked_sub(now.saturating_duration_since(self.caret_since))
+            .filter(|left| !left.is_zero());
+        let home = caret_home(self.state, self.dock.status, held.is_some());
+        // Karşılaştırılan iki cevap da **aynı kapıdan** geçiyor ve yalnız
+        // `held`'de ayrılıyorlar: ham cevabı ikinci bir yoldan türetmek
+        // (`caret_home_raw`'u doğrudan çağırmak) ikisinin ayrışmasını mümkün
+        // kılardı. Ayrışsalardı `home != raw` tutmanın hiç uygulanmadığı bir
+        // kolda da doğru olur ve pencere 150 ms'de bir hiçbir şeyi
+        // değiştirmeyen kare isterdi — `sessiz=` jetonunun son savunma hattı
+        // olduğu sessiz sızıntı sınıfı.
+        let unheld = caret_home(self.state, self.dock.status, false);
+        CaretDecision {
+            home,
+            // Kalan süre **cevabın çevrilmiş olmasından** türüyor, ayrı bir
+            // koşuldan değil: ikisi ayrı yazılsaydı ayrışabilirlerdi ve
+            // tutmanın uygulanmadığı bir kolda (`Unavailable`) boşuna kare
+            // istenirdi. Tek cümle: tutma cevabı çevirdiyse kalanı vardır.
+            hold_left: held.filter(|_| home != unheld),
+        }
     }
 
     /// Bir bloğun şeridi; `None` → **çizilmez**.
@@ -2731,6 +2872,173 @@ mod tests {
         scanner.feed(b"\x1b]8133;b;\x07", |event| log.apply_scan(event));
         assert_eq!(log.context.branch, "");
         assert_eq!(log.dock.status, DockStatus::Live);
+    }
+
+    /// **Hızlı komut devir doğurmuyor** — setin çekirdek iddiası.
+    ///
+    /// Ölçülmüş belirti (`context.md` → Kanıt): `ls` koşarken safha 44 ms
+    /// sürüyor, imleç animasyonu 230 ms'de yerleşiyor; caret dock'tan çıkıp
+    /// yarı yolda geri dönüyor ve göz bunu bir zıplama olarak okuyor.
+    ///
+    /// Devrin **`line-finish`'te** başladığı da burada çivileniyor: `C`
+    /// gelmeden, ayna `Idle`'a düşer düşmez ham cevap `Grid` oluyor.
+    /// `running_since`'e bağlanan bir eşik bu ilk geçişi göremezdi.
+    #[test]
+    fn a_fast_command_never_hands_the_caret_over() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        scanner.feed(b"\x1b]133;A\x07\x1b]133;B\x07", |event| {
+            log.apply_scan(event)
+        });
+        scanner.feed(&dock_update(2, "% ", "ls", "", &[]), |event| {
+            log.apply_scan(event)
+        });
+
+        // **`now` olaylardan sonra alınıyor.** Önce alınsaydı `caret_since`
+        // ondan ileride olur, `saturating_duration_since` sıfıra kırpar ve
+        // sınama `HANDOVER_HOLD > 0` olan her değerde yeşil kalırdı — 1 ms'lik
+        // bir tutma `ls`'in 44 ms'sini hiç yakalamadığı hâlde.
+        let at_prompt = log.caret(Instant::now());
+        assert_eq!(at_prompt.home, CaretHome::Dock, "promptta caret dock'un");
+        assert_eq!(
+            at_prompt.hold_left, None,
+            "tutma yokken saat kurulmamalı: boşta sıfır kare"
+        );
+
+        // Enter → `line-finish`: ayna satırı bıraktı, safha hâlâ `Input`.
+        scanner.feed(b"\x1b]8133;e\x07", |event| log.apply_scan(event));
+        let now = Instant::now();
+        assert_eq!(
+            caret_home(log.state, log.dock.status, false),
+            CaretHome::Grid,
+            "ham cevap `line-finish`'te çoktan `Grid`"
+        );
+        let handing_over = log.caret(now);
+        assert_eq!(handing_over.home, CaretHome::Dock, "tutma devri gizlemeli");
+        assert!(
+            handing_over.hold_left.is_some(),
+            "tutmanın kalanı kare istemeli, yoksa devir bir sonraki hasarı beklerdi"
+        );
+
+        // Komut koştu ve bitti — hepsi tutmanın içinde.
+        scanner.feed(b"\x1b]133;C\x07", |event| log.apply_scan(event));
+        assert_eq!(log.caret(now).home, CaretHome::Dock, "koşarken de gizli");
+        scanner.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07", |event| {
+            log.apply_scan(event)
+        });
+        let after = log.caret(now);
+        assert_eq!(after.home, CaretHome::Dock);
+        assert_eq!(
+            after.hold_left, None,
+            "ham cevap `Dock`'a döndü: saat sönmeli (adlandırılmış durma koşulu)"
+        );
+    }
+
+    /// **Yavaş komutun devri oluyor**, gecikmesi tutma süresi kadar; ve
+    /// **ters yön hiç tutulmuyor**.
+    ///
+    /// İkisi tek sınamada, çünkü ikincisi birincisinin kabulü: tutma her iki
+    /// yöne uygulansaydı komut bitince caret ızgarada asılı kalır ve kullanıcı
+    /// yazmaya başladığında dock'ta caret'siz bir satır görürdü.
+    #[test]
+    fn a_slow_command_hands_over_after_the_hold_but_comes_back_at_once() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        scanner.feed(b"\x1b]133;A\x07\x1b]133;B\x07", |event| {
+            log.apply_scan(event)
+        });
+        scanner.feed(&dock_update(2, "% ", "sleep 2", "", &[]), |event| {
+            log.apply_scan(event)
+        });
+        scanner.feed(b"\x1b]8133;e\x07\x1b]133;C\x07", |event| {
+            log.apply_scan(event)
+        });
+
+        let now = Instant::now();
+        assert_eq!(log.caret(now).home, CaretHome::Dock, "tutma sürüyor");
+        // Tutmanın **tam** dolduğu an: kalan sıfır, yani devir görünür oluyor.
+        let expired = now + HANDOVER_HOLD;
+        let handed = log.caret(expired);
+        assert_eq!(handed.home, CaretHome::Grid, "yavaş komutta devir olmalı");
+        assert_eq!(handed.hold_left, None, "dolmuş tutma kare istemez");
+
+        // Komut bitti: ters yön **anında**, tutma yok.
+        scanner.feed(b"\x1b]133;D;0\x07", |event| log.apply_scan(event));
+        let back = log.caret(expired);
+        assert_eq!(back.home, CaretHome::Dock, "Grid→Dock geciktirilmemeli");
+        assert_eq!(back.hold_left, None);
+    }
+
+    /// Damga **değişimde** kıpırdıyor, her olayda değil.
+    ///
+    /// Her tuş vuruşu bir ayna olayı doğuruyor; damga onlarla tazelenseydi
+    /// tutma hiç dolmaz ve yavaş komutta devir **hiç** gerçekleşmezdi.
+    #[test]
+    fn the_stamp_moves_on_change_not_on_every_event() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        scanner.feed(b"\x1b]133;A\x07\x1b]133;B\x07", |event| {
+            log.apply_scan(event)
+        });
+        scanner.feed(&dock_update(0, "% ", "", "", &[]), |event| {
+            log.apply_scan(event)
+        });
+        scanner.feed(b"\x1b]8133;e\x07", |event| log.apply_scan(event));
+        let stamped = log.caret_since;
+
+        // Devirden sonra gelen olaylar ham cevabı değiştirmiyor (`Running` de
+        // `Grid`), yani damga yerinde kalmalı.
+        scanner.feed(b"\x1b]133;C\x07", |event| log.apply_scan(event));
+        assert_eq!(
+            log.caret_since, stamped,
+            "değişmeyen cevap damgayı taşımamalı"
+        );
+    }
+
+    /// **Aynanın arızası tutulmuyor** — carve-out'un deterministik bekçisi.
+    ///
+    /// Entegrasyon sınaması (`the_grid_keeps_the_input_line_when_the_mirror_
+    /// cannot_show_it`) bunu ancak `frame()` 150 ms içinde koşarsa görüyor,
+    /// yani yüklü bir makinede carve-out silinse de yeşil kalabilirdi —
+    /// **açığa düşen** bir bekçi. Buradaki sorgu saatten bağımsız.
+    #[test]
+    fn a_faulty_mirror_is_never_held() {
+        let typing = Some(ShellState {
+            phase: ShellPhase::Input,
+            last_exit: None,
+        });
+        for fault in [DockFault::Overflow, DockFault::Malformed] {
+            assert_eq!(
+                caret_home(typing, DockStatus::Unavailable(fault), true),
+                CaretHome::Grid,
+                "gösteremediğimiz satırın caret'i tutulamaz: {fault:?}"
+            );
+        }
+        // Karşı uç, aynı `held` ile: tutmanın gerçekten uygulandığı kol.
+        // İkisi bir arada olmasa sınama "tutma hiç çalışmıyor" hâlinde de
+        // yeşil kalırdı.
+        assert_eq!(
+            caret_home(typing, DockStatus::Idle, true),
+            CaretHome::Dock,
+            "`Input`+`Idle` tutulabilen kol"
+        );
+    }
+
+    /// İki son tarih **birleşiyor**, biri ötekini ezmiyor.
+    ///
+    /// Bugün `resolve_blocks` `next_tick`'i doğrudan yazıyor ve o yol koşan
+    /// bloğun çıpasının görünür olmasına bağlı; devir ona bağlanamaz. Ezme
+    /// iki yönde de sessiz: ya sayaç donar ya devir hiç gerçekleşmez.
+    #[test]
+    fn two_deadlines_merge_into_the_sooner_one() {
+        let tick = Duration::from_millis(600);
+        let hold = Duration::from_millis(150);
+        assert_eq!(sooner(Some(tick), Some(hold)), Some(hold));
+        assert_eq!(sooner(Some(hold), Some(tick)), Some(hold), "sıra önemsiz");
+        // Tek taraflı hâller: olan kazanır, olmayan kaybettirmez.
+        assert_eq!(sooner(Some(tick), None), Some(tick));
+        assert_eq!(sooner(None, Some(hold)), Some(hold));
+        assert_eq!(sooner(None, None), None, "iki taraf da boşsa saat kurulmaz");
     }
 
     #[test]
