@@ -127,7 +127,7 @@ impl Caret {
     /// glyph'lerinden sonra çizilir ve altındaki harfi boyardı (014 phase-1'de
     /// aynı tuzağa düşülmüştü).
     fn instance(self, cell_px: (f32, f32), shape: CaretShape, rule: f32, glow: f32) -> Instance {
-        let (pos, size) = caret_rect(self.at, cell_px, shape, rule).painted;
+        let (pos, size) = caret_painted_rect(self.at, cell_px, shape, rule);
         Instance {
             pos: [pos[0] - glow, pos[1] - glow],
             size: [size[0] + glow * 2.0, size[1] + glow * 2.0],
@@ -213,7 +213,12 @@ struct CaretRects {
 /// **Kalınlık uydurulmuyor:** fontun kendi alt çizgi metriğinden geliyor
 /// (`CellMetrics::rule_px`), chevron emsali. Hücreyi aşamaz — küçük puntoda
 /// metrik hücreden büyük çıkabilir ve caret komşu hücreye taşardı.
-fn caret_rect(at: [f32; 2], cell_px: (f32, f32), shape: CaretShape, rule: f32) -> CaretRects {
+fn caret_painted_rect(
+    at: [f32; 2],
+    cell_px: (f32, f32),
+    shape: CaretShape,
+    rule: f32,
+) -> ([f32; 2], [f32; 2]) {
     // **`clamp` değil `min`+`max`** (`/code-review`, 014 kapı): `f32::clamp`
     // `min <= max` istiyor ve `Frame::default()`'ın hücresi `(0.0, 0.0)` —
     // `clear` çağrılmadan gelen bir `push_caret` display link callback'inin
@@ -221,19 +226,46 @@ fn caret_rect(at: [f32; 2], cell_px: (f32, f32), shape: CaretShape, rule: f32) -
     // sıfır hücrede kalınlık da sıfır kalıyor, yani çizilmeyen bir caret.
     let limit = cell_px.0.min(cell_px.1);
     let thick = rule.max(1.0).min(limit);
-    let rect = match shape {
+    match shape {
         CaretShape::Block => (at, [cell_px.0, cell_px.1]),
         // Hücrenin **dibinde**, fontun alt çizgi konumunda değil: o konum
         // taban çizgisinin hemen altı ve caret orada `g`'nin kuyruğunu
         // keserdi. Metrikten alınan şey konum değil **kalınlık**.
         CaretShape::Underline => ([at[0], at[1] + cell_px.1 - thick], [cell_px.0, thick]),
         CaretShape::Beam => (at, [thick, cell_px.1]),
-    };
-    // Bugün ikisi **aynı**: dolu caret boyadığı her pikselin altındaki metni
-    // ters çeviriyor. Ayrılmaları phase-3'ün işi.
+    }
+}
+
+/// [`caret_painted_rect`]'in üstüne ters çevirme alanını ekler.
+///
+/// **Boyanan alan odağı bilmiyor** ve bilmemeli: içi boş caret aynı yeri
+/// kaplıyor, yalnız içini boyamıyor. Odağa bağlı olan tek şey opak iç.
+fn caret_rect(
+    at: [f32; 2],
+    cell_px: (f32, f32),
+    shape: CaretShape,
+    rule: f32,
+    hollow: bool,
+) -> CaretRects {
+    // **`clamp` değil `min`+`max`** (`/code-review`, 014 kapı): `f32::clamp`
+    // `min <= max` istiyor ve `Frame::default()`'ın hücresi `(0.0, 0.0)` —
+    // `clear` çağrılmadan gelen bir `push_caret` display link callback'inin
+    // içinde **panik** ederdi. Panik yolu değil ama bir pencereyi öldürürdü;
+    // sıfır hücrede kalınlık da sıfır kalıyor, yani çizilmeyen bir caret.
+    let rect = caret_painted_rect(at, cell_px, shape, rule);
     CaretRects {
         painted: rect,
-        opaque: rect,
+        // **İçi boş caret'te opak iç yok.** Ters çevirme boyanan zemine
+        // dayanıyor: boyanmayan bir pikselin altındaki harf kendi rengiyle
+        // kalmalı, yoksa çerçevenin ortasındaki metin zemin renginde çizilir
+        // ve **görünmez** olurdu. Boş dikdörtgen ayrı bir bayrak değil,
+        // `CursorBlock`'un kendi sözleşmesi ("görünmez imleç dejenere bir
+        // dikdörtgendir").
+        opaque: if hollow {
+            ([0.0, 0.0], [0.0, 0.0])
+        } else {
+            rect
+        },
     }
 }
 
@@ -462,6 +494,15 @@ pub(crate) struct Frame {
     /// Caret'in şekli; [`Frame::push_caret`] yazıyor, [`Frame::move_caret`]
     /// koruyor — o yol `bt-core`'a hiç gitmiyor.
     caret_shape: CaretShape,
+    /// Caret'in içi boş mu — odaksız pencerenin işareti.
+    ///
+    /// [`Frame`]'de yaşıyor, imzada taşınıp unutulmuyor: hareket karesi
+    /// ([`Frame::move_caret`]) `bt-core`'a hiç gitmiyor ve odağı bilmiyor.
+    /// Alan olmasaydı odaksız pencerede ilk hareket karesinde caret dolardı.
+    ///
+    /// `CaretShape`'e **eklenmedi** (R7.3): o enum ayar dosyasının sözlüğü
+    /// (`"block" | "underline" | "beam"`) ve odak şekle **dik** bir eksen.
+    caret_hollow: bool,
     /// Izgaranın sol payı: her hücrenin x'i buradan **sonra** başlar.
     ///
     /// `cell_px` ile aynı gerekçeyle alan değil [`Frame::clear`]'ın taşıdığı
@@ -789,7 +830,15 @@ impl Frame {
         rgba: LinearRgba,
         alpha: f32,
         shape: CaretShape,
+        focused: bool,
     ) {
+        // **İçi boşalma yalnız bloğa.** Alt çizgi ve dikey çubuk zaten birer
+        // ince şerit; onların "içi boş" hâli bir pikselin çerçevesi, yani
+        // hiçbir şey — üstelik kenar kalınlığı `rule_px` ve şeridin kendi
+        // kalınlığı da o, yani çıkarma gövdeyi tümden yutardı. O şekillerde
+        // odaksızlığın sinyali blink'in durması.
+        let hollow = !focused && matches!(shape, CaretShape::Block);
+        self.caret_hollow = hollow;
         let pos = self.pos_at(at);
         let top = pos[1];
         // **Şekil `Frame`'de yaşıyor**, imzada taşınıp unutulmuyor: hareket
@@ -803,7 +852,7 @@ impl Frame {
         // glyph'leri için aynı uzay. `at` ekran satırı olduğu için çevirme
         // gerekmiyor — eskiden dock'un kendi dikdörtgeni vardı ve encode onu
         // `shifted_y` ile taşıyordu; tek caret o çeviriyi büsbütün kaldırdı.
-        let rects = caret_rect(pos, self.cell_px, shape, self.rule_px);
+        let rects = caret_rect(pos, self.cell_px, shape, self.rule_px, hollow);
         let (opaque_pos, opaque_size) = rects.opaque;
         self.cursor = CursorBlock {
             rect: [
@@ -867,11 +916,13 @@ impl Frame {
         rgba: LinearRgba,
         alpha: f32,
     ) {
-        // Şekil **korunuyor**: bu yolun `bt-core`'a erişimi yok ve
-        // `clear_caret` yalnız yuvaları boşaltıyor.
+        // Şekil **ve odak** korunuyor: bu yolun `bt-core`'a da `bt-shell`'e
+        // de erişimi yok ve `clear_caret` yalnız yuvaları boşaltıyor.
+        // Korunmasaydı odaksız pencerede ilk hareket karesinde caret dolardı.
         let shape = self.caret_shape;
+        let focused = !self.caret_hollow || !matches!(shape, CaretShape::Block);
         self.clear_caret();
-        self.push_caret(at, text, rgba, alpha, shape);
+        self.push_caret(at, text, rgba, alpha, shape, focused);
     }
 
     /// Caret'in üç yuvasını da boşaltır: iki instance ve dikdörtgen.
@@ -1158,7 +1209,10 @@ impl Frame {
         }
         [
             caret_radius_px(self.cell_px),
-            0.0,
+            // Kenar yalnız içi boş caret'te; dolu caret'te 0 = dolgu.
+            // Kalınlık yine fontun kendi metriğinden (`rule_px`), ikinci bir
+            // tasarım sabiti yok.
+            if self.caret_hollow { self.rule_px } else { 0.0 },
             self.glow_px(),
             CARET_GLOW_ALPHA,
         ]
@@ -1312,7 +1366,7 @@ mod tests {
     /// `bt-core`'un sınır tipi; değişen yalnız `Frame`'in iç yuvası.
     fn push_cursor(frame: &mut Frame, cursor: Cursor, at: [f32; 2], rgba: LinearRgba, alpha: f32) {
         if cursor.visible {
-            frame.push_caret(at, cursor.text, rgba, alpha, cursor.shape);
+            frame.push_caret(at, cursor.text, rgba, alpha, cursor.shape, true);
         }
     }
 
@@ -1399,6 +1453,75 @@ mod tests {
         // Uniform da dokunulmadan kalır: dejenere dikdörtgen "blok yok"
         // demenin tek yolu, shader'da ikinci bir bayrak yok.
         assert_eq!(frame.cursor_block(), &CursorBlock::default());
+    }
+
+    #[test]
+    fn an_unfocused_block_is_hollow_and_stops_inverting() {
+        // **Odaksız pencerenin iki işareti** ve ikisi de tek karardan
+        // (`push_caret`'in `focused`'ı): caret'in içi boşalıyor (kenar
+        // kalınlığı `rule_px`) ve ters çevirme **kalkıyor**.
+        //
+        // İkincisi şart: ters çevirme boyanan zemine dayanıyor. Çerçevenin
+        // ortasındaki harf zemin renginde çizilseydi altında boyanmış bir şey
+        // olmadığı için **görünmez** olurdu — içi boş caret metni yutardı.
+        let mut frame = Frame::default();
+        frame.clear(grid(9, 18));
+        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
+
+        assert_eq!(
+            frame.cursor_block().rect,
+            [0.0; 4],
+            "odaksız caret hâlâ ters çeviriyor: altındaki harf kaybolur"
+        );
+        assert!(
+            frame.caret_sdf()[1] > 0.0,
+            "içi boş caret'in kenarı çizilmiyor"
+        );
+
+        // Boyanan alan **aynı yerde**: içi boş caret aynı hücreyi kaplıyor.
+        let hollow = frame.grid_caret().expect("caret");
+        let mut lit = Frame::default();
+        lit.clear(grid(9, 18));
+        lit.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
+        let solid = lit.grid_caret().expect("caret");
+        assert_eq!(hollow.pos, solid.pos, "içi boşalınca ayak izi kaydı");
+        assert_eq!(hollow.size, solid.size);
+        assert_eq!(lit.caret_sdf()[1], 0.0, "odaklı caret'in içi boş");
+    }
+
+    #[test]
+    fn thin_carets_never_go_hollow() {
+        // **İçi boşalma yalnız bloğa.** Alt çizgi ve dikey çubuk zaten birer
+        // ince şerit ve kenar kalınlığı da `rule_px`, yani çıkarma gövdeyi
+        // tümden yutar ve caret görünmez olurdu. O şekillerde odaksızlığın
+        // sinyali blink'in durması.
+        for shape in [CaretShape::Underline, CaretShape::Beam] {
+            let mut frame = Frame::default();
+            frame.clear(grid(9, 18));
+            frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, shape, false);
+            assert_eq!(frame.caret_sdf()[1], 0.0, "{shape:?} içi boşaldı");
+            assert_ne!(
+                frame.cursor_block().rect,
+                [0.0; 4],
+                "{shape:?} ters çevirmeyi bıraktı"
+            );
+        }
+    }
+
+    #[test]
+    fn a_motion_frame_keeps_the_caret_hollow() {
+        // Hareket karesi `bt-core`'a da `bt-shell`'e de gitmiyor, yani odağı
+        // bilmiyor. Korunmasaydı odaksız pencerede caret ilk kaymada dolardı
+        // — şeklin (`caret_shape`) aynı gerekçesi.
+        let mut frame = Frame::default();
+        frame.clear(grid(9, 18));
+        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
+        move_cursor(&mut frame, cursor(2, 1, true), [2.0, 1.0], CURSOR, OPAQUE);
+        assert!(
+            frame.caret_sdf()[1] > 0.0,
+            "hareket karesi caret'i doldurdu"
+        );
+        assert_eq!(frame.cursor_block().rect, [0.0; 4]);
     }
 
     #[test]
@@ -1971,7 +2094,7 @@ mod tests {
         frame.set_dock_top(64.0);
 
         // Bandın tamamen üstünde: ızgaranın yuvası.
-        frame.push_caret([3.0, 2.0], TEXT, CURSOR, OPAQUE, CaretShape::Block);
+        frame.push_caret([3.0, 2.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
         assert!(
             frame.grid_caret().is_some(),
             "caret ızgara yuvasına düşmedi"
@@ -1990,7 +2113,7 @@ mod tests {
         // `clear` bandı da sıfırlıyor: dock'u olmayan bir sonraki karede caret
         // yine ızgaranın yuvasına düşmeli.
         frame.clear(grid(8, 16));
-        frame.push_caret([3.0, 40.0], TEXT, CURSOR, OPAQUE, CaretShape::Block);
+        frame.push_caret([3.0, 40.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
         assert!(
             frame.grid_caret().is_some(),
             "dock'suz karede caret dock yuvasına düştü"
@@ -2008,21 +2131,28 @@ mod tests {
         let metrics = CellMetrics::new(10, 20, 0, 2).expect("ölçü");
 
         frame.clear(metrics);
-        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block);
+        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
         let block = frame.grid_caret().expect("caret yok");
         assert_eq!((block.pos, block.size), ([10.0, 20.0], [10.0, 20.0]));
         assert_eq!(frame.cursor_block().rect, [10.0, 20.0, 20.0, 40.0]);
 
         // Alt çizgi hücrenin **dibinde**: 20 + 20 − 2.
         frame.clear(metrics);
-        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Underline);
+        frame.push_caret(
+            [1.0, 1.0],
+            TEXT,
+            CURSOR,
+            OPAQUE,
+            CaretShape::Underline,
+            true,
+        );
         let under = frame.grid_caret().expect("caret yok");
         assert_eq!((under.pos, under.size), ([10.0, 38.0], [10.0, 2.0]));
         assert_eq!(frame.cursor_block().rect, [10.0, 38.0, 20.0, 40.0]);
 
         // Dikey çubuk hücrenin solunda ve tam boy.
         frame.clear(metrics);
-        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam);
+        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
         let beam = frame.grid_caret().expect("caret yok");
         assert_eq!((beam.pos, beam.size), ([10.0, 20.0], [2.0, 20.0]));
         assert_eq!(frame.cursor_block().rect, [10.0, 20.0, 12.0, 40.0]);
@@ -2037,9 +2167,9 @@ mod tests {
         // **release'de de** var — yani sürüm derlemesinde bir pencereyi
         // öldürürdü. Geometri doğrudan sınanıyor, çünkü `push_caret`'e o
         // hâlde ulaşmanın yolu debug'da kapalı.
-        let (pos, size) = caret_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Beam, 1.0).painted;
+        let (pos, size) = caret_painted_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Beam, 1.0);
         assert_eq!((pos, size), ([0.0, 0.0], [0.0, 0.0]));
-        let (_, size) = caret_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Underline, 1.0).painted;
+        let (_, size) = caret_painted_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Underline, 1.0);
         assert_eq!(size, [0.0, 0.0]);
     }
 
@@ -2048,7 +2178,7 @@ mod tests {
         // Kural metriği sıfır gelse de ince caret görünür kalıyor.
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(10, 20, 0, 0).expect("ölçü"));
-        frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam);
+        frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
         assert_eq!(frame.grid_caret().expect("caret").size, [1.0, 20.0]);
     }
 
@@ -2059,7 +2189,7 @@ mod tests {
         // (phase-2) tam bu yoldan geçecek.
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(10, 20, 0, 2).expect("ölçü"));
-        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam);
+        frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
         frame.move_caret([2.0, 1.0], TEXT, CURSOR, OPAQUE);
         let moved = frame.grid_caret().expect("caret yok");
         assert_eq!(moved.size, [2.0, 20.0], "hareket karesi şekli yuttu");
@@ -2074,7 +2204,14 @@ mod tests {
         let mut frame = Frame::default();
         frame.clear(CellMetrics::new(8, 16, 0, 1).expect("ölçü"));
         frame.set_dock_top(64.0);
-        frame.push_caret([3.0, 3.5], TEXT, CURSOR, OPAQUE, CaretShape::Underline);
+        frame.push_caret(
+            [3.0, 3.5],
+            TEXT,
+            CURSOR,
+            OPAQUE,
+            CaretShape::Underline,
+            true,
+        );
         assert!(
             frame.grid_caret().is_none(),
             "alt çizgi caret'i ızgara yuvasında kaldı"

@@ -225,9 +225,16 @@ pub struct Cursor {
     ///
     /// Fazın kendisi (şu an açık mı kapalı mı) boyayan tarafın işi: hareket
     /// karesi `bt-core`'a hiç uğramıyor ve burada üretilen bir faz o kola
-    /// ulaşamazdı. Buradan geçen şey yalnız "sönsün mü" ve iki kaynağın
-    /// birleşimi: uygulamanın DECSCUSR/DECSET 12 isteği ile kullanıcının
-    /// `[terminal] cursor_blink` ayarı ([`CursorBlink::resolve`]).
+    /// ulaşamazdı. Buradan geçen şey iki kaynağın birleşimi: uygulamanın
+    /// DECSCUSR/DECSET 12 isteği ile kullanıcının `[terminal] cursor_blink`
+    /// ayarı ([`CursorBlink::resolve`]).
+    ///
+    /// **Son söz burada değil.** `bt-gpu` bu biti iki şeyle daha `AND`'liyor
+    /// ve ikisi de `bt-core`'un göremeyeceği şeyler: Hareketi Azalt
+    /// (erişilebilirlik ayarı animasyon *eklemez*) ve pencerenin **odağı**
+    /// (015 R7.4 — odakta olmayan pencerede blink duruyor, imleç görünür
+    /// kalıyor). Yani buradaki `true` "sönecek" demek değil, "bu tarafta
+    /// engel yok" demek.
     pub blink: bool,
     /// Bloğun altında kalan metnin (glyph **ve** kural çizgilerinin) rengi,
     /// **lineer** RGBA; bugünkü değeri temanın zemini.
@@ -475,8 +482,13 @@ fn caret_shape(shape: CaretShape) -> CursorShape {
 ///
 /// `Hidden` ve `HollowBlock` **bloğa düşüyor** ve ikisi de adlandırılmış
 /// karar: ilkini [`Cursor::visible`] zaten taşıyor (iki yerde temsil edilen
-/// bir gerçek ayrışır), ikincisi odak kaybının hâli ve odak bugün sınırdan
-/// geçmiyor — içi boş imleç kendi setini bekliyor.
+/// bir gerçek ayrışır), ikincisi odak kaybının hâli ve odak **hâlâ sınırdan
+/// geçmiyor** — içi boş imleç 015 phase-3'te geldi ama `bt-gpu`'nun kendi
+/// biti olarak (`DisplayLink::set_focused`). Buraya eklenmemesi bilerek:
+/// `CaretShape` ayar dosyasının sözlüğü (`"block" | "underline" | "beam"`) ve
+/// odak şekle **dik** bir eksen — ikisi tek enumda buluşsaydı "odaksız beam"
+/// temsil edilemezdi. Alacritty'nin `HollowBlock`'u zaten ölü: bu kol onu
+/// kendiliğinden üretmiyor.
 fn caret_shape_of(shape: CursorShape) -> CaretShape {
     match shape {
         CursorShape::Underline => CaretShape::Underline,

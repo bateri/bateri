@@ -2060,6 +2060,7 @@ mod tests {
             WHITE,
             1.0,
             CaretShape::Block,
+            true,
         );
         frame.open_dock(1, red, WHITE);
 
@@ -2372,6 +2373,7 @@ mod tests {
                 rgba,
                 1.0,
                 cursor.shape,
+                true,
             );
         }
     }
@@ -2591,7 +2593,14 @@ mod tests {
         let sample = |alpha: f32| {
             let mut frame = Frame::default();
             frame.clear(grid_with_gutter(cw, ch, GUTTER));
-            frame.push_caret([0.0, 0.0], BACKGROUND, ACCENT, alpha, CaretShape::Block);
+            frame.push_caret(
+                [0.0, 0.0],
+                BACKGROUND,
+                ACCENT,
+                alpha,
+                CaretShape::Block,
+                true,
+            );
             let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
             let (r8, g8, b8) = pixel_at(&pixels, EDGE, at, y);
             u32::from(r8) + u32::from(g8) + u32::from(b8)
@@ -2603,6 +2612,89 @@ mod tests {
         assert!(
             dark < half && half < full,
             "hale caret'in alfasını izlemiyor: {dark} / {half} / {full}"
+        );
+    }
+
+    #[test]
+    fn a_hollow_caret_leaves_the_glyph_its_own_color() {
+        // **`glyph_under_the_cursor_takes_the_cursor_text_color`'ın odaksız
+        // kardeşi ve tersini söylüyor.** Ters çevirme boyanan zemine
+        // dayanıyor: içi boş caret'in ortasında boyanmış bir şey yok, yani
+        // harf kendi ön planıyla kalmalı. Kalmasaydı zemin renginde çizilir
+        // ve **görünmez** olurdu — içi boş caret metni yutardı.
+        //
+        // Örnekleme hücrenin **içi**: kenar bandı (`rule_px`) caret'in
+        // kendisi ve orada eşitlik beklenmiyor.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
+
+        let mut frame = Frame::default();
+        frame.clear(grid(cw, ch));
+        // A: odaksız caret'in altında. C: caret yok, aynı harf ve zemin.
+        frame.push(glyph_cell(0, 'M', None));
+        frame.push(glyph_cell(1, 'M', None));
+        frame.push_caret(
+            [0.0, 0.0],
+            BACKGROUND,
+            ACCENT,
+            1.0,
+            CaretShape::Block,
+            false,
+        );
+
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+        let inset = 3;
+        let interior = |col: usize| {
+            let (cwu, chu) = (usize::from(cw), usize::from(ch));
+            (inset..chu - inset)
+                .flat_map(|y| (inset..cwu - inset).map(move |x| (x, y)))
+                .map(|(x, y)| pixel_at(&pixels, EDGE, col * cwu + x, y))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            interior(0),
+            interior(1),
+            "içi boş caret harfin rengini ezdi: metin görünmez olur"
+        );
+    }
+
+    #[test]
+    fn an_unfocused_caret_paints_a_ring_through_the_production_path() {
+        // Halkanın **üretim yolundan** bekçisi: `a_hollow_caret_paints_only_
+        // its_edge` shader'ın kolunu `force_caret_sdf` ile sürüyor, burada
+        // kenarı açan şey odağın kendisi (`push_caret(.., focused=false)`).
+        // İkisi bir arada olmasa "kol çalışıyor ama odak onu hiç açmıyor"
+        // hâli sessiz kalırdı.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
+
+        let mut frame = Frame::default();
+        frame.clear(grid(cw, ch));
+        frame.push_caret(
+            [0.0, 0.0],
+            BACKGROUND,
+            ACCENT,
+            1.0,
+            CaretShape::Block,
+            false,
+        );
+        let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+
+        let sum = |x, y| {
+            let (r8, g8, b8) = pixel_at(&pixels, EDGE, x, y);
+            u32::from(r8) + u32::from(g8) + u32::from(b8)
+        };
+        let clear = sum(EDGE - 1, EDGE - 1);
+        assert!(
+            sum(0, usize::from(ch) / 2) > clear,
+            "odaksız caret'in kenarı çizilmedi"
+        );
+        assert_eq!(
+            sum(usize::from(cw) / 2, usize::from(ch) / 2),
+            clear,
+            "odaksız caret'in ortası dolu"
         );
     }
 
@@ -2629,7 +2721,14 @@ mod tests {
             frame.clear(grid(cw, ch));
             frame.push(glyph_cell(0, 'M', None));
             if let Some(alpha) = alpha {
-                frame.push_caret([0.0, 0.0], BACKGROUND, ACCENT, alpha, CaretShape::Block);
+                frame.push_caret(
+                    [0.0, 0.0],
+                    BACKGROUND,
+                    ACCENT,
+                    alpha,
+                    CaretShape::Block,
+                    true,
+                );
             }
             cell_rows(
                 &render_offscreen(&r, EDGE, BACKGROUND, &frame),
@@ -2730,7 +2829,7 @@ mod tests {
         frame.push(rule_cell(1, UnderlineStyle::Single));
         let mut cursor = cursor_at(0, BACKGROUND);
         cursor.col = 0;
-        frame.push_caret([0.5, 0.0], cursor.text, ACCENT, 1.0, cursor.shape);
+        frame.push_caret([0.5, 0.0], cursor.text, ACCENT, 1.0, cursor.shape, true);
 
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
         let last_column: Vec<(u8, u8, u8)> = cell_rows(&pixels, EDGE, (cw, ch), 1)
