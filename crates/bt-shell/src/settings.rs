@@ -753,10 +753,6 @@ mod tests {
             theme,
             Theme {
                 background: 0xffffff,
-                // Dosya `cursor` yazmıyor, yani rol `accent`'i izliyor
-                // (014 R13.1): eski tema dosyaları tek harf değişmeden aynı
-                // görünmeli.
-                cursor: Theme::BATERI.accent,
                 ..Theme::BATERI
             }
         );
@@ -772,7 +768,6 @@ mod tests {
             (
                 Theme {
                     accent: 0xff0000,
-                    cursor: 0xff0000,
                     ..Theme::BATERI_LIGHT
                 },
                 Vec::new()
@@ -783,7 +778,6 @@ mod tests {
             paper.0,
             Theme {
                 accent: 0xff0000,
-                cursor: 0xff0000,
                 ..Theme::BATERI
             }
         );
@@ -1028,7 +1022,6 @@ mod tests {
             (
                 Some(Theme {
                     background: 0xffffff,
-                    cursor: Theme::BATERI.accent,
                     ..Theme::BATERI
                 }),
                 Vec::new()
