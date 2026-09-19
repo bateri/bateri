@@ -48,11 +48,21 @@ olsun, odakta olmayan pencerede içi boşalsın.
 - **R7 — Odak `bt-core`'a girmez.** `DisplayLink::set_focused(bool)`;
   `AppDelegate` zaten `NSWindowDelegate`.
   - **R7.1** — Hermetik koşuda odak **hiç okunmaz** (`resolve_reduce_motion`
-    emsali): kapı bir makinede yeşil bir makinede kırmızı düşerdi.
+    emsali): kapı bir makinede yeşil bir makinede kırmızı düşerdi. Kapının
+    yeri **çağrı**, varsayılan değil — `focused: true` varsayılanı yetmez,
+    çünkü `make duman` koşarken açılan bir Spotlight `windowDidResignKey:`
+    doğurur ve o da bir kare ister.
   - **R7.2** — `set_focused` **aynı değerde no-op** (`Session::set_theme`
     emsali); yoksa açılıştaki key olayı bedava bir içerik karesi yazar.
   - **R7.3** — İçi boş imleç `CaretShape`'e **eklenmez**: o enum ayar
     dosyasının sözlüğü, odak ise şekle dik bir eksen.
+  - **R7.4** — **Odaksız pencerede blink durur ve imleç görünür kalır**
+    (kullanıcı kararı, 2026-09-19). Dikkat çekmek için var olan bir hareketin
+    kimsenin bakmadığı pencerede koşması boşa yanan pildir. Kabul edilen bedel
+    adıyla: `bt-gpu`, `Cursor::blink`'in ("buradan geçen şey yalnız 'sönsün
+    mü'") **ikinci sahibi** olur. Mekanizma yeni değil — `content_frame`'in
+    kapısına üçüncü bir terim giriyor ve "kapalı blink görünür kalır"
+    değişmezi (bugün gizli imleci koruyan) üçüncü tüketicisini kazanıyor.
 - **R8 — Ayar anahtarı yok.** Geri alma yolu phase commit'ini revert etmek ve
   bunu gerçek kılmak için `yarıçap = 0` / `hale alfası = 0` **desteklenen ve
   sınanan** bir yoldur.
@@ -99,16 +109,16 @@ olsun, odakta olmayan pencerede içi boşalsın.
    `blink.content_frame`'in `AND`'i.
 7. **Ayar anahtarı yok** (R8): inen anahtar silinmiyor, emekli oluyor.
 
-### Açık karar: odaksız caret söner mi?
+### Çözülen karar: odaksız caret sönmez
 
-**Önerim: sönmesin.** Odaksız pencerede yanıp sönen bir imleç, dikkat çekmek
-için var olan bir şeyin boşa çalışması; içi boş imleçle de aynı sinyali
-paylaşıyor. `bt-gpu` o biti zaten `AND`'liyor
-(`cursor.blink && !motion.reduce()`), üçüncü bir terim ekleniyor.
+**Karar (2026-09-19, kullanıcı):** *"Dursun, sabit kalsın."* Odakta olmayan
+pencerede blink durur, imleç **görünür** kalır ve içi boşalır. Gereksinim
+karşılığı R7.4; `bt-gpu` o biti `cursor.blink && !motion.reduce() && focused`
+diye `AND`'liyor.
 
-**Bedeli adıyla:** `bt-gpu`, `Cursor::blink`'in ("buradan geçen şey yalnız
-'sönsün mü'") ikinci sahibi olur. **phase-3 bu karar verilmeden yazılmaz** —
-014'ün phase-2'sinin referans bakışını beklemesiyle aynı disiplin.
+**Bedeli adıyla:** `bt-gpu`, `Cursor::blink`'in ikinci sahibi olur. Karşılığı
+boştaki odaksız pencerenin **saat kurmaması**, yani boşta sıfır kare kuralına
+bir kazanç.
 
 ## Kapsam Dışı
 
@@ -134,7 +144,7 @@ dokunulmuyor.
 |-------|-----|-----------------|
 | phase-1 | Histerezis (`bt-core`) | Shader'a sıfır dokunuş, tek başına sevk edilebilir ve kullanıcıyı günlük rahatsız eden o. `make duman` riskli listesinde değil, yani ucuz |
 | phase-2 | Kardeş fragment + yarıçap + hale (`bt-gpu`) | Tek riskli phase (`make shader` + düzen sözleşmesi). Dejenere değerlerle inip sonra açılabilir, yani parite kanıtlanabilir |
-| phase-3 | Odak + içi boş imleç | Setin tek crate'ler arası sinyali. **Açık karar bekliyor** (yukarıda); set uzarsa doğal kesme çizgisi |
+| phase-3 | Odak + içi boş imleç | Setin tek crate'ler arası sinyali ve phase-2'nin kenar yolunu açan taraf. Set uzarsa doğal kesme çizgisi |
 
 ## Durum
 

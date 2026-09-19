@@ -120,11 +120,16 @@ pencereye tıklama):
 - `set_focused` **aynı değerde no-op**; emsali `Session::set_theme`. Yoksa
   açılıştaki key olayı bedava bir içerik karesi yazar.
 
-### Açık soru: odaksız caret söner mi?
+### Çözülen soru: odaksız caret söner mi? → ✅ sönmez, sabit kalır
 
-Set bunu hiç sormamıştı. "Sönmesin" denirse `bt-gpu`, `Cursor::blink`'in
-("buradan geçen şey yalnız 'sönsün mü'") **ikinci sahibi** olur — sınırın
-delindiği tam nokta orası. **Kullanıcıya sorulacak.**
+**Karar (2026-09-19, kullanıcı):** *"Dursun, sabit kalsın."* Gerekçe: blink
+dikkat çekmek için var; kimsenin bakmadığı pencerede koşması boşa yanan pil.
+İçi boş imleçle de aynı sinyali paylaşıyor — ikisi "bu pencere seni
+beklemiyor" diyor.
+
+**Bedel kabul edildi:** `bt-gpu`, `Cursor::blink`'in ikinci sahibi oluyor.
+Karşılığında odaksız boş pencere **saat kurmuyor**; sınırın delinmesi boşta
+sıfır kare tarafında bir kazançla ödeniyor. Gereksinim karşılığı R7.4.
 
 ## Karar 7: Sıçrama nasıl düzelecek? → ✅ eşik değil histerezis
 
@@ -274,7 +279,7 @@ ve **sıçramanın teşhisini** düzeltti.
 - **Ayar anahtarı yok**; geri alma yolu revert ve dejenere kol.
 - **Sıra:** histerezis → yüzey → odak. Birincisi shader'a dokunmuyor ve
   kullanıcıyı günlük rahatsız eden o.
-- **Açık ve phase-3'ü bekleten tek karar:** odakta olmayan pencerede caret
-  söner mi? Önerilen "sönmesin"; bedeli `bt-gpu`'nun `Cursor::blink`'in ikinci
-  sahibi olması. `phase-3.md` bu karar verilmeden **yazılmadı** — 014'ün
-  phase-2'sinin referans bakışını beklemesiyle aynı disiplin.
+- **Odaksız caret sönmez, sabit kalır** (2026-09-19, kullanıcı: *"Dursun,
+  sabit kalsın"*). `phase-3.md` bu karar verilene kadar **yazılmadı** — 014'ün
+  phase-2'sinin referans bakışını beklemesiyle aynı disiplin. Gereksinim
+  karşılığı R7.4.
