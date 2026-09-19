@@ -255,4 +255,4 @@ Frame şekli saklar                  arm_clock: min(iki deadline)
 | phase-1 | ✅ |
 | phase-2 | ✅ |
 | phase-3 | ✅ |
-| kapı | |
+| kapı | ✅ `/code-review` 13 bulgu (12 düzeltildi, 1 kullanıcı kararı, 1 waive) + `/audit` (`make denetim` temiz, 1 belge bulgusu düzeltildi) |

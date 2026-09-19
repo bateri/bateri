@@ -344,10 +344,13 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   tadı* dikmez (`Waker::resume`; imlecin yanıp sönmesi, fazın sahibi
   `bt-gpu::blink`). Kurulan uyandırma yine **tek**: iki son tarihten yakın
   olanı seçiliyor, çünkü `after` iptal edilemiyor. Animasyonun zamana bağlı kare talebi
-  hareket saatinden geçer, `Waker`'dan **değil** — oradan istenen bir hareket
-  karesi kendini "içerik" diye saydırırdı. Saat bunun istisnası değil başka
-  bir şey: animasyon aynı içeriği farklı çizer, saat **içeriğin kendisini**
-  değiştirir (koşan komutun süre sayacı), yani `icerik=` sayması doğrudur.
+  hareket saatinden geçer, **`Waker::wake`'ten değil** — oradan istenen bir
+  hareket karesi kendini "içerik" diye saydırırdı. Yasağın öznesi o **kapı**,
+  `Waker` tipi değil: `Waker::resume` hasar dikmediği için aynı yasağın altına
+  girmiyor ve saatin hareket tadını o taşıyor. Saatin **içerik** tadı da
+  istisna değil başka bir şey: animasyon aynı içeriği farklı çizer, o tat
+  **içeriğin kendisini** değiştirir (koşan komutun süre sayacı), yani `icerik=`
+  sayması doğrudur.
   Ölçütü üç şart — içerik gerçekten değişecek, periyodu ekran hızından çok
   düşük olacak, adlandırılmış bir durma koşulu taşıyacak. **Koşan komutu ya da sönen bir
   imleci olan pencere boşta değildir.** İkisi de adlandırılmış bir durma
