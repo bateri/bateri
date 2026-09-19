@@ -72,7 +72,7 @@ make test-yaris     # exit 0  (ShellLog'a iki yeni alan)
       tabanıyla **bire bir aynı** — üçüncü pipeline, devrin saati ve odak
       kapısı hermetik koşuya tek kare eklemedi (reçetede dock yok, odak hiç
       okunmuyor, `hucre=` caret'i zaten saymıyor)
-- [ ] **Gözle kontrol** — **kullanıcıda** (aşağıda B.2)
+- [x] **Gözle kontrol** — **kullanıcı yaptı ve geçti** (2026-09-19): beş maddenin beşi de
 
 ### Ölçüm bekleyen iddia
 
@@ -115,8 +115,8 @@ düşürmemeli.
 ### Yayın Checklist
 
 - [x] B.1 `make duman` — jetonlar temiz; pencere geçişi ayrıca doğrulanacak
-- [ ] B.2 gözle kontrol — beş madde
-- [ ] `/ship`
+- [x] B.2 gözle kontrol — beş maddenin beşi de geçti
+- [x] `/ship`
 
 `make kur` **gerekmiyor**: kabuk betiği, terminfo, jeton satırı, ayar şeması
 ve app bundle değişmedi.
