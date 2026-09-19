@@ -237,16 +237,6 @@ kalınlığından geliyor (ikinci bir sayı uydurulmadı). `bt-core` sınırdan 
 görünen satırlar için biliniyor ve bölge boyamak onu tahmine çevirirdi.
 **İçerik pencerenin tabanına yaslanır**: `frame()` kaç satırın dolu olduğunu
 sınırdan verir (`Cursor::content_rows`; alternatif ekranda ızgaranın tamamı),
-**ama yalnız geçmiş boşken** — scrollback'te satır varsa ekran dolu sayılıyor.
-Gerekçe yaslanmanın kendi gerekçesi: "ekran dolmadan içerik tepede
-birikmesin" ancak gösterilecek başka satır **yokken** doğru. Belirti ölçüldü
-(kullanıcı, ekran görüntüsüyle): `ls`'in çıktısından sonra Tab'a basıp
-tamamlama listesini iptal etmek ekranı siliyor, geriye tek satır mürekkep
-kalıyor ve o satır dibe yapışıp üstünde kocaman bir boşluk bırakıyordu —
-oysa çıktının tamamı bir tık yukarıda duruyordu. Kapı **sıçrama üretmiyor**:
-ilk satır ancak ekran dolunca geçmişe düşüyor ve o anda öteleme zaten sıfır,
-yani kapı yalnız ekranın sonradan **boşaldığı** hâlde (silme dizileri)
-devreye giriyor.
 `DisplayLink` onu `rows - content_rows` ile ötelemeye çevirir ve `encode_pass`
 tek bir `setViewport` ile bütün pipeline'ları birden kaydırır — dört liste ve imleç
 aynı yerden. Öteleme **yumuşak kayar**: `bt-gpu::motion`'ın ikinci animatörü

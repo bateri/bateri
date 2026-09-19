@@ -317,6 +317,21 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   `mouse=a` açık vim'de tıklama imleci taşımıyor, seçim yapıyor. Tıklama
   raporu seçimle çakışır, yani 006'nın seçim modelini (Karar 1) yeniden açar.
   Kaynak: 006 `phase-3b.md` → Kapsam dışı; 006 `discussion.md` → Karar 4 eki.
+- **Tamamlama listesi ızgarayı kaydırıyor.** ZLE'nin `BUFFER` olmayan çıktısı
+  (tamamlama listesi, `menu-select`, `bck-i-search`, `zle -M`) aynada yok ve
+  ızgaraya düşüyor — 012'nin kayıtlı bedeli. Görünür sonucu **ölçüldü**
+  (2026-09-19, PTY koşumu): zsh listeyi 15 satır ilerletmeyle basıyor,
+  alternatif ekran kullanmıyor, yani ekranı gerçekten kaydırıyor ve üstteki
+  çıktı scrollback'e düşüyor; Ctrl-C ile iptalde yalnız `ESC[J` gönderiyor ve
+  **hiçbir satırı geri basmıyor**. Yani kaybı hiçbir terminal geri
+  getiremez — iTerm de getirmiyor. Farkımız şu: normal terminalde prompt
+  hayatta kalan satırın hemen altına dönüyor ve boşluk onun **altında**
+  kalıyor; bizde giriş satırı dock'ta çivili olduğu için boşluk **arada**
+  kalıyor ve delik gibi duruyor. Kullanıcı bunu kusur olarak bildirdi
+  (2026-09-19, dört ekran görüntüsü). **Gerçek çare listeyi ızgaraya hiç
+  düşürmemek**: aynanın altıncı kanalı ya da bir overlay. `content_rows`'u
+  oynatmak çare değil — denendi ve deliği yalnız yer değiştirdi
+  (commit geri alındı).
 - **Klavye kalanları.** Home/End bilerek yutuluyor (terminfo `khome`/`kend`,
   oklar gibi DECCKM'e bağlı; yutmayı bağlayan sınama duruyor). Değiştiricili
   oklar (`\e[1;5A` vb.) yok. Ctrl+Shift+Tab `0x19` (readline/zle `yank`)
