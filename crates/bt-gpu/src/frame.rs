@@ -116,19 +116,94 @@ struct Caret {
 }
 
 impl Caret {
-    /// Instance'a çevirir; hücre boyunu, şekli ve kural kalınlığını çağıran
-    /// veriyor ([`Frame`]'in alanları).
-    fn instance(self, cell_px: (f32, f32), shape: CaretShape, rule: f32) -> Instance {
-        let (pos, size) = caret_rect(self.at, cell_px, shape, rule);
+    /// Instance'a çevirir; hücre boyunu, şekli, kural kalınlığını ve hale
+    /// payını çağıran veriyor ([`Frame`]'in alanları).
+    ///
+    /// **Dörtlü hale payı kadar şişiyor**, boyanan dikdörtgen şişmiyor: hale
+    /// boyanın dışında yaşıyor ve fragment onu dikdörtgenin **dışındaki**
+    /// mesafeden çiziyor. Şişme yalnız burada, çünkü yuva seçimi
+    /// ([`Frame::push_caret`]) şişmemiş dikdörtgene bakmak **zorunda** — hale
+    /// ayak izini büyütüp caret'i dock yuvasına kaydırsaydı caret ızgaranın
+    /// glyph'lerinden sonra çizilir ve altındaki harfi boyardı (014 phase-1'de
+    /// aynı tuzağa düşülmüştü).
+    fn instance(self, cell_px: (f32, f32), shape: CaretShape, rule: f32, glow: f32) -> Instance {
+        let (pos, size) = caret_rect(self.at, cell_px, shape, rule).painted;
         Instance {
-            pos,
-            size,
+            pos: [pos[0] - glow, pos[1] - glow],
+            size: [size[0] + glow * 2.0, size[1] + glow * 2.0],
             rgba: self.rgba,
         }
     }
 }
 
-/// Caret'in dikdörtgeni: sol üst köşe ve ölçü, **pencere uzayında** piksel.
+/// Caret'in köşe yarıçapı, **hücre yüksekliğinin** oranı.
+///
+/// **Seçilmiş, ölçülmemiş** — bir his eşiği (emsal `FADE_DURATION`). Oran,
+/// çünkü punto büyüyünce yarıçap da büyümeli ve ikinci bir tasarım sabiti
+/// uydurulmuyor. **Yükseklik**, genişlik değil: üç şeklin ortak tek boyutu o —
+/// beam'in genişliği `rule_px` kadar ve ona oranlansaydı yarıçap şekle göre
+/// değişirdi. Fragment ayrıca kendi tarafında yarıyla kırpıyor, yoksa ince
+/// bir beam'i yuvarlaklık büsbütün yutardı.
+///
+/// **Gözle bir kez indirildi** (0.18 → 0.10, kullanıcı): blok caret hücre
+/// genişliğinden kısa ve yüksekliğin beşte birine yakın bir yarıçap onu
+/// dikdörtgen olmaktan çıkarıp hapa çeviriyordu. Yumuşatma isteniyordu,
+/// yuvarlak isteniyor değildi.
+pub(crate) const CARET_RADIUS_RATIO: f32 = 0.10;
+
+/// Halenin payı, **sol payın oranı** olarak.
+///
+/// **Seçilmiş, ölçülmemiş** ve bir kez gözle düzeltildi: pay başta sol payın
+/// tamamıydı (varsayılan puntoda ~8 px) ve hale caret'in kendisi kadar
+/// genişleyince ortaya "box shadow" değil neon çıktı — kullanıcının ilk
+/// bakışta söylediği şey buydu. Yarısı gölge ölçeğinde kalıyor.
+///
+/// Oran, çünkü payın kaynağı hâlâ tek: `CellMetrics::gutter_px`. İkinci bir
+/// tasarım sabiti yok ve punto büyüyünce hale de büyüyor.
+///
+/// İki turda indi: sol payın tamamı → yarısı → **beşte ikisi**; ikisi de gözle.
+pub(crate) const CARET_GLOW_RATIO: f32 = 0.4;
+
+/// Halenin tepe alfası — dikdörtgenin kenarında bu, hale payının ucunda sıfır.
+///
+/// **Seçilmiş, ölçülmemiş** ve yine gözle düzeltildi: 0.35 altın bir bloğun
+/// çevresinde parlıyordu. İstenen "box shadow gibi temiz bir hafif tasarım
+/// dokunuşu", yani gölge ölçeğinde bir alfa. Caret'in kendi alfasıyla
+/// **çarpılıyor**, yani blink sönerken hale de sönüyor (R6) ve ikinci bir yol
+/// yazılmıyor.
+///
+/// İki turda indi: 0.35 → 0.14 → **0.10**; ikisi de gözle.
+const CARET_GLOW_ALPHA: f32 = 0.10;
+
+/// Caret'in köşe yarıçapı, piksel — **kırpması dahil**.
+///
+/// Kırpma burada, shader'da değil: yarıçapın değerine karar veren taraf tek
+/// olmalı ve o taraf hücre ölçüsünü bilen taraf. `caret_fragment` kendi
+/// `min`'ini koruyor ama o bir **politika değil matematik ön koşulu** (SDF
+/// yarıçapın yarım ölçüyü aşmamasını istiyor); değeri burası seçiyor.
+/// Sınamalar da buradan okuyor, yoksa formülün üçüncü bir yazarı olurdu.
+pub(crate) fn caret_radius_px(cell_px: (f32, f32)) -> f32 {
+    (cell_px.1 * CARET_RADIUS_RATIO)
+        .min(cell_px.0 / 2.0)
+        .min(cell_px.1 / 2.0)
+}
+
+/// Caret'in **iki** dikdörtgeni; ikisi de sol üst köşe + ölçü, pencere uzayı.
+///
+/// Değişmez ("tek yer, iki tüketici") kırılmıyor, **eksik tanımlıydı**: bir
+/// caret'in boyandığı alan ile altındaki metni ters çevirdiği alan aynı şey
+/// değil. Bugün ikisi eşit; içi boş imleçte (015 phase-3, R5) boyanan var,
+/// opak iç yok.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CaretRects {
+    /// Fragment'in gövdeyi çizdiği alan — hale bunun **dışında** yaşıyor.
+    painted: ([f32; 2], [f32; 2]),
+    /// Ters çevirmenin alanı ([`CursorBlock`]). Boş dikdörtgen = ters çevirme
+    /// yok, ayrı bir bayrak değil.
+    opaque: ([f32; 2], [f32; 2]),
+}
+
+/// Caret'in dikdörtgenleri: sol üst köşe ve ölçü, **pencere uzayında** piksel.
 ///
 /// **Tek yer, iki tüketici:** boyanan dörtlü ([`Caret::instance`]) ve ters
 /// çevirme dikdörtgeni ([`CursorBlock`]). Ayrı yazılsalardı biri daralıp
@@ -138,12 +213,7 @@ impl Caret {
 /// **Kalınlık uydurulmuyor:** fontun kendi alt çizgi metriğinden geliyor
 /// (`CellMetrics::rule_px`), chevron emsali. Hücreyi aşamaz — küçük puntoda
 /// metrik hücreden büyük çıkabilir ve caret komşu hücreye taşardı.
-fn caret_rect(
-    at: [f32; 2],
-    cell_px: (f32, f32),
-    shape: CaretShape,
-    rule: f32,
-) -> ([f32; 2], [f32; 2]) {
+fn caret_rect(at: [f32; 2], cell_px: (f32, f32), shape: CaretShape, rule: f32) -> CaretRects {
     // **`clamp` değil `min`+`max`** (`/code-review`, 014 kapı): `f32::clamp`
     // `min <= max` istiyor ve `Frame::default()`'ın hücresi `(0.0, 0.0)` —
     // `clear` çağrılmadan gelen bir `push_caret` display link callback'inin
@@ -151,13 +221,19 @@ fn caret_rect(
     // sıfır hücrede kalınlık da sıfır kalıyor, yani çizilmeyen bir caret.
     let limit = cell_px.0.min(cell_px.1);
     let thick = rule.max(1.0).min(limit);
-    match shape {
+    let rect = match shape {
         CaretShape::Block => (at, [cell_px.0, cell_px.1]),
         // Hücrenin **dibinde**, fontun alt çizgi konumunda değil: o konum
         // taban çizgisinin hemen altı ve caret orada `g`'nin kuyruğunu
         // keserdi. Metrikten alınan şey konum değil **kalınlık**.
         CaretShape::Underline => ([at[0], at[1] + cell_px.1 - thick], [cell_px.0, thick]),
         CaretShape::Beam => (at, [thick, cell_px.1]),
+    };
+    // Bugün ikisi **aynı**: dolu caret boyadığı her pikselin altındaki metni
+    // ters çeviriyor. Ayrılmaları phase-3'ün işi.
+    CaretRects {
+        painted: rect,
+        opaque: rect,
     }
 }
 
@@ -440,6 +516,28 @@ pub(crate) struct Frame {
     /// yeni konumla yeniden çağırıyor, yani ikinci çağrı birincinin üstüne
     /// yazmak zorunda.
     cursor: CursorBlock,
+    /// Caret'in **boyanan** dikdörtgeni (x0, y0, x1, y1), pencere uzayı.
+    ///
+    /// [`CursorBlock::rect`]'ten ayrı bir alan ve ayrılığı phase-3'ün şartı:
+    /// içi boş caret'te boyanan var, opak iç yok. Dejenere (hepsi sıfır) =
+    /// çizilecek caret yok.
+    caret_core: [f32; 4],
+    /// SDF uniform'unun **sınama ezmesi**; üretimde hep `None`.
+    ///
+    /// **Yarım bir ezme** (`/code-review`): yalnız fragment uniform'unu
+    /// çeviriyor, dörtlünün hale payı kadar şişmesini ([`Frame::glow_px`])
+    /// çevirmiyor. Yani hale payını burada büyütmek dörtlüyü büyütmez ve
+    /// hale çekirdeğin dışına çıkamaz. Sınamalar bu yüzden haleyi ezmeyle
+    /// değil **paylı bir ızgarayla** açıyor; ezme yalnız yarıçapı ve kenarı
+    /// sürmek için.
+    ///
+    /// Geri alma yolunun (R8) tek bekçisi buradan geçiyor: "yarıçap 0, hale 0"
+    /// kolunun çıktısı 014'ün düz dörtgeniyle **bit bit** aynı olmak zorunda
+    /// ve bunu yalnız GPU söyleyebilir — dejenere kolda fragment `step`,
+    /// açık kolda `smoothstep` kullanıyor ve ikisinin kenar pikselleri
+    /// ayrışır. Üretimde bir kurucusu olsaydı ölü kod olurdu.
+    #[cfg(test)]
+    caret_sdf_override: Option<[f32; 4]>,
     /// Dock yüzeyi: pencerenin altındaki **ikinci koordinat uzayı**.
     ///
     /// `Option`, çünkü dock oturum doğarken kararlaşıyor (entegrasyonlu zsh mi)
@@ -705,16 +803,28 @@ impl Frame {
         // glyph'leri için aynı uzay. `at` ekran satırı olduğu için çevirme
         // gerekmiyor — eskiden dock'un kendi dikdörtgeni vardı ve encode onu
         // `shifted_y` ile taşıyordu; tek caret o çeviriyi büsbütün kaldırdı.
-        let (rect_pos, rect_size) = caret_rect(pos, self.cell_px, shape, self.rule_px);
+        let rects = caret_rect(pos, self.cell_px, shape, self.rule_px);
+        let (opaque_pos, opaque_size) = rects.opaque;
         self.cursor = CursorBlock {
             rect: [
-                rect_pos[0],
-                rect_pos[1],
-                rect_pos[0] + rect_size[0],
-                rect_pos[1] + rect_size[1],
+                opaque_pos[0],
+                opaque_pos[1],
+                opaque_pos[0] + opaque_size[0],
+                opaque_pos[1] + opaque_size[1],
             ],
             rgba: with_alpha(text, alpha),
         };
+        // **Boyanan dikdörtgen ayrı tutuluyor**, `CursorBlock`'unkinden
+        // türetilmiyor: bugün eşitler ama içi boş caret'te (phase-3, R5) ters
+        // çevirme alanı boşalırken boyanan alan duruyor. Fragment SDF'inin
+        // çekirdeği bu; ekran uzayında, yani `[[position]]` ile aynı uzayda.
+        let (painted_pos, painted_size) = rects.painted;
+        self.caret_core = [
+            painted_pos[0],
+            painted_pos[1],
+            painted_pos[0] + painted_size[0],
+            painted_pos[1] + painted_size[1],
+        ];
         // **Yuva seçimi boyacı algoritmasının zorunluluğu.** Blok, üstünde
         // duracağı yüzeyin zemininden **sonra** ama glyph'lerinden **önce**
         // çizilmek zorunda: ızgaranın yuvasında kalsaydı dock'un opak zemini
@@ -774,6 +884,13 @@ impl Frame {
         self.grid_caret = None;
         self.dock_caret = None;
         self.cursor = CursorBlock::default();
+        self.caret_core = [0.0; 4];
+    }
+
+    /// SDF uniform'unu ezer — yalnız sınama; sınırı alanın doc'unda.
+    #[cfg(test)]
+    pub(crate) fn force_caret_sdf(&mut self, shape: [f32; 4]) {
+        self.caret_sdf_override = Some(shape);
     }
 
     /// Dock'un bir hücresi; [`Frame::push`]'un ikizi ama **dock-yerel**
@@ -964,7 +1081,8 @@ impl Frame {
     /// Caret'in ızgara yuvası; `None` → caret bu karede ızgarada değil.
     pub(crate) fn grid_caret(&self) -> Option<Instance> {
         self.grid_caret.map(|caret| {
-            let mut instance = caret.instance(self.cell_px, self.caret_shape, self.rule_px);
+            let mut instance =
+                caret.instance(self.cell_px, self.caret_shape, self.rule_px, self.glow_px());
             // **Ötelemeyi geri veriyor** ve bu bir asimetri değil: bu yuva
             // ızgaranın viewport'undan geçiyor, o da `+ origin_px` uyguluyor.
             // Dikdörtgen ise fragment'in `[[position]]`'ı ile karşılaştırılıyor
@@ -993,7 +1111,8 @@ impl Frame {
     /// yazarı doğmasın.
     pub(crate) fn dock_caret(&self, origin_y: f32) -> Option<Instance> {
         self.dock_caret.map(|caret| {
-            let mut instance = caret.instance(self.cell_px, self.caret_shape, self.rule_px);
+            let mut instance =
+                caret.instance(self.cell_px, self.caret_shape, self.rule_px, self.glow_px());
             instance.pos[1] -= origin_y;
             instance
         })
@@ -1002,6 +1121,47 @@ impl Frame {
     /// Dock bandının tepesini bu kare için yazar; caret'in yuvasını o belirliyor.
     pub(crate) fn set_dock_top(&mut self, top_px: f32) {
         self.dock_top_px = top_px;
+    }
+
+    /// Halenin payı, piksel — sol paydan türüyor ([`CARET_GLOW_RATIO`]),
+    /// ikinci bir tasarım sabiti değil (R3).
+    ///
+    /// Aynı içi girinti üçüncü kez kullanılıyor: sol pay, dock'un nefes payı
+    /// ve şimdi hale — üçü de **tek kaynaktan**, punto büyüyünce üçü birden
+    /// büyüyor. Hale o kaynağın kendisi değil [`CARET_GLOW_RATIO`] kadarı;
+    /// tamamı olduğunda ortaya gölge değil neon çıkıyordu.
+    fn glow_px(&self) -> f32 {
+        self.gutter_px * CARET_GLOW_RATIO
+    }
+
+    /// Caret fragment'inin **boyanan** çekirdeği (x0, y0, x1, y1), pencere
+    /// uzayı; fragment onu `[[position]]` ile karşılaştırıyor.
+    pub(crate) fn caret_core(&self) -> [f32; 4] {
+        self.caret_core
+    }
+
+    /// Caret fragment'inin şekil uniform'u: yarıçap, kenar, hale payı, hale
+    /// alfası — hepsi piksel, sonuncusu 0..1.
+    ///
+    /// **Çıplak `[f32; 4]`, struct değil** (R2.1): Rust'ta `[f32; 4]` 4,
+    /// MSL'de `float4` 16 hizalı ve ikisi bir struct'ın içinde buluşunca
+    /// stride sessizce ayrışır. Tek başına argüman olarak ikisi de 16 bayt ve
+    /// ofset 0, yani tuzak hiç doğmuyor.
+    ///
+    /// **Kenar bu sürümde sıfır** = dolu caret. Phase-3 onu `rule_px`'e açıp
+    /// içi boş imleci üretecek; alan şimdiden var, çünkü shader'ı o phase'de
+    /// yeniden yazmak istemiyoruz.
+    pub(crate) fn caret_sdf(&self) -> [f32; 4] {
+        #[cfg(test)]
+        if let Some(shape) = self.caret_sdf_override {
+            return shape;
+        }
+        [
+            caret_radius_px(self.cell_px),
+            0.0,
+            self.glow_px(),
+            CARET_GLOW_ALPHA,
+        ]
     }
 
     pub(crate) fn bg_count(&self) -> usize {
@@ -1877,9 +2037,9 @@ mod tests {
         // **release'de de** var — yani sürüm derlemesinde bir pencereyi
         // öldürürdü. Geometri doğrudan sınanıyor, çünkü `push_caret`'e o
         // hâlde ulaşmanın yolu debug'da kapalı.
-        let (pos, size) = caret_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Beam, 1.0);
+        let (pos, size) = caret_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Beam, 1.0).painted;
         assert_eq!((pos, size), ([0.0, 0.0], [0.0, 0.0]));
-        let (_, size) = caret_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Underline, 1.0);
+        let (_, size) = caret_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Underline, 1.0).painted;
         assert_eq!(size, [0.0, 0.0]);
     }
 

@@ -21,7 +21,11 @@ yordamsal sprite'ı (beş alt çizgi, üstü çizili ve prompt chevron'u) sabit 
 `Renderer::cell_metrics(scale)` ile yeniden yayınlar. `bt-gpu` atlası
 `R8Unorm` dokuya bağlar, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
-çizer. `bt-shell` klavyeyi PTY'ye akıtır; fareyle seçim, pano, geçmişte
+çizer. Pipeline **üç**: arka planlar/dörtgenler (`cell_bg`), glyph'ler ve
+kurallar (`cell`), ve caret (`caret_fragment`). Üçüncüsü `cell_bg`'nin
+vertex'ini **aynen** paylaşıyor — ayrılan yalnız fragment, çünkü caret'in
+yuvarlak köşesini, kenarını ve halesini bir SDF çiziyor ve o hesabı kare
+başına binlerce arka plan dörtgenine ödetmenin anlamı yok. `bt-shell` klavyeyi PTY'ye akıtır; fareyle seçim, pano, geçmişte
 kaydırma, ana menü (About, Settings…, Quit; Edit'te Copy/Paste; View'da
 Theme ▸ ve Cmd +/−/0 geçici punto) ve kapanış sırası ondadır; uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
@@ -53,7 +57,20 @@ geliyor (`Cursor::shape`): DECSCUSR'ın üç biçimi — blok, alt çizgi, dikey
 (`bt_gpu::frame::caret_rect`, tek yer iki tüketici), kalınlık fontun kendi alt
 çizgi metriğinden (`CellMetrics::rule_px`) ve daraltma yuva seçiminden
 **sonra**, yoksa alt çizgi caret'i dock bandına değmez ve zeminin altında
-kalırdı. Hedef **ekran hücresi**
+kalırdı. **Yüzeyi kendi fragment'inin**: köşesi yuvarlak ve çevresinde hafif
+bir hale var, ikisi de yuvarlak dikdörtgenin imzalı mesafesinden
+(`shaders/cell_bg.metal` → `caret_fragment`). Sayılar uydurulmuyor —
+yarıçap hücre **yüksekliğinin** oranı (üç şeklin ortak tek boyutu o), hale
+payı sol paydan türüyor (`CellMetrics::gutter_px`'in yarısı, aynı içi
+girintinin üçüncü kullanımı) ve kenar kalınlığı yine `rule_px`; punto büyüyünce üçü
+birden büyüyor. Hale caret'in **kendi alfasıyla** çarpılıyor, yani blink
+sönerken hale de sönüyor ve ikinci bir yol yok. Dörtlü hale payı kadar
+**şişiyor** ama **yuva seçimi şişmemiş dikdörtgene bakıyor**: hale ayak izini
+büyütüp caret'i dock yuvasına kaydırsaydı caret ızgaranın glyph'lerinden sonra
+çizilir ve altındaki harfi boyardı. `caret_rect` bu yüzden **iki** dikdörtgen
+veriyor — boyanan ve ters çevirmenin opak içi; bugün eşitler, içi boş imleçte
+ayrılacaklar. "Yarıçap 0, hale 0" kolu **desteklenen ve sınanan** bir hâl:
+çıktısı düz dörtgenle bit bit aynı ve geri alma yolu o. Hedef **ekran hücresi**
 cinsinden ve dock'unki kesirli — band nefes payı kadar aşağıdan başlıyor ve
 artık şeridin altında duruyor; yuvarlansaydı caret bir hücre yukarıda dururdu.
 Çizim **yuvası** konuma göre seçiliyor (`Frame::push_caret`): blok, üstünde
@@ -221,7 +238,7 @@ görünen satırlar için biliniyor ve bölge boyamak onu tahmine çevirirdi.
 **İçerik pencerenin tabanına yaslanır**: `frame()` kaç satırın dolu olduğunu
 sınırdan verir (`Cursor::content_rows`; alternatif ekranda ızgaranın tamamı),
 `DisplayLink` onu `rows - content_rows` ile ötelemeye çevirir ve `encode_pass`
-tek bir `setViewport` ile iki pipeline'ı birden kaydırır — dört liste ve imleç
+tek bir `setViewport` ile bütün pipeline'ları birden kaydırır — dört liste ve imleç
 aynı yerden. Öteleme **yumuşak kayar**: `bt-gpu::motion`'ın ikinci animatörü
 (`Slide`) onu imleçle aynı stil ve aynı `settled()` kapısı altında sürer, imlecin
 hedefi de **ekran satırıdır** (`row + origin`), yani Enter'da imleç dipteki

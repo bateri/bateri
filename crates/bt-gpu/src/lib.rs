@@ -11,6 +11,12 @@
 //! görür — katman tablosu iki kenarla değil bir kenarla yaşar. Atlasın
 //! **dokusu** da bu crate'in: `bt-atlas` yuva numarası ve CPU bitmap'i verir,
 //! `replaceRegion` ile dokuya yazan ve `cell` pipeline'ıyla çizen buradır.
+//!
+//! **Üç pipeline var** ve ikisi vertex'i paylaşıyor: `cell_bg` (arka planlar,
+//! blok şeritleri, dock zemini), `cell` (glyph'ler ve kurallar; atlası
+//! örnekliyor) ve `caret` (`cell_bg_vertex` + `caret_fragment`). Üçüncüsü
+//! ayrı, çünkü caret'in yuvarlak köşesi, kenarı ve halesi bir SDF istiyor ve
+//! o hesabı kare başına binlerce arka plan dörtgenine ödetmenin anlamı yok.
 //! Kare yolunun **ölçüm defteri** de burada ([`Stats`]): zamanı kim
 //! üretiyorsa örneği de o topluyor — CPU aralıkları display link'ten, GPU
 //! deltası Metal'in tamamlanma bloğundan. Bu crate hiçbir şey **basmaz**;
