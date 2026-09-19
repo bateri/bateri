@@ -100,6 +100,6 @@ _Requirements: R1, R1.3, R1.4, R2, R3, R3.2, R3.3, R4, R5, R7, R8_
 - [x] `CLAUDE.md`, `docs/AYARLAR.md`
 - [x] Doğrulama geçti (`make hepsi` — exit 0)
 - [ ] `make duman` (kullanıcıda)
-- [ ] **Gözle kontrol:** `cursor_blink = "on"` iken periyodu değiştirip kaydet
+- [x] **Gözle kontrol** (kullanıcı, 2026-09-20): `cursor_blink = "on"` iken periyodu değiştirip kaydet
       — ritim **hemen** değişmeli, bir flip gecikmeden
 - [x] Yayın etkisi yazıldı

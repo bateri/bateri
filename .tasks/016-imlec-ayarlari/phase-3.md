@@ -79,6 +79,6 @@ _Requirements: R9, R9.1, R9.2, R9.3, R1.3, R1.4, R2, R3, R7, R8_
 - [x] Test: kabul edilmeyen değer + tanı
 - [x] `docs/AYARLAR.md` (Şablon kaynaktan senkron), `CLAUDE.md`
 - [x] Doğrulama geçti (`make hepsi` — exit 0)
-- [ ] **Gözle kontrol:** `"solid"` yazıp kaydet, başka pencereye geç — imleç
+- [x] **Gözle kontrol** (kullanıcı, 2026-09-20): `"solid"` yazıp kaydet, başka pencereye geç — imleç
       dolu kalmalı
 - [x] Yayın etkisi yazıldı

@@ -120,5 +120,5 @@ _Requirements: R1, R1.1, R1.2, R1.3, R1.4, R2, R2.1, R3, R3.1, R3.2, R3.3, R4, R
 - [x] `docs/AYARLAR.md` (tablo + Şablon bloğu kaynaktan senkron), `CLAUDE.md`
 - [x] Doğrulama geçti (`make hepsi` — exit 0)
 - [ ] `make duman` (kullanıcıda) — jetonlar değişmemeli
-- [ ] **Gözle kontrol:** ayarı kaydedince **boştaki** pencerede de değişiyor
+- [x] **Gözle kontrol** (kullanıcı, 2026-09-20): ayarı kaydedince **boştaki** pencerede de değişiyor
 - [x] Yayın etkisi yazıldı
