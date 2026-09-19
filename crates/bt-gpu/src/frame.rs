@@ -498,12 +498,9 @@ pub(crate) struct Frame {
     /// Pencere odakta mı — [`Frame::push_caret`] yazıyor,
     /// [`Frame::move_caret`] **koruyor**.
     ///
-    /// `caret_hollow`'dan türetilebilir **görünüyor** ama ters çevirme kayıplı:
-    /// ince şekiller hiç boşalmadığı için odaksız bir beam'den `focused = true`
-    /// çıkardı. Bugün tek tüketici `hollow` olduğu için sonuç aynı; ikinci bir
-    /// tüketici doğduğu gün (odaksızda soluk caret, farklı hale alfası)
-    /// hareket kareleri içerik kareleriyle **sessizce** ayrışırdı — `caret_shape`
-    /// kendi alanını tam bu yüzden almıştı (`/code-review`).
+    /// Yalnız **tanı ve değişmez** için: çizimin kaynağı değil. Hareket karesi
+    /// odağı argüman olarak alıyor ([`Frame::move_caret`]), çünkü güncel değer
+    /// `bt-gpu`'nun elinde ve saklanmış bir kopya bayatlardı.
     caret_focused: bool,
     /// İmlecin **ayardan gelen** çizim sayıları; `clear`'ın ikinci argümanı
     /// yazıyor, hareket karesi koruyor (o `clear` çağırmıyor).
@@ -925,12 +922,17 @@ impl Frame {
         text: LinearRgba,
         rgba: LinearRgba,
         alpha: f32,
+        focused: bool,
     ) {
-        // Şekil **ve odak** korunuyor: bu yolun `bt-core`'a da `bt-shell`'e
-        // de erişimi yok ve `clear_caret` yalnız yuvaları boşaltıyor.
-        // Korunmasaydı odaksız pencerede ilk hareket karesinde caret dolardı.
+        // **Şekil korunuyor, odak korunmuyor** ve ayrım kaynakta: şekil
+        // `bt-core`'dan geliyor ve bu yolun ona erişimi yok, odak ise
+        // `bt-gpu`'nun kendi biti (`DisplayLink::set_focused`) ve her karede
+        // okunabiliyor. Saklanmış bir kopyayı korumak onu **bayatlatırdı**:
+        // odak dönerken uçuşta bir animasyon varsa caret içi boş çizilmeye
+        // devam eder, ancak bir sonraki **içerik** karesinde dolardı —
+        // kullanıcı bunu "çerçeve duruyor, içi sonradan doluyor" diye gördü
+        // (2026-09-20).
         let shape = self.caret_shape;
-        let focused = self.caret_focused;
         self.clear_caret();
         self.push_caret(at, text, rgba, alpha, shape, focused);
     }
@@ -1393,7 +1395,8 @@ mod tests {
 
     /// `Frame::move_cursor`'ın sınama kabuğu; görünmez imleç caret'i siliyor.
     fn move_cursor(frame: &mut Frame, cursor: Cursor, at: [f32; 2], rgba: LinearRgba, alpha: f32) {
-        frame.move_caret(at, cursor.text, rgba, alpha);
+        let focused = frame.caret_focused;
+        frame.move_caret(at, cursor.text, rgba, alpha, focused);
         if !cursor.visible {
             frame.clear_caret();
         }
@@ -1555,18 +1558,26 @@ mod tests {
     }
 
     #[test]
-    fn a_motion_frame_keeps_the_caret_hollow() {
-        // Hareket karesi `bt-core`'a da `bt-shell`'e de gitmiyor, yani odağı
-        // bilmiyor. Korunmasaydı odaksız pencerede caret ilk kaymada dolardı
-        // — şeklin (`caret_shape`) aynı gerekçesi.
+    fn a_motion_frame_follows_the_live_focus() {
+        // **Odak hareket karesinde de taze** ve bu bir kullanıcı bildirimiyle
+        // geldi (2026-09-20): "pencereye geri dönünce çerçeve duruyor ama içi
+        // boş, sonradan doluyor". Sebep saklanmış bir kopyanın korunmasıydı —
+        // odak `bt-gpu`'nun kendi biti ve hareket karesi ona **erişiyor**,
+        // yani korumak onu bayatlatmaktı. Şekil için koruma doğru: o
+        // `bt-core`'dan geliyor ve bu yolun ona erişimi yok.
         let mut frame = Frame::default();
         frame.clear(grid(9, 18), CaretStyle::default());
+
+        // Odaksız basıldı, hareket karesi **odaklı** geldi: caret dolmalı.
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
-        move_cursor(&mut frame, cursor(2, 1, true), [2.0, 1.0], CURSOR, OPAQUE);
-        assert!(
-            frame.caret_sdf()[1] > 0.0,
-            "hareket karesi caret'i doldurdu"
-        );
+        assert!(frame.caret_sdf()[1] > 0.0, "içi boş başlamalıydı");
+        frame.move_caret([2.0, 1.0], TEXT, CURSOR, OPAQUE, true);
+        assert_eq!(frame.caret_sdf()[1], 0.0, "hareket karesi odağı görmedi");
+        assert_ne!(frame.cursor_block().rect, [0.0; 4], "ters çevirme dönmedi");
+
+        // Ters yön: odak giderken de hareket karesi anında boşaltıyor.
+        frame.move_caret([3.0, 1.0], TEXT, CURSOR, OPAQUE, false);
+        assert!(frame.caret_sdf()[1] > 0.0);
         assert_eq!(frame.cursor_block().rect, [0.0; 4]);
     }
 
@@ -2175,7 +2186,7 @@ mod tests {
         assert!(frame.dock_caret(64.0).is_none(), "caret iki yuvada birden");
 
         // Banda **değdiği** anda dock'un yuvası — henüz yarısı ızgarada olsa da.
-        frame.move_caret([3.0, 3.5], TEXT, CURSOR, OPAQUE);
+        frame.move_caret([3.0, 3.5], TEXT, CURSOR, OPAQUE, true);
         assert!(frame.grid_caret().is_none(), "eski yuva temizlenmedi");
         let caret = frame.dock_caret(64.0).expect("caret dock yuvasında değil");
         // Instance pencere uzayında doğuyor (y = 3.5 × 16 = 56) ve dock
@@ -2269,7 +2280,7 @@ mod tests {
             CaretStyle::default(),
         );
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
-        frame.move_caret([2.0, 1.0], TEXT, CURSOR, OPAQUE);
+        frame.move_caret([2.0, 1.0], TEXT, CURSOR, OPAQUE, true);
         let moved = frame.grid_caret().expect("caret yok");
         assert_eq!(moved.size, [2.0, 20.0], "hareket karesi şekli yuttu");
     }

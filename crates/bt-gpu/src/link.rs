@@ -815,6 +815,10 @@ define_class!(
                         text,
                         theme.cursor_linear(),
                         motion.alpha() * iv.blink.get().alpha(),
+                        // **Odak her karede taze okunuyor**, `Frame`'de
+                        // saklanandan değil: bu bit `bt-gpu`'nun kendi kararı
+                        // ve hareket karesi de ona erişiyor.
+                        iv.focused.get(),
                     );
                 }
                 // CPU örneği **yazılmıyor** ve bu bir eksiklik değil:
