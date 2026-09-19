@@ -1671,16 +1671,6 @@ impl DisplayLink {
         }
     }
 
-    /// Pencere odağı değişti — `bt-shell`'in `NSWindowDelegate`'i veriyor.
-    ///
-    /// **Aynı değerde no-op** (R7.2; emsal [`crate::Session::set_theme`]):
-    /// açılıştaki `windowDidBecomeKey:` tam bu yola düşüyor ve bedava bir
-    /// içerik karesi yazardı.
-    ///
-    /// **Değişimin kendisi kare istiyor** ve gerekçesi `set_reduce_motion`'ın
-    /// aynısı: caret'in içi boşalacak ya da dolacak, blink duracak ya da
-    /// başlayacak — boştaki bir pencere bunların hiçbirini bir sonraki hasara
-    /// kadar göstermezdi.
     /// İmlecin çizim sayıları değişti — `bt-shell` ayar dosyasından veriyor.
     ///
     /// **Aynı değerde no-op, değişimde kare** ve gerekçe kardeşlerininkiyle
@@ -1716,6 +1706,16 @@ impl DisplayLink {
         self.request_frame();
     }
 
+    /// Pencere odağı değişti — `bt-shell`'in `NSWindowDelegate`'i veriyor.
+    ///
+    /// **Aynı değerde no-op** (015 R7.2; emsal [`crate::Session::set_theme`]):
+    /// açılıştaki `windowDidBecomeKey:` tam bu yola düşüyor ve bedava bir
+    /// içerik karesi yazardı.
+    ///
+    /// **Değişimin kendisi kare istiyor** ve gerekçesi `set_reduce_motion`'ın
+    /// aynısı: caret'in içi boşalacak ya da dolacak, blink duracak ya da
+    /// başlayacak — boştaki bir pencere bunların hiçbirini bir sonraki hasara
+    /// kadar göstermezdi.
     pub fn set_focused(&self, focused: bool) {
         let iv = self.delegate.ivars();
         if iv.focused.replace(focused) == focused {

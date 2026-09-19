@@ -23,18 +23,13 @@
 //! açığa bırakıyor**: sönük fazda durulsaydı imleç bir sonraki hasara kadar
 //! kaybolurdu ve kullanıcı bunu "imleç kayboldu" diye okurdu.
 
-/// Yarım periyot, saniye — **seçilmiş bir sayı, ölçülmüş değil**.
+/// Blink'in yarım periyodunun **varsayılanı** — değeri ve gerekçesi
+/// `bt_core::CURSOR_BLINK_INTERVAL`'de.
 ///
-/// Tam devir 1 saniye, yani saniyede **iki** kare: biri yakan, biri söndüren.
-/// Klasik terminal ritmi bu mertebede (xterm 600/300 ms, VS Code 500 ms) ve
-/// sayının kendisi bir ölçüme değil o hedefe dayanıyor.
-///
-/// Periyodu kısaltmanın bedeli doğrusal: 250 ms'lik bir yarım periyot saniyede
-/// dört kare eder. Uzatmanın bedeli yok ama imleç "yanıp sönüyor" gibi
-/// okunmaz olur.
-/// **Varsayılanın tek sahibi `bt-core`** (016 R2): periyot artık bir ayar
-/// (`[terminal] cursor_blink_interval`) ve iki literal olsaydı dosyasız
-/// kullanıcı ile süreli koşu iki ayrı ritme bağlanırdı.
+/// Burada yalnız işaret var, kopya yok: seçilmiş bir sayının tek sahibi olur
+/// ve iki yerde yazılı bir gerekçe yeniden ayarlanınca birinde güncellenip
+/// ötekinde sessizce yalan söyler (`/code-review`). Periyot 016'dan beri
+/// kullanıcı ayarı; buradaki sabit yalnız [`Blink::default`]'ın tabanı.
 const HALF_PERIOD: f64 = bt_core::CURSOR_BLINK_INTERVAL;
 
 /// Klavye sessizliğinden sonra blink'in durma süresi, saniye — **seçilmiş,

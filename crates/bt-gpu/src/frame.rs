@@ -498,10 +498,6 @@ pub(crate) struct Frame {
     /// Pencere odakta mı — [`Frame::push_caret`] yazıyor,
     /// [`Frame::move_caret`] **koruyor**.
     ///
-    /// Yalnız **tanı ve değişmez** için: çizimin kaynağı değil. Hareket karesi
-    /// odağı argüman olarak alıyor ([`Frame::move_caret`]), çünkü güncel değer
-    /// `bt-gpu`'nun elinde ve saklanmış bir kopya bayatlardı.
-    caret_focused: bool,
     /// İmlecin **ayardan gelen** çizim sayıları; `clear`'ın ikinci argümanı
     /// yazıyor, hareket karesi koruyor (o `clear` çağırmıyor).
     ///
@@ -851,7 +847,6 @@ impl Frame {
             && matches!(shape, CaretShape::Block)
             && self.caret_style.unfocused == UnfocusedCaret::Hollow;
         self.caret_hollow = hollow;
-        self.caret_focused = focused;
         let pos = self.pos_at(at);
         let top = pos[1];
         // **Şekil `Frame`'de yaşıyor**, imzada taşınıp unutulmuyor: hareket
@@ -1200,7 +1195,7 @@ impl Frame {
     /// büyüyor. Hale o kaynağın kendisi değil [`CARET_GLOW_RATIO`] kadarı;
     /// tamamı olduğunda ortaya gölge değil neon çıkıyordu.
     fn glow_px(&self) -> f32 {
-        self.gutter_px * CARET_GLOW_RATIO * self.caret_style.glow
+        self.gutter_px * CARET_GLOW_RATIO * self.caret_style.glow as f32
     }
 
     /// Caret fragment'inin **boyanan** çekirdeği (x0, y0, x1, y1), pencere
@@ -1226,7 +1221,7 @@ impl Frame {
             return shape;
         }
         [
-            caret_radius_px(self.cell_px, self.caret_style.radius_ratio),
+            caret_radius_px(self.cell_px, self.caret_style.radius_ratio as f32),
             // Kenar yalnız içi boş caret'te; dolu caret'te 0 = dolgu.
             // Kalınlık yine fontun kendi metriğinden (`rule_px`), ikinci bir
             // tasarım sabiti yok.
@@ -1243,7 +1238,7 @@ impl Frame {
                 0.0
             },
             self.glow_px(),
-            CARET_GLOW_ALPHA * self.caret_style.glow,
+            CARET_GLOW_ALPHA * self.caret_style.glow as f32,
         ]
     }
 
@@ -1400,8 +1395,14 @@ mod tests {
     }
 
     /// `Frame::move_cursor`'ın sınama kabuğu; görünmez imleç caret'i siliyor.
-    fn move_cursor(frame: &mut Frame, cursor: Cursor, at: [f32; 2], rgba: LinearRgba, alpha: f32) {
-        let focused = frame.caret_focused;
+    fn move_cursor(
+        frame: &mut Frame,
+        cursor: Cursor,
+        at: [f32; 2],
+        rgba: LinearRgba,
+        alpha: f32,
+        focused: bool,
+    ) {
         frame.move_caret(at, cursor.text, rgba, alpha, focused);
         if !cursor.visible {
             frame.clear_caret();
@@ -1715,7 +1716,14 @@ mod tests {
         assert_eq!((cells, glyphs, rules), (2, 1, 1));
 
         for _ in 0..3 {
-            move_cursor(&mut frame, cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
+            move_cursor(
+                &mut frame,
+                cursor(5, 0, true),
+                [4.5, 0.0],
+                CURSOR,
+                OPAQUE,
+                true,
+            );
             // Üç sayacın üçü de oynamadı: `hucre=8 glif=6 kural=15` duman
             // koşusunda hareket karesiyle bitse bile aynı kalmalı.
             assert_eq!(frame.bg_count(), cells);
@@ -1730,7 +1738,14 @@ mod tests {
 
         // Görünmez imleçle gelen hareket karesi bloğu **kaldırır**: uniform
         // eski yerinde kalsaydı orada zemin renginde bir harf dururdu.
-        move_cursor(&mut frame, cursor(5, 0, false), [4.5, 0.0], CURSOR, OPAQUE);
+        move_cursor(
+            &mut frame,
+            cursor(5, 0, false),
+            [4.5, 0.0],
+            CURSOR,
+            OPAQUE,
+            true,
+        );
         assert_eq!(frame.bg_instances().len(), cells);
         assert!(frame.grid_caret().is_none(), "görünmez imleç blok bıraktı");
         assert_eq!(frame.cursor_block(), &CursorBlock::default());
@@ -1838,7 +1853,14 @@ mod tests {
         // dikdörtgen `push_cursor` anındaki ötelemeyi pişiriyor ve üretimde de
         // sıra öyle (`link.rs` orijini imleçten **önce** yazıyor).
         frame.set_origin_rows(2.0);
-        move_cursor(&mut frame, cursor(0, 2, true), [0.0, 4.0], CURSOR, OPAQUE);
+        move_cursor(
+            &mut frame,
+            cursor(0, 2, true),
+            [0.0, 4.0],
+            CURSOR,
+            OPAQUE,
+            true,
+        );
         assert_eq!(
             frame.grid_caret().expect("caret").pos[1],
             cell_y,
@@ -1985,7 +2007,14 @@ mod tests {
 
         let stripes = frame.stripes().to_vec();
         for _ in 0..3 {
-            move_cursor(&mut frame, cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
+            move_cursor(
+                &mut frame,
+                cursor(5, 0, true),
+                [4.5, 0.0],
+                CURSOR,
+                OPAQUE,
+                true,
+            );
             // Izgara değişmedi, yani blokların satır aralığı da değişmedi:
             // şerit hareket karesinde olduğu gibi kalmalı.
             assert_eq!(frame.stripes(), stripes, "hareket karesi şeridi oynattı");
@@ -2042,7 +2071,14 @@ mod tests {
         assert_eq!(dock_rules.len(), 1);
 
         for _ in 0..3 {
-            move_cursor(&mut frame, cursor(5, 0, true), [4.5, 0.0], CURSOR, OPAQUE);
+            move_cursor(
+                &mut frame,
+                cursor(5, 0, true),
+                [4.5, 0.0],
+                CURSOR,
+                OPAQUE,
+                true,
+            );
             assert_eq!(frame.dock_bg(), dock_bg, "hareket karesi dock'u oynattı");
             assert_eq!(frame.dock_glyphs(), dock_glyphs);
             assert_eq!(frame.dock_rules(), dock_rules);
