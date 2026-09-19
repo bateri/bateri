@@ -99,7 +99,9 @@ _Requirements: R1, R1.3, R1.4, R2, R3, R3.2, R3.3, R4, R5, R7, R8_
 - [x] Test: şablon/varsayılan çifti (`template_is_the_defaults`)
 - [x] `CLAUDE.md`, `docs/AYARLAR.md`
 - [x] Doğrulama geçti (`make hepsi` — exit 0)
-- [ ] `make duman` (kullanıcıda)
+- [x] `make duman` (kullanıcıda, 2026-09-20): `kare=29 hucre=8 glif=6 kural=15
+      icerik=2 hareket=27 sessiz=1751.73ms kapanis=clean` — 014/015 tabanıyla
+      **bire bir aynı**, yani dört anahtar da hermetik koşuya dokunmadı
 - [x] **Gözle kontrol** (kullanıcı, 2026-09-20): `cursor_blink = "on"` iken periyodu değiştirip kaydet
       — ritim **hemen** değişmeli, bir flip gecikmeden
 - [x] Yayın etkisi yazıldı

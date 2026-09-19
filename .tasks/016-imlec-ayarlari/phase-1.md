@@ -119,6 +119,8 @@ _Requirements: R1, R1.1, R1.2, R1.3, R1.4, R2, R2.1, R3, R3.1, R3.2, R3.3, R4, R
       `the_glow_setting_reaches_the_pixels` — ayarın piksele indiğinin kanıtı
 - [x] `docs/AYARLAR.md` (tablo + Şablon bloğu kaynaktan senkron), `CLAUDE.md`
 - [x] Doğrulama geçti (`make hepsi` — exit 0)
-- [ ] `make duman` (kullanıcıda) — jetonlar değişmemeli
+- [x] `make duman` (kullanıcıda, 2026-09-20): `kare=29 hucre=8 glif=6 kural=15
+      icerik=2 hareket=27 sessiz=1751.73ms kapanis=clean` — 014/015 tabanıyla
+      **bire bir aynı**, yani dört anahtar da hermetik koşuya dokunmadı
 - [x] **Gözle kontrol** (kullanıcı, 2026-09-20): ayarı kaydedince **boştaki** pencerede de değişiyor
 - [x] Yayın etkisi yazıldı

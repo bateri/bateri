@@ -70,7 +70,10 @@ make test-yaris     # exit 0
 - [x] `/audit` — `make denetim` temiz, 1 bulgu giderildi
 - [x] **Gözle kontrol** — kullanıcı yaptı (2026-09-20): dört anahtar da
       kayıt anında uygulanıyor
-- [ ] `make duman` — **kullanıcıda** (aşağıda B.1)
+- [x] `make duman` — **kullanıcı koştu** (2026-09-20): `kare=29 hucre=8 glif=6
+      kural=15 icerik=2 hareket=27 sessiz=1751.73ms kapanis=clean`. 014 ve
+      015 tabanıyla **bire bir aynı** — dört anahtar da hermetik koşuya
+      dokunmadı, yani hiçbir yol yanlış kurulmamış
 
 ### Ölçüm bekleyen iddia
 
@@ -92,8 +95,8 @@ kurulmuş demektir.
 
 ### Yayın Checklist
 
-- [ ] B.1 `make duman`
-- [ ] `/ship`
+- [x] B.1 `make duman` — jetonlar değişmedi
+- [x] `/ship`
 
 `make kur` **gerekmiyor**: kabuk betiği, terminfo, jeton satırı ve app bundle
 değişmedi.
