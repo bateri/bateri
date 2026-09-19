@@ -455,8 +455,9 @@ impl Settings {
     /// Metin İngilizce: kullanıcının açtığı dosya bir UI dizgisi
     /// (`CLAUDE.md` → Dil).
     pub const TEMPLATE: &str = r#"# bateri settings. Changes apply as soon as you save this file.
-# A key you delete goes back to its default. Values are case-sensitive; one
-# that is not understood leaves its key alone and says so under the title.
+# A key you delete goes back to its default. Values are case-sensitive; one that
+# is not understood leaves its key alone and says so under the title — except
+# clipboard.osc52, which turns off instead.
 
 [terminal]
 # 0 to 100000. Lines of history kept above the screen.
@@ -466,10 +467,11 @@ scrollback = 10000
 # vim may ask for a different shape while they run; this is the shape when none
 # is asked for.
 cursor = "block"
-# "auto" | "on" | "off". Whether the cursor blinks: auto follows what the
-# program asks for, on and off decide it here. Blinking asks for two frames a
-# second, so it is off unless you choose it; with it on, it stops on its own
-# 15 seconds after the last keystroke and comes back with the next one.
+# "auto" | "on" | "off". Whether the cursor blinks: auto blinks until a program
+# asks it to stop (vim in normal mode does), on blinks whatever the program
+# says, off never blinks. Blinking asks for two frames a second, so it is off
+# unless you choose it; with it on, it stops on its own 15 seconds after the
+# window last drew anything and comes back with the next output or keystroke.
 cursor_blink = "off"
 
 [appearance]

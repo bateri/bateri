@@ -73,8 +73,9 @@ değeri yerinde değiştirip kaydetmek yeter.
 
 ```toml
 # bateri settings. Changes apply as soon as you save this file.
-# A key you delete goes back to its default. Values are case-sensitive; one
-# that is not understood leaves its key alone and says so under the title.
+# A key you delete goes back to its default. Values are case-sensitive; one that
+# is not understood leaves its key alone and says so under the title — except
+# clipboard.osc52, which turns off instead.
 
 [terminal]
 # 0 to 100000. Lines of history kept above the screen.
@@ -84,10 +85,11 @@ scrollback = 10000
 # vim may ask for a different shape while they run; this is the shape when none
 # is asked for.
 cursor = "block"
-# "auto" | "on" | "off". Whether the cursor blinks: auto follows what the
-# program asks for, on and off decide it here. Blinking asks for two frames a
-# second, so it is off unless you choose it; with it on, it stops on its own
-# 15 seconds after the last keystroke and comes back with the next one.
+# "auto" | "on" | "off". Whether the cursor blinks: auto blinks until a program
+# asks it to stop (vim in normal mode does), on blinks whatever the program
+# says, off never blinks. Blinking asks for two frames a second, so it is off
+# unless you choose it; with it on, it stops on its own 15 seconds after the
+# window last drew anything and comes back with the next output or keystroke.
 cursor_blink = "off"
 
 [appearance]
@@ -280,14 +282,21 @@ istemediğindeki hâl. Tanınmayan değer (`"bar"`, `"Block"`) anahtarı
 kalınlığı fontun kendi alt çizgi metriğinden gelir, yani punto ya da font
 değişince caret de onunla değişir.
 
-`cursor_blink` üç değerli, çünkü iki ayrı soru var: `"auto"` uygulamanın
-isteğini dinler (vim'in `\e[5 q`'su söndürür), `"on"` her zaman söner,
-`"off"` hiç söndürmez — ikisi de uygulamanın dediğini **ezer**.
+`cursor_blink` üç değerli, çünkü iki ayrı soru var: `"auto"` **söner ve
+uygulama onu durdurabilir** (vim normal modda `\e[2 q` gönderiyor), `"on"` her
+zaman söner, `"off"` hiç söndürmez — son ikisi uygulamanın dediğini **ezer**.
+
+`"auto"`nun tabanı bilerek **açık**: kapalı olsaydı hiçbir şey blink
+istemediği için (ne zsh ne bizim sarmalayıcımız DECSCUSR gönderiyor) düz bir
+promptta `"off"` ile birebir aynı olurdu ve üç değerden ikisi ayırt
+edilemezdi.
 
 Varsayılan `"off"` ve bu bir ürün kararı: yanıp sönen imleç pencereyi kalıcı
 olarak meşgul tutar (saniyede iki kare) ve bu terminalin ana vaadi boşta hiç
-kare çizmemek. Açtığında bedeli sınırlı kalıyor — yazmayı bıraktıktan 15 saniye
-sonra blink **duruyor** ve imleç görünür hâlde kalıyor; ilk tuşta geri geliyor.
+kare çizmemek. Açtığında bedeli sınırlı kalıyor — pencere 15 saniyedir
+hiçbir şey çizmediyse blink **duruyor** ve imleç görünür hâlde kalıyor; ilk
+çıktıda ya da tuşta geri geliyor. Sayaç **çizime** bakıyor, klavyeye değil:
+`tail -f` gibi akan bir çıktı blink'i ayakta tutar.
 Hareketi Azalt açıkken blink hiç başlamaz: erişilebilirlik ayarı animasyon
 *eklemez*.
 
@@ -634,8 +643,9 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 - **Her anahtar opsiyoneldir.** Eksik anahtar gömülü `bateri` temasından
   gelir; yalnız zemini değiştiren iki satırlık bir dosya geçerli bir temadır.
 - Gömülü bir temayı **gölgeleyen** dosyada (`themes/bateri-light.toml`) eksik
-  anahtar o gömülü temanın kendisinden gelir: yalnız `accent` yazmak açık
-  temayı yalnız koşan komutun işaretiyle değiştirir.
+  anahtar o gömülü temanın kendisinden gelir — `cursor` hariç (bir alttaki
+  madde): yalnız `accent` yazmak koşan komutun işaretini **ve imleci** birden
+  değiştirir.
 - **`cursor`'ın tek istisnası var:** eksikse tabandan değil **`accent`'ten**
   gelir. Rol sonradan doğdu ve ondan önce imleç `accent` rengindeydi; tabandan
   doldurulsaydı eski bir tema dosyası tek harf değişmeden başka görünürdü —

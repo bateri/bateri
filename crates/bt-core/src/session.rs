@@ -1687,9 +1687,27 @@ impl Session {
             } else {
                 color::resolve(cell.bg, colors, &theme)
             };
+            // `HIDDEN` (`\e[8m`) "mürekkep yok" demek ve **tek bir `let`**
+            // (yukarıdaki `hidden`): hem glyph'i hem kuralları düşürüyor, hem
+            // de seçim vurgusunu dışlıyor. Üç ayrı ifadeye yazılsaydı biri
+            // sonradan değişip ötekiler eski kalabilirdi ve belirti "gizli
+            // metin altı çizgisinden/vurgusundan okunuyor" olurdu.
             let ch = (!hidden && !flags.intersects(SPACERS) && cell.c != ' ').then_some(cell.c);
+            // Kapının kural yarısı tek maske testi; **hangi** çeşit olduğu
+            // kapıdan sonra sorulur. `!hidden` maskenin dışında değil
+            // **içinde**: dışarıda kalsaydı gizli ve altı çizili bir hücre
+            // kapıdan geçer ve `sink`'e çizilecek hiçbir şeyi olmadan varırdı.
             let ruled = !hidden && flags.intersects(RULES);
-            let drawable = plain_back != background || ch.is_some() || ruled;
+            // **Spacer da çizilir sayılıyor** ve bu şart (`/code-review`, 014
+            // kapı): geniş karakterin ikinci hücresinin kendi mürekkebi yok
+            // (`ch` onu eliyor) ve zemini varsayılan olabilir, yani ölçüt
+            // yalnız mürekkep + zemin + kural olsaydı seçili bir CJK
+            // karakterinin **yarısı** vurgusuz kalırdı — `selection_text()`
+            // onu bütün kopyalarken. Bugün belirti geniş glyph'in tek yuvaya
+            // kırpılmasıyla örtülü; 016 çizmeye başlayınca görünür olurdu ve
+            // hiçbir sayaç göremezdi.
+            let drawable =
+                plain_back != background || ch.is_some() || ruled || flags.intersects(SPACERS);
             let selected = !hidden
                 && drawable
                 && selected_range
@@ -1883,11 +1901,13 @@ impl Session {
             //
             // Ayrım iki gerçek kusuru kapatıyor (`/code-review`, 013 kapı):
             //
-            // - **Seçim.** Seçili satırda boş kuyruk hücreleri de zemin
-            //   alıyor; ölçüt yalnız mürekkep olsaydı sayaç onların üstüne
-            //   düşer ve sönük ön plan ters çevrilmiş zeminde okunmaz olurdu.
-            //   Şimdi sayaç seçime de yol veriyor — komut metnine verdiği
-            //   yolun aynısı.
+            // - **Seçim — bu yarısı artık ulaşılamaz ve kayıt olarak
+            //   duruyor** (`/code-review`, 014 kapı). 013'te seçili satırın
+            //   boş kuyruk hücreleri ters çevrilmiş zemin alıyordu ve sayaç
+            //   onların üstüne düşseydi sönük ön plan okunmaz olurdu. 014
+            //   seçimi "çizilir hücreye" kapadı (`drawable`), yani boş kuyruk
+            //   artık hiç boyanmıyor; `last_col`'a da hiç varmıyor. Ölçütü
+            //   doluluk tutan şey aşağıdaki geniş glyph, seçim değil.
             // - **Geniş glyph.** İkinci yarısı ayrı bir hücre ve kendi başına
             //   kapıdan geçmiyor, ama sütunu işgal ediyor. Öncüsünden
             //   `col + 1` diye kaydediliyor; yoksa `çç` ile biten bir komutta
@@ -5944,6 +5964,32 @@ mod tests {
         let cursor = wait_cursor(&session, &wake, |cells| cells.len() == 2);
         assert!(!cursor.visible, "imleç gizlenmedi");
         assert!(!cursor.blink, "gizli imleç sönmeye devam ediyor");
+    }
+
+    #[test]
+    fn a_wide_char_keeps_both_halves_highlighted() {
+        // **Ölçülmüş kusur** (`/code-review`, 014 kapı): seçim vurgusuna
+        // "çizilir mi" kapısı eklendiğinde geniş karakterin ikinci hücresi
+        // (spacer) dışarıda kalıyordu — kendi mürekkebi yok ve zemini
+        // varsayılan, yani seçili bir CJK karakterinin **yarısı** vurgusuz
+        // kalıyordu; `selection_text()` ise onu bütün kopyalıyordu.
+        //
+        // Renkler **varsayılan** ve bu şart: komşu sınama (`wide_char_is_
+        // selected_as_one_glyph`) zemini `\033[41m` ile boyadığı için spacer
+        // oradan zaten çizilir görünüyor ve kusuru göremiyordu.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf '漢'; sleep 5", Arc::clone(&wake));
+        wait_frame(&session, &wake, |cells| !cells.is_empty());
+
+        session.set_selection(at(0, 0, CellHalf::Left), at(1, 0, CellHalf::Right));
+        let mut cells = Vec::new();
+        assert!(frame_if_damaged(&session, |c| cells.push(c)).is_some());
+        let cols: Vec<_> = cells.iter().map(|c| c.col).collect();
+        assert_eq!(
+            cols,
+            vec![0, 1],
+            "geniş karakterin yarısı vurgusuz: {cells:?}"
+        );
     }
 
     #[test]

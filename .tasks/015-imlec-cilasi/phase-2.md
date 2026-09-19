@@ -32,9 +32,8 @@ _Requirements: R2, R2.1, R2.2, R2.3, R3, R4, R5, R6, R8, R9, R10_
      bakmaya devam ediyor** (R4). Aksi hâlde caret dock yuvasına kayar,
      ızgaranın glyph'lerinden sonra çizilir ve altındaki harfi boyar — 014
      phase-1'de aynı tuzağa düşülmüştü.
-  3. Bayat iki doc: `Frame::move_caret`'ın "caret `bg` listesinin sonunda"
-     cümlesi ve `Frame::push`'un `debug_assert` mesajı (kod 012'den beri
-     caret'i ayrı alanlarda tutuyor).
+  3. *(014'ün kapısında düzeldi — `Frame::move_caret` ve `Frame::push`'un
+     bayat `truncate(bg_count)` atıfları temizlendi.)*
 - **Şekil sayıları türetiliyor** (R3): kenar kalınlığı `CellMetrics::rule_px`,
   hale payı `gutter_px`, yarıçap hücre ölçüsünün oranı. Türetilemeyen kalırsa
   `const` doc'unda "seçilmiş, ölçülmemiş" **ve hangi metriğin neden yetmediği**.
@@ -97,7 +96,7 @@ _Requirements: R2, R2.1, R2.2, R2.3, R3, R4, R5, R6, R8, R9, R10_
 - [ ] Test: hale sınırı — dikdörtgenin **dışı** örnekleniyor
 - [ ] Test: hale blink alfasıyla sönüyor (yine **dışarıdan** örnekleyerek)
 - [ ] İki piksel sınamasının iddiası **ikiye ayrıldı** (toleransa çevrilmedi)
-- [ ] `CLAUDE.md`, `lib.rs` başlığı, `docs/YOL-HARITASI.md`, iki bayat doc
+- [ ] `CLAUDE.md`, `lib.rs` başlığı, `docs/YOL-HARITASI.md`
 - [ ] Doğrulama geçti (`make hepsi` + `make shader`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
 - [ ] `make duman` (kullanıcıda)
