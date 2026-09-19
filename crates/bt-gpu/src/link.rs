@@ -62,7 +62,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    Blocks, Cursor, CursorMotion, DirtyFlag, DockContext, DockState, LinearRgba, Session, Theme,
+    Blocks, CaretStyle, Cursor, CursorMotion, DirtyFlag, DockContext, DockState, LinearRgba,
+    Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -661,6 +662,16 @@ struct LinkIvars {
     /// yetmezdi, çünkü koşu sırasında açılan bir Spotlight
     /// `windowDidResignKey:` doğurup kare isterdi.
     focused: Cell<bool>,
+    /// İmlecin **ayardan gelen** çizim sayıları.
+    ///
+    /// `cell`/`motion`/`blink` ile aynı yuvada ve aynı gerekçeyle: kare yolu
+    /// bunu her içerik karesinde `Frame`'e veriyor (`clear`'ın ikinci
+    /// argümanı) ve hareket karesi `clear` çağırmadığı için değeri koruyor.
+    ///
+    /// `bt-core`'a **uğramıyor** anlamında değil — değer `bt_core::Settings`'te
+    /// yaşıyor ve varsayılanının tek sahibi orası; uğramadığı yer
+    /// `TerminalOptions`/`Session`, yani terminalin durum makinesi.
+    caret_style: Cell<CaretStyle>,
     /// Kurulmuş tikin kuşağı — eskiyen tik kendini tanıyıp sussun diye.
     ///
     /// `DispatchQueue::after` iptal edilemiyor, yani araya bir içerik karesi
@@ -879,7 +890,7 @@ define_class!(
                 }
                 return;
             }
-            frame.clear(iv.cell.get());
+            frame.clear(iv.cell.get(), iv.caret_style.get());
             // CPU **iki** aralık ölçülüyor, bir değil: kilit beklemesi
             // `session.frame`'in içinde, encode ise `draw`'ın. Tek aralık
             // ikisini toplar ve ayrımı yok eder (R3.1).
@@ -1436,6 +1447,7 @@ impl DisplayLink {
                 content_deadline: Cell::new(None),
                 blink: Cell::new(Blink::default()),
                 focused: Cell::new(true),
+                caret_style: Cell::new(CaretStyle::default()),
                 clock_generation: Arc::new(AtomicU64::new(0)),
                 last_caret_text: Cell::new(None),
                 last_caret_at: Cell::new(None),
@@ -1653,6 +1665,20 @@ impl DisplayLink {
     /// aynısı: caret'in içi boşalacak ya da dolacak, blink duracak ya da
     /// başlayacak — boştaki bir pencere bunların hiçbirini bir sonraki hasara
     /// kadar göstermezdi.
+    /// İmlecin çizim sayıları değişti — `bt-shell` ayar dosyasından veriyor.
+    ///
+    /// **Aynı değerde no-op, değişimde kare** ve gerekçe kardeşlerininkiyle
+    /// aynı ([`DisplayLink::set_cursor_motion`], [`DisplayLink::set_focused`]):
+    /// boştaki bir pencerede kaydedilen yarıçap bir sonraki hasara kadar
+    /// ekrana hiç düşmezdi ve kullanıcı ayarın çalışmadığını sanırdı.
+    pub fn set_caret_style(&self, style: CaretStyle) {
+        let iv = self.delegate.ivars();
+        if iv.caret_style.replace(style) == style {
+            return;
+        }
+        self.request_frame();
+    }
+
     pub fn set_focused(&self, focused: bool) {
         let iv = self.delegate.ivars();
         if iv.focused.replace(focused) == focused {

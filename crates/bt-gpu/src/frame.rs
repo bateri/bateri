@@ -17,7 +17,7 @@
 use std::mem::offset_of;
 
 use bt_atlas::{Face, RuleKind};
-use bt_core::{Block, CaretShape, Cell, LinearRgba, UnderlineStyle};
+use bt_core::{Block, CaretShape, CaretStyle, Cell, LinearRgba, UnderlineStyle};
 
 use crate::renderer::CellMetrics;
 
@@ -136,21 +136,6 @@ impl Caret {
     }
 }
 
-/// Caret'in köşe yarıçapı, **hücre yüksekliğinin** oranı.
-///
-/// **Seçilmiş, ölçülmemiş** — bir his eşiği (emsal `FADE_DURATION`). Oran,
-/// çünkü punto büyüyünce yarıçap da büyümeli ve ikinci bir tasarım sabiti
-/// uydurulmuyor. **Yükseklik**, genişlik değil: üç şeklin ortak tek boyutu o —
-/// beam'in genişliği `rule_px` kadar ve ona oranlansaydı yarıçap şekle göre
-/// değişirdi. Fragment ayrıca kendi tarafında yarıyla kırpıyor, yoksa ince
-/// bir beam'i yuvarlaklık büsbütün yutardı.
-///
-/// **Gözle bir kez indirildi** (0.18 → 0.10, kullanıcı): blok caret hücre
-/// genişliğinden kısa ve yüksekliğin beşte birine yakın bir yarıçap onu
-/// dikdörtgen olmaktan çıkarıp hapa çeviriyordu. Yumuşatma isteniyordu,
-/// yuvarlak isteniyor değildi.
-pub(crate) const CARET_RADIUS_RATIO: f32 = 0.10;
-
 /// Halenin payı, **sol payın oranı** olarak.
 ///
 /// **Seçilmiş, ölçülmemiş** ve bir kez gözle düzeltildi: pay başta sol payın
@@ -162,6 +147,11 @@ pub(crate) const CARET_RADIUS_RATIO: f32 = 0.10;
 /// tasarım sabiti yok ve punto büyüyünce hale de büyüyor.
 ///
 /// İki turda indi: sol payın tamamı → yarısı → **beşte ikisi**; ikisi de gözle.
+///
+/// **Bu bir taban**, ayarın kendisi değil: `[terminal] cursor_glow` bunun
+/// **çarpanı** ([`bt_core::CaretStyle`]). Sabitin burada kalması "ikinci bir
+/// tasarım sabiti yok" kuralını koruyor — kullanıcı tasarımın ölçüsünü
+/// ölçekliyor, yeni bir ölçü uydurmuyor.
 pub(crate) const CARET_GLOW_RATIO: f32 = 0.4;
 
 /// Halenin tepe alfası — dikdörtgenin kenarında bu, hale payının ucunda sıfır.
@@ -172,7 +162,9 @@ pub(crate) const CARET_GLOW_RATIO: f32 = 0.4;
 /// **çarpılıyor**, yani blink sönerken hale de sönüyor (R6) ve ikinci bir yol
 /// yazılmıyor.
 ///
-/// İki turda indi: 0.35 → 0.14 → **0.10**; ikisi de gözle.
+/// İki turda indi: 0.35 → 0.14 → **0.10**; ikisi de gözle. [`CARET_GLOW_RATIO`]
+/// gibi **taban**: `cursor_glow` onu da aynı çarpanla ölçekliyor, çünkü pay ve
+/// alfa tek his (016 `discussion.md` → Muhakeme).
 const CARET_GLOW_ALPHA: f32 = 0.10;
 
 /// Caret'in köşe yarıçapı, piksel — **kırpması dahil**.
@@ -182,8 +174,12 @@ const CARET_GLOW_ALPHA: f32 = 0.10;
 /// `min`'ini koruyor ama o bir **politika değil matematik ön koşulu** (SDF
 /// yarıçapın yarım ölçüyü aşmamasını istiyor); değeri burası seçiyor.
 /// Sınamalar da buradan okuyor, yoksa formülün üçüncü bir yazarı olurdu.
-pub(crate) fn caret_radius_px(cell_px: (f32, f32)) -> f32 {
-    (cell_px.1 * CARET_RADIUS_RATIO)
+///
+/// Oran **argüman**, sabit değil: 016'dan beri ayardan geliyor
+/// ([`bt_core::CaretStyle`]) ve varsayılanının tek sahibi `bt-core`
+/// ([`bt_core::CURSOR_RADIUS`]).
+pub(crate) fn caret_radius_px(cell_px: (f32, f32), ratio: f32) -> f32 {
+    (cell_px.1 * ratio)
         .min(cell_px.0 / 2.0)
         .min(cell_px.1 / 2.0)
 }
@@ -509,6 +505,12 @@ pub(crate) struct Frame {
     /// hareket kareleri içerik kareleriyle **sessizce** ayrışırdı — `caret_shape`
     /// kendi alanını tam bu yüzden almıştı (`/code-review`).
     caret_focused: bool,
+    /// İmlecin **ayardan gelen** çizim sayıları; `clear`'ın ikinci argümanı
+    /// yazıyor, hareket karesi koruyor (o `clear` çağırmıyor).
+    ///
+    /// `CellMetrics`'e **binmedi** (016 R3.1): o font geometrisi ve 32 çağrı
+    /// yeri var; `GUTTER_PT`'nin doc'u zaten "ayar değil sabit" diyor.
+    caret_style: CaretStyle,
     /// Izgaranın sol payı: her hücrenin x'i buradan **sonra** başlar.
     ///
     /// `cell_px` ile aynı gerekçeyle alan değil [`Frame::clear`]'ın taşıdığı
@@ -622,7 +624,8 @@ impl Frame {
     /// geliyor ve burada da birlikte yazılıyorlar. Ayrı iki parametre olsaydı
     /// biri tazelenip öteki unutulabilirdi ve belirti "glyph'ler pay kadar
     /// kaymış" olurdu.
-    pub(crate) fn clear(&mut self, metrics: CellMetrics) {
+    pub(crate) fn clear(&mut self, metrics: CellMetrics, caret: CaretStyle) {
+        self.caret_style = caret;
         let cell_px = metrics.cell_px();
         self.stripes.clear();
         self.bg.clear();
@@ -1189,7 +1192,7 @@ impl Frame {
     /// büyüyor. Hale o kaynağın kendisi değil [`CARET_GLOW_RATIO`] kadarı;
     /// tamamı olduğunda ortaya gölge değil neon çıkıyordu.
     fn glow_px(&self) -> f32 {
-        self.gutter_px * CARET_GLOW_RATIO
+        self.gutter_px * CARET_GLOW_RATIO * self.caret_style.glow
     }
 
     /// Caret fragment'inin **boyanan** çekirdeği (x0, y0, x1, y1), pencere
@@ -1215,7 +1218,7 @@ impl Frame {
             return shape;
         }
         [
-            caret_radius_px(self.cell_px),
+            caret_radius_px(self.cell_px, self.caret_style.radius_ratio),
             // Kenar yalnız içi boş caret'te; dolu caret'te 0 = dolgu.
             // Kalınlık yine fontun kendi metriğinden (`rule_px`), ikinci bir
             // tasarım sabiti yok.
@@ -1232,7 +1235,7 @@ impl Frame {
                 0.0
             },
             self.glow_px(),
-            CARET_GLOW_ALPHA,
+            CARET_GLOW_ALPHA * self.caret_style.glow,
         ]
     }
 
@@ -1343,7 +1346,7 @@ impl Frame {
 
 #[cfg(test)]
 mod tests {
-    use bt_core::{CaretShape, Cursor};
+    use bt_core::{CaretShape, CaretStyle, Cursor};
 
     use super::*;
 
@@ -1443,7 +1446,7 @@ mod tests {
     #[test]
     fn frame_bg_count_excludes_cursor() {
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
 
         frame.push(bg_cell(0, 0));
         frame.push(bg_cell(1, 0));
@@ -1457,7 +1460,7 @@ mod tests {
         assert_eq!(frame.bg_count(), 2);
         assert!(frame.grid_caret().is_some(), "caret çizilmiyor");
 
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         assert_eq!(frame.bg_count(), 0);
         assert!(frame.bg_instances().is_empty());
     }
@@ -1465,7 +1468,7 @@ mod tests {
     #[test]
     fn invisible_cursor_is_not_drawn() {
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         push_settled(&mut frame, cursor(0, 0, false));
         assert!(frame.bg_instances().is_empty());
         // Uniform da dokunulmadan kalır: dejenere dikdörtgen "blok yok"
@@ -1483,7 +1486,7 @@ mod tests {
         // ortasındaki harf zemin renginde çizilseydi altında boyanmış bir şey
         // olmadığı için **görünmez** olurdu — içi boş caret metni yutardı.
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
 
         assert_eq!(
@@ -1499,7 +1502,7 @@ mod tests {
         // Boyanan alan **aynı yerde**: içi boş caret aynı hücreyi kaplıyor.
         let hollow = frame.grid_caret().expect("caret");
         let mut lit = Frame::default();
-        lit.clear(grid(9, 18));
+        lit.clear(grid(9, 18), CaretStyle::default());
         lit.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
         let solid = lit.grid_caret().expect("caret");
         assert_eq!(hollow.pos, solid.pos, "içi boşalınca ayak izi kaydı");
@@ -1516,7 +1519,10 @@ mod tests {
         // kalkmış olduğu için altındaki harf kendi rengiyle kalır ve okunmayan
         // kombinasyon ortaya çıkardı.
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(10, 20, 0, 0).expect("sıfır olmayan hücre"));
+        frame.clear(
+            CellMetrics::new(10, 20, 0, 0).expect("sıfır olmayan hücre"),
+            CaretStyle::default(),
+        );
         frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
         assert!(
             frame.caret_sdf()[1] > 0.0,
@@ -1537,7 +1543,7 @@ mod tests {
         // sinyali blink'in durması.
         for shape in [CaretShape::Underline, CaretShape::Beam] {
             let mut frame = Frame::default();
-            frame.clear(grid(9, 18));
+            frame.clear(grid(9, 18), CaretStyle::default());
             frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, shape, false);
             assert_eq!(frame.caret_sdf()[1], 0.0, "{shape:?} içi boşaldı");
             assert_ne!(
@@ -1554,7 +1560,7 @@ mod tests {
         // bilmiyor. Korunmasaydı odaksız pencerede caret ilk kaymada dolardı
         // — şeklin (`caret_shape`) aynı gerekçesi.
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
         move_cursor(&mut frame, cursor(2, 1, true), [2.0, 1.0], CURSOR, OPAQUE);
         assert!(
@@ -1570,7 +1576,7 @@ mod tests {
         // ayrışsalardı blok bir yerde, altındaki metnin rengi başka bir yerde
         // olurdu ve ikisi de sessizce yanlış çizerdi.
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         push_settled(&mut frame, cursor(3, 2, true));
 
         let block = *frame.cursor_block();
@@ -1594,7 +1600,7 @@ mod tests {
 
         // `clear` uniform'u da sıfırlar: sönen imleç (`\e[?25l`) bloğu
         // kaldırır ama rengi eski hücrede bırakırsa orası görünmez olur.
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         assert_eq!(frame.cursor_block(), &CursorBlock::default());
     }
 
@@ -1607,7 +1613,7 @@ mod tests {
         // bir hücre; belirti de tam olarak o hücreyle sınırlı, hiçbir sayaç
         // görmez.
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         push_cursor(&mut frame, cursor(3, 2, true), [3.0, 2.0], CURSOR, 0.25);
 
         let instance = frame.grid_caret().expect("blok instance'ı");
@@ -1623,7 +1629,7 @@ mod tests {
         assert_eq!(frame.cursor_block().rgba[..3], TEXT.to_array()[..3]);
 
         // Yerleşmiş imleç opak ve o hâlde iki dizi de temanın kendisi.
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         push_settled(&mut frame, cursor(3, 2, true));
         assert_eq!(frame.grid_caret().expect("blok").rgba, CURSOR.to_array());
         assert_eq!(frame.cursor_block().rgba, TEXT.to_array());
@@ -1635,7 +1641,7 @@ mod tests {
         // piksele oturmalı. Tam sayıya yuvarlansaydı kayma hücre hücre
         // zıplar ve animasyonun tamamı görünmez olurdu.
         let mut frame = Frame::default();
-        frame.clear(grid(10, 20));
+        frame.clear(grid(10, 20), CaretStyle::default());
         push_cursor(&mut frame, cursor(3, 2, true), [2.5, 1.25], CURSOR, OPAQUE);
         assert_eq!(frame.cursor_block().rect, [25.0, 25.0, 35.0, 45.0]);
         assert_eq!(frame.grid_caret().expect("caret").pos, [25.0, 25.0]);
@@ -1648,7 +1654,7 @@ mod tests {
         // Kırpma olmasaydı her hareket karesi listeye bir dikdörtgen daha
         // eklerdi — 200 ms'lik bir kaymada yirmi dört hayalet imleç.
         let mut frame = Frame::default();
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         frame.push(bg_cell(0, 0));
         frame.push(Cell {
             col: 1,
@@ -1691,11 +1697,11 @@ mod tests {
         // alan olsaydı ekran ölçeği değişince bayatlardı ve hiçbir sınama
         // görmezdi. Pay da aynı çağrıdan geliyor, yani aynı bekçinin altında.
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         frame.push(bg_cell(1, 1));
         assert_eq!(frame.bg_instances()[0].pos, [9.0, 18.0]);
 
-        frame.clear(grid(18, 36));
+        frame.clear(grid(18, 36), CaretStyle::default());
         frame.push(bg_cell(1, 1));
         assert_eq!(frame.bg_instances()[0].pos, [18.0, 36.0]);
         assert_eq!(frame.bg_instances()[0].size, [18.0, 36.0]);
@@ -1704,7 +1710,7 @@ mod tests {
     #[test]
     fn grid_coords_convert_to_pixels() {
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         frame.push(bg_cell(3, 2));
         assert_eq!(
             frame.bg_instances()[0],
@@ -1724,7 +1730,10 @@ mod tests {
         // eklenseydi biri payı iki kez uygular ve belirti "glyph arka
         // planından kaymış" olurdu.
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.push(Cell {
             col: 3,
             row: 2,
@@ -1767,7 +1776,7 @@ mod tests {
         // İki öteleme sınanıyor ve sıfır olmayanı asıl olan: sıfırda iki taraf
         // eşit ve `origin_px`'i tümden silen bir kod da geçer.
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         frame.push(bg_cell(0, 2));
         push_settled(&mut frame, cursor(0, 2, true));
         let cell_y = frame.bg_instances()[0].pos[1];
@@ -1810,7 +1819,7 @@ mod tests {
         // donsaydı bütün metin yarım piksele kadar kaymış, yani her Enter'dan
         // sonra bulanık olurdu — hiçbir sayaç görmez, göz görür.
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         frame.set_origin_rows(1.51);
         assert_eq!(frame.origin_px(), 27.0, "öteleme piksele yuvarlanmadı");
 
@@ -1832,7 +1841,7 @@ mod tests {
         // eklenmediği hâline birebir döner. Bu modüldeki öteki sınamaların
         // `grid()` üzerinden dayandığı sözleşme de bu.
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         frame.push(bg_cell(3, 2));
         assert_eq!(frame.bg_instances()[0].pos, [27.0, 36.0]);
     }
@@ -1856,7 +1865,10 @@ mod tests {
         // başlar — komutun satırını gösteriyor, bir aralığı değil; (3) **0.
         // sütunda**, yani dock'un prompt işaretiyle aynı x'te (012 phase-11).
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.push_block(block(2));
 
         let mark = frame.stripes()[0];
@@ -1866,7 +1878,10 @@ mod tests {
         // **Hiza hesaplanmıyor, tek formülden doğuyor.** Dock'un işareti de
         // 0. sütunda ve o da `Frame::pos`'tan geçiyor; ikisi ayrı aritmetikle
         // yerleştirildiği sürece yarım pay kadar ayrı duruyorlardı.
-        frame.clear(CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.push_dock(Cell {
             col: 0,
             row: 0,
@@ -1880,7 +1895,10 @@ mod tests {
             "ızgaranın işareti dock'unkiyle aynı sütunda değil"
         );
         // Pay değişince de aynı: ikisi de aynı paydan geçiyor.
-        frame.clear(CellMetrics::new(4, 18, 12, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(4, 18, 12, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.push_dock(Cell {
             col: 0,
             row: 0,
@@ -1891,7 +1909,10 @@ mod tests {
         assert_eq!(frame.stripes()[0].pos[0], 12.0, "işaret paydan geçmedi");
         assert_eq!(frame.stripes()[0].pos[0], frame.dock_glyphs()[0].pos[0]);
 
-        frame.clear(CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         assert!(
             frame.stripes().is_empty(),
             "`clear` işaretleri de boşaltmalı"
@@ -1905,7 +1926,10 @@ mod tests {
         // siler ve şerit imleç kaydıkça titrerdi; sayılsaydı `hucre=` jetonu
         // hücre olmayan bir şeyi de sayar ve duman kapısının anlamı kayardı.
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(8, 16, GUTTER, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(8, 16, GUTTER, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.push(bg_cell(0, 0));
         frame.push_block(block(0));
         push_settled(&mut frame, cursor(0, 0, true));
@@ -1945,7 +1969,7 @@ mod tests {
         // Sayaçlara girmemesi ikinci sözleşme: `hucre=8 glif=6 kural=15` duman
         // koşusunda ölçülüyor ve anlamı bit bit korunmalı.
         let mut frame = Frame::default();
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         frame.push(bg_cell(0, 0));
         push_settled(&mut frame, cursor(0, 0, true));
         frame.push_dock(dock_cell(0));
@@ -1982,7 +2006,7 @@ mod tests {
 
         // `clear` **hepsini** boşaltıyor: korunan bir yüzey, dock'u olmayan
         // bir oturumun penceresinde asılı kalırdı.
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         assert!(frame.dock().is_none());
         assert!(frame.dock_bg().is_empty());
         assert!(frame.dock_glyphs().is_empty());
@@ -2000,13 +2024,13 @@ mod tests {
         // henüz bilinmiyor. Bu sınama o bağımsızlığı CPU tarafında çiviliyor;
         // pikselin tanığı `renderer.rs`'te.
         let mut frame = Frame::default();
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         frame.push_dock(dock_cell(1));
         let settled_bg = frame.dock_bg()[0];
 
         // Aynı kare, iki satır ötelenmiş: ızgaranın hücresi kayar, dock'unki
         // kaymaz.
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         frame.set_origin_rows(2.0);
         frame.push_dock(dock_cell(1));
         assert_eq!(frame.dock_bg()[0], settled_bg, "dock ötelemeyi yedi");
@@ -2027,7 +2051,7 @@ mod tests {
         // kaplamak zorunda. Zemin opak olmalı — kayma boyunca ızgaranın taşan
         // alt satırı onun altında kalıyor.
         let mut frame = Frame::default();
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         frame.open_dock(2, BG, CURSOR);
         assert_eq!(frame.dock_px(), 36.0, "iki satır piksele çevrilmedi");
 
@@ -2047,7 +2071,7 @@ mod tests {
         assert_eq!(divider.rgba, CURSOR.to_array());
 
         // Dock'suz kare hiçbir yükseklik vermiyor: ikinci viewport kurulmaz.
-        frame.clear(grid(9, 18));
+        frame.clear(grid(9, 18), CaretStyle::default());
         assert_eq!(frame.dock_px(), 0.0);
     }
 
@@ -2057,7 +2081,10 @@ mod tests {
         // İki satırın üstünde ve altında pay var, kaynağı da sol payın ta
         // kendisi — ikinci bir tasarım sabiti uydurulmadı.
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.open_dock(2, BG, CURSOR);
         // 2×18 + 2×GUTTER + 1×(2×GUTTER) = 36 + 14 + 14 = 64. Satır arası
         // boşluk dış payın **iki katı**, çünkü ortasından bir çizgi geçiyor:
@@ -2091,7 +2118,10 @@ mod tests {
         assert_eq!(separator.pos, [0.0, 0.0]);
 
         // İçerik payın altından başlıyor: ilk satır y = pay.
-        frame.clear(CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.push_dock(Cell {
             col: 0,
             row: 0,
@@ -2105,7 +2135,10 @@ mod tests {
             "içerik paya inmedi"
         );
         // İkinci satır bir hücre aşağıda, yani pay **bir kez** uygulanıyor.
-        frame.clear(CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.push_dock(Cell {
             col: 0,
             row: 1,
@@ -2130,7 +2163,7 @@ mod tests {
         // kırpılmış bir blok görünmesin diye banda değen caret yukarı değil
         // aşağı yuvarlanıyor.
         let mut frame = Frame::default();
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         frame.set_dock_top(64.0);
 
         // Bandın tamamen üstünde: ızgaranın yuvası.
@@ -2152,7 +2185,7 @@ mod tests {
 
         // `clear` bandı da sıfırlıyor: dock'u olmayan bir sonraki karede caret
         // yine ızgaranın yuvasına düşmeli.
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         frame.push_caret([3.0, 40.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
         assert!(
             frame.grid_caret().is_some(),
@@ -2170,14 +2203,14 @@ mod tests {
         let mut frame = Frame::default();
         let metrics = CellMetrics::new(10, 20, 0, 2).expect("ölçü");
 
-        frame.clear(metrics);
+        frame.clear(metrics, CaretStyle::default());
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
         let block = frame.grid_caret().expect("caret yok");
         assert_eq!((block.pos, block.size), ([10.0, 20.0], [10.0, 20.0]));
         assert_eq!(frame.cursor_block().rect, [10.0, 20.0, 20.0, 40.0]);
 
         // Alt çizgi hücrenin **dibinde**: 20 + 20 − 2.
-        frame.clear(metrics);
+        frame.clear(metrics, CaretStyle::default());
         frame.push_caret(
             [1.0, 1.0],
             TEXT,
@@ -2191,7 +2224,7 @@ mod tests {
         assert_eq!(frame.cursor_block().rect, [10.0, 38.0, 20.0, 40.0]);
 
         // Dikey çubuk hücrenin solunda ve tam boy.
-        frame.clear(metrics);
+        frame.clear(metrics, CaretStyle::default());
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
         let beam = frame.grid_caret().expect("caret yok");
         assert_eq!((beam.pos, beam.size), ([10.0, 20.0], [2.0, 20.0]));
@@ -2217,7 +2250,10 @@ mod tests {
     fn the_caret_is_at_least_one_pixel_thick() {
         // Kural metriği sıfır gelse de ince caret görünür kalıyor.
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(10, 20, 0, 0).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(10, 20, 0, 0).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
         assert_eq!(frame.grid_caret().expect("caret").size, [1.0, 20.0]);
     }
@@ -2228,7 +2264,10 @@ mod tests {
         // `Frame`'de olmasaydı beam ilk sönüp yanışta bloğa dönerdi — blink
         // (phase-2) tam bu yoldan geçecek.
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(10, 20, 0, 2).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(10, 20, 0, 2).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
         frame.move_caret([2.0, 1.0], TEXT, CURSOR, OPAQUE);
         let moved = frame.grid_caret().expect("caret yok");
@@ -2242,7 +2281,10 @@ mod tests {
         // kalır (yüksekliği 2 piksel) ve ızgara yuvasına düşerdi — dock'un
         // opak zemini onu örterdi.
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(8, 16, 0, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(8, 16, 0, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         frame.set_dock_top(64.0);
         frame.push_caret(
             [3.0, 3.5],
@@ -2268,7 +2310,7 @@ mod tests {
         // planlı hücredir ama altı glyph'tir. İkisi tek sayaçtan okunsaydı
         // duman kapısı ikisinden birini hiç sormamış olurdu.
         let mut frame = Frame::default();
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         frame.push(bg_cell(0, 0)); // mürekkepsiz
         frame.push(Cell {
             col: 1,
@@ -2300,7 +2342,7 @@ mod tests {
             }
         );
 
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         assert_eq!(frame.glyph_count(), 0);
     }
 
@@ -2312,7 +2354,7 @@ mod tests {
         // plandan, ikisi aynı hücrede buluşabilir — ve `clear` kural listesini
         // de boşaltır (üç listenin üçü de aynı çağrıda sıfırlanmalı).
         let mut frame = Frame::default();
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
 
         frame.push(bg_cell(0, 0));
         assert_eq!(frame.rule_count(), 0, "kuralsız hücre kural üretti");
@@ -2346,7 +2388,7 @@ mod tests {
             ]
         );
 
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         assert_eq!(frame.rule_count(), 0);
     }
 

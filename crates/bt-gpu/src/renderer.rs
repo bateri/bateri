@@ -1239,6 +1239,7 @@ mod tests {
 
     use super::*;
     use crate::stats::Stats;
+    use bt_core::CaretStyle;
 
     /// Gömülü temanın zemini ve vurgusu: üretimde clear ve imleç rengi bu
     /// iki rolden geliyor (`link.rs`), sınamalar da aynı kaynaktan.
@@ -1564,8 +1565,9 @@ mod tests {
     /// çekme payı. **Üretimin kendi fonksiyonundan** okuyor, kopyasından
     /// değil: formül üç yerde yazılıydı ve biri değişince bekçi sessizce
     /// gevşerdi (`/code-review`).
-    fn caret_radius_px(cell_px: (u16, u16)) -> usize {
-        crate::frame::caret_radius_px((f32::from(cell_px.0), f32::from(cell_px.1))).ceil() as usize
+    fn caret_radius_px(cell_px: (u16, u16), ratio: f32) -> usize {
+        crate::frame::caret_radius_px((f32::from(cell_px.0), f32::from(cell_px.1)), ratio).ceil()
+            as usize
     }
 
     /// Offscreen sınamaların ortak kurulumu: hücre ölçüsü + sığma kontrolü.
@@ -1669,7 +1671,7 @@ mod tests {
         const EDGE: usize = 16;
         let texture = target_texture(&r, EDGE);
         let mut frame = Frame::default();
-        frame.clear(grid(8, 8));
+        frame.clear(grid(8, 8), CaretStyle::default());
         frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
         let cmd = r.queue.commandBuffer().expect("komut tamponu");
         r.encode_pass(&cmd, &texture, BACKGROUND, &frame)
@@ -1719,7 +1721,7 @@ mod tests {
         // sRGB transfer fonksiyonunun sabit noktaları, yani kırmızı ve yeşil
         // lineerleştirme olsa da olmasa da aynı baytı verir.
         let mut frame = Frame::default();
-        frame.clear(grid(8, 8));
+        frame.clear(grid(8, 8), CaretStyle::default());
         frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
         frame.push(bg_cell(1, 1, LinearRgba::from_srgb(0x00, 0xff, 0x00)));
         frame.push(bg_cell(0, 1, MIDTONE));
@@ -1820,7 +1822,7 @@ mod tests {
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
         let mut frame = Frame::default();
-        frame.clear(grid(8, 8));
+        frame.clear(grid(8, 8), CaretStyle::default());
         frame.push(bg_cell(0, 0, red));
 
         // Clear **vurgu**: hücrenin rengiyle ayrık olmak zorunda, yoksa
@@ -1854,7 +1856,7 @@ mod tests {
         // 8 px, yani atlas yuvası esner; sorulan şey konum, çözünürlük değil.
         r.cell_metrics(1.0);
         let mut frame = Frame::default();
-        frame.clear(grid(8, 8));
+        frame.clear(grid(8, 8), CaretStyle::default());
         // Arka plansız `M`: iddia yalnız `cell` pipeline'ına ait olsun.
         // `cell_bg` listesi boş kaldığı için üst bölgede tek tanık clear.
         frame.push(glyph_cell(0, 'M', None));
@@ -1902,7 +1904,10 @@ mod tests {
         let gutter = cw;
 
         let mut frame = Frame::default();
-        frame.clear(CellMetrics::new(cw, ch, gutter, 1).expect("ölçü"));
+        frame.clear(
+            CellMetrics::new(cw, ch, gutter, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
         // İki işaret, iki durum rengi: 0. satır başarılı, 2. satır başarısız.
         // Aradaki satır (çıktı) **işaretsiz** kalmalı.
         frame.push_block(Block {
@@ -2006,7 +2011,7 @@ mod tests {
         // ızgara, altta dock. `DOCK_ROWS` burada **kullanılmıyor** ve bilerek:
         // renderer kaç satır olduğunu bilmiyor, yalnız verilen payı çiziyor.
         let mut frame = Frame::default();
-        frame.clear(grid(CELL, CELL));
+        frame.clear(grid(CELL, CELL), CaretStyle::default());
         frame.push(bg_cell(0, 0, red));
         frame.push_dock(bg_cell(0, 0, blue));
         frame.open_dock(1, green, WHITE);
@@ -2063,7 +2068,7 @@ mod tests {
 
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         // Izgaranın son satırı dock'un üstünde kalıyor; dock **tek** satır ve
         // dokunun dibinde.
         frame.push_dock(glyph_cell(0, 'M', Some(red)));
@@ -2145,7 +2150,7 @@ mod tests {
         // doldurur, `.` yalnız tabanına küçük bir nokta koyar.
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         for (col, glyph) in [(0u16, 'M'), (1, '.')] {
             frame.push(glyph_cell(col, glyph, Some(red)));
         }
@@ -2217,7 +2222,7 @@ mod tests {
         let mut used = base.0;
         for (col, glyph) in [(0u16, 'M'), (1, '.')] {
             let mut frame = Frame::default();
-            frame.clear(grid(cw, ch));
+            frame.clear(grid(cw, ch), CaretStyle::default());
             frame.push(glyph_cell(col, glyph, None));
             render_offscreen(&r, EDGE, BACKGROUND, &frame);
 
@@ -2249,7 +2254,7 @@ mod tests {
         // hücreyi çöple dolduran bir kodda da geçerdi. İkisi birlikte "kıvrım
         // dalgalı **ve** düz çizgi düz" diyor.
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         frame.push(rule_cell(0, UnderlineStyle::Single));
         frame.push(rule_cell(1, UnderlineStyle::Curl));
         assert_eq!(frame.rule_count(), 2);
@@ -2285,7 +2290,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         // Sol hücre kontrol: aynı çizgi, SGR 58 **yok** → ön plan rengi.
         frame.push(rule_cell(0, UnderlineStyle::Single));
         frame.push(Cell {
@@ -2339,7 +2344,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         for (col, bold) in [(0u16, false), (1, true)] {
             frame.push(Cell {
                 col,
@@ -2417,7 +2422,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 3);
 
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         // A: imlecin altında, harfin kendi ön planı beyaz.
         frame.push(glyph_cell(0, 'M', None));
         // B: imleçsiz ama harf zaten metin renginde, arka planı blok rengi.
@@ -2435,7 +2440,7 @@ mod tests {
         // oradan geçen bir eşitlik yuvarlaklığı sınardı. Gövdede eşitlik hâlâ
         // **bit bit**; köşenin ve halenin kendi bekçileri ayrı
         // ([`the_caret_corner_is_rounded`], [`the_caret_glow_spills_but_stops`]).
-        let inset = caret_radius_px((cw, ch));
+        let inset = caret_radius_px((cw, ch), bt_core::CURSOR_RADIUS);
         let cell = |col| cell_body(&pixels, EDGE, (cw, ch), col, inset);
         let (a, b, c) = (cell(0), cell(1), cell(2));
 
@@ -2458,8 +2463,16 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
-        frame.force_caret_sdf([0.0; 4]);
+        // **Dejenere kol artık ayardan sürülüyor** (016 R6): `cursor_radius = 0`
+        // ve `cursor_glow = 0` desteklenen bir kullanıcı ayarı, yani geri alma
+        // yolu bir sınama kancası değil **gerçek yol**.
+        frame.clear(
+            grid(cw, ch),
+            CaretStyle {
+                radius_ratio: 0.0,
+                glow: 0.0,
+            },
+        );
         // A: caret, dejenere şekille. B: aynı rengin düz arka planı — yani
         // caret'in kendi pipeline'ından önceki hâli.
         push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
@@ -2491,15 +2504,21 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        // **Yarıçap ayardan sürülüyor** (016 R6), ezmeden: `cursor_radius`
+        // artık kullanıcı anahtarı ve bekçinin gerçek yolu geçmesi gerekiyor.
+        // Oran üretim varsayılanından değil **açıkça** veriliyor — varsayılan
+        // bir zevk sayısı ve 1x hücrede ~1.6 px'e denk geliyor, yani köşe
+        // pikselinin çoğu hâlâ boyalı olurdu ve eşik hücre boyuna göre
+        // kızardı.
+        frame.clear(
+            grid(cw, ch),
+            CaretStyle {
+                // Dar kenarın yarısı: blok bir stadyuma dönüyor.
+                radius_ratio: 0.5,
+                glow: 0.0,
+            },
+        );
         push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
-        // **Yarıçap açıkça veriliyor, üretim oranından alınmıyor.** Sınanan
-        // şey shader'ın yuvarlaması; üretim oranı (`CARET_RADIUS_RATIO`) bir
-        // zevk sayısı ve 1x'te ~1.6 px'e denk geliyor, yani köşe pikselinin
-        // çoğu hâlâ boyalı — o oranla kurulan bir eşik hücre boyuna göre
-        // kızarır ve bekçi zamanla yalancı olurdu.
-        let radius = f32::from(cw.min(ch)) / 2.0;
-        frame.force_caret_sdf([radius, 0.0, 0.0, 0.0]);
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
 
         let sum = |x, y| brightness(&pixels, EDGE, x, y);
@@ -2524,7 +2543,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
         // Yarıçap ve hale kapalı; sınanan tek şey kenar bandı.
         let stroke = (f32::from(cw) / 4.0).max(1.0);
@@ -2553,7 +2572,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
         let mut frame = Frame::default();
-        frame.clear(grid_with_gutter(cw, ch, GUTTER));
+        frame.clear(grid_with_gutter(cw, ch, GUTTER), CaretStyle::default());
         push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
         let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
 
@@ -2581,6 +2600,42 @@ mod tests {
     }
 
     #[test]
+    fn the_glow_setting_reaches_the_pixels() {
+        // **Ayarın gerçekten indiğinin tek kanıtı.** `cursor_glow` payı da
+        // alfayı da ölçekliyor (tek his, iki sayı değil), yani kapatmak
+        // dikdörtgenin dışını zemine döndürmeli ve açmak parlatmalı.
+        // `Settings` sınamaları değerin **okunduğunu** gösteriyor, boyandığını
+        // yalnız burası gösterir.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        const GUTTER: u16 = 16;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
+        let y = usize::from(ch) / 2;
+        let at = usize::from(GUTTER) + usize::from(cw) + 2;
+        assert!(at < EDGE, "örnekleme noktası dokuya sığmıyor");
+
+        let sample = |glow: f32| {
+            let mut frame = Frame::default();
+            frame.clear(
+                grid_with_gutter(cw, ch, GUTTER),
+                CaretStyle {
+                    radius_ratio: 0.0,
+                    glow,
+                },
+            );
+            push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
+            let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+            brightness(&pixels, EDGE, at, y)
+        };
+
+        let (off, on, strong) = (sample(0.0), sample(1.0), sample(2.0));
+        assert!(
+            off < on && on < strong,
+            "gölge ayarı piksele inmiyor: {off} / {on} / {strong}"
+        );
+    }
+
+    #[test]
     fn the_caret_glow_fades_with_the_caret() {
         // Hale caret'in kendi alfasıyla **çarpılıyor**, yani blink sönerken
         // hale de sönüyor (R6). Bekçi yine **dışarıdan** örnekliyor:
@@ -2601,7 +2656,7 @@ mod tests {
 
         let sample = |alpha: f32| {
             let mut frame = Frame::default();
-            frame.clear(grid_with_gutter(cw, ch, GUTTER));
+            frame.clear(grid_with_gutter(cw, ch, GUTTER), CaretStyle::default());
             frame.push_caret(
                 [0.0, 0.0],
                 BACKGROUND,
@@ -2638,7 +2693,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 2);
 
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         // A: odaksız caret'in altında. C: caret yok, aynı harf ve zemin.
         frame.push(glyph_cell(0, 'M', None));
         frame.push(glyph_cell(1, 'M', None));
@@ -2656,7 +2711,8 @@ mod tests {
         // halkanın kalınlığı `rule_px` ve köşeyi yarıçap yiyor; sabit bir 3
         // ya büyük puntoda halkayı örneklemin içine alır ya da dar hücrede
         // aralığı boşaltıp hiçbir şey iddia etmeyen bir eşitliğe düşerdi.
-        let inset = caret_radius_px((cw, ch)) + usize::from(r.cell_metrics(1.0).rule_px()).max(1);
+        let inset = caret_radius_px((cw, ch), bt_core::CURSOR_RADIUS)
+            + usize::from(r.cell_metrics(1.0).rule_px()).max(1);
         assert!(
             inset * 2 < usize::from(cw).min(usize::from(ch)),
             "içeri çekme hücreyi yuttu"
@@ -2687,7 +2743,7 @@ mod tests {
         let (cw, ch) = fitting_cell_px(&r, EDGE, 1);
 
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         frame.push_caret(
             [0.0, 0.0],
             BACKGROUND,
@@ -2731,7 +2787,7 @@ mod tests {
         // opaklık üç ayrı kare demek.
         let render = |alpha: Option<f32>| {
             let mut frame = Frame::default();
-            frame.clear(grid(cw, ch));
+            frame.clear(grid(cw, ch), CaretStyle::default());
             frame.push(glyph_cell(0, 'M', None));
             if let Some(alpha) = alpha {
                 frame.push_caret(
@@ -2815,7 +2871,7 @@ mod tests {
         // hangi pikseli boyadığına bağlı kalmıyor (glyph'in ilk sütunu boş
         // olabilir ve sınama sessizce hiçbir şey sormaz).
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         frame.push(rule_cell(0, UnderlineStyle::Single));
         frame.push(rule_cell(1, UnderlineStyle::Single));
         push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
@@ -2837,7 +2893,7 @@ mod tests {
         // ya da iki hücre olduğu bir kusur burada da yakalanır, üstelik
         // kesirli konumda.
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         frame.push(rule_cell(0, UnderlineStyle::Single));
         frame.push(rule_cell(1, UnderlineStyle::Single));
         let mut cursor = cursor_at(0, BACKGROUND);
@@ -2869,7 +2925,7 @@ mod tests {
 
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         // İki hücrede aynı SGR 58'li çizgi; imleç yalnız birinde.
         for col in [0, 1] {
             frame.push(Cell {
@@ -2920,7 +2976,7 @@ mod tests {
 
         let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
         let mut frame = Frame::default();
-        frame.clear(grid(cw, ch));
+        frame.clear(grid(cw, ch), CaretStyle::default());
         frame.push(rule_cell(0, UnderlineStyle::Single));
         // Metin rengi bilerek kuralın kendi rengiyle **aynı** (beyaz): bu
         // sınamanın sorduğu şey renk değil **sıra**, ve dikdörtgenin ezmesi
@@ -2953,7 +3009,7 @@ mod tests {
         let texture = target_texture(&r, EDGE);
 
         let mut frame = Frame::default();
-        frame.clear(grid(8, 16));
+        frame.clear(grid(8, 16), CaretStyle::default());
         frame.push(Cell {
             col: 0,
             row: 0,
