@@ -144,7 +144,13 @@ fn caret_rect(
     shape: CaretShape,
     rule: f32,
 ) -> ([f32; 2], [f32; 2]) {
-    let thick = rule.clamp(1.0, cell_px.0.min(cell_px.1));
+    // **`clamp` değil `min`+`max`** (`/code-review`, 014 kapı): `f32::clamp`
+    // `min <= max` istiyor ve `Frame::default()`'ın hücresi `(0.0, 0.0)` —
+    // `clear` çağrılmadan gelen bir `push_caret` display link callback'inin
+    // içinde **panik** ederdi. Panik yolu değil ama bir pencereyi öldürürdü;
+    // sıfır hücrede kalınlık da sıfır kalıyor, yani çizilmeyen bir caret.
+    let limit = cell_px.0.min(cell_px.1);
+    let thick = rule.max(1.0).min(limit);
     match shape {
         CaretShape::Block => (at, [cell_px.0, cell_px.1]),
         // Hücrenin **dibinde**, fontun alt çizgi konumunda değil: o konum
@@ -360,9 +366,10 @@ pub(crate) struct Frame {
     /// pipeline'dan ama ayrı listede.
     ///
     /// Ayrılığın sebebi çizim sırası değil ömür (010 → R4.1): `bg`'ye
-    /// girseydi ya sayılmadan girerdi — [`Frame::move_caret`]'ın
-    /// `truncate(bg_count)`'u onu her hareket karesinde siler ve şerit imleç
-    /// kaydıkça **titrerdi** — ya da sayılarak girer ve `hucre=` jetonunun
+    /// girseydi ya sayılmadan girerdi — o dönem hareket karesi `bg`'yi
+    /// `bg_count`'a kırpıyordu ve şerit imleç kaydıkça **titrerdi**; caret
+    /// 012'den beri kendi yuvasında ([`Frame::grid_caret`]) ve kırpma kalktı,
+    /// ama ayrılığın gerekçesi duruyor — ya da sayılarak girer ve `hucre=` jetonunun
     /// anlamı kayardı ("çizilen hücre" artık hücre olmayan bir şeyi de
     /// sayardı). Üçüncü bir liste ikisini de temsil edilemez kılıyor.
     stripes: Vec<RuleCell>,
@@ -428,10 +435,10 @@ pub(crate) struct Frame {
     /// pipeline'ının uniform'u.
     ///
     /// Liste değil **alan**: kare başına tek imleç var ve [`Frame::clear`] onu
-    /// dejenereye döndürüyor. Alan olması hareket karesinin de şartı
-    /// (`plan.md` → Karar 4): o yol `bg`'yi `bg_count`'a kırpıp
-    /// [`Frame::push_caret`]'ı yeni konumla yeniden çağırıyor, yani ikinci
-    /// çağrı birincinin üstüne yazmak zorunda.
+    /// dejenereye döndürüyor. Alan olması hareket karesinin de şartı: o yol
+    /// [`Frame::move_caret`] ile yuvaları boşaltıp [`Frame::push_caret`]'ı
+    /// yeni konumla yeniden çağırıyor, yani ikinci çağrı birincinin üstüne
+    /// yazmak zorunda.
     cursor: CursorBlock,
     /// Dock yüzeyi: pencerenin altındaki **ikinci koordinat uzayı**.
     ///
@@ -443,9 +450,8 @@ pub(crate) struct Frame {
     /// Dock'un kendi arka planları **ve caret'i**; ızgaranın `bg`'sinin ikizi.
     ///
     /// Ayrı liste olması `stripes` ile **aynı** gerekçe ve bir derece daha
-    /// zorunlu: [`Frame::move_caret`]'ın `truncate(bg_count)`'u `bg`'ye giren
-    /// her şeyi her hareket karesinde siler, yani dock ızgaranın imleci
-    /// kaydıkça **titrerdi**. Sayaçlara da girmiyor (`bg_count`,
+    /// zorunlu: dock ızgaranın listesine girseydi ızgaranın kare ömrüne
+    /// bağlanırdı ve kendi viewport'undan kopardı. Sayaçlara da girmiyor (`bg_count`,
     /// `glyph_count`, `rule_count`): `hucre=8 glif=6 kural=15` duman
     /// sözleşmesi dock'suz bir kabukta ölçülüyor ve anlamı bit bit korunmalı.
     dock_bg: Vec<Instance>,
@@ -548,11 +554,14 @@ impl Frame {
         // yok ve ayrışabilen dört kopya demek.
         let pos = self.pos(cell.col, cell.row);
         if let Some(bg) = cell.bg {
-            // `bg.len() > bg_count` tam olarak "imleç eklendi" demektir.
+            // Sayaç ile listenin **aynı** uzunlukta olması `bg`'ye imleç
+            // gibi sayılmayan bir şeyin sızmadığının kanıtı; caret 012'den
+            // beri kendi yuvasında ([`Frame::grid_caret`]) ve buraya hiç
+            // girmiyor.
             debug_assert_eq!(
                 self.bg.len(),
                 self.bg_count,
-                "arka plan imleçten sonra eklendi: imleç gömülür"
+                "`bg`'ye sayılmayan bir instance sızdı"
             );
             self.bg.push(Instance {
                 pos,
@@ -1607,9 +1616,9 @@ mod tests {
     #[test]
     fn the_dock_keeps_its_own_lists_and_stays_out_of_the_counters() {
         // Phase'in birinci sözleşmesi: dock listeleri `bg`'ye **girmiyor**.
-        // Girselerdi `move_cursor`'ın `truncate(bg_count)`'u onları her hareket
-        // karesinde siler ve dock, imleç kaydıkça **titrerdi** — şeridin ayrı
-        // liste olma gerekçesinin aynısı, bir derece daha görünür belirtiyle.
+        // Girselerdi ızgaranın kare ömrüne bağlanır ve kendi viewport'undan
+        // koparlardı — şeridin ayrı liste olma gerekçesinin aynısı, bir derece
+        // daha görünür belirtiyle.
         // Sayaçlara girmemesi ikinci sözleşme: `hucre=8 glif=6 kural=15` duman
         // koşusunda ölçülüyor ve anlamı bit bit korunmalı.
         let mut frame = Frame::default();
@@ -1857,6 +1866,30 @@ mod tests {
         let beam = frame.grid_caret().expect("caret yok");
         assert_eq!((beam.pos, beam.size), ([10.0, 20.0], [2.0, 20.0]));
         assert_eq!(frame.cursor_block().rect, [10.0, 20.0, 12.0, 40.0]);
+    }
+
+    #[test]
+    fn caret_geometry_survives_a_zero_cell() {
+        // `Frame::default()`'ın hücresi `(0.0, 0.0)` ve eski
+        // `rule.clamp(1.0, 0.0)` `min > max` diye **panik** ediyordu
+        // (`/code-review`, 014 kapı). Debug'da `push_caret`'in kendi
+        // `debug_assert`'i önce düşüyor, ama `f32::clamp`'ın assert'i
+        // **release'de de** var — yani sürüm derlemesinde bir pencereyi
+        // öldürürdü. Geometri doğrudan sınanıyor, çünkü `push_caret`'e o
+        // hâlde ulaşmanın yolu debug'da kapalı.
+        let (pos, size) = caret_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Beam, 1.0);
+        assert_eq!((pos, size), ([0.0, 0.0], [0.0, 0.0]));
+        let (_, size) = caret_rect([0.0, 0.0], (0.0, 0.0), CaretShape::Underline, 1.0);
+        assert_eq!(size, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_caret_is_at_least_one_pixel_thick() {
+        // Kural metriği sıfır gelse de ince caret görünür kalıyor.
+        let mut frame = Frame::default();
+        frame.clear(CellMetrics::new(10, 20, 0, 0).expect("ölçü"));
+        frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam);
+        assert_eq!(frame.grid_caret().expect("caret").size, [1.0, 20.0]);
     }
 
     #[test]

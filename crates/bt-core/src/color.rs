@@ -64,12 +64,13 @@ impl LinearRgba {
 ///
 /// Pencerenin clear rengi ([`Theme::background_linear`]), `frame()`'in "bu
 /// hücre varsayılan, çizilmesin" kararı, imleç bloğu
-/// ([`Theme::accent_linear`]) ve uygulamanın renk sorusuna (OSC 10/11) verilen
+/// ([`Theme::cursor_linear`]) ve uygulamanın renk sorusuna (OSC 10/11) verilen
 /// yanıt hep aynı değerden okunur. İki yerde dursalardı biri değişince
 /// pencere ile hücreler ayrı renk olurdu.
 ///
-/// Sekiz rollü modelin altısı burada: 007'nin dördü ve 010'un iki durum rolü
-/// (`success`, `error`). Kalan iki durum rolü (uyarı, bilgi) 013'e kalıyor —
+/// **Dokuz rollü** modelin yedisi burada: 007'nin dördü, 010'un iki durum rolü
+/// (`success`, `error`) ve 014'ün `cursor`'ı. Kalan iki durum rolü (uyarı,
+/// bilgi) sonraki setlere kalıyor —
 /// **çizilmeyen rol eklenmiyor**, çünkü tüketicisi olmayan bir anahtar tema
 /// dosyasına girdiği gün biçim sözü verir ve sözün karşılığı yoktur.
 /// Alanlar `0xRRGGBB` (üst bayt okunmaz) ve `pub`: tip bir
@@ -218,12 +219,14 @@ impl Theme {
 
     /// İmleç bloğunun rengi, **lineer** RGBA. Renderer'da sabit durmasın diye
     /// burada: renk kararı temanın, çizim kararı renderer'ın.
-    /// İmleç bloğunun rengi, lineer — çizim hedefi sRGB kodlamayı kendi
-    /// yapıyor ([`linear_rgba`]).
     pub const fn cursor_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.cursor))
     }
 
+    /// Vurgu rengi, **lineer** RGBA — bugün **yalnız koşan komut bloğunun
+    /// şeridi**. İmleç 014'te kendi rolüne ayrıldı
+    /// ([`Theme::cursor_linear`]); ikisi tek değerden beslenirken "imleci
+    /// altın yap" isteği şeridi de altın yapıyordu.
     pub const fn accent_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.accent))
     }
