@@ -76,7 +76,7 @@ make test-yaris     # exit 0
       iki katı: hermetik koşuda saat hiç kurulmuyor
 - [x] `/code-review` (set aralığı, phase-2 hariç) — 13 bulgu, 12 düzeltildi
 - [x] `/audit` — `make denetim` temiz, 1 belge bulgusu düzeltildi
-- [ ] **Gözle kontrol** (aşağıda B.1)
+- [x] **Gözle kontrol** — kullanıcı yaptı ve geçti (2026-09-19)
 
 ### Ölçüm bekleyen iddia
 
@@ -104,8 +104,9 @@ make test-yaris     # exit 0
 
 ### Yayın Checklist
 
-- [ ] B.1 gözle kontrol
-- [ ] `/ship`
+- [x] B.1 gözle kontrol — beş maddenin beşi de geçti; blink sürerken süre
+      sayacının ilerlemesi dahil (setin en kırılgan yeri)
+- [x] `/ship`
 
 `make kur` **gerekmiyor**: kabuk betiği, terminfo, jeton satırı ve app bundle
 değişmedi.
