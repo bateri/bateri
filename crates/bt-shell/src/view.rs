@@ -30,7 +30,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 
-use bt_core::{CellHalf, SelectionPoint, Session, Wheel};
+use bt_core::{CellHalf, Click, MouseButton, MouseModifiers, SelectionPoint, Session, Wheel};
 use bt_gpu::{CellMetrics, Origin};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
@@ -221,6 +221,29 @@ pub(crate) fn wheel_lines(delta: f64, unit: f64, carry: f64) -> (i32, f64) {
 ///
 /// `chars` yoksa (saf modifier tuşu) Command'lı olay yutulur: izin listesinin
 /// ölçütü bir karakter ve ortada karakter yok.
+/// Fare olayının değiştiricileri. Shift rapora girmez, arbitrajı yapar —
+/// gerekçesi [`MouseModifiers`]'ın doc'unda.
+fn modifiers(event: &NSEvent) -> MouseModifiers {
+    let flags = event.modifierFlags();
+    MouseModifiers {
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        // macOS'un Option'ı xterm'in Meta'sı — klavyedeki Meta kodlamasıyla
+        // (`Option+←` → `\eb`) aynı tuş.
+        meta: flags.contains(NSEventModifierFlags::Option),
+        control: flags.contains(NSEventModifierFlags::Control),
+    }
+}
+
+/// Düğmenin [`ViewIvars::sent_buttons`] içindeki biti. Raporun düğme
+/// kodundan ([`bt_core`] içinde) **ayrı**: bu bir maske, o bir bayt değeri.
+fn button_bit(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Right => 4,
+    }
+}
+
 fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
     if !flags.contains(NSEventModifierFlags::Command) {
         return true;
@@ -250,6 +273,20 @@ pub(crate) struct ViewIvars {
     /// sürüyor mu": basışsız bir `mouseDragged:` eski seçimin ucunu
     /// taşımasın.
     dragging: Cell<bool>,
+    /// Basışı **uygulamaya raporlanmış** düğmeler — düğme başına bir bit
+    /// (sol 1, orta 2, sağ 4).
+    ///
+    /// Rota basışta kilitleniyor (R6): Shift her olayda okunsaydı
+    /// sürüklemenin ortasında Shift'i bırakmak seçim jestini rapor jestine
+    /// çevirirdi. Bırakma bu yüzden kipi değil **bu biti** soruyor.
+    ///
+    /// `dragging`'in yanında ve onun içinde değil: ikisi ayrı sorulara cevap
+    /// veriyor ("bu basış seçim başlattı" / "bu basış raporlandı") ve tek bir
+    /// jest alanına katlanamazlar — sol tuşla seçim sürerken sağ tuşa basmak
+    /// ikisini **aynı anda** doğuruyor. Bitmask, çünkü üç düğme birden basılı
+    /// tutulabilir; tek bir "son rota" alanı sol bırakmayı sağın rotasıyla
+    /// raporlardı.
+    sent_buttons: Cell<u8>,
     /// **Metin yığını bu olayı aldı mı** — `keyDown:`'ın yeniden giriş
     /// bayrağı. `interpretKeyEvents:` çağrılmadan önce `false`'a çekilir;
     /// `insertText:` **ve** `setMarkedText:` onu `true` yapar, `keyDown:`
@@ -406,30 +443,20 @@ define_class!(
             true
         }
 
-        /// Fare basıldı: seçimin çapası burada atılır ve sürükleme başlar.
+        /// Sol tuş basıldı: jest uygulamanın mı terminalin mi, kararı
+        /// `bt-core` veriyor ([`BateriView::button_event`]).
         ///
-        /// Çapa **yarısıyla** `bt-core`'a gider: basış hücrenin hangi
-        /// yarısındaysa sınır oradan geçer, sürükleme boyunca da orada kalır.
-        ///
-        /// Yalnız sol tuş (button 0): sağ/orta tık bir seçim başlatmaz —
-        /// bağlam tıklaması beklenmedik bir vurgu üretirdi. Tek tıkla
-        /// odaklanma değişmez — view zaten first responder; tıklama bir seçim
-        /// başlatır (R1). `super`'e geçilmiyor: varsayılan `NSView` davranışı
-        /// seçimi bilmez ve olayı yutardı.
+        /// `buttonNumber()` kapısı duruyor: AppKit bu selector'ı sol tuşa
+        /// ayırıyor ve buraya düşen başka bir düğme **yanlış** düğmeyle
+        /// raporlanırdı — sağ ve ortanın kendi selector'ı var. `super`'e
+        /// geçilmiyor: varsayılan `NSView` davranışı seçimi bilmez ve olayı
+        /// yutardı.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             if event.buttonNumber() != 0 {
                 return;
             }
-            let Some((session, anchor)) = self.session_cell(event) else {
-                return;
-            };
-            self.ivars().dragging.set(true);
-            // İmleç çapa hücresinden sürüklenir: ters yöne ilk hareket seçimi
-            // boşaltmamalı, fare ucundan büyümeli. İki uç **aynı** olduğu
-            // sürece seçim boştur — yani sürüklemesiz tık hiçbir şey seçmez ve
-            // Cmd-C panoya dokunmaz (`selection_text()` `None`).
-            session.set_selection(anchor, anchor);
+            self.button_event(event, MouseButton::Left, true);
         }
 
         /// Sürükleme: aktif uç farenin şimdiki yeri, çapa `bt-core`'da
@@ -450,11 +477,50 @@ define_class!(
             }
         }
 
-        /// Tuş bırakıldı: sürükleme biter, seçim ekranda kalır (Cmd-C onu
+        /// Sol tuş bırakıldı: basış raporlandıysa bırakma da raporlanır
+        /// (R6), yoksa sürükleme biter ve seçim ekranda kalır (Cmd-C onu
         /// kopyalar).
+        ///
+        /// `buttonNumber()` kapısı burada **yok** ve asimetri bilerek: kapı
+        /// olsaydı beklenmedik bir düğme numarası `dragging`'i bayat `true`
+        /// bırakır, sonraki her kaydırma eski seçimi sessizce uzatırdı
+        /// ([`BateriView::follow_pointer`]'ın kapattığı hâlin aynısı).
         #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, _event: &NSEvent) {
-            self.ivars().dragging.set(false);
+        fn mouse_up(&self, event: &NSEvent) {
+            self.button_event(event, MouseButton::Left, false);
+        }
+
+        /// Sağ tuş — bugün yalnız rapor yolu var: fare kipi kapalıyken sağ
+        /// tık hiçbir şey yapmıyor (bağlam menüsü yok, seçim de başlatmıyor:
+        /// beklenmedik bir vurgu üretirdi).
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            self.button_event(event, MouseButton::Right, true);
+        }
+
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, event: &NSEvent) {
+            self.button_event(event, MouseButton::Right, false);
+        }
+
+        /// Orta tuş ve **ötesi**: AppKit dördüncü düğmeden sonrasını da bu
+        /// selector'a yolluyor, X10'un iki biti ise yalnız üç düğme taşıyor
+        /// ve `3` bırakmaya ayrılmış. Numara 2 değilse olay düşüyor — orta
+        /// tuş diye raporlamak uygulamaya **yanlış** bir düğme söylerdi.
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &NSEvent) {
+            if event.buttonNumber() != 2 {
+                return;
+            }
+            self.button_event(event, MouseButton::Middle, true);
+        }
+
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &NSEvent) {
+            if event.buttonNumber() != 2 {
+                return;
+            }
+            self.button_event(event, MouseButton::Middle, false);
         }
 
         /// Tekerlek ve trackpad: uygulama fare raporu istediyse — ekran fark
@@ -960,6 +1026,7 @@ impl BateriView {
         let this = Self::alloc(mtm).set_ivars(ViewIvars {
             session: OnceCell::new(),
             dragging: Cell::new(false),
+            sent_buttons: Cell::new(0),
             consumed: Cell::new(false),
             marked_text: RefCell::new(String::new()),
             scroll_carry: Cell::new(0.0),
@@ -1023,10 +1090,81 @@ impl BateriView {
         );
     }
 
+    /// Fare düğmesinin **altı** selector'ının ortak gövdesi: basış ya da
+    /// bırakma, üç düğme.
+    ///
+    /// Kararı `bt-core` veriyor ([`Session::mouse_button`]) — kip burada
+    /// tutulmuyor ve sorulmuyor. Burası yalnız AppKit çevirisi: hücre,
+    /// değiştiriciler ve cevabın üç kolu.
+    ///
+    /// **Basış ile bırakma farklı hücre kapısından geçiyor** ve bu bir
+    /// tutarsızlık değil, iki ayrı kuralın sonucu. Basış `event_cell`'den:
+    /// doldurma bandının üstündeki nokta `None` ve olay hiç doğmuyor (R8) —
+    /// bandın satırları geçmişte, uygulamanın ekranında yoklar. Bırakma
+    /// `fill_rows = 0` ile, yani bandın üstünde de bir hücre veriyor
+    /// (tekerleğin işaretçisiyle aynı gerekçe): jest zaten başlamış ve
+    /// düşürülen bırakma uygulamada **takılı kalmış bir düğme** bırakırdı;
+    /// kırpmayı `bt-core` yapıyor.
+    fn button_event(&self, event: &NSEvent, button: MouseButton, pressed: bool) {
+        let Some(session) = self.ivars().session.get() else {
+            return;
+        };
+        let bit = button_bit(button);
+        let sent = &self.ivars().sent_buttons;
+        if !pressed {
+            if sent.get() & bit == 0 {
+                // Rapor edilmemiş basışın bırakması: seçim jestinin sonu.
+                if button == MouseButton::Left {
+                    self.ivars().dragging.set(false);
+                }
+                return;
+            }
+            sent.set(sent.get() & !bit);
+            if let Some(cell) = self.window_point_cell(event.locationInWindow(), 0) {
+                session.mouse_button(button, false, cell, modifiers(event));
+            }
+            return;
+        }
+        // Yeni basış yeni jest: kayıp bir `mouseUp:`'ın (sürüklemenin
+        // ortasında bir modal, bir sistem jesti) bıraktığı **bayat** bit
+        // burada iniyor — [`BateriView::follow_pointer`]'ın `dragging` için
+        // yaptığının basıştaki eşi. İnmeseydi kip bu arada kapandığında
+        // basış `Select` olur, bırakma bayat biti bulup rapor yolunu seçer ve
+        // `dragging`'i hiç düşürmezdi: sonraki her kaydırma eski seçimi
+        // sessizce uzatırdı.
+        sent.set(sent.get() & !bit);
+        let Some(cell) = self.event_cell(event) else {
+            return;
+        };
+        match session.mouse_button(button, true, cell, modifiers(event)) {
+            // Jest uygulamanın: `dragging` **kurulmuyor**, yoksa
+            // `mouseDragged:` var olan eski seçimin ucunu büyütürdü.
+            Click::Sent => sent.set(sent.get() | bit),
+            // Jest terminalin — ama seçimi yalnız sol tuş başlatır: sağ ya da
+            // orta tık beklenmedik bir vurgu üretirdi.
+            Click::Select if button == MouseButton::Left => {
+                self.ivars().dragging.set(true);
+                // İmleç çapa hücresinden sürüklenir: ters yöne ilk hareket
+                // seçimi boşaltmamalı, fare ucundan büyümeli. İki uç **aynı**
+                // olduğu sürece seçim boştur — yani sürüklemesiz tık hiçbir
+                // şey seçmez ve Cmd-C panoya dokunmaz (`selection_text()`
+                // `None`). Çapa **yarısıyla** gidiyor: basış hücrenin hangi
+                // yarısındaysa sınır oradan geçer ve sürükleme boyunca orada
+                // kalır.
+                session.set_selection(cell, cell);
+            }
+            Click::Select | Click::Ignored => {}
+        }
+    }
+
     /// Oturum + olayın altındaki uç (hücre ve yarısı). Üçü (`session`, ölçü,
-    /// grid) birlikte yoksa `None`: yarım bilgiyle seçim başlatılamaz.
-    /// Doldurma bandının üstüne yapılan tıklama da `None`
+    /// grid) birlikte yoksa `None`: yarım bilgiyle seçimin ucu taşınamaz.
+    /// Doldurma bandının üstüne düşen nokta da `None`
     /// ([`point_to_cell`]).
+    ///
+    /// Bugün tek tüketicisi sürükleme; düğme olayları oturumu ve hücreyi
+    /// ayrı ayrı istiyor ([`BateriView::button_event`]), çünkü bırakma
+    /// hücreyi başka bir kapıdan (`fill_rows = 0`) alıyor.
     fn session_cell(&self, event: &NSEvent) -> Option<(Arc<Session>, SelectionPoint)> {
         let session = Arc::clone(self.ivars().session.get()?);
         let cell = self.event_cell(event)?;
