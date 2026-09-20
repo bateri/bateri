@@ -51,6 +51,26 @@ pub struct Dock {
     pub sigil: LinearRgba,
 }
 
+/// Dock'un iki satırının sütun bütçesi.
+///
+/// **Tek tip, iki sayı** ve ayrı parametre olarak taşınmıyorlar: ikisi de
+/// `u16` ve ikisi de "kaç sütun" — imzada yan yana dursalardı çağıran onları
+/// sessizce ters geçirebilirdi ve belirti yalnız dar pencerede, yalnız bağlam
+/// satırında görünürdü. Aynı sebeple [`Session::dock`] de bu tipi alıyor
+/// ([`crate::Session::dock`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DockCols {
+    /// Giriş satırının genişliği: ızgaranın sütun sayısı. Dock aynı sütunları
+    /// kullanıyor ve taşan satır soldan pencereleniyor.
+    pub grid: u16,
+    /// Bağlam satırının bütçesi. Ayrı bir sayı, çünkü o satır **küçük
+    /// puntoda** çiziliyor: aynı piksel şeridine daha çok harf sığıyor.
+    /// Sayıyı çizen taraf veriyor (`bt_gpu`'nun `context_cols`'u), bu crate
+    /// piksel görmüyor — değer bir **bütçe**, punto kararı değil. `grid` ile
+    /// eşit geçilirse satır bugünkü gibi davranır.
+    pub context: u16,
+}
+
 /// Metnin başladığı sütun: işaret bir hücre, bir hücre de nefes payı.
 ///
 /// Sabit, çünkü işaret **tek** karakter ve ayna onu görmüyor — aynanın
@@ -93,12 +113,18 @@ const ELLIPSIS: char = '…';
 /// **soldan pencerelenip** caret görünür tutuluyor (kırpmak caret'i ekrandan
 /// düşürürdü — yazdığını görmeyen bir giriş satırı). Pencereleme karakter
 /// biriminde: geniş glyph bu sette henüz yok (`CLAUDE.md`).
+///
+/// `context_cols` bağlam satırının bütçesi ve ayrı bir sayı, çünkü o satır
+/// **küçük puntoda** çiziliyor: aynı genişliğe daha çok harf sığıyor. Sayıyı
+/// çizen taraf veriyor (`bt-gpu`), bu crate piksel görmüyor — `cols`'un
+/// kendisiyle aynı sözleşme. İkisi eşit geçilirse satır bugünkü gibi davranır,
+/// yani değer bir **bütçe**dir, punto kararı değil.
 pub(crate) fn render(
     state: &DockState,
     context: &DockContext,
     shell: Option<ShellState>,
     theme: &Theme,
-    cols: u16,
+    cols: DockCols,
     owned: bool,
     mut sink: impl FnMut(Cell),
 ) -> Dock {
@@ -109,7 +135,7 @@ pub(crate) fn render(
         caret_text: theme.background_linear(),
         sigil: sigil_color(shell, theme),
     };
-    if cols == 0 {
+    if cols.grid == 0 {
         return surface;
     }
     // **Caret'in sahibi burada sorulmuyor, cevabı hazır geliyor** (`owned`).
@@ -126,9 +152,9 @@ pub(crate) fn render(
     // Bağlam satırı aynanın **durumundan önce**: dizin ve dal ZLE satırı
     // düzenlemese de doğru ve kullanıcı komut koşarken de onlara bakıyor.
     // Aşağıdaki `Live` kapısının altında kalsaydı her komutta kaybolurdu.
-    render_context(context, theme, cols, &mut sink);
+    render_context(context, theme, cols.context, &mut sink);
 
-    let available = usize::from(cols.saturating_sub(TEXT_COL));
+    let available = usize::from(cols.grid.saturating_sub(TEXT_COL));
     if available == 0 {
         return surface;
     }
@@ -467,6 +493,16 @@ mod tests {
     }
 
     /// Bağlamsız çizim: yol da dal da boş (bu modülün eski sınamalarının hâli).
+    /// İki satırın bütçesi eşit: bu modülün sınamaları **çizimi** soruyor,
+    /// puntoyu değil. Bütçenin ayrıştığı hâlin kendi sınaması var
+    /// (`context_line_spends_its_own_budget`).
+    fn same(cols: u16) -> DockCols {
+        DockCols {
+            grid: cols,
+            context: cols,
+        }
+    }
+
     fn draw(state: &DockState, cols: u16) -> (Vec<Cell>, Dock) {
         draw_with(state, &DockContext::default(), cols)
     }
@@ -480,7 +516,7 @@ mod tests {
         // (`held: false`): histerezis devrin **ne zaman** görüneceğini
         // değiştiriyor, çizimini değil.
         let owned = caret_home(None, state.status, false) == CaretHome::Dock;
-        let dock = render(state, context, None, &THEME, cols, owned, |cell| {
+        let dock = render(state, context, None, &THEME, same(cols), owned, |cell| {
             cells.push(cell)
         });
         (cells, dock)
@@ -496,7 +532,7 @@ mod tests {
             &DockContext::default(),
             shell,
             &THEME,
-            cols,
+            same(cols),
             owned,
             |cell| cells.push(cell),
         );
@@ -902,6 +938,41 @@ mod tests {
         // Sığan yol kısalmıyor ve `…` eklenmiyor.
         let (cells, _) = draw_with(&state, &context(path, "main"), 40);
         assert_eq!(row_text(&cells, 1), "/a/bb/ccc/dddd | main");
+    }
+
+    #[test]
+    fn context_line_spends_its_own_budget() {
+        // **Bağlam satırının bütçesi giriş satırınınkinden ayrı** ve sebebi
+        // punto: o satır küçük yüzle çiziliyor, aynı piksel şeridine daha çok
+        // harf sığıyor. Sayıyı çizen taraf veriyor (`bt_gpu::context_cols`);
+        // bu crate onu bir **bütçe** olarak alıyor, punto olarak değil.
+        let state = live("", "ls", "", 2);
+        let path = "/a/bb/ccc/dddd";
+        let ctx = context(path, "main");
+
+        // Dokuz sütunluk bir ızgarada giriş satırı dokuza sığıyor, bağlam
+        // satırı ise yirmi bire (yol 14 + ayraç 3 + dal 4): kısaltma **büyük**
+        // bütçeye göre hesaplanıyor ve yol tam çıkıyor.
+        let mut cells = Vec::new();
+        let owned = caret_home(None, state.status, false) == CaretHome::Dock;
+        let wide = DockCols {
+            grid: 9,
+            context: 21,
+        };
+        render(&state, &ctx, None, &THEME, wide, owned, |cell| {
+            cells.push(cell)
+        });
+        assert_eq!(row_text(&cells, 1), "/a/bb/ccc/dddd | main");
+        // Giriş satırı **dokunulmamış**: iki bütçe birbirine karışmıyor.
+        assert_eq!(text(&cells), "  ls");
+
+        // Aynı ızgara, bütçe dar: kısaltma geri geliyor. Yani satırın gördüğü
+        // sayı gerçekten `context_cols`, `cols` değil.
+        let mut narrow = Vec::new();
+        render(&state, &ctx, None, &THEME, same(9), owned, |cell| {
+            narrow.push(cell)
+        });
+        assert_eq!(row_text(&narrow, 1), "…d | main");
     }
 
     #[test]

@@ -40,6 +40,25 @@ pub enum Face {
     BoldItalic = 3,
 }
 
+/// Bir sprite'ın hangi **punto sınıfında** rasterize edileceği.
+///
+/// [`Face`] ile **dik** bir eksen ve bilerek ayrı: yüz metnin biçimi (SGR 1 /
+/// SGR 3'ün karşılığı), bu onun ölçüsü. `Face`'e beşinci bir varyant olarak
+/// eklenseydi "kalın küçük" temsil edilemez olur ve [`Faces::effective`]'in
+/// merdiveni iki ayrı soruyu tek sıraya dizerdi.
+///
+/// Küçük sınıfın **tek** tüketicisi dock'un bağlam satırı; o satır terminalin
+/// kendi altbilgisi ve kabuğun biçimlendirmesi oraya hiç girmiyor, bu yüzden
+/// küçük tarafta yalnız düz yüz rasterize ediliyor (`Atlas::slot`).
+// `repr(u8)`: bkz. `RuleKind` — anahtar `slot()`'un sıcak yolunda.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum SizeClass {
+    #[default]
+    Normal = 0,
+    Small = 1,
+}
+
 impl Face {
     /// Uyarı metninde geçen ad.
     fn name(self) -> &'static str {

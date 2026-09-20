@@ -55,7 +55,7 @@ use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle};
 use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
-use crate::dock::{self, Dock};
+use crate::dock::{self, Dock, DockCols};
 use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
 use crate::settings::{CaretShape, CursorBlink};
 use crate::shell::{
@@ -2601,7 +2601,10 @@ impl Session {
     /// `into` çağıranın tamponu ([`Session::dock_state`] ile aynı gerekçe:
     /// kare başına ayırma yok). `cols` ızgaranın genişliği; dock aynı
     /// sütunları kullanıyor ve taşan satırı pencerelemek için gerekiyor
-    /// ([`crate::dock::render`]).
+    /// ([`crate::dock::render`]). İki satırın bütçesi tek tipte
+    /// ([`DockCols`]) ve ayrı sayılar: bağlam satırı küçük puntoda çizildiği
+    /// için aynı genişliğe daha çok harf sığıyor; sayıyı çizen taraf veriyor,
+    /// bu crate piksel görmüyor.
     ///
     /// **Dock'u olmayan pencere bunu hiç çağırmıyor**: ayrım oturum doğarken
     /// (`bt-shell`, entegrasyon kuruldu mu) kararlaşıyor ve bu crate onu
@@ -2609,7 +2612,7 @@ impl Session {
     /// bir kaydı doğardı.
     pub fn dock(
         &self,
-        cols: u16,
+        cols: DockCols,
         into: &mut DockState,
         context: &mut DockContext,
         caret_in_dock: bool,
@@ -4066,7 +4069,10 @@ mod tests {
         // kalıyordu — bastırmanın kurtardığı satırı devir geri kaybediyordu.
         assert!(!cursor.caret_in_dock, "{cursor:?}");
         let dock = session.dock(
-            40,
+            DockCols {
+                grid: 40,
+                context: 40,
+            },
             &mut DockState::default(),
             &mut DockContext::default(),
             cursor.caret_in_dock,
@@ -7262,7 +7268,16 @@ mod tests {
             if let Some(cursor) = frame_if_damaged(&session, |_| ()) {
                 frames += 1;
                 if session
-                    .dock(80, &mut dock, &mut context, cursor.caret_in_dock, |_| ())
+                    .dock(
+                        DockCols {
+                            grid: 80,
+                            context: 80,
+                        },
+                        &mut dock,
+                        &mut context,
+                        cursor.caret_in_dock,
+                        |_| (),
+                    )
                     .caret
                     .is_some()
                 {

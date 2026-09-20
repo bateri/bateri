@@ -407,7 +407,7 @@ pub(crate) struct Grid {
 /// Kapsamı bu kadar, daha fazlası değil: `CELL_PX`'in asıl durduğu satır
 /// `sync_geometry`'deki `cell_metrics(scale)` çağrısıydı ve orası bir
 /// pencere ile Metal device istediği için sınanmıyor. `CellMetrics::new`
-/// bilerek `pub`, yani oraya yazılacak bir `CellMetrics::new(9, 18, 8, 1)` yer
+/// bilerek `pub`, yani oraya yazılacak bir `CellMetrics::new(9, 18, 7, 8, 1)` yer
 /// tutucuyu diriltir ve buradaki iki sınama yeşil kalır.
 ///
 /// **Sol pay sütunlardan düşülür** (010 Karar 3): şerit metnin üstüne
@@ -2575,7 +2575,7 @@ mod tests {
     /// Izgara ölçüsü; pay **argüman**, çünkü `split_into_grid`'un sorduğu iki
     /// ayrı şey var: hücre bölmesi (pay sıfır) ve payın sütunlardan düşülmesi.
     fn metrics(w: u16, h: u16, gutter: u16) -> CellMetrics {
-        CellMetrics::new(w, h, gutter, 1).expect("sıfır olmayan hücre")
+        CellMetrics::new(w, h, w, gutter, 1).expect("sıfır olmayan hücre")
     }
 
     /// Dock'suz pencere: entegrasyonsuz oturumun (ve duman reçetesinin) hâli.
