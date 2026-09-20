@@ -2178,7 +2178,7 @@ impl Session {
             &term,
             grid_rows.saturating_sub(content_rows),
             alt_screen,
-            offset != 0,
+            usize::try_from(offset).unwrap_or(0),
         );
         // **Geçmişten okuma ayrı bir döngü ve bu stil değil zorunluluk.**
         // Yukarıdaki döngünün `debug_assert!((0..rows).contains(&row))`
@@ -2195,8 +2195,11 @@ impl Session {
         // satır zaten defterin içinde, ama `bt-core`'da indeksleme panik
         // yasağının altında (R2.5) ve yasağı tip değil **çağrı yeri** taşıyor.
         for fill_row in 0..fill {
-            let line =
-                Line(i32::from(fill_row) - i32::from(fill)).grid_clamp(&*term, Boundary::Grid);
+            // `- offset`: bant viewport'la birlikte geriye kayıyor
+            // ([`Session::fill_rows`]). Kaydırılmamış pencerede terim sıfır,
+            // yani `Line(-1)` yine defterin en yeni satırı.
+            let line = Line(i32::from(fill_row) - i32::from(fill) - offset)
+                .grid_clamp(&*term, Boundary::Grid);
             let cells = &term.grid()[line];
             // **`zip`, indeksleme değil** ve gerekçesi panik yasağı (R2.5):
             // `Row`'un `Index`'i sınır dışında panikliyor ve `make denetim`
@@ -2524,10 +2527,24 @@ impl Session {
     /// **Safha kapısı yok** ve bu ölçülmüş bir karar (`discussion.md` → Karar
     /// 5): Enter kolunda `\e[J` `Running` safhasından geçiyor ve safha kapısı
     /// olsaydı o karede `fill` sıfır kalır, dönüş animasyonsuz olurdu.
-    fn fill_rows<T>(&self, term: &Term<T>, gap: u16, alt_screen: bool, scrolled: bool) -> u16 {
-        if !self.dock || alt_screen || scrolled || self.screen_cleared.load(Ordering::Relaxed) {
+    fn fill_rows<T>(&self, term: &Term<T>, gap: u16, alt_screen: bool, offset: usize) -> u16 {
+        if !self.dock || alt_screen || self.screen_cleared.load(Ordering::Relaxed) {
             return 0;
         }
+        // **Kaydırılmış pencerede doldurma kapanmıyor, geriye kayıyor**
+        // (2026-09-20, gözle kontrol; kullanıcı). Bir dönem burada
+        // `scrolled` kapısı vardı ve belirti şuydu: tamamlama listesi
+        // ızgarayı boşaltıyor, bant boşluğu geçmişle örtüyor, tekerleğin ilk
+        // çentiği bandı **düşürüyor** ve ızgaranın çıplak boşluğu ortaya
+        // çıkıyordu — ekranın üstü kapkara, içerik dipte, kaydırdıkça geri
+        // geliyor. Yaslama (011) kaydırılmış pencerede de koştuğu için
+        // boşluk orada da üstte duruyor, yani örtülmeye orada da ihtiyaç var.
+        //
+        // Defterin **en yenisi** değil, viewport'un üstü ölçüt: kaydırma
+        // viewport'u `offset` satır geriye taşıyor ve bant onun üstündeki
+        // satırları göstermek zorunda (okuma döngüsü aynı `offset`'i
+        // `Line`'a katıyor). Kapı yalnız `fresh`'ten düşüyor — geriye inen
+        // pencere temizleme damgasına da o kadar yaklaşıyor.
         let history = term.history_size();
         // **Üçüncü terim: temizlemeden beri gelen satır sayısı.** Bayrağın
         // düşmesi "defterin en yenileri artık temizleme öncesine ait değil"
@@ -2549,7 +2566,13 @@ impl Session {
         } else {
             history.saturating_sub(stamp)
         };
-        gap.min(u16::try_from(fresh).unwrap_or(u16::MAX))
+        // İki `saturating_sub` de gerçek bir hâl: defterin başına kadar
+        // kaydırılmış pencerede üstte gösterilecek satır kalmıyor ve doğru
+        // cevap sıfır — boşluk orada dürüstçe boş kalıyor.
+        let reachable = fresh
+            .saturating_sub(offset)
+            .min(history.saturating_sub(offset));
+        gap.min(u16::try_from(reachable).unwrap_or(u16::MAX))
     }
 
     /// Faz 2: çıpalardan komut işaretleri, defterden renkler.
@@ -7399,27 +7422,47 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_into_history_keeps_the_gap_empty() {
-        // Üçüncü kapı (`display_offset == 0`): geçmişe kaydırılmış pencerede
-        // üstteki boşluk zaten geçmişle dolu ve ikinci kez doldurmak aynı
-        // satırları iki kez gösterirdi.
+    fn scrolling_into_history_slides_the_fill_band() {
+        // **Kaydırılmış pencerede bant kapanmıyor, viewport'la birlikte
+        // geriye kayıyor.** Bir dönem burada `display_offset == 0` kapısı
+        // vardı; gerekçesi "kaydırılmış pencerede boşluk zaten geçmişle dolu"
+        // idi ve **ölçümle çürüdü** (2026-09-20, gözle kontrol; kullanıcı):
+        // yaslama (011) kaydırılmış pencerede de koşuyor, yani boşluk orada
+        // da **üstte** duruyor. Kapı yüzünden tekerleğin ilk çentiği bandı
+        // düşürüyor ve ızgaranın çıplak boşluğunu açığa çıkarıyordu —
+        // ekranın üstü kapkara, içerik dipte, kaydırdıkça geri geliyor.
         let (session, _wake) = gapped_session(true);
-        assert!(fill_now(&session).0.fill > 0, "sahne doldurmasız kuruldu");
+        let (before, before_cells) = fill_now(&session);
+        assert!(before.fill >= 2, "sahne doldurmasız kuruldu: {before:?}");
+        // Bandın **en altı** içeriğin hemen üstü, yani defterin en yenisi.
+        let bottom = row_text(&before_cells, before.fill - 1);
+        let above = row_text(&before_cells, before.fill - 2);
+        assert_ne!(bottom, above, "sahnenin iki satırı ayırt edilemiyor");
 
         assert_eq!(scroll(&session, 1), Wheel::Scrolled(1));
-        let (cursor, cells) = fill_now(&session);
-        assert_eq!(cursor.display_offset, 1, "{cursor:?}");
-        // Bir çentik yukarıda delik hâlâ duruyor (dört satır), yani kapıyı
-        // kapatan tek şey ofset.
-        assert!(cursor.rows - cursor.content_rows > 0, "{cursor:?}");
-        assert_eq!(cursor.fill, 0, "kaydırılmış pencere doldu: {cursor:?}");
-        assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
+        let (after, after_cells) = fill_now(&session);
+        assert_eq!(after.display_offset, 1, "{after:?}");
+        assert!(
+            after.fill > 0,
+            "kaydırılmış pencerede bant düştü: {after:?}"
+        );
+        assert!(!after_cells.is_empty(), "ikinci sink çağrılmadı: {after:?}");
 
-        // Dibe dönünce geri geliyor: kayıp kaydırmayla sınırlı, kalıcı değil.
+        // **Kayma bir satır**: bandın yeni en altı, eskisinin bir üstündeki
+        // satır. Aynı kalsaydı bant viewport'un tepesindeki satırı ikinci kez
+        // gösterirdi — eski kapının korktuğu şey tam olarak buydu ve çare
+        // kapatmak değil kaydırmakmış.
+        assert_eq!(
+            row_text(&after_cells, after.fill - 1),
+            above,
+            "bant viewport'la birlikte kaymadı: {after:?}"
+        );
+
+        // Dibe dönünce eski hâline oturuyor.
         session.term.lock().scroll_display(Scroll::Bottom);
-        let cursor = fill_now(&session).0;
-        assert_eq!(cursor.display_offset, 0, "{cursor:?}");
-        assert!(cursor.fill > 0, "dibe dönünce doldurma gelmedi: {cursor:?}");
+        let (back, back_cells) = fill_now(&session);
+        assert_eq!(back.display_offset, 0, "{back:?}");
+        assert_eq!(row_text(&back_cells, back.fill - 1), bottom, "{back:?}");
     }
 
     #[test]
