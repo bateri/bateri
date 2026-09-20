@@ -23,7 +23,8 @@ Yani yol çalışıyor ve zaten var olan karakterde tabanı **değiştirmiyor**.
 Menlo, dil verilmeden): **42 descriptor**.
 
 **3. Maliyet:** `CTFontCreateForString` **3.9 µs/çağrı** (2000 çağrı, ctypes
-ek yüküyle — Rust'ta daha ucuz olur, yani bu bir **tavan**).
+ek yüküyle). Bu bir **taban**, tavan değil: sayı ısınmış cache'ten geliyor.
+Soğuk ilk açılış ayrı ölçüldü (`## Karar` → 2): **5.9–7.6 ms**.
 
 **Maliyetin doğru okunuşu:** 3000 hücrenin hepsi her karede sorulsaydı
 11.8 ms/kare ederdi ve bu tek başına 60 fps'i yerdi — ama o senaryo
@@ -183,6 +184,42 @@ oklar bugünkü gibi kutu kalıyor. Çift hücre 021'in işi.
    yola girmiyor (yalnız ilk görülen karakterde koşuyor), yani `/measure`
    şartı bu set için **zayıf** — ama "ölçülmemiş sayı yazılmaz" gereği
    teslim belgesine "ölçüm bekliyor" satırı girmeli mi?
+
+## Karar (2026-09-20)
+
+**Seçenek A + tek geometrik kapı.** Kullanıcı kararı bana bıraktı; panel üç
+mercekten de yönü onayladı, öncülleri çürüttü ve düzeltmeler işlendi.
+
+Kalan iki açık kalem de advisor ile kapatıldı ve **ikisi de ölçülerek**:
+
+**1. Dar glyph hücrenin neresine? → Ortalanacak, ve kural evrensel.**
+Kaydırma `(cell_px - advance) / 2`, rasterize anında. Taban monospace fontta
+`advance == cell_px` olduğu için kaydırma **sıfır** ve bugünkü çıktı bit bit
+aynı kalıyor — yani "yedek mi değil mi" diye bir dal gerekmiyor; tek
+geometrik kural iki durumu da doğru çözüyor. İkinci bir kod yolu açmamak bu
+deponun genel tercihi.
+
+Kırpma riski **ölçüldü ve yok**: `⏵`'nin mürekkep kutusu `origin.x = 1.04`
+(pozitif), yani negatif sol yatak yok ve 0.644 px'lik kaydırma mürekkebi
+kenardan taşırmıyor. Ölçüt uydurulmuş bir tolerans değil, kullanıcının
+bildirdiği glyph'in kendi sayısı.
+
+Yan etki, bilinçli kabul: orantılı font kolu (`FontIssue::NotMonospaced`,
+Helvetica) da ortalanacak. O yol zaten "bozuk ama çalışan" diye adlandırılmış
+ve ortalama onu iyileştiriyor; `proportional_family_opens_with_a_warning`
+uyarıyı ve taşmamayı sınıyor, piksel konumunu değil.
+
+**2. Soğuk font açılışı → ertelenmedi, ölçüldü.**
+Taze süreçte `漢` için PingFang SC'yi açmak **5.9 / 6.8 / 7.6 ms** (üç koşu,
+ctypes ek yüküyle, yani bir **tavan**). 60 fps'de kare bütçesi 16.7 ms.
+
+Sonuç bir dipnot değil: bir CJK dosyasının ilk karesinde **bir kare düşmesi
+beklenen davranış** ve `teslim.md`'ye bilinen sınır olarak giriyor. Ama
+tasarımı değiştirmiyor — açılış font ailesi başına **bir kez**, ana thread'de,
+ve genişlik kapısı CJK'yı zaten reddettiği için bu maliyet yalnız **kabul
+edilen** bir yedek ilk kez görüldüğünde ödeniyor. `discussion.md`'nin
+"3.9 µs bir tavan" cümlesi bu ölçümle düzeldi: o sayı ısınmış cache'ten
+gelen bir **taban**.
 
 ## Muhakeme (2026-09-20)
 
