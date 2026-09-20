@@ -152,10 +152,20 @@ sorması gerekiyor, doldurmanınki sormuyor.
 Doldurulan satırlar seçilemiyor (`plan.md` → Kapsam Dışı; R5.1 orijinin
 üstündeki tıklamayı reddediyor), yani vurgulanmaları "burada seçilebilir bir
 şey var" derdi. Izgara da bugün aynı cevabı veriyor: tamamı geçmişte kalan bir
-aralık `visible_range`'den geçmiyor. **Bilinen sınır:** geçmişten ekrana uzanan
-bir seçim dibe dönüldüğünde doldurma bandında vurgusuz görünür —
-`selection_text()` onu hâlâ kopyalar. Yönü güvenli (eksik vurgu, fazla değil)
-ve kapatmanın yeri phase-5.
+aralık `visible_range`'den geçmiyor. Gerekçenin kapsamı **yeni bir seçim
+başlatmak**: "burada seçilebilir bir şey var" yanlış vaadi ancak tıklamayı
+davet ederse zarar veriyor.
+
+**Bilinen sınır, kapsamın dışında kalan hâl:** geçmişten ekrana uzanan ve
+**duran** bir seçim dibe dönüldüğünde doldurma bandında vurgusuz görünür —
+`selection_text()` onu hâlâ kopyalar. **phase-5 bunu kapatmıyor**: orada
+reddedilen şey tıklama, duran seçim değil. Kalem set kapısında yeniden
+tartıldı (2026-09-20) ve **kabul edildi** — davranış yeni değil, bugünkü
+`selection_scrolled_into_history_is_not_drawn` (`session.rs:5828`) bekçisinin
+çivilediği "kopyalanır ama çizilmez" hâlinin **görünür** yarısı; bant onu
+yaratmıyor, üstünü açıyor. İki büyük çare de bu setin kararlarıyla kavgalı
+(bantta vurgulamak R5.1'in reddiyle, seçimi düşürmek her Tab→Ctrl-C'de bir
+sıçramayla). Kararı gözle kontrole bırakıldı, kalem `teslim.md`'de.
 
 ### 6. `alt_screen` kapısı bugün **ikinci bir kilit**
 

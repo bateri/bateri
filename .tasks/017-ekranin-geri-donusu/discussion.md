@@ -186,10 +186,15 @@ doldurma bir daha çalışmaz. Belirti bugünkü davranışın **birebir aynıs�
 yani kimse bozulduğunu anlamaz. Kabul ediliyor, `teslim.md`'de adıyla:
 *özelliğin varlığı pencere boyuna ve çıktı uzunluğuna bağlı.*
 
-**Adıyla konan kör nokta:** imleç tepedeyken gönderilen çıplak `\e[J`
-(`ClearMode::Below`) geçmişi büyütmez, yani doldurmayı zaten tetiklemez; ama
-tetikleyen bir program çıkarsa liste iptalinden ayırt edilemez. zsh bunu
-üretmiyor (`context.md` → Kanıt 3).
+**Adıyla konan kör nokta:** imleç tepedeyken gönderilen `\e[H \e[J`
+(`ClearMode::Below`) kasten temizleme **sayılmaz** ve bant ekranı geri getirir.
+Gerekçe phase-1b'de (2026-09-20) düzeltildi: bir dönem burada "geçmişi
+büyütmez, dolayısıyla doldurmayı zaten tetiklemez" yazıyordu ve bu, bayrak
+modeli gelmeden önceki **büyüme** ölçütüne aitti — bayrakta ölçüt `2J`'nin
+basılması, büyüme değil, yani bayraksız temizleme bandı açık bırakır. Kör
+nokta pratikte dar: zsh'in `clear-screen`'i, `clear(1)` ve `tput clear` üçü de
+`2J` basıyor (`context.md` → Kanıt 3). Ayırt edilemezlik ancak `2J` basmayan
+bir program çıkarsa doğuyor.
 
 **Önerim: 3a.**
 
