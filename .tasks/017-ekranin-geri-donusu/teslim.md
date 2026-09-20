@@ -77,7 +77,17 @@ Set yedi phase + bir kapı commit'i:
 
 Üçü de gerçek pencerede, entegrasyonlu zsh oturumunda:
 
-1. **Asıl senaryo.** Ekranı doldur → `ls alfa_<TAB>` → Ctrl-C. İçerik aşağı
+**Sahneyi kuran tek satır** (1. ve 2. senaryo için; `bateri` penceresinde):
+
+```sh
+mkdir -p /tmp/bateri-gk && cd /tmp/bateri-gk && touch alfa_{01..30}.txt && seq 1 60
+```
+
+`seq` ekranı dolduruyor (boşluk kalmasın, yoksa liste ızgarayı itmez), 30
+dosya da tamamlama listesini dört satıra çıkarıyor — ölçülen sahnenin aynısı
+(`context.md` → Kanıt 1). Sonra:
+
+1. **Asıl senaryo.** `ls alfa_<TAB>` → Ctrl-C. İçerik aşağı
    **süzülmeli**, üstten geçmiş satırları girmeli. Bakılacak: kaymanın hızı ve
    yerleşmesi (aynı animatör, aynı stil — 011'in yukarı akışıyla simetrik
    hissetmeli), en üstteki satırın kesirli orijin yüzünden yarım girmesi.

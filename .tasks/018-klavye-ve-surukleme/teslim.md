@@ -102,9 +102,22 @@ Shift+Tab ile paylaşıyor), **düz çok baytlı harf** (`ğ`, `İ`) ve
 `^A/^C/^D/^E/^K/^U/^W`. Hiçbiri sınamayla çivilenemiyor — hiçbir test
 "hangi olay `encode_key`'e ulaştı"yı göremiyor.
 
-**3. Finder damlası:** tek dosya · **adında boşluk olan dosya**
-(`İki\ Kelime` — kabuk tek argüman görmeli) · birden çok dosya · klasör
-(yalnız yol, `cd` yok) · dock satırın sahibiyken damla.
+**3. Finder damlası.** Sahneyi kuran tek satır (herhangi bir kabukta):
+
+```sh
+mkdir -p "/tmp/bateri-gk/İki Kelime" && touch "/tmp/bateri-gk/İki Kelime/a.txt" \
+  "/tmp/bateri-gk/b.txt" "/tmp/bateri-gk/c.txt" && open /tmp/bateri-gk
+```
+
+Finder açılınca sırayla `bateri`'ye sürükle: `b.txt` (tek dosya) ·
+`İki Kelime/a.txt` (**adında boşluk** — `İki\ Kelime` görünmeli, kabuk tek
+argüman saymalı) · `b.txt`+`c.txt` birlikte (boşlukla ayrılmış, her biri ayrı
+kaçmış) · `İki Kelime` klasörü (yalnız yol, `cd` yok) · bir damlayı da dock
+satırın sahibiyken yap (yazılmış gibi girmeli).
+
+Elemenin kendisi artık hermetik olarak çivili (B.3 §3), yani bu tablonun
+sınadığı şey **AppKit tarafı**: kaydın tutması, `draggingEntered:`in kabulü
+ve `Session::paste`'in dock istisnası.
 
 **4. Press-and-hold — setin tek açık tasarım sorusu, ama artık yarısı
 ölçüldü.** `bateri`'de `e`'yi basılı tut:
