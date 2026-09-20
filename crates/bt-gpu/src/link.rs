@@ -916,9 +916,13 @@ define_class!(
             // `Option`'ı ve onun `GpuError::NoDrawable`'ı da kalktı:
             // `update.drawable()` başlıkta `nonnull` ve objc2 onu `Option`suz
             // üretiyor.)
-            let cursor = iv
-                .session
-                .frame(|cell| frame.push(cell), &mut iv.blocks.borrow_mut());
+            // İkinci sink **bilerek boş**: doldurmanın hücreleri sınırdan
+            // geçiyor ama çizen taraf phase-3'ün işi (017). O gelene kadar
+            // `Cursor::fill` de, bu kanal da tüketilmiyor — kare bugünküyle
+            // bit bit aynı.
+            let cursor =
+                iv.session
+                    .frame(|cell| frame.push(cell), |_| (), &mut iv.blocks.borrow_mut());
             // Şeritler hücrelerle **aynı** karede ve aynı `frame()` çağrısından:
             // ayrı bir sorgudan okunsalardı kaydırma karesinde bir kare geride
             // kalırlardı (010 discussion.md → Karar 2). Sink içinde değil

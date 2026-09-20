@@ -2530,6 +2530,9 @@ mod tests {
             // orijini konu eden sınamalar (`content_sticks_to_the_bottom_*`)
             // onu doğrudan söylüyor. Dolu ızgara, yani öteleme sıfır.
             content_rows: 1,
+            // Doldurmanın çizimi phase-3'ün işi (017); bu sınamalar onu henüz
+            // tüketmiyor.
+            fill: 0,
             rows: 1,
         }
     }

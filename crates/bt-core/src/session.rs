@@ -43,7 +43,11 @@ use alacritty_terminal::index::{Boundary, Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::TermMode;
-use alacritty_terminal::term::cell::Flags;
+// Grid hücresi **takma adla**: bu modülün `Cell`'i sınırdan geçen kare kaydı
+// ve ikisi aynı ada gelseydi hangi bütçeye tabi olduğu okunamazdı
+// (`CLAUDE.md` → hücre sabit boyuttadır).
+use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Config, Osc52 as TermOsc52, RenderableContent, Term};
 // `EventedReadWrite` ada geliyor çünkü `io::Read` gövdesi `Pty::reader()`'ı
 // çağırıyor, yani kendi impl bloğunun dışından; `EventedPty` ve `io::Read`
@@ -283,6 +287,23 @@ pub struct Cursor {
     /// Alternatif ekranda `rows`, yani öteleme sıfır: vim ve htop ızgaranın
     /// tamamını sahipleniyor.
     pub content_rows: u16,
+    /// Üstte kalan boşluğun kaç satırı **geçmişle** dolduruldu (R2.1).
+    ///
+    /// `rows - content_rows` kadar boşluk var ve defterde o kadar satır varsa
+    /// hepsi, yoksa defterin tamamı: `fill = min(history_size, gap)`. Doldurma
+    /// hücreleri [`Session::frame`]'in **ikinci** sink'inden geçiyor ve satır
+    /// numaraları **fill-yerel**: `0..fill`, en üstteki en eski. Ekran satırına
+    /// çeviren taraf çizen taraf — bu crate "hangi satırlar" der, "nereye"
+    /// demez.
+    ///
+    /// **[`Cursor::content_rows`]'a girmiyor ve girmemeli**: doluluk "içerik
+    /// tabana yapışsın" ötelemesinin tek girdisi ve doldurma tam da o
+    /// ötelemenin açtığı boşluğu dolduruyor. Sayılsaydı öteleme kapanır,
+    /// içerik tabandan kopardı — `27a0b98`'in maliyeti (R2.3).
+    ///
+    /// Sıfır **geri alma şeridi**: [`Session::fill_rows`] sıfır döndüğünde
+    /// ikinci sink hiç çağrılmıyor ve kare bugünküyle bit bit aynı (R2.4).
+    pub fill: u16,
     /// Bu karenin ızgara yüksekliği — [`Cursor::content_rows`]'un ölçeği.
     ///
     /// Redundant görünüyor (çizen taraf grid'i kendisi kurdu) ama değil:
@@ -1240,6 +1261,95 @@ fn last_ink_in_row<T>(term: &Term<T>, row: u16, offset: i32) -> Option<char> {
     })
 }
 
+/// Kapıdan geçmiş bir hücrenin **mürekkep yarısı**: ön plan rengi ve kural
+/// çizgileri.
+///
+/// Ayrı tip değil ayrı **parça**: [`Session::frame`]'in iki döngüsü de
+/// (ızgara ve doldurma) aynı hücre kaydını kuruyor ve bu dört alan ikisinde de
+/// birebir aynı. Sınırdan geçen [`Cell`]'in alanları, yalnız kapıdan sonra
+/// çözülenleri.
+struct CellStyle {
+    fg: LinearRgba,
+    underline: UnderlineStyle,
+    strikeout: bool,
+    underline_color: Option<LinearRgba>,
+}
+
+/// Atlama kapısından **sonra** çözülen alanlar; `inverse`, `dim` ve `ruled`
+/// kapıdan **önce** çözülmüş olarak geliyor.
+///
+/// Paylaşım bir stil kararı değil: bu bloğun iki tuzağı var ve ikisi de ikinci
+/// bir kopyada sessizce ayrışırdı.
+///
+/// **Beş bayrak ayrı ayrı sorulur ve kıvrımlı önce gelir.** `UNDERCURL`
+/// `UNDERLINE`'ı **içermez**: `Attr::Undercurl` önce `ALL_UNDERLINES`'ı
+/// siliyor, sonra yalnız kendini ekliyor (alacritty `term/mod.rs`, beş kolun
+/// beşi de öyle). Refleksle yazılmış tek bir `contains(UNDERLINE)` 004'ün
+/// varlık sebebi olan dalgalı çizgiyi sessizce düz çizgiye indirirdi ve hiçbir
+/// sayaç bunu göremezdi — `undercurl_text_yields_curl` görüyor.
+///
+/// `ruled` yanlışsa zincir hiç sorulmuyor: gizli hücre de, hiç kuralı olmayan
+/// hücre de tek testte eleniyor. Geniş karakterin ikinci hücresi bayrakları
+/// şablondan kopyaladığı için kural iki hücreye kendiliğinden yayılıyor —
+/// bedava, ama "neden çalışıyor" sorusunun cevabı burası.
+///
+/// **SGR 58'in kapısı `ruled` değil alt çizginin kendisi**: adı "alt çizgi
+/// rengi" ve SGR'de üstü çizilinin ayrı bir rengi yok. `ruled` olsaydı yalnız
+/// üstü çizili bir hücre (`\e[9;58;5;196m`) rengi taşırdı ve onu okuyan çizici
+/// üstü çiziliyi kırmızıya boyardı. Yan tabloya (`CellExtra`) iniyor, yani
+/// bedeli ancak kapıdan geçen hücreler için ödeniyor.
+fn cell_style(
+    cell: &TermCell,
+    inverse: bool,
+    dim: bool,
+    ruled: bool,
+    colors: &Colors,
+    theme: &Theme,
+) -> CellStyle {
+    let flags = cell.flags;
+    // Ön plan **koşulsuz**: alan adının söylediği şey olmalı, yoksa kural
+    // çizgisi mürekkebi olmayan bir hücrede arka plan rengiyle, yani görünmez
+    // olarak çizilirdi.
+    //
+    // Ters video hücrenin iki rengini takas eder; `DIM` ise **ön plana**
+    // uygulanır (adlı rengi sönük eşine çeviren kod alacritty'nin ikili
+    // tarafında, kitaplıkta değil). İkisi birleşince kural şu: sönüklük,
+    // `cell.fg`'den doğan renge gider — ters videoda o renk arka plan olmuştur.
+    // Kural `color::resolve_fg`'de tek: iki dal aynı fonksiyondan geçiyor,
+    // ters videolu dal sönük rolü unutamıyor.
+    let fg = if inverse {
+        color::resolve(cell.bg, colors, theme)
+    } else {
+        color::resolve_fg(cell.fg, dim, colors, theme)
+    };
+    let underline = if !ruled {
+        UnderlineStyle::None
+    } else if flags.contains(Flags::UNDERCURL) {
+        UnderlineStyle::Curl
+    } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+        UnderlineStyle::Double
+    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+        UnderlineStyle::Dotted
+    } else if flags.contains(Flags::DASHED_UNDERLINE) {
+        UnderlineStyle::Dashed
+    } else if flags.contains(Flags::UNDERLINE) {
+        UnderlineStyle::Single
+    } else {
+        UnderlineStyle::None
+    };
+    CellStyle {
+        fg: color::linear_rgba(fg),
+        underline,
+        strikeout: ruled && flags.contains(Flags::STRIKEOUT),
+        // `None` → çizen taraf `fg`'yi kullanır; `bg` ile birebir aynı örüntü
+        // ve alacritty'nin `Color`'ı `pub` API'ye sızmıyor.
+        underline_color: (underline != UnderlineStyle::None)
+            .then(|| cell.underline_color())
+            .flatten()
+            .map(|c| color::linear_rgba(color::resolve(c, colors, theme))),
+    }
+}
+
 /// Seçimin **ekranda** çizilen aralığı — `frame()`, kare kapısı ve temizleme
 /// hep bunu sorar, ki "çizili mi" sorusunun tek cevabı olsun. Çıktının
 /// görünür pencerenin üstüne ittiği bir aralık grid'de durur ama çizilmez.
@@ -1348,7 +1458,9 @@ pub struct Session {
     screen_seen: AtomicU32,
     /// Ekran **kasten** temizlendi ve henüz doğal yoldan dolmadı (R1.1, R1.2).
     ///
-    /// **Tüketicisi henüz yok** (017 phase-2); bu sette yalnız ömrü işliyor.
+    /// **Tek tüketicisi [`Session::fill_rows`]** ve okuma yeri sıranın kendisi:
+    /// ömür bu karede işledikten **sonra**, yani aynı karede gelmiş taze bir
+    /// `CSI 2 J` doldurmayı da kapatıyor.
     ///
     /// `screen_seen` ile birlikte tek yazıcısı [`Session::frame`] ve yazma
     /// `Term` kilidi tutulurken oluyor, yani okuma-değiştirme-yazma turunu
@@ -1469,13 +1581,26 @@ impl Session {
     /// kendini kilitler. Sink'in işi tamponu doldurmaktır, başka bir şey değil —
     /// `Wake` ile aynı sözleşme.
     ///
+    /// **`fill_sink` ikinci ve ayrı bir kanaldır** (R2.1): üstte kalan boşluğu
+    /// dolduran geçmiş satırları oradan geçiyor, satır numaraları
+    /// **fill-yerel** (`0..fill`) ve sayısı [`Cursor::fill`]'de. Ayrı olması
+    /// zorunlu — dock örüntüsü: doldurma kendi listelerine giriyor, ızgaranın
+    /// sayaçlarına (`hucre=`/`glif=`/`kural=`) **girmiyor** (R3.2) ve satır
+    /// numaraları ızgaranınkilerle çakıştığı için tek kanalda ayırt
+    /// edilemezlerdi. [`Session::fill_rows`] sıfır derse hiç çağrılmıyor.
+    ///
     /// `blocks` **iki fazlıdır** ve sırası zorunlu. Faz 1, `Term` kilidi
     /// altında: prompt hücrelerinin OSC 8 çıpasından blok kimliği çekilir ve
     /// `(kimlik, ilk satır)` çiftleri toplanır. Faz 2, kilit **bırakıldıktan
     /// sonra**: kimlikler kabuk defterinden renklendirilir. Ters sıra bu
     /// modülün yazılı kuralını çiğnerdi — yaprak kilit (`shell`) `Term`
     /// kilidinin altına girmez.
-    pub fn frame(&self, mut sink: impl FnMut(Cell), blocks: &mut Blocks) -> Cursor {
+    pub fn frame(
+        &self,
+        mut sink: impl FnMut(Cell),
+        mut fill_sink: impl FnMut(Cell),
+        blocks: &mut Blocks,
+    ) -> Cursor {
         // Tema `Term` kilidinden **önce** ve kopya olarak: yaprak kilit
         // kare boyunca tutulmaz, `Term` kilidinin altına ikinci bir muteks
         // girmez. Kopya ile kilit arasına düşen bir takas en çok bir kare
@@ -1900,62 +2025,12 @@ impl Session {
                 continue;
             }
             drawn_rows = drawn_rows.max(row.saturating_add(1));
-            // Ön plan **ancak burada** çözülüyor — atlama kapısından sonra.
-            // Kapıdan önce olsaydı `Term` kilidi tutulurken çizilmeyen her
-            // hücre için de ödenirdi ve boş grid'de hücrelerin neredeyse
-            // tamamı çizilmiyor. Koşulsuz: alan adının söylediği şey olmalı,
-            // yoksa kural çizgisi mürekkepsiz bir hücrede arka plan rengiyle
-            // çizilir, yani görünmez olurdu.
-            let fore = if inverse {
-                color::resolve(cell.bg, colors, &theme)
-            } else {
-                color::resolve_fg(cell.fg, dim, colors, &theme)
-            };
-            // **Beş bayrak ayrı ayrı sorulur ve kıvrımlı önce gelir.**
-            // `UNDERCURL` `UNDERLINE`'ı **içermez**: `Attr::Undercurl` önce
-            // `ALL_UNDERLINES`'ı siliyor, sonra yalnız kendini ekliyor
-            // (alacritty `term/mod.rs`, beş kolun beşi de öyle). Refleksle
-            // yazılmış tek bir `contains(UNDERLINE)` bu setin varlık sebebi
-            // olan dalgalı çizgiyi sessizce düz çizgiye indirirdi ve hiçbir
-            // sayaç bunu göremezdi — `undercurl_text_yields_curl` görüyor.
-            //
-            // `ruled` yanlışsa hiç sorulmuyor: gizli hücre de, hiç kuralı
-            // olmayan hücre de tek testte eleniyor. Geniş karakterin ikinci
-            // hücresi bayrakları şablondan kopyaladığı için kural iki hücreye
-            // kendiliğinden yayılıyor — bedava, ama "neden çalışıyor"
-            // sorusunun cevabı burası.
-            let underline = if !ruled {
-                UnderlineStyle::None
-            } else if flags.contains(Flags::UNDERCURL) {
-                UnderlineStyle::Curl
-            } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
-                UnderlineStyle::Double
-            } else if flags.contains(Flags::DOTTED_UNDERLINE) {
-                UnderlineStyle::Dotted
-            } else if flags.contains(Flags::DASHED_UNDERLINE) {
-                UnderlineStyle::Dashed
-            } else if flags.contains(Flags::UNDERLINE) {
-                UnderlineStyle::Single
-            } else {
-                UnderlineStyle::None
-            };
-            let strikeout = ruled && flags.contains(Flags::STRIKEOUT);
-            // SGR 58 (`CellExtra`'da yaşıyor) ön planla **aynı kapıdan
-            // sonra**, aynı gerekçeyle: yan tabloya inmenin ve palete
-            // bakmanın bedeli çizilmeyen hücreler için ödenmesin — `extra`
-            // yalnız alt çizgi rengi için değil, sıfır genişlikli birleşik
-            // karakter ve hyperlink için de doluyor.
-            //
-            // Kapı `ruled` değil **alt çizginin kendisi**: adı "alt çizgi
-            // rengi" ve SGR'de üstü çizilinin ayrı bir rengi yok. `ruled`
-            // olsaydı yalnız üstü çizili bir hücre (`\e[9;58;5;196m`) rengi
-            // taşırdı ve onu okuyan çizici üstü çiziliyi kırmızıya boyardı.
-            // `None` → çizen taraf `fg`'yi kullanır; `bg` ile birebir aynı
-            // örüntü ve alacritty'nin `Color`'ı `pub` API'ye sızmıyor.
-            let underline_color = (underline != UnderlineStyle::None)
-                .then(|| cell.underline_color())
-                .flatten()
-                .map(|c| color::linear_rgba(color::resolve(c, colors, &theme)));
+            // Mürekkep yarısı **ancak burada** çözülüyor — atlama kapısından
+            // sonra. Kapıdan önce olsaydı `Term` kilidi tutulurken çizilmeyen
+            // her hücre için de ödenirdi (renk çözümü, yan tabloya iniş) ve boş
+            // grid'de hücrelerin neredeyse tamamı çizilmiyor. Ortak parça
+            // ([`cell_style`]): doldurma döngüsü de aynı yerden geçiyor.
+            let style = cell_style(cell, inverse, dim, ruled, colors, &theme);
 
             let col = indexed.point.column.0 as u16;
             // **Süre sayacının çakışma ölçütü**, faz 1'de toplanıyor: komut
@@ -2005,25 +2080,141 @@ impl Session {
                 col,
                 row,
                 ch,
-                fg: color::linear_rgba(fore),
+                fg: style.fg,
                 bg,
                 // `Flags::BOLD_ITALIC` ikisinin birleşimi, ayrı bir bit
                 // değil: `contains` her iki soruyu da doğru yanıtlıyor.
                 bold: flags.contains(Flags::BOLD),
                 italic: flags.contains(Flags::ITALIC),
-                underline,
-                underline_color,
-                strikeout,
+                underline: style.underline,
+                underline_color: style.underline_color,
+                strikeout: style.strikeout,
             });
         }
 
-        // **İmleç döngüden sonra kuruluyor** ve sebebi tek bir alan:
-        // `content_rows` ancak döngü bitince biliniyor. Girdilerinin tamamı
-        // (şekil, nokta, satır, görünürlük) döngüden **önce** çözüldü, yani
-        // yukarıdaki "imleç döngüden önce çözülüyor" cümlesi ayakta; burada
-        // yalnız kayıt kuruluyor. Yer değiştirmesinin alternatifi
-        // `content_rows`'u sıfırla doğurup sonra düzeltmekti ve o, bir kare
-        // boyunca yanlış olan bir alan demekti.
+        // **Doluluk sayısı kayıttan önce bir yerele çıkıyor** ve sebebi iki
+        // tüketicisi: bayrağın ömrü ([`Session::observe_screen_clear`]) ve
+        // doldurmanın boşluğu ([`Session::fill_rows`]). İkisi de `Term` kilidi
+        // altında ve ikisi de kayıt kurulmadan önce koşuyor; alan üstünden
+        // okunsaydı kayıt yalnız sırayı taşıyan bir ara durak olurdu.
+        //
+        // **Alternatif ekranda ızgaranın tamamı**, yani öteleme sıfır: vim ve
+        // htop bütün satırları sahipleniyor (bayrak kilidin altında zaten
+        // okundu). Ana ekranda iki kaynağın maksimumu; gerekçesi
+        // [`Cursor::content_rows`]'ta.
+        let content_rows = if alt_screen {
+            grid_rows
+        } else if caret_in_dock {
+            // **Giriş satırı yer de kaplamıyor** — `display: none`, gizli
+            // bir satır değil. İmleç terimi burada düşüyor, çünkü imleç
+            // ızgarada değil: sayılsaydı çizilmeyen bir satır için yer
+            // ayrılır ve son çıktı satırı ile dock arasında boş bir şerit
+            // kalırdı.
+            //
+            // **Kapı bastırmayla değil devirle aynı** ve fark ölçülebilir
+            // bir kusurdu (gözlendi; kullanıcı): boş prompt'ta hiçbir hücre
+            // çıpayı taşımıyor, yani bastırma çalışmıyor ama satır yine
+            // çizilmiyordu — doluluk ise imleci sayıyordu. İlk tuşta çıpa
+            // doğuyor, bastırma başlıyor ve doluluk **bir satır**
+            // düşüyordu: ızgaranın tamamı yazarken aşağı, silerken yukarı
+            // oynuyordu. Kapılar tek yükleme bağlanınca oynama kalmıyor.
+            //
+            // Taban 1: bütün pencerenin bastırıldığı dejenere hâlde
+            // (ilk prompt, üstünde hiç çıktı yok) `drawn_rows` sıfır
+            // kalır ve `content_rows`'un `1..=rows` sözleşmesi bozulurdu.
+            drawn_rows.max(1)
+        } else {
+            drawn_rows.max(cursor_screen_row.saturating_add(1))
+        };
+        debug_assert!(
+            (1..=grid_rows).contains(&content_rows),
+            "doluluk sayısı ızgaranın dışında: {content_rows} / {grid_rows}"
+        );
+        // **Kasten temizleme bayrağının ömrü burada işliyor** ve yeri zorunlu:
+        // `Term` kilidinin **içinde**, doluluk sayısıyla aynı okumada
+        // ([`Session::observe_screen_clear`]).
+        self.observe_screen_clear(content_rows == grid_rows, alt_screen, offset != 0);
+        // **Doldurma bayrağın ömründen SONRA soruluyor** ve sıra zorunlu:
+        // aynı karede gelmiş taze bir `CSI 2 J` bayrağı **kuruyor** ve
+        // doldurma o kareyi de kapatmak zorunda. Ters sırada, baytları henüz
+        // uygulanmamış bir Ctrl-L'in karesinde doldurma bir kereliğine koşar
+        // ve temizlenen ekranı geri getirirdi.
+        let fill = self.fill_rows(
+            &term,
+            grid_rows.saturating_sub(content_rows),
+            alt_screen,
+            offset != 0,
+        );
+        // **Geçmişten okuma ayrı bir döngü ve bu stil değil zorunluluk.**
+        // Yukarıdaki döngünün `debug_assert!((0..rows).contains(&row))`
+        // bekçisi negatif satırda patlardı, ve doldurulan satırlar
+        // `drawn_rows`'a **girmemeli**: girselerdi öteleme kapanır, içerik
+        // tabandan kopardı (R2.3, `27a0b98`'in maliyeti).
+        //
+        // Satır numarası **fill-yerel** (`0..fill`) ve sırası geçmişin kendi
+        // sırası: `0` en eski, `fill - 1` defterin en yeni satırı, yani
+        // içeriğin hemen üstü. Ekran satırına çeviren taraf **çizen** taraf
+        // (phase-3) — bu crate "hangi satırlar" der, "nereye" demez.
+        //
+        // `grid_clamp` bir emniyet kemeri: `fill <= history_size` olduğu için
+        // satır zaten defterin içinde, ama `bt-core`'da indeksleme panik
+        // yasağının altında (R2.5) ve yasağı tip değil **çağrı yeri** taşıyor.
+        for fill_row in 0..fill {
+            let line =
+                Line(i32::from(fill_row) - i32::from(fill)).grid_clamp(&*term, Boundary::Grid);
+            let cells = &term.grid()[line];
+            for col in 0..grid_cols {
+                let cell = &cells[Column(usize::from(col))];
+                let flags = cell.flags;
+                let dim = flags.contains(Flags::DIM);
+                let hidden = flags.contains(Flags::HIDDEN);
+                // **Seçim bu döngüde yok ve bu bir karar, unutulmuş bir dal
+                // değil.** Doldurulan satırlar seçilemiyor (plan → Kapsam
+                // Dışı; R5.1 orijinin üstündeki tıklamayı reddediyor) ve
+                // vurgulanmaları "burada seçilebilir bir şey var" derdi —
+                // gözün gördüğü ile panonun verdiği tam da bu deponun
+                // yasakladığı yerde ayrışırdı. Izgara da aynı cevabı veriyor:
+                // tamamı geçmişte kalan bir aralık `visible_range`'den
+                // geçmiyor, yani bugün de çizilmiyor.
+                let inverse = flags.contains(Flags::INVERSE);
+                let back = if inverse {
+                    color::resolve_fg(cell.fg, dim, colors, &theme)
+                } else {
+                    color::resolve(cell.bg, colors, &theme)
+                };
+                let bg = (back != background).then(|| color::linear_rgba(back));
+                let ch = (!hidden && !flags.intersects(SPACERS) && cell.c != ' ').then_some(cell.c);
+                let ruled = !hidden && flags.intersects(RULES);
+                // Atlama kapısı ızgaranınkiyle **aynı** olmak zorunda: iki
+                // taraf aynı hücreye bakıp farklı cevap verseydi doldurulan
+                // satır ekrana çıktığındakinden farklı görünürdü.
+                if bg.is_none() && ch.is_none() && !ruled {
+                    continue;
+                }
+                let style = cell_style(cell, inverse, dim, ruled, colors, &theme);
+                fill_sink(Cell {
+                    col,
+                    row: fill_row,
+                    ch,
+                    fg: style.fg,
+                    bg,
+                    bold: flags.contains(Flags::BOLD),
+                    italic: flags.contains(Flags::ITALIC),
+                    underline: style.underline,
+                    underline_color: style.underline_color,
+                    strikeout: style.strikeout,
+                });
+            }
+        }
+
+        // **İmleç döngülerden sonra kuruluyor** ve sebebi iki alan:
+        // `content_rows` ancak ızgara döngüsü bitince, `fill` de ondan sonra
+        // biliniyor. İmlecin girdilerinin tamamı (şekil, nokta, satır,
+        // görünürlük) döngüden **önce** çözüldü, yani yukarıdaki "imleç
+        // döngüden önce çözülüyor" cümlesi ayakta; burada yalnız kayıt
+        // kuruluyor. Yer değiştirmesinin alternatifi iki alanı sıfırla doğurup
+        // sonra düzeltmekti ve o, bir kare boyunca yanlış olan bir alan
+        // demekti.
         let mut cursor = Cursor {
             col: cursor_col,
             row: cursor_screen_row,
@@ -2064,49 +2255,16 @@ impl Session {
             // "ofset aynı ama satır oynadı" diye yanlış bir animasyon
             // başlatırdı.
             display_offset: offset,
-            // **Alternatif ekranda ızgaranın tamamı**, yani öteleme sıfır:
-            // vim ve htop bütün satırları sahipleniyor (bayrak kilidin altında
-            // zaten okundu). Ana ekranda iki kaynağın maksimumu; gerekçesi
-            // [`Cursor::content_rows`]'ta.
-            content_rows: if alt_screen {
-                grid_rows
-            } else if caret_in_dock {
-                // **Giriş satırı yer de kaplamıyor** — `display: none`, gizli
-                // bir satır değil. İmleç terimi burada düşüyor, çünkü imleç
-                // ızgarada değil: sayılsaydı çizilmeyen bir satır için yer
-                // ayrılır ve son çıktı satırı ile dock arasında boş bir şerit
-                // kalırdı.
-                //
-                // **Kapı bastırmayla değil devirle aynı** ve fark ölçülebilir
-                // bir kusurdu (gözlendi; kullanıcı): boş prompt'ta hiçbir hücre
-                // çıpayı taşımıyor, yani bastırma çalışmıyor ama satır yine
-                // çizilmiyordu — doluluk ise imleci sayıyordu. İlk tuşta çıpa
-                // doğuyor, bastırma başlıyor ve doluluk **bir satır**
-                // düşüyordu: ızgaranın tamamı yazarken aşağı, silerken yukarı
-                // oynuyordu. Kapılar tek yükleme bağlanınca oynama kalmıyor.
-                //
-                // Taban 1: bütün pencerenin bastırıldığı dejenere hâlde
-                // (ilk prompt, üstünde hiç çıktı yok) `drawn_rows` sıfır
-                // kalır ve `content_rows`'un `1..=rows` sözleşmesi bozulurdu.
-                drawn_rows.max(1)
-            } else {
-                drawn_rows.max(cursor_screen_row.saturating_add(1))
-            },
+            content_rows,
+            // Yukarıdaki döngünün saydığı satır sayısı; doluluğa **girmiyor**
+            // ([`Cursor::fill`]).
+            fill,
             rows: grid_rows,
             // Faz 2 dolduruyor: koşan bloğun çıpasının bu karede **görünüp
             // görünmediği** ancak orada biliniyor ve saatin durma koşulu tam
             // olarak o.
             next_tick: None,
         };
-        debug_assert!(
-            (1..=grid_rows).contains(&cursor.content_rows),
-            "doluluk sayısı ızgaranın dışında: {} / {grid_rows}",
-            cursor.content_rows
-        );
-        // **Kasten temizleme bayrağının ömrü burada işliyor** ve yeri zorunlu:
-        // `Term` kilidinin **içinde**, doluluk sayısıyla aynı okumada
-        // ([`Session::observe_screen_clear`]).
-        self.observe_screen_clear(cursor.content_rows == grid_rows, alt_screen, offset != 0);
         drop(term);
 
         // **Faz 2**, `Term` kilidi düştükten sonra: kimlikler kabuk
@@ -2207,6 +2365,43 @@ impl Session {
             // aynı değeri yazmamak için bir okuma daha ödemek olurdu.
             self.screen_cleared.store(false, Ordering::Relaxed);
         }
+    }
+
+    /// Üstte kalan boşluğun kaç satırı geçmişle dolacak (R2.1, R2.2).
+    ///
+    /// **Doldurmanın tek boğaz noktası** ve bu bir geri alma şeridi (R2.4):
+    /// burası sıfır döndüğünde ikinci sink hiç çağrılmıyor, [`Cursor::fill`]
+    /// sıfır kalıyor ve sınırdan geçen kare bugünküyle **bit bit** aynı oluyor
+    /// — 016'nın "yarıçap 0, hale 0" kolunun aynı örüntüsü. Koşullar iki yere
+    /// dağılsaydı geri alma yolu da ikiye bölünürdü.
+    ///
+    /// Sayı `min(history_size, gap)`: boşluk kadar satır isteniyor, defterde o
+    /// kadar yoksa defterin tamamı. Yeni oturumda defter boş, yani `0` ve
+    /// hiçbir ek okuma yok.
+    ///
+    /// **Dört kapı ve dördü de zorunlu:**
+    ///
+    /// - `self.dock` — doldurmanın tüketicisi dock'lu pencere. Ölçüt
+    ///   [`Cursor::caret_in_dock`] **değil** pencerenin dock'u olması (R2.2):
+    ///   devir tuşa, safhaya ve aynanın tazeliğine bağlı oynuyor ve boşluk
+    ///   onlardan bağımsız.
+    /// - `!alt_screen` — vim ve htop ızgaranın tamamını sahipleniyor, boşluk
+    ///   zaten yok; dock da kalkıyor.
+    /// - Bayrak temiz — kullanıcı ekranı **kasten** temizlediyse geri
+    ///   gelmemeli (R1). Bayrağın ömrü [`Session::observe_screen_clear`]'da ve
+    ///   çağrı sırası zorunlu: ömür **önce** işliyor.
+    /// - `!scrolled` (`display_offset == 0`) — geçmişe kaydırılmış pencerede
+    ///   üstteki boşluk zaten geçmişle dolu; ikinci kez doldurmak aynı
+    ///   satırları iki kez gösterirdi.
+    ///
+    /// **Safha kapısı yok** ve bu ölçülmüş bir karar (`discussion.md` → Karar
+    /// 5): Enter kolunda `\e[J` `Running` safhasından geçiyor ve safha kapısı
+    /// olsaydı o karede `fill` sıfır kalır, dönüş animasyonsuz olurdu.
+    fn fill_rows<T>(&self, term: &Term<T>, gap: u16, alt_screen: bool, scrolled: bool) -> u16 {
+        if !self.dock || alt_screen || scrolled || self.screen_cleared.load(Ordering::Relaxed) {
+            return 0;
+        }
+        gap.min(u16::try_from(term.history_size()).unwrap_or(u16::MAX))
     }
 
     /// Faz 2: çıpalardan komut işaretleri, defterden renkler.
@@ -3333,14 +3528,14 @@ mod tests {
     fn frame_if_damaged(session: &Session, sink: impl FnMut(Cell)) -> Option<Cursor> {
         session
             .take_damage()
-            .then(|| session.frame(sink, &mut Blocks::default()))
+            .then(|| session.frame(sink, |_| (), &mut Blocks::default()))
     }
 
     /// [`frame_if_damaged`]'in blok soran kardeşi: tamponu çağıran tutar,
     /// böylece sınama hem hücreleri hem şeritleri görebilir.
     fn blocks_if_damaged(session: &Session, blocks: &mut Blocks) -> bool {
         session.take_damage() && {
-            session.frame(|_| (), blocks);
+            session.frame(|_| (), |_| (), blocks);
             true
         }
     }
@@ -3628,7 +3823,7 @@ mod tests {
             loop {
                 assert!(Instant::now() < deadline, "{what} gelmedi");
                 let mut cells = Vec::new();
-                session.frame(|cell| cells.push(cell), &mut Blocks::default());
+                session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
                 if read_counter(&cells).is_some_and(|counter| ready(&counter)) {
                     return cells;
                 }
@@ -3730,7 +3925,7 @@ mod tests {
         loop {
             assert!(Instant::now() < deadline, "bitmiş süre görünmedi");
             let mut cells = Vec::new();
-            session.frame(|cell| cells.push(cell), &mut Blocks::default());
+            session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
             let row = row_glyphs(&cells, 0);
             if let Some(counter) = row.strip_prefix("$ls-la")
                 && counter.contains('.')
@@ -3771,7 +3966,7 @@ mod tests {
         loop {
             assert!(Instant::now() < deadline, "sığmayan sayaç saati söndürmedi");
             let mut cells = Vec::new();
-            let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+            let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
             // Komut satırı gerçekten sağ uca dayanmış olmalı, yoksa sınama
             // sığmama kolunu hiç denemeden yeşil geçerdi.
             if row_glyphs(&cells, 0).len() >= 38 && cursor.next_tick.is_none() {
@@ -3806,7 +4001,9 @@ mod tests {
         let mut tick = None;
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && tick.is_none() {
-            tick = session.frame(|_| (), &mut Blocks::default()).next_tick;
+            tick = session
+                .frame(|_| (), |_| (), &mut Blocks::default())
+                .next_tick;
             std::thread::sleep(Duration::from_millis(20));
         }
         let tick = tick.expect("komut koşarken saat kurulmadı");
@@ -3820,7 +4017,7 @@ mod tests {
         loop {
             assert!(Instant::now() < deadline, "komut bitti, saat sönmedi");
             if session
-                .frame(|_| (), &mut Blocks::default())
+                .frame(|_| (), |_| (), &mut Blocks::default())
                 .next_tick
                 .is_none()
             {
@@ -3893,7 +4090,7 @@ mod tests {
         );
         wait_mirror(&session, DockStatus::Live);
 
-        let cursor = session.frame(|_| (), &mut Blocks::default());
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
         assert!(
             !cursor.visible,
             "boş prompt'ta ızgara ikinci bir imleç çizdi: {cursor:?}"
@@ -3932,14 +4129,14 @@ mod tests {
             Arc::clone(&wake),
         );
         wait_mirror(&session, DockStatus::Live);
-        let empty = session.frame(|_| (), &mut Blocks::default());
+        let empty = session.frame(|_| (), |_| (), &mut Blocks::default());
 
         wait_until("ilk tuş aynaya düşmedi", Duration::from_secs(3), || {
             let mut dock = DockState::default();
             session.dock_state(&mut dock);
             dock.status == DockStatus::Live && dock.buffer == "l"
         });
-        let typed = session.frame(|_| (), &mut Blocks::default());
+        let typed = session.frame(|_| (), |_| (), &mut Blocks::default());
 
         assert_eq!(
             empty.content_rows, typed.content_rows,
@@ -3965,11 +4162,11 @@ mod tests {
         let session = spawn_docked_session("printf 'hazir'; sleep 5", Arc::clone(&wake));
         wait_until("çıktı gelmedi", Duration::from_secs(2), || {
             let mut cells = Vec::new();
-            session.frame(|cell| cells.push(cell), &mut Blocks::default());
+            session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
             !cells.is_empty()
         });
 
-        let cursor = session.frame(|_| (), &mut Blocks::default());
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
         assert!(
             !cursor.visible,
             "dock canlanmadan ızgarada imleç var: {cursor:?}"
@@ -4001,9 +4198,11 @@ mod tests {
         // bu sınamayı aynı zamanda "tutma gerçekten doluyor"un bekçisi
         // yapıyor — süresiz tutma burayı kızdırır.
         wait_until("caret ızgaraya dönmedi", Duration::from_secs(2), || {
-            session.frame(|_| (), &mut Blocks::default()).visible
+            session
+                .frame(|_| (), |_| (), &mut Blocks::default())
+                .visible
         });
-        let cursor = session.frame(|_| (), &mut Blocks::default());
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
         assert!(cursor.visible, "koşan komutta ızgara imleçsiz: {cursor:?}");
         session.shutdown();
     }
@@ -4034,7 +4233,7 @@ mod tests {
             log.apply_scan(ScanEvent::Mark(Mark::PromptEnd));
             log.apply_scan(ScanEvent::Dock(DockEvent::End));
         }
-        let cursor = session.frame(|_| (), &mut Blocks::default());
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
         assert!(cursor.caret_in_dock, "tutma devri gizlemeliydi: {cursor:?}");
         let tick = cursor.next_tick.expect("tutma kare istemedi");
         assert!(
@@ -4051,7 +4250,7 @@ mod tests {
                 id: None,
             }));
         }
-        let cursor = session.frame(|_| (), &mut Blocks::default());
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
         assert_eq!(
             cursor.next_tick, None,
             "bekleyen tutma yokken saat sönmeli: {cursor:?}"
@@ -4076,7 +4275,7 @@ mod tests {
         );
         wait_mirror(&session, DockStatus::Live);
 
-        let cursor = session.frame(|_| (), &mut Blocks::default());
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
         assert!(
             cursor.visible,
             "dock'suz pencere caret'siz kaldı: {cursor:?}"
@@ -4094,7 +4293,7 @@ mod tests {
         wait_mirror(&session, DockStatus::Live);
 
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
         assert_eq!(row_glyphs(&cells, 0), "$cmd1", "geçmiş kayboldu");
         assert_eq!(row_glyphs(&cells, 1), "out", "çıktı kayboldu");
         // Giriş satırı **tamamen** boş: prompt'un `$`'ı da gitti, çünkü aralık
@@ -4123,7 +4322,7 @@ mod tests {
         wait_mirror(&session, DockStatus::Live);
 
         let mut blocks = Blocks::default();
-        session.frame(|_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks);
         let rows: Vec<u16> = blocks.as_slice().iter().map(|block| block.row).collect();
         assert_eq!(rows, [0], "bastırma blok şeridini düşürdü: {blocks:?}");
         session.shutdown();
@@ -4142,7 +4341,7 @@ mod tests {
         wait_mirror(&session, DockStatus::Unavailable(DockFault::Overflow));
 
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
         assert_eq!(
             row_glyphs(&cells, 2),
             "$ls-la",
@@ -4169,7 +4368,7 @@ mod tests {
         wait_mirror(&session, DockStatus::Live);
 
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
         assert_eq!(
             row_glyphs(&cells, 2),
             "$ls-la",
@@ -4233,7 +4432,7 @@ mod tests {
         wait_mirror(&session, DockStatus::Live);
 
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
         assert_eq!(row_glyphs(&cells, 2), "", "girişin ilk satırı ızgarada");
         assert_eq!(row_glyphs(&cells, 3), "", "sarmalı kuyruk ızgarada sızdı");
         assert_eq!(
@@ -4272,7 +4471,7 @@ mod tests {
         );
         wait_mirror(&session, DockStatus::Live);
         let mut live = Vec::new();
-        session.frame(|cell| live.push(cell), &mut Blocks::default());
+        session.frame(|cell| live.push(cell), |_| (), &mut Blocks::default());
         assert_eq!(row_glyphs(&live, 2), "", "ayna canlıyken bastırma yok");
 
         wait_mirror(&session, DockStatus::Idle);
@@ -4281,10 +4480,12 @@ mod tests {
         // ikisi ayrı yüklem ve ayrı hızda. `content_rows` caret'e bağlı,
         // yani ölçüm devir gerçekleştikten sonra alınmalı.
         wait_until("caret ızgaraya dönmedi", Duration::from_secs(2), || {
-            session.frame(|_| (), &mut Blocks::default()).visible
+            session
+                .frame(|_| (), |_| (), &mut Blocks::default())
+                .visible
         });
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), &mut Blocks::default());
+        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
         assert_eq!(
             row_glyphs(&cells, 2),
             "$ls-la",
@@ -4388,7 +4589,7 @@ mod tests {
         });
         wait_settled(&session);
         let mut blocks = Blocks::default();
-        session.frame(|_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks);
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -4419,14 +4620,14 @@ mod tests {
         // On satır yukarı: pencere tamamen `out` satırlarına düşüyor.
         let mut blocks = Blocks::default();
         session.term.lock().scroll_display(Scroll::Delta(10));
-        session.frame(|_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks);
         assert_eq!(blocks.as_slice(), [], "çıktı satırı işaret aldı");
 
         // Dibe dönünce komutun satırı yine görünmüyor (27 satırlık içerikte
         // 10 satırlık pencere), ama ikinci prompt görünüyor ve `Pending`
         // olduğu için çizilmiyor: yine boş.
         session.term.lock().scroll_display(Scroll::Bottom);
-        session.frame(|_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks);
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -4551,7 +4752,7 @@ mod tests {
         });
         wait_settled(&session);
         let mut blocks = Blocks::default();
-        session.frame(|_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks);
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -4573,7 +4774,7 @@ mod tests {
         wait_frame(&session, &wake, |cells| row_text(cells, 0) == "duzenleyici");
         wait_settled(&session);
         let mut blocks = Blocks::default();
-        session.frame(|_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks);
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -6325,7 +6526,7 @@ mod tests {
     /// olmak zorunda (hareket karesi onu `link.rs`'te korunan bir değerden
     /// okuyor). Hasarsız `frame()` meşru, yalnız boşuna — doc'u öyle yazıyor.
     fn cursor_now(session: &Session) -> Cursor {
-        session.frame(|_| (), &mut Blocks::default())
+        session.frame(|_| (), |_| (), &mut Blocks::default())
     }
 
     #[test]
@@ -6440,9 +6641,10 @@ mod tests {
 
     /// Bu anın "ekran kasten temizlendi" bayrağı.
     ///
-    /// Doğrudan atomikten, çünkü bayrağın **tüketicisi henüz yok** (017
-    /// phase-2) ve yalnız sınama için `pub` bir kapı açmak sınırı erken
-    /// genişletmek olurdu; `mod tests` modülün çocuğu, alanı görüyor.
+    /// Doğrudan atomikten: bayrağın tüketicisi [`Session::fill_rows`] ve o da
+    /// `pub` değil — sınırdan geçen şey bayrak değil [`Cursor::fill`]. Yalnız
+    /// sınama için `pub` bir kapı açmak sınırı sebepsiz genişletmek olurdu;
+    /// `mod tests` modülün çocuğu, alanı görüyor.
     fn screen_cleared(session: &Session) -> bool {
         session.screen_cleared.load(Ordering::Relaxed)
     }
@@ -6570,6 +6772,180 @@ mod tests {
                 "alternatif ekranın dolu ızgarası bayrağı düşürdü"
             );
         }
+    }
+
+    /// Bu anın imleç kaydı **ve** doldurma hücreleri.
+    ///
+    /// [`cursor_now`]'un doldurma soran kardeşi: doldurma ikinci bir sink'ten
+    /// geçiyor ([`Session::frame`]) ve [`Session::fill_rows`] sıfır dediğinde o
+    /// sink **hiç** çağrılmamalı. Geri alma şeridinin (R2.4) tanığı tam olarak
+    /// o boş liste: sıfır dönen bir karede sınırdan bugünküyle bit bit aynı şey
+    /// geçiyor.
+    fn fill_now(session: &Session) -> (Cursor, Vec<Cell>) {
+        let mut cells = Vec::new();
+        let cursor = session.frame(|_| (), |cell| cells.push(cell), &mut Blocks::default());
+        (cursor, cells)
+    }
+
+    /// Ekranı `seq 1 30` ile doldurup üstten **beş satırlık bir delik** açan
+    /// dock'lu oturum; doldurmanın bütün sınamalarının ortak sahnesi.
+    ///
+    /// Tab→Ctrl-C reçetesinin hermetik eşdeğeri: `\e[4A\e[J` içeriği yukarıdan
+    /// kısaltıyor, tıpkı tamamlama listesi kapanınca olduğu gibi. Kasten
+    /// temizleme **değil** — tarayıcı yalnız `CSI 2 J` sayıyor (R1.1), ED 0
+    /// bayrağı kurmuyor. İki adım `read` ile sıralanıyor (emsal
+    /// `content_rows_come_from_the_visible_window_while_scrolled`).
+    ///
+    /// Sonuç: ekranda `22`…`26`, defterde 21 satır (`1`…`21`), `gap == 5`.
+    fn gapped_session(dock: bool) -> (Session, Arc<TestWake>) {
+        let script = "stty -echo; seq 1 30; read _; printf '\\033[4A\\033[J'; sleep 5";
+        let wake = Arc::new(TestWake::default());
+        let session = if dock {
+            spawn_docked_session(script, Arc::clone(&wake))
+        } else {
+            spawn_session(script, Arc::clone(&wake))
+        };
+        wait_seq_tail(&session, &wake);
+        session.write(b"\n");
+        // Ölçüt "doluluk kısaldı", kesin sayı değil: dock'lu pencerede beş
+        // (`caret_in_dock` imleci saymıyor), dock'suzda altı (imlecin satırı
+        // da sayılıyor) — ikisinin de ortak yanı dokuzdan inmiş olması ve
+        // `\e[4A`'nın tek başına hiçbir şeyi kısaltmaması.
+        wait_until(
+            "içerik yukarıdan kısalmadı",
+            Duration::from_secs(5),
+            || cursor_now(&session).content_rows <= 6,
+        );
+        (session, wake)
+    }
+
+    #[test]
+    fn the_gap_above_fills_with_the_newest_history_rows() {
+        // **R2.1 ve R2.3 birlikte**: boşluk defterin en yeni satırlarıyla
+        // doluyor ve `content_rows` bundan **etkilenmiyor**. İkincisi bu
+        // phase'in en somut kazancı — doldurulan satırlar doluluğa girseydi
+        // öteleme kapanır, içerik tabandan kopardı (`27a0b98`'in maliyeti).
+        let (session, _wake) = gapped_session(true);
+
+        let (cursor, cells) = fill_now(&session);
+        // Doluluk `\e[4A\e[J` öncesiyle aynı aritmetikten doğuyor: beş dolu
+        // satır, beş satırlık delik.
+        assert_eq!(cursor.content_rows, 5, "{cursor:?}");
+        assert_eq!(
+            cursor.fill,
+            cursor.rows - cursor.content_rows,
+            "boşluk kadar doldurulmadı: {cursor:?}"
+        );
+
+        // Satırlar **fill-yerel** (`0..fill`) ve sıraları defterin sırası: `0`
+        // en eski, `fill - 1` içeriğin hemen üstü. Ekranda `22`…`26` durduğuna
+        // göre doldurma `17`…`21` olmak zorunda — "en yeniler" iddiasını
+        // taşıyan tek şey bu liste.
+        let text: Vec<String> = (0..cursor.fill).map(|r| row_text(&cells, r)).collect();
+        assert_eq!(text, ["17", "18", "19", "20", "21"], "{cells:?}");
+    }
+
+    #[test]
+    fn a_deliberate_clear_keeps_the_gap_empty() {
+        // **Setin varlık sebebinin öteki yarısı** (R2.2): Ctrl-L'den sonra
+        // üstte kocaman bir boşluk var ve doldurma koşmuyor — kullanıcı ekranı
+        // kasten temizlediyse geri gelmemeli.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+
+        session.write(b"\n");
+        wait_until("ekran temizlenmedi", Duration::from_secs(5), || {
+            cursor_now(&session).content_rows == 1
+        });
+        assert!(screen_cleared(&session), "`CSI 2 J` bayrağı kurmadı");
+
+        let (cursor, cells) = fill_now(&session);
+        // Boşluk gerçekten var: sınama boş bir `gap`le yanlış sebeple yeşil
+        // olmasın.
+        assert!(cursor.rows - cursor.content_rows > 0, "{cursor:?}");
+        assert_eq!(cursor.fill, 0, "temizlenen ekran geri doldu: {cursor:?}");
+        assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
+    }
+
+    #[test]
+    fn scrolling_into_history_keeps_the_gap_empty() {
+        // Üçüncü kapı (`display_offset == 0`): geçmişe kaydırılmış pencerede
+        // üstteki boşluk zaten geçmişle dolu ve ikinci kez doldurmak aynı
+        // satırları iki kez gösterirdi.
+        let (session, _wake) = gapped_session(true);
+        assert!(fill_now(&session).0.fill > 0, "sahne doldurmasız kuruldu");
+
+        assert_eq!(scroll(&session, 1), Wheel::Scrolled(1));
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.display_offset, 1, "{cursor:?}");
+        // Bir çentik yukarıda delik hâlâ duruyor (dört satır), yani kapıyı
+        // kapatan tek şey ofset.
+        assert!(cursor.rows - cursor.content_rows > 0, "{cursor:?}");
+        assert_eq!(cursor.fill, 0, "kaydırılmış pencere doldu: {cursor:?}");
+        assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
+
+        // Dibe dönünce geri geliyor: kayıp kaydırmayla sınırlı, kalıcı değil.
+        session.term.lock().scroll_display(Scroll::Bottom);
+        let cursor = fill_now(&session).0;
+        assert_eq!(cursor.display_offset, 0, "{cursor:?}");
+        assert!(cursor.fill > 0, "dibe dönünce doldurma gelmedi: {cursor:?}");
+    }
+
+    #[test]
+    fn a_window_without_a_dock_never_fills_the_gap() {
+        // İlk kapı (`SessionOptions::dock`): doldurmanın tüketicisi dock'lu
+        // pencere ve ayrım oturum doğarken kararlaşıyor. Aynı sahne, tek fark
+        // bayrak — yani bu sınama **geri alma şeridinin** kendisi (R2.4):
+        // dock'suz pencerede sınırdan geçen kare bugünküyle bit bit aynı.
+        let (session, _wake) = gapped_session(false);
+
+        let (cursor, cells) = fill_now(&session);
+        // Dock'suz pencerede doluluk imleci de sayıyor (`caret_in_dock`
+        // yanlış), yani delik bir satır küçük — ama hâlâ var.
+        assert!(cursor.rows - cursor.content_rows > 0, "{cursor:?}");
+        assert_eq!(cursor.fill, 0, "dock'suz pencere doldu: {cursor:?}");
+        assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
+    }
+
+    #[test]
+    fn an_empty_history_and_the_alternate_screen_leave_the_gap_empty() {
+        // (1) **Boş defter**: yeni oturumda `min(history_size, gap)` sıfır ve
+        // hiçbir ek okuma yok — doldurma yokluktan içerik uydurmuyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session("stty -echo; printf 'a\\n'; sleep 5", Arc::clone(&wake));
+        wait_ink(&session, &wake, "a");
+        let (cursor, cells) = fill_now(&session);
+        assert!(cursor.rows - cursor.content_rows > 0, "{cursor:?}");
+        assert_eq!(cursor.fill, 0, "boş defterden satır doğdu: {cursor:?}");
+        assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
+
+        // (2) **Alternatif ekran**: vim ve htop ızgaranın tamamını
+        // sahipleniyor, yani `gap` zaten sıfır. Kapı bu yüzden bugün ikinci
+        // bir kilit — ama R2.2'nin yazdığı kapı o ve `content_rows`'un
+        // alternatif ekran kolu değişirse tek tutan şey bu olur.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[?1049h'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+        session.write(b"\n");
+        wait_until(
+            "alternatif ekrana geçilmedi",
+            Duration::from_secs(5),
+            || {
+                cursor_now(&session);
+                session.alt_screen()
+            },
+        );
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.content_rows, cursor.rows, "{cursor:?}");
+        assert_eq!(cursor.fill, 0, "alternatif ekran doldu: {cursor:?}");
+        assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
     }
 
     #[test]
@@ -7571,7 +7947,11 @@ mod tests {
         // doğru: kayıp tek karelik ve o karede `content_rows == rows`, yani
         // `gap` sıfır ve doldurma zaten çizmezdi.
         let wake = Arc::new(TestWake::default());
-        let session = Arc::new(spawn_session(
+        // **Dock'lu oturum** ve bu phase-2'nin eklediği tek ayrıntı: bayrağın
+        // tek tüketicisi doldurma ([`Session::fill_rows`]) ve onun ilk kapısı
+        // `SessionOptions::dock`. Dock'suz koşan bir yarışta `fill` her hâlde
+        // sıfır kalır, yani aşağıdaki iddia boşa düşerdi.
+        let session = Arc::new(spawn_docked_session(
             // Kısa bir `sleep` **şart** ve ailenin kesintisiz akışından bu
             // yüzden ayrılıyor: temizlemeden sonra ekranın boş kaldığı bir
             // pencere olmazsa kayıp bir bayrak bir sonraki `CSI 2 J` ile
@@ -7608,7 +7988,7 @@ mod tests {
         let mut armed = 0u64;
         let mut roomy = 0u64;
         while Instant::now() < deadline {
-            let cursor = cursor_now(&session);
+            let (cursor, fill) = fill_now(&session);
             frames += 1;
             let cleared = screen_cleared(&session);
             if cleared {
@@ -7620,6 +8000,13 @@ mod tests {
             if armed > 0 && !session.alt_screen() && cursor.content_rows < cursor.rows {
                 roomy += 1;
                 assert!(cleared, "temizlenmiş ekran bayraksız kaldı: {cursor:?}");
+                // **Bayrağın tek tüketicisi, yarışın altında**: kayıp bir
+                // bayrağın belirtisi "Ctrl-L geri alındı"dır ve o belirti tam
+                // olarak burada doğar. Sıralama da sınanıyor — ömür
+                // doldurmadan **önce** işliyor, yani taze bir nesil aynı
+                // karede doldurmayı kapatıyor.
+                assert_eq!(cursor.fill, 0, "temizlenen ekran doldu: {cursor:?}");
+                assert!(fill.is_empty(), "ikinci sink çağrıldı: {fill:?}");
             }
             std::thread::yield_now();
         }

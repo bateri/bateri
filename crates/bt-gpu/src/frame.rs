@@ -1504,6 +1504,9 @@ mod tests {
             // `set_origin_rows` söylüyor ve bu iki alan onun **girdisi**,
             // yani `link.rs`'in okuduğu yer. Dolu ızgara, yani öteleme sıfır.
             content_rows: 1,
+            // Doldurmanın çizimi phase-3'ün işi (017); bu modül onu henüz
+            // tüketmiyor.
+            fill: 0,
             rows: 1,
         }
     }
