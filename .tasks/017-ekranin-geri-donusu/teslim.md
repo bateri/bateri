@@ -162,7 +162,15 @@ Hiçbiri açık hata değil; hepsi kapıda tartılıp kabul edildi.
    bayrağı kurmuyor; DCS gövdesindeki `\e[2J` bayrağı kurar (OSC kollarının da
    paylaştığı sınıf); `Motion::sync`'in iki `bool`'u transpoze edilebilir
    (bekçisi var).
-7. **Yol haritasının overlay maddesi kapanmadı, küçüldü**: bu çare liste
+7. **Kaydırmanın başlangıç noktası bir kare bayatlayabilir.** Bandın boyu
+   son dibe yaslı kareden okunuyor (`Session::fill_shown`); kullanıcı
+   geçmişteyken arka planda gelen çıktı dipteki boşluğu kapatırsa dönüşün son
+   çentiği bir satır yerine dibe indirir. Pencere dar (kaydırılmış **ve**
+   çıktı akıyor **ve** bandın kenarına iniliyor) ve yönü güvenli — inen
+   kullanıcının gittiği yer zaten dip. Kesin çare doluluğu kare başına iki kez
+   saymak (görünen pencere + ızgaranın kendisi) ve bedeli ikinci bir tam
+   tarama.
+8. **Yol haritasının overlay maddesi kapanmadı, küçüldü**: bu çare liste
    **ekrandayken** üstteki çıktıyı geri getirmiyor (iTerm de getirmiyor),
    yalnız liste kalktıktan sonra ekranı Tab öncesine döndürüyor. Maddenin
    kapanıp kapanmayacağına kullanıcı gözle kontrolde karar verir.

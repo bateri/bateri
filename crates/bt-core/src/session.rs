@@ -2224,9 +2224,16 @@ impl Session {
         // — ilk çentiğin nereden başlayacağı ona bağlı. Yazan yalnız **dibe
         // yaslı** kare: kaydırılmış pencerede `fill` tanım gereği sıfır ve
         // üstüne yazsaydı dönüş çentiği bandı bulamaz, ekran dibe varırken
-        // boşluk kadar zıplardı. Değer bir kare bayatlayabilir (kaydırırken
-        // gelen çıktı dipteki bandı değiştirir); yanlışın yönü tek satırlık
-        // bir sapma ve dibe varan ilk kare onu düzeltiyor.
+        // boşluk kadar zıplardı.
+        //
+        // **Bilinen sınır:** kullanıcı geçmişteyken arka planda gelen çıktı
+        // ızgarayı doldurup dipteki boşluğu kapatabilir ve o zaman bu sayı
+        // bayatlar — dönüşün son çentiği kullanıcıyı bir satır yerine dibe
+        // indirir. Dar bir pencere (kaydırılmış **ve** çıktı akıyor **ve**
+        // bandın kenarına iniliyor) ve yönü güvenli: inen kullanıcının zaten
+        // gittiği yer dip. Kesin çare doluluğu iki kez saymak olurdu — biri
+        // görünen pencere, biri ızgaranın kendisi — ve bedeli kare başına
+        // ikinci bir tam tarama.
         if offset == 0 {
             self.fill_shown.store(fill, Ordering::Relaxed);
         }
