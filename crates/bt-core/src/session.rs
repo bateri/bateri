@@ -53,7 +53,7 @@ use alacritty_terminal::term::{Config, Osc52 as TermOsc52, RenderableContent, Te
 // çağırıyor, yani kendi impl bloğunun dışından; `EventedPty` ve `io::Read`
 // gelmiyor, onların tek çağrı yeri kendi impl blokları.
 use alacritty_terminal::tty::{self, EventedReadWrite as _, Pty, Shell};
-use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle};
+use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Handler};
 // `Event` adı bu modülde alacritty'nin olayına ait; `polling`'inki `TappedPty`
 // dışında hiç geçmediği için ada gelen o, takma alan o.
 use polling::{Event as PollingEvent, PollMode, Poller};
@@ -1704,7 +1704,7 @@ impl Session {
         };
         blocks.anchors.clear();
         blocks.resolved.clear();
-        let term = self.term.lock();
+        let mut term = self.term.lock();
 
         let rows = term.screen_lines() as i32;
         // Alternatif ekranda blok **yok**: vim'in tamponunda prompt da komut da
@@ -1716,7 +1716,36 @@ impl Session {
         // ([`Session::alt_screen`]): kilidi zaten elimizde ve okunan değer tam
         // da bu karenin `content_rows`'uyla tutarlı olan değer. İkinci bir
         // sorgu kilidi kare başına bir kez daha alırdı.
-        self.alt_screen.store(alt_screen, Ordering::Relaxed);
+        //
+        // **`swap` çünkü düşen kenarın da bir tüketicisi var**: alternatif
+        // ekrandan çıkışta imlecin stili kullanıcının tabanına dönüyor.
+        let was_alt = self.alt_screen.swap(alt_screen, Ordering::Relaxed);
+        if was_alt && !alt_screen {
+            // **Uygulama bitti, bıraktığı imleç durumu da bitsin.**
+            // `set_cursor_style(None)` DECSCUSR'ın kaydını siliyor ve
+            // `Term::cursor_style()` `config.default_cursor_style`'a, yani
+            // `[terminal] cursor` + `cursor_blink`'in tabanına düşüyor.
+            //
+            // Gerekçe ölçüldü (2026-09-20, kullanıcı bildirdi): `cursor_blink
+            // = "auto"` açılışta sönen imleci vim'den **bir kez** geçtikten
+            // sonra kalıcı olarak kaybediyordu. Suçlu DECSCUSR değil
+            // terminfo: `xterm-256color`'da `cnorm = \e[?12l \e[?25h`, yani
+            // "imleci normal görünür yap" komutunun **içinde** blink'i kapatan
+            // özel mod 12 var. vim, less, man, htop — `cnorm` gönderen her
+            // program çıkarken blink'i öldürüyor ve geri açan kimse yok.
+            // Ölçüm: vim'in bütün oturumu 160 bayt ve içinde `\e[?12h` ile
+            // `\e[?12l` var, DECSCUSR **hiç** yok.
+            //
+            // alacritty bunu kendiliğinden yapmıyor ve bu onun bilinçli
+            // tercihi: `cursor_style` `Term` seviyesinde tek bir alan,
+            // `swap_alt` ona hiç dokunmuyor (0.26.0, `term/mod.rs:714`).
+            // Yani kural host'un, ve yeri burası.
+            //
+            // **Şekil de resetleniyor**, yalnız blink değil: ölçüt "uygulama
+            // bitti" ve ikisi de aynı alanın parçası. Bedeli bir prompt'luk —
+            // zsh'in vi-kipi stilini `zle-line-init`'te yeniden gönderiyor.
+            term.set_cursor_style(None);
+        }
         let RenderableContent {
             display_iter,
             cursor,
@@ -6805,6 +6834,64 @@ mod tests {
     /// okuyor). Hasarsız `frame()` meşru, yalnız boşuna — doc'u öyle yazıyor.
     fn cursor_now(session: &Session) -> Cursor {
         session.frame(|_| (), |_| (), &mut Blocks::default())
+    }
+
+    #[test]
+    fn leaving_the_alt_screen_restores_the_cursor_baseline() {
+        // **Kullanıcının bildirdiği kusurun bekçisi** (2026-09-20): `auto`
+        // modunda açılışta sönen imleç, vim'den bir kez geçtikten sonra bir
+        // daha hiç sönmüyordu.
+        //
+        // Sahne vim'i çağırmıyor, vim'in **gönderdiğini** gönderiyor ve o
+        // ölçüldü: `\e[?12l` özel mod 12'nin reset'i ve terminfo'nun
+        // `cnorm`'unun içinde geliyor (`xterm-256color`:
+        // `cnorm = \e[?12l\e[?25h`), yani onu gönderen şey vim'in kendisi
+        // değil "imleci normalleştir" komutu — less, man ve htop da aynısını
+        // yapıyor. DECSCUSR sahnede **yok**, çünkü vim'in bütün oturumunda da
+        // yoktu.
+        //
+        // Adımlar `sleep` ile ayrılıyor: aynı PTY okumasında gelselerdi
+        // aradaki hâller hiç gözlenmez ve sınama kusuru göremezdi.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh(
+                "stty -echo; printf 'a\\n'; sleep 0.4; printf '\\033[?1049h'; \
+                sleep 0.4; printf '\\033[?12l'; sleep 0.4; printf '\\033[?1049l'; sleep 5",
+            ),
+            40,
+        );
+        options.terminal.blink = CursorBlink::Auto;
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_ink(&session, &wake, "a");
+
+        // `"auto"`nun tabanı açık (`docs/AYARLAR.md`): kapalı olsaydı `"off"`
+        // ile ayırt edilemezdi.
+        assert!(cursor_now(&session).blink, "auto'nun tabanı sönük başladı");
+
+        // Alt ekranda `cnorm` blink'i kapatıyor — **bu doğru**, uygulamanın
+        // dediği geçerli.
+        // `cursor_now` **önce**: `alt_screen` bayrağını `frame()` diker
+        // ([`Session::frame`]) ve `&&`'in kısa devresi onu hiç çağırmazsa
+        // bayrak sonsuza kadar bayat kalır (ölçüldü, bu sınamayı yazarken).
+        wait_until(
+            "alt ekranda blink kapanmadı",
+            Duration::from_secs(5),
+            || {
+                let blink = cursor_now(&session).blink;
+                session.alt_screen() && !blink
+            },
+        );
+
+        // Çıkışta taban geri geliyor. Kusurlu hâlde burası zaman aşımına
+        // düşüyor (ölçüldü): bayrak düşüyor ama blink `false` kalıyordu.
+        wait_until(
+            "alt ekrandan çıkışta taban dönmedi",
+            Duration::from_secs(5),
+            || {
+                let blink = cursor_now(&session).blink;
+                !session.alt_screen() && blink
+            },
+        );
     }
 
     #[test]

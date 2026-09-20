@@ -307,8 +307,18 @@ kalınlığı fontun kendi alt çizgi metriğinden gelir, yani punto ya da font
 değişince caret de onunla değişir.
 
 `cursor_blink` üç değerli, çünkü iki ayrı soru var: `"auto"` **söner ve
-uygulama onu durdurabilir** (vim normal modda `\e[2 q` gönderiyor), `"on"` her
-zaman söner, `"off"` hiç söndürmez — son ikisi uygulamanın dediğini **ezer**.
+uygulama onu durdurabilir**, `"on"` her zaman söner, `"off"` hiç söndürmez —
+son ikisi uygulamanın dediğini **ezer**.
+
+`"auto"`da uygulamanın sözü **alternatif ekrandan çıkınca bitiyor**: imlecin
+şekli de sönmesi de `[terminal] cursor` + `cursor_blink` tabanına döner.
+Bu olmadan `"auto"` pratikte "ilk tam ekran uygulamasına kadar" demekti ve
+sebebi DECSCUSR değil terminfo: `xterm-256color`'da
+`cnorm = \e[?12l\e[?25h`, yani "imleci normal görünür yap" komutunun
+**içinde** blink'i kapatan özel mod 12 var. vim, less, man, htop — `cnorm`
+gönderen her program çıkarken blink'i öldürüyor ve geri açan kimse yok
+(ölçüldü 2026-09-20: `vim -u NONE`'un bütün oturumu 160 bayt, içinde
+`\e[?12h` ve `\e[?12l` var, DECSCUSR hiç yok).
 
 `"auto"`nun tabanı bilerek **açık**: kapalı olsaydı hiçbir şey blink
 istemediği için (ne zsh ne bizim sarmalayıcımız DECSCUSR gönderiyor) düz bir

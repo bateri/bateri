@@ -116,7 +116,18 @@ kalınlığında birer şerit ve çıkarma onları büsbütün yutardı, o şeki
 sinyal blink'in durması. Odak `bt-core`'a **hiç girmiyor**
 (`DisplayLink::set_focused`; `CaretShape`'e de eklenmedi — o enum ayar
 dosyasının sözlüğü, odak ona dik bir eksen) ve hermetik koşuda **hiç
-okunmuyor**: kapı çağrı yerinde, `bt-shell`'in pencere delegate'inde. Hedef **ekran hücresi**
+okunmuyor**: kapı çağrı yerinde, `bt-shell`'in pencere delegate'inde. **Alternatif ekrandan çıkışta imlecin
+stili kullanıcının tabanına dönüyor** (`Term::set_cursor_style(None)`,
+`Session::frame`'de `alt_screen` bayrağının **düşen kenarında**): ölçüt
+"uygulama bitti", yani bıraktığı şekil de sönme de bitiyor. Gerekçe ölçüldü
+(kullanıcı bildirdi): `cursor_blink = "auto"` vim'den bir kez geçtikten sonra
+kalıcı olarak sönmeyi bırakıyordu ve suçlu DECSCUSR değil terminfo —
+`xterm-256color`'ın `cnorm`'u (`\e[?12l\e[?25h`) blink'i kapatan özel mod 12'yi
+**içinde** taşıyor, yani `cnorm` gönderen her program (vim, less, man, htop)
+onu öldürüyor ve geri açan kimse yok. alacritty bunu kendiliğinden yapmıyor ve
+bu onun tercihi: `cursor_style` `Term` seviyesinde tek bir alan ve `swap_alt`
+ona hiç dokunmuyor. Bedeli bir prompt'luk — zsh vi-kipinin stilini
+`zle-line-init`'te yeniden gönderiyor. Hedef **ekran hücresi**
 cinsinden ve dock'unki kesirli — band nefes payı kadar aşağıdan başlıyor ve
 artık şeridin altında duruyor; yuvarlansaydı caret bir hücre yukarıda dururdu.
 Çizim **yuvası** konuma göre seçiliyor (`Frame::push_caret`): blok, üstünde
