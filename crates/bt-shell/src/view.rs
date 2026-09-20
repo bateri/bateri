@@ -48,7 +48,7 @@ use objc2_foundation::{
 };
 
 use crate::clipboard;
-use crate::keys::{BACKSPACE, KeyInput, KeyPress, encode_key, page_scroll};
+use crate::keys::{BACKSPACE, KeyInput, KeyPress, encode_key, only_char, page_scroll};
 use crate::quote::shell_quote;
 
 /// Fare noktası → seçim ucu. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
@@ -225,10 +225,10 @@ fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
     if !flags.contains(NSEventModifierFlags::Command) {
         return true;
     }
-    // Tek karakterlik eşleşme, `page_scroll` emsali: ⌫ ile **başlayan** çok
-    // karakterli bir `characters` izin listesine girmez.
-    let mut it = chars.unwrap_or_default().chars();
-    (it.next(), it.next()) == (Some(BACKSPACE), None)
+    // Tek karakterlik eşleşme, `page_scroll` emsali ve **aynı sahipten**
+    // ([`only_char`]): ⌫ ile **başlayan** çok karakterli bir `characters`
+    // izin listesine girmez.
+    only_char(chars.unwrap_or_default()) == Some(BACKSPACE)
 }
 
 pub(crate) struct ViewIvars {
@@ -842,6 +842,16 @@ define_class!(
         /// yalnız yolunu yazıyoruz. `draggingUpdated:` de uygulanmıyor —
         /// AppKit onu uygulamayan hedefte buradaki cevabı sürdürüyor, yani
         /// ikinci metot aynı sabiti tekrarlardı.
+        ///
+        /// **Oturum sorulmuyor ve asimetri bilerek duruyor:** aşağıdaki
+        /// `performDragOperation:` oturum bağlı değilken `false` dönüyor, yani
+        /// imleç "+" gösterip damla "poof" ile geri dönebilir. Burada da
+        /// sormak iki cevabı eşitlerdi ama ölçüt yanlış olurdu — bu metot
+        /// sürüklemenin **başında** koşuyor ve oturum o an yoksa damla
+        /// bırakılana kadar doğmuş olabilir. Pencerede oturumun yokluğu zaten
+        /// erişilemez ([`ViewIvars::session`]: view ile oturum arasına run
+        /// loop dönmediği için hiçbir olay düşemiyor), yani asimetrinin
+        /// görülebileceği bir kare yok; adı yine de burada dursun.
         #[unsafe(method(draggingEntered:))]
         fn dragging_entered(
             &self,
