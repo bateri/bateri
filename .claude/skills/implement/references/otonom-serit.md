@@ -13,9 +13,13 @@ Bu kurallar implementer'ın, kapı ajanının ve kapanış ajanının isteminde
   "hâlâ koşuyor mu" diye tekrar tekrar `echo`/`date` koşmak yasak. Her bekleme
   turu ajanın bütün bağlamını yeniden okutur: 004 phase-3'ün implementer'ı 929
   `echo tick` turu attı ve harcamasının büyük kısmı bekleme oldu.
-- **Kapıyı ve alt ajanı ön planda koştur.** `Skill` çağrısı zaten senkrondur.
-  Uzun komut (`make hepsi`, `make kur`) ön planda ve `timeout`'la koşar. Arka
-  plana alınmış iş bitince harness ajanı zaten uyandırır; yoklamaya gerek yoktur.
+- **Kapıyı ve alt ajanı ön planda koştur.** `Skill` çağrısının senkron olduğu
+  **varsayılmaz**: 017/018'in kapı ajanında `/code-review` fork olarak koştu ve
+  ajan sonucu beklemeden ilerledi (2026-09-20). Bir kapıyı `Skill` ile
+  koşturan ajan sonucun geldiğini **görmeden** rapor yazmaz; gelmediyse
+  bunu `ARTIK:` alanına yazar. Uzun komut (`make hepsi`, `make kur`) ön planda
+  ve `timeout`'la koşar. Arka plana alınmış iş bitince harness ajanı zaten
+  uyandırır; yoklamaya gerek yoktur.
 - **Yalnız kendi başlattığın süreci kapat.** `pkill`/`killall bateri` yasak:
   kullanıcı aynı anda kendi `bateri` örneğini açık tutuyor olabilir.
 - **Arkada kalanı bildir.** Raporun `ARTIK:` alanı açık kalan süreç, shell ya

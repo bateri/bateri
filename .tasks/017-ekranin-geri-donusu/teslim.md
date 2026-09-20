@@ -72,6 +72,14 @@ Set yedi phase + bir kapı commit'i:
 | kapı | `8c3845f` | `/code-review` + `/audit` bulguları, yanlış örneklerin düzeltilmesi |
 | gözle kontrol | `967d5f3` | Bandı viewport'la kaydırma denemesi (kullanıcı buldu; **yetmedi**, aşağıya bak) |
 | gözle kontrol | `1af9d0d` | Bant bir sanal kaydırma: çentik banttan devam ediyor, yaslama geçmiş penceresinde kalkıyor |
+| gözle kontrol | `3052ec1` | `fill_shown`'ın bayatlama sınırı adıyla yazıldı |
+| gözle kontrol | `dd34fd6` | Resize bandın aralığına düşürüyordu (ölçüldü: yukarı çentik `Scrolled(-4)`); üç doc kalıntısı |
+
+**Set dışı, aynı aralıkta duran bir commit var** ve `/ship` onu görecek:
+
+| Commit | Ne | Neden burada |
+|---|---|---|
+| `71f4676` | Alternatif ekrandan çıkışta imlecin stili tabana dönüyor | 017'nin işi **değil** (imleç 014/015'in sahası), ama kullanıcı 017'yi gözle kontrol ederken buldu ve tek commit'lik düzeltme phase açmaz (`CLAUDE.md` → İş akışı). `cursor_blink = "auto"` vim'den bir kez geçince kalıcı olarak sönmeyi bırakıyordu; suçlu terminfo'nun `cnorm`'u (`\e[?12l\e[?25h`). Belge etkisi B.5'te. |
 
 `/ship` doğrulama + `main`'e push'u kapsar. **Bu sette push edilmedi.**
 
@@ -189,15 +197,23 @@ Hiçbiri açık hata değil; hepsi kapıda tartılıp kabul edildi.
   "spinner testeresi" bedeli artık yalnız doldurmanın kapalı olduğu kollarda
   geçerli (phase-4). Eksik 016 satırı kapıda eklendi.
 - **`.tasks/011-tabana-yapisik-icerik/`** — kural **daraltıldığı** için karar
-  kaydına not düşüldü; snap'in özgün gerekçesi korundu (phase-4).
+  kaydına not düşüldü; snap'in özgün gerekçesi korundu (phase-4). Gözle
+  kontrolde kural bir kez daha daraldı (`1af9d0d`): yaslama artık yalnız dibe
+  yaslı pencerede koşuyor ve 011'in bekçisi tersine yazıldı
+  (`content_rows_fill_the_window_while_scrolled`).
+- **Set dışı (`71f4676`):** `CLAUDE.md`'ye alternatif ekrandan çıkışta imleç
+  stilinin tabana dönmesi, `docs/AYARLAR.md`'ye `cursor_blink = "auto"`nun
+  yeni sınırı ve `cnorm` ölçümü.
 
 ### Yayın Checklist
 
 - [x] `make duman` yeşil, jetonlar değişmemiş (2026-09-20)
 - [ ] Gözle kontrol B.2 §1 (asıl senaryo — kaymanın hissi)
 - [ ] Gözle kontrol B.2 §2 (duran seçim + bant → karar)
-- [ ] Gözle kontrol B.2 §3 (kaydırma: çentik başına bir satır, iki yönde —
-      **ikinci düzeltme sonrası**)
+- [x] Gözle kontrol B.2 §3 (kaydırma: çentik başına bir satır, iki yönde) —
+      **kullanıcı doğruladı, 2026-09-20**
+- [x] Set dışı `71f4676` (vim'den çıkınca blink dönüyor) — **kullanıcı
+      doğruladı, 2026-09-20**
 - [ ] Gözle kontrol B.2 §4 (alternatif ekrandan çıkış — bir karelik kayma)
 - [ ] `docs/YOL-HARITASI.md`'nin overlay maddesi kapansın mı, kullanıcı kararı
 - [ ] `/ship`
