@@ -32,10 +32,15 @@ değişmedi (phase-3). `make kur` ve `make terminfo` bu setin kapsamı dışınd
 
 - `make hepsi` → exit 0 (set kapısında koşuldu, `8c3845f`).
 - `make test-yaris` → exit 0 (aynı koşu).
-- `make duman` jetonları **değişmemeli**: `hucre=8 glif=6 kural=15` bit bit
-  aynı. Duman bu özelliğe **yapısal olarak kör** — süreli koşu `/bin/sh`
-  koşuyor, dock yok, doldurma hiç tetiklenmiyor (phase-3). Jetonların
-  oynamaması doğrulama değil, **regresyon yokluğunun** kanıtı.
+- `make duman` → **koştu ve yeşil** (2026-09-20, üç ardışık koşu `exit 0`):
+  `kare=30 hucre=8 glif=6 kural=15 yuva=13/1984 yuk=smoke istek=4 icerik=3
+  hareket=27 kayma=0 sessiz≈1740ms kapanis=clean profil=debug ornek=off
+  pipeline=ok`. İddia edilen `hucre=8 glif=6 kural=15` **bit bit doğrulandı**;
+  `icerik=3` (sınır 8) ve `sessiz≈1740ms` (taban 868) da bandın içinde.
+  Duman yine de bu özelliğe **yapısal olarak kör** — süreli koşu `/bin/sh`
+  koşuyor, dock yok, doldurma hiç tetiklenmiyor (phase-3), ve `kayma=0` tam
+  da onu söylüyor. Yani jeton satırı **regresyon yokluğunun** kanıtı, özelliğin
+  çalıştığının değil; onu gözle kontrol (B.2) söyleyecek.
 - Ölçüm değişmedi; `docs/OLCUMLER.md`'ye bu setten giren sayı yok. Bekleyen
   iddialar B.3'te.
 
@@ -46,8 +51,7 @@ değişmedi (phase-3). `make kur` ve `make terminfo` bu setin kapsamı dışınd
 - [x] `/code-review` set aralığında koştu (9 bulgu; 1 giderildi, 1 reddedildi,
       1 karar kaydı, 6 waive — B.4)
 - [x] `/audit` koştu (7 mercek, 4 bulgu, hepsi giderildi)
-- [ ] `make duman` **gerçek pencerede** — ajan kabuğunda yanlış tanıyla
-      kırmızı düşer, kullanıcı koşar
+- [x] `make duman` — **koştu, yeşil** (üç koşu `exit 0`; jetonlar yukarıda)
 - [ ] Gözle kontrol (B.2)
 
 ## B. Yayın (doğrulamadan SONRA)
@@ -155,7 +159,7 @@ Hiçbiri açık hata değil; hepsi kapıda tartılıp kabul edildi.
 
 ### Yayın Checklist
 
-- [ ] `make duman` gerçek pencerede yeşil, jetonlar değişmemiş
+- [x] `make duman` yeşil, jetonlar değişmemiş (2026-09-20)
 - [ ] Gözle kontrol B.2 §1 (asıl senaryo — kaymanın hissi)
 - [ ] Gözle kontrol B.2 §2 (duran seçim + bant → karar)
 - [ ] Gözle kontrol B.2 §3 (alternatif ekrandan çıkış — bir karelik kayma)

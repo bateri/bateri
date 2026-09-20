@@ -33,11 +33,15 @@ içeriği değişmedi.
 
 - `make hepsi` → exit 0 (kapıdan **sonra** koşuldu, `0c96228`; `bt-shell`
   126 → 127 sınama, `e0e4660` ile son hâl yine yeşil).
-- `make duman` **kullanıcıda** ve bu sette sıradan bir kutu değil: süreli koşu
-  klavyeye **kör** (tuş sentezi yok) ama **sınıf kaydına kör değil** — hiçbir
-  sınama `BateriView` üretmiyor, yani `NSTextInputClient`'ın 11 zorunlu
-  metodunun eksiksizliğini iddia eden `define_class!` assertion'ı **ilk kez
-  gerçek pencerede** koşuyor. Jetonlar değişmemeli.
+- `make duman` → **koştu ve yeşil** (2026-09-20, üç ardışık koşu `exit 0`):
+  `kare=30 hucre=8 glif=6 kural=15 yuva=13/1984 yuk=smoke istek=4 icerik=3
+  hareket=27 kayma=0 sessiz≈1740ms kapanis=clean profil=debug ornek=off
+  pipeline=ok`. Bu sette sıradan bir kutu değildi: süreli koşu klavyeye
+  **kör** (tuş sentezi yok) ama **sınıf kaydına kör değil** — hiçbir sınama
+  `BateriView` üretmiyor, yani `NSTextInputClient`'ın 11 zorunlu metodunun
+  eksiksizliğini iddia eden `define_class!` assertion'ı ilk kez orada koştu.
+  **Patlamadı**, yani R1.1'in protokol uyumu artık iddia değil ölçüm.
+  Klavye davranışının kendisi hâlâ elle turda (B.2).
 - Ölçüm değişmedi; `docs/OLCUMLER.md`'ye bu setten giren sayı yok.
 
 ### Doğrulama Checklist
@@ -49,7 +53,7 @@ içeriği değişmedi.
       düzeltti, 5 waive)
 - [x] `/audit` koştu (0 bulgu; `make denetim` temiz, mercek 1/3/4/5/7 temiz,
       2/6 ilgisiz)
-- [ ] `make duman` **gerçek pencerede** — protokol uyumunun tek kapısı
+- [x] `make duman` — **koştu, yeşil** (üç koşu `exit 0`); protokol uyumu geçti
 - [ ] Elle tuş turu (B.2) — üç tablo
 - [ ] Finder damlası turu (B.2 §3)
 
@@ -180,7 +184,8 @@ adlandırdı.
 
 ### Yayın Checklist
 
-- [ ] `make duman` gerçek pencerede yeşil (protokol uyumunun tek kapısı)
+- [x] `make duman` yeşil — `NSTextInputClient`'ın 11 metotluk uyum
+      assertion'ı gerçek pencerede patlamadı (2026-09-20)
 - [ ] B.2 §1 kazanç tablosu
 - [ ] B.2 §2 sıfır regresyon listesi
 - [ ] B.2 §3 Finder damlası tablosu

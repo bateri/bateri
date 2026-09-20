@@ -119,11 +119,8 @@ ama **sınıf kaydına kör değil**: hiçbir sınama `BateriView` üretmiyor, y
       `## Uygulama Notları`'nda
 - [x] `keys.rs` ve `CLAUDE.md` doc'ları güncellendi
 - [x] Doğrulama geçti (`make hepsi` → exit 0)
-- [~] `make duman` — **kullanıcı koşacak** (gerçek pencere gerekiyor; bu
-      fazda tek uyum kapısı o: `NSTextInputClient`'ın protokol assertion'ı ilk
-      kez orada koşar)
-      (gerçek pencere ister; R1.1'in protokol assertion'ı ilk kez orada
-      patlar)
+- [x] `make duman` — **koştu, yeşil** (2026-09-20, üç koşu `exit 0`);
+      `NSTextInputClient`'ın protokol assertion'ı gerçek pencerede patlamadı
 - [x] Riskli phase: `/code-review` koştu (5 bulgu: 1 düzeltildi, 2 gerekçe
       yazıldı, 2 **waive** — tablo `## Uygulama Notları`'nda)
 - [x] Yayın etkisi yazıldı

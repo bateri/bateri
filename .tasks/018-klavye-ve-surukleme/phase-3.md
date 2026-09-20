@@ -73,7 +73,7 @@ bölü, `$`, `` ` ``, `;`, `&`, satır sonu, Türkçe karakter, çok dosya.
 - [x] `view.rs` başlığı ve `CLAUDE.md` güncellendi (+ `docs/YOL-HARITASI.md`,
       R6'nın son kalemi)
 - [x] Doğrulama geçti (`make hepsi` → exit 0)
-- [~] `make duman` — **kullanıcı koşacak** (gerçek pencere gerekiyor)
+- [x] `make duman` — **koştu, yeşil** (2026-09-20)
 - [x] Yayın etkisi yazıldı
 
 ## Uygulama Notları

@@ -90,7 +90,7 @@ tek istisnası `view.rs`'te. Dokuz mevcut sınama yeni imzayla yeşil.
 - [x] `keys.rs`/`view.rs` doc'ları ve yol haritası güncellendi (+ `CLAUDE.md`,
       aşağıda)
 - [x] Doğrulama geçti (`make hepsi` → exit 0)
-- [~] `make duman` — **kullanıcı koşacak** (gerçek pencere gerekiyor)
+- [x] `make duman` — **koştu, yeşil** (2026-09-20)
 - [x] Yayın etkisi yazıldı
 
 ## Uygulama Notları
