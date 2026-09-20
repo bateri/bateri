@@ -17,11 +17,16 @@ dosyanın yolu giriş satırına düşsün — **bugün çalışan hiçbir tuş 
     setinde; aynı yorum bloğu bunu da söyler (dosyanın "kırpma günü"
     konvansiyonu). `Cargo.lock` değişmiyor.
   - **R1.2** — `keyDown:` **dört kollu** arbitraj olur: (a) Cmd'li olay
-    (R4), (b) **Control'lü olay** — yığına **girmez**, bugünkü `encode_key`
-    kolunda kalır, (c) Shift+PgUp/PgDn (bugünkü `page_scroll`), (d) kalanı
-    `interpretKeyEvents:`e. `consumed` bayrağı set edilmediyse `encode_key`'e
-    düşer; bayrağı `insertText:` **ve** `setMarkedText:` set eder (değişmez:
-    "yığın bu olayı aldı", "metin geldi" değil).
+    (R4), (b) Shift+PgUp/PgDn (bugünkü `page_scroll`), (c) **Control'lü
+    olay** — yığına **girmez**, bugünkü `encode_key` kolunda kalır, (d)
+    kalanı `interpretKeyEvents:`e. `consumed` bayrağı set edilmediyse
+    `encode_key`'e düşer; bayrağı `insertText:` **ve** `setMarkedText:` set
+    eder (değişmez: "yığın bu olayı aldı", "metin geldi" değil).
+    **Kaydırma ile Control'ün sırası phase-1'de takas edildi** (2026-09-20):
+    özgün sıra (b) Control / (c) kaydırma, **Ctrl+Shift+PgUp**'ı Control
+    koluna düşürüp bugünkü kaydırmayı `\e[5~`'e çevirirdi ve R1.7 sıfır
+    regresyon istiyor. Maddenin savunduğu şey sıra değil **yığından önce
+    gelmek**: Cmd de Control de `interpretKeyEvents:`i hâlâ hiç görmüyor.
   - **R1.3** — `insertText:` ve `setMarkedText:`'in argümanı `&AnyObject`
     (`NSString` **ya da** `NSAttributedString`). **Tek** çözme kuralı:
     `NSString`'e downcast, olmazsa `NSAttributedString::string()`, ikisi de
@@ -107,7 +112,7 @@ dosyanın yolu giriş satırına düşsün — **bugün çalışan hiçbir tuş 
   gibi yutar — davranış bit bit aynı. Şekli `docs/YOL-HARITASI.md`'nin borç
   satırında bağlandı.
 - **Ctrl+Shift+Tab ve Ctrl+numpad Enter.** İkisi de `keys.rs`'in doc'unda
-  duran borç ve bu sette kapanmıyor. R1.2'nin (b) kolu ikisini de bugünkü
+  duran borç ve bu sette kapanmıyor. R1.2'nin Control kolu ikisini de bugünkü
   davranışta **tutuyor** — Ctrl'lü olay yığına hiç girmediği için U+0003 ve
   U+0019 paylaşımları AppKit'in koluna bırakılmıyor.
 - **Tam IME** — CJK ve altı çizili preedit'in **çizilmesi**. `setMarkedText:`
@@ -156,11 +161,13 @@ NSEvent (AppKit)
 keyDown:  — dört kol
    ├─ Cmd'li?     ──► izin listesi (⌘⌫ → \x15) ya da YUTULUR      [R4]
    │                   (metin yığınına HİÇ girmez)                 [R4.2]
-   ├─ Control'lü? ──► encode_key                                   [R1.2b]
+   ├─ Shift+PgUp/PgDn? ──► Session::scroll_page                    (bugünkü kol)
+   │                   (scroll_page None dönerse → encode_key, bugünkü yol;
+   │                    Control'ün ÖNÜNDE, yoksa Ctrl+Shift+PgUp kaydırmayı
+   │                    kaybeder — phase-1'de takas edildi)
+   ├─ Control'lü? ──► encode_key                                   [R1.2c]
    │                   (U+0003 ve U+0019 paylaşımları AppKit'e
    │                    bırakılmaz; Ctrl'lü borçlar bugünkü hâlde)
-   ├─ Shift+PgUp/PgDn? ──► Session::scroll_page                    (bugünkü kol)
-   │                   (scroll_page None dönerse → encode_key, bugünkü yol)
    └─ kalanı:
         consumed.set(false)
         interpretKeyEvents(&[event])

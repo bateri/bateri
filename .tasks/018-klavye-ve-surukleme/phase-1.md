@@ -161,3 +161,13 @@ ama **sınıf kaydına kör değil**: hiçbir sınama `BateriView` üretmiyor, y
 | 3 | Control kolu bekleyen bileşimi yıkmıyor (`Option+ü` → `^C` → `a` = `ã`) | **waive** — kolu yığına sokmanın bedeli numpad Enter; takas `keyDown:`'ın doc'unda, ölçüm tablosunda satır |
 | 4 | Press-and-hold bastırması tutmazsa popover'ın harfi `replacementRange` atlandığı için `eé` olur | bileşik belirti `disable_press_and_hold` ve `insertText:`'in doc'una yazıldı |
 | 5 | `insert_text`'te çözülemeyen tip `marked_text`'i asılı bırakıyor | **düzeltildi** — `clear()` çözme kuralının önüne alındı |
+
+**İki waive orkestratörde kabul edildi** (2026-09-20). Ortak gerekçe: ikisinin
+de **karşı hâli** ölçülmemiş — tüketme saymak bileşimden sonraki ilk oku
+yutar, yani düzeltme yeni bir sessiz kayıp açabilir. Üstelik preedit
+**çizilmiyor**: `Option+ü`'den sonra kullanıcı hiçbir şey görmüyor, yani
+bugünkü belirti (Backspace gerçek bir harfi siler) bugünkü deneyimin ta
+kendisi, reviewer'ın önerdiği hâlde ise Backspace sebepsiz hiçbir şey
+yapmıyor gibi görünürdü — yanlışın yönü bu kolda daha güvenli. Kalem elle tuş
+turunun ölçüm tablosunda ve `teslim.md`'de; **kapatma kararı kullanıcının
+ölçümünden sonra**, bu sette değil.
