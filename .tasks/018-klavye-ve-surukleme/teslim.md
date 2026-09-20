@@ -106,20 +106,26 @@ Shift+Tab ile paylaşıyor), **düz çok baytlı harf** (`ğ`, `İ`) ve
 (`İki\ Kelime` — kabuk tek argüman görmeli) · birden çok dosya · klasör
 (yalnız yol, `cd` yok) · dock satırın sahibiyken damla.
 
-**4. Press-and-hold — bu setin tek açık tasarım sorusu.** `bateri`'de `e`'yi
-basılı tut:
+**4. Press-and-hold — setin tek açık tasarım sorusu, ama artık yarısı
+ölçüldü.** `bateri`'de `e`'yi basılı tut:
 
-- **Popover çıkmıyorsa** bastırma tutuyor, kalem konusuz ve B.4 §1 kapanır.
+- **Popover çıkmıyorsa** bastırma tutuyor ve B.4 §2 kapanır.
 - **Popover çıkıyor ve `é` seçince kabuğa `eé` gidiyorsa** düzeltme gerekli;
   iki çare var ve ikisi de senin kararın: (a) değeri uygulamanın **kendi
   kalıcı domain'ine** yazmak (iTerm2'nin yolu — `bateri`'nin plist'i,
   kullanıcının değil, yani R1.6'nın yasağının dışında), (b) `insertText:`in
   `replacementRange` uzunluğu kadar `\x7f` basması.
 
-Gerekçe: `registerDefaults` `NSUserDefaults` arama sırasının **en düşük
-öncelikli** halkası ve NSGlobalDomain ya da MDM onu ezebilir. `plan.md` R1.6
-bu belirsizliği zaten "ölçüm bekliyor" diye yazmıştı; set kapısı belirtiyi
-adlandırdı.
+**Ölçülen yarı (2026-09-20):** set kapısının itirazı "registration domain en
+düşük öncelikli halka, NSGlobalDomain ya da MDM eziyor olabilir" idi. Bu
+makinede `defaults read -g ApplePressAndHoldEnabled` → **anahtar yok**, yani
+ezecek bir halka bulunmuyor ve itiraz bu kurulumda konusuz.
+
+**Ölçülmeyen yarı — testin asıl sebebi bu:** popover kararının değeri
+`NSUserDefaults` üzerinden okuduğu. AppKit `CFPreferences`'a doğrudan
+bakıyorsa registration domain'i büsbütün atlar ve ezilme sorusu anlamsızlaşır
+— iTerm2'nin *kalıcı* domain değeri tutması tam da bu ihtimalin ipucu.
+Kapatan sınama makineye bağlı olurdu; kapatan şey on saniyelik bir tuş.
 
 ### B.3 Ölçüm bekleyen iddialar `[komut]` — `/measure`
 
@@ -127,6 +133,12 @@ adlandırdı.
 2. **Tuş başına `String` ayırma** (`characters().to_string()`): kazanç
    ölçülmedi, o yüzden sayı yazılmadı. Ertelemenin yolu yok — Cmd izin listesi
    ile `page_scroll` `chars`'ı yığın kolundan **önce** istiyor.
+3. **Takip işi (sınama, ölçüm değil):** `dropped_paths`'in pasteboard
+   davranışı hermetik olarak çivilenebilir — panoya bir `file://` ve bir
+   `http://` URL'si yazıp yalnız birincisinin döndüğünü sınamak `e0e4660`'ın
+   `isFileURL` kademesini kapıya bağlar. Set kapısı koştuktan **sonra**
+   düşünüldüğü için bu sete alınmadı; B.2 §3'ün elle tablosunun yerine de
+   geçmiyor (gerçek Finder, gerçek dock sahipliği).
 
 ### B.4 Bilinen sınırlar (adıyla) `[elle]`
 
@@ -140,7 +152,9 @@ adlandırdı.
    yani kayıp **görünür**. Aynı gerekçe ölü tuş + Backspace koluna da geçerli
    (phase-1 waive #1).
 2. **`insertText:` `replacementRange`'i yoksayıyor** — B.2 §4'ün ölçümüne
-   bağlı.
+   bağlı. Kapının itirazının **ezilme yarısı ölçüldü ve düştü** (bu makinenin
+   `NSGlobalDomain`'inde anahtar yok); açık kalan şey popover kararının bu
+   yolu okuyup okumadığı.
 3. **IME sözleşmesi asgari:** `attributedSubstringForProposedRange:` hep
    `nil` (PTY'ye akmış baytı geri okuyacak belge yok; alacritty ve ghostty de
    aynı), `setMarkedText:` bilinmeyen tipte erken dönüyor. İkisi de

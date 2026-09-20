@@ -655,9 +655,18 @@ fn open_in_editor(path: &Path) -> bool {
 /// kanıtı aynı anahtarı gösteriyor: iTerm2 kendi domain'inde
 /// `ApplePressAndHoldEnabled = 0` tutuyor.
 ///
-/// **Ölçüm bekliyor:** bellek içi domain'in popover'ı gerçekten bastırdığı
-/// ölçülmedi; iTerm2'nin kanıtı *kalıcı* domain değeri (ghostty aynı
-/// `registerDefaults` yolunu kullanıyor).
+/// **Yarısı ölçüldü** (2026-09-20): bu makinenin `NSGlobalDomain`'inde
+/// `ApplePressAndHoldEnabled` **yok** (`defaults read -g`), yani arama
+/// sırasında registration domain'in üstünde onu ezecek bir halka bulunmuyor
+/// — set kapısının "NSGlobalDomain ya da MDM eziyor olabilir" itirazı bu
+/// kurulumda konusuz.
+///
+/// **Ölçüm bekleyen yarı:** popover kararının değeri bu yoldan, yani
+/// `NSUserDefaults` üzerinden okuduğu. AppKit `CFPreferences`'a doğrudan
+/// bakıyorsa registration domain'i büsbütün atlar ve ezilme sorusu
+/// anlamsızlaşır. iTerm2'nin *kalıcı* domain değeri tutması bu ihtimalin
+/// ipucu (ghostty aynı `registerDefaults` yolunu kullanıyor). Kapatan sınama
+/// makineye bağlı olurdu; kapatan şey `e`'yi basılı tutmak.
 ///
 /// **Tutmazsa belirti iki yarılı** ve ikincisi sessiz: gürültülü yarısı
 /// basılı tuşun yinelememesi, sessiz yarısı popover'dan seçilen harfin
