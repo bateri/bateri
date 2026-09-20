@@ -58,9 +58,10 @@ bulunamaz.
 | 016 | imleç ayarları | 015'in **bilinçli** borcundan doğdu (`.tasks/016-imlec-ayarlari/context.md` → Mevcut durum, 015 R8: "ayar anahtarı yok"): caret'in köşe yarıçapı, halesi, odaksız hâli ve blink periyodu koda gömülü dört sayıydı ve oradan `[terminal]` anahtarlarına çıktı. Kendi setini hak etmesinin sebebi kapsam değil **yüzey**: dördü de kayıt anında uygulanıyor, yani ayar şemasının ve canlı izlemenin yolu. Set açıldı → `.tasks/016-imlec-ayarlari/plan.md` |
 | 017 | ekranın geri dönüşü | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "tamamlama listesi ızgarayı kaydırıyor"): Tab listesi kalkınca geriye bir delik kalıyor ve ekran Tab öncesine dönmüyor. Kökü 011'in kayıtlı bedeline ve 012'nin Karar 3a'sına bağlı, yani `bt-core`'un bastırma aralığı + `origin`'in tek yönlü kayması birlikte açılıyor. Set açıldı → `.tasks/017-ekranin-geri-donusu/context.md` |
 | 018 | klavye + dosya sürükleme | **Üç kullanıcı isteği bir arada** (2026-09-19 ve -20): macOS metin kısayolları ("bu kısayollar yok diye pratiklik çok azalıyor"), **ölü tuşlar** — Türkçe Q'da `~` ve `` ` `` yazılamıyor, ölçüldü — ve Finder'dan dosya sürükleme. Tek set olmalarının sebebi kapsam değil dosya: üçü de `bt-shell/view.rs` + `keys.rs`'te, `keyDown:`'ın aynı yönlendirmesinde buluşuyor. Set açıldı → `.tasks/018-klavye-ve-surukleme/context.md` (düzen taraması ve iki ölçüm orada; kapsamı panel daralttı — `discussion.md` → Muhakeme) |
-| 019 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
-| 020 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek |
-| 021 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
+| 019 | glyph yedeği | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "font fallback yok"): seçili fontta olmayan karakter kutu çiziliyor. Ölçüldü — `⏵` (U+23F5) Menlo'da yok, aynı satırdaki `→`/`↻`/`░` var; `CTFontGetGlyphsForCharacters` cascade list'e düşmüyor. **Aile** düzeyinde yedek zaten var (`PREFERRED` → `FALLBACK`), eksik olan **karakter** düzeyi. Emoji setinden ayrı ve çok daha ucuz: yedekten gelen glyph de tek kanallı maske, `R8Unorm` atlas duruyor; değişen tek şey yuva anahtarına gerçek fontun kimliğinin girmesi. Set açıldı → `.tasks/019-glyph-yedegi/context.md` |
+| 020 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
+| 021 | emoji + geniş glyph + kutu çizim | Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek |
+| 022 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
 animasyonu), Sparkle ile güncelleme.
@@ -158,6 +159,16 @@ animasyonu), Sparkle ile güncelleme.
 > Klavye setine **dosya sürükleme** de girdi (kullanıcı isteği, aynı gün) —
 > gerekçesi kapsam değil dosya: ikisi de `view.rs`'in kancalarında buluşuyor.
 > **Materyalin bedeli beşinci kez ödeniyor.**
+>
+> **Dokuzuncu kayma (2026-09-20, kullanıcı kararı).** Araya **019 glyph
+> yedeği** girdi — yine sete bağlanmamış bir borç sete dönüştü ve yine aynı
+> gün bildirildi (Claude Code'un `⏵⏵` göstergesi kutu çıkıyor). Kullanıcı onu
+> materyalden **önce** istedi; materyal yüzey / emoji-geniş-kutu / sekme-bölme
+> sırasıyla **020, 021, 022** oldu. Gerekçe ucuzluk ve görünürlük: yedekten
+> gelen glyph de tek kanallı maske, yani emoji setinin mimari çatalı
+> açılmıyor, ama belirti ok/sembol/kutu karakterlerinin geçtiği her yerde.
+> **Materyalin bedeli altıncı kez ödeniyor** — ve bu, ölçüm baskısının da
+> altıncı kez ertelenmesi demek.
 
 ## Sete bağlanmamış borçlar
 
@@ -401,6 +412,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   tutmak onu bitmemiş bir iş gibi gösterirdi. `content_rows`'u oynatmak çare
   değil: denendi, deliği yalnız yer değiştirdi (`2fdca50` → `27a0b98`).
 - **Font fallback yok: seçili fontta olmayan karakter kutu (tofu) çiziliyor.**
+  **2026-09-20'de sete bağlandı → 019**, ayrıntısı `.tasks/019-glyph-yedegi/context.md`'de.
   Ölçüldü (2026-09-20, kullanıcı ekran görüntüsüyle bildirdi): Claude Code'un
   `⏵⏵ auto mode on` göstergesi iki boş kutu olarak çıkıyor. Sebep `⏵`
   (U+23F5) — CoreText'e doğrudan soruldu, **Menlo'da yok**; aynı satırdaki
