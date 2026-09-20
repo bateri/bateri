@@ -392,9 +392,28 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   üstte kalan boşluk geçmişin en yeni satırlarıyla doluyor. Kalan borç
   **küçülüyor ama kapanmıyor**: liste *ekrandayken* üstteki çıktı yine
   görünmez (iTerm de göstermiyor), ve gerçek çare — listeyi ızgaraya hiç
-  düşürmemek (aynanın altıncı kanalı ya da overlay) — 017'nin gözle
-  kontrolünden sonra hâlâ tartışılabilir. `content_rows`'u oynatmak çare
+  düşürmemek (aynanın altıncı kanalı ya da overlay).
+  **Madde 2026-09-20'de kapandı** (gözle kontrol, kullanıcı): bildirilen
+  şikâyet "liste kalkınca ekran geri gelmiyor"du ve o çözüldü. "Liste
+  *ekrandayken* üstteki çıktı da görünsün" **ayrı ve çok daha büyük** bir
+  istek — tamamlama listesini kendi yüzeyinde çizmeyi gerektirir, iTerm de
+  yapmıyor, ve kimse istemedi. İstenirse kendi seti açılır; bu maddeyi yarım
+  tutmak onu bitmemiş bir iş gibi gösterirdi. `content_rows`'u oynatmak çare
   değil: denendi, deliği yalnız yer değiştirdi (`2fdca50` → `27a0b98`).
+- **Doldurma bandının satırları seçilemiyor.** 017'nin bandı geçmiş
+  satırlarını gösteriyor ama fare orayı **reddediyor** (`point_to_cell`,
+  `fill > 0`): satırlar `frame()` sınırının satır numaralarıyla temsil
+  edilemiyor ve kırpma, vurguyu gözün gördüğü yerden başka bir yerde
+  başlatırdı — "yanlış seçilir" ile "seçilemez" arasında dürüst olan ikincisi
+  (2026-09-20 kararı, kullanıcı bana bıraktı). **Bugün bir çıkış yolu var ve
+  ücretsiz:** bant, `display_offset == fill` olan pencereyle **aynı satırları**
+  gösteriyor, yani bir çentik yukarı kaydıran kullanıcı aynı görüntüde ama
+  seçilebilir bir pencere buluyor. Gerçek çare o eşdeğerliği tıklamaya da
+  öğretmek — bandın üstüne tıklayınca pencereyi sessizce o ofsete taşımak;
+  görüntü değişmediği için sıçrama olmaz. `Cell.row`'u negatife açmak
+  **gerekmiyor**, ki o yol sınır tipini ve bütün tüketicilerini değiştirirdi.
+  Sırası: ölçülmüş bir ihtiyaç beklemeye değer — kullanıcı bandı kopyalamak
+  isterse bugün de yapabiliyor.
 - **Klavye kalanları: Home/End ve iki Control borcu.** Home/End bilerek
   yutuluyor (yutmayı bağlayan sınama duruyor): tüketicisi less/vim, yani tam
   ekran uygulama borcu — varsayılan zsh'te `^[[H`/`^[[F`/`^[OH`/`^[OF` için

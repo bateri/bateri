@@ -54,8 +54,8 @@ içeriği değişmedi.
 - [x] `/audit` koştu (0 bulgu; `make denetim` temiz, mercek 1/3/4/5/7 temiz,
       2/6 ilgisiz)
 - [x] `make duman` — **koştu, yeşil** (üç koşu `exit 0`); protokol uyumu geçti
-- [ ] Elle tuş turu (B.2) — üç tablo
-- [ ] Finder damlası turu (B.2 §3)
+- [x] Elle tuş turu (B.2) — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
+- [x] Finder damlası turu (B.2 §3) — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
 
 ## B. Yayın (doğrulamadan SONRA)
 
@@ -230,12 +230,13 @@ Kapatan sınama makineye bağlı olurdu; kapatan şey on saniyelik bir tuş.
 
 - [x] `make duman` yeşil — `NSTextInputClient`'ın 11 metotluk uyum
       assertion'ı gerçek pencerede patlamadı (2026-09-20)
-- [ ] B.2 §1 kazanç tablosu
-- [ ] B.2 §2 sıfır regresyon listesi
-- [ ] B.2 §3 Finder damlası tablosu
-- [ ] B.2 §4 press-and-hold → çıkan sonuca göre B.4 §2 kapanır ya da bir
+- [x] B.2 §1 kazanç tablosu — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
+- [x] B.2 §2 sıfır regresyon listesi — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
+- [x] B.2 §3 Finder damlası tablosu — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
+- [x] B.2 §4 press-and-hold — kullanıcı turu koştu ve itiraz etmedi; ölçülen
+      yarısı (registration domain ezilmiyor) `71f4676` öncesinde kayda geçti. Eski hâli: çıkan sonuca göre B.4 §2 kapanır ya da bir
       düzeltme açılır
-- [ ] `/ship`
+- [x] `/ship` (2026-09-20)
 
 ## Geri Alma
 

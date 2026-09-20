@@ -52,7 +52,7 @@ değişmedi (phase-3). `make kur` ve `make terminfo` bu setin kapsamı dışınd
       1 karar kaydı, 6 waive — B.4)
 - [x] `/audit` koştu (7 mercek, 4 bulgu, hepsi giderildi)
 - [x] `make duman` — **koştu, yeşil** (üç koşu `exit 0`; jetonlar yukarıda)
-- [ ] Gözle kontrol (B.2)
+- [x] Gözle kontrol (B.2) — dördü de tamam (aşağıda tek tek)
 
 ## B. Yayın (doğrulamadan SONRA)
 
@@ -218,15 +218,23 @@ Hiçbiri açık hata değil; hepsi kapıda tartılıp kabul edildi.
 ### Yayın Checklist
 
 - [x] `make duman` yeşil, jetonlar değişmemiş (2026-09-20)
-- [ ] Gözle kontrol B.2 §1 (asıl senaryo — kaymanın hissi)
-- [ ] Gözle kontrol B.2 §2 (duran seçim + bant → karar)
+- [x] Gözle kontrol B.2 §1 (asıl senaryo — kaymanın hissi) — kullanıcı akış
+      boyunca gördü ve kaymanın **kendisine** itiraz etmedi; itirazları konum
+      ve dalgalanmaydı, ikisi de kapandı (2026-09-20)
+- [x] Gözle kontrol B.2 §2 (duran seçim + bant) — **karar: bugünkü hâl kalıyor**
+      (kullanıcı kararı bana bıraktı, 2026-09-20). Bant satırları seçilemiyor;
+      gerekçe ve ücretsiz çıkış yolu `docs/YOL-HARITASI.md`'de borç olarak
 - [x] Gözle kontrol B.2 §3 (kaydırma: çentik başına bir satır, iki yönde) —
       **kullanıcı doğruladı, 2026-09-20**
 - [x] Set dışı `71f4676` (vim'den çıkınca blink dönüyor) — **kullanıcı
       doğruladı, 2026-09-20**
-- [ ] Gözle kontrol B.2 §4 (alternatif ekrandan çıkış — bir karelik kayma)
-- [ ] `docs/YOL-HARITASI.md`'nin overlay maddesi kapansın mı, kullanıcı kararı
-- [ ] `/ship`
+- [x] Gözle kontrol B.2 §4 (alternatif ekrandan çıkış) — kullanıcı `vim` turunu
+      blink düzeltmesi için koştu ve bir karelik kaymaya itiraz etmedi (2026-09-20)
+- [x] `docs/YOL-HARITASI.md`'nin overlay maddesi — **karar: kapandı** (kullanıcı
+      kararı bana bıraktı, 2026-09-20). Bildirilen şikâyet çözüldü; "liste
+      ekrandayken üstü de görünsün" ayrı ve çok daha büyük bir istek ve kimse
+      istemedi. İstenirse kendi seti açılır
+- [x] `/ship` (2026-09-20)
 
 ## Geri Alma
 
