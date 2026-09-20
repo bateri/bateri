@@ -70,7 +70,8 @@ Set yedi phase + bir kapı commit'i:
 | phase-4 | `445fe0d` | `sync_origin` guard'ının üçüncü terimi + belge tadilleri |
 | phase-5 | `ff66b09` | `point_to_cell`'in reddi |
 | kapı | `8c3845f` | `/code-review` + `/audit` bulguları, yanlış örneklerin düzeltilmesi |
-| gözle kontrol | `967d5f3` | Kaydırılmış pencerede bant düşmüyor, viewport'la kayıyor (kullanıcı buldu) |
+| gözle kontrol | `967d5f3` | Bandı viewport'la kaydırma denemesi (kullanıcı buldu; **yetmedi**, aşağıya bak) |
+| gözle kontrol | `HASH2` | Bant bir sanal kaydırma: çentik banttan devam ediyor, yaslama geçmiş penceresinde kalkıyor |
 
 `/ship` doğrulama + `main`'e push'u kapsar. **Bu sette push edilmedi.**
 
@@ -100,10 +101,19 @@ dosya da tamamlama listesini dört satıra çıkarıyor — ölçülen sahnenin 
    kullanıcının:** bantta vurgula / bant görünürken seçimi düşür / bırak.
    Kabul edilme gerekçesi ve iki çarenin bedeli `phase-2.md` §5'te.
 3. **Kaydırma.** Bant görünürken (1. senaryodan hemen sonra) tekerlekle
-   yukarı çık: ekran **dolu kalmalı**, bant viewport'la birlikte geriye
-   kaymalı. Teslimde düzeltildi (`967d5f3`) — kusuru sen buldun: bant
-   kaydırmanın ilk çentiğinde düşüyor, ızgaranın çıplak boşluğu açığa
-   çıkıyordu (ekranın üstü kapkara, içerik dipte, kaydırdıkça geri geliyor).
+   yukarı çık, sonra aynı kadar geri in. Beklenen: **her çentik bir satır**,
+   iki yönde de, ölü bölge yok ve sıçrama yok; geri inerken ekran bandın
+   durduğu yere oturuyor. Teslimde **iki tur** düzeltildi ve ikisini de sen
+   buldun:
+   - (a) `967d5f3` öncesi bant ilk çentikte düşüyor, ızgaranın çıplak boşluğu
+     açığa çıkıyordu (ekranın üstü kapkara, içerik dipte, kaydırdıkça geri
+     geliyor).
+   - (b) `967d5f3` bandı viewport'la birlikte kaydırdı ve görüntüyü düzeltti,
+     ama `fill + offset` sabit kaldığı için ekranın tepesi boşluk kadar çentik
+     boyunca hiç kıpırdamıyordu ("sanki bi scroll sayıyor"). Kalıcı çare
+     `HASH2`: bant `display_offset == fill` olan pencerenin **görsel ikizi**
+     sayılıyor, kaydırma çentiği oradan devam ettiriyor ve yaslama geçmiş
+     penceresinde kalkıyor.
 4. **Alternatif ekrandan çıkış.** `vim` aç, çık. Çıkış karesinde `fill > 0` ve
    öteleme **bir kare** süzülüyor, sonra dock'u geri getiren resize'ın
    `geometry` bayrağı snap'liyor. Hissedilir ve savunulur ama **tasarlanmış
@@ -178,7 +188,8 @@ Hiçbiri açık hata değil; hepsi kapıda tartılıp kabul edildi.
 - [x] `make duman` yeşil, jetonlar değişmemiş (2026-09-20)
 - [ ] Gözle kontrol B.2 §1 (asıl senaryo — kaymanın hissi)
 - [ ] Gözle kontrol B.2 §2 (duran seçim + bant → karar)
-- [ ] Gözle kontrol B.2 §3 (kaydırmada bant kayıyor — **düzeltme sonrası**)
+- [ ] Gözle kontrol B.2 §3 (kaydırma: çentik başına bir satır, iki yönde —
+      **ikinci düzeltme sonrası**)
 - [ ] Gözle kontrol B.2 §4 (alternatif ekrandan çıkış — bir karelik kayma)
 - [ ] `docs/YOL-HARITASI.md`'nin overlay maddesi kapansın mı, kullanıcı kararı
 - [ ] `/ship`

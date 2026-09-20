@@ -59,10 +59,10 @@ _Requirements: R4.1, R4.2, R4.3, R6_
 ## Bilinen sınır (adıyla yazılır)
 
 `snap` bugün `scrolled || geometry` ve `scrolled` `display_offset`'in
-değişmesi. `filled` ile `scrolled` **aynı karede doğru olabiliyor** — bu satır
-bir dönem tersini söylüyordu, çünkü R2.2 kaydırılmış pencerede `fill`'i
-sıfırlıyordu; o kapı teslimde kalktı (2026-09-20) ve bant artık kaydırılmış
-pencerede de duruyor. Guard'ın davranışı **değişmedi ve doğru kalıyor**:
+değişmesi. `filled` ile `scrolled` **aynı karede doğru olamıyor**: R2.2
+kaydırılmış pencerede `fill`'i sıfırlıyor. Kapı teslimde bir tur kalkıp geri
+geldi (2026-09-20) ve bu satır o turda tersini söylüyordu; kalıcı hâl
+başlangıçtaki hâl. Guard'ın davranışı **hiç değişmedi ve doğru kalıyor**:
 `!snap` terimi dıştan yutuyor, yani tekerleğin döndüğü karede `snap` kazanıyor
 ve öteleme süzülmeden oturuyor. İstenen de bu — kaydırma bir animasyon değil
 doğrudan bir manipülasyon, parmağın altındaki içerik gecikmeli gelmemeli.
