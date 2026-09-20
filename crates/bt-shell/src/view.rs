@@ -903,9 +903,15 @@ define_class!(
 /// `bt-core`'un kendi çözücüsü OSC 7 için var ve orada kalıyor (katman
 /// düzeni); burada Foundation'ın kendi cevabı okunuyor.
 ///
-/// Çözülemeyen öğe (URL olmayan, yol vermeyen — `http://` bir dosya yolu
-/// değil) **sessizce düşüyor**: damlanın bir parçasını anlamamak tamamını
-/// düşürmek için sebep değil.
+/// Çözülemeyen öğe **sessizce düşüyor**: damlanın bir parçasını anlamamak
+/// tamamını düşürmek için sebep değil. Eleme üç kademeli ve ortadaki şart —
+/// `NSURL`'e çözülemeyen, **`isFileURL` demeyeni** ve yol vermeyen.
+///
+/// Ortadaki kademe set kapısında eklendi (018): `NSURL` sınıfı `http://`'yi
+/// de okur ve `NSURL.path` ona `/foo` cevabını verir, yani web adresi
+/// damlatan kullanıcı giriş satırında kökten bir yol bulurdu. Karar 4 "yalnız
+/// dosya URL'si" diyor ve `plan.md` metin/URL damlasını kapsam dışında
+/// tutuyor; kayıt doğruydu, kod eksikti.
 fn dropped_paths(board: &NSPasteboard) -> Vec<String> {
     let classes: Retained<NSArray<AnyClass>> = NSArray::from_slice(&[NSURL::class()]);
     // SAFETY: imzanın iki koşulu da sağlanıyor — sınıf dizisi gerçek bir
@@ -918,6 +924,7 @@ fn dropped_paths(board: &NSPasteboard) -> Vec<String> {
         .filter_map(|object| {
             object
                 .downcast_ref::<NSURL>()
+                .filter(|url| url.isFileURL())
                 .and_then(NSURL::path)
                 .map(|path| path.to_string())
         })
