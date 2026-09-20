@@ -23,19 +23,23 @@ karakter sistemin cascade'inden geliyor** (`font::fallback_font`, 019): yüz
 merdiveni tükendikten sonra, negatif önbellekten önce, yani anahtar başına
 atlasın ömründe bir kez ve kabul edilen aday sıradan bir yuvaya düşüyor —
 yeni önbellek, yeni tavan, yeni tahliye yok. **Kapı geometrik**: adayın
-ilerlemesi hücrenin ilerlemesini aşıyorsa kutu kalıyor, ve emoji (2.17×),
-`.LastResort` (1.83×), CJK (1.66×) ile geniş matematik harfi (1.07×) o **tek**
-kapıdan eleniyor — aile adı karşılaştırması, trait biti ve sihirli dizge yok
-(oranlar ölçüldü). Alternatifi yarım çizilmiş bir glyph'ti: kutu görünür bir
-eksiklik, kırpılmış glyph sessiz bir bozulma. Boy sınıfının ikisi de **ayrı
-ayrı** değerlendiriliyor; yedeğin tabanı ile sınırı o sınıfın kendi fontu,
-yoksa küçük satıra büyük punto glyph düşerdi. Glyph hücrede **ortalanıyor** ve
-kural evrensel, yedeğe koşullu değil: eşaralıklı taban fontta her glyph'in
-ilerlemesi hücrenin ilerlemesinin ta kendisi (ölçüldü, iki sınıfta da), yani
-kaydırma tam olarak sıfır ve raster bit bit aynı. Ortalamanın girdisi hücrenin
-**kesirli** ilerlemesi, yuvarlanmış genişliği değil — ızgaranın adımı
-yuvarlanmış olan ama kesirli olanla karşılaştırma taban fontun kendi glyph'ini
-bile hücreden dar gösterir ve her harfi yarım pikselin altında kaydırırdı.
+ilerlemesi hücrenin ilerlemesini aşıyorsa kutu kalıyor, ve emoji, `.LastResort`,
+CJK, geniş matematik harfi ile Braille o **tek** kapıdan eleniyor — aile adı
+karşılaştırması, trait biti ve sihirli dizge yok (oranlar ölçüldü, sayıları
+`.tasks/019-glyph-yedegi/phase-1.md` → Uygulama Notları). Kapı **yalnız
+ilerlemeyi** ölçüyor, mürekkep kutusunu değil: dar ilerleyen ama geniş boyayan
+bir aday geçer ve sağdan kırpılır, yani "kutu ya da tam glyph" bir dilek değil
+ilerleme ölçüsünde bir söz. Alternatifi yarım çizilmiş bir glyph'ti: kutu
+görünür bir eksiklik, kırpılmış glyph sessiz bir bozulma. Boy sınıfının ikisi
+de **ayrı ayrı** değerlendiriliyor; yedeğin tabanı ile sınırı o sınıfın kendi
+fontu, yoksa küçük satıra büyük punto glyph düşerdi. Glyph hücrede
+**ortalanıyor** ve kural evrensel, yedeğe koşullu değil: eşaralıklı taban
+fontta her glyph'in ilerlemesi hücrenin ilerlemesinin ta kendisi (ölçüldü, beş
+yüzün beşinde de — dört yüz artı küçük sınıf), yani kaydırma tam olarak sıfır
+ve raster bit bit aynı. Ortalamanın girdisi hücrenin **kesirli** ilerlemesi,
+yuvarlanmış genişliği değil: ızgaranın adımı yuvarlanmış olan, ama ortalamayı
+**yuvarlanmışa** bağlamak taban fontun kendi glyph'ini bile hücreden dar
+gösterir (7.827 < 8) ve her harfi yarım pikselin altında kaydırırdı.
 `bt-gpu` atlası
 `R8Unorm` dokuya bağlar, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
@@ -425,9 +429,13 @@ Tekerleğin işaretçisi reddin dışında, çünkü o bir seçim ucu değil rap
 giden koordinat — reddedilseydi band ekrandayken kaydırma büsbütün ölürdü.
 Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app` paketini
 üretir.
-Emoji, geniş glyph ve kutu çizim henüz yok — üçü de **tek hücrelik yedeğin
-genişlik kapısından** eleniyor (yukarıda), yani kutu çiziliyor ve bunu çizmek
-ayrı bir setin işi. Aşağıdaki sözleşme kod geldikçe
+Emoji ve geniş glyph henüz yok: ikisi de **tek hücrelik yedeğin genişlik
+kapısından** eleniyor (yukarıda), yani kutu çiziliyor. **Kutu ve blok çizim
+ayrı bir olgu ve kapının konusu değil** — o karakterler (U+2500–U+254B,
+U+2580–U+259F) Menlo'da **var**, yedek yoluna hiç girmiyorlar; sorun fontun
+glyph'inin hücreyi doldurmaması, yani alt alta gelen iki bloğun arasında şerit
+kalması. Çaresi yedek değil **yordamsal çizim** (`RuleKind` emsali) ve Braille
+de aynı aileden; üçü `docs/YOL-HARITASI.md`'de tek borç. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri
 aynı commit'te düzelir.
 

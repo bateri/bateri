@@ -20,7 +20,7 @@
 | 016 | [imlec-ayarlari](016-imlec-ayarlari/) | 🟢 | `main`'de — imlecin köşe yarıçapı, gölgesi, odaksız hâli ve blink periyodu `[terminal]` anahtarları oldu; dördü de kayıt anında ve varsayılanları bugünkü görüntü |
 | 017 | [ekranin-geri-donusu](017-ekranin-geri-donusu/) | 🟢 | tamamlama listesi kalkınca ekran Tab öncesine dönüyor: üstteki boşluk geçmişin en yeni satırlarıyla doluyor ve dönüş kayarak oluyor, kasten temizleme (`2J`) hariç. Teslimden sonra beş gözle-kontrol düzeltmesi geldi (kaydırmanın sürekliliği, bandın kendi blok işareti, yaslamanın korunması, seri kaydırmanın dalgalanması) ve hepsi bekçili. İki ürün kararı kapandı: bant satırları seçilemiyor (çıkış yolu yol haritasında borç) ve yol haritasının overlay maddesi kapandı |
 | 018 | [klavye-ve-surukleme](018-klavye-ve-surukleme/) | 🟢 | metin girişi AppKit'in yığınından geçiyor (`NSTextInputClient`), **ölü tuşlar yazılabiliyor** (`~` ve `` ` `` Türkçe Q'da), Option+←/→/⌫ kelime geziyor/siliyor, Cmd+⌫ satırı siliyor, Finder damlası giriş satırına düşüyor. Elle tuş turu, Finder damlası ve press-and-hold gerçek pencerede doğrulandı; popover ölçümü bir bilinen sınırı da düşürdü (`replacementRange`) |
-
 | 019 | [glyph-yedegi](019-glyph-yedegi/) | 🔨 | Seçili fontta olmayan tek hücrelik karakter sistemin cascade'inden geliyor (`⏵` düzeldi); kapı geometrik, hücreye sığmayan aday kutu kalıyor. 2 phase tamam; teslim bekliyor. Ölçümün çıkardığı yeni borç yol haritasında: blok/çizgi/Braille fonttan geliyor ve döşemiyor (maskot, spinner) |
+
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

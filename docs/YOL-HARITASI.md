@@ -436,19 +436,36 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   girmek zorunda. Kapsamı 020'ye eklenebilir ya da kendi küçük setini alır;
   kullanıcı görünürlüğü yüksek, çünkü ok/sembol/kutu karakterleri TUI'lerde
   ve prompt'larda her yerde.
+- **`line_height = 1.0` bir no-op değil: hücreye bir piksel ekliyor.**
+  019'un kapısında ölçüldü (2026-09-20). `font::metrics` fazlalığı
+  `round_up(natural * (line_height - 1.0))` ile hesaplıyor ve `round_up`'ın
+  **tabanı 1** — taban ölçüler (genişlik, yükseklik) sıfır olmasın diye
+  konulmuş, ama fazlalık için sıfır meşru bir değer. Sonuç: varsayılan ayarda
+  her hücre fontun istediğinden bir piksel uzun (Menlo 13pt: font 17 istiyor,
+  hücre 18 oluyor). Fazlalık alta düşüyor (`above = extra / 2 = 0`), yani
+  taban çizgisi ve kurallar oynamıyor; belirti yalnız bir piksel fazla satır
+  aralığı — kusurlu değil ama kodun **söylediği şey değil**
+  (`font.rs`: "`1.0`'da fazlalık sıfır, yani bu yol varsayılanda bir
+  no-op"). Bekçisi de yoktu: `line_height_grows_the_cell_…`'in dördüncü
+  iddiası `1.0`'ı yine `1.0` ile karşılaştırıyordu, yani totolojiydi (yorumu
+  019'un kapısında düzeltildi).
+  **Düzeltmesi bir ürün kararı**, o yüzden 019'da yapılmadı: `extra`'yı
+  tabansız yuvarlamaya çevirmek her kullanıcının ızgarasını bir piksel
+  sıkıştırır ve ekrana bir satır daha sığdırır. İsteniyorsa tek satırlık bir
+  düzeltme; istenmiyorsa `font.rs`'in yorumu gerçeğe uydurulur.
 - **Blok, çizgi ve Braille fonttan geliyor ve döşemiyor.** 2026-09-20'de
   kullanıcı ekran görüntüsüyle bildirdi: 019'dan **sonra** da Claude Code'un
   maskotu bozuk. Ölçüldü ve sebep yedek **değil** — maskotun karakterleri
   (blok elemanları U+2580–U+259F) ile çizgi çizim karakterleri (U+2500–U+254B)
   **zaten Menlo'da var**, yedek yoluna hiç girmiyorlar. Sorun fontun
-  glyph'inin hücreyi doldurmaması: Menlo'da `█` (U+2588) 13pt'de 8×18'lik
-  hücrenin yalnız 3–16 satırlarını boyuyor, yani iki `█` alt alta gelince
-  arada ~5 piksel siyah şerit kalıyor (ekran görüntüsünde 11 aygıt pikseli,
-  @2x ile birebir tutuyor). Yatayda dolduruyor, o yüzden belirti yalnız
-  satırlar arasında. **Braille ayrı bir yüzü aynı olgunun:** Menlo'da yok,
-  Apple Braille'den geliyor ve ilerlemesi hücrenin **1.135 katı**, yani
-  019'un genişlik kapısından dönüyor ve kutu kalıyor — Claude Code'un
-  spinner'ı (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) bu yüzden kutu.
+  glyph'inin hücreyi doldurmaması: Menlo'nun `█`'i (U+2588) hücrenin üstünde
+  ve altında birkaç satır boş bırakıyor, yani iki `█` alt alta gelince arada
+  siyah bir şerit kalıyor. Yatayda dolduruyor, o yüzden belirti yalnız
+  satırlar arasında. **Braille aynı olgunun öteki yüzü:** Menlo'da yok, Apple
+  Braille'den geliyor ve ilerlemesi hücreninkini aşıyor, yani 019'un genişlik
+  kapısından dönüyor — Claude Code'un spinner'ı (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) bu yüzden
+  kutu. Sayılar ve nasıl ölçüldükleri
+  `.tasks/019-glyph-yedegi/phase-2.md` → Uygulama Notları'nda.
   **Çaresi üçü için de tek ve yedek font değil: yordamsal çizim**, `RuleKind`
   sprite'ları gibi. Blok, çizgi ve Braille birer **ızgara grafiği** (Braille
   2×4 nokta, 256 kombinasyon tek formülden); fonttan gelmeleri zaten yanlış,

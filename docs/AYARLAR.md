@@ -427,13 +427,21 @@ line_height = 1.0
   kırpılır.
 - **Seçili fontta olmayan karakter sistemden gelir.** Tek hücreye sığdığı
   sürece macOS'un kendi font zincirinden çizilir; fontunu değiştirmene ya da
-  bir yedek liste tanımlamana gerek yok. Sığmayanlar **kutu olarak kalır** ve
-  bu bilinçli: emoji, CJK (`漢`), geniş oklar (`` U+E0B0``) ve Braille
-  (spinner'larda kullanılan `⠋⠙⠹`) hücrenin genişliğini aşıyor. Yarım
-  çizilmiş bir glyph sessiz bir bozulma olurdu — komşu harfin üstüne taşar ve
-  fark etmezsin; kutu ise görünür bir eksiklik, yani neyin çizilemediğini
-  sana söyler. Bu karakterleri gerçekten çizmek ayrı bir işin konusu
+  bir yedek liste tanımlamana gerek yok. Ölçüt karakterin **ilerlemesi**:
+  hücreden genişse çizilmez, **kutu kalır**. Bu bilinçli — emoji, CJK (`漢`),
+  powerline'ın ayraçları (`U+E0B0`) ve Braille (spinner'ların `⠋⠙⠹`'si)
+  hücrenin genişliğini aşıyor, ve yarım çizilmiş bir glyph sessiz bir bozulma
+  olurdu; kutu ise görünür bir eksiklik, yani neyin çizilemediğini sana
+  söyler. Bu karakterleri gerçekten çizmek ayrı bir işin konusu
   (`docs/YOL-HARITASI.md`).
+- Ölçünün **ilerleme** olduğunun bir bedeli var: dar ilerleyip geniş boyayan
+  bir glyph kapıdan geçer ve taşan kısmı kırpılır. Bugünkü font zincirinde
+  böyle bir karakterle karşılaşılmadı, ama söz "hiç kırpılmaz" değil
+  "ilerlemesi sığmayan hiç çizilmez".
+- **Kutu ve blok çizim karakterleri bunun dışında** (`─ │ ┌ █ ▀ ▄`): onlar
+  fontta zaten var, yedeğe hiç uğramıyorlar. Alt alta gelen iki bloğun
+  arasında ince bir şerit görüyorsan sebebi bu değil — fontun glyph'i hücreyi
+  tam doldurmuyor ve çaresi ayrı bir iş (`docs/YOL-HARITASI.md`).
 - `family = ""` ya da anahtarın olmaması varsayılan font demektir, uyarı
   vermez.
 - `size` tam sayı da ondalıklı da olabilir (`13`, `13.5`). Sıfır, negatif,

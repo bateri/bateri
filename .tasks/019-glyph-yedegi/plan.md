@@ -79,4 +79,4 @@ Atlas::slot(Char(ch), face, size)
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| kapı | |
+| kapı | ✅ |
