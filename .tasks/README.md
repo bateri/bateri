@@ -19,7 +19,7 @@
 | 015 | [imlec-cilasi](015-imlec-cilasi/) | 🟢 | `main`'de — imleç doğru anda kıpırdıyor (Enter'daki sıçrama histerezisle kalktı) ve iyi görünüyor: caret kendi fragment'inde, köşesi yuvarlak, hafif gölgesi var ve odaksız pencerede içi boşalıp blink duruyor |
 | 016 | [imlec-ayarlari](016-imlec-ayarlari/) | 🟢 | `main`'de — imlecin köşe yarıçapı, gölgesi, odaksız hâli ve blink periyodu `[terminal]` anahtarları oldu; dördü de kayıt anında ve varsayılanları bugünkü görüntü |
 | 017 | [ekranin-geri-donusu](017-ekranin-geri-donusu/) | 🔨 | 7 phase + kapı tamam; teslim bekliyor — tamamlama listesi kalkınca ekran Tab öncesine dönüyor: üstteki boşluk geçmişin en yeni satırlarıyla doluyor ve dönüş kayarak oluyor, kasten temizleme (`2J`) hariç. Gözle kontrol ve `make duman` kullanıcıda ([teslim.md](017-ekranin-geri-donusu/teslim.md) → B.2) |
-| 018 | [klavye-ve-surukleme](018-klavye-ve-surukleme/) | 🔨 | macOS metin kısayolları, Option kipleri, **ölü tuşlar** (`~` ve `` ` `` Türkçe Q'da yazılamıyor — ölçüldü) ve Finder'dan dosya sürükleme; dördü de `view.rs` + `keys.rs`'te |
+| 018 | [klavye-ve-surukleme](018-klavye-ve-surukleme/) | 🔨 | 3 phase + kapı tamam; teslim bekliyor — metin girişi AppKit'in yığınından geçiyor (`NSTextInputClient`), **ölü tuşlar yazılabiliyor** (`~` ve `` ` `` Türkçe Q'da), Option+←/→/⌫ kelime geziyor/siliyor, Cmd+⌫ satırı siliyor, Finder damlası giriş satırına düşüyor. Elle tuş turu, damla turu, press-and-hold ölçümü ve `make duman` kullanıcıda ([teslim.md](018-klavye-ve-surukleme/teslim.md) → B.2) |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

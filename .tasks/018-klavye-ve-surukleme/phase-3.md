@@ -72,8 +72,8 @@ bölü, `$`, `` ` ``, `;`, `&`, satır sonu, Türkçe karakter, çok dosya.
       sınama; önce stub'a karşı düştükleri görüldü)
 - [x] `view.rs` başlığı ve `CLAUDE.md` güncellendi (+ `docs/YOL-HARITASI.md`,
       R6'nın son kalemi)
-- [x] Doğrulama geçti (`make hepsi` → exit 0); `make duman` kullanıcıda
-      (gerçek pencere ister)
+- [x] Doğrulama geçti (`make hepsi` → exit 0)
+- [~] `make duman` — **kullanıcı koşacak** (gerçek pencere gerekiyor)
 - [x] Yayın etkisi yazıldı
 
 ## Uygulama Notları
@@ -121,7 +121,7 @@ iki waive (phase-1'in tablosu) kapıda **yeniden açılmadı**.
 | # | bulgu | karar |
 |---|---|---|
 | 1 | `insertText:` `replacementRange`'i yoksayıyor; bastıran tek şey `registerDefaults` ve o **en düşük öncelikli** domain — NSGlobalDomain'de ya da MDM'de `ApplePressAndHoldEnabled = 1` olan kullanıcıda popover dönüyor ve kabuğa `eé` gidiyor | **waive** — düzeltme PTY'ye `\x7f` yazar, yani tuşun ne yazdığını değiştirir |
-| 2 | `dropped_paths`'in doc'u "`http://` sessizce düşüyor" diyor ama `NSURL.path` `/foo` döndürüyor: karışık damlada uydurma yol giriş satırına giriyor | **waive** — damlanın ne ürettiğini değiştirir; **doc ile kod çelişiyor**, ikisinden biri kapanmalı |
+| 2 | `dropped_paths`'in doc'u "`http://` sessizce düşüyor" diyor ama `NSURL.path` `/foo` döndürüyor: karışık damlada uydurma yol giriş satırına giriyor | **düzeltildi** (`e0e4660`, orkestratör) — waive edilemezdi: `CLAUDE.md` çelişen iki cümleden birinin aynı commit'te düzelmesini istiyor ve hangisinin düzeleceğini **plan çoktan söylemiş** (Karar 4 "yalnız dosya URL'si", Kapsam Dışı "metin/URL damlası"), yani kayıt doğru koddu eksik. `isFileURL` kademesi eklendi |
 | 3 | `attributedSubstringForProposedRange:` hep `nil`, oysa `markedRange` bileşimde `{0, len}` ilan ediyor | **waive** — `nil` phase-1'de gerekçeli bir karar ("geri okunacak belge yok"); değiştirmek o kararı bozar |
 | 4 | `setMarkedText:` bilinmeyen tipte erken dönüyor: ne `consumed` ne durum temizleniyor (`insertText:`'in tam tersi sırası) | **waive** — bileşim durumuna dokunuyor, yani tuşun ne yazdığına |
 | 5 | "tam tek karakter" ölçütü **üç** ayrı yazımda (`encode_key`'in `single`'ı, `page_scroll`, `reaches_terminal`) | **düzeltildi** — `keys::only_char` tek sahip, üçü de ona bağlandı; sözleşmeyi `only_char_is_the_single_owner_of_the_one_character_test` çiviliyor |
@@ -131,9 +131,31 @@ iki waive (phase-1'in tablosu) kapıda **yeniden açılmadı**.
 
 **Kapının düzelttiği iki kalem de davranışa dokunmuyor:** biri saf bir
 çıkarma (`only_char`, üç çağrı yeri bit bit aynı cevabı veriyor), öteki bir
-doc satırı. Kalan altısı **hissedilir davranışa** dokunuyor (tuşun ne
-yazdığı, damlanın ne ürettiği) ya da yapısal bir yeniden şekillendirme
-istiyor; ikisi de kullanıcının/orkestratörün kararı, kapının değil.
+doc satırı. Kalanı **hissedilir davranışa** dokunuyor (tuşun ne yazdığı,
+damlanın ne ürettiği) ya da yapısal bir yeniden şekillendirme istiyor; ikisi
+de kullanıcının/orkestratörün kararı, kapının değil.
+
+### Orkestratörün kararı (2026-09-20)
+
+**#2 düzeltildi** (yukarıda), **kalan beşi kabul edildi.** Gerekçeler ayrı,
+ortak değil:
+
+- **#1 (`replacementRange` / press-and-hold)** kabul **ama ölçüme bağlandı**.
+  Kapı search order'da haklı — `registerDefaults` en düşük öncelikli halka ve
+  NSGlobalDomain ya da MDM onu ezebilir. Ne var ki `plan.md` R1.6 tam bu
+  belirsizliği **zaten** "ölçüm bekliyor" diye yazmış: bastırmanın tutup
+  tutmadığı hiç ölçülmedi. Bastırma tutuyorsa kalem konusuz, tutmuyorsa
+  düzeltme gerekli — ve düzeltme tuşun ne yazdığını değiştirdiği için
+  kullanıcının kararı. `teslim.md` → B.2'de on saniyelik bir gözle kontrol ve
+  iki çare (uygulamanın kendi kalıcı domain'i / `replacementRange` kadar
+  `\x7f`) olarak duruyor.
+- **#3, #4 (IME sözleşmesi)** kabul: ikisi de `plan.md`'nin **Kapsam Dışı**
+  maddesinin içinde ("Tam IME — CJK ve altı çizili preedit'in çizilmesi").
+  Sözleşmenin tam hâli o yüzey doğduğunda yazılır; bugün tüketicisi yok.
+- **#6, #7 (çift sahiplik, tuş başına `String`)** kabul: ikisi de temizlik ve
+  kapının kendi gerekçesi doğru — klavye arbitrajını **elle tuş turu
+  koşmadan** yeniden şekillendirmek riski kazancın üstüne çıkarır. #7 ayrıca
+  "ölçülmemiş sayı yazılmaz"ın kapsamında: kazanç ölçülmedi.
 
 **Kapının kendi bulduğu kalem** (`/code-review`'un listesinde yok) phase-2'de:
 ⌘⌫ ile Finder damlası yığını atlayarak bekleyen bir bileşimin üstünden yazıyor

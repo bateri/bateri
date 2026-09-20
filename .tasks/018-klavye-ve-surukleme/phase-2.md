@@ -89,8 +89,8 @@ tek istisnası `view.rs`'te. Dokuz mevcut sınama yeni imzayla yeşil.
       Cmd+`"t"`'yi altı değiştirici kombinasyonunda da reddediyor
 - [x] `keys.rs`/`view.rs` doc'ları ve yol haritası güncellendi (+ `CLAUDE.md`,
       aşağıda)
-- [x] Doğrulama geçti (`make hepsi` → exit 0); `make duman` kullanıcıda
-      (gerçek pencere ister)
+- [x] Doğrulama geçti (`make hepsi` → exit 0)
+- [~] `make duman` — **kullanıcı koşacak** (gerçek pencere gerekiyor)
 - [x] Yayın etkisi yazıldı
 
 ## Uygulama Notları
@@ -139,7 +139,7 @@ tek istisnası `view.rs`'te. Dokuz mevcut sınama yeni imzayla yeşil.
   bu sette kapanmıyor. Çıkan: ölü tuşlar, Option'ın Meta dizileri, Cmd'nin
   izin listesi ve "set henüz açılmadı" defteri.
 
-### Set kapısının önerdiği waive (2026-09-20) — **karar orkestratörün**
+### Set kapısının önerdiği waive (2026-09-20) — **orkestratörde kabul edildi**
 
 **Yığını atlayan iki yeni yazıcı, bekleyen bir bileşimin üstünden PTY'ye bayt
 akıtıyor.** phase-1'in `/code-review`'unda kabul edilen 3. waive'in (Control
@@ -166,3 +166,11 @@ düzeltmedi.
 Kalem phase-1'in ölçüm tablosuna **iki satır** olarak ekleniyor ve
 kullanıcının elle turuna giriyor: `Option+ü` sonra ⌘⌫, ve `Option+ü` sonra
 Finder damlası. Kapatma kararı o ölçümden sonra, bu sette değil.
+
+**Kabul** (orkestratör, 2026-09-20): kapının gerekçesi phase-1'in kabul
+edilmiş 3. waive'iyle aynı sınıfta ve aynı ölçüm boşluğuna dayanıyor. Üç
+kalem (Control kolu, ⌘⌫, damla) artık **tek bir bilinen sınır**: yığını
+atlayan hiçbir yazıcı bekleyen bileşimi yıkmıyor. `teslim.md` onları tek
+maddede topluyor — ayrı ayrı yazmak üç ayrı kusur izlenimi verirdi, oysa
+çare de tek: bileşimi yıkacak ortak bir kapı, ve o kapı ancak preedit
+çizildiğinde (tam IME, kapsam dışı) dürüst olur.
