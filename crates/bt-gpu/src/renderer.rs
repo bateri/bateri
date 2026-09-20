@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use block2::RcBlock;
-use bt_atlas::{Atlas, Face, FontIssue, Metrics, Sprite, TOFU};
+use bt_atlas::{Atlas, Face, FontIssue, Metrics, SizeClass, Sprite, TOFU};
 use bt_core::{FontOptions, LinearRgba};
 use dispatch2::DispatchData;
 use objc2::rc::{Retained, autoreleasepool};
@@ -114,6 +114,7 @@ struct AtlasTexture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellMetrics {
     cell_px: (u16, u16),
+    context_cell_px: u16,
     gutter_px: u16,
     rule_px: u16,
 }
@@ -144,9 +145,19 @@ impl CellMetrics {
     /// kurabildiği bir tip o testleri GPU'ya bağlardı. Payın **argüman**
     /// olması aynı gerekçenin devamı: gövdeye gizlenmiş bir sabit, payı
     /// sorgulayan sınamaları da GPU'ya bağlardı.
-    pub fn new(width: u16, height: u16, gutter: u16, rule: u16) -> Option<Self> {
-        (width > 0 && height > 0).then_some(Self {
+    pub fn new(
+        width: u16,
+        height: u16,
+        context_width: u16,
+        gutter: u16,
+        rule: u16,
+    ) -> Option<Self> {
+        // Kapı üçünü birden soruyor: bağlam genişliği de **bölen**
+        // (`bt-gpu`'nun bağlam sütun bütçesi) ve sıfır geçseydi ızgaranınki
+        // yakalanırken onunki sessizce geçerdi.
+        (width > 0 && height > 0 && context_width > 0).then_some(Self {
             cell_px: (width, height),
+            context_cell_px: context_width,
             gutter_px: gutter,
             rule_px: rule,
         })
@@ -184,6 +195,20 @@ impl CellMetrics {
     /// metrikten. Punto ya da font değişince caret de onunla değişiyor.
     pub fn rule_px(self) -> u16 {
         self.rule_px
+    }
+
+    /// Dock'un bağlam satırındaki sütun adımı, piksel — küçük yüzün ilerleme
+    /// genişliği (`bt_atlas::Atlas::context_cell_w`).
+    ///
+    /// **Yalnız genişlik**: küçük glyph de büyük yuvaya, büyük hücrenin taban
+    /// çizgisine rasterize ediliyor, yani satır yüksekliği ve taban ortak.
+    /// Band aritmetiği ([`crate::dock_px`]) bu yüzden hiç değişmiyor — bağlam
+    /// satırı kendi bandında duruyor, yalnız harfleri küçük ve sık.
+    ///
+    /// `cell_px` gibi ≥ 1 ve aynı yapısal gerekçeyle: kaynağı
+    /// `font::round_up`, sınırın bu tarafında alan private.
+    pub fn context_cell_px(self) -> u16 {
+        self.context_cell_px
     }
 }
 
@@ -336,7 +361,7 @@ impl Renderer {
     /// `bt-shell` `bt-atlas`'ı görmüyor, metrik buradan geçiyor; katman
     /// tablosu (`CLAUDE.md`) değişmeden `CELL_PX` yer tutucusu ölebildi.
     pub fn cell_metrics(&self, scale: f64) -> CellMetrics {
-        let metrics = self.sync_atlas(scale);
+        let (metrics, context_w) = self.sync_atlas(scale);
         let (w, h) = metrics.cell_px;
         // `as u16` doygun: NaN ve negatif ölçek sıfır pay verir (ızgara
         // kenardan başlar, `split_into_grid` ile fare eşlemesi ikisi de doğru
@@ -351,7 +376,7 @@ impl Renderer {
         // bırakırdı; `expect` onu programlama hatasına çevirir. Panik yolu
         // değil: PTY okuma ve ayrıştırma bu satırdan geçmez, burası
         // pencere geometrisi yolu.
-        CellMetrics::new(w, h, gutter, metrics.underline_px.1)
+        CellMetrics::new(w, h, context_w, gutter, metrics.underline_px.1)
             .expect("bt-atlas hücre ölçüsünü 1'e kırpar")
     }
 
@@ -423,7 +448,7 @@ impl Renderer {
     /// **derleyici tarafından kabul edilir** (`unused_must_use` yalnız çıplak
     /// ifade deyimine bakar), yani `#[must_use]` burada bir bekçi değil bir
     /// niyet beyanı; bekçi bu satırın kendisi.
-    fn sync_atlas(&self, scale: f64) -> Metrics {
+    fn sync_atlas(&self, scale: f64) -> (Metrics, u16) {
         let font = self.font.borrow();
         let family = font.family.as_deref();
         let mut slot = self.atlas.borrow_mut();
@@ -440,8 +465,11 @@ impl Renderer {
         }
         // Ödünç değil **metrik** dönüyor: atlas ödüncünün bir çağrı sınırını
         // aşabildiği tek yer burasıydı ve [`Renderer::encode_glyphs`]'in
-        // dayandığı özellik tam olarak bunun olmaması.
-        atlas_tex.atlas.metrics()
+        // dayandığı özellik tam olarak bunun olmaması. Bağlam genişliği de
+        // aynı ödüncün içinden çıkıyor ve aynı sebeple demetle: ikinci bir
+        // çağrıda alınsaydı araya düşen bir `ensure` ikisini ayrı atlaslardan
+        // verirdi.
+        (atlas_tex.atlas.metrics(), atlas_tex.atlas.context_cell_w())
     }
 
     /// GPU'nun hatasız bitirdiği kare sayısı. Anlamın sahibi artık
@@ -1095,6 +1123,7 @@ impl AtlasTexture {
                 inv,
                 Sprite::Char(glyph.ch),
                 glyph.face,
+                glyph.size,
             );
             self.instances.push(GlyphInstance {
                 pos: glyph.pos,
@@ -1114,6 +1143,9 @@ impl AtlasTexture {
                 inv,
                 Sprite::Rule(rule.kind),
                 Face::Regular,
+                // Kurallar **her zaman** gösterim ölçüsünde: bağlam satırında
+                // kural yok ve `Atlas::slot` bunu ayrıca normalize ediyor.
+                SizeClass::Normal,
             );
             self.instances.push(GlyphInstance {
                 pos: rule.pos,
@@ -1146,8 +1178,9 @@ fn slot_uv(
     inv: (f32, f32),
     sprite: Sprite,
     face: Face,
+    size: SizeClass,
 ) -> [f32; 2] {
-    let (slot, upload) = atlas.slot(sprite, face);
+    let (slot, upload) = atlas.slot(sprite, face, size);
     let (x, y) = if let Some(upload) = upload {
         upload_slot(texture, upload.origin, metrics, upload.bytes);
         upload.origin
@@ -1272,14 +1305,14 @@ mod tests {
     /// geometrisi değil, GPU'nun hangi rengi hangi hücreye boyadığı. Payın
     /// orijine eklendiğini `frame.rs` tarafında `pos` sınamaları tutuyor.
     fn grid(width: u16, height: u16) -> CellMetrics {
-        CellMetrics::new(width, height, 0, 1).expect("sıfır olmayan hücre")
+        CellMetrics::new(width, height, width, 0, 1).expect("sıfır olmayan hücre")
     }
 
     /// Payı **sıfır olmayan** ızgara: halenin payı sol paydan türüyor
     /// ([`Frame::glow_px`]), yani paysız bir ızgarada hale hiç doğmuyor ve
     /// onu sınayan hiçbir şey göremez.
     fn grid_with_gutter(width: u16, height: u16, gutter: u16) -> CellMetrics {
-        CellMetrics::new(width, height, gutter, 1).expect("sıfır olmayan hücre")
+        CellMetrics::new(width, height, width, gutter, 1).expect("sıfır olmayan hücre")
     }
 
     /// Yalnız arka planı olan hücre; `ch: None` glyph üretmez.
@@ -1381,16 +1414,21 @@ mod tests {
         // Tipin taşıdığı tek garanti bu. Düşerse `bt-shell`'in bölmesi
         // `inf` verir, `inf as u16` 65535 eder ve `Session::resize`'ın sıfır
         // kapısına takılmadan 65535×65535'lik bir `TIOCSWINSZ` geçer.
-        assert!(CellMetrics::new(0, 18, 8, 1).is_none());
-        assert!(CellMetrics::new(9, 0, 8, 1).is_none());
-        let metrics = CellMetrics::new(9, 18, 8, 1).expect("ölçü");
+        assert!(CellMetrics::new(0, 18, 0, 8, 1).is_none());
+        assert!(CellMetrics::new(9, 0, 9, 8, 1).is_none());
+        // Bağlam genişliği de **bölen** (`crate::frame::context_cols`), yani
+        // aynı kapıdan geçiyor: sıfır geçseydi ızgaranınki yakalanırken dock'un
+        // bağlam satırı sessizce sıfıra bölerdi.
+        assert!(CellMetrics::new(9, 18, 0, 8, 1).is_none());
+        let metrics = CellMetrics::new(9, 18, 7, 8, 1).expect("ölçü");
         assert_eq!(metrics.cell_px(), (9, 18));
+        assert_eq!(metrics.context_cell_px(), 7);
         assert_eq!(metrics.gutter_px(), 8);
         // Pay **eliyor değil taşınıyor**: bölen değil çıkan, ve sıfır pay
         // "ızgara kenardan başlıyor" demek. Sıfırı burada da elemek, payı
         // konu etmeyen her sınamayı uydurma bir değer yazmaya zorlardı.
         assert_eq!(
-            CellMetrics::new(9, 18, 0, 1)
+            CellMetrics::new(9, 18, 9, 0, 1)
                 .expect("sıfır pay meşru")
                 .gutter_px(),
             0
@@ -1905,7 +1943,7 @@ mod tests {
 
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(cw, ch, gutter, 1).expect("ölçü"),
+            CellMetrics::new(cw, ch, cw, gutter, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         // İki işaret, iki durum rengi: 0. satır başarılı, 2. satır başarısız.

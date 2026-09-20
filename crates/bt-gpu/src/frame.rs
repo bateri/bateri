@@ -16,7 +16,7 @@
 
 use std::mem::offset_of;
 
-use bt_atlas::{Face, RuleKind};
+use bt_atlas::{Face, RuleKind, SizeClass};
 use bt_core::{Block, CaretShape, CaretStyle, Cell, LinearRgba, UnderlineStyle, UnfocusedCaret};
 
 use crate::renderer::CellMetrics;
@@ -277,6 +277,16 @@ pub(crate) struct GlyphCell {
     /// çevirisi. [`GlyphInstance`] bunu **taşımıyor**: uv0 yuvayı, yuva da
     /// yüzü zaten kodluyor.
     pub(crate) face: Face,
+    /// Hangi punto sınıfından rasterize edileceği; yüze **dik** bir eksen.
+    ///
+    /// Tek üreticisi [`Frame::push_dock`] ve tek değeri dock'un bağlam
+    /// satırında `Small`. Ayrı bir liste açılmadı ve sebebi encode:
+    /// `GlyphInstance` bundan da etkilenmiyor (uv0 yuvayı kodluyor), yani
+    /// küçük glyph aynı listede, aynı draw call'da ve aynı `cell_px`
+    /// uniform'uyla çiziliyor. Dörtlü büyük kalıyor, küçük harf onun sol
+    /// kenarında duruyor; komşu dörtlüler örtüşüyor ama örtüşen pikseller
+    /// saydam ve blend `SourceAlpha`, yani altındaki harf bozulmuyor.
+    pub(crate) size: SizeClass,
     pub(crate) rgba: [f32; 4],
 }
 
@@ -368,6 +378,15 @@ pub(crate) struct DockSurface {
 /// tutmuyor — payın `CellMetrics` ile taşınmasıyla aynı disiplin.
 pub const DOCK_ROWS: u16 = 2;
 
+/// Bağlam satırının dock-yerel satır numarası: giriş satırının **altı**.
+///
+/// `bt-core`'un `dock::CONTEXT_ROW`'uyla aynı sayı ve ikisi de [`DOCK_ROWS`]'un
+/// tüketicisi — biri satırı doğuruyor, öteki çiziyor. Sınırdan bir bayrak
+/// geçirmek yerine satır numarasına bakılıyor, çünkü "hangi satır küçük"
+/// çizimin kararı: `bt-core` hücreyi verir, punto sınıfını bu katman seçer
+/// (`Dock::sigil`'in şeklinin burada seçilmesiyle aynı ayrım).
+pub(crate) const DOCK_CONTEXT_ROW: u16 = 1;
+
 /// Dock'un kapladığı yükseklik, **piksel**; `dock_rows == 0` ise sıfır.
 ///
 /// Formülün **tek** kopyası burası ve iki tüketicisi var: ızgaranın satır
@@ -390,6 +409,24 @@ pub fn dock_px(dock_rows: u16, cell: CellMetrics) -> f32 {
         f32::from(cell.cell_px().1),
         f32::from(cell.gutter_px()),
     )
+}
+
+/// Bağlam satırının sütun bütçesi: **aynı piksel şeridi, küçük adım**.
+///
+/// Dock sol payı ızgarayla paylaşıyor ([`Frame::dock_pos`]), yani iki satırın
+/// kapladığı yatay şerit birebir aynı; ayrışan tek şey bir harfin kaç piksel
+/// ilerlettiği. Bütçe bu yüzden bir oran: `cols * hücre / bağlam hücresi`.
+///
+/// Hesabın burada olması şart — `bt-core` piksel görmüyor ve görmemeli
+/// (`dock::render`'ın `context_cols`'u bir **bütçe**, punto kararı değil).
+/// `u32`'de çarpılıyor: 65535 sütun × 65535 piksel `u16`'yı taşırdı, oysa
+/// ara değer yalnız bir orana giriyor.
+///
+/// Bölen ≥ 1 ve bu **yapısal**: [`CellMetrics::new`] sıfır bağlam genişliğini
+/// eliyor, yani burada ikinci bir kapı yok.
+pub(crate) fn context_cols(cols: u16, cell: CellMetrics) -> u16 {
+    let span = u32::from(cols) * u32::from(cell.cell_px().0);
+    u16::try_from(span / u32::from(cell.context_cell_px())).unwrap_or(u16::MAX)
 }
 
 /// Formülün gövdesi, ham sayılarla: [`dock_px`] ile [`Frame`] aynı aritmetiği
@@ -479,6 +516,10 @@ pub(crate) struct Frame {
     /// çizilir (üstü çizili, altındaki harfin üstünden geçmeli).
     rules: Vec<RuleCell>,
     cell_px: (f32, f32),
+    /// Dock'un bağlam satırındaki sütun adımı, piksel
+    /// ([`CellMetrics::context_cell_px`]). `cell_px` ile aynı gerekçeyle
+    /// alan: hareket karesi `clear` çağırmıyor ve değeri **koruyor**.
+    context_cell_px: f32,
     /// Kural çizgisinin kalınlığı, piksel — ince caret'lerin genişliği
     /// ([`caret_rect`]). `cell_px` ile aynı gerekçeyle alan: hareket karesi
     /// `clear` çağırmıyor ve değeri **koruyor**.
@@ -638,6 +679,7 @@ impl Frame {
         // zemin renginde bir harf, yani görünmez bir hücre.
         self.clear_caret();
         self.cell_px = (f32::from(cell_px.0), f32::from(cell_px.1));
+        self.context_cell_px = f32::from(metrics.context_cell_px());
         self.rule_px = f32::from(metrics.rule_px());
         self.gutter_px = f32::from(metrics.gutter_px());
         // **Sonsuz**, sıfır değil: sıfır "dock bandı pencerenin tepesinde"
@@ -722,6 +764,9 @@ impl Frame {
                 pos,
                 ch,
                 face: face(cell.bold, cell.italic),
+                // Izgara **her zaman** gösterim fontunda: küçük sınıfın tek
+                // yeri dock'un bağlam satırı ([`Frame::push_dock`]).
+                size: SizeClass::Normal,
                 rgba: cell.fg.to_array(),
             });
         }
@@ -985,6 +1030,13 @@ impl Frame {
                 pos,
                 ch,
                 face: face(cell.bold, cell.italic),
+                // Konumla **aynı eşik** ([`Frame::column_px`]): ayrışsalardı
+                // harf bir ölçüde, adımı başka ölçüde olurdu.
+                size: if cell.row >= DOCK_CONTEXT_ROW {
+                    SizeClass::Small
+                } else {
+                    SizeClass::Normal
+                },
                 rgba: cell.fg.to_array(),
             });
         }
@@ -1326,9 +1378,34 @@ impl Frame {
     /// ([`Frame::pos_at`]): arka plan, glyph, kural ve caret dördü de bu
     /// satırdan geçiyor, ikinci bir yerde eklenseydi pay iki kez uygulanırdı.
     fn dock_pos(&self, col: u16, row: u16) -> [f32; 2] {
-        let [x, y] = self.pos(col, row);
+        // Sütun **adımı** satıra göre: bağlam satırında küçük yüzün
+        // ilerlemesi. Büyük adımla çizilseydi küçük harfler büyük hücrelerin
+        // sol kenarlarına dağılır, aralarında sebepsiz boşluk kalırdı — göz
+        // bunu "harf harf yazılmış" diye okur.
+        //
+        // Dikey aritmetik **değişmiyor**: satırın yüksekliği de payı da
+        // ortak, küçük glyph büyük hücrenin taban çizgisinde duruyor. Band
+        // ([`dock_px`]) bu yüzden hiç kısalmıyor.
+        let [_, y] = self.pos(0, row);
+        let w = self.column_px(row);
         let pad = self.dock_pad();
-        [x, y + pad + f32::from(row) * dock_row_gap(pad)]
+        [
+            self.gutter_px + f32::from(col) * w,
+            y + pad + f32::from(row) * dock_row_gap(pad),
+        ]
+    }
+
+    /// Dock'un `row` satırındaki sütun adımı, piksel.
+    ///
+    /// Tek karar noktası: hangi satırın küçük olduğu **yalnız** burada ve
+    /// [`Frame::push_dock`]'ta sorulur, ikisi de aynı sabite bakar. Ayrı
+    /// eşiklere baksalardı konum küçük, glyph büyük (ya da tersi) olurdu.
+    fn column_px(&self, row: u16) -> f32 {
+        if row >= DOCK_CONTEXT_ROW {
+            self.context_cell_px
+        } else {
+            self.cell_px.0
+        }
     }
 
     /// [`Frame::pos`]'un kesirli hâli — imleç iki hücre arasındayken.
@@ -1376,7 +1453,7 @@ mod tests {
     /// beklenen piksellerini hücre aritmetiğinde tutuyor. Payın kendi
     /// sınamaları [`GUTTER`]'ı kullanıyor ve adıyla anıyor.
     fn grid(width: u16, height: u16) -> CellMetrics {
-        CellMetrics::new(width, height, 0, 1).expect("sıfır olmayan hücre")
+        CellMetrics::new(width, height, width, 0, 1).expect("sıfır olmayan hücre")
     }
 
     /// Payı sorgulayan sınamaların ölçüsü. Değer üretimdekiyle aynı olmak
@@ -1530,7 +1607,7 @@ mod tests {
         // kombinasyon ortaya çıkardı.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(10, 20, 0, 0).expect("sıfır olmayan hücre"),
+            CellMetrics::new(10, 20, 10, 0, 0).expect("sıfır olmayan hücre"),
             CaretStyle::default(),
         );
         frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, false);
@@ -1791,7 +1868,7 @@ mod tests {
         // planından kaymış" olurdu.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.push(Cell {
@@ -1933,7 +2010,7 @@ mod tests {
         // sütunda**, yani dock'un prompt işaretiyle aynı x'te (012 phase-11).
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.push_block(block(2));
@@ -1946,7 +2023,7 @@ mod tests {
         // 0. sütunda ve o da `Frame::pos`'tan geçiyor; ikisi ayrı aritmetikle
         // yerleştirildiği sürece yarım pay kadar ayrı duruyorlardı.
         frame.clear(
-            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.push_dock(Cell {
@@ -1963,7 +2040,7 @@ mod tests {
         );
         // Pay değişince de aynı: ikisi de aynı paydan geçiyor.
         frame.clear(
-            CellMetrics::new(4, 18, 12, 1).expect("ölçü"),
+            CellMetrics::new(4, 18, 4, 12, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.push_dock(Cell {
@@ -1977,13 +2054,89 @@ mod tests {
         assert_eq!(frame.stripes()[0].pos[0], frame.dock_glyphs()[0].pos[0]);
 
         frame.clear(
-            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         assert!(
             frame.stripes().is_empty(),
             "`clear` işaretleri de boşaltmalı"
         );
+    }
+
+    #[test]
+    fn the_context_budget_is_the_same_strip_in_small_steps() {
+        // Bütçe bir **oran**: iki satır aynı yatay şeridi kaplıyor (sol pay
+        // ortak), ayrışan tek şey bir harfin kaç piksel ilerlettiği. Sayı
+        // burada doğuyor çünkü `bt-core` piksel görmüyor.
+        let m = |w, cw| CellMetrics::new(w, 20, cw, GUTTER, 1).expect("ölçü");
+        // 80 × 10 piksel = 800; 8 piksellik adımda 100 sütun.
+        assert_eq!(context_cols(80, m(10, 8)), 100);
+        // Oran 1 ise bütçe de aynı: "küçültme yok" kolu **desteklenen** bir
+        // hâl ve çıktısı bugünküyle bit bit aynı.
+        assert_eq!(context_cols(80, m(10, 10)), 80);
+        // Tam bölünmeyen oran **aşağı** yuvarlanıyor: bir sütun fazla vermek
+        // satırı payın dışına taşırırdı.
+        assert_eq!(context_cols(10, m(10, 3)), 33);
+        // Dejenere uçta taşma yok: çarpım `u32`'de yaşıyor ve sonuç kırpılıyor.
+        assert_eq!(context_cols(u16::MAX, m(u16::MAX, 1)), u16::MAX);
+    }
+
+    #[test]
+    fn the_context_row_steps_by_the_small_advance() {
+        // **Dock'un iki satırı iki ayrı sütun adımında.** Giriş satırı
+        // gösterim fontunda, bağlam satırı küçük yüzde: aynı piksel şeridine
+        // daha çok harf sığıyor. Küçük glyph büyük yuvanın sol kenarında
+        // durduğu için dörtlü büyük kalabiliyor ve ayrı bir draw call
+        // doğmuyor (`GlyphCell::size`).
+        let mut frame = Frame::default();
+        frame.clear(
+            CellMetrics::new(10, 20, 8, GUTTER, 1).expect("ölçü"),
+            CaretStyle::default(),
+        );
+        let at = |col, row| Cell {
+            col,
+            row,
+            ch: Some('x'),
+            ..Cell::default()
+        };
+        frame.push_dock(at(0, 0));
+        frame.push_dock(at(3, 0));
+        frame.push_dock(at(0, 1));
+        frame.push_dock(at(3, 1));
+
+        let g = frame.dock_glyphs();
+        // İki satır da sol paydan başlıyor: adım ayrı, **başlangıç ortak**.
+        assert_eq!(g[0].pos[0], g[2].pos[0], "satırlar aynı sütunda başlamadı");
+        // Giriş satırı gösterim ölçüsünde ilerliyor.
+        assert_eq!(g[1].pos[0] - g[0].pos[0], 30.0, "giriş satırının adımı");
+        // Bağlam satırı küçük ölçüde.
+        assert_eq!(g[3].pos[0] - g[2].pos[0], 24.0, "bağlam satırının adımı");
+        // Punto sınıfı konumla **aynı eşikten**: harf bir ölçüde, adımı başka
+        // ölçüde olamaz.
+        assert_eq!(g[1].size, SizeClass::Normal);
+        assert_eq!(g[3].size, SizeClass::Small);
+
+        // **Dikey aritmetik dokunulmamış.** Bandın yüksekliği de satırların
+        // y'si de büyük hücreden: küçük harf büyük satırın taban çizgisinde
+        // duruyor, satır kendi bandını küçültmüyor. Bu yüzden `dock_px`'in
+        // tüketicileri (`split_into_grid`, ikinci viewport) hiç değişmedi.
+        assert_eq!(
+            g[2].pos[1] - g[0].pos[1],
+            20.0 + dock_row_gap(GUTTER as f32)
+        );
+        frame.open_dock(DOCK_ROWS, BG, CURSOR);
+        assert_eq!(
+            frame.dock_px(),
+            dock_px(
+                DOCK_ROWS,
+                CellMetrics::new(10, 20, 8, GUTTER, 1).expect("ölçü")
+            ),
+            "küçük punto bandı kısaltmamalı"
+        );
+
+        // Izgara küçük sınıfa **hiç** girmiyor: tek tüketici dock'un alt satırı.
+        frame.push(at(0, 1));
+        assert_eq!(frame.glyphs()[0].size, SizeClass::Normal);
     }
 
     #[test]
@@ -1994,7 +2147,7 @@ mod tests {
         // hücre olmayan bir şeyi de sayar ve duman kapısının anlamı kayardı.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(8, 16, GUTTER, 1).expect("ölçü"),
+            CellMetrics::new(8, 16, 8, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.push(bg_cell(0, 0));
@@ -2163,7 +2316,7 @@ mod tests {
         // kendisi — ikinci bir tasarım sabiti uydurulmadı.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.open_dock(2, BG, CURSOR);
@@ -2200,7 +2353,7 @@ mod tests {
 
         // İçerik payın altından başlıyor: ilk satır y = pay.
         frame.clear(
-            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.push_dock(Cell {
@@ -2217,7 +2370,7 @@ mod tests {
         );
         // İkinci satır bir hücre aşağıda, yani pay **bir kez** uygulanıyor.
         frame.clear(
-            CellMetrics::new(9, 18, GUTTER, 1).expect("ölçü"),
+            CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.push_dock(Cell {
@@ -2282,7 +2435,7 @@ mod tests {
         //
         // Kalınlık `CellMetrics::rule_px`'ten; burada 2.
         let mut frame = Frame::default();
-        let metrics = CellMetrics::new(10, 20, 0, 2).expect("ölçü");
+        let metrics = CellMetrics::new(10, 20, 10, 0, 2).expect("ölçü");
 
         frame.clear(metrics, CaretStyle::default());
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
@@ -2332,7 +2485,7 @@ mod tests {
         // Kural metriği sıfır gelse de ince caret görünür kalıyor.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(10, 20, 0, 0).expect("ölçü"),
+            CellMetrics::new(10, 20, 10, 0, 0).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.push_caret([0.0, 0.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
@@ -2346,7 +2499,7 @@ mod tests {
         // (phase-2) tam bu yoldan geçecek.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(10, 20, 0, 2).expect("ölçü"),
+            CellMetrics::new(10, 20, 10, 0, 2).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.push_caret([1.0, 1.0], TEXT, CURSOR, OPAQUE, CaretShape::Beam, true);
@@ -2363,7 +2516,7 @@ mod tests {
         // opak zemini onu örterdi.
         let mut frame = Frame::default();
         frame.clear(
-            CellMetrics::new(8, 16, 0, 1).expect("ölçü"),
+            CellMetrics::new(8, 16, 8, 0, 1).expect("ölçü"),
             CaretStyle::default(),
         );
         frame.set_dock_top(64.0);
@@ -2419,6 +2572,7 @@ mod tests {
                 pos: [16.0, 0.0],
                 ch: 'a',
                 face: Face::Regular,
+                size: SizeClass::Normal,
                 rgba: CURSOR.to_array(),
             }
         );

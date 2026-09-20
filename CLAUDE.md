@@ -120,8 +120,20 @@ yanaki en sessiz metinle aynı ağırlıkta olsalardı göz onları da okunacak 
 çizgisiz yolda ayrım yok, tamamı öne çıkıyor — yanlışın yönü güvenli.
 Satır **dock'un sol kenarından**, giriş
 metninin hizasından değil: metinle hizalanınca sebepsiz girintili görünüyordu
-ve bağlam giriş satırının devamı değil, dock'un altbilgisi. İki satırın arasında
-da boşluk var (dış payın yarısı). Bağlamın iki ucu iki ayrı yerden:
+ve bağlam giriş satırının devamı değil, dock'un altbilgisi. **Puntosu da ayrı**
+— gösterim fontunun %80'i (`bt_atlas::CONTEXT_SCALE`), çünkü hiyerarşiyi
+yalnız renge yüklemek yetmiyordu; oran ölçülmüş bir sayı değil bir tasarım
+sabiti (`GUTTER_PT` emsali) ve **oran**, mutlak punto değil, yani Cmd +/− ile
+iki satır birlikte büyüyor. Küçük harfler atlasta **aynı yuvaya, aynı taban
+çizgisine** rasterize oluyor (`SizeClass`), yani doku, ızgara ve band
+aritmetiği (`dock_px`) hiç değişmiyor: ayrışan tek şey bir harfin kaç piksel
+ilerlettiği (`CellMetrics::context_cell_px`) ve bağlam satırının sütun
+bütçesi (`DockCols`, oranı `bt_gpu::context_cols` veriyor — `bt-core` piksel
+görmüyor). Dörtlü büyük kalıyor, küçük harf sol kenarında duruyor ve komşu
+dörtlüler örtüşüyor; örtüşen piksel saydam, blend `SourceAlpha`, yani ikinci
+bir draw call doğmuyor. Küçük sınıfta yalnız **düz yüz** var: bağlam satırı
+terminalin kendi altbilgisi, kabuğun biçimlendirmesi oraya girmiyor. İki satırın arasında
+da boşluk var (dış payın iki katı; aynı dosyanın yukarısı zaten öyle diyor). Bağlamın iki ucu iki ayrı yerden:
 dizin **OSC 7**'den (tarayıcının üçüncü kolu; `file://` yetkisi boş ya da
 `localhost` olmalı, adlı host yabancı sayılır), dal aynanın kanalından
 (`8133;b`, `precmd`'de bir `git rev-parse` fork'u). İkisi de aynanın

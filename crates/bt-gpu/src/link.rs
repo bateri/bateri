@@ -62,8 +62,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    Blocks, CaretStyle, Cursor, CursorMotion, DirtyFlag, DockContext, DockState, LinearRgba,
-    Session, Theme,
+    Blocks, CaretStyle, Cursor, CursorMotion, DirtyFlag, DockCols, DockContext, DockState,
+    LinearRgba, Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -986,7 +986,16 @@ define_class!(
                 // hesaplamıyor: üç ön koşulu (dock'u olan pencere, alternatif
                 // ekran, aynanın tazeliği) yalnız o biliyor.
                 let dock = iv.session.dock(
-                    iv.cols.get(),
+                    DockCols {
+                        grid: iv.cols.get(),
+                        // Bağlam satırının bütçesi: **aynı piksel genişliği,
+                        // küçük adım**. Dock sol payı ızgarayla paylaşıyor
+                        // (`Frame::dock_pos`), yani iki satırın kapladığı
+                        // şerit aynı; ayrışan tek şey bir harfin kaç piksel
+                        // ilerlettiği. Hesap burada, çünkü `bt-core` piksel
+                        // görmüyor.
+                        context: crate::frame::context_cols(iv.cols.get(), iv.cell.get()),
+                    },
                     &mut dock_state,
                     &mut dock_context,
                     cursor.caret_in_dock,
@@ -1850,7 +1859,7 @@ mod tests {
         // aşağıdan başlıyor ve bandın kendisi de pencerenin yüksekliği hücre
         // boyuna tam bölünmediğinde artan şeridin altında duruyor. Hedefi tam
         // sayıya yuvarlasaydık caret bir hücreye kadar yukarıda dururdu.
-        let cell = CellMetrics::new(9, 18, 8, 1).expect("ölçü");
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
         // 600 px pencere, iki satırlık dock: 2×18 satır + 2×8 dış pay +
         // 1×16 satır arası = 68, yani band 532'de başlıyor.
         let dock_top = 600.0 - crate::frame::dock_px(2, cell);
