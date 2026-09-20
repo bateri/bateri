@@ -181,10 +181,14 @@ Kapatan sınama makineye bağlı olurdu; kapatan şey on saniyelik bir tuş.
    ekranda hiçbir iz bırakmaz, oysa bugünkü hâlde aksan sonraki harfe biniyor,
    yani kayıp **görünür**. Aynı gerekçe ölü tuş + Backspace koluna da geçerli
    (phase-1 waive #1).
-2. **`insertText:` `replacementRange`'i yoksayıyor** — B.2 §4'ün ölçümüne
-   bağlı. Kapının itirazının **ezilme yarısı ölçüldü ve düştü** (bu makinenin
-   `NSGlobalDomain`'inde anahtar yok); açık kalan şey popover kararının bu
-   yolu okuyup okumadığı.
+2. ~~**`insertText:` `replacementRange`'i yoksayıyor**~~ — **madde düştü**
+   (2026-09-20, ölçüldü). Sınır yalnız popover açıkken konuşuyordu: seçilen
+   harf `insertText:"é" replacementRange:{n-1,1}` ile gelir ve aralık
+   atlandığı için `eé` yazılırdı. Kullanıcı gerçek pencerede basılı tuttu ve
+   **popover çıkmadı**, yani o çağrı hiç doğmuyor. Ezilme yarısı zaten
+   ölçülmüştü (`NSGlobalDomain`'de anahtar yok); ikisi birlikte maddeyi
+   konusuz bırakıyor. Tam IME geldiğinde `replacementRange` kendi
+   sözleşmesiyle yeniden açılır.
 3. **IME sözleşmesi asgari:** `attributedSubstringForProposedRange:` hep
    `nil` (PTY'ye akmış baytı geri okuyacak belge yok; alacritty ve ghostty de
    aynı), `setMarkedText:` bilinmeyen tipte erken dönüyor. İkisi de
@@ -233,12 +237,9 @@ Kapatan sınama makineye bağlı olurdu; kapatan şey on saniyelik bir tuş.
 - [x] B.2 §1 kazanç tablosu — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
 - [x] B.2 §2 sıfır regresyon listesi — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
 - [x] B.2 §3 Finder damlası tablosu — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
-- [ ] B.2 §4 press-and-hold — **işaretim geri alındı (2026-09-20)**: kullanıcının
-      "018 çalışıyor"u bu kalemi kapsamıyordu, ne sınanacağını bilmiyordu ve ben
-      onun adına işaretledim. Ölçülen yarı (`NSGlobalDomain`'de anahtar yok, yani
-      kullanıcı ayarı ezmiyor) duruyor; **açık olan yarı** AppKit'in bu kararı
-      `registerDefaults`'tan okuyup okumadığı ve onu ancak gerçek pencerede bir
-      harfi basılı tutmak söyler. Çıkan sonuca göre B.4 §2 kapanır ya da bir
+- [x] B.2 §4 press-and-hold — **ölçüldü** (2026-09-20, kullanıcı gerçek
+      pencerede): harf basılı tutulunca popover çıkmıyor, yani AppKit kararı
+      `registerDefaults`'tan okuyor. İkinci yarı da kapandı ve **B.4 §2 düştü**
       düzeltme açılır
 - [x] `/ship` (2026-09-20)
 

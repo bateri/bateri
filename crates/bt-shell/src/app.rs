@@ -661,14 +661,15 @@ fn open_in_editor(path: &Path) -> bool {
 /// — set kapısının "NSGlobalDomain ya da MDM eziyor olabilir" itirazı bu
 /// kurulumda konusuz.
 ///
-/// **Ölçüm bekleyen yarı:** popover kararının değeri bu yoldan, yani
-/// `NSUserDefaults` üzerinden okuduğu. AppKit `CFPreferences`'a doğrudan
-/// bakıyorsa registration domain'i büsbütün atlar ve ezilme sorusu
-/// anlamsızlaşır. iTerm2'nin *kalıcı* domain değeri tutması bu ihtimalin
-/// ipucu (ghostty aynı `registerDefaults` yolunu kullanıyor). Kapatan sınama
-/// makineye bağlı olurdu; kapatan şey `e`'yi basılı tutmak.
+/// **İkinci yarı da ölçüldü** (2026-09-20, kullanıcı gerçek pencerede):
+/// harf basılı tutulunca popover **çıkmıyor**, yani AppKit kararı
+/// `NSUserDefaults` üzerinden okuyor ve registration domain'i görüyor.
+/// Kuşkunun kaynağı `CFPreferences`'a doğrudan bakma ihtimaliydi (iTerm2'nin
+/// *kalıcı* domain değeri tutması o ihtimalin ipucuydu; ghostty aynı
+/// `registerDefaults` yolunu kullanıyor) ve düştü. Hermetik sınama makineye
+/// bağlı olurdu; kapatan şey `e`'yi basılı tutmaktı.
 ///
-/// **Tutmazsa belirti iki yarılı** ve ikincisi sessiz: gürültülü yarısı
+/// **Tutmasaydı belirti iki yarılı olurdu** ve ikincisi sessiz: gürültülü yarısı
 /// basılı tuşun yinelememesi, sessiz yarısı popover'dan seçilen harfin
 /// kabuğa **çift** gitmesi — o çağrı `insertText:"é" replacementRange:{n-1,1}`
 /// oluyor ve `view::BateriView` aralığı atladığı için `eé` yazılıyor.
