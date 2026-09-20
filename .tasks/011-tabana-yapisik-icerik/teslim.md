@@ -144,8 +144,9 @@ Dördü de tasarım kararı, kusur değil — ikisinin adı planda, ikisi yolun
   süzüyor. Buradaki gerekçe (`4c291ee`: "aşağı iniş *düşmesi* gibi okunuyor")
   **aynen ayakta** ve daraltmanın sebebi de o — doldurma varken aşağı inen şey
   boşluk değil, üstten **gelen geçmiş**, yani "düşme" okuması o kolda konusuz
-  kalıyor. `fill == 0` iken (vim'den çıkış, kasten temizlenmiş ekranda `clear`)
-  daralan içerik hâlâ snap'liyor ve bekçisi duruyor — adı
+  kalıyor. `fill == 0` iken (dock'u olmayan pencere, kasten temizlenmiş ekran,
+  geçmişe kaydırılmış pencere) daralan içerik hâlâ snap'liyor ve bekçisi
+  duruyor — adı
   `a_shrinking_origin_snaps_unless_history_fills_the_gap`. Testerenin bedeli de
   **daraldı**: doldurmanın açık olduğu bir oturumda salınımın iki yarısı da
   kayıyor, yani spinner kalemi yalnız doldurmanın kapalı olduğu kollarda

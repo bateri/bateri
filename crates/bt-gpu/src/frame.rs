@@ -4,8 +4,16 @@
 //! burada piksele çevrilir ve GPU'nun göreceği düzene girer. Renderer "ne
 //! çizileceğini" buradan okur, "ne anlama geldiğini" bilmez.
 //!
-//! Dört liste, iki pipeline: komut bloğu şeritleri, arka planlar (ve imleç)
-//! `cell_bg`'nin, glyph'ler ve kural çizgileri `cell`'in. Ayrı durmalarının
+//! **On liste, üç yüzey, üç pipeline.** Listeler yüzey başına dörtlü/üçlü
+//! gruplar hâlinde: ızgaranın dördü (komut bloğu şeritleri, arka planlar,
+//! glyph'ler, kural çizgileri), dock'un üçü (`dock_bg`/`dock_glyphs`/
+//! `dock_rules`) ve doldurma bandının üçü (`fill_bg`/`fill_glyphs`/
+//! `fill_rules`). Grupların ayrılığı sıra değil **koordinat uzayı**: her
+//! yüzeyin kendi `setViewport`'u var ve satır numaraları yüzey-yerel, yani
+//! tek listede ayırt edilemezlerdi ([`crate::Renderer`]). Pipeline ise üç ve
+//! yüzeyden bağımsız: şeritler ve arka planlar `cell_bg`'nin, glyph'ler ve
+//! kural çizgileri `cell`'in, caret de `cell_bg`'nin vertex'ini paylaşan
+//! kardeş fragment'in (`caret`). Grubun içindeki listelerin ayrı durmasının
 //! sebebi çizim sırası — glyph'ler arka planların, kurallar da glyph'lerin
 //! **üstüne** gelmek zorunda ve tek listede sıra hücre hücre karışırdı. Glyph
 //! ile kuralın ayrı listede olması da aynı cümlenin devamı: ikisi aynı

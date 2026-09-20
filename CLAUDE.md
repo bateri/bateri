@@ -269,10 +269,17 @@ dört liste ve imleç aynı yerden. Öteleme **yumuşak kayar**: `bt-gpu::motion
 (`Slide`) onu imleçle aynı stil ve aynı `settled()` kapısı altında sürer, imlecin
 hedefi de **ekran satırıdır** (`row + origin`), yani Enter'da imleç dipteki
 satırında durur ve geçmiş arkasından yukarı akar. Kayma **boşluk boş kalıyorsa
-tek yönlüdür**: içerik büyüyünce (hedef düşünce) süzülür, daralınca (vim'den
-çıkış, dolu ekranda `clear`) **snap**'ler — yukarı akış içeriğin gelmesi,
+tek yönlüdür**: içerik büyüyünce (hedef düşünce) süzülür, daralınca (dock'u
+olmayan pencere, kasten temizlenmiş ekran, geçmişe kaydırılmış pencere)
+**snap**'ler — yukarı akış içeriğin gelmesi,
 aşağı iniş düşmesi gibi okunuyor; ölçüt mesafe değil işaret, çünkü eşik
-ölçülmemiş bir sayı olurdu. **Doldurma o yönü açıyor** (`Motion::sync`'in
+ölçülmemiş bir sayı olurdu. **Alternatif ekrandan çıkış bu listede değil**
+(017 kapı, ölçüldü): `vim`'in giriş `2J`'si bayrağı kurmadığı için çıkış
+karesinde `fill > 0` ve öteleme süzülmeye **başlıyor**; snap'i getiren şey
+dock'u geri getiren resize'ın bir sonraki ana kuyruk turunda dikeceği
+`geometry` bayrağı, yani kayma bir kare sürüyor. Yönü savunulur — boşluğa
+gerçekten geçmiş giriyor — ama tasarlanmış değil ve adıyla yazılı
+(`Motion::sync_origin`'in doc'u). **Doldurma o yönü açıyor** (`Motion::sync`'in
 `filled` biti, `link.rs`'te `cursor.fill > 0`): boşluk defterin satırlarıyla
 doluyorsa aşağı inen şey boşluk değil, üstten **gelen geçmiştir**, yani
 011'in gerekçesi o kolda konusuz kalıyor ve yükselen hedef de süzülüyor —

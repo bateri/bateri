@@ -42,8 +42,15 @@ _Requirements: R4.1, R4.2, R4.3, R6_
 - Enter + kısa çıktı kolunda da süzülüyor (phase-2'nin safha kapısız kapısı
   sayesinde).
 - Tekerlek ve pencere/font/punto değişimi **hâlâ snap'liyor**.
-- `fill == 0` iken daralan içerik **hâlâ snap'liyor** (vim'den çıkış, dolu
-  ekranda `clear`) — 011'in kararı bu kolda korunuyor.
+- `fill == 0` iken daralan içerik **hâlâ snap'liyor** — 011'in kararı bu kolda
+  korunuyor. **Örnekler set kapısında düzeltildi** (2026-09-20, ölçüldü):
+  doğru örnekler dock'u olmayan pencere, kasten temizlenmiş ekran ve geçmişe
+  kaydırılmış pencere. "vim'den çıkış" **yanlış örnekti** — phase-1b'nin
+  kabulü zaten "vim'den çıkışta doldurma çalışır" diyor, yani çıkış karesinde
+  `fill > 0` ve öteleme süzülmeye başlıyor; snap'i getiren şey dock'u geri
+  getiren resize'ın bir sonraki ana kuyruk turunda dikeceği `geometry`
+  bayrağı. Kayma bir kare sürüyor ve yönü savunulur, ama tasarlanmış değil:
+  kalem `Motion::sync_origin`'in doc'unda adıyla duruyor.
 - `reduce_motion` / `cursor_motion = "snap"` doldurma varken de snap'liyor
   (`origin_mode()` `Fade`'i `Snap`'e çeviriyor; erişilebilirlik ayarı
   animasyon **eklemez**).
