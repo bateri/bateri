@@ -487,6 +487,15 @@ impl Atlas {
                 // Tahliye bedeli amortize: iki tahliye arasına en az
                 // `capacity()` yeni kayıt sığıyor. Pozitif kayıtlar (gerçek
                 // yuvalar) korunuyor; onların tahliyesi LRU'nun işi (00X).
+                //
+                // **Bedel yedekle birlikte büyüdü** ve bu bilerek kabul
+                // edildi: tahliyeden sonra geri sorulan karakter artık yalnız
+                // `CTFontGetGlyphsForCharacters` değil bir cascade yürüyüşü de
+                // ödüyor. Sıcak yürüyüş ölçüldü ve ucuz (setin `phase-1.md`'si
+                // → Uygulama Notları); pahalı olan bir **ailenin ilk
+                // açılışı** ve o tahliyeden etkilenmiyor — font CoreText'te
+                // açık kalıyor, yeniden yüklenmiyor. Yani tahliyenin geri
+                // getirdiği maliyet sıcak yürüyüş, soğuk açılış değil.
                 if self.slots.len() >= self.negative_cache_cap() {
                     self.slots.retain(|_, &mut slot| slot != TOFU);
                 }
@@ -587,7 +596,7 @@ mod tests {
     /// SC) ve o aday genişlik kapısından dönüyor — ilerlemesi hücrenin 1.66
     /// katı (ölçüldü, bu makine, Menlo 13pt). Yani bu sabite dayanan
     /// sınamalar "tofu" derken artık kapının da çalıştığını varsayıyor;
-    /// kapının kendi bekçisi [`wide_fallback_candidates_are_rejected`].
+    /// kapının kendi bekçisi [`the_gate_decides_by_width_alone`].
     const UNKNOWN_CHAR: char = '漢';
     /// Yedeğin **kabul ettiği** karakter ve setin varlık sebebi: `⏵` Menlo'da
     /// yok, Claude Code'un `⏵⏵ auto mode on` göstergesi iki kutu çıkıyordu.
@@ -595,15 +604,28 @@ mod tests {
     /// ilerlemesi hücrenin 0.84'ü — oran ölçekten bağımsız olduğu için iki boy
     /// sınıfında da kapıyı geçiyor.
     const FALLBACK_CHAR: char = '⏵';
-    /// Yedeğin **reddettiği** karakterler ve ölçülmüş oranları (bu makine,
-    /// Menlo 13pt). Dördü de bir aday **buluyor** ve dördü de aynı geometrik
-    /// kapıdan dönüyor: emoji, `.LastResort`, CJK ve geniş matematik harfi
-    /// için ayrı kol yok.
-    const REJECTED: [(char, &str); 4] = [
-        ('𝔸', "STIX Two Math, 1.07×"),
-        (UNKNOWN_CHAR, "PingFang SC, 1.66×"),
-        ('\u{E0B0}', ".LastResort, 1.83×"),
-        ('🎉', "Apple Color Emoji, 2.17×"),
+    /// Kapının **kuralını** sınamak için kullanılan karakterler: hepsi
+    /// Menlo'da yok, yani yedek yoluna giriyorlar.
+    ///
+    /// Listenin taşıdığı iddia "bunlar kutu olur" **değil** — o, makinede
+    /// hangi fontların kurulu olduğuna bağlı bir olgu, kodun bir özelliği
+    /// değil. `U+E0B0` bu makinede `.LastResort`'a düşüyor ama Nerd Font
+    /// kurulu bir makinede (terminal kullanıcılarında çok yaygın) gerçek bir
+    /// glyph'e düşer ve **çizilmesi doğru olur**. Beklentiyi listeye yazmak
+    /// `make hepsi`'yi doğru kodda kırmızıya düşürürdü; bu yüzden beklenti
+    /// listede değil, [`the_gate_decides_by_width_alone`] onu adayın kendi
+    /// ilerlemesinden **türetiyor**.
+    const GATE_PROBES: [char; 8] = [
+        FALLBACK_CHAR,
+        '𝔸',
+        UNKNOWN_CHAR,
+        '\u{E0B0}',
+        '\u{10FFFD}',
+        '🎉',
+        '\u{F8FF}',
+        // Braille: Apple Braille'den geliyor ve bu makinede 1.135× ile
+        // reddediliyor (Claude Code'un spinner'ı). Yol haritasında borç.
+        '⠋',
     ];
     /// Hiçbir makinede olmayan aile; CoreText yerine başka bir font verir.
     const MISSING_FAMILY: &str = "Bu Aile Yok 12345";
@@ -700,10 +722,28 @@ mod tests {
         // ortalama gerçekten kaydırır — `raster::draw`'in `max(0.0)`'ı o yolu
         // adıyla anlatıyor.
         let a = atlas(POINT_SIZE, 1.0);
-        for (label, face_font, cell) in size_classes(&a) {
+        // **Beş fontun beşi de**, iki değil: `cell_advance` düz yüzün ölçüsü
+        // (`Metrics` yalnız ondan türüyor) ama atlas kalın, eğik ve kalın-eğik
+        // yüzleri de **aynı** sayıyla ortalıyor. Kalın yüzü düz yüzünden dar
+        // bir ailede her kalın glyph sağa kayardı ve kayma yalnız bir yönde
+        // görünürdü — `max(0.0)` ötekini yutuyor. Bekçi düz yüzle küçük yüzle
+        // sınırlı kalsaydı o kolu hiç görmezdi.
+        let fonts = [
+            ("düz yüz", a.faces.get(Face::Regular), a.cell_advance),
+            ("kalın yüz", a.faces.get(Face::Bold), a.cell_advance),
+            ("eğik yüz", a.faces.get(Face::Italic), a.cell_advance),
+            ("kalın eğik", a.faces.get(Face::BoldItalic), a.cell_advance),
+            ("küçük yüz", &a.small, a.context_advance),
+        ];
+        for (label, face_font, cell) in fonts {
             // Yazdırılabilir ASCII, kutu çizim ve Menlo'nun kendi simgeleri:
             // hücreden farklı ilerleyen bir glyph varsa buradan görünür.
-            for ch in (' '..='~').chain("─│┌┐└┘├┤┬┴┼✓⚠▶".chars()) {
+            // Birleştirici işaretler de listede: ilerlemesi sıfır olan bir
+            // glyph hücrenin **ortasına** rasterize olurdu ve belirti ancak
+            // ekranda görünürdü (Menlo'da U+0301 tam hücre ilerliyor, yani bu
+            // kol bugün kapalı — ölçüldü).
+            for ch in (' '..='~').chain("─│┌┐└┘├┤┬┴┼✓⚠▶\u{0300}\u{0301}".chars())
+            {
                 let Some(glyph) = font::glyph_index(face_font, ch) else {
                     continue;
                 };
@@ -852,43 +892,73 @@ mod tests {
     }
 
     #[test]
-    fn wide_fallback_candidates_are_rejected() {
-        // Bekçinin asıl işi "tofu geldi mi" **değil**: tofu, aday hiç
-        // bulunamasa da gelirdi ve kapı sessizce ölse fark edilmezdi. Bu
-        // yüzden iki şey birden sınanıyor — aday **var** ve karakteri
-        // çizebiliyor (sınır sonsuza açılınca kabul ediliyor), ama gerçek
-        // sınırda kapı onu almıyor. Yani ret kapının eseri.
-        let a = atlas(POINT_SIZE, 1.0);
-        for (ch, measured) in REJECTED {
-            for (label, base, cell) in size_classes(&a) {
-                let open = font::fallback_font(base, ch, CGFloat::INFINITY).unwrap_or_else(|| {
-                    panic!("{label}: '{ch}' için aday yok ({measured}) — ret kapının değil")
-                });
+    fn the_gate_decides_by_width_alone() {
+        // Bekçinin sınadığı şey "bu karakter kutu mu" **değil**: o, makinede
+        // hangi fontların kurulu olduğuna bağlı bir olgu ve kodun özelliği
+        // değil. `U+E0B0` bu makinede `.LastResort`'a düşüyor ve reddediliyor,
+        // ama Nerd Font kurulu bir makinede gerçek bir glyph'e düşer ve
+        // **çizilmesi doğru olur**; beklentiyi sabite yazmak `make hepsi`'yi
+        // doğru kodda kırmızıya düşürürdü.
+        //
+        // Sınanan şey **kapının kuralı**: aday hücreye sığıyorsa çiziliyor,
+        // sığmıyorsa kutu. Beklenti adayın kendi ilerlemesinden türetiliyor,
+        // yani ölçüt her makinede aynı — ve gözlem ile beklenti iki ayrı
+        // çağrıdan geliyor (biri `fallback_font`, öteki `slot`), yani
+        // totoloji değil: kapı `slot`'un yolunda koşmuyorsa bu sınama düşer.
+        let mut a = atlas(POINT_SIZE, 1.0);
+        let classes = size_classes(&a);
+        let mut plan: Vec<(char, SizeClass, bool, String)> = Vec::new();
+        for ch in GATE_PROBES {
+            for (i, size) in [SizeClass::Normal, SizeClass::Small]
+                .into_iter()
+                .enumerate()
+            {
+                let (label, base, cell) = classes[i];
+                // Taban fontta varsa yedek yolu hiç koşmuyor: deneyin konusu değil.
+                if font::glyph_index(base, ch).is_some() {
+                    continue;
+                }
+                // Aday hiç yoksa da kapının konusu değil — reddi kapı vermiyor.
+                let Some(open) = font::fallback_font(base, ch, CGFloat::INFINITY) else {
+                    continue;
+                };
                 let glyph = font::glyph_index(&open, ch).expect("aday çizebiliyor");
                 let advance = font::glyph_advance(&open, glyph);
-                assert!(
-                    advance > cell,
-                    "{label}: '{ch}' hücreye sığıyor ({advance} <= {cell}), oysa ölçüm {measured}"
-                );
-                assert!(
-                    font::fallback_font(base, ch, cell).is_none(),
-                    "{label}: '{ch}' kapıdan geçti ({measured})"
-                );
+                let family = unsafe { open.family_name() }.to_string();
+                plan.push((
+                    ch,
+                    size,
+                    advance <= cell,
+                    format!("{label}, {family}, ilerleme {advance} / hücre {cell}"),
+                ));
             }
         }
-        // Uçtan uca: reddedilen karakter tofu'ya düşüyor ve **yuva
-        // harcamıyor**. İkincisi olmasaydı bir CJK dosyası atlası tüketirdi.
-        let mut a = atlas(POINT_SIZE, 1.0);
-        for (ch, measured) in REJECTED {
-            for size in [SizeClass::Normal, SizeClass::Small] {
-                assert_eq!(
-                    a.slot(Sprite::Char(ch), Face::Regular, size).0,
-                    TOFU,
-                    "{size:?}: '{ch}' çizildi ({measured})"
-                );
+
+        let (mut fits, mut wide) = (0usize, 0usize);
+        for (ch, size, should_fit, why) in plan {
+            let slot = a.slot(Sprite::Char(ch), Face::Regular, size).0;
+            if should_fit {
+                assert_ne!(slot, TOFU, "hücreye sığan aday çizilmedi: '{ch}' ({why})");
+                fits += 1;
+            } else {
+                assert_eq!(slot, TOFU, "hücreye sığmayan aday çizildi: '{ch}' ({why})");
+                wide += 1;
             }
         }
-        assert_eq!(a.occupancy().0, 1, "reddedilen aday yuva harcamamalı");
+        // Deney **boşalamaz**: kapı iki yönde de gözlenmiş olmalı. Bu satır
+        // olmasaydı bütün adayların elenmesi (ya da hepsinin geçmesi) sınamayı
+        // sessizce anlamsızlaştırır ve yine yeşil kalırdı.
+        assert!(
+            fits > 0 && wide > 0,
+            "kapı tek yönde sınandı: sığan {fits}, sığmayan {wide}"
+        );
+        // Reddedilen aday **yuva harcamıyor**; olmasaydı bir CJK dosyası
+        // atlası tüketirdi. `fits` kadar yuva + tofu bekleniyor.
+        assert_eq!(
+            a.occupancy().0,
+            fits + 1,
+            "reddedilen aday yuva harcadı (sığan {fits})"
+        );
     }
 
     #[test]
@@ -980,11 +1050,13 @@ mod tests {
         // Yedek aramanın gelişiyle bu iddia **daha pahalı** bir şeyi koruyor.
         // Eskiden önbelleklenmeyen kayıt kare başına tek bir
         // `CTFontGetGlyphsForCharacters` demekti; artık ona bir
-        // `CTFontCreateForString` de ekleniyor ve o cascade'i yürüyor — soğuk
-        // ilk çağrısı ölçüldü, **6.3 ms** (bu makine, PingFang SC'nin açılışı;
-        // 60 fps'de kare bütçesi 16.7 ms). Kaydın **ana thread'de** doğduğu
-        // yer `slot()`'un çizim yolu, yani tavansız bir sızıntı değil kare
-        // başına ödenen bir gecikme olurdu.
+        // `CTFontCreateForString` de ekleniyor ve o cascade'i yürüyor. Soğuk
+        // ilk çağrının bedeli kare bütçesiyle karşılaştırılabilir ölçüde;
+        // sayısı ve ortamı `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama
+        // Notları'nda emanette (ilk `/measure` onu `docs/OLCUMLER.md`'ye
+        // taşır). Kaydın **ana thread'de** doğduğu yer `slot()`'un çizim
+        // yolu, yani tavansız bir sızıntı değil kare başına ödenen bir
+        // gecikme olurdu.
         assert_eq!(
             a.slots
                 .get(&(Sprite::Char(UNKNOWN_CHAR), Face::Regular, SizeClass::Normal)),
@@ -1141,9 +1213,18 @@ mod tests {
             "üstü çizili tabanla inmedi"
         );
 
-        // (4) **`1.0` no-op.** Varsayılan yol fazladan bir piksel bile
-        //     oynatmamalı, yoksa ayarı hiç yazmayan kullanıcının ızgarası
-        //     sessizce değişirdi.
+        // (4) **`1.0` yeniden üretilebilir.** Aynı dörtlü aynı metriği
+        //     veriyor; `metrics()` saf, gizli bir duruma bağlı değil.
+        //
+        //     Bu satır bir dönem "`1.0` no-op" diye okunuyordu ve o iddia
+        //     **yanlıştı**: `tight` da `1.0` ile kuruluyor, yani karşılaştırma
+        //     totolojiydi. 019'un kapısında ölçüldü — `1.0`'da
+        //     `extra = round_up(natural * 0.0)` ve `round_up`'ın tabanı 1,
+        //     yani varsayılan yol hücreye **bir piksel ekliyor** (Menlo 13pt:
+        //     font 17 istiyor, hücre 18 oluyor). Fazlalık alta düşüyor, taban
+        //     çizgisi oynamıyor; belirti bir piksel fazla satır aralığı.
+        //     Düzeltmesi bu setin dışında ve `docs/YOL-HARITASI.md`'de borç:
+        //     her kullanıcının ızgarasını oynatır, yani ürün kararı.
         assert_eq!(Atlas::new(None, POINT_SIZE, 1.0, 1.0).metrics(), tight);
     }
 
@@ -1209,12 +1290,11 @@ mod tests {
         // çevirir. Crate'in tavanı olmayan tek sayısı burasıydı.
         //
         // **Havuz yedek aramadan sonra da çalışıyor** ve bu bir varsayım
-        // değil: oranın ölçekten bağımsız olması sayesinde CJK burada da
-        // reddediliyor (144pt'de hücre 86.7 px, PingFang SC 144 px). Ama artık
-        // her kayıt bir `CTFontCreateForString` ödüyor, o yüzden bedeli
-        // ölçüldü: 396 karakter **889 µs** (bu makine; PingFang SC'nin soğuk
-        // açılışı süitin daha erken bir sınamasında amortize oluyor, tek
-        // başına 0.8 ms). Havuzu daraltmak gerekmedi.
+        // değil: oran ölçekten bağımsız olduğu için CJK bu puntoda da
+        // reddediliyor. Ama artık her kayıt bir `CTFontCreateForString`
+        // ödüyor, o yüzden havuzun bedeli ölçüldü ve daraltmak gerekmedi;
+        // sayısı ve ortamı `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama
+        // Notları'nda emanette.
         let pool: Vec<char> = ('\u{4e00}'..'\u{9fff}').take(cap * 3).collect();
         assert!(pool.len() > cap, "havuz tavanı aşmalı");
         for &ch in &pool {

@@ -106,8 +106,11 @@ pub(crate) fn draw(
     //
     // `max(0.0)`: genişlik kapısı yalnız **yedekte** koşuyor, taban font
     // eşaralıklı olmayabilir ([`font::FontIssue::NotMonospaced`]) ve geniş bir
-    // glyph'i hücreyi aşabilir. Negatif kaydırma o glyph'in mürekkebini sola,
-    // komşu hücrenin üstüne taşırdı; kırpma sağdan olmalı.
+    // glyph'i hücreyi aşabilir. Komşu hücreye taşma **mümkün değil** — bağlam
+    // tam bir yuva genişliğinde ve CG oraya kırpıyor — yani mesele taşma değil
+    // kırpmanın **yönü**: negatif kaydırma glyph'in solunu keser, kırpma ise
+    // sağdan olmalı. Latin yazıda harf soldan tanınıyor; sol kenarı kesilmiş
+    // bir 'W' ile 'V' ayırt edilemez.
     let x = ((cell_advance - font::glyph_advance(font, glyph)) / 2.0).max(0.0);
     let position = CGPoint::new(x, baseline);
     // SAFETY: tek glyph, tek konum, sayı ikisiyle tutarlı; bağlam canlı.

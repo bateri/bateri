@@ -436,7 +436,7 @@ pub(crate) fn metrics(font: &CTFont, line_height: f64) -> Metrics {
 /// Kural çizgisini hücrenin **içine** oturtur: (üstten konum, kalınlık).
 ///
 /// Dönüşün değişmezi `konum + kalınlık <= cell_h`. Bu depoda bugünkü fontla
-/// (Menlo) sınır hiç zorlanmıyor — 13pt'de alt çizgi 14+1, hücre 17 — ama
+/// (Menlo) sınır hiç zorlanmıyor — 13pt'de alt çizgi 14+1, hücre 18 — ama
 /// kırpma bir dilek değil sözleşme: `underline_position` fontun kendi
 /// verisidir ve descent'i dar bir font çizgiyi hücrenin dışına atabilir.
 /// Belirti sessizdir: bir satırın alt çizgisi bir alttaki satırın tepesinde
