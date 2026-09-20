@@ -482,6 +482,16 @@ struct LinkIvars {
     /// kendisi değil — `Frame::push_block` aralıkları buradan okuyup oraya
     /// çeviriyor.
     blocks: RefCell<Blocks>,
+    /// Doldurulan satırların tamponu; `blocks` ile aynı ömür ve **aynı
+    /// gerekçe**: `Frame`'in içinde değil yanında.
+    ///
+    /// Sebep borç kuralının ta kendisi: `Session::frame` iki sink alıyor ve
+    /// ikisi de `frame`'i ödünç alsaydı aynı çağrıda iki `&mut` doğardı.
+    /// Tampon o ikinci ucu tutuyor, çağrı dönünce hücreler `Frame::push_fill`
+    /// ile bandın kendi listelerine geçiyor. Boşaltılıp yeniden doluyor, yani
+    /// kare başına ayırma yok; doldurması olmayan pencerede (dock'suz kabuk,
+    /// süreli koşu) sınır sink'i hiç çağırmıyor ve tampon boş kalıyor.
+    fill: RefCell<Vec<bt_core::Cell>>,
     /// Aynanın tamponu; `blocks` ile aynı gerekçeyle uzun ömürlü —
     /// [`Session::dock`] onu her karede yerinde tazeliyor ve kapasitesi
     /// duruyor, yani kare başına ayırma yok.
@@ -916,13 +926,25 @@ define_class!(
             // `Option`'ı ve onun `GpuError::NoDrawable`'ı da kalktı:
             // `update.drawable()` başlıkta `nonnull` ve objc2 onu `Option`suz
             // üretiyor.)
-            // İkinci sink **bilerek boş**: doldurmanın hücreleri sınırdan
-            // geçiyor ama çizen taraf phase-3'ün işi (017). O gelene kadar
-            // `Cursor::fill` de, bu kanal da tüketilmiyor — kare bugünküyle
-            // bit bit aynı.
-            let cursor =
-                iv.session
-                    .frame(|cell| frame.push(cell), |_| (), &mut iv.blocks.borrow_mut());
+            // **İkinci sink tampona akıyor, doğrudan `Frame`'e değil** ve
+            // sebep borç kuralı: iki sink de `frame`'i ödünç alsaydı aynı
+            // çağrıda iki `&mut` doğardı (`LinkIvars::fill`, `blocks`'un
+            // gerekçesinin ikizi). Hücreler çağrı dönünce banda geçiyor.
+            let mut fill = iv.fill.borrow_mut();
+            fill.clear();
+            let cursor = iv.session.frame(
+                |cell| frame.push(cell),
+                |cell| fill.push(cell),
+                &mut iv.blocks.borrow_mut(),
+            );
+            // **Bandın boyu hücrelerden önce** (`Frame::set_fill_rows`):
+            // `push_fill`'in bekçisi satırı ona göre ölçüyor. Sıfırsa sınır
+            // ikinci sink'i hiç çağırmadı, yani döngü de boş dönüyor ve kare
+            // doldurmasız hâliyle bit bit aynı.
+            frame.set_fill_rows(cursor.fill);
+            for cell in fill.drain(..) {
+                frame.push_fill(cell);
+            }
             // Şeritler hücrelerle **aynı** karede ve aynı `frame()` çağrısından:
             // ayrı bir sorgudan okunsalardı kaydırma karesinde bir kare geride
             // kalırlardı (010 discussion.md → Karar 2). Sink içinde değil
@@ -1449,6 +1471,7 @@ impl DisplayLink {
                 stats,
                 frame: RefCell::new(Frame::default()),
                 blocks: RefCell::new(Blocks::default()),
+                fill: RefCell::new(Vec::new()),
                 dock: RefCell::new(DockState::default()),
                 dock_context: RefCell::new(DockContext::default()),
                 dock_rows: Cell::new(layout.dock_rows),
