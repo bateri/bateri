@@ -13,19 +13,35 @@ hareketin tam tersi yönde. Kullanıcı ekranı **kasten** temizlediyse (Ctrl-L,
   - **R1.1** — PTY tarayıcısı `CSI 2 J`'yi tanır ve "ekran kasten temizlendi"
     bayrağını kurar. `3J` ve RIS için kol **yok**: ikisi de geçmişi siliyor,
     doldurma kendiliğinden kapanıyor.
-  - **R1.2** — Bayrak, ekran doğal yoldan yeniden dolunca düşer
-    (`content_rows == rows`, alternatif ekranda değilken **ve**
-    `display_offset == 0`). Üçüncü koşul phase-1'de eklendi
+  - **R1.2** — Bayrağı **birincil ekranın** `CSI 2 J`'si kurar; alternatif
+    ekranınki nesli tüketir ama kurmaz (orada `ClearMode::All`
+    `reset_region(..)` çağırıyor, geçmiş büyümüyor). Bayrak, **defter
+    temizlemeden sonra büyüyünce** düşer — damga bayrak kurulduktan sonraki
+    ilk karede alınır — ve bunun için alternatif ekranda olmamak **ve**
+    `display_offset == 0` gerekir. `display_offset` koşulu phase-1'de eklendi
     (`/code-review`): `content_rows` görünür pencereden doğuyor, yani
     geçmişe kaydırılan pencere dolu **görünür** ve onsuz tek bir tekerlek
-    jesti bayrağı kalıcı olarak düşürürdü.
+    jesti bayrağı kalıcı olarak düşürürdü. Damga ölçütü ve alternatif ekran
+    kolu phase-1b'de geldi: `content_rows == rows` dock'lu pencerede
+    erişilemez (doluluk giriş satırını saymıyor) ve `vim`'in açılıştaki
+    `CSI 2 J`'si bayrağı kalıcı olarak kuruyordu — ikisi birlikte özelliği
+    ilk `vim` kullanımından sonra kapatıyordu. `content_rows == rows` kolu
+    **kalktı**: dock'lu pencerede erişilemez ve R2.1'in kırpması geldikten
+    sonra ölü. **Bilinen sınır:** defter `scrollback`'te doyduğunda damganın
+    üstüne çıkacak sayı kalmıyor ve o oturumda bir Ctrl-L'den sonra doldurma
+    koşmuyor; kapatmanın yolu doymuş defterde de artan bir sayaç.
   - **R1.3** — Tarayıcının yeni durumu vte'nin iptal kurallarını taşır: `ESC`
     → `Escape`, `0x18`/`0x1A` → `Ground`, parametre uzunluğuna tavan. Bozuk
     bir CSI'da takılıp arkasından gelen `ESC ] 133;…`'ü **yutmaz**.
   - **R1.4** — Tarayıcı baytlara dokunmaz; akış aynen geçer.
 - **R2 — Boşluk geçmişle dolar.**
-  - **R2.1** — `fill = min(history_size, gap)`, geçmişin **en yeni** satırları,
-    içeriğin hemen üstüne.
+  - **R2.1** — `fill = min(gap, temizlemeden beri geçmişe düşen satır)`,
+    geçmişin **en yeni** satırları, içeriğin hemen üstüne. Hiç temizleme
+    olmamış oturumda ikinci terim defterin tamamıdır, yani formül
+    `min(history_size, gap)`. Üçüncü terim phase-1b'de eklendi
+    (`/code-review`): bayrağın düşmesi tek satırlık bir büyümeyle oluyor ve
+    onsuz doldurma boşluğun tamamını, yani kullanıcının sildiği ekranı geri
+    getiriyordu — ölçüldü (yedi satırlık delikte dördü temizleme öncesi).
   - **R2.2** — Koşul: pencerenin dock'u var **∧** alternatif ekranda değil
     **∧** bayrak temiz **∧** `display_offset == 0`. Safha kapısı **yok**.
   - **R2.3** — `content_rows` ve `origin = rows - content_rows` aritmetiği
@@ -121,6 +137,7 @@ bt-shell
 | phase-0 | ✅ |
 | phase-1 | ✅ |
 | phase-2 | ✅ |
+| phase-1b | ✅ |
 | phase-3 | |
 | phase-4 | |
 | phase-5 | |

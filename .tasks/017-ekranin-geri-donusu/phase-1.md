@@ -180,6 +180,10 @@ Aynı sınıfın daha seyrek hâli — pencereyi `content_rows`'un altına kısm
 
 ### 5. phase-2'ye geçen sonuç: alternatif ekran bayrağı **kurar**
 
+> **phase-1b'de düzeltildi (2026-09-20):** alternatif ekranın `CSI 2 J`'si
+> artık nesli tüketiyor ama bayrağı **kurmuyor**, ve düşme ölçütü defterin
+> büyümesi oldu. Aşağıdaki kayıt ölçüldüğü hâliyle duruyor.
+
 `vim` açılışta `CSI 2 J` basıyor, yani bayrak alternatif ekranda da kuruluyor
 ve ömrün ikinci koşulu (`!alt_screen`) onu orada düşmekten koruyor. Sonucu
 phase-2'nin bilmesi gereken cümle: **vim'den çıkıldığında ekran dolu değilse

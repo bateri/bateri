@@ -165,7 +165,15 @@ duruyor: `content_rows`'un alternatif ekran kolu değişirse tutan tek şey o
 olur. Sınaması bunu iddia etmiyor, **gözlüyor** (`an_empty_history_and_the_
 alternate_screen_leave_the_gap_empty`, ikinci kol).
 
-### 7. `/code-review`'un iki bulgusu — **giderilmedi, kayda geçti**
+### 7. `/code-review`'un iki bulgusu — **WAIVE reddedildi → phase-1b**
+
+> **Orkestratör kararı (2026-09-20):** iki waive de **reddedildi**. Tek tek
+> "yönü güvenli" görünüyorlar (doldurma yapmamak bugünkü davranış), ama
+> **birlikte** özelliği ilk `vim` kullanımından sonra **kalıcı olarak**
+> kapatıyorlar: vim `2J` basıp bayrağı kuruyor, dock'lu pencerede düşme
+> ölçütü erişilemez, altı phase'lik iş ekranda hiç görünmüyor. Çaresi iki
+> dar koşul ve `phase-1b.md`'de; R1.2 orada tadil ediliyor. Aşağıdaki kayıt
+> bulgunun ölçüldüğü hâliyle duruyor.
 
 İkisi de bu phase'in kodunda değil **bayrağın ömründe** (R1.2, phase-1) ve
 ikisi de yukarıdaki iki devir bloğunun *ölçülmüş* hâli. Düzeltmeleri
