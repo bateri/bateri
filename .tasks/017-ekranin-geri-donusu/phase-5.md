@@ -53,11 +53,41 @@ adıyla yasaklıyor — *"gözün gördüğü ile panonun verdiği ayrışmıyor
 
 ## Checklist
 
-- [ ] `point_to_cell` doldurma yüksekliğini alıyor ve `None` dönüyor
-- [ ] `fill == 0` yolu bit bit korunuyor
-- [ ] `view.rs:741` yeniden yazıldı (iki hâl ayrıldı)
-- [ ] Test: doldurma alanına tıklama `None`
-- [ ] Test: boş alanda kırpma hâlâ 0. satır
-- [ ] Test: sürükleme doldurma alanına girince uç son hücrede kalıyor
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] Yayın etkisi yazıldı
+- [x] `point_to_cell` doldurma yüksekliğini alıyor ve `None` dönüyor
+- [x] `fill == 0` yolu bit bit korunuyor
+- [x] `view.rs:741` yeniden yazıldı (iki hâl ayrıldı)
+- [x] Test: doldurma alanına tıklama `None`
+- [x] Test: boş alanda kırpma hâlâ 0. satır
+- [x] Test: sürükleme doldurma alanına girince uç son hücrede kalıyor —
+      **doğrudan yazılamadı** (AppKit'e bağlı); kanıt `None` bekçisi + iki
+      çağrı yerinin `if let Some`'ı (aşağıda)
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+- **Doldurma yüksekliği `Origin`'in gövdesine girdi** (`link.rs`), yanına
+  değil: `Origin(Rc<Cell<Drawn>>)` ve `Drawn { px, fill_rows }`. Tek gövde,
+  tek yayın noktası (`publish_origin`, `draw` `Ok` kolu) — ayrı bir hücre
+  olsaydı fare, orijini yeni bandı eski bir kareye göre çevirebilirdi. Hareket
+  karesinde band `Frame`'de korunuyor, yani kayma boyunca yayınlanan değer
+  sabit.
+- **Ret `y < 0.0`**, "bandın içi" değil: `fill = min(gap, taze satır)` yüzünden
+  bandın üstünde hâlâ boşluk kalabilir ve iki bölgeyi ayırmak farenin `fill`'i
+  bir de piksele çevirmesini isterdi. Reddin yönü güvenli
+  (`a_click_over_the_filled_area_is_rejected_instead_of_clamped`'in son iki
+  iddiası).
+- **Tekerleğin işaretçisi reddin dışında** ve sıfır bilerek geçiyor
+  (`scrollWheel:`): oradaki nokta bir seçim ucu değil fare raporuna giden
+  koordinat, ve `point_to_cell` `None` dönse `let ... else` kaydırmanın
+  **tamamını** düşürürdü — band ekrandayken işaretçiyi oraya götüren kullanıcı
+  hiç kaydıramazdı. Kuralın tek evi yine `point_to_cell`; ayrışan şey çağrı
+  yeri.
+- **Sürükleme ucunun sınaması yazılamadı**: `mouseDragged:` ile
+  `follow_pointer` AppKit olayına ve pencereye bağlı, `bt-shell`'de bunu kuran
+  bir seam yok. Kanıt ikiye ayrıldı — `None`'ın kendisi sınanıyor, iki çağrı
+  yerinin `if let Some`'ı da yorumla adlandırıldı.
+- **Bilinen davranış** (kapsam dışı bırakıldı): reddedilen `mouseDown:`
+  `set_selection`'a hiç varmıyor, yani band üstüne tıklamak **duran seçimi
+  temizlemiyor**. Temizlemek `mouse_down`'ın `None`'ın *sebebini* bilmesini
+  isterdi; kabul ölçütü de temizlemeyi istemiyor.

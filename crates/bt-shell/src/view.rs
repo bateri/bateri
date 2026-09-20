@@ -41,6 +41,11 @@ use crate::keys::{KeyInput, encode_key, page_scroll};
 /// Parametre, alan değil: fonksiyon saf kalıyor ve orijini konu etmeyen
 /// sınamalar `0.0` geçiyor.
 ///
+/// `fill_rows` aynı gövdeden geliyor ([`bt_gpu::Origin`]) ve aynı sebeple:
+/// "orijinin üstünde ne var" sorusunun iki yarısı — kaç piksel ve orası boş
+/// mu — aynı karenin geometrisi. İkinci bir senkronizasyon kurulmadı; kare
+/// yolu yazıyor, fare yolu okuyor, ikisi de ana thread.
+///
 /// Payın **içine** düşen tıklama ilk sütuna kırpılır, yani seçim payda
 /// başlamaz: çıkarmadan sonra x negatif kalır ve aşağıdaki iki dil kuralı onu
 /// 0. hücrenin sol yarısına yapıştırır — grid'in solundaki noktayla aynı yol,
@@ -56,8 +61,17 @@ use crate::keys::{KeyInput, encode_key, page_scroll};
 /// yanından çıkarsa çıksın o kenara tutunur. Sağa taşan nokta son sütunun
 /// **sağ** yarısıdır — satır sonuna sürükleyen fare grid'in sağındaki
 /// kullanılmayan şeride (`split_into_grid` sütunu aşağı yuvarlıyor) geçince
-/// son harf seçimde kalmalı. `None` yalnız sıfır sütunlu/satırlı grid içindir
-/// (simge durumundaki pencere): yapışacak hücre yok.
+/// son harf seçimde kalmalı.
+///
+/// `None`'ın **iki** sebebi var: sıfır sütunlu/satırlı grid (simge
+/// durumundaki pencere — yapışacak hücre yok) ve `fill_rows > 0` iken
+/// orijinin **üstüne** düşen nokta. İkincisi bu fonksiyondaki tek **ret**:
+/// doldurma bandı çizilince (017) orası boş değil, geçmişin satırları orada
+/// duruyor ve o satırlar sınırın satır numaralarıyla temsil edilemiyor. Ret
+/// kırpmanın yerine geçmiyor, **yanına** geçiyor — `fill_rows == 0` iken
+/// yukarı taşan nokta bugünkü gibi 0. satıra yapışır ve yapışmalı: orası
+/// gerçekten boş, üstelik `u16` taşmasının asıl koruması o kırpmada
+/// (`the_origin_shifts_the_grid_down_and_the_blank_area_clamps`).
 ///
 /// Taban yuvarlama (`as u16` kesmesi): farenin **hangi** hücrede olduğu
 /// soruluyor ve `split_into_grid` ile aynı aritmetik. Sol/üst yapışması ayrı
@@ -71,6 +85,7 @@ pub(crate) fn point_to_cell(
     view_px: (f64, f64),
     metrics: CellMetrics,
     origin_px: f64,
+    fill_rows: u16,
     scale: f64,
     cols: u16,
     rows: u16,
@@ -91,6 +106,15 @@ pub(crate) fn point_to_cell(
     // sıfıra **doyuruyor** — payın yatayda kullandığı yolun aynısı, ayrı bir
     // kırpma dalı yok.
     let y = view_px.1 * scale - origin_px;
+    // **Orijinin üstü doluysa ret, kırpma değil.** Kırpma yalnız orası
+    // *boşken* doğru: doldurma bandı çizilince kullanıcı orada metin görüyor
+    // ve 0. satıra yapışan bir çapa vurguyu gözün gördüğü yerden başka bir
+    // yere koyardı. Doldurulan satırlar sınırın satır numaralarıyla temsil
+    // edilemiyor (hepsi geçmişte, yani negatif) — "yanlış seçilir" ile
+    // "seçilemez" arasında ikincisi dürüst olan.
+    if fill_rows > 0 && y < 0.0 {
+        return None;
+    }
     let row = ((y / cell_h) as u16).min(rows - 1);
     let col = (x / cell_w) as u16;
     let (col, half) = if col < cols {
@@ -396,7 +420,15 @@ define_class!(
             // İşaretçinin hücresi fare kipinde rapora giriyor; yarısı girmiyor
             // (`bt-core` okumuyor). Kenar dışı nokta yapışır, `None` yalnız
             // sıfır boyutlu grid'de.
-            let Some(pointer) = self.event_cell(event) else {
+            //
+            // **Doldurma reddi burada geçerli değil** ve sıfır bilerek
+            // geçiliyor: buradaki nokta bir seçim ucu değil rapora giden
+            // koordinat ve reddedilseydi bu `else` kaydırmanın **tamamını**
+            // düşürürdü — band ekrandayken işaretçiyi oraya götüren kullanıcı
+            // hiç kaydıramazdı. Bandın üstündeki nokta rapora bugünkü gibi 0.
+            // satır olarak giriyor: uygulama doldurmayı zaten bilmiyor, o bir
+            // terminal çizimi.
+            let Some(pointer) = self.window_point_cell(event.locationInWindow(), 0) else {
                 return;
             };
             let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
@@ -504,21 +536,28 @@ impl BateriView {
 
     /// Oturum + olayın altındaki uç (hücre ve yarısı). Üçü (`session`, ölçü,
     /// grid) birlikte yoksa `None`: yarım bilgiyle seçim başlatılamaz.
+    /// Doldurma bandının üstüne yapılan tıklama da `None`
+    /// ([`point_to_cell`]).
     fn session_cell(&self, event: &NSEvent) -> Option<(Arc<Session>, SelectionPoint)> {
         let session = Arc::clone(self.ivars().session.get()?);
         let cell = self.event_cell(event)?;
         Some((session, cell))
     }
 
-    /// Olay noktasını seçim ucuna indirir. `None` yalnız ölçü ya da pencere
-    /// henüz yokken ve grid sıfır boyutluyken — kenar dışı nokta yapışır.
+    /// Olay noktasını seçim ucuna indirir. `None` ölçü ya da pencere henüz
+    /// yokken, grid sıfır boyutluyken ve doldurma bandının üstünde — kenar
+    /// dışı nokta yapışır.
     fn event_cell(&self, event: &NSEvent) -> Option<SelectionPoint> {
-        self.window_point_cell(event.locationInWindow())
+        self.window_point_cell(event.locationInWindow(), self.fill_rows())
     }
 
     /// Pencere koordinatındaki noktayı seçim ucuna indirir — [`Self::event_cell`]'in
     /// olaysız hâli: tuşla kaydırmada farenin yerini taşıyan bir fare olayı yok.
-    fn window_point_cell(&self, in_window: NSPoint) -> Option<SelectionPoint> {
+    ///
+    /// `fill_rows` **argüman**, alan değil: tekerleğin işaretçisi bir seçim
+    /// ucu değil rapora giden koordinattır ve sıfır geçerek reddi dışında
+    /// kalır (`scrollWheel:`).
+    fn window_point_cell(&self, in_window: NSPoint, fill_rows: u16) -> Option<SelectionPoint> {
         let (metrics, (cols, rows)) = self.ivars().metrics.get()?;
         let point = self.convertPoint_fromView(in_window, None);
         let scale = self.window()?.backingScaleFactor();
@@ -529,10 +568,18 @@ impl BateriView {
             (point.x, point.y),
             metrics,
             f64::from(origin_px),
+            fill_rows,
             scale,
             cols,
             rows,
         )
+    }
+
+    /// Çizilen karenin doldurma bandının boyu — orijinle **aynı gövdeden**
+    /// ([`bt_gpu::Origin`]), yani ikisi aynı kareye ait. Link yoksa sıfır:
+    /// band da çizim de yok.
+    fn fill_rows(&self) -> u16 {
+        self.ivars().origin.get().map_or(0, Origin::fill_rows)
     }
 
     /// Pencere kaydı; basılı bir sürükleme varsa seçimin ucunu farenin **yeni**
@@ -560,7 +607,11 @@ impl BateriView {
         let Some(window) = self.window() else {
             return;
         };
-        if let Some(cell) = self.window_point_cell(window.mouseLocationOutsideOfEventStream()) {
+        // `None` gelirse uç **taşınmıyor**: fare doldurma bandının üstüne
+        // çıktıysa seçim son geçerli hücresinde kalır, 0. satıra fırlamaz.
+        if let Some(cell) =
+            self.window_point_cell(window.mouseLocationOutsideOfEventStream(), self.fill_rows())
+        {
             session.update_selection(cell);
         }
     }
@@ -584,7 +635,7 @@ mod tests {
     /// pay kadar kaydırmak o gerekçeleri okunmaz hâle getirirdi. Payın kendi
     /// sınaması `the_gutter_shifts_the_grid_origin`.
     fn scene_point(view_px: (f64, f64)) -> Option<SelectionPoint> {
-        point_to_cell(view_px, grid(0), 0.0, 2.0, 100, 33)
+        point_to_cell(view_px, grid(0), 0.0, 0, 2.0, 100, 33)
     }
 
     /// Sahnenin hücresi ve yarısı ayrı okunuyor: hücre testleri hücreye, yarı
@@ -693,7 +744,7 @@ mod tests {
     fn the_gutter_shifts_the_grid_origin() {
         // Sahne: 9×18 hücre, @2x, **8 fiziksel piksel** pay. View'da pay
         // 4 nokta, hücre 4.5 nokta eder.
-        let at = |x: f64| point_to_cell((x, 9.0), grid(8), 0.0, 2.0, 100, 33);
+        let at = |x: f64| point_to_cell((x, 9.0), grid(8), 0.0, 0, 2.0, 100, 33);
         let cell = |point: Option<SelectionPoint>| point.map(|p| (p.col, p.half));
 
         // Payın **içi** ilk sütuna kırpılır ve sol yarıda kalır: seçim payda
@@ -719,7 +770,7 @@ mod tests {
         // yoksa pay hiç uygulanmasa da geçerdi.
         assert_eq!(cell(at(5.0)), Some((0, CellHalf::Left)), "paylı");
         assert_eq!(
-            point_to_cell((5.0, 9.0), grid(0), 0.0, 2.0, 100, 33).map(|p| (p.col, p.half)),
+            point_to_cell((5.0, 9.0), grid(0), 0.0, 0, 2.0, 100, 33).map(|p| (p.col, p.half)),
             Some((1, CellHalf::Left)),
             "paysız aynı nokta bir sonraki sütun"
         );
@@ -731,11 +782,20 @@ mod tests {
         // bu: ikisi ayrışsaydı son sütun ya erken biterdi ya taşardı.
         assert_eq!(cell(at(451.5)), Some((99, CellHalf::Left)), "paylı sağ uç");
         assert_eq!(
-            point_to_cell((451.5, 9.0), grid(0), 0.0, 2.0, 100, 33).map(|p| (p.col, p.half)),
+            point_to_cell((451.5, 9.0), grid(0), 0.0, 0, 2.0, 100, 33).map(|p| (p.col, p.half)),
             Some((99, CellHalf::Right)),
             "paysız aynı nokta grid'i taşar"
         );
     }
+
+    /// Orijinin üstündeki sahnenin ölçüsü: 9×18 hücre, @2x, **180 fiziksel
+    /// piksel** orijin — yani on satırlık bir alan, ardından içerik. View'da
+    /// orijin 90 nokta eder, hücre 9 nokta.
+    ///
+    /// İki sınama aynı sahneyi iki `fill` ile soruyor: sıfırda alan **boş**
+    /// ve tıklama kırpılır, sıfırdan büyükte alanda **geçmiş** var ve tıklama
+    /// reddedilir.
+    const ORIGIN_PX: f64 = 180.0;
 
     #[test]
     fn the_origin_shifts_the_grid_down_and_the_blank_area_clamps() {
@@ -744,16 +804,13 @@ mod tests {
         // tıklamada fark negatife iniyor. `u16`'da yapılsaydı taşar ve o
         // tıklama son satırı seçerdi — sürüklemenin başı ekranın dibine
         // fırlardı. `f64`'te negatif kalıyor ve `as u16` sıfıra doyuruyor.
-        //
-        // Sahne: 9×18 hücre, @2x, **180 fiziksel piksel** orijin — yani on
-        // satırlık boş alan, ardından içerik. View'da orijin 90 nokta eder,
-        // hücre 9 nokta.
-        const ORIGIN_PX: f64 = 180.0;
-        let at = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX, 2.0, 100, 33);
+        let at = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX, 0, 2.0, 100, 33);
         let row = |point: Option<SelectionPoint>| point.map(|p| p.row);
 
         // Boş alanın tamamı 0. satıra yapışır: üst kenar, ortası ve orijinin
-        // bittiği yerin bir öncesi. Ayrı bir kırpma dalı yok.
+        // bittiği yerin bir öncesi. Ayrı bir kırpma dalı yok — ve kırpma
+        // **kaldırılamaz**: doldurma yokken orası gerçekten boş ve yukarıdan
+        // başlayan sürükleme ilk satırı seçime katmalı.
         assert_eq!(row(at(0.0)), Some(0), "üst kenar");
         assert_eq!(row(at(45.0)), Some(0), "boş alanın ortası");
         assert_eq!(row(at(89.0)), Some(0), "içeriğin bir öncesi");
@@ -767,7 +824,7 @@ mod tests {
         // cevap veriyor. Bu satır olmasa orijin hiç uygulanmasa da sınama
         // geçerdi — payın kendi sınamasındaki ayrımın aynısı.
         assert_eq!(
-            row(point_to_cell((0.0, 99.0), grid(0), 0.0, 2.0, 100, 33)),
+            row(point_to_cell((0.0, 99.0), grid(0), 0.0, 0, 2.0, 100, 33)),
             Some(11),
             "orijinsiz aynı nokta on bir satır aşağıda"
         );
@@ -782,7 +839,7 @@ mod tests {
         // yarım hücre aşağıda ve eski sınır bir satır yukarıya düşüyor.
         // Fonksiyonun tam satır varsayımı yok — olsaydı belirti "kayarken
         // tıklama bir satır şaşıyor" olurdu.
-        let mid = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX + 9.0, 2.0, 100, 33);
+        let mid = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX + 9.0, 0, 2.0, 100, 33);
         assert_eq!(
             row(mid(99.0)),
             Some(0),
@@ -796,11 +853,50 @@ mod tests {
     }
 
     #[test]
+    fn a_click_over_the_filled_area_is_rejected_instead_of_clamped() {
+        // Doldurma gelince orijinin üstü **boş değil**: kullanıcı orada metin
+        // görüyor. Kırpma sürseydi çapa gözün gördüğü satıra değil içeriğin
+        // tepesine düşer, vurgu bambaşka bir yerde belirirdi — seçim
+        // sözleşmesinin ("gözün gördüğü ile panonun verdiği ayrışmıyor")
+        // adıyla yasakladığı şey. Doldurulan satırlar **seçilemez** olduğu
+        // için (satır numaraları negatife açılmadan temsil edilemezler) tek
+        // doğru cevap reddetmek.
+        let at = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX, 10, 2.0, 100, 33);
+        let row = |point: Option<SelectionPoint>| point.map(|p| p.row);
+
+        // Boş alanın kırpıldığı **üç noktanın aynısı**, bu kez `None`: iki
+        // sınamayı ayıran tek girdi `fill`.
+        assert_eq!(at(0.0), None, "üst kenar");
+        assert_eq!(at(45.0), None, "bandın ortası");
+        assert_eq!(at(89.0), None, "içeriğin bir öncesi");
+
+        // Sürükleme tam burada duruyor: iki çağrı yeri de (`mouseDragged:` ve
+        // `follow_pointer`) `if let Some` ile giriyor, yani `None` gelen
+        // olayda seçimin ucu **son geçerli hücresinde** kalıyor.
+
+        // İçeriğin kendisi el değmeden geçiyor — ret yalnız orijinin üstüne.
+        assert_eq!(row(at(90.0)), Some(0), "içeriğin başı");
+        assert_eq!(row(at(99.0)), Some(1), "bir satır sonra");
+        assert_eq!(row(at(600.0)), Some(32), "alt taşma hâlâ son satır");
+
+        // **Band boşluğun tamamını kaplamasa da** ret orijinin üstünün
+        // tamamına: `fill = min(gap, taze satır)` ve üstte hâlâ boşluk
+        // kalabilir. İki bölgeyi ayırmak farenin `fill`'i bir de piksele
+        // çevirmesini isterdi; reddin yönü güvenli, kırpmanınki değil.
+        let thin = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX, 1, 2.0, 100, 33);
+        assert_eq!(thin(0.0), None, "bandın üstünde kalan boşluk");
+        assert_eq!(thin(89.0), None, "bandın içi");
+    }
+
+    #[test]
     fn empty_grid_has_no_cell() {
         // Simge durumundaki pencere sıfır sütun/satır verebilir: yapışacak bir
         // son hücre yok.
-        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 0.0, 2.0, 0, 33), None);
-        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 0.0, 2.0, 100, 0), None);
+        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 0.0, 0, 2.0, 0, 33), None);
+        assert_eq!(
+            point_to_cell((1.0, 1.0), grid(0), 0.0, 0, 2.0, 100, 0),
+            None
+        );
     }
 
     #[test]
@@ -878,8 +974,8 @@ mod tests {
         // Aynı view noktası iki ölçekte iki ayrı hücre: ölçü fiziksel
         // pikselden geliyor ve ölçek çarpanı atlanırsa retina makinede seçim
         // yarı kayar.
-        let at1x = point_to_cell((90.0, 150.0), grid(0), 0.0, 1.0, 100, 33);
-        let at2x = point_to_cell((90.0, 150.0), grid(0), 0.0, 2.0, 100, 33);
+        let at1x = point_to_cell((90.0, 150.0), grid(0), 0.0, 0, 1.0, 100, 33);
+        let at2x = point_to_cell((90.0, 150.0), grid(0), 0.0, 0, 2.0, 100, 33);
         assert_eq!(
             (at1x.map(|p| (p.col, p.row)), at2x.map(|p| (p.col, p.row))),
             (Some((10, 8)), Some((20, 16)))

@@ -286,7 +286,14 @@ impl Waker {
 }
 
 /// Çizilen karenin dikey orijini, piksel — **kare yolu yazar, fare yolu
-/// okur**.
+/// okur**. Yanında doldurma bandının boyu (satır) taşınıyor.
+///
+/// **Band orijinin geometrisinin parçası**, ikinci bir konu değil: bandın
+/// kendi viewport'u da buradan türüyor (`Frame::fill_origin_px`,
+/// `origin_px − fill_px`) ve fare eşlemesinin sorduğu şey de orijinin
+/// **üstünde** ne olduğu — boşluk mu, geçmiş mi. Ayrı bir gövdeye konsaydı
+/// iki değer iki ayrı karede yayınlanabilir ve orijini yeni, bandı eski bir
+/// fare çevirisi doğardı.
 ///
 /// Değerin **tek sahibi** [`DisplayLink`]: hesabı `Session::frame` yapıyor
 /// (`bt_core::Cursor::content_rows`, tek hesap) ama ötelemeye çeviren ve
@@ -314,17 +321,30 @@ impl Waker {
 /// yine düşebilir — kalan pencere tek kare, çünkü `draw_failed` hasar bayrağını
 /// geri dikiyor ve sıradaki kare aynı ötelemeyle yeniden çiziliyor.
 #[derive(Clone, Default)]
-pub struct Origin(Rc<Cell<f32>>);
+pub struct Origin(Rc<Cell<Drawn>>);
+
+/// [`Origin`]'in gövdesi: tek karenin iki sayısı, birlikte yayınlanır.
+#[derive(Clone, Copy, Default)]
+struct Drawn {
+    px: f32,
+    fill_rows: u16,
+}
 
 impl Origin {
     /// Çizilen karenin dikey orijini, **fiziksel piksel**.
     pub fn px(&self) -> f32 {
-        self.0.get()
+        self.0.get().px
+    }
+
+    /// Orijinin üstündeki doldurma bandının boyu, **satır**
+    /// (`bt_core::Cursor::fill`). Sıfırsa orada boşluk var, değilse geçmiş.
+    pub fn fill_rows(&self) -> u16 {
+        self.0.get().fill_rows
     }
 
     /// Yalnız kare yolu yazar; `pub` değil ve olmamalı.
-    fn set(&self, px: f32) {
-        self.0.set(px);
+    fn set(&self, px: f32, fill_rows: u16) {
+        self.0.set(Drawn { px, fill_rows });
     }
 }
 
@@ -1240,7 +1260,8 @@ impl LinkDelegate {
         frame.set_origin_rows(origin_rows);
     }
 
-    /// Çizilen ötelemeyi fare eşlemesine yayınla — yalnız `draw` `Ok` dönünce.
+    /// Çizilen ötelemeyi **ve doldurma bandının boyunu** fare eşlemesine
+    /// yayınla — yalnız `draw` `Ok` dönünce.
     ///
     /// Ayrı bir adım, çünkü [`Origin`]'in sözleşmesi **encode edilen** kareyi
     /// söylüyor: `Err` kolunda ekranda önceki kare kalıyor ve o kareyi
@@ -1248,8 +1269,15 @@ impl LinkDelegate {
     /// Aralığı daraltıyor, kapatmıyor — `Ok` "commit edildi" demek, "ekranda"
     /// demek değil; asenkron tamamlanma yine düşebilir ve sözleşme bu yüzden
     /// "çizilen" değil "encode edilen" diyor.
+    ///
+    /// İki değer **tek** yazmada gidiyor: ikisi de aynı karenin geometrisi ve
+    /// ayrı yayınlansalardı fare, orijini yeni bandı eski bir kareye göre
+    /// çevirebilirdi. Hareket karesi de buraya uğruyor — band orada korunuyor
+    /// (`Frame` temizlenmiyor), yani kayma boyunca yayınlanan değer sabit.
     fn publish_origin(&self, frame: &Frame) {
-        self.ivars().origin.set(frame.origin_px());
+        self.ivars()
+            .origin
+            .set(frame.origin_px(), frame.fill_rows());
     }
 
     /// **Saat**: kare talebinin üçüncü sebebi (modül başlığı).
@@ -1530,7 +1558,8 @@ impl DisplayLink {
         self.waker.clone()
     }
 
-    /// Çizilen karenin dikey orijinini okuyan uç; fare eşlemesi bunu tutar.
+    /// Çizilen karenin dikey orijinini (ve üstündeki doldurma bandının boyunu)
+    /// okuyan uç; fare eşlemesi bunu tutar.
     ///
     /// [`Self::waker`] ile aynı örüntü — paylaşılan gövdenin kopyası — ama
     /// yönü ters: `Waker` dışarıdan **yazılıyor**, bu dışarıdan **okunuyor**.

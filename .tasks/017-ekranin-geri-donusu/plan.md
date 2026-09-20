@@ -140,5 +140,5 @@ bt-shell
 | phase-1b | ✅ |
 | phase-3 | ✅ |
 | phase-4 | ✅ |
-| phase-5 | |
+| phase-5 | ✅ |
 | kapı | |

@@ -309,7 +309,16 @@ kalmak zorunda.
 boyamıyor ve gözün gördüğü ile panonun verdiği ayrışmıyor. Ölçüt "mürekkep"
 değil **çizilirlik** — ters videolu bir boşluk (vim'in durum satırı, tmux
 çubuğu) mürekkepsizdir ama görünürdür ve seçilince vurgulanır; varsayılan
-zeminli boş hücre görünmezdir ve seçim onu görünür kılmaz.
+zeminli boş hücre görünmezdir ve seçim onu görünür kılmaz. Doldurma bandı bu
+kuralın tek istisnası değil **tersi**: satırları görünür ama **seçilemez**,
+çünkü hepsi geçmişte, yani sınırın satır numaralarıyla temsil edilemiyorlar.
+Fare bu yüzden orijinin üstünü **reddediyor** (`point_to_cell`, `fill > 0`);
+kırpma orayı 0. satıra yapıştırır ve vurguyu gözün gördüğü yerden başka bir
+yerde başlatırdı — "yanlış seçilir" ile "seçilemez" arasında dürüst olan
+ikincisi. Kırpma **kalkmıyor**, yanına geçiyor: doldurma yokken orası
+gerçekten boş ve yukarıdan başlayan sürükleme ilk satırı seçime katmalı.
+Tekerleğin işaretçisi reddin dışında, çünkü o bir seçim ucu değil rapora
+giden koordinat — reddedilseydi band ekrandayken kaydırma büsbütün ölürdü.
 Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app` paketini
 üretir.
 Emoji, geniş glyph ve kutu çizim henüz yok. Aşağıdaki sözleşme kod geldikçe
