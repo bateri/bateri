@@ -38,11 +38,11 @@ uygula.
 
 **C. Bugünkü hâl** — sorunu hiç çözmüyor, tamlık için yazılı.
 
-**Öneri: A**, ve yanında panelden gelen bir **daraltma**: sürükleme yalnız
-1002/1003 istendiğinde uygulamanın. Yalnız `1000` açan uygulama sürüklemeyi
-zaten istemiyor, yani o kolda seçimi terminale bırakmak hiçbir şey
-kaybettirmiyor — deponun kendi ölçütüyle "yanlışın yönü güvenli". Yan kazanç
-Karar 2'de: phase-1'in ara durumu kendiliğinden tutarlı oluyor.
+**Öneri: A**, **daraltmasız**. Panelden "sürükleme yalnız 1002/1003'ün
+olsun" diye bir daraltma gelmişti ve bir tur kabul edildi; advisor çürüttü
+(`## Muhakeme` → Reddedilenler). Kural tek cümle kalıyor: **basış
+raporlandıysa jest uygulamanındır, Shift tek kaçış yolu.** xterm ve alacritty
+paritesi.
 
 **Asimetrinin bekçisi zorunlu:** "Shift düğmeyi geçersiz kılar, tekerleği
 kılmaz" sınaması `mouse_mode_comes_first_on_either_screen`'in **yanında**
@@ -57,11 +57,15 @@ gelmesi 1000 seviyesidir.
 **A. Aynı set, ayrı phase.** Düğme phase-1'de belirtiyi kapatır; hareket
 phase-2'de gelir. İkisi de tek başına `make hepsi`'yi yeşil bırakır.
 
-- **Artı:** belirti ilk commit'te kapanıyor. Karar 1'in daraltmasıyla
-  birlikte ara durum **katıksız ekleme**: phase-1'den sonra Shift'siz
-  sürükleme hâlâ seçim yapıyor (çünkü sürüklemeyi ancak 1002/1003 alır ve o
-  phase-2'de geliyor), tıklama ise uygulamaya gidiyor.
-- **Eksi:** yok sayılır.
+- **Artı:** belirti ilk commit'te kapanıyor; hareketin AppKit yüzeyi kendi
+  incelemesini alıyor.
+- **Eksi — ara durum katıksız ekleme değil ve dürüst yazılmalı:** phase-1'den
+  sonra fare isteyen bir uygulamada Shift'siz sürükleme **hiçbir şey
+  yapmıyor** — tıklama uygulamaya gidiyor, jest uygulamanın oluyor (Karar 1),
+  ama hareket henüz raporlanmıyor. 1002/1003'te bu phase-2'de kapanıyor;
+  yalnız 1000 açan uygulamada **kalıcı** ve doğru (o uygulama sürükleme
+  istemiyor). Shift'li sürükleme her iki hâlde de seçim yapıyor, yani
+  kullanıcının kaçış yolu phase-1'den itibaren var.
 
 **B. Tek phase.** Phase tek commit'e sığmaz; `bt-core`'un saf tablosu ile
 AppKit'in olay yüzeyi aynı incelemede boğulur.
@@ -101,9 +105,10 @@ seviyesindeki olay ona geliyor.
 **A. Her zaman aç, `mouseMoved:` kipe bakıp erken dönsün.**
 
 - **Artı:** tek satır, yeni haberci yok, yeni paylaşılan durum yok.
-- **Eksi:** fare istemeyen pencerede de hareket başına bir olay — ve kip
-  sorusu `Term` kilidi altında olmak zorunda, yani **hareket başına bir
-  kilit**. Ölçülmedi.
+- **Eksi:** fare istemeyen pencerede de hareket başına bir AppKit olayı.
+  **`Term` kilidi hareket başına değil**: Karar 5d'nin kısması `bt-core`
+  çağrısından **önce** koşuyor, yani hücre değişmeyen olay kilide hiç
+  uğramadan dönüyor. Kalan bedel bir koordinat aritmetiği. Ölçülmedi.
 
 **B. Kipe göre aç.** Kare yolu kip değişimini fark edip `bt-shell`'e haber
 versin (`notify_alt_screen_changed` örüntüsü), ya da kip `fill_shown:
@@ -162,7 +167,18 @@ konumunu tutmaya başlar.
 - **Öneri: `ViewIvars`'ta bir `Cell<Option<(u16, u16)>>`** (`dragging`
   emsali), karşılaştırma **görünür pencere** hücresinde. xterm de ekran
   konumunda kısıyor; uygulamanın kendi kaydırması işaretçi dururken rapor
-  üretmemeli.
+  üretmemeli. Kısma `bt-core` çağrısından **önce**: hücre değişmediyse kilit
+  hiç alınmıyor (Karar 4'ün bedelini de bu düşürüyor).
+
+**5e — Bırakma basışın rotasını izler.** Panelin ulaşamadığı boşluk. Basış
+`Sent` olduysa ve işaretçi bırakılırken artık sığmayan bir satırdaysa
+(doldurma bandına kaymış ya da satır negatif), bırakmayı **düşürmek**
+uygulamada **takılı kalmış bir düğme** bırakır — hafifçe yanlış bir
+koordinattan kötü.
+
+- **Öneri:** rota `mouseDown:`'da kilitlensin (5b) ve `Sent` basışın
+  bırakması **kırpılarak** raporlansın, asla düşürülmesin. Basışta ret
+  (`Ignored`) doğru, bırakmada değil — jest zaten başlamış.
 
 ## Kapsam dışı
 
@@ -217,9 +233,6 @@ Kabul edilen itirazların hepsi kodda doğrulandı.
   odak `app.rs`'te ve `view.rs`'te sıfır geçiş.
 - **`NSTrackingArea` gereksiz** (Sadelik) → Karar 4 sadeleşti. View zaten
   first responder.
-- **Sürükleme kapısı daraltılsın** (İşletme) → Karar 1'e fıkra. Sürükleme
-  yalnız 1002/1003'ün; yan kazanç phase-1'in ara durumunun katıksız ekleme
-  olması.
 - **Doğrulama kör** (İşletme) → plana yazılacak: duman kabuğu sabit bir betik
   ve hiçbir fare kipi açmıyor, depoda fare olayı enjekte eden kanca yok, yani
   `make duman` fare yolu tamamen ölü olsa da yeşil düşer. Burada duman bir
@@ -237,10 +250,58 @@ Kabul edilen itirazların hepsi kodda doğrulandı.
   B kolunda kayıtlı ama şimdi alınmıyor: yeni paylaşılan durum demek ve o
   phase'e `make test-yaris` ekler. Ölçülmemiş bir kazanç için ölçülmüş bir
   bedel.
+- **Sürükleme kapısının daraltılması** (İşletme, basitleştirme 1) — bir tur
+  **kabul edilmişti**, advisor çürüttü. Daraltma bir **kip** kuralı ("yalnız
+  1000 açıksa sürükleme terminalin"), ama ona bağladığım kazanç phase-1'in
+  ne **uyguladığıyla** ilgiliydi ve çıkarım yanlıştı: Claude Code 1003
+  açıyor, yani daraltmayla da sürükleme uygulamanın olur ve phase-1 hareketi
+  raporlamadığı için sürükleme yine ölü. Kazandırdığı tek şey yalnız-1000
+  açan uygulamalarda (seyrek) sürükleyerek seçim; bedeli cevap enum'una
+  ikinci bir eksen (`Sent{drag: App|Terminal}`) ve Karar 5b'nin
+  karmaşıklaşması. Kural tek cümle kalıyor.
 - **alacritty'nin `on_mouse_press`'ine paritenin doğrulanması**
   (Codebase-fit, not 2) — depoda doğrulanamıyor (`alacritty` binary crate
   bağımlılık grafında yok, yalnız `alacritty_terminal` var). Karar 1'in
   dayanağı xterm konvansiyonu olarak kalıyor; parite sorusu açık ve
   gerekçeyi zayıflatmıyor.
 
-## Karar
+## Karar (2026-09-21, kullanıcı devretti → advisor)
+
+Kullanıcı kararı vermeyi devretti ("kararları advisor ile ver bana sorma");
+damga bu yüzden "kullanıcı onayı" değil. Panelden geçmiş öneriler advisor'a
+sunuldu, advisor ikisini düzeltti.
+
+- **Karar 1 → A, daraltmasız.** Shift terminali geri alır; fare kipi açıkken
+  Shift'siz basış uygulamanın, Shift'li basış seçimin. **Basış raporlandıysa
+  jest uygulamanındır** — sürükleme için ayrı bir kip kapısı yok.
+  - *Reddedilen:* B (fare kipi her zaman kazanır) — uygulama içinde fareyle
+    metin seçme yeteneğini büsbütün öldürürdü.
+  - *Reddedilen:* panelin "sürükleme yalnız 1002/1003'ün" daraltması — bir tur
+    kabul edilmişti, gerekçesi çürüdü (`## Muhakeme` → Reddedilenler).
+- **Karar 2 → A.** Aynı set, ayrı phase. Ara durum **katıksız ekleme değil**
+  ve plana dürüst yazılıyor: phase-1'den sonra Shift'siz sürükleme fare
+  isteyen uygulamada hiçbir şey yapmıyor, Shift'li sürükleme seçim yapıyor.
+- **Karar 3 → A.** Doldurma bandının üstündeki tıklama reddedilir; sıfır
+  satır kod.
+- **Karar 4 → A.** `setAcceptsMouseMovedEvents:` hep açık, `mouseMoved:` erken
+  döner; `NSTrackingArea` yok. Kısma `bt-core` çağrısından **önce**, yani
+  `Term` kilidi hareket başına değil **hücre değişimi** başına ödeniyor.
+  - *Geri dönüş adlandırıldı:* belirti görülürse B (kipe göre aç). Ölçüm sözü
+    değil — fare hareketi başına maliyeti ölçecek kanca depoda yok.
+- **Karar 5 → tekerleğin kolu + latch + üç varyantlı enum + view ivars.**
+  - **5a:** rapor `send`'den geçer, `send_input`'tan değil: seçimi temizlemez,
+    pencereyi dibe döndürmez (`wheel_and_replies_keep_the_selection` emsali).
+  - **5b:** rota `mouseDown:`'da kilitlenir; jest başladığı kolda biter.
+  - **5c:** cevap üç varyantlı enum. Yan sonuç kabul edildi ve yazılacak:
+    geçmişe kaydırılmış pencerede fare kipinde tıklamak hiçbir şey yapmaz.
+  - **5d:** kısmanın durumu `ViewIvars`'ta, karşılaştırma görünür pencere
+    hücresinde.
+  - **5e (advisor ekledi):** **bırakma basışın rotasını izler.** `Sent` basışın
+    bırakması kırpılarak raporlanır, asla düşürülmez — düşürmek uygulamada
+    takılı kalmış bir düğme bırakırdı. Bekçisi `release_follows_press`.
+- **Kapsam dışı:** `?1004` odak raporu, `?2031` tema bildirimi, yatay tekerlek
+  (66/67), SGR-pixel (1016), çift/üçlü tıkla seçim. İlk ikisi yol haritasına
+  borç olarak yazılır.
+- **Ayar anahtarı yok.** Shift kaçış yolu var, emsal terminallerin hepsi
+  anahtarsız ve anahtar eklemek geri alınamaz ("bilinmeyen anahtar asla
+  silinmez"). `docs/AYARLAR.md` dokunulmadan kalır.

@@ -59,9 +59,10 @@ bulunamaz.
 | 017 | ekranın geri dönüşü | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "tamamlama listesi ızgarayı kaydırıyor"): Tab listesi kalkınca geriye bir delik kalıyor ve ekran Tab öncesine dönmüyor. Kökü 011'in kayıtlı bedeline ve 012'nin Karar 3a'sına bağlı, yani `bt-core`'un bastırma aralığı + `origin`'in tek yönlü kayması birlikte açılıyor. Set açıldı → `.tasks/017-ekranin-geri-donusu/context.md` |
 | 018 | klavye + dosya sürükleme | **Üç kullanıcı isteği bir arada** (2026-09-19 ve -20): macOS metin kısayolları ("bu kısayollar yok diye pratiklik çok azalıyor"), **ölü tuşlar** — Türkçe Q'da `~` ve `` ` `` yazılamıyor, ölçüldü — ve Finder'dan dosya sürükleme. Tek set olmalarının sebebi kapsam değil dosya: üçü de `bt-shell/view.rs` + `keys.rs`'te, `keyDown:`'ın aynı yönlendirmesinde buluşuyor. Set açıldı → `.tasks/018-klavye-ve-surukleme/context.md` (düzen taraması ve iki ölçüm orada; kapsamı panel daralttı — `discussion.md` → Muhakeme) |
 | 019 | glyph yedeği | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "font fallback yok"): seçili fontta olmayan karakter kutu çiziliyor. Ölçüldü — `⏵` (U+23F5) Menlo'da yok, aynı satırdaki `→`/`↻`/`░` var; `CTFontGetGlyphsForCharacters` cascade list'e düşmüyor. **Aile** düzeyinde yedek zaten var (`PREFERRED` → `FALLBACK`), eksik olan **karakter** düzeyi. Emoji setinden ayrı ve çok daha ucuz: yedekten gelen glyph de tek kanallı maske, `R8Unorm` atlas duruyor; değişen tek şey yuva anahtarına gerçek fontun kimliğinin girmesi. Set açıldı → `.tasks/019-glyph-yedegi/context.md` |
-| 020 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
-| 021 | emoji + geniş glyph + kutu çizim | **Kutu çizim yarısı ayrılabilir** (2026-09-20, ölçüldü → aşağıdaki "blok, çizgi ve Braille fonttan geliyor"): blok/çizgi/Braille'in çaresi yordamsal çizim ve o, emoji'nin mimari çatalına hiç dokunmuyor — 019'un buradan ayrıldığı aynı gerekçe, ve maskot + spinner + TUI çerçeveleri onu beklemek zorunda değil. Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek |
-| 022 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
+| 020 | fare raporlama | **Kullanıcı isteğinden doğdu** (2026-09-21): Claude Code'un giriş kutusunda tıklanan yere imleç gelmiyor. Sebep fare raporunun yokluğu — adı TUI desteği değil mouse tracking. Ölçüldü (CLI bir pty'ye koşturuldu): Claude Code `?1000/1002/1003/1006` istiyor, etkin kip 1003. Raporun yarısı hazır: `wheel_report` adı tekerlek ama gövdesi genel X10/SGR raporu ve kip takibi alacritty'den bedava geliyor; eksik olan düğme/hareket kodlaması ve `mouseDown:`'ın kipi hiç sormaması. İçindeki ürün kararı Shift arbitrajı — fare kipinde Shift terminali geri alır, yoksa uygulama içinde metin seçme yeteneği ölür. Set açıldı → `.tasks/020-fare-raporlama/` |
+| 021 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı (`/measure`, bugün sayısı yok) bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
+| 022 | emoji + geniş glyph + kutu çizim | **Kutu çizim yarısı ayrılabilir** (2026-09-20, ölçüldü → aşağıdaki "blok, çizgi ve Braille fonttan geliyor"): blok/çizgi/Braille'in çaresi yordamsal çizim ve o, emoji'nin mimari çatalına hiç dokunmuyor — 019'un buradan ayrıldığı aynı gerekçe, ve maskot + spinner + TUI çerçeveleri onu beklemek zorunda değil. Üçü tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek |
+| 023 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
 animasyonu), Sparkle ile güncelleme.
@@ -169,6 +170,17 @@ animasyonu), Sparkle ile güncelleme.
 > açılmıyor, ama belirti ok/sembol/kutu karakterlerinin geçtiği her yerde.
 > **Materyalin bedeli altıncı kez ödeniyor** — ve bu, ölçüm baskısının da
 > altıncı kez ertelenmesi demek.
+>
+> **Onuncu kayma (2026-09-21, kullanıcı kararı).** Araya **020 fare
+> raporlama** girdi — yine bir kullanıcı isteği, yine aynı gün bildirildi
+> (Claude Code'un giriş kutusunda tıklanan yere imleç gelmiyor). Materyal
+> yüzey / emoji-geniş-kutu / sekme-bölme sırasıyla **021, 022, 023** oldu.
+> Gerekçe yine ucuzluk ve görünürlük: raporun yarısı (`wheel_report`'un genel
+> gövdesi, alacritty'nin kip takibi) zaten depoda, eksik olan düğme kodlaması
+> ve bir kapı; belirti ise fare isteyen her TUI'de (vim, htop, lazygit, tmux)
+> görünüyor. Kullanıcı kaymayı görüp devam dedi.
+> **Materyalin bedeli yedinci kez ödeniyor** — ve ölçüm baskısı yedinci kez
+> erteleniyor.
 
 ## Sete bağlanmamış borçlar
 
@@ -436,6 +448,23 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   girmek zorunda. Kapsamı 020'ye eklenebilir ya da kendi küçük setini alır;
   kullanıcı görünürlüğü yüksek, çünkü ok/sembol/kutu karakterleri TUI'lerde
   ve prompt'larda her yerde.
+- **Terminal→uygulama bildirim kanalları eksik: `?1004` odak, `?2031` tema.**
+  020'nin ölçümünde çıktı (2026-09-21, Claude Code bir pty'ye koşturuldu) ve
+  o setin kapsamı dışında bırakıldı — konusu fare değil. İkisi de aynı
+  şekle sahip: **sinyal elimizde, söyleyecek kanal yok.**
+  `?1004` (odak): `bt-shell` odağı biliyor (`AppDelegate::apply_focus` →
+  `DisplayLink::set_focused`) ama uygulamaya `\e[I`/`\e[O` demiyor.
+  Bedeli "~20 satır" değil: `CLAUDE.md`'de **adıyla yazılı** bir mimari
+  kararın ("Odak `bt-core`'a hiç girmiyor … kapı çağrı yerinde") inceltilmesi
+  ve süreli koşunun (`apply_focus`'un `run.is_some()` erken dönüşü) yeni bir
+  mini kararı. Durumsuz bir iletim (`Session::report_focus`, kipi kilit
+  altında sorar, hiçbir şey saklamaz) cümleyi "odak `bt-core`'da yaşamıyor"
+  diye inceltir.
+  `?2031` (tema): sistemin açık/koyu geçişini `Session::set_theme` canlı
+  izliyor; uygulama bunu öğrenemediği için Claude Code kendi paletini bizim
+  temamıza uyduramıyor. `bt-shell`'in görünüm izleyicisine ve `Theme` yoluna
+  dokunuyor.
+  İkisi tek sette birleşebilir: ortak yanları fare değil **bildirim yönü**.
 - **`line_height = 1.0` bir no-op değil: hücreye bir piksel ekliyor.**
   019'un kapısında ölçüldü (2026-09-20). `font::metrics` fazlalığı
   `round_up(natural * (line_height - 1.0))` ile hesaplıyor ve `round_up`'ın
@@ -471,8 +500,8 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   2×4 nokta, 256 kombinasyon tek formülden); fonttan gelmeleri zaten yanlış,
   çünkü fontun em kutusu hücre kutusu değil ve döşeme orada kırılıyor. kitty,
   WezTerm, iTerm2 ve Alacritty bunları bilerek fonttan almıyor.
-  **021'den ayrılabilir ve ayrılmalı** — 019'un 020/021'den ayrıldığı aynı
-  gerekçeyle: 021'in pahalı olmasının sebebi emoji'nin renkli bitmap'i ve
+  **Emoji setinden (022) ayrılabilir ve ayrılmalı** — glyph yedeğinin (019)
+  o setten ayrıldığı aynı gerekçeyle: emoji setinin pahalı olmasının sebebi renkli bitmap'i ve
   "ikinci atlas mı, RGBA mı" çatalı; yordamsal çizim o çatalın hiçbirine
   dokunmuyor (çıktı yine tek kanallı kapsama maskesi, `R8Unorm` atlas
   duruyor) ve kendi başına ucuz. Kullanıcı görünürlüğü yüksek: maskot,
