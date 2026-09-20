@@ -87,13 +87,76 @@ viewport'unun **üstünde** kalıyor ve Metal orayı kırpıyor
 
 ## Checklist
 
-- [ ] phase-0'ın seçtiği kol uygulandı
-- [ ] Doldurma listeleri sayaçlardan muaf, kardeş bekçi yazıldı
-- [ ] Encode sırası: ızgara → doldurma → dock
-- [ ] Test: hareket karesinde doldurma ızgarayla birlikte kayıyor
-- [ ] Test: `fill == 0` iken çizim bit bit aynı
-- [ ] Test: dock'u olmayan pencerede encode kurulmuyor
-- [ ] Doğrulama geçti (`make hepsi`; `.metal` değiştiyse `make shader`)
-- [ ] Riskli phase: `/code-review` koştu (`#[repr(C)]` ↔ `.metal` düzeni),
-      bulgular giderildi
-- [ ] Yayın etkisi yazıldı
+- [x] phase-0'ın seçtiği kol uygulandı (2b-i, `Renderer::encode_fill`)
+- [x] Doldurma listeleri sayaçlardan muaf, kardeş bekçi yazıldı
+      (`the_fill_keeps_its_own_lists_and_stays_out_of_the_counters`)
+- [x] Encode sırası: ızgara → doldurma → dock
+- [x] Test: hareket karesinde doldurma ızgarayla birlikte kayıyor
+      (`the_fill_band_draws_above_the_content_and_rides_the_origin` +
+      `the_fill_band_rides_the_origin`)
+- [x] Test: `fill == 0` iken çizim bit bit aynı
+      (`a_frame_without_fill_draws_todays_picture`)
+- [x] Test: dock'u olmayan pencerede encode kurulmuyor — zincirle (§3):
+      `bt-core`'un `a_window_without_a_dock_never_fills_the_gap`'ı +
+      `fill_rows() == 0` kapısı + `clear`'ın bandı sıfırlaması
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] Riskli phase **değil**: `.metal` ve `#[repr(C)]` düzeni dokunulmadı,
+      `stride 32` assert'leri aynı; `make shader` ve `/code-review`
+      tetiklenmedi
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+### 1. İkinci sink `Frame`'e **doğrudan** akamadı: tampon gerekti
+
+`frame(sink, fill_sink, blocks)`'in iki kapatması da `frame`'i ödünç alsaydı
+aynı çağrıda iki `&mut` doğardı; borç kuralı bunu derleme zamanında kapatıyor.
+Çözüm `blocks`'un ta kendisi — `LinkIvars::fill`, `Frame`'in **içinde değil
+yanında** bir `RefCell<Vec<Cell>>`; çağrı dönünce hücreler `Frame::push_fill`
+ile banda geçiyor. Boşaltılıp yeniden doluyor, yani kare başına ayırma yok;
+doldurması olmayan pencerede sınır sink'i hiç çağırmıyor ve tampon boş
+kalıyor. Plan'ın "Değişiklikler"i bu ucu saymıyordu.
+
+### 2. Encode sırasının gerekçesi planda yazıldığı gibi **değil**
+
+Plan "kayma boyunca ızgaranın üst satırı doldurma bandına taşıyor" diyordu;
+ızgaranın listeleri her iki kayma yönünde de `y ≥ origin_px` çiziliyor, yani
+bandın içine **hiç** girmiyorlar. Giren tek şey ötelemeden muaf olan caret
+(ekran satırı, `Frame::push_caret`). Sıra **değişmedi** — dock'un opak zemini
+en altta kalmak zorunda ve bant ondan önce — ama `encode_fill`'in doc'u gerçek
+gerekçeyi taşıyor: bu depo kodla çelişen cümleyi aynı commit'te düzeltiyor.
+
+### 3. "Dock'suz pencerede encode kurulmuyor" GPU'dan **gözlenemez**
+
+`setViewport` çağrıları CPU'dan okunmuyor, yani bu maddeyi doğrudan söyleyen
+bir sınama uydurma olurdu. Zincir üç halka: kapı `bt-core`'da açılıyor
+(`Session::fill_rows` dock'suz pencerede koşulsuz sıfır,
+`a_window_without_a_dock_never_fills_the_gap`), `encode_fill` `fill_rows() ==
+0`'da erken dönüyor, ve `Frame::clear` bandı sıfırlıyor
+(`the_fill_keeps_its_own_lists_...`'in son bloğu) — üçüncüsü olmadan bir
+önceki karenin bandı asılı kalırdı.
+
+### 4. Orijin formülü `Frame`'de, `renderer.rs`'te değil
+
+Dock kendi orijinini `renderer.rs`'te kuruyor (`viewport_px[1] - dock_px()`),
+çünkü terimlerinden biri dokunun boyu. Doldurmanın iki terimi de `Frame`'in
+kendi alanları (`origin_px`, bandın satırı × hücre boyu), yani
+`Frame::fill_origin_px` hem formülün tek kopyası hem de R3.1'in CPU'dan
+sınanabilir hâli: hareket karesi yalnız `origin_px`'i yazıyor ve bant onu
+**okuma anında** görüyor.
+
+### 5. Bandın glyph encode'una **dejenere** `CursorBlock` gidiyor
+
+Emsal sol payın blok işaretleri. Bandın caret yuvası yok — caret'in ekran
+satırı yerleşik karede her zaman içeriğin içinde — ve gerçek dikdörtgeni
+geçirmek, kaymanın ortasında bandın üstünden geçen bir caret'in altındaki
+harfi zemin rengine boyardı: çizilmemiş bir caret için okunmaz bir hücre.
+
+### 6. "Bit bit aynı"nın sınanabilir hâli üç okuma
+
+Tek kare iki kez çizilip karşılaştırılsaydı sınama determinizmi ölçerdi.
+Bekçi üç okuma alıyor: doldurmasız kare → doldurmalı kare (**ayrışmak
+zorunda**, yoksa eşitlik hiçbir şey söylemez) → yeniden doldurmasız kare, ve
+birinciyle üçüncüyü **bütün tampon** üzerinden karşılaştırıyor. Sessiz
+kalabilecek tek kusur — `clear`'ın bandın boyunu unutması ya da viewport'un
+koşulsuz kurulması — tam orada düşüyor.

@@ -706,9 +706,73 @@ impl Renderer {
                     viewport_px,
                 )
             })
+            .and_then(|()| self.encode_fill(&enc, frame, viewport_px))
             .and_then(|()| self.encode_dock(&enc, frame, viewport_px));
         enc.endEncoding();
         result
+    }
+
+    /// Doldurma bandı: **üçüncü koordinat uzayı**, ızgaranın üstüne.
+    ///
+    /// Ayrı bir `setViewport` ve gerekçesi dock'unkinin ikizi ama ters yönde:
+    /// bant ötelemeden muaf değil, ötelemenin **üstünde** duruyor
+    /// (`originY = origin_px − fill_px`, [`Frame::fill_origin_px`]). Satırları
+    /// fill-yerel doğuyor ve hangi ekran satırına düştükleri ancak burada,
+    /// **encode anında** belli oluyor — push anında pişirilseydi hareket
+    /// karesi (listeler korunur, yalnız `origin_px` değişir) bandı yerinde
+    /// dondururdu (R3.1).
+    ///
+    /// Orijin **negatife inebilir** ve bırakılıyor: bandın pencereye sığmayan
+    /// en eski satırları tepeden taşıyor ve Metal onları kırpıyor (017
+    /// phase-0'ın ölçümü; dock'un `max(0.0)` kırpması oraya ait, çünkü orada
+    /// doğru cevap dejenere bir dock). Boy ve `viewport_px` uniform'u yine
+    /// dokunun boyu: ikisi NDC ölçeğinin iki yarısı.
+    ///
+    /// **Sıra: ızgaradan sonra, dock'tan önce.** Izgaranın *listeleri* bandın
+    /// içine hiç girmiyor (hepsi `y ≥ origin_px`), giren tek şey ötelemeden
+    /// muaf olan caret; band bu yüzden ondan sonra çiziliyor — devir
+    /// karelerinde bandın hücreleri caret'in üstünde kalıyor. Dock'tan önce
+    /// olması ise zorunlu: dock'un opak zemini en altta kalmak, yani en son
+    /// çizilmek zorunda.
+    fn encode_fill(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        frame: &Frame,
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
+        // **Geri alma şeridi** (R2.4): bant sıfır satırsa üçüncü viewport hiç
+        // kurulmuyor ve çizilen kare doldurmasız hâliyle bit bit aynı. Dock'u
+        // olmayan pencere de bu daldan çıkıyor — orada `Session::fill_rows`
+        // koşulsuz sıfır döndürüyor, yani kapı `bt-core`'da açılıyor ve burada
+        // yalnız kapanıyor.
+        if frame.fill_rows() == 0 {
+            return Ok(());
+        }
+        enc.setViewport(MTLViewport {
+            originX: 0.0,
+            originY: f64::from(frame.fill_origin_px()),
+            width: f64::from(viewport_px[0]),
+            height: f64::from(viewport_px[1]),
+            znear: 0.0,
+            zfar: 1.0,
+        });
+        self.encode_quads(enc, frame.fill_bg(), viewport_px)
+            .and_then(|()| {
+                self.encode_glyphs(
+                    enc,
+                    frame.fill_glyphs(),
+                    frame.fill_rules(),
+                    // Ters çevirme dikdörtgeni **dejenere** (emsal: sol payın
+                    // blok işaretleri): bandın caret yuvası yok — caret'in
+                    // ekran satırı yerleşik karede her zaman içeriğin içinde.
+                    // Gerçeğini geçirmek, kaymanın ortasında bandın üstünden
+                    // geçen bir caret'in altındaki harfi zemin rengine
+                    // boyardı: çizilmemiş bir caret için okunmaz bir hücre.
+                    &CursorBlock::default(),
+                    frame.cell_px(),
+                    viewport_px,
+                )
+            })
     }
 
     /// Dock yüzeyi: **ikinci koordinat uzayı**, ızgaranın üstüne.
@@ -727,7 +791,8 @@ impl Renderer {
     /// viewport'uyla aynı gerekçe: ikisi NDC ölçeğinin iki yarısı ve
     /// ayrışırlarsa yüzey ezilir.
     ///
-    /// **Sıra: ızgaranın üç encode'undan sonra.** Kayma boyunca ızgaranın
+    /// **Sıra: en sonda** — ızgaranın encode'larından **ve** doldurma
+    /// bandından sonra. Kayma boyunca ızgaranın
     /// öteleme hedefi aşılıyor ve en alt satır dock'un üstüne taşıyor
     /// (`LinkDelegate::set_origin`); dock'un opak zemini onu örtüyor. Ters
     /// sırada taşan satır dock'un metninin üstünde görünürdü.
@@ -2027,6 +2092,131 @@ mod tests {
         assert!(
             near(pixel_at(&pixels, EDGE, 2, 4), (0, 255, 0)),
             "negatif orijinde içeriğin satırı tepeye oturmadı"
+        );
+    }
+
+    /// Doldurma bandının ölçüsü: bir satır, hücre boyu kadar.
+    ///
+    /// İki bekçinin ortak kurulumu bu sayı üzerinden okunuyor; elle yazılsaydı
+    /// biri değişip öteki sessizce eski kalabilirdi.
+    const FILL_ROWS: u16 = 1;
+
+    #[test]
+    fn the_fill_band_draws_above_the_content_and_rides_the_origin() {
+        // **017 phase-3'ün tek görünür iddiası ve R3.1'in piksel yarısı.**
+        // Bant ötelemenin üstüne çiziliyor (üçüncü `setViewport`,
+        // `originY = origin_px − fill_px`) ve **hareket karesinde** — listeler
+        // korunur, yalnız `origin_px` değişir — ızgarayla birlikte kayıyor.
+        // Push anında pişmiş bir konum ikinci yarıyı düşürürdü: bant yerinde
+        // donar, ızgara süzülür ve aradaki dikiş görünürdü.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 16;
+        const CELL: u16 = 8;
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let green = LinearRgba::from_srgb(0x00, 0xff, 0x00);
+        // Clear **vurgu**, kardeşleriyle aynı gerekçe: iki bandın rengiyle de
+        // ayrık olmak zorunda. ±1 çünkü vurgu bir ara ton.
+        let clear = {
+            let hex = Theme::BATERI.accent;
+            ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+        };
+        let near = |seen: (u8, u8, u8), want: (u8, u8, u8)| {
+            seen.0.abs_diff(want.0) <= 1
+                && seen.1.abs_diff(want.1) <= 1
+                && seen.2.abs_diff(want.2) <= 1
+        };
+
+        let mut frame = Frame::default();
+        frame.clear(grid(CELL, CELL), CaretStyle::default());
+        // İçerik tek satır ve tabana yaslı: öteleme bir satır, üstünde bir
+        // satırlık boşluk kalıyor ve doldurma tam oraya düşüyor.
+        frame.push(bg_cell(0, 0, green));
+        frame.set_fill_rows(FILL_ROWS);
+        // Satır **fill-yerel**: `0` bandın tek satırı, ızgaranın 0. satırı
+        // değil. İkisi aynı numarayı taşıyor ve ayrı uzaylarda çiziliyorlar —
+        // iddia tam olarak bu.
+        frame.push_fill(bg_cell(0, 0, red));
+        frame.set_origin_rows(1.0);
+
+        let cell_px = f32::from(CELL);
+        let band = |pixels: &[u8], origin_px: f32| {
+            for y in 0..EDGE {
+                let from_fill = y as f32 - (origin_px - cell_px * f32::from(FILL_ROWS));
+                let from_grid = y as f32 - origin_px;
+                let want = if (0.0..cell_px).contains(&from_fill) {
+                    (255, 0, 0)
+                } else if (0.0..cell_px).contains(&from_grid) {
+                    (0, 255, 0)
+                } else {
+                    // Ne bant ne içerik: doldurmanın taşan parçası kırpılıyor
+                    // (üstte) ya da ızgaranın altında hiçbir şey yok.
+                    clear
+                };
+                let seen = pixel_at(pixels, EDGE, 2, y);
+                assert!(
+                    near(seen, want),
+                    "origin_px={origin_px}, y={y}: {seen:02x?} ≠ {want:02x?}"
+                );
+            }
+        };
+
+        // Yerleşik kare: bant [0, 8), içerik [8, 16).
+        band(&render_offscreen(&r, EDGE, ACCENT, &frame), 8.0);
+
+        // **Hareket karesi**: `link.rs` bu kolda `clear` da `frame()` de
+        // çağırmıyor, yalnız ötelemeyi yeniden yazıyor. Yarım satır aşağıda
+        // bandın orijini **negatife** iniyor (−4): üst yarısı kırpılmalı, alt
+        // yarısı içeriğin hemen üstünde durmalı.
+        frame.set_origin_rows(0.5);
+        assert_eq!(
+            frame.fill_origin_px(),
+            -4.0,
+            "bandın orijini negatife inmedi"
+        );
+        band(&render_offscreen(&r, EDGE, ACCENT, &frame), 4.0);
+    }
+
+    #[test]
+    fn a_frame_without_fill_draws_todays_picture() {
+        // **Geri alma şeridi** (R2.4/R3.2), 016'nın "yarıçap 0, hale 0"
+        // örüntüsü: doldurma kapalıyken çizilen kare bugünküyle **bit bit**
+        // aynı olmak zorunda ve bunu yalnız GPU söyleyebilir. Üçüncü viewport
+        // koşulsuz kurulsaydı (ya da `clear` bandın boyunu unutsaydı) üçüncü
+        // okuma birinciden ayrışırdı — sessiz kalabilecek tek kusur o.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 16;
+        const CELL: u16 = 8;
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let green = LinearRgba::from_srgb(0x00, 0xff, 0x00);
+
+        let mut frame = Frame::default();
+        let today = |frame: &mut Frame| {
+            frame.clear(grid(CELL, CELL), CaretStyle::default());
+            frame.push(bg_cell(0, 0, green));
+            frame.set_origin_rows(1.0);
+        };
+
+        today(&mut frame);
+        let before = render_offscreen(&r, EDGE, ACCENT, &frame);
+
+        // Aynı kare, bir satır doldurma ile: ayrışmak **zorunda**, yoksa
+        // aşağıdaki eşitlik hiçbir şey söylemez.
+        frame.clear(grid(CELL, CELL), CaretStyle::default());
+        frame.push(bg_cell(0, 0, green));
+        frame.set_fill_rows(FILL_ROWS);
+        frame.push_fill(bg_cell(0, 0, red));
+        frame.set_origin_rows(1.0);
+        let filled = render_offscreen(&r, EDGE, ACCENT, &frame);
+        assert!(before != filled, "doldurma bandı hiç çizilmedi");
+
+        // Ve doldurma kapanınca: `clear` bandın boyunu da sıfırlıyor, yani
+        // `encode_fill` erken dönüyor ve encoder doldurmayı hiç görmüyor.
+        today(&mut frame);
+        let after = render_offscreen(&r, EDGE, ACCENT, &frame);
+        let diff = before.iter().zip(&after).position(|(a, b)| a != b);
+        assert!(
+            diff.is_none(),
+            "doldurma kapanınca kare bugünküyle ayrıştı, ilk fark {diff:?}. baytta"
         );
     }
 

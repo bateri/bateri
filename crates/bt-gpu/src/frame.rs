@@ -573,8 +573,13 @@ pub(crate) struct Frame {
     /// içinde koşuyor ve hücreyi basma anında `Instance`'a pişiriyor, oysa
     /// doluluk sayısı ancak döngü bitince doğuyor
     /// (`bt_core::Cursor::content_rows`). Öteleme bu yüzden **çizim zamanı**
-    /// uygulanıyor: `setViewport` dört listeyi birden kaydırıyor
+    /// uygulanıyor: `setViewport` ızgaranın dört listesini birden kaydırıyor
     /// ([`crate::Renderer`]) ve instance başına maliyeti sıfır.
+    ///
+    /// **İkinci okuyucusu doldurma bandı** ([`Frame::fill_origin_px`]): kendi
+    /// viewport'u var ama orijini buradan türüyor (`origin_px − fill_px`),
+    /// yani bant ızgarayla **birlikte** kayıyor. Türetme de okuma anında,
+    /// yoksa hareket karesinde bayatlardı.
     ///
     /// Tek istisna imleç: hedefi **ekran** satırı ve ötelemeden muaf, yani
     /// onun instance'ı ötelemeyi CPU'da **geri veriyor**, dikdörtgeni ise
@@ -638,6 +643,29 @@ pub(crate) struct Frame {
     dock_bg: Vec<Instance>,
     dock_glyphs: Vec<GlyphCell>,
     dock_rules: Vec<RuleCell>,
+    /// Üstteki boşluğu dolduran geçmiş satırları; ızgaranın `bg`'sinin
+    /// **üçüncü** ikizi (`stripes` ve `dock_bg`'den sonra).
+    ///
+    /// Ayrılığın gerekçesi dock'unkiyle aynı ve bir ucu daha var: bandın
+    /// kendi viewport'u var ([`Frame::fill_origin_px`]) ve satır numaraları
+    /// **fill-yerel**, yani ızgaranınkilerle çakışıyor — tek listede ayırt
+    /// edilemezlerdi ve ızgaranın uzayından çizilip bandın yerine içeriğin
+    /// üstüne düşerlerdi. Sayaçlara da girmiyorlar (`bg_count`,
+    /// `glyph_count`, `rule_count`): `hucre=8 glif=6 kural=15` duman
+    /// sözleşmesi doldurması olmayan bir kabukta ölçülüyor ve anlamı bit bit
+    /// korunmalı.
+    fill_bg: Vec<Instance>,
+    fill_glyphs: Vec<GlyphCell>,
+    fill_rules: Vec<RuleCell>,
+    /// Doldurma bandının yüksekliği, **satır** (`bt_core::Cursor::fill`);
+    /// sıfır → bant yok ve üçüncü viewport hiç kurulmuyor.
+    ///
+    /// Listelerden ayrı bir alan, `DockSurface` emsali: sıfırken listeler
+    /// dolu olsa bile hiçbir şey çizilmiyor, yani "yarım açılmış doldurma"
+    /// temsil edilemez. Bandın boyu sınırın kendi sayısı ve hücrelerden
+    /// türetilmiyor — hücresi olmayan (bütünüyle boş) bir doldurma satırı da
+    /// bandın içinde yer tutmak zorunda.
+    fill_rows: u16,
     /// Çizilen **arka plan** instance'ı sayısı; imleç sayılmaz.
     ///
     /// `make duman`'ın `hucre=K` jetonu bunu okur: sink'in hücre ürettiğinin
@@ -673,6 +701,16 @@ impl Frame {
         self.dock_bg.clear();
         self.dock_glyphs.clear();
         self.dock_rules.clear();
+        self.fill_bg.clear();
+        self.fill_glyphs.clear();
+        self.fill_rules.clear();
+        // **Bant da her karede yeniden söyleniyor** ve sıfırlanması dock'un
+        // yüzeyiyle aynı gerekçeyi taşıyor: korunsaydı doldurmayı kapatan ilk
+        // karede (Ctrl-L, alternatif ekrana giriş, dock'u olmayan pencere)
+        // önceki karenin bandı ızgaranın üstünde asılı kalırdı. Sıfır aynı
+        // zamanda geri alma şeridinin kapısı — [`Renderer::encode_pass`]
+        // üçüncü viewport'u hiç kurmuyor.
+        self.fill_rows = 0;
         // Dikdörtgen de sıfırlanıyor ([`Frame::clear_caret`]): kalsaydı
         // imlecin sönmesi (`\e[?25l`) ya da geçmişe kayması bloğu ekrandan
         // kaldırır ama **altındaki metnin rengini** eski yerinde bırakırdı —
@@ -1237,6 +1275,114 @@ impl Frame {
     /// Dock bandının tepesini bu kare için yazar; caret'in yuvasını o belirliyor.
     pub(crate) fn set_dock_top(&mut self, top_px: f32) {
         self.dock_top_px = top_px;
+    }
+
+    /// Doldurma bandının bu karedeki yüksekliği, satır
+    /// (`bt_core::Cursor::fill`).
+    ///
+    /// Hücrelerden **önce** çağrılıyor ve bu dock'un tersi bir sıra: dock'un
+    /// renkleri hücreleri basan çağrıdan dönüyor ([`Frame::open_dock`]), bandın
+    /// boyu ise `frame()`'in dönüşünde hazır ve [`Frame::push_fill`]'in
+    /// bekçisi onu okuyor. Ters sırada bekçi her karede kendi sıfırına bakardı.
+    pub(crate) fn set_fill_rows(&mut self, rows: u16) {
+        self.fill_rows = rows;
+    }
+
+    /// Doldurma bandının yüksekliği, satır; sıfır → bant yok.
+    pub(crate) fn fill_rows(&self) -> u16 {
+        self.fill_rows
+    }
+
+    /// Doldurulan bir satırın hücresi; [`Frame::push`]'un ikizi ama
+    /// **fill-yerel** satırda ve sayaçlara girmeden.
+    ///
+    /// **Geometri ızgaranın ta kendisi** ([`Frame::pos`]), dock'unki gibi kendi
+    /// payı olan ayrı bir yüzey değil: doldurulan satırlar ızgaranın
+    /// satırları, yalnız ötelemenin **üstünde** duruyorlar. Ayrı bir aritmetik
+    /// yazılsaydı bant ile içeriğin sütunları ayrışabilirdi.
+    ///
+    /// **Konum push anında pişmiyor** (R3.1) ve pişemezdi: hareket karesi
+    /// listeleri koruyup yalnız `origin_px`'i yeniden yazıyor
+    /// (`LinkDelegate::set_origin`), yani pişmiş bir konum kaymanın her
+    /// karesinde bayatlardı — ızgara süzülürken doldurma yerinde donardı.
+    /// Bandı ekrana taşıyan şey üçüncü `setViewport`
+    /// ([`Frame::fill_origin_px`]) ve o, orijini **encode anında** okuyor.
+    pub(crate) fn push_fill(&mut self, cell: Cell) {
+        // Satır fill-yerel (`0..fill`): sınır "hangi satırlar" der, "nereye"
+        // demez. Bandın boyu bu çağrıdan önce yazılmak zorunda, yoksa
+        // ekrana çıkmayacak bir hücre sessizce listeye girerdi.
+        debug_assert!(
+            cell.row < self.fill_rows,
+            "doldurma satırı bandın dışında: {} / {}",
+            cell.row,
+            self.fill_rows
+        );
+        let pos = self.pos(cell.col, cell.row);
+        if let Some(bg) = cell.bg {
+            self.fill_bg.push(Instance {
+                pos,
+                size: [self.cell_px.0, self.cell_px.1],
+                rgba: bg.to_array(),
+            });
+        }
+        if let Some(ch) = cell.ch {
+            self.fill_glyphs.push(GlyphCell {
+                pos,
+                ch,
+                face: face(cell.bold, cell.italic),
+                // Izgaranın ölçüsü: bant ızgaranın geçmişi, dock'un bağlam
+                // satırı gibi ayrı bir sınıf değil.
+                size: SizeClass::Normal,
+                rgba: cell.fg.to_array(),
+            });
+        }
+        if let Some(kind) = rule_kind(cell.underline) {
+            self.fill_rules.push(RuleCell {
+                pos,
+                kind,
+                rgba: cell.underline_color.unwrap_or(cell.fg).to_array(),
+            });
+        }
+        if cell.strikeout {
+            self.fill_rules.push(RuleCell {
+                pos,
+                kind: RuleKind::Strike,
+                rgba: cell.fg.to_array(),
+            });
+        }
+    }
+
+    pub(crate) fn fill_bg(&self) -> &[Instance] {
+        &self.fill_bg
+    }
+
+    pub(crate) fn fill_glyphs(&self) -> &[GlyphCell] {
+        &self.fill_glyphs
+    }
+
+    pub(crate) fn fill_rules(&self) -> &[RuleCell] {
+        &self.fill_rules
+    }
+
+    /// Doldurma bandının viewport orijini, piksel: `origin_px − fill_px`.
+    ///
+    /// **Formülün tek kopyası** ve `Frame`'de duruyor, çünkü iki terimi de
+    /// burada yaşıyor (`origin_px` ile bandın satır sayısı × hücre boyu);
+    /// `renderer.rs`'te kurulsaydı hücre ölçüsünün ikinci bir okuyucusu
+    /// olurdu — [`Frame::dock_ground`]'un aritmetiği içeride tutmasıyla aynı
+    /// disiplin.
+    ///
+    /// **Negatif meşru** ve üretimde oluyor: `origin_px` bandın boyundan
+    /// küçükken bandın en eski satırları pencerenin tepesinden taşıyor ve
+    /// Metal onları kırpıyor. Ölçüldü (017 phase-0, Apple M1 Pro /
+    /// macOS 26.4.1, API doğrulama katmanı açık); tanık
+    /// `Renderer::tests::a_negative_viewport_origin_draws_and_clips_from_the_top`.
+    ///
+    /// **Okuma anında**, push anında değil: ikisi arasında `set_origin_rows`
+    /// bir kez daha koşuyor (hareket karesi) ve bant onunla **birlikte**
+    /// kaymak zorunda (R3.1).
+    pub(crate) fn fill_origin_px(&self) -> f32 {
+        self.origin_px - f32::from(self.fill_rows) * self.cell_px.1
     }
 
     /// Halenin payı, piksel — sol paydan türüyor ([`CARET_GLOW_RATIO`]),
@@ -2279,6 +2425,107 @@ mod tests {
             2.0 * 16.0,
             "ızgaranın imleci ekran satırında değil"
         );
+    }
+
+    /// Doldurulan bir satırın hücresi; ızgaranın [`bg_cell`]'inin band ikizi.
+    fn fill_cell(col: u16, row: u16) -> Cell {
+        Cell {
+            col,
+            row,
+            ch: Some('x'),
+            fg: CURSOR,
+            bg: Some(BG),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_fill_keeps_its_own_lists_and_stays_out_of_the_counters() {
+        // Dock bekçisinin kardeşi (R3.2) ve aynı iki sözleşme: doldurma
+        // listeleri ızgaranınkilere **girmiyor** — girselerdi ızgaranın
+        // uzayından, yani bandın yerine içeriğin üstüne çizilirlerdi — ve
+        // sayaçlara da girmiyorlar: `hucre=8 glif=6 kural=15` duman
+        // koşusunda ölçülüyor ve anlamı bit bit korunmalı.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.push(bg_cell(0, 0));
+        push_settled(&mut frame, cursor(0, 0, true));
+        frame.set_fill_rows(2);
+        frame.push_fill(fill_cell(0, 0));
+        frame.push_fill(Cell {
+            underline: UnderlineStyle::Single,
+            ..fill_cell(1, 1)
+        });
+
+        assert_eq!(frame.bg_count(), 1, "doldurma hücre sayıldı");
+        assert_eq!(frame.glyph_count(), 0, "doldurma glyph sayıldı");
+        assert_eq!(frame.rule_count(), 0, "doldurma kural sayıldı");
+        assert_eq!(frame.bg_instances().len(), 1, "doldurma `bg`'ye sızdı");
+
+        let (fill_bg, fill_glyphs, fill_rules) = (
+            frame.fill_bg().to_vec(),
+            frame.fill_glyphs().to_vec(),
+            frame.fill_rules().to_vec(),
+        );
+        assert_eq!(fill_bg.len(), 2);
+        assert_eq!(fill_glyphs.len(), 2);
+        assert_eq!(fill_rules.len(), 1);
+
+        // Hareket karesi listeleri **koruyor**: grid kirli değil, yani bandın
+        // hücreleri de hâlâ geçerli (dock emsali).
+        for _ in 0..3 {
+            move_cursor(
+                &mut frame,
+                cursor(5, 0, true),
+                [4.5, 0.0],
+                CURSOR,
+                OPAQUE,
+                true,
+            );
+            assert_eq!(frame.fill_bg(), fill_bg, "hareket karesi bandı oynattı");
+            assert_eq!(frame.fill_glyphs(), fill_glyphs);
+            assert_eq!(frame.fill_rules(), fill_rules);
+            assert_eq!(frame.fill_rows(), 2, "hareket karesi bandı kapattı");
+        }
+
+        // `clear` **hepsini** boşaltıyor, bandın boyu dahil: korunan bir boy
+        // doldurmayı kapatan ilk karede (Ctrl-L, dock'u olmayan pencere)
+        // ekranda asılı kalırdı — ve `fill_rows == 0` üçüncü viewport'un
+        // kurulmadığı hâlin ta kendisi (geri alma şeridi).
+        frame.clear(grid(8, 16), CaretStyle::default());
+        assert_eq!(frame.fill_rows(), 0, "clear bandı bırakmadı");
+        assert!(frame.fill_bg().is_empty());
+        assert!(frame.fill_glyphs().is_empty());
+        assert!(frame.fill_rules().is_empty());
+    }
+
+    #[test]
+    fn the_fill_band_rides_the_origin() {
+        // **R3.1'in CPU yarısı.** Bant ötelemenin üstünde duruyor ve
+        // ötelemeyle **birlikte** kayıyor: hücreler fill-yerel doğuyor,
+        // ekrana taşıyan şey `origin_px − fill_px` ve o, okuma anında
+        // türüyor. Push anında pişirilseydi hareket karesi — listeler
+        // korunur, yalnız `origin_px` değişir — bandı yerinde dondururdu.
+        // Pikselin tanığı `renderer.rs`'te.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.set_fill_rows(2);
+        frame.push_fill(fill_cell(1, 0));
+        let pushed = frame.fill_bg()[0];
+
+        // Öteleme yokken bandın orijini negatif: iki satırı da pencerenin
+        // tepesinden taşıyor ve Metal kırpıyor (017 phase-0'ın ölçümü).
+        assert_eq!(frame.fill_origin_px(), -32.0, "bant ötelemesiz kaymadı");
+        for rows in [3.0, 2.5, 1.0] {
+            frame.set_origin_rows(rows);
+            assert_eq!(
+                frame.fill_origin_px(),
+                rows * 16.0 - 32.0,
+                "bandın orijini ötelemeyi izlemedi"
+            );
+            // Hücrenin kendisi kıpırdamıyor: kayan şey uzayın ta kendisi.
+            assert_eq!(frame.fill_bg()[0], pushed, "bant ötelemeyi yedi");
+        }
     }
 
     #[test]
