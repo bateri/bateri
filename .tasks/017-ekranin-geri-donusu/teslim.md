@@ -160,8 +160,16 @@ Hiçbiri açık hata değil; hepsi kapıda tartılıp kabul edildi.
    (R5.1) — seçilebilir olmaları `Cell.row` sözleşmesini negatife açmayı
    isterdi, bu setin kapsamı dışı. Ayrıca reddedilen tıklama `set_selection`'a
    varmadığı için **duran bir seçimi temizlemiyor** (phase-5).
-4. **Blok işareti (chevron) ve komut süresi sayacı bantta yok.** Bant geçmiş
-   satırlarını çiziyor, blok üstverisini değil.
+4. **Komut süresi sayacı bantta yok.** Bant geçmiş satırlarını çiziyor;
+   sayaç hücre üretiyor (`Counter`) ve çakışma ölçütünü (`last_col`,
+   `counted_row`) bandın sink'i için ikinci kez kurmayı isterdi.
+   **Blok işareti (chevron) bu maddeden çıktı ve kapı kararı tersine döndü**
+   (2026-09-20, kullanıcı bildirdi): işaretsiz dönen satır 017'nin sözünü
+   ("ekran Tab öncesine dönüyor") tutmuyordu — kullanıcı tamamlama listesini
+   kapatınca `ls` satırı geri geliyor ama chevron'u gelmiyor, kaydırınca aynı
+   satır ızgaradan geçtiği için chevron beliriyordu. Bandın artık kendi blok
+   listesi var (`Blocks::fill_slice`), dock'un kendi sigil'ini taşıması gibi.
+   Bekçi `the_fill_band_carries_its_own_block_marks`.
 5. **Doymuş defterde bir Ctrl-L doldurmayı o oturum için kapatır**: bayrağın
    düşme ölçütü geçmişin damganın üstüne çıkması ve `scrollback` dolduğunda
    artacak sayı kalmıyor (`plan.md` → R1.2). Çare doymuş defterde de artan bir

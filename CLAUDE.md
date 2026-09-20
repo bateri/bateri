@@ -370,7 +370,17 @@ karesinde (listeler korunur, yalnız öteleme değişir) bandı yerinde
 dondururdu. Orijin kaymanın ortasında **negatife** iniyor ve bırakılıyor:
 bandın pencereye sığmayan en eski satırlarını Metal tepeden kırpıyor
 (ölçüldü, 017 phase-0). Listeleri dock örüntüsünde **ayrı** ve sayaçlardan
-muaf (`hucre=`/`glif=`/`kural=` oynamıyor); encode sırası **ızgara →
+muaf (`hucre=`/`glif=`/`kural=` oynamıyor); **blok işareti de o listelerden**
+(`Blocks::fill_slice`, `Frame::push_fill_block` → `fill_rules`): bant ikinci
+bir yüzey ve ızgaradan türeyen her şeyi ayrıca kazanmak zorunda — hücreleri
+017 phase-2'de almıştı, işareti almamıştı ve kullanıcı bunu gördü (tamamlama
+listesi komut satırını geçmişe itiyor, bant satırı geri getiriyor ama
+**işaretsiz**, kaydırınca aynı satır ızgaradan geçtiği için işaret geri
+geliyor). Çıpa yeni bir kaynak değil, hücrenin kendi OSC 8 bağlantısı;
+eksik olan **okuyan** döngüydü. Satırlar fill-yerel, yani işaret bandın kendi
+`setViewport`'unda. **Süre sayacı hâlâ bantta yok** ve bu bilinçli daraltma:
+sayaç hücre üretiyor (`Counter`) ve çakışma ölçütünü (`last_col`) ikinci kez
+kurmayı isterdi; işaret ise bir `RuleCell`. Encode sırası **ızgara →
 doldurma → dock**, çünkü ızgaranın listeleri bandın içine hiç girmiyor ama
 ötelemeden muaf olan caret girebiliyor, ve dock'un opak zemini en altta
 kalmak zorunda.

@@ -891,6 +891,31 @@ impl Frame {
         });
     }
 
+    /// Doldurma bandının blok işareti — [`Frame::push_block`]'un band ikizi.
+    ///
+    /// Ayrı bir çağrı, çünkü ayrı bir **koordinat uzayı**: satır fill-yerel
+    /// (`0..fill`) ve liste bandın kendi `setViewport`'unda çiziliyor
+    /// (`fill_rules`, üçüncü yüzey). Izgaranın `stripes`'ına yazsaydı işaret
+    /// bandın gösterdiği satırın değil, aynı numaralı ızgara satırının
+    /// yanında belirirdi.
+    ///
+    /// Şekil, sütun ve renk kaynağı ızgarayla **aynı**: aynı chevron sprite'ı,
+    /// 0. sütun, `bt-core`'un verdiği safha rengi. İkinci bir tasarım kararı
+    /// yok — bandın kazandığı şey yalnız listeye erişim.
+    pub(crate) fn push_fill_block(&mut self, block: Block) {
+        debug_assert!(
+            block.row < self.fill_rows,
+            "doldurma işareti bandın dışında: {} / {}",
+            block.row,
+            self.fill_rows
+        );
+        self.fill_rules.push(RuleCell {
+            pos: self.pos(0, block.row),
+            kind: RuleKind::Chevron,
+            rgba: block.stripe.to_array(),
+        });
+    }
+
     /// İmleç bloğu; `bg_count`'a **girmez** ve görünmez imleç çizilmez.
     ///
     /// İki şey birden yazıyor ve bilerek tek çağrıda: bloğun kendisi arka plan

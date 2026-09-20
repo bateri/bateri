@@ -965,6 +965,14 @@ define_class!(
             for cell in fill.drain(..) {
                 frame.push_fill(cell);
             }
+            // Bandın kendi blok işaretleri (`Blocks::fill_slice`): hücrelerden
+            // **sonra**, çünkü `push_fill_block`'un bekçisi bandın boyunu
+            // okuyor ve o, hücrelerle aynı karede yazılıyor. Izgaranınkiyle
+            // aynı `borrow` turundan geçmiyor — bandın listesi ayrı ve
+            // `fill_rules`'a düşüyor.
+            for block in iv.blocks.borrow().fill_slice() {
+                frame.push_fill_block(*block);
+            }
             // Şeritler hücrelerle **aynı** karede ve aynı `frame()` çağrısından:
             // ayrı bir sorgudan okunsalardı kaydırma karesinde bir kare geride
             // kalırlardı (010 discussion.md → Karar 2). Sink içinde değil

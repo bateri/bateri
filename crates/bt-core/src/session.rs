@@ -405,12 +405,44 @@ pub struct Blocks {
     anchors: Vec<(u32, u16, u16)>,
     /// Faz 2'nin ürettiği liste; çizen taraf yalnız bunu görür.
     resolved: Vec<Block>,
+    /// **Doldurma bandının kendi çıpaları**: `(blok kimliği, fill-yerel satır)`.
+    ///
+    /// Ayrı liste olmasının sebebi koordinat uzayı: bandın satırları
+    /// `0..fill` ve ızgarayınkiler `0..content_rows` — ikisi ayrı
+    /// `setViewport`'ta çiziliyor, yani tek listede toplanan satır numarası
+    /// çizen tarafta anlamsız olurdu. Dock'un kendi listelerini taşıması da
+    /// aynı örüntü.
+    ///
+    /// Üçüncü alan **yok**: süre sayacı bantta çizilmiyor ve `last_col` onun
+    /// tek tüketicisiydi (gerekçe [`Blocks::fill_slice`]).
+    fill_anchors: Vec<(u32, u16)>,
+    /// Bandın çözülmüş listesi; satırlar **fill-yerel**.
+    fill_resolved: Vec<Block>,
 }
 
 impl Blocks {
-    /// Bu karede çizilecek bloklar, satır sırasıyla.
+    /// Bu karede ızgarada çizilecek bloklar, satır sırasıyla.
     pub fn as_slice(&self) -> &[Block] {
         &self.resolved
+    }
+
+    /// Bu karede **doldurma bandında** çizilecek bloklar; satırlar
+    /// fill-yerel (`0..fill`).
+    ///
+    /// **Neden ayrı bir liste** (2026-09-20, kullanıcı bildirdi): bant ikinci
+    /// bir yüzey ve ızgaradan türeyen her şeyi ayrıca kazanmak zorunda —
+    /// hücreleri phase-2'de almıştı, blok işaretini almamıştı. Belirti şuydu:
+    /// tamamlama listesi komut satırını geçmişe itiyor, liste kalkınca bant
+    /// o satırı geri getiriyor ama **işaretsiz**, ve kullanıcı kaydırınca
+    /// aynı satır ızgaradan geçtiği için işaret geri geliyordu. Ekranın Tab
+    /// öncesine dönmesi 017'nin sözü; işaretsiz dönen satır o sözü tutmuyor.
+    ///
+    /// **Süre sayacı hâlâ bantta yok** ve bu bilinçli bir daraltma: sayaç
+    /// hücre üretiyor (`Counter`), yani bandın sink'ine yazmak ve çakışma
+    /// ölçütünü (`last_col`, `counted_row`) ikinci kez kurmak gerekirdi.
+    /// İşaret bir `RuleCell` ve bandın `fill_rules` listesi zaten var.
+    pub fn fill_slice(&self) -> &[Block] {
+        &self.fill_resolved
     }
 }
 
@@ -1704,6 +1736,8 @@ impl Session {
         };
         blocks.anchors.clear();
         blocks.resolved.clear();
+        blocks.fill_anchors.clear();
+        blocks.fill_resolved.clear();
         let mut term = self.term.lock();
 
         let rows = term.screen_lines() as i32;
@@ -2309,6 +2343,20 @@ impl Session {
             // duruyor, yani sınır tipin kendisinden geliyor;
             // `grid_clamp`'in satır için yaptığının sütun ikizi.
             for (col, cell) in (0..grid_cols).zip(cells) {
+                // **Bandın çıpası ızgaranınkiyle aynı yerden** — hücrenin
+                // kendi OSC 8 bağlantısından ([`Blocks::fill_anchors`]).
+                // Geçmişe inen satır bağlantısını yanında götürüyor, yani
+                // burada yeni bir kaynak yok; eksik olan yalnız **okuyan**
+                // döngüydü.
+                //
+                // `alt_screen` kapısı yok: doldurma alternatif ekranda zaten
+                // koşmuyor ([`Session::fill_rows`]), yani koşul ölü bir dal
+                // olurdu.
+                if let Some(id) = cell.hyperlink().and_then(|link| block_id(link.uri()))
+                    && blocks.fill_anchors.last().map(|&(last, _)| last) != Some(id)
+                {
+                    blocks.fill_anchors.push((id, fill_row));
+                }
                 let flags = cell.flags;
                 let dim = flags.contains(Flags::DIM);
                 let hidden = flags.contains(Flags::HIDDEN);
@@ -2691,7 +2739,12 @@ impl Session {
         // Yıkım: aşağıdaki kapatma yalnız `resolved`'ı ödünç alsın, döngü
         // `anchors`'ı okuyabilsin. Tek bir `&mut blocks` ikisini de tutar ve
         // ödünç denetleyicisi haklı olarak reddeder.
-        let Blocks { anchors, resolved } = blocks;
+        let Blocks {
+            anchors,
+            resolved,
+            fill_anchors,
+            fill_resolved,
+        } = blocks;
         let shell = lock(&self.shell);
         let running = shell.running();
         let counter_fg = theme.dim_linear();
@@ -2789,6 +2842,23 @@ impl Session {
                 continue;
             };
             resolved.push(Block {
+                row,
+                stripe: match stripe {
+                    Stripe::Running => theme.accent_linear(),
+                    Stripe::Success => theme.success_linear(),
+                    Stripe::Error => theme.error_linear(),
+                },
+            });
+        }
+        // **Bandın şeritleri aynı defterden, ayrı listeye**
+        // ([`Blocks::fill_slice`]). Döngü sayaçsız: süre hücre üretiyor ve
+        // bandın sink'i bu fazda kapalı — karar ve gerekçe `fill_slice`'ın
+        // doc'unda. "Bilinmeyen çizilmez" kuralı burada da aynen geçerli.
+        for &(id, row) in fill_anchors.iter() {
+            let Some(stripe) = shell.stripe(id, running) else {
+                continue;
+            };
+            fill_resolved.push(Block {
                 row,
                 stripe: match stripe {
                     Stripe::Running => theme.accent_linear(),
@@ -7664,6 +7734,73 @@ mod tests {
             "boşluk kadar doldurulmadı: {cursor:?}"
         );
         assert!(!cells.is_empty(), "ikinci sink çağrılmadı: {cursor:?}");
+    }
+
+    #[test]
+    fn the_fill_band_carries_its_own_block_marks() {
+        // **Kullanıcının bildirdiği kusur** (2026-09-20): tamamlama listesi
+        // komut satırını geçmişe itiyor, liste kalkınca bant o satırı geri
+        // getiriyor ama **blok işareti olmadan**; kaydırınca aynı satır
+        // ızgaradan geçtiği için işaret geri geliyordu. Ekranın Tab öncesine
+        // dönmesi 017'nin sözü ve işaretsiz dönen satır onu tutmuyor.
+        //
+        // Sahne zsh istemiyor: çıpa hücrenin kendi OSC 8 bağlantısı
+        // (`anchored_prompt`) ve geçmişe inen satır onu yanında götürüyor.
+        // Eksik olan yalnız **okuyan** döngüydü.
+        //
+        // Akış: çıpalı komut satırı → on iki satır çıktı (çıpalı satır
+        // geçmişe düşer) → komut biter (şerit çözülebilir olur) → `\e[4A\e[J`
+        // boşluk açar → bant geçmişin en yenilerini geri getirir.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}komut\\r\\n\\033]133;C\\007'; seq 1 12; \
+                 printf '\\033]133;D;0;bt_block=1\\007'; read _; \
+                 printf '\\033[4A\\033[J'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| row_text(cells, 8) == "12");
+        wait_settled(&session);
+        session.write(b"\n");
+        wait_until(
+            "içerik yukarıdan kısalmadı",
+            Duration::from_secs(5),
+            || cursor_now(&session).content_rows <= 6,
+        );
+
+        let mut blocks = Blocks::default();
+        let mut band = Vec::new();
+        let cursor = session.frame(|_| (), |cell| band.push(cell), &mut blocks);
+        assert!(cursor.fill > 0, "sahne bantsız kuruldu: {cursor:?}");
+
+        // Çıpalı satır bandın **içinde** ve metni tanınıyor: `$ ` prompt'u
+        // artı komut. Bu olmadan aşağıdaki iddia boşa düşerdi.
+        let band_text: Vec<String> = (0..cursor.fill).map(|r| row_text(&band, r)).collect();
+        let anchored = band_text
+            .iter()
+            .position(|row| row.contains("komut"))
+            .unwrap_or_else(|| panic!("çıpalı satır bantta değil: {band_text:?}"));
+
+        // **Asıl iddia**: bandın kendi blok listesi o satırı taşıyor, ve
+        // satır numarası **fill-yerel** — çizen taraf onu bandın kendi
+        // `setViewport`'unda kullanıyor.
+        let marks = blocks.fill_slice();
+        assert_eq!(
+            marks.len(),
+            1,
+            "bandın blok listesi beklenen tek işareti vermedi: {marks:?} / {band_text:?}"
+        );
+        assert_eq!(
+            usize::from(marks[0].row),
+            anchored,
+            "işaret çıpalı satırın hizasında değil: {marks:?} / {band_text:?}"
+        );
+        // Izgaranın listesi **karışmıyor**: satır geçmişte, yani ızgarada
+        // gösterilecek bir bloğu yok.
+        assert_eq!(blocks.as_slice(), [], "işaret ızgaranın listesine sızdı");
+        session.shutdown();
     }
 
     #[test]
