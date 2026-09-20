@@ -69,6 +69,12 @@ hareketin tam tersi yönde. Kullanıcı ekranı **kasten** temizlediyse (Ctrl-L,
     satırları gösteriyor. Kaydırma bu yüzden `0`'dan değil banttan devam
     ediyor (`scroll_locked`'ın `band` terimi, kaynağı `Session::fill_shown`)
     ve `1..=fill` ofsetlerinde **durulmuyor** — iki kenar da uçurum değil.
+    Üst uç (`offset == fill`) aralığın **içinde**: defter tam bandın boyu
+    kadarsa yukarı çıkan pencere `clamp` yüzünden orada duruyor ve aşağı
+    inen çentik dibe snap'lemeli. Muafiyet yalnız resize'ın bırakabileceği
+    iç ofsetler (`1..fill`); ölçüldü (2026-09-20, kullanıcı: seri kaydırmada
+    dalgalanma) — üst uç muaf tutulunca pencere tek tek iniyor ve son
+    adımda bant birden geri gelip ekranı bandın boyu kadar zıplatıyordu.
   - **R2.4** — `fill_rows()` sıfır dönerken sınırdan geçen kare bugünküyle
     **bit bit** aynıdır (geri alma şeridi, 016'nın "yarıçap 0, hale 0"
     örüntüsü).

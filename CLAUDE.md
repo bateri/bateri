@@ -355,7 +355,13 @@ tam olarak o ofsetin gösterdiği şeyi gösteriyor. Süreklilik bu yüzden
 kaydırmanın işi — `scroll_locked` çentiği `0`'dan değil **banttan** devam
 ettiriyor (`Session::fill_shown`, son dibe yaslı karenin bıraktığı sayı) ve
 `1..=fill` aralığı ekranda hiç görülmüyor: yukarı çıkarken üstüne atlanıyor,
-aşağı inerken o aralığa değen hedef doğrudan dibe düşüyor. Alternatifi
+aşağı inerken o aralığa **değen** hedef doğrudan dibe düşüyor — `fill`'in
+kendisi dahil, çünkü defter tam bandın boyu kadarsa yukarı çıkan pencere
+`clamp` yüzünden orada duruyor ve orası görsel olarak dibin ta kendisi.
+Kuralın tek muafiyeti resize'ın bırakabileceği **iç** ofsetler (`1..fill`):
+pencereyi büyütmek geçmişten satır çekip ofseti düşürüyor ve oradan yukarı
+çıkan çentik dibe inmemeli. Ölçüt "her çentikte ekran ya aynı kalır ya tam
+bir satır kayar" ve bekçisi o (`every_notch_moves_the_screen_by_one_row_at_most`). Alternatifi
 **ölçüldü ve kullanıcının bildirdiği kusurdu** (2026-09-20, gözle kontrol):
 doldurma kaydırılmış pencerede de koşunca `fill = rows - content_rows` her
 çentikte bir azalıyor, `fill + offset` sabit kalıyor ve bandın okuma noktası
