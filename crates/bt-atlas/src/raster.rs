@@ -29,8 +29,19 @@ pub(crate) enum DrawResult {
 
 /// `target`e `ch`'in kapsama (alfa) baytlarını çizer.
 ///
+/// `cell_advance` hücrenin **kesirli** ilerlemesi ([`font::space_advance`]) ve
+/// glyph'in yatay ortalanmasının tek girdisi; `m.cell_px.0` onun yukarı
+/// yuvarlanmışıdır ve buraya girmez (gerekçe [`font::space_advance`]'in
+/// doc'unda).
+///
 /// Tampon yalnız gerçekten çizim yapılacaksa sıfırlanır.
-pub(crate) fn draw(font: &CTFont, ch: char, m: Metrics, target: &mut [u8]) -> DrawResult {
+pub(crate) fn draw(
+    font: &CTFont,
+    ch: char,
+    m: Metrics,
+    cell_advance: CGFloat,
+    target: &mut [u8],
+) -> DrawResult {
     // `debug_assert` değil: bu satır aşağıdaki `unsafe` bloğun ön koşulu.
     // CG'ye `width`/`height` `m`'den, işaretçi `target`ten gidiyor; ikisi
     // ayrışırsa CG kısa tamponun ötesine yazar ve release derlemede hiçbir şey
@@ -83,7 +94,22 @@ pub(crate) fn draw(font: &CTFont, ch: char, m: Metrics, target: &mut [u8]) -> Dr
     // `font::metrics` yüksekliği taban + (descent+leading) olarak kuruyor ve
     // ikinci parça en az 1.
     let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px);
-    let position = CGPoint::new(0.0, baseline);
+    // Glyph hücrede **yatay olarak ortalanıyor**: yedek fontun ilerlemesi
+    // hücrenin ilerlemesinden dar olabiliyor ve sola yapışmış bir işaret
+    // komşularının arasında hizasız görünür. Kural **evrensel**, yedeğe
+    // koşullu değil — eşaralıklı taban fontta her glyph'in ilerlemesi
+    // hücrenin ilerlemesinin ta kendisi, yani çıkarma tam olarak sıfır ve
+    // taban fontun rasteri bit bit aynı kalıyor (bekçisi
+    // `every_base_glyph_advance_is_the_cell_advance`). Koşullu yazılsaydı
+    // "yedek mi" sorusu çizim yoluna ikinci bir dal, sınamaya da ikinci bir
+    // kod yolu eklerdi.
+    //
+    // `max(0.0)`: genişlik kapısı yalnız **yedekte** koşuyor, taban font
+    // eşaralıklı olmayabilir ([`font::FontIssue::NotMonospaced`]) ve geniş bir
+    // glyph'i hücreyi aşabilir. Negatif kaydırma o glyph'in mürekkebini sola,
+    // komşu hücrenin üstüne taşırdı; kırpma sağdan olmalı.
+    let x = ((cell_advance - font::glyph_advance(font, glyph)) / 2.0).max(0.0);
+    let position = CGPoint::new(x, baseline);
     // SAFETY: tek glyph, tek konum, sayı ikisiyle tutarlı; bağlam canlı.
     unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
     DrawResult::Drawn

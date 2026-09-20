@@ -7,7 +7,7 @@
 
 use std::ptr::{self, NonNull};
 
-use objc2_core_foundation::{CFRetained, CFString, CGFloat, CGSize};
+use objc2_core_foundation::{CFIndex, CFRange, CFRetained, CFString, CGFloat, CGSize};
 use objc2_core_graphics::CGGlyph;
 use objc2_core_text::{CTFont, CTFontOrientation, CTFontSymbolicTraits};
 
@@ -454,17 +454,34 @@ pub(crate) fn rule_envelope(top: u16, thickness: u16, cell_h: u16) -> (u16, u16)
     (top.min(cell_h - thickness), thickness)
 }
 
-/// Boşluğun yatay advance'i — hücre genişliği.
+/// Boşluğun yatay advance'i — hücre genişliği, **kesirli**.
 ///
 /// Monospace varsayımı zincirin kendisinde (SF Mono / Menlo); ayarın ailesi
 /// eşaralıklı değilse hücre yine boşluktan türer, geniş harfler kırpılır ve
 /// bunu [`FontIssue::NotMonospaced`] söyler. Ölçülen karakter
 /// boşluk çünkü her fontta var; seçim gövdede sabit, çünkü başka bir karakterle
 /// çağrılması hücre genişliğini fontun o harfine bağlamak olurdu.
-fn space_advance(font: &CTFont) -> CGFloat {
+///
+/// Dönüş **yuvarlanmamış** ve `pub(crate)` olmasının sebebi bu: ızgaranın
+/// adımı yuvarlanmış hâli ([`Metrics::cell_px`]) ama iki tüketici kesirli
+/// hâli istiyor — [`fallback_font`]'un genişlik kapısı ile
+/// [`crate::raster::draw`]'in ortalaması. İkisi de yuvarlanmışla çalışsaydı
+/// taban fontun **kendi** glyph'i hücreden dar görünür (7.827 < 8) ve
+/// ortalama her glyph'i yarım pikselin altında kaydırırdı: çıktı bit bit aynı
+/// kalmazdı. Bekçisi `the_cell_is_the_rounded_advance`.
+pub(crate) fn space_advance(font: &CTFont) -> CGFloat {
     let Some(glyph) = glyph_index(font, ' ') else {
         return 0.0;
     };
+    glyph_advance(font, glyph)
+}
+
+/// Bir glyph'in yatay ilerlemesi, **kesirli**.
+///
+/// [`space_advance`]'ten ayrılmasının sebebi ikinci çağıran: yedek adayın
+/// genişlik kapısı ile `raster::draw`'in ortalaması karakterin **kendi**
+/// glyph'ini ölçüyor, boşluğu değil.
+pub(crate) fn glyph_advance(font: &CTFont, glyph: CGGlyph) -> CGFloat {
     let mut advance = [CGSize::ZERO; 1];
     // SAFETY: tek glyph, tek ölçü hücresi; sayı ikisiyle de tutarlı.
     unsafe {
@@ -478,6 +495,55 @@ fn space_advance(font: &CTFont) -> CGFloat {
     advance[0].width
 }
 
+/// `ch`'i çizebilen bir sistem fontu — **hücreye sığıyorsa**.
+///
+/// Üç adım tek fonksiyonda, çünkü üçü tek soruyu yanıtlıyor: "bu karakteri
+/// kabul edilebilir bir fontla çizebilir miyiz". `None` "aday bulunamadı"
+/// değil **"kabul edilmedi"** demek ve çağıran ikisini ayırt etmek zorunda
+/// değil — ikisinin de cevabı [`crate::TOFU`].
+///
+/// 1. **Aday.** `CTFontCreateForString` cascade'i bizim için yürüyor ve
+///    [`glyph_index`]'in sarıldığı `CTFontGetGlyphsForCharacters`'ın
+///    **yapmadığı** tam olarak bu: o yalnız verilen fonta bakıyor, cascade'e
+///    düşmüyor. Setin varlık sebebi bu fark (`⏵` U+23F5 Menlo'da yok).
+/// 2. **Glyph.** Aday gerçekten çizebiliyor mu. Aday `base`'in kendisi
+///    dönebilir ve o hâlde bu adım `None` verir — buraya ancak `base`
+///    `.notdef` verdikten sonra düşülüyor, yani ayrı bir "aynı font mu"
+///    karşılaştırması gerekmiyor.
+/// 3. **Genişlik kapısı.** `advance <= cell_advance`, ve **reddin tek ölçütü
+///    bu**: emoji (2.17×), `.LastResort` (1.83×) ve CJK (1.66×) aynı kapıdan
+///    eleniyor. Aile adı karşılaştırması, trait biti ve sihirli dizge yok —
+///    ölçülen sayılar `.tasks/019-glyph-yedegi/phase-1.md`'de. Sınır
+///    **kesirli** hücre ilerlemesi ([`space_advance`]), yuvarlanmış hücre
+///    genişliği değil: aynı sayı `raster::draw`'in ortalamasını da besliyor
+///    ve iki iş için iki sayı tutmak ikisini ayrıştırırdı.
+///
+/// Sıfır ilerlemeli aday kapıdan **geçer** (`0 <= cell`); çizilecek şey
+/// görünmez bir glyph olur, kutu değil. Bugün bu yol doğmuyor çünkü
+/// birleştirici işaretler grid hücresine ayrı bir sprite olarak hiç gelmiyor.
+///
+/// **Log yok:** fonksiyon [`crate::Atlas::slot`]'un çizim yolunda ve glyph
+/// başına basılan bir satır kare bütçesinin ortasına düşerdi
+/// ([`Faces::derive`]'ın yazılı kuralı).
+pub(crate) fn fallback_font(
+    base: &CTFont,
+    ch: char,
+    cell_advance: CGFloat,
+) -> Option<CFRetained<CTFont>> {
+    let mut utf8 = [0u8; 4];
+    let text = CFString::from_str(ch.encode_utf8(&mut utf8));
+    let range = CFRange {
+        location: 0,
+        // `CFString` UTF-16 birimi sayıyor, bayt değil: BMP dışı karakterde
+        // aralık iki birim ve `1` verilseydi vekil çiftinin yarısı istenirdi.
+        length: ch.len_utf16() as CFIndex,
+    };
+    // SAFETY: `base` ve `text` bu kapsamda canlı; `range` string'in tamamı.
+    let candidate = unsafe { base.for_string(&text, range) };
+    let glyph = glyph_index(&candidate, ch)?;
+    (glyph_advance(&candidate, glyph) <= cell_advance).then_some(candidate)
+}
+
 /// Yukarı yuvarlar ve `u16`'ya sıkıştırır.
 ///
 /// Alt sınır 1: bozuk ya da bulunamayan bir fontta metrik sıfır dönebilir ve
@@ -485,7 +551,7 @@ fn space_advance(font: &CTFont) -> CGFloat {
 ///
 /// NaN ayrıca ele alınıyor çünkü `clamp` onu **geçirir** ve `NaN as u16` 0
 /// eder: alt sınır sessizce delinir ve hata bölmede patlar, kaynağında değil.
-fn round_up(v: CGFloat) -> u16 {
+pub(crate) fn round_up(v: CGFloat) -> u16 {
     if !v.is_finite() {
         return 1;
     }
