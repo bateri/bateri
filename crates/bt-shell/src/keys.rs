@@ -35,10 +35,31 @@ pub(crate) enum KeyInput {
 
 /// `chars` = `NSEvent.characters`, `ctrl` = Control basılı.
 ///
+/// **Artık her tuş buraya gelmiyor.** Metin yolu AppKit'in yığınından geçiyor
+/// (`view::BateriView`'ın `NSTextInputClient` uyumu) ve basılabilir harfin
+/// olağan üreticisi bu fonksiyon değil `insertText:`. Buraya kalan **dört**
+/// küme var:
+///
+/// 1. **Control'lü olay** — `keyDown:` onu yığına hiç vermiyor (numpad
+///    Enter'ın U+0003'ü ve Ctrl-Y'nin U+0019'u paylaşımlı, kolu AppKit'e
+///    bırakmak her komutu kesebilirdi).
+/// 2. **Yığının `doCommandBySelector:`'a verdiği tuş** — Enter, Tab, Escape,
+///    Backspace, oklar, Shift+Tab, PgUp/PgDn, fn+Backspace. O metot sessiz
+///    bir no-op ve olay bayraksız döndüğü için baytı buradan geliyor.
+/// 3. **Oturumun reddettiği Shift+PgUp/PgDn** — alternate screen'de kaydırma
+///    yok, tuş uygulamaya düz dizi olarak gidiyor.
+/// 4. **Yığının tanımadığımız bir tiple verdiği metin** — `insertText:`'in
+///    downcast'i tutmazsa olay tüketilmiş sayılmıyor ve buraya düşüyor.
+///
+/// Düz metin dalı bu yüzden **kalkmadı**: 2. ve 4. kümenin baytı oradan
+/// çıkıyor ve Ctrl'lü harf (1.) de aynı dala düşebiliyor.
+///
 /// `None` → tuş yutulur; çağıran hiçbir şey yazmaz. Kapsam dışı: IME, ölü
 /// tuşlar, Option-as-Meta, kitty klavye protokolü, değiştiricili oklar
 /// (`\e[1;5A`), Control'lü/Option'lı geri sekme ve ileri silme, Home/End
-/// (dizileri henüz yazılmadı — borç; aşağıda yutuluyor).
+/// (dizileri henüz yazılmadı — borç; aşağıda yutuluyor). **Ölü tuşlar
+/// kapsam dışı kalmaya devam ediyor ve artık bir borç değil**: bileşimi
+/// AppKit'in yığını tamamlıyor, buraya hiç uğramıyor.
 pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<KeyInput> {
     let c = chars.chars().next()?;
     // `characters` tek karakter mi — tek bir `c`'den çıkan kolların ortak
@@ -196,6 +217,11 @@ mod tests {
 
     #[test]
     fn plain_text_passes_as_utf8() {
+        // Düz harfin **olağan** üreticisi artık burası değil, AppKit
+        // yığınının `insertText:`'i (018). Bu sınama yine de bekçi: düz metin
+        // dalı 2. ve 4. kümenin (bkz. [`encode_key`]) tek yolu ve o iki küme
+        // de çok baytlı harf taşıyabiliyor — `insertText:`'in downcast'i
+        // tutmadığında `ğ` buradan geçer.
         assert_eq!(encode("a", false), b"a");
         // Türkçe karakter çok baytlı: bayt bayt geçmeli, `as u8` ile kırpılmamalı.
         assert_eq!(encode("ğ", false), "ğ".as_bytes());
@@ -204,10 +230,14 @@ mod tests {
 
     #[test]
     fn keys_without_sequences_are_swallowed() {
-        // Saf modifier tuşu: `characters` boş.
+        // Saf modifier tuşu: `characters` boş. Yığın yolunda bu olay
+        // `keyDown:`'ın fallback'ine `None` olarak varıyor ve oraya hiç
+        // gelmiyor; sınama yine de yutmanın sözleşmesini çiviliyor.
         assert!(encode_key("", false).is_none());
         // F1 ve Home private use alanında. UTF-8'e çevirip PTY'ye yazmak
-        // shell'e çöp göndermek olurdu; dizileri 00X'te.
+        // shell'e çöp göndermek olurdu; dizileri 00X'te. **Yığın bunları
+        // yutmuyor**: ikisi de `doCommandBySelector:`'a düşüyor, no-op'tan
+        // geçiyor ve yutma kararı hâlâ burada.
         assert!(encode_key("\u{f704}", false).is_none(), "F1");
         assert!(encode_key("\u{f729}", false).is_none(), "Home");
     }
