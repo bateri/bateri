@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -1451,12 +1451,13 @@ pub struct Session {
     /// [`Session::screen_clears`]'in kare yolunun **hesaba kattığı** hâli.
     ///
     /// İkisi ayrıştığı anda ortada henüz sindirilmemiş bir temizleme var
-    /// demektir ve o kare bayrağı **kurar**; eşitken bayrağın ömrü ızgaraya
-    /// bakar. Sayacı burada tutmanın sebebi tam olarak bu: bir `bool` "ekran
+    /// demektir ve o kare bayrağı **kurar** (birincil ekranda); eşitken
+    /// bayrağın ömrü ızgaraya **ve deftere** bakar. Sayacı burada tutmanın sebebi tam olarak bu: bir `bool` "ekran
     /// temizlendi mi" sorusunu yanıtlar, nesil ise "bu temizlemeyi hesaba
     /// kattım mı" sorusunu — ve yarışı kapatan ikincisi.
     screen_seen: AtomicU32,
-    /// Ekran **kasten** temizlendi ve henüz doğal yoldan dolmadı (R1.1, R1.2).
+    /// Ekran **kasten** temizlendi ve defter o temizlemeden sonra henüz
+    /// büyümedi (R1.1, R1.2; ekranın doğal yoldan dolması ikinci kol).
     ///
     /// **Tek tüketicisi [`Session::fill_rows`]** ve okuma yeri sıranın kendisi:
     /// ömür bu karede işledikten **sonra**, yani aynı karede gelmiş taze bir
@@ -1467,6 +1468,23 @@ pub struct Session {
     /// serileştiren şey kilidin kendisi — `Relaxed` bu yüzden yetiyor
     /// ([`Session::alt_screen`] emsali).
     screen_cleared: AtomicBool,
+    /// Bayrak kurulduğunda defterin boyu — düşme ölçütünün **damgası** (R1.2).
+    ///
+    /// Soru tek: "temizlemeden **sonra** geçmişe satır düştü mü". Düştüyse
+    /// geçmişin en yeni satırları artık temizleme öncesine ait değildir, yani
+    /// doldurma Ctrl-L'i geri almaz ve bayrağın işi bitmiştir.
+    ///
+    /// **Damga bir kare geç alınıyor** ([`Session::UNSTAMPED`]) ve bu bir
+    /// zamanlama zorunluluğu: okuyucu thread nesli `advance`'ten **önce**
+    /// artırıyor, yani bayrağı kuran kare ızgarayı temizlenmeden **önce**
+    /// görebiliyor. O karenin defter boyu temizleme öncesine ait olurdu ve
+    /// `CSI 2 J`'nin kendisi görünen satırları geçmişe ittiği için
+    /// (alacritty `clear_viewport`) bir sonraki karede damga **anında**
+    /// aşılır, bayrak da hemen düşerdi. Damgayı nesil yerleştikten sonraki
+    /// ilk kareye bırakmak bunu kapatıyor; bedeli o karede gelmiş fazladan
+    /// satırların damgayı biraz yükseltmesi, yani bayrağın biraz **uzun**
+    /// yaşaması — yanlışın yönü güvenli.
+    screen_clear_history: AtomicUsize,
     /// Pencerenin dock'u var mı ([`SessionOptions::dock`]).
     ///
     /// Doğumda kararlaşıyor ve bir daha değişmiyor, o yüzden ne kilit ne
@@ -1476,6 +1494,14 @@ pub struct Session {
 }
 
 impl Session {
+    /// [`Session::screen_clear_history`]'nin "henüz damgalanmadı" değeri.
+    ///
+    /// Sentinel bir **tavan** ve seçim bilerek: damgasız bir bayrak
+    /// `history > stamp` karşılaştırmasını hiçbir defter boyuyla geçemiyor,
+    /// yani ayrı bir dal olmadan "damga gelene kadar düşme" anlamına geliyor.
+    /// Gerçek bir defter boyu olamaz — tavanı `SCROLLBACK_MAX`.
+    const UNSTAMPED: usize = usize::MAX;
+
     /// PTY'yi açar, shell'i başlatır ve okuyucu thread'i kurar.
     pub fn spawn(options: SessionOptions, wake: Arc<dyn Wake>) -> io::Result<Self> {
         let grid = GridSize::for_spawn(options.cols, options.rows);
@@ -1546,6 +1572,9 @@ impl Session {
             // bayrağı sebepsiz kurmasını önlüyor.
             screen_seen: AtomicU32::new(0),
             screen_cleared: AtomicBool::new(false),
+            // Damga da yok: bayrak kurulu olmadığı için okunmuyor, ilk kare
+            // onu defterin boyuyla değiştiriyor.
+            screen_clear_history: AtomicUsize::new(Self::UNSTAMPED),
             dock: options.dock,
         })
     }
@@ -2132,8 +2161,10 @@ impl Session {
         );
         // **Kasten temizleme bayrağının ömrü burada işliyor** ve yeri zorunlu:
         // `Term` kilidinin **içinde**, doluluk sayısıyla aynı okumada
-        // ([`Session::observe_screen_clear`]).
-        self.observe_screen_clear(content_rows == grid_rows, alt_screen, offset != 0);
+        // ([`Session::observe_screen_clear`]). Defterin boyu da aynı okumadan:
+        // düşme ölçütü "temizlemeden sonra geçmişe satır düştü mü" ve iki
+        // sayının farklı turlardan gelmesi ölçütü uydurma yapardı.
+        self.observe_screen_clear(term.history_size(), alt_screen, offset != 0);
         // **Doldurma bayrağın ömründen SONRA soruluyor** ve sıra zorunlu:
         // aynı karede gelmiş taze bir `CSI 2 J` bayrağı **kuruyor** ve
         // doldurma o kareyi de kapatmak zorunda. Ters sırada, baytları henüz
@@ -2328,12 +2359,43 @@ impl Session {
     /// görünse bile, çünkü baytlar bu karede uygulanmamış olabilir. Ömrün
     /// ikinci yarısı ancak nesil eşitken işliyor.
     ///
-    /// **Düşürmenin üç koşulu var ve üçü de aynı soruyu soruyor: "ekran
-    /// *gerçekten* doğal yoldan doldu mu".** `full` (`content_rows == rows`)
-    /// tek başına yetmiyor, çünkü [`Cursor::content_rows`] **görünür
-    /// pencereden** doğuyor, canlı ekrandan değil:
+    /// **Alternatif ekranın `CSI 2 J`'si nesli tüketir ama bayrağı kurmaz**
+    /// (phase-1b, Fix A). Semantik alacritty'den: `ClearMode::All` ALT_SCREEN
+    /// altında `reset_region(..)` çağırıyor, `clear_viewport()` **değil** —
+    /// geçmiş büyümüyor ve birincil ekranın durumuna hiç dokunulmuyor, yani
+    /// geri getirilmeyecek bir şey yok. Nesil yine de tüketiliyor: yoksa
+    /// birikmiş sayaç alternatif ekrandan çıkışta bayrağı kurardı ve `vim`
+    /// kullanan her oturumda doldurma kalıcı olarak kapanırdı — waive'lerin
+    /// reddinin yarısı bu.
     ///
-    /// - `alt_screen` — alternatif ekranda doluluk tanım gereği `rows`, yani
+    /// **Düşürmenin ölçütü "temizlemeden sonra defter büyüdü mü".** Büyüdüyse
+    /// geçmişe temizlemeden **sonra** satır düşmüş demektir ve doldurma o
+    /// kadarını güvenle geri verebilir. Damga [`Session::screen_clear_history`]'de
+    /// ve bir kare geç alınıyor; gerekçesi orada.
+    ///
+    /// **Bayrak bir eşik değil bir kapı: "kaç satır" sorusunun cevabı
+    /// [`Session::fill_rows`]'ta.** Tek satırlık bir büyüme bayrağı düşürüyor
+    /// ama boşluğun tamamını açmıyor — doldurma damgayı ikinci kez, bu kez
+    /// **taze satır sayısı** olarak okuyor ve `fill`'i onunla kırpıyor.
+    /// Kırpma olmasaydı bayrağın düşmesi ile "geri getirilebilir" arasındaki
+    /// fark ekrana çıkardı; ölçüldü ve sayısı oradaki doc'ta.
+    ///
+    /// Bayrağın kırpmadan **ayrı** durmasının sebebi damgasız pencere: bayrak
+    /// kurulduğu karede damga henüz alınmamış (`UNSTAMPED`) ve orada "taze
+    /// satır" hesaplanamıyor. Kapı o kareyi kapatıyor.
+    ///
+    /// `content_rows == rows` kolu **yok**: phase-1'in ölçütüydü,
+    /// [`Cursor::content_rows`] dock'lu pencerede giriş satırını saymadığı
+    /// için (`drawn_rows.max(1)`, tavan `rows - 1`) pratikte erişilemez —
+    /// ölçüldü (`phase-2.md` → Uygulama Notları §7b). Kırpma geldikten sonra
+    /// ikinci bir kol olarak tutmanın da anlamı kalmadı: doymuş defterde
+    /// (aşağıda) bayrağı düşürse bile `fill` kırpmadan sıfır çıkıyor, yani
+    /// kol **ölü**.
+    ///
+    /// **İki koşul ölçütün üstünde:**
+    ///
+    /// - `alt_screen` — alternatif ekranda doluluk tanım gereği `rows` ve
+    ///   `history_size()` etkin ızgaradan geliyor, yani alt ekranda sıfır;
     ///   onsuz `vim`'in her karesi bayrağı düşürürdü.
     /// - `scrolled` (`display_offset != 0`) — geçmişe kaydırılmış pencere
     ///   geçmiş satırlarıyla dolar ve `full` doğru olur; tanığı deponun kendi
@@ -2343,26 +2405,74 @@ impl Session {
     ///   (`display_offset == 0`) doldurma temizlenmiş ekranı geri doldururdu.
     ///   R2.2'nin `display_offset == 0` kapısı bunu kurtarmıyor — o kapı
     ///   doldurmayı kaydırma *sırasında* durduruyor, bayrağın kaybı ise
-    ///   kalıcı. (`/code-review`, 017 phase-1.)
+    ///   kalıcı. (`/code-review`, 017 phase-1.) Damga ölçütü onu gereksiz
+    ///   kılıyor (kaydırma defteri büyütmüyor) ama koşul ucuz ve bekçisi
+    ///   `scrolling_into_history_never_drops_the_flag` yerinde duruyor.
     ///
-    /// Aynı sınıfın daha seyrek hâli — pencereyi `content_rows`'un altına
-    /// kısmak — kapsam dışı: orada ekran gerçekten doluyor.
+    /// **Bilinen sınır 0 — doymuş defter.** `history_size()` `scrollback`'te
+    /// doyuyor (alacritty `increase_scroll_limit`), yani on bin satırlık bir
+    /// oturumda defter büyümeyi bırakıyor: damganın üstüne çıkacak bir sayı
+    /// kalmıyor ve o oturumda bir Ctrl-L'den sonra doldurma bir daha
+    /// koşmuyor. Tek damgayla kapatılamıyor — gereken şey "geçmişe itilen
+    /// satır" sayacı ve o sayaç doymuş defterde de artmak zorunda, yani
+    /// `history_size` ondan türetilemiyor. Yönü güvenli (doldurma yapmamak
+    /// phase-1'in davranışı) ve phase-1b'ye göre bir **gerileme değil**:
+    /// bayrağın phase-1'deki ömrü dock'lu pencerede zaten erişilemezdi.
     ///
-    /// **Bilinen sınır:** eşzamanlı güncelleme (`\e[?2026h`) baytları
+    /// **Bilinen sınır 1:** eşzamanlı güncelleme (`\e[?2026h`) baytları
     /// `vte::ansi::Processor`'da tamponluyor, yani o blokun içindeki bir
     /// `CSI 2 J` uygulanmadan **önce** birden çok kare geçebilir ve nesil
     /// eşitlendikten sonra dolu bir ızgara bayrağı düşürebilir. Birincil
     /// ekranda eşzamanlı güncelleme kullanan kabuk yok; yanlışın yönü kötü
     /// ama olasılığı, kapatmanın bedelini (uygulanan bayt sayacı, alacritty'de
     /// kanca yok) hak etmiyor.
-    fn observe_screen_clear(&self, full: bool, alt_screen: bool, scrolled: bool) {
+    ///
+    /// **Bilinen sınır 2:** `alt_screen` de nesil gibi tek okumadan geliyor,
+    /// yani mod değişimiyle `CSI 2 J`'yi **aynı** PTY okumasında taşıyan bir
+    /// tur iki yönde de yanılabilir. `?1049h` + `2J` (her `vim` açılışı) bir
+    /// kere fazladan kurabilir — kendi kendini onarıyor, çünkü birincil
+    /// ekranda defter büyüyünce bayrak düşüyor. `?1049l` + `2J` ise gerçek bir
+    /// temizlemeyi atlayabilir; yönü kötü ama böyle basan uygulama yok ve
+    /// kapatmanın bedeli uygulanan bayta kanca takmak.
+    ///
+    /// **Bilinen sınır 3:** `2J` ile `3J` **ayrı** PTY okumalarına düşerse
+    /// damga `2J` sonrası / `3J` öncesi boydan alınır; `3J` defteri sıfırlar
+    /// (`clear_history`) ve bayrak defterin o eski damgayı yeniden aşmasını
+    /// bekler. Pratikte olmuyor: `clear(1)` üçünü (`\e[H\e[2J\e[3J`) tek
+    /// `write` ile basıyor, yani damga sıfırdan alınıyor. Çaresi `>` yerine
+    /// `!=` **değil**: pencereyi büyütmek geçmişten satır çekiyor, yani defter
+    /// **küçülebiliyor** ve `!=` orada bayrağı düşürüp temizleme öncesi
+    /// satırları geri getirirdi.
+    fn observe_screen_clear(&self, history: usize, alt_screen: bool, scrolled: bool) {
         let clears = self.screen_clears.load(Ordering::Relaxed);
         if clears != self.screen_seen.load(Ordering::Relaxed) {
             self.screen_seen.store(clears, Ordering::Relaxed);
-            self.screen_cleared.store(true, Ordering::Relaxed);
-        } else if full && !alt_screen && !scrolled {
-            // Bayrak zaten düşükken de yazılıyor: dalı `cleared` ile korumak
-            // aynı değeri yazmamak için bir okuma daha ödemek olurdu.
+            if !alt_screen {
+                self.screen_clear_history
+                    .store(Self::UNSTAMPED, Ordering::Relaxed);
+                self.screen_cleared.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
+        // **Bayrak düşükken damgaya dokunulmuyor** ve bu kırpmanın koşulu:
+        // damga [`Session::fill_rows`]'a "temizlemeden beri kaç satır geldi"
+        // diye de hizmet ediyor, yani hiç temizleme olmamış bir oturumda
+        // `UNSTAMPED` kalmak **zorunda** — orada damgalansaydı kırpma taze bir
+        // pencerede doldurmayı sıfıra indirirdi.
+        if !self.screen_cleared.load(Ordering::Relaxed) {
+            return;
+        }
+        let stamp = self.screen_clear_history.load(Ordering::Relaxed);
+        if stamp == Self::UNSTAMPED {
+            // **Damga alternatif ekranda alınmıyor** ve bu bir zorunluluk:
+            // `history_size()` etkin ızgaradan geliyor, alt ekranda sıfır.
+            // Ctrl-L'den hemen sonra `vim` açılsaydı damga sıfır olur, çıkışta
+            // birincil ekranın defteri onu anında aşar ve bayrak yanlışlıkla
+            // düşerdi. Damgasız kalan bayrak düşmüyor: `UNSTAMPED` tavan.
+            if !alt_screen {
+                self.screen_clear_history.store(history, Ordering::Relaxed);
+            }
+        } else if history > stamp && !alt_screen && !scrolled {
             self.screen_cleared.store(false, Ordering::Relaxed);
         }
     }
@@ -2375,9 +2485,13 @@ impl Session {
     /// — 016'nın "yarıçap 0, hale 0" kolunun aynı örüntüsü. Koşullar iki yere
     /// dağılsaydı geri alma yolu da ikiye bölünürdü.
     ///
-    /// Sayı `min(history_size, gap)`: boşluk kadar satır isteniyor, defterde o
-    /// kadar yoksa defterin tamamı. Yeni oturumda defter boş, yani `0` ve
-    /// hiçbir ek okuma yok.
+    /// Sayı `min(gap, taze satır)`: boşluk kadar satır isteniyor, temizlemeden
+    /// beri o kadar gelmemişse gelen kadarı. Hiç temizleme olmamış oturumda
+    /// "taze" defterin tamamıdır, yani formül R2.1'in `min(history_size, gap)`'i
+    /// — yeni oturumda defter boş, `0` ve hiçbir ek okuma yok.
+    ///
+    /// **Üçüncü terim phase-1b'de geldi ve R2.1'den sapmadır**; gerekçesi
+    /// aşağıda, gövdede, ölçülmüş hâliyle.
     ///
     /// **Dört kapı ve dördü de zorunlu:**
     ///
@@ -2389,7 +2503,8 @@ impl Session {
     ///   zaten yok; dock da kalkıyor.
     /// - Bayrak temiz — kullanıcı ekranı **kasten** temizlediyse geri
     ///   gelmemeli (R1). Bayrağın ömrü [`Session::observe_screen_clear`]'da ve
-    ///   çağrı sırası zorunlu: ömür **önce** işliyor.
+    ///   çağrı sırası zorunlu: ömür **önce** işliyor. Bayrak kapı, kırpma
+    ///   ölçü: kapı "hiç" der, kırpma "ne kadar".
     /// - `!scrolled` (`display_offset == 0`) — geçmişe kaydırılmış pencerede
     ///   üstteki boşluk zaten geçmişle dolu; ikinci kez doldurmak aynı
     ///   satırları iki kez gösterirdi.
@@ -2401,7 +2516,28 @@ impl Session {
         if !self.dock || alt_screen || scrolled || self.screen_cleared.load(Ordering::Relaxed) {
             return 0;
         }
-        gap.min(u16::try_from(term.history_size()).unwrap_or(u16::MAX))
+        let history = term.history_size();
+        // **Üçüncü terim: temizlemeden beri gelen satır sayısı.** Bayrağın
+        // düşmesi "defterin en yenileri artık temizleme öncesine ait değil"
+        // demiyor, yalnız "bir satır geldi" diyor; boşluk o bir satırdan
+        // büyükse aradaki fark doğrudan kullanıcının sildiği ekrandır.
+        // Ölçüldü (2026-09-20, `/code-review` 017 phase-1b): Ctrl-L → 12
+        // satırlık çıktı (defter +3) → yedi satırlık delik, ve doldurulan yedi
+        // satırın **dördü** temizleme öncesine aitti
+        // (`["27","28","29","30","1","2","3"]`). Kırpmayla aynı sahne
+        // `["1","2","3"]` veriyor.
+        //
+        // `UNSTAMPED` "hiç temizleme olmadı" demek ve orada kırpma **yok**:
+        // taze bir pencerede defterin tamamı serbest. `saturating_sub` bir
+        // emniyet kemeri — pencereyi büyütmek geçmişten satır çekiyor, yani
+        // defter damganın altına inebiliyor ve orada doğru cevap sıfır.
+        let stamp = self.screen_clear_history.load(Ordering::Relaxed);
+        let fresh = if stamp == Self::UNSTAMPED {
+            history
+        } else {
+            history.saturating_sub(stamp)
+        };
+        gap.min(u16::try_from(fresh).unwrap_or(u16::MAX))
     }
 
     /// Faz 2: çıpalardan komut işaretleri, defterden renkler.
@@ -6774,6 +6910,236 @@ mod tests {
         }
     }
 
+    /// Alternatif ekrana girip `CSI 2 J` basıp çıkan tur; `armed` turun
+    /// başındaki bayrağı seçiyor.
+    ///
+    /// Reçete `vim`'in ta kendisi: açılışta `?1049h` sonra `2J`, çıkışta
+    /// `?1049l`. Adımlar `read` ile **ayrı ayrı** sıralanıyor — tek okumada
+    /// gelselerdi mod değişimi ile temizleme aynı turda görünür ve sınama
+    /// kendi ölçmek istediği kolu değil bir yarışı ölçerdi
+    /// ([`Session::observe_screen_clear`] → Bilinen sınır 2).
+    fn alternate_screen_round_trip(armed: bool) {
+        // İki başlangıç durumu, aynı adım sayısı: bayraksız kol da bir şey
+        // basıyor ki `read` adımları hizada kalsın.
+        let first = if armed {
+            "printf '\\033[2J\\033[H'"
+        } else {
+            "printf 'a\\n'"
+        };
+        let script = format!(
+            "stty -echo; seq 1 30; read _; {first}; read _; printf '\\033[?1049h'; \
+             read _; printf '\\033[2J'; read _; printf '\\033[?1049l'; sleep 5"
+        );
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(&script, Arc::clone(&wake));
+        wait_seq_tail(&session, &wake);
+
+        session.write(b"\n");
+        if armed {
+            wait_until("ekran temizlenmedi", Duration::from_secs(5), || {
+                cursor_now(&session).content_rows == 1
+            });
+        } else {
+            wait_ink(&session, &wake, "a");
+        }
+        assert_eq!(
+            screen_cleared(&session),
+            armed,
+            "turun başlangıç durumu kurulamadı"
+        );
+
+        session.write(b"\n");
+        wait_until(
+            "alternatif ekrana geçilmedi",
+            Duration::from_secs(5),
+            || {
+                cursor_now(&session);
+                session.alt_screen()
+            },
+        );
+
+        // Alternatif ekranın `CSI 2 J`'si: tarayıcı onu sayıyor, ömür ise
+        // nesli tüketip bayrağa **dokunmuyor** (Fix A). Beklemenin ölçütü
+        // sayaç, çünkü alternatif ekranda temizlemenin ızgarada görünür bir
+        // izi yok — `reset_region(..)` zaten boş bir ekranı boşaltıyor.
+        let before = screen_clears(&session);
+        session.write(b"\n");
+        wait_until(
+            "alternatif ekranda `2J` sayılmadı",
+            Duration::from_secs(5),
+            || screen_clears(&session) > before,
+        );
+        for _ in 0..3 {
+            cursor_now(&session);
+            assert_eq!(
+                screen_cleared(&session),
+                armed,
+                "alternatif ekranın `CSI 2 J`'si bayrağa dokundu"
+            );
+        }
+
+        // Ve çıkışta da: nesil alternatif ekranda tüketildiği için birincil
+        // ekrana dönüş bayrağı kurmuyor.
+        session.write(b"\n");
+        wait_until(
+            "alternatif ekrandan çıkılmadı",
+            Duration::from_secs(5),
+            || {
+                cursor_now(&session);
+                !session.alt_screen()
+            },
+        );
+        for _ in 0..3 {
+            cursor_now(&session);
+            assert_eq!(
+                screen_cleared(&session),
+                armed,
+                "alternatif ekrandan çıkış bayrağı değiştirdi"
+            );
+        }
+    }
+
+    #[test]
+    fn the_alternate_screen_clear_leaves_an_armed_flag_armed() {
+        // **Fix A'nın birinci kolu** (phase-1b): Ctrl-L'den sonra `vim`'e
+        // girip çıkmak bayrağı yeniden kurmamalı — ama düşürmemeli de.
+        alternate_screen_round_trip(true);
+    }
+
+    #[test]
+    fn the_alternate_screen_clear_leaves_a_clear_flag_clear() {
+        // **Fix A'nın asıl kolu ve waive'lerin reddinin yarısı**: `vim`
+        // açılışta `CSI 2 J` basıyor: bayrağı orada kurmak, doldurmayı ilk
+        // `vim` kullanımından sonra **kalıcı olarak** kapatıyordu. Semantik
+        // alacritty'den — alternatif ekranda `ClearMode::All` `reset_region`
+        // çağırıyor, geçmiş büyümüyor, geri getirilmeyecek bir şey yok.
+        alternate_screen_round_trip(false);
+    }
+
+    #[test]
+    fn the_stamp_waits_for_the_frame_that_sees_the_clear() {
+        // **Damga bir kare geç alınıyor** ve gerekçesi ölçülebilir bir kusur:
+        // okuyucu thread nesli `advance`'ten **önce** artırıyor, yani bayrağı
+        // kuran kare ızgarayı temizlenmeden önce görebiliyor. `CSI 2 J`
+        // birincil ekranda görünen satırları geçmişe **itiyor** (alacritty
+        // `clear_viewport`), yani o karenin defter boyu bir sonraki karede
+        // anında aşılır ve bayrak hemen düşerdi.
+        //
+        // Yarışın penceresi zamanlamaya bağlı, o yüzden hermetik tanık ömrü
+        // **doğrudan** çağırıyor; sayılar deponun kendi sahnesinden
+        // (`seq 1 30`: defter 21, temizleme dokuz satır itiyor).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("sleep 5", Arc::clone(&wake));
+
+        session.screen_clears.fetch_add(1, Ordering::Relaxed);
+        // Baytlar henüz uygulanmadı: ızgara dolu, defter temizleme öncesi boyda.
+        session.observe_screen_clear(21, false, false);
+        assert!(screen_cleared(&session), "taze nesil bayrağı kurmadı");
+
+        // Temizleme uygulandı, defter dokuz satır büyüdü — ve damga **burada**
+        // alınıyor. Bayat damgayla bu kare bayrağı düşürürdü.
+        session.observe_screen_clear(30, false, false);
+        assert!(screen_cleared(&session), "bayat damga bayrağı düşürdü");
+
+        // Aynı boy: geçmişin en yenileri hâlâ temizleme öncesine ait.
+        session.observe_screen_clear(30, false, false);
+        assert!(screen_cleared(&session), "defter büyümeden bayrak düştü");
+
+        // Tek satır yetiyor: ölçüt bir eşik değil, işaret.
+        session.observe_screen_clear(31, false, false);
+        assert!(
+            !screen_cleared(&session),
+            "defter büyüdü ama bayrak düşmedi"
+        );
+    }
+
+    #[test]
+    fn the_alternate_screen_neither_arms_nor_stamps_the_flag() {
+        // İki kol tek sahnede, çünkü ikisi de `alt_screen`'in aynı okumasına
+        // bağlı:
+        //
+        // 1. **Fix A** — alternatif ekranın `CSI 2 J`'si nesli tüketir,
+        //    bayrağı kurmaz. Nesil tüketilmeseydi birincil ekrana dönüş onu
+        //    kurardı ve `vim` kullanan her oturumda doldurma kapanırdı.
+        // 2. **Damga alternatif ekranda alınmaz** — `history_size()` etkin
+        //    ızgaradan geliyor ve alternatif ekranda sıfır. Ctrl-L'den hemen
+        //    sonra `vim` açılsaydı damga sıfır olur, çıkışta birincil ekranın
+        //    defteri onu anında aşar ve bayrak yanlışlıkla düşerdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("sleep 5", Arc::clone(&wake));
+
+        // (1) Alternatif ekranda gelen temizleme.
+        session.screen_clears.fetch_add(1, Ordering::Relaxed);
+        session.observe_screen_clear(0, true, false);
+        assert!(
+            !screen_cleared(&session),
+            "alternatif ekranın `CSI 2 J`'si bayrağı kurdu"
+        );
+        session.observe_screen_clear(30, false, false);
+        assert!(!screen_cleared(&session), "nesil tüketilmedi");
+
+        // (2) Birincil ekranda kurulan bayrak, damgalanmadan alternatif ekrana
+        // giriyor.
+        session.screen_clears.fetch_add(1, Ordering::Relaxed);
+        session.observe_screen_clear(21, false, false);
+        assert!(screen_cleared(&session), "taze nesil bayrağı kurmadı");
+        for _ in 0..3 {
+            session.observe_screen_clear(0, true, false);
+        }
+        assert!(screen_cleared(&session), "alternatif ekran bayrağı düşürdü");
+
+        // Birincil ekrana dönüş: damga sıfırdan değil **defterin kendi
+        // boyundan** alınıyor, yani aynı boy bayrağı düşürmüyor.
+        session.observe_screen_clear(30, false, false);
+        session.observe_screen_clear(30, false, false);
+        assert!(
+            screen_cleared(&session),
+            "alternatif ekranın sıfır defteri damgalandı"
+        );
+        session.observe_screen_clear(31, false, false);
+        assert!(
+            !screen_cleared(&session),
+            "defter büyüdü ama bayrak düşmedi"
+        );
+    }
+
+    #[test]
+    fn a_saturated_history_never_drops_the_flag() {
+        // **Bilinen sınır, gözlemle sabitlenmiş.** `history_size()`
+        // `scrollback`'te doyuyor (alacritty `increase_scroll_limit`), yani on
+        // bin satırlık bir oturumda defter büyümeyi bırakıyor ve damganın
+        // üstüne çıkacak bir sayı kalmıyor: o oturumda bir Ctrl-L'den sonra
+        // doldurma bir daha koşmuyor. Tek damgayla kapatılamıyor — gereken şey
+        // doymuş defterde de artan bir "geçmişe itilen satır" sayacı.
+        //
+        // Sınama bunu **iddia etmiyor, gözlüyor**: yönü güvenli (doldurma
+        // yapmamak phase-1'in davranışı) ve düzelme geldiğinde burası
+        // kırmızıya düşüp kendini hatırlatıyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("sleep 5", Arc::clone(&wake));
+
+        session.screen_clears.fetch_add(1, Ordering::Relaxed);
+        session.observe_screen_clear(100, false, false);
+        assert!(screen_cleared(&session), "taze nesil bayrağı kurmadı");
+        // Damga da tavanda: defter bir daha büyümüyor.
+        for _ in 0..5 {
+            session.observe_screen_clear(100, false, false);
+        }
+        assert!(
+            screen_cleared(&session),
+            "doymuş defterde bayrak düştü: bilinen sınır kapanmış olabilir"
+        );
+    }
+
+    /// Bu anın nesil sayacı — tarayıcının saydığı `CSI 2 J`.
+    ///
+    /// [`screen_cleared`] emsali: sayaç `pub` değil, sınırdan geçen şey
+    /// bayrak bile değil. Alternatif ekranda temizlemenin ızgarada görünür bir
+    /// izi olmadığı için bekleyecek başka bir ölçüt yok.
+    fn screen_clears(session: &Session) -> u32 {
+        session.screen_clears.load(Ordering::Relaxed)
+    }
+
     /// Bu anın imleç kaydı **ve** doldurma hücreleri.
     ///
     /// [`cursor_now`]'un doldurma soran kardeşi: doldurma ikinci bir sink'ten
@@ -6869,6 +7235,155 @@ mod tests {
         assert!(cursor.rows - cursor.content_rows > 0, "{cursor:?}");
         assert_eq!(cursor.fill, 0, "temizlenen ekran geri doldu: {cursor:?}");
         assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
+    }
+
+    #[test]
+    fn a_clear_without_new_history_keeps_the_gap_empty() {
+        // **Damga ölçütünün öteki yarısı** (phase-1b): ekran kaymadıysa defter
+        // büyümez ve bayrak durur. Doğru cevap bu — geçmişin en yenileri hâlâ
+        // temizleme öncesine ait, yani doldurma Ctrl-L'i geri alırdı.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; read _; \
+             printf 'hi\\n'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+
+        session.write(b"\n");
+        wait_until("ekran temizlenmedi", Duration::from_secs(5), || {
+            cursor_now(&session).content_rows == 1
+        });
+        assert!(screen_cleared(&session), "`CSI 2 J` bayrağı kurmadı");
+
+        // Tek satırlık çıktı ekranı kaydırmıyor: defter olduğu yerde kalıyor.
+        session.write(b"\n");
+        wait_ink(&session, &wake, "hi");
+
+        let (cursor, cells) = fill_now(&session);
+        assert!(cursor.rows - cursor.content_rows > 0, "{cursor:?}");
+        assert!(
+            screen_cleared(&session),
+            "defter büyümeden bayrak düştü: {cursor:?}"
+        );
+        assert_eq!(cursor.fill, 0, "temizlenen ekran geri doldu: {cursor:?}");
+        assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
+    }
+
+    #[test]
+    fn the_fill_stops_at_the_rows_that_arrived_after_the_clear() {
+        // **`/code-review`'un ölçülmüş bulgusu** (017 phase-1b): bayrağın
+        // düşmesi "boşluğun tamamı geri verilebilir" demiyor. Defter tek satır
+        // büyüyünce bayrak düşüyor, ama doldurma `gap` satır çekiyor — aradaki
+        // fark doğrudan kullanıcının sildiği ekran.
+        //
+        // Sahne ölçüldü: Ctrl-L (defter 30) → `seq 1 12` üç satır kaydırıyor
+        // (defter 33) → yedi satırlık delik. Kırpmasız hâlde doldurulan yedi
+        // satır `["27","28","29","30","1","2","3"]`, yani **dördü** temizleme
+        // öncesine aitti. Kırpmayla üçü kalıyor ve üçü de temizlemeden sonra
+        // gelmiş.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; read _; \
+             seq 1 12; read _; printf '\\033[6A\\033[J'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+
+        session.write(b"\n");
+        wait_until("ekran temizlenmedi", Duration::from_secs(5), || {
+            cursor_now(&session).content_rows == 1
+        });
+        assert!(screen_cleared(&session), "`CSI 2 J` bayrağı kurmadı");
+
+        session.write(b"\n");
+        wait_frame(&session, &wake, |cells| row_text(cells, 8) == "12");
+        wait_settled(&session);
+        assert!(
+            !screen_cleared(&session),
+            "defter büyüdü ama bayrak düşmedi"
+        );
+
+        session.write(b"\n");
+        wait_until(
+            "içerik yukarıdan kısalmadı",
+            Duration::from_secs(5),
+            || cursor_now(&session).content_rows <= 3,
+        );
+
+        let (cursor, cells) = fill_now(&session);
+        // Delik doldurmadan **büyük**: kırpma gerçekten kırpıyor.
+        assert!(
+            cursor.rows - cursor.content_rows > cursor.fill,
+            "sahne kırpmasız kuruldu: {cursor:?}"
+        );
+        let text: Vec<String> = (0..cursor.fill).map(|r| row_text(&cells, r)).collect();
+        assert_eq!(text, ["1", "2", "3"], "{cells:?}");
+    }
+
+    #[test]
+    fn a_grown_history_lets_the_gap_fill_again() {
+        // **phase-1b'nin varlık sebebi ve waive'lerin reddinin ölçüldüğü yer.**
+        // Reçete kullanıcının gördüğü hâliyle: Ctrl-L → yirmi satırlık çıktı →
+        // Tab → Ctrl-C. Düşme ölçütü `content_rows == rows` iken burada
+        // `fill == 0` çıkıyordu — dock'lu pencerede doluluk giriş satırını
+        // saymadığı için tavan `rows - 1` ve yüklem erişilemez
+        // (`phase-2.md` → Uygulama Notları §7b).
+        //
+        // Dört adım `read` ile sıralanıyor: aynı PTY okumasında gelselerdi
+        // aradaki hâller hiç gözlenmezdi (emsal
+        // `content_rows_come_from_the_visible_window_while_scrolled`).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; read _; \
+             seq 1 20; read _; printf '\\033[4A\\033[J'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+
+        // (1) Ctrl-L: bayrak kuruluyor.
+        session.write(b"\n");
+        wait_until("ekran temizlenmedi", Duration::from_secs(5), || {
+            cursor_now(&session).content_rows == 1
+        });
+        assert!(screen_cleared(&session), "`CSI 2 J` bayrağı kurmadı");
+
+        // (2) Yirmi satır çıktı: defter büyüyor, yani geçmişin en yenileri
+        // artık temizleme öncesine ait değil. **Ölçüt ekranın dolması değil
+        // son satırın mürekkebi** ve fark bu phase'in kendisi: dock'lu
+        // pencerede imleç boş bir alt satırda duruyor, yani `content_rows`
+        // dokuzda kalıyor ve `rows`'a hiç çıkmıyor (ölçüldü — bu bekleme
+        // `content_rows == rows` yazılınca zaman aşımına düşüyor).
+        session.write(b"\n");
+        wait_frame(&session, &wake, |cells| row_text(cells, 8) == "20");
+        wait_settled(&session);
+        assert!(
+            !screen_cleared(&session),
+            "defter temizlemeden sonra büyüdü ama bayrak düşmedi"
+        );
+
+        // (3) Tab listesinin kapanışı: üstten dört satırlık delik.
+        session.write(b"\n");
+        wait_until(
+            "içerik yukarıdan kısalmadı",
+            Duration::from_secs(5),
+            || cursor_now(&session).content_rows <= 6,
+        );
+
+        let (cursor, cells) = fill_now(&session);
+        assert!(cursor.rows - cursor.content_rows > 0, "{cursor:?}");
+        assert!(
+            cursor.fill > 0,
+            "Ctrl-L'den sonra doldurma bir daha hiç koşmadı: {cursor:?}"
+        );
+        // Ölçüldü (2026-09-20): düzeltmeden önce `gap == 5` ve `fill == 0`;
+        // sonra boşluğun tamamı doluyor.
+        assert_eq!(
+            cursor.fill,
+            cursor.rows - cursor.content_rows,
+            "boşluk kadar doldurulmadı: {cursor:?}"
+        );
+        assert!(!cells.is_empty(), "ikinci sink çağrılmadı: {cursor:?}");
     }
 
     #[test]
@@ -7935,9 +8450,10 @@ mod tests {
         // **Bekçinin yakaladığı kusur sessiz:** sayacı kilitten önce okuyan
         // (ya da nesil karşılaştırmasını hiç yapmayan) bir düzenleme
         // `CSI 2 J`'yi kaybeder ve 017 phase-2'nin doldurması Ctrl-L'i geri
-        // alır. Yükleme çevrilebilir: ilk temizleme görüldükten sonra
-        // **ekran dolu değilse bayrak kurulu olmak zorundur** — betikte
-        // satırları eksilten tek şey `CSI 2 J`.
+        // alır. Yükleme çevrilebilir: ekran **taze temizlenmişse** bayrak
+        // kurulu olmak zorundur — betikte ekranı tek satıra indiren tek şey
+        // `CSI 2 J`. Yüklem phase-1b'de daraldı ("ekran dolu değilse"ydi);
+        // gerekçesi çağrı yerinde.
         //
         // **İki düzenleme üstünde kırmızıya düştüğü ölçüldü** (2026-09-20,
         // üçer koşu): nesil karşılaştırması olmayan düz bayrak, ve sayacı
@@ -7997,7 +8513,22 @@ mod tests {
             // `armed > 0`: ilk temizlemeden **önce** ekran doğal olarak boş ve
             // bayrak da doğru olarak kurulu değil; yüklem ancak ilk `CSI 2 J`
             // görüldükten sonra anlamlı.
-            if armed > 0 && !session.alt_screen() && cursor.content_rows < cursor.rows {
+            //
+            // **Ölçüt phase-1b'de daraldı: "ekran dolu değil" değil, "ekran
+            // taze temizlenmiş"** (`content_rows == 1`, betiğin `sleep 0.01`
+            // penceresi). Eski ölçüt bayrağın düşme koşulunu yazıyordu ve o
+            // koşul dock'lu pencerede **erişilemezdi** — bayrak bir kere
+            // kurulunca yarış boyunca asılı kalıyordu, yani yüklem bedavaya
+            // doğruydu. Düşme ölçütü artık "defter temizlemeden sonra büyüdü
+            // mü" ve `seq 1 12` onu her turda meşru olarak düşürüyor
+            // (ölçüldü: `content_rows = 9`, `fill = 1`).
+            //
+            // Daralan yüklem **daha güçlü**: `content_rows == 1` yalnız
+            // temizlemenin hemen ardından doğru — defterin büyümesi ekranın
+            // dolmasını gerektiriyor, yani o pencerede bayrağın düşmesinin
+            // meşru bir yolu yok. Kayıp bir bayrak eskiden bir önceki turdan
+            // kalma kurulu bayrakla örtülebiliyordu; artık örtülemiyor.
+            if armed > 0 && !session.alt_screen() && cursor.content_rows == 1 {
                 roomy += 1;
                 assert!(cleared, "temizlenmiş ekran bayraksız kaldı: {cursor:?}");
                 // **Bayrağın tek tüketicisi, yarışın altında**: kayıp bir
@@ -8013,7 +8544,10 @@ mod tests {
         assert!(reader.join().unwrap() > 0, "kabuk durumu hiç okunmadı");
         assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         assert!(armed > 0, "yarış boyunca bayrak hiç kurulmadı");
-        assert!(roomy > 0, "yarış boyunca ekran hiç boşalmadı: yüklem boşta");
+        assert!(
+            roomy > 0,
+            "yarış boyunca ekran hiç taze temizlenmedi: yüklem boşta"
+        );
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }
