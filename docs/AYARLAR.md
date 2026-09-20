@@ -119,7 +119,9 @@ dark_theme = "bateri"
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
-# Menlo when SF Mono is not installed.
+# Menlo when SF Mono is not installed — SF Mono ships with Xcode, so it is not
+# on every machine. A character the family lacks is drawn from the system font
+# chain when it fits one cell; emoji, CJK and other wide glyphs stay as boxes.
 # family = "Menlo"
 # Greater than 0. Size in points.
 size = 13
@@ -413,10 +415,25 @@ line_height = 1.0
 - Aile makinede yoksa varsayılan font kullanılır ve başlık çubuğunda
   söylenir: `font "Fira Code" not found; using Menlo`. Adı düzeltip
   kaydedince font değişir, uyarı kalkar.
+- **Varsayılan font iki halkalı bir zincirdir:** önce SF Mono, o yoksa
+  Menlo. SF Mono Xcode ile geliyor ve **her makinede bulunmaz**; kurulu
+  değilse uyarı da verilmez, çünkü bu bir kusur değil tasarlanmış geri
+  düşüştür — ikisi de eşaralıklı. Tablodaki "SF Mono, yoksa Menlo" bunu
+  söylüyor: ekranda hangisinin olduğunu merak ediyorsan `family`'yi hiç
+  yazmadığında gördüğün yüz odur.
 - Eşaralıklı olmayan bir aile (`"Helvetica"`) **reddedilmez**, uyarı verir:
   `font "Helvetica" is not monospaced; text may not line up`. Hücre
   genişliği boşluk karakterinden gelir; ondan geniş harfler hücreye
   kırpılır.
+- **Seçili fontta olmayan karakter sistemden gelir.** Tek hücreye sığdığı
+  sürece macOS'un kendi font zincirinden çizilir; fontunu değiştirmene ya da
+  bir yedek liste tanımlamana gerek yok. Sığmayanlar **kutu olarak kalır** ve
+  bu bilinçli: emoji, CJK (`漢`), geniş oklar (`` U+E0B0``) ve Braille
+  (spinner'larda kullanılan `⠋⠙⠹`) hücrenin genişliğini aşıyor. Yarım
+  çizilmiş bir glyph sessiz bir bozulma olurdu — komşu harfin üstüne taşar ve
+  fark etmezsin; kutu ise görünür bir eksiklik, yani neyin çizilemediğini
+  sana söyler. Bu karakterleri gerçekten çizmek ayrı bir işin konusu
+  (`docs/YOL-HARITASI.md`).
 - `family = ""` ya da anahtarın olmaması varsayılan font demektir, uyarı
   vermez.
 - `size` tam sayı da ondalıklı da olabilir (`13`, `13.5`). Sıfır, negatif,
