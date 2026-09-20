@@ -743,12 +743,21 @@ impl Renderer {
         if frame.dock().is_none() {
             return Ok(());
         }
-        // **Sıfırda kırpılıyor**: dock'tan alçak bir pencerede (simge durumuna
-        // inerken ya da kullanıcı pencereyi dibe kadar kısarken) fark negatife
-        // iner ve negatif bir `originY` Metal'in doğrulamasına düşerdi — süreci
-        // öldüren bir istisna, oysa doğru cevap dejenere: dock pencerenin
-        // tamamını kaplar. Izgaranın payı zaten sıfır satıra inmiş oluyor
-        // (`split_into_grid`) ve `Session::resize` o boyutu yoksayıyor.
+        // **Sıfırda kırpılıyor** ve gerekçesi 2026-09-20'de **düzeltildi**.
+        // Eski cümle "negatif bir `originY` Metal'in doğrulamasına düşerdi —
+        // süreci öldüren bir istisna" diyordu; ölçülmemiş bir varsayımdı ve
+        // **yanlıştı**. Ölçüm 017 phase-0: Apple M1 Pro / macOS 26.4.1, API
+        // doğrulama katmanı **açıkken** de negatif orijin kabul ediliyor ve
+        // viewport'un üstünde kalan fragment'ler kırpılıyor; tanık
+        // [`tests::a_negative_viewport_origin_draws_and_clips_from_the_top`].
+        //
+        // Kırpma yine de **kalıyor**, çünkü kendi gerekçesi duruyor:
+        // dock'tan alçak bir pencerede (simge durumuna inerken ya da kullanıcı
+        // pencereyi dibe kadar kısarken) fark negatife iner ve doğru cevap
+        // dejenere — dock pencerenin tamamını kaplar. Negatif bırakılsaydı
+        // dock kendi bandının üstüne, yani ızgaranın alanına taşardı.
+        // Izgaranın payı zaten sıfır satıra inmiş oluyor (`split_into_grid`)
+        // ve `Session::resize` o boyutu yoksayıyor.
         let origin_y = (viewport_px[1] - frame.dock_px()).max(0.0);
         enc.setViewport(MTLViewport {
             originX: 0.0,
@@ -1918,6 +1927,106 @@ mod tests {
                 && p.1.abs_diff(clear.1) <= 1
                 && p.2.abs_diff(clear.2) <= 1),
             "glyph eski satırında da kaldı: {top:02x?}"
+        );
+    }
+
+    /// **017 phase-0'ın ölçümü, sınamaya çivilenmiş hâli.**
+    ///
+    /// 017'nin doldurma bandı ızgaranın **üstüne** düşecek ve adayı üçüncü bir
+    /// `setViewport`: `originY = origin_px − fill_px`. O sayı kaymanın
+    /// ortasında negatife iniyor, oysa [`Renderer::encode_dock`]'un kırpması
+    /// *"negatif bir `originY` Metal'in doğrulamasına düşerdi — süreci öldüren
+    /// bir istisna"* diyordu ve o cümle **ölçülmemişti**. Bu sınama onu
+    /// ölçüyor; sayıları, makinesi ve doğrulama katmanının cevabı
+    /// `.tasks/017-ekranin-geri-donusu/phase-0.md` → Uygulama Notları'nda.
+    ///
+    /// Sorulan tek şey `MTLViewport`'un `originY` alanı: hangi listenin
+    /// çizildiği Metal'i ilgilendirmiyor, bu yüzden tanık ızgaranın **kendi**
+    /// viewport'undan geçiyor ([`Frame::set_origin_rows`] negatif satırı kabul
+    /// ediyor) ve ikinci bir encode yolu icat etmiyor.
+    ///
+    /// Beş değerin **dördü yerleşik değil** ve üçünde `originY` negatif, yani
+    /// kaymanın ortası: yerleşik kare tek başına sorulsaydı kanarya dinlenmede
+    /// geçer, 150 ms'lik kaymanın ortasında düşerdi (phase-0 → Kabul).
+    #[test]
+    fn a_negative_viewport_origin_draws_and_clips_from_the_top() {
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 16;
+        const CELL: u16 = 8;
+        // Doldurma **bir satır**: `fill_px` bir hücre, yani yerleşik karede
+        // `origin_px` onun iki katı ve `originY` artıda; kayma boyunca
+        // `origin_px` düşüyor ve fark sıfırı geçip negatife iniyor.
+        const FILL_PX: f32 = CELL as f32;
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let green = LinearRgba::from_srgb(0x00, 0xff, 0x00);
+        let blue = LinearRgba::from_srgb(0x00, 0x00, 0xff);
+        // Clear **vurgu**, kardeşleriyle aynı gerekçe: hücrelerin rengiyle
+        // ayrık olmak zorunda, yoksa "bant kaydı" ile "her yer clear" ayırt
+        // edilemez. ±1 çünkü vurgu bir ara ton ve 8-bit sRGB kodlaması
+        // yuvarlama taşıyor (emsal `cell_bg_paints_pixels_on_the_gpu`).
+        let clear = {
+            let hex = Theme::BATERI.accent;
+            ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+        };
+        let near = |seen: (u8, u8, u8), want: (u8, u8, u8)| {
+            seen.0.abs_diff(want.0) <= 1
+                && seen.1.abs_diff(want.1) <= 1
+                && seen.2.abs_diff(want.2) <= 1
+        };
+
+        let mut frame = Frame::default();
+        frame.clear(grid(CELL, CELL), CaretStyle::default());
+        // 0. satır doldurmanın, 1. satır içeriğin ilk satırı. İki ayrı renk
+        // şart: "üst bant kırpıldı" ile "iki bant birden kaydı" ancak
+        // birbirinden ayrık renklerle ayırt edilebiliyor.
+        frame.push(bg_cell(0, 0, red));
+        frame.push(bg_cell(0, 1, green));
+
+        // Viewport'un boyu dokunun boyu kalıyor (üretimdeki gibi) ve iki
+        // satır tam onu kaplıyor: viewport-yerel y ∈ [0, EDGE) içerisi,
+        // dışarısı kırpılan.
+        for origin_px in [2.0 * FILL_PX, FILL_PX, 5.0, 3.0, 0.0] {
+            let origin_y = origin_px - FILL_PX;
+            frame.set_origin_rows(origin_y / f32::from(CELL));
+            assert_eq!(frame.origin_px(), origin_y, "öteleme piksele çevrilmedi");
+            let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+            for y in 0..EDGE {
+                let local = y as f32 - origin_y;
+                let want = if !(0.0..EDGE as f32).contains(&local) {
+                    // Viewport'un dışı — "Fragments that lie outside of the
+                    // viewport are clipped". Negatif orijinin sınadığı yarı
+                    // **üstteki** kırpma: doldurma bandının ekrana sığmayan
+                    // parçası clear rengiyle kalmalı, sarmamalı.
+                    clear
+                } else if local < FILL_PX {
+                    (255, 0, 0)
+                } else {
+                    (0, 255, 0)
+                };
+                let seen = pixel_at(&pixels, EDGE, 2, y);
+                assert!(
+                    near(seen, want),
+                    "originY={origin_y}, y={y}: {seen:02x?} ≠ {want:02x?}"
+                );
+            }
+        }
+
+        // **Aynı encoder'da negatif viewport'un ardından ikincisi**: 2b-i'nin
+        // şekli tam olarak bu (ızgara → doldurma → dock). Encoder negatif
+        // orijinde düşseydi dock da çizilmezdi, yani dock'un zemini bütün
+        // pass'in sağ çıktığının tanığı.
+        frame.set_origin_rows(-FILL_PX / f32::from(CELL));
+        frame.open_dock(1, blue, WHITE);
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        assert!(
+            near(pixel_at(&pixels, EDGE, 14, 12), (0, 0, 255)),
+            "negatif viewport'tan sonra dock'un zemini çizilmedi"
+        );
+        // Ve ızgaranın kendisi: `originY = -8` ile 0. satır tamamen kırpıldı,
+        // 1. satır dokunun tepesine oturdu.
+        assert!(
+            near(pixel_at(&pixels, EDGE, 2, 4), (0, 255, 0)),
+            "negatif orijinde içeriğin satırı tepeye oturmadı"
         );
     }
 
