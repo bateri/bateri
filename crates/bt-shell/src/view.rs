@@ -2,7 +2,8 @@
 //!
 //! Çizim burada **yok** — layer'ın içeriğini `bt-gpu` doldurur. Bu sınıfın işi
 //! first responder olmak, tuş vuruşunu doğru kola vermek, fareyi (basış,
-//! sürükleme, bırakış ve tekerlek) hücreye çevirip oturuma iletmek ve Edit
+//! sürükleme, bırakış ve tekerlek) hücreye çevirip oturuma iletmek, Finder'dan
+//! bırakılan dosyanın yolunu giriş satırına düşürmek ve Edit
 //! menüsünün Copy/Paste eylemlerini karşılamak. Terminal kararları (seçim
 //! aralığı, sayfanın boyu, tekerleğin kipe göre yolu, okun baytı) `bt-core`'da;
 //! burada AppKit'e bakan taraf yaşar — piksel → hücre aritmetiği, tekerleğin
@@ -18,6 +19,13 @@
 //! okumuyoruz. Yığın olayı almadıysa ([`ViewIvars::consumed`]) olay yine
 //! `encode_key`'e düşer: fonksiyon tuşları, Enter/Tab/Esc/Backspace ve
 //! tanınmayan her şey oradan geçer.
+//!
+//! **View aynı zamanda bir sürükleme hedefi** (`NSDraggingDestination`):
+//! Finder'dan bırakılan dosyanın yolu kaçırılıp
+//! ([`crate::quote::shell_quote`]) `Session::paste`'ten giriş satırına düşer.
+//! Kayıt `NSPasteboardTypeFileURL` ile ve **yalnız** onunla — düz metin
+//! damlası kaçış kuralını tipe koşullu yapardı ve Finder tek damlada iki tip
+//! koyduğu için kolların sırası da bir karara dönerdi (018 Karar 4).
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
@@ -25,19 +33,23 @@ use std::sync::Arc;
 use bt_core::{CellHalf, SelectionPoint, Session, Wheel};
 use bt_gpu::{CellMetrics, Origin};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Sel};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
+use objc2::{
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
-    NSApplication, NSEvent, NSEventModifierFlags, NSEventPhase, NSPasteboard, NSTextInputClient,
+    NSApplication, NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent,
+    NSEventModifierFlags, NSEventPhase, NSPasteboard, NSPasteboardTypeFileURL, NSTextInputClient,
     NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint,
-    NSRange, NSRangePointer, NSRect, NSString, NSUInteger,
+    NSRange, NSRangePointer, NSRect, NSString, NSUInteger, NSURL,
 };
 
 use crate::clipboard;
 use crate::keys::{BACKSPACE, KeyInput, KeyPress, encode_key, page_scroll};
+use crate::quote::shell_quote;
 
 /// Fare noktası → seçim ucu. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
 ///
@@ -810,7 +822,97 @@ define_class!(
             NOT_FOUND
         }
     }
+
+    /// Finder'dan gelen damlanın bu view'a bakan yüzü. Protokolün **bütün**
+    /// metotları `#[optional]` — `NSTextInputClient`'ın tam tersi — yani iki
+    /// tanesi yetiyor: damlanın kabul edildiğini söyleyen ve onu yazan.
+    ///
+    /// `prepareForDragOperation:` bilerek yok: uygulanmayan metotta AppKit
+    /// "evet" varsayıp doğrudan `performDragOperation:`e geçiyor, yani
+    /// yazılacak gövde sabit bir `true` olurdu.
+    unsafe impl NSDraggingDestination for BateriView {
+        /// İşaretçi damlayla pencereye girdi: cevap **kopya**.
+        ///
+        /// Koşulsuz, çünkü eleme kayıtta yapıldı
+        /// ([`BateriView::new`]'daki `registerForDraggedTypes`): bu metot
+        /// ancak panoda bir dosya URL'si varsa çağrılıyor ve ikinci bir
+        /// eleme aynı soruyu iki kez sormak olurdu.
+        ///
+        /// **Kopya**, taşıma değil: Finder'daki dosya yerinde kalmalı, biz
+        /// yalnız yolunu yazıyoruz. `draggingUpdated:` de uygulanmıyor —
+        /// AppKit onu uygulamayan hedefte buradaki cevabı sürdürüyor, yani
+        /// ikinci metot aynı sabiti tekrarlardı.
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(
+            &self,
+            _sender: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            NSDragOperation::Copy
+        }
+
+        /// Damla bırakıldı: yollar kaçırılıp giriş satırına yazılır.
+        ///
+        /// Çıkış [`Session::paste`] — `session.write` **değil**: bracketed
+        /// paste sarması ve dock istisnası oradan bedavaya geliyor
+        /// (018 Karar 4). Dock satırın sahibiyken tek dosyalık damla dock'a
+        /// "yazılmış gibi" giriyor (`Session::can_be_typed`; ters bölü bir
+        /// kontrol karakteri değil, ham daldan sorunsuz geçiyor) ve bu
+        /// **doğru** davranış: kullanıcı damlayı yazdığı satırın devamı
+        /// olarak görüyor.
+        ///
+        /// `false`'ın iki sebebi var ve ikisi de "yazacak bir şey yok":
+        /// oturum henüz bağlanmamış, ya da damlada okunabilen yol çıkmamış.
+        /// AppKit bunu damlanın reddi olarak gösteriyor — sessizce `true`
+        /// demek kullanıcıya hiçbir şey olmamışken olmuş gibi gösterirdi.
+        ///
+        /// Gövdede erken `return` **yok** ve olamaz: `define_class!` cevabı
+        /// ObjC'nin `BOOL`'una çeviriyor ve çeviri yalnız **kuyruk
+        /// ifadesine** uygulanıyor, yani bir `return false` dış imzayla
+        /// çelişip derlemeyi kırardı.
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            let line = shell_quote(&dropped_paths(&sender.draggingPasteboard()));
+            match self.ivars().session.get() {
+                Some(session) if !line.is_empty() => {
+                    session.paste(line.into_bytes());
+                    true
+                }
+                _ => false,
+            }
+        }
+    }
 );
+
+/// Panodaki dosya URL'lerinin dosya sistemi yolları.
+///
+/// Okuma API'si **seçili**: `readObjectsForClasses:options:` + `NSURL`
+/// sınıfı. `pasteboardItems()` aynı işi görürdü ama `NSPasteboardItem`
+/// feature'ını isterdi ve bize kalan iş yine öğeyi URL'ye çözmek olurdu.
+///
+/// Yol `NSURL.path`'ten alınıyor: **yüzde çözme ikinci kez yazılmıyor.**
+/// `bt-core`'un kendi çözücüsü OSC 7 için var ve orada kalıyor (katman
+/// düzeni); burada Foundation'ın kendi cevabı okunuyor.
+///
+/// Çözülemeyen öğe (URL olmayan, yol vermeyen — `http://` bir dosya yolu
+/// değil) **sessizce düşüyor**: damlanın bir parçasını anlamamak tamamını
+/// düşürmek için sebep değil.
+fn dropped_paths(board: &NSPasteboard) -> Vec<String> {
+    let classes: Retained<NSArray<AnyClass>> = NSArray::from_slice(&[NSURL::class()]);
+    // SAFETY: imzanın iki koşulu da sağlanıyor — sınıf dizisi gerçek bir
+    // sınıf (`NSURL`) taşıyor ve seçenek sözlüğü verilmiyor (`None`).
+    let Some(objects) = (unsafe { board.readObjectsForClasses_options(&classes, None) }) else {
+        return Vec::new();
+    };
+    objects
+        .iter()
+        .filter_map(|object| {
+            object
+                .downcast_ref::<NSURL>()
+                .and_then(NSURL::path)
+                .map(|path| path.to_string())
+        })
+        .collect()
+}
 
 /// `NSNotFound`'un `NSRange` alanlarındaki tipi. Sabit `NSInteger` olarak
 /// geliyor, aralıkların iki alanı ise `NSUInteger`; dönüşüm tek yerde dursun.
@@ -849,7 +951,17 @@ impl BateriView {
         });
         // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
         // set edildi.
-        unsafe { msg_send![super(this), initWithFrame: frame] }
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        // Sürükleme hedefi olmanın tek şartı: view hangi tipleri kabul
+        // ettiğini **önceden** söylemeli, yoksa `draggingEntered:` hiç
+        // çağrılmaz. Liste tek tipli — düz metin damlası kapsam dışı ve
+        // kaçış kuralı bu yüzden tipe koşullu değil (018 Karar 4).
+        //
+        // SAFETY: `unsafe` blok yalnız `NSPasteboardTypeFileURL` **statik**
+        // erişimi için (`clipboard` emsali); gerçek bir pasteboard tipi
+        // kaydı ve `None`'a çözümlenmiyor.
+        this.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
+        this
     }
 
     /// Bileşim metninin **UTF-16 kod birimi** sayısı — `NSRange`'in birimi o.

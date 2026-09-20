@@ -5,6 +5,8 @@
 //! de sürmez: pencereyi, oturumu ve display link'i birbirine bağlar, gerisi
 //! `bt-gpu`'nun ritmidir. Klavye buradan PTY'ye akar (`keys`, `view`,
 //! `clipboard`), fare de buradan oturuma (seçim ve kaydırma, `view`);
+//! Finder'dan bırakılan dosyanın yolu da buradan giriş satırına düşer
+//! (`view`'ın sürükleme hedefi + `quote`'un kabuk kaçışı);
 //! kabuğun hangi dizinde ve hangi yerelle açılacağına (`child`) ve kapanış
 //! sırasına da bu crate karar verir. Ayar dosyasını okuyan (`settings`),
 //! kayıt anında yeniden okuyabilsin diye izleyen (`watch`) ve tanısını
@@ -21,6 +23,7 @@ mod clipboard;
 mod keys;
 mod menu;
 mod notices;
+mod quote;
 mod settings;
 mod view;
 mod watch;
