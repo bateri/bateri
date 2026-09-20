@@ -163,9 +163,13 @@ hiç kilit istemiyor.
 R1.2 iki koşul yazıyordu (`content_rows == rows` ve `!alt_screen`);
 uygulamada **üç** oldu. Üçüncüsü `display_offset == 0` ve bulgusu
 `/code-review`'un: `Cursor::content_rows` **görünür pencereden** doğuyor,
-canlı ekrandan değil — tanığı deponun kendi sınaması
-`content_rows_come_from_the_visible_window_while_scrolled`, orası `2J`
-sonrası 20 çentiğin `content_rows == rows` verdiğini zaten sabitliyor.
+canlı ekrandan değil — tanığı deponun kendi sınamasıydı
+(`content_rows_come_from_the_visible_window_while_scrolled`), orası `2J`
+sonrası 20 çentiğin `content_rows == rows` verdiğini sabitliyordu. **Bekçi
+teslimde yeniden yazıldı** (`content_rows_fill_the_window_while_scrolled`):
+kaydırılmış pencerede doluluk artık **ilk** çentikte `rows` oluyor, yaslama
+orada kalktığı için. R1.2'nin üçüncü koşulunun gerekçesi değişmiyor — tam
+tersine güçleniyor.
 
 Onsuz dizi şu: Ctrl-L → bayrak kurulu → kullanıcı tekerlekle geçmişe bakar →
 pencere geçmişle dolar → **bayrak düşer** → kullanıcı dibe döner → doldurma

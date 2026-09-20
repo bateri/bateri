@@ -286,6 +286,14 @@ pub struct Cursor {
     ///
     /// Alternatif ekranda `rows`, yani öteleme sıfır: vim ve htop ızgaranın
     /// tamamını sahipleniyor.
+    ///
+    /// **Geçmişe kaydırılmış pencerede de `rows`** (017): yaslama dibe yaslı
+    /// pencerenin işi, çünkü doldurma bandı ile yaslama ekranı **tam** bölmek
+    /// zorunda ve bir arada yaşayamıyorlar — `fill = rows - content_rows` ve
+    /// `content_rows` görünür pencereden doğduğu için ikisi birlikte koşunca
+    /// `fill + offset` sabit kalıyor, yani ekranın tepesi kaydırmayla hiç
+    /// kıpırdamıyor. Gerekçenin tamamı [`Session::fill_rows`]'da, bekçisi
+    /// `content_rows_fill_the_window_while_scrolled`.
     pub content_rows: u16,
     /// Üstte kalan boşluğun kaç satırı **geçmişle** dolduruldu (R2.1).
     ///
@@ -1394,7 +1402,11 @@ fn block_id(uri: &str) -> Option<u32> {
 /// cevabın kendisini soruyor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wheel {
-    /// Birincil ekran: görünen pencere `n` satır kaydı; geçmişin iki ucunda `0`.
+    /// Birincil ekran: **ofset** `n` satır değişti; geçmişin iki ucunda `0`.
+    ///
+    /// Görsel hareket değil: doldurma bandı olan pencerenin ilk çentiği
+    /// ofseti `fill + 1` yapıyor ama ekran bir satır kayıyor
+    /// ([`scroll_locked`]). Tüketiciler yalnız "kaydı mı" diye soruyor.
     Scrolled(i32),
     /// Uygulamaya gitti: fare kipinde tekerlek raporu, alternate screen'de ok.
     Sent,
@@ -3699,10 +3711,22 @@ fn scroll_locked<T: EventListener>(term: &mut Term<T>, lines: i32, band: i32) ->
     //
     // İki uç da aynı kuralla kapanıyor: yukarı çıkarken `band`'in üstüne
     // atlanıyor, aşağı inerken `band`'e **değen** hedef dibe (`0`) düşüyor.
-    // Aralığa hiç girilmediği için bandın iki kenarı da bir uçurum değil.
+    // Kaydırma aralığa hiç sokmadığı için bandın iki kenarı da bir uçurum
+    // değil.
+    //
+    // **Ama kaydırma tek giriş değil:** pencereyi büyütmek geçmişten satır
+    // çekiyor ve alacritty ofseti o kadar düşürüyor
+    // (`grid/resize.rs`'te `grow_lines` → `display_offset.saturating_sub`;
+    // [`Session::resize`] dibe snap'lemiyor). Yani `before` aralığın
+    // **içinde** doğabiliyor ve orada kural kendi amacının tersine çalışırdı:
+    // yukarı bir çentik `target`'ı `band`'in altında tutar ve kullanıcıyı
+    // yukarı çıkmak isterken dibe indirirdi. İçeriden kaydırma bu yüzden
+    // **düz**: aralık birkaç çentikte terk ediliyor ve dibe varış zaten
+    // kaydırmanın doğal ucu.
+    let inside = (1..=band).contains(&before);
     let virtual_before = if before == 0 { band } else { before };
     let target = virtual_before.saturating_add(lines);
-    let lines = if target <= band {
+    let lines = if target <= band && !inside {
         -before
     } else {
         target - before
@@ -7609,6 +7633,41 @@ mod tests {
         // kalıyor ama ızgara büyüyordu.
         assert_eq!(rows[1..], top[..top.len() - 1], "ekran bir satır kaymadı");
         assert_ne!(rows[0], top[0], "ekranın tepesi kıpırdamadı");
+    }
+
+    #[test]
+    fn scrolling_out_of_the_bands_interval_is_plain() {
+        // **Bandın aralığına kaydırmadan da girilebiliyor** ve orada kural
+        // kendi amacının tersine çalışırdı. Yol resize: pencereyi büyütmek
+        // geçmişten satır çekiyor ve alacritty ofseti o kadar düşürüyor
+        // (`grid/resize.rs` → `grow_lines`), [`Session::resize`] de dibe
+        // snap'lemiyor. `1..=fill` aralığında yukarı bir çentik `target`'ı
+        // hâlâ `fill`'in altında tutar, yani muafiyet olmasaydı yukarı çıkmak
+        // isteyen kullanıcı **dibe** inerdi.
+        //
+        // Sahne resize'ın kendisini kurmuyor, onun **bıraktığı hâli** kuruyor:
+        // ofseti `scroll_display` ile doğrudan aralığa koyuyor, çünkü sınanan
+        // şey resize değil o hâlden çıkış.
+        let (session, _wake) = gapped_session(true);
+        let before = cursor_now(&session);
+        assert!(before.fill >= 3, "sahne dar bir bantla kuruldu: {before:?}");
+
+        assert!(matches!(scroll(&session, 1), Wheel::Scrolled(n) if n > 0));
+        // Aralığın **içine**: bandın boyundan bir eksik.
+        let inside = i32::from(before.fill) - 1;
+        session
+            .term
+            .lock()
+            .scroll_display(Scroll::Delta(inside - (i32::from(before.fill) + 1)));
+        assert_eq!(display_offset(&session), usize::try_from(inside).unwrap());
+
+        // Yukarı bir çentik: bir satır yukarı, dibe değil.
+        assert_eq!(scroll(&session, 1), Wheel::Scrolled(1));
+        assert_eq!(
+            display_offset(&session),
+            usize::try_from(inside + 1).unwrap(),
+            "aralığın içinden yukarı çıkmak dibe indirdi"
+        );
     }
 
     #[test]
