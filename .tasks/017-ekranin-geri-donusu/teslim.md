@@ -71,9 +71,11 @@ Set yedi phase + bir kapı commit'i:
 | phase-5 | `ff66b09` | `point_to_cell`'in reddi |
 | kapı | `8c3845f` | `/code-review` + `/audit` bulguları, yanlış örneklerin düzeltilmesi |
 | gözle kontrol | `967d5f3` | Bandı viewport'la kaydırma denemesi (kullanıcı buldu; **yetmedi**, aşağıya bak) |
-| gözle kontrol | `1af9d0d` | Bant bir sanal kaydırma: çentik banttan devam ediyor, yaslama geçmiş penceresinde kalkıyor |
+| gözle kontrol | `1af9d0d` | Bant bir sanal kaydırma: çentik banttan devam ediyor (yaslamaya dokunan yarısı `HASH3` ile geri alındı) |
 | gözle kontrol | `3052ec1` | `fill_shown`'ın bayatlama sınırı adıyla yazıldı |
 | gözle kontrol | `dd34fd6` | Resize bandın aralığına düşürüyordu (ölçüldü: yukarı çentik `Scrolled(-4)`); üç doc kalıntısı |
+| gözle kontrol | `e2b431b` | Banda kendi blok listesi: işaret bant satırında da çiziliyor (B.4 §4 tersine döndü) |
+| gözle kontrol | `HASH3` | Yaslamaya dokunan kol geri alındı: kaydırınca içerik tepeye sıçrıyordu |
 
 **Set dışı, aynı aralıkta duran bir commit var** ve `/ship` onu görecek:
 

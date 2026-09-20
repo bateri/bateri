@@ -60,10 +60,10 @@ satırı**, `0..rows`; `display_iter` yalnız görünür pencereyi veriyor ve
     saklanmalı — iki yerde iki ofset.
   - *Eksisi (3):* `content_rows_come_from_the_visible_window_while_scrolled`
     (`session.rs:6283`) kırılır; o bekçi tam olarak `27a0b98`'in geri
-    getirdiği şey. **Sonradan (2026-09-20):** o bekçinin *kaydırma* yarısı
-    zaten teslimde çürüdü ve `content_rows_fill_the_window_while_scrolled`
-    olarak tersine yazıldı — yaslama geçmiş penceresinde kalkıyor. Buradaki
-    eksi yine de duruyor, çünkü kırılan yarı **yaslamanın kendisiydi**.
+    getirdiği şey. **Sonradan (2026-09-20):** teslimde bir tur o bekçi
+    tersine yazıldı (yaslama kaydırmada kalkıyor denendi) ve kullanıcı
+    çürüttü — içerik pencerenin tepesine sıçrıyordu. Bekçi ve kural özgün
+    hâlinde; buradaki eksi olduğu gibi duruyor.
 - **2b — `origin` korunur, boşluk ayrı listeler hâlinde boyanır.**
   `content_rows` ve `origin = rows - content_rows` aritmetiği **aynen kalır**;
   değişen yalnız üstteki `origin` satırın **ne boyandığı**. `frame()`

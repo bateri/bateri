@@ -293,7 +293,7 @@ pub struct Cursor {
     /// `content_rows` görünür pencereden doğduğu için ikisi birlikte koşunca
     /// `fill + offset` sabit kalıyor, yani ekranın tepesi kaydırmayla hiç
     /// kıpırdamıyor. Gerekçenin tamamı [`Session::fill_rows`]'da, bekçisi
-    /// `content_rows_fill_the_window_while_scrolled`.
+    /// `content_rows_come_from_the_visible_window_while_scrolled`.
     pub content_rows: u16,
     /// Üstte kalan boşluğun kaç satırı **geçmişle** dolduruldu (R2.1).
     ///
@@ -2233,22 +2233,20 @@ impl Session {
         // okundu). Ana ekranda iki kaynağın maksimumu; gerekçesi
         // [`Cursor::content_rows`]'ta.
         //
-        // **Kaydırılmış pencerede de ızgaranın tamamı** ve bu 011'in
-        // kuralının daraltılması: yaslama dipteki pencerenin işi, geçmiş
-        // penceresinin değil. Ölçüldü (2026-09-20, gözle kontrol; kullanıcı):
-        // yaslama kaydırılmış pencerede de koşarken `content_rows` her
-        // çentikte bir artıyor, `fill = rows - content_rows` bir azalıyor ve
-        // `fill + offset` **değişmiyordu** — yani ekranın en üst satırı
-        // boşluk kadar çentik boyunca hiç kıpırdamıyor, kaydırma ölü
-        // görünüyordu. Bant ile yaslamanın aynı pencerede yaşayamamasının
-        // sebebi aritmetik: ikisi ekranı **tam** bölmek zorunda ve bandın
-        // tepesi `-(fill + offset)`, o toplam da sabit.
+        // **Kaydırılmış pencerede de görünür satırlardan** ve bu 011'in
+        // kuralı: içerik her zaman tabana yaslı, geçmiş penceresinde de.
+        // Bir dönem burada `offset != 0 => grid_rows` vardı ve belirti
+        // ölçüldü (2026-09-20, gözle kontrol; kullanıcı): ızgaranın **boş**
+        // alt satırları da doluluğa giriyor, öteleme kapanıyor ve bütün
+        // içerik pencerenin tepesine sıçrıyordu — terminal aşağıdan yukarı
+        // akar, o hâl kuralın kendisini deliyordu.
         //
-        // Süreklilik kaybolmuyor, kaydırmanın kendisine taşınıyor: bant
-        // görünürken ekran, `display_offset == fill` olan bir pencereyle
-        // **görsel olarak aynı** şeyi gösteriyor ve [`scroll_locked`] ilk
-        // çentiği oradan başlatıyor.
-        let content_rows = if alt_screen || offset != 0 {
+        // Ölü kaydırmayı bu kol getirmiyordu: sebep doldurmanın kaydırılmış
+        // pencerede de koşmasıydı (`fill + offset` sabit kalıyordu) ve kapı
+        // [`Session::fill_rows`]'ta. `fill == 0` olduğu için burada doluluk
+        // büyüdükçe öteleme küçülüyor, yani tepeden **yeni satır giriyor** —
+        // istenen davranış tam olarak bu.
+        let content_rows = if alt_screen {
             grid_rows
         } else if caret_in_dock {
             // **Giriş satırı yer de kaplamıyor** — `display: none`, gizli
@@ -2560,7 +2558,7 @@ impl Session {
     ///   onsuz `vim`'in her karesi bayrağı düşürürdü.
     /// - `scrolled` (`display_offset != 0`) — geçmişe kaydırılmış pencere
     ///   geçmiş satırlarıyla dolar ve `full` doğru olur; tanığı deponun kendi
-    ///   sınaması `content_rows_fill_the_window_while_scrolled`.
+    ///   sınaması `content_rows_come_from_the_visible_window_while_scrolled`.
     ///   Onsuz **tek bir tekerlek jesti** Ctrl-L'i geri alırdı: bayrak
     ///   kaydırma sırasında düşer, kullanıcı dibe dönünce
     ///   (`display_offset == 0`) doldurma temizlenmiş ekranı geri doldururdu.
@@ -2667,14 +2665,19 @@ impl Session {
     ///   çağrı sırası zorunlu: ömür **önce** işliyor. Bayrak kapı, kırpma
     ///   ölçü: kapı "hiç" der, kırpma "ne kadar".
     /// - `!scrolled` (`display_offset == 0`) — **bant dibe yaslı pencerenin
-    ///   işi.** Kaydırılmış pencerede yaslama da kalkıyor
-    ///   ([`Session::frame`]'in `content_rows` kolu), yani boşluk yok ve
-    ///   örtülecek bir şey de yok: viewport ekranın tamamını dolduruyor.
+    ///   işi.** Kaydırılmış pencerede üstteki boşluk zaten geçmişle dolu ve
+    ///   ikinci kez doldurmak aynı satırları iki kez gösterirdi.
     ///   Kapı bir dönem kaldırılmıştı ve belirti ölçüldü (2026-09-20, gözle
-    ///   kontrol; kullanıcı): bant ile yaslama aynı pencerede yaşayamıyor,
-    ///   çünkü `fill + offset` sabit kalıyor ve kaydırma ölü görünüyor.
-    ///   Kullanıcının kaybettiği süreklilik kapının değil kaydırmanın
-    ///   sorumluluğu ve karşılığı [`scroll_locked`]'ın `band` terimi.
+    ///   kontrol; kullanıcı): doldurma kaydırılmış pencerede de koşunca
+    ///   `fill = rows - content_rows` her çentikte bir azalıyor,
+    ///   `fill + offset` **sabit** kalıyor ve bandın okuma noktası
+    ///   `-(fill + offset)` hiç kıpırdamıyor — kaydırma boşluk kadar çentik
+    ///   boyunca ölü görünüyordu. Yaslamanın (011) kendisi bu kolda
+    ///   **değişmiyor**: kaydırılmış pencerede de içerik tabana yaslı ve
+    ///   `fill == 0` olduğu için doluluk büyüdükçe öteleme küçülüyor, yani
+    ///   tepeden yeni satır giriyor. Kullanıcının kaybettiği süreklilik
+    ///   kapının değil kaydırmanın sorumluluğu ve karşılığı
+    ///   [`scroll_locked`]'ın `band` terimi.
     ///
     /// **Safha kapısı yok** ve bu ölçülmüş bir karar (`discussion.md` → Karar
     /// 5): Enter kolunda `\e[J` `Running` safhasından geçiyor ve safha kapısı
@@ -3803,10 +3806,10 @@ fn scroll_locked<T: EventListener>(term: &mut Term<T>, lines: i32, band: i32) ->
     // pencerede ekranın tepesi `Line(-band)` ve orası `display_offset == band`
     // olan bir pencerenin de tepesi. Kaydırma bu yüzden `0`'dan değil
     // `band`'den devam ediyor — aradaki `1..=band` aralığı ekranda **hiç
-    // görülmeyen** ofsetler: orada bant kalkıyor (yaslama da kalkıyor, bkz.
-    // `Session::frame`) ama gösterilen satırlar bandın gösterdiklerinin ta
-    // kendisi, yani o ofsetlerde durmak kaydırmayı `band` çentik boyunca ölü
-    // gösterirdi. Ölçüldü (2026-09-20, gözle kontrol; kullanıcı).
+    // görülmeyen** ofsetler: orada bant kalkıyor ama gösterilen satırlar
+    // bandın gösterdiklerinin ta kendisi, yani o ofsetlerde durmak
+    // kaydırmayı `band` çentik boyunca ölü gösterirdi. Ölçüldü (2026-09-20,
+    // gözle kontrol; kullanıcı).
     //
     // İki uç da aynı kuralla kapanıyor: yukarı çıkarken `band`'in üstüne
     // atlanıyor, aşağı inerken `band`'e **değen** hedef dibe (`0`) düşüyor.
@@ -7032,22 +7035,19 @@ mod tests {
     }
 
     #[test]
-    fn content_rows_fill_the_window_while_scrolled() {
-        // **Yaslama dibe yaslı pencerenin işi; geçmiş penceresinde kalkıyor.**
-        // `display_offset > 0` iken doluluk `rows`, yani öteleme sıfır ve
-        // ekran viewport'un ta kendisi.
+    fn content_rows_come_from_the_visible_window_while_scrolled() {
+        // **Geçmişte kaydırırken de içerik tabana yapışık kalır.** Doluluk
+        // görünür satırlardan doğuyor, yani `display_offset > 0` iken kural
+        // aynı: temizlenmiş bir pencerede tekerleğin ilk çentiği iki satırlık
+        // içerik gösterir ve ikisi dipte durur.
         //
-        // Bir dönem burada tersi yazılıydı ("doluluk kaydırırken de görünür
-        // satırlardan doğar") ve gerekçesi "alternatifi tekerleğe dokunur
-        // dokunmaz içeriğin tavana sıçraması demekti" idi. O gerekçe **bantsız
-        // dünyanın** gerekçesiydi ve 017 onu çürüttü (2026-09-20, gözle
-        // kontrol; kullanıcı): yaslama ile bant aynı pencerede yaşayamıyor,
-        // çünkü ikisi ekranı tam bölmek zorunda ve bandın tepesi
-        // `-(fill + offset)` — o toplam da her çentikte sabit kalıyordu, yani
-        // kaydırma boşluk kadar çentik boyunca ölü görünüyordu. Korkulan
-        // sıçrama da kalmadı: kaydırma artık bandın üstünden devam ediyor
-        // ([`scroll_locked`]) ve ilk çentik ekranı tam bir satır taşıyor
-        // (`the_first_notch_continues_where_the_band_left_off`).
+        // Bir dönem burada `offset != 0 => rows` kolu vardı (017, ölü
+        // kaydırmayı çözmek için) ve **kullanıcı onu gördü**: ızgaranın boş
+        // alt satırları doluluğa giriyor, öteleme kapanıyor ve bütün içerik
+        // pencerenin tepesine sıçrıyordu. Ölü kaydırmanın sebebi bu kol
+        // değilmiş — doldurmanın kaydırılmış pencerede de koşmasıymış, ve
+        // kapısı [`Session::fill_rows`]'ta. Süreklilik de bu kolda değil
+        // kaydırmada (`the_first_notch_continues_where_the_band_left_off`).
         //
         // `\e[2J\e[H` geçmişi silmiyor, yalnız görünen pencereyi: `seq`'in 30
         // satırı defterde duruyor ve kaydırılacak bir yer var.
@@ -7070,19 +7070,19 @@ mod tests {
         });
         assert_eq!(display_offset(&session), 0);
 
-        // Bir çentik geriye: öteleme kapanıyor, ekran viewport'un oluyor.
+        // Bir çentik geriye: geçmişin son satırı 0. satıra, imleç 1.'ye.
         // Bant yok (pencere dock'suz), yani çentik de bir.
         assert_eq!(scroll(&session, 1), Wheel::Scrolled(1));
         let cursor = cursor_now(&session);
         assert_eq!(cursor.display_offset, 1, "{cursor:?}");
-        assert_eq!(cursor.content_rows, cursor.rows, "{cursor:?}");
+        assert_eq!(cursor.content_rows, 2, "{cursor:?}");
 
-        // **Dibe dönünce yaslama geri geliyor**: kural kalkmadı, kaydırılmış
-        // pencereyle sınırlandı.
-        assert!(matches!(scroll(&session, -1), Wheel::Scrolled(-1)));
+        // Pencere geçmişle dolunca öteleme kendiliğinden sıfıra iner: doluluk
+        // `rows`'a **çıkıyor**, ama onu yazan şey görünür satırlar — bir dal
+        // değil.
+        assert!(matches!(scroll(&session, 20), Wheel::Scrolled(n) if n > 0));
         let cursor = cursor_now(&session);
-        assert_eq!(cursor.display_offset, 0, "{cursor:?}");
-        assert_eq!(cursor.content_rows, 1, "{cursor:?}");
+        assert_eq!(cursor.content_rows, cursor.rows, "{cursor:?}");
     }
 
     /// Bu anın "ekran kasten temizlendi" bayrağı.
@@ -7103,7 +7103,7 @@ mod tests {
         //
         // Üç adım `read` ile sıralanıyor: tek betikte arka arkaya yazılsalardı
         // ikisi aynı PTY okumasında gelir ve aradaki hâl hiç gözlenmezdi
-        // (emsal `content_rows_fill_the_window_while_scrolled`).
+        // (emsal `content_rows_come_from_the_visible_window_while_scrolled`).
         let wake = Arc::new(TestWake::default());
         let session = spawn_session(
             "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; read _; \
@@ -7142,7 +7142,7 @@ mod tests {
         // — kayıp kaydırmayla birlikte bitmiyor, **kalıcı**.
         //
         // Reçete deponun kendi tanığından alındı
-        // (`content_rows_fill_the_window_while_scrolled`): orası
+        // (`content_rows_come_from_the_visible_window_while_scrolled`): orası
         // `\033[2J` sonrası 20 çentiğin `content_rows == rows` verdiğini zaten
         // sabitliyor, yani bu sınamanın öncülü ölçülmüş.
         let wake = Arc::new(TestWake::default());
@@ -7510,7 +7510,7 @@ mod tests {
     /// kısaltıyor, tıpkı tamamlama listesi kapanınca olduğu gibi. Kasten
     /// temizleme **değil** — tarayıcı yalnız `CSI 2 J` sayıyor (R1.1), ED 0
     /// bayrağı kurmuyor. İki adım `read` ile sıralanıyor (emsal
-    /// `content_rows_fill_the_window_while_scrolled`).
+    /// `content_rows_come_from_the_visible_window_while_scrolled`).
     ///
     /// Sonuç: ekranda `22`…`26`, defterde 21 satır (`1`…`21`), `gap == 5`.
     fn gapped_session(dock: bool) -> (Session, Arc<TestWake>) {
@@ -7682,7 +7682,7 @@ mod tests {
         //
         // Dört adım `read` ile sıralanıyor: aynı PTY okumasında gelselerdi
         // aradaki hâller hiç gözlenmezdi (emsal
-        // `content_rows_fill_the_window_while_scrolled`).
+        // `content_rows_come_from_the_visible_window_while_scrolled`).
         let wake = Arc::new(TestWake::default());
         let session = spawn_docked_session(
             "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; read _; \
@@ -7847,8 +7847,10 @@ mod tests {
             i32::from(before.fill) + 1,
             "{after:?}"
         );
-        // Bant kalktı, yaslama da kalktı: pencere artık düz bir geçmiş
-        // penceresi ve ekranın tamamı viewport'un.
+        // Bant kalktı. Doluluk bu sahnede `rows`'a **çıkıyor** ama bunu
+        // yazan şey bir dal değil görünür satırlar: viewport'un on satırı da
+        // mürekkepli (yaslama yerinde duruyor, `content_rows_come_from_the_\
+        // visible_window_while_scrolled`).
         assert_eq!(after.fill, 0, "kaydırılmış pencerede bant kaldı: {after:?}");
         assert_eq!(after.content_rows, after.rows, "{after:?}");
 

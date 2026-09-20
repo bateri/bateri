@@ -44,13 +44,13 @@ hareketin tam tersi yönde. Kullanıcı ekranı **kasten** temizlediyse (Ctrl-L,
     getiriyordu — ölçüldü (yedi satırlık delikte dördü temizleme öncesi).
   - **R2.2** — Koşul: pencerenin dock'u var **∧** alternatif ekranda değil
     **∧** bayrak temiz **∧** `display_offset == 0`. Safha kapısı **yok**.
-    Dördüncü koşul **teslimde iki tur döndü** ve sonunda yerinde kaldı, ama
-    gerekçesi değişti: "kaydırılmış pencerede boşluk zaten geçmişle dolu"
-    değil, **boşluk yok** — 011'in yaslaması da kaydırılmış pencerede kalkıyor
-    (R2.3'ün tadili), yani viewport ekranın tamamını dolduruyor.
+    Dördüncü koşul **teslimde iki tur döndü** ve gerekçesiyle birlikte
+    yerinde kaldı: kaydırılmış pencerede üstteki boşluk zaten geçmişle dolu.
     Ara denemenin ölçümü (2026-09-20, gözle kontrol; kullanıcı): bandı
     viewport'la birlikte kaydırmak `fill + offset`'i sabit tutuyor ve ekranın
-    tepesi boşluk kadar çentik boyunca hiç kıpırdamıyordu.
+    tepesi boşluk kadar çentik boyunca hiç kıpırdamıyordu. Kapı `fill`'i
+    sıfırlayınca doluluk yine görünür satırlardan doğuyor ve tepeden yeni
+    satır giriyor — 011'in yaslamasına **dokunulmadı** (R2.3).
     Kullanıcının kaybettiği süreklilik kapının değil **kaydırmanın** işi:
     `scroll_locked` çentiği banttan devam ettiriyor (R2.6).
     Bekçiler `scrolling_into_history_keeps_the_gap_empty` ve
@@ -58,11 +58,12 @@ hareketin tam tersi yönde. Kullanıcı ekranı **kasten** temizlediyse (Ctrl-L,
     **ömründeki** `display_offset` koşulu (R1.2) ayrı ve duruyor.
   - **R2.3** — `content_rows` ve `origin = rows - content_rows` aritmetiği
     **değişmez**; `session.rs:6283`'ün bekçisi dokunulmadan geçer.
-    **Tadil (2026-09-20):** dibe yaslı pencerede aynen doğru, ama kaydırılmış
-    pencerede doluluk artık `rows` — yaslama geçmiş penceresinde kalkıyor,
-    çünkü bant ile yaslama ekranı tam bölmek zorunda ve bir arada
-    yaşayamıyorlar. 011'in bekçisi bu yüzden yeniden yazıldı
-    (`content_rows_fill_the_window_while_scrolled`).
+    **Teslimde bir tur denendi ve geri alındı (2026-09-20):** kaydırılmış
+    pencerede `content_rows = rows` yapılmıştı; kullanıcı gördü — ızgaranın
+    boş alt satırları doluluğa giriyor, öteleme kapanıyor ve bütün içerik
+    pencerenin tepesine sıçrıyordu. Ölü kaydırmanın sebebi o kol değil
+    doldurmanın kaydırılmış pencerede koşmasıydı (R2.2). Kural olduğu gibi
+    duruyor, bekçisi de (`content_rows_come_from_the_visible_window_while_scrolled`).
   - **R2.6 (teslimde eklendi)** — Bant bir **sanal kaydırmadır**: dibe yaslı
     pencerede ekran, `display_offset == fill` olan bir pencereyle aynı
     satırları gösteriyor. Kaydırma bu yüzden `0`'dan değil banttan devam

@@ -309,10 +309,12 @@ görünen satırlar için biliniyor ve bölge boyamak onu tahmine çevirirdi.
 sınırdan verir (`Cursor::content_rows`; alternatif ekranda ızgaranın tamamı),
 `DisplayLink` onu `rows - content_rows` ile ötelemeye çevirir ve `encode_pass`
 tek bir `setViewport` ile ızgaranın bütün pipeline'larını birden kaydırır —
-dört liste ve imleç aynı yerden. **Yaslama dibe yaslı pencerenin işi**:
-`display_offset != 0` iken doluluk `rows`, yani geçmiş penceresinde öteleme
-sıfır ve ekran viewport'un ta kendisi (017, ölçüldü; gerekçe doldurmanın
-yanında). Öteleme **yumuşak kayar**: `bt-gpu::motion`'ın ikinci animatörü
+dört liste ve imleç aynı yerden. **Kaydırılmış pencerede de aynı kural**:
+doluluk görünür satırlardan doğuyor, yani geçmişe bakarken de içerik tabana
+yaslı kalıyor. 017 bir dönem burada `display_offset != 0 => rows` denedi ve
+kullanıcı gördü: ızgaranın **boş** alt satırları doluluğa giriyor, öteleme
+kapanıyor ve bütün içerik pencerenin tepesine sıçrıyordu — terminal aşağıdan
+yukarı akar. Öteleme **yumuşak kayar**: `bt-gpu::motion`'ın ikinci animatörü
 (`Slide`) onu imleçle aynı stil ve aynı `settled()` kapısı altında sürer, imlecin
 hedefi de **ekran satırıdır** (`row + origin`), yani Enter'da imleç dipteki
 satırında durur ve geçmiş arkasından yukarı akar. Kayma **boşluk boş kalıyorsa
@@ -353,15 +355,13 @@ tam olarak o ofsetin gösterdiği şeyi gösteriyor. Süreklilik bu yüzden
 kaydırmanın işi — `scroll_locked` çentiği `0`'dan değil **banttan** devam
 ettiriyor (`Session::fill_shown`, son dibe yaslı karenin bıraktığı sayı) ve
 `1..=fill` aralığı ekranda hiç görülmüyor: yukarı çıkarken üstüne atlanıyor,
-aşağı inerken o aralığa değen hedef doğrudan dibe düşüyor. Alternatifleri
-**ikisi de ölçüldü ve ikisi de kullanıcının bildirdiği kusur** (2026-09-20,
-gözle kontrol): kapı tek başına tekerleğin ilk çentiğinde bandı düşürüp
-ızgaranın çıplak boşluğunu açığa çıkarıyordu (ekranın üstü kapkara, içerik
-dipte); bandı viewport'la birlikte kaydırmak ise `fill + offset`'i sabit
-tuttuğu için ekranın tepesini boşluk kadar çentik boyunca **hiç
-kıpırdatmıyordu**. Aritmetik kaçınılmaz: bant ile ızgara ekranı tam bölmek
-zorunda, yani `fill = rows - content_rows`, ve `content_rows` görünür
-pencereden doğduğu için her çentikte bir büyüyor. Sıfır dönerse
+aşağı inerken o aralığa değen hedef doğrudan dibe düşüyor. Alternatifi
+**ölçüldü ve kullanıcının bildirdiği kusurdu** (2026-09-20, gözle kontrol):
+doldurma kaydırılmış pencerede de koşunca `fill = rows - content_rows` her
+çentikte bir azalıyor, `fill + offset` sabit kalıyor ve bandın okuma noktası
+`-(fill + offset)` hiç kıpırdamıyordu — kaydırma boşluk kadar çentik boyunca
+ölü görünüyordu. Kapı `fill`'i sıfırlayınca doluluk yine görünür satırlardan
+doğuyor ve tepeden yeni satır giriyor. Sıfır dönerse
 ikinci sink hiç çağrılmıyor ve kare doldurmasız hâliyle bit bit aynı. Çizen
 taraf **üçüncü bir `setViewport`**: bandın orijini `origin_px - fill_px`
 (`Frame::fill_origin_px`) ve o sayı **encode anında** türüyor, yani bant
