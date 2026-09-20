@@ -30,16 +30,24 @@ objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLoc
 # bildirimi (`observe_reduce_motion`, 008 phase-5); ikisi de `NSWorkspace`'in
 # bu bayrakla gelen kategorisinde. NSTextInputClient: klavyenin metin yolu
 # AppKit'in yığınından geçiyor (`view::BateriView`, 018 phase-1) — protokolün
-# adı ve 11 zorunlu metodu o bayrağın arkasında. Yeni crate değil, var olan
-# bağımlılığın bayrakları; `Cargo.lock` bayrak kaydetmiyor.
+# adı ve 11 zorunlu metodu o bayrağın arkasında. NSDragging: view artık bir
+# sürükleme hedefi (`view::BateriView`, 018 phase-3) — `NSDraggingDestination`,
+# `NSDraggingInfo` ve `NSDragOperation` o bayrağın arkasında; protokolün
+# **bütün** metotları `#[optional]`, yani ikisini uygulamak yetiyor.
+# `NSPasteboardTypeFileURL` ve `readObjectsForClasses:options:` burada bir
+# bayrak **istemiyor**: ikisi de workspace manifest'inin açtığı
+# `NSPasteboard` başlığının içinde (bu satır o seti kırpmıyor) ve okuma yolu
+# bilerek o API — `pasteboardItems()` `NSPasteboardItem` bayrağını isterdi.
+# Yeni crate değil, var olan bağımlılığın bayrakları; `Cargo.lock` bayrak
+# kaydetmiyor.
 #
 # Aynı yolun `NSUserDefaults`'ı **bayrak istemiyor**: `registerDefaults`
 # (`app`: `ApplePressAndHoldEnabled`) `objc2-foundation`'ın varsayılan
 # setinde ve yukarıdaki liste o seti kırpmıyor, ekliyor. Kırpma günü bu satır
 # aranacak; kaydı bu yorum.
 objc2-app-kit = { workspace = true, features = [
-    "NSAccessibility", "NSAppearance", "NSCell", "NSMenu", "NSMenuItem",
-    "NSTextInputClient", "NSWorkspace",
+    "NSAccessibility", "NSAppearance", "NSCell", "NSDragging", "NSMenu",
+    "NSMenuItem", "NSTextInputClient", "NSWorkspace",
 ] }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.

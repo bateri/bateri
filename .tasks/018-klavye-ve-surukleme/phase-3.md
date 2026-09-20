@@ -61,12 +61,52 @@ bölü, `$`, `` ` ``, `;`, `&`, satır sonu, Türkçe karakter, çok dosya.
 
 ## Checklist
 
-- [ ] `registerForDraggedTypes` + `draggingEntered:` + `performDragOperation:`
-- [ ] Okuma `readObjectsForClasses:` + `NSURL::class()`; yol `NSURL.path`'ten
-- [ ] `shell_quote` saf, AppKit'siz, kendi sınamalarıyla
-- [ ] `Cargo.toml`'a `NSDragging` + gerekçe yorumu; `Cargo.lock` değişmedi
-- [ ] Test: kabul tablosunun tamamı elle geçti (boşluklu ad ve çok dosya dahil)
-- [ ] Test: `shell_quote`'un kaçış kümesi hermetik olarak çivilendi
-- [ ] `view.rs` başlığı ve `CLAUDE.md` güncellendi
-- [ ] Doğrulama geçti (`make hepsi`; `make duman` kullanıcıda)
-- [ ] Yayın etkisi yazıldı
+- [x] `registerForDraggedTypes` + `draggingEntered:` + `performDragOperation:`
+- [x] Okuma `readObjectsForClasses:` + `NSURL::class()`; yol `NSURL.path`'ten
+- [x] `shell_quote` saf, AppKit'siz, kendi sınamalarıyla (`quote.rs`)
+- [x] `Cargo.toml`'a `NSDragging` + gerekçe yorumu; `Cargo.lock` değişmedi
+- [~] Test: kabul tablosunun tamamı elle geçti (boşluklu ad ve çok dosya dahil)
+      — **kullanıcı koşacak**: gerçek pencere ve Finder'dan sürükleme
+      gerekiyor, ajan kabuğunda fare/damla sentezi yok
+- [x] Test: `shell_quote`'un kaçış kümesi hermetik olarak çivilendi (altı
+      sınama; önce stub'a karşı düştükleri görüldü)
+- [x] `view.rs` başlığı ve `CLAUDE.md` güncellendi (+ `docs/YOL-HARITASI.md`,
+      R6'nın son kalemi)
+- [x] Doğrulama geçti (`make hepsi` → exit 0); `make duman` kullanıcıda
+      (gerçek pencere ister)
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+- **`shell_quote` `keys.rs`'e girmedi, kardeşi `quote.rs` doğdu.** Phase
+  dosyası ikisine de izin veriyordu; ayıran şey `keys.rs`'in kendi başlığı
+  ("tuş vuruşu → PTY baytları ya da ok"): buradaki soru bir tuş değil bir
+  damla ve modülü o cümleyle çelişir hâle getirmek, bir dosya kazanıp bir
+  sözleşme kaybetmek olurdu. `view.rs`'e koymak da elendi — dosya zaten 1350
+  satır ve fonksiyonun AppKit'e hiç bakmayan yarısı orada saklanırdı.
+- **Kaçacak küme kara liste değil, beyaz listenin tümleyeni.** Plan "kabuğun
+  metakarakterlerinin tamamı" diyordu; o listeyi tek tek saymak `~`, `=`,
+  `#`, `!`, `%`'in hangi kabukta kelimenin neresinde özel olduğunu tartışmaya
+  açıyordu ve listeden düşen tek karakter sessiz bir hata olurdu. Geçen küme
+  ASCII harf/rakam + `/ . _ -` + **ASCII olmayan her şey**; kalan her ASCII
+  kaçıyor. Fazladan kaçırmanın bedeli yok (`\+` kabukta `+`), yani yanlışın
+  yönü güvenli — ve plandaki küme bunun **içinde**.
+- **Satır sonunun bilinen sınırı yazıldı ve çivilendi.** `\` + satır sonu
+  zsh'te de bash'te de *satır devamı*, yani adında satır sonu taşıyan dosya
+  iki parçası birleşmiş yazılır. Kaçmamak daha ağır (ham satır sonu tamponda
+  bir komut sınırı) ve `$'\n'` tek kuralı ikiye bölerdi (Karar 4: tek tip,
+  tek kural), yani kol değil **doc** ve **sınama** eklendi.
+- **`performDragOperation:`de erken `return` yok ve olamaz.** `define_class!`
+  cevabı ObjC'nin `BOOL`'una yalnız **kuyruk ifadesinde** çeviriyor; ilk
+  yazımdaki `return false` `expected Bool, found bool` ile derlemeyi kırdı.
+  Gövde `match`'e döndü ve gerekçe metodun doc'unda.
+- **Damlada `false`'ın iki sebebi birleşti:** oturum yok ya da okunabilen yol
+  yok. İkisi de "yazacak bir şey yok" ve AppKit ikisini de damlanın reddi
+  olarak gösteriyor.
+- **Yol haritası maddesi "tek madde, yalnız borç"a indi**, tek fiziksel
+  satıra değil. Home/End'in **şekli** (yeni `pub enum`, ölçülmüş
+  `\EOH`/`\EOF`/`smkx`) `plan.md` → Kapsam Dışı'nın ve ikinci tur panelin
+  Reddedilenler'inin oraya **emaneti**; silmek iki onaylı belgeyle çelişirdi.
+  Çıkan şey **durum** oldu ("018 şunu kapattı", panel tarihleri) — `CLAUDE.md`
+  durumun tek sahibini `.tasks/README.md` diye yazıyor. Otuz satır yirmiye
+  indi ve içinde yalnız borç kaldı.
