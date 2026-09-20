@@ -18,6 +18,8 @@
 | 014 | [imlec-stilleri](014-imlec-stilleri/) | 🟢 | `main`'de — imleç uygulamanın istediği şekli alıyor (blok/alt çizgi/çubuk), istenirse sönüyor ve rengini kendi tema rolünden alıyor. Saat ikinci bir tat kazandı: hasar dikmeyen uyandırma, saniyede iki kare. 3 phase + kapı tamam (13 + 1 bulgu), gözle kontrol geçti. Bir tema kuralı kullanıcı kararı bekliyor — `teslim.md` |
 | 015 | [imlec-cilasi](015-imlec-cilasi/) | 🟢 | `main`'de — imleç doğru anda kıpırdıyor (Enter'daki sıçrama histerezisle kalktı) ve iyi görünüyor: caret kendi fragment'inde, köşesi yuvarlak, hafif gölgesi var ve odaksız pencerede içi boşalıp blink duruyor |
 | 016 | [imlec-ayarlari](016-imlec-ayarlari/) | 🟢 | `main`'de — imlecin köşe yarıçapı, gölgesi, odaksız hâli ve blink periyodu `[terminal]` anahtarları oldu; dördü de kayıt anında ve varsayılanları bugünkü görüntü |
+| 017 | [ekranin-geri-donusu](017-ekranin-geri-donusu/) | 🔨 | tamamlama listesi kalkınca ekran Tab öncesine dönsün: üstteki boşluk geçmişle dolsun ve dönüş kayarak olsun. phase-0 ölçtü: negatif `originY` meşru → phase-3 kolu 2b-i |
+| 018 | [klavye-ve-surukleme](018-klavye-ve-surukleme/) | 📐 | macOS metin kısayolları, Option kipleri, **ölü tuşlar** (`~` ve `` ` `` Türkçe Q'da yazılamıyor — ölçüldü) ve Finder'dan dosya sürükleme; dördü de `view.rs` + `keys.rs`'te |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
