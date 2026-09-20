@@ -507,11 +507,17 @@ reduce_motion = "system"
 - Aynı stil **içeriğin yükselmesini** de sürer: bateri içeriği pencerenin
   tabanına yaslar, yani yeni bir satır geldiğinde geçmiş yukarı kayar ve imleç
   dipteki satırında durur. Kayan şey bütün ızgaradır, imleç değil.
-- **Yalnız yukarı kayar.** İçerik büyüyünce (yeni satır, `vim`/`less` gibi tam
-  ekran bir uygulamanın açılması) ızgara yukarı **süzülerek** gelir; içerik
-  daralınca (o uygulamadan çıkmak, dolu bir ekranda `clear`, silinen satırlar)
-  **anında** yerine oturur. Sebebi his: yukarı akış içeriğin gelmesi gibi
-  okunuyor, aşağı iniş düşmesi gibi.
+- **Boş kalacak bir alana doğru yalnız yukarı kayar.** İçerik büyüyünce (yeni satır,
+  `vim`/`less` gibi tam ekran bir uygulamanın açılması) ızgara yukarı
+  **süzülerek** gelir; içerik daralıp üstte **boş** bir alan bırakacaksa (o
+  uygulamadan çıkmak, dolu bir ekranda `clear`, silinen satırlar) **anında**
+  yerine oturur. Sebebi his: yukarı akış içeriğin gelmesi gibi okunuyor, aşağı
+  iniş düşmesi gibi.
+- **Aşağı dönüş de kayar, eğer boşluğu geçmiş dolduruyorsa.** Bir tamamlama
+  listesi kapanıp yerini eski satırlarınız aldığında ekranda aşağı inen şey
+  boşluk değil, yukarıdan **gelen geçmiştir** — orada ızgara süzülerek döner.
+  Ctrl-L ya da `clear` ile kasten temizlediğiniz ekran bu kolun dışında:
+  geçmiş geri gelmez, yani oraya kayacak bir şey de yoktur.
 - **Izgaranın başka sebeple yer değiştirmesi de kaymaz:** geçmişte kaydırmak
   (tekerlek), pencereyi boyutlandırmak, fontu ya da puntoyu değiştirmek. Orada
   hareket eden şey içerik değil, pencerenin kendisidir.

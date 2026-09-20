@@ -124,7 +124,9 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7_
   ölçülmemiş bir sayı olurdu, yön bedava. Dolu ekranda `clear`'ın kayması da
   aynı kuralla kapandı — kapıda "ölçüm ister" diye borç yazılmıştı, gerekmedi.
   `alt_screen` bayrağı **geri alındı**, çünkü yön kuralı onu gereksiz kılıyor.
-  Bekçi `a_growing_origin_slides_and_a_shrinking_one_snaps`.
+  Bekçi `a_growing_origin_slides_and_a_shrinking_one_snaps` — 017 phase-4 onu
+  `a_shrinking_origin_snaps_unless_history_fills_the_gap` olarak yeniden
+  adlandırdı; kuralın daraltılmasının kaydı `teslim.md` → Bilinen sınırlar'da.
   **Ders kapının değil turların:** phase-2'nin göz kontrolü "kaçırmadı",
   beğendi; kapı koda bakıp kusur sandı; doğruyu kullanıcının ikinci turu
   söyledi. Gözle kontrol bir kapı değil, bir **sohbet**.

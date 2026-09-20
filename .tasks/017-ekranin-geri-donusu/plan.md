@@ -139,6 +139,6 @@ bt-shell
 | phase-2 | ✅ |
 | phase-1b | ✅ |
 | phase-3 | ✅ |
-| phase-4 | |
+| phase-4 | ✅ |
 | phase-5 | |
 | kapı | |

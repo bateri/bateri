@@ -250,7 +250,10 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   (spinner, çok satırlı ilerleme çubuğu) — büyürken kayıp daralırken zıplıyor,
   yani simetrik bir salınım yerine testere. Gerçek bir örnekte rahatsız
   ediyorsa çaresi yön değil **mesafe** eşiği olur ve o ölçülmemiş bir sayı;
-  ölçüm olmadan değiştirilmez.
+  ölçüm olmadan değiştirilmez. **017 phase-4 kalemi daralttı:** doldurmanın
+  açık olduğu oturumda (dock'lu pencere, birincil ekran, temizlenmemiş, dibe
+  yaslı) daralan yön de kayıyor, yani testere yalnız doldurmanın kapalı olduğu
+  kollarda kalıyor. Kalan yarı hâlâ ölçülmemiş.
 - **Hareket karesi ucuz değil.** 008 Karar 4 hareket karesinde grid'i yeniden
   taramayı önlüyor (`Frame::move_cursor` listeleri koruyor) ama encode yolu
   korunan listeyi yine de **baştan kuruyor**: `AtlasTexture::prepare` her

@@ -139,6 +139,18 @@ Dördü de tasarım kararı, kusur değil — ikisinin adı planda, ikisi yolun
   ölçülmemiş bir sayı. Kalem `docs/YOL-HARITASI.md` → Sete bağlanmamış
   borçlar'da.
 
+  **Sonradan daraltıldı (017 phase-4, 2026-09-20).** Kural kalkmadı, koşulunu
+  kazandı: guard'ın üçüncü terimi (`filled`) doldurma varken yükselen hedefi de
+  süzüyor. Buradaki gerekçe (`4c291ee`: "aşağı iniş *düşmesi* gibi okunuyor")
+  **aynen ayakta** ve daraltmanın sebebi de o — doldurma varken aşağı inen şey
+  boşluk değil, üstten **gelen geçmiş**, yani "düşme" okuması o kolda konusuz
+  kalıyor. `fill == 0` iken (vim'den çıkış, kasten temizlenmiş ekranda `clear`)
+  daralan içerik hâlâ snap'liyor ve bekçisi duruyor — adı
+  `a_shrinking_origin_snaps_unless_history_fills_the_gap`. Testerenin bedeli de
+  **daraldı**: doldurmanın açık olduğu bir oturumda salınımın iki yarısı da
+  kayıyor, yani spinner kalemi yalnız doldurmanın kapalı olduğu kollarda
+  (dock'suz pencere, alternatif ekran, temizlenmiş ekran) geçerli.
+
 - **Kayma yolunun gerçek pencerede koşan bekçisi yok.** Duman reçetesi onu
   tetiklemiyor; kanıtı birim sınamaları ve göz kontrolü. Reçeteyi kaymayı
   tetikleyecek biçimde değiştirmek `hucre/glif/kural` ve `sessiz`'in ölçülmüş

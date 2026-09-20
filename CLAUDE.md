@@ -268,11 +268,19 @@ tek bir `setViewport` ile ızgaranın bütün pipeline'larını birden kaydırı
 dört liste ve imleç aynı yerden. Öteleme **yumuşak kayar**: `bt-gpu::motion`'ın ikinci animatörü
 (`Slide`) onu imleçle aynı stil ve aynı `settled()` kapısı altında sürer, imlecin
 hedefi de **ekran satırıdır** (`row + origin`), yani Enter'da imleç dipteki
-satırında durur ve geçmiş arkasından yukarı akar. Kayma **tek yönlüdür**:
-içerik büyüyünce (hedef düşünce) süzülür, daralınca (vim'den çıkış, dolu
-ekranda `clear`) **snap**'ler — yukarı akış içeriğin gelmesi, aşağı iniş
-düşmesi gibi okunuyor; ölçüt mesafe değil işaret, çünkü eşik ölçülmemiş bir
-sayı olurdu. Tekerlek ve geometri (pencere/font/punto) ayrıca snap'ler.
+satırında durur ve geçmiş arkasından yukarı akar. Kayma **boşluk boş kalıyorsa
+tek yönlüdür**: içerik büyüyünce (hedef düşünce) süzülür, daralınca (vim'den
+çıkış, dolu ekranda `clear`) **snap**'ler — yukarı akış içeriğin gelmesi,
+aşağı iniş düşmesi gibi okunuyor; ölçüt mesafe değil işaret, çünkü eşik
+ölçülmemiş bir sayı olurdu. **Doldurma o yönü açıyor** (`Motion::sync`'in
+`filled` biti, `link.rs`'te `cursor.fill > 0`): boşluk defterin satırlarıyla
+doluyorsa aşağı inen şey boşluk değil, üstten **gelen geçmiştir**, yani
+011'in gerekçesi o kolda konusuz kalıyor ve yükselen hedef de süzülüyor —
+kural kalkmadı, **daraldı**. Terim guard'da `!snap`'in **içinde**: dışına
+yazılsaydı Rust'ın önceliği onu `animated`'ın da üstüne çıkarır, doldurmalı
+pencerede tekerlek ve geometri animasyona başlardı ve `cursor_motion =
+"snap"` ile Hareketi Azalt delinirdi. Tekerlek ve geometri
+(pencere/font/punto) ayrıca snap'ler.
 Piksel aygıt ızgarasına
 yuvarlanır (`Frame::set_origin_rows`): kaymanın durduğu kare ekranda kalıcı ve
 kesirli bir piksel bütün metni bulanıklaştırırdı. Ötelemenin tek sahibi
