@@ -1,12 +1,27 @@
 //! Kabuğun bastığı OSC işaretleri, onların tuttuğu oturum durumu, **komut
 //! bloğu defteri** ve **ZLE'nin görüntü aynası**.
 //!
-//! Tarayıcının **üç kolu** var ve üçü de aynı bayt akışından besleniyor:
+//! Tarayıcının **üç OSC kolu** var ve üçü de aynı bayt akışından besleniyor:
 //! [`MARK_OSC`] oturumun safhasını ve blok kimliklerini taşır, [`DOCK_OSC`]
 //! satır düzenleyicinin (ZLE) o anki görüntüsünü, [`CWD_OSC`] de çalışma
 //! dizinini. Üçü tek durum makinesinde, çünkü akış tek: ayrı tarayıcılar aynı
 //! diziyi üç kez çerçevelerdi ve çerçeveleme kuralının (aşağıdaki üç madde)
 //! üç kopyası doğardı.
+//!
+//! **Dördüncü kol OSC değil CSI** ve ötekilerden iki yanıyla ayrılıyor:
+//! tanıdığı tek dizi `CSI 2 J`, ve **yükü yok**. Tuttuğu şey bir yük değil bir
+//! sayı — kaç kez "ekranı kasten temizle" geçtiği ([`Scanner::take_screen_clears`]).
+//! Aynı durum makinesinde, çünkü çerçeveleme yine tek: bozuk bir CSI'da takılıp
+//! kalan bir tarayıcı peşinden gelen `ESC ] 133;…`'ü yutar ve bloklar,
+//! bastırma, dock **sessizce** ölürdü. `ESC [` bugüne kadar `Ground`'a
+//! düşüyordu; o kol ancak aranan diziyi görmediği için zararsızdı, yoksa
+//! bir CSI'nın içindeki `]` bizde yeni bir OSC açabilirdi.
+//!
+//! Neden bu diziyi terminalin **kendisi** izliyor: alacritty
+//! `ClearMode::All`'ü birincil ekranda `clear_viewport()` ile karşılıyor
+//! (`term/mod.rs:1794`), yani görünen satırları **geçmişe itiyor**. Ekran
+//! boşalıyor ama `history_size()` büyüyor; "boşluğu geçmişle doldur" kuralı
+//! (017) onu ayırt edemezse Ctrl-L'i geri alırdı.
 //!
 //! Beş sorumluluk, tek modül: baytlardan işaret çıkarmak ([`parse_mark`]),
 //! işaretlerden oturum safhası tutmak ([`ShellState`]), blok kimliği başına
@@ -1341,6 +1356,23 @@ const CWD_PAYLOAD_LIMIT: usize = 4 * 1024;
 /// taşmasın diye var; `133`'ün altı hane uzağında bir OSC numarası yok.
 const MAX_OSC_NUMBER: u32 = 999_999;
 
+/// CSI parametresinin makul üst sınırı; aşan dizi bizim değildir.
+///
+/// [`MAX_OSC_NUMBER`]'ın emsali ve aynı işi görüyor: sonlandırıcı basmayan bir
+/// akışta sayaç taşmasın. Aşımın cezası da aynı yönde — dizi **atılmıyor**,
+/// yalnız tanınmaz oluyor; `2`'nin altı hane uzağında bir ED parametresi yok.
+const MAX_CSI_PARAM: u32 = 999_999;
+
+/// ED'nin "bütün ekranı temizle" parametresi: `CSI 2 J`.
+///
+/// `3J` (`ClearMode::Saved`) ve RIS için kol **yok** ve gerekçe ikisinde de
+/// aynı: ikisi de `clear_history()` çağırıyor (`term/mod.rs:1806`, RIS için
+/// `grid/mod.rs:341`), yani `history_size()` sıfıra iniyor ve "boşluğu
+/// geçmişle doldur" kuralı **kendiliğinden** kapanıyor. Üçüncü bir kol
+/// eklemek, bir bayrakla zaten kapalı olan bir yolu ikinci kez kapatmak
+/// olurdu.
+const ERASE_ALL: u32 = 2;
+
 /// Tarayıcının nerede olduğu. Chunk sınırında hayatta kalması gereken şey
 /// yükün kendisi **değil**, bu durumun tamamı: "ESC gördüm" ve "rakamların
 /// ortasındayım" da iki `read()` arasında taşınır.
@@ -1348,7 +1380,7 @@ const MAX_OSC_NUMBER: u32 = 999_999;
 enum ScanState {
     /// Dizinin dışındayız; bir sonraki `ESC` aranıyor.
     Ground,
-    /// `ESC` görüldü, `]` bekleniyor.
+    /// `ESC` görüldü, `]` (OSC) ya da `[` (CSI) bekleniyor.
     Escape,
     /// `ESC ]` görüldü, OSC numarası toplanıyor.
     Number,
@@ -1356,6 +1388,48 @@ enum ScanState {
     Payload(Arm),
     /// Bizim dizimiz değil (ya da sınırı aştı): sonlandırıcıya kadar atlanıyor.
     Skip,
+    /// `ESC [` görüldü; CSI sonlandırıcısına kadar izleniyor.
+    Csi(CsiScan),
+}
+
+/// CSI dizisinin bizi ilgilendiren kadarı.
+///
+/// **Tampon yok ve olmayacak:** tanıdığımız tek dizinin parametresi tek bir
+/// sayı, yani toplanacak yük de yok. `vte`'nin dört CSI durumu
+/// (`advance_csi_entry`, `_param`, `_intermediate`, `_ignore`) bizde **tek**
+/// duruma iniyor, çünkü sorduğumuz soru tek: "bu dizi `CSI 2 J` mi". Ara
+/// baytı, özel işareti ya da ikinci parametresi olan her dizinin cevabı aynı —
+/// hayır — ve o cevabı [`Self::simple`] taşıyor.
+///
+/// `Default` **türetilmiyor**: türetilseydi `simple: false` olurdu, yani
+/// "hiçbir dizi tanınmaz" — sessizce yanlış bir başlangıç. Tek doğru
+/// başlangıcın adı [`CsiScan::new`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CsiScan {
+    /// Toplanan tek parametre.
+    param: u32,
+    /// Hiç rakam görüldü mü. Parametresiz `CSI J` **ED 0** demek (imleçten
+    /// aşağısı), yani bizim dizimiz değil; ayrı bayrak olmasaydı `param`'ın
+    /// sıfırı ile "hiç yazılmadı" karışırdı.
+    has_digit: bool,
+    /// Dizi hâlâ "tek parametreli, işaretsiz, ara baytsız" mı.
+    simple: bool,
+}
+
+impl CsiScan {
+    /// `ESC [`'in hemen ardındaki hâl.
+    fn new() -> Self {
+        Self {
+            param: 0,
+            has_digit: false,
+            simple: true,
+        }
+    }
+
+    /// Dizi tanıdığımız tek dizi mi — sonlandırıcısı da dahil.
+    fn is_erase_all(&self, final_byte: u8) -> bool {
+        self.simple && self.has_digit && self.param == ERASE_ALL && final_byte == b'J'
+    }
 }
 
 /// Tarayıcının iki kolu; yük hangi tampona ve hangi ayrıştırıcıya gidiyor.
@@ -1438,6 +1512,13 @@ pub(crate) struct Scanner {
     /// Toplanan OSC numarası ve hiç rakam görülüp görülmediği.
     number: u32,
     has_digit: bool,
+    /// Son boşaltmadan bu yana görülen `CSI 2 J` sayısı.
+    ///
+    /// **Olay değil sayaç**, ve ayrım kasıtlı: [`ScanEvent`] "olay başına tek
+    /// kilit turu" için var (kendi doc'u), CSI kolunun tüketicisi ise hiç
+    /// kilit istemiyor — artıracağı şey bir atomik. Enum'a kol eklemek her
+    /// olay yolunda bedelsiz ama anlamsız bir dal açardı.
+    screen_clears: u32,
 }
 
 impl Scanner {
@@ -1460,7 +1541,18 @@ impl Scanner {
             branch: String::new(),
             number: 0,
             has_digit: false,
+            screen_clears: 0,
         }
+    }
+
+    /// Son çağrıdan bu yana görülen `CSI 2 J` sayısı; sayacı **boşaltır**.
+    ///
+    /// Sayı, çünkü tüketicisi bir **nesil sayacına** ekliyor
+    /// (`Session::screen_clears`): kare yolunun sorduğu soru "ekran temizlendi
+    /// mi" değil, "bu temizlemeyi hesaba kattım mı". Bayrak olsaydı iki
+    /// temizlemenin arasına düşen bir kare ikincisini birincisi sanardı.
+    pub(crate) fn take_screen_clears(&mut self) -> u32 {
+        std::mem::take(&mut self.screen_clears)
     }
 
     /// Dilimi tarar ve bulduğu her olayı `on_event`'e verir.
@@ -1497,14 +1589,19 @@ impl Scanner {
                     self.state = ScanState::Escape;
                 }
             }
-            // `vte::advance_esc`: `]` diziyi açar, kalan her şey (CSI, DCS,
-            // tek harfli kaçışlar) bizi ilgilendirmiyor.
+            // `vte::advance_esc`: `]` OSC dizisini, `[` de CSI'yı açar; kalan
+            // her şey (DCS, tek harfli kaçışlar) bizi ilgilendirmiyor.
             ScanState::Escape => match byte {
                 b']' => {
                     self.state = ScanState::Number;
                     self.number = 0;
                     self.has_digit = false;
                 }
+                // **Dördüncü kol.** Bugüne kadar aşağıdaki `_ =>` ile
+                // `Ground`'a düşüyordu; artık izleniyor, çünkü `CSI 2 J`
+                // aranıyor ve çerçevelenmeyen bir CSI'nın içindeki `]` bizde
+                // sahte bir OSC açabilirdi.
+                b'[' => self.state = ScanState::Csi(CsiScan::new()),
                 // `advance_esc`'in `Escape`'te **bırakan** baytları: `ESC`'in
                 // kendisi, C0'ların 0x18/0x1A dışındakileri (`execute`
                 // ediliyor, durum değişmiyor) ve 0x7F'ten büyük her şey (son
@@ -1613,6 +1710,57 @@ impl Scanner {
                     self.close(byte);
                 }
             }
+            // **OSC'nin çerçeveleme kuralları burada geçerli değil ve bu tek
+            // başına bir kusur kaynağıydı:** `is_terminator` `BEL`'i (0x07)
+            // dizi sonu sayıyor, `vte`'nin CSI durumları ise onu yerinde
+            // `execute` edip durumu **değiştirmiyor** — yani `ESC [ 2 BEL J`
+            // hâlâ bir ED 2. İki kümeyi paylaştırmak, ızgaranın gördüğü dizi
+            // sınırı ile bizimkini ayırırdı; iki taraf aynı akıştan iki
+            // farklı hikâye okur (modül başlığı).
+            ScanState::Csi(mut csi) => match byte {
+                // **İptal kuralları `vte::anywhere`'den birebir** (R1.3).
+                // Taşınmasaydı bozuk bir CSI durumu takar ve peşinden gelen
+                // `ESC ] 133;…` yutulurdu — bloklar, bastırma ve dock
+                // **sessizce** ölürdü.
+                0x18 | 0x1a => self.state = ScanState::Ground,
+                0x1b => self.state = ScanState::Escape,
+                // Dizinin içindeki C0'lar yerinde `execute` ediliyor; durum
+                // duruyor, parametre etkilenmiyor.
+                0x00..=0x17 | 0x19 | 0x1c..=0x1f => {}
+                b'0'..=b'9' => {
+                    csi.param = csi
+                        .param
+                        .saturating_mul(10)
+                        .saturating_add(u32::from(byte - b'0'));
+                    csi.has_digit = true;
+                    if csi.param > MAX_CSI_PARAM {
+                        csi.simple = false;
+                    }
+                    self.state = ScanState::Csi(csi);
+                }
+                // Ara baytlar (0x20–0x2F), parametre ayraçları (`;`, `:`) ve
+                // özel işaretler (`<=>?`) — üçünün de cevabı aynı: dizi bizim
+                // değil, ama **çerçeveleme sürüyor**. `ESC [ ? 1049 h` ne
+                // bayrak kuruyor ne durumu takıyor.
+                0x20..=0x3f => {
+                    csi.simple = false;
+                    self.state = ScanState::Csi(csi);
+                }
+                0x40..=0x7e => {
+                    if csi.is_erase_all(byte) {
+                        // **Doyuran toplama, saran değil.** Tüketici sayacı
+                        // her okuma turunda boşaltıyor, yani tavana ancak tek
+                        // bir `read()` içinde dört milyar temizlemeyle
+                        // varılır; sarsaydı o okuma `0` döndürür ve "hiç
+                        // temizleme olmadı" derdi — kaybın yanlış yönü.
+                        self.screen_clears = self.screen_clears.saturating_add(1);
+                    }
+                    self.state = ScanState::Ground;
+                }
+                // `0x7F` ve 0x7F'ten büyük her şey `anywhere`'in `_ => ()`
+                // kolu: yoksayılıyor, durum duruyor.
+                _ => {}
+            },
         }
     }
 
@@ -2304,6 +2452,127 @@ mod tests {
         // açılmıyor — `advance_esc` onları Ground'a götürüyor.
         assert_eq!(marks(b"\x1b\x18]133;A\x07"), vec![]);
         assert_eq!(marks(b"\x1b\x1a]133;A\x07"), vec![]);
+    }
+
+    /// Diziyi parçalar hâlinde besler; sayacı ve arkasından görülen işaretleri
+    /// birlikte döndürür — CSI kolunun iki iddiası da ("bayrağı kurdu mu",
+    /// "arkasındakini yuttu mu") tek çağrıda sorulabilsin diye.
+    fn clears_and_marks_of_chunks(chunks: &[&[u8]]) -> (u32, Vec<Mark>) {
+        let mut scanner = Scanner::new();
+        let mut seen = Vec::new();
+        let mut clears = 0;
+        for chunk in chunks {
+            scanner.feed(chunk, |event| {
+                if let ScanEvent::Mark(mark) = event {
+                    seen.push(mark);
+                }
+            });
+            clears += scanner.take_screen_clears();
+        }
+        (clears, seen)
+    }
+
+    fn clears(bytes: &[u8]) -> u32 {
+        clears_and_marks_of_chunks(&[bytes]).0
+    }
+
+    #[test]
+    fn only_erase_all_sets_the_screen_clear() {
+        // Tanınan **tek** dizi `CSI 2 J`. `CSI J` parametresiz ED, yani ED 0
+        // (imleçten aşağısı) ve `CSI 3 J` geçmişi siliyor — ikisi de ekranı
+        // kasten temizlemek değil.
+        assert_eq!(clears(b"\x1b[2J"), 1);
+        assert_eq!(clears(b"\x1b[02J"), 1, "başındaki sıfır diziyi bozmamalı");
+        assert_eq!(clears(b"\x1b[J"), 0);
+        assert_eq!(clears(b"\x1b[0J"), 0);
+        assert_eq!(clears(b"\x1b[1J"), 0);
+        assert_eq!(clears(b"\x1b[3J"), 0);
+        assert_eq!(clears(b"\x1b[22J"), 0);
+        assert_eq!(clears(b"\x1b[2K"), 0, "sonlandırıcı da eşleşmeli");
+        // Özel işaret (`?`, DECSED), ikinci parametre ve ara bayt: üçü de
+        // diziyi tanınmaz yapıyor.
+        assert_eq!(clears(b"\x1b[?2J"), 0);
+        assert_eq!(clears(b"\x1b[2;2J"), 0);
+        assert_eq!(clears(b"\x1b[2 J"), 0);
+        // Parametre tavanı: sayaç taşmadan dizi tanınmaz oluyor.
+        assert_eq!(clears(b"\x1b[99999999999999999999J"), 0);
+        // İki temizleme iki kez sayılıyor: tüketici nesil sayacı, bayrak değil.
+        assert_eq!(clears(b"\x1b[2J\x1b[2J"), 2);
+    }
+
+    #[test]
+    fn a_csi_never_swallows_the_mark_behind_it() {
+        // **Bu sınamanın kapattığı kusur sessiz:** bozuk bir CSI'da takılan
+        // tarayıcı peşinden gelen `ESC ] 133;…`'ü yutar ve bloklar, giriş
+        // satırının bastırılması, dock birlikte ölür.
+        let mark = vec![Mark::PromptStart { id: None }];
+
+        // (1) Tamamlanan CSI'lardan sonra: tanınan da tanınmayan da.
+        assert_eq!(
+            clears_and_marks_of_chunks(&[b"\x1b[2J\x1b]133;A\x07"]),
+            (1, mark.clone())
+        );
+        assert_eq!(
+            clears_and_marks_of_chunks(&[b"\x1b[?1049h\x1b]133;A\x07"]),
+            (0, mark.clone())
+        );
+        // (2) Yarım kalan CSI'yı `ESC` iptal ediyor (`vte::anywhere`), yani
+        // bizim dizimiz yine açılıyor.
+        assert_eq!(
+            clears_and_marks_of_chunks(&[b"\x1b[2;3\x1b]133;A\x07"]),
+            (0, mark.clone())
+        );
+        assert_eq!(
+            clears_and_marks_of_chunks(&[b"\x1b[\x1b]133;A\x07"]),
+            (0, mark.clone())
+        );
+        // (3) `CAN`/`SUB` diziyi `Ground`'a götürüyor; oradan yeni bir dizi
+        // ancak `ESC` ile açılır.
+        assert_eq!(
+            clears_and_marks_of_chunks(&[b"\x1b[2\x18", b"\x1b]133;A\x07"]),
+            (0, mark.clone())
+        );
+        assert_eq!(
+            clears_and_marks_of_chunks(&[b"\x1b[2\x18]133;A\x07"]),
+            (0, vec![])
+        );
+        // (4) Sonlandırıcısı hiç gelmeyen bir CSI'yı da `ESC` kurtarıyor:
+        // tavan yalnız parametreyi tanınmaz yapıyor, durumu bırakmıyor.
+        let long = b"\x1b["
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(b'9', 10_000));
+        let stream: Vec<u8> = long.chain(b"\x1b]133;A\x07".iter().copied()).collect();
+        assert_eq!(clears_and_marks_of_chunks(&[&stream]), (0, mark));
+    }
+
+    #[test]
+    fn a_bel_inside_a_csi_is_not_a_terminator() {
+        // OSC'nin sonlandırıcı kümesi CSI'da geçerli **değil**: `vte`'nin CSI
+        // durumları C0'ları yerinde `execute` edip durumu değiştirmiyor, yani
+        // `ESC [ 2 BEL J` hâlâ bir ED 2. İki kümeyi paylaştıran bir düzenleme
+        // ızgaranın gördüğü dizi sınırıyla bizimkini ayırırdı.
+        assert_eq!(clears(b"\x1b[2\x07J"), 1);
+        assert_eq!(clears(b"\x1b[\r2J"), 1);
+        // 0x7F ve 0x7F'ten büyük baytlar da yoksayılıyor (`anywhere`'in son
+        // kolu), durumu bırakmıyor.
+        assert_eq!(clears(b"\x1b[2\x7fJ"), 1);
+        assert_eq!(clears(b"\x1b[2\x80J"), 1);
+    }
+
+    #[test]
+    fn the_screen_clear_survives_a_split_at_every_byte() {
+        // Durumun tamamı chunk sınırında taşınmak zorunda: "CSI'dayım",
+        // "parametre 2" ve "dizi hâlâ sade" de iki `read()` arasında yaşıyor.
+        let seq: &[u8] = b"\x1b[2J";
+        for at in 0..=seq.len() {
+            let (head, tail) = seq.split_at(at);
+            assert_eq!(
+                clears_and_marks_of_chunks(&[head, tail]).0,
+                1,
+                "bölünme noktası {at}"
+            );
+        }
     }
 
     #[test]
