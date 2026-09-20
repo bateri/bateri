@@ -43,7 +43,17 @@ hareketin tam tersi yönde. Kullanıcı ekranı **kasten** temizlediyse (Ctrl-L,
     onsuz doldurma boşluğun tamamını, yani kullanıcının sildiği ekranı geri
     getiriyordu — ölçüldü (yedi satırlık delikte dördü temizleme öncesi).
   - **R2.2** — Koşul: pencerenin dock'u var **∧** alternatif ekranda değil
-    **∧** bayrak temiz **∧** `display_offset == 0`. Safha kapısı **yok**.
+    **∧** bayrak temiz. Safha kapısı **yok**. **`display_offset == 0` kapısı
+    teslimde kalktı** (2026-09-20, gözle kontrol; kullanıcı): kaydırılmış
+    pencerede doldurma kapanmıyor, viewport'la birlikte **geriye kayıyor**
+    (`Line(fill_row - fill - offset)`, `fresh` de aynı kadar kırpılıyor).
+    Kapının gerekçesi "kaydırılmış pencerede boşluk zaten geçmişle dolu" idi
+    ve ölçüm çürüttü — 011'in yaslaması kaydırılmış pencerede de koştuğu için
+    boşluk orada da **üstte** duruyor; kapı tekerleğin ilk çentiğinde bandı
+    düşürüp ızgaranın çıplak boşluğunu açığa çıkarıyordu (ekranın üstü
+    kapkara, içerik dipte, kaydırdıkça geri geliyor). Bekçi
+    `scrolling_into_history_slides_the_fill_band`. Bayrağın **ömründeki**
+    `display_offset` koşulu (R1.2) ayrı ve duruyor.
   - **R2.3** — `content_rows` ve `origin = rows - content_rows` aritmetiği
     **değişmez**; `session.rs:6283`'ün bekçisi dokunulmadan geçer.
   - **R2.4** — `fill_rows()` sıfır dönerken sınırdan geçen kare bugünküyle

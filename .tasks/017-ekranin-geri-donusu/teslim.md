@@ -98,7 +98,12 @@ dosya da tamamlama listesini dört satıra çıkarıyor — ölçülen sahnenin 
    davranışının görünür yarısı — bant onu yaratmıyor, üstünü açıyor. **Karar
    kullanıcının:** bantta vurgula / bant görünürken seçimi düşür / bırak.
    Kabul edilme gerekçesi ve iki çarenin bedeli `phase-2.md` §5'te.
-3. **Alternatif ekrandan çıkış.** `vim` aç, çık. Çıkış karesinde `fill > 0` ve
+3. **Kaydırma.** Bant görünürken (1. senaryodan hemen sonra) tekerlekle
+   yukarı çık: ekran **dolu kalmalı**, bant viewport'la birlikte geriye
+   kaymalı. Teslimde düzeltildi (`d1fb0c2`) — kusuru sen buldun: bant
+   kaydırmanın ilk çentiğinde düşüyor, ızgaranın çıplak boşluğu açığa
+   çıkıyordu (ekranın üstü kapkara, içerik dipte, kaydırdıkça geri geliyor).
+4. **Alternatif ekrandan çıkış.** `vim` aç, çık. Çıkış karesinde `fill > 0` ve
    öteleme **bir kare** süzülüyor, sonra dock'u geri getiren resize'ın
    `geometry` bayrağı snap'liyor. Hissedilir ve savunulur ama **tasarlanmış
    değil** (`Motion::sync_origin`'in doc'unda adıyla duruyor). Rahatsız
@@ -172,7 +177,8 @@ Hiçbiri açık hata değil; hepsi kapıda tartılıp kabul edildi.
 - [x] `make duman` yeşil, jetonlar değişmemiş (2026-09-20)
 - [ ] Gözle kontrol B.2 §1 (asıl senaryo — kaymanın hissi)
 - [ ] Gözle kontrol B.2 §2 (duran seçim + bant → karar)
-- [ ] Gözle kontrol B.2 §3 (alternatif ekrandan çıkış — bir karelik kayma)
+- [ ] Gözle kontrol B.2 §3 (kaydırmada bant kayıyor — **düzeltme sonrası**)
+- [ ] Gözle kontrol B.2 §4 (alternatif ekrandan çıkış — bir karelik kayma)
 - [ ] `docs/YOL-HARITASI.md`'nin overlay maddesi kapansın mı, kullanıcı kararı
 - [ ] `/ship`
 
