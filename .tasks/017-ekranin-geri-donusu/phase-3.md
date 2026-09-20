@@ -7,6 +7,24 @@ Doldurulan satırlar ötelemenin üstündeki alana çizilir ve ızgarayla
 
 _Requirements: R3.1, R3.2_
 
+## phase-2'den devralınan
+
+Sınır **hazır ve bugün tüketilmiyor** — bu phase'in ilk işi o iki ucu bağlamak
+(`phase-2.md` → Uygulama Notları §1):
+
+1. **`frame()`'in ikinci sink'i.** İmza `frame(sink, fill_sink, blocks)`;
+   doldurma hücreleri oradan geçiyor ve satır numaraları **fill-yerel**
+   (`0..fill`, `0` en eski, `fill - 1` içeriğin hemen üstü). Ekran satırına
+   çeviren taraf bu phase. `bt-gpu::link` bugün `|_| ()` veriyor, yeri
+   yorumla işaretli.
+2. **`Cursor::fill`.** Kaç satır geldiğini o söylüyor; `content_rows`'a
+   **girmiyor**, yani öteleme aritmetiği phase-2'de dokunulmadan kaldı (R2.3).
+3. **Geri alma şeridi kurulu.** `Session::fill_rows` sıfır dediğinde ikinci
+   sink hiç çağrılmıyor; `fill == 0` iken kareyi bit bit aynı tutmanın
+   `bt-core` yarısı bitti, `bt-gpu` yarısı bu phase'in Kabul'ünde.
+4. **Doldurmada seçim yok** (phase-2 §5) — vurgusuz hücreler bekleniyor, bu
+   bir eksik değil karar.
+
 ## Kol seçimi phase-0'dan gelir
 
 Push anında aritmetik (`origin - fill + row`) **elendi** ve gerekçesi repoda

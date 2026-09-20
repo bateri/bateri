@@ -611,6 +611,10 @@ mod tests {
                 }
                 rows[row][col] = cell.ch.unwrap_or(' ');
             },
+            // Sorulan şey **ızgarada** çizilen metin; doldurma ayrı bir kanal
+            // ve satırları fill-yerel, yani aynı tampona dökülseydi ızgaranın
+            // ilk satırlarını ezerdi.
+            |_| (),
             blocks,
         );
         rows.into_iter()
