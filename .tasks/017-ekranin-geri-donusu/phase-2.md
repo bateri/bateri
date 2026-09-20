@@ -7,6 +7,18 @@ verir; `Cursor` kaç satır dolduğunu söyler.
 
 _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5_
 
+## phase-0'dan devralınan
+
+**Doldurma ekranı Tab öncesine birebir değil, bir satır eksiğine döndürür** ve
+bu bir aritmetik seçim değil zsh'in davranışı: Ctrl-C'nin `\r\r\n`'si yeni
+prompt'u komut satırının bir altına indiriyor, yani listenin açtığı dört
+satırın biri prompt tarafından tüketiliyor. `gap` olaydan **sonra** ölçüldüğü
+için `fill = min(history_size, gap)` formülü **düzeltme istemiyor** (ölçülen
+koşuda `min(24, 3) = 3`, doğru sayı). Sayılar `phase-0.md` → Uygulama
+Notları §4. Yanlışın yönü güvenli: ekran dolu görünür, yalnız bir satır
+yukarıdan başlar. Kabul ölçütü buna göre okunur — "Tab öncesinin **aynısı**"
+değil, "delik yok ve içerik sürekli".
+
 ## Değişiklikler
 
 - **`crates/bt-core/src/session.rs`** — `frame()`'e doldurma kolu.

@@ -14,7 +14,11 @@ hareketin tam tersi yönde. Kullanıcı ekranı **kasten** temizlediyse (Ctrl-L,
     bayrağını kurar. `3J` ve RIS için kol **yok**: ikisi de geçmişi siliyor,
     doldurma kendiliğinden kapanıyor.
   - **R1.2** — Bayrak, ekran doğal yoldan yeniden dolunca düşer
-    (`content_rows == rows` **ve** alternatif ekranda değilken).
+    (`content_rows == rows`, alternatif ekranda değilken **ve**
+    `display_offset == 0`). Üçüncü koşul phase-1'de eklendi
+    (`/code-review`): `content_rows` görünür pencereden doğuyor, yani
+    geçmişe kaydırılan pencere dolu **görünür** ve onsuz tek bir tekerlek
+    jesti bayrağı kalıcı olarak düşürürdü.
   - **R1.3** — Tarayıcının yeni durumu vte'nin iptal kurallarını taşır: `ESC`
     → `Escape`, `0x18`/`0x1A` → `Ground`, parametre uzunluğuna tavan. Bozuk
     bir CSI'da takılıp arkasından gelen `ESC ] 133;…`'ü **yutmaz**.
@@ -115,7 +119,7 @@ bt-shell
 | Phase | Durum |
 |-------|-------|
 | phase-0 | ✅ |
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | phase-3 | |
 | phase-4 | |
