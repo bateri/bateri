@@ -424,8 +424,22 @@ impl Motion {
     /// boşluk defterin en yeni satırlarıyla doluyorsa aşağı inen şey boşluk
     /// değil, üstten **gelen geçmiştir** — 011'in "düşme gibi okunuyor"
     /// gerekçesi o kolda konusuz kalıyor. Kural bu yüzden kalkmıyor,
-    /// **daralıyor**: `fill == 0` iken daralan içerik (vim'den çıkış, dolu
-    /// ekranda `clear`) hâlâ snap'liyor.
+    /// **daralıyor**: `fill == 0` iken daralan içerik hâlâ snap'liyor —
+    /// dock'u olmayan pencere, kasten temizlenmiş ekran (Ctrl-L, dolu ekranda
+    /// `clear`) ve geçmişe kaydırılmış pencere.
+    ///
+    /// **Alternatif ekrandan çıkış bu listede değil ve bir dönem yazılıydı**
+    /// (017 kapı, ölçüldü 2026-09-20): `vim`'in giriş `2J`'si bayrağı
+    /// kurmadığı için (phase-1b) çıkış karesinde dört kapı da açık ve `fill`
+    /// sıfırdan büyük geliyor — yani öteleme o karede **süzülmeye
+    /// başlıyor**. Snap'i getiren şey `fill` değil, dock'u geri getiren
+    /// resize'ın **bir sonraki** ana kuyruk turunda dikeceği `geometry`
+    /// bayrağı; kayma bu yüzden pratikte bir kare sürüyor. Yönü de savunulur
+    /// — üstteki boşluğa gerçekten geçmiş giriyor — ama **tasarlanmış
+    /// değil**, bu yüzden adıyla yazılıyor: ya `bt-core` çıkış karesinde bir
+    /// kapı kurmalı ya da bu cümle kararı onaylamalı. Aşağıdaki sınamanın
+    /// `filled = false`'ı o kolu değil, **kolun kendisini** (`fill == 0`)
+    /// ölçüyor.
     ///
     /// **Terim `!snap`'in içinde** ve bu bir yerleşim zevki değil: dışına
     /// yazılsaydı Rust'ın önceliği ifadeyi `(animated && !snap && …) || filled`
@@ -1696,9 +1710,15 @@ mod tests {
         run_to_rest(&mut motion, TICK);
         assert_eq!(motion.origin(), 0.0);
 
-        // vim'den çıkış: doluluk daralıyor, öteleme **yükseliyor** — kabuk
-        // aşağı süzülmüyor, anında yerine oturuyor. `fill == 0`, çünkü
-        // alternatif ekrandan yeni çıkıldı.
+        // Daralan içerik, `fill == 0`: öteleme **yükseliyor** ama kabuk aşağı
+        // süzülmüyor, anında yerine oturuyor.
+        //
+        // **Sahnenin adı `vim`'den çıkış değil** ve bu 017 kapısında
+        // düzeltildi: orada `fill` sıfır **değil** (giriş `2J`'si bayrağı
+        // kurmuyor, dört kapı da açık) ve snap'i getiren şey bir sonraki
+        // turdaki `geometry`. Buradaki sıfır dock'u olmayan pencerenin,
+        // kasten temizlenmiş ekranın ve geçmişe kaydırılmış pencerenin ortak
+        // hâli; gerekçesi [`Motion::sync_origin`]'in doc'unda.
         motion.sync(Some([0.0, 29.0]), 26, 0, false, false);
         assert!(motion.origin_settled(), "daralan içerik kaydı");
         assert_eq!(motion.origin(), 26.0);

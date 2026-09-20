@@ -289,8 +289,12 @@ pub struct Cursor {
     pub content_rows: u16,
     /// Üstte kalan boşluğun kaç satırı **geçmişle** dolduruldu (R2.1).
     ///
-    /// `rows - content_rows` kadar boşluk var ve defterde o kadar satır varsa
-    /// hepsi, yoksa defterin tamamı: `fill = min(history_size, gap)`. Doldurma
+    /// `rows - content_rows` kadar boşluk var ve **temizlemeden beri** o kadar
+    /// satır geldiyse hepsi, yoksa geleni:
+    /// `fill = min(gap, temizlemeden beri gelen satır)`. Hiç temizleme olmamış
+    /// oturumda ikinci terim defterin tamamıdır, yani formül
+    /// `min(history_size, gap)`'e iniyor; kırpmanın gerekçesi ve ölçümü
+    /// [`Session::fill_rows`]'da. Doldurma
     /// hücreleri [`Session::frame`]'in **ikinci** sink'inden geçiyor ve satır
     /// numaraları **fill-yerel**: `0..fill`, en üstteki en eski. Ekran satırına
     /// çeviren taraf çizen taraf — bu crate "hangi satırlar" der, "nereye"
@@ -2194,8 +2198,16 @@ impl Session {
             let line =
                 Line(i32::from(fill_row) - i32::from(fill)).grid_clamp(&*term, Boundary::Grid);
             let cells = &term.grid()[line];
-            for col in 0..grid_cols {
-                let cell = &cells[Column(usize::from(col))];
+            // **`zip`, indeksleme değil** ve gerekçesi panik yasağı (R2.5):
+            // `Row`'un `Index`'i sınır dışında panikliyor ve `make denetim`
+            // indekslemeyi göremiyor — aradığı şey `unwrap`/`expect`/`panic!`.
+            // Bugün taşma yok, çünkü alacritty her satırı `columns()` boyunda
+            // tutuyor (`grow_columns`/`shrink_columns`), ama o değişmez **bu
+            // crate'te adlandırılmamış** ve bir reflow değişikliği onu kare
+            // yolunda süreç öldüren bir paniğe çevirirdi. `zip` kısa olanda
+            // duruyor, yani sınır tipin kendisinden geliyor;
+            // `grid_clamp`'in satır için yaptığının sütun ikizi.
+            for (col, cell) in (0..grid_cols).zip(cells) {
                 let flags = cell.flags;
                 let dim = flags.contains(Flags::DIM);
                 let hidden = flags.contains(Flags::HIDDEN);
