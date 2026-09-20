@@ -1109,6 +1109,7 @@ impl BateriView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2_foundation::ns_string;
 
     /// Sahnelerin ızgara ölçüsü; pay **argüman**, çünkü sorulan iki ayrı şey
     /// var: hücre aritmetiği (pay sıfır) ve payın kendisi.
@@ -1483,5 +1484,41 @@ mod tests {
             (at1x.map(|p| (p.col, p.row)), at2x.map(|p| (p.col, p.row))),
             (Some((10, 8)), Some((20, 16)))
         );
+    }
+
+    /// Damlanın elemesi: **yalnız dosya URL'si** yol veriyor.
+    ///
+    /// Bekçi set kapısından **sonra** eklendi, çünkü kapının bulduğu
+    /// doc↔kod çelişkisinin düzeltmesi (`isFileURL` kademesi) kapıyı
+    /// görmemişti. Çivilediği şey `NSURL`'ün cömertliği: sınıf `http://`'yi
+    /// de okuyor ve `NSURL.path` ona `/foo` cevabını veriyor, yani kademe
+    /// olmadan tarayıcıdan sürüklenen bir bağlantı giriş satırına kökten bir
+    /// yol yazardı (`discussion.md` → Karar 4: yalnız dosya URL'si).
+    ///
+    /// Pano **benzersiz ve yerel**: `generalPasteboard` kullanılsaydı sınama
+    /// kullanıcının kopyaladığı şeyi silerdi.
+    #[test]
+    fn only_file_urls_become_dropped_paths() {
+        let board = NSPasteboard::pasteboardWithUniqueName();
+        let file = NSURL::fileURLWithPath(ns_string!("/tmp/bir dosya.txt"));
+        let web = NSURL::URLWithString(ns_string!("http://example.com/foo")).expect("geçerli URL");
+        board.clearContents();
+        let written = board.writeObjects(&NSArray::from_retained_slice(&[
+            ProtocolObject::from_retained(file),
+            ProtocolObject::from_retained(web),
+        ]));
+        assert!(written, "pano iki URL'yi de aldı");
+
+        // Web adresi düşüyor, dosya yolu **yüzde çözülmüş** geliyor: yüzde
+        // çözmeyi ikinci kez yazmama kararının (Foundation'ın kendi cevabı)
+        // gözlemlenebilir yarısı.
+        assert_eq!(
+            dropped_paths(&board),
+            vec!["/tmp/bir dosya.txt".to_string()]
+        );
+
+        // Pano benzersiz ve süreç-yerel: sınama süreci bitince gidiyor,
+        // elle bırakma (`releaseGlobally`) bu bağlamada yok.
+        board.clearContents();
     }
 }

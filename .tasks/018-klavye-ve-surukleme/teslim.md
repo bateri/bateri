@@ -133,12 +133,14 @@ Kapatan sınama makineye bağlı olurdu; kapatan şey on saniyelik bir tuş.
 2. **Tuş başına `String` ayırma** (`characters().to_string()`): kazanç
    ölçülmedi, o yüzden sayı yazılmadı. Ertelemenin yolu yok — Cmd izin listesi
    ile `page_scroll` `chars`'ı yığın kolundan **önce** istiyor.
-3. **Takip işi (sınama, ölçüm değil):** `dropped_paths`'in pasteboard
-   davranışı hermetik olarak çivilenebilir — panoya bir `file://` ve bir
-   `http://` URL'si yazıp yalnız birincisinin döndüğünü sınamak `e0e4660`'ın
-   `isFileURL` kademesini kapıya bağlar. Set kapısı koştuktan **sonra**
-   düşünüldüğü için bu sete alınmadı; B.2 §3'ün elle tablosunun yerine de
-   geçmiyor (gerçek Finder, gerçek dock sahipliği).
+3. **(Kapandı)** `dropped_paths`'in eleme davranışı artık hermetik olarak
+   çivili — `only_file_urls_become_dropped_paths`, benzersiz bir panoya bir
+   `file://` ve bir `http://` yazıp yalnız birincisinin döndüğünü sınıyor.
+   Kapının bulduğu belirti **iki yönde ölçüldü**: kademesiz hâlde dönen liste
+   `["/tmp/bir dosya.txt", "/foo"]`, kademeli hâlde yalnız birincisi. Bekçi
+   `e0e4660`'ı kapıya bağlıyor — o düzeltme set kapısından **sonra** geldiği
+   için testsiz kalmıştı. B.2 §3'ün elle tablosunun yerine geçmiyor (gerçek
+   Finder, gerçek dock sahipliği).
 
 ### B.4 Bilinen sınırlar (adıyla) `[elle]`
 
