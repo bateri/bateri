@@ -46,9 +46,9 @@ mod wake;
 
 pub use color::{LinearRgba, Theme};
 pub use dock::{Dock, DockCols};
-pub use input::Arrow;
+pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use session::{
-    Block, Blocks, Cell, CellHalf, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, SelectionPoint,
+    Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, SelectionPoint,
     Session, SessionOptions, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell,
     smoke_shell,
 };

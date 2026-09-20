@@ -60,7 +60,9 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock, DockCols};
-use crate::input::{self, Arrow, WHEEL_DOWN, WHEEL_UP, WheelRoute};
+use crate::input::{
+    self, Arrow, ButtonRoute, MouseButton, MouseModifiers, WHEEL_DOWN, WHEEL_UP, WheelRoute,
+};
 use crate::settings::{CaretShape, CursorBlink};
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockState, Precision, Scanner, ShellLog,
@@ -1445,6 +1447,29 @@ pub enum Wheel {
     /// Hiçbir şey gitmedi: alternate screen'de ok kapalı (`\e[?1007l`) ya da
     /// Shift basılı; fare kipinde işaretçi geçmişte ya da koordinat
     /// kodlamaya sığmıyor; uygulama yolunda sıfır satır.
+    Ignored,
+}
+
+/// [`Session::mouse_button`]'ın cevabı: düğme olayı nereye gitti. Basış da
+/// bırakma da buradan cevaplanıyor.
+///
+/// `bool` değil ve sebebi iki ayrı "hayır": *kip kapalı* (jest terminalin,
+/// seçim başlamalı) ile *kip açık ama rapor düştü* (koordinat kodlamaya
+/// sığmadı ya da satır uygulamanın ekranında değil). `bool` ikisini
+/// birleştirseydi geçmişe kaydırılmış pencerede fare kipindeki tıklama
+/// sessizce seçim başlatırdı — kullanıcının uygulamaya gönderdiğini sandığı
+/// tık ekranda bir vurgu bırakırdı. [`Wheel`]'in üç varyantlı olmasının
+/// gerekçesi de aynı aileden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Click {
+    /// Rapor uygulamaya gitti; jest artık uygulamanın.
+    Sent,
+    /// Jest terminalin: kip kapalı ya da Shift basılı. **Seçimi `bt-shell`
+    /// başlatıyor**, burası yalnız yolu söylüyor.
+    Select,
+    /// Hiçbir şey gitmedi: kip açık ama işaretçinin satırı uygulamanın
+    /// ekranında değil (pencere geçmişte) ya da koordinat kodlamaya sığmıyor;
+    /// bırakmada ise kip bu arada kapanmış.
     Ignored,
 }
 
@@ -3089,7 +3114,7 @@ impl Session {
                 let button = if lines > 0 { WHEEL_UP } else { WHEEL_DOWN };
                 let report = u16::try_from(line.0)
                     .ok()
-                    .and_then(|row| input::wheel_report(encoding, button, at.col, row));
+                    .and_then(|row| input::mouse_report(encoding, button, true, at.col, row));
                 let Some(report) = report else {
                     return Wheel::Ignored;
                 };
@@ -3105,6 +3130,100 @@ impl Session {
         }
         self.send(Msg::Input(unit.repeat(count).into()));
         Wheel::Sent
+    }
+
+    /// Fare düğmesi: basış ya da bırakma. Karar kipe bakar ve kip `Term`'de
+    /// yaşıyor, yani karar burada — `bt-shell` kip tutmaz ve **kipi
+    /// soramaz** (`bracketed_paste`'in yazılı gerekçesi: kapı dışarıdan
+    /// sorulabilseydi by-pass edilebilirdi).
+    ///
+    /// **Arbitraj tek cümle:** fare kipi (1000/1002/1003) açık ve Shift
+    /// basılı değilse jest uygulamanın, değilse terminalin. Shift **tek**
+    /// kaçış yolu ve onsuz uygulama içinde fareyle metin seçilemezdi;
+    /// tablonun kendisi saf (`input::button_route`) ve tekerlekle
+    /// asimetrisinin gerekçesi orada.
+    ///
+    /// **Bırakma basışın rotasını izler** ve rotayı `bt-shell` basışta
+    /// kilitliyor: Shift her olayda okunsaydı sürüklemenin ortasında Shift'i
+    /// bırakmak seçim jestini rapor jestine çevirirdi. Bu yüzden `pressed`
+    /// `false` olan çağrıda **Shift sorulmuyor**. Kip **yine de soruluyor**
+    /// ve bu R6'nın ("bırakma asla düşürülmez") daraltması: söz koordinat
+    /// içindi, kip için değil. Basış raporlandıktan sonra uygulama çıkıp
+    /// `\e[?1000l` göndermişse (vim kapandı) bırakma raporu **kabuğa**
+    /// giderdi — `\e[<0;5;3m` bir zsh komut satırına düşerdi. alacritty de
+    /// `on_mouse_release`'te kipi yeniden soruyor.
+    ///
+    /// **Koordinat basışta reddedilir, bırakmada kırpılır.** İşaretçinin
+    /// satırı `display_offset` ile uygulamanın satırına iner; basışta o satır
+    /// uygulamanın ekranında değilse ya da kodlamaya sığmıyorsa rapor gitmez
+    /// ([`Click::Ignored`], alacritty'nin kuralı). Bırakmada aynı ret
+    /// uygulamada **takılı kalmış bir düğme** bırakırdı — jest zaten
+    /// başlamış — ve hafifçe yanlış bir koordinat ondan iyidir
+    /// ([`crate::input::MouseEncoding::clamp`], bekçisi
+    /// `release_follows_press`).
+    ///
+    /// **Gönderim `send`'den geçiyor, `send_input`'tan değil** (tekerleğin
+    /// rapor kolunun aynısı, `wheel_and_replies_keep_the_selection`): rapor
+    /// kullanıcının yazdığı bir şey değil, uygulamaya iletilen bir olay.
+    /// Seçim durur ve pencere dibe dönmez — dönseydi geçmişe bakan pencere
+    /// her tıkta dibe fırlar, raporlanan hücre de kullanıcının baktığı yerden
+    /// kayardı. Bedeli `write_owned`'ın doc'undaki gerekçenin aynısı ve
+    /// bilinerek ödeniyor: uygulama rapordan sonra ekranını yeniden çizerse
+    /// vurgu aynı hücrelerde kalır, altındaki metin değişir.
+    ///
+    /// **Kare istenmez:** uygulama ekranını yeniden çizince okuyucunun
+    /// `Wakeup`'ı kareyi getirir (tekerleğin rapor kolu gibi).
+    ///
+    /// [`Click::Select`] kolunda seçimi **burası başlatmıyor**: çapa
+    /// `bt-shell`'in `set_selection`'ıyla iniyor, yani bu kolda iki `Term`
+    /// kilidi var. Yarış adıyla yazılı ve zararsız: kip iki kilit arasında
+    /// kapanırsa çapa yine atılır ve kullanıcı bir kez fazladan seçim
+    /// başlatır; ters yönde (kip açılırsa) rapor değil seçim olur. İkisi de
+    /// bir tıklık ve yönü güvenli — çapayı buraya almak `Session`'ın
+    /// arbitrajına seçim politikasını da yüklerdi.
+    pub fn mouse_button(
+        &self,
+        button: MouseButton,
+        pressed: bool,
+        at: SelectionPoint,
+        modifiers: MouseModifiers,
+    ) -> Click {
+        let term = self.term.lock();
+        let mode = *term.mode();
+        let encoding = if pressed {
+            match input::button_route(mode, modifiers.shift) {
+                ButtonRoute::Select => return Click::Select,
+                ButtonRoute::Report(encoding) => encoding,
+            }
+        } else {
+            // Rota kilitli (Shift sorulmuyor), kip değil — doc'taki daraltma.
+            match input::button_route(mode, false) {
+                ButtonRoute::Select => return Click::Ignored,
+                ButtonRoute::Report(encoding) => encoding,
+            }
+        };
+        let offset = term.grid().display_offset() as i32;
+        let line = viewport_point((at.col, at.row), offset).line;
+        let byte = input::button_byte(button, modifiers);
+        let report = if pressed {
+            u16::try_from(line.0)
+                .ok()
+                .and_then(|row| input::mouse_report(encoding, byte, true, at.col, row))
+        } else {
+            // Satır yalnız **negatife** kaçabilir (pencere geçmişte, ya da
+            // işaretçi doldurma bandında): `display_offset` eksi olmadığı
+            // için üstten taşma yok. Kodlamanın tavanı ayrıca kırpılıyor —
+            // sütun da, satır da.
+            let row = u16::try_from(line.0.max(0)).unwrap_or(u16::MAX);
+            let (col, row) = (encoding.clamp(at.col), encoding.clamp(row));
+            input::mouse_report(encoding, byte, false, col, row)
+        };
+        drop(term);
+        let Some(report) = report else {
+            return Click::Ignored;
+        };
+        self.send(Msg::Input(report.into()));
+        Click::Sent
     }
 
     /// Ok tuşu — klavyenin oku baytla değil tuşla girer; neden [`Arrow`]'da.
@@ -6908,6 +7027,17 @@ mod tests {
         session.scroll_wheel(lines, at(0, 0, CellHalf::Left), false)
     }
 
+    /// Shift'siz sol tuş basışı — düğme sınamalarının ortak çağrısı.
+    fn press(session: &Session, at: SelectionPoint) -> Click {
+        session.mouse_button(MouseButton::Left, true, at, MouseModifiers::default())
+    }
+
+    /// Shift'siz sol tuş bırakması; Shift zaten okunmuyor (rota basışta
+    /// kilitli).
+    fn release(session: &Session, at: SelectionPoint) -> Click {
+        session.mouse_button(MouseButton::Left, false, at, MouseModifiers::default())
+    }
+
     /// Hasar sormadan bu anın imleç kaydı.
     ///
     /// [`frame_if_damaged`]'ten ayrı, çünkü sorulan şey kare isteği değil
@@ -8538,6 +8668,83 @@ mod tests {
             Some("araba"),
             "tekerlek oku seçimi temizledi"
         );
+    }
+
+    #[test]
+    fn button_reports_keep_the_selection_and_the_scrollback() {
+        // Düğme raporu `write_owned`'ın değil tekerleğin kolundan geçiyor
+        // (`send`, `send_input` değil): rapor kullanıcının yazdığı bir şey
+        // değil, uygulamaya iletilen bir olay. İki yan etki de sınanıyor,
+        // çünkü `send_input` ikisini birden yapar.
+        let (session, _wake) = dump_session(40, "printf 'araba\\033[?1000h\\033[?1006h'", |mode| {
+            mode.contains(TermMode::SGR_MOUSE)
+        });
+        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        assert_eq!(press(&session, at(1, 0, CellHalf::Left)), Click::Sent);
+        assert_eq!(
+            session.selection_text().as_deref(),
+            Some("araba"),
+            "düğme raporu seçimi temizledi"
+        );
+        // Karşıt: aynı oturumda kullanıcı girdisi temizliyor.
+        session.write(b"x");
+        assert_eq!(session.selection_text(), None);
+
+        // Geçmişe bakan pencere dibe fırlamıyor. Geçmiş **bir sayfadan kısa**
+        // (14 satır, 10 satırlık ekran): bir sayfalık kaydırma geçmişin
+        // ucunda duruyor ve alt satırlar uygulamanın ekranında kalıyor
+        // (`row - offset >= 0`), yani rapor gerçekten gidiyor ve sorulan şey
+        // ofset. Tam sayfalık geçmişte her görünür satır negatife düşerdi.
+        let (scrolled, _wake) =
+            dump_session(40, "seq 1 14; printf '\\033[?1000h\\033[?1006h'", |mode| {
+                mode.contains(TermMode::SGR_MOUSE)
+            });
+        assert!(scrolled.scroll_page(1).is_some_and(|moved| moved > 0));
+        assert_eq!(press(&scrolled, at(0, 9, CellHalf::Left)), Click::Sent);
+        // Ölçüt "sıfır değil": `send_input` olsaydı ofset **dibe**, yani tam
+        // sıfıra inerdi. Eşitlik sorulmuyor çünkü uygulamanın bu arada
+        // basacağı bir satır ofseti meşru olarak artırır.
+        assert!(
+            display_offset(&scrolled) > 0,
+            "düğme raporu pencereyi dibe döndürdü"
+        );
+    }
+
+    #[test]
+    fn release_follows_press() {
+        // R6: basış raporlandıysa bırakma **düşürülmez**, kırpılır —
+        // düşürmek uygulamada takılı kalmış bir düğme bırakırdı. Ölçüt bu
+        // yüzden asimetrik ve asimetri bilerek: aynı koordinat basışta
+        // reddediliyor (jest hiç başlamamış), bırakmada kırpılıyor (jest
+        // zaten başlamış).
+        let (session, wake) =
+            dump_session(40, "seq 1 30; printf '\\033[?1000h\\033[?1006h'", |mode| {
+                mode.contains(TermMode::SGR_MOUSE)
+            });
+        // Pencereyi geçmişe al: klavye kaydırması karar tablosundan geçmiyor,
+        // tekerlek bu kipte rapora giderdi.
+        assert!(session.scroll_page(1).is_some_and(|moved| moved > 0));
+        let top = at(0, 0, CellHalf::Left);
+        assert_eq!(press(&session, top), Click::Ignored, "satır geçmişte");
+        assert_eq!(release(&session, top), Click::Sent, "bırakma düştü");
+        // Dökümü okumak için dibe dön — kaydırılmış pencere yeni çıktıyı
+        // göstermez ve `expect_sent` ekrandan okuyor.
+        assert!(session.scroll_page(-2).is_some());
+        // Kırpılmış koordinat: negatif satır 0'a, yani SGR'ın 1'ine iniyor.
+        expect_sent(&session, &wake, b"\x1b[<0;1;1m");
+
+        // Rota kilitli ama **kip yeniden soruluyor** (R6'nın daraltması):
+        // basıştan sonra uygulama çıkıp `\e[?1000l` göndermişse bırakma
+        // raporu kabuğun komut satırına düşerdi. "Hiçbir şey gitmedi" iğnesi
+        // oturum başına bir kez ve **ilk** adım (`expect_sent`'in kuralı),
+        // bu yüzden ayrı oturum.
+        let (closed, wake) = dump_session(
+            40,
+            "printf '\\033[?1000h\\033[?1006h\\033[?1000l'",
+            |mode| mode.contains(TermMode::SGR_MOUSE) && !mode.intersects(TermMode::MOUSE_MODE),
+        );
+        assert_eq!(release(&closed, at(0, 0, CellHalf::Left)), Click::Ignored);
+        expect_sent(&closed, &wake, b"");
     }
 
     #[test]
