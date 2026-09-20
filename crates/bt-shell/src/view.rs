@@ -1,26 +1,39 @@
 //! Pencerenin içeriği: `CAMetalLayer`'ı taşıyan ve klavyeyi PTY'ye akıtan view.
 //!
 //! Çizim burada **yok** — layer'ın içeriğini `bt-gpu` doldurur. Bu sınıfın işi
-//! first responder olmak, tuş vuruşunu [`crate::keys::encode_key`]'e verip
-//! çıkan baytı ya da oku oturuma yazmak, fareyi (basış, sürükleme, bırakış ve
-//! tekerlek) hücreye çevirip oturuma iletmek ve Edit menüsünün Copy/Paste
-//! eylemlerini karşılamak. Terminal kararları (seçim
+//! first responder olmak, tuş vuruşunu doğru kola vermek, fareyi (basış,
+//! sürükleme, bırakış ve tekerlek) hücreye çevirip oturuma iletmek ve Edit
+//! menüsünün Copy/Paste eylemlerini karşılamak. Terminal kararları (seçim
 //! aralığı, sayfanın boyu, tekerleğin kipe göre yolu, okun baytı) `bt-core`'da;
 //! burada AppKit'e bakan taraf yaşar — piksel → hücre aritmetiği, tekerleğin
 //! satır artığı, sürüklemenin sürüp sürmediği.
+//!
+//! **Klavyenin metin yolu artık AppKit'in yığınından geçiyor** ve `keyDown:`
+//! tek kapı değil bir **arbitraj**: Cmd'li olay yutulur, Shift+PgUp/PgDn
+//! terminalin kaydırmasıdır, Control'lü olay doğrudan
+//! [`crate::keys::encode_key`]'e gider ve **kalanı** `interpretKeyEvents:` ile
+//! metin yığınına verilir. Yığın ölü tuş durumunu kendi tutar ve bileşim
+//! tamamlanınca metni `insertText:` ile geri verir — düzen verisini biz
+//! okumuyoruz. Yığın olayı almadıysa ([`ViewIvars::consumed`]) olay yine
+//! `encode_key`'e düşer: fonksiyon tuşları, Enter/Tab/Esc/Backspace ve
+//! tanınmayan her şey oradan geçer.
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 
 use bt_core::{CellHalf, SelectionPoint, Session, Wheel};
 use bt_gpu::{CellMetrics, Origin};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSEvent, NSEventModifierFlags, NSEventPhase, NSPasteboard, NSView,
+    NSApplication, NSEvent, NSEventModifierFlags, NSEventPhase, NSPasteboard, NSTextInputClient,
+    NSView,
 };
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint,
+    NSRange, NSRangePointer, NSRect, NSString, NSUInteger,
+};
 
 use crate::clipboard;
 use crate::keys::{KeyInput, encode_key, page_scroll};
@@ -203,7 +216,44 @@ pub(crate) struct ViewIvars {
     /// devri, 006 phase-3'te kapandı). Geriye kalan soru yalnız "sürükleme
     /// sürüyor mu": basışsız bir `mouseDragged:` eski seçimin ucunu
     /// taşımasın.
-    dragging: std::cell::Cell<bool>,
+    dragging: Cell<bool>,
+    /// **Metin yığını bu olayı aldı mı** — `keyDown:`'ın yeniden giriş
+    /// bayrağı. `interpretKeyEvents:` çağrılmadan önce `false`'a çekilir;
+    /// `insertText:` **ve** `setMarkedText:` onu `true` yapar, `keyDown:`
+    /// dönüşte okur ve `false` ise olayı [`crate::keys::encode_key`]'e düşürür.
+    ///
+    /// Değişmez **"yığın olayı aldı"**, "metin geldi" değil — adı bu yüzden
+    /// `consumed`. Ölü tuşun ilk vuruşunda (`Option+ü`) `characters` boş
+    /// olduğu için fallback bugün tesadüfen zararsız; bayrağı yalnız
+    /// `insertText:` set etseydi değişmez o tesadüfe yazılır ve boş olmayan
+    /// bir bileşim başlangıcı tuşu iki kez gönderirdi.
+    ///
+    /// `Cell`, ivar: `interpretKeyEvents:` bizi **yeniden çağırıyor**, yani
+    /// değer `keyDown:`'ın yığın çerçevesinde taşınamaz. Tek thread (ana
+    /// thread) olduğu için paylaşılan durum değil — emsal yanındaki
+    /// [`ViewIvars::dragging`].
+    ///
+    /// **Göremediği bir hâl var ve ölçülmedi:** bekleyen bir bileşimi
+    /// yalnız `unmarkText` ile iptal eden tuş (ölü tuştan sonra Backspace ya
+    /// da Esc) bayrağı kurmuyor, yani olay `encode_key`'e düşüyor ve PTY'ye
+    /// `0x7f` gidiyor — kullanıcının **gerçekten** yazdığı bir harf silinir.
+    /// Karşı hâl de ölçülmedi: `unmarkText`'i tüketme saymak, bileşimden
+    /// sonraki ilk oku da yutardı (yığın onu `unmarkText` + `moveLeft:`
+    /// olarak veriyor). İki yön de bir tuş turuyla ayrışıyor ve savunma o
+    /// ölçümden **sonra** kurulur — bugün yazılacak kol, hangisinin gerçek
+    /// olduğunu bilmeden yanlış yarıyı seçebilir.
+    consumed: Cell<bool>,
+    /// Bileşimin (marked text) **asgari** durumu: yığının henüz
+    /// tamamlanmamış girdisi. Çizim **yok** — `bt-gpu`'nun altı çizili
+    /// preedit yüzeyi bu sette doğmuyor; burada yalnız
+    /// `hasMarkedText`/`markedRange`/`selectedRange`'in cevap verebileceği
+    /// **durum** var.
+    ///
+    /// Boş dizge "bileşim yok" demek: `unmarkText` ve `insertText:` onu
+    /// boşaltır. Stub bırakmak (her şeye "bileşim yok" demek) **ölçülmemiş**
+    /// bir iddiaydı; alacritty ve ghostty ikisi de bir marked-text alanı
+    /// tutuyor.
+    marked_text: RefCell<String>,
     /// Tekerleğin satıra dönmemiş artığı ([`wheel_lines`]). Üç yerde sıfırlanır,
     /// üçünde de kalan artık bir sonraki kaydırmaya ait değil: yeni jestin
     /// başında (önceki jestin kırıntısı yeni jesti erken ya da geç tetiklemesin),
@@ -212,7 +262,7 @@ pub(crate) struct ViewIvars {
     /// ters yöndeki ilk satırı geciktirmesin). Tekerlek uygulamaya gidince
     /// (`Wheel::Sent`) **korunur**: trackpad'le yavaş kaydırmada her olayın
     /// küsuratı düşseydi `less` sarsak kayardı.
-    scroll_carry: std::cell::Cell<f64>,
+    scroll_carry: Cell<f64>,
     /// Fare çevirisinin canlı girdileri: ölçü `bt-gpu`'dan, grid `bt-core`'un
     /// bildiği sayı. `OnceCell` değil `Cell<Option<…>>`, çünkü pencere boyu
     /// değişince tazeleniyor (`set_metrics`). Ayrı bir kopya gibi görünüyor
@@ -228,7 +278,7 @@ pub(crate) struct ViewIvars {
     /// kapanıyor. Dejenere boyut bu geçişi hiç doğurmuyor: oturum onu
     /// reddediyor (`Session::resize`) ve `point_to_cell` sıfır satır/sütunda
     /// `None` dönüyor, yani iki taraf da aynı yerde susuyor.
-    metrics: std::cell::Cell<Option<(CellMetrics, (u16, u16))>>,
+    metrics: Cell<Option<(CellMetrics, (u16, u16))>>,
     /// Çizilen karenin dikey orijini — kare yolunun yazdığı gövdenin okuma
     /// ucu ([`bt_gpu::Origin`]).
     ///
@@ -441,14 +491,35 @@ define_class!(
             }
         }
 
+        /// Tuş vuruşunun **arbitrajı** — dört kol, ve sırası sözleşme.
+        ///
+        /// İlk üç kol AppKit'in metin yığınına (`interpretKeyEvents:`)
+        /// **girmez** ve girmemeleri ayrı ayrı gerekçeli:
+        ///
+        /// 1. **Cmd'li olay** yutulur (`reaches_terminal`). Yığına girseydi
+        ///    ⌘⌫ orada `deleteToBeginningOfLine:` olur, ⌘T de
+        ///    `insertText:`'e varıp kabuğa `t` yazardı; Cmd'nin izin listesi o
+        ///    tuşları hiç görmezdi.
+        /// 2. **Shift+PgUp/PgDn** terminalin kaydırmasıdır
+        ///    ([`page_scroll`]). Kol Control'ünkinden **önce**, çünkü
+        ///    `page_scroll` Shift dışındaki değiştiricileri sormuyor —
+        ///    Ctrl'lü Shift+PgUp da bugün kaydırıyor ve sıra ters olsaydı
+        ///    o tuş `\e[5~`'e düşerdi.
+        /// 3. **Control'lü olay** doğrudan [`encode_key`]'e gider. AppKit'in
+        ///    kolunu seçmesine bırakılamaz: numpad Enter'ın `characters`'ı
+        ///    U+0003 (Ctrl-C'nin baytı) ve Ctrl-Y'ninki U+0019'u Shift+Tab ile
+        ///    paylaşıyor — yığın yanlış kolu seçerse her komut kesilir.
+        ///    Yan kazanç: Ctrl+Shift+Tab ve Ctrl+numpad Enter borçları bugünkü
+        ///    hâllerinde kalıyor. **Bedeli adıyla:** bekleyen bir bileşim bu
+        ///    koldan yıkılmıyor — Option+ü'den sonra `^C`, ardından `a`
+        ///    yazmak `ã` üretebilir, çünkü yığın hâlâ ölü tuşu bekliyor.
+        ///    Ölçülmedi ve savunma kurulmadı: kolu yığına sokmak numpad
+        ///    Enter'ın U+0003'ünü AppKit'in seçimine bırakırdı, yani takas
+        ///    "her komut kesilebilir"e karşı "seyrek bir aksan".
+        /// 4. **Kalanı** yığına verilir; yığın olayı almadıysa
+        ///    ([`ViewIvars::consumed`]) yine `encode_key`'e düşer.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            // `characters` modifier'lar uygulanmış hâli verir (Option-basılı
-            // "ø", Ctrl-C → U+0003); ham tuş kodu `charactersIgnoringModifiers`
-            // olurdu ve klavye düzenini bizim yeniden uygulamamızı isterdi.
-            let Some(chars) = event.characters() else {
-                return;
-            };
             let flags = event.modifierFlags();
             let Some(session) = self.ivars().session.get() else {
                 return;
@@ -459,14 +530,21 @@ define_class!(
             if !reaches_terminal(flags) {
                 return;
             }
-            let chars = chars.to_string();
+            // `characters` modifier'lar uygulanmış hâli verir (Option-basılı
+            // "ø", Ctrl-C → U+0003); ham tuş kodu `charactersIgnoringModifiers`
+            // olurdu ve klavye düzenini bizim yeniden uygulamamızı isterdi.
+            // Yokluğu (saf modifier tuşu) aşağıdaki iki kolu da susturuyor ama
+            // **yığını susturmuyor**: bileşimin ilk vuruşunda `characters` boş
+            // gelir ve ölü tuş tam oradan başlar.
+            let chars = event.characters().map(|c| c.to_string());
             // Shift+PgUp/PgDn terminalin kaydırmasıdır, uygulamanın tuşu değil —
             // ama yalnız oturum kabul ederse. Alternate screen'de kaydırma
             // reddedilir (`None`) ve tuş aşağıdaki yoldan uygulamaya düz PgUp
             // olarak gider: less/vim'de Shift+PgUp da sayfa çevirir, yutulmaz.
             // Sayfanın kaç satır olduğu `bt-core`'un kararı (`scroll_page`).
             let shift = flags.contains(NSEventModifierFlags::Shift);
-            if let Some(pages) = page_scroll(&chars, shift)
+            if let Some(chars) = chars.as_deref()
+                && let Some(pages) = page_scroll(chars, shift)
                 && let Some(moved) = session.scroll_page(pages)
             {
                 if moved != 0 {
@@ -475,8 +553,27 @@ define_class!(
                 return;
             }
             let ctrl = flags.contains(NSEventModifierFlags::Control);
+            if !ctrl {
+                // Metin yığını: ölü tuş durumunu o tutuyor ve bileşim
+                // tamamlanınca metni `insertText:` ile geri veriyor. Bayrak
+                // çağrıdan **önce** iniyor; yığın bizi yeniden çağırdığı için
+                // cevabı ivar taşıyor, `keyDown:`'ın yığın çerçevesi değil.
+                self.ivars().consumed.set(false);
+                // Tek olaylık dizi: yığın onu senkron tüketiyor ve
+                // aşağıdaki okuma dönüşten sonra geçerli.
+                self.interpretKeyEvents(&NSArray::from_slice(&[event]));
+                if self.ivars().consumed.get() {
+                    return;
+                }
+            }
+            // Yığının almadığı (ya da hiç uğramadığı) olay: fonksiyon tuşları,
+            // Enter/Tab/Esc/Backspace ve Control'lü harfler.
+            //
             // `super`'e geçmiyoruz: `NSResponder::keyDown:` tanımadığı tuşta
             // beep çalar ve terminalde her ok tuşu bip sesi olurdu.
+            let Some(chars) = chars else {
+                return;
+            };
             match encode_key(&chars, ctrl) {
                 Some(KeyInput::Bytes(bytes)) => session.write(&bytes),
                 // Okun baytı DECCKM'e bağlı, kip `bt-core`'da.
@@ -485,20 +582,243 @@ define_class!(
             }
         }
     }
+
+    /// AppKit'in metin yığınının bu view'a bakan yüzü. Protokolün **11
+    /// zorunlu** metodu da burada: `objc2-app-kit` hiçbirini `#[optional]`
+    /// işaretlemiyor ve eksik kalanı `define_class!`'ın debug assertion'ında
+    /// panikliyor — kısmi uyum bir seçenek değil.
+    ///
+    /// Üçü bileşim durumunu **yazıyor** (`insertText:`, `setMarkedText:`,
+    /// `unmarkText`), üçü onu **okuyor** (`selectedRange`, `markedRange`,
+    /// `hasMarkedText`); `doCommandBySelector:` bilerek boş ve kalan dördü
+    /// sabit cevap veriyor — her biri kendi "neden"iyle.
+    unsafe impl NSTextInputClient for BateriView {
+        /// Bileşim tamamlandı (ya da düz bir harf geldi): metin PTY'ye gider.
+        ///
+        /// Argüman `&AnyObject` — yığın `NSString` **ya da**
+        /// `NSAttributedString` gönderebiliyor. **Tek** çözme kuralı:
+        /// `NSString`'e downcast, olmazsa `NSAttributedString::string()`;
+        /// ikisi de değilse olay **tüketilmiş sayılmıyor** ve `keyDown:`
+        /// onu `encode_key`'e düşürüyor — tanımadığımız bir tipi sessizce
+        /// yutmak tuşu büsbütün kaybettirirdi.
+        ///
+        /// `replacement_range` yoksayılıyor: yığının düzenleyebileceği bir
+        /// belgemiz yok, yazılan şey doğrudan PTY'ye akıyor ve satırın
+        /// sahibi kabuk. **Bilinen sonucu var**: aksan popover'ı bir harf
+        /// seçtirdiğinde çağrı `insertText:"é" replacementRange:{n-1,1}`
+        /// oluyor, yani "son harfi bununla değiştir"; biz aralığı
+        /// atladığımız için kabuğa `eé` gider. Popover kapalı
+        /// (`app::disable_press_and_hold`) ve bu yüzden yol bugün ölü; o
+        /// bastırma tutmazsa belirtinin **sessiz yarısı** budur (gürültülü
+        /// yarısı basılı tuşun yinelememesi).
+        #[unsafe(method(insertText:replacementRange:))]
+        fn insert_text(&self, string: &AnyObject, _replacement_range: NSRange) {
+            // Bileşim **çözme kuralından önce** siliniyor: tanımadığımız bir
+            // tip gelse bile yığın o bileşimi bitirmiş oluyor ve durum
+            // orada kalsaydı `hasMarkedText` sonsuza kadar `true` derdi.
+            self.ivars().marked_text.borrow_mut().clear();
+            let Some(text) = resolve_text(string) else {
+                return;
+            };
+            // Bayrak **oturumdan önce**: değişmez "yığın bu olayı aldı", "bayt
+            // yazıldı" değil. Oturum henüz bağlanmadıysa tuş kaybolur ama
+            // `encode_key` onu ikinci kez göndermez.
+            self.ivars().consumed.set(true);
+            if let Some(session) = self.ivars().session.get() {
+                session.write(text.as_bytes());
+            }
+        }
+
+        /// Yığının tanıdığı bir düzenleme komutu (Enter → `insertNewline:`,
+        /// Tab → `insertTab:`, Esc → `cancelOperation:`, `^A` →
+        /// `moveToBeginningOfParagraph:`…): **sessiz no-op**.
+        ///
+        /// Metot gövdesiz kalamaz, boş da olsa: yoksa `NSResponder`'ın
+        /// varsayılanı koşar ve tanımadığı seçicide **bip çalar** —
+        /// `keyDown:`'da `super`'e geçmeme gerekçesinin aynısı, yeni kapıdan.
+        /// Bayrak set edilmiyor, yani olay `encode_key`'e düşüyor ve baytı
+        /// bugünkü yerden geliyor.
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command_by_selector(&self, _selector: Sel) {}
+
+        /// Bileşim sürüyor (ölü tuş basıldı, henüz tamamlanmadı): durum
+        /// güncellenir. **Çizim yok** — altı çizili preedit yüzeyi bu sette
+        /// doğmuyor.
+        ///
+        /// Bayrağı bu metot da set ediyor ([`ViewIvars::consumed`]): değişmez
+        /// "yığın olayı aldı", "metin geldi" değil.
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        fn set_marked_text(
+            &self,
+            string: &AnyObject,
+            _selected_range: NSRange,
+            _replacement_range: NSRange,
+        ) {
+            let Some(text) = resolve_text(string) else {
+                return;
+            };
+            self.ivars().consumed.set(true);
+            *self.ivars().marked_text.borrow_mut() = text;
+        }
+
+        /// Bileşim iptal edildi ya da tamamlandı. Bayrak **set edilmiyor**:
+        /// yığın bunu `keyDown:` dışından da (odak kaybı, fare) çağırıyor ve
+        /// o çağrı bir tuş olayını tüketmiş sayılmaz.
+        ///
+        /// **Sözleşmeden bilinçli sapma:** Apple "işaretli metni normal
+        /// yazılmış gibi kabul et" diyor, biz **atıyoruz**. Sebebi bizde
+        /// geri alınacak bir belge olmaması: `insertText:` baytı doğrudan
+        /// PTY'ye akıtıyor ve kabuk onu satırına almış oluyor, yani
+        /// "kabul etmek" bekleyen aksanı kullanıcının hiç istemediği bir yere
+        /// yazmak demek. Bedeli adıyla duruyor — bileşim ortasında pencereye
+        /// tıklamak bekleyen `~`'yi sessizce düşürür; alacritty ve ghostty de
+        /// aynı yerde aynı şeyi yapıyor.
+        #[unsafe(method(unmarkText))]
+        fn unmark_text(&self) {
+            self.ivars().marked_text.borrow_mut().clear();
+        }
+
+        /// Seçim aralığı. Modelimiz tek cümle: **belge = bileşim metni,
+        /// imleç sonunda**. Terminalin ızgarasındaki seçim (fareyle yapılan)
+        /// bu soruya girmiyor — o `bt-core`'un seçimi ve yığının
+        /// düzenleyebileceği bir metin değil.
+        #[unsafe(method(selectedRange))]
+        fn selected_range(&self) -> NSRange {
+            NSRange::new(self.marked_utf16_len(), 0)
+        }
+
+        /// İşaretli aralık; bileşim yoksa `NSNotFound` — "işaretli bir şey
+        /// yok"un sözleşmedeki karşılığı, sıfır uzunluklu bir aralık değil.
+        #[unsafe(method(markedRange))]
+        fn marked_range(&self) -> NSRange {
+            match self.marked_utf16_len() {
+                0 => EMPTY_RANGE,
+                len => NSRange::new(0, len),
+            }
+        }
+
+        #[unsafe(method(hasMarkedText))]
+        fn has_marked_text(&self) -> bool {
+            !self.ivars().marked_text.borrow().is_empty()
+        }
+
+        /// Yığının geri okuyabileceği bir belge **yok**: yazılan her şey
+        /// PTY'ye akıyor ve ızgaranın içeriği `bt-core`'un, metin
+        /// yığınının değil. `None` = "bu aralıkta metnim yok".
+        ///
+        /// `actual_range` yazılmıyor: hiçbir aralık döndürmediğimiz için
+        /// doldurulacak bir gerçek aralık da yok (Apple'ın sözleşmesi).
+        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
+        fn attributed_substring(
+            &self,
+            _range: NSRange,
+            _actual_range: NSRangePointer,
+        ) -> Option<Retained<NSAttributedString>> {
+            None
+        }
+
+        /// İşaretli metnin taşıyabileceği öznitelikler: **hiçbiri**. Boş
+        /// dizi "altını çizme, renklendirme, ruby — hiçbirini uygulayamam"
+        /// demek ve preedit'i çizmediğimiz için doğrusu bu.
+        #[unsafe(method_id(validAttributesForMarkedText))]
+        fn valid_attributes_for_marked_text(&self) -> Retained<NSArray<NSAttributedStringKey>> {
+            NSArray::new()
+        }
+
+        /// Bileşim yüzeyinin (aksan popover'ı, aday penceresi) ekranda
+        /// konumlanacağı dikdörtgen — **ekran koordinatında**.
+        ///
+        /// Cevap view'ın kendi dikdörtgeni, hücre hassasiyetinde değil ve
+        /// bu **bilinçli**: kapsam içinde tüketicisi yok (ölü tuş önizlemesi
+        /// popover değil marked text, aday penceresi de CJK'nın, yani tam
+        /// IME borcunun). İmleç hücresini crate sınırı ötesinden taşımak
+        /// (`bt_gpu::Origin` emsali) o iş geldiğinde ilk adım olur.
+        /// Yaklaşımın yönü yine de doğru: içerik pencerenin **tabanına**
+        /// yaslanıyor, yani imleç view dikdörtgeninin sol alt köşesinin
+        /// yakınında ve yüzey oradan açılıyor.
+        ///
+        /// Sıfır dikdörtgen dönmemenin sebebi duruyor: yüzey o zaman ekranın
+        /// köşesinde belirirdi. Penceresi olmayan view'da (henüz takılmamış)
+        /// çevirecek bir uzay yok, cevap sıfır.
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn first_rect_for_character_range(
+            &self,
+            range: NSRange,
+            actual_range: NSRangePointer,
+        ) -> NSRect {
+            // Sorulan aralığın tamamını karşıladığımızı söylüyoruz: tek bir
+            // dikdörtgen dönüyoruz ve o dikdörtgen aralığın tamamına ait.
+            // SAFETY: işaretçi ya null ya da çağıranın yığınındaki geçerli
+            // bir `NSRange`; AppKit'in sözleşmesi bu.
+            unsafe {
+                if let Some(actual) = actual_range.as_mut() {
+                    *actual = range;
+                }
+            }
+            let Some(window) = self.window() else {
+                return NSRect::ZERO;
+            };
+            window.convertRectToScreen(self.convertRect_toView(self.bounds(), None))
+        }
+
+        /// Ekrandaki bir noktanın hangi karaktere denk geldiği: **cevabımız
+        /// yok**. Yığın bunu sürükleyerek metin seçmek için soruyor ve
+        /// ızgaranın seçimi bizim kendi yolumuz (`mouseDragged:`), yığının
+        /// değil. `NSNotFound` sözleşmedeki "bu noktada karakterim yok".
+        #[unsafe(method(characterIndexForPoint:))]
+        fn character_index_for_point(&self, _point: NSPoint) -> NSUInteger {
+            NOT_FOUND
+        }
+    }
 );
+
+/// `NSNotFound`'un `NSRange` alanlarındaki tipi. Sabit `NSInteger` olarak
+/// geliyor, aralıkların iki alanı ise `NSUInteger`; dönüşüm tek yerde dursun.
+const NOT_FOUND: NSUInteger = NSNotFound as NSUInteger;
+
+/// "İşaretli bir şey yok" — `markedRange`'in bileşimsiz cevabı.
+const EMPTY_RANGE: NSRange = NSRange::new(NOT_FOUND, 0);
+
+/// Yığının verdiği metin nesnesini dizgeye indirger — **tek** çözme kuralı
+/// ([`NSTextInputClient::insertText_replacementRange`] ve
+/// `setMarkedText:` aynı soruyu soruyor).
+///
+/// Argümanın tipi belgede "doğru tipte olmalı" diye geçiyor ve pratikte iki
+/// tip geliyor: düz `NSString` (çoğu yol) ve `NSAttributedString` (işaretli
+/// metin, aday penceresi). `None` = ikisi de değil; çağıran o olayı
+/// tüketilmiş saymıyor ve `encode_key`'e düşürüyor.
+fn resolve_text(string: &AnyObject) -> Option<String> {
+    if let Some(text) = string.downcast_ref::<NSString>() {
+        return Some(text.to_string());
+    }
+    string
+        .downcast_ref::<NSAttributedString>()
+        .map(|text| text.string().to_string())
+}
 
 impl BateriView {
     pub(crate) fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ViewIvars {
             session: OnceCell::new(),
-            dragging: std::cell::Cell::new(false),
-            scroll_carry: std::cell::Cell::new(0.0),
-            metrics: std::cell::Cell::new(None),
+            dragging: Cell::new(false),
+            consumed: Cell::new(false),
+            marked_text: RefCell::new(String::new()),
+            scroll_carry: Cell::new(0.0),
+            metrics: Cell::new(None),
             origin: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
         // set edildi.
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// Bileşim metninin **UTF-16 kod birimi** sayısı — `NSRange`'in birimi o.
+    ///
+    /// Bayt değil: `ü` bir kod birimi ama iki bayt, ve ölü tuş bileşimi tam
+    /// olarak o harflerde yaşıyor. `String::len()` yazılsaydı yığın bileşimin
+    /// boyunu olduğundan uzun görürdü.
+    fn marked_utf16_len(&self) -> usize {
+        self.ivars().marked_text.borrow().encode_utf16().count()
     }
 
     /// Oturumu bağlar; bu andan sonra tuşlar PTY'ye gider.

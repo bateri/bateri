@@ -28,8 +28,9 @@ use objc2_app_kit::{
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
-    NSArray, NSNotification, NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint,
-    NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL, ns_string,
+    NSArray, NSDictionary, NSNotification, NSNumber, NSObject, NSObjectNSDelayedPerforming,
+    NSObjectProtocol, NSPoint, NSRect, NSRunLoopCommonModes, NSSize, NSString, NSURL,
+    NSUserDefaults, ns_string,
 };
 
 use crate::clipboard::PendingCopy;
@@ -641,6 +642,38 @@ fn open_in_editor(path: &Path) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Basılı tutulan harfin **aksan popover'ını** kapatır: terminalde basılı
+/// tuş **yineleme** demektir (vim'de `j`, kabukta `u`), popover onu çalar.
+///
+/// Yan etki `NSTextInputClient`'ın kendisiyle geliyor (018 phase-1): protokolü
+/// uygulamayan bir view'da popover zaten çıkmıyordu.
+///
+/// Yazılan yer uygulamanın **kendi `registerDefaults`'ı**, yani bellekteki
+/// registration domain: kullanıcının plist'i el değmeden kalıyor ve ayar
+/// koşudan koşuya taşınmıyor. Gerekçe kabuğun rc dosyasına dokunmama
+/// kuralının aynısı — kullanıcının dosyasına biz yazmayız. Kurulu bir ürünün
+/// kanıtı aynı anahtarı gösteriyor: iTerm2 kendi domain'inde
+/// `ApplePressAndHoldEnabled = 0` tutuyor.
+///
+/// **Ölçüm bekliyor:** bellek içi domain'in popover'ı gerçekten bastırdığı
+/// ölçülmedi; iTerm2'nin kanıtı *kalıcı* domain değeri (ghostty aynı
+/// `registerDefaults` yolunu kullanıyor).
+///
+/// **Tutmazsa belirti iki yarılı** ve ikincisi sessiz: gürültülü yarısı
+/// basılı tuşun yinelememesi, sessiz yarısı popover'dan seçilen harfin
+/// kabuğa **çift** gitmesi — o çağrı `insertText:"é" replacementRange:{n-1,1}`
+/// oluyor ve `view::BateriView` aralığı atladığı için `eé` yazılıyor.
+/// Popover'ı açan şey `NSTextInputClient`'ın kendisi, yani bu iki belirtiyi
+/// de doğuran ve tek çaresi burada olan aynı değişiklik (018 phase-1).
+fn disable_press_and_hold() {
+    let key = ns_string!("ApplePressAndHoldEnabled");
+    let off = NSNumber::numberWithBool(false);
+    let defaults = NSDictionary::from_slices::<NSString>(&[key], &[off.as_ref()]);
+    // SAFETY: sözlüğün anahtarı `NSString`, değeri property-list'e girebilen
+    // bir `NSNumber` — `registerDefaults`'ın istediği tipler.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+}
+
 /// Delegate'in durumu. `OnceCell`: pencere, oturum ve link
 /// `applicationDidFinishLaunching` içinde bir kez doğar, sonra yalnız okunur.
 pub(crate) struct Ivars {
@@ -734,6 +767,7 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
+            disable_press_and_hold();
             // AppKit'in kendi pencere sekmeleri kapalı: açıkken "View" adlı
             // menüye Show Tab Bar / Show All Tabs ekliyor ve tek pencerelik
             // uygulamada boş bir sekme çubuğu açıyorlar. Sekmeler kendi
