@@ -233,8 +233,12 @@ Kapatan sınama makineye bağlı olurdu; kapatan şey on saniyelik bir tuş.
 - [x] B.2 §1 kazanç tablosu — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
 - [x] B.2 §2 sıfır regresyon listesi — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
 - [x] B.2 §3 Finder damlası tablosu — kullanıcı doğruladı: "018 deki şeyler çalışıyor" (2026-09-20)
-- [x] B.2 §4 press-and-hold — kullanıcı turu koştu ve itiraz etmedi; ölçülen
-      yarısı (registration domain ezilmiyor) `71f4676` öncesinde kayda geçti. Eski hâli: çıkan sonuca göre B.4 §2 kapanır ya da bir
+- [ ] B.2 §4 press-and-hold — **işaretim geri alındı (2026-09-20)**: kullanıcının
+      "018 çalışıyor"u bu kalemi kapsamıyordu, ne sınanacağını bilmiyordu ve ben
+      onun adına işaretledim. Ölçülen yarı (`NSGlobalDomain`'de anahtar yok, yani
+      kullanıcı ayarı ezmiyor) duruyor; **açık olan yarı** AppKit'in bu kararı
+      `registerDefaults`'tan okuyup okumadığı ve onu ancak gerçek pencerede bir
+      harfi basılı tutmak söyler. Çıkan sonuca göre B.4 §2 kapanır ya da bir
       düzeltme açılır
 - [x] `/ship` (2026-09-20)
 
