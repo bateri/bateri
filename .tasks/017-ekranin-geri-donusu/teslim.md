@@ -71,7 +71,7 @@ Set yedi phase + bir kapı commit'i:
 | phase-5 | `ff66b09` | `point_to_cell`'in reddi |
 | kapı | `8c3845f` | `/code-review` + `/audit` bulguları, yanlış örneklerin düzeltilmesi |
 | gözle kontrol | `967d5f3` | Bandı viewport'la kaydırma denemesi (kullanıcı buldu; **yetmedi**, aşağıya bak) |
-| gözle kontrol | `HASH2` | Bant bir sanal kaydırma: çentik banttan devam ediyor, yaslama geçmiş penceresinde kalkıyor |
+| gözle kontrol | `1af9d0d` | Bant bir sanal kaydırma: çentik banttan devam ediyor, yaslama geçmiş penceresinde kalkıyor |
 
 `/ship` doğrulama + `main`'e push'u kapsar. **Bu sette push edilmedi.**
 
@@ -111,7 +111,7 @@ dosya da tamamlama listesini dört satıra çıkarıyor — ölçülen sahnenin 
    - (b) `967d5f3` bandı viewport'la birlikte kaydırdı ve görüntüyü düzeltti,
      ama `fill + offset` sabit kaldığı için ekranın tepesi boşluk kadar çentik
      boyunca hiç kıpırdamıyordu ("sanki bi scroll sayıyor"). Kalıcı çare
-     `HASH2`: bant `display_offset == fill` olan pencerenin **görsel ikizi**
+     `1af9d0d`: bant `display_offset == fill` olan pencerenin **görsel ikizi**
      sayılıyor, kaydırma çentiği oradan devam ettiriyor ve yaslama geçmiş
      penceresinde kalkıyor.
 4. **Alternatif ekrandan çıkış.** `vim` aç, çık. Çıkış karesinde `fill > 0` ve
