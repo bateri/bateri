@@ -400,6 +400,24 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   yapmıyor, ve kimse istemedi. İstenirse kendi seti açılır; bu maddeyi yarım
   tutmak onu bitmemiş bir iş gibi gösterirdi. `content_rows`'u oynatmak çare
   değil: denendi, deliği yalnız yer değiştirdi (`2fdca50` → `27a0b98`).
+- **Font fallback yok: seçili fontta olmayan karakter kutu (tofu) çiziliyor.**
+  Ölçüldü (2026-09-20, kullanıcı ekran görüntüsüyle bildirdi): Claude Code'un
+  `⏵⏵ auto mode on` göstergesi iki boş kutu olarak çıkıyor. Sebep `⏵`
+  (U+23F5) — CoreText'e doğrudan soruldu, **Menlo'da yok**; aynı satırdaki
+  `→` (U+2192), `↻` (U+21BB) ve `░` (U+2591) Menlo'da **var** ve düzgün
+  çiziliyorlar, yani belirti tek karakterde ve font kaynaklı.
+  `bt-atlas` glyph'i `CTFontGetGlyphsForCharacters` ile arıyor ve o
+  **cascade list'e düşmüyor** (`lib.rs`'in `UNKNOWN_CHAR` sabiti bunu zaten
+  adıyla söylüyor); macOS'un fallback yolu `CTFontCreateForString`. iTerm2,
+  Terminal.app ve ghostty fallback yapıyor, yani bu bir parite açığı.
+  **Emoji setinden (020) ayrı ve çok daha ucuz:** fallback'in getirdiği
+  glyph de tek kanallı bir kapsama maskesi, yani `R8Unorm` atlas olduğu gibi
+  kalıyor ve oradaki "ikinci atlas mı, RGBA mı" çatalı hiç açılmıyor.
+  Değişen şey glyph **cache anahtarı**: bugün yuva `(karakter, yüz, boy
+  sınıfı)` ile aranıyor, fallback gelince gerçek fontun kimliği de anahtara
+  girmek zorunda. Kapsamı 020'ye eklenebilir ya da kendi küçük setini alır;
+  kullanıcı görünürlüğü yüksek, çünkü ok/sembol/kutu karakterleri TUI'lerde
+  ve prompt'larda her yerde.
 - **Doldurma bandının satırları seçilemiyor.** 017'nin bandı geçmiş
   satırlarını gösteriyor ama fare orayı **reddediyor** (`point_to_cell`,
   `fill > 0`): satırlar `frame()` sınırının satır numaralarıyla temsil
