@@ -3825,7 +3825,16 @@ fn scroll_locked<T: EventListener>(term: &mut Term<T>, lines: i32, band: i32) ->
     // yukarı çıkmak isterken dibe indirirdi. İçeriden kaydırma bu yüzden
     // **düz**: aralık birkaç çentikte terk ediliyor ve dibe varış zaten
     // kaydırmanın doğal ucu.
-    let inside = (1..=band).contains(&before);
+    // **Üst uç dışarıda** (`1..band`, `1..=band` değil) ve fark ölçüldü
+    // (2026-09-20, kullanıcı: "seri scroll'da dalgalanıyor"): `offset ==
+    // band` kaydırmanın **meşru varış noktası** — defter tam bandın boyu
+    // kadarsa yukarı çıkan pencere orada duruyor (`clamp`) ve orası
+    // görsel olarak dibin ta kendisi. Muafiyetin içine alınınca aşağı inen
+    // çentik dibe snap'lemek yerine `band-1`, `band-2` … diye tek tek
+    // iniyordu ve `offset == 1`'den `0`'a geçişte bant birden geri gelip
+    // ekranı bandın boyu kadar zıplatıyordu. Aralığın **içi** yalnız
+    // resize'ın bırakabileceği ofsetler.
+    let inside = (1..band).contains(&before);
     let virtual_before = if before == 0 { band } else { before };
     let target = virtual_before.saturating_add(lines);
     let lines = if target <= band && !inside {
@@ -7801,6 +7810,59 @@ mod tests {
         // gösterilecek bir bloğu yok.
         assert_eq!(blocks.as_slice(), [], "işaret ızgaranın listesine sızdı");
         session.shutdown();
+    }
+
+    #[test]
+    fn every_notch_moves_the_screen_by_one_row_at_most() {
+        // **Seri kaydırmanın bekçisi** (2026-09-20, kullanıcı: "yukarı aşağı
+        // seri scroll ettiğimde varolan sonuçları bi dalgalandırıyor").
+        //
+        // Ölçüt tek ve bütünsel: **her çentikte ekran ya aynı kalır ya tam
+        // bir satır kayar.** Ara bir hâl yok — bant ile ızgaranın rol
+        // değiştirdiği anda ekranın bandın boyu kadar zıplaması tam olarak
+        // bu ölçütü deliyordu.
+        //
+        // Sahne kullanıcının durumunu taklit ediyor: **defter bandın boyu
+        // kadar**, yani yukarı çıkan pencere `offset == fill`'de duruyor
+        // (`clamp`). Eski kural o ofseti muafiyetin içine alıyor, aşağı inen
+        // çentik dibe snap'lemek yerine tek tek iniyor ve son adımda bant
+        // birden geri gelip ekranı zıplatıyordu.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 12; read _; printf '\\033[4A\\033[J'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| row_text(cells, 8) == "12");
+        wait_settled(&session);
+        session.write(b"\n");
+        wait_until(
+            "içerik yukarıdan kısalmadı",
+            Duration::from_secs(5),
+            || cursor_now(&session).content_rows <= 6,
+        );
+
+        let (start, mut prev) = screen_now(&session);
+        assert!(start.fill > 0, "sahne bantsız kuruldu: {start:?}");
+
+        // Üç yukarı, üç aşağı: uçlarda doyma meşru, ara adımlarda değil.
+        for (step, notch) in [1, 1, 1, -1, -1, -1].into_iter().zip(1..) {
+            scroll(&session, step);
+            let (cursor, now) = screen_now(&session);
+            let up = now[1..] == prev[..prev.len() - 1];
+            let down = now[..now.len() - 1] == prev[1..];
+            assert!(
+                now == prev || up || down,
+                "çentik {notch} ekranı bir satırdan fazla oynattı: \
+                 {cursor:?}\n  önce: {prev:?}\n  sonra: {now:?}"
+            );
+            prev = now;
+        }
+
+        // Dönüşün sonu başlangıcın ta kendisi: bant geri gelmiş ve ekran
+        // kımıldamamış olmalı.
+        let (end, back) = screen_now(&session);
+        assert_eq!(end.fill, start.fill, "bant geri gelmedi: {end:?}");
+        assert_eq!(back, prev, "son kare kendiyle tutarsız");
     }
 
     #[test]
