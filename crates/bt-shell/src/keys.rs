@@ -24,6 +24,17 @@ const FUNCTION_KEYS: std::ops::RangeInclusive<char> = '\u{f700}'..='\u{f8ff}';
 const PAGE_UP: char = '\u{f72c}';
 const PAGE_DOWN: char = '\u{f72d}';
 
+/// `NSDeleteCharacter` — geri sekmenin (⌫) `characters`'ı. İleri silme (⌦)
+/// **bu değil**, o `NSDeleteFunctionKey` (U+F728) ve fonksiyon tuşu
+/// aralığında.
+///
+/// `PAGE_UP` emsali, iki yerde okunuyor: Cmd'nin kapalı izin listesi
+/// (`view::reaches_terminal` — "bu tuş terminale gider mi") ve o listenin
+/// baytı ([`encode_key`] — "hangi bayt"). Karar ile kodlamanın ayrı yerlerde
+/// olması `page_scroll` ile aynı bölünme; literali iki yerde yazmak ise
+/// birinde kaymasına açık kapı bırakırdı.
+pub(crate) const BACKSPACE: char = '\u{7f}';
+
 /// [`encode_key`]'in cevabı: baytı belli bir tuş ya da ok.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum KeyInput {
@@ -33,41 +44,101 @@ pub(crate) enum KeyInput {
     Arrow(Arrow),
 }
 
-/// `chars` = `NSEvent.characters`, `ctrl` = Control basılı.
+/// [`encode_key`]'in girdisi: `NSEvent`'in bu fonksiyonu ilgilendiren yarısı.
+///
+/// Dört ayrı parametre değil **tek kayıt**, çünkü kollar bayrakları artık
+/// karakterle **birlikte** soruyor — ⌘⌫ ile ⌥⌫ aynı `characters`'tan
+/// (`BACKSPACE`) yalnız bayrakla ayrılıyor — ve her yeni değiştirici çağrı
+/// yerlerini tek tek gezdirirdi.
+///
+/// **Shift yok** ve eksik değil: hiçbir kol onu sormuyor. Shift'in tek
+/// anlamlı olduğu yer kaydırma kararı ([`page_scroll`]) ve orayı Shift'siz
+/// düşünmek mümkün değil; burada kullanılmayan bir bayrak kaydın sözleşmesini
+/// ("bu bayraklar okunuyor") gevşetirdi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KeyPress<'a> {
+    /// `NSEvent.characters` — değiştiriciler **uygulanmış** hâl (Option-basılı
+    /// `ø`, Ctrl-C → U+0003).
+    pub(crate) chars: &'a str,
+    /// Control basılı.
+    pub(crate) ctrl: bool,
+    /// Option (⌥) basılı. Yalnız gezinme/silme sınıfını açıyor; basılabilir
+    /// harfe dokunmuyor (aşağıda, R3.2).
+    pub(crate) option: bool,
+    /// Command (⌘) basılı. Buraya **yalnız** izin listesinden geçen tuş
+    /// geliyor (`view::reaches_terminal`), yani bayrağın tek işi ⌘⌫'i
+    /// ⌥⌫'ten ayırmak.
+    pub(crate) command: bool,
+}
+
+/// Tuş vuruşu ([`KeyPress`]) → PTY baytları ya da ok.
 ///
 /// **Artık her tuş buraya gelmiyor.** Metin yolu AppKit'in yığınından geçiyor
 /// (`view::BateriView`'ın `NSTextInputClient` uyumu) ve basılabilir harfin
-/// olağan üreticisi bu fonksiyon değil `insertText:`. Buraya kalan **dört**
+/// olağan üreticisi bu fonksiyon değil `insertText:`. Buraya kalan **beş**
 /// küme var:
 ///
 /// 1. **Control'lü olay** — `keyDown:` onu yığına hiç vermiyor (numpad
 ///    Enter'ın U+0003'ü ve Ctrl-Y'nin U+0019'u paylaşımlı, kolu AppKit'e
 ///    bırakmak her komutu kesebilirdi).
 /// 2. **Yığının `doCommandBySelector:`'a verdiği tuş** — Enter, Tab, Escape,
-///    Backspace, oklar, Shift+Tab, PgUp/PgDn, fn+Backspace. O metot sessiz
+///    Backspace, oklar, Shift+Tab, PgUp/PgDn, fn+Backspace **ve Option'lı
+///    gezinme/silme** (`moveWordLeft:`, `deleteWordBackward:`). O metot sessiz
 ///    bir no-op ve olay bayraksız döndüğü için baytı buradan geliyor.
 /// 3. **Oturumun reddettiği Shift+PgUp/PgDn** — alternate screen'de kaydırma
 ///    yok, tuş uygulamaya düz dizi olarak gidiyor.
 /// 4. **Yığının tanımadığımız bir tiple verdiği metin** — `insertText:`'in
 ///    downcast'i tutmazsa olay tüketilmiş sayılmıyor ve buraya düşüyor.
+/// 5. **Cmd'nin kapalı izin listesinden geçen tuş** — ⌘⌫; Cmd'li olay
+///    yığına **hiç girmiyor**, kararı `view::reaches_terminal` veriyor.
 ///
 /// Düz metin dalı bu yüzden **kalkmadı**: 2. ve 4. kümenin baytı oradan
 /// çıkıyor ve Ctrl'lü harf (1.) de aynı dala düşebiliyor.
 ///
-/// `None` → tuş yutulur; çağıran hiçbir şey yazmaz. Kapsam dışı: IME, ölü
-/// tuşlar, Option-as-Meta, kitty klavye protokolü, değiştiricili oklar
-/// (`\e[1;5A`), Control'lü/Option'lı geri sekme ve ileri silme, Home/End
-/// (dizileri henüz yazılmadı — borç; aşağıda yutuluyor). **Ölü tuşlar
-/// kapsam dışı kalmaya devam ediyor ve artık bir borç değil**: bileşimi
-/// AppKit'in yığını tamamlıyor, buraya hiç uğramıyor.
-pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<KeyInput> {
-    let c = chars.chars().next()?;
+/// `None` → tuş yutulur; çağıran hiçbir şey yazmaz.
+///
+/// **Kapsam dışı:** IME; **Option'ın topluca Meta olması** — Meta kodlaması
+/// yalnız gezinme/silme sınıfına, basılabilir harf değişmiyor (`Option+7`
+/// Türkçe Q'da `{` yazmaya devam ediyor, R3.2); kitty klavye protokolü;
+/// **değiştiricili oklar** (`\e[1;5A`) — Option+ok'un `\eb`'si onların yerine
+/// geçmiyor, o bir Meta dizisi, xterm'in değiştirici kodlaması değil;
+/// **Control'lü geri sekme** ve **Option/Control'lü ileri silme** (⌦, U+F728);
+/// Home/End (dizileri henüz yazılmadı — borç; aşağıda yutuluyor). **Ölü
+/// tuşlar kapsam dışı kalmaya devam ediyor ve artık bir borç değil**:
+/// bileşimi AppKit'in yığını tamamlıyor, buraya hiç uğramıyor.
+pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
+    let c = key.chars.chars().next()?;
     // `characters` tek karakter mi — tek bir `c`'den çıkan kolların ortak
     // koruması (aşağıda geri sekme, oklar, PgUp/PgDn, ileri silme ve
     // Control): çok karakterli girdi (ölü tuş bileşimi, marked text) ilk
     // karakterinden okunmaz.
-    let single = chars.len() == c.len_utf8();
-    let bytes: Cow<'static, [u8]> = match (c, ctrl) {
+    let single = key.chars.len() == c.len_utf8();
+    let bytes: Cow<'static, [u8]> = match (c, key.ctrl) {
+        // Cmd'nin kapalı izin listesindeki **tek** tuş: ⌘⌫ → `\x15` (`^U`,
+        // zsh'te `kill-whole-line`). macOS'un katı anlamı "satır **başına
+        // kadar** sil" ama zsh'te `backward-kill-line` varsayılanda hiç bağlı
+        // değil (ölçüldü) — beklenti satırın gitmesi, `^U` tam onu yapıyor
+        // (018 Karar 3). Kol Option'ınkinden **önce**: ⌘⌥⌫ satırı siler,
+        // kelimeyi değil — izin listesi adı konmuş bir istisna, Option'ın
+        // sınıfı bir kural.
+        (BACKSPACE, _) if key.command && single => Cow::Borrowed(b"\x15"),
+        // Option'ın **gezinme/silme** sınıfı → Meta dizileri. Ayar sorulmuyor,
+        // çünkü bu tuşlar hiçbir klavye düzeninde basılabilir karakter
+        // üretmiyor: çatışma Option'lı **harfte** ve orası dokunulmadan
+        // kalıyor (018 Karar 2). Diziler **küçük harf**: büyük harfli hâl
+        // zsh'te başka widget'lara bağlı (`\eA` = `accept-and-hold`; ölçüldü).
+        //
+        // Buraya 2. kümeden geliyorlar: yığın Option'lı oku/⌫'i
+        // `doCommandBySelector:`'a (`moveWordLeft:`, `deleteWordBackward:`)
+        // veriyor, o metot sessiz no-op ve olay tüketilmemiş dönüyor. O
+        // metoda gövde yazmak bu kolu sessizce öldürürdü.
+        //
+        // Yanındaki değiştiriciler sorulmuyor (`page_scroll` emsali):
+        // Ctrl'lü ya da Shift'li Option+ok da kelime gezer, ⌥'in bu sınıfta
+        // ikinci bir anlamı yok.
+        (BACKSPACE, _) if key.option && single => Cow::Borrowed(b"\x1b\x7f"),
+        ('\u{f702}', _) if key.option && single => Cow::Borrowed(b"\x1bb"),
+        ('\u{f703}', _) if key.option && single => Cow::Borrowed(b"\x1bf"),
         // Sayısal tuş takımının Enter'ı ve Fn-Return `NSEnterCharacter` =
         // U+0003 verir — Ctrl-C'nin baytıyla aynı. Ctrl basılı DEĞİLSE bu bir
         // satır sonudur; bu kol olmasaydı düz metin dalından 0x03 olarak geçer
@@ -118,7 +189,7 @@ pub(crate) fn encode_key(chars: &str, ctrl: bool) -> Option<KeyInput> {
         // zaten doğru bayta çevirmiş (U+000D, U+0009, U+001B, U+007F) ve
         // ayrı kollar yazmak aynı baytı ikinci kez tarif etmek olurdu.
         // Sözleşmeyi `return_and_delete_are_single_bytes` çiviliyor.
-        _ => Cow::Owned(chars.as_bytes().to_vec()),
+        _ => Cow::Owned(key.chars.as_bytes().to_vec()),
     };
     Some(KeyInput::Bytes(bytes))
 }
@@ -150,19 +221,52 @@ pub(crate) fn page_scroll(chars: &str, shift: bool) -> Option<i32> {
 mod tests {
     use super::*;
 
-    fn encode(chars: &str, ctrl: bool) -> Vec<u8> {
-        match encode_key(chars, ctrl) {
+    /// Değiştiricisiz vuruş. Tek bayrağı açan kollar `..plain(chars)` ile
+    /// yazılıyor, yani sınama satırı hangi bayrağın konu olduğunu adıyla
+    /// söylüyor.
+    fn plain(chars: &str) -> KeyPress<'_> {
+        KeyPress {
+            chars,
+            ctrl: false,
+            option: false,
+            command: false,
+        }
+    }
+
+    fn ctrl(chars: &str) -> KeyPress<'_> {
+        KeyPress {
+            ctrl: true,
+            ..plain(chars)
+        }
+    }
+
+    fn option(chars: &str) -> KeyPress<'_> {
+        KeyPress {
+            option: true,
+            ..plain(chars)
+        }
+    }
+
+    fn command(chars: &str) -> KeyPress<'_> {
+        KeyPress {
+            command: true,
+            ..plain(chars)
+        }
+    }
+
+    fn encode(key: KeyPress<'_>) -> Vec<u8> {
+        match encode_key(key) {
             Some(KeyInput::Bytes(bytes)) => bytes.into_owned(),
-            other => panic!("{chars:?} (ctrl={ctrl}) bayt vermedi: {other:?}"),
+            other => panic!("{key:?} bayt vermedi: {other:?}"),
         }
     }
 
     #[test]
     fn return_and_delete_are_single_bytes() {
-        assert_eq!(encode("\r", false), b"\r");
-        assert_eq!(encode("\u{7f}", false), b"\x7f");
-        assert_eq!(encode("\t", false), b"\t");
-        assert_eq!(encode("\u{1b}", false), b"\x1b");
+        assert_eq!(encode(plain("\r")), b"\r");
+        assert_eq!(encode(plain("\u{7f}")), b"\x7f");
+        assert_eq!(encode(plain("\t")), b"\t");
+        assert_eq!(encode(plain("\u{1b}")), b"\x1b");
     }
 
     #[test]
@@ -171,29 +275,29 @@ mod tests {
         // burada koşulsuz `\e[A` yazılıyordu, oysa `xterm-256color`'ın
         // terminfo'sunu okuyan less açılışta DECCKM'i açıp `\eOA` bekliyor.
         assert_eq!(
-            encode_key("\u{f700}", false),
+            encode_key(plain("\u{f700}")),
             Some(KeyInput::Arrow(Arrow::Up))
         );
         assert_eq!(
-            encode_key("\u{f701}", false),
+            encode_key(plain("\u{f701}")),
             Some(KeyInput::Arrow(Arrow::Down))
         );
         assert_eq!(
-            encode_key("\u{f702}", false),
+            encode_key(plain("\u{f702}")),
             Some(KeyInput::Arrow(Arrow::Left))
         );
         assert_eq!(
-            encode_key("\u{f703}", false),
+            encode_key(plain("\u{f703}")),
             Some(KeyInput::Arrow(Arrow::Right))
         );
         // Control'lü ok da düz ok: değiştiricili oklar (`\e[1;5A`) kapsam dışı.
         assert_eq!(
-            encode_key("\u{f700}", true),
+            encode_key(ctrl("\u{f700}")),
             Some(KeyInput::Arrow(Arrow::Up))
         );
         // Tek karakterlik eşleşme, PgUp'la aynı ölçüt: okla başlayan bir
         // bileşim ilk karakterinden ok diye okunmaz.
-        assert_eq!(encode_key("\u{f700}x", false), None);
+        assert_eq!(encode_key(plain("\u{f700}x")), None);
     }
 
     #[test]
@@ -201,9 +305,9 @@ mod tests {
         // AppKit Control'ü çoğu tuşta kendi uygular: `characters` doğrudan
         // U+0003 gelir. İki yol da aynı baytı vermeli, yoksa Ctrl-C'nin
         // çalışması AppKit'in o gün hangi yolu seçtiğine bağlı olur.
-        assert_eq!(encode("\u{3}", true), b"\x03");
-        assert_eq!(encode("c", true), b"\x03");
-        assert_eq!(encode("C", true), b"\x03", "Shift ile de aynı");
+        assert_eq!(encode(ctrl("\u{3}")), b"\x03");
+        assert_eq!(encode(ctrl("c")), b"\x03");
+        assert_eq!(encode(ctrl("C")), b"\x03", "Shift ile de aynı");
     }
 
     #[test]
@@ -211,8 +315,8 @@ mod tests {
         // U+0003 iki ayrı tuşun `characters`'ı: Ctrl-C ve numpad Enter.
         // Ayıran tek şey Control bayrağı; karıştırılırsa numpad Enter her
         // komutu çalıştırmak yerine keser.
-        assert_eq!(encode("\u{3}", false), b"\r");
-        assert_eq!(encode("\u{3}", true), b"\x03");
+        assert_eq!(encode(plain("\u{3}")), b"\r");
+        assert_eq!(encode(ctrl("\u{3}")), b"\x03");
     }
 
     #[test]
@@ -222,10 +326,10 @@ mod tests {
         // dalı 2. ve 4. kümenin (bkz. [`encode_key`]) tek yolu ve o iki küme
         // de çok baytlı harf taşıyabiliyor — `insertText:`'in downcast'i
         // tutmadığında `ğ` buradan geçer.
-        assert_eq!(encode("a", false), b"a");
+        assert_eq!(encode(plain("a")), b"a");
         // Türkçe karakter çok baytlı: bayt bayt geçmeli, `as u8` ile kırpılmamalı.
-        assert_eq!(encode("ğ", false), "ğ".as_bytes());
-        assert_eq!(encode("İ", false), "İ".as_bytes());
+        assert_eq!(encode(plain("ğ")), "ğ".as_bytes());
+        assert_eq!(encode(plain("İ")), "İ".as_bytes());
     }
 
     #[test]
@@ -233,13 +337,13 @@ mod tests {
         // Saf modifier tuşu: `characters` boş. Yığın yolunda bu olay
         // `keyDown:`'ın fallback'ine `None` olarak varıyor ve oraya hiç
         // gelmiyor; sınama yine de yutmanın sözleşmesini çiviliyor.
-        assert!(encode_key("", false).is_none());
+        assert!(encode_key(plain("")).is_none());
         // F1 ve Home private use alanında. UTF-8'e çevirip PTY'ye yazmak
         // shell'e çöp göndermek olurdu; dizileri 00X'te. **Yığın bunları
         // yutmuyor**: ikisi de `doCommandBySelector:`'a düşüyor, no-op'tan
         // geçiyor ve yutma kararı hâlâ burada.
-        assert!(encode_key("\u{f704}", false).is_none(), "F1");
-        assert!(encode_key("\u{f729}", false).is_none(), "Home");
+        assert!(encode_key(plain("\u{f704}")).is_none(), "F1");
+        assert!(encode_key(plain("\u{f729}")).is_none(), "Home");
     }
 
     #[test]
@@ -247,12 +351,12 @@ mod tests {
         // PgUp/PgDn artık fonksiyon tuşu aralığında yutulmuyor: less ve vim
         // sayfa sayfa gezmek için bu iki diziyi bekliyor. Diziler
         // `xterm-256color`'ın `kpp`/`knp`'si — `TERM` oynamıyor.
-        assert_eq!(encode("\u{f72c}", false), b"\x1b[5~");
-        assert_eq!(encode("\u{f72d}", false), b"\x1b[6~");
+        assert_eq!(encode(plain("\u{f72c}")), b"\x1b[5~");
+        assert_eq!(encode(plain("\u{f72d}")), b"\x1b[6~");
         // Tek karakterlik eşleşme, `page_scroll` ile aynı ölçüt: PgUp ile
         // başlayan çok karakterli bir `characters` dizi üretip kalanını
         // izsiz düşürmez — tanınmayan fonksiyon tuşu gibi bütünüyle yutulur.
-        assert!(encode_key("\u{f72c}x", false).is_none());
+        assert!(encode_key(plain("\u{f72c}x")).is_none());
     }
 
     #[test]
@@ -262,15 +366,82 @@ mod tests {
         // ham `0x19` gidiyordu, zsh'ın menüsü onu geri gitme diye okumuyor.
         // fn+Backspace `NSDeleteFunctionKey` (U+F728): fonksiyon tuşu kolunda
         // yutuluyordu.
-        assert_eq!(encode("\u{19}", false), b"\x1b[Z");
-        assert_eq!(encode("\u{f728}", false), b"\x1b[3~");
+        assert_eq!(encode(plain("\u{19}")), b"\x1b[Z");
+        assert_eq!(encode(plain("\u{f728}")), b"\x1b[3~");
         // U+0019 Ctrl-Y'nin de `characters`'ı (`'y' & 0x1f`) — readline'ın
         // yank'i. Ayıran yalnız Control bayrağı, numpad Enter/Ctrl-C ikilisi
         // gibi; karışırsa Ctrl-Y geri sekme olur.
-        assert_eq!(encode("\u{19}", true), b"\x19");
-        assert_eq!(encode("y", true), b"\x19");
+        assert_eq!(encode(ctrl("\u{19}")), b"\x19");
+        assert_eq!(encode(ctrl("y")), b"\x19");
         // Tek karakterlik eşleşme, PgUp'la aynı ölçüt.
-        assert!(encode_key("\u{f728}x", false).is_none());
+        assert!(encode_key(plain("\u{f728}x")).is_none());
+        // İleri silme (⌦) Option'lı da düz `kdch1`: Meta sınıfı geri sekmeye
+        // ve oklara, ileri silme **kapsam dışı** (`encode_key`'in doc'u).
+        assert_eq!(encode(option("\u{f728}")), b"\x1b[3~");
+    }
+
+    #[test]
+    fn option_navigation_sends_meta_sequences() {
+        // Option'ın gezinme/silme sınıfı hiçbir düzende basılabilir karakter
+        // üretmiyor, yani ayar sorulmadan Meta kodlanıyor (018 Karar 2).
+        // Diziler varsayılan zsh'te ölçüldü: `\eb` `backward-word`, `\ef`
+        // `forward-word`, `\e\x7f` `backward-kill-word`. Harf **küçük** —
+        // büyük harfli hâl başka widget'lara bağlı (`\eA` =
+        // `accept-and-hold`), yani `\eB` kelime gezmezdi.
+        assert_eq!(encode(option("\u{f702}")), b"\x1bb", "Option+←");
+        assert_eq!(encode(option("\u{f703}")), b"\x1bf", "Option+→");
+        assert_eq!(encode(option("\u{7f}")), b"\x1b\x7f", "Option+Delete");
+        // Option'sız hâl dokunulmadan duruyor: ok yine ok (baytı DECCKM'e
+        // bağlı), ⌫ yine tek bayt.
+        assert_eq!(
+            encode_key(plain("\u{f702}")),
+            Some(KeyInput::Arrow(Arrow::Left))
+        );
+        assert_eq!(encode(plain("\u{7f}")), b"\x7f");
+        // Yukarı/aşağı ok Option'lı da ok: kelime gezme yatay bir jest,
+        // dikeyde karşılığı yok.
+        assert_eq!(
+            encode_key(option("\u{f700}")),
+            Some(KeyInput::Arrow(Arrow::Up))
+        );
+        // Tek karakterlik eşleşme, PgUp'la aynı ölçüt.
+        assert!(encode_key(option("\u{f702}x")).is_none());
+    }
+
+    #[test]
+    fn option_printable_characters_are_untouched() {
+        // R3.2: Türkçe Q'da `{` = Option+7, `∫` = Option+b. Option topluca
+        // Meta olsaydı kabuğun metakarakterleri yazılamaz hâle gelirdi (018
+        // Karar 2) — Meta yalnız gezinme/silme sınıfına.
+        //
+        // Bu harflerin **olağan** üreticisi artık `insertText:`; buraya
+        // yalnız yığının çözemediği tip düşüyor (4. küme) ve o zaman da harf
+        // harf geçmeli.
+        assert_eq!(encode(option("{")), b"{");
+        assert_eq!(encode(option("∫")), "∫".as_bytes());
+    }
+
+    #[test]
+    fn command_backspace_kills_the_whole_line() {
+        // Cmd'nin kapalı izin listesindeki **tek** tuş. `\x15` = `^U`, zsh'te
+        // `kill-whole-line`: macOS'un "satır başına kadar sil"i zsh'te
+        // varsayılanda bağlı değil (ölçüldü) ve kullanıcının ölçütü satırın
+        // gitmesi (018 Karar 3).
+        assert_eq!(encode(command("\u{7f}")), b"\x15");
+        // Cmd, Option'ın **önünde**: ⌘⌥⌫ satırı siler, kelimeyi değil.
+        assert_eq!(
+            encode(KeyPress {
+                option: true,
+                ..command("\u{7f}")
+            }),
+            b"\x15"
+        );
+        // Cmd'siz ⌫ yine tek bayt — bayrak karakteri değil kararı taşıyor.
+        assert_eq!(encode(plain("\u{7f}")), b"\x7f");
+        // Buraya **yalnız** izin listesinden geçen tuş geliyor
+        // (`view::reaches_terminal`); Cmd'li başka bir karakter gelseydi
+        // bayrak onu değiştirmezdi.
+        assert_eq!(encode(command("t")), b"t");
     }
 
     #[test]

@@ -75,13 +75,66 @@ tek istisnası `view.rs`'te. Dokuz mevcut sınama yeni imzayla yeşil.
 
 ## Checklist
 
-- [ ] Girdi kaydı tanımlandı ve `encode_key`'in imzası genişledi
-- [ ] Option kolu: `\eb` / `\ef` / `\e\x7f` (küçük harf)
-- [ ] `reaches_terminal` tek istisna tanıyor: Cmd+Delete → `\x15`
-- [ ] `command_keys_never_reach_the_terminal` tek istisnayla yeniden yazıldı
-- [ ] Dokuz mevcut sınama yeni imzayla yeşil
-- [ ] Test: kazanç tablosunun tamamı elle geçti (Option+7 ve Option+b dahil)
-- [ ] Test: `Cmd+T` kabuğa harf yazmıyor
-- [ ] `keys.rs`/`view.rs` doc'ları ve yol haritası güncellendi
-- [ ] Doğrulama geçti (`make hepsi`; `make duman` kullanıcıda)
-- [ ] Yayın etkisi yazıldı
+- [x] Girdi kaydı tanımlandı (`keys::KeyPress`) ve `encode_key`'in imzası
+      genişledi
+- [x] Option kolu: `\eb` / `\ef` / `\e\x7f` (küçük harf)
+- [x] `reaches_terminal` tek istisna tanıyor: Cmd+Delete → `\x15`
+- [x] `command_keys_never_reach_the_terminal` tek istisnayla yeniden yazıldı
+- [x] Dokuz mevcut sınama yeni imzayla yeşil (+ üç yeni kol sınaması)
+- [~] Test: kazanç tablosunun tamamı elle geçti (Option+7 ve Option+b dahil)
+      — **kullanıcı koşacak**: gerçek pencere ve tuş vuruşu gerekiyor, ajan
+      kabuğunda klavye sentezi yok
+- [~] Test: `Cmd+T` kabuğa harf yazmıyor — **kullanıcı koşacak**, aynı
+      gerekçe. Hermetik yarısı çivili: `command_keys_never_reach_the_terminal`
+      Cmd+`"t"`'yi altı değiştirici kombinasyonunda da reddediyor
+- [x] `keys.rs`/`view.rs` doc'ları ve yol haritası güncellendi (+ `CLAUDE.md`,
+      aşağıda)
+- [x] Doğrulama geçti (`make hepsi` → exit 0); `make duman` kullanıcıda
+      (gerçek pencere ister)
+- [x] Yayın etkisi yazıldı
+
+## Uygulama Notları
+
+- **Kayıt `chars`'ı da taşıyor** (`KeyPress { chars, ctrl, option, command }`),
+  yalnız bayrakları değil: `plan.md`'nin Akış'ı `encode_key(girdi kaydı)`
+  diyor ve ⌘⌫ ile ⌥⌫ aynı `characters`'tan yalnız bayrakla ayrıldığı için
+  kollar ikisini **birlikte** soruyor. **Shift kayda girmedi** — hiçbir kol
+  onu sormuyor ve `page_scroll` onu zaten ayrı alıyor; kullanılmayan bir
+  bayrak kaydın sözleşmesini gevşetirdi.
+- **⌫'in karakteri tek yerde** (`keys::BACKSPACE`, `PAGE_UP` emsali): izin
+  listesi `view::reaches_terminal`'da, baytı `encode_key`'de ve iki yerde
+  ayrı yazılan bir literal birinde kayardı.
+- **İzin listesi yanındaki değiştiricileri sormuyor** — ölçüt yalnız
+  karakter. Planda yazılı değildi; ters kararın somut bedeli **CapsLock**:
+  bayrağı tesadüfen açık olan kullanıcıda ⌘⌫ sessizce yutulurdu. Aynı
+  gerekçe Option'ın gezinme sınıfında da geçerli (Ctrl'lü Option+ok da kelime
+  gezer) ve `page_scroll`'un "Shift dışındaki değiştiriciler sorulmuyor"
+  kuralının kopyası. **Yan etkisi adıyla:** Ctrl+Option+ok bugüne kadar düz
+  ok gönderiyordu, artık `\eb`/`\ef` gönderiyor — R1.7'nin sıfır regresyon
+  listesinde değil ve zsh'in o tuşta bağlaması zaten yoktu.
+- **Cmd kolu Option'ın önünde:** ⌘⌥⌫ satırı siler, kelimeyi değil. İzin
+  listesi adı konmuş bir istisna, Option'ın sınıfı bir kural; ters sıra
+  istisnayı kuralın altına sokardı.
+- **`chars` artık Cmd kolundan önce okunuyor.** Kol sırası (a) Cmd → (b)
+  Shift+PgUp/PgDn → (c) Control → (d) yığın **değişmedi**; değişen yalnız
+  `characters`'ın nerede çözüldüğü, çünkü izin listesinin ölçütü artık tuşun
+  kimliği.
+- **R4.2 `!command` guard'ında uygulanıyor.** Yığın kolu `!ctrl && !command`:
+  izin listesinden geçen ⌘⌫ de `interpretKeyEvents:`e girmiyor. Girseydi
+  yığın onu `deleteToBeginningOfLine:`e çevirir, `doCommandBySelector:`
+  sessizce yutar ve `\x15` kolu hiç koşmazdı.
+- **Option kolunun yığına bağımlılığı yazıldı.** Option'lı ok/⌫ `encode_key`'e
+  ancak `doCommandBySelector:` (`moveWordLeft:`, `deleteWordBackward:`)
+  bayrak kurmadığı için varıyor — faz 1'in sözleşmesi. O metoda bir gün gövde
+  yazan kişi bu kolu sessizce öldürür; gerekçe kolun kendi yorumunda.
+- **`CLAUDE.md` bu fazın `## Değişiklikler`'inde yoktu ama düzeldi:** giriş
+  özeti "Cmd'li olay yutulur" diyordu ve kodla çelişir hâle geldi — depo
+  kuralı ("buradaki bir cümle kodla çelişirse ikisinden biri aynı commit'te
+  düzelir") phase dosyasının listesini geçiyor. Aynı paragrafa Option'ın iki
+  sınıfı da yazıldı.
+- **Yol haritası "tek satır"a inmedi, *018'in devraldığı kadarı* çıktı.**
+  Kalanlar kasıtlı: Home/End'in **şekli** (yeni `pub enum`, ölçülmüş baytlar)
+  `plan.md` → Kapsam Dışı'nın "şekli `docs/YOL-HARITASI.md`'nin borç satırında
+  bağlandı" cümlesiyle oraya emanet, Ctrl+Shift+Tab ile Ctrl+numpad Enter de
+  bu sette kapanmıyor. Çıkan: ölü tuşlar, Option'ın Meta dizileri, Cmd'nin
+  izin listesi ve "set henüz açılmadı" defteri.

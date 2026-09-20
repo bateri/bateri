@@ -27,7 +27,10 @@ vertex'ini **aynen** paylaşıyor — ayrılan yalnız fragment, çünkü caret'
 yuvarlak köşesini, kenarını ve halesini bir SDF çiziyor ve o hesabı kare
 başına binlerce arka plan dörtgenine ödetmenin anlamı yok. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
 yığınından geçer**: `keyDown:` tek kapı değil dört kollu bir arbitraj —
-Cmd'li olay yutulur, Shift+PgUp/PgDn terminalin kaydırmasıdır, **Control'lü
+Cmd'li olay **kapalı bir izin listesinin tek tuşu dışında** yutulur (⌘⌫ →
+`\x15`, zsh'te `kill-whole-line`; liste kapalı kalmak zorunda, yoksa bir gün
+Cmd-T kabuğa `t` yazar) ve geçen tuş da yığına girmez,
+Shift+PgUp/PgDn terminalin kaydırmasıdır, **Control'lü
 olay yığına hiç girmez** (numpad Enter'ın U+0003'ü Ctrl-C ile, Ctrl-Y'nin
 U+0019'u Shift+Tab ile paylaşımlı; kolu AppKit'e bırakmak her komutu
 kesebilirdi) ve kalanı `interpretKeyEvents:` ile metin yığınına verilir.
@@ -38,6 +41,10 @@ panikler. Yığın olayı aldıysa bir bayrak (`consumed`; `insertText:` **ve**
 `setMarkedText:` kurar, değişmez "yığın aldı", "metin geldi" değil) onu
 söyler; kurulmadıysa olay `keys::encode_key`'e düşer ve fonksiyon tuşları,
 Enter/Tab/Esc/Backspace ile Control'lü harfler baytını bugünkü yerden alır.
+Option'lı **gezinme ve silme** de oradan geçiyor ve Meta kodlanıyor
+(Option+←/→/⌫ → `\eb`/`\ef`/`\e\x7f`, ayarsız); Option'lı **harf**
+değişmiyor (`Option+7` Türkçe Q'da `{`), çünkü kabuğun bütün metakarakterleri
+o düzende Option'da ve topluca Meta olsaydı kabuk yazılamaz hâle gelirdi.
 `doCommandBySelector:` **sessiz** bir no-op: gövdesiz kalsaydı
 `NSResponder`'ın varsayılanı bip çalardı. Bileşimin durumu asgari
 (`marked_text`), **çizim yok** — altı çizili preedit `bt-gpu`'nun borcu.

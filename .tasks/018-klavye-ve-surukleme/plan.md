@@ -188,6 +188,6 @@ performDragOperation: ──► readObjectsForClasses:(NSURL) → NSURL.path
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | phase-3 | |
 | kapı | |

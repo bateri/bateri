@@ -395,9 +395,16 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   düşürmemek (aynanın altıncı kanalı ya da overlay) — 017'nin gözle
   kontrolünden sonra hâlâ tartışılabilir. `content_rows`'u oynatmak çare
   değil: denendi, deliği yalnız yer değiştirdi (`2fdca50` → `27a0b98`).
-- **Klavye kalanları.** Home/End bilerek yutuluyor (terminfo `khome`/`kend`,
+- **Klavye kalanları.** 018 ölü tuşları, Option'ın Meta dizilerini (`\eb`,
+  `\ef`, `\e\x7f`) ve Cmd'nin tek tuşluk izin listesini (⌘⌫ → `\x15`)
+  kapattı; geriye **Home/End** ile iki Control borcu kaldı. Option'ın
+  **topluca** Meta olması da kapsam dışı bıraktı — Türkçe Q'da kabuğun bütün
+  metakarakterleri Option'da ve o kol varsayılanda hiç koşmazdı, yani
+  `[keyboard]` bölümü ilk "Meta istiyorum" isteğinde açılır
+  (`.tasks/018-klavye-ve-surukleme/discussion.md` → Karar 2).
+  Home/End bilerek yutuluyor (terminfo `khome`/`kend`,
   oklar gibi DECCKM'e bağlı; yutmayı bağlayan sınama duruyor). **018'den
-  çıkarıldı ve şekli orada bağlandı** (2026-09-20, ikinci tur panel): tüketici
+  çıkarıldı ve şekli burada bağlandı** (2026-09-20, ikinci tur panel): tüketici
   less/vim, yani tam ekran uygulama borcu — varsayılan zsh'te
   `^[[H`/`^[[F`/`^[OH`/`^[OF` için **sıfır** bağlama ölçüldü, yani kabukta
   görünür kazancı yok. Şekli: `bt_core::Arrow` **genişletilmez** — doc'u
@@ -409,22 +416,15 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   `send_input`'tan geçen yeni bir `Session` metodu, `keys.rs::KeyInput`'a
   üçüncü varyant ve `arrows_are_keys_not_bytes`'ın aynadaki eşi. Baytlar
   ölçülü: `infocmp xterm-256color` → `khome=\EOH`, `kend=\EOF`,
-  `smkx=\E[?1h\E=`. Değiştiricili oklar (`\e[1;5A` vb.) yok. Ctrl+Shift+Tab `0x19` (readline/zle `yank`)
+  `smkx=\E[?1h\E=`. Değiştiricili oklar (`\e[1;5A` vb.) yok ve 018'in
+  `\eb`'si onların yerine geçmiyor — o bir Meta dizisi, xterm'in değiştirici
+  kodlaması değil. Ctrl+Shift+Tab `0x19` (readline/zle `yank`)
   gönderiyor, Ctrl+numpad Enter aynı yapıdan `0x03` — ikisi de gerçek
   klavyede doğrulanmadı; aday çare `charactersIgnoringModifiers`'ı
   `encode_key`'e geçirmek. Kaynak: 006 `phase-4d.md` → Uygulama Notları ve
-  orkestratör kararı (WAIVE (1)); 006 `phase-3b.md` → Kapsam dışı.
-  **2026-09-19'da sete bağlandı → 018** (yukarıdaki tablo; numarası
-  2026-09-20'de iki kez kaydı — 016'dan 017'ye, 017'den 018'e; yedinci ve
-  sekizinci kayma). Madde burada kalıyor çünkü set
-  henüz açılmadı; açılınca ayrıntısı `context.md`'sine taşınır ve burası tek
-  satıra iner. 018 bunun üstüne üç şey daha getiriyor: Option+ok/Delete'in Meta
-  **dizileri** (`\eb`, `\ef`, `\e\x7f` — ayarsız, çünkü bu tuşlar hiçbir düzende
-  harf üretmiyor), Cmd'nin adı konmuş **tek tuşluk** izin listesi ve **ölü
-  tuşlar** (`insertText:`). Option'ın topluca Meta olması ise 018'de **kapsam
-  dışı**: Türkçe Q'da kabuğun bütün metakarakterleri Option'da ve o kol
-  varsayılanda hiç koşmayacaktı (`.tasks/018-klavye-ve-surukleme/discussion.md`
-  → Muhakeme).
+  orkestratör kararı (WAIVE (1)); 006 `phase-3b.md` → Kapsam dışı; 018
+  `plan.md` → Kapsam Dışı (R1.2'nin Control kolu ikisini de bugünkü
+  davranışta tutuyor).
 - **Tam IME: altı çizili preedit çizilmiyor.** 018 ölü tuşları ve emoji
   paletinin **girişini** `insertText:` ile kapatıyor; **CJK** ve press-and-hold gibi
   *bekleyen metni gösteren* girdi kipleri kapanmıyor, çünkü `setMarkedText:`in
