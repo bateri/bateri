@@ -138,3 +138,31 @@ tek istisnası `view.rs`'te. Dokuz mevcut sınama yeni imzayla yeşil.
   bağlandı" cümlesiyle oraya emanet, Ctrl+Shift+Tab ile Ctrl+numpad Enter de
   bu sette kapanmıyor. Çıkan: ölü tuşlar, Option'ın Meta dizileri, Cmd'nin
   izin listesi ve "set henüz açılmadı" defteri.
+
+### Set kapısının önerdiği waive (2026-09-20) — **karar orkestratörün**
+
+**Yığını atlayan iki yeni yazıcı, bekleyen bir bileşimin üstünden PTY'ye bayt
+akıtıyor.** phase-1'in `/code-review`'unda kabul edilen 3. waive'in (Control
+kolu bekleyen bileşimi yıkmıyor) **aynı sınıfı**, ama **başka tuşlar**, yani
+kabul edilmiş kalemin kapsamında değil:
+
+- **⌘⌫ (bu faz).** `keyDown:`'ın yığın kolu `!ctrl && !command` ile korunuyor
+  (R4.2'nin gereği), yani izin listesinden geçen ⌘⌫ `interpretKeyEvents:`e hiç
+  girmiyor ve `marked_text` el değmeden kalıyor. **Fazdan önce zararsızdı** —
+  Cmd'li olay yutuluyordu, PTY'ye hiçbir şey gitmiyordu; şimdi `\x15` gidiyor
+  ve bileşim hâlâ bekliyor. Belirti: `Option+ü` → ⌘⌫ → `a` = `ã`.
+- **Finder damlası (phase-3).** `performDragOperation:` bir tuş olayı değil,
+  yığına hiç uğramıyor ve `Session::paste` baytları doğrudan akıtıyor. Aynı
+  belirti: bekleyen ölü tuştan sonra damla, sonra bir harf.
+
+**Düzeltme önerilmiyor, ölçüm öneriliyor.** Gerekçe kabul edilmiş waive'lerin
+aynısı: karşı hâl **ölçülmemiş** — bileşimi bu kollarda `unmarkText`'le
+yıkmak, kullanıcının bekleyen aksanını sessizce düşürür ve preedit
+**çizilmediği** için ekranda hiçbir şey değişmez; bugünkü hâlde en azından
+aksan sonraki harfe biniyor, yani kayıp görünür. Dokunduğu şey **hissedilir
+davranış** (tuşun ne yazdığı, damlanın ne ürettiği), o yüzden kapı onu
+düzeltmedi.
+
+Kalem phase-1'in ölçüm tablosuna **iki satır** olarak ekleniyor ve
+kullanıcının elle turuna giriyor: `Option+ü` sonra ⌘⌫, ve `Option+ü` sonra
+Finder damlası. Kapatma kararı o ölçümden sonra, bu sette değil.

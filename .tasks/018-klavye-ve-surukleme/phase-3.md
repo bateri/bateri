@@ -110,3 +110,33 @@ bölü, `$`, `` ` ``, `;`, `&`, satır sonu, Türkçe karakter, çok dosya.
   Çıkan şey **durum** oldu ("018 şunu kapattı", panel tarihleri) — `CLAUDE.md`
   durumun tek sahibini `.tasks/README.md` diye yazıyor. Otuz satır yirmiye
   indi ve içinde yalnız borç kaldı.
+
+## Set kapısı (2026-09-20)
+
+`/code-review` (aralık `05ff10c^..HEAD`, yüksek efor) **8 bulgu**, `/audit`
+**0 bulgu** (mekanik yarı `make denetim` temiz; mercek 1/3/4/5/7 temiz,
+2/6 ilgisiz — ayar/tema şeması ve `Cell`/shader diff'te yok). Kabul edilmiş
+iki waive (phase-1'in tablosu) kapıda **yeniden açılmadı**.
+
+| # | bulgu | karar |
+|---|---|---|
+| 1 | `insertText:` `replacementRange`'i yoksayıyor; bastıran tek şey `registerDefaults` ve o **en düşük öncelikli** domain — NSGlobalDomain'de ya da MDM'de `ApplePressAndHoldEnabled = 1` olan kullanıcıda popover dönüyor ve kabuğa `eé` gidiyor | **waive** — düzeltme PTY'ye `\x7f` yazar, yani tuşun ne yazdığını değiştirir |
+| 2 | `dropped_paths`'in doc'u "`http://` sessizce düşüyor" diyor ama `NSURL.path` `/foo` döndürüyor: karışık damlada uydurma yol giriş satırına giriyor | **waive** — damlanın ne ürettiğini değiştirir; **doc ile kod çelişiyor**, ikisinden biri kapanmalı |
+| 3 | `attributedSubstringForProposedRange:` hep `nil`, oysa `markedRange` bileşimde `{0, len}` ilan ediyor | **waive** — `nil` phase-1'de gerekçeli bir karar ("geri okunacak belge yok"); değiştirmek o kararı bozar |
+| 4 | `setMarkedText:` bilinmeyen tipte erken dönüyor: ne `consumed` ne durum temizleniyor (`insertText:`'in tam tersi sırası) | **waive** — bileşim durumuna dokunuyor, yani tuşun ne yazdığına |
+| 5 | "tam tek karakter" ölçütü **üç** ayrı yazımda (`encode_key`'in `single`'ı, `page_scroll`, `reaches_terminal`) | **düzeltildi** — `keys::only_char` tek sahip, üçü de ona bağlandı; sözleşmeyi `only_char_is_the_single_owner_of_the_one_character_test` çiviliyor |
+| 6 | ⌘⌫ izin listesi iki yerde (`reaches_terminal` + `encode_key`'in guard'ı) | **waive** — doğru ama kapının işi değil: klavye arbitrajını set kapanırken yeniden şekillendirmek, elle tuş turu **henüz koşmamışken** riski kazancın üstüne çıkarıyor |
+| 7 | `characters().to_string()` her tuşta bir `String` ayırıyor, oysa baskın yol yığının tüketmesi | **waive** — kazanç **ölçülmemiş** ve ertelemenin yolu yok: Cmd izin listesi ile `page_scroll` `chars`'ı yığın kolundan **önce** istiyor |
+| 8 | `draggingEntered:` koşulsuz `Copy` diyor, `performDragOperation:` oturumsuzda `false` — imleç kabul gösterip damla reddediliyor | **düzeltildi (doc)** — asimetri `draggingEntered:`'in doc'unda adıyla duruyor; koşul eklemek yanlış ölçüt olurdu (metot sürüklemenin **başında** koşuyor) |
+
+**Kapının düzelttiği iki kalem de davranışa dokunmuyor:** biri saf bir
+çıkarma (`only_char`, üç çağrı yeri bit bit aynı cevabı veriyor), öteki bir
+doc satırı. Kalan altısı **hissedilir davranışa** dokunuyor (tuşun ne
+yazdığı, damlanın ne ürettiği) ya da yapısal bir yeniden şekillendirme
+istiyor; ikisi de kullanıcının/orkestratörün kararı, kapının değil.
+
+**Kapının kendi bulduğu kalem** (`/code-review`'un listesinde yok) phase-2'de:
+⌘⌫ ile Finder damlası yığını atlayarak bekleyen bir bileşimin üstünden yazıyor
+— `phase-2.md` → "Set kapısının önerdiği waive".
+
+`make hepsi` → exit 0 (düzeltmelerden **sonra**; `bt-shell` 126 → 127 sınama).

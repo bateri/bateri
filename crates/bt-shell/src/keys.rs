@@ -35,6 +35,27 @@ const PAGE_DOWN: char = '\u{f72d}';
 /// birinde kaymasına açık kapı bırakırdı.
 pub(crate) const BACKSPACE: char = '\u{7f}';
 
+/// Dizge **tam olarak tek karakter** mi — öyleyse o karakter, değilse `None`.
+///
+/// Ölçütün **tek sahibi** burası ve üç tüketicisi var: [`encode_key`]'in
+/// `single` disiplini, [`page_scroll`]'un kaydırma kararı ve
+/// `view::reaches_terminal`'ın ⌘ izin listesi. Üçü de aynı soruyu soruyor —
+/// "bu bir tuşun karakteri mi, yoksa bir bileşimin çok karakterli çıktısı
+/// mı" — ve üçü de ayrı yazılmıştı; `BACKSPACE` ile `PAGE_UP`'ın tek yerde
+/// durma gerekçesinin aynısı, bir yerde kayan ölçüt ötekileri sessizce
+/// ayrıştırırdı.
+///
+/// `chars().next()` **yetmiyor**: çok karakterli bir `characters` (ölü tuş
+/// bileşiminin çıktısı, marked text) ilk karakterinden okunursa kalanı izsiz
+/// düşer.
+pub(crate) fn only_char(chars: &str) -> Option<char> {
+    let mut it = chars.chars();
+    match (it.next(), it.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
+    }
+}
+
 /// [`encode_key`]'in cevabı: baytı belli bir tuş ya da ok.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum KeyInput {
@@ -111,8 +132,9 @@ pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
     // `characters` tek karakter mi — tek bir `c`'den çıkan kolların ortak
     // koruması (aşağıda geri sekme, oklar, PgUp/PgDn, ileri silme ve
     // Control): çok karakterli girdi (ölü tuş bileşimi, marked text) ilk
-    // karakterinden okunmaz.
-    let single = key.chars.len() == c.len_utf8();
+    // karakterinden okunmaz. Ölçütün sahibi [`only_char`] — `page_scroll` ve
+    // `view::reaches_terminal` de aynı soruyu oradan soruyor.
+    let single = only_char(key.chars).is_some();
     let bytes: Cow<'static, [u8]> = match (c, key.ctrl) {
         // Cmd'nin kapalı izin listesindeki **tek** tuş: ⌘⌫ → `\x15` (`^U`,
         // zsh'te `kill-whole-line`). macOS'un katı anlamı "satır **başına
@@ -202,17 +224,16 @@ pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
 /// değiştiriciler sorulmuyor — Control ya da Option'lı Shift+PgUp da
 /// kaydırır; kaydırma tuşunun başka bir anlamı yok.
 ///
-/// Eşleşme **tüm dizgiyle**: çok karakterli bir `characters` (bileşim)
-/// ilk karakterinden kaydırma diye okunmaz — [`encode_key`]'in `single`
-/// disiplininin aynısı.
+/// Eşleşme **tüm dizgiyle** ([`only_char`]): çok karakterli bir `characters`
+/// (bileşim) ilk karakterinden kaydırma diye okunmaz — [`encode_key`]'in
+/// `single` disiplininin aynısı, artık aynı yerden.
 pub(crate) fn page_scroll(chars: &str, shift: bool) -> Option<i32> {
     if !shift {
         return None;
     }
-    let mut it = chars.chars();
-    match (it.next(), it.next()) {
-        (Some(PAGE_UP), None) => Some(1),
-        (Some(PAGE_DOWN), None) => Some(-1),
+    match only_char(chars)? {
+        PAGE_UP => Some(1),
+        PAGE_DOWN => Some(-1),
         _ => None,
     }
 }
@@ -259,6 +280,24 @@ mod tests {
             Some(KeyInput::Bytes(bytes)) => bytes.into_owned(),
             other => panic!("{key:?} bayt vermedi: {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_char_is_the_single_owner_of_the_one_character_test() {
+        // Ölçütün üç tüketicisi var (`encode_key`'in `single`'ı,
+        // `page_scroll`, `view::reaches_terminal`) ve üçü de buraya bağlı;
+        // sözleşme burada çivileniyor.
+        assert_eq!(only_char("a"), Some('a'));
+        // Çok baytlı **tek** karakter de tek karakter: ölçüt bayt değil
+        // karakter sayısı.
+        assert_eq!(only_char("ğ"), Some('ğ'));
+        assert_eq!(only_char("\u{7f}"), Some('\u{7f}'));
+        // İki karakter tek değil — bileşimin çıktısı ilk karakterinden
+        // okunmasın diye ölçüt tam da bu.
+        assert_eq!(only_char("ab"), None);
+        assert_eq!(only_char("\u{f72c}x"), None);
+        // Boş dizge (saf modifier tuşu) de tek karakter değil.
+        assert_eq!(only_char(""), None);
     }
 
     #[test]
