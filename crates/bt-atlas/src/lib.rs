@@ -10,9 +10,13 @@
 //! Dört font yüzü (`Face`) ve kural çizgileri (`RuleKind`) burada: kural
 //! sprite'ları fonttan glyph almıyor, yordamsal çiziliyor. Aile ayardan
 //! gelir (007 phase-5) ve makinede yoksa zincire düşülür; bunu söyleyen
-//! [`FontIssue`] çağırana döner, bu crate kimseye bir şey basmaz. Kutu çizim
-//! karakterleri, emoji ve yedek font listesi (bir glyph'i başka fonttan
-//! almak) hâlâ kapsam dışı ve ayrı setlere kaldı.
+//! [`FontIssue`] çağırana döner, bu crate kimseye bir şey basmaz.
+//!
+//! Seçili fontta olmayan **tek hücrelik** karakter sistemin cascade'inden
+//! geliyor (`font::fallback_font`) ve kapı **geometrik**: adayın ilerlemesi
+//! hücrenin ilerlemesini aşıyorsa reddediliyor. Yani emoji, CJK ve geniş
+//! glyph hâlâ [`TOFU`] — onları gerçekten çizmek (iki hücre, renkli doku)
+//! ayrı bir sete kaldı, kutu çizim karakterleri de öyle.
 
 mod font;
 mod raster;
@@ -21,7 +25,7 @@ use std::collections::HashMap;
 
 use font::Faces;
 pub use font::{Face, FontIssue, Metrics, SizeClass};
-use objc2_core_foundation::CFRetained;
+use objc2_core_foundation::{CFRetained, CGFloat};
 use objc2_core_text::CTFont;
 use raster::DrawResult;
 pub use raster::RuleKind;
@@ -111,11 +115,29 @@ pub struct Atlas {
     /// "yüz edinilemedi" uyarısı demekti — ikisi de karşılığı olmayan bedel.
     small: CFRetained<CTFont>,
     metrics: Metrics,
+    /// Hücrenin **kesirli** ilerlemesi, fiziksel piksel — büyük sınıf.
+    ///
+    /// [`Metrics::cell_px`]'in genişliği bunun yukarı yuvarlanmışı ve
+    /// ızgaranın adımı o; kesirli hâli burada duruyor çünkü iki tüketici
+    /// yuvarlanmışla çalışamıyor — yedek adayın genişlik kapısı
+    /// (`font::fallback_font`) ile glyph'in hücrede ortalanması
+    /// (`raster::draw`). Gerekçenin tamamı `font::space_advance`'in doc'unda;
+    /// iki sayının aynı ölçüyü verdiğinin bekçisi
+    /// `the_cell_is_the_rounded_advance`.
+    cell_advance: CGFloat,
+    /// Küçük yüzün kesirli ilerlemesi: [`Atlas::cell_advance`]'in küçük sınıf
+    /// ikizi. Yedek kapısı ve ortalama **sınıf başına** ayrı, çünkü ikisinin
+    /// de sınırı o sınıfın kendi hücresi.
+    context_advance: CGFloat,
     /// Küçük yüzün ilerleme genişliği, piksel: bağlam satırının sütun adımı.
     ///
     /// **Yalnız genişlik**, çünkü küçük glyph de büyük yuvaya, büyük hücrenin
     /// taban çizgisine rasterize ediliyor ([`Atlas::slot`]): yükseklik ve
     /// taban ortak, ayrışan tek şey harflerin arasındaki mesafe.
+    ///
+    /// [`Atlas::context_advance`]'in yuvarlanmışı ve **ondan türüyor**: iki
+    /// ayrı yoldan hesaplanırsa (biri `font::metrics`, öteki `space_advance`)
+    /// aynı ölçünün iki kaynağı olur.
     context_cell_w: u16,
     /// Kurulduğu (aile, punto, ölçek). [`Atlas::ensure`]'nin ölçütü.
     key: Key,
@@ -185,6 +207,7 @@ impl Atlas {
         // Kalın glyph aynı yuvaya rasterize olur ve bir piksel kırpılabilir —
         // her terminal bunu böyle yapıyor.
         let metrics = font::metrics(faces.get(Face::Regular), line_height);
+        let cell_advance = font::space_advance(faces.get(Face::Regular));
         // Küçük yüz **aynı zincirden**: `font_issue` ikinci kez sorulmuyor ve
         // yok sayılıyor, çünkü aynı aileye aynı cevap gelir — ikinci bir kayıt
         // kullanıcıya aynı uyarıyı iki kez söyletirdi.
@@ -192,9 +215,12 @@ impl Atlas {
             family,
             effective_point_size(point_size * CONTEXT_SCALE, scale),
         );
-        // `line_height` küçük yüze de uygulanıyor ama **yalnız genişliği**
-        // alınıyor; satır aralığı hücrenin boyunu belirler ve o boy ortak.
-        let context_cell_w = font::metrics(&small, line_height).cell_px.0;
+        // `line_height` **sorulmuyor**: satır aralığı yalnız hücrenin boyunu
+        // büyütüyor ve o boy iki sınıfta ortak, genişlik ise fontun kendi
+        // ilerlemesi. Bütün bir `Metrics` kurup içinden genişliği almak aynı
+        // sayıyı ikinci bir yoldan türetmek olurdu.
+        let context_advance = font::space_advance(&small);
+        let context_cell_w = font::round_up(context_advance);
         let (w, h) = metrics.cell_px;
         // `w`/`h` en az 1 (`font::round_up`), yani bölme güvenli; `max(1)` de
         // hücrenin dokudan büyük olduğu uç için.
@@ -203,6 +229,8 @@ impl Atlas {
             faces,
             small,
             metrics,
+            cell_advance,
+            context_advance,
             context_cell_w,
             key: Key {
                 family: family.map(str::to_owned),
@@ -349,11 +377,39 @@ impl Atlas {
                 // boyu ortak kaldığı için ızgara, doku ve `slot_bytes`
                 // değişmiyor — ayrışan tek şey harfin kendi boyu, o da
                 // fonttan geliyor.
-                let font = match size {
-                    SizeClass::Normal => self.faces.get(face),
-                    SizeClass::Small => &self.small,
+                // Yedek kapısının sınırı da sınıf başına: küçük glyph küçük
+                // hücrenin ilerlemesine sığmak zorunda, büyüğün değil.
+                let (font, cell_advance) = match size {
+                    SizeClass::Normal => (self.faces.get(face), self.cell_advance),
+                    SizeClass::Small => (&*self.small, self.context_advance),
                 };
-                raster::draw(font, ch, self.metrics, &mut self.buffer)
+                let drawn = raster::draw(font, ch, self.metrics, cell_advance, &mut self.buffer);
+                // **Yedek font.** Kol `NoGlyph` yaprağının içinde ve yalnız
+                // düz yüzde koşuyor, yani sıra şu: önce yüz merdiveni
+                // (aşağıdaki `face != Regular` kolu düz yüze iniyor), sonra
+                // burası, en sonda negatif önbellek. Merdiven tüketilmeden
+                // yedeğe gidilseydi kalın bir `─` sistem fontundan gelir ve
+                // ailenin kendi düz yüzü hiç sorulmazdı.
+                //
+                // Kol `match drawn` içinde değil **çizim adımının içinde**,
+                // iki mecburi sebeple: `match`'in kolları negatif önbellek
+                // koluna düşemiyor (yedek reddedilirse oraya inmek gerekiyor)
+                // ve `ch` yalnız burada kapsamda. Semantik sıra değişmiyor.
+                //
+                // Kabul edilen aday aşağıdaki `Drawn` kolundan geçiyor: aynı
+                // anahtar, aynı `Upload`, aynı yuva aritmetiği. Yani arama
+                // anahtar başına atlasın ömründe **bir kez** koşuyor — ret de
+                // negatif önbelleğe giriyor.
+                if drawn == DrawResult::NoGlyph && face == Face::Regular {
+                    match font::fallback_font(font, ch, cell_advance) {
+                        Some(alt) => {
+                            raster::draw(&alt, ch, self.metrics, cell_advance, &mut self.buffer)
+                        }
+                        None => drawn,
+                    }
+                } else {
+                    drawn
+                }
             }
             // Yordamsal çizim başarısız olamaz: font sorulmuyor, bağlam
             // kurulmuyor. `Drawn` bir varsayım değil, tipin kendisi.
@@ -510,6 +566,11 @@ fn tofu_buffer(m: Metrics) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr::NonNull;
+
+    use objc2_core_foundation::CGRect;
+    use objc2_core_text::CTFontOrientation;
+
     use super::*;
 
     /// Sınama puntosu bilerek büyük: ızgara hücre ölçüsünden türüyor, yani
@@ -518,15 +579,68 @@ mod tests {
     /// üstünü istemek sessizce kırpılır ve sınama kapasiteyi yanlış sanırdı.
     const LARGE_POINT_SIZE: f64 = MAX_POINT_SIZE;
     const POINT_SIZE: f64 = 13.0;
-    /// Menlo ve SF Mono CJK içermez ve `CTFontGetGlyphsForCharacters` başka
-    /// fonta düşmez: bu karakter `.notdef` verir.
+    /// Tofu'ya düşen karakter — ve **iki** kapıdan birden düşüyor.
+    ///
+    /// Menlo ile SF Mono CJK içermez, yani taban font `.notdef` veriyor
+    /// (`CTFontGetGlyphsForCharacters` cascade'e inmiyor). Yedek aramanın
+    /// gelişiyle yol bir adım uzadı: cascade **bir aday buluyor** (PingFang
+    /// SC) ve o aday genişlik kapısından dönüyor — ilerlemesi hücrenin 1.66
+    /// katı (ölçüldü, bu makine, Menlo 13pt). Yani bu sabite dayanan
+    /// sınamalar "tofu" derken artık kapının da çalıştığını varsayıyor;
+    /// kapının kendi bekçisi [`wide_fallback_candidates_are_rejected`].
     const UNKNOWN_CHAR: char = '漢';
+    /// Yedeğin **kabul ettiği** karakter ve setin varlık sebebi: `⏵` Menlo'da
+    /// yok, Claude Code'un `⏵⏵ auto mode on` göstergesi iki kutu çıkıyordu.
+    /// Ölçüldü (bu makine, macOS 26.4.1): STIX Two Math'ten geliyor ve
+    /// ilerlemesi hücrenin 0.84'ü — oran ölçekten bağımsız olduğu için iki boy
+    /// sınıfında da kapıyı geçiyor.
+    const FALLBACK_CHAR: char = '⏵';
+    /// Yedeğin **reddettiği** karakterler ve ölçülmüş oranları (bu makine,
+    /// Menlo 13pt). Dördü de bir aday **buluyor** ve dördü de aynı geometrik
+    /// kapıdan dönüyor: emoji, `.LastResort`, CJK ve geniş matematik harfi
+    /// için ayrı kol yok.
+    const REJECTED: [(char, &str); 4] = [
+        ('𝔸', "STIX Two Math, 1.07×"),
+        (UNKNOWN_CHAR, "PingFang SC, 1.66×"),
+        ('\u{E0B0}', ".LastResort, 1.83×"),
+        ('🎉', "Apple Color Emoji, 2.17×"),
+    ];
     /// Hiçbir makinede olmayan aile; CoreText yerine başka bir font verir.
     const MISSING_FAMILY: &str = "Bu Aile Yok 12345";
 
     /// Zincirle kurulan atlas — ayarda aile yokken üretimin kurduğu.
     fn atlas(point_size: f64, scale: f64) -> Atlas {
         Atlas::new(None, point_size, scale, 1.0)
+    }
+
+    /// Bir boy sınıfının (ad, taban font, **kesirli** hücre ilerlemesi)
+    /// üçlüsü. Yedekle ilgili her bekçi iki sınıfı da ayrı ayrı dolaşmak
+    /// zorunda: taban font ve sınır sınıf başına ayrı, tek bir tanesinden
+    /// geçen sınama ötekini hiç sınamamış olur.
+    fn size_classes(a: &Atlas) -> [(&'static str, &CTFont, CGFloat); 2] {
+        [
+            ("düz yüz", a.faces.get(Face::Regular), a.cell_advance),
+            ("küçük yüz", &a.small, a.context_advance),
+        ]
+    }
+
+    /// Glyph'in mürekkep kutusu, taban çizgisine göre (y yukarı).
+    ///
+    /// Yalnız sınamada var ve üretimde **olmamalı**: genişlik kapısı
+    /// ilerlemeye bakıyor, mürekkep kutusuna değil. Buradaki iş kapının
+    /// göremediğini görmek — kırpma.
+    fn glyph_bounds(font: &CTFont, glyph: objc2_core_graphics::CGGlyph) -> CGRect {
+        let mut rects = [CGRect::ZERO; 1];
+        // SAFETY: tek glyph, tek dikdörtgen hücresi; sayı ikisiyle de tutarlı.
+        unsafe {
+            font.bounding_rects_for_glyphs(
+                CTFontOrientation::Horizontal,
+                NonNull::from(&glyph),
+                rects.as_mut_ptr(),
+                1,
+            );
+        }
+        rects[0]
     }
 
     #[test]
@@ -540,6 +654,241 @@ mod tests {
             m.slot_bytes(),
             usize::from(m.cell_px.0) * usize::from(m.cell_px.1)
         );
+    }
+
+    #[test]
+    fn the_cell_is_the_rounded_advance() {
+        // Hücre genişliği iki temsilde yaşıyor: kesirli ([`Atlas::cell_advance`],
+        // yedek kapısı ile ortalamanın girdisi) ve yukarı yuvarlanmış
+        // ([`Metrics::cell_px`], ızgaranın adımı). İkisi **aynı ölçü** olmak
+        // zorunda; ayrışsalar kapı bir hücreye, ortalama başka bir hücreye
+        // bakar ve belirti sessiz olur. Küçük sınıfta ayrıca bir tarihçe var:
+        // `context_cell_w` bir dönem `font::metrics(&small, ..)` üzerinden
+        // türüyordu, yani aynı sayının iki kaynağı vardı.
+        for (point_size, scale) in [
+            (POINT_SIZE, 1.0),
+            (POINT_SIZE, 2.0),
+            (LARGE_POINT_SIZE, 1.0),
+        ] {
+            let a = atlas(point_size, scale);
+            assert_eq!(
+                font::round_up(a.cell_advance),
+                a.metrics.cell_px.0,
+                "{point_size}×{scale}: büyük sınıfın iki temsili ayrıştı ({})",
+                a.cell_advance
+            );
+            assert_eq!(
+                font::round_up(a.context_advance),
+                a.context_cell_w,
+                "{point_size}×{scale}: küçük sınıfın iki temsili ayrıştı ({})",
+                a.context_advance
+            );
+        }
+    }
+
+    #[test]
+    fn every_base_glyph_advance_is_the_cell_advance() {
+        // Ortalama **evrensel** ve taban fontta tam olarak sıfır olmak
+        // zorunda: `(cell - advance) / 2` kesirli bir sonuç verse CG'nin kenar
+        // yumuşatması değişir ve depodaki bütün piksel bekçilerinin
+        // (`glyph_sits_on_the_baseline`, `descender_fits_in_the_cell`, …)
+        // altı sessizce oyulur. Bu sınama o sıfırın **sebebini** tutuyor.
+        //
+        // İddia "font eşaralıklı" değil, ondan daha güçlü: her glyph'in
+        // ilerlemesi hücrenin ilerlemesine **bit bit** eşit. Eşaralıklı
+        // olmayan bir aile bunu düşürmez (zincirin tabanı Menlo) ama orada
+        // ortalama gerçekten kaydırır — `raster::draw`'in `max(0.0)`'ı o yolu
+        // adıyla anlatıyor.
+        let a = atlas(POINT_SIZE, 1.0);
+        for (label, face_font, cell) in size_classes(&a) {
+            // Yazdırılabilir ASCII, kutu çizim ve Menlo'nun kendi simgeleri:
+            // hücreden farklı ilerleyen bir glyph varsa buradan görünür.
+            for ch in (' '..='~').chain("─│┌┐└┘├┤┬┴┼✓⚠▶".chars()) {
+                let Some(glyph) = font::glyph_index(face_font, ch) else {
+                    continue;
+                };
+                assert_eq!(
+                    font::glyph_advance(face_font, glyph),
+                    cell,
+                    "{label}: '{ch}' hücreden farklı ilerliyor, ortalama artık no-op değil"
+                );
+            }
+        }
+
+        // İkinci yarı: `raster::draw` bu sayıyı **gerçekten** tüketiyor.
+        // Yalnız yukarıdaki eşitlik sınansaydı iddia girdinin doğruluğundan
+        // ibaret kalırdı; `draw`'in girdiyi yok sayıp yuvarlanmış hücreye
+        // (`cell_px.0`) bakması — yani taban fontun her glyph'ini 0.09 piksel
+        // kaydırıp bütün rasteri sessizce değiştirmesi — buradan geçerdi.
+        // Ölçüt: daha geniş bir hücre ilerlemesi bitmap'i sağa itmeli.
+        let m = a.metrics();
+        let font = a.faces.get(Face::Regular);
+        let mut own = vec![0u8; m.slot_bytes()];
+        let mut wider = vec![0u8; m.slot_bytes()];
+        assert_eq!(
+            raster::draw(font, 'W', m, a.cell_advance, &mut own),
+            DrawResult::Drawn
+        );
+        // Dört piksel geniş bir hücre glyph'i iki piksel sağa iter.
+        assert_eq!(
+            raster::draw(font, 'W', m, a.cell_advance + 4.0, &mut wider),
+            DrawResult::Drawn
+        );
+        assert_ne!(
+            own, wider,
+            "`draw` hücre ilerlemesini yok sayıyor: ortalama girdiye bağlı değil"
+        );
+    }
+
+    #[test]
+    fn fallback_glyph_is_drawn_in_both_size_classes() {
+        let mut a = atlas(POINT_SIZE, 1.0);
+        let (w, h) = a.metrics().cell_wh();
+        // Kapsamanın en sağdaki sütunu; `the_small_class_is_narrower_…`'in
+        // ölçütüyle aynı ve aynı sebeple: tek tek piksel değeri font sürümüne
+        // bağlı, sınır değil.
+        let ink_right = |bytes: &[u8]| {
+            (0..w)
+                .rev()
+                .find(|&x| (0..h).any(|y| bytes[y * w + x] > 0))
+                .expect("yedek glyph hiç piksel boyamadı")
+        };
+
+        let mut edge = Vec::new();
+        for size in [SizeClass::Normal, SizeClass::Small] {
+            let (slot, upload) = a.slot(Sprite::Char(FALLBACK_CHAR), Face::Regular, size);
+            assert_ne!(
+                slot, TOFU,
+                "{size:?}: '{FALLBACK_CHAR}' yedekten gelmeli, kutu değil"
+            );
+            edge.push(ink_right(upload.expect("yeni yuva").bytes));
+        }
+
+        // İki sınıf **ayrı ayrı** değerlendiriliyor ve ayrı yuva tutuyor:
+        // anahtar boy sınıfı taşımasaydı tek yuva çıkardı.
+        assert_eq!(
+            a.occupancy().0,
+            3,
+            "iki boy sınıfı ayrı yuva almalı (tofu dahil üç)"
+        );
+        // Ve yedeğin **tabanı** o sınıfın kendi fontu: küçük sınıfta aynı
+        // yuvaya daha dar bir iz düşmeli. Bu olmadan "iki sınıf da çalışıyor"
+        // iddiası, küçük satıra büyük punto glyph çizen bir uygulamadan
+        // ayırt edilemezdi — ve belirti sessiz olurdu, çünkü bir şey yine
+        // görünürdü.
+        assert!(
+            edge[1] < edge[0],
+            "küçük sınıfın yedeği daralmadı: sağ kenar büyükte {}, küçükte {}",
+            edge[0],
+            edge[1]
+        );
+    }
+
+    #[test]
+    fn fallback_glyph_fits_the_cell() {
+        // `slot != TOFU` kırpmayı **göremez**: CG hücrenin dışına taşan
+        // mürekkebi sessizce kesiyor ve bitmap yine dolu görünür. Genişlik
+        // kapısı da yalnız **ilerlemeyi** ölçüyor; yan yatağı negatif ya da
+        // ascent'i yüksek bir aday kapıyı geçip yine kırpılabilir. Ölçüt bu
+        // yüzden fontun kendi sınır dikdörtgeni ve **dört kenar birden** —
+        // yatayda o sınıfın kesirli hücresi (komşu glyph o kadar ilerliyor),
+        // dikeyde yuvanın boyu (iki sınıf aynı yuvaya çiziliyor).
+        let a = atlas(POINT_SIZE, 1.0);
+        let m = a.metrics();
+        // CG'nin başlangıcı sol alt: taban çizgisi yuvanın dibinden bu kadar
+        // yukarıda (`raster::draw` ile aynı aritmetik).
+        let baseline = f64::from(m.cell_px.1 - m.baseline_px);
+        for (label, base, cell) in size_classes(&a) {
+            let alt = font::fallback_font(base, FALLBACK_CHAR, cell)
+                .unwrap_or_else(|| panic!("{label}: '{FALLBACK_CHAR}' kapıdan geçmeli"));
+            let glyph =
+                font::glyph_index(&alt, FALLBACK_CHAR).expect("kapıyı geçen aday çizebiliyor");
+            let rect = glyph_bounds(&alt, glyph);
+            let x = (cell - font::glyph_advance(&alt, glyph)) / 2.0;
+            let (left, right) = (x + rect.origin.x, x + rect.origin.x + rect.size.width);
+            assert!(left >= 0.0, "{label}: mürekkep soldan taştı ({left})");
+            assert!(
+                right <= cell,
+                "{label}: mürekkep sağdan taştı ({right} > {cell})"
+            );
+            let (bottom, top) = (
+                baseline + rect.origin.y,
+                baseline + rect.origin.y + rect.size.height,
+            );
+            assert!(bottom >= 0.0, "{label}: mürekkep alttan taştı ({bottom})");
+            let cell_h = f64::from(m.cell_px.1);
+            assert!(
+                top <= cell_h,
+                "{label}: mürekkep üstten taştı ({top} > {cell_h})"
+            );
+
+            // Ve ortalama yedek yolunda **gerçekten** koşuyor: aynı adayı
+            // kaydırmasız çizmek (sınırı tam glyph'in ilerlemesi yaparak,
+            // yani kaydırmayı inşaen sıfırlayarak) başka bir bitmap veriyor.
+            //
+            // Ölçüt "mürekkebin ağırlık merkezi hücrenin ortasına yaklaştı"
+            // **değil**: ortalanan şey glyph'in **ilerleme kutusu**, mürekkebi
+            // değil, ve `⏵`'nin yan yatakları asimetrik (ölçüldü: solda 1.04,
+            // sağda 0.13). Merkez ölçütü bu glyph'te yanlış yöne işaret eder
+            // ve doğru uygulamayı kırmızıya düşürürdü. İddia bu yüzden daha
+            // mütevazı ama yine gözlenebilir: kaydırma uygulanıyor ve taban
+            // fontun tersine sıfır değil.
+            let advance = font::glyph_advance(&alt, glyph);
+            let mut centred = vec![0u8; m.slot_bytes()];
+            let mut flush = vec![0u8; m.slot_bytes()];
+            assert_eq!(
+                raster::draw(&alt, FALLBACK_CHAR, m, cell, &mut centred),
+                DrawResult::Drawn
+            );
+            assert_eq!(
+                raster::draw(&alt, FALLBACK_CHAR, m, advance, &mut flush),
+                DrawResult::Drawn
+            );
+            assert_ne!(
+                centred, flush,
+                "{label}: yedek glyph kaydırılmadı (kapı {cell}, ilerleme {advance})"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_fallback_candidates_are_rejected() {
+        // Bekçinin asıl işi "tofu geldi mi" **değil**: tofu, aday hiç
+        // bulunamasa da gelirdi ve kapı sessizce ölse fark edilmezdi. Bu
+        // yüzden iki şey birden sınanıyor — aday **var** ve karakteri
+        // çizebiliyor (sınır sonsuza açılınca kabul ediliyor), ama gerçek
+        // sınırda kapı onu almıyor. Yani ret kapının eseri.
+        let a = atlas(POINT_SIZE, 1.0);
+        for (ch, measured) in REJECTED {
+            for (label, base, cell) in size_classes(&a) {
+                let open = font::fallback_font(base, ch, CGFloat::INFINITY).unwrap_or_else(|| {
+                    panic!("{label}: '{ch}' için aday yok ({measured}) — ret kapının değil")
+                });
+                let glyph = font::glyph_index(&open, ch).expect("aday çizebiliyor");
+                let advance = font::glyph_advance(&open, glyph);
+                assert!(
+                    advance > cell,
+                    "{label}: '{ch}' hücreye sığıyor ({advance} <= {cell}), oysa ölçüm {measured}"
+                );
+                assert!(
+                    font::fallback_font(base, ch, cell).is_none(),
+                    "{label}: '{ch}' kapıdan geçti ({measured})"
+                );
+            }
+        }
+        // Uçtan uca: reddedilen karakter tofu'ya düşüyor ve **yuva
+        // harcamıyor**. İkincisi olmasaydı bir CJK dosyası atlası tüketirdi.
+        let mut a = atlas(POINT_SIZE, 1.0);
+        for (ch, measured) in REJECTED {
+            for size in [SizeClass::Normal, SizeClass::Small] {
+                assert_eq!(
+                    a.slot(Sprite::Char(ch), Face::Regular, size).0,
+                    TOFU,
+                    "{size:?}: '{ch}' çizildi ({measured})"
+                );
+            }
+        }
+        assert_eq!(a.occupancy().0, 1, "reddedilen aday yuva harcamamalı");
     }
 
     #[test]
@@ -602,7 +951,12 @@ mod tests {
             a.tofu_bitmap().iter().any(|&b| b > 0),
             "tofu boş kutu olamaz"
         );
-        // Tofu'ya düşen çağrı yükleme **vermez**: veri dokuda zaten.
+        // Tofu'ya düşen çağrı yükleme **vermez**: veri dokuda zaten. Yedek
+        // aramanın gelişiyle bu iddianın kapsamı büyüdü: kabul edilmeyen aday
+        // tampona hiç çizilmediği için yol yine buraya iniyor, yani "rezident"
+        // sözü yedek reddinde de tutuyor. Kabul edilen aday `Drawn` kolundan
+        // geçer ve orada yükleme **gelir** — ikisini karıştıran bir uygulama
+        // dokuya boş tampon yazardı.
         assert!(
             a.slot(Sprite::Char(UNKNOWN_CHAR), Face::Regular, SizeClass::Normal)
                 .1
@@ -619,9 +973,18 @@ mod tests {
                 .0,
             TOFU
         );
-        // Fontun bu karakteri tanımaması kalıcı: ikinci soruluşta CoreText'e
-        // gidilmemeli. Bekçi iç tabloya bakıyor çünkü FFI çağrısının olup
-        // olmadığı dışarıdan gözlenemiyor.
+        // Reddin kalıcılığı: ikinci soruluşta CoreText'e gidilmemeli. Bekçi iç
+        // tabloya bakıyor çünkü FFI çağrısının olup olmadığı dışarıdan
+        // gözlenemiyor.
+        //
+        // Yedek aramanın gelişiyle bu iddia **daha pahalı** bir şeyi koruyor.
+        // Eskiden önbelleklenmeyen kayıt kare başına tek bir
+        // `CTFontGetGlyphsForCharacters` demekti; artık ona bir
+        // `CTFontCreateForString` de ekleniyor ve o cascade'i yürüyor — soğuk
+        // ilk çağrısı ölçüldü, **6.3 ms** (bu makine, PingFang SC'nin açılışı;
+        // 60 fps'de kare bütçesi 16.7 ms). Kaydın **ana thread'de** doğduğu
+        // yer `slot()`'un çizim yolu, yani tavansız bir sızıntı değil kare
+        // başına ödenen bir gecikme olurdu.
         assert_eq!(
             a.slots
                 .get(&(Sprite::Char(UNKNOWN_CHAR), Face::Regular, SizeClass::Normal)),
@@ -844,13 +1207,21 @@ mod tests {
         // sınırlamıyor. Tavan olmasaydı harita gördüğü ayrı codepoint sayısı
         // kadar büyürdü ve bir ikili dosyayı `cat`'lemek bunu gerçek bir yola
         // çevirir. Crate'in tavanı olmayan tek sayısı burasıydı.
+        //
+        // **Havuz yedek aramadan sonra da çalışıyor** ve bu bir varsayım
+        // değil: oranın ölçekten bağımsız olması sayesinde CJK burada da
+        // reddediliyor (144pt'de hücre 86.7 px, PingFang SC 144 px). Ama artık
+        // her kayıt bir `CTFontCreateForString` ödüyor, o yüzden bedeli
+        // ölçüldü: 396 karakter **889 µs** (bu makine; PingFang SC'nin soğuk
+        // açılışı süitin daha erken bir sınamasında amortize oluyor, tek
+        // başına 0.8 ms). Havuzu daraltmak gerekmedi.
         let pool: Vec<char> = ('\u{4e00}'..'\u{9fff}').take(cap * 3).collect();
         assert!(pool.len() > cap, "havuz tavanı aşmalı");
         for &ch in &pool {
             assert_eq!(
                 a.slot(Sprite::Char(ch), Face::Regular, SizeClass::Normal).0,
                 TOFU,
-                "'{ch}' Menlo/SF Mono'da yok"
+                "'{ch}' Menlo/SF Mono'da yok ve yedeği hücreye sığmıyor"
             );
             assert!(
                 a.slots.len() <= cap,
@@ -884,15 +1255,32 @@ mod tests {
     #[test]
     fn non_bmp_char_path_works() {
         // Surrogate çifti: `encode_utf16` iki birim üretiyor, CoreText ikinci
-        // birime de dokunuyor ve glyph üretmeyip `false` dönüyor. `font::glif`
-        // o dönüşü bilerek yok sayıyor ve işaretçilerini dilimden türetiyor;
-        // ikisinin gerekçesi de ancak bu yol koşarsa sınanmış olur.
+        // birime de dokunuyor ve glyph üretmeyip `false` dönüyor.
+        // `font::glyph_index` o dönüşü bilerek yok sayıyor ve işaretçilerini
+        // dilimden türetiyor; ikisinin gerekçesi de ancak bu yol koşarsa
+        // sınanmış olur.
+        //
+        // Yedek aramanın gelişiyle BMP dışı yol **iki yerden** geçiyor ve
+        // ikincisi yeni: `font::fallback_font`'un `CFRange`'i de UTF-16 birimi
+        // sayıyor, yani `len_utf16` yerine `1` yazılsaydı vekil çiftinin
+        // yarısı istenir ve cascade yanlış karakteri arardı. Bu sınama artık
+        // o aralığın da bekçisi — sonuç yine tofu, ama sebebi uzadı: aday
+        // (STIX Two Math) bulunuyor ve genişlik kapısından dönüyor (1.07×).
         let mut a = atlas(POINT_SIZE, 1.0);
         assert_eq!(
             a.slot(Sprite::Char('𝔸'), Face::Regular, SizeClass::Normal)
                 .0,
             TOFU,
-            "Menlo/SF Mono matematik alfabesi içermez"
+            "Menlo/SF Mono matematik alfabesi içermez, yedeği de hücreye sığmaz"
+        );
+        // BMP dışı bir karakter kapıyı **geçebilse** aynı aralık çizim yolunda
+        // da doğru olmak zorunda; `\u{10FFFD}` (.LastResort, 1.83×) ile `𝔸`
+        // aynı kolun iki ucu ve ikisi de aday **buluyor** — aralık bozuk
+        // olsaydı aday hiç bulunmazdı ve bu sınama yine yeşil kalırdı.
+        let (label, base, _) = size_classes(&a)[0];
+        assert!(
+            font::fallback_font(base, '𝔸', CGFloat::INFINITY).is_some(),
+            "{label}: BMP dışı karakter için aday bulunamadı — `CFRange` şüpheli"
         );
     }
 

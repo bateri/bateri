@@ -77,6 +77,6 @@ Atlas::slot(Char(ch), face, size)
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | kapı | |
