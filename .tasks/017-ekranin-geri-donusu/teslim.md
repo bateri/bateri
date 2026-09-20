@@ -70,6 +70,7 @@ Set yedi phase + bir kapı commit'i:
 | phase-4 | `445fe0d` | `sync_origin` guard'ının üçüncü terimi + belge tadilleri |
 | phase-5 | `ff66b09` | `point_to_cell`'in reddi |
 | kapı | `8c3845f` | `/code-review` + `/audit` bulguları, yanlış örneklerin düzeltilmesi |
+| gözle kontrol | `967d5f3` | Kaydırılmış pencerede bant düşmüyor, viewport'la kayıyor (kullanıcı buldu) |
 
 `/ship` doğrulama + `main`'e push'u kapsar. **Bu sette push edilmedi.**
 
@@ -100,7 +101,7 @@ dosya da tamamlama listesini dört satıra çıkarıyor — ölçülen sahnenin 
    Kabul edilme gerekçesi ve iki çarenin bedeli `phase-2.md` §5'te.
 3. **Kaydırma.** Bant görünürken (1. senaryodan hemen sonra) tekerlekle
    yukarı çık: ekran **dolu kalmalı**, bant viewport'la birlikte geriye
-   kaymalı. Teslimde düzeltildi (`d1fb0c2`) — kusuru sen buldun: bant
+   kaymalı. Teslimde düzeltildi (`967d5f3`) — kusuru sen buldun: bant
    kaydırmanın ilk çentiğinde düşüyor, ızgaranın çıplak boşluğu açığa
    çıkıyordu (ekranın üstü kapkara, içerik dipte, kaydırdıkça geri geliyor).
 4. **Alternatif ekrandan çıkış.** `vim` aç, çık. Çıkış karesinde `fill > 0` ve
