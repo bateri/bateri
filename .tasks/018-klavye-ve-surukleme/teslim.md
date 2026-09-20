@@ -99,8 +99,23 @@ seçtiğine bağlı olan tuşlar: Enter, Tab, Esc, Backspace, oklar, Shift+Tab,
 fn+Backspace, Shift+PgUp, **numpad Enter / Fn-Return** (U+0003 — yığın onu
 eklerse her komut kesilir), **Ctrl+Shift+harf**, **Ctrl+Y** (U+0019'u
 Shift+Tab ile paylaşıyor), **düz çok baytlı harf** (`ğ`, `İ`) ve
-`^A/^C/^D/^E/^K/^U/^W`. Hiçbiri sınamayla çivilenemiyor — hiçbir test
-"hangi olay `encode_key`'e ulaştı"yı göremiyor.
+`^A/^C/^D/^E/^K/^U/^W`.
+
+**Neden elle** (R1.7'nin gerekçesi, teslimde ölçülerek daraltıldı): liste
+ikiye ayrılıyor ve yalnız **ikinci yarısı** yapısal olarak sınanamaz.
+
+- *Arbitraj kolları* (Ctrl'lü tuşlar, numpad Enter, Cmd'liler): ilke olarak
+  sınanabilir ama bedeli var — `BateriView` `MainThreadOnly`, kurulumu ana
+  thread'e çivili bir test ister, ve kolun seçimi ancak `OnceCell`'deki
+  **gerçek bir `Session`**'a, yani doğmuş bir PTY'ye yazılarak gözlenir.
+- *Yığın kolu* (ölü tuşlar, düz çok baytlı harf): **sınanamaz**, çünkü
+  sorulan şey `interpretKeyEvents:`in AppKit içindeki yönlendirmesi —
+  programatik bir `NSEvent` benim arbitrajımı doğrular, AppKit'in kararını
+  değil. Doğru sebeple geçmeyen bir bekçi, bekçisizlikten kötüdür.
+
+Yani "hiçbir test göremiyor" fazla genel bir cümleydi; doğrusu "yarısının
+bedeli yüksek, yarısı yapısal olarak kapalı" ve ikisi de bu setin kapsamı
+dışında kalıyor.
 
 **3. Finder damlası.** Sahneyi kuran tek satır (herhangi bir kabukta):
 
