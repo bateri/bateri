@@ -1107,6 +1107,12 @@ define_class!(
                 // Geometri bayrağı burada **tüketiliyor**: tüketilmeseydi
                 // bir pencere sürüklemesinden sonraki her kare snap'lerdi.
                 iv.geometry_changed.replace(false),
+                // **Yön kuralının istisnası burada hesaplanıyor** (017 R4.1):
+                // üstteki boşluk geçmişle doluyorsa aşağı inen şey boşluk
+                // değil, gelen geçmiş — öteleme yükselirken de süzülüyor.
+                // `bt-gpu` "doldurma" diye bir terminal kavramı öğrenmiyor;
+                // aldığı şey `offset` ve `geometry` gibi tek bir bit.
+                cursor.fill > 0,
             );
             iv.motion.set(motion);
             // **Öteleme `sync`'ten sonra** ve bu sıra zorunlu: çizilecek değer
