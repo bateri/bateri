@@ -405,6 +405,29 @@ pub enum DockStatus {
     Live,
     /// Ayna geldi ama okunamadı; alanlar **boş**.
     Unavailable(DockFault),
+    /// Ayna **okundu ve geçerli**, ama görüntü satır sonu taşıyor: dock tek
+    /// satır, gösteremez.
+    ///
+    /// [`Self::Unavailable`]'ın kardeşi, kolu değil — ayrım tanıda: orada
+    /// kanal bozuk ya da yük sınırı aşmış, burada veri sağlam, yalnız yüzey
+    /// dar. Davranış yine de aynı ve kural tek cümle: **gösteremediğimiz
+    /// satır da caret'i de ızgarada kalır** — bastırma yok
+    /// ([`ShellLog::suppressed_input`] `Live` soruyor), caret ızgaranın
+    /// ([`caret_home_raw`]) ve dock yalnız işaretini çiziyor
+    /// ([`crate::dock::render`]).
+    ///
+    /// **Alanlar boşaltılmıyor**, `Unavailable`'ın tersine, ve gerekçe
+    /// oranın kendi doc'unda: orada tamponda kalacak metin bir **önceki**
+    /// okumadan kalma, yani bayat; buradaki metin bu okumanın kendisi ve
+    /// doğru. Bugün okuyan yok (her tüketici `Live` soruyor); dock'u çok
+    /// satıra büyüten set onları hazır bulur.
+    ///
+    /// **Dönüş kuralı kendiliğinden:** durum her `u` yükünde yeniden
+    /// hesaplanıyor, yani satır sonu silinince bir sonraki aynada `Live`.
+    /// Tuş başına değil **satırın şekline** bağlı olması şart — "bir sonraki
+    /// tuşta dön" deseydi kullanıcı çok satırlı metni düzenlerken caret
+    /// ızgara ile dock arasında gidip gelirdi.
+    Multiline,
 }
 
 /// Aynanın neden okunamadığı.
@@ -720,7 +743,7 @@ pub(crate) struct CaretDecision {
 fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
     match (shell.map(|state| state.phase), status) {
         (Some(ShellPhase::Running), _)
-        | (_, DockStatus::Unavailable(_))
+        | (_, DockStatus::Unavailable(_) | DockStatus::Multiline)
         | (Some(ShellPhase::Input), DockStatus::Idle) => CaretHome::Grid,
         _ => CaretHome::Dock,
     }
@@ -740,21 +763,27 @@ fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
 /// caret ızgarada asılı kalır, kullanıcı yazmaya başladığında dock'ta
 /// caret'siz bir satır görürdü — yanlışın yönü güvenli değil.
 ///
-/// **`Unavailable` tutmanın dışında.** O kolun gerekçesi aşağıda yazılı ve
-/// koşulsuz: gösteremediğimiz satır ızgarada duruyor, caret'i de orada
-/// durmalı, *yoksa kullanıcı yazdığı yeri göremez*. Üstelik arıza bir sıçrama
+/// **`Unavailable` ile `Multiline` tutmanın dışında.** O iki kolun gerekçesi
+/// aşağıda yazılı ve koşulsuz: gösteremediğimiz satır ızgarada duruyor,
+/// caret'i de orada durmalı, *yoksa kullanıcı yazdığı yeri göremez*. Tutma
+/// onları da kapsasaydı çok satırlı bir yapıştırmadan sonra caret 150 ms
+/// boyunca dock'un prompt işaretinin yanında durur, yani düzeltilen belirti
+/// kısalmış hâliyle geri gelirdi. Üstelik arıza bir sıçrama
 /// **üretmiyor** — kullanıcı geri silmeden ayna `Live`'a dönmüyor — yani
 /// tutmanın orada kazancı sıfır, bedeli caret'in 150 ms boş bir dock'ta
 /// durması olurdu. Carve-out yüklemin **içinde**, çünkü dışarıda olsaydı
 /// `caret_home(_, Unavailable, true)` `Dock` döner ve yüklem yalan söylerdi.
 ///
 /// **Kural tek cümle: caret satırın nerede çizildiğine uyar.** Giriş satırı
-/// ızgaradaysa caret de ızgarada, dock'taysa dock'ta. Üç hâl ızgaranın:
+/// ızgaradaysa caret de ızgarada, dock'taysa dock'ta. Dört hâl ızgaranın:
 ///
 /// - `Running` — komut koşuyor. Satırın sahibi o: `cat`'in beklediği girdi,
 ///   `ssh`'ın parola istemi ve vim'in kendi imleci ızgarada yaşıyor.
 /// - `Unavailable` — gösteremediğimiz bir satır var ve ızgarada duruyor
 ///   (R1.2); caret'i de orada durmalı, yoksa kullanıcı yazdığı yeri göremez.
+/// - `Multiline` — satır sonu taşıyan görüntü dock'un tek satırına sığmıyor
+///   ([`DockStatus::Multiline`]). Aynı cümlenin ikinci uygulaması: satır
+///   ızgarada kaldığı için caret de orada.
 /// - `Input` + `Idle` — kabuk "kullanıcı yazıyor" diyor ama ZLE satırı
 ///   **bırakmış**. Bastırma da tam burada kalkıyor (R3.3): `CORRECT`'in
 ///   `[nyae]` sorusu, `zle -M` mesajı, `line-finish` ile Enter arası. Satır
@@ -783,7 +812,11 @@ fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
 /// şeridi yok), yani bu deponun yasakladığı "sessizce yanlış" sınıfına girmiyor.
 pub(crate) fn caret_home(shell: Option<ShellState>, status: DockStatus, held: bool) -> CaretHome {
     match caret_home_raw(shell, status) {
-        CaretHome::Grid if held && !matches!(status, DockStatus::Unavailable(_)) => CaretHome::Dock,
+        CaretHome::Grid
+            if held && !matches!(status, DockStatus::Unavailable(_) | DockStatus::Multiline) =>
+        {
+            CaretHome::Dock
+        }
         home => home,
     }
 }
@@ -2046,6 +2079,27 @@ fn decode_line<'a>(
     decode_text(fields.next()?, decoded, &mut line.buffer)?;
     decode_text(fields.next()?, decoded, &mut line.postdisplay)?;
 
+    // **Satır sonu taşıyan görüntü dock'a sığmıyor** ([`DockStatus::Multiline`]).
+    // Dock'un giriş satırı **bir** tane ([`bt_gpu::DOCK_ROWS`]'un ikincisi
+    // bağlam satırı) ve [`crate::dock::render`] görüntüyü tek satıra
+    // yassıltıyor: `\n` glyph üretmiyor ama sütun tüketiyor, yani metin
+    // görünmez boşluklarla eziliyor ve caret'in sütunu düz karakter
+    // indeksinden geldiği için hiçbir harfin üstünde durmuyor. Belirti
+    // kullanıcıda görüldü (2026-09-21, çok satırlı yapıştırma): metin
+    // ızgarada kalıyor, caret dock'a iniyordu.
+    //
+    // **Ölçüt `BUFFER` değil görüntünün tamamı:** satır sonu hangi gövdeden
+    // gelirse gelsin satırı ikiye bölüyor. `PREDISPLAY` çok satırlı bir
+    // prompt'u, `POSTDISPLAY` da çok satırlı bir öneriyi taşıyabilir; ikisi
+    // de bugün seyrek, ama kapının onları elemesi için ayrı bir cümle
+    // gerekmiyor.
+    if line.predisplay.contains('\n')
+        || line.buffer.contains('\n')
+        || line.postdisplay.contains('\n')
+    {
+        line.status = DockStatus::Multiline;
+    }
+
     // Üç uzunluk da burada: ofsetlerin tek uzaya inmesi ([`Highlight::start`])
     // ve görüntünün dışına taşan bir ofsetin kırpılması bunları istiyor.
     let predisplay_chars = line.predisplay.chars().count();
@@ -3261,6 +3315,64 @@ mod tests {
         assert_eq!(
             log.caret_since, stamped,
             "değişmeyen cevap damgayı taşımamalı"
+        );
+    }
+
+    /// **Satır sonu taşıyan görüntü aynayı `Live` bırakmaz.**
+    ///
+    /// Dock'un giriş satırı bir tane; çok satırlı bir `BUFFER` tek satıra
+    /// yassılırdı (`\n` glyph üretmiyor ama sütun tüketiyor) ve caret düz
+    /// karakter indeksinden geldiği için hiçbir harfin üstünde durmazdı.
+    /// Gösteremediğimiz satırın kuralı tek: ızgarada kalır.
+    #[test]
+    fn a_newline_anywhere_in_the_display_marks_the_mirror_multiline() {
+        // Üç gövdenin üçü de satırı bölebilir; ölçüt `BUFFER` değil görüntü.
+        for (pre, buffer, post) in [
+            ("", "echo a\necho b\n", ""),
+            ("", "for x in 1 2 3; do\n  echo $x", ""),
+            ("% \n", "ls", ""),
+            ("", "ls", " a\nb"),
+        ] {
+            let line = dock_line(&dock_update(0, pre, buffer, post, &[]));
+            assert_eq!(
+                line.status,
+                DockStatus::Multiline,
+                "satır sonu taşıyan görüntü `Live` kaldı: {pre:?} {buffer:?} {post:?}"
+            );
+            // **Alanlar duruyor.** `Unavailable`'ın boşaltma gerekçesi burada
+            // yok: oradaki metin bir önceki okumadan kalma, buradaki bu
+            // okumanın kendisi ve doğru.
+            assert_eq!(line.buffer, buffer);
+        }
+
+        // Karşı uç: aynı gövdeler satır sonsuz `Live`.
+        let single = dock_line(&dock_update(0, "% ", "echo a", "", &[]));
+        assert_eq!(single.status, DockStatus::Live);
+    }
+
+    /// **Çok satırlı ayna da tutulmuyor** — `Unavailable` carve-out'unun ikizi.
+    ///
+    /// Tutma bu kolu da kapsasaydı çok satırlı bir yapıştırmadan sonra caret
+    /// 150 ms boyunca dock'un prompt işaretinin yanında durur, yani
+    /// düzeltilen belirti kısalmış hâliyle geri gelirdi.
+    #[test]
+    fn a_multiline_mirror_is_never_held() {
+        let typing = Some(ShellState {
+            phase: ShellPhase::Input,
+            last_exit: None,
+        });
+        for held in [false, true] {
+            assert_eq!(
+                caret_home(typing, DockStatus::Multiline, held),
+                CaretHome::Grid,
+                "çok satırlı aynada caret dock'a düştü (held={held})"
+            );
+        }
+        // Safha sormadan da aynı: satırı gösteremeyen dock caret'i de
+        // devralamaz.
+        assert_eq!(
+            caret_home(None, DockStatus::Multiline, false),
+            CaretHome::Grid
         );
     }
 
