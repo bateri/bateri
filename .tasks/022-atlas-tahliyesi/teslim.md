@@ -34,9 +34,9 @@ make duman
 - [x] `crates/bt-gpu` diff'i boş (R5)
 - [x] Değişmezin dişi doğrulandı (`MAX_EDGE` mutasyonu bekçiyi düşürdü,
       geri alındı)
-- [ ] `make kur` — **koşulu doğmadı**: `assets/bundle`, `assets/shell`,
+- [~] `make kur` — **koşulu doğmadı**: `assets/bundle`, `assets/shell`,
       `crates/bateri` ve `kur` hedefi el değmedi
-- [ ] `make shader` / `make terminfo` / `make test-yaris` — koşulları doğmadı
+- [~] `make shader` / `make terminfo` / `make test-yaris` — koşulları doğmadı
       (`.metal`, `build.rs`, terminfo girdisi ve paylaşılan durum el değmedi)
 
 ## B. Yayın (doğrulamadan SONRA)
