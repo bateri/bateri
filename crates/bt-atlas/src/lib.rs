@@ -84,9 +84,12 @@ const RULE_RESERVE: u16 = 7;
 ///
 /// **Ölçüm iddiası değil, bir tasarım sabiti** (`GUTTER_PT` ve
 /// [`CONTEXT_SCALE`] emsali) ama türetmesi ölçülmüş bir sayıdan: yordamsal
-/// aile tofu ile birlikte **422** yuva istiyor (`docs/OLCUMLER.md` → Atlas
-/// yuva ayak izi) ve kural "ailenin payı atlasın yarısını geçmesin", yani
-/// `2 × 422 = 844`, yukarı yuvarlanmış **1024**.
+/// aile **421** karakter (`docs/OLCUMLER.md` → Atlas yuva ayak izi) ve
+/// atlastan istediği yuva **429** — tofu (1) ile karakterlere kapalı kural
+/// payı ([`RULE_RESERVE`], 7) üstüne biniyor, çünkü [`Atlas::slot`]
+/// karakterlere `capacity() - RULE_RESERVE` veriyor ve `next` 1'den
+/// başlıyor. Kural "ailenin payı atlasın yarısını geçmesin", yani
+/// `2 × 429 = 858`, yukarı yuvarlanmış **1024**.
 ///
 /// Sabit **düşük riskli** ve bu onu dürüstçe bir tasarım sabiti yapıyor:
 /// `(450, 1624]` aralığındaki *her* değer 13pt, 28pt ve 29pt@2x'te aynı
@@ -658,22 +661,34 @@ impl Atlas {
 /// kendi hatasını göremez.
 fn edge_for(w: u16, h: u16) -> u16 {
     let mut edge = MIN_EDGE;
-    while slots_at(edge, w, h) < SLOT_TARGET && edge < MAX_EDGE {
-        edge *= 2;
+    while slots_at(grid_at(edge, w, h)) < SLOT_TARGET && edge < MAX_EDGE {
+        // `min` bir savunma refleksi değil, [`MAX_EDGE`]'in doc'unu **doğru**
+        // kılan şey: guard katlamadan **önce** bakıyor, yani tavan
+        // `MIN_EDGE * 2^k` değilse çarpım onu aşardı ve sabit adının
+        // söylediği şeyi söylemez olurdu. Taşma da aynı satırda kapanıyor.
+        edge = edge.saturating_mul(2).min(MAX_EDGE);
     }
     edge
 }
 
-/// Verilen kenarda kaç yuva çıkar. `u32`: bölümlerin çarpımı küçük hücrede
-/// `u16`'yı aşıyor (13pt@1x, 4096 kenar → 116 224).
-fn slots_at(edge: u16, w: u16, h: u16) -> u32 {
-    u32::from((edge / w).max(1)) * u32::from((edge / h).max(1))
+/// Verilen kenarda ızgaranın satır/sütun sayısı — **tek ifade, iki okuyucu**
+/// ([`edge_for`]'un kararı ile [`grid_for`]'un kurduğu ızgara).
+///
+/// İki kopya olsaydı sessizce ayrışabilirlerdi: büyüme döngüsü bir sayıya
+/// göre "hedef tutturuldu" derken kurulan ızgara başka bir sayı verirdi.
+fn grid_at(edge: u16, w: u16, h: u16) -> (u16, u16) {
+    ((edge / w).max(1), (edge / h).max(1))
+}
+
+/// Izgaranın yuva sayısı. `u32`: çarpım küçük hücrede `u16`'yı aşıyor
+/// (13pt@1x, 4096 kenar → 116 224).
+fn slots_at((cols, rows): (u16, u16)) -> u32 {
+    u32::from(cols) * u32::from(rows)
 }
 
 /// [`edge_for`]'un ızgaraya çevrilmiş hâli.
 fn grid_for(w: u16, h: u16) -> (u16, u16) {
-    let edge = edge_for(w, h);
-    ((edge / w).max(1), (edge / h).max(1))
+    grid_at(edge_for(w, h), w, h)
 }
 
 /// Fonta girecek punto: ölçek çarpılmış ve aralığa oturtulmuş.
@@ -724,7 +739,11 @@ mod tests {
 
     /// Sınama puntosu bilerek büyük: ızgara hücre ölçüsünden türüyor, yani
     /// büyük punto = az yuva. "Dolu atlas" sınaması böylece binlerce glyph
-    /// rasterize etmeden, onlarcasıyla koşuyor. Değer [`MAX_POINT_SIZE`]'tur:
+    /// rasterize etmeden koşuyor. **Havuz 022'de büyüdü** (yordamsal aile +
+    /// ASCII × dört yüz ≈ 800 istek) çünkü kenar türetildikten sonra en
+    /// küçük kapasite 564'e çıktı ve 95 karakterlik ASCII onu dolduramıyor;
+    /// yani "onlarca" artık doğru değil, ama binlerce de değil ve seçimin
+    /// gerekçesi aynı kalıyor. Değer [`MAX_POINT_SIZE`]'tur:
     /// üstünü istemek sessizce kırpılır ve sınama kapasiteyi yanlış sanırdı.
     const LARGE_POINT_SIZE: f64 = MAX_POINT_SIZE;
     /// Ayar ayrıştırıcısının kabul ettiği en büyük satır aralığı.
@@ -1301,6 +1320,30 @@ mod tests {
         assert_eq!(a.occupancy().0, 2, "geri düşüş ikinci bir yuva harcadı");
     }
 
+    /// Yordamsal ailenin karakterleri — **tek kaynak**, tarama BMP'nin
+    /// tamamı ve süzgeç `raster::is_procedural`.
+    ///
+    /// Dar bir aralık yazmak implementasyonun tablosunu aynalamak olurdu;
+    /// aynalanmış tablo kendi eksiğini göremez (021'in kol tablosu dersi).
+    fn procedural_chars() -> impl Iterator<Item = char> {
+        (0u32..=0xFFFF)
+            .filter_map(char::from_u32)
+            .filter(|&ch| raster::is_procedural(ch))
+    }
+
+    /// Ailenin atlastan istediği yuva sayısı — **kapasiteyle doğrudan
+    /// karşılaştırılabilir** hâli.
+    ///
+    /// Karakterlerin eline geçen yuva `capacity()` değil: `Atlas::slot`
+    /// onlara `capacity() - RULE_RESERVE` veriyor ve `next` tofu ayrıldığı
+    /// için **1'den** başlıyor. Yani aile sığsın diye kapasitenin ailenin
+    /// boyundan `1 + RULE_RESERVE` fazla olması gerekiyor. Bu yedi yuvayı
+    /// saymamak değişmezi sessizce gevşetirdi ve son birkaç Braille
+    /// karakteri kutu kalırken bekçi yeşil geçerdi.
+    fn procedural_family_size() -> usize {
+        procedural_chars().count() + 1 + usize::from(RULE_RESERVE)
+    }
+
     /// Varsayılan yol **bit bit aynı** kalmalı (022 R2).
     ///
     /// Kenarın türetilmesi ancak hücre büyüdüğünde devreye giriyor; varsayılan
@@ -1329,24 +1372,33 @@ mod tests {
     /// sıkılaşıyor.
     #[test]
     fn capacity_clears_the_family_at_every_accepted_size() {
-        let family = (0x23B0..=0x28FF)
-            .filter_map(char::from_u32)
-            .filter(|&ch| raster::is_procedural(ch))
-            .count()
-            + 1; // tofu
+        // **Aralık aynalanmıyor:** tarama BMP'nin tamamı ve süzgeç
+        // `raster::is_procedural`'ın kendisi. Dar bir tarama aralığı
+        // implementasyonun tablosunun ikinci kopyası olurdu ve aileye yeni
+        // bir blok eklenince (Legacy Computing, U+1FB00–1FBFF — yol
+        // haritasının sıradaki adayı) bekçi yeşil kalırdı: tam da 021'in
+        // uyardığı sessiz ayrışma.
+        let family = procedural_family_size();
         // Punto × ölçek çarpımı [`MIN_POINT_SIZE`]..[`MAX_POINT_SIZE`]
         // aralığına oturuyor, yani köşeyi kuran şey çarpımın tavanı ve
         // satır aralığının tavanı.
-        for point_size in [MIN_POINT_SIZE, 13.0, 29.0, 56.0, MAX_POINT_SIZE] {
-            for scale in [1.0, 2.0] {
-                for line_height in [1.0, LARGEST_LINE_HEIGHT] {
-                    let a = Atlas::new(None, point_size, scale, line_height);
-                    let total = a.occupancy().1;
-                    assert!(
-                        total >= family,
-                        "{point_size}pt@{scale}x lh={line_height}: \
-                         kapasite {total} < aile {family}"
-                    );
+        // **İki eksen.** Hücre ölçüsü yalnız punto/ölçek/satır aralığından
+        // değil **aileden** de geliyor ve kullanıcının ailesi reddedilmiyor,
+        // yalnız uyarı alıyor (`proportional_family_opens_with_a_warning`).
+        // Tek eksenli bir bekçi, tam da bu setin sözleşmeye çevirdiği kusuru
+        // ikinci eksenden kaçırırdı.
+        for family_name in [None, Some("Helvetica")] {
+            for point_size in [MIN_POINT_SIZE, 13.0, 29.0, 56.0, MAX_POINT_SIZE] {
+                for scale in [1.0, 2.0] {
+                    for line_height in [1.0, LARGEST_LINE_HEIGHT] {
+                        let a = Atlas::new(family_name, point_size, scale, line_height);
+                        let total = a.occupancy().1;
+                        assert!(
+                            total >= family,
+                            "{family_name:?} {point_size}pt@{scale}x \
+                             lh={line_height}: kapasite {total} < aile {family}"
+                        );
+                    }
                 }
             }
         }
@@ -1369,9 +1421,7 @@ mod tests {
         // kendisi: ikinci bir kopya sessizce kayardı.
         // ASCII dört yüzde de ayrı yuva tutuyor; yordamsal aile `Regular`'a
         // normalize olduğu için **tek** kez sayılıyor (`Atlas::slot`).
-        let pool: Vec<(char, Face)> = (0x23B0..=0x28FF)
-            .filter_map(char::from_u32)
-            .filter(|&ch| raster::is_procedural(ch))
+        let pool: Vec<(char, Face)> = procedural_chars()
             .map(|ch| (ch, Face::Regular))
             .chain(
                 [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic]
@@ -1795,16 +1845,17 @@ mod tests {
         // gitmemeli. Kenar artık türetilmiş, yani sabite değil **ızgaranın
         // kendi kenarına** bakılıyor: satır/sütun sayısı ile hücre ölçüsünün
         // çarpımı dokuyu vermeli ve bir hücre daha eklenince kenarı aşmalı.
+        // Eski sınama dokuyu sabit `TEXTURE_EDGE`'e bağlıyordu; kenar
+        // türetildiğine göre bağlanacak yer `edge_for`. **Asıl sınır bu**:
+        // doku türetilen kenarı aşarsa `slot_origin` son sütunun ötesini
+        // gösterir ve `replaceRegion` satırın dışına yazar — belirti sessiz.
         let (tw, th) = a.texture_px();
-        let edge_w = a.grid.0 * w;
-        let edge_h = a.grid.1 * h;
-        assert_eq!((tw, th), (edge_w, edge_h), "doku ızgarayı sarmıyor");
-        // Türetilen kenar ikinin kuvveti ve tabanla tavan arasında.
         let edge = edge_for(w, h);
         assert!(
-            (MIN_EDGE..=MAX_EDGE).contains(&edge) && edge.is_power_of_two(),
-            "kenar: {edge}"
+            tw <= edge && th <= edge,
+            "doku kenarı aşıyor: {tw}×{th} > {edge}"
         );
+        // Ve bir hücreden fazlası boşa gitmiyor.
         assert!(
             tw + w > edge && th + h > edge,
             "artık şerit bir hücreden büyük: {tw}×{th}, kenar {edge}"
