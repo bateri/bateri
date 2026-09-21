@@ -51,6 +51,25 @@ use crate::clipboard;
 use crate::keys::{BACKSPACE, KeyInput, KeyPress, encode_key, only_char, page_scroll};
 use crate::quote::shell_quote;
 
+/// Izgaranın dışına düşen noktaya ne olacağı — [`point_to_cell`]'in tek
+/// karar ekseni.
+///
+/// Kural tek cümle: **jest başlatan olay reddedilir, süren jestin devamı
+/// kırpılır.** Basış ve düğmesiz hareket bir yer *söylüyor*, yani pencerenin
+/// başlık çubuğundan, sol payından ya da dock bandından gelen bir koordinat
+/// uygulamaya **yanlış** bir hücre bildirirdi; sürüklemenin ve bırakmanın
+/// koordinatı ise zaten başlamış bir jestin devamı ve orada kenara yapışmak
+/// hem xterm'in davranışı hem R6'nın şartı (düşen bırakma uygulamada takılı
+/// kalmış bir düğme bırakır).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutOfGrid {
+    /// En yakın hücreye yapıştır. `fill_rows` doldurma bandının boyu:
+    /// orijinin üstü **doluysa** yine `None`, çünkü orada çizili metin var.
+    Clamp { fill_rows: u16 },
+    /// Nokta `[0, cols) × [0, rows)` dışındaysa `None`.
+    Reject,
+}
+
 /// Fare noktası → seçim ucu. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
 ///
 /// `view_px` view koordinatında (nokta), `metrics` ve `origin_px` fiziksel
@@ -111,7 +130,7 @@ pub(crate) fn point_to_cell(
     view_px: (f64, f64),
     metrics: CellMetrics,
     origin_px: f64,
-    fill_rows: u16,
+    outside: OutOfGrid,
     scale: f64,
     cols: u16,
     rows: u16,
@@ -132,14 +151,24 @@ pub(crate) fn point_to_cell(
     // sıfıra **doyuruyor** — payın yatayda kullandığı yolun aynısı, ayrı bir
     // kırpma dalı yok.
     let y = view_px.1 * scale - origin_px;
-    // **Orijinin üstü doluysa ret, kırpma değil.** Kırpma yalnız orası
-    // *boşken* doğru: doldurma bandı çizilince kullanıcı orada metin görüyor
-    // ve 0. satıra yapışan bir çapa vurguyu gözün gördüğü yerden başka bir
-    // yere koyardı. Doldurulan satırlar sınırın satır numaralarıyla temsil
-    // edilemiyor (hepsi geçmişte, yani negatif) — "yanlış seçilir" ile
-    // "seçilemez" arasında ikincisi dürüst olan.
-    if fill_rows > 0 && y < 0.0 {
-        return None;
+    match outside {
+        // **Orijinin üstü doluysa ret, kırpma değil.** Kırpma yalnız orası
+        // *boşken* doğru: doldurma bandı çizilince kullanıcı orada metin
+        // görüyor ve 0. satıra yapışan bir çapa vurguyu gözün gördüğü yerden
+        // başka bir yere koyardı. Doldurulan satırlar sınırın satır
+        // numaralarıyla temsil edilemiyor (hepsi geçmişte, yani negatif) —
+        // "yanlış seçilir" ile "seçilemez" arasında ikincisi dürüst olan.
+        OutOfGrid::Clamp { fill_rows } if fill_rows > 0 && y < 0.0 => return None,
+        OutOfGrid::Clamp { .. } => {}
+        OutOfGrid::Reject
+            if x < 0.0
+                || y < 0.0
+                || x >= cell_w * f64::from(cols)
+                || y >= cell_h * f64::from(rows) =>
+        {
+            return None;
+        }
+        OutOfGrid::Reject => {}
     }
     let row = ((y / cell_h) as u16).min(rows - 1);
     let col = (x / cell_w) as u16;
@@ -198,29 +227,6 @@ pub(crate) fn wheel_lines(delta: f64, unit: f64, carry: f64) -> (i32, f64) {
     (whole as i32, total - whole)
 }
 
-/// Tuş vuruşu terminale gider mi — **saf karar**, sınanıyor: Command'lı tuş,
-/// **tek istisna dışında**, gitmez.
-///
-/// Menünün kısayolları (Cmd-C, Cmd-V, Cmd-Q, Cmd-,, Cmd +/−/0) bu soruya hiç
-/// varmıyor: AppKit Command'lı tuşu `keyDown:`'dan **önce** `performKeyEquivalent:` ile
-/// ana menüye veriyor (`menu`). Buraya varan Command'lı tuşun menüde
-/// karşılığı yok (Cmd-T) ya da öğesi o an devre dışı; terminale düşseydi
-/// kabuğa düz harf yazardı. Değiştiricinin geri kalanı sorulmuyor: Cmd-Shift-T
-/// de bir kısayol denemesi, girdi değil.
-///
-/// **İstisna tek ve liste kapalı:** ⌘⌫ ([`BACKSPACE`]) geçer, baytı
-/// [`encode_key`]'de (`\x15` = `^U`, zsh'te `kill-whole-line`). Liste kapalı
-/// kalmak zorunda — açık bir kural bir gün Cmd-T'yi de geçirir ve kabuğa `t`
-/// yazar (018 Karar 3).
-///
-/// İstisna **yalnız karakteri** soruyor, yanındaki değiştiricileri değil:
-/// CapsLock açıkken de ⌘⌫ satırı silmeli ve Shift ya da Control ⌫'e ikinci
-/// bir anlam vermiyor. `page_scroll`'un "Shift dışındaki değiştiriciler
-/// sorulmuyor" kuralının aynısı; ters karar, bayrağı tesadüfen açık olan bir
-/// kullanıcıda tuşu sessizce yutardı.
-///
-/// `chars` yoksa (saf modifier tuşu) Command'lı olay yutulur: izin listesinin
-/// ölçütü bir karakter ve ortada karakter yok.
 /// Fare olayının değiştiricileri. Shift rapora girmez, arbitrajı yapar —
 /// gerekçesi [`MouseModifiers`]'ın doc'unda.
 fn modifiers(event: &NSEvent) -> MouseModifiers {
@@ -256,6 +262,29 @@ fn button_bit(button: MouseButton) -> u8 {
     }
 }
 
+/// Tuş vuruşu terminale gider mi — **saf karar**, sınanıyor: Command'lı tuş,
+/// **tek istisna dışında**, gitmez.
+///
+/// Menünün kısayolları (Cmd-C, Cmd-V, Cmd-Q, Cmd-,, Cmd +/−/0) bu soruya hiç
+/// varmıyor: AppKit Command'lı tuşu `keyDown:`'dan **önce** `performKeyEquivalent:` ile
+/// ana menüye veriyor (`menu`). Buraya varan Command'lı tuşun menüde
+/// karşılığı yok (Cmd-T) ya da öğesi o an devre dışı; terminale düşseydi
+/// kabuğa düz harf yazardı. Değiştiricinin geri kalanı sorulmuyor: Cmd-Shift-T
+/// de bir kısayol denemesi, girdi değil.
+///
+/// **İstisna tek ve liste kapalı:** ⌘⌫ ([`BACKSPACE`]) geçer, baytı
+/// [`encode_key`]'de (`\x15` = `^U`, zsh'te `kill-whole-line`). Liste kapalı
+/// kalmak zorunda — açık bir kural bir gün Cmd-T'yi de geçirir ve kabuğa `t`
+/// yazar (018 Karar 3).
+///
+/// İstisna **yalnız karakteri** soruyor, yanındaki değiştiricileri değil:
+/// CapsLock açıkken de ⌘⌫ satırı silmeli ve Shift ya da Control ⌫'e ikinci
+/// bir anlam vermiyor. `page_scroll`'un "Shift dışındaki değiştiriciler
+/// sorulmuyor" kuralının aynısı; ters karar, bayrağı tesadüfen açık olan bir
+/// kullanıcıda tuşu sessizce yutardı.
+///
+/// `chars` yoksa (saf modifier tuşu) Command'lı olay yutulur: izin listesinin
+/// ölçütü bir karakter ve ortada karakter yok.
 fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
     if !flags.contains(NSEventModifierFlags::Command) {
         return true;
@@ -311,9 +340,13 @@ pub(crate) struct ViewIvars {
     /// kendi kaydırması işaretçi dururken rapor üretmemeli (xterm de ekran
     /// konumunda kısıyor). `half` girmiyor — rapor hücre çözünürlüğünde.
     ///
-    /// Basış ve bırakma da çentiği **tazeliyor** (sıfırlamıyor): o olaylar
-    /// kendi hücrelerini zaten raporladı, ve çentik bayat kalsaydı jestten
-    /// sonraki ilk hareket yutulabilirdi.
+    /// Basış ve bırakma da çentiği **tazeliyor** (sıfırlamıyor) — ama yalnız
+    /// raporlandıklarında ([`BateriView::report_button`]): ölçüt "işaretçi
+    /// burada görüldü" değil **"burası uygulamaya bildirildi"**. `Select` ve
+    /// `Ignored` kollarında hiçbir şey gitmedi ve damgalamak o hücredeki ilk
+    /// hover raporunu sessizce yutardı. Tazelemenin kendisi şart: çentik
+    /// bayat kalsaydı basışın hücresi ikinci kez, bu kez hareket olarak
+    /// raporlanırdı.
     motion_cell: Cell<Option<(u16, u16)>>,
     /// **Metin yığını bu olayı aldı mı** — `keyDown:`'ın yeniden giriş
     /// bayrağı. `interpretKeyEvents:` çağrılmadan önce `false`'a çekilir;
@@ -628,7 +661,9 @@ define_class!(
             // hiç kaydıramazdı. Bandın üstündeki nokta rapora bugünkü gibi 0.
             // satır olarak giriyor: uygulama doldurmayı zaten bilmiyor, o bir
             // terminal çizimi.
-            let Some(pointer) = self.window_point_cell(event.locationInWindow(), 0) else {
+            let Some(pointer) =
+                self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp { fill_rows: 0 })
+            else {
                 return;
             };
             let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
@@ -1150,13 +1185,15 @@ impl BateriView {
     /// değiştiriciler ve cevabın üç kolu.
     ///
     /// **Basış ile bırakma farklı hücre kapısından geçiyor** ve bu bir
-    /// tutarsızlık değil, iki ayrı kuralın sonucu. Basış `event_cell`'den:
-    /// doldurma bandının üstündeki nokta `None` ve olay hiç doğmuyor (R8) —
-    /// bandın satırları geçmişte, uygulamanın ekranında yoklar. Bırakma
-    /// `fill_rows = 0` ile, yani bandın üstünde de bir hücre veriyor
-    /// (tekerleğin işaretçisiyle aynı gerekçe): jest zaten başlamış ve
-    /// düşürülen bırakma uygulamada **takılı kalmış bir düğme** bırakırdı;
-    /// kırpmayı `bt-core` yapıyor.
+    /// tutarsızlık değil, [`OutOfGrid`]'in tek kuralının iki yüzü. Basış bir
+    /// jest *başlatıyor*: ızgaranın dışına düşen nokta reddediliyor, yani
+    /// başlık çubuğu, sol pay, dock bandı ve doldurma bandı üstündeki basış
+    /// ne rapor ne seçim üretiyor (R8 bunun özel hâli). Bırakma başlamış bir
+    /// jesti *bitiriyor*: nokta kırpılıyor, çünkü düşürülen bırakma
+    /// uygulamada **takılı kalmış bir düğme** bırakırdı (R6).
+    ///
+    /// Bırakmada `Clamp`'in `fill_rows`'u sıfır geçiyor: bandın üstü de bir
+    /// hücre vermeli, kırpmayı `bt-core` yapıyor.
     fn button_event(&self, event: &NSEvent, button: MouseButton, pressed: bool) {
         let Some(session) = self.ivars().session.get() else {
             return;
@@ -1172,11 +1209,9 @@ impl BateriView {
                 return;
             }
             sent.set(sent.get() & !bit);
-            if let Some(cell) = self.window_point_cell(event.locationInWindow(), 0) {
-                // Çentik tazeleniyor: bırakmanın hücresi raporlandı, aynı
-                // hücredeki bir sonraki hareket rapor üretmemeli.
-                moved_to_new_cell(&self.ivars().motion_cell, cell);
-                session.mouse_button(button, false, cell, modifiers(event));
+            let clamp = OutOfGrid::Clamp { fill_rows: 0 };
+            if let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) {
+                self.report_button(session, button, false, cell, event);
             }
             return;
         }
@@ -1188,11 +1223,10 @@ impl BateriView {
         // `dragging`'i hiç düşürmezdi: sonraki her kaydırma eski seçimi
         // sessizce uzatırdı.
         sent.set(sent.get() & !bit);
-        let Some(cell) = self.event_cell(event) else {
+        let Some(cell) = self.window_point_cell(event.locationInWindow(), OutOfGrid::Reject) else {
             return;
         };
-        moved_to_new_cell(&self.ivars().motion_cell, cell);
-        match session.mouse_button(button, true, cell, modifiers(event)) {
+        match self.report_button(session, button, true, cell, event) {
             // Jest uygulamanın: `dragging` **kurulmuyor**, yoksa
             // `mouseDragged:` var olan eski seçimin ucunu büyütürdü.
             Click::Sent => sent.set(sent.get() | bit),
@@ -1236,6 +1270,58 @@ impl BateriView {
         }
     }
 
+    /// Düğme raporunu gönderir ve **raporlandıysa** kısmanın çentiğini o
+    /// hücreye damgalar: aynı hücrede gelecek ilk hareket ikinci bir rapor
+    /// üretmesin. Ölçüt cevabın kendisi, çünkü `Select` ve `Ignored`
+    /// kollarında uygulamaya hiçbir şey gitmedi ve damgalamak oradaki ilk
+    /// hover raporunu sessizce yutardı.
+    fn report_button(
+        &self,
+        session: &Session,
+        button: MouseButton,
+        pressed: bool,
+        cell: SelectionPoint,
+        event: &NSEvent,
+    ) -> Click {
+        let answer = session.mouse_button(button, pressed, cell, modifiers(event));
+        if answer == Click::Sent {
+            moved_to_new_cell(&self.ivars().motion_cell, cell);
+        }
+        answer
+    }
+
+    /// Kayıp bir `mouseUp:`'ın uygulamada basılı bıraktığı düğmeleri serbest
+    /// bırakır — [`BateriView::follow_pointer`]'ın `dragging` için yaptığının
+    /// uygulama tarafındaki eşi.
+    ///
+    /// **Kanıt selector'ın kendisi:** AppKit `mouseMoved:`'ı yalnız hiçbir
+    /// düğme basılı değilken gönderiyor (basılıyken `*MouseDragged:` gelir),
+    /// yani orada kurulu bir bit tek bir şey demek — bırakma olayı bu view'a
+    /// hiç varmadı (sürüklemenin ortasında bir modal, Mission Control, bir
+    /// sistem jesti). Biti sessizce düşürmek yetmez: uygulama düğmeyi
+    /// **hâlâ basılı** sanar ve her hareket raporunda kendi seçimini
+    /// büyütür, yani bırakmanın kendisi gönderilmek zorunda.
+    ///
+    /// Basıştaki bayat-bit temizliği bunun yerine geçmiyor: o, terminalin
+    /// kendi defterini düzeltiyor ve ancak kullanıcı **aynı düğmeye yeniden
+    /// bastığında** koşuyor.
+    fn flush_lost_releases(&self, session: &Session, event: &NSEvent) {
+        let sent = self.ivars().sent_buttons.replace(0);
+        if sent == 0 {
+            return;
+        }
+        // Jestin devamı, başlangıcı değil: koordinat kırpılıyor (R6).
+        let clamp = OutOfGrid::Clamp { fill_rows: 0 };
+        let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) else {
+            return;
+        };
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            if sent & button_bit(button) != 0 {
+                self.report_button(session, button, false, cell, event);
+            }
+        }
+    }
+
     /// Hareket raporunun tek yolu: düğmesiz (`mouseMoved:`) ve basılı
     /// (`*MouseDragged:`).
     ///
@@ -1244,14 +1330,21 @@ impl BateriView {
     /// gitmese de yazılıyor — kip kapalıyken de hücre değişimi başına tek
     /// bir sonuçsuz çağrı kalsın, piksel başına değil.
     ///
-    /// Hücre `fill_rows = 0` ile alınıyor, basışın kapısıyla değil: bandın
-    /// üstündeki nokta bir seçim ucu değil rapora giden koordinat
-    /// (tekerleğin ve bırakmanın gerekçesinin aynısı).
+    /// Hücrenin kapısı düğmeye bağlı ([`OutOfGrid`]): basılı sürükleme
+    /// başlamış bir jestin devamı ve kırpılıyor, düğmesiz hareket ise bir
+    /// yer *söylüyor* ve ızgaranın dışında reddediliyor — başlık çubuğunda
+    /// gezinen işaretçi uygulamaya 0. satırı bildirmemeli.
     fn motion_event(&self, event: &NSEvent, button: Option<MouseButton>) {
         let Some(session) = self.ivars().session.get() else {
             return;
         };
-        let Some(cell) = self.window_point_cell(event.locationInWindow(), 0) else {
+        let outside = if button.is_some() {
+            OutOfGrid::Clamp { fill_rows: 0 }
+        } else {
+            self.flush_lost_releases(session, event);
+            OutOfGrid::Reject
+        };
+        let Some(cell) = self.window_point_cell(event.locationInWindow(), outside) else {
             return;
         };
         if !moved_to_new_cell(&self.ivars().motion_cell, cell) {
@@ -1278,16 +1371,17 @@ impl BateriView {
     /// yokken, grid sıfır boyutluyken ve doldurma bandının üstünde — kenar
     /// dışı nokta yapışır.
     fn event_cell(&self, event: &NSEvent) -> Option<SelectionPoint> {
-        self.window_point_cell(event.locationInWindow(), self.fill_rows())
+        let fill_rows = self.fill_rows();
+        self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp { fill_rows })
     }
 
     /// Pencere koordinatındaki noktayı seçim ucuna indirir — [`Self::event_cell`]'in
     /// olaysız hâli: tuşla kaydırmada farenin yerini taşıyan bir fare olayı yok.
     ///
-    /// `fill_rows` **argüman**, alan değil: tekerleğin işaretçisi bir seçim
-    /// ucu değil rapora giden koordinattır ve sıfır geçerek reddi dışında
-    /// kalır (`scrollWheel:`).
-    fn window_point_cell(&self, in_window: NSPoint, fill_rows: u16) -> Option<SelectionPoint> {
+    /// `outside` **argüman**, alan değil: aynı nokta çağıranına göre bir
+    /// seçim ucu ya da rapora giden koordinat oluyor ve ızgaranın dışına
+    /// düşünce ikisi ayrı şey istiyor ([`OutOfGrid`]).
+    fn window_point_cell(&self, in_window: NSPoint, outside: OutOfGrid) -> Option<SelectionPoint> {
         let (metrics, (cols, rows)) = self.ivars().metrics.get()?;
         let point = self.convertPoint_fromView(in_window, None);
         let scale = self.window()?.backingScaleFactor();
@@ -1298,7 +1392,7 @@ impl BateriView {
             (point.x, point.y),
             metrics,
             f64::from(origin_px),
-            fill_rows,
+            outside,
             scale,
             cols,
             rows,
@@ -1339,9 +1433,11 @@ impl BateriView {
         };
         // `None` gelirse uç **taşınmıyor**: fare doldurma bandının üstüne
         // çıktıysa seçim son geçerli hücresinde kalır, 0. satıra fırlamaz.
-        if let Some(cell) =
-            self.window_point_cell(window.mouseLocationOutsideOfEventStream(), self.fill_rows())
-        {
+        let fill_rows = self.fill_rows();
+        if let Some(cell) = self.window_point_cell(
+            window.mouseLocationOutsideOfEventStream(),
+            OutOfGrid::Clamp { fill_rows },
+        ) {
             session.update_selection(cell);
         }
     }
@@ -1366,7 +1462,15 @@ mod tests {
     /// pay kadar kaydırmak o gerekçeleri okunmaz hâle getirirdi. Payın kendi
     /// sınaması `the_gutter_shifts_the_grid_origin`.
     fn scene_point(view_px: (f64, f64)) -> Option<SelectionPoint> {
-        point_to_cell(view_px, grid(0), 0.0, 0, 2.0, 100, 33)
+        point_to_cell(
+            view_px,
+            grid(0),
+            0.0,
+            OutOfGrid::Clamp { fill_rows: 0 },
+            2.0,
+            100,
+            33,
+        )
     }
 
     /// Sahnenin hücresi ve yarısı ayrı okunuyor: hücre testleri hücreye, yarı
@@ -1426,6 +1530,51 @@ mod tests {
         // başlangıç ucunda hücreyi dışarıda, bitiş ucunda içeride bırakır.
         assert_eq!(scene_half((11.25, 9.0)), Some(CellHalf::Right));
         assert_eq!(scene_half((11.25 - 0.25, 9.0)), Some(CellHalf::Left));
+    }
+
+    #[test]
+    fn reject_keeps_the_report_inside_the_grid() {
+        // Sahne 100×33 hücre, 9×18 piksel @2x → view 450×297 nokta.
+        // `Clamp` kenar dışını yapıştırıyor (seçimin kuralı), `Reject`
+        // reddediyor (rapor **başlatan** olayın kuralı): başlık çubuğundan,
+        // sol paydan ya da dock bandından gelen bir koordinat uygulamaya
+        // ızgaranın kenar hücresini bildirirdi ve işaretçi orada değil.
+        let reject =
+            |view_px| point_to_cell(view_px, grid(0), 0.0, OutOfGrid::Reject, 2.0, 100, 33);
+        // İçeride: iki kapı da aynı hücreyi veriyor.
+        assert_eq!(reject((5.0, 9.0)), scene_point((5.0, 9.0)));
+        // Son hücrenin içi hâlâ geçerli (449.5 nokta < 450).
+        assert!(reject((449.0, 296.0)).is_some());
+        // Üstte (başlık çubuğu tarafı) ve solda (pay) ret; `Clamp` yapıştırır.
+        assert_eq!(reject((5.0, -1.0)), None);
+        assert_eq!(reject((-1.0, 9.0)), None);
+        assert_eq!(scene((5.0, -1.0)), Some((1, 0)));
+        assert_eq!(scene((-1.0, 9.0)), Some((0, 1)));
+        // Altta (dock bandı) ve sağda ret; `Clamp` son satıra/sütuna yapıştırır.
+        assert_eq!(reject((5.0, 297.0)), None);
+        assert_eq!(reject((450.0, 9.0)), None);
+        assert_eq!(scene((5.0, 297.0)), Some((1, 32)));
+        assert_eq!(scene((450.0, 9.0)), Some((99, 1)));
+    }
+
+    #[test]
+    fn reject_measures_from_the_origin_like_clamp_does() {
+        // Öteleme ızgarayı aşağı itiyor: üstte kalan boşluk ızgaranın
+        // **dışı**, yani rapor başlatan olay orada da reddediliyor. Kapı
+        // ötelemeyi `Clamp` ile aynı yerden okuyor (`origin_px`), yoksa
+        // tabana yaslı pencerede bütün üst yarı geçerli sayılırdı.
+        let origin_px = 100.0;
+        let at =
+            |view_px, outside| point_to_cell(view_px, grid(0), origin_px, outside, 2.0, 100, 33);
+        // 49 nokta × 2 = 98 piksel < 100: orijinin üstü.
+        assert_eq!(at((5.0, 49.0), OutOfGrid::Reject), None);
+        // Doldurma yokken `Clamp` orayı 0. satıra yapıştırmayı sürdürüyor.
+        assert_eq!(
+            at((5.0, 49.0), OutOfGrid::Clamp { fill_rows: 0 }).map(|p| p.row),
+            Some(0)
+        );
+        // Orijinin hemen altı geçerli.
+        assert_eq!(at((51.0, 51.0), OutOfGrid::Reject).map(|p| p.row), Some(0));
     }
 
     #[test]
@@ -1494,7 +1643,17 @@ mod tests {
     fn the_gutter_shifts_the_grid_origin() {
         // Sahne: 9×18 hücre, @2x, **8 fiziksel piksel** pay. View'da pay
         // 4 nokta, hücre 4.5 nokta eder.
-        let at = |x: f64| point_to_cell((x, 9.0), grid(8), 0.0, 0, 2.0, 100, 33);
+        let at = |x: f64| {
+            point_to_cell(
+                (x, 9.0),
+                grid(8),
+                0.0,
+                OutOfGrid::Clamp { fill_rows: 0 },
+                2.0,
+                100,
+                33,
+            )
+        };
         let cell = |point: Option<SelectionPoint>| point.map(|p| (p.col, p.half));
 
         // Payın **içi** ilk sütuna kırpılır ve sol yarıda kalır: seçim payda
@@ -1520,7 +1679,16 @@ mod tests {
         // yoksa pay hiç uygulanmasa da geçerdi.
         assert_eq!(cell(at(5.0)), Some((0, CellHalf::Left)), "paylı");
         assert_eq!(
-            point_to_cell((5.0, 9.0), grid(0), 0.0, 0, 2.0, 100, 33).map(|p| (p.col, p.half)),
+            point_to_cell(
+                (5.0, 9.0),
+                grid(0),
+                0.0,
+                OutOfGrid::Clamp { fill_rows: 0 },
+                2.0,
+                100,
+                33
+            )
+            .map(|p| (p.col, p.half)),
             Some((1, CellHalf::Left)),
             "paysız aynı nokta bir sonraki sütun"
         );
@@ -1532,7 +1700,16 @@ mod tests {
         // bu: ikisi ayrışsaydı son sütun ya erken biterdi ya taşardı.
         assert_eq!(cell(at(451.5)), Some((99, CellHalf::Left)), "paylı sağ uç");
         assert_eq!(
-            point_to_cell((451.5, 9.0), grid(0), 0.0, 0, 2.0, 100, 33).map(|p| (p.col, p.half)),
+            point_to_cell(
+                (451.5, 9.0),
+                grid(0),
+                0.0,
+                OutOfGrid::Clamp { fill_rows: 0 },
+                2.0,
+                100,
+                33
+            )
+            .map(|p| (p.col, p.half)),
             Some((99, CellHalf::Right)),
             "paysız aynı nokta grid'i taşar"
         );
@@ -1554,7 +1731,17 @@ mod tests {
         // tıklamada fark negatife iniyor. `u16`'da yapılsaydı taşar ve o
         // tıklama son satırı seçerdi — sürüklemenin başı ekranın dibine
         // fırlardı. `f64`'te negatif kalıyor ve `as u16` sıfıra doyuruyor.
-        let at = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX, 0, 2.0, 100, 33);
+        let at = |y: f64| {
+            point_to_cell(
+                (0.0, y),
+                grid(0),
+                ORIGIN_PX,
+                OutOfGrid::Clamp { fill_rows: 0 },
+                2.0,
+                100,
+                33,
+            )
+        };
         let row = |point: Option<SelectionPoint>| point.map(|p| p.row);
 
         // Boş alanın tamamı 0. satıra yapışır: üst kenar, ortası ve orijinin
@@ -1574,7 +1761,15 @@ mod tests {
         // cevap veriyor. Bu satır olmasa orijin hiç uygulanmasa da sınama
         // geçerdi — payın kendi sınamasındaki ayrımın aynısı.
         assert_eq!(
-            row(point_to_cell((0.0, 99.0), grid(0), 0.0, 0, 2.0, 100, 33)),
+            row(point_to_cell(
+                (0.0, 99.0),
+                grid(0),
+                0.0,
+                OutOfGrid::Clamp { fill_rows: 0 },
+                2.0,
+                100,
+                33
+            )),
             Some(11),
             "orijinsiz aynı nokta on bir satır aşağıda"
         );
@@ -1589,7 +1784,17 @@ mod tests {
         // yarım hücre aşağıda ve eski sınır bir satır yukarıya düşüyor.
         // Fonksiyonun tam satır varsayımı yok — olsaydı belirti "kayarken
         // tıklama bir satır şaşıyor" olurdu.
-        let mid = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX + 9.0, 0, 2.0, 100, 33);
+        let mid = |y: f64| {
+            point_to_cell(
+                (0.0, y),
+                grid(0),
+                ORIGIN_PX + 9.0,
+                OutOfGrid::Clamp { fill_rows: 0 },
+                2.0,
+                100,
+                33,
+            )
+        };
         assert_eq!(
             row(mid(99.0)),
             Some(0),
@@ -1611,7 +1816,17 @@ mod tests {
         // adıyla yasakladığı şey. Doldurulan satırlar **seçilemez** olduğu
         // için (satır numaraları negatife açılmadan temsil edilemezler) tek
         // doğru cevap reddetmek.
-        let at = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX, 10, 2.0, 100, 33);
+        let at = |y: f64| {
+            point_to_cell(
+                (0.0, y),
+                grid(0),
+                ORIGIN_PX,
+                OutOfGrid::Clamp { fill_rows: 10 },
+                2.0,
+                100,
+                33,
+            )
+        };
         let row = |point: Option<SelectionPoint>| point.map(|p| p.row);
 
         // Boş alanın kırpıldığı **üç noktanın aynısı**, bu kez `None`: iki
@@ -1633,7 +1848,17 @@ mod tests {
         // tamamına: `fill = min(gap, taze satır)` ve üstte hâlâ boşluk
         // kalabilir. İki bölgeyi ayırmak farenin `fill`'i bir de piksele
         // çevirmesini isterdi; reddin yönü güvenli, kırpmanınki değil.
-        let thin = |y: f64| point_to_cell((0.0, y), grid(0), ORIGIN_PX, 1, 2.0, 100, 33);
+        let thin = |y: f64| {
+            point_to_cell(
+                (0.0, y),
+                grid(0),
+                ORIGIN_PX,
+                OutOfGrid::Clamp { fill_rows: 1 },
+                2.0,
+                100,
+                33,
+            )
+        };
         assert_eq!(thin(0.0), None, "bandın üstünde kalan boşluk");
         assert_eq!(thin(89.0), None, "bandın içi");
     }
@@ -1642,9 +1867,28 @@ mod tests {
     fn empty_grid_has_no_cell() {
         // Simge durumundaki pencere sıfır sütun/satır verebilir: yapışacak bir
         // son hücre yok.
-        assert_eq!(point_to_cell((1.0, 1.0), grid(0), 0.0, 0, 2.0, 0, 33), None);
         assert_eq!(
-            point_to_cell((1.0, 1.0), grid(0), 0.0, 0, 2.0, 100, 0),
+            point_to_cell(
+                (1.0, 1.0),
+                grid(0),
+                0.0,
+                OutOfGrid::Clamp { fill_rows: 0 },
+                2.0,
+                0,
+                33
+            ),
+            None
+        );
+        assert_eq!(
+            point_to_cell(
+                (1.0, 1.0),
+                grid(0),
+                0.0,
+                OutOfGrid::Clamp { fill_rows: 0 },
+                2.0,
+                100,
+                0
+            ),
             None
         );
     }
@@ -1738,8 +1982,24 @@ mod tests {
         // Aynı view noktası iki ölçekte iki ayrı hücre: ölçü fiziksel
         // pikselden geliyor ve ölçek çarpanı atlanırsa retina makinede seçim
         // yarı kayar.
-        let at1x = point_to_cell((90.0, 150.0), grid(0), 0.0, 0, 1.0, 100, 33);
-        let at2x = point_to_cell((90.0, 150.0), grid(0), 0.0, 0, 2.0, 100, 33);
+        let at1x = point_to_cell(
+            (90.0, 150.0),
+            grid(0),
+            0.0,
+            OutOfGrid::Clamp { fill_rows: 0 },
+            1.0,
+            100,
+            33,
+        );
+        let at2x = point_to_cell(
+            (90.0, 150.0),
+            grid(0),
+            0.0,
+            OutOfGrid::Clamp { fill_rows: 0 },
+            2.0,
+            100,
+            33,
+        );
         assert_eq!(
             (at1x.map(|p| (p.col, p.row)), at2x.map(|p| (p.col, p.row))),
             (Some((10, 8)), Some((20, 16)))
