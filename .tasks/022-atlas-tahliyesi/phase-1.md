@@ -86,6 +86,33 @@ _Requirements: R1, R1.1, R1.2, R1.3, R2, R3, R3.1, R4, R5, R6, R6.1_
 - **Gerçek pencerede doğrulandı:** `make duman` `yuva=13/1984` bastı, yani
   varsayılan puntonun kapasitesi değişmedi (R2).
 
+- **Kapı turu (12 bulgu) beş kodu, altı belgeyi düzeltti.** Kayda değer
+  üçü: (a) değişmez **yedi yuva gevşekti** — `Atlas::slot` karakterlere
+  `capacity() - RULE_RESERVE` veriyor ve `next` 1'den başlıyor, yani aile
+  422 değil **429** istiyor; sayı kodda, `CLAUDE.md`'de, yol haritasında ve
+  ölçüm defterinde birden düzeltildi. (b) `slot_origin_walks_the_grid`'i
+  yeniden yazarken **totolojiye çevirmişim** — `assert_eq!((tw,th),(grid*w,
+  grid*h))` `texture_px()`'in tanımını tekrar ediyordu ve düşürdüğüm gerçek
+  sınır (`tw <= kenar`) hiçbir yere geri konmamıştı. (c) iki yeni bekçi
+  aralık tablosunu **aynalıyordu** (`0x23B0..=0x28FF`); tarama BMP'nin
+  tamamına açıldı, yoksa Legacy Computing eklendiğinde bekçi yeşil kalırdı —
+  tam da doc'unda "kendiliğinden sıkılaşır" diye övündüğüm şeyin tersi.
+- **Değişmez ikinci bir eksen kazandı.** Kapı haklı olarak sordu: hücre
+  ölçüsü **aileden** de geliyor ve kullanıcının ailesi reddedilmiyor, uyarı
+  alıyor. Döngü artık `Helvetica`'yı da dolaşıyor; geçiyor.
+- **Kare-dışı büyüme değerlendirildi ve alınmadı.** Kapı "her iki ekseni
+  birden katlamak 1.06× açık için 4× bellek" dedi ve aritmetiği doğru:
+  29pt'de hücre 35×71, yani 2048×1024'lük bir doku değişmezi yarı bedelle
+  sağlardı. Alınmamasının sebebi ölçü: dikdörtgen doku `edge_for`'u tek
+  sayıdan iki sayıya çıkarır, `MIN_EDGE`/`MAX_EDGE`'i eksen başına ikizler
+  ve `slot_origin`'in aritmetiğini iki tavana bağlar. Kazanç ise ölçülmemiş
+  bir bütçeye karşı 2 MB — ve 022'nin panelinde ölçüldüğü gibi, tek bir
+  drawable bu makinede zaten 23,7 MB. Basit kalması tercih edildi; istenirse
+  kendi kararını hak ediyor.
+- **En dar pay ölçüldü:** `None 144pt@1x lh=2` → kapasite 564, ailenin
+  istediği 429. Mutasyon sınaması yine dişini gösterdi (`MAX_EDGE` 1024'e
+  çekilince `29pt@2x: kapasite 406 < aile 429`).
+
 ## Yayın Etkisi
 
 - **shader** — yok (`.metal` değişmiyor).
@@ -93,10 +120,16 @@ _Requirements: R1, R1.1, R1.2, R1.3, R2, R3, R3.1, R4, R5, R6, R6.1_
   kabul aralıkları değişmiyor).
 - **`CLAUDE.md` / crate başlığı** — `bt-atlas` satırı güncellenir (R6).
 - **app bundle / terminfo / tema / shell** — yok.
-- **ölçüm bekliyor: sekme başına bellek.** Doku büyük puntoda 1 MB'dan
-  4 MB'a çıkıyor. `docs/OLCUMLER.md` → `## Bellek` bugün **boş** ve kancası
-  yok (`footprint`/`vmmap` dışarıdan), yani bu bir blokaj değil kayıtlı bir
-  kalem. Varsayılan puntoda fark **sıfır bayt**.
+- **ölçüm bekliyor: sekme başına bellek.** Doku 1 MB'dan **16 MB'a** kadar
+  çıkabiliyor ve bu sayı kapı turunda düzeltildi: ilk yazımda "4 MB"
+  yazmıştım, o yalnız 2048 kenarın bandı. En kötü köşe (`MAX_POINT_SIZE` ×
+  `line_height` 2.0) 4096 kenara çıkıyor, yani ~16 MB — ve **kullanıcının
+  erişebildiği** bir köşe: Retina'da Cmd + ile 72pt'ye çıkmak punto × ölçeği
+  144'e, yani tavana getiriyor. Ara kademe 29pt civarında 4 MB.
+  `docs/OLCUMLER.md` → `## Bellek` bugün **boş** ve kancası yok
+  (`footprint`/`vmmap` dışarıdan), yani bu bir blokaj değil kayıtlı bir
+  kalem — ama ölçüm 4 MB'a değil 16 MB'a kurulmalı. Varsayılan puntoda fark
+  **sıfır bayt**.
 
 ## Checklist
 

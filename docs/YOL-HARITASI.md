@@ -660,7 +660,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 - **Atlas dolunca geri dönüşü yok.** **022'de daraldı, kapanmadı.** Kapasite
   artık sabit bir dokudan değil **hedeflenen yuva sayısından** türüyor
   (`bt_atlas::SLOT_TARGET`), yani ölçülen kırılma — Retina'da 29pt, 406 yuva,
-  aile 422 — kalktı ve değişmez bir bekçiye bağlandı
+  ailenin istediği 429 — kalktı ve değişmez bir bekçiye bağlandı
   (`capacity_clears_the_family_at_every_accepted_size`: kabul edilen her
   punto × ölçek × `line_height` için kapasite ≥ aile). Varsayılan punto
   bugünkü dokusunda kaldı.

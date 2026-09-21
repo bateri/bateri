@@ -195,9 +195,12 @@ aritmetiğinden türüyor, zamandan değil. Yine de **iki profilde de koşulur v
 eşitliği yazılır**: eşit olmadıkları gün ortada bir kusur var demektir.
 
 - **Ölçülen şey:** `Atlas::occupancy()`'nin ilk bileşeni (harcanan yuva) ile
-  ikincisi (kapasite). Kapasite `floor(1024 / hücre_genişliği) * floor(1024 /
-  hücre_yüksekliği)` ve yalnız hücre ölçüsünden türüyor, yani aileyi hiç
-  istemeden de okunabiliyor.
+  ikincisi (kapasite). Kapasite `floor(kenar / hücre_genişliği) * floor(kenar
+  / hücre_yüksekliği)` ve yalnız hücre ölçüsünden türüyor, yani aileyi hiç
+  istemeden de okunabiliyor. **Kenar 2026-09-22'ye kadar sabit 1024'tü**;
+  aşağıdaki 021 ölçümü o hâlin kaydı ve tarihî olarak doğru. 022'den sonra
+  kenar hedeflenen yuva sayısından türüyor (`bt_atlas::SLOT_TARGET`), yani
+  aynı hücre ölçüsü daha büyük bir kapasite verebiliyor.
 - **Ayak izi bir tavandır, bir maliyet değil:** yuvalar **istendikçe**
   harcanıyor. Bir oturum yalnız çizdiği karakterin yuvasını öder; 421 sayısı
   "bütün aileyi kullanan içerik" hâlidir.
@@ -721,14 +724,29 @@ giren mürekkep kapısını da taşıyor (bkz. Yöntem).
 Ölçek 1'de eşik **58pt** (kapasite 406; 57pt'de 435 ile sığıyor) — aynı kapasite
 sayısı, çünkü kırılma noktası hücrenin piksel boyu.
 
-**Okunuşu:** Retina'da 29pt ve üstünde yordamsal ailenin kendisi atlasa
-sığmıyor ve **tahliye olmadığı için** sığmayan her karakter o oturumun
-kalanında kalıcı olarak kutu çıkıyor. 28pt'de teknik olarak sığıyor ama
-geriye 24 yuva kalıyor, yani ASCII ile kullanıcının metni için yer yok —
-pratik eşik 29 değil, ona yaklaşan **her** punto. Ayak izi bir **tavan**:
-yuvalar istendikçe harcanıyor, yani bütün aileyi kullanmayan içerik bu
-sayıyı ödemiyor. Borcun adı ve önceliği `docs/YOL-HARITASI.md` → "Atlas
-dolunca geri dönüşü yok".
+**Okunuşu (2026-09-21, ölçüldüğü gün):** Retina'da 29pt ve üstünde yordamsal
+ailenin kendisi atlasa sığmıyor ve **tahliye olmadığı için** sığmayan her
+karakter o oturumun kalanında kalıcı olarak kutu çıkıyor. 28pt'de teknik
+olarak sığıyor ama geriye 24 yuva kalıyor, yani ASCII ile kullanıcının metni
+için yer yok — pratik eşik 29 değil, ona yaklaşan **her** punto. Ayak izi bir
+**tavan**: yuvalar istendikçe harcanıyor, yani bütün aileyi kullanmayan
+içerik bu sayıyı ödemiyor.
+
+> **Bu okunuş 2026-09-22'de geçersizleşti (022).** Doku kenarı artık
+> hedeflenen yuva sayısından türüyor: 29pt@2x'te kenar 2048'e çıkıyor ve
+> kapasite 406 değil **1624** oluyor, yani aile sığıyor. Bu sayı yeni bir
+> ölçüm **değil**, yukarıdaki tablonun kendi hücre ölçüsünden aritmetik
+> (`floor(2048/35) * floor(2048/73)`) ve `Atlas::occupancy` üstünden
+> sınamayla doğrulanıyor — bu bölüm yalnız **ölçülmüş** sayının sahibi, bu
+> bir türetme. Yukarıdaki tablo sabit 1024 kenarın kaydı olarak duruyor
+> — ölçüm o gün doğruydu ve tarihî kayıt silinmez — ama "29pt ve üstünde
+> kalıcı kutu" cümlesi bugünün kodu için **yanlıştır**. Bugünkü sözleşme bir
+> tablo değil bir değişmez:
+> `bt_atlas::tests::capacity_clears_the_family_at_every_accepted_size`
+> (kabul edilen her aile × punto × ölçek × `line_height` için kapasite ≥
+> ailenin istediği 429). Atlas hâlâ dolabilir; kalan senaryo "tek karede
+> hedeften fazla farklı glyph" ve **ölçülmedi** (`docs/YOL-HARITASI.md` →
+> "Atlas dolunca geri dönüşü yok").
 
 ## Kare süresi
 
