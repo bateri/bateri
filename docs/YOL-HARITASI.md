@@ -542,6 +542,24 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   dokunmuyor (çıktı yine tek kanallı kapsama maskesi, `R8Unorm` atlas
   duruyor) ve kendi başına ucuz. Kullanıcı görünürlüğü yüksek: maskot,
   spinner ve her TUI çerçevesi.
+- **Atlas dolunca geri dönüşü yok ve 021 eşiği yaklaştırdı.** Yuva tahliyesi
+  (LRU) yok: `Atlas::slot` `next >= cap` olduğunda **her** yeni anahtara
+  `TOFU` veriyor ve karar önbelleğe girmiyor, yani o andan sonra yazılan her
+  yeni karakter kutu çıkıyor — pencere yeniden boyutlanana ya da font/punto
+  değişip `ensure()` atlası yeniden kurana kadar. Doluluk **bugün de**
+  mümkündü (büyük puntoda birkaç yüz farklı glyph); 021 onu erişilebilir
+  kıldı ve sayı artık somut (021 set kapısı, `/code-review`): kapasite
+  `floor(1024/w) * floor(1024/h)`, yordamsal aile **413** yuva (32 blok +
+  125 çizgi + 256 Braille) ve Braille'in 256'sı bu setten önce **sıfır**
+  harcıyordu (genişlik kapısından dönüp negatif önbellekte `TOFU`'ya
+  bağlanıyordu, o önbellek ise tavanlı ve toptan boşaltılıyor). Retina'da
+  ~27pt civarında `capacity() - RULE_RESERVE` ailenin kendi boyuna iniyor;
+  Braille bloğunu tarayan bir TUI (`btop`'un grafikleri) atlası tek başına
+  tüketebilir. Kapsam kararı bilinçliydi — `RULE_RESERVE`'ün kutu ailesi için
+  karşılığı yok, 416 karaktere pay ayırmak kapasitenin beşte birini bağlardı
+  (`.tasks/021-kutu-cizim/discussion.md` → Kapsam dışı) — ama borcun sahibi
+  belli: **tahliye**. Önce ölçüm (`/measure`: yuva ayak izi ve puntoya göre
+  doyma eşiği), sonra LRU.
 - **Doldurma bandının satırları seçilemiyor.** 017'nin bandı geçmiş
   satırlarını gösteriyor ama fare orayı **reddediyor** (`point_to_cell`,
   `fill > 0`): satırlar `frame()` sınırının satır numaralarıyla temsil
