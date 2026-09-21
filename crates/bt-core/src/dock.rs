@@ -754,6 +754,27 @@ mod tests {
     }
 
     #[test]
+    fn a_multiline_mirror_draws_nothing_and_keeps_the_caret_in_the_grid() {
+        // **Dock'un giriş satırı bir tane.** Çok satırlı bir görüntüyü tek
+        // satıra yassıltmak metni görünmez boşluklarla ezer ve caret'i
+        // hiçbir harfin üstünde durmayan bir sütuna koyardı — belirti
+        // kullanıcıda görüldü (2026-09-21, çok satırlı yapıştırma). Kural
+        // `Unavailable`'ınkiyle aynı: satır da caret'i de ızgarada kalır.
+        let state = DockState {
+            status: DockStatus::Multiline,
+            ..live("% ", "echo a\necho b", "", 4)
+        };
+        let (cells, dock) = draw(&state, COLS);
+        assert_eq!(text(&cells), "", "gösteremediğimiz satır dock'a çizildi");
+        assert_eq!(dock.caret, None, "çok satırlı aynada dock caret'i aldı");
+        // Yüzeyin kendisi duruyor: bant kalkmıyor, yalnız sahiplik ızgaraya
+        // geçiyor — bağlam satırı `Live` kapısının **üstünde** çiziliyor
+        // ([`render`]), yani dizin ile dal yerinde kalıyor.
+        let (with_context, _) = draw_with(&state, &context("/tmp/x", "main"), COLS);
+        assert_eq!(row_text(&with_context, CONTEXT_ROW), "/tmp/x | main");
+    }
+
+    #[test]
     fn a_long_line_scrolls_from_the_left_and_keeps_the_caret_visible() {
         // Taşmada kırpmak caret'i ekrandan düşürürdü: kullanıcı yazdığını
         // görmezdi. Görüntü soldan kayıyor ve caret son sütunda duruyor.

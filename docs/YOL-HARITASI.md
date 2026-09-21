@@ -259,6 +259,20 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   mesajı çiziliyor ve doluluk sayısı onları sayınca bastırılan satır arada
   görünür bir boşluk oluyor. `display: none` yalnız giriş satırı son çizilen
   satırken tam. Aynanın görsel dikişi borcunun (012 satırı) görünür belirtisi.
+- **Dock çok satırlı girişi göstermiyor, ızgaraya bırakıyor.** 2026-09-21'de
+  kapatılan kusurun kalan yarısı: satır sonu taşıyan görüntü artık **görünür**
+  bir durum (`DockStatus::Multiline`) ve satır da caret'i de ızgarada kalıyor,
+  yani "metin yukarıda, imleç aşağıda" bitti. Dock'un kendisi hâlâ **bir**
+  satır; çok satırlı bir `for` döngüsünü ya da heredoc'u dock'ta göstermek
+  bandı büyütmeyi gerektiriyor ve bedeli ölçülü bir tasarım sorusu: bant
+  ızgaranın satırlarından düşüldüğü için her yeni satır bir PTY resize'ı, yani
+  kullanıcı yazarken nefes alan bir ekran ve yukarıdaki sarmalı geçmişin
+  yeniden akışı. Örtmek (opak bandı büyütmek) de tersi: tam o anda
+  kullanıcının görmek istediği şeyi — koşmak üzere olduğu komutun üstündeki
+  çıktıyı — kapatır. İstenirse kendi setini hak ediyor. **012 phase-4'ün
+  "çok satırlı `BUFFER`" bilinen sınırı** (bastırma aritmetiği satır sonlarını
+  saymıyor, kuyruk sızıyor) bu kararla **konusuz kaldı**: çok satırlı ayna
+  bastırmaya hiç girmiyor.
 - **Blok animasyonları.** 010 Karar 5 şeridin belirmesini setten **çıkardı**:
   şerit bugün anında beliriyor. Gerekçe animasyonun zorluğu değil, bedeli —
   `bt-gpu::motion` ikinci bir tüketici kazanır, `Mode::Fade`'in "indirgemenin

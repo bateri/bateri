@@ -1308,6 +1308,41 @@ fn last_ink_in_row<T>(term: &Term<T>, row: u16, offset: i32) -> Option<char> {
     })
 }
 
+/// Verilen satırdan **yukarı** doğru, bloğun çıpasını taşıyan ilk satır;
+/// hiçbir satırda yoksa `None`.
+///
+/// Tazelik kapısının **boş ayna** yarısı ([`last_ink_in_row`] mürekkep
+/// yarısı). Ayna hiç karakter taşımıyorsa iki taraf da "boş" der ve
+/// karşılaştırma vakuma düşer; ayıran şey o hâlde geometridir — boş bir giriş
+/// satırının imleci prompt'un satırından ayrılamaz.
+///
+/// **Yön yukarı ve ilk bulunan kazanıyor:** çıpa prompt'un hücrelerinde,
+/// yani imlecin satırında ya da üstünde. İmlecin satırında bulunursa ayna
+/// taze, yukarıda bulunursa bayat, hiç bulunmazsa kapı susuyor.
+///
+/// **Maliyeti yalnız boş satırda ödeniyor** (çağrı yeri `blank_mirror`
+/// kolunda) ve olağan hâlde tek satır geziliyor: boş prompt'ta çıpa zaten
+/// imlecin satırında. `hyperlink()` yan tabloya iniyor ve bir `Arc` klonluyor
+/// ([`Session::frame`]'in çıpa okumasının doc'u), o yüzden tarama kapının
+/// altında duruyor, üstünde değil.
+///
+/// [`Session::frame`]'in döngüsündeki `suppress_from` ile **aynı satırı**
+/// bulur ama onun yerine geçemez: o değer hücre hücre, çizim sırasında
+/// doğuyor ve kapı döngüden önce karar vermek zorunda.
+fn anchor_row_at_or_above<T>(term: &Term<T>, row: u16, offset: i32, block: u32) -> Option<u16> {
+    (0..=row).rev().find(|&probe| {
+        let line = Point::new(Line(i32::from(probe) - offset), Column(0))
+            .grid_clamp(term, Boundary::Grid)
+            .line;
+        (0..term.columns()).any(|col| {
+            term.grid()[line][Column(col)]
+                .hyperlink()
+                .and_then(|link| block_id(link.uri()))
+                == Some(block)
+        })
+    })
+}
+
 /// Kapıdan geçmiş bir hücrenin **mürekkep yarısı**: ön plan rengi ve kural
 /// çizgileri.
 ///
@@ -1900,7 +1935,39 @@ impl Session {
             // ızgaranın son mürekkebi ile aynanınki. Yanlış alarmın yönü
             // güvenli — bastırmayı bırakır, yani en kötü ihtimalle kullanıcı
             // satırı iki yerde görür; sessizce kaybetmez.
-            (last_ink_in_row(&term, to, offset) == input.last_ink).then_some(to)
+            //
+            // **Kapının kör noktası: iki boşluk aynı şey değil.** Ayna hiç
+            // karakter taşımıyorsa son mürekkebi `None`, boş bir ızgara
+            // satırınınki de `None` — karşılaştırma vakumda "taze" diyor.
+            // Meşru hâli boş prompt (kullanıcı henüz yazmadı) ve o hâl
+            // bastırmaya **girmek zorunda**: girmeseydi 012 phase-8'in kusuru
+            // geri gelirdi (satır gizli ama yer kaplıyor). Bayat hâli
+            // **ölçüldü** (2026-09-21, kullanıcı bildirdi + saf PTY ile
+            // doğrulandı): zsh bracketed yapıştırmanın **son satır sonunu
+            // tamponda tutuyor** (`BUFFER='echo a\necho b\n'`, `CURSOR=14`),
+            // yani ızgaranın imleci yapıştırmanın bıraktığı **boş** satırda
+            // duruyor; `bracketed-paste-magic` de aynayı bir tuş boyunca boş
+            // bıraktığı için iki `None` eşleşiyor, bastırma açılıyor ve caret
+            // metnin yanında değil dock'un prompt işaretinin yanında kalıyordu.
+            //
+            // Ayıran ikinci kesin veri **çıpanın satırı**: ayna hiç karakter
+            // taşımıyorsa imleci prompt'un satırından aşağı itecek bir şey
+            // yoktur, yani imleç çıpanın satırında olmak **zorunda**. Boş
+            // prompt'ta öyle (betiğin `PS1`'i iki boşluk basıyor ve o iki
+            // hücre çıpayı taşıyor); yapıştırmadan sonra değil — çıpa
+            // yukarıda, imleç aşağıdaki boş satırda.
+            //
+            // **Çıpa hiç bulunamazsa kapı susuyor** ve bu bilerek: hücresiz
+            // bir prompt'ta (012 phase-7'nin kurduğu hâl) söyleyecek bir şey
+            // yok, yani karar bugünkü karşılaştırmaya kalıyor. Kapının yönü
+            // her iki kolda da aynı: şüpheli hâl bastırmayı **bırakıyor**,
+            // yani en kötü ihtimalle satır iki yerde görünür.
+            let blank_mirror = input.chars_before_cursor == 0 && input.chars_after_cursor == 0;
+            let at_anchor = !blank_mirror
+                || anchor_row_at_or_above(&term, to, offset, input.block)
+                    .is_none_or(|anchor| anchor == to);
+            let fresh = last_ink_in_row(&term, to, offset) == input.last_ink && at_anchor;
+            fresh.then_some(to)
         });
         // Aralığın **üst tabanı**, aynı aritmetiğin öteki yönü: caret'ten
         // önceki metin imlecin satırının üstünde kaç satır tutuyor.
@@ -4969,6 +5036,82 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_mirror_below_the_anchor_is_stale() {
+        // **Kapının kör noktası** (kullanıcı, 2026-09-21): çok satırlı
+        // yapıştırmada `bracketed-paste-magic` aynayı bir tuş boyunca boş
+        // bırakıyor, zsh de bracketed yapıştırmanın **son satır sonunu
+        // tamponda tutuyor** (saf PTY ile ölçüldü: `BUFFER='echo a\necho b\n'`),
+        // yani ızgaranın imleci yapıştırmanın bıraktığı boş satırda duruyor.
+        // İki `None` eşleşip "taze" diyordu: bastırma açılıyor, caret metnin
+        // yanında değil dock'un prompt işaretinin yanında kalıyordu.
+        //
+        // Ayıran veri çıpanın satırı: karakteri olmayan bir ayna imleci
+        // prompt'un satırından aşağı itemez.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}cmd1{}{}echo a\r\necho b\r\n{}'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out"),
+                anchored_prompt(2),
+                // Boş ayna: yapıştırma ZLE'ye ulaştı ama `line-pre-redraw`
+                // henüz koşmadı.
+                mirror("", 0),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+
+        let mut cells = Vec::new();
+        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        assert!(
+            !cursor.caret_in_dock,
+            "boş ayna boş satıra uydu: caret metnin yanında değil dock'ta ({cursor:?})"
+        );
+        assert!(cursor.visible, "{cursor:?}");
+        // Yapıştırılan satırlar ızgarada duruyor — gösterilen yer ile
+        // caret'in yeri artık aynı.
+        assert_eq!(row_glyphs(&cells, 2), "$echoa");
+        assert_eq!(row_glyphs(&cells, 3), "echob");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_blank_mirror_on_the_anchor_row_is_fresh() {
+        // Yukarıdakinin karşı ucu ve **kapının asıl işi**: boş prompt'ta ayna
+        // da satır da boş, ama satır gerçekten dock'un. Kapı bu kolu
+        // kaybetseydi 012 phase-8'in kusuru geri gelirdi — satır gizli ama
+        // yer kaplıyor.
+        //
+        // Prompt burada **gerçek `PS1`'in şekliyle** kuruluyor: iki sıfır
+        // genişlikli işaret artı iki gerçek boşluk (`dock::TEXT_COL`), yani
+        // çıpayı taşıyan ama mürekkebi olmayan iki hücre. `anchored_prompt`'ın
+        // `$ `'ı kapının **öteki** yarısına takılırdı — mürekkebi var, aynanın
+        // yok (`docs/YOL-HARITASI.md`: kapı prompt hücrelerini de sayıyor).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}cmd1{}\\033]133;A;bt_block=2\\007\
+                 \\033]8;;bateri://block/2\\007  \\033]8;;\\007\
+                 \\033]133;B\\007{}'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out"),
+                mirror("", 0),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        assert!(
+            cursor.caret_in_dock,
+            "boş prompt'ta caret dock'un olmalı: {cursor:?}"
+        );
+        assert!(!cursor.visible, "{cursor:?}");
+        session.shutdown();
+    }
+
+    #[test]
     fn a_wrapped_input_line_is_suppressed_below_the_cursor_row_too() {
         // **`/code-review`'un orta bulgusu.** Aralığın altı eskiden imlecin
         // satırıydı; ZLE caret'i tamponun içinde serbestçe gezdirdiği için
@@ -5299,6 +5442,56 @@ mod tests {
         wait_dock(&session, &mut dock, |dock| {
             dock.status == DockStatus::Idle && dock.buffer.is_empty()
         });
+
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// **Çok satırlı yapıştırma satırı ızgaraya bırakıyor** — uçtan uca.
+    ///
+    /// Zincirin tamamı sınanıyor: gerçek zsh bracketed yapıştırmayı alıyor,
+    /// `BUFFER`'ı satır sonlarıyla birlikte tutuyor (ölçüldü, saf PTY:
+    /// `BUFFER='echo a\necho b\n'`), ZLE kancası onu aynaya basıyor, çözücü
+    /// "bu görüntü tek satıra sığmaz" diyor ve caret ızgarada kalıyor.
+    ///
+    /// Belirti kullanıcıda görüldü (2026-09-21): metin ızgarada, caret
+    /// dock'un prompt işaretinin yanında — yazdığı yeri göremiyordu.
+    #[test]
+    fn a_bracketed_multiline_paste_leaves_the_line_and_the_caret_in_the_grid() {
+        let home = empty_home("dock-paste");
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(("/bin/zsh".into(), vec!["-i".into()]), 40);
+        options
+            .env
+            .insert("HOME".into(), home.display().to_string());
+        options
+            .env
+            .insert("ZDOTDIR".into(), wrapper_dir().display().to_string());
+        let session = Session::spawn(options, wake).unwrap();
+
+        let mut dock = DockState::default();
+        wait_dock(&session, &mut dock, |dock| {
+            dock.status == DockStatus::Live && dock.buffer.is_empty()
+        });
+
+        // Bracketed yapıştırma: iki satır ve **kapanış satır sonu**. Son satır
+        // sonu tamponda kalıyor, yani ızgaranın imleci boş bir satıra düşüyor
+        // — tazelik kapısının kör noktasını doğuran şekil.
+        session.write(b"\x1b[200~echo a\necho b\n\x1b[201~");
+        wait_dock(&session, &mut dock, |dock| {
+            dock.status == DockStatus::Multiline
+        });
+        assert!(
+            dock.buffer.contains('\n'),
+            "çok satırlı tampon beklenirdi: {dock:?}"
+        );
+
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        assert!(
+            !cursor.caret_in_dock,
+            "gösteremediğimiz satırın caret'i dock'ta kaldı: {cursor:?}"
+        );
+        assert!(cursor.visible, "{cursor:?}");
 
         session.shutdown();
         let _ = std::fs::remove_dir_all(&home);
