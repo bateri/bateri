@@ -511,9 +511,13 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   tabansız yuvarlamaya çevirmek her kullanıcının ızgarasını bir piksel
   sıkıştırır ve ekrana bir satır daha sığdırır. İsteniyorsa tek satırlık bir
   düzeltme; istenmiyorsa `font.rs`'in yorumu gerçeğe uydurulur.
-- **Blok, çizgi ve Braille fonttan geliyor ve döşemiyor.** **2026-09-21'de
-  sete bağlandı → 021** (kullanıcı kararı); ayrıntısı
-  `.tasks/021-kutu-cizim/`'de. Aşağıdaki gerekçe tarih olarak duruyor:
+- **Blok, çizgi ve Braille fonttan geliyor ve döşemiyor.** **Kapandı
+  (2026-09-21) → `.tasks/021-kutu-cizim/`**: üçü de artık yordamsal
+  çiziliyor, fonta hiç sorulmadan. Geriye bilinçli tek bir delik kaldı —
+  **köşegenler** (`╱╲╳`, U+2571–U+2573) fonttan gelmeye devam ediyor (Karar
+  3B: üçü de nadir ve kapsamı kapalı tutmak setin ölçüsünü tuttu) ve o delik
+  ayrıca 019'un yüz merdiveni kolunun bu makinedeki tek bekçisini ayakta
+  tutuyor. Aşağıdaki gerekçe tarih olarak duruyor:
   2026-09-20'de
   kullanıcı ekran görüntüsüyle bildirdi: 019'dan **sonra** da Claude Code'un
   maskotu bozuk. Ölçüldü ve sebep yedek **değil** — maskotun karakterleri

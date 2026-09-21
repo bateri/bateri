@@ -13,12 +13,14 @@
 //! [`FontIssue`] çağırana döner, bu crate kimseye bir şey basmaz.
 //!
 //! **Yordamsal çizilen ikinci küme karakterlerdir** ve fonta hiç sorulmadan
-//! kazanırlar (`raster::is_procedural`): blok elemanları (U+2580–U+259F) ile
-//! Braille (U+2800–U+28FF). Gerekçe döşeme — fontun em kutusu hücre kutusu
-//! değil ve Menlo'nun `█`'i hücreyi doldurmuyor, alt alta iki blok arasında
-//! şerit kalıyor. Yüzden bağımsızlar (dört yüz tek yuva), ama **yalnız büyük
-//! sınıfta**: dock'un bağlam satırında sütun adımı küçük yüzün ilerlemesi ve
-//! büyük hücre genişliğinde bir sprite orada komşusunun üstüne binerdi.
+//! kazanırlar (`raster::is_procedural`): blok elemanları (U+2580–U+259F),
+//! Braille (U+2800–U+28FF) ve çizgi çizim (U+2500–U+257F, **köşegenler
+//! `╱╲╳` hariç**). Gerekçe döşeme — fontun em kutusu hücre kutusu değil ve
+//! Menlo'nun `█`'i hücreyi doldurmuyor, alt alta iki blok arasında şerit
+//! kalıyor. Yüzden bağımsızlar (dört yüz tek yuva; ince/kalın ayrımı zaten
+//! karakterin kendisinde), ama **yalnız büyük sınıfta**: dock'un bağlam
+//! satırında sütun adımı küçük yüzün ilerlemesi ve büyük hücre genişliğinde
+//! bir sprite orada komşusunun üstüne binerdi.
 //!
 //! Seçili fontta olmayan **tek hücrelik** karakter sistemin cascade'inden
 //! geliyor (`font::fallback_font`) ve kapı **geometrik**: adayın ilerlemesi
@@ -119,8 +121,9 @@ pub struct Upload<'a> {
 ///
 /// Paketleyici yok: bu sette **tüm sprite'lar hücre boyutunda** (emoji ve
 /// geniş glyph kapsam dışı), yani `yuva_no → piksel köşe` dönüşümü
-/// aritmetiktir. Yordamsal karakterler (blok, Braille) o kısıtı bozmuyor —
-/// tanımları gereği tam bir hücre.
+/// aritmetiktir. Yordamsal karakterler (blok, Braille, çizgi) o kısıtı
+/// bozmuyor — tanımları gereği tam bir hücre; üstelik kısıtı asıl talep eden
+/// onlar, çünkü döşemeleri hücrenin kenarında sürüyor.
 pub struct Atlas {
     faces: Faces,
     /// Bağlam satırının düz yüzü: aynı aile, [`CONTEXT_SCALE`] katı punto.
@@ -1917,11 +1920,11 @@ mod tests {
 
     /// Yordamsal değişmezlerin koştuğu (punto, ölçek) çiftleri.
     ///
-    /// Üçü de gerekli ve her biri başka bir aritmetiği açıyor: 13pt@1x
-    /// hücresi bu makinede 8×17 — yükseklik **asal**, yani sekizde bir
-    /// dilimleri de yarım da kesirli düşüyor ve kenar yumuşatması gerçekten
-    /// koşuyor; 13pt@2x yuvarlanmanın iki katına çıktığı hâl; 144pt@1x ise
-    /// dilimlerin çoğunun tam bölündüğü büyük hücre. Tek çiftte koşan bir
+    /// Üçü de gerekli ve her biri başka bir aritmetiği açıyor (ölçüler bu
+    /// makinede, Menlo): 13pt@1x hücresi 8×18 — sekizde bir dilimleri
+    /// kesirli düşüyor (18/8 = 2.25) ve kenar yumuşatması gerçekten koşuyor;
+    /// 13pt@2x 16×33, yani **tek** yükseklik, yarım da kesire iniyor;
+    /// 144pt@1x ise 87×169, dilimlerin çoğunun tam bölündüğü büyük hücre. Tek çiftte koşan bir
     /// değişmez ötekini hiç sınamamış olur — `envelope_stays_inside_cell`'in
     /// doc'undaki ders ("gerçek fontla kırpma dalı hiç ateşlenmiyor").
     const PROCEDURAL_SIZES: [(f64, f64); 3] = [
@@ -1981,8 +1984,8 @@ mod tests {
     #[test]
     fn disjoint_blocks_tile_the_cell() {
         // Ayrık parçaların birleşimi **tam** kapsama vermek zorunda ve ölçüt
-        // doygun toplam: h = 17'de yarım 8.5'e düşüyor, iki komşu parça o
-        // satıra 128'er bırakıyor. `max` alsaydı hücrenin **ortasında**
+        // doygun toplam: 13pt@2x'in h = 33'ünde yarım 16.5'e düşüyor, iki
+        // komşu parça o satıra 128'er bırakıyor. `max` alsaydı hücrenin **ortasında**
         // %50'lik bir şerit kalırdı — bu setin kapatmaya geldiği kusurun
         // hücre içine taşınmış hâli, ve `> 0` sınayan bir bekçi onu görmezdi.
         for (point_size, scale) in PROCEDURAL_SIZES {
@@ -2063,7 +2066,7 @@ mod tests {
     fn the_shades_are_flat_and_ordered() {
         // Gölgeler **desensiz** (bkz. `raster`'ın `SHADE_LEVELS` doc'u):
         // dama deseni ancak adım hücrenin iki ölçüsünü de bölerse döşer ve
-        // bu makinede 13pt@1x yüksekliği 17, yani asal. Düz kapsama döşemeyi
+        // bölmüyor: bu makinede 13pt@2x hücresi 16×33 ve 33 tek. Düz kapsama döşemeyi
         // inşaen veriyor ve bekçisi bu: her gölge tek değerli.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
@@ -2208,5 +2211,616 @@ mod tests {
                 assert_eq!(w % p, 0, "periyot {p} hücreyi ({w}) bölmüyor");
             }
         }
+    }
+
+    /// Çizgi ailesinin kol tablosunun **ikinci kopyası** ve kaynağı ayrı:
+    /// bu liste karakterlerin Unicode adları (`unicodedata`, UCD 16.0;
+    /// `BOX DRAWINGS ` öneki atılmış), `raster::LINES` ise geometriden
+    /// yazılmış kol kümeleri. Uygulamanın tablosunu okuyan bir sınama hiçbir
+    /// şey kanıtlamazdı ve kaçırdığı şeyin adı var: **doğru geometri, yanlış
+    /// karakter** — aynalanmış ya da kaydırılmış bir tabloda her sprite
+    /// kusursuz görünür, yalnız yanlış kod noktasında durur.
+    #[rustfmt::skip]
+    const LINE_NAMES: [&str; 128] = [
+        "LIGHT HORIZONTAL",                            // ─
+        "HEAVY HORIZONTAL",                            // ━
+        "LIGHT VERTICAL",                              // │
+        "HEAVY VERTICAL",                              // ┃
+        "LIGHT TRIPLE DASH HORIZONTAL",                // ┄
+        "HEAVY TRIPLE DASH HORIZONTAL",                // ┅
+        "LIGHT TRIPLE DASH VERTICAL",                  // ┆
+        "HEAVY TRIPLE DASH VERTICAL",                  // ┇
+        "LIGHT QUADRUPLE DASH HORIZONTAL",             // ┈
+        "HEAVY QUADRUPLE DASH HORIZONTAL",             // ┉
+        "LIGHT QUADRUPLE DASH VERTICAL",               // ┊
+        "HEAVY QUADRUPLE DASH VERTICAL",               // ┋
+        "LIGHT DOWN AND RIGHT",                        // ┌
+        "DOWN LIGHT AND RIGHT HEAVY",                  // ┍
+        "DOWN HEAVY AND RIGHT LIGHT",                  // ┎
+        "HEAVY DOWN AND RIGHT",                        // ┏
+        "LIGHT DOWN AND LEFT",                         // ┐
+        "DOWN LIGHT AND LEFT HEAVY",                   // ┑
+        "DOWN HEAVY AND LEFT LIGHT",                   // ┒
+        "HEAVY DOWN AND LEFT",                         // ┓
+        "LIGHT UP AND RIGHT",                          // └
+        "UP LIGHT AND RIGHT HEAVY",                    // ┕
+        "UP HEAVY AND RIGHT LIGHT",                    // ┖
+        "HEAVY UP AND RIGHT",                          // ┗
+        "LIGHT UP AND LEFT",                           // ┘
+        "UP LIGHT AND LEFT HEAVY",                     // ┙
+        "UP HEAVY AND LEFT LIGHT",                     // ┚
+        "HEAVY UP AND LEFT",                           // ┛
+        "LIGHT VERTICAL AND RIGHT",                    // ├
+        "VERTICAL LIGHT AND RIGHT HEAVY",              // ┝
+        "UP HEAVY AND RIGHT DOWN LIGHT",               // ┞
+        "DOWN HEAVY AND RIGHT UP LIGHT",               // ┟
+        "VERTICAL HEAVY AND RIGHT LIGHT",              // ┠
+        "DOWN LIGHT AND RIGHT UP HEAVY",               // ┡
+        "UP LIGHT AND RIGHT DOWN HEAVY",               // ┢
+        "HEAVY VERTICAL AND RIGHT",                    // ┣
+        "LIGHT VERTICAL AND LEFT",                     // ┤
+        "VERTICAL LIGHT AND LEFT HEAVY",               // ┥
+        "UP HEAVY AND LEFT DOWN LIGHT",                // ┦
+        "DOWN HEAVY AND LEFT UP LIGHT",                // ┧
+        "VERTICAL HEAVY AND LEFT LIGHT",               // ┨
+        "DOWN LIGHT AND LEFT UP HEAVY",                // ┩
+        "UP LIGHT AND LEFT DOWN HEAVY",                // ┪
+        "HEAVY VERTICAL AND LEFT",                     // ┫
+        "LIGHT DOWN AND HORIZONTAL",                   // ┬
+        "LEFT HEAVY AND RIGHT DOWN LIGHT",             // ┭
+        "RIGHT HEAVY AND LEFT DOWN LIGHT",             // ┮
+        "DOWN LIGHT AND HORIZONTAL HEAVY",             // ┯
+        "DOWN HEAVY AND HORIZONTAL LIGHT",             // ┰
+        "RIGHT LIGHT AND LEFT DOWN HEAVY",             // ┱
+        "LEFT LIGHT AND RIGHT DOWN HEAVY",             // ┲
+        "HEAVY DOWN AND HORIZONTAL",                   // ┳
+        "LIGHT UP AND HORIZONTAL",                     // ┴
+        "LEFT HEAVY AND RIGHT UP LIGHT",               // ┵
+        "RIGHT HEAVY AND LEFT UP LIGHT",               // ┶
+        "UP LIGHT AND HORIZONTAL HEAVY",               // ┷
+        "UP HEAVY AND HORIZONTAL LIGHT",               // ┸
+        "RIGHT LIGHT AND LEFT UP HEAVY",               // ┹
+        "LEFT LIGHT AND RIGHT UP HEAVY",               // ┺
+        "HEAVY UP AND HORIZONTAL",                     // ┻
+        "LIGHT VERTICAL AND HORIZONTAL",               // ┼
+        "LEFT HEAVY AND RIGHT VERTICAL LIGHT",         // ┽
+        "RIGHT HEAVY AND LEFT VERTICAL LIGHT",         // ┾
+        "VERTICAL LIGHT AND HORIZONTAL HEAVY",         // ┿
+        "UP HEAVY AND DOWN HORIZONTAL LIGHT",          // ╀
+        "DOWN HEAVY AND UP HORIZONTAL LIGHT",          // ╁
+        "VERTICAL HEAVY AND HORIZONTAL LIGHT",         // ╂
+        "LEFT UP HEAVY AND RIGHT DOWN LIGHT",          // ╃
+        "RIGHT UP HEAVY AND LEFT DOWN LIGHT",          // ╄
+        "LEFT DOWN HEAVY AND RIGHT UP LIGHT",          // ╅
+        "RIGHT DOWN HEAVY AND LEFT UP LIGHT",          // ╆
+        "DOWN LIGHT AND UP HORIZONTAL HEAVY",          // ╇
+        "UP LIGHT AND DOWN HORIZONTAL HEAVY",          // ╈
+        "RIGHT LIGHT AND LEFT VERTICAL HEAVY",         // ╉
+        "LEFT LIGHT AND RIGHT VERTICAL HEAVY",         // ╊
+        "HEAVY VERTICAL AND HORIZONTAL",               // ╋
+        "LIGHT DOUBLE DASH HORIZONTAL",                // ╌
+        "HEAVY DOUBLE DASH HORIZONTAL",                // ╍
+        "LIGHT DOUBLE DASH VERTICAL",                  // ╎
+        "HEAVY DOUBLE DASH VERTICAL",                  // ╏
+        "DOUBLE HORIZONTAL",                           // ═
+        "DOUBLE VERTICAL",                             // ║
+        "DOWN SINGLE AND RIGHT DOUBLE",                // ╒
+        "DOWN DOUBLE AND RIGHT SINGLE",                // ╓
+        "DOUBLE DOWN AND RIGHT",                       // ╔
+        "DOWN SINGLE AND LEFT DOUBLE",                 // ╕
+        "DOWN DOUBLE AND LEFT SINGLE",                 // ╖
+        "DOUBLE DOWN AND LEFT",                        // ╗
+        "UP SINGLE AND RIGHT DOUBLE",                  // ╘
+        "UP DOUBLE AND RIGHT SINGLE",                  // ╙
+        "DOUBLE UP AND RIGHT",                         // ╚
+        "UP SINGLE AND LEFT DOUBLE",                   // ╛
+        "UP DOUBLE AND LEFT SINGLE",                   // ╜
+        "DOUBLE UP AND LEFT",                          // ╝
+        "VERTICAL SINGLE AND RIGHT DOUBLE",            // ╞
+        "VERTICAL DOUBLE AND RIGHT SINGLE",            // ╟
+        "DOUBLE VERTICAL AND RIGHT",                   // ╠
+        "VERTICAL SINGLE AND LEFT DOUBLE",             // ╡
+        "VERTICAL DOUBLE AND LEFT SINGLE",             // ╢
+        "DOUBLE VERTICAL AND LEFT",                    // ╣
+        "DOWN SINGLE AND HORIZONTAL DOUBLE",           // ╤
+        "DOWN DOUBLE AND HORIZONTAL SINGLE",           // ╥
+        "DOUBLE DOWN AND HORIZONTAL",                  // ╦
+        "UP SINGLE AND HORIZONTAL DOUBLE",             // ╧
+        "UP DOUBLE AND HORIZONTAL SINGLE",             // ╨
+        "DOUBLE UP AND HORIZONTAL",                    // ╩
+        "VERTICAL SINGLE AND HORIZONTAL DOUBLE",       // ╪
+        "VERTICAL DOUBLE AND HORIZONTAL SINGLE",       // ╫
+        "DOUBLE VERTICAL AND HORIZONTAL",              // ╬
+        "LIGHT ARC DOWN AND RIGHT",                    // ╭
+        "LIGHT ARC DOWN AND LEFT",                     // ╮
+        "LIGHT ARC UP AND LEFT",                       // ╯
+        "LIGHT ARC UP AND RIGHT",                      // ╰
+        "LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT",    // ╱
+        "LIGHT DIAGONAL UPPER LEFT TO LOWER RIGHT",    // ╲
+        "LIGHT DIAGONAL CROSS",                        // ╳
+        "LIGHT LEFT",                                  // ╴
+        "LIGHT UP",                                    // ╵
+        "LIGHT RIGHT",                                 // ╶
+        "LIGHT DOWN",                                  // ╷
+        "HEAVY LEFT",                                  // ╸
+        "HEAVY UP",                                    // ╹
+        "HEAVY RIGHT",                                 // ╺
+        "HEAVY DOWN",                                  // ╻
+        "LIGHT LEFT AND HEAVY RIGHT",                  // ╼
+        "LIGHT UP AND HEAVY DOWN",                     // ╽
+        "HEAVY LEFT AND LIGHT RIGHT",                  // ╾
+        "HEAVY UP AND LIGHT DOWN",                     // ╿
+    ];
+
+    // Kol indeksleri — **sınamanın kendi sırası**, `raster`'ınkinden ayrı:
+    // ikisi aynı sabiti paylaşsaydı oracle uygulamanın bir parçasını okumuş
+    // olurdu.
+    const NAMED_UP: usize = 0;
+    const NAMED_DOWN: usize = 1;
+    const NAMED_LEFT: usize = 2;
+    const NAMED_RIGHT: usize = 3;
+
+    /// Adın söylediği kol stili. `SINGLE` ile `LIGHT` aynı şey: çift çizgi
+    /// ailesinde Unicode ince kolu "single" diye adlandırıyor.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Named {
+        Light,
+        Heavy,
+        Double,
+    }
+
+    /// Bir çizgi karakterinin **adından** okunan tarifi.
+    struct NamedLine {
+        arms: [Option<Named>; 4],
+        dashes: u8,
+        arc: bool,
+    }
+
+    /// Unicode adını kol kümesine çevirir.
+    ///
+    /// Ad ` AND ` ile öbeklere ayrılıyor; her öbek bir yön kümesi ve —
+    /// varsa — bir stil taşıyor. Stilsiz öbek adın **ilk** stilini miras
+    /// alıyor (`LIGHT DOWN AND RIGHT` → ikisi de ince, `HEAVY VERTICAL AND
+    /// RIGHT` → üçü de kalın). İki tuzak var ve ikisi de adlandırmanın
+    /// kendisinden: `DOUBLE` bir stil ama `DOUBLE DASH`'te yoğunluk sayısı,
+    /// ve `SINGLE` stil sözlüğünde yok — `LIGHT`'ın çift çizgi ailesindeki
+    /// adı.
+    ///
+    /// Tanınmayan sözcük ya da yönsüz öbek **panik**: sessizce atlamak
+    /// oracle'ı kendi kendine boşaltırdı.
+    fn parse_line_name(name: &str) -> NamedLine {
+        let words: Vec<&str> = name.split_whitespace().collect();
+        let dashes = words
+            .iter()
+            .position(|&word| word == "DASH")
+            .map_or(0u8, |at| match words[at - 1] {
+                "DOUBLE" => 2,
+                "TRIPLE" => 3,
+                "QUADRUPLE" => 4,
+                other => panic!("bilinmeyen yoğunluk: {other} ({name})"),
+            });
+        // Adın ilk stil sözcüğü: stilsiz öbeklerin mirası.
+        let mut inherited = None;
+        for (at, &word) in words.iter().enumerate() {
+            let style = match word {
+                "LIGHT" | "SINGLE" => Some(Named::Light),
+                "HEAVY" => Some(Named::Heavy),
+                "DOUBLE" if words.get(at + 1) != Some(&"DASH") => Some(Named::Double),
+                _ => None,
+            };
+            if style.is_some() {
+                inherited = style;
+                break;
+            }
+        }
+
+        let mut arms = [None; 4];
+        for group in name.split(" AND ") {
+            let mut style = None;
+            let mut directions: Vec<usize> = Vec::new();
+            let words: Vec<&str> = group.split_whitespace().collect();
+            for (at, &word) in words.iter().enumerate() {
+                match word {
+                    "LIGHT" | "SINGLE" => style = Some(Named::Light),
+                    "HEAVY" => style = Some(Named::Heavy),
+                    "DOUBLE" if words.get(at + 1) != Some(&"DASH") => style = Some(Named::Double),
+                    "DOUBLE" | "TRIPLE" | "QUADRUPLE" | "DASH" | "ARC" => {}
+                    "UP" => directions.push(NAMED_UP),
+                    "DOWN" => directions.push(NAMED_DOWN),
+                    "LEFT" => directions.push(NAMED_LEFT),
+                    "RIGHT" => directions.push(NAMED_RIGHT),
+                    "VERTICAL" => directions.extend([NAMED_UP, NAMED_DOWN]),
+                    "HORIZONTAL" => directions.extend([NAMED_LEFT, NAMED_RIGHT]),
+                    other => panic!("adda tanınmayan sözcük: {other} ({name})"),
+                }
+            }
+            assert!(!directions.is_empty(), "yönsüz öbek: {group} ({name})");
+            let style = style
+                .or(inherited)
+                .unwrap_or_else(|| panic!("stilsiz ad: {name}"));
+            for direction in directions {
+                arms[direction] = Some(style);
+            }
+        }
+        assert!(arms.iter().any(Option::is_some), "kolsuz ad: {name}");
+        NamedLine {
+            arms,
+            dashes,
+            arc: name.contains("ARC"),
+        }
+    }
+
+    /// Kapsamdaki çizgi karakterleri: U+2500–U+257F, **köşegenler hariç**.
+    fn line_chars() -> impl Iterator<Item = (char, NamedLine)> {
+        (0x2500..=0x257Fu32)
+            .filter(|cp| !(0x2571..=0x2573).contains(cp))
+            .map(|cp| {
+                let ch = char::from_u32(cp).expect("çizgi kod noktası");
+                (ch, parse_line_name(LINE_NAMES[(cp - 0x2500) as usize]))
+            })
+    }
+
+    /// Sprite'ın bir kenarındaki piksel profili — üst/alt kenarda satır,
+    /// sol/sağ kenarda sütun.
+    fn edge(bytes: &[u8], m: Metrics, side: usize) -> Vec<u8> {
+        let (w, h) = m.cell_wh();
+        match side {
+            NAMED_UP => bytes[..w].to_vec(),
+            NAMED_DOWN => bytes[(h - 1) * w..].to_vec(),
+            NAMED_LEFT => (0..h).map(|y| bytes[y * w]).collect(),
+            _ => (0..h).map(|y| bytes[y * w + w - 1]).collect(),
+        }
+    }
+
+    /// Kolu tek başına taşıyan karakterin aynı kenardaki profili — dikişin
+    /// ölçütü.
+    fn reference_edge(m: Metrics, style: Named, vertical: bool) -> Vec<u8> {
+        let ch = match (vertical, style) {
+            (true, Named::Light) => '│',
+            (true, Named::Heavy) => '┃',
+            (true, Named::Double) => '║',
+            (false, Named::Light) => '─',
+            (false, Named::Heavy) => '━',
+            (false, Named::Double) => '═',
+        };
+        let side = if vertical { NAMED_UP } else { NAMED_LEFT };
+        edge(&procedural(m, ch), m, side)
+    }
+
+    /// Profildeki kesintisiz mürekkep kuşaklarının sayısı.
+    fn runs(profile: &[u8]) -> usize {
+        profile
+            .iter()
+            .zip(std::iter::once(&0).chain(profile))
+            .filter(|(current, previous)| **current > 0 && **previous == 0)
+            .count()
+    }
+
+    #[test]
+    fn the_name_parser_reads_the_grammar() {
+        // Oracle'ın kendi bekçisi: her adı aynı kola çeviren bozuk bir
+        // ayrıştırıcı bütün sınamaları yeşil bırakırdı. Dört ad dilbilgisinin
+        // dört tuzağını taşıyor — miras alınan stil, `DOUBLE DASH`'in stil
+        // olmaması, `SINGLE`'ın ince demesi ve `ARC`.
+        let probe = parse_line_name("UP HEAVY AND RIGHT DOWN LIGHT"); // ┞
+        assert_eq!(
+            probe.arms,
+            [
+                Some(Named::Heavy),
+                Some(Named::Light),
+                None,
+                Some(Named::Light)
+            ]
+        );
+        let probe = parse_line_name("HEAVY DOUBLE DASH HORIZONTAL"); // ╍
+        assert_eq!(
+            probe.arms,
+            [None, None, Some(Named::Heavy), Some(Named::Heavy)]
+        );
+        assert_eq!((probe.dashes, probe.arc), (2, false));
+        let probe = parse_line_name("VERTICAL SINGLE AND HORIZONTAL DOUBLE"); // ╪
+        assert_eq!(
+            probe.arms,
+            [
+                Some(Named::Light),
+                Some(Named::Light),
+                Some(Named::Double),
+                Some(Named::Double)
+            ]
+        );
+        let probe = parse_line_name("LIGHT ARC DOWN AND RIGHT"); // ╭
+        assert_eq!(
+            probe.arms,
+            [None, Some(Named::Light), None, Some(Named::Light)]
+        );
+        assert!(probe.arc && probe.dashes == 0);
+        // Ve ayrıştırıcı 125 adın **hepsini** okuyabiliyor: tanınmayan
+        // sözcük ya da yönsüz öbek panik, yani bu tur sessiz kalmaz.
+        assert_eq!(line_chars().count(), 125);
+    }
+
+    #[test]
+    fn the_arms_come_from_the_unicode_names() {
+        // Oracle **bağımsız**: beklenti karakterin Unicode adından
+        // ayrıştırılıyor (bkz. [`LINE_NAMES`]), uygulamanın tablosundan
+        // değil. Gördüğü şey aynalanmış ya da bir kaydırmış tablo: `├` ile
+        // `┤` yer değiştirseydi ikisi de kusursuz çizilir, yalnız yanlış
+        // kod noktasında dururdu ve geometriye bakan hiçbir değişmez bunu
+        // göremezdi.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            for (ch, named) in line_chars() {
+                let bytes = procedural(m, ch);
+                for side in [NAMED_UP, NAMED_DOWN, NAMED_LEFT, NAMED_RIGHT] {
+                    let profile = edge(&bytes, m, side);
+                    let inked = profile.iter().any(|&b| b > 0);
+                    // Kesikli çizginin **kapanış** kenarı boş: desen dolu
+                    // başlıyor ve boşlukla bitiyor (`band`'in bugünkü
+                    // davranışı da bu). Kol orada yok değil, tire orada yok.
+                    let trailing = named.dashes > 0 && (side == NAMED_DOWN || side == NAMED_RIGHT);
+                    if named.arms[side].is_some() && !trailing {
+                        assert!(
+                            inked,
+                            "{point_size}pt@{scale}x: '{ch}' ({}) {side}. kolu \
+                             kenara ulaşmadı",
+                            LINE_NAMES[(u32::from(ch) - 0x2500) as usize]
+                        );
+                    }
+                    if named.arms[side].is_none() {
+                        assert!(
+                            !inked,
+                            "{point_size}pt@{scale}x: '{ch}' ({}) olmayan {side}. \
+                             kolun kenarına mürekkep bıraktı",
+                            LINE_NAMES[(u32::from(ch) - 0x2500) as usize]
+                        );
+                    }
+                }
+                assert_eq!(
+                    named.arc,
+                    matches!(ch, '╭' | '╮' | '╯' | '╰'),
+                    "yay bayrağı adla uyuşmuyor: '{ch}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arms_tile_across_the_cell_edge() {
+        // **Dikiş sürekliliği**: kenardaki profil yalnız kolun *stiline*
+        // bağlı olmak zorunda, karakterin geri kalanına değil. Yan yana iki
+        // `─`, `├`'nin sağına konan `─`, `┼`'ın altına konan `│` — hepsi
+        // aynı iddia, ve iddia bu tek eşitlikte: her karakterin kenar
+        // profili o stilin tek kollu referansının profiline **eşit**.
+        // Ölçüt eşitlik, "mürekkep var mı" değil: bir baytlık fark komşu
+        // hücreler arasında sönük bir dikiş demek.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            for (ch, named) in line_chars() {
+                for side in [NAMED_UP, NAMED_DOWN, NAMED_LEFT, NAMED_RIGHT] {
+                    let Some(style) = named.arms[side] else {
+                        continue;
+                    };
+                    // İki muafiyet ve ikisi de adıyla: kesikli çizginin
+                    // kapanış kenarı (desen boşlukla bitiyor) ve yay —
+                    // teğet noktasında kapsama mesafe alanından geliyor ve
+                    // yarıçapın eğriliği kadar (13pt'de bir baytın
+                    // altında) referanstan sapıyor. Yayın kenarı
+                    // [`the_arms_come_from_the_unicode_names`]'de
+                    // "mürekkep var mı" ölçütüyle sınanıyor.
+                    let trailing = named.dashes > 0 && (side == NAMED_DOWN || side == NAMED_RIGHT);
+                    if named.arc || trailing {
+                        continue;
+                    }
+                    let vertical = side == NAMED_UP || side == NAMED_DOWN;
+                    assert_eq!(
+                        edge(&procedural(m, ch), m, side),
+                        reference_edge(m, style, vertical),
+                        "{point_size}pt@{scale}x: '{ch}' {side}. kenarında \
+                         dikiş kırıldı"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disjoint_arms_unite_into_the_joint() {
+        // Birleşim yasası: ayrık kol kümeli iki karakterin piksel-max'i
+        // birleşim kümesinin karakteri. Yapısal olarak doğru olmak zorunda
+        // — aynı kol her karakterde aynı dikdörtgeni veriyor — ve tam da bu
+        // yüzden kırılması bir kaza değil, kolun uzantısının karaktere göre
+        // değiştiğinin kanıtı olurdu.
+        //
+        // **Çift çizgi bu listede yok** ve sebebi geometri: `╔`'in üst rayı
+        // köşeyi kapatmak için kavşağı geçiyor, `╬`'te ise aynı ray dirsek
+        // yapıp duruyor (kanal açık kalmalı). Yani `╔ ∪ ╝ ≠ ╬` ve olması da
+        // gerekmiyor; çift çizginin bekçisi
+        // [`double_junctions_keep_the_channel_open`].
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            for (a, b, joint) in [
+                ('┌', '┘', '┼'),
+                ('┐', '└', '┼'),
+                ('┏', '┛', '╋'),
+                ('┓', '┗', '╋'),
+                ('╴', '╶', '─'),
+                ('╵', '╷', '│'),
+                ('╸', '╺', '━'),
+                ('╹', '╻', '┃'),
+                ('├', '┤', '┼'),
+            ] {
+                assert_eq!(
+                    pixel_max(&procedural(m, a), &procedural(m, b)),
+                    procedural(m, joint),
+                    "{point_size}pt@{scale}x: '{a}' ∪ '{b}' '{joint}' vermedi"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn double_junctions_keep_the_channel_open() {
+        // Çift çizgi bir çizgi değil **iki duvarlı bir kanal**, ve
+        // kavşaktaki bütün kararlar tek cümleden çıkıyor: kanal kapanmaz.
+        // Bu bekçi rayın "dönmesi" ile "geçmesi" arasındaki farkın tek
+        // tanığı — birleşim yasası da dikiş de o farkı göremez, ikisi de
+        // kenarlara ve toplama bakıyor.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let (w, h) = m.cell_wh();
+            // **İç** boşluk: mürekkebin arasında kalan boş satır. Ölçüt
+            // "boş satır var mı" olamazdı — `╒`'nin üstünde kolu olmayan
+            // sekiz boş satır var ve onlar kanal değil, karakterin dışı.
+            let gap_row = |ch: char| {
+                let bytes = procedural(m, ch);
+                let inked = |y: usize| bytes[y * w..(y + 1) * w].iter().any(|&b| b > 0);
+                (0..h).any(|y| !inked(y) && (0..y).any(inked) && (y + 1..h).any(inked))
+            };
+            let gap_column = |ch: char| {
+                let bytes = procedural(m, ch);
+                let inked = |x: usize| (0..h).any(|y| bytes[y * w + x] > 0);
+                (0..w).any(|x| !inked(x) && (0..x).any(inked) && (x + 1..w).any(inked))
+            };
+            let full_row = |ch: char| {
+                let bytes = procedural(m, ch);
+                (0..h).any(|y| bytes[y * w..(y + 1) * w].iter().all(|&b| b == 255))
+            };
+            let full_column = |ch: char| {
+                let bytes = procedural(m, ch);
+                (0..w).any(|x| (0..h).all(|y| bytes[y * w + x] == 255))
+            };
+            let at = format!("{point_size}pt@{scale}x");
+
+            // `╬` dört dirsek: ortasından hem boş bir satır hem boş bir
+            // sütun geçiyor. `╋` aynı kollara sahip ve hiçbiri yok — ölçüt
+            // "çizgi var mı" değil, kanalın açıklığı.
+            assert!(gap_row('╬') && gap_column('╬'), "{at}: `╬` kanalı kapandı");
+            assert!(
+                !gap_row('╋') && !gap_column('╋'),
+                "{at}: `╋` ortasında boşluk açtı"
+            );
+            // `╠`: dış duvar kesintisiz, iç duvar kırık. Kesintisiz duvar
+            // yüzünden boş satır **yok**; olsaydı çerçevenin sol kenarı
+            // T-kavşağında kopardı.
+            assert!(full_column('╠'), "{at}: `╠`'in dış duvarı kesintisiz değil");
+            assert!(!gap_row('╠'), "{at}: `╠` sol kenarı kopardı");
+            assert!(full_row('╦'), "{at}: `╦`'in dış duvarı kesintisiz değil");
+            assert!(!gap_column('╦'), "{at}: `╦` üst kenarı kopardı");
+            // Tek ray çift raylı kavşağı **geçiyor** — karşı kolu varsa.
+            // `╪`'nin dikey çizgisi baştan sona, `╫`'ün yatayı öyle.
+            assert!(!gap_row('╪'), "{at}: `╪`'in dikey çizgisi ortadan koptu");
+            assert!(!gap_column('╫'), "{at}: `╫`'ün yatay çizgisi ortadan koptu");
+            // Karşı kolu yoksa **duruyor**: `╤`'nin sapı alt rayda başlıyor
+            // ve iki ray arasındaki satır boş kalıyor.
+            assert!(gap_row('╤'), "{at}: `╤`'nin sapı kanalı kapattı");
+            // Ama köşede aynı sap **uzak** raya kadar gidiyor, yoksa `╒`
+            // köşesiz kalırdı.
+            assert!(!gap_row('╒'), "{at}: `╒`'nin sapı üst raya ulaşmadı");
+        }
+    }
+
+    #[test]
+    fn heavy_is_thicker_and_double_is_two_rails() {
+        // Üç stil üç ayrı iddia taşıyor ve üçü de kenar profilinden
+        // okunabiliyor: kalın inceden **kalın**, çift **iki ayrı** banttan.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            for vertical in [false, true] {
+                let light = reference_edge(m, Named::Light, vertical);
+                let heavy = reference_edge(m, Named::Heavy, vertical);
+                let double = reference_edge(m, Named::Double, vertical);
+                let ink = |profile: &[u8]| profile.iter().map(|&b| u32::from(b)).sum::<u32>();
+                assert!(
+                    ink(&heavy) > ink(&light),
+                    "{point_size}pt@{scale}x (dikey={vertical}): kalın inceden kalın değil"
+                );
+                assert_eq!(runs(&light), 1, "ince çizgi tek bant olmalı");
+                assert_eq!(runs(&heavy), 1, "kalın çizgi tek bant olmalı");
+                assert_eq!(
+                    runs(&double),
+                    2,
+                    "{point_size}pt@{scale}x (dikey={vertical}): çift çizgi iki \
+                     ayrı bant olmalı"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dashed_densities_collapse_only_with_the_period() {
+        // `dividing_period` korunuyor (`discussion.md` → Karar 4): periyot
+        // hücreyi tam bölmek zorunda, yoksa desen hücre sınırında faz kırar
+        // ve döşeme bu setin varlık sebebi. Bedeli görünür bir bilgi kaybı
+        // — bu makinede `w = 8`'de `┄` ile `╌` **aynı sprite'a** çöküyor —
+        // ve bekçi onu listeye yazmıyor, **türetiyor**: iki yoğunluk ancak
+        // periyotları eşitse eşit. Sayı listeye yazılsaydı başka bir
+        // puntoda yanlış olurdu.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let (w, h) = m.cell_wh();
+            for (axis, extent, family) in
+                [("yatay", w, ['╌', '┄', '┈']), ("dikey", h, ['╎', '┆', '┊'])]
+            {
+                for (i, first) in family.into_iter().enumerate() {
+                    for second in family.into_iter().skip(i + 1) {
+                        let period = |ch: char| {
+                            let dashes = match ch {
+                                '╌' | '╎' => 2usize,
+                                '┄' | '┆' => 3,
+                                _ => 4,
+                            };
+                            raster::dividing_period(extent.div_ceil(dashes), extent)
+                        };
+                        assert_eq!(
+                            procedural(m, first) == procedural(m, second),
+                            period(first) == period(second),
+                            "{point_size}pt@{scale}x {axis}: '{first}' ile '{second}' \
+                             periyotları {} ve {}",
+                            period(first),
+                            period(second)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_arcs_round_the_corner() {
+        // Yay ayrı bir teknik değil ama ayrı bir **şekil**: `╭` ile `┌`
+        // aynı kolları taşıyor, aynı kenarlara dokunuyor ve farklı
+        // çiziliyor. Bekçi ikisinin arasındaki farkı istiyor, yoksa yay
+        // bayrağı sessizce yok sayılabilirdi.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            for (arc, sharp) in [('╭', '┌'), ('╮', '┐'), ('╯', '┘'), ('╰', '└')] {
+                assert_ne!(
+                    procedural(m, arc),
+                    procedural(m, sharp),
+                    "{point_size}pt@{scale}x: '{arc}' keskin köşeyle aynı çizildi"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_diagonals_stay_out_of_scope() {
+        // Köşegenler kapsamın içinde **bilerek bırakılmış bir delik**
+        // (Karar 3B) ve deliğin ikinci bir işi var:
+        // `face_fallback_is_cached_under_the_requested_face`'in fikstürü
+        // (`╱`) orada yaşıyor — bu makinede Menlo Regular'da olup Bold'da
+        // olmayan tek blok U+2500–U+257F ve gerisi artık yordamsal.
+        for ch in ['╱', '╲', '╳'] {
+            assert!(
+                !raster::is_procedural(ch),
+                "'{ch}' kapsama girdi: yüz merdiveninin fikstürü kalmıyor"
+            );
+        }
+        // Aralığın iki ucu ve komşuları: `┐`'den bir önceki karakter
+        // (U+24FF) dışarıda, `╿` içeride, `▀` zaten blok ailesinden.
+        assert!(!raster::is_procedural('\u{24FF}'), "aralık aşağıdan taştı");
+        assert!(raster::is_procedural('\u{2500}'), "aralığın başı dışarıda");
+        assert!(raster::is_procedural('\u{257F}'), "aralığın sonu dışarıda");
+        assert!(raster::is_procedural('\u{2580}'), "blok ailesi kapandı");
     }
 }
