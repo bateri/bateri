@@ -105,5 +105,5 @@ mouseMoved: / mouseDragged:            (phase-2)
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | kapı | |

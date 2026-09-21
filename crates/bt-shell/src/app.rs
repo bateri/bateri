@@ -811,6 +811,15 @@ define_class!(
             view.setWantsLayer(true);
             window.setContentView(Some(&view));
             window.setTitle(ns_string!("bateri"));
+            // Düğmesiz hareket olayları varsayılan **kapalı**; fare raporu
+            // isteyen uygulama (1003) onlarsız işaretçiyi hiç göremez.
+            // `NSTrackingArea` gerekmiyor: o yalnız `mouseEntered:`/
+            // `mouseExited:` ve cursor rect için, ikisi de istenmiyor, ve
+            // view zaten first responder — pencere seviyesindeki
+            // `mouseMoved:` ona geliyor. Kipe göre açıp kapamak kipi
+            // `bt-shell`'e yayınlamayı isterdi
+            // (`.tasks/020-fare-raporlama/discussion.md` → Karar 4).
+            window.setAcceptsMouseMovedEvents(true);
             // Klavyenin PTY'ye varan yolu buradan başlıyor. `contentView`
             // otomatik first responder DEĞİLDİR; bu satır olmadan pencere
             // key olur, tuşlar view'a hiç uğramaz ve terminal sessizce

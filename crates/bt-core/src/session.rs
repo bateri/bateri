@@ -3226,6 +3226,52 @@ impl Session {
         Click::Sent
     }
 
+    /// Fare hareketi: 1003'te her zaman, 1002'de yalnız bir düğme
+    /// basılıyken, 1000'de hiç ([`crate::input::motion_route`]).
+    ///
+    /// `button` **basılı olanı** söylüyor, `None` düğmesiz hareket demek —
+    /// kararın girdisi bu, çünkü 1002'nin "yalnız sürüklerken"i tam olarak o
+    /// soru. Basılıyken hangi düğme olduğu rapora da giriyor.
+    ///
+    /// **Kısma burada değil, çağıranda.** Rapor hücre başına en çok bir kez
+    /// gitmeli ve karşılaştırma `bt-shell`'de, bu çağrıdan **önce** koşuyor
+    /// (`ViewIvars::motion_cell`): aynı hücrede kalan hareket `Term`
+    /// kilidine hiç uğramıyor. Durum burada yaşasaydı `bt-core` fare
+    /// konumunu tutmaya başlardı ve kilit hareket başına ödenirdi.
+    ///
+    /// Gerisi [`Session::mouse_button`]'ın basış kolunun aynısı: tek kilit,
+    /// `send` (`send_input` değil), satır uygulamanın ekranında değilse ya da
+    /// koordinat sığmıyorsa [`Click::Ignored`]. **Kırpma yok** — bırakmanın
+    /// kırpması takılı düğmeyi önlemek içindi, düşen bir hareket raporu
+    /// hiçbir şeyi asılı bırakmıyor.
+    ///
+    /// [`Click::Select`] bu yoldan **hiç dönmüyor**: hareket bir jest
+    /// başlatmıyor, başlamış bir jestin devamı. Tip yine de ortak, çünkü
+    /// çağıran iki fonksiyonu aynı kolda tüketiyor.
+    pub fn mouse_motion(
+        &self,
+        button: Option<MouseButton>,
+        at: SelectionPoint,
+        modifiers: MouseModifiers,
+    ) -> Click {
+        let term = self.term.lock();
+        let Some(encoding) = input::motion_route(*term.mode(), button.is_some()) else {
+            return Click::Ignored;
+        };
+        let offset = term.grid().display_offset() as i32;
+        let line = viewport_point((at.col, at.row), offset).line;
+        let byte = input::motion_byte(button, modifiers);
+        let report = u16::try_from(line.0)
+            .ok()
+            .and_then(|row| input::mouse_report(encoding, byte, true, at.col, row));
+        drop(term);
+        let Some(report) = report else {
+            return Click::Ignored;
+        };
+        self.send(Msg::Input(report.into()));
+        Click::Sent
+    }
+
     /// Ok tuşu — klavyenin oku baytla değil tuşla girer; neden [`Arrow`]'da.
     ///
     /// [`Session::write`] gibi kullanıcı girdisidir: seçimi temizler ve
@@ -8708,6 +8754,36 @@ mod tests {
             display_offset(&scrolled) > 0,
             "düğme raporu pencereyi dibe döndürdü"
         );
+    }
+
+    #[test]
+    fn motion_reports_follow_the_mode_not_the_pointer() {
+        // 1002 yalnız basılıyken, 1003 her zaman. İki kip iki oturumda,
+        // çünkü "hiçbir şey gitmedi" iğnesi oturum başına bir kez ve **ilk**
+        // adım sorulabiliyor (`expect_sent`'in kuralı).
+        let origin = at(0, 0, CellHalf::Left);
+        let hover =
+            |session: &Session| session.mouse_motion(None, origin, MouseModifiers::default());
+
+        // 1002: düğmesiz hareket düşüyor, basılı hareket gidiyor.
+        let (drag, wake) = dump_session(40, "printf '\\033[?1002h\\033[?1006h'", |mode| {
+            mode.contains(TermMode::SGR_MOUSE)
+        });
+        assert_eq!(hover(&drag), Click::Ignored);
+        expect_sent(&drag, &wake, b"");
+        assert_eq!(
+            drag.mouse_motion(Some(MouseButton::Left), origin, MouseModifiers::default()),
+            Click::Sent
+        );
+        // `32` hareket biti, sol düğme `0`.
+        expect_sent(&drag, &wake, b"\x1b[<32;1;1M");
+
+        // 1003: düğmesiz hareket de gidiyor, düğme kodu `35` (`32 | 3`).
+        let (motion, wake) = dump_session(40, "printf '\\033[?1003h\\033[?1006h'", |mode| {
+            mode.contains(TermMode::SGR_MOUSE)
+        });
+        assert_eq!(hover(&motion), Click::Sent);
+        expect_sent(&motion, &wake, b"\x1b[<35;1;1M");
     }
 
     #[test]

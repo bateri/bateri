@@ -136,16 +136,39 @@ pub struct MouseModifiers {
     pub control: bool,
 }
 
-/// Raporun düğme baytı: düğmenin kodu (alt iki bit) artı değiştirici bitleri.
-pub(crate) fn button_byte(button: MouseButton, modifiers: MouseModifiers) -> u8 {
-    let base = match button {
+/// Düğmenin alt iki biti. `3` burada **yok**: o kod bırakmaya
+/// ([`mouse_report`]) ve düğmesiz harekete ([`motion_byte`]) ayrılmış.
+fn button_base(button: MouseButton) -> u8 {
+    match button {
         MouseButton::Left => 0,
         MouseButton::Middle => 1,
         MouseButton::Right => 2,
-    };
+    }
+}
+
+/// xterm'in değiştirici bitleri: Meta 8, Control 16. Shift'in 4'ü **hiç
+/// kurulmuyor** — gerekçesi [`MouseModifiers`]'ın doc'unda.
+fn modifier_bits(modifiers: MouseModifiers) -> u8 {
     let meta = if modifiers.meta { 8 } else { 0 };
     let control = if modifiers.control { 16 } else { 0 };
-    base | meta | control
+    meta | control
+}
+
+/// Basış/bırakma raporunun düğme baytı: düğmenin kodu artı değiştiriciler.
+pub(crate) fn button_byte(button: MouseButton, modifiers: MouseModifiers) -> u8 {
+    button_base(button) | modifier_bits(modifiers)
+}
+
+/// Hareket raporunun düğme baytı: **hareket biti** (32) artı basılı düğme,
+/// düğme yoksa `3`.
+///
+/// xterm'in kodlaması bu: aynı `3` hem "bırakma" hem "düğmesiz" demek ve
+/// ikisini ayıran şey 32 biti. Basılı düğmeli hareket (`\e[<32;..M`) ile
+/// düğmesiz hareket (`\e[<35;..M`) bu yüzden tek fonksiyondan çıkıyor.
+pub(crate) fn motion_byte(button: Option<MouseButton>, modifiers: MouseModifiers) -> u8 {
+    const MOTION: u8 = 32;
+    let base = button.map_or(3, button_base);
+    MOTION | base | modifier_bits(modifiers)
 }
 
 /// Düğmenin karar tablosu — [`WheelRoute`]'un kardeşi, aynı örüntüde.
@@ -175,6 +198,26 @@ pub(crate) fn button_route(mode: TermMode, shift: bool) -> ButtonRoute {
     } else {
         ButtonRoute::Select
     }
+}
+
+/// Kipten ve basılı düğmeden hareketin yolu. Cevap [`ButtonRoute`] **değil**
+/// `Option`: hareket bir jest başlatmıyor, yani "seçim" kolu yok — rapor
+/// istenmiyorsa olay düşüyor ve fare bugünkü işini (seçimi taşımak, ya da
+/// hiçbir şey) sürdürüyor.
+///
+/// Üç kip burada **ayrışıyor** ve `MOUSE_MODE` birleşik sorulamaz: 1003
+/// (`MOUSE_MOTION`) her hareketi ister, 1002 (`MOUSE_DRAG`) yalnız basılı
+/// olanı, 1000 (`MOUSE_REPORT_CLICK`) hiçbirini. Düğme yolunda üçü aynı
+/// cevabı veriyordu ([`button_route`]'un tek `intersects`'i), burada
+/// vermiyorlar.
+///
+/// **Shift sorulmuyor**: rota basışta kilitleniyor
+/// ([`crate::Session::mouse_button`]) ve jestin ortasında değişmiyor;
+/// düğmesiz harekette de zaten bir jest yok.
+pub(crate) fn motion_route(mode: TermMode, pressed: bool) -> Option<MouseEncoding> {
+    let wanted =
+        mode.contains(TermMode::MOUSE_MOTION) || (pressed && mode.contains(TermMode::MOUSE_DRAG));
+    wanted.then(|| mouse_encoding(mode))
 }
 
 /// Tekerleğin karar tablosu (006 `phase-3b.md` §1) — sıra tablonun sırası
@@ -398,6 +441,73 @@ mod tests {
             // Shift'li olay `button_route`'ta seçime ayrılıyor ve rapora
             // gelmiyor.
             26
+        );
+    }
+
+    #[test]
+    fn motion_route_splits_the_three_mouse_modes() {
+        // Düğme yolunda üç bit aynı cevabı veriyor
+        // (`mouse_mode_comes_first_on_either_screen`); hareket yolunda
+        // ayrışıyorlar ve ayrım kipin **anlamı**: 1000 tıklama, 1002
+        // sürükleme, 1003 her hareket.
+        let (click, drag, motion) = (
+            TermMode::MOUSE_REPORT_CLICK,
+            TermMode::MOUSE_DRAG,
+            TermMode::MOUSE_MOTION,
+        );
+        let normal = Some(MouseEncoding::Normal);
+        // 1000: hiçbir hareket.
+        assert_eq!(motion_route(click, false), None);
+        assert_eq!(motion_route(click, true), None);
+        // 1002: yalnız basılıyken.
+        assert_eq!(motion_route(drag, false), None);
+        assert_eq!(motion_route(drag, true), normal);
+        // 1003: her zaman.
+        assert_eq!(motion_route(motion, false), normal);
+        assert_eq!(motion_route(motion, true), normal);
+        // Kip yokken de hiç.
+        assert_eq!(motion_route(TermMode::empty(), true), None);
+        // Kodlama düğmeyle aynı tablodan.
+        assert_eq!(
+            motion_route(motion | TermMode::SGR_MOUSE, false),
+            Some(MouseEncoding::Sgr)
+        );
+    }
+
+    #[test]
+    fn motion_sets_bit_thirtytwo_and_three_without_a_button() {
+        let none = MouseModifiers::default();
+        // Düğmesiz hareket: `32 | 3`.
+        assert_eq!(motion_byte(None, none), 35);
+        // Basılı düğme: `32` artı düğmenin kodu.
+        assert_eq!(motion_byte(Some(MouseButton::Left), none), 32);
+        assert_eq!(motion_byte(Some(MouseButton::Middle), none), 33);
+        assert_eq!(motion_byte(Some(MouseButton::Right), none), 34);
+        // Değiştiriciler basış raporundaki bitlerin aynısı; Shift yine yok.
+        assert_eq!(
+            motion_byte(
+                Some(MouseButton::Left),
+                MouseModifiers {
+                    meta: true,
+                    control: true,
+                    shift: true,
+                }
+            ),
+            32 | 8 | 16
+        );
+        // Aynı bayt üç kodlamada da hareket olarak çıkıyor; `pressed = true`
+        // çünkü hareketin bırakma biçimi yok.
+        assert_eq!(
+            mouse_report(MouseEncoding::Sgr, 35, true, 4, 2).unwrap(),
+            b"\x1b[<35;5;3M"
+        );
+        assert_eq!(
+            mouse_report(MouseEncoding::Normal, 35, true, 4, 2).unwrap(),
+            [0x1b, b'[', b'M', 32 + 35, 37, 35]
+        );
+        assert_eq!(
+            mouse_report(MouseEncoding::Utf8, 32, true, 95, 0).unwrap(),
+            [0x1b, b'[', b'M', 32 + 32, 0xc2, 0x80, 33]
         );
     }
 

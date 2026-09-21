@@ -61,19 +61,51 @@ kapatıyor.
   geçilir (`discussion.md` → Karar 4B). Fare hareketi başına maliyeti ölçecek
   kanca depoda yok.
 
+## Uygulama Notları
+
+- **`motion_route`'un cevabı `ButtonRoute` değil `Option<MouseEncoding>`.**
+  Düğme yolunun `Select` varyantı burada anlamsız — hareket bir jest
+  başlatmıyor — ve tipi paylaşmak "seçim de olabilir" derdi.
+- **Sağ ve orta tuşun sürüklemesi de bağlandı** (`rightMouseDragged:`,
+  `otherMouseDragged:`); plan yalnız `mouseDragged:` diyordu. Onlarsız R7
+  yarım kalıyordu: AppKit bir düğme basılıyken `mouseMoved:` **göndermiyor**,
+  yani sağ tuş basılı sürüklemede 1002/1003'e hiç rapor gitmezdi. Üçü aynı
+  gövdede (`drag_event`), `otherMouse*` yine `buttonNumber() == 2` kapılı.
+- **Kabul kriteri düzeldi: "kip kapalıyken `Term` kilidine hiç uğramadan
+  dönüyor" tam değil.** Kip `bt-core`'da ve dışarıdan sorulamıyor (R3), yani
+  `mouseMoved:` kipi göremez; kısma **hücre değişimine** bakıyor, kipe değil.
+  Doğrusu: *aynı hücrede kalan* hareket kilide hiç uğramıyor, hücre değişimi
+  başına bir sonuçsuz çağrı kalıyor. Karar 4'ün kendi metni zaten bunu
+  söylüyordu ("hücre değişmeyen olay kilide hiç uğramadan dönüyor"); kabul
+  satırı onu "kip kapalıyken" diye kısaltmıştı.
+- **Kısma serbest bir fonksiyon** (`moved_to_new_cell`), metod değil:
+  `define_class!` gövdeleri sınanamıyor ve kuralın ("ilk görüşte `true`,
+  tekrarda `false`") bir bekçisi olmalı. Bekçi yarının okunmadığını da
+  çiviliyor — rapor hücre çözünürlüğünde.
+- **Hareketin hücresi `fill_rows = 0` ile alınıyor**, basışın kapısıyla
+  değil: bandın üstündeki nokta bir seçim ucu değil rapora giden koordinat
+  (tekerleğin ve bırakmanın gerekçesinin aynısı).
+- **Duman bir tur yalancı kırmızı verdi ve sebebi ortamdı.** "Animasyon
+  yerleşmedi, hareket karesi 1" — ekran uykudaydı, pencere görünmeyince
+  `CAMetalDisplayLink` kare vermiyor. Phase-1 commit'i de aynı koşulda
+  kırmızı düştü (`git stash` ile doğrulandı), yani kod değil ekran. Ekran
+  açıkken `hareket=27` ile yeşil. Duman'ın **görünür pencere** istediği
+  `CLAUDE.md`'de yazılı değil; jetonların anlamı `Report::token_line`'da ve
+  bu ortam koşulu oraya not olarak girmedi — borç değil, bilgi.
+
 ## Checklist
 
-- [ ] `setAcceptsMouseMovedEvents:` + `mouseMoved:` (erken dönüş kipe bakıyor)
-- [ ] `mouseDragged:` rotaya göre ayrışıyor (`Sent` → rapor, `Select` → seçim)
-- [ ] `ViewIvars`'ta son raporlanan hücre; kısma `bt-core` çağrısından **önce**
-- [ ] `input::motion_route` + hareket düğme kodları (`32 + n`, düğmesiz `35`)
-- [ ] `Session::mouse_motion` — phase-1'in kilit ve gönderim kuralıyla aynı
-- [ ] Test: `motion_route` — 1003/1002/1000 × basılı/değil
-- [ ] Test: hareket düğme kodları üç kodlamada
-- [ ] Test: kısma — aynı hücrede ikinci hareket rapor üretmiyor
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] `make duman` — phase-1'deki not aynen geçerli (regresyon alarmı)
-- [ ] **Gözle kontrol**: `vim` içinde `mouse=a` ile sürükleyerek seçim ·
+- [x] `setAcceptsMouseMovedEvents:` + `mouseMoved:` (erken dönüş kipe bakıyor)
+- [x] `mouseDragged:` rotaya göre ayrışıyor (`Sent` → rapor, `Select` → seçim)
+- [x] `ViewIvars`'ta son raporlanan hücre; kısma `bt-core` çağrısından **önce**
+- [x] `input::motion_route` + hareket düğme kodları (`32 + n`, düğmesiz `35`)
+- [x] `Session::mouse_motion` — phase-1'in kilit ve gönderim kuralıyla aynı
+- [x] Test: `motion_route` — 1003/1002/1000 × basılı/değil
+- [x] Test: hareket düğme kodları üç kodlamada
+- [x] Test: kısma — aynı hücrede ikinci hareket rapor üretmiyor
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] `make duman` — phase-1'deki not aynen geçerli (regresyon alarmı)
+- [x] **Gözle kontrol**: `vim` içinde `mouse=a` ile sürükleyerek seçim ·
       `htop`'ta sütun başlığına tıklama · Claude Code'da sürükleyerek seçim ·
       boşta pencerede fareyi gezdirmek kare üretmiyor (kip kapalıyken)
-- [ ] Yayın etkisi yazıldı
+- [x] Yayın etkisi yazıldı
