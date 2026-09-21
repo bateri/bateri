@@ -76,8 +76,10 @@ Karar verilene kadar yapılacak bir şey yok; ikisi de kayıtlı.
 
 - [ ] B.1 — `/measure` ile yedeğin kare süresine etkisi ölçüldü ve emanetteki
       sayılar `docs/OLCUMLER.md`'ye taşındı
-- [ ] B.2 — yol haritasındaki iki borç için ürün kararı alındı (karar
-      gerektirene kadar açık kalır)
+- [~] B.2 — yol haritasındaki iki borç için ürün kararı alındı: **birincisi
+      (blok/çizgi/Braille yordamsal çizim) 2026-09-21'de sete bağlandı →
+      `.tasks/021-kutu-cizim/`**; ikincisi (`line_height = 1.0` bir piksel
+      ekliyor) hâlâ açık ve karar gerektirene kadar öyle kalıyor
 
 ## Geri Alma
 
