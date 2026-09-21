@@ -149,6 +149,13 @@ pub enum RuleKind {
     /// ayırt etmiyor. Ayıran şey "kim çiziyor" değil "adı var mı": kural
     /// çizgisi bir SGR biçimi, blok bir karakter.
     ///
+    /// İki küme aynı mürekkebi paylaşsa da **sınırları ayrı**: bu enum
+    /// kapalı ve yedi üyeli, öteki 413 karakter ve kod noktası aralıklarıyla
+    /// tanımlı. Bir çizgi çizim karakteri ([`Family::Line`]) buraya
+    /// eklenemez — `Single`'ın altı da bir `─` çiziyor ama o alt çizgi,
+    /// konumu fontun `underline` metriğinde; `─` hücrenin ortasında ve
+    /// komşusuyla döşemek zorunda.
+    ///
     /// Fonttan bir `>` **almıyoruz** ve sebebi ürün kararı: işaret terminalin
     /// kendi işareti, kullanıcının fontunun değil. Font değişince prompt'un
     /// şekli değişmemeli (012 phase-9, kullanıcı: "bunu daha hoş kendin
@@ -416,6 +423,10 @@ enum Family {
     Block,
     /// U+2800–U+28FF — Braille deseni; alt 8 bit doğrudan nokta maskesi.
     Braille,
+    /// U+2500–U+257F — çizgi çizim: dört kol × {yok, ince, kalın, çift},
+    /// kesikli aile ve yuvarlak köşeler. **Köşegenler hariç**, bkz.
+    /// [`family`].
+    Line,
 }
 
 /// Karakterin yordamsal ailesi — **kapsamın tek sahibi**.
@@ -430,6 +441,18 @@ fn family(ch: char) -> Option<Family> {
     match ch {
         '\u{2580}'..='\u{259F}' => Some(Family::Block),
         '\u{2800}'..='\u{28FF}' => Some(Family::Braille),
+        // Köşegenler (`╱╲╳`) kapsamın içinde **bilerek bırakılmış bir delik**
+        // (`discussion.md` → Karar 3B): mesafe alanı onları da çizebilirdi,
+        // üçü de nadir ve setin ölçüsü kapsamı kapalı tutmaktan geçti. Kol
+        // aşağıdaki aralığın **üstünde** durmak zorunda, yoksa delik kapanır.
+        //
+        // Deliğin ikinci bir işi var ve o da bilerek: bu üç karakter Menlo
+        // Regular'da olup Bold'da olmayan tek kalan blok, yani
+        // `face_fallback_is_cached_under_the_requested_face`'in fikstürü
+        // (019'un yüz merdiveni kolunun bu makinedeki tek bekçisi) burada
+        // yaşıyor.
+        '\u{2571}'..='\u{2573}' => None,
+        '\u{2500}'..='\u{257F}' => Some(Family::Line),
         _ => None,
     }
 }
@@ -467,6 +490,7 @@ pub(crate) fn draw_procedural(ch: char, m: Metrics, target: &mut [u8]) {
     match family(ch) {
         Some(Family::Block) => block(ch, m, target),
         Some(Family::Braille) => braille(ch, m, target),
+        Some(Family::Line) => line(ch, m, target),
         None => {}
     }
 }
@@ -475,7 +499,7 @@ pub(crate) fn draw_procedural(ch: char, m: Metrics, target: &mut [u8]) {
 ///
 /// Toplama ile [`max_rect`] arasındaki fark bir zevk değil bir ölçüt:
 /// birbirini döşeyen (ayrık) parçaların birleşimi **tam** kapsama vermek
-/// zorunda. `▀` ile `▄` h = 17'de 8.5 satırında buluşuyor ve ikisi de o
+/// zorunda. `▀` ile `▄` 13pt@2x'in h = 33'ünde 16.5 satırında buluşuyor ve ikisi de o
 /// satıra 128 bırakıyor; `max` alsaydı hücrenin ortasında %50'lik bir şerit
 /// kalırdı — yani bu setin kapatmaya geldiği kusurun hücre içine taşınmış
 /// hâli. Doygun toplama onu 255'e kapatıyor.
@@ -522,7 +546,7 @@ fn rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32, join:
 /// Desen **yok, düz kapsama var** ve bu bilinçli: CP437'nin dama deseni tek
 /// bitlik ekranların yoğunluk hilesiydi, atlas ise sekiz bitlik. Dama
 /// yazılsaydı faz ancak adım hücrenin **iki** ölçüsünü de bölerse tutardı ve
-/// tutmuyor — bu makinede 13pt@1x hücresi 8×17 ve 17 asal, yani her satır
+/// tutmuyor — bu makinede 13pt@2x hücresi 16×33 ve 33 tek, yani her satır
 /// sınırında desen kırılır, `░` ile dolu bir alanda yatay şeritler belirirdi.
 /// Döşeme bu setin varlık sebebi; düz kapsama onu inşaen veriyor.
 const SHADE_LEVELS: [f32; 3] = [0.25, 0.5, 0.75];
@@ -674,5 +698,509 @@ fn braille(ch: char, m: Metrics, target: &mut [u8]) {
             cy - half_h,
             cy + half_h,
         );
+    }
+}
+
+/// Kalın çizginin ince çizgiye oranı.
+///
+/// **Ölçüm değil tasarım sabiti** ([`CURL_FACTOR`] emsali). Unicode ince ile
+/// kalını ayrı kod noktalarına koyuyor (`─` U+2500 ince, `━` U+2501 kalın)
+/// ama kalının *ne kadar* kalın olduğunu söylemiyor: ince
+/// [`Metrics::underline_px`]'ten geliyor (depoda "çizgi kalınlığı"nın zaten
+/// bir cevabı var), kalın için ikinci bir sayı gerekiyor. İki kat seçildi —
+/// bir buçuk kat 13pt'de tam sayıya yuvarlandığında inceden ayrılmıyor, üç
+/// kat hücre genişliğinin üçte birini yiyor.
+const HEAVY_FACTOR: f32 = 2.0;
+
+/// Bir kolun çizgi stili.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stroke {
+    None,
+    Light,
+    Heavy,
+    /// İki ince ray; aralarında bir kalınlık boşluk.
+    Double,
+}
+
+// Kol indeksleri. Karşıt kol `dir ^ 1`: çiftler bilerek yan yana.
+const UP: usize = 0;
+const DOWN: usize = 1;
+const LEFT: usize = 2;
+const RIGHT: usize = 3;
+
+/// Bir çizgi karakterinin geometri tarifi.
+///
+/// Kolların sırası [`UP`], [`DOWN`], [`LEFT`], [`RIGHT`]; `dashes` sıfırsa
+/// çizgi düz, değilse hücre başına o kadar tire; `arc` köşeyi yuvarlatıyor.
+#[derive(Clone, Copy)]
+struct Recipe {
+    arms: [Stroke; 4],
+    dashes: u8,
+    arc: bool,
+}
+
+const N: Stroke = Stroke::None;
+const L: Stroke = Stroke::Light;
+const H: Stroke = Stroke::Heavy;
+const D: Stroke = Stroke::Double;
+
+const fn plain(arms: [Stroke; 4]) -> Recipe {
+    Recipe {
+        arms,
+        dashes: 0,
+        arc: false,
+    }
+}
+
+const fn dashed(arms: [Stroke; 4], dashes: u8) -> Recipe {
+    Recipe {
+        arms,
+        dashes,
+        arc: false,
+    }
+}
+
+const fn arc(arms: [Stroke; 4]) -> Recipe {
+    Recipe {
+        arms,
+        dashes: 0,
+        arc: true,
+    }
+}
+
+/// U+2500–U+257F'in kol tabloları — **gerçek tablo**, formül yok.
+///
+/// Sıra kod noktasının sırası (indeks = `cp - 0x2500`) ve bir sayaç değil:
+/// `251C..2523`'ün (yukarı, aşağı, sağ) kalın maskeleri sırayla 000, 001,
+/// 100, 010, 110, 101, 011, 111, yani bir **permütasyon**; aynı ailenin
+/// `252C..2533` karşılığı (sol, sağ, aşağı) ise 000, 100, 010, 110, 001,
+/// 101, 011, 111 — başka bir permütasyon. Formül aramak yanlış bir örüntüyü
+/// sessizce kodlardı; tablo karakter **adlarından** yazıldı ve bekçisi
+/// adları Unicode veritabanından okuyan [`crate::tests`] tarafında
+/// (`the_arm_table_matches_the_unicode_names`).
+///
+/// Köşegenlerin (`╱╲╳`) satırları boş: [`family`] onları kapsamın dışında
+/// tutuyor, yani bu üç satır hiç okunmuyor. Tablo yine de 128 satır, çünkü
+/// indeks aritmetiği deliği atlayamaz.
+#[rustfmt::skip]
+const LINES: [Recipe; 128] = [
+    plain([N, N, L, L]),      // ─ LIGHT HORIZONTAL
+    plain([N, N, H, H]),      // ━ HEAVY HORIZONTAL
+    plain([L, L, N, N]),      // │ LIGHT VERTICAL
+    plain([H, H, N, N]),      // ┃ HEAVY VERTICAL
+    dashed([N, N, L, L], 3),  // ┄ LIGHT TRIPLE DASH HORIZONTAL
+    dashed([N, N, H, H], 3),  // ┅ HEAVY TRIPLE DASH HORIZONTAL
+    dashed([L, L, N, N], 3),  // ┆ LIGHT TRIPLE DASH VERTICAL
+    dashed([H, H, N, N], 3),  // ┇ HEAVY TRIPLE DASH VERTICAL
+    dashed([N, N, L, L], 4),  // ┈ LIGHT QUADRUPLE DASH HORIZONTAL
+    dashed([N, N, H, H], 4),  // ┉ HEAVY QUADRUPLE DASH HORIZONTAL
+    dashed([L, L, N, N], 4),  // ┊ LIGHT QUADRUPLE DASH VERTICAL
+    dashed([H, H, N, N], 4),  // ┋ HEAVY QUADRUPLE DASH VERTICAL
+    plain([N, L, N, L]),      // ┌ LIGHT DOWN AND RIGHT
+    plain([N, L, N, H]),      // ┍ DOWN LIGHT AND RIGHT HEAVY
+    plain([N, H, N, L]),      // ┎ DOWN HEAVY AND RIGHT LIGHT
+    plain([N, H, N, H]),      // ┏ HEAVY DOWN AND RIGHT
+    plain([N, L, L, N]),      // ┐ LIGHT DOWN AND LEFT
+    plain([N, L, H, N]),      // ┑ DOWN LIGHT AND LEFT HEAVY
+    plain([N, H, L, N]),      // ┒ DOWN HEAVY AND LEFT LIGHT
+    plain([N, H, H, N]),      // ┓ HEAVY DOWN AND LEFT
+    plain([L, N, N, L]),      // └ LIGHT UP AND RIGHT
+    plain([L, N, N, H]),      // ┕ UP LIGHT AND RIGHT HEAVY
+    plain([H, N, N, L]),      // ┖ UP HEAVY AND RIGHT LIGHT
+    plain([H, N, N, H]),      // ┗ HEAVY UP AND RIGHT
+    plain([L, N, L, N]),      // ┘ LIGHT UP AND LEFT
+    plain([L, N, H, N]),      // ┙ UP LIGHT AND LEFT HEAVY
+    plain([H, N, L, N]),      // ┚ UP HEAVY AND LEFT LIGHT
+    plain([H, N, H, N]),      // ┛ HEAVY UP AND LEFT
+    plain([L, L, N, L]),      // ├ LIGHT VERTICAL AND RIGHT
+    plain([L, L, N, H]),      // ┝ VERTICAL LIGHT AND RIGHT HEAVY
+    plain([H, L, N, L]),      // ┞ UP HEAVY AND RIGHT DOWN LIGHT
+    plain([L, H, N, L]),      // ┟ DOWN HEAVY AND RIGHT UP LIGHT
+    plain([H, H, N, L]),      // ┠ VERTICAL HEAVY AND RIGHT LIGHT
+    plain([H, L, N, H]),      // ┡ DOWN LIGHT AND RIGHT UP HEAVY
+    plain([L, H, N, H]),      // ┢ UP LIGHT AND RIGHT DOWN HEAVY
+    plain([H, H, N, H]),      // ┣ HEAVY VERTICAL AND RIGHT
+    plain([L, L, L, N]),      // ┤ LIGHT VERTICAL AND LEFT
+    plain([L, L, H, N]),      // ┥ VERTICAL LIGHT AND LEFT HEAVY
+    plain([H, L, L, N]),      // ┦ UP HEAVY AND LEFT DOWN LIGHT
+    plain([L, H, L, N]),      // ┧ DOWN HEAVY AND LEFT UP LIGHT
+    plain([H, H, L, N]),      // ┨ VERTICAL HEAVY AND LEFT LIGHT
+    plain([H, L, H, N]),      // ┩ DOWN LIGHT AND LEFT UP HEAVY
+    plain([L, H, H, N]),      // ┪ UP LIGHT AND LEFT DOWN HEAVY
+    plain([H, H, H, N]),      // ┫ HEAVY VERTICAL AND LEFT
+    plain([N, L, L, L]),      // ┬ LIGHT DOWN AND HORIZONTAL
+    plain([N, L, H, L]),      // ┭ LEFT HEAVY AND RIGHT DOWN LIGHT
+    plain([N, L, L, H]),      // ┮ RIGHT HEAVY AND LEFT DOWN LIGHT
+    plain([N, L, H, H]),      // ┯ DOWN LIGHT AND HORIZONTAL HEAVY
+    plain([N, H, L, L]),      // ┰ DOWN HEAVY AND HORIZONTAL LIGHT
+    plain([N, H, H, L]),      // ┱ RIGHT LIGHT AND LEFT DOWN HEAVY
+    plain([N, H, L, H]),      // ┲ LEFT LIGHT AND RIGHT DOWN HEAVY
+    plain([N, H, H, H]),      // ┳ HEAVY DOWN AND HORIZONTAL
+    plain([L, N, L, L]),      // ┴ LIGHT UP AND HORIZONTAL
+    plain([L, N, H, L]),      // ┵ LEFT HEAVY AND RIGHT UP LIGHT
+    plain([L, N, L, H]),      // ┶ RIGHT HEAVY AND LEFT UP LIGHT
+    plain([L, N, H, H]),      // ┷ UP LIGHT AND HORIZONTAL HEAVY
+    plain([H, N, L, L]),      // ┸ UP HEAVY AND HORIZONTAL LIGHT
+    plain([H, N, H, L]),      // ┹ RIGHT LIGHT AND LEFT UP HEAVY
+    plain([H, N, L, H]),      // ┺ LEFT LIGHT AND RIGHT UP HEAVY
+    plain([H, N, H, H]),      // ┻ HEAVY UP AND HORIZONTAL
+    plain([L, L, L, L]),      // ┼ LIGHT VERTICAL AND HORIZONTAL
+    plain([L, L, H, L]),      // ┽ LEFT HEAVY AND RIGHT VERTICAL LIGHT
+    plain([L, L, L, H]),      // ┾ RIGHT HEAVY AND LEFT VERTICAL LIGHT
+    plain([L, L, H, H]),      // ┿ VERTICAL LIGHT AND HORIZONTAL HEAVY
+    plain([H, L, L, L]),      // ╀ UP HEAVY AND DOWN HORIZONTAL LIGHT
+    plain([L, H, L, L]),      // ╁ DOWN HEAVY AND UP HORIZONTAL LIGHT
+    plain([H, H, L, L]),      // ╂ VERTICAL HEAVY AND HORIZONTAL LIGHT
+    plain([H, L, H, L]),      // ╃ LEFT UP HEAVY AND RIGHT DOWN LIGHT
+    plain([H, L, L, H]),      // ╄ RIGHT UP HEAVY AND LEFT DOWN LIGHT
+    plain([L, H, H, L]),      // ╅ LEFT DOWN HEAVY AND RIGHT UP LIGHT
+    plain([L, H, L, H]),      // ╆ RIGHT DOWN HEAVY AND LEFT UP LIGHT
+    plain([H, L, H, H]),      // ╇ DOWN LIGHT AND UP HORIZONTAL HEAVY
+    plain([L, H, H, H]),      // ╈ UP LIGHT AND DOWN HORIZONTAL HEAVY
+    plain([H, H, H, L]),      // ╉ RIGHT LIGHT AND LEFT VERTICAL HEAVY
+    plain([H, H, L, H]),      // ╊ LEFT LIGHT AND RIGHT VERTICAL HEAVY
+    plain([H, H, H, H]),      // ╋ HEAVY VERTICAL AND HORIZONTAL
+    dashed([N, N, L, L], 2),  // ╌ LIGHT DOUBLE DASH HORIZONTAL
+    dashed([N, N, H, H], 2),  // ╍ HEAVY DOUBLE DASH HORIZONTAL
+    dashed([L, L, N, N], 2),  // ╎ LIGHT DOUBLE DASH VERTICAL
+    dashed([H, H, N, N], 2),  // ╏ HEAVY DOUBLE DASH VERTICAL
+    plain([N, N, D, D]),      // ═ DOUBLE HORIZONTAL
+    plain([D, D, N, N]),      // ║ DOUBLE VERTICAL
+    plain([N, L, N, D]),      // ╒ DOWN SINGLE AND RIGHT DOUBLE
+    plain([N, D, N, L]),      // ╓ DOWN DOUBLE AND RIGHT SINGLE
+    plain([N, D, N, D]),      // ╔ DOUBLE DOWN AND RIGHT
+    plain([N, L, D, N]),      // ╕ DOWN SINGLE AND LEFT DOUBLE
+    plain([N, D, L, N]),      // ╖ DOWN DOUBLE AND LEFT SINGLE
+    plain([N, D, D, N]),      // ╗ DOUBLE DOWN AND LEFT
+    plain([L, N, N, D]),      // ╘ UP SINGLE AND RIGHT DOUBLE
+    plain([D, N, N, L]),      // ╙ UP DOUBLE AND RIGHT SINGLE
+    plain([D, N, N, D]),      // ╚ DOUBLE UP AND RIGHT
+    plain([L, N, D, N]),      // ╛ UP SINGLE AND LEFT DOUBLE
+    plain([D, N, L, N]),      // ╜ UP DOUBLE AND LEFT SINGLE
+    plain([D, N, D, N]),      // ╝ DOUBLE UP AND LEFT
+    plain([L, L, N, D]),      // ╞ VERTICAL SINGLE AND RIGHT DOUBLE
+    plain([D, D, N, L]),      // ╟ VERTICAL DOUBLE AND RIGHT SINGLE
+    plain([D, D, N, D]),      // ╠ DOUBLE VERTICAL AND RIGHT
+    plain([L, L, D, N]),      // ╡ VERTICAL SINGLE AND LEFT DOUBLE
+    plain([D, D, L, N]),      // ╢ VERTICAL DOUBLE AND LEFT SINGLE
+    plain([D, D, D, N]),      // ╣ DOUBLE VERTICAL AND LEFT
+    plain([N, L, D, D]),      // ╤ DOWN SINGLE AND HORIZONTAL DOUBLE
+    plain([N, D, L, L]),      // ╥ DOWN DOUBLE AND HORIZONTAL SINGLE
+    plain([N, D, D, D]),      // ╦ DOUBLE DOWN AND HORIZONTAL
+    plain([L, N, D, D]),      // ╧ UP SINGLE AND HORIZONTAL DOUBLE
+    plain([D, N, L, L]),      // ╨ UP DOUBLE AND HORIZONTAL SINGLE
+    plain([D, N, D, D]),      // ╩ DOUBLE UP AND HORIZONTAL
+    plain([L, L, D, D]),      // ╪ VERTICAL SINGLE AND HORIZONTAL DOUBLE
+    plain([D, D, L, L]),      // ╫ VERTICAL DOUBLE AND HORIZONTAL SINGLE
+    plain([D, D, D, D]),      // ╬ DOUBLE VERTICAL AND HORIZONTAL
+    arc([N, L, N, L]),        // ╭ LIGHT ARC DOWN AND RIGHT
+    arc([N, L, L, N]),        // ╮ LIGHT ARC DOWN AND LEFT
+    arc([L, N, L, N]),        // ╯ LIGHT ARC UP AND LEFT
+    arc([L, N, N, L]),        // ╰ LIGHT ARC UP AND RIGHT
+    plain([N, N, N, N]),      // ╱ köşegen — kapsam dışı, bu satır okunmuyor
+    plain([N, N, N, N]),      // ╲ köşegen — kapsam dışı
+    plain([N, N, N, N]),      // ╳ köşegen — kapsam dışı
+    plain([N, N, L, N]),      // ╴ LIGHT LEFT
+    plain([L, N, N, N]),      // ╵ LIGHT UP
+    plain([N, N, N, L]),      // ╶ LIGHT RIGHT
+    plain([N, L, N, N]),      // ╷ LIGHT DOWN
+    plain([N, N, H, N]),      // ╸ HEAVY LEFT
+    plain([H, N, N, N]),      // ╹ HEAVY UP
+    plain([N, N, N, H]),      // ╺ HEAVY RIGHT
+    plain([N, H, N, N]),      // ╻ HEAVY DOWN
+    plain([N, N, L, H]),      // ╼ LIGHT LEFT AND HEAVY RIGHT
+    plain([L, H, N, N]),      // ╽ LIGHT UP AND HEAVY DOWN
+    plain([N, N, H, L]),      // ╾ HEAVY LEFT AND LIGHT RIGHT
+    plain([H, L, N, N]),      // ╿ HEAVY UP AND LIGHT DOWN
+];
+
+/// Bir rayın **piksel ızgarasına oturtulmuş** bandı: `[başlangıç, başlangıç +
+/// kalınlık)`.
+///
+/// Yuvarlama şart ve bedeli gözle görülür: bu makinede 13pt@1x hücresi 8×18,
+/// yani dikey çizginin ekseni x = 4.0 ve yuvarlanmamış bir ince bant
+/// `[3.5, 4.5)` iki sütuna %50'şer düşerdi — bütün dikey çizgiler gri,
+/// yataylar (eksen 9.0) net. Kural yeni değil: alt çizginin konumu da
+/// kalınlığı da zaten tam sayı ([`Metrics::underline_px`]) ve
+/// [`font::rule_envelope`] kalınlığı `>= 1`'e bağlıyor, yani `start` tam
+/// sayıyken bant da tam sayı kenarlarda bitiyor ve [`overlap`] kesir
+/// üretmiyor.
+fn rail(center: f32, thickness: f32) -> (f32, f32) {
+    let start = (center - thickness / 2.0).round();
+    (start, start + thickness)
+}
+
+/// Bir kolun raylarının **dik eksendeki** bantları.
+///
+/// Çift çizginin ray aralığı [`RuleKind::Double`]'ın bugünkü
+/// `position + 2.0 * thickness`'ından geliyor: iki ray arasında tam bir
+/// kalınlık boşluk kalıyor. Yeni bir tasarım sabiti doğmuyor.
+fn rails(stroke: Stroke, center: f32, thin: f32) -> [Option<(f32, f32)>; 2] {
+    match stroke {
+        Stroke::None => [None, None],
+        Stroke::Light => [Some(rail(center, thin)), None],
+        Stroke::Heavy => [Some(rail(center, HEAVY_FACTOR * thin)), None],
+        Stroke::Double => [
+            Some(rail(center - thin, thin)),
+            Some(rail(center + thin, thin)),
+        ],
+    }
+}
+
+/// Eksen çevirici: `along` kolun ilerleme ekseni, `across` rayın bandı.
+///
+/// [`max_rect`] üstünde duruyor ve birleştiricisi bilerek **piksel-max**:
+/// kollar aynı mürekkebi paylaşıyor (kesişimde üst üste biniyorlar), yani
+/// `add_rect`'in doygun toplamı kavşağı yapay olarak koyulaştırırdı. Yan
+/// kazanç yapısal: birleşim yasası (`┌ ∪ ┘ == ┼`) aynı kolun her karakterde
+/// **aynı dikdörtgeni** vermesinden çıkıyor.
+fn stroke_rect(
+    target: &mut [u8],
+    m: Metrics,
+    vertical: bool,
+    along: (f32, f32),
+    across: (f32, f32),
+) {
+    if vertical {
+        max_rect(target, m, across.0, across.1, along.0, along.1);
+    } else {
+        max_rect(target, m, along.0, along.1, across.0, across.1);
+    }
+}
+
+/// Bir rayın kenardan içeri doğru nereye kadar gideceği.
+///
+/// Üç hâl var ve üçü de çift çizgi kavşaklarının gerçek geometrisinden:
+///
+/// - **Dik kol yok** → ray merkezi geçer ([`f32::round`] ile ızgaraya
+///   oturarak) ve karşı kolun rayıyla tam orada buluşur. `─`'nin iki kolu
+///   böyle birleşiyor.
+/// - **Geçiyor** → ray bütün dik rayları kesip en uzağının uzak kenarında
+///   biter. Köşeyi kapatan şey bu: `╔`'in üst rayı sol dikey rayın **sol**
+///   kenarına kadar gidiyor, yoksa köşede bir çentik kalırdı.
+/// - **Dönüyor** → ray ilk rastladığı dik rayın uzak kenarında durur, yani
+///   o rayın içine dirsek yapar. `╬`'in dört dirseği ve ortasındaki boş
+///   kanal bundan doğuyor.
+///
+/// `turn` kararının kendisi [`arm`]'de; burası yalnız sonucu ölçüyor.
+fn reach(bands: [Option<(f32, f32)>; 4], forward: bool, turn: bool, center: f32) -> f32 {
+    let mut nearest: Option<(f32, f32)> = None;
+    let mut farthest: Option<f32> = None;
+    for band in bands.into_iter().flatten() {
+        let (near_edge, far_edge) = if forward { band } else { (band.1, band.0) };
+        let closer = nearest.is_none_or(|current| {
+            let current_near = if forward { current.0 } else { current.1 };
+            if forward {
+                near_edge < current_near
+            } else {
+                near_edge > current_near
+            }
+        });
+        if closer {
+            nearest = Some(band);
+        }
+        farthest = Some(match farthest {
+            Some(edge) if forward => edge.max(far_edge),
+            Some(edge) => edge.min(far_edge),
+            None => far_edge,
+        });
+    }
+    match (turn, nearest, farthest) {
+        (true, Some(band), _) => {
+            if forward {
+                band.1
+            } else {
+                band.0
+            }
+        }
+        (false, _, Some(edge)) => edge,
+        // Dik kol yok: merkezde buluşuyoruz.
+        _ => center.round(),
+    }
+}
+
+/// Tek bir kol: kenardan merkeze doğru bir ya da iki ray.
+///
+/// **Dönme kuralı** ([`reach`]'in üçüncü hâli) iki cümlede yaşıyor ve ikisi
+/// de çift çizginin "kanal" olmasından çıkıyor — çift çizgi bir çizgi değil
+/// iki duvarlı bir kanal, kavşakta açılan duvar kanalı kapatmaz:
+///
+/// - **Çift rayın** kendi tarafındaki dik kol da çiftse ray döner: `╠`'te
+///   sağ (iç) duvar kırılıp yatay raylara dirsek yapıyor, sol (dış) duvar
+///   kesintisiz geçiyor.
+/// - **Tek ray** (ince/kalın) yalnız dik kolların **ikisi de** çiftken **ve**
+///   karşı kolu yokken döner: `╤`'nin sapı alt rayda duruyor, `╪`'nin dikey
+///   çizgisi ise baştan sona geçiyor. Karşı kol koşulu olmasaydı `╪` ortadan
+///   ikiye bölünürdü.
+fn arm(spec: Recipe, dir: usize, m: Metrics, target: &mut [u8]) {
+    let stroke = spec.arms[dir];
+    if stroke == Stroke::None {
+        return;
+    }
+    let (w, h) = m.cell_wh();
+    let (w, h) = (w as f32, h as f32);
+    let thin = f32::from(m.underline_px.1).max(1.0);
+    let vertical = dir == UP || dir == DOWN;
+    // Kenardan merkeze: yukarı ve sol koller 0'dan artarak, aşağı ve sağ
+    // kollar hücrenin ucundan azalarak ilerliyor.
+    let forward = dir == UP || dir == LEFT;
+    let (along_extent, across_center) = if vertical { (h, w / 2.0) } else { (w, h / 2.0) };
+    let along_center = along_extent / 2.0;
+    // Dik kolların yönleri **ve** rayın kendi tarafı aynı çift: dikey bir
+    // kolun rayları solda/sağda, yatay bir kolunkiler üstte/altta.
+    let sides = if vertical { [LEFT, RIGHT] } else { [UP, DOWN] };
+    let crossing = {
+        let first = rails(spec.arms[sides[0]], along_center, thin);
+        let second = rails(spec.arms[sides[1]], along_center, thin);
+        [first[0], first[1], second[0], second[1]]
+    };
+    let single_turns = spec.arms[sides[0]] == Stroke::Double
+        && spec.arms[sides[1]] == Stroke::Double
+        // Karşıt kol: `dir ^ 1` (UP↔DOWN, LEFT↔RIGHT).
+        && spec.arms[dir ^ 1] == Stroke::None;
+
+    for (index, band) in rails(stroke, across_center, thin).into_iter().enumerate() {
+        let Some(band) = band else { continue };
+        let turn = if stroke == Stroke::Double {
+            spec.arms[sides[index]] == Stroke::Double
+        } else {
+            single_turns
+        };
+        let edge = reach(crossing, forward, turn, along_center);
+        let along = if forward {
+            (0.0, edge)
+        } else {
+            (edge, along_extent)
+        };
+        stroke_rect(target, m, vertical, along, band);
+    }
+}
+
+/// Kesikli çizgi ailesi (`┄┅┆┇┈┉┊┋╌╍╎╏`).
+///
+/// Periyot [`dividing_period`]'dan, yani hücreyi **tam bölen** en yakın
+/// değere çekiliyor; döşeme bu setin varlık sebebi ve faz hücre sınırında
+/// kırılamaz. Bedeli görünür bir bilgi kaybı ve kabul edildi
+/// (`discussion.md` → Karar 4): bu makinede `w = 8`'de üçlü kesiğin istediği
+/// periyot 3 → **4**'e çekiliyor ve `┄` ile `╌` **aynı sprite'a** çöküyor;
+/// bölenleri seyrek bir ölçüde (144pt@1x'in `w = 87`'si: 1, 3, 29, 87) `╌`
+/// hücre başına **tek** tireye iniyor. Bekçisi çökmeyi listeye yazmıyor,
+/// **türetiyor**: aynı eksendeki iki yoğunluk ancak periyotları eşitse eşit
+/// (`dashed_densities_collapse_only_with_the_period`).
+///
+/// Dolu oranı [`RuleKind::Dashed`]'in oranı (üçte iki); ikinci bir tasarım
+/// sabiti doğmuyor.
+fn dashes(spec: Recipe, m: Metrics, target: &mut [u8]) {
+    let (w, h) = m.cell_wh();
+    let thin = f32::from(m.underline_px.1).max(1.0);
+    let vertical = spec.arms[UP] != Stroke::None;
+    let (along_extent, across_center) = if vertical {
+        (h, w as f32 / 2.0)
+    } else {
+        (w, h as f32 / 2.0)
+    };
+    let stroke = spec.arms[if vertical { UP } else { LEFT }];
+    // Kesikli ailede çift çizgi yok: tek ray.
+    let Some(band) = rails(stroke, across_center, thin)[0] else {
+        return;
+    };
+    let period = dividing_period(
+        along_extent.div_ceil(usize::from(spec.dashes).max(1)),
+        along_extent,
+    );
+    let filled = (period * 2 / 3).max(1);
+    for start in (0..along_extent).step_by(period) {
+        let end = (start + filled).min(along_extent);
+        stroke_rect(target, m, vertical, (start as f32, end as f32), band);
+    }
+}
+
+/// Yuvarlak köşe (`╭╮╯╰`): iki sap ve onları birleştiren çeyrek yay.
+///
+/// Yay [`chevron`]'un mesafe alanının ikizi — orada `distance_to_segment`,
+/// burada `|hypot(x - ox, y - oy) - r|`, aynı yarım piksellik geçiş bandı
+/// ve aynı `half_stroke`. [`curl`] emsal **değil**: sütun başına tek bir `y`
+/// örnekliyor ve çeyrek yayın dikey teğetinde bant kopardı.
+///
+/// Yarıçap dört köşede de aynı ve **oturtulmuş eksenlerden** türüyor:
+/// merkezin hücre kenarlarına uzaklıklarının en küçüğü. Tek yönden
+/// türetilseydi `╭──╮`'nin sol köşesi sağından dar olurdu; teğet noktaları
+/// oturtulmamış eksenden alınsaydı sapla yay arasında yarım piksellik bir
+/// kırık kalırdı.
+///
+/// Sap ile yayın dikişi **tam**: bant tam sayı kenarlarda
+/// ([`rail`]) ve eksen hizalı bir vuruşta mesafe tabanlı kapsama ile
+/// [`overlap`]'inki cebirsel olarak aynı sonucu veriyor (kalınlık `>= 1`,
+/// yani yarı kalınlık `>= 0.5`).
+fn corner(spec: Recipe, m: Metrics, target: &mut [u8]) {
+    let (w, h) = m.cell_wh();
+    let thin = f32::from(m.underline_px.1).max(1.0);
+    let vertical_band = rail(w as f32 / 2.0, thin);
+    let horizontal_band = rail(h as f32 / 2.0, thin);
+    let axis_x = (vertical_band.0 + vertical_band.1) / 2.0;
+    let axis_y = (horizontal_band.0 + horizontal_band.1) / 2.0;
+    let radius = axis_x
+        .min(w as f32 - axis_x)
+        .min(axis_y)
+        .min(h as f32 - axis_y);
+    let right = spec.arms[RIGHT] != Stroke::None;
+    let down = spec.arms[DOWN] != Stroke::None;
+    let (ox, oy) = (
+        if right {
+            axis_x + radius
+        } else {
+            axis_x - radius
+        },
+        if down {
+            axis_y + radius
+        } else {
+            axis_y - radius
+        },
+    );
+
+    // Saplar: teğet noktasından hücre kenarına.
+    let (x0, x1) = if right { (ox, w as f32) } else { (0.0, ox) };
+    let (y0, y1) = if down { (oy, h as f32) } else { (0.0, oy) };
+    max_rect(target, m, x0, x1, horizontal_band.0, horizontal_band.1);
+    max_rect(target, m, vertical_band.0, vertical_band.1, y0, y1);
+
+    let half_stroke = thin / 2.0;
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            // Çeyrek kısıtı: yay merkezin **kolların tersi** tarafında.
+            // Kesme tam teğet noktasında ve orada sap zaten dolu, yani
+            // kesilen şey sapın altında kalıyor.
+            let inside =
+                if right { px <= ox } else { px >= ox } && if down { py <= oy } else { py >= oy };
+            if !inside {
+                continue;
+            }
+            let distance = ((px - ox).hypot(py - oy) - radius).abs();
+            let value = (half_stroke + 0.5 - distance).clamp(0.0, 1.0);
+            let value = (value * 255.0).round() as u8;
+            // audit: `y < h` ve `x < w`, yani indeks `w * h`'nin altında.
+            target[y * w + x] = target[y * w + x].max(value);
+        }
+    }
+}
+
+/// Çizgi çizim karakteri (U+2500–U+257F).
+///
+/// Tarif [`LINES`]'tan geliyor; çizim üç kola ayrılıyor ve üçü de aynı iki
+/// primitifi kullanıyor (dikdörtgen ve mesafe alanı). Kapsam dışı indeks
+/// **boş yuva** bırakıyor, panik değil: kapı ([`family`]) zaten tutuyor.
+fn line(ch: char, m: Metrics, target: &mut [u8]) {
+    let Some(&spec) = LINES.get((u32::from(ch) - 0x2500) as usize) else {
+        return;
+    };
+    if spec.dashes > 0 {
+        dashes(spec, m, target);
+    } else if spec.arc {
+        corner(spec, m, target);
+    } else {
+        for dir in [UP, DOWN, LEFT, RIGHT] {
+            arm(spec, dir, m, target);
+        }
     }
 }
