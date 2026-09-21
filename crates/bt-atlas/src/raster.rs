@@ -262,7 +262,7 @@ pub(crate) fn draw_rule(kind: RuleKind, m: Metrics, target: &mut [u8]) {
 /// (`bt_gpu::Frame::push_block`) ve pay bir hücreden dar olabilir. Taşsaydı
 /// komut metninin ilk harfine binerdi.
 fn chevron(target: &mut [u8], m: Metrics) {
-    let (w, h) = m.cell_wh();
+    let (w, _) = m.cell_wh();
     let (strike_top, strike_thick) = m.strikeout_px;
     let center_y = f32::from(strike_top) + f32::from(strike_thick) / 2.0;
     // x-height'ın yarısı; taban çizgisi merkezin altında olmasaydı (dejenere
@@ -279,15 +279,31 @@ fn chevron(target: &mut [u8], m: Metrics) {
     let upper = (center_x - half_w, center_y - half_h);
     let lower = (center_x - half_w, center_y + half_h);
 
+    stamp(target, m, half_stroke, |px, py| {
+        distance_to_segment(px, py, upper, apex).min(distance_to_segment(px, py, apex, lower))
+    });
+}
+
+/// Mesafe alanını kapsama baytlarına basar: `distance` sıfıra yakın piksel
+/// dolu, `half_stroke + 0.5`'ten uzak olan boş.
+///
+/// **Kenar yumuşatma kuralının tek sahibi**, [`coverage`]'ın eksen hizalı
+/// çizimler için olduğu gibi. Gerekçe de aynı ve orada yazılı: iki çizici
+/// aynı kuralı iki kez yazarsa biri ayarlandığında öteki eski sertlikte
+/// kalır ve belirti sessizdir — "şekilleri farklı olsun" diyen bir sınama
+/// bunu göremez. Bugün iki tüketicisi var, [`chevron`] ile [`corner`], ve
+/// yarım piksellik geçiş bandı ikisinde de aynı: daha genişi şekli
+/// bulanıklaştırır, daha darı merdivenlendirir.
+///
+/// `join` **yok**: iki tüketici de boş bir tampona çiziyor ve mesafe alanı
+/// bütün hücreyi kapsıyor, yani yazma doğrudan. Birleştirici isteyen bir
+/// üçüncü tüketici çıkarsa buraya girer, çağıranın içine değil.
+fn stamp(target: &mut [u8], m: Metrics, half_stroke: f32, distance: impl Fn(f32, f32) -> f32) {
+    let (w, h) = m.cell_wh();
     for y in 0..h {
         for x in 0..w {
             let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let distance = distance_to_segment(px, py, upper, apex)
-                .min(distance_to_segment(px, py, apex, lower));
-            // Yarım piksellik geçiş bandı: `band`'in kenar yumuşatmasıyla aynı
-            // sertlik. Daha genişi işareti bulanıklaştırır, daha darı
-            // merdivenlendirir.
-            let value = (half_stroke + 0.5 - distance).clamp(0.0, 1.0);
+            let value = (half_stroke + 0.5 - distance(px, py)).clamp(0.0, 1.0);
             // audit: `y < h` ve `x < w`, yani indeks `w * h`'nin altında.
             target[y * w + x] = (value * 255.0).round() as u8;
         }
@@ -782,6 +798,8 @@ const fn arc(arms: [Stroke; 4]) -> Recipe {
 /// Köşegenlerin (`╱╲╳`) satırları boş: [`family`] onları kapsamın dışında
 /// tutuyor, yani bu üç satır hiç okunmuyor. Tablo yine de 128 satır, çünkü
 /// indeks aritmetiği deliği atlayamaz.
+// `rustfmt::skip`: satır başına bir karakter ve hizalı ad yorumu, tablonun
+// gözle taranabilir olmasının tek sebebi; biçimlendirici sarmaları bozuyor.
 #[rustfmt::skip]
 const LINES: [Recipe; 128] = [
     plain([N, N, L, L]),      // ─ LIGHT HORIZONTAL
@@ -984,39 +1002,32 @@ fn stroke_rect(
 ///
 /// `turn` kararının kendisi [`arm`]'de; burası yalnız sonucu ölçüyor.
 fn reach(bands: [Option<(f32, f32)>; 4], forward: bool, turn: bool, center: f32) -> f32 {
+    // Eksen **bir kez** çevriliyor: geri yönde ilerleyen kol için bütün
+    // koordinatlar negatifleniyor, yani "yakın" hep küçük ve "uzak" hep
+    // büyük oluyor. Çevirme girişte ve çıkışta birer kez; `forward`'ı
+    // yakın/uzak seçiminde, min/max'ta ve dönüşte ayrı ayrı sormak beş ayrı
+    // yerin birbiriyle tutarlı kalmasını isterdi ve biri ters yazıldığında
+    // belirti `╬` kavşağında tek piksellik bir çentik olurdu.
+    let travel = |value: f32| if forward { value } else { -value };
     let mut nearest: Option<(f32, f32)> = None;
     let mut farthest: Option<f32> = None;
     for band in bands.into_iter().flatten() {
-        let (near_edge, far_edge) = if forward { band } else { (band.1, band.0) };
-        let closer = nearest.is_none_or(|current| {
-            let current_near = if forward { current.0 } else { current.1 };
-            if forward {
-                near_edge < current_near
-            } else {
-                near_edge > current_near
-            }
-        });
-        if closer {
-            nearest = Some(band);
+        let (near, far) = (
+            travel(band.0).min(travel(band.1)),
+            travel(band.0).max(travel(band.1)),
+        );
+        if nearest.is_none_or(|(current, _)| near < current) {
+            nearest = Some((near, far));
         }
-        farthest = Some(match farthest {
-            Some(edge) if forward => edge.max(far_edge),
-            Some(edge) => edge.min(far_edge),
-            None => far_edge,
-        });
+        farthest = Some(farthest.map_or(far, |edge: f32| edge.max(far)));
     }
-    match (turn, nearest, farthest) {
-        (true, Some(band), _) => {
-            if forward {
-                band.1
-            } else {
-                band.0
-            }
-        }
-        (false, _, Some(edge)) => edge,
+    let stop = match (turn, nearest, farthest) {
+        (true, Some((_, far)), _) => far,
+        (false, _, Some(far)) => far,
         // Dik kol yok: merkezde buluşuyoruz.
-        _ => center.round(),
-    }
+        _ => travel(center.round()),
+    };
+    travel(stop)
 }
 
 /// Tek bir kol: kenardan merkeze doğru bir ya da iki ray.
@@ -1117,72 +1128,74 @@ fn dashes(spec: Recipe, m: Metrics, target: &mut [u8]) {
 
 /// Yuvarlak köşe (`╭╮╯╰`): iki sap ve onları birleştiren çeyrek yay.
 ///
-/// Yay [`chevron`]'un mesafe alanının ikizi — orada `distance_to_segment`,
-/// burada `|hypot(x - ox, y - oy) - r|`, aynı yarım piksellik geçiş bandı
-/// ve aynı `half_stroke`. [`curl`] emsal **değil**: sütun başına tek bir `y`
-/// örnekliyor ve çeyrek yayın dikey teğetinde bant kopardı.
+/// Yay [`chevron`]'un mesafe alanının ikizi ve aynı [`stamp`]'ten geçiyor —
+/// orada `distance_to_segment`, burada `|hypot(x - ox, y - oy) - r|`.
+/// [`curl`] emsal **değil**: sütun başına tek bir `y` örnekliyor ve çeyrek
+/// yayın dikey teğetinde bant kopardı.
 ///
 /// Yarıçap dört köşede de aynı ve **oturtulmuş eksenlerden** türüyor:
-/// merkezin hücre kenarlarına uzaklıklarının en küçüğü. Tek yönden
-/// türetilseydi `╭──╮`'nin sol köşesi sağından dar olurdu; teğet noktaları
-/// oturtulmamış eksenden alınsaydı sapla yay arasında yarım piksellik bir
-/// kırık kalırdı.
+/// merkezin hücre kenarlarına uzaklıklarının en küçüğü, **bir piksel
+/// içeriden**. O bir piksel dikişin kendisi: yarıçap sınıra kadar gitseydi
+/// teğet noktası hücrenin kenarına düşer, kenar sütununu sap değil **yay**
+/// boyardı ve yayın kapsaması bandınkinden eksik kalırdı — ölçüldü
+/// (13pt@1x, `╭`'nin sağ kenarı): rayın satırında 255 yerine 246, altındaki
+/// satırda 0 yerine 13. Belirti bir kutunun iki köşesinin ayrışması olurdu,
+/// çünkü eksen oturtulduktan sonra hücrenin ortasında değil (13pt'de 4.5 ile
+/// 4.0) ve en küçük uzaklık hep **tek** bir kenardan geliyor: `╭` ile `╰`
+/// sapsız kalırken `╮` ile `╯` sapını koruyordu. İçerlek yarıçapla teğet
+/// noktası kenar pikselinin dışında kalıyor, çeyrek kısıtı o pikseli yaya
+/// hiç vermiyor ve dikiş `─` ile **bit bit** aynı oluyor
+/// (`arms_tile_across_the_cell_edge` artık yayları da sınıyor).
 ///
-/// Sap ile yayın dikişi **tam**: bant tam sayı kenarlarda
-/// ([`rail`]) ve eksen hizalı bir vuruşta mesafe tabanlı kapsama ile
-/// [`overlap`]'inki cebirsel olarak aynı sonucu veriyor (kalınlık `>= 1`,
-/// yani yarı kalınlık `>= 0.5`).
+/// Tek yönden türetilseydi `╭──╮`'nin sol köşesi sağından dar olurdu; teğet
+/// noktaları oturtulmamış eksenden alınsaydı sapla yay arasında yarım
+/// piksellik bir kırık kalırdı.
 fn corner(spec: Recipe, m: Metrics, target: &mut [u8]) {
     let (w, h) = m.cell_wh();
+    let (w, h) = (w as f32, h as f32);
     let thin = f32::from(m.underline_px.1).max(1.0);
-    let vertical_band = rail(w as f32 / 2.0, thin);
-    let horizontal_band = rail(h as f32 / 2.0, thin);
+    let vertical_band = rail(w / 2.0, thin);
+    let horizontal_band = rail(h / 2.0, thin);
     let axis_x = (vertical_band.0 + vertical_band.1) / 2.0;
     let axis_y = (horizontal_band.0 + horizontal_band.1) / 2.0;
-    let radius = axis_x
-        .min(w as f32 - axis_x)
-        .min(axis_y)
-        .min(h as f32 - axis_y);
+    // Bir piksel içeriden ve `max(0.0)`: dar hücrede yarıçap sıfıra iner,
+    // köşe keskinleşir ve sap hücreyi baştan sona doldurur — kayıp bir
+    // yuvarlaklık, kırık bir dikiş değil.
+    let radius = (axis_x.min(w - axis_x).min(axis_y).min(h - axis_y) - 1.0).max(0.0);
     let right = spec.arms[RIGHT] != Stroke::None;
     let down = spec.arms[DOWN] != Stroke::None;
-    let (ox, oy) = (
-        if right {
-            axis_x + radius
+    let ox = if right {
+        axis_x + radius
+    } else {
+        axis_x - radius
+    };
+    let oy = if down {
+        axis_y + radius
+    } else {
+        axis_y - radius
+    };
+
+    // Yay **önce**: [`stamp`] bütün hücreye yazıyor (birleştiricisi yok) ve
+    // tampon bu noktada temiz ([`draw_procedural`] sıfırladı). Saplar sonra
+    // `max` ile üstüne biniyor; sıra tersine çevrilseydi yay sapları silerdi.
+    stamp(target, m, thin / 2.0, |px, py| {
+        // Çeyrek kısıtı: yay merkezin **kolların tersi** tarafında. Dışarısı
+        // sonsuz uzaklık, yani sıfır kapsama — kesme tam teğet noktasında ve
+        // ötesini sap boyuyor.
+        let inside =
+            if right { px <= ox } else { px >= ox } && if down { py <= oy } else { py >= oy };
+        if inside {
+            ((px - ox).hypot(py - oy) - radius).abs()
         } else {
-            axis_x - radius
-        },
-        if down {
-            axis_y + radius
-        } else {
-            axis_y - radius
-        },
-    );
+            f32::INFINITY
+        }
+    });
 
     // Saplar: teğet noktasından hücre kenarına.
-    let (x0, x1) = if right { (ox, w as f32) } else { (0.0, ox) };
-    let (y0, y1) = if down { (oy, h as f32) } else { (0.0, oy) };
+    let (x0, x1) = if right { (ox, w) } else { (0.0, ox) };
+    let (y0, y1) = if down { (oy, h) } else { (0.0, oy) };
     max_rect(target, m, x0, x1, horizontal_band.0, horizontal_band.1);
     max_rect(target, m, vertical_band.0, vertical_band.1, y0, y1);
-
-    let half_stroke = thin / 2.0;
-    for y in 0..h {
-        for x in 0..w {
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            // Çeyrek kısıtı: yay merkezin **kolların tersi** tarafında.
-            // Kesme tam teğet noktasında ve orada sap zaten dolu, yani
-            // kesilen şey sapın altında kalıyor.
-            let inside =
-                if right { px <= ox } else { px >= ox } && if down { py <= oy } else { py >= oy };
-            if !inside {
-                continue;
-            }
-            let distance = ((px - ox).hypot(py - oy) - radius).abs();
-            let value = (half_stroke + 0.5 - distance).clamp(0.0, 1.0);
-            let value = (value * 255.0).round() as u8;
-            // audit: `y < h` ve `x < w`, yani indeks `w * h`'nin altında.
-            target[y * w + x] = target[y * w + x].max(value);
-        }
-    }
 }
 
 /// Çizgi çizim karakteri (U+2500–U+257F).
@@ -1191,7 +1204,15 @@ fn corner(spec: Recipe, m: Metrics, target: &mut [u8]) {
 /// primitifi kullanıyor (dikdörtgen ve mesafe alanı). Kapsam dışı indeks
 /// **boş yuva** bırakıyor, panik değil: kapı ([`family`]) zaten tutuyor.
 fn line(ch: char, m: Metrics, target: &mut [u8]) {
-    let Some(&spec) = LINES.get((u32::from(ch) - 0x2500) as usize) else {
+    // Çıkarma **kontrollü**: `.get()` yalnız üst sınırı tutuyor, aralığın
+    // altındaki bir karakter `u32` çıkarmasını taşırır ve debug derlemede
+    // panik olurdu. Bugün erişilemez (kapı [`family`]'de) ama
+    // [`draw_procedural`]'in doc'u panik yolunun **olmadığını** söylüyor ve
+    // savunma sözün geçerli olduğu her iki yönde durmalı.
+    let Some(&spec) = u32::from(ch)
+        .checked_sub(0x2500)
+        .and_then(|index| LINES.get(index as usize))
+    else {
         return;
     };
     if spec.dashes > 0 {
