@@ -1244,62 +1244,15 @@ enum MotionState {
 ///
 /// # Ölçümün dürüst sınırları
 ///
-/// Bu liste `docs/OLCUMLER.md` → `## Yöntem`'in **kaynağıdır** ve kare süresi
-/// ile açılışın ilk `/measure`'ında oraya taşınır.
-/// Buradaki koşu sayıları da o taşımaya kadar geçici: sayının asıl sahibi o
-/// dosya, burası **emanetçi**. Hepsi 2026-09-12, `profil=debug`, tek makine.
+/// **Liste buradan taşındı.** Sahibi 2026-09-21'den beri
+/// `docs/OLCUMLER.md` → `## Yöntem` → "Kare süresi ve açılış"; o türün ilk
+/// `/measure`'ı taşımayı yaptı ve aynı koşu yedinci bir kalem ekledi (GPU
+/// sütununun taban olacak kadar kararlı olmaması). Burada **kopyası tutulmuyor**: iki yerde
+/// duran bir liste sessizce ayrışır, ki bu maddenin kendi uyarısıydı.
 ///
-/// Her kalem **kapsam** ya da **açık kalem** diye etiketli, çünkü okuyanın
-/// yapacağı şey farklı: kapsam bilinip geçilir, açık kalem eylem bekler.
+/// Aşağıdaki alan doc'ları o listenin **kapsam** kalemlerinden yalnız kendi
+/// alanına düşeni tekrar ediyor; tamamı ve **açık kalemler** o dosyada.
 ///
-/// - **Kapsam — `acilis=` iki ucundan da kısa.** Başı `main()`'in ilk satırı,
-///   süreç başlangıcı değil; sonu ilk **tamamlanan** kare
-///   (`addCompletedHandler`), sunulan kare değil. İkisi de
-///   [`bt_gpu::Stats::startup`]'ta yazılı. Ölçüm halkalarının ayrılması bu
-///   aralığın **içinde** kalıyor.
-/// - **Kapsam — bugüne kadarki bütün sayılar `profil=debug`.** Taban
-///   değiller; `/measure` release şart koşuyor ve jeton hangi profilde
-///   olduğunu satırın kendisinde söylüyor (R5.3).
-/// - **Kapsam — düşen kare ölçülmüyor** (R3, kapsam dışı). `dusen=` halkaya
-///   sığmayan **örnek**, atlanan kare değil; kuralı [`bt_gpu::Samples`]'ın
-///   doc'unda.
-/// - **Açık kalem (jeton boşluğu) — CPU'nun elenen örneği sayılıyor ama
-///   basılmıyor.** `Stats::record_cpu` sıfır uzunluklu bir aralığı eliyor ve
-///   [`bt_gpu::Samples::rejected`]'a yazıyor; rapor bu sayacı yalnız GPU
-///   sütunu için (`gpu_elenen=`) okuyor. Yani elenen bir CPU örneği `ornek=`'i
-///   sessizce düşürüyor ve satırda sebebini söyleyen jeton **yok** — GPU
-///   tarafında tam bu körlüğü kapatmak için eklenen sayacın CPU'da eksik
-///   kalmış hâli (R5.2). Bugün zararsız: eleme yalnız sıfır uzunluklu
-///   aralıkta oluyor ve ölçülen koşuların hiçbirinde görülmedi. Kapatmanın
-///   yolu belli ve bedeli de belli: bir `cpu_elenen=` jetonu eklemek, yani
-///   **makine sözleşmesini genişletmek** — sözleşme "silinmez, eklenir"
-///   dediği için geri alınamaz bir adım, o yüzden ölçülmüş bir ihtiyaç
-///   beklemeden atılmadı.
-/// - **Açık kalem (kayıtlı kusur) — `kapanis=abandoned`** ölçüm koşularının
-///   dörtte birinde çıkıyor (on yedi koşuda dört). Örneklere etkisi **yok**,
-///   ama sebebi sıra değil: kapanış halkadan **önce** koşuyor
-///   ([`AppDelegate::report_and_exit`]'in "Sıra bilinçli" doc'u). Etkisiz
-///   olmasının sebebi `shutdown()`'ın beklemeye girmeden **önce**
-///   `link.stop()` çağırması: bekleme boyunca yeni kare **istenmiyor**.
-///   Halkanın tamamen durağan olduğu anlamına gelmez — uçuşta kalan bir iki
-///   tamamlanma hâlâ düşebilir ve o bir örneklik kayma
-///   [`Measured::read`]'de yazılı. Bedeli yalnız koşunun duvar saatinde:
-///   `SHUTDOWN_GRACE` kadar ekliyor. Bu ölçümün bir **özelliği değil**,
-///   kapanış tasarımının borcu ve çaresi adı konmuş durumda
-///   (`Session::spawn`'da master'ın bir kopyası); ayrıntısı `CLAUDE.md`'nin
-///   kapanış maddesinde.
-/// - **Açık kalem (cevaplanmamış soru) — `kare` ile `istek` iki yükte apayrı
-///   davranıyor** ve mekanizması **ölçülmedi** (kapı mı yutuyor, ana thread
-///   mi doyuyor, sistem mi link'i kısıyor): duman yükünde
-///   `istek ≈ icerik + 1..2` (2026-09-16 ölçümü; 008'e kadar `kare + 2` diye
-///   ölçülmüştü, hareket kareleri `Waker`'a dokunmadığı için `kare` o
-///   ilişkiden koptu), ölçüm yükünde ikisi
-///   **mertebelerce** ayrışıyor. Üstüne, ölçüm yükünün
-///   kendisi **aynı komut ve aynı derlemeyle** iki farklı rejim verdi: `kare`
-///   bir koşuda onlarda, başka bir koşuda yüzlerde. En olası değişken pencere
-///   görünürlüğü ama **doğrulanmadı** (bkz. [`IDLE_FRAME_LIMIT`]). Bir kare
-///   süresini yorumlayan taraf hangi rejimde olduğunu satırdan
-///   **okuyamıyor** — yani iki koşuyu karşılaştırmadan önce bu cevaplanmalı.
 struct Measured {
     /// `main()`'in ilk satırından ilk **tamamlanan** kareye. `None` → hiç kare
     /// bitmedi; iki ucun sınırı [`bt_gpu::Stats::startup`]'ta.

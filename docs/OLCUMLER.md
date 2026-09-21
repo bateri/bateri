@@ -7,10 +7,13 @@ sahibinde yazılı (`/audit` → Ölçüm sahipliği).
 Ölçüm bir **kapı değildir** (`.claude/is-akisi/proje.md` → Doğrulama): gerçek
 pencere, sessiz makine ve dakikalar ister. Kullanıcı ister, `/measure` koşturur.
 
-Dosya 006 phase-5'te kuruldu ve bugün **iki** ölçüm taşıyor: boşta kare ile
-atlas yuva ayak izi. Kare süresi, açılış, bellek, giriş gecikmesi ve bench
-bölümlerinde sayı yok; hangisinin kancası olduğu `/measure` skill'inin
-tablosunda.
+Dosya 006 phase-5'te kuruldu ve bugün **dört** ölçüm taşıyor: boşta kare,
+atlas yuva ayak izi, kare süresi ve açılış. Sondaki ikisi 2026-09-21'de
+girdi. Kare süresinin **CPU sütunları** ile açılış taban; **GPU sütunu
+değil** — aynı kaynak ve bayt bayt aynı shader ikilisiyle 2,7 kat dolaştı ve
+sınanan dört hipotezin hiçbiri onu ayıramadı (`## Kare süresi` → GPU
+sütununun gezintisi). Bellek, giriş gecikmesi ve bench bölümlerinde sayı
+yok; hangisinin kancası olduğu `/measure` skill'inin tablosunda.
 
 ## Yöntem
 
@@ -98,20 +101,90 @@ iki profili birden taşımalıdır.
 
 ### Kare süresi ve açılış
 
-Sayı yok. Kancanın (`BT_FRAME_STATS`) dürüst sınırları — her biri **kapsam**
-ya da **açık kalem** diye etiketli — bugün hâlâ `crates/bt-shell/src/app.rs`'te
-`Measured`'ın doc'unda emaneten duruyor; bu türün ilk ölçümü onları buraya
-taşır. Eksik bir kopya sessizce ayrışacağı için şimdiden kopyalanmadı.
+Yöntem 2026-09-21'de kuruldu; kancanın (`BT_FRAME_STATS`) dürüst sınırları o
+gün `crates/bt-shell/src/app.rs`'teki `Measured`'ın doc'undan **buraya
+taşındı** ve sahibi artık burası. Her kalem **kapsam** ya da **açık kalem**
+diye etiketli, çünkü okuyanın yapacağı şey farklı: kapsam bilinip geçilir,
+açık kalem eylem bekler.
 
-Listenin **dışından** bir kapsam kalemi 008'de doğdu ve o türü ölçmeye
-gerek olmadan biliniyor, o yüzden burada: **`ornek=` ile `gpu_ornek=` aynı
-kare popülasyonunu saymıyor.** Hareket karesi CPU örneği yazmıyor (o karede
-`session.frame` hiç koşmuyor, sahte örnek p95'i aşağı çekerdi) ama bir komut
-tamponu commit ediyor, yani GPU'nun tamamlanma bloğu onu **görüyor**. Ayrılık
-yapısal: aynı blok `FailureStreak`'i de besliyor ve hareket karesini ondan
-muaf tutmak çizim hatasını görünmez kılardı. Sonucu, imleç kayan bir koşuda
-iki sütunun p95'i **doğrudan karşılaştırılamaz**; gerekçesi
-`bt-gpu/src/link.rs`'te hareket karesinin gövdesinde.
+**Koşunun şekli:** release binary doğrudan çağrılır (`.app`'in `open`'ı
+değil — o yol boşta kare ölçümünün LaunchServices sorusuna ait),
+`BT_FRAME_STATS=1 BT_SCROLL_TEST=1`, **10 saniye** ve **10 koşu**. İki sayının
+gerekçesi ayrı: süre örnek sayısı içindir ve 10 saniye ~1200 örnek veriyor,
+yani p95'in tabanının (`MIN_SAMPLES` = 20) altmış katı — 5 saniye de (592
+örnek) yetiyordu, 30 saniye tören olurdu. Koşu sayısı **turlar arası
+sapma** içindir ve oradaki kural bu dosyanın kendi gürültü kuralı (profil
+başına en az on).
+
+- **Kapsam — `acilis=` iki ucundan da kısa.** Başı `main()`'in ilk satırı,
+  süreç başlangıcı değil; sonu ilk **tamamlanan** kare
+  (`addCompletedHandler`), sunulan kare değil. İkisi de
+  `bt_gpu::Stats::startup`'ta yazılı. Ölçüm halkalarının ayrılması bu
+  aralığın **içinde** kalıyor.
+- **Kapsam — düşen kare ölçülmüyor** (005 R3, kapsam dışı). `dusen=` halkaya
+  sığmayan **örnek**, atlanan kare değil; kuralı `bt_gpu::Samples`'ın
+  doc'unda.
+- **Kapsam — `ornek=` ile `gpu_ornek=` aynı kare popülasyonunu saymıyor.**
+  Hareket karesi CPU örneği yazmıyor (o karede `session.frame` hiç koşmuyor,
+  sahte örnek p95'i aşağı çekerdi) ama bir komut tamponu commit ediyor, yani
+  GPU'nun tamamlanma bloğu onu **görüyor**. Ayrılık yapısal: aynı blok
+  `FailureStreak`'i de besliyor ve hareket karesini ondan muaf tutmak çizim
+  hatasını görünmez kılardı. Sonucu, imleç kayan bir koşuda iki sütunun p95'i
+  **doğrudan karşılaştırılamaz**; gerekçesi `bt-gpu/src/link.rs`'te hareket
+  karesinin gövdesinde.
+- **Açık kalem (jeton boşluğu) — CPU'nun elenen örneği sayılıyor ama
+  basılmıyor.** `Stats::record_cpu` sıfır uzunluklu bir aralığı eliyor ve
+  `bt_gpu::Samples::rejected`'a yazıyor; rapor bu sayacı yalnız GPU sütunu
+  için (`gpu_elenen=`) okuyor. Yani elenen bir CPU örneği `ornek=`'i sessizce
+  düşürüyor ve satırda sebebini söyleyen jeton **yok** (005 R5.2). Bugün
+  zararsız: eleme yalnız sıfır uzunluklu aralıkta oluyor ve 2026-09-21
+  koşularının hiçbirinde görülmedi. Kapatmanın bedeli **makine sözleşmesini
+  genişletmek** (`cpu_elenen=`), yani geri alınamaz bir adım — ölçülmüş bir
+  ihtiyaç beklemeden atılmadı.
+- **Açık kalem (kayıtlı kusur) — `kapanis=abandoned`.** Örneklere etkisi
+  **yok**, çünkü `shutdown()` beklemeye girmeden **önce** `link.stop()`
+  çağırıyor: bekleme boyunca yeni kare istenmiyor. Bedeli yalnız koşunun
+  duvar saatinde (`SHUTDOWN_GRACE` kadar). Kapanış tasarımının borcu; çaresi
+  adı konmuş (`Session::spawn`'da master'ın bir kopyası), ayrıntısı
+  `CLAUDE.md`'nin kapanış maddesinde. **Sıklığı 2026-09-21'de oynadı:** 2026-09-12
+  ölçümlerinde on yedi koşuda dört (~%25), bugün on koşuda **altı**. Sebebi
+  aranmadı ve sayı yorumlanmadı — kalem zaten açık.
+- **Açık kalem (cevaplanmamış soru) — `kare` ile `istek` iki yükte apayrı
+  davranıyor** ve mekanizması **ölçülmedi** (kapı mı yutuyor, ana thread mi
+  doyuyor, sistem mi link'i kısıyor): duman yükünde `istek ≈ icerik + 1..2`
+  (2026-09-16), ölçüm yükünde ikisi **mertebelerce** ayrışıyor — 2026-09-21'de
+  `kare ≈ 1185`'e karşı `istek ≈ 260 000`. Üstüne, ölçüm yükünün kendisi
+  **aynı komut ve aynı derlemeyle** iki farklı rejim vermişti: `kare` bir
+  koşuda onlarda, başka bir koşuda yüzlerde. **2026-09-21 koşusu o rejim
+  çatalını görmedi:** `kare` jetonu saklanan **on bir** koşunun (on ölçüm
+  koşusu artı deneme koşusu) on birinde de `kare / süre ≈ 118`, yani
+  tazeleme hızı — pencere görünür ve tam hızda. Kalan beş koşunun satırı
+  yalnız `gpu_*` için süzüldüğü için `kare` saklanmadı. Rejimi satırdan okumanın
+  yolu bu oran; ölçümü yorumlayan taraf onu **koşu başına** yazmalı.
+- **Açık kalem — GPU sütunu bu koşumda taban olacak kadar kararlı değil ve
+  sebebi bulunamadı.** Aynı kaynak, aynı makine, aynı yük ve **bayt bayt aynı
+  metallib** ile `gpu_p95` 2026-09-21'de **0,25 – 0,68 ms** arasında
+  dolaştı, yani 2,7 kat. Dizinin tamamı `## Kare süresi` → "GPU sütununun
+  gezintisi"nde. İmzası iki parçalı: bir blok **içinde** çarpıcı biçimde
+  kararlı (on üç koşu tam `0,68`, on koşu tam `0,63`) ama bloklar arasında
+  sıçrıyor. **Dört hipotez sınandı, dördü de ayırmadı:**
+  *koşu süresi* (5 sn de 10 sn de aynı değeri verdi), *derlemeden sonraki
+  ilk koşu* (yeniden derleme değeri bir kez indirdi, bir kez çıkardı),
+  *güç durumu* (`0,63` hem pil %25'te hem priz %82'de; `0,25` hem pil
+  %51'de hem priz %86'da — yani **ayırıcı değil**) ve *metallib kimliği*
+  (`shasum` yeniden derlemeden önce ve sonra aynı: `9f0a7969…`, sayı yine
+  sıçradı — yani shader ikilisi **aklandı**). Geriye bizim binary'mizin
+  dışındaki bir şey kalıyor (GPU saat durumu, başka bir GPU tüketicisi,
+  compositor) ve oraya bu ölçümün araçları yetmiyor.
+  **Sonucu iki tane.** Bir: GPU sütununun tabanı **alınmadı**, çünkü
+  gürültüsü ölçülecek çoğu etkiden büyük. İki, ve daha önemlisi: **022
+  materyal yüzeyin ölçümü tam da bu sıçramanın üstüne oturuyor** —
+  "shader'lı hâl shader'sız hâlden yavaş mı" sorusu doğası gereği bir
+  yeniden derleme sınırının iki yanını karşılaştırmak demek ve sıçrama tam
+  orada. 022'nin `/rfc`'si ölçme yöntemini **önce** çözmek zorunda: aynı
+  binary içinde çalışma zamanı anahtarıyla A/B, ya da çok sayıda yeniden
+  derleme üzerinden ortalama. Bunu çözmeden alınacak bir "materyal %X
+  yavaşlattı" cümlesi ölçüm değil gürültü olur.
 
 ### Atlas yuva ayak izi
 
@@ -155,6 +228,45 @@ pmset -g batt; pmset -g | grep lowpowermode             # güç kaynağı, düş
 Tazeleme hızı `system_profiler`'da görünmüyor (ProMotion ekranda değişken);
 en çok değeri `NSScreen.main.maximumFramesPerSecond` verir, koşudaki gerçek
 hızın dolaylı kanıtı ise bozuk koşunun saniye başına karesidir.
+
+### Kare süresi ve açılış
+
+Kanca ortamdan açılıyor; ikisi de **sıfırdan büyük** bir `BT_RUN_SECONDS`
+ister, yoksa süreç çıkış 1 verir. `.app` değil **binary** koşuyor: `open`
+yolu boşta kare ölçümünün LaunchServices sorusuna ait ve çıkış kodunu
+yutuyor.
+
+```sh
+cargo build --release -p bateri
+for i in $(seq 1 10); do
+  BT_FRAME_STATS=1 BT_SCROLL_TEST=1 BT_RUN_SECONDS=10 \
+    ./target/release/bateri > "target/olcum-kare/run-$i.out" 2>&1
+  grep -h '^kare=' "target/olcum-kare/run-$i.out" | tail -1
+done
+```
+
+Koşmadan önce `pmset -g batt` ile güç kaynağı **prizde** olmalı ve kayda
+girmeli. Güç durumunun CPU sütunlarını ve açılışı **etkilemediği** 2026-09-21'de
+ölçüldü (iki blok yan yana, `## Kare süresi`), ama kural kalıyor: ölçülmüş
+olan bu yük ve bu makine, bütün yükler değil.
+
+**GPU sütununu yorumlamadan önce bir yoklama.** Sayı bloklar arasında
+sıçrıyor ve dört hipotez onu ayıramadı (`## Yöntem`, yedinci kalem). Yeniden
+derleme sınırının iki yanını karşılaştıran her ölçüm önce shader ikilisinin
+gerçekten değişip değişmediğini sormalı:
+
+```sh
+shasum -a 256 target/release/build/bt-gpu-*/out/default.metallib
+```
+
+2026-09-21'de bu hash yeniden derlemeden **önce ve sonra aynıydı** ve
+`gpu_p95` yine sıçradı — yani sıçramanın kaynağı shader değil. Aynı hash
+üstünde iki farklı sayı görüyorsan ölçtüğün şey kod değil ortamdır.
+
+Her koşunun **tam jeton satırı** saklanır. Yorumlamadan önce üç yoklama:
+`ornek` ile `gpu_ornek` tabanın (`taban=`, bugün 20) üstünde mi,
+`insufficient` var mı, ve `kare / süre` tazeleme hızına yakın mı — sonuncusu
+rejim tanığı (`## Yöntem`, altıncı kalem).
 
 ### Atlas yuva ayak izi
 
@@ -620,12 +732,167 @@ dolunca geri dönüşü yok".
 
 ## Kare süresi
 
-Ölçülmedi. Kanca var (`BT_FRAME_STATS=1 BT_SCROLL_TEST=1 BT_RUN_SECONDS=N`);
-yöntemi için yukarıda "Kare süresi ve açılış".
+### 2026-09-21 — taban: CPU ve açılış (prizde); GPU alınamadı
+
+Ölçülen commit `5f74180`, `profil=release`, binary doğrudan çağrıldı. MacBook
+Pro M1 Pro, 32 GB, macOS 26.4.1 (25E253), rustc 1.88.0, Retina 3024×1964,
+`kare / süre ≈ 118`. Yük `BT_SCROLL_TEST=1` (`load_shell`), 10 saniye,
+10 koşu, **prizde** (%82 → %84, şarj oluyor, düşük güç kipi kapalı).
+
+| # | cpu_kare p95 / max | cpu_encode p95 / max | gpu p95 / max | acilis | kare | kapanis |
+|---|---|---|---|---|---|---|
+| 1 | 0,08 / 0,79 | 0,23 / 2,06 | 0,63 / 0,92 | 318,84 | 1188 | clean |
+| 2 | 0,08 / 0,17 | 0,24 / 1,51 | 0,63 / 0,76 | 233,57 | 1190 | abandoned |
+| 3 | 0,08 / **2,76** | 0,24 / 1,69 | 0,63 / 1,27 | 329,58 | 1187 | abandoned |
+| 4 | 0,07 / 0,19 | 0,24 / 1,47 | 0,63 / 1,45 | 242,98 | 1189 | clean |
+| 5 | 0,07 / 0,67 | 0,24 / 1,52 | 0,63 / 0,75 | 264,85 | 1190 | clean |
+| 6 | 0,07 / 0,11 | 0,24 / 1,54 | 0,63 / 1,28 | 257,52 | 1191 | clean |
+| 7 | 0,08 / 0,15 | 0,24 / 1,50 | 0,63 / 1,24 | 268,98 | 1192 | abandoned |
+| 8 | 0,08 / 0,16 | 0,24 / 1,64 | 0,63 / 1,23 | 250,61 | 1184 | abandoned |
+| 9 | 0,08 / 0,13 | 0,23 / 1,67 | 0,63 / 1,78 | 266,36 | 1190 | clean |
+| 10 | 0,07 / 0,16 | 0,24 / 1,51 | 0,63 / 1,28 | 246,10 | 1191 | clean |
+
+Sabit jetonlar bir kez: `hucre=0 kural=0 yuva=37/1984 yuk=load hareket=0
+kayma=0 sessiz=0.00ms profil=release dusen=0 gpu_elenen=0 taban=20
+pipeline=ok`, `glif` onunda da 1785. Oynayanlar: `istek` 282 770 – 296 754,
+`icerik` = `kare` (9. ve 10. koşuda +1, `Measured::read`'in yazdığı bir
+örneklik kayma), `gpu_ornek` = `kare`, `kapanis` altı `clean` dört
+`abandoned`.
+
+**CPU tarafı taban.** `cpu_kare_p95` 0,07 (4., 5., 6., 10. koşu) ile 0,08
+(kalan altısı) arasında; `cpu_encode_p95` sekiz koşuda 0,24, ikisinde 0,23.
+120 Hz'in kare bütçesi 8,33 ms, yani `session.frame`'in tamamı bütçenin
+**%1'i**, encode **%3'ü**. Uçlar: `cpu_kare_max` dokuz koşuda 0,11–0,79 ms,
+**3. koşu 2,76 ms** — bütçenin altında ama dağılımın on beş katı, sebebi
+aranmadı ve **ayıklanmadı**. `cpu_encode_max` 1,47–2,06 ms.
+
+**Pildeki blokla karşılaştırma:** CPU sütunları iki blok arasında oynamadı
+(pil 0,07–0,08 ve 0,24–0,27, priz 0,07–0,08 ve 0,23–0,24), yani bu iki sütun
+güç durumundan bağımsız. Aşağıdaki pil tablosu **gözlem olarak** duruyor;
+taban bu tablodur.
+
+**GPU sütunu tabana girmiyor.** Bu bloğun onunda da `0,63` — blok içi
+kararlılık çarpıcı, ama aynı gün aynı binary `0,25` ve `0,68` de verdi.
+Gezintinin tamamı ve sınanan dört hipotez aşağıda.
+
+### 2026-09-21 — GPU sütununun gezintisi (taban neden alınamadı)
+
+Kronolojik, hepsi aynı kaynak ve aynı makine; `gpu_p95`:
+
+| # | blok | güç | `gpu_p95` |
+|---|---|---|---|
+| 1 | `cargo build` sonrası ilk koşu (5 sn) | pil %51 | **0,25** |
+| 2 | 10 koşu × 10 sn | pil %28→26 | **0,68** (onunda da) |
+| 3 | 3 doğrulama koşusu (5 sn) | pil %25 | **0,68** (üçünde de) |
+| 4 | shader `touch` + yeniden derleme, 2 koşu | pil %25 | **0,63** (ikisinde de) |
+| 5 | 10 koşu × 10 sn (**yukarıdaki tablo**) | priz %82→84 | **0,63** (onunda da) |
+| 6 | shader `touch` + yeniden derleme, 2 koşu | priz %84 | **0,25** (ikisinde de) |
+| 7 | 6 koşu, yeniden derleme yok | priz %86 | 0,32 0,34 0,31 0,25 0,25 0,25 |
+| 8 | shader `touch` + yeniden derleme, 3 koşu | priz %86 | 0,66 0,62 0,56 |
+
+**Dört hipotez sınandı, dördü de ayırmadı:**
+
+1. **Koşu süresi** — 5 sn de 10 sn de aynı değeri verdi (#2 ile #3).
+2. **Derlemeden sonraki ilk koşu** — yeniden derleme değeri bir kez indirdi
+   (#4, #6), bir kez **çıkardı** (#8). Yön tutarlı değil.
+3. **Güç durumu** — `0,63` hem pil %25'te (#4) hem priz %82'de (#5); `0,25`
+   hem pil %51'de (#1) hem priz %86'da (#6, #7). **Ayırıcı değil.** Bu
+   hipotez 2026-09-21'de bir kez yazıldı ve **aynı gün prizdeki koşuyla
+   çürütüldü**; kayıt olarak burada duruyor.
+4. **Metallib kimliği** — #8'in yeniden derlemesinden önce ve sonra
+   `shasum -a 256 target/release/build/bt-gpu-*/out/default.metallib`
+   **aynı** (`9f0a7969…`), yani shader ikilisi bayt bayt değişmedi ama sayı
+   yine sıçradı. Shader **aklandı**.
+
+Geriye binary'mizin dışındaki bir şey kalıyor — GPU saat durumu, başka bir
+GPU tüketicisi, compositor — ve bu ölçümün araçları oraya yetmiyor. `#7`
+ayrıca gösteriyor ki değer her zaman iki ondalıkta donmuyor: 0,32/0,34/0,31
+sonra 0,25. Yani "P-state gibi" bir benzetme değil, **tarif** yazıldı.
+
+### 2026-09-21 — pildeki blok (gözlem, taban değil)
+
+Ortam üsttekiyle aynı; tek fark makine **pilde** koştu (%28 → %26, düşük güç
+kipi kapalı). Yöntem prizde olmayı şart koştuğu için bu blok **taban değil
+gözlem** olarak duruyor ve taban üstteki priz bloğudur. Kayıtta kalmasının
+sebebi kıyas: CPU sütunlarının ve açılışın güç durumundan **bağımsız**
+olduğu bu iki bloğun yan yana durmasından okunuyor — gezinti yalnız GPU
+sütununda.
+
+| # | cpu_kare p95 / max | cpu_encode p95 / max | gpu p95 / max | acilis | kare | kapanis |
+|---|---|---|---|---|---|---|
+| 1 | 0,08 / 0,45 | 0,24 / 2,18 | 0,68 / 0,97 | 392,23 | 1178 | clean |
+| 2 | 0,07 / 0,55 | 0,25 / 3,51 | 0,68 / 1,02 | 262,59 | 1187 | clean |
+| 3 | 0,08 / 0,47 | 0,24 / 1,60 | 0,68 / 1,10 | 255,54 | 1191 | abandoned |
+| 4 | 0,08 / 0,58 | 0,26 / 5,11 | 0,68 / 1,06 | 256,26 | 1183 | abandoned |
+| 5 | 0,08 / 0,58 | 0,24 / 1,54 | 0,68 / 1,82 | 275,16 | 1184 | clean |
+| 6 | 0,07 / 0,19 | 0,25 / 1,67 | 0,68 / 1,14 | 253,53 | 1186 | abandoned |
+| 7 | 0,07 / **10,08** | 0,24 / 1,90 | 0,68 / 1,72 | 262,53 | 1187 | abandoned |
+| 8 | 0,08 / 0,21 | 0,25 / 1,56 | 0,68 / 0,81 | 263,39 | 1191 | abandoned |
+| 9 | 0,07 / 0,15 | 0,25 / 1,55 | 0,68 / 1,02 | 263,72 | 1192 | clean |
+| 10 | 0,08 / 0,22 | 0,27 / 2,49 | 0,68 / 1,25 | 263,55 | 1178 | abandoned |
+
+Bütün koşularda sabit kalan jetonlar bir kez: `hucre=0 kural=0 yuva=37/1984
+yuk=load kayma=0 sessiz=0.00ms profil=release dusen=0 gpu_elenen=0 taban=20
+pipeline=ok`. Oynayanlar: `glif` 1785 (biri 1836), `istek` 247 680 – 273 227,
+`hareket` sekiz koşuda 0 (1. ve 3. koşuda 1, 10. koşuda 11), `icerik`
+1167–1192, `gpu_ornek` **onunda da `kare`'ye eşit**, `ornek` ise `icerik`'e
+eşit — yani `ornek = kare − hareket` (2. koşuda +1 sapıyor, `Measured::read`'in
+yazdığı bir örneklik kayma).
+
+**Dağılım.** `cpu_kare_p95` iki değere oturuyor (0,07 **dört** koşuda —
+2., 6., 7., 9.; 0,08 kalan **altı**sında); `cpu_encode_p95` 0,24–0,27;
+`gpu_p95` **onunda da 0,68**. 120 Hz'in
+kare bütçesi 8,33 ms, yani üç sütunun p95'i bütçenin sırasıyla %1, %3 ve %8'i.
+
+**Uçlar sayılıyor, ortalamaya gömülmüyor.** `cpu_kare_max` dokuz koşuda
+0,15–0,58 ms; **7. koşu 10,08 ms** ile bütçeyi aşan tek takılma. Bir kez
+görüldü, sebebi aranmadı ve **ayıklanmadı** — gürültü kuralı nedeni
+bulunamayan koşuyu dağılımda tutuyor. `cpu_encode_max` 1,54–5,11 ms ve bu
+sütunun uçları p95'inin yirmi katına çıkıyor; `gpu_max` 0,81–1,82 ms, yani
+GPU tarafı en kötü karede bile bütçenin dörtte birinde.
+
+**Okunuşu.** Bu yükte kare süresi bütçenin çok altında ve darboğaz CPU değil:
+`cpu_kare_p95` 0,08 ms'de, yani `session.frame`'in tamamı (kilit + ayrıştırma
++ grid + sink) kare bütçesinin yüzde biri. Encode tarafı üç kat pahalı ama
+hâlâ %3. Ölçülmemiş olan, yani 022'nin soracağı şey, GPU'nun prizdeki hâli.
+
+**Jetonların okunuşu — sabit sıfırların sebebi reçetede.** `load_shell` düz
+ASCII basıyor ve tek bir SGR dizisi içermiyor, yani varsayılan zemin dışında
+arka plan yok (`hucre=0`) ve altı çizili/üstü çizili hücre yok (`kural=0`).
+`yuva=37/1984` aynı sebepten dar: yük ASCII'nin ötesine çıkmıyor.
+`istek` ile `kare` arasındaki üç mertebelik fark bu dosyanın kayıtlı açık
+kalemidir (`## Yöntem`, altıncı kalem), bu koşuda da görüldü ve
+**yorumlanmadı**.
+
+### Yolun ateşlendiğinin tanığı
+
+Her iki blokta da üç sütunun üçü de dolu ve `ornek` tabanın (`taban=20`)
+elli katı; hiçbir koşuda `insufficient` görülmedi, yani örnekleme durmadı.
+`kare / süre ≈ 118` — tazeleme hızı, yani pencere görünür ve tam hızda
+çiziyor (rejim tanığı, `## Yöntem` altıncı kalem). Yolun gerçekten
+koştuğunun ikinci tanığı yukarıdaki **gezinti tablosunun kendisi**: kapalı
+bir ölçüm yolu on koşuda aynı sayıyı verirdi, bloklar arası sıçrama
+üretmezdi.
 
 ## Açılış
 
-Ölçülmedi. Kanca var (`acilis=` jetonu), tarifi dar; bkz. `Measured`'ın doc'u.
+### 2026-09-21 — taban (prizde)
+
+Üstteki priz bloğunun `acilis=` jetonu; ortam aynı, sınırları `## Yöntem` →
+Kare süresi ve açılış, birinci kalem (iki ucundan da kısa: `main()`'in ilk
+satırından ilk **tamamlanan** kareye — süreç başlangıcı değil, sunulan kare
+değil).
+
+**233,57 – 329,58 ms**, ortası ~259 ms. Sekiz koşu 233–269 aralığında;
+**1. koşu 318,84 ve 3. koşu 329,58** ile ayrışıyor. 1. koşunun derlemeden
+sonraki ilk koşu olması bir açıklama **adayı**, ama 3. koşu için böyle bir
+gerekçe yok ve ikisi de **aranmadı**: sebebi bulunamayan koşu dağılımda
+kalıyor.
+
+Pildeki blok (gözlem) 253,53 – 392,23 ms verdi ve oradaki 392,23 de
+derlemeden sonraki ilk koşuydu. İki bloğun sıcak koşuları örtüşüyor
+(priz 233–269, pil 253–275), yani **açılış güç durumundan etkilenmiyor** —
+kare süresinin CPU sütunlarıyla aynı sonuç.
 
 ## Bellek
 
