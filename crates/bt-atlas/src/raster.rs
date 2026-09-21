@@ -138,10 +138,16 @@ pub enum RuleKind {
     /// Prompt işareti: `>` yerine geçen chevron.
     ///
     /// **Bir kural çizgisi değil ama aynı aileden** ve burada olmasının sebebi
-    /// mekanizma: bu enum yordamsal çizilen sprite'ların kümesi — fonttan
-    /// gelmiyor, yüzden bağımsız ([`crate::Face::Regular`]'a çivili) ve
-    /// atlasta kendi payını tutuyor. Beşi alt çizgi, biri üstü çizili, biri
-    /// de bu.
+    /// mekanizma: bu enum yordamsal çizilen sprite'ların **kendi kod noktası
+    /// olmayan** kümesi — fonttan gelmiyor, yüzden bağımsız
+    /// ([`crate::Face::Regular`]'a çivili) ve atlasta kendi payını tutuyor.
+    /// Beşi alt çizgi, biri üstü çizili, biri de bu.
+    ///
+    /// Yordamsal çizimin **ikinci** kümesi karakterler ([`is_procedural`]) ve
+    /// o küme buraya girmiyor: `Sprite::Char` olarak yaşıyor, yuva payı
+    /// ([`crate::RULE_RESERVE`]) almıyor ve `bt-gpu` onu sıradan bir harften
+    /// ayırt etmiyor. Ayıran şey "kim çiziyor" değil "adı var mı": kural
+    /// çizgisi bir SGR biçimi, blok bir karakter.
     ///
     /// Fonttan bir `>` **almıyoruz** ve sebebi ürün kararı: işaret terminalin
     /// kendi işareti, kullanıcının fontunun değil. Font değişince prompt'un
@@ -343,8 +349,19 @@ fn band(target: &mut [u8], m: Metrics, top: f32, thickness: f32, period: usize, 
 /// sessizdir — beş çeşidi karşılaştıran sınama "farklı olsunlar" dediği için
 /// bunu göremez.
 fn coverage(y: usize, y0: f32, y1: f32) -> u8 {
-    let ratio = (y1.min(y as f32 + 1.0) - y0.max(y as f32)).clamp(0.0, 1.0);
-    (ratio * 255.0).round() as u8
+    (overlap(y, y0, y1) * 255.0).round() as u8
+}
+
+/// `[i, i+1)` pikselinin `[a, b)` aralığıyla kesişimi — **oran olarak**.
+///
+/// [`coverage`]'ın içinden çıkarıldı çünkü dikdörtgen iki eksende birden
+/// örtüşüyor ve iki oranın **çarpımı** bir kez yuvarlanmak zorunda: iki
+/// `coverage` baytını çarpmak iki kez yuvarlar ve `▀` ile `▄`'ün doygun
+/// toplamı 255'te durmaz — ondan bir iki eksik kalır, yani alt alta iki
+/// yarım blok arasında bu setin kapatmaya geldiği şeridin sönük bir
+/// kopyası belirirdi.
+fn overlap(i: usize, a: f32, b: f32) -> f32 {
+    (b.min(i as f32 + 1.0) - a.max(i as f32)).clamp(0.0, 1.0)
 }
 
 /// Kıvrımlı çizgi: bandın merkezi sütun boyunca sinüsle salınıyor.
@@ -384,5 +401,278 @@ fn curl(target: &mut [u8], m: Metrics, position: f32, thickness: f32) {
                 target[y * w + x] = value;
             }
         }
+    }
+}
+
+/// Yordamsal çizilen karakter aileleri.
+///
+/// [`RuleKind`]'ın ikinci kümesi: fonttan gelmiyorlar, hücre ölçüsünden
+/// hesaplanıyorlar ve yüzden bağımsızlar. Farkları bir **karakter** olmaları
+/// — atlasta [`crate::Sprite::Char`] olarak yaşıyorlar, yani `bt-gpu` onları
+/// sıradan harflerden ayırt etmiyor ve sınır hiç değişmiyor.
+enum Family {
+    /// U+2580–U+259F — blok elemanları: yarımlar, sekizde bir merdivenleri,
+    /// çeyrekler ve üç gölge.
+    Block,
+    /// U+2800–U+28FF — Braille deseni; alt 8 bit doğrudan nokta maskesi.
+    Braille,
+}
+
+/// Karakterin yordamsal ailesi — **kapsamın tek sahibi**.
+///
+/// [`is_procedural`] ile [`draw_procedural`] aynı fonksiyonu çağırıyor,
+/// çünkü ikisi `Atlas::slot`'un **iki ayrı** kolundan okunuyor: biri
+/// normalizasyonda ("bu karakter yüze duyarsız mı"), öteki çizimde ("fonta
+/// mı soracağız"). İki kopya sessizce kayardı ve kaymanın tehlikeli yönü de
+/// sessiz olanı: kapıda var / normalizasyonda yok olsaydı aynı bitmap dört
+/// yüz için dört ayrı yuva tutardı (`Atlas::slot`'un kendi doc'u).
+fn family(ch: char) -> Option<Family> {
+    match ch {
+        '\u{2580}'..='\u{259F}' => Some(Family::Block),
+        '\u{2800}'..='\u{28FF}' => Some(Family::Braille),
+        _ => None,
+    }
+}
+
+/// Karakter fonttan değil terminalden mi geliyor?
+///
+/// **Yordamsal çizim fontu koşulsuz yener** ve bu bir karar: kullanıcı bu
+/// karakterleri taşıyan bir font seçse de yordamsal çizim kazanır. Gerekçe
+/// döşeme — fontun em kutusu hücre kutusu değil ve bir fontun onu vermesini
+/// garanti edecek hiçbir ölçüt yok. Ölçüldü (019 phase-2, kullanıcı ekran
+/// görüntüsüyle bildirdi): Menlo 13pt'de 8×18 hücrenin yalnız 3–16 satırları
+/// boyanıyor, yani alt alta iki `█` arasında ~5 piksel şerit kalıyor. 012
+/// phase-9'un prompt işareti kararının aynısı: *işaret terminalin kendi
+/// işareti, kullanıcının fontunun değil.*
+pub(crate) fn is_procedural(ch: char) -> bool {
+    family(ch).is_some()
+}
+
+/// `target`e yordamsal karakterin kapsama baytlarını çizer.
+///
+/// [`draw_rule`]'un ikizi ve aynı iki açılış satırıyla başlıyor; gerekçeleri
+/// de aynı. Başarısız olamaz — font sorulmuyor, bağlam kurulmuyor — yani
+/// çağıranın `Drawn`'ı bir varsayım değil tipin kendisi.
+///
+/// Kapsam dışı karakter **boş yuva** bırakıyor, panik değil: çağıran
+/// ([`is_procedural`]) kapıyı zaten tutuyor, ama panik yolu bir çizicide
+/// karşılığı olmayan bir risk — boş hücre görünür ve teşhis edilebilir bir
+/// kayıp, panik ise pencerenin kendisi.
+pub(crate) fn draw_procedural(ch: char, m: Metrics, target: &mut [u8]) {
+    // audit: `draw`/`draw_rule` ile aynı ön koşul, aynı gerekçe.
+    assert_eq!(target.len(), m.slot_bytes(), "tampon tam bir yuva olmalı");
+    // Tampon paylaşılıyor ve içinde bir önceki glyph'in pikselleri var.
+    target.fill(0);
+
+    match family(ch) {
+        Some(Family::Block) => block(ch, m, target),
+        Some(Family::Braille) => braille(ch, m, target),
+        None => {}
+    }
+}
+
+/// Kesirli dikdörtgen, kapsaması **toplanarak** — döşeyen parçalar için.
+///
+/// Toplama ile [`max_rect`] arasındaki fark bir zevk değil bir ölçüt:
+/// birbirini döşeyen (ayrık) parçaların birleşimi **tam** kapsama vermek
+/// zorunda. `▀` ile `▄` h = 17'de 8.5 satırında buluşuyor ve ikisi de o
+/// satıra 128 bırakıyor; `max` alsaydı hücrenin ortasında %50'lik bir şerit
+/// kalırdı — yani bu setin kapatmaya geldiği kusurun hücre içine taşınmış
+/// hâli. Doygun toplama onu 255'e kapatıyor.
+fn add_rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32) {
+    rect(target, m, x0, x1, y0, y1, u8::saturating_add);
+}
+
+/// Kesirli dikdörtgen, kapsaması **piksel-max** ile — üst üste binen mürekkep.
+///
+/// Braille'in noktaları ayrı mürekkep lekeleri; geometri dejenere olup iki
+/// nokta aynı piksele değdiğinde toplama onları sahte bir kalınlığa
+/// çıkarırdı. `max` lekeleri dürüst tutuyor ve "maskenin sprite'ı = set
+/// bitlerin sprite'larının piksel-max'i" değişmezi **yapısal** oluyor:
+/// noktaların ayrıklığından değil, birleştiricinin kendisinden.
+fn max_rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32) {
+    rect(target, m, x0, x1, y0, y1, u8::max);
+}
+
+/// İki eksende kesirli dikdörtgen; kenar yumuşatması [`overlap`]'ten bedava.
+///
+/// Oranlar **çarpılıp bir kez** yuvarlanıyor (bkz. [`overlap`]).
+fn rect(target: &mut [u8], m: Metrics, x0: f32, x1: f32, y0: f32, y1: f32, join: fn(u8, u8) -> u8) {
+    let (w, h) = m.cell_wh();
+    for y in 0..h {
+        let ry = overlap(y, y0, y1);
+        if ry == 0.0 {
+            continue;
+        }
+        for x in 0..w {
+            let value = (ry * overlap(x, x0, x1) * 255.0).round() as u8;
+            if value > 0 {
+                // audit: `y < h` ve `x < w`, yani indeks `w * h`'nin altında.
+                target[y * w + x] = join(target[y * w + x], value);
+            }
+        }
+    }
+}
+
+/// Üç gölgenin (`░▒▓`, U+2591–U+2593) kapsama oranları.
+///
+/// **Ölçüm değil tasarım sabiti** (`CURL_FACTOR` emsali) ve sayılar
+/// karakterlerin kendi tanımından: çeyrek, yarım, üç çeyrek yoğunluk.
+///
+/// Desen **yok, düz kapsama var** ve bu bilinçli: CP437'nin dama deseni tek
+/// bitlik ekranların yoğunluk hilesiydi, atlas ise sekiz bitlik. Dama
+/// yazılsaydı faz ancak adım hücrenin **iki** ölçüsünü de bölerse tutardı ve
+/// tutmuyor — bu makinede 13pt@1x hücresi 8×17 ve 17 asal, yani her satır
+/// sınırında desen kırılır, `░` ile dolu bir alanda yatay şeritler belirirdi.
+/// Döşeme bu setin varlık sebebi; düz kapsama onu inşaen veriyor.
+const SHADE_LEVELS: [f32; 3] = [0.25, 0.5, 0.75];
+
+/// Çeyrek maskesinin bitleri: sol üst, sağ üst, sol alt, sağ alt.
+const UL: u8 = 1;
+const UR: u8 = 2;
+const LL: u8 = 4;
+const LR: u8 = 8;
+
+/// U+2596–U+259F'in çeyrek maskeleri — **gerçek tablo**, formül yok.
+///
+/// Sıralama Unicode'un kendi sırası ve bir örüntüsü yok (`▖▗▘▙▚▛▜▝▞▟`):
+/// tek çeyrekler üçe bölünmüş, üçlüler araya serpilmiş. Tablo karakter
+/// adlarından yazıldı, sayaçtan değil.
+const QUADRANTS: [(char, u8); 10] = [
+    ('\u{2596}', LL),           // ▖ QUADRANT LOWER LEFT
+    ('\u{2597}', LR),           // ▗ QUADRANT LOWER RIGHT
+    ('\u{2598}', UL),           // ▘ QUADRANT UPPER LEFT
+    ('\u{2599}', UL | LL | LR), // ▙ UPPER LEFT AND LOWER LEFT AND LOWER RIGHT
+    ('\u{259A}', UL | LR),      // ▚ UPPER LEFT AND LOWER RIGHT
+    ('\u{259B}', UL | UR | LL), // ▛ UPPER LEFT AND UPPER RIGHT AND LOWER LEFT
+    ('\u{259C}', UL | UR | LR), // ▜ UPPER LEFT AND UPPER RIGHT AND LOWER RIGHT
+    ('\u{259D}', UR),           // ▝ QUADRANT UPPER RIGHT
+    ('\u{259E}', UR | LL),      // ▞ UPPER RIGHT AND LOWER LEFT
+    ('\u{259F}', UR | LL | LR), // ▟ UPPER RIGHT AND LOWER LEFT AND LOWER RIGHT
+];
+
+/// Blok elemanları (U+2580–U+259F).
+///
+/// Ailenin üç yarısı var ve yalnız sonuncusu tablo istiyor: **iki aritmetik
+/// koşu** (alttan ve soldan sekizde bir merdivenleri, yarımlar onların
+/// dördüncü basamağı), **üç gölge** ve **on çeyrek**.
+///
+/// Sekizde bir dilimleri hücrenin kendi ölçüsünden bölünüyor, sabit bir
+/// piksel sayısından değil: `h / 8` kesirli kalıyor ve kenar yumuşatması
+/// [`rect`]'ten geliyor, yani merdiven her puntoda monoton ve `█` her
+/// puntoda dolu.
+fn block(ch: char, m: Metrics, target: &mut [u8]) {
+    let (w, h) = m.cell_wh();
+    let (w, h) = (w as f32, h as f32);
+    let cp = u32::from(ch);
+    match ch {
+        // ▀ üst yarım. Alt merdivenin aynası değil kendi karakteri: Unicode
+        // alt merdiveni 2581'den, sol merdiveni 258F'ten başlatıyor ve üst
+        // yarımı ikisinin de dışında, aralığın başına koymuş.
+        '\u{2580}' => add_rect(target, m, 0.0, w, 0.0, h / 2.0),
+        // ▁▂▃▄▅▆▇█ — alttan n/8; sekizincisi dolu blok.
+        '\u{2581}'..='\u{2588}' => {
+            let n = (cp - 0x2580) as f32;
+            add_rect(target, m, 0.0, w, h - h * n / 8.0, h);
+        }
+        // ▉▊▋▌▍▎▏ — soldan n/8, ama **azalarak**: 2589 yedi sekizde,
+        // 258F bir sekizde. Kod noktası büyüdükçe dilim inceliyor, yani
+        // sayaç 0x2590'tan geri sayıyor.
+        '\u{2589}'..='\u{258F}' => {
+            let n = (0x2590 - cp) as f32;
+            add_rect(target, m, 0.0, w * n / 8.0, 0.0, h);
+        }
+        // ▐ sağ yarım.
+        '\u{2590}' => add_rect(target, m, w / 2.0, w, 0.0, h),
+        // ░▒▓ — düz kapsama (bkz. [`SHADE_LEVELS`]).
+        '\u{2591}'..='\u{2593}' => {
+            let level = SHADE_LEVELS[(cp - 0x2591) as usize];
+            let value = (level * 255.0).round() as u8;
+            target.fill(value);
+        }
+        // ▔ üst sekizde bir.
+        '\u{2594}' => add_rect(target, m, 0.0, w, 0.0, h / 8.0),
+        // ▕ sağ sekizde bir.
+        '\u{2595}' => add_rect(target, m, w - w / 8.0, w, 0.0, h),
+        // ▖▗▘▙▚▛▜▝▞▟ — çeyrekler, tablodan.
+        _ => {
+            let mask = QUADRANTS
+                .iter()
+                .find(|&&(c, _)| c == ch)
+                .map_or(0, |&(_, mask)| mask);
+            // Çeyrekler **ayrık döşüyor**: dördünün birleşimi `█`. Ortadaki
+            // kesirli satır/sütun iki çeyrekten birer pay alıyor ve
+            // [`add_rect`] onları 255'e kapatıyor.
+            for (bit, (x0, x1, y0, y1)) in [
+                (UL, (0.0, w / 2.0, 0.0, h / 2.0)),
+                (UR, (w / 2.0, w, 0.0, h / 2.0)),
+                (LL, (0.0, w / 2.0, h / 2.0, h)),
+                (LR, (w / 2.0, w, h / 2.0, h)),
+            ] {
+                if mask & bit != 0 {
+                    add_rect(target, m, x0, x1, y0, y1);
+                }
+            }
+        }
+    }
+}
+
+/// Braille noktasının kendi alt hücresini doldurma oranı.
+///
+/// **Ölçüm değil tasarım sabiti** (`CURL_FACTOR` emsali). İki şeyi birden
+/// tutuyor: nokta küçük puntoda görünecek kadar büyük, komşu noktalardan
+/// ayrılacak kadar küçük. Oran — mutlak piksel değil — yani punto ve ölçek
+/// büyüdükçe nokta da büyüyor; sabit bir piksel yarıçapı @2x'te iğne başına
+/// dönerdi.
+///
+/// Nokta bu phase'de bir **dikdörtgen**; yuvarlağın istediği mesafe alanı
+/// phase-2'nin primitifi ve yalnız bunun için getirilmesi karşılığı olmayan
+/// bir bedel olurdu — 13pt'de alt hücre 4×4.25 piksel, orada kare ile daire
+/// arasındaki fark bir pikselin altında.
+const BRAILLE_DOT_FILL: f32 = 0.7;
+
+/// Braille deseni (U+2800–U+28FF).
+///
+/// **Tablo yok:** kod noktasının alt 8 biti doğrudan nokta maskesi — Unicode
+/// bloğu tam olarak böyle tanımlıyor. Bitin hücresi de tanımdan geliyor:
+/// noktalar 2×4 ızgarada ve numaralandırma tarihsel olarak önce 2×3'lük
+/// hücreyi dolduruyor, dördüncü satır sonradan eklenmiş —
+///
+/// ```text
+///   bit0  bit3        1 4
+///   bit1  bit4   =    2 5
+///   bit2  bit5        3 6
+///   bit6  bit7        7 8
+/// ```
+///
+/// yani bit 0–2 sol sütunun ilk üç satırı, bit 3–5 sağ sütunun ilk üç
+/// satırı, bit 6 ve 7 de dördüncü satırın sol ve sağı.
+fn braille(ch: char, m: Metrics, target: &mut [u8]) {
+    let (w, h) = m.cell_wh();
+    let (dot_w, dot_h) = (w as f32 / 2.0, h as f32 / 4.0);
+    let mask = u32::from(ch) & 0xFF;
+    for bit in 0..8u32 {
+        if mask & (1 << bit) == 0 {
+            continue;
+        }
+        let (col, row) = match bit {
+            0..=2 => (0, bit),
+            3..=5 => (1, bit - 3),
+            6 => (0, 3),
+            _ => (1, 3),
+        };
+        let (cx, cy) = ((col as f32 + 0.5) * dot_w, (row as f32 + 0.5) * dot_h);
+        let (half_w, half_h) = (
+            dot_w * BRAILLE_DOT_FILL / 2.0,
+            dot_h * BRAILLE_DOT_FILL / 2.0,
+        );
+        max_rect(
+            target,
+            m,
+            cx - half_w,
+            cx + half_w,
+            cy - half_h,
+            cy + half_h,
+        );
     }
 }

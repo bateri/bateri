@@ -12,11 +12,19 @@
 //! gelir (007 phase-5) ve makinede yoksa zincire düşülür; bunu söyleyen
 //! [`FontIssue`] çağırana döner, bu crate kimseye bir şey basmaz.
 //!
+//! **Yordamsal çizilen ikinci küme karakterlerdir** ve fonta hiç sorulmadan
+//! kazanırlar (`raster::is_procedural`): blok elemanları (U+2580–U+259F) ile
+//! Braille (U+2800–U+28FF). Gerekçe döşeme — fontun em kutusu hücre kutusu
+//! değil ve Menlo'nun `█`'i hücreyi doldurmuyor, alt alta iki blok arasında
+//! şerit kalıyor. Yüzden bağımsızlar (dört yüz tek yuva), ama **yalnız büyük
+//! sınıfta**: dock'un bağlam satırında sütun adımı küçük yüzün ilerlemesi ve
+//! büyük hücre genişliğinde bir sprite orada komşusunun üstüne binerdi.
+//!
 //! Seçili fontta olmayan **tek hücrelik** karakter sistemin cascade'inden
 //! geliyor (`font::fallback_font`) ve kapı **geometrik**: adayın ilerlemesi
 //! hücrenin ilerlemesini aşıyorsa reddediliyor. Yani emoji, CJK ve geniş
 //! glyph hâlâ [`TOFU`] — onları gerçekten çizmek (iki hücre, renkli doku)
-//! ayrı bir sete kaldı, kutu çizim karakterleri de öyle.
+//! ayrı bir sete kaldı.
 
 mod font;
 mod raster;
@@ -36,6 +44,12 @@ pub use raster::RuleKind;
 /// maskesi**; `bt-gpu` ikisini de aynı `cell` pipeline'ından çiziyor ve rengi
 /// instance'tan veriyor. Emoji bu birliği bozar (iki hücre, renkli doku) ve
 /// tam bu yüzden ayrı bir sete bırakıldı.
+///
+/// Yordamsal çizilen karakterler (blok, Braille) **üçüncü bir varyant
+/// almadı**: bir karakterdirler ve `Char` olarak yaşıyorlar. `Sprite::Box`
+/// açmak `bt-gpu`'nun bugünkü tek satırını "bu karakter hangi sprite"
+/// sorusuna çevirir, yani renderer'a terminal semantiği sızdırırdı; kapı
+/// bu yüzden [`Atlas::slot`]'un içinde.
 // `repr(u8)`: bkz. `RuleKind`.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -103,8 +117,10 @@ pub struct Upload<'a> {
 
 /// Sabit yuva ızgarasında yaşayan glyph atlası.
 ///
-/// Paketleyici yok: bu sette **tüm glyph'ler hücre boyutunda** (emoji ve kutu
-/// çizim kapsam dışı), yani `yuva_no → piksel köşe` dönüşümü aritmetiktir.
+/// Paketleyici yok: bu sette **tüm sprite'lar hücre boyutunda** (emoji ve
+/// geniş glyph kapsam dışı), yani `yuva_no → piksel köşe` dönüşümü
+/// aritmetiktir. Yordamsal karakterler (blok, Braille) o kısıtı bozmuyor —
+/// tanımları gereği tam bir hücre.
 pub struct Atlas {
     faces: Faces,
     /// Bağlam satırının düz yüzü: aynı aile, [`CONTEXT_SCALE`] katı punto.
@@ -337,13 +353,32 @@ impl Atlas {
         //     kalın değildir) ve ölçüden de: dock'un bağlam satırında kural
         //     yok, yani küçük bir kural sprite'ı hiç doğmaz,
         //   - fontta olmayan yüz düz yüze çökmüştür (`Faces::effective`),
-        //   - küçük sınıfta yalnız düz yüz var ([`Atlas::small`]).
+        //   - küçük sınıfta yalnız düz yüz var ([`Atlas::small`]),
+        //   - yordamsal çizilen karakter de kural gibi yüzden bağımsız
+        //     ([`raster::is_procedural`]).
         // Normalizasyon **burada**, çağıranın disiplininde değil: ayrışan bir
         // anahtar bayt bayt aynı bitmap'i ayrı yuvalarda tutar, atlas kat kat
         // hızlı dolar ve belirti sessizdir.
         let (face, size) = match (sprite, size) {
             (Sprite::Rule(_), _) => (Face::Regular, SizeClass::Normal),
             (Sprite::Char(_), SizeClass::Small) => (Face::Regular, SizeClass::Small),
+            // Unicode ince/kalın ayrımını **karakterin kendisinde** taşıyor
+            // (`─` U+2500 ince, `━` U+2501 kalın), yani SGR bold'un çizgiyi
+            // kalınlaştırması bilginin iki kez kodlanması olurdu. Yan kazanç:
+            // dört yüz tek yuvayı paylaşıyor ve kalın bir TUI çerçevesi
+            // atlasa dört kat değil bir kat biniyor.
+            //
+            // Desen `SizeClass::Normal`, `_` **değil**: `_` yazılsaydı küçük
+            // istek de `Normal`'e zorlanır ve aşağıdaki `size == Normal`
+            // guard'ı tam da kapatılmak istenen yerde açılırdı. Küçük sınıfta
+            // kapının kapalı olmasının gerekçesi döşeme değil **ölçü
+            // ayrışması**: `Metrics` büyük hücrenin, yani yordamsal sprite
+            // büyük hücre genişliğinde çizilir, dock'un bağlam satırının
+            // sütun adımı ise küçük yüzün ilerlemesi (`Frame::column_px`) —
+            // hücreyi tam dolduran bir sprite orada komşusunun üstüne binerdi.
+            (Sprite::Char(ch), SizeClass::Normal) if raster::is_procedural(ch) => {
+                (Face::Regular, SizeClass::Normal)
+            }
             (Sprite::Char(_), SizeClass::Normal) => (self.faces.effective(face), SizeClass::Normal),
         };
         let key = (sprite, face, size);
@@ -370,6 +405,22 @@ impl Atlas {
         // Ödünç match'in scrutinee'sinde bırakılmıyor: `&mut self.buffer`
         // orada kalsaydı kolların içinde `&self.buffer` alınamazdı.
         let result = match sprite {
+            // **Yordamsal çizim fonttan önce.** Sıra zorunlu ve "fontta
+            // yoksa yordamsal çiz" yanlış kol olurdu: `█` Menlo'da *var* ama
+            // hücreyi doldurmuyor, yani o karakter yedeğe hiç gitmeden
+            // bozuk geliyor. `⠋` ise Menlo'da yok ve yedek koşarsa Apple
+            // Braille gelip genişlik kapısından döner. İkisini de kapatan
+            // tek yer burası — ve kol aşağıdaki font kolunun **üstünde**
+            // olduğu için `raster::draw` font yolu olarak saf kalıyor,
+            // `DrawResult`'ın doc'u ("fontun cevabı") gerilime girmiyor.
+            //
+            // `size` **normalize edilmiş** olan: küçük sınıf yukarıdaki
+            // kolda `Small` kalıyor, yani guard onu eliyor ve bağlam satırı
+            // kutu karakterini fonttan almaya devam ediyor.
+            Sprite::Char(ch) if size == SizeClass::Normal && raster::is_procedural(ch) => {
+                raster::draw_procedural(ch, self.metrics, &mut self.buffer);
+                DrawResult::Drawn
+            }
             Sprite::Char(ch) => {
                 // **Metrik her iki sınıfta da büyük hücrenin**: küçük glyph
                 // büyük yuvaya, büyük hücrenin taban çizgisine çiziliyor
@@ -605,7 +656,9 @@ mod tests {
     /// sınıfında da kapıyı geçiyor.
     const FALLBACK_CHAR: char = '⏵';
     /// Kapının **kuralını** sınamak için kullanılan karakterler: hepsi
-    /// Menlo'da yok, yani yedek yoluna giriyorlar.
+    /// Menlo'da yok, yani yedek yoluna giriyorlar — `⠋` bir istisna ve
+    /// listede kalma sebebi o: büyük sınıfta yordamsal çiziliyor, yani
+    /// yedeğe hiç gelmiyor; küçük sınıfta kapı kapalı ve yol hâlâ açık.
     ///
     /// Listenin taşıdığı iddia "bunlar kutu olur" **değil** — o, makinede
     /// hangi fontların kurulu olduğuna bağlı bir olgu, kodun bir özelliği
@@ -624,7 +677,9 @@ mod tests {
         '🎉',
         '\u{F8FF}',
         // Braille: Apple Braille'den geliyor ve bu makinede 1.135× ile
-        // reddediliyor (Claude Code'un spinner'ı). Yol haritasında borç.
+        // reddediliyordu (Claude Code'un spinner'ı). **Büyük sınıfta artık
+        // kapıya hiç gelmiyor** — yordamsal çiziliyor; listede kalmasının
+        // sebebi küçük sınıf, orada kapı kapalı ve yedek yolu hâlâ koşuyor.
         '⠋',
     ];
     /// Hiçbir makinede olmayan aile; CoreText yerine başka bir font verir.
@@ -918,6 +973,14 @@ mod tests {
                 if font::glyph_index(base, ch).is_some() {
                     continue;
                 }
+                // Yordamsal çizilen karakter de deneyin konusu değil: kapı
+                // ondan **önce** duruyor ve font hiç sorulmuyor. Kapının
+                // yüklemi burada birebir tekrarlanıyor, `is_procedural(ch)`
+                // tek başına değil — `⠋` küçük sınıfta hâlâ yedek yolundan
+                // geçiyor ve bu sınamada kapalı kapının tek tanığı o.
+                if size == SizeClass::Normal && raster::is_procedural(ch) {
+                    continue;
+                }
                 // Aday hiç yoksa da kapının konusu değil — reddi kapı vermiyor.
                 let Some(open) = font::fallback_font(base, ch, CGFloat::INFINITY) else {
                     continue;
@@ -1068,16 +1131,38 @@ mod tests {
 
     #[test]
     fn face_fallback_is_cached_under_the_requested_face() {
-        // `─` (U+2500) **ölçüldü** (bu makine, Menlo 13pt): düz yüzde var,
-        // kalın yüzde yok. Yani glyph düzeyindeki geri düşüş gerçek bir fontla
-        // ateşlenebiliyor — ve hiç de seyrek bir durum değil: kalın bir TUI
-        // çerçevesi bu koldan geçiyor.
-        const BOX_DRAWING: char = '─';
+        // `╱` (U+2571) **ölçüldü** (bu makine, macOS 26.4.1, Menlo 13pt):
+        // düz yüzde var, kalın yüzde yok. Yani glyph düzeyindeki geri düşüş
+        // gerçek bir fontla ateşlenebiliyor.
+        //
+        // Fikstür **köşegen olmak zorunda** ve bu bir tesadüf değil: aynı
+        // ölçüm Menlo Bold'da eksik olan kod noktalarını da saydı ve BMP ile
+        // SMP'nin tamamında **tek** bir blok çıktı — U+2500–U+257F, tam 128
+        // karakter. O bloğun tamamı 021'in kapsamında, yalnız üç köşegeni
+        // (`╱╲╳`, Karar 3B) bilerek dışarıda. Yani bu sınamanın taşıyıcı
+        // iddiasını ayakta tutan şey kapsamın o deliği: delik kapansaydı
+        // `DrawResult::NoGlyph if face != Face::Regular` kolunun bu makinede
+        // **hiç** bekçisi kalmazdı ve kol sessizce ölürdü.
+        //
+        // Bir dönem fikstür `─` (U+2500) idi ve doc'u "kalın bir TUI
+        // çerçevesi bu koldan geçiyor" diyordu; artık geçmiyor, çerçeve
+        // yordamsal çiziliyor ve `(Char('─'), Bold)` anahtarı hiç oluşmuyor.
+        // Değiştirilmeseydi `bold == regular` ile `occupancy == 2` yeşil
+        // kalır, sınama hiçbir şey sınamadan yaşardı.
+        const FACE_LADDER_PROBE: char = '╱';
         let mut a = atlas(POINT_SIZE, 1.0);
         let regular = a
-            .slot(Sprite::Char(BOX_DRAWING), Face::Regular, SizeClass::Normal)
+            .slot(
+                Sprite::Char(FACE_LADDER_PROBE),
+                Face::Regular,
+                SizeClass::Normal,
+            )
             .0;
-        let (bold, _) = a.slot(Sprite::Char(BOX_DRAWING), Face::Bold, SizeClass::Normal);
+        let (bold, _) = a.slot(
+            Sprite::Char(FACE_LADDER_PROBE),
+            Face::Bold,
+            SizeClass::Normal,
+        );
 
         // Geri düşüşün kendisi: kalın istek tofu'ya değil düz yüzün yuvasına
         // çözülmeli, yoksa kalın bir satırdaki çerçeve kutu kutu görünürdü.
@@ -1090,8 +1175,11 @@ mod tests {
         // yeniden sorulurdu — ana thread'de. Dışarıdan gözlenemediği için
         // bekçi iç tabloya bakıyor; `unknown_char_is_cached` ile aynı gerekçe.
         assert_eq!(
-            a.slots
-                .get(&(Sprite::Char(BOX_DRAWING), Face::Bold, SizeClass::Normal)),
+            a.slots.get(&(
+                Sprite::Char(FACE_LADDER_PROBE),
+                Face::Bold,
+                SizeClass::Normal
+            )),
             Some(&regular),
             "geri düşüş istenen yüzün anahtarıyla önbelleğe girmeli"
         );
@@ -1824,6 +1912,286 @@ mod tests {
             menlo.effective(Face::Bold),
             Face::Bold,
             "Menlo'nun kalın yüzü çöktü"
+        );
+    }
+
+    /// Yordamsal değişmezlerin koştuğu (punto, ölçek) çiftleri.
+    ///
+    /// Üçü de gerekli ve her biri başka bir aritmetiği açıyor: 13pt@1x
+    /// hücresi bu makinede 8×17 — yükseklik **asal**, yani sekizde bir
+    /// dilimleri de yarım da kesirli düşüyor ve kenar yumuşatması gerçekten
+    /// koşuyor; 13pt@2x yuvarlanmanın iki katına çıktığı hâl; 144pt@1x ise
+    /// dilimlerin çoğunun tam bölündüğü büyük hücre. Tek çiftte koşan bir
+    /// değişmez ötekini hiç sınamamış olur — `envelope_stays_inside_cell`'in
+    /// doc'undaki ders ("gerçek fontla kırpma dalı hiç ateşlenmiyor").
+    const PROCEDURAL_SIZES: [(f64, f64); 3] = [
+        (POINT_SIZE, 1.0),
+        (POINT_SIZE, 2.0),
+        (LARGE_POINT_SIZE, 1.0),
+    ];
+
+    /// Yordamsal sprite'ın baytları — `Atlas::slot`'tan **değil**, doğrudan.
+    ///
+    /// `LARGE_POINT_SIZE`'ta kapasite birkaç düzine yuva ve tek başına 256
+    /// Braille deseni oraya sığmıyor: `slot()` üzerinden koşan bir değişmez
+    /// sınaması tofu'ya düşer, `Upload` hiç gelmez ve bekçi geometriyi değil
+    /// kapasiteyi sınamış olurdu. Kapının `slot()` yolunda gerçekten
+    /// koştuğunu gösteren bekçiler ayrı ve 13pt'de
+    /// ([`procedural_chars_share_one_slot_across_faces`],
+    /// [`the_small_class_still_asks_the_font`]).
+    fn procedural(m: Metrics, ch: char) -> Vec<u8> {
+        let mut bytes = vec![0u8; m.slot_bytes()];
+        raster::draw_procedural(ch, m, &mut bytes);
+        bytes
+    }
+
+    /// İki sprite'ın piksel-piksel doygun toplamı.
+    fn saturating_sum(a: &[u8], b: &[u8]) -> Vec<u8> {
+        a.iter().zip(b).map(|(x, y)| x.saturating_add(*y)).collect()
+    }
+
+    /// İki sprite'ın piksel-max'i.
+    fn pixel_max(a: &[u8], b: &[u8]) -> Vec<u8> {
+        a.iter().zip(b).map(|(x, y)| *x.max(y)).collect()
+    }
+
+    #[test]
+    fn the_full_block_fills_the_cell() {
+        // **Bildirilen kusurun tam tersi**, `> 0` değil eşitlik: Menlo'nun
+        // `█`'i 8×18 hücrenin yalnız 3–16 satırlarını boyuyor ve alt alta iki
+        // blok arasında ~5 piksel şerit kalıyordu (019 phase-2, kullanıcı
+        // ekran görüntüsüyle bildirdi). Tek bir eksik bayt o şeridin sönük
+        // kopyasıdır, yani ölçüt "hiç mürekkep var mı" olamaz.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let bytes = procedural(m, '\u{2588}');
+            let (w, _) = m.cell_wh();
+            let gap = bytes.iter().position(|&b| b != 255);
+            assert!(
+                gap.is_none(),
+                "{point_size}pt@{scale}x: `█` hücreyi doldurmadı, ilk eksik piksel \
+                 ({}, {}) = {}",
+                gap.unwrap_or(0) % w,
+                gap.unwrap_or(0) / w,
+                bytes[gap.unwrap_or(0)]
+            );
+        }
+    }
+
+    #[test]
+    fn disjoint_blocks_tile_the_cell() {
+        // Ayrık parçaların birleşimi **tam** kapsama vermek zorunda ve ölçüt
+        // doygun toplam: h = 17'de yarım 8.5'e düşüyor, iki komşu parça o
+        // satıra 128'er bırakıyor. `max` alsaydı hücrenin **ortasında**
+        // %50'lik bir şerit kalırdı — bu setin kapatmaya geldiği kusurun
+        // hücre içine taşınmış hâli, ve `> 0` sınayan bir bekçi onu görmezdi.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let full = procedural(m, '\u{2588}');
+            for (a, b, name) in [
+                ('\u{2580}', '\u{2584}', "üst/alt yarım"),
+                ('\u{258C}', '\u{2590}', "sol/sağ yarım"),
+            ] {
+                assert_eq!(
+                    saturating_sum(&procedural(m, a), &procedural(m, b)),
+                    full,
+                    "{point_size}pt@{scale}x: {name} `█`'i vermedi"
+                );
+            }
+            // Dört çeyrek de aynı yasayı taşıyor ve ayrıca **orta dikişi**
+            // görüyor: yatay ile dikey kesirli satır/sütun aynı karede.
+            let quarters = ['\u{2598}', '\u{259D}', '\u{2596}', '\u{2597}'];
+            let union = quarters.iter().fold(vec![0u8; m.slot_bytes()], |acc, &ch| {
+                saturating_sum(&acc, &procedural(m, ch))
+            });
+            assert_eq!(
+                union, full,
+                "{point_size}pt@{scale}x: dört çeyrek `█`'i vermedi"
+            );
+        }
+    }
+
+    #[test]
+    fn the_eighth_ladders_are_nested() {
+        // İki merdiven, iki yön: alttan `▁..█` kod noktası **artarken**
+        // büyüyor, soldan `▏..▉` kod noktası **azalırken**. İkinci yön
+        // Unicode'un kendi sıralaması ve tam da orada bir işaret hatası
+        // sessiz kalırdı — merdiven yine merdiven görünür, yalnız ters.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let full = procedural(m, '\u{2588}');
+            for (name, steps) in [
+                ("alt", (0x2581..=0x2588).collect::<Vec<u32>>()),
+                ("sol", (0x2589..=0x258F).rev().collect::<Vec<u32>>()),
+            ] {
+                let mut previous = vec![0u8; m.slot_bytes()];
+                let mut previous_ink = 0u64;
+                for cp in steps {
+                    let ch = char::from_u32(cp).expect("blok kod noktası");
+                    let bytes = procedural(m, ch);
+                    // **İç içe**: her basamak bir öncekini kapsıyor.
+                    assert!(
+                        bytes.iter().zip(&previous).all(|(b, p)| b >= p),
+                        "{point_size}pt@{scale}x: {name} merdiveni U+{cp:04X}'te geri gitti"
+                    );
+                    // Ve gerçekten **büyüyor**: hepsini aynı çizen bir kod
+                    // iç içelik sınamasından geçerdi.
+                    let ink: u64 = bytes.iter().map(|&b| u64::from(b)).sum();
+                    assert!(
+                        ink > previous_ink,
+                        "{point_size}pt@{scale}x: {name} merdiveni U+{cp:04X}'te büyümedi \
+                         ({previous_ink} → {ink})"
+                    );
+                    previous = bytes;
+                    previous_ink = ink;
+                }
+                // Merdivenin son basamağı dolu blok: `▉` sol yedi sekizde
+                // değil, `2589..=258F` tersten yürüdüğü için son adım
+                // yedi sekizde kalıyor — o yüzden yalnız alt merdiven
+                // karşılaştırılıyor.
+                if name == "alt" {
+                    assert_eq!(
+                        previous, full,
+                        "{point_size}pt@{scale}x: alt merdiven `█`'e varmadı"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_shades_are_flat_and_ordered() {
+        // Gölgeler **desensiz** (bkz. `raster`'ın `SHADE_LEVELS` doc'u):
+        // dama deseni ancak adım hücrenin iki ölçüsünü de bölerse döşer ve
+        // bu makinede 13pt@1x yüksekliği 17, yani asal. Düz kapsama döşemeyi
+        // inşaen veriyor ve bekçisi bu: her gölge tek değerli.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let mut previous = 0u8;
+            for cp in 0x2591..=0x2593u32 {
+                let ch = char::from_u32(cp).expect("gölge kod noktası");
+                let bytes = procedural(m, ch);
+                let first = bytes[0];
+                assert!(
+                    bytes.iter().all(|&b| b == first),
+                    "{point_size}pt@{scale}x: U+{cp:04X} düz değil, desen döşemede kırılır"
+                );
+                assert!(
+                    first > previous,
+                    "{point_size}pt@{scale}x: U+{cp:04X} bir öncekinden koyu değil \
+                     ({previous} → {first})"
+                );
+                previous = first;
+            }
+            assert!(previous < 255, "en koyu gölge dolu bloğa eşit olmamalı");
+        }
+    }
+
+    #[test]
+    fn braille_dots_come_from_the_code_point_bits() {
+        // **Tablo yok**: alt 8 bit doğrudan nokta maskesi. Bekçi de tablosuz
+        // — beklentiyi 256 desen için tek tek yazmak yerine sekiz **tek
+        // noktanın** sprite'larından türetiyor, yani uygulamanın kendi
+        // eşlemesini okumuyor.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let blank = procedural(m, '\u{2800}');
+            assert!(
+                blank.iter().all(|&b| b == 0),
+                "{point_size}pt@{scale}x: boş Braille deseni mürekkep bıraktı"
+            );
+
+            let dots: Vec<Vec<u8>> = (0..8)
+                .map(|bit| {
+                    let ch = char::from_u32(0x2800 | (1u32 << bit)).expect("Braille kod noktası");
+                    procedural(m, ch)
+                })
+                .collect();
+            for (bit, dot) in dots.iter().enumerate() {
+                assert!(
+                    dot.iter().any(|&b| b > 0),
+                    "{point_size}pt@{scale}x: bit {bit} hiç piksel boyamadı"
+                );
+            }
+            // **Destekler ayrık**: iki nokta aynı piksele değseydi 2×4
+            // ızgarası birbirine akar ve desen okunamazdı.
+            for i in 0..8 {
+                for j in i + 1..8 {
+                    let touching = dots[i].iter().zip(&dots[j]).any(|(a, b)| *a > 0 && *b > 0);
+                    assert!(
+                        !touching,
+                        "{point_size}pt@{scale}x: bit {i} ile bit {j} aynı piksele değdi"
+                    );
+                }
+            }
+            // Birleşim yasası, 256 desenin **hepsinde**.
+            for mask in 0u32..=0xFF {
+                let ch = char::from_u32(0x2800 | mask).expect("Braille kod noktası");
+                let expected = (0..8)
+                    .filter(|bit| mask & (1 << bit) != 0)
+                    .fold(vec![0u8; m.slot_bytes()], |acc, bit| {
+                        pixel_max(&acc, &dots[bit])
+                    });
+                assert_eq!(
+                    procedural(m, ch),
+                    expected,
+                    "{point_size}pt@{scale}x: U+{:04X} bitlerinin birleşimi değil",
+                    0x2800 | mask
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn procedural_chars_share_one_slot_across_faces() {
+        // Unicode ince/kalın ayrımını karakterin kendisinde taşıyor, yani SGR
+        // bold'un bloğu kalınlaştırması bilginin iki kez kodlanması olurdu.
+        // Yan kazanç ölçülebilir: dört yüz tek yuva.
+        let mut a = atlas(POINT_SIZE, 1.0);
+        let regular = a
+            .slot(Sprite::Char('\u{2588}'), Face::Regular, SizeClass::Normal)
+            .0;
+        assert_ne!(regular, TOFU, "yordamsal karakter tofu'ya düştü");
+        for face in [Face::Bold, Face::Italic, Face::BoldItalic] {
+            assert_eq!(
+                a.slot(Sprite::Char('\u{2588}'), face, SizeClass::Normal).0,
+                regular,
+                "{face:?} ayrı yuva tuttu"
+            );
+        }
+        assert_eq!(a.occupancy().0, 2, "tofu + tek yuva bekleniyordu");
+    }
+
+    #[test]
+    fn the_small_class_still_asks_the_font() {
+        // Kapı küçük sınıfta **kapalı** ve gerekçe döşeme değil ölçü
+        // ayrışması: `Metrics` büyük hücrenin, yani yordamsal sprite büyük
+        // hücre genişliğinde çizilir; dock'un bağlam satırının sütun adımı
+        // ise küçük yüzün ilerlemesi (`Frame::column_px`). Hücreyi tam
+        // dolduran bir sprite orada komşusunun üstüne binerdi — ve bağlam
+        // satırı yol ile dal taşıyor, ikisi de kullanıcı verisi.
+        let mut a = atlas(POINT_SIZE, 1.0);
+        let (normal_slot, normal) =
+            a.slot(Sprite::Char('\u{2588}'), Face::Regular, SizeClass::Normal);
+        assert!(
+            normal
+                .expect("yeni yuva yükleme vermeli")
+                .bytes
+                .iter()
+                .all(|&b| b == 255),
+            "büyük sınıfta kapı açılmadı"
+        );
+        let (small_slot, small) = a.slot(Sprite::Char('\u{2588}'), Face::Regular, SizeClass::Small);
+        let small = small.expect("yeni yuva yükleme vermeli").bytes.to_vec();
+        assert_ne!(
+            small_slot, normal_slot,
+            "küçük sınıf büyüğün yuvasını paylaştı"
+        );
+        // Menlo'nun `█`'i hücreyi doldurmuyor — setin varlık sebebi tam bu.
+        // Yani "tamamı 255 değil" burada fontun imzası.
+        assert!(
+            small.iter().any(|&b| b != 255),
+            "küçük sınıfta kapı açıldı: sprite yordamsal çizilmiş"
         );
     }
 

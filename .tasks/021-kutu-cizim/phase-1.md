@@ -60,6 +60,64 @@ Braille. Çizgiler phase-2'de ve belirtiyi kapatmak için gerekmiyor —
 - Dock'un bağlam satırındaki blok karakteri hâlâ fonttan geliyor (R4).
 - `make hepsi` yeşil.
 
+## Uygulama Notları
+
+- **Fikstür ölçüldü ve çıkan sayı kapsamı bağladı.** Menlo Regular'da olup
+  Bold'da olmayan kod noktaları BMP+SMP'nin tamamında tarandı (bu makine,
+  macOS 26.4.1, Menlo 13pt): **tek** blok çıktı, U+2500–U+257F, tam 128
+  karakter. Yani `face_fallback_is_cached_under_the_requested_face`'in
+  fikstürü zorunlu olarak o bloğun içinden ve zorunlu olarak 021'in kapsamı
+  **dışından** olmak zorunda — geriye Karar 3B'nin bilerek bıraktığı üç
+  köşegen kalıyor. Fikstür `╱` (U+2571) oldu ve sınamanın doc'una şu yazıldı:
+  köşegenlerin kapsam dışı kalması artık `DrawResult::NoGlyph if face !=
+  Regular` kolunun bu makinedeki **tek** bekçisini ayakta tutan şey. Delik
+  kapansaydı kol sessizce ölürdü.
+- **Gölgeler dama deseniyle değil düz kapsamayla çiziliyor** — plandan sapma
+  ve gerekçesi planın kendi ölçütü. Karar 4 dama adımını "komşu hücrelerde
+  faz tutması için mutlak olmalı" diye istemişti; faz ancak adım hücrenin
+  **iki** ölçüsünü de bölerse tutar ve bu makinede 13pt@1x hücresi 8×17, yani
+  yükseklik asal — `░` ile dolu bir alanda her satır sınırında yatay şerit
+  belirirdi. Atlas sekiz bitlik, dama ise tek bitlik ekranların yoğunluk
+  hilesi. Tasarım sabiti yine tek ve adıyla: `SHADE_LEVELS` (çeyrek, yarım,
+  üç çeyrek). Bekçisi `the_shades_are_flat_and_ordered` — "tek değerli"
+  iddiasını doğrudan sınıyor. **Sapma kullanıcıya soruldu ve onaylandı**
+  (2026-09-21): iki kol yan yana gösterildi, düz kapsama seçildi.
+- **Birleşim tek değil iki primitif.** Plan "birleşim (piksel-max)" diyordu;
+  ölçüldü ki `max` ayrık döşemede yanlış: h = 17'de yarım 8.5'e düşüyor, `▀`
+  ile `▄` o satıra 128'er bırakıyor ve `max` hücrenin **ortasında** %50'lik
+  bir şerit bırakırdı — bu setin kapatmaya geldiği kusurun hücre içine
+  taşınmış hâli. Ayrım ölçüte bağlandı: `add_rect` (doygun toplam) birbirini
+  **döşeyen** parçalar için, `max_rect` (piksel-max) üst üste binen mürekkep
+  için. Braille ikincisini kullanıyor ve kazanç yapısal — "maskenin sprite'ı
+  = set bitlerin piksel-max'i" değişmezi noktaların ayrıklığından değil
+  birleştiricinin kendisinden geliyor.
+- **`coverage` ikiye ayrıldı** (`overlap` oranı veriyor, `coverage` onu
+  yuvarlıyor). Dikdörtgen iki eksende örtüşüyor ve iki `coverage` **baytını**
+  çarpmak iki kez yuvarlıyor: `▀` + `▄` 255'te durmuyor, birkaç eksik kalıyor
+  ve o eksik tam da şeridin sönük bir kopyası. Oranlar çarpılıp **bir kez**
+  yuvarlanıyor.
+- **Değişmezler `Atlas::slot`'tan değil `raster::draw_procedural`'dan
+  koşuyor.** `LARGE_POINT_SIZE`'ta kapasite birkaç düzine yuva ve tek başına
+  256 Braille deseni oraya sığmıyor — `slot()` üzerinden koşan bir bekçi
+  tofu'ya düşer, `Upload` hiç gelmez ve geometri yerine kapasite sınanmış
+  olurdu. Kapının `slot()` yolunda gerçekten koştuğunu gösteren iki ayrı
+  bekçi 13pt'de: `procedural_chars_share_one_slot_across_faces` ve
+  `the_small_class_still_asks_the_font`.
+- **`the_gate_decides_by_width_alone`'un `continue` kapısı yüklemi
+  birebir tekrarlıyor** (`size == Normal && is_procedural(ch)`),
+  `is_procedural(ch)` tek başına değil: `⠋` küçük sınıfta hâlâ yedek
+  yolundan geçiyor ve o sınamada **kapalı kapının tek tanığı** o. Tek başına
+  yazılsaydı probun tamamı elenir ve R4 orada hiç sınanmazdı.
+- **Sekizde bir merdiveninin iki yönü var** ve ikincisi ters: alttan `▁..█`
+  kod noktası artarken büyüyor, soldan `▏..▉` kod noktası **azalırken**.
+  Bekçi ikisini de yürüyor; bir işaret hatası yalnız ikinci yönde sessiz
+  kalırdı (merdiven yine merdiven görünür, yalnız ters).
+- **`make hepsi` bir kez `bt-shell`'de SIGSEGV ile düştü** (`bt_shell` lib
+  sınamaları), ardından üç koşuda da yeşil geçti. Bu phase `bt-shell`'e
+  dokunmuyor; kayda geçiriliyor, kovalanmıyor.
+- **Duman jetonları birebir aynı**: `kare=30 hucre=8 glif=6 kural=15
+  yuva=13/1984 … sessiz=1756.52ms kapanis=clean`.
+
 ## Yayın Etkisi
 
 - **`CLAUDE.md`:** "Kutu ve blok çizim ayrı bir olgu… çaresi yordamsal
@@ -85,35 +143,36 @@ Braille. Çizgiler phase-2'de ve belirtiyi kapatmak için gerekmiyor —
 
 ## Checklist
 
-- [ ] `raster::is_procedural` (iki aralık) + `draw_procedural`
+- [x] `raster::is_procedural` (iki aralık) + `draw_procedural`
       (`draw_rule`'un iki açılış satırı önce)
-- [ ] Dikdörtgen ve birleşim primitifleri, mevcut `coverage`/`max`
+- [x] Dikdörtgen ve birleşim primitifleri, mevcut `coverage`/`max`
       üstünden
-- [ ] Blok elemanları: `█`, sekizde birlik merdivenler, çeyrekler, üç gölge
-- [ ] Braille: alt 8 bitten nokta maskesi, **tablo yok**
-- [ ] Tasarım sabitleri adıyla ve gerekçeli (dama adımı, Braille nokta
-      geometrisi)
-- [ ] `Atlas::slot`: normalizasyon kolu (deseni `Normal`, `_` değil) +
+- [x] Blok elemanları: `█`, sekizde birlik merdivenler, çeyrekler, üç gölge
+- [x] Braille: alt 8 bitten nokta maskesi, **tablo yok**
+- [x] Tasarım sabitleri adıyla ve gerekçeli (`SHADE_LEVELS` — dama adımı
+      **değil**, bkz. Uygulama Notları; `BRAILLE_DOT_FILL`)
+- [x] `Atlas::slot`: normalizasyon kolu (deseni `Normal`, `_` değil) +
       guard'lı çizim kolu
-- [ ] Test: `█` bit bit 255
-- [ ] Test: Braille bit-max değişmezi (`0x2800` boş, maskelerin birleşimi,
+- [x] Test: `█` bit bit 255
+- [x] Test: Braille bit-max değişmezi (`0x2800` boş, maskelerin birleşimi,
       sekiz noktanın desteği ayrık)
-- [ ] Test: sekizde bir merdiveni monoton iç içe; `▀` + `▄` doygun toplamı
+- [x] Test: sekizde bir merdiveni monoton iç içe; `▀` + `▄` doygun toplamı
       255
-- [ ] Test: kalın yüz ile düz yüz **aynı yuvayı** paylaşıyor
-- [ ] Test: küçük sınıfta kapı kapalı (fonttan geliyor)
-- [ ] Değişmezler **en az üç (punto, ölçek) çiftinde** koşuyor
-- [ ] `the_gate_decides_by_width_alone`'un `continue` kapısı genişletildi
+- [x] Test: kalın yüz ile düz yüz **aynı yuvayı** paylaşıyor
+- [x] Test: küçük sınıfta kapı kapalı (fonttan geliyor)
+- [x] Değişmezler **en az üç (punto, ölçek) çiftinde** koşuyor
+- [x] `the_gate_decides_by_width_alone`'un `continue` kapısı genişletildi
       (`⠋`), `wide > 0` bekçisi ayakta
-- [ ] `face_fallback_is_cached_under_the_requested_face`'e yeni fikstür
+- [x] `face_fallback_is_cached_under_the_requested_face`'e yeni fikstür
       **ölçülerek** bulundu
-- [ ] Belgeler (R10'un bu phase'e düşen yarısı)
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] `make duman` — **regresyon nöbetçisi, kanıt değil**: duman betiği
+- [x] Belgeler (R10'un bu phase'e düşen yarısı)
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] `make duman` — **regresyon nöbetçisi, kanıt değil**: duman betiği
       donmuş (`session.rs`: "ikinci bir yük buraya eklenmez") ve
       `hucre=8 glif=6 kural=15` jetonları bu setin karakterlerine hiç
       dokunmuyor; birebir aynı kalmalı
-- [ ] **Gözle kontrol** (gerçek doğrulama; birleşim yasası "doğru
+- [x] **Gözle kontrol** (gerçek doğrulama; birleşim yasası "doğru
       geometri, yanlış karakter"i göremez): blok/Braille örnek sayfası ·
-      Claude Code'un maskotu · Claude Code'un spinner'ı
-- [ ] Yayın etkisi yazıldı
+      Claude Code'un maskotu · Claude Code'un spinner'ı — kullanıcı
+      onayladı (2026-09-21)
+- [x] Yayın etkisi yazıldı

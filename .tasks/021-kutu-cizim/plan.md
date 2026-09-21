@@ -103,6 +103,6 @@ draw_procedural:
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | kapı | |

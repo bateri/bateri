@@ -22,7 +22,7 @@
 | 018 | [klavye-ve-surukleme](018-klavye-ve-surukleme/) | 🟢 | metin girişi AppKit'in yığınından geçiyor (`NSTextInputClient`), **ölü tuşlar yazılabiliyor** (`~` ve `` ` `` Türkçe Q'da), Option+←/→/⌫ kelime geziyor/siliyor, Cmd+⌫ satırı siliyor, Finder damlası giriş satırına düşüyor. Elle tuş turu, Finder damlası ve press-and-hold gerçek pencerede doğrulandı; popover ölçümü bir bilinen sınırı da düşürdü (`replacementRange`) |
 | 019 | [glyph-yedegi](019-glyph-yedegi/) | 🔨 | `main`'de — seçili fontta olmayan tek hücrelik karakter sistemin cascade'inden geliyor (`⏵` düzeldi); kapı geometrik, hücreye sığmayan aday kutu kalıyor. Teslim bekliyor: `/measure` (yedeğin kare süresine etkisi, emanetteki sayılar) ve yol haritasının iki yeni borcu için ürün kararı — `teslim.md` |
 | 020 | [fare-raporlama](020-fare-raporlama/) | 🟢 | `main`'de — fare isteyen uygulama fareyi alıyor: düğme, bırakma ve hareket rapor oluyor, Shift terminali geri alıyor (uygulama içinde metin seçmenin tek yolu) |
-| 021 | [kutu-cizim](021-kutu-cizim/) | 📐 | Kutu/blok çizim ve Braille fonttan geliyor ve döşemiyor (maskot, spinner, her TUI çerçevesi); çare yordamsal çizim, `RuleKind` emsali. Emoji setinden ayrıldı — çıktı yine tek kanallı maske, `R8Unorm` atlas duruyor |
+| 021 | [kutu-cizim](021-kutu-cizim/) | 🔨 | Kutu/blok çizim ve Braille fonttan geliyor ve döşemiyor (maskot, spinner, her TUI çerçevesi); çare yordamsal çizim, `RuleKind` emsali. Emoji setinden ayrıldı — çıktı yine tek kanallı maske, `R8Unorm` atlas duruyor |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
