@@ -78,7 +78,7 @@ silinmez") ve emsal terminallerin hepsi anahtarsız.
 
 ### Yayın Checklist
 
-- [ ] `/ship` — üç commit `main`'e, indeks 🟢
+- [x] `/ship` — üç commit `main`'e, indeks 🟢
 
 ## Geri Alma
 
