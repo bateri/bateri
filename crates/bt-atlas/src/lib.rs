@@ -23,10 +23,13 @@
 //! bir sprite orada komşusunun üstüne binerdi.
 //!
 //! Seçili fontta olmayan **tek hücrelik** karakter sistemin cascade'inden
-//! geliyor (`font::fallback_font`) ve kapı **geometrik**: adayın ilerlemesi
-//! hücrenin ilerlemesini aşıyorsa reddediliyor. Yani emoji, CJK ve geniş
-//! glyph hâlâ [`TOFU`] — onları gerçekten çizmek (iki hücre, renkli doku)
-//! ayrı bir sete kaldı.
+//! geliyor (`font::fallback_font`) ve kapı **geometrik**: adayın
+//! **boyayacağı piksel** hücrenin dışına taşıyorsa reddediliyor. Ölçülen şey
+//! ilerleme değil mürekkep, çünkü sembol fontlarının glyph'leri
+//! ilerlemelerinden dar boyuyor (`⏺` U+23FA) ve ilerlemeyi ölçen bir kapı
+//! onları hücreye sığdıkları hâlde eliyordu. Emoji, CJK ve geniş glyph hâlâ
+//! [`TOFU`] — onları gerçekten çizmek (iki hücre, renkli doku) ayrı bir sete
+//! kaldı.
 
 mod font;
 mod raster;
@@ -138,7 +141,7 @@ pub struct Atlas {
     ///
     /// [`Metrics::cell_px`]'in genişliği bunun yukarı yuvarlanmışı ve
     /// ızgaranın adımı o; kesirli hâli burada duruyor çünkü iki tüketici
-    /// yuvarlanmışla çalışamıyor — yedek adayın genişlik kapısı
+    /// yuvarlanmışla çalışamıyor — yedek adayın mürekkep kapısı
     /// (`font::fallback_font`) ile glyph'in hücrede ortalanması
     /// (`raster::draw`). Gerekçenin tamamı `font::space_advance`'in doc'unda;
     /// iki sayının aynı ölçüyü verdiğinin bekçisi
@@ -629,11 +632,6 @@ fn tofu_buffer(m: Metrics) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::ptr::NonNull;
-
-    use objc2_core_foundation::CGRect;
-    use objc2_core_text::CTFontOrientation;
-
     use super::*;
 
     /// Sınama puntosu bilerek büyük: ızgara hücre ölçüsünden türüyor, yani
@@ -647,17 +645,35 @@ mod tests {
     /// Menlo ile SF Mono CJK içermez, yani taban font `.notdef` veriyor
     /// (`CTFontGetGlyphsForCharacters` cascade'e inmiyor). Yedek aramanın
     /// gelişiyle yol bir adım uzadı: cascade **bir aday buluyor** (PingFang
-    /// SC) ve o aday genişlik kapısından dönüyor — ilerlemesi hücrenin 1.66
-    /// katı (ölçüldü, bu makine, Menlo 13pt). Yani bu sabite dayanan
-    /// sınamalar "tofu" derken artık kapının da çalıştığını varsayıyor;
-    /// kapının kendi bekçisi [`the_gate_decides_by_width_alone`].
+    /// SC) ve o aday mürekkep kapısından dönüyor — hücre 7.827 iken mürekkebi
+    /// 0.70'ten 12.49'a uzanıyor (ölçüldü, bu makine, Menlo 13pt). CJK'de
+    /// ilerleme ile mürekkep birlikte geniş, yani kapı ölçütü değiştiğinde bu
+    /// karakterin cevabı değişmedi. Bu sabite dayanan sınamalar "tofu" derken
+    /// kapının da çalıştığını varsayıyor; kapının kendi bekçisi
+    /// [`the_gate_decides_by_ink_alone`].
     const UNKNOWN_CHAR: char = '漢';
     /// Yedeğin **kabul ettiği** karakter ve setin varlık sebebi: `⏵` Menlo'da
     /// yok, Claude Code'un `⏵⏵ auto mode on` göstergesi iki kutu çıkıyordu.
-    /// Ölçüldü (bu makine, macOS 26.4.1): STIX Two Math'ten geliyor ve
-    /// ilerlemesi hücrenin 0.84'ü — oran ölçekten bağımsız olduğu için iki boy
-    /// sınıfında da kapıyı geçiyor.
+    /// Ölçüldü (bu makine, macOS 26.4.1): STIX Two Math'ten geliyor,
+    /// ilerlemesi hücrenin 0.84'ü ve mürekkebi 0.69'u — oran ölçekten bağımsız
+    /// olduğu için iki boy sınıfında da kapıyı geçiyor. Kapı ilerlemeyi
+    /// ölçerken de mürekkebi ölçerken de kabul ettiği tek karakter bu, yani
+    /// **ölçüt değişikliğinin tanığı değil**: onun için [`INK_CHAR`] var.
     const FALLBACK_CHAR: char = '⏵';
+    /// Kapının **ölçütünü** sınayan karakter: ilerlemesi hücreyi aşıyor ama
+    /// mürekkebi hücreye sığıyor.
+    ///
+    /// `⏺` Claude Code'un araç işareti ve kullanıcıda kutu çıkıyordu. Ölçüldü
+    /// (bu makine, Menlo 16pt): aday yine STIX Two Math, ilerlemesi hücrenin
+    /// **1.046 katı** ama mürekkebi **0.914'ü** — yani ilerlemeyi ölçen kapı
+    /// hücreye rahat sığan bir glyph'i eliyordu. İki ölçütün ayrıştığı tek
+    /// tanık bu: [`FALLBACK_CHAR`] ikisinden de geçiyor, [`UNKNOWN_CHAR`]
+    /// ikisinde de eleniyor, yani ölçüt geri alınsa onlar bunu görmezdi.
+    ///
+    /// Listenin ötekilerinde olduğu gibi beklenti **sabite yazılmıyor**:
+    /// karakteri taşıyan bir font kurulu bir makinede taban fonttan gelir ve
+    /// yedek yolu hiç koşmaz.
+    const INK_CHAR: char = '⏺';
     /// Kapının **kuralını** sınamak için kullanılan karakterler: hepsi
     /// Menlo'da yok, yani yedek yoluna giriyorlar — `⠋` bir istisna ve
     /// listede kalma sebebi o: büyük sınıfta yordamsal çiziliyor, yani
@@ -671,18 +687,22 @@ mod tests {
     /// `make hepsi`'yi doğru kodda kırmızıya düşürürdü; bu yüzden beklenti
     /// listede değil, [`the_gate_decides_by_width_alone`] onu adayın kendi
     /// ilerlemesinden **türetiyor**.
-    const GATE_PROBES: [char; 8] = [
+    const GATE_PROBES: [char; 9] = [
         FALLBACK_CHAR,
+        INK_CHAR,
         '𝔸',
         UNKNOWN_CHAR,
         '\u{E0B0}',
         '\u{10FFFD}',
         '🎉',
         '\u{F8FF}',
-        // Braille: Apple Braille'den geliyor ve bu makinede 1.135× ile
-        // reddediliyordu (Claude Code'un spinner'ı). **Büyük sınıfta artık
-        // kapıya hiç gelmiyor** — yordamsal çiziliyor; listede kalmasının
-        // sebebi küçük sınıf, orada kapı kapalı ve yedek yolu hâlâ koşuyor.
+        // Braille: Apple Braille'den geliyor. **Büyük sınıfta kapıya hiç
+        // gelmiyor** — yordamsal çiziliyor; listede kalmasının sebebi küçük
+        // sınıf, orada yordamsal kapı kapalı ve yedek yolu hâlâ koşuyor.
+        // Cevabı ölçütle birlikte **değişen** ikinci karakter: ilerlemesi
+        // hücrenin 1.135 katı ama mürekkebi 2.62'den 8.34'e, yani 9.633'lük
+        // hücrenin içinde (ölçüldü, Menlo 16pt) — küçük sınıfta artık
+        // çiziliyor.
         '⠋',
     ];
     /// Hiçbir makinede olmayan aile; CoreText yerine başka bir font verir.
@@ -702,25 +722,6 @@ mod tests {
             ("düz yüz", a.faces.get(Face::Regular), a.cell_advance),
             ("küçük yüz", &a.small, a.context_advance),
         ]
-    }
-
-    /// Glyph'in mürekkep kutusu, taban çizgisine göre (y yukarı).
-    ///
-    /// Yalnız sınamada var ve üretimde **olmamalı**: genişlik kapısı
-    /// ilerlemeye bakıyor, mürekkep kutusuna değil. Buradaki iş kapının
-    /// göremediğini görmek — kırpma.
-    fn glyph_bounds(font: &CTFont, glyph: objc2_core_graphics::CGGlyph) -> CGRect {
-        let mut rects = [CGRect::ZERO; 1];
-        // SAFETY: tek glyph, tek dikdörtgen hücresi; sayı ikisiyle de tutarlı.
-        unsafe {
-            font.bounding_rects_for_glyphs(
-                CTFontOrientation::Horizontal,
-                NonNull::from(&glyph),
-                rects.as_mut_ptr(),
-                1,
-            );
-        }
-        rects[0]
     }
 
     #[test]
@@ -885,12 +886,13 @@ mod tests {
     #[test]
     fn fallback_glyph_fits_the_cell() {
         // `slot != TOFU` kırpmayı **göremez**: CG hücrenin dışına taşan
-        // mürekkebi sessizce kesiyor ve bitmap yine dolu görünür. Genişlik
-        // kapısı da yalnız **ilerlemeyi** ölçüyor; yan yatağı negatif ya da
-        // ascent'i yüksek bir aday kapıyı geçip yine kırpılabilir. Ölçüt bu
-        // yüzden fontun kendi sınır dikdörtgeni ve **dört kenar birden** —
-        // yatayda o sınıfın kesirli hücresi (komşu glyph o kadar ilerliyor),
-        // dikeyde yuvanın boyu (iki sınıf aynı yuvaya çiziliyor).
+        // mürekkebi sessizce kesiyor ve bitmap yine dolu görünür. Kapı
+        // yatayda artık mürekkebi ölçüyor, ama **dikeyde ölçmüyor** (gerekçe
+        // `font::ink_fits_cell`'in doc'unda: dikeyi eleyen tek küme emoji ve
+        // o zaten yatayda dönüyor) — ascent'i yüksek bir aday kapıyı geçip
+        // yine kırpılabilir. Ölçüt bu yüzden fontun kendi sınır dikdörtgeni
+        // ve **dört kenar birden**: yatayda kapının tanığı, dikeyde tek
+        // bekçi.
         let a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
         // CG'nin başlangıcı sol alt: taban çizgisi yuvanın dibinden bu kadar
@@ -901,8 +903,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{label}: '{FALLBACK_CHAR}' kapıdan geçmeli"));
             let glyph =
                 font::glyph_index(&alt, FALLBACK_CHAR).expect("kapıyı geçen aday çizebiliyor");
-            let rect = glyph_bounds(&alt, glyph);
-            let x = (cell - font::glyph_advance(&alt, glyph)) / 2.0;
+            let rect = font::glyph_ink(&alt, glyph);
+            let x = font::centre_shift(cell, font::glyph_advance(&alt, glyph));
             let (left, right) = (x + rect.origin.x, x + rect.origin.x + rect.size.width);
             assert!(left >= 0.0, "{label}: mürekkep soldan taştı ({left})");
             assert!(
@@ -950,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_decides_by_width_alone() {
+    fn the_gate_decides_by_ink_alone() {
         // Bekçinin sınadığı şey "bu karakter kutu mu" **değil**: o, makinede
         // hangi fontların kurulu olduğuna bağlı bir olgu ve kodun özelliği
         // değil. `U+E0B0` bu makinede `.LastResort`'a düşüyor ve reddediliyor,
@@ -958,11 +960,16 @@ mod tests {
         // **çizilmesi doğru olur**; beklentiyi sabite yazmak `make hepsi`'yi
         // doğru kodda kırmızıya düşürürdü.
         //
-        // Sınanan şey **kapının kuralı**: aday hücreye sığıyorsa çiziliyor,
-        // sığmıyorsa kutu. Beklenti adayın kendi ilerlemesinden türetiliyor,
-        // yani ölçüt her makinede aynı — ve gözlem ile beklenti iki ayrı
-        // çağrıdan geliyor (biri `fallback_font`, öteki `slot`), yani
-        // totoloji değil: kapı `slot`'un yolunda koşmuyorsa bu sınama düşer.
+        // Sınanan şey **kapının kuralı**: adayın boyayacağı piksel hücrenin
+        // içinde kalıyorsa çiziliyor, taşıyorsa kutu. Beklenti adayın kendi
+        // mürekkep kutusundan türetiliyor, yani ölçüt her makinede aynı — ve
+        // gözlem ile beklenti iki ayrı çağrıdan geliyor (biri `fallback_font`,
+        // öteki `slot`), yani totoloji değil: kapı `slot`'un yolunda
+        // koşmuyorsa bu sınama düşer.
+        //
+        // Beklenti **ilerlemeden** türetilseydi bu sınama iki karakterde
+        // kırmızı düşerdi ([`INK_CHAR`] ile `⠋`); listede kalmalarının sebebi
+        // o — ölçütün geri alınması sessiz kalmamalı.
         let mut a = atlas(POINT_SIZE, 1.0);
         let classes = size_classes(&a);
         let mut plan: Vec<(char, SizeClass, bool, String)> = Vec::new();
@@ -990,12 +997,22 @@ mod tests {
                 };
                 let glyph = font::glyph_index(&open, ch).expect("aday çizebiliyor");
                 let advance = font::glyph_advance(&open, glyph);
+                // Adayın **çizileceği yerdeki** mürekkebi: kaydırma
+                // `raster::draw`'in uyguladığının ta kendisi
+                // (`font::centre_shift`), yoksa sınama çizilmeyecek bir
+                // yerleşimi ölçerdi.
+                let ink = font::glyph_ink(&open, glyph);
+                let left = ink.origin.x + font::centre_shift(cell, advance);
+                let right = left + ink.size.width;
                 let family = unsafe { open.family_name() }.to_string();
                 plan.push((
                     ch,
                     size,
-                    advance <= cell,
-                    format!("{label}, {family}, ilerleme {advance} / hücre {cell}"),
+                    left >= 0.0 && right <= cell,
+                    format!(
+                        "{label}, {family}, mürekkep {left}..{right} / hücre {cell} \
+                         (ilerleme {advance})"
+                    ),
                 ));
             }
         }
@@ -1380,13 +1397,25 @@ mod tests {
         // kadar büyürdü ve bir ikili dosyayı `cat`'lemek bunu gerçek bir yola
         // çevirir. Crate'in tavanı olmayan tek sayısı burasıydı.
         //
-        // **Havuz yedek aramadan sonra da çalışıyor** ve bu bir varsayım
-        // değil: oran ölçekten bağımsız olduğu için CJK bu puntoda da
-        // reddediliyor. Ama artık her kayıt bir `CTFontCreateForString`
-        // ödüyor, o yüzden havuzun bedeli ölçüldü ve daraltmak gerekmedi;
-        // sayısı ve ortamı `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama
-        // Notları'nda emanette.
-        let pool: Vec<char> = ('\u{4e00}'..'\u{9fff}').take(cap * 3).collect();
+        // **Havuz yedek aramadan sonra da çalışıyor**, ama artık her kayıt
+        // bir `CTFontCreateForString` ödüyor; havuzun bedeli ölçüldü ve
+        // daraltmak gerekmedi, sayısı ve ortamı
+        // `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama Notları'nda emanette.
+        //
+        // Havuz **filtreli** ve bu bir kolaylık değil zorunluluk: kapı
+        // ilerlemeyi ölçerken CJK'nın tamamı dönüyordu, mürekkebi ölçerken
+        // dar boyayan üyeleri (`丨` U+4E28 bir dikey çubuk) geçiyor ve yuva
+        // alıyor. Deneyin konusu negatif önbellek, yani havuza yalnız
+        // gerçekten reddedilenler giriyor; kapının kendi bekçisi
+        // [`the_gate_decides_by_ink_alone`] ve filtre onun cevabını
+        // sormaktan ibaret.
+        let pool: Vec<char> = {
+            let (_, base, cell) = size_classes(&a)[0];
+            ('\u{4e00}'..'\u{9fff}')
+                .filter(|&ch| font::fallback_font(base, ch, cell).is_none())
+                .take(cap * 3)
+                .collect()
+        };
         assert!(pool.len() > cap, "havuz tavanı aşmalı");
         for &ch in &pool {
             assert_eq!(

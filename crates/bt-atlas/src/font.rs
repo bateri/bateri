@@ -7,7 +7,7 @@
 
 use std::ptr::{self, NonNull};
 
-use objc2_core_foundation::{CFIndex, CFRange, CFRetained, CFString, CGFloat, CGSize};
+use objc2_core_foundation::{CFIndex, CFRange, CFRetained, CFString, CGFloat, CGRect, CGSize};
 use objc2_core_graphics::CGGlyph;
 use objc2_core_text::{CTFont, CTFontOrientation, CTFontSymbolicTraits};
 
@@ -464,7 +464,7 @@ pub(crate) fn rule_envelope(top: u16, thickness: u16, cell_h: u16) -> (u16, u16)
 ///
 /// Dönüş **yuvarlanmamış** ve `pub(crate)` olmasının sebebi bu: ızgaranın
 /// adımı yuvarlanmış hâli ([`Metrics::cell_px`]) ama iki tüketici kesirli
-/// hâli istiyor — [`fallback_font`]'un genişlik kapısı ile
+/// hâli istiyor — [`fallback_font`]'un mürekkep kapısı ile
 /// [`crate::raster::draw`]'in ortalaması. İkisi de yuvarlanmışla çalışsaydı
 /// taban fontun **kendi** glyph'i hücreden dar görünür (7.827 < 8) ve
 /// ortalama her glyph'i yarım pikselin altında kaydırırdı: çıktı bit bit aynı
@@ -479,7 +479,7 @@ pub(crate) fn space_advance(font: &CTFont) -> CGFloat {
 /// Bir glyph'in yatay ilerlemesi, **kesirli**.
 ///
 /// [`space_advance`]'ten ayrılmasının sebebi ikinci çağıran: yedek adayın
-/// genişlik kapısı ile `raster::draw`'in ortalaması karakterin **kendi**
+/// mürekkep kapısı ile `raster::draw`'in ortalaması karakterin **kendi**
 /// glyph'ini ölçüyor, boşluğu değil.
 pub(crate) fn glyph_advance(font: &CTFont, glyph: CGGlyph) -> CGFloat {
     let mut advance = [CGSize::ZERO; 1];
@@ -493,6 +493,61 @@ pub(crate) fn glyph_advance(font: &CTFont, glyph: CGGlyph) -> CGFloat {
         );
     }
     advance[0].width
+}
+
+/// Bir glyph'in **mürekkep** kutusu: gerçekten boyanacak piksellerin sınırı,
+/// taban çizgisinin soluna/üstüne göre ve **kesirli**.
+///
+/// [`glyph_advance`]'ten ayrı bir ölçü ve ikisinin ayrışması kapının varlık
+/// sebebi: bir sembol fontunun glyph'i ilerlemesinden dar boyayabiliyor
+/// (`⏺` U+23FA, STIX Two Math'te ilerleme hücrenin 1.046 katı ama mürekkep
+/// 0.914'ü — ölçüldü, bu makine, Menlo 16pt). İlerlemeyi ölçen bir kapı onu
+/// eler ve kullanıcı yerinde bir kutu görür.
+pub(crate) fn glyph_ink(font: &CTFont, glyph: CGGlyph) -> CGRect {
+    let mut rect = [CGRect::ZERO; 1];
+    // SAFETY: tek glyph, tek ölçü hücresi; sayı ikisiyle de tutarlı.
+    unsafe {
+        font.bounding_rects_for_glyphs(
+            CTFontOrientation::Horizontal,
+            NonNull::from(&glyph),
+            rect.as_mut_ptr(),
+            1,
+        );
+    }
+    rect[0]
+}
+
+/// Glyph'in hücre içindeki yatay kaydırması — **tek formül, iki tüketici**.
+///
+/// Çizim ([`crate::raster::draw`]) glyph'i buraya koyuyor, kapı
+/// ([`fallback_font`]) mürekkebi buradan ölçüyor. Ayrı yazılsalardı kapı
+/// çizilmeyecek bir yerleşimi sınar ve ikisi sessizce ayrışırdı: kabul edilen
+/// bir aday hücrenin dışına boyayabilir ya da sığan bir aday elenirdi.
+///
+/// `max(0.0)` çizimin kendi kuralı: ilerlemesi hücreyi aşan bir glyph sola
+/// yapışıyor, çünkü kırpma sağdan olmalı — gerekçe [`crate::raster::draw`]'in
+/// gövdesinde. Kapının bunu **aynen** paylaşması şart, yoksa negatif bir
+/// kaydırma varsayıp adayın solunu hücrenin içinde sanırdı.
+pub(crate) fn centre_shift(cell_advance: CGFloat, advance: CGFloat) -> CGFloat {
+    ((cell_advance - advance) / 2.0).max(0.0)
+}
+
+/// Adayın boyayacağı piksel hücrenin **içinde** mi kalıyor.
+///
+/// Ölçüt yatay ve yalnız yatay. Dikeyi de sınamak bugün **hiçbir adayı
+/// elemiyor** (ölçüldü: yatay kapıyı geçen her aday hücrenin taban çizgisi
+/// penceresine de sığıyor; dikeyde taşan tek küme emoji ve o zaten yatayda
+/// dönüyor), yani ikinci ölçüt yazılmış ama tanığı olmayan bir kural olurdu.
+/// Sınır adıyla yazılı: dikeyde taşan bir aday bugün kutuya değil **kırpmaya**
+/// düşer.
+fn ink_fits_cell(font: &CTFont, glyph: CGGlyph, cell_advance: CGFloat) -> bool {
+    let shift = centre_shift(cell_advance, glyph_advance(font, glyph));
+    let ink = glyph_ink(font, glyph);
+    let left = ink.origin.x + shift;
+    // Sol kenar da sınanıyor: negatif `origin.x` taşıyan bir aday hücreye
+    // soldan taşar ve CG onu **soldan** keser. Latin yazıda harf soldan
+    // tanınıyor, yani o kırpma sessiz bir bozulma olurdu — kutu dürüsttür.
+    left >= 0.0 && left + ink.size.width <= cell_advance
 }
 
 /// `ch`'i çizebilen bir sistem fontu — **hücreye sığıyorsa**.
@@ -510,17 +565,32 @@ pub(crate) fn glyph_advance(font: &CTFont, glyph: CGGlyph) -> CGFloat {
 ///    dönebilir ve o hâlde bu adım `None` verir — buraya ancak `base`
 ///    `.notdef` verdikten sonra düşülüyor, yani ayrı bir "aynı font mu"
 ///    karşılaştırması gerekmiyor.
-/// 3. **Genişlik kapısı.** `advance <= cell_advance`, ve **reddin tek ölçütü
-///    bu**: emoji (2.17×), `.LastResort` (1.83×) ve CJK (1.66×) aynı kapıdan
-///    eleniyor. Aile adı karşılaştırması, trait biti ve sihirli dizge yok —
-///    ölçülen sayılar `.tasks/019-glyph-yedegi/phase-1.md`'de. Sınır
-///    **kesirli** hücre ilerlemesi ([`space_advance`]), yuvarlanmış hücre
-///    genişliği değil: aynı sayı `raster::draw`'in ortalamasını da besliyor
-///    ve iki iş için iki sayı tutmak ikisini ayrıştırırdı.
+/// 3. **Mürekkep kapısı** ([`ink_fits_cell`]). Aday, çizileceği yerde
+///    hücrenin dışına boyuyor mu — ve **reddin tek ölçütü bu**: emoji, CJK ve
+///    `.LastResort` aynı kapıdan eleniyor, çünkü onların mürekkebi
+///    ilerlemeleri kadar geniş. Aile adı karşılaştırması, trait biti ve
+///    sihirli dizge yok; ölçülen sayılar
+///    `.tasks/019-glyph-yedegi/phase-1.md`'de. Sınır **kesirli** hücre
+///    ilerlemesi ([`space_advance`]), yuvarlanmış hücre genişliği değil: aynı
+///    sayı `raster::draw`'in ortalamasını da besliyor ve iki iş için iki sayı
+///    tutmak ikisini ayrıştırırdı.
 ///
-/// Sıfır ilerlemeli aday kapıdan **geçer** (`0 <= cell`); çizilecek şey
-/// görünmez bir glyph olur, kutu değil. Bugün bu yol doğmuyor çünkü
-/// birleştirici işaretler grid hücresine ayrı bir sprite olarak hiç gelmiyor.
+/// Ölçüt bir dönem **ilerlemeydi** (`advance <= cell_advance`) ve belirtisi
+/// kullanıcıda görüldü: Claude Code'un araç işareti `⏺` (U+23FA) kutu
+/// çıkıyordu. Sebep ölçüldü — STIX Two Math'ten gelen aday hücreden %4.6
+/// geniş **ilerliyor** ama %8.6 dar **boyuyor**, yani ilerlemeyi ölçen kapı
+/// hücreye rahat sığan bir glyph'i eliyordu. 019'un kalibrasyon örneklerinde
+/// (2.17× / 1.83× / 1.66×) 1.0'ın yakınında hiçbir aday yoktu ve kapı sembol
+/// fontlarına karşı hiç sınanmamıştı.
+///
+/// Ölçütün değişmesi ters yöndeki boşluğu da kapatıyor: dar ilerleyip geniş
+/// boyayan bir aday artık **kutu**, eskiden sessizce sağdan kırpılıyordu.
+/// "Kutu ya da tam glyph" ilk kez bir dilek değil sözleşme.
+///
+/// Mürekkebi olmayan aday kapıdan **geçer** (sıfır genişlik her hücreye
+/// sığar); çizilecek şey görünmez bir glyph olur, kutu değil. Bugün bu yol
+/// doğmuyor çünkü birleştirici işaretler grid hücresine ayrı bir sprite
+/// olarak hiç gelmiyor.
 ///
 /// **Log yok:** fonksiyon [`crate::Atlas::slot`]'un çizim yolunda ve glyph
 /// başına basılan bir satır kare bütçesinin ortasına düşerdi
@@ -541,7 +611,7 @@ pub(crate) fn fallback_font(
     // SAFETY: `base` ve `text` bu kapsamda canlı; `range` string'in tamamı.
     let candidate = unsafe { base.for_string(&text, range) };
     let glyph = glyph_index(&candidate, ch)?;
-    (glyph_advance(&candidate, glyph) <= cell_advance).then_some(candidate)
+    ink_fits_cell(&candidate, glyph, cell_advance).then_some(candidate)
 }
 
 /// Yukarı yuvarlar ve `u16`'ya sıkıştırır.
