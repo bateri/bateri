@@ -595,7 +595,10 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 - **Klavye kalanları: Home/End ve iki Control borcu.** Home/End bilerek
   yutuluyor (yutmayı bağlayan sınama duruyor): tüketicisi less/vim, yani tam
   ekran uygulama borcu — varsayılan zsh'te `^[[H`/`^[[F`/`^[OH`/`^[OF` için
-  **sıfır** bağlama ölçüldü, yani kabukta görünür kazancı yok. **Şekli
+  **sıfır** bağlama ölçüldü, yani kabukta görünür kazancı yok. Borç **yalnız o
+  yarısı**: kabuğun satır başı/sonu jesti 2026-09-21'de ⌘←/⌘→ ile kapandı
+  (`\x01`/`\x05`; izin listesi `view::reaches_terminal`, gerekçesi
+  `encode_key`'in kolunda). **Şekli
   bağlandı:** `bt_core::Arrow` **genişletilmez** — doc'u "klavyenin dördü,
   tekerleğin ikisi" diyor ve tekerlek onu gerçekten kuruyor (`session.rs`),
   genişletmek o değişmezi bozar ve tekerleğe "Home" ifade etme yetkisi

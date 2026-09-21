@@ -60,8 +60,11 @@ vertex'ini **aynen** paylaşıyor — ayrılan yalnız fragment, çünkü caret'
 yuvarlak köşesini, kenarını ve halesini bir SDF çiziyor ve o hesabı kare
 başına binlerce arka plan dörtgenine ödetmenin anlamı yok. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
 yığınından geçer**: `keyDown:` tek kapı değil dört kollu bir arbitraj —
-Cmd'li olay **kapalı bir izin listesinin tek tuşu dışında** yutulur (⌘⌫ →
-`\x15`, zsh'te `kill-whole-line`; liste kapalı kalmak zorunda, yoksa bir gün
+Cmd'li olay **kapalı bir izin listesinin üç tuşu dışında** yutulur (⌘⌫ →
+`\x15` `kill-whole-line`, ⌘← → `\x01` `beginning-of-line`, ⌘→ → `\x05`
+`end-of-line`; üçü de macOS'un satır jesti ve üçünün de baytı zsh'te
+**gerçekten** bağlı — 018'in ölçtüğü karşılıksız diziler Home/End'in
+şekliydi, bu baytlar değil. Liste kapalı kalmak zorunda, yoksa bir gün
 Cmd-T kabuğa `t` yazar) ve geçen tuş da yığına girmez,
 Shift+PgUp/PgDn terminalin kaydırmasıdır, **Control'lü
 olay yığına hiç girmez** (numpad Enter'ın U+0003'ü Ctrl-C ile, Ctrl-Y'nin

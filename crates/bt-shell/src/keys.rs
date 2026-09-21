@@ -35,6 +35,15 @@ const PAGE_DOWN: char = '\u{f72d}';
 /// birinde kaymasına açık kapı bırakırdı.
 pub(crate) const BACKSPACE: char = '\u{7f}';
 
+/// `NSLeftArrowFunctionKey` ve `NSRightArrowFunctionKey`.
+///
+/// `BACKSPACE` ile `PAGE_UP` emsali ve aynı gerekçe: ikisi de **iki yerde**
+/// okunuyor — Cmd'nin kapalı izin listesi (`view::reaches_terminal`) ve o
+/// listenin baytı ([`encode_key`]) — ve iki yerde ayrı yazılan bir literal
+/// birinde kayardı. Yukarı/aşağı ok literal kalıyor: onları tek yer okuyor.
+pub(crate) const ARROW_LEFT: char = '\u{f702}';
+pub(crate) const ARROW_RIGHT: char = '\u{f703}';
+
 /// Dizge **tam olarak tek karakter** mi — öyleyse o karakter, değilse `None`.
 ///
 /// Ölçütün **tek sahibi** burası ve üç tüketicisi var: [`encode_key`]'in
@@ -87,8 +96,8 @@ pub(crate) struct KeyPress<'a> {
     /// harfe dokunmuyor (aşağıda, R3.2).
     pub(crate) option: bool,
     /// Command (⌘) basılı. Buraya **yalnız** izin listesinden geçen tuş
-    /// geliyor (`view::reaches_terminal`), yani bayrağın tek işi ⌘⌫'i
-    /// ⌥⌫'ten ayırmak.
+    /// geliyor (`view::reaches_terminal`), yani bayrağın tek işi listenin üç
+    /// tuşunu (⌘⌫, ⌘←, ⌘→) Option'lı hâllerinden ayırmak.
     pub(crate) command: bool,
 }
 
@@ -110,8 +119,8 @@ pub(crate) struct KeyPress<'a> {
 ///    yok, tuş uygulamaya düz dizi olarak gidiyor.
 /// 4. **Yığının tanımadığımız bir tiple verdiği metin** — `insertText:`'in
 ///    downcast'i tutmazsa olay tüketilmiş sayılmıyor ve buraya düşüyor.
-/// 5. **Cmd'nin kapalı izin listesinden geçen tuş** — ⌘⌫; Cmd'li olay
-///    yığına **hiç girmiyor**, kararı `view::reaches_terminal` veriyor.
+/// 5. **Cmd'nin kapalı izin listesinden geçen tuş** — ⌘⌫, ⌘← ve ⌘→; Cmd'li
+///    olay yığına **hiç girmiyor**, kararı `view::reaches_terminal` veriyor.
 ///
 /// Düz metin dalı bu yüzden **kalkmadı**: 2. ve 4. kümenin baytı oradan
 /// çıkıyor ve Ctrl'lü harf (1.) de aynı dala düşebiliyor.
@@ -136,7 +145,7 @@ pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
     // `view::reaches_terminal` de aynı soruyu oradan soruyor.
     let single = only_char(key.chars).is_some();
     let bytes: Cow<'static, [u8]> = match (c, key.ctrl) {
-        // Cmd'nin kapalı izin listesindeki **tek** tuş: ⌘⌫ → `\x15` (`^U`,
+        // Cmd'nin kapalı izin listesinin ilk tuşu: ⌘⌫ → `\x15` (`^U`,
         // zsh'te `kill-whole-line`). macOS'un katı anlamı "satır **başına
         // kadar** sil" ama zsh'te `backward-kill-line` varsayılanda hiç bağlı
         // değil (ölçüldü) — beklenti satırın gitmesi, `^U` tam onu yapıyor
@@ -144,6 +153,27 @@ pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // kelimeyi değil — izin listesi adı konmuş bir istisna, Option'ın
         // sınıfı bir kural.
         (BACKSPACE, _) if key.command && single => Cow::Borrowed(b"\x15"),
+        // İzin listesinin diğer iki tuşu: ⌘← → `\x01` (`^A`,
+        // `beginning-of-line`), ⌘→ → `\x05` (`^E`, `end-of-line`). ⌘⌫'in
+        // kararının aynısı — macOS'un satır başı/sonu jesti, zsh'in o işi
+        // **gerçekten** yapan baytıyla.
+        //
+        // 018 Karar 3 bu iki tuşu reddetmişti ve gerekçesi iki parçaydı:
+        // "istenmedi" ile "Home/End dizileri zsh'te karşılıksız". İlki
+        // düştü (kullanıcı istedi, 2026-09-21), ikincisi **hiç bu tuşların
+        // gerekçesi değildi**: ölçüm `^[[H`/`^[[F`/`^[OH`/`^[OF` için sıfır
+        // bağlama gösteriyor ama `^A`/`^E` emacs keymap'inde (zsh'in
+        // varsayılanı) `beginning-of-line`/`end-of-line`'a bağlı — yani
+        // reddin ölçümü Home/End'in şekline aitti, bu baytlara değil.
+        // Ghostty, VS Code ve Warp da aynı iki baytı gönderiyor.
+        //
+        // **Bilinen bedel, ⌘⌫'inkiyle aynı sınıfta:** `viins` keymap'inde
+        // `^A`/`^E` `self-insert`, yani vi kipinde satıra bir kontrol
+        // karakteri düşer (ölçüldü). Option'ın `\eb`/`\ef`'i de orada
+        // `undefined-key` ve o takas kabul edilmişti; vi kipinin satır
+        // başı/sonu tuşu `0`/`$`.
+        (ARROW_LEFT, _) if key.command && single => Cow::Borrowed(b"\x01"),
+        (ARROW_RIGHT, _) if key.command && single => Cow::Borrowed(b"\x05"),
         // Option'ın **gezinme/silme** sınıfı → Meta dizileri. Ayar sorulmuyor,
         // çünkü bu tuşlar hiçbir klavye düzeninde basılabilir karakter
         // üretmiyor: çatışma Option'lı **harfte** ve orası dokunulmadan
@@ -159,8 +189,8 @@ pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // Ctrl'lü ya da Shift'li Option+ok da kelime gezer, ⌥'in bu sınıfta
         // ikinci bir anlamı yok.
         (BACKSPACE, _) if key.option && single => Cow::Borrowed(b"\x1b\x7f"),
-        ('\u{f702}', _) if key.option && single => Cow::Borrowed(b"\x1bb"),
-        ('\u{f703}', _) if key.option && single => Cow::Borrowed(b"\x1bf"),
+        (ARROW_LEFT, _) if key.option && single => Cow::Borrowed(b"\x1bb"),
+        (ARROW_RIGHT, _) if key.option && single => Cow::Borrowed(b"\x1bf"),
         // Sayısal tuş takımının Enter'ı ve Fn-Return `NSEnterCharacter` =
         // U+0003 verir — Ctrl-C'nin baytıyla aynı. Ctrl basılı DEĞİLSE bu bir
         // satır sonudur; bu kol olmasaydı düz metin dalından 0x03 olarak geçer
@@ -174,8 +204,8 @@ pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         ('\u{19}', false) if single => Cow::Borrowed(b"\x1b[Z"),
         ('\u{f700}', _) if single => return Some(KeyInput::Arrow(Arrow::Up)),
         ('\u{f701}', _) if single => return Some(KeyInput::Arrow(Arrow::Down)),
-        ('\u{f702}', _) if single => return Some(KeyInput::Arrow(Arrow::Left)),
-        ('\u{f703}', _) if single => return Some(KeyInput::Arrow(Arrow::Right)),
+        (ARROW_LEFT, _) if single => return Some(KeyInput::Arrow(Arrow::Left)),
+        (ARROW_RIGHT, _) if single => return Some(KeyInput::Arrow(Arrow::Right)),
         // `xterm-256color`'ın `kpp`/`knp`'si: less ve vim sayfa gezmeyi bu
         // iki diziden okuyor. Shift'li hâl buraya **gelmez** — o terminalin
         // kaydırması ([`page_scroll`]), `view` önce onu soruyor. Alternate
@@ -462,7 +492,7 @@ mod tests {
 
     #[test]
     fn command_backspace_kills_the_whole_line() {
-        // Cmd'nin kapalı izin listesindeki **tek** tuş. `\x15` = `^U`, zsh'te
+        // İzin listesinin ilk tuşu. `\x15` = `^U`, zsh'te
         // `kill-whole-line`: macOS'un "satır başına kadar sil"i zsh'te
         // varsayılanda bağlı değil (ölçüldü) ve kullanıcının ölçütü satırın
         // gitmesi (018 Karar 3).
@@ -481,6 +511,35 @@ mod tests {
         // (`view::reaches_terminal`); Cmd'li başka bir karakter gelseydi
         // bayrak onu değiştirmezdi.
         assert_eq!(encode(command("t")), b"t");
+    }
+
+    #[test]
+    fn command_arrows_jump_to_the_line_edges() {
+        // İzin listesinin diğer iki tuşu: `\x01` = `^A` (`beginning-of-line`),
+        // `\x05` = `^E` (`end-of-line`). Şekil `Arrow` **değil**: bu iki bayt
+        // DECCKM'den bağımsız, tıpkı ⌘⌫'in `\x15`'i gibi — ok baytının kipe
+        // bağlı olması aşağıdaki Cmd'siz kolun konusu.
+        let (left, right) = (ARROW_LEFT.to_string(), ARROW_RIGHT.to_string());
+        assert_eq!(encode(command(&left)), b"\x01");
+        assert_eq!(encode(command(&right)), b"\x05");
+        // Cmd, Option'ın **önünde** (⌘⌥⌫ emsali): ⌘⌥← satır başına gider,
+        // kelime başına değil.
+        assert_eq!(
+            encode(KeyPress {
+                option: true,
+                ..command(&left)
+            }),
+            b"\x01"
+        );
+        // Cmd'siz ok yine **ok**, bayt değil: kipi `bt-core` biliyor.
+        assert_eq!(encode_key(plain(&left)), Some(KeyInput::Arrow(Arrow::Left)));
+        assert_eq!(
+            encode_key(plain(&right)),
+            Some(KeyInput::Arrow(Arrow::Right))
+        );
+        // Tek karakterlik eşleşme, PgUp ve ⌘⌫ ile aynı ölçüt: bileşimin ilk
+        // karakteri satır başı diye okunmaz.
+        assert!(encode_key(command(&format!("{ARROW_LEFT}x"))).is_none());
     }
 
     #[test]
