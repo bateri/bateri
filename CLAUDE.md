@@ -23,14 +23,25 @@ karakter sistemin cascade'inden geliyor** (`font::fallback_font`, 019): yüz
 merdiveni tükendikten sonra, negatif önbellekten önce, yani anahtar başına
 atlasın ömründe bir kez ve kabul edilen aday sıradan bir yuvaya düşüyor —
 yeni önbellek, yeni tavan, yeni tahliye yok. **Kapı geometrik**: adayın
-ilerlemesi hücrenin ilerlemesini aşıyorsa kutu kalıyor, ve emoji, `.LastResort`,
-CJK ile geniş matematik harfi o **tek** kapıdan eleniyor — aile adı
-karşılaştırması, trait biti ve sihirli dizge yok (oranlar ölçüldü, sayıları
-`.tasks/019-glyph-yedegi/phase-1.md` → Uygulama Notları). Kapı **yalnız
-ilerlemeyi** ölçüyor, mürekkep kutusunu değil: dar ilerleyen ama geniş boyayan
-bir aday geçer ve sağdan kırpılır, yani "kutu ya da tam glyph" bir dilek değil
-ilerleme ölçüsünde bir söz. Alternatifi yarım çizilmiş bir glyph'ti: kutu
-görünür bir eksiklik, kırpılmış glyph sessiz bir bozulma. Boy sınıfının ikisi
+**boyayacağı piksel** hücrenin dışına taşıyorsa kutu kalıyor, ve emoji,
+`.LastResort`, CJK ile geniş matematik harfi o **tek** kapıdan eleniyor — aile
+adı karşılaştırması, trait biti ve sihirli dizge yok (oranlar ölçüldü, sayıları
+`.tasks/019-glyph-yedegi/phase-1.md` → Uygulama Notları). Ölçülen şey
+**mürekkep**, ilerleme değil, ve ölçüt sonradan değişti: 019 kapıyı
+ilerlemeye kurmuştu ve belirtisi kullanıcıda görüldü — Claude Code'un araç işareti `⏺`
+(U+23FA) kutu çıkıyordu, çünkü STIX Two Math'ten gelen aday hücreden %4.6
+geniş **ilerliyor** ama %8.6 dar **boyuyor**. 019'un kalibrasyon örneklerinde
+(2.17× / 1.83× / 1.66×) 1.0'ın yakınında hiçbir aday yoktu, yani kapı sembol
+fontlarına karşı hiç sınanmamıştı. Ölçüt ters yöndeki boşluğu da kapatıyor:
+dar ilerleyip geniş boyayan aday eskiden geçip sağdan kırpılıyordu, artık
+kutu — yani "kutu ya da tam glyph" ilk kez bir dilek değil sözleşme.
+Alternatifi yarım çizilmiş bir glyph'ti: kutu görünür bir eksiklik, kırpılmış
+glyph sessiz bir bozulma. Ölçüt **yatay ve yalnız yatay**; dikeyi de sınamak
+bugün hiçbir adayı elemiyor (ölçüldü: dikeyde taşan tek küme emoji ve o zaten
+yatayda dönüyor), o yüzden dikey taşma kutuya değil kırpmaya düşüyor ve sınır
+adıyla yazılı (`font::ink_fits_cell`). Kaydırmanın formülü **tek yerde**
+(`font::centre_shift`, iki tüketici): kapı adayın **çizileceği** yerdeki
+mürekkebini ölçmek zorunda, yoksa çizilmeyen bir yerleşimi sınardı. Boy sınıfının ikisi
 de **ayrı ayrı** değerlendiriliyor; yedeğin tabanı ile sınırı o sınıfın kendi
 fontu, yoksa küçük satıra büyük punto glyph düşerdi. Glyph hücrede
 **ortalanıyor** ve kural evrensel, yedeğe koşullu değil: eşaralıklı taban
@@ -454,8 +465,12 @@ Tekerleğin işaretçisi reddin dışında, çünkü o bir seçim ucu değil rap
 giden koordinat — reddedilseydi band ekrandayken kaydırma büsbütün ölürdü.
 Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app` paketini
 üretir.
-Emoji ve geniş glyph henüz yok: ikisi de **tek hücrelik yedeğin genişlik
-kapısından** eleniyor (yukarıda), yani kutu çiziliyor. **Blok elemanları, Braille ve
+Emoji ve geniş glyph henüz yok: ikisi de **tek hücrelik yedeğin mürekkep
+kapısından** eleniyor (yukarıda), yani kutu çiziliyor — mürekkepleri
+ilerlemeleri kadar geniş. Geniş ilan edilmiş ama **dar boyayan** karakter
+(`丨` U+4E28, Claude Code'un `⏺`'ü) artık çiziliyor; ızgara ona iki sütun
+ayırıyor, spacer hücresi zaten glyph vermiyor (`Session::frame`) ve sütun
+kayması doğmuyor. **Blok elemanları, Braille ve
 çizgi çizim kapının konusu değil, artık yordamsal çiziliyor** (021,
 `raster::is_procedural`): U+2580–U+259F, U+2800–U+28FF ile U+2500–U+257F
 fonta hiç sorulmadan hücre ölçüsünden hesaplanıyor ve kapı `Atlas::slot`'ta,
@@ -463,7 +478,7 @@ fonta hiç sorulmadan hücre ölçüsünden hesaplanıyor ve kapı `Atlas::slot`
 ve "fontta yoksa yordamsal çiz" yanlış kol olurdu: `█` Menlo'da *var* ama
 hücreyi doldurmuyor (8×18 hücrenin yalnız 3–16 satırları), yani yedeğe hiç
 gitmeden bozuk geliyor; `⠋` ise Menlo'da yok ve yedek koşarsa Apple
-Braille'den gelip genişlik kapısından dönüyordu. **Yordamsal çizim fontu
+Braille'den gelirdi. **Yordamsal çizim fontu
 koşulsuz yeniyor** — kullanıcı bu karakterleri taşıyan bir font seçse de
 kazanıyor, çünkü fontun em kutusunun hücre kutusu olacağını garanti edecek
 hiçbir ölçüt yok; 012 phase-9'un prompt işareti kararının aynısı. Yüz
@@ -551,7 +566,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread (PTY okuma yolu **taranıyor**: araya giren sarmalayıcı baytları aynen geçirir, geçerken **üç** OSC numarasını ve **bir** CSI dizisini çeker), OSC (7/8/9/52; 7 çalışma dizinini dock'un bağlam satırına verir, 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, farenin düğme/hareket/tekerlek raporu; kipten karar veren tablolar `input::button_route`/`motion_route`/`wheel_route`), ayar modeli, shell bağlamı. Tarayıcının üç kolu var ve üçü de alacritty'de **yok** (`vte` üçünü de `unhandled`'a düşürüyor): OSC 133 oturumun safhasını ve blok kimliklerini `ShellState`'e yazar (`Session::shell_state()`), OSC 8133 ZLE'nin görüntü aynasını — `PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlight`, `CURSOR`, base64 gövdelerle — çözüp `DockState`'e (`Session::dock_state()`) ve dalı `DockContext`'e, OSC 7 de çalışma dizinini yine `DockContext`'e (yüzde çözme ve yabancı host elenmesi orada; bozuk URI panik değil yoksayma). Aynanın kendi yük sınırı var ve aşımı **görünür** (`DockStatus::Unavailable`), sessizce düşmez. **Dördüncü kol OSC değil CSI** ve yükü yok: `CSI 2 J`'yi tanıyıp "ekran kasten temizlendi" bayrağını kurar (`Session::observe_screen_clear`; `3J` ve RIS için kol **yok**, ikisi de geçmişi siliyor). **Alternatif ekranda kurmaz** — orada `ClearMode::All` `reset_region(..)` çağırıyor, geçmiş büyümüyor ve birincil ekranın durumuna dokunulmuyor, yani geri getirilmeyecek bir şey yok; nesil yine de **tüketilir**, yoksa `vim`'den çıkışta birikmiş sayaç bayrağı kurar ve doldurma ilk `vim`'den sonra kalıcı olarak kapanırdı. Bayrak **defter temizlemeden sonra büyüyünce** düşer: geçmişe temizlemeden sonra satır düşmüş demektir ve doldurma o kadarını güvenle geri verebilir. Ölçüt bir damga ve tek karşılaştırma (`Session::screen_clear_history`); damga bayrak kurulduktan **sonraki** ilk karede alınıyor, çünkü kuran kare ızgarayı henüz temizlenmemiş görebiliyor ve temizlemenin kendisi satırları geçmişe itiyor — bayat damga anında aşılırdı. Üstünde iki koşul var — alternatif ekranda değil ve `display_offset == 0`; ikincisi olmasa geçmişe kaydırılan pencere dolu **görünür** ve tek bir tekerlek jesti Ctrl-L'i geri alırdı. (Bu koşul **bayrağın ömrüne** ait; doldurmanın kendi `display_offset` kapısı ayrı bir şey ve ayrı gerekçeli.) **Bayrak bir kapı, damga bir ölçü:** kapı "hiç" der, aynı damga doldurmada ikinci kez okunup `fill`'i temizlemeden beri gelen satır sayısına **kırpar** — yoksa tek satırlık bir büyüme bayrağı düşürür ve doldurma boşluğun tamamını, yani kullanıcının sildiği ekranı geri getirirdi (ölçüldü). `content_rows == rows` kolu yok: dock'lu pencerede doluluk giriş satırını saymadığı için erişilemez. **Bilinen sınır**, defter `scrollback`'te doyunca damganın üstüne çıkacak sayı kalmıyor ve o oturumda bir Ctrl-L'den sonra doldurma koşmuyor; yönü güvenli. Yarışı kapatan şey bir **nesil sayacı**: tarayıcı baytları uygulamadan **önce** sayıyor, kare yolu sayacı `Term` kilidinin **altında** doluluk sayısıyla aynı okumada tüketiyor, ve henüz hesaba katılmamış bir nesil aynı karede doldurma kuralını ezer. Bayrağın tek tüketicisi doldurmanın kapısı (`Session::fill_rows`) ve sıra zorunlu: ömür **önce** işliyor. Komut blokları `frame()` sınırından **çözülmüş** geçer (komutun satırı + renk, çıkış kodu değil; bölge değil işaret): kimlik prompt'un OSC 8 çıpasından `Term` kilidi altında toplanır, renk kilit bırakıldıktan sonra kabuk defterinden çözülür. Giriş satırının **bastırılması** da burada: safha ile aynanın durumu tek yüklemde birleşiyor (`ShellLog::suppressed_input`) ve kopya `Term` kilidinden **önce** alınıyor — yaprak kilit `Term`'ün altına girmez | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir |
-| `bt-atlas` | glyph rasterizasyonu, atlas paketleme, **sistemin cascade'inden tek hücrelik yedek glyph** (kapı geometrik: hücreye sığmayan aday kutu kalır), **yordamsal karakterler** (blok elemanları, Braille ve çizgi çizim — köşegenler hariç; fonta sorulmadan, yüzden bağımsız, yalnız büyük sınıfta), font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
+| `bt-atlas` | glyph rasterizasyonu, atlas paketleme, **sistemin cascade'inden tek hücrelik yedek glyph** (kapı geometrik: mürekkebi hücreye sığmayan aday kutu kalır), **yordamsal karakterler** (blok elemanları, Braille ve çizgi çizim — köşegenler hariç; fonta sorulmadan, yüzden bağımsız, yalnız büyük sınıfta), font seti | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `setViewport`, kendi listeleri ve caret'i; kaç satır olduğu `DOCK_ROWS`), **doldurma bandı** (üçüncü `setViewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye (metin yolu AppKit'in yığınından: `BateriView` `NSTextInputClient`, ölü tuş bileşimi orada tamamlanır), **Finder damlası** (`NSDraggingDestination`, yalnız dosya URL'si; yol `quote::shell_quote`'tan geçip `Session::paste`'e gider), servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini, yereli, hangi kabuğun koşacağı ve sarmalayıcı betiğinin yeri (`child`), entegrasyonun kurulup kurulmayacağı ve `ZDOTDIR`/`BATERI_ZDOTDIR` çifti (`app::shell_integration_env`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `dispatch2` (ana kuyruk: `child_exit` → `terminate:`, OSC 52'nin pano işi; vnode kaynakları: ayar izleme), `libc` (bekçinin `write` + `_exit`'i, izlemenin `O_EVTONLY`'si, kabuğun passwd kaydı için `getpwuid_r`) |
 | `bateri` | `main`, app bundle, Sparkle | — |

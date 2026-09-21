@@ -60,6 +60,39 @@ girmiyor**: üçü de Menlo'da var, satırın gerçek yedeği yalnız U+F8FF
 iki sınıfta da kabul. `⏵`'nin mürekkep kutusu `origin.x = 1.04 > 0`, yani
 **negatif sol yatak yok** ve ortalama kaydırması (0.644 px) kırpma üretmiyor.
 
+### Sonradan: ölçüt ilerlemeden mürekkebe geçti
+
+Yukarıdaki tablo **ilerlemeyi** ölçüyor ve kapı bir dönem oydu. Belirti
+kullanıcıda görüldü (2026-09-21, ekran görüntüsü): Claude Code'un araç işareti
+`⏺` U+23FA kutu çıkıyordu. Yeniden ölçüldü, aynı makine, Menlo **16pt**, hücre
+**9.633 px** — mürekkep sütunu adayın `raster::draw`'da duracağı yerde
+(`font::centre_shift` uygulanmış):
+
+| Karakter | Yedek | advance | oran | mürekkep | eski | yeni |
+|---|---|---|---|---|---|---|
+| `⏺` U+23FA | STIX Two Math | 10.080 | 1.046× | 0.64..9.44 | RED | **KABUL** |
+| `⏵` U+23F5 | STIX Two Math | 8.048 | 0.835× | 2.07..8.68 | KABUL | KABUL |
+| `⎿` U+23BF | Hiragino Sans W3 | 16.000 | 1.661× | 7.68..16.00 | RED | RED |
+| `⠋` U+280B | Apple Braille | 10.938 | 1.135× | 2.62..8.34 | RED | **KABUL** |
+| `丨` U+4E28 | PingFang SC | 16.000 | 1.661× | 7.46..8.67 | RED | **KABUL** |
+| `漢` U+6F22 | PingFang SC | 16.00 | 1.661× | 0.86..15.38 | RED | RED |
+| U+E0B0, U+10FFFD | `.LastResort` | 17.60 | 1.827× | 1.60..15.99 | RED | RED |
+| `🎉` U+1F389 | Apple Color Emoji | 21.00 | 2.180× | 0.46..20.46 | RED | RED |
+
+1.0'ın yakınında hiçbir adayın olmaması kapının kör noktasıydı: 019 emoji ile
+CJK'ya karşı kalibre edildi, sembol fontlarına karşı hiç sınanmadı.
+
+**Dikey ölçüldü ve kapıya girmedi:** yukarıdaki adayların hiçbirinde yatay
+kapıyı geçip dikeyde taşan yok — dikeyde taşan tek satır emoji (y −4.0..16.0,
+taban çizgisinin üstünde 15 px var) ve o zaten yatayda dönüyor. İkinci bir
+ölçüt yazılmış ama tanığı olmayan bir kural olurdu; sınır
+`font::ink_fits_cell`'in doc'unda adıyla duruyor.
+
+**Yan etki, kabul edildi:** `⠋` küçük sınıfta (dock'un bağlam satırı) ve `丨`
+her yerde artık çiziliyor. İkisi de mürekkebi hücreye sığan doğru glyph'ler;
+`negative_cache_is_capped_and_evicted`'ın CJK havuzu bu yüzden **filtreli**
+hâle geldi — havuzun iddiası negatif önbellek, kapı değil.
+
 ## Kabul
 
 - `⏵` `TOFU` **değil** ve bitmap hücreye sığıyor, mürekkebi ortalı.
