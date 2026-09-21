@@ -101,6 +101,47 @@ if (( ! ${+__bateri_had} )); then
     __bateri_dock=1
   fi
   unset BATERI_DOCK
+
+  # TAŞAN TAMAMLAMA LİSTESİ EKRANI SİLMESİN. zsh'in varsayılan ölçütü
+  # `LISTMAX=100` ve SEÇENEK SAYISINA bakıyor, kapladığı YERE değil: yüzün
+  # altında kalan bir liste sormadan basılıyor, satır sayısı ekranı aşsa da.
+  # Belirti kullanıcıda görüldü (2026-09-21, `ls -` tamamlaması): liste
+  # sorulmadan basıldı, ızgarayı aştı ve satır silinince ekranda KALDI. `0`
+  # ölçütü sayıdan yere çeviriyor: "ekrana sığmıyorsa sor". Kaç seçeneğin kaç
+  # satır tuttuğu kullanıcının `zstyle`'ına bağlı ve burada bir sayı
+  # yazılmıyor — ölçüt zaten sayı değil.
+  #
+  # Gerekçe ölçüldü (2026-09-21, saf PTY, aynı 37 satırlık liste iki ekran
+  # boyunda): liste SIĞDIĞINDA (60 satır) zsh Tab'da `\e[37A` ile imleci
+  # listenin üstüne alıyor ve satır silinince `\e[J` gönderiyor — 017'nin
+  # doldurma bandı boşluğu defterden dolduruyor ve ekran Tab öncesine
+  # dönüyor. Liste AŞTIĞINDA (26 satır) zsh ikisini de göndermiyor; satır
+  # silmede yalnız backspace geliyor, çünkü normal bir terminalde kaydırıp
+  # geçmişe giden satırları geri getiremez ve yarım temizlemek ekranı
+  # bozardı. Terminale "liste bitti" diyen bir sinyal HİÇ gelmiyor: defter
+  # bizde duruyor ama geri getirmenin tetiği yok. `LISTMAX=0` ekranı silmeyi
+  # geri dönüşsüz bir adım olmaktan çıkarıyor — aşan listede zsh önce soruyor
+  # ve `n` ekranı olduğu gibi bırakıyor.
+  #
+  # BİLİNEN SINIR: `y` dendiğinde liste basılıyor ve yine kalıcı oluyor.
+  # Ölçüt "bozulmadan önce sor", "geri getir" değil.
+  #
+  # DEĞER KULLANICININ DOSYALARINDAN ÖNCE KONUYOR ve yerin kendisi bir karar:
+  # `LISTMAX` zsh'te varsayılan olarak SET (`typeset -i LISTMAX=100`), yani
+  # "kullanıcı mı ayarlamış" diye sınanamaz. Bu blok `.zshenv`'den bir kez
+  # koşuyor, kullanıcının hiçbir başlangıç dosyası okunmadan önce; kendi
+  # `LISTMAX`'ını yazan kullanıcı SONRA koşuyor ve kazanıyor. Değer
+  # `__bateri_hooks` içine konsaydı tam tersi olur, kullanıcının tercihi
+  # ezilirdi.
+  #
+  # DOCK'A KOŞULLU, çünkü koruduğu şey dock'un vaadi (017, ekranın geri
+  # dönüşü) ve `integration = "blocks"` kademesinde o vaat yok — orada giriş
+  # satırı kullanıcının ve kabuk klasik davranmalı. `__bateri_dock`'un
+  # tükettiği üçüncü karar; ayrı bir anahtar açılsaydı "dock yok ama
+  # completion bizim" gibi tutarsız bir hâl doğardı.
+  if (( __bateri_dock )); then
+    LISTMAX=0
+  fi
 fi
 
 # Kullanıcının aynı adlı başlangıç dosyasını yüklemeye HAZIRLAR; yüklemeyi
