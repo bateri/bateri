@@ -446,6 +446,10 @@ enum Family {
     /// kesikli aile ve yuvarlak köşeler. **Köşegenler hariç**, bkz.
     /// [`family`].
     Line,
+    /// U+23B8–U+23BF — terminalin grafik kümesi: iki dikey kutu çizgisi, dört
+    /// tarama satırı ve iki köşe. [`Line`](Family::Line)'ın akrabası ama
+    /// eksenleri **kenarda**, merkezde değil; gerekçesi [`technical`]'de.
+    Technical,
 }
 
 /// Karakterin yordamsal ailesi — **kapsamın tek sahibi**.
@@ -472,6 +476,13 @@ fn family(ch: char) -> Option<Family> {
         // yaşıyor.
         '\u{2571}'..='\u{2573}' => None,
         '\u{2500}'..='\u{257F}' => Some(Family::Line),
+        // U+23B7 (`⎷` RADICAL SYMBOL BOTTOM) aralığın **altında** duruyor ve
+        // bu da bilerek bırakılmış bir delik: kök işaretinin kuyruğu bir ray
+        // değil, yani [`technical`]'in geometrisi onu çizemez. Cascade'den
+        // geliyor ve kapıyı geçiyor (ölçüldü, bu makine, Menlo 16pt: Apple
+        // Symbols, mürekkebi hücrenin 0.88'i), yani kapsama almak bir kusuru
+        // değil çalışan bir glyph'i değiştirirdi.
+        '\u{23B8}'..='\u{23BF}' => Some(Family::Technical),
         _ => None,
     }
 }
@@ -510,6 +521,7 @@ pub(crate) fn draw_procedural(ch: char, m: Metrics, target: &mut [u8]) {
         Some(Family::Block) => block(ch, m, target),
         Some(Family::Braille) => braille(ch, m, target),
         Some(Family::Line) => line(ch, m, target),
+        Some(Family::Technical) => technical(ch, m, target),
         None => {}
     }
 }
@@ -1226,5 +1238,88 @@ fn line(ch: char, m: Metrics, target: &mut [u8]) {
         for dir in [UP, DOWN, LEFT, RIGHT] {
             arm(spec, dir, m, target);
         }
+    }
+}
+
+/// Tarama satırlarının (`⎺⎻⎼⎽`, U+23BA–U+23BD) numaraları.
+///
+/// Adları söylüyor: "HORIZONTAL SCAN LINE-1/-3/-7/-9". Tablo sayaç değil —
+/// sıra 1, 3, 7, 9 ve aradaki 5 **yok**, çünkü Unicode onu `─` (U+2500) ile
+/// birleştirdi.
+const SCAN_LINES: [f32; 4] = [1.0, 3.0, 7.0, 9.0];
+
+/// Tarama satırının hücredeki dikey merkezi.
+///
+/// Ad bir **satır** söylüyor: DEC'in karakter hücresi dokuz tarama satırı ve
+/// N'inci satır hücrenin N'inci dokuzda birlik bandı, yani merkezi
+/// `(N - 0.5) / 9`. Formülün ikinci bir sayı uydurmadığının tanığı beşinci
+/// satır: `(5 - 0.5) / 9` tam olarak `0.5`, yani Unicode'un `─` ile
+/// birleştirdiği satır [`arm`]'in yatay kolunu koyduğu yerin ta kendisine
+/// düşüyor. İki aile aynı ızgarayı paylaşıyor; ortak sabit yok, ortak
+/// **geometri** var.
+fn scan_centre(line: f32, h: f32) -> f32 {
+    (line - 0.5) / 9.0 * h
+}
+
+/// `target`e terminalin grafik kümesini (U+23B8–U+23BF) çizer.
+///
+/// [`line`]'ın akrabası ve aynı rayları kullanıyor ([`rail`], [`max_rect`]),
+/// ayrıldığı tek yer **eksenin yeri**: U+2500 ailesinin kolları hücrenin
+/// ortasında buluşur, bu kümenin çizgileri ise tanımı gereği **kenarda** —
+/// "LEFT/RIGHT VERTICAL BOX LINE" hücrenin sol/sağ kenarı, tarama satırları
+/// hücreyi dokuza bölen bantlar, iki dentistry köşesi de kenarları izleyen
+/// bir "L". Bu yüzden [`Recipe`] tablosuna satır eklenmiyor: `LINES`'ın
+/// indeksi `cp - 0x2500` ve kolların ekseni `w / 2` / `h / 2` olarak yazılı.
+///
+/// **Neden yordamsal.** Üçü de fonttan geliyordu ve üçünün de kusuru ayrı
+/// (ölçüldü, bu makine, Menlo 16pt@2x, hücre 20×39):
+///
+/// - `⎾` `⎿` **kutu çıkıyordu** — cascade Hiragino Sans veriyor, ilerlemesi
+///   hücrenin 1.66 katı ve yarım genişlikli glyph o kutunun **sağ yarısına**
+///   yaslanmış (mürekkebi 15.36–32.00 px), yani mürekkep kapısı onu haklı
+///   olarak eliyordu. Belirti kullanıcıda görüldü: Claude Code araç
+///   sonuçlarını `⎿` ile başlatıyor.
+/// - `⎸` `⎹` **yanlış yerde** çiziliyordu — Apple Symbols'un ilerlemesi
+///   hücrenin 0.42'si, yani [`font::centre_shift`] onları hücrenin ortasına
+///   kaydırıyor ve "sol kenar çizgisi" solda durmuyordu.
+/// - `⎺⎻⎼⎽` **döşemiyordu** — Monaco'nun mürekkebi 20 px hücrede 0.03–19.19,
+///   yani her hücrenin sağ ucunda 0.8 px boşluk kalıyor ve yan yana dizilen
+///   tarama satırı kesikli görünüyor. 021'in tezi burada da aynı: fontun em
+///   kutusunun hücre kutusu olacağının hiçbir garantisi yok.
+///
+/// Dikey uzanım **tam hücre** ve bu da ölçümden: elenen adayın mürekkebi
+/// hücre yüksekliğinin 0.047'sinden 0.868'ine kadar uzanıyor, yani şekil
+/// hücreyi dolduruyor — `⎿`'yi `└` gibi (ekseni merkezde) çizmek onu
+/// yarı boyda bir köşeye indirirdi.
+fn technical(ch: char, m: Metrics, target: &mut [u8]) {
+    let (w, h) = m.cell_wh();
+    let (w, h) = (w as f32, h as f32);
+    let thin = f32::from(m.underline_px.1).max(1.0);
+    // Hücrenin ilk ve son bandı. `rail` ızgaraya oturttuğu için ilki tam
+    // olarak `[0, thin)`, sonuncusu `[uzunluk - thin, uzunluk)`: kenar
+    // çizgisi kenarın **içinde** kalıyor, yarısı kırpılmıyor.
+    let first = rail(thin / 2.0, thin);
+    let last_col = rail(w - thin / 2.0, thin);
+    let last_row = rail(h - thin / 2.0, thin);
+    match ch {
+        // ⎸ ⎹ — sol / sağ kenarda tam boy dikey çizgi.
+        '\u{23B8}' => max_rect(target, m, first.0, first.1, 0.0, h),
+        '\u{23B9}' => max_rect(target, m, last_col.0, last_col.1, 0.0, h),
+        // ⎺ ⎻ ⎼ ⎽ — hücreyi boydan boya geçen tarama satırı.
+        '\u{23BA}'..='\u{23BD}' => {
+            // audit: aralık dört karakter, indeks tablonun içinde.
+            let line = SCAN_LINES[u32::from(ch) as usize - 0x23BA];
+            let band = rail(scan_centre(line, h), thin);
+            max_rect(target, m, 0.0, w, band.0, band.1);
+        }
+        // ⎾ ⎿ — sol kenarda tam boy dikey, üst / alt kenarda tam boy yatay.
+        // Kollar `max_rect` ile birleşiyor, köşedeki piksel iki kez
+        // boyanmıyor: gerekçesi [`stroke_rect`]'inkiyle aynı.
+        '\u{23BE}' | '\u{23BF}' => {
+            max_rect(target, m, first.0, first.1, 0.0, h);
+            let band = if ch == '\u{23BE}' { first } else { last_row };
+            max_rect(target, m, 0.0, w, band.0, band.1);
+        }
+        _ => {}
     }
 }

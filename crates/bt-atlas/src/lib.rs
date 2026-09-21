@@ -14,10 +14,14 @@
 //!
 //! **Yordamsal çizilen ikinci küme karakterlerdir** ve fonta hiç sorulmadan
 //! kazanırlar (`raster::is_procedural`): blok elemanları (U+2580–U+259F),
-//! Braille (U+2800–U+28FF) ve çizgi çizim (U+2500–U+257F, **köşegenler
-//! `╱╲╳` hariç**). Gerekçe döşeme — fontun em kutusu hücre kutusu değil ve
+//! Braille (U+2800–U+28FF), çizgi çizim (U+2500–U+257F, **köşegenler
+//! `╱╲╳` hariç**) ve terminalin grafik kümesi (U+23B8–U+23BF: iki dikey
+//! kenar çizgisi, dört tarama satırı, iki köşe — `⎷` U+23B7 dışarıda).
+//! Gerekçe döşeme — fontun em kutusu hücre kutusu değil ve
 //! Menlo'nun `█`'i hücreyi doldurmuyor, alt alta iki blok arasında şerit
-//! kalıyor. Yüzden bağımsızlar (dört yüz tek yuva; ince/kalın ayrımı zaten
+//! kalıyor. Son aile bir kusuru da kapatıyor: `⎿` (Claude Code araç
+//! sonuçlarının işareti) cascade'den **hücreye sığmayan** bir glyph'le
+//! geliyordu ve kutu çıkıyordu. Yüzden bağımsızlar (dört yüz tek yuva; ince/kalın ayrımı zaten
 //! karakterin kendisinde), ama **yalnız büyük sınıfta**: dock'un bağlam
 //! satırında sütun adımı küçük yüzün ilerlemesi ve büyük hücre genişliğinde
 //! bir sprite orada komşusunun üstüne binerdi.
@@ -2954,6 +2958,130 @@ mod tests {
     }
 
     #[test]
+    fn the_technical_set_hugs_the_cell_edges() {
+        // Bu kümenin U+2500 ailesinden ayrıldığı **tek** yer eksenin yeri:
+        // orada kollar hücrenin ortasında buluşur, burada çizgiler kenarı
+        // izler. Ölçüt piksel piksel eşitlik, "mürekkep var mı" değil —
+        // ortada buluşan bir `⎿` de mürekkepli olurdu ama yarı boyda bir
+        // köşe çizerdi.
+        type Mask = fn(usize, usize, usize, usize, usize) -> bool;
+        let cases: [(char, Mask); 4] = [
+            ('\u{23B8}', |x, _y, _w, _h, thin| x < thin),
+            ('\u{23B9}', |x, _y, w, _h, thin| x >= w - thin),
+            ('\u{23BE}', |x, y, _w, _h, thin| x < thin || y < thin),
+            ('\u{23BF}', |x, y, _w, h, thin| x < thin || y >= h - thin),
+        ];
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let (w, h) = m.cell_wh();
+            let thin = usize::from(m.underline_px.1.max(1));
+            for (ch, mask) in cases {
+                let bytes = procedural(m, ch);
+                for y in 0..h {
+                    for x in 0..w {
+                        let want = if mask(x, y, w, h, thin) { 255 } else { 0 };
+                        assert_eq!(
+                            bytes[y * w + x],
+                            want,
+                            "{point_size}pt@{scale}x: '{ch}' ({x}, {y}) pikselinde \
+                             kenar profili bozuk"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_technical_pairs_are_mirrors() {
+        // Aynalama **yapısal**: ilk bant `[0, thin)`, son bant
+        // `[uzunluk - thin, uzunluk)` ve ikisi birbirinin tam yansıması,
+        // yani bu eşitlik yuvarlamadan bağımsız her ölçüde tutmak zorunda.
+        // Kırılması "kenar çizgisi kenarda değil" demenin ikinci yolu.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let (w, h) = m.cell_wh();
+            let flip_h: Vec<u8> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (y, w - 1 - x)))
+                .map(|(y, x)| procedural(m, '\u{23B8}')[y * w + x])
+                .collect();
+            assert_eq!(
+                flip_h,
+                procedural(m, '\u{23B9}'),
+                "{point_size}pt@{scale}x: '⎸' ile '⎹' birbirinin aynası değil"
+            );
+            let top = procedural(m, '\u{23BE}');
+            let flip_v: Vec<u8> = (0..h)
+                .flat_map(|y| {
+                    let row = (h - 1 - y) * w;
+                    top[row..row + w].to_vec()
+                })
+                .collect();
+            assert_eq!(
+                flip_v,
+                procedural(m, '\u{23BF}'),
+                "{point_size}pt@{scale}x: '⎾' ile '⎿' birbirinin aynası değil"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scan_lines_step_down_the_cell() {
+        // İki iddia, ikisi de adın kendisinden: "HORIZONTAL SCAN LINE-N"
+        //
+        // 1. Satır **hücreyi boydan boya** geçiyor. Fonttan gelen hâli
+        //    geçmiyordu: Monaco'nun mürekkebi 20 px hücrede 0.03–19.19,
+        //    yani yan yana dizilen tarama satırları kesikli görünüyordu.
+        // 2. Dokuz bandın 1, 3, 5, 7, 9'uncusu — ve **beşincisi `─`**,
+        //    çünkü Unicode onu U+2500 ile birleştirdi. Beş bandın eşit
+        //    aralıklı çıkması formülün ikinci bir sabit uydurmadığının
+        //    tanığı; ±1 piksel payı `rail`'in ızgaraya oturtmasından
+        //    (13pt@1x'te beş bant tam bölünüyor, 16pt@2x'te 9/9/8/9).
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let (w, h) = m.cell_wh();
+            let mut starts = Vec::new();
+            for ch in ['\u{23BA}', '\u{23BB}', '\u{2500}', '\u{23BC}', '\u{23BD}'] {
+                let bytes = procedural(m, ch);
+                let rows: Vec<usize> = (0..h)
+                    .filter(|&y| bytes[y * w..y * w + w].iter().any(|&b| b > 0))
+                    .collect();
+                let (&first, &last) = (
+                    rows.first().expect("tarama satırı boş çizildi"),
+                    rows.last().expect("tarama satırı boş çizildi"),
+                );
+                assert_eq!(
+                    rows.len(),
+                    last - first + 1,
+                    "{point_size}pt@{scale}x: '{ch}' tek bant değil"
+                );
+                for y in first..=last {
+                    assert!(
+                        bytes[y * w..y * w + w].iter().all(|&b| b == 255),
+                        "{point_size}pt@{scale}x: '{ch}' {y}. satırda hücreyi \
+                         boydan boya geçmiyor"
+                    );
+                }
+                starts.push(first);
+            }
+            assert!(
+                starts.windows(2).all(|pair| pair[0] < pair[1]),
+                "{point_size}pt@{scale}x: tarama satırları yukarıdan aşağıya \
+                 sıralı değil: {starts:?}"
+            );
+            let steps: Vec<usize> = starts.windows(2).map(|pair| pair[1] - pair[0]).collect();
+            let (low, high) = (
+                *steps.iter().min().expect("dört adım"),
+                *steps.iter().max().expect("dört adım"),
+            );
+            assert!(
+                high - low <= 1,
+                "{point_size}pt@{scale}x: bantlar eşit aralıklı değil: {steps:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_diagonals_stay_out_of_scope() {
         // Köşegenler kapsamın içinde **bilerek bırakılmış bir delik**
         // (Karar 3B) ve deliğin ikinci bir işi var:
@@ -2982,6 +3110,14 @@ mod tests {
             ('\u{2800}', true, "Braille'in başı"),
             ('\u{28FF}', true, "Braille'in sonu"),
             ('\u{2900}', false, "Braille'in üstü"),
+            // Dördüncü aile ve **iki** komşusu anlamlı: U+23B7 (`⎷`) de
+            // bilerek dışarıda (kök kuyruğu bir ray değil, cascade'den
+            // gelen hâli kapıyı geçiyor), yani alt sınır bir sınır değil
+            // bir **karar**.
+            ('\u{23B7}', false, "teknik kümenin altı"), // ⎷
+            ('\u{23B8}', true, "teknik kümenin başı"),  // ⎸
+            ('\u{23BF}', true, "teknik kümenin sonu"),  // ⎿
+            ('\u{23C0}', false, "teknik kümenin üstü"), // ⏀
         ] {
             assert_eq!(
                 raster::is_procedural(ch),
