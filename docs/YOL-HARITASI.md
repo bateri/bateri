@@ -456,7 +456,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   ile sistemin cascade'inden geliyor ve kapı **geometrik**: adayın ilerlemesi
   hücreninkini aşıyorsa kutu kalıyor. Kapının elediği her şey — emoji, CJK,
   geniş ok, **ve ölçüm sırasında çıkan Braille** — aşağıdaki "blok, çizgi ve
-  Braille fonttan geliyor" maddesine ve **022**'ye devredildi (020 araya
+  Braille fonttan geliyor" maddesine ve **023**'e devredildi (020 ile 021 araya
   girince numara kaydı; aynı commit aşağıdaki kardeş referansı düzeltmişti,
   bu satır atlanmıştı). Aşağıdaki gerekçe
   tarih olarak duruyor:
@@ -536,7 +536,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   2×4 nokta, 256 kombinasyon tek formülden); fonttan gelmeleri zaten yanlış,
   çünkü fontun em kutusu hücre kutusu değil ve döşeme orada kırılıyor. kitty,
   WezTerm, iTerm2 ve Alacritty bunları bilerek fonttan almıyor.
-  **Emoji setinden (022) ayrılabilir ve ayrılmalı** — glyph yedeğinin (019)
+  **Emoji setinden (023) ayrılabilir ve ayrılmalı** — glyph yedeğinin (019)
   o setten ayrıldığı aynı gerekçeyle: emoji setinin pahalı olmasının sebebi renkli bitmap'i ve
   "ikinci atlas mı, RGBA mı" çatalı; yordamsal çizim o çatalın hiçbirine
   dokunmuyor (çıktı yine tek kanallı kapsama maskesi, `R8Unorm` atlas

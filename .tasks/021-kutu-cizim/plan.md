@@ -105,4 +105,4 @@ draw_procedural:
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| kapı | |
+| kapı | ✅ |

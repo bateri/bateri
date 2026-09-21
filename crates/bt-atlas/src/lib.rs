@@ -2062,6 +2062,104 @@ mod tests {
         }
     }
 
+    /// Çeyrek ve sekizde bir bloklarının Unicode adları
+    /// (`unicodedata`, UCD 16.0), `raster::QUADRANTS`'ın oracle'ı.
+    ///
+    /// Çizgi ailesiyle aynı gerekçe ([`LINE_NAMES`]): bu da el yazması bir
+    /// tablo ve geometriye bakan hiçbir değişmez "doğru geometri, yanlış
+    /// karakter"i göremez — `▙` ile `▟`'nin maskeleri yer değiştirse dört
+    /// çeyreğin birleşimi hâlâ `█` olurdu.
+    // `rustfmt::skip`: hizalı ad yorumları tablonun gözle taranabilir
+    // olmasının tek sebebi.
+    #[rustfmt::skip]
+    const QUARTER_NAMES: [(char, &str); 12] = [
+        ('▔', "UPPER ONE EIGHTH BLOCK"),
+        ('▕', "RIGHT ONE EIGHTH BLOCK"),
+        ('▖', "QUADRANT LOWER LEFT"),
+        ('▗', "QUADRANT LOWER RIGHT"),
+        ('▘', "QUADRANT UPPER LEFT"),
+        ('▙', "QUADRANT UPPER LEFT AND LOWER LEFT AND LOWER RIGHT"),
+        ('▚', "QUADRANT UPPER LEFT AND LOWER RIGHT"),
+        ('▛', "QUADRANT UPPER LEFT AND UPPER RIGHT AND LOWER LEFT"),
+        ('▜', "QUADRANT UPPER LEFT AND UPPER RIGHT AND LOWER RIGHT"),
+        ('▝', "QUADRANT UPPER RIGHT"),
+        ('▞', "QUADRANT UPPER RIGHT AND LOWER LEFT"),
+        ('▟', "QUADRANT UPPER RIGHT AND LOWER LEFT AND LOWER RIGHT"),
+    ];
+
+    #[test]
+    fn the_quadrants_come_from_the_unicode_names() {
+        // İki iddia, ikisi de addan: **tek** çeyrekler adlarının söylediği
+        // çeyrekte duruyor (mürekkep orada, başka yerde değil) ve
+        // **bileşik** olanlar adlarında sayılan tek çeyreklerin doygun
+        // toplamı. Birincisi aynalamayı, ikincisi maske hatasını görüyor;
+        // yalnız ikincisi yazılsaydı `▘` ile `▝` takası her iki sınamadan
+        // da geçerdi, çünkü bileşikler de aynı takas edilmiş tekleri
+        // kullanırdı.
+        for (point_size, scale) in PROCEDURAL_SIZES {
+            let m = atlas(point_size, scale).metrics();
+            let (w, h) = m.cell_wh();
+            let singles = |name: &str| -> Vec<char> {
+                name.trim_start_matches("QUADRANT ")
+                    .split(" AND ")
+                    .map(|quarter| match quarter {
+                        "UPPER LEFT" => '▘',
+                        "UPPER RIGHT" => '▝',
+                        "LOWER LEFT" => '▖',
+                        "LOWER RIGHT" => '▗',
+                        other => panic!("tanınmayan çeyrek: {other}"),
+                    })
+                    .collect()
+            };
+            for (ch, name) in QUARTER_NAMES {
+                let bytes = procedural(m, ch);
+                assert!(
+                    bytes.iter().any(|&b| b > 0),
+                    "{point_size}pt@{scale}x: '{ch}' ({name}) hiç piksel boyamadı"
+                );
+                // Adın çizdiği kutu: sekizde birler kendi şeritleri,
+                // çeyrekler kendi çeyrekleri, bileşikler bütün hücre.
+                let (x0, x1, y0, y1) = match name {
+                    "UPPER ONE EIGHTH BLOCK" => (0, w, 0, h.div_ceil(8)),
+                    "RIGHT ONE EIGHTH BLOCK" => (w - w.div_ceil(8), w, 0, h),
+                    _ if name.contains(" AND ") => (0, w, 0, h),
+                    _ => {
+                        let left = name.ends_with("LEFT");
+                        let upper = name.contains("UPPER");
+                        (
+                            if left { 0 } else { w / 2 },
+                            if left { w.div_ceil(2) } else { w },
+                            if upper { 0 } else { h / 2 },
+                            if upper { h.div_ceil(2) } else { h },
+                        )
+                    }
+                };
+                for y in 0..h {
+                    for x in 0..w {
+                        let outside = x < x0 || x >= x1 || y < y0 || y >= y1;
+                        assert!(
+                            !outside || bytes[y * w + x] == 0,
+                            "{point_size}pt@{scale}x: '{ch}' ({name}) ({x}, {y}) \
+                             pikselini boyadı — adının kutusunun dışında"
+                        );
+                    }
+                }
+                if name.contains(" AND ") {
+                    let expected = singles(name)
+                        .into_iter()
+                        .fold(vec![0u8; m.slot_bytes()], |acc, quarter| {
+                            saturating_sum(&acc, &procedural(m, quarter))
+                        });
+                    assert_eq!(
+                        bytes, expected,
+                        "{point_size}pt@{scale}x: '{ch}' ({name}) adındaki \
+                         çeyreklerin toplamı değil"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_shades_are_flat_and_ordered() {
         // Gölgeler **desensiz** (bkz. `raster`'ın `SHADE_LEVELS` doc'u):
@@ -2220,6 +2318,8 @@ mod tests {
     /// şey kanıtlamazdı ve kaçırdığı şeyin adı var: **doğru geometri, yanlış
     /// karakter** — aynalanmış ya da kaydırılmış bir tabloda her sprite
     /// kusursuz görünür, yalnız yanlış kod noktasında durur.
+    // `rustfmt::skip`: hizalı ad yorumları tablonun gözle taranabilir
+    // olmasının tek sebebi.
     #[rustfmt::skip]
     const LINE_NAMES: [&str; 128] = [
         "LIGHT HORIZONTAL",                            // ─
@@ -2595,26 +2695,47 @@ mod tests {
         // hücreler arasında sönük bir dikiş demek.
         for (point_size, scale) in PROCEDURAL_SIZES {
             let m = atlas(point_size, scale).metrics();
+            // Referanslar **punto başına bir kez**: altısı da her kenarda
+            // yeniden rasterize edilseydi üç boyda 1500 tam hücre çizimi
+            // eder ve `make hepsi` her phase kapısında onu öderdi.
+            // Dış indeks eksen (`vertical`), iç indeks `Named`'ın kendi
+            // sırası — `style as usize` onu okuyor, yani iki liste birlikte
+            // değişmek zorunda.
+            let references: [[Vec<u8>; 3]; 2] = [
+                [
+                    reference_edge(m, Named::Light, false),
+                    reference_edge(m, Named::Heavy, false),
+                    reference_edge(m, Named::Double, false),
+                ],
+                [
+                    reference_edge(m, Named::Light, true),
+                    reference_edge(m, Named::Heavy, true),
+                    reference_edge(m, Named::Double, true),
+                ],
+            ];
             for (ch, named) in line_chars() {
+                let bytes = procedural(m, ch);
                 for side in [NAMED_UP, NAMED_DOWN, NAMED_LEFT, NAMED_RIGHT] {
                     let Some(style) = named.arms[side] else {
                         continue;
                     };
-                    // İki muafiyet ve ikisi de adıyla: kesikli çizginin
-                    // kapanış kenarı (desen boşlukla bitiyor) ve yay —
-                    // teğet noktasında kapsama mesafe alanından geliyor ve
-                    // yarıçapın eğriliği kadar (13pt'de bir baytın
-                    // altında) referanstan sapıyor. Yayın kenarı
-                    // [`the_arms_come_from_the_unicode_names`]'de
-                    // "mürekkep var mı" ölçütüyle sınanıyor.
-                    let trailing = named.dashes > 0 && (side == NAMED_DOWN || side == NAMED_RIGHT);
-                    if named.arc || trailing {
+                    // Tek muafiyet ve adıyla: kesikli çizginin **kapanış**
+                    // kenarı, çünkü desen dolu başlayıp boşlukla bitiyor.
+                    // **Yay muaf değil** — bir dönem öyleydi ve muafiyet
+                    // gerçek bir kusuru örtüyordu: yarıçap hücre kenarına
+                    // kadar gidince teğet noktası oraya düşüyor ve kenar
+                    // sütununu sap yerine yay boyuyordu (rayın satırında 255
+                    // yerine 246, altındakinde 0 yerine 13), üstelik dört
+                    // köşenin yalnız ikisinde. `corner`'ın bir piksel
+                    // içerlek yarıçapı onu kapattı; muafiyet kalkınca bu
+                    // satır o düzeltmenin bekçisi oldu.
+                    if named.dashes > 0 && (side == NAMED_DOWN || side == NAMED_RIGHT) {
                         continue;
                     }
                     let vertical = side == NAMED_UP || side == NAMED_DOWN;
                     assert_eq!(
-                        edge(&procedural(m, ch), m, side),
-                        reference_edge(m, style, vertical),
+                        edge(&bytes, m, side),
+                        references[usize::from(vertical)][style as usize],
                         "{point_size}pt@{scale}x: '{ch}' {side}. kenarında \
                          dikiş kırıldı"
                     );
@@ -2816,11 +2937,29 @@ mod tests {
                 "'{ch}' kapsama girdi: yüz merdiveninin fikstürü kalmıyor"
             );
         }
-        // Aralığın iki ucu ve komşuları: `┐`'den bir önceki karakter
-        // (U+24FF) dışarıda, `╿` içeride, `▀` zaten blok ailesinden.
-        assert!(!raster::is_procedural('\u{24FF}'), "aralık aşağıdan taştı");
-        assert!(raster::is_procedural('\u{2500}'), "aralığın başı dışarıda");
-        assert!(raster::is_procedural('\u{257F}'), "aralığın sonu dışarıda");
-        assert!(raster::is_procedural('\u{2580}'), "blok ailesi kapandı");
+        // Üç ailenin de iki ucu ve dışarıdaki komşuları. Taşan bir aralık
+        // **sessiz**: `braille` maskeyi `& 0xFF` ile alıyor, `block`'un
+        // çeyrek kolu tanımadığı karaktere sıfır maske veriyor, yani
+        // aralığı bir karakter geniş yazmak boş sprite üretir ve geometriye
+        // bakan hiçbir değişmez bunu göremez.
+        for (ch, inside, family) in [
+            ('\u{24FF}', false, "çizginin altı"),
+            ('\u{2500}', true, "çizginin başı"), // ─
+            ('\u{257F}', true, "çizginin sonu"), // ╿
+            ('\u{2580}', true, "bloğun başı"),   // ▀
+            ('\u{259F}', true, "bloğun sonu"),   // ▟
+            ('\u{25A0}', false, "bloğun üstü"),  // ■, geometrik şekiller
+            ('\u{27FF}', false, "Braille'in altı"),
+            ('\u{2800}', true, "Braille'in başı"),
+            ('\u{28FF}', true, "Braille'in sonu"),
+            ('\u{2900}', false, "Braille'in üstü"),
+        ] {
+            assert_eq!(
+                raster::is_procedural(ch),
+                inside,
+                "{family} (U+{:04X}) yanlış tarafta",
+                u32::from(ch)
+            );
+        }
     }
 }
