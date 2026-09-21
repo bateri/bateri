@@ -129,7 +129,7 @@ Braille. Çizgiler phase-2'de ve belirtiyi kapatmak için gerekmiyor —
 - **`RuleKind` doc'u:** "bu enum yordamsal çizilen sprite'ların kümesi"
   artık **tek küme değil** — `draw_procedural` ikinci kümeyi getiriyor.
 - **Ayar şeması: yok.** Yeni anahtar yok, varsayılan değişmiyor.
-- **Ölçüm bekliyor:** kutu ailesinin yuva ayak izi (`yuva=U/T`,
+- **Ölçüm bekliyor — KAPANDI (2026-09-21, `/measure`):** kutu ailesinin yuva ayak izi (`yuva=U/T`,
   `Atlas::occupancy`) ve **büyük puntoda doyma eşiği**. Braille bugün
   **sıfır** yuva harcıyor (kapıdan dönüp tofu'ya bağlanıyor) ve bu
   phase'den sonra 256 yuva garantili harcayacak; 32pt@2x'te kapasite 338,

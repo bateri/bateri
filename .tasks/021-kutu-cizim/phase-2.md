@@ -69,7 +69,7 @@ phase-1 tek başına `make hepsi`'yi yeşil bırakıyor.
 - **`RuleKind` doc'u:** phase-1'de ikinci küme doğmuştu; bu phase o
   kümenin sınırını netleştiriyor.
 - **Ayar şeması: yok.**
-- **Ölçüm bekliyor:** phase-1'in kalemi genişliyor — aile 160'tan **413**
+- **Ölçüm bekliyor — KAPANDI (2026-09-21, `/measure`):** phase-1'in kalemi genişliyor — aile 160'tan **413**
   yuvaya çıkıyor (2,6×; 416 değil, üç köşegen kapsam dışı). Kapasite puntoyla
   düşüyor ve 32pt@2x'te 338; büyük puntoda doyma eşiği `/measure`'ın işi.
   Kare süresi iddiası yok — çizim yuva başına ömürde bir kez koşuyor.
@@ -139,6 +139,11 @@ phase-1 tek başına `make hepsi`'yi yeşil bırakıyor.
 - **Duman jetonları birebir aynı**: `hucre=8 glif=6 kural=15 yuva=13/1984`
   (phase-1'in satırı); `kare` ile `istek` koşudan koşuya oynuyor ve
   sözleşmenin sabit kısmı değil.
+- **Ölçüm koştu (2026-09-21, `/measure`)** ve iki iddia da kapandı; sayılar
+  `docs/OLCUMLER.md` → `## Atlas yuva ayak izi`. Ayak izi planın beklediği
+  değeri **birebir** verdi, doyma eşiği ise yeni bir sayı: eşik Retina'da
+  **29pt**, ölçek 1'de 58pt. Ölçüm ailenin dışındaki tek commit'lik teknik
+  küme düzeltmesinden (`51e1459`) sonra koştuğu için onu da kapsıyor.
 
 ## Checklist
 

@@ -22,7 +22,7 @@
 | 018 | [klavye-ve-surukleme](018-klavye-ve-surukleme/) | 🟢 | metin girişi AppKit'in yığınından geçiyor (`NSTextInputClient`), **ölü tuşlar yazılabiliyor** (`~` ve `` ` `` Türkçe Q'da), Option+←/→/⌫ kelime geziyor/siliyor, Cmd+⌫ satırı siliyor, Finder damlası giriş satırına düşüyor. Elle tuş turu, Finder damlası ve press-and-hold gerçek pencerede doğrulandı; popover ölçümü bir bilinen sınırı da düşürdü (`replacementRange`) |
 | 019 | [glyph-yedegi](019-glyph-yedegi/) | 🔨 | `main`'de — seçili fontta olmayan tek hücrelik karakter sistemin cascade'inden geliyor (`⏵` düzeldi); kapı geometrik, hücreye sığmayan aday kutu kalıyor. Teslim bekliyor: `/measure` (yedeğin kare süresine etkisi, emanetteki sayılar); borç kalemi `[~]` kapandı — biri 021'e bağlandı, `line_height` piksel kalemi karar bekleyerek açık — `teslim.md` |
 | 020 | [fare-raporlama](020-fare-raporlama/) | 🟢 | `main`'de — fare isteyen uygulama fareyi alıyor: düğme, bırakma ve hareket rapor oluyor, Shift terminali geri alıyor (uygulama içinde metin seçmenin tek yolu) |
-| 021 | [kutu-cizim](021-kutu-cizim/) | 🔨 | Blok, Braille ve çizgi çizim artık fonttan değil terminalden — köşegenler bilerek dışarıda; 2 phase tamam, kapı koştu, teslim bekliyor (`/measure`: yuva ayak izi) |
+| 021 | [kutu-cizim](021-kutu-cizim/) | 🟢 | `main`'de — blok, Braille ve çizgi çizim artık fonttan değil terminalden; köşegenler bilerek dışarıda. Ölçüm koştu: aile 160 → **421** yuva, doyma eşiği Retina'da **29pt** (`docs/OLCUMLER.md` → Atlas yuva ayak izi) |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

@@ -69,8 +69,9 @@ koşuyor (`draw_rule` emsali), kare başına yeni iş doğmuyor.
 
 ### Yayın Checklist
 
-- [ ] `/measure` — yuva ayak izi (421 vs 160) ve puntoya göre doyma eşiği
-      `docs/OLCUMLER.md`'ye işlendi
+- [x] `/measure` — yuva ayak izi (421 vs 160) ve puntoya göre doyma eşiği
+      `docs/OLCUMLER.md`'ye işlendi (2026-09-21; aile **421** ölçüldü, taban
+      **160**, doyma eşiği Retina'da **29pt** / ölçek 1'de 58pt)
 
 ## Açık kalemler
 

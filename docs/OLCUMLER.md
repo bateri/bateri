@@ -7,9 +7,10 @@ sahibinde yazılı (`/audit` → Ölçüm sahipliği).
 Ölçüm bir **kapı değildir** (`.claude/is-akisi/proje.md` → Doğrulama): gerçek
 pencere, sessiz makine ve dakikalar ister. Kullanıcı ister, `/measure` koşturur.
 
-Dosya 006 phase-5'te kuruldu ve bugün **yalnız boşta kare** ölçümünü taşıyor.
-Kare süresi, açılış, bellek, giriş gecikmesi ve bench bölümlerinde sayı yok;
-hangisinin kancası olduğu `/measure` skill'inin tablosunda.
+Dosya 006 phase-5'te kuruldu ve bugün **iki** ölçüm taşıyor: boşta kare ile
+atlas yuva ayak izi. Kare süresi, açılış, bellek, giriş gecikmesi ve bench
+bölümlerinde sayı yok; hangisinin kancası olduğu `/measure` skill'inin
+tablosunda.
 
 ## Yöntem
 
@@ -112,6 +113,35 @@ muaf tutmak çizim hatasını görünmez kılardı. Sonucu, imleç kayan bir ko�
 iki sütunun p95'i **doğrudan karşılaştırılamaz**; gerekçesi
 `bt-gpu/src/link.rs`'te hareket karesinin gövdesinde.
 
+### Atlas yuva ayak izi
+
+**Bu tür bir sayımdır, bir süre değil** ve üstteki kuralların üçü ona
+uygulanmaz: gürültü eşiği yok (aynı commit aynı sayıyı veriyor), sessiz makine
+gerekmiyor, profil ayrımı anlamsız — sayı fontun metriğinden ve ızgara
+aritmetiğinden türüyor, zamandan değil. Yine de **iki profilde de koşulur ve
+eşitliği yazılır**: eşit olmadıkları gün ortada bir kusur var demektir.
+
+- **Ölçülen şey:** `Atlas::occupancy()`'nin ilk bileşeni (harcanan yuva) ile
+  ikincisi (kapasite). Kapasite `floor(1024 / hücre_genişliği) * floor(1024 /
+  hücre_yüksekliği)` ve yalnız hücre ölçüsünden türüyor, yani aileyi hiç
+  istemeden de okunabiliyor.
+- **Ayak izi bir tavandır, bir maliyet değil:** yuvalar **istendikçe**
+  harcanıyor. Bir oturum yalnız çizdiği karakterin yuvasını öder; 421 sayısı
+  "bütün aileyi kullanan içerik" hâlidir.
+- **Doyma ölçülürken sıra önemlidir.** Prob aileyi çizgi → köşegen → blok →
+  Braille → teknik sırasıyla istiyor, yani atlas dolduğunda kırpılan **son
+  istenen** küme oluyor (aşağıdaki tabloda Braille). Ölçütün kendisi sıradan
+  bağımsız: kapasite ile ailenin boyu karşılaştırılıyor, kırpılma yalnız
+  atlasın gerçekten dolduğunun tanığı.
+- **Yolun ateşlendiğinin tanığı iki bilinen sayı** (13pt@2x → 1984,
+  32pt@2x → 338; ikisi de 021'in planından) ve **taban koşusunun kendisi**:
+  021 öncesi commit'te Braille sıfır yuva harcıyor, sonrasında 256 — kapı
+  koşmasaydı iki koşu aynı sayıyı verirdi.
+- **Taban 021 öncesinin son commit'i** (`b17fa78`). Arada 021'in iki phase'i
+  **ve** yedek glyph kapısının mürekkebe dönmesi (`bc4d451`) var; teknik
+  kümenin 6 → 8 ile kök kuyruğunun 0 → 1 hareketi o ikinci değişikliği de
+  taşıyor, blok/çizgi/Braille ise yalnız 021'i.
+
 ## Nasıl yeniden ölçülür
 
 ### Ortam
@@ -125,6 +155,28 @@ pmset -g batt; pmset -g | grep lowpowermode             # güç kaynağı, düş
 Tazeleme hızı `system_profiler`'da görünmüyor (ProMotion ekranda değişken);
 en çok değeri `NSScreen.main.maximumFramesPerSecond` verir, koşudaki gerçek
 hızın dolaylı kanıtı ise bozuk koşunun saniye başına karesidir.
+
+### Atlas yuva ayak izi
+
+Prob **depoda durmuyor**: ölçüm bir kapı değil ve `tests/` altında kalan bir
+dosya `make hepsi`'nin her koşusunda derlenirdi. İki çalışma ağacı açılır
+(ölçülen commit ve taban), aynı prob ikisine kopyalanır, koşulur ve silinir:
+
+```sh
+git worktree add /tmp/wt-head <ölçülen-commit>
+git worktree add /tmp/wt-base <taban-commit>
+# prob: crates/bt-atlas/tests/atlas_probe.rs — `Atlas::new(None, punto, ölçek, 1.0)`,
+# her aralığı `Atlas::slot(Sprite::Char(ch), Face::Regular, SizeClass::Normal)` ile
+# isteyip `occupancy()` farkını basar. Gövdesi bu bölümün altındaki tabloyu üretir.
+for wt in /tmp/wt-head /tmp/wt-base; do
+  (cd $wt && cargo test --release -p bt-atlas --test atlas_probe -- --ignored --nocapture)
+done
+git worktree remove /tmp/wt-head; git worktree remove /tmp/wt-base
+```
+
+Çalışma ağacı şart değil ama **kirli ağaçta ölçüm yapılmaz**: 2026-09-21
+koşusunda depoda başka bir oturumun commit'lenmemiş değişikliği vardı ve prob
+ayrı ağaçlarda koştuğu için ona hiç değmedi.
 
 ### Boşta kare
 
@@ -513,6 +565,58 @@ O günün iki ek gözlemi: oynama değişiklikten gelmiyordu (on beş koşu
 değiştirilmemiş `854f027`'de aynı dağılımı verdi) ve eski `2` doğru bir
 build'i kırmızıya düşürdü (5 sn'lik koşudaki `4`). İki rejim aynı günün
 ölçüm yükünde görüldü (aynı komutla 5 sn'de bir kez `kare=21`, bir kez `597`).
+
+## Atlas yuva ayak izi
+
+### 2026-09-21 — yordamsal aile ve doyma eşiği (021)
+
+Ölçülen commit `51e1459`, taban `b17fa78` (021 öncesi). MacBook Pro M1 Pro,
+32 GB, macOS 26.4.1 (25E253), rustc 1.88.0, prizde, Retina 3024×1964. Font
+**Menlo** (varsayılan), `line_height = 1.0`. Debug ile release **birebir aynı**
+sayıyı verdi (425); aşağıdaki tablo ikisinin ortak değeri.
+
+**Ayak izi** — aynı Unicode aralıkları, iki commit (yuva):
+
+| küme | taban (`b17fa78`) | bugün (`51e1459`) |
+|---|---|---|
+| çizgi çizim (U+2500–257F, köşegensiz) | 125 (fonttan) | 125 (yordamsal) |
+| köşegen (`╱╲╳`) | 3 (fonttan) | 3 (fonttan — kapsam dışı) |
+| blok elemanları (U+2580–259F) | 32 (fonttan) | 32 (yordamsal) |
+| Braille (U+2800–28FF) | **0** (kapıdan dönüp tofu'ya) | **256** (yordamsal) |
+| teknik (U+23B8–23BF) | 6 (fonttan, ikisi tofu) | 8 (yordamsal) |
+| kök kuyruğu (`⎷` U+23B7) | 0 (tofu) | 1 (fonttan — bilerek dışarıda) |
+| **yordamsal ailenin kendisi** | **160** | **421** |
+| **aralıkların toplamı** | 166 | 425 |
+
+421 sayısı planın beklediğinin **birebir aynısı**. Braille'in 0 → 256 sıçraması
+setin asıl bedeli; teknik kümenin 6 → 8'i ile kök kuyruğunun 0 → 1'i araya
+giren mürekkep kapısını da taşıyor (bkz. Yöntem).
+
+**Doyma eşiği** — ailenin kendisi kapasiteyi hangi puntoda aşıyor
+(`floor(1024/w) * floor(1024/h)`, aile + tofu = 422 yuva ister):
+
+| punto @2x | kapasite | aile sığıyor mu |
+|---|---|---|
+| 13 | 1984 | evet (ailenin payı %21) |
+| 16 | 1326 | evet (%32) |
+| 20 | 800 | evet (%53) |
+| 26 | 512 | evet (%82) |
+| 28 | 450 | evet — **24 yuva artıyor** |
+| **29** | **406** | **hayır** (Braille 256 yerine 238 aldı, teknik küme hiç) |
+| 31–32 | 338 | hayır (Braille 170) |
+| 56 | 105 | hayır (çizgi ailesi bile kırpılıyor: 97) |
+
+Ölçek 1'de eşik **58pt** (kapasite 406; 57pt'de 435 ile sığıyor) — aynı kapasite
+sayısı, çünkü kırılma noktası hücrenin piksel boyu.
+
+**Okunuşu:** Retina'da 29pt ve üstünde yordamsal ailenin kendisi atlasa
+sığmıyor ve **tahliye olmadığı için** sığmayan her karakter o oturumun
+kalanında kalıcı olarak kutu çıkıyor. 28pt'de teknik olarak sığıyor ama
+geriye 24 yuva kalıyor, yani ASCII ile kullanıcının metni için yer yok —
+pratik eşik 29 değil, ona yaklaşan **her** punto. Ayak izi bir **tavan**:
+yuvalar istendikçe harcanıyor, yani bütün aileyi kullanmayan içerik bu
+sayıyı ödemiyor. Borcun adı ve önceliği `docs/YOL-HARITASI.md` → "Atlas
+dolunca geri dönüşü yok".
 
 ## Kare süresi
 
