@@ -497,10 +497,11 @@ kapısından** eleniyor (yukarıda), yani kutu çiziliyor — mürekkepleri
 ilerlemeleri kadar geniş. Geniş ilan edilmiş ama **dar boyayan** karakter
 (`丨` U+4E28, Claude Code'un `⏺`'ü) artık çiziliyor; ızgara ona iki sütun
 ayırıyor, spacer hücresi zaten glyph vermiyor (`Session::frame`) ve sütun
-kayması doğmuyor. **Blok elemanları, Braille ve
-çizgi çizim kapının konusu değil, artık yordamsal çiziliyor** (021,
-`raster::is_procedural`): U+2580–U+259F, U+2800–U+28FF ile U+2500–U+257F
-fonta hiç sorulmadan hücre ölçüsünden hesaplanıyor ve kapı `Atlas::slot`'ta,
+kayması doğmuyor. **Blok elemanları, Braille,
+çizgi çizim ve terminalin grafik kümesi kapının konusu değil, artık
+yordamsal çiziliyor** (021,
+`raster::is_procedural`): U+2580–U+259F, U+2800–U+28FF, U+2500–U+257F ile
+U+23B8–U+23BF fonta hiç sorulmadan hücre ölçüsünden hesaplanıyor ve kapı `Atlas::slot`'ta,
 `Sprite::Rule` kolunun ikizi olarak, **yedekten önce** duruyor. Sıra zorunlu
 ve "fontta yoksa yordamsal çiz" yanlış kol olurdu: `█` Menlo'da *var* ama
 hücreyi doldurmuyor (8×18 hücrenin yalnız 3–16 satırları), yani yedeğe hiç
@@ -545,6 +546,27 @@ profili yalnız kolun stiline bağlı (dikiş), ayrık kol kümelerinin piksel-m
 birleşim kümesini veriyor (`┌ ∪ ┘ == ┼`) ve kol tablosunun ikinci kopyası
 sınamaya **Unicode adlarından** yazıldı — birleşim yasası aynalanmış bir
 tabloyu göremez, adlar görüyor.
+**Terminalin grafik kümesi (U+23B8–U+23BF) aynı ailenin akrabası ama ekseni
+kenarda** (`raster::technical`): iki dikey kenar çizgisi (`⎸⎹`) hücrenin sol
+ve sağ sütununda, dört tarama satırı (`⎺⎻⎼⎽`) hücreyi dokuza bölen bantların
+1., 3., 7. ve 9.'sunda, iki köşe (`⎾⎿`) sol kenarda tam boy dikey artı üst
+ya da alt kenarda tam boy yatay. U+2500 ailesinin `LINES` tablosuna satır
+eklenmiyor, çünkü orada eksen `w/2` / `h/2` olarak yazılı ve indeks
+`cp - 0x2500`. Formül ikinci bir sabit uydurmuyor: beşinci bant tam olarak
+hücrenin ortası, yani Unicode'un `─` ile birleştirdiği tarama satırı
+`arm`'in yatay kolunun yerine düşüyor. Üçünün de fonttaki hâli **ayrı ayrı
+kusurluydu** (ölçüldü, Menlo 16pt@2x, hücre 20×39): `⎾⎿` cascade'den
+1.66× ilerlemeli bir Hiragino glyph'iyle geliyor ve mürekkebi kutunun sağ
+yarısında olduğu için kapıdan dönüyordu — belirti kullanıcıda görüldü, Claude
+Code araç sonuçlarını `⎿` ile başlatıyor; `⎸⎹` Apple Symbols'tan 0.42×
+ilerlemeyle gelip **ortaya** kayıyordu (sol kenar çizgisi solda durmuyordu);
+`⎺⎻⎼⎽` Monaco'dan geliyor ve 20 px hücrede 0.03–19.19 boyadığı için yan yana
+**döşemiyordu**. `⎷` (U+23B7) bilerek dışarıda: kök işaretinin kuyruğu bir
+ray değil ve cascade'den gelen hâli kapıyı geçiyor — kapsama almak kusuru
+değil çalışan bir glyph'i değiştirirdi. Doğrulama yine değişmez: kenar
+profili piksel piksel (`⎿` = sol sütun ∪ alt satır), `⎾` ile `⎿` ve `⎸` ile
+`⎹` birbirinin **tam aynası**, beş bant yukarıdan aşağıya sıralı, hücreyi
+boydan boya geçiyor ve eşit aralıklı.
 `bt-gpu` ile `bt-core` bundan **habersiz** — `Sprite::Char(ch)` çağrısı aynı,
 yuva aritmetiği aynı. Aşağıdaki sözleşme kod geldikçe
 kodla birlikte güncellenir — buradaki bir cümle kodla çelişirse ikisinden biri

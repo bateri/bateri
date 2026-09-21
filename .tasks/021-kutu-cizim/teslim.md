@@ -55,6 +55,10 @@ bağımlılık yok. Geriye tek bir adım kalıyor.
   + 256 Braille); Braille'in 256'sı bu setten önce **sıfır** harcıyordu
   (genişlik kapısından dönüp negatif önbellekte `TOFU`'ya bağlanıyordu).
   Ölçüsü `Atlas::occupancy`, panelin aynı yöntemle bulduğu taban 160.
+  **2026-09-21'de sayı 421 oldu:** setin dışında, tek commit'lik bir
+  düzeltme terminalin grafik kümesini (U+23B8–U+23BF, 8 sprite) aynı kapıya
+  aldı — `⎿` kutu çıkıyordu. Altısı zaten fonttan yuva harcıyordu, yani
+  tavana gerçek katkı 2. Ölçüm bu sayıyla koşar.
 - **Puntoya göre doyma eşiği.** Kapasite `floor(1024/w) * floor(1024/h)` ve
   puntoyla düşüyor (13pt@2x'te 1984, 32pt@2x'te 338). Hangi puntoda ailenin
   kendisi kapasiteyi aştığı ölçülmeli — tahliye borcunun önceliğini o sayı
@@ -65,7 +69,7 @@ koşuyor (`draw_rule` emsali), kare başına yeni iş doğmuyor.
 
 ### Yayın Checklist
 
-- [ ] `/measure` — yuva ayak izi (413 vs 160) ve puntoya göre doyma eşiği
+- [ ] `/measure` — yuva ayak izi (421 vs 160) ve puntoya göre doyma eşiği
       `docs/OLCUMLER.md`'ye işlendi
 
 ## Açık kalemler

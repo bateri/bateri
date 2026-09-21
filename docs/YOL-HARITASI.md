@@ -504,8 +504,25 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   kullanıcı görünürlüğü yüksek, çünkü ok/sembol/kutu karakterleri TUI'lerde
   ve prompt'larda her yerde.
 - **`⎿` (U+23BF) kutu çiziliyor ve mürekkep kapısı onu kurtarmıyor.**
-  Claude Code araç sonuçlarını bu köşe parçasıyla başlatıyor, yani
-  kullanıcının ekranında `⏺` kadar sık. Ölçüldü (2026-09-21, Menlo 16pt,
+  **Kapandı (2026-09-21, tek commit)**: U+23B8–U+23BF artık yordamsal
+  (`raster::technical`) ve kapsam maddenin önerdiğinden **bir karakter dar**
+  — `⎷` (U+23B7) dışarıda kaldı, çünkü kök işaretinin kuyruğu bir ray değil
+  ve cascade'den gelen hâli kapıyı zaten geçiyor (Apple Symbols, mürekkebi
+  hücrenin 0.88'i). Kümenin öteki altısı kutu **değildi** ama ölçünce ikisi
+  de kusurluydu: `⎸⎹` Apple Symbols'tan 0.42× ilerlemeyle gelip hücrenin
+  **ortasına** kayıyordu, `⎺⎻⎼⎽` Monaco'dan gelip 20 px hücrede 0.03–19.19
+  boyadığı için **döşemiyordu**. Yani yordamsal çizim burada üç ayrı kusuru
+  birden kapattı. İki görünür fark ölçüldü ve ikisi de kabul edildi — ölçüt
+  **referans**, çünkü bateri'de `⎿` hiç çizilmiyordu: (1) ayağı hücrenin
+  **tam dibinde**, cascade'in adayında (ve onu çizen referans terminalde)
+  satır kutusunun ~4 px üstünde duruyor; kenar ailesinin `▁` ve 9. tarama
+  satırıyla hizalı olması tercih edildi. (2) dikey çizgi hücrenin **0.
+  sütununda**, adayın küçük bir sol boşluğu var — soldaki hücrede mürekkep
+  varsa (`│⎿`, `▌⎿`) çizgiler birleşir. Claude Code'un yerleşimi bunu hiç
+  uyarmıyor (`  ⎿  `), ama isteniyorsa iki köşeye — `⎸`'ye **değil**, onun
+  işi kenarın kendisi — bir piksel girinti verilebilir; bedeli aynalama
+  bekçisinin değişmesi. Aşağıdaki gerekçe tarih olarak duruyor:
+  Ölçüldü (2026-09-21, Menlo 16pt,
   hücre 9.633): cascade Hiragino Sans W3 veriyor, ilerleme 16.0 (1.66×) ve
   mürekkep **7.68'den 16.0'a** — yarım genişlikli bir glyph ilerleme
   kutusunun **sağ yarısına** yaslanmış, yani ortalama kaydırması
@@ -517,7 +534,43 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   ailesinin akrabası ve aynı mesafe alanı onu da çizer. Kapsam küçük —
   U+23B7–U+23BF'in terminal grafik kümesi — ve 021'in `Family::Line`
   tablosuna bir kol ekliyor. Kendi seti gerekmez, 021'in yanına ya da tek
-  commit'lik bir ek olarak girer.
+  commit'lik bir ek olarak girer. (Uygulamada tabloya **satır eklenmedi**:
+  `LINES`'ın indeksi `cp - 0x2500` ve kolların ekseni hücrenin ortası olarak
+  yazılı, bu kümenin çizgileri ise tanımı gereği kenarda — ayrı bir aile ve
+  ayrı bir çizici oldu.)
+- **Kutu kalan karakterlerin envanteri ölçüldü (2026-09-21) ve üç ayrı
+  sınıf çıktı; üçünün çaresi de ayrı.** Tarama `⎿` düzeltilirken yapıldı
+  (taban Menlo 16pt@2x, bu makine, hücre 20×39): U+2190–21FF, U+2200–22FF,
+  U+2300–23FF, U+25A0–25FF, U+2600–26FF, U+2700–27BF, U+2B00–2BFF,
+  U+1FB00–1FBFF ve U+E000–E0FF. Kutuya düşen her karakter **adayının
+  fontuna** göre ayrıldı, çünkü sınıfı belirleyen şey o:
+  - **676'sının adayı yok** (cascade `.LastResort` veriyor, yani makinede o
+    karakteri taşıyan font kurulu değil). İçinde U+1FB00–1FBFF'in **tamamı**
+    var: 256 "Symbols for Legacy Computing" — altılı/sekizli bloklar, kama
+    ve köşe şekilleri. Onlar 021'in doğal devamı ve aynı gerekçeyle
+    yordamsal çizilmeli (ızgara grafiği, döşemesi hücre ölçüsünden çıkıyor;
+    kitty ile ghostty de fonttan almıyor). Powerline/Nerd özel kullanım
+    alanı (U+E0B0…) ayrı bir karar: orada kutu **fontun yokluğu**, Nerd Font
+    kurulu makinede gerçek glyph geliyor ve çizilmesi doğru.
+  - **279'unun glyph'i var ama mürekkep kapısından dönüyor** (Apple Symbols
+    128, STIX Two Math 104, Zapf Dingbats 30, kalanı dağınık; `≪ ≫ ⊢ ⊤ ⊥
+    ❶ ➀ ⏱ ⏳ ⎯ ⧉`). **89'unun mürekkebi hücreye sığıyor** ve yalnız
+    *yerleşimi* dışarı düşüyor: aday ilerlemesine göre ortalanıyor
+    (`font::centre_shift`), ilerlemesi hücreyi aşınca kaydırma sıfır kalıyor
+    ve hücrenin sağ yarısına yaslanmış mürekkep dışarıda kalıyor — `⎿`'nin
+    tam olarak bu hâliydi. Yani bu 89 için çare kapıyı gevşetmek değil
+    **yerleşimi mürekkebe bağlamak**, ve bedeli bir mimari karar: ortalamanın
+    kuralı bugün **evrensel** ve yedeğe koşullu değil (taban fontun rasteri
+    bit bit aynı kalmak zorunda, `every_base_glyph_advance_is_the_cell_advance`).
+    Kalan 190'ının mürekkebi gerçekten hücreden geniş; onlar için tek yol
+    **küçültme** (kitty yedek glyph'i hücreye sığacak kadar ölçekliyor) ve
+    o da ayrı bir karar — eşaralıklı bir ızgarada ölçeklenmiş bir glyph
+    komşularından farklı ağırlıkta görünür.
+  - **41'inin adayı Apple Color Emoji** → emoji seti (023); renkli bitmap ve
+    "ikinci atlas mı, RGBA mı" çatalı orada.
+  Sıra önerisi: legacy computing (021'in devamı, ucuz ve yordamsal),
+  sonra yerleşim kararı (89 karakter, tek dosyalık ama mimari cümleyi
+  inceltiyor), sonra emoji.
 - **Terminal→uygulama bildirim kanalları eksik: `?1004` odak, `?2031` tema.**
   020'nin ölçümünde çıktı (2026-09-21, Claude Code bir pty'ye koşturuldu) ve
   o setin kapsamı dışında bırakıldı — konusu fare değil. İkisi de aynı
@@ -590,8 +643,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   değişip `ensure()` atlası yeniden kurana kadar. Doluluk **bugün de**
   mümkündü (büyük puntoda birkaç yüz farklı glyph); 021 onu erişilebilir
   kıldı ve sayı artık somut (021 set kapısı, `/code-review`): kapasite
-  `floor(1024/w) * floor(1024/h)`, yordamsal aile **413** yuva (32 blok +
-  125 çizgi + 256 Braille) ve Braille'in 256'sı bu setten önce **sıfır**
+  `floor(1024/w) * floor(1024/h)`, yordamsal aile **421** yuva (32 blok +
+  125 çizgi + 256 Braille + 8 teknik; sonuncusu 2026-09-21'de eklendi ve
+  altısı zaten fonttan yuva harcıyordu, yani tavana gerçek katkısı 2) ve Braille'in 256'sı bu setten önce **sıfır**
   harcıyordu (genişlik kapısından dönüp negatif önbellekte `TOFU`'ya
   bağlanıyordu, o önbellek ise tavanlı ve toptan boşaltılıyor). Retina'da
   ~27pt civarında `capacity() - RULE_RESERVE` ailenin kendi boyuna iniyor;
