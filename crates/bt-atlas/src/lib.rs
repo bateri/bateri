@@ -80,12 +80,38 @@ pub const TOFU: u16 = 0;
 /// Kapasitenin bu kadarı karakterlere kapalı. Bkz. [`Atlas::slot`].
 const RULE_RESERVE: u16 = 7;
 
-/// Atlas dokusunun hedeflenen kenarı, piksel.
+/// Atlasın hedeflediği yuva sayısı — dokunun kenarı **bundan** türüyor.
 ///
-/// **Ölçüm iddiası değil**, bir kapasite tercihi: yuva sayısı hücre
-/// ölçüsünden türüyor ve gerçek doluluk [`Atlas::occupancy`] sayacından okunur
-/// (`/measure`). Tahliye yok — dolan atlas tofu'ya düşer, LRU 00X'in işi.
-const TEXTURE_EDGE: u16 = 1024;
+/// **Ölçüm iddiası değil, bir tasarım sabiti** (`GUTTER_PT` ve
+/// [`CONTEXT_SCALE`] emsali) ama türetmesi ölçülmüş bir sayıdan: yordamsal
+/// aile tofu ile birlikte **422** yuva istiyor (`docs/OLCUMLER.md` → Atlas
+/// yuva ayak izi) ve kural "ailenin payı atlasın yarısını geçmesin", yani
+/// `2 × 422 = 844`, yukarı yuvarlanmış **1024**.
+///
+/// Sabit **düşük riskli** ve bu onu dürüstçe bir tasarım sabiti yapıyor:
+/// `(450, 1624]` aralığındaki *her* değer 13pt, 28pt ve 29pt@2x'te aynı
+/// davranışı veriyor — 13pt zaten 1984 yuvayla tabanda kalıyor, 28 ile 29pt
+/// ise ikisi de bir kez katlanıyor.
+///
+/// Bu sayı bir **taban**, bir tavan değil: hücre küçükse kapasite hedefi
+/// katbekat aşar (13pt@2x → 1984) ve kimse kırpmaz.
+const SLOT_TARGET: u32 = 1024;
+
+/// Doku kenarının tabanı, piksel — **bugünkü davranışın koruma sözü**.
+///
+/// Varsayılan punto bu kenarda kalıyor ([`SLOT_TARGET`]'ı zaten aşıyor), yani
+/// ızgara, `texture_px()` ve raster bit bit değişmiyor. Düşürülürse o söz
+/// bozulur: varsayılan puntonun dokusu küçülür ve yuva sayısı düşer.
+const MIN_EDGE: u16 = 1024;
+
+/// Doku kenarının tavanı, piksel.
+///
+/// Tavan olmadan büyüme [`MAX_POINT_SIZE`] × `MAX_LINE_HEIGHT` köşesinde
+/// sınırsız sürerdi. 4096 Metal'in doku sınırının (16384) katbekat altında ve
+/// o köşede bile kapasiteyi ailenin üstünde tutuyor — sayısı
+/// `capacity_clears_the_family_at_every_accepted_size`'da **hesaplanıyor**,
+/// buraya yazılmıyor.
+const MAX_EDGE: u16 = 4096;
 
 /// `point_size * scale` çarpımının kabul aralığı.
 ///
@@ -248,9 +274,24 @@ impl Atlas {
         let context_advance = font::space_advance(&small);
         let context_cell_w = font::round_up(context_advance);
         let (w, h) = metrics.cell_px;
+        // Kenar **yuva hedefinden** türüyor: hücre büyüdükçe kapasite düşüyor
+        // ve bir yerde yordamsal ailenin (422 yuva) altına iniyor — ölçülen
+        // kırılma Retina'da 29pt (`docs/OLCUMLER.md`). Taban [`MIN_EDGE`],
+        // yani varsayılan punto bugünkü dokusunda kalıyor.
+        //
+        // `u32`'de sayılıyor: bölümlerin çarpımı küçük hücrede `u16`'yı aşar
+        // (13pt@1x, 4096 kenar → 116 224). `grid` yine `u16`.
+        //
+        // **`capacity()`'nin `u16::MAX` kırpmasına giden yol yok** ve sebebi
+        // döngünün kendisi: katlama yalnız kapasite hedefin **altındayken**
+        // koşuyor ve her katlama kapasiteyi dörtle çarpıyor, yani büyümenin
+        // ürettiği kapasite her zaman `4 × SLOT_TARGET`in (4096) altında.
+        // Kırpma ancak hiç katlanmamış bir tabanda görülebilir ve orası
+        // zaten bugünkü davranış.
+        //
         // `w`/`h` en az 1 (`font::round_up`), yani bölme güvenli; `max(1)` de
         // hücrenin dokudan büyük olduğu uç için.
-        let grid = ((TEXTURE_EDGE / w).max(1), (TEXTURE_EDGE / h).max(1));
+        let grid = grid_for(w, h);
         Self {
             faces,
             small,
@@ -321,7 +362,7 @@ impl Atlas {
 
     /// Atlas dokusunun piksel boyutu; `bt-gpu` dokuyu buna göre ayırır.
     ///
-    /// [`TEXTURE_EDGE`] değil **tam ızgara**: kenardaki artık şerit hiçbir
+    /// Türetilmiş kenar değil **tam ızgara**: kenardaki artık şerit hiçbir
     /// yuvaya düşmez, ayırmanın da anlamı yok.
     pub fn texture_px(&self) -> (u16, u16) {
         let (w, h) = self.metrics.cell_px;
@@ -407,9 +448,17 @@ impl Atlas {
         };
         if self.next >= cap {
             // Dolu atlas **önbelleklenmez**: bu, fontun kalıcı bir gerçeği
-            // değil atlasın geçici hâli. Tahliye geldiğinde (00X) buraya
-            // yazılacak kayıt yanlış olurdu — yer açılmış ama karakter hâlâ
-            // tofu'ya bağlı kalırdı.
+            // değil atlasın geçici hâli. Kapasite hücre ölçüsünden türüyor
+            // ([`SLOT_TARGET`]), yani aynı karakter başka bir puntoda yuva
+            // bulabilir ve buraya yazılacak kayıt onu tofu'ya çivilerdi.
+            //
+            // Buraya düşmek **tek karede hedeften fazla farklı glyph**
+            // demek ve o senaryo **ölçülmedi** (022). Ölçülürse çaresi LRU
+            // değil `encode_pass` sınırında geri dönüşüm: yuva numarası kare
+            // verisinde saklanmıyor, `slot_uv` uv'yi çözüm anında pişiriyor
+            // ve `prepare` kare başına dört kez koşuyor, yani kare
+            // **ortasında** yapılan her yeniden kullanım önceki geçişlerin
+            // uv'lerini geçersizleştirir.
             return (TOFU, None);
         }
         // Ödünç match'in scrutinee'sinde bırakılmıyor: `&mut self.buffer`
@@ -547,7 +596,10 @@ impl Atlas {
                 // geri sorulurdu — ana thread'de, kare bütçesinin ortasında.
                 // Tahliye bedeli amortize: iki tahliye arasına en az
                 // `capacity()` yeni kayıt sığıyor. Pozitif kayıtlar (gerçek
-                // yuvalar) korunuyor; onların tahliyesi LRU'nun işi (00X).
+                // yuvalar) korunuyor: onları toptan atmak dokuyu da
+                // düşürmeyi gerektirir ve o karar 022'de kapsam dışı
+                // bırakıldı — kapasite hücre ölçüsünden türüyor, yani
+                // pozitif tarafın dolması artık çok daha zor.
                 //
                 // **Bedel yedekle birlikte büyüdü** ve bu bilerek kabul
                 // edildi: tahliyeden sonra geri sorulan karakter artık yalnız
@@ -577,6 +629,12 @@ impl Atlas {
     /// Haritanın kabul ettiği en çok kayıt sayısı — pozitif ve negatif
     /// birlikte. Kapasitenin **iki katı**: bir katı pozitif kayıtların
     /// olabildiği en büyük değer, ikincisi negatif önbelleğe bırakılan pay.
+    ///
+    /// Kastedilen kapasite [`Atlas::capacity`], yani **türetilmiş** kenardan
+    /// çıkan sayı ([`SLOT_TARGET`]) — sabit bir tavan değil. Kenar
+    /// katlandığında bu pay da onunla büyüyor ve büyümesi doğru: pozitif
+    /// tarafta daha çok yuva varsa negatif tarafta da daha çok karakter
+    /// denenmiş demektir.
     fn negative_cache_cap(&self) -> usize {
         usize::from(self.capacity()).saturating_mul(2)
     }
@@ -590,6 +648,32 @@ impl Atlas {
         let total = u32::from(self.grid.0) * u32::from(self.grid.1);
         u16::try_from(total).unwrap_or(u16::MAX)
     }
+}
+
+/// Hücre ölçüsüne düşen doku kenarı, piksel — kararın **tek** kaynağı.
+///
+/// Taban [`MIN_EDGE`]; kapasite [`SLOT_TARGET`]'ın altında kaldıkça ve tavana
+/// ([`MAX_EDGE`]) varmadıkça ikiye katlanıyor. Sınamalar bu fonksiyonu
+/// **çağırıyor**, ikinci bir kopyasını yazmıyor: aynalanmış bir türetme
+/// kendi hatasını göremez.
+fn edge_for(w: u16, h: u16) -> u16 {
+    let mut edge = MIN_EDGE;
+    while slots_at(edge, w, h) < SLOT_TARGET && edge < MAX_EDGE {
+        edge *= 2;
+    }
+    edge
+}
+
+/// Verilen kenarda kaç yuva çıkar. `u32`: bölümlerin çarpımı küçük hücrede
+/// `u16`'yı aşıyor (13pt@1x, 4096 kenar → 116 224).
+fn slots_at(edge: u16, w: u16, h: u16) -> u32 {
+    u32::from((edge / w).max(1)) * u32::from((edge / h).max(1))
+}
+
+/// [`edge_for`]'un ızgaraya çevrilmiş hâli.
+fn grid_for(w: u16, h: u16) -> (u16, u16) {
+    let edge = edge_for(w, h);
+    ((edge / w).max(1), (edge / h).max(1))
 }
 
 /// Fonta girecek punto: ölçek çarpılmış ve aralığa oturtulmuş.
@@ -643,6 +727,13 @@ mod tests {
     /// rasterize etmeden, onlarcasıyla koşuyor. Değer [`MAX_POINT_SIZE`]'tur:
     /// üstünü istemek sessizce kırpılır ve sınama kapasiteyi yanlış sanırdı.
     const LARGE_POINT_SIZE: f64 = MAX_POINT_SIZE;
+    /// Ayar ayrıştırıcısının kabul ettiği en büyük satır aralığı.
+    ///
+    /// Kaynağı `bt_core::settings::MAX_LINE_HEIGHT` ama **oradan
+    /// okunamıyor**: katman yönü `bt-atlas`'ın `bt-core`'u görmesini
+    /// yasaklıyor. Kopya bilinçli ve dar — yalnız en kötü köşeyi kurmak
+    /// için; ikisi ayrışırsa bu sınama köşeyi kaçırır, yanlış çizim üretmez.
+    const LARGEST_LINE_HEIGHT: f64 = 2.0;
     const POINT_SIZE: f64 = 13.0;
     /// Tofu'ya düşen karakter — ve **iki** kapıdan birden düşüyor.
     ///
@@ -1210,23 +1301,93 @@ mod tests {
         assert_eq!(a.occupancy().0, 2, "geri düşüş ikinci bir yuva harcadı");
     }
 
+    /// Varsayılan yol **bit bit aynı** kalmalı (022 R2).
+    ///
+    /// Kenarın türetilmesi ancak hücre büyüdüğünde devreye giriyor; varsayılan
+    /// punto zaten [`SLOT_TARGET`]'ın katbekat üstünde. Bu bekçi olmasaydı
+    /// [`MIN_EDGE`] ya da [`SLOT_TARGET`] oynayınca varsayılan kullanıcının
+    /// ızgarası, dokusu ve **rasteri** sessizce değişirdi.
+    #[test]
+    fn the_default_size_keeps_todays_texture() {
+        let a = atlas(POINT_SIZE, 2.0);
+        assert_eq!(
+            edge_for(a.metrics.cell_px.0, a.metrics.cell_px.1),
+            MIN_EDGE,
+            "varsayılan punto tabanda kalmalı"
+        );
+        // Ölçülmüş sayı: `docs/OLCUMLER.md` → Atlas yuva ayak izi, 13pt@2x.
+        assert_eq!(a.occupancy().1, 1984, "13pt@2x kapasitesi değişti");
+    }
+
+    /// Değişmez: **kabul edilen her ölçüde** kapasite yordamsal ailenin
+    /// üstünde (022 R3).
+    ///
+    /// Bu bekçi 021'in doyma tablosunun yerine geçiyor: tablo bir gözlemdi,
+    /// bu bir sözleşme. Aile + tofu = 422 yuva (`docs/OLCUMLER.md`); sayı
+    /// burada **sabit olarak değil** `raster::is_procedural`'dan sayılarak
+    /// türetiliyor, yani aileye karakter eklenirse bekçi kendiliğinden
+    /// sıkılaşıyor.
+    #[test]
+    fn capacity_clears_the_family_at_every_accepted_size() {
+        let family = (0x23B0..=0x28FF)
+            .filter_map(char::from_u32)
+            .filter(|&ch| raster::is_procedural(ch))
+            .count()
+            + 1; // tofu
+        // Punto × ölçek çarpımı [`MIN_POINT_SIZE`]..[`MAX_POINT_SIZE`]
+        // aralığına oturuyor, yani köşeyi kuran şey çarpımın tavanı ve
+        // satır aralığının tavanı.
+        for point_size in [MIN_POINT_SIZE, 13.0, 29.0, 56.0, MAX_POINT_SIZE] {
+            for scale in [1.0, 2.0] {
+                for line_height in [1.0, LARGEST_LINE_HEIGHT] {
+                    let a = Atlas::new(None, point_size, scale, line_height);
+                    let total = a.occupancy().1;
+                    assert!(
+                        total >= family,
+                        "{point_size}pt@{scale}x lh={line_height}: \
+                         kapasite {total} < aile {family}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn full_atlas_returns_tofu_without_caching() {
-        let mut a = atlas(LARGE_POINT_SIZE, 1.0);
+        // En küçük kapasiteyi veren köşe: en büyük punto **ve** en büyük
+        // satır aralığı. Kenar tavana ([`MAX_EDGE`]) çarpıp orada duruyor,
+        // yani kapasite burada dibini buluyor.
+        let mut a = Atlas::new(None, LARGE_POINT_SIZE, 1.0, LARGEST_LINE_HEIGHT);
         let (used, total) = a.occupancy();
         assert_eq!(used, 1, "yeni atlasta yalnız tofu ayrılmış olmalı");
-        // Yazdırılabilir ASCII'nin tamamı: havuz kapasiteden büyük olmalı ve
-        // harf/rakam (62) `MAX_POINT_SIZE`'taki kapasiteye yetmiyor.
-        let pool: Vec<char> = (' '..='~').collect();
+        // Havuz iki kümeden: yordamsal aile (fonta sorulmadan çizildiği için
+        // **her zaman** yuva harcıyor) ve yazdırılabilir ASCII. Kapasite
+        // artık hücre ölçüsünden türüdüğü için tek başına ASCII yetmiyor —
+        // ve tofu'ya düşen karakter yuva **harcamıyor** (negatif önbellek),
+        // yani havuz gerçekten çizilebilen karakterlerden kurulmak zorunda.
+        // Aralık tablosu **aynalanmıyor**, süzgeç `raster::is_procedural`'ın
+        // kendisi: ikinci bir kopya sessizce kayardı.
+        // ASCII dört yüzde de ayrı yuva tutuyor; yordamsal aile `Regular`'a
+        // normalize olduğu için **tek** kez sayılıyor (`Atlas::slot`).
+        let pool: Vec<(char, Face)> = (0x23B0..=0x28FF)
+            .filter_map(char::from_u32)
+            .filter(|&ch| raster::is_procedural(ch))
+            .map(|ch| (ch, Face::Regular))
+            .chain(
+                [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic]
+                    .into_iter()
+                    .flat_map(|f| (' '..='~').map(move |ch| (ch, f))),
+            )
+            .collect();
         assert!(
             pool.len() > total,
             "sınama havuzu kapasiteyi aşmalı: havuz={} kapasite={total}",
             pool.len()
         );
-        let dropped: Vec<char> = pool
+        let dropped: Vec<(char, Face)> = pool
             .iter()
             .copied()
-            .filter(|&ch| a.slot(Sprite::Char(ch), Face::Regular, SizeClass::Normal).0 == TOFU)
+            .filter(|&(ch, face)| a.slot(Sprite::Char(ch), face, SizeClass::Normal).0 == TOFU)
             .collect();
         assert!(!dropped.is_empty(), "kapasite aşılınca tofu beklenir");
         assert_eq!(
@@ -1244,13 +1405,13 @@ mod tests {
             SizeClass::Normal,
         );
         assert_ne!(rule, TOFU, "dolu atlasta kural sprite'ı tofu'ya düştü");
-        // Dolu atlas geçici bir hâl: tahliye gelince (00X) yer açılacak ve
-        // bu karakterlerin tofu'ya bağlı kalmaması gerekiyor.
-        for ch in dropped {
+        // Dolu atlas geçici bir hâl: aynı karakter başka bir puntoda yuva
+        // bulabilir, yani tofu'ya bağlı kalmamaları gerekiyor.
+        for (ch, face) in dropped {
             assert!(
                 !a.slots
-                    .contains_key(&(Sprite::Char(ch), Face::Regular, SizeClass::Normal)),
-                "'{ch}' kalıcı olarak tofu'ya yazılmış"
+                    .contains_key(&(Sprite::Char(ch), face, SizeClass::Normal)),
+                "'{ch}' ({face:?}) kalıcı olarak tofu'ya yazılmış"
             );
         }
     }
@@ -1501,8 +1662,11 @@ mod tests {
                 "{point_size}×{scale}: {m:?}"
             );
             let (tw, th) = a.texture_px();
+            // Tavan artık [`MAX_EDGE`]: kenar hedefe göre katlanabiliyor ama
+            // orada duruyor. Uç girdiler (NaN, sonsuz, 1e9) puntoyu
+            // aralığa oturttuğu için buraya da sonlu bir doku düşmeli.
             assert!(
-                tw <= TEXTURE_EDGE && th <= TEXTURE_EDGE,
+                tw <= MAX_EDGE && th <= MAX_EDGE,
                 "{point_size}×{scale}: {tw}×{th}"
             );
         }
@@ -1627,15 +1791,23 @@ mod tests {
         assert_eq!(a.slot_origin(TOFU), (0, 0));
         assert_eq!(a.slot_origin(1), (w, 0));
         assert_eq!(a.slot_origin(cols), (0, h), "ilk yuva bir alt satıra düşer");
-        // Doku ızgarayı sarmalı ve kenarda bir hücreden fazlası boşa gitmemeli.
+        // Doku ızgarayı sarmalı ve kenarda bir hücreden fazlası boşa
+        // gitmemeli. Kenar artık türetilmiş, yani sabite değil **ızgaranın
+        // kendi kenarına** bakılıyor: satır/sütun sayısı ile hücre ölçüsünün
+        // çarpımı dokuyu vermeli ve bir hücre daha eklenince kenarı aşmalı.
         let (tw, th) = a.texture_px();
+        let edge_w = a.grid.0 * w;
+        let edge_h = a.grid.1 * h;
+        assert_eq!((tw, th), (edge_w, edge_h), "doku ızgarayı sarmıyor");
+        // Türetilen kenar ikinin kuvveti ve tabanla tavan arasında.
+        let edge = edge_for(w, h);
         assert!(
-            tw <= TEXTURE_EDGE && tw + w > TEXTURE_EDGE,
-            "genişlik: {tw}"
+            (MIN_EDGE..=MAX_EDGE).contains(&edge) && edge.is_power_of_two(),
+            "kenar: {edge}"
         );
         assert!(
-            th <= TEXTURE_EDGE && th + h > TEXTURE_EDGE,
-            "yükseklik: {th}"
+            tw + w > edge && th + h > edge,
+            "artık şerit bir hücreden büyük: {tw}×{th}, kenar {edge}"
         );
     }
 

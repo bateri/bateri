@@ -58,6 +58,34 @@ _Requirements: R1, R1.1, R1.2, R1.3, R2, R3, R3.1, R4, R5, R6, R6.1_
 - `crates/bt-gpu` diff'i **boş** (R5).
 - `make hepsi` yeşil.
 
+## Uygulama Notları
+
+- **Köşe kapasitesi 564, tahmin 506 değil.** R3.1 "sayı doğrulanmadan kabul
+  edilmesin" diyordu; `MAX_POINT_SIZE` × `LARGEST_LINE_HEIGHT` köşesinde
+  kapasite **564** çıktı, aile 422 — değişmez `MAX_EDGE = 4096` ile
+  sağlanıyor, tavan yükseltmeye gerek kalmadı. Pay %25 ve dar olduğu için
+  bekçi aileyi **sayarak** türetiyor, sabit yazmıyor.
+- **Türetme serbest fonksiyona çıktı** (`edge_for` / `slots_at` /
+  `grid_for`). İlk yazım `Atlas::new`'in içinde bir kapalıydı ve sınama
+  kenarı görmek için türetmeyi **aynalamak** zorunda kalıyordu; aynalanmış
+  tablo kendi hatasını göremez (021'in kol tablosu dersi). Şimdi sınama
+  `edge_for`'u çağırıyor.
+- **`full_atlas_returns_tofu_without_caching` havuzu büyümek zorunda kaldı.**
+  Sınama kapasiteyi 95 karakterlik ASCII ile dolduruyordu; kenar katlandığı
+  için en küçük kapasite 564'e çıktı. Havuz artık yordamsal aile (421, yüze
+  duyarsız) + ASCII × dört yüz (380) = 801. Gerekçe kayda değer: **tofu'ya
+  düşen karakter yuva harcamıyor** (negatif önbellek), yani havuz gerçekten
+  çizilebilen karakterlerden kurulmak zorunda — rastgele Unicode taraması
+  atlası hiç doldurmazdı.
+- **`MAX_LINE_HEIGHT` `bt-core`'dan okunamadı** (katman yönü). Sınama-yerel
+  `LARGEST_LINE_HEIGHT` kopyası, kaynağı adıyla yazılı; ayrışırlarsa bu
+  sınama köşeyi kaçırır, yanlış çizim üretmez.
+- **Değişmezin dişi olduğu doğrulandı:** `MAX_EDGE` geçici olarak 1024'e
+  çekilince `capacity_clears_the_family_at_every_accepted_size` tam ölçülen
+  noktada düştü — `29pt@2x: kapasite 406 < aile 422`. Mutasyon geri alındı.
+- **Gerçek pencerede doğrulandı:** `make duman` `yuva=13/1984` bastı, yani
+  varsayılan puntonun kapasitesi değişmedi (R2).
+
 ## Yayın Etkisi
 
 - **shader** — yok (`.metal` değişmiyor).
@@ -72,15 +100,15 @@ _Requirements: R1, R1.1, R1.2, R1.3, R2, R3, R3.1, R4, R5, R6, R6.1_
 
 ## Checklist
 
-- [ ] `SLOT_TARGET` / `MIN_EDGE` / `MAX_EDGE` ayrımı ve türetme doc'ları
-- [ ] `Atlas::new`'de kenarın türetilmesi
-- [ ] `u16` gerekçesi ve `negative_cache_cap` doc'u
-- [ ] Dört `00X` yorumu + `CLAUDE.md` + yol haritası borcu hizalandı
-- [ ] Test: varsayılan yol değişmedi (13pt@2x → 1984, `texture_px` sabit)
-- [ ] Test: değişmez — kabul edilen her punto × ölçek × `line_height` için
+- [x] `SLOT_TARGET` / `MIN_EDGE` / `MAX_EDGE` ayrımı ve türetme doc'ları
+- [x] `Atlas::new`'de kenarın türetilmesi
+- [x] `u16` gerekçesi ve `negative_cache_cap` doc'u
+- [x] Dört `00X` yorumu + `CLAUDE.md` + yol haritası borcu hizalandı
+- [x] Test: varsayılan yol değişmedi (13pt@2x → 1984, `texture_px` sabit)
+- [x] Test: değişmez — kabul edilen her punto × ölçek × `line_height` için
       kapasite ≥ 422, köşe dahil ve köşenin sayısı **hesaplanmış**
-- [ ] Test: üç eski `TEXTURE_EDGE` iddiası türetilmiş kenara göre yeniden
+- [x] Test: üç eski `TEXTURE_EDGE` iddiası türetilmiş kenara göre yeniden
       yazıldı
-- [ ] `crates/bt-gpu` diff'i boş
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] Yayın etkisi yazıldı
+- [x] `crates/bt-gpu` diff'i boş
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] Yayın etkisi yazıldı

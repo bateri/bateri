@@ -23,7 +23,7 @@
 | 019 | [glyph-yedegi](019-glyph-yedegi/) | 🔨 | `main`'de — seçili fontta olmayan tek hücrelik karakter sistemin cascade'inden geliyor (`⏵` düzeldi); kapı geometrik, hücreye sığmayan aday kutu kalıyor. Teslim bekliyor: `/measure` (yedeğin kare süresine etkisi, emanetteki sayılar); borç kalemi `[~]` kapandı — biri 021'e bağlandı, `line_height` piksel kalemi karar bekleyerek açık — `teslim.md` |
 | 020 | [fare-raporlama](020-fare-raporlama/) | 🟢 | `main`'de — fare isteyen uygulama fareyi alıyor: düğme, bırakma ve hareket rapor oluyor, Shift terminali geri alıyor (uygulama içinde metin seçmenin tek yolu) |
 | 021 | [kutu-cizim](021-kutu-cizim/) | 🟢 | `main`'de — blok, Braille ve çizgi çizim artık fonttan değil terminalden; köşegenler bilerek dışarıda. Ölçüm koştu: aile 160 → **421** yuva, doyma eşiği Retina'da **29pt** (`docs/OLCUMLER.md` → Atlas yuva ayak izi) |
-| 022 | [atlas-tahliyesi](022-atlas-tahliyesi/) | 📐 | atlas dolunca geri dönüşü yok: dolduğu andan sonra ilk kez görülen her karakter o oturumda kalıcı kutu. 021'in ölçümü eşiği somutladı (aile 421 yuva, Retina'da 29pt) ve borcun sırası geldi — `önce ölçüm, sonra LRU` |
+| 022 | [atlas-tahliyesi](022-atlas-tahliyesi/) | 🔨 | atlas dolunca geri dönüşü yok: dolduğu andan sonra ilk kez görülen her karakter o oturumda kalıcı kutu. 021'in ölçümü eşiği somutladı (aile 421 yuva, Retina'da 29pt) ve borcun sırası geldi — `önce ölçüm, sonra LRU` |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

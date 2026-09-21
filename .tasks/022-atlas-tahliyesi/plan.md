@@ -76,5 +76,5 @@ Atlas::new(family, point_size, scale, line_height)
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | kapı | |

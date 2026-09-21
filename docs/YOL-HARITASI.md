@@ -657,11 +657,23 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   dokunmuyor (çıktı yine tek kanallı kapsama maskesi, `R8Unorm` atlas
   duruyor) ve kendi başına ucuz. Kullanıcı görünürlüğü yüksek: maskot,
   spinner ve her TUI çerçevesi.
-- **Atlas dolunca geri dönüşü yok ve 021 eşiği yaklaştırdı.**
-  **2026-09-22'de sete bağlandı → 022**, ayrıntısı
-  `.tasks/022-atlas-tahliyesi/context.md`'de; maddenin kendi yazdığı sıra
-  ("önce ölçüm, sonra LRU") tamamlandı, çünkü ölçüm 021'de koştu. Aşağıdaki
-  gerekçe tarih olarak duruyor. Yuva tahliyesi
+- **Atlas dolunca geri dönüşü yok.** **022'de daraldı, kapanmadı.** Kapasite
+  artık sabit bir dokudan değil **hedeflenen yuva sayısından** türüyor
+  (`bt_atlas::SLOT_TARGET`), yani ölçülen kırılma — Retina'da 29pt, 406 yuva,
+  aile 422 — kalktı ve değişmez bir bekçiye bağlandı
+  (`capacity_clears_the_family_at_every_accepted_size`: kabul edilen her
+  punto × ölçek × `line_height` için kapasite ≥ aile). Varsayılan punto
+  bugünkü dokusunda kaldı.
+  **Kalan borç ve neden LRU değil:** atlas hâlâ dolabilir ve dolunca hâlâ
+  tofu'ya düşüyor; kalan senaryo "tek karede hedeften fazla farklı glyph" ve
+  o **ölçülmedi**. Ölçülürse çaresi LRU **değil**, `encode_pass` sınırında
+  geri dönüşüm — gerekçesi 022'nin panelinden çıktı ve kaynaktan doğrulandı:
+  `slot_uv` uv'yi çözüm anında pişiriyor, `prepare` kare başına **dört kez**
+  koşuyor, yani kare **ortasında** yapılan her yuva yeniden kullanımı önceki
+  geçişlerin uv'lerini geçersizleştirir ve ızgaradaki harf dock'un
+  bitmap'iyle çizilir — sessizce, hiçbir sayaç kıpırdamadan. Ayrıntısı
+  `.tasks/022-atlas-tahliyesi/discussion.md` → Karar. Aşağıdaki gerekçe
+  tarih olarak duruyor. Yuva tahliyesi
   (LRU) yok: `Atlas::slot` `next >= cap` olduğunda **her** yeni anahtara
   `TOFU` veriyor ve karar önbelleğe girmiyor, yani o andan sonra yazılan her
   yeni karakter kutu çıkıyor — pencere yeniden boyutlanana ya da font/punto
