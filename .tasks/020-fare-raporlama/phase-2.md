@@ -93,6 +93,50 @@ kapatıyor.
   `CLAUDE.md`'de yazılı değil; jetonların anlamı `Report::token_line`'da ve
   bu ortam koşulu oraya not olarak girmedi — borç değil, bilgi.
 
+### Set kapısının değiştirdikleri
+
+`/code-review` on bulgu verdi; sekizi düzeltildi, ikisi waive.
+
+- **Rapora giden koordinat artık ızgaranın dışında reddediliyor**
+  (`OutOfGrid`). Kapı tek kurala indi: **jest başlatan olay reddedilir,
+  süren jestin devamı kırpılır.** Bu olmadan başlık çubuğunda gezinen
+  işaretçi uygulamaya 0. satırı, dock bandına yapılan tıklama son ızgara
+  satırını bildiriyordu — ikisi de `point_to_cell`'in yapışma
+  semantiğinden. R8 (doldurma bandı) artık bu kuralın **özel hâli**, ayrı
+  bir dal değil.
+- **Kayıp `mouseUp:` uygulamada takılı düğme bırakıyordu**
+  (`flush_lost_releases`). Basıştaki bayat-bit temizliği terminalin kendi
+  defterini düzeltiyordu ama bırakma raporu hiç gitmiyordu; kanıt
+  selector'ın kendisi — AppKit `mouseMoved:`'ı yalnız hiçbir düğme basılı
+  değilken gönderiyor.
+- **Çentik yalnız raporlanan olayda damgalanıyor** (`report_button`):
+  `Select`/`Ignored` kollarında damgalamak o hücredeki ilk hover raporunu
+  yutuyordu. `motion_cell`'in doc'u buna göre düzeldi.
+- **`reaches_terminal`'ın doc'u çalınmıştı:** `modifiers` fonksiyonu doc
+  bloğu ile gövdesinin **arasına** girmiş, Command izin listesinin gerekçesi
+  fare değiştirici çevirmenini belgeliyordu. Yol haritasında adıyla yazılı
+  tuzağın ("doc yorumunun altına kod sokmak sessizce doc çalıyor") üçüncü
+  tekrarı.
+- **`session.rs`'in iki kopyası tek gövdeye indi** (`mouse_report_at` +
+  `send_report`); `mouse_button`'ın iki `button_route` match'i bire indi ve
+  asimetri (`let shift = pressed && modifiers.shift`) tek satırda görünür
+  oldu.
+- **`docs/YOL-HARITASI.md`:** 020 araya girince kaçan bayat `021` referansı
+  düzeldi.
+
+**Waive edilen iki bulgu:**
+
+- **Hücre başına `Term` kilidi** (ana thread). `discussion.md` → Karar 4A'nın
+  kabul ettiği bedel; geri dönüşü (4B, kipe göre aç) adlandırılmış ve
+  ölçülmemiş bir kazanç için ölçülmüş bir bedel (`make test-yaris`)
+  istiyor. `/audit` mercek 4 de aynı yeri gördü ve kilit sırasını temiz
+  buldu.
+- **Jest durum makinesi sınanamıyor.** `sent_buttons`/`dragging`/`Click`
+  geçişleri `define_class!` komşusu `impl` gövdesinde ve yalnız
+  `moved_to_new_cell` ile `button_bit` saf fonksiyona çıkarıldı. Bulgunun
+  önerisi (jest durumunu saf bir struct'a taşımak) doğru ama set kapısının
+  kapsamını aşıyor — borç olarak yazılıyor.
+
 ## Checklist
 
 - [x] `setAcceptsMouseMovedEvents:` + `mouseMoved:` (erken dönüş kipe bakıyor)

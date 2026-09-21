@@ -61,7 +61,8 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock, DockCols};
 use crate::input::{
-    self, Arrow, ButtonRoute, MouseButton, MouseModifiers, WHEEL_DOWN, WHEEL_UP, WheelRoute,
+    self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
+    WheelRoute,
 };
 use crate::settings::{CaretShape, CursorBlink};
 use crate::shell::{
@@ -3189,36 +3190,27 @@ impl Session {
         modifiers: MouseModifiers,
     ) -> Click {
         let term = self.term.lock();
-        let mode = *term.mode();
-        let encoding = if pressed {
-            match input::button_route(mode, modifiers.shift) {
-                ButtonRoute::Select => return Click::Select,
-                ButtonRoute::Report(encoding) => encoding,
-            }
-        } else {
-            // Rota kilitli (Shift sorulmuyor), kip değil — doc'taki daraltma.
-            match input::button_route(mode, false) {
-                ButtonRoute::Select => return Click::Ignored,
-                ButtonRoute::Report(encoding) => encoding,
-            }
+        // Shift **yalnız basışta** soruluyor: bırakmanın rotası basışta
+        // kilitlendi. Kip ikisinde de soruluyor ve `Select` iki kolda iki
+        // ayrı şey demek — basışta jest terminalin, bırakmada gidecek yer
+        // yok.
+        let shift = pressed && modifiers.shift;
+        let encoding = match input::button_route(*term.mode(), shift) {
+            ButtonRoute::Select if pressed => return Click::Select,
+            ButtonRoute::Select => return Click::Ignored,
+            ButtonRoute::Report(encoding) => encoding,
         };
         let offset = term.grid().display_offset() as i32;
-        let line = viewport_point((at.col, at.row), offset).line;
         let byte = input::button_byte(button, modifiers);
-        let report = if pressed {
-            u16::try_from(line.0)
-                .ok()
-                .and_then(|row| input::mouse_report(encoding, byte, true, at.col, row))
-        } else {
-            // Satır yalnız **negatife** kaçabilir (pencere geçmişte, ya da
-            // işaretçi doldurma bandında): `display_offset` eksi olmadığı
-            // için üstten taşma yok. Kodlamanın tavanı ayrıca kırpılıyor —
-            // sütun da, satır da.
-            let row = u16::try_from(line.0.max(0)).unwrap_or(u16::MAX);
-            let (col, row) = (encoding.clamp(at.col), encoding.clamp(row));
-            input::mouse_report(encoding, byte, false, col, row)
-        };
+        let report = mouse_report_at(encoding, byte, at, offset, pressed);
         drop(term);
+        self.send_report(report)
+    }
+
+    /// Raporu gönderir; boş rapor [`Click::Ignored`]. Kilit **bırakılmış**
+    /// olmalı: `send` kanala yazıyor ve `Term`'ü tutarken beklemenin anlamı
+    /// yok.
+    fn send_report(&self, report: Option<Vec<u8>>) -> Click {
         let Some(report) = report else {
             return Click::Ignored;
         };
@@ -3259,17 +3251,10 @@ impl Session {
             return Click::Ignored;
         };
         let offset = term.grid().display_offset() as i32;
-        let line = viewport_point((at.col, at.row), offset).line;
         let byte = input::motion_byte(button, modifiers);
-        let report = u16::try_from(line.0)
-            .ok()
-            .and_then(|row| input::mouse_report(encoding, byte, true, at.col, row));
+        let report = mouse_report_at(encoding, byte, at, offset, true);
         drop(term);
-        let Some(report) = report else {
-            return Click::Ignored;
-        };
-        self.send(Msg::Input(report.into()));
-        Click::Sent
+        self.send_report(report)
     }
 
     /// Ok tuşu — klavyenin oku baytla değil tuşla girer; neden [`Arrow`]'da.
@@ -4030,6 +4015,35 @@ fn scroll_locked<T: EventListener>(term: &mut Term<T>, lines: i32, band: i32) ->
 fn clear_selection_locked<T>(term: &mut Term<T>) -> bool {
     let selection = term.selection.take();
     visible_range(selection.as_ref(), term).is_some()
+}
+
+/// Raporun gövdesi: işaretçinin hücresini uygulamanın satırına indirir ve
+/// baytları kurar. **Kilidi çağıran tutuyor** — `offset` onun altından
+/// okundu; burası saf.
+///
+/// `pressed` yalnız iki şeyi seçiyor ve ikisi de aynı ayrımdan: raporun
+/// biçimi (SGR'da `M`/`m`) ve **sığmayan koordinatın akıbeti**. Jest
+/// başlatan ya da süren olay (basış, hareket) reddediliyor; jesti bitiren
+/// bırakma kırpılıyor, çünkü düşen bırakma uygulamada takılı kalmış bir
+/// düğme bırakır (R6).
+fn mouse_report_at(
+    encoding: MouseEncoding,
+    byte: u8,
+    at: SelectionPoint,
+    offset: i32,
+    pressed: bool,
+) -> Option<Vec<u8>> {
+    let line = viewport_point((at.col, at.row), offset).line;
+    if pressed {
+        let row = u16::try_from(line.0).ok()?;
+        return input::mouse_report(encoding, byte, true, at.col, row);
+    }
+    // Satır yalnız **negatife** kaçabilir (pencere geçmişte, ya da işaretçi
+    // doldurma bandında): `display_offset` eksi olmadığı için üstten taşma
+    // yok. Kodlamanın tavanı ayrıca kırpılıyor — sütun da, satır da.
+    let row = u16::try_from(line.0.max(0)).unwrap_or(u16::MAX);
+    let (col, row) = (encoding.clamp(at.col), encoding.clamp(row));
+    input::mouse_report(encoding, byte, false, col, row)
 }
 
 /// Görünür pencere hücresini grid noktasına çevirir.

@@ -396,12 +396,24 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   boşta kare borcundan ayrı bir iş. Kaydırma (006) görünür kıldı, getirmedi;
   maliyeti ölçülmedi. Kaynak: 006 `phase-3.md` → `/audit` mercek 8 ve
   orkestratör kararı; `bt-core`'da `AdapterInner::dirty`'nin doc'u.
-- **Fare raporlamasının geri kalanı.** 006 yalnız tekerlek kolunu getirdi
-  (SGR, UTF-8, düz kodlama). Eksik: tıklama/sürükleme/hareket raporu,
-  değiştirici bitleri (bugün `0`), yatay tekerlek, SGR-pixel. Görünen bedeli:
-  `mouse=a` açık vim'de tıklama imleci taşımıyor, seçim yapıyor. Tıklama
-  raporu seçimle çakışır, yani 006'nın seçim modelini (Karar 1) yeniden açar.
-  Kaynak: 006 `phase-3b.md` → Kapsam dışı; 006 `discussion.md` → Karar 4 eki.
+- **Fare raporlamasının geri kalanı.** **2026-09-21'de sete bağlandı → 020
+  ve madde büyük ölçüde kapandı:** tıklama, sürükleme, hareket ve değiştirici
+  bitleri (Meta 8 / Control 16) geldi, seçimle çakışmayı Shift arbitrajı
+  çözdü (006'nın Karar 1'i yeniden açıldı ve yerine "Shift terminali geri
+  alır" kuralı kondu). **Kalan iki kalem:** yatay tekerlek raporu (66/67) ve
+  SGR-pixel fare (1016); ikisi de 020'de adıyla kapsam dışı. Kimse
+  istemedi, kendi setlerini hak etmiyorlar. Kaynak: 006 `phase-3b.md` →
+  Kapsam dışı; `.tasks/020-fare-raporlama/`.
+- **Farenin jest durumu sınanamıyor.** 020 set kapısının (`/code-review`)
+  waive edilen bulgusu: rotayı kilitleyen defter (`sent_buttons`,
+  `dragging`, `Click`'in üç kolu, kayıp bırakmanın telafisi)
+  `BateriView`'ın `impl` gövdesinde ve `define_class!` komşusu kod
+  sınanamıyor — saf fonksiyona çıkarılanlar yalnız `moved_to_new_cell` ile
+  `button_bit`. Bugün dört geçişin dördü de yalnız gözle doğrulandı. Çaresi
+  jest durumunu `NSEvent` görmeyen bir struct'a taşımak; bedeli orta ve
+  ancak `view.rs`'in fare yolunu zaten elden geçiren bir set içinde ucuz.
+  Yamandığı yer belli değil — hareketin ikinci tüketicisi ya da çift/üçlü
+  tıkla seçim doğal ev.
 - **Tamamlama listesi ızgarayı kaydırıyor.** ZLE'nin `BUFFER` olmayan çıktısı
   (tamamlama listesi, `menu-select`, `bck-i-search`, `zle -M`) aynada yok ve
   ızgaraya düşüyor — 012'nin kayıtlı bedeli; liste kalkınca dock ile içerik
@@ -429,7 +441,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   ile sistemin cascade'inden geliyor ve kapı **geometrik**: adayın ilerlemesi
   hücreninkini aşıyorsa kutu kalıyor. Kapının elediği her şey — emoji, CJK,
   geniş ok, **ve ölçüm sırasında çıkan Braille** — aşağıdaki "blok, çizgi ve
-  Braille fonttan geliyor" maddesine ve 021'e devredildi. Aşağıdaki gerekçe
+  Braille fonttan geliyor" maddesine ve **022**'ye devredildi (020 araya
+  girince numara kaydı; aynı commit aşağıdaki kardeş referansı düzeltmişti,
+  bu satır atlanmıştı). Aşağıdaki gerekçe
   tarih olarak duruyor:
   Ölçüldü (2026-09-20, kullanıcı ekran görüntüsüyle bildirdi): Claude Code'un
   `⏵⏵ auto mode on` göstergesi iki boş kutu olarak çıkıyor. Sebep `⏵`

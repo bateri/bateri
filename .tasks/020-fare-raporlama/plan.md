@@ -106,4 +106,4 @@ mouseMoved: / mouseDragged:            (phase-2)
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| kapı | |
+| kapı | ✅ |
