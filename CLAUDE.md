@@ -769,7 +769,18 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   işaretlerinden okunur ve `Session::shell_state()`'te durur; satıra
   çıpalanması prompt'un OSC 8 bağlantısıyla, yani blok kimliği hücrelerde
   taşınır. bash ve fish betikleri doğduğunda çıpa satırı onlara da yazılır —
-  yoksa o kabuklarda blok yok, işaret de yok.
+  yoksa o kabuklarda blok yok, işaret de yok. Sarmalayıcı bir de **`LISTMAX=0`**
+  dayatıyor (yalnız dock'lu kademede, kullanıcının başlangıç dosyalarından
+  **önce**, yani kendi değerini yazan kullanıcı kazanıyor; `LISTMAX` zsh'te
+  varsayılan olarak set olduğu için "kullanıcı mı ayarlamış" sınanamıyor ve
+  bedeli kapatan şey sıra): zsh'in varsayılan ölçütü seçenek **sayısı** (100)
+  ve ekranı satırca aşan küçük bir liste sormadan basılıyor — basıldıktan
+  sonra da zsh onu **temizlemiyor** (ölçüldü: taşan listede ne imleç geri
+  alınıyor ne `ED` geliyor, yani 017'nin geri dönüşü tetiksiz kalıyor, çünkü
+  zsh normal bir terminalde geçmişe kayan satırları geri getiremez). `0`
+  ölçütü sayıdan yere çeviriyor: sığmayan liste **önce soruyor** ve `n` ekranı
+  olduğu gibi bırakıyor. **Bilinen sınır**: `y` dendiğinde liste basılıyor ve
+  yine kalıcı — ölçüt "bozulmadan önce sor", "geri getir" değil.
 - **Ölçülmemiş sayı yazılmaz.** Tek sahip `docs/OLCUMLER.md` (dosyanın başı
   hangi türün sayısı olduğunu söyler); ölçüm bir kapı değildir, `/measure` ile
   kullanıcı ister. Zaman kancaları env'dir: `BT_SCROLL_TEST` yükü seçer (boşta

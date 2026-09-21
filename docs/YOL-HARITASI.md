@@ -450,6 +450,15 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   yapmıyor, ve kimse istemedi. İstenirse kendi seti açılır; bu maddeyi yarım
   tutmak onu bitmemiş bir iş gibi gösterirdi. `content_rows`'u oynatmak çare
   değil: denendi, deliği yalnız yer değiştirdi (`2fdca50` → `27a0b98`).
+  **Kapanışın bir kolu 2026-09-21'de ölçülüp yamandı:** dönüşün tetiği zsh'in
+  kendi `\e[J`'si ve zsh onu yalnız liste ekrana **sığdığında** gönderiyor;
+  taşan listede ne imleci geri alıyor ne temizliyor (ölçüldü, saf PTY —
+  sayılar `assets/shell/zsh/bateri.zsh`'in `LISTMAX` yorumunda), yani 017'nin
+  doldurma bandı tetiksiz kalıyor ve liste ekranda **kalıyordu**. Sarmalayıcı
+  artık dock'lu kademede `LISTMAX=0` dayatıyor: ölçüt seçenek sayısından
+  kapladığı **yere** iniyor ve sığmayan liste basılmadan **önce** soruyor.
+  Kalan borç `y` kolu — o listede ekran yine bozuluyor — ve çaresi yeni bir
+  madde değil, yukarıdaki "listeyi kendi yüzeyinde çiz" isteğinin ta kendisi.
 - **Font fallback yok: seçili fontta olmayan karakter kutu (tofu) çiziliyor.**
   **2026-09-20'de sete bağlandı → 019 ve madde kapandı** (ölçüldü); ayrıntısı
   `.tasks/019-glyph-yedegi/`'de. Eksik glyph artık `CTFontCreateForString`
