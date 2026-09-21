@@ -48,7 +48,9 @@ use objc2_foundation::{
 };
 
 use crate::clipboard;
-use crate::keys::{BACKSPACE, KeyInput, KeyPress, encode_key, only_char, page_scroll};
+use crate::keys::{
+    ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, encode_key, only_char, page_scroll,
+};
 use crate::quote::shell_quote;
 
 /// Izgaranın dışına düşen noktaya ne olacağı — [`point_to_cell`]'in tek
@@ -272,10 +274,14 @@ fn button_bit(button: MouseButton) -> u8 {
 /// kabuğa düz harf yazardı. Değiştiricinin geri kalanı sorulmuyor: Cmd-Shift-T
 /// de bir kısayol denemesi, girdi değil.
 ///
-/// **İstisna tek ve liste kapalı:** ⌘⌫ ([`BACKSPACE`]) geçer, baytı
-/// [`encode_key`]'de (`\x15` = `^U`, zsh'te `kill-whole-line`). Liste kapalı
-/// kalmak zorunda — açık bir kural bir gün Cmd-T'yi de geçirir ve kabuğa `t`
-/// yazar (018 Karar 3).
+/// **İstisnalar üç tuş ve liste kapalı:** ⌘⌫ ([`BACKSPACE`]), ⌘←
+/// ([`ARROW_LEFT`]) ve ⌘→ ([`ARROW_RIGHT`]) geçer; baytları [`encode_key`]'de
+/// (`\x15` = `^U` `kill-whole-line`, `\x01` = `^A` `beginning-of-line`,
+/// `\x05` = `^E` `end-of-line`). Üçü de macOS'un satır jestleri ve üçünün de
+/// baytı zsh'te gerçekten bağlı. Listenin **kapalı** kalması bir tasarım
+/// kararı, uzunluğu değil: geçen tuş adıyla yazılır, yoksa açık bir kural bir
+/// gün Cmd-T'yi de geçirir ve kabuğa `t` yazar (018 Karar 3; ⌘←/⌘→'nin girişi
+/// `encode_key`'in kolunda gerekçeli).
 ///
 /// İstisna **yalnız karakteri** soruyor, yanındaki değiştiricileri değil:
 /// CapsLock açıkken de ⌘⌫ satırı silmeli ve Shift ya da Control ⌫'e ikinci
@@ -290,9 +296,12 @@ fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
         return true;
     }
     // Tek karakterlik eşleşme, `page_scroll` emsali ve **aynı sahipten**
-    // ([`only_char`]): ⌫ ile **başlayan** çok karakterli bir `characters`
-    // izin listesine girmez.
-    only_char(chars.unwrap_or_default()) == Some(BACKSPACE)
+    // ([`only_char`]): listedeki bir tuşla **başlayan** çok karakterli bir
+    // `characters` izin listesine girmez.
+    matches!(
+        only_char(chars.unwrap_or_default()),
+        Some(BACKSPACE | ARROW_LEFT | ARROW_RIGHT)
+    )
 }
 
 pub(crate) struct ViewIvars {
@@ -681,12 +690,14 @@ define_class!(
         /// İlk üç kol AppKit'in metin yığınına (`interpretKeyEvents:`)
         /// **girmez** ve girmemeleri ayrı ayrı gerekçeli:
         ///
-        /// 1. **Cmd'li olay** yutulur (`reaches_terminal`); **tek istisna**
-        ///    kapalı izin listesinde (⌘⌫ → `\x15`) ve o da yığına
-        ///    **girmiyor**, doğrudan [`encode_key`]'e gidiyor. Yığına
-        ///    girseydi ⌘⌫ orada `deleteToBeginningOfLine:` olur, ⌘T de
-        ///    `insertText:`'e varıp kabuğa `t` yazardı; izin listesi o
-        ///    tuşları hiç görmezdi.
+        /// 1. **Cmd'li olay** yutulur (`reaches_terminal`); **istisnalar**
+        ///    kapalı izin listesinde (⌘⌫ → `\x15`, ⌘← → `\x01`, ⌘→ →
+        ///    `\x05`) ve onlar da yığına **girmiyor**, doğrudan
+        ///    [`encode_key`]'e gidiyor. Yığına girseydi ⌘⌫ orada
+        ///    `deleteToBeginningOfLine:`, ⌘←/⌘→ de
+        ///    `moveToBeginningOfLine:`/`moveToEndOfLine:` olur,
+        ///    `doCommandBySelector:` üçünü de sessizce yutardı; ⌘T ise
+        ///    `insertText:`'e varıp kabuğa `t` yazardı.
         /// 2. **Shift+PgUp/PgDn** terminalin kaydırmasıdır
         ///    ([`page_scroll`]). Kol Control'ünkinden **önce**, çünkü
         ///    `page_scroll` Shift dışındaki değiştiricileri sormuyor —
@@ -724,7 +735,7 @@ define_class!(
             // Command basılıyken tuş bir kısayoldur, girdi değil. Menü onu
             // `performKeyEquivalent:` ile önce yakalıyor (Cmd-C/V/Q/,, Cmd +/−/0);
             // yakalamadığı buraya varır ve **yutulur** (`reaches_terminal`) —
-            // izin listesindeki tek tuş (⌘⌫) dışında.
+            // izin listesindeki üç tuş (⌘⌫, ⌘←, ⌘→) dışında.
             if !reaches_terminal(flags, chars.as_deref()) {
                 return;
             }
@@ -746,9 +757,10 @@ define_class!(
             }
             let ctrl = flags.contains(NSEventModifierFlags::Control);
             // `!command` R4.2'nin **uygulandığı** yer: izin listesinden geçen
-            // ⌘⌫ de yığına girmiyor. Girseydi yığın onu
-            // `deleteToBeginningOfLine:`e çevirir, `doCommandBySelector:`
-            // sessizce yutar ve aşağıdaki kol `\x15`'i hiç göremezdi.
+            // üç tuş da yığına girmiyor. Girseydi yığın onları
+            // `deleteToBeginningOfLine:`/`moveToBeginningOfLine:`/`moveToEndOfLine:`e
+            // çevirir, `doCommandBySelector:` sessizce yutar ve aşağıdaki
+            // kollar baytlarını hiç göremezdi.
             if !ctrl && !command {
                 // Metin yığını: ölü tuş durumunu o tutuyor ve bileşim
                 // tamamlanınca metni `insertText:` ile geri veriyor. Bayrak
@@ -765,7 +777,7 @@ define_class!(
             // Yığının almadığı (ya da hiç uğramadığı) olay: fonksiyon tuşları,
             // Enter/Tab/Esc/Backspace, Control'lü harfler, Option'lı
             // gezinme/silme (yığın onları `doCommandBySelector:`'a veriyor ve
-            // o metot sessiz no-op) ve izin listesinden geçen ⌘⌫.
+            // o metot sessiz no-op) ve izin listesinden geçen ⌘⌫/⌘←/⌘→.
             //
             // `super`'e geçmiyoruz: `NSResponder::keyDown:` tanımadığı tuşta
             // beep çalar ve terminalde her ok tuşu bip sesi olurdu.
@@ -1916,20 +1928,33 @@ mod tests {
         // Saf modifier tuşu: `characters` yok, ortada kimliği sorulacak bir
         // tuş da yok — yutulur.
         assert!(!reaches_terminal(NSEventModifierFlags::Command, None));
-        // **Tek istisna**: ⌘⌫ (`\x15`, baytı `encode_key`'de). Yanındaki
-        // değiştirici sorulmuyor — CapsLock açıkken de satırı silmeli.
-        for extra in extras {
+        // **İstisnalar**: ⌘⌫ (`\x15`), ⌘← (`\x01`) ve ⌘→ (`\x05`); baytları
+        // `encode_key`'de. Yanındaki değiştirici sorulmuyor — CapsLock
+        // açıkken de satırı silmeli, ⌘⇧← de satır başına gitmeli.
+        for allowed in [BACKSPACE, ARROW_LEFT, ARROW_RIGHT] {
+            for extra in extras {
+                assert!(
+                    reaches_terminal(
+                        NSEventModifierFlags::Command | extra,
+                        Some(&allowed.to_string())
+                    ),
+                    "Command + {allowed:?} + {extra:?}"
+                );
+            }
+            // Tek karakterlik eşleşme: listedeki tuşla başlayan çok
+            // karakterli bir `characters` listeye girmez.
             assert!(
-                reaches_terminal(NSEventModifierFlags::Command | extra, Some("\u{7f}")),
-                "Command + Delete + {extra:?}"
+                !reaches_terminal(NSEventModifierFlags::Command, Some(&format!("{allowed}x"))),
+                "{allowed:?} + x"
             );
         }
-        // Tek karakterlik eşleşme: ⌫ ile başlayan çok karakterli bir
-        // `characters` listeye girmez.
-        assert!(!reaches_terminal(
-            NSEventModifierFlags::Command,
-            Some("\u{7f}x")
-        ));
+        // Liste **kapalı**: yönü aynı olan ⌘↑/⌘↓ listede değil, yutulur.
+        for swallowed in ['\u{f700}', '\u{f701}'] {
+            assert!(
+                !reaches_terminal(NSEventModifierFlags::Command, Some(&swallowed.to_string())),
+                "{swallowed:?}"
+            );
+        }
         // Command'sız tuş terminalin: Control'lü harf bir bayt, Option'lı
         // gezinme tuşu bir Meta dizisi, Option'lı harf bir karakter.
         for flags in extras {
