@@ -453,8 +453,11 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 - **Font fallback yok: seçili fontta olmayan karakter kutu (tofu) çiziliyor.**
   **2026-09-20'de sete bağlandı → 019 ve madde kapandı** (ölçüldü); ayrıntısı
   `.tasks/019-glyph-yedegi/`'de. Eksik glyph artık `CTFontCreateForString`
-  ile sistemin cascade'inden geliyor ve kapı **geometrik**: adayın ilerlemesi
-  hücreninkini aşıyorsa kutu kalıyor. Kapının elediği her şey — emoji, CJK,
+  ile sistemin cascade'inden geliyor ve kapı **geometrik**: adayın boyayacağı
+  piksel hücrenin dışına taşıyorsa kutu kalıyor. (Ölçüt 2026-09-21'de
+  ilerlemeden mürekkebe çevrildi — `⏺` U+23FA ilerlemesiyle eleniyor,
+  mürekkebiyle sığıyordu; ayrıntısı 019 phase-1 → Ölçülmüş sayılar.)
+  Kapının elediği her şey — emoji, CJK,
   geniş ok, **ve ölçüm sırasında çıkan Braille** — aşağıdaki "blok, çizgi ve
   Braille fonttan geliyor" maddesine ve **023**'e devredildi (020 ile 021 araya
   girince numara kaydı; aynı commit aşağıdaki kardeş referansı düzeltmişti,
@@ -477,6 +480,21 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   girmek zorunda. Kapsamı 020'ye eklenebilir ya da kendi küçük setini alır;
   kullanıcı görünürlüğü yüksek, çünkü ok/sembol/kutu karakterleri TUI'lerde
   ve prompt'larda her yerde.
+- **`⎿` (U+23BF) kutu çiziliyor ve mürekkep kapısı onu kurtarmıyor.**
+  Claude Code araç sonuçlarını bu köşe parçasıyla başlatıyor, yani
+  kullanıcının ekranında `⏺` kadar sık. Ölçüldü (2026-09-21, Menlo 16pt,
+  hücre 9.633): cascade Hiragino Sans W3 veriyor, ilerleme 16.0 (1.66×) ve
+  mürekkep **7.68'den 16.0'a** — yarım genişlikli bir glyph ilerleme
+  kutusunun **sağ yarısına** yaslanmış, yani ortalama kaydırması
+  (`font::centre_shift`, ilerleme hücreyi aştığı için sıfır) onu hücreye
+  sokamıyor. Mürekkebe göre ortalamak çare gibi görünüyor ama değil: ortalama
+  kuralı **evrensel** ve yedeğe koşullu değil (taban fontun rasteri bit bit
+  aynı kalmak zorunda, `every_base_glyph_advance_is_the_cell_advance`).
+  Doğru yol **yordamsal çizim**: `⎿` bir köşe parçası, yani 021'in U+2500
+  ailesinin akrabası ve aynı mesafe alanı onu da çizer. Kapsam küçük —
+  U+23B7–U+23BF'in terminal grafik kümesi — ve 021'in `Family::Line`
+  tablosuna bir kol ekliyor. Kendi seti gerekmez, 021'in yanına ya da tek
+  commit'lik bir ek olarak girer.
 - **Terminal→uygulama bildirim kanalları eksik: `?1004` odak, `?2031` tema.**
   020'nin ölçümünde çıktı (2026-09-21, Claude Code bir pty'ye koşturuldu) ve
   o setin kapsamı dışında bırakıldı — konusu fare değil. İkisi de aynı
