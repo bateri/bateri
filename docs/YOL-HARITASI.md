@@ -61,9 +61,10 @@ bulunamaz.
 | 019 | glyph yedeği | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "font fallback yok"): seçili fontta olmayan karakter kutu çiziliyor. Ölçüldü — `⏵` (U+23F5) Menlo'da yok, aynı satırdaki `→`/`↻`/`░` var; `CTFontGetGlyphsForCharacters` cascade list'e düşmüyor. **Aile** düzeyinde yedek zaten var (`PREFERRED` → `FALLBACK`), eksik olan **karakter** düzeyi. Emoji setinden ayrı ve çok daha ucuz: yedekten gelen glyph de tek kanallı maske, `R8Unorm` atlas duruyor; değişen tek şey yuva anahtarına gerçek fontun kimliğinin girmesi. Set açıldı → `.tasks/019-glyph-yedegi/context.md` |
 | 020 | fare raporlama | **Kullanıcı isteğinden doğdu** (2026-09-21): Claude Code'un giriş kutusunda tıklanan yere imleç gelmiyor. Sebep fare raporunun yokluğu — adı TUI desteği değil mouse tracking. Ölçüldü (CLI bir pty'ye koşturuldu): Claude Code `?1000/1002/1003/1006` istiyor, etkin kip 1003. Raporun yarısı hazır: `wheel_report` adı tekerlek ama gövdesi genel X10/SGR raporu ve kip takibi alacritty'den bedava geliyor; eksik olan düğme/hareket kodlaması ve `mouseDown:`'ın kipi hiç sormaması. İçindeki ürün kararı Shift arbitrajı — fare kipinde Shift terminali geri alır, yoksa uygulama içinde metin seçme yeteneği ölür. Set açıldı → `.tasks/020-fare-raporlama/` |
 | 021 | kutu çizim | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "blok, çizgi ve Braille fonttan geliyor"): kutu/blok çizim ve Braille fonttan geliyor ve **döşemiyor** — Menlo'nun `█`'i hücreyi doldurmuyor, Braille de genişlik kapısından dönüyor. Çare yordamsal çizim ve örüntü depoda hazır (`RuleKind`'ın yedi sprite'ı); çıktı yine tek kanallı kapsama maskesi, yani emoji setinin "ikinci atlas mı, RGBA mı" çatalı **hiç açılmıyor** — 019'un 020/021'den ayrıldığı gerekçenin aynısı. Kullanıcı görünürlüğü yüksek ve sürekli: Claude Code'un maskotu, spinner'ı ve her TUI çerçevesi. Set açıldı → `.tasks/021-kutu-cizim/` |
-| 022 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-21: taban **yarım alındı** ve kalan yarısı sanıldığından zor çıktı. CPU sütunları ile açılış prizde ölçüldü, ikisi de taban. **GPU sütunu alınamadı:** aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms arasında dolaşıyor ve sınanan dört hipotez (koşu süresi, derleme sonrası ilk koşu, güç durumu, metallib kimliği) onu ayıramadı. Bu setin bedeli bir **shader** bedeli, yani ihtiyacı olan sütun tam da gezinen sütun — üstelik sıçrama yeniden derleme sınırında oluyor ve "shader'lı hâl shader'sız hâlden yavaş mı" sorusu doğası gereği o sınırın iki yanını karşılaştırmak demek. Yani ön koşul **açık** ve artık ondan fazlası: bu setin `/rfc`'si ölçme yöntemini de çözmek zorunda (aynı binary içinde çalışma zamanı anahtarıyla A/B, ya da çok sayıda yeniden derleme üzerinden ortalama). `docs/OLCUMLER.md` → `## Kare süresi`.)* *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
-| 023 | emoji + geniş glyph | **Kutu çizim yarısı 2026-09-21'de ayrıldı → 021** (kullanıcı kararı); kalan ikisi tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek |
-| 024 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
+| 022 | atlas tahliyesi | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "Atlas dolunca geri dönüşü yok") ve borcun kendi yazdığı sıra geldi: *önce ölçüm, sonra LRU* — ölçüm 021'de koştu. Kusur kullanıcıya iki sıradan kapıdan çarpıyor: 16 kez Cmd + (varsayılan 13pt, adım 1pt, tavan 72pt) Retina'da doyma eşiğine çıkarıyor, ve Braille bloğunu tarayan bir TUI (`btop`, Claude Code spinner'ı) tek başına 256 yuva isteyebiliyor. Dolduktan sonra o oturumda ilk kez görülen her karakter kalıcı kutu. Set açıldı → `.tasks/022-atlas-tahliyesi/` |
+| 023 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-21: taban **yarım alındı** ve kalan yarısı sanıldığından zor çıktı. CPU sütunları ile açılış prizde ölçüldü, ikisi de taban. **GPU sütunu alınamadı:** aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms arasında dolaşıyor ve sınanan dört hipotez (koşu süresi, derleme sonrası ilk koşu, güç durumu, metallib kimliği) onu ayıramadı. Bu setin bedeli bir **shader** bedeli, yani ihtiyacı olan sütun tam da gezinen sütun — üstelik sıçrama yeniden derleme sınırında oluyor ve "shader'lı hâl shader'sız hâlden yavaş mı" sorusu doğası gereği o sınırın iki yanını karşılaştırmak demek. Yani ön koşul **açık** ve artık ondan fazlası: bu setin `/rfc`'si ölçme yöntemini de çözmek zorunda (aynı binary içinde çalışma zamanı anahtarıyla A/B, ya da çok sayıda yeniden derleme üzerinden ortalama). `docs/OLCUMLER.md` → `## Kare süresi`.)* *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
+| 024 | emoji + geniş glyph | **Kutu çizim yarısı 2026-09-21'de ayrıldı → 021** (kullanıcı kararı); kalan ikisi tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek |
+| 025 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
 animasyonu), Sparkle ile güncelleme.
@@ -196,6 +197,23 @@ animasyonu), Sparkle ile güncelleme.
 > **Materyalin bedeli sekizinci kez ödeniyor** — yazılı ön koşulu (kare
 > süresi tabanı `/measure` ile bu setten önce alınmış olmalı) bir kez daha
 > erteleniyor ve o cümle artık sekiz kayma boyunca tekrarlanıyor.
+
+>
+> **On ikinci kayma (2026-09-22, kullanıcı kararı).** Araya **022 atlas
+> tahliyesi** girdi — yine sete bağlanmamış bir borç sete dönüştü; materyal
+> yüzey / emoji-geniş / sekme-bölme sırasıyla **023, 024, 025** oldu.
+> Gerekçe bu kez "ucuzluk ve görünürlük" değil **sıra**: borcun kendi maddesi
+> "önce ölçüm, sonra LRU" diyordu ve ölçüm 021'de geldi (aile 421 yuva, doyma
+> eşiği Retina'da 29pt). 021 eşiği hem yaklaştırdı hem somutladı — Braille'in
+> 256'sı bu setten önce sıfır yuva harcıyordu.
+> **Materyalin bedeli dokuzuncu kez ödeniyor**, ama bu kez ödenen şey
+> ölçüm baskısı **değil**: kare süresi ölçümü 2026-09-21'de koştu. CPU
+> sütunları ile açılış taban oldu; GPU sütununun tabanı **alınamadı** ve
+> sebebi ölçüldü (aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms
+> arası geziniyor, dört hipotez onu ayıramadı). Yani materyalin ön koşulu
+> artık "ölçüm yapılmadı" değil, **"ölçme yöntemi çözülmedi"** — ve o, o
+> setin `/rfc`'sinin ilk işi. Ayrıntısı 023'ün satırında ve
+> `docs/OLCUMLER.md` → `## Kare süresi`.
 
 ## Sete bağlanmamış borçlar
 
@@ -639,7 +657,11 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   dokunmuyor (çıktı yine tek kanallı kapsama maskesi, `R8Unorm` atlas
   duruyor) ve kendi başına ucuz. Kullanıcı görünürlüğü yüksek: maskot,
   spinner ve her TUI çerçevesi.
-- **Atlas dolunca geri dönüşü yok ve 021 eşiği yaklaştırdı.** Yuva tahliyesi
+- **Atlas dolunca geri dönüşü yok ve 021 eşiği yaklaştırdı.**
+  **2026-09-22'de sete bağlandı → 022**, ayrıntısı
+  `.tasks/022-atlas-tahliyesi/context.md`'de; maddenin kendi yazdığı sıra
+  ("önce ölçüm, sonra LRU") tamamlandı, çünkü ölçüm 021'de koştu. Aşağıdaki
+  gerekçe tarih olarak duruyor. Yuva tahliyesi
   (LRU) yok: `Atlas::slot` `next >= cap` olduğunda **her** yeni anahtara
   `TOFU` veriyor ve karar önbelleğe girmiyor, yani o andan sonra yazılan her
   yeni karakter kutu çıkıyor — pencere yeniden boyutlanana ya da font/punto
