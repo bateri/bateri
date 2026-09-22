@@ -952,6 +952,13 @@ define_class!(
             // gerekçesinin ikizi). Hücreler çağrı dönünce banda geçiyor.
             let mut fill = iv.fill.borrow_mut();
             fill.clear();
+            // **Izgaranın çizildiği yer taramadan önce bildiriliyor**: kayma
+            // uçuştayken ızgara hedefinin altında ve tepesinde açılan şeridi
+            // doldurma bandı kapatıyor (`Session::set_grid_top`). Değer bu
+            // karenin `advance`'inden önceki konum — yerleşmeye giden kayma
+            // için gereğinden bir parça büyük, yani fazlası ekranın dışında.
+            iv.session
+                .set_grid_top(motion.origin().max(0.0).ceil() as u16);
             let cursor = iv.session.frame(
                 |cell| frame.push(cell),
                 |cell| fill.push(cell),
@@ -1128,6 +1135,11 @@ define_class!(
             // hedef kurulur. Ters sırada `dt` yeni hedefe uygulanır ve imleç
             // bir kare boyunca gitmediği bir yöne doğru hızlanırdı.
             motion.advance(dt);
+            // **Dolu ızgaranın kayması** (`Motion::scroll_in`): hedef sabitken
+            // satırlar geçmişe kaydıysa öteleme o kadar aşağıdan yeniden
+            // süzülüyor. `sync`'ten önce, ki tekerlek ve geometri snap'i bunu
+            // da silsin.
+            motion.scroll_in(cursor.scrolled, cursor.rows);
             motion.sync(
                 caret.map(|(at, _)| at),
                 origin_target(cursor),

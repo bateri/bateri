@@ -398,6 +398,63 @@ impl Motion {
         }
     }
 
+    /// Ekranın tepesinden `rows` satır geçmişe kaydı: öteleme **bulunduğu
+    /// yerden** o kadar aşağı alınıyor ve hedefine yeniden süzülüyor.
+    ///
+    /// [`Motion::sync_origin`]'in göremediği hareket. Onun girdisi doluluk
+    /// (`rows - content_rows`) ve ızgara dolunca doluluk sabitleniyor: yeni
+    /// satırlar içeriği hücrelerin **içinde** kaydırıyor, hedef oynamıyor ve
+    /// animatör hiçbir şey görmüyor — kayma ızgara dolana kadar vardı, sonra
+    /// yoktu (kullanıcı bildirdi). Ekranın gördüğü şey ise aynı: içerik
+    /// yukarı aktı. Aynı hareketi aynı animatörle çizmek için ötelemenin
+    /// **konumu** kaydırma kadar geri alınıyor — içerik bir önceki karede
+    /// durduğu yerden başlıyor — ve hedef dokunulmadan kalıyor.
+    ///
+    /// Yön kuralına ([`Motion::sync_origin`]) uyuyor: kayma aşağıdan yukarı,
+    /// yani içeriğin *gelmesi*. Tepede açılan şeridi kaydırılan satırlar
+    /// kapatıyor (`bt_core::Cursor::fill`).
+    ///
+    /// **Sıra:** [`Motion::advance`]'ten sonra, [`Motion::sync`]'ten önce. Önce
+    /// değil, çünkü geçen süre eski yola işlenmeli; sonra değil, çünkü
+    /// `sync`'in snap tetikleri (tekerlek, geometri) bu karenin kaydırmasını
+    /// da silmeli — pencereyi küçültmek satırları geçmişe itiyor ve o bir
+    /// kaydırma değil. Aynı karede hedef de düşüyorsa (ızgara bu karede
+    /// doldu) `sync` kaymayı buradan kurulan konumdan devralıyor.
+    ///
+    /// **Tavan `limit` satır** (çağıran ızgaranın boyunu veriyor): akan
+    /// çıktıda kaymalar üst üste biniyor ve `ease` her yeni başlangıçta yolun
+    /// yalnız bir kesrini alıyor, yani tavansız öteleme ekranlarca geride
+    /// kalırdı. Tavan konumu **aşağı çekmiyor**, yalnız daha fazla itmiyor.
+    ///
+    /// **Tek karede `limit` ya da daha fazla satır kaydıysa kayma bitiriliyor**
+    /// ve bu tavanın ikinci yarısı: ekranda bir önceki kareyle ortak tek satır
+    /// kalmadı, yani sürdürülecek bir süreklilik yok ve kaymak yalnız en yeni
+    /// çıktıyı geciktirirdi. Ölçüldü (`BT_SCROLL_TEST`, kare başına 45–467
+    /// satır): bu kol olmadan öteleme tavanda asılı kalıyor ve pencere akış
+    /// boyunca en yeni çıktıyı **bir ekran geriden** gösteriyordu.
+    ///
+    /// Belirme ve `Snap` kiplerinde hiçbir şey: öteleme o kiplerde zaten
+    /// kaymıyor ([`Motion::origin_mode`]). İlk karede de hiçbir şey — kayacak
+    /// bir konum yok.
+    pub(crate) fn scroll_in(&mut self, rows: u16, limit: u16) {
+        if rows == 0 || self.origin_mode() == Mode::Snap {
+            return;
+        }
+        if let Some(slide) = &mut self.origin {
+            if rows >= limit {
+                slide.pos = slide.target;
+                slide.vel = 0.0;
+                slide.from = slide.target;
+                slide.elapsed = 0.0;
+                return;
+            }
+            let cap = slide.target + f32::from(limit);
+            slide.pos = (slide.pos + f32::from(rows)).min(cap).max(slide.pos);
+            slide.from = slide.pos;
+            slide.elapsed = 0.0;
+        }
+    }
+
     /// Ötelemenin hedefi: [`Motion::sync`]'in tek eksenli yarısı.
     ///
     /// Snap hâlleri imlecinkilerle **aynı sınıf** ve aynı gerekçe: ilk kare,
@@ -1901,6 +1958,110 @@ mod tests {
         motion.sync(Some([0.0, 29.0]), 25, 0, false, true);
         assert!(motion.origin_settled(), "Hareketi Azalt'ta doldurma kaydı");
         assert_eq!(motion.origin(), 25.0);
+    }
+
+    /// Dolu ızgara: öteleme sıfırda yerleşmiş, hedef bir daha oynamayacak.
+    fn full_grid() -> Motion {
+        let mut motion = Motion::default();
+        motion.sync(Some([0.0, 29.0]), 0, 0, false, false);
+        assert!(motion.settled(), "ilk kare animasyon başlattı");
+        motion
+    }
+
+    #[test]
+    fn a_full_grid_still_slides_when_rows_scroll_off() {
+        // **Kullanıcının bildirdiği kusurun bekçisi** (2026-09-23): ızgara
+        // dolunca hedef sabitleniyor ve `sync` hiçbir şey görmüyordu — kayma
+        // ızgara dolana kadar vardı, sonra yoktu. Aynı kare, iki satır kaydı.
+        let mut motion = full_grid();
+        motion.sync(Some([0.0, 29.0]), 0, 0, false, false);
+        assert!(motion.settled(), "kaydırmasız kare kayma başlattı");
+
+        motion.advance(TICK);
+        motion.scroll_in(2, 30);
+        motion.sync(Some([0.0, 29.0]), 0, 0, false, false);
+        // İçerik bir önceki karede durduğu yerden başlıyor: iki satır aşağıda.
+        assert_eq!(motion.origin(), 2.0);
+        assert!(!motion.origin_settled(), "kaydırma kayma başlatmadı");
+        // Ve yukarı doğru süzülüp yerine oturuyor.
+        let mut last = motion.origin();
+        for _ in 0..3 {
+            motion.advance(TICK);
+            assert!(motion.origin() < last, "öteleme yukarı akmıyor");
+            last = motion.origin();
+        }
+        run_to_rest(&mut motion, TICK);
+        assert_eq!(motion.origin(), 0.0);
+    }
+
+    #[test]
+    fn a_scroll_while_sliding_continues_from_where_the_grid_is() {
+        // Akan çıktı: her kare yeni satır getiriyor. Kayma baştan
+        // başlamıyor, **bulunduğu yere** ekleniyor — yoksa ızgara her
+        // satırda geri sıçrardı.
+        let mut motion = full_grid();
+        motion.scroll_in(1, 30);
+        motion.advance(TICK);
+        let mid = motion.origin();
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        motion.scroll_in(1, 30);
+        assert_eq!(motion.origin(), mid + 1.0);
+    }
+
+    #[test]
+    fn the_scroll_slide_is_capped_at_the_limit() {
+        // Hızlı akan çıktı kare başına onlarca satır kaydırabilir; öteleme
+        // ekranlarca geride kalmasın. Tavan konumu aşağı çekmiyor, yalnız
+        // daha fazla itmiyor.
+        let mut motion = full_grid();
+        for _ in 0..20 {
+            motion.scroll_in(5, 30);
+        }
+        assert_eq!(motion.origin(), 30.0);
+        motion.scroll_in(5, 30);
+        assert_eq!(motion.origin(), 30.0);
+
+        // Bir ekran ya da fazlası tek karede: süreklilik yok, kayma bitiyor
+        // ve en yeni çıktı hemen yerinde.
+        motion.scroll_in(30, 30);
+        assert!(motion.settled(), "ekran boyu kaydırma kaymayı sürdürdü");
+        assert_eq!(motion.origin(), 0.0);
+        motion.scroll_in(500, 30);
+        assert!(motion.settled());
+        assert_eq!(motion.origin(), 0.0);
+    }
+
+    #[test]
+    fn geometry_and_the_wheel_cancel_the_scroll_slide() {
+        // Pencereyi küçültmek satırları geçmişe itiyor ve bu bir kaydırma
+        // değil; `sync`'in snap'i aynı karenin `scroll_in`'ini de silmeli.
+        let mut motion = full_grid();
+        motion.scroll_in(3, 30);
+        motion.sync(Some([0.0, 20.0]), 0, 0, true, false);
+        assert!(motion.settled(), "geometri kaymayı silmedi");
+        assert_eq!(motion.origin(), 0.0);
+
+        motion.scroll_in(3, 30);
+        motion.sync(Some([0.0, 20.0]), 0, 4, false, false);
+        assert!(motion.settled(), "tekerlek kaymayı silmedi");
+        assert_eq!(motion.origin(), 0.0);
+    }
+
+    #[test]
+    fn snap_and_reduce_motion_never_slide_on_scroll() {
+        // Hareketi kapatmış kullanıcıya kaydırma animasyon eklemez; Hareketi
+        // Azalt ötelemeyi zaten snap'liyor ([`Motion::origin_mode`]).
+        let mut motion = full_grid();
+        motion.set_style(CursorMotion::Snap);
+        motion.scroll_in(3, 30);
+        assert!(motion.settled());
+        assert_eq!(motion.origin(), 0.0);
+
+        let mut motion = full_grid();
+        motion.set_reduce(true);
+        motion.scroll_in(3, 30);
+        assert!(motion.settled());
+        assert_eq!(motion.origin(), 0.0);
     }
 
     #[test]
