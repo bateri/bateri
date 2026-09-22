@@ -1311,8 +1311,13 @@ impl Measured {
 /// geçirilseydi `Counters`'ın kaçtığı hatayı bir üst katmanda tekrarlardı.
 struct Report {
     counters: Counters,
-    /// Atlasın dolu/toplam yuvası. Bir kapı **değil**, sayaç.
+    /// Atlasın **maske** düzleminin dolu/toplam yuvası. Bir kapı **değil**,
+    /// sayaç.
     atlas: (usize, usize),
+    /// Atlasın **renk** düzleminin dolu/toplam yuvası; ikinci bir jeton
+    /// (`yuva2=`) olmasının gerekçesi `Atlas::colour_occupancy`'nin doc'unda.
+    /// Jeton **eklendi, silinmedi**: `yuva=` yerinde ve anlamı değişmedi.
+    colour_atlas: (usize, usize),
     workload: Workload,
     /// Koşu boyunca istenen kare — çizilen değil.
     requests: u64,
@@ -1355,6 +1360,7 @@ impl Report {
             slide,
         } = self.counters;
         let (used, total) = self.atlas;
+        let (colour_used, colour_total) = self.colour_atlas;
         // `profil=` kapı kapalıyken de basılıyor: `make duman` **debug**
         // koşuyor, `/measure` **release** şart koşuyor ve bir debug sayısını
         // taban sanmak ancak satırın kendisi profilini söylerse imkânsız olur
@@ -1371,7 +1377,8 @@ impl Report {
         // **zorunda** (`smoke_counts_unchanged`).
         let mut line = format!(
             "kare={frames} hucre={cells} glif={glyphs} kural={rules} \
-yuva={used}/{total} yuk={workload} istek={requests} icerik={content} \
+yuva={used}/{total} yuva2={colour_used}/{colour_total} yuk={workload} \
+istek={requests} icerik={content} \
 hareket={motion} kayma={slide} sessiz={quiet} kapanis={teardown} \
 profil={profile}",
             workload = self.workload.token(),
@@ -2434,6 +2441,7 @@ impl AppDelegate {
         let report = Report {
             counters,
             atlas: renderer.atlas_occupancy(),
+            colour_atlas: renderer.colour_atlas_occupancy(),
             workload: run.workload,
             requests: link.map_or(0, DisplayLink::requests),
             quiet,
@@ -2594,6 +2602,9 @@ mod tests {
         Report {
             counters,
             atlas: (13, 2048),
+            // Renk düzlemi **boş**: duman reçetesi `/bin/sh` koşuyor ve
+            // emoji basmıyor, yani sağlıklı koşunun beklediği sayı bu.
+            colour_atlas: (0, 2048),
             workload,
             requests: 4,
             quiet: Some(Duration::from_millis(2950)),

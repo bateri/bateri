@@ -4,7 +4,9 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use objc2_core_foundation::{CGFloat, CGPoint};
-use objc2_core_graphics::{CGBitmapContextCreate, CGContext, CGImageAlphaInfo};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, kCGColorSpaceSRGB,
+};
 use objc2_core_text::CTFont;
 
 use crate::font::{self, Metrics};
@@ -128,6 +130,89 @@ pub(crate) fn draw(
     let x = font::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
     let position = CGPoint::new(x, baseline);
     // SAFETY: tek glyph, tek konum, sayı ikisiyle tutarlı; bağlam canlı.
+    unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
+    DrawResult::Drawn
+}
+
+/// `target`e `ch`'in **renkli** piksellerini çizer (`RGBA8`, ön çarpımlı).
+///
+/// [`draw`]'in kardeşi ve ondan **ayrı** bir fonksiyon, parametreli bir dalı
+/// değil: iki reçetenin ortak yanı yalnız konum aritmetiği, ayrıştıkları şey
+/// bağlamın kendisi — bu bağlamın bir renk uzayı var (`sRGB`), piksel başına
+/// dört bileşeni ve ön çarpımlı alfası; [`draw`]'inki alfa-only ve renk
+/// **üretemiyor** (`space: None`, [`CGImageAlphaInfo::Only`]).
+///
+/// **Renk uzayı sRGB olmak zorunda** ve doku tarafı da öyle
+/// (`RGBA8Unorm_sRGB`): hedef `BGRA8Unorm_sRGB`, donanım fragment çıktısını
+/// lineer sayıyor ve sRGB olmayan bir dokudan örneklenen emoji paleti
+/// **açar**. Belirti `CLAUDE.md` → "Renk uzayı sınırı geçer" maddesindeki
+/// sessiz kusurun aynısı, o yüzden tanığı da aynı cinsten: ara tonlu bir
+/// piksel (`0.0` ve `1.0` transfer fonksiyonunun sabit noktaları).
+///
+/// **Ön çarpım CG'nin kararı**, bizim değil: `PremultipliedLast` istiyoruz
+/// çünkü CoreGraphics renkli glyph'i öyle veriyor ve geri almak düşük alfada
+/// hassasiyet kaybı + yuva başına bir CPU turu demek. Bedeli blend tarafında
+/// ödeniyor: o pipeline'ın RGB kaynak çarpanı `One`.
+pub(crate) fn draw_colour(
+    font: &CTFont,
+    ch: char,
+    m: Metrics,
+    box_advance: CGFloat,
+    x_offset: CGFloat,
+    target: &mut [u8],
+) -> DrawResult {
+    // `debug_assert` değil: aşağıdaki `unsafe` bloğun ön koşulu ve **maske
+    // tamponunu yakalayan** şey. Yanlış düzlemin tamponu verilirse CG kısa
+    // tamponun ötesine yazar ve belirti sessizdir.
+    assert_eq!(
+        target.len(),
+        m.slot_bytes_rgba(),
+        "tampon tam bir RGBA yuva olmalı"
+    );
+
+    let Some(glyph) = font::glyph_index(font, ch) else {
+        return DrawResult::NoGlyph;
+    };
+
+    let (w, h) = m.cell_wh();
+    // SAFETY: adlandırılmış sistem sabiti; dönüş non-null.
+    let space = unsafe { CGColorSpace::with_name(Some(kCGColorSpaceSRGB)) };
+    let Some(space) = space else {
+        return DrawResult::NoContext;
+    };
+    // SAFETY: `target` 4*w*h bayt ve bağlam yaşadığı sürece canlı; ölçüler
+    // tamponla tutarlı. Bağlam düştükten sonra `target`e yalnız Rust
+    // tarafından erişilir.
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            target.as_mut_ptr().cast::<c_void>(),
+            w,
+            h,
+            8,
+            w * 4,
+            Some(&space),
+            CGImageAlphaInfo::PremultipliedLast.0,
+        )
+    };
+    let Some(ctx) = ctx else {
+        return DrawResult::NoContext;
+    };
+    target.fill(0);
+    CGContext::set_should_antialias(Some(&ctx), true);
+    // Subpixel yine kapalı: [`draw`] ile aynı gerekçe (sistem de bıraktı) ve
+    // renkli glyph'te zaten konusuz.
+    CGContext::set_allows_font_smoothing(Some(&ctx), false);
+    CGContext::set_should_smooth_fonts(Some(&ctx), false);
+
+    // Konum aritmetiği [`draw`] ile **birebir aynı** ve olmak zorunda: geniş
+    // emoji de `Half` mekanizmasından geçiyor, yani sağ yarısı aynı tam sayı
+    // ofsetle elde ediliyor.
+    let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px);
+    let x = font::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
+    let position = CGPoint::new(x, baseline);
+    // SAFETY: tek glyph, tek konum, sayı ikisiyle tutarlı; bağlam canlı.
+    // `draw_glyphs` renkli fontta `sbix`/`CBDT` tablosunu kendisi çiziyor;
+    // ayrı bir "renkli mi" dalı CoreText'in içinde.
     unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
     DrawResult::Drawn
 }

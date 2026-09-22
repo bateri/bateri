@@ -95,6 +95,30 @@ pub enum Half {
     Right,
 }
 
+/// Atlasın **hangi düzlemi** — maske mi renk mi.
+///
+/// İki düzlem tek [`Atlas`]'ın içinde ve bu bilinçli: ikinci bir `Atlas`
+/// beş CoreText türetmesini (dört yüz + küçük yüz) ve aynı anahtardan
+/// **ikinci bir [`Metrics`]**'i doğururdu. `bt-gpu`'nun `sync_atlas`'ı tam
+/// bunu önlemek için var ("ikinci bir çağrıda alınsaydı araya düşen bir
+/// `ensure` ikisini ayrı atlaslardan verirdi") ve [`Atlas::context_cell_w`]'in
+/// doc'u aynı kokuyu adıyla yazıyor.
+///
+/// Yuvalar **iki düzlemde de hücre boyunda**, yani [`Half`] mekanizması geniş
+/// emojinin geometrisini de çözüyor ve ızgara aritmetiği
+/// ([`Atlas::slot_origin`], [`Atlas::capacity`]) ikisi için ortak. Ayrışan tek
+/// şey piksel formatı: maske `R8`, renk `RGBA8` — ve her düzlemin **kendi
+/// monoton sayacı** var, çünkü uv `bt-gpu`'nun `prepare`'inde çözüm anında
+/// pişiyor ve kare ortasında anlamı değişen paylaşımlı bir sayaç önceki
+/// geçişlerin uv'lerini geçersizleştirirdi.
+// `repr(u8)`: bkz. `RuleKind`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Plane {
+    Mask,
+    Colour,
+}
+
 /// [`Atlas::slot`]'un cevabı: yuva **ve** hangi yarının kullanıldığı.
 ///
 /// İkinci alan bir kolaylık değil zorunluluk: "bir yuva mı iki mi" kararını
@@ -104,6 +128,9 @@ pub enum Half {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placed {
     pub slot: u16,
+    /// Yuvanın yaşadığı düzlem; çağıran dokuyu ve pipeline'ı buna göre
+    /// seçiyor. Tofu **her zaman** [`Plane::Mask`]: kutu bir maske.
+    pub plane: Plane,
     /// Kapının kabul ettiği kutu: [`Half::Whole`] tek hücre, [`Half::Left`]
     /// iki hücrenin solu. [`Half::Right`] yalnız `Left` dönmüş bir karakter
     /// için sorulur.
@@ -205,6 +232,10 @@ pub struct Upload<'a> {
     pub right: Option<(u16, u16)>,
     /// Sağ yarının baytları; [`Upload::right`] `Some` ise anlamlı.
     pub right_bytes: &'a [u8],
+    /// Baytların hangi düzleme yazılacağı — formatı ve satır adımını o
+    /// belirliyor. `bt-gpu` `bytesPerRow`'u buradan türetmek zorunda:
+    /// ayrışırsa Metal kısa tamponun ötesini okur ve belirti sessizdir.
+    pub plane: Plane,
 }
 
 /// Sabit yuva ızgarasında yaşayan glyph atlası.
@@ -258,7 +289,7 @@ pub struct Atlas {
     /// Karakterin **çözümlendiği** yuva — yalnız yüklenenler değil: fontun
     /// tanımadığı karakter de burada [`TOFU`] olarak yaşıyor, yoksa aynı
     /// karakter her karede CoreText'e yeniden sorulurdu.
-    slots: HashMap<(Sprite, Face, SizeClass, Half), u16>,
+    slots: HashMap<(Sprite, Face, SizeClass, Half), (u16, Plane)>,
     /// Bir sonraki boş yuva; [`TOFU`] ayrılmış olduğu için 1'den başlar.
     /// `slots.len()`'den türetilemez: tofu'ya çözümlenen kayıtlar yuva
     /// harcamıyor, yani iki sayı bilerek ayrışıyor.
@@ -273,6 +304,24 @@ pub struct Atlas {
     /// baytları aynı anda canlı olmak zorunda. Boyu tam bir yuva, yani
     /// varsayılan hücrede yüzlerce bayt.
     buffer_right: Vec<u8>,
+    /// Renk düzleminin yuva sayacı — maskenin [`Atlas::next`]'inden **ayrı**.
+    ///
+    /// Ayrı olmasının gerekçesi [`Plane`]'in doc'unda: uv çözüm anında
+    /// pişiyor. Yan kazanç kapasite: emoji yuvaları maskelerin havuzuna
+    /// binmiyor, yani CJK-ağır bir oturum emojiyi, emoji-ağır bir oturum da
+    /// harfleri tofu'ya düşürmüyor.
+    ///
+    /// **Tofu payı yok**: renk düzleminde tofu doğmuyor (kutu bir maske), yani
+    /// sayaç 0'dan başlıyor ve `capacity()`'nin tamamı emojiye açık.
+    colour_next: u16,
+    /// Renkli yuvanın tamponu ve ikizi; [`Metrics::slot_bytes_rgba`] boyunda.
+    ///
+    /// Maskenin tamponundan **ayrı**: paylaşılan bir tampon iki formatı aynı
+    /// diziye sığdırmayı, yani `raster::draw`'un ön koşul assert'ini
+    /// gevşetmeyi isterdi — o assert `unsafe` bloğun ön koşulu ve yanlış
+    /// düzlemin tamponunu yakalayan tek şey.
+    colour_buffer: Vec<u8>,
+    colour_buffer_right: Vec<u8>,
     /// Rezident tofu kutusu; ömür boyu değişmez.
     tofu: Vec<u8>,
 }
@@ -375,6 +424,9 @@ impl Atlas {
             next: TOFU + 1,
             buffer: vec![0u8; metrics.slot_bytes()],
             buffer_right: vec![0u8; metrics.slot_bytes()],
+            colour_next: 0,
+            colour_buffer: vec![0u8; metrics.slot_bytes_rgba()],
+            colour_buffer_right: vec![0u8; metrics.slot_bytes_rgba()],
             tofu: tofu_buffer(metrics),
         }
     }
@@ -516,19 +568,27 @@ impl Atlas {
         // aynı yuvayı ve aynı cevabı veriyor. Kapı bu yüzden anahtar başına
         // atlasın ömründe bir kez koşuyor.
         let key = (sprite, face, size, want);
-        if let Some(&slot) = self.slots.get(&key) {
-            return (Placed { slot, half: want }, None);
+        if let Some(&(slot, plane)) = self.slots.get(&key) {
+            return (
+                Placed {
+                    slot,
+                    half: want,
+                    plane,
+                },
+                None,
+            );
         }
         // `Left` istendi ama karakter daha önce **tek hücrelik** kabul
         // edilmişse cevabı o veriyor. Bu dal olmasaydı `☕` iki kez
         // rasterize edilir, iki yuva harcar ve sağ yarısı boş kalırdı.
         if want == Half::Left {
             let whole = (sprite, face, size, Half::Whole);
-            if let Some(&slot) = self.slots.get(&whole) {
+            if let Some(&(slot, plane)) = self.slots.get(&whole) {
                 return (
                     Placed {
                         slot,
                         half: Half::Whole,
+                        plane,
                     },
                     None,
                 );
@@ -558,7 +618,18 @@ impl Atlas {
         // buraya düşer ve tofu alır — sol yarısı da aynı sayıdan tofu
         // aldığı için cevap tutarlı kalıyor.
         let need = u32::from(if want == Half::Left { 2u16 } else { 1 });
-        if u32::from(self.next) + need > u32::from(cap) {
+        // Ölçüt **iki düzlemin boşta olanı** (`min`), maskenin sayacı değil:
+        // düzlem ancak çizim sırasında biliniyor ve yalnız maskeye bakan bir
+        // kapı, maske dolduğunda renk düzlemi bomboş olsa da **her** emojiyi
+        // tofu'ya düşürürdü — [`Atlas::colour_next`]'in yazılı sözünün
+        // ("CJK-ağır bir oturum emojiyi tofu'ya düşürmüyor") tam tersi.
+        // `min` ile kapı yalnız **ikisi de** doluyken kapanıyor; tek düzlemin
+        // dolu olduğu hâlde karar tahsisten hemen önceki düzleme duyarlı
+        // kapıya kalıyor. Bedeli o hâlde önbelleğe girmeyen karakter başına
+        // kare başına bir rasterizasyon — ölçülmedi, kabul edildi, ve
+        // yanlışın yönü güvenli: fazladan çizim, yanlış kutu değil.
+        let freest = u32::from(self.next.min(self.colour_next));
+        if freest + need > u32::from(cap) {
             // Dolu atlas **önbelleklenmez**: bu, fontun kalıcı bir gerçeği
             // değil atlasın geçici hâli. Kapasite hücre ölçüsünden türüyor
             // ([`SLOT_TARGET`]), yani aynı karakter başka bir puntoda yuva
@@ -575,6 +646,7 @@ impl Atlas {
                 Placed {
                     slot: TOFU,
                     half: Half::Whole,
+                    plane: Plane::Mask,
                 },
                 None,
             );
@@ -602,7 +674,7 @@ impl Atlas {
             // ailenin kendi özelliği.
             Sprite::Char(ch) if size == SizeClass::Normal && raster::is_procedural(ch) => {
                 raster::draw_procedural(ch, self.metrics, &mut self.buffer);
-                (DrawResult::Drawn, Half::Whole)
+                (DrawResult::Drawn, Half::Whole, Plane::Mask)
             }
             Sprite::Char(ch) => {
                 // **Metrik her iki sınıfta da büyük hücrenin**: küçük glyph
@@ -650,93 +722,161 @@ impl Atlas {
                     // sonra iki.
                     let cols = if want == Half::Left { 2 } else { 1 };
                     match font::fallback_font(font, ch, cell_advance, cols) {
-                        Some(alt) if alt.cols >= 2 => {
+                        Some(alt) => {
+                            // **Düzlem adayın kendi özelliğinden**: renkli
+                            // glyph taşıyan bir font `RGBA8` düzlemine,
+                            // ötekiler maskeye. Ölçüt trait biti, aile adı
+                            // değil (gerekçe [`font::has_color_glyphs`]).
+                            let plane = if font::has_color_glyphs(&alt.font) {
+                                Plane::Colour
+                            } else {
+                                Plane::Mask
+                            };
                             // İki yarı **aynı kutuya** ortalanıyor ve ikisi de
                             // aynı çağrıda çiziliyor: sağ yarının ofseti tam
                             // sayı piksel, yani AA fazı ikisinde birebir aynı.
+                            let pair = alt.cols >= 2;
                             let box_advance = cell_advance * f64::from(alt.cols);
                             let shift = f64::from(self.metrics.cell_px.0);
-                            let left = raster::draw(
-                                &alt.font,
-                                ch,
-                                self.metrics,
-                                box_advance,
-                                0.0,
-                                &mut self.buffer,
-                            );
-                            let right = raster::draw(
-                                &alt.font,
-                                ch,
-                                self.metrics,
-                                box_advance,
-                                shift,
-                                &mut self.buffer_right,
-                            );
-                            // İki çağrı aynı fontun aynı glyph'ini soruyor,
-                            // yani ikisi birden başarılı ya da ikisi birden
-                            // değil; `min` bunu ifade ediyor, sırayı
-                            // varsaymadan.
-                            let worst = if left == DrawResult::Drawn && right == DrawResult::Drawn {
-                                DrawResult::Drawn
-                            } else {
-                                DrawResult::NoGlyph
+                            let half = if pair { Half::Left } else { Half::Whole };
+                            // Tek çizici, iki reçete: `Plane` hangisi
+                            // olacağını söylüyor ve tampon da onunla
+                            // eşleşiyor. Eşleşmezse `raster`'ın ön koşul
+                            // assert'i düşer — o assert yanlış düzlemi
+                            // yakalayan tek şey.
+                            let left = match plane {
+                                Plane::Mask => raster::draw(
+                                    &alt.font,
+                                    ch,
+                                    self.metrics,
+                                    box_advance,
+                                    0.0,
+                                    &mut self.buffer,
+                                ),
+                                Plane::Colour => raster::draw_colour(
+                                    &alt.font,
+                                    ch,
+                                    self.metrics,
+                                    box_advance,
+                                    0.0,
+                                    &mut self.colour_buffer,
+                                ),
                             };
-                            (worst, Half::Left)
+                            if !pair {
+                                (left, half, plane)
+                            } else {
+                                let right = match plane {
+                                    Plane::Mask => raster::draw(
+                                        &alt.font,
+                                        ch,
+                                        self.metrics,
+                                        box_advance,
+                                        shift,
+                                        &mut self.buffer_right,
+                                    ),
+                                    Plane::Colour => raster::draw_colour(
+                                        &alt.font,
+                                        ch,
+                                        self.metrics,
+                                        box_advance,
+                                        shift,
+                                        &mut self.colour_buffer_right,
+                                    ),
+                                };
+                                // İki çağrı aynı fontun aynı glyph'ini
+                                // soruyor, yani ikisi birden başarılı ya da
+                                // ikisi birden değil. Yine de **ikisi de**
+                                // sınanıyor: biri düşerse çift kabul
+                                // edilmemeli, yoksa yarısı boş bir glyph
+                                // çizilirdi.
+                                let both = left == DrawResult::Drawn && right == DrawResult::Drawn;
+                                let worst = if both {
+                                    DrawResult::Drawn
+                                } else {
+                                    DrawResult::NoGlyph
+                                };
+                                (worst, half, plane)
+                            }
                         }
-                        Some(alt) => (
-                            raster::draw(
-                                &alt.font,
-                                ch,
-                                self.metrics,
-                                cell_advance,
-                                0.0,
-                                &mut self.buffer,
-                            ),
-                            Half::Whole,
-                        ),
-                        None => (drawn, Half::Whole),
+                        None => (drawn, Half::Whole, Plane::Mask),
                     }
                 } else {
-                    (drawn, Half::Whole)
+                    (drawn, Half::Whole, Plane::Mask)
                 }
             }
             // Yordamsal çizim başarısız olamaz: font sorulmuyor, bağlam
             // kurulmuyor. `Drawn` bir varsayım değil, tipin kendisi.
             Sprite::Rule(kind) => {
                 raster::draw_rule(kind, self.metrics, &mut self.buffer);
-                (DrawResult::Drawn, Half::Whole)
+                (DrawResult::Drawn, Half::Whole, Plane::Mask)
             }
         };
-        let (result, half) = result;
+        let (result, half, plane) = result;
         // Anahtar **çözülen** yarıyı taşıyor: `Left` istenip tek hücreye sığan
         // karakter `Whole`'a yazılıyor, yani ikinci soruluşunda önbellekten
         // aynı cevap dönüyor ve kapı bir daha koşmuyor.
         let key = (sprite, face, size, half);
         match result {
+            // **Kararı veren kapı burası.** Yukarıdaki `need` kapısı iki
+            // düzlemin boşta olanına bakıyor ve yalnız ikisi de doluyken
+            // kapanıyor, yani buraya bir düzlemi dolu bir atlasla
+            // gelinebiliyor. Düzlem artık biliniyor (aday fontun trait biti),
+            // yani ölçüt kesin: o düzlemin kendi sayacı.
+            DrawResult::Drawn
+                if u32::from(match plane {
+                    Plane::Mask => self.next,
+                    Plane::Colour => self.colour_next,
+                }) + u32::from(if half == Half::Left { 2u16 } else { 1 })
+                    > u32::from(cap) =>
+            {
+                (
+                    Placed {
+                        slot: TOFU,
+                        half: Half::Whole,
+                        plane: Plane::Mask,
+                    },
+                    None,
+                )
+            }
             DrawResult::Drawn => {
-                let slot = self.next;
+                // Sayaç **düzlemin kendi sayacı**: iki düzlem aynı ızgara
+                // aritmetiğini paylaşıyor ama yuva numaraları ayrı uzaylarda
+                // (gerekçe [`Plane`]).
+                let slot = match plane {
+                    Plane::Mask => self.next,
+                    Plane::Colour => self.colour_next,
+                };
                 // **Çift atomik.** İki yuva aynı ifadede ayrılıyor, iki
                 // anahtar aynı ifadede yazılıyor ve iki bayt dizisi aynı
                 // `Upload`'la dönüyor: sağ yarı için ikinci bir `slot()` turu
                 // yok, yani kapasite sınırı ikisinin arasına düşemiyor.
                 // Yukarıdaki `need` bu ifadenin ön koşulu.
                 let pair = half == Half::Left;
-                self.next += if pair { 2 } else { 1 };
-                self.slots.insert(key, slot);
+                let step = if pair { 2 } else { 1 };
+                match plane {
+                    Plane::Mask => self.next += step,
+                    Plane::Colour => self.colour_next += step,
+                }
+                self.slots.insert(key, (slot, plane));
                 let right = pair.then(|| {
                     let right_slot = slot + 1;
                     self.slots
-                        .insert((sprite, face, size, Half::Right), right_slot);
+                        .insert((sprite, face, size, Half::Right), (right_slot, plane));
                     self.slot_origin(right_slot)
                 });
                 let origin = self.slot_origin(slot);
+                let (bytes, right_bytes) = match plane {
+                    Plane::Mask => (&self.buffer, &self.buffer_right),
+                    Plane::Colour => (&self.colour_buffer, &self.colour_buffer_right),
+                };
                 (
-                    Placed { slot, half },
+                    Placed { slot, half, plane },
                     Some(Upload {
                         origin,
-                        bytes: &self.buffer,
+                        bytes,
                         right,
-                        right_bytes: &self.buffer_right,
+                        right_bytes,
+                        plane,
                     }),
                 )
             }
@@ -778,22 +918,28 @@ impl Atlas {
                 // instance bastırırdı.
                 let origin = upload.as_ref().map(|upload| upload.origin);
                 let right = upload.as_ref().and_then(|upload| upload.right);
-                self.slots
-                    .insert((sprite, face, size, placed.half), placed.slot);
-                if let Some(right_origin) = right {
+                self.slots.insert(
+                    (sprite, face, size, placed.half),
+                    (placed.slot, placed.plane),
+                );
+                if right.is_some() {
                     // Sağ yarının takma adı da yazılıyor, yoksa kalın yüzde
                     // sorulan sağ yarı düz yüzü yeniden rasterize ederdi.
-                    let _ = right_origin;
                     self.slots.insert(
                         (sprite, face, size, Half::Right),
-                        placed.slot.saturating_add(1),
+                        (placed.slot.saturating_add(1), placed.plane),
                     );
                 }
+                let (bytes, right_bytes) = match placed.plane {
+                    Plane::Mask => (&self.buffer, &self.buffer_right),
+                    Plane::Colour => (&self.colour_buffer, &self.colour_buffer_right),
+                };
                 let upload = origin.map(|origin| Upload {
                     origin,
-                    bytes: &self.buffer,
+                    bytes,
                     right,
-                    right_bytes: &self.buffer_right,
+                    right_bytes,
+                    plane: placed.plane,
                 });
                 (placed, upload)
             }
@@ -825,21 +971,30 @@ impl Atlas {
                 // açık kalıyor, yeniden yüklenmiyor. Yani tahliyenin geri
                 // getirdiği maliyet sıcak yürüyüş, soğuk açılış değil.
                 if self.slots.len() >= self.negative_cache_cap() {
-                    self.slots.retain(|_, &mut slot| slot != TOFU);
+                    // Ölçüt **kaydın tamamı**, yuva numarası değil: renk
+                    // düzleminin sayacı 0'dan başlıyor ve `TOFU` da 0, yani
+                    // numaraya bakan bir süzgeç ilk emojinin **pozitif**
+                    // kaydını da atardı. Belirti sessiz ve iki katlı: emoji
+                    // bir sonraki görülüşünde yeniden rasterize olur, eski
+                    // yuvası öksüz kalır ve `yuva2=` şişer.
+                    self.slots
+                        .retain(|_, &mut entry| entry != (TOFU, Plane::Mask));
                 }
-                self.slots.insert(key, TOFU);
+                self.slots.insert(key, (TOFU, Plane::Mask));
                 // **Çiftin iki yarısı da tofu.** Yalnız sol yarı yazılsaydı
                 // sağ yarı ikinci bir kapı turu koşar, aynı cevabı alır ve
                 // sonuç aynı olurdu — ama kapı kare bütçesinin ortasında bir
                 // cascade yürüyüşü demek. Anahtarı şimdi yazmak o turu bir
                 // kereye indiriyor.
                 if want == Half::Left {
-                    self.slots.insert((sprite, face, size, Half::Right), TOFU);
+                    self.slots
+                        .insert((sprite, face, size, Half::Right), (TOFU, Plane::Mask));
                 }
                 (
                     Placed {
                         slot: TOFU,
                         half: Half::Whole,
+                        plane: Plane::Mask,
                     },
                     None,
                 )
@@ -853,6 +1008,20 @@ impl Atlas {
     /// `/measure`'da bu iki sayıdan okunacak.
     pub fn occupancy(&self) -> (usize, usize) {
         (usize::from(self.next), usize::from(self.capacity()))
+    }
+
+    /// Renk düzleminin (kullanılan, toplam) yuvası.
+    ///
+    /// Maskeden **ayrı** yayımlanıyor ve gerekçesi jeton sözleşmesi: duman
+    /// kapısının `yuva=` sayacı yalnız maske düzlemini sayıyor ve ikinci bir
+    /// düzlemi ona toplamak "hangi düzlem doldu" sorusunu cevapsız bırakırdı.
+    /// Göremediği bir düzlem tam olarak 021'in Braille şekli olurdu: sıfır
+    /// yuva harcayan, sessiz.
+    ///
+    /// Toplam ikisinde de aynı ([`Atlas::capacity`]): iki düzlem aynı yuva
+    /// ızgarasını paylaşıyor, ayrışan yalnız piksel formatı ve sayaç.
+    pub fn colour_occupancy(&self) -> (usize, usize) {
+        (usize::from(self.colour_next), usize::from(self.capacity()))
     }
 
     /// Haritanın kabul ettiği en çok kayıt sayısı — pozitif ve negatif
@@ -1540,7 +1709,7 @@ mod tests {
                 SizeClass::Normal,
                 Half::Whole,
             )),
-            Some(&TOFU),
+            Some(&(TOFU, Plane::Mask)),
             "tofu çözümü önbelleğe girmeli"
         );
         assert_eq!(a.occupancy().0, 1, "tofu düşüşü yuva harcamamalı");
@@ -1604,7 +1773,7 @@ mod tests {
                 SizeClass::Normal,
                 Half::Whole
             )),
-            Some(&regular),
+            Some(&(regular, Plane::Mask)),
             "geri düşüş istenen yüzün anahtarıyla önbelleğe girmeli"
         );
         assert_eq!(a.occupancy().0, 2, "geri düşüş ikinci bir yuva harcadı");
@@ -1989,7 +2158,7 @@ mod tests {
                 SizeClass::Normal,
                 Half::Whole
             )),
-            Some(&TOFU),
+            Some(&(TOFU, Plane::Mask)),
             "tahliyeden sonraki kayıt önbelleğe girmeli"
         );
         // Pozitif kayıt tahliyeye girmiyor: yuvası duruyor.
