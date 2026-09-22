@@ -96,6 +96,8 @@ use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
 use std::time::{Duration, Instant};
 
+use unicode_width::UnicodeWidthChar;
+
 /// Kabuğun akışa bastığı tek bir OSC 133 işareti.
 ///
 /// Dördü de kabuktan bağımsızdır: tipte ne zsh, ne bash, ne fish geçer
@@ -276,6 +278,21 @@ pub struct DockState {
     /// türüyor. Kare başına yeniden saymak `frame()`'in `Term` kilidi
     /// öncesine O(n) bir gezinti eklerdi.
     pub display_chars: usize,
+    /// Görüntünün **sütun** genişliği ve imleçten önceki sütun sayısı.
+    ///
+    /// `display_chars`/`cursor`'ın karakter cinsinden ikizleri ve ikisi de
+    /// aynı yerde, aynı süzgeçle sayılıyor — sıfır genişlikliler düşüyor,
+    /// geniş karakterler iki sayılıyor. **İki ayrı birim iki ayrı tüketiciye
+    /// ait ve karıştırmak iki yönde de kusur üretiyordu** (024 set kapısı):
+    /// `region_highlight`'ın aralıkları karakter (ZLE'nin birimi), bastırma
+    /// aralığının satır aritmetiği ise **sütun** — ızgarada satır sarması
+    /// sütunla oluyor. Karakterle sayıldığında birleştirici taşıyan bir
+    /// satır **fazla** bastırıyordu (tamamlama listesinin ilk satırı
+    /// gizleniyordu) ve geniş karakter taşıyan satır **eksik**; ilki
+    /// güvensiz yön.
+    pub display_cols: usize,
+    /// Bkz. [`DockState::display_cols`].
+    pub cursor_col: usize,
     /// Görüntünün **son boşluk olmayan** karakteri; boş satırda `None`.
     ///
     /// Bastırmanın **tazelik kapısı** bunu kullanıyor: ızgaradaki giriş
@@ -323,6 +340,8 @@ impl Clone for DockState {
         self.postdisplay.push_str(&source.postdisplay);
         self.cursor = source.cursor;
         self.display_chars = source.display_chars;
+        self.cursor_col = source.cursor_col;
+        self.display_cols = source.display_cols;
         self.last_ink = source.last_ink;
         self.insert_keymap = source.insert_keymap;
         self.highlights.clear();
@@ -341,6 +360,8 @@ impl DockState {
         self.postdisplay.clear();
         self.cursor = 0;
         self.display_chars = 0;
+        self.cursor_col = 0;
+        self.display_cols = 0;
         self.last_ink = None;
         // Güvenli yön: gösteremediğimiz bir satırın keymap'i de bilinmiyor ve
         // "bilmiyorum" yapıştırmayı sarılı yola göndermeli.
@@ -831,10 +852,12 @@ pub(crate) struct SuppressedInput {
     /// Yazılmakta olan bloğun kimliği; **satırı** [`crate::Session::frame`]
     /// çıpadan bulur — kabuk hangi satırda olduğunu bilmiyor.
     pub(crate) block: u32,
-    /// Caret'ten **sonra** gelen karakter sayısı; girişin imleç satırının
-    /// altında kaç satır daha sürdüğü bundan çıkıyor.
-    pub(crate) chars_after_cursor: usize,
-    /// Caret'ten **önce** gelen karakter sayısı ([`DockState::cursor`]);
+    /// Caret'ten **sonra** gelen **sütun** sayısı; girişin imleç satırının
+    /// altında kaç satır daha sürdüğü bundan çıkıyor. Karakter değil sütun,
+    /// çünkü ızgarada satır sarması sütunla oluyor
+    /// ([`DockState::display_cols`]).
+    pub(crate) cols_after_cursor: usize,
+    /// Caret'ten **önce** gelen **sütun** sayısı ([`DockState::cursor_col`]);
     /// girişin imleç satırının üstünde kaç satır sürdüğü bundan çıkıyor.
     ///
     /// Aralığın üstünü yalnız çıpaya bağlamak **yetmiyor**: çıpa prompt'un
@@ -842,7 +865,7 @@ pub(crate) struct SuppressedInput {
     /// basılırsa) ikisinin arasındaki satırlar girişin değil, yine de
     /// bastırılırdı. Ayna kaç satır tuttuğunu biliyor; üst uç ikisinin
     /// **alttakini** seçiyor.
-    pub(crate) chars_before_cursor: usize,
+    pub(crate) cols_before_cursor: usize,
     /// Görüntünün son mürekkebi ([`DockState::last_ink`]) — tazelik kapısının
     /// aynadaki yarısı.
     pub(crate) last_ink: Option<char>,
@@ -1059,8 +1082,8 @@ impl ShellLog {
         match self.blocks.last()? {
             (block, Outcome::Pending) => Some(SuppressedInput {
                 block,
-                chars_after_cursor: self.dock.display_chars.saturating_sub(self.dock.cursor),
-                chars_before_cursor: self.dock.cursor,
+                cols_after_cursor: self.dock.display_cols.saturating_sub(self.dock.cursor_col),
+                cols_before_cursor: self.dock.cursor_col,
                 last_ink: self.dock.last_ink,
                 insert_keymap: self.dock.insert_keymap,
             }),
@@ -2110,6 +2133,26 @@ fn decode_line<'a>(
         .checked_add(cursor_in_buffer)?
         .min(text_chars);
     line.display_chars = display_chars;
+    // **Sütun ikizleri, tek fonksiyondan.** Genişliğin kuralı
+    // [`crate::dock::column_width`]'te ve buraya kopyalanmıyor: ikinci bir
+    // ifade ayrışabilirdi ve o hâlde bastırma aralığı ile **çizilen** satır
+    // farklı genişlikte olurdu — biri gizlenir, öteki görünür.
+    let width_of = crate::dock::column_width;
+    line.cursor_col = line
+        .predisplay
+        .chars()
+        .chain(line.buffer.chars())
+        .chain(line.postdisplay.chars())
+        .take(line.cursor)
+        .map(width_of)
+        .sum();
+    line.display_cols = line
+        .predisplay
+        .chars()
+        .chain(line.buffer.chars())
+        .chain(line.postdisplay.chars())
+        .map(width_of)
+        .sum();
     // Sondan ilk boşluk olmayan karakter; üç gövde görüntü sırasında.
     line.last_ink = line
         .predisplay
@@ -2139,7 +2182,23 @@ fn decode_line<'a>(
         // `'\x01'` der ve kapı yine düşer. Ölçülmedi ve düzeltilmedi; yönü
         // güvenli (bastırma kalkar, satır iki yerde görünür, sessizce
         // kaybolmaz) ve gerçek bir tampona girmesi Ctrl-V gerektiriyor.
-        .filter(|ch| *ch != ' ' && *ch != '\t')
+        //
+        // **Üçüncü ölçüt sıfır genişlik ve o 024'te geldi** (kullanıcı
+        // bildirdi, ölçüldü): birleştirici kod noktaları (VS16, ZWJ, ten
+        // rengi) ızgara hücresine **hiç girmiyor** — alacritty onları
+        // `CellExtra`'da tutuyor ve `cell.c` taban karakteri taşıyor. Yani
+        // `❤️` (U+2764 + U+FE0F) yazan bir tamponda ayna `U+FE0F`, ızgara
+        // `U+2764` diyor ve ikisi **hiçbir zaman** eşleşmiyor: kapı kalıcı
+        // olarak "bayat" der, bastırma her tuşta kalkar ve giriş satırı
+        // dock'tan ızgaraya fırlar. Sekmenin yukarıdaki gerekçesiyle aynı
+        // cümle — ayna **ham** tamponu, ızgara **çizilmiş** hâli taşıyor — ve
+        // çaresi de aynı: ızgaraya ulaşmayan karakteri ayna da saymıyor.
+        //
+        // Ölçüt `unicode-width`'in `Some(0)`'ı, yani `dock::column_width`'in
+        // beslendiği kaynağın ta kendisi. Kontrol karakterleri `None` dönüyor
+        // ve bu süzgece **girmiyor**: onların akıbeti yukarıdaki iki satırda
+        // yazılı bilinen sınır, buranın konusu değil.
+        .filter(|ch| *ch != ' ' && *ch != '\t' && UnicodeWidthChar::width(*ch) != Some(0))
         .next_back();
 
     decoded.clear();

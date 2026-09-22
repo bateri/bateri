@@ -261,6 +261,20 @@ bir sonraki turunda koşuyor. Bedel komut başına değil **geçiş başına**: 
 log` gibi alternatif ekrana girmeyen komutlar hiç resize görmüyor. Dock'u
 olmayan pencerede haberci **hiç kurulmuyor**, yani yol yapısal olarak kapalı ve
 alternatif ekrandan çıkış orada dock doğurmuyor.
+**Dock sütun sayıyor** (024): giriş satırının pencerelemesi, caret'in yeri ve
+geniş karakterin iki hücresi karakter indeksinden değil **genişlikten**
+birikiyor; pencere caret'in altındaki karakterin tamamını ayırıyor ve iki
+kenarda da geniş glyph yarılanmıyor — sığmayan karakter hiç çizilmiyor.
+`region_highlight`'ın aralıkları **karakter** indeksinde kalıyor, çünkü
+ZLE'nin birimi o; yayılan şey boyanan **zemin** ve onu baş hücrenin `wide`'ı
+ile spacer sütununa düşen glyph'siz bir hücre taşıyor. **Bağlam satırı
+karakter biriminde** ve gerekçesi küçük boy sınıfı (021'in emsali), yani
+CJK'lı bir yol orada hâlâ sütun kaydırıyor — bilinen sınır, bekçili.
+Bastırmanın tazelik kapısı da aynı birime geçti: ayna tarafı **sıfır
+genişlikli** kod noktalarını atlıyor, çünkü onlar ızgara hücresine hiç
+girmiyor (`CellExtra`) ve saymak kapıyı kalıcı olarak "bayat" yapardı —
+`❤️` yazan satır her tuşta ızgaraya fırlıyordu.
+
 Giriş satırı ızgarada **çizilmiyor**: kabuk `Input` safhasındayken ve ayna
 canlıyken (`ShellLog::suppressed_input`; karar `Term` kilidinden **önce**
 okunuyor, `Theme` örüntüsü) yazılmakta olan bloğun çıpa satırından imlecin
@@ -511,10 +525,14 @@ yol (raster bit bit aynı), geçmezse iki hücrelik kapı, o da geçmezse kutu.
 Sıra ters olsaydı geniş **ilan edilmiş ama dar boyayan** 65 karakter
 (21'i Menlo'nun `☕ ⚡ ♈`'si, 44'ü cascade'den gelen `丨 、 》 ！`) iki
 hücrelik kutuya göre ortalanır ve bugünkü yerlerinden kayardı; yan kazanç
-kapasite — o 65 ikinci bir yuva da harcamıyor. Sütun sayısının **tek
-yetkilisi ızgara**: `Cell::wide` yalnız baş hücrede kurulu ve `bt-atlas`
-kutu genişliğini argüman olarak alıyor, yani `unicode-width` oraya hiç
-girmiyor (ikinci bir genişlik yetkilisi ızgaranınkiyle ayrışırdı). Yelpazeleme
+kapasite — o 65 ikinci bir yuva da harcamıyor. Sütun sayısının **tek yetkilisi
+`unicode-width`'in tablosu** ve iki yüzey de onu okuyor: ızgara alacritty
+üzerinden (`Flags::WIDE_CHAR`), dock ise doğrudan (`dock::column_width`,
+024). Dock'un ızgaraya **sorması mümkün değil** — çizdiği şey ZLE'nin
+`BUFFER`'ı, ızgaranın hücreleri değil — ve tabloyu paylaşmaları tam bu
+yüzden zorunlu: ikinci bir tablo ayrıştığı gün dock bir sütun kayar ve
+belirti sessizdir. `bt-atlas` onu hiç görmüyor; kutu genişliğini argüman
+olarak alıyor ve `Cell::wide` sınırdan geçiyor. Yelpazeleme
 `AtlasTexture::prepare`'de, `Frame::push`'ta **değil**: "bir yuva mı iki mi"
 kararı mürekkep kapısında doğuyor ve sink atlası ödünç alamıyor — yan kazanç
 üç yüzeyin (ızgara, doldurma bandı, dock) tek yerden kazanılması. Çift
@@ -667,7 +685,14 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   ayrıştırıcımızı yazmıyoruz — `bt-core` onu **kapsüller**, `pub` API'de
   alacritty tipi görünmez), `objc2` ailesi (CoreText ve CoreGraphics dahil;
   servo ailesi `core-text` ikinci bir CF sarmalayıcı yığını olacağı için
-  **reddedildi**), `toml_edit` (ayar ve tema dosyası, yalnız `bt-core`'da;
+  **reddedildi**), `unicode-width` (dock'un sütun aritmetiği ve bastırmanın tazelik kapısı,
+  yalnız `bt-core`'da) **yeni bir crate değil**, `polling` gibi: grafta zaten
+  vardı ve **ızgaranın kullandığının ta kendisi** — alacritty
+  `Flags::WIDE_CHAR`'ı onunla kuruyor ama yeniden ihraç etmiyor (ölçüldü),
+  yani `bt-core`'un listesine yalnız bir kenar ekliyor ve hiçbir sürüm
+  oynamıyor. Aynı tabloyu paylaşmak kararın **özü**, yan etkisi değil
+  (`.tasks/024-dock-sutun-aritmetigi/discussion.md` → Karar 1).
+  `toml_edit` (ayar ve tema dosyası, yalnız `bt-core`'da;
   `toml` + `serde` yerine, çünkü menüden yazılan dosyada yorum ve bilinmeyen
   anahtar yerinde kalmalı — `.tasks/007-ayarlar-ve-tema/discussion.md` →
   Karar), `tracing`. `polling` **yeni bir crate değil**, `libc` gibi: grafta

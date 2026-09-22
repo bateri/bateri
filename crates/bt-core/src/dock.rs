@@ -199,10 +199,22 @@ pub(crate) fn render(
         .take(state.cursor)
         .map(|(ch, _)| column_width(ch))
         .sum();
-    // Caret sağ kenarı geçince görüntü **soldan** kayıyor; caret son sütunda
-    // durur. Ölçüt artık sütun: karakter sayan bir pencere CJK'lı bir satırda
-    // caret'i kenardan dışarı taşırdı.
-    let skip = (caret_col + 1).saturating_sub(available);
+    // **Pencere caret'in altındaki karakterin tamamını ayırıyor.** İlk yazım
+    // sabit `+ 1` idi ve set kapısı (`/code-review`) onu yakaladı: caret
+    // kaydırılmış bir satırda geniş bir glyph'in üstünde duruyorsa o glyph
+    // iki sütun ister, pencere biri ayırır ve sağ kenar kuralı glyph'i
+    // **hiç çizmez** — caret boş bir hücrenin üstünde kalır. 024 öncesinde
+    // caret'in altındaki karakter her zaman çiziliyordu, yani sabit `1` bir
+    // regresyondu.
+    //
+    // Karar 2 ("kenarda yarılanma yok") caret'ten **sonraki** karakteri
+    // kapsıyordu; bu satır onun altındakini kapsıyor ve ikisi aynı cümlenin
+    // iki yarısı. Satır sonunda caret bir karakterin üstünde değil, o yüzden
+    // pay 1'e iniyor.
+    let caret_width = stream()
+        .nth(state.cursor)
+        .map_or(1, |(ch, _)| column_width(ch).max(1));
+    let skip = (caret_col + caret_width).saturating_sub(available);
 
     // Mutlak sütun (kaydırma çıkarılmadan önce). Döngü boyunca birikiyor ve
     // `index`'ten **bağımsız**: ayrıştıkları yer tam olarak bu setin konusu.
@@ -282,7 +294,12 @@ pub(crate) fn render(
 ///
 /// Kısaltma **karakter** biriminde ve bileşen sınırına yaslanmıyor: sınıra
 /// yaslamak kullanılabilir sütunların bir kısmını boş bırakırdı ve kazancı
-/// zevk, kaybı bilgi olurdu. Geniş glyph bu sette yok (`CLAUDE.md`).
+/// zevk, kaybı bilgi olurdu. **Bu satır karakter biriminde kalıyor** ve
+/// gerekçesi giriş satırınınkinden başka: bağlam satırı **küçük boy
+/// sınıfında** çiziliyor, sütun adımı küçük yüzün ilerlemesi ve geniş yol
+/// orada kapalı (021'in emsali). Yani CJK'lı bir yol burada hâlâ sütun
+/// kaydırıyor — bilinen sınır, bekçisi
+/// `the_context_line_keeps_character_columns`.
 ///
 /// **Ayraç iki yan da doluysa çizilir.** Depo olmayan dizinde asılı bir `|`
 /// "dal okunamadı" derdi; okunacak dal yok.
@@ -490,7 +507,7 @@ fn style_at(state: &DockState, index: usize) -> HighlightStyle {
 /// çıkarır" diye yazmıştı ve o kısıt bu setle **kalktı** — artık aritmetik
 /// zaten sütun. Yani `^C` çizmek bugün mümkün; yapılmadı çünkü bu setin
 /// konusu değil ve kimse istemedi.
-fn column_width(ch: char) -> usize {
+pub(crate) fn column_width(ch: char) -> usize {
     // `unwrap_or(1)`, `unwrap_or(0)` değil: bkz. doc.
     UnicodeWidthChar::width(ch).unwrap_or(1)
 }
@@ -522,8 +539,10 @@ fn cell(
         // karakterleri de üretmiyor ve bu bir **bilinen sınır**: ZLE ham bayt
         // taşıyabiliyor (`Ctrl-V` ile yapıştırılmış bir kaçış dizisi) ve
         // bugün onlar dock'ta görünmez kalıyor. Yerinde bir yer tutucu
-        // (`^C`) çizmek sütun aritmetiğini karakter biriminden çıkarır,
-        // yani caret'in yerini de değiştirirdi.
+        // (`^C`) çizmek bir dönem sütun aritmetiğini karakter biriminden
+        // çıkarırdı; o kısıt **024'te kalktı** (aritmetik zaten sütun) ve
+        // yer tutucu bugün mümkün — yapılmadı çünkü kimse istemedi.
+        // Ayrıntı [`column_width`]'in doc'unda.
         ch: (!ch.is_control() && ch != ' ').then_some(ch),
         fg,
         bg,
@@ -581,6 +600,21 @@ mod tests {
             display_chars: predisplay.chars().count()
                 + buffer.chars().count()
                 + postdisplay.chars().count(),
+            // Sütun ikizleri **aynı fonksiyondan** ([`column_width`]), yani
+            // elle kurulmuş bir durum da üretimdeki aritmetiği taşıyor.
+            display_cols: predisplay
+                .chars()
+                .chain(buffer.chars())
+                .chain(postdisplay.chars())
+                .map(column_width)
+                .sum(),
+            cursor_col: predisplay
+                .chars()
+                .chain(buffer.chars())
+                .chain(postdisplay.chars())
+                .take(cursor)
+                .map(column_width)
+                .sum(),
             last_ink: predisplay
                 .chars()
                 .chain(buffer.chars())
@@ -1223,7 +1257,11 @@ mod tests {
         // sütun boş kalmalı. (Üç sütun verilseydi ikisi de sığardı; sınır
         // tam burası.)
         let cols = TEXT_COL + 2;
-        let state = live("", "a漢", "", 1);
+        // Caret `a`'nın üstünde (indeks 0), yani pencere kaymıyor ve sınanan
+        // şey caret'ten **sonraki** karakterin sığmaması. Caret'in kendi
+        // karakterinin sığmaması ayrı bir kural ve ayrı bir bekçisi var
+        // (`the_window_reserves_the_whole_char_under_the_caret`).
+        let state = live("", "a漢", "", 0);
         let mut cells = Vec::new();
         let owned = caret_home(None, state.status, false) == CaretHome::Dock;
         render(
@@ -1273,6 +1311,92 @@ mod tests {
             dock.caret,
             Some(TEXT_COL + 3),
             "caret kontrol karakterinin sütununu saymadı"
+        );
+    }
+
+    /// **Pencere caret'in altındaki karakterin tamamını ayırıyor.**
+    ///
+    /// Set kapısının (`/code-review`) bulduğu regresyon: sabit `+ 1` payıyla
+    /// caret kaydırılmış bir satırda geniş bir glyph'in üstünde durduğunda o
+    /// glyph iki sütun ister, pencere biri ayırır ve sağ kenar kuralı glyph'i
+    /// **hiç çizmez** — caret boş bir hücrenin üstünde kalırdı. 024 öncesinde
+    /// caret'in altındaki karakter her zaman çiziliyordu.
+    ///
+    /// Karar 2 ("kenarda yarılanma yok") caret'ten **sonraki** karakteri
+    /// kapsıyordu; bu bekçi onun altındakini kapsıyor.
+    #[test]
+    fn the_window_reserves_the_whole_char_under_the_caret() {
+        // İki sütunluk bütçe, caret geniş karakterin üstünde (indeks 1).
+        let cols = TEXT_COL + 2;
+        let state = live("", "a漢", "", 1);
+        let mut cells = Vec::new();
+        let owned = caret_home(None, state.status, false) == CaretHome::Dock;
+        let dock = render(
+            &state,
+            &DockContext::default(),
+            None,
+            &THEME,
+            same(cols),
+            owned,
+            |cell| cells.push(cell),
+        );
+        let lead = cells
+            .iter()
+            .find(|cell| cell.ch == Some('漢'))
+            .expect("caret'in altındaki karakter çizilmedi");
+        assert!(lead.wide, "{lead:?}");
+        assert_eq!(
+            dock.caret,
+            Some(lead.col),
+            "caret kendi karakterinin üstünde durmalı"
+        );
+    }
+
+    /// **Bağlam satırı karakter biriminde kalıyor** — bilinen sınır.
+    ///
+    /// Gerekçesi geniş glyph'in yokluğu değil **küçük boy sınıfı**: sütun
+    /// adımı küçük yüzün ilerlemesi ve geniş yol orada kapalı (021'in
+    /// emsali). Yani CJK'lı bir yol burada hâlâ sütun kaydırıyor.
+    ///
+    /// Bekçi 023'ün silinen sınamasının bıraktığı boşluğu dolduruyor: o,
+    /// `render_context`'i CJK'lı bir `cwd` ile geçen **tek** sınamaydı ve
+    /// yerine gelen dördü bağlam satırına hiç dokunmuyordu (set kapısı,
+    /// `/code-review`).
+    #[test]
+    fn the_context_line_keeps_character_columns() {
+        let state = live("", "ls", "", 2);
+        let (cells, _) = draw_with(
+            &state,
+            &DockContext {
+                cwd: "/tmp/漢字".into(),
+                branch: "主".into(),
+            },
+            COLS,
+        );
+        let context: Vec<&Cell> = cells.iter().filter(|cell| cell.row == 1).collect();
+        assert!(
+            context.iter().any(|cell| cell.ch == Some('漢')),
+            "sınama konusuz kalmasın: bağlam satırı CJK çizmeli"
+        );
+        // **Hiçbiri geniş işaretli değil** ve olmamalı: küçük sınıfta
+        // `Atlas::slot` `Half`'ı zaten `Whole`'a normalize ediyor, yani
+        // bayrak konsa bile yelpazeleme koşmaz — ama bayrağı koymak
+        // sözleşmeyi iki yerde tutmak olurdu.
+        assert!(
+            context.iter().all(|cell| !cell.wide),
+            "bağlam satırı geniş bayrağı koydu: {context:?}"
+        );
+        // Sütun **karakter** başına ilerliyor: `漢` ile `字` komşu sütunlarda.
+        let cols_of: Vec<u16> = context
+            .iter()
+            .filter(|cell| cell.ch == Some('漢') || cell.ch == Some('字'))
+            .map(|cell| cell.col)
+            .collect();
+        assert_eq!(cols_of.len(), 2, "iki CJK hücresi beklenir: {context:?}");
+        assert_eq!(
+            cols_of[1] - cols_of[0],
+            1,
+            "bağlam satırı sütun saymaya geçmiş (sınır kalktıysa doc'u düzelt)"
         );
     }
 }
