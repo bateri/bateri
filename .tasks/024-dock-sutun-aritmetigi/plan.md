@@ -88,5 +88,5 @@ tazelik kapısı: last_ink sıfır genişliklileri atlıyor → iki taraf aynı 
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| phase-3 | |
+| phase-3 | ✅ |
 | kapı | |
