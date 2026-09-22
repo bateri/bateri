@@ -9,3 +9,4 @@ license.workspace = true
 alacritty_terminal = { workspace = true }
 polling = { workspace = true }
 toml_edit = { workspace = true }
+unicode-width = { workspace = true }

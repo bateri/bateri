@@ -16,8 +16,11 @@
 //! [`crate::Session::dock`] ve o yaprak kilidi alıp bırakıyor; sınamalar
 //! buraya PTY'siz giriyor.
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::color::{self, LinearRgba, Theme};
 use crate::session::{Cell, UnderlineStyle};
+
 use crate::shell::{
     DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ShellPhase, ShellState,
 };
@@ -111,8 +114,10 @@ const ELLIPSIS: char = '…';
 ///
 /// `cols` ızgaranın genişliği: dock aynı sütunları kullanıyor ve taşan metin
 /// **soldan pencerelenip** caret görünür tutuluyor (kırpmak caret'i ekrandan
-/// düşürürdü — yazdığını görmeyen bir giriş satırı). Pencereleme karakter
-/// biriminde: geniş glyph bu sette henüz yok (`CLAUDE.md`).
+/// düşürürdü — yazdığını görmeyen bir giriş satırı). Pencereleme **sütun**
+/// biriminde (024): karakter sayan bir pencere CJK'lı bir satırda caret'i
+/// kenardan dışarı taşırdı. Kenarda geniş glyph **yarılanmıyor** — sığmayan
+/// karakter hiç çizilmiyor ve o sütun boş kalıyor.
 ///
 /// `context_cols` bağlam satırının bütçesi ve ayrı bir sayı, çünkü o satır
 /// **küçük puntoda** çiziliyor: aynı genişliğe daha çok harf sığıyor. Sayıyı
@@ -173,44 +178,96 @@ pub(crate) fn render(
         }
         return surface;
     }
-    // Caret sağ kenarı geçince görüntü **soldan** kayıyor; caret son sütunda
-    // durur. Ofset yalnız caret'e bağlı, metnin toplam uzunluğuna değil:
-    // uzunluğu saymak bütün dizgiyi bir kez daha gezmek olurdu ve cevabı
-    // değiştirmezdi.
-    let skip = (state.cursor + 1).saturating_sub(available);
-
     let fixed = theme.foreground_linear();
     // Öneri sönük: "henüz yazılmamış metin" ile SGR 2'nin sorduğu şey aynı.
     let suggestion = theme.dim_linear();
-    let stream = state
-        .predisplay
-        .chars()
-        .chain(state.buffer.chars())
-        .map(|ch| (ch, fixed))
-        .chain(state.postdisplay.chars().map(|ch| (ch, suggestion)));
+    let stream = || {
+        state
+            .predisplay
+            .chars()
+            .chain(state.buffer.chars())
+            .map(|ch| (ch, fixed))
+            .chain(state.postdisplay.chars().map(|ch| (ch, suggestion)))
+    };
 
-    for (index, (ch, base)) in stream.enumerate() {
-        let Some(offset) = index.checked_sub(skip) else {
+    // **Caret'in sütunu, indeksi değil.** `CURSOR` karakter indeksi (ZLE'nin
+    // birimi) ama görüntünün birimi sütun: geniş bir karakter indeksi bir,
+    // sütunu iki ilerletiyor. Önek yalnız imlece kadar geziliyor, yani
+    // maliyet eski hâlinkiyle aynı mertebede — tam dizgiyi ikinci kez
+    // gezmekten kaçınmanın gerekçesi (eski yorum) hâlâ geçerli.
+    let caret_col: usize = stream()
+        .take(state.cursor)
+        .map(|(ch, _)| column_width(ch))
+        .sum();
+    // Caret sağ kenarı geçince görüntü **soldan** kayıyor; caret son sütunda
+    // durur. Ölçüt artık sütun: karakter sayan bir pencere CJK'lı bir satırda
+    // caret'i kenardan dışarı taşırdı.
+    let skip = (caret_col + 1).saturating_sub(available);
+
+    // Mutlak sütun (kaydırma çıkarılmadan önce). Döngü boyunca birikiyor ve
+    // `index`'ten **bağımsız**: ayrıştıkları yer tam olarak bu setin konusu.
+    let mut col_acc = 0usize;
+    for (index, (ch, base)) in stream().enumerate() {
+        let width = column_width(ch);
+        // **Sıfır genişlikli kod noktası hücre almıyor.** Birleştiriciler
+        // (VS16, ZWJ, ten rengi) ızgarada da kendi hücresine sahip değil —
+        // alacritty onları `CellExtra`'da tutuyor. Hücre verilseydi önceki
+        // karakterin sütununa ikinci bir hücre düşer ve glyph'ini örterdi.
+        if width == 0 {
             continue;
-        };
-        if offset >= available {
+        }
+        // Pencerenin **sol** yakası ve **tek** koşul yetiyor: `width >= 1`
+        // (sıfır yukarıda döndü), yani tamamen soldaki karakter de
+        // (`col_acc + width <= skip`) kenara binen karakter de bu testten
+        // geçiyor. İkisini ayrı yazmak ölü bir disjunct olurdu ve sonraki
+        // okuyanı yanlış yarıyı "düzeltmeye" çağırırdı (set kapısı,
+        // `/code-review`). Kenara binen karakter çizilmiyor: yarım glyph
+        // sessiz bir bozulma, boşluk görünür bir eksiklik
+        // (`discussion.md` → Karar 2).
+        if col_acc < skip {
+            col_acc += width;
+            continue;
+        }
+        let visible = col_acc - skip;
+        // Pencerenin **sağ** yakası, aynı kural: sığmayan geniş karakter
+        // yarılanmıyor, o sütun boş kalıyor ve döngü biter (sonraki
+        // karakterler daha da sağda).
+        if visible + width > available {
             break;
         }
-        // audit: `offset < available ≤ cols` ve `cols` `u16`; toplam taşamaz.
-        let col = TEXT_COL + offset as u16;
-        let cell = cell(ch, col, base, style_at(state, index), theme);
+        // audit: `visible < available ≤ cols` ve `cols` `u16`; toplam taşamaz.
+        let col = TEXT_COL + visible as u16;
+        let lead = cell(ch, col, base, style_at(state, index), theme, width == 2);
         // `frame()`'in atlama kapısının dock karşılığı: ne mürekkebi, ne
         // zemini, ne çizgisi olan hücre sink'e hiç uğramaz. Vurgusuz bir
         // satırda boşlukların çoğu buradan eleniyor ve `hucre=` jetonunun
         // dock kardeşi olmadığı için sayının tek tüketicisi bu tasarruf.
-        if cell.ch.is_some() || cell.bg.is_some() || cell.underline != UnderlineStyle::None {
-            sink(cell);
+        if lead.ch.is_some() || lead.bg.is_some() || lead.underline != UnderlineStyle::None {
+            sink(lead);
         }
+        if width == 2 {
+            // **Spacer sütununa zemin.** Glyph'i yok (onu baş hücrenin
+            // `wide`'ı çiziyor) ama zemini ve kuralları var: ızgaranın
+            // `WIDE_CHAR_SPACER` kolunun aynısı ve gerekçesi `frame()`'de
+            // yazılı — "hücreyi tümden elemek onun sağ yarısını renksiz
+            // bırakırdı". Bu olmadan `region_highlight`'ın zemini geniş
+            // karakterin sağ yarısında biterdi.
+            let spacer = Cell {
+                col: col + 1,
+                ch: None,
+                wide: false,
+                ..lead
+            };
+            if spacer.bg.is_some() || spacer.underline != UnderlineStyle::None {
+                sink(spacer);
+            }
+        }
+        col_acc += width;
     }
 
     Dock {
-        // audit: `skip`'in tanımı gereği `cursor - skip < available ≤ cols`.
-        caret: owned.then(|| TEXT_COL + (state.cursor - skip) as u16),
+        // audit: `skip`'in tanımı gereği `caret_col - skip < available ≤ cols`.
+        caret: owned.then(|| TEXT_COL + (caret_col - skip) as u16),
         ..surface
     }
 }
@@ -407,8 +464,46 @@ fn style_at(state: &DockState, index: usize) -> HighlightStyle {
     style
 }
 
+/// Karakterin kaç **sütun** tuttuğu; sıfır genişlikli ise `0`.
+///
+/// Kaynak `unicode-width` ve bu bir tercih değil **zorunluluk**: ızgara aynı
+/// crate'i kullanıyor (alacritty `Flags::WIDE_CHAR`'ı onunla kuruyor) ve
+/// ikinci bir genişlik kaynağı ayrıştığı gün belirtisi sessiz olurdu — dock
+/// bir sütun kayar. Kararın kaydı
+/// `.tasks/024-dock-sutun-aritmetigi/discussion.md` → Karar 1.
+///
+/// **İki ayrı sıfır var ve ayrımı `Option` taşıyor.** `width()` kontrol
+/// karakterlerinde `None`, birleştiricilerde (VS16, ZWJ, aksan) `Some(0)`
+/// dönüyor (ölçüldü) ve ikisi burada **ayrı** karşılanıyor:
+///
+/// - `Some(0)` → **0 sütun.** Birleştirici ızgarada da kendi hücresine sahip
+///   değil (alacritty `CellExtra`), yani sütun tüketmemesi doğru.
+/// - `None` → **1 sütun.** Kontrol karakteri dock'ta çizilmiyor ([`cell`])
+///   ama 024 öncesinde **sütununu tutuyordu** (her indeks bir sütundu) ve
+///   sıfıra indirmek bir regresyon olurdu: `Ctrl-V` ile eklenmiş bir TAB'ın
+///   iki yanındaki kelimeler birleşir ve caret kontrol karakteri başına bir
+///   sütun sola kayardı. Set kapısı (`/code-review`) bunu yakaladı.
+///
+/// **Bilinen sınır ve yönü değişti.** Doğru görüntü ne 0 ne 1: zsh kontrol
+/// karakterini `^C` diye **iki** sütunda gösteriyor. [`cell`]'in doc'u bir
+/// yer tutucu çizmemenin gerekçesini "sütun aritmetiğini karakter biriminden
+/// çıkarır" diye yazmıştı ve o kısıt bu setle **kalktı** — artık aritmetik
+/// zaten sütun. Yani `^C` çizmek bugün mümkün; yapılmadı çünkü bu setin
+/// konusu değil ve kimse istemedi.
+fn column_width(ch: char) -> usize {
+    // `unwrap_or(1)`, `unwrap_or(0)` değil: bkz. doc.
+    UnicodeWidthChar::width(ch).unwrap_or(1)
+}
+
 /// Bir karakterin hücresi: taban rengi + aralığın stili.
-fn cell(ch: char, col: u16, base: LinearRgba, style: HighlightStyle, theme: &Theme) -> Cell {
+fn cell(
+    ch: char,
+    col: u16,
+    base: LinearRgba,
+    style: HighlightStyle,
+    theme: &Theme,
+    wide: bool,
+) -> Cell {
     let mut fg = style.fg.map_or(base, |color| resolve(color, theme));
     let mut bg = style.bg.map(|color| resolve(color, theme));
     if style.standout {
@@ -442,17 +537,12 @@ fn cell(ch: char, col: u16, base: LinearRgba, style: HighlightStyle, theme: &The
         // SGR 58'in karşılığı `region_highlight`'ta yok: çizgi ön planı alır.
         underline_color: None,
         strikeout: false,
-        // **Dock'ta geniş yol yapısal olarak kapalı** ve bu bir varsayım
-        // değil değişmez: yukarıdaki sütun **karakter indeksinden** türüyor
-        // (`TEXT_COL + offset`, `offset = index - skip`), yani aynada bir CJK
-        // karakteri varsa ızgaranın spacer'ı gibi bir boş sütun **yok**. İki
-        // hücrelik bir glyph burada komşu karakterin üstüne boyardı.
-        // 021'in "kapı küçük sınıfta kapalı" emsali yetmiyor: dock'un giriş
-        // satırı gösterim ölçüsünde (`SizeClass::Normal`), yalnız bağlam
-        // satırı küçük. Kusurun kendisi (caret'in CJK'lı satırda kayması)
-        // bundan eski ve `docs/YOL-HARITASI.md`'de borç olarak duruyor;
-        // bu satır onu **büyütmüyor**.
-        wide: false,
+        // **Geniş yol dock'ta artık açık** (024): yukarıdaki sütun karakter
+        // indeksinden değil **genişlikten** birikiyor, yani iki hücrelik bir
+        // glyph'in sağ sütunu gerçekten ayrılmış oluyor ve komşusunun üstüne
+        // boyamıyor. 023'te bu satır `false` sabitiydi ve gerekçesi *o
+        // aritmetikle* sağlamdı; aritmetik değişince değişmez de kalktı.
+        wide,
     }
 }
 
@@ -1020,44 +1110,169 @@ mod tests {
         assert_eq!(dock.caret_text, THEME.background_linear());
     }
 
-    /// **Dock hiçbir hücreye geniş bayrağı koymuyor** ve bu bir değişmez,
-    /// gözlem değil.
+    /// **Geniş karakter dock'ta iki sütun tutuyor** ve baş hücresi
+    /// işaretlenmiş oluyor.
     ///
-    /// Dock'un sütunu **karakter indeksinden** türüyor (`TEXT_COL + offset`),
-    /// yani ızgaranın `WIDE_CHAR_SPACER`'ı gibi bir boş sütun yok: iki
-    /// hücrelik bir glyph burada komşu karakterin üstüne boyardı. Bayrağı
-    /// gören ilk yer `bt_gpu::AtlasTexture::prepare` ve orada ikinci bir
-    /// dörtlü basardı, yani kusur sessiz olurdu — hiçbir sayaç kıpırdamaz.
-    /// Kusurun kendisi (CJK'lı satırda caret'in kayması) bundan eski ve
-    /// `docs/YOL-HARITASI.md`'de borç olarak duruyor; bu bekçi onun
-    /// **büyümediğini** söylüyor.
+    /// Bu bekçi 023'te **tersinin** bekçisiydi
+    /// (`the_dock_never_marks_a_cell_wide`) ve gerekçesi o aritmetikle
+    /// sağlamdı: sütun karakter indeksinden türerken iki hücrelik bir glyph
+    /// komşusunun üstüne boyardı. 024 aritmetiği değiştirdi, yani değişmez de
+    /// kalktı — kutu silinmedi, **iddiası** değişti. Ders `/rfc` → Bulguyu
+    /// işleme yolu'nda: gerçekten zorunlu bir kısıt bir sonraki sette
+    /// kaldırılamazdı.
     ///
-    /// 021'in "kapı küçük sınıfta kapalı" emsali **yetmiyor**: dock'un giriş
-    /// satırı gösterim ölçüsünde, yalnız bağlam satırı küçük.
+    /// Bağlam satırı kapsamın **dışında**: küçük sınıf, sütun adımı küçük
+    /// yüzün ilerlemesi (021'in emsali).
     #[test]
-    fn the_dock_never_marks_a_cell_wide() {
-        let state = live("", "漢字 ls ｆｕｌｌ", "", 3);
-        let (cells, _) = draw_with(
-            &state,
-            &DockContext {
-                // Bağlam satırı da CJK taşıyabiliyor: yol bir dizin adı.
-                cwd: "/tmp/漢字".into(),
-                branch: "主".into(),
-            },
-            COLS,
-        );
+    fn a_wide_char_takes_two_columns_in_the_dock() {
+        let state = live("", "漢ls", "", 3);
+        let (cells, dock) = draw(&state, COLS);
+        let lead = cells
+            .iter()
+            .find(|cell| cell.ch == Some('漢'))
+            .expect("sınama konusuz kalmasın: CJK çizilmiş olmalı");
+        assert!(lead.wide, "baş hücre işaretlenmedi: {lead:?}");
+        assert_eq!(lead.col, TEXT_COL, "metin ilk sütundan başlar");
+        // Komşu sütun **glyph almıyor**: onu baş hücrenin `wide`'ı çiziyor
+        // (`bt_gpu::AtlasTexture::prepare` yelpazeliyor). İkinci bir glyph
+        // hücresi aynı yere iki dörtlü basardı.
         assert!(
-            cells.iter().any(|cell| cell.ch == Some('漢')),
-            "sınama konusuz kalmasın: CJK hücreleri çizilmiş olmalı"
-        );
-        assert!(
-            cells.iter().all(|cell| !cell.wide),
-            "dock geniş bayrağı koydu: {:?}",
-            cells
+            !cells
                 .iter()
-                .filter(|cell| cell.wide)
-                .map(|cell| (cell.col, cell.row, cell.ch))
-                .collect::<Vec<_>>()
+                .any(|cell| cell.col == TEXT_COL + 1 && cell.ch.is_some()),
+            "spacer sütununa glyph düştü: {cells:?}"
+        );
+        // Ve sonraki harf **iki** sütun sonra: aritmetiğin tamamı bu satırda.
+        let l = cells
+            .iter()
+            .find(|cell| cell.ch == Some('l'))
+            .expect("'l' çizilmeli");
+        assert_eq!(l.col, TEXT_COL + 2, "geniş karakter iki sütun tuttu");
+        // Caret imleçten önceki **genişliklerin** toplamında: `漢ls` için
+        // indeks 3 ama sütun 4.
+        assert_eq!(
+            dock.caret,
+            Some(TEXT_COL + 4),
+            "caret sütun değil indeks saydı"
+        );
+    }
+
+    /// Sıfır genişlikli kod noktası **hücre almıyor**.
+    ///
+    /// Birleştiriciler (VS16, ZWJ, ten rengi) ızgarada da kendi hücresine
+    /// sahip değil — alacritty onları `CellExtra`'da tutuyor. Hücre
+    /// verilseydi önceki karakterin sütununa ikinci bir hücre düşer ve
+    /// glyph'ini örterdi.
+    #[test]
+    fn a_zero_width_codepoint_gets_no_cell() {
+        // `❤` + VS16: iki karakter, **bir** sütun (`❤` tek sütunlu).
+        let state = live("", "\u{2764}\u{fe0f}x", "", 3);
+        let (cells, _) = draw(&state, COLS);
+        assert_eq!(
+            cells.iter().filter(|c| c.ch.is_some()).count(),
+            2,
+            "VS16 kendi hücresini aldı: {cells:?}"
+        );
+        let x = cells
+            .iter()
+            .find(|cell| cell.ch == Some('x'))
+            .expect("'x' çizilmeli");
+        assert_eq!(x.col, TEXT_COL + 1, "VS16 sütun tüketti");
+    }
+
+    /// Vurgu geniş karakterde **iki hücreye** yayılıyor.
+    ///
+    /// `region_highlight`'ın aralıkları karakter indeksinde (ZLE'nin birimi)
+    /// ama boyanan zemin hücre başına: spacer sütununa bir zemin hücresi
+    /// düşmezse `"fix 🎉"` dizgisinin sarı zemini emojinin sağ yarısında
+    /// biterdi. Izgaranın `WIDE_CHAR_SPACER` kolunun aynısı.
+    #[test]
+    fn a_highlight_covers_both_cells_of_a_wide_char() {
+        let mut state = live("", "漢", "", 1);
+        state.highlights.push(Highlight {
+            start: 0,
+            end: 1,
+            style: HighlightStyle {
+                bg: Some(HighlightColor::Indexed(3)),
+                ..HighlightStyle::default()
+            },
+        });
+        let (cells, _) = draw(&state, COLS);
+        let painted: Vec<u16> = cells
+            .iter()
+            .filter(|cell| cell.bg.is_some())
+            .map(|cell| cell.col)
+            .collect();
+        assert_eq!(
+            painted,
+            vec![TEXT_COL, TEXT_COL + 1],
+            "vurgu geniş karakterin yalnız yarısını boyadı"
+        );
+    }
+
+    /// Pencere kenarında geniş glyph **yarılanmıyor**.
+    ///
+    /// Sığmayan karakter hiç çizilmiyor ve o sütun boş kalıyor: 023'ün
+    /// sözleşmesi "kutu ya da tam glyph" ve yarım glyph **sessiz** bir
+    /// bozulma, boşluk ise görünür bir eksiklik
+    /// (`discussion.md` → Karar 2).
+    #[test]
+    fn a_wide_char_is_never_split_at_the_window_edge() {
+        // Bütçe `TEXT_COL + 2`: metne **iki** sütun kalıyor. `a` birini
+        // yiyor, `漢` iki ister ve sığmıyor — yani hiç çizilmemeli ve son
+        // sütun boş kalmalı. (Üç sütun verilseydi ikisi de sığardı; sınır
+        // tam burası.)
+        let cols = TEXT_COL + 2;
+        let state = live("", "a漢", "", 1);
+        let mut cells = Vec::new();
+        let owned = caret_home(None, state.status, false) == CaretHome::Dock;
+        render(
+            &state,
+            &DockContext::default(),
+            None,
+            &THEME,
+            same(cols),
+            owned,
+            |cell| cells.push(cell),
+        );
+        assert!(
+            cells.iter().any(|cell| cell.ch == Some('a')),
+            "sığan karakter çizilmedi: {cells:?}"
+        );
+        assert!(
+            !cells.iter().any(|cell| cell.ch == Some('漢')),
+            "sığmayan geniş karakter yarılandı: {cells:?}"
+        );
+    }
+
+    /// Kontrol karakteri **sütununu tutuyor**, çizilmese de.
+    ///
+    /// İki sıfırın ayrımı: birleştirici sütun tüketmiyor (ızgarada da kendi
+    /// hücresi yok), kontrol karakteri tüketiyor. Sıfıra indirilmesi bir
+    /// regresyon olurdu — `Ctrl-V` ile eklenmiş bir TAB'ın iki yanındaki
+    /// kelimeler birleşir ve caret kontrol karakteri başına bir sütun sola
+    /// kayardı. Set kapısı (`/code-review`) bunu yakaladı ve bu bekçi onu
+    /// çiviliyor.
+    ///
+    /// Doğru görüntü ne 0 ne 1 (zsh `^C` diye **iki** sütun gösteriyor) ve o
+    /// bilinen sınır [`column_width`]'in doc'unda; bekçi bugünkü davranışı
+    /// koruyor, ideali dayatmıyor.
+    #[test]
+    fn a_control_char_keeps_its_column() {
+        // `a` + TAB + `b`: üç sütun, ortadaki çizilmiyor.
+        let state = live("", "a\tb", "", 3);
+        let (cells, dock) = draw(&state, COLS);
+        let drawn: Vec<(u16, Option<char>)> =
+            cells.iter().map(|cell| (cell.col, cell.ch)).collect();
+        assert_eq!(
+            drawn,
+            vec![(TEXT_COL, Some('a')), (TEXT_COL + 2, Some('b'))],
+            "kontrol karakteri sütununu kaybetti: kelimeler birleşti"
+        );
+        assert_eq!(
+            dock.caret,
+            Some(TEXT_COL + 3),
+            "caret kontrol karakterinin sütununu saymadı"
         );
     }
 }
