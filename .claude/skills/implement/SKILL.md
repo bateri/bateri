@@ -49,9 +49,8 @@ yoksa ya da şüpheliyse phase'in commit'ini gövdedeki `{set} phase-{N}`
 satırından ara (`git log --grep`); bulunamazsa checklist'i `git status`/`git
 diff` ile doğrula ve sor: "phase-N'den devam ediyorum, doğru mu?"
 
-Bütün phase'ler ✅ ama `kapı` satırı boşsa (akış kapıdan önce kesilmiş):
-adım 8'i koş ve sonucunu tek `{set} kapı` commit'iyle kapat — ayrı kapı
-commit'inin tek meşru hâli bu. İkisi de doluysa set bitmiştir; `/ship`'e yönlendir.
+Bütün phase'ler ✅ ama `kapı` satırı boşsa akış kapıdan önce kesilmiştir:
+adım 8'i koş, kapanış `duzen.md` → Kalite kapısı'ndaki istisnadır. İkisi de doluysa set bitmiştir; `/ship`'e yönlendir.
 
 **0.5 Todo kur.** `TodoWrite` ile resume noktasından itibaren phase başına bir
 todo. Kalıcı kayıt `## Durum` + checklist'lerdir.
@@ -74,21 +73,16 @@ komutlar; **geçmeli**.
 Ölçüm bir kapı değildir ve iddiası yazılmaz (`duzen.md` → Kalite kapısı →
 Ölçüm).
 
-**5. Riskli phase kapısı.** Phase `proje.md` → Riskli phase
-tetikleyicilerinden birini tetiklediyse `/code-review`'u `Skill` aracıyla, ön planda
-koştur; kod değiştiyse adım 4'ü yeniden koş. Tetiklemediyse bu adım yoktur —
-tam kapı set sonunda koşar (adım 8). **Son phase'de** bu adım adım 8'in içinde
-erir: set kapısı zaten o phase'in commit'inden önce koşuyor. Gideremediğin bulguyu phase dosyasına
-gerekçesiyle waive olarak yaz; kapının **kendisi** koşmadıysa kutusu `[~]`
-olur ve adım 7'de söylenir.
+**5. Riskli phase kapısı.** Ne zaman koştuğu `duzen.md` → Kalite kapısı'nda
+(son phase'de adım 8'in içinde erir). Koşuyorsa `/code-review`'u `Skill`
+aracıyla, ön planda koştur; kod değiştiyse adım 4'ü yeniden koş.
+Gideremediğin bulguyu phase dosyasına gerekçesiyle waive olarak yaz; kapının
+**kendisi** koşmadıysa kutusu `[~]` olur ve adım 7'de söylenir.
 
 **6. Commit (phase = tek commit).** Checklist'i işaretle, `plan.md ## Durum`'da
-phase'i `✅` yap, ilk phase'se `.tasks/README.md`'de setin satırını **🔨**
-yap — hepsi kodla **aynı commit'e** girer. **Son phase'de** önce adım 8'i koş;
-kapının düzeltmeleri, `kapı` satırının ✅'ü ve indeksin 🟢'si de bu commit'e
-girer. Ayrı kapı ya da damga commit'i yoktur. İleti biçimi `duzen.md` → Teslim
-(gövdenin ilk satırı `{set} phase-{N}`). Hash dosyaya yazılmaz, defter için
-ayrı commit atılmaz. **Push etme.**
+phase'i `✅` yap, ilk phase'se indekste setin satırını **🔨** yap; **son
+phase'de** önce adım 8'i koş. Commit'e neyin girdiği ve ileti biçimi
+`duzen.md` → Teslim. **Push etme.**
 
 **7. Onay kapısı.** Sonraki phase'e geçmeden dur: değişen dosyalar, commit
 hash'i ve sapmaların özeti; onay bekle. Özet **her seferinde** ayrı bir
@@ -101,20 +95,15 @@ Onay sonrası aynı oturumda devam edilebilir ya da **taze bağlam (önerilen)**
 
 ## Kapanış (son phase'in commit'inden önce, bir kez)
 
-**8. Set kapısı.** Son phase'in kodu yazılıp doğrulandıktan sonra, **commit'ten
-önce**: `duzen.md` → Kalite kapısı → "Set sonunda". `/code-review` setin
-aralığında (`duzen.md` → Set aralığı; son phase henüz commit'lenmediği için
-aralık + çalışma ağacı), ardından `/audit`. Bulgu düzeltildiyse doğrulamayı
-yeniden koş. Sonra `## Durum`'un `kapı` satırını ✅, indeks satırını **🟢**
-yap ve notu tek cümleye getir ("N phase + kapı tamam") — hepsi son phase'in
-commit'ine girer (adım 6). Kapı koşamadıysa `kapı` satırına `[~] {gerekçe}`
-yazılır (🟢 yine konur, `duzen.md` → İndeks) ve adım 9'da söylenir. Otonom şeritte bunu son phase'in implementer'ı yapar (otonom
-şerit §5).
+**8. Set kapısı.** Son phase'in kodu doğrulandıktan sonra, **commit'ten
+önce**: `duzen.md` → Kalite kapısı → "Set sonunda" adımlarını koş. Sonra
+`## Durum`'un `kapı` satırını ✅ (koşamadıysa `[~] {gerekçe}`, adım 9'da
+söylenir), indeks satırını **🟢** yap ve notu tek cümleye getir ("N phase +
+kapı tamam"); hepsi adım 6'nın commit'ine girer. Otonom şeritte bunu son
+phase'in implementer'ı yapar (otonom şerit §5).
 
 Eksik-checklist taraması **yok**: kapı komutu yeşil ve `## Durum` ✅ ise
-phase bitmiştir; kutu `[ ]` kaldıysa phase commit'inde işaretlenmemiştir, o
-kadar. (Bir dönem waive sayımı ve "kutuyu geri koy" ritüeli vardı; 49 `[~]`
-üretti ve hiçbirini kod okumadı.)
+phase bitmiştir.
 
 **9. Devir.** Son phase'in commit'inden sonra kapanış özeti: phase'ler + commit hash'leri (git log'dan), kayda
 değer sapmalar, waive'ler ve **gözle kontrol satırı** (`duzen.md` → Kalite

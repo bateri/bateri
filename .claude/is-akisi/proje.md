@@ -22,7 +22,6 @@ ajan onu zaten yükler, iki kopya hem bağlam hem drift demektir.
 - Jüri mercek notları
 - Otonom şerit ekleri
 - Denetim mercekleri
-- Tuzaklar
 
 ## Belgeler
 
@@ -45,7 +44,12 @@ ajan onu zaten yükler, iki kopya hem bağlam hem drift demektir.
 | `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz girdisi yok*: koşunca "henüz yok" deyip kırmızı düşer; tetiklenirse doğrulama "yeşil" değil "koşamadı"dır, `[~]` işaretlenir |
 | `assets/bundle/*`, `assets/shell/*`, `crates/bateri` ya da `kur` hedefi değiştiyse | `make kur` — **ürünü** denetler, düşerse çıkış 2; neyi denetlediği `Makefile`'ın `kur` yorumunda. İmza yok. `assets/shell/*` aynı satırda, çünkü betik de pakete kopyalanıp `cmp` ile denetleniyor ve `make hepsi` yalnız **girdiyi** görüyor |
 | PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — iki zamanlama profili, ikisi de geçmeli. TSan nightly ister ve araç zinciri pin'li değil: "TSan koşmadı" waive değil, bilinen sınırdır |
-| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — `kare`, `hucre`, `glif`, `kural`, **`hareket`** > 0, **`icerik`** ≤ `IDLE_FRAME_LIMIT` ve **`sessiz`** ≥ `QUIET_FLOOR` olmalı; deadline'da animasyon **yerleşmiş** olmalı (yerleşmemişse satır hiç basılmaz, `Verdict::MotionUnsettled`). shell sabit olduğu için `hucre=8 glif=6 kural=15` beklenir. Dördü de CPU sayacıdır: GPU'nun boyadığını `make hepsi`'deki offscreen sınamalar, pencerenin görünürlüğünü hiçbiri kanıtlamaz. Jetonların anlamı `Makefile`'ın `duman` yorumunda ve `Report::token_line`'da. Başsız ortamda "ATLANDI" → `[~]`. `IDLE_FRAME_LIMIT` ölçülmüş bir sözleşmedir: değişikliği kod phase'lerinden **ayrı** commit'le iner |
+| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — geçme ölçütü `CLAUDE.md` → Komutlar'da, jetonların anlamı `Makefile`'ın `duman` yorumunda ve `Report::token_line`'da. Sayaçlar CPU'nundur: GPU'nun boyadığını `make hepsi`'deki offscreen sınamalar, pencerenin görünürlüğünü hiçbiri kanıtlamaz. Başsız ortamda "ATLANDI" → `[~]`. `IDLE_FRAME_LIMIT` ölçülmüş bir sözleşmedir: değişikliği kod phase'lerinden **ayrı** commit'le iner |
+
+**Araç zinciri pin'li değil** (Homebrew rustc; `rustup` ve
+`rust-toolchain.toml` bilinçli olarak yok): `brew upgrade` sonrası yeni bir
+clippy lint'i dokunulmamış kodu kırmızıya çevirebilir. `make hepsi` sürümü
+başta basar; kırmızıda önce sürüme bak.
 
 ## Dosya sınıfları
 
@@ -115,8 +119,9 @@ konuları:
   koşulu nerede, shader parametresi olarak GPU'ya taşınamaz mı, boşta sıfır
   kare korunuyor mu?
 - Hücre yapısına alan ekleyen plan → itiraz: yan tablo neden olmuyor?
-- `TERM` adını değiştiren ya da terminfo dağıtan plan → itiraz: SSH'daki
-  uzak makinede geri düşüş tasarlanmış mı?
+- `TERM` adını değiştiren ya da terminfo dağıtan plan → itiraz: özel
+  terminfo SSH'daki uzak makinede yok (Metalterm #23); geri düşüş
+  tasarlanmış mı, yoksa `xterm-256color` ile uyum mu korunuyor?
 - Shell betiğine dokunan plan → üç kabuğu (zsh, bash, fish) birden
   kapsamalı; kullanıcı rc dosyasına yazan her yol KIRMIZI.
 - Ölçüm iddiası taşıyan plan ("120 fps tutar", "gecikme düşer") → itiraz:
@@ -130,7 +135,8 @@ konuları:
   `make test-yaris`.
 - **Yayın etkili sürprizler** (eskalasyon): beklenmeyen `Cargo.lock`
   değişimi, yeni bağımlılık ihtiyacı, ayar şeması / `TERM` / shell
-  entegrasyonu etkisi.
+  entegrasyonu etkisi, beklenmeyen ölçüm gerilemesi ya da boşta kare üreten
+  bir yol.
 
 ## Denetim mercekleri
 
@@ -167,20 +173,3 @@ onların **kontrol edilebilir hâlleridir**. Mekanik yarı `make denetim`'de.
    İngilizce** mi (`build.rs` dahil)? Türkçe kalan üç öbek yerinde mi (tanı
    metni, `Makefile` hedefleri, jeton satırının anahtarları) ve jeton
    **değerleri** İngilizce mi (`CLAUDE.md` → Dil)? `#[allow]` gerekçeli mi?
-
-## Tuzaklar
-
-Katman yönü, `bt-core`'un platformsuzluğu, boşta sıfır kare, hücre boyutu,
-panik yolu, ayar anahtarları, ölçüm sahipliği ve dil kuralı `CLAUDE.md`'dedir.
-İş akışında ayrıca akılda tutulacak ve orada yazmayanlar:
-
-- **Renderer'a terminal semantiği eklenmez.** OSC/CSI ayrıştırma, komut
-  blokları ve seçim modeli `bt-core`'dadır; `bt-gpu` "ne çizeceğini" alır, "ne
-  anlama geldiğini" bilmez. Renderer'da escape dizisi tanıyan dal yanlış yerdedir.
-- **`TERM` adı bir sözleşmedir.** Özel terminfo SSH'daki uzak makinede yoktur
-  (Metalterm #23). Ya `xterm-256color` ile uyumlu kal ya da uzak tarafta geri
-  düşüşü tasarla; ikisi de yapılmadan `TERM` değiştirilmez.
-- **Araç zinciri pin'li değil.** Homebrew rustc, `rustup` ve
-  `rust-toolchain.toml` bilinçli olarak yok. `brew upgrade` sonrası yeni
-  bir clippy lint'i dokunulmamış kodu kırmızıya çevirebilir: `make hepsi`
-  sürümü başta basar, kırmızıda önce sürüme bak.

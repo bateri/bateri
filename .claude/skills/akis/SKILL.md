@@ -24,9 +24,11 @@ Sürücü de hafızasızdır; kuralın kendisi ve gerekçesi
   📐 ya da 🔨 bir set varsa **dur ve söyle**; iki set aynı işi böler ve numara
   geri alınamaz.
 - **`{NNN-slug}`** — yarıda kalan akışı sürdür. Nerede kalındığı diskten
-  okunur, sinyaller bu sırayla: `discussion.md` → `## Muhakeme` → `## Karar` →
+  okunur, sinyaller bu sırayla: `discussion.md` (varsa) → `## Karar` →
   `plan.md` → `phase-*.md` → setin commit'i → `## Durum`. İlk eksik olandan
-  devam et. (Konu biçimindeki mükerrer koruması burada geçerli değildir;
+  devam et. `## Muhakeme` bir sinyal değildir: panel yalnız pahalı kararda
+  koşar ve yokluğu çoğu sette meşrudur; koşup koşmadığını `## Karar`'ın
+  damgası ve `/rfc` ajanının `PANEL` alanı söyler. (Konu biçimindeki mükerrer koruması burada geçerli değildir;
   ikisini karıştırmak yarıda kalan akışı kendi kapısında durdurur.)
 
 ## 1. Set
@@ -108,5 +110,5 @@ bekle.
 ## Devir
 
 Kapanışta: set yolu, phase commit'leri (sonuncusu kapıyı ve 🟢'yi taşır),
-kayda değer sapmalar, waive'ler ve gözle kontrol satırı. Net yönlendirme: **"Teslim için `/ship {NNN-slug}`
-çalıştır; sonraki iş için `/clear`"** — akış push etmez.
+kayda değer sapmalar, waive'ler ve gözle kontrol satırı. Net yönlendirme: **"Teslim için `/ship`
+çalıştır; sonraki iş için `/clear`"** (`/ship`'in birimi dal, set değil) — akış push etmez.

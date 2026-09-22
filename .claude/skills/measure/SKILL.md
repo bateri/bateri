@@ -50,12 +50,12 @@ koşuyu **yorumlama**, yeniden koş.
 **Optimize edilmiş derlemeyi ölç.** Hata ayıklama derlemesinin sayısı bir
 taban değildir.
 
-## 3. Gecikme ve karede: dağılım, ortalama değil
+## 3. Zaman ölçümünde dağılım, ortalama değil
 
 Ortalama tek başına yeterli değildir — bir takılma ortalamayı oynatmaz ama
-kullanıcı onu görür. Kare süresinde **p95 ve en kötü kare**, gecikmede
-**medyan ve p95** yazılır; düşen kare sayısı ayrı sütundur. Karşılaştırmada
-iki dağılımı yan yana koy: kazancın yanında kaybı da göster.
+kullanıcı onu görür. Hangi türde hangi yüzdeliklerin yazıldığı profildedir
+(`olcum.md` → Koşu şartları); karşılaştırmada iki dağılımı yan yana koy:
+kazancın yanında kaybı da göster.
 
 ## 4. İşle
 
@@ -76,6 +76,5 @@ maddeyi düş; tek liste orası. Setlerin dosyalarına dokunulmaz — set çokta
 ## 6. Rapor
 
 Kullanıcıya: ne ölçüldü, taban neydi, şimdi ne, fark anlamlı mı (gürültü
-eşiğinin üstünde mi), defterde hangi bölüm güncellendi. Kare ölçtüysen düşen
-kare sayısı ve en kötü kare; gecikme ölçtüysen zincirin hangi halkasının
-büyüdüğü.
+eşiğinin üstünde mi), defterde hangi bölüm güncellendi; dağılımın kuyruğu
+ve zincirli bir ölçümde hangi halkanın büyüdüğü.

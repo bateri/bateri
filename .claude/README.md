@@ -95,6 +95,7 @@ satır). Kullanıcı sordu; her satır yine bir çıkarma.
 | panel sınıfı konu adıyla ("shell entegrasyonu") | değişecek dosyayla (`assets/shell/`) | 025 betiğe dokunmadan panel açtı | `rfc` adım 6 |
 | aynı bilgi birden çok set dosyasında ve `CLAUDE.md`'de | her bilgi tek yerde; `CLAUDE.md` kural + tek cümle + işaretçi | `CLAUDE.md` her oturumda okunuyor ve her set bir paragraf ekliyordu | `duzen.md` → Teslim |
 | skill'lerde proje komutu, yolu ve set geçmişi; `audit`/`measure` bu projeye yazılmış; `proje.md`'de genel kurallar | iki kat: genel (skill'ler, `duzen.md`, şablonlar) ve proje (`proje.md`, `olcum.md`, `settings.json`); `make denetim` genel kata sızan proje izini yakalar | skill'ler başka projede kullanılamıyordu; taşıma her seferinde gövdeleri yeniden yazmayı istiyordu | bu dosya → Düzen |
+| genel katta sayılı set anekdotları ("ilk altı set", "65 phase'in 59'u"), aynı kuralın 3–6 kopyası ("son phase hariç", "ayrı kapı commit'i yok"), `proje.md` → Tuzaklar | genel katta kural + sayısız tek cümle gerekçe, sayılar yalnız bu dosyanın tablolarında; kuralın tek kopyası `duzen.md`'de, skill'ler bağlanır; Tuzaklar düştü (iki maddesi jüri notlarının tekrarıydı, üçüncüsü Doğrulama'ya indi) | anekdot sözcük listesinden geçiyordu ama başka projede yanlıştı; kopyalar bir önceki turda ayrışmaya başlamıştı (`/plan-review`'un `/implement`'e yüklediği ölü Muhakeme kontrolü, `/akis`'in zorunlu saydığı `## Muhakeme`) | bu dosya → Düzen |
 
 ## Düzen
 
@@ -106,8 +107,9 @@ satır). Kullanıcı sordu; her satır yine bir çıkarma.
 │   ├── sablonlar/          ← GENEL: belge biçimleri                  [TEK SAHİP]
 │   ├── proje.md            ← PROJEYE ÖZGÜ: belgeler, komutlar, dosya sınıfları,
 │   │                          tetikleyiciler, pahalı karar sınıfı, jüri notları,
-│   │                          denetim mercekleri, tuzaklar           [TEK SAHİP]
+│   │                          denetim mercekleri                     [TEK SAHİP]
 │   └── olcum.md            ← PROJEYE ÖZGÜ: ölçüm türleri, kancalar, koşu şartları
+├── README.md               ← PROJEYE ÖZGÜ: genel bakış + tarihçe (tur tabloları)
 └── skills/                 ← GENEL: hepsi
     ├── akis/SKILL.md        ← zincirin sürücüsü (konudan koda)
     ├── rfc/SKILL.md
@@ -120,11 +122,14 @@ satır). Kullanıcı sordu; her satır yine bir çıkarma.
 
 **İki kat var ve sınır keskin.** Genel kat (skill'ler, `duzen.md`,
 şablonlar) projenin adını, komutunu, yolunu ya da set geçmişini **hiç**
-taşımaz; "kapı komutu", "kilit dosyası", "sıra belgesi", "pahalı karar
+taşımaz — gerekçesini sayısız, tek cümleyle verir; "kapı komutu", "kilit dosyası", "sıra belgesi", "pahalı karar
 sınıfı" gibi **rollerle** konuşur. Proje katı (`proje.md`, `olcum.md`,
-`settings.json`) o rollerin bu projede neye karşılık geldiğini söyler. Genel
+`settings.json`, bu dosya) o rollerin bu projede neye karşılık geldiğini söyler. Genel
 kata proje izi girerse projenin mekanik denetimi kırmızı düşer (bu projede
-`make denetim`). Skill'ler kuralları gövdelerinde **tekrar etmez**,
+`make denetim`; sözcük listesi sayılı anekdotu göremez, onu kat sınırını
+değiştiren göz yakalar). **Bu dosya proje katıdır**: zincirin genel bakışı
+artı bu projede ölçülmüş tarihçenin **tek yeri** (tur tabloları); genel
+dosyalar sayıya ihtiyaç duyduğunda buraya bağlanır. Skill'ler kuralları gövdelerinde **tekrar etmez**,
 `is-akisi/` altına bağlanır: aynı kural iki yerde dururken biri düzeltilirse
 öteki sessizce eskir.
 
@@ -134,11 +139,11 @@ Bu yapı `odunluk` deposundan taşındı. O taşımada skill'lerin bir kısmı d
 yeniden yazılmıştı (`audit`, `measure`, `plan-review`'ın mercek notları,
 `allowed-tools` satırları); 2026-09-23'te o parçalar proje katına indi ve
 genel kat gerçekten genel oldu. **Bir sonraki projeye taşırken yeniden
-yazılan yalnız proje katıdır**: `is-akisi/proje.md`, `is-akisi/olcum.md` ve
-`settings.json` izinleri (komut izinleri skill'lerin `allowed-tools`'unda
+yazılan yalnız proje katıdır**: `is-akisi/proje.md`, `is-akisi/olcum.md`,
+bu dosyanın tur tabloları ile Kökeni (genel bakış kalır) ve `settings.json` izinleri (komut izinleri skill'lerin `allowed-tools`'unda
 değil, orada durur). Skill'ler, `duzen.md` ve şablonlar olduğu gibi kopyalanır;
 bekçinin sözcük listesi (bu projede `Makefile` → `denetim`) de proje katıdır.
-Aşağıdaki tur tabloları bu projede ölçülen gerekçelerdir, taşınan kuralların
+Yukarıdaki tur tabloları bu projede ölçülen gerekçelerdir, taşınan kuralların
 tarihçesi olarak kalır.
 
 ## Çağırma

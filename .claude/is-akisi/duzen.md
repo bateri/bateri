@@ -56,7 +56,8 @@ numara çakışması iki işi aynı ada bağlar.
 | `phase-{N}.md` | kodun kılavuzu, checklist | plan onaylanınca | `/rfc`, `/implement` |
 
 `discussion.md` opsiyoneldir; tek bariz yaklaşım varsa atlanır. Set defteri
-(`teslim.md`) **yoktur** — gerekçesi Teslim bölümünde. Eski setlerin dosyaları tarihçe olarak duruyor, yenisi yazılmaz.
+**yoktur** — gerekçesi Teslim bölümünde; eski setlerde kalan `teslim.md`
+tarihçedir, yenisi yazılmaz.
 
 Şablonlar `.claude/is-akisi/sablonlar/` altındadır ve dosya biçiminin tek
 sahibi orasıdır; skill'ler şablonu gövdelerine kopyalamaz, oradan okur.
@@ -82,7 +83,9 @@ Phase'ler tamsayı olmak zorunda değil: `phase-0`, `phase-1`, `phase-1b`,
 Bu yüzden sıralama **doğaldır, leksik değil**: `phase-2` < `phase-10` ve
 `phase-2` < `phase-2a` < `phase-2b`. "phase-1'den N'e say" varsayma, glob'la.
 
-**Ek phase eşiği.** Set yürürken çıkan iş, ancak kendi kılavuzunu hak
+### Ek phase eşiği
+
+Set yürürken çıkan iş, ancak kendi kılavuzunu hak
 ediyorsa phase olur: birden çok dosyaya yayılır, kendi doğrulaması vardır.
 Tek commit'lik düzeltme (tek dosyada otuz satır)
 phase açmaz — doğrudan commit'lenir, `plan.md → ## Durum`'un altına tek satır
@@ -102,7 +105,7 @@ tablosudur; `/implement` resume noktasını oradan okur.
 
 Phase'in ✅'ü **kendi kod commit'inin içinde** girer; hash tabloya yazılmaz.
 Hash commit'ten önce bilinmediği için onu dosyaya yazmak her phase'e ikinci bir
-"defter" commit'i doğuruyordu (ölçülen bir dönemde commit'lerin yarısı). Phase'in
+"defter" commit'i doğurur. Phase'in
 commit'i gövdedeki `{NNN-slug} phase-{N}` satırından bulunur (Teslim). Tablonun son satırı `kapı`dır: set sonundaki kalite kapısının izi.
 
 Tablo diskte yaşadığı için oturum geçmişine ihtiyaç yoktur: `/clear` sonrası
@@ -171,8 +174,8 @@ kapsıyor, aynı diff iki kez incelenmez.
 
 **Set sonunda — bir kez**, son phase'in kodu doğrulandıktan sonra ve **o
 phase'in commit'inden önce**; düzeltmeler, `kapı` ✅ ve indeksin 🟢'si son
-phase'in commit'ine girer. Ayrı kapı ya da damga commit'i yok: öyleyken tek
-bir kod commit'inin etrafında altı defter commit'i birikti.
+phase'in commit'ine girer. Ayrı kapı ya da damga commit'i yok: her biri bir
+kod commit'inin etrafına defter commit'i biriktirir.
 
 1. `/code-review` — setin commit aralığı + çalışma ağacı (Set aralığı).
 2. `/audit` — projede varsa (`proje.md` → Set kapısı ekleri), yalnız ilgili
@@ -180,17 +183,17 @@ bir kod commit'inin etrafında altı defter commit'i birikti.
 3. Bulgu düzeltildiyse doğrulama yeniden.
 4. **Gözle kontrol** — kullanıcının gördüğü davranış değiştiyse kapanış
    mesajı kullanıcıya **neye bakacağını** tek satırla söyler (sahne +
-   beklenen görüntü). Kapı koda bakar, kullanıcı ekrana: kapıların hepsi
-   koşup teslimden sonra kusurları kullanıcının gözünün bulduğu ölçüldü. Bu
+   beklenen görüntü). Kapı koda bakar, kullanıcı ekrana: bütün kapılar
+   yeşilken kusuru bulan çoğu zaman kullanıcının gözüdür. Bu
    bir defter satırı değil, devir mesajının bir cümlesidir; 🟢'yi bekletmez.
    Projenin yüzeyleri varsa sahne **hepsini** sayar (`proje.md` → Set kapısı
    ekleri).
 
 `/simplify` kapının parçası değildir; kullanıcı isterse koşar.
 
-Tek istisna kesilmiş akıştır: bütün phase'ler ✅ ama `kapı` satırı boşsa kapı
-koşar ve sonucu tek `{NNN-slug} kapı` commit'iyle kapanır. Reddedilen bir
-waive'in sonradan düzeltmesi de aynı biçimi alır.
+**Ayrı commit'in iki istisnası var**, ikisi de `{NNN-slug} kapı` gövdesiyle:
+kesilmiş akış (bütün phase'ler ✅ ama `kapı` satırı boş — kapı koşar ve
+sonucu bu commit'le kapanır) ve reddedilen bir waive'in sonradan düzeltmesi.
 
 ### Kapıyı kim koşturur
 
@@ -221,8 +224,8 @@ atlandığını hiçbir yerde göstermez.
 **Ölçüm bir kapı değildir** ve ölçülmemiş sayı yazılmaz. Performans iddiası
 taşıyan phase o iddiayı **hiç yazmaz**; ölçmek isteyen kullanıcı `/measure`
 çağırır ve sonuç ölçüm defterine girer (`proje.md` → Belgeler). "Ölçüm
-bekliyor" diye bir kalem yoktur: vardı ve bir phase'in iddiasını setin
-durumuna çevirip setleri süresiz 🔨'da tuttu.
+bekliyor" diye bir kalem yoktur: bir phase'in iddiasını setin durumuna çevirir
+ve seti süresiz 🔨'da tutar.
 
 ## Teslim
 
@@ -242,12 +245,11 @@ Projenin dalı, push komutu ve commit dili `proje.md` → Teslim'de.
   (`proje.md` → Belgeler) **bugünkü sözleşmedir** ve her oturumun başında
   okunur: yeni bir kural oraya kural + tek cümle gerekçe + işaretçi olarak
   girer; tarihçe, ölçüm anlatısı, reddedilen seçenekler ve bilinen sınır
-  listeleri `.tasks/`'ta kalır. Aynı sınır listesi beş dosyaya yazıldığında
-  setin belgesi kodundan büyük çıktı.
-- **Set defteri yok.** Bir dönem `teslim.md` vardı (doğrulama + yayın
-  checklist'i + geri alma); her sette aynı "revert et"i söyledi ve
-  commit'lerin üçte birini defter yaptı. Kapanışın izi `plan.md → ## Durum`
-  ve indeks satırıdır.
+  listeleri `.tasks/`'ta kalır. Önceki bir setin ya da sözleşmenin zaten
+  yazdığı şey yeni sette yeniden anlatılmaz, bölümüne bağlanır.
+- **Set defteri yok** (doğrulama + yayın checklist'i + geri alma): her sette
+  aynı geri alma talimatını tekrarlar ve commit'leri deftere çevirir.
+  Kapanışın izi `plan.md → ## Durum` ve indeks satırıdır.
 - **Push `/ship`'in kararıdır**, `/implement` push etmez. Kapı yeşil olmadan
   push yok.
 

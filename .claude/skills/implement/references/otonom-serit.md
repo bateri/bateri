@@ -11,11 +11,11 @@ Bu kurallar implementer'ın ve kapanış ajanının isteminde
 
 - **Boşta bekleme yok.** `sleep`, `until [ -f … ]`, `while …; sleep` ve
   "hâlâ koşuyor mu" diye tekrar tekrar `echo`/`date` koşmak yasak. Her bekleme
-  turu ajanın bütün bağlamını yeniden okutur: bir implementer 929 `echo tick`
-  turu attı ve harcamasının büyük kısmı bekleme oldu.
+  turu ajanın bütün bağlamını yeniden okutur ve harcamanın büyük kısmı
+  beklemeye gider.
 - **Kapıyı ve alt ajanı ön planda koştur.** `Skill` çağrısının senkron olduğu
-  **varsayılmaz**: bir kapı ajanında `/code-review` fork olarak koştu ve ajan
-  sonucu beklemeden ilerledi. Bir kapıyı `Skill` ile
+  **varsayılmaz**: bir skill fork olarak koşabilir ve ajan sonucu beklemeden
+  ilerler. Bir kapıyı `Skill` ile
   koşturan ajan sonucun geldiğini **görmeden** rapor yazmaz; gelmediyse
   bunu `ARTIK:` alanına yazar. Uzun komut (`proje.md` → Otonom şerit ekleri)
   ön planda ve `timeout`'la koşar. Arka plana alınmış iş bitince harness ajanı zaten
@@ -28,10 +28,9 @@ Bu kurallar implementer'ın ve kapanış ajanının isteminde
   da kullanıcıya söyler.
 
 **Önbellek ön koşulu.** Uzun koşan ajan (implementer, kapı) prompt
-önbelleğinin çalıştığı yoldan koşmalı. İki implementer proxy'li bir
-oturumdan açıldı (`toolUseId` `toolu_` değil
-`call_` ile başlıyor), kayıtta `cache_read` sıfır ve her tur bütün bağlamı tam
-fiyattan okudu. Belirti oturum dökümündedir
+önbelleğinin çalıştığı yoldan koşmalı; proxy'li bir oturumdan açılan ajanda
+(`toolUseId` `toolu_` değil `call_` ile başlıyor) `cache_read` sıfır kalır ve
+her tur bütün bağlamı tam fiyattan okur. Belirti oturum dökümündedir
 (`~/.claude/projects/…/subagents/*.jsonl` → `usage.cache_read_input_tokens`);
 şüphede otonom şeride girmeden önce sor.
 
@@ -65,9 +64,8 @@ düşmediyse kaybolmuştur, orkestratör onu sonraki turda hatırlamaz.
 
 **Bir oturum, bir set.** Hafızasızlık oturumu da kapsar: set bitince devir
 mesajı kullanıcıya `/clear` önerir ve aynı oturumda ikinci bir sete
-başlanmaz. İlk altı set tek oturumda koştu; orkestratörün bağlamı ortalama 330K'da
-dolaştı ve 22 kez compact'landı — dosyalardaki kanonik kayıtla yarışan kayıplı
-özetler.
+başlanmaz: setler tek oturumda biriktiğinde bağlam defalarca compact'lanır ve
+her özet dosyalardaki kanonik kayıtla yarışan kayıplı ikinci bir kaynak olur.
 
 ### 2. Yürütme: phase başına taze implementer
 
@@ -75,9 +73,10 @@ Her phase için bir implementer başlat. Ona **dosya yollarını ver, içeriğin
 değil** (`plan.md` + o phase dosyası) ve istemine ajan kurallarını yaz.
 
 İmplementer kodu yazar, doğrulamayı koşar (`proje.md` → Doğrulama) ve phase'i
-**tek commit**'le kapatır: kod + checklist + `## Durum` ✅. Phase riskliyse
-(`proje.md` → Riskli phase tetikleyicileri; son phase hariç, orada set kapısı koşar — §5) `/code-review`'u da o koşturur ve doğrulamayı
-**kapıdan sonra yeniden** koşar — kapı kodu değiştirir, önceki yeşil geçersizdir.
+**tek commit**'le kapatır (`duzen.md` → Teslim). Riskli phase kapısı
+koşuyorsa (`duzen.md` → Kalite kapısı) `/code-review`'u da o koşturur ve
+doğrulamayı **kapıdan sonra yeniden** koşar — kapı kodu değiştirir, önceki
+yeşil geçersizdir.
 
 Devredilmeyen tek şey **bulgu kararıdır**: implementer gideremediği bulguyu
 `WAIVE` alanına yazar, kabulü orkestratör verir.
@@ -116,22 +115,16 @@ otomatik geç:
 2. `KAPI` koştu ya da gerekmedi; `WAIVE` varsa onaylandı
 3. `git show --stat {COMMIT}` listesinde `plan.md` var — ✅ aynı commit'e girmiş
 
-Kontrol raporun alanlarından ve tek bir `--stat`'tan okunur. Ayrı bir sadakat
-kontrolü (commit'in dosya listesini checklist'le karşılaştırmak) ilk altı sette
-17 phase'de 17 kez "makas yok" döndü ve kendi kuralı gereği kaldırıldı.
+Kontrol raporun alanlarından ve tek bir `--stat`'tan okunur; commit'in dosya
+listesini checklist'le karşılaştıran ayrı bir sadakat kontrolü yoktur.
 
 ### 5. Set kapısı (son phase'in içinde, bir kez)
 
-Ayrı kapı ajanı yok. **Son phase'in implementer'ı** kodu doğruladıktan sonra,
-commit'ten önce `duzen.md` → Kalite kapısı → "Set sonunda" adımlarını koşar
-(aralık `duzen.md` → Set aralığı + çalışma ağacı), bulguları giderir,
-doğrulamayı yeniden koşar ve phase'i **tek commit**'le kapatır: kod + kapı
-düzeltmeleri + `## Durum`'da phase ✅ ve `kapı` ✅ + indeks 🟢. Raporunun
-`SAPMA` satırına gözle kontrol sahnesini yazar; `KAPI:` satırı
-`/code-review · /audit → koştu`. Bu phase'in riskli phase kapısı ayrıca
-koşmaz — set kapısının `/code-review`'u onu kapsıyor. Bulgu gövdesi
-orkestratöre girmez; `WAIVE` kararı orkestratörde kalır — reddedilirse
-düzeltme ayrı bir commit olur (tek istisna).
+Ayrı kapı ajanı yok. **Son phase'in implementer'ı** `/implement` adım 8'i
+koşar ve phase'i tek commit'le kapatır. Raporunun `SAPMA` satırına gözle
+kontrol sahnesini yazar; `KAPI:` satırı `/code-review · /audit → koştu`.
+Bulgu gövdesi orkestratöre girmez; `WAIVE` kararı orkestratörde kalır —
+reddedilirse düzeltme `duzen.md` → Kalite kapısı'ndaki istisna commit'idir.
 
 ### Eskalasyon — şunlarda DUR ve sor, tahmin etme
 
@@ -140,8 +133,8 @@ düzeltme ayrı bir commit olur (tek istisna).
   vermek için `plan.md` **o an** okunur.)
 - Üç denemede geçmeyen test.
 - Giderilemeyen ve waive de edilemeyen `/code-review` bulgusu; reddedilen `WAIVE`.
-- Yayın etkili sürpriz (`proje.md` → Otonom şerit ekleri).
-- Beklenmeyen ölçüm gerilemesi ya da boşta kare üreten bir yol.
+- Yayın etkili ya da projenin sözleşmesini delen sürpriz (`proje.md` →
+  Otonom şerit ekleri).
 - Phase dosyası dışına taşan kapsam ihtiyacı. (Tek commit'lik ek iş phase
   açmaz, `duzen.md` → Ek phase eşiği.)
 

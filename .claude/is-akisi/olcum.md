@@ -38,6 +38,9 @@ entegrasyonu" altındadır.
 
 ## Koşu şartları
 
+- **Dağılım:** kare süresinde **p95 ve en kötü kare**, gecikmede **medyan ve
+  p95**; düşen kare sayısı ayrı sütundur.
+
 - `BT_FRAME_STATS` ile `BT_SCROLL_TEST` **sıfırdan büyük** bir
   `BT_RUN_SECONDS` ister (yoksa süreç çıkış 1 verir — rapor yalnız deadline
   yolunda basılıyor), ve ölçüm yükü olmadan kare akmaz.

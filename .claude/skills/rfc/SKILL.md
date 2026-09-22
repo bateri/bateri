@@ -1,7 +1,7 @@
 ---
 name: rfc
 description: Yeni bir özellik veya iyileştirme için planlama seti (.tasks/NNN-slug/) üretir — bağlam, tartışma, karar kaydı, plan ve phase dosyaları. Kullanıcı bir işi planlamak, RFC/tasarım dokümanı yazmak ya da "önce planlayalım" dediğinde kullanılır. Kod yazmaz.
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash(ls:*), Bash(mkdir:*), Bash(cp:*), Bash(mv:*), Bash(printf:*), Bash(sed:*), Bash(cut:*), Bash(sort:*), Bash(tail:*), Skill
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash(ls:*), Bash(mkdir:*), Bash(cp:*), Bash(mv:*), Bash(printf:*), Bash(sed:*), Bash(cut:*), Bash(sort:*), Bash(tail:*), Bash(find:*), Skill
 ---
 
 Kullanıcı yeni bir iş için planlama seti üretmek istiyor. Bu skill **kodu
@@ -35,15 +35,18 @@ kurulur.
 Sıradaki numarayı `duzen.md`'deki komutla **listeden oku** (tahmin etme),
 `.tasks/{NNN}-{slug}/` klasörünü aç ve `.tasks/README.md` indeksine **📐
 planlama** satırı ekle (indeks dosyası yoksa `duzen.md`'deki biçimle oluştur).
-İş projenin sıra belgesinde (`proje.md` → Belgeler) bekliyorsa satırı numarayı **şimdi** alır ve
-sete bağlanır; açılmamış satırlar numara taşımaz, yani araya giren set başka
-hiçbir satırı kaydırmaz ve "kayma" notu yazılmaz. Yeni set mevcut bir setin yerine geçiyorsa eskisini
+İş projenin sıra belgesinde (`proje.md` → Belgeler) bekliyorsa satırı
+numarayı **şimdi** alır ve sete bağlanır; açılmamış satırlar numara taşımaz,
+yoksa araya giren her set ötekileri kaydırır. Yeni set mevcut bir setin yerine geçiyorsa eskisini
 arşivle (yine `duzen.md`).
 
 ## 4. context.md
 
 Şablondan üret. Mevcut durum, motivasyon, varsa kanıt. Sorun çözümü için de
-geliştirme için de aynı biçim kullanılır.
+geliştirme için de aynı biçim kullanılır. Proje sözleşmesinde, sıra
+belgesinde ya da önceki bir setin dosyasında zaten yazılı olan şey yeniden
+anlatılmaz, bölümüne bağlanır (`duzen.md` → Teslim → Her bilgi tek yerde):
+her ajan sözleşmeyi zaten yüklüyor ve kopya ilk düzeltmede ayrışır.
 
 ## 5. discussion.md (opsiyonel)
 
@@ -53,10 +56,9 @@ yaz. Tek bariz yaklaşım varsa atla, doğrudan plan.md'ye geç. Biçim seçimi
 
 ## 6. Muhakeme paneli — yalnız pahalı kararda
 
-Panel **varsayılan olarak kapalı**. Sayıldı: muhakeme tablolarındaki
-verdiktlerin neredeyse tamamı SORUNLU, yani hemen her sette "sorunlu" diyen
-bir kapı ayırt etmiyor ve her koşu üç güçlü ajan açıyor. Kapı kalkmadı,
-**pahalı karar sınıfına daraltıldı**.
+Panel **varsayılan olarak kapalı**: hemen her sette "sorunlu" diyen bir kapı
+ayırt etmiyor ve her koşu üç güçlü ajan açıyor. Kapı kalkmadı, **pahalı karar
+sınıfına daraltıldı**.
 
 - `/plan-review {NNN-slug}` koş, **ancak** discussion.md'de birden çok
   yaklaşım var **ve** seçim projenin pahalı karar sınıfına dokunuyorsa
@@ -99,11 +101,10 @@ ya da çıkarımı karşılamanın yolları arasında seçim gerekçesiz kalıyo
 varsayılan **kodu açmaktır** — kısıtı zorunluluk sanıp özelliği daraltmak
 değil. Aynı kural talebin kendisi için de geçerli: kapsamda bir boşluk varsa
 kullanıcının lehine okunur, kendi işini kolaylaştıran yönde değil.
-**Ölçülmüş bedeli var:** jürinin bir kod kısıtından çıkardığı "bu özellik o
-yüzeyde hiç olmasın" önerisi karar sanıldı, plana gereksinim ve koda
-değişmez olarak girdi; kullanıcı özelliği bozuk gördü ve kısıtın ikinci
-çözümü (kodu açmak) için ayrı bir set yazıldı. İlk turda konuşulsaydı o set
-hiç açılmazdı.
+Bedeli: jürinin bir kod kısıtından çıkardığı "bu özellik o yüzeyde hiç
+olmasın" önerisi karar sanılırsa plana ve koda değişmez olarak girer,
+kullanıcı özelliği bozuk görür ve kısıtın ikinci çözümü için ayrı bir set
+açılır.
 
 **Dil de denetlenir:** "yapısal olarak zorunda", "temsil edilemiyor", "mümkün
 değil" ifadeleri bir kısıtı zorunluluğa çeviriyor ve o çeviri seçimi görünmez
@@ -145,25 +146,21 @@ yazılmaz (`duzen.md` → Tek phase'li set). plan.md setin **omurgasıdır** ve 
 Kullanıcı planı onaylayıp "phase'e geç" dediğinde `phase-1.md` üret, gerekirse
 `phase-2.md`... Her phase: değişecek dosyalar, kabul ölçütü, checklist.
 
-> Phase dosyası kodun **kılavuzudur, kopyası değil**: kod örneği yazılmaz.
-> Bir imza ya da alan sırası sözleşmeyse adıyla tek satır yeter, gövdesini
-> implementer yazar. Checklist'i ve kapıyı **kodlama adımı** uygular; bu
-> skill yalnız yazar. (Bir dönem 3–5 KB hedefi vardı; 65 phase'in 59'u
-> aşınca ölü kural diye kaldırıldı — ölçü boyut değil, kodun tekrarı.)
+> Phase dosyası kodun **kılavuzudur, kopyası değil** (biçim ve kural
+> şablonda). Ölçü boyut değil, kodun ve başka dosyaların tekrarı.
+> Checklist'i ve kapıyı **kodlama adımı** uygular; bu skill yalnız yazar.
 
 Phase bölmenin ölçüsü: her phase **tek başına doğrulanabilir** olmalı
 (kapı komutunu yeşil bırakmalı) ve tek commit'e sığmalı. Doğrulanamayan bir
 ara durum bırakan bölme yanlıştır — ya birleştir ya da sınırı kaydır. Tersine,
 tek commit'lik düzeltme phase olmaz (`duzen.md` → Ek phase eşiği).
 
-Riskli phase kutusunu (`duzen.md` → Kalite kapısı, tetikleyiciler `proje.md`'de) yalnız koşulu tetikleyecek
-phase'e koy — **son phase hariç**: orada set kapısı onu kapsıyor. Set
-sonundaki kapı `plan.md → ## Durum`'un `kapı` satırıdır, phase
-checklist'lerine yazılmaz.
+Riskli phase kutusu ve set kapısının yeri `duzen.md` → Kalite kapısı'nda;
+şablonun checklist yorumu hangi phase'de kutunun kalacağını söyler.
 
 Çok phase'li sette her phase'in `_Requirements:_` satırı plan.md'deki
 gereksinimlere bağlanır; `/implement` ön uçuşta kapsanmayan gereksinim / öksüz
 phase arar. Tek phase'li sette satır yazılmaz.
 
 Performans iddiası phase'e **yazılmaz** (`duzen.md` → Kalite kapısı →
-Ölçüm): ölçülmemiş sayı yasak, "ölçüm bekliyor" kalemi de yok.
+Ölçüm).

@@ -11,8 +11,8 @@ Kullanıcı bir planlama setinin (`.tasks/{NNN}-{slug}/`) seçilen yaklaşımın
 `/implement` tarafından sadakatle uygulanır ve tasarım hatası en ucuz burada
 yakalanır.
 
-Set düzeni için `.claude/is-akisi/duzen.md`, projenin mimari sözleşmesi için
-`.claude/is-akisi/proje.md` ve `CLAUDE.md`.
+Set düzeni için `.claude/is-akisi/duzen.md`, projenin profili ve sözleşmesinin
+yeri için `.claude/is-akisi/proje.md` (→ Belgeler).
 
 ## Girdi
 
@@ -25,7 +25,7 @@ Hiçbiri yoksa dur: "önce `/rfc` ile context/discussion üret".
 
 Her jüri **karşılaştırmalı** çalışır: önerilen yaklaşımı hem discussion'daki
 alternatiflere hem kendi üreteceği "daha basit yol"a kıyaslar. Jürilere
-context+discussion+plan içeriğini, `CLAUDE.md`'yi ve repo erişimini ver;
+context+discussion+plan içeriğini, proje sözleşmesini ve repo erişimini ver;
 aramayı repoyla sınırla (host geneli tarama yasak).
 
 | Mercek | Soru | Çıktı |
@@ -48,14 +48,11 @@ Her jüriden dönecek biçim:
 **Sınır:** Panel tasarımı sorgular, kapsamı **genişletmez**. "Şunu da eklesek"
 türü öneri kapsam dışıdır, taşıma.
 
-**İkinci sınır — jüri ürün kararına yetkili değil.** Mercekler "koda uyar mı",
-"daha basit var mı", "yükü ne" diye sorar; hiçbiri "kullanıcı ne görür" diye
-sormaz. Bir bulgunun **çözümü** kullanıcının gördüğünü değiştiriyorsa o artık
-bir ürün sorusudur ve adım 4'te kullanıcıya **sorulur**, sentezde karara
-bağlanmaz. Ölçülmüş örnek: Codebase-fit doğru bir kod kısıtı buldu ve ondan
-"bu özellik o yüzeyde hiç olmasın" sonucunu çıkardı; sentez onu değişmez
-diye plana yazdı ve kullanıcı özelliği bozuk gördü. Kısıtın iki çözümü vardı
-ve jüri yalnız kodu koruyanı görüyordu.
+**İkinci sınır — jüri ürün kararına yetkili değil.** Mercekler "kullanıcı ne
+görür" diye sormaz; bir bulgunun **çözümü** kullanıcının gördüğünü
+değiştiriyorsa o bir ürün sorusudur ve adım 4'te kullanıcıya sorulur. Bulgu
+sentezde `/rfc` → Bulguyu işleme yolu ile işlenir (gözlem ve çıkarım jürinin,
+çözüm seçimi değil).
 
 **Projenin mercek notları** `proje.md` → Jüri mercek notları'ndadır: her
 jüriye o bölüm de verilir ve oradaki itiraz konuları merceğin kendi
@@ -70,8 +67,7 @@ değiştirecek itirazı taşı.
 ## 3. Muhakeme kaydı
 
 `discussion.md`'ye (yoksa `plan.md`'ye) `## Muhakeme` bölümünü yaz — biçim
-`.claude/is-akisi/sablonlar/discussion.md` içindedir. Bu bölüm aynı zamanda
-"bu plan muhakeme gördü" işaretidir; `/implement` ön uçuşta buna bakar.
+`.claude/is-akisi/sablonlar/discussion.md` içindedir.
 
 ## 4. Kullanıcıya özet
 
