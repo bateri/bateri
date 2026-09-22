@@ -91,6 +91,7 @@ dependencies = [
  "alacritty_terminal",
  "polling",
  "toml_edit",
+ "unicode-width",
 ]
 
 [[package]]

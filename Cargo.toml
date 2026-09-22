@@ -89,6 +89,16 @@ libc = "0.2"
 # bağımlılık listesine bir kenar ekleniyor. Kararın kaydı:
 # .tasks/009-shell-entegrasyonu/phase-2.md → Uygulama Notları.
 polling = "3.8"
+# Dock'un sütun aritmetiği (`bt-core::dock`) ve — aynı setin ikinci
+# phase'inde — bastırmanın tazelik kapısı (`bt-core::shell`). Yeni bir crate DEĞİL — grafta zaten vardı ve **ızgaranın
+# kullandığının ta kendisi**: alacritty `Flags::WIDE_CHAR`'ı
+# `unicode_width::UnicodeWidthChar` ile kuruyor ama onu yeniden **ihraç
+# etmiyor** (ölçüldü). Aynı crate'in aynı sürümü olması kararın özü: ikinci
+# bir genişlik kaynağı ızgaranınkiyle ayrıştığı gün belirtisi sessizdir —
+# dock bir sütun kayar. `Cargo.lock`'ta yalnız `bt-core`'un listesine bir
+# kenar ekleniyor, hiçbir sürüm oynamıyor. Kararın kaydı:
+# .tasks/024-dock-sutun-aritmetigi/discussion.md → Karar 1.
+unicode-width = "0.2"
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }

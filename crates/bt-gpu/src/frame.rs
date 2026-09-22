@@ -1118,12 +1118,15 @@ impl Frame {
                 } else {
                     SizeClass::Normal
                 },
-                // Sınır burada **her zaman `false` veriyor**
-                // (`bt_core::dock`'un değişmezi: dock'un sütunu karakter
-                // indeksinden türüyor, spacer yok). Alan yine de hücreden
-                // okunuyor, sabit `false` yazılmıyor: sabit yazmak değişmezi
-                // iki yere kopyalar ve `bt-core` bir gün onu kaldırsa bu
-                // satır sessizce eski kalırdı.
+                // **Sınır burada artık `true` de verebiliyor** (024): dock'un
+                // sütunu karakter indeksinden değil genişlikten birikiyor,
+                // yani geniş karakterin baş hücresi işaretli geliyor ve
+                // spacer sütununa glyph'siz bir zemin hücresi düşüyor.
+                // 023'te bu satırın yorumu "sınır her zaman `false` veriyor"
+                // diyordu ve alanın hücreden okunmasının gerekçesi de tam
+                // buydu — "`bt-core` bir gün onu kaldırsa bu satır sessizce
+                // eski kalırdı". Kaldırdı; satır sessizce eski kalmadı,
+                // çünkü sabit yazılmamıştı.
                 wide: cell.wide,
                 rgba: cell.fg.to_array(),
             });
