@@ -95,4 +95,17 @@ kare yolu (Session::frame)
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| kapı | ⏳ |
+| kapı | ✅ |
+
+### Kapı (2026-09-23)
+
+Set tek phase olduğu için `/code-review` phase-1'in riskli phase kapısında
+setin diff'inin tamamını taradı (`make test-yaris` tetikledi) ve **iki**
+düşük bulgu verdi; ikisi de phase commit'inde işlendi (`phase-1.md` →
+Uygulama Notları): zamansal kısa devre iki eski bekçiyi sessizce
+silahsızlandırmıştı (`key_gen` artışı eklendi) ve ayna doğurmayan tuş
+(`^X` öneki, vi'de `Esc`) üçüncü bilinen sınır olarak yazıldı. Kapıdan sonra
+değişen kod yok.
+
+`/audit` temiz: `make denetim` temiz; mercek 1, 3, 4, 7 temiz (kare yoluna
+yalnız bir atomik okuma girdi, yeni kilit sırası yok); 2, 5, 6 ilgisiz.
