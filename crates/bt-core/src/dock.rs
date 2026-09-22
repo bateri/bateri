@@ -190,15 +190,17 @@ pub(crate) fn render(
             .chain(state.postdisplay.chars().map(|ch| (ch, suggestion)))
     };
 
-    // **Caret'in sütunu, indeksi değil.** `CURSOR` karakter indeksi (ZLE'nin
-    // birimi) ama görüntünün birimi sütun: geniş bir karakter indeksi bir,
-    // sütunu iki ilerletiyor. Önek yalnız imlece kadar geziliyor, yani
-    // maliyet eski hâlinkiyle aynı mertebede — tam dizgiyi ikinci kez
-    // gezmekten kaçınmanın gerekçesi (eski yorum) hâlâ geçerli.
-    let caret_col: usize = stream()
-        .take(state.cursor)
-        .map(|(ch, _)| column_width(ch))
-        .sum();
+    // **Caret'in sütunu, indeksi değil** — ve **çözücüden** geliyor, burada
+    // yeniden sayılmıyor. `CURSOR` karakter indeksi (ZLE'nin birimi) ama
+    // görüntünün birimi sütun: geniş bir karakter indeksi bir, sütunu iki
+    // ilerletiyor.
+    //
+    // İlk yazım bu öneki burada geziyordu ve `/audit` (mercek 4) onu iki
+    // kusurla birden yakaladı: kare yolunda **ikinci** bir O(n) gezinti
+    // (aşağıdaki `nth`'in yanında) ve aynı sayının **ikinci üreticisi** —
+    // tam da bu setin kaçındığı koku. `DockState::cursor_col` phase-2'de
+    // doğdu ve tek sahip o.
+    let caret_col = state.cursor_col;
     // **Pencere caret'in altındaki karakterin tamamını ayırıyor.** İlk yazım
     // sabit `+ 1` idi ve set kapısı (`/code-review`) onu yakaladı: caret
     // kaydırılmış bir satırda geniş bir glyph'in üstünde duruyorsa o glyph
@@ -211,9 +213,20 @@ pub(crate) fn render(
     // kapsıyordu; bu satır onun altındakini kapsıyor ve ikisi aynı cümlenin
     // iki yarısı. Satır sonunda caret bir karakterin üstünde değil, o yüzden
     // pay 1'e iniyor.
+    // Pay **pencereden büyük olamaz** (`min(available)`): `available == 1` ve
+    // caret'in altında iki sütunluk bir karakter varken pay pencereyi aşar,
+    // `caret_col - skip` negatife düşer ve aşağıdaki çıkarma taşar — debug'da
+    // `bt-core`'da kare yolunda panik (depo bunu yasaklıyor), release'de
+    // sarma ve caret prompt işaretinin payına düşer. Set kapısı
+    // (`/code-review`) yakaladı; kökü payın kendisiydi, yani bir önceki
+    // kapının düzeltmesi kendi kenarını doğurmuştu.
+    //
+    // Kırpma Karar 2'yi **bozmuyor**: sığmayan karakter yine çizilmiyor
+    // (sağ kenar kuralı ayrı), yalnız caret son sütuna sabitleniyor.
     let caret_width = stream()
         .nth(state.cursor)
-        .map_or(1, |(ch, _)| column_width(ch).max(1));
+        .map_or(1, |(ch, _)| column_width(ch).max(1))
+        .min(available);
     let skip = (caret_col + caret_width).saturating_sub(available);
 
     // Mutlak sütun (kaydırma çıkarılmadan önce). Döngü boyunca birikiyor ve
@@ -1398,5 +1411,38 @@ mod tests {
             1,
             "bağlam satırı sütun saymaya geçmiş (sınır kalktıysa doc'u düzelt)"
         );
+    }
+
+    /// Pencere caret'in karakterinden **darsa** taşma yok.
+    ///
+    /// `available == 1` ve caret'in altında iki sütunluk bir karakter: pay
+    /// pencereden büyük, yani `caret_col - skip` negatife düşerdi. Debug'da
+    /// `bt-core`'da kare yolunda panik (depo bunu yasaklıyor), release'de
+    /// sarma ve caret prompt işaretinin payına düşer. Set kapısı
+    /// (`/code-review`) yakaladı ve kökü bir önceki kapının düzeltmesiydi —
+    /// `caret_width` payı eklenince kendi kenarını doğurdu.
+    #[test]
+    fn a_window_narrower_than_the_caret_char_does_not_underflow() {
+        for (label, buffer, cursor) in [
+            ("caret geniş karakterin üstünde", "漢", 0),
+            ("tek sütunda geniş karakter + kuyruk", "漢a", 0),
+        ] {
+            let state = live("", buffer, "", cursor);
+            let mut cells = Vec::new();
+            let owned = caret_home(None, state.status, false) == CaretHome::Dock;
+            let dock = render(
+                &state,
+                &DockContext::default(),
+                None,
+                &THEME,
+                same(TEXT_COL + 1),
+                owned,
+                |cell| cells.push(cell),
+            );
+            // Caret metin alanının **içinde**: prompt işaretinin payına
+            // düşmüyor ve pencerenin dışına da taşmıyor.
+            let caret = dock.caret.expect("{label}: caret dock'un");
+            assert_eq!(caret, TEXT_COL, "{label}: caret {caret}");
+        }
     }
 }
