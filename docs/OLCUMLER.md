@@ -912,6 +912,54 @@ derlemeden sonraki ilk koşuydu. İki bloğun sıcak koşuları örtüşüyor
 (priz 233–269, pil 253–275), yani **açılış güç durumundan etkilenmiyor** —
 kare süresinin CPU sütunlarıyla aynı sonuç.
 
+## Bekleyen iddialar
+
+Ölçüm bekleyen iddiaların **tek listesi**. 2026-09-22'ye kadar her set kendi
+`teslim.md`'sinde taşıyordu ve sonuç sekiz setin süresiz **🔨**'da kalmasıydı:
+defter, *alınmış bir kararı* (bench bağımlılığı reddedildi) *bekleyen bir iş*
+gibi sayıyordu. Kodun tamamı `main`'de ve çalışıyordu.
+
+Buraya taşınmalarının sebebi sahiplik: bu dosya zaten ölçülmüş sayının tek
+sahibi, bekleyen iddianın da sahibi olması gerekiyordu. Setlerin
+checklist'lerinde kutuları `[~]` ve gerekçesiyle duruyor — silinmedi, çünkü
+silinen kutu atlandığını hiçbir yerde göstermez.
+
+### Emekli — `criterion` alınmadı
+
+Bench iddiaları **kapanmayacak** ve bu bir eksik değil bir karar: `criterion`
+ayrı bir bağımlılık kararıdır, kimse bench sayısı istemedi ve `cargo bench
+--workspace -- --list` bugün `0 benchmarks` diyor. İstenirse kendi setini
+hak ediyor; o gün bu bölüm yeniden yazılır.
+
+- 002 #2'nin yarısı — ayrıştırıcının saf maliyeti
+- 003 #1 — `#[inline]` işaretlerinin renk yolundaki kazancı
+- 003 #2 — `Atlas::slot`'un hücre başına maliyeti
+- 004 #4'ün yarısı — kural instance'larının maliyeti
+
+### GPU sütununun tabanına bağlı
+
+Hepsi "bu değişikliğin kare süresine **etkisi**" biçiminde, yani önce/sonra
+karşılaştırması istiyor — ve o karşılaştırma `## Kare süresi`'nde kayıtlı
+kararsızlığa düşüyor (aynı kaynakla 0,25–0,68 ms). Sıra bu yüzden tersine
+döndü: **önce ölçme yöntemi, sonra bu iddialar.** Aynı yöntem 023 materyal
+yüzeyin de ön koşulu.
+
+- 003 #5 — ikinci pipeline ile glyph instance tamponunun etkisi
+- 004'ün beş iddiası — sınır `Cell`'i, kural instance'ları, alfa maliyeti
+- 019 B.1 — yedek glyph'in etkisi. **İkinci bir sebebi var:** ölçüm yükü
+  (`load_shell`) düz ASCII basıyor, yani yedek yoluna hiç girmiyor — bugünkü
+  kancayla bu iddianın tanığı yok, ölçüm yolunun kendisi genişlemeli.
+
+### Kancası ya da yükü olmayanlar
+
+- 009 B.2 — tarayıcının akış maliyeti
+- 012'nin üç iddiası — dock'un kare yolu (kanca borcu, setin kendi kaydında)
+- 013 — "saat armed'ken kare maliyeti": kanca var, **yük yok** (entegrasyonlu
+  bir ölçüm yükü tanımlı değil)
+- 022 B.1 — sekme başına bellek: `## Bellek` boş, araç dışarıdan
+  (`footprint`, `vmmap`). Doku en kötü köşede ~16 MB'a çıkıyor.
+- 011 — kaymanın yerleşme süresi (kanca yok; setin kendi `[~]` kaydı)
+
 ## Bellek
 
 Ölçülmedi. Araç dışarıdan (`footprint`, `vmmap`); sekme yok.

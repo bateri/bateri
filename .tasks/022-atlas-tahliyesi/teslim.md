@@ -61,7 +61,7 @@ kapı değildir.
 
 ### Yayın Checklist
 
-- [ ] B.1 `/measure` — sekme başına bellek; doku büyümesinin gerçek ayak izi
+- [~] B.1 `/measure` — sekme başına bellek. `docs/OLCUMLER.md` → `## Bellek` boş ve kancası yok (`footprint`/`vmmap` dışarıdan). bekleyen iddiaların tek listesi `docs/OLCUMLER.md` → `## Bekleyen iddialar`; kutuyu `[ ]` tutmak seti süresiz 🔨'da bırakıyordu. Doku büyümesinin gerçek ayak izi
       ölçülüp `docs/OLCUMLER.md` → `## Bellek`'e işlendi
 
 ## Geri Alma

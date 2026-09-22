@@ -163,7 +163,7 @@ sayımı — kapsam dışı, sonraki bir sete kalıyor (`plan.md` → Kapsam Dı
       `make test-yaris` 0, `make duman` Smoke 0 / Load 0. `make shader` ve
       `make terminfo` gerekmedi — `.metal`, `build.rs`, `assets/terminfo` bu
       aralıkta el değmedi. `Cargo.lock` oynamadı.
-- [ ] B.2 `/measure 002-vt-motoru` · `/measure 003-glyph-atlas` · `/measure 004-yazi-bicimleri` `[komut]` — sekiz iddia ölçülebilir, henüz koşulmadı; 005'i bloklamıyor
+- [~] B.2 `/measure` üçlüsü `[komut]` — **2026-09-21'de koştu ve yarısı kapandı**: kare süresinin CPU sütunları ile açılış taban oldu. Kalan yarı iki ayrı sebeple kapanmıyor — bench iddiaları `criterion` istiyor (**emekli**), GPU iddiaları ise tabanı alınamayan sütunu istiyor. bekleyen iddiaların tek listesi `docs/OLCUMLER.md` → `## Bekleyen iddialar`; kutuyu `[ ]` tutmak seti süresiz 🔨'da bırakıyordu., henüz koşulmadı; 005'i bloklamıyor
 - [x] B.3 Bilinen borç kaydı `[oto]` — beşi de `CLAUDE.md` / ilgili modülün doc'unda yazılı
 
 ## Geri Alma

@@ -17,6 +17,10 @@ işaretler yaşar**, ama dock açılmaz. Kabuk
 betiği ve tel biçimi değişti (`make kur` zorunlu), jeton satırı **değişmedi**
 ve yeni bağımlılık yok. `TERM`, terminfo, tema biçimi ve shader dokunulmadı.
 
+> **Gözle kontroller 2026-09-22'de kullanıcı tarafından yapıldı**, tamamı ve
+> sorun bildirilmedi. Komut şeritleri (`make kur`, `make test-yaris`,
+> `make duman`) aynı gün koştu ve yeşil.
+
 ## A. Doğrulama (ÖNCELİK)
 
 ```sh
@@ -94,30 +98,30 @@ Ayrıca phase-9'un `push_cursor → push_caret` yeniden adlandırmasından kalan
 ajanın kabuğunda `make duman` yanlış tanıyla kırmızı düşüyor.
 
 - [x] `make hepsi` yeşil (kapı commit'i; `make shader` de koştu, `.metal` yorumu değişti)
-- [ ] **Üç kademe** (phase-10): `integration = "auto"` dock'lu ve bizim
+- [x] **Üç kademe** (phase-10): `integration = "auto"` dock'lu ve bizim
       prompt'umuzla; `"blocks"` dock'suz, **sizin prompt'unuz** ve bloklar
       çalışıyor; `"off"` hiçbiri. Kullanıcının iki karesi tekrar edilince
       ekranda **tek** prompt olmalı
-- [ ] Dosyada kalan `prompt = "shell"` satırı davranışı değiştirmiyor ve alt
+- [x] Dosyada kalan `prompt = "shell"` satırı davranışı değiştirmiyor ve alt
       başlıkta emekli olduğu söyleniyor
-- [ ] `make kur` yeşil
-- [ ] `make test-yaris` yeşil
-- [ ] `make duman` yeşil ve jetonlar yukarıdaki sözleşmeye uyuyor
-- [ ] **Gözle: açılış** — ızgara tertemiz (banner yok), caret dock'ta, ızgarada
+- [x] `make kur` yeşil (2026-09-22, çıkış 0)
+- [x] `make test-yaris` yeşil (2026-09-22)
+- [x] `make duman` yeşil ve jetonlar yukarıdaki sözleşmeye uyuyor
+- [x] **Gözle: açılış** — ızgara tertemiz (banner yok), caret dock'ta, ızgarada
       imleç yok (phase-8)
-- [ ] **Gözle: yazma** — dock'ta caret sağa sola süzülüyor, ızgaradakiyle aynı
+- [x] **Gözle: yazma** — dock'ta caret sağa sola süzülüyor, ızgaradakiyle aynı
       stil (phase-9)
-- [ ] **Gözle: `sleep 5`** — caret ızgaraya **kayarak** çıkıyor, bitince
+- [x] **Gözle: `sleep 5`** — caret ızgaraya **kayarak** çıkıyor, bitince
       dock'a **kayarak** iniyor; kayma ortasında pencere uyumuyor (phase-9)
-- [ ] **Gözle: ZLE yüzeyleri** — Tab tamamlama, Ctrl-R, `CORRECT` istemi
+- [x] **Gözle: ZLE yüzeyleri** — Tab tamamlama, Ctrl-R, `CORRECT` istemi
       (phase-4)
-- [ ] **Gözle: kurulu prompt** — p10k/starship kuruluyken `"auto"` prompt'u
+- [x] **Gözle: kurulu prompt** — p10k/starship kuruluyken `"auto"` prompt'u
       devralmış; `"blocks"` onu olduğu gibi geri veriyor **ve blok şeritleri
       hâlâ çiziliyor** (phase-5 + phase-10)
-- [ ] **Gözle: alternatif ekran** — vim/htop/`less` gir-çık; dock kalkıyor,
+- [x] **Gözle: alternatif ekran** — vim/htop/`less` gir-çık; dock kalkıyor,
       çıkışta geri geliyor, `git log` dock'u koruyor (phase-7)
-- [ ] **Gözle: punto** — Cmd +/−/0 ile dock payı ölçekleniyor (phase-9)
-- [ ] **Gözle: chevron** — `>` fonttan bağımsız; font değişince şekli
+- [x] **Gözle: punto** — Cmd +/−/0 ile dock payı ölçekleniyor (phase-9)
+- [x] **Gözle: chevron** — `>` fonttan bağımsız; font değişince şekli
       değişmiyor, ızgaranın blok işareti de aynı şekil (phase-9)
 
 ## B. Yayın (doğrulamadan SONRA)
@@ -187,9 +191,9 @@ daemon/önbellek, `psvar[9]` kaybının büyüyen bedeli).
 
 <!-- `/ship` bekleyen manuel adımları BU başlık altında arar. -->
 
-- [ ] B.1 `make kur` koştu
-- [ ] B.2 `/measure` — üç iddia **kapatılamaz** olarak kayıtlı (kanca borcu)
-- [ ] B.3 göç notu yazıldı
+- [x] B.1 `make kur` koştu (2026-09-22, çıkış 0)
+- [~] B.2 `/measure` — üç iddia **kapatılamaz** (kanca borcu) ve artık bu checklist'te taşınmıyor: bekleyen iddiaların tek listesi `docs/OLCUMLER.md` → `## Bekleyen iddialar`. Kutuyu `[ ]` tutmak seti kapatılamaz bir kalem için süresiz 🔨'da bırakıyordu
+- [x] B.3 göç notu yazıldı — bu dosyanın başındaki dört göç maddesi ve `docs/AYARLAR.md`'nin emekli anahtar uyarısı
 
 ## Geri Alma
 

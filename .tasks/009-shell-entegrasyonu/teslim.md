@@ -85,8 +85,8 @@ make kur
 ### Yayın Checklist
 
 - [x] B.1 `/ship` — `main`'e push
-- [ ] B.2 `/measure` — tarayıcının akış maliyeti (ölçüm bekliyor; kapı değil)
-- [ ] B.3 `make kur` — sevk paketi gerekiyorsa
+- [~] B.2 `/measure` — tarayıcının akış maliyeti. bekleyen iddiaların tek listesi `docs/OLCUMLER.md` → `## Bekleyen iddialar`; kutuyu `[ ]` tutmak seti süresiz 🔨'da bırakıyordu.
+- [x] B.3 `make kur` — 2026-09-22'de koştu, çıkış 0
 
 ## Geri Alma
 

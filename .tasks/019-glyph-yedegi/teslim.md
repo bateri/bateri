@@ -74,7 +74,7 @@ Karar verilene kadar yapılacak bir şey yok; ikisi de kayıtlı.
 
 ### Yayın Checklist
 
-- [ ] B.1 — `/measure` ile yedeğin kare süresine etkisi ölçüldü ve emanetteki
+- [~] B.1 — `/measure` ile yedeğin kare süresine **etkisi**. İki sebeple kapanmıyor: önce/sonra karşılaştırması GPU sütununun kararsızlığına düşüyor, ve ölçüm yükü (`load_shell`) düz ASCII bastığı için **yedek yoluna hiç girmiyor** — yani bugünkü kancayla tanığı yok. Emanetteki
       sayılar `docs/OLCUMLER.md`'ye taşındı
 - [~] B.2 — yol haritasındaki iki borç için ürün kararı alındı: **birincisi
       (blok/çizgi/Braille yordamsal çizim) 2026-09-21'de sete bağlandı →

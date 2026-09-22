@@ -203,7 +203,7 @@ Kapsam dışı ama görünürlüğü korunsun diye ayrıca not: `plan.md`'nin
       phase-3'ün `## Uygulama Notları`'nda
 - [x] B.2 Göz kontrolü `[elle]` — **kullanıcı 2026-09-11'de yaptı, geçti.**
       Doğrulayan kullanıcıdır; bu satır onun raporudur, otomatik bir kapı değil
-- [ ] B.3 `/measure 004-yazi-bicimleri` `[komut]` — beş iddia bekliyor.
+- [~] B.3 `/measure 004-yazi-bicimleri` `[komut]` — beşi de "bu değişikliğin kare süresine **etkisi**" biçiminde, yani önce/sonra ister ve o karşılaştırma GPU sütununun kararsızlığına düşüyor; **#4'ün yarısı `criterion` istiyor — emekli**. bekleyen iddiaların tek listesi `docs/OLCUMLER.md` → `## Bekleyen iddialar`; kutuyu `[ ]` tutmak seti süresiz 🔨'da bırakıyordu.
       **005 kanca setini getirdi**, komut artık koşulabilir. Kanca adları
       değişti: `BT_FRAME_LOG` ve `BT_STARTUP_TRACE` yok, ikisinin yerine
       `BT_FRAME_STATS` (açılış aynı bayrağın altında). `#4`'ün bench yarısı

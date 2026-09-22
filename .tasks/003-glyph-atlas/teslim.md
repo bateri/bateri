@@ -162,7 +162,7 @@ ikinci bir CF sarmalayıcı yığını olurdu). phase-1, phase-3 ve phase-4
 
 <!-- `/ship` bekleyen manuel adımları BU başlık altında arar. -->
 
-- [ ] B.1 `/measure 003-glyph-atlas` `[komut]` — beş ölçüm bekliyor.
+- [~] B.1 `/measure 003-glyph-atlas` `[komut]` — #3 kapandı (yuva sayacı), #4 2026-09-21'de kapandı (açılış tabanı), **#1 ve #2 `criterion` istiyor ve o bağımlılık bilerek alınmadı — emekli**, #5 GPU sütununun tabanını istiyor ve o taban alınamadı. bekleyen iddiaların tek listesi `docs/OLCUMLER.md` → `## Bekleyen iddialar`; kutuyu `[ ]` tutmak seti süresiz 🔨'da bırakıyordu.
       **005 kanca setini getirdi.** 2026-09-10'daki "ölçüm aracı yok" sonucu o
       güne aitti. Kapanabilenler: `#3` (atlas doluluğu → `yuva=` jetonu), `#4`
       ve `#5` (açılış damgası ve kare sütunları). **Açık kalan:** `#1` ve `#2`

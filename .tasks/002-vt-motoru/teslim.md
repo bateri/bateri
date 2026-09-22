@@ -108,7 +108,7 @@ ilgili crate'in bağımlılık listesine kenar eklendi.
       teslimde yapılacak bir şey yok. **006 phase-4'te kapandı:** lisans metni
       `assets/bundle/THIRD-PARTY-LICENSES.txt`, atıf `Credits.html`; girdiyi
       `bundle_assets` sınaması, ürünü `make kur`'un denetimi sınıyor
-- [ ] B.2 `/measure 002-vt-motoru` `[komut]` — iki ölçüm bekliyor.
+- [~] B.2 `/measure 002-vt-motoru` `[komut]` — iki iddia; **#2'nin yarısı `criterion` istiyor ve o bağımlılık bilerek alınmadı**, yani o yarı emekli. Kalanı bekleyen iddiaların tek listesi `docs/OLCUMLER.md` → `## Bekleyen iddialar`; kutuyu `[ ]` tutmak seti süresiz 🔨'da bırakıyordu.
       **005 kanca setini getirdi, komut artık koşulabilir.** 2026-09-10'daki
       "ölçüm aracı yok" sonucu o güne aitti. Kilit beklemesi (`#1`) CPU'nun
       `session.frame()` sütunundan okunur; instance tamponu (`#2`) kısmen —
