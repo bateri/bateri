@@ -91,8 +91,9 @@ değiştirecek itirazı taşı.
 ## 4. Kullanıcıya özet
 
 Verdiktler + kendi önerin (planla devam / planı değiştir / seçenek değiştir).
-**Karar kullanıcınındır**; kabul edilen değişiklikler plan.md'ye ya da
-discussion.md'ye onayıyla işlenir.
+**Ürün kararı kullanıcınındır, teknik karar senin** (`/rfc` adım 7): teknik
+itirazların sentezi sende biter ve `## Karar`'a gerekçesiyle yazılır;
+kullanıcıya yalnız sonucu ekranda ayrışan seçim sorulur.
 
 ## Ne zaman koşulur
 

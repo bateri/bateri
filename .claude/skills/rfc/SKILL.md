@@ -34,7 +34,10 @@ kurulur.
 
 Sıradaki numarayı `duzen.md`'deki komutla **listeden oku** (tahmin etme),
 `.tasks/{NNN}-{slug}/` klasörünü aç ve `.tasks/README.md` indeksine **📐
-planlama** satırı ekle (indeks dosyası yoksa `duzen.md`'deki biçimle oluştur). Yeni set mevcut bir setin yerine geçiyorsa eskisini
+planlama** satırı ekle (indeks dosyası yoksa `duzen.md`'deki biçimle oluştur).
+İş `docs/YOL-HARITASI.md`'de bekliyorsa satırı numarayı **şimdi** alır ve
+sete bağlanır; açılmamış satırlar numara taşımaz, yani araya giren set başka
+hiçbir satırı kaydırmaz ve "kayma" notu yazılmaz. Yeni set mevcut bir setin yerine geçiyorsa eskisini
 arşivle (yine `duzen.md`).
 
 ## 4. context.md
@@ -59,7 +62,9 @@ kapı ayırt etmiyor ve her koşu üç `opus` ajanı açıyor. Kapı kalkmadı,
 - `/plan-review {NNN-slug}` koş, **ancak** discussion.md'de birden çok
   yaklaşım var **ve** seçim şunlardan birine dokunuyorsa: yeni crate
   bağımlılığı, katman yönü (`bt-core`'a platform, `bt-gpu`'ya semantik),
-  `Cell`'e alan, `TERM`/terminfo, shell entegrasyonu, her karede CPU hesabı.
+  `Cell`'e alan, `TERM`/terminfo, shell betiği (`assets/shell/`), her karede
+  CPU hesabı. Sınıf **değişecek dosyaya** göre okunur, konunun adına göre
+  değil: 025 "shell entegrasyonu" diye panel açtı ama betiğe hiç dokunmadı.
 - Geri kalan her sette atla; kullanıcı "bu tasarım temiz mi" derse koşulur.
 - Panel `KIRMIZI` verirse (yaklaşım değişmeli) → kullanıcıya **gitmeden**
   seçenekleri yeniden kur, gerekirse paneli tekrarla. Kullanıcı ikinci tura
@@ -87,7 +92,8 @@ korur:
   geçirir.
 
 İkisi kullanıcının gördüğünde ayrışıyorsa karar **ürün kararıdır** ve adım
-7'de kullanıcıya gider; yalnız kod biçiminde ayrışıyorsa senin. Ölçüt tek
+7'de kullanıcıya gider; yalnız kod biçiminde ayrışıyorsa senin — kullanıcıya
+sorulmaz, gerekçesiyle `## Karar`'a yazılır. Ölçüt tek
 soru: *kullanıcı bu iki sonucu birbirinden ayırt eder mi?*
 
 **Boşlukta kullanıcı tarafı seçilir.** Hangi yetkiye ait olduğu belirsizse,
@@ -112,12 +118,20 @@ kılıyor. Yazmadan önce sor: *bugünkü aritmetikle* mi zorunda, gerçekten mi
 > ("phase'e geç") yerine de karar kaydının yazılmış olması geçer: karar
 > panelden geçmiş öneridir. Kaydın kendisi atlanmaz; damga biçimi şablondadır.
 
-discussion.md varsa: seçenekleri özetle, panel koştuysa mercek verdiktlerini
-(`TEMİZ`/`SORUNLU`/`KIRMIZI`) ve öneriye işlenen revizyonları birlikte sun,
-kendi önerini belirt, kararı bekle. Kullanıcı panelde hiç değerlendirilmemiş
+**Kullanıcıya yalnız ürün kararı sorulur** — sonucu ekranda, klavyede ya da
+ayar dosyasında ayrışan seçim. Teknik seçimi (hangi sayaç, hangi yapı, hangi
+kilit) sen verirsin ve gerekçesiyle `## Karar`'a yazarsın; kullanıcı onu
+değerlendiremez ve sormak kararı ona yıkmaktır (025'te `^A` sorusu böyle
+geldi, cevap "bilmiyorum" oldu). Belirsizse **kullanıcının göreceği sonucu**
+sade dille, örnekle sor — mekanizmayı değil.
+
+discussion.md varsa: kararı ve varsa ürün sorusunu özetle, panel koştuysa
+verdiktleri tek satırda ver. Kullanıcı panelde hiç değerlendirilmemiş
 bambaşka bir yön seçerse paneli o yön için tekrarlamayı öner.
 
 discussion.md yoksa: context.md'yi özetle, önerilen yaklaşımı belirt, onay bekle.
+Onay **planın** onayıdır (ne yapılacak, ne kapsam dışı), teknik ayrıntının
+değil.
 
 **Karar netleşince discussion.md `## Karar` bölümüne işle** (tarih + gerekçe +
 reddedilenler). Chat'te verilip dosyaya düşmeyen karar kaybolur.
@@ -125,7 +139,8 @@ reddedilenler). Chat'te verilip dosyaya düşmeyen karar kaybolur.
 ## 8. plan.md
 
 Onaydan sonra yaz. Yalnız onaylanan yaklaşımı içerir; gerekçe tartışmasını
-tekrarlamaz. plan.md setin **omurgasıdır** ve çift rol taşır: onaylı tasarım
+tekrarlamaz. Tek phase'li sette Yaklaşım, Akış ve gereksinim numaraları
+yazılmaz (`duzen.md` → Tek phase'li set). plan.md setin **omurgasıdır** ve çift rol taşır: onaylı tasarım
 (statik) + ilerleme defteri (`## Durum`, `/implement` günceller).
 
 ## 9. Phase dosyaları
@@ -145,11 +160,13 @@ ara durum bırakan bölme yanlıştır — ya birleştir ya da sınırı kaydır
 tek commit'lik düzeltme phase olmaz (`duzen.md` → Ek phase eşiği).
 
 Riskli phase kutusunu (`proje.md` → Kalite kapısı) yalnız koşulu tetikleyecek
-phase'e koy; set sonundaki kapı `plan.md → ## Durum`'un `kapı` satırıdır,
-phase checklist'lerine yazılmaz.
+phase'e koy — **son phase hariç**: orada set kapısı onu kapsıyor. Set
+sonundaki kapı `plan.md → ## Durum`'un `kapı` satırıdır, phase
+checklist'lerine yazılmaz.
 
-Her phase'in `_Requirements:_` satırı plan.md'deki gereksinimlere bağlanır;
-`/implement` ön uçuşta kapsanmayan gereksinim / öksüz phase arar.
+Çok phase'li sette her phase'in `_Requirements:_` satırı plan.md'deki
+gereksinimlere bağlanır; `/implement` ön uçuşta kapsanmayan gereksinim / öksüz
+phase arar. Tek phase'li sette satır yazılmaz.
 
 Kare, gecikme ya da bellek iddiası phase'e **yazılmaz** (`proje.md` →
 Doğrulama): ölçülmemiş sayı yasak, "ölçüm bekliyor" kalemi de yok.

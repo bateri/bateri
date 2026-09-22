@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Değişiklikleri doğrulayıp commit'ler ve uzak depoya gönderir; biten iş setlerinin .tasks indeks satırını push'tan önce aynı commit'te 🟢 yapar. Kullanıcı "push et", "teslim et", "gönder", "commit'le ve yolla" dediğinde kullanılır.
+description: Değişiklikleri doğrulayıp commit'ler ve uzak depoya gönderir; 🟢'yi /implement koyar, /ship yalnız eksikse tamamlar. Kullanıcı "push et", "teslim et", "gönder", "commit'le ve yolla" dediğinde kullanılır.
 allowed-tools: Read, Edit, Glob, Grep, Bash(make:*), Bash(cargo:*), Bash(git:*)
 ---
 
@@ -26,8 +26,8 @@ neyin kırıldığını çıktıyla göster ve dur.
 değiştiyse** (`.tasks/`, `docs/`, `CLAUDE.md`) kapıyı yeniden koşma; son
 koşunun sonucunu kanıt olarak an. `crates/`, `assets/`, `Makefile`,
 `Cargo.*` değiştiyse ya da rebase olduysa koş. Gerekçe: `/implement` kapıyı
-phase commit'inden hemen önce koşuyor ve arada yalnız defter commit'i
-kalıyor; aynı sonucu bir buçuk dakikaya ikinci kez almak doğrulama değil
+son phase'in commit'inden hemen önce koşuyor ve o commit'ten sonra kod
+değişmiyor; aynı sonucu bir buçuk dakikaya ikinci kez almak doğrulama değil
 tekrar (025'te kullanıcı sordu).
 
 Koşullu komutları da burada uygula: `.metal` değiştiyse `make shader`,
@@ -62,16 +62,16 @@ ekran kaydı) görürsen **uyar ve devam etme**. Commit'lemek yerine
 
 ## 4. İndeks ve commit
 
-Adım 2'de bulunan, bütün phase'leri ✅ ve `kapı` satırı kapalı her set için
-`.tasks/README.md` satırını **🟢** yap; not tek cümle kalır (`duzen.md` →
-İndeks). Bu değişiklik push'tan **önce**, gidecek commit'e girer; push'tan
-sonra ayrı bir damga commit'i atılmaz. Bekleyen ölçüm ya da ürün kararı 🟢'yi
-ertelemez — onların yeri `docs/OLCUMLER.md` ve yol haritası.
+🟢'yi `/implement` son phase'in commit'inde koyuyor (`duzen.md` → İndeks);
+burada yalnız **kontrol** edilir. Adım 2'de bulunan, bütün phase'leri ✅ ve
+`kapı` satırı kapalı bir set hâlâ 🔨 ise (eski akışla kapanmış set, elle
+düzeltilmiş kapı) satırı 🟢 yap; bu tek istisna gidecek commit'e girer.
+Bekleyen ölçüm ya da ürün kararı 🟢'yi ertelemez — onların yeri
+`docs/OLCUMLER.md` ve yol haritası.
 
-Sonra commit: çalışma ağacı temizse (defter değişmediyse) atla — boş commit
-üretme. Değilse `proje.md`'deki kurala göre mesaj yaz (Türkçe, emir kipinde,
-tek satırlık özet). Push reddedilirse damga commit'i de onunla birlikte bekler;
-ayrı düzeltme gerekmez.
+Sonra commit: çalışma ağacı temizse atla — boş commit üretme. Olağan akışta
+ağaç temizdir ve `/ship` hiç commit atmaz, yalnız gönderir. Değilse `proje.md`'deki kurala göre mesaj yaz (Türkçe, emir kipinde,
+tek satırlık özet).
 
 `$ARGUMENTS` gerçek bir commit konusu gibi görünüyorsa (anlamlı bir cümle/öbek)
 onu kullan. Kısa bir onay sözcüğüyse ("yap", "go", "tamam") "kullanıcı onayladı,

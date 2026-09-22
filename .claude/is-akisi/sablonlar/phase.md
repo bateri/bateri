@@ -9,6 +9,7 @@
 
 {Bu fazda ne yapılacak — tek cümle}
 
+<!-- Yalnız çok phase'li sette; tek phase'li sette bu satırı sil. -->
 _Requirements: R1, R2.1_
 
 ## Değişiklikler
@@ -29,7 +30,8 @@ _Requirements: R1, R2.1_
 
 <!-- [x] yapıldı · [~] waive/atlandı (yanına gerekçe) · [ ] yapılmadı.
      Kutular silinmez. Riskli phase kutusu yalnız proje.md → Kalite kapısı →
-     "Riskli phase" koşulu tetiklenirse kalır; tetiklenmiyorsa üretirken sil. -->
+     "Riskli phase" koşulu tetiklenirse kalır; tetiklenmiyorsa ya da bu SON
+     phase'se (set kapısı onu kapsıyor) üretirken sil. -->
 
 - [ ] {Yapılacak iş}
 - [ ] Test: {test senaryosu}

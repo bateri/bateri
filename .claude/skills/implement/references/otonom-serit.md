@@ -6,7 +6,7 @@ katmanlaması).
 
 ## Ajan kuralları — her subagent isteminde
 
-Bu kurallar implementer'ın, kapı ajanının ve kapanış ajanının isteminde
+Bu kurallar implementer'ın ve kapanış ajanının isteminde
 **her seferinde** yazılır; subagent bu dosyayı okumaz, istemi okur.
 
 - **Boşta bekleme yok.** `sleep`, `until [ -f … ]`, `while …; sleep` ve
@@ -75,7 +75,7 @@ değil** (`plan.md` + o phase dosyası) ve istemine ajan kurallarını yaz.
 
 İmplementer kodu yazar, doğrulamayı koşar (`proje.md` → Doğrulama) ve phase'i
 **tek commit**'le kapatır: kod + checklist + `## Durum` ✅. Phase riskliyse
-(`proje.md` → Kalite kapısı) `/code-review`'u da o koşturur ve doğrulamayı
+(`proje.md` → Kalite kapısı; son phase hariç, orada set kapısı koşar — §5) `/code-review`'u da o koşturur ve doğrulamayı
 **kapıdan sonra yeniden** koşar — kapı kodu değiştirir, önceki yeşil geçersizdir.
 
 Devredilmeyen tek şey **bulgu kararıdır**: implementer gideremediği bulguyu
@@ -119,15 +119,18 @@ Kontrol raporun alanlarından ve tek bir `--stat`'tan okunur. Ayrı bir sadakat
 kontrolü (commit'in dosya listesini checklist'le karşılaştırmak) 001–006'da
 17 phase'de 17 kez "makas yok" döndü ve kendi kuralı gereği kaldırıldı.
 
-### 5. Set kapısı (kapanışta, bir kez)
+### 5. Set kapısı (son phase'in içinde, bir kez)
 
-Son phase'den sonra **tek bir kapı ajanı** başlat: `proje.md` → Kalite kapısı → "Set sonunda" adımlarını koşar
-(aralık `duzen.md` → Set aralığı), bulguları giderir, `make hepsi`'yi yeniden
-koşar, tek commit atar (düzeltme + `## Durum`'un `kapı` satırı ✅ + indeks
-notu; düzeltme yoksa yalnız son ikisi) ve raporunun `SAPMA` satırına gözle
-kontrol sahnesini yazar. Rapor biçimi §3'tür (`KAPI:` satırı
-`/code-review · /audit → koştu`). Bulgu gövdesi orkestratöre girmez; `WAIVE`
-kararı orkestratörde kalır.
+Ayrı kapı ajanı yok. **Son phase'in implementer'ı** kodu doğruladıktan sonra,
+commit'ten önce `proje.md` → Kalite kapısı → "Set sonunda" adımlarını koşar
+(aralık `duzen.md` → Set aralığı + çalışma ağacı), bulguları giderir,
+doğrulamayı yeniden koşar ve phase'i **tek commit**'le kapatır: kod + kapı
+düzeltmeleri + `## Durum`'da phase ✅ ve `kapı` ✅ + indeks 🟢. Raporunun
+`SAPMA` satırına gözle kontrol sahnesini yazar; `KAPI:` satırı
+`/code-review · /audit → koştu`. Bu phase'in riskli phase kapısı ayrıca
+koşmaz — set kapısının `/code-review`'u onu kapsıyor. Bulgu gövdesi
+orkestratöre girmez; `WAIVE` kararı orkestratörde kalır — reddedilirse
+düzeltme ayrı bir commit olur (tek istisna).
 
 ### Eskalasyon — şunlarda DUR ve sor, tahmin etme
 
@@ -162,5 +165,5 @@ model dar bağlamda düşünsün.* Tek-oy karar noktaları güçlü kalır. Agen
 | `/plan-review` jürileri | `opus` | mercek başına tek ses |
 | `/audit` yargı mercekleri (fan-out olursa) | `opus` | dosyalar arası akıl yürütme |
 | `/akis` — `/rfc` ajanı | `opus` | tasarım kararı üretir |
-| Otonom şerit — implementer, set kapısı ajanı | `opus` | kodlar, kapıyı koşturur |
+| Otonom şerit — implementer (son phase'de set kapısı dahil) | `opus` | kodlar, kapıyı koşturur |
 | Sentez, bulgu değerlendirme, "hangi sapma kabul" | ana döngü | devredilmez |

@@ -107,6 +107,6 @@ bekle.
 
 ## Devir
 
-Kapanışta: set yolu, phase commit'leri, kayda değer sapmalar, waive'ler ve
-gözle kontrol satırı. Net yönlendirme: **"Teslim için `/ship {NNN-slug}`
+Kapanışta: set yolu, phase commit'leri (sonuncusu kapıyı ve 🟢'yi taşır),
+kayda değer sapmalar, waive'ler ve gözle kontrol satırı. Net yönlendirme: **"Teslim için `/ship {NNN-slug}`
 çalıştır; sonraki iş için `/clear`"** — akış push etmez.

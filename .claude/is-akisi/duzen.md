@@ -60,6 +60,15 @@ sahibi orasıdır; skill'ler şablonu gövdelerine kopyalamaz, oradan okur.
 bırakılmaz**. Boş bırakılan bölüm de silinir — doldurulmamış başlık, okuyucuya
 "burada bir şey yok" değil "burası unutulmuş" der.
 
+### Tek phase'li set
+
+Set tek phase'se `plan.md` yalnız **Hedef**, **Gereksinimler** (numarasız
+madde listesi), **Kapsam Dışı** ve **Durum** taşır; **Yaklaşım** ve **Akış**
+yazılmaz, çünkü `phase-1.md`'nin "Değişiklikler"i onların ta kendisi ve iki
+yerde durunca biri eskir. `R1.1` numaralandırması ve phase'in
+`_Requirements:_` satırı da yazılmaz: tek phase her gereksinimi kapsar ve
+`/implement`'in kapsama kontrolü orada hiçbir şey bulamaz.
+
 ### Phase numaraları
 
 Phase'ler tamsayı olmak zorunda değil: `phase-0`, `phase-1`, `phase-1b`,
@@ -95,14 +104,19 @@ Tablo diskte yaşadığı için oturum geçmişine ihtiyaç yoktur: `/clear` son
 
 ### Set aralığı
 
-Set sonundaki `/code-review` setin bütün commit'lerine bakar. Aralığın başı
-`.tasks/{NNN-slug}/`'a dokunan **ilk** commit'tir (set koddan önce
-commit'lendiyse o, değilse ilk phase'in commit'i):
+Set sonundaki `/code-review` setin bütün commit'lerine **ve** henüz
+commit'lenmemiş son phase'e bakar (kapı o commit'ten önce koşar, `proje.md`
+→ Kalite kapısı). Aralığın başı `.tasks/{NNN-slug}/`'a dokunan **ilk**
+commit'tir (set koddan önce commit'lendiyse o, değilse ilk phase'in
+commit'i); sonu çalışma ağacı:
 
 ```sh
 first=$(git log --reverse --format=%h -- .tasks/{NNN-slug} | head -1)
-git diff --stat "$first^" HEAD
+git diff --stat "$first^"
 ```
+
+Set henüz hiç commit'lenmediyse (tek phase, set dosyaları da çalışma
+ağacında) aralık `git diff HEAD` + izlenmeyen dosyalardır.
 
 ## İndeks
 
@@ -122,14 +136,17 @@ listesi `git log --grep`'tedir, tarihçe phase'lerin Uygulama Notları'nda.
 İlk iş eklenirken tablodaki `henüz iş açılmadı` yer tutucu satırı silinir.
 
 Durum işaretleri: **📐 planlama** (plan var, kod yok) · **🔨 devam** (phase'ler
-işleniyor) · **🟢 bitti** (kod `main`'de, `make hepsi` yeşil, `## Durum`'un
+işleniyor) · **🟢 bitti** (kod yerel `main` dalında commit'li, `make hepsi` yeşil, `## Durum`'un
 `kapı` satırı ✅ ya da gerekçeli `[~]`) · **🗄️ arşiv** (yerini başka iş aldı
 ya da iptal edildi). 🟢 **bekleyen ölçüm ya da manuel adımla ertelenmez**:
 ölçüm iddiası `docs/OLCUMLER.md`'nin, ürün kararı yol haritasının konusudur,
 setin durumu değil.
 
 İndeks bakımı komutlara gömülüdür: `/rfc` işi 📐 olarak ekler, `/implement`
-🔨 yapar, `/ship` 🟢 yapar. Atlanırsa indeks drift'e düşer.
+ilk phase'in commit'inde 🔨, son phase'in commit'inde (set kapısıyla birlikte)
+🟢 yapar. 🟢'nin anlamındaki "kod `main`'de" **yerel** `main` dalıdır; push
+`/ship`'in kararı ve durum değil. `/ship` 🟢'yi yalnız eksikse tamamlar.
+Atlanırsa indeks drift'e düşer.
 
 ## Arşiv
 

@@ -11,8 +11,8 @@ Dört skill, tek zincir:
 |---|---|---|
 | `/rfc` | planlama seti üretir (`.tasks/NNN-slug/`) | kod yazmaz |
 | `/plan-review` | tasarımı 3 mercekli jüriyle sınar — **yalnız pahalı kararda** (`/rfc` adım 6) | plan değiştirmez, önerir |
-| `/implement` | phase başına kodlar, doğrular, tek commit atar; set sonunda kalite kapısını koşar | push etmez |
-| `/ship` | doğrular, commit'ler, indeksi 🟢 yapar, `main`'e gönderir | set defteri tutmaz |
+| `/implement` | phase başına kodlar, doğrular, tek commit atar; set kapısını son phase'in commit'inden önce koşar ve 🟢'yi o commit'e koyar | push etmez |
+| `/ship` | doğrular (kod değişmediyse son yeşil koşuyu kullanır), gönderir; 🟢'yi yalnız eksikse tamamlar | set defteri tutmaz |
 
 Zinciri baştan sona koşturan bir sürücü vardır ve kendisi iş yapmaz:
 
@@ -77,6 +77,23 @@ daraltma; yeni kapı, defter ya da ajan yok.
 | `/implement` 0.5 muhakeme nag'i, adım 9 eksik-checklist kapısı, `/ship` adım 7 kalan dilim | yok | panel isteğe bağlıyken nag gürültü; waive sayımı hiç kod okumadı; kalan dilim teslim.md'nin adımlarıydı | `implement`, `ship` |
 | phase hedefi 3–5 KB | cümle kalktı | 65 phase'in 59'u aştı (ort. 9,1 KB): ölü kural | `sablonlar/phase.md`, `rfc` adım 9 |
 | gözle kontrol adsız | set kapısının 4. adımı: devir mesajında tek satır "neye bakılır" | 017'de üç kapı koştu, teslimden sonra beş kusuru kullanıcının gözü buldu — ürünü sınayan adım süreçte adsızdı; bu bir defter satırı değil, 🟢'yi bekletmez | `proje.md` → Kalite kapısı |
+
+## Üçüncü tur (2026-09-23)
+
+025 tek phase'li bir setti ve süreç onun etrafında yedi commit, beş yere
+kopyalanmış bir sınır listesi ve koddan büyük bir belge üretti (706'ya 426
+satır). Kullanıcı sordu; her satır yine bir çıkarma.
+
+| ne vardı | ne oldu | neden | sahibi |
+|---|---|---|---|
+| `/ship` kapıyı "her zaman" koşar | aynı oturumda yeşil koştuysa ve arada yalnız belge değiştiyse koşmaz | kapı-defteri commit'inden sonra aynı sonuç bir buçuk dakikaya ikinci kez alındı | `ship` adım 1 |
+| set kapısı son phase'den **sonra**, ayrı `{set} kapı` commit'i; 🟢 `/ship`'in ayrı commit'i | kapı son phase'in commit'inden **önce**; düzeltme, `kapı` ✅ ve 🟢 o commit'e girer | bir kod commit'inin etrafında altı defter commit'i | `proje.md` → Kalite kapısı, `implement` adım 6/8, `duzen.md` → İndeks |
+| son phase'de riskli phase `/code-review`'u + set `/code-review`'u | yalnız set kapısı | aynı diff iki kez incelendi | `proje.md`, `otonom-serit.md` §5 |
+| tek phase'li sette `plan.md` Yaklaşım/Akış + `R1.1` numaraları + `_Requirements:_` | yok; `phase-1.md` taşır | kapsama kontrolü tek phase'te hiçbir şey bulamaz; iki kopya biri eskir | `duzen.md` → Tek phase'li set |
+| yol haritası açılmamış işlere numara verir | numara set açılınca | araya giren her set kaydırıyordu: on beş kayma notu | `docs/YOL-HARITASI.md` başı, `rfc` adım 3 |
+| `/rfc` adım 7 her kararı kullanıcıya sorar | yalnız ürün kararı; teknik karar gerekçesiyle `## Karar`'a | kullanıcı teknik seçimi değerlendiremiyor ("bilmiyorum") | `rfc` adım 7, `plan-review` adım 4 |
+| panel sınıfı konu adıyla ("shell entegrasyonu") | değişecek dosyayla (`assets/shell/`) | 025 betiğe dokunmadan panel açtı | `rfc` adım 6 |
+| aynı bilgi birden çok set dosyasında ve `CLAUDE.md`'de | her bilgi tek yerde; `CLAUDE.md` kural + tek cümle + işaretçi | `CLAUDE.md` her oturumda okunuyor ve her set bir paragraf ekliyordu | `proje.md` → Teslim |
 
 ## Düzen
 

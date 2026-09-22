@@ -57,12 +57,18 @@ değişti. Bu üçünde hata sessizdir ve sonraki phase'ler onun üstüne kurulu
 geri kalan her şey set sonunu bekler. Liste doğrulama tablosundan türer, ayrı
 tutulmaz.
 
-**Set sonunda — bir kez** (son phase'den sonra):
+**Set sonunda — bir kez**, son phase'in kodu doğrulandıktan sonra ve **o
+phase'in commit'inden önce**; düzeltmeler, `kapı` ✅ ve indeksin 🟢'si son
+phase'in commit'ine girer. Ayrı kapı ya da damga commit'i yok: 025'te tek bir
+kod commit'inin etrafında altı defter commit'i birikti.
 
-1. `/code-review` — setin commit aralığı (`duzen.md` → Set aralığı).
+1. `/code-review` — setin commit aralığı + çalışma ağacı (`duzen.md` → Set
+   aralığı). Son phase'in riskli phase incelemesi ayrıca koşmaz: bu
+   inceleme onu kapsıyor ve aynı diff'i iki kez incelemek 025'te iki kez
+   aynı sonucu verdi.
 2. `/audit` — `make denetim`'in kapsamadığı mercekler, yalnız ilgili dosya
    değiştiyse.
-3. Bulgu düzeltildiyse `make hepsi` yeniden ve **tek** düzeltme commit'i.
+3. Bulgu düzeltildiyse `make hepsi` yeniden.
 4. **Gözle kontrol** — pencereyi açan davranış değiştiyse kapanış mesajı
    kullanıcıya **neye bakacağını** tek satırla söyler (sahne + beklenen
    görüntü). Kapı koda bakar, kullanıcı ekrana: 017'de üç kapı da koştu ve
@@ -109,11 +115,24 @@ Tek branch: `main`. Dev branch, migration, container, panel yok.
 
 - Commit iletisi **Türkçe, emir kipinde, tek satırlık özet**
   ("Glyph atlasını tek dokuya topla ve tahliyeyi ölç"). Set commit'inde
-  gövdenin ilk satırı `{NNN-slug} phase-{N}` (set kapısında `{NNN-slug} kapı`):
-  hash dosyaya yazılmaz, phase'in commit'i `git log --grep` ile bu satırdan
+  gövdenin ilk satırı `{NNN-slug} phase-{N}` (set kapısı son phase'in
+  commit'ine girdiği için ayrı bir `kapı` satırı yok; tek istisna kesilmiş bir
+  akışın ya da reddedilen bir waive'in sonradan düzeltmesi, o `{NNN-slug}
+  kapı`): hash dosyaya yazılmaz, phase'in commit'i `git log --grep` ile bu satırdan
   bulunur.
 - **Phase = tek commit:** kod, phase checklist'i, `plan.md ## Durum` ✅ ve
-  (ilk phase'de) indeksin 🔨'ü birlikte girer. Defter için ayrı commit atılmaz.
+  (ilk phase'de) indeksin 🔨'ü birlikte girer; **son phase'de** set kapısının
+  düzeltmeleri, `kapı` ✅ ve indeksin 🟢'si de. Defter için ayrı commit
+  atılmaz.
+- **Her bilgi tek yerde.** Set dosyalarının rolleri ayrık: `discussion.md`
+  kararı ve gerekçesini, `plan.md` hedefi ve kapsamı, `phase-{N}.md` hangi
+  dosyada ne değişeceğini, kod yorumu yerel "neden"i taşır. Aynı paragraf
+  ikinci bir dosyaya kopyalanmaz, işaretçiyle bağlanır. `CLAUDE.md` **bugünkü
+  sözleşmedir** ve her oturumun başında baştan sona okunur: yeni bir kural
+  oraya kural + tek cümle gerekçe + işaretçi olarak girer; tarihçe, ölçüm
+  anlatısı, reddedilen seçenekler ve bilinen sınır listeleri `.tasks/`'ta
+  kalır. 025 aynı sınır listesini beş dosyaya yazdı ve belgesi kodundan
+  büyük çıktı (706'ya 426 satır).
 - **Set defteri yok.** Bir dönem `teslim.md` vardı (doğrulama + yayın
   checklist'i + geri alma); 21 sette 21 kez "revert et" dedi, 61 manuel adım
   biriktirdi ve 007'den sonraki 207 commit'in 71'i yalnız defter oldu.

@@ -959,6 +959,12 @@ kurulmaması bir kod kısıtından *karar* diye türetildi ve kullanıcının ya
 emoji kutu çıktı). Bir kısıtı "yapısal olarak zorunda" diye yazmak o seçimi
 görünmez kılar; ölçüt "bugünkü aritmetikle mi, gerçekten mi".
 
+**Bu dosya bugünkü sözleşmedir, tarihçe değil.** Yeni bir kural buraya kural +
+tek cümle gerekçe + işaretçi olarak girer; ölçüm anlatısı, reddedilen
+seçenekler ve bilinen sınır listeleri setin dosyalarında kalır (`proje.md` →
+Teslim → Her bilgi tek yerde). Dosya her oturumun başında baştan sona
+okunuyor ve her set ona bir paragraf ekliyordu.
+
 Hangi işin **neden o sırada** olduğu `docs/YOL-HARITASI.md`'dedir; henüz
 açılmamış setlerin sırası ve bağımlılıkları oraya yazılır. **Durumu** o dosya
 tutmaz — tek sahibi `.tasks/README.md` indeksidir, iki yerde durum tutmak
