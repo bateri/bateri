@@ -125,3 +125,37 @@ fragment float4 cell_fragment(Out in [[stage_in]],
     // Ön çarpımsız: blend src_alpha/one_minus_src_alpha ile eşleşiyor.
     return float4(rgb, in.rgba.a * coverage);
 }
+
+// **Emoji: renkli düzlemin kardeş fragment'i.** `cell_vertex`'i AYNEN
+// paylaşıyor (015'in `caret_fragment`'i `cell_bg_vertex`'i böyle paylaşıyor):
+// ayrılan yalnız fragment, çünkü geometri birebir aynı — tam bir hücrelik
+// dörtlü, aynı `cell_px` ve `uv_size` uniform'ları, aynı 32 baytlık
+// `GlyphInstance`.
+//
+// Doku `RGBA8Unorm_sRGB`: donanım örneklerken sRGB'yi ÇÖZÜYOR, yani buradaki
+// değer lineer ve hedefin (`BGRA8Unorm_sRGB`) beklediği uzayda. Düz
+// `RGBA8Unorm` bir doku bu satırı sessizce yanlışlardı — palet açardı ve
+// tanığı ancak ARA TONLU bir piksel görür (`0.0` ve `1.0` transfer
+// fonksiyonunun sabit noktaları).
+//
+// Baytlar ÖN ÇARPIMLI (CoreGraphics `PremultipliedLast` veriyor), yani bu
+// pipeline'ın blend'inde RGB kaynak çarpanı `One`. Maske yolunun `SourceAlpha`
+// çarpanıyla çizilseydi renk kendi alfasıyla iki kez çarpılır ve kenarda koyu
+// bir halka kalırdı.
+fragment float4 emoji_fragment(Out in [[stage_in]],
+                               texture2d<float> atlas [[texture(0)]]) {
+    // `nearest`: maske yolununkiyle aynı gerekçe (yuvalar arasında pay yok ve
+    // `linear`'ın son sütunu komşu yuvayı karıştırır).
+    constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
+    // `in.rgba` OKUNMUYOR ve okunmamalı: renk dokudan geliyor, instance'tan
+    // değil. Ön planla çarpmak emojiyi metnin rengine boyardı — maske
+    // yolunun tam tersi olan şey bu setin varlık sebebi.
+    //
+    // İmleç uniform'u da OKUNMUYOR: `cell_fragment`'in `mix`'i altındaki
+    // harfi imlecin metin rengine çeviriyor ve o karar bir PALET kararı
+    // (`bt_core::Cursor::text`). Emojinin rengi paletten gelmiyor, yani
+    // "imlecin altındaki emoji ne renk" sorusunun temadan bir cevabı yok.
+    // Sonuç: blok imleç emojinin mürekkebinin altında kalıyor ve caret onun
+    // çevresinde bir halka olarak görünüyor. Kabul edilen davranış.
+    return atlas.sample(s, in.uv);
+}

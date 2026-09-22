@@ -255,6 +255,18 @@ impl Metrics {
         w * h
     }
 
+    /// Renk düzleminin tek yuvası (`RGBA8`: piksel başına **dört** bayt).
+    ///
+    /// Aynı yuva geometrisi, başka format — ve tek sahip kuralı bozulmuyor:
+    /// ikisi de [`Metrics::cell_wh`]'den türüyor, yani kenar payı ya da
+    /// hizalama dolgusu bir gün girerse düzeltilecek yer hâlâ tek. Sayıyı
+    /// `slot_bytes() * 4` diye yazmak da olurdu; ayrı bir isim, tamponu
+    /// kuranın hangi düzlemde olduğunu **söylemesini** zorunlu kılıyor ve
+    /// `raster::draw`'un assert'i yanlış düzlemi yakalıyor.
+    pub fn slot_bytes_rgba(self) -> usize {
+        self.slot_bytes() * 4
+    }
+
     /// Hücre ölçüsü `usize` olarak — indeksleme ve döngü sınırı için.
     ///
     /// [`Metrics::slot_bytes`] ile aynı gerekçe: açımı dörde dağıtmak yerine
@@ -648,6 +660,21 @@ pub(crate) fn fallback_font(
         });
     }
     None
+}
+
+/// Fontun glyph'leri **renkli** mi.
+///
+/// Ölçüt fontun kendi trait biti (`kCTFontTraitColorGlyphs`), aile adı
+/// **değil**: `CLAUDE.md`'nin mürekkep kapısı için yazdığı kural ("aile adı
+/// karşılaştırması, trait biti ve sihirli dizge yok") o kapının ölçütü
+/// hakkında ve burada konu başka — "bu glyph hangi düzleme rasterize
+/// edilecek" sorusunun cevabı fontun gerçek bir özelliği. Apple Color
+/// Emoji'yi adıyla aramak, aynı işi yapan başka bir renkli fontu (kullanıcının
+/// kurduğu bir Nerd Font emoji seti) sessizce maske düzlemine düşürürdü.
+pub(crate) fn has_color_glyphs(font: &CTFont) -> bool {
+    // SAFETY: `font` çağrı boyunca canlı; dönüş bir bit kümesi.
+    let traits = unsafe { font.symbolic_traits() };
+    traits.contains(CTFontSymbolicTraits::TraitColorGlyphs)
 }
 
 /// Kabul edilen aday ve **kaç hücreye** sığdığı.

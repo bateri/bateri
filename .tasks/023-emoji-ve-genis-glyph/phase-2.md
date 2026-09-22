@@ -63,18 +63,76 @@ _Requirements: R5, R5.1, R5.2, R5.3, R5.4, R6, R6.1, R6.2, R7.2, R8_
 - `hucre=`/`glif=`/`kural=` sayaçları oynamıyor, `yuva2=` basılıyor.
 - `make shader` yeşil, `make hepsi` yeşil, `make duman` yeşil.
 
+## Uygulama Notları
+
+- **Düzlem kararı fontun trait bitinden** (`kCTFontTraitColorGlyphs`), aile
+  adından değil. Plan "renkli bitmap" diyordu ama ölçütü söylemiyordu; aile
+  adını aramak kullanıcının kurduğu başka bir renkli fontu sessizce maske
+  düzlemine düşürürdü.
+- **Renk dokusu `slot_uv`'nin içinde, yükleme anında kuruluyor.** İlk yazım
+  `prepare`'in başında bir ön kontrol denedi ("bu karede renkli glyph var
+  mı") ve o kontrol cascade'i **ikinci kez** yürümeyi gerektiriyordu. Bir
+  kare sonra kurmak da olmuyor: yuva yazılmadan önbelleğe girer ve emoji
+  **kalıcı olarak** görünmez kalır. Çare `ColourPlane` tipi — doku yuvası +
+  device + kenar, tek argümanda (`slot_uv` yine clippy'nin sınırında).
+- **Kapasite kapısı iki kez soruluyor.** Yukarıdaki `need` kapısı maskenin
+  sayacına bakıyor, çünkü düzlem ancak çizim sırasında biliniyor; tahsisten
+  hemen önce düzlemin kendi sayacı **yeniden** soruluyor. İkisi yalnız bir
+  hâlde ayrışıyor (maskede yer var, renk düzlemi dolu) ve o hâlde bedel
+  önbelleğe girmeyen renkli karakter başına kare başına bir rasterizasyon —
+  ölçülmedi, kabul edildi ve koda yazıldı. Alternatifleri iki düzlemi tek
+  havuza bağlamak (emoji-ağır oturum harfleri tofu'ya düşürürdü) ya
+  `fallback_font`'u ikiye bölmekti.
+- **`pipeline()` parametresini geri aldı** (008 phase-5 onu "tek değere
+  düşünce" atmıştı) ve fonksiyonun doc'undaki "blend parametre değil" cümlesi
+  daraldı: blend'in **üç** çarpanı parametre değil, dördüncüsü (RGB kaynağı)
+  fragment'in ön çarpım sözleşmesinden türüyor.
+- **Maske listesi boş olabiliyor.** Yalnız emoji taşıyan bir kare mümkün
+  (`glyphs` dolu, hepsi renk düzlemine gitti) ve `encode_glyphs`'in baştaki
+  kapısı `GlyphCell`'leri sayıyor, düzleme ayrılmış instance'ları değil —
+  sıfır uzunluklu bir `newBufferWithBytes` doğuyordu. İkinci bir kapı
+  eklendi.
+- **Ön çarpım tanığının eşiği gevşek.** Aranan şey kararmanın **yokluğu**,
+  kesin bir bayt değil: lineer uzayda iki kez çarpım dörtte bire iner ve
+  eşik onu rahatça yakalıyor. Kesin bayt istemek sınamayı sürücünün sRGB
+  yuvarlamasına rehin ederdi.
+- **Kapı beş bulgu verdi, dördü gerçek kusurdu ve düzeltildi.** (1) `sync_atlas`
+  atlası yeniden kurarken maske dokusunu düşürüyordu, **renk dokusunu
+  düşürmüyordu**: Cmd+ ile punto büyüyünce doku kenarı değişiyor ve eski
+  kenarda kalan renk dokusuna yeni ızgaranın köşeleriyle yazmak
+  `replaceRegion`'ı dokunun dışına taşırıyordu (bekçisi
+  `rebuilding_the_atlas_drops_both_textures`). (2) Negatif önbellek tahliyesi
+  yuva **numarasına** bakıyordu ve renk sayacı 0'dan başladığı için ilk
+  emojinin pozitif kaydını da atıyordu — ölçüt kaydın tamamı oldu.
+  (3) Çizimden önceki kapasite kapısı yalnız maskenin sayacına bakıyordu ve bu
+  `colour_next`'in yazılı sözünü ("CJK-ağır oturum emojiyi tofu'ya düşürmez")
+  **çürütüyordu**; ölçüt iki düzlemin boşta olanı (`min`) oldu, yani kapı
+  ancak ikisi de doluyken kapanıyor. (4) `a_colour_glyph_goes_to_the_colour_list`'in
+  kaçış dalı ("renkli font kurulu değil") tam da `has_color_glyphs`'in
+  regresyon hâliyle aynı görünüyordu — dal artık maske düzleminin yalnız
+  tofu tuttuğunu sınıyor. Beşincisi belge sapmasıydı ve `CLAUDE.md`'nin kendi
+  kuralı ("bir cümle kodla çelişirse ikisinden biri **aynı commit'te**
+  düzelir") gereği phase-3'ten **bu commit'e alındı**: pipeline sayısı,
+  iki düzlemin dokuları, emoji paragrafının tamamı ve jeton sözleşmesi
+  (`CLAUDE.md` + `Makefile`). Phase-3'e kalan `docs/OLCUMLER.md` envanteri ve
+  yol haritasının borç kalemleri.
+- **Release profilinde `bt-shell`'in beş sınaması düşüyor ve bu `main`'de de
+  böyle** (`git stash` ile doğrulandı): sarmalayıcı betiği depo kolunda
+  `target/debug` üzerinden aranıyor. Kapının profili debug, yani bu setin
+  konusu değil — ama yol haritasına yazılacak bir kalem.
+
 ## Checklist
 
-- [ ] `Atlas` içinde ikinci düzlem, kendi monoton `next`'i, format-duyarlı
+- [x] `Atlas` içinde ikinci düzlem, kendi monoton `next`'i, format-duyarlı
       `slot_bytes`
-- [ ] İkinci CG reçetesi (ön çarpımlı RGBA + renk uzayı)
-- [ ] Kardeş fragment, `cell_vertex` paylaşımı, stride 32 korunuyor
-- [ ] Doku `RGBA8Unorm_sRGB`, `upload_slot` `bytesPerRow`-duyarlı
-- [ ] Blend RGB kaynağı `One`; `pipeline()`'ın parametresi ve 008 phase-5'in
+- [x] İkinci CG reçetesi (ön çarpımlı RGBA + renk uzayı)
+- [x] Kardeş fragment, `cell_vertex` paylaşımı, stride 32 korunuyor
+- [x] Doku `RGBA8Unorm_sRGB`, `upload_slot` `bytesPerRow`-duyarlı
+- [x] Blend RGB kaynağı `One`; `pipeline()`'ın parametresi ve 008 phase-5'in
       geri alınma gerekçesi yazıldı
-- [ ] Çizim sırası **üç yüzeyde** kazanıldı (ızgara, doldurma, dock)
-- [ ] `yuva2=U/T` jetonu
-- [ ] Test: sentetik ara tonlu RGBA yuvası offscreen okunuyor (sRGB tanığı)
-- [ ] Test: ön çarpım — yarı saydam kenarda koyu halka yok
-- [ ] Doğrulama geçti (`make shader`, `make hepsi`, `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Çizim sırası **üç yüzeyde** kazanıldı (tek gövde: `prepare` kare başına dört kez koşuyor) (ızgara, doldurma, dock)
+- [x] `yuva2=U/T` jetonu (`CLAUDE.md` + `Makefile` sözleşmesiyle birlikte)
+- [x] Test: sentetik ara tonlu RGBA yuvası offscreen okunuyor → `a_midtone_colour_slot_survives_the_round_trip`, `the_colour_plane_is_an_srgb_texture`
+- [x] Test: ön çarpım — `a_premultiplied_edge_does_not_darken`; ayrıca `a_colour_glyph_goes_to_the_colour_list` ve `rebuilding_the_atlas_drops_both_textures`
+- [x] Doğrulama geçti (`make shader` + `make hepsi` yeşil; `make duman` `yuva=13/1984 yuva2=0/1984 hareket=27 icerik=3 sessiz=1754.12ms kapanis=clean`)
+- [x] Riskli phase: `/code-review` koştu, beş bulgunun beşi giderildi (bkz. Uygulama Notları)

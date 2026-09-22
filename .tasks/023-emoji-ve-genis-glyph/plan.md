@@ -153,6 +153,6 @@ kapı sırası: ink(cell) → tek yuva | ink(2·cell) → iki yuva | kutu
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | phase-3 | |
 | kapı | |

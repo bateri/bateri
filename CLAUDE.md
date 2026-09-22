@@ -52,13 +52,18 @@ yuvarlanmış genişliği değil: ızgaranın adımı yuvarlanmış olan, ama or
 **yuvarlanmışa** bağlamak taban fontun kendi glyph'ini bile hücreden dar
 gösterir (7.827 < 8) ve her harfi yarım pikselin altında kaydırırdı.
 `bt-gpu` atlası
-`R8Unorm` dokuya bağlar, `(bold, italic)`'i font yüzüne çevirir ve `cell`
+atlasın **iki düzlemini** iki dokuya bağlar — maske `R8Unorm`, renk
+`RGBA8Unorm_sRGB` —, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
-çizer. Pipeline **üç**: arka planlar/dörtgenler (`cell_bg`), glyph'ler ve
-kurallar (`cell`), ve caret (`caret_fragment`). Üçüncüsü `cell_bg`'nin
-vertex'ini **aynen** paylaşıyor — ayrılan yalnız fragment, çünkü caret'in
-yuvarlak köşesini, kenarını ve halesini bir SDF çiziyor ve o hesabı kare
-başına binlerce arka plan dörtgenine ödetmenin anlamı yok. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
+çizer. Pipeline **dört**: arka planlar/dörtgenler (`cell_bg`), glyph'ler ve
+kurallar (`cell`), caret (`caret_fragment`) ve renkli emoji
+(`emoji_fragment`). Son ikisi paylaşımla doğdu: caret `cell_bg`'nin,
+emoji `cell`'in **vertex'ini aynen** paylaşıyor ve ayrılan yalnız fragment.
+Caret'te sebep bir SDF (yuvarlak köşe, kenar, hale) ve o hesabı kare başına
+binlerce arka plan dörtgenine ödetmenin anlamı yok; emojide sebep **iki
+ayrım** — rengi dokudan alıyor (instance'tan değil) ve baytları **ön
+çarpımlı**, yani blend'in RGB kaynak çarpanı `One`. İkinci ayrım pipeline
+durumunun kendisi, yani tek bir fragment dalına birleşemiyor. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
 yığınından geçer**: `keyDown:` tek kapı değil dört kollu bir arbitraj —
 Cmd'li olay **kapalı bir izin listesinin üç tuşu dışında** yutulur (⌘⌫ →
 `\x15` `kill-whole-line`, ⌘← → `\x01` `beginning-of-line`, ⌘→ → `\x05`
@@ -492,12 +497,38 @@ Tekerleğin işaretçisi reddin dışında, çünkü o bir seçim ucu değil rap
 giden koordinat — reddedilseydi band ekrandayken kaydırma büsbütün ölürdü.
 Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app` paketini
 üretir.
-Emoji ve geniş glyph henüz yok: ikisi de **tek hücrelik yedeğin mürekkep
-kapısından** eleniyor (yukarıda), yani kutu çiziliyor — mürekkepleri
-ilerlemeleri kadar geniş. Geniş ilan edilmiş ama **dar boyayan** karakter
-(`丨` U+4E28, Claude Code'un `⏺`'ü) artık çiziliyor; ızgara ona iki sütun
-ayırıyor, spacer hücresi zaten glyph vermiyor (`Session::frame`) ve sütun
-kayması doğmuyor. **Blok elemanları, Braille,
+**Geniş karakter ve renkli emoji çiziliyor** (023) ve ikisi tek
+mekanizmadan: mürekkebi bir hücreye sığmayan **iki sütunlu** karakter iki
+hücre boyunda bir kutuya ortalanıp **iki yuvaya** rasterize ediliyor
+(`bt_atlas::Half`; sağ yarı tam sayı piksel ofsetiyle, yani AA fazı ikisinde
+birebir aynı ve bölünmüş bir tampon gerekmiyor). Yuvalar yine tam bir hücre,
+yani doku düzeni, `slot_bytes` ve ızgara aritmetiği **değişmiyor**; dörtlü de
+tek hücre kalıyor ve `GlyphInstance`'ın 32 baytlık stride'ı ile `cell_px`
+uniform'u el değmiyor — 012'nin `>` işaretini durduran sınır bu setle
+**aşılmadı, etrafından dolaşıldı**. Kapının **sırası** karar ve ölçülmüş:
+geniş hücrede önce tek hücrelik mürekkep kapısı, geçerse bugünkü tek yuvalı
+yol (raster bit bit aynı), geçmezse iki hücrelik kapı, o da geçmezse kutu.
+Sıra ters olsaydı geniş **ilan edilmiş ama dar boyayan** 65 karakter
+(21'i Menlo'nun `☕ ⚡ ♈`'si, 44'ü cascade'den gelen `丨 、 》 ！`) iki
+hücrelik kutuya göre ortalanır ve bugünkü yerlerinden kayardı; yan kazanç
+kapasite — o 65 ikinci bir yuva da harcamıyor. Sütun sayısının **tek
+yetkilisi ızgara**: `Cell::wide` yalnız baş hücrede kurulu ve `bt-atlas`
+kutu genişliğini argüman olarak alıyor, yani `unicode-width` oraya hiç
+girmiyor (ikinci bir genişlik yetkilisi ızgaranınkiyle ayrışırdı). Yelpazeleme
+`AtlasTexture::prepare`'de, `Frame::push`'ta **değil**: "bir yuva mı iki mi"
+kararı mürekkep kapısında doğuyor ve sink atlası ödünç alamıyor — yan kazanç
+üç yüzeyin (ızgara, doldurma bandı, dock) tek yerden kazanılması. Çift
+**atomik** ayrılıyor, yoksa kapasite sınırı iki yarının arasına düşer ve
+ekranda yarım glyph + yarım kutu belirirdi. **Renk ikinci bir düzlem**
+(`bt_atlas::Plane`), ikinci bir `Atlas` değil — o beş CoreText türetmesini ve
+ikinci bir `Metrics`'i doğururdu; düzlemin **kendi monoton sayacı** var (uv
+`prepare` anında pişiyor, kare ortasında anlamı değişen paylaşımlı bir sayaç
+önceki geçişlerin uv'lerini geçersizleştirirdi) ve dokusu **tembel**, ilk
+renkli yuvayla doğuyor. Düzlem kararı fontun **trait bitinden**
+(`kCTFontTraitColorGlyphs`), aile adından değil. Kapsam dışı ve adıyla
+yazılı: grapheme dizileri (ZWJ, ten rengi, VS16 — anahtar `char` değil `&str`
+olmak zorunda) ve **tek sütunlu emojinin 78'i** (rengi var, iki sütunu yok,
+mürekkebi 1.66 hücre — çaresi küçültme ve o ayrı bir karar). **Blok elemanları, Braille,
 çizgi çizim ve terminalin grafik kümesi kapının konusu değil, artık
 yordamsal çiziliyor** (021,
 `raster::is_procedural`): U+2580–U+259F, U+2800–U+28FF, U+2500–U+257F ile
@@ -582,12 +613,13 @@ make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
-                  # kare=N hucre=K glif=G kural=R yuva=U/T yuk=smoke istek=I icerik=C hareket=M kayma=S sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
+                  # kare=N hucre=K glif=G kural=R yuva=U/T yuva2=U/T yuk=smoke istek=I icerik=C hareket=M kayma=S sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
                   # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT ise, sessiz < QUIET_FLOOR ya da sessiz=none ise
                   # ya da deadline'da animasyon yerleşmemişse kırmızı. iki sınır da ölçülmüş; değerleri ve türetmeleri sabitlerin doc'unda.
                   # üst sınır kare'de değil icerik'te: icerik çizilmeye karar verilen kare, kare GPU'nun bitirdiği — animasyon ikincisini meşru olarak şişirir.
                   # sessiz'in kuralı ters (sağlıklıda büyük) ve kapının en duyarlı katı: icerik sınırının göremediği yavaş sızıntıyı o görüyor.
-                  # yuva/yuk/istek/kayma/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
+                  # yuva/yuva2/yuk/istek/kayma/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
+                  # yuva atlasın maske düzlemi, yuva2 renk düzlemi (023): ikisi aynı yuva ızgarasını paylaşıyor, ayrı sayaçları var ve toplamları aynı.
                   # hareket ile kayma iki ayrı animatörün tanığı (imleç / içeriğin ötelemesi): aynı karede ikisi birden artabilir, toplamları kare değildir.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
