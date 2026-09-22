@@ -63,6 +63,13 @@ görüntüsü tam da bu setin kapatmaya geldiği şey.
 `caret_rect`'in tek yerinden geçer (`bt_gpu::frame`), yani ucuz — ama dock'a
 özel yapmak yanlış.
 
+**İmlecin hareketi ayrı bir şey ve o karakter başına:** bir sağ ok = bir
+karakter, yani imleç geniş bir glyph'in üstünden tek hamlede geçiyor ve bir
+Backspace onun tamamını siliyor. Bu zaten böyle — hareketi ZLE yapıyor ve
+`CURSOR` karakter indeksi; bu setin değiştirdiği şey o indeksin **hangi
+sütuna** düştüğü. İkisini karıştırmamak önemli: "iki hücre" çizimin birimi,
+"tek karakter" düzenlemenin birimi.
+
 ## Karar 4: Tazelik kapısının iki tarafı aynı birimi okusun
 
 Aynanın `last_ink`'i son boşluk olmayan `char`'ı alıyor, ızgara tarafı
@@ -96,20 +103,31 @@ Son iki satır ızgarada **bugün de** öyle görünüyor, yani set iki yüzeyi
 eşitliyor — kusuru kapatmıyor. Kapatan şey grapheme seti ve onun ön koşulu
 atlas anahtarının `&str` olması.
 
+## Karar 6: Vurgu geniş karakterde iki hücreye yayılır
+
+`region_highlight` zsh'in komut satırını boyaması (sözdizimi renkleri, seçili
+aralık) ve aralıkları **karakter** indeksinde veriyor — `style_at` bu yüzden
+indeksle aranmaya devam ediyor, doğru olan o. Ama boyanan **zemin** hücre
+başına çiziliyor, yani iki hücrelik bir karakterde bugün yalnız sol hücre
+boyanıyor: `"fix 🎉"` dizgisinin sarı zemini emojinin sağ yarısında bitiyor.
+
+→ **Yayılıyor.** Baş hücrenin `wide`'ı zemini de ikinci sütuna taşıyor
+(spacer sütununa da bir arka plan hücresi düşüyor) ve bu, ızgaranın
+`WIDE_CHAR_SPACER`'a zemin vermesinin aynısı — o kolun gerekçesi `frame()`'de
+yazılı ("hücreyi tümden elemek onun sağ yarısını renksiz bırakırdı").
+
+Bedeli hücre başına bir arka plan kaydı. **Kullanıcıya sorulmadı ve
+sorulmamalıydı:** yarım boyanmış bir vurgu bariz bir kusur ve iki yüzeyi
+eşitlemek bu setin varlık sebebi — `/rfc` → Bulguyu işleme yolu ("boşlukta
+kullanıcı tarafı"). İlk yazımı bunu bir karar noktası olarak kullanıcıya
+sormuştu; kullanıcı ne olduğunu anlamadı ve haklıydı.
+
 ## Karar Noktaları
 
-Kullanıcıya gidecek **tek** soru kalıyor; ötekiler yukarıda kullanıcı tarafına
-kapatıldı:
-
-1. **`region_highlight`'ın sütuna çevrilmesi kapsama girsin mi?** Aralıklar
-   karakter indeksinde ve `style_at` öyle kalıyor (doğru olan bu). Ama
-   **vurgunun kendisi** artık iki hücre boyunda bir zemin isteyebilir: `zsh`
-   bir CJK karakterini vurguladığında bugün tek hücre boyanır. Öneri:
-   **kapsama girsin** — baş hücrenin `wide`'ı zemini de iki hücreye yayıyor
-   (`bt-gpu` arka planı hücre başına çiziyor, yani spacer sütununa da bir
-   arka plan hücresi gerekiyor) ve bu, ızgaranın `WIDE_CHAR_SPACER`'a zemin
-   vermesinin aynısı. Bedeli bir hücre daha, kazancı yarım boyanmış bir
-   vurgunun olmaması.
+**Kullanıcıya gidecek soru yok.** Altı kararın tamamı ya ölçümle ya
+"boşlukta kullanıcı tarafı" varsayılanıyla kapandı. Bu bölüm bilerek boş
+bırakılmıyor, **yok**: 023'ün dersi, kullanıcının değerlendiremeyeceği bir
+teknik ayrımı ona sormanın karar üretmediğini gösterdi.
 
 ## Muhakeme
 
@@ -124,3 +142,36 @@ olmadığı için üç `opus` ajanı açmak gürültü olurdu.
 kuralının tersine çevrilmiş hâli — orada `bt-atlas`'a genişlik sokmayı
 reddetmiştim, burada `bt-core`'a sokmak **zorunlu**, çünkü yetkinin yeri
 ızgarayla aynı katman.
+
+## Karar (2026-09-22, kullanıcı onayı — "boşlukta hep kullanıcı tarafını seç")
+
+Kullanıcı bu sette bir yetki verdi ve kararların tamamı ondan türüyor:
+*"talebin kendisini düşünürken de eğer boşluk varsa hep kullanıcı tarafını
+seçmen lazım."* Yani aşağıdaki altı kararın hiçbiri tek tek onaylanmadı;
+onaylanan şey **varsayılanın yönü**.
+
+- **Seçilen — K1: `unicode-width` `bt-core`'a giriyor.** Izgaranın kullandığı
+  crate'in aynısı ve aynı sürümü. **Reddedilen:** alacritty'den ihraç beklemek
+  (ölçüldü, ihraç etmiyor) ve kendi tablomuz (ikinci genişlik yetkilisi).
+- **Seçilen — K2: pencere kenarında geniş glyph yarılanmıyor**, o sütun boş
+  kalıyor. **Reddedilen:** yarısını çizmek — 023'ün "kutu ya da tam glyph"
+  sözleşmesi ve yarım glyph sessiz bir bozulma.
+- **Seçilen — K3: caret tek hücre, ızgarayla parite.** İmlecin **hareketi**
+  karakter başına ve o değişmiyor.
+- **Seçilen — K4: tazelik kapısının ayna tarafı sıfır genişlikli kod
+  noktalarını atlıyor**, yani iki taraf aynı birimi okuyor.
+- **Seçilen — K5: grapheme dizileri kapsam dışı**, ama atlama onlarda da
+  düzeliyor.
+- **Seçilen — K6: vurgu geniş karakterde iki hücreye yayılıyor.**
+
+**Bir kararın süreç kaydı var:** K6 ilk yazımda kullanıcıya soru olarak
+sunuldu ve kullanıcı ne olduğunu anlamadı — haklıydı, `region_highlight`
+ürün diliyle sorulabilen bir şey değil ve cevabı bariz. Aynı hata bu oturumda
+ikinci kez oldu (ilki 023'ün dört karar noktası) ve ikisinin de kaydı
+`urun-kararlari-ux-once` hafızasında.
+
+**023'ün bir değişmezi bu sette kalkıyor.** `the_dock_never_marks_a_cell_wide`
+bir commit önce yazıldı ve gerekçesi sağlamdı *o aritmetikle*; aritmetik
+değişince değişmez de kalkıyor ve yerine tersi geliyor. Bu, "yapısal olarak
+zorunda" ifadesinin neden denetlenmesi gerektiğinin canlı örneği: kısıt
+gerçekten zorunlu olsaydı bir sonraki sette kaldırılamazdı.
