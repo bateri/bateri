@@ -17,10 +17,18 @@ için `.claude/is-akisi/duzen.md`'yi oku.
 **Kapsam:** teslim birimi **branch**'tir, iş seti değil — çalışma ağacındaki
 her şey birlikte gider, sete göre seçmeli teslim yoktur.
 
-## 1. Doğrula (önce, her zaman)
+## 1. Doğrula
 
 `proje.md` → "Doğrulama" bölümündeki kapıyı koş. **Yeşil değilse teslim yok** —
 neyin kırıldığını çıktıyla göster ve dur.
+
+**Aynı oturumda yeşil koştuysa ve o koşudan beri yalnız derlenmeyen dosyalar
+değiştiyse** (`.tasks/`, `docs/`, `CLAUDE.md`) kapıyı yeniden koşma; son
+koşunun sonucunu kanıt olarak an. `crates/`, `assets/`, `Makefile`,
+`Cargo.*` değiştiyse ya da rebase olduysa koş. Gerekçe: `/implement` kapıyı
+phase commit'inden hemen önce koşuyor ve arada yalnız defter commit'i
+kalıyor; aynı sonucu bir buçuk dakikaya ikinci kez almak doğrulama değil
+tekrar (025'te kullanıcı sordu).
 
 Koşullu komutları da burada uygula: `.metal` değiştiyse `make shader`,
 `assets/terminfo` değiştiyse `make terminfo` koşmuş olmalı. `Cargo.lock`
