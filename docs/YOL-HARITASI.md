@@ -63,8 +63,9 @@ bulunamaz.
 | 021 | kutu çizim | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "blok, çizgi ve Braille fonttan geliyor"): kutu/blok çizim ve Braille fonttan geliyor ve **döşemiyor** — Menlo'nun `█`'i hücreyi doldurmuyor, Braille de genişlik kapısından dönüyor. Çare yordamsal çizim ve örüntü depoda hazır (`RuleKind`'ın yedi sprite'ı); çıktı yine tek kanallı kapsama maskesi, yani emoji setinin "ikinci atlas mı, RGBA mı" çatalı **hiç açılmıyor** — 019'un 020/021'den ayrıldığı gerekçenin aynısı. Kullanıcı görünürlüğü yüksek ve sürekli: Claude Code'un maskotu, spinner'ı ve her TUI çerçevesi. Set açıldı → `.tasks/021-kutu-cizim/` |
 | 022 | atlas tahliyesi | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "Atlas dolunca geri dönüşü yok") ve borcun kendi yazdığı sıra geldi: *önce ölçüm, sonra LRU* — ölçüm 021'de koştu. Kusur kullanıcıya iki sıradan kapıdan çarpıyor: 16 kez Cmd + (varsayılan 13pt, adım 1pt, tavan 72pt) Retina'da doyma eşiğine çıkarıyor, ve Braille bloğunu tarayan bir TUI (`btop`, Claude Code spinner'ı) tek başına 256 yuva isteyebiliyor. Dolduktan sonra o oturumda ilk kez görülen her karakter kalıcı kutu. Set açıldı → `.tasks/022-atlas-tahliyesi/` |
 | 023 | emoji + geniş glyph | **Kutu çizim yarısı 2026-09-21'de ayrıldı → 021** (kullanıcı kararı); kalan ikisi tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek **Sıra 2026-09-22'de öne alındı** (kullanıcı kararı: materyal pas geçildi) ve envanter `/rfc`'nin araştırmasında ölçüldü: adayı olan 1346 geniş karakterin ilerlemesi de mürekkebi de hücrenin **1.66** katı, yani kapıyı sütunla çarpmak ailenin tamamını kabul ediyor; emojinin **78'i tek sütunlu** ve geometri kolu onlara yardım etmiyor. Set açıldı → `.tasks/023-emoji-ve-genis-glyph/` |
-| 024 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-21: taban **yarım alındı** ve kalan yarısı sanıldığından zor çıktı. CPU sütunları ile açılış prizde ölçüldü, ikisi de taban. **GPU sütunu alınamadı:** aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms arasında dolaşıyor ve sınanan dört hipotez (koşu süresi, derleme sonrası ilk koşu, güç durumu, metallib kimliği) onu ayıramadı. Bu setin bedeli bir **shader** bedeli, yani ihtiyacı olan sütun tam da gezinen sütun — üstelik sıçrama yeniden derleme sınırında oluyor ve "shader'lı hâl shader'sız hâlden yavaş mı" sorusu doğası gereği o sınırın iki yanını karşılaştırmak demek. Yani ön koşul **açık** ve artık ondan fazlası: bu setin `/rfc`'si ölçme yöntemini de çözmek zorunda (aynı binary içinde çalışma zamanı anahtarıyla A/B, ya da çok sayıda yeniden derleme üzerinden ortalama). `docs/OLCUMLER.md` → `## Kare süresi`.)* *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
-| 025 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
+| 024 | dock sütun saysın | **Kullanıcı bildirdi (2026-09-22)**: yazılan emoji dock'ta kutu çıkıyor ve bazıları giriş satırını ızgaraya fırlatıyor. Kök tek — `dock::render` karakter indeksini sütun sanıyor — ve üç belirtiyi birden doğuruyor: dock `Cell::wide`'ı kuramıyor (023'ün kendi değişmezi), tazelik kapısının iki tarafı farklı birim okuyor (ayna `char`, ızgara hücrenin `c`'si — birleştirici `CellExtra`'da) ve CJK'lı satırda caret kayıyor (aşağıdaki `CURSOR` borcu). Ölçüldü: `🎉` dock'a düşüyor ama kutu, `❤️` satırı fırlatıyor. Sete girmesinin sebebi kapsam değil **sıra**: 023 emojiyi çizilebilir yaptı, yani artık yazılıyor ve kusur her yazışta görünüyor. Set açıldı → `.tasks/024-dock-sutun-aritmetigi/` |
+| 025 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-21: taban **yarım alındı** ve kalan yarısı sanıldığından zor çıktı. CPU sütunları ile açılış prizde ölçüldü, ikisi de taban. **GPU sütunu alınamadı:** aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms arasında dolaşıyor ve sınanan dört hipotez (koşu süresi, derleme sonrası ilk koşu, güç durumu, metallib kimliği) onu ayıramadı. Bu setin bedeli bir **shader** bedeli, yani ihtiyacı olan sütun tam da gezinen sütun — üstelik sıçrama yeniden derleme sınırında oluyor ve "shader'lı hâl shader'sız hâlden yavaş mı" sorusu doğası gereği o sınırın iki yanını karşılaştırmak demek. Yani ön koşul **açık** ve artık ondan fazlası: bu setin `/rfc`'si ölçme yöntemini de çözmek zorunda (aynı binary içinde çalışma zamanı anahtarıyla A/B, ya da çok sayıda yeniden derleme üzerinden ortalama). `docs/OLCUMLER.md` → `## Kare süresi`.)* *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
+| 026 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
 animasyonu), Sparkle ile güncelleme.
@@ -235,6 +236,26 @@ animasyonu), Sparkle ile güncelleme.
 > sonraki kaymada yine eskirdi.
 
 
+> **On dördüncü kayma (2026-09-22, kullanıcı kararı).** Araya **024 dock sütun
+> saysın** girdi; materyal yüzey **025**, sekme + bölme **026** oldu. Gerekçe
+> bu kez ne ucuzluk ne ölçüm baskısı: **023'ün kendi bıraktığı kusur**.
+> Kullanıcı emojiyi yazınca dock'ta kutu gördü ve bazı emojilerde giriş satırı
+> ızgaraya fırladı; ikisinin de kökü `dock::render`'ın karakter indeksini
+> sütun sanması. Sıraya girmesinin sebebi şu: 023 emojiyi **çizilebilir**
+> yaptı, yani artık yazılıyor — kusur her yazışta görünüyor ve materyalin ön
+> koşulu (ölçme yöntemi) hâlâ çözülmedi.
+> **Setin kendisi bir süreç dersinin faturası.** 023'te `/plan-review`'un
+> Codebase-fit jürisi doğru bir kod kısıtı buldu (dock'un sütunu karakter
+> indeksinden geliyor) ve ondan "dock'ta geniş bayrağı hiç kurulmasın"
+> **sonucunu** çıkardı; sentez onu karar sanıp plana gereksinim, koda değişmez
+> diye yazdı. Kısıtın ikinci çözümü — dock sütun saysın — ilk turda
+> konuşulsaydı bu set hiç açılmayacaktı. Ders iki yere yazıldı
+> (`.claude/skills/rfc` → Bulguyu işleme yolu, `proje.md` → Kalite kapısı 4)
+> ve özü tek cümle: jüri bulgusunun **gözlemi ve çıkarımı** onun yetkisi,
+> **çözüm önerisi** değil; boşlukta kullanıcı tarafı seçilir.
+> **Materyalin bedeli on birinci kez ödeniyor.**
+
+
 ## Sete bağlanmamış borçlar
 
 Bunlar kendi setlerini hak etmiyor; yukarıdaki setlerden birine yamanırlar.
@@ -311,7 +332,11 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   "çok satırlı `BUFFER`" bilinen sınırı** (bastırma aritmetiği satır sonlarını
   saymıyor, kuyruk sızıyor) bu kararla **konusuz kaldı**: çok satırlı ayna
   bastırmaya hiç girmiyor.
-- **Aynanın `CURSOR`'u karakter indeksi, sütun değil.** 023'ün panelinde
+- **Aynanın `CURSOR`'u karakter indeksi, sütun değil.** **2026-09-22'de sete
+  bağlandı → 024** ve madde orada kapanıyor: kök aynı aritmetik, yani caret'in
+  kayması ile emojinin dock'ta kutu çıkması tek çarenin iki belirtisi.
+  Ayrıntısı `.tasks/024-dock-sutun-aritmetigi/`'de. Aşağıdaki gerekçe tarih
+  olarak duruyor: 023'ün panelinde
   çıktı (2026-09-22) ve o setin kapsamı dışında bırakıldı: `dock::render`
   sütunu karakter sayısından türetiyor (`TEXT_COL + offset`, `offset = index -
   skip`), spacer yok, genişlik farkındalığı yok — caret de öyle. Yani dock'un

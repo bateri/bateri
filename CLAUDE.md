@@ -900,6 +900,18 @@ ve `/audit` set sonunda bir kez koşar; set defteri (`teslim.md`) ve "ölçüm
 bekliyor" kalemi yoktur, panel yalnız pahalı kararda açılır
 (`.claude/README.md` → Sadeleştirme).
 
+**Boşlukta kullanıcı tarafı seçilir.** Bir kapı ya da jüri bulgusu kod
+hakkında **olgu** verir ("şu aritmetik şunu yapamaz"); ondan çıkan "öyleyse
+şunu yapmayalım" cümlesi **olgu değil seçimdir**. Çıkarımı karşılamanın iki
+yolu vardır — özelliği kısmak ya da kodu açmak — ve ikisi kullanıcının
+gördüğünde ayrışıyorsa karar ürün kararıdır, kullanıcıya sorulur. Belirsizse
+varsayılan **kodu açmaktır**. Aynı kural talebin kendisine de uygulanır:
+kapsamdaki boşluk kullanıcının lehine okunur. Yöntemi `.claude/skills/rfc`
+→ Bulguyu işleme yolu; bedeli ölçüldü (023: dock'ta geniş bayrağın hiç
+kurulmaması bir kod kısıtından *karar* diye türetildi ve kullanıcının yazdığı
+emoji kutu çıktı). Bir kısıtı "yapısal olarak zorunda" diye yazmak o seçimi
+görünmez kılar; ölçüt "bugünkü aritmetikle mi, gerçekten mi".
+
 Hangi işin **neden o sırada** olduğu `docs/YOL-HARITASI.md`'dedir; henüz
 açılmamış setlerin sırası ve bağımlılıkları oraya yazılır. **Durumu** o dosya
 tutmaz — tek sahibi `.tasks/README.md` indeksidir, iki yerde durum tutmak

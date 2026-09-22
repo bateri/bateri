@@ -65,6 +65,47 @@ kapı ayırt etmiyor ve her koşu üç `opus` ajanı açıyor. Kapı kalkmadı,
   seçenekleri yeniden kur, gerekirse paneli tekrarla. Kullanıcı ikinci tura
   çağrılmaz; o yalnız vetlenmiş sonucu görür.
 
+### Bulguyu işleme yolu — üç parça, iki yetki
+
+Bir jüri bulgusu **üç** parça taşır ve üçü aynı yetkide değil:
+
+1. **Gözlem** — kod hakkında olgu ("dock'un sütunu karakter indeksinden
+   geliyor, spacer hücresi yok"). Jürinin yetkisi; doğrula ve kabul et.
+2. **Çıkarım** — ne kırılır ("iki hücrelik glyph komşusunun üstüne boyar").
+   Jürinin yetkisi; doğrula ve kabul et.
+3. **Çözüm önerisi** — ne yapılmalı ("geniş bayrağı hiç kurulmasın").
+   **Jürinin yetkisi DEĞİL.** Bir seçimdir ve çıkarımı karşılamanın birden
+   fazla yolu varsa onu seçmek jüriye ait değildir.
+
+Sentezin adımı bu yüzden "bulguyu uygula" değil **"çıkarımı karşılamanın
+yollarını say"**dır. Yol neredeyse her zaman iki tanedir ve ikisi ayrı şeyi
+korur:
+
+- **Özelliği kısmak** — kodu olduğu gibi bırakır, kullanıcının gördüğünü
+  daraltır.
+- **Kodu açmak** — özelliği korur, mevcut aritmetiği/sözleşmeyi elden
+  geçirir.
+
+İkisi kullanıcının gördüğünde ayrışıyorsa karar **ürün kararıdır** ve adım
+7'de kullanıcıya gider; yalnız kod biçiminde ayrışıyorsa senin. Ölçüt tek
+soru: *kullanıcı bu iki sonucu birbirinden ayırt eder mi?*
+
+**Boşlukta kullanıcı tarafı seçilir.** Hangi yetkiye ait olduğu belirsizse,
+ya da çıkarımı karşılamanın yolları arasında seçim gerekçesiz kalıyorsa,
+varsayılan **kodu açmaktır** — kısıtı zorunluluk sanıp özelliği daraltmak
+değil. Aynı kural talebin kendisi için de geçerli: kapsamda bir boşluk varsa
+kullanıcının lehine okunur, kendi işini kolaylaştıran yönde değil.
+**Ölçülmüş bedeli var** (023): jürinin bir kod kısıtından çıkardığı
+"dock'ta geniş bayrağı hiç kurulmasın" önerisi karar sanıldı, plana
+gereksinim ve koda değişmez olarak girdi; sonuç kullanıcının yazdığı
+emojinin dock'ta kutu çıkması ve bazı satırların ızgaraya fırlaması oldu.
+Kısıtın ikinci çözümü (dock sütun saysın) ilk turda konuşulsaydı bir set
+daha az yazılırdı.
+
+**Dil de denetlenir:** "yapısal olarak zorunda", "temsil edilemiyor", "mümkün
+değil" ifadeleri bir kısıtı zorunluluğa çeviriyor ve o çeviri seçimi görünmez
+kılıyor. Yazmadan önce sor: *bugünkü aritmetikle* mi zorunda, gerçekten mi?
+
 ## 7. Kullanıcıyla tartış (tek onay noktası)
 
 > `/akis` ile koşuluyorsa adım 7'nin **onayı alınmaz**, adım 9'un tetiği
