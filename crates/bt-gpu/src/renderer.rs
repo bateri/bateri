@@ -90,13 +90,13 @@ struct AtlasTexture {
     /// **Tembel** ve bu bilinçli: doku maske dokusuyla aynı kenarda
     /// (`texture_px`) ama piksel başına dört bayt, yani varsayılan hücrede
     /// 1 MiB yerine 4 MiB. Emoji görmeyen bir oturum onu hiç ödemiyor.
-    colour_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+    color_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     /// Emoji dörtlüleri — maskelerin listesinden **ayrı**.
     ///
     /// Ayrı olmak zorunda: başka bir pipeline, başka bir doku ve başka bir
     /// blend. Aynı listeye karışsalardı tek draw call iki fragment'i birden
     /// isteyemezdi.
-    colour_instances: Vec<GlyphInstance>,
+    color_instances: Vec<GlyphInstance>,
 }
 
 /// Izgaranın **fiziksel piksel** geometrisi (ölçek uygulanmış): hücre ölçüsü
@@ -249,11 +249,11 @@ pub struct Renderer {
     /// Renkli emojiyi çizen pipeline; **aynı vertex** (`cell_vertex`), ayrı
     /// fragment ve ayrı blend.
     ///
-    /// Dördüncü pipeline olmasının sebebi iki ayrım: fragment rengi
-    /// **dokudan** alıyor (instance'tan değil) ve baytlar **ön çarpımlı**,
-    /// yani RGB kaynak çarpanı `One`. `cell`'in fragment'iyle tek bir dala
-    /// birleştirilemez — ayrımın biri blend durumu ve o pipeline'ın kendisine
-    /// ait.
+    /// Dördüncü pipeline olmasının sebebi **tek** ayrım ve o fragment'in
+    /// kendisi: rengi **dokudan** alıyor (instance'tan değil) ve imleç
+    /// uniform'unu hiç okumuyor. Blend durumu `cell`'inkiyle **aynı** —
+    /// `raster::draw_color` ön çarpımı yüklemeden önce geri aldığı için
+    /// baytlar düz alfa.
     emoji: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Caret'i çizen pipeline; **aynı vertex**, ayrı fragment.
     ///
@@ -340,25 +340,19 @@ impl Renderer {
             .map_err(GpuError::Library)?;
         // Arka planlar opak (alfaları `1.0`), yani blend onlar için no-op;
         // açık olmasının tek sebebi imlecin belirmesi (bkz. `cell_bg` alanı).
-        let cell_bg = pipeline(
-            &device,
-            &library,
-            "cell_bg_vertex",
-            "cell_bg_fragment",
-            false,
-        )?;
+        let cell_bg = pipeline(&device, &library, "cell_bg_vertex", "cell_bg_fragment")?;
         // Glyph'ler arka planların üstüne **karışarak** geliyor: atlas bir
         // kapsama maskesi, renk instance'tan. Blend lineer uzayda koşuyor ve
         // sebebi tam olarak bu (`PIXEL_FORMAT` → `_sRGB`).
-        let cell = pipeline(&device, &library, "cell_vertex", "cell_fragment", false)?;
+        let cell = pipeline(&device, &library, "cell_vertex", "cell_fragment")?;
         // Emoji: `cell_vertex`'i **aynen** paylaşıyor, fragment'i ayrı ve
         // baytları **ön çarpımlı**. Dördüncü pipeline olmasının sebebi
         // `caret`'inkiyle aynı cinsten: geometri bir, fragment iki — ve
         // buradaki ikinci ayrım blend'in RGB çarpanı.
-        let emoji = pipeline(&device, &library, "cell_vertex", "emoji_fragment", true)?;
+        let emoji = pipeline(&device, &library, "cell_vertex", "emoji_fragment")?;
         // Caret: `cell_bg_vertex`'i paylaşıyor, fragment'i ayrı. Blend zaten
         // açık ve burada **zorunlu** — hale tanımı gereği yarı saydam.
-        let caret = pipeline(&device, &library, "cell_bg_vertex", "caret_fragment", false)?;
+        let caret = pipeline(&device, &library, "cell_bg_vertex", "caret_fragment")?;
         let queue = device.newCommandQueue().ok_or(GpuError::NoCommandQueue)?;
 
         Ok(Self {
@@ -435,11 +429,11 @@ impl Renderer {
     ///
     /// [`Renderer::atlas_occupancy`] ile aynı gerekçe ve aynı `(0, 0)` kuralı:
     /// açılmamış bir atlasın yuvası da yok.
-    pub fn colour_atlas_occupancy(&self) -> (usize, usize) {
+    pub fn color_atlas_occupancy(&self) -> (usize, usize) {
         self.atlas
             .borrow()
             .as_ref()
-            .map_or((0, 0), |tex| tex.atlas.colour_occupancy())
+            .map_or((0, 0), |tex| tex.atlas.color_occupancy())
     }
 
     /// İstenen fontu değiştirir; önceki istekten farklıysa `true`.
@@ -500,8 +494,8 @@ impl Renderer {
             atlas: Atlas::new(family, font.size, scale, font.line_height),
             texture: None,
             instances: Vec::new(),
-            colour_texture: None,
-            colour_instances: Vec::new(),
+            color_texture: None,
+            color_instances: Vec::new(),
         });
         if atlas_tex
             .atlas
@@ -509,14 +503,14 @@ impl Renderer {
         {
             atlas_tex.texture = None;
             // **Renk dokusu da düşmek zorunda.** `Atlas::ensure` atlası
-            // baştan kuruyor (`*self = Self::new(..)`), yani `colour_next`
+            // baştan kuruyor (`*self = Self::new(..)`), yani `color_next`
             // sıfırlanıyor **ve** doku kenarı değişebiliyor (kenar
             // `SLOT_TARGET` ile hücre ölçüsünden türüyor). Eski kenarda
             // kalan bir renk dokusu yeni ızgaranın köşeleriyle yazılırdı:
             // `replaceRegion` dokunun dışına taşar. Cmd+ ile puntoyu
             // büyütmek ya da pencereyi başka ölçekli bir ekrana taşımak bu
             // yolu ekranda emoji varken tetikliyor.
-            atlas_tex.colour_texture = None;
+            atlas_tex.color_texture = None;
         }
         // Ödünç değil **metrik** dönüyor: atlas ödüncünün bir çağrı sınırını
         // aşabildiği tek yer burasıydı ve [`Renderer::encode_glyphs`]'in
@@ -1097,12 +1091,12 @@ impl Renderer {
         // Aynı ekleme **üç yüzeyde** birden kazanılıyor, çünkü bu fonksiyon
         // kare başına dört kez koşuyor (şeritler, ızgara, doldurma bandı,
         // dock) — 017'nin dersi tek yerde ödeniyor.
-        if !atlas_tex.colour_instances.is_empty() {
-            // Doku yoksa liste de boş olmalıydı; yine de kapı: `ColourPlane`
+        if !atlas_tex.color_instances.is_empty() {
+            // Doku yoksa liste de boş olmalıydı; yine de kapı: `ColorPlane`
             // doku ayıramazsa yüklemeyi atlıyor ve o karede liste dolu ama
             // doku `None` olabiliyor.
-            if let Some(colour_texture) = atlas_tex.colour_texture.as_ref() {
-                let colour_buffer = self.instance_buffer(&atlas_tex.colour_instances)?;
+            if let Some(color_texture) = atlas_tex.color_texture.as_ref() {
+                let color_buffer = self.instance_buffer(&atlas_tex.color_instances)?;
                 enc.setRenderPipelineState(&self.emoji);
                 vertex_uniform(enc, &viewport_px, 1);
                 vertex_uniform(enc, &cell_px, 2);
@@ -1112,13 +1106,13 @@ impl Renderer {
                 // SAFETY: tampon ve doku bu blok boyunca yaşıyor; indeksler
                 // `cell.metal`'in bildirimleriyle aynı.
                 unsafe {
-                    enc.setVertexBuffer_offset_atIndex(Some(&colour_buffer), 0, 0);
-                    enc.setFragmentTexture_atIndex(Some(colour_texture.as_ref()), 0);
+                    enc.setVertexBuffer_offset_atIndex(Some(&color_buffer), 0, 0);
+                    enc.setFragmentTexture_atIndex(Some(color_texture.as_ref()), 0);
                     enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
                         MTLPrimitiveType::TriangleStrip,
                         0,
                         4,
-                        atlas_tex.colour_instances.len(),
+                        atlas_tex.color_instances.len(),
                     );
                 }
             }
@@ -1206,7 +1200,6 @@ fn pipeline(
     library: &ProtocolObject<dyn MTLLibrary>,
     vs_name: &'static str,
     fs_name: &'static str,
-    premultiplied: bool,
 ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, GpuError> {
     let vs = library
         .newFunctionWithName(&NSString::from_str(vs_name))
@@ -1222,23 +1215,13 @@ fn pipeline(
     let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
     att.setPixelFormat(Renderer::PIXEL_FORMAT);
     att.setBlendingEnabled(true);
-    // **RGB kaynak çarpanı fragment'in ön çarpımına bağlı ve tek ayrıştığı
-    // yer bu.** Ön çarpımsız fragment (`cell_bg`, `cell`, `caret`) rengi
-    // kendi alfasıyla çarpılmak **ister**; ön çarpımlı olan (`emoji`, çünkü
-    // CoreGraphics renkli glyph'i `PremultipliedLast` veriyor) çarpımı zaten
-    // taşıyor ve ikinci kez çarpılırsa kenarda koyu bir halka kalır.
-    //
-    // Parametre 008 phase-5'te **atılmıştı** ("tek değere düşünce hem
-    // kendisi hem tek `if`'i kalktı") ve burada geri geliyor: o gün tek değer
-    // vardı, bugün iki. Yazılı kararın geri alınma gerekçesi bu — fonksiyonun
-    // doc'undaki "blend parametre değil" cümlesi de onunla birlikte
-    // daralıyor: **blend'in üç çarpanı** parametre değil, dördüncüsü
-    // fragment'in sözleşmesinden türüyor.
-    att.setSourceRGBBlendFactor(if premultiplied {
-        MTLBlendFactor::One
-    } else {
-        MTLBlendFactor::SourceAlpha
-    });
+    // **Dört pipeline da ön çarpımsız fragment veriyor**, emoji dahil:
+    // CoreGraphics renkli glyph'i ön çarpımlı yazıyor ama `raster::draw_color`
+    // onu yüklemeden önce geri alıyor (gerekçe `raster::unpremultiply`'ın
+    // doc'unda: ön çarpım sRGB-kodlanmış uzayda yapıldığı için doku başına
+    // kanal çözümü onu karartıyordu). Yani 008 phase-5'in bu parametreyi
+    // atma kararı **geri alınmadı** ve blend hâlâ parametre değil.
+    att.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
     att.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     // Alfa kanalının **kaynak çarpanı `One`**, `SourceAlpha` değil.
     // Fragment ön çarpımsız veriyor (`rgb`, `a = kapsama`): renk için
@@ -1300,7 +1283,7 @@ impl AtlasTexture {
         let texture = self.texture.as_ref().expect("doku hemen üstte kuruldu");
 
         self.instances.clear();
-        self.colour_instances.clear();
+        self.color_instances.clear();
         // `clear` kapasiteyi koruyor, yani durağan hâlde ayırma yok; `reserve`
         // yalnız kapasitenin **ilk kez** aşıldığı kareyi düzleştiriyor (bir
         // blok metnin altı çizilince glyph + kural toplamı sıçrar) — iki
@@ -1329,8 +1312,8 @@ impl AtlasTexture {
             let (uv0, placed) = slot_uv(
                 &mut self.atlas,
                 texture,
-                &mut ColourPlane {
-                    slot: &mut self.colour_texture,
+                &mut ColorPlane {
+                    slot: &mut self.color_texture,
                     device,
                     edge: (tw, th),
                 },
@@ -1348,7 +1331,7 @@ impl AtlasTexture {
             // tek draw call iki fragment'i birden isteyemezdi.
             let list = match placed.plane {
                 Plane::Mask => &mut self.instances,
-                Plane::Colour => &mut self.colour_instances,
+                Plane::Color => &mut self.color_instances,
             };
             list.push(GlyphInstance {
                 pos: glyph.pos,
@@ -1364,8 +1347,8 @@ impl AtlasTexture {
                 let (uv1, right) = slot_uv(
                     &mut self.atlas,
                     texture,
-                    &mut ColourPlane {
-                        slot: &mut self.colour_texture,
+                    &mut ColorPlane {
+                        slot: &mut self.color_texture,
                         device,
                         edge: (tw, th),
                     },
@@ -1380,7 +1363,7 @@ impl AtlasTexture {
                 );
                 let list = match right.plane {
                     Plane::Mask => &mut self.instances,
-                    Plane::Colour => &mut self.colour_instances,
+                    Plane::Color => &mut self.color_instances,
                 };
                 list.push(GlyphInstance {
                     pos: [glyph.pos[0] + f32::from(metrics.cell_px.0), glyph.pos[1]],
@@ -1397,8 +1380,8 @@ impl AtlasTexture {
             let (uv0, _) = slot_uv(
                 &mut self.atlas,
                 texture,
-                &mut ColourPlane {
-                    slot: &mut self.colour_texture,
+                &mut ColorPlane {
+                    slot: &mut self.color_texture,
                     device,
                     edge: (tw, th),
                 },
@@ -1432,23 +1415,31 @@ impl AtlasTexture {
 /// Tip, üç şeyi tek argümanda taşıyor (doku yuvası, device ve kenar) çünkü
 /// üçü tek bir işi yapıyor: "gerektiğinde renk dokusunu kur ve ver".
 /// Ayrı argümanlar olsaydı `slot_uv` yine `clippy`'nin sınırını aşardı.
-struct ColourPlane<'a> {
+struct ColorPlane<'a> {
     slot: &'a mut Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     device: &'a ProtocolObject<dyn MTLDevice>,
     edge: (u16, u16),
 }
 
-impl ColourPlane<'_> {
+impl ColorPlane<'_> {
     /// Dokuyu (gerekirse kurup) verir; kurulum başarısızsa `None`.
     ///
     /// Hata **yutuluyor** ve gerekçesi çağrı yeri: `slot_uv` kare yolunda ve
-    /// `Result` döndürmüyor. Doku ayırması başarısızsa o emoji çizilmiyor
-    /// (yuva dokuda yazılmamış kalıyor ve önbellekte olduğu için bir daha
-    /// denenmiyor) — bilinen bir sınır, ve 4 MiB ayıramayan bir makinede
-    /// zaten daha büyük bir sorun var.
+    /// `Result` döndürmüyor. 4 MiB ayıramayan bir makinede zaten daha büyük
+    /// bir sorun var.
+    ///
+    /// **Bilinen sınır ve tam şekli** (set kapısı, `/code-review`): yuva
+    /// `Atlas::slot`'ta **zaten** ayrılmış ve önbelleğe girmiş oluyor, yani
+    /// yükleme atlanınca o yuva dokuda yazılmamış kalıyor. Sonraki bir
+    /// istekte ayırma **başarılı olursa** doku doğuyor ama o eski yuvalar
+    /// hâlâ yazılmamış — ve Metal yeni dokuyu **sıfırlamıyor**, yani sonuç
+    /// saydam siyah değil **tanımsız bellek**. Belirti o birkaç emojide
+    /// rastgele piksel. Yol bir ayırma hatası gerektiriyor, yani pratikte
+    /// görülmedi; doğru çaresi ayırma başarısız olduğunda o isteğin yuvasını
+    /// da geri almak ve o, `Atlas::slot`'un dönüşünü değiştirmeyi ister.
     fn get(&mut self) -> Option<&ProtocolObject<dyn MTLTexture>> {
         if self.slot.is_none() {
-            *self.slot = new_colour_texture(self.device, self.edge.0, self.edge.1).ok();
+            *self.slot = new_color_texture(self.device, self.edge.0, self.edge.1).ok();
         }
         self.slot.as_deref()
     }
@@ -1464,7 +1455,7 @@ impl ColourPlane<'_> {
 ///
 /// `Shared` depolama ve `ShaderRead` kullanımı maske dokusuyla aynı gerekçe
 /// ([`new_atlas_texture`]).
-fn new_colour_texture(
+fn new_color_texture(
     device: &ProtocolObject<dyn MTLDevice>,
     width: u16,
     height: u16,
@@ -1516,7 +1507,7 @@ struct SlotAsk {
 fn slot_uv(
     atlas: &mut Atlas,
     texture: &ProtocolObject<dyn MTLTexture>,
-    colour: &mut ColourPlane<'_>,
+    color: &mut ColorPlane<'_>,
     metrics: Metrics,
     inv: (f32, f32),
     ask: SlotAsk,
@@ -1536,7 +1527,7 @@ fn slot_uv(
             // ikinci kez yürüyerek sormak gerekirdi, bir kare sonra
             // kurulsaydı bu yuva yazılmadan önbelleğe girer ve emoji
             // **kalıcı olarak** görünmez kalırdı.
-            Plane::Colour => colour.get(),
+            Plane::Color => color.get(),
         };
         // Renk dokusu **tembel** ve `prepare` onu emoji görünce kuruyor; yine
         // de `Option`: doku ayırması başarısız olabiliyor ve o hâlde emoji
@@ -1613,7 +1604,7 @@ fn upload_slot(
     // sayıya bağlamak yanlış düzlemin tamponunu sessizce geçirirdi.
     let (expected, row_bytes) = match plane {
         Plane::Mask => (metrics.slot_bytes(), w),
-        Plane::Colour => (metrics.slot_bytes_rgba(), w * 4),
+        Plane::Color => (metrics.slot_bytes_rgba(), w * 4),
     };
     assert_eq!(bytes.len(), expected, "tam bir yuva olmalı ({plane:?})");
     let region = MTLRegion {
@@ -3693,8 +3684,8 @@ mod tests {
             atlas: Atlas::new(None, 13.0, 1.0, 1.0),
             texture: None,
             instances: Vec::new(),
-            colour_texture: None,
-            colour_instances: Vec::new(),
+            color_texture: None,
+            color_instances: Vec::new(),
         };
         let cell_w = tex.atlas.metrics().cell_px.0;
         // `漢` mürekkebi iki hücre isteyen bir aday veriyor (cascade: PingFang
@@ -3743,8 +3734,8 @@ mod tests {
             atlas: Atlas::new(None, 13.0, 1.0, 1.0),
             texture: None,
             instances: Vec::new(),
-            colour_texture: None,
-            colour_instances: Vec::new(),
+            color_texture: None,
+            color_instances: Vec::new(),
         };
         // Menlo'nun kendi glyph'i, Unicode'a göre iki sütun: taban fontta
         // ilerleme hücrenin ilerlemesinin ta kendisi, yani tek hücre.
@@ -3773,9 +3764,9 @@ mod tests {
     /// `CLAUDE.md` → "Renk uzayı sınırı geçer" maddesindeki sessiz kusurun
     /// aynısı ve doğrudan sorulan tek yer burası.
     #[test]
-    fn the_colour_plane_is_an_srgb_texture() {
+    fn the_color_plane_is_an_srgb_texture() {
         let r = Renderer::system_default().expect("Metal device ve pipeline");
-        let texture = new_colour_texture(&r.device, 64, 64).expect("renk dokusu");
+        let texture = new_color_texture(&r.device, 64, 64).expect("renk dokusu");
         assert_eq!(
             texture.pixelFormat(),
             MTLPixelFormat::RGBA8Unorm_sRGB,
@@ -3802,7 +3793,7 @@ mod tests {
     /// `SourceAlpha` bu pikselde **aynı** sonucu verir; ayrıştıkları yer
     /// yarı saydam kenar ve onun bekçisi aşağıda.
     #[test]
-    fn a_midtone_colour_slot_survives_the_round_trip() {
+    fn a_midtone_color_slot_survives_the_round_trip() {
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         const EDGE: usize = 16;
         // Ara ton: `cell_bg_paints_pixels_on_the_gpu`'nun `MIDTONE`'uyla aynı
@@ -3819,28 +3810,31 @@ mod tests {
         );
     }
 
-    /// **Ön çarpımın tanığı:** yarı saydam bir emoji pikseli kararmıyor.
+    /// **Yarı saydam kenarın tanığı:** kompozisyon **lineer** uzayda oluyor.
     ///
-    /// CoreGraphics renkli glyph'i `PremultipliedLast` veriyor, yani RGB
-    /// zaten alfayla çarpılmış. Blend'in RGB kaynak çarpanı `SourceAlpha`
-    /// kalsaydı çarpım **iki kez** uygulanır ve yarı saydam kenarda koyu bir
-    /// halka kalırdı. Sınama tam o pikseli kuruyor: alfa yarım, RGB de yarım
-    /// (ön çarpımlı bir beyaz), zemin **siyah** — doğru blend beyazın yarısını
-    /// verir, iki kez çarpan blend çeyreğini.
+    /// Düz alfalı yarı saydam beyaz siyah zeminde çizilince sonuç lineer
+    /// uzayda tam yarım, sRGB'ye kodlanınca **0xBC** olmak zorunda. Sayı
+    /// gevşek bir "kararmadı" eşiği değil: blend zincirindeki her hata onu
+    /// aşağı çekiyor ve en sinsi hâli **0x80** — ön çarpımı sRGB-kodlanmış
+    /// uzayda bırakmanın imzası (`raster::unpremultiply`'ın doc'u).
+    /// Eşiğin gevşek olduğu bir hâl bu ikisini ayırt edemezdi: set kapısı
+    /// (`/code-review`) tam bunu yakaladı — eski eşik `> 0x60` idi ve
+    /// karartılmış `0x80`'i geçiriyordu, yani sınamanın yazılı ölçütü ile
+    /// iddiası ayrışmıştı.
     #[test]
-    fn a_premultiplied_edge_does_not_darken() {
+    fn a_translucent_edge_composites_in_linear_space() {
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         const EDGE: usize = 16;
-        // Ön çarpımlı yarı saydam beyaz: rgb = a = 0x80.
-        let seen = emoji_round_trip(&r, EDGE, (0x80, 0x80, 0x80), 0x80);
-        // Zemin siyah, kaynak ön çarpımlı: sonuç lineer uzayda 0x80'in
-        // lineeri. sRGB'ye geri kodlanınca yine 0x80 civarı çıkıyor — iki kez
-        // çarpılsaydı lineerde dörtte bire, sRGB'de gözle görülür biçimde
-        // aşağı inerdi. Eşik gevşek ve bilerek: aranan şey **kararmanın
-        // yokluğu**, kesin bir bayt değil.
+        // Düz alfa: tam beyaz, yarım alfa. `raster::draw_color` dokuya bunu
+        // yazıyor (ön çarpımı kendi geri alıyor), yani sentetik yuva da
+        // üretimdeki biçimde kuruluyor.
+        let seen = emoji_round_trip(&r, EDGE, (0xff, 0xff, 0xff), 0x80);
+        // encode(0.502) ≈ 0.7367 → 0xBC. ±2: sRGB kodlaması yuvarlama taşır
+        // ve `0x80` (yanlış uzay) bu payın **çok** ötesinde.
         assert!(
-            seen.0 > 0x60,
-            "ön çarpımlı kenar karardı: {seen:02x?} (RGB kaynak çarpanı `One` olmalı)"
+            seen.0.abs_diff(0xbc) <= 2,
+            "yarı saydam kenar lineer kompozit vermedi: {seen:02x?} ≠ ~0xbc \
+             (0x80 civarı ön çarpımın sRGB uzayında kaldığını söyler)"
         );
     }
 
@@ -3853,7 +3847,7 @@ mod tests {
     /// karışırsa tanık bileşenin değil fontun tanığı olur.
     fn emoji_round_trip(r: &Renderer, edge: usize, rgb: (u8, u8, u8), alpha: u8) -> (u8, u8, u8) {
         let target = target_texture(r, edge);
-        let colour = new_colour_texture(&r.device, edge as u16, edge as u16).expect("renk dokusu");
+        let color = new_color_texture(&r.device, edge as u16, edge as u16).expect("renk dokusu");
         // Tek hücrelik yuva: dokunun sol üst köşesine tekdüze bir renk.
         let cell = 8u16;
         let slot: Vec<u8> = (0..usize::from(cell) * usize::from(cell))
@@ -3870,7 +3864,7 @@ mod tests {
         // SAFETY: `slot` 4*cell*cell bayt ve çağrı boyunca canlı; bölge
         // dokunun içinde, satır adımı tam genişlik × dört.
         unsafe {
-            colour.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+            color.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
                 region,
                 0,
                 NonNull::from(&slot[..]).cast::<c_void>(),
@@ -3919,7 +3913,7 @@ mod tests {
         // `cell.metal`'in bildirimleriyle aynı.
         unsafe {
             enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
-            enc.setFragmentTexture_atIndex(Some(colour.as_ref()), 0);
+            enc.setFragmentTexture_atIndex(Some(color.as_ref()), 0);
             enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
                 MTLPrimitiveType::TriangleStrip,
                 0,
@@ -3942,14 +3936,14 @@ mod tests {
     /// Karışsalardı tek draw call iki fragment'i birden isteyemezdi ve emoji
     /// metnin ön plan rengiyle boyanırdı.
     #[test]
-    fn a_colour_glyph_goes_to_the_colour_list() {
+    fn a_color_glyph_goes_to_the_color_list() {
         let device = MTLCreateSystemDefaultDevice().expect("Metal device");
         let mut tex = AtlasTexture {
             atlas: Atlas::new(None, 13.0, 1.0, 1.0),
             texture: None,
             instances: Vec::new(),
-            colour_texture: None,
-            colour_instances: Vec::new(),
+            color_texture: None,
+            color_instances: Vec::new(),
         };
         // Emoji sunumu varsayılan olan bir kod noktası; ızgara ona iki sütun
         // ayırıyor, yani `wide` kurulu geliyor.
@@ -3964,10 +3958,10 @@ mod tests {
         tex.prepare(&device, &glyphs, &[]).expect("prepare");
         // Karakteri taşıyan renkli bir font kurulu değilse sınama konusuz —
         // ama kaçış dalı **regresyonu görmek zorunda**: `has_color_glyphs`
-        // bozulursa `🎉` maske düzlemine düşer ve `colour_instances` yine boş
+        // bozulursa `🎉` maske düzlemine düşer ve `color_instances` yine boş
         // kalır. O hâlde maske listesinin tofu'dan başka bir şey taşımaması
         // gerekiyor; taşıyorsa renkli bir glyph maske olarak çizilmiş demektir.
-        if tex.colour_instances.is_empty() {
+        if tex.color_instances.is_empty() {
             assert_eq!(
                 tex.atlas.occupancy().0,
                 1,
@@ -3976,7 +3970,7 @@ mod tests {
             return;
         }
         assert_eq!(
-            tex.colour_instances.len(),
+            tex.color_instances.len(),
             2,
             "geniş emoji iki dörtlü üretmeli"
         );
@@ -3986,11 +3980,11 @@ mod tests {
             tex.instances.len()
         );
         assert!(
-            tex.colour_texture.is_some(),
+            tex.color_texture.is_some(),
             "renk dokusu ilk renkli yuvayla kurulmalı"
         );
         assert_eq!(
-            tex.atlas.colour_occupancy().0,
+            tex.atlas.color_occupancy().0,
             2,
             "renk düzlemi iki yuva harcamalı"
         );
@@ -4003,7 +3997,7 @@ mod tests {
 
     /// Atlas yeniden kurulunca **renk dokusu da düşüyor**.
     ///
-    /// `Atlas::ensure` atlası baştan kuruyor: `colour_next` sıfırlanıyor ve
+    /// `Atlas::ensure` atlası baştan kuruyor: `color_next` sıfırlanıyor ve
     /// doku kenarı değişebiliyor (kenar `SLOT_TARGET` ile hücre ölçüsünden
     /// türüyor). Eski kenarda kalan bir renk dokusu yeni ızgaranın
     /// köşeleriyle yazılırsa `replaceRegion` dokunun **dışına** taşar —
@@ -4027,13 +4021,13 @@ mod tests {
             ..Default::default()
         });
         render_offscreen(&r, EDGE, BACKGROUND, &frame);
-        let colour_before = r
+        let color_before = r
             .atlas
             .borrow()
             .as_ref()
-            .is_some_and(|tex| tex.colour_texture.is_some());
+            .is_some_and(|tex| tex.color_texture.is_some());
         // Renkli bir font kurulu değilse doku hiç doğmuyor ve sınama konusuz.
-        if !colour_before {
+        if !color_before {
             return;
         }
         assert!(
@@ -4057,7 +4051,7 @@ mod tests {
         let tex = atlas.as_ref().expect("atlas duruyor");
         assert!(tex.texture.is_none(), "maske dokusu düşmedi");
         assert!(
-            tex.colour_texture.is_none(),
+            tex.color_texture.is_none(),
             "renk dokusu düşmedi: eski kenarda kalan doku taşan bir replaceRegion alır"
         );
     }

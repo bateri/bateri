@@ -153,7 +153,7 @@ pub(crate) fn draw(
 /// çünkü CoreGraphics renkli glyph'i öyle veriyor ve geri almak düşük alfada
 /// hassasiyet kaybı + yuva başına bir CPU turu demek. Bedeli blend tarafında
 /// ödeniyor: o pipeline'ın RGB kaynak çarpanı `One`.
-pub(crate) fn draw_colour(
+pub(crate) fn draw_color(
     font: &CTFont,
     ch: char,
     m: Metrics,
@@ -214,7 +214,52 @@ pub(crate) fn draw_colour(
     // `draw_glyphs` renkli fontta `sbix`/`CBDT` tablosunu kendisi çiziyor;
     // ayrı bir "renkli mi" dalı CoreText'in içinde.
     unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
+    // Bağlam düşüyor ki `target`e Rust tarafından erişmek güvenli olsun:
+    // aşağıdaki geçiş CG'nin hâlâ yazabileceği bir tampona dokunmamalı.
+    drop(ctx);
+    unpremultiply(target);
     DrawResult::Drawn
+}
+
+/// Ön çarpımı geri alır: `encode(c)·a` → `encode(c)`.
+///
+/// **Zorunlu, çünkü ön çarpım yanlış uzayda yapılıyor.** CG bağlamı sRGB ve
+/// `PremultipliedLast`, yani sakladığı değer `encode(c)·a` — *kodlanmış*
+/// bileşenin alfayla çarpımı. Metal'in `RGBA8Unorm_sRGB` dokusu ise her RGB
+/// kanalını **alfadan bağımsız** çözüyor ve sRGB çözümü konveks:
+/// `decode(encode(c)·a) < decode(encode(c))·a`. Sonuç her kenar pikselinde
+/// koyuya kayıyor — yarı saydam beyaz siyah zeminde `0xBC` yerine `0x80`
+/// çıkıyor, yani **her antialias kenarında görünür bir koyu halka**.
+///
+/// Doğru yer bir lineer bağlam olurdu ama CG bunu 8 bitte vermiyor:
+/// `CGBitmapContext`'in desteklediği alfa biçimleri arasında **düz alfa
+/// yok** (`NoneSkip*` ya da `Premultiplied*`). Kalan iki yol ön çarpımı geri
+/// almak ya 16 bitlik lineer bir doku; ikincisi renk düzlemini iki katına
+/// çıkarır ve `slot_bytes_rgba`'yı format başına üçe böler.
+///
+/// **Bedeli düşük alfada hassasiyet:** `a = 1` iken bölme niceleme hatasını
+/// 255 katına çıkarıyor. Görünür değil — o pikselin ekrana katkısı da
+/// `a/255` kadar, yani hatanın ağırlığı kendisiyle birlikte sönüyor. Bedel
+/// yuva başına **bir kez** ödeniyor (raster önbellekli), kare başına değil.
+///
+/// Çıktı **düz alfa**, yani emoji pipeline'ının blend'i maske yolununkiyle
+/// **aynı** kalıyor: RGB kaynak çarpanı `SourceAlpha`. 008 phase-5'in
+/// "blend parametre değil" kararı bu yüzden geri alınmadı.
+fn unpremultiply(target: &mut [u8]) {
+    for px in target.chunks_exact_mut(4) {
+        let a = u32::from(px[3]);
+        if a == 0 {
+            // Tümden saydam pikselin rengi **yok**; bölme de tanımsız.
+            // Sıfırda bırakmak `nearest` örneklemede de doğru: o piksel
+            // hiçbir zaman ağırlık taşımıyor.
+            continue;
+        }
+        for c in &mut px[..3] {
+            // `min(255)`: `a` ile çarpım yuvarlanmış olduğu için bölme
+            // 255'i bir birim aşabiliyor (yarı saydam beyaz tam bu köşe).
+            *c = u8::try_from((u32::from(*c) * 255 / a).min(255)).unwrap_or(u8::MAX);
+        }
+    }
 }
 
 /// Kural çizgisi çeşidi — atlasta karakter gibi yuva tutar.
@@ -1417,5 +1462,87 @@ fn technical(ch: char, m: Metrics, target: &mut [u8]) {
             max_rect(target, m, 0.0, w, band.0, band.1);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ön çarpımın geri alınması: `encode(c)·a` → `encode(c)`.
+    ///
+    /// Sayılar CG'nin gerçekten yazdığı hâl: yarı saydam beyaz
+    /// (`a = 0x80`) ön çarpımlı olarak `0x80` saklanıyor ve düz alfaya
+    /// dönünce `0xff` olmak zorunda. Dönüşüm olmazsa dokudan `0x80`
+    /// okunuyor, kanal çözümü alfadan bağımsız olduğu için sonuç lineer
+    /// uzayda dörtte bire iniyor ve her antialias kenarı koyu bir halka
+    /// alıyor — GPU tarafındaki tanığı
+    /// `bt_gpu::renderer::tests::a_translucent_edge_composites_in_linear_space`.
+    #[test]
+    fn unpremultiply_recovers_straight_alpha() {
+        // Sıra: yarı saydam beyaz, tümden saydam (rengi yok), opak kırmızı,
+        // ve **en zor köşe** olan en küçük alfa.
+        let mut px = vec![
+            0x80, 0x80, 0x80, 0x80, // ön çarpımlı beyaz, a = 0.5
+            0x00, 0x00, 0x00, 0x00, // tümden saydam
+            0xff, 0x00, 0x00, 0xff, // opak kırmızı: dokunulmamalı
+            0x01, 0x00, 0x00, 0x01, // a = 1/255: bölme 0xff vermeli
+        ];
+        unpremultiply(&mut px);
+        assert_eq!(&px[0..4], &[0xff, 0xff, 0xff, 0x80], "yarı saydam beyaz");
+        assert_eq!(
+            &px[4..8],
+            &[0x00, 0x00, 0x00, 0x00],
+            "tümden saydam pikselin rengi yok: bölme tanımsız, sıfırda kalmalı"
+        );
+        assert_eq!(
+            &px[8..12],
+            &[0xff, 0x00, 0x00, 0xff],
+            "opak piksel değişmez"
+        );
+        assert_eq!(
+            &px[12..16],
+            &[0xff, 0x00, 0x00, 0x01],
+            "en küçük alfa: 255'e kırpılmalı, taşmamalı"
+        );
+    }
+
+    /// Dönüşüm **tersine çevrilebilir**: geri çarpım özgün baytı veriyor.
+    ///
+    /// Aranan şey formülün kopyası değil bir **değişmez**, yani "ne yazdıysak
+    /// GPU onu alfayla çarpınca elimizdeki ön çarpımlı bayta dönmeli". Tarama
+    /// bütün (bileşen, alfa) çiftlerini dolaşıyor — köşe elle seçilmiş bir
+    /// örnek değil — ve `min(255)`'in gerekçesini de o gösteriyor: yarı
+    /// saydam beyazda bölme 255'i bir birim aşıyor.
+    ///
+    /// Pay **±1** ve iki yuvarlamadan geliyor: biri CG'nin ön çarpımında,
+    /// biri bizim bölmemizde. Düşük alfada daha büyük bir sapma meşru ve
+    /// ölçütü o taşıyor (`a` küçükken bir bayt, lineer katkının çok üstünde
+    /// bir orana karşılık geliyor) — o yüzden pay alfaya göre ölçekli.
+    #[test]
+    fn unpremultiply_round_trips_through_the_gpu_multiply() {
+        for a in 1u32..=255 {
+            for c in 0u32..=a {
+                // Ön çarpımlı bir bileşen alfayı **aşamaz**; aşan bir girdi
+                // CG'den gelmiyor ve taramaya da girmiyor.
+                let mut px = [
+                    u8::try_from(c).expect("c ≤ 255"),
+                    0,
+                    0,
+                    u8::try_from(a).expect("a ≤ 255"),
+                ];
+                unpremultiply(&mut px);
+                // GPU'nun yaptığı: düz bileşeni alfayla çarpmak.
+                let back = u32::from(px[0]) * a / 255;
+                // Bölmenin niceleme payı: bir baytlık düz hata `a/255`
+                // kadar ön çarpımlı hataya iniyor, artı iki yuvarlama.
+                let slack = a.div_ceil(255) + 1;
+                assert!(
+                    back.abs_diff(c) <= slack,
+                    "geri çarpım özgün baytı vermedi: c={c} a={a} → {} → {back}",
+                    px[0]
+                );
+            }
+        }
     }
 }

@@ -155,4 +155,66 @@ kapı sırası: ink(cell) → tek yuva | ink(2·cell) → iki yuva | kutu
 | phase-1 | ✅ |
 | phase-2 | ✅ |
 | phase-3 | ✅ |
-| kapı | |
+| kapı | ✅ |
+
+### Kapı (2026-09-22)
+
+`/code-review` setin aralığında (`c1914d9^..HEAD`) **dört bulgu** verdi ve
+dördü de giderildi:
+
+1. **HIGH — tek hücrelik ret, iki hücrelik isteği zehirliyordu.**
+   `Half::Left` takma adı `Whole` anahtarındaki **her** kaydı geçiriyordu,
+   negatif önbelleğin `TOFU`'su dahil. Üretimdeki sıra tam bunu tetikliyor:
+   dock giriş satırını her zaman `wide: false` ile soruyor, yani prompt'a
+   yazılan bir CJK karakteri önce `Whole` olarak eleniyor ve önbelleğe
+   giriyor; Enter'dan sonra aynı karakter ızgaraya `wide: true` ile gelip
+   tofu alıyordu — setin tamamı o karakter için atlasın ömrü boyunca ölü.
+   Çare iki parçalı ve ikisi de zorunlu: takma ad `TOFU`'yu geçirmiyor **ve**
+   ret istenen yarının anahtarına da yazılıyor (yoksa o istek her karede
+   yeniden cascade yürürdü). Bekçisi
+   `a_single_cell_rejection_does_not_answer_the_wide_request` +
+   `a_rejected_wide_request_caches_its_own_key`.
+2. **MEDIUM — çizim öncesi kapasite kapısı hiç kapanmıyordu.**
+   `min(next, color_next)` ölçütü, emoji görmeyen bir oturumda `color_next`
+   ömür boyu 0 olduğu için kapıyı ölü bırakıyordu: dolu atlasta her
+   önbelleklenmemiş glyph kare başına bir `CGBitmapContext` + `draw_glyphs`,
+   taban fontta olmayan karakterde üstüne bir cascade yürüyüşü ödüyordu —
+   ana thread'de. Ölçüt maskenin sayacına döndü ve `color_next`'in yazılı
+   sözü **daraltıldı**: ayrı sayaç kapasiteyi ayırıyor, kapıyı ayırmıyor.
+3. **MEDIUM — ön çarpım yanlış uzayda yapılıyordu ve her kenar kararıyordu.**
+   CG bağlamı sRGB + `PremultipliedLast`, yani saklanan değer `encode(c)·a`;
+   doku ise her kanalı alfadan bağımsız çözüyor ve sRGB çözümü konveks, yani
+   yarı saydam beyaz siyah zeminde `0xBC` yerine `0x80` çıkıyordu. Üstelik
+   tanığın eşiği (`> 0x60`) o karartılmış değeri **geçiriyordu**, yani
+   sınamanın yazılı ölçütü ile iddiası ayrışmıştı. Çare ön çarpımı yüklemede
+   geri almak (`raster::unpremultiply`) — CG 8 bitte düz alfa vermiyor, yani
+   lineer bağlam kolu kapalı. Yan kazanç: blend maske yolununkiyle aynı
+   kaldığı için 008 phase-5'in "blend parametre değil" kararı **geri
+   alınmadı**. Tanık `≈0xBC ±2`'ye sıkıldı ve `unpremultiply`'ın kendi iki
+   bekçisi var (biri bütün (bileşen, alfa) çiftlerini tarıyor).
+4. **LOW — başarısız renk dokusu ayırması yazılmamış yuva bırakıyor.**
+   Metal yeni dokuyu sıfırlamıyor, yani sonraki bir ayırma başarılı olursa o
+   yuvalar saydam siyah değil **tanımsız bellek** okuyor. Yol bir ayırma
+   hatası gerektiriyor; bilinen sınır olarak `ColorPlane::get`'in doc'una tam
+   şekliyle yazıldı.
+
+`/audit` **iki** bulgu verdi (mercek 1, 2 ve 5 ilgisiz — `Cargo.*`,
+`settings.rs`, `assets/shell/*` ve `link.rs` diff'te yok):
+
+- **Mercek 3 (ölçüm sahipliği)** — `Atlas::slot`'ta "seçenekler ölçüldü"
+  yazılıydı ama üç seçeneğin hiçbirinin sayısı alınmadı; ayıran şey ilk
+  ikisinin **yapısal** kusuruydu. "Tartışıldı" diye düzeltildi.
+- **Mercek 7 (dil)** — yeni tanımlayıcılar `colour` yazımıyla girmişti, oysa
+  deponun yazımı `color` (`color.rs`, `color::`, `colors`) ve aynı sette
+  `has_color_glyphs` da öyle. Tamamı `color`'a normalize edildi.
+
+Mercek 4 (thread) ve 6 (hücre + shader/Rust düzeni) **temiz**: render yolunda
+yeni bir bloklayan çağrı yok (`unpremultiply` yuva başına bir kez, önbellekli),
+`.metal` tarafında **hiçbir struct değişmedi** (yeni fragment var olan `Out`'u
+kullanıyor, `static_assert`'ler yerinde) ve sınır `Cell`'inin büyümesi ölçülüp
+doc'una yazıldı (68 → 72 bayt, hiza 4).
+
+**Bir flaky düşme gözlendi ve setin konusu değil:** `pending_copy_delivers_to_the_given_board`
+tam koşuda bir kez düştü, izole koşuda iki kez geçti. Pano sınamaları genel
+`NSPasteboard`'u paylaşıyor ve yol haritasının hijyen kaleminde zaten kayıtlı
+("Pano sınamaları oluşturdukları geçici panoları bırakmıyor").

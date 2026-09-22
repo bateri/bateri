@@ -116,7 +116,7 @@ pub enum Half {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Plane {
     Mask,
-    Colour,
+    Color,
 }
 
 /// [`Atlas::slot`]'un cevabı: yuva **ve** hangi yarının kullanıldığı.
@@ -307,21 +307,26 @@ pub struct Atlas {
     /// Renk düzleminin yuva sayacı — maskenin [`Atlas::next`]'inden **ayrı**.
     ///
     /// Ayrı olmasının gerekçesi [`Plane`]'in doc'unda: uv çözüm anında
-    /// pişiyor. Yan kazanç kapasite: emoji yuvaları maskelerin havuzuna
-    /// binmiyor, yani CJK-ağır bir oturum emojiyi, emoji-ağır bir oturum da
-    /// harfleri tofu'ya düşürmüyor.
+    /// pişiyor. Yan kazanç **kapasite**: emoji yuvaları maskelerin havuzuna
+    /// binmiyor ve tersi, yani emoji-ağır bir oturum harflerin yuvasını
+    /// yemiyor.
+    ///
+    /// **Ayıran şey kapasite, kapı değil.** Çizimden önceki kapasite kapısı
+    /// maskenin sayacına bakıyor (gerekçesi [`Atlas::slot`]'ta, üç seçenek
+    /// tartışılarak), yani **dolu bir maske atlası emojiyi de reddediyor**.
+    /// Tersi olmuyor: dolu bir renk düzlemi harfleri etkilemiyor.
     ///
     /// **Tofu payı yok**: renk düzleminde tofu doğmuyor (kutu bir maske), yani
     /// sayaç 0'dan başlıyor ve `capacity()`'nin tamamı emojiye açık.
-    colour_next: u16,
+    color_next: u16,
     /// Renkli yuvanın tamponu ve ikizi; [`Metrics::slot_bytes_rgba`] boyunda.
     ///
     /// Maskenin tamponundan **ayrı**: paylaşılan bir tampon iki formatı aynı
     /// diziye sığdırmayı, yani `raster::draw`'un ön koşul assert'ini
     /// gevşetmeyi isterdi — o assert `unsafe` bloğun ön koşulu ve yanlış
     /// düzlemin tamponunu yakalayan tek şey.
-    colour_buffer: Vec<u8>,
-    colour_buffer_right: Vec<u8>,
+    color_buffer: Vec<u8>,
+    color_buffer_right: Vec<u8>,
     /// Rezident tofu kutusu; ömür boyu değişmez.
     tofu: Vec<u8>,
 }
@@ -424,9 +429,9 @@ impl Atlas {
             next: TOFU + 1,
             buffer: vec![0u8; metrics.slot_bytes()],
             buffer_right: vec![0u8; metrics.slot_bytes()],
-            colour_next: 0,
-            colour_buffer: vec![0u8; metrics.slot_bytes_rgba()],
-            colour_buffer_right: vec![0u8; metrics.slot_bytes_rgba()],
+            color_next: 0,
+            color_buffer: vec![0u8; metrics.slot_bytes_rgba()],
+            color_buffer_right: vec![0u8; metrics.slot_bytes_rgba()],
             tofu: tofu_buffer(metrics),
         }
     }
@@ -578,12 +583,27 @@ impl Atlas {
                 None,
             );
         }
-        // `Left` istendi ama karakter daha önce **tek hücrelik** kabul
-        // edilmişse cevabı o veriyor. Bu dal olmasaydı `☕` iki kez
-        // rasterize edilir, iki yuva harcar ve sağ yarısı boş kalırdı.
+        // `Left` istendi ama karakter daha önce **tek hücrelik kabul**
+        // edilmişse cevabı o veriyor. Bu dal olmasaydı `☕` iki kez rasterize
+        // edilir, iki yuva harcar ve sağ yarısı boş kalırdı.
+        //
+        // **`TOFU` bu daldan geçmiyor ve kapı zorunlu.** Tek hücrelik bir
+        // **ret** iki hücrelik isteğin cevabı **değil**: `Whole` isteği
+        // `cols = 1` ile eleniyor ve o ölçüt iki hücrelikten kesin olarak
+        // daha sıkı, yani çıkarım tek yönlü — `Left` reddedildiyse `Whole` da
+        // reddedilir, tersi değil. Kapı olmadan yol şöyle ölüyordu: dock giriş
+        // satırını **her zaman** `wide: false` ile soruyor
+        // (`bt_core::dock`'un değişmezi) ve dock'un satırı `SizeClass::Normal`,
+        // yani prompt'a yazılan bir CJK karakteri önce `Whole` olarak
+        // sorulup negatif önbelleğe giriyor; Enter'dan sonra aynı karakter
+        // ızgaraya `wide: true` ile geliyor, `Left` anahtarını bulamıyor,
+        // buradan `TOFU` alıyor ve setin tamamı o karakter için atlasın ömrü
+        // boyunca **ölü** kalıyordu.
         if want == Half::Left {
             let whole = (sprite, face, size, Half::Whole);
-            if let Some(&(slot, plane)) = self.slots.get(&whole) {
+            if let Some(&(slot, plane)) = self.slots.get(&whole)
+                && slot != TOFU
+            {
                 return (
                     Placed {
                         slot,
@@ -618,18 +638,25 @@ impl Atlas {
         // buraya düşer ve tofu alır — sol yarısı da aynı sayıdan tofu
         // aldığı için cevap tutarlı kalıyor.
         let need = u32::from(if want == Half::Left { 2u16 } else { 1 });
-        // Ölçüt **iki düzlemin boşta olanı** (`min`), maskenin sayacı değil:
-        // düzlem ancak çizim sırasında biliniyor ve yalnız maskeye bakan bir
-        // kapı, maske dolduğunda renk düzlemi bomboş olsa da **her** emojiyi
-        // tofu'ya düşürürdü — [`Atlas::colour_next`]'in yazılı sözünün
-        // ("CJK-ağır bir oturum emojiyi tofu'ya düşürmüyor") tam tersi.
-        // `min` ile kapı yalnız **ikisi de** doluyken kapanıyor; tek düzlemin
-        // dolu olduğu hâlde karar tahsisten hemen önceki düzleme duyarlı
-        // kapıya kalıyor. Bedeli o hâlde önbelleğe girmeyen karakter başına
-        // kare başına bir rasterizasyon — ölçülmedi, kabul edildi, ve
-        // yanlışın yönü güvenli: fazladan çizim, yanlış kutu değil.
-        let freest = u32::from(self.next.min(self.colour_next));
-        if freest + need > u32::from(cap) {
+        // Ölçüt **maskenin** sayacı ve bu bilinçli bir daraltma. Düzlem ancak
+        // çizim sırasında biliniyor, yani düzleme duyarlı bir ön kapı yok.
+        // Üç seçenek tartıldı (ölçülmedi — hiçbirinin sayısı alınmadı, ayıran
+        // şey ilk ikisinin **yapısal** kusuru):
+        //
+        //   - `min(next, color_next)`: kapı **hiç kapanmıyor**, çünkü
+        //     `color_next` emoji görmeyen bir oturumda ömür boyu 0 —
+        //     yani dolu atlasta her önbelleklenmemiş glyph kare başına bir
+        //     `CGBitmapContext` + `draw_glyphs`, taban fontta olmayan
+        //     karakterde üstüne bir cascade yürüyüşü ödüyordu. Ana thread'de.
+        //   - `max(..)`: dolu renk düzlemi **harfleri** tofu'ya düşürürdü.
+        //   - maskenin sayacı (bu): dolu maske atlası emojiyi de reddediyor.
+        //
+        // Üçüncüsü seçildi ve bedeli [`Atlas::color_next`]'in sözünü
+        // **daraltıyor**: ayrı sayaç *kapasiteyi* ayırıyor (emoji maskenin
+        // yuvalarını yemiyor, maske de emojininkileri) ama *kapıyı*
+        // ayırmıyor. Kesin ölçüt tahsisten hemen önce, düzlem bilindiğinde
+        // soruluyor.
+        if u32::from(self.next) + need > u32::from(cap) {
             // Dolu atlas **önbelleklenmez**: bu, fontun kalıcı bir gerçeği
             // değil atlasın geçici hâli. Kapasite hücre ölçüsünden türüyor
             // ([`SLOT_TARGET`]), yani aynı karakter başka bir puntoda yuva
@@ -728,7 +755,7 @@ impl Atlas {
                             // ötekiler maskeye. Ölçüt trait biti, aile adı
                             // değil (gerekçe [`font::has_color_glyphs`]).
                             let plane = if font::has_color_glyphs(&alt.font) {
-                                Plane::Colour
+                                Plane::Color
                             } else {
                                 Plane::Mask
                             };
@@ -753,13 +780,13 @@ impl Atlas {
                                     0.0,
                                     &mut self.buffer,
                                 ),
-                                Plane::Colour => raster::draw_colour(
+                                Plane::Color => raster::draw_color(
                                     &alt.font,
                                     ch,
                                     self.metrics,
                                     box_advance,
                                     0.0,
-                                    &mut self.colour_buffer,
+                                    &mut self.color_buffer,
                                 ),
                             };
                             if !pair {
@@ -774,13 +801,13 @@ impl Atlas {
                                         shift,
                                         &mut self.buffer_right,
                                     ),
-                                    Plane::Colour => raster::draw_colour(
+                                    Plane::Color => raster::draw_color(
                                         &alt.font,
                                         ch,
                                         self.metrics,
                                         box_advance,
                                         shift,
-                                        &mut self.colour_buffer_right,
+                                        &mut self.color_buffer_right,
                                     ),
                                 };
                                 // İki çağrı aynı fontun aynı glyph'ini
@@ -825,7 +852,7 @@ impl Atlas {
             DrawResult::Drawn
                 if u32::from(match plane {
                     Plane::Mask => self.next,
-                    Plane::Colour => self.colour_next,
+                    Plane::Color => self.color_next,
                 }) + u32::from(if half == Half::Left { 2u16 } else { 1 })
                     > u32::from(cap) =>
             {
@@ -844,7 +871,7 @@ impl Atlas {
                 // (gerekçe [`Plane`]).
                 let slot = match plane {
                     Plane::Mask => self.next,
-                    Plane::Colour => self.colour_next,
+                    Plane::Color => self.color_next,
                 };
                 // **Çift atomik.** İki yuva aynı ifadede ayrılıyor, iki
                 // anahtar aynı ifadede yazılıyor ve iki bayt dizisi aynı
@@ -855,7 +882,7 @@ impl Atlas {
                 let step = if pair { 2 } else { 1 };
                 match plane {
                     Plane::Mask => self.next += step,
-                    Plane::Colour => self.colour_next += step,
+                    Plane::Color => self.color_next += step,
                 }
                 self.slots.insert(key, (slot, plane));
                 let right = pair.then(|| {
@@ -867,7 +894,7 @@ impl Atlas {
                 let origin = self.slot_origin(slot);
                 let (bytes, right_bytes) = match plane {
                     Plane::Mask => (&self.buffer, &self.buffer_right),
-                    Plane::Colour => (&self.colour_buffer, &self.colour_buffer_right),
+                    Plane::Color => (&self.color_buffer, &self.color_buffer_right),
                 };
                 (
                     Placed { slot, half, plane },
@@ -932,7 +959,7 @@ impl Atlas {
                 }
                 let (bytes, right_bytes) = match placed.plane {
                     Plane::Mask => (&self.buffer, &self.buffer_right),
-                    Plane::Colour => (&self.colour_buffer, &self.colour_buffer_right),
+                    Plane::Color => (&self.color_buffer, &self.color_buffer_right),
                 };
                 let upload = origin.map(|origin| Upload {
                     origin,
@@ -981,12 +1008,18 @@ impl Atlas {
                         .retain(|_, &mut entry| entry != (TOFU, Plane::Mask));
                 }
                 self.slots.insert(key, (TOFU, Plane::Mask));
-                // **Çiftin iki yarısı da tofu.** Yalnız sol yarı yazılsaydı
-                // sağ yarı ikinci bir kapı turu koşar, aynı cevabı alır ve
-                // sonuç aynı olurdu — ama kapı kare bütçesinin ortasında bir
-                // cascade yürüyüşü demek. Anahtarı şimdi yazmak o turu bir
-                // kereye indiriyor.
+                // **Ret `want` anahtarına da yazılıyor** ve bu şart:
+                // yukarıdaki `key` **çözülen** yarıyı taşıyor ve ret kolunda
+                // o her zaman `Whole`, yani `Left` isteğinin kendi anahtarı
+                // hiç yazılmazdı. Takma ad artık `TOFU`'yu geçirmediğine göre
+                // o istek her karede yeniden bir cascade yürüyüşü öderdi —
+                // ana thread'de, kare bütçesinin ortasında. Üç yarının üçü de
+                // yazılıyor ve üçü de doğru: `cols = 1` ölçütü iki
+                // hücrelikten kesin olarak daha sıkı, yani `Left`
+                // reddedildiyse `Whole` da reddedilmiştir.
                 if want == Half::Left {
+                    self.slots
+                        .insert((sprite, face, size, Half::Left), (TOFU, Plane::Mask));
                     self.slots
                         .insert((sprite, face, size, Half::Right), (TOFU, Plane::Mask));
                 }
@@ -1020,8 +1053,8 @@ impl Atlas {
     ///
     /// Toplam ikisinde de aynı ([`Atlas::capacity`]): iki düzlem aynı yuva
     /// ızgarasını paylaşıyor, ayrışan yalnız piksel formatı ve sayaç.
-    pub fn colour_occupancy(&self) -> (usize, usize) {
-        (usize::from(self.colour_next), usize::from(self.capacity()))
+    pub fn color_occupancy(&self) -> (usize, usize) {
+        (usize::from(self.color_next), usize::from(self.capacity()))
     }
 
     /// Haritanın kabul ettiği en çok kayıt sayısı — pozitif ve negatif
@@ -4100,5 +4133,108 @@ mod tests {
         );
         assert_eq!(right.slot, TOFU, "sağ yarı da tofu olmalı");
         assert_eq!(a.next, next_before, "sağ yarı da yuva harcamamalı");
+    }
+
+    /// **Tek hücrelik ret, iki hücrelik isteğin cevabı değil.**
+    ///
+    /// Üretimdeki sıra tam bu: dock giriş satırını **her zaman**
+    /// `wide: false` ile soruyor (`bt_core::dock`'un değişmezi) ve dock'un
+    /// satırı `SizeClass::Normal`, yani prompt'a yazılan bir CJK karakteri
+    /// önce `Half::Whole` olarak sorulup **negatif önbelleğe** giriyor.
+    /// Enter'dan sonra aynı karakter ızgaraya `wide: true` ile geliyor. Takma
+    /// ad o tofu kaydını geçirirse setin tamamı o karakter için atlasın ömrü
+    /// boyunca ölü kalır — ve belirti sessiz: kutu çizilir, hiçbir sayaç
+    /// kıpırdamaz.
+    #[test]
+    fn a_single_cell_rejection_does_not_answer_the_wide_request() {
+        let mut a = atlas(POINT_SIZE, 1.0);
+        // 1. Dock'un sorusu: tek hücre, ve `漢` oraya sığmıyor.
+        let (whole, _) = a.slot(
+            Sprite::Char(UNKNOWN_CHAR),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        assert_eq!(
+            whole.slot, TOFU,
+            "'{UNKNOWN_CHAR}' tek hücreye sığmıyor: negatif önbelleğe girmeli"
+        );
+        // 2. Izgaranın sorusu: iki hücre. Aynı karakter artık çizilmeli.
+        let (left, upload) = a.slot(
+            Sprite::Char(UNKNOWN_CHAR),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Left,
+        );
+        assert_ne!(
+            left.slot, TOFU,
+            "tek hücrelik ret iki hücrelik isteği zehirledi"
+        );
+        assert_eq!(left.half, Half::Left, "çift beklenir");
+        assert!(upload.is_some(), "yeni çift yükleme vermeli");
+
+        // 3. **İki anahtar bir arada ve cevapları ayrı.** `Whole` hâlâ tofu
+        // (tek hücreye gerçekten sığmıyor), `Left` gerçek yuva. İkisinin de
+        // önbellekte olması şart: biri eksik olsaydı o istek her karede
+        // yeniden cascade yürürdü — ana thread'de, kare bütçesinin ortasında.
+        let key = |half| {
+            (
+                Sprite::Char(UNKNOWN_CHAR),
+                Face::Regular,
+                SizeClass::Normal,
+                half,
+            )
+        };
+        assert_eq!(
+            a.slots.get(&key(Half::Whole)),
+            Some(&(TOFU, Plane::Mask)),
+            "tek hücrelik ret önbellekte kalmalı"
+        );
+        assert_eq!(
+            a.slots.get(&key(Half::Left)).map(|&(slot, _)| slot),
+            Some(left.slot),
+            "iki hücrelik kabul de önbellekte olmalı"
+        );
+        assert_eq!(
+            a.slots.get(&key(Half::Right)).map(|&(slot, _)| slot),
+            Some(left.slot + 1),
+            "sağ yarı da önbellekte: ikinci bir kapı turu koşmamalı"
+        );
+    }
+
+    /// İki hücreye de sığmayan bir istek **kendi anahtarına** yazılıyor.
+    ///
+    /// Yazılmasaydı reddedilen bir [`Half::Left`] isteği her karede yeniden
+    /// cascade yürürdü: ret kolu anahtarı **çözülen** yarıyla kuruyor ve o
+    /// kolda çözülen yarı her zaman [`Half::Whole`], yani istenen yarının
+    /// anahtarı hiç yazılmazdı. Takma ad artık tofu'yu geçirmediğine göre
+    /// boşluk doğrudan bir kare bedeline dönüşürdü.
+    #[test]
+    fn a_rejected_wide_request_caches_its_own_key() {
+        let mut a = atlas(POINT_SIZE, 1.0);
+        // Hiçbir fontta olmayan bir kod noktası: cascade glyph veremiyorsa
+        // `NoGlyph`, veriyorsa mürekkep kapısı karar veriyor — ikisinde de
+        // sonuç tofu ve bu sınamanın sorduğu şey **anahtar**, hangi koldan
+        // geldiği değil.
+        const NOBODY: char = '\u{10FFFD}';
+        let (placed, _) = a.slot(
+            Sprite::Char(NOBODY),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Left,
+        );
+        // Kabul edilirse sınama konusuz: bu makinede o karakteri iki hücreye
+        // sığdıran bir font var demektir.
+        if placed.slot != TOFU {
+            return;
+        }
+        for half in [Half::Whole, Half::Left, Half::Right] {
+            assert_eq!(
+                a.slots
+                    .get(&(Sprite::Char(NOBODY), Face::Regular, SizeClass::Normal, half)),
+                Some(&(TOFU, Plane::Mask)),
+                "{half:?} anahtarı yazılmadı: o istek her karede cascade yürür"
+            );
+        }
     }
 }

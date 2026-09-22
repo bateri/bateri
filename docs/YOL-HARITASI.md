@@ -831,7 +831,11 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 - **Küçük hijyen.** `make kur` boş hedef dizinini denetlemiyor — bugün
   zararsız. Pano sınamaları oluşturdukları geçici panoları bırakmıyor
   (`releaseGlobally` yok) — kullanıcıya görünmez. İkisi de doğrulanmadı;
-  kullanıcı 006'ya almadı. Kaynak: 006 `phase-4c.md` → `/code-review` (8),
+  kullanıcı 006'ya almadı. **Panonun yarısı 2026-09-22'de görünür oldu:**
+  023'ün set kapısında `pending_copy_delivers_to_the_given_board` tam koşuda
+  bir kez düştü ve izole koşuda iki kez geçti — sınamalar genel
+  `NSPasteboard`'u paylaşıyor, yani bırakılan geçici panolar **flaky bir
+  kapı** üretiyor. Kullanıcıya hâlâ görünmez ama artık kapıya görünüyor. Kaynak: 006 `phase-4c.md` → `/code-review` (8),
   (9); 006 `discussion.md` → Kapsam eki.
 - **Paket dumanı.** Paketten açılan duman/ölçüm koşusu bugün elle yazılan bir
   `open` komutu; bir `Makefile` hedefi `docs/OLCUMLER.md` → `## Nasıl yeniden
