@@ -1931,13 +1931,23 @@ impl Session {
         // olurdu.
         //
         // **Hatası yönlü ve bu bilinçli:** `BUFFER`'da satır sonu (PS2,
-        // Esc-Enter) ya da geniş glyph varsa gerçek satır sayısı hesaptan
-        // büyüktür, yani **eksik** bastırılır — sızıntı o satırlarla sınırlı
-        // kalır, fazla bastırma olmaz. Tek fazla-bastırma yolu bayat ayna
+        // Esc-Enter) varsa gerçek satır sayısı hesaptan büyüktür, yani
+        // **eksik** bastırılır — sızıntı o satırlarla sınırlı kalır, fazla
+        // bastırma olmaz. Tek fazla-bastırma yolu bayat ayna
         // (`line-pre-redraw` çizimden önce koşuyor) ve o bir karelik.
+        //
+        // **Geniş glyph ve birleştirici bu listeden 024'te çıktı.** Sayı artık
+        // **sütun** (`DockState::display_cols`), karakter değil: karakterle
+        // sayıldığında geniş glyph eksik bastırıyordu (güvenli yön) ama
+        // birleştirici **fazla** bastırıyordu ve o güvensiz yön — NFD bir
+        // dosya adı (`é` = iki karakter, bir sütun) satırı tam `cols`'un
+        // altına getirdiğinde `below` bir satır fazla yuvarlıyor ve altındaki
+        // tamamlama listesinin ilk satırını gizliyordu; tam da aşağıdaki
+        // `saturating_sub(1)`'in korumaya çalıştığı satır. Set kapısı
+        // (`/code-review`) yakaladı.
         let suppress_to = suppressed_block.and_then(|input| {
             let cols = usize::from(term.columns().max(1) as u16);
-            let last = usize::from(cursor_col).saturating_add(input.chars_after_cursor);
+            let last = usize::from(cursor_col).saturating_add(input.cols_after_cursor);
             let below = u16::try_from(last.saturating_sub(1) / cols).unwrap_or(u16::MAX);
             let to = cursor_screen_row
                 .saturating_add(below)
@@ -1984,7 +1994,7 @@ impl Session {
             // yok, yani karar bugünkü karşılaştırmaya kalıyor. Kapının yönü
             // her iki kolda da aynı: şüpheli hâl bastırmayı **bırakıyor**,
             // yani en kötü ihtimalle satır iki yerde görünür.
-            let blank_mirror = input.chars_before_cursor == 0 && input.chars_after_cursor == 0;
+            let blank_mirror = input.cols_before_cursor == 0 && input.cols_after_cursor == 0;
             let at_anchor = !blank_mirror
                 || anchor_row_at_or_above(&term, to, offset, input.block)
                     .is_none_or(|anchor| anchor == to);
@@ -2003,7 +2013,7 @@ impl Session {
         let suppress_floor = suppressed_block.map_or(0, |input| {
             let cols = usize::from(term.columns().max(1) as u16);
             let above = input
-                .chars_before_cursor
+                .cols_before_cursor
                 .saturating_sub(usize::from(cursor_col))
                 .div_ceil(cols);
             cursor_screen_row.saturating_sub(u16::try_from(above).unwrap_or(u16::MAX))
@@ -5065,6 +5075,42 @@ mod tests {
         assert!(
             dock.caret.is_none(),
             "bayat aynada iki caret: ızgara gösteriyor, dock da sahipleniyor"
+        );
+        session.shutdown();
+    }
+
+    /// **Birleştirici taşıyan satır bastırılıyor** — tazelik kapısının iki
+    /// tarafı artık aynı birimi okuyor.
+    ///
+    /// Kusur kullanıcıda görüldü ve ölçüldü (2026-09-22): `❤️` yazınca giriş
+    /// satırı dock'tan ızgaraya fırlıyordu. Sebebi birim ayrışması — ayna
+    /// son `char`'ı veriyor (`U+FE0F`), ızgara hücrenin `c`'sini
+    /// (`U+2764`; birleştirici alacritty'de `CellExtra`'da) — yani kapı
+    /// **hiçbir zaman** eşleşemiyor ve her tuşta "bayat" diyordu.
+    ///
+    /// Bekçi kusurun tam tersini soruyor: caret dock'ta, ızgara imleci gizli.
+    #[test]
+    fn a_combining_mark_does_not_make_the_mirror_look_stale() {
+        let wake = Arc::new(TestWake::default());
+        // Izgarada `❤️`, aynada aynısı: `U+2764 U+FE0F`, iki karakter.
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}\\342\\235\\244\\357\\270\\217{}'; sleep 5",
+                anchored_prompt(1),
+                mirror("4p2k77iP", 2),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        let mut cells = Vec::new();
+        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        assert!(
+            cursor.caret_in_dock,
+            "birleştirici kapıyı düşürdü: satır ızgaraya fırladı ({cursor:?})"
+        );
+        assert!(
+            !cursor.visible,
+            "bastırma koştuysa ızgara imleci gizli olmalı: {cursor:?}"
         );
         session.shutdown();
     }
