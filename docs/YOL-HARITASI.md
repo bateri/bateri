@@ -370,30 +370,15 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   yerde** olmak zorunda. Dock'un giriş satırını elden geçiren ilk set doğal ev;
   021'in "küçük sınıfta kapalı" emsali burada **yetmez**, giriş satırı
   `SizeClass::Normal`.
-- **Bastırmanın tazelik kapısının ölçütü içerik, oysa zaman olmalı.** Kapı
-  aynanın güncel olduğunu ızgaranın son mürekkebiyle aynanınkini
-  karşılaştırarak sınıyor ve bu bir **vekil**: damga olmadığı için seçilmişti.
-  Vekil, zsh karakteri **dönüştürdüğü** her hâlde kırılıyor ve sınıfın adı
-  kodda zaten yazılı — "ayna ham tamponu taşıyor, ızgara ise çizilmiş hâli
-  tutuyor". **Üç örnek:** TAB (2026-09-18'de sekmeyi mürekkepsiz sayarak
-  kapandı), `^A` (bilinen sınır, `shell.rs`'te yazılı) ve **`<hex>`** —
-  kullanıcı 2026-09-22'de ekran görüntüsüyle bildirdi. Ölçüldü (`zsh -f`,
-  saf pty, `LANG=en_US.UTF-8`): zsh `🥰` U+1F970 için
-  `ESC[7m<0001f970>ESC[27m` yazıyor, yani ters videolu on ASCII hücresi;
-  aynada ise ham emoji duruyor. Kapı eşleşme bulamıyor, bastırma kalkıyor ve
-  satır **iki yerde** görünüyor (dock'ta 🥰, ızgarada `<0001f970>`, caret
-  ızgarada). Kapsam küçük ve ölçülü: 🎉 😀 📁 ❤ 漢 Ａ █ hepsi ham geçiyor,
-  yani yalnız zsh'in basılabilirlik tablosunun bilmediği yeni kod noktaları
-  (U+1F970 Unicode 10) bu yola giriyor. **`<hex>`'i zsh yazıyor, biz
-  değil** — bizde öyle bir kod yolu yok ve dock zsh'ten daha iyi gösteriyor,
-  çünkü `BUFFER`'ın ham baytlarını kendi atlasımızdan çiziyor.
-  **Çarenin yönü:** tazelik zamansal bir soru ("ayna ızgaranın son
-  yazımından sonra mı geldi") ve emsali depoda var — `observe_screen_clear`'ın
-  nesil sayacı tam bu şekle sahip: tarayıcı baytları uygulamadan **önce**
-  sayıyor, kare yolu sayacı `Term` kilidinin altında tüketiyor. Zorluk
-  satır başına damga: alacritty hücre başına yazım damgası vermiyor, yani
-  ölçüt ya imlecin satırına ya da hasar bayrağına bağlanmak zorunda. Kendi
-  setini hak ediyor.
+- **Dock kontrol karakterini çizmiyor.** zsh `Ctrl-V Ctrl-A`'yı ızgarada
+  okunur bir `^A` diye basıyor; dock ise o sütunu boş bırakırdı, o yüzden
+  025'ten beri böyle bir satır `DockStatus::Control` ile ızgarada kalıyor ve
+  caret'i de orada. Kusur değil daraltma: dock'ta yazmak isteyen kullanıcı
+  o satırda dock'u kaybediyor. Çaresi yer tutucu (`^X`, zsh'in biçimi) ve
+  024'ten beri mümkün — aritmetik sütun sayıyor. Kendi kararları var: TAB
+  kontrol ama `^I` değil boşluğa açılıyor, DEL `^?`, ESC `^[`. Yer tutucu
+  geldiği gün `Control` kolu silinir. *(Tazelik kapısının ölçütü borcu 025'te
+  kapandı: kapı önce "son girdinin aynası geldi mi" diye soruyor.)*
 - **Blok animasyonları.** 010 Karar 5 şeridin belirmesini setten **çıkardı**:
   şerit bugün anında beliriyor. Gerekçe animasyonun zorluğu değil, bedeli —
   `bt-gpu::motion` ikinci bir tüketici kazanır, `Mode::Fade`'in "indirgemenin

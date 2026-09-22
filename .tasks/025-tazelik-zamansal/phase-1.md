@@ -95,19 +95,52 @@ _Requirements: R1, R1.1, R1.2, R1.3, R2, R2.1, R2.2, R2.3, R3, R3.1, R3.2, R3.3,
 
 ## Uygulama Notları
 
-_(uygulama sırasında doldurulur)_
+- **`apply_scan` ikiye ayrıldı, imza değişmedi.** Üretimin tek çağıranı
+  (`TappedPty::read`) `apply_scan_answering(event, answers)`'ı çağırıyor;
+  `apply_scan(event)` yalnız `#[cfg(test)]` ve damgayı sıfırla veriyor.
+  Otuz küsur sınama çağrısı dokunulmadan kaldı; damgaya bakan tek şey
+  kapı ve ona `Session` sınamaları gerçek yoldan geliyor.
+- **Mevcut bir bekçi yeni kolu ilk koşuda yakaladı:**
+  `the_script_encodes_what_the_scanner_decodes`'ın tamponu bir `ESC`
+  taşıyor (`\u{1b}[0m`) ve artık `Control`. Doğru davranış — dock `ESC`'i
+  çizmiyor, zsh `^[` basıyor —, iddia `Control`'e çevrildi ve telin geri
+  kalanını sınamaya devam ediyor.
+- **İki eski bekçide nesil elle ilerletiliyor** (`key_gen.fetch_add`,
+  `screen_clears` emsali), `write`/`paste` ile değil: `/bin/sh`'in yankısı
+  ızgarayı da değiştirir ve bekçinin iddiası (`$ls-la`) oynardı.
+- **Yarış bekçisinin değişmezi sıra:** kabuk okuduğu her satırı aynaya
+  koyuyor, yani `k`. girdinin aynasının tamponu `k`; iddia `k ≤ answers ≤
+  key_gen`. Birinci eşitsizlik `send_input`'taki artışın gönderimden
+  **önce** olmasını sınıyor (danışmanın "damga `key_gen`'i aşmaz"ın totoloji
+  olduğu notu ikincisini yalnız yan iddia yaptı).
+- **Kusuru gördüğü sınandı:** zamansal terim geçici olarak `&& false` ile
+  kapatıldığında `a_transformed_char_keeps_the_caret_in_the_dock` ve
+  `a_key_answered_by_an_older_mirror_is_a_known_limit` kırmızı, `Control`
+  bekçisi yeşil (o kol zamandan bağımsız). Terim geri açıldı.
+- **Riskli phase kapısı (`/code-review`) iki düşük bulgu verdi, ikisi de
+  işlendi.** (1) Zamansal kısa devre iki eski bekçiyi sessizce
+  silahsızlandırmıştı (`a_combining_mark_does_not_make_the_mirror_look_stale`,
+  `a_blank_mirror_on_the_anchor_row_is_fresh`): nesil ilerlemediği için içerik
+  kapısına hiç düşmüyorlardı; ikisine de `key_gen` artışı eklendi, yani 024'ün
+  sıfır genişlik süzgeci ve çıpa kolu yapıştırmadan sonraki tek hakemde hâlâ
+  bekçili. (2) Ayna doğurmayan tuş (`^X` öneki, vi'de `Esc`) nesli ilerletiyor
+  ve o süre kapı içeriğe düşüyor — eski davranış, üçüncü bilinen sınır olarak
+  `discussion.md` → Karar 2'ye ve `CLAUDE.md`'ye yazıldı.
+- Doğrulama: `make hepsi` yeşil, `make test-yaris` yeşil (8 `race_*`, yeni
+  biri dahil), `make duman` `kare=29 hareket=27 icerik=2 sessiz=1754.22ms
+  kapanis=clean`.
 
 ## Checklist
 
-- [ ] `DockStatus::Control` + `decode_line` (sekme istisnası, gerekçesiyle)
-- [ ] `caret_home`/tutma ve `dock` eşleşmeleri `Control`'ü `Multiline` gibi sayıyor
-- [ ] `DockState::answers`, `clone_from` + `reset`; `apply_scan` damga
-- [ ] `SuppressedInput::answers`
-- [ ] `key_gen`: `send_input` artırıyor, `TappedPty` okuyor
-- [ ] Kapı yeni biçim, kısa devre
-- [ ] İki eski bekçi girdiyle bayatlık kuruyor; ikincisinin adı değişti
-- [ ] Yeni bekçiler: `<hex>` taze, `^A` ortada/sonda ızgara, tuş→yapıştırma sınırı, `race_*`
-- [ ] `shell.rs` durum bekçileri
-- [ ] `CLAUDE.md`, yol haritası (borç kapanır, `^X` kalemi), indeks
-- [ ] `make hepsi`, `make test-yaris`, `make duman`
+- [x] `DockStatus::Control` + `decode_line` (sekme istisnası, gerekçesiyle)
+- [x] `caret_home`/tutma ve `dock` eşleşmeleri `Control`'ü `Multiline` gibi sayıyor
+- [x] `DockState::answers`, `clone_from` + `reset`; `apply_scan` damga
+- [x] `SuppressedInput::answers`
+- [x] `key_gen`: `send_input` artırıyor, `TappedPty` okuyor
+- [x] Kapı yeni biçim, kısa devre
+- [x] İki eski bekçi girdiyle bayatlık kuruyor; ikincisinin adı değişti
+- [x] Yeni bekçiler: `<hex>` taze, `^A` ortada/sonda ızgara, tuş→yapıştırma sınırı, `race_*`
+- [x] `shell.rs` durum bekçileri
+- [x] `CLAUDE.md`, yol haritası (borç kapanır, `^X` kalemi), indeks
+- [x] `make hepsi`, `make test-yaris`, `make duman`
 - [ ] Gözle: `🥰` yazınca caret dock'ta; `Ctrl-V Ctrl-A` ızgarada

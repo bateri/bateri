@@ -309,6 +309,13 @@ yazılıyor:
   **yazım** nesli (`write_gen`) ve panel onu pahalı buldu (tarayıcının yazım
   kavramı yok, hızlı yol baytları gezmiyor). Sıklığı düşük, kayıp kalıcı değil;
   sınır olarak yazılıyor, kullanıcı bildirirse kendi kalemi.
+- **Ayna doğurmayan tuş** (set kapısı, `/code-review`). zsh bazı tuşları
+  redisplay'siz tutuyor — emacs kipinde `^X` öneki bir sonraki tuşu
+  bekliyor, vi kipinde çıplak `Esc` `KEYTIMEOUT`'u (varsayılan 0,4 s)
+  bekliyor. Nesil ilerliyor, ayna gelmiyor, kapı içeriğe düşüyor ve `🥰`
+  taşıyan satır o süre ızgaraya çıkıyor. Regresyon değil, eski davranış;
+  bu setin kapattığı belirti yalnız o dar pencerede duruyor. Kapatmanın
+  yolu "hangi tuş ayna doğurur" bilgisi ve o ZLE'nin keymap'inde.
 
 **Karar 3 — Plan tek phase, tek commit** (panelin kararı): gevşetme ile
 zamansal terim bölünürse arada kullanıcıya sıfır değer veren yeşil bir phase

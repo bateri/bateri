@@ -33,8 +33,9 @@ mi"** diye sorsun; cevap gelmediyse bugünkü içerik kapısı aynen dursun.
   - **R3.2** — Sekme istisna: bilgi taşımıyor, Ctrl-V Tab satırı dock'ta kalıyor.
   - **R3.3** — `^A` konumdan bağımsız ızgarada ve okunur (bugün yalnız son
     karakterse öyle; ortadaysa sessizce kayboluyordu).
-- **R4** — İki bilinen sınır adıyla yazılı (`discussion.md` → Karar 2): tuş +
-  hemen yapıştırma penceresi ve kabuğun dışından yazım.
+- **R4** — Bilinen sınırlar adıyla yazılı (`discussion.md` → Karar 2): tuş +
+  hemen yapıştırma penceresi, kabuğun dışından yazım ve (set kapısında
+  eklendi) ayna doğurmayan tuş.
 - **R5** — Sözleşme aynı commit'te: `CLAUDE.md`'nin bayatlık paragrafı,
   `shell.rs`'in `^A` yorumu, `docs/YOL-HARITASI.md` (borç kapanır, `^X`
   kalemi açılır, numaralar kayar).
@@ -93,5 +94,5 @@ kare yolu (Session::frame)
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | ⏳ |
+| phase-1 | ✅ |
 | kapı | ⏳ |

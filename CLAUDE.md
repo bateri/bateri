@@ -294,9 +294,31 @@ hesaplanıyor, yani satır sonu silinince bir sonraki aynada `Live`. Dock'u çok
 satırlı girişe göre **büyütmek** ayrı bir iş ve bilerek yapılmadı: bandın boyu
 ızgaranın satırlarından düşüldüğü için her yeni satır bir PTY resize'ı, yani
 kullanıcı yazarken nefes alan bir ekran demekti.
-Bayatlık kip sezerek değil iki kesin veriyi karşılaştırarak anlaşılıyor —
+Bayatlık kip sezerek anlaşılmıyor ve **önce zaman soruluyor** (025):
+kullanıcı girdisinin tek hunisi (`Session::send_input`) her gönderimde bir
+nesil artırıyor, okuyucu ayna çözüldüğü anda o nesli aynanın **yanına**
+damga olarak koyuyor (`DockState::answers`) ve damga güncel nesle eşitse
+ayna son girdinin cevabıdır — taze. Damga içerikle aynı yaprak kilit
+turunda okunuyor, yani bayat bir okuma bayat damga getirir ve karar ikinci
+soruya kalır. Gerekçe kullanıcıda görüldü: zsh bazı kod noktalarını
+**kendisi** `<hex>` diye yazıyor (`🥰` → ters videolu `<0001f970>`), ayna
+ise ham emojiyi taşıyor; içerik karşılaştırması onları hiç eşleştiremiyor
+ve caret yazarken ızgaraya sıçrıyordu. **Cevap gelmediyse** (yapıştırmanın
+`bracketed-paste-magic` kolu) kapı iki kesin veriyi karşılaştırıyor —
 ızgaranın son mürekkebi ile aynanınki (`DockState::last_ink`); yanlış alarmın
-yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez. **Aynanın hiç
+yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez. Zamansal
+sorunun **üç bilinen sınırı** var ve üçü de adıyla yazılı
+(`.tasks/025-tazelik-zamansal/discussion.md` → Karar 2): damga aynanın ne
+zaman geldiğini söylüyor, hangi girdiye cevap olduğunu değil (bir tuşun
+aynası yoldayken giden yapıştırma bir tuş boyunca "cevaplanmış" görünür), ve
+kabuğun dışından gelen yazım (arka plan işinin satıra bastığı çıktı) nesli
+oynatmıyor, düzenleme boyunca bastırılan aralıkta gizli kalıyor; zsh'in
+redisplay'siz tuttuğu tuş (`^X` öneki, vi'de çıplak `Esc`) ise nesli
+ilerletip ayna doğurmuyor ve o süre kapı içeriğe düşüyor. **Dock'un
+çizmediği kontrol karakteri** (sekme hariç) satırı `DockStatus::Control`'e
+indiriyor — `Multiline`'ın kardeşi, aynı kural: gösteremediğimiz satır
+ızgarada, okunur `^A` ile. Bu kol gelmeden önce karar kapının tesadüfüne
+kalıyordu ve `^A` satırın ortasındaysa satır dock'a gidip kayboluyordu. **Aynanın hiç
 karakteri yoksa o karşılaştırma vakuma düşüyor** (iki taraf da `None`) ve
 ayıran ikinci veri çıpanın satırı (`session::anchor_row_at_or_above`):
 karakteri olmayan bir ayna imleci prompt'un satırından aşağı itemez, yani
