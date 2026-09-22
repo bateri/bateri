@@ -4,7 +4,18 @@
 
 Dock'ta yazılan geniş karakter (emoji, CJK, fullwidth) ızgarada göründüğü
 **gibi** görünsün: iki hücre, doğru sütunda caret, tam boyanmış vurgu — ve
-hiçbir emoji giriş satırını ızgaraya fırlatmasın.
+zsh'in **ham geçirdiği** hiçbir emoji giriş satırını ızgaraya fırlatmasın.
+
+**Hedef cümlesi teslimden sonra daraltıldı** (kullanıcı ekran görüntüsüyle
+bildirdi, ölçüldü): ilk yazımı "hiçbir emoji" diyordu ve o fazla güçlüydü.
+zsh bazı kod noktalarını **kendisi** `<hex>` diye yazıyor (`🥰` U+1F970 →
+`ESC[7m<0001f970>ESC[27m`, `zsh -f` ile saf bir pty'de doğrulandı) ve o hâlde
+ayna ham emojiyi, ızgara on ASCII hücresini taşıyor — hiçbir **içerik**
+karşılaştırması ikisini eşleştiremez, yani bastırma kalkıyor ve satır iki
+yerde görünüyor. Kusur bu setin kolunda değil: kapının ölçütü içerik yerine
+**zaman** olmalı ve o ayrı bir set (`docs/YOL-HARITASI.md` → tazelik
+kapısının ölçütü). Ölçüldü ki daralmanın sınırı da belli — 🎉 😀 📁 ❤ 漢 Ａ █
+hepsi ham geçiyor, yani setin vaadi onlarda tutuyor.
 
 ## Gereksinimler
 
@@ -89,4 +100,42 @@ tazelik kapısı: last_ink sıfır genişliklileri atlıyor → iki taraf aynı 
 | phase-1 | ✅ |
 | phase-2 | ✅ |
 | phase-3 | ✅ |
-| kapı | |
+| kapı | ✅ |
+
+### Kapı (2026-09-22)
+
+`/code-review` setin aralığında (`27c94d2^..HEAD`) **tek** bulgu verdi ve o
+bir **panik**: `available == 1` iken caret'in altında iki sütunluk bir
+karakter varsa pay pencereden büyük oluyor, `caret_col - skip` negatife
+düşüyor ve çıkarma taşıyor — debug'da `bt-core`'da kare yolunda panik (depo
+bunu adıyla yasaklıyor), release'de sarma ve caret prompt işaretinin payına
+düşüyor. Kökü **bir önceki kapının düzeltmesiydi**: phase-2'de eklenen
+`caret_width` payı kendi kenarını doğurdu. Pay `min(available)` ile
+kırpıldı ve bekçisi `a_window_narrower_than_the_caret_char_does_not_underflow`
+(panik birebir üretildi, sonra geçti). Karar 2 bozulmuyor: sığmayan karakter
+yine çizilmiyor, yalnız caret son sütuna sabitleniyor.
+
+Kapı ayrıca üç şeyi **denetleyip temiz buldu** ve ikisi bu setin özüne
+dokunuyor: `unicode-width` tek sürüm (0.2.2) ve `alacritty_terminal`'la
+paylaşımlı (`cargo tree -d` temiz), yani Karar 1'in öncülü ayakta; bastırma
+aritmetiği ızgaranın `LEADING_WIDE_CHAR_SPACER` sarmasında da doğru kalıyor
+(78/79/80 sütun sınırları sınandı); ve tazelik kapısının iki yarısı artık
+`❤️` ile `漢` için aynı cevabı veriyor.
+
+`/audit` **bir** bulgu verdi (mercek 1 kayıtlı, mercek 2/5/6 ilgisiz —
+`settings.rs`, `link.rs`, `.metal` ve sınır `Cell`'i diff'te yok; mercek 3 ve
+7 temiz):
+
+- **Mercek 4 (thread ve blokaj)** — kare yolunda **iki** önek gezinti vardı
+  (`take(cursor).sum()` ve `nth(cursor)`) ve birincisi aynı zamanda
+  `cursor_col`'un **ikinci üreticisiydi**; `DockState::cursor_col` phase-2'de
+  doğmuştu ve tek sahip o olmalıydı. `render` artık onu okuyor: bir gezinti
+  ve bir üretici eksildi. Bu, bu setin kaçınmak için var olduğu "iki
+  yetkili" kokusunun **kendi kodumdaki** hâliydi ve bu oturumda ikinci kez
+  oldu (ilki `shell.rs`'in `width_of` kapanışıydı, phase-2'de aynı şekilde
+  birleştirildi).
+
+**Teslimden sonra bir kalem açıldı ve setin vaadi daraltıldı** — kullanıcı
+ekran görüntüsüyle bildirdi: zsh bazı kod noktalarını kendisi `<hex>` diye
+yazıyor ve o hâlde bastırma kalkıyor. Ayrıntısı yukarıda `## Hedef`'te ve
+`docs/YOL-HARITASI.md` → tazelik kapısının ölçütü.
