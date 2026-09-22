@@ -16,7 +16,7 @@ Set düzeni için `.claude/is-akisi/duzen.md`, projenin mimari sözleşmesi içi
 
 ## Girdi
 
-`$ARGUMENTS` = iş klasörü adı (`003-ek-fiil-indeksi`) ya da yalnız numarası /
+`$ARGUMENTS` = iş klasörü adı (`{NNN-slug}`) ya da yalnız numarası /
 slug'ı — `.tasks/` altında eşleştir. `context.md` + `discussion.md` (varsa) +
 `plan.md` (taslak dahil) oku, önerilen yaklaşımı ve alternatifleri çıkar.
 Hiçbiri yoksa dur: "önce `/rfc` ile context/discussion üret".
@@ -52,29 +52,14 @@ türü öneri kapsam dışıdır, taşıma.
 "daha basit var mı", "yükü ne" diye sorar; hiçbiri "kullanıcı ne görür" diye
 sormaz. Bir bulgunun **çözümü** kullanıcının gördüğünü değiştiriyorsa o artık
 bir ürün sorusudur ve adım 4'te kullanıcıya **sorulur**, sentezde karara
-bağlanmaz. Ölçülmüş örnek: 023'te Codebase-fit doğru bir kod kısıtı buldu
-(dock'un sütunu karakter indeksinden geliyor) ve ondan "dock'ta geniş bayrağı
-hiç kurulmasın" sonucunu çıkardı; sentez onu değişmez diye plana yazdı ve
-sonuç, kullanıcının yazdığı emojinin dock'ta kutu çıkması oldu. Kısıtın iki
-çözümü vardı ve jüri yalnız kodu koruyanı görüyordu.
+bağlanmaz. Ölçülmüş örnek: Codebase-fit doğru bir kod kısıtı buldu ve ondan
+"bu özellik o yüzeyde hiç olmasın" sonucunu çıkardı; sentez onu değişmez
+diye plana yazdı ve kullanıcı özelliği bozuk gördü. Kısıtın iki çözümü vardı
+ve jüri yalnız kodu koruyanı görüyordu.
 
-Bu projeye özgü mercek notları:
-
-- Yeni bir crate bağımlılığı öneren plan → otomatik itiraz konusu; taban
-  liste `CLAUDE.md`'dedir ve dışına çıkmak mimari karardır. Özellikle
-  "kendi VT ayrıştırıcımızı yazalım" → `alacritty_terminal` neden yetmiyor?
-- Renderer'a (`bt-gpu`) terminal semantiği koyan ya da `bt-core`'a platform
-  kütüphanesi sokan plan → itiraz: katman yönü ve platformsuzluk `CLAUDE.md`'de.
-- Her frame'de CPU tarafında hesap yapan bir efekt önerisi → itiraz: durma
-  koşulu nerede, shader parametresi olarak GPU'ya taşınamaz mı, boşta sıfır
-  kare korunuyor mu?
-- Hücre yapısına alan ekleyen plan → itiraz: yan tablo neden olmuyor?
-- `TERM` adını değiştiren ya da terminfo dağıtan plan → itiraz: SSH'daki
-  uzak makinede geri düşüş tasarlanmış mı?
-- Shell entegrasyonuna dokunan plan → üç kabuğu (zsh, bash, fish) birden
-  kapsamalı; kullanıcı rc dosyasına yazan her yol KIRMIZI.
-- Ölçüm iddiası taşıyan plan ("120 fps tutar", "gecikme düşer") → itiraz:
-  ölçüm tahmin edilmez, `/measure` ile gösterilir; plan iddiayı hiç yazmaz.
+**Projenin mercek notları** `proje.md` → Jüri mercek notları'ndadır: her
+jüriye o bölüm de verilir ve oradaki itiraz konuları merceğin kendi
+sorusuna eklenir.
 
 ## 2. Sentez (ana döngüde — devredilmez)
 

@@ -14,7 +14,7 @@ Başlamadan iki dosyayı oku — set düzeninin ve projeye özgü kuralların te
 sahibi onlardır, burada tekrarlanmaz:
 
 - `.claude/is-akisi/duzen.md` — klasör adı, numaralandırma, dosya rolleri, indeks
-- `.claude/is-akisi/proje.md` — doğrulama komutları, kalite kapısı
+- `.claude/is-akisi/proje.md` — projenin profili: komutlar, belgeler, pahalı karar sınıfı
 
 Belge biçimleri `.claude/is-akisi/sablonlar/` altındadır: yeni dosyayı ilgili
 şablondan **kopyalayarak** başlat, gövdeni oradan doldur.
@@ -35,7 +35,7 @@ kurulur.
 Sıradaki numarayı `duzen.md`'deki komutla **listeden oku** (tahmin etme),
 `.tasks/{NNN}-{slug}/` klasörünü aç ve `.tasks/README.md` indeksine **📐
 planlama** satırı ekle (indeks dosyası yoksa `duzen.md`'deki biçimle oluştur).
-İş `docs/YOL-HARITASI.md`'de bekliyorsa satırı numarayı **şimdi** alır ve
+İş projenin sıra belgesinde (`proje.md` → Belgeler) bekliyorsa satırı numarayı **şimdi** alır ve
 sete bağlanır; açılmamış satırlar numara taşımaz, yani araya giren set başka
 hiçbir satırı kaydırmaz ve "kayma" notu yazılmaz. Yeni set mevcut bir setin yerine geçiyorsa eskisini
 arşivle (yine `duzen.md`).
@@ -53,18 +53,15 @@ yaz. Tek bariz yaklaşım varsa atla, doğrudan plan.md'ye geç. Biçim seçimi
 
 ## 6. Muhakeme paneli — yalnız pahalı kararda
 
-Panel **varsayılan olarak kapalı**. 21 setin muhakeme tablolarında verdikt
-sözcüğü 71 kez geçiyor: 65 SORUNLU, 5 KIRMIZI, 1 TEMİZ; mercek düzeyinde
-gerçek KIRMIZI 011 ve 012'de, 022'ninki bir merceğin hücre içinde. Hemen her sette "sorunlu" diyen bir
-kapı ayırt etmiyor ve her koşu üç `opus` ajanı açıyor. Kapı kalkmadı,
+Panel **varsayılan olarak kapalı**. Sayıldı: muhakeme tablolarındaki
+verdiktlerin neredeyse tamamı SORUNLU, yani hemen her sette "sorunlu" diyen
+bir kapı ayırt etmiyor ve her koşu üç güçlü ajan açıyor. Kapı kalkmadı,
 **pahalı karar sınıfına daraltıldı**.
 
 - `/plan-review {NNN-slug}` koş, **ancak** discussion.md'de birden çok
-  yaklaşım var **ve** seçim şunlardan birine dokunuyorsa: yeni crate
-  bağımlılığı, katman yönü (`bt-core`'a platform, `bt-gpu`'ya semantik),
-  `Cell`'e alan, `TERM`/terminfo, shell betiği (`assets/shell/`), her karede
-  CPU hesabı. Sınıf **değişecek dosyaya** göre okunur, konunun adına göre
-  değil: 025 "shell entegrasyonu" diye panel açtı ama betiğe hiç dokunmadı.
+  yaklaşım var **ve** seçim projenin pahalı karar sınıfına dokunuyorsa
+  (`proje.md` → Pahalı karar sınıfı). Sınıf **değişecek dosyaya** göre
+  okunur, konunun adına göre değil.
 - Geri kalan her sette atla; kullanıcı "bu tasarım temiz mi" derse koşulur.
 - Panel `KIRMIZI` verirse (yaklaşım değişmeli) → kullanıcıya **gitmeden**
   seçenekleri yeniden kur, gerekirse paneli tekrarla. Kullanıcı ikinci tura
@@ -74,11 +71,12 @@ kapı ayırt etmiyor ve her koşu üç `opus` ajanı açıyor. Kapı kalkmadı,
 
 Bir jüri bulgusu **üç** parça taşır ve üçü aynı yetkide değil:
 
-1. **Gözlem** — kod hakkında olgu ("dock'un sütunu karakter indeksinden
-   geliyor, spacer hücresi yok"). Jürinin yetkisi; doğrula ve kabul et.
-2. **Çıkarım** — ne kırılır ("iki hücrelik glyph komşusunun üstüne boyar").
+1. **Gözlem** — kod hakkında olgu ("bu modül konumu öğe sırasından
+   hesaplıyor, öğenin genişliğini görmüyor"). Jürinin yetkisi; doğrula ve
+   kabul et.
+2. **Çıkarım** — ne kırılır ("geniş bir öğe komşusunun üstüne biner").
    Jürinin yetkisi; doğrula ve kabul et.
-3. **Çözüm önerisi** — ne yapılmalı ("geniş bayrağı hiç kurulmasın").
+3. **Çözüm önerisi** — ne yapılmalı ("o öğe o yüzeyde hiç olmasın").
    **Jürinin yetkisi DEĞİL.** Bir seçimdir ve çıkarımı karşılamanın birden
    fazla yolu varsa onu seçmek jüriye ait değildir.
 
@@ -101,12 +99,11 @@ ya da çıkarımı karşılamanın yolları arasında seçim gerekçesiz kalıyo
 varsayılan **kodu açmaktır** — kısıtı zorunluluk sanıp özelliği daraltmak
 değil. Aynı kural talebin kendisi için de geçerli: kapsamda bir boşluk varsa
 kullanıcının lehine okunur, kendi işini kolaylaştıran yönde değil.
-**Ölçülmüş bedeli var** (023): jürinin bir kod kısıtından çıkardığı
-"dock'ta geniş bayrağı hiç kurulmasın" önerisi karar sanıldı, plana
-gereksinim ve koda değişmez olarak girdi; sonuç kullanıcının yazdığı
-emojinin dock'ta kutu çıkması ve bazı satırların ızgaraya fırlaması oldu.
-Kısıtın ikinci çözümü (dock sütun saysın) ilk turda konuşulsaydı bir set
-daha az yazılırdı.
+**Ölçülmüş bedeli var:** jürinin bir kod kısıtından çıkardığı "bu özellik o
+yüzeyde hiç olmasın" önerisi karar sanıldı, plana gereksinim ve koda
+değişmez olarak girdi; kullanıcı özelliği bozuk gördü ve kısıtın ikinci
+çözümü (kodu açmak) için ayrı bir set yazıldı. İlk turda konuşulsaydı o set
+hiç açılmazdı.
 
 **Dil de denetlenir:** "yapısal olarak zorunda", "temsil edilemiyor", "mümkün
 değil" ifadeleri bir kısıtı zorunluluğa çeviriyor ve o çeviri seçimi görünmez
@@ -121,8 +118,8 @@ kılıyor. Yazmadan önce sor: *bugünkü aritmetikle* mi zorunda, gerçekten mi
 **Kullanıcıya yalnız ürün kararı sorulur** — sonucu ekranda, klavyede ya da
 ayar dosyasında ayrışan seçim. Teknik seçimi (hangi sayaç, hangi yapı, hangi
 kilit) sen verirsin ve gerekçesiyle `## Karar`'a yazarsın; kullanıcı onu
-değerlendiremez ve sormak kararı ona yıkmaktır (025'te `^A` sorusu böyle
-geldi, cevap "bilmiyorum" oldu). Belirsizse **kullanıcının göreceği sonucu**
+değerlendiremez ve sormak kararı ona yıkmaktır (teknik bir soru sorulduğunda
+cevap "bilmiyorum" oldu). Belirsizse **kullanıcının göreceği sonucu**
 sade dille, örnekle sor — mekanizmayı değil.
 
 discussion.md varsa: kararı ve varsa ürün sorusunu özetle, panel koştuysa
@@ -155,11 +152,11 @@ Kullanıcı planı onaylayıp "phase'e geç" dediğinde `phase-1.md` üret, gere
 > aşınca ölü kural diye kaldırıldı — ölçü boyut değil, kodun tekrarı.)
 
 Phase bölmenin ölçüsü: her phase **tek başına doğrulanabilir** olmalı
-(`make hepsi` yeşil bırakmalı) ve tek commit'e sığmalı. Doğrulanamayan bir
+(kapı komutunu yeşil bırakmalı) ve tek commit'e sığmalı. Doğrulanamayan bir
 ara durum bırakan bölme yanlıştır — ya birleştir ya da sınırı kaydır. Tersine,
 tek commit'lik düzeltme phase olmaz (`duzen.md` → Ek phase eşiği).
 
-Riskli phase kutusunu (`proje.md` → Kalite kapısı) yalnız koşulu tetikleyecek
+Riskli phase kutusunu (`duzen.md` → Kalite kapısı, tetikleyiciler `proje.md`'de) yalnız koşulu tetikleyecek
 phase'e koy — **son phase hariç**: orada set kapısı onu kapsıyor. Set
 sonundaki kapı `plan.md → ## Durum`'un `kapı` satırıdır, phase
 checklist'lerine yazılmaz.
@@ -168,5 +165,5 @@ checklist'lerine yazılmaz.
 gereksinimlere bağlanır; `/implement` ön uçuşta kapsanmayan gereksinim / öksüz
 phase arar. Tek phase'li sette satır yazılmaz.
 
-Kare, gecikme ya da bellek iddiası phase'e **yazılmaz** (`proje.md` →
-Doğrulama): ölçülmemiş sayı yasak, "ölçüm bekliyor" kalemi de yok.
+Performans iddiası phase'e **yazılmaz** (`duzen.md` → Kalite kapısı →
+Ölçüm): ölçülmemiş sayı yasak, "ölçüm bekliyor" kalemi de yok.

@@ -14,7 +14,7 @@ _Requirements: R1, R2.1_
 
 ## Değişiklikler
 
-- **`crates/{crate}/src/{dosya}.rs`** — {ne değişir; korunacak sınır ya da
+- **`{yol/dosya}`** — {ne değişir; korunacak sınır ya da
   sözleşme varsa o}
 
 ## Kabul
@@ -29,11 +29,11 @@ _Requirements: R1, R2.1_
 ## Checklist
 
 <!-- [x] yapıldı · [~] waive/atlandı (yanına gerekçe) · [ ] yapılmadı.
-     Kutular silinmez. Riskli phase kutusu yalnız proje.md → Kalite kapısı →
-     "Riskli phase" koşulu tetiklenirse kalır; tetiklenmiyorsa ya da bu SON
+     Kutular silinmez. Riskli phase kutusu yalnız proje.md → Riskli phase
+     tetikleyicilerinden biri tetiklenirse kalır; tetiklenmiyorsa ya da bu SON
      phase'se (set kapısı onu kapsıyor) üretirken sil. -->
 
 - [ ] {Yapılacak iş}
 - [ ] Test: {test senaryosu}
-- [ ] Doğrulama geçti (`make hepsi` + koşullu komutlar)
+- [ ] Doğrulama geçti (kapı komutu + tetiklenen koşullu komutlar)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi

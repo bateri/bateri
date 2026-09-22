@@ -44,6 +44,7 @@ denetim:
 	done; \
 	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshenv|\.zprofile|\.zshrc|\.zlogin|\.zlogout|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "denetim: shell entegrasyonu kullanıcı rc dosyasına yazıyor"; fail=1; fi; \
 	git diff --quiet HEAD -- Cargo.lock $$(git ls-files '*Cargo.toml') || echo "denetim: uyarı — Cargo.toml/Cargo.lock HEAD'den farklı; bağımlılık kararı kayıtlı mı?"; \
+	if grep -rnEi "bateri|bt-(core|gpu|shell|atlas)|make [a-z]|cargo|crates/|assets/|metal|olcumler|yol-harita|arastirma|ayarlar\.md|zsh|dock|emoji|glyph|\bcrate|alacritty|terminfo|origin/main" .claude/skills .claude/is-akisi/duzen.md .claude/is-akisi/sablonlar; then echo "denetim: genel iş akışı dosyasında proje izi var — yeri .claude/is-akisi/proje.md"; fail=1; fi; \
 	test $$fail -eq 0 && echo "denetim: temiz"
 
 clippy:

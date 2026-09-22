@@ -1,151 +1,174 @@
 # Proje profili — bateri
 
-İş akışı skill'lerinin **projeye özgü** kısmı burada durur: skill gövdeleri
-"doğrula", "kapıdan geçir" der, hangi komut olduğunu burası söyler. Başka bir
-projeye taşırken bu dosyayı (ve `/audit`, `/measure` merceklerini) yeniden yaz.
+Skill'ler ve `duzen.md` **projeden bağımsızdır**: "kapı komutunu koş",
+"kilit dosyası değiştiyse", "pahalı karar sınıfı" derler; bu projede neyin o
+olduğunu **yalnız burası** söyler. Başka bir projeye taşırken yeniden yazılan
+dosyalar bu dosya, `olcum.md` ve `.claude/settings.json`'dur — skill'lere,
+`duzen.md`'ye ve şablonlara dokunulmaz. Genel dosyalara proje adı, komutu ya
+da yolu girerse `make denetim` kırmızı düşer.
 
 Proje sözleşmesinin tamamı `CLAUDE.md`'dedir ve **burada tekrarlanmaz**; her
 ajan onu zaten yükler, iki kopya hem bağlam hem drift demektir.
 
-> Girdisi henüz olmayan hedef: `terminfo` (shell/TERM seti). Koşunca "henüz
-> yok" deyip kırmızı düşer. Tetiklenirse doğrulama "yeşil" değil "koşamadı"dır:
-> `[~]` işaretlenir, phase bitmiş sayılmaz. Hedef gerçek olunca bu not silinir.
-
 ## İçindekiler
 
-- Doğrulama (definition of done)
-- Kalite kapısı
+- Belgeler
+- Doğrulama
+- Dosya sınıfları
+- Riskli phase tetikleyicileri
+- Set kapısı ekleri
 - Teslim
-- Bu depoya özgü tuzaklar
+- Pahalı karar sınıfı
+- Jüri mercek notları
+- Otonom şerit ekleri
+- Denetim mercekleri
+- Tuzaklar
 
-## Doğrulama (definition of done)
+## Belgeler
 
-Bir phase, doğrulama yeşil olmadan bitmiş sayılmaz.
+| rol | dosya |
+|---|---|
+| proje sözleşmesi | `CLAUDE.md` |
+| sıra belgesi (açılmamış işler, sırası ve gerekçesi) | `docs/YOL-HARITASI.md` |
+| ölçüm defteri (sayının tek sahibi) | `docs/OLCUMLER.md`; ölçüm türleri ve kancaları `olcum.md` |
+| referans ürün envanteri | `docs/ARASTIRMA.md` (Metalterm; tarihli kayıt, bilerek eskir) |
+| ayar belgesi | `docs/AYARLAR.md` |
+
+## Doğrulama
 
 | durum | komut |
 |---|---|
-| her phase | `make hepsi` — sürüm + `fmt` + `denetim` + `clippy -D warnings` + `test` |
+| **kapı komutu** — her phase | `make hepsi` — sürüm + `fmt` + `denetim` + `clippy -D warnings` + `test` |
 | hızlı iç döngü | `cargo test -p {crate}` |
+| mekanik denetim (kapının içinde) | `make denetim` — katman yönü, `bt-core`'da gerekçesiz panik, rc dosyasına yazma, bağımlılık uyarısı, genel iş akışı dosyalarının projeden bağımsızlığı |
 | `.metal` ya da `build.rs` değiştiyse | `make shader` — cargo'nun bayatlık takibini atlayan kanarya; derleme reçetesi yalnız `build.rs`'te |
-| `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz yok, bkz. üstteki not* |
-| `assets/bundle/*`, `assets/shell/*`, `crates/bateri` ya da `kur` hedefi değiştiyse | `make kur` — **ürünü** denetler, düşerse çıkış 2; neyi denetlediği `Makefile`'ın `kur` yorumunda. İmza yok (006 Karar 6). `assets/shell/*` aynı satırda, çünkü tetiklediği komut aynı: betik de pakete kopyalanıp `cmp` ile denetleniyor ve `make hepsi` yalnız **girdiyi** görüyor |
+| `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz girdisi yok*: koşunca "henüz yok" deyip kırmızı düşer; tetiklenirse doğrulama "yeşil" değil "koşamadı"dır, `[~]` işaretlenir |
+| `assets/bundle/*`, `assets/shell/*`, `crates/bateri` ya da `kur` hedefi değiştiyse | `make kur` — **ürünü** denetler, düşerse çıkış 2; neyi denetlediği `Makefile`'ın `kur` yorumunda. İmza yok. `assets/shell/*` aynı satırda, çünkü betik de pakete kopyalanıp `cmp` ile denetleniyor ve `make hepsi` yalnız **girdiyi** görüyor |
 | PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — iki zamanlama profili, ikisi de geçmeli. TSan nightly ister ve araç zinciri pin'li değil: "TSan koşmadı" waive değil, bilinen sınırdır |
-| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — `kare`, `hucre`, `glif`, `kural`, **`hareket`** > 0, **`icerik`** ≤ `IDLE_FRAME_LIMIT` ve **`sessiz`** ≥ `QUIET_FLOOR` olmalı (üst sınırın operandı `kare` değil: animasyon `kare`'yi meşru olarak şişirir; alt sınırın kuralı ters — sağlıklı koşuda `sessiz` büyük, `sessiz=none` kırmızı); ayrıca deadline'da animasyon **yerleşmiş** olmalı — yerleşmemişse satır hiç basılmaz (`Verdict::MotionUnsettled`). shell sabit olduğu için `hucre=8 glif=6 kural=15` beklenir. Dördü de CPU sayacıdır: GPU'nun gerçekten boyadığını `make hepsi`'deki offscreen sınamalar, pencerenin görünürlüğünü hiçbiri kanıtlamaz. Jetonların anlamı `Makefile`'ın `duman` yorumunda ve `Report::token_line`'da. Başsız ortamda "ATLANDI" → `[~]`. `IDLE_FRAME_LIMIT` ölçülmüş bir sözleşmedir: değişikliği kod phase'lerinden **ayrı** commit'le iner, yoksa regresyonu maskeler |
+| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — `kare`, `hucre`, `glif`, `kural`, **`hareket`** > 0, **`icerik`** ≤ `IDLE_FRAME_LIMIT` ve **`sessiz`** ≥ `QUIET_FLOOR` olmalı; deadline'da animasyon **yerleşmiş** olmalı (yerleşmemişse satır hiç basılmaz, `Verdict::MotionUnsettled`). shell sabit olduğu için `hucre=8 glif=6 kural=15` beklenir. Dördü de CPU sayacıdır: GPU'nun boyadığını `make hepsi`'deki offscreen sınamalar, pencerenin görünürlüğünü hiçbiri kanıtlamaz. Jetonların anlamı `Makefile`'ın `duman` yorumunda ve `Report::token_line`'da. Başsız ortamda "ATLANDI" → `[~]`. `IDLE_FRAME_LIMIT` ölçülmüş bir sözleşmedir: değişikliği kod phase'lerinden **ayrı** commit'le iner |
 
-**Türetilmiş dosya yoktur** (`default.metallib` `target/` altında kalır).
-Buradaki karşılığı "`Cargo.lock` değişti mi"dir — değiştiyse ya kayıtlı bir
-bağımlılık kararıdır ya da kusurdur; `make denetim` uyarır.
+## Dosya sınıfları
 
-**Ölçüm bir kapı değildir** ve ölçülmemiş sayı yazılmaz (`CLAUDE.md`). Kare,
-gecikme ya da bellek iddiası taşıyan phase o iddiayı **hiç yazmaz**; ölçmek
-isteyen kullanıcı `/measure` çağırır ve sonuç `docs/OLCUMLER.md`'ye girer.
-"Ölçüm bekliyor" diye bir kalem yoktur: 2026-09-22'ye kadar vardı ve bir
-phase'in iddiasını setin durumuna çevirip sekiz seti süresiz 🔨'da tuttu.
+- **Derlenmeyen dosyalar** — `.tasks/`, `docs/`, `.claude/`, `CLAUDE.md`.
+  Son yeşil kapıdan beri yalnız bunlar değiştiyse kapı yeniden koşulmaz.
+- **Kilit dosyası** — `Cargo.lock` (bağımlılık bildirimi `Cargo.toml`'lar).
+  Değiştiyse ya kayıtlı bir bağımlılık kararıdır ya da kusurdur; `make
+  denetim` uyarır. Depoya **girer**, kirlilik değildir.
+- **Türetilmiş dosya yoktur** (`default.metallib` `target/` altında kalır).
+- **Depoya girmeyenler** — `target/`, `*.metallib`, `*.dSYM`, `*.dmg`,
+  `*.app`, `*.icns`, `*.iconset/`, `*.trace`, `.DS_Store`; kişisel/geçici
+  örnekleri `~/.config/bateri` kopyası ve ekran kaydı. İkonun kaynağı
+  (`assets/bundle/bateri.png`) **girer**.
 
-## Kalite kapısı
+## Riskli phase tetikleyicileri
 
-İki katman: ucuz olanı her phase'de, pahalı olanı sette bir kez.
+Doğrulama tablosundan türer, ayrı tutulmaz: phase `make test-yaris`
+(paylaşılan durum) ya da `make shader` (`#[repr(C)]` ↔ `.metal` düzeni)
+gerektirdiyse, ya da kilit dosyası değiştiyse.
 
-**Her phase — doğrulama.** Yukarıdaki tablo. `make hepsi` `make denetim`'i
-içerir; proje kurallarının mekanik yarısı (katman yönü, `bt-core`'da panik
-yolu, rc dosyasına yazma, bağımlılık uyarısı) her phase'de ajansız koşar.
+## Set kapısı ekleri
 
-**Riskli phase — ayrıca `/code-review`.** Phase şunlardan birini tetiklediyse
-kendi diff'i phase sonunda incelenir: `make test-yaris` gerekti (paylaşılan
-durum), `make shader` gerekti (`#[repr(C)]` ↔ `.metal` düzeni), `Cargo.lock`
-değişti. Bu üçünde hata sessizdir ve sonraki phase'ler onun üstüne kurulur;
-geri kalan her şey set sonunu bekler. Liste doğrulama tablosundan türer, ayrı
-tutulmaz.
-
-**Set sonunda — bir kez**, son phase'in kodu doğrulandıktan sonra ve **o
-phase'in commit'inden önce**; düzeltmeler, `kapı` ✅ ve indeksin 🟢'si son
-phase'in commit'ine girer. Ayrı kapı ya da damga commit'i yok: 025'te tek bir
-kod commit'inin etrafında altı defter commit'i birikti.
-
-1. `/code-review` — setin commit aralığı + çalışma ağacı (`duzen.md` → Set
-   aralığı). Son phase'in riskli phase incelemesi ayrıca koşmaz: bu
-   inceleme onu kapsıyor ve aynı diff'i iki kez incelemek 025'te iki kez
-   aynı sonucu verdi.
-2. `/audit` — `make denetim`'in kapsamadığı mercekler, yalnız ilgili dosya
-   değiştiyse.
-3. Bulgu düzeltildiyse `make hepsi` yeniden.
-4. **Gözle kontrol** — pencereyi açan davranış değiştiyse kapanış mesajı
-   kullanıcıya **neye bakacağını** tek satırla söyler (sahne + beklenen
-   görüntü). Kapı koda bakar, kullanıcı ekrana: 017'de üç kapı da koştu ve
-   teslimden sonra beş kusuru kullanıcının gözü buldu. Bu bir defter satırı
-   değil, devir mesajının bir cümlesidir; 🟢'yi bekletmez.
-   **Sahne yüzey saymak zorunda.** Hücre çizen üç yüzey var — ızgara, dock ve
-   doldurma bandı — ve davranış değiştiyse üçünde de ne görüldüğü söylenir.
-   Farklı görünüyorlarsa o fark bir **gerekçe** ister, "yapısal olarak böyle"
-   değil. 023 bunu kaçırdı: teslim satırındaki dört sahnenin dördü de
-   `echo`'ydu, yani dördü de ızgaraydı; emojinin **yazıldığı** yüzey listede
-   hiç yoktu ve kusuru kullanıcı buldu. Ölçüt basit — kullanıcı bu değişikliği
-   nerede *yaparak* görecek, yalnız nerede *okuyarak*?
-
-`/simplify` kapının parçası değildir; kullanıcı isterse koşar. Kapının neden
-phase başından set sonuna taşındığı `.claude/README.md` → Hafifletme.
-
-### Kapıyı kim koşturur
-
-**Ajan koşturur, `Skill` aracıyla ve ön planda.** Kapıyı arka planda başlatıp
-yoklamak yasaktır (`implement/references/otonom-serit.md` → Ajan kuralları).
-Skill çağrısı gerçekten hata verirse `code-reviewer` subagent'ı; o da olmazsa
-**dur ve kullanıcıdan iste**. Waive *bulgu* içindir: kapı hiç koşmadıysa bu
-waive değil, atlanmış kapıdır.
-
-"Yok" demeden önce aramanın o şeyi bulabilecek türden olduğunu göster:
-yerleşik skill'ler `.claude/skills/` altında durmaz.
-
-### İz
-
-| işaret | anlamı |
-|---|---|
-| `- [x]` | yapıldı |
-| `- [~]` | **waive / atlandı** — yanına gerekçe |
-| `- [ ]` | yapılmadı |
-
-Phase'in izi checklist'indedir (doğrulama, riskli ise `/code-review`). Set
-kapısının izi `plan.md → ## Durum` tablosunun `kapı` satırıdır.
-Kutu silinmez: koşmayan kapının kutusu `[~]` ve gerekçesiyle durur, silinen
-kutu atlandığını hiçbir yerde göstermez.
+- **`/audit` var**: set kapısında `/code-review`'dan sonra koşar, mercekleri
+  aşağıda (Denetim mercekleri).
+- **Gözle kontrolün yüzeyleri.** Hücre çizen üç yüzey var — ızgara, dock ve
+  doldurma bandı — ve davranış değiştiyse devir mesajı üçünde de ne
+  görüldüğünü söyler. Farklı görünüyorlarsa o fark bir **gerekçe** ister,
+  "yapısal olarak böyle" değil. Ölçüt: kullanıcı bu değişikliği nerede
+  *yaparak* görecek, yalnız nerede *okuyarak*? (023'te dört sahnenin dördü de
+  ızgaraydı; emojinin **yazıldığı** dock listede yoktu ve kusuru kullanıcı
+  buldu.)
 
 ## Teslim
 
-Tek branch: `main`. Dev branch, migration, container, panel yok.
+- Tek branch: `main`; push komutu `git push origin main`. Dev branch,
+  migration, container yok.
+- Commit iletisi **Türkçe, emir kipinde, tek satırlık özet** ("Glyph
+  atlasını tek dokuya topla ve tahliyeyi ölç").
+- Geri alma her sette `git revert`.
 
-- Commit iletisi **Türkçe, emir kipinde, tek satırlık özet**
-  ("Glyph atlasını tek dokuya topla ve tahliyeyi ölç"). Set commit'inde
-  gövdenin ilk satırı `{NNN-slug} phase-{N}` (set kapısı son phase'in
-  commit'ine girdiği için ayrı bir `kapı` satırı yok; tek istisna kesilmiş bir
-  akışın ya da reddedilen bir waive'in sonradan düzeltmesi, o `{NNN-slug}
-  kapı`): hash dosyaya yazılmaz, phase'in commit'i `git log --grep` ile bu satırdan
-  bulunur.
-- **Phase = tek commit:** kod, phase checklist'i, `plan.md ## Durum` ✅ ve
-  (ilk phase'de) indeksin 🔨'ü birlikte girer; **son phase'de** set kapısının
-  düzeltmeleri, `kapı` ✅ ve indeksin 🟢'si de. Defter için ayrı commit
-  atılmaz.
-- **Her bilgi tek yerde.** Set dosyalarının rolleri ayrık: `discussion.md`
-  kararı ve gerekçesini, `plan.md` hedefi ve kapsamı, `phase-{N}.md` hangi
-  dosyada ne değişeceğini, kod yorumu yerel "neden"i taşır. Aynı paragraf
-  ikinci bir dosyaya kopyalanmaz, işaretçiyle bağlanır. `CLAUDE.md` **bugünkü
-  sözleşmedir** ve her oturumun başında baştan sona okunur: yeni bir kural
-  oraya kural + tek cümle gerekçe + işaretçi olarak girer; tarihçe, ölçüm
-  anlatısı, reddedilen seçenekler ve bilinen sınır listeleri `.tasks/`'ta
-  kalır. 025 aynı sınır listesini beş dosyaya yazdı ve belgesi kodundan
-  büyük çıktı (706'ya 426 satır).
-- **Set defteri yok.** Bir dönem `teslim.md` vardı (doğrulama + yayın
-  checklist'i + geri alma); 21 sette 21 kez "revert et" dedi, 61 manuel adım
-  biriktirdi ve 007'den sonraki 207 commit'in 71'i yalnız defter oldu.
-  Yayın etkisi olan şeyler (`Cargo.lock`, ayar şeması, `TERM`, shell) zaten
-  `/audit`'in mercekleri ve otonom şeridin eskalasyon listesi; geri alma her
-  sette `git revert`. Kapanışın izi `plan.md → ## Durum` ve indeks satırıdır.
-- Push `/ship` kararıdır, `/implement` push etmez. `make hepsi` yeşil olmadan
-  push yok.
-- Depoya girmeyenler: `target/`, `*.metallib`, `*.dSYM`, `*.dmg`, `*.app`,
-  `*.icns`, `*.iconset/`, `.DS_Store`. İkonun kaynağı
-  (`assets/bundle/bateri.png`) ve `Cargo.lock` **girer**.
+## Pahalı karar sınıfı
 
-## Bu depoya özgü tuzaklar
+`/plan-review` paneli yalnız birden çok yaklaşım varken **ve** seçim şunlardan
+birine dokunuyorsa açılır (`/rfc` adım 6). Sınıf **değişecek dosyaya** göre
+okunur, konunun adına göre değil (025 "shell entegrasyonu" diye panel açtı ama
+betiğe hiç dokunmadı):
+
+- yeni crate bağımlılığı (`Cargo.toml`)
+- katman yönü — `bt-core`'a platform kütüphanesi, `bt-gpu`'ya terminal
+  semantiği
+- `Cell`'e alan (`bt-core/src/lib.rs`'in boyut assert'i)
+- `TERM` / terminfo (`assets/terminfo/`)
+- shell betiği (`assets/shell/`)
+- her karede CPU hesabı (kare yolu: `Session::frame`, `bt-gpu`'nun encode'u)
+
+## Jüri mercek notları
+
+`/plan-review`'un üç jürisine ek olarak verilen, bu projeye özgü itiraz
+konuları:
+
+- Yeni bir crate bağımlılığı öneren plan → otomatik itiraz konusu; taban
+  liste `CLAUDE.md`'dedir ve dışına çıkmak mimari karardır. Özellikle
+  "kendi VT ayrıştırıcımızı yazalım" → `alacritty_terminal` neden yetmiyor?
+- Renderer'a (`bt-gpu`) terminal semantiği koyan ya da `bt-core`'a platform
+  kütüphanesi sokan plan → itiraz: katman yönü ve platformsuzluk `CLAUDE.md`'de.
+- Her karede CPU tarafında hesap yapan bir efekt önerisi → itiraz: durma
+  koşulu nerede, shader parametresi olarak GPU'ya taşınamaz mı, boşta sıfır
+  kare korunuyor mu?
+- Hücre yapısına alan ekleyen plan → itiraz: yan tablo neden olmuyor?
+- `TERM` adını değiştiren ya da terminfo dağıtan plan → itiraz: SSH'daki
+  uzak makinede geri düşüş tasarlanmış mı?
+- Shell betiğine dokunan plan → üç kabuğu (zsh, bash, fish) birden
+  kapsamalı; kullanıcı rc dosyasına yazan her yol KIRMIZI.
+- Ölçüm iddiası taşıyan plan ("120 fps tutar", "gecikme düşer") → itiraz:
+  ölçüm tahmin edilmez, `/measure` ile gösterilir; plan iddiayı hiç yazmaz.
+
+## Otonom şerit ekleri
+
+- **Uygulamanın süreç adı** `bateri`: `pkill`/`killall bateri` yasak,
+  kullanıcı aynı anda kendi örneğini açık tutuyor olabilir.
+- **Uzun komutlar** (ön planda, `timeout`'la): `make hepsi`, `make kur`,
+  `make test-yaris`.
+- **Yayın etkili sürprizler** (eskalasyon): beklenmeyen `Cargo.lock`
+  değişimi, yeni bağımlılık ihtiyacı, ayar şeması / `TERM` / shell
+  entegrasyonu etkisi.
+
+## Denetim mercekleri
+
+`/audit`'in mercekleri. Kuralların gerekçesi `CLAUDE.md`'dedir; aşağıdakiler
+onların **kontrol edilebilir hâlleridir**. Mekanik yarı `make denetim`'de.
+
+1. **Bağımlılık kararı.** `make denetim` `Cargo.toml`/`Cargo.lock` uyarısı
+   verdiyse: kararın kaydı (`discussion.md` → `## Karar` ya da phase notu)
+   var mı? Yoksa bulgudur ve kullanıcıya sorulur.
+2. **Ayar ve tema şeması.** `settings.rs` ya da tema modeli değiştiyse: yeni
+   anahtarın varsayılanı, eski anahtarın akıbeti (silinmez), `docs/AYARLAR.md`,
+   yeniden yazma yolunun **bilinmeyen anahtarı koruduğu** round-trip sınaması,
+   İngilizce `snake_case` adlar. Shell dosyası değiştiyse üç kabuk da (zsh,
+   bash, fish) diff'te mi; değilse gerekçesi Uygulama Notları'nda mı.
+3. **Ölçüm sahipliği.** Diff'te ölçüm sayısı taşıyan belge satırı ya da
+   **ölçülmemiş iddia** var mı? Tek sahip `docs/OLCUMLER.md`. İstisnalar:
+   `docs/ARASTIRMA.md` ve bir `const`'un doc'undaki türetme. `Measured`'ın
+   doc'undaki sayılar istisna değil **emanettir** (`olcum.md`).
+4. **Thread ve blokaj.** Render yolunda (kare üreten kod, display link
+   callback'i) bloklayan çağrı var mı — PTY `read`, kilit bekleme, `sleep`,
+   dosya G/Ç? AppKit çağrıları `MainThreadMarker` taşıyor mu? PTY okuyucu ile
+   renderer arasındaki paylaşılan durumda iki kilit sırası kilitlenme
+   üretebilir mi?
+5. **Boşta sıfır kare ve animasyon durma.** Yeni animasyon ya da
+   zamanlayıcının **durma koşulu** nerede? Kirli satır olmadan kare talebi var
+   mı? Belirti sessizdir: uygulama çalışır, pil gider.
+6. **Hücre boyutu ve shader/Rust düzen uyumu.** `Cell` değiştiyse `const`
+   assert güncel ve gerekçeli mi, alan yan tabloya mı gitmeliydi? `.metal`
+   struct'ı değiştiyse Rust `#[repr(C)]` karşılığı alan sırası, tip ve
+   hizalama ile aynı mı (`float3`'ün 16 bayt hizası)? Attribute indeksleri
+   eşleşiyor mu?
+7. **Belge ve dil.** Yeni crate'in `lib.rs` başlık yorumu var mı? Yorumlar
+   "neden"i mi anlatıyor? Yorumlar Türkçe, **kod tanımlayıcılarının tamamı
+   İngilizce** mi (`build.rs` dahil)? Türkçe kalan üç öbek yerinde mi (tanı
+   metni, `Makefile` hedefleri, jeton satırının anahtarları) ve jeton
+   **değerleri** İngilizce mi (`CLAUDE.md` → Dil)? `#[allow]` gerekçeli mi?
+
+## Tuzaklar
 
 Katman yönü, `bt-core`'un platformsuzluğu, boşta sıfır kare, hücre boyutu,
 panik yolu, ayar anahtarları, ölçüm sahipliği ve dil kuralı `CLAUDE.md`'dedir.
@@ -158,6 +181,6 @@ panik yolu, ayar anahtarları, ölçüm sahipliği ve dil kuralı `CLAUDE.md`'de
   (Metalterm #23). Ya `xterm-256color` ile uyumlu kal ya da uzak tarafta geri
   düşüşü tasarla; ikisi de yapılmadan `TERM` değiştirilmez.
 - **Araç zinciri pin'li değil.** Homebrew rustc, `rustup` ve
-  `rust-toolchain.toml` bilinçli olarak yok (001). `brew upgrade` sonrası yeni
+  `rust-toolchain.toml` bilinçli olarak yok. `brew upgrade` sonrası yeni
   bir clippy lint'i dokunulmamış kodu kırmızıya çevirebilir: `make hepsi`
   sürümü başta basar, kırmızıda önce sürüme bak.

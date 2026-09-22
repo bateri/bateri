@@ -684,8 +684,8 @@ make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaşt
 make kur          # release derler, target/release/bateri.app'i kurar ve içeriğini denetler (Info.plist, ikon, lisans, shell betiği); imza yok
 ```
 
-Girdisi henüz olmayan hedefler "henüz yok" deyip kırmızı düşer; listesi
-`.claude/is-akisi/proje.md` başındadır.
+Girdisi henüz olmayan hedefler "henüz yok" deyip kırmızı düşer; hangileri
+olduğu `.claude/is-akisi/proje.md` → Doğrulama'da.
 
 Tek crate / tek sınama:
 
@@ -979,7 +979,7 @@ görünmez kılar; ölçüt "bugünkü aritmetikle mi, gerçekten mi".
 
 **Bu dosya bugünkü sözleşmedir, tarihçe değil.** Yeni bir kural buraya kural +
 tek cümle gerekçe + işaretçi olarak girer; ölçüm anlatısı, reddedilen
-seçenekler ve bilinen sınır listeleri setin dosyalarında kalır (`proje.md` →
+seçenekler ve bilinen sınır listeleri setin dosyalarında kalır (`duzen.md` →
 Teslim → Her bilgi tek yerde). Dosya her oturumun başında baştan sona
 okunuyor ve her set ona bir paragraf ekliyordu.
 

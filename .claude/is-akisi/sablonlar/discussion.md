@@ -45,10 +45,11 @@
 **Reddedilenler:**
 - {itiraz} — {neden red}
 
-## Karar ({tarih}, {kullanıcı onayı | otonom akış})
+## Karar ({tarih}, {kullanıcı onayı | teknik karar | otonom akış})
 
 <!-- Karar verildikten SONRA doldurulur. Damga kararı KİMİN verdiğini söyler:
-     /rfc adım 7'de kullanıcı, /akis'te panelden geçmiş öneri. Yanlış damga
+     ürün kararında kullanıcı, teknik kararda ajan (/rfc adım 7 — kullanıcıya
+     sorulmaz, gerekçe burada), /akis'te panelden geçmiş öneri. Yanlış damga
      kaydı yalanlar ve bu dosyanın tek işi kaydın doğruluğudur. Dosya soru listesi olarak değil,
      karar KAYDI olarak kapanır — "neden böyle yapmışız?" sorusunun tek cevabı
      burasıdır; chat'te kalan karar kaybolur. -->

@@ -51,11 +51,11 @@ PHASE:    {n} dosya
 ```
 
 `ÖN KOŞUL` boş bırakılamaz, çünkü keşif onu `context.md` gövdesine yazar ve
-sürücü o gövdeyi okumaz: 014 ile 015 "bu set 013 teslim edilmeden başlamaz"
-diyor, alan olmasaydı akış henüz yazılmamış bir yüzeye kod yazardı.
+sürücü o gövdeyi okumaz: "bu set şu teslim edilmeden başlamaz" diyen bir
+sette alan olmasaydı akış henüz yazılmamış bir yüzeye kod yazardı.
 
-`PANEL` **hücre içindeki verdict'i de** taşır: 016'da merceğin kendisi SORUNLU
-ama içindeki bir kararın seçeneği KIRMIZI. Yalnız mercek satırına bakan sürücü
+`PANEL` **hücre içindeki verdict'i de** taşır: merceğin kendisi SORUNLU
+ama içindeki bir kararın seçeneği KIRMIZI olabilir. Yalnız mercek satırına bakan sürücü
 onu göremez.
 
 **Dur:** `ÖN KOŞUL` dolu ve beklenen set 🟢 değilse; `PANEL`'de herhangi bir
@@ -64,7 +64,7 @@ yerde KIRMIZI geçiyorsa; `KARAR` yazılmamışsa.
 ## 2. Seti commit'le
 
 Kod yazılmadan önce: `.tasks/{NNN-slug}/` **ve** indeksin bu sete ait satırı
-birlikte. İleti kuralı `proje.md` → Teslim.
+birlikte. İleti kuralı `duzen.md` → Teslim (dili `proje.md` → Teslim).
 
 Gerekçesi burasıdır ve iki yönlüdür. `--auto`'ya kirli çalışma ağacıyla
 girilmez — rapor sözleşmesinin `git status → temiz` satırı her phase'de ya
@@ -93,8 +93,8 @@ Uygulama tarafının listesi otonom şerittedir. Sürücünün kendi listesi:
 - `ÖN KOŞUL` karşılanmamış: set başka bir setin teslimini bekliyor.
 - Panelde KIRMIZI — mercek verdict'i ya da hücre içi.
 - Panel ikinci turdan sonra da yaklaşımı ayakta bırakmıyor.
-- **Yeni bağımlılık ya da mimari karar** — `CLAUDE.md` gereği kendiliğinden
-  yapılmaz.
+- **Yeni bağımlılık ya da mimari karar** — proje sözleşmesi gereği
+  kendiliğinden yapılmaz.
 - Konu birden çok okumaya açık ve ölçüm hangisi olduğunu ayırmıyor; ya da iki
   probe aynı soruya farklı cevap veriyor. (Ölçüm ayırıyorsa sorma: kanıtı sete
   yaz ve devam et.)

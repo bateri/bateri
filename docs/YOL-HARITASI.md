@@ -260,7 +260,7 @@ animasyonu), Sparkle ile güncelleme.
 > **sonucunu** çıkardı; sentez onu karar sanıp plana gereksinim, koda değişmez
 > diye yazdı. Kısıtın ikinci çözümü — dock sütun saysın — ilk turda
 > konuşulsaydı bu set hiç açılmayacaktı. Ders iki yere yazıldı
-> (`.claude/skills/rfc` → Bulguyu işleme yolu, `proje.md` → Kalite kapısı 4)
+> (`.claude/skills/rfc` → Bulguyu işleme yolu, `proje.md` → Set kapısı ekleri)
 > ve özü tek cümle: jüri bulgusunun **gözlemi ve çıkarımı** onun yetkisi,
 > **çözüm önerisi** değil; boşlukta kullanıcı tarafı seçilir.
 > **Materyalin bedeli on birinci kez ödeniyor.**
