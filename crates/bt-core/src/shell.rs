@@ -321,6 +321,20 @@ pub struct DockState {
     /// bir betikle koşan pencere (`plan.md` → Göç) istisnayı kaybeder, yani
     /// sarılı yapıştırmaya — phase-5 öncesinin davranışına — döner.
     pub insert_keymap: bool,
+    /// Bu aynanın **cevap verdiği** kullanıcı girdisi: ayna çözüldüğü anda
+    /// okunan girdi nesli (`Session`'ın `key_gen`'i).
+    ///
+    /// Tazelik kapısının zamansal yarısı: nesil o andan beri ilerlemediyse
+    /// kullanıcının son girdisinin aynası gelmiş demektir ve ızgaranın ne
+    /// dediğine bakmaya gerek yok. **İçeriğin yanında** duruyor, serbest bir
+    /// bayrakta değil: kare yolu onu metinle aynı yaprak kilit turunda
+    /// okuyor, yani bayat bir okuma bayat damgayı da beraberinde getiriyor ve
+    /// kapı içerik karşılaştırmasına düşüyor — yanlışın yönü güvenli
+    /// (`.tasks/025-tazelik-zamansal/discussion.md` → Muhakeme).
+    ///
+    /// Yazan tek yer [`ShellLog::apply_scan_answering`]; tarayıcının
+    /// sahnelediği kopyada anlamsız ve sıfır.
+    pub answers: u64,
 }
 
 impl Clone for DockState {
@@ -344,6 +358,7 @@ impl Clone for DockState {
         self.display_cols = source.display_cols;
         self.last_ink = source.last_ink;
         self.insert_keymap = source.insert_keymap;
+        self.answers = source.answers;
         self.highlights.clear();
         self.highlights.extend_from_slice(&source.highlights);
     }
@@ -366,6 +381,7 @@ impl DockState {
         // Güvenli yön: gösteremediğimiz bir satırın keymap'i de bilinmiyor ve
         // "bilmiyorum" yapıştırmayı sarılı yola göndermeli.
         self.insert_keymap = false;
+        self.answers = 0;
         self.highlights.clear();
     }
 }
@@ -449,6 +465,28 @@ pub enum DockStatus {
     /// tuşta dön" deseydi kullanıcı çok satırlı metni düzenlerken caret
     /// ızgara ile dock arasında gidip gelirdi.
     Multiline,
+    /// Ayna **okundu ve geçerli**, ama görüntü dock'un **çizmediği** bir
+    /// kontrol karakteri taşıyor (`Ctrl-V Ctrl-A`'nın `\x01`'i): dock o
+    /// sütunu boş bırakırdı, ZLE ise ızgarada okunur bir `^A` basıyor.
+    ///
+    /// [`Self::Multiline`]'ın kardeşi ve kuralı aynı cümle — veri sağlam,
+    /// **yüzey dar**; gösteremediğimiz satır da caret'i de ızgarada kalır.
+    /// Bu kol gelmeden önce kontrol karakterinin akıbeti tazelik kapısının
+    /// **tesadüfüne** kalıyordu: `^A` satırın son karakteriyse iki taraf
+    /// uyuşmuyor ve satır ızgarada kalıyordu, ama ortadaysa (`\x01foo`) iki
+    /// taraf da `'o'` diyor, kapı geçiyor ve satır dock'a gidiyordu — `^A`'nın
+    /// sütunu boş, yani kullanıcı yazdığını **hiçbir yerde** görmüyordu. Kol
+    /// kararı konumdan bağımsız kılıyor (025, `discussion.md` → Karar 1).
+    ///
+    /// **Sekme bu kolun dışında** ve gerekçe bilgi: sekme bir şey söylemiyor,
+    /// dock'taki boş sütunu kayıp değil — ızgarada da boşluğa açılıyor.
+    /// İstisnasız Ctrl-V Tab satırı dock'tan ızgaraya düşerdi.
+    ///
+    /// Dönüş kuralı [`Self::Multiline`]'ınkiyle aynı: durum her ayna yükünde
+    /// yeniden hesaplanıyor. **Kolun ömrü bir yer tutucuya bağlı**: dock
+    /// kontrol karakterini zsh gibi `^X` diye çizdiği gün bu kol silinir
+    /// (`docs/YOL-HARITASI.md`).
+    Control,
 }
 
 /// Aynanın neden okunamadığı.
@@ -764,7 +802,7 @@ pub(crate) struct CaretDecision {
 fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
     match (shell.map(|state| state.phase), status) {
         (Some(ShellPhase::Running), _)
-        | (_, DockStatus::Unavailable(_) | DockStatus::Multiline)
+        | (_, DockStatus::Unavailable(_) | DockStatus::Multiline | DockStatus::Control)
         | (Some(ShellPhase::Input), DockStatus::Idle) => CaretHome::Grid,
         _ => CaretHome::Dock,
     }
@@ -804,7 +842,8 @@ fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
 ///   (R1.2); caret'i de orada durmalı, yoksa kullanıcı yazdığı yeri göremez.
 /// - `Multiline` — satır sonu taşıyan görüntü dock'un tek satırına sığmıyor
 ///   ([`DockStatus::Multiline`]). Aynı cümlenin ikinci uygulaması: satır
-///   ızgarada kaldığı için caret de orada.
+///   ızgarada kaldığı için caret de orada. `Control` üçüncüsü
+///   ([`DockStatus::Control`]) ve tutmanın dışında kalışı da aynı gerekçeyle.
 /// - `Input` + `Idle` — kabuk "kullanıcı yazıyor" diyor ama ZLE satırı
 ///   **bırakmış**. Bastırma da tam burada kalkıyor (R3.3): `CORRECT`'in
 ///   `[nyae]` sorusu, `zle -M` mesajı, `line-finish` ile Enter arası. Satır
@@ -834,7 +873,11 @@ fn caret_home_raw(shell: Option<ShellState>, status: DockStatus) -> CaretHome {
 pub(crate) fn caret_home(shell: Option<ShellState>, status: DockStatus, held: bool) -> CaretHome {
     match caret_home_raw(shell, status) {
         CaretHome::Grid
-            if held && !matches!(status, DockStatus::Unavailable(_) | DockStatus::Multiline) =>
+            if held
+                && !matches!(
+                    status,
+                    DockStatus::Unavailable(_) | DockStatus::Multiline | DockStatus::Control
+                ) =>
         {
             CaretHome::Dock
         }
@@ -876,6 +919,11 @@ pub(crate) struct SuppressedInput {
     /// keymap ile safha farklı anlara ait olabilir ve istisna, kullanıcının
     /// çoktan `vicmd`'ye geçtiği bir satırda açık kalabilirdi.
     pub(crate) insert_keymap: bool,
+    /// Aynanın cevap verdiği girdi nesli ([`DockState::answers`]) — tazelik
+    /// kapısının zamansal yarısı. `last_ink` ile **aynı kayıtta**, çünkü ikisi
+    /// aynı aynaya ait olmak zorunda: ayrı okunsalardı yeni bir damga eski bir
+    /// içeriği "taze" ilan edebilirdi.
+    pub(crate) answers: u64,
 }
 
 impl ShellLog {
@@ -978,10 +1026,21 @@ impl ShellLog {
     ///
     /// Tek giriş noktası, çünkü okuyucu thread'i kilidi **olay başına** alıyor
     /// ve iki ayrı çağrı iki ayrı kilit turu demek olurdu.
+    #[cfg(test)]
     pub(crate) fn apply_scan(&mut self, event: ScanEvent<'_>) {
+        self.apply_scan_answering(event, 0);
+    }
+
+    /// [`Self::apply_scan`]'in üretimdeki hâli: ayna olayı `answers`'ı
+    /// [`DockState::answers`]'a **içerikle aynı turda** yazıyor.
+    ///
+    /// Damga argüman, çünkü defter `Session`'ı görmüyor ve görmemeli; okuyan
+    /// taraf (`session`'ın `TappedPty`'si) nesli olay başına bir atomik
+    /// okumayla getiriyor.
+    pub(crate) fn apply_scan_answering(&mut self, event: ScanEvent<'_>, answers: u64) {
         match event {
             ScanEvent::Mark(mark) => self.apply(mark),
-            ScanEvent::Dock(event) => self.apply_dock(event),
+            ScanEvent::Dock(event) => self.apply_dock(event, answers),
             // Dizin **kabul edilmiş** geliyor: şemayı, yetkiyi ve yüzde
             // çözmeyi tarayıcı yaptı, buraya yalnız çizilebilir bir yol
             // ulaşıyor. Reddedilen bir OSC 7 hiç olay doğurmuyor, yani eski
@@ -1015,9 +1074,12 @@ impl ShellLog {
     /// bayat bir satır bırakmak, phase-4'te ızgara bastırılırken dock'un bir
     /// önceki komutu göstermesi demek olurdu — kullanıcının yazdığıyla
     /// gördüğünün sessizce ayrılması, bu deponun yasakladığı belirti sınıfı.
-    fn apply_dock(&mut self, event: DockEvent<'_>) {
+    fn apply_dock(&mut self, event: DockEvent<'_>, answers: u64) {
         match event {
-            DockEvent::Update(staged) => self.dock.clone_from(staged),
+            DockEvent::Update(staged) => {
+                self.dock.clone_from(staged);
+                self.dock.answers = answers;
+            }
             DockEvent::End => {
                 self.dock.reset();
                 self.dock.status = DockStatus::Idle;
@@ -1086,6 +1148,7 @@ impl ShellLog {
                 cols_before_cursor: self.dock.cursor_col,
                 last_ink: self.dock.last_ink,
                 insert_keymap: self.dock.insert_keymap,
+                answers: self.dock.answers,
             }),
             (_, Outcome::Finished { .. }) => None,
         }
@@ -2121,6 +2184,18 @@ fn decode_line<'a>(
         || line.postdisplay.contains('\n')
     {
         line.status = DockStatus::Multiline;
+    } else if line
+        .predisplay
+        .chars()
+        .chain(line.buffer.chars())
+        .chain(line.postdisplay.chars())
+        .any(|ch| ch.is_control() && ch != '\t')
+    {
+        // **Dock'un çizmediği kontrol karakteri** ([`DockStatus::Control`]).
+        // Satır sonu önce soruluyor: ikisi birden varsa ikisi de ızgara ve
+        // fark yalnız ad. Sekme istisna ve gerekçesi kolun doc'unda: bilgi
+        // taşımıyor.
+        line.status = DockStatus::Control;
     }
 
     // Üç uzunluk da burada: ofsetlerin tek uzaya inmesi ([`Highlight::start`])
@@ -2177,11 +2252,12 @@ fn decode_line<'a>(
         // Sekmeyi de mürekkepsiz saymak iki yarıyı yeniden eşitliyor — `"ls\t"`
         // ikisinde de `'s'`, `"\t"` ikisinde de `None`.
         //
-        // **Kalan sınır, adıyla:** ham kontrol karakteri (Ctrl-V ile basılan
-        // `\x01`) ZLE'de `^A` diye çiziliyor, yani ızgara `'A'` derken ayna
-        // `'\x01'` der ve kapı yine düşer. Ölçülmedi ve düzeltilmedi; yönü
-        // güvenli (bastırma kalkar, satır iki yerde görünür, sessizce
-        // kaybolmaz) ve gerçek bir tampona girmesi Ctrl-V gerektiriyor.
+        // **Ham kontrol karakteri bu karşılaştırmaya hiç gelmiyor** (025):
+        // ZLE `\x01`'i ızgarada `^A` diye çiziyor ve dock onu hiç çizmiyor,
+        // yani o satır [`DockStatus::Control`] ile ızgarada kalıyor ve
+        // bastırılmıyor. Bir dönem burada "kalan sınır" diye yazılıydı ve
+        // yazıldığından kötüydü: `^A` yalnız **son** karakterken kapı
+        // düşüyordu, ortadayken satır dock'a gidip kayboluyordu.
         //
         // **Üçüncü ölçüt sıfır genişlik ve o 024'te geldi** (kullanıcı
         // bildirdi, ölçüldü): birleştirici kod noktaları (VS16, ZWJ, ten
@@ -2196,8 +2272,7 @@ fn decode_line<'a>(
         //
         // Ölçüt `unicode-width`'in `Some(0)`'ı, yani `dock::column_width`'in
         // beslendiği kaynağın ta kendisi. Kontrol karakterleri `None` dönüyor
-        // ve bu süzgece **girmiyor**: onların akıbeti yukarıdaki iki satırda
-        // yazılı bilinen sınır, buranın konusu değil.
+        // ve bu süzgece **girmiyor**: taşıyan satır zaten `Control`.
         .filter(|ch| *ch != ' ' && *ch != '\t' && UnicodeWidthChar::width(*ch) != Some(0))
         .next_back();
 
@@ -3409,6 +3484,87 @@ mod tests {
         assert_eq!(single.status, DockStatus::Live);
     }
 
+    /// **Dock'un çizmediği kontrol karakteri satırı `Control`'e indiriyor**
+    /// (025) — konumdan ve gövdeden bağımsız; sekme hariç.
+    #[test]
+    fn a_control_char_anywhere_in_the_display_marks_the_mirror_control() {
+        for (pre, buffer, post) in [
+            ("", "\x01foo", ""),
+            ("", "foo\x01", ""),
+            ("", "echo \x1b[0m", ""),
+            ("% \x7f", "ls", ""),
+            ("", "ls", " \x02"),
+        ] {
+            let line = dock_line(&dock_update(0, pre, buffer, post, &[]));
+            assert_eq!(
+                line.status,
+                DockStatus::Control,
+                "kontrol karakteri taşıyan görüntü `Live` kaldı: {pre:?} {buffer:?} {post:?}"
+            );
+            assert_eq!(line.buffer, buffer, "alanlar `Multiline` gibi duruyor");
+        }
+        // **Sekme istisna**: bilgi taşımıyor ve Ctrl-V Tab satırı dock'ta
+        // kalmalı. Emoji, boş satır ve düz metin de `Live`.
+        for buffer in ["ls\t", "\t", "🥰", "", "echo a"] {
+            let line = dock_line(&dock_update(0, "% ", buffer, "", &[]));
+            assert_eq!(line.status, DockStatus::Live, "{buffer:?}");
+        }
+        // Satır sonu önce soruluyor: ikisi birden varsa `Multiline`.
+        let both = dock_line(&dock_update(0, "", "a\x01\nb", "", &[]));
+        assert_eq!(both.status, DockStatus::Multiline);
+        // Dönüş kendiliğinden: kontrol karakteri silinince bir sonraki ayna `Live`.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        scanner.feed(&dock_update(4, "", "\x01foo", "", &[]), |event| {
+            log.apply_scan(event)
+        });
+        assert_eq!(log.dock.status, DockStatus::Control);
+        scanner.feed(&dock_update(3, "", "foo", "", &[]), |event| {
+            log.apply_scan(event)
+        });
+        assert_eq!(log.dock.status, DockStatus::Live);
+    }
+
+    /// **`Control` de tutulmuyor** — `Multiline`'ın ikizi ve aynı gerekçe:
+    /// gösteremediğimiz satırın caret'i ızgarada, 150 ms bile olsa dock'ta
+    /// durmamalı.
+    #[test]
+    fn a_control_mirror_is_never_held() {
+        let typing = Some(ShellState {
+            phase: ShellPhase::Input,
+            last_exit: None,
+        });
+        for held in [false, true] {
+            assert_eq!(
+                caret_home(typing, DockStatus::Control, held),
+                CaretHome::Grid,
+                "held={held}"
+            );
+        }
+    }
+
+    /// **Ayna damgasını içerikle aynı turda alıyor** (025): `answers` ayna
+    /// olayında yazılıyor, başka olaylarda kıpırdamıyor ve `End` onu
+    /// sıfırlıyor.
+    #[test]
+    fn the_mirror_carries_the_generation_it_answers() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        scanner.feed(&dock_update(2, "", "ls", "", &[]), |event| {
+            log.apply_scan_answering(event, 7)
+        });
+        assert_eq!(log.dock.answers, 7);
+        // İşaret ya da dal olayı damgaya dokunmuyor.
+        scanner.feed(b"\x1b]133;B\x07", |event| {
+            log.apply_scan_answering(event, 9)
+        });
+        assert_eq!(log.dock.answers, 7);
+        scanner.feed(b"\x1b]8133;e\x07", |event| {
+            log.apply_scan_answering(event, 9)
+        });
+        assert_eq!(log.dock.answers, 0, "kapanmış ayna eski damgayı taşımamalı");
+    }
+
     /// **Çok satırlı ayna da tutulmuyor** — `Unavailable` carve-out'unun ikizi.
     ///
     /// Tutma bu kolu da kapsasaydı çok satırlı bir yapıştırmadan sonra caret
@@ -3641,7 +3797,11 @@ mod tests {
             ],
         ));
 
-        assert_eq!(line.status, DockStatus::Live);
+        // Tel sağlam ama satır dock'un değil: `ESC` bir kontrol karakteri,
+        // dock onu çizmiyor ve zsh ızgarada `^[` basıyor
+        // ([`DockStatus::Control`], 025). Metin yine de eksiksiz çözülüyor —
+        // aşağıdaki iddialar telin kendisini sınıyor.
+        assert_eq!(line.status, DockStatus::Control);
         assert_eq!(line.predisplay, "❯ ");
         assert_eq!(line.buffer, buffer);
         assert_eq!(line.postdisplay, " --dry-run");

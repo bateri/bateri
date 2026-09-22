@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -1070,6 +1070,9 @@ struct TappedPty {
     /// [`Session::screen_clears`]'in aynı yuvası: tarayıcının saydığı
     /// `CSI 2 J`. Artıran **yalnız** burası.
     screen_clears: Arc<AtomicU32>,
+    /// [`Session::key_gen`]'in aynı yuvası. Burası yalnız **okuyor**: ayna
+    /// olayı çözüldüğü anda nesli damga olarak deftere geçiriyor.
+    key_gen: Arc<AtomicU64>,
 }
 
 impl io::Read for TappedPty {
@@ -1081,8 +1084,16 @@ impl io::Read for TappedPty {
         //
         // Kilit yalnız işaret çıkınca alınıyor: olağan akışta closure hiç
         // çağrılmıyor, yani kabuk çıktısının hızlı yolu kilitsiz.
+        //
+        // Girdi nesli kilitten **önce** okunuyor ve bu yeterli: `send_input`
+        // nesli baytları göndermeden önce artırıyor, yani bir tuşun aynası
+        // buraya ulaştığında o tuşun nesli çoktan görünür. Kilit altında
+        // okumak bir şey kazandırmazdı — neslin yazarı defterin kilidini
+        // hiç almıyor.
+        let key_gen = &self.key_gen;
         self.scanner.feed(&buf[..read], |event| {
-            lock(&self.shell).apply_scan(event);
+            let answers = key_gen.load(Ordering::Acquire);
+            lock(&self.shell).apply_scan_answering(event, answers);
         });
         // **CSI kolu kilide hiç uğramıyor**: yükü yok, tüketicisi bir sayaç.
         //
@@ -1579,6 +1590,22 @@ pub struct Session {
     ///
     /// [`shell`]: Session::shell
     screen_clears: Arc<AtomicU32>,
+    /// Kullanıcı girdisinin **nesli**: [`Session::send_input`]'tan geçen her
+    /// gönderim bir artırıyor, baytlar gitmeden **önce**.
+    ///
+    /// Tazelik kapısının zamansal yarısı (025): okuyucu thread'i ayna
+    /// çözüldüğü anda bunu okuyup aynanın yanına damga olarak koyuyor
+    /// ([`crate::shell::DockState::answers`]); kare yolu damga ile güncel
+    /// nesli karşılaştırıyor ve eşitse kullanıcının son girdisinin aynası
+    /// gelmiş demektir. Sıra zorunlu: artış gönderimden sonra olsaydı tuşun
+    /// kendi aynası bir önceki nesille damgalanabilir ve kapı onu sonsuza
+    /// kadar "cevapsız" sayardı.
+    ///
+    /// `screen_clears`'ın emsali ama yönü ters: orada okuyucu yazıyor, kare
+    /// yolu okuyor; burada ana thread yazıyor, ikisi okuyor. Tek yazar
+    /// kuralı aynı. `Adapter::reply` ve tekerlek raporu buradan geçmiyor ve
+    /// geçmemeli — onlar kullanıcının yazdığı bir şey değil.
+    key_gen: Arc<AtomicU64>,
     /// [`Session::screen_clears`]'in kare yolunun **hesaba kattığı** hâli.
     ///
     /// İkisi ayrıştığı anda ortada henüz sindirilmemiş bir temizleme var
@@ -1683,11 +1710,13 @@ impl Session {
         let shell = Arc::new(Mutex::new(ShellLog::new(options.terminal.scrollback)));
         // Sayacın da iki ucu var ve ikisi de aynı gerekçeyle burada doğuyor.
         let screen_clears = Arc::new(AtomicU32::new(0));
+        let key_gen = Arc::new(AtomicU64::new(0));
         let pty = TappedPty {
             pty,
             scanner: Scanner::new(),
             shell: Arc::clone(&shell),
             screen_clears: Arc::clone(&screen_clears),
+            key_gen: Arc::clone(&key_gen),
         };
 
         // **Blink de açılışta geçiyor**, temanın yanında: tek yazıcısı
@@ -1718,6 +1747,7 @@ impl Session {
             // Açılışta alternatif ekran yok; ilk içerik karesi zaten yazacak.
             alt_screen: AtomicBool::new(false),
             screen_clears,
+            key_gen,
             // Açılışta sindirilmemiş temizleme yok: sayaç da, hesaba katılan
             // nesil de sıfır. Üçünü de sıfırdan başlatmak, ilk karenin
             // bayrağı sebepsiz kurmasını önlüyor.
@@ -1998,7 +2028,36 @@ impl Session {
             let at_anchor = !blank_mirror
                 || anchor_row_at_or_above(&term, to, offset, input.block)
                     .is_none_or(|anchor| anchor == to);
-            let fresh = last_ink_in_row(&term, to, offset) == input.last_ink && at_anchor;
+            //
+            // **Önce zamansal soru** (025): kullanıcının son girdisinin
+            // aynası geldiyse ayna tazedir ve ızgaranın ne dediğine bakmak
+            // gerekmiyor — içerik karşılaştırması bir **vekildi** ve zsh
+            // karakteri dönüştürdüğü her hâlde kırılıyordu (`🥰` aynada ham,
+            // ızgarada `<0001f970>`: kapı düşüyor, caret yazarken ızgaraya
+            // sıçrıyordu). Damga aynanın **yanında** geliyor
+            // ([`crate::shell::DockState::answers`]), yani bayat bir okuma
+            // bayat damga getirir ve karar aşağıdaki içerik kapısına kalır.
+            // Cevap gelmediyse (yapıştırmanın `bracketed-paste-magic` kolu)
+            // kapı bugünkü hâliyle koşuyor: iki taraf da henüz eski ve
+            // eşleşiyorlar, ya da ayna geride ve düşüyor. Kısa devre taramayı
+            // da atlatıyor.
+            //
+            // **İki bilinen sınır, adıyla** (`discussion.md` → Karar 2). Bir
+            // tuşun aynası yoldayken hemen bir yapıştırma giderse ayna
+            // yapıştırmanın nesliyle damgalanır ve kapı onu bir tuş boyunca
+            // cevap sanar — terminalin "ZLE bunu işledi mi" sorusunu bilme
+            // yolu yok. Ve kabuğun **dışından** gelen yazım (bir arka plan
+            // işinin giriş satırına bastığı çıktı) nesli oynatmıyor: satır
+            // düzenlenirken bastırılan aralıkta gizli kalıyor, Enter'dan sonra
+            // geçmişte görünüyor. İkisini ayırmanın yolu bir yazım nesli ve
+            // tarayıcının yazım kavramı yok. Üçüncüsü ters yönde ve eski
+            // davranış: zsh'in **redisplay'siz** tuttuğu bir tuş (emacs'ın
+            // `^X` öneki, vi'de çıplak `Esc`'in bekleme süresi) nesli
+            // ilerletiyor ama ayna doğurmuyor, yani o süre kapı içeriğe
+            // düşüyor ve dönüştürülmüş karakterli satır ızgaraya çıkıyor.
+            let answered = input.answers == self.key_gen.load(Ordering::Acquire);
+            let fresh =
+                answered || (last_ink_in_row(&term, to, offset) == input.last_ink && at_anchor);
             fresh.then_some(to)
         });
         // Aralığın **üst tabanı**, aynı aritmetiğin öteki yönü: caret'ten
@@ -3718,6 +3777,8 @@ impl Session {
         } else {
             self.wake_if_moved(moved);
         }
+        // Nesil **gönderimden önce** ([`Session::key_gen`]'in doc'u).
+        self.key_gen.fetch_add(1, Ordering::Release);
         self.send(Msg::Input(bytes.into()));
     }
 
@@ -5042,9 +5103,16 @@ mod tests {
         //
         // Burada aynı hâl elle kuruluyor: ızgarada `ls -la`, aynada onun bir
         // önceki hâli (`ls`). Kapı uyuşmazlığı görüp bastırmayı bırakmalı.
+        //
+        // **Ve ayna cevapsız** (025): kullanıcının son girdisi aynadan sonra
+        // gitmiş. Nesil elle ilerletiliyor (`screen_clears`'ın emsali), çünkü
+        // gerçek bir yazım `/bin/sh`'in yankısıyla ızgarayı da değiştirirdi;
+        // ölçülen hâl de tam bu — yapıştırma gitti, ayna gelmedi. Nesil
+        // ilerlemeseydi ayna cevap sayılır ve kapı içeriğe hiç bakmazdı.
         let wake = Arc::new(TestWake::default());
         let session = spawn_typing_session(&mirror("bHM", 2), Arc::clone(&wake));
         wait_mirror(&session, DockStatus::Live);
+        session.key_gen.fetch_add(1, Ordering::Release);
 
         let mut cells = Vec::new();
         let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
@@ -5102,6 +5170,10 @@ mod tests {
             Arc::clone(&wake),
         );
         wait_mirror(&session, DockStatus::Live);
+        // **Cevapsız ayna** (025): nesil ilerletilmeseydi zamansal kısa devre
+        // kapıyı içerik karşılaştırmasına hiç düşürmez ve bu bekçi bir şey
+        // sınamazdı. İçerik kapısı yapıştırmadan sonra hâlâ tek hakem.
+        session.key_gen.fetch_add(1, Ordering::Release);
         let mut cells = Vec::new();
         let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
         assert!(
@@ -5115,8 +5187,103 @@ mod tests {
         session.shutdown();
     }
 
+    /// **Kullanıcının bildirdiği kusur** (2026-09-22, 025): `🥰` yazınca caret
+    /// dock'tan ızgaraya sıçrıyordu.
+    ///
+    /// zsh U+1F970'i kendi basılabilirlik tablosunda bulamıyor ve ızgaraya
+    /// ters videolu `<0001f970>` yazıyor (`zsh -f`, saf pty ile ölçüldü);
+    /// ayna ise ham emojiyi taşıyor. İçerik kapısı `'>'` ile `'🥰'`'yi hiçbir
+    /// zaman eşleştiremez. Ama ayna kullanıcının son girdisine **cevap**
+    /// olarak geldi, yani tazedir: bastırma açık, caret dock'ta.
     #[test]
-    fn a_blank_mirror_below_the_anchor_is_stale() {
+    fn a_transformed_char_keeps_the_caret_in_the_dock() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}\\033[7m<0001f970>\\033[27m{}'; sleep 5",
+                anchored_prompt(1),
+                // `🥰` = F0 9F A5 B0.
+                mirror("8J+lsA", 1),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        let mut cells = Vec::new();
+        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        assert!(
+            cursor.caret_in_dock,
+            "zsh'in dönüştürdüğü karakter kapıyı düşürdü: caret ızgaraya sıçradı ({cursor:?})"
+        );
+        assert!(!cursor.visible, "{cursor:?}");
+        assert_eq!(row_glyphs(&cells, 0), "", "giriş satırı ızgarada kaldı");
+        session.shutdown();
+    }
+
+    /// **Dock'un çizmediği kontrol karakteri satırı ızgarada tutuyor** —
+    /// konumu ne olursa olsun (025, [`DockStatus::Control`]).
+    ///
+    /// ZLE `Ctrl-V Ctrl-A`'yı ızgarada okunur bir `^A` diye basıyor; dock ise
+    /// o sütunu boş bırakırdı. Bu kol gelmeden önce karar tazelik kapısının
+    /// tesadüfüne kalıyordu: `^A` sondayken iki taraf uyuşmuyor ve satır
+    /// ızgarada kalıyordu, **ortadayken** ikisi de `'o'` diyor, satır dock'a
+    /// gidiyor ve `^A` hiçbir yerde görünmüyordu. İki konum da sınanıyor.
+    #[test]
+    fn a_control_char_the_dock_cannot_draw_stays_in_the_grid() {
+        // `\x01foo` ve `foo\x01`, base64.
+        for (grid, b64) in [("^Afoo", "AWZvbw"), ("foo^A", "Zm9vAQ")] {
+            let wake = Arc::new(TestWake::default());
+            let session = spawn_docked_session(
+                &format!(
+                    "printf '{}{grid}{}'; sleep 5",
+                    anchored_prompt(1),
+                    mirror(b64, 4),
+                ),
+                Arc::clone(&wake),
+            );
+            wait_mirror(&session, DockStatus::Control);
+            let mut cells = Vec::new();
+            let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+            assert_eq!(
+                row_glyphs(&cells, 0),
+                format!("${grid}"),
+                "dock'un gösteremediği satır ızgarada da gizlendi ({grid})"
+            );
+            assert!(!cursor.caret_in_dock, "{grid}: {cursor:?}");
+            assert!(cursor.visible, "{grid}: {cursor:?}");
+            session.shutdown();
+        }
+    }
+
+    /// **Bilinen sınır, adıyla** (025, `discussion.md` → Karar 2): damga
+    /// aynanın **ne zaman** geldiğini söylüyor, hangi girdiye cevap olduğunu
+    /// değil.
+    ///
+    /// Bir tuşun aynası yoldayken hemen bir yapıştırma giderse ayna
+    /// yapıştırmanın nesliyle damgalanır: ızgara yapıştırmayı almıştır, ayna
+    /// hâlâ tuşun hâlidir ve kapı onu cevap sayar — bir tuş boyunca bastırma
+    /// eski içerikle açık kalır. Terminalin "ZLE bu girdiyi işledi mi"
+    /// sorusunu bilme yolu yok.
+    ///
+    /// **Damgalama elle taklit ediliyor**: pty'siz düzenekte ZLE yok, yani
+    /// "ayna yoldayken" hâlini üretmek uygulamanın kendisi olurdu. Taklit
+    /// şu: ızgara ile ayna ayrışmış (`ls -la` / `ls`) ama ayna **güncel**
+    /// nesille damgalı. Sınır bir gün kapanırsa bekçi kırmızıya döner ve bu
+    /// cümle güncellenir.
+    #[test]
+    fn a_key_answered_by_an_older_mirror_is_a_known_limit() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_typing_session(&mirror("bHM", 2), Arc::clone(&wake));
+        wait_mirror(&session, DockStatus::Live);
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        assert!(
+            cursor.caret_in_dock,
+            "sınır kapanmış görünüyor — bekçiyi ve discussion.md'yi güncelle ({cursor:?})"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn an_unanswered_blank_mirror_below_the_anchor_is_stale() {
         // **Kapının kör noktası** (kullanıcı, 2026-09-21): çok satırlı
         // yapıştırmada `bracketed-paste-magic` aynayı bir tuş boyunca boş
         // bırakıyor, zsh de bracketed yapıştırmanın **son satır sonunu
@@ -5127,6 +5294,12 @@ mod tests {
         //
         // Ayıran veri çıpanın satırı: karakteri olmayan bir ayna imleci
         // prompt'un satırından aşağı itemez.
+        //
+        // **Adında "cevapsız" var** (025): gerçekten gelmiş boş bir ayna
+        // (`zle -I`'dan sonraki redisplay) çıpanın altında olsa da artık
+        // taze ve bu doğru — satır boş, dock'un caret'i doğru yerde. Kör
+        // nokta yalnız ayna **gelmemişken** bir kör nokta; nesil o yüzden
+        // aşağıda elle ilerletiliyor.
         let wake = Arc::new(TestWake::default());
         let session = spawn_docked_session(
             &format!(
@@ -5141,6 +5314,7 @@ mod tests {
             Arc::clone(&wake),
         );
         wait_mirror(&session, DockStatus::Live);
+        session.key_gen.fetch_add(1, Ordering::Release);
 
         let mut cells = Vec::new();
         let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
@@ -5181,6 +5355,10 @@ mod tests {
             Arc::clone(&wake),
         );
         wait_mirror(&session, DockStatus::Live);
+        // **Cevapsız ayna** (025): nesil ilerletilmeseydi zamansal kısa devre
+        // kapıyı içerik karşılaştırmasına hiç düşürmez ve bu bekçi bir şey
+        // sınamazdı. İçerik kapısı yapıştırmadan sonra hâlâ tek hakem.
+        session.key_gen.fetch_add(1, Ordering::Release);
 
         let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
         assert!(
@@ -9450,6 +9628,64 @@ mod tests {
             wake.copies().iter().any(|text| text == "hello"),
             "yarış boyunca pano kolu hiç koşmadı"
         );
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_key_gen_and_mirror_stamp() {
+        // 025 okuyucu thread ile ana thread arasına bir **atomik** soktu
+        // (`Session.key_gen`): ana thread her girdide artırıyor, okuyucu ayna
+        // olayında okuyup damga yapıyor. Kabuk her okuduğu satırı aynaya
+        // koyuyor, yani `k`. girdinin aynasının tamponu `k`.
+        //
+        // Değişmez **sıra**: bir aynanın damgası cevap verdiği girdiden asla
+        // küçük değil. Artış gönderimden sonra olsaydı `k`. girdinin aynası
+        // `k - 1` ile damgalanabilir ve kapı son tuşun aynasını sonsuza kadar
+        // cevapsız sayardı. (Tersi — damga girdiden büyük — bilinen sınır:
+        // `a_key_answered_by_an_older_mirror_is_a_known_limit`.) Damga ile
+        // tampon aynı `DockState`'ten, aynı kilit turunda okunuyor.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "stty -echo; while read l; do \
+             b=$(printf %s \"$l\" | base64); \
+             printf '\\033]8133;u;0;;%s;;;bWFpbg==\\007' \"$b\"; done",
+            Arc::clone(&wake),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let writer = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut sent = 0u64;
+                while Instant::now() < deadline {
+                    sent += 1;
+                    session.write(format!("{sent}\n").as_bytes());
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                sent
+            })
+        };
+
+        let mut state = DockState::default();
+        let mut seen = 0u64;
+        while Instant::now() < deadline {
+            session.dock_state(&mut state);
+            if let Ok(answered) = state.buffer.parse::<u64>() {
+                let now = session.key_gen.load(Ordering::Acquire);
+                assert!(
+                    answered <= state.answers,
+                    "{answered}. girdinin aynası {} ile damgalandı",
+                    state.answers
+                );
+                assert!(state.answers <= now, "damga nesli aştı");
+                seen += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(writer.join().unwrap() > 0, "hiç girdi gitmedi");
+        assert!(seen > 0, "yarış boyunca hiç ayna gelmedi");
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }
 

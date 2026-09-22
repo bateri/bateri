@@ -519,7 +519,9 @@ fn style_at(state: &DockState, index: usize) -> HighlightStyle {
 /// yer tutucu çizmemenin gerekçesini "sütun aritmetiğini karakter biriminden
 /// çıkarır" diye yazmıştı ve o kısıt bu setle **kalktı** — artık aritmetik
 /// zaten sütun. Yani `^C` çizmek bugün mümkün; yapılmadı çünkü bu setin
-/// konusu değil ve kimse istemedi.
+/// konusu değil ve kimse istemedi. **025'ten beri sınır sekmeye daraldı:**
+/// öteki kontrol karakterlerini taşıyan satır [`DockStatus::Control`] ile
+/// ızgarada kalıyor ve bu fonksiyona hiç gelmiyor.
 pub(crate) fn column_width(ch: char) -> usize {
     // `unwrap_or(1)`, `unwrap_or(0)` değil: bkz. doc.
     UnicodeWidthChar::width(ch).unwrap_or(1)
@@ -549,13 +551,13 @@ fn cell(
         row: 0,
         // Mürekkepsiz hücrenin kuralı `frame()`'inkiyle aynı: boşluk glyph
         // üretmez (atlasta yuva harcar, tek piksel boyamaz). Kontrol
-        // karakterleri de üretmiyor ve bu bir **bilinen sınır**: ZLE ham bayt
-        // taşıyabiliyor (`Ctrl-V` ile yapıştırılmış bir kaçış dizisi) ve
-        // bugün onlar dock'ta görünmez kalıyor. Yerinde bir yer tutucu
-        // (`^C`) çizmek bir dönem sütun aritmetiğini karakter biriminden
-        // çıkarırdı; o kısıt **024'te kalktı** (aritmetik zaten sütun) ve
-        // yer tutucu bugün mümkün — yapılmadı çünkü kimse istemedi.
-        // Ayrıntı [`column_width`]'in doc'unda.
+        // karakterleri de üretmiyor, ama artık buraya yalnız **sekme**
+        // ulaşıyor: öteki kontrol karakterlerini taşıyan satır
+        // [`DockStatus::Control`] ile ızgarada kalıyor ve dock onu hiç
+        // çizmiyor (025) — ZLE ham baytı ızgarada okunur bir `^A` diye
+        // basıyor, dock ise o sütunu boş bırakırdı. Yerinde bir yer tutucu
+        // (`^C`) çizmek 024'ten beri mümkün (aritmetik zaten sütun) ve o gün
+        // `Control` kolu silinir. Ayrıntı [`column_width`]'in doc'unda.
         ch: (!ch.is_control() && ch != ' ').then_some(ch),
         fg,
         bg,
@@ -637,6 +639,8 @@ mod tests {
             // Bu modül okumuyor (tüketicisi `Session::can_be_typed`); canlı
             // bir satırın olağan hâli ekleme keymap'i.
             insert_keymap: true,
+            // Tazelik kapısının damgası; `render` okumuyor.
+            answers: 0,
         }
     }
 
