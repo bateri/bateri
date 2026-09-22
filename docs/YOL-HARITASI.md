@@ -623,8 +623,20 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
     **küçültme** (kitty yedek glyph'i hücreye sığacak kadar ölçekliyor) ve
     o da ayrı bir karar — eşaralıklı bir ızgarada ölçeklenmiş bir glyph
     komşularından farklı ağırlıkta görünür.
-  - **41'inin adayı Apple Color Emoji** → emoji seti (**023, açıldı**); renkli bitmap ve
-    "ikinci atlas mı, RGBA mı" çatalı orada.
+    **Kalem 023'te büyüdü ve daraldı.** Büyüdü: tek sütunlu **78 emoji**
+    (`🌡 🎙 🏋 🏔`) aynı karara katıldı — rengi var, iki sütunu yok, mürekkebi
+    1.66 hücre, yani 023'ün geometri kolu onlara yardım etmiyor ve kutu
+    kaldılar. Daraldı: 190'ın **iki sütunlu** olanları 023'te çizildi
+    (ölçüm: adayı olan 1346 geniş karakterin tamamı iki hücreye sığıyor),
+    yani kalan küme gerçekten "tek sütun, mürekkebi taşıyor" — ve orada
+    küçültmenin alternatifi yok.
+  - **41'inin adayı Apple Color Emoji** → **kapandı (023)**: çatal "ikinci
+    atlas mı, RGBA mı" diye açılmıştı ve cevabı **ikisi de değil** oldu —
+    aynı `Atlas`'ın içinde ikinci bir düzlem (`Plane`), kendi monoton sayacı
+    ve `RGBA8Unorm_sRGB` dokusuyla. Bu taramanın 41'i 023'ün kendi
+    envanterinde **1000**'e çıktı (tarama emoji bloklarını da kapsadı) ve
+    922'si çizildi; kalan 78'i tek sütunlu ve aşağıdaki küçültme kalemine
+    devredildi.
   Sıra önerisi: legacy computing (021'in devamı, ucuz ve yordamsal),
   sonra yerleşim kararı (89 karakter, tek dosyalık ama mimari cümleyi
   inceltiyor), sonra emoji.
@@ -700,6 +712,21 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   (`capacity_clears_the_family_at_every_accepted_size`: kabul edilen her
   punto × ölçek × `line_height` için kapasite ≥ aile). Varsayılan punto
   bugünkü dokusunda kaldı.
+  **Borç 023'te büyüdü.** Kapıdan dönen CJK o güne kadar **sıfır** yuva
+  harcıyordu (negatif önbellek `TOFU`'ya bağlıyor); artık kabul edilen her
+  geniş karakter **iki** yuva harcıyor ve tavan hangi karakterlerin
+  göründüğüne bağlı — karakterlere açık yuva `capacity() - RULE_RESERVE - 1`
+  ve mürekkebi iki hücre isteyen her karakter ikisini alıyor, tek hücreye
+  sığan geniş ilan edilmişler (ölçülen 65) birini. 13pt@2x'te en kötü hâl
+  **988 ayırt edici geniş karakter** ve 80×24'te bir ekran 960 geniş hücre
+  tutuyor, yani 022'nin "tek karede hedeften fazla farklı glyph" dediği
+  senaryo varsayılan puntoda **erişilebilir**. 022'nin bekçisi bunu
+  göremiyordu (yordamsal aile baştan sona tek sütunlu, değişmez yeşil
+  kalıyor); 023 kendi bekçisini getirdi
+  (`a_wide_char_is_rejected_whole_when_only_one_slot_is_left`: tam bir yuva
+  boşken istenen çift **tümden** reddediliyor, yani yarım glyph + yarım kutu
+  yapısal olarak doğmuyor). Renk düzleminin **ayrı** sayacı var, yani emoji
+  maskelerin havuzuna binmiyor.
   **Kalan borç ve neden LRU değil:** atlas hâlâ dolabilir ve dolunca hâlâ
   tofu'ya düşüyor; kalan senaryo "tek karede hedeften fazla farklı glyph" ve
   o **ölçülmedi**. Ölçülürse çaresi LRU **değil**, `encode_pass` sınırında
@@ -791,6 +818,16 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   kurulu. `{dil}_{etiket bölgesi}` ara kolu bir ürün kararı; düşüş `en_US`
   olduğu için etkisi görünür (ABD tarih biçimi). Kaynak: 006 `phase-4c.md` →
   `/code-review` WAIVE (5) ve orkestratör kararı.
+- **`bt-shell`'in beş sınaması release profilinde düşüyor.** 023'ün
+  uygulamasında görüldü (2026-09-22) ve `git stash` ile taban commit'te de
+  doğrulandı, yani **bu setin kusuru değil**: `child.rs`'in sarmalayıcı
+  arayışı depo kolunda `target/debug` üzerinden gidiyor ve `cargo test
+  --release` o yolu bulamıyor (`sarmalayıcı bulunamadı`). Kapının profili
+  debug (`make hepsi`), yani bugün hiçbir şeyi bloke etmiyor — ama
+  `cargo test --release` koşturan biri beş kırmızı görüp yanlış yere bakar.
+  Çaresi yolu profile duyarlı yapmak ya da `CARGO_MANIFEST_DIR`'dan
+  türetmek; ikisi de tek satırlık. `bt-shell`'in `child` modülüne meşru
+  biçimde dokunan ilk set toplar.
 - **Küçük hijyen.** `make kur` boş hedef dizinini denetlemiyor — bugün
   zararsız. Pano sınamaları oluşturdukları geçici panoları bırakmıyor
   (`releaseGlobally` yok) — kullanıcıya görünmez. İkisi de doğrulanmadı;

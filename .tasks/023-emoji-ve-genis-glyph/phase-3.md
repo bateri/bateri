@@ -47,13 +47,38 @@ _Requirements: R9_
   kalem sayısıyla yazıldı.
 - `make hepsi` yeşil (`make denetim`'in belge taramaları dahil).
 
+## Uygulama Notları
+
+- **`CLAUDE.md`'nin çelişen cümleleri phase-2'ye alındı.** Planın bu phase'e
+  bıraktığı iş, set kapısının (`/code-review`) beşinci bulgusuyla yerinden
+  oynadı: `CLAUDE.md`'nin kendi kuralı "buradaki bir cümle kodla çelişirse
+  ikisinden biri **aynı commit'te** düzelir" diyor ve phase-2 aksi hâlde
+  kodla çelişen bir sözleşme bırakırdı. Pipeline sayısı, iki düzlemin
+  dokuları, emoji paragrafının tamamı ve jeton sözleşmesi (`CLAUDE.md` +
+  `Makefile`) o commit'e girdi. Bu phase'e kalan: katman tablosunun iki
+  sorumluluk satırı, `docs/OLCUMLER.md` envanteri ve yol haritasının borç
+  kalemleri.
+- **Envanter `## Atlas yuva ayak izi`'nin altına "ikinci tür" olarak girdi**,
+  ayrı bir bölüm açılmadı: ikisi de bir sayım ve ikisi de fontun metriğinden
+  türüyor, ayrışan şey sorulan soru. Yöntemin kapsam etiketi de yazıldı —
+  "1.66×" bu makinenin Menlo'su için tek bir değer, karara giren şey oranın
+  **2.0'ın altında** olması.
+- **Yol haritasına planda olmayan bir kalem eklendi:** `bt-shell`'in beş
+  sınaması release profilinde düşüyor ve `git stash` ile taban commit'te de
+  doğrulandı, yani bu setin kusuru değil. Kapının profili debug olduğu için
+  bugün hiçbir şeyi bloke etmiyor ama `cargo test --release` koşturan biri
+  yanlış yere bakar.
+
 ## Checklist
 
-- [ ] `CLAUDE.md`: pipeline sayısı, doku formatı, emoji paragrafı, iki
-      sorumluluk satırı
-- [ ] `renderer.rs`: blend yorumu dördüncü sebebi ve parametrenin dönüşünü
-      söylüyor
-- [ ] `docs/OLCUMLER.md`: envanter + yöntem + kapsam etiketleri
-- [ ] `docs/YOL-HARITASI.md`: dört kalem (kapanan, büyüyen ikisi, yeni)
-- [ ] `.tasks/README.md`: 023'ün notu
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] `CLAUDE.md`: pipeline sayısı, doku formatı ve emoji paragrafı
+      **phase-2'de** (kuralın kendisi aynı commit'i istiyor); iki sorumluluk
+      satırı burada
+- [x] `renderer.rs`: blend yorumu dördüncü sebebi ve parametrenin dönüşünü
+      söylüyor (phase-2'de, kodla aynı commit)
+- [x] `docs/OLCUMLER.md`: envanter + yöntem + kapsam etiketleri
+- [x] `docs/YOL-HARITASI.md`: beş kalem — emoji kapandı, küçültme kalemi
+      büyüdü/daraldı, atlas doyması büyüdü, `CURSOR` eklendi, release
+      profili eklendi
+- [x] `.tasks/README.md`: 023'ün notu
+- [x] Doğrulama geçti (`make hepsi`)

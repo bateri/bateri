@@ -24,7 +24,7 @@
 | 020 | [fare-raporlama](020-fare-raporlama/) | 🟢 | `main`'de — fare isteyen uygulama fareyi alıyor: düğme, bırakma ve hareket rapor oluyor, Shift terminali geri alıyor (uygulama içinde metin seçmenin tek yolu) |
 | 021 | [kutu-cizim](021-kutu-cizim/) | 🟢 | `main`'de — blok, Braille ve çizgi çizim artık fonttan değil terminalden; köşegenler bilerek dışarıda. Ölçüm koştu: aile 160 → **421** yuva, doyma eşiği Retina'da **29pt** (`docs/OLCUMLER.md` → Atlas yuva ayak izi) |
 | 022 | [atlas-tahliyesi](022-atlas-tahliyesi/) | 🟢 | `main`'de — doku kenarı sabit değil, hedeflenen yuva sayısından türüyor: ölçülen kırılma (Retina'da 29pt, 406 yuva, ailenin istediği 429) kalktı ve yerine bir değişmez geçti. Tahliye **gelmedi** — borç daraldı |
-| 023 | [emoji-ve-genis-glyph](023-emoji-ve-genis-glyph/) | 🔨 | phase-1 `main`'de — geniş glyph iki hücreyi boyuyor (CJK, fullwidth): geniş glyph **iki yarım yuvadan** çiziliyor (shader ve stride el değmiyor), renkli emoji `Atlas`'ın **içinde ikinci bir düzlemde**. Kapı sırası tek hücreyle başlıyor, yani ölçülen 65 çalışan çizim oynamıyor. Panel 3× SORUNLU ve iki bulgu `plan.md`'ye girdi: atlas doluluğu 021→022'yi tekrarlıyor, yelpazeleme `push`'a değil `prepare`'e ait |
+| 023 | [emoji-ve-genis-glyph](023-emoji-ve-genis-glyph/) | 🔨 | geniş karakter iki hücreyi boyuyor (CJK, fullwidth) ve emoji renkli çiziliyor: atlas ikinci bir `RGBA8Unorm_sRGB` düzlem kazandı, shader ile `GlyphInstance`'ın stride'ı el değmedi. Kapının **sırası** ölçümden çıktı — tek hücreye sığan 65 geniş karakter yerinden oynamıyor. 3 phase + kapı; kapı beş bulgu verdi ve beşi giderildi |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

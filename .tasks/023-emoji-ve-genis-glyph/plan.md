@@ -154,5 +154,5 @@ kapı sırası: ink(cell) → tek yuva | ink(2·cell) → iki yuva | kutu
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| phase-3 | |
+| phase-3 | ✅ |
 | kapı | |

@@ -218,6 +218,26 @@ eşitliği yazılır**: eşit olmadıkları gün ortada bir kusur var demektir.
   kümenin 6 → 8 ile kök kuyruğunun 0 → 1 hareketi o ikinci değişikliği de
   taşıyor, blok/çizgi/Braille ise yalnız 021'i.
 
+**İkinci tür: kutu envanteri** (023, 2026-09-22). Aynı bölümün altında,
+çünkü ikisi de bir **sayım** ve ikisi de fontun metriğinden türüyor — ama
+soru farklı: "hangi karakterler kutu çıkıyor ve **neden**".
+
+- **Ölçülen şey, karakter başına dört değer:** taban fontta glyph var mı;
+  yoksa cascade hangi adayı veriyor (`CTFont::for_string`); adayın
+  ilerlemesi ve **mürekkebi** hücrenin kaç katı; ve bugünkü kapı
+  (`font::fallback_font`) onu kabul ediyor mu. Sütun sayısı Unicode'un
+  `East_Asian_Width`'inden (`W`/`F` → 2), yani ızgaranın `unicode-width`
+  üzerinden kullandığı ölçütle **aynı kaynak** — ayrı bir tablo ikinci bir
+  genişlik yetkilisi olurdu.
+- **Kapsam — oran ölçekten bağımsız, mutlak sayı değil.** "1.66×" bu
+  makinenin Menlo'su için tek bir değer; başka bir ailede ya da başka bir
+  sistem sürümünde cascade başka bir aday verir. Karara giren şey oranın
+  **2.0'ın altında olması**, sayının kendisi değil.
+- **Prob depoda durmuyor**, yukarıdaki kuralın aynısı: `bt-atlas`'ın
+  içine geçici bir `#[ignore]` sınaması olarak yazılıp koşuldu ve
+  `git checkout` ile alındı. `pub(crate)` iç yollara (`font::fallback_font`,
+  `glyph_ink`) erişmesi gerektiği için crate'in **dışından** koşamıyor.
+
 ## Nasıl yeniden ölçülür
 
 ### Ortam
@@ -706,6 +726,39 @@ sayıyı verdi (425); aşağıdaki tablo ikisinin ortak değeri.
 421 sayısı planın beklediğinin **birebir aynısı**. Braille'in 0 → 256 sıçraması
 setin asıl bedeli; teknik kümenin 6 → 8'i ile kök kuyruğunun 0 → 1'i araya
 giren mürekkep kapısını da taşıyor (bkz. Yöntem).
+
+**Kutu envanteri** (2026-09-22, `0d383bc`) — Menlo 16pt@2x, hücre ilerlemesi
+**19.266 px**. Taranan aralıklar 019/021'in envanterindekiler artı CJK ve
+emoji blokları (U+3000–30FF, U+4E00–4E7F, U+1F300–1F5FF, U+1F600–1F64F,
+U+1F900–1F9FF, U+FF00–FF60): **3521 kod noktası, 2559'u kutu.**
+
+| aday fontu | 1 sütun | 2 sütun | toplam |
+|---|---:|---:|---:|
+| Apple Color Emoji | 78 | **922** | 1000 |
+| `.LastResort` (makinede font yok) | 825 | 0 | 825 |
+| Hiragino Sans | 31 | 204 | 235 |
+| PingFang SC | 0 | 220 | 220 |
+| Apple Symbols | 116 | 12 | 128 |
+| STIX Two Math | 104 | 0 | 104 |
+| Zapf Dingbats | 30 | 0 | 30 |
+| Arial Unicode MS, Hiragino Sans GB, diğer | 7 | 10 | 17 |
+
+Üç sayı 023'ün kapsamını belirledi:
+
+1. **Adayı olan her 2 sütunlu karakterin ilerlemesi tam olarak hücrenin 1.66
+   katı** — emoji, PingFang ve Hiragino'da aynı, dağılım değil **tek değer**
+   (1.66..1.66). Yani mürekkebi iki hücreye sığıyor: **1346/1346**. Kapının
+   argümanını sütunla çarpmak ailenin tamamını kabul ediyor; ikinci bir eşik
+   ya da "emoji mi" sorusu gerekmedi.
+2. **Emojinin 78'i tek sütunlu** (`🌡 🎙 🏋 🏔`) ve mürekkebi 1.66 hücre, yani
+   tek hücreye sığmıyor. Rengi olan ama iki sütunu **olmayan** karakterler:
+   geometri kolu onlara yardım etmiyor ve 023'te kutu kaldılar.
+3. **65 karakter 2 sütunlu ve ölçümden önce de çiziliyordu** — 21'i Menlo'nun
+   kendi glyph'i (`◽ ◾ ☔ ☕ ♈…♓ ♿ ⚓ ⚡`), 44'ü cascade'den narin mürekkeple
+   geçenler (`丨 、 。 》 」 ！ １ Ｉ ｜`). 023'ün kapı **sırası** (önce tek
+   hücre) bu sayıdan çıktı: ölçüm olmadan "geniş ilan edilmiş" ile "geniş
+   boyuyor" ayrımı görünmezdi ve bayrağa bağlanan bir tasarım 65 çalışan
+   çizimi yerinden oynatırdı.
 
 **Doyma eşiği** — ailenin kendisi kapasiteyi hangi puntoda aşıyor
 (`floor(1024/w) * floor(1024/h)`, aile + tofu = 422 yuva ister):
