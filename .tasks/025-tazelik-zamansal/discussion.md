@@ -254,29 +254,39 @@ cümlesi ("orada bilgi kaybı olur") onu söylüyordu — onay istenecek bir şe
 değil, dönüş işaretiydi.
 
 **Karar 1 — Gösteremediğimiz satır ızgarada kalır; kural yeni değil.**
-`Unavailable` ve `Multiline`'ın kuralının üçüncü uygulaması:
+`Unavailable` ve `Multiline`'ın kuralının üçüncü uygulaması ve **aynı yerde**
+uygulanıyor: `decode_line`'da satır sonu kontrolünün yanında, sekme dışındaki
+bir kontrol karakteri `DockStatus::Control`'a iniyor. `Multiline`'ın cümlesi
+burada da geçerli — veri sağlam, **yüzey dar**. Kapı iki terimde kalıyor:
 
 ```
-fresh = (answered && drawable) || (last_ink eşit && at_anchor)
+fresh = answered || (last_ink eşit && at_anchor)
 ```
 
-`drawable` = görüntüde dock'un glyph **vermediği** bir kontrol karakteri yok.
-Yüklem **tek fonksiyon** ve `dock::cell`'in kullandığının ta kendisi
-(`column_width`'in yanında), yani iki tablo doğmuyor. `decode_line`'da
-`last_ink`'in yanında hesaplanıyor ve `SuppressedInput`'ta aynı yaprak kilit
-turunda taşınıyor — "damga içeriğin yanında" şartının aynısı.
+İlk taslak üçüncü bir terim (`answered && drawable`) öneriyordu ve danışman
+onu çürüttü: `drawable = false` satırı ızgaraya göndermiyor, **bugünkü
+kapıya** düşürüyordu, o da `^A` yalnız **son** karakterse düşüyor. `\x01foo`
+yazan kullanıcıda iki taraf da `'o'` der, kapı geçer, satır dock'a gider ve
+`^A`'nın sütunu boş kalır — **sessiz kayıp, bugün de var**. Durum kolu onu
+konumdan bağımsız kapatıyor ve üstelik bedava geliyor: `suppressed_input`
+`Live` istiyor, `caret_home` arızayı ızgaraya veriyor, `HANDOVER_HOLD` arızayı
+zaten dışlıyor, `Session::dock` `Live` olmayan aynada caret'i satır başına
+koyuyor. Yayılmış bir `bool` yerine tek enum kolu; `^X` yer tutucusu geldiği
+gün silinen şey o kol.
 
-| satır | `answered` | `drawable` | sonuç | bugün |
+**Sekme istisna ve gerekçesi bilgi:** sekme bir şey söylemiyor, dock'taki
+boş sütunu kayıp değil. Öteki kontrol karakterleri bilgidir. İstisna olmasaydı
+Ctrl-V Tab satırı bugünkü yerinden (dock) ızgaraya düşerdi.
+
+| satır | durum | `answered` | sonuç | bugün |
 |---|---|---|---|---|
-| `🥰` (zsh `<hex>` yazıyor) | ✓ | ✓ | **dock**, caret dock'ta | ızgara, caret sıçrıyor — **bu setin konusu** |
-| `^A` (Ctrl-V Ctrl-A) | ✓ | ✗ | içerik kapısı → uyuşmaz → ızgara | aynı |
-| Ctrl-V Tab | ✓ | ✗ | içerik kapısı → eşleşir (2026-09-18) → dock | aynı |
-| `^A` + `🥰` aynı satırda | ✓ | ✗ | ızgara | aynı |
-| yapıştırma, ayna gelmedi | ✗ | — | içerik kapısı | aynı |
+| `🥰` (zsh `<hex>` yazıyor) | `Live` | ✓ | **dock**, caret dock'ta | ızgara, caret sıçrıyor — **bu setin konusu** |
+| `^A` herhangi bir konumda | `Control` | — | ızgara, okunur | son karakterse ızgara, değilse **sessiz kayıp** |
+| Ctrl-V Tab | `Live` | ✓ | dock | aynı |
+| yapıştırma, ayna gelmedi | `Live` | ✗ | içerik kapısı | aynı |
 
-`^X` yer tutucusu **ayrı kalem** (TAB kontrol ama `^I` değil boşluğa açılır,
-DEL `^?` — kendi kararlarını istiyor). O kalem geldiği gün `drawable` kendi
-kendine `true` döner ve bu daraltma söner; yol haritasına öyle yazılıyor.
+`^X` yer tutucusu **ayrı kalem** (TAB `^I` değil boşluğa açılır, DEL `^?` —
+kendi kararlarını istiyor).
 
 **Karar 2 — Damganın etiketleme kuralı ve iki bilinen sınır.** Ayna
 çözüldüğü anda `key_gen` okunur ve `DockState::answers`'a yazılır; kapı
