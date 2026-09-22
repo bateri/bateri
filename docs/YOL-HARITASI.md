@@ -67,8 +67,9 @@ kapandı:** yazılan emoji dock'ta kutu çıkıyordu ve bazıları giriş satır
 ızgaraya fırlatıyordu; kökü bu setin kendi değişmeziydi (dock'ta geniş bayrak
 hiç kurulmasın) ve o değişmez bir kod kısıtından *karar* diye türetilmişti |
 | 024 | dock sütun saysın | **Kullanıcı bildirdi (2026-09-22)**: yazılan emoji dock'ta kutu çıkıyor ve bazıları giriş satırını ızgaraya fırlatıyor. Kök tek — `dock::render` karakter indeksini sütun sanıyor — ve üç belirtiyi birden doğuruyor: dock `Cell::wide`'ı kuramıyor (023'ün kendi değişmezi), tazelik kapısının iki tarafı farklı birim okuyor (ayna `char`, ızgara hücrenin `c`'si — birleştirici `CellExtra`'da) ve CJK'lı satırda caret kayıyor (aşağıdaki `CURSOR` borcu). Ölçüldü: `🎉` dock'a düşüyor ama kutu, `❤️` satırı fırlatıyor. Sete girmesinin sebebi kapsam değil **sıra**: 023 emojiyi çizilebilir yaptı, yani artık yazılıyor ve kusur her yazışta görünüyor. Set açıldı → `.tasks/024-dock-sutun-aritmetigi/` |
-| 025 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-21: taban **yarım alındı** ve kalan yarısı sanıldığından zor çıktı. CPU sütunları ile açılış prizde ölçüldü, ikisi de taban. **GPU sütunu alınamadı:** aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms arasında dolaşıyor ve sınanan dört hipotez (koşu süresi, derleme sonrası ilk koşu, güç durumu, metallib kimliği) onu ayıramadı. Bu setin bedeli bir **shader** bedeli, yani ihtiyacı olan sütun tam da gezinen sütun — üstelik sıçrama yeniden derleme sınırında oluyor ve "shader'lı hâl shader'sız hâlden yavaş mı" sorusu doğası gereği o sınırın iki yanını karşılaştırmak demek. Yani ön koşul **açık** ve artık ondan fazlası: bu setin `/rfc`'si ölçme yöntemini de çözmek zorunda (aynı binary içinde çalışma zamanı anahtarıyla A/B, ya da çok sayıda yeniden derleme üzerinden ortalama). `docs/OLCUMLER.md` → `## Kare süresi`.)* *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
-| 026 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
+| 025 | tazelik kapısı zamansal | **Kullanıcı bildirdi (2026-09-22)**: `🥰` yazınca caret dock'tan ızgaraya sıçrıyor. zsh bazı kod noktalarını kendisi `<hex>` diye yazıyor ve tazelik kapısı **içerik** karşılaştırdığı için aynayı bayat sanıyor. Aşağıdaki borç kalemi ("ölçütü içerik, oysa zaman olmalı") sete bağlandı. Set açıldı → `.tasks/025-tazelik-zamansal/` |
+| 026 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-21: taban **yarım alındı** ve kalan yarısı sanıldığından zor çıktı. CPU sütunları ile açılış prizde ölçüldü, ikisi de taban. **GPU sütunu alınamadı:** aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms arasında dolaşıyor ve sınanan dört hipotez (koşu süresi, derleme sonrası ilk koşu, güç durumu, metallib kimliği) onu ayıramadı. Bu setin bedeli bir **shader** bedeli, yani ihtiyacı olan sütun tam da gezinen sütun — üstelik sıçrama yeniden derleme sınırında oluyor ve "shader'lı hâl shader'sız hâlden yavaş mı" sorusu doğası gereği o sınırın iki yanını karşılaştırmak demek. Yani ön koşul **açık** ve artık ondan fazlası: bu setin `/rfc`'si ölçme yöntemini de çözmek zorunda (aynı binary içinde çalışma zamanı anahtarıyla A/B, ya da çok sayıda yeniden derleme üzerinden ortalama). `docs/OLCUMLER.md` → `## Kare süresi`.)* *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
+| 027 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
 animasyonu), Sparkle ile güncelleme.
@@ -257,6 +258,14 @@ animasyonu), Sparkle ile güncelleme.
 > ve özü tek cümle: jüri bulgusunun **gözlemi ve çıkarımı** onun yetkisi,
 > **çözüm önerisi** değil; boşlukta kullanıcı tarafı seçilir.
 > **Materyalin bedeli on birinci kez ödeniyor.**
+
+> **On beşinci kayma (2026-09-23).** Araya **025 tazelik kapısı zamansal**
+> girdi; materyal yüzey **026**, sekme + bölme **027** oldu. Gerekçe 024'ünkünün
+> aynısı: önceki setin görünür kıldığı kusur. 024 emojiyi dock'ta çizilebilir
+> yaptı, kullanıcı `🥰` yazdı ve caret yazarken ızgaraya sıçradı. Kusur 024'ün
+> değil 012'nin kapısında ve borç olarak zaten kayıtlıydı; sıraya girmesinin
+> sebebi her yazışta görünmesi.
+
 
 
 ## Sete bağlanmamış borçlar
