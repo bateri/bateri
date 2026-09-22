@@ -8881,6 +8881,16 @@ mod tests {
             seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
             let mut cells = Vec::new();
             if let Some(cursor) = frame_if_damaged(session, |c| cells.push(c)) {
+                // **Bileşim**: kayan her satırın bandı da aynı karede geliyor,
+                // yoksa kaymanın açtığı şerit bir kare boş kalırdı. Bu
+                // yardımcının pencereleri dolu, yani bandın tamamı uzantı;
+                // ekran boyu kaydırmada kayma bitiriliyor ve bant da yok.
+                assert!(
+                    cursor.scrolled == 0
+                        || cursor.scrolled >= cursor.rows
+                        || cursor.fill >= cursor.scrolled,
+                    "kayma bandsız: {cursor:?}"
+                );
                 total += u32::from(cursor.scrolled);
                 if glyph_text(&cells).contains(needle) {
                     // Akışın kuyruğu: aynı okumada gelmemiş bir satır sonu
