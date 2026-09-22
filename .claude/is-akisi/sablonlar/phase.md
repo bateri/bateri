@@ -1,10 +1,9 @@
 # Phase {N} — {Başlık}
 
-<!-- Hedef boyut: 3–5 KB. Phase dosyası kodun KILAVUZUDUR, kopyası değil:
-     ne değişecek, neden, hangi sınır korunacak, nasıl doğrulanacak. Kod
-     örneği yazılmaz; bir imza, tip adı ya da `#[repr(C)]` alan sırası
-     sözleşmeyse tek satırla adı geçer. Gerekçe tartışması discussion.md'de,
-     tarihçe teslim.md'dedir — burada tekrarlanmaz. -->
+<!-- Phase dosyası kodun KILAVUZUDUR, kopyası değil: ne değişecek, neden,
+     hangi sınır korunacak, nasıl doğrulanacak. Kod örneği yazılmaz; bir imza,
+     tip adı ya da `#[repr(C)]` alan sırası sözleşmeyse tek satırla adı geçer.
+     Gerekçe tartışması discussion.md'de — burada tekrarlanmaz. -->
 
 ## Özet
 
@@ -24,12 +23,7 @@ _Requirements: R1, R2.1_
 ## Uygulama Notları
 
 <!-- Kodlanırken doldurulur. YALNIZ ilk varsayımdan sapan şey, madde başına
-     bir-iki satır. Çelişki çıkarsa teslim.md Yayın Etkisi'ne değil BURAYA
-     güvenir. Sapma yoksa bölümü sil. -->
-
-## Yayın Etkisi
-
-{Aranacak başlıklar `proje.md` → "Yayın etkisi"; hiçbiri yoksa "yok".}
+     bir-iki satır. Sapma yoksa bölümü sil. -->
 
 ## Checklist
 
@@ -41,4 +35,3 @@ _Requirements: R1, R2.1_
 - [ ] Test: {test senaryosu}
 - [ ] Doğrulama geçti (`make hepsi` + koşullu komutlar)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
-- [ ] Yayın etkisi yazıldı

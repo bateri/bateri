@@ -14,7 +14,7 @@ Başlamadan iki dosyayı oku — set düzeninin ve projeye özgü kuralların te
 sahibi onlardır, burada tekrarlanmaz:
 
 - `.claude/is-akisi/duzen.md` — klasör adı, numaralandırma, dosya rolleri, indeks
-- `.claude/is-akisi/proje.md` — doğrulama komutları, yayın etkisi başlıkları
+- `.claude/is-akisi/proje.md` — doğrulama komutları, kalite kapısı
 
 Belge biçimleri `.claude/is-akisi/sablonlar/` altındadır: yeni dosyayı ilgili
 şablondan **kopyalayarak** başlat, gövdeni oradan doldur.
@@ -48,13 +48,19 @@ Birden fazla geçerli yaklaşım **veya** birden fazla açık karar noktası var
 yaz. Tek bariz yaklaşım varsa atla, doğrudan plan.md'ye geç. Biçim seçimi
 (seçenek / karar-listesi) şablonun başındaki notta anlatılır.
 
-## 6. Muhakeme paneli — kullanıcıya SUNMADAN önce
+## 6. Muhakeme paneli — yalnız pahalı kararda
 
-Kullanıcı onayını vetlenmemiş materyalle isteme.
+Panel **varsayılan olarak kapalı**. 21 setin muhakeme tablolarında verdikt
+sözcüğü 71 kez geçiyor: 65 SORUNLU, 5 KIRMIZI, 1 TEMİZ; mercek düzeyinde
+gerçek KIRMIZI 011 ve 012'de, 022'ninki bir merceğin hücre içinde. Hemen her sette "sorunlu" diyen bir
+kapı ayırt etmiyor ve her koşu üç `opus` ajanı açıyor. Kapı kalkmadı,
+**pahalı karar sınıfına daraltıldı**.
 
-- discussion.md yazıldıysa → **varsayılan olarak** `/plan-review {NNN-slug}`
-  koş. Tasarım hatası en ucuz burada yakalanır.
-- Tek bariz yaklaşımlı küçük işte → atla (kullanıcı isterse koşulur).
+- `/plan-review {NNN-slug}` koş, **ancak** discussion.md'de birden çok
+  yaklaşım var **ve** seçim şunlardan birine dokunuyorsa: yeni crate
+  bağımlılığı, katman yönü (`bt-core`'a platform, `bt-gpu`'ya semantik),
+  `Cell`'e alan, `TERM`/terminfo, shell entegrasyonu, her karede CPU hesabı.
+- Geri kalan her sette atla; kullanıcı "bu tasarım temiz mi" derse koşulur.
 - Panel `KIRMIZI` verirse (yaklaşım değişmeli) → kullanıcıya **gitmeden**
   seçenekleri yeniden kur, gerekirse paneli tekrarla. Kullanıcı ikinci tura
   çağrılmaz; o yalnız vetlenmiş sonucu görür.
@@ -84,15 +90,13 @@ tekrarlamaz. plan.md setin **omurgasıdır** ve çift rol taşır: onaylı tasar
 ## 9. Phase dosyaları
 
 Kullanıcı planı onaylayıp "phase'e geç" dediğinde `phase-1.md` üret, gerekirse
-`phase-2.md`... Her phase: değişecek dosyalar, kabul ölçütü, `## Yayın
-Etkisi`, checklist.
+`phase-2.md`... Her phase: değişecek dosyalar, kabul ölçütü, checklist.
 
-> Phase dosyası kodun **kılavuzudur, kopyası değil**: kod örneği yazılmaz,
-> hedef 3–5 KB (şablonun başındaki not). 001–006'nın phase dosyaları kod
-> örnekleriyle 15–39 KB'a çıktı; `.tasks/` toplamı üretilen kodu geçti ve
-> her implementer o metni bağlamında taşıdı. Bir imza ya da alan sırası
-> sözleşmeyse adıyla tek satır yeter, gövdesini implementer yazar.
-> Checklist'i ve kapıyı **kodlama adımı** uygular; bu skill yalnız yazar.
+> Phase dosyası kodun **kılavuzudur, kopyası değil**: kod örneği yazılmaz.
+> Bir imza ya da alan sırası sözleşmeyse adıyla tek satır yeter, gövdesini
+> implementer yazar. Checklist'i ve kapıyı **kodlama adımı** uygular; bu
+> skill yalnız yazar. (Bir dönem 3–5 KB hedefi vardı; 65 phase'in 59'u
+> aşınca ölü kural diye kaldırıldı — ölçü boyut değil, kodun tekrarı.)
 
 Phase bölmenin ölçüsü: her phase **tek başına doğrulanabilir** olmalı
 (`make hepsi` yeşil bırakmalı) ve tek commit'e sığmalı. Doğrulanamayan bir
@@ -106,7 +110,5 @@ phase checklist'lerine yazılmaz.
 Her phase'in `_Requirements:_` satırı plan.md'deki gereksinimlere bağlanır;
 `/implement` ön uçuşta kapsanmayan gereksinim / öksüz phase arar.
 
-## 10. teslim.md
-
-Bu skill teslim.md'yi **yazmaz**. Sorumluluğu her phase'e doğru bir
-`## Yayın Etkisi` bloğu koymaktır; derlemeyi `/implement` kapanışta yapar.
+Kare, gecikme ya da bellek iddiası phase'e **yazılmaz** (`proje.md` →
+Doğrulama): ölçülmemiş sayı yasak, "ölçüm bekliyor" kalemi de yok.

@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Değişiklikleri doğrulayıp commit'ler ve uzak depoya gönderir; iş setlerinin teslim.md checklist'ini ve .tasks indeksini push'tan önce aynı commit'te damgalar. Kullanıcı "push et", "teslim et", "gönder", "commit'le ve yolla" dediğinde kullanılır.
+description: Değişiklikleri doğrulayıp commit'ler ve uzak depoya gönderir; biten iş setlerinin .tasks indeks satırını push'tan önce aynı commit'te 🟢 yapar. Kullanıcı "push et", "teslim et", "gönder", "commit'le ve yolla" dediğinde kullanılır.
 allowed-tools: Read, Edit, Glob, Grep, Bash(make:*), Bash(cargo:*), Bash(git:*)
 ---
 
@@ -15,9 +15,7 @@ commit kuralları, türetilmiş dosya politikası). Başlamadan onu ve set düze
 için `.claude/is-akisi/duzen.md`'yi oku.
 
 **Kapsam:** teslim birimi **branch**'tir, iş seti değil — çalışma ağacındaki
-her şey birlikte gider, sete göre seçmeli teslim yoktur. teslim.md'nin
-`[komut]`/`[elle]` adımları otomatik koşulmaz; adım 2'de görünür kılınır,
-adım 7'de birlikte yürütmek teklif edilir.
+her şey birlikte gider, sete göre seçmeli teslim yoktur.
 
 ## 1. Doğrula (önce, her zaman)
 
@@ -39,18 +37,13 @@ Dokunmadan önce keşfet:
   yolları (`git log origin/main..HEAD --name-only -- .tasks/`). İndeks bir kez
   bakımsız kalırsa ilk sinyal sessizce boş döner; ikincisi commit'lerin
   kendisinden gelir ve bakım gerektirmez.
-- Binen her set için `teslim.md` varsa oku ve **bekleyen manuel adımları**
-  topla — B bölümünün `### Yayın Checklist` başlığı altındaki işaretsiz
-  `[komut]`/`[elle]` maddeleri.
-  teslim.md'si olmayan set "standart, manuel adım yok" sayılır.
 - Bir set **yarım görünüyorsa** (`plan.md ## Durum` tablosunda `✅` olmayan
   phase var) bunu **açıkça uyar**: onun kısmi commit'leri de gidecek. Phase'ler
   bitmiş ama `kapı` satırı ✅ ya da gerekçeli `[~]` değilse set kapısı koşmamıştır
   (`proje.md` → Kalite kapısı) — uyar ve kullanıcıya sor.
 
 **Özetle ve onay bekle.** Örnek: "Bu teslimle 2 iş gidiyor: 003-ek-fiil-indeksi
-(2 `[elle]` adımı bekliyor — ölçüm `docs/OLCUMLER.md`'ye işlenecek),
-005-ocr-onarim (no-op). Devam?"
+(3 phase + kapı), 005-ocr-onarim (1 phase, kapı `[~]`). Devam?"
 
 ## 3. Kirlilik denetimi
 
@@ -59,16 +52,13 @@ Dokunmadan önce keşfet:
 ekran kaydı) görürsen **uyar ve devam etme**. Commit'lemek yerine
 `.gitignore` öner. `Cargo.lock` bilinçli olarak depodadır, kirlilik değildir.
 
-## 4. Set defteri ve commit
+## 4. İndeks ve commit
 
-**Damga push'tan önce, gidecek commit'e girer.** Push'tan sonra ayrı bir
-"damgala" commit'i atılmaz — o commit gönderilmemiş kalır ve bir sonraki
-teslimi bekler. Adım 2'de bulunan her set için:
-
-- **teslim.md:** adım 1'de koşulan `[oto]` maddelerini `[x]` yap.
-  `[komut]`/`[elle]` maddeleri işaretsiz kalır — koşulmadılar.
-- **`.tasks/README.md`:** bekleyen manuel adım yoksa satırı **🟢** yap; varsa
-  "🔨 teslim bekliyor: {kalan adımlar}". Not tek cümledir (`duzen.md` → İndeks).
+Adım 2'de bulunan, bütün phase'leri ✅ ve `kapı` satırı kapalı her set için
+`.tasks/README.md` satırını **🟢** yap; not tek cümle kalır (`duzen.md` →
+İndeks). Bu değişiklik push'tan **önce**, gidecek commit'e girer; push'tan
+sonra ayrı bir damga commit'i atılmaz. Bekleyen ölçüm ya da ürün kararı 🟢'yi
+ertelemez — onların yeri `docs/OLCUMLER.md` ve yol haritası.
 
 Sonra commit: çalışma ağacı temizse (defter değişmediyse) atla — boş commit
 üretme. Değilse `proje.md`'deki kurala göre mesaj yaz (Türkçe, emir kipinde,
@@ -97,12 +87,3 @@ sonrası doğrulama atlanırsa birleşmiş kod hiç test edilmemiş olur.
 
 Gönderilen commit'ler, değişen dosya sayısı, `Cargo.lock` oynadıysa hangi
 crate ve ölçüm değiştiyse yeni değer.
-
-## 7. Kalan dilim
-
-- **Kalan dilimi bitirmeyi teklif et:** "İstersen kalan adımları birlikte
-  yürütelim — `[komut]` adımlarını tek tek onaylatarak ben koşarım, `[elle]`
-  adımlarında ne yapılacağını tarif ederim, sen tamamlayınca doğrulamayı
-  koştururum." Kabul edilirse teslim.md sırasını izle, tamamlanan her maddeyi
-  `[x]` yap ve checklist bitince README satırını 🟢'ye çevir; bu işaretler bir
-  sonraki teslimin commit'ine girer, kendi başına commit doğurmaz.

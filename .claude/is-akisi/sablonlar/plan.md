@@ -22,14 +22,6 @@ olmaz; gerekçe discussion.md `## Karar`'da kayıtlıdır, tekrarlanmaz.}
 
 {Bu planda yapmayacağımız şeyler}
 
-## Göç (varsa)
-
-{Kullanıcının makinesindeki durum için yapılması gerekenler: `settings.toml`
-anahtarı değişiyorsa eski anahtarın akıbeti, tema dosyası biçimi değişiyorsa
-`~/.config/bateri/themes/` altındakilerin okunabilirliği, `TERM`/terminfo
-değişiyorsa uzak makine geri düşüşü, shell entegrasyon dosyası yer
-değiştiriyorsa açık oturumların durumu. Yoksa bölümü sil.}
-
 ## Akış
 
 {ASCII diagram veya adım adım akış}

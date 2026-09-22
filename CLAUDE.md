@@ -840,7 +840,8 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   bağımlılık kararı; `cargo bench` satırı yukarıdaki komut bloğuna bench seti
   gelince döner. Giriş gecikmesi zinciri (`BT_INPUT_LATENCY_SAMPLES`) ve düşen
   kare sayımı da aynı durumda. Hangi iddianın hangi araca baktığı `/measure`
-  skill'inin tablosunda, bekleyen iddialar setlerin `teslim.md`'lerinde.
+  skill'inin tablosunda, bekleyen iddialar `docs/OLCUMLER.md` → `## Bekleyen
+  iddialar`'da — bir setin durumu ölçüm beklemez.
 - **Dil:** yorumlar, commit iletileri ve belgeler Türkçe ve "neden"i anlatır.
   **Kod tanımlayıcılarının tamamı İngilizce** — pub adlar da, yerel yardımcı,
   alan, değişken ve sınama adı da; `build.rs` dahil, istisnasız. UI dizgileri,
@@ -863,7 +864,9 @@ yürür: `/rfc → /plan-review → /implement → /ship`, sürücüsü `/akis`.
 `.claude/README.md` ve `.claude/is-akisi/`'de; iş setleri `.tasks/` altında.
 Tek dosyalık düzeltme için set açılmaz; set yürürken çıkan tek commit'lik
 düzeltme de phase açmaz. Her phase'in kapısı `make hepsi`'dir, `/code-review`
-ve `/audit` set sonunda bir kez koşar.
+ve `/audit` set sonunda bir kez koşar; set defteri (`teslim.md`) ve "ölçüm
+bekliyor" kalemi yoktur, panel yalnız pahalı kararda açılır
+(`.claude/README.md` → Sadeleştirme).
 
 Hangi işin **neden o sırada** olduğu `docs/YOL-HARITASI.md`'dedir; henüz
 açılmamış setlerin sırası ve bağımlılıkları oraya yazılır. **Durumu** o dosya

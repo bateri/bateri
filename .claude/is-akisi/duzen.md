@@ -46,11 +46,11 @@ numara çakışması iki işi aynı ada bağlar.
 | `context.md` | mevcut durum, motivasyon, kanıt | ilk | `/rfc` |
 | `discussion.md` | seçenekler/karar noktaları + **karar kaydı** + muhakeme | seçenek varsa | `/rfc`, `/plan-review` |
 | `plan.md` | onaylanan yaklaşım + gereksinimler + **durum tablosu** | onaydan sonra | `/rfc`, `/implement` |
-| `phase-{N}.md` | kodun birebir kılavuzu, checklist, yayın etkisi | plan onaylanınca | `/rfc`, `/implement` |
-| `teslim.md` | doğrulama + yayın adımları, geri alma | son phase'den sonra | `/implement` |
+| `phase-{N}.md` | kodun kılavuzu, checklist | plan onaylanınca | `/rfc`, `/implement` |
 
-`discussion.md` opsiyoneldir; tek bariz yaklaşım varsa atlanır. `teslim.md`
-sıfırdan keşfedilerek değil, phase'lerin `## Yayın Etkisi` bloklarından derlenir.
+`discussion.md` opsiyoneldir; tek bariz yaklaşım varsa atlanır. Set defteri
+(`teslim.md`) **yoktur** — 2026-09-22'de kaldırıldı, gerekçesi `proje.md` →
+Teslim. Eski setlerin dosyaları tarihçe olarak duruyor, yenisi yazılmaz.
 
 Şablonlar `.claude/is-akisi/sablonlar/` altındadır ve dosya biçiminin tek
 sahibi orasıdır; skill'ler şablonu gövdelerine kopyalamaz, oradan okur.
@@ -68,8 +68,7 @@ Bu yüzden sıralama **doğaldır, leksik değil**: `phase-2` < `phase-10` ve
 `phase-2` < `phase-2a` < `phase-2b`. "phase-1'den N'e say" varsayma, glob'la.
 
 **Ek phase eşiği.** Set yürürken çıkan iş, ancak kendi kılavuzunu hak
-ediyorsa phase olur: birden çok dosyaya yayılır, kendi doğrulaması ve yayın
-etkisi vardır. Tek commit'lik düzeltme (006 phase-4c: tek dosyada otuz satır)
+ediyorsa phase olur: birden çok dosyaya yayılır, kendi doğrulaması vardır. Tek commit'lik düzeltme (006 phase-4c: tek dosyada otuz satır)
 phase açmaz — doğrudan commit'lenir, `plan.md → ## Durum`'un altına tek satır
 not düşer.
 
@@ -109,8 +108,8 @@ git diff --stat "$first^" HEAD
 
 `.tasks/README.md` bütün işleri tek tabloda tutar. Klasör adı zaten sırayı
 verdiği için indeks yalnız **durum** ve **tek cümlelik not** taşır — commit
-listesi, açık kalem dökümü ve tarihçe `teslim.md`'dedir. İndeksi her akış
-okur; paragraf büyüyen not her okumada bağlama biner:
+listesi `git log --grep`'tedir, tarihçe phase'lerin Uygulama Notları'nda.
+İndeksi her akış okur; paragraf büyüyen not her okumada bağlama biner:
 
 ```markdown
 # İşler
@@ -123,8 +122,11 @@ okur; paragraf büyüyen not her okumada bağlama biner:
 İlk iş eklenirken tablodaki `henüz iş açılmadı` yer tutucu satırı silinir.
 
 Durum işaretleri: **📐 planlama** (plan var, kod yok) · **🔨 devam** (phase'ler
-işleniyor) · **🟢 bitti** (kod `main`'de, teslim checklist'i kapalı) ·
-**🗄️ arşiv** (yerini başka iş aldı ya da iptal edildi).
+işleniyor) · **🟢 bitti** (kod `main`'de, `make hepsi` yeşil, `## Durum`'un
+`kapı` satırı ✅ ya da gerekçeli `[~]`) · **🗄️ arşiv** (yerini başka iş aldı
+ya da iptal edildi). 🟢 **bekleyen ölçüm ya da manuel adımla ertelenmez**:
+ölçüm iddiası `docs/OLCUMLER.md`'nin, ürün kararı yol haritasının konusudur,
+setin durumu değil.
 
 İndeks bakımı komutlara gömülüdür: `/rfc` işi 📐 olarak ekler, `/implement`
 🔨 yapar, `/ship` 🟢 yapar. Atlanırsa indeks drift'e düşer.

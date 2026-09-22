@@ -64,7 +64,7 @@ Bu projeye özgü mercek notları:
 - Shell entegrasyonuna dokunan plan → üç kabuğu (zsh, bash, fish) birden
   kapsamalı; kullanıcı rc dosyasına yazan her yol KIRMIZI.
 - Ölçüm iddiası taşıyan plan ("120 fps tutar", "gecikme düşer") → itiraz:
-  ölçüm tahmin edilmez, `/measure` ile gösterilir; plan "ölçüm bekliyor" der.
+  ölçüm tahmin edilmez, `/measure` ile gösterilir; plan iddiayı hiç yazmaz.
 
 ## 2. Sentez (ana döngüde — devredilmez)
 
@@ -86,8 +86,8 @@ discussion.md'ye onayıyla işlenir.
 
 ## Ne zaman koşulur
 
-- `/rfc` akışında (adım 6): discussion.md yazıldıysa, seçenekler kullanıcıya
-  **sunulmadan önce** varsayılan adım.
-- `/implement` ön uçuşunda: hiç başlanmamış, muhakeme görmemiş sette önerilir.
+- `/rfc` akışında (adım 6): **yalnız** birden çok yaklaşım varsa ve seçim
+  pahalı bir sınıfa dokunuyorsa (liste orada). Varsayılan kapalı; gerekçesi
+  de orada.
 - Bağımsız: herhangi bir eski planın üstüne de koşturulabilir ("bu plan temiz
   mi?") — bu kullanımda bulgular doğrudan kullanıcıya sunulur.

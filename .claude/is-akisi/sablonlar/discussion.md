@@ -30,8 +30,8 @@
      Turlar dosyada sayılabilir durmalıdır: otonom akış tur sayısını buradan
      okur, bağlamından değil. -->
 
-<!-- `/plan-review` doldurur. Bu bölümün varlığı "bu plan bağımsız göz gördü"
-     işaretidir; `/implement` ön uçuşta buna bakar. -->
+<!-- `/plan-review` doldurur; panel yalnız pahalı kararda koşar (`/rfc`
+     adım 6), koşmadıysa bu bölüm dosyada olmaz. -->
 
 | Mercek | Verdict |
 |---|---|

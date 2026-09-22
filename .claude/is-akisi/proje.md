@@ -15,7 +15,6 @@ ajan onu zaten yükler, iki kopya hem bağlam hem drift demektir.
 
 - Doğrulama (definition of done)
 - Kalite kapısı
-- Yayın etkisi
 - Teslim
 - Bu depoya özgü tuzaklar
 
@@ -38,8 +37,10 @@ Buradaki karşılığı "`Cargo.lock` değişti mi"dir — değiştiyse ya kayı
 bağımlılık kararıdır ya da kusurdur; `make denetim` uyarır.
 
 **Ölçüm bir kapı değildir** ve ölçülmemiş sayı yazılmaz (`CLAUDE.md`). Kare,
-gecikme ya da bellek iddiası taşıyan phase `## Yayın Etkisi`'ne **"ölçüm
-bekliyor: {ne}"** yazar ve devam eder; `/measure` oradan kapatır.
+gecikme ya da bellek iddiası taşıyan phase o iddiayı **hiç yazmaz**; ölçmek
+isteyen kullanıcı `/measure` çağırır ve sonuç `docs/OLCUMLER.md`'ye girer.
+"Ölçüm bekliyor" diye bir kalem yoktur: 2026-09-22'ye kadar vardı ve bir
+phase'in iddiasını setin durumuna çevirip sekiz seti süresiz 🔨'da tuttu.
 
 ## Kalite kapısı
 
@@ -56,12 +57,17 @@ değişti. Bu üçünde hata sessizdir ve sonraki phase'ler onun üstüne kurulu
 geri kalan her şey set sonunu bekler. Liste doğrulama tablosundan türer, ayrı
 tutulmaz.
 
-**Set sonunda — bir kez** (son phase'den sonra, `teslim.md` derlenmeden önce):
+**Set sonunda — bir kez** (son phase'den sonra):
 
 1. `/code-review` — setin commit aralığı (`duzen.md` → Set aralığı).
 2. `/audit` — `make denetim`'in kapsamadığı mercekler, yalnız ilgili dosya
    değiştiyse.
 3. Bulgu düzeltildiyse `make hepsi` yeniden ve **tek** düzeltme commit'i.
+4. **Gözle kontrol** — pencereyi açan davranış değiştiyse kapanış mesajı
+   kullanıcıya **neye bakacağını** tek satırla söyler (sahne + beklenen
+   görüntü). Kapı koda bakar, kullanıcı ekrana: 017'de üç kapı da koştu ve
+   teslimden sonra beş kusuru kullanıcının gözü buldu. Bu bir defter satırı
+   değil, devir mesajının bir cümlesidir; 🟢'yi bekletmez.
 
 `/simplify` kapının parçası değildir; kullanıcı isterse koşar. Kapının neden
 phase başından set sonuna taşındığı `.claude/README.md` → Hafifletme.
@@ -85,30 +91,10 @@ yerleşik skill'ler `.claude/skills/` altında durmaz.
 | `- [~]` | **waive / atlandı** — yanına gerekçe |
 | `- [ ]` | yapılmadı |
 
-Phase'in izi checklist'indedir (doğrulama, riskli ise `/code-review`, yayın
-etkisi). Set kapısının izi `plan.md → ## Durum` tablosunun `kapı` satırıdır.
+Phase'in izi checklist'indedir (doğrulama, riskli ise `/code-review`). Set
+kapısının izi `plan.md → ## Durum` tablosunun `kapı` satırıdır.
 Kutu silinmez: koşmayan kapının kutusu `[~]` ve gerekçesiyle durur, silinen
 kutu atlandığını hiçbir yerde göstermez.
-
-## Yayın etkisi
-
-Phase dosyalarındaki `## Yayın Etkisi` bloğu şunları arar (hiçbiri yoksa "yok"):
-
-- **shader** — `.metal` değiştiyse `make shader` koştu mu; uniform/vertex
-  yapıları Rust `#[repr(C)]` karşılığıyla **alan alan** aynı mı
-- **terminfo / `TERM`** — yetenek ya da ad değiştiyse `assets/terminfo`
-  güncellendi mi, kurulum adımı (`[komut]`) teslim.md'ye düştü mü; uzak
-  makinede geri düşüş (`xterm-256color`) korunmalı
-- **ayar şeması** — anahtar eklendi/adı değiştiyse varsayılan değer,
-  `docs/AYARLAR.md`, eski anahtarın akıbeti; **bilinmeyen anahtar asla silinmez**
-- **tema / materyal biçimi** — paketli temaların hepsi ve kullanıcı tema
-  dizini için geriye dönük okuma
-- **shell entegrasyonu** — üç kabuk da (zsh, bash, fish) gözden geçirildi mi;
-  kullanıcı rc dosyasına **dokunulmaz**
-- **app bundle** — `Info.plist`, entitlements, `NS*UsageDescription`, imza
-- ölçüm bekleyen iddia → **"ölçüm bekliyor: {ne}"**, sayı uydurma
-- `CLAUDE.md` / crate'in `lib.rs` başlık yorumu güncellenmeli mi
-- **yeni bağımlılık** — mimari karardır, kendiliğinden yapılmaz: dur ve sor
 
 ## Teslim
 
@@ -121,6 +107,12 @@ Tek branch: `main`. Dev branch, migration, container, panel yok.
   bulunur.
 - **Phase = tek commit:** kod, phase checklist'i, `plan.md ## Durum` ✅ ve
   (ilk phase'de) indeksin 🔨'ü birlikte girer. Defter için ayrı commit atılmaz.
+- **Set defteri yok.** Bir dönem `teslim.md` vardı (doğrulama + yayın
+  checklist'i + geri alma); 21 sette 21 kez "revert et" dedi, 61 manuel adım
+  biriktirdi ve 007'den sonraki 207 commit'in 71'i yalnız defter oldu.
+  Yayın etkisi olan şeyler (`Cargo.lock`, ayar şeması, `TERM`, shell) zaten
+  `/audit`'in mercekleri ve otonom şeridin eskalasyon listesi; geri alma her
+  sette `git revert`. Kapanışın izi `plan.md → ## Durum` ve indeks satırıdır.
 - Push `/ship` kararıdır, `/implement` push etmez. `make hepsi` yeşil olmadan
   push yok.
 - Depoya girmeyenler: `target/`, `*.metallib`, `*.dSYM`, `*.dmg`, `*.app`,

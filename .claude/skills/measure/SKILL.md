@@ -110,12 +110,11 @@ sayı kopyalama; o belgeler niteliksel anlatıp buraya bağlanır.
 - `docs/ARASTIRMA.md`'ye dokunma: o Metalterm'in kendi sayılarını aktaran
   tarihli bir kayıttır, bilerek eskir.
 
-## 5. İş setini kapat
+## 5. Bekleyen iddia
 
-Ölçüm bir `.tasks/{set}/` işinden geldiyse: o phase'in `## Yayın Etkisi`
-bloğundaki **"ölçüm bekliyor: {ne}"** maddesini kapat, checklist kutusunu
-`[x]` yap ve yeni değeri `## Uygulama Notları`'na tek satır olarak düş
-(sayının kendisi değil, nereye yazıldığı — sayı `docs/OLCUMLER.md`'de).
+Ölçülen şeyin `docs/OLCUMLER.md → ## Bekleyen iddialar`'da bir maddesi varsa o
+maddeyi düş; tek liste orası. Setlerin dosyalarına dokunulmaz — set çoktan
+🟢'dir, ölçüm setin durumu değildir (`duzen.md` → İndeks).
 
 ## 6. Rapor
 

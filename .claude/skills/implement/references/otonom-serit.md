@@ -121,11 +121,11 @@ kontrolü (commit'in dosya listesini checklist'le karşılaştırmak) 001–006'
 
 ### 5. Set kapısı (kapanışta, bir kez)
 
-Son phase'den sonra, `teslim.md` derlenmeden önce **tek bir kapı ajanı**
-başlat: `proje.md` → Kalite kapısı → "Set sonunda" adımlarını koşar
+Son phase'den sonra **tek bir kapı ajanı** başlat: `proje.md` → Kalite kapısı → "Set sonunda" adımlarını koşar
 (aralık `duzen.md` → Set aralığı), bulguları giderir, `make hepsi`'yi yeniden
-koşar, düzeltme varsa tek commit atar ve `## Durum`'un `kapı` satırını aynı
-commit'te ✅ yapar. Rapor biçimi §3'tür (`KAPI:` satırı
+koşar, tek commit atar (düzeltme + `## Durum`'un `kapı` satırı ✅ + indeks
+notu; düzeltme yoksa yalnız son ikisi) ve raporunun `SAPMA` satırına gözle
+kontrol sahnesini yazar. Rapor biçimi §3'tür (`KAPI:` satırı
 `/code-review · /audit → koştu`). Bulgu gövdesi orkestratöre girmez; `WAIVE`
 kararı orkestratörde kalır.
 

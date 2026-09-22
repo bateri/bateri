@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Bir planlama setinin (.tasks/NNN-slug/) phase dosyalarını sırayla hayata geçirir — kodu yazar, testleri koşar, phase başına tek commit atar, set sonunda kalite kapısından geçirir ve teslim.md derler. Kullanıcı planlanmış bir işi uygulamak, "phase'lere geç", "hadi yapalım" ya da yarım kalmış bir setten devam etmek istediğinde kullanılır. Push/teslim etmez.
+description: Bir planlama setinin (.tasks/NNN-slug/) phase dosyalarını sırayla hayata geçirir — kodu yazar, testleri koşar, phase başına tek commit atar, set sonunda kalite kapısından geçirir. Kullanıcı planlanmış bir işi uygulamak, "phase'lere geç", "hadi yapalım" ya da yarım kalmış bir setten devam etmek istediğinde kullanılır. Push/teslim etmez.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash(make:*), Bash(cargo:*), Bash(git:*), Bash(ls:*), TodoWrite, Agent, Skill
 ---
 
@@ -19,8 +19,7 @@ her durumda o dosyanın **Ajan kuralları** isteme yazılır.
 Okunacak sözleşmeler:
 
 - `.claude/is-akisi/duzen.md` — set düzeni, phase sıralaması, durum tablosu, set aralığı
-- `.claude/is-akisi/proje.md` — **doğrulama komutları, kalite kapısı, yayın etkisi, commit biçimi**
-- `.claude/is-akisi/sablonlar/teslim.md` — kapanışta derlenecek biçim
+- `.claude/is-akisi/proje.md` — **doğrulama komutları, kalite kapısı, commit biçimi**
 
 ## Girdi
 
@@ -51,10 +50,7 @@ diff` ile doğrula ve sor: "phase-N'den devam ediyorum, doğru mu?"
 
 Bütün phase'ler ✅ ise doğrudan Kapanış'a geç.
 
-**0.5 Muhakeme kontrolü** (yalnız hiç başlanmamış sette). `discussion.md` var
-ama `## Muhakeme` yoksa `/plan-review {set}` öner; kullanıcı istemezse devam.
-
-**0.6 Todo kur.** `TodoWrite` ile resume noktasından itibaren phase başına bir
+**0.5 Todo kur.** `TodoWrite` ile resume noktasından itibaren phase başına bir
 todo. Kalıcı kayıt `## Durum` + checklist'lerdir.
 
 ## Phase döngüsü (sırayla, resume noktasından)
@@ -72,8 +68,7 @@ yalnız sapma. Planın tekrarı, keşif günlüğü ya da "şunu da okudum" notu
 **4. Doğrula.** `proje.md` → Doğrulama; **geçmeli**. Koşullu komutlar (shader,
 yarış, duman, kur) orada tanımlıdır.
 
-Ölçüm bir kapı değildir: kare/gecikme/bellek iddiası taşıyan phase `## Yayın
-Etkisi`'ne "ölçüm bekliyor: {ne}" yazar ve devam eder.
+Ölçüm bir kapı değildir ve iddiası yazılmaz (`proje.md` → Doğrulama).
 
 **5. Riskli phase kapısı.** Phase `proje.md` → Kalite kapısı → "Riskli
 phase" koşulunu tetiklediyse `/code-review`'u `Skill` aracıyla, ön planda
@@ -101,36 +96,19 @@ Onay sonrası aynı oturumda devam edilebilir ya da **taze bağlam (önerilen)**
 
 **8. Set kapısı.** `proje.md` → Kalite kapısı → "Set sonunda": `/code-review`
 setin aralığında (`duzen.md` → Set aralığı), ardından `/audit`. Bulgu
-düzeltildiyse `make hepsi` ve tek commit (`{set} kapı`). `## Durum`'un `kapı`
-satırını aynı commit'te ✅ yap (kapı koşamadıysa `[~] {gerekçe}` ve adım 12'de
-söylenir) — düzeltme yoksa ayrı commit atma, satır
-teslim commit'ine girer. Otonom şeritte bunu tek bir kapı ajanı yapar
-(otonom şerit §5).
+düzeltildiyse `make hepsi` ve tek commit (`{set} kapı`); o commit `## Durum`'un
+`kapı` satırını ✅ yapar ve indeks notunu tek cümleye getirir ("N phase +
+kapı tamam"). Düzeltme yoksa ikisi de aynı **tek** defter commit'ine girer —
+setin son commit'i budur, başka defter yok. Kapı koşamadıysa `[~] {gerekçe}`
+ve adım 9'da söylenir. Otonom şeritte bunu tek bir kapı ajanı yapar (otonom
+şerit §5). 🟢 `/ship`'in işidir.
 
-**9. Eksik-checklist kapısı.** Bütün phase checklist'lerini tara:
+Eksik-checklist taraması **yok**: `make hepsi` yeşil ve `## Durum` ✅ ise
+phase bitmiştir; kutu `[ ]` kaldıysa phase commit'inde işaretlenmemiştir, o
+kadar. (Bir dönem waive sayımı ve "kutuyu geri koy" ritüeli vardı; 49 `[~]`
+üretti ve hiçbirini kod okumadı.)
 
-- İşaretsiz (`[ ]`) kutu varsa ya tamamla ya da kullanıcıyla **bilinçli
-  waive** olarak onayla (`[~]` + gerekçe).
-- `[~]` kutuları **say ve raporla**; `[x]` gibi sessizce geçilmez.
-- Doğrulama kutusu **hiç olmayan** phase bir kayıptır, waive değil: kutuyu geri
-  koy ve doğrulamanın koşup koşmadığını kullanıcıya sor.
-- Başka phase'e devredilmiş kutu (`→ phase-2b'de takip`) bilinçli waive'dir.
-
-**10. teslim.md derle.** Şablondan üret ya da güncelle. Phase'lerin `## Yayın
-Etkisi` bloklarını topla:
-
-- "yok" bloklarını atla. Hiç dolu blok yoksa **no-op teslim.md**: "türetilmiş
-  dosya/ölçüm/belge etkisi yok; doğrulama + `/ship` yeterli".
-- **Çelişki kuralı:** Yayın Etkisi aynı phase'in Uygulama Notları'yla
-  çelişirse **Uygulama Notları kazanır**.
-- `git log` ile tara: Yayın Etkisi'ne düşmemiş ama etkisi olan set dışı commit
-  varsa ekle.
-- Her B adımını şeritle etiketle (`[oto]` / `[komut]` / `[elle]`).
-
-**11. İndeks.** Setin notunu tek cümleyle güncelle ("N phase tamam; teslim
-bekliyor"). 🟢 `/ship`'in işidir. teslim.md ile indeks aynı commit'e girer.
-
-**12. Devir.** Kapanış özeti: phase'ler + commit hash'leri (git log'dan), kayda
-değer sapmalar, waive'ler, ölçüm bekleyen iddialar. Net yönlendirme:
-**"Teslim için `/ship`; sonraki set için `/clear`."** teslim.md'de bekleyen
-`[komut]`/`[elle]` adımı varsa birlikte yürütmeyi teklif et.
+**9. Devir.** Kapanış özeti: phase'ler + commit hash'leri (git log'dan), kayda
+değer sapmalar, waive'ler ve **gözle kontrol satırı** (`proje.md` → Kalite
+kapısı 4: pencereyi açan davranış değiştiyse neye bakılacak, tek satır). Net
+yönlendirme: **"Teslim için `/ship`; sonraki set için `/clear`."**

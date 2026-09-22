@@ -1,6 +1,6 @@
 ---
 name: akis
-description: Bir konuyu baştan sona yürütür — planlama setini ürettirir, paneliyle vetletir, kararı kaydettirir, seti commit'ler ve phase'leri --auto ile kodlatır. Kullanıcı bir işi komple devrettiğinde ("şunu yap", "baştan sona hallet", "sen kur ve uygula") kullanılır. Zincirin sürücüsüdür, aşamaların işini kendi yapmaz; teslim/push etmez.
+description: Bir konuyu baştan sona yürütür — planlama setini ürettirir, gerekirse paneliyle vetletir, kararı kaydettirir, seti commit'ler ve phase'leri --auto ile kodlatır. Kullanıcı bir işi komple devrettiğinde ("şunu yap", "baştan sona hallet", "sen kur ve uygula") kullanılır. Zincirin sürücüsüdür, aşamaların işini kendi yapmaz; teslim/push etmez.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash(git:*), Bash(ls:*), TodoWrite, Agent, Skill
 ---
 
@@ -108,5 +108,5 @@ bekle.
 ## Devir
 
 Kapanışta: set yolu, phase commit'leri, kayda değer sapmalar, waive'ler ve
-ölçüm bekleyen iddialar. Net yönlendirme: **"Teslim için `/ship {NNN-slug}`
+gözle kontrol satırı. Net yönlendirme: **"Teslim için `/ship {NNN-slug}`
 çalıştır; sonraki iş için `/clear`"** — akış push etmez.

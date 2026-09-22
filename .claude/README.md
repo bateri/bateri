@@ -10,15 +10,15 @@ Dört skill, tek zincir:
 | skill | ne yapar | ne YAPMAZ |
 |---|---|---|
 | `/rfc` | planlama seti üretir (`.tasks/NNN-slug/`) | kod yazmaz |
-| `/plan-review` | tasarımı 3 mercekli jüriyle sınar | plan değiştirmez, önerir |
+| `/plan-review` | tasarımı 3 mercekli jüriyle sınar — **yalnız pahalı kararda** (`/rfc` adım 6) | plan değiştirmez, önerir |
 | `/implement` | phase başına kodlar, doğrular, tek commit atar; set sonunda kalite kapısını koşar | push etmez |
-| `/ship` | doğrular, commit'ler, `main`'e gönderir | manuel adımları kendiliğinden koşmaz |
+| `/ship` | doğrular, commit'ler, indeksi 🟢 yapar, `main`'e gönderir | set defteri tutmaz |
 
 Zinciri baştan sona koşturan bir sürücü vardır ve kendisi iş yapmaz:
 
 | skill | ne yapar | ne YAPMAZ |
 |---|---|---|
-| `/akis` | konuyu alır, seti ürettirir, vetletir, kararı kaydeder, `--auto` ile kodlatır | aşamaların işini kendi yapmaz; teslim/push etmez |
+| `/akis` | konuyu alır, seti ürettirir, gerekirse vetletir, kararı kaydeder, `--auto` ile kodlatır | aşamaların işini kendi yapmaz; teslim/push etmez |
 
 `/akis`'in insandan devraldığı tek nokta `/rfc` adım 7'nin onayıdır; karar
 kaydı yine yazılır (damga biçimi şablonda). Aşamaların kuralları
@@ -60,6 +60,24 @@ Değişen kural ve sahibi:
 Kalan, repo dışı kalem: uzun koşan ajanlar prompt önbelleğinin çalıştığı
 yoldan koşmalı (`otonom-serit.md` → Önbellek ön koşulu).
 
+## Sadeleştirme (2026-09-22)
+
+007–022'nin git geçmişi ve `.tasks/` içeriği sayılarak ikinci tur. Hafifletme
+defteri öldürmemişti, taşımıştı: 007'den sonraki 207 commit'in 71'i yalnız
+`.tasks/`/`docs/`'a dokunuyordu ve sekiz set, kodu `main`'de olduğu hâlde
+"ölçüm bekliyor" yüzünden süresiz 🔨'daydı. Her satır bir çıkarma ya da
+daraltma; yeni kapı, defter ya da ajan yok.
+
+| ne vardı | ne oldu | neden | sahibi |
+|---|---|---|---|
+| kare/gecikme iddiası taşıyan phase "ölçüm bekliyor" yazar, `/ship` bekleyen adımı 🔨 sayar | iddia yazılmaz; 🟢 = kod `main`'de + `make hepsi` yeşil + `kapı` satırı kapalı; bekleyen iddiaların tek yeri `docs/OLCUMLER.md` | bir phase'in iddiası setin durumuna dönüşüyordu; 12 iddianın kancası ya da yükü yoktu, bench'inki reddedilmiş bir bağımlılığı bekliyordu | `proje.md` → Doğrulama, `duzen.md` → İndeks |
+| `teslim.md` (doğrulama + yayın checklist'i + geri alma) | yok; kapanış = kapı commit'i + indeks satırı + devir mesajı | 21 sette 21 kez "revert et", 61 `[komut]`/`[elle]` adımı, 49 `[~]`; hash yazan defter commit'leri `teslim.md`'de yeniden doğmuştu (017'de üç kez) | `proje.md` → Teslim; şablon silindi |
+| phase'de `## Yayın Etkisi`, plan'da `## Göç`, context'te `## Kanıt` ve `## Mevcut Mimari` | hepsi yok | 94 phase'in 93'ü konusu olmayan başlığı doldurdu (tek branch, terminfo yok, bash/fish yok); gerçek yayın etkisi zaten `/audit` mercekleri ve eskalasyon listesi | `sablonlar/` |
+| panel her discussion.md'de varsayılan açık, 3 × `opus` | yalnız birden çok yaklaşım **ve** pahalı sınıf (bağımlılık, katman, `Cell`, `TERM`, shell, her karede CPU) | 71 verdiktin 65'i SORUNLU, 1'i TEMİZ: %99 "sorunlu" diyen kapı ayırt etmiyor; gerçek KIRMIZI üç sette | `rfc` adım 6, `plan-review` → Ne zaman koşulur |
+| `/implement` 0.5 muhakeme nag'i, adım 9 eksik-checklist kapısı, `/ship` adım 7 kalan dilim | yok | panel isteğe bağlıyken nag gürültü; waive sayımı hiç kod okumadı; kalan dilim teslim.md'nin adımlarıydı | `implement`, `ship` |
+| phase hedefi 3–5 KB | cümle kalktı | 65 phase'in 59'u aştı (ort. 9,1 KB): ölü kural | `sablonlar/phase.md`, `rfc` adım 9 |
+| gözle kontrol adsız | set kapısının 4. adımı: devir mesajında tek satır "neye bakılır" | 017'de üç kapı koştu, teslimden sonra beş kusuru kullanıcının gözü buldu — ürünü sınayan adım süreçte adsızdı; bu bir defter satırı değil, 🟢'yi bekletmez | `proje.md` → Kalite kapısı |
+
 ## Düzen
 
 ```
@@ -68,9 +86,9 @@ yoldan koşmalı (`otonom-serit.md` → Önbellek ön koşulu).
 │   ├── duzen.md            ← iş seti düzeni: klasör adı, numaralandırma,
 │   │                          dosya rolleri, durum tablosu, indeks  [TEK SAHİP]
 │   ├── proje.md            ← PROJEYE ÖZGÜ: doğrulama komutları, kalite kapısı (phase / set),
-│   │                          yayın etkisi, branch akışı, tuzaklar   [TEK SAHİP]
+│   │                          teslim kuralı, tuzaklar                [TEK SAHİP]
 │   └── sablonlar/          ← belge biçimleri: context, discussion, plan,
-│                              phase, teslim                          [TEK SAHİP]
+│                              phase                                  [TEK SAHİP]
 └── skills/
     ├── akis/SKILL.md        ← zincirin sürücüsü (konudan koda)
     ├── rfc/SKILL.md
