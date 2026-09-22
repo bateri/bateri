@@ -442,6 +442,17 @@ fn cell(ch: char, col: u16, base: LinearRgba, style: HighlightStyle, theme: &The
         // SGR 58'in karşılığı `region_highlight`'ta yok: çizgi ön planı alır.
         underline_color: None,
         strikeout: false,
+        // **Dock'ta geniş yol yapısal olarak kapalı** ve bu bir varsayım
+        // değil değişmez: yukarıdaki sütun **karakter indeksinden** türüyor
+        // (`TEXT_COL + offset`, `offset = index - skip`), yani aynada bir CJK
+        // karakteri varsa ızgaranın spacer'ı gibi bir boş sütun **yok**. İki
+        // hücrelik bir glyph burada komşu karakterin üstüne boyardı.
+        // 021'in "kapı küçük sınıfta kapalı" emsali yetmiyor: dock'un giriş
+        // satırı gösterim ölçüsünde (`SizeClass::Normal`), yalnız bağlam
+        // satırı küçük. Kusurun kendisi (caret'in CJK'lı satırda kayması)
+        // bundan eski ve `docs/YOL-HARITASI.md`'de borç olarak duruyor;
+        // bu satır onu **büyütmüyor**.
+        wide: false,
     }
 }
 
@@ -1007,5 +1018,46 @@ mod tests {
         assert_ne!(dock.separator, dock.ground, "ayraç zeminle aynı renk");
         // Caret'in altındaki metin ızgaradakiyle aynı kuraldan: zemin rengi.
         assert_eq!(dock.caret_text, THEME.background_linear());
+    }
+
+    /// **Dock hiçbir hücreye geniş bayrağı koymuyor** ve bu bir değişmez,
+    /// gözlem değil.
+    ///
+    /// Dock'un sütunu **karakter indeksinden** türüyor (`TEXT_COL + offset`),
+    /// yani ızgaranın `WIDE_CHAR_SPACER`'ı gibi bir boş sütun yok: iki
+    /// hücrelik bir glyph burada komşu karakterin üstüne boyardı. Bayrağı
+    /// gören ilk yer `bt_gpu::AtlasTexture::prepare` ve orada ikinci bir
+    /// dörtlü basardı, yani kusur sessiz olurdu — hiçbir sayaç kıpırdamaz.
+    /// Kusurun kendisi (CJK'lı satırda caret'in kayması) bundan eski ve
+    /// `docs/YOL-HARITASI.md`'de borç olarak duruyor; bu bekçi onun
+    /// **büyümediğini** söylüyor.
+    ///
+    /// 021'in "kapı küçük sınıfta kapalı" emsali **yetmiyor**: dock'un giriş
+    /// satırı gösterim ölçüsünde, yalnız bağlam satırı küçük.
+    #[test]
+    fn the_dock_never_marks_a_cell_wide() {
+        let state = live("", "漢字 ls ｆｕｌｌ", "", 3);
+        let (cells, _) = draw_with(
+            &state,
+            &DockContext {
+                // Bağlam satırı da CJK taşıyabiliyor: yol bir dizin adı.
+                cwd: "/tmp/漢字".into(),
+                branch: "主".into(),
+            },
+            COLS,
+        );
+        assert!(
+            cells.iter().any(|cell| cell.ch == Some('漢')),
+            "sınama konusuz kalmasın: CJK hücreleri çizilmiş olmalı"
+        );
+        assert!(
+            cells.iter().all(|cell| !cell.wide),
+            "dock geniş bayrağı koydu: {:?}",
+            cells
+                .iter()
+                .filter(|cell| cell.wide)
+                .map(|cell| (cell.col, cell.row, cell.ch))
+                .collect::<Vec<_>>()
+        );
     }
 }

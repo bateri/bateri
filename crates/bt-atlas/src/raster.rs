@@ -29,17 +29,20 @@ pub(crate) enum DrawResult {
 
 /// `target`e `ch`'in kapsama (alfa) baytlarını çizer.
 ///
-/// `cell_advance` hücrenin **kesirli** ilerlemesi ([`font::space_advance`]) ve
-/// glyph'in yatay ortalanmasının tek girdisi; `m.cell_px.0` onun yukarı
-/// yuvarlanmışıdır ve buraya girmez (gerekçe [`font::space_advance`]'in
-/// doc'unda).
+/// `box_advance` glyph'in ortalanacağı **kutunun** kesirli ilerlemesi
+/// ([`font::space_advance`], geniş karakterde onun iki katı); `m.cell_px.0`
+/// onun yukarı yuvarlanmışıdır ve buraya girmez (gerekçe
+/// [`font::space_advance`]'in doc'unda). `x_offset` çizildikten sonra
+/// uygulanan **tam sayı** piksel kaydırması — yalnız geniş glyph'in sağ
+/// yarısında sıfırdan farklı.
 ///
 /// Tampon yalnız gerçekten çizim yapılacaksa sıfırlanır.
 pub(crate) fn draw(
     font: &CTFont,
     ch: char,
     m: Metrics,
-    cell_advance: CGFloat,
+    box_advance: CGFloat,
+    x_offset: CGFloat,
     target: &mut [u8],
 ) -> DrawResult {
     // `debug_assert` değil: bu satır aşağıdaki `unsafe` bloğun ön koşulu.
@@ -114,7 +117,15 @@ pub(crate) fn draw(
     // **yönü**: negatif kaydırma glyph'in solunu keser, kırpma ise sağdan
     // olmalı. Latin yazıda harf soldan tanınıyor; sol kenarı kesilmiş bir 'W'
     // ile 'V' ayırt edilemez.
-    let x = font::centre_shift(cell_advance, font::glyph_advance(font, glyph));
+    // `x_offset` geniş glyph'in **sağ yarısı** için: aynı glyph aynı iki
+    // hücrelik kutuya göre ortalanıyor, sonra bir hücre sola kaydırılıyor ve
+    // CG taşan sol yarıyı kırpıyor. Ofset **tam sayı** piksel
+    // (`m.cell_px.0`), yani iki çağrının AA fazı birebir aynı ve iki yarı
+    // 2w'lik tek bir rasterin bölünmüşüyle bit bit aynı çıkıyor — bölünmüş
+    // bir tampon, ikinci bir `slot_bytes` ve yarım pikselde dikiş riski
+    // doğmuyor. Tek hücrelik çizimde sıfır ve o hâlde bu satır 022'deki
+    // hâliyle aynı.
+    let x = font::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
     let position = CGPoint::new(x, baseline);
     // SAFETY: tek glyph, tek konum, sayı ikisiyle tutarlı; bağlam canlı.
     unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };

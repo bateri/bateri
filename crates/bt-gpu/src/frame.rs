@@ -296,6 +296,15 @@ pub(crate) struct GlyphCell {
     /// saydam ve blend `SourceAlpha`, yani altındaki harf bozulmuyor.
     pub(crate) size: SizeClass,
     pub(crate) rgba: [f32; 4],
+    /// Sınırın `Cell::wide`'ı: hücre **iki sütun** genişliğinde bir
+    /// karakterin baş hücresi mi.
+    ///
+    /// Alan `half` **değil** ve bu bilinçli: "hangi yarı" sorusunun cevabı
+    /// mürekkep kapısında, yani `Atlas::slot`'ta doğuyor ve bu liste atlası
+    /// hiç görmüyor (tipin uv'siz olmasının gerekçesi hemen yukarıda).
+    /// Yelpazeleme bu yüzden `AtlasTexture::prepare`'de: orada atlas zaten
+    /// ödünç alınmış ve hücre ölçüsü elde.
+    pub(crate) wide: bool,
 }
 
 /// Çizilecek bir kural çizgisi — [`GlyphCell`]'in kardeşi ve aynı gerekçeyle
@@ -814,6 +823,7 @@ impl Frame {
                 // yeri dock'un bağlam satırı ([`Frame::push_dock`]).
                 size: SizeClass::Normal,
                 rgba: cell.fg.to_array(),
+                wide: cell.wide,
             });
         }
         if let Some(kind) = rule_kind(cell.underline) {
@@ -1108,6 +1118,13 @@ impl Frame {
                 } else {
                     SizeClass::Normal
                 },
+                // Sınır burada **her zaman `false` veriyor**
+                // (`bt_core::dock`'un değişmezi: dock'un sütunu karakter
+                // indeksinden türüyor, spacer yok). Alan yine de hücreden
+                // okunuyor, sabit `false` yazılmıyor: sabit yazmak değişmezi
+                // iki yere kopyalar ve `bt-core` bir gün onu kaldırsa bu
+                // satır sessizce eski kalırdı.
+                wide: cell.wide,
                 rgba: cell.fg.to_array(),
             });
         }
@@ -1367,6 +1384,7 @@ impl Frame {
                 // satırı gibi ayrı bir sınıf değil.
                 size: SizeClass::Normal,
                 rgba: cell.fg.to_array(),
+                wide: cell.wide,
             });
         }
         if let Some(kind) = rule_kind(cell.underline) {
@@ -2857,6 +2875,7 @@ mod tests {
                 face: Face::Regular,
                 size: SizeClass::Normal,
                 rgba: CURSOR.to_array(),
+                wide: false,
             }
         );
 

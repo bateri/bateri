@@ -110,7 +110,10 @@ pub enum UnderlineStyle {
 /// başına ve yalnız **çizilen** hücreler için doğuyor; sink jenerik
 /// (`impl FnMut(Cell)`) ve satır içine alınıyor, yani kopyalama da bir çağrı
 /// sınırından geçmiyor. Seyrek veri yan tabloya taşınacaksa ölçüt o assert
-/// değil, bu tipin kare başına maliyeti olur — ve o ölçüm bekliyor.
+/// değil, bu tipin kare başına maliyeti olur. **Ölçüldü** (023): tip bugün
+/// **72 bayt**, hizalama 4 ve dolgu sıfır; tek **tamponlanan** dizisi
+/// doldurma bandının `Vec<Cell>`'i (`bt_gpu::link`, kapasitesi korunuyor),
+/// kalan her yol satır içine alınmış değer-geçişli sink.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
     pub col: u16,
@@ -159,6 +162,24 @@ pub struct Cell {
     pub underline_color: Option<LinearRgba>,
     /// SGR 9; `HIDDEN` hücrede `false`.
     pub strikeout: bool,
+    /// Hücre **iki sütun** genişliğinde bir karakterin baş hücresi mi.
+    ///
+    /// Izgaranın kararı, çizenin değil: alacritty `Flags::WIDE_CHAR`'ı
+    /// `unicode-width`'e göre kuruyor ve sütun sayısının **tek yetkilisi** o.
+    /// Bayrak yalnız **baş** hücrede; spacer hücresi (`WIDE_CHAR_SPACER`)
+    /// bugünkü gibi mürekkepsiz geçiyor ve sağ yarıyı çizen taraf baş
+    /// hücrenin bu bayrağından türetiyor. İkinci bir hücreye işaret koymak
+    /// aynı olguyu iki yerde tutmak olurdu.
+    ///
+    /// **`true` "iki yuva" demek değil**, "iki sütun" demek: mürekkebi tek
+    /// hücreye sığan geniş karakterler (`☕`, fullwidth `！`) tek yuvadan ve
+    /// tek dörtlüden çiziliyor. O ayrımı [`crate`] dışında `bt-atlas`
+    /// veriyor, çünkü kararı mürekkep kapısı veriyor.
+    ///
+    /// `LEADING_WIDE_CHAR_SPACER` bunu **almıyor**: satır sonuna sığmayan
+    /// geniş karakterin bıraktığı boşluk bir baş hücre değil ve sağ yarı
+    /// orada kopmuş bir glyph çizerdi.
+    pub wide: bool,
 }
 
 /// **Yalnız sınama literalleri için**: `bt-gpu`'nun kare sınamaları hücreyi
@@ -183,6 +204,7 @@ impl Default for Cell {
             underline: UnderlineStyle::None,
             underline_color: None,
             strikeout: false,
+            wide: false,
         }
     }
 }
@@ -2312,6 +2334,11 @@ impl Session {
                 underline: style.underline,
                 underline_color: style.underline_color,
                 strikeout: style.strikeout,
+                // Yukarıdaki `last_col` aritmetiği aynı bayrağı okuyor;
+                // **aynı ifade** olmak zorunda değil ama aynı bayrak olmak
+                // zorunda — ikisi ayrışsa sayacın payı ile çizimin genişliği
+                // ayrılırdı.
+                wide: flags.contains(Flags::WIDE_CHAR),
             });
         }
 
@@ -2486,6 +2513,10 @@ impl Session {
                     underline: style.underline,
                     underline_color: style.underline_color,
                     strikeout: style.strikeout,
+                    // Izgara sink'iyle **aynı** bayrak, aynı gerekçe: bandın
+                    // satırı ekrana çıktığındakiyle aynı genişlikte
+                    // çizilmek zorunda.
+                    wide: flags.contains(Flags::WIDE_CHAR),
                 });
             }
         }
@@ -2907,6 +2938,9 @@ impl Session {
                                     underline: UnderlineStyle::None,
                                     underline_color: None,
                                     strikeout: false,
+                                    // Sayacın rakamları ASCII: `Counter`
+                                    // yalnız rakam, `.`, `m` ve `s` üretiyor.
+                                    wide: false,
                                 });
                             }
                             counted_row = Some(row);
