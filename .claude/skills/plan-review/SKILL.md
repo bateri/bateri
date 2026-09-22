@@ -48,6 +48,16 @@ Her jüriden dönecek biçim:
 **Sınır:** Panel tasarımı sorgular, kapsamı **genişletmez**. "Şunu da eklesek"
 türü öneri kapsam dışıdır, taşıma.
 
+**İkinci sınır — jüri ürün kararına yetkili değil.** Mercekler "koda uyar mı",
+"daha basit var mı", "yükü ne" diye sorar; hiçbiri "kullanıcı ne görür" diye
+sormaz. Bir bulgunun **çözümü** kullanıcının gördüğünü değiştiriyorsa o artık
+bir ürün sorusudur ve adım 4'te kullanıcıya **sorulur**, sentezde karara
+bağlanmaz. Ölçülmüş örnek: 023'te Codebase-fit doğru bir kod kısıtı buldu
+(dock'un sütunu karakter indeksinden geliyor) ve ondan "dock'ta geniş bayrağı
+hiç kurulmasın" sonucunu çıkardı; sentez onu değişmez diye plana yazdı ve
+sonuç, kullanıcının yazdığı emojinin dock'ta kutu çıkması oldu. Kısıtın iki
+çözümü vardı ve jüri yalnız kodu koruyanı görüyordu.
+
 Bu projeye özgü mercek notları:
 
 - Yeni bir crate bağımlılığı öneren plan → otomatik itiraz konusu; taban

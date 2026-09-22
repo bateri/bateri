@@ -68,6 +68,13 @@ tutulmaz.
    görüntü). Kapı koda bakar, kullanıcı ekrana: 017'de üç kapı da koştu ve
    teslimden sonra beş kusuru kullanıcının gözü buldu. Bu bir defter satırı
    değil, devir mesajının bir cümlesidir; 🟢'yi bekletmez.
+   **Sahne yüzey saymak zorunda.** Hücre çizen üç yüzey var — ızgara, dock ve
+   doldurma bandı — ve davranış değiştiyse üçünde de ne görüldüğü söylenir.
+   Farklı görünüyorlarsa o fark bir **gerekçe** ister, "yapısal olarak böyle"
+   değil. 023 bunu kaçırdı: teslim satırındaki dört sahnenin dördü de
+   `echo`'ydu, yani dördü de ızgaraydı; emojinin **yazıldığı** yüzey listede
+   hiç yoktu ve kusuru kullanıcı buldu. Ölçüt basit — kullanıcı bu değişikliği
+   nerede *yaparak* görecek, yalnız nerede *okuyarak*?
 
 `/simplify` kapının parçası değildir; kullanıcı isterse koşar. Kapının neden
 phase başından set sonuna taşındığı `.claude/README.md` → Hafifletme.
