@@ -2665,9 +2665,25 @@ mod tests {
         // Dört yeni anahtar da **kalıcı**: sözleşme bugünden sonra onları da
         // "silinmez" tarafına alıyor. `kayma=` 011 ile geldi ve `hareket=`'in
         // yanına girdi — jeton **silinmez, eklenir**.
-        for token in ["icerik=1", "hareket=3", "kayma=2", "sessiz=2950.00ms"] {
+        for token in [
+            "icerik=1",
+            "hareket=3",
+            "kayma=2",
+            "sessiz=2950.00ms",
+            // 023 ile geldi ve `yuva=`'nin **hemen yanına** girdi: ikisi
+            // atlasın iki düzlemi ve yan yana okunuyorlar. Listeye aynı gün
+            // yazıldı, çünkü "silinmez" sözü ancak bir bekçisi varsa söz —
+            // yukarıdaki liste yalnız **eski** jetonları koruyor.
+            "yuva2=0/2048",
+        ] {
             assert!(line.contains(token), "{token} yok: {line}");
         }
+        // Yeri de sözleşme: `yuva=` ile `yuva2=` yan yana. Ayrılsalardı satırı
+        // gözle okuyan taraf iki düzlemi birbirine bağlayamazdı.
+        assert!(
+            line.contains("yuva=13/2048 yuva2=0/2048 "),
+            "iki düzlemin jetonu yan yana durmalı: {line}"
+        );
 
         // Kapı kapalıyken ölçüm jetonları **yok** ve `ornek=0` da yok: sıfır,
         // "kapı açıktı ama hiç örnek toplanmadı" ile karışırdı ve R5.2'nin
