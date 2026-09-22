@@ -43,9 +43,9 @@ _Requirements: R1, R1.1, R1.2, R1.3, R2, R2.1, R2.2, R2.3, R3, R3.1, R3.2, R3.3,
     kapının okuması ayrı thread'lerde.
   - `TappedPty::read`'in `apply_scan` kapanışı damgayı geçiriyor.
   - Kapı: `let answered = input.answers == self.key_gen.load(..);`
-    `let fresh = (answered && input.drawable) || (last_ink_in_row(..) == input.last_ink && at_anchor);`
+    `let fresh = answered || (last_ink_in_row(..) == input.last_ink && at_anchor);`
     — `||`'nin sol kolu önde, tarama kısa devreyle atlanıyor. Yorum bloğu
-    "iki kesin veri" anlatısını üç terime genişletiyor ve iki bilinen sınırı
+    "iki kesin veri" anlatısının önüne cevap terimini koyuyor ve iki bilinen sınırı
     adıyla yazıyor.
 - **Bekçiler (`session.rs`)**
   - `a_stale_mirror_leaves_the_input_line_in_the_grid` ve
