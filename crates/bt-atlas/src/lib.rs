@@ -67,6 +67,49 @@ pub enum Sprite {
     Rule(RuleKind),
 }
 
+/// Bir glyph'in hücre ızgarasındaki **yarısı** — yuva anahtarının dördüncü
+/// ekseni ve [`SizeClass`]'ın kardeşi.
+///
+/// Geniş karakter iki hücre boyunda bir kutuya ortalanıp **iki** yuvaya
+/// rasterize ediliyor; her yuva yine tam bir hücre, yani doku düzeni,
+/// `slot_bytes` ve ızgara aritmetiği hiç değişmiyor. Dörtlü de tek hücre
+/// kalıyor: `bt-gpu` iki instance basıyor ve `GlyphInstance`'ın 32 baytlık
+/// stride'ı ile `cell_px` uniform'u el değmiyor.
+///
+/// Eksen [`Sprite`]'a **varyant olarak eklenmedi** ve gerekçe o tipin
+/// doc'unda yazılı: `Sprite`'a eklenen bir kol renderer'a "bu karakter hangi
+/// sprite" sorusunu sızdırır. Buradaki eksen ise çağıranın **taşıdığı** bir
+/// istek — `Face` ile `SizeClass` gibi — ve `Atlas::slot` onu normalize
+/// ediyor.
+///
+/// [`Half::Whole`] "tek hücre" demek ve **geniş karakterlerde de doğabiliyor**:
+/// mürekkebi bir hücreye sığan geniş ilan edilmiş karakter (`☕`, fullwidth
+/// `！`) tek yuvadan çiziliyor. Kararı kapı veriyor ([`font::fallback_font`]),
+/// çağıran değil.
+// `repr(u8)`: bkz. `RuleKind`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Half {
+    Whole,
+    Left,
+    Right,
+}
+
+/// [`Atlas::slot`]'un cevabı: yuva **ve** hangi yarının kullanıldığı.
+///
+/// İkinci alan bir kolaylık değil zorunluluk: "bir yuva mı iki mi" kararını
+/// mürekkep kapısı veriyor, yani ancak burada biliniyor — çağıran (`bt-gpu`)
+/// ise ikinci instance'ı basıp basmayacağına karar vermek zorunda. Alan
+/// olmasaydı `☕`'nin sağına boş bir dörtlü düşerdi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placed {
+    pub slot: u16,
+    /// Kapının kabul ettiği kutu: [`Half::Whole`] tek hücre, [`Half::Left`]
+    /// iki hücrenin solu. [`Half::Right`] yalnız `Left` dönmüş bir karakter
+    /// için sorulur.
+    pub half: Half,
+}
+
 /// Yuva 0 **rezident tofu**: dolu atlasta ve `.notdef`'te buraya düşülür.
 ///
 /// Sessiz kayıp (glyph hiç çizilmez) yerine görünür kayıp (kutu çizilir):
@@ -151,6 +194,17 @@ pub struct Upload<'a> {
     pub origin: (u16, u16),
     /// Tam bir yuva dolusu `R8` kapsama verisi ([`Metrics::slot_bytes`]).
     pub bytes: &'a [u8],
+    /// Geniş glyph'in **sağ** yarısı — aynı dönüşte, aynı `&mut` ödüncünden.
+    ///
+    /// İki yarı **atomik**: aynı çağrıda iki yuva ayrılıyor, ikisi de bu
+    /// dönüşle yükleniyor ve sağ yarı için ikinci bir `slot()` turu
+    /// beklenmiyor. Ayrı turlara bölünseydi kapasite sınırı ikisinin
+    /// **arasına** düşebilirdi — sol yuva açılır, sağ tofu'ya düşer ve ekranda
+    /// yarım glyph + yarım kutu belirirdi. Bu tipin tek dönüşü o hâli
+    /// **temsil edemiyor**: ya iki yarı birden gelir ya hiçbiri.
+    pub right: Option<(u16, u16)>,
+    /// Sağ yarının baytları; [`Upload::right`] `Some` ise anlamlı.
+    pub right_bytes: &'a [u8],
 }
 
 /// Sabit yuva ızgarasında yaşayan glyph atlası.
@@ -204,7 +258,7 @@ pub struct Atlas {
     /// Karakterin **çözümlendiği** yuva — yalnız yüklenenler değil: fontun
     /// tanımadığı karakter de burada [`TOFU`] olarak yaşıyor, yoksa aynı
     /// karakter her karede CoreText'e yeniden sorulurdu.
-    slots: HashMap<(Sprite, Face, SizeClass), u16>,
+    slots: HashMap<(Sprite, Face, SizeClass, Half), u16>,
     /// Bir sonraki boş yuva; [`TOFU`] ayrılmış olduğu için 1'den başlar.
     /// `slots.len()`'den türetilemez: tofu'ya çözümlenen kayıtlar yuva
     /// harcamıyor, yani iki sayı bilerek ayrışıyor.
@@ -212,6 +266,13 @@ pub struct Atlas {
     /// Tek yuvalık çizim tamponu. Alan olması kare başına yeniden ayırmayı
     /// önlüyor; içeriği her yeni glyph'te üzerine yazılır.
     buffer: Vec<u8>,
+    /// Geniş glyph'in sağ yarısının tamponu — [`Atlas::buffer`]'ın ikizi.
+    ///
+    /// İkinci bir tampon, tek tamponu iki kez kullanmaktan **ucuz ve
+    /// doğru**: iki yarı aynı `Upload`'la dönüyor (atomiklik), yani ikisinin
+    /// baytları aynı anda canlı olmak zorunda. Boyu tam bir yuva, yani
+    /// varsayılan hücrede yüzlerce bayt.
+    buffer_right: Vec<u8>,
     /// Rezident tofu kutusu; ömür boyu değişmez.
     tofu: Vec<u8>,
 }
@@ -313,6 +374,7 @@ impl Atlas {
             slots: HashMap::new(),
             next: TOFU + 1,
             buffer: vec![0u8; metrics.slot_bytes()],
+            buffer_right: vec![0u8; metrics.slot_bytes()],
             tofu: tofu_buffer(metrics),
         }
     }
@@ -400,7 +462,8 @@ impl Atlas {
         sprite: Sprite,
         face: Face,
         size: SizeClass,
-    ) -> (u16, Option<Upload<'_>>) {
+        want: Half,
+    ) -> (Placed, Option<Upload<'_>>) {
         // Anahtar **istenen** yüzü değil **çizilen** yüzü taşır. Üç ayrı
         // sebeple ayrışabiliyorlar ve üçü de aynı cümlenin yüzü:
         //   - kural çizgileri yüzden bağımsız (kalın metnin altındaki çizgi
@@ -413,6 +476,18 @@ impl Atlas {
         // Normalizasyon **burada**, çağıranın disiplininde değil: ayrışan bir
         // anahtar bayt bayt aynı bitmap'i ayrı yuvalarda tutar, atlas kat kat
         // hızlı dolar ve belirti sessizdir.
+        // `want` de normalize ediliyor ve iki yerde zorla `Whole`'a iniyor:
+        // kural sprite'ları (yüzden ve ölçüden bağımsız, hep tek hücre) ve
+        // **küçük sınıf**. İkincisinin gerekçesi 021'in yordamsal kapısıyla
+        // aynı: dock'un bağlam satırının sütun adımı küçük yüzün ilerlemesi,
+        // oysa kutu büyük hücreden türüyor — iki hücrelik bir glyph orada
+        // komşusunun üstüne binerdi. Dock'un giriş satırı `Normal` ama oraya
+        // `wide` hiç gelmiyor (`bt_core::dock`'un değişmezi), yani bu kol
+        // yalnız bağlam satırını kapatıyor.
+        let want = match (sprite, size) {
+            (Sprite::Rule(_), _) | (_, SizeClass::Small) => Half::Whole,
+            _ => want,
+        };
         let (face, size) = match (sprite, size) {
             (Sprite::Rule(_), _) => (Face::Regular, SizeClass::Normal),
             (Sprite::Char(_), SizeClass::Small) => (Face::Regular, SizeClass::Small),
@@ -435,9 +510,29 @@ impl Atlas {
             }
             (Sprite::Char(_), SizeClass::Normal) => (self.faces.effective(face), SizeClass::Normal),
         };
-        let key = (sprite, face, size);
+        // Anahtar **istenen** yarıyı taşıyor ama cevabın yarısı istenenle
+        // aynı olmak zorunda değil: `Left` istenip tek hücreye sığan bir
+        // karakter `Whole` anahtarına yazılıyor, yani ikinci soruluşunda da
+        // aynı yuvayı ve aynı cevabı veriyor. Kapı bu yüzden anahtar başına
+        // atlasın ömründe bir kez koşuyor.
+        let key = (sprite, face, size, want);
         if let Some(&slot) = self.slots.get(&key) {
-            return (slot, None);
+            return (Placed { slot, half: want }, None);
+        }
+        // `Left` istendi ama karakter daha önce **tek hücrelik** kabul
+        // edilmişse cevabı o veriyor. Bu dal olmasaydı `☕` iki kez
+        // rasterize edilir, iki yuva harcar ve sağ yarısı boş kalırdı.
+        if want == Half::Left {
+            let whole = (sprite, face, size, Half::Whole);
+            if let Some(&slot) = self.slots.get(&whole) {
+                return (
+                    Placed {
+                        slot,
+                        half: Half::Whole,
+                    },
+                    None,
+                );
+            }
         }
         // Kural sprite'larına **pay ayrılıyor**: altısı da yordamsal,
         // deterministik ve ömür boyu gerekli. Pay olmasaydı, birkaç bin farklı
@@ -449,7 +544,21 @@ impl Atlas {
             Sprite::Rule(_) => self.capacity(),
             Sprite::Char(_) => self.capacity().saturating_sub(RULE_RESERVE),
         };
-        if self.next >= cap {
+        // **Geniş istek iki yuva ister ve ikisini birden ister.** Sayı
+        // `want`'tan geliyor, kapıdan değil: kapı ancak çizim sırasında
+        // koşuyor ve o zamana kadar tahsis kararı verilmiş olmak zorunda.
+        // Fazladan istemek güvenli yönde yanlış — tek hücreye sığan bir geniş
+        // karakter bir yuva harcıyor, sınırın bir yuva berisinde de reddedilse
+        // bir sonraki `ensure`'da yeri var. Ters yönde yanlış olsaydı sol yarı
+        // açılır sağ yarı tofu'ya düşerdi.
+        //
+        // `Half::Right` buraya **hiç ulaşmıyor**: çifti kabul eden çağrı iki
+        // anahtarı birden yazıyor, yani sağ yarı yukarıdaki önbellek
+        // turundan dönüyor. Dolu atlasta ise önbelleğe yazılmadığı için
+        // buraya düşer ve tofu alır — sol yarısı da aynı sayıdan tofu
+        // aldığı için cevap tutarlı kalıyor.
+        let need = u32::from(if want == Half::Left { 2u16 } else { 1 });
+        if u32::from(self.next) + need > u32::from(cap) {
             // Dolu atlas **önbelleklenmez**: bu, fontun kalıcı bir gerçeği
             // değil atlasın geçici hâli. Kapasite hücre ölçüsünden türüyor
             // ([`SLOT_TARGET`]), yani aynı karakter başka bir puntoda yuva
@@ -462,10 +571,18 @@ impl Atlas {
             // ve `prepare` kare başına dört kez koşuyor, yani kare
             // **ortasında** yapılan her yeniden kullanım önceki geçişlerin
             // uv'lerini geçersizleştirir.
-            return (TOFU, None);
+            return (
+                Placed {
+                    slot: TOFU,
+                    half: Half::Whole,
+                },
+                None,
+            );
         }
         // Ödünç match'in scrutinee'sinde bırakılmıyor: `&mut self.buffer`
         // orada kalsaydı kolların içinde `&self.buffer` alınamazdı.
+        // Kutunun ilerlemesi: `Whole` bir hücre, `Left` iki. `Right` buraya
+        // ulaşmıyor (yukarıda).
         let result = match sprite {
             // **Yordamsal çizim fonttan önce.** Sıra zorunlu ve "fontta
             // yoksa yordamsal çiz" yanlış kol olurdu: `█` Menlo'da *var* ama
@@ -479,9 +596,13 @@ impl Atlas {
             // `size` **normalize edilmiş** olan: küçük sınıf yukarıdaki
             // kolda `Small` kalıyor, yani guard onu eliyor ve bağlam satırı
             // kutu karakterini fonttan almaya devam ediyor.
+            // Yordamsal aile **tanımı gereği tek hücre**: blok elemanları,
+            // Braille, çizgi çizim ve teknik küme baştan sona tek sütunlu
+            // (ölçüldü, 023 envanteri). `Whole` bu yüzden bir varsayım değil,
+            // ailenin kendi özelliği.
             Sprite::Char(ch) if size == SizeClass::Normal && raster::is_procedural(ch) => {
                 raster::draw_procedural(ch, self.metrics, &mut self.buffer);
-                DrawResult::Drawn
+                (DrawResult::Drawn, Half::Whole)
             }
             Sprite::Char(ch) => {
                 // **Metrik her iki sınıfta da büyük hücrenin**: küçük glyph
@@ -496,7 +617,15 @@ impl Atlas {
                     SizeClass::Normal => (self.faces.get(face), self.cell_advance),
                     SizeClass::Small => (&*self.small, self.context_advance),
                 };
-                let drawn = raster::draw(font, ch, self.metrics, cell_advance, &mut self.buffer);
+                // **Taban font her zaman tek hücre.** Eşaralıklı taban fontta
+                // her glyph'in ilerlemesi hücrenin ilerlemesinin ta kendisi
+                // (bekçisi `every_base_glyph_advance_is_the_cell_advance`),
+                // yani geniş ilan edilmiş bir karakter taban fontta varsa
+                // orada tek hücreye çizilir ve çizimi **bit bit** eskisiyle
+                // aynı kalır. Menlo'nun `☕ ⚡ ♈` ailesi tam bu kol: ölçülen
+                // 65'in 21'i.
+                let drawn =
+                    raster::draw(font, ch, self.metrics, cell_advance, 0.0, &mut self.buffer);
                 // **Yedek font.** Kol `NoGlyph` yaprağının içinde ve yalnız
                 // düz yüzde koşuyor, yani sıra şu: önce yüz merdiveni
                 // (aşağıdaki `face != Regular` kolu düz yüze iniyor), sonra
@@ -514,34 +643,100 @@ impl Atlas {
                 // anahtar başına atlasın ömründe **bir kez** koşuyor — ret de
                 // negatif önbelleğe giriyor.
                 if drawn == DrawResult::NoGlyph && face == Face::Regular {
-                    match font::fallback_font(font, ch, cell_advance) {
-                        Some(alt) => {
-                            raster::draw(&alt, ch, self.metrics, cell_advance, &mut self.buffer)
+                    // Kapıya **sütun sayısı** gidiyor ve tek kaynağı çağıran:
+                    // `bt-atlas` `unicode-width` görmüyor (yeni bir bağımlılık
+                    // *ve* ızgaranınkiyle ayrışabilen ikinci bir genişlik
+                    // yetkilisi olurdu). Sıra kapının içinde: önce tek hücre,
+                    // sonra iki.
+                    let cols = if want == Half::Left { 2 } else { 1 };
+                    match font::fallback_font(font, ch, cell_advance, cols) {
+                        Some(alt) if alt.cols >= 2 => {
+                            // İki yarı **aynı kutuya** ortalanıyor ve ikisi de
+                            // aynı çağrıda çiziliyor: sağ yarının ofseti tam
+                            // sayı piksel, yani AA fazı ikisinde birebir aynı.
+                            let box_advance = cell_advance * f64::from(alt.cols);
+                            let shift = f64::from(self.metrics.cell_px.0);
+                            let left = raster::draw(
+                                &alt.font,
+                                ch,
+                                self.metrics,
+                                box_advance,
+                                0.0,
+                                &mut self.buffer,
+                            );
+                            let right = raster::draw(
+                                &alt.font,
+                                ch,
+                                self.metrics,
+                                box_advance,
+                                shift,
+                                &mut self.buffer_right,
+                            );
+                            // İki çağrı aynı fontun aynı glyph'ini soruyor,
+                            // yani ikisi birden başarılı ya da ikisi birden
+                            // değil; `min` bunu ifade ediyor, sırayı
+                            // varsaymadan.
+                            let worst = if left == DrawResult::Drawn && right == DrawResult::Drawn {
+                                DrawResult::Drawn
+                            } else {
+                                DrawResult::NoGlyph
+                            };
+                            (worst, Half::Left)
                         }
-                        None => drawn,
+                        Some(alt) => (
+                            raster::draw(
+                                &alt.font,
+                                ch,
+                                self.metrics,
+                                cell_advance,
+                                0.0,
+                                &mut self.buffer,
+                            ),
+                            Half::Whole,
+                        ),
+                        None => (drawn, Half::Whole),
                     }
                 } else {
-                    drawn
+                    (drawn, Half::Whole)
                 }
             }
             // Yordamsal çizim başarısız olamaz: font sorulmuyor, bağlam
             // kurulmuyor. `Drawn` bir varsayım değil, tipin kendisi.
             Sprite::Rule(kind) => {
                 raster::draw_rule(kind, self.metrics, &mut self.buffer);
-                DrawResult::Drawn
+                (DrawResult::Drawn, Half::Whole)
             }
         };
+        let (result, half) = result;
+        // Anahtar **çözülen** yarıyı taşıyor: `Left` istenip tek hücreye sığan
+        // karakter `Whole`'a yazılıyor, yani ikinci soruluşunda önbellekten
+        // aynı cevap dönüyor ve kapı bir daha koşmuyor.
+        let key = (sprite, face, size, half);
         match result {
             DrawResult::Drawn => {
                 let slot = self.next;
-                self.next += 1;
+                // **Çift atomik.** İki yuva aynı ifadede ayrılıyor, iki
+                // anahtar aynı ifadede yazılıyor ve iki bayt dizisi aynı
+                // `Upload`'la dönüyor: sağ yarı için ikinci bir `slot()` turu
+                // yok, yani kapasite sınırı ikisinin arasına düşemiyor.
+                // Yukarıdaki `need` bu ifadenin ön koşulu.
+                let pair = half == Half::Left;
+                self.next += if pair { 2 } else { 1 };
                 self.slots.insert(key, slot);
+                let right = pair.then(|| {
+                    let right_slot = slot + 1;
+                    self.slots
+                        .insert((sprite, face, size, Half::Right), right_slot);
+                    self.slot_origin(right_slot)
+                });
                 let origin = self.slot_origin(slot);
                 (
-                    slot,
+                    Placed { slot, half },
                     Some(Upload {
                         origin,
                         bytes: &self.buffer,
+                        right,
+                        right_bytes: &self.buffer_right,
                     }),
                 )
             }
@@ -572,18 +767,35 @@ impl Atlas {
             // `Normal` yazmak geri düşüşü sessizce büyük yüze bağlardı —
             // küçük satırın eksik glyph'i büyük harf olarak belirirdi.
             DrawResult::NoGlyph if face != Face::Regular => {
-                let (slot, upload) = self.slot(sprite, Face::Regular, size);
+                let (placed, upload) = self.slot(sprite, Face::Regular, size, want);
                 // `map` `upload`'ı tüketiyor ve `self.buffer` ödüncü burada
                 // bitiyor; `insert` ancak ondan sonra mümkün. Tampon özyineli
                 // çağrının çizdiği baytları hâlâ taşıyor, yani `Upload` aynı
                 // içerikle yeniden kurulabiliyor.
-                let origin = upload.map(|upload| upload.origin);
-                self.slots.insert(key, slot);
+                // Düz yüzün **çözdüğü** yarı yazılıyor, istenen değil:
+                // merdivenden dönen cevap `Whole` olabilir (`☕`'nin kalın
+                // yüzü) ve takma adı `Left` diye yazmak çağırana ikinci bir
+                // instance bastırırdı.
+                let origin = upload.as_ref().map(|upload| upload.origin);
+                let right = upload.as_ref().and_then(|upload| upload.right);
+                self.slots
+                    .insert((sprite, face, size, placed.half), placed.slot);
+                if let Some(right_origin) = right {
+                    // Sağ yarının takma adı da yazılıyor, yoksa kalın yüzde
+                    // sorulan sağ yarı düz yüzü yeniden rasterize ederdi.
+                    let _ = right_origin;
+                    self.slots.insert(
+                        (sprite, face, size, Half::Right),
+                        placed.slot.saturating_add(1),
+                    );
+                }
                 let upload = origin.map(|origin| Upload {
                     origin,
                     bytes: &self.buffer,
+                    right,
+                    right_bytes: &self.buffer_right,
                 });
-                (slot, upload)
+                (placed, upload)
             }
             DrawResult::NoGlyph | DrawResult::NoContext => {
                 // Tavan: negatif önbellek yuva harcamıyor, yani `next` onu
@@ -616,7 +828,21 @@ impl Atlas {
                     self.slots.retain(|_, &mut slot| slot != TOFU);
                 }
                 self.slots.insert(key, TOFU);
-                (TOFU, None)
+                // **Çiftin iki yarısı da tofu.** Yalnız sol yarı yazılsaydı
+                // sağ yarı ikinci bir kapı turu koşar, aynı cevabı alır ve
+                // sonuç aynı olurdu — ama kapı kare bütçesinin ortasında bir
+                // cascade yürüyüşü demek. Anahtarı şimdi yazmak o turu bir
+                // kereye indiriyor.
+                if want == Half::Left {
+                    self.slots.insert((sprite, face, size, Half::Right), TOFU);
+                }
+                (
+                    Placed {
+                        slot: TOFU,
+                        half: Half::Whole,
+                    },
+                    None,
+                )
             }
         }
     }
@@ -939,12 +1165,12 @@ mod tests {
         let mut own = vec![0u8; m.slot_bytes()];
         let mut wider = vec![0u8; m.slot_bytes()];
         assert_eq!(
-            raster::draw(font, 'W', m, a.cell_advance, &mut own),
+            raster::draw(font, 'W', m, a.cell_advance, 0.0, &mut own),
             DrawResult::Drawn
         );
         // Dört piksel geniş bir hücre glyph'i iki piksel sağa iter.
         assert_eq!(
-            raster::draw(font, 'W', m, a.cell_advance + 4.0, &mut wider),
+            raster::draw(font, 'W', m, a.cell_advance + 4.0, 0.0, &mut wider),
             DrawResult::Drawn
         );
         assert_ne!(
@@ -969,7 +1195,13 @@ mod tests {
 
         let mut edge = Vec::new();
         for size in [SizeClass::Normal, SizeClass::Small] {
-            let (slot, upload) = a.slot(Sprite::Char(FALLBACK_CHAR), Face::Regular, size);
+            let (placed, upload) = a.slot(
+                Sprite::Char(FALLBACK_CHAR),
+                Face::Regular,
+                size,
+                Half::Whole,
+            );
+            let slot = placed.slot;
             assert_ne!(
                 slot, TOFU,
                 "{size:?}: '{FALLBACK_CHAR}' yedekten gelmeli, kutu değil"
@@ -1013,7 +1245,8 @@ mod tests {
         // yukarıda (`raster::draw` ile aynı aritmetik).
         let baseline = f64::from(m.cell_px.1 - m.baseline_px);
         for (label, base, cell) in size_classes(&a) {
-            let alt = font::fallback_font(base, FALLBACK_CHAR, cell)
+            let alt = font::fallback_font(base, FALLBACK_CHAR, cell, 1)
+                .map(|accepted| accepted.font)
                 .unwrap_or_else(|| panic!("{label}: '{FALLBACK_CHAR}' kapıdan geçmeli"));
             let glyph =
                 font::glyph_index(&alt, FALLBACK_CHAR).expect("kapıyı geçen aday çizebiliyor");
@@ -1051,11 +1284,11 @@ mod tests {
             let mut centred = vec![0u8; m.slot_bytes()];
             let mut flush = vec![0u8; m.slot_bytes()];
             assert_eq!(
-                raster::draw(&alt, FALLBACK_CHAR, m, cell, &mut centred),
+                raster::draw(&alt, FALLBACK_CHAR, m, cell, 0.0, &mut centred),
                 DrawResult::Drawn
             );
             assert_eq!(
-                raster::draw(&alt, FALLBACK_CHAR, m, advance, &mut flush),
+                raster::draw(&alt, FALLBACK_CHAR, m, advance, 0.0, &mut flush),
                 DrawResult::Drawn
             );
             assert_ne!(
@@ -1106,7 +1339,9 @@ mod tests {
                     continue;
                 }
                 // Aday hiç yoksa da kapının konusu değil — reddi kapı vermiyor.
-                let Some(open) = font::fallback_font(base, ch, CGFloat::INFINITY) else {
+                let Some(open) =
+                    font::fallback_font(base, ch, CGFloat::INFINITY, 1).map(|a| a.font)
+                else {
                     continue;
                 };
                 let glyph = font::glyph_index(&open, ch).expect("aday çizebiliyor");
@@ -1133,7 +1368,10 @@ mod tests {
 
         let (mut fits, mut wide) = (0usize, 0usize);
         for (ch, size, should_fit, why) in plan {
-            let slot = a.slot(Sprite::Char(ch), Face::Regular, size).0;
+            let slot = a
+                .slot(Sprite::Char(ch), Face::Regular, size, Half::Whole)
+                .0
+                .slot;
             if should_fit {
                 assert_ne!(slot, TOFU, "hücreye sığan aday çizilmedi: '{ch}' ({why})");
                 fits += 1;
@@ -1161,10 +1399,22 @@ mod tests {
     #[test]
     fn same_char_gets_same_slot() {
         let mut a = atlas(POINT_SIZE, 1.0);
-        let (first, upload) = a.slot(Sprite::Char('A'), Face::Regular, SizeClass::Normal);
+        let (placed_first, upload) = a.slot(
+            Sprite::Char('A'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let first = placed_first.slot;
         assert_ne!(first, TOFU, "tanınan karakter tofu'ya düşmemeli");
         assert!(upload.is_some(), "ilk soruluşta yükleme gelmeli");
-        let (second, again) = a.slot(Sprite::Char('A'), Face::Regular, SizeClass::Normal);
+        let (placed_second, again) = a.slot(
+            Sprite::Char('A'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let second = placed_second.slot;
         assert_eq!(first, second);
         assert!(
             again.is_none(),
@@ -1183,7 +1433,13 @@ mod tests {
         // tüketilir, sonra aynı atlas uv için yeniden okunur. Köşe
         // `Upload`'nin içinde olmasaydı o blokta `&self` istemek gerekirdi
         // ve `slot`'un `&mut` ödüncü yüzünden derlenmezdi.
-        let (slot, upload) = a.slot(Sprite::Char('A'), Face::Regular, SizeClass::Normal);
+        let (placed_slot, upload) = a.slot(
+            Sprite::Char('A'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let slot = placed_slot.slot;
         let mut written = None;
         if let Some(y) = upload {
             assert_eq!(y.bytes.len(), slot_len);
@@ -1197,12 +1453,24 @@ mod tests {
         // Bu bekçi olmadan "her şey çalışıyor ama atlas bomboş" durumu sessiz
         // kalır: yuva numaraları doğru, doku doğru boyutta, ekran boş.
         let mut a = atlas(POINT_SIZE, 1.0);
-        let (_, upload) = a.slot(Sprite::Char('W'), Face::Regular, SizeClass::Normal);
+        let (placed__, upload) = a.slot(
+            Sprite::Char('W'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let _ = placed__.slot;
         let bytes = upload.expect("ilk soruluşta yükleme gelmeli").bytes;
         assert!(bytes.iter().any(|&b| b > 0), "'W' hiç piksel boyamadı");
         // Boşluk da tanınan bir glyph'tir ama hiçbir şey boyamaz: ölçüt
         // "bitmap doldu mu" değil, "raster çalıştı mı".
-        let (slot, blank) = a.slot(Sprite::Char(' '), Face::Regular, SizeClass::Normal);
+        let (placed_slot, blank) = a.slot(
+            Sprite::Char(' '),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let slot = placed_slot.slot;
         assert_ne!(slot, TOFU);
         assert!(
             blank.expect("yeni yuva").bytes.iter().all(|&b| b == 0),
@@ -1225,9 +1493,14 @@ mod tests {
         // geçer ve orada yükleme **gelir** — ikisini karıştıran bir uygulama
         // dokuya boş tampon yazardı.
         assert!(
-            a.slot(Sprite::Char(UNKNOWN_CHAR), Face::Regular, SizeClass::Normal)
-                .1
-                .is_none(),
+            a.slot(
+                Sprite::Char(UNKNOWN_CHAR),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole
+            )
+            .1
+            .is_none(),
             "rezident yuva yeniden yüklenmez"
         );
     }
@@ -1236,8 +1509,14 @@ mod tests {
     fn unknown_char_is_cached() {
         let mut a = atlas(POINT_SIZE, 1.0);
         assert_eq!(
-            a.slot(Sprite::Char(UNKNOWN_CHAR), Face::Regular, SizeClass::Normal)
-                .0,
+            a.slot(
+                Sprite::Char(UNKNOWN_CHAR),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole
+            )
+            .0
+            .slot,
             TOFU
         );
         // Reddin kalıcılığı: ikinci soruluşta CoreText'e gidilmemeli. Bekçi iç
@@ -1255,8 +1534,12 @@ mod tests {
         // yolu, yani tavansız bir sızıntı değil kare başına ödenen bir
         // gecikme olurdu.
         assert_eq!(
-            a.slots
-                .get(&(Sprite::Char(UNKNOWN_CHAR), Face::Regular, SizeClass::Normal)),
+            a.slots.get(&(
+                Sprite::Char(UNKNOWN_CHAR),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole,
+            )),
             Some(&TOFU),
             "tofu çözümü önbelleğe girmeli"
         );
@@ -1290,13 +1573,19 @@ mod tests {
                 Sprite::Char(FACE_LADDER_PROBE),
                 Face::Regular,
                 SizeClass::Normal,
+                Half::Whole,
             )
-            .0;
-        let (bold, _) = a.slot(
-            Sprite::Char(FACE_LADDER_PROBE),
-            Face::Bold,
-            SizeClass::Normal,
-        );
+            .0
+            .slot;
+        let bold = a
+            .slot(
+                Sprite::Char(FACE_LADDER_PROBE),
+                Face::Bold,
+                SizeClass::Normal,
+                Half::Whole,
+            )
+            .0
+            .slot;
 
         // Geri düşüşün kendisi: kalın istek tofu'ya değil düz yüzün yuvasına
         // çözülmeli, yoksa kalın bir satırdaki çerçeve kutu kutu görünürdü.
@@ -1312,7 +1601,8 @@ mod tests {
             a.slots.get(&(
                 Sprite::Char(FACE_LADDER_PROBE),
                 Face::Bold,
-                SizeClass::Normal
+                SizeClass::Normal,
+                Half::Whole
             )),
             Some(&regular),
             "geri düşüş istenen yüzün anahtarıyla önbelleğe girmeli"
@@ -1437,7 +1727,12 @@ mod tests {
         let dropped: Vec<(char, Face)> = pool
             .iter()
             .copied()
-            .filter(|&(ch, face)| a.slot(Sprite::Char(ch), face, SizeClass::Normal).0 == TOFU)
+            .filter(|&(ch, face)| {
+                a.slot(Sprite::Char(ch), face, SizeClass::Normal, Half::Whole)
+                    .0
+                    .slot
+                    == TOFU
+            })
             .collect();
         assert!(!dropped.is_empty(), "kapasite aşılınca tofu beklenir");
         assert_eq!(
@@ -1449,18 +1744,22 @@ mod tests {
         // sprite'ı gerçek bir yuva alıyor. Pay olmasaydı bu noktadan itibaren
         // altı çizili her hücrenin altında çizgi yerine tofu kutusu belirirdi
         // ve belirti ancak uzun bir oturumdan sonra ortaya çıkardı.
-        let (rule, _) = a.slot(
-            Sprite::Rule(RuleKind::Single),
-            Face::Regular,
-            SizeClass::Normal,
-        );
+        let rule = a
+            .slot(
+                Sprite::Rule(RuleKind::Single),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole,
+            )
+            .0
+            .slot;
         assert_ne!(rule, TOFU, "dolu atlasta kural sprite'ı tofu'ya düştü");
         // Dolu atlas geçici bir hâl: aynı karakter başka bir puntoda yuva
         // bulabilir, yani tofu'ya bağlı kalmamaları gerekiyor.
         for (ch, face) in dropped {
             assert!(
                 !a.slots
-                    .contains_key(&(Sprite::Char(ch), face, SizeClass::Normal)),
+                    .contains_key(&(Sprite::Char(ch), face, SizeClass::Normal, Half::Whole)),
                 "'{ch}' ({face:?}) kalıcı olarak tofu'ya yazılmış"
             );
         }
@@ -1476,7 +1775,13 @@ mod tests {
         // değil. Ters bir taban ancak gözle görülürdü.
         let mut a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
-        let (_, upload) = a.slot(Sprite::Char('W'), Face::Regular, SizeClass::Normal);
+        let (placed__, upload) = a.slot(
+            Sprite::Char('W'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let _ = placed__.slot;
         let bytes = upload.expect("yeni yuva").bytes;
         let w = usize::from(m.cell_px.0);
         let has_ink = |row: usize| bytes[row * w..(row + 1) * w].iter().any(|&b| b > 0);
@@ -1561,7 +1866,13 @@ mod tests {
         // yuvarlama bir pikseli yiyebilirdi.
         let mut a = Atlas::new(None, POINT_SIZE, 1.0, 1.5);
         let m = a.metrics();
-        let (_, upload) = a.slot(Sprite::Char('g'), Face::Regular, SizeClass::Normal);
+        let (placed__, upload) = a.slot(
+            Sprite::Char('g'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let _ = placed__.slot;
         let bytes = upload.expect("yeni yuva").bytes;
         let w = usize::from(m.cell_px.0);
         let has_ink = |row: usize| bytes[row * w..(row + 1) * w].iter().any(|&b| b > 0);
@@ -1583,7 +1894,13 @@ mod tests {
         // descender'ı olmayan harf iki yuvarlamada da aynı görünür.
         let mut a = atlas(POINT_SIZE, 1.0);
         let m = a.metrics();
-        let (_, upload) = a.slot(Sprite::Char('g'), Face::Regular, SizeClass::Normal);
+        let (placed__, upload) = a.slot(
+            Sprite::Char('g'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let _ = placed__.slot;
         let bytes = upload.expect("yeni yuva").bytes;
         let w = usize::from(m.cell_px.0);
         let has_ink = |row: usize| bytes[row * w..(row + 1) * w].iter().any(|&b| b > 0);
@@ -1604,7 +1921,13 @@ mod tests {
         let cap = a.negative_cache_cap();
         // Tanınan bir karakter önce yuvasını alsın: tahliyenin **yalnız**
         // negatif kayıtları attığını sınamak için bir pozitif kayıt gerek.
-        let (letter, _) = a.slot(Sprite::Char('A'), Face::Regular, SizeClass::Normal);
+        let (placed_letter, _) = a.slot(
+            Sprite::Char('A'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let letter = placed_letter.slot;
         assert_ne!(letter, TOFU, "'A' Menlo'da var");
 
         // Tanınmayan karakter yuva harcamıyor, yani `next` onu
@@ -1627,14 +1950,21 @@ mod tests {
         let pool: Vec<char> = {
             let (_, base, cell) = size_classes(&a)[0];
             ('\u{4e00}'..'\u{9fff}')
-                .filter(|&ch| font::fallback_font(base, ch, cell).is_none())
+                .filter(|&ch| font::fallback_font(base, ch, cell, 1).is_none())
                 .take(cap * 3)
                 .collect()
         };
         assert!(pool.len() > cap, "havuz tavanı aşmalı");
         for &ch in &pool {
             assert_eq!(
-                a.slot(Sprite::Char(ch), Face::Regular, SizeClass::Normal).0,
+                a.slot(
+                    Sprite::Char(ch),
+                    Face::Regular,
+                    SizeClass::Normal,
+                    Half::Whole
+                )
+                .0
+                .slot,
                 TOFU,
                 "'{ch}' Menlo/SF Mono'da yok ve yedeği hücreye sığmıyor"
             );
@@ -1653,15 +1983,25 @@ mod tests {
         // çizim yoluna girdiği için bedeli ana thread'de ödenirdi.
         let last = *pool.last().expect("havuz boş değil");
         assert_eq!(
-            a.slots
-                .get(&(Sprite::Char(last), Face::Regular, SizeClass::Normal)),
+            a.slots.get(&(
+                Sprite::Char(last),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole
+            )),
             Some(&TOFU),
             "tahliyeden sonraki kayıt önbelleğe girmeli"
         );
         // Pozitif kayıt tahliyeye girmiyor: yuvası duruyor.
         assert_eq!(
-            a.slot(Sprite::Char('A'), Face::Regular, SizeClass::Normal)
-                .0,
+            a.slot(
+                Sprite::Char('A'),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole
+            )
+            .0
+            .slot,
             letter,
             "pozitif kayıt tahliyede kayboldu"
         );
@@ -1683,8 +2023,14 @@ mod tests {
         // (STIX Two Math) bulunuyor ve genişlik kapısından dönüyor (1.07×).
         let mut a = atlas(POINT_SIZE, 1.0);
         assert_eq!(
-            a.slot(Sprite::Char('𝔸'), Face::Regular, SizeClass::Normal)
-                .0,
+            a.slot(
+                Sprite::Char('𝔸'),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole
+            )
+            .0
+            .slot,
             TOFU,
             "Menlo/SF Mono matematik alfabesi içermez, yedeği de hücreye sığmaz"
         );
@@ -1694,7 +2040,7 @@ mod tests {
         // olsaydı aday hiç bulunmazdı ve bu sınama yine yeşil kalırdı.
         let (label, base, _) = size_classes(&a)[0];
         assert!(
-            font::fallback_font(base, '𝔸', CGFloat::INFINITY).is_some(),
+            font::fallback_font(base, '𝔸', CGFloat::INFINITY, 1).is_some(),
             "{label}: BMP dışı karakter için aday bulunamadı — `CFRange` şüpheli"
         );
     }
@@ -1737,7 +2083,12 @@ mod tests {
     #[test]
     fn ensure_rebuilds_only_when_key_changes() {
         let mut a = atlas(POINT_SIZE, 1.0);
-        a.slot(Sprite::Char('A'), Face::Regular, SizeClass::Normal);
+        a.slot(
+            Sprite::Char('A'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
         assert!(
             !a.ensure(None, POINT_SIZE, 1.0, 1.0),
             "aynı anahtar yeniden kurmamalı"
@@ -1757,7 +2108,12 @@ mod tests {
         // yuvaların sıfırlanması. Anahtarda aile olmasaydı eski fontun
         // glyph'leri yeni fontun atlasında kalırdı ve belirti sessizdi.
         let mut a = atlas(POINT_SIZE, 1.0);
-        a.slot(Sprite::Char('A'), Face::Regular, SizeClass::Normal);
+        a.slot(
+            Sprite::Char('A'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
         assert!(
             !a.ensure(None, POINT_SIZE, 1.0, 1.0),
             "aynı anahtar yeniden kurmamalı"
@@ -1767,7 +2123,12 @@ mod tests {
             "aile değişti: yeniden kurulmalı"
         );
         assert_eq!(a.occupancy().0, 1, "yeni atlasta yalnız tofu");
-        a.slot(Sprite::Char('A'), Face::Regular, SizeClass::Normal);
+        a.slot(
+            Sprite::Char('A'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
         assert!(
             !a.ensure(Some("Monaco"), POINT_SIZE, 1.0, 1.0),
             "aynı aile yeniden kurmamalı"
@@ -1864,7 +2225,7 @@ mod tests {
 
     /// Yuvanın baytlarını kopyalar — `Upload` ödüncü atlası kilitliyor.
     fn slot_bytes_of(a: &mut Atlas, sprite: Sprite, face: Face) -> Vec<u8> {
-        let (_, upload) = a.slot(sprite, face, SizeClass::Normal);
+        let (_, upload) = a.slot(sprite, face, SizeClass::Normal, Half::Whole);
         upload.expect("yeni yuva yükleme vermeli").bytes.to_vec()
     }
 
@@ -1873,7 +2234,10 @@ mod tests {
         let mut a = atlas(POINT_SIZE, 1.0);
         let mut slots = Vec::new();
         for face in [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic] {
-            let slot = a.slot(Sprite::Char('M'), face, SizeClass::Normal).0;
+            let slot = a
+                .slot(Sprite::Char('M'), face, SizeClass::Normal, Half::Whole)
+                .0
+                .slot;
             assert_ne!(slot, TOFU, "{face:?} tofu'ya düştü");
             // Anahtar yüzü taşımasaydı dördü aynı yuvayı paylaşır ve kalın 'M'
             // düz 'M' olarak çizilirdi — sessiz, çünkü bir şey yine görünürdü.
@@ -1894,7 +2258,13 @@ mod tests {
         // taban çizgisine çiziliyor. Doku boyu, `slot_bytes` ve ızgara bu
         // yüzden hiç değişmiyor — bütün ucuzluk buradan geliyor.
         let big = slot_bytes_of(&mut a, Sprite::Char('M'), Face::Regular);
-        let (small_slot, small_upload) = a.slot(Sprite::Char('M'), Face::Regular, SizeClass::Small);
+        let (placed_small_slot, small_upload) = a.slot(
+            Sprite::Char('M'),
+            Face::Regular,
+            SizeClass::Small,
+            Half::Whole,
+        );
+        let small_slot = placed_small_slot.slot;
         let small = small_upload
             .expect("yeni yuva yükleme vermeli")
             .bytes
@@ -1906,8 +2276,14 @@ mod tests {
         assert_ne!(small_slot, TOFU, "küçük sınıf tofu'ya düştü");
         assert_ne!(
             small_slot,
-            a.slot(Sprite::Char('M'), Face::Regular, SizeClass::Normal)
-                .0,
+            a.slot(
+                Sprite::Char('M'),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole
+            )
+            .0
+            .slot,
             "küçük sınıf düz yüzün yuvasını paylaştı"
         );
 
@@ -1935,15 +2311,19 @@ mod tests {
             a.slot(
                 Sprite::Rule(RuleKind::Single),
                 Face::Regular,
-                SizeClass::Small
+                SizeClass::Small,
+                Half::Whole
             )
-            .0,
+            .0
+            .slot,
             a.slot(
                 Sprite::Rule(RuleKind::Single),
                 Face::Regular,
-                SizeClass::Normal
+                SizeClass::Normal,
+                Half::Whole
             )
-            .0,
+            .0
+            .slot,
         );
     }
 
@@ -1996,8 +2376,10 @@ mod tests {
                 Sprite::Rule(RuleKind::Single),
                 Face::Regular,
                 SizeClass::Normal,
+                Half::Whole,
             )
-            .0;
+            .0
+            .slot;
         // Çağıran yanılıp yüz verse bile normalizasyon aynı yuvaya götürür;
         // yoksa altı çeşit dört yüzle yirmi dört yuva harcardı.
         let bold = a
@@ -2005,8 +2387,10 @@ mod tests {
                 Sprite::Rule(RuleKind::Single),
                 Face::BoldItalic,
                 SizeClass::Normal,
+                Half::Whole,
             )
-            .0;
+            .0
+            .slot;
         assert_eq!(regular, bold, "kural yüze göre ayrı yuva tuttu");
     }
 
@@ -2506,12 +2890,25 @@ mod tests {
         // Yan kazanç ölçülebilir: dört yüz tek yuva.
         let mut a = atlas(POINT_SIZE, 1.0);
         let regular = a
-            .slot(Sprite::Char('\u{2588}'), Face::Regular, SizeClass::Normal)
-            .0;
+            .slot(
+                Sprite::Char('\u{2588}'),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole,
+            )
+            .0
+            .slot;
         assert_ne!(regular, TOFU, "yordamsal karakter tofu'ya düştü");
         for face in [Face::Bold, Face::Italic, Face::BoldItalic] {
             assert_eq!(
-                a.slot(Sprite::Char('\u{2588}'), face, SizeClass::Normal).0,
+                a.slot(
+                    Sprite::Char('\u{2588}'),
+                    face,
+                    SizeClass::Normal,
+                    Half::Whole
+                )
+                .0
+                .slot,
                 regular,
                 "{face:?} ayrı yuva tuttu"
             );
@@ -2528,8 +2925,13 @@ mod tests {
         // dolduran bir sprite orada komşusunun üstüne binerdi — ve bağlam
         // satırı yol ile dal taşıyor, ikisi de kullanıcı verisi.
         let mut a = atlas(POINT_SIZE, 1.0);
-        let (normal_slot, normal) =
-            a.slot(Sprite::Char('\u{2588}'), Face::Regular, SizeClass::Normal);
+        let (placed_normal, normal) = a.slot(
+            Sprite::Char('\u{2588}'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let normal_slot = placed_normal.slot;
         assert!(
             normal
                 .expect("yeni yuva yükleme vermeli")
@@ -2538,7 +2940,13 @@ mod tests {
                 .all(|&b| b == 255),
             "büyük sınıfta kapı açılmadı"
         );
-        let (small_slot, small) = a.slot(Sprite::Char('\u{2588}'), Face::Regular, SizeClass::Small);
+        let (placed_small_slot, small) = a.slot(
+            Sprite::Char('\u{2588}'),
+            Face::Regular,
+            SizeClass::Small,
+            Half::Whole,
+        );
+        let small_slot = placed_small_slot.slot;
         let small = small.expect("yeni yuva yükleme vermeli").bytes.to_vec();
         assert_ne!(
             small_slot, normal_slot,
@@ -3349,5 +3757,179 @@ mod tests {
                 u32::from(ch)
             );
         }
+    }
+
+    /// Geniş karakter **iki yuvadan** çiziliyor ve ikisi **aynı dönüşte**
+    /// geliyor.
+    ///
+    /// Atomiklik bir kolaylık değil: iki yarı ayrı turlara bölünseydi kapasite
+    /// sınırı ikisinin arasına düşebilir, sol yuva açılır, sağ tofu'ya düşer
+    /// ve ekranda yarım glyph + yarım kutu belirirdi. `CLAUDE.md`'nin kuralı
+    /// bunu adıyla yasaklıyor: "kutu görünür bir eksiklik, kırpılmış glyph
+    /// sessiz bir bozulma".
+    #[test]
+    fn a_wide_char_takes_two_slots_in_one_answer() {
+        let mut a = atlas(POINT_SIZE, 1.0);
+        let before = a.occupancy().0;
+        let (placed, upload) = a.slot(
+            Sprite::Char(UNKNOWN_CHAR),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Left,
+        );
+        assert_eq!(
+            placed.half,
+            Half::Left,
+            "'{UNKNOWN_CHAR}' mürekkebi iki hücreye sığıyor: çift beklenir"
+        );
+        assert_ne!(placed.slot, TOFU, "kabul edilen çift tofu'ya düşmemeli");
+        let upload = upload.expect("yeni çift yükleme vermeli");
+        let right = upload.right.expect("sağ yarı aynı dönüşte gelmeli");
+        assert_ne!(
+            upload.origin, right,
+            "iki yarı aynı yuvaya yazılıyor: köşeler ayrı olmalı"
+        );
+        assert_eq!(
+            upload.bytes.len(),
+            upload.right_bytes.len(),
+            "iki yarı da tam bir yuva"
+        );
+        assert_eq!(
+            a.occupancy().0 - before,
+            2,
+            "geniş karakter tam iki yuva harcamalı"
+        );
+        // Sağ yarı **ikinci bir kapı turu istemiyor**: çifti kabul eden çağrı
+        // iki anahtarı birden yazdı, yani bu soru önbellekten dönüyor ve
+        // cascade yürüyüşü kare bütçesinin ortasında bir daha koşmuyor.
+        let (right_placed, right_upload) = a.slot(
+            Sprite::Char(UNKNOWN_CHAR),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Right,
+        );
+        assert_eq!(right_placed.slot, placed.slot + 1, "sağ yarı solun komşusu");
+        assert!(
+            right_upload.is_none(),
+            "sağ yarı zaten yüklendi: doku el değmeden kalmalı"
+        );
+        assert_eq!(a.occupancy().0 - before, 2, "sağ yarı üçüncü yuva açmamalı");
+    }
+
+    /// **Kapı sırası: tek hücre önce.** Geniş ilan edilmiş ama mürekkebi bir
+    /// hücreye sığan karakter tek yuvadan çiziliyor ve rasteri `Half::Whole`
+    /// isteğiyle **bit bit** aynı.
+    ///
+    /// Ölçülen 65 karakterin ("geniş ilan edilmiş, tek hücreye sığıyor")
+    /// sözleşmesi bu: 021'den beri çalışan çizimleri bu set oynatmıyor. Sıra
+    /// ters olsaydı `centre_shift` onları iki hücrelik kutuya göre ortalar ve
+    /// hepsi yerinden kayardı.
+    #[test]
+    fn a_wide_char_that_fits_one_cell_keeps_the_single_slot_raster() {
+        // Taban fontun kendi glyph'i: eşaralıklı yüzde ilerleme hücrenin
+        // ilerlemesinin ta kendisi, yani tanım gereği tek hücre. `☕` bu
+        // makinede Menlo'da var ve Unicode onu iki sütun ilan ediyor —
+        // ölçülen 21'in içinde.
+        const NARROW_WIDE: char = '☕';
+        let mut a = atlas(POINT_SIZE, 1.0);
+        let whole = {
+            let (placed, upload) = a.slot(
+                Sprite::Char(NARROW_WIDE),
+                Face::Regular,
+                SizeClass::Normal,
+                Half::Whole,
+            );
+            (placed, upload.map(|u| u.bytes.to_vec()))
+        };
+        let Some(whole_bytes) = whole.1 else {
+            // Karakteri taşıyan bir font kurulu değilse sınama konusuz.
+            return;
+        };
+        assert_ne!(whole.0.slot, TOFU, "'{NARROW_WIDE}' çizilebilir olmalı");
+
+        let mut b = atlas(POINT_SIZE, 1.0);
+        let (placed, upload) = b.slot(
+            Sprite::Char(NARROW_WIDE),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Left,
+        );
+        assert_eq!(
+            placed.half,
+            Half::Whole,
+            "tek hücreye sığan geniş karakter çifte dönüşmemeli"
+        );
+        let upload = upload.expect("yeni yuva yükleme vermeli");
+        assert!(
+            upload.right.is_none(),
+            "tek hücrelik cevap sağ yarı vermemeli: çağıran boş dörtlü basardı"
+        );
+        assert_eq!(
+            upload.bytes,
+            &whole_bytes[..],
+            "raster `Half::Whole` isteğiyle bit bit aynı kalmalı"
+        );
+        assert_eq!(b.occupancy().0, 2, "tek yuva + tofu");
+    }
+
+    /// Kapasite sınırı çiftin **arasına düşmüyor**: tam bir boş yuva varken
+    /// istenen geniş karakterin iki yarısı da tofu dönüyor ve `next`
+    /// kıpırdamıyor.
+    ///
+    /// Aranan şey "yarım glyph + yarım kutu"nun **yokluğu** ve o hâl
+    /// atomiklik yüzünden yapısal olarak doğmuyor — yani bu bekçi kapıyı
+    /// değil kapının **sınırını** sınıyor. Doluluğu arayan bir sınama boşa
+    /// yeşil kalırdı.
+    #[test]
+    fn a_wide_char_is_rejected_whole_when_only_one_slot_is_left() {
+        let mut a = Atlas::new(None, LARGE_POINT_SIZE, 1.0, LARGEST_LINE_HEIGHT);
+        let cap = a.capacity().saturating_sub(RULE_RESERVE);
+        // Havuz `full_atlas_returns_tofu_without_caching`'inkiyle **aynı
+        // gerekçeyle** kuruluyor: tofu'ya düşen karakter yuva harcamıyor, yani
+        // doldurma gerçekten çizilebilen karakterlerden olmak zorunda.
+        // Yordamsal aile `Regular`'a normalize olduğu için bir kez, ASCII dört
+        // yüzde de ayrı yuva tutuyor.
+        let pool: Vec<(char, Face)> = procedural_chars()
+            .map(|ch| (ch, Face::Regular))
+            .chain(
+                [Face::Regular, Face::Bold, Face::Italic, Face::BoldItalic]
+                    .into_iter()
+                    .flat_map(|f| (' '..='~').map(move |ch| (ch, f))),
+            )
+            .collect();
+        // Tam **bir** yuva boş kalana kadar doldur.
+        for &(ch, face) in &pool {
+            if a.next + 1 >= cap {
+                break;
+            }
+            a.slot(Sprite::Char(ch), face, SizeClass::Normal, Half::Whole);
+        }
+        assert_eq!(
+            a.next + 1,
+            cap,
+            "havuz kapasiteyi doldurmalı: tam bir yuva boş kalacak"
+        );
+        let next_before = a.next;
+        let (placed, upload) = a.slot(
+            Sprite::Char('𠀀'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Left,
+        );
+        assert_eq!(
+            placed.slot, TOFU,
+            "bir yuva iki yarıya yetmez: çift tümden reddedilmeli"
+        );
+        assert!(upload.is_none(), "reddedilen çift yükleme vermemeli");
+        assert_eq!(a.next, next_before, "reddedilen çift yuva harcamamalı");
+        // Sağ yarı da aynı cevabı veriyor: ekranda yarım glyph doğmuyor.
+        let (right, _) = a.slot(
+            Sprite::Char('𠀀'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Right,
+        );
+        assert_eq!(right.slot, TOFU, "sağ yarı da tofu olmalı");
+        assert_eq!(a.next, next_before, "sağ yarı da yuva harcamamalı");
     }
 }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use block2::RcBlock;
-use bt_atlas::{Atlas, Face, FontIssue, Metrics, SizeClass, Sprite, TOFU};
+use bt_atlas::{Atlas, Face, FontIssue, Half, Metrics, SizeClass, Sprite, TOFU};
 use bt_core::{FontOptions, LinearRgba};
 use dispatch2::DispatchData;
 use objc2::rc::{Retained, autoreleasepool};
@@ -1190,36 +1190,82 @@ impl AtlasTexture {
         // geliyor: glyph geçişi zaten arka planlardan ve imleçten sonra
         // kodlanıyor (`encode_pass`), yani kural da imlecin üstüne düşüyor.
         for glyph in glyphs {
-            let uv0 = slot_uv(
+            // **Yelpazeleme burada, `Frame::push`'ta değil.** Gerekçe ödünç:
+            // "bir yuva mı iki mi" kararını mürekkep kapısı veriyor, yani
+            // `Atlas::slot` — ve `push` atlası ödünç alamıyor (`GlyphCell`'in
+            // uv'siz olmasının yazılı sebebi: sink'te çözüm ödüncü `draw`
+            // boyunca canlı tutar ve ilk glyph'li karede `BorrowMutError`
+            // verir). Burada atlas **zaten** ödünç alınmış ve `metrics` elde.
+            //
+            // Üç yüzey bedavaya geliyor: bu fonksiyon kare başına dört kez
+            // koşuyor (şeritler, ızgara, doldurma bandı, dock) ve dördü de
+            // buradan geçiyor. 017'nin dersi — bant ızgaradan türeyen her şeyi
+            // ayrıca kazanmak zorunda — tek yerde ödeniyor.
+            let want = if glyph.wide { Half::Left } else { Half::Whole };
+            let (uv0, half) = slot_uv(
                 &mut self.atlas,
                 texture,
                 metrics,
                 inv,
-                Sprite::Char(glyph.ch),
-                glyph.face,
-                glyph.size,
+                SlotAsk {
+                    sprite: Sprite::Char(glyph.ch),
+                    face: glyph.face,
+                    size: glyph.size,
+                    want,
+                },
             );
             self.instances.push(GlyphInstance {
                 pos: glyph.pos,
                 uv0,
                 rgba: glyph.rgba,
             });
+            // İkinci dörtlü **yalnız kapı iki hücre dediyse**. Geniş ilan
+            // edilmiş ama mürekkebi bir hücreye sığan karakter (`☕`,
+            // fullwidth `！`) `Whole` dönüyor ve burası hiç koşmuyor — yoksa
+            // sağına boş bir dörtlü düşerdi. Izgara ona zaten iki sütun
+            // ayırdığı için komşu hücre spacer ve glyph vermiyor.
+            if half == Half::Left {
+                let (uv1, _) = slot_uv(
+                    &mut self.atlas,
+                    texture,
+                    metrics,
+                    inv,
+                    SlotAsk {
+                        sprite: Sprite::Char(glyph.ch),
+                        face: glyph.face,
+                        size: glyph.size,
+                        want: Half::Right,
+                    },
+                );
+                self.instances.push(GlyphInstance {
+                    pos: [glyph.pos[0] + f32::from(metrics.cell_px.0), glyph.pos[1]],
+                    uv0: uv1,
+                    rgba: glyph.rgba,
+                });
+            }
         }
         for rule in rules {
             // Kurallar **her zaman** `Face::Regular`: kalın metnin altındaki
             // çizgi kalın değildir. `Atlas::slot` bunu ayrıca normalize ediyor;
             // burada da doğru yüzü sormak o normalizasyonu bir savunma
             // katmanı olarak bırakıyor, tek dayanak yapmıyor.
-            let uv0 = slot_uv(
+            let (uv0, _) = slot_uv(
                 &mut self.atlas,
                 texture,
                 metrics,
                 inv,
-                Sprite::Rule(rule.kind),
-                Face::Regular,
-                // Kurallar **her zaman** gösterim ölçüsünde: bağlam satırında
-                // kural yok ve `Atlas::slot` bunu ayrıca normalize ediyor.
-                SizeClass::Normal,
+                SlotAsk {
+                    sprite: Sprite::Rule(rule.kind),
+                    face: Face::Regular,
+                    // Kurallar **her zaman** gösterim ölçüsünde: bağlam
+                    // satırında kural yok ve `Atlas::slot` bunu ayrıca
+                    // normalize ediyor.
+                    size: SizeClass::Normal,
+                    // Kural çizgisi tanımı gereği tek hücre; `Atlas::slot`
+                    // bunu da normalize ediyor ve burada doğru yarıyı sormak
+                    // o normalizasyonu savunma katmanı olarak bırakıyor.
+                    want: Half::Whole,
+                },
             );
             self.instances.push(GlyphInstance {
                 pos: rule.pos,
@@ -1229,6 +1275,20 @@ impl AtlasTexture {
         }
         Ok(())
     }
+}
+
+/// Atlasa sorulan yuvanın kimliği — [`Atlas::slot`]'un dört argümanı.
+///
+/// Dördü tek tipte, çünkü [`slot_uv`]'nin argüman sayısı `clippy`'nin
+/// sınırını aşıyordu ve lint'i susturmak yanlış çare olurdu: bu dördü
+/// gerçekten **tek bir şeyi** adlandırıyor — atlas anahtarının istek hâli.
+struct SlotAsk {
+    sprite: Sprite,
+    face: Face,
+    size: SizeClass,
+    /// Çağıranın **istediği** yarı; cevabın yarısı bundan farklı olabilir
+    /// (bkz. [`Half::Whole`]).
+    want: Half,
 }
 
 /// Sprite'ın yuvasını çözer, yuva yeni açıldıysa dokuya yükler ve uv0'ını
@@ -1250,18 +1310,23 @@ fn slot_uv(
     texture: &ProtocolObject<dyn MTLTexture>,
     metrics: Metrics,
     inv: (f32, f32),
-    sprite: Sprite,
-    face: Face,
-    size: SizeClass,
-) -> [f32; 2] {
-    let (slot, upload) = atlas.slot(sprite, face, size);
+    ask: SlotAsk,
+) -> ([f32; 2], Half) {
+    let (placed, upload) = atlas.slot(ask.sprite, ask.face, ask.size, ask.want);
     let (x, y) = if let Some(upload) = upload {
         upload_slot(texture, upload.origin, metrics, upload.bytes);
+        // **Çiftin sağ yarısı aynı dönüşte yükleniyor.** `bt-atlas` iki yuvayı
+        // atomik ayırıyor ve ikisinin baytlarını birlikte veriyor; burada
+        // atlanırsa sağ yuva dokuda **yazılmamış** kalır ve o karakterin sağ
+        // yarısı komşu yuvanın bitmap'iyle çizilir — sessiz bir bozulma.
+        if let Some(right) = upload.right {
+            upload_slot(texture, right, metrics, upload.right_bytes);
+        }
         upload.origin
     } else {
-        atlas.slot_origin(slot)
+        atlas.slot_origin(placed.slot)
     };
-    [f32::from(x) * inv.0, f32::from(y) * inv.1]
+    ([f32::from(x) * inv.0, f32::from(y) * inv.1], placed.half)
 }
 
 /// Atlas dokusu: tek kanal kapsama, yalnız shader okur.
@@ -3372,5 +3437,86 @@ mod tests {
         // "released without endEncoding" ile süreci öldürürdü.
         cmd.commit();
         cmd.waitUntilCompleted();
+    }
+
+    /// Geniş hücre **iki dörtlü** üretiyor: sol yarı yerinde, sağ yarı bir
+    /// hücre sağda ve iki ayrı yuvadan.
+    ///
+    /// Yelpazeleme `Frame::push`'ta **değil** burada ve sebebi ödünç: "bir
+    /// yuva mı iki mi" kararını mürekkep kapısı veriyor, yani `Atlas::slot`
+    /// — sink ise atlası hiç görmüyor. Bekçi o kararın çizime gerçekten
+    /// döndüğünü gösteriyor.
+    #[test]
+    fn a_wide_cell_becomes_two_quads() {
+        let device = MTLCreateSystemDefaultDevice().expect("Metal device");
+        let mut tex = AtlasTexture {
+            atlas: Atlas::new(None, 13.0, 1.0, 1.0),
+            texture: None,
+            instances: Vec::new(),
+        };
+        let cell_w = tex.atlas.metrics().cell_px.0;
+        // `漢` mürekkebi iki hücre isteyen bir aday veriyor (cascade: PingFang
+        // SC); tek hücrelik kapıdan dönüyor, iki hücrelik kapıdan geçiyor.
+        let glyphs = [GlyphCell {
+            pos: [0.0, 0.0],
+            ch: '漢',
+            face: Face::Regular,
+            size: SizeClass::Normal,
+            rgba: [1.0, 1.0, 1.0, 1.0],
+            wide: true,
+        }];
+        tex.prepare(&device, &glyphs, &[]).expect("prepare");
+        assert_eq!(
+            tex.instances.len(),
+            2,
+            "geniş hücre iki dörtlü üretmeli: {:?}",
+            tex.instances.len()
+        );
+        assert_eq!(
+            tex.instances[0].pos,
+            [0.0, 0.0],
+            "sol yarı hücrenin yerinde"
+        );
+        assert_eq!(
+            tex.instances[1].pos,
+            [f32::from(cell_w), 0.0],
+            "sağ yarı tam bir hücre sağda"
+        );
+        assert_ne!(
+            tex.instances[0].uv0, tex.instances[1].uv0,
+            "iki yarı iki ayrı yuvadan okunmalı"
+        );
+    }
+
+    /// Geniş ilan edilmiş ama mürekkebi bir hücreye sığan karakter **tek**
+    /// dörtlü üretiyor.
+    ///
+    /// Sağına boş bir dörtlü düşmesi bir israf draw'ı olurdu ve ölçülen 65
+    /// karakterin ("bugün çalışan çizimler") her birinde ödenirdi. Kararın
+    /// sahibi kapı, çağıran değil — bekçi de tam bunu gösteriyor.
+    #[test]
+    fn a_wide_cell_that_fits_one_cell_stays_one_quad() {
+        let device = MTLCreateSystemDefaultDevice().expect("Metal device");
+        let mut tex = AtlasTexture {
+            atlas: Atlas::new(None, 13.0, 1.0, 1.0),
+            texture: None,
+            instances: Vec::new(),
+        };
+        // Menlo'nun kendi glyph'i, Unicode'a göre iki sütun: taban fontta
+        // ilerleme hücrenin ilerlemesinin ta kendisi, yani tek hücre.
+        let glyphs = [GlyphCell {
+            pos: [0.0, 0.0],
+            ch: '☕',
+            face: Face::Regular,
+            size: SizeClass::Normal,
+            rgba: [1.0, 1.0, 1.0, 1.0],
+            wide: true,
+        }];
+        tex.prepare(&device, &glyphs, &[]).expect("prepare");
+        assert_eq!(
+            tex.instances.len(),
+            1,
+            "tek hücreye sığan geniş karakter ikinci dörtlü üretmemeli"
+        );
     }
 }

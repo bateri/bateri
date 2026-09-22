@@ -524,15 +524,26 @@ pub(crate) fn glyph_ink(font: &CTFont, glyph: CGGlyph) -> CGRect {
 /// çizilmeyecek bir yerleşimi sınar ve ikisi sessizce ayrışırdı: kabul edilen
 /// bir aday hücrenin dışına boyayabilir ya da sığan bir aday elenirdi.
 ///
-/// `max(0.0)` çizimin kendi kuralı: ilerlemesi hücreyi aşan bir glyph sola
+/// Argüman **kutunun** ilerlemesi, hücrenin değil: tek hücrelik bir glyph'te
+/// ikisi aynı sayı, iki sütunluk bir karakterde kutu iki hücre
+/// ([`crate::Half`]). Adı 023'te `cell_advance`'ten `box_advance`'e çevrildi
+/// ve tek satırlık bir yeniden adlandırma değildi: aynı sayı hem kapıya hem
+/// çizime gidiyor, yani yalnız birinde sütunla çarpılsa kapı çizilmeyecek bir
+/// yerleşimi sınardı.
+///
+/// `max(0.0)` çizimin kendi kuralı: ilerlemesi kutuyu aşan bir glyph sola
 /// yapışıyor, çünkü kırpma sağdan olmalı — gerekçe [`crate::raster::draw`]'in
 /// gövdesinde. Kapının bunu **aynen** paylaşması şart, yoksa negatif bir
 /// kaydırma varsayıp adayın solunu hücrenin içinde sanırdı.
-pub(crate) fn centre_shift(cell_advance: CGFloat, advance: CGFloat) -> CGFloat {
-    ((cell_advance - advance) / 2.0).max(0.0)
+pub(crate) fn centre_shift(box_advance: CGFloat, advance: CGFloat) -> CGFloat {
+    ((box_advance - advance) / 2.0).max(0.0)
 }
 
-/// Adayın boyayacağı piksel hücrenin **içinde** mi kalıyor.
+/// Adayın boyayacağı piksel **kutunun** içinde mi kalıyor.
+///
+/// Kutu tek hücre ya da iki hücre (`box_advance`): geniş ilan edilmiş bir
+/// karakter iki sütun işgal ediyor, yani mürekkebi iki hücreye sığıyorsa
+/// kabul edilmeli. Sıranın kendisi [`fallback_font`]'ta.
 ///
 /// Ölçüt yatay ve yalnız yatay. Dikeyi de sınamak bugün **hiçbir adayı
 /// elemiyor** (ölçüldü: yatay kapıyı geçen her aday hücrenin taban çizgisi
@@ -540,14 +551,14 @@ pub(crate) fn centre_shift(cell_advance: CGFloat, advance: CGFloat) -> CGFloat {
 /// dönüyor), yani ikinci ölçüt yazılmış ama tanığı olmayan bir kural olurdu.
 /// Sınır adıyla yazılı: dikeyde taşan bir aday bugün kutuya değil **kırpmaya**
 /// düşer.
-fn ink_fits_cell(font: &CTFont, glyph: CGGlyph, cell_advance: CGFloat) -> bool {
-    let shift = centre_shift(cell_advance, glyph_advance(font, glyph));
+fn ink_fits_box(font: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> bool {
+    let shift = centre_shift(box_advance, glyph_advance(font, glyph));
     let ink = glyph_ink(font, glyph);
     let left = ink.origin.x + shift;
     // Sol kenar da sınanıyor: negatif `origin.x` taşıyan bir aday hücreye
     // soldan taşar ve CG onu **soldan** keser. Latin yazıda harf soldan
     // tanınıyor, yani o kırpma sessiz bir bozulma olurdu — kutu dürüsttür.
-    left >= 0.0 && left + ink.size.width <= cell_advance
+    left >= 0.0 && left + ink.size.width <= box_advance
 }
 
 /// `ch`'i çizebilen bir sistem fontu — **hücreye sığıyorsa**.
@@ -599,7 +610,8 @@ pub(crate) fn fallback_font(
     base: &CTFont,
     ch: char,
     cell_advance: CGFloat,
-) -> Option<CFRetained<CTFont>> {
+    cols: u8,
+) -> Option<Accepted> {
     let mut utf8 = [0u8; 4];
     let text = CFString::from_str(ch.encode_utf8(&mut utf8));
     let range = CFRange {
@@ -611,7 +623,41 @@ pub(crate) fn fallback_font(
     // SAFETY: `base` ve `text` bu kapsamda canlı; `range` string'in tamamı.
     let candidate = unsafe { base.for_string(&text, range) };
     let glyph = glyph_index(&candidate, ch)?;
-    ink_fits_cell(&candidate, glyph, cell_advance).then_some(candidate)
+    // **Sıra zorunlu: önce tek hücre.** Tek hücreye sığan bir aday bugün de
+    // sığıyor ve tek yuvadan çiziliyor; doğrudan iki hücrelik kutuyla
+    // sorulsaydı `centre_shift` onu iki hücrenin ortasına kaydırır ve
+    // *bugün çalışan* bir çizim yerinden oynardı. Ölçüldü (023 `context.md`):
+    // 65 karakter geniş ilan edilmiş ama mürekkebi tek hücreye sığıyor —
+    // 21'i Menlo'nun kendi glyph'i, 44'ü cascade'den narin mürekkeple gelen
+    // CJK noktalaması ve fullwidth formlar (`、 。 》 ！`). Yan kazanç
+    // kapasite: o 65 ikinci bir yuva da harcamıyor.
+    if ink_fits_box(&candidate, glyph, cell_advance) {
+        return Some(Accepted {
+            font: candidate,
+            cols: 1,
+        });
+    }
+    // İkinci kapı yalnız **iki sütun ilan edilmiş** karakterde açılıyor. Tek
+    // sütunlu bir karaktere iki hücre vermek komşusunun üstüne boyamak olurdu:
+    // ızgara ona spacer ayırmıyor ve o hücrenin kendi mürekkebi var. Ölçüt bu
+    // yüzden `min(sütun, mürekkep)`.
+    if cols >= 2 && ink_fits_box(&candidate, glyph, cell_advance * CGFloat::from(cols)) {
+        return Some(Accepted {
+            font: candidate,
+            cols,
+        });
+    }
+    None
+}
+
+/// Kabul edilen aday ve **kaç hücreye** sığdığı.
+///
+/// `cols` ızgaranın ayırdığı sütun sayısı değil, kapının kabul ettiği kutu:
+/// iki sütun ilan edilmiş bir karakter tek hücreye sığıyorsa burada `1`
+/// dönüyor ve tek yuvadan çiziliyor.
+pub(crate) struct Accepted {
+    pub(crate) font: CFRetained<CTFont>,
+    pub(crate) cols: u8,
 }
 
 /// Yukarı yuvarlar ve `u16`'ya sıkıştırır.

@@ -62,8 +62,8 @@ bulunamaz.
 | 020 | fare raporlama | **Kullanıcı isteğinden doğdu** (2026-09-21): Claude Code'un giriş kutusunda tıklanan yere imleç gelmiyor. Sebep fare raporunun yokluğu — adı TUI desteği değil mouse tracking. Ölçüldü (CLI bir pty'ye koşturuldu): Claude Code `?1000/1002/1003/1006` istiyor, etkin kip 1003. Raporun yarısı hazır: `wheel_report` adı tekerlek ama gövdesi genel X10/SGR raporu ve kip takibi alacritty'den bedava geliyor; eksik olan düğme/hareket kodlaması ve `mouseDown:`'ın kipi hiç sormaması. İçindeki ürün kararı Shift arbitrajı — fare kipinde Shift terminali geri alır, yoksa uygulama içinde metin seçme yeteneği ölür. Set açıldı → `.tasks/020-fare-raporlama/` |
 | 021 | kutu çizim | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "blok, çizgi ve Braille fonttan geliyor"): kutu/blok çizim ve Braille fonttan geliyor ve **döşemiyor** — Menlo'nun `█`'i hücreyi doldurmuyor, Braille de genişlik kapısından dönüyor. Çare yordamsal çizim ve örüntü depoda hazır (`RuleKind`'ın yedi sprite'ı); çıktı yine tek kanallı kapsama maskesi, yani emoji setinin "ikinci atlas mı, RGBA mı" çatalı **hiç açılmıyor** — 019'un 020/021'den ayrıldığı gerekçenin aynısı. Kullanıcı görünürlüğü yüksek ve sürekli: Claude Code'un maskotu, spinner'ı ve her TUI çerçevesi. Set açıldı → `.tasks/021-kutu-cizim/` |
 | 022 | atlas tahliyesi | **Sete bağlanmamış borçtan doğdu** (aşağıdaki "Atlas dolunca geri dönüşü yok") ve borcun kendi yazdığı sıra geldi: *önce ölçüm, sonra LRU* — ölçüm 021'de koştu. Kusur kullanıcıya iki sıradan kapıdan çarpıyor: 16 kez Cmd + (varsayılan 13pt, adım 1pt, tavan 72pt) Retina'da doyma eşiğine çıkarıyor, ve Braille bloğunu tarayan bir TUI (`btop`, Claude Code spinner'ı) tek başına 256 yuva isteyebiliyor. Dolduktan sonra o oturumda ilk kez görülen her karakter kalıcı kutu. Set açıldı → `.tasks/022-atlas-tahliyesi/` |
-| 023 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-21: taban **yarım alındı** ve kalan yarısı sanıldığından zor çıktı. CPU sütunları ile açılış prizde ölçüldü, ikisi de taban. **GPU sütunu alınamadı:** aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms arasında dolaşıyor ve sınanan dört hipotez (koşu süresi, derleme sonrası ilk koşu, güç durumu, metallib kimliği) onu ayıramadı. Bu setin bedeli bir **shader** bedeli, yani ihtiyacı olan sütun tam da gezinen sütun — üstelik sıçrama yeniden derleme sınırında oluyor ve "shader'lı hâl shader'sız hâlden yavaş mı" sorusu doğası gereği o sınırın iki yanını karşılaştırmak demek. Yani ön koşul **açık** ve artık ondan fazlası: bu setin `/rfc`'si ölçme yöntemini de çözmek zorunda (aynı binary içinde çalışma zamanı anahtarıyla A/B, ya da çok sayıda yeniden derleme üzerinden ortalama). `docs/OLCUMLER.md` → `## Kare süresi`.)* *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
-| 024 | emoji + geniş glyph | **Kutu çizim yarısı 2026-09-21'de ayrıldı → 021** (kullanıcı kararı); kalan ikisi tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek |
+| 023 | emoji + geniş glyph | **Kutu çizim yarısı 2026-09-21'de ayrıldı → 021** (kullanıcı kararı); kalan ikisi tek iş: 003 `teslim.md` B.3 "geniş karakter tek yuvaya kırpılıyor" diyor, 004 `plan.md` ikisini aynı sete bağlıyor. İçinde gerçek bir mimari çatal var: atlas `R8Unorm`, yani tek kanallı **kapsama maskesi**; emoji ise renkli bitmap. İkisi aynı dokuda yaşayamaz → ikinci atlas mı, RGBA mı, sprite başına format bayrağı mı? `/rfc` şart. TUI'ler (htop, tmux, lazygit) bu setten sonra düzgün görünür. **Bedel:** 2026-09-16'daki ikinci kaymayla TUI çerçeveleri **yedi set** boyunca bozuk görünür — bilerek **Sıra 2026-09-22'de öne alındı** (kullanıcı kararı: materyal pas geçildi) ve envanter `/rfc`'nin araştırmasında ölçüldü: adayı olan 1346 geniş karakterin ilerlemesi de mürekkebi de hücrenin **1.66** katı, yani kapıyı sütunla çarpmak ailenin tamamını kabul ediyor; emojinin **78'i tek sütunlu** ve geometri kolu onlara yardım etmiyor. Set açıldı → `.tasks/023-emoji-ve-genis-glyph/` |
+| 024 | materyal yüzey | `substrate` shader'ı, grain/sheen, birkaç materyal; 007'nin tema rollerine bağlanır. Metalterm'in görünüşü kapalı kaynak — adlarını biliyoruz (`docs/ARASTIRMA.md` → Görünüm), matematiğini bilmiyoruz; `/rfc`'nin ilk işi referans görüntü/video toplamak ve tasarım denemesi. Efekt GPU bütçesi yer: kare süresi tabanı bu setten **önce** alınmış olmalı, yoksa "materyal ne kadar yavaşlattı" cevapsız kalır. *(2026-09-21: taban **yarım alındı** ve kalan yarısı sanıldığından zor çıktı. CPU sütunları ile açılış prizde ölçüldü, ikisi de taban. **GPU sütunu alınamadı:** aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms arasında dolaşıyor ve sınanan dört hipotez (koşu süresi, derleme sonrası ilk koşu, güç durumu, metallib kimliği) onu ayıramadı. Bu setin bedeli bir **shader** bedeli, yani ihtiyacı olan sütun tam da gezinen sütun — üstelik sıçrama yeniden derleme sınırında oluyor ve "shader'lı hâl shader'sız hâlden yavaş mı" sorusu doğası gereği o sınırın iki yanını karşılaştırmak demek. Yani ön koşul **açık** ve artık ondan fazlası: bu setin `/rfc`'si ölçme yöntemini de çözmek zorunda (aynı binary içinde çalışma zamanı anahtarıyla A/B, ya da çok sayıda yeniden derleme üzerinden ortalama). `docs/OLCUMLER.md` → `## Kare süresi`.)* *(2026-09-16'da ertelendi; gerekçesi değişmedi, yalnız sırası — ve ertelenmesi ölçüm baskısını da erteledi.)* |
 | 025 | sekme + bölme | 2026-09-16'da ertelendi. **Bedeli kayıtlı:** komut blokları ve Input Dock "bir pencere = bir oturum" varsayımıyla inecek, bu set onları retrofit eder |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
@@ -212,8 +212,28 @@ animasyonu), Sparkle ile güncelleme.
 > sebebi ölçüldü (aynı kaynak ve bayt bayt aynı metallib ile 0,25–0,68 ms
 > arası geziniyor, dört hipotez onu ayıramadı). Yani materyalin ön koşulu
 > artık "ölçüm yapılmadı" değil, **"ölçme yöntemi çözülmedi"** — ve o, o
-> setin `/rfc`'sinin ilk işi. Ayrıntısı 023'ün satırında ve
+> setin `/rfc`'sinin ilk işi. Ayrıntısı materyal yüzeyin satırında ve
 > `docs/OLCUMLER.md` → `## Kare süresi`.
+
+> **On üçüncü kayma (2026-09-22, kullanıcı kararı).** **Emoji + geniş glyph
+> materyal yüzeyin önüne geçti**: emoji **023**, materyal yüzey **024**, sekme
+> + bölme **025** oldu. Gerekçe ilk kez "ucuzluk ve görünürlük" **değil** —
+> emoji setin en pahalısı, projenin ilk gerçek mimari çatalı. Gerekçe
+> materyalin kendi ön koşulu: on ikinci kaymanın yazdığı gibi o artık "ölçüm
+> yapılmadı" değil **"ölçme yöntemi çözülmedi"**, yani sırası gelen set
+> `/rfc`'sinde bir tasarım işinin yanında bir **ölçüm yöntemi** icat etmek
+> zorunda ve o ikinci iş kuyruğun geri kalanını bekletiyor. Kullanıcı
+> materyali pas geçti; ön koşulu kalkmadı, **sırası kalktı** — ölçme yöntemi
+> çözülünce yerine döner.
+> **Materyalin bedeli onuncu kez ödeniyor** ve bu kez ödenen şey ne ölçüm
+> baskısı ne sıra: ödenen şey **tasarımın kendisi**, çünkü referans görüntü
+> toplamak da o setin `/rfc`'sine ait ve o iş de kullanıcıyı bekliyor.
+> Numara kayması yine tarihli kayıt: bu tarihten önceki belgelerde emoji 024,
+> materyal 023 geçer ve düzeltilmedi. **Tek düzeltme** on ikinci kaymanın
+> materyale bakan işaretçisiydi: "023'ün satırında" artık emojiyi gösterdiği
+> için sete **adıyla** bağlandı — numarayla değil, çünkü aynı cümle bir
+> sonraki kaymada yine eskirdi.
+
 
 ## Sete bağlanmamış borçlar
 
@@ -291,6 +311,22 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   "çok satırlı `BUFFER`" bilinen sınırı** (bastırma aritmetiği satır sonlarını
   saymıyor, kuyruk sızıyor) bu kararla **konusuz kaldı**: çok satırlı ayna
   bastırmaya hiç girmiyor.
+- **Aynanın `CURSOR`'u karakter indeksi, sütun değil.** 023'ün panelinde
+  çıktı (2026-09-22) ve o setin kapsamı dışında bırakıldı: `dock::render`
+  sütunu karakter sayısından türetiyor (`TEXT_COL + offset`, `offset = index -
+  skip`), spacer yok, genişlik farkındalığı yok — caret de öyle. Yani dock'un
+  giriş satırında bir CJK karakteri varsa caret **yanlış hücrede** durur ve
+  ondan sonraki her harf bir sütun kayar. Kusur 012'den beri var; 023 onu
+  **kötüleştirmiyor** ve gerekçesi yapısal — o set geniş bayrağını dock
+  kayıtlarında hiç kurmuyor (adıyla yazılmış değişmez), çünkü iki hücrelik bir
+  glyph komşu karakterin üstüne boyardı. Çare iki yönden birinde: ya ZLE
+  aynası sütun gönderir (sarmalayıcının sözleşmesi değişir), ya `bt-core`
+  `BUFFER` üstünde gösterim genişliği hesaplar (`unicode-width` `bt-core`'un
+  grafında zaten var, `alacritty_terminal` üzerinden). İkincisi ucuz görünüyor
+  ama `region_highlight`'ın indeksleri de aynı uzayda, yani dönüşüm **tek
+  yerde** olmak zorunda. Dock'un giriş satırını elden geçiren ilk set doğal ev;
+  021'in "küçük sınıfta kapalı" emsali burada **yetmez**, giriş satırı
+  `SizeClass::Normal`.
 - **Blok animasyonları.** 010 Karar 5 şeridin belirmesini setten **çıkardı**:
   şerit bugün anında beliriyor. Gerekçe animasyonun zorluğu değil, bedeli —
   `bt-gpu::motion` ikinci bir tüketici kazanır, `Mode::Fade`'in "indirgemenin
@@ -587,7 +623,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
     **küçültme** (kitty yedek glyph'i hücreye sığacak kadar ölçekliyor) ve
     o da ayrı bir karar — eşaralıklı bir ızgarada ölçeklenmiş bir glyph
     komşularından farklı ağırlıkta görünür.
-  - **41'inin adayı Apple Color Emoji** → emoji seti (023); renkli bitmap ve
+  - **41'inin adayı Apple Color Emoji** → emoji seti (**023, açıldı**); renkli bitmap ve
     "ikinci atlas mı, RGBA mı" çatalı orada.
   Sıra önerisi: legacy computing (021'in devamı, ucuz ve yordamsal),
   sonra yerleşim kararı (89 karakter, tek dosyalık ama mimari cümleyi
