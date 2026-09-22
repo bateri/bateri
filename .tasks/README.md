@@ -27,6 +27,7 @@
 | 023 | [emoji-ve-genis-glyph](023-emoji-ve-genis-glyph/) | 🟢 | `main`'de — geniş karakter iki hücreyi boyuyor (CJK, fullwidth) ve emoji renkli çiziliyor: atlas ikinci bir `RGBA8Unorm_sRGB` düzlem kazandı, shader ile `GlyphInstance`'ın stride'ı el değmedi ve kapının **sırası** ölçümden çıktığı için tek hücreye sığan 65 geniş karakter yerinden oynamıyor. 3 phase + kapı tamam (4 + 2 bulgu giderildi); envanter `docs/OLCUMLER.md` → Kutu envanteri |
 | 024 | [dock-sutun-aritmetigi](024-dock-sutun-aritmetigi/) | 🟢 | `main`'de — dock **sütun** sayıyor: yazılan emoji dock'ta iki hücre ve renkli, caret CJK'lı satırda doğru sütunda, vurgu tam boyanıyor ve birleştirici taşıyan satır ızgaraya fırlamıyor. 3 phase + kapı tamam (1 + 1 bulgu giderildi); `CURSOR` borcu kapandı, zsh'in `<hex>` yazdığı kod noktaları yeni bir kaleme ayrıldı |
 | 025 | [tazelik-zamansal](025-tazelik-zamansal/) | 🟢 | `main`'de — yazarken caret dock'tan çıkmıyor: tazelik kapısı önce "son girdinin aynası geldi mi" diye soruyor, `🥰` gibi zsh'in dönüştürdüğü karakterde satır dock'ta kalıyor; dock'un çizmediği kontrol karakteri (`^A`) satırı konumdan bağımsız ızgarada tutuyor. 1 phase + kapı tamam (2 bulgu giderildi) |
+| 026 | [sekmeler](026-sekmeler/) | 📐 | planlama — macOS'un kendi sekmeleri (her sekme bir pencere + kendi oturumu), temaya boyanmış başlık çubuğu, standart kısayollar; bölme sonraki set |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
