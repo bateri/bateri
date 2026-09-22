@@ -542,6 +542,10 @@ reduce_motion = "system"
 - Aynı stil **içeriğin yükselmesini** de sürer: bateri içeriği pencerenin
   tabanına yaslar, yani yeni bir satır geldiğinde geçmiş yukarı kayar ve imleç
   dipteki satırında durur. Kayan şey bütün ızgaradır, imleç değil.
+- **Pencere dolduktan sonra da kayar.** Ekran dolup eski satırlar geçmişe
+  itilmeye başladığında yeni satırlar yine süzülerek gelir; tepeden çıkan
+  satırlar kayma bitene kadar görünür kalır. Bir karede ekrandan fazla satır
+  gelen çok hızlı çıktıda kayma yapılmaz, en yeni satırlar hemen görünür.
 - **Boş kalacak bir alana doğru yalnız yukarı kayar.** İçerik büyüyünce (yeni satır,
   `vim`/`less` gibi tam ekran bir uygulamanın açılması) ızgara yukarı
   **süzülerek** gelir; içerik daralıp üstte **boş** bir alan bırakacaksa (o

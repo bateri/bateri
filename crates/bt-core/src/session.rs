@@ -340,7 +340,30 @@ pub struct Cursor {
     ///
     /// Sıfır **geri alma şeridi**: [`Session::fill_rows`] sıfır döndüğünde
     /// ikinci sink hiç çağrılmıyor ve kare bugünküyle bit bit aynı (R2.4).
+    ///
+    /// **Kayma uçuştayken bant uzuyor**: çizen tarafın bildirdiği ızgara
+    /// tepesi ([`Session::set_grid_top`]) ile bu karede kayan satırlar
+    /// ([`Cursor::scrolled`]) kadar, ki ızgara hedefinin altındayken
+    /// tepesinde boş bir şerit açılmasın. Uzantı yerleşince ekranın dışında
+    /// kalıyor; hesabı [`Session::slide_fill_rows`]'ta.
     pub fill: u16,
+    /// Önceki kareden bu yana ekranın tepesinden **geçmişe kayan** satır
+    /// sayısı; dolu ızgaranın kayma animasyonunun tek girdisi.
+    ///
+    /// Gereken sebep [`Cursor::content_rows`]'un kör noktası: ızgara dolunca
+    /// doluluk `rows`'ta (dock'lu pencerede bir eksiğinde) sabitleniyor ve
+    /// her yeni satır içeriği hücrelerin **içinde** kaydırıyor — öteleme hiç
+    /// oynamıyor, yani ondan beslenen animatör hiçbir şey görmüyor ve satırlar
+    /// süzülmeden sıçrıyordu. Belirti kullanıcıda görüldü: kayma ızgara
+    /// dolana kadar var, sonra yok. Çizen taraf bu sayıyı ötelemenin
+    /// **bulunduğu yerine** ekliyor, hedefine değil: ekran bir önceki karede
+    /// neredeyse oradan başlıyor ve hedefe süzülüyor.
+    ///
+    /// Sıfır olduğu hâller: alternatif ekran, kaydırılmış pencere, boyutu
+    /// değişen ızgara, kasten temizleme bayrağı ve bir önceki karede ekranda
+    /// olmayan bir satır (ters kaydırma, `CSI 3 J`) — hepsinde ya kaydırma
+    /// yok ya da ızgara başka bir sebeple yer değiştirdi.
+    pub scrolled: u16,
     /// Bu karenin ızgara yüksekliği — [`Cursor::content_rows`]'un ölçeği.
     ///
     /// Redundant görünüyor (çizen taraf grid'i kendisi kurdu) ama değil:
@@ -1341,6 +1364,27 @@ fn last_ink_in_row<T>(term: &Term<T>, row: u16, offset: i32) -> Option<char> {
     })
 }
 
+/// Bir ızgara satırının **kimliği**: ilk hücresinin adresi, `0` satır boşsa.
+///
+/// [`Session::scroll_probe`]'un ölçüsü. Adres satırın kendi hücre tamponundan
+/// ve o tampon kaydırmada yerinde kalıyor: alacritty'nin defteri bir halka,
+/// `scroll_up` satırları kopyalamıyor, halkanın başını çeviriyor; defter
+/// doyduğunda en eski satırın tamponu yeni dip satır olarak **yeniden
+/// kullanılıyor** ama o satır bir önceki karede ekranın tepesinde değildi,
+/// yani karışmıyor. Tamponu değiştiren tek yol sütun sayısının değişmesi ve
+/// orada boyut kapısı karşılaştırmayı zaten kapatıyor.
+///
+/// `line` çağıranın sözleşmesiyle defterin içinde (`-history..rows`); satır
+/// hücresiz olamaz ama indeksleme yerine yineleyici kullanılıyor, çünkü
+/// `bt-core`'da panik yasak (emsali doldurma döngüsünün `zip`'i).
+fn row_identity<T>(term: &Term<T>, line: Line) -> usize {
+    let line = line.grid_clamp(term, Boundary::Grid);
+    (&term.grid()[line])
+        .into_iter()
+        .next()
+        .map_or(0, |cell| std::ptr::from_ref(cell) as usize)
+}
+
 /// Verilen satırdan **yukarı** doğru, bloğun çıpasını taşıyan ilk satır;
 /// hiçbir satırda yoksa `None`.
 ///
@@ -1663,6 +1707,32 @@ pub struct Session {
     /// Yalnız `display_offset == 0` olan kareler yazıyor; gerekçe yazan
     /// yerde.
     fill_shown: AtomicU16,
+    /// Bir önceki dibe yaslı karenin **ekran tepesindeki satırın kimliği**
+    /// ([`row_identity`]); `0` "karşılaştırılacak kare yok" demek.
+    ///
+    /// Kaydırma sayısının ([`Cursor::scrolled`]) tek girdisi ve ölçüt
+    /// defterin boyu **değil**: `history_size()` `scrollback`'te doyuyor ve
+    /// o andan sonra her kaydırmada sabit kalıyor, yani ondan türeyen bir
+    /// sayı uzun bir oturumda sessizce sıfıra inerdi — kullanıcının bildirdiği
+    /// kusurun ("ızgara dolunca kayma yok oluyor") aynı şekli, bu sefer
+    /// on bin satır sonra. Satırın kimliği doymuyor: alacritty'nin defteri bir
+    /// halka ve kaydırma satırları taşımıyor, halkanın başını çeviriyor
+    /// (`Storage::rotate`), yani bir satırın hücre tamponu geçmişe düşerken
+    /// yerinde kalıyor ve kimliği onunla birlikte `Line(-k)`'ya iniyor.
+    scroll_probe: AtomicUsize,
+    /// [`Session::scroll_probe`]'u alan karenin ızgara boyutu,
+    /// `rows << 16 | cols`. Boyut değiştiyse karşılaştırma yapılmıyor: pencereyi
+    /// küçültmek satırları geçmişe itiyor ve bu bir kaydırma değil.
+    scroll_probe_size: AtomicU32,
+    /// Izgaranın tepesi **çizildiği hâliyle** pencerenin tepesinden kaç satır
+    /// aşağıda (yukarı yuvarlanmış) — çizen tarafın bildirdiği tek sayı
+    /// ([`Session::set_grid_top`]).
+    ///
+    /// Doldurma bandının geçici uzantısının ölçüsü: kayma uçuştayken ızgara
+    /// hedefinin altında duruyor ve üstünde açılan şerit ancak bu sayı
+    /// bilinirse geçmişle kapatılabiliyor. Animasyonun kendisi `bt-gpu`'da ve
+    /// bu crate onu görmüyor; gördüğü şey bir satır sayısı.
+    grid_top: AtomicU16,
     /// Pencerenin dock'u var mı ([`SessionOptions::dock`]).
     ///
     /// Doğumda kararlaşıyor ve bir daha değişmiyor, o yüzden ne kilit ne
@@ -1758,6 +1828,11 @@ impl Session {
             screen_clear_history: AtomicUsize::new(Self::UNSTAMPED),
             // Bant da yok: ilk kare doldurmayı hesaplayıp yazacak.
             fill_shown: AtomicU16::new(0),
+            // Karşılaştırılacak kare yok: ilk kare kimliği yazıp sıfır döner.
+            scroll_probe: AtomicUsize::new(0),
+            scroll_probe_size: AtomicU32::new(0),
+            // İlk karede kayma yok, ızgara hedefinde.
+            grid_top: AtomicU16::new(0),
             dock: options.dock,
         })
     }
@@ -2474,12 +2549,30 @@ impl Session {
         // doldurma o kareyi de kapatmak zorunda. Ters sırada, baytları henüz
         // uygulanmamış bir Ctrl-L'in karesinde doldurma bir kereliğine koşar
         // ve temizlenen ekranı geri getirirdi.
-        let fill = self.fill_rows(
-            &term,
-            grid_rows.saturating_sub(content_rows),
-            alt_screen,
-            offset != 0,
-        );
+        let gap = grid_rows.saturating_sub(content_rows);
+        let gap_fill = self.fill_rows(&term, gap, alt_screen, offset != 0);
+        // **Kaç satırın geçmişe kaydığı** — dolu ızgaranın kayma animasyonunun
+        // tek girdisi ([`Cursor::scrolled`]). Kimlik her karede yazılıyor,
+        // kaydırılmış pencerede ve alternatif ekranda sıfırla: oradan dönen
+        // ilk kare karşılaştıracak bir şey bulmamalı.
+        //
+        // **Temizleme bayrağı kuruluyken sıfır** ve sıra bu yüzden
+        // `observe_screen_clear`'dan sonra: `CSI 2 J` görünen satırları
+        // geçmişe itiyor (alacritty `clear_viewport`) ve o itme bir kaydırma
+        // gibi okunursa temizlenen ekran yukarı süzülerek giderdi — kullanıcı
+        // onu silmek istedi, uğurlamak değil.
+        let scrolled = self.scrolled_rows(&term, alt_screen, offset != 0, grid_rows, grid_cols);
+        let scrolled = if self.screen_cleared.load(Ordering::Relaxed) {
+            0
+        } else {
+            scrolled
+        };
+        // **Bandın geçici uzantısı**: kayma uçuştayken ızgara hedefinin altında
+        // çiziliyor ve tepesinde açılan şerit boş kalırdı. Kapatan satırlar
+        // tam da az önce ekranın tepesinden geçmişe düşenler, yani bant
+        // yalnız **uzuyor** — yeni bir kaynak yok, aynı fill-yerel satırlar.
+        let fill =
+            gap_fill.max(self.slide_fill_rows(&term, gap, alt_screen, offset != 0, scrolled));
         // **Bandın boyu kaydırma yoluna emanet ediliyor** ([`scroll_locked`]):
         // tekerlek `frame()`'in taramasını tekrarlayamaz (doluluk ızgaranın
         // bütün hücrelerini geziyor), ama ekranda duran bandı bilmek zorunda
@@ -2496,8 +2589,14 @@ impl Session {
         // gittiği yer dip. Kesin çare doluluğu iki kez saymak olurdu — biri
         // görünen pencere, biri ızgaranın kendisi — ve bedeli kare başına
         // ikinci bir tam tarama.
+        //
+        // **Yazılan `gap_fill`, `fill` değil**: bandın kaymanın açtığı geçici
+        // uzantısı yerleşince ekranın dışında kalıyor (orijin sıfırın altına
+        // iniyor, Metal kırpıyor), yani sanal kaydırmanın parçası değil.
+        // Sayılsaydı dolu bir ızgarada tekerleğin ilk çentiği o uzantı kadar
+        // satırı atlardı.
         if offset == 0 {
-            self.fill_shown.store(fill, Ordering::Relaxed);
+            self.fill_shown.store(gap_fill, Ordering::Relaxed);
         }
         // **Geçmişten okuma ayrı bir döngü ve bu stil değil zorunluluk.**
         // Yukarıdaki döngünün `debug_assert!((0..rows).contains(&row))`
@@ -2642,6 +2741,7 @@ impl Session {
             // Yukarıdaki döngünün saydığı satır sayısı; doluluğa **girmiyor**
             // ([`Cursor::fill`]).
             fill,
+            scrolled,
             rows: grid_rows,
             // Faz 2 dolduruyor: koşan bloğun çıpasının bu karede **görünüp
             // görünmediği** ancak orada biliniyor ve saatin durma koşulu tam
@@ -2879,7 +2979,6 @@ impl Session {
         if !self.dock || alt_screen || scrolled || self.screen_cleared.load(Ordering::Relaxed) {
             return 0;
         }
-        let history = term.history_size();
         // **Üçüncü terim: temizlemeden beri gelen satır sayısı.** Bayrağın
         // düşmesi "defterin en yenileri artık temizleme öncesine ait değil"
         // demiyor, yalnız "bir satır geldi" diyor; boşluk o bir satırdan
@@ -2894,13 +2993,116 @@ impl Session {
         // taze bir pencerede defterin tamamı serbest. `saturating_sub` bir
         // emniyet kemeri — pencereyi büyütmek geçmişten satır çekiyor, yani
         // defter damganın altına inebiliyor ve orada doğru cevap sıfır.
+        let fresh = self.fresh_history(term);
+        gap.min(u16::try_from(fresh).unwrap_or(u16::MAX))
+    }
+
+    /// Önceki kareden bu yana ekranın tepesinden geçmişe kayan satır sayısı
+    /// ([`Cursor::scrolled`]).
+    ///
+    /// Önceki karenin tepe satırının kimliği ([`Session::scroll_probe`])
+    /// defterde aranıyor: `Line(-k)`'da bulunduysa `k` satır kaydı. Arama
+    /// defterin tamamına kadar gidiyor, çünkü hızlı akan çıktı bir karede
+    /// ekrandan fazla satır kaydırabilir; bedeli işaretçi karşılaştırması ve
+    /// yalnız kimlik değiştiğinde ödeniyor. Bulunamadıysa (ters kaydırma
+    /// satırı aşağı itti, `CSI 3 J` defteri sildi) cevap sıfır — yanlışın
+    /// yönü güvenli, satırlar bugünkü gibi sıçrar.
+    ///
+    /// **Bilinen sınır:** kaydırma bölgesi tepeden başlayıp dipten önce biten
+    /// bir program (altta sabit bir durum satırı) birincil ekranda kaydırırsa
+    /// sayı doğru ama animasyon sabit satırı da oynatır. Bu programlar
+    /// pratikte alternatif ekranda koşuyor ve orada sayı sıfır.
+    fn scrolled_rows<T>(
+        &self,
+        term: &Term<T>,
+        alt_screen: bool,
+        scrolled: bool,
+        grid_rows: u16,
+        grid_cols: u16,
+    ) -> u16 {
+        let probe = if alt_screen || scrolled {
+            0
+        } else {
+            row_identity(term, Line(0))
+        };
+        let size = (u32::from(grid_rows) << 16) | u32::from(grid_cols);
+        let prev = self.scroll_probe.swap(probe, Ordering::Relaxed);
+        let prev_size = self.scroll_probe_size.swap(size, Ordering::Relaxed);
+        if probe == 0 || prev == 0 || prev == probe || prev_size != size {
+            return 0;
+        }
+        let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
+        (1..=history)
+            .find(|&k| row_identity(term, Line(-k)) == prev)
+            .map_or(0, |k| u16::try_from(k).unwrap_or(u16::MAX))
+    }
+
+    /// Doldurma bandının kaymanın açtığı şeridi kapatan boyu ([`Cursor::fill`]).
+    ///
+    /// Izgaranın tepesi bu karede en çok `grid_top + scrolled` satır aşağıda:
+    /// çizen taraf bir önceki karenin yerini bildirdi ([`Session::set_grid_top`])
+    /// ve bu karede kayan satırlar onu o kadar aşağıdan başlatacak. Bant o
+    /// kadar satırla pencerenin tepesine ulaşıyor.
+    ///
+    /// **Kapılar [`Session::fill_rows`]'unkiler** — alternatif ekran,
+    /// kaydırılmış pencere, temizleme bayrağı ve temizlemeden beri gelen
+    /// satır kırpması — tek farkla: dock'suz pencerede de koşuyor, ama yalnız
+    /// ızgara **doluyken** (`gap == 0`). Orada üstte kalıcı bir boşluk yok, yani
+    /// uzantı yerleşince tamamen ekranın dışında kalıyor ve dock'suz
+    /// pencerenin "boşluk boş kalır" kuralına dokunmuyor. Dolmamış dock'suz
+    /// pencerede uzantı boşluğa taşıp orada kalırdı.
+    ///
+    /// Tavan `gap + grid_rows`: çizen taraf kaymayı hedefin en çok bir ekran
+    /// altından başlatıyor, bandın ondan fazlası hiç görünmez.
+    fn slide_fill_rows<T>(
+        &self,
+        term: &Term<T>,
+        gap: u16,
+        alt_screen: bool,
+        scrolled_window: bool,
+        scrolled: u16,
+    ) -> u16 {
+        if alt_screen
+            || scrolled_window
+            || !(self.dock || gap == 0)
+            || self.screen_cleared.load(Ordering::Relaxed)
+        {
+            return 0;
+        }
+        let rows = u16::try_from(term.screen_lines()).unwrap_or(u16::MAX);
+        // Bir ekran ya da fazlası tek karede kaydıysa çizen taraf kaymayı
+        // bitiriyor (`bt_gpu::Motion::scroll_in`), yani uzatacak şerit yok.
+        let scrolled = if scrolled >= rows { 0 } else { scrolled };
+        let wanted = self
+            .grid_top
+            .load(Ordering::Relaxed)
+            .saturating_add(scrolled)
+            .min(gap.saturating_add(rows));
+        wanted.min(u16::try_from(self.fresh_history(term)).unwrap_or(u16::MAX))
+    }
+
+    /// Temizlemeden beri geçmişe düşen satır sayısı; hiç temizleme olmadıysa
+    /// defterin tamamı. İki doldurma hesabının ortak kırpması
+    /// ([`Session::fill_rows`], [`Session::slide_fill_rows`]).
+    fn fresh_history<T>(&self, term: &Term<T>) -> usize {
+        let history = term.history_size();
         let stamp = self.screen_clear_history.load(Ordering::Relaxed);
-        let fresh = if stamp == Self::UNSTAMPED {
+        if stamp == Self::UNSTAMPED {
             history
         } else {
             history.saturating_sub(stamp)
-        };
-        gap.min(u16::try_from(fresh).unwrap_or(u16::MAX))
+        }
+    }
+
+    /// Izgaranın tepesinin çizildiği yer, pencerenin tepesinden satır
+    /// cinsinden ve yukarı yuvarlanmış — bir sonraki [`Session::frame`]'in
+    /// doldurma bandını ne kadar uzatacağı ([`Cursor::fill`]).
+    ///
+    /// Yazan çizen taraf (`bt-gpu`) ve her içerik karesinden **önce**: bu
+    /// crate animasyonu görmüyor, yalnız sonucunu bir satır sayısı olarak
+    /// alıyor. Yazılmazsa değer sıfır ve bant bugünkü boyunda kalıyor.
+    pub fn set_grid_top(&self, rows: u16) {
+        self.grid_top.store(rows, Ordering::Relaxed);
     }
 
     /// Faz 2: çıpalardan komut işaretleri, defterden renkler.
@@ -8655,6 +8857,119 @@ mod tests {
         assert!(cursor.rows - cursor.content_rows > 0, "{cursor:?}");
         assert_eq!(cursor.fill, 0, "dock'suz pencere doldu: {cursor:?}");
         assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
+    }
+
+    /// Dolu ızgaraya `read`'in ardından `after` betiğini koşturur ve
+    /// kareler boyunca [`Cursor::scrolled`]'ı toplar, `needle` görünüp akış
+    /// durulana kadar. Son karenin imlecini ve hücrelerini de verir.
+    ///
+    /// Toplam, tek kare değil: çıktının kaç kareye bölüneceği PTY okumasının
+    /// keyfi ve bekçinin sorusu "toplam kaç satır kaydı".
+    fn scrolled_total(
+        session: &Session,
+        wake: &TestWake,
+        needle: &str,
+    ) -> (u32, Cursor, Vec<Cell>) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut total = 0u32;
+        let mut seen = 0;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "beklenen çıktı gelmedi: {needle}"
+            );
+            seen = wake.wait_wakes(seen + 1, Duration::from_millis(500));
+            let mut cells = Vec::new();
+            if let Some(cursor) = frame_if_damaged(session, |c| cells.push(c)) {
+                total += u32::from(cursor.scrolled);
+                if glyph_text(&cells).contains(needle) {
+                    // Akışın kuyruğu: aynı okumada gelmemiş bir satır sonu
+                    // daha kaydırabilir.
+                    std::thread::sleep(Duration::from_millis(100));
+                    let mut tail = Vec::new();
+                    let last = frame_if_damaged(session, |c| tail.push(c));
+                    if let Some(last) = last {
+                        total += u32::from(last.scrolled);
+                        return (total, last, tail);
+                    }
+                    return (total, cursor, cells);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_grid_reports_the_rows_that_scrolled_off_the_top() {
+        // **Kullanıcının bildirdiği kusurun bekçisi** (2026-09-23): ızgara
+        // dolunca yeni satırlar süzülmeden sıçrıyordu, çünkü doluluk
+        // sabitleniyor ve animatörün tek girdisi oydu. Kaydırmanın sayısı
+        // sınırdan ayrı bir alanla geçiyor ve üç satırlık çıktı dolu ızgarayı
+        // tam üç satır kaydırır.
+        let (session, wake) = history_session("stty -echo; seq 1 30; read _; seq 31 33; sleep 5");
+        // Karşılaştırmanın tabanı: kimliği yazan bir kare.
+        assert_eq!(cursor_now(&session).scrolled, 0);
+        session.write(b"\n");
+        let (total, cursor, _) = scrolled_total(&session, &wake, "33");
+        assert_eq!(total, 3, "{cursor:?}");
+        // Doluluk hâlâ tavanda — animatörün eski girdisi hiçbir şey görmüyor.
+        assert_eq!(cursor.content_rows, cursor.rows, "{cursor:?}");
+    }
+
+    #[test]
+    fn the_scroll_count_survives_a_saturated_history() {
+        // **Ölçüt defterin boyu değil satırın kimliği** ve bu sınama sebebi:
+        // `history_size()` `scrollback`'te doyuyor ve oradan türeyen sayı
+        // uzun bir oturumda sessizce sıfıra inerdi — aynı kusur on bin satır
+        // sonra. Defter burada beş satırda doyuyor.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(sh("stty -echo; seq 1 30; read _; seq 31 33; sleep 5"), 40);
+        options.terminal.scrollback = 5;
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_seq_tail(&session, &wake);
+        assert_eq!(session.term.lock().history_size(), 5, "defter doymadı");
+        assert_eq!(cursor_now(&session).scrolled, 0);
+        session.write(b"\n");
+        let (total, cursor, _) = scrolled_total(&session, &wake, "33");
+        assert_eq!(total, 3, "{cursor:?}");
+    }
+
+    #[test]
+    fn a_deliberate_clear_is_not_a_scroll() {
+        // `CSI 2 J` görünen satırları geçmişe itiyor; kaydırma diye sayılsaydı
+        // temizlenen ekran yukarı süzülerek giderdi.
+        let (session, wake) = history_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[Hcleared'; sleep 5",
+        );
+        assert_eq!(cursor_now(&session).scrolled, 0);
+        session.write(b"\n");
+        let (total, cursor, _) = scrolled_total(&session, &wake, "cleared");
+        assert_eq!(total, 0, "{cursor:?}");
+    }
+
+    #[test]
+    fn the_band_grows_over_the_rows_that_just_scrolled_off() {
+        // Kayma uçuştayken ızgara hedefinin altında çiziliyor; tepesinde
+        // açılan şeridi az önce kayan satırlar kapatıyor. Dolu ve dock'suz
+        // pencere: kalıcı boşluk yok, yani bandın tamamı geçici uzantı.
+        let (session, wake) = history_session("stty -echo; seq 1 30; read _; seq 31 33; sleep 5");
+        assert_eq!(cursor_now(&session).fill, 0, "dolu ızgarada bant vardı");
+        session.write(b"\n");
+        wait_ink(&session, &wake, "33");
+        wait_settled(&session);
+        // Çizen taraf: "ızgara şu an üç satır aşağıda".
+        session.set_grid_top(3);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.fill, 3, "{cursor:?}");
+        // Ekranın tepesi `25` (`26..33` ve imlecin satırı); üstündekiler
+        // geçmişin en yenileri.
+        let text: Vec<String> = (0..cursor.fill).map(|r| row_text(&cells, r)).collect();
+        assert_eq!(text, ["22", "23", "24"], "{cells:?}");
+        // Sanal kaydırmanın boyu uzantıyı saymıyor: tekerlek dolu ızgarada
+        // hâlâ `0`'dan başlıyor.
+        assert_eq!(session.fill_shown.load(Ordering::Relaxed), 0);
+        // Kayma yerleşti: bant eski boyuna döner.
+        session.set_grid_top(0);
+        assert_eq!(fill_now(&session).0.fill, 0);
     }
 
     #[test]

@@ -3019,6 +3019,7 @@ mod tests {
             // Doldurmanın çizimi phase-3'ün işi (017); bu sınamalar onu henüz
             // tüketmiyor.
             fill: 0,
+            scrolled: 0,
             rows: 1,
         }
     }

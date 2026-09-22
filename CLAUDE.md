@@ -463,6 +463,24 @@ yazılsaydı Rust'ın önceliği onu `animated`'ın da üstüne çıkarır, dold
 pencerede tekerlek ve geometri animasyona başlardı ve `cursor_motion =
 "snap"` ile Hareketi Azalt delinirdi. Tekerlek ve geometri
 (pencere/font/punto) ayrıca snap'ler.
+**Dolu ızgara da kayıyor** (`Motion::scroll_in`): ızgara dolunca doluluk
+sabitleniyor, yeni satırlar içeriği hücrelerin içinde kaydırıyor ve ötelemenin
+hedefi hiç oynamıyor — kayma ızgara dolana kadar vardı, sonra yoktu
+(kullanıcı bildirdi). Kaç satırın geçmişe kaydığı sınırdan ayrı geçiyor
+(`Cursor::scrolled`) ve ötelemenin **konumu** o kadar geri alınıp hedefine
+yeniden süzülüyor; tavanı bir ekran, ve tek karede bir ekran ya da fazlası
+kaydıysa kayma **bitiriliyor** (ölçüldü: `BT_SCROLL_TEST`'te öteleme tavanda
+asılı kalıp en yeni çıktıyı bir ekran geriden gösteriyordu). Sayının ölçütü defterin boyu **değil**
+ekran tepesindeki satırın kimliği (`session::row_identity`, hücre tamponunun
+adresi): `history_size()` `scrollback`'te doyuyor ve ondan türeyen sayı on
+bin satır sonra aynı kusuru geri getirirdi, satırın tamponu ise alacritty'nin
+halkasında kaydırmayla yerinde kalıyor. Temizleme bayrağı kuruluyken sayı
+sıfır — `CSI 2 J`'nin geçmişe ittiği ekran süzülerek gitmemeli. Tepede açılan
+şeridi doldurma bandı kapatıyor: çizen taraf ızgaranın çizildiği yeri
+bildiriyor (`Session::set_grid_top`) ve bant o kadar **uzuyor**
+(`Session::slide_fill_rows`), dock'suz pencerede de, ama yalnız ızgara
+doluyken; uzantı `fill_shown`'a yazılmıyor, yani tekerleğin sanal kaydırması
+onu saymıyor.
 Piksel aygıt ızgarasına
 yuvarlanır (`Frame::set_origin_rows`): kaymanın durduğu kare ekranda kalıcı ve
 kesirli bir piksel bütün metni bulanıklaştırırdı. Ötelemenin tek sahibi
