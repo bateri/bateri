@@ -138,10 +138,14 @@ fragment float4 cell_fragment(Out in [[stage_in]],
 // tanığı ancak ARA TONLU bir piksel görür (`0.0` ve `1.0` transfer
 // fonksiyonunun sabit noktaları).
 //
-// Baytlar ÖN ÇARPIMLI (CoreGraphics `PremultipliedLast` veriyor), yani bu
-// pipeline'ın blend'inde RGB kaynak çarpanı `One`. Maske yolunun `SourceAlpha`
-// çarpanıyla çizilseydi renk kendi alfasıyla iki kez çarpılır ve kenarda koyu
-// bir halka kalırdı.
+// Baytlar DÜZ ALFA. CoreGraphics renkli glyph'i ön çarpımlı yazıyor ama
+// `raster::draw_color` onu yüklemeden önce geri alıyor ve sebebi UZAY: CG'nin
+// bağlamı sRGB, yani sakladığı değer `encode(c)·a` — kodlanmış bileşenin
+// alfayla çarpımı. Bu dokunun kanal çözümü ise alfadan bağımsız ve sRGB
+// çözümü konveks, yani `decode(encode(c)·a) < decode(encode(c))·a`: her
+// antialias kenarı koyuya kayardı (yarı saydam beyaz siyah zeminde 0xBC
+// yerine 0x80). Ön çarpım geri alındığı için bu pipeline'ın blend'i maske
+// yolununkiyle AYNI — RGB kaynak çarpanı `SourceAlpha`.
 fragment float4 emoji_fragment(Out in [[stage_in]],
                                texture2d<float> atlas [[texture(0)]]) {
     // `nearest`: maske yolununkiyle aynı gerekçe (yuvalar arasında pay yok ve
