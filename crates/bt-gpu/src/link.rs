@@ -1108,6 +1108,10 @@ define_class!(
                     &mut dock_context,
                     cursor.caret_in_dock,
                     |cell| frame.push_dock(cell),
+                    // Yazım animasyonlarının düzenlemeleri (030): bu phase'de
+                    // tüketen yok, çizim bugünkü gibi. Tampona akıp `GlyphFx`'e
+                    // işlenmesi phase-2'nin işi (`discussion.md` → Karar 4).
+                    |_edit| (),
                 );
                 dock_caret = dock.caret.map(|col| (col, dock.caret_text));
                 frame.push_dock_sigil(dock.sigil);

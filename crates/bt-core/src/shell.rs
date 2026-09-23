@@ -335,6 +335,14 @@ pub struct DockState {
     ///
     /// Yazan tek yer [`ShellLog::apply_scan_answering`]; tarayıcının
     /// sahnelediği kopyada anlamsız ve sıfır.
+    ///
+    /// **`Idle` ayna da damgalı** (`End` kolu, 030): dock'un yazım
+    /// animasyonları ([`crate::DockEdit`]) canlanacak glyph sayısını bu
+    /// damganın farkıyla sınırlıyor ve Enter'dan sonraki ilk tuşun tabanı
+    /// `Idle` ayna. Sıfır damgalı bir taban o sınırı boşa düşürür, prompt'taki
+    /// ilk yapıştırma harf harf canlanırdı. Tazelik kapısı `Idle`'ı hiç
+    /// okumuyor ([`ShellLog::suppressed_input`] `Live` ister), yani ona etkisi
+    /// yok.
     pub answers: u64,
 }
 
@@ -1128,6 +1136,8 @@ impl ShellLog {
             DockEvent::End => {
                 self.dock.reset();
                 self.dock.status = DockStatus::Idle;
+                // Boş satır da bir cevap: bkz. [`DockState::answers`].
+                self.dock.answers = answers;
             }
             DockEvent::Unavailable(fault) => {
                 self.dock.reset();
@@ -3589,8 +3599,8 @@ mod tests {
     }
 
     /// **Ayna damgasını içerikle aynı turda alıyor** (025): `answers` ayna
-    /// olayında yazılıyor, başka olaylarda kıpırdamıyor ve `End` onu
-    /// sıfırlıyor.
+    /// olayında yazılıyor, başka olaylarda kıpırdamıyor ve `End` onu o anki
+    /// nesille yeniden damgalıyor (030).
     #[test]
     fn the_mirror_carries_the_generation_it_answers() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -3607,7 +3617,10 @@ mod tests {
         scanner.feed(b"\x1b]8133;e\x07", |event| {
             log.apply_scan_answering(event, 9);
         });
-        assert_eq!(log.dock.answers, 0, "kapanmış ayna eski damgayı taşımamalı");
+        // Kapanmış ayna **eski** damgayı taşımıyor, güncelini taşıyor: `Idle`
+        // taban da dock'un yazım animasyonlarının girdi sınırına giriyor.
+        assert_eq!(log.dock.status, DockStatus::Idle);
+        assert_eq!(log.dock.answers, 9, "kapanmış ayna güncel damgayı taşımalı");
     }
 
     /// **Çok satırlı ayna da tutulmuyor** — `Unavailable` carve-out'unun ikizi.
