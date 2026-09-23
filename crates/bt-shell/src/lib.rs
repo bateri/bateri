@@ -1,9 +1,10 @@
 //! bt-shell — AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler.
 //!
 //! `objc2-app-kit` üzerinden doğrudan AppKit; Metal'i görmez, çizimi
-//! `bt-gpu`'ya bırakır ve device'ı `Renderer::system_default` kurar. Kareyi
-//! de sürmez: pencereyi, oturumu ve display link'i birbirine bağlar, gerisi
-//! `bt-gpu`'nun ritmidir. Klavye buradan PTY'ye akar (`keys`, `view`,
+//! `bt-gpu`'ya bırakır ve device'ı `Renderer::system_default` kurar — pencere
+//! başına bir renderer (`window`). Kareyi de sürmez: pencereyi, oturumu ve
+//! display link'i birbirine bağlar, gerisi `bt-gpu`'nun ritmidir. Uygulama
+//! geneli (`app`) ile pencere başına olan (`window`) ayrı nesnelerde. Klavye buradan PTY'ye akar (`keys`, `view`,
 //! `clipboard`), fare de buradan oturuma (seçim ve kaydırma, `view`);
 //! Finder'dan bırakılan dosyanın yolu da buradan giriş satırına düşer
 //! (`view`'ın sürükleme hedefi + `quote`'un kabuk kaçışı);
@@ -14,7 +15,8 @@
 //! `bt-core`'da. Sistemin açık/koyu görünümünü okuyup temayı seçen de
 //! (`app`, view'dan hedefsiz eylemle). Ana menü (`menu`) uygulama, Edit ve
 //! View menüsü; öğeleri hedefsiz eylem. View'da Theme ▸ seçimi ayar dosyasına
-//! yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan geçici punto (`zoom`).
+//! yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan ve pencereye ait geçici
+//! punto (`zoom`).
 //! Tek pencere; sekme, bölme ve IME sonraki setlerde.
 
 pub(crate) mod app;
@@ -27,9 +29,9 @@ mod quote;
 mod settings;
 mod view;
 mod watch;
+mod window;
 mod zoom;
 
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use objc2::MainThreadMarker;
@@ -89,10 +91,13 @@ pub struct Run {
     pub workload: Workload,
     /// `BT_FRAME_STATS`: `Some` ise ölçüm açık **ve** damga `main()`'in ilk
     /// satırında alınmış (süreç başlangıcı **değil**; damganın iki ucu da
-    /// [`bt_gpu::Stats::startup`]'ta). `bool` olsaydı damgayı [`run`] içinde almak
-    /// gerekirdi — yani `Renderer::system_default()`'tan sonra, açılışın en
-    /// pahalı parçasını (Metal device kurulumu, metallib yüklemesi)
-    /// kaçırarak.
+    /// [`bt_gpu::Stats::startup`]'ta). `bool` olsaydı damgayı bayrağın
+    /// okunduğu bir yerde almak gerekirdi — [`run`]'da ya da daha geç, yani
+    /// en geç ilk pencerenin `Renderer::system_default()`'undan hemen önce ve
+    /// sıranın doğruluğu bir yoruma kalırdı. İlk renderer artık ana döngü
+    /// başladıktan sonra, ilk pencereyle doğuyor; damga yine de ondan
+    /// **önce**, açılışın en pahalı parçası (Metal device kurulumu, metallib
+    /// yüklemesi) ölçünün içinde.
     pub stats_since: Option<Instant>,
 }
 
@@ -103,7 +108,13 @@ pub struct Options {
 /// Uygulamayı kurar ve `NSApplication::run` ile ana döngüye girer. **Dönmez:**
 /// son pencere kapanınca ve shell çıkınca (`child_exit` → `terminate:`) AppKit
 /// yoluyla, `BT_RUN_SECONDS` yolu `process::exit` ile süreçten çıkar; `Ok(())`
-/// yalnız kurulum hatası yoksa ve AppKit'in `run`'ı bir gün dönerse görülür.
+/// yalnız AppKit'in `run`'ı bir gün dönerse görülür.
+///
+/// **`Err` bugün dönmüyor.** Renderer'ı artık ilk pencere kuruyor (pencere
+/// başına renderer, `.tasks/026-sekmeler/discussion.md` → Karar 2a) ve o an
+/// ana döngünün içindeyiz: kurulum hatası `applicationDidFinishLaunching:`'te
+/// aynı satırla (`bateri: {hata}`) ve aynı çıkış koduyla (1) basılıyor. İmza
+/// bin crate'inin çağrı yerini değiştirmemek için duruyor.
 ///
 /// Kapanış işi (PTY, ayar yazımı) buradan sonraya değil, **her iki çıkış
 /// yolunun da geçtiği** `app::AppDelegate::shutdown`'a konur —
@@ -112,17 +123,13 @@ pub struct Options {
 pub fn run(opts: Options) -> Result<(), GpuError> {
     // audit: giriş noktası; ana thread dışından çağrılması programlama hatasıdır.
     let mtm = MainThreadMarker::new().expect("bt_shell::run ana thread'de çağrılır");
-    // `Rc`: renderer'ı hem delegate hem display link tutar, ama ikisi de ana
-    // thread'de. `Arc` yanlış bir söz verirdi — `Renderer` glyph atlasını
-    // taşıyor ve atlasın `CTFont`'u `Send` değil.
-    // Açılış damgası bu satırdan **önce** alınmış olmalı ve tipi bunu zorluyor:
-    // `Options` bir `Instant` taşıyor, bir bayrak değil.
-    let renderer = Rc::new(bt_gpu::Renderer::system_default()?);
+    // Açılış damgası ilk renderer'dan (ilk pencere) **önce** alınmış olmalı ve
+    // tipi bunu zorluyor: `Options` bir `Instant` taşıyor, bir bayrak değil.
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // `delegate` bu kapsamda `app.run()`'ı aşar: AppKit'in ve pencerenin
     // delegate özellikleri zayıftır, sahip bu Retained'dır.
-    let delegate = app::AppDelegate::new(mtm, renderer, opts);
+    let delegate = app::AppDelegate::new(mtm, opts);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.run();
     Ok(())
