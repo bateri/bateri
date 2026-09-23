@@ -17,8 +17,12 @@ efektleri kapatır ya da en sade hâline indirir. Kararlar ve gerekçeleri
     damga (`answers`) ilerlemediyse fark alınmaz; taban `Live` ya da damgalı `Idle`.
   - **R1.2** — Yalnız tek bitişik ekleme/silme ve glyph sayısı ≤ girdi sayısı
     (`answers` farkı) canlanır; tablo Karar 2'de (her satırı bir sınama).
-  - **R1.3** — `Reset`: canlanmayan değişim, yeni taraf `Live` değil ya da eski taraf `Live`/`Idle` değil,
-    pencereleme kaydı.
+  - **R1.3** — `Reset`: canlanmayan değişim, yeni taraf `Live` değil ya da eski taraf `Live`/`Idle` değil.
+    **Pencereleme kayması `Reset` değil** (kullanıcı kararı, 2026-09-23 —
+    phase-1'in sapma 9'u): dock'a sığmayan satırda da tuş canlanır; kayma
+    sınırdan sütun farkı olarak geçer, uçuştaki efektler o kadar kayar ve
+    yeni glyph yine `Arrive`/`Erase` alır. Panelin reddettiği `bt-gpu`
+    sütun defteri geri gelmiyor: fark `bt-core`'un `window_skip`'inden.
   - **R1.4** — Hayalet hücreleri eski tamponun vurgu stiliyle, temaya
     çözülmüş (karakter, renk, biçim, `wide`).
 - **R2** — Sınır: `Session::dock` / `dock::render` ikinci bir sink alır, karede

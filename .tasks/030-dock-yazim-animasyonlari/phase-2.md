@@ -76,6 +76,7 @@ _Requirements: R3, R3.1, R3.2, R3.3, R3.4, R4, R5, R6, R10_
 - [ ] `FxInstance` + `glyph_fx.metal` + pipeline + `build.rs`
 - [ ] `Frame` fx listeleri, `suppress_dock`, `prepare`'in yelpazelemesi
 - [ ] `link.rs` iki kare yolu, uyku terimi, `finish` kapsamı
+- [ ] Pencereleme kayması (plan R1.3, kullanıcı kararı): phase-1'in kayma → `Reset` kolu sütun farkına dönüşür (`bt-core`, `window_skip`), `GlyphFx` uçuştaki efektleri o kadar kaydırır; sınama: taşan satırda sona yazmak ve Backspace canlanıyor, efektler yeni pencerede doğru sütunda
 - [ ] `CLAUDE.md`
 - [ ] Test: R5 değişmezleri (fade, recede)
 - [ ] Doğrulama geçti (`make hepsi` + `make shader` + `make duman`)
