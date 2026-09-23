@@ -104,6 +104,243 @@ const CONTEXT_ROW: u16 = 1;
 /// Soldan kısaltılmış yolun başındaki işaret.
 const ELLIPSIS: char = '…';
 
+/// Bir düzenlemenin taşıyabileceği en çok glyph — **tasarım sabiti**.
+///
+/// Canlanan düzenleme yazımın kendisi: basılı Backspace kare başına bir
+/// glyph, hızlı yazım iki-üç. Sınırı aşan bir düzenleme yazım gibi
+/// okunmuyor (kare yolu bir süre durmuş ve girdi birikmiş demek) ve
+/// [`DockEdit::Reset`]'e düşüyor — yanlışın yönü güvenli, metin anında
+/// belirir. Sabit kapasite kare başına ayırmayı sıfırda tutuyor.
+pub const EDIT_MAX: usize = 8;
+
+/// Dock'un giriş satırında **bu karede** ne değişti — yazım animasyonlarının
+/// girdisi (030).
+///
+/// Karar burada: hangi glyph'i kullanıcı yazdı, hangisini sildi, hangi değişim
+/// canlanmamalı (yapıştırma, geçmiş, tamamlama). Zaman ve çizim `bt-gpu`'da.
+/// Kural ve tablosu `.tasks/030-dock-yazim-animasyonlari/discussion.md` →
+/// Karar 2; sınırdan neden ikinci bir sink geçtiği → Karar 3.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DockEdit {
+    /// Glyph'ler geldi. `col` koşunun **ilk** ekran sütunu; hücreler normal
+    /// sink'e de gidiyor, hangisinin çizileceği boyamanın kararı.
+    Arrive { col: u16, cells: EditCells },
+    /// Glyph'ler gitti. `col` silinmenin ekran sütunu (caret'in sütunu) ve
+    /// hayaletler **eski** satırın vurgusuyla çözülmüş.
+    Erase { col: u16, ghosts: EditCells },
+    /// Canlanmayan bir değişim: uçuştaki her efekt bitmeli.
+    Reset,
+}
+
+/// [`DockEdit`]'in hücreleri: sabit kapasiteli ([`EDIT_MAX`]) bir liste.
+///
+/// Yalnız **glyph'i olan** hücreler: boşluk ve spacer sütunu hareket edecek
+/// mürekkep taşımıyor, zeminleri normal sink'ten çiziliyor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EditCells {
+    len: usize,
+    cells: [Cell; EDIT_MAX],
+}
+
+impl EditCells {
+    fn empty() -> Self {
+        Self {
+            len: 0,
+            cells: [Cell::default(); EDIT_MAX],
+        }
+    }
+
+    /// Hücreler, sütun sırasıyla.
+    pub fn as_slice(&self) -> &[Cell] {
+        self.cells.get(..self.len).unwrap_or(&[])
+    }
+
+    /// Doluysa sessizce düşürür; kapasiteyi [`diff`] zaten sınırlıyor.
+    fn push(&mut self, cell: Cell) {
+        if let Some(slot) = self.cells.get_mut(self.len) {
+            *slot = cell;
+            self.len += 1;
+        }
+    }
+}
+
+/// Aynanın son çizilen hâlinden bu yana ne değişti — [`render`]'ın
+/// [`DockEdit`]'e çevireceği ham hâl.
+///
+/// **Ham, çünkü sütun yok:** ekran sütunu pencerelemeden çıkıyor ve onu
+/// [`render`] kendi döngüsünde zaten hesaplıyor; ikinci bir kopyası burada
+/// doğmuyor. Eski taraftan yalnız yeni tamponda artık olmayan şey taşınıyor —
+/// hayaletin karakteri, vurgusu ve eski pencerenin kayması — çünkü çağıran
+/// ([`crate::Session::dock`]) bu hesaptan hemen sonra tamponu yeni aynayla
+/// eziyor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Change {
+    /// Canlanmayan değişim.
+    Reset,
+    /// Ayna ilerledi ama `BUFFER` aynı (öneri değişti, caret kıpırdadı).
+    /// Pencere kaydıysa yine de [`DockEdit::Reset`]: uçuştaki efektler yerinde
+    /// kalırdı, metin kaymış olurdu.
+    Same { old_skip: Option<usize> },
+    /// Yeni görüntünün `start..end` karakterleri eklendi.
+    Insert {
+        old_skip: Option<usize>,
+        start: usize,
+        end: usize,
+    },
+    /// Eski `BUFFER`'dan glyph'ler silindi; yenisinde yoklar.
+    Delete {
+        old_skip: Option<usize>,
+        ghosts: Ghosts,
+    },
+}
+
+/// Silinen glyph'ler ve eski satırdaki vurguları.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Ghosts {
+    len: usize,
+    chars: [(char, HighlightStyle); EDIT_MAX],
+}
+
+impl Ghosts {
+    fn as_slice(&self) -> &[(char, HighlightStyle)] {
+        self.chars.get(..self.len).unwrap_or(&[])
+    }
+}
+
+/// Kare kapısı: aynanın damgası ya da durumu ilerlemediyse değişim yok ve
+/// [`diff`] hiç koşmuyor.
+///
+/// Yeni girdi yoksa canlanacak bir düzenleme de yok, yani olağan içerik
+/// karesinin (koşan komutun çıktısı, sayaç) bedeli bir karşılaştırma. Durum
+/// da soruluyor, çünkü damgayı taşımayan bir geçiş (`Unavailable` sıfır
+/// damgalı) uçuştaki efektleri bitirmeli.
+///
+/// `old` **son çizilen** ayna olmak zorunda: çağıranın tamponu
+/// ([`crate::Session::dock`]'un `into`'su), yeni aynayla ezilmeden önce.
+pub(crate) fn change(old: &DockState, new: &DockState, cols: u16) -> Option<Change> {
+    (old.answers != new.answers || old.status != new.status).then(|| diff(old, new, cols))
+}
+
+/// İki ayna arasındaki düzenleme: yalnız tek bitişik ekleme ya da silme
+/// canlanıyor ve glyph sayısı aradaki girdi sayısını aşamıyor.
+///
+/// **Yalnız `BUFFER`:** `POSTDISPLAY` (autosuggestions'ın önerisi) her tuşta
+/// toptan değişiyor ve kullanıcının yazdığı değil. **Yön `CURSOR`'dan**:
+/// ekleme yeni caret'te biter, silme (Backspace de ileri silme de) yeni
+/// caret'te başlar. Hipotez türetilmiyor, **sınanıyor** — tutmazsa `Reset`.
+///
+/// **Glyph genişliği sıfırdan büyük karakter:** `❤️` iki kod noktası ama
+/// tek girdi ve tek glyph; birleştirici [`render`]'da da hücre almıyor.
+///
+/// **Taban `Live` ya da `Idle`:** `Idle` boş satır — Enter'dan sonraki ilk
+/// tuşun tabanı o. `PREDISPLAY` değiştiyse metin kaymıştır, `Reset`.
+pub(crate) fn diff(old: &DockState, new: &DockState, cols: u16) -> Change {
+    let (old_buffer, old_skip) = match old.status {
+        DockStatus::Live => {
+            if old.predisplay != new.predisplay {
+                return Change::Reset;
+            }
+            let available = usize::from(cols.saturating_sub(TEXT_COL));
+            (old.buffer.as_str(), Some(window_skip(old, available)))
+        }
+        // Ekranda hiçbir şey yok, yani kayacak bir şey de yok.
+        DockStatus::Idle => ("", None),
+        _ => return Change::Reset,
+    };
+    if new.status != DockStatus::Live {
+        return Change::Reset;
+    }
+    if old_buffer == new.buffer {
+        return Change::Same { old_skip };
+    }
+    let Some(inputs) = new.answers.checked_sub(old.answers) else {
+        return Change::Reset;
+    };
+    let pre = new.predisplay.chars().count();
+    let Some(caret) = new.cursor.checked_sub(pre) else {
+        return Change::Reset;
+    };
+    let old_len = old_buffer.chars().count();
+    let new_len = new.buffer.chars().count();
+    let glyphs =
+        |run: &mut dyn Iterator<Item = char>| run.filter(|&ch| column_width(ch) > 0).count();
+    let fits = |count: usize| count > 0 && count <= EDIT_MAX && count as u64 <= inputs;
+
+    if new_len > old_len {
+        // Ekleme: `old == new[..start] ++ new[caret..]`.
+        let Some(start) = caret.checked_sub(new_len - old_len) else {
+            return Change::Reset;
+        };
+        let rest = new
+            .buffer
+            .chars()
+            .take(start)
+            .chain(new.buffer.chars().skip(caret));
+        if !old_buffer.chars().eq(rest) {
+            return Change::Reset;
+        }
+        if !fits(glyphs(
+            &mut new.buffer.chars().skip(start).take(caret - start),
+        )) {
+            return Change::Reset;
+        }
+        Change::Insert {
+            old_skip,
+            start: pre + start,
+            end: pre + caret,
+        }
+    } else {
+        // Silme: `new == old[..caret] ++ old[caret + k..]`. `Idle` tabanda
+        // eski satır boş, yani buraya eşit uzunlukta bir değiştirme düşüyor
+        // ve `k = 0` onu aşağıdaki `fits`'te eliyor.
+        let count = old_len - new_len;
+        let rest = old_buffer
+            .chars()
+            .take(caret)
+            .chain(old_buffer.chars().skip(caret + count));
+        if count == 0 || !new.buffer.chars().eq(rest) {
+            return Change::Reset;
+        }
+        let mut ghosts = Ghosts {
+            len: 0,
+            chars: [(' ', HighlightStyle::default()); EDIT_MAX],
+        };
+        let run = old_buffer.chars().enumerate().skip(caret).take(count);
+        for (index, ch) in run.filter(|&(_, ch)| column_width(ch) > 0) {
+            let Some(slot) = ghosts.chars.get_mut(ghosts.len) else {
+                return Change::Reset;
+            };
+            // Vurgu **eski** görüntüden: yenisinde bu karakter yok.
+            *slot = (ch, style_at(old, pre + index));
+            ghosts.len += 1;
+        }
+        if !fits(ghosts.len) {
+            return Change::Reset;
+        }
+        Change::Delete { old_skip, ghosts }
+    }
+}
+
+/// Pencerenin soldan attığı sütun sayısı: caret ve **altındaki karakterin
+/// tamamı** görünür kalacak kadar. Gerekçeleri [`render`]'ın gövdesinde.
+///
+/// Tek formül, iki tüketici: [`render`] ve [`diff`] (eski pencerenin kayması).
+/// `Live` olmayan aynada metin yok, yani kayma da yok.
+fn window_skip(state: &DockState, available: usize) -> usize {
+    if state.status != DockStatus::Live || available == 0 {
+        return 0;
+    }
+    let caret_width = state
+        .predisplay
+        .chars()
+        .chain(state.buffer.chars())
+        .chain(state.postdisplay.chars())
+        .nth(state.cursor)
+        .map_or(1, |ch| column_width(ch).max(1))
+        .min(available);
+    (state.cursor_col + caret_width).saturating_sub(available)
+}
+
 /// Aynayı bu karenin dock hücrelerine çevirir.
 ///
 /// **Zemin opak olmak zorunda** ve bu bir zevk değil yapısal bir şart: kayma
@@ -124,6 +361,16 @@ const ELLIPSIS: char = '…';
 /// çizen taraf veriyor (`bt-gpu`), bu crate piksel görmüyor — `cols`'un
 /// kendisiyle aynı sözleşme. İkisi eşit geçilirse satır bugünkü gibi davranır,
 /// yani değer bir **bütçe**dir, punto kararı değil.
+///
+/// `change` son çizilen aynadan bu yana ne değiştiği ([`change`]'in cevabı);
+/// [`DockEdit`]'e burada, **bu pencerelemenin** sütunlarıyla çevrilip
+/// `edits`'e basılıyor — karede en çok bir kez. Canlanma yalnız metnin
+/// çizildiği ve caret'in dock'ta olduğu kolda: satır ızgaradaysa efektin
+/// konusu yok ve her canlanmayan kol uçuştakileri bitirir (`Reset`).
+///
+/// Parametreler dokuz ve her biri ayrı bir girdi; bir yapıya toplamak yalnız
+/// bu çağrı için bir tip doğururdu.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     state: &DockState,
     context: &DockContext,
@@ -131,7 +378,9 @@ pub(crate) fn render(
     theme: &Theme,
     cols: DockCols,
     owned: bool,
+    change: Option<&Change>,
     mut sink: impl FnMut(Cell),
+    mut edits: impl FnMut(DockEdit),
 ) -> Dock {
     let mut surface = Dock {
         ground: theme.background_linear(),
@@ -141,6 +390,7 @@ pub(crate) fn render(
         sigil: sigil_color(shell, theme),
     };
     if cols.grid == 0 {
+        settle(change, &mut edits);
         return surface;
     }
     // **Caret'in sahibi burada sorulmuyor, cevabı hazır geliyor** (`owned`).
@@ -161,6 +411,7 @@ pub(crate) fn render(
 
     let available = usize::from(cols.grid.saturating_sub(TEXT_COL));
     if available == 0 {
+        settle(change, &mut edits);
         return surface;
     }
     // `Live` olmayan ayna metin çizdirmiyor ve ikisi de doğru cevap: `Idle`'da
@@ -176,6 +427,7 @@ pub(crate) fn render(
         if owned {
             surface.caret = Some(TEXT_COL);
         }
+        settle(change, &mut edits);
         return surface;
     }
     let fixed = theme.foreground_linear();
@@ -223,11 +475,29 @@ pub(crate) fn render(
     //
     // Kırpma Karar 2'yi **bozmuyor**: sığmayan karakter yine çizilmiyor
     // (sağ kenar kuralı ayrı), yalnız caret son sütuna sabitleniyor.
-    let caret_width = stream()
-        .nth(state.cursor)
-        .map_or(1, |(ch, _)| column_width(ch).max(1))
-        .min(available);
-    let skip = (caret_col + caret_width).saturating_sub(available);
+    //
+    // Formül [`window_skip`]'te, çünkü ikinci bir tüketicisi var: [`diff`]
+    // eski pencerenin kaymasını aynı hesapla buluyor.
+    let skip = window_skip(state, available);
+
+    // **Pencere kaydıysa canlanma yok:** uçuştaki efektler eski sütunlarında
+    // kalırdı, metin ise kaymış olurdu. Taşan satırda her tuş pencereyi
+    // kaydırıyor, yani orada yazım animasyonsuz — bilinen ve seçilmiş sınır.
+    let shifted = matches!(
+        change,
+        Some(
+            Change::Same { old_skip: Some(old) }
+                | Change::Insert { old_skip: Some(old), .. }
+                | Change::Delete { old_skip: Some(old), .. }
+        ) if *old != skip
+    );
+    let animated = owned && !shifted;
+    let arriving = match change {
+        Some(&Change::Insert { start, end, .. }) if animated => start..end,
+        _ => 0..0,
+    };
+    let mut arrive_col = None;
+    let mut arrived = EditCells::empty();
 
     // Mutlak sütun (kaydırma çıkarılmadan önce). Döngü boyunca birikiyor ve
     // `index`'ten **bağımsız**: ayrıştıkları yer tam olarak bu setin konusu.
@@ -263,6 +533,14 @@ pub(crate) fn render(
         // audit: `visible < available ≤ cols` ve `cols` `u16`; toplam taşamaz.
         let col = TEXT_COL + visible as u16;
         let lead = cell(ch, col, base, style_at(state, index), theme, width == 2);
+        // Gelen glyph'ler **aynı** döngüden ve aynı hücreyle: pencereleme,
+        // geniş karakter ve kenar kuralı ikinci kez yazılmıyor.
+        if arriving.contains(&index) {
+            arrive_col.get_or_insert(col);
+            if lead.ch.is_some() {
+                arrived.push(lead);
+            }
+        }
         // `frame()`'in atlama kapısının dock karşılığı: ne mürekkebi, ne
         // zemini, ne çizgisi olan hücre sink'e hiç uğramaz. Vurgusuz bir
         // satırda boşlukların çoğu buradan eleniyor ve `hucre=` jetonunun
@@ -290,10 +568,62 @@ pub(crate) fn render(
         col_acc += width;
     }
 
+    // audit: `skip`'in tanımı gereği `caret_col - skip < available ≤ cols`.
+    let caret_visible = caret_col - skip;
+    let caret_screen = TEXT_COL + caret_visible as u16;
+    match change {
+        None => {}
+        Some(Change::Same { .. }) if !shifted => {}
+        Some(Change::Insert { .. }) if animated => edits(DockEdit::Arrive {
+            // Koşunun tamamı pencerenin solunda kaldıysa (pencereden geniş
+            // bir koşu) hücresi de yok; sütun yine caret'in solunda.
+            col: arrive_col.unwrap_or(caret_screen),
+            cells: arrived,
+        }),
+        Some(Change::Delete { ghosts, .. }) if animated => {
+            // Hayaletler caret'in sütunundan sağa: silme (Backspace de ileri
+            // silme de) yeni caret'te başlıyor ve pencere kaymadı.
+            let mut cells = EditCells::empty();
+            let mut offset = caret_visible;
+            for &(ch, style) in ghosts.as_slice() {
+                let width = column_width(ch);
+                // Sağ yaka, satırın kuralıyla: sığmayan hayalet çizilmez.
+                if offset + width > available {
+                    break;
+                }
+                // audit: `offset + width <= available ≤ cols`; taşamaz.
+                let ghost = cell(
+                    ch,
+                    TEXT_COL + offset as u16,
+                    fixed,
+                    style,
+                    theme,
+                    width == 2,
+                );
+                if ghost.ch.is_some() {
+                    cells.push(ghost);
+                }
+                offset += width;
+            }
+            edits(DockEdit::Erase {
+                col: caret_screen,
+                ghosts: cells,
+            });
+        }
+        Some(_) => edits(DockEdit::Reset),
+    }
+
     Dock {
-        // audit: `skip`'in tanımı gereği `caret_col - skip < available ≤ cols`.
-        caret: owned.then(|| TEXT_COL + (caret_col - skip) as u16),
+        caret: owned.then_some(caret_screen),
         ..surface
+    }
+}
+
+/// Metnin çizilmediği kolun düzenlemesi: aynanın ilerlediği her kol
+/// uçuştakileri bitirir, `BUFFER`'ı değişmeyen ayna hiçbir şey basmaz.
+fn settle(change: Option<&Change>, edits: &mut impl FnMut(DockEdit)) {
+    if matches!(change, Some(change) if !matches!(change, Change::Same { .. })) {
+        edits(DockEdit::Reset);
     }
 }
 
@@ -668,9 +998,17 @@ mod tests {
         // (`held: false`): histerezis devrin **ne zaman** görüneceğini
         // değiştiriyor, çizimini değil.
         let owned = caret_home(None, state.status, false) == CaretHome::Dock;
-        let dock = render(state, context, None, &THEME, same(cols), owned, |cell| {
-            cells.push(cell)
-        });
+        let dock = render(
+            state,
+            context,
+            None,
+            &THEME,
+            same(cols),
+            owned,
+            None,
+            |cell| cells.push(cell),
+            |_| (),
+        );
         (cells, dock)
     }
 
@@ -686,7 +1024,9 @@ mod tests {
             &THEME,
             same(cols),
             owned,
+            None,
             |cell| cells.push(cell),
+            |_| (),
         );
         (cells, dock)
     }
@@ -1132,9 +1472,17 @@ mod tests {
             grid: 9,
             context: 21,
         };
-        render(&state, &ctx, None, &THEME, wide, owned, |cell| {
-            cells.push(cell)
-        });
+        render(
+            &state,
+            &ctx,
+            None,
+            &THEME,
+            wide,
+            owned,
+            None,
+            |cell| cells.push(cell),
+            |_| (),
+        );
         assert_eq!(row_text(&cells, 1), "/a/bb/ccc/dddd | main");
         // Giriş satırı **dokunulmamış**: iki bütçe birbirine karışmıyor.
         assert_eq!(text(&cells), "  ls");
@@ -1142,9 +1490,17 @@ mod tests {
         // Aynı ızgara, bütçe dar: kısaltma geri geliyor. Yani satırın gördüğü
         // sayı gerçekten `context_cols`, `cols` değil.
         let mut narrow = Vec::new();
-        render(&state, &ctx, None, &THEME, same(9), owned, |cell| {
-            narrow.push(cell)
-        });
+        render(
+            &state,
+            &ctx,
+            None,
+            &THEME,
+            same(9),
+            owned,
+            None,
+            |cell| narrow.push(cell),
+            |_| (),
+        );
         assert_eq!(row_text(&narrow, 1), "…d | main");
     }
 
@@ -1288,7 +1644,9 @@ mod tests {
             &THEME,
             same(cols),
             owned,
+            None,
             |cell| cells.push(cell),
+            |_| (),
         );
         assert!(
             cells.iter().any(|cell| cell.ch == Some('a')),
@@ -1355,7 +1713,9 @@ mod tests {
             &THEME,
             same(cols),
             owned,
+            None,
             |cell| cells.push(cell),
+            |_| (),
         );
         let lead = cells
             .iter()
@@ -1441,12 +1801,372 @@ mod tests {
                 &THEME,
                 same(TEXT_COL + 1),
                 owned,
+                None,
                 |cell| cells.push(cell),
+                |_| (),
             );
             // Caret metin alanının **içinde**: prompt işaretinin payına
             // düşmüyor ve pencerenin dışına da taşmıyor.
             let caret = dock.caret.expect("{label}: caret dock'un");
             assert_eq!(caret, TEXT_COL, "{label}: caret {caret}");
         }
+    }
+
+    // ---- Yazım animasyonlarının düzenlemesi (030) ----
+    //
+    // `discussion.md` → Karar 2'nin tablosu: her satırı bir sınama.
+
+    /// Kullanıcının yazdığı satır: `PREDISPLAY` boş, caret `BUFFER`'da,
+    /// damga `answers`.
+    fn typed(buffer: &str, cursor: usize, answers: u64) -> DockState {
+        DockState {
+            answers,
+            ..live("", buffer, "", cursor)
+        }
+    }
+
+    /// Satırın sonunda caret.
+    fn at_end(buffer: &str, answers: u64) -> DockState {
+        typed(buffer, buffer.chars().count(), answers)
+    }
+
+    /// `line-finish`'ten sonraki boş ayna, damgasıyla (`End` kolu).
+    fn idle(answers: u64) -> DockState {
+        DockState {
+            status: DockStatus::Idle,
+            answers,
+            ..DockState::default()
+        }
+    }
+
+    /// Eski aynadan yenisine: üretimdeki sıra — kapı, sonra çizim — ve
+    /// çizimin bastığı düzenlemeler.
+    fn edits_between(old: &DockState, new: &DockState, cols: u16) -> Vec<DockEdit> {
+        let change = change(old, new, cols);
+        let owned = caret_home(None, new.status, false) == CaretHome::Dock;
+        let mut edits = Vec::new();
+        render(
+            new,
+            &DockContext::default(),
+            None,
+            &THEME,
+            same(cols),
+            owned,
+            change.as_ref(),
+            |_| (),
+            |edit| edits.push(edit),
+        );
+        edits
+    }
+
+    /// Düzenlemenin karakterleri ve sütunları; `Reset` → `None`.
+    fn glyphs(edit: &DockEdit) -> Option<(u16, String, Vec<u16>)> {
+        let (col, cells) = match edit {
+            DockEdit::Arrive { col, cells } | DockEdit::Erase { col, ghosts: cells } => {
+                (*col, cells.as_slice())
+            }
+            DockEdit::Reset => return None,
+        };
+        Some((
+            col,
+            cells.iter().filter_map(|cell| cell.ch).collect(),
+            cells.iter().map(|cell| cell.col).collect(),
+        ))
+    }
+
+    fn only(edits: &[DockEdit]) -> &DockEdit {
+        assert_eq!(
+            edits.len(),
+            1,
+            "karede tek düzenleme bekleniyordu: {edits:?}"
+        );
+        &edits[0]
+    }
+
+    fn arrive(edits: &[DockEdit]) -> (u16, String) {
+        match only(edits) {
+            edit @ DockEdit::Arrive { .. } => {
+                let (col, text, _) = glyphs(edit).expect("geliş");
+                (col, text)
+            }
+            other => panic!("geliş bekleniyordu: {other:?}"),
+        }
+    }
+
+    fn erase(edits: &[DockEdit]) -> (u16, String) {
+        match only(edits) {
+            edit @ DockEdit::Erase { .. } => {
+                let (col, text, _) = glyphs(edit).expect("silme");
+                (col, text)
+            }
+            other => panic!("silme bekleniyordu: {other:?}"),
+        }
+    }
+
+    fn reset(edits: &[DockEdit], label: &str) {
+        assert_eq!(edits, [DockEdit::Reset], "{label}");
+    }
+
+    #[test]
+    fn a_typed_letter_arrives_left_of_the_caret() {
+        let edits = edits_between(&at_end("l", 1), &at_end("ls", 2), COLS);
+        assert_eq!(arrive(&edits), (TEXT_COL + 1, "s".into()));
+    }
+
+    #[test]
+    fn two_keys_in_one_frame_arrive_together() {
+        // Taban son **çizilen** ayna: aradaki ayna atlandı, iki tuş tek koşu.
+        let edits = edits_between(&at_end("l", 1), &at_end("lsa", 3), COLS);
+        assert_eq!(arrive(&edits), (TEXT_COL + 1, "sa".into()));
+    }
+
+    #[test]
+    fn backspace_leaves_a_ghost_at_the_caret() {
+        let edits = edits_between(&at_end("ls", 2), &at_end("l", 3), COLS);
+        assert_eq!(erase(&edits), (TEXT_COL + 1, "s".into()));
+        // Basılı Backspace: iki silme tek karede, hayaletler sağa doğru.
+        let edits = edits_between(&at_end("lsa", 3), &at_end("l", 5), COLS);
+        let DockEdit::Erase { ghosts, .. } = only(&edits) else {
+            panic!("{edits:?}");
+        };
+        let cols: Vec<u16> = ghosts.as_slice().iter().map(|cell| cell.col).collect();
+        assert_eq!(cols, [TEXT_COL + 1, TEXT_COL + 2]);
+    }
+
+    #[test]
+    fn forward_delete_leaves_its_ghost_at_the_caret_too() {
+        // `lsa`, caret `s`'nin üstünde, ileri silme: caret yerinde kalıyor.
+        let edits = edits_between(&typed("lsa", 1, 1), &typed("la", 1, 2), COLS);
+        assert_eq!(erase(&edits), (TEXT_COL + 1, "s".into()));
+    }
+
+    #[test]
+    fn bulk_changes_do_not_animate() {
+        for (label, old, new) in [
+            // Tek girdi, çok glyph.
+            ("yapıştırma", at_end("", 1), at_end("hello", 2)),
+            ("Ctrl-U", at_end("git status", 2), at_end("", 3)),
+            (
+                "Tab tamamlama",
+                at_end("git st", 1),
+                at_end("git status", 2),
+            ),
+            // Ekleme de silme de değil: değiştirme.
+            ("geçmiş", at_end("ls", 2), at_end("git status", 3)),
+            ("eşit boyda geçmiş", at_end("ab", 2), at_end("cd", 3)),
+            // Sınır kapasitede: girdi yetse de dokuz glyph yazım gibi okunmuyor.
+            ("kapasite", at_end("", 0), at_end("abcdefghi", 9)),
+        ] {
+            reset(&edits_between(&old, &new, COLS), label);
+        }
+    }
+
+    #[test]
+    fn a_one_char_completion_animates_like_typing() {
+        let edits = edits_between(&at_end("cd src", 1), &at_end("cd src/", 2), COLS);
+        assert_eq!(arrive(&edits), (TEXT_COL + 6, "/".into()));
+    }
+
+    #[test]
+    fn a_dead_key_is_two_inputs_for_one_glyph() {
+        let edits = edits_between(&at_end("", 0), &at_end("~", 2), COLS);
+        assert_eq!(arrive(&edits), (TEXT_COL, "~".into()));
+    }
+
+    #[test]
+    fn a_combining_mark_is_not_a_glyph() {
+        // `❤️` iki kod noktası, tek girdi (emoji paleti): sayılan glyph bir.
+        let edits = edits_between(&at_end("", 0), &at_end("❤\u{FE0F}", 1), COLS);
+        assert_eq!(arrive(&edits), (TEXT_COL, "❤".into()));
+    }
+
+    #[test]
+    fn a_mirror_without_input_changes_nothing() {
+        // Damga da durum da aynı: kapı kapalı ve `diff` hiç koşmuyor — içerik
+        // farklı olsa bile (girdisiz ayna: prompt yenilemesi, zamanlayıcı).
+        let old = at_end("ls", 4);
+        let new = at_end("ls -la", 4);
+        assert_eq!(change(&old, &new, COLS), None);
+        assert!(edits_between(&old, &new, COLS).is_empty());
+    }
+
+    #[test]
+    fn a_new_suggestion_over_the_same_buffer_draws_nothing() {
+        let old = at_end("l", 1);
+        let new = DockState {
+            answers: 2,
+            ..live("", "l", "s -la", 1)
+        };
+        assert_eq!(
+            change(&old, &new, COLS),
+            Some(Change::Same { old_skip: Some(0) })
+        );
+        assert!(edits_between(&old, &new, COLS).is_empty());
+    }
+
+    #[test]
+    fn leaving_live_resets() {
+        // Enter: `line-finish` aynayı `Idle`'a indiriyor, satır ızgaraya geçti.
+        reset(
+            &edits_between(&at_end("ls", 2), &idle(3), COLS),
+            "Live → Idle",
+        );
+        let broken = DockState {
+            status: DockStatus::Unavailable(DockFault::Malformed),
+            ..DockState::default()
+        };
+        reset(
+            &edits_between(&at_end("ls", 2), &broken, COLS),
+            "Live → Unavailable",
+        );
+        reset(
+            &edits_between(&broken, &at_end("l", 1), COLS),
+            "Unavailable → Live",
+        );
+    }
+
+    #[test]
+    fn the_first_letter_after_the_prompt_arrives() {
+        // Taban `Idle`, boş satır: kural "iki taraf da Live" olsaydı her
+        // komutun ilk harfi canlanmazdı.
+        let edits = edits_between(&idle(5), &at_end("l", 6), COLS);
+        assert_eq!(arrive(&edits), (TEXT_COL, "l".into()));
+    }
+
+    #[test]
+    fn a_paste_as_the_first_action_does_not_animate() {
+        // `Idle` taban damgalı (`End` kolu): girdi sınırı tek, beş glyph aşar.
+        reset(
+            &edits_between(&idle(5), &at_end("hello", 6), COLS),
+            "prompt'taki ilk yapıştırma",
+        );
+    }
+
+    #[test]
+    fn a_wide_char_arrives_as_one_glyph_over_two_columns() {
+        let edits = edits_between(&at_end("a", 1), &at_end("a漢", 2), COLS);
+        let DockEdit::Arrive { col, cells } = only(&edits) else {
+            panic!("{edits:?}");
+        };
+        assert_eq!(*col, TEXT_COL + 1);
+        let [lead] = cells.as_slice() else {
+            panic!("tek hücre bekleniyordu: {cells:?}");
+        };
+        assert_eq!(
+            (lead.ch, lead.col, lead.wide),
+            (Some('漢'), TEXT_COL + 1, true)
+        );
+        // Silinirken de tek hayalet, iki sütun.
+        let edits = edits_between(&at_end("a漢", 2), &at_end("a", 3), COLS);
+        let DockEdit::Erase { ghosts, .. } = only(&edits) else {
+            panic!("{edits:?}");
+        };
+        assert!(ghosts.as_slice()[0].wide, "{ghosts:?}");
+    }
+
+    #[test]
+    fn a_typed_space_still_marks_its_column() {
+        // Boşluk glyph değil ama sütun kaydırıyor: uçuştaki gelişlerin
+        // bitmesi bu sütuna bakıyor (`discussion.md` → Karar 3).
+        let edits = edits_between(&at_end("ls", 1), &at_end("ls ", 2), COLS);
+        let DockEdit::Arrive { col, cells } = only(&edits) else {
+            panic!("{edits:?}");
+        };
+        assert_eq!(*col, TEXT_COL + 2);
+        assert!(cells.as_slice().is_empty(), "{cells:?}");
+    }
+
+    #[test]
+    fn edits_follow_the_prompt_width() {
+        // `PREDISPLAY` metni sağa itiyor; sütun pencerelemenin kendisinden.
+        let old = DockState {
+            answers: 1,
+            ..live("% ", "l", "", 3)
+        };
+        let new = DockState {
+            answers: 2,
+            ..live("% ", "ls", "", 4)
+        };
+        assert_eq!(
+            arrive(&edits_between(&old, &new, COLS)),
+            (TEXT_COL + 3, "s".into())
+        );
+        // `PREDISPLAY` değiştiyse metin kaydı: canlanma yok.
+        let moved = DockState {
+            answers: 2,
+            ..live("%% ", "ls", "", 5)
+        };
+        reset(&edits_between(&old, &moved, COLS), "PREDISPLAY değişti");
+    }
+
+    #[test]
+    fn a_ghost_keeps_the_color_of_the_old_line() {
+        let mut old = at_end("ls", 2);
+        old.highlights.push(Highlight {
+            start: 1,
+            end: 2,
+            style: HighlightStyle {
+                fg: Some(HighlightColor::Indexed(2)),
+                ..HighlightStyle::default()
+            },
+        });
+        // Yeni satırın vurgusu yok: renk yalnız eski tamponda.
+        let edits = edits_between(&old, &at_end("l", 3), COLS);
+        let DockEdit::Erase { ghosts, .. } = only(&edits) else {
+            panic!("{edits:?}");
+        };
+        assert_eq!(ghosts.as_slice()[0].fg, THEME.indexed_linear(2));
+    }
+
+    #[test]
+    fn a_scrolled_window_places_the_ghost_on_screen() {
+        // Pencere 6 sütun (`TEXT_COL` payından sonra 4), satır taşmış ve
+        // soldan kaydırılmış; ileri silme caret'i ve pencereyi yerinde
+        // bırakıyor — hayalet caret'in **ekran** sütununda.
+        let cols = TEXT_COL + 4;
+        let old = typed("abcdefgh", 5, 1);
+        let new = typed("abcdegh", 5, 2);
+        let edits = edits_between(&old, &new, cols);
+        let (col, text) = erase(&edits);
+        assert_eq!(text, "f");
+        // skip = 5 + 1 - 4 = 2: `f` (sütun 5) ekranda 3. sütunda.
+        assert_eq!(col, TEXT_COL + 3);
+    }
+
+    #[test]
+    fn a_shifting_window_resets() {
+        // Taşan satırın sonunda yazmak pencereyi kaydırıyor: uçuştaki
+        // efektler eski sütunlarında kalırdı.
+        let cols = TEXT_COL + 4;
+        reset(
+            &edits_between(&at_end("abcd", 1), &at_end("abcde", 2), cols),
+            "yazım pencereyi kaydırdı",
+        );
+        // Metin aynı, caret kıpırdadı ve pencere kaydı.
+        reset(
+            &edits_between(&typed("abcdefgh", 8, 1), &typed("abcdefgh", 2, 2), cols),
+            "caret pencereyi kaydırdı",
+        );
+    }
+
+    #[test]
+    fn a_line_owned_by_the_grid_does_not_animate() {
+        // Caret ızgaradaysa satır da orada: efektin konusu dock'ta yazmak.
+        let old = at_end("l", 1);
+        let new = at_end("ls", 2);
+        let change = change(&old, &new, COLS);
+        let mut edits = Vec::new();
+        render(
+            &new,
+            &DockContext::default(),
+            None,
+            &THEME,
+            same(COLS),
+            false,
+            change.as_ref(),
+            |_| (),
+            |edit| edits.push(edit),
+        );
+        reset(&edits, "caret ızgarada");
     }
 }

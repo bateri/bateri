@@ -117,7 +117,7 @@ encode_dock: zemin → dock_bg → caret → HAYALETLER (glyph_fx) → emoji
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | phase-3 | |
 | phase-4 | |

@@ -59,8 +59,46 @@ _Requirements: R1, R1.1, R1.2, R1.3, R1.4, R2_
 
 ## Checklist
 
-- [ ] `DockEdit` + `dock::diff` + `render`'ın sütun çözümü
-- [ ] `Session::dock` kapısı ve ikinci sink; doc
-- [ ] `bt-gpu` ikinci sink'i bağlar (no-op)
-- [ ] Test: Kabul'deki diff ve render sınamaları
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] `DockEdit` + `dock::diff` + `render`'ın sütun çözümü
+- [x] `Session::dock` kapısı ve ikinci sink; doc
+- [x] `bt-gpu` ikinci sink'i bağlar (no-op)
+- [x] Test: Kabul'deki diff ve render sınamaları
+- [x] Doğrulama geçti (`make hepsi`)
+- [~] `make test-yaris` — tetiklenmedi: paylaşılan duruma tek değişiklik
+  `End` kolunun damgası, mevcut yaprak kilit altında; panel phase-1 için
+  bunu açıkça reddetti (`discussion.md` → Muhakeme → Reddedilenler). Riskli
+  phase değil, `/code-review` set sonunda.
+- [~] `make duman` — gerekmedi: görünür değişim yok ve süreli koşu dock
+  almıyor (`/bin/sh`), yani yeni yol dumanda hiç koşmuyor.
+
+## Uygulama Notları
+
+- **Kapı durumu da soruyor:** `dock::change` damga **ya da** durum
+  değiştiyse `diff`'i koşturuyor. Damgasız bir geçiş (`Unavailable` sıfır
+  damgalı; girdisiz bir `End`) uçuştakileri bitirmeli; yalnız damgaya
+  bakan kapı onları asılı bırakırdı.
+- **`Change::Same`:** `BUFFER` aynı ama ayna ilerlediyse `diff` `None`
+  değil `Same { old_skip }` döndürüyor, çünkü caret'in kaydırdığı pencere
+  (Karar 3) metin değişmeden de kayabiliyor; `render` kaymada `Reset`,
+  yoksa hiçbir şey basıyor. Kabul'ün "`None`"ı gözlemlenebilir hâliyle
+  sınanıyor (düzenleme sink'i çağrılmıyor). Sonucu: taşan satırda her tuş
+  pencereyi kaydırdığı için orada yazım animasyonsuz — seçilmiş sınır.
+- **Eski pencerenin kayması `diff`'te** (`render`'da değil): `render`
+  koşarken eski ayna ezilmiş oluyor. Formül tek (`window_skip`), iki
+  tüketici; `diff` bu yüzden `cols` alıyor.
+- **Glyph = genişliği sıfırdan büyük karakter:** `❤️` iki kod noktası,
+  tek girdi, tek glyph (birleştirici `render`'da da hücre almıyor). Koşu
+  yalnız birleştiriciyse `Reset`.
+- **`PREDISPLAY` değiştiyse `Reset`:** metin kaymıştır; `Idle` tabanda
+  sorulmuyor (ekranda metin yok).
+- **Caret ızgaradaysa (`owned == false`) canlanma yok, `Reset`:** satır
+  ızgarada (bayat ayna) ve efektin konusu dock'ta yazmak.
+- **Hücreler yalnız glyph'liler;** boşluk yazımı boş hücreli bir `Arrive`
+  basıyor, çünkü sütunu uçuştaki gelişlerin bitme kuralına giriyor.
+- `EDIT_MAX = 8` (tasarım sabiti); aşan düzenleme `Reset`.
+- `render` dokuz parametre aldı: `#[allow(clippy::too_many_arguments)]`,
+  gerekçesi doc'unda.
+- `make hepsi` iki kez `bt-shell`'in pano sınamalarında düştü (bir
+  SIGSEGV, bir `pending_copy_delivers_to_the_given_board` — paylaşılan
+  panoya başka bir yazar); bu phase `bt-shell`'e dokunmuyor, tek başına ve
+  üçüncü tam koşuda yeşil.

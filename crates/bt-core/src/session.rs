@@ -59,7 +59,7 @@ use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Handler};
 use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
-use crate::dock::{self, Dock, DockCols};
+use crate::dock::{self, Dock, DockCols, DockEdit};
 use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
@@ -4309,6 +4309,14 @@ impl Session {
     /// (`bt-shell`, entegrasyon kuruldu mu) kararlaşıyor ve bu crate onu
     /// bilmiyor — bilseydi "kabuk entegrasyonu kuruldu mu" sorusunun ikinci
     /// bir kaydı doğardı.
+    ///
+    /// **İkinci sink yazım animasyonlarının** (030): son çizilen aynadan bu
+    /// yana eklenen ya da silinen glyph'i, ekran sütunuyla, **en çok bir**
+    /// [`DockEdit`] olarak basıyor. Fark çağıranın tamponuna karşı alınıyor,
+    /// yani `into` **son çizilen** ayna olmak zorunda — tek çağıranı
+    /// `bt-gpu`'nun içerik karesi ve tamponu ondan başka kimse yazmıyor.
+    /// Farkın bedeli damga kapısının arkasında (`dock::change`):
+    /// yeni girdi yoksa tek bir karşılaştırma.
     pub fn dock(
         &self,
         cols: DockCols,
@@ -4316,17 +4324,31 @@ impl Session {
         context: &mut DockContext,
         caret_in_dock: bool,
         sink: impl FnMut(Cell),
+        edits: impl FnMut(DockEdit),
     ) -> Dock {
         let theme = *lock(&self.adapter.0.theme);
-        let shell = {
+        let (shell, change) = {
             let shell = lock(&self.shell);
+            // Fark **kopyadan önce**: `into` şu an son çizilen ayna ve bir
+            // satır sonra yenisiyle eziliyor.
+            let change = dock::change(into, &shell.dock, cols.grid);
             into.clone_from(&shell.dock);
             // Bağlam **aynı kilit turunda**: ayrı bir turda alınsaydı araya
             // düşen bir prompt dizini yeni, dalı eski bir satırla eşleştirirdi.
             context.clone_from(&shell.context);
-            shell.state
+            (shell.state, change)
         };
-        dock::render(into, context, shell, &theme, cols, caret_in_dock, sink)
+        dock::render(
+            into,
+            context,
+            shell,
+            &theme,
+            cols,
+            caret_in_dock,
+            change.as_ref(),
+            sink,
+            edits,
+        )
     }
 
     /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve
@@ -6102,6 +6124,7 @@ mod tests {
             &mut DockState::default(),
             &mut DockContext::default(),
             cursor.caret_in_dock,
+            |_| (),
             |_| (),
         );
         assert!(
@@ -11560,6 +11583,7 @@ mod tests {
                         &mut dock,
                         &mut context,
                         cursor.caret_in_dock,
+                        |_| (),
                         |_| (),
                     )
                     .caret

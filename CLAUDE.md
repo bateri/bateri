@@ -171,7 +171,12 @@ ZLE'nin görüntüsünü (`PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlig
 `CURSOR`) OSC 8133 ile aynalıyor; `Session::dock()` onu **çözülmüş** dock
 hücrelerine çevirip sınırdan veriyor ve `bt-gpu` pencerenin altındaki **ikinci
 bir `setViewport`**'la çiziyor — kendi listeleri, kendi caret'i, opak zemini ve
-ızgaradan ayıran saç çizgisiyle. **Caret tek**: ızgaranın imleci ile dock'un
+ızgaradan ayıran saç çizgisiyle. Aynı çağrı **ikinci bir sink**'ten, son
+çizilen aynaya karşı bulduğu en çok bir `DockEdit`'i (`Arrive`/`Erase`/
+`Reset`, ekran sütunuyla) veriyor: yalnız girdi sayısını aşmayan tek bitişik
+ekleme ya da silme canlanıyor, gerisi uçuştakileri bitiriyor — yazım
+animasyonlarının girdisi, tüketicisi `bt-gpu` (030; kural
+`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 1–3). **Caret tek**: ızgaranın imleci ile dock'un
 caret'i aynı animatörün (`bt-gpu::motion`) iki hedefi, yani dock'ta yazarken de
 süzülüyor ve devir bir ışınlanma değil bir kayma. **Şekli de tek** ve sınırdan
 geliyor (`Cursor::shape`): DECSCUSR'ın üç biçimi — blok, alt çizgi, dikey
