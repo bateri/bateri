@@ -185,8 +185,14 @@ reduce_motion = "system"
 # line by line. Reduce Motion and cursor_motion = "snap" also move line by
 # line.
 smooth_scroll = "on"
-# "off" | "fade". How a letter you type in the dock at the bottom of the
-# window appears: fade brings it in from clear, off shows it at once.
+# "off" | "fade" | "rise" | "pop" | "extrude" | "heat" | "echo" | "drop" |
+# "ink" | "squeeze". How a letter you type in the dock at the bottom of the
+# window appears: fade brings it in from clear, rise slides it up into place,
+# pop springs it out from small, extrude stretches it out from its left edge,
+# heat starts it in the cursor color and cools it to its own, echo sends a
+# faint copy of it rippling outward, drop lets it fall into place with a small
+# bounce, ink fills it from the middle of its strokes outward, squeeze starts
+# it narrow and tall and lets it spring into shape. off shows it at once.
 keypress = "fade"
 # "off" | "recede". How a letter you delete in the dock goes: recede shrinks
 # it away, off removes it at once. Pasting, history and deleting a whole word
@@ -609,7 +615,7 @@ erase = "recede"
 | `cursor_motion` | `"snap"`, `"ease"` ya da `"spring"` | `"spring"` | imlecin hücreler arasında nasıl gittiği |
 | `reduce_motion` | `"system"`, `"on"` ya da `"off"` | `"system"` | animasyonların kısılıp kısılmayacağı |
 | `smooth_scroll` | `"on"` ya da `"off"` | `"on"` | geçmişte kaydırmanın pürüzsüz mü satır satır mı gittiği |
-| `keypress` | `"off"` ya da `"fade"` | `"fade"` | dock'ta yazılan harfin nasıl geldiği |
+| `keypress` | `"off"`, `"fade"`, `"rise"`, `"pop"`, `"extrude"`, `"heat"`, `"echo"`, `"drop"`, `"ink"` ya da `"squeeze"` | `"fade"` | dock'ta yazılan harfin nasıl geldiği |
 | `erase` | `"off"` ya da `"recede"` | `"recede"` | dock'ta silinen harfin nasıl gittiği |
 
 - **`"spring"`** — imleç yeni yerine bir yayla kayar ve yavaşlayarak oturur;
@@ -700,8 +706,26 @@ erase = "recede"
 `keypress` ile `erase` pencerenin altındaki **dock**'ta — komutu yazdığınız
 satırda — harflerin nasıl geldiğini ve gittiğini söyler:
 
-- **`keypress = "fade"`** — yazdığınız harf yerinde saydamdan tam renge
-  belirir. **`"off"`** — anında görünür.
+- **`keypress`** — yazdığınız harf:
+  - **`"fade"`** — yerinde saydamdan tam renge belirir.
+  - **`"rise"`** — hücrenin biraz altından yukarı kayarak yerine oturur,
+    kayarken belirir.
+  - **`"pop"`** — küçük doğar, bir an yerinden biraz büyür ve oturur.
+  - **`"extrude"`** — sol kenarından sağa doğru uzayarak çıkar.
+  - **`"heat"`** — temanın imleç renginde (`cursor`) doğar ve kendi rengine
+    soğur. Emoji boyanmaz, yalnız belirir.
+  - **`"echo"`** — yerinde belirir; soluk bir kopyası büyüyerek dışa doğru
+    dağılıp söner.
+  - **`"drop"`** — hücrenin üstünden düşer, hafifçe sekip yerine oturur.
+  - **`"ink"`** — önce çizgilerin çekirdeği görünür, mürekkep kenarlara
+    yayılır gibi dolar. Emojide düz bir belirmedir.
+  - **`"squeeze"`** — yatayda dar, dikeyde uzun doğar ve esneyerek kendi
+    oranına açılır.
+  - **`"off"`** — anında görünür.
+
+  Hepsi aynı kısa sürede (bir tuşun onayı kadar) biter ve harf en sonda
+  statik hâliyle birebir aynı yerde durur; emoji ve geniş karakterler
+  (`漢`) tek parça olarak hareket eder.
 - **`erase = "recede"`** — Backspace'le sildiğiniz harf yerinde küçülerek
   söner; satırın ortasından sildiyseniz sağdaki metin bugünkü gibi anında
   kayar, hayalet onun altında söner. **`"off"`** — anında kaybolur.
@@ -715,9 +739,10 @@ satırda — harflerin nasıl geldiğini ve gittiğini söyler:
   Hareketi Azalt'ta Keypress satırı açık kalır: orada da açıp kapatmak bir
   fark.
 - Kaydettiğiniz anda geçerli olur; o sırada süren bir efekt hemen biter.
-- Tanınmayan değer (`"pop"`, `"Fade"`, `1`) yalnız kendi anahtarını etkiler
-  (açılışta varsayılan, kayıt anında ekrandaki efekt) ve uyarı görünür.
-  Referans ürünün öteki efekt adları henüz tanınmıyor.
+- Tanınmayan değer (`"bounce"`, `"Fade"`, `1`) yalnız kendi anahtarını
+  etkiler (açılışta varsayılan, kayıt anında ekrandaki efekt) ve uyarı
+  görünür. Referans ürünün öteki **silme** efektlerinin adları henüz
+  tanınmıyor.
 
 ### `[shell]`
 

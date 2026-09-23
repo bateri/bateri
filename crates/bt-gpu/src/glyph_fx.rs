@@ -68,6 +68,14 @@ impl Effect for Keypress {
         match self {
             Self::Off => None,
             Self::Fade => Some(1),
+            Self::Rise => Some(2),
+            Self::Pop => Some(3),
+            Self::Extrude => Some(4),
+            Self::Heat => Some(5),
+            Self::Echo => Some(6),
+            Self::Drop => Some(7),
+            Self::Ink => Some(8),
+            Self::Squeeze => Some(9),
         }
     }
 

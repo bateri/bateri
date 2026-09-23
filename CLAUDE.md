@@ -196,7 +196,12 @@ efekt `t = 1`'de statik glyph'le **piksel piksel aynı** (geliş) ya da düz
 zemin (hayalet) ve bu bir kapı (`renderer::tests`): devir karesinde harf
 sıçramıyor. Efektler `[motion] keypress`/`erase`'ten **ham** iniyor ve
 adların sözlüğü `bt-core`'un (`Keypress`/`Erase`; `NAMES` yalnız çizilebilen
-adları taşır), shader kimliği `bt-gpu`'nun (`glyph_fx::Effect`). İndirgeme
+adları taşır), shader kimliği `bt-gpu`'nun (`glyph_fx::Effect`). Geometri
+ters dönüşümle (kutunun merkezi ya da sol kenarı, yarının değil) ve her
+örnekleme yuvanın içinde; genlikler hücre oranında tasarım sabiti
+(`shaders/glyph_fx.metal`). `heat`'in kızgın rengi temanın `cursor`'ı ve
+instance'ta yeri olmadığı için kare başına bir uniform (`Frame::dock_fx_heat`);
+renk düzlemi (emoji) boyanmaz ve eşiklenmez, renk dokudan. İndirgeme
 `Motion::glyph_fx`'te — `snap` ikisini kapatır, Hareketi Azalt gelişi
 belirmeye indirip hayaleti kapatır; ayar penceresi ezilen satırı devre dışı
 bırakıp nedenini söylüyor (`settings_window::motion_override`). **Caret tek**: ızgaranın imleci ile dock'un

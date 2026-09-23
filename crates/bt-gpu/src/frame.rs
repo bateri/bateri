@@ -739,6 +739,12 @@ pub(crate) struct Frame {
     /// korunuyor; değişen yalnız bu ikisi. Sayaçlara girmiyorlar.
     dock_ghosts: Vec<FxCell>,
     dock_arrivals: Vec<FxCell>,
+    /// `heat`'in kızgın rengi: temanın `cursor` rolü, lineer. Efekt başına
+    /// değil kare başına tek değer ve fragment'e uniform olarak gidiyor
+    /// (`glyph_fx.metal` → `heat`); instance'ta yeri yok (`FxInstance`'ın
+    /// `fx`'inde tek bir yedek `f32` var). Yazarı listelerle aynı
+    /// ([`Frame::set_dock_fx`]), yani ikisi ayrışamıyor.
+    dock_fx_heat: [f32; 4],
     /// Uçuştaki gelişlerin statik glyph'i **çıkarılmış** dock glyph'leri.
     ///
     /// `dock_glyphs`'in kendisi değişmiyor ve bu şart: hareket karesi dock'u
@@ -1330,7 +1336,11 @@ impl Frame {
     /// (`dock_shown`), yoksa `fade` statik glyph'in üstünde belirir ve hiçbir
     /// şey görünmezdi. `dock_glyphs`'e dokunulmuyor: efekt bitince statik
     /// glyph, dock yeniden basılmadan geri gelmeli.
-    pub(crate) fn set_dock_fx(&mut self, fx: impl IntoIterator<Item = Fx>) {
+    ///
+    /// `heat` temanın `cursor` rengi (`heat` efektinin kızgın rengi); iki
+    /// yazar da temayı elinde tutuyor.
+    pub(crate) fn set_dock_fx(&mut self, fx: impl IntoIterator<Item = Fx>, heat: LinearRgba) {
+        self.dock_fx_heat = heat.to_array();
         self.dock_ghosts.clear();
         self.dock_arrivals.clear();
         self.dock_shown.clear();
@@ -1523,6 +1533,11 @@ impl Frame {
     /// Gelen glyph'ler; dock glyph'lerinden **sonra** çiziliyor.
     pub(crate) fn dock_arrivals(&self) -> &[FxCell] {
         &self.dock_arrivals
+    }
+
+    /// `heat` efektinin kızgın rengi ([`Frame::set_dock_fx`]).
+    pub(crate) fn dock_fx_heat(&self) -> &[f32; 4] {
+        &self.dock_fx_heat
     }
 
     pub(crate) fn dock_rules(&self) -> &[RuleCell] {
@@ -3366,14 +3381,14 @@ mod tests {
         frame.clear(grid(8, 16), CaretStyle::default());
         frame.push_dock(typed_cell(2, 'l'));
         frame.push_dock(typed_cell(3, 's'));
-        frame.set_dock_fx([fx(typed_cell(3, 's'), Kind::Arrival)]);
+        frame.set_dock_fx([fx(typed_cell(3, 's'), Kind::Arrival)], CURSOR);
         let shown: Vec<char> = frame.dock_glyphs().iter().map(|g| g.ch).collect();
         assert_eq!(shown, ['l']);
         assert_eq!(frame.dock_arrivals().len(), 1);
         assert_eq!(frame.dock_arrivals()[0].glyph, frame.dock_glyphs[1]);
         // Efekt bitti (hareket karesi, liste boş): statik glyph dock yeniden
         // basılmadan geri geliyor.
-        frame.set_dock_fx([]);
+        frame.set_dock_fx([], CURSOR);
         let shown: Vec<char> = frame.dock_glyphs().iter().map(|g| g.ch).collect();
         assert_eq!(shown, ['l', 's']);
     }
@@ -3411,7 +3426,7 @@ mod tests {
         frame.suppress_dock(&mut glyph_fx);
         let left: Vec<(u16, Kind)> = glyph_fx.iter().map(|fx| (fx.cell.col, fx.kind)).collect();
         assert_eq!(left, [(2, Kind::Arrival), (5, Kind::Ghost)]);
-        frame.set_dock_fx(glyph_fx.iter());
+        frame.set_dock_fx(glyph_fx.iter(), CURSOR);
         assert_eq!(frame.dock_ghosts().len(), 1);
         assert_eq!(frame.dock_arrivals().len(), 1);
         assert!(
@@ -3426,7 +3441,7 @@ mod tests {
         // asılı kalmamalı.
         let mut frame = Frame::default();
         frame.clear(grid(8, 16), CaretStyle::default());
-        frame.set_dock_fx([fx(typed_cell(3, 's'), Kind::Ghost)]);
+        frame.set_dock_fx([fx(typed_cell(3, 's'), Kind::Ghost)], CURSOR);
         assert_eq!(frame.dock_ghosts().len(), 1);
         frame.clear(grid(8, 16), CaretStyle::default());
         assert!(frame.dock_ghosts().is_empty() && frame.dock_arrivals().is_empty());

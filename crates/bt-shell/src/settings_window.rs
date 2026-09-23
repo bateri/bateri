@@ -373,6 +373,14 @@ impl Choice for Keypress {
         match self {
             Keypress::Off => "Off",
             Keypress::Fade => "Fade",
+            Keypress::Rise => "Rise",
+            Keypress::Pop => "Pop",
+            Keypress::Extrude => "Extrude",
+            Keypress::Heat => "Heat",
+            Keypress::Echo => "Echo",
+            Keypress::Drop => "Drop",
+            Keypress::Ink => "Ink",
+            Keypress::Squeeze => "Squeeze",
         }
     }
 }

@@ -37,9 +37,44 @@ _Requirements: R8, R5_
 
 ## Checklist
 
-- [ ] Sekiz shader dalı
-- [ ] `KeypressFx` kolları, `heat` rengi, şişme payı
-- [ ] `NAMES`, şablon, popup başlıkları, `docs/AYARLAR.md`
-- [ ] Test: R5 döngüsü dokuz efektte, ayrıştırma
-- [ ] Doğrulama geçti (`make hepsi` + `make shader`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Sekiz shader dalı
+- [x] `KeypressFx` kolları, `heat` rengi, şişme payı
+- [x] `NAMES`, şablon, popup başlıkları, `docs/AYARLAR.md`
+- [x] Test: R5 döngüsü dokuz efektte, ayrıştırma
+- [x] Doğrulama geçti (`make hepsi` + `make shader`; `make duman` yeşil)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi (bulgu yok; not: 1x ekranda ince fontta `ink` 1 px çizgileri sürenin ilk üçte birinde gizli tutuyor — gözle yargılanacak tasarım seçimi)
+
+## Uygulama Notları
+
+- **`KeypressFx` yok** (phase-3 tek enum'a geçti): kollar `bt-core`'un
+  `Keypress`'inde, kimlikler `glyph_fx::Effect`'te (1..9, Karar 6'nın
+  sırası), shader'da `FX_*`.
+- **`heat`'in rengi `GlyphFx`'ten değil `Frame`'den:** kare başına tek bir
+  uniform (`Frame::dock_fx_heat`, `glyph_fx.metal` → `buffer(3)`); yazarı
+  listelerle aynı `set_dock_fx(fx, heat)`, iki kare yolu temayı zaten tutuyor.
+  `CursorBlock.rgba` imlecin rengi değil altındaki metnin rengi, o yüzden
+  kullanılamadı. Bloğun altında kızgın renk imlecin metin rengine dönüyor
+  (blokla aynı renkte harf görünmezdi).
+- **Şişme payı shader'da kaldı** (`FX_PAD = 1`, `frame.rs`'te değil): en
+  büyük taşma `echo`'nun geniş glyph'teki kopyası (0,8 hücre); doc'u söylüyor.
+- **Renk düzlemi (emoji):** `heat` boyamıyor, `ink` eşiklemiyor — ikisi de
+  düz belirmeye düşüyor (renk dokudan, `emoji_fragment`'in kuralı).
+- **Offscreen karelerde görülen ve ayarlanan** (16pt@2x, t = 0…1, geçici
+  `#[ignore]` döküm sınaması; depoya girmedi): `heat` Karar 6'nın eğrisiyle
+  ilk çeyrekte soğuyordu → `smoothstep`; `ink`'in cephesi ilk karede
+  bitiyordu → zamanda doğrusal; `extrude`'un ilk karesi `nearest`
+  örneklemede kesik bir çizgiydi → belirme eklendi; `drop` 0,35 hücreden
+  zor seçiliyordu → 0,45. `pop` (≈1,08 tepe), `rise`, `echo`, `squeeze`
+  ilk hâlleriyle kaldı; büyüyen karelerde `nearest`'in pürüzü görülüyor
+  (`recede` emsali, 120 ms). Hiçbirinde kenar kırpılması ya da `t = 1`'de
+  sıçrama yok; `漢` ve `🎉` tek parça.
+- **Gerçek pencerede** (geçici paket, `pop` ve `echo`): yazım ve son hâl
+  temiz, komşu harfler bozulmuyor; 120 ms'lik ara kareler ekran
+  görüntüsüyle yakalanamıyor.
+- **Komşu yuva sınaması aynı kaldı**, doc'u `.`'nın seçimini açıklıyor:
+  kayan/büyüyen efektler hücreyi meşru olarak taşırıyor, `.`'nın mürekkebi
+  bugünkü genliklerde içeride kalıyor. Geniş glyph sınaması gelişlere de
+  genişledi (`a_wide_glyph_transforms_as_one_box`); `heat`'in uniform'unu
+  `heat_starts_in_the_cursor_color` bekliyor.
+- Bilinmeyen anahtar tanığı `keypress = "pop"` → `"bounce"`.
+
