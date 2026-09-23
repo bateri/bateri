@@ -30,6 +30,7 @@
 | 026 | [sekmeler](026-sekmeler/) | 🟢 | 4 phase + kapı tamam — macOS'un kendi sekmeleri (her sekme bir pencere + kendi oturumu), standart kısayollar, sekme başlığı ve temaya boyanmış saydam başlık çubuğu; bölme sonraki set |
 | 027 | [yumusak-kaydirma](027-yumusak-kaydirma/) | 🟢 | 3 phase + kapı tamam — trackpad parmağı piksel piksel izliyor, momentum AppKit'in olaylarıyla yavaşlıyor, jest sonunda pencere en yakın satıra süzülüyor ve tekerlek çentiği süzülüyor; `[motion] smooth_scroll = "off"`, Hareketi Azalt ve `snap` bugünkü satır adımı (1 + 1 bulgu giderildi) |
 | 028 | [kapatma-onayi](028-kapatma-onayi/) | 🟢 | 2 phase + kapı tamam — koşan süreç varken ⌘W, kırmızı düğme, "Close Other Tabs", ⇧⌘W ve ⌘Q jest başına tek soru soruyor (sayfa / uygulama uyarısı, süreç adıyla); kabuk boştayken, `exit`'te ve süreli koşuda sormuyor; `[terminal] confirm_close` |
+| 029 | [ayarlar-penceresi](029-ayarlar-penceresi/) | 📐 | Cmd-, yerel bir ayar penceresi açıyor: kenar çubuğunda General / Appearance / Cursor / Motion, sağda etiket–kontrol satırları; pencere yalnız `settings.toml`'a yazıyor (yorumlar yerinde), uygulayan bugünkü izleme yolu, bozuk dosyada kilitleniyor |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
