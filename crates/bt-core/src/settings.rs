@@ -13,7 +13,7 @@
 //! **Tek istisna `clipboard.osc52`:** kabul edilmeyen değeri varsayılanı
 //! (açık) değil kapalıyı alır ([`Settings::parse_keeping`]'in doc'u).
 //! **Bilinmeyen anahtar ve bölüm sessizce yoksayılır:** sonraki setlerin
-//! anahtarı (`[motion] keypress`) bugünkü sürümde tanı üretmemeli.
+//! anahtarı (`[motion] intensity`) bugünkü sürümde tanı üretmemeli.
 //!
 //! Ayrıştırıcı önceki ayarları yalnız kabul edilmeyen değerin yerine geçecek
 //! değer olarak görür ([`Settings::parse_keeping`], kayıt anı); fark almak
@@ -456,6 +456,64 @@ impl SmoothScroll {
     }
 }
 
+/// `[motion] keypress`: dock'ta yazılan glyph'in nasıl geldiği (030).
+///
+/// **Yalnız çizilebilen adlar** ([`Self::NAMES`]): referansın listesi daha
+/// uzun ve kalanı çizildikçe buraya giriyor — popup'ta ya da dosyada
+/// çizilmeyen bir ad kabul edilseydi seçmek hiçbir şey yapmazdı
+/// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 7).
+///
+/// Tüketicisi `bt-gpu` ([`CursorMotion`] emsali) ve değer **ham** gidiyor:
+/// `cursor_motion = "snap"` ile Hareketi Azalt'ın indirgemesi orada, imlecin
+/// kipiyle aynı yerde. Sürelerin ve eğrinin sahibi de orası.
+///
+/// Varsayılan **[`Self::Fade`]**: kullanıcı animasyonu açıkça istedi ve kutudan
+/// çıkınca görmeli; listenin en az yer değiştiren efekti — glyph yerinden
+/// oynamıyor, yalnız beliriyor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Keypress {
+    /// Glyph anında belirir.
+    Off,
+    /// Glyph yerinde saydamdan tam renge belirir.
+    #[default]
+    Fade,
+}
+
+impl Keypress {
+    /// Ayar dosyasındaki yazılışların tek listesi.
+    pub const NAMES: &'static [(&'static str, Self)] = &[("off", Self::Off), ("fade", Self::Fade)];
+
+    /// Ayar dosyasındaki yazılışı.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
+/// `[motion] erase`: dock'ta silinen glyph'in nasıl gittiği (030).
+///
+/// [`Keypress`]'in kardeşi, aynı kurallarla: yalnız çizilebilen adlar, ham
+/// değer `bt-gpu`'ya. Varsayılan **[`Self::Recede`]** — gidişlerin en az yer
+/// değiştireni, glyph yerinde küçülüp söner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Erase {
+    /// Glyph anında kaybolur.
+    Off,
+    /// Glyph merkezine doğru küçülerek geri çekilir ve söner.
+    #[default]
+    Recede,
+}
+
+impl Erase {
+    /// Ayar dosyasındaki yazılışların tek listesi.
+    pub const NAMES: &'static [(&'static str, Self)] =
+        &[("off", Self::Off), ("recede", Self::Recede)];
+
+    /// Ayar dosyasındaki yazılışı.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[shell] integration`: kabuğa sarmalayıcımız kurulsun mu.
 ///
 /// Anahtarın anlamı dar ve bilerek öyle: **"sarmalayıcıyı kurma"**. İşaretleri
@@ -585,6 +643,10 @@ pub struct Settings {
     pub reduce_motion: ReduceMotion,
     /// `[motion] smooth_scroll`: geçmişte kaydırmak pürüzsüz mü.
     pub smooth_scroll: SmoothScroll,
+    /// `[motion] keypress`: dock'ta yazılan glyph'in efekti.
+    pub keypress: Keypress,
+    /// `[motion] erase`: dock'ta silinen glyph'in efekti.
+    pub erase: Erase,
     /// `[shell] integration`: kabuk sarmalayıcısı kurulsun mu. **Sonraki
     /// oturumda** geçerli ([`ShellIntegration`]).
     pub shell_integration: ShellIntegration,
@@ -620,6 +682,8 @@ impl Default for Settings {
             cursor_motion: CursorMotion::default(),
             reduce_motion: ReduceMotion::default(),
             smooth_scroll: SmoothScroll::default(),
+            keypress: Keypress::default(),
+            erase: Erase::default(),
             shell_integration: ShellIntegration::default(),
             confirm_close: ConfirmClose::default(),
         }
@@ -690,6 +754,8 @@ pub enum SettingsEdit {
     CursorMotion(CursorMotion),
     ReduceMotion(ReduceMotion),
     SmoothScroll(SmoothScroll),
+    Keypress(Keypress),
+    Erase(Erase),
     ShellIntegration(ShellIntegration),
 }
 
@@ -729,6 +795,8 @@ impl SettingsEdit {
             Self::CursorMotion(_) => ("motion", "cursor_motion", "motion.cursor_motion"),
             Self::ReduceMotion(_) => ("motion", "reduce_motion", "motion.reduce_motion"),
             Self::SmoothScroll(_) => ("motion", "smooth_scroll", "motion.smooth_scroll"),
+            Self::Keypress(_) => ("motion", "keypress", "motion.keypress"),
+            Self::Erase(_) => ("motion", "erase", "motion.erase"),
             Self::ShellIntegration(_) => ("shell", "integration", "shell.integration"),
         }
     }
@@ -749,6 +817,8 @@ impl SettingsEdit {
             Self::CursorMotion(motion) => motion.name().into(),
             Self::ReduceMotion(reduce) => reduce.name().into(),
             Self::SmoothScroll(smooth) => smooth.name().into(),
+            Self::Keypress(keypress) => keypress.name().into(),
+            Self::Erase(erase) => erase.name().into(),
             Self::ShellIntegration(integration) => integration.name().into(),
             Self::CursorRadius(value)
             | Self::CursorGlow(value)
@@ -862,6 +932,14 @@ reduce_motion = "system"
 # line by line. Reduce Motion and cursor_motion = "snap" also move line by
 # line.
 smooth_scroll = "on"
+# "off" | "fade". How a letter you type in the dock at the bottom of the
+# window appears: fade brings it in from clear, off shows it at once.
+keypress = "fade"
+# "off" | "recede". How a letter you delete in the dock goes: recede shrinks
+# it away, off removes it at once. Pasting, history and deleting a whole word
+# or line are instant. cursor_motion = "snap" turns both off; Reduce Motion
+# keeps only a fade for typing.
+erase = "recede"
 
 [shell]
 # "auto" | "blocks" | "off". Whether bateri sets up the shell so it can report
@@ -1136,11 +1214,33 @@ integration = "auto"
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = motion.get("keypress") {
+                    parsed.settings.keypress = named_enum(
+                        text,
+                        item,
+                        "motion.keypress",
+                        Keypress::NAMES,
+                        fallback.keypress,
+                        &mut parsed.diagnostics,
+                    );
+                }
+                if let Some(item) = motion.get("erase") {
+                    parsed.settings.erase = named_enum(
+                        text,
+                        item,
+                        "motion.erase",
+                        Erase::NAMES,
+                        fallback.erase,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("motion") => {
                 parsed.settings.cursor_motion = fallback.cursor_motion;
                 parsed.settings.reduce_motion = fallback.reduce_motion;
                 parsed.settings.smooth_scroll = fallback.smooth_scroll;
+                parsed.settings.keypress = fallback.keypress;
+                parsed.settings.erase = fallback.erase;
             }
             None => {}
         }
@@ -1217,7 +1317,9 @@ integration = "auto"
             font: self.font != new.font,
             motion: self.cursor_motion != new.cursor_motion
                 || self.reduce_motion != new.reduce_motion
-                || self.smooth_scroll != new.smooth_scroll,
+                || self.smooth_scroll != new.smooth_scroll
+                || self.keypress != new.keypress
+                || self.erase != new.erase,
             caret: self.caret != new.caret || self.blink_interval != new.blink_interval,
         }
     }
@@ -1784,6 +1886,8 @@ mod tests {
             ("motion", "cursor_motion"),
             ("motion", "reduce_motion"),
             ("motion", "smooth_scroll"),
+            ("motion", "keypress"),
+            ("motion", "erase"),
             ("shell", "integration"),
         ] {
             assert!(
@@ -1964,6 +2068,8 @@ mod tests {
             cursor_motion: CursorMotion::Spring,
             reduce_motion: ReduceMotion::System,
             smooth_scroll: SmoothScroll::On,
+            keypress: Keypress::Fade,
+            erase: Erase::Recede,
             shell_integration: ShellIntegration::Auto,
             confirm_close: ConfirmClose::Always,
         };
@@ -2814,6 +2920,116 @@ found 1.5; using 0.1"
     }
 
     #[test]
+    fn keypress_and_erase_are_read() {
+        // Dosyada yoksa `fade` / `recede`: animasyon kutudan çıkınca
+        // görünmeli (030 Karar 7).
+        let empty = clean("");
+        assert_eq!(
+            (empty.keypress, empty.erase),
+            (Keypress::Fade, Erase::Recede)
+        );
+        for &(name, keypress) in Keypress::NAMES {
+            let settings = clean(&format!("[motion]\nkeypress = \"{name}\"\n"));
+            assert_eq!(settings.keypress, keypress, "{name}");
+            assert_eq!(keypress.name(), name);
+        }
+        for &(name, erase) in Erase::NAMES {
+            let settings = clean(&format!("motion = {{ erase = \"{name}\" }}\n"));
+            assert_eq!(settings.erase, erase, "{name}");
+            assert_eq!(erase.name(), name);
+        }
+        // Komşular birbirini ezmiyor.
+        let all = clean(
+            "[motion]\ncursor_motion = \"ease\"\nkeypress = \"off\"\nerase = \"off\"\n\
+             smooth_scroll = \"off\"\n",
+        );
+        assert_eq!(all.cursor_motion, CursorMotion::Ease);
+        assert_eq!(all.smooth_scroll, SmoothScroll::Off);
+        assert_eq!((all.keypress, all.erase), (Keypress::Off, Erase::Off));
+    }
+
+    #[test]
+    fn unrecognized_keypress_and_erase_keep_their_own_keys() {
+        // `pop` referansın bir efekti ama bugün çizilmiyor: tanınmıyor, yani
+        // seçmek hiçbir şey yapmayan bir ad kabul edilmiyor (030 Karar 7).
+        for (value, found) in [
+            ("\"pop\"", "\"pop\""),
+            ("\"Fade\"", "\"Fade\""),
+            ("1", "an integer"),
+        ] {
+            let text = format!("[motion]\ncursor_motion = \"snap\"\nkeypress = {value}\n");
+            let (settings, diagnostic) = rejected(&text);
+            assert_eq!(
+                settings,
+                Settings {
+                    cursor_motion: CursorMotion::Snap,
+                    ..Settings::default()
+                },
+                "{value}"
+            );
+            assert_eq!(diagnostic.key, Some("motion.keypress"), "{value}");
+            assert_eq!(diagnostic.line, Some(3), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`motion.keypress` must be \"off\" or \"fade\", found {found}; using \"fade\""
+                )
+            );
+        }
+        let (settings, diagnostic) =
+            rejected("[motion]\nkeypress = \"off\"\nerase = \"shatter\"\n");
+        assert_eq!(settings.keypress, Keypress::Off);
+        assert_eq!(settings.erase, Erase::Recede);
+        assert_eq!(diagnostic.key, Some("motion.erase"));
+        assert_eq!(
+            diagnostic.message,
+            "`motion.erase` must be \"off\" or \"recede\", found \"shatter\"; using \"recede\""
+        );
+        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
+        let current = Settings {
+            keypress: Keypress::Off,
+            erase: Erase::Off,
+            ..Settings::default()
+        };
+        let parsed =
+            Settings::parse_keeping("[motion]\nkeypress = \"x\"\nerase = \"y\"\n", &current)
+                .expect("ayrıştırılabilir metin");
+        assert_eq!(
+            (parsed.settings.keypress, parsed.settings.erase),
+            (Keypress::Off, Erase::Off)
+        );
+        assert_eq!(parsed.diagnostics.len(), 2);
+        let parsed =
+            Settings::parse_keeping("motion = 5\n", &current).expect("ayrıştırılabilir metin");
+        assert_eq!(
+            (parsed.settings.keypress, parsed.settings.erase),
+            (Keypress::Off, Erase::Off)
+        );
+    }
+
+    #[test]
+    fn keypress_and_erase_changes_are_motion_changes() {
+        // İkisi de link'e gidiyor (`bt_gpu::DisplayLink::set_glyph_fx`), yani
+        // `motion` kolunda; oturumu ve fontu kıpırdatmamalı.
+        let before = clean("");
+        for text in [
+            "[motion]\nkeypress = \"off\"\n",
+            "[motion]\nerase = \"off\"\n",
+        ] {
+            assert_eq!(
+                before.changes(&clean(text)),
+                Changes {
+                    terminal: false,
+                    font: false,
+                    motion: true,
+                    caret: false
+                },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn unrecognized_smooth_scroll_keeps_its_own_key() {
         // `cursor_motion` ile aynı kural: yalnız kendi anahtarı etkilenir,
         // yanında tanı.
@@ -2968,16 +3184,16 @@ found 1.5; using 0.1"
 
     #[test]
     fn unknown_keys_and_sections_are_silent() {
-        // Sonraki setlerin anahtarları bugün tanı üretmemeli: `keypress` ve
-        // `intensity` referansın `[motion]` bölümünde var, bizde yok
-        // (008 → Kapsam dışı).
+        // Sonraki setlerin anahtarları bugün tanı üretmemeli: `intensity`
+        // ve `speed` referansın `[motion]` bölümünde var, bizde yok
+        // (008 → Kapsam dışı; `keypress` 030'da tanındı ve tanık oldu).
         let text = "\
 future = true
 [terminal]
 scrollback = 42
 shape = \"block\"
 [motion]
-keypress = \"pop\"
+speed = \"brisk\"
 intensity = 0.5
 [font]
 line_height = 1.2
@@ -3194,6 +3410,8 @@ cursor = \"spring\"
             SettingsEdit::CursorMotion(motion) => settings.cursor_motion = motion,
             SettingsEdit::ReduceMotion(reduce) => settings.reduce_motion = reduce,
             SettingsEdit::SmoothScroll(smooth) => settings.smooth_scroll = smooth,
+            SettingsEdit::Keypress(keypress) => settings.keypress = keypress,
+            SettingsEdit::Erase(erase) => settings.erase = erase,
             SettingsEdit::ShellIntegration(integration) => {
                 settings.shell_integration = integration;
             }
@@ -3225,6 +3443,8 @@ cursor = \"spring\"
             SettingsEdit::CursorMotion(CursorMotion::Ease),
             SettingsEdit::ReduceMotion(ReduceMotion::On),
             SettingsEdit::SmoothScroll(SmoothScroll::Off),
+            SettingsEdit::Keypress(Keypress::Off),
+            SettingsEdit::Erase(Erase::Off),
             SettingsEdit::ShellIntegration(ShellIntegration::Blocks),
         ]
     }

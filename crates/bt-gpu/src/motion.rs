@@ -51,9 +51,7 @@
 //! değerli `reduce_motion` ile sistemin cevabını `bt-shell` birleştiriyor,
 //! çünkü `bt-gpu` AppKit görmüyor.
 
-use bt_core::{CursorMotion, ScrollGlide};
-
-use crate::glyph_fx::{EraseFx, KeypressFx};
+use bt_core::{CursorMotion, Erase, Keypress, ScrollGlide};
 
 /// Yay sertliği, rad/s. **Seçilmiş bir sayı, ölçülmüş değil.**
 ///
@@ -298,11 +296,11 @@ impl Motion {
     /// çünkü hayalet orada olmayan bir içerik. Erişilebilirlik ayarı
     /// animasyon **eklemez**: kapalı geliş kapalı kalır
     /// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 7).
-    pub(crate) fn glyph_fx(self, keypress: KeypressFx, erase: EraseFx) -> (KeypressFx, EraseFx) {
+    pub(crate) fn glyph_fx(self, keypress: Keypress, erase: Erase) -> (Keypress, Erase) {
         match (self.style, self.reduce) {
-            (CursorMotion::Snap, _) => (KeypressFx::Off, EraseFx::Off),
-            (_, true) if keypress == KeypressFx::Off => (KeypressFx::Off, EraseFx::Off),
-            (_, true) => (KeypressFx::Fade, EraseFx::Off),
+            (CursorMotion::Snap, _) => (Keypress::Off, Erase::Off),
+            (_, true) if keypress == Keypress::Off => (Keypress::Off, Erase::Off),
+            (_, true) => (Keypress::Fade, Erase::Off),
             _ => (keypress, erase),
         }
     }
