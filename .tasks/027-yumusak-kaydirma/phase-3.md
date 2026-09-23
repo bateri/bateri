@@ -68,4 +68,6 @@ _Requirements: R3.1, R3.2, R3.3, R3.4_
 - [ ] Tek `bool` birleşmesi ve kayıt anında yayılım
 - [ ] `docs/AYARLAR.md` ve `CLAUDE.md`
 - [ ] Test: niyet tablosu, `off` kolunun bugünküyle aynılığı, ayar round-trip
-- [ ] Doğrulama geçti (`make hepsi`, `make duman`)
+- [ ] Doğrulama geçti (`make hepsi`, `make duman`) — `make duman` phase-2'nin `/code-review`
+  düzeltmelerinden sonra ortam yüzünden koşulamadı (HEAD de kırmızıydı);
+  burada yeşil görülmeli

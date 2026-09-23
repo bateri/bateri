@@ -611,7 +611,31 @@ pub(crate) struct Frame {
     /// ötelemeyi **yine de yazıyor** (`link.rs`'in ikinci yazma noktası):
     /// kayma iki içerik karesi arasında ilerliyor ve korunan bir değer
     /// ilerleyemez.
+    ///
+    /// **Kaydırmanın kesri burada değil** ([`Frame::frac_px`]): viewport'un
+    /// orijini ikisinin toplamı ve toplamı yalnız [`Frame::origin_px`]
+    /// veriyor, yani iki setter'ın çağrı sırası sonucu değiştirmiyor.
     origin_px: f32,
+    /// Kaydırmanın kesri (`bt_core::Cursor::scroll_frac`), **aygıt pikseline
+    /// yuvarlı** — [`Frame::origin_px`]'in ikinci terimi.
+    ///
+    /// Ötelemeden **ayrı** tutuluyor ve ayrı yuvarlanıyor, çünkü iki
+    /// tüketicisi ayrışıyor: ızgaranın viewport'u ikisinin toplamını, caret
+    /// ise **yalnız bunu** istiyor ([`Frame::push_caret`]) — caret ötelemenin
+    /// kaymasından muaf (hedefi ekran satırı) ama kesirden değil, kesir
+    /// ızgaranın bütün dünyasını, altındaki imleç dahil kaydırıyor. Toplam
+    /// tek yuvarlamayla yazılsaydı caret'in payı ondan geri çıkarılamazdı ve
+    /// yerleşmiş caret harfinden bir piksel ayrışabilirdi.
+    ///
+    /// **Bir hücreden kısa** ([`Frame::set_scroll_frac`]): yuvarlama
+    /// `1 − ½/h`'nin üstündeki kesri tam hücreye çıkarır ve ızgara ofset
+    /// değişmeden bir satır aşağı çizilirdi.
+    ///
+    /// [`Frame::clear`] sıfırlıyor (içerik karesi her karede yeniden
+    /// söylüyor); hareket karesi onu **koruyor**, çünkü `clear` çağırmıyor ve
+    /// kesir yalnız içerik karesinde değişebiliyor — süzülme uçuştayken link
+    /// içerik yoluna düşüyor.
+    frac_px: f32,
     /// İmlecin piksel dikdörtgeni ve blok altındaki metin rengi; `cell`
     /// pipeline'ının uniform'u.
     ///
@@ -749,6 +773,8 @@ impl Frame {
         // bugünkü (tavana yapışık) yerleşimi çiziyor — sessiz bir yanlış
         // ötelemeden iyi.
         self.origin_px = 0.0;
+        // Kesir de aynı sözleşmede: söylemeyen kare tam satırda çiziyor.
+        self.frac_px = 0.0;
     }
 
     /// Bu karenin dikey orijini, **satır** cinsinden: içerik bu kadar aşağıdan
@@ -770,14 +796,40 @@ impl Frame {
     ///
     /// Satır alıyor piksel saklıyor demenin ikinci sonucu bu: yuvarlama ancak
     /// hücre boyunun bilindiği yerde yapılabilir.
+    ///
+    /// **Kaydırmanın kesri ayrı yuvarlanıyor** ([`Frame::set_scroll_frac`]) ve
+    /// [`Frame::origin_px`] ikisini topluyor: toplam tek yuvarlamadan en çok
+    /// bir piksel ayrışıyor — o da yalnız öteleme kayarken kesir de sıfırdan
+    /// büyükse, yani iki hareketin üst üste bindiği bir karede. Kazanç
+    /// yerleşmiş hâlde: caret'in payı toplamdan değil kesrin kendisinden
+    /// geliyor ve harfiyle bit bit aynı pikselde duruyor.
     pub(crate) fn set_origin_rows(&mut self, rows: f32) {
         debug_assert!(self.cell_px.1 > 0.0, "clear(metrics) çağrılmadı");
         self.origin_px = (rows * self.cell_px.1).round();
     }
 
-    /// Bu karenin dikey orijini, piksel; `setViewport`'un `originY`'si.
+    /// Bu karenin kaydırma kesri, **satır** (`[0, 1)`,
+    /// `bt_core::Cursor::scroll_frac`): ızgara bu kadar aşağı çizilecek.
+    ///
+    /// Caret'ten **önce** çağrılıyor ([`Frame::push_caret`] kesri ızgaradaki
+    /// caret'e ekliyor); ötelemeyle sırası serbest. Sıfır kesir kareyi
+    /// bugünküyle bit bit aynı bırakıyor: yuvarlanmış sıfır, eklenen sıfır.
+    ///
+    /// Piksel **bir hücreden kısa** kırpılıyor: `[0, 1)` satır sözleşmesi
+    /// yuvarlamadan sonra da geçerli kalmalı — tam hücre, ofseti değişmemiş
+    /// bir ızgarayı bir satır aşağı çizer, tepe satırını tümden seçilemez
+    /// kılar ve son satırın caret'ini dock'un altına gömerdi.
+    pub(crate) fn set_scroll_frac(&mut self, frac: f32) {
+        debug_assert!(self.cell_px.1 > 0.0, "clear(metrics) çağrılmadı");
+        self.frac_px = (frac * self.cell_px.1)
+            .round()
+            .clamp(0.0, (self.cell_px.1 - 1.0).max(0.0));
+    }
+
+    /// Bu karenin dikey orijini, piksel; `setViewport`'un `originY`'si —
+    /// öteleme artı kaydırmanın kesri.
     pub(crate) fn origin_px(&self) -> f32 {
-        self.origin_px
+        self.origin_px + self.frac_px
     }
 
     /// Sink'in tek girişi: hücrenin arka planı varsa boyanır, mürekkebi varsa
@@ -973,8 +1025,25 @@ impl Frame {
             && matches!(shape, CaretShape::Block)
             && self.caret_style.unfocused == UnfocusedCaret::Hollow;
         self.caret_hollow = hollow;
-        let pos = self.pos_at(at);
-        let top = pos[1];
+        let mut pos = self.pos_at(at);
+        // **Yuva kaydırmadan önce seçiliyor** ve kesir ızgaranın yuvasındaki
+        // caret'e ekleniyor ([`Frame::frac_px`]): ızgara kesir kadar aşağıda,
+        // caret onun harfinin üstünde durmak zorunda. Dock yuvası kaydırmadan
+        // muaf — dock ayrı bir yüzey ve orada duran caret kaydırılan ekranın
+        // parçası değil. Seçim kaydırılmamış konuma bakıyor, çünkü kesir bir
+        // devir değil: ızgaranın son satırındaki caret'i dock'un yuvasına
+        // itseydi dock'un zemininin **altında** değil üstünde, harfinden
+        // kopuk çizilirdi — oysa ızgaranın taşan harfini de dock örtüyor.
+        //
+        // **Bilinen sınır:** ızgaradan dock'a devir kaymasında eşiği geçen
+        // karede kesir düşüyor, yani caret o karede kesir kadar sıçrıyor.
+        // Kesir yalnız süren bir jestte sıfırdan büyük ve devir komutun
+        // bitişinde, yani ikisinin aynı kareye denk gelmesi dar; kapatmak
+        // kesri caret'in animatörüne taşımak demek.
+        let in_dock = pos[1] + self.cell_px.1 > self.dock_top_px;
+        if !in_dock {
+            pos[1] += self.frac_px;
+        }
         // **Şekil `Frame`'de yaşıyor**, imzada taşınıp unutulmuyor: hareket
         // karesi ([`Frame::move_caret`]) `bt-core`'a hiç gitmiyor ve şekli
         // bilmiyor. Alan olmasaydı ilk hareket karesinde beam bloğa dönerdi
@@ -988,12 +1057,22 @@ impl Frame {
         // `shifted_y` ile taşıyordu; tek caret o çeviriyi büsbütün kaldırdı.
         let rects = caret_rect(pos, self.cell_px, shape, self.rule_px, hollow);
         let (opaque_pos, opaque_size) = rects.opaque;
+        let mut bottom = opaque_pos[1] + opaque_size[1];
+        // **Izgaranın caret'i dock bandında ters çevirmiyor.** Kesirle kayan
+        // son satırın caret'i banda girebiliyor ve orada harfiyle birlikte
+        // dock'un opak zemininin altında kalıyor; dikdörtgen ise iki glyph
+        // encode'una da gidiyor ve kırpılmasaydı dock'un o sütundaki harfleri
+        // zemin renginde, yani görünmez çizilirdi. Dock'suz karede sınır
+        // sonsuz ve kırpma kimlik.
+        if !in_dock {
+            bottom = bottom.min(self.dock_top_px);
+        }
         self.cursor = CursorBlock {
             rect: [
                 opaque_pos[0],
                 opaque_pos[1],
                 opaque_pos[0] + opaque_size[0],
-                opaque_pos[1] + opaque_size[1],
+                bottom.max(opaque_pos[1]),
             ],
             rgba: with_alpha(text, alpha),
         };
@@ -1022,7 +1101,7 @@ impl Frame {
             at: pos,
             rgba: with_alpha(rgba, alpha),
         };
-        if top + self.cell_px.1 > self.dock_top_px {
+        if in_dock {
             self.dock_caret = Some(caret);
         } else {
             self.grid_caret = Some(caret);
@@ -1303,7 +1382,7 @@ impl Frame {
             // bir hücre. Okuma anında yapılıyor, çünkü `origin_px` `push_caret`
             // ile encode arasında hâlâ değişebilir (`set_origin_rows` sink'ten
             // sonra çağrılıyor).
-            instance.pos[1] -= self.origin_px;
+            instance.pos[1] -= self.origin_px();
             instance
         })
     }
@@ -1330,8 +1409,14 @@ impl Frame {
         self.dock_top_px = top_px;
     }
 
-    /// Doldurma bandının bu karedeki yüksekliği, satır
-    /// (`bt_core::Cursor::fill`).
+    /// Doldurma **kanalının** bu karedeki yüksekliği, satır: bandın
+    /// (`bt_core::Cursor::fill`) artı kesrin tepe satırı
+    /// (`bt_core::Cursor::top_row`), yani `top_row + fill`.
+    ///
+    /// Tepe satırı ayrı bir yüzey değil, kanalın en üst satırı: fill-yerel
+    /// `0`, bandın satırları onun altında. Bandın orijini
+    /// ([`Frame::fill_origin_px`]) boydan türüyor, yani tepe satırı bandla ve
+    /// ızgarayla birlikte kayıyor ve ikinci bir aritmetik doğmuyor.
     ///
     /// Hücrelerden **önce** çağrılıyor ve bu dock'un tersi bir sıra: dock'un
     /// renkleri hücreleri basan çağrıdan dönüyor ([`Frame::open_dock`]), bandın
@@ -1341,7 +1426,8 @@ impl Frame {
         self.fill_rows = rows;
     }
 
-    /// Doldurma bandının yüksekliği, satır; sıfır → bant yok.
+    /// Doldurma kanalının yüksekliği, satır (tepe satırı dahil); sıfır →
+    /// kanal yok.
     pub(crate) fn fill_rows(&self) -> u16 {
         self.fill_rows
     }
@@ -1436,7 +1522,7 @@ impl Frame {
     /// bir kez daha koşuyor (hareket karesi) ve bant onunla **birlikte**
     /// kaymak zorunda (R3.1).
     pub(crate) fn fill_origin_px(&self) -> f32 {
-        self.origin_px - f32::from(self.fill_rows) * self.cell_px.1
+        self.origin_px() - f32::from(self.fill_rows) * self.cell_px.1
     }
 
     /// Halenin payı, piksel — sol paydan türüyor ([`CARET_GLOW_RATIO`]),
@@ -2586,6 +2672,152 @@ mod tests {
             // Hücrenin kendisi kıpırdamıyor: kayan şey uzayın ta kendisi.
             assert_eq!(frame.fill_bg()[0], pushed, "bant ötelemeyi yedi");
         }
+    }
+
+    #[test]
+    fn the_scroll_fraction_lowers_the_grid_by_whole_device_pixels() {
+        // **R2.1:** kaydırmanın kesri ızgarayı o kadar aşağı çiziyor ve
+        // piksel ötelemeninki gibi **aygıt ızgarasına** oturuyor — yarım
+        // pikselde dinlenen bir kaydırma bütün metni bulanıklaştırırdı.
+        // Kesir ötelemeden **ayrı** yuvarlanıyor, çünkü caret ötelemeden muaf
+        // ama kesirden değil ve kendi payını tek başına istiyor
+        // (`the_grid_caret_rides_the_fraction_and_the_dock_caret_does_not`).
+        let mut frame = Frame::default();
+        frame.clear(grid(9, 18), CaretStyle::default());
+        frame.set_scroll_frac(0.3);
+        frame.set_origin_rows(0.0);
+        assert_eq!(frame.origin_px(), 5.0, "kesir piksele yuvarlanmadı");
+        frame.set_origin_rows(2.0);
+        assert_eq!(frame.origin_px(), 41.0, "kesir ötelemeye eklenmedi");
+
+        // Hareket karesi `clear` çağırmıyor: kesir korunuyor ve öteleme her
+        // yazıldığında yeniden ekleniyor.
+        frame.set_origin_rows(1.0);
+        assert_eq!(frame.origin_px(), 23.0, "hareket karesi kesri düşürdü");
+
+        // `clear` kesri bırakıyor: içerik karesi onu her karede yeniden
+        // söylüyor, söylemeyen kare tam satırda çiziyor.
+        frame.clear(grid(9, 18), CaretStyle::default());
+        frame.set_origin_rows(2.0);
+        assert_eq!(frame.origin_px(), 36.0, "clear kesri bırakmadı");
+
+        // Sıra serbest: kesir ötelemeden sonra yazılsa da toplamda.
+        frame.set_scroll_frac(0.3);
+        assert_eq!(frame.origin_px(), 41.0, "kesir sıraya bağlı");
+
+        // Yuvarlama tam hücreye çıkmıyor: ofseti değişmemiş ızgara bir satır
+        // aşağı çizilemez.
+        frame.set_scroll_frac(0.99);
+        assert_eq!(
+            frame.origin_px(),
+            36.0 + 17.0,
+            "kesir bir hücreye yuvarlandı"
+        );
+    }
+
+    #[test]
+    fn a_grid_caret_pushed_into_the_dock_band_does_not_invert_the_dock() {
+        // Kesirle kayan son satırın caret'i dock bandına girebiliyor ve orada
+        // harfiyle birlikte dock'un zemininin altında. Ters çevirme dikdörtgeni
+        // iki glyph encode'una da gidiyor: kırpılmasaydı dock'un o sütundaki
+        // harfleri zemin renginde, görünmez çizilirdi.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.set_dock_top(64.0);
+        frame.set_scroll_frac(0.5);
+        frame.push_caret([0.0, 3.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
+        assert!(
+            frame.grid_caret().is_some(),
+            "kesir caret'i dock'a devretti"
+        );
+        let rect = frame.cursor_block().rect;
+        assert_eq!(rect[1], 56.0);
+        assert_eq!(rect[3], 64.0, "ters çevirme dock bandına taştı");
+    }
+
+    #[test]
+    fn the_top_row_sits_above_the_band_and_rides_with_it() {
+        // **R2.2:** kesrin açtığı şeridi kapatan satır doldurma kanalının en
+        // üstünde (fill-yerel `0`), bandın satırları onun altında. Kanalın
+        // boyu `top_row + fill` ve bandın orijini de ondan türüyor, yani
+        // tepe satırı bandla ve ızgarayla **birlikte** kayıyor. Sayaçlara da
+        // girmiyor: `hucre=`/`glif=`/`kural=` ızgaranın tanıkları.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.set_scroll_frac(0.25);
+        // Bir tepe satırı, iki bant satırı.
+        frame.set_fill_rows(3);
+        frame.push_fill(fill_cell(0, 0));
+        frame.push_fill(fill_cell(0, 1));
+        frame.push_fill(fill_cell(0, 2));
+        frame.push_fill_block(block(0));
+
+        assert_eq!(frame.bg_count(), 0, "tepe satırı hücre sayıldı");
+        assert_eq!(frame.glyph_count(), 0, "tepe satırı glyph sayıldı");
+        assert_eq!(frame.rule_count(), 0, "tepe satırı kural sayıldı");
+
+        for rows in [2.0, 1.5, 0.0] {
+            frame.set_origin_rows(rows);
+            let origin = frame.origin_px();
+            assert_eq!(origin, (rows * 16.0).round() + 4.0);
+            let band = frame.fill_origin_px();
+            assert_eq!(band, origin - 48.0, "kanal tepe satırını saymadı");
+            // Ekrandaki yerler: tepe satırı ızgaranın üç satır, bandın son
+            // satırı bir satır üstünde — aradaki boşluk sıfır.
+            let top = band + frame.fill_bg()[0].pos[1];
+            let last = band + frame.fill_bg()[2].pos[1];
+            assert_eq!(top, origin - 48.0);
+            assert_eq!(last + 16.0, origin, "bant ızgaraya değmiyor");
+        }
+        // Tepe satırının işareti de bandın listesinde, ızgaranınkinde değil.
+        assert_eq!(frame.fill_rules().len(), 1);
+        assert!(
+            frame.stripes().is_empty(),
+            "tepe satırının işareti ızgaraya düştü"
+        );
+    }
+
+    #[test]
+    fn the_grid_caret_rides_the_fraction_and_the_dock_caret_does_not() {
+        // **Kesir ızgaranın bütün dünyasını kaydırıyor, caret dahil.** Caret
+        // ötelemeden muaf (hedefi ekran satırı), kesirden değil: ızgara kesir
+        // kadar aşağı çizilirken caret yerinde kalsaydı blok harfinin bir
+        // kısmını ve üstteki satırın bir şeridini örter, ters çevirme de
+        // yanlış pikselleri çevirirdi — `sleep 10`'un imleci ile trackpad'de
+        // yarım satır yukarı. Dock caret'i ise kaydırmadan muaf: dock ayrı bir
+        // yüzey.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.set_dock_top(64.0);
+        frame.set_scroll_frac(0.5);
+        frame.set_origin_rows(0.0);
+        frame.push(bg_cell(0, 2));
+        frame.push_caret([0.0, 2.0], TEXT, CURSOR, OPAQUE, CaretShape::Block, true);
+        // Hücrenin ekrandaki yeri: listedeki konum + viewport'un orijini.
+        let cell_on_screen = frame.bg_instances()[0].pos[1] + frame.origin_px();
+        assert_eq!(cell_on_screen, 40.0);
+        assert_eq!(
+            frame.grid_caret().expect("caret").pos[1] + frame.origin_px(),
+            cell_on_screen,
+            "caret harfinden ayrıldı"
+        );
+        assert_eq!(
+            frame.cursor_block().rect[1],
+            cell_on_screen,
+            "ters çevirme harfin üstünde değil"
+        );
+        assert_eq!(frame.caret_core()[1], cell_on_screen);
+
+        // Hareket karesi de aynı kaydırmayı uyguluyor: kesir `Frame`'de duruyor.
+        frame.move_caret([0.0, 2.0], TEXT, CURSOR, OPAQUE, true);
+        assert_eq!(frame.cursor_block().rect[1], cell_on_screen);
+
+        // Yuva seçimi **kaydırılmamış** konuma bakıyor: kesir bir devir değil.
+        // Dock bandındaki caret kıpırdamıyor.
+        frame.move_caret([0.0, 4.0], TEXT, CURSOR, OPAQUE, true);
+        let caret = frame.dock_caret(64.0).expect("caret dock yuvasında değil");
+        assert_eq!(caret.pos[1], 0.0, "dock caret'i kesirle kaydı");
+        assert_eq!(frame.cursor_block().rect[1], 64.0);
     }
 
     #[test]

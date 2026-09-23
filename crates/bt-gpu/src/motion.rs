@@ -4,12 +4,17 @@
 //! olduğu için ayrı bir tipte yaşıyor ve gerçek bir pencere olmadan sınanıyor.
 //! `link.rs`'e gömülü kalsaydı yalnız ekranda denenebilirdi.
 //!
-//! **İki animatör, tek tip** ([`Motion`]): imleç ([`State`], iki eksen) ve
-//! ötelemenin kayması ([`Slide`], tek eksen). Ayrı bir tipe çıkarılmadılar,
-//! çünkü link'in uyku kararı tek: `motion.settled()` (`link.rs`'in "hasar yok"
-//! dalı). İkinci bir animatör o kapının **dışında** kalsaydı link kayma
-//! ortasında uyur ve içerik donardı — animasyonun görünen belirtisi
-//! "yarıda kaldı" olurdu.
+//! **Üç animatör, tek tip** ([`Motion`]): imleç ([`State`], iki eksen),
+//! ötelemenin kayması ve çentiğin süzülmesi (ikisi de [`Slide`], tek eksen).
+//! Ayrı tiplere çıkarılmadılar, çünkü link'in uyku kararı tek:
+//! `motion.settled()` (`link.rs`'in "hasar yok" dalı). Bir animatör o kapının
+//! **dışında** kalsaydı link kayma ortasında uyur ve içerik donardı —
+//! animasyonun görünen belirtisi "yarıda kaldı" olurdu.
+//!
+//! **Süzülme ötekilerden farklı bir şey çiziyor** ([`Motion::request_glide`]):
+//! konumu ekrana değil `Session`'a gidiyor. Birimi "teslim edilecek satır" ve
+//! kare başına **payı** (konumun değişimi) `Session::frame`'in argümanı; pencere
+//! o payla kayıyor, yani süzülme ötelemenin değil kaydırmanın animasyonu.
 //!
 //! **İkisi aynı fiziği paylaşıyor, aynı kipi değil.** Sabitler, kübik
 //! yavaşlama ve yayın kapalı formu ortak ([`ease_axis`], [`spring_axis`],
@@ -46,7 +51,7 @@
 //! değerli `reduce_motion` ile sistemin cevabını `bt-shell` birleştiriyor,
 //! çünkü `bt-gpu` AppKit görmüyor.
 
-use bt_core::CursorMotion;
+use bt_core::{CursorMotion, ScrollGlide};
 
 /// Yay sertliği, rad/s. **Seçilmiş bir sayı, ölçülmüş değil.**
 ///
@@ -191,6 +196,27 @@ pub(crate) struct Motion {
     /// geçmişi kaybolmamalı: TUI imleci gizleyip pencereyi kaydırır, sonra
     /// geri açar.
     offset: Option<i32>,
+    /// Çentiğin süzülmesi: [`Slide`]'ın ikinci örneği, birimi **teslim
+    /// edilecek satır** ([`Motion::request_glide`]).
+    ///
+    /// `Option` değil: ötelemenin `None`'ı "ilk kare, hedefe otur" demek,
+    /// süzülmenin dinlenme hâli ise sıfırda duran bir konum — istek yoksa
+    /// gidecek yol da yok. Konum her teslimde sıfıra **yeniden dayanıyor**
+    /// ([`Motion::take_glide`]), yani dinlenirken `pos == target == 0` ve
+    /// sayılar bir oturum boyunca büyüyüp `f32`'nin hassasiyetini yemiyor.
+    glide: Slide,
+    /// Süzülmenin ait olduğu kaydırma nesli (`bt_core::ScrollGlide`).
+    ///
+    /// Pay `Session::frame`'e bu nesille gidiyor; konum dışarıdan
+    /// sıfırlanınca (girdide dibe dönüş, Shift+PgUp) nesil artıyor ve uçuştaki
+    /// süzülme **düşüyor** ([`Motion::observe_scroll_generation`]).
+    glide_generation: u32,
+    /// Son içerik karesinin kaydırma konumu, `(display_offset, kesir)` —
+    /// süzülmenin uca çarptığını gören tek tanık ([`Motion::observe_scroll`]).
+    ///
+    /// Konum değil **kimlik**, [`Motion::offset`] gibi: karşılaştırılıyor,
+    /// sayı olarak kullanılmıyor.
+    glide_at: Option<(i32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -222,14 +248,15 @@ struct State {
     since_move: f32,
 }
 
-/// Ötelemenin kaymasının durumu — [`State`]'in **tek eksenli** kardeşi.
+/// Ötelemenin kaymasının — ve çentiğin süzülmesinin — durumu: [`State`]'in
+/// **tek eksenli** kardeşi.
 ///
 /// Ayrı bir tip, `State`'in ikinci ekseni boş bırakılarak değil: kullanılmayan
 /// bir eksen tipin söylediği yalan olurdu ve `since_move` (belirmenin saati)
 /// buraya hiç girmiyor — öteleme belirmiyor ([`Motion::origin_mode`]).
 /// Paylaşılan şey **fizik**: [`ease_axis`], [`spring_axis`] ve
 /// [`axis_settled`] ikisinin de altında.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Slide {
     /// Satır cinsinden; tam sayı olmak zorunda değil. Piksele çeviren ve
     /// **aygıt ızgarasına yuvarlayan** taraf `Frame::set_origin_rows`.
@@ -609,6 +636,8 @@ impl Motion {
             slide.from = slide.pos;
             slide.elapsed = 0.0;
         }
+        self.glide.from = self.glide.pos;
+        self.glide.elapsed = 0.0;
         false
     }
 
@@ -654,6 +683,7 @@ impl Motion {
     pub(crate) fn advance(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, DT_MAX);
         self.advance_origin(dt);
+        self.advance_glide(dt);
         let mode = self.mode();
         let Some(state) = &mut self.state else {
             return;
@@ -709,6 +739,142 @@ impl Motion {
         }
     }
 
+    /// [`Motion::advance`]'ın süzülme yarısı; öteleme ile **aynı fizik ve aynı
+    /// kip** ([`Motion::origin_mode`]): ikisi de ızgaranın yer değiştirmesi ve
+    /// Hareketi Azalt ikisini de snap'liyor.
+    fn advance_glide(&mut self, dt: f32) {
+        let mode = self.origin_mode();
+        let glide = &mut self.glide;
+        glide.elapsed += dt;
+        match mode {
+            Mode::Ease => glide.ease(),
+            Mode::Spring => glide.spring(dt),
+            // `Snap`'te istek zaten anında teslim edildi
+            // ([`Motion::request_glide`]); `Fade` [`Motion::origin_mode`]'dan
+            // hiç gelmiyor.
+            Mode::Snap | Mode::Fade => {}
+        }
+        if glide.settled(mode) {
+            // Öteki iki animatörle aynı üçlü: konum **tam** hedefe. Burada
+            // üstelik bir sözleşme — hedefte kalan artık teslim edilmeseydi
+            // payların toplamı istekten `POS_EPSILON` kadar eksik kalır ve her
+            // çentik pencereyi bir satırın kesrinde bırakırdı.
+            glide.pos = glide.target;
+            glide.vel = 0.0;
+            glide.from = glide.target;
+        }
+    }
+
+    /// Kaydırmanın **süzülme isteği** geldi (`Session::take_scroll_glide`):
+    /// `request.rows` satır daha teslim edilecek.
+    ///
+    /// Önce nesil soruluyor ([`Motion::observe_scroll_generation`]): istek
+    /// yeni bir nesle aitse uçuştaki süzülme eski konumun payını taşıyor ve
+    /// düşüyor, istek sıfırdan başlıyor.
+    ///
+    /// **Uçuştaki süzülmeye ekleniyor**, baştan başlamıyor: hedef büyüyor,
+    /// kayma bulunduğu yerden yeniden kuruluyor (`from`, `elapsed`) ve yay
+    /// hızını koruyor — art arda gelen çentikler tek bir akış. Öteleme gibi
+    /// yeniden hedeflemenin kuralı ([`Motion::sync_origin`]).
+    ///
+    /// **Link bunu `advance`'ten sonra çağırıyor** ve sıra zorunlu: uykudan
+    /// uyanan link'in ilk `dt`'si [`DT_MAX`]'e kırpılmış bir uydurma ve
+    /// yeni isteğe uygulansaydı `ease`'de çentiğin yarısı tek karede
+    /// giderdi. İlk pay bu yüzden sıfır, süzülme sıradaki karede başlıyor —
+    /// imleç ve ötelemenin "önce geçen süre, sonra yeni hedef" kuralı.
+    ///
+    /// `Snap` kipinde (`cursor_motion = "snap"`, Hareketi Azalt) istek
+    /// **anında** teslim ediliyor: hareketi kapatmış kullanıcıya çentik
+    /// animasyon eklemez.
+    pub(crate) fn request_glide(&mut self, request: ScrollGlide) {
+        self.observe_scroll_generation(request.generation);
+        if request.rows == 0.0 {
+            return;
+        }
+        let snap = self.origin_mode() == Mode::Snap;
+        let glide = &mut self.glide;
+        glide.target += request.rows;
+        glide.from = glide.pos;
+        glide.elapsed = 0.0;
+        if snap {
+            glide.pos = glide.target;
+            glide.from = glide.target;
+            glide.vel = 0.0;
+        }
+    }
+
+    /// Bu karenin **payı**: son teslimden beri süzülmenin aldığı yol, satır —
+    /// `Session::frame`'in argümanı, ait olduğu nesille.
+    ///
+    /// Konum burada sıfıra yeniden dayanıyor (`from`, `target` ve `pos` aynı
+    /// miktar kaydırılıyor): kübik yavaşlama da yayın kapalı formu da öteleme
+    /// altında değişmez, yani kayma kıpırdamıyor, yalnız sayılar küçük
+    /// kalıyor. Yan kazancı yerleşmenin tanımı: dinlenen süzülmede üçü de
+    /// tam sıfır ([`Motion::glide_idle`]).
+    pub(crate) fn take_glide(&mut self) -> ScrollGlide {
+        let glide = &mut self.glide;
+        let rows = glide.pos;
+        glide.from -= rows;
+        glide.target -= rows;
+        glide.pos = 0.0;
+        ScrollGlide {
+            rows,
+            generation: self.glide_generation,
+        }
+    }
+
+    /// Kaydırmanın bu anki nesli; süzülme başka bir nesle aitse **düşer**.
+    ///
+    /// Kalan pay teslim edilmiyor ve bu bitirmenin ([`Motion::finish`])
+    /// tersi, bilerek: nesli artıran şey konumu dışarıdan sıfırlayan bir girdi
+    /// (dibe dönüş, Shift+PgUp, satır adımı) ya da kaydırmanın artık
+    /// geçersiz olması (`CSI 3 J`, alternatif ekran) — gidilmek istenen yer
+    /// orası, kalan pay pencereyi oradan geri çekerdi. Link onu iki kez
+    /// soruyor: isteği alırken ve `frame()`'den sonra, çünkü `frame()` de
+    /// nesli artırabiliyor.
+    ///
+    /// Link'in `frame()`'den sonraki tek çağrısı [`Motion::observe_scroll`];
+    /// bu, onun ve [`Motion::request_glide`]'ın ortak yarısı.
+    pub(crate) fn observe_scroll_generation(&mut self, generation: u32) {
+        if generation != self.glide_generation {
+            self.glide = Slide::default();
+            self.glide_generation = generation;
+        }
+    }
+
+    /// `frame()`'in cevabı: kaydırmanın nesli ve payın bıraktığı konum.
+    ///
+    /// Nesil [`Motion::observe_scroll_generation`]'a gidiyor — `frame()` kesri
+    /// geçersiz bulunca nesli kendisi artırıyor. **Konum ikinci soru**: pay
+    /// sıfırdan farklıyken konum kıpırdamadıysa pencere geçmişin ucuna
+    /// çarpmış demek (`bt-core` kırpıyor) ve süzülme **bitiyor**. Bitmeseydi
+    /// ucun ötesine istenmiş kalan pay yerleşene kadar hiçbir şeyi
+    /// değiştirmeyen içerik kareleri çizdirir, üstelik ters yöne gelen ilk
+    /// çentiği yerdi — dipte aşağı fırlatılan tekerlekten sonra yukarı
+    /// çentik hiçbir şey yapmıyordu (`/code-review`). Ters yöndeki çentik
+    /// zaten ayrı bir istek, yani bitmek yalnız ulaşılamayan kalanı düşürüyor.
+    ///
+    /// Tam satırın ucu **kısmen** aşılırsa (pay `0,3`, uca `0,1` kalmış) o
+    /// kare konumu oynatıyor ve süzülme sıradaki karede bitiyor.
+    pub(crate) fn observe_scroll(&mut self, generation: u32, at: (i32, f32), share: f32) {
+        self.observe_scroll_generation(generation);
+        let before = self.glide_at.replace(at);
+        if share != 0.0 && before == Some(at) {
+            self.glide = Slide::default();
+        }
+    }
+
+    /// Süzülme dinleniyor mu: yol da yok, **teslim edilmemiş pay da**.
+    ///
+    /// İki soru birlikte, çünkü bitirilen bir süzülme ([`Motion::finish`])
+    /// hedefinde yerleşmiş ama payını henüz vermemiş olabilir ve o pay ancak
+    /// bir **içerik** karesinde teslim edilebilir. Link bu yüzden ona bakarak
+    /// "hasar yok" dalını atlıyor; `false` iken hareket karesi değil içerik
+    /// karesi çiziliyor.
+    pub(crate) fn glide_idle(&self) -> bool {
+        self.glide.settled(self.origin_mode()) && self.glide.pos == 0.0
+    }
+
     /// Uçuştaki kaymayı **hedefinde bitirir** — animasyonun ilerleyemeyeceği
     /// anlar için.
     ///
@@ -739,6 +905,18 @@ impl Motion {
             slide.vel = 0.0;
             slide.elapsed = 0.0;
         }
+        // **Süzülme de hedefinde bitiyor ve payını teslim ediyor**, düşürmüyor:
+        // düşseydi pencere bir satırın ortasında dinlenirdi. Pay sıradaki
+        // içerik karesinde gidiyor ve bitiren her yol zaten bir kare istiyor
+        // (`DisplayLink::set_visible`, `set_cursor_motion`,
+        // `set_reduce_motion`); o güne kadar [`Motion::glide_idle`] `false`.
+        // Nesil değişiminin kuralı bunun tersi
+        // ([`Motion::observe_scroll_generation`]).
+        let glide = &mut self.glide;
+        glide.pos = glide.target;
+        glide.from = glide.target;
+        glide.vel = 0.0;
+        glide.elapsed = 0.0;
     }
 
     /// Bu karede imlecin çizileceği yer, **ekran hücresi** — grid hücresi
@@ -777,14 +955,15 @@ impl Motion {
         self.origin.map_or(0.0, |slide| slide.pos)
     }
 
-    /// **Her iki** animasyon da durdu mu — link'in "uyuyabilir miyim" sorusu.
+    /// **Üç** animasyon da durdu mu — link'in "uyuyabilir miyim" sorusu.
     ///
     /// Öteleme bu kapının **içinde** olmak zorunda (R2.5): dışında kalsaydı
     /// link "hasar yok" dalında kayma ortasında uyur ve içerik yarı yolda
-    /// donardı. Süreli koşunun kapısı (`Verdict::MotionUnsettled`) da bunu
-    /// okuyor.
+    /// donardı. Süzülme de aynı sebeple ve teslim edilmemiş payıyla birlikte
+    /// ([`Motion::glide_idle`]). Süreli koşunun kapısı
+    /// (`Verdict::MotionUnsettled`) da bunu okuyor.
     pub(crate) fn settled(&self) -> bool {
-        self.cursor_settled() && self.origin_settled()
+        self.cursor_settled() && self.origin_settled() && self.glide_idle()
     }
 
     /// Hareketi Azalt açık mı — blink'in kapısı ([`crate::blink`]).
@@ -2128,6 +2307,242 @@ mod tests {
         motion.finish();
         assert!(motion.settled(), "bitirilen kayma yerleşmedi");
         assert_eq!(motion.origin(), 26.0);
+    }
+
+    /// `rows` satırlık bir çentik isteği, `generation` neslinde.
+    fn notch(rows: f32, generation: u32) -> ScrollGlide {
+        ScrollGlide { rows, generation }
+    }
+
+    /// Link'in kare başı sırası (`link.rs`): önce geçen süre, sonra payın
+    /// alınması. Dönüş bu karenin payı.
+    fn glide_frame(motion: &mut Motion) -> f32 {
+        motion.advance(TICK);
+        motion.take_glide().rows
+    }
+
+    /// Süzülme bitene kadar kare kare teslim eder; payların toplamını ve
+    /// en büyük tek payı döndürür.
+    fn deliver_to_rest(motion: &mut Motion) -> (f32, f32) {
+        let (mut sum, mut largest) = (0.0_f32, 0.0_f32);
+        for _ in 0..10_000 {
+            let share = glide_frame(motion);
+            sum += share;
+            largest = largest.max(share.abs());
+            if motion.glide_idle() {
+                return (sum, largest);
+            }
+        }
+        panic!("süzülme yerleşmedi");
+    }
+
+    #[test]
+    fn a_glide_delivers_exactly_the_rows_it_was_asked_for() {
+        // **R2.3'ün sözleşmesi:** çentik kaç satır istediyse pencere o kadar
+        // gidiyor — paylar kare kare `Session::frame`'e giriyor ve toplamları
+        // eksik ya da fazla olsaydı her çentik pencereyi bir kesir kadar
+        // kaydırıp orada bırakırdı. İki kayan stilde de, taşmasız.
+        for style in [CursorMotion::Spring, CursorMotion::Ease] {
+            let mut motion = Motion::default();
+            motion.set_style(style);
+            motion.request_glide(notch(3.0, 0));
+            assert!(!motion.settled(), "{style:?}: istek link'i uyandırmadı");
+            // İstek **bu** karenin `advance`'inden sonra geliyor: ilk pay
+            // sıfır, yani uykudan uyanan link'in kırpılmış `dt`'si isteğin
+            // yarısını tek karede teslim etmiyor.
+            assert_eq!(motion.take_glide().rows, 0.0, "{style:?}: ilk kare sıçradı");
+
+            let mut shares = Vec::new();
+            while !motion.glide_idle() {
+                shares.push(glide_frame(&mut motion));
+                assert!(shares.len() < 10_000, "{style:?}: süzülme yerleşmedi");
+            }
+            let sum: f32 = shares.iter().sum();
+            assert!((sum - 3.0).abs() < 1e-5, "{style:?}: toplam {sum}");
+            assert!(
+                shares.iter().all(|&share| share >= 0.0),
+                "{style:?}: süzülme geri tepti: {shares:?}"
+            );
+            // Süzülme **süzülüyor**: tek kare isteğin büyük kısmını
+            // taşısaydı çentik yine bir sıçrama olurdu.
+            assert!(shares.len() > 5, "{style:?}: {} kare", shares.len());
+            assert!(
+                motion.settled(),
+                "{style:?}: yerleşen süzülme uyku vermiyor"
+            );
+            assert_eq!(
+                motion.take_glide().rows,
+                0.0,
+                "{style:?}: yerleşince pay kaldı"
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_notch_joins_the_glide_in_flight() {
+        // Tekerleğin çentikleri üst üste geliyor: ikincisi birincinin
+        // **kalanına** ekleniyor, baştan başlamıyor — yoksa ilk çentiğin
+        // teslim edilmemiş payı kaybolurdu.
+        let mut motion = Motion::default();
+        motion.request_glide(notch(1.0, 0));
+        let mut sum = 0.0;
+        for _ in 0..4 {
+            sum += glide_frame(&mut motion);
+        }
+        assert!(sum > 0.0 && sum < 1.0, "senaryo kurulmadı: {sum}");
+        motion.request_glide(notch(1.0, 0));
+        let (rest, _) = deliver_to_rest(&mut motion);
+        assert!((sum + rest - 2.0).abs() < 1e-5, "toplam {}", sum + rest);
+    }
+
+    #[test]
+    fn snap_and_reduce_motion_deliver_the_glide_at_once() {
+        // Hareketi kapatmış kullanıcıya çentik animasyon eklemez; Hareketi
+        // Azalt'ta da öteleme gibi snap ([`Motion::origin_mode`]). İstek
+        // **aynı karede** tamamen teslim ediliyor ve link uyanık kalmıyor.
+        let mut motion = Motion::default();
+        motion.set_style(CursorMotion::Snap);
+        motion.request_glide(notch(3.0, 0));
+        assert_eq!(motion.take_glide().rows, 3.0);
+        assert!(motion.settled(), "snap'te süzülme kaldı");
+
+        let mut motion = Motion::default();
+        motion.set_reduce(true);
+        motion.request_glide(notch(-2.0, 0));
+        assert_eq!(motion.take_glide().rows, -2.0);
+        assert!(motion.settled(), "Hareketi Azalt'ta süzülme kaldı");
+    }
+
+    #[test]
+    fn a_new_generation_drops_the_glide_in_flight() {
+        // Konum dışarıdan sıfırlandı (girdide dibe dönüş, Shift+PgUp): kalan
+        // pay dibe dönen pencereyi geri çekmemeli. **Düşürülüyor**, teslim
+        // edilmiyor — dibe dönüş zaten gidilmek istenen yer.
+        let mut motion = Motion::default();
+        motion.request_glide(notch(5.0, 0));
+        glide_frame(&mut motion);
+        glide_frame(&mut motion);
+        assert!(!motion.glide_idle());
+
+        motion.observe_scroll_generation(1);
+        assert!(motion.glide_idle(), "yeni nesil süzülmeyi bitirmedi");
+        assert!(motion.settled());
+        assert_eq!(
+            motion.take_glide(),
+            notch(0.0, 1),
+            "düşen pay teslim edildi"
+        );
+
+        // Aynı nesil no-op: her içerik karesi nesli bildiriyor.
+        motion.request_glide(notch(1.0, 1));
+        motion.observe_scroll_generation(1);
+        assert!(!motion.glide_idle(), "aynı nesil süzülmeyi bitirdi");
+
+        // Yeni nesilden gelen istek eskisinin kalanını taşımıyor: yalnız
+        // kendisi teslim ediliyor.
+        motion.request_glide(notch(2.0, 2));
+        let (sum, _) = deliver_to_rest(&mut motion);
+        assert!((sum - 2.0).abs() < 1e-5, "eski neslin payı taşındı: {sum}");
+        assert_eq!(motion.take_glide().generation, 2);
+    }
+
+    #[test]
+    fn a_glide_that_hits_the_edge_ends() {
+        // Dipte aşağı fırlatılan tekerlek: kalan pay kırpmaya çarpıyor ve
+        // konum kıpırdamıyor. Süzülme orada bitmeli — yoksa yerleşene kadar
+        // boş içerik kareleri çizer ve sonraki yukarı çentiği yerdi.
+        let mut motion = Motion::default();
+        motion.observe_scroll(0, (0, 0.0), 0.0);
+        motion.request_glide(notch(-30.0, 0));
+        let share = glide_frame(&mut motion);
+        assert!(share < 0.0);
+        // `bt-core` iki satır kaydırdı: konum değişti, süzülme sürüyor.
+        motion.observe_scroll(0, (2, 0.0), share);
+        assert!(!motion.glide_idle(), "hareket eden süzülme bitti");
+        let share = glide_frame(&mut motion);
+        motion.observe_scroll(0, (2, 0.0), share);
+        assert!(motion.glide_idle(), "uca çarpan süzülme sürdü");
+        assert!(motion.settled());
+
+        // Ters yöndeki çentik tam teslim ediliyor: uçtaki kalan onu yemiyor.
+        motion.request_glide(notch(3.0, 0));
+        let (sum, _) = deliver_to_rest(&mut motion);
+        assert!((sum - 3.0).abs() < 1e-5, "yukarı çentik yendi: {sum}");
+
+        // Payı sıfır olan kare (isteğin ilk karesi, yerleşmiş pencere) konumu
+        // oynatmıyor ama bir şeyi de bitirmiyor.
+        motion.request_glide(notch(1.0, 0));
+        motion.observe_scroll(0, (2, 0.0), 0.0);
+        motion.observe_scroll(0, (2, 0.0), 0.0);
+        assert!(!motion.glide_idle(), "sıfır pay süzülmeyi bitirdi");
+    }
+
+    #[test]
+    fn finishing_a_glide_delivers_what_is_left() {
+        // Örtülme, `snap`'e geçiş ve Hareketi Azalt süzülmeyi **hedefinde**
+        // bitiriyor: kalan pay düşseydi pencere bir satırın ortasında dinlenirdi
+        // — jestin sonu "en yakın satıra oturur" sözünü tutmazdı. Kalan pay
+        // sıradaki içerik karesinde teslim ediliyor; o güne kadar `settled()`
+        // `false`, çünkü teslim edilmemiş bir pay link'in uyuyamayacağı bir iş.
+        type Finisher = fn(&mut Motion) -> bool;
+        let finishers: [(&str, Finisher); 3] = [
+            ("finish", |motion| {
+                motion.finish();
+                true
+            }),
+            ("snap", |motion| motion.set_style(CursorMotion::Snap)),
+            ("reduce", |motion| motion.set_reduce(true)),
+        ];
+        for (name, finisher) in finishers {
+            let mut motion = Motion::default();
+            motion.request_glide(notch(4.0, 0));
+            let mut sum = glide_frame(&mut motion) + glide_frame(&mut motion);
+            assert!(sum > 0.0 && sum < 4.0, "{name}: senaryo kurulmadı: {sum}");
+
+            assert!(finisher(&mut motion), "{name}: kare istenmedi");
+            assert!(!motion.settled(), "{name}: bekleyen pay link'i uyuttu");
+            sum += motion.take_glide().rows;
+            assert!((sum - 4.0).abs() < 1e-5, "{name}: toplam {sum}");
+            assert!(motion.settled(), "{name}: teslimden sonra yerleşmedi");
+        }
+    }
+
+    #[test]
+    fn scrolling_does_not_end_the_glide() {
+        // **R2.4:** süzülme her satır sınırında ofseti oynatıyor ve `sync`'in
+        // ofset snap'i imleç ile ötelemeye ait. Süzülmeye dokunsaydı ilk
+        // satırı geçen çentik orada kesilirdi.
+        let mut motion = Motion::default();
+        motion.sync(Some([0.0, 29.0]), 0, 0, false, false);
+        motion.request_glide(notch(3.0, 0));
+        let mut sum = 0.0;
+        for offset in 1..4 {
+            sum += glide_frame(&mut motion);
+            motion.sync(Some([0.0, 29.0]), 0, offset, false, false);
+            assert!(!motion.glide_idle(), "ofset değişimi süzülmeyi bitirdi");
+        }
+        let (rest, _) = deliver_to_rest(&mut motion);
+        assert!((sum + rest - 3.0).abs() < 1e-5, "toplam {}", sum + rest);
+    }
+
+    #[test]
+    fn switching_style_mid_glide_does_not_jump() {
+        // Öteleme ve imleçle aynı kural: `ease` çıkış noktasını hatırlıyor ve
+        // tazelenmezse eski başlangıçtan yeniden başlardı — teslim edilmiş
+        // payın üstüne bir daha eklenirdi.
+        let mut motion = Motion::default();
+        motion.request_glide(notch(3.0, 0));
+        let mut sum = 0.0;
+        for _ in 0..3 {
+            sum += glide_frame(&mut motion);
+        }
+        assert!(
+            !motion.set_style(CursorMotion::Ease),
+            "devralma kare istedi"
+        );
+        let (rest, largest) = deliver_to_rest(&mut motion);
+        assert!((sum + rest - 3.0).abs() < 1e-5, "toplam {}", sum + rest);
+        assert!(largest < 1.0, "stil değişimi sıçrattı: {largest}");
     }
 
     #[test]

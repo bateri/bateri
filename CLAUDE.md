@@ -216,7 +216,10 @@ artık şeridin altında duruyor; yuvarlansaydı caret bir hücre yukarıda duru
 duracağı yüzeyin zemininden sonra ama glyph'lerinden önce çizilmek zorunda,
 yani ızgarada kalsaydı dock'un opak zemini onu örter, dock'ta kalsaydı
 ızgaranın harfini boyardı. Ölçüt örtüşme — banda değen caret dock yuvasına
-geçiyor ve orada en üstte kalıyor. Ters çevirme dikdörtgeni **tek** ve pencere
+geçiyor ve orada en üstte kalıyor; ölçülen konum kaydırma kesrinden
+**önceki**, yani kesirle banda itilen ızgara caret'i ızgarada kalıp harfiyle
+birlikte dock'un zemininin altına giriyor ve ters çevirmesi bandın tepesinde
+kırpılıyor. Ters çevirme dikdörtgeni **tek** ve pencere
 uzayında, iki glyph encode'una da aynısı gidiyor. Payı `DOCK_ROWS * cell_h` **artı iki nefes
 payı** (`bt_gpu::dock_px`; formülün tek kopyası orada, `split_into_grid` onu
 tüketiyor): iki satır saç çizgisine yapışınca dock bakılamaz duruyordu. Payın
@@ -457,7 +460,7 @@ yaslı kalıyor. 017 bir dönem burada `display_offset != 0 => rows` denedi ve
 kullanıcı gördü: ızgaranın **boş** alt satırları doluluğa giriyor, öteleme
 kapanıyor ve bütün içerik pencerenin tepesine sıçrıyordu — terminal aşağıdan
 yukarı akar. Öteleme **yumuşak kayar**: `bt-gpu::motion`'ın ikinci animatörü
-(`Slide`) onu imleçle aynı stil ve aynı `settled()` kapısı altında sürer, imlecin
+(`Slide`; üçüncüsü çentiğin süzülmesi) onu imleçle aynı stil ve aynı `settled()` kapısı altında sürer, imlecin
 hedefi de **ekran satırıdır** (`row + origin`), yani Enter'da imleç dipteki
 satırında durur ve geçmiş arkasından yukarı akar. Kayma **boşluk boş kalıyorsa
 tek yönlüdür**: içerik büyüyünce (hedef düşünce) süzülür, daralınca (dock'u
@@ -531,7 +534,7 @@ doldurma kaydırılmış pencerede de koşunca `fill = rows - content_rows` her
 doğuyor ve tepeden yeni satır giriyor. Sıfır dönerse
 ikinci sink hiç çağrılmıyor ve kare doldurmasız hâliyle bit bit aynı. Çizen
 taraf **üçüncü bir `setViewport`**: bandın orijini `origin_px - fill_px`
-(`Frame::fill_origin_px`) ve o sayı **encode anında** türüyor, yani bant
+(`Frame::fill_origin_px`; `fill_px` kanalın boyu, kesrin tepe satırı dahil) ve o sayı **encode anında** türüyor, yani bant
 ızgarayla **birlikte** kayıyor — push anında pişmiş bir konum hareket
 karesinde (listeler korunur, yalnız öteleme değişir) bandı yerinde
 dondururdu. Orijin kaymanın ortasında **negatife** iniyor ve bırakılıyor:
@@ -551,9 +554,9 @@ kurmayı isterdi; işaret ise bir `RuleCell`. Encode sırası **ızgara →
 doldurma → dock**, çünkü ızgaranın listeleri bandın içine hiç girmiyor ama
 ötelemeden muaf olan caret girebiliyor, ve dock'un opak zemini en altta
 kalmak zorunda.
-**Kaydırma konumu göreli bir kesir taşıyor** (027; bugün yalnız `bt-core`
-tarafı var — `bt-shell` tam satır niyeti gönderiyor, kare yolu sıfır pay
-veriyor, yani ekranda kesir doğmuyor): `Session`'ın tek yeni kaydırma durumu
+**Kaydırma konumu göreli bir kesir taşıyor** (027; `bt-core` ve `bt-gpu`
+tarafı var, `bt-shell` henüz tam satır niyeti gönderiyor, yani ekranda kesir
+doğmuyor): `Session`'ın tek yeni kaydırma durumu
 `[0, 1)` satırlık bir kesir (`Cursor::scroll_frac`, ızgara o kadar
 **aşağı**), tam satırın tek yetkilisi yine `scroll_locked` ve bant eşlemesi
 dokunulmadan geçerli — mutlak bir konum `display_offset`'in dört dış
@@ -575,6 +578,23 @@ kanalının en üst satırı (fill-yerel `0`, bant onun altında), ama sayısı
 Ctrl-L ve ofset kapıları ona uygulanmıyor, yoksa kaydırılmış pencerede tepe
 boş bir yarım satır olurdu. Tekerlek artık kaydırmıyorsa (alternatif ekran,
 fare kipi) ya da tepenin üstünde satır kalmadıysa kare yolu kesri sıfırlıyor.
+**Kesir orijine ekleniyor ama ayrı yuvarlanıyor** (`Frame::set_scroll_frac`):
+ızgaranın viewport'u toplamı, ızgaradaki caret ise yalnız kesri alıyor — caret
+ötelemenin kaymasından muaf, kesirden değil, ve kaysaydı bloğu harfinden
+ayrılırdı; dock'taki caret kaydırmadan muaf. Doldurma **kanalının** boyu
+`top_row + fill`, yani tepe satırı bandın viewport'unda onun üstünde çiziliyor
+ve `Origin::fill_rows` onu da sayıyor — tepedeki yarım satır bant satırı gibi
+seçilemiyor. **Çentiğin süzülmesi `bt-gpu::motion`'ın üçüncü animatörü**
+(`Slide`'ın ikinci örneği, birimi teslim edilecek satır): istek kare başında
+`advance`'ten **sonra** alınıyor (uykudan uyanan link'in kırpılmış `dt`'si
+çentiğin yarısını tek karede götürmesin) ve kare başına pay `frame()`'in
+argümanı; uçuştayken hasarsız kare de içerik karesi (`icerik=` sayıyor, talep
+yine hareketin). Nesil değişimi süzülmeyi **düşürüyor** (dibe dönüş gidilmek
+istenen yer), örtülme, `snap` ve Hareketi Azalt ise **teslim ederek**
+bitiriyor — düşseydi pencere bir satırın ortasında dinlenirdi. Payı konumu
+oynatmayan süzülme geçmişin ucuna çarpmıştır ve orada bitiyor
+(`Motion::observe_scroll`), yoksa ulaşılamayan kalan boş kareler çizdirip ters
+yöndeki çentiği yerdi.
 Gerekçeler `.tasks/027-yumusak-kaydirma/discussion.md` → Muhakeme.
 **Seçim içeriği vurgular, içerik yaratmaz**: vurgu yalnız seçim olmasaydı da
 çizilecek hücrelere uygulanıyor, yani boş ekranda fareyi sürüklemek hiçbir şey
@@ -584,7 +604,8 @@ değil **çizilirlik** — ters videolu bir boşluk (vim'in durum satırı, tmux
 zeminli boş hücre görünmezdir ve seçim onu görünür kılmaz. Doldurma bandı bu
 kuralın tek istisnası değil **tersi**: satırları görünür ama **seçilemez**,
 çünkü hepsi geçmişte, yani sınırın satır numaralarıyla temsil edilemiyorlar.
-Fare bu yüzden orijinin üstünü **reddediyor** (`point_to_cell`, `fill > 0`);
+Fare bu yüzden orijinin üstünü **reddediyor** (`point_to_cell`, kanal
+boyu `> 0`);
 kırpma orayı 0. satıra yapıştırır ve vurguyu gözün gördüğü yerden başka bir
 yerde başlatırdı — "yanlış seçilir" ile "seçilemez" arasında dürüst olan
 ikincisi. Kırpma **kalkmıyor**, yanına geçiyor: doldurma yokken orası
@@ -814,7 +835,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **Boşta sıfır kare.** Kirli satır, yerleşmemiş animasyon **ve** ilerleyen
   bir süre sayacı yoksa frame gönderilmez; kare istemenin **üç** yolu var
   (`bt-gpu::link` modül başlığı): **hasar** (`Waker::wake`), **hareket** (uyanık
-  callback'in kendi kararı, kimseyi uyandırmaz) ve **saat** (link uyumaya
+  callback'in kendi kararı, kimseyi uyandırmaz; çentiğin süzülmesi de bu yol,
+  ama payı pencereyi `frame()`'in içinde kaydırdığı için karesi içerik karesi
+  olarak çiziliyor) ve **saat** (link uyumaya
   giderken kurulan tek gecikmeli uyandırma). Saatin **iki tadı** var ve tadını
   bekleyen işin cinsi belirliyor: *içerik tadı* hasar diker (koşan komutun süre
   sayacı; süresi ve durma koşulu `bt-core`'dan, `Cursor::next_tick`), *hareket

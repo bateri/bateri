@@ -10,7 +10,12 @@
 //! - **Hasar** — `Waker` üzerinden, başka bir thread'den, bayrak dikerek.
 //! - **Hareket** ([`crate::motion`]) — kimseyi uyandırmadan, çünkü zaten
 //!   uyanık olan callback'in kendisi karar veriyor: yerleşmemiş bir animasyon
-//!   varken `needs_update` uyumayı reddediyor.
+//!   varken `needs_update` uyumayı reddediyor. **Çentiğin süzülmesi de bu
+//!   yoldan, yalnız çizimi başka kolda** (027): talebi yine hareketin
+//!   (uyandırma yok, hasar yok), ama payı pencereyi `Session::frame`'in içinde
+//!   kaydırdığı için uçuştaki kare **içerik** karesi olarak çiziliyor ve
+//!   `icerik=`'e giriyor — gerekçe saatin içerik tadınınki: ızgaranın çizilen
+//!   çıktısı gerçekten değişiyor. Durma koşulu süzülmenin kendi yerleşmesi.
 //! - **Saat** ([`LinkDelegate::arm_clock`]) — link uyumaya giderken kurulan
 //!   tek bir gecikmeli uyandırma. **İki tadı var** ve tadını bekleyen işin
 //!   cinsi belirliyor: *içerik tadı* [`Waker::wake`] ile hasar diker (koşan
@@ -63,7 +68,7 @@ use std::time::{Duration, Instant};
 
 use bt_core::{
     Blocks, CaretStyle, Cursor, CursorMotion, DirtyFlag, DockCols, DockContext, DockState,
-    LinearRgba, ScrollGlide, Session, Theme,
+    LinearRgba, Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -334,13 +339,17 @@ struct Drawn {
 }
 
 impl Origin {
-    /// Çizilen karenin dikey orijini, **fiziksel piksel**.
+    /// Çizilen karenin dikey orijini, **fiziksel piksel** — kaydırmanın
+    /// kesri dahil (`Frame::set_scroll_frac`), yani fare ızgarayı çizildiği
+    /// yerde okuyor.
     pub fn px(&self) -> f32 {
         self.0.get().px
     }
 
-    /// Orijinin üstündeki doldurma bandının boyu, **satır**
-    /// (`bt_core::Cursor::fill`). Sıfırsa orada boşluk var, değilse geçmiş.
+    /// Orijinin üstündeki doldurma kanalının boyu, **satır**: bant
+    /// (`bt_core::Cursor::fill`) artı kaydırma kesrinin tepe satırı
+    /// (`bt_core::Cursor::top_row`). Sıfırsa orada boşluk var, değilse geçmiş
+    /// — kesirli konumda tepedeki yarım satır da bandınki gibi seçilemiyor.
     pub fn fill_rows(&self) -> u16 {
         self.0.get().fill_rows
     }
@@ -795,7 +804,13 @@ define_class!(
             // listeyi temizlemeden kullanıyor, yani "temizlensin mi" kararı
             // `clear`'dan önce verilmek zorunda. `Session::frame`'in eski
             // `Option`'ı tam bu sırayı imkânsız kılıyordu.
-            if !iv.session.take_damage() {
+            //
+            // **Süzülme uçuştayken hasarsız kare de içerik karesi** (027): payı
+            // pencereyi `Session::frame`'in içinde kaydırıyor ve hareket karesi
+            // `bt-core`'a hiç gitmiyor. Talep hareketin — kimse uyandırmıyor,
+            // `Waker::wake`'e dokunulmuyor — çizimi içeriğin (modül başlığı).
+            let damaged = iv.session.take_damage();
+            if !damaged && motion.glide_idle() {
                 // Hasar yok. İki ihtimal kaldı ve ikisi de burada bitiyor.
                 motion.advance(dt);
                 // **Uyku testinin üçüncü sorusu.** Blink `Motion`'ın dışında
@@ -960,21 +975,47 @@ define_class!(
             // doldurma bandı kapatıyor (`Session::set_grid_top`). Değer bu
             // karenin `advance`'inden önceki konum — yerleşmeye giden kayma
             // için gereğinden bir parça büyük, yani fazlası ekranın dışında.
-            iv.session
-                .set_grid_top(motion.origin().max(0.0).ceil() as u16);
+            let grid_top = motion.origin();
+            // **Geçen süre taramadan önce işleniyor** ve sebebi süzülme: payı
+            // konumun bu karedeki değişimi ve `frame()`'in argümanı, yani
+            // `frame()`'den önce belli olmak zorunda. İmleç ve öteleme için
+            // sıra aynı kalıyor — `advance` yine `sync`'ten önce, ve arada
+            // `motion`'ı okuyan kimse yok.
+            motion.advance(dt);
+            // İstek `advance`'ten **sonra** (`Motion::request_glide`): uykudan
+            // uyanan link'in kırpılmış `dt`'si yeni çentiğe uygulanmasın.
+            motion.request_glide(iv.session.take_scroll_glide());
+            let glide = motion.take_glide();
+            iv.session.set_grid_top(grid_top.max(0.0).ceil() as u16);
             let cursor = iv.session.frame(
                 |cell| frame.push(cell),
                 |cell| fill.push(cell),
                 &mut iv.blocks.borrow_mut(),
-                // Süzülme payı henüz yok: animatörü gelene kadar pay sıfır ve
-                // kare bugünküyle aynı (`Session::frame`).
-                ScrollGlide::default(),
+                // Pay **uyandırmıyor**: kareyi zaten bu callback çiziyor
+                // (`Session::frame`). Nesli değiştiyse orada düşüyor.
+                glide,
             );
-            // **Bandın boyu hücrelerden önce** (`Frame::set_fill_rows`):
-            // `push_fill`'in bekçisi satırı ona göre ölçüyor. Sıfırsa sınır
-            // ikinci sink'i hiç çağırmadı, yani döngü de boş dönüyor ve kare
-            // doldurmasız hâliyle bit bit aynı.
-            frame.set_fill_rows(cursor.fill);
+            // **Nesil ikinci kez, `frame()`'den sonra**: `frame()` kesri
+            // geçersiz bulunca (`CSI 3 J`, alternatif ekran, fare kipi) nesli
+            // kendisi artırıyor ve uçuştaki süzülme o karede bitmeli. Konum da
+            // soruluyor: pay konumu oynatmadıysa pencere geçmişin ucunda ve
+            // süzülme orada bitiyor (`Motion::observe_scroll`) — ikisinde de
+            // yoksa kırpmaya çarpan paylar için kare üstüne kare çizilirdi.
+            motion.observe_scroll(
+                cursor.scroll_generation,
+                (cursor.display_offset, cursor.scroll_frac),
+                glide.rows,
+            );
+            // Kesir orijinden **önce** (`Frame::set_origin_rows` onu yazıldığı
+            // anda topluyor) ve caret'ten önce (`Frame::push_caret` onu
+            // ızgaradaki caret'e ekliyor).
+            frame.set_scroll_frac(cursor.scroll_frac);
+            // **Kanalın boyu hücrelerden önce** (`Frame::set_fill_rows`):
+            // `push_fill`'in bekçisi satırı ona göre ölçüyor. Kanal bant artı
+            // kesrin tepe satırı; sıfırsa sınır ikinci sink'i hiç çağırmadı,
+            // yani döngü de boş dönüyor ve kare doldurmasız hâliyle bit bit
+            // aynı.
+            frame.set_fill_rows(cursor.top_row + cursor.fill);
             for cell in fill.drain(..) {
                 frame.push_fill(cell);
             }
@@ -1137,10 +1178,11 @@ define_class!(
             // sönük fazda donabilirdi ve caret çıktı boyunca görünmezdi.
             blink.advance(now);
             iv.blink.set(blink);
-            // Sıra zorunlu: önce geçen süre eski hedefe işlenir, sonra yeni
-            // hedef kurulur. Ters sırada `dt` yeni hedefe uygulanır ve imleç
-            // bir kare boyunca gitmediği bir yöne doğru hızlanırdı.
-            motion.advance(dt);
+            // `motion.advance` taramadan önce koştu ve sıra zorunlu: önce
+            // geçen süre eski hedefe işlenir, sonra yeni hedef kurulur. Ters
+            // sırada `dt` yeni hedefe uygulanır ve imleç bir kare boyunca
+            // gitmediği bir yöne doğru hızlanırdı.
+            //
             // **Dolu ızgaranın kayması** (`Motion::scroll_in`): hedef sabitken
             // satırlar geçmişe kaydıysa öteleme o kadar aşağıdan yeniden
             // süzülüyor. `sync`'ten önce, ki tekerlek ve geometri snap'i bunu
@@ -1266,17 +1308,24 @@ impl LinkDelegate {
     /// yeniden hesaplanmıyor: viewport ile fare eşlemesinin aynı sayıyı
     /// görmesi bu satırın işi — kayma boyunca da (R2.7).
     ///
-    /// **Üretimde hiçbir içerik kırpılmıyor** ve bunu ötelemenin *tanımı*
-    /// veriyor, `setViewport`'un kırpması değil: içerik `0..content_rows`
-    /// aralığında, öteleme `rows - content_rows`, yani en alt dolu satırın
-    /// bittiği yer tam `rows` satır. Keyfi bir öteleme (ya da `content_rows`'u
-    /// büyüten bir kusur) alt satırları dokunun dışına taşırdı ve belirti
-    /// "son satır yok" olurdu. **Kayma boyunca öteleme hedefinden büyük** —
-    /// içerik yukarı akıyor — yani en alt satırın bir kısmı o karelerde
-    /// pencerenin altında kalıyor: yeni satır alt kenardan yükselerek geliyor
-    /// ve kayma bitince tam yerine oturuyor. Tek `setViewport`'un (R1.1)
-    /// doğrudan sonucu: dört liste birden kayıyor, yani yeni satırın yerinde
-    /// belirip ötekilerin kayması temsil edilebilir bir şey değil.
+    /// **Dinlenen karede hiçbir içerik kırpılmıyor** ve bunu ötelemenin
+    /// *tanımı* veriyor, `setViewport`'un kırpması değil: içerik
+    /// `0..content_rows` aralığında, öteleme `rows - content_rows`, yani en
+    /// alt dolu satırın bittiği yer tam `rows` satır. Keyfi bir öteleme (ya
+    /// da `content_rows`'u büyüten bir kusur) alt satırları dokunun dışına
+    /// taşırdı ve belirti "son satır yok" olurdu. **Kayma boyunca öteleme
+    /// hedefinden büyük** — içerik yukarı akıyor — yani en alt satırın bir
+    /// kısmı o karelerde pencerenin altında kalıyor: yeni satır alt kenardan
+    /// yükselerek geliyor ve kayma bitince tam yerine oturuyor. Tek
+    /// `setViewport`'un (R1.1) doğrudan sonucu: dört liste birden kayıyor,
+    /// yani yeni satırın yerinde belirip ötekilerin kayması temsil edilebilir
+    /// bir şey değil.
+    ///
+    /// **Kaydırmanın kesri ikinci bilinçli istisna** (`Frame::set_scroll_frac`,
+    /// `Frame::set_origin_rows` onu topluyor): ızgara kesir kadar aşağıda,
+    /// alt satırın o kadarı pencerenin (dock'lu pencerede dock'un zemininin)
+    /// altında kalıyor, tepede açılan şeridi de doldurma kanalının tepe satırı
+    /// kapatıyor. Dinlenirken kesir yok — jest en yakın satıra oturuyor.
     ///
     /// **Fare eşlemesine yayınlamıyor.** Öteleme kareye burada pişiyor ama
     /// [`Origin`]'e ancak `draw` `Ok` dönünce yazılıyor
