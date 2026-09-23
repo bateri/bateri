@@ -94,6 +94,6 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7, R2.8, R3.1, R3.2_
 - [ ] `closeWindow:` tek soru
 - [ ] `applicationShouldTerminate:`
 - [ ] Cargo bayrakları + kenar + yorumlar
-- [ ] Bayatlayan cümleler ve `CLAUDE.md`
+- [ ] Bayatlayan cümleler ve `CLAUDE.md` (`libc`'nin `proc_*` cümlesi phase-1'de girdi; kalan `block2`)
 - [ ] Test: `should_ask`, metin, ayar sınamaları
 - [ ] Doğrulama geçti (`make hepsi` + `make duman`)

@@ -29,7 +29,7 @@
 | 025 | [tazelik-zamansal](025-tazelik-zamansal/) | 🟢 | `main`'de — yazarken caret dock'tan çıkmıyor: tazelik kapısı önce "son girdinin aynası geldi mi" diye soruyor, `🥰` gibi zsh'in dönüştürdüğü karakterde satır dock'ta kalıyor; dock'un çizmediği kontrol karakteri (`^A`) satırı konumdan bağımsız ızgarada tutuyor. 1 phase + kapı tamam (2 bulgu giderildi) |
 | 026 | [sekmeler](026-sekmeler/) | 🟢 | 4 phase + kapı tamam — macOS'un kendi sekmeleri (her sekme bir pencere + kendi oturumu), standart kısayollar, sekme başlığı ve temaya boyanmış saydam başlık çubuğu; bölme sonraki set |
 | 027 | [yumusak-kaydirma](027-yumusak-kaydirma/) | 🟢 | 3 phase + kapı tamam — trackpad parmağı piksel piksel izliyor, momentum AppKit'in olaylarıyla yavaşlıyor, jest sonunda pencere en yakın satıra süzülüyor ve tekerlek çentiği süzülüyor; `[motion] smooth_scroll = "off"`, Hareketi Azalt ve `snap` bugünkü satır adımı (1 + 1 bulgu giderildi) |
-| 028 | [kapatma-onayi](028-kapatma-onayi/) | 📐 | koşan süreç varken ⌘W, kırmızı düğme, ⇧⌘W ve ⌘Q soruyor (sayfa / uygulama uyarısı, süreç adıyla); kabuk boştayken ve `exit`'te sormuyor; `[terminal] confirm_close` |
+| 028 | [kapatma-onayi](028-kapatma-onayi/) | 🔨 | koşan süreç varken ⌘W, kırmızı düğme, ⇧⌘W ve ⌘Q soruyor (sayfa / uygulama uyarısı, süreç adıyla); kabuk boştayken ve `exit`'te sormuyor; `[terminal] confirm_close` |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

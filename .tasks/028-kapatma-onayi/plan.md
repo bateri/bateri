@@ -90,6 +90,6 @@ exit ──child_exit──▶ close() ──(delegate'e sormaz)──▶ window
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | kapı | |

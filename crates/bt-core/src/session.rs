@@ -1983,6 +1983,10 @@ pub struct Session {
     dock: bool,
     /// [`SessionOptions::home`]; yalnız [`Session::title`] okuyor.
     home: Option<PathBuf>,
+    /// PTY'nin çocuğunun pid'i ([`Session::child_pid`]). Doğumda alınıyor,
+    /// çünkü `Pty` bir kez [`TappedPty`]'ye sarılınca okuyucu thread'ine
+    /// gidiyor ve bu yakadan bir daha görülmüyor.
+    child_pid: u32,
 }
 
 impl Session {
@@ -2018,6 +2022,7 @@ impl Session {
         };
         let home = options.home;
         let pty = tty::new(&pty_options, size, 0)?;
+        let child_pid = pty.child().id();
         // Yuva `EventLoop`'tan **önce** doğuyor: bir ucu sarmalayıcıyla okuyucu
         // thread'ine gidiyor, öteki ucu `Session`'da kalıyor.
         // Defterin tavanı `scrollback`'ten: blok başına en az bir satır düştüğü
@@ -2084,6 +2089,7 @@ impl Session {
             scroll_glide: AtomicU64::new(0),
             dock: options.dock,
             home,
+            child_pid,
         })
     }
 
@@ -4782,6 +4788,19 @@ impl Session {
                 ShutdownHandle(None)
             }
         })
+    }
+
+    /// PTY'nin çocuğunun pid'i — **kabuğun değil**, en azından her zaman
+    /// değil: süresiz oturumda çocuk `login(1)` ve kabuk onun çocuğu
+    /// (`.tasks/028-kapatma-onayi/context.md` → Süreç tarafı). Hangisi
+    /// olduğunu komutu kuran taraf biliyor, bu crate değil.
+    ///
+    /// Çocuk biçildikten sonra **bayatlar**: sayı aynı kalıyor, işletim
+    /// sistemi onu başka bir sürece verebilir. Tüketen taraf onu
+    /// [`Session::reader_alive`] ile birlikte sorar — okuyucu thread çocuğun
+    /// çıkışını görünce bitiyor.
+    pub fn child_pid(&self) -> u32 {
+        self.child_pid
     }
 
     /// Okuyucu thread hâlâ çalışıyor mu. `false` ya kapandığımız ya da

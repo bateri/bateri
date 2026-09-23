@@ -71,5 +71,8 @@ dispatch2 = { workspace = true }
 # Bekçi thread'in `write` + `_exit`'i, izleme kaynaklarının `O_EVTONLY`'si
 # (`watch`, 007 kapı) ve kabuğun passwd kaydı (`child::passwd_shell`,
 # `getpwuid_r`, 009 phase-3: Dock'tan açılışta `$SHELL` yok ve alacritty de
-# aynı sıraya düşüyor). Gerekçesi workspace manifest'inde.
+# aynı sıraya düşüyor) ve kabuğun ön planında koşan işin tespiti (`jobs`,
+# `proc_pidinfo`/`proc_listchildpids`/`proc_listpgrppids`/`proc_name`, 028
+# phase-1: Apple'ın `libproc` yarısı, yeni bayrak ya da crate değil).
+# Gerekçesi workspace manifest'inde.
 libc = { workspace = true }

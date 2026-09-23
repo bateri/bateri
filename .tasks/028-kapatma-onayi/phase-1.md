@@ -60,9 +60,46 @@ _Requirements: R1.1, R1.2, R1.3, R1.4, R1.5, R1.6_
 
 ## Checklist
 
-- [ ] `Session::child_pid`
-- [ ] `jobs.rs`: saf karar + `libc` okuyucusu
-- [ ] `ShellParent` pencerede, doğumda
-- [ ] Test: sahte tablolu karar sınamaları (yukarıdaki yedi kol)
-- [ ] Test: gerçek PTY'de boşta / `sleep`
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] `Session::child_pid`
+- [x] `jobs.rs`: saf karar + `libc` okuyucusu
+- [x] `ShellParent` pencerede, doğumda
+- [x] Test: sahte tablolu karar sınamaları (yukarıdaki yedi kol)
+- [x] Test: gerçek PTY'de boşta / `sleep`
+- [x] Doğrulama geçti (`make hepsi`)
+- [~] `/code-review` — riskli phase tetikleyicisi yok (`Cargo.lock`, `.metal`, paylaşılan durum oynamadı); set kapısı kapsıyor
+
+## Uygulama Notları
+
+- **`libproc`'un dönüşleri ölçüldü** (bu makinede küçük bir C yoklaması):
+  listeleme çağrıları bayt değil **pid sayısı** döndürüyor; boş tamponla
+  çağrı sistemdeki bütün süreçlerin sayısını veriyor (tamponun boyu oradan);
+  küçük tampon **sessizce** kırpılıyor; var olmayan pid'e sıfır, yani "süreç
+  yok" ile "çocuğu yok" ayrışmıyor — arayüzün listeleri bu yüzden `Vec`,
+  `Option` değil ve canlılığın tek tanığı `reader_alive`. `launchd`'de (root)
+  `PROC_PIDTBSDINFO` ve `proc_name` sıfır, `PROC_PIDT_SHORTBSDINFO` tam:
+  ad `proc_name`'den, olmazsa kısa bilginin `comm`'undan.
+- **Arayüz planın dört sorusu değil beş**: "pid → ebeveyn, grup, ad" üçe
+  bölünmedi, ikiye bölündü (`parent`, `name`); üyenin grubu kararın hiçbir
+  kolunda okunmuyor, kabuğun grubu ise `e_tpgid` ile aynı uzun bilgiden
+  (`groups`).
+- **Sıfır `e_tpgid` okunamayan tablonun kolu** (plan bunu yalnız sınama için
+  söylüyordu): karar onu adsız koşuyor sayıyor, çünkü `members(0)` bir grubun
+  değil çekirdeğin cevabı olurdu. Sahte tablonun sınamasında bir satır.
+- **`SilentWake` ve `wait_until` `child::tests`'ten modül düzeyine çıktı**
+  (`#[cfg(test)] pub(crate)`, `settings::TempRoot` emsali): gerçek PTY
+  sınaması aynısını istiyordu, kopya doğmasın.
+- **Gerçek PTY sınaması `sleep 30`** (plan `sleep 5` diyordu): iş, sınamanın
+  10 s'lik son tarihi boyunca yaşamalı. Sonunda Ctrl-C ile işin bittiği ve
+  ön planın kabuğa döndüğü de soruluyor, sonra `shutdown`.
+- **`TerminalWindow::foreground` `#[expect(dead_code)]` taşıyor**, `allow`
+  değil: phase-2 çağıranı eklediği anda beklenti karşılanmaz ve derleme onu
+  kaldırtır.
+- **Komutun kararı `SessionOptions`'ın dışına alındı**: kabuğun yeri
+  (`ShellParent`) komutla aynı `match`'te doğuyor; komutun yorumu da onunla
+  birlikte taşındı.
+- **`libc`'nin kullanım listesi bu commit'te güncellendi** (`bt-shell/
+  Cargo.toml` yorumu, `CLAUDE.md` katman tablosu, crate başlığı): `proc_*`
+  bu phase'le geldi ve iki cümle aynı commit'te bayatlardı. Phase-2'nin
+  "Bayatlayan cümleler" maddesine yalnız `block2` kalıyor. `Cargo.toml`
+  yalnız yorumda değişti; `make denetim`'in uyarısı bundan, `Cargo.lock`
+  oynamadı.
