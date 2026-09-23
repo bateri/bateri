@@ -228,6 +228,87 @@ pub(crate) fn wheel_lines(delta: f64, unit: f64, carry: f64) -> (i32, f64) {
     (whole as i32, total - whole)
 }
 
+/// Pürüzsüz yolda bir tekerlek olayının `Session::scroll_wheel`'e ne
+/// götüreceği: kesirli miktar, aynı olayın tam satırı ve niyet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SmoothWheel {
+    /// Kaydırma kolunun miktarı, satır cinsinden (artı geriye).
+    pub(crate) rows: f64,
+    /// Ok ve rapor kollarının miktarı ([`wheel_lines`]'ın tam satırı).
+    pub(crate) lines: i32,
+    pub(crate) intent: ScrollIntent,
+}
+
+/// Tekerlek olayının **niyeti** — saf, `NSEvent`'siz, sınanabilir
+/// (`smooth_scroll = "on"`'un kolu; `"off"` bu fonksiyona hiç uğramıyor).
+///
+/// Ayraç **jest fazı**, deltanın hassasiyeti değil: fazı olan olay (trackpad,
+/// Magic Mouse) parmağı izliyor, fazsız olay (klasik tekerlek) bir çentik.
+/// Fazsız ama hassas olay da (dış kaydırıcıların sentetik olayları) çentik
+/// sayılıyor: bitişini söyleyen bir faz taşımadığı için doğrudan izlenseydi
+/// pencere yarım satırda dinlenirdi (`.tasks/027-yumusak-kaydirma/discussion.md`
+/// → Karar 3).
+///
+/// - **Jest başı** (`phase` `Began`/`MayBegin`, `momentum` `Began`):
+///   [`ScrollIntent::GestureBegan`] — parmak yeniden değdi ya da momentum
+///   başladı, uçuştaki yerleşme bitmeli.
+/// - **Jest sonu** (`Ended`/`Cancelled`, iki fazda da):
+///   [`ScrollIntent::Settle`] — en yakın satıra oturma. Momentum gelecekse
+///   `Began`'ı yerleşmeyi bitiriyor; göreli model olduğu için sıçrama yok ve
+///   zamanlayıcı ya da eşik gerekmiyor.
+/// - **Arası** (`Changed`/`Stationary`): [`ScrollIntent::Direct`].
+/// - **Çentik**: [`ScrollIntent::Glide`] ve miktarı **tam satır** — kesirli
+///   bir çentik hedefi pencereyi yarım satırda bırakırdı ve onu yerleştirecek
+///   bir jest sonu gelmiyor. Mesafe böylece `"off"` kolununkiyle aynı; ayrışan
+///   yalnız süzülme.
+///
+/// `lines` her kolda [`wheel_lines`]'tan, çünkü rota `bt-core`'da seçiliyor
+/// ve ok/rapor kolu onu okuyor. Dönüş `(adım, yeni artık)`; adım `None` ise
+/// gönderilecek bir şey yok (tam satırı olmayan çentik, hareketsiz ara olay).
+pub(crate) fn smooth_wheel(
+    delta: f64,
+    unit: f64,
+    carry: f64,
+    phase: NSEventPhase,
+    momentum: NSEventPhase,
+) -> (Option<SmoothWheel>, f64) {
+    let (lines, rest) = wheel_lines(delta, unit, carry);
+    if phase.is_empty() && momentum.is_empty() {
+        let step = (lines != 0).then_some(SmoothWheel {
+            rows: f64::from(lines),
+            lines,
+            intent: ScrollIntent::Glide,
+        });
+        return (step, rest);
+    }
+    let rows = delta / unit;
+    let rows = if rows.is_finite() { rows } else { 0.0 };
+    let intent = if momentum.contains(NSEventPhase::Began)
+        || phase.intersects(NSEventPhase::Began | NSEventPhase::MayBegin)
+    {
+        ScrollIntent::GestureBegan
+    } else if momentum.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled)
+        || phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled)
+    {
+        ScrollIntent::Settle
+    } else {
+        ScrollIntent::Direct
+    };
+    // Hareketsiz ara olay (`Stationary`, sıfır delta) hiçbir şey
+    // değiştirmiyor; `Term` kilidine gitmesin.
+    if intent == ScrollIntent::Direct && rows == 0.0 && lines == 0 {
+        return (None, rest);
+    }
+    (
+        Some(SmoothWheel {
+            rows,
+            lines,
+            intent,
+        }),
+        rest,
+    )
+}
+
 /// Fare olayının değiştiricileri. Shift rapora girmez, arbitrajı yapar —
 /// gerekçesi [`MouseModifiers`]'ın doc'unda.
 fn modifiers(event: &NSEvent) -> MouseModifiers {
@@ -400,8 +481,15 @@ pub(crate) struct ViewIvars {
     /// taşınmasın) ve geçmişin ucuna dayanınca (uca doğru biriken momentum
     /// ters yöndeki ilk satırı geciktirmesin). Tekerlek uygulamaya gidince
     /// (`Wheel::Sent`) **korunur**: trackpad'le yavaş kaydırmada her olayın
-    /// küsuratı düşseydi `less` sarsak kayardı.
+    /// küsuratı düşseydi `less` sarsak kayardı. Pürüzsüz kolun iki istisnası
+    /// [`BateriView::smooth_scroll_wheel`]'de.
     scroll_carry: Cell<f64>,
+    /// Kaydırma pürüzsüz mü ([`smooth_wheel`]) yoksa satır adımıyla mı:
+    /// `[motion] smooth_scroll`, Hareketi Azalt ve `cursor_motion = "snap"`'in
+    /// **çözülmüş** hâli (`app::resolve_smooth_scroll`). `true` doğuyor,
+    /// çünkü ayarın varsayılanı `"on"` ve hermetik süreli koşu ayar okumuyor;
+    /// pencerenin `start`'ı yine de ayarın değerini yazıyor.
+    smooth_scroll: Cell<bool>,
     /// Fare çevirisinin canlı girdileri: ölçü `bt-gpu`'dan, grid `bt-core`'un
     /// bildiği sayı. `OnceCell` değil `Cell<Option<…>>`, çünkü pencere boyu
     /// değişince tazeleniyor (`set_metrics`). Ayrı bir kopya gibi görünüyor
@@ -607,6 +695,12 @@ define_class!(
         ///
         /// Basılı sürüklemenin ortasında kaydırma olursa seçimin ucu farenin
         /// **yeni** altındaki hücreye taşınır ([`BateriView::follow_pointer`]).
+        ///
+        /// **İki kol var** ve seçen `ViewIvars::smooth_scroll`: pürüzsüz kol
+        /// ([`BateriView::smooth_scroll_wheel`]) kesirli miktarı ve niyeti
+        /// gönderiyor, satır kolu (aşağıdaki gövde) `"on"`'dan önceki yolun
+        /// bayt bayt kendisi — `smooth_scroll = "off"`, Hareketi Azalt ve
+        /// `cursor_motion = "snap"`'in geri alma yolu.
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             let Some(session) = self.ivars().session.get() else {
@@ -629,6 +723,10 @@ define_class!(
             let carry = &self.ivars().scroll_carry;
             if event.phase().contains(NSEventPhase::Began) {
                 carry.set(0.0);
+            }
+            if self.ivars().smooth_scroll.get() {
+                self.smooth_scroll_wheel(event, session, unit);
+                return;
             }
             let (lines, rest) = wheel_lines(event.scrollingDeltaY(), unit, carry.get());
             carry.set(rest);
@@ -1107,6 +1205,7 @@ impl BateriView {
             consumed: Cell::new(false),
             marked_text: RefCell::new(String::new()),
             scroll_carry: Cell::new(0.0),
+            smooth_scroll: Cell::new(true),
             metrics: Cell::new(None),
             origin: OnceCell::new(),
         });
@@ -1151,6 +1250,79 @@ impl BateriView {
         self.ivars()
             .metrics
             .set(Some((grid.cell, (grid.cols, grid.rows))));
+    }
+
+    /// Kaydırmanın pürüzsüz mü satır adımıyla mı gideceği — pencere
+    /// çözülmüş `bool`'u açılışta ve her kayıtta/sistem bildiriminde veriyor
+    /// (`TerminalWindow::set_smooth_scroll`).
+    ///
+    /// `false`'a geçiş uçuştaki süzülmeye dokunmuyor: Hareketi Azalt ve
+    /// `snap` onu link'te zaten bitiriyor, `"off"`'un kendisinde ise sıradaki
+    /// satır adımı kalan kesri düşürüp nesli artırıyor (`ScrollIntent::Lines`)
+    /// ve uçuştaki süzülme kendi süresinde oturuyor.
+    pub(crate) fn set_smooth_scroll(&self, smooth: bool) {
+        self.ivars().smooth_scroll.set(smooth);
+    }
+
+    /// `scrollWheel:`'in pürüzsüz kolu ([`smooth_wheel`]). Satır kolundan
+    /// tek farkı miktar ve niyet; işaretçi, Shift ve rota aynı.
+    ///
+    /// **Artığın kuralı** satır kolununkiyle aynı cümle, iki istisnayla:
+    /// kaydırma kolunda (`Wheel::Scrolled`) artık **sıfırlanıyor** — kesirli
+    /// konumun sahibi orada `Session`, artığın tüketicisi yok ve kalsa sonraki
+    /// bir kipe (ok, rapor) sızardı — ama **çentikte korunuyor**, çünkü
+    /// çentiğin tam satırı artıktan doğuyor ve `Scrolled(0)` orada "uç" değil
+    /// "süzülme isteği" demek. Tam satırı olmayan olayın `Ignored`'u da artığı
+    /// silmiyor: ok ve rapor kolu sıfır satırı reddediyor ve trackpad'le yavaş
+    /// kaydırmada her küçük olay artığı sıfırlasaydı `less` hiç kaymazdı.
+    ///
+    /// Trackpad jestinin **yerleşmesi** sürüklemede de süzülüyor ve uç onu
+    /// bir sonraki `mouseDragged:`'e kadar izlemiyor: pay yarım satırın
+    /// altında ve plan bu sınırı adıyla yazıyor (→ Kapsam Dışı).
+    fn smooth_scroll_wheel(&self, event: &NSEvent, session: &Session, unit: f64) {
+        let carry = &self.ivars().scroll_carry;
+        let (step, rest) = smooth_wheel(
+            event.scrollingDeltaY(),
+            unit,
+            carry.get(),
+            event.phase(),
+            event.momentumPhase(),
+        );
+        carry.set(rest);
+        let Some(mut step) = step else {
+            return;
+        };
+        // **Basılı sürüklemede çentik süzülmüyor**, satır adımıyla gidiyor:
+        // süzülmenin payı pencereyi kare yolunda kaydırıyor ve orada seçimin
+        // ucunu fareye taşıyan kimse yok — fare kıpırdamazken uç eski satırda
+        // kalırdı (`/code-review`). Satır adımı `Scrolled(n)` döndürüyor ve
+        // `follow_pointer` bugünkü gibi koşuyor; seçerken kaydırmada hassasiyet
+        // süsten önce geliyor.
+        if step.intent == ScrollIntent::Glide && self.ivars().dragging.get() {
+            step.intent = ScrollIntent::Lines;
+        }
+        // İşaretçinin hücresi ve doldurma reddinin sıfırı satır kolundaki
+        // gerekçeyle (`scrollWheel:`).
+        let Some(pointer) =
+            self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp { fill_rows: 0 })
+        else {
+            return;
+        };
+        let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
+        match session.scroll_wheel(step.rows, step.lines, step.intent, pointer, shift) {
+            Wheel::Ignored if step.lines == 0 => {}
+            Wheel::Scrolled(0) if step.intent == ScrollIntent::Glide => {}
+            Wheel::Scrolled(0) | Wheel::Ignored => carry.set(0.0),
+            Wheel::Scrolled(_) => {
+                // Tam satırlı kollarda (çentik, sürüklemedeki satır adımı)
+                // artık çentiğin kaynağı, satır kolundaki gibi korunuyor.
+                if !matches!(step.intent, ScrollIntent::Glide | ScrollIntent::Lines) {
+                    carry.set(0.0);
+                }
+                self.follow_pointer(session);
+            }
+            Wheel::Sent => {}
+        }
     }
 
     /// Fare çevirisinin dikey orijinini bağlar; link doğduktan hemen sonra,
@@ -1937,6 +2109,125 @@ mod tests {
         // gezinme tuşu bir Meta dizisi, Option'lı harf bir karakter.
         for flags in extras {
             assert!(reaches_terminal(flags, Some("t")), "{flags:?}");
+        }
+    }
+
+    /// Pürüzsüz kolun adımı; birim 9 nokta (trackpad), artık sıfır.
+    fn smooth(delta: f64, phase: NSEventPhase, momentum: NSEventPhase) -> Option<SmoothWheel> {
+        smooth_wheel(delta, 9.0, 0.0, phase, momentum).0
+    }
+
+    #[test]
+    fn a_trackpad_gesture_is_classified_phase_by_phase() {
+        // Began → Changed → Ended → momentum Began → Changed → momentum Ended.
+        let none = NSEventPhase::None;
+        let intent = |delta, phase, momentum| smooth(delta, phase, momentum).map(|s| s.intent);
+        assert_eq!(
+            intent(0.0, NSEventPhase::MayBegin, none),
+            Some(ScrollIntent::GestureBegan),
+            "parmak değince uçuştaki yerleşme bitmeli"
+        );
+        assert_eq!(
+            intent(2.0, NSEventPhase::Began, none),
+            Some(ScrollIntent::GestureBegan)
+        );
+        assert_eq!(
+            intent(3.0, NSEventPhase::Changed, none),
+            Some(ScrollIntent::Direct)
+        );
+        assert_eq!(
+            intent(0.0, NSEventPhase::Ended, none),
+            Some(ScrollIntent::Settle)
+        );
+        assert_eq!(
+            intent(8.0, none, NSEventPhase::Began),
+            Some(ScrollIntent::GestureBegan),
+            "momentum başı yerleşmeyi bitirmeli"
+        );
+        assert_eq!(
+            intent(5.0, none, NSEventPhase::Changed),
+            Some(ScrollIntent::Direct)
+        );
+        assert_eq!(
+            intent(0.0, none, NSEventPhase::Ended),
+            Some(ScrollIntent::Settle)
+        );
+        // İptal edilen jest de yerleşiyor: pencere yarım satırda dinlenmemeli.
+        assert_eq!(
+            intent(0.0, NSEventPhase::Cancelled, none),
+            Some(ScrollIntent::Settle)
+        );
+        // Hareketsiz ara olay gönderilmiyor.
+        assert_eq!(intent(0.0, NSEventPhase::Stationary, none), None);
+        assert_eq!(intent(0.0, NSEventPhase::Changed, none), None);
+    }
+
+    #[test]
+    fn a_trackpad_delta_is_sent_as_a_fraction_of_a_row() {
+        // Parmağı piksel piksel izlemenin kaynağı: miktar hücre boyuna
+        // bölünmüş delta, kesilmemiş. Tam satır ok/rapor kolu için ayrıca.
+        let step = smooth(4.5, NSEventPhase::Changed, NSEventPhase::None).expect("adım");
+        assert_eq!(step.rows, 0.5);
+        assert_eq!(step.lines, 0);
+        let (step, rest) = smooth_wheel(-12.0, 9.0, 0.0, NSEventPhase::Changed, NSEventPhase::None);
+        let step = step.expect("adım");
+        assert_eq!((step.rows, step.lines), (-12.0 / 9.0, -1));
+        assert_eq!(rest, -12.0 / 9.0 + 1.0);
+        // Sonlu olmayan miktar kaydırma koluna sızmıyor.
+        let step = smooth_wheel(9.0, 0.0, 0.0, NSEventPhase::Ended, NSEventPhase::None)
+            .0
+            .expect("adım");
+        assert_eq!((step.rows, step.lines), (0.0, 0));
+    }
+
+    #[test]
+    fn a_notch_glides_in_whole_rows() {
+        // Fazsız olay çentik: miktar **tam satır**, yani "off"'un mesafesi,
+        // ve kesirli kısım artıkta kalıyor.
+        let none = NSEventPhase::None;
+        let (step, rest) = smooth_wheel(2.5, 1.0, 0.0, none, none);
+        assert_eq!(
+            step,
+            Some(SmoothWheel {
+                rows: 2.0,
+                lines: 2,
+                intent: ScrollIntent::Glide
+            })
+        );
+        assert_eq!(rest, 0.5);
+        // Satıra varmayan çentik hiçbir şey göndermiyor, artık birikiyor.
+        let (step, rest) = smooth_wheel(0.3, 1.0, 0.5, none, none);
+        assert_eq!(step, None);
+        assert_eq!(rest, 0.8);
+        // Hassas ama fazsız olay da çentik: bitişini söyleyecek faz yok.
+        let (step, _) = smooth_wheel(18.0, 9.0, 0.0, none, none);
+        assert_eq!(
+            step.map(|s| (s.rows, s.intent)),
+            Some((2.0, ScrollIntent::Glide))
+        );
+    }
+
+    #[test]
+    fn the_line_amount_is_the_off_arms_amount() {
+        // `"off"` kolu `wheel_lines`'ın kendisi ve pürüzsüz kolun `lines`'ı
+        // (ok ve rapor kollarının miktarı) aynı fonksiyondan, aynı artıkla —
+        // vim/less ve fare kipinde tekerlek iki kipte de aynı satırı gönderir.
+        let phases = [
+            (NSEventPhase::None, NSEventPhase::None),
+            (NSEventPhase::Began, NSEventPhase::None),
+            (NSEventPhase::Changed, NSEventPhase::None),
+            (NSEventPhase::Ended, NSEventPhase::None),
+            (NSEventPhase::None, NSEventPhase::Changed),
+        ];
+        for (phase, momentum) in phases {
+            for (delta, unit, carry) in [(4.0, 9.0, 6.0), (-27.0, 9.0, 0.0), (2.0, 1.0, 0.25)] {
+                let (step, rest) = smooth_wheel(delta, unit, carry, phase, momentum);
+                let (lines, off_rest) = wheel_lines(delta, unit, carry);
+                assert_eq!(rest, off_rest, "{phase:?}/{momentum:?}");
+                if let Some(step) = step {
+                    assert_eq!(step.lines, lines, "{phase:?}/{momentum:?}");
+                }
+            }
         }
     }
 

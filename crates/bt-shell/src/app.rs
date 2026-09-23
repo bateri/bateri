@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    ReduceMotion, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, ShellIntegration, Teardown, Theme,
+    CursorMotion, ReduceMotion, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, ShellIntegration,
+    SmoothScroll, Teardown, Theme,
 };
 use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Stats};
 use dispatch2::DispatchQueue;
@@ -284,6 +285,23 @@ fn resolve_reduce_motion(
         ReduceMotion::Off => false,
         ReduceMotion::System => system(),
     }
+}
+
+/// `[motion] smooth_scroll` + Hareketi Azalt + `cursor_motion` → tek `bool`:
+/// tekerlek pürüzsüz mü gidiyor.
+///
+/// Üçünden biri hareketi kapatıyorsa satır adımı — hareketi kapatmış olana
+/// kaydırma animasyon *eklemez* (`cursor_motion = "snap"`'in Hareketi
+/// Azalt'la ilişkisinin aynısı). Nicemleme **kaynakta**, `bt-gpu`'nun
+/// `Motion`'ında değil: `false` kolu bugünkü satır yolu olarak kalıyor
+/// (`.tasks/027-yumusak-kaydirma/discussion.md` → Karar 5).
+///
+/// `reduce` [`resolve_reduce_motion`]'ın çözülmüş cevabı, yani süreli koşu
+/// burada da sistemi okumuyor. Saf, sınanıyor.
+fn resolve_smooth_scroll(settings: &Settings, reduce: bool) -> bool {
+    settings.smooth_scroll == SmoothScroll::On
+        && !reduce
+        && settings.cursor_motion != CursorMotion::Snap
 }
 
 /// Shell entegrasyonunun çocuğa eklediği ortam — kurulmuyorsa boş.
@@ -2011,11 +2029,24 @@ impl AppDelegate {
     /// değişmediyse çağrı no-op (`bt_gpu::DisplayLink::set_reduce_motion`),
     /// yani üç yolu birleştirmeye gerek yok. Pencerenin ilk değeri kendi
     /// `start`'ında iniyor; link'i olmayan pencere sessizce atlanıyor.
+    ///
+    /// Tekerleğin kipi de burada iniyor ([`AppDelegate::smooth_scroll`]):
+    /// Hareketi Azalt onun girdisi, yani üç tetikleyicinin üçü de onu da
+    /// değiştirebiliyor — ikinci bir yol yazılsaydı sistem bildirimi onu
+    /// atlardı.
     fn apply_reduce_motion(&self) {
         let reduce = self.reduce_motion();
+        let smooth = resolve_smooth_scroll(&self.ivars().settings.borrow(), reduce);
         for window in self.windows() {
             window.set_reduce_motion(reduce);
+            window.set_smooth_scroll(smooth);
         }
+    }
+
+    /// Tekerlek pürüzsüz mü ([`resolve_smooth_scroll`]).
+    pub(crate) fn smooth_scroll(&self) -> bool {
+        let reduce = self.reduce_motion();
+        resolve_smooth_scroll(&self.ivars().settings.borrow(), reduce)
     }
 
     /// Ayarın üç değeri ile sistemin cevabı, [`resolve_reduce_motion`]'da
@@ -3052,6 +3083,44 @@ mod tests {
             decide_inputs(None, None),
             Inputs::User { config_root: None }
         );
+    }
+
+    #[test]
+    fn smooth_scroll_is_off_when_any_input_turns_motion_off() {
+        // Üç girdiden biri hareketi kapatıyorsa satır adımı (027 Karar 5).
+        let on = Settings::default();
+        assert!(
+            resolve_smooth_scroll(&on, false),
+            "varsayılan pürüzsüz değil"
+        );
+        assert!(
+            !resolve_smooth_scroll(&on, true),
+            "Hareketi Azalt'ta süzüldü"
+        );
+        let off = Settings {
+            smooth_scroll: SmoothScroll::Off,
+            ..Settings::default()
+        };
+        assert!(!resolve_smooth_scroll(&off, false));
+        let snap = Settings {
+            cursor_motion: CursorMotion::Snap,
+            ..Settings::default()
+        };
+        assert!(!resolve_smooth_scroll(&snap, false), "snap'te süzüldü");
+        // Öteki iki stil kaymayı açık bırakıyor.
+        for style in [CursorMotion::Ease, CursorMotion::Spring] {
+            let settings = Settings {
+                cursor_motion: style,
+                ..Settings::default()
+            };
+            assert!(resolve_smooth_scroll(&settings, false), "{style:?}");
+        }
+        // Süreli koşu: ayar okunmuyor, Hareketi Azalt `false` çözülüyor, yani
+        // pürüzsüz — sistem ayarına bağlanmadan.
+        let reduce = resolve_reduce_motion(&Inputs::Hermetic, ReduceMotion::System, || {
+            panic!("süreli koşu sistem ayarını okudu")
+        });
+        assert!(resolve_smooth_scroll(&Settings::default(), reduce));
     }
 
     #[test]

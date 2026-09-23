@@ -925,6 +925,9 @@ impl TerminalWindow {
         // pencerelere. Hermetik koşuda çözülmüş değer `false` ve link o
         // değerle doğuyor, yani çağrı no-op (`DisplayLink::set_reduce_motion`).
         self.set_reduce_motion(app.reduce_motion());
+        // Tekerleğin kipi de aynı çözülmüş girdiden (Hareketi Azalt ayarın
+        // üçüncü girdisi) ve aynı sonraki yoldan (`apply_reduce_motion`).
+        self.set_smooth_scroll(app.smooth_scroll());
         // İmlecin çizim sayıları da açılışta bir kez iniyor ve **yuvadan**
         // okunuyor, elde kalan `link`'ten değil: link o çağrıda yuvaya
         // taşındı. `set_caret_style` aynı değerde no-op, yani kayıt anı
@@ -1097,6 +1100,14 @@ impl TerminalWindow {
         if let Some(link) = self.ivars().link.get() {
             link.set_reduce_motion(reduce);
         }
+    }
+
+    /// Kaydırmanın **çözülmüş** kipini view'a verir
+    /// (`AppDelegate::smooth_scroll`). Link'e değil view'a: karar olayın
+    /// sınıflamasında, `scrollWheel:`'de veriliyor ve `false` kolu bugünkü
+    /// satır yolunun ta kendisi (027 Karar 5).
+    pub(crate) fn set_smooth_scroll(&self, smooth: bool) {
+        self.ivars().view.set_smooth_scroll(smooth);
     }
 
     /// Odak değişti — `bt-gpu`'ya iletir.

@@ -385,6 +385,36 @@ impl ReduceMotion {
     }
 }
 
+/// `[motion] smooth_scroll`: geçmişte kaydırmak pürüzsüz mü, satır adımıyla
+/// mı.
+///
+/// **`bool` değil**, dosyanın dizge-enum geleneği ([`ReduceMotion`],
+/// `Osc52`): değer referansın anahtarının (`scroll.smooth`) anlamı, türü
+/// bizim.
+///
+/// Tüketicisi `bt-shell` ([`CursorMotion`] emsali) ve orada Hareketi Azalt
+/// ile `cursor_motion = "snap"`'le **tek `bool`'a** iniyor: üçünden biri
+/// hareketi kapatıyorsa tekerlek bugünkü satır adımıyla gidiyor
+/// (`.tasks/027-yumusak-kaydirma/discussion.md` → Karar 5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SmoothScroll {
+    /// Trackpad parmağı izler, çentik süzülür, jest sonunda satıra oturur.
+    #[default]
+    On,
+    /// Satır adımı — `"on"`'dan önceki davranışın ta kendisi.
+    Off,
+}
+
+impl SmoothScroll {
+    /// Ayar dosyasındaki yazılışı; [`CursorMotion::name`] ile aynı gerekçe.
+    fn name(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// `[shell] integration`: kabuğa sarmalayıcımız kurulsun mu.
 ///
 /// Anahtarın anlamı dar ve bilerek öyle: **"sarmalayıcıyı kurma"**. İşaretleri
@@ -509,6 +539,8 @@ pub struct Settings {
     pub cursor_motion: CursorMotion,
     /// `[motion] reduce_motion`: animasyonlar kısılsın mı.
     pub reduce_motion: ReduceMotion,
+    /// `[motion] smooth_scroll`: geçmişte kaydırmak pürüzsüz mü.
+    pub smooth_scroll: SmoothScroll,
     /// `[shell] integration`: kabuk sarmalayıcısı kurulsun mu. **Sonraki
     /// oturumda** geçerli ([`ShellIntegration`]).
     pub shell_integration: ShellIntegration,
@@ -540,6 +572,7 @@ impl Default for Settings {
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::default(),
             reduce_motion: ReduceMotion::default(),
+            smooth_scroll: SmoothScroll::default(),
             shell_integration: ShellIntegration::default(),
         }
     }
@@ -667,6 +700,12 @@ cursor_motion = "spring"
 # "system" | "on" | "off". Whether to tone animations down to a short fade:
 # system follows the macOS Reduce Motion setting, on and off decide it here.
 reduce_motion = "system"
+# "on" | "off". How scrolling back through history moves: on follows your
+# fingers on a trackpad pixel by pixel, lets a flick coast to a stop, glides a
+# mouse wheel notch and settles on a whole line when you let go; off moves
+# line by line. Reduce Motion and cursor_motion = "snap" also move line by
+# line.
+smooth_scroll = "on"
 
 [shell]
 # "auto" | "blocks" | "off". Whether bateri sets up the shell so it can report
@@ -890,10 +929,15 @@ integration = "auto"
                     parsed.settings.reduce_motion =
                         reduce_motion(text, item, fallback.reduce_motion, &mut parsed.diagnostics);
                 }
+                if let Some(item) = motion.get("smooth_scroll") {
+                    parsed.settings.smooth_scroll =
+                        smooth_scroll(text, item, fallback.smooth_scroll, &mut parsed.diagnostics);
+                }
             }
             None if root.contains_key("motion") => {
                 parsed.settings.cursor_motion = fallback.cursor_motion;
                 parsed.settings.reduce_motion = fallback.reduce_motion;
+                parsed.settings.smooth_scroll = fallback.smooth_scroll;
             }
             None => {}
         }
@@ -967,7 +1011,8 @@ integration = "auto"
             terminal: self.terminal() != new.terminal(),
             font: self.font != new.font,
             motion: self.cursor_motion != new.cursor_motion
-                || self.reduce_motion != new.reduce_motion,
+                || self.reduce_motion != new.reduce_motion
+                || self.smooth_scroll != new.smooth_scroll,
             caret: self.caret != new.caret || self.blink_interval != new.blink_interval,
         }
     }
@@ -1088,10 +1133,11 @@ pub struct Changes {
     /// bir alan, çünkü hareket ne oturumu ne hücre ölçüsünü ilgilendiriyor —
     /// ikisine de bağlansaydı bir stil değişimi grid'i yeniden kurdururdu.
     ///
-    /// İki anahtar **tek** alanda: ikisi de aynı yere, aynı çağrı yerinde
-    /// gidiyor ve ayrı alanlar çağıranda tek bir `if` yerine iki tane
-    /// yazdırırdı. [`Settings::reduce_motion`] üç değerli olduğu için
-    /// `bt-shell` onu yine de çözmek zorunda; fark yalnız "bir şey değişti"
+    /// Üç anahtar **tek** alanda: üçü de aynı çağrı yerinde çözülüyor ve ayrı
+    /// alanlar çağıranda tek bir `if` yerine üç tane yazdırırdı.
+    /// [`Settings::reduce_motion`] üç değerli olduğu için `bt-shell` onu yine
+    /// de çözmek zorunda, [`Settings::smooth_scroll`] de öteki ikisiyle tek
+    /// `bool`'a iniyor (view'ın tekerleğine); fark yalnız "bir şey değişti"
     /// diyor.
     pub motion: bool,
     /// [`Settings::caret`] değişti: imlecin çizim sayıları `bt-gpu`'ya gider
@@ -1563,6 +1609,35 @@ fn reduce_motion(
     fallback
 }
 
+/// `motion.smooth_scroll`: tam olarak `"on"` ya da `"off"`.
+///
+/// [`cursor_motion`] ile aynı kural ve aynı gerekçe: kabul edilmeyen değer
+/// `fallback`'i alır ve tanı bırakır; yanlış tahmin görünür (kaydırma süzülür
+/// ya da satır satır gider).
+fn smooth_scroll(
+    text: &str,
+    item: &Item,
+    fallback: SmoothScroll,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> SmoothScroll {
+    const KEY: &str = "motion.smooth_scroll";
+    let found = match item.as_str() {
+        Some("on") => return SmoothScroll::On,
+        Some("off") => return SmoothScroll::Off,
+        Some(value) => format!("{value:?}"),
+        None => kind(item).to_owned(),
+    };
+    diagnostics.push(Diagnostic {
+        key: Some(KEY),
+        line: item.span().and_then(|span| line_of(text, span.start)),
+        message: format!(
+            "`{KEY}` must be \"on\" or \"off\", found {found}; using \"{}\"",
+            fallback.name()
+        ),
+    });
+    fallback
+}
+
 /// `shell.integration`: tam olarak `"auto"` ya da `"off"`.
 ///
 /// [`cursor_motion`] ile aynı kural: kabul edilmeyen değer `fallback`'i alır
@@ -1688,6 +1763,7 @@ mod tests {
             ("clipboard", "osc52"),
             ("motion", "cursor_motion"),
             ("motion", "reduce_motion"),
+            ("motion", "smooth_scroll"),
             ("shell", "integration"),
         ] {
             assert!(
@@ -1867,6 +1943,7 @@ mod tests {
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::Spring,
             reduce_motion: ReduceMotion::System,
+            smooth_scroll: SmoothScroll::On,
             shell_integration: ShellIntegration::Auto,
         };
         let parsed = Settings::parse_keeping(
@@ -2692,6 +2769,100 @@ found 1.5; using 0.1"
             diagnostic.message,
             "`terminal` must be a section, found an array of sections (`[[…]]`)"
         );
+    }
+
+    #[test]
+    fn smooth_scroll_is_read() {
+        // Dosyada yoksa `on`: özellik kapalı sevk edilmiyor (027 Karar 4).
+        assert_eq!(clean("").smooth_scroll, SmoothScroll::On);
+        assert_eq!(
+            clean("[motion]\nsmooth_scroll = \"off\"\n").smooth_scroll,
+            SmoothScroll::Off
+        );
+        assert_eq!(
+            clean("motion = { smooth_scroll = \"on\" }\n").smooth_scroll,
+            SmoothScroll::On
+        );
+        // Üç anahtar birbirini ezmiyor.
+        let all = clean(
+            "[motion]\ncursor_motion = \"ease\"\nreduce_motion = \"on\"\nsmooth_scroll = \"off\"\n",
+        );
+        assert_eq!(all.cursor_motion, CursorMotion::Ease);
+        assert_eq!(all.reduce_motion, ReduceMotion::On);
+        assert_eq!(all.smooth_scroll, SmoothScroll::Off);
+    }
+
+    #[test]
+    fn unrecognized_smooth_scroll_keeps_its_own_key() {
+        // `cursor_motion` ile aynı kural: yalnız kendi anahtarı etkilenir,
+        // yanında tanı.
+        for (value, found) in [
+            ("\"yes\"", "\"yes\""),
+            ("\"On\"", "\"On\""),
+            ("true", "a boolean"),
+        ] {
+            let text = format!("[motion]\ncursor_motion = \"snap\"\nsmooth_scroll = {value}\n");
+            let (settings, diagnostic) = rejected(&text);
+            assert_eq!(
+                settings,
+                Settings {
+                    cursor_motion: CursorMotion::Snap,
+                    ..Settings::default()
+                },
+                "{value}"
+            );
+            assert_eq!(diagnostic.key, Some("motion.smooth_scroll"), "{value}");
+            assert_eq!(diagnostic.line, Some(3), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`motion.smooth_scroll` must be \"on\" or \"off\", found {found}; using \"on\""
+                )
+            );
+        }
+        // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
+        let current = Settings {
+            smooth_scroll: SmoothScroll::Off,
+            ..Settings::default()
+        };
+        let parsed = Settings::parse_keeping("[motion]\nsmooth_scroll = \"yes\"\n", &current)
+            .expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.smooth_scroll, SmoothScroll::Off);
+        assert!(parsed.diagnostics[0].message.ends_with("using \"off\""));
+        // Bölüm yanlış türde: anahtar kabul edilmemiş sayılıyor.
+        let parsed =
+            Settings::parse_keeping("motion = 5\n", &current).expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.smooth_scroll, SmoothScroll::Off);
+    }
+
+    #[test]
+    fn smooth_scroll_change_is_a_motion_change() {
+        // `bt-shell` onu Hareketi Azalt'ın yolunda çözüyor, yani fark
+        // `motion`'da; oturumu ve fontu kıpırdatmamalı.
+        let before = clean("");
+        let after = clean("[motion]\nsmooth_scroll = \"off\"\n");
+        assert_eq!(
+            before.changes(&after),
+            Changes {
+                terminal: false,
+                font: false,
+                motion: true,
+                caret: false
+            }
+        );
+        assert_eq!(after.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn theme_write_keeps_smooth_scroll_and_unknown_keys() {
+        // Menünün yazma yolu yeni anahtarı ve tanımadığı komşusunu yerinde
+        // bırakıyor; yazılan metin aynı değeri geri okuyor.
+        let text = "[motion]\nsmooth_scroll = \"off\" # satır satır\nglide = 3\n";
+        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        assert!(written.starts_with(text), "{written}");
+        let settings = clean(&written);
+        assert_eq!(settings.smooth_scroll, SmoothScroll::Off);
+        assert_eq!(settings.theme, "paper");
     }
 
     #[test]
