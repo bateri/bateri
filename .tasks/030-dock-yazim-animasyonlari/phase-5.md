@@ -44,4 +44,6 @@ _Requirements: R9, R5_
 - [ ] `EraseFx` kolları, tohum, şişme payı
 - [ ] `NAMES`, şablon, popup başlıkları, `docs/AYARLAR.md`
 - [ ] Test: R5 döngüsü sekiz efektte, `t = 0` eşitliği, tohum kararlılığı, ayrıştırma
+- [ ] Ölçeklenen karelerde pürüz (phase-4'ün offscreen karelerinde görüldü, `recede` dahil): `glyph_fx` ölçekli örneklemede **doğrusal** filtreye geçsin, atlasın komşu yuvasına sızmadan (uv yuva sınırına kırpılır; komşu yuva bekçisi yeşil kalır). Büyütmeyen efektler bit bit aynı.
+- [ ] `CLAUDE.md`'nin emoji blend cümlesi (R10): metin RGB kaynak çarpanı `One` diyor, kod `SourceAlpha` — kodla hizala (hangisi doğruysa; ön çarpımlı bayt iddiasını da doğrula).
 - [ ] Doğrulama geçti (`make hepsi` + `make shader`)
