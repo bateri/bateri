@@ -47,6 +47,7 @@ _Requirements: R2.5_
 - [ ] Köşe kararı fonksiyonu + sınaması
 - [ ] Altıncı pipeline ve encode sırası
 - [ ] Test: offscreen köşe ve içbükey piksel bekçileri
+- [ ] Zeminli seçili hücrenin köşesi (phase-2'den devir): `frame()` seçili hücrenin zeminini düşürüyor, yani yuvarlak köşede renkli bir satırın (vim durum satırı, `\e[7m`) yerine pencere zemini görünecek — gözle bak; çentik okunuyorsa zemini koşunun altında bırak (`session.rs`, `let bg = if selected`)
 - [ ] `CLAUDE.md`
 - [ ] Doğrulama geçti (`make shader`, `make hepsi`, `make duman`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi

@@ -889,7 +889,7 @@ bateri – themes/paper.toml: line 3: `ansi.red` must be a color like "#rrggbb",
 
 ### Biçim
 
-Altı rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
+Sekiz rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
 bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 
 | anahtar | anlamı |
@@ -899,6 +899,7 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 | `dim` | sönük (SGR 2) yazılmış varsayılan ön plan |
 | `accent` | vurgu; **koşan** komutun işareti |
 | `cursor` | imleç bloğunun rengi |
+| `selection` | fareyle seçimin vurgusu; seçili metin kendi renginde kalır, odakta olmayan pencerede vurgu zemine doğru soluklaşır |
 | `success` | durum: başarı; sıfır çıkış koduyla biten komutun işareti |
 | `error` | durum: hata; sıfırdan farklı çıkış koduyla biten komutun işareti |
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |
@@ -927,10 +928,12 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   kuraldır: renk temanın `background`'una doğru üçte bir yol alır — koyu
   temada koyulaşır, açık temada açılır. Siyah zeminde bu, alacritty'nin ve
   vte'nin "rengin üçte ikisi" kuralıyla aynıdır.
-- `dim`, `success` ve `error` de her anahtar gibi eksikse `bateri`'den gelir:
-  açık bir temada `dim` yazılmazsa sönük varsayılan metin koyu temanın grisiyle
-  (`#909093`), `success`/`error` yazılmazsa komut işaretleri koyu temanın yeşil
-  ve kırmızısıyla çizilir.
+- `dim`, `success`, `error` ve `selection` de her anahtar gibi eksikse
+  `bateri`'den gelir: açık bir temada `dim` yazılmazsa sönük varsayılan metin
+  koyu temanın grisiyle (`#909093`), `success`/`error` yazılmazsa komut
+  işaretleri koyu temanın yeşil ve kırmızısıyla, `selection` yazılmazsa seçim
+  koyu temanın laciverdiyle (`#2b3a50`) çizilir — açık bir temada koyu metnin
+  altında zor okunur, yani açık bir tema `selection`'ını yazmalı.
 
 ### Gömülü `bateri`
 
@@ -942,6 +945,7 @@ foreground = "#d8d9dd"
 dim = "#909093"
 accent = "#7a9cc6"
 cursor = "#d9b063"
+selection = "#2b3a50"
 success = "#8bb58b"
 error = "#d16d6a"
 
@@ -976,6 +980,7 @@ foreground = "#24262c"
 dim = "#696b70"
 accent = "#3d6aa8"
 cursor = "#8a6512"
+selection = "#c9d8ee"
 success = "#3b7a3b"
 error = "#b5423d"
 

@@ -65,9 +65,29 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.6_
 
 ## Checklist
 
-- [ ] Rol, iki gömülü değer, iki lineer erişimci
-- [ ] `frame()`: takas kalkar, koşular kapıdan önce biriktirilir
-- [ ] `bt-gpu`: koşu listesi, sıra, sayaçtan muafiyet, odak rengi
-- [ ] Test: koşu sınamaları; offscreen bekçi; eski ters video bekçileri yeniden
-- [ ] `docs/AYARLAR.md`, `CLAUDE.md`
-- [ ] Doğrulama geçti (`make hepsi`, `make duman`)
+- [x] Rol, iki gömülü değer, iki lineer erişimci
+- [x] `frame()`: takas kalkar, koşular kapıdan önce biriktirilir
+- [x] `bt-gpu`: koşu listesi, sıra, sayaçtan muafiyet, odak rengi
+- [x] Test: koşu sınamaları; offscreen bekçi; eski ters video bekçileri yeniden
+- [x] `docs/AYARLAR.md`, `CLAUDE.md`
+- [x] Doğrulama geçti (`make hepsi`, `make duman` — jetonlar `hucre=8 glif=6 kural=15`, değişmedi)
+
+## Uygulama Notları
+
+- Atlama kapısı seçimsiz zemine bakıyor (`plain_bg`); seçili hücrenin zemini
+  kapıdan **sonra** düşüyor. Kapı seçili zemine baksaydı yalnız zeminden ibaret
+  seçili satır (ters videolu boşluk) doluluktan düşer, ızgara kayardı —
+  bekçi `a_selection_does_not_move_the_content`.
+- Planda yoktu: bastırılan giriş satırı koşu vermiyor (döngüden sonra
+  `retain`), yoksa çizilmeyen satırın yerine koşu boyanırdı.
+- `SelectionRuns` iki rengi de taşıyor (`color(focused)`); renk `frame()`'in
+  tema kopyasından, `bt-gpu` yalnız seçiyor. Doğrudan `Default` yok
+  (`LinearRgba`'nın yok), taban gömülü temanın renkleri.
+- Test-first sırası tutulmadı: sınamalar yeni sınır tipine (`SelectionRun`)
+  bağlı ve kod ile aynı turda yazıldı.
+- Renkler: koyu `#2b3a50`, açık `#c9d8ee` (zevk kararı). Gözle (geçici paket,
+  iki tema): üç satırlık sürükleme satır başına tek koşu, kelime arası boşluk
+  köprülü, boş ara satır bölüyor, satır sonu vurgusuz; ters videolu durum
+  satırı seçimde normal ön planıyla; kırmızı/mavi metin okunur (koyu temada
+  mavi en zayıfı — Karar 3'ün bilinen sınırı); ikinci pencere öne gelince
+  seçim soluyor, dönünce geri geliyor; çift tık kelimeyi yeni renkle seçiyor.

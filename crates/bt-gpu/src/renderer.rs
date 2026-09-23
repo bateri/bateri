@@ -756,6 +756,11 @@ impl Renderer {
                 viewport_px,
             )
             .and_then(|()| self.encode_quads(&enc, frame.bg_instances(), viewport_px))
+            // **Seçim zeminden sonra, caret'ten ve glyph'lerden önce** (031):
+            // metin seçimin üstünde kendi renginde okunuyor ve imleç seçimin
+            // üstünde kalıyor — ters videonun "imleç kazanır" kuralı, artık
+            // piksel sırasıyla.
+            .and_then(|()| self.encode_quads(&enc, frame.selection_instances(), viewport_px))
             // **Caret arka planlardan sonra, glyph'lerden önce** ve gerekçe
             // **dolu** caret'e ait: blok opak, altındaki harf onun üstüne ve
             // `cursor_block`'un ters çevirdiği renkle çiziliyor. Caret kendi
@@ -1928,7 +1933,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    use bt_core::{Block, CaretShape, Cell, Cursor, Theme, UnderlineStyle};
+    use bt_core::{Block, CaretShape, Cell, Cursor, SelectionRun, Theme, UnderlineStyle};
 
     use super::*;
     use crate::glyph_fx::{Effect, Fx, Kind};
@@ -2470,6 +2475,77 @@ mod tests {
             srgb(Theme::BATERI.accent),
             "boş çeyrek clear rengi",
         );
+    }
+
+    #[test]
+    fn a_selection_run_paints_between_the_ground_and_the_glyph() {
+        // 031 phase-2'nin GPU tanığı: seçim koşusu **zeminden sonra,
+        // glyph'ten önce** çiziliyor. Üç hücrelik bir koşu: 0. sütunda
+        // kırmızı zeminli bir hücre (koşu onu örtmeli), 1. sütunda beyaz `M`
+        // (koşunun üstünde kendi renginde kalmalı), 2. sütun boş (köprü).
+        // 3. sütun koşunun dışında ve clear rengiyle kalmalı.
+        //
+        // Koşunun rengi temadan değil **ara ton** ([`MIDTONE`]): sRGB'nin
+        // sabit noktaları lineerleştirmenin unutulmasını göremezdi. Clear
+        // `ACCENT` — koşu ile clear ayrık iki renk, yoksa "boyandı" ile
+        // "boyanmadı" ayırt edilemez.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 4);
+        let mut frame = Frame::default();
+        frame.clear(grid(cw, ch), CaretStyle::default());
+        frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
+        frame.push(glyph_cell(1, 'M', None));
+        frame.push_selection(
+            SelectionRun {
+                row: 0,
+                first: 0,
+                last: 2,
+            },
+            MIDTONE,
+        );
+        assert_eq!(frame.bg_count(), 1, "koşu `hucre=` sayacına girmemeli");
+
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        let srgb = |hex: u32| ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let near = |seen: (u8, u8, u8), expected: (u8, u8, u8)| {
+            seen.0.abs_diff(expected.0) <= 1
+                && seen.1.abs_diff(expected.1) <= 1
+                && seen.2.abs_diff(expected.2) <= 1
+        };
+        let midtone = srgb(MIDTONE_SRGB);
+        let accent = srgb(Theme::BATERI.accent);
+        let cell = |col: usize| cell_rows(&pixels, EDGE, (cw, ch), col).concat();
+        // Zeminli hücre koşunun altında: kırmızı hiç görünmüyor.
+        assert!(
+            cell(0).iter().all(|&p| near(p, midtone)),
+            "koşu zeminin altında kaldı: {:02x?}",
+            cell(0)
+        );
+        // Glyph koşunun üstünde, kendi renginde; harfin boşlukları koşunun
+        // renginde — clear rengi koşunun içinde hiçbir yerde yok.
+        let glyph = cell(1);
+        // Tam bayt aranmıyor: 1x'te dikey gövdeler bile yarım piksele
+        // düşebiliyor ve doygun beyaz kapsaması tam bir piksel ister. Sorulan
+        // şey harfin koşudan **açık** olması — altında kalsaydı hiç görünmezdi.
+        let brightest = glyph
+            .iter()
+            .map(|p| u32::from(p.0) + u32::from(p.1) + u32::from(p.2))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            brightest > 3 * 0xc0,
+            "glyph koşunun altında kaldı: {brightest}"
+        );
+        assert!(
+            glyph.iter().any(|&p| near(p, midtone)),
+            "harfin çevresi boyanmadı"
+        );
+        assert!(!glyph.iter().any(|&p| near(p, accent)), "koşuda delik");
+        // Köprü: mürekkepsiz sütun da koşunun renginde.
+        assert!(cell(2).iter().all(|&p| near(p, midtone)), "köprü boyanmadı");
+        // Koşunun dışı clear.
+        assert!(cell(3).iter().all(|&p| near(p, accent)), "koşu taştı");
     }
 
     /// Bir dörtgen bölgenin pikselleri, [`pixel_at`]'in üçlüsüyle.

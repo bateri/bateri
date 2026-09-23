@@ -529,6 +529,61 @@ impl Blocks {
     }
 }
 
+/// Seçim vurgusunun bir satırlık parçası: `row` satırında `first..=last`
+/// sütunları, ekran koordinatında (`Cell` ile aynı uzay).
+///
+/// **Hücre değil satır koşusu** (031 `discussion.md` → Karar 4): koşu satırın
+/// ilk çizilir seçili hücresinden sonuncusuna uzanıyor ve aradaki boşlukları
+/// köprülüyor — kelime arası boşluk vurgulu (pano onu zaten kopyalıyor), satır
+/// sonundaki boş kuyruk ve boş satır vurgusuz (seçim içerik yaratmaz).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionRun {
+    pub row: u16,
+    pub first: u16,
+    /// Dahil. Geniş karakterde spacer'ın sütunu — iki yarı da vurgulu.
+    pub last: u16,
+}
+
+/// [`Session::frame`]'in seçim koşuları ve iki rengi — [`Blocks`] emsali,
+/// çağıranın karelere yaydığı tampon (kare başına ayırma yok).
+///
+/// **Renkler hazır geliyor, seçimi çizen taraf yapıyor** (Karar 9): odak
+/// `bt-core`'a girmiyor, yani hangisinin çizileceğini `bt-gpu` biliyor. İkisi
+/// de temanın aynı kopyasından, koşularla aynı karede — ayrı bir sorgudan
+/// okunsalardı tema takasında bir kare ayrışırlardı.
+#[derive(Debug)]
+pub struct SelectionRuns {
+    runs: Vec<SelectionRun>,
+    color: LinearRgba,
+    unfocused: LinearRgba,
+}
+
+/// Koşusuz boş tampon; renkler gömülü temadan, ilk kare üstüne yazıyor.
+/// `LinearRgba`'nın `Default`'u yok (tek kurucusu `from_srgb`), yani renk
+/// uydurulmuyor, temanın kendisinden geliyor.
+impl Default for SelectionRuns {
+    fn default() -> Self {
+        Self {
+            runs: Vec::new(),
+            color: Theme::BATERI.selection_linear(),
+            unfocused: Theme::BATERI.selection_unfocused_linear(),
+        }
+    }
+}
+
+impl SelectionRuns {
+    /// Bu karenin koşuları, satır sırasıyla; satır başına en çok bir tane.
+    pub fn as_slice(&self) -> &[SelectionRun] {
+        &self.runs
+    }
+
+    /// Vurgunun rengi, **lineer**: odaktaki pencerede `color`, değilse
+    /// zemine doğru soluklaşmış eşi ([`Theme::selection_unfocused_linear`]).
+    pub fn color(&self, focused: bool) -> LinearRgba {
+        if focused { self.color } else { self.unfocused }
+    }
+}
+
 /// Oturumun açılış ayarları.
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
@@ -2197,6 +2252,11 @@ impl Session {
     /// modülün yazılı kuralını çiğnerdi — yaprak kilit (`shell`) `Term`
     /// kilidinin altına girmez.
     ///
+    /// `selection` seçimin **satır koşularını** ve iki rengini alıyor
+    /// ([`SelectionRuns`]); `blocks` gibi her karede boşalıp doluyor. Koşular
+    /// ızgaranın ekran satırlarında, bastırılan giriş satırı hariç — doldurma
+    /// bandı seçilemiyor, dock'un seçimi ayrı.
+    ///
     /// **`glide` kare yolunun bu karede teslim ettiği süzülme payı** (027): aynı
     /// `Term` kilidinde, tarama başlamadan uygulanıyor ve **uyandırmıyor** —
     /// animasyonun kare talebi `Waker::wake`'ten geçemez (`CLAUDE.md` → Boşta
@@ -2209,6 +2269,7 @@ impl Session {
         mut sink: impl FnMut(Cell),
         mut fill_sink: impl FnMut(Cell),
         blocks: &mut Blocks,
+        selection: &mut SelectionRuns,
         glide: ScrollGlide,
     ) -> Cursor {
         // Tema `Term` kilidinden **önce** ve kopya olarak: yaprak kilit
@@ -2249,6 +2310,9 @@ impl Session {
         blocks.resolved.clear();
         blocks.fill_anchors.clear();
         blocks.fill_resolved.clear();
+        selection.runs.clear();
+        selection.color = theme.selection_linear();
+        selection.unfocused = theme.selection_unfocused_linear();
         let mut term = self.term.lock();
         // **Süzülme payı taramadan önce**: aşağıdaki her şey (ofset, bayrağın
         // ömrü, doldurma, kayma sayısı) payın taşıdığı pencereyi görmeli.
@@ -2548,56 +2612,53 @@ impl Session {
         // onu hücre başına okumak aynı değeri her hücrede yeniden okumak
         // olurdu.
         let selected_range = visible_range(term.selection.as_ref(), &term);
+        // Seçim koşusunun birikimi: satır başına ilk ve son **çizilir seçili**
+        // sütun. `display_iter` satır sırasıyla geldiği için tek bir açık koşu
+        // yetiyor; satır değişince kapanıp tampona iniyor.
+        let mut open_run: Option<SelectionRun> = None;
 
         for indexed in display_iter {
             let cell = indexed.cell;
             let flags = cell.flags;
             let dim = flags.contains(Flags::DIM);
             let hidden = flags.contains(Flags::HIDDEN);
-            // Seçim vurgusu ters videodur — yeni shader/uniform yok, hücrenin
-            // kendi iki rengi takaslanıyor. `^`, `||` değil: seçim ters
-            // videoyu **çevirir**, seçili ters videolu hücre normal renklerine
-            // döner. `||` ile ters videolu bir satırın (vim durum satırı, tmux
-            // çubuğu) seçimi hiç görünmüyordu — seçili hücre seçilmemişle aynı
-            // renkteydi. Emsal alacritty: hücreyi önce `INVERSE` için takaslıyor,
-            // sonra varsayılan seçim renkleri (`CellBackground`/`CellForeground`)
-            // takaslanmış iki rengi bir kez daha takaslıyor. İmlecin altındaki
-            // hücreyle seçim çakışırsa imleç kazanır: seçim hücrenin
-            // renklerini takaslıyor, imleç ise bloğun **piksellerini** eziyor
-            // (bkz. [`Cursor`]) ve sonuncu söz çizenin.
+            // **Seçim artık hücreyi boyamıyor, satır koşusu veriyor** (031
+            // phase-2). Vurgu temanın `selection` rengi ve çizen taraf onu
+            // zeminle glyph'ler arasına düz dörtgen olarak koyuyor; buradaki
+            // tek iş hangi hücrelerin koşuyu belirlediğini bulmak. Ters video
+            // takası (`inverse ^ selected`) kalktı: seçili hücrenin metni
+            // **kendi ön planıyla** ve ters video çözülmüş olarak çiziliyor
+            // (Karar 3) — seçili ters videolu bir hücre (vim'in durum satırı)
+            // normal ön planıyla okunuyor, sözdizimi renkleri seçimde
+            // kaybolmuyor. İmleç seçimin üstünde kalıyor: koşu caret'ten önce
+            // çiziliyor.
             //
-            // Gizli metin seçilince de vurgulanmaz: `HIDDEN` "çizme" demek ve
-            // seçim onu delseydi gizli hücrenin yeri boyalı bir blok olarak
-            // görünürdü. Gizli metni kopyalamak isteyen phase-2'de
-            // `selection_text()`'e sorar — vurgu ile metin aynı kapıdan geçmek
-            // zorunda değil. `contains` değil `contains_cell`, iki sebeple:
-            // blok imleç seçimin **ucunda** durursa o hücre seçilmiş sayılmaz
+            // Gizli metin koşunun **ucunu** belirlemez: `HIDDEN` "çizme" demek
+            // ve seçim onu delseydi gizli hücrenin yeri boyalı bir blok olarak
+            // görünürdü. İçeride kalırsa köprüleniyor — iki yanında görünen
+            // seçili metin varken aradaki boşluk da boşluk gibi vurgulu.
+            // `contains` değil `contains_cell`, iki sebeple: blok imleç
+            // seçimin **ucunda** durursa o hücre seçilmiş sayılmaz
             // (alacritty'nin istisnası; imlecin **kendi** noktası bu yüzden
             // veriliyor — hücrenin noktası verilince istisna her uca
             // uygulanıyordu), ve aralık bir spacer'da başlarsa geniş
-            // karakterin baş hücresi de vurgulanır. Seçimin ortasındaki imleç
-            // hücresi seçili sayılır ve `inverse`'i çevrilir; görünen sonuç
-            // yalnız opak bloğun altında kalan arka plandır.
+            // karakterin baş hücresi de vurgulanır.
             // `set_selection` spacer'dan başlayan aralık kurmaz (`anchor`
             // spacer'ı `Right` yapıyor), ama seçimden sonra satır yeniden
             // yazılıp o hücre spacer olursa aralık orada başlar.
+            //
             // **Seçim içeriği vurgular, içerik yaratmaz.** Aralık boş
-            // hücreleri de kapsıyor ve onları ters çevirmek "burada bir şey
-            // var" demek oluyordu: boş ekranda fareyi sürükleyen kullanıcı
-            // koca bir blok görüyor, üstelik o seçim **hiçbir şey
-            // kopyalamıyor** (gözlendi, 2026-09-18). Vurgu ile metnin
-            // ayrışması bu deponun yasakladığı sınıf — göz "seçtim" derken
-            // pano boş geliyor.
-            //
-            // Ölçüt "mürekkep" **değil** "çizilir mi": zemin de sütunu işgal
-            // ediyor (013 Karar 7'nin aynısı). Ters videolu bir boşluk —
-            // vim'in durum satırı, tmux çubuğu — mürekkepsizdir ama
-            // görünürdür ve seçilince vurgulanmalıdır; varsayılan zeminli boş
-            // bir hücre ise görünmezdir ve seçim onu görünür kılmamalıdır.
-            // İkisini ayıran şey aşağıdaki atlama koşulunun **ta kendisi**,
-            // yalnız seçim uygulanmadan önceki hâliyle sorulmuş hâli.
-            //
-            // Satır taraması yok: soru hücrenin kendisine sorulabiliyor.
+            // hücreleri de kapsıyor ve onları boyamak "burada bir şey var"
+            // demek oluyordu: boş ekranda fareyi sürükleyen kullanıcı koca bir
+            // blok görüyor, üstelik o seçim **hiçbir şey kopyalamıyor**
+            // (gözlendi, 2026-09-18). Ölçüt "mürekkep" **değil** "çizilir mi"
+            // (zemin de sütunu işgal ediyor; 013 Karar 7): ters videolu bir
+            // boşluk — vim'in durum satırı, tmux çubuğu — mürekkepsizdir ama
+            // görünürdür ve koşuyu uzatır; varsayılan zeminli boş hücre
+            // görünmezdir ve koşuyu uzatmaz. Birim hücre değil **satır**
+            // (Karar 4): koşu ilk çizilir seçili hücreden sonuncusuna uzanıyor,
+            // yani kelime arası boşluk vurgulu (pano onu zaten kopyalıyor),
+            // satır sonundaki boş kuyruk ve boş bir ara satır vurgusuz.
             let plain_inverse = flags.contains(Flags::INVERSE);
             let plain_back = if plain_inverse {
                 color::resolve_fg(cell.fg, dim, colors, &theme)
@@ -2620,9 +2681,7 @@ impl Session {
             // (`ch` onu eliyor) ve zemini varsayılan olabilir, yani ölçüt
             // yalnız mürekkep + zemin + kural olsaydı seçili bir CJK
             // karakterinin **yarısı** vurgusuz kalırdı — `selection_text()`
-            // onu bütün kopyalarken. Bugün belirti geniş glyph'in tek yuvaya
-            // kırpılmasıyla örtülü; 016 çizmeye başlayınca görünür olurdu ve
-            // hiçbir sayaç göremezdi.
+            // onu bütün kopyalarken.
             let drawable =
                 plain_back != background || ch.is_some() || ruled || flags.intersects(SPACERS);
             let selected = !hidden
@@ -2630,45 +2689,6 @@ impl Session {
                 && selected_range
                     .as_ref()
                     .is_some_and(|range| range.contains_cell(&indexed, cursor_point, cursor_shape));
-            let inverse = plain_inverse ^ selected;
-
-            // **Arka plan önce**: atlama koşulunun ağır yarısı bu ve boş
-            // grid'de hücrelerin neredeyse tamamı burada eleniyor. Ön plan
-            // zincirini de bu satırın önüne almak, `Term` kilidi tutulurken
-            // hücre başına ikinci bir renk çözümünü çizilmeyen hücreler için
-            // de ödemek olurdu.
-            //
-            // Ters video hücrenin iki rengini takas eder; `DIM` ise **ön
-            // plana** uygulanır (adlı rengi sönük eşine çeviren kod
-            // alacritty'nin ikili tarafında, kitaplıkta değil). İkisi
-            // birleşince kural şu: sönüklük, `cell.fg`'den doğan renge gider —
-            // ters videoda o renk arka plan olmuştur. "Ters video" burada
-            // seçimin çevirdiği `inverse`: seçili ters videolu hücrede sönüklük
-            // yeniden ön plana döner.
-            //
-            // Kural `color::resolve_fg`'de tek: iki dal aynı fonksiyondan
-            // geçiyor, ters videolu dal sönük rolü unutamıyor.
-            // Seçim `plain_back`'i takaslıyor; seçilmemiş hücrede ikinci bir
-            // çözüm yok, `plain_back` zaten cevap.
-            let back = if selected {
-                if inverse {
-                    color::resolve_fg(cell.fg, dim, colors, &theme)
-                } else {
-                    color::resolve(cell.bg, colors, &theme)
-                }
-            } else {
-                plain_back
-            };
-            // Varsayılan arka plan çizilmez; `None` onun adı.
-            let bg = (back != background).then(|| color::linear_rgba(back));
-
-            // Atlama koşulu: ne boyanacak bir arka plan, ne çizilecek bir
-            // mürekkep, ne de bir kural çizgisi. Boş grid'de bu koşul her
-            // hücreye uyar ve sink hiç çağrılmaz — `frame()`'in boştaki
-            // maliyeti iterasyonun kendisi.
-            if bg.is_none() && ch.is_none() && !ruled {
-                continue;
-            }
             // `display_iter` yalnız görünür pencereyi verir: aralığı
             // `-offset ..= -offset + screen_lines - 1`'e kırpar, yani satır
             // zaten 0..rows. Sözleşme değişirse debug derlemesi haber verir;
@@ -2680,6 +2700,53 @@ impl Session {
             let Ok(row) = u16::try_from(row) else {
                 continue;
             };
+            let col = indexed.point.column.0 as u16;
+            // **Koşu atlama kapısından ÖNCE** ve sıra zorunlu: varsayılan
+            // zeminli spacer ve boşluk kapıya takılıyor (çizecek bir şeyi
+            // yok), sonra olsaydı seçili bir CJK karakterinin sağ yarısı
+            // koşudan düşerdi. Geniş karakterin baş hücresi koşuyu
+            // spacer'ının sütununa kadar uzatıyor: aralık baş hücrede bitince
+            // spacer'ın kendisi seçili sayılmıyor ama glyph iki sütun (süre
+            // sayacının `last_col` aritmetiğinin aynısı).
+            if selected {
+                let last = if flags.contains(Flags::WIDE_CHAR) {
+                    col.saturating_add(1)
+                } else {
+                    col
+                };
+                match open_run.as_mut() {
+                    Some(run) if run.row == row => run.last = run.last.max(last),
+                    _ => {
+                        selection.runs.extend(open_run.take());
+                        open_run = Some(SelectionRun {
+                            row,
+                            first: col,
+                            last,
+                        });
+                    }
+                }
+            }
+            // Kapının zemin yarısı **seçimsiz** hâlin zemini: seçim kapıyı
+            // oynatmıyor. Oynatsaydı seçili ters videolu bir boşluk (çizecek
+            // tek şeyi zemini) kapıya takılır, satırın doluluğu (`drawn_rows`)
+            // ve çıpa taraması seçimle değişirdi — seçim içerik yaratmadığı
+            // gibi içerik de silmez.
+            let plain_bg = (plain_back != background).then(|| color::linear_rgba(plain_back));
+
+            // Atlama koşulu: ne boyanacak bir arka plan, ne çizilecek bir
+            // mürekkep, ne de bir kural çizgisi. Boş grid'de bu koşul her
+            // hücreye uyar ve sink hiç çağrılmaz — `frame()`'in boştaki
+            // maliyeti iterasyonun kendisi.
+            if plain_bg.is_none() && ch.is_none() && !ruled {
+                continue;
+            }
+            // Seçili hücrenin zemini **çizilmiyor**: seçimin şeklinin altında
+            // kalıyor ve opak şekil onu zaten örtüyor. Ters video da burada
+            // çözülüyor — metin hücrenin kendi ön planıyla (Karar 3). Sönüklük
+            // yine `cell.fg`'den doğan renge gider (`color::resolve_fg`), yani
+            // seçili sönük ters video hücrede o renk ön plana döner.
+            let bg = if selected { None } else { plain_bg };
+            let inverse = plain_inverse && !selected;
             // **Doluluk sayısının çizilen yarısı** ([`Cursor::content_rows`]):
             // atlama kapısından **sonra**, yani yalnız gerçekten çizilen
             // satırlar sayılıyor. Kapıdan önce olsaydı `display_iter` bütün
@@ -2754,7 +2821,6 @@ impl Session {
             // ([`cell_style`]): doldurma döngüsü de aynı yerden geçiyor.
             let style = cell_style(cell, inverse, dim, ruled, colors, &theme);
 
-            let col = indexed.point.column.0 as u16;
             // **Süre sayacının çakışma ölçütü**, faz 1'de toplanıyor: komut
             // satırının son mürekkepli sütunu. `display_iter` satır sırasıyla
             // geldiği ve komutun bütün hücreleri çıpayı taşıdığı (kapanış
@@ -2817,6 +2883,17 @@ impl Session {
                 // ayrılırdı.
                 wide: flags.contains(Flags::WIDE_CHAR),
             });
+        }
+        selection.runs.extend(open_run);
+        // **Bastırılan giriş satırı koşu da vermiyor**: ızgarada çizilmiyor ve
+        // yer kaplamıyor, yani oradaki bir koşu görünmeyen hücreleri — ya da
+        // ötelemeyle dock'un bandına düşen boş bir şeridi — boyardı. Süzgeç
+        // döngüden **sonra**, çünkü bastırmanın üst ucu (`suppress_from`)
+        // çıpa taramasıyla döngünün içinde doğuyor; koşu ise kapıdan önce
+        // birikmek zorunda.
+        if caret_in_dock && let (Some(from), Some(to)) = (suppress_from, suppress_to) {
+            let hidden = from.max(suppress_floor)..=to;
+            selection.runs.retain(|run| !hidden.contains(&run.row));
         }
 
         // **Doluluk sayısı kayıttan önce bir yerele çıkıyor** ve sebebi iki
@@ -5243,16 +5320,50 @@ mod tests {
     /// kare isteğiydi, blok değil. Blokları okuyan sınamalar
     /// [`blocks_if_damaged`] ile tamponu kendileri tutar.
     fn frame_if_damaged(session: &Session, sink: impl FnMut(Cell)) -> Option<Cursor> {
-        session
-            .take_damage()
-            .then(|| session.frame(sink, |_| (), &mut Blocks::default(), ScrollGlide::default()))
+        session.take_damage().then(|| {
+            session.frame(
+                sink,
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                ScrollGlide::default(),
+            )
+        })
+    }
+
+    /// [`frame_if_damaged`]'in seçim soran kardeşi: hücreler, koşular ve
+    /// doluluk birlikte — seçimin hücreyi değil koşuyu boyadığını ve
+    /// doluluğa dokunmadığını aynı karede sormak için.
+    fn runs_if_damaged(session: &Session) -> Option<(Vec<Cell>, Vec<SelectionRun>, Cursor)> {
+        session.take_damage().then(|| {
+            let mut cells = Vec::new();
+            let mut runs = SelectionRuns::default();
+            let cursor = session.frame(
+                |c| cells.push(c),
+                |_| (),
+                &mut Blocks::default(),
+                &mut runs,
+                ScrollGlide::default(),
+            );
+            (cells, runs.as_slice().to_vec(), cursor)
+        })
+    }
+
+    fn run(row: u16, first: u16, last: u16) -> SelectionRun {
+        SelectionRun { row, first, last }
     }
 
     /// [`frame_if_damaged`]'in blok soran kardeşi: tamponu çağıran tutar,
     /// böylece sınama hem hücreleri hem şeritleri görebilir.
     fn blocks_if_damaged(session: &Session, blocks: &mut Blocks) -> bool {
         session.take_damage() && {
-            session.frame(|_| (), |_| (), blocks, ScrollGlide::default());
+            session.frame(
+                |_| (),
+                |_| (),
+                blocks,
+                &mut SelectionRuns::default(),
+                ScrollGlide::default(),
+            );
             true
         }
     }
@@ -5567,6 +5678,7 @@ mod tests {
                     |cell| cells.push(cell),
                     |_| (),
                     &mut Blocks::default(),
+                    &mut SelectionRuns::default(),
                     ScrollGlide::default(),
                 );
                 if read_counter(&cells).is_some_and(|counter| ready(&counter)) {
@@ -5674,6 +5786,7 @@ mod tests {
                 |cell| cells.push(cell),
                 |_| (),
                 &mut Blocks::default(),
+                &mut SelectionRuns::default(),
                 ScrollGlide::default(),
             );
             let row = row_glyphs(&cells, 0);
@@ -5720,6 +5833,7 @@ mod tests {
                 |cell| cells.push(cell),
                 |_| (),
                 &mut Blocks::default(),
+                &mut SelectionRuns::default(),
                 ScrollGlide::default(),
             );
             // Komut satırı gerçekten sağ uca dayanmış olmalı, yoksa sınama
@@ -5761,6 +5875,7 @@ mod tests {
                     |_| (),
                     |_| (),
                     &mut Blocks::default(),
+                    &mut SelectionRuns::default(),
                     ScrollGlide::default(),
                 )
                 .next_tick;
@@ -5781,6 +5896,7 @@ mod tests {
                     |_| (),
                     |_| (),
                     &mut Blocks::default(),
+                    &mut SelectionRuns::default(),
                     ScrollGlide::default(),
                 )
                 .next_tick
@@ -5859,6 +5975,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(
@@ -5903,6 +6020,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
 
@@ -5915,6 +6033,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
 
@@ -5946,6 +6065,7 @@ mod tests {
                 |cell| cells.push(cell),
                 |_| (),
                 &mut Blocks::default(),
+                &mut SelectionRuns::default(),
                 ScrollGlide::default(),
             );
             !cells.is_empty()
@@ -5955,6 +6075,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(
@@ -5993,6 +6114,7 @@ mod tests {
                     |_| (),
                     |_| (),
                     &mut Blocks::default(),
+                    &mut SelectionRuns::default(),
                     ScrollGlide::default(),
                 )
                 .visible
@@ -6001,6 +6123,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(cursor.visible, "koşan komutta ızgara imleçsiz: {cursor:?}");
@@ -6037,6 +6160,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(cursor.caret_in_dock, "tutma devri gizlemeliydi: {cursor:?}");
@@ -6059,6 +6183,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert_eq!(
@@ -6089,6 +6214,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(
@@ -6112,6 +6238,7 @@ mod tests {
             |cell| cells.push(cell),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert_eq!(row_glyphs(&cells, 0), "$cmd1", "geçmiş kayboldu");
@@ -6142,7 +6269,13 @@ mod tests {
         wait_mirror(&session, DockStatus::Live);
 
         let mut blocks = Blocks::default();
-        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+        );
         let rows: Vec<u16> = blocks.as_slice().iter().map(|block| block.row).collect();
         assert_eq!(rows, [0], "bastırma blok şeridini düşürdü: {blocks:?}");
         session.shutdown();
@@ -6165,6 +6298,7 @@ mod tests {
             |cell| cells.push(cell),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert_eq!(
@@ -6204,6 +6338,7 @@ mod tests {
             |cell| cells.push(cell),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert_eq!(
@@ -6270,6 +6405,7 @@ mod tests {
             |cell| cells.push(cell),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(
@@ -6309,6 +6445,7 @@ mod tests {
             |cell| cells.push(cell),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(
@@ -6347,6 +6484,7 @@ mod tests {
                 |cell| cells.push(cell),
                 |_| (),
                 &mut Blocks::default(),
+                &mut SelectionRuns::default(),
                 ScrollGlide::default(),
             );
             assert_eq!(
@@ -6384,6 +6522,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(
@@ -6432,6 +6571,7 @@ mod tests {
             |cell| cells.push(cell),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(
@@ -6480,6 +6620,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(
@@ -6526,6 +6667,7 @@ mod tests {
             |cell| cells.push(cell),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert_eq!(row_glyphs(&cells, 2), "", "girişin ilk satırı ızgarada");
@@ -6570,6 +6712,7 @@ mod tests {
             |cell| live.push(cell),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert_eq!(row_glyphs(&live, 2), "", "ayna canlıyken bastırma yok");
@@ -6585,6 +6728,7 @@ mod tests {
                     |_| (),
                     |_| (),
                     &mut Blocks::default(),
+                    &mut SelectionRuns::default(),
                     ScrollGlide::default(),
                 )
                 .visible
@@ -6594,6 +6738,7 @@ mod tests {
             |cell| cells.push(cell),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert_eq!(
@@ -6699,7 +6844,13 @@ mod tests {
         });
         wait_settled(&session);
         let mut blocks = Blocks::default();
-        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -6730,14 +6881,26 @@ mod tests {
         // On satır yukarı: pencere tamamen `out` satırlarına düşüyor.
         let mut blocks = Blocks::default();
         session.term.lock().scroll_display(Scroll::Delta(10));
-        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(blocks.as_slice(), [], "çıktı satırı işaret aldı");
 
         // Dibe dönünce komutun satırı yine görünmüyor (27 satırlık içerikte
         // 10 satırlık pencere), ama ikinci prompt görünüyor ve `Pending`
         // olduğu için çizilmiyor: yine boş.
         session.term.lock().scroll_display(Scroll::Bottom);
-        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -6889,6 +7052,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(
@@ -6917,7 +7081,13 @@ mod tests {
         });
         wait_settled(&session);
         let mut blocks = Blocks::default();
-        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -6939,7 +7109,13 @@ mod tests {
         wait_frame(&session, &wake, |cells| row_text(cells, 0) == "duzenleyici");
         wait_settled(&session);
         let mut blocks = Blocks::default();
-        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -8555,41 +8731,19 @@ mod tests {
 
     #[test]
     fn selection_highlights_its_first_and_last_cell() {
-        // Vurgu aralığın **iki ucunu da** kapsar. Blok imlecin sınır istisnası
+        // Koşu aralığın **iki ucunu da** kapsar. Blok imlecin sınır istisnası
         // (`contains_cell`) yalnız imlecin durduğu hücre içindir; imleç
         // noktası yerine hücrenin kendi noktası verilince istisna her sınır
-        // hücresine uygulanıyor ve seçimin ilk ile son harfi hiç ters
-        // videolanmıyordu. İmleç burada `araba`'nın sağında, 5. sütunda.
+        // hücresine uygulanıyor ve seçimin ilk ile son harfi hiç
+        // vurgulanmıyordu. İmleç burada `araba`'nın sağında, 5. sütunda.
         let session = word_session();
-        // Taban: seçimsiz `a`'nın ön planı. Kare istemek için seçim son
-        // satıra kuruluyor — boş seçim (haklı olarak) kare istemez.
-        let mut plain = Vec::new();
-        session.set_selection(
-            SelectKind::Simple,
-            at(0, 9, CellHalf::Left),
-            at(1, 9, CellHalf::Right),
-        );
-        assert!(frame_if_damaged(&session, |c| plain.push(c)).is_some());
-        let plain_fg = plain.iter().find(|c| c.col == 0).expect("a hücresi").fg;
-
         session.set_selection(
             SelectKind::Simple,
             at(0, 0, CellHalf::Left),
             at(4, 0, CellHalf::Right),
         );
-        let mut next = Vec::new();
-        assert!(frame_if_damaged(&session, |c| next.push(c)).is_some());
-        for col in 0..5 {
-            let cell = next
-                .iter()
-                .find(|c| c.col == col && c.row == 0)
-                .expect("hücre");
-            assert_eq!(
-                cell.bg,
-                Some(plain_fg),
-                "sütun {col} vurgulanmalı: {cell:?}"
-            );
-        }
+        let (_, runs, _) = runs_if_damaged(&session).expect("seçim kare istemeli");
+        assert_eq!(runs, vec![run(0, 0, 4)]);
     }
 
     #[test]
@@ -8626,32 +8780,22 @@ mod tests {
     }
 
     #[test]
-    fn selected_cells_are_inverted_through_existing_pipe() {
-        // Vurgu `cell_bg` borusundan ters video ile geçiyor. Reçetede yalnız
+    fn selected_cells_give_one_run_and_drop_their_ground() {
+        // Vurgu hücreyi boyamıyor, **koşu** veriyor (031 phase-2): seçili
+        // üç hücrenin zemini sınırdan düşüyor (seçimin şeklinin altında
+        // kalacaktı), metinleri kendi renklerinde kalıyor. Reçetede yalnız
         // seçili aralık bg'li (`\033[41mell\033[0m`); `h` ile `o` varsayılan
-        // bg'li, yani vurgusuz karede `bg: None` taşıyor. İddia iki yönlü:
-        // seçili hücrede boya **beliriyor**, seçimsiz hücrede boya **yok**.
-        //
-        // Boyanın rengi takasın görünen yüzü **değil**: seçili hücrenin bg'si
-        // kendi fg'sinden değil, ters video kuralının çözdüğü renkten gelir
-        // (`resolve(if inverse { cell.fg } …)` — alacritty hücrenin `fg`'si
-        // `Named(Foreground)`, çözüm paletin ön planıdır). Rengi soran, boruyu
-        // değil paleti sorar; boruyu soran boyanın varlığı ile yokluğudur.
+        // bg'li.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session(
             "printf 'h\\033[41mell\\033[0mo'; sleep 5",
             Arc::clone(&wake),
         );
-
-        // Metin grid'e indi: beş glyph'li kare (`hello` — `h` ve `o`
-        // mürekkepli ama boyasız, `frame()` onları mürekkep için geçiriyor).
-        // Üçlük bg çapası burada **yanlış**: `h`/`o` bg'siz diye üçlük karede
-        // yoktur sanıyorduk, ama kare mürekkebi de taşıyor. Mürekkep sayısına
-        // bağlanan çapa hem erken-dönüşü hem bölünmüş PTY okumasını kapatıyor.
         let cells = wait_frame(&session, &wake, |cells| {
             cells.iter().filter_map(|c| c.ch).collect::<String>() == "hello"
         });
         assert_eq!(backgrounds(&cells).count(), 3, "{cells:?}");
+        let plain: HashMap<_, _> = cells.iter().map(|c| (c.col, c.fg)).collect();
         session.set_selection(
             SelectKind::Simple,
             at(1, 0, CellHalf::Left),
@@ -8659,26 +8803,28 @@ mod tests {
         );
         assert_eq!(session.selection_text().as_deref(), Some("ell"));
 
-        let mut next = Vec::new();
-        assert!(frame_if_damaged(&session, |c| next.push(c)).is_some());
-        // Seçili üç hücre boyalı, seçili olmayan iki hücre boyasız. `h`
-        // vurgusuz karede eleniyordu (`bg: None, ch: Some` — `ch`'si var ama
-        // bu döngü bg'ye bakıyor); seçim onu karesine sokmaz, sokmamalı.
-        let painted: Vec<u16> = next
-            .iter()
-            .filter(|c| c.bg.is_some())
-            .map(|c| c.col)
-            .collect();
-        assert_eq!(painted, vec![1, 2, 3], "{next:?}");
-        // Seçimsiz `o` boyanın yokluğuyla duruyor.
-        let outside = next.iter().find(|c| c.col == 4).expect("o hücresi");
-        assert_eq!(outside.bg, None, "{outside:?}");
+        let (next, runs, _) = runs_if_damaged(&session).expect("seçim kare istemeli");
+        assert_eq!(runs, vec![run(0, 1, 3)]);
+        assert_eq!(
+            backgrounds(&next).count(),
+            0,
+            "seçili zemin çizildi: {next:?}"
+        );
+        // Metin yerinde ve kendi renginde: seçim içerik silmez, rengi de
+        // çevirmez (Karar 3).
+        assert_eq!(
+            next.iter().filter_map(|c| c.ch).collect::<String>(),
+            "hello"
+        );
+        for cell in &next {
+            assert_eq!(cell.fg, plain[&cell.col], "{cell:?}");
+        }
     }
 
     #[test]
-    fn selected_inverse_cell_is_drawn_in_normal_colors() {
-        // Seçim ters videoyu **çevirir**: seçili ters videolu hücre normal
-        // renkleriyle çizilir (gerekçesi `frame()`'in `inverse` yorumunda).
+    fn selected_inverse_cell_is_drawn_in_its_own_foreground() {
+        // Seçim ters videoyu **çözer** (Karar 3): seçili ters videolu hücre
+        // kendi ön planıyla, zeminsiz çizilir — altında seçimin rengi var.
         //
         // Sütunlar: 0–1 ters video (ön plan kırmızı, arka plan yeşil), 2–3
         // aynısı artı `DIM`, 4 varsayılan renkli ters video boşluk. İmleç 5.
@@ -8690,15 +8836,15 @@ mod tests {
             Arc::clone(&wake),
         );
         assert_eq!(wait_cells(&session, &wake, 5).len(), 5);
-        let red = THEME.default(1);
+        let red = color::linear_rgba(THEME.default(1));
         let green = color::linear_rgba(THEME.default(2));
-        let colors = |session: &Session| {
-            let mut cells = Vec::new();
-            assert!(frame_if_damaged(session, |c| cells.push(c)).is_some());
-            cells
+        let frame = |session: &Session| {
+            let (cells, runs, _) = runs_if_damaged(session).expect("seçim kare istemeli");
+            let colors = cells
                 .iter()
                 .map(|c| (c.col, (c.bg, c.fg)))
-                .collect::<HashMap<_, _>>()
+                .collect::<HashMap<_, _>>();
+            (colors, runs)
         };
 
         // 1. ve 2. sütun seçili: biri düz, biri sönük ters video.
@@ -8707,44 +8853,33 @@ mod tests {
             at(1, 0, CellHalf::Left),
             at(2, 0, CellHalf::Right),
         );
-        let drawn = colors(&session);
+        let (drawn, runs) = frame(&session);
+        assert_eq!(runs, vec![run(0, 1, 2)]);
         // Seçilmemiş ters video: renkler takaslı.
-        assert_eq!(
-            drawn[&0],
-            (Some(color::linear_rgba(red)), green),
-            "{drawn:?}"
-        );
-        // Seçili ters video: takas geri alınmış, yani hücrenin kendi renkleri.
-        assert_eq!(
-            drawn[&1],
-            (Some(green), color::linear_rgba(red)),
-            "{drawn:?}"
-        );
-        // `DIM` kuralı çevirmeden sonra da aynı: sönüklük `cell.fg`'den doğan
-        // renge gider. Seçilmemişte o renk arka plan, seçilide yine ön plan.
+        assert_eq!(drawn[&0], (Some(red), green), "{drawn:?}");
+        // Seçili ters video: zemin yok, metin hücrenin kendi ön planında.
+        assert_eq!(drawn[&1], (None, red), "{drawn:?}");
+        // `DIM` kuralı çözmeden sonra da aynı: sönüklük `cell.fg`'den doğan
+        // renge gider. Seçilmemişte o renk arka plan, seçilide ön plan.
         // Elle yazılı: `0xd16d6a`'nın zemine karışmış sönüğü (bkz.
         // `dim_colors_on_the_draw_path_are_pinned`).
         let dim_red = LinearRgba::from_srgb(0x8b, 0x48, 0x46);
-        assert_eq!(drawn[&2], (Some(green), dim_red), "{drawn:?}");
+        assert_eq!(drawn[&2], (None, dim_red), "{drawn:?}");
         assert_eq!(drawn[&3], (Some(dim_red), green), "{drawn:?}");
 
-        // Varsayılan renkli ters video boşluk seçilince çizilmeyen hücreye
-        // döner: arka planı varsayılan, mürekkebi ve kuralı yok. Atlama
-        // koşulu onu elemeli — ekranın zeminiyle aynı renkte bir hücreyi
-        // `sink`'e sokmak `hucre=` sayısını şişirirdi.
+        // Varsayılan renkli ters video boşluk **çizilirdir** (zemini
+        // görünür), yani seçilince koşuyu kendi başına doğuruyor; zemini
+        // seçimin altında kalıyor.
         assert!(drawn[&4].0.is_some(), "seçilmemiş boşluk boyalı: {drawn:?}");
         session.set_selection(
             SelectKind::Simple,
             at(4, 0, CellHalf::Left),
             at(4, 0, CellHalf::Right),
         );
-        let drawn = colors(&session);
-        assert!(!drawn.contains_key(&4), "seçili boşluk çizildi: {drawn:?}");
-        assert_eq!(
-            drawn[&1],
-            (Some(color::linear_rgba(red)), green),
-            "{drawn:?}"
-        );
+        let (drawn, runs) = frame(&session);
+        assert_eq!(runs, vec![run(0, 4, 4)]);
+        assert!(drawn.get(&4).is_none_or(|c| c.0.is_none()), "{drawn:?}");
+        assert_eq!(drawn[&1], (Some(red), green), "{drawn:?}");
     }
 
     #[test]
@@ -8767,10 +8902,110 @@ mod tests {
             at(0, 0, CellHalf::Left),
             at(10, 2, CellHalf::Right),
         );
-        let mut cells = Vec::new();
-        assert!(frame_if_damaged(&session, |c| cells.push(c)).is_some());
+        let (cells, runs, _) = runs_if_damaged(&session).expect("seçim kare istemeli");
         let drawn: Vec<_> = cells.iter().map(|c| (c.row, c.col)).collect();
         assert_eq!(drawn, vec![(0, 0), (0, 1)], "boş hücre boyandı: {cells:?}");
+        // Koşu da metinde bitiyor: boş kuyruk ve boş satırlar koşusuz.
+        assert_eq!(runs, vec![run(0, 0, 1)]);
+    }
+
+    #[test]
+    fn a_run_bridges_the_gaps_between_words_but_not_the_tail() {
+        // **Birim hücre değil satır** (031 Karar 4): `echo hello world`'ün
+        // kelime arası boşlukları koşunun içinde — pano onları zaten
+        // kopyalıyor, göz de artık görüyor. Satırın boş kuyruğu (aralık 20.
+        // sütuna kadar gidiyor) dışarıda: seçim içerik yaratmaz.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf 'echo hello world'; sleep 5", Arc::clone(&wake));
+        wait_frame(&session, &wake, |cells| cells.len() == 14);
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(20, 0, CellHalf::Right),
+        );
+        let (cells, runs, _) = runs_if_damaged(&session).expect("seçim kare istemeli");
+        assert_eq!(runs, vec![run(0, 0, 15)]);
+        // Köprü bir çizim kararı, hücre üretmiyor: boşluklar sink'e yine
+        // uğramıyor.
+        assert_eq!(cells.len(), 14, "{cells:?}");
+    }
+
+    #[test]
+    fn an_empty_row_splits_the_runs() {
+        // Çok satırlı seçimde boş bir ara satır koşu üretmiyor ve şekil orada
+        // bölünüyor (Karar 4). Satır başına **bir** koşu: ikinci satırın
+        // kelime arası boşluğu da köprülü.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf 'ab\\n\\ncd ef'; sleep 5", Arc::clone(&wake));
+        wait_frame(&session, &wake, |cells| cells.len() == 6);
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(10, 2, CellHalf::Right),
+        );
+        let (_, runs, _) = runs_if_damaged(&session).expect("seçim kare istemeli");
+        assert_eq!(runs, vec![run(0, 0, 1), run(2, 0, 4)]);
+    }
+
+    #[test]
+    fn a_selection_does_not_move_the_content() {
+        // Doluluk sayısı seçimden etkilenmez: seçili hücrenin zemini sınırdan
+        // düşse de atlama kapısı **seçimsiz** hâle bakıyor. Bakmasaydı
+        // yalnız zeminden ibaret bir satır (ters videolu boşluklar) seçilince
+        // doluluktan düşer ve bütün ızgara bir satır kayardı. Satır 2 imlecin
+        // üstünde: dolu olarak sayılan tek sebep o zeminler.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf 'a\\n\\n\\033[7m   \\033[0m\\n\\n'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| cells.len() == 4);
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(0, 0, CellHalf::Right),
+        );
+        let (_, _, before) = runs_if_damaged(&session).expect("seçim kare istemeli");
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 2, CellHalf::Left),
+            at(2, 2, CellHalf::Right),
+        );
+        let (cells, runs, after) = runs_if_damaged(&session).expect("seçim kare istemeli");
+        assert_eq!(runs, vec![run(2, 0, 2)]);
+        assert!(backgrounds(&cells).next().is_none(), "{cells:?}");
+        assert_eq!(after.content_rows, before.content_rows);
+    }
+
+    #[test]
+    fn the_selection_colors_come_from_the_theme() {
+        // İki renk `bt-core`'dan hazır geliyor, hangisinin çizileceğini odak
+        // bilen `bt-gpu` seçiyor (Karar 9). Tema takası bir sonraki karede
+        // ikisini birden değiştiriyor — ayrı bir sorgu yok.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf 'ab'; sleep 5", Arc::clone(&wake));
+        wait_frame(&session, &wake, |cells| cells.len() == 2);
+        let mut runs = SelectionRuns::default();
+        let mut frame = |session: &Session| {
+            session.frame(
+                |_| (),
+                |_| (),
+                &mut Blocks::default(),
+                &mut runs,
+                ScrollGlide::default(),
+            );
+            (runs.color(true), runs.color(false))
+        };
+        assert_eq!(
+            frame(&session),
+            (THEME.selection_linear(), THEME.selection_unfocused_linear())
+        );
+        session.set_theme(Theme::BATERI_LIGHT);
+        let light = Theme::BATERI_LIGHT;
+        assert_eq!(
+            frame(&session),
+            (light.selection_linear(), light.selection_unfocused_linear())
+        );
     }
 
     #[test]
@@ -8820,14 +9055,8 @@ mod tests {
             at(0, 0, CellHalf::Left),
             at(1, 0, CellHalf::Right),
         );
-        let mut cells = Vec::new();
-        assert!(frame_if_damaged(&session, |c| cells.push(c)).is_some());
-        let cols: Vec<_> = cells.iter().map(|c| c.col).collect();
-        assert_eq!(
-            cols,
-            vec![0, 1],
-            "geniş karakterin yarısı vurgusuz: {cells:?}"
-        );
+        let (_, runs, _) = runs_if_damaged(&session).expect("seçim kare istemeli");
+        assert_eq!(runs, vec![run(0, 0, 1)], "geniş karakterin yarısı vurgusuz");
     }
 
     #[test]
@@ -8841,21 +9070,16 @@ mod tests {
         // harfi katardı.
         //
         // `あ` 0–1. hücreler (baş + spacer), `b` 2. hücre; üçü de kırmızı
-        // bg'li. Ters videoda vurgulu hücrenin bg'si seçimsiz karenin fg'si.
+        // bg'li. Vurgunun tanığı koşu: sütunu bir koşunun içinde mi.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("printf '\\033[41mあb\\033[0m'; sleep 5", Arc::clone(&wake));
         let cells = wait_cells(&session, &wake, 3);
-        let plain_fg = cells
-            .iter()
-            .find(|c| c.ch == Some('b'))
-            .expect("b hücresi")
-            .fg;
+        assert!(cells.iter().any(|c| c.ch == Some('b')), "{cells:?}");
         let highlighted = |session: &Session, col: u16| {
-            let mut next = Vec::new();
-            frame_if_damaged(session, |c| next.push(c));
-            next.iter()
-                .find(|c| c.col == col)
-                .is_some_and(|c| c.bg == Some(plain_fg))
+            runs_if_damaged(session).is_some_and(|(_, runs, _)| {
+                runs.iter()
+                    .any(|r| r.row == 0 && (r.first..=r.last).contains(&col))
+            })
         };
 
         // Bitiş ucu glyph'in sağ yarısında (spacer'ın sol yarısı): harf
@@ -8973,6 +9197,7 @@ mod tests {
             |_| (),
             |_| (),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         )
     }
@@ -9531,6 +9756,7 @@ mod tests {
             |_| (),
             |cell| cells.push(cell),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         (cursor, cells)
@@ -9558,6 +9784,7 @@ mod tests {
             |cell| grid.push(cell),
             |cell| band.push(cell),
             &mut Blocks::default(),
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         let origin = cursor.rows - cursor.content_rows;
@@ -9853,6 +10080,7 @@ mod tests {
             |_| (),
             |cell| band.push(cell),
             &mut blocks,
+            &mut SelectionRuns::default(),
             ScrollGlide::default(),
         );
         assert!(cursor.fill > 0, "sahne bantsız kuruldu: {cursor:?}");
@@ -10379,13 +10607,25 @@ mod tests {
             rows: 0.5,
             generation: start,
         };
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default(), stale);
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            stale,
+        );
         assert_eq!(cursor.scroll_frac, 0.0, "eski neslin payı uygulandı");
         let live = ScrollGlide {
             rows: 0.5,
             generation: start + 1,
         };
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default(), live);
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            live,
+        );
         assert_eq!(cursor.scroll_frac, 0.5, "{cursor:?}");
         assert_eq!(wakes(&wake), woken, "kare yolunun payı uyandırdı");
 
@@ -10460,7 +10700,13 @@ mod tests {
             smooth(&session, frac, ScrollIntent::Direct);
             smooth(&session, 0.0, ScrollIntent::Settle);
             let glide = session.take_scroll_glide();
-            let cursor = session.frame(|_| (), |_| (), &mut Blocks::default(), glide);
+            let cursor = session.frame(
+                |_| (),
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                glide,
+            );
             assert_eq!(
                 (cursor.display_offset, cursor.scroll_frac, cursor.top_row),
                 (if frac < 0.5 { 5 } else { 6 }, 0.0, 0),

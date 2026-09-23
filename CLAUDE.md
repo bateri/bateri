@@ -666,12 +666,19 @@ oynatmayan süzülme geçmişin ucuna çarpmıştır ve orada bitiyor
 (`Motion::observe_scroll`), yoksa ulaşılamayan kalan boş kareler çizdirip ters
 yöndeki çentiği yerdi.
 Gerekçeler `.tasks/027-yumusak-kaydirma/discussion.md` → Muhakeme.
-**Seçim içeriği vurgular, içerik yaratmaz**: vurgu yalnız seçim olmasaydı da
-çizilecek hücrelere uygulanıyor, yani boş ekranda fareyi sürüklemek hiçbir şey
-boyamıyor ve gözün gördüğü ile panonun verdiği ayrışmıyor. Ölçüt "mürekkep"
-değil **çizilirlik** — ters videolu bir boşluk (vim'in durum satırı, tmux
-çubuğu) mürekkepsizdir ama görünürdür ve seçilince vurgulanır; varsayılan
-zeminli boş hücre görünmezdir ve seçim onu görünür kılmaz. Doldurma bandı bu
+**Seçim içeriği vurgular, içerik yaratmaz**: vurgu temanın `selection`
+rengiyle çizilen **satır koşusu** (`SelectionRuns`, `frame()`'in `&mut`
+tamponu; `bt-gpu` onu `cell_bg` dörtgeni olarak zeminden sonra, caret ve
+glyph'lerden önce çiziyor) ve koşu satırın **ilk çizilir seçili hücresinden
+sonuncusuna** uzanıyor — aradaki boşluklar köprülü, çünkü pano onları zaten
+kopyalıyor; boş kuyruk ve boş satır koşusuz, yani boş ekranda fareyi
+sürüklemek hiçbir şey boyamıyor (031 Karar 4). Ölçüt "mürekkep" değil
+**çizilirlik** — ters videolu bir boşluk (vim'in durum satırı, tmux çubuğu)
+mürekkepsizdir ama görünürdür ve koşuyu uzatır; varsayılan zeminli boş hücre
+görünmezdir ve uzatmaz. Seçili metin **kendi ön planıyla**, ters video
+çözülmüş çiziliyor (Karar 3) ve seçim atlama kapısını, dolayısıyla doluluğu
+oynatmıyor; odakta olmayan pencerede renk zemine doğru üçte bir soluyor —
+iki renk sınırdan hazır, seçimi odağı bilen `bt-gpu` yapıyor (Karar 9). Doldurma bandı bu
 kuralın tek istisnası değil **tersi**: satırları görünür ama **seçilemez**,
 çünkü hepsi geçmişte, yani sınırın satır numaralarıyla temsil edilemiyorlar.
 Fare bu yüzden orijinin üstünü **reddediyor** (`point_to_cell`, kanal
@@ -1007,7 +1014,8 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   varsayılan ön plan), `accent` (koşan komut bloğunun şeridi), `cursor` (imleç
   bloğu, ANSI 258'in cevabı **ve** dock'un `heat` efektinin kızgın rengi),
   `success` ve `error` (biten bloğun şeridi)
-  — ve yanlarında `[ansi]`'nin 16 rengi; kalan iki durum rolü (uyarı, bilgi)
+  — ve yanlarında `selection` (fareyle seçimin vurgusu, modelin dışında;
+  031) ile `[ansi]`'nin 16 rengi; kalan iki durum rolü (uyarı, bilgi)
   sonraki setlerde gelir. Çizilmeyen rol eklenmiyor. `cursor` **014'te
   ayrıldı**: ikisi tek değerden beslenirken "imleci altın yap" isteği koşan
   komutun şeridini de altın yapıyordu, ve 258 yuvası zaten `accent`'e takma

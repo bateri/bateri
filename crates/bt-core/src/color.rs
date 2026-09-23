@@ -69,8 +69,9 @@ impl LinearRgba {
 /// pencere ile hücreler ayrı renk olurdu.
 ///
 /// **Dokuz rollü** modelin yedisi burada: 007'nin dördü, 010'un iki durum rolü
-/// (`success`, `error`) ve 014'ün `cursor`'ı. Kalan iki durum rolü (uyarı,
-/// bilgi) sonraki setlere kalıyor —
+/// (`success`, `error`) ve 014'ün `cursor`'ı; yanlarında 031'in `selection`'ı
+/// (dokuzun dışında: model Metalterm'in, seçim rengi terminalin kendi
+/// yüzeyi). Kalan iki durum rolü (uyarı, bilgi) sonraki setlere kalıyor —
 /// **çizilmeyen rol eklenmiyor**, çünkü tüketicisi olmayan bir anahtar tema
 /// dosyasına girdiği gün biçim sözü verir ve sözün karşılığı yoktur.
 /// Alanlar `0xRRGGBB` (üst bayt okunmaz) ve `pub`: tip bir
@@ -104,6 +105,14 @@ pub struct Theme {
     /// zemin renkli harfe karşı okunur olması gerekiyor: koyu temada açık,
     /// açık temada koyu bir altın.
     pub cursor: u32,
+    /// Fareyle seçimin vurgusu — satır koşularının zemini.
+    ///
+    /// **Metnin rengi değişmiyor** (031 Karar 3): seçili hücre kendi ön
+    /// planıyla çiziliyor, yani bu rengin varsayılan ön planla **ve** paletin
+    /// renkli sekizlisiyle okunur olması, zeminden de ayrışması gerekiyor.
+    /// Odaksız pencerede zemine doğru soluklaşıyor
+    /// ([`Theme::selection_unfocused_linear`]).
+    pub selection: u32,
     /// Durum: başarı. Bugün sıfır çıkış koduyla biten komut bloğunun şeridi.
     pub success: u32,
     /// Durum: hata. Bugün sıfırdan farklı çıkış koduyla biten komut bloğunun
@@ -146,6 +155,12 @@ impl Theme {
         // ölçüm değil.** Siyah zeminde açık olmak zorunda: altındaki harf
         // zemin rengiyle, yani siyahla çiziliyor.
         cursor: 0xd9b063,
+        // Soğuk, koyu bir lacivert; `accent`'in ailesinden ama ondan çok
+        // koyu, çünkü üstünde metin okunacak: ön plan da renkli sekizli de
+        // açık. **Zevk kararı, ölçüm değil.** Paletin griye yakın iki
+        // siyahından (`0x22252b`, `0x4a4e57`) ton olarak ayrık — seçim bir
+        // `\e[40m` bloğu gibi okunmamalı.
+        selection: 0x2b3a50,
         success: 0x8bb58b,
         error: 0xd16d6a,
         ansi: [
@@ -187,6 +202,9 @@ impl Theme {
         // (neredeyse beyaz) çiziliyor, yani açık bir altında harf kaybolurdu.
         // Koyu temanın tonu doğrudan taşınamaz; aynı ailenin bronzu.
         cursor: 0x8a6512,
+        // Açık bir buz mavisi: metin koyu, yani seçim zeminin bir adım
+        // koyusu. Parlak beyazdan (`0xdcdee3`) ton olarak ayrık.
+        selection: 0xc9d8ee,
         success: 0x3b7a3b,
         error: 0xb5423d,
         ansi: [
@@ -238,6 +256,21 @@ impl Theme {
     /// altın yap" isteği şeridi de altın yapıyordu.
     pub const fn accent_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.accent))
+    }
+
+    /// Seçim vurgusunun rengi, **lineer** RGBA — odaktaki pencerede.
+    pub const fn selection_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.selection))
+    }
+
+    /// Odaksız penceredeki seçim: zemine doğru **üçte bir** ([`dim_toward`]).
+    ///
+    /// Yeni bir rol değil, türetilmiş değer ([`Theme::quiet_linear`] emsali):
+    /// seçim silinmiyor, geri çekiliyor — odak dönünce aynı seçim aynı yerde.
+    /// Hangisinin çizileceği `bt-gpu`'nun kararı, çünkü odak `bt-core`'a
+    /// girmiyor (031 Karar 9).
+    pub const fn selection_unfocused_linear(&self) -> LinearRgba {
+        linear_rgba(dim_toward(rgb(self.selection), self.background_rgb()))
     }
 
     /// Varsayılan ön plan, **lineer** RGBA; dock'un yazdığı metnin rengi.
