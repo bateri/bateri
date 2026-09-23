@@ -522,6 +522,10 @@ pub struct SessionOptions {
     /// değiştirirse orası kızarır. Hangi dizinin verileceği uygulamanın
     /// kararı, bu crate yalnız geçirir.
     pub working_directory: Option<PathBuf>,
+    /// Kullanıcının ev dizini — yalnız başlığın `~` kuralı için
+    /// ([`Session::title`]). Bu crate ortam okumaz, değeri uygulama veriyor;
+    /// `None` → ev dizini sıradan bir dizin gibi son bileşeniyle görünür.
+    pub home: Option<PathBuf>,
     /// Çocuğa **eklenen** ortam değişkenleri; geri kalanı miras.
     ///
     /// Öncelik, güçlüden zayıfa: `TERM` ve `COLORTERM` (bu crate'in sabiti,
@@ -940,6 +944,14 @@ struct AdapterInner {
     /// Kopya `Term` kilidinden **önce** alınıyor, temanınkiyle aynı turda ve
     /// aynı gerekçeyle: yaprak kilit `Term`'ün altına girmez.
     blink: Mutex<CursorBlink>,
+    /// Uygulamanın OSC 0/2 başlığı; `None` → hiç gelmedi ya da
+    /// `ResetTitle`. Okuyan [`Session::title`].
+    ///
+    /// **Yaprak kilit** (`theme` emsali). Yazanı `Title`/`ResetTitle` kolu ve
+    /// o kol `Term` kilidi **tutulurken** geliyor — `ColorRequest`'in temayı
+    /// orada alması gibi: sıra `Term` → yaprak, tersi hiçbir yerde yok.
+    /// [`Session::title`] onu `Term`'e dokunmadan, tek başına alıyor.
+    title: Mutex<Option<String>>,
 }
 
 impl Adapter {
@@ -952,6 +964,7 @@ impl Adapter {
             size: Mutex::new(size),
             theme: Mutex::new(theme),
             blink: Mutex::new(blink),
+            title: Mutex::new(None),
         }))
     }
 
@@ -968,6 +981,25 @@ impl Adapter {
         if let Some(sender) = self.0.sender.get() {
             // Kanal yalnız kapanışta ölür; o yolda sessiz kalmak doğrudur.
             let _ = sender.send(Msg::Input(text.into_bytes().into()));
+        }
+    }
+}
+
+impl Adapter {
+    /// Başlık yuvasını yazar; **değiştiyse** yaprak kilidi bıraktıktan sonra
+    /// [`Wake::title_changed`]. `Term` kilidi tutulurken çağrılır.
+    fn store_title(&self, title: Option<String>) {
+        let changed = {
+            let mut slot = lock(&self.0.title);
+            if *slot == title {
+                false
+            } else {
+                *slot = title;
+                true
+            }
+        };
+        if changed {
+            self.0.wake.title_changed();
         }
     }
 }
@@ -1035,8 +1067,21 @@ impl EventListener for Adapter {
                     self.0.wake.copy_to_clipboard(text);
                 }
             }
-            // Başlık ve zil bu sette yok; bilinmeyen dizi gibi sessizce
-            // düşerler (`CLAUDE.md` → PTY yolunda panik yok). "Yoksayılır ve
+            // Başlık: OSC 0/2 (ve başlık yığınının `CSI 23 t`'si) `Title`,
+            // boşaltan yol `ResetTitle`. `Term` kilidi tutulurken geliyor;
+            // yaprak kilit o yüzden yalnız karşılaştırıp yazmak için ve
+            // haber kilit **bırakıldıktan sonra**. `Term::set_options` her
+            // çağrıda güncel başlığı yeniden yolluyor (ayar kaydı): değişmeyen
+            // başlık haber doğurmaz, yoksa her ayar kaydı pencere başına bir
+            // ana kuyruk işi olurdu.
+            //
+            // **Bilinen sınır:** RIS (`\ec`) alacritty'nin başlığını olaysız
+            // siliyor (`Term::reset_state`), yani yuva bir sonraki
+            // `set_options`'a ya da OSC 0/2'ye kadar eski başlığı tutuyor.
+            Event::Title(title) => self.store_title(Some(title)),
+            Event::ResetTitle => self.store_title(None),
+            // Zil bu sette yok; bilinmeyen dizi gibi sessizce
+            // düşer (`CLAUDE.md` → PTY yolunda panik yok). "Yoksayılır ve
             // LOGLANIR" kuralının ikinci yarısı borç: `tracing` henüz
             // bağımlılık değil, workspace'te hiçbir logger yok — alacritty'nin
             // kendi `log::error!` satırları da bu yüzden yere düşüyor.
@@ -1051,9 +1096,7 @@ impl EventListener for Adapter {
             // yanlış çare olurdu — olay kaymayan bir kaydırmada da (geçmişin
             // ucunda) ve fare raporlama kipinin her değişiminde (DECSET
             // 1000/1002/1003) gönderiliyor, yani boş kare doğururdu.
-            Event::Title(_)
-            | Event::ResetTitle
-            | Event::Bell
+            Event::Bell
             | Event::ClipboardLoad(..)
             | Event::MouseCursorDirty
             | Event::CursorBlinkingChange
@@ -1096,6 +1139,9 @@ struct TappedPty {
     /// [`Session::key_gen`]'in aynı yuvası. Burası yalnız **okuyor**: ayna
     /// olayı çözüldüğü anda nesli damga olarak deftere geçiriyor.
     key_gen: Arc<AtomicU64>,
+    /// `Adapter`'ın taşıdığı uyandırma ucunun kopyası: OSC 7 dizini
+    /// **değişince** başlık haberi buradan gidiyor ([`Wake::title_changed`]).
+    wake: Arc<dyn Wake>,
 }
 
 impl io::Read for TappedPty {
@@ -1113,10 +1159,18 @@ impl io::Read for TappedPty {
         // buraya ulaştığında o tuşun nesli çoktan görünür. Kilit altında
         // okumak bir şey kazandırmazdı — neslin yazarı defterin kilidini
         // hiç almıyor.
+        //
+        // Başlık haberi defterin kilidi **bırakıldıktan sonra**: `let`'in
+        // sonunda guard düşüyor. Haber yalnız değişen dizinde
+        // (`apply_scan_answering`'in dönüşü).
         let key_gen = &self.key_gen;
+        let wake = &self.wake;
         self.scanner.feed(&buf[..read], |event| {
             let answers = key_gen.load(Ordering::Acquire);
-            lock(&self.shell).apply_scan_answering(event, answers);
+            let cwd_changed = lock(&self.shell).apply_scan_answering(event, answers);
+            if cwd_changed {
+                wake.title_changed();
+            }
         });
         // **CSI kolu kilide hiç uğramıyor**: yükü yok, tüketicisi bir sayaç.
         //
@@ -1251,6 +1305,48 @@ pub enum Teardown {
     /// İkinci ve sonraki çağrı. Hiçbir şey beklenmedi; kapanışın gerçek
     /// sonucunu **ilk** çağrı biliyor.
     AlreadyDone,
+}
+
+/// Başlamış bir kapanışın tutamağı ([`Session::begin_shutdown`]).
+///
+/// İçerideki kanal teardown thread'inin "bitti" haberini taşıyor; `None`
+/// thread'in hiç kurulamadığı dal ([`Teardown::Unbounded`]). Tutamak
+/// beklenmeden düşebilir — kapanış yine biter, yalnız sonucu kimse okumaz.
+#[must_use = "düşen tutamak kapanışı durdurmaz ama sonucunu yutar"]
+pub struct ShutdownHandle(Option<mpsc::Receiver<bool>>);
+
+impl ShutdownHandle {
+    /// Kapanışı en geç `deadline`'a kadar bekler ve sonucunu verir.
+    ///
+    /// Son tarih bir **an**, süre değil: Cmd-Q bütün oturumları başlatıp
+    /// hepsini aynı son tarihe kadar bekliyor, yani sıradaki her bekleme
+    /// kalan süreyi alıyor ve toplam bir [`SHUTDOWN_GRACE`]'i aşmıyor.
+    /// Geçmiş bir son tarih sıfır beklemedir: bitmiş kapanış yine `Clean`
+    /// döner, bitmemiş olan `Abandoned`.
+    pub fn wait_until(self, deadline: Instant) -> Teardown {
+        let Some(finished) = self.0 else {
+            return Teardown::Unbounded;
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match finished.recv_timeout(remaining) {
+            Ok(true) => Teardown::Clean,
+            // Kapanış **bitti** ama okuyucu panikle bitti: çocuk toplandı,
+            // yine de bu bir kural ihlali ve raporda görünmeli.
+            Ok(false) => Teardown::ReaderPanicked,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!("bateri: shell {SHUTDOWN_GRACE:?} içinde kapanmadı, arkada bırakıldı");
+                Teardown::Abandoned
+            }
+            // Kanal göndermeden kapandı: kapanış thread'i panikledi ve bu
+            // **hemen** dönüyor, yani süre dolmadı. İki durum tek satıra
+            // katlanırsa tanı yalan söyler ("500 ms bekledim") ve kapanış
+            // yolundaki bir panik sessizce yutulur.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("bateri: kapanış thread'i panikle bitti, PTY'nin durumu bilinmiyor");
+                Teardown::Panicked
+            }
+        }
+    }
 }
 
 /// Seçim ucunun hücre içindeki yeri.
@@ -1739,6 +1835,8 @@ pub struct Session {
     /// atomik: `[shell] integration` **sonraki oturumda** geçerli (`CLAUDE.md`)
     /// ve dock'un varlığı ona bağlı.
     dock: bool,
+    /// [`SessionOptions::home`]; yalnız [`Session::title`] okuyor.
+    home: Option<PathBuf>,
 }
 
 impl Session {
@@ -1772,6 +1870,7 @@ impl Session {
             env,
             ..Default::default()
         };
+        let home = options.home;
         let pty = tty::new(&pty_options, size, 0)?;
         // Yuva `EventLoop`'tan **önce** doğuyor: bir ucu sarmalayıcıyla okuyucu
         // thread'ine gidiyor, öteki ucu `Session`'da kalıyor.
@@ -1787,6 +1886,7 @@ impl Session {
             shell: Arc::clone(&shell),
             screen_clears: Arc::clone(&screen_clears),
             key_gen: Arc::clone(&key_gen),
+            wake: Arc::clone(&wake),
         };
 
         // **Blink de açılışta geçiyor**, temanın yanında: tek yazıcısı
@@ -1834,6 +1934,7 @@ impl Session {
             // İlk karede kayma yok, ızgara hedefinde.
             grid_top: AtomicU16::new(0),
             dock: options.dock,
+            home,
         })
     }
 
@@ -3724,6 +3825,28 @@ impl Session {
         lock(&self.shell).state
     }
 
+    /// Kabuğun son OSC 7 dizini; hiç gelmediyse `None`.
+    ///
+    /// [`Session::shell_state`] ile aynı şekil: yaprak kilidi alır, kopyalar,
+    /// bırakır; `Term` kilidine dokunmaz. Tüketicisi yeni sekmenin başlangıç
+    /// dizini ve başlık.
+    pub fn working_directory(&self) -> Option<PathBuf> {
+        let log = lock(&self.shell);
+        (!log.context.cwd.is_empty()).then(|| PathBuf::from(&log.context.cwd))
+    }
+
+    /// Pencerenin başlığı: uygulamanın OSC 0/2 başlığı → dizinin son
+    /// bileşeni (ev `~`) → `bateri` (kural `shell::title_of`).
+    ///
+    /// İki yaprak kilidi **sırayla** alır, iç içe değil; `Term` kilidine
+    /// dokunmaz. Kare yolu bunu çağırmıyor: değişimi [`Wake::title_changed`]
+    /// haber veriyor ve okuyan o haberin alıcısı.
+    pub fn title(&self) -> String {
+        let osc = lock(&self.adapter.0.title).clone();
+        let cwd = lock(&self.shell).context.cwd.clone();
+        crate::shell::title_of(osc.as_deref(), Some(&cwd), self.home.as_deref())
+    }
+
     /// Uygulama alternatif ekranda mı — **son karedeki** hâl.
     ///
     /// Kendi sorgusu, [`Cursor`]'ın alanı **değil**: `Cursor` bir kare kaydı
@@ -3844,9 +3967,10 @@ impl Session {
     ///
     /// **Kilit altında giden olay:** `Term::set_options` başlık olayını
     /// (`Title`/`ResetTitle`) `Term` kilidi **tutulurken** `Adapter`'a
-    /// yolluyor. O kol bugün boş; bir gün başlık çizilirse kolu kilit
-    /// almamalı — `Wake` sözleşmesiyle aynı yasak, yoksa bu çağrı kendi
-    /// kendini kilitler (`race_set_terminal_options_and_frame` asılı kalır).
+    /// yolluyor. Kol başlığı yaprak kilide yazıyor (`Term` → yaprak, emsali
+    /// `ColorRequest`) ve değişmeyen başlık için haber doğurmuyor; `Term`'e
+    /// geri uzanan bir yol açarsa bu çağrı kendi kendini kilitler
+    /// (`race_set_terminal_options_and_frame` asılı kalır).
     pub fn set_terminal_options(&self, options: TerminalOptions) {
         let scrollback = options.scrollback;
         // Blink `Term`'ün config'inde temsil edilemiyor (`AdapterInner::blink`),
@@ -4202,16 +4326,35 @@ impl Session {
     /// kurulamazsa (OS thread sınırı) bu fonksiyon sınırsız kalır, gövdedeki
     /// yorum o dalın iki sonucunu sayıyor.
     pub fn shutdown(&self) -> Teardown {
-        let Some(reader) = lock(&self.reader).take() else {
-            return Teardown::AlreadyDone;
-        };
+        match self.begin_shutdown() {
+            Some(handle) => handle.wait_until(Instant::now() + SHUTDOWN_GRACE),
+            None => Teardown::AlreadyDone,
+        }
+    }
+
+    /// [`Session::shutdown`]'ın **başlatan** yarısı: `Msg::Shutdown`'ı yollar,
+    /// `join` ile düşmeyi "PTY teardown" thread'ine verir ve **beklemez**.
+    /// İkinci ve sonraki çağrılar `None` döner (kapanış zaten başladı).
+    ///
+    /// Bölünmenin sebebi çok pencere: bir sekmeyi kapatmak ana thread'i
+    /// yarım saniyeye kadar durdurmamalı ve Cmd-Q bütün oturumları **tek**
+    /// [`SHUTDOWN_GRACE`] içinde paralel kapatabilmeli — önce hepsi başlar,
+    /// sonra ortak bir son tarihe kadar beklenir
+    /// ([`ShutdownHandle::wait_until`]).
+    ///
+    /// Tutamak beklenmeden düşerse kapanış **yine biter**: teardown thread'i
+    /// kanalın ölüsüne yazar ve sonucu yutar; `SIGHUP` ile `child.wait()`
+    /// `Pty::drop`'ta, o thread'de koşar. Sonucu kimse bilmez — tanı yüzeyi
+    /// yalnız stderr satırlarıdır (`Drop for Session`'ın durumu).
+    pub fn begin_shutdown(&self) -> Option<ShutdownHandle> {
+        let reader = lock(&self.reader).take()?;
         self.send(Msg::Shutdown);
 
-        // `join` de düşme de bloklayabilir (iki sebep yukarıda), yani ikisi
-        // de bu thread'de koşmuyor. Kanal iki şey taşıyor: **zamanlama**
-        // ("bitti" haberi gelmezse sınır dolmuştur) ve okuyucunun paniğe
-        // düşüp düşmediği. İkincisi `()` ile taşınamazdı ve taşınmayınca
-        // panikleyen bir okuyucu raporda `temiz` görünüyordu.
+        // `join` de düşme de bloklayabilir (iki sebep `shutdown`'ın doc'unda),
+        // yani ikisi de bu thread'de koşmuyor. Kanal iki şey taşıyor:
+        // **zamanlama** ("bitti" haberi gelmezse sınır dolmuştur) ve
+        // okuyucunun paniğe düşüp düşmediği. İkincisi `()` ile taşınamazdı ve
+        // taşınmayınca panikleyen bir okuyucu raporda `temiz` görünüyordu.
         let (done, finished) = mpsc::channel();
         let teardown = thread::Builder::new()
             .name("PTY teardown".to_owned())
@@ -4228,6 +4371,8 @@ impl Session {
                 // `shutdown_returns_within_limit`'in alt sınırı tam bunu
                 // kırmızıya çeviriyor.
                 drop(tail);
+                // Alıcı düşmüşse (tutamak beklenmeden bırakıldı) sonuç
+                // yutulur; kapanışın kendisi yukarıda çoktan bitti.
                 let _ = done.send(reader_ok);
             });
         // Thread kurulamazsa (OS thread sınırı) **sınır yoktur** ve bu dalda
@@ -4237,28 +4382,13 @@ impl Session {
         // düşürür (kimse bloklanmaz, ama `SIGHUP` + `child.wait()` sınırsız
         // koşar) ya da — okuyucu thread çoktan bitmişse — çift orada düştüğü
         // için `Pty::drop` bu thread'i bloklar. İkisi de sessiz kalmasın.
-        if let Err(err) = teardown {
-            eprintln!("bateri: kapanış thread'i kurulamadı ({err}), kapanış sınırsız");
-            return Teardown::Unbounded;
-        }
-        match finished.recv_timeout(SHUTDOWN_GRACE) {
-            Ok(true) => Teardown::Clean,
-            // Kapanış **bitti** ama okuyucu panikle bitti: çocuk toplandı,
-            // yine de bu bir kural ihlali ve raporda görünmeli.
-            Ok(false) => Teardown::ReaderPanicked,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                eprintln!("bateri: shell {SHUTDOWN_GRACE:?} içinde kapanmadı, arkada bırakıldı");
-                Teardown::Abandoned
+        Some(match teardown {
+            Ok(_) => ShutdownHandle(Some(finished)),
+            Err(err) => {
+                eprintln!("bateri: kapanış thread'i kurulamadı ({err}), kapanış sınırsız");
+                ShutdownHandle(None)
             }
-            // Kanal göndermeden kapandı: kapanış thread'i panikledi ve bu
-            // **hemen** dönüyor, yani süre dolmadı. İki durum tek satıra
-            // katlanırsa tanı yalan söyler ("500 ms bekledim") ve kapanış
-            // yolundaki bir panik sessizce yutulur.
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                eprintln!("bateri: kapanış thread'i panikle bitti, PTY'nin durumu bilinmiyor");
-                Teardown::Panicked
-            }
-        }
+        })
     }
 
     /// Okuyucu thread hâlâ çalışıyor mu. `false` ya kapandığımız ya da
@@ -4496,6 +4626,8 @@ mod tests {
         exit: Option<Option<i32>>,
         /// [`Wake::copy_to_clipboard`]'ın metinleri, geliş sırasıyla.
         copies: Vec<String>,
+        /// [`Wake::title_changed`] kaç kez geldi.
+        titles: u32,
     }
 
     impl TestWake {
@@ -4523,6 +4655,21 @@ mod tests {
         fn copies(&self) -> Vec<String> {
             self.state.lock().unwrap().copies.clone()
         }
+
+        /// Şimdiye kadar gelen başlık haberleri.
+        fn titles(&self) -> u32 {
+            self.state.lock().unwrap().titles
+        }
+
+        /// En az `target` başlık haberi gelene kadar bekler.
+        fn wait_titles(&self, target: u32, timeout: Duration) -> u32 {
+            let state = self.state.lock().unwrap();
+            let (state, _) = self
+                .cond
+                .wait_timeout_while(state, timeout, |state| state.titles < target)
+                .unwrap();
+            state.titles
+        }
     }
 
     impl Wake for TestWake {
@@ -4541,6 +4688,11 @@ mod tests {
         // tutulurken `Session`'a girilmez.
         fn copy_to_clipboard(&self, text: String) {
             self.state.lock().unwrap().copies.push(text);
+            self.cond.notify_all();
+        }
+
+        fn title_changed(&self) {
+            self.state.lock().unwrap().titles += 1;
             self.cond.notify_all();
         }
     }
@@ -4602,6 +4754,7 @@ mod tests {
         SessionOptions {
             command: Some(command),
             working_directory: None,
+            home: None,
             env: HashMap::new(),
             cols,
             rows: 10,
@@ -6473,6 +6626,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let options = SessionOptions {
             working_directory: Some(dir.clone()),
+            home: None,
             ..test_options(sh(PRINT_CWD), 200)
         };
 
@@ -6485,6 +6639,7 @@ mod tests {
         // yol yoksa açılış düşmüyor, çocuk miras alıyor.
         let options = SessionOptions {
             working_directory: Some("/nonexistent/bt-core-working-directory".into()),
+            home: None,
             ..test_options(sh(PRINT_CWD), 200)
         };
 
@@ -9736,6 +9891,98 @@ mod tests {
         );
 
         shutdown_within_grace(&session);
+    }
+
+    #[test]
+    fn a_dropped_shutdown_handle_still_finishes_the_teardown() {
+        // Sekme kapanışının yolu (026 R3.6): kapanış başlatılır, tutamak
+        // **beklenmeden** düşer. Teardown thread'i işini yine bitirmeli —
+        // `SIGHUP` `Pty::drop`'ta, yani o thread'in `join`'den sonraki
+        // adımında gidiyor. Çocuk sinyali bir dosyaya yazarak doğruluyor.
+        let wake = Arc::new(TestWake::default());
+        // Ad yalnız süreç kimliğiyle benzersiz: yol kabuğun komut satırına
+        // tırnaksız giriyor, `ThreadId(..)`'nin parantezi sözdizimini bozardı.
+        let dir =
+            std::env::temp_dir().join(format!("bateri-dropped-handle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("geçici dizin kurulamadı");
+        let ready = dir.join("ready");
+        let hup = dir.join("hup");
+        let session = spawn_session(
+            &format!(
+                "trap 'echo x > {hup}; exit' HUP; echo x > {ready}; while :; do sleep 0.05; done",
+                hup = hup.display(),
+                ready = ready.display(),
+            ),
+            Arc::clone(&wake),
+        );
+        // Çapa: `trap` kuruldu. Olmadan `SIGHUP` tuzaktan önce gelip çocuğu
+        // dosyasız öldürebilir ve sınama sebepsiz kızarırdı.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "betik hazır olmadı");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let handle = session.begin_shutdown().expect("ilk çağrı tutamak verir");
+        assert!(
+            session.begin_shutdown().is_none(),
+            "ikinci çağrı kapanışı yeniden başlatmamalı"
+        );
+        drop(handle);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !hup.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "düşen tutamaktan sonra çocuk SIGHUP almadı"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Kapanış başladığı için `shutdown()` da artık bir şey beklemiyor.
+        assert_eq!(session.shutdown(), Teardown::AlreadyDone);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_follows_the_application_and_a_changed_directory() {
+        // OSC 7 → başlık dizinin son bileşeni; aynı dizini basan ikinci
+        // `precmd` haber doğurmaz; OSC 2 kazanır; başlık yığınından `None`
+        // çıkaran `CSI 23 t` `ResetTitle` doğurur ve başlık dizine döner.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "sleep 0.5; printf '\\033]7;file:///tmp\\007'; sleep 0.5; \
+             printf '\\033]7;file:///tmp\\007'; sleep 0.5; \
+             printf '\\033[22;0t\\033]2;selam\\007'; sleep 0.5; \
+             printf '\\033[23;0t'; sleep 5",
+            Arc::clone(&wake),
+        );
+        // Betik ilk yarım saniye sessiz: bu okuma ilk OSC 7'den önce.
+        assert_eq!(session.title(), "bateri", "hiçbir kaynak yokken");
+
+        assert!(wake.wait_titles(1, Duration::from_secs(5)) >= 1);
+        assert_eq!(session.title(), "tmp");
+        assert_eq!(session.working_directory(), Some(PathBuf::from("/tmp")));
+
+        assert!(wake.wait_titles(2, Duration::from_secs(5)) >= 2);
+        assert_eq!(session.title(), "selam");
+
+        assert!(wake.wait_titles(3, Duration::from_secs(5)) >= 3);
+        assert_eq!(session.title(), "tmp");
+        // Aynı dizini basan ikinci OSC 7 dördüncü bir haber doğurmadı.
+        // Betik son adımdan sonra sessiz; haberlerin sayısı üçte durmalı.
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(wake.titles(), 3);
+
+        // Ayar kaydı `Term::set_options` üzerinden başlığı yeniden yolluyor;
+        // değişmeyen başlık haber doğurmaz.
+        session.set_terminal_options(TerminalOptions {
+            scrollback: 100,
+            osc52: Osc52::Off,
+            cursor: CaretShape::default(),
+            blink: CursorBlink::default(),
+        });
+        assert_eq!(wake.titles(), 3);
     }
 
     #[test]

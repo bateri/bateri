@@ -49,8 +49,8 @@ pub use dock::{Dock, DockCols};
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use session::{
     Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, SelectionPoint,
-    Session, SessionOptions, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell,
-    smoke_shell,
+    Session, SessionOptions, ShutdownHandle, Teardown, TerminalOptions, UnderlineStyle, Wheel,
+    load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_GLOW, CURSOR_RADIUS, CaretShape, CaretStyle, Changes,

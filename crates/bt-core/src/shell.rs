@@ -94,6 +94,7 @@
 
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthChar;
@@ -422,6 +423,40 @@ impl Clone for DockContext {
         self.cwd.push_str(&source.cwd);
         self.branch.clear();
         self.branch.push_str(&source.branch);
+    }
+}
+
+/// Pencerenin (ve native sekmenin) başlığı — öncelik sırası
+/// `.tasks/026-sekmeler/discussion.md` → Karar 7.
+///
+/// 1. **Uygulamanın OSC 0/2 başlığı** (vim, ssh, Claude Code, oh-my-zsh'in
+///    `termsupport`'u). Boş başlık yok sayılır: `\e]2;\a` bir başlık değil,
+///    sekmeyi adsız bırakırdı.
+/// 2. **Çalışma dizininin son bileşeni** (OSC 7); ev dizininin kendisi `~`,
+///    kök `/`. Alt dizin `~/proj` değil `proj` — sekme dar ve ayırt edici
+///    olan son bileşen.
+/// 3. `bateri`.
+///
+/// Saf ve iki yuvadan beslenir; okuyan [`crate::Session::title`]. Ev dizini
+/// argüman, çünkü bu crate ortam okumaz — değeri uygulama veriyor
+/// ([`crate::SessionOptions::home`]).
+pub(crate) fn title_of(osc_title: Option<&str>, cwd: Option<&str>, home: Option<&Path>) -> String {
+    if let Some(title) = osc_title.filter(|title| !title.trim().is_empty()) {
+        return title.to_owned();
+    }
+    let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {
+        return "bateri".to_owned();
+    };
+    let path = Path::new(cwd);
+    if home.is_some_and(|home| home == path) {
+        return "~".to_owned();
+    }
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        // Son bileşeni olmayan mutlak yol yalnız kök: `file_name` `/` için
+        // `None` veriyor. Tarayıcı yalnız mutlak yol geçiriyor, yani göreli
+        // bir `..` buraya düşmez; düşse de yolun kendisi dürüst bir başlık.
+        None => cwd.to_owned(),
     }
 }
 
@@ -1037,7 +1072,13 @@ impl ShellLog {
     /// Damga argüman, çünkü defter `Session`'ı görmüyor ve görmemeli; okuyan
     /// taraf (`session`'ın `TappedPty`'si) nesli olay başına bir atomik
     /// okumayla getiriyor.
-    pub(crate) fn apply_scan_answering(&mut self, event: ScanEvent<'_>, answers: u64) {
+    ///
+    /// Dönüş "başlığın girdisi değişti mi": yalnız **farklı** bir OSC 7
+    /// dizini `true` verir ve çağıran o zaman [`crate::Wake::title_changed`]'i
+    /// kilidi bıraktıktan sonra çağırır. Aynı dizini basan her `precmd` haber
+    /// doğursaydı her prompt ana kuyruğa boşuna bir iş atardı.
+    pub(crate) fn apply_scan_answering(&mut self, event: ScanEvent<'_>, answers: u64) -> bool {
+        let mut cwd_changed = false;
         match event {
             ScanEvent::Mark(mark) => self.apply(mark),
             ScanEvent::Dock(event) => self.apply_dock(event, answers),
@@ -1046,11 +1087,15 @@ impl ShellLog {
             // ulaşıyor. Reddedilen bir OSC 7 hiç olay doğurmuyor, yani eski
             // yol yerinde kalıyor — yanlış yol göstermektense bayat yol.
             ScanEvent::Cwd(path) => {
-                self.context.cwd.clear();
-                self.context.cwd.push_str(path);
+                if self.context.cwd != path {
+                    self.context.cwd.clear();
+                    self.context.cwd.push_str(path);
+                    cwd_changed = true;
+                }
             }
         }
         self.observe_caret();
+        cwd_changed
     }
 
     /// Devrin ham cevabını damgalar; **değişmediyse damga kıpırdamaz**.
@@ -3551,16 +3596,16 @@ mod tests {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
         let mut scanner = Scanner::new();
         scanner.feed(&dock_update(2, "", "ls", "", &[]), |event| {
-            log.apply_scan_answering(event, 7)
+            log.apply_scan_answering(event, 7);
         });
         assert_eq!(log.dock.answers, 7);
         // İşaret ya da dal olayı damgaya dokunmuyor.
         scanner.feed(b"\x1b]133;B\x07", |event| {
-            log.apply_scan_answering(event, 9)
+            log.apply_scan_answering(event, 9);
         });
         assert_eq!(log.dock.answers, 7);
         scanner.feed(b"\x1b]8133;e\x07", |event| {
-            log.apply_scan_answering(event, 9)
+            log.apply_scan_answering(event, 9);
         });
         assert_eq!(log.dock.answers, 0, "kapanmış ayna eski damgayı taşımamalı");
     }
@@ -4260,5 +4305,44 @@ mod tests {
             id: Some(1),
         });
         assert!(log.running_since.is_none(), "`D` saati tüketmeliydi");
+    }
+
+    #[test]
+    fn the_title_prefers_the_application_then_the_directory() {
+        let home = Path::new("/Users/someone");
+        // OSC 0/2 kazanır, dizin ne olursa olsun.
+        assert_eq!(title_of(Some("vim"), Some("/tmp"), Some(home)), "vim");
+        // Boş (ya da yalnız boşluk) OSC başlığı yok sayılır, dizine düşer.
+        assert_eq!(title_of(Some(""), Some("/tmp"), Some(home)), "tmp");
+        assert_eq!(title_of(Some("  "), Some("/tmp"), Some(home)), "tmp");
+        // `ResetTitle` yuvayı siliyor: başlık dizine döner.
+        assert_eq!(title_of(None, Some("/usr/local/bin"), Some(home)), "bin");
+        // Ev dizininin kendisi `~`, alt dizini son bileşen.
+        assert_eq!(title_of(None, Some("/Users/someone"), Some(home)), "~");
+        assert_eq!(title_of(None, Some("/Users/someone/"), Some(home)), "~");
+        assert_eq!(
+            title_of(None, Some("/Users/someone/proj"), Some(home)),
+            "proj"
+        );
+        // Ev dizini bilinmiyorsa ev de sıradan bir dizin.
+        assert_eq!(title_of(None, Some("/Users/someone"), None), "someone");
+        // Kök.
+        assert_eq!(title_of(None, Some("/"), Some(home)), "/");
+        // Hiçbiri: uygulamanın adı.
+        assert_eq!(title_of(None, None, Some(home)), "bateri");
+        assert_eq!(title_of(None, Some(""), Some(home)), "bateri");
+    }
+
+    #[test]
+    fn only_a_different_directory_changes_the_title_input() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        assert!(log.apply_scan_answering(ScanEvent::Cwd("/tmp"), 0));
+        // Aynı dizini basan ikinci `precmd` haber doğurmaz.
+        assert!(!log.apply_scan_answering(ScanEvent::Cwd("/tmp"), 0));
+        assert!(log.apply_scan_answering(ScanEvent::Cwd("/"), 0));
+        // Dizin dışı olaylar başlığın girdisine hiç dokunmaz.
+        assert!(!log.apply_scan_answering(ScanEvent::Mark(Mark::PromptEnd), 0));
+        assert!(!log.apply_scan_answering(ScanEvent::Dock(DockEvent::End), 0));
+        assert_eq!(log.context.cwd, "/");
     }
 }

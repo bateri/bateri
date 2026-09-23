@@ -14,6 +14,7 @@
 
 use std::cell::{Cell, OnceCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bt_core::{FontOptions, Session, SessionOptions, Settings, Teardown, Theme, Wake};
@@ -46,11 +47,19 @@ use crate::{Run, Workload};
 /// zaten elle isteniyor ve o ana kadar okunmuş her bayt hasar bayrağında
 /// birikmiş olur.
 struct ShellWake {
+    /// Pencerenin kimliği: ana kuyruk işleri pencereyi listeden bununla
+    /// buluyor (alternatif ekran habercisinin örüntüsü) — `Session`'a ya da
+    /// pencereye referans tutmak `wake.rs`'in Sahiplik çemberini kapatırdı.
+    id: u64,
     waker: OnceLock<Waker>,
     /// OSC 52'nin ana kuyruğa bekleyen metni. `Arc`, çünkü ana kuyruğun işi
     /// `'static` ister ve `Wake`'in çağrısı yalnız `&self` veriyor; iş
     /// `ShellWake`'i değil yalnız yuvayı tutar.
     pending_copy: Arc<PendingCopy>,
+    /// Başlık işi ana kuyrukta bekliyor mu — kuyruğa **en çok bir** iş
+    /// (`PendingCopy`'nin örüntüsü, yük yerine bayrak: başlığın kendisi
+    /// oturumda, iş onu okuyor).
+    title_pending: Arc<AtomicBool>,
 }
 
 impl Wake for ShellWake {
@@ -103,6 +112,29 @@ impl Wake for ShellWake {
                 pending.deliver(&NSPasteboard::generalPasteboard());
             });
         }
+    }
+
+    fn title_changed(&self) {
+        // Okuyucu thread (ya da ayar kaydının thread'i), `Term` kilidi
+        // tutuluyor olabilir: bayrağı kur, iş zaten bekliyorsa dön.
+        if self.title_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.title_pending);
+        let id = self.id;
+        DispatchQueue::main().exec_async(move || {
+            // Bayrak başlık **okunmadan önce** iniyor: okumadan sonra gelen
+            // bir değişiklik yeni bir iş ister ve kaçmaz. `swap`, çünkü
+            // okuma-değiştirme-yazma yazarın `swap`'ıyla eşleşiyor ve onun
+            // yuvaya yazdığını görünür kılıyor.
+            pending.swap(false, Ordering::AcqRel);
+            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+            // Pencere bu arada kapanmışsa yazacak bir başlık da yok.
+            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
+                window.refresh_title();
+            }
+        });
     }
 }
 
@@ -370,8 +402,10 @@ impl TerminalWindow {
             link: OnceCell::new(),
             session: OnceCell::new(),
             wake: Arc::new(ShellWake {
+                id,
                 waker: OnceLock::new(),
                 pending_copy: Arc::default(),
+                title_pending: Arc::default(),
             }),
             zoom: Cell::new(Zoom::default()),
             // Açılışta dock yok: kararı `start` veriyor ve geometriyi ondan
@@ -409,6 +443,18 @@ impl TerminalWindow {
 
     pub(crate) fn session(&self) -> Option<&Arc<Session>> {
         self.ivars().session.get()
+    }
+
+    /// Başlığı oturumdan okuyup pencereye yazar — `ShellWake::title_changed`'in
+    /// ana kuyruk işi. Kare yolu başlık hesaplamıyor; yazım yalnız
+    /// **değişimde** (026 R2.4). Oturum henüz yoksa başlık kurucunun
+    /// `bateri`'si kalıyor.
+    pub(crate) fn refresh_title(&self) {
+        if let Some(session) = self.ivars().session.get() {
+            self.ivars()
+                .window
+                .setTitle(&NSString::from_str(&session.title()));
+        }
     }
 
     /// Alt başlığın yazımı; metni kuran `AppDelegate::post_notices`.
@@ -507,6 +553,8 @@ impl TerminalWindow {
                 // değil — `printf` ile `sleep`, `date` ile `printf`; yolları
                 // mutlak ya da `PATH`'ten, çıktıları ASCII.
                 working_directory: child::working_directory(),
+                // Başlığın `~` kuralı; dizinle **aynı çözüm** (`child::home`).
+                home: child::home(),
                 // Shell entegrasyonu yerelin yanında, aynı haritada: ikisi de
                 // çocuğa **eklenen** ortam ve ikisi de yalnız çocuğa gidiyor.
                 // Anahtarları ayrık (`LANG` ↔ `ZDOTDIR`), yani sıranın
@@ -541,6 +589,10 @@ impl TerminalWindow {
         // de kendi kopyasını tutar; üçü de ana thread'de yaşıyor, yani son
         // referansın nerede düşeceği belli (bkz. `shutdown`).
         let _ = self.ivars().session.set(Arc::clone(&session));
+        // Oturum yuvaya girmeden önce gelmiş bir başlık haberi `refresh_title`'da
+        // boş yuva bulup düşmüş olabilir; bir kez elle okumak o pencereyi
+        // kapatıyor (değişmemişse aynı `bateri`'yi yazar).
+        self.refresh_title();
         let view = &self.ivars().view;
         view.attach(Arc::clone(&session));
         // Fare çevirisi oturumla aynı grid'i görmeli: ölçü ve sayı yukarıdaki
