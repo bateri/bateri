@@ -488,9 +488,12 @@ sabitleniyor, yeni satırlar içeriği hücrelerin içinde kaydırıyor ve ötel
 hedefi hiç oynamıyor — kayma ızgara dolana kadar vardı, sonra yoktu
 (kullanıcı bildirdi). Kaç satırın geçmişe kaydığı sınırdan ayrı geçiyor
 (`Cursor::scrolled`) ve ötelemenin **konumu** o kadar geri alınıp hedefine
-yeniden süzülüyor; tavanı bir ekran, ve tek karede bir ekran ya da fazlası
-kaydıysa kayma **bitiriliyor** (ölçüldü: `BT_SCROLL_TEST`'te öteleme tavanda
-asılı kalıp en yeni çıktıyı bir ekran geriden gösteriyordu). Sayının ölçütü defterin boyu **değil**
+yeniden süzülüyor; tavanı bir ekran. Tek karede bir ekran ya da fazlası
+kaydıysa ayıran şey kaymanın uçuşta olması: durgun ızgarada bu bir
+**patlama** ve son ekran bir ekran aşağıdan süzülüyor (dolu ekranda `seq 1
+200` hiç kaymıyordu, kullanıcı bildirdi), kayma sürüyorsa çıktı **akıyor**
+ve kayma bitiriliyor (ölçüldü: `BT_SCROLL_TEST`'te öteleme tavanda asılı
+kalıp en yeni çıktıyı bir ekran geriden gösteriyordu). Sayının ölçütü defterin boyu **değil**
 ekran tepesindeki satırın kimliği (`session::row_identity`, hücre tamponunun
 adresi): `history_size()` `scrollback`'te doyuyor ve ondan türeyen sayı on
 bin satır sonra aynı kusuru geri getirirdi, satırın tamponu ise alacritty'nin

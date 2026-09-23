@@ -453,12 +453,18 @@ impl Motion {
     /// yalnız bir kesrini alıyor, yani tavansız öteleme ekranlarca geride
     /// kalırdı. Tavan konumu **aşağı çekmiyor**, yalnız daha fazla itmiyor.
     ///
-    /// **Tek karede `limit` ya da daha fazla satır kaydıysa kayma bitiriliyor**
-    /// ve bu tavanın ikinci yarısı: ekranda bir önceki kareyle ortak tek satır
-    /// kalmadı, yani sürdürülecek bir süreklilik yok ve kaymak yalnız en yeni
-    /// çıktıyı geciktirirdi. Ölçüldü (`BT_SCROLL_TEST`, kare başına 45–467
+    /// **Tek karede `limit` ya da daha fazla satır kaydıysa iki kol var ve
+    /// ayıran şey kaymanın uçuşta olup olmadığı.** Durgun ızgarada bu tek
+    /// seferlik bir patlama (dolu ekranda `seq 1 200`): son ekran tam bir
+    /// ekran aşağıdan süzülerek geliyor, yani boş ızgaradaki büyümeyle aynı
+    /// his. Kayma zaten sürüyorsa çıktı **akıyor** ve kayma bitiriliyor —
+    /// tavanın ikinci yarısı. Ölçüldü (`BT_SCROLL_TEST`, kare başına 45–467
     /// satır): bu kol olmadan öteleme tavanda asılı kalıyor ve pencere akış
-    /// boyunca en yeni çıktıyı **bir ekran geriden** gösteriyordu.
+    /// boyunca en yeni çıktıyı **bir ekran geriden** gösteriyordu. İki kolu
+    /// tek ölçüte ("bir ekran ya da fazlası → bitir") bağlamak patlamayı da
+    /// akış sanıyordu: dolu ızgarada taşan çıktı hiç kaymıyordu (kullanıcı
+    /// bildirdi, 2026-09-23). Akışın ilk karesi de patlama gibi süzülmeye
+    /// başlıyor; ikinci büyük karede bitiyor, yani gecikme en çok bir kare.
     ///
     /// Belirme ve `Snap` kiplerinde hiçbir şey: öteleme o kiplerde zaten
     /// kaymıyor ([`Motion::origin_mode`]). İlk karede de hiçbir şey — kayacak
@@ -467,11 +473,17 @@ impl Motion {
         if rows == 0 || self.origin_mode() == Mode::Snap {
             return;
         }
+        let mode = self.origin_mode();
         if let Some(slide) = &mut self.origin {
             if rows >= limit {
-                slide.pos = slide.target;
+                let burst = slide.settled(mode);
+                slide.pos = if burst {
+                    slide.target + f32::from(limit)
+                } else {
+                    slide.target
+                };
                 slide.vel = 0.0;
-                slide.from = slide.target;
+                slide.from = slide.pos;
                 slide.elapsed = 0.0;
                 return;
             }
@@ -2200,13 +2212,41 @@ mod tests {
         motion.scroll_in(5, 30);
         assert_eq!(motion.origin(), 30.0);
 
-        // Bir ekran ya da fazlası tek karede: süreklilik yok, kayma bitiyor
-        // ve en yeni çıktı hemen yerinde.
+        // Kayma sürerken bir ekran ya da fazlası tek karede: çıktı akıyor,
+        // kayma bitiyor ve en yeni çıktı hemen yerinde.
         motion.scroll_in(30, 30);
-        assert!(motion.settled(), "ekran boyu kaydırma kaymayı sürdürdü");
+        assert!(
+            motion.settled(),
+            "akışta ekran boyu kaydırma kaymayı sürdürdü"
+        );
         assert_eq!(motion.origin(), 0.0);
-        motion.scroll_in(500, 30);
-        assert!(motion.settled());
+    }
+
+    #[test]
+    fn a_burst_on_a_resting_grid_slides_in_one_screen() {
+        // **Kullanıcının bildirdiği kusurun bekçisi** (2026-09-23): dolu
+        // ızgarada `seq 1 200` tek karede ekrandan fazlasını kaydırıyor ve
+        // kayma hiç başlamıyordu — boş ızgarada aynı komut süzülürken. Durgun
+        // ızgarada patlama son ekranı tam bir ekran aşağıdan getiriyor.
+        let mut motion = full_grid();
+        motion.scroll_in(200, 30);
+        assert_eq!(
+            motion.origin(),
+            30.0,
+            "patlama bir ekran aşağıdan başlamadı"
+        );
+        assert!(!motion.origin_settled(), "patlama kayma başlatmadı");
+        let mut last = motion.origin();
+        for _ in 0..3 {
+            motion.advance(TICK);
+            assert!(motion.origin() < last, "öteleme yukarı akmıyor");
+            last = motion.origin();
+        }
+
+        // Akış: ikinci büyük kare uçuştaki kaymayı bitiriyor — pencere en
+        // yeni çıktının bir ekran gerisinde asılı kalmıyor.
+        motion.scroll_in(200, 30);
+        assert!(motion.settled(), "akış kaymayı sürdürdü");
         assert_eq!(motion.origin(), 0.0);
     }
 
