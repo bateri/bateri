@@ -622,6 +622,7 @@ mod tests {
             // ilk satırlarını ezerdi.
             |_| (),
             blocks,
+            &mut bt_core::SelectionRuns::default(),
             ScrollGlide::default(),
         );
         rows.into_iter()

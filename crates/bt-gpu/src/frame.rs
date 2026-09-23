@@ -26,7 +26,9 @@
 use std::mem::offset_of;
 
 use bt_atlas::{Face, RuleKind, SizeClass};
-use bt_core::{Block, CaretShape, CaretStyle, Cell, LinearRgba, UnderlineStyle, UnfocusedCaret};
+use bt_core::{
+    Block, CaretShape, CaretStyle, Cell, LinearRgba, SelectionRun, UnderlineStyle, UnfocusedCaret,
+};
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
 use crate::renderer::CellMetrics;
@@ -573,6 +575,17 @@ pub(crate) struct Frame {
     /// sayardı). Üçüncü bir liste ikisini de temsil edilemez kılıyor.
     stripes: Vec<RuleCell>,
     bg: Vec<Instance>,
+    /// Fareyle seçimin satır koşuları (031); arka planlarla **aynı**
+    /// pipeline'dan (`cell_bg`) ama ayrı listede ve onlardan **sonra**,
+    /// caret'ten ve glyph'lerden önce çiziliyor
+    /// ([`Renderer::encode_pass`](crate::renderer::Renderer)).
+    ///
+    /// Ayrılığın sebebi şeridinkiyle aynı: `bg`'ye girseydi ya sayılarak
+    /// girer ve `hucre=` jetonunun anlamı kayardı ("çizilen hücre" bir satır
+    /// koşusunu da sayardı), ya da sayılmadan girer ve `bg_count`'un
+    /// bekçisini delerdi. Sayacı **yok**: duman reçetesinde seçim yok, yani
+    /// jeton hiçbir şey söylemezdi; kanıtı `renderer.rs`'in offscreen okuması.
+    selection: Vec<Instance>,
     glyphs: Vec<GlyphCell>,
     /// Kural çizgileri; glyph'lerle **aynı** pipeline'dan ama onlardan sonra
     /// çizilir (üstü çizili, altındaki harfin üstünden geçmeli).
@@ -800,6 +813,7 @@ impl Frame {
         let cell_px = metrics.cell_px();
         self.stripes.clear();
         self.bg.clear();
+        self.selection.clear();
         self.glyphs.clear();
         self.rules.clear();
         self.bg_count = 0;
@@ -968,6 +982,30 @@ impl Frame {
                 rgba: cell.fg.to_array(),
             });
         }
+    }
+
+    /// Seçimin bir satır koşusu: `first..=last` sütunlarını kaplayan **tek**
+    /// düz dörtgen, verilen renkte.
+    ///
+    /// Koşu başına bir instance, hücre başına değil: köprülenen boşlukların
+    /// kendi hücresi yok (sink'e hiç uğramıyorlar) ve komşu dörtgenlerin
+    /// dikişi kesirli hücre genişliğinde yarı saydam bir çizgi bırakabilirdi.
+    /// Renk odağa göre çağıranın seçimi (`bt_core::SelectionRuns::color`):
+    /// odak `bt-core`'a girmiyor, burada da sorulmuyor.
+    pub(crate) fn push_selection(&mut self, run: SelectionRun, rgba: LinearRgba) {
+        debug_assert!(self.cell_px.0 > 0.0, "clear(metrics) çağrılmadı");
+        debug_assert!(run.first <= run.last, "ters koşu: {run:?}");
+        let cols = f32::from(run.last.saturating_sub(run.first)) + 1.0;
+        self.selection.push(Instance {
+            pos: self.pos(run.first, run.row),
+            size: [cols * self.cell_px.0, self.cell_px.1],
+            rgba: rgba.to_array(),
+        });
+    }
+
+    /// Bu karenin seçim koşuları; [`Frame::push_selection`]'ın dörtgenleri.
+    pub(crate) fn selection_instances(&self) -> &[Instance] {
+        &self.selection
     }
 
     /// Bir komut bloğunun işareti: **0. sütuna**, komutun kendi satırına

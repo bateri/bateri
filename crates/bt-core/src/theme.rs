@@ -42,7 +42,7 @@ impl Theme {
     /// ayrıştırılamadı.
     ///
     /// Roller (`background`, `foreground`, `dim`, `accent`, `cursor`,
-    /// `success`, `error`) kökte, 16 renk
+    /// `selection`, `success`, `error`) kökte, 16 renk
     /// `[ansi]` bölümünde; renk `"#rrggbb"` (büyük harf de olur). `Err` yalnız
     /// geçersiz TOML'da, ayar dosyasındaki anlamıyla.
     ///
@@ -61,6 +61,7 @@ impl Theme {
             ("dim", &mut theme.dim),
             ("accent", &mut theme.accent),
             ("cursor", &mut theme.cursor),
+            ("selection", &mut theme.selection),
             ("success", &mut theme.success),
             ("error", &mut theme.error),
         ];
@@ -133,6 +134,7 @@ mod tests {
         dim: 0x000003,
         accent: 0x000004,
         cursor: 0x000007,
+        selection: 0x000008,
         success: 0x000005,
         error: 0x000006,
         ansi: [

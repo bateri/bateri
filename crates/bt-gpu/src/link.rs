@@ -75,7 +75,7 @@ use std::time::{Duration, Instant};
 
 use bt_core::{
     Blocks, CaretStyle, Cursor, CursorMotion, DOCK_TEXT_COL, DirtyFlag, DockCols, DockContext,
-    DockState, Erase, Keypress, LinearRgba, Session, Theme,
+    DockState, Erase, Keypress, LinearRgba, SelectionRuns, Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -522,6 +522,10 @@ struct LinkIvars {
     /// kendisi değil — `Frame::push_block` aralıkları buradan okuyup oraya
     /// çeviriyor.
     blocks: RefCell<Blocks>,
+    /// Seçimin satır koşuları ve iki rengi (031); `blocks` ile aynı ömür ve
+    /// aynı gerekçe — `Frame`'in içinde değil yanında, `Frame::push_selection`
+    /// onu dörtgenlere çeviriyor.
+    selection: RefCell<SelectionRuns>,
     /// Doldurulan satırların tamponu; `blocks` ile aynı ömür ve **aynı
     /// gerekçe**: `Frame`'in içinde değil yanında.
     ///
@@ -1028,6 +1032,7 @@ define_class!(
                 |cell| frame.push(cell),
                 |cell| fill.push(cell),
                 &mut iv.blocks.borrow_mut(),
+                &mut iv.selection.borrow_mut(),
                 // Pay **uyandırmıyor**: kareyi zaten bu callback çiziyor
                 // (`Session::frame`). Nesli değiştiyse orada düşüyor.
                 glide,
@@ -1080,6 +1085,17 @@ define_class!(
             for block in iv.blocks.borrow().as_slice() {
                 frame.push_block(*block);
             }
+            // **Seçimin rengi odaktan** (031 Karar 9): iki renk sınırdan hazır
+            // geliyor, hangisinin çizileceği burada. Kare kaynağı yeni değil —
+            // odağın değişimi zaten bir içerik karesi istiyor
+            // ([`DisplayLink::set_focused`]) ve renk o karede dönüyor; hareket
+            // karesi listeyi koruyor, rengi de.
+            let selection = iv.selection.borrow();
+            let rgba = selection.color(iv.focused.get());
+            for run in selection.as_slice() {
+                frame.push_selection(*run, rgba);
+            }
+            drop(selection);
             // Kapının operandı burada artıyor: hasar bulundu, kare çizilecek.
             // `kare`'den önce ve ondan bağımsız — GPU'nun bitirmesini
             // beklemiyor (bkz. `LinkIvars::content_frames`).
@@ -1639,6 +1655,7 @@ impl DisplayLink {
                 stats,
                 frame: RefCell::new(Frame::default()),
                 blocks: RefCell::new(Blocks::default()),
+                selection: RefCell::new(SelectionRuns::default()),
                 fill: RefCell::new(Vec::new()),
                 dock: RefCell::new(DockState::default()),
                 dock_context: RefCell::new(DockContext::default()),

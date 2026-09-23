@@ -52,8 +52,8 @@ pub use dock::{Dock, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_T
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use session::{
     Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, ScrollGlide,
-    ScrollIntent, SelectKind, SelectionPoint, Session, SessionOptions, ShutdownHandle, Teardown,
-    TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
+    ScrollIntent, SelectKind, SelectionPoint, SelectionRun, SelectionRuns, Session, SessionOptions,
+    ShutdownHandle, Teardown, TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,
