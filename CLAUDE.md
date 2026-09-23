@@ -131,10 +131,18 @@ punto; Window'da sekme geçişi ve Select Tab ▸) ve kapanış sırası ondadı
 **Sekmeler macOS'un kendi sekmeleri** (026): her sekme bir `NSWindow` ve
 kendi `Session`/`DisplayLink`/`Renderer`'ı, yani "bir pencere = bir oturum"
 bozulmuyor; yeni sekme etkin sekmenin OSC 7 dizininde ve punto farkıyla
-doğar, kısayollar (⌃⇥ dahil) menü öğesi ve `keyDown:`'ın izin listesi
-değişmedi, arka sekme örtülme yolundan sıfır kare çizer, kabuk çıkınca
+doğar, sekme kısayolları (⌃⇥ dahil) menü öğesidir ve `keyDown:`'ın Cmd
+izin listesi üç tuşta kalır, arka sekme örtülme yolundan sıfır kare çizer, kabuk çıkınca
 yalnız o sekme kapanır ve son pencere kapanınca uygulama açık kalır —
-gerekçeler `.tasks/026-sekmeler/discussion.md` → Karar. Uygulamanın
+gerekçeler `.tasks/026-sekmeler/discussion.md` → Karar. **Krom temanın**
+(`TerminalWindow::apply_chrome`): başlık çubuğu saydam ve ayırıcısız,
+pencerenin zemini temanın `background`'ı (sRGB), görünümü zeminin
+açıklığından (`window::is_dark_background`), yani tek sekmede başlık ile
+içerik tek yüzey. Görünümü kurulan pencere sistemden miras almayı bıraktığı
+için açık/koyu değişimi view'dan değil `NSApp.effectiveAppearance`'ın
+KVO'sundan geliyor, geometri de pencereden değil içerik view'ının çerçeve
+bildiriminden — sekme çubuğu pencereyi değil içeriği boyutlandırıyor
+(`.tasks/026-sekmeler/phase-4.md` → Uygulama Notları). Uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı, `osc52`,
 `cursor`, `cursor_blink`, `cursor_radius`, `cursor_glow`, `cursor_unfocused`,

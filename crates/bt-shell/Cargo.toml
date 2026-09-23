@@ -22,7 +22,12 @@ objc2 = { workspace = true }
 # listesiz kullanıyor (`ns_string!`, `NSArray`); kırpma günü buraya girerler.
 # NSURL: "Settings…"ın dosya URL'si (007 phase-6); `NSWorkspace` de çekiyor,
 # ama kullanan bu crate.
-objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLocale", "NSURL"] }
+# NSKeyValueObserving: uygulamanın etkin görünümünü izlemek (026 phase-4) —
+# pencereye temanın görünümü kurulunca view sistemin açık/koyu değişimini
+# artık görmüyor, `NSApp.effectiveAppearance` ise KVO ile izlenebilir.
+objc2-foundation = { workspace = true, features = [
+    "NSRunLoop", "NSDate", "NSLocale", "NSURL", "NSKeyValueObserving",
+] }
 # NSAppearance: sistemin açık/koyu görünümü (007 phase-3). NSMenu ve
 # NSMenuItem: ana menü; NSWorkspace: "Settings…"ın dosyayı editörde açması
 # (007 phase-6). NSCell: Theme ▸'deki işaretin tipi (`NSControlStateValue`,
@@ -34,6 +39,8 @@ objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLoc
 # sürükleme hedefi (`view::BateriView`, 018 phase-3) — `NSDraggingDestination`,
 # `NSDraggingInfo` ve `NSDragOperation` o bayrağın arkasında; protokolün
 # **bütün** metotları `#[optional]`, yani ikisini uygulamak yetiyor.
+# NSColor: pencere kromunun zemini temanın `background`'ından
+# (`window::TerminalWindow::apply_chrome`, 026 phase-4).
 # NSWindowTabGroup: sekme grubunun pencereleri (⇧⌘W, ⌘1…⌘9; 026 phase-3) —
 # `tabbedWindows` çubuk görünmüyorken `nil` veriyor. Yalnız NSArray/NSString
 # başlıklarını çekiyor, ikisi zaten açık; `Cargo.lock` oynamadı.
@@ -49,8 +56,8 @@ objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLoc
 # setinde ve yukarıdaki liste o seti kırpmıyor, ekliyor. Kırpma günü bu satır
 # aranacak; kaydı bu yorum.
 objc2-app-kit = { workspace = true, features = [
-    "NSAccessibility", "NSAppearance", "NSCell", "NSDragging", "NSMenu",
-    "NSMenuItem", "NSTextInputClient", "NSWindowTabGroup", "NSWorkspace",
+    "NSAccessibility", "NSAppearance", "NSCell", "NSColor", "NSDragging",
+    "NSMenu", "NSMenuItem", "NSTextInputClient", "NSWindowTabGroup", "NSWorkspace",
 ] }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.

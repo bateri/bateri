@@ -26,8 +26,9 @@ use objc2_app_kit::{
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
-    NSArray, NSDictionary, NSNotification, NSNumber, NSObject, NSObjectNSDelayedPerforming,
-    NSObjectProtocol, NSRunLoopCommonModes, NSString, NSURL, NSUserDefaults, ns_string,
+    NSArray, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSNumber, NSObject,
+    NSObjectNSDelayedPerforming, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol,
+    NSRunLoopCommonModes, NSString, NSURL, NSUserDefaults, ns_string,
 };
 
 use crate::notices::{Notices, Source};
@@ -649,6 +650,14 @@ pub(crate) struct Ivars {
     /// kullanılmıyor, yani kapanmış bir pencereye giden bayat bir haber başka
     /// bir pencereyi bulamaz.
     next_window_id: Cell<u64>,
+    /// Son görülen sistem görünümü koyu muydu — [`AppDelegate::apply_appearance`]'ın
+    /// kapısı. `None`: henüz hiç değişim gelmedi (ilk haber her zaman geçer).
+    ///
+    /// Kapı bir **tasarruf**, doğruluk şartı değil: KVO haberi görünümün adı
+    /// değişince de geliyor (vurgu rengi, yüksek kontrast) ve tema yalnız
+    /// açık/koyu bitine bağlı; bit aynıysa tema dosyasını yeniden okumanın ve
+    /// bütün pencereleri yeniden boyamanın sebebi yok.
+    appearance_dark: Cell<Option<bool>>,
 }
 
 define_class!(
@@ -691,6 +700,9 @@ define_class!(
             // Sistemin Hareketi Azalt bildirimi uygulama genelinde ve bir kez;
             // pencerenin ilk değeri `start`'ta kendi link'ine indi.
             self.observe_reduce_motion();
+            // Açık/koyu görünüm de uygulama genelinde ve bir kez; ilk pencerenin
+            // teması zaten görünümden seçildi (`open_window` → `resolve_theme`).
+            self.observe_appearance();
 
             if let Some(run) = self.ivars().run {
                 // block2 yok: zamanlayıcı performSelector ile.
@@ -829,12 +841,17 @@ define_class!(
     }
 
     impl AppDelegate {
-        /// Sistemin açık/koyu görünümü değişti. Gönderen `BateriView`'ın
-        /// `viewDidChangeEffectiveAppearance`'ı, hedefsiz eylemle: view
-        /// oturumdan başka bir şeye referans tutmuyor ve responder zinciri
-        /// eylemi app delegate'e ulaştırıyor.
-        #[unsafe(method(appearanceDidChange:))]
-        fn appearance_did_change(&self, _sender: Option<&AnyObject>) {
+        /// KVO: `NSApp.effectiveAppearance` değişti — sistemin açık/koyu
+        /// görünümü ([`AppDelegate::observe_appearance`]). Bu sınıfın izlediği
+        /// tek anahtar yolu bu, yani yol ve nesne sorulmuyor.
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observe_value(
+            &self,
+            _key_path: Option<&NSString>,
+            _object: Option<&AnyObject>,
+            _change: Option<&AnyObject>,
+            _context: *mut c_void,
+        ) {
             self.apply_appearance();
         }
 
@@ -1428,6 +1445,7 @@ impl AppDelegate {
             stats,
             windows: RefCell::new(Vec::new()),
             next_window_id: Cell::new(0),
+            appearance_dark: Cell::new(None),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
@@ -1497,7 +1515,7 @@ impl AppDelegate {
     /// oturumundan — bütün pencereler aynı temada; `from` yoksa tema
     /// ayarlardan çözülüyor. `as_tab` ama `from` yoksa ayrı pencere.
     ///
-    /// Sıra: punto ve alt başlık pencere görünmeden, liste yerleşimden önce
+    /// Sıra: punto, alt başlık ve krom pencere görünmeden, liste yerleşimden önce
     /// (geometri olayları pencereyi listede bulsun), oturum yerleşimden
     /// **sonra** — sekmeye eklenen pencere grubun boyutunu alıyor ve kabuk ilk
     /// `TIOCSWINSZ`'yi o boyutla görmeli.
@@ -1519,12 +1537,15 @@ impl AppDelegate {
             &self.ivars().notices.borrow().subtitle(),
         ));
         self.ivars().windows.borrow_mut().push(window.clone());
+        let session = from.and_then(TerminalWindow::session);
+        let theme = session.map_or_else(|| self.resolve_theme(), |session| session.theme());
+        // Krom pencere **görünmeden**: sonra boyansaydı her ⌘T bir kare
+        // sistemin gri başlık çubuğunu gösterirdi.
+        window.apply_chrome(&theme);
         match from {
             Some(from) if as_tab => window.show_as_tab_of(from),
             _ => window.show_after(from),
         }
-        let session = from.and_then(TerminalWindow::session);
-        let theme = session.map_or_else(|| self.resolve_theme(), |session| session.theme());
         let dir = session
             .and_then(|session| session.working_directory())
             .or_else(child::working_directory);
@@ -1873,31 +1894,64 @@ impl AppDelegate {
         self.ivars().theme_watch.replace(watch);
     }
 
+    /// Sistemin açık/koyu görünümünü izlemeye başlar — **yalnız kullanıcının
+    /// oturumunda** ([`Inputs`]).
+    ///
+    /// Kaynak `NSApp.effectiveAppearance`'ın KVO'su, view'ın
+    /// `viewDidChangeEffectiveAppearance`'ı **değil**: pencerenin kromu temanın
+    /// görünümünü taşıyor ([`TerminalWindow::apply_chrome`]) ve görünümü
+    /// kurulmuş pencere sistemden miras almayı bırakıyor — view o andan sonra
+    /// sistemin değişimini hiç görmüyor (ölçüldü, 026 phase-4 Uygulama
+    /// Notları), yalnız bizim kendi kurduğumuzu görüyordu.
+    ///
+    /// Gözlemci **sökülmüyor**: `AppDelegate` de `NSApp` de sürecin ömrü
+    /// boyunca yaşıyor ([`AppDelegate::observe_reduce_motion`]'ın emsali).
+    fn observe_appearance(&self) {
+        let Inputs::User { .. } = self.inputs() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(self.mtm());
+        // SAFETY: gözlemci bu sınıf ve `observeValueForKeyPath:…`'u
+        // uyguluyor; bağlam boş, çünkü izlenen tek yol bu. İki nesne de süreç
+        // boyunca yaşıyor, yani kayıt sarkan bir gözlemci bırakmıyor.
+        unsafe {
+            app.addObserver_forKeyPath_options_context(
+                self,
+                ns_string!("effectiveAppearance"),
+                NSKeyValueObservingOptions::empty(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
     /// Görünüm değişiminin uygulayıcısı: tema sistemi izliyorsa görünüme uyan
     /// temayı açılışla aynı yoldan ([`AppDelegate::choose_theme`]) seçer ve
-    /// oturuma takas eder.
+    /// oturuma ve kroma takas eder ([`TerminalWindow::set_theme`]).
     ///
-    /// Üç kapı, sırayla:
+    /// Dört kapı, sırayla:
     /// - **Süreli koşu** ([`Inputs::Hermetic`]): görünüm yok sayılır, tema
     ///   `bateri` kalır — `make duman` makinenin açık modundan etkilenmez.
-    /// - **Hiçbir pencerede oturum yok:** view pencereye takılırken de bu
-    ///   bildirimi alabilir, pencerenin `start_session`'ından önce. Açılışın teması zaten `load_settings`'te
-    ///   görünümden seçiliyor.
-    /// - **Sabit tema** (`theme = "{ad}"`): görünüm temaya dokunmaz. Bildirim
-    ///   vurgu rengi ya da kontrast değişiminde de geliyor; dosyayı her
-    ///   seferinde yeniden okumanın sebebi yok.
+    /// - **Açık/koyu biti değişmedi** ([`Ivars::appearance_dark`]).
+    /// - **Hiçbir pencerede oturum yok:** son pencere kapanmış (uygulama açık
+    ///   kalıyor) ya da tek pencerenin oturumu henüz doğmamış; doğan pencere
+    ///   temayı görünümden kendisi seçiyor ([`AppDelegate::open_window`]).
+    /// - **Sabit tema** (`theme = "{ad}"`): görünüm temaya dokunmaz.
     ///
-    /// Tema aynı çıkarsa (`light_theme` ile `dark_theme` aynı ad, ya da
-    /// görünüm dışı bir bildirim) takas no-op ve kare istenmez
+    /// Tema aynı çıkarsa (`light_theme` ile `dark_theme` aynı ad) takas no-op
+    /// ve kare istenmez
     /// (`Session::set_theme`). Tema yuvası yine yeniden yazılır: bu okuma o
     /// kaynağın güncel hâli.
     fn apply_appearance(&self) {
         let Inputs::User { config_root } = self.inputs() else {
             return;
         };
-        // "Oturum yok" artık "hiçbir pencerede oturum yok": açılışın ilk
-        // penceresi henüz `start`'a varmadıysa görünüm bildirimi erken
-        // düşmüş demek ve açılışın teması zaten görünümden seçilecek.
+        let dark = self.dark_appearance();
+        if self.ivars().appearance_dark.replace(Some(dark)) == Some(dark) {
+            return;
+        }
+        // Bit kapıdan **önce** yazıldı: pencere yokken gelen değişim de
+        // görülmüş sayılıyor, sonra doğan pencere temayı zaten görünümden
+        // seçiyor.
         let windows = self.windows();
         if windows.iter().all(|window| window.session().is_none()) {
             return;
@@ -1925,8 +1979,8 @@ impl AppDelegate {
     ///
     /// Gözlemci **sökülmüyor**: `AppDelegate` sürecin ömrü boyunca yaşıyor
     /// (`run()`'daki `Retained`) ve merkez onu zaten sahiplenmeden tutuyor.
-    /// Açık/koyu görünümün izlendiği yol (`viewDidChangeEffectiveAppearance`)
-    /// de aynı biçimde sökülmüyor.
+    /// Açık/koyu görünümün KVO'su ([`AppDelegate::observe_appearance`]) de
+    /// aynı biçimde sökülmüyor.
     fn observe_reduce_motion(&self) {
         let Inputs::User { .. } = self.inputs() else {
             return;
@@ -1973,11 +2027,13 @@ impl AppDelegate {
         })
     }
 
-    /// Uygulamanın etkin görünümü koyu mu.
+    /// Uygulamanın etkin görünümü, yani sistemin açık/koyu ayarı koyu mu.
     ///
-    /// `NSApp`'ten okunuyor, view'dan değil: pencere ve view görünümü
-    /// uygulamadan miras alıyor ve hiçbiri kendi görünümünü kurmuyor, yani
-    /// değer aynı. `bestMatchFromAppearancesWithNames` "koyu mu" sorusunun
+    /// `NSApp`'ten okunması **zorunlu**: pencere ve view'ın görünümü artık
+    /// temayı yansıtıyor, sistemi değil ([`TerminalWindow::apply_chrome`]) —
+    /// view'dan okumak sabit açık temalı bir kullanıcıda sistem koyuyken
+    /// "açık" derdi ve temayı seçen soru kendi cevabını okurdu.
+    /// `bestMatchFromAppearancesWithNames` "koyu mu" sorusunun
     /// AppKit'teki yolu — ad karşılaştırması yüksek kontrastlı koyu
     /// görünümü (`NSAppearanceNameAccessibilityHighContrastDarkAqua`) açık
     /// sayardı.
@@ -2031,8 +2087,9 @@ impl AppDelegate {
     /// pencerenin kapanışı buraya uğramıyor, beklemiyor da (`TerminalWindow`'un
     /// `windowWillClose:`'u).
     ///
-    /// Bugün çağrı tek: iki yol da `process::exit`'e varıyor ve ana thread
-    /// beklerken zamanlayıcı ateşleyemiyor. Adımlar idempotent
+    /// Bugün çağrı tek: süreli koşu `process::exit`'e, etkileşimli ⌘Q
+    /// AppKit'in çıkışına varıyor ve ana thread beklerken zamanlayıcı
+    /// ateşleyemiyor. Adımlar idempotent
     /// ([`TerminalWindow::begin_close`]); bekçi değil — ikinci bir çağrı
     /// ikinci bir bekleme doğurmaz ama sonuç `AlreadyDone` olur.
     ///
