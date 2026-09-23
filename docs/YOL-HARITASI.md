@@ -703,7 +703,7 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   020'nin ölçümünde çıktı (2026-09-21, Claude Code bir pty'ye koşturuldu) ve
   o setin kapsamı dışında bırakıldı — konusu fare değil. İkisi de aynı
   şekle sahip: **sinyal elimizde, söyleyecek kanal yok.**
-  `?1004` (odak): `bt-shell` odağı biliyor (`AppDelegate::apply_focus` →
+  `?1004` (odak): `bt-shell` odağı biliyor (`TerminalWindow::apply_focus` →
   `DisplayLink::set_focused`) ama uygulamaya `\e[I`/`\e[O` demiyor.
   Bedeli "~20 satır" değil: `CLAUDE.md`'de **adıyla yazılı** bir mimari
   kararın ("Odak `bt-core`'a hiç girmiyor … kapı çağrı yerinde") inceltilmesi

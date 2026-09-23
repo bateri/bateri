@@ -3,8 +3,10 @@
 //!
 //! **Hiçbir öğenin hedefi yok.** Eylem responder zincirinden geçip onu
 //! tanımlayan ilk nesneye varıyor: `copy:`/`paste:` first responder
-//! `BateriView`'a; `openSettings:`, tema ve punto eylemleri app delegate'e
-//! (görünüm değişiminin `appearanceDidChange:`'i ile aynı yol); `terminate:`,
+//! `BateriView`'a; punto eylemleri key pencerenin delegate'ine
+//! (`window::TerminalWindow` — punto pencereye ait); `openSettings:` ve tema
+//! eylemleri app delegate'e (görünüm değişiminin `appearanceDidChange:`'i ile
+//! aynı yol — bütün pencerelere yayılıyorlar); `terminate:`,
 //! `hide:` ve `orderFrontStandardAboutPanel:` `NSApp`'in kendisine. Menü bu
 //! yüzden kimseye referans tutmuyor; eylemi karşılayan yoksa AppKit öğeyi devre
 //! dışı gösteriyor.
@@ -138,7 +140,7 @@ pub(crate) fn fill_themes(
 /// Hedefsiz bir öğe. `key` boşsa kısayol yok; değiştirici varsayılanı Command.
 fn item(mtm: MainThreadMarker, title: &str, action: Sel, key: &str) -> Retained<NSMenuItem> {
     // SAFETY: `action` `sel!` ile kurulmuş geçerli bir seçici ve her alıcısı
-    // (`BateriView`, `AppDelegate`, `NSApplication`) onu tek
+    // (`BateriView`, `TerminalWindow`, `AppDelegate`, `NSApplication`) onu tek
     // `Option<&AnyObject>` argümanlı, dönüşsüz bir eylem olarak tanımlıyor.
     unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(

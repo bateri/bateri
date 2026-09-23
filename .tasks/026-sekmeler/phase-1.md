@@ -63,11 +63,46 @@ _Requirements: R1, R1.1, R1.2, R1.3, R1.4_
 
 ## Checklist
 
-- [ ] Pencere başına durum `window.rs`'e, uygulama geneli `app.rs`'te
-- [ ] `NSWindowDelegate` pencere nesnesinde; olaylar kendi penceresine
-- [ ] Kayıt anı yolları pencere listesini dolaşıyor
-- [ ] Yayılan eylemler `AppDelegate`'te, punto eylemleri pencere delegate'inde
-- [ ] Alternatif ekran habercisi pencere kimliği taşıyor
-- [ ] Her pencerenin kendi `Renderer`'ı; `bt-gpu` API'si değişmedi
-- [ ] Test: taşınan saf fonksiyonların sınamaları yeşil
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] Pencere başına durum `window.rs`'e, uygulama geneli `app.rs`'te
+- [x] `NSWindowDelegate` pencere nesnesinde; olaylar kendi penceresine
+- [x] Kayıt anı yolları pencere listesini dolaşıyor
+- [x] Yayılan eylemler `AppDelegate`'te, punto eylemleri pencere delegate'inde
+- [x] Alternatif ekran habercisi pencere kimliği taşıyor
+- [x] Her pencerenin kendi `Renderer`'ı; `bt-gpu` API'si değişmedi
+- [x] Test: taşınan saf fonksiyonların sınamaları yeşil
+- [~] Doğrulama: `make hepsi` geçti; `make duman` [~] ortam — başka bir oturumdan kalan `bateri` penceresi ekranda, HEAD 3cdc11a ve 0c66b02'de de birebir aynı `MotionUnsettled`; set sonunda kullanıcı yeniden koşacak
+
+## Uygulama Notları
+
+- **Saf fonksiyonlar `app.rs`'te kaldı** (`Grid`, `split_into_grid`,
+  `dock_rows_for`, `dock_rows_at_birth`, `shell_integration_env`;
+  `pub(crate)`), sınamaları da yerinde — taşınan sınama yok. Entegrasyon
+  kararı `Inputs`'a bağlı ve `Inputs` `app`'e özel; pencere onu
+  `AppDelegate::shell_integration()`'dan tek çağrıyla (ortam + doğum payı)
+  alıyor.
+- **Pencere uygulama delegate'ine referans tutmuyor**: `app::delegate(mtm)`
+  `NSApp.delegate()`'ten downcast ediyor. Üç çağıran: alternatif ekran
+  habercisi (kimlik → `AppDelegate::window(id)`), punto eylemleri (ayarın
+  fontu), geometri (font tanısının alt başlığı). Kayıt anı yolları ise
+  pencere yöntemlerine `&AppDelegate` geçiyor.
+- **Renderer hatası**: `run` renderer kurmuyor ama imzası (`Result<(),
+  GpuError>`) bin crate'ine dokunmamak için duruyor ve `Err` bugün dönmüyor;
+  hata `didFinishLaunching`'te aynı satırla (`bateri: {hata}`) ve çıkış 1 ile
+  basılıyor. phase-3'te ⌘T/⌘N'in `TerminalWindow::new` hatası süreci
+  bitirmemeli — o yol bu kalıbı kopyalamamalı.
+- **Hareketi Azalt ikiye bölündü**: pencerenin ilk değeri kendi
+  `start_session`'ında (`AppDelegate::reduce_motion()`), sistem gözlemcisi
+  uygulama genelinde ve `didFinishLaunching`'te bir kez
+  (`observe_reduce_motion`). Hermetik koşuda çözülmüş değer `false` ve link o
+  değerle doğuyor, yani ilk çağrı no-op.
+- **İki "oturum yok" kapısı liste diline çevrildi**: `reload_settings` artık
+  oturumsuzken erken dönmüyor (her pencere yöntemi kendi yuvasına bakıp
+  sessizce dönüyor; olay `didFinishLaunching` dönmeden düşemediği için
+  ulaşılmaz dal), `apply_appearance`'ın kapısı "hiçbir pencerede oturum yok".
+- **Kapanış ve rapor ilk pencereyi okuyor**: `shutdown` listeyi sırayla
+  dolaşıp ilk pencerenin `Teardown`'unu, `report_and_exit` ile `sessiz=`
+  ilk pencerenin sayaçlarını veriyor; süreli koşuda tek pencere olduğu için
+  değerler aynı.
+- `docs/YOL-HARITASI.md`'de tek bir işaretçi (`AppDelegate::apply_focus` →
+  `TerminalWindow::apply_focus`) bu commit'te düzeltildi; set sonundaki yol
+  haritası işi ayrı.

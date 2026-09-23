@@ -1180,7 +1180,7 @@ impl BateriView {
     ///
     /// `set_metrics`'ten ayrı çağrı, çünkü kaynağı ayrı: o üçlü pencere
     /// geometrisinden, bu link'ten geliyor ve link `set_metrics`'ten sonra
-    /// kuruluyor (`app::start_session`). İkinci çağrı sessizce düşseydi fare
+    /// kuruluyor (`window::TerminalWindow::start_session`). İkinci çağrı sessizce düşseydi fare
     /// eski gövdeyi, yani sonsuza kadar sıfır bir orijin okurdu.
     pub(crate) fn attach_origin(&self, origin: Origin) {
         assert!(
