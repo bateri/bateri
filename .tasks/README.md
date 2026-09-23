@@ -32,6 +32,7 @@
 | 028 | [kapatma-onayi](028-kapatma-onayi/) | 🟢 | 2 phase + kapı tamam — koşan süreç varken ⌘W, kırmızı düğme, "Close Other Tabs", ⇧⌘W ve ⌘Q jest başına tek soru soruyor (sayfa / uygulama uyarısı, süreç adıyla); kabuk boştayken, `exit`'te ve süreli koşuda sormuyor; `[terminal] confirm_close` |
 | 029 | [ayarlar-penceresi](029-ayarlar-penceresi/) | 🟢 | 3 phase + kapı tamam — Cmd-, yerel ayar penceresi açıyor (General / Appearance / Cursor / Motion), yalnız değiştirilen satırı `settings.toml`'a yazıyor, dosya dışarıdan değişince tazeleniyor, bozuk dosyada kilitlenip sebebini söylüyor |
 | 030 | [dock-yazim-animasyonlari](030-dock-yazim-animasyonlari/) | 🟢 | 5 phase + kapı tamam — dock'ta yazılan harf Keypress'in dokuz efektinden biriyle geliyor, Backspace'le silinen Erase'in sekiz efektinden biriyle gidiyor (caret'in üstünde, çeyrek saniyede); `[motion] keypress`/`erase` ve ayar penceresinde iki popup, yapıştırma/geçmiş/toplu silme anında |
+| 031 | [fare-ile-secim](031-fare-ile-secim/) | 📐 | çift/üçlü tıklama ve Shift+tıklama ızgarada, fareyle seçip silme/yerine yazma dock'ta; seçim temanın `selection` rengiyle ve yuvarlak köşeli tek parça şekil |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
