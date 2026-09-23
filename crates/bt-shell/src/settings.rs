@@ -25,7 +25,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use bt_core::{Diagnostic, Parsed, Settings, Theme};
+use bt_core::{Diagnostic, Parsed, Settings, SettingsEdit, Theme};
 
 /// Ayar dosyasının adı; tanı metinleri de kullanıcıya bu adla söylüyor.
 pub(crate) const FILE_NAME: &str = "settings.toml";
@@ -95,9 +95,11 @@ pub(crate) fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// View ▸ Theme ▸'nin yazması: `{root}/settings.toml`'da `[appearance]
-/// theme`'i `name` yapar ([`Settings::with_theme`]); hata yazma yuvasının
-/// iletisi.
+/// Tek anahtarın yazması — View ▸ Theme ▸ ve ayar penceresi:
+/// `{root}/settings.toml`'da `edit`'in anahtarını değiştirir
+/// ([`Settings::with_edit`]); hata yazma yuvasının iletisi. İleti neyin
+/// kaydedilmediğini söylüyor: tema seçimi menüdeki adıyla ("the theme"),
+/// öteki her anahtar "the setting".
 ///
 /// **Yalnız yazar, uygulamaz** — uygulayan dosyayı okuyan yol, izleyicinin
 /// yolu (`app`).
@@ -121,8 +123,12 @@ pub(crate) fn create_if_missing(root: &Path) -> io::Result<PathBuf> {
 /// koparır, izinleri ve genişletilmiş öznitelikleri düşürür ve yazılamayan
 /// dizinde başarısız olur; yerinde yazma planın kararı (`/code-review` bulgusu,
 /// waive: `.tasks/007-ayarlar-ve-tema/phase-7.md`).
-pub(crate) fn write_theme(root: &Path, name: &str) -> Result<(), String> {
-    let not_saved = |reason: String| format!("{reason}; the theme was not saved");
+pub(crate) fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String> {
+    let subject = match edit {
+        SettingsEdit::Theme(_) => "theme",
+        _ => "setting",
+    };
+    let not_saved = |reason: String| format!("{reason}; the {subject} was not saved");
     let path = create_if_missing(root)
         .map_err(|err| format!("{FILE_NAME} could not be created: {err}"))?;
     let text = match read_text(&path) {
@@ -133,7 +139,7 @@ pub(crate) fn write_theme(root: &Path, name: &str) -> Result<(), String> {
         // Yaratmayla okuma arasında silindi.
         Text::Missing => return Err(not_saved(format!("{FILE_NAME} was removed"))),
     };
-    let written = Settings::with_theme(&text, name).map_err(|d| not_saved(notice(&d)))?;
+    let written = Settings::with_edit(&text, edit).map_err(|d| not_saved(notice(&d)))?;
     std::fs::write(&path, written).map_err(|err| format!("{FILE_NAME} could not be written: {err}"))
 }
 
@@ -494,6 +500,30 @@ mod tests {
         assert!(create_if_missing(&config).is_err());
     }
 
+    /// Menünün tema seçimi: sınamaların yazdığı düzenleme.
+    fn paper() -> SettingsEdit {
+        SettingsEdit::Theme("paper".to_owned())
+    }
+
+    #[test]
+    fn a_setting_write_names_what_was_not_saved() {
+        // Pencerenin yazması aynı yoldan: yerinde, geri kalan satırlara
+        // dokunmadan; reddedilince ileti "setting" diyor, "theme" değil.
+        let root = TempRoot::new("write-setting");
+        std::fs::write(root.0.join(FILE_NAME), "[terminal]\nscrollback = 7 # few\n")
+            .expect("yazılamadı");
+        assert_eq!(write_edit(&root.0, &SettingsEdit::Scrollback(2500)), Ok(()));
+        assert_eq!(
+            std::fs::read_to_string(root.0.join(FILE_NAME)).expect("okunamadı"),
+            "[terminal]\nscrollback = 2500 # few\n"
+        );
+        std::fs::write(root.0.join(FILE_NAME), "terminal = 1\n").expect("yazılamadı");
+        assert_eq!(
+            write_edit(&root.0, &SettingsEdit::Scrollback(2500)),
+            Err("settings.toml: line 1: `terminal` must be a section, found an integer; the setting was not saved".to_owned())
+        );
+    }
+
     #[test]
     fn theme_write_updates_the_file_in_place() {
         // Yorum ve tanınmayan anahtar kalır, çift yerinde; okuma yeni temayı
@@ -502,7 +532,7 @@ mod tests {
         let text =
             "# mine\n[appearance]\ntheme = \"system\" # os\ndark_theme = \"ink\"\n[x]\ny = 1\n";
         std::fs::write(root.0.join(FILE_NAME), text).expect("yazılamadı");
-        assert_eq!(write_theme(&root.0, "paper"), Ok(()));
+        assert_eq!(write_edit(&root.0, &paper()), Ok(()));
         assert_eq!(
             std::fs::read_to_string(root.0.join(FILE_NAME)).expect("okunamadı"),
             text.replace("\"system\"", "\"paper\"")
@@ -524,7 +554,7 @@ mod tests {
         std::fs::write(&target, "[terminal]\nscrollback = 7\n").expect("yazılamadı");
         let link = root.0.join(FILE_NAME);
         std::os::unix::fs::symlink(&target, &link).expect("bağ kurulamadı");
-        assert_eq!(write_theme(&root.0, "paper"), Ok(()));
+        assert_eq!(write_edit(&root.0, &paper()), Ok(()));
         assert!(
             std::fs::symlink_metadata(&link)
                 .expect("bağ yok")
@@ -544,7 +574,7 @@ mod tests {
         let root = TempRoot::new("write-unparseable");
         let text = "[appearance\ntheme = \"ink\"\n";
         std::fs::write(root.0.join(FILE_NAME), text).expect("yazılamadı");
-        let err = write_theme(&root.0, "paper").expect_err("yazılmamalı");
+        let err = write_edit(&root.0, &paper()).expect_err("yazılmamalı");
         assert!(
             err.starts_with("settings.toml: line 1: invalid TOML: ")
                 && err.ends_with("; the theme was not saved"),
@@ -558,7 +588,7 @@ mod tests {
         // Bölüm olmayan `appearance` da ezilmez.
         std::fs::write(root.0.join(FILE_NAME), "appearance = 1\n").expect("yazılamadı");
         assert_eq!(
-            write_theme(&root.0, "paper"),
+            write_edit(&root.0, &paper()),
             Err("settings.toml: line 1: `appearance` must be a section, found an integer; the theme was not saved".to_owned())
         );
 
@@ -567,7 +597,7 @@ mod tests {
         let moved = root.0.join("moved.toml");
         std::os::unix::fs::symlink(&moved, root.0.join(FILE_NAME)).expect("bağ kurulamadı");
         assert_eq!(
-            write_theme(&root.0, "paper"),
+            write_edit(&root.0, &paper()),
             Err("settings.toml could not be read: symbolic link points to a missing file; the theme was not saved".to_owned())
         );
         assert!(!moved.exists(), "bağın hedefi yaratıldı");
@@ -578,7 +608,7 @@ mod tests {
         // Dizin de dosya da yok: "Settings…"ın yolu, üstüne anahtar.
         let root = TempRoot::new("write-missing");
         let config = root.0.join("nested").join("bateri");
-        assert_eq!(write_theme(&config, "paper"), Ok(()));
+        assert_eq!(write_edit(&config, &paper()), Ok(()));
         assert_eq!(
             std::fs::read_to_string(config.join(FILE_NAME)).expect("okunamadı"),
             // Satır başıyla: şablonun yorumu da `theme = "system"` diyor ve

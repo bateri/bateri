@@ -507,9 +507,11 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   sözcükleriyle yazılı ve taşımak mesajları tek turda değiştirirdi. Ondalık
   tarafın ikizi `ranged_float` da aynı sette doğdu ve `line_height` ona
   **taşındı**; `font_size` tek uçlu olduğu için kaldı.)*
-  Dördüncü anahtar altıncı kopyayı doğurur. Çare bir yardımcı
-  (`(anahtar, &[(dizge, değer)], varsayılan)`), yeri bir sonraki ayar seti —
-  yeni anahtar eklemeden yapılırsa hiçbir davranış değişmez.
+  **Madde 029 phase-1'de kapandı:** her dizge enum'u tek bir `NAMES`
+  tablosu taşıyor, `name()` ve ayrıştırıcı (`named_enum`, `osc52` dahil)
+  ondan okuyor, elle yazılmış kol kalmadı. Tanı metinleri bayt bayt aynı —
+  yardımcının kurduğu cümle beş kopyanınkiyle zaten özdeşti (bekçisi mevcut
+  tanı sınamaları). Tablolar ayar penceresinin seçeneklerini de veriyor.
 - **Logger yok.** `tracing` bağlanmadı; yoksayılan olaylar (başlık, zil, pano)
   ve alacritty'nin `log` satırları **sessizce** düşüyor. Hata ayıklamayı
   körleştiriyor, o yüzden erken yamanmalı. 005 doğal adayıydı — ölçüm

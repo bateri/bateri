@@ -40,3 +40,8 @@ pub use link::{DisplayLink, Layout, Origin, Waker};
 pub use renderer::{CellMetrics, FontNotice, Renderer};
 pub use stats::{MIN_SAMPLES, Samples, Stats};
 pub use surface::Surface;
+
+/// Ayar penceresinin Font listesi: eşaralıklı aileler, `bt-atlas`'ın
+/// zincirinin uyarısız açtıkları. Yeniden ihraç, çünkü `bt-shell`
+/// `bt-atlas`'ı görmüyor ([`FontNotice`] emsali).
+pub use bt_atlas::monospaced_families;

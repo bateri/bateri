@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    CursorMotion, ReduceMotion, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, ShellIntegration,
-    SmoothScroll, Teardown, Theme,
+    CursorMotion, ReduceMotion, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit,
+    ShellIntegration, SmoothScroll, Teardown, Theme,
 };
 use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Stats};
 use dispatch2::DispatchQueue;
@@ -1926,7 +1926,7 @@ impl AppDelegate {
     }
 
     /// View ▸ Theme ▸'nin seçimi: `theme`'i dosyaya yazar
-    /// ([`settings::write_theme`]) ve **dosyayı okuyan yoldan** uygular
+    /// ([`settings::write_edit`]) ve **dosyayı okuyan yoldan** uygular
     /// ([`AppDelegate::reload_settings`]) — menünün kendi uygulama yolu yok,
     /// ekrana giden tek zincir dosyadan geçiyor.
     ///
@@ -1943,7 +1943,7 @@ impl AppDelegate {
         else {
             return;
         };
-        match settings::write_theme(&root, name) {
+        match settings::write_edit(&root, &SettingsEdit::Theme(name.to_owned())) {
             Ok(()) => {
                 self.post_notices(Source::Write, Vec::new());
                 self.reload_settings();

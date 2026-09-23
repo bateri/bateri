@@ -68,10 +68,36 @@ _Requirements: R1, R1.1, R1.2, R2, R3_
 
 ## Checklist
 
-- [ ] Yazılış tabloları + `pub` aralıklar; ayrıştırıcı tablodan okuyor
-- [ ] `SettingsEdit` + `with_edit`; `with_theme` sarmalayıcı
-- [ ] `write_edit`; menü yolu ona geçti
-- [ ] `monospaced_families` + ihraç; `CTFontManager` bayrağı gerekçeli
-- [ ] Test: varyant başına round-trip, tablo ↔ ayrıştırıcı, aile listesi
-- [ ] `docs/YOL-HARITASI.md` → "Ayar ayrıştırmasının beş kopyası" borcu: `name()` ↔ kol eşleşmesinin kapandığı, kalan yarısı (kopya ayrıştırıcı gövdeleri) varsa o yazılır
-- [ ] Doğrulama geçti (`make hepsi`; `Cargo.lock` değişmedi)
+- [x] Yazılış tabloları + `pub` aralıklar; ayrıştırıcı tablodan okuyor
+- [x] `SettingsEdit` + `with_edit`; `with_theme` sarmalayıcı
+- [x] `write_edit`; menü yolu ona geçti
+- [x] `monospaced_families` + ihraç; ~~`CTFontManager` bayrağı gerekçeli~~ bayrak gerekmedi (Uygulama Notları)
+- [x] Test: varyant başına round-trip, tablo ↔ ayrıştırıcı, aile listesi
+- [x] `docs/YOL-HARITASI.md` → "Ayar ayrıştırmasının beş kopyası" borcu: `name()` ↔ kol eşleşmesinin kapandığı, kalan yarısı (kopya ayrıştırıcı gövdeleri) varsa o yazılır
+- [x] Doğrulama geçti (`make hepsi`; `Cargo.lock` değişmedi)
+
+## Uygulama Notları
+
+- **Borcun iki yarısı da kapandı.** Elle yazılmış yedi ayrıştırıcı
+  (`caret_shape`, `cursor_blink`, `cursor_motion`, `reduce_motion`,
+  `smooth_scroll`, `shell_integration`, `osc52`) silindi, hepsi `named_enum` +
+  `NAMES`: yardımcının kurduğu cümle onlarınkiyle zaten bayt bayt aynıydı
+  (mevcut tanı sınamaları dokunulmadan yeşil). `named_enum`'un
+  `fallback_name` parametresi düştü, "using …" de tablodan (`name_in`).
+- **Aile listesi `CTFontManager` ile değil, CoreText'in eşleştirmesiyle.**
+  Her aileyi açıp sormak bütün aileleri açmak demekti; yerine `TraitMonoSpace`
+  bitli bir tanımlayıcının eşleşmeleri aday veriyor, son süzgeç yine
+  `open` + `same_family` + `is_monospaced` (ölçüt tek yerde). Bu makinede iki
+  yolun listesi aynı çıktı (5 aile). Gereken feature'lar
+  (`CTFontDescriptor`'ın CF'leri) zaten açık, yani `Cargo.toml`'a dokunulmadı.
+  Not: bu ortamda sınama sürecindeki **ilk** CoreText çağrısı ~25 s sürüyor
+  (mevcut `bt-atlas` sınamaları da öyle; aynı çağrı yerel bir Swift
+  ikilisinde anında) — bu yolun maliyeti değil.
+- **Tanının "must be …" kısmı değerin türünden:** bölüm olan bir anahtara
+  yazma reddi `a string` / `an integer` / `a number` diyor; tema için metin
+  eskisiyle aynı.
+- **`write_edit`'in iletisi neyin kaydedilmediğini adlandırıyor:** `Theme`
+  için "the theme", öteki anahtarlar için "the setting" — menünün iletisi
+  aynı kaldı, sarmalayıcı gerekmedi.
+- `FontSize` her zaman ondalık yazılıyor (`size = 14.5`, `13.0`); şablondaki
+  `size = 13` tamsayısı okunurken aynı değer.
