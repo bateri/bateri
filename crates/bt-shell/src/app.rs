@@ -33,6 +33,7 @@ use objc2_foundation::{
 };
 
 use crate::notices::{Notices, Source};
+use crate::settings_window::SettingsWindow;
 use crate::watch::{Notify, Watch};
 use crate::window::{self, CloseScope, TerminalWindow};
 use crate::{Options, Run, Workload};
@@ -676,6 +677,11 @@ pub(crate) struct Ivars {
     /// açık/koyu bitine bağlı; bit aynıysa tema dosyasını yeniden okumanın ve
     /// bütün pencereleri yeniden boyamanın sebebi yok.
     appearance_dark: Cell<Option<bool>>,
+    /// Ayar penceresi (bateri ▸ Settings…): ilk açılışta doğuyor, kapatınca
+    /// gizleniyor ve süreç boyunca yaşıyor (029 Karar 4). Terminal penceresi
+    /// **değil** — [`Ivars::windows`]'a girmiyor, yani ⌘Q'nun onayı, ayar
+    /// yayılımı ve sekme işleri onu görmüyor. Süreli koşuda hiç doğmuyor.
+    settings_window: RefCell<Option<Retained<SettingsWindow>>>,
 }
 
 define_class!(
@@ -951,10 +957,11 @@ define_class!(
             self.open_from_key_window(true);
         }
 
-        /// bateri ▸ Settings… (Cmd-,), hedefsiz menü öğesinden (`menu`).
+        /// bateri ▸ Settings… (Cmd-,), hedefsiz menü öğesinden (`menu`):
+        /// ayar penceresini açar ya da öne getirir.
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
-            self.edit_settings();
+            self.show_settings_window();
         }
 
         /// View ▸ Theme ▸ {ad}: öğenin başlığı temanın adı
@@ -1491,6 +1498,7 @@ impl AppDelegate {
             windows: RefCell::new(Vec::new()),
             next_window_id: Cell::new(0),
             appearance_dark: Cell::new(None),
+            settings_window: RefCell::new(None),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
@@ -1881,9 +1889,13 @@ impl AppDelegate {
                 window.set_theme(theme);
             }
         }
+        // Dosya dışarıdan da değişmiş olabilir (vnode): açık ayar penceresi
+        // her koşuda dosyanın hâlini gösterir.
+        self.refresh_settings_window();
     }
 
-    /// bateri ▸ Settings…: dosya yoksa şablonla yaratır
+    /// Ayar penceresinin "Open settings.toml" düğmesi (029 Karar 8; 029'a
+    /// kadar bateri ▸ Settings…'ın kendisiydi): dosya yoksa şablonla yaratır
     /// ([`settings::create_if_missing`]), izlemeyi yeniden kurup okur ve
     /// dosyayı editörde açar ([`open_in_editor`]).
     ///
@@ -1897,7 +1909,7 @@ impl AppDelegate {
     ///   okuma yuvayı dosyanın hâline göre yeniden yazdığı için önce
     ///   yazılsaydı hemen silinirdi. Sonraki kayıt ya da "Settings…" yuvayı
     ///   yeniden kurar.
-    fn edit_settings(&self) {
+    pub(crate) fn edit_settings(&self) {
         let Inputs::User {
             config_root: Some(root),
         } = self.inputs()
@@ -1937,19 +1949,72 @@ impl AppDelegate {
     /// Hata **yazma yuvasına**; başarılı yazma yuvayı boşaltır. Süreli koşu
     /// yazmaz ([`Inputs::Hermetic`]); menü o dalda zaten dolmuyor.
     fn save_theme(&self, name: &str) {
+        self.save_edit(&SettingsEdit::Theme(name.to_owned()));
+    }
+
+    /// Tek anahtarın yeni değerini dosyaya yazar ve dosyayı okuyan yoldan
+    /// uygular — View ▸ Theme ▸'nin ve ayar penceresinin **ortak** yolu
+    /// ([`AppDelegate::save_theme`]'in gerekçeleri aynen). Yazma hatasında
+    /// pencere dosyanın değerine döner: kontrolün gösterdiği yazılamayan bir
+    /// değer olmasın.
+    pub(crate) fn save_edit(&self, edit: &SettingsEdit) {
         let Inputs::User {
             config_root: Some(root),
         } = self.inputs()
         else {
             return;
         };
-        match settings::write_edit(&root, &SettingsEdit::Theme(name.to_owned())) {
+        match settings::write_edit(&root, edit) {
             Ok(()) => {
                 self.post_notices(Source::Write, Vec::new());
                 self.reload_settings();
             }
-            Err(message) => self.post_notices(Source::Write, vec![message]),
+            Err(message) => {
+                self.post_notices(Source::Write, vec![message]);
+                self.refresh_settings_window();
+            }
         }
+    }
+
+    /// bateri ▸ Settings…: ayar penceresini doğurur (ilk seferde), etkin
+    /// ayarla doldurur ve öne getirir. Süreli koşuda ve ev dizini
+    /// çözülemeyince **hiçbir şey** yapmaz ([`Inputs::Hermetic`]): yazacağı
+    /// bir dosya yok, `make duman` pencereyi hiç görmüyor.
+    fn show_settings_window(&self) {
+        let Inputs::User {
+            config_root: Some(_),
+        } = self.inputs()
+        else {
+            return;
+        };
+        let window = self
+            .ivars()
+            .settings_window
+            .borrow_mut()
+            .get_or_insert_with(|| SettingsWindow::new(self.mtm()))
+            .clone();
+        self.refresh_settings_window();
+        window.show();
+    }
+
+    /// Açık (ya da gizli) ayar penceresini etkin ayarla doldurur; pencere
+    /// hiç doğmadıysa no-op. Ayar ödüncü pencereye girmeden **kopyalanıyor**:
+    /// bu yol bir kontrolün eyleminden (yaz → `reload_settings` → buraya)
+    /// koşuyor ve pencere geri dönüp delegate'e uzanabiliyor.
+    pub(crate) fn refresh_settings_window(&self) {
+        let Some(window) = self.ivars().settings_window.borrow().clone() else {
+            return;
+        };
+        let Inputs::User {
+            config_root: Some(root),
+        } = self.inputs()
+        else {
+            return;
+        };
+        let settings = self.ivars().settings.borrow().clone();
+        let embedded: Vec<&str> = Theme::embedded_names().collect();
+        let user = settings::user_theme_names(&root);
+        window.refresh(&settings, &embedded, &user);
     }
 
     /// Ayar dizininin kaynaklarını yeniden kurar. Yenisi eskisi düşmeden

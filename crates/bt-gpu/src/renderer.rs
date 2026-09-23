@@ -58,6 +58,24 @@ pub enum FontNotice {
     NotMonospaced { family: String },
 }
 
+impl From<FontIssue> for FontNotice {
+    fn from(issue: FontIssue) -> Self {
+        match issue {
+            FontIssue::FamilyNotFound { requested, using } => {
+                FontNotice::FamilyNotFound { requested, using }
+            }
+            FontIssue::NotMonospaced { family } => FontNotice::NotMonospaced { family },
+        }
+    }
+}
+
+/// Ayar penceresinin sorusu: `family` açılsa ne söylenirdi — listede
+/// olmayan ailenin durumu ([`bt_atlas::family_issue`]). Renderer'sız, çünkü
+/// pencere terminal penceresi yokken de açık olabiliyor.
+pub fn family_notice(family: &str) -> Option<FontNotice> {
+    bt_atlas::family_issue(family).map(FontNotice::from)
+}
+
 /// Atlas ve onun dokusu — **tek yerde**.
 ///
 /// Ayrı iki alan olsalardı [`Atlas::ensure`]'ün `true`'su ("atlası yeniden
@@ -462,15 +480,7 @@ impl Renderer {
     pub fn font_notice(&self) -> Option<FontNotice> {
         let atlas = self.atlas.borrow();
         let issue = atlas.as_ref()?.atlas.font_issue()?;
-        Some(match issue {
-            FontIssue::FamilyNotFound { requested, using } => FontNotice::FamilyNotFound {
-                requested: requested.clone(),
-                using: using.clone(),
-            },
-            FontIssue::NotMonospaced { family } => FontNotice::NotMonospaced {
-                family: family.clone(),
-            },
-        })
+        Some(FontNotice::from(issue.clone()))
     }
 
     /// Atlası istenen fonta ve `scale` ölçeğine getirir ve metriğini verir.

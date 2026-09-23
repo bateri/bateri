@@ -63,10 +63,28 @@ objc2-foundation = { workspace = true, features = [
 # açıyor. Yeni crate değil ve sürüm oynamıyor; `Cargo.lock`'ta bu paketin ve
 # `bt-shell`'in listelerine birer `block2` satırı. Karar kaydı
 # .tasks/028-kapatma-onayi/discussion.md → Karar 2.
+#
+# Ayar penceresi (029 phase-2): kenar çubuğu (`NSSplitViewController`,
+# `NSSplitViewItem`, `NSSplitView`, `NSViewController`, `NSTableView`,
+# `NSTableColumn`, `NSTableCellView`, `NSScrollView`, `NSClipView`,
+# `NSImage`, `NSImageView`, `NSTableHeaderView` — başlıksız tablo,
+# `NSUserInterfaceItemIdentification` — sütunun kimliği), satırlar
+# (`NSGridView`, `NSStackView`, `NSTextField`, `NSPopUpButton`, `NSSlider`,
+# `NSStepper`, `NSSwitch`, `NSFont`, `NSFontDescriptor` — değer etiketinin
+# sabit genişlikli rakamları, `NSText`) ve yerleşim (`NSLayoutConstraint`, `NSLayoutAnchor`,
+# `NSLayoutGuide` — başlık çubuğunun altı, `NSUserInterfaceLayout`). Hepsi `objc2-app-kit`'in yalnız başlık açan
+# bayrakları — bağımlılık olarak yalnız `objc2-foundation`'ın başlıklarını ve
+# grafta zaten olan `bitflags`'i istiyorlar; yeni crate değil, `Cargo.lock`
+# oynamadı. Karar kaydı .tasks/029-ayarlar-penceresi/discussion.md → Karar 4.
 objc2-app-kit = { workspace = true, features = [
-    "NSAccessibility", "NSAlert", "NSAppearance", "NSButton", "NSCell", "NSColor",
-    "NSControl", "NSDragging", "NSMenu", "NSMenuItem", "NSTextInputClient",
-    "NSWindowTabGroup", "NSWorkspace", "block2",
+    "NSAccessibility", "NSAlert", "NSAppearance", "NSButton", "NSCell", "NSClipView",
+    "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
+    "NSImageView", "NSLayoutAnchor", "NSLayoutConstraint", "NSLayoutGuide", "NSMenu", "NSMenuItem",
+    "NSPopUpButton", "NSScrollView", "NSSlider", "NSSplitView", "NSSplitViewController",
+    "NSSplitViewItem", "NSStackView", "NSStepper", "NSSwitch", "NSTableCellView",
+    "NSTableColumn", "NSTableHeaderView", "NSTableView", "NSText", "NSTextField",
+    "NSTextInputClient", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSViewController", "NSWindowTabGroup", "NSWorkspace",
+    "block2",
 ] }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.

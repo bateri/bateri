@@ -382,6 +382,16 @@ pub fn monospaced_families() -> Vec<String> {
     names
 }
 
+/// Zincirin `family`'yi açarken söyleyeceği şey — ayar penceresinin Font
+/// listesinde **olmayan** bir ailenin durumu (`— not found` / `— not
+/// monospaced`, 029 Karar 3). Soru [`open_chain`]'in ta kendisi, yani
+/// pencerenin dediği ile alt başlığın dediği ayrışamaz.
+pub fn family_issue(family: &str) -> Option<FontIssue> {
+    // Punto önemsiz: aile ve eşaralıklılık puntodan bağımsız.
+    const PROBE_SIZE: CGFloat = 12.0;
+    open_chain(Some(family), PROBE_SIZE).1
+}
+
 /// CoreText'in bildirdiği aile adı istenen ad mı — **harf duyarsız**.
 ///
 /// CoreText adı harf duyarsız buluyor (`"menlo"` → `Menlo`, ölçüldü) ama

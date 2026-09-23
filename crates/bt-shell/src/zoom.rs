@@ -21,8 +21,13 @@ const STEP: f64 = 1.0;
 /// Ayardaki `size` bu aralığa bağlı değil (kırpma orada da sessiz): aralığın
 /// dışındaki bir puntodan içeri doğru basış çalışır, dışarı doğru olan
 /// çalışmaz.
-const MIN_SIZE: f64 = 4.0;
-const MAX_SIZE: f64 = 72.0;
+///
+/// İkinci tüketici ayar penceresinin Size satırı (`settings_window`): stepper
+/// ve alanın kabul ettiği aralık bu, ikinci bir sayı uydurulmadı (029 Karar
+/// 2). Dosyada aralığın dışında bir değer varsa alan onu olduğu gibi
+/// gösteriyor.
+pub(crate) const MIN_SIZE: f64 = 4.0;
+pub(crate) const MAX_SIZE: f64 = 72.0;
 
 /// Ayardaki puntonun üstüne kaç adım çıkıldı (eksi: indi). Adım sayısı,
 /// punto değil: tekrarlanan toplama ondalık birikim bırakmasın.

@@ -2,7 +2,9 @@
 //! Window, New Tab, Close Tab, Close Window), Edit (Copy, Paste), View (Theme
 //! ▸, Bigger, Smaller, Actual Size) ve Window (Minimize, Zoom, sekme geçişi,
 //! Select Tab ▸, Move Tab to New Window, Merge All Windows, Bring All to
-//! Front).
+//! Front). Settings… (⌘,) ayar penceresini açıyor (`settings_window`; 029'a
+//! kadar dosyayı editörde açıyordu, o iş artık pencerenin "Open
+//! settings.toml" düğmesinde); öğe ve kısayol aynı.
 //!
 //! **Hiçbir öğenin hedefi yok.** Eylem responder zincirinden geçip onu
 //! tanımlayan ilk nesneye varıyor: `copy:`/`paste:` first responder

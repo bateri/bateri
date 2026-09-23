@@ -41,7 +41,7 @@ mod raster;
 use std::collections::HashMap;
 
 use font::Faces;
-pub use font::{Face, FontIssue, Metrics, SizeClass, monospaced_families};
+pub use font::{Face, FontIssue, Metrics, SizeClass, family_issue, monospaced_families};
 use objc2_core_foundation::{CFRetained, CGFloat};
 use objc2_core_text::CTFont;
 use raster::DrawResult;

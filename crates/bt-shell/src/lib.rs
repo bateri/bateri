@@ -13,7 +13,8 @@
 //! tablosundan okuyan da (`jobs`). Ayar dosyasını okuyan (`settings`),
 //! kayıt anında yeniden okuyabilsin diye izleyen (`watch`) ve tanısını
 //! pencere alt başlığında gösteren (`notices`) de burası; ayrıştırma ve fark
-//! `bt-core`'da. Sistemin açık/koyu görünümünü okuyup temayı seçen de
+//! `bt-core`'da; ayar penceresi (`settings_window`, Settings…) dosyaya o
+//! yazma yolundan yazar. Sistemin açık/koyu görünümünü okuyup temayı seçen de
 //! (`app`, `NSApp.effectiveAppearance`'ın KVO'suyla) ve pencere kromunu
 //! temaya boyayan (`window`). Ana menü (`menu`) uygulama, Shell,
 //! Edit, View ve Window menüsü; öğeleri hedefsiz eylem. View'da Theme ▸ seçimi
@@ -32,6 +33,7 @@ mod menu;
 mod notices;
 mod quote;
 mod settings;
+mod settings_window;
 mod view;
 mod watch;
 mod window;
