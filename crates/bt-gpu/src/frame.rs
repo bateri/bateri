@@ -1707,7 +1707,12 @@ mod tests {
             // Doldurmanın çizimi phase-3'ün işi (017); bu modül onu henüz
             // tüketmiyor.
             fill: 0,
+            // Kesirli kaydırma (027) de bu listeyi ilgilendirmiyor: tam
+            // satırda, tepe satırı yok.
+            top_row: 0,
             scrolled: 0,
+            scroll_frac: 0.0,
+            scroll_generation: 0,
             rows: 1,
         }
     }
