@@ -2038,6 +2038,11 @@ impl DisplayLink {
         // çelişen bir şey yapmıyor.
         iv.cols.set(cols);
         iv.geometry_changed.set(true);
+        // Yazım efektleri de bitiyor (`Motion`'ın geometri snap'inin
+        // kardeşi): sütun sayısı ya da hücre değişince dock'un pencerelemesi
+        // yeni bir ayna gelmeden kayabiliyor ve uçuştakiler eski sütunlarında
+        // başka bir harfin üstünde kalırdı.
+        iv.glyph_fx.borrow_mut().finish();
         self.request_frame();
     }
 }

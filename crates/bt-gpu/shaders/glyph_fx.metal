@@ -30,16 +30,6 @@ static_assert(__builtin_offsetof(FxInstance, uv0) == 8, "uv0@8");
 static_assert(__builtin_offsetof(FxInstance, rgba) == 16, "rgba@16");
 static_assert(__builtin_offsetof(FxInstance, fx) == 32, "fx@32");
 
-// cell.metal'deki `CursorBlock`'un aynısı: her .metal ayrı derleniyor ve
-// her kopya KENDİ assert'iyle Rust'a bağlı.
-struct CursorBlock {
-    float4 rect;
-    float4 rgba;
-};
-
-static_assert(sizeof(CursorBlock) == 32, "CursorBlock 32 bayt olmalı");
-static_assert(__builtin_offsetof(CursorBlock, rgba) == 16, "rgba@16");
-
 // Efekt kimlikleri — Rust karşılığı `glyph_fx::Effect::id` (`Keypress` /
 // `Erase`). Gelişler 1..16, hayaletler 16..32: girdinin türü kimlikten
 // okunuyor. Gelişlerin sırası `discussion.md` → Karar 6'nın tablosu.
@@ -53,15 +43,23 @@ constant uint FX_DROP = 7;
 constant uint FX_INK = 8;
 constant uint FX_SQUEEZE = 9;
 constant uint FX_RECEDE = 16;
+constant uint FX_IRIS = 17;
+constant uint FX_UNDERTOW = 18;
+constant uint FX_GHOST_ECHO = 19;
+constant uint FX_BLEED = 20;
+constant uint FX_UNRAVEL = 21;
+constant uint FX_SUBLIME = 22;
+constant uint FX_SHATTER = 23;
 constant uint FX_GHOST_FIRST = 16;
 
-// Dörtlünün her yana şişme payı, hücre ölçüsü cinsinden. En geniş taşmayı
-// `echo`'nun kopyası yapıyor: geniş glyph'in iki hücrelik kutusu ECHO_SCALE
-// kadar büyüyünce her yarının dörtlüsü kendi hücresinden (ECHO_SCALE - 1)
-// hücre taşıyor, yani pay ≥ 0.8. Pay aynı zamanda geniş glyph'in öteki
-// yarısının yeri: sol yarının dörtlüsü sağ yarının hücresini de örtmeli ki
-// kutunun merkezine göre dönüşen mürekkep oraya düşebilsin.
-constant float FX_PAD = 1.0;
+// Dörtlünün her yana şişme payı, hücre ölçüsü cinsinden. En uzak noktalar:
+// yatayda `echo`'nun kopyası (geniş glyph'in iki hücrelik kutusu ECHO_SCALE
+// kadar büyüyünce her yarının dörtlüsünden 1.2 hücre taşıyor), dikeyde
+// `shatter`'ın düşen parçası (SHATTER_FALL + parçanın yarısı) ve `undertow`.
+// Pay aynı zamanda geniş glyph'in öteki yarısının yeri: sol yarının dörtlüsü
+// sağ yarının hücresini de örtmeli ki kutunun merkezine göre dönüşen
+// mürekkep oraya düşebilsin.
+constant float FX_PAD = 1.5;
 
 // **Genlikler tasarım sabiti**, ölçülmüş değil ve hepsi hücre oranında —
 // punto büyüyünce birlikte büyüyor. Offscreen karelerde gözle seçildi
@@ -70,12 +68,12 @@ constant float FX_PAD = 1.0;
 // `rise`: glyph'in doğduğu yer, hücre yüksekliğinin bu kadarı aşağısı.
 // "Biraz altından": taban çizgisinin altına inen bir harf bir satır aşağıdan
 // geliyor gibi okunurdu.
-constant float RISE_DISTANCE = 0.3;
+constant float RISE_DISTANCE = 0.4;
 
 // `pop`: doğduğu ölçek ve yaylanmanın sertliği. Sertlik kapalı formun
 // (`ease_out_back`) tek sabiti; 2.2 tepe ölçeği ≈ 1.08 veriyor — "bir an
 // biraz büyür", sıçrar değil.
-constant float POP_START = 0.5;
+constant float POP_START = 0.3;
 constant float POP_BACK = 2.2;
 
 // `extrude`: doğduğu yatay ölçek. Sıfır değil, çünkü sıfır ölçekte ters
@@ -84,13 +82,13 @@ constant float EXTRUDE_START = 0.05;
 
 // `echo`: kopyanın vardığı ölçek ve başladığı saydamlık. Kopya "soluk" —
 // glyph'in kendisiyle yarışmamalı.
-constant float ECHO_SCALE = 1.8;
-constant float ECHO_ALPHA = 0.4;
+constant float ECHO_SCALE = 2.2;
+constant float ECHO_ALPHA = 0.7;
 
 // `drop`: glyph'in düştüğü yükseklik (hücre yüksekliğinin oranı) ve sekişin
 // sertliği (`ease_out_back`; 1.7 hedefi yüksekliğin ~%10'u kadar aşıyor —
 // "hafifçe seker").
-constant float DROP_HEIGHT = 0.45;
+constant float DROP_HEIGHT = 0.5;
 constant float DROP_BACK = 1.7;
 
 // `ink`: mürekkebin ön cephesinin yumuşaklığı, "derinlik" biriminde (0..1).
@@ -99,14 +97,69 @@ constant float INK_SOFTNESS = 0.35;
 
 // `squeeze`: doğduğu oran (yatayda dar, dikeyde uzun) ve esnemenin
 // sertliği — `pop`'la aynı kapalı form, daha yumuşak.
-constant float SQUEEZE_X = 0.55;
-constant float SQUEEZE_Y = 1.3;
+constant float SQUEEZE_X = 0.4;
+constant float SQUEEZE_Y = 1.45;
 constant float SQUEEZE_BACK = 1.5;
 
 // `recede`'in vardığı ölçek — tasarım sabiti. Glyph merkezine doğru bu
 // orana küçülürken söner; sıfıra inseydi son karelerde bir noktaya büzülen
 // mürekkep "çekildi" değil "yutuldu" okunurdu.
-constant float RECEDE_SCALE = 0.6;
+constant float RECEDE_SCALE = 0.3;
+
+// Hayaletlerin genlikleri de hücre oranında ve çeyrek saniyelik bir gidişte
+// gözün seçebileceği büyüklükte seçildi (kullanıcı: "animasyonlar hiç belli
+// olmuyor"); en uzak nokta FX_PAD'in içinde.
+
+// `iris`: diyaframın açık hâlinin dikey çapı, hücre yüksekliğinin oranı —
+// glyph'lerin mürekkebi hücrenin üst ve alt boşluğuna uzanmıyor.
+constant float IRIS_REACH = 0.7;
+
+// `undertow`: glyph'in çekildiği yer — sola (caret'e; Backspace'ten sonra
+// caret tam hayaletin solunda) ve aşağı, hücre oranında.
+constant float UNDERTOW_X = 0.8;
+constant float UNDERTOW_Y = 0.7;
+// Çekilirken vardığı ölçek: akıntı glyph'i uzaklaştırıyor, küçülme o
+// uzaklığın hissi.
+constant float UNDERTOW_SCALE = 0.75;
+
+// `echo` (hayalet): glyph'in dağılırken vardığı ölçek. Gelişin kopyasından
+// (ECHO_SCALE) küçük: burada dağılan glyph'in kendisi, soluk bir kopya değil.
+constant float ECHO_OUT_SCALE = 1.8;
+
+// `bleed`: mürekkebin yayıldığı yarıçap, hücre genişliğinin oranı. Yarıçap
+// büyüdükçe çizgi yayılıp inceliyor (BLUR_TAPS örnekli disk, `spread`).
+constant float BLEED_RADIUS = 0.3;
+
+// `unravel`: bir hücre yüksekliğindeki şerit sayısı, bir şeridin yana
+// kayması (hücre genişliğinin oranı) ve gecikmelerin yayıldığı pay — son
+// şerit bu kadar geç başlıyor, yani her şeridin kendi yolu `1 - UNRAVEL_STAGGER`
+// sürüyor.
+constant float UNRAVEL_STRIPS = 5.0;
+constant float UNRAVEL_SHIFT = 0.6;
+constant float UNRAVEL_STAGGER = 0.45;
+
+// `sublime`: yükselme (hücre yüksekliğinin oranı) ve açılma — yatayda
+// dikeyden çok, buhar yana yayılır.
+constant float SUBLIME_RISE = 0.5;
+constant float SUBLIME_OPEN_X = 1.4;
+constant float SUBLIME_OPEN_Y = 1.1;
+// Buharın dağılması: `bleed`'in yayılması, daha hafifi (hücre genişliğinin
+// oranı).
+constant float SUBLIME_BLUR = 0.12;
+
+// `shatter`: parçaların ızgarası (hücre başına sütun × satır; geniş glyph'in
+// kutusu SHATTER_COLS_WIDE sütun — tek sayı, yani ortadaki parça dikişin
+// üstünde ve iki yarı tek kutu gibi kırılıyor), dağılma (hücre genişliğinin
+// oranı, zamanla doğrusal), düşüş (hücre yüksekliğinin oranı, zamanın
+// karesiyle — yerçekimi),
+// en çok dönme (radyan) ve yönün sapması (radyan).
+constant float SHATTER_COLS = 2.0;
+constant float SHATTER_COLS_WIDE = 3.0;
+constant float SHATTER_ROWS = 2.0;
+constant float SHATTER_SPREAD = 0.5;
+constant float SHATTER_FALL = 1.2;
+constant float SHATTER_SPIN = 0.8;
+constant float SHATTER_JITTER = 0.7;
 
 struct FxOut {
     float4 position [[position]];
@@ -137,10 +190,13 @@ vertex FxOut glyph_fx_vertex(uint vid [[vertex_id]],
     return o;
 }
 
-// Çıkışta yavaşlayan kübik — Karar 6'nın tek eğrisi.
+// Çıkışta yavaşlayan eğri — Karar 6'nın tek eğrisi, **karesel**. Kübik
+// değişimi başa yığıyordu (yarısı sürenin beşte birinde bitiyordu) ve görünür
+// kısım birkaç kareye sıkışıyordu: kullanıcı "animasyonlar hiç belli
+// olmuyor" dedi. Karesel yarıyı sürenin üçte birine bırakıyor.
 static float ease_out(float t) {
     float u = 1.0 - t;
-    return 1.0 - u * u * u;
+    return 1.0 - u * u;
 }
 
 // Hedefi bir an aşıp geri dönen eğri — `pop`, `drop` ve `squeeze`'in
@@ -153,23 +209,105 @@ static float ease_out_back(float t, float back) {
 
 // Glyph'in bir noktadaki boyası: maske düzleminde ön plan rengi ve kapsama,
 // renk düzleminde dokunun kendisi. **Yuvanın dışı örneklenmiyor** ve kural
-// tek yerde: her örnekleme (ana glyph, `echo`'nun kopyası) buradan geçiyor.
-// Sınır yarı açık, statik yolun fragment merkezleriyle aynı: `g` hücrenin
-// içindeyse texel merkezine düşüyor.
-static float4 paint(float2 g, float2 uv0, float3 fg, bool colored,
+// tek yerde: her örnekleme (ana glyph, `echo`'nun kopyası, `spread`'in
+// diski, `shatter`'ın parçaları) buradan geçiyor. Sınır yarı açık, statik
+// yolun fragment merkezleriyle aynı: `g` hücrenin içindeyse texel merkezine
+// düşüyor.
+//
+// **`smooth` ölçekleyen ve döndüren dalların** (`pop`, `squeeze`, `recede`,
+// `sublime`, `shatter`…): `nearest` büyüyen ya da küçülen bir glyph'te her
+// karede başka texel'leri atlıyor ve kenar pürüzlü titriyordu (phase-4'ün
+// offscreen kareleri). Doğrusal örneklemenin dört texel'i **yuvanın içinde
+// kalıyor**: nokta texel merkezlerine kırpılıyor, yani ayak izi hiçbir zaman
+// komşu yuvaya — başka bir glyph'e — değmiyor (`clamp_to_edge` dokuyu
+// kırpar, yuvayı değil). Yalnız kayan dallar (`rise`, `drop`, `undertow`,
+// `unravel`) ve uçlar (`t = 0`, `t = 1`) `nearest`'te: harf keskin kalıyor ve
+// statik yolla bit bit aynı.
+static float4 paint(float2 g, float2 uv0, float3 fg, bool colored, bool smooth,
                     texture2d<float> mask, texture2d<float> color,
                     float2 cell_px, float2 uv_size) {
     if (any(g < 0.0) || any(g >= cell_px)) {
         return float4(0.0);
     }
-    float2 uv = uv0 + g / cell_px * uv_size;
     // `nearest`: cell.metal'deki gerekçe (yuvalar arasında pay yok).
-    constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
-    if (colored) {
-        // Renk düzlemi: `emoji_fragment`'in aynısı — renk dokudan.
-        return color.sample(s, uv);
+    constexpr sampler near(coord::normalized, filter::nearest, address::clamp_to_edge);
+    float2 texel = uv_size / cell_px;
+    if (!smooth) {
+        float2 uv = uv0 + g * texel;
+        if (colored) {
+            // Renk düzlemi: `emoji_fragment`'in aynısı — renk dokudan.
+            return color.sample(near, uv);
+        }
+        return float4(fg, mask.sample(near, uv).r);
     }
-    return float4(fg, mask.sample(s, uv).r);
+    float2 q = clamp(g, float2(0.5), cell_px - 0.5);
+    if (colored) {
+        // Renk düzleminde donanımın süzgeci kullanılamıyor: baytlar düz alfa
+        // (`raster::unpremultiply`) ve saydam texel'in rengi karışıma girip
+        // kenarı karartırdı. Dört texel elle, ön çarpımlı karışıyor.
+        float2 p = q - 0.5;
+        float2 i0 = floor(p);
+        float2 f = p - i0;
+        float2 i1 = min(i0 + 1.0, cell_px - 1.0);
+        float4 a = color.sample(near, uv0 + (float2(i0.x, i0.y) + 0.5) * texel);
+        float4 b = color.sample(near, uv0 + (float2(i1.x, i0.y) + 0.5) * texel);
+        float4 c = color.sample(near, uv0 + (float2(i0.x, i1.y) + 0.5) * texel);
+        float4 d = color.sample(near, uv0 + (float2(i1.x, i1.y) + 0.5) * texel);
+        a.rgb *= a.a;
+        b.rgb *= b.a;
+        c.rgb *= c.a;
+        d.rgb *= d.a;
+        float4 m = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        return m.a > 0.0 ? float4(m.rgb / m.a, m.a) : float4(0.0);
+    }
+    constexpr sampler lin(coord::normalized, filter::linear, address::clamp_to_edge);
+    return float4(fg, mask.sample(lin, uv0 + q * texel).r);
+}
+
+// Tam sayı karması — `shatter`'ın ve `unravel`'ın rastgelesi. `fract(sin)`
+// değil: GPU'nun `sin`'i büyük argümanda hassasiyet kaybediyor ve desen
+// cihaza göre kayardı; bu karma bit bit belirli.
+static uint hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+// `seed`'in `k`'ıncı rastgelesi, `[0, 1]`.
+static float rand01(uint seed, uint k) {
+    return float(hash(seed * 0x9e3779b9u + k) & 0xffffu) / 65535.0;
+}
+
+// `spread`'in örnek sayısı.
+constant int BLUR_TAPS = 16;
+
+// Noktanın `radius` yarıçaplı diskteki ortalama boyası — `bleed`'in yayılan
+// mürekkebi, `sublime`'ın buharı. Örnekler Vogel diski (altın açı), ızgara
+// değil: 3×3'lük bir ızgara büyük yarıçapta glyph'in dokuz ayrı kopyası
+// olarak görünüyordu. Ortalama ön çarpımlı; sonuç düz alfa.
+static float4 spread(float2 g, float radius, float2 uv0, float3 fg, bool colored,
+                     texture2d<float> mask, texture2d<float> color,
+                     float2 cell_px, float2 uv_size) {
+    float4 sum = float4(0.0);
+    for (int i = 0; i < BLUR_TAPS; i++) {
+        float r = radius * sqrt((float(i) + 0.5) / float(BLUR_TAPS));
+        float a = float(i) * 2.39996323;
+        float4 s = paint(g + r * float2(cos(a), sin(a)), uv0, fg, colored, true,
+                         mask, color, cell_px, uv_size);
+        sum += float4(s.rgb * s.a, s.a);
+    }
+    sum /= float(BLUR_TAPS);
+    return sum.a > 0.0 ? float4(sum.rgb / sum.a, sum.a) : float4(0.0);
+}
+
+// Ön çarpımlı iki boyanın "üstte olan kazanır" birleşimi; sonuç düz alfa.
+static float4 over(float4 top, float4 under) {
+    float a = top.a + under.a * (1.0 - top.a);
+    float3 rgb = top.rgb * top.a + under.rgb * under.a * (1.0 - top.a);
+    return a > 0.0 ? float4(rgb / a, a) : float4(0.0);
 }
 
 // `ink`'in "derinliği": noktanın 3×3 komşuluğunun ortalama kapsaması. Çizginin
@@ -189,10 +327,64 @@ static float ink_depth(float2 g, float2 uv0, texture2d<float> mask,
     return sum / 9.0;
 }
 
+// `shatter`'ın boyası: noktaya düşen parçaların en koyusu. Her parça kendi
+// merkezi etrafında dönüp kayıyor ve fragment parçaları gezip noktayı her
+// birinin durağan çerçevesine geri çeviriyor; nokta o parçanın dikdörtgeni
+// içine düşüyorsa isabet. **Parça sınırında kırpılıyor**: dikdörtgenin dışı o
+// parçaya ait değil — komşu parçanın mürekkebi kopup gidenle gitmemeli.
+// Üst üste binen parçalarda en koyusu kazanıyor, "ilk isabet" değil: boş
+// köşesi dolu bir parçanın üstüne binen parça onu örtmemeli.
+//
+// Parçaların ızgarası glyph'in KUTUSUNDA (`box_left`, genişlik `box_w`),
+// yarının hücresinde değil: geniş glyph'in iki yarısı tek kutu gibi kırılıyor
+// ve her yarı yalnız kendi yuvasına düşen isabeti boyuyor (`paint`).
+static float4 shatter_paint(float2 p, float t, float e, uint seed, float2 center,
+                            float box_left, float box_w, bool wide,
+                            float2 uv0, float3 fg, bool colored,
+                            texture2d<float> mask, texture2d<float> color,
+                            float2 cell_px, float2 uv_size) {
+    float cols = wide ? SHATTER_COLS_WIDE : SHATTER_COLS;
+    float2 tile = float2(box_w / cols, cell_px.y / SHATTER_ROWS);
+    float4 best = float4(0.0);
+    uint n = 0u;
+    for (float row = 0.0; row < SHATTER_ROWS; row += 1.0) {
+        for (float col = 0.0; col < cols; col += 1.0, n += 1u) {
+            float2 lo = float2(box_left, 0.0) + float2(col, row) * tile;
+            float2 mid = lo + tile * 0.5;
+            // Yön kutunun merkezinden dışarı, tohumdan bir sapmayla; ortadaki
+            // parçanın (merkezin üstündeki) yönü aşağı.
+            float2 away = mid - center;
+            float len = length(away);
+            float2 dir = len > 0.5 ? away / len : float2(0.0, 1.0);
+            float turn = (rand01(seed, n * 4u) - 0.5) * SHATTER_JITTER;
+            dir = float2(dir.x * cos(turn) - dir.y * sin(turn),
+                         dir.x * sin(turn) + dir.y * cos(turn));
+            float speed = mix(0.6, 1.0, rand01(seed, n * 4u + 1u));
+            // Balistik: dağılma zamanda doğrusal (ilk hız), düşüş karesel
+            // (yerçekimi) — yukarı savrulan parça tepe yapıp düşüyor.
+            float2 offset = dir * (SHATTER_SPREAD * cell_px.x * speed * t)
+                          + float2(0.0, SHATTER_FALL * cell_px.y * t * t);
+            float angle = (rand01(seed, n * 4u + 2u) - 0.5) * 2.0 * SHATTER_SPIN * e;
+            // Ters dönüşüm: önce kayma, sonra dönme geri alınıyor.
+            float2 v = p - mid - offset;
+            float cs = cos(angle);
+            float sn = sin(angle);
+            float2 q = mid + float2(v.x * cs + v.y * sn, -v.x * sn + v.y * cs);
+            if (any(q < lo) || any(q >= lo + tile)) {
+                continue;
+            }
+            float4 c = paint(q, uv0, fg, colored, true, mask, color, cell_px, uv_size);
+            if (c.a > best.a) {
+                best = c;
+            }
+        }
+    }
+    return best;
+}
+
 fragment float4 glyph_fx_fragment(FxOut in [[stage_in]],
                                   texture2d<float> mask [[texture(0)]],
                                   texture2d<float> color [[texture(1)]],
-                                  constant CursorBlock& cursor [[buffer(0)]],
                                   constant float2& cell_px [[buffer(1)]],
                                   constant float2& uv_size [[buffer(2)]],
                                   constant float4& heat [[buffer(3)]]) {
@@ -216,23 +408,33 @@ fragment float4 glyph_fx_fragment(FxOut in [[stage_in]],
     float cx = half_ == 0u ? cell_px.x * 0.5 : (half_ == 1u ? cell_px.x : 0.0);
     float2 center = float2(cx, cell_px.y * 0.5);
     float box_left = half_ == 2u ? -cell_px.x : 0.0;
+    float box_w = half_ == 0u ? cell_px.x : 2.0 * cell_px.x;
 
     float2 g = in.local;
     float alpha = 1.0;
     // Maske düzleminde ön planın rengi; `heat` onu değiştiriyor.
     float3 fg = in.rgba.rgb;
+    // Ölçekleyen ve döndüren dallar doğrusal örnekliyor (`paint`'in doc'u).
+    bool smooth = false;
     // `echo`'nun kopyası: ikinci örnekleme noktası ve saydamlığı (0 = yok).
     float2 echo_g = float2(0.0);
     float echo_alpha = 0.0;
     // `ink`'in eşiği; 0'da bütün mürekkep görünüyor.
     float ink_front = 0.0;
-    // **`t = 1` dalı statik yolun aritmetiğine iniyor**: geliş yerine
-    // oturduğunda ters dönüşüm hiç koşmuyor, yani `g` statik yoldaki
-    // interpolasyonun ta kendisi ve son efekt karesinden statik çizime
-    // devirde piksel sıçramıyor (`plan.md` → R5). Her dal `t → 1`'de de
-    // özdeşliğe yaklaşıyor: son efekt karesi statik glyph'ten ancak eğrinin
-    // kalanı kadar ayrışıyor.
-    if (t < 1.0) {
+    // `bleed`'in yarıçapı, piksel; 0'da tek örnek.
+    float blur = 0.0;
+    // `iris`'in diyaframının yarıçapı, piksel; negatifse diyafram yok.
+    float iris = -1.0;
+    bool shatter = false;
+    // **Uçlar statik yolun aritmetiğine iniyor**: geliş yerine oturduğunda
+    // (`t = 1`) ve hayalet silindiği anda (`t = 0`) ters dönüşüm hiç
+    // koşmuyor, yani `g` statik yoldaki interpolasyonun ta kendisi ve devirde
+    // piksel sıçramıyor (`plan.md` → R5). `center + (g - center) / 1` `g`'ye
+    // bit bit eşit değil; `nearest` bunu örtüyordu, doğrusal örnekleme
+    // örtmezdi. Her dal uçlarda da özdeşliğe yaklaşıyor: son efekt karesi
+    // statik glyph'ten ancak eğrinin kalanı kadar ayrışıyor.
+    bool moving = ghost ? t > 0.0 : t < 1.0;
+    if (moving) {
         float e = ease_out(t);
         if (id == FX_FADE) {
             alpha = e;
@@ -243,12 +445,14 @@ fragment float4 glyph_fx_fragment(FxOut in [[stage_in]],
             float s = mix(POP_START, 1.0, ease_out_back(t, POP_BACK));
             g = center + (in.local - center) / s;
             alpha = e;
+            smooth = true;
         } else if (id == FX_EXTRUDE) {
             float s = mix(EXTRUDE_START, 1.0, e);
             g.x = box_left + (in.local.x - box_left) / s;
-            // Belirme de var: ilk karenin ince şeridi `nearest` örneklemede
-            // kesik kesik bir çizgi olarak görünüyordu.
+            // Belirme de var: ilk karenin ince şeridi kesik kesik bir çizgi
+            // olarak görünüyordu.
             alpha = e;
+            smooth = true;
         } else if (id == FX_HEAT) {
             // Soğuma Karar 6'nın eğrisiyle değil `smoothstep`'le: çıkışta
             // yavaşlayan kübik rengi ilk çeyrekte büyük ölçüde soğutuyordu ve
@@ -265,7 +469,10 @@ fragment float4 glyph_fx_fragment(FxOut in [[stage_in]],
             alpha = e;
             float s = mix(1.0, ECHO_SCALE, e);
             echo_g = center + (in.local - center) / s;
-            echo_alpha = ECHO_ALPHA * (1.0 - e);
+            // Kopya büyürken hızlı sönüyor (kalanın karesi): 0.7'lik bir kopya
+            // eğriyle birlikte sönseydi ilk kareler kalın ve büyük bir harf
+            // gibi okunuyordu, halka gibi değil.
+            echo_alpha = ECHO_ALPHA * (1.0 - e) * (1.0 - e);
         } else if (id == FX_DROP) {
             g.y += DROP_HEIGHT * cell_px.y * (1.0 - ease_out_back(t, DROP_BACK));
             alpha = e;
@@ -284,40 +491,98 @@ fragment float4 glyph_fx_fragment(FxOut in [[stage_in]],
             float2 s = float2(mix(SQUEEZE_X, 1.0, b), mix(SQUEEZE_Y, 1.0, b));
             g = center + (in.local - center) / s;
             alpha = e;
+            smooth = true;
         } else if (id == FX_RECEDE) {
             float s = mix(1.0, RECEDE_SCALE, e);
             g = center + (in.local - center) / s;
             alpha = 1.0 - e;
+            smooth = true;
+        } else if (id == FX_IRIS) {
+            // Diyafram mürekkebin kabaca sınırından (kutunun genişliği,
+            // yüksekliğinin IRIS_REACH'i) merkeze kapanıyor; glyph sönmüyor,
+            // örtülüyor. Kutunun köşesinden başlasaydı sürenin ilk üçte biri
+            // boş bir hücrenin üstünde kapanırdı.
+            float reach = length(float2(box_w, cell_px.y * IRIS_REACH) * 0.5) + 1.0;
+            iris = reach * (1.0 - e);
+        } else if (id == FX_UNDERTOW) {
+            // Çekilme yavaş başlayıp hızlanıyor (`smoothstep`): akıntı
+            // glyph'i önce kavrıyor, sonra alıp götürüyor. Sönme geç
+            // başlıyor — glyph görünürken yol alsın.
+            float pull = smoothstep(0.0, 1.0, t);
+            float2 moved = in.local - float2(-UNDERTOW_X * cell_px.x, UNDERTOW_Y * cell_px.y) * pull;
+            g = center + (moved - center) / mix(1.0, UNDERTOW_SCALE, pull);
+            alpha = 1.0 - smoothstep(0.25, 1.0, t);
+            smooth = true;
+        } else if (id == FX_GHOST_ECHO) {
+            float s = mix(1.0, ECHO_OUT_SCALE, e);
+            g = center + (in.local - center) / s;
+            alpha = 1.0 - e;
+            smooth = true;
+        } else if (id == FX_BLEED) {
+            blur = BLEED_RADIUS * cell_px.x * e;
+            alpha = 1.0 - e;
+            smooth = true;
+        } else if (id == FX_UNRAVEL) {
+            // Şerit noktanın KENDİ satırından: kayma yalnız yatay, yani
+            // noktanın örneklendiği satır ile ait olduğu şerit aynı ve iki
+            // şerit arasında dikiş yok. Şeritler yukarıdan aşağıya sırayla
+            // başlıyor ve komşular ters yöne kayıyor — iplik gibi çözülme.
+            float strip = floor(in.local.y / (cell_px.y / UNRAVEL_STRIPS));
+            strip = clamp(strip, 0.0, UNRAVEL_STRIPS - 1.0);
+            float delay = strip / (UNRAVEL_STRIPS - 1.0) * UNRAVEL_STAGGER;
+            float own = ease_out(saturate((t - delay) / (1.0 - UNRAVEL_STAGGER)));
+            float side = fmod(strip, 2.0) < 0.5 ? 1.0 : -1.0;
+            g.x -= side * UNRAVEL_SHIFT * cell_px.x * own;
+            alpha = 1.0 - own;
+        } else if (id == FX_SUBLIME) {
+            float2 s = float2(mix(1.0, SUBLIME_OPEN_X, e), mix(1.0, SUBLIME_OPEN_Y, e));
+            float2 lifted = in.local + float2(0.0, SUBLIME_RISE * cell_px.y * e);
+            g = center + (lifted - center) / s;
+            blur = SUBLIME_BLUR * cell_px.x * e;
+            alpha = 1.0 - e;
+            smooth = true;
+        } else if (id == FX_SHATTER) {
+            shatter = true;
+            // Parçalar görünürken yol alsın: sönme geç başlıyor.
+            alpha = 1.0 - smoothstep(0.3, 1.0, t);
         }
     }
 
-    float4 c = paint(g, in.uv0, fg, colored, mask, color, cell_px, uv_size);
+    float4 c;
+    if (shatter) {
+        float e = ease_out(t);
+        uint seed = uint(round(in.fx.z));
+        c = shatter_paint(in.local, t, e, seed, center, box_left, box_w, half_ != 0u,
+                          in.uv0, fg, colored, mask, color, cell_px, uv_size);
+    } else if (blur > 0.0) {
+        c = spread(g, blur, in.uv0, fg, colored, mask, color, cell_px, uv_size);
+    } else {
+        c = paint(g, in.uv0, fg, colored, smooth, mask, color, cell_px, uv_size);
+    }
     if (ink_front > 0.0) {
         float depth = ink_depth(g, in.uv0, mask, cell_px, uv_size);
         c.a *= smoothstep(ink_front - INK_SOFTNESS, ink_front, depth);
     }
+    if (iris >= 0.0) {
+        // Bir piksellik yumuşak kenar: diyafram keskin ama merdivensiz.
+        c.a *= saturate(iris - length(in.local - center) + 0.5);
+    }
     c.a *= alpha;
     if (echo_alpha > 0.0) {
         // Kopya glyph'in ALTINDA: "üstünden dağılan" halka glyph'i örtmemeli.
-        // Ön çarpımlı birleşim, sonra geri bölme — blend `SourceAlpha`.
-        float4 copy = paint(echo_g, in.uv0, fg, colored, mask, color, cell_px, uv_size);
+        // Büyüyen yalnız kopya: doğrusal örnekleme onun, glyph'in kendisi
+        // yerinde ve `nearest`'te.
+        float4 copy = paint(echo_g, in.uv0, fg, colored, true, mask, color, cell_px, uv_size);
         copy.a *= echo_alpha;
-        float a = c.a + copy.a * (1.0 - c.a);
-        float3 rgb = c.rgb * c.a + copy.rgb * copy.a * (1.0 - c.a);
-        c = a > 0.0 ? float4(rgb / a, a) : float4(0.0);
+        c = over(c, copy);
     }
 
+    // **Caret'in ters çevirmesi yok** (`Renderer::encode_fx`'in doc'u): efekt
+    // caret'in üstünde, kendi renginde. Maske düzleminde örneğin alfası
+    // instance'ın alfasıyla çarpılıyor (`cell_fragment`'in kuralı), renk
+    // düzleminde rengi dokudan.
     if (colored) {
-        // İmleç uniform'u renk düzleminde okunmuyor (`emoji_fragment`).
         return c;
     }
-    // İmleç bloğunun altındaki metin: `cell_fragment`'in karışımının aynısı
-    // (hayalet de caret'in altında silinebiliyor ve blok onun üstünde).
-    // `heat`'in rengi de bloğun altında imlecin metin rengine dönüyor:
-    // kızgın renk imlecin kendi rengi ve blokla aynı renkte bir harf
-    // görünmezdi.
-    float2 p = in.position.xy;
-    bool inside = all(p >= cursor.rect.xy) && all(p < cursor.rect.zw);
-    float3 rgb = mix(c.rgb, cursor.rgba.rgb, inside ? cursor.rgba.a : 0.0);
-    return float4(rgb, in.rgba.a * c.a);
+    return float4(c.rgb, in.rgba.a * c.a);
 }

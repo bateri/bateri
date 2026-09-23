@@ -906,14 +906,7 @@ impl Renderer {
         // Izgaranın payı zaten sıfır satıra inmiş oluyor (`split_into_grid`)
         // ve `Session::resize` o boyutu yoksayıyor.
         let origin_y = (viewport_px[1] - frame.dock_px()).max(0.0);
-        enc.setViewport(MTLViewport {
-            originX: 0.0,
-            originY: f64::from(origin_y),
-            width: f64::from(viewport_px[0]),
-            height: f64::from(viewport_px[1]),
-            znear: 0.0,
-            zfar: 1.0,
-        });
+        enc.setViewport(viewport_at(origin_y, viewport_px));
         // Zemin ve ayraç önce: dock'un kendi arka planları (vurgu aralıkları,
         // caret) onların üstüne gelmek zorunda.
         self.encode_quads(enc, &frame.dock_ground(viewport_px[0]), viewport_px)
@@ -940,10 +933,10 @@ impl Renderer {
                 self.encode_fx(
                     enc,
                     frame.dock_ghosts(),
-                    frame.cursor_block(),
                     frame.dock_fx_heat(),
                     frame.cell_px(),
                     viewport_px,
+                    origin_y,
                 )
             })
             .and_then(|()| {
@@ -976,10 +969,10 @@ impl Renderer {
                     self.encode_fx(
                         enc,
                         arrivals,
-                        frame.cursor_block(),
                         frame.dock_fx_heat(),
                         frame.cell_px(),
                         viewport_px,
+                        origin_y,
                     )
                 })
                 .and_then(|()| {
@@ -996,8 +989,27 @@ impl Renderer {
     }
 
     /// Dock'un yazım efektlerini encode eder (030) — beşinci pipeline
-    /// (`glyph_fx`), iki doku, [`CursorBlock`] ve `heat`'in kızgın rengi
+    /// (`glyph_fx`), iki doku ve `heat`'in kızgın rengi
     /// ([`Frame::dock_fx_heat`]).
+    ///
+    /// **[`CursorBlock`] bağlanmıyor**: efekt caret'in üstünde kendi renginde
+    /// çiziliyor, bloğun ters çevirmesine girmiyor. Ölçüldü (kullanıcı
+    /// "animasyonlar hiç belli olmuyor" dedi): gelişin ilk anı henüz
+    /// ayrılmamış caret'in içinde, Backspace'te ise caret hayaletin sütununa
+    /// geliyor ve hayalet baştan sona bloğun içinde oynuyordu — ters çevrilen
+    /// efekt caret'in bir parçası gibi okunuyordu. Bedeli: caret bir gelişin
+    /// üstünde dururken efekt bitseydi devir karesinde harfin rengi ters
+    /// çevrilmiş hâline sıçrardı; insert kipinde caret yazılan harfin
+    /// üstünden efektten çok önce ayrılıyor.
+    ///
+    /// **Kendi viewport'unda, dock'unkinde değil**: dock'un viewport'u
+    /// bandın tepesinden başlıyor ve onun üstü kırpılıyor, oysa `drop`
+    /// hücrenin üstünden düşüyor, `sublime` yukarı süzülüyor ve giriş
+    /// satırının üstünde yalnız ince bir nefes payı var — ilk kareler yarısı
+    /// kesik bir harf gösteriyordu (offscreen kareler, phase-5). Efekt
+    /// pencere uzayında çiziliyor (instance'lar `origin_y` kadar iniyor) ve
+    /// payı kadar (`glyph_fx.metal` → `FX_PAD`) saç çizgisinin üstüne
+    /// taşabiliyor; dock'un viewport'u çağrıdan sonra geri kuruluyor.
     ///
     /// Yuva çözümü [`Renderer::encode_glyphs`]'teki gibi atlas ödüncünün
     /// içinde doğup ölüyor. Renk dokusu henüz yoksa (hiç emoji görülmedi) renk
@@ -1008,10 +1020,10 @@ impl Renderer {
         &self,
         enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         cells: &[FxCell],
-        cursor: &CursorBlock,
         heat: &[f32; 4],
         cell_px: [f32; 2],
         viewport_px: [f32; 2],
+        origin_y: f32,
     ) -> Result<(), GpuError> {
         if cells.is_empty() {
             return Ok(());
@@ -1027,6 +1039,9 @@ impl Renderer {
         if atlas_tex.fx_instances.is_empty() {
             return Ok(());
         }
+        for instance in &mut atlas_tex.fx_instances {
+            instance.pos[1] += origin_y;
+        }
         // audit: `prepare_fx` `Ok` döndüyse dokuyu kurmuştur.
         let mask = atlas_tex.texture.as_ref().expect("prepare_fx dokuyu kurdu");
         // Renk dokusu yoksa maske ikinci yuvaya da bağlanıyor: bağlanmamış
@@ -1039,12 +1054,12 @@ impl Renderer {
         // Düzen `FxInstance`'ın `offset_of` assert'leriyle `glyph_fx.metal`'e
         // bağlı.
         let buffer = self.instance_buffer(&atlas_tex.fx_instances)?;
+        enc.setViewport(viewport_at(0.0, viewport_px));
         enc.setRenderPipelineState(&self.glyph_fx);
         // İndeksler `glyph_fx.metal`'in `[[buffer(n)]]`/`[[texture(n)]]`
         // bildirimleriyle aynı; fragment'in tampon alanı vertex'inkinden ayrı.
         vertex_uniform(enc, &viewport_px, 1);
         vertex_uniform(enc, &cell_px, 2);
-        fragment_uniform(enc, cursor, 0);
         fragment_uniform(enc, &cell_px, 1);
         fragment_uniform(enc, &uv_size, 2);
         fragment_uniform(enc, heat, 3);
@@ -1060,6 +1075,7 @@ impl Renderer {
                 atlas_tex.fx_instances.len(),
             );
         }
+        enc.setViewport(viewport_at(origin_y, viewport_px));
         Ok(())
     }
 
@@ -1383,6 +1399,20 @@ fn pipeline(
     device
         .newRenderPipelineStateWithDescriptor_error(&desc)
         .map_err(GpuError::Pipeline)
+}
+
+/// Dokunun boyunda, `origin_y`'den başlayan viewport — dock'un ve (sıfırla)
+/// yazım efektlerinin ([`Renderer::encode_fx`]). Boy dokunun boyu: NDC
+/// ölçeği `viewport_px` uniform'uyla aynı kalmalı (`encode_dock`'un doc'u).
+fn viewport_at(origin_y: f32, viewport_px: [f32; 2]) -> MTLViewport {
+    MTLViewport {
+        originX: 0.0,
+        originY: f64::from(origin_y),
+        width: f64::from(viewport_px[0]),
+        height: f64::from(viewport_px[1]),
+        znear: 0.0,
+        zfar: 1.0,
+    }
 }
 
 impl AtlasTexture {
@@ -4454,32 +4484,45 @@ mod tests {
 
     #[test]
     fn an_effect_never_samples_its_neighbour_slot() {
-        // Dörtlü efekt payı kadar şişiyor ve ters dönüşüm hücrenin dışını
-        // yuvanın dışına eşliyor; sınır testi olmasa komşu yuvanın glyph'i
-        // (yuvalar arasında pay yok) efektin çevresinde belirirdi. Komşular
-        // **dolu**: `@` ile `#` `.`'dan hemen önce ve sonra yuva alıyor.
+        // Dörtlü efekt payı kadar şişiyor, ters dönüşüm hücrenin dışını
+        // yuvanın dışına eşliyor ve ölçekleyen dallar doğrusal örnekliyor;
+        // sınır testi ve texel merkezine kırpma olmasa komşu yuvanın glyph'i
+        // (yuvalar arasında pay yok) efektin içinde belirirdi.
         //
-        // **`.` seçimi iddianın parçası**: kayan ve büyüyen efektler
-        // (`rise`, `drop`, `pop`, `echo`, `squeeze`) mürekkebi hücrenin dışına
-        // meşru olarak taşırabiliyor, ama `.`'nın küçük mürekkebi bugünkü
-        // genliklerde hücresinin içinde kalıyor — yani hücrenin dışındaki her
-        // piksel ancak komşu yuvadan gelebilir. Genlik büyür de `.` taşarsa
-        // burası kırmızı düşer ve sebebi sızıntı değil genliktir.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        // **Ölçüt genlikten bağımsız**: aynı `.` iki atlasta çiziliyor — birinde
+        // yuvasının iki yanı dolu (`@` önce, `#` sonra yuva alıyor), ötekinde
+        // `.` tek başına. Çıktı komşuya bakmıyorsa iki kare özdeş. Önceki hâli
+        // "hücrenin dışındaki her piksel sızıntıdır" diyordu ve bu, efektin
+        // genliğini `.`'nın hücre içindeki boşluğuna bağlıyordu — kullanıcı
+        // efektleri "hiç belli olmuyor" bulunca genlikler o zarfı aştı.
+        //
+        // Tolerans 2/255: iki atlasta `uv0` farklı ve doğrusal süzgecin alt
+        // texel ağırlığı o farkın yuvarlamasıyla oynayabilir; bir sızıntı ise
+        // komşunun mürekkebini, yani çok daha büyük bir farkı getirirdi.
         const EDGE: usize = 128;
-        let cell_px = fitting_cell_px(&r, EDGE, 8);
+        let crowded = Renderer::system_default().expect("Metal device ve pipeline");
+        let alone = Renderer::system_default().expect("Metal device ve pipeline");
+        let cell_px = fitting_cell_px(&crowded, EDGE, 8);
+        // Atlas ölçüyle kuruluyor: ikinci renderer'ın da aynı ölçüsü olmalı.
+        assert_eq!(fitting_cell_px(&alone, EDGE, 8), cell_px);
         let neighbours = [
             glyph_cell(2, '@', None),
             glyph_cell(3, '.', None),
             glyph_cell(4, '#', None),
         ];
         render_offscreen(
-            &r,
+            &crowded,
             EDGE,
             BACKGROUND,
             &dock_fx_frame(cell_px, &neighbours, &[]),
         );
         let dot = glyph_cell(5, '.', None);
+        render_offscreen(
+            &alone,
+            EDGE,
+            BACKGROUND,
+            &dock_fx_frame(cell_px, &[dot], &[]),
+        );
         let kinds = Keypress::effects()
             .into_iter()
             .map(|fx| (Kind::Arrival, fx.id().expect("çizen efekt")))
@@ -4488,33 +4531,24 @@ mod tests {
                     .into_iter()
                     .map(|fx| (Kind::Ghost, fx.id().expect("çizen efekt"))),
             );
-        let (cw, ch) = (usize::from(cell_px.0), usize::from(cell_px.1));
-        let background = pixel_at(
-            &render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[], &[])),
-            EDGE,
-            0,
-            EDGE - 1,
-        );
         for (kind, id) in kinds {
             for t in [0.1, 0.25, 0.5, 0.75, 0.9] {
                 // Gelişin statik glyph'i olmak zorunda (yoksa çizilmiyor).
                 let statics: &[Cell] = if kind == Kind::Arrival { &[dot] } else { &[] };
                 let frame = dock_fx_frame(cell_px, statics, &[effect(dot, kind, id, t)]);
-                let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
-                let own = 5 * cw..6 * cw;
-                for y in 0..EDGE {
-                    for x in 0..EDGE {
-                        if own.contains(&x) && y >= dock_row_top(EDGE, cell_px.1) {
-                            continue;
-                        }
-                        assert_eq!(
-                            pixel_at(&pixels, EDGE, x, y),
-                            background,
-                            "efekt kendi hücresinin dışını boyadı ({x}, {y}): \
-                             komşu yuva örneklendi ({kind:?} {id}, t = {t}, hücre {cw}×{ch})"
-                        );
-                    }
-                }
+                let a = render_offscreen(&crowded, EDGE, BACKGROUND, &frame);
+                let b = render_offscreen(&alone, EDGE, BACKGROUND, &frame);
+                let worst = a
+                    .iter()
+                    .zip(&b)
+                    .map(|(x, y)| x.abs_diff(*y))
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    worst <= 2,
+                    "efekt komşu yuvaya bakıyor: dolu komşulu atlasla tek başına \
+                     atlas {worst} ayrışıyor ({kind:?} {id}, t = {t})"
+                );
             }
         }
     }
@@ -4547,6 +4581,29 @@ mod tests {
             u32::from(red) > u32::from(blue) + 64,
             "heat kızgın renkte doğmadı: en parlak piksel r={red} b={blue}"
         );
+    }
+
+    #[test]
+    fn a_shattered_glyph_breaks_the_same_way_every_frame() {
+        // `shatter`'ın parçaları tohumdan (`FxInstance`'ın `fx[2]`'si): aynı
+        // girdi iki karede aynı parçaları vermeli — yoksa hareket karesinde
+        // parçalar titrer —, başka bir tohum ise başka bir kırılma. İkinci
+        // iddia shader'ın tohumu gerçekten okuduğunun tek tanığı.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let cell_px = fitting_cell_px(&r, EDGE, 4);
+        let cell = glyph_cell(2, 'M', None);
+        let id = Erase::Shatter.id().expect("çizen efekt");
+        let draw = |seed: f32| {
+            let fx = Fx {
+                seed,
+                ..effect(cell, Kind::Ghost, id, 0.5)
+            };
+            render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[], &[fx]))
+        };
+        let first = draw(7.0);
+        assert!(first == draw(7.0), "aynı tohum iki karede farklı kırıldı");
+        assert!(first != draw(8.0), "tohum kırılmayı değiştirmiyor");
     }
 
     #[test]
