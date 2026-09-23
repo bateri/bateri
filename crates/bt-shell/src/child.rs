@@ -556,6 +556,7 @@ mod tests {
         fn wake(&self) {}
         fn child_exit(&self, _code: Option<i32>) {}
         fn copy_to_clipboard(&self, _text: String) {}
+        fn title_changed(&self) {}
     }
 
     /// `ready` doğru diyene kadar bekler; süre dolarsa `message` ile düşer.
@@ -650,6 +651,7 @@ mod tests {
                     vec!["-l".to_owned(), "-i".to_owned()],
                 )),
                 working_directory: Some(home.clone()),
+                home: Some(home.clone()),
                 env: HashMap::from([
                     ("HOME".to_owned(), home.display().to_string()),
                     ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
@@ -763,6 +765,7 @@ mod tests {
                     vec!["-l".to_owned(), "-i".to_owned()],
                 )),
                 working_directory: Some(home.clone()),
+                home: Some(home.clone()),
                 env: HashMap::from([
                     ("HOME".to_owned(), home.display().to_string()),
                     ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
@@ -895,6 +898,7 @@ mod tests {
                     vec!["-l".to_owned(), "-i".to_owned()],
                 )),
                 working_directory: Some(home.clone()),
+                home: Some(home.clone()),
                 env: HashMap::from([
                     ("HOME".to_owned(), home.display().to_string()),
                     ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
@@ -1029,6 +1033,7 @@ mod tests {
                     vec!["-l".to_owned(), "-i".to_owned()],
                 )),
                 working_directory: Some(home.clone()),
+                home: Some(home.clone()),
                 env: HashMap::from([
                     ("HOME".to_owned(), home.display().to_string()),
                     ("ZDOTDIR".to_owned(), wrapper.display().to_string()),

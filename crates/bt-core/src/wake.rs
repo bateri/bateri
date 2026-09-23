@@ -51,4 +51,21 @@ pub trait Wake: Send + Sync + 'static {
     ///
     /// Kapanış sırasında gelen yazmanın panoya ulaşmaması zararsızdır.
     fn copy_to_clipboard(&self, text: String);
+
+    /// Oturumun başlığı ([`crate::Session::title`]) değişmiş olabilir:
+    /// uygulamanın OSC 0/2 başlığı değişti ya da kabuğun OSC 7 dizini
+    /// **değişti** (aynı dizini basan `precmd` haber doğurmaz).
+    ///
+    /// İki kaynağın iki thread durumu var: OSC 0/2 `Term` kilidi **altında**
+    /// gelir (okuyucu thread'de ya da `Session::set_terminal_options`'ı
+    /// çağıran thread'de — `Term::set_options` başlık olayını yeniden
+    /// yolluyor, değişmediyse haber yok), OSC 7 okuyucu thread'de kilitsiz.
+    /// Üstteki üç yasak ikisinde de geçerli.
+    ///
+    /// **Yük taşımaz:** alıcı başlığı `Session::title`'dan kendisi okur, yani
+    /// birbirini kovalayan iki değişiklik bayat bir değerle davranamaz.
+    /// Uygulayan kuyruğa **en çok bir** iş atar — başlığını her komutta
+    /// basan bir kabuk ya da döngüdeki `printf` çağrıyı sık yapabilir ve
+    /// görülecek olan zaten son başlık.
+    fn title_changed(&self);
 }

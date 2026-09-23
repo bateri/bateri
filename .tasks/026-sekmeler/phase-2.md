@@ -64,12 +64,37 @@ _Requirements: R2, R2.1, R2.2, R2.3, R2.4, R5_
 
 ## Checklist
 
-- [ ] `Session`'da kapanış başlat/bekle; `shutdown()` davranışı aynı
-- [ ] `Session::working_directory()`
-- [ ] Başlık yaprak yuvası, saf kural, `Session::title()`
-- [ ] `Wake::title_changed` iki kaynaktan; `ShellWake` ≤1 iş ile pencereye yazıyor
-- [ ] `wake.rs`, `set_terminal_options` doc'u ve `CLAUDE.md`'nin `bt-core`
+- [x] `Session`'da kapanış başlat/bekle; `shutdown()` davranışı aynı
+- [x] `Session::working_directory()`
+- [x] Başlık yaprak yuvası, saf kural, `Session::title()`
+- [x] `Wake::title_changed` iki kaynaktan; `ShellWake` ≤1 iş ile pencereye yazıyor
+- [x] `wake.rs`, `set_terminal_options` doc'u ve `CLAUDE.md`'nin `bt-core`
       satırı (OSC 0/2 artık başlığa gidiyor) aynı commit'te
-- [ ] Test: başlık kuralı, haber kaynakları, bölünmüş kapanış
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Test: başlık kuralı, haber kaynakları, bölünmüş kapanış
+- [~] Doğrulama geçti (`make hepsi` + `make test-yaris` yeşil; `make duman`
+      ortam (bkz. phase-1): HEAD'de de aynı `MotionUnsettled`, sessiz ~917 ms)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi (tek bulgu: başlık
+      sınamasının ilk okuması yarışlıydı, betiğe açılış beklemesi eklendi)
+
+## Uygulama Notları
+
+- **Tutamak tipi `ShutdownHandle`** (`bt-core` ihraç ediyor):
+  `Session::begin_shutdown() -> Option<ShutdownHandle>` ve
+  `ShutdownHandle::wait_until(Instant) -> Teardown`. Son tarih süre değil
+  **an** — phase-3'ün paralel ⌘Q'su bütün tutamakları aynı son tarihe kadar
+  bekleyecek. Thread kurulamayan dal tutamağın içinde (`Unbounded`),
+  stderr satırı başlatırken.
+- **OSC 7'nin "değişti" bilgisi `ShellLog::apply_scan_answering`'in
+  dönüşü** (`bool`); `TappedPty` haberi defterin kilidi düştükten sonra
+  veriyor ve `Adapter`'ın `Wake`'inin bir kopyasını taşıyor. `#[cfg(test)]
+  apply_scan` `()` dönmeye devam ediyor (onlarca sınama çağrı yeri).
+- **Başlık kuralı `shell::title_of`**, ev dizini `SessionOptions::home`
+  (yeni alan; `bt-shell` `child::home()` veriyor).
+- **Pencere oturum yuvasına girer girmez başlığı bir kez okuyor**
+  (`start_session` → `refresh_title`): yuvadan önce gelen bir haber boş
+  yuva bulup düşmüş olabilir.
+- **Bilinen sınır:** RIS (`\ec`) alacritty'nin başlığını olaysız siliyor
+  (`Term::reset_state`), yuva bir sonraki `set_options`'a ya da OSC 0/2'ye
+  kadar eski başlığı tutuyor.
+- `ResetTitle` sınaması başlık yığınıyla (`CSI 22 t` / `CSI 23 t`) kuruldu:
+  boş OSC 2 `Some("")` doğuruyor, `ResetTitle` değil.
