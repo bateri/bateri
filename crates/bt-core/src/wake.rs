@@ -7,7 +7,9 @@
 /// elinde tutarken `Wakeup` yollar). Uygulayan bu yüzden üç şey yapmaz:
 /// `Session`'a geri girmez, bloklamaz, kilit almaz — yalnız başka bir
 /// thread'e "bir şey oldu" der. `bt-gpu`'daki `Waker` bunun karşılığıdır:
-/// ana kuyruğa tek bir iş atar.
+/// ana kuyruğa tek bir iş atar. Tek istisna **yaprak** kilit: alınıp hemen
+/// bırakılan, altında başka kilit alınmayan bir yuva (`Theme`'in yaprak
+/// kilidi emsali; üretimde `ShellWake`'in sökülebilir `Waker` yuvası).
 ///
 /// **Sahiplik:** `Session` bu nesneyi `Arc` ile tutar. Uygulayan da
 /// `Arc<Session>` tutarsa çember kapanır: `Drop for Session` hiç koşmaz,
@@ -23,9 +25,11 @@
 /// `(EventLoop, State)` çifti `"PTY teardown"` thread'inde kalır ve o çift
 /// `Adapter` üzerinden bu nesnenin bir `Arc` kopyasını taşır: son kopya
 /// oraya düşerse **`Wake::drop` o thread'de koşar**. Dolayısıyla uygulayanın
-/// `Drop`'u da bloklamaz — özellikle ana kuyruğa senkron iş atmaz (üretimdeki
-/// uygulayan `bt-shell`'in `ShellWake`'i; taşıdığı `bt-gpu` `Waker`'ında tam
-/// böyle bir alan var: `MainThreadBound<Retained<CAMetalDisplayLink>>`).
+/// `Drop`'u da bloklamaz — özellikle ana kuyruğa senkron iş atmaz. Üretimdeki
+/// uygulayan `bt-shell`'in `ShellWake`'i ve taşıdığı `bt-gpu` `Waker`'ında tam
+/// böyle bir alan var (`MainThreadBound<Retained<CAMetalDisplayLink>>`); bu
+/// yüzden `Waker` pencere kapanırken ana thread'de **sökülüyor** ve
+/// `ShellWake` hangi thread'de düşerse düşsün onu taşımıyor.
 ///
 /// Çağrıların hiçbirinin varsayılan gövdesi yok: yeni bir çağrı eklendiğinde
 /// uygulayan onu unutamasın, derleme söylesin.

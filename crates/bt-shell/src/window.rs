@@ -13,11 +13,15 @@
 //! başına puntoyu imkânsız kılardı.
 
 use std::cell::{Cell, OnceCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
-use bt_core::{FontOptions, Session, SessionOptions, Settings, Teardown, Theme, Wake};
+use bt_core::{
+    FontOptions, Session, SessionOptions, Settings, ShutdownHandle, Teardown, Theme, Wake,
+};
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Surface, Waker};
 use dispatch2::DispatchQueue;
@@ -25,8 +29,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSPasteboard, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSMenuItem, NSPasteboard, NSWindow, NSWindowDelegate,
+    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
@@ -43,15 +47,30 @@ use crate::{Run, Workload};
 /// `bt-core`'un uyandırma ucu — pencere başına bir tane, oturumuyla birlikte.
 ///
 /// `Session::spawn` `Wake`'i link'ten **önce** ister, `Waker` ise link'ten
-/// sonra doğar; boşluğu `OnceLock` kapatır. Kaçan kare yok: açılış karesi
-/// zaten elle isteniyor ve o ana kadar okunmuş her bayt hasar bayrağında
-/// birikmiş olur.
+/// sonra doğar; boşluğu yuvanın `None`'ı kapatır. Kaçan kare yok: açılış
+/// karesi zaten elle isteniyor ve o ana kadar okunmuş her bayt hasar
+/// bayrağında birikmiş olur.
 struct ShellWake {
     /// Pencerenin kimliği: ana kuyruk işleri pencereyi listeden bununla
     /// buluyor (alternatif ekran habercisinin örüntüsü) — `Session`'a ya da
     /// pencereye referans tutmak `wake.rs`'in Sahiplik çemberini kapatırdı.
     id: u64,
-    waker: OnceLock<Waker>,
+    /// Süreli koşu mu: `child_exit` iki yola ayrılıyor ([`Wake::child_exit`]'in
+    /// gövdesi). `AppDelegate`'inkinin kopyası; okuyucu thread'den uygulama
+    /// delegate'ine uzanılamaz.
+    timed: bool,
+    /// Link'in `Waker`'ı — **yaprak kilit** altında ve **sökülebilir**.
+    ///
+    /// Pencere kapanırken ana thread'de `take()` ediliyor
+    /// ([`ShellWake::detach`]): bu nesnenin son kopyası `"PTY teardown"`
+    /// thread'inde düşebilir (`wake.rs` → Sahiplik) ve `Waker`'ın
+    /// `MainThreadBound`'u oraya düşerse `Drop`'u ana kuyruğa senkron iş atar.
+    /// Sökülmüş yuva o `Drop`'u yapısal olarak ana thread'e çiviliyor; eskiden
+    /// tek koruma pencere listesinin `app.run()`'ı aşmasıydı.
+    ///
+    /// Kilit yaprak: `wake()` onu `Term` kilidi altında alıp bırakıyor ve
+    /// altında başka kilit alınmıyor (`Theme`'in yaprak kilidi emsali).
+    waker: Mutex<Option<Waker>>,
     /// OSC 52'nin ana kuyruğa bekleyen metni. `Arc`, çünkü ana kuyruğun işi
     /// `'static` ister ve `Wake`'in çağrısı yalnız `&self` veriyor; iş
     /// `ShellWake`'i değil yalnız yuvayı tutar.
@@ -62,40 +81,69 @@ struct ShellWake {
     title_pending: Arc<AtomicBool>,
 }
 
+impl ShellWake {
+    /// Yaprak kilidi alır; zehirlenmişse içindekiyle devam eder — yuvanın tek
+    /// değişmezi "ya `Waker` var ya yok" ve yarım yazılmış bir hâli olamaz.
+    fn slot(&self) -> MutexGuard<'_, Option<Waker>> {
+        self.waker.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `Waker`'ı yuvadan söker ve çağırana verir — ana thread'de düşsün diye
+    /// ([`ShellWake::waker`]). İkinci çağrı `None`.
+    fn detach(&self) -> Option<Waker> {
+        self.slot().take()
+    }
+}
+
 impl Wake for ShellWake {
     fn wake(&self) {
         // Okuyucu thread; `Term` kilidi tutuluyor olabilir. Tek iş: ana
         // kuyruğa "link'i aç" işini at, hemen dön.
-        if let Some(waker) = self.waker.get() {
+        // Kopya **alınmıyor**, kilit altında çağrılıyor: kopya burada son
+        // referans kalıp okuyucu thread'de düşebilirdi — sökmenin
+        // kapattığı yolun ta kendisi.
+        if let Some(waker) = self.slot().as_ref() {
             waker.wake();
         }
     }
 
     fn child_exit(&self, _code: Option<i32>) {
-        // Shell gitti, terminal penceresinin dayanağı kalmadı: uygulama
-        // sonlanır. Sonlanmayı `terminate:` yürütüyor ki kapanış tek kapıdan
-        // geçsin — kırmızı düğme, `exit` ve duman deadline'ı aynı
-        // `applicationWillTerminate:`'a varır.
+        // Shell gitti, pencerenin dayanağı kalmadı: **o pencere** kapanır
+        // (026 → Karar 5), uygulama değil. Kapanış pencerenin kendi
+        // `windowWillClose:`'undan geçiyor — kırmızı düğme, ⌘W ve `exit` aynı
+        // sıraya varır.
+        //
+        // **Süreli koşuda** eski yol: doğrudan `terminate:`. Rapor pencerenin
+        // sayaçlarını okuyor ve pencere rapordan önce listeden düşseydi duman
+        // reçetesi deadline'dan kısa bittiğinde rapor boş listeyle koşardı
+        // (`will_terminate`'in doc'u).
         //
         // Ana kuyruğa atılmasının iki sebebi var ve ikisi de zorunlu: AppKit
         // ana thread ister, ve bu çağrı **okuyucu thread'de** geliyor —
-        // `shutdown()`'a giden senkron bir yol okuyucu thread'i kendi
-        // kapanışında bekletirdi (`wake.rs` → Sahiplik). Kapanış sınırlı
-        // olduğundan bu artık `EDEADLK` paniği değil, yarım saniyelik bir
-        // durma ve hiç tamamlanmayan bir kapanış — yasak aynı kalıyor.
+        // kapanışa giden senkron bir yol okuyucu thread'i kendi kapanışında
+        // bekletirdi (`wake.rs` → Sahiplik).
         //
         // **Bilinen sınır:** shell'in son çıktısı ekrana gelmeyebilir.
         // alacritty sırayı `ChildExit` → `Wakeup` diye kuruyor, yani buraya
-        // geldiğimizde son bayt henüz çizilmemiş olabilir; `terminate:` de
-        // araya bir vsync girmeden koşar. Garanti etmek ya sihirli bir
-        // gecikme ya da display link'e "hasar tükendi, şimdi çık" semantiği
-        // eklemek olurdu — ikincisi renderer'a terminal bilgisi sokar.
-        // `bateri -e cmd` yolu geldiğinde `drain_on_exit` ile birlikte
-        // tasarlanacak (`.tasks/002-vt-motoru/phase-4.md` → Uygulama Notları).
-        DispatchQueue::main().exec_async(|| {
+        // geldiğimizde son bayt henüz çizilmemiş olabilir; kapanış da araya
+        // bir vsync girmeden koşar. Garanti etmek ya sihirli bir gecikme ya da
+        // display link'e "hasar tükendi, şimdi çık" semantiği eklemek olurdu —
+        // ikincisi renderer'a terminal bilgisi sokar. `bateri -e cmd` yolu
+        // geldiğinde `drain_on_exit` ile birlikte tasarlanacak
+        // (`.tasks/002-vt-motoru/phase-4.md` → Uygulama Notları).
+        let (timed, id) = (self.timed, self.id);
+        DispatchQueue::main().exec_async(move || {
             // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            NSApplication::sharedApplication(mtm).terminate(None);
+            if timed {
+                NSApplication::sharedApplication(mtm).terminate(None);
+                return;
+            }
+            // Pencere bu arada kapandıysa (⌘W'nin `SIGHUP`'ı kabuğu öldürdü
+            // ve haber sonradan geldi) kapatacak bir şey yok.
+            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
+                window.close();
+            }
         });
     }
 
@@ -174,6 +222,38 @@ fn alt_screen_notifier(id: u64) -> Box<dyn Fn()> {
             }
         });
     })
+}
+
+/// Başlamış bir pencere kapanışı ([`TerminalWindow::begin_close`]).
+pub(crate) enum Closing {
+    /// Bu çağrı başlattı; sonucu tutamak biliyor.
+    Started(ShutdownHandle),
+    /// Kapanış daha önce başlamıştı (pencere kapanırken ⌘Q gibi): beklenecek
+    /// bir şey yok, gerçek sonucu ilk çağrı biliyordu.
+    AlreadyDone,
+}
+
+impl Closing {
+    /// En geç `deadline`'a kadar bekler ([`ShutdownHandle::wait_until`]).
+    pub(crate) fn wait_until(self, deadline: Instant) -> Teardown {
+        match self {
+            Self::Started(handle) => handle.wait_until(deadline),
+            Self::AlreadyDone => Teardown::AlreadyDone,
+        }
+    }
+}
+
+/// Select Tab ▸ öğesinin `tag`'i + sekme sayısı → seçilecek sekmenin sırası.
+///
+/// ⌘1…⌘8 n. sekme, yoksa `None` (no-op); ⌘9 **son** sekme — Safari,
+/// Terminal.app ve tarayıcıların ortak kuralı: dokuzdan fazla sekmede de
+/// sonuncuya tek tuşla gidiliyor. Saf, sınanıyor.
+pub(crate) fn tab_index(tag: u8, count: usize) -> Option<usize> {
+    match tag {
+        1..=8 => Some(usize::from(tag) - 1).filter(|&index| index < count),
+        9 => count.checked_sub(1),
+        _ => None,
+    }
 }
 
 /// Pencerenin durumu. `OnceCell`: oturum ve link `start` içinde bir kez doğar,
@@ -268,6 +348,9 @@ define_class!(
         //
         // Tek kanca yetiyor: simge durumu da örtülme de `occlusionState`'i
         // düşürür, yani `windowDidDeminiaturize:` bunun altkümesi olurdu.
+        // **Seçili olmayan sekme de bu yoldan gidiyor** (026 R3.7, ölçüldü):
+        // sekme arkaya düşünce `visible=false`, öne gelince `true` geliyor,
+        // yani arka sekme sıfır kare çiziyor ve sekmeye özel bir kanca yok.
         // Genel sinyalin üstüne özel durum dizmek, listenin hiç kapanmaması
         // demek (tam ekran, Space, `unhide`, ekran uyanması...).
         #[unsafe(method(windowDidChangeOcclusionState:))]
@@ -301,6 +384,40 @@ define_class!(
         fn window_did_resign_key(&self, _n: &NSNotification) {
             self.apply_focus(false);
         }
+
+        /// Pencere (ya da sekme) kapanıyor: kırmızı düğme, ⌘W, ⇧⌘W ve
+        /// kabuğun çıkışı (`ShellWake::child_exit` → `close`) buraya varır.
+        ///
+        /// Kapanış **beklenmiyor** (026 → Karar 5): başlatılıyor ve tutamak
+        /// düşüyor, `"PTY teardown"` thread'i işini arkada bitiriyor — tek
+        /// sekmeyi kapatmak ana thread'i yarım saniyeye kadar durdurmamalı.
+        /// Sıra [`TerminalWindow::begin_close`]'ta.
+        ///
+        /// Süreli koşuda bu yol koşmuyor: kabuğun çıkışı `terminate:`'e gidiyor
+        /// ve rapor pencereyi listede bulmak zorunda.
+        ///
+        /// **Listeden çıkış bir tur ertelenir.** Listenin tuttuğu `Retained`
+        /// bu nesnenin tek güçlü referansı (pencerenin delegate özelliği zayıf)
+        /// ve burada düşseydi nesne kendi metodunun içinde, AppKit `-close`'un
+        /// ortasındayken serbest kalırdı — `NSWindow`'un `Retained`'ı da
+        /// onunla. Ertelenen iş kimliği taşıyor (alternatif ekran habercisinin
+        /// örüntüsü); nesne yine ana thread'de düşüyor.
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _n: &NSNotification) {
+            drop(self.begin_close());
+            // Delegate'i şimdi bırak: AppKit kapanmakta olan pencereye bundan
+            // sonra bildirim göndermesin (odak, örtülme), nesne düşene kadar
+            // bile.
+            self.ivars().window.setDelegate(None);
+            let id = self.ivars().id;
+            DispatchQueue::main().exec_async(move || {
+                // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+                let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+                if let Some(app) = app::delegate(mtm) {
+                    app.forget_window(id);
+                }
+            });
+        }
     }
 
     // **Pencereye ait eylemler** burada, uygulama geneline yayılanlar
@@ -327,6 +444,33 @@ define_class!(
         #[unsafe(method(resetFontSize:))]
         fn reset_font_size(&self, _sender: Option<&AnyObject>) {
             self.change_zoom(|_, _| Zoom::default());
+        }
+
+        /// Shell ▸ Close Window (⇧⌘W): pencereyi **bütün sekmeleriyle**.
+        /// Her sekme kendi `performClose:`'undan geçiyor, yani her birinin
+        /// kapanışı ⌘W'ninkiyle aynı yol (`windowWillClose:`).
+        #[unsafe(method(closeWindow:))]
+        fn close_window(&self, _sender: Option<&AnyObject>) {
+            for window in self.tab_windows() {
+                window.performClose(None);
+            }
+        }
+
+        /// Window ▸ Select Tab ▸ Tab n (⌘1…⌘8) ve Last Tab (⌘9): öğenin `tag`'i
+        /// ([`crate::menu`]) sekme grubunda bir sıraya iner ([`tab_index`]).
+        /// Olmayan sekme no-op.
+        #[unsafe(method(selectTab:))]
+        fn select_tab(&self, sender: Option<&AnyObject>) {
+            let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>()) else {
+                return;
+            };
+            let Ok(tag) = u8::try_from(item.tag()) else {
+                return;
+            };
+            let windows = self.tab_windows();
+            if let Some(window) = tab_index(tag, windows.len()).map(|index| &windows[index]) {
+                window.makeKeyAndOrderFront(None);
+            }
         }
     }
 );
@@ -377,6 +521,11 @@ impl TerminalWindow {
         view.setWantsLayer(true);
         window.setContentView(Some(&view));
         window.setTitle(ns_string!("bateri"));
+        // **Native sekmeler** (026 → Karar 1): aynı kimliği taşıyan pencereleri
+        // AppKit tek pencerede sekme olarak topluyor. `tabbingMode` bilerek
+        // varsayılanda — sistemin "Prefer tabs" ayarına saygı. Kimliğin tek
+        // yazıldığı yer burası, yani bütün pencereler ortak kimlikte.
+        window.setTabbingIdentifier(ns_string!("bateri.terminal"));
         // Düğmesiz hareket olayları varsayılan **kapalı**; fare raporu
         // isteyen uygulama (1003) onlarsız işaretçiyi hiç göremez.
         // `NSTrackingArea` gerekmiyor: o yalnız `mouseEntered:`/
@@ -403,7 +552,8 @@ impl TerminalWindow {
             session: OnceCell::new(),
             wake: Arc::new(ShellWake {
                 id,
-                waker: OnceLock::new(),
+                timed: run.is_some(),
+                waker: Mutex::new(None),
                 pending_copy: Arc::default(),
                 title_pending: Arc::default(),
             }),
@@ -422,14 +572,69 @@ impl TerminalWindow {
         Ok(this)
     }
 
-    /// Pencereyi ortalayıp öne alır.
-    pub(crate) fn show(&self) {
-        self.ivars().window.center();
+    pub(crate) fn id(&self) -> u64 {
+        self.ivars().id
+    }
+
+    /// Bu nesnenin `NSWindow`'u mu — etkin pencere `NSApp.keyWindow`'dan
+    /// listede böyle aranıyor (`AppDelegate::key_window`).
+    pub(crate) fn owns(&self, window: &NSWindow) -> bool {
+        std::ptr::eq(&*self.ivars().window, window)
+    }
+
+    /// Bu pencerenin geçici punto farkı — yeni sekme onu devralıyor
+    /// (026 → Karar 3).
+    pub(crate) fn zoom(&self) -> Zoom {
+        self.ivars().zoom.get()
+    }
+
+    /// Devralınan punto farkı; oturum doğmadan, [`TerminalWindow::request_font`]'tan
+    /// önce yazılır ki ilk atlas büyütülmüş puntoyla açılsın.
+    pub(crate) fn set_zoom(&self, zoom: Zoom) {
+        self.ivars().zoom.set(zoom);
+    }
+
+    /// Pencereyi kapatır (`windowWillClose:` yolundan) — kabuğun çıkışı.
+    pub(crate) fn close(&self) {
+        self.ivars().window.close();
+    }
+
+    /// Pencereyi `from`'un sekme grubuna, seçili sekmenin **sağına** ekler ve
+    /// öne alır.
+    pub(crate) fn show_as_tab_of(&self, from: &TerminalWindow) {
+        from.ivars()
+            .window
+            .addTabbedWindow_ordered(&self.ivars().window, NSWindowOrderingMode::Above);
         self.ivars().window.makeKeyAndOrderFront(None);
     }
 
-    pub(crate) fn id(&self) -> u64 {
-        self.ivars().id
+    /// Ayrı pencere olarak öne alır; `from` varsa ondan kademeli (üst sol köşe
+    /// bir adım sağ-aşağı), yoksa ekranın ortasında.
+    pub(crate) fn show_after(&self, from: Option<&TerminalWindow>) {
+        let window = &self.ivars().window;
+        match from {
+            // `NSZeroPoint`'le çağrı pencereyi oynatmıyor, bir sonraki
+            // pencerenin köşesini veriyor — AppKit'in kademeleme deyimi.
+            Some(from) => {
+                let next = from.ivars().window.cascadeTopLeftFromPoint(NSPoint::ZERO);
+                window.cascadeTopLeftFromPoint(next);
+            }
+            None => window.center(),
+        }
+        window.makeKeyAndOrderFront(None);
+    }
+
+    /// Pencerenin sekme grubundaki pencereler, sırasıyla; grup yoksa yalnız
+    /// kendisi.
+    ///
+    /// `tabbedWindows` değil `tabGroup`: ilki çubuk görünmüyorken `nil`
+    /// veriyor, yani tek sekmede ⇧⌘W hiçbir şey kapatmazdı.
+    fn tab_windows(&self) -> Vec<Retained<NSWindow>> {
+        let window = &self.ivars().window;
+        match window.tabGroup() {
+            Some(group) => group.windows().to_vec(),
+            None => vec![window.clone()],
+        }
     }
 
     /// Rapor yolu sayaçlarını buradan okuyor (`AppDelegate::report_and_exit`).
@@ -492,7 +697,18 @@ impl TerminalWindow {
     /// olurdu. Geometriden **önce**: ızgara yüksekliği dock payını görmeli,
     /// yoksa kabuk açılışta bir satır fazlasıyla doğar ve ilk kare düzeltme
     /// için bir `TIOCSWINSZ` yer.
-    pub(crate) fn start(&self, app: &AppDelegate, mtm: MainThreadMarker, theme: Theme) {
+    ///
+    /// `working_directory` çağıranın kararı (026 → Karar 4: etkin sekmenin
+    /// dizini, yoksa ev). Hata çağırana dönüyor: ilk pencerede süreç çıkıyor,
+    /// ⌘T/⌘N'de yalnız o pencere kapanıyor — öteki sekmelerin kabukları bir
+    /// yenisinin doğamamasıyla ölmemeli.
+    pub(crate) fn start(
+        &self,
+        app: &AppDelegate,
+        mtm: MainThreadMarker,
+        theme: Theme,
+        working_directory: Option<PathBuf>,
+    ) -> std::io::Result<()> {
         let (integration, birth) = app.shell_integration();
         self.ivars().dock_rows_at_birth.set(birth);
         self.ivars().dock_rows.set(birth);
@@ -504,7 +720,7 @@ impl TerminalWindow {
         let grid = self
             .sync_geometry(app)
             .expect("pencere ve contentView kuruldu");
-        self.start_session(app, mtm, grid, theme, integration, birth > 0);
+        self.start_session(app, mtm, grid, theme, integration, working_directory)
     }
 
     /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
@@ -516,8 +732,8 @@ impl TerminalWindow {
         grid: Grid,
         theme: Theme,
         integration: Vec<(String, String)>,
-        dock: bool,
-    ) {
+        working_directory: Option<PathBuf>,
+    ) -> std::io::Result<()> {
         let session = Session::spawn(
             SessionOptions {
                 // Duman ve ölçüm koşularında shell sabit: sonuç kullanıcının
@@ -552,7 +768,11 @@ impl TerminalWindow {
                 // "istisnasız") ve iki sabit betik de dizine ve yerele bağlı
                 // değil — `printf` ile `sleep`, `date` ile `printf`; yolları
                 // mutlak ya da `PATH`'ten, çıktıları ASCII.
-                working_directory: child::working_directory(),
+                //
+                // Dizin artık çağırandan: yeni sekme etkin sekmenin OSC 7
+                // dizininde (026 → Karar 4); süreli koşuda ve ilk pencerede
+                // `child::working_directory()`.
+                working_directory,
                 // Başlığın `~` kuralı; dizinle **aynı çözüm** (`child::home`).
                 home: child::home(),
                 // Shell entegrasyonu yerelin yanında, aynı haritada: ikisi de
@@ -569,22 +789,16 @@ impl TerminalWindow {
                 terminal: app.settings().terminal(),
                 theme,
                 // Dock'un **varlığı**, payı değil: `bt-core` caret'i ona göre
-                // devrediyor. Aynı doğum kararının öteki tüketicisi
-                // `dock_rows_at_birth`; ikisi çağıranda tek ifadeden çıkıyor
-                // (`start`'ın `birth`'ü), yani ayrışamazlar.
-                dock,
+                // devrediyor. Kaynağı doğum payının yuvası (`start` onu bir
+                // satır önce yazdı) ve alternatif ekran habercisinin kapısı da
+                // aynı yuvayı okuyor, yani ayrışamazlar.
+                dock: self.ivars().dock_rows_at_birth.get() > 0,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );
-        let session = match session {
-            Ok(session) => Arc::new(session),
-            // `didFinishLaunching` hata döndüremez ve shell'siz bir terminal
-            // penceresi boş bir kutudur: sessizce açık kalmaktansa çık.
-            Err(e) => {
-                eprintln!("bateri: shell başlatılamadı: {e}");
-                std::process::exit(1);
-            }
-        };
+        // Shell'siz bir terminal penceresi boş bir kutudur; ne yapılacağı
+        // çağıranın (ilk pencere: süreç çıkar; sonrakiler: o pencere kapanır).
+        let session = Arc::new(session?);
         // Kapanış sırası oturuma link üzerinden değil buradan uzanır, klavye
         // de kendi kopyasını tutar; üçü de ana thread'de yaşıyor, yani son
         // referansın nerede düşeceği belli (bkz. `shutdown`).
@@ -626,7 +840,7 @@ impl TerminalWindow {
         // link'in `Waker`'ı kalır, pencere shell çıktısına bir daha hiç
         // uyanmaz ve tek satır iz kalmaz.
         assert!(
-            self.ivars().wake.waker.set(link.waker()).is_ok(),
+            self.ivars().wake.slot().replace(link.waker()).is_none(),
             "waker ikinci kez kuruldu"
         );
         // Fare eşlemesinin dikey orijini: `set_metrics` gibi pencere değil
@@ -661,6 +875,7 @@ impl TerminalWindow {
         // gelmez ve `focused` `true` kalırdı: odaksız pencere dolu caret
         // çizer ve blink saatini kurardı (`/code-review`).
         self.apply_focus(self.ivars().window.isKeyWindow());
+        Ok(())
     }
 
     /// Alternatif ekran değişti: dock kalkıyor ya da iniyor.
@@ -793,22 +1008,38 @@ impl TerminalWindow {
         }
     }
 
-    /// Kapanış sırasının pencereye düşen iki adımı; sırayı ve gerekçesini
-    /// `AppDelegate::shutdown` anlatıyor.
+    /// Kapanış sırasının pencereye düşen adımları — **başlatır, beklemez**.
+    /// İki çağıranı var: pencerenin kapanışı (`windowWillClose:`, tutamak
+    /// düşüyor) ve uygulamanın kapanışı (`AppDelegate::shutdown`, bütün
+    /// tutamaklar tek son tarihe kadar bekleniyor).
     ///
     /// 1. Ritmi kes (`DisplayLink::stop`): link durur, run loop'tan çıkar ve
     ///    uyandırma kapısı kapanır. Bundan sonra yeni kare istenmez.
-    /// 2. Oturumu kapat: `SIGHUP` + okuyucu thread'in bitişi, **sınırlı**
-    ///    bekleyerek (`bt-core`'un `SHUTDOWN_GRACE`'i).
+    /// 2. `Waker`'ı `ShellWake`'ten **sök** ve burada, ana thread'de düşür
+    ///    ([`ShellWake::detach`]): `ShellWake`'in son kopyası okuyucu ya da
+    ///    `"PTY teardown"` thread'inde düşebilir ve orada `Waker` taşımamalı.
+    /// 3. Oturumun kapanışını başlat (`Session::begin_shutdown`: `SIGHUP` +
+    ///    okuyucu thread'in bitişi arkada).
     ///
-    /// `DisplayLink` bilerek **düşürülmüyor**, yalnız durduruluyor (gerekçe
-    /// `AppDelegate::shutdown`'da). Sonuç raporu besliyor (`kapanis=`): oturum
-    /// hiç doğmadıysa `None` ve o da bir cevap — kapanacak bir şey yoktu.
-    pub(crate) fn shutdown(&self) -> Option<Teardown> {
+    /// `DisplayLink` artık **düşürülebilir** ve pencere nesnesiyle ana
+    /// thread'de düşüyor: son `Waker` kopyası sökmeden sonra ya bu nesnede ya
+    /// da Metal'in tamamlanma bloğunda; ikincisi ana kuyruğa senkron iş atar
+    /// ama ana thread o sırada beklemede değil — pencere kapanışı beklemiyor,
+    /// ⌘Q ise pencereleri bekleme bitene kadar listede tutuyor.
+    ///
+    /// İdempotent: ikinci çağrı [`Closing::AlreadyDone`] döner (`stop`
+    /// mandallı, `detach` `take`, `begin_shutdown` `Option`). Oturum hiç
+    /// doğmadıysa `None` — kapanacak bir şey yok.
+    pub(crate) fn begin_close(&self) -> Option<Closing> {
         if let Some(link) = self.ivars().link.get() {
             link.stop();
         }
-        self.ivars().session.get().map(|session| session.shutdown())
+        drop(self.ivars().wake.detach());
+        let session = self.ivars().session.get()?;
+        Some(match session.begin_shutdown() {
+            Some(handle) => Closing::Started(handle),
+            None => Closing::AlreadyDone,
+        })
     }
 
     /// Pencere geometrisi ya da font oynadı: layer'ı eşle, grid'i güncelle,
@@ -871,5 +1102,38 @@ impl TerminalWindow {
             cell,
             self.ivars().dock_rows.get(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tab_index;
+
+    #[test]
+    fn numbered_tabs_select_the_nth_or_nothing() {
+        assert_eq!(tab_index(1, 3), Some(0));
+        assert_eq!(tab_index(3, 3), Some(2));
+        assert_eq!(tab_index(4, 3), None, "olmayan sekme no-op");
+        assert_eq!(tab_index(8, 8), Some(7));
+        assert_eq!(
+            tab_index(8, 20),
+            Some(7),
+            "⌘8 dokuzdan fazla sekmede de sekizinci"
+        );
+    }
+
+    #[test]
+    fn nine_selects_the_last_tab() {
+        assert_eq!(tab_index(9, 1), Some(0), "tek sekmede ⌘9 o sekme");
+        assert_eq!(tab_index(9, 3), Some(2));
+        assert_eq!(tab_index(9, 20), Some(19));
+    }
+
+    #[test]
+    fn no_tabs_or_unknown_tags_select_nothing() {
+        assert_eq!(tab_index(1, 0), None);
+        assert_eq!(tab_index(9, 0), None);
+        assert_eq!(tab_index(0, 3), None);
+        assert_eq!(tab_index(10, 12), None);
     }
 }

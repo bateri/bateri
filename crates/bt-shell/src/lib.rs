@@ -13,11 +13,13 @@
 //! kayıt anında yeniden okuyabilsin diye izleyen (`watch`) ve tanısını
 //! pencere alt başlığında gösteren (`notices`) de burası; ayrıştırma ve fark
 //! `bt-core`'da. Sistemin açık/koyu görünümünü okuyup temayı seçen de
-//! (`app`, view'dan hedefsiz eylemle). Ana menü (`menu`) uygulama, Edit ve
-//! View menüsü; öğeleri hedefsiz eylem. View'da Theme ▸ seçimi ayar dosyasına
-//! yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan ve pencereye ait geçici
-//! punto (`zoom`).
-//! Tek pencere; sekme, bölme ve IME sonraki setlerde.
+//! (`app`, view'dan hedefsiz eylemle). Ana menü (`menu`) uygulama, Shell,
+//! Edit, View ve Window menüsü; öğeleri hedefsiz eylem. View'da Theme ▸ seçimi
+//! ayar dosyasına yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan ve pencereye
+//! ait geçici punto (`zoom`).
+//! **Çok pencere ve macOS'un kendi sekmeleri** (`.tasks/026-sekmeler`): her
+//! sekme bir `NSWindow` ve kendi oturumu (`window`); pencereleri açan,
+//! listeleyen ve kapanışı paralel yürüten `app`. Bölme ve IME sonraki setlerde.
 
 pub(crate) mod app;
 mod child;
@@ -106,9 +108,11 @@ pub struct Options {
 }
 
 /// Uygulamayı kurar ve `NSApplication::run` ile ana döngüye girer. **Dönmez:**
-/// son pencere kapanınca ve shell çıkınca (`child_exit` → `terminate:`) AppKit
-/// yoluyla, `BT_RUN_SECONDS` yolu `process::exit` ile süreçten çıkar; `Ok(())`
-/// yalnız AppKit'in `run`'ı bir gün dönerse görülür.
+/// etkileşimli oturum yalnız Quit (Cmd-Q, `terminate:`) ile çıkar — son
+/// pencere kapanınca da, kabuk çıkınca da (o pencere kapanır) uygulama açık
+/// kalır. `BT_RUN_SECONDS` yolu `process::exit` ile çıkar; orada kabuğun
+/// çıkışı (`child_exit` → `terminate:`) ve son pencerenin kapanması da süreci
+/// bitiriyor. `Ok(())` yalnız AppKit'in `run`'ı bir gün dönerse görülür.
 ///
 /// **`Err` bugün dönmüyor.** Renderer'ı artık ilk pencere kuruyor (pencere
 /// başına renderer, `.tasks/026-sekmeler/discussion.md` → Karar 2a) ve o an

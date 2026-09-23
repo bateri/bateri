@@ -91,14 +91,71 @@ _Requirements: R3, R3.1, R3.2, R3.3, R3.4, R3.5, R3.6, R3.7, R5_
 
 ## Checklist
 
-- [ ] Tabbing açık, ortak kimlik, `open_window` tek yol
-- [ ] ⌘N / ⌘T / `+` / ⌘W / ⇧⌘W; Shell ve Window menüleri, AppKit öğeleri çiftlenmedi
-- [ ] ⌃⇥ yolu doğrulandı (Uygulama Notları)
-- [ ] ⌘1…⌘9 saf eşleme ve sınaması
-- [ ] Pencere kapanışı: stop → waker sök → kapanışı başlat → düş
-- [ ] `child_exit` süreli koşuda `terminate:`, değilse o pencere
-- [ ] Son pencere / reopen; ⌘Q paralel tek son tarih
-- [ ] Arka plan sekmesinin örtülme sinyali doğrulandı
-- [ ] `lib.rs`, `menu.rs`, `wake.rs` başlıkları ve `CLAUDE.md` aynı commit'te
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Tabbing açık, ortak kimlik, `open_window` tek yol
+- [x] ⌘N / ⌘T / `+` / ⌘W / ⇧⌘W; Shell ve Window menüleri, AppKit öğeleri çiftlenmedi
+- [x] ⌃⇥ yolu doğrulandı (Uygulama Notları)
+- [x] ⌘1…⌘9 saf eşleme ve sınaması
+- [x] Pencere kapanışı: stop → waker sök → kapanışı başlat → düş
+- [x] `child_exit` süreli koşuda `terminate:`, değilse o pencere
+- [x] Son pencere / reopen; ⌘Q paralel tek son tarih
+- [x] Arka plan sekmesinin örtülme sinyali doğrulandı
+- [x] `lib.rs`, `menu.rs`, `wake.rs` başlıkları ve `CLAUDE.md` aynı commit'te
+- [~] Doğrulama geçti (`make hepsi` + `make test-yaris` yeşil; `make duman`
+      [~] ortam (bkz. phase-1): aynı `MotionUnsettled`, `hareket=7`, sessiz
+      ~915 ms; geçici bir satırla basılan jetonlar `hucre=8 glif=6 kural=15
+      kapanis=clean pipeline=ok`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi (tek bulgu: Dock
+      ikonu açık bir About panelinde pencere açmıyordu — ölçüt artık yalnız
+      pencere listesi; ⇧⌘W'nin arka sekmeyi kapattığı elle sınanmıştı)
+
+## Uygulama Notları
+
+- **⌃⇥ menü kısayolu olarak yakalanıyor** (ölçüldü, System Events ile tuş
+  gönderip hangi pencerenin key olduğuna bakarak): `keyDown:` el değmedi.
+  ⌃⇥ `"\t"` + Control, ⌃⇧⇥ `"\t"` + Control|Shift ile eşleşiyor. Ctrl-I zsh'e
+  hâlâ sekme olarak gidiyor (tamamlama çalıştı).
+- **AppKit sekme gezinme öğelerini eklemiyor** (ölçüldü, menü dökümü ve
+  açılmış Window menüsünün AX listesi): tabbing açıkken View'a Show/Hide Tab
+  Bar ve Show All Tabs, Window'a yerleşim öğeleri (Fill, Center, Move &
+  Resize, Full Screen Tile…) ve alternatifler, Shell'e Close All (⌥⌘W)
+  geliyor; Show Previous/Next Tab, Move Tab to New Window ve Merge All Windows
+  **gelmiyor**. Karar 6'nın "AppKit'in" dediği son ikisi bu yüzden bizim
+  Window menümüzde (NSWindow eylemleri, AppKit doğruluyor). ⇧⌘[ / ⇧⌘] görünür
+  öğe (`{`/`}`), ⌃⇧⇥ / ⌃⇥ **gizli** öğe + `allowsKeyEquivalentWhenHidden` —
+  bir öğe iki kısayol taşıyamıyor ve başlık iki kez görünmesin (Safari'nin
+  deyimi); her kısayol tek öğede.
+- **Seçili olmayan sekme `windowDidChangeOcclusionState:` alıyor** (geçici
+  log): arkaya düşen sekme `visible=false`, öne gelen `true`. Ek kanca
+  gerekmedi; yorum `window.rs`'te.
+- **Türkçe Q'da** ⇧⌘] / ⇧⌘[ (fiziksel ] / [ tuşları) çalıştı; AppKit'in
+  kısayol yerelleştirmesi `,`'ü `ö`'ye, `+`'yı `:`'ya çeviriyor (menü dökümü).
+- **Listeden çıkış bir tur erteleniyor** (`AppDelegate::forget_window`):
+  listenin `Retained`'ı nesnenin tek güçlü referansı; `windowWillClose:`
+  içinde düşseydi nesne kendi metodunda serbest kalırdı. Kapanan pencerenin
+  delegate'i orada `None` yapılıyor.
+- **Oturum açılamazsa da süreç çıkmıyor** (phase-1 notunun genişlemesi):
+  `start_session`'daki `Session::spawn` hatası eskiden `process::exit(1)`'di;
+  artık `start` `io::Result` dönüyor, ⌘T/⌘N'de pencere kapanıyor ve satır
+  stderr'e, yalnız ilk pencerede süreç çıkıyor.
+- **Ayarlar ilk pencereden önce okunuyor**: `load_settings` artık tema
+  döndürmüyor ve pencere listesine uzanmıyor; yeni pencere fontu
+  (`request_font`) ve alt başlığı (`notices.subtitle()`) doğarken alıyor,
+  tema etkin pencerenin oturumundan ya da `resolve_theme`'den
+  (`choose_theme`) geliyor.
+- **`start_session`'ın `dock` argümanı kalktı** (clippy: sekiz argüman);
+  değer bir satır önce yazılan `dock_rows_at_birth` yuvasından.
+- **Dock ikonu**: pencere hiç yokken yeni pencere, varsa (simge durumunda da)
+  AppKit'in varsayılanı — simge durumundakini geri getirmek. Elle
+  sınanamadı (paketsiz binary'ye reopen olayı gönderilemedi) → phase-4 gözle
+  kontrolünün 8. sahnesinde zaten var.
+- **Elle sınanan** (System Events, kendi başlattığım süreç): ⌘T ikinci
+  sekmeyi birincinin dizininde açıyor; ⌃⇥/⌃⇧⇥, ⇧⌘]/⇧⌘[, ⌘1, ⌘2, ⌘9;
+  `+` düğmesi; Move Tab to New Window / Merge All Windows; `exit` ve ⌘W yalnız
+  o sekmeyi kapatıyor ve zsh `ps`'te kalmıyor; ⇧⌘W iki sekmeyi kapatıyor ve
+  uygulama açık kalıyor; pencere yokken ⌘N evde açıyor; üç sekmeyle ⌘Q
+  ~0,3 sn'de (osascript'in 0,3 sn'lik gecikmesi hariç) bitiyor ve çocuk kalmıyor.
+- `NSWindowTabGroup` bayrağı eklendi (`tabbedWindows` tek sekmede `nil`);
+  `Cargo.lock` oynamadı.
+- `make hepsi` bir koşuda `bt-shell` lib sınamalarında bilinen SIGSEGV
+  (008 phase-5, 021 phase-1) ile düştü; ardından `bt-shell` üç koşuda ve
+  `make hepsi` yeşil.

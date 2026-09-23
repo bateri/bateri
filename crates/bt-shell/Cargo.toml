@@ -34,6 +34,9 @@ objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLoc
 # sürükleme hedefi (`view::BateriView`, 018 phase-3) — `NSDraggingDestination`,
 # `NSDraggingInfo` ve `NSDragOperation` o bayrağın arkasında; protokolün
 # **bütün** metotları `#[optional]`, yani ikisini uygulamak yetiyor.
+# NSWindowTabGroup: sekme grubunun pencereleri (⇧⌘W, ⌘1…⌘9; 026 phase-3) —
+# `tabbedWindows` çubuk görünmüyorken `nil` veriyor. Yalnız NSArray/NSString
+# başlıklarını çekiyor, ikisi zaten açık; `Cargo.lock` oynamadı.
 # `NSPasteboardTypeFileURL` ve `readObjectsForClasses:options:` burada bir
 # bayrak **istemiyor**: ikisi de workspace manifest'inin açtığı
 # `NSPasteboard` başlığının içinde (bu satır o seti kırpmıyor) ve okuma yolu
@@ -47,7 +50,7 @@ objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSLoc
 # aranacak; kaydı bu yorum.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAppearance", "NSCell", "NSDragging", "NSMenu",
-    "NSMenuItem", "NSTextInputClient", "NSWorkspace",
+    "NSMenuItem", "NSTextInputClient", "NSWindowTabGroup", "NSWorkspace",
 ] }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.
