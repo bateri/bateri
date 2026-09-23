@@ -14,7 +14,8 @@
 //! tek listede ayırt edilemezlerdi ([`crate::Renderer`]). Pipeline ise üç ve
 //! yüzeyden bağımsız: şeritler ve arka planlar `cell_bg`'nin, glyph'ler ve
 //! kural çizgileri `cell`'in, caret de `cell_bg`'nin vertex'ini paylaşan
-//! kardeş fragment'in (`caret`). Grubun içindeki listelerin ayrı durmasının
+//! kardeş fragment'in (`caret`). Seçimin listesi (031) altıncı pipeline'ın
+//! (`selection`): aynı `Instance`, kendi vertex'i ve köşe maskeli fragment'i. Grubun içindeki listelerin ayrı durmasının
 //! sebebi çizim sırası — glyph'ler arka planların, kurallar da glyph'lerin
 //! **üstüne** gelmek zorunda ve tek listede sıra hücre hücre karışırdı. Glyph
 //! ile kuralın ayrı listede olması da aynı cümlenin devamı: ikisi aynı
@@ -225,6 +226,69 @@ pub(crate) fn caret_radius_px(cell_px: (f32, f32), ratio: f32) -> f32 {
     (cell_px.1 * ratio)
         .min(cell_px.0 / 2.0)
         .min(cell_px.1 / 2.0)
+}
+
+/// Seçim şeklinin bir köşesi (031 phase-3); sırası [`selection_corners`]'ın
+/// dizisinde TL, TR, BR, BL — `selection_fragment`'in maske sırası.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Corner {
+    /// Açıkta kalan köşe: o kenardaki komşu satırın koşusu köşenin
+    /// sütununu örtmüyor (ya komşu yok, ya sütun onun dışında).
+    Convex,
+    /// Komşu koşu köşeyi örtüyor ve kenar ikisinde hizalı: şekil düz devam
+    /// ediyor.
+    Square,
+    /// Komşu köşeyi örtüyor **ve** bu koşunun kenarını aşıyor: köşe kare,
+    /// basamağın dışına bir içbükey dolgu parçası düşüyor. Dolguyu her zaman
+    /// **dar** koşu doğuruyor — geniş olanın o kenarı komşusunca örtülmüyor,
+    /// yani her basamak tam bir kez dolduruluyor.
+    Concave,
+}
+
+/// `runs[index]`'in dört köşesi (TL, TR, BR, BL).
+///
+/// Komşu yalnız **bitişik** satırın koşusu: araya koşusuz bir satır girerse
+/// (Karar 4 — çizilir hücresi olmayan satır koşu üretmez) şekil orada
+/// bölünüyor ve iki parça kendi köşelerini alıyor. `runs` satır sırasıyla ve
+/// satır başına en çok bir koşu (`bt_core::SelectionRuns::as_slice`).
+///
+/// Karar sütunda, pikselde değil: köşe o kenardaki komşunun o **sütunu**
+/// kapsayıp kapsamadığına bakıyor. Yalnız çaprazdan değen iki koşu (üstteki
+/// 5'ten başlıyor, alttaki 4'te bitiyor) birbirini örtmüyor ve iki dışbükey
+/// köşe veriyor — satır akışındaki seçimin olağan hâli.
+pub(crate) fn selection_corners(runs: &[SelectionRun], index: usize) -> [Corner; 4] {
+    let this = runs[index];
+    let adjacent = |other: Option<&SelectionRun>, row: Option<u16>| {
+        other.copied().filter(|o| Some(o.row) == row)
+    };
+    let above = index
+        .checked_sub(1)
+        .and_then(|i| adjacent(runs.get(i), this.row.checked_sub(1)));
+    let below = adjacent(runs.get(index + 1), this.row.checked_add(1));
+    // Sol köşe `first` sütununa, sağ köşe `last` sütununa bakıyor; komşu o
+    // sütunu kapsıyorsa kare, üstelik o yönde taşıyorsa içbükey.
+    let left = |n: Option<SelectionRun>| corner(n, this.first, |n| n.first < this.first);
+    let right = |n: Option<SelectionRun>| corner(n, this.last, |n| n.last > this.last);
+    [left(above), right(above), right(below), left(below)]
+}
+
+/// [`selection_corners`]'ın tek köşesi: komşu `col` sütununu örtüyor mu, ve
+/// örtüyorsa bu kenarı aşıyor mu.
+fn corner(
+    neighbour: Option<SelectionRun>,
+    col: u16,
+    extends: impl Fn(SelectionRun) -> bool,
+) -> Corner {
+    match neighbour {
+        Some(n) if (n.first..=n.last).contains(&col) => {
+            if extends(n) {
+                Corner::Concave
+            } else {
+                Corner::Square
+            }
+        }
+        _ => Corner::Convex,
+    }
 }
 
 /// Caret'in **iki** dikdörtgeni; ikisi de sol üst köşe + ölçü, pencere uzayı.
@@ -575,17 +639,20 @@ pub(crate) struct Frame {
     /// sayardı). Üçüncü bir liste ikisini de temsil edilemez kılıyor.
     stripes: Vec<RuleCell>,
     bg: Vec<Instance>,
-    /// Fareyle seçimin satır koşuları (031); arka planlarla **aynı**
-    /// pipeline'dan (`cell_bg`) ama ayrı listede ve onlardan **sonra**,
-    /// caret'ten ve glyph'lerden önce çiziliyor
+    /// Fareyle seçimin satır koşuları ve içbükey dolguları (031); kendi
+    /// pipeline'ından (`selection`, köşe maskeli SDF), arka planlardan
+    /// **sonra**, caret'ten ve glyph'lerden önce çiziliyor
     /// ([`Renderer::encode_pass`](crate::renderer::Renderer)).
     ///
-    /// Ayrılığın sebebi şeridinkiyle aynı: `bg`'ye girseydi ya sayılarak
+    /// Listenin ayrılığının pipeline dışındaki sebebi şeridinkiyle aynı: `bg`'ye girseydi ya sayılarak
     /// girer ve `hucre=` jetonunun anlamı kayardı ("çizilen hücre" bir satır
     /// koşusunu da sayardı), ya da sayılmadan girer ve `bg_count`'un
     /// bekçisini delerdi. Sayacı **yok**: duman reçetesinde seçim yok, yani
     /// jeton hiçbir şey söylemezdi; kanıtı `renderer.rs`'in offscreen okuması.
     selection: Vec<Instance>,
+    /// Seçimin bu karedeki rengi ([`Frame::push_selection`] yazıyor);
+    /// hareket karesi listeyi koruduğu gibi onu da koruyor.
+    selection_rgba: [f32; 4],
     glyphs: Vec<GlyphCell>,
     /// Kural çizgileri; glyph'lerle **aynı** pipeline'dan ama onlardan sonra
     /// çizilir (üstü çizili, altındaki harfin üstünden geçmeli).
@@ -984,28 +1051,84 @@ impl Frame {
         }
     }
 
-    /// Seçimin bir satır koşusu: `first..=last` sütunlarını kaplayan **tek**
-    /// düz dörtgen, verilen renkte.
+    /// Seçimin satır koşuları: koşu başına **tek** dörtgen, yuvarlak köşeli
+    /// tek parça şeklin parçaları olarak (031 phase-3).
     ///
     /// Koşu başına bir instance, hücre başına değil: köprülenen boşlukların
     /// kendi hücresi yok (sink'e hiç uğramıyorlar) ve komşu dörtgenlerin
     /// dikişi kesirli hücre genişliğinde yarı saydam bir çizgi bırakabilirdi.
+    ///
+    /// **Dilimin tamamı birden**, koşu koşu değil: bir köşenin kararı komşu
+    /// satırın koşusuna bağlı ([`selection_corners`]). Instance'ın `rgba`
+    /// yuvası burada renk değil **köşe maskesi** — köşe başına `1` dışbükey,
+    /// `0` kare; içbükey dolgu ayrı bir `r×r` instance ve maskesinde dairenin
+    /// merkezi olan köşe `-1` (`selection_fragment`). Renk ile yarıçap kare
+    /// başına tek ve uniform ([`Frame::selection_rgba`],
+    /// [`Frame::selection_radius`]), caret'in hizalama kaçışıyla aynı yol.
+    ///
     /// Renk odağa göre çağıranın seçimi (`bt_core::SelectionRuns::color`):
     /// odak `bt-core`'a girmiyor, burada da sorulmuyor.
-    pub(crate) fn push_selection(&mut self, run: SelectionRun, rgba: LinearRgba) {
+    pub(crate) fn push_selection(&mut self, runs: &[SelectionRun], rgba: LinearRgba) {
         debug_assert!(self.cell_px.0 > 0.0, "clear(metrics) çağrılmadı");
-        debug_assert!(run.first <= run.last, "ters koşu: {run:?}");
-        let cols = f32::from(run.last.saturating_sub(run.first)) + 1.0;
-        self.selection.push(Instance {
-            pos: self.pos(run.first, run.row),
-            size: [cols * self.cell_px.0, self.cell_px.1],
-            rgba: rgba.to_array(),
-        });
+        self.selection_rgba = rgba.to_array();
+        let r = self.selection_radius();
+        let (cw, ch) = self.cell_px;
+        for (index, run) in runs.iter().enumerate() {
+            debug_assert!(run.first <= run.last, "ters koşu: {run:?}");
+            let corners = selection_corners(runs, index);
+            let pos = self.pos(run.first, run.row);
+            let width = (f32::from(run.last.saturating_sub(run.first)) + 1.0) * cw;
+            self.selection.push(Instance {
+                pos,
+                size: [width, ch],
+                rgba: corners.map(|c| if c == Corner::Convex { 1.0 } else { 0.0 }),
+            });
+            if r <= 0.0 {
+                continue;
+            }
+            let (x0, x1) = (pos[0], pos[0] + width);
+            let (y0, y1) = (pos[1], pos[1] + ch);
+            // Dolgu basamağın **dışında**, bu koşunun kendi satır bandında:
+            // köşenin yanındaki `r×r` kare, dairenin merkezi o karenin
+            // köşeden en uzak ucu. Sıra [`Corner`]'ınki (TL, TR, BR, BL);
+            // ikinci sayı dolgu dörtgeninin merkezi taşıyan köşesi.
+            let fills = [
+                ([x0 - r, y0], 3),
+                ([x1, y0], 2),
+                ([x1, y1 - r], 1),
+                ([x0 - r, y1 - r], 0),
+            ];
+            for (corner, (fill_pos, centre)) in corners.into_iter().zip(fills) {
+                if corner != Corner::Concave {
+                    continue;
+                }
+                let mut mask = [0.0; 4];
+                mask[centre] = -1.0;
+                self.selection.push(Instance {
+                    pos: fill_pos,
+                    size: [r, r],
+                    rgba: mask,
+                });
+            }
+        }
     }
 
-    /// Bu karenin seçim koşuları; [`Frame::push_selection`]'ın dörtgenleri.
+    /// Bu karenin seçim parçaları; [`Frame::push_selection`]'ın dörtgenleri.
     pub(crate) fn selection_instances(&self) -> &[Instance] {
         &self.selection
+    }
+
+    /// Seçimin rengi, lineer — `selection_fragment`'in renk uniform'u.
+    pub(crate) fn selection_rgba(&self) -> [f32; 4] {
+        self.selection_rgba
+    }
+
+    /// Seçimin köşe yarıçapı, piksel: caret'in **varsayılan** oranı
+    /// ([`bt_core::CURSOR_RADIUS`]), kullanıcının `cursor_radius`'u değil
+    /// (Karar 10 — anahtar imlecin). Kırpması [`caret_radius_px`]'ten, yani
+    /// tek hücrelik koşuda yarım genişlik.
+    pub(crate) fn selection_radius(&self) -> f32 {
+        caret_radius_px(self.cell_px, bt_core::CURSOR_RADIUS as f32)
     }
 
     /// Bir komut bloğunun işareti: **0. sütuna**, komutun kendi satırına
@@ -1958,12 +2081,93 @@ mod tests {
     /// `cursor_alpha_reaches_the_block_and_the_text`.
     const OPAQUE: f32 = 1.0;
 
+    #[test]
+    fn a_lone_run_rounds_all_four_corners() {
+        let runs = [run(3, 2, 9)];
+        assert_eq!(selection_corners(&runs, 0), [Corner::Convex; 4]);
+    }
+
+    #[test]
+    fn two_equal_runs_square_their_inner_corners() {
+        use Corner::{Convex, Square};
+        let runs = [run(3, 2, 9), run(4, 2, 9)];
+        assert_eq!(
+            selection_corners(&runs, 0),
+            [Convex, Convex, Square, Square]
+        );
+        assert_eq!(
+            selection_corners(&runs, 1),
+            [Square, Square, Convex, Convex]
+        );
+    }
+
+    #[test]
+    fn a_step_gets_one_concave_fill_from_the_narrower_run() {
+        use Corner::{Concave, Convex, Square};
+        // Akış seçiminin tipik hâli: üstte 4'ten satır sonuna, altta satır
+        // başından sona. Sol kenarda alt satır uzuyor → üst koşunun BL'si
+        // içbükey; sağ kenar hizalı → kare.
+        let runs = [run(3, 4, 9), run(4, 0, 9)];
+        assert_eq!(
+            selection_corners(&runs, 0),
+            [Convex, Convex, Square, Concave]
+        );
+        assert_eq!(
+            selection_corners(&runs, 1),
+            [Convex, Square, Convex, Convex]
+        );
+        // Ters basamak: alt koşu dar ve sağda kalıyor → onun TR'si içbükey.
+        let runs = [run(3, 0, 9), run(4, 0, 5)];
+        assert_eq!(
+            selection_corners(&runs, 0),
+            [Convex, Convex, Convex, Square]
+        );
+        assert_eq!(
+            selection_corners(&runs, 1),
+            [Square, Concave, Convex, Convex]
+        );
+        // Dolgu yalnız dar koşuda: iki satırın içbükey köşe toplamı tek.
+        let concave = |runs: &[SelectionRun]| {
+            (0..runs.len())
+                .flat_map(|i| selection_corners(runs, i))
+                .filter(|&c| c == Concave)
+                .count()
+        };
+        assert_eq!(concave(&[run(3, 4, 9), run(4, 0, 9)]), 1);
+        assert_eq!(
+            concave(&[run(3, 3, 6), run(4, 0, 9)]),
+            2,
+            "iki yanda basamak"
+        );
+    }
+
+    #[test]
+    fn diagonal_runs_touch_only_at_a_point_and_stay_convex() {
+        // Üstteki 5'ten başlıyor, alttaki 4'te bitiyor: aynı sütunu hiç
+        // paylaşmıyorlar, yani iki ayrı yuvarlak parça.
+        let runs = [run(3, 5, 9), run(4, 0, 4)];
+        assert_eq!(selection_corners(&runs, 0), [Corner::Convex; 4]);
+        assert_eq!(selection_corners(&runs, 1), [Corner::Convex; 4]);
+    }
+
+    #[test]
+    fn a_blank_row_between_runs_splits_the_shape() {
+        let runs = [run(3, 0, 9), run(5, 0, 9)];
+        assert_eq!(selection_corners(&runs, 0), [Corner::Convex; 4]);
+        assert_eq!(selection_corners(&runs, 1), [Corner::Convex; 4]);
+    }
+
     /// Sol payı **sıfır** olan ızgara ölçüsü: bu modüldeki sınamaların çoğu
     /// listelerin düzenini soruyor, orijini değil, ve sıfır pay onların
     /// beklenen piksellerini hücre aritmetiğinde tutuyor. Payın kendi
     /// sınamaları [`GUTTER`]'ı kullanıyor ve adıyla anıyor.
     fn grid(width: u16, height: u16) -> CellMetrics {
         CellMetrics::new(width, height, width, 0, 1).expect("sıfır olmayan hücre")
+    }
+
+    /// Seçimin satır koşusu; köşe kararı sınamalarının kısaltması.
+    fn run(row: u16, first: u16, last: u16) -> SelectionRun {
+        SelectionRun { row, first, last }
     }
 
     /// Payı sorgulayan sınamaların ölçüsü. Değer üretimdekiyle aynı olmak

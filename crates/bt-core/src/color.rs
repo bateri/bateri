@@ -155,12 +155,15 @@ impl Theme {
         // ölçüm değil.** Siyah zeminde açık olmak zorunda: altındaki harf
         // zemin rengiyle, yani siyahla çiziliyor.
         cursor: 0xd9b063,
-        // Soğuk, koyu bir lacivert; `accent`'in ailesinden ama ondan çok
-        // koyu, çünkü üstünde metin okunacak: ön plan da renkli sekizli de
-        // açık. **Zevk kararı, ölçüm değil.** Paletin griye yakın iki
-        // siyahından (`0x22252b`, `0x4a4e57`) ton olarak ayrık — seçim bir
-        // `\e[40m` bloğu gibi okunmamalı.
-        selection: 0x2b3a50,
+        // Soğuk, koyu ve **az doygun** bir arduvaz; `accent`'in ailesinden ama
+        // ondan çok koyu, çünkü üstünde metin okunacak. Ölçüt: zeminde 3:1'i
+        // geçen her metin rengi seçimde de 3:1'i geçiyor (en zayıfı `red`,
+        // 3.84; hesap 031 phase-3 → Uygulama Notları). Doygunluk bilerek
+        // düşük: daha mavi bir ton (`0x2b3a50`) ANSI mavisiyle aynı renk
+        // ailesinde kalıp o metni oranın söylediğinden zor okutuyordu. Paletin
+        // griye yakın iki siyahından (`0x22252b`, `0x4a4e57`) ton olarak
+        // ayrık — seçim bir `\e[40m` bloğu gibi okunmamalı.
+        selection: 0x283042,
         success: 0x8bb58b,
         error: 0xd16d6a,
         ansi: [
@@ -203,8 +206,11 @@ impl Theme {
         // Koyu temanın tonu doğrudan taşınamaz; aynı ailenin bronzu.
         cursor: 0x8a6512,
         // Açık bir buz mavisi: metin koyu, yani seçim zeminin bir adım
-        // koyusu. Parlak beyazdan (`0xdcdee3`) ton olarak ayrık.
-        selection: 0xc9d8ee,
+        // koyusu. Koyu temanınkiyle aynı ölçüt — zeminde 3:1'i geçen her
+        // metin rengi seçimde de geçiyor (en zayıfı `bright_yellow`, 3.03);
+        // bir önceki değer (`0xc9d8ee`) parlak sarı, yeşil ve camgöbeğini 3:1'in
+        // altına indiriyordu. Parlak beyazdan (`0xdcdee3`) ton olarak ayrık.
+        selection: 0xdde6f3,
         success: 0x3b7a3b,
         error: 0xb5423d,
         ansi: [

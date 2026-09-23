@@ -129,3 +129,77 @@ fragment float4 caret_fragment(Out in [[stage_in]],
     // birlikte sönüyor ve ikinci bir yol yazılmıyor (R6).
     return float4(in.rgba.rgb, in.rgba.a * max(body, halo));
 }
+
+// ---------------------------------------------------------------------------
+// Seçimin kendi vertex'i ve fragment'i (031 phase-3)
+// ---------------------------------------------------------------------------
+//
+// `Instance` AYNEN — yeni bir #[repr(C)] ↔ .metal çifti yok, stride assert'leri
+// yerinde. Değişen `rgba`'nın ANLAMI: burada renk değil köşe maskesi
+// (bt_gpu::frame::Frame::push_selection), sıra TL, TR, BR, BL:
+//
+//   koşu    →  köşe başına 1 = dışbükey yuvarlak, 0 = kare
+//   dolgu   →  r×r'lik parça; dairenin merkezi olan köşe -1, kalanı 0
+//
+// Renk ve yarıçap kare başına tek, çıplak uniform (`caret_fragment`'in
+// hizalama kaçışı).
+//
+// Vertex ayrı, çünkü fragment kendi dörtgenini bilmek zorunda ve
+// `cell_bg_vertex`'in çıkışı onu taşımıyor. Caret bunu Rust'ta pencere
+// uzayında yazılmış bir `core` uniform'uyla çözüyor — tek instance için
+// yeterli; seçimde instance başına dörtgen var, yani dörtgenin kendisi
+// varying olarak geçiyor. `local` dörtgen merkezine göre piksel ve
+// viewport'tan bağımsız: öteleme (`origin_px`) onu hiç görmüyor.
+struct SelectionOut {
+    float4 position [[position]];
+    // Doğrusal interpolasyon köşeden türeyen afin bir koordinatı fragment
+    // merkezinde TAM veriyor; `flat` olsaydı dörtgen boyunca sabit kalırdı.
+    float2 local;
+    float2 half_size [[flat]];
+    float4 mask [[flat]];
+};
+
+vertex SelectionOut selection_vertex(uint vid [[vertex_id]],
+                                     uint iid [[instance_id]],
+                                     device const Instance* inst [[buffer(0)]],
+                                     constant float2& viewport_px [[buffer(1)]]) {
+    Instance it = inst[iid];
+    float2 corner = float2(vid & 1, vid >> 1);
+    float2 ndc = (it.pos + corner * it.size) / viewport_px * 2.0 - 1.0;
+    SelectionOut o;
+    o.position = float4(ndc.x, -ndc.y, 0.0, 1.0);
+    o.local = (corner - 0.5) * it.size;
+    o.half_size = it.size * 0.5;
+    o.mask = it.rgba;
+    return o;
+}
+
+fragment float4 selection_fragment(SelectionOut in [[stage_in]],
+                                   constant float4& color [[buffer(0)]],
+                                   constant float& radius [[buffer(1)]]) {
+    float2 p = in.local;
+    float4 m = in.mask;
+    float coverage;
+    if (any(m < 0.0f)) {
+        // İçbükey dolgu: dairenin DIŞINI boyuyor. Merkez maskedeki -1'in
+        // köşesi; parça r×r olduğu için dairenin yayı basamağın iç köşesini
+        // yuvarlıyor ve parçanın dış iki kenarı dairenin içinde kalıyor.
+        float2 unit = m.y < 0.0f ? float2(1.0f, 0.0f)
+                    : m.z < 0.0f ? float2(1.0f, 1.0f)
+                    : m.w < 0.0f ? float2(0.0f, 1.0f)
+                                 : float2(0.0f, 0.0f);
+        float2 centre = (unit - 0.5f) * in.half_size * 2.0f;
+        coverage = smoothstep(-0.5f, 0.5f, length(p - centre) - radius);
+    } else {
+        // Köşe başına yarıçap: pikselin çeyreği hangi köşeyse onun kodu.
+        // Pencere uzayında y aşağı, yani `p.y < 0` üst yarı. Kare köşede
+        // yarıçap 0 ve SDF düz kutunun ta kendisi; kenarlar piksel ızgarasına
+        // oturduğu için ±0.5'lik yumuşatma orada tam 0/1 veriyor — alt alta
+        // iki koşu dikişsiz birleşiyor.
+        float code = p.y < 0.0f ? (p.x < 0.0f ? m.x : m.y)
+                                : (p.x < 0.0f ? m.w : m.z);
+        float d = rounded_box_sdf(p, in.half_size, code * radius);
+        coverage = 1.0f - smoothstep(-0.5f, 0.5f, d);
+    }
+    return float4(color.rgb, color.a * coverage);
+}

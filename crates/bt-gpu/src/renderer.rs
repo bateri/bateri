@@ -295,9 +295,18 @@ pub struct Renderer {
     /// `GlyphInstance`'ı genişletmek bütün glyph listelerinin stride'ını
     /// animasyonlu bir avuç glyph için büyütürdü
     /// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 5).
-    /// Emoji için ayrı bir kardeş gerekmiyor: blend beş pipeline'da aynı ve
+    /// Emoji için ayrı bir kardeş gerekmiyor: blend altı pipeline'da aynı ve
     /// iki doku birden bağlı, düzlem instance'tan.
     glyph_fx: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Fareyle seçimi çizen pipeline (031) — **altıncı**, `Instance`'ı aynen
+    /// okuyan kendi vertex'i (`selection_vertex`) ve köşe maskeli fragment'i.
+    ///
+    /// `cell_bg`'den ayrı olmasının sebebi caret'inkiyle aynı (yuvarlak köşe
+    /// bir SDF istiyor ve onu her arka plan dörtgenine ödetmenin anlamı yok);
+    /// vertex'in ayrı olmasının sebebi fragment'in kendi dörtgenini bilmek
+    /// zorunda olması — caret tek dörtgen olduğu için onu uniform'dan alıyor,
+    /// seçimde dörtgen başına bir tane var.
+    selection: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Son **gönderilen** karedeki arka plan hücresi sayısı; `make duman`'ın
     /// `hucre=K` jetonu. `frames`'in yanında duruyor çünkü ikisi de aynı
     /// soruya bakan tanı sayaçları ve tek yerden okunmaları gerekiyor.
@@ -392,6 +401,9 @@ impl Renderer {
         // Yazım efektleri: kendi vertex'i (şişen dörtlü) ve fragment'i (ters
         // dönüşüm, iki doku).
         let glyph_fx = pipeline(&device, &library, "glyph_fx_vertex", "glyph_fx_fragment")?;
+        // Seçim: kendi vertex'i (dörtgeni fragment'e taşıyor) ve köşe maskeli
+        // fragment'i; blend yuvarlak köşenin kenar yumuşatması için.
+        let selection = pipeline(&device, &library, "selection_vertex", "selection_fragment")?;
         let queue = device.newCommandQueue().ok_or(GpuError::NoCommandQueue)?;
 
         Ok(Self {
@@ -402,6 +414,7 @@ impl Renderer {
             cell,
             emoji,
             glyph_fx,
+            selection,
             font: RefCell::new(FontOptions::default()),
             atlas: RefCell::new(None),
             last_bg_count: AtomicUsize::new(0),
@@ -760,7 +773,15 @@ impl Renderer {
             // metin seçimin üstünde kendi renginde okunuyor ve imleç seçimin
             // üstünde kalıyor — ters videonun "imleç kazanır" kuralı, artık
             // piksel sırasıyla.
-            .and_then(|()| self.encode_quads(&enc, frame.selection_instances(), viewport_px))
+            .and_then(|()| {
+                self.encode_selection(
+                    &enc,
+                    frame.selection_instances(),
+                    frame.selection_rgba(),
+                    frame.selection_radius(),
+                    viewport_px,
+                )
+            })
             // **Caret arka planlardan sonra, glyph'lerden önce** ve gerekçe
             // **dolu** caret'e ait: blok opak, altındaki harf onun üstüne ve
             // `cursor_block`'un ters çevirdiği renkle çiziliyor. Caret kendi
@@ -1135,6 +1156,28 @@ impl Renderer {
         self.draw_quads(enc, instances, viewport_px)
     }
 
+    /// Seçimin parçalarını encode eder — [`Renderer::encode_caret`]'ın
+    /// kardeşi: altıncı pipeline, iki fragment uniform'u (renk, yarıçap).
+    /// Uniform'lar kare başına tek, çünkü bir pencerede tek seçim ve tek renk
+    /// var; köşe kararı instance'ın maskesinde.
+    fn encode_selection(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        instances: &[Instance],
+        rgba: [f32; 4],
+        radius: f32,
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
+        if instances.is_empty() {
+            return Ok(());
+        }
+        enc.setRenderPipelineState(&self.selection);
+        // İndeksler `selection_fragment`'in bildirimleriyle aynı.
+        fragment_uniform(enc, &rgba, 0);
+        fragment_uniform(enc, &radius, 1);
+        self.draw_quads(enc, instances, viewport_px)
+    }
+
     /// Caret'i encode eder — [`Renderer::encode_quads`]'ın kardeşi, tek farkı
     /// üçüncü pipeline ve iki fragment uniform'u.
     ///
@@ -1357,10 +1400,10 @@ fn fragment_uniform<T>(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, value:
 /// biri" demekle yetinirdi — metallib'de hangisinin olmadığını okuyanın
 /// aramasına bırakırdı.
 ///
-/// Blend **parametre değil**: beş pipeline da onu istiyor ve sebepleri ayrı —
+/// Blend **parametre değil**: altı pipeline da onu istiyor ve sebepleri ayrı —
 /// `cell` alfayı atlasın kapsamasından üretiyor, `cell_bg`'de imlecin
 /// belirmesi ([`crate::motion`]) dikdörtgeni saydamlaştırıyor, `glyph_fx`'te
-/// efektin kendisi saydamlık. Bir `enum`
+/// efektin kendisi saydamlık, `selection`'da yuvarlak köşenin yumuşatması. Bir `enum`
 /// parametresi 008 phase-5'e kadar iki değer taşıyordu; tek değere düşünce
 /// hem kendisi hem tek `if`'i kalktı.
 fn pipeline(
@@ -1383,7 +1426,7 @@ fn pipeline(
     let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
     att.setPixelFormat(Renderer::PIXEL_FORMAT);
     att.setBlendingEnabled(true);
-    // **Beş pipeline da ön çarpımsız fragment veriyor**, emoji dahil:
+    // **Altı pipeline da ön çarpımsız fragment veriyor**, emoji dahil:
     // CoreGraphics renkli glyph'i ön çarpımlı yazıyor ama `raster::draw_color`
     // onu yüklemeden önce geri alıyor (gerekçe `raster::unpremultiply`'ın
     // doc'unda: ön çarpım sRGB-kodlanmış uzayda yapıldığı için doku başına
@@ -2497,11 +2540,11 @@ mod tests {
         frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
         frame.push(glyph_cell(1, 'M', None));
         frame.push_selection(
-            SelectionRun {
+            &[SelectionRun {
                 row: 0,
                 first: 0,
                 last: 2,
-            },
+            }],
             MIDTONE,
         );
         assert_eq!(frame.bg_count(), 1, "koşu `hucre=` sayacına girmemeli");
@@ -2516,11 +2559,29 @@ mod tests {
         let midtone = srgb(MIDTONE_SRGB);
         let accent = srgb(Theme::BATERI.accent);
         let cell = |col: usize| cell_rows(&pixels, EDGE, (cw, ch), col).concat();
-        // Zeminli hücre koşunun altında: kırmızı hiç görünmüyor.
+        // Koşunun dört köşesi yuvarlak (phase-3): köşeye `inset` pikselden
+        // yakın olanlar sorunun dışında, onları köşe bekçileri soruyor.
+        let inset = caret_radius_px((cw, ch), bt_core::CURSOR_RADIUS as f32);
+        let body = |col: usize, left: bool| -> Band {
+            let rows = cell_rows(&pixels, EDGE, (cw, ch), col);
+            let (w, h) = (usize::from(cw), usize::from(ch));
+            let mut out = Vec::new();
+            for (y, row) in rows.into_iter().enumerate() {
+                for (x, p) in row.into_iter().enumerate() {
+                    let edge_x = if left { x < inset } else { x >= w - inset };
+                    if edge_x && (y < inset || y >= h - inset) {
+                        continue;
+                    }
+                    out.push(p);
+                }
+            }
+            out
+        };
+        // Zeminli hücre koşunun altında: kırmızı köşeler dışında görünmüyor.
         assert!(
-            cell(0).iter().all(|&p| near(p, midtone)),
+            body(0, true).iter().all(|&p| near(p, midtone)),
             "koşu zeminin altında kaldı: {:02x?}",
-            cell(0)
+            body(0, true)
         );
         // Glyph koşunun üstünde, kendi renginde; harfin boşlukları koşunun
         // renginde — clear rengi koşunun içinde hiçbir yerde yok.
@@ -2543,9 +2604,93 @@ mod tests {
         );
         assert!(!glyph.iter().any(|&p| near(p, accent)), "koşuda delik");
         // Köprü: mürekkepsiz sütun da koşunun renginde.
-        assert!(cell(2).iter().all(|&p| near(p, midtone)), "köprü boyanmadı");
+        assert!(
+            body(2, false).iter().all(|&p| near(p, midtone)),
+            "köprü boyanmadı"
+        );
         // Koşunun dışı clear.
         assert!(cell(3).iter().all(|&p| near(p, accent)), "koşu taştı");
+    }
+
+    /// Seçim bekçilerinin ortak kurulumu: köşe yarıçapı birkaç piksel olsun
+    /// diye **büyük** yapay hücre (40×80 → yarıçap 8), atlas gerekmiyor —
+    /// karede glyph yok. Dönen şey pikselin ara tona (seçim) mi clear'a mı
+    /// yakın olduğunu söyleyen okuyucu.
+    fn render_selection(runs: &[SelectionRun]) -> impl Fn(usize, usize) -> &'static str {
+        const EDGE: usize = 256;
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let mut frame = Frame::default();
+        frame.clear(grid(40, 80), CaretStyle::default());
+        assert_eq!(frame.selection_radius(), 8.0, "yarıçap varsayımı");
+        frame.push_selection(runs, MIDTONE);
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        let srgb = |hex: u32| ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let (midtone, accent) = (srgb(MIDTONE_SRGB), srgb(Theme::BATERI.accent));
+        let near = |seen: (u8, u8, u8), expected: (u8, u8, u8)| {
+            seen.0.abs_diff(expected.0) <= 1
+                && seen.1.abs_diff(expected.1) <= 1
+                && seen.2.abs_diff(expected.2) <= 1
+        };
+        move |x, y| {
+            let p = pixel_at(&pixels, EDGE, x, y);
+            if near(p, midtone) {
+                "selection"
+            } else if near(p, accent) {
+                "clear"
+            } else {
+                "blend"
+            }
+        }
+    }
+
+    #[test]
+    fn a_lone_selection_run_has_round_corners_and_a_solid_body() {
+        // İki hücrelik koşu: x 0..80, y 0..80. Köşe pikselinin merkezi
+        // yarıçapı 8 olan yayın 2.6 px dışında → clear; kenarın ortası ve
+        // yayın içi seçim rengi — kenarlar piksel ızgarasında, yani düz
+        // kenarda yarım alfa yok.
+        let at = render_selection(&[SelectionRun {
+            row: 0,
+            first: 0,
+            last: 1,
+        }]);
+        for (x, y) in [(0, 0), (79, 0), (79, 79), (0, 79)] {
+            assert_eq!(at(x, y), "clear", "köşe ({x},{y}) yuvarlanmadı");
+        }
+        for (x, y) in [(40, 0), (0, 40), (79, 40), (40, 79), (40, 40), (4, 4)] {
+            assert_eq!(at(x, y), "selection", "gövde ({x},{y}) boyanmadı");
+        }
+        assert_eq!(at(80, 40), "clear", "koşu taştı");
+    }
+
+    #[test]
+    fn a_selection_step_fills_its_concave_corner() {
+        // Üstte 2..=3 (x 80..160), altta 0..=3 (x 0..160): üst koşunun sol
+        // alt köşesi içbükey. Dolgu [72,80]×[72,80]'de, merkezi (72,72) olan
+        // dairenin dışını boyuyor: basamağın dibindeki piksel seçim rengi,
+        // dairenin merkezindeki clear.
+        let at = render_selection(&[
+            SelectionRun {
+                row: 0,
+                first: 2,
+                last: 3,
+            },
+            SelectionRun {
+                row: 1,
+                first: 0,
+                last: 3,
+            },
+        ]);
+        assert_eq!(at(79, 79), "selection", "içbükey köşe dolmadı");
+        assert_eq!(at(72, 72), "clear", "dolgu dairenin içini boyadı");
+        // Açıkta kalan köşeler yuvarlak, örtülen köşeler kare.
+        assert_eq!(at(80, 0), "clear", "üst koşunun sol üstü");
+        assert_eq!(at(0, 80), "clear", "alt koşunun sol üstü");
+        assert_eq!(at(159, 79), "selection", "hizalı sağ kenar dikişi");
+        assert_eq!(at(159, 80), "selection", "hizalı sağ kenar dikişi");
+        assert_eq!(at(100, 79), "selection", "iki satırın dikişi");
+        assert_eq!(at(100, 80), "selection", "iki satırın dikişi");
+        assert_eq!(at(159, 159), "clear", "alt koşunun sağ altı");
     }
 
     /// Bir dörtgen bölgenin pikselleri, [`pixel_at`]'in üçlüsüyle.
