@@ -43,12 +43,47 @@ _Requirements: R2.5_
 
 ## Checklist
 
-- [ ] `selection_fragment` + maske kodlaması
-- [ ] Köşe kararı fonksiyonu + sınaması
-- [ ] Altıncı pipeline ve encode sırası
-- [ ] Test: offscreen köşe ve içbükey piksel bekçileri
-- [ ] Zeminli seçili hücrenin köşesi (phase-2'den devir): `frame()` seçili hücrenin zeminini düşürüyor, yani yuvarlak köşede renkli bir satırın (vim durum satırı, `\e[7m`) yerine pencere zemini görünecek — gözle bak; çentik okunuyorsa zemini koşunun altında bırak (`session.rs`, `let bg = if selected`)
-- [ ] Seçim renginin okunurluğu (orkestratör, phase-2'nin gözle kontrolünden): koyu temada `#2b3a50` üstünde ANSI mavi en zayıf okunan metin. Gömülü iki temanın `selection` değerini, 16 ANSI rengi + `foreground` + `dim` seçimin üstünde okunur kalacak şekilde gözden geçir (kontrast oranını hesapla, sayıyı Uygulama Notları'na yaz); seçim yine sakin ve zemine yakın kalsın. Metin rengini değiştirmek Karar 3'ün dışında — yalnız rol değeri.
-- [ ] `CLAUDE.md`
-- [ ] Doğrulama geçti (`make shader`, `make hepsi`, `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] `selection_fragment` + maske kodlaması
+- [x] Köşe kararı fonksiyonu + sınaması
+- [x] Altıncı pipeline ve encode sırası
+- [x] Test: offscreen köşe ve içbükey piksel bekçileri
+- [x] Zeminli seçili hücrenin köşesi (phase-2'den devir): `frame()` seçili hücrenin zeminini düşürüyor, yani yuvarlak köşede renkli bir satırın (vim durum satırı, `\e[7m`) yerine pencere zemini görünecek — gözle bak; çentik okunuyorsa zemini koşunun altında bırak (`session.rs`, `let bg = if selected`)
+- [x] Seçim renginin okunurluğu (orkestratör, phase-2'nin gözle kontrolünden): koyu temada `#2b3a50` üstünde ANSI mavi en zayıf okunan metin. Gömülü iki temanın `selection` değerini, 16 ANSI rengi + `foreground` + `dim` seçimin üstünde okunur kalacak şekilde gözden geçir (kontrast oranını hesapla, sayıyı Uygulama Notları'na yaz); seçim yine sakin ve zemine yakın kalsın. Metin rengini değiştirmek Karar 3'ün dışında — yalnız rol değeri.
+- [x] `CLAUDE.md`
+- [x] Doğrulama geçti (`make shader`, `make hepsi`, `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+
+## Uygulama Notları
+
+- Vertex **ayrı** (`selection_vertex`), planda `cell_bg_vertex` yazıyordu:
+  fragment kendi dörtgenini bilmek zorunda ve `cell_bg_vertex`'in çıkışı onu
+  taşımıyor. `Instance` aynen; dörtgen merkezine göre `local` (interpolasyonlu)
+  + `half_size`/`mask` (`flat`) varying. Maske: köşe başına 1 dışbükey / 0
+  kare; içbükey dolgu ayrı `r×r` instance, dairenin merkezi olan köşe `-1`.
+- `Frame::push_selection` artık dilimin tamamını alıyor (köşe komşuya bağlı);
+  saf karar `frame::selection_corners` → `[Corner; 4]`. Dolguyu yalnız dar
+  koşu doğuruyor, yani her basamak bir kez. Çaprazdan değen koşular (üst 5'ten,
+  alt 4'e) iki ayrı yuvarlak parça.
+- Eski bekçi (`a_selection_run_paints_between_the_ground_and_the_glyph`)
+  köşelerden `caret_radius_px` kadar içeride soruyor. İçbükey bekçisi dolgu
+  kapatılarak kırmızı görüldü, sonra yeşil.
+- Zeminli seçili hücre (phase-2 devri): zemin **düşük kaldı**. Gözle (ters
+  videolu durum satırı): köşede birkaç piksellik pencere zemini okunmuyor;
+  zemini altta bırakmak seçimin köşesinde açık gri kırık leke bırakırdı.
+  Yorum `session.rs`'te.
+- Seçim rengi. Ölçüt: zeminde 3:1'i geçen her metin rengi (koyuda
+  `black`/`bright_black`, açıkta `white`/`bright_white` zaten geçmiyor ve
+  dışarıda) seçimde de 3:1'i geçsin (WCAG oranı). Koyu `#2b3a50` ölçütü
+  geçiyordu (en zayıf `red` 3.35, `blue` 4.06) — mavinin zor okunması oran
+  değil **ton çakışması** (mavi metin mavi zeminde), WCAG onu ölçmüyor. Yeni
+  koyu `#283042` (daha az doygun arduvaz): `red` 3.84, `blue` 4.65, `dim`
+  4.14, `foreground` 9.35; zemine karşı 1.59 (eskisi 1.82). Açık `#c9d8ee`
+  ölçütü **geçmiyordu** (`bright_yellow` 2.64, `bright_green` 2.73,
+  `bright_cyan` 2.81); yeni `#dde6f3`: `bright_yellow` 3.03, `bright_green`
+  3.14, `bright_cyan` 3.23, `blue` 4.60; zemine karşı 1.16 (eskisi 1.34).
+  Gözle (geçici paket, iki tema): mavi metin okunur, seçim sakin ve görünür.
+- Gözle (geçici paket): çok satırlı akış seçimi tek parça, basamakların iç
+  köşesi yuvarlak, hizalı kenarlar dikişsiz; çift tık tek kelimede dört köşe
+  yuvarlak. Yarıçap caret'inki (13pt@2x'te ~3 px) — küçük ama aynı dil.
+- `/code-review` (medium): doğruluk bulgusu yok; tek nit (sınama yardımcısı
+  `grid`'in doc yorumunu ayırıyordu) düzeltildi.

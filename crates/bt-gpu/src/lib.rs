@@ -12,11 +12,13 @@
 //! **dokusu** da bu crate'in: `bt-atlas` yuva numarası ve CPU bitmap'i verir,
 //! `replaceRegion` ile dokuya yazan ve `cell` pipeline'ıyla çizen buradır.
 //!
-//! **Beş pipeline var** ve üçü vertex paylaşıyor: `cell_bg` (arka planlar,
+//! **Altı pipeline var** ve üçü vertex paylaşıyor: `cell_bg` (arka planlar,
 //! blok şeritleri, dock zemini), `cell` (glyph'ler ve kurallar; atlası
 //! örnekliyor), `caret` (`cell_bg_vertex` + `caret_fragment`), `emoji`
-//! (`cell_vertex` + `emoji_fragment`) ve `glyph_fx` (dock'un yazım efektleri,
-//! kendi vertex'i). `caret` ayrı, çünkü caret'in yuvarlak köşesi, kenarı ve
+//! (`cell_vertex` + `emoji_fragment`), `glyph_fx` (dock'un yazım efektleri,
+//! kendi vertex'i) ve `selection` (fareyle seçimin yuvarlak köşeli şekli;
+//! `Instance`'ı aynen okuyan kendi vertex'i, çünkü fragment dörtgenini
+//! bilmek zorunda). `caret` ayrı, çünkü caret'in yuvarlak köşesi, kenarı ve
 //! halesi bir SDF istiyor ve o hesabı kare başına binlerce arka plan
 //! dörtgenine ödetmenin anlamı yok; `glyph_fx` ayrı, çünkü dörtlüsü efekt payı
 //! kadar şişiyor ve instance'ı efektin parametrelerini taşıyor. Efektlerin

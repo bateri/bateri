@@ -2741,7 +2741,11 @@ impl Session {
                 continue;
             }
             // Seçili hücrenin zemini **çizilmiyor**: seçimin şeklinin altında
-            // kalıyor ve opak şekil onu zaten örtüyor. Ters video da burada
+            // kalıyor ve opak şekil onu zaten örtüyor. Örtmediği tek yer
+            // şeklin yuvarlak köşesi (031 phase-3) ve orada pencere zemini
+            // görünüyor; zemin altta bırakılsaydı renkli bir satırın (ters
+            // videolu durum satırı) köşesinde seçimin dışına taşan birkaç
+            // piksellik kırık leke kalırdı — gözle bakıldı, çentik okunmuyor. Ters video da burada
             // çözülüyor — metin hücrenin kendi ön planıyla (Karar 3). Sönüklük
             // yine `cell.fg`'den doğan renge gider (`color::resolve_fg`), yani
             // seçili sönük ters video hücrede o renk ön plana döner.

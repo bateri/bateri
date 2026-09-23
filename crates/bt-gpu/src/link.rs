@@ -1092,9 +1092,8 @@ define_class!(
             // karesi listeyi koruyor, rengi de.
             let selection = iv.selection.borrow();
             let rgba = selection.color(iv.focused.get());
-            for run in selection.as_slice() {
-                frame.push_selection(*run, rgba);
-            }
+            // Dilim bir kerede: köşe kararı komşu satırın koşusuna bakıyor.
+            frame.push_selection(selection.as_slice(), rgba);
             drop(selection);
             // Kapının operandı burada artıyor: hasar bulundu, kare çizilecek.
             // `kare`'den önce ve ondan bağımsız — GPU'nun bitirmesini

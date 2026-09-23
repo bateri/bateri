@@ -55,19 +55,23 @@ gösterir (7.827 < 8) ve her harfi yarım pikselin altında kaydırırdı.
 atlasın **iki düzlemini** iki dokuya bağlar — maske `R8Unorm`, renk
 `RGBA8Unorm_sRGB` —, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
-çizer. Pipeline **beş**: arka planlar/dörtgenler (`cell_bg`), glyph'ler ve
+çizer. Pipeline **altı**: arka planlar/dörtgenler (`cell_bg`), glyph'ler ve
 kurallar (`cell`), caret (`caret_fragment`), renkli emoji
-(`emoji_fragment`) ve dock'un yazım efektleri (`glyph_fx`). Caret ile emoji
+(`emoji_fragment`), dock'un yazım efektleri (`glyph_fx`) ve fareyle seçim
+(`selection`). Caret ile emoji
 paylaşımla doğdu: caret `cell_bg`'nin, emoji `cell`'in **vertex'ini aynen**
 paylaşıyor ve ayrılan yalnız fragment. Caret'te sebep bir SDF (yuvarlak
 köşe, kenar, hale) ve o hesabı kare başına binlerce arka plan dörtgenine
 ödetmenin anlamı yok; emojide sebep rengi dokudan alması (instance'tan
 değil) — baytlar **düz alfa** (ön çarpım yüklemeden önce geri alınıyor,
-`raster::unpremultiply`), yani blend beş pipeline'da aynı (`SourceAlpha`).
+`raster::unpremultiply`), yani blend altı pipeline'da aynı (`SourceAlpha`).
 `glyph_fx` kendi vertex'ini ve 48 baytlık instance'ını taşıyor, çünkü
 dörtlüsü efekt payı kadar şişiyor ve fragment noktayı efektin ters
 dönüşümüyle glyph uzayına çeviriyor; iki dokuyu birden bağlıyor, düzlem
-instance'tan. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
+instance'tan. `selection` `Instance`'ı **aynen** okuyan kendi vertex'ini
+taşıyor, çünkü fragment dörtgenini bilmek zorunda (caret onu tek dörtgen
+olduğu için uniform'dan alıyor); `rgba` yuvası orada renk değil köşe
+maskesi, renk ile yarıçap uniform. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
 yığınından geçer**: `keyDown:` tek kapı değil dört kollu bir arbitraj —
 Cmd'li olay **kapalı bir izin listesinin üç tuşu dışında** yutulur (⌘⌫ →
 `\x15` `kill-whole-line`, ⌘← → `\x01` `beginning-of-line`, ⌘→ → `\x05`
@@ -668,8 +672,12 @@ yöndeki çentiği yerdi.
 Gerekçeler `.tasks/027-yumusak-kaydirma/discussion.md` → Muhakeme.
 **Seçim içeriği vurgular, içerik yaratmaz**: vurgu temanın `selection`
 rengiyle çizilen **satır koşusu** (`SelectionRuns`, `frame()`'in `&mut`
-tamponu; `bt-gpu` onu `cell_bg` dörtgeni olarak zeminden sonra, caret ve
-glyph'lerden önce çiziyor) ve koşu satırın **ilk çizilir seçili hücresinden
+tamponu; `bt-gpu` onu zeminden sonra, caret ve glyph'lerden önce çiziyor) ve
+koşular **yuvarlak köşeli tek parça** bir şekil: açıkta kalan köşe dışbükey,
+bitişik satırın koşusunca örtülen köşe kare, basamakta içbükey dolgu — karar
+saf bir fonksiyonda (`frame::selection_corners`) ve boş ara satır şekli
+bölüyor. Yarıçap caret'in **varsayılan** oranı (`CURSOR_RADIUS`), kullanıcının
+`cursor_radius`'u değil (031 Karar 10: anahtar imlecin). Koşu satırın **ilk çizilir seçili hücresinden
 sonuncusuna** uzanıyor — aradaki boşluklar köprülü, çünkü pano onları zaten
 kopyalıyor; boş kuyruk ve boş satır koşusuz, yani boş ekranda fareyi
 sürüklemek hiçbir şey boyamıyor (031 Karar 4). Ölçüt "mürekkep" değil

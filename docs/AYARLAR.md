@@ -932,7 +932,7 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   `bateri`'den gelir: açık bir temada `dim` yazılmazsa sönük varsayılan metin
   koyu temanın grisiyle (`#909093`), `success`/`error` yazılmazsa komut
   işaretleri koyu temanın yeşil ve kırmızısıyla, `selection` yazılmazsa seçim
-  koyu temanın laciverdiyle (`#2b3a50`) çizilir — açık bir temada koyu metnin
+  koyu temanın arduvazıyla (`#283042`) çizilir — açık bir temada koyu metnin
   altında zor okunur, yani açık bir tema `selection`'ını yazmalı.
 
 ### Gömülü `bateri`
@@ -945,7 +945,7 @@ foreground = "#d8d9dd"
 dim = "#909093"
 accent = "#7a9cc6"
 cursor = "#d9b063"
-selection = "#2b3a50"
+selection = "#283042"
 success = "#8bb58b"
 error = "#d16d6a"
 
@@ -980,7 +980,7 @@ foreground = "#24262c"
 dim = "#696b70"
 accent = "#3d6aa8"
 cursor = "#8a6512"
-selection = "#c9d8ee"
+selection = "#dde6f3"
 success = "#3b7a3b"
 error = "#b5423d"
 
