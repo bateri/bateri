@@ -26,7 +26,9 @@ use objc2_metal::{
 };
 use objc2_quartz_core::CAMetalDrawable;
 
-use crate::frame::{CursorBlock, Frame, GlyphCell, GlyphInstance, Instance, RuleCell};
+use crate::frame::{
+    CursorBlock, Frame, FxCell, FxInstance, GlyphCell, GlyphInstance, Instance, RuleCell,
+};
 use crate::{GpuError, Surface};
 
 /// `addCompletedHandler:`e verilen blok; [`Renderer::completion`] kurar.
@@ -115,6 +117,10 @@ struct AtlasTexture {
     /// blend. Aynı listeye karışsalardı tek draw call iki fragment'i birden
     /// isteyemezdi.
     color_instances: Vec<GlyphInstance>,
+    /// Yazım efektlerinin instance'ları (030) — iki düzlem **tek** listede,
+    /// çünkü `glyph_fx` pipeline'ı iki dokuyu birden bağlıyor ve düzlemi
+    /// instance'tan okuyor ([`FxInstance`]'ın `fx[1]`'i).
+    fx_instances: Vec<FxInstance>,
 }
 
 /// Izgaranın **fiziksel piksel** geometrisi (ölçek uygulanmış): hücre ölçüsü
@@ -280,6 +286,18 @@ pub struct Renderer {
     /// dörtgenine ödetmek kare başına binlerce fragment'e bedel bindirirdi.
     /// Vertex paylaşılıyor, yani ikinci bir köşe yolu yok (R2).
     caret: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Dock'un yazım efektlerini çizen pipeline (030) — **beşinci** ve kendi
+    /// vertex'i, kendi instance'ı ([`FxInstance`]).
+    ///
+    /// `cell`'in vertex'ini paylaşamıyor: dörtlü hücreden efekt payı kadar
+    /// şişiyor ve fragment noktayı efektin ters dönüşümüyle glyph uzayına
+    /// çeviriyor, yani instance'ın efekt parametrelerini taşıması gerekiyor —
+    /// `GlyphInstance`'ı genişletmek bütün glyph listelerinin stride'ını
+    /// animasyonlu bir avuç glyph için büyütürdü
+    /// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 5).
+    /// Emoji için ayrı bir kardeş gerekmiyor: blend beş pipeline'da aynı ve
+    /// iki doku birden bağlı, düzlem instance'tan.
+    glyph_fx: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Son **gönderilen** karedeki arka plan hücresi sayısı; `make duman`'ın
     /// `hucre=K` jetonu. `frames`'in yanında duruyor çünkü ikisi de aynı
     /// soruya bakan tanı sayaçları ve tek yerden okunmaları gerekiyor.
@@ -363,14 +381,17 @@ impl Renderer {
         // kapsama maskesi, renk instance'tan. Blend lineer uzayda koşuyor ve
         // sebebi tam olarak bu (`PIXEL_FORMAT` → `_sRGB`).
         let cell = pipeline(&device, &library, "cell_vertex", "cell_fragment")?;
-        // Emoji: `cell_vertex`'i **aynen** paylaşıyor, fragment'i ayrı ve
-        // baytları **ön çarpımlı**. Dördüncü pipeline olmasının sebebi
-        // `caret`'inkiyle aynı cinsten: geometri bir, fragment iki — ve
-        // buradaki ikinci ayrım blend'in RGB çarpanı.
+        // Emoji: `cell_vertex`'i **aynen** paylaşıyor, fragment'i ayrı:
+        // rengi dokudan alıyor, instance'tan değil. Baytlar düz alfa (ön
+        // çarpım yüklemeden önce geri alınıyor, `raster::unpremultiply`),
+        // yani blend öteki pipeline'larınkiyle aynı.
         let emoji = pipeline(&device, &library, "cell_vertex", "emoji_fragment")?;
         // Caret: `cell_bg_vertex`'i paylaşıyor, fragment'i ayrı. Blend zaten
         // açık ve burada **zorunlu** — hale tanımı gereği yarı saydam.
         let caret = pipeline(&device, &library, "cell_bg_vertex", "caret_fragment")?;
+        // Yazım efektleri: kendi vertex'i (şişen dörtlü) ve fragment'i (ters
+        // dönüşüm, iki doku).
+        let glyph_fx = pipeline(&device, &library, "glyph_fx_vertex", "glyph_fx_fragment")?;
         let queue = device.newCommandQueue().ok_or(GpuError::NoCommandQueue)?;
 
         Ok(Self {
@@ -380,6 +401,7 @@ impl Renderer {
             cell_bg,
             cell,
             emoji,
+            glyph_fx,
             font: RefCell::new(FontOptions::default()),
             atlas: RefCell::new(None),
             last_bg_count: AtomicUsize::new(0),
@@ -506,6 +528,7 @@ impl Renderer {
             instances: Vec::new(),
             color_texture: None,
             color_instances: Vec::new(),
+            fx_instances: Vec::new(),
         });
         if atlas_tex
             .atlas
@@ -910,21 +933,129 @@ impl Renderer {
                     viewport_px,
                 )
             })
+            // **Hayaletler dock glyph'lerinden önce** (030): satır ortasında
+            // silinen harfin yerine kayan harf hayaletin üstünde durmalı —
+            // metin anında akıyor, hayalet onun altında sönüyor.
             .and_then(|()| {
-                self.encode_glyphs(
+                self.encode_fx(
                     enc,
-                    frame.dock_glyphs(),
-                    frame.dock_rules(),
-                    // Caret'in dikdörtgeni fragment'in `[[position]]`'ı ile
-                    // karşılaştırılıyor ve o koordinat viewport dönüşümünden
-                    // **sonraki**, yani pencere uzayı — ızgaranınkiyle **aynı**
-                    // dikdörtgen. Tek caret, tek ters çevirme: caret ızgaradaysa
-                    // dock'un glyph'leri onunla zaten kesişmiyor.
+                    frame.dock_ghosts(),
                     frame.cursor_block(),
                     frame.cell_px(),
                     viewport_px,
                 )
             })
+            .and_then(|()| {
+                // **Gelişler glyph'lerden sonra, kurallardan önce** ve bu
+                // yüzden uçuşta geliş varken çağrı ikiye bölünüyor: altı çizili
+                // bir harf gelirken çizgisi onun **üstünde** kalmalı, yoksa
+                // efekt bitip statik çizime dönülen karede çizgi harfin
+                // altından üstüne sıçrardı (`t = 1`'de piksel eşitliği,
+                // `plan.md` → R5). Uçuşta geliş yoksa çağrı bugünkü tek çağrı.
+                let arrivals = frame.dock_arrivals();
+                let (glyph_rules, late_rules) = if arrivals.is_empty() {
+                    (frame.dock_rules(), &[][..])
+                } else {
+                    (&[][..], frame.dock_rules())
+                };
+                // Caret'in dikdörtgeni fragment'in `[[position]]`'ı ile
+                // karşılaştırılıyor ve o koordinat viewport dönüşümünden
+                // **sonraki**, yani pencere uzayı — ızgaranınkiyle **aynı**
+                // dikdörtgen. Tek caret, tek ters çevirme: caret ızgaradaysa
+                // dock'un glyph'leri onunla zaten kesişmiyor.
+                self.encode_glyphs(
+                    enc,
+                    frame.dock_glyphs(),
+                    glyph_rules,
+                    frame.cursor_block(),
+                    frame.cell_px(),
+                    viewport_px,
+                )
+                .and_then(|()| {
+                    self.encode_fx(
+                        enc,
+                        arrivals,
+                        frame.cursor_block(),
+                        frame.cell_px(),
+                        viewport_px,
+                    )
+                })
+                .and_then(|()| {
+                    self.encode_glyphs(
+                        enc,
+                        &[],
+                        late_rules,
+                        frame.cursor_block(),
+                        frame.cell_px(),
+                        viewport_px,
+                    )
+                })
+            })
+    }
+
+    /// Dock'un yazım efektlerini encode eder (030) — beşinci pipeline
+    /// (`glyph_fx`), iki doku ve [`CursorBlock`].
+    ///
+    /// Yuva çözümü [`Renderer::encode_glyphs`]'teki gibi atlas ödüncünün
+    /// içinde doğup ölüyor. Renk dokusu henüz yoksa (hiç emoji görülmedi) renk
+    /// düzlemindeki instance zaten doğamıyor; doğduysa ve doku kurulamadıysa
+    /// o instance **çizilmiyor** — maske dokusunu renk diye okumak rastgele
+    /// piksel olurdu.
+    fn encode_fx(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        cells: &[FxCell],
+        cursor: &CursorBlock,
+        cell_px: [f32; 2],
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
+        if cells.is_empty() {
+            return Ok(());
+        }
+        let mut atlas = self.atlas.borrow_mut();
+        let atlas_tex = atlas.as_mut().ok_or(GpuError::NoAtlas)?;
+        atlas_tex.prepare_fx(&self.device, cells)?;
+        if atlas_tex.color_texture.is_none() {
+            atlas_tex
+                .fx_instances
+                .retain(|instance| (instance.fx[1] as u32 >> 5) & 1 == 0);
+        }
+        if atlas_tex.fx_instances.is_empty() {
+            return Ok(());
+        }
+        // audit: `prepare_fx` `Ok` döndüyse dokuyu kurmuştur.
+        let mask = atlas_tex.texture.as_ref().expect("prepare_fx dokuyu kurdu");
+        // Renk dokusu yoksa maske ikinci yuvaya da bağlanıyor: bağlanmamış
+        // bir doku yuvası Metal doğrulamasında hata, ve renk düzleminde
+        // instance kalmadığı için okunmuyor.
+        let color = atlas_tex.color_texture.as_ref().unwrap_or(mask);
+        let (cw, ch) = atlas_tex.atlas.metrics().cell_px;
+        let (tw, th) = atlas_tex.atlas.texture_px();
+        let uv_size: [f32; 2] = [f32::from(cw) / f32::from(tw), f32::from(ch) / f32::from(th)];
+        // Düzen `FxInstance`'ın `offset_of` assert'leriyle `glyph_fx.metal`'e
+        // bağlı.
+        let buffer = self.instance_buffer(&atlas_tex.fx_instances)?;
+        enc.setRenderPipelineState(&self.glyph_fx);
+        // İndeksler `glyph_fx.metal`'in `[[buffer(n)]]`/`[[texture(n)]]`
+        // bildirimleriyle aynı; fragment'in tampon alanı vertex'inkinden ayrı.
+        vertex_uniform(enc, &viewport_px, 1);
+        vertex_uniform(enc, &cell_px, 2);
+        fragment_uniform(enc, cursor, 0);
+        fragment_uniform(enc, &cell_px, 1);
+        fragment_uniform(enc, &uv_size, 2);
+        // SAFETY: tampon ve dokular bu blok boyunca yaşıyor.
+        unsafe {
+            enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
+            enc.setFragmentTexture_atIndex(Some(mask.as_ref()), 0);
+            enc.setFragmentTexture_atIndex(Some(color.as_ref()), 1);
+            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::TriangleStrip,
+                0,
+                4,
+                atlas_tex.fx_instances.len(),
+            );
+        }
+        Ok(())
     }
 
     /// Instance dilimini kare başına yeni bir Metal tamponuna kopyalar.
@@ -1200,9 +1331,10 @@ fn fragment_uniform<T>(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, value:
 /// biri" demekle yetinirdi — metallib'de hangisinin olmadığını okuyanın
 /// aramasına bırakırdı.
 ///
-/// Blend **parametre değil**: üç pipeline da onu istiyor ve sebepleri ayrı —
+/// Blend **parametre değil**: beş pipeline da onu istiyor ve sebepleri ayrı —
 /// `cell` alfayı atlasın kapsamasından üretiyor, `cell_bg`'de imlecin
-/// belirmesi ([`crate::motion`]) dikdörtgeni saydamlaştırıyor. Bir `enum`
+/// belirmesi ([`crate::motion`]) dikdörtgeni saydamlaştırıyor, `glyph_fx`'te
+/// efektin kendisi saydamlık. Bir `enum`
 /// parametresi 008 phase-5'e kadar iki değer taşıyordu; tek değere düşünce
 /// hem kendisi hem tek `if`'i kalktı.
 fn pipeline(
@@ -1225,7 +1357,7 @@ fn pipeline(
     let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
     att.setPixelFormat(Renderer::PIXEL_FORMAT);
     att.setBlendingEnabled(true);
-    // **Dört pipeline da ön çarpımsız fragment veriyor**, emoji dahil:
+    // **Beş pipeline da ön çarpımsız fragment veriyor**, emoji dahil:
     // CoreGraphics renkli glyph'i ön çarpımlı yazıyor ama `raster::draw_color`
     // onu yüklemeden önce geri alıyor (gerekçe `raster::unpremultiply`'ın
     // doc'unda: ön çarpım sRGB-kodlanmış uzayda yapıldığı için doku başına
@@ -1271,26 +1403,11 @@ impl AtlasTexture {
         glyphs: &[GlyphCell],
         rules: &[RuleCell],
     ) -> Result<(), GpuError> {
+        self.ensure_texture(device)?;
+        // audit: `ensure_texture` `Ok` döndüyse dokuyu kurmuştur.
+        let texture = self.texture.as_ref().expect("doku hemen üstte kuruldu");
         let metrics = self.atlas.metrics();
         let (tw, th) = self.atlas.texture_px();
-        if self.texture.is_none() {
-            let texture = new_atlas_texture(device, tw, th)?;
-            // Rezident tofu bir kez yazılır ve bir daha dokunulmaz:
-            // `Atlas::slot` tofu'ya düştüğünde bitmap **vermiyor**, çünkü veri
-            // zaten burada.
-            upload_slot(
-                &texture,
-                self.atlas.slot_origin(TOFU),
-                metrics,
-                self.atlas.tofu_bitmap(),
-                Plane::Mask,
-            );
-            self.texture = Some(texture);
-        }
-        // audit: hemen üstte kuruldu ya da zaten doluydu. `match` ile
-        // kurtulunamıyor: `None` kolunda dokuyu kurup aynı ödünçten geri
-        // vermek NLL'den geçmiyor.
-        let texture = self.texture.as_ref().expect("doku hemen üstte kuruldu");
 
         self.instances.clear();
         self.color_instances.clear();
@@ -1307,19 +1424,13 @@ impl AtlasTexture {
         // geliyor: glyph geçişi zaten arka planlardan ve imleçten sonra
         // kodlanıyor (`encode_pass`), yani kural da imlecin üstüne düşüyor.
         for glyph in glyphs {
-            // **Yelpazeleme burada, `Frame::push`'ta değil.** Gerekçe ödünç:
-            // "bir yuva mı iki mi" kararını mürekkep kapısı veriyor, yani
-            // `Atlas::slot` — ve `push` atlası ödünç alamıyor (`GlyphCell`'in
-            // uv'siz olmasının yazılı sebebi: sink'te çözüm ödüncü `draw`
-            // boyunca canlı tutar ve ilk glyph'li karede `BorrowMutError`
-            // verir). Burada atlas **zaten** ödünç alınmış ve `metrics` elde.
+            // **Yelpazeleme [`fan`]'da**, burada ve yazım efektlerinde
+            // ([`AtlasTexture::prepare_fx`]) aynı gövde.
             //
-            // Üç yüzey bedavaya geliyor: bu fonksiyon kare başına dört kez
-            // koşuyor (şeritler, ızgara, doldurma bandı, dock) ve dördü de
-            // buradan geçiyor. 017'nin dersi — bant ızgaradan türeyen her şeyi
-            // ayrıca kazanmak zorunda — tek yerde ödeniyor.
-            let want = if glyph.wide { Half::Left } else { Half::Whole };
-            let (uv0, placed) = slot_uv(
+            // **Liste düzlemden seçiliyor.** Emoji başka bir pipeline, başka
+            // bir doku ve başka bir blend istiyor; aynı listeye karışsalardı
+            // tek draw call iki fragment'i birden isteyemezdi.
+            for part in fan(
                 &mut self.atlas,
                 texture,
                 &mut ColorPlane {
@@ -1329,55 +1440,18 @@ impl AtlasTexture {
                 },
                 metrics,
                 inv,
-                SlotAsk {
-                    sprite: Sprite::Char(glyph.ch),
-                    face: glyph.face,
-                    size: glyph.size,
-                    want,
-                },
-            );
-            // **Liste düzlemden seçiliyor.** Emoji başka bir pipeline, başka
-            // bir doku ve başka bir blend istiyor; aynı listeye karışsalardı
-            // tek draw call iki fragment'i birden isteyemezdi.
-            let list = match placed.plane {
-                Plane::Mask => &mut self.instances,
-                Plane::Color => &mut self.color_instances,
-            };
-            list.push(GlyphInstance {
-                pos: glyph.pos,
-                uv0,
-                rgba: glyph.rgba,
-            });
-            // İkinci dörtlü **yalnız kapı iki hücre dediyse**. Geniş ilan
-            // edilmiş ama mürekkebi bir hücreye sığan karakter (`☕`,
-            // fullwidth `！`) `Whole` dönüyor ve burası hiç koşmuyor — yoksa
-            // sağına boş bir dörtlü düşerdi. Izgara ona zaten iki sütun
-            // ayırdığı için komşu hücre spacer ve glyph vermiyor.
-            if placed.half == Half::Left {
-                let (uv1, right) = slot_uv(
-                    &mut self.atlas,
-                    texture,
-                    &mut ColorPlane {
-                        slot: &mut self.color_texture,
-                        device,
-                        edge: (tw, th),
-                    },
-                    metrics,
-                    inv,
-                    SlotAsk {
-                        sprite: Sprite::Char(glyph.ch),
-                        face: glyph.face,
-                        size: glyph.size,
-                        want: Half::Right,
-                    },
-                );
-                let list = match right.plane {
+                glyph,
+            )
+            .into_iter()
+            .flatten()
+            {
+                let list = match part.plane {
                     Plane::Mask => &mut self.instances,
                     Plane::Color => &mut self.color_instances,
                 };
                 list.push(GlyphInstance {
-                    pos: [glyph.pos[0] + f32::from(metrics.cell_px.0), glyph.pos[1]],
-                    uv0: uv1,
+                    pos: part.pos,
+                    uv0: part.uv0,
                     rgba: glyph.rgba,
                 });
             }
@@ -1418,6 +1492,177 @@ impl AtlasTexture {
         }
         Ok(())
     }
+
+    /// Maske dokusunu (gerekirse) kurar ve rezident tofu'yu bir kez yazar —
+    /// [`AtlasTexture::prepare`] ile [`AtlasTexture::prepare_fx`]'in ortak
+    /// başı.
+    fn ensure_texture(&mut self, device: &ProtocolObject<dyn MTLDevice>) -> Result<(), GpuError> {
+        if self.texture.is_some() {
+            return Ok(());
+        }
+        let (tw, th) = self.atlas.texture_px();
+        let texture = new_atlas_texture(device, tw, th)?;
+        // Rezident tofu bir kez yazılır ve bir daha dokunulmaz:
+        // `Atlas::slot` tofu'ya düştüğünde bitmap **vermiyor**, çünkü veri
+        // zaten burada.
+        upload_slot(
+            &texture,
+            self.atlas.slot_origin(TOFU),
+            self.atlas.metrics(),
+            self.atlas.tofu_bitmap(),
+            Plane::Mask,
+        );
+        self.texture = Some(texture);
+        Ok(())
+    }
+
+    /// Yazım efektlerinin instance'larını kurar (030): yuva çözümü ve
+    /// yelpazeleme [`AtlasTexture::prepare`]'inkiyle **aynı** gövdeden
+    /// ([`fan`]), ikinci bir kopya yok.
+    ///
+    /// Geniş glyph iki instance veriyor ve her biri **hangi yarı** olduğunu
+    /// taşıyor: shader dönüşümün merkezini iki hücrelik kutudan alıyor, yoksa
+    /// `recede` bir emojiyi ortasından ikiye ayırırdı. Düzlem de instance'ta:
+    /// iki doku birden bağlı, liste tek.
+    fn prepare_fx(
+        &mut self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        cells: &[FxCell],
+    ) -> Result<(), GpuError> {
+        self.ensure_texture(device)?;
+        // audit: `ensure_texture` `Ok` döndüyse dokuyu kurmuştur.
+        let texture = self.texture.as_ref().expect("doku hemen üstte kuruldu");
+        let metrics = self.atlas.metrics();
+        let (tw, th) = self.atlas.texture_px();
+        let inv = (1.0 / f32::from(tw), 1.0 / f32::from(th));
+        self.fx_instances.clear();
+        for cell in cells {
+            for part in fan(
+                &mut self.atlas,
+                texture,
+                &mut ColorPlane {
+                    slot: &mut self.color_texture,
+                    device,
+                    edge: (tw, th),
+                },
+                metrics,
+                inv,
+                &cell.glyph,
+            )
+            .into_iter()
+            .flatten()
+            {
+                let plane = match part.plane {
+                    Plane::Mask => 0,
+                    Plane::Color => 1,
+                };
+                let half = match part.half {
+                    Half::Whole => 0,
+                    Half::Left => 1,
+                    Half::Right => 2,
+                };
+                self.fx_instances.push(FxInstance {
+                    pos: part.pos,
+                    uv0: part.uv0,
+                    rgba: cell.glyph.rgba,
+                    // Paket `shaders/glyph_fx.metal`'in çözdüğüyle aynı:
+                    // `kimlik | düzlem << 5 | yarı << 6`, küçük bir tam sayı
+                    // ve `f32`'de birebir (bkz. [`FxInstance`]).
+                    fx: [
+                        cell.t,
+                        (cell.effect | plane << 5 | half << 6) as f32,
+                        cell.seed,
+                        0.0,
+                    ],
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Bir glyph'in dokudaki yeri: dörtlünün konumu, yuvanın uv'si, düzlemi ve
+/// geniş glyph'in hangi yarısı olduğu.
+struct Part {
+    pos: [f32; 2],
+    uv0: [f32; 2],
+    plane: Plane,
+    half: Half,
+}
+
+/// Bir glyph'in yuvası — ya da geniş glyph'in iki yarısı: **yelpazelemenin tek
+/// gövdesi**.
+///
+/// **Burada, `Frame::push`'ta değil.** Gerekçe ödünç: "bir yuva mı iki mi"
+/// kararını mürekkep kapısı veriyor, yani `Atlas::slot` — ve `push` atlası
+/// ödünç alamıyor (`GlyphCell`'in uv'siz olmasının yazılı sebebi: sink'te
+/// çözüm ödüncü `draw` boyunca canlı tutar ve ilk glyph'li karede
+/// `BorrowMutError` verir). Burada atlas **zaten** ödünç alınmış ve `metrics`
+/// elde.
+///
+/// Dört yüzey bedavaya geliyor: [`AtlasTexture::prepare`] kare başına dört kez
+/// koşuyor (şeritler, ızgara, doldurma bandı, dock) ve yazım efektleri
+/// ([`AtlasTexture::prepare_fx`]) de buradan geçiyor. 017'nin dersi — bir
+/// yüzey ızgaradan türeyen her şeyi ayrıca kazanmak zorunda — tek yerde
+/// ödeniyor.
+fn fan(
+    atlas: &mut Atlas,
+    texture: &ProtocolObject<dyn MTLTexture>,
+    color: &mut ColorPlane<'_>,
+    metrics: Metrics,
+    inv: (f32, f32),
+    glyph: &GlyphCell,
+) -> [Option<Part>; 2] {
+    let want = if glyph.wide { Half::Left } else { Half::Whole };
+    let (uv0, placed) = slot_uv(
+        atlas,
+        texture,
+        color,
+        metrics,
+        inv,
+        SlotAsk {
+            sprite: Sprite::Char(glyph.ch),
+            face: glyph.face,
+            size: glyph.size,
+            want,
+        },
+    );
+    let first = Part {
+        pos: glyph.pos,
+        uv0,
+        plane: placed.plane,
+        half: placed.half,
+    };
+    // İkinci dörtlü **yalnız kapı iki hücre dediyse**. Geniş ilan edilmiş ama
+    // mürekkebi bir hücreye sığan karakter (`☕`, fullwidth `！`) `Whole`
+    // dönüyor ve burası hiç koşmuyor — yoksa sağına boş bir dörtlü düşerdi.
+    // Izgara ona zaten iki sütun ayırdığı için komşu hücre spacer ve glyph
+    // vermiyor.
+    if placed.half != Half::Left {
+        return [Some(first), None];
+    }
+    let (uv1, right) = slot_uv(
+        atlas,
+        texture,
+        color,
+        metrics,
+        inv,
+        SlotAsk {
+            sprite: Sprite::Char(glyph.ch),
+            face: glyph.face,
+            size: glyph.size,
+            want: Half::Right,
+        },
+    );
+    [
+        Some(first),
+        Some(Part {
+            pos: [glyph.pos[0] + f32::from(metrics.cell_px.0), glyph.pos[1]],
+            uv0: uv1,
+            plane: right.plane,
+            half: right.half,
+        }),
+    ]
 }
 
 /// Renk dokusunun tembel kurucusu — [`slot_uv`]'nin dördüncü argümanı.
@@ -1651,6 +1896,7 @@ mod tests {
     use bt_core::{Block, CaretShape, Cell, Cursor, Theme, UnderlineStyle};
 
     use super::*;
+    use crate::glyph_fx::{EraseFx, Fx, KeypressFx, Kind};
     use crate::stats::Stats;
     use bt_core::CaretStyle;
 
@@ -3702,6 +3948,7 @@ mod tests {
             instances: Vec::new(),
             color_texture: None,
             color_instances: Vec::new(),
+            fx_instances: Vec::new(),
         };
         let cell_w = tex.atlas.metrics().cell_px.0;
         // `漢` mürekkebi iki hücre isteyen bir aday veriyor (cascade: PingFang
@@ -3752,6 +3999,7 @@ mod tests {
             instances: Vec::new(),
             color_texture: None,
             color_instances: Vec::new(),
+            fx_instances: Vec::new(),
         };
         // Menlo'nun kendi glyph'i, Unicode'a göre iki sütun: taban fontta
         // ilerleme hücrenin ilerlemesinin ta kendisi, yani tek hücre.
@@ -3960,6 +4208,7 @@ mod tests {
             instances: Vec::new(),
             color_texture: None,
             color_instances: Vec::new(),
+            fx_instances: Vec::new(),
         };
         // Emoji sunumu varsayılan olan bir kod noktası; ızgara ona iki sütun
         // ayırıyor, yani `wide` kurulu geliyor.
@@ -4070,5 +4319,221 @@ mod tests {
             tex.color_texture.is_none(),
             "renk dokusu düşmedi: eski kenarda kalan doku taşan bir replaceRegion alır"
         );
+    }
+
+    // ---- Dock'un yazım efektleri (030): hermetik değişmezler (R5) ----
+    //
+    // Ara karelerin doğruluğu yalnız gözle; burada her efekt için döngüyle
+    // sınanan şey uçlar ve sınırlar: geliş `t = 1`'de statik glyph'in ta
+    // kendisi, hayalet `t = 1`'de düz zemin, komşu yuva hiç örneklenmiyor ve
+    // geniş glyph tek kutu olarak dönüşüyor.
+
+    /// Tek satırlık dock'lu bir kare: zemin [`BACKGROUND`], hücreler dock'a
+    /// basılı, efektler onların üstünde.
+    fn dock_fx_frame(cell_px: (u16, u16), cells: &[Cell], fx: &[Fx]) -> Frame {
+        let mut frame = Frame::default();
+        frame.clear(grid(cell_px.0, cell_px.1), CaretStyle::default());
+        for &cell in cells {
+            frame.push_dock(cell);
+        }
+        frame.set_dock_fx(fx.iter().copied());
+        frame.open_dock(1, BACKGROUND, BACKGROUND);
+        frame
+    }
+
+    fn effect(cell: Cell, kind: Kind, effect: u32, t: f32) -> Fx {
+        Fx {
+            cell,
+            kind,
+            effect,
+            t,
+            seed: 0.0,
+        }
+    }
+
+    fn wide_cell(col: u16, ch: char) -> Cell {
+        Cell {
+            wide: true,
+            ..glyph_cell(col, ch, None)
+        }
+    }
+
+    /// Dock satırının tepesi, piksel: dock dokunun dibine yaslı.
+    fn dock_row_top(edge: usize, ch: u16) -> usize {
+        edge - usize::from(ch)
+    }
+
+    #[test]
+    fn an_arrival_at_its_end_is_the_static_glyph_pixel_for_pixel() {
+        // Son efekt karesinden statik çizime devirde harf sıçramamalı: `t = 1`
+        // dalı statik yolun aritmetiğine iniyor. Üç düzen: tek hücre, geniş
+        // glyph'in iki yarısı ve renk düzlemi (emoji; renkli font kurulu
+        // değilse tofu ve iddia maske düzleminde kalıyor).
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let cell_px = fitting_cell_px(&r, EDGE, 4);
+        for &keypress in KeypressFx::EFFECTS {
+            let id = keypress.id().expect("çizen efekt");
+            for cell in [
+                glyph_cell(2, 'M', None),
+                wide_cell(2, '漢'),
+                wide_cell(2, '🎉'),
+            ] {
+                let still = dock_fx_frame(cell_px, &[cell], &[]);
+                // Önbellek ısıtılıyor: renkli font kurulu değilse `🎉` tofu'ya
+                // düşüyor ve atlas negatif cevabı ilk soruluşta tek hücre,
+                // önbellekten iki yarı veriyor (`bt_atlas::Atlas::slot`) —
+                // karşılaştırılan şey efektin yolu, atlasın ilk sorusu değil.
+                render_offscreen(&r, EDGE, BACKGROUND, &still);
+                let moving =
+                    dock_fx_frame(cell_px, &[cell], &[effect(cell, Kind::Arrival, id, 1.0)]);
+                assert!(
+                    moving.dock_glyphs().is_empty() && moving.dock_arrivals().len() == 1,
+                    "geliş efektin yolundan çizilmiyor ({keypress:?}, {:?})",
+                    cell.ch
+                );
+                let a = render_offscreen(&r, EDGE, BACKGROUND, &still);
+                let b = render_offscreen(&r, EDGE, BACKGROUND, &moving);
+                let top = dock_row_top(EDGE, cell_px.1);
+                assert!(
+                    (0..EDGE)
+                        .any(|x| brightness(&a, EDGE, x, top + usize::from(cell_px.1) / 2) > 0)
+                        || (top..EDGE).any(|y| (0..EDGE).any(|x| brightness(&a, EDGE, x, y) > 0)),
+                    "statik glyph hiç çizilmedi — eşitlik bir şey iddia etmez ({:?})",
+                    cell.ch
+                );
+                assert!(
+                    a == b,
+                    "t = 1'de geliş statik glyph'ten ayrışıyor ({keypress:?}, {:?})",
+                    cell.ch
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_ghost_starts_as_the_glyph_and_ends_as_bare_ground() {
+        // Hayalet `t = 0`'da silinen glyph'in kendisi (silme anında harf
+        // sıçramıyor), `t = 1`'de ise hiçbir şey: son efekt karesinden sonra
+        // zemin düz.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let cell_px = fitting_cell_px(&r, EDGE, 4);
+        let bare = render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[], &[]));
+        for &erase in EraseFx::EFFECTS {
+            let id = erase.id().expect("çizen efekt");
+            for cell in [glyph_cell(2, 'M', None), wide_cell(2, '漢')] {
+                let glyph =
+                    render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[cell], &[]));
+                assert_ne!(glyph, bare, "glyph çizilmedi ({:?})", cell.ch);
+                let start = dock_fx_frame(cell_px, &[], &[effect(cell, Kind::Ghost, id, 0.0)]);
+                let end = dock_fx_frame(cell_px, &[], &[effect(cell, Kind::Ghost, id, 1.0)]);
+                assert!(
+                    render_offscreen(&r, EDGE, BACKGROUND, &start) == glyph,
+                    "t = 0'da hayalet silinen glyph değil ({erase:?}, {:?})",
+                    cell.ch
+                );
+                assert!(
+                    render_offscreen(&r, EDGE, BACKGROUND, &end) == bare,
+                    "t = 1'de hayalet zemini düz bırakmıyor ({erase:?}, {:?})",
+                    cell.ch
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_effect_never_samples_its_neighbour_slot() {
+        // Dörtlü efekt payı kadar şişiyor ve ters dönüşüm hücrenin dışını
+        // yuvanın dışına eşliyor; sınır testi olmasa komşu yuvanın glyph'i
+        // (yuvalar arasında pay yok) efektin çevresinde belirirdi. Komşular
+        // **dolu**: `@` ile `#` `.`'dan hemen önce ve sonra yuva alıyor.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 128;
+        let cell_px = fitting_cell_px(&r, EDGE, 8);
+        let neighbours = [
+            glyph_cell(2, '@', None),
+            glyph_cell(3, '.', None),
+            glyph_cell(4, '#', None),
+        ];
+        render_offscreen(
+            &r,
+            EDGE,
+            BACKGROUND,
+            &dock_fx_frame(cell_px, &neighbours, &[]),
+        );
+        let dot = glyph_cell(5, '.', None);
+        let kinds = KeypressFx::EFFECTS
+            .iter()
+            .map(|fx| (Kind::Arrival, fx.id().expect("çizen efekt")))
+            .chain(
+                EraseFx::EFFECTS
+                    .iter()
+                    .map(|fx| (Kind::Ghost, fx.id().expect("çizen efekt"))),
+            );
+        let (cw, ch) = (usize::from(cell_px.0), usize::from(cell_px.1));
+        let background = pixel_at(
+            &render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[], &[])),
+            EDGE,
+            0,
+            EDGE - 1,
+        );
+        for (kind, id) in kinds {
+            for t in [0.1, 0.25, 0.5, 0.75, 0.9] {
+                // Gelişin statik glyph'i olmak zorunda (yoksa çizilmiyor).
+                let statics: &[Cell] = if kind == Kind::Arrival { &[dot] } else { &[] };
+                let frame = dock_fx_frame(cell_px, statics, &[effect(dot, kind, id, t)]);
+                let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+                let own = 5 * cw..6 * cw;
+                for y in 0..EDGE {
+                    for x in 0..EDGE {
+                        if own.contains(&x) && y >= dock_row_top(EDGE, cell_px.1) {
+                            continue;
+                        }
+                        assert_eq!(
+                            pixel_at(&pixels, EDGE, x, y),
+                            background,
+                            "efekt kendi hücresinin dışını boyadı ({x}, {y}): \
+                             komşu yuva örneklendi ({kind:?} {id}, t = {t}, hücre {cw}×{ch})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_ghost_recedes_as_one_box() {
+        // Geniş glyph iki yuvaya bölünmüş ama tek kutu olarak dönüşmeli:
+        // yarılar kendi merkezlerine küçülseydi ikisinin arasında — dikişte —
+        // boş bir şerit açılırdı. Dikişin iki yanındaki sütunlarda statik
+        // glyph'in mürekkebi var; kutunun merkezi sabit nokta, yani küçülen
+        // hayalette de orada mürekkep kalmalı.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let cell_px = fitting_cell_px(&r, EDGE, 4);
+        let (cw, ch) = (usize::from(cell_px.0), usize::from(cell_px.1));
+        let han = wide_cell(1, '漢');
+        let seam = 2 * cw;
+        let top = dock_row_top(EDGE, cell_px.1);
+        let inked = |pixels: &[u8]| {
+            (top..top + ch).any(|y| {
+                brightness(pixels, EDGE, seam - 1, y) > 0 || brightness(pixels, EDGE, seam, y) > 0
+            })
+        };
+        let still = render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[han], &[]));
+        assert!(
+            inked(&still),
+            "önkoşul: statik `漢`'ın dikişte mürekkebi yok"
+        );
+        for &erase in EraseFx::EFFECTS {
+            let id = erase.id().expect("çizen efekt");
+            let frame = dock_fx_frame(cell_px, &[], &[effect(han, Kind::Ghost, id, 0.5)]);
+            let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
+            assert!(
+                inked(&pixels),
+                "geniş hayalet dikişte yarıldı: iki yarı ayrı kutular gibi dönüştü ({erase:?})"
+            );
+        }
     }
 }

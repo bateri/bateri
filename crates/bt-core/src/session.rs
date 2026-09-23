@@ -4316,7 +4316,9 @@ impl Session {
     /// yani `into` **son çizilen** ayna olmak zorunda — tek çağıranı
     /// `bt-gpu`'nun içerik karesi ve tamponu ondan başka kimse yazmıyor.
     /// Farkın bedeli damga kapısının arkasında (`dock::change`):
-    /// yeni girdi yoksa tek bir karşılaştırma.
+    /// yeni girdi yoksa tek bir karşılaştırma. Taşan satırda pencerenin
+    /// kayması düzenlemeyle birlikte sütun farkı olarak geçiyor
+    /// ([`DockEdit`]'in doc'u).
     pub fn dock(
         &self,
         cols: DockCols,

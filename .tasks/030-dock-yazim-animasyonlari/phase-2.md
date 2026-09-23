@@ -72,12 +72,57 @@ _Requirements: R3, R3.1, R3.2, R3.3, R3.4, R4, R5, R6, R10_
 
 ## Checklist
 
-- [ ] `glyph_fx.rs` + birim sınamaları
-- [ ] `FxInstance` + `glyph_fx.metal` + pipeline + `build.rs`
-- [ ] `Frame` fx listeleri, `suppress_dock`, `prepare`'in yelpazelemesi
-- [ ] `link.rs` iki kare yolu, uyku terimi, `finish` kapsamı
-- [ ] Pencereleme kayması (plan R1.3, kullanıcı kararı): phase-1'in kayma → `Reset` kolu sütun farkına dönüşür (`bt-core`, `window_skip`), `GlyphFx` uçuştaki efektleri o kadar kaydırır; sınama: taşan satırda sona yazmak ve Backspace canlanıyor, efektler yeni pencerede doğru sütunda
-- [ ] `CLAUDE.md`
-- [ ] Test: R5 değişmezleri (fade, recede)
-- [ ] Doğrulama geçti (`make hepsi` + `make shader` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] `glyph_fx.rs` + birim sınamaları
+- [x] `FxInstance` + `glyph_fx.metal` + pipeline + `build.rs`
+- [x] `Frame` fx listeleri, `suppress_dock`, `prepare`'in yelpazelemesi
+- [x] `link.rs` iki kare yolu, uyku terimi, `finish` kapsamı
+- [x] Pencereleme kayması (plan R1.3, kullanıcı kararı): phase-1'in kayma → `Reset` kolu sütun farkına dönüşür (`bt-core`, `window_skip`), `GlyphFx` uçuştaki efektleri o kadar kaydırır; sınama: taşan satırda sona yazmak ve Backspace canlanıyor, efektler yeni pencerede doğru sütunda
+- [x] `CLAUDE.md`
+- [x] Test: R5 değişmezleri (fade, recede)
+- [x] Doğrulama geçti (`make hepsi` + `make shader` + `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [~] Gözle kontrol — koşamadı: debug derlemesi paketsiz bir binary ve
+  computer-use onu uygulama olarak tanımıyor (`request_access` "installed
+  değil" dedi). Kullanıcıya: dock'ta yazınca harfler beliriyor, Backspace'le
+  küçülüp gidiyor; taşan uzun satırın sonunda da; yazıp bekleyince harf tam
+  renkte kalıyor (yarı saydam asılı kalmıyor).
+
+## Uygulama Notları
+
+- **`DockEdit`'e dördüncü varyant ve `shift` alanı** (R1.3 kullanıcı
+  kararı): `Arrive`/`Erase` `shift: i32` taşıyor (eski pencerenin attığı
+  sütun eksi yenisininki, sağa pozitif), metni aynı ama pencereyi kayan
+  ayna `DockEdit::Shift { by }` basıyor — uçuştakiler bitmiyor, yalnız
+  kayıyor. phase-1'in `shifted → Reset` kolu kalktı. Kayan girdi metnin
+  sütunlarından (`[DOCK_TEXT_COL, cols)`) taşarsa düşüyor; bunun için
+  `dock::TEXT_COL` `pub` oldu ve `DOCK_TEXT_COL` adıyla ihraç ediliyor.
+  `EditCells` `FromIterator<Cell>` kazandı (yalnız `bt-gpu` sınamaları kuruyor).
+- **Tampon ivar değil yerel `Option`:** karede en çok bir düzenleme var ve
+  yalnız içerik karesi okuyor; ikinci sink `frame`'i ödünç almadığı için
+  `LinkIvars`'a alan gerekmedi.
+- **Susturma `dock_glyphs`'i değiştirmiyor**, ayrı bir `dock_shown` listesi
+  kuruyor: hareket karesi dock'u yeniden basmıyor, efekt bitince statik
+  glyph oradan geri geliyor. `owns(col, ch)` yerine `GlyphFx::retain`.
+- **Uyku terimi `advance`'ten önceki hâle bakıyor** (`link::at_rest`):
+  efektin bittiği kare çizilmeden uyunsaydı son çizilen kare yarı saydam bir
+  harf olarak ekranda kalırdı. İkinci uyku noktası (faz karesinden sonra)
+  `advance`'ten sonraki `is_empty`'yi soruyor.
+- **Encode sırası planla aynı, bedeli bölünen çağrı:** uçuşta geliş varken
+  dock glyph'leri ve kuralları iki `encode_glyphs` çağrısına bölünüyor
+  (glyph → gelişler → kurallar); yoksa bugünkü tek çağrı. Bölünmeseydi altı
+  çizili bir harfin çizgisi efekt bitince harfin altından üstüne sıçrardı.
+- **`prepare`'in yelpazelemesi `fan`'a çıktı**; `prepare_fx` aynı gövdeden
+  geçiyor. Maske dokusunun kurulumu `ensure_texture`'a çıktı.
+- **Paket `f32` tam sayı** (`kimlik | düzlem << 5 | yarı << 6`), bit kalıbı
+  değil: küçük kalıp denormal sayılıp `flat` aktarımda sıfırlanabilirdi.
+- `/code-review` (tek bulgu, giderildi): hareket karesinde çizim hatası
+  `GlyphFx`'i bitiriyor ama `Frame`'in efekt listelerini bırakıyordu; sıradaki
+  hasarsız kare onları donmuş çizerdi — artık listeler de boşalıyor.
+- `motion::DT_MAX` `pub(crate)` oldu (`GlyphFx::advance` aynı kırpmayı
+  kullanıyor); `DisplayLink::motion_settled` efektleri de soruyor.
+- Süreler: geliş 0,12 s, hayalet 0,16 s; `recede` 0,6 ölçeğe küçülüyor;
+  `FX_MAX = 32` — hepsi tasarım sabiti.
+- **Gözlenen, bu phase'in değil:** atlasın negatif önbelleği geniş bir tofu
+  karakterine ilk soruluşta tek hücre (`Whole`), önbellekten iki yarı veriyor
+  (`bt_atlas::Atlas::slot`'un önbellek kolu `half: want` dönüyor); renkli
+  font kurulu olmayan ortamda `🎉` sınaması önbelleği ısıtarak bunu atlıyor.

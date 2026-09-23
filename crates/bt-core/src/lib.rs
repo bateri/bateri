@@ -9,7 +9,7 @@
 //! `ShellState`, `ShellPhase`, aynanın `DockState`, `DockStatus`, `DockFault`,
 //! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, bağlam satırının
 //! `DockContext`'ini, dock yüzeyinin `Dock`'unu, yazım animasyonlarının
-//! `DockEdit`'ini ve `EditCells`'ini,
+//! `DockEdit`'ini, `EditCells`'ini ve metnin sütununu (`DOCK_TEXT_COL`),
 //! `Wake` ve ayar modelinin `Settings`, `SettingsEdit`, `Parsed`, `Diagnostic`,
 //! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose`'u ve geçerli
 //! değerlerin tablolarını (`NAMES`, `*_RANGE`) görür (tam
@@ -48,7 +48,7 @@ mod theme;
 mod wake;
 
 pub use color::{LinearRgba, Theme};
-pub use dock::{Dock, DockCols, DockEdit, EDIT_MAX, EditCells};
+pub use dock::{Dock, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_TEXT_COL};
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use session::{
     Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, ScrollGlide,

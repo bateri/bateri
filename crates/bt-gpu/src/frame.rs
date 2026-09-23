@@ -4,7 +4,8 @@
 //! burada piksele çevrilir ve GPU'nun göreceği düzene girer. Renderer "ne
 //! çizileceğini" buradan okur, "ne anlama geldiğini" bilmez.
 //!
-//! **On liste, üç yüzey, üç pipeline.** Listeler yüzey başına dörtlü/üçlü
+//! **On liste (artı dock'un iki efekt listesi), üç yüzey, üç pipeline**
+//! (buradaki listelerin; efektler beşincisinden, `glyph_fx`). Listeler yüzey başına dörtlü/üçlü
 //! gruplar hâlinde: ızgaranın dördü (komut bloğu şeritleri, arka planlar,
 //! glyph'ler, kural çizgileri), dock'un üçü (`dock_bg`/`dock_glyphs`/
 //! `dock_rules`) ve doldurma bandının üçü (`fill_bg`/`fill_glyphs`/
@@ -27,6 +28,7 @@ use std::mem::offset_of;
 use bt_atlas::{Face, RuleKind, SizeClass};
 use bt_core::{Block, CaretShape, CaretStyle, Cell, LinearRgba, UnderlineStyle, UnfocusedCaret};
 
+use crate::glyph_fx::{Fx, GlyphFx, Kind};
 use crate::renderer::CellMetrics;
 
 /// `shaders/cell_bg.metal` → `Instance` ile alan alan aynı.
@@ -78,6 +80,37 @@ pub(crate) struct GlyphInstance {
 const _: () = assert!(size_of::<GlyphInstance>() == 32);
 const _: () = assert!(offset_of!(GlyphInstance, uv0) == 8);
 const _: () = assert!(offset_of!(GlyphInstance, rgba) == 16);
+
+/// `shaders/glyph_fx.metal` → `FxInstance` ile alan alan aynı: dock'un yazım
+/// efektlerinin instance'ı (030).
+///
+/// **[`GlyphInstance`]'ın genişletilmişi değil kardeşi**: bütün glyph
+/// listelerinin stride'ı animasyonlu bir avuç glyph için büyürdü
+/// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 5). İlk üç
+/// alan onunkiyle aynı yerde, dördüncüsü efektin parametreleri:
+///
+/// - `fx[0]` — ilerleme `t`, `0..=1`; eğri shader'da.
+/// - `fx[1]` — efekt kimliği, düzlem ve yarı **tek küçük tam sayıda**
+///   (`kimlik | düzlem << 5 | yarı << 6`), `f32` olarak: tam sayı `f32`'de
+///   birebir temsil ediliyor ve bit kalıbı (`from_bits`) olarak taşınsaydı
+///   küçük bir kalıp denormal sayılıp `flat` aktarımda sıfırlanabilirdi.
+/// - `fx[2]` — tohum ([`crate::glyph_fx::Fx::seed`]).
+/// - `fx[3]` — yedek, sıfır.
+///
+/// Düzen dolgusuz: `float2` 8, `float4` 16 hizalı → 0/8/16/32, stride 48.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FxInstance {
+    pub(crate) pos: [f32; 2],
+    pub(crate) uv0: [f32; 2],
+    pub(crate) rgba: [f32; 4],
+    pub(crate) fx: [f32; 4],
+}
+
+const _: () = assert!(size_of::<FxInstance>() == 48);
+const _: () = assert!(offset_of!(FxInstance, uv0) == 8);
+const _: () = assert!(offset_of!(FxInstance, rgba) == 16);
+const _: () = assert!(offset_of!(FxInstance, fx) == 32);
 
 /// `shaders/cell.metal` → `CursorBlock` ile alan alan aynı: imlecin **piksel**
 /// dikdörtgeni ve bloğun altında kalan metnin rengi.
@@ -305,6 +338,18 @@ pub(crate) struct GlyphCell {
     /// Yelpazeleme bu yüzden `AtlasTexture::prepare`'de: orada atlas zaten
     /// ödünç alınmış ve hücre ölçüsü elde.
     pub(crate) wide: bool,
+}
+
+/// Çizilecek bir yazım efekti: glyph'i ve efektin parametreleri — uv'siz,
+/// [`GlyphCell`] ile aynı gerekçe (yuva çözümü `encode` anında).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FxCell {
+    pub(crate) glyph: GlyphCell,
+    /// İlerleme, `0..=1`.
+    pub(crate) t: f32,
+    /// Shader'ın efekt kimliği ([`crate::glyph_fx`]).
+    pub(crate) effect: u32,
+    pub(crate) seed: f32,
 }
 
 /// Çizilecek bir kural çizgisi — [`GlyphCell`]'in kardeşi ve aynı gerekçeyle
@@ -684,6 +729,23 @@ pub(crate) struct Frame {
     dock_bg: Vec<Instance>,
     dock_glyphs: Vec<GlyphCell>,
     dock_rules: Vec<RuleCell>,
+    /// Dock'un yazım efektleri (030): silinen glyph'lerin hayaletleri ve
+    /// gelen glyph'ler. İki liste, çünkü çizim sıraları ayrı — hayaletler
+    /// dock glyph'lerinden **önce**, gelişler **sonra**
+    /// ([`crate::Renderer`]'ın `encode_dock`'u).
+    ///
+    /// **İki yazarı var** ([`Frame::set_dock_fx`]): içerik karesi ve hareket
+    /// karesi. Hareket karesi `clear` çağırmıyor ve dock'un statik listeleri
+    /// korunuyor; değişen yalnız bu ikisi. Sayaçlara girmiyorlar.
+    dock_ghosts: Vec<FxCell>,
+    dock_arrivals: Vec<FxCell>,
+    /// Uçuştaki gelişlerin statik glyph'i **çıkarılmış** dock glyph'leri.
+    ///
+    /// `dock_glyphs`'in kendisi değişmiyor ve bu şart: hareket karesi dock'u
+    /// yeniden basmıyor, yani efekti biten gelişin statik glyph'i geri
+    /// gelebilmek için hâlâ orada olmalı. Uçuşta geliş yoksa bu liste
+    /// okunmuyor ([`Frame::dock_glyphs`]).
+    dock_shown: Vec<GlyphCell>,
     /// Üstteki boşluğu dolduran geçmiş satırları; ızgaranın `bg`'sinin
     /// **üçüncü** ikizi (`stripes` ve `dock_bg`'den sonra).
     ///
@@ -742,6 +804,11 @@ impl Frame {
         self.dock_bg.clear();
         self.dock_glyphs.clear();
         self.dock_rules.clear();
+        // Efektler de: dock'u olmayan bir karede (alternatif ekran) önceki
+        // karenin hayaleti asılı kalmasın.
+        self.dock_ghosts.clear();
+        self.dock_arrivals.clear();
+        self.dock_shown.clear();
         self.fill_bg.clear();
         self.fill_glyphs.clear();
         self.fill_rules.clear();
@@ -1174,6 +1241,9 @@ impl Frame {
     /// ızgaranınkilerle hizalı ve şeridin ayrıldığı pay dock'ta da boş kalıyor.
     pub(crate) fn push_dock(&mut self, cell: Cell) {
         let pos = self.dock_pos(cell.col, cell.row);
+        if let Some(glyph) = self.dock_glyph(cell) {
+            self.dock_glyphs.push(glyph);
+        }
         if let Some(bg) = cell.bg {
             // Caret artık bu listede **değil**: kendi yuvası var ve encode onu
             // dock'un arka planlarından sonra çiziyor ([`Frame::push_caret`]),
@@ -1183,31 +1253,6 @@ impl Frame {
                 pos,
                 size: [self.cell_px.0, self.cell_px.1],
                 rgba: bg.to_array(),
-            });
-        }
-        if let Some(ch) = cell.ch {
-            self.dock_glyphs.push(GlyphCell {
-                pos,
-                ch,
-                face: face(cell.bold, cell.italic),
-                // Konumla **aynı eşik** ([`Frame::column_px`]): ayrışsalardı
-                // harf bir ölçüde, adımı başka ölçüde olurdu.
-                size: if cell.row >= DOCK_CONTEXT_ROW {
-                    SizeClass::Small
-                } else {
-                    SizeClass::Normal
-                },
-                // **Sınır burada artık `true` de verebiliyor** (024): dock'un
-                // sütunu karakter indeksinden değil genişlikten birikiyor,
-                // yani geniş karakterin baş hücresi işaretli geliyor ve
-                // spacer sütununa glyph'siz bir zemin hücresi düşüyor.
-                // 023'te bu satırın yorumu "sınır her zaman `false` veriyor"
-                // diyordu ve alanın hücreden okunmasının gerekçesi de tam
-                // buydu — "`bt-core` bir gün onu kaldırsa bu satır sessizce
-                // eski kalırdı". Kaldırdı; satır sessizce eski kalmadı,
-                // çünkü sabit yazılmamıştı.
-                wide: cell.wide,
-                rgba: cell.fg.to_array(),
             });
         }
         if let Some(kind) = rule_kind(cell.underline) {
@@ -1223,6 +1268,110 @@ impl Frame {
                 kind: RuleKind::Strike,
                 rgba: cell.fg.to_array(),
             });
+        }
+    }
+
+    /// Dock hücresinin glyph'i — [`Frame::push_dock`] ile yazım efektlerinin
+    /// ([`Frame::set_dock_fx`]) **ortak** çevirisi.
+    ///
+    /// Tek yer, çünkü efektin `t = 1`'deki çizimi statik glyph'le piksel
+    /// piksel aynı olmak zorunda (`plan.md` → R5): konum, yüz, boy sınıfı ya
+    /// da renk iki yerde hesaplansaydı devir karesinde harf bir an sıçrardı.
+    fn dock_glyph(&self, cell: Cell) -> Option<GlyphCell> {
+        cell.ch.map(|ch| GlyphCell {
+            pos: self.dock_pos(cell.col, cell.row),
+            ch,
+            face: face(cell.bold, cell.italic),
+            // Konumla **aynı eşik** ([`Frame::column_px`]): ayrışsalardı
+            // harf bir ölçüde, adımı başka ölçüde olurdu.
+            size: if cell.row >= DOCK_CONTEXT_ROW {
+                SizeClass::Small
+            } else {
+                SizeClass::Normal
+            },
+            // **Sınır burada artık `true` de verebiliyor** (024): dock'un
+            // sütunu karakter indeksinden değil genişlikten birikiyor,
+            // yani geniş karakterin baş hücresi işaretli geliyor ve
+            // spacer sütununa glyph'siz bir zemin hücresi düşüyor.
+            // 023'te bu satırın yorumu "sınır her zaman `false` veriyor"
+            // diyordu ve alanın hücreden okunmasının gerekçesi de tam
+            // buydu — "`bt-core` bir gün onu kaldırsa bu satır sessizce
+            // eski kalırdı". Kaldırdı; satır sessizce eski kalmadı,
+            // çünkü sabit yazılmamıştı.
+            wide: cell.wide,
+            rgba: cell.fg.to_array(),
+        })
+    }
+
+    /// Uçuştaki gelişlerden **statik glyph'i bulunamayanları** bitirir —
+    /// içerik karesinde, dock basıldıktan sonra.
+    ///
+    /// Eşleşme sütun (aynı [`Frame::dock_pos`]'tan geçen konum, yani tam
+    /// eşitlik) ve karakter. Bulunamayan geliş ya pencerenin dışına düştü ya
+    /// da o karakter artık orada değil; çizilseydi satırda olmayan bir harf
+    /// belirirdi. Hayaletler sorulmuyor: onların statik glyph'i zaten yok.
+    pub(crate) fn suppress_dock(&self, fx: &mut GlyphFx) {
+        fx.retain(|fx| fx.kind == Kind::Ghost || self.static_arrival(fx).is_some());
+    }
+
+    /// Gelişin statik glyph'i, `dock_glyphs`'te.
+    fn static_arrival(&self, fx: &Fx) -> Option<usize> {
+        let pos = self.dock_pos(fx.cell.col, fx.cell.row);
+        self.dock_glyphs
+            .iter()
+            .position(|glyph| glyph.pos == pos && Some(glyph.ch) == fx.cell.ch)
+    }
+
+    /// Yazım efektlerini bu kare için yazar; içerik karesi de hareket karesi
+    /// de buradan geçiyor (dock'un statik listeleri hareket karesinde
+    /// korunuyor, yalnız efektler ilerliyor).
+    ///
+    /// Uçuştaki gelişin statik glyph'i çizilecek listeden **çıkarılıyor**
+    /// (`dock_shown`), yoksa `fade` statik glyph'in üstünde belirir ve hiçbir
+    /// şey görünmezdi. `dock_glyphs`'e dokunulmuyor: efekt bitince statik
+    /// glyph, dock yeniden basılmadan geri gelmeli.
+    pub(crate) fn set_dock_fx(&mut self, fx: impl IntoIterator<Item = Fx>) {
+        self.dock_ghosts.clear();
+        self.dock_arrivals.clear();
+        self.dock_shown.clear();
+        let mut hidden = [usize::MAX; crate::glyph_fx::FX_MAX];
+        let mut hidden_len = 0;
+        for fx in fx {
+            let Some(glyph) = self.dock_glyph(fx.cell) else {
+                continue;
+            };
+            let cell = FxCell {
+                glyph,
+                t: fx.t,
+                effect: fx.effect,
+                seed: fx.seed,
+            };
+            match fx.kind {
+                Kind::Ghost => self.dock_ghosts.push(cell),
+                Kind::Arrival => {
+                    // Statik glyph'i yoksa geliş çizilmiyor (bkz.
+                    // [`Frame::suppress_dock`]; içerik karesi onu zaten
+                    // bitirdi, burası hareket karesinin savunması).
+                    let Some(index) = self.static_arrival(&fx) else {
+                        continue;
+                    };
+                    if let Some(slot) = hidden.get_mut(hidden_len) {
+                        *slot = index;
+                        hidden_len += 1;
+                    }
+                    self.dock_arrivals.push(cell);
+                }
+            }
+        }
+        if hidden_len > 0 {
+            let hidden = &hidden[..hidden_len];
+            self.dock_shown.extend(
+                self.dock_glyphs
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !hidden.contains(index))
+                    .map(|(_, glyph)| *glyph),
+            );
         }
     }
 
@@ -1356,8 +1505,24 @@ impl Frame {
         &self.dock_bg
     }
 
+    /// Dock'un çizilecek glyph'leri: uçuşta geliş varsa onların statik
+    /// glyph'i çıkarılmış hâli ([`Frame::set_dock_fx`]).
     pub(crate) fn dock_glyphs(&self) -> &[GlyphCell] {
-        &self.dock_glyphs
+        if self.dock_arrivals.is_empty() {
+            &self.dock_glyphs
+        } else {
+            &self.dock_shown
+        }
+    }
+
+    /// Silinen glyph'lerin hayaletleri; dock glyph'lerinden **önce** çiziliyor.
+    pub(crate) fn dock_ghosts(&self) -> &[FxCell] {
+        &self.dock_ghosts
+    }
+
+    /// Gelen glyph'ler; dock glyph'lerinden **sonra** çiziliyor.
+    pub(crate) fn dock_arrivals(&self) -> &[FxCell] {
+        &self.dock_arrivals
     }
 
     pub(crate) fn dock_rules(&self) -> &[RuleCell] {
@@ -3168,6 +3333,103 @@ mod tests {
 
         frame.clear(grid(8, 16), CaretStyle::default());
         assert_eq!(frame.rule_count(), 0);
+    }
+
+    /// Dock'un giriş satırında bir glyph'li hücre.
+    fn typed_cell(col: u16, ch: char) -> Cell {
+        Cell {
+            col,
+            row: 0,
+            ch: Some(ch),
+            fg: CURSOR,
+            ..Default::default()
+        }
+    }
+
+    fn fx(cell: Cell, kind: Kind) -> Fx {
+        Fx {
+            cell,
+            kind,
+            effect: 1,
+            t: 0.5,
+            seed: 0.0,
+        }
+    }
+
+    #[test]
+    fn an_arriving_glyph_is_drawn_by_its_effect_not_twice() {
+        // `fade` statik glyph'in üstünde belirseydi hiçbir şey görünmezdi:
+        // uçuştaki gelişin statik glyph'i çizilecek listeden çıkıyor, ama
+        // `dock_glyphs`'in kendisinden değil — hareket karesi dock'u yeniden
+        // basmıyor ve efekt bitince statik glyph geri gelmeli.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.push_dock(typed_cell(2, 'l'));
+        frame.push_dock(typed_cell(3, 's'));
+        frame.set_dock_fx([fx(typed_cell(3, 's'), Kind::Arrival)]);
+        let shown: Vec<char> = frame.dock_glyphs().iter().map(|g| g.ch).collect();
+        assert_eq!(shown, ['l']);
+        assert_eq!(frame.dock_arrivals().len(), 1);
+        assert_eq!(frame.dock_arrivals()[0].glyph, frame.dock_glyphs[1]);
+        // Efekt bitti (hareket karesi, liste boş): statik glyph dock yeniden
+        // basılmadan geri geliyor.
+        frame.set_dock_fx([]);
+        let shown: Vec<char> = frame.dock_glyphs().iter().map(|g| g.ch).collect();
+        assert_eq!(shown, ['l', 's']);
+    }
+
+    #[test]
+    fn an_arrival_without_its_static_glyph_finishes() {
+        // Statik glyph'i bulunamayan geliş biter: satırda olmayan bir harf
+        // belirmesin. Hayalet sorulmuyor — onun statik glyph'i zaten yok.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.push_dock(typed_cell(2, 'l'));
+        let mut glyph_fx = GlyphFx::default();
+        let motion = crate::motion::Motion::default();
+        let window = (bt_core::DOCK_TEXT_COL, 80);
+        for edit in [
+            bt_core::DockEdit::Arrive {
+                col: 2,
+                cells: [typed_cell(2, 'l')].into_iter().collect(),
+                shift: 0,
+            },
+            bt_core::DockEdit::Erase {
+                col: 5,
+                ghosts: [typed_cell(5, 'q')].into_iter().collect(),
+                shift: 0,
+            },
+            // Yanlış karakter: sütun tutuyor ama `x` orada değil.
+            bt_core::DockEdit::Arrive {
+                col: 6,
+                cells: [typed_cell(6, 'x')].into_iter().collect(),
+                shift: 0,
+            },
+        ] {
+            glyph_fx.apply(edit, motion, window);
+        }
+        frame.suppress_dock(&mut glyph_fx);
+        let left: Vec<(u16, Kind)> = glyph_fx.iter().map(|fx| (fx.cell.col, fx.kind)).collect();
+        assert_eq!(left, [(2, Kind::Arrival), (5, Kind::Ghost)]);
+        frame.set_dock_fx(glyph_fx.iter());
+        assert_eq!(frame.dock_ghosts().len(), 1);
+        assert_eq!(frame.dock_arrivals().len(), 1);
+        assert!(
+            frame.dock_glyphs().is_empty(),
+            "gelişin statik glyph'i çift çizildi"
+        );
+    }
+
+    #[test]
+    fn the_effects_live_and_die_with_the_content_frame() {
+        // Dock'u olmayan karede (alternatif ekran) önceki karenin hayaleti
+        // asılı kalmamalı.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        frame.set_dock_fx([fx(typed_cell(3, 's'), Kind::Ghost)]);
+        assert_eq!(frame.dock_ghosts().len(), 1);
+        frame.clear(grid(8, 16), CaretStyle::default());
+        assert!(frame.dock_ghosts().is_empty() && frame.dock_arrivals().is_empty());
     }
 
     #[test]

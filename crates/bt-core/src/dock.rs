@@ -81,7 +81,11 @@ pub struct DockCols {
 ///
 /// **Yalnız giriş satırının hizası**; bağlam satırı sol kenardan başlıyor
 /// ([`CONTEXT_COL`]).
-const TEXT_COL: u16 = 2;
+///
+/// Crate dışına `DOCK_TEXT_COL` adıyla çıkıyor: `bt-gpu`'nun yazım efektleri
+/// pencereyle kayan bir hayaleti metnin sütunlarının dışında (işaretin
+/// üstünde) bırakmıyor. İkinci bir kopya değil, aynı sabitin okuyucusu.
+pub const TEXT_COL: u16 = 2;
 
 /// Bağlam satırının iki yanını ayıran işaret; iki yanında birer boşluk.
 const SEPARATOR: &str = " | ";
@@ -120,14 +124,34 @@ pub const EDIT_MAX: usize = 8;
 /// canlanmamalı (yapıştırma, geçmiş, tamamlama). Zaman ve çizim `bt-gpu`'da.
 /// Kural ve tablosu `.tasks/030-dock-yazim-animasyonlari/discussion.md` →
 /// Karar 2; sınırdan neden ikinci bir sink geçtiği → Karar 3.
+///
+/// **Pencerenin kayması `shift` olarak geçiyor, `Reset` olarak değil**
+/// (kullanıcı kararı, `plan.md` → R1.3): taşan satırda her tuş pencereyi
+/// kaydırıyor ve kayma sıfırlasaydı uzun bir komutta hiçbir harf canlanmazdı.
+/// `shift` son çizilen karedeki metnin ekranda kaç sütun kaydığı — eski
+/// pencerenin attığı sütun eksi yenisininki, yani sağa pozitif. Uçuştaki
+/// efektler o kadar kayıyor; sayının tek üreticisi [`render`]'ın pencereleme
+/// hesabı, `bt-gpu` sütun defteri tutmuyor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DockEdit {
-    /// Glyph'ler geldi. `col` koşunun **ilk** ekran sütunu; hücreler normal
-    /// sink'e de gidiyor, hangisinin çizileceği boyamanın kararı.
-    Arrive { col: u16, cells: EditCells },
-    /// Glyph'ler gitti. `col` silinmenin ekran sütunu (caret'in sütunu) ve
-    /// hayaletler **eski** satırın vurgusuyla çözülmüş.
-    Erase { col: u16, ghosts: EditCells },
+    /// Glyph'ler geldi. `col` koşunun **ilk** ekran sütunu (yeni pencerede);
+    /// hücreler normal sink'e de gidiyor, hangisinin çizileceği boyamanın
+    /// kararı.
+    Arrive {
+        col: u16,
+        cells: EditCells,
+        shift: i32,
+    },
+    /// Glyph'ler gitti. `col` silinmenin ekran sütunu (caret'in sütunu, yeni
+    /// pencerede) ve hayaletler **eski** satırın vurgusuyla çözülmüş.
+    Erase {
+        col: u16,
+        ghosts: EditCells,
+        shift: i32,
+    },
+    /// Metin değişmedi ama pencere kaydı (caret taşan satırda gezindi):
+    /// uçuştaki efektler yalnız kayıyor, hiçbiri bitmiyor.
+    Shift { by: i32 },
     /// Canlanmayan bir değişim: uçuştaki her efekt bitmeli.
     Reset,
 }
@@ -164,6 +188,20 @@ impl EditCells {
     }
 }
 
+/// Hücrelerden bir kap; [`EDIT_MAX`]'ı aşan hücre sessizce düşer.
+///
+/// Sınırın öteki yakası (`bt-gpu`'nun sınamaları) düzenleme kurabilsin diye:
+/// üretimde kabı yalnız [`render`] dolduruyor.
+impl FromIterator<Cell> for EditCells {
+    fn from_iter<I: IntoIterator<Item = Cell>>(cells: I) -> Self {
+        let mut out = Self::empty();
+        for cell in cells {
+            out.push(cell);
+        }
+        out
+    }
+}
+
 /// Aynanın son çizilen hâlinden bu yana ne değişti — [`render`]'ın
 /// [`DockEdit`]'e çevireceği ham hâl.
 ///
@@ -178,8 +216,8 @@ pub(crate) enum Change {
     /// Canlanmayan değişim.
     Reset,
     /// Ayna ilerledi ama `BUFFER` aynı (öneri değişti, caret kıpırdadı).
-    /// Pencere kaydıysa yine de [`DockEdit::Reset`]: uçuştaki efektler yerinde
-    /// kalırdı, metin kaymış olurdu.
+    /// Pencere kaydıysa [`DockEdit::Shift`]: uçuştaki efektler metinle
+    /// birlikte kaymalı, yoksa eski sütunlarında kalırlardı.
     Same { old_skip: Option<usize> },
     /// Yeni görüntünün `start..end` karakterleri eklendi.
     Insert {
@@ -480,20 +518,32 @@ pub(crate) fn render(
     // eski pencerenin kaymasını aynı hesapla buluyor.
     let skip = window_skip(state, available);
 
-    // **Pencere kaydıysa canlanma yok:** uçuştaki efektler eski sütunlarında
-    // kalırdı, metin ise kaymış olurdu. Taşan satırda her tuş pencereyi
-    // kaydırıyor, yani orada yazım animasyonsuz — bilinen ve seçilmiş sınır.
-    let shifted = matches!(
-        change,
+    // **Pencerenin kayması sütun farkı olarak geçiyor** (kullanıcı kararı,
+    // `plan.md` → R1.3): taşan satırda her tuş pencereyi kaydırıyor ve
+    // kayma sıfırlasaydı uzun bir komutta hiçbir harf canlanmazdı. Fark
+    // eski pencerenin attığı sütun eksi yenisininki — metin ekranda o kadar
+    // sağa kaydı; uçuştaki efektler de o kadar kayıyor ([`DockEdit`]).
+    let shift = match change {
         Some(
-            Change::Same { old_skip: Some(old) }
-                | Change::Insert { old_skip: Some(old), .. }
-                | Change::Delete { old_skip: Some(old), .. }
-        ) if *old != skip
-    );
-    let animated = owned && !shifted;
+            Change::Same {
+                old_skip: Some(old),
+            }
+            | Change::Insert {
+                old_skip: Some(old),
+                ..
+            }
+            | Change::Delete {
+                old_skip: Some(old),
+                ..
+            },
+        ) => {
+            // audit: iki pencere de `≤ cols` sütun atıyor ve `cols` `u16`.
+            *old as i32 - skip as i32
+        }
+        _ => 0,
+    };
     let arriving = match change {
-        Some(&Change::Insert { start, end, .. }) if animated => start..end,
+        Some(&Change::Insert { start, end, .. }) if owned => start..end,
         _ => 0..0,
     };
     let mut arrive_col = None;
@@ -573,16 +623,21 @@ pub(crate) fn render(
     let caret_screen = TEXT_COL + caret_visible as u16;
     match change {
         None => {}
-        Some(Change::Same { .. }) if !shifted => {}
-        Some(Change::Insert { .. }) if animated => edits(DockEdit::Arrive {
+        Some(Change::Same { .. }) if shift == 0 => {}
+        // Metin aynı, pencere kaydı: caret ızgaradaysa da uçuştakiler
+        // bitmiyor, yalnız kayıyor — satır hâlâ bu pencerede çiziliyor.
+        Some(Change::Same { .. }) => edits(DockEdit::Shift { by: shift }),
+        Some(Change::Insert { .. }) if owned => edits(DockEdit::Arrive {
             // Koşunun tamamı pencerenin solunda kaldıysa (pencereden geniş
             // bir koşu) hücresi de yok; sütun yine caret'in solunda.
             col: arrive_col.unwrap_or(caret_screen),
             cells: arrived,
+            shift,
         }),
-        Some(Change::Delete { ghosts, .. }) if animated => {
+        Some(Change::Delete { ghosts, .. }) if owned => {
             // Hayaletler caret'in sütunundan sağa: silme (Backspace de ileri
-            // silme de) yeni caret'te başlıyor ve pencere kaymadı.
+            // silme de) yeni caret'te başlıyor. Sütun **yeni** pencerede,
+            // yani hayalet de metinle birlikte kaymış yerinde doğuyor.
             let mut cells = EditCells::empty();
             let mut offset = caret_visible;
             for &(ch, style) in ghosts.as_slice() {
@@ -608,6 +663,7 @@ pub(crate) fn render(
             edits(DockEdit::Erase {
                 col: caret_screen,
                 ghosts: cells,
+                shift,
             });
         }
         Some(_) => edits(DockEdit::Reset),
@@ -1859,13 +1915,14 @@ mod tests {
         edits
     }
 
-    /// Düzenlemenin karakterleri ve sütunları; `Reset` → `None`.
+    /// Düzenlemenin karakterleri ve sütunları; `Shift` ve `Reset` → `None`.
     fn glyphs(edit: &DockEdit) -> Option<(u16, String, Vec<u16>)> {
         let (col, cells) = match edit {
-            DockEdit::Arrive { col, cells } | DockEdit::Erase { col, ghosts: cells } => {
-                (*col, cells.as_slice())
-            }
-            DockEdit::Reset => return None,
+            DockEdit::Arrive { col, cells, .. }
+            | DockEdit::Erase {
+                col, ghosts: cells, ..
+            } => (*col, cells.as_slice()),
+            DockEdit::Shift { .. } | DockEdit::Reset => return None,
         };
         Some((
             col,
@@ -2045,7 +2102,7 @@ mod tests {
     #[test]
     fn a_wide_char_arrives_as_one_glyph_over_two_columns() {
         let edits = edits_between(&at_end("a", 1), &at_end("a漢", 2), COLS);
-        let DockEdit::Arrive { col, cells } = only(&edits) else {
+        let DockEdit::Arrive { col, cells, .. } = only(&edits) else {
             panic!("{edits:?}");
         };
         assert_eq!(*col, TEXT_COL + 1);
@@ -2069,7 +2126,7 @@ mod tests {
         // Boşluk glyph değil ama sütun kaydırıyor: uçuştaki gelişlerin
         // bitmesi bu sütuna bakıyor (`discussion.md` → Karar 3).
         let edits = edits_between(&at_end("ls", 1), &at_end("ls ", 2), COLS);
-        let DockEdit::Arrive { col, cells } = only(&edits) else {
+        let DockEdit::Arrive { col, cells, .. } = only(&edits) else {
             panic!("{edits:?}");
         };
         assert_eq!(*col, TEXT_COL + 2);
@@ -2133,20 +2190,48 @@ mod tests {
         assert_eq!(col, TEXT_COL + 3);
     }
 
+    /// Düzenlemenin taşıdığı pencere kayması.
+    fn shift_of(edits: &[DockEdit]) -> i32 {
+        match only(edits) {
+            DockEdit::Arrive { shift, .. } | DockEdit::Erase { shift, .. } => *shift,
+            DockEdit::Shift { by } => *by,
+            DockEdit::Reset => panic!("kayma bekleniyordu: Reset"),
+        }
+    }
+
     #[test]
-    fn a_shifting_window_resets() {
-        // Taşan satırın sonunda yazmak pencereyi kaydırıyor: uçuştaki
-        // efektler eski sütunlarında kalırdı.
+    fn typing_at_the_end_of_an_overflowing_line_still_animates() {
+        // Kullanıcı kararı (`plan.md` → R1.3): taşan satırın sonunda yazmak
+        // pencereyi kaydırıyor ama harf yine canlanıyor; uçuştakiler metinle
+        // birlikte bir sütun sola kayıyor.
         let cols = TEXT_COL + 4;
-        reset(
-            &edits_between(&at_end("abcd", 1), &at_end("abcde", 2), cols),
-            "yazım pencereyi kaydırdı",
-        );
-        // Metin aynı, caret kıpırdadı ve pencere kaydı.
-        reset(
-            &edits_between(&typed("abcdefgh", 8, 1), &typed("abcdefgh", 2, 2), cols),
-            "caret pencereyi kaydırdı",
-        );
+        let edits = edits_between(&at_end("abcd", 1), &at_end("abcde", 2), cols);
+        // skip: eski 4 + 1 - 4 = 1, yeni 5 + 1 - 4 = 2. `e` caret'in solunda,
+        // yani son metin sütununun bir solunda.
+        assert_eq!(arrive(&edits), (TEXT_COL + 2, "e".into()));
+        assert_eq!(shift_of(&edits), -1);
+    }
+
+    #[test]
+    fn backspace_at_the_end_of_an_overflowing_line_still_animates() {
+        // Silmek pencereyi geri kaydırıyor: metin sağa, hayalet de metnin
+        // yeni yerinde — caret'in sütununda doğuyor.
+        let cols = TEXT_COL + 4;
+        let edits = edits_between(&at_end("abcde", 2), &at_end("abcd", 3), cols);
+        assert_eq!(erase(&edits), (TEXT_COL + 3, "e".into()));
+        assert_eq!(shift_of(&edits), 1);
+    }
+
+    #[test]
+    fn a_caret_that_moves_the_window_shifts_without_settling() {
+        // Metin aynı, caret satırın başına gitti ve pencere kaydı: uçuştakiler
+        // bitmiyor, yalnız kayıyor (skip 5 → 0).
+        let cols = TEXT_COL + 4;
+        let edits = edits_between(&typed("abcdefgh", 8, 1), &typed("abcdefgh", 2, 2), cols);
+        assert_eq!(edits, [DockEdit::Shift { by: 5 }]);
+        // Kaymayan bir caret hareketi hiçbir şey basmıyor.
+        let edits = edits_between(&typed("abcdefgh", 2, 1), &typed("abcdefgh", 1, 2), cols);
+        assert!(edits.is_empty(), "{edits:?}");
     }
 
     #[test]

@@ -55,15 +55,19 @@ gösterir (7.827 < 8) ve her harfi yarım pikselin altında kaydırırdı.
 atlasın **iki düzlemini** iki dokuya bağlar — maske `R8Unorm`, renk
 `RGBA8Unorm_sRGB` —, `(bold, italic)`'i font yüzüne çevirir ve `cell`
 pipeline'ında arka planın üstüne önce glyph'leri, **sonra** kural çizgilerini
-çizer. Pipeline **dört**: arka planlar/dörtgenler (`cell_bg`), glyph'ler ve
-kurallar (`cell`), caret (`caret_fragment`) ve renkli emoji
-(`emoji_fragment`). Son ikisi paylaşımla doğdu: caret `cell_bg`'nin,
-emoji `cell`'in **vertex'ini aynen** paylaşıyor ve ayrılan yalnız fragment.
-Caret'te sebep bir SDF (yuvarlak köşe, kenar, hale) ve o hesabı kare başına
-binlerce arka plan dörtgenine ödetmenin anlamı yok; emojide sebep **iki
-ayrım** — rengi dokudan alıyor (instance'tan değil) ve baytları **ön
-çarpımlı**, yani blend'in RGB kaynak çarpanı `One`. İkinci ayrım pipeline
-durumunun kendisi, yani tek bir fragment dalına birleşemiyor. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
+çizer. Pipeline **beş**: arka planlar/dörtgenler (`cell_bg`), glyph'ler ve
+kurallar (`cell`), caret (`caret_fragment`), renkli emoji
+(`emoji_fragment`) ve dock'un yazım efektleri (`glyph_fx`). Caret ile emoji
+paylaşımla doğdu: caret `cell_bg`'nin, emoji `cell`'in **vertex'ini aynen**
+paylaşıyor ve ayrılan yalnız fragment. Caret'te sebep bir SDF (yuvarlak
+köşe, kenar, hale) ve o hesabı kare başına binlerce arka plan dörtgenine
+ödetmenin anlamı yok; emojide sebep rengi dokudan alması (instance'tan
+değil) — baytlar **düz alfa** (ön çarpım yüklemeden önce geri alınıyor,
+`raster::unpremultiply`), yani blend beş pipeline'da aynı (`SourceAlpha`).
+`glyph_fx` kendi vertex'ini ve 48 baytlık instance'ını taşıyor, çünkü
+dörtlüsü efekt payı kadar şişiyor ve fragment noktayı efektin ters
+dönüşümüyle glyph uzayına çeviriyor; iki dokuyu birden bağlıyor, düzlem
+instance'tan. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
 yığınından geçer**: `keyDown:` tek kapı değil dört kollu bir arbitraj —
 Cmd'li olay **kapalı bir izin listesinin üç tuşu dışında** yutulur (⌘⌫ →
 `\x15` `kill-whole-line`, ⌘← → `\x01` `beginning-of-line`, ⌘→ → `\x05`
@@ -176,7 +180,21 @@ bir `setViewport`**'la çiziyor — kendi listeleri, kendi caret'i, opak zemini 
 `Reset`, ekran sütunuyla) veriyor: yalnız girdi sayısını aşmayan tek bitişik
 ekleme ya da silme canlanıyor, gerisi uçuştakileri bitiriyor — yazım
 animasyonlarının girdisi, tüketicisi `bt-gpu` (030; kural
-`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 1–3). **Caret tek**: ızgaranın imleci ile dock'un
+`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 1–3). Taşan
+satırda pencerenin kayması `Reset` değil sütun farkı (`shift`, `Shift`):
+uçuştakiler metinle birlikte kayıyor, yoksa uzun bir komutta hiçbir harf
+canlanmazdı (kullanıcı kararı, `plan.md` → R1.3). **Zaman ve çizim
+`bt-gpu`'da** (`glyph_fx::GlyphFx`, `Motion`'ın yanında ayrı bir ivar, blink
+emsali): içerik karesi düzenlemeyi işliyor, uçuştaki gelişin statik glyph'i
+çizilecek listeden çıkıyor (`Frame::set_dock_fx`) ama `dock_glyphs`'ten
+değil — hareket karesi dock'u yeniden basmıyor ve efekt bitince glyph geri
+gelmeli. Uyku testinin **dördüncü** terimi efektler ve `advance`'ten
+**önceki** hâle bakıyor: efektin bittiği kare çizilmeden uyunsaydı yarı
+saydam bir harf asılı kalırdı. Hasar dikmiyor, `icerik=` saymıyor. Her
+efekt `t = 1`'de statik glyph'le **piksel piksel aynı** (geliş) ya da düz
+zemin (hayalet) ve bu bir kapı (`renderer::tests`): devir karesinde harf
+sıçramıyor. İndirgeme `Motion::glyph_fx`'te — `snap` ikisini kapatır,
+Hareketi Azalt gelişi belirmeye indirip hayaleti kapatır. **Caret tek**: ızgaranın imleci ile dock'un
 caret'i aynı animatörün (`bt-gpu::motion`) iki hedefi, yani dock'ta yazarken de
 süzülüyor ve devir bir ışınlanma değil bir kayma. **Şekli de tek** ve sınırdan
 geliyor (`Cursor::shape`): DECSCUSR'ın üç biçimi — blok, alt çizgi, dikey
