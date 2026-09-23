@@ -663,6 +663,18 @@ pub enum Osc52 {
     Copy,
 }
 
+impl Osc52 {
+    /// Ayar dosyasındaki yazılışların tek listesi; ayrıştırıcısı
+    /// `settings.rs`'te. Okuma yönünün değerleri (`"paste"`, alacritty'nin
+    /// `"copy_paste"`'i) bilerek yok — okuma yönü yok (006 Karar 5).
+    pub const NAMES: &'static [(&'static str, Self)] = &[("copy", Self::Copy), ("off", Self::Off)];
+
+    /// Ayar dosyasındaki yazılışı.
+    pub fn name(self) -> &'static str {
+        crate::settings::name_in(Self::NAMES, self)
+    }
+}
+
 /// alacritty `Config`'ini seçeneklerin **tamamından** kurar — açılışın
 /// (`Session::spawn`) ve canlı değişimin ([`Session::set_terminal_options`])
 /// tek yolu.

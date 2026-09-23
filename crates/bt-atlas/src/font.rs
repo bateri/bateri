@@ -7,9 +7,14 @@
 
 use std::ptr::{self, NonNull};
 
-use objc2_core_foundation::{CFIndex, CFRange, CFRetained, CFString, CGFloat, CGRect, CGSize};
+use objc2_core_foundation::{
+    CFDictionary, CFIndex, CFNumber, CFRange, CFRetained, CFString, CGFloat, CGRect, CGSize,
+};
 use objc2_core_graphics::CGGlyph;
-use objc2_core_text::{CTFont, CTFontOrientation, CTFontSymbolicTraits};
+use objc2_core_text::{
+    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, kCTFontFamilyNameAttribute,
+    kCTFontSymbolicTrait, kCTFontTraitsAttribute,
+};
 
 /// Tercih sırası. Bulunamayan ad **sessizce** atlanır: SF Mono Xcode ile
 /// gelir, her makinede yoktur ve yokluğu bir kusur değil tasarlanmış bir geri
@@ -312,11 +317,69 @@ pub(crate) fn open_chain(
         };
         return (font, Some(issue));
     }
-    // SAFETY: `font` az önce yaratıldı ve bu kapsamda canlı.
-    let traits = unsafe { font.symbolic_traits() };
-    let issue = (!traits.contains(CTFontSymbolicTraits::TraitMonoSpace))
-        .then_some(FontIssue::NotMonospaced { family: returned });
+    let issue = (!is_monospaced(&font)).then_some(FontIssue::NotMonospaced { family: returned });
     (font, issue)
+}
+
+/// CoreText fontu eşaralıklı sayıyor mu — "eşaralıklı" ölçütünün **tek
+/// yeri**: zincirin uyarısı ([`open_chain`]) da ayar penceresinin listesi
+/// ([`monospaced_families`]) de bunu soruyor, yani listeden seçilen aile
+/// uyarı almaz.
+fn is_monospaced(font: &CTFont) -> bool {
+    // SAFETY: `font` çağıranın elinde canlı.
+    let traits = unsafe { font.symbolic_traits() };
+    traits.contains(CTFontSymbolicTraits::TraitMonoSpace)
+}
+
+/// Makinedeki eşaralıklı ailelerin adları, harf duyarsız sırayla — ayar
+/// penceresinin Font listesi.
+///
+/// Bir aile listeye ancak zincirin onu **uyarısız** açacağı hâlde giriyor:
+/// CoreText adı kendi ailesine çözüyor ([`same_family`]) ve açtığı font
+/// eşaralıklı ([`is_monospaced`]). Nokta ile başlayan sistem aileleri
+/// (`.AppleSystemUIFont`) kullanıcıya gösterilmiyor.
+///
+/// Adaylar CoreText'in eşaralıklı bitine göre eşleştirdiği tanımlayıcılardan
+/// geliyor, makinedeki bütün ailelerden değil: her aileyi açıp sormak
+/// yüzlerce font açmak demek ve pencere açılırken beklenirdi. Eşleştirme
+/// yalnız bir ön süzgeç — son söz yine yukarıdaki iki ölçütün, yani listeye
+/// ölçütün kabul etmediği bir aile giremez.
+pub fn monospaced_families() -> Vec<String> {
+    // `TraitMonoSpace` biti `1 << 10`; `i32`'ye kayıpsız sığıyor.
+    let mono = CFNumber::new_i32(CTFontSymbolicTraits::TraitMonoSpace.bits() as i32);
+    // SAFETY: iki anahtar da CoreText'in dışa açtığı sabit, program boyunca
+    // canlı.
+    let (traits_key, symbolic_key) = unsafe { (kCTFontTraitsAttribute, kCTFontSymbolicTrait) };
+    let traits = CFDictionary::from_slices(&[symbolic_key], &[&*mono]);
+    let attributes = CFDictionary::from_slices(&[traits_key], &[&*traits]);
+    // SAFETY: sözlük CoreText'in beklediği biçimde — `kCTFontTraitsAttribute`
+    // altında `kCTFontSymbolicTrait` → `CFNumber`.
+    let wanted = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
+    // SAFETY: `wanted` canlı; zorunlu anahtar kümesi yok.
+    let Some(matches) = (unsafe { wanted.matching_font_descriptors(None) }) else {
+        return Vec::new();
+    };
+    // SAFETY: işlevin belgesine göre dizinin öğeleri font tanımlayıcısı.
+    let matches = unsafe { matches.cast_unchecked::<CTFontDescriptor>() };
+    // SAFETY: anahtar CoreText'in sabiti.
+    let family_key = unsafe { kCTFontFamilyNameAttribute };
+    let mut names: Vec<String> = matches
+        .iter()
+        // SAFETY: tanımlayıcı dizinin elinde canlı.
+        .filter_map(|descriptor| unsafe { descriptor.attribute(family_key) })
+        .filter_map(|name| name.downcast::<CFString>().ok())
+        .map(|name| name.to_string())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.sort_by_cached_key(|name| name.to_lowercase());
+    names.dedup();
+    // Punto önemsiz: aile ve eşaralıklılık puntodan bağımsız.
+    const PROBE_SIZE: CGFloat = 12.0;
+    names.retain(|name| {
+        let (font, returned) = open(name, PROBE_SIZE);
+        same_family(&returned, name) && is_monospaced(&font)
+    });
+    names
 }
 
 /// CoreText'in bildirdiği aile adı istenen ad mı — **harf duyarsız**.

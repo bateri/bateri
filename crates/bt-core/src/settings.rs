@@ -37,10 +37,12 @@ use crate::session::{Osc52, TerminalOptions};
 /// crate bağımlılığımız değil), sayı kaynağıyla birlikte buraya kopyalandı;
 /// ölçülmüş bir bellek bütçesi değil.
 ///
-/// `pub(crate)`: tavan kullanıcı girdisinin kuralı, `Session`'ın değişmezi
-/// değil — `SessionOptions.scrollback`'i kırpan başka bir kapı yok ve olması
-/// da gerekmiyor, oraya giden tek değer bu ayrıştırıcıdan geçiyor.
-pub(crate) const SCROLLBACK_MAX: usize = 100_000;
+/// Tavan kullanıcı girdisinin kuralı, `Session`'ın değişmezi değil —
+/// `SessionOptions.scrollback`'i kırpan başka bir kapı yok ve olması da
+/// gerekmiyor, oraya giden tek değer bu ayrıştırıcıdan geçiyor. `pub`, çünkü
+/// ayar penceresinin alanı da aynı tavanı soruyor: ikinci bir kopya pencereye
+/// ayrıştırıcının reddettiği bir sayı yazdırabilirdi (029).
+pub const SCROLLBACK_MAX: usize = 100_000;
 
 /// `[appearance] theme`'in ayrılmış değeri: temayı sistemin açık/koyu
 /// görünümü seçer ([`Settings::theme_for`]).
@@ -119,16 +121,17 @@ pub enum CursorMotion {
 }
 
 impl CursorMotion {
-    /// Ayar dosyasındaki yazılışı — tanı metninin "using …" yarısı buradan.
-    ///
-    /// Ayrıştırıcının kabul ettiği dizgilerle **aynı** olmak zorunda
-    /// ([`cursor_motion`]): tanı kullanıcıya geçerli bir değer göstermeli.
-    fn name(self) -> &'static str {
-        match self {
-            Self::Snap => "snap",
-            Self::Ease => "ease",
-            Self::Spring => "spring",
-        }
+    /// Ayar dosyasındaki yazılışların **tek listesi**
+    /// ([`UnfocusedCaret::NAMES`]'in gerekçesi).
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("snap", Self::Snap),
+        ("ease", Self::Ease),
+        ("spring", Self::Spring),
+    ];
+
+    /// Ayar dosyasındaki yazılışı.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
     }
 }
 
@@ -159,14 +162,13 @@ pub enum CursorBlink {
 }
 
 impl CursorBlink {
-    /// Ayar dosyasındaki yazılışı; ayrıştırıcının kabul ettikleriyle **aynı**
-    /// olmak zorunda ([`cursor_blink`]).
-    fn name(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::On => "on",
-            Self::Off => "off",
-        }
+    /// Ayar dosyasındaki yazılışların tek listesi.
+    pub const NAMES: &'static [(&'static str, Self)] =
+        &[("auto", Self::Auto), ("on", Self::On), ("off", Self::Off)];
+
+    /// Ayar dosyasındaki yazılışı.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
     }
 
     /// Uygulamanın söylediğiyle kullanıcının dediğini birleştirir — **tek
@@ -257,10 +259,13 @@ pub const CURSOR_BLINK_INTERVAL: f64 = 0.5;
 /// blink varsayılanı da kapalı, yani bozuk bir periyot `make duman`'ın
 /// `sessiz=` katını **hiçbir koşulda** kızartmaz (014 `teslim.md`: "koruma
 /// bir jeton değil varsayılanın kendisi"). Tek koruma bu aralık.
-const CURSOR_BLINK_RANGE: std::ops::RangeInclusive<f64> = 0.05..=5.0;
+pub const CURSOR_BLINK_RANGE: std::ops::RangeInclusive<f64> = 0.05..=5.0;
 
 /// Yarıçabın kabul aralığı; yarım = hücrenin yarısı, ötesi anlamsız.
-const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
+///
+/// Aralıklar `pub`: ayar penceresinin kontrolleri de bu uçlarla kuruluyor, yani
+/// ayrıştırıcının kabul ettiği ile pencerenin sunduğu tek yerden (029).
+pub const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
 
 /// Gölge çarpanının kabul aralığı — **seçilmiş, ölçülmemiş**.
 ///
@@ -272,7 +277,7 @@ const CURSOR_RADIUS_RANGE: std::ops::RangeInclusive<f64> = 0.0..=0.5;
 /// Tavan yine de orada, çünkü **varsayılanın zevki ile tavanın işi ayrı**:
 /// reddedilen şey o görüntünün *varsayılan* olmasıydı. Tavan kullanıcının
 /// açıkça seçtiği uca yer bırakıyor ve tek görevi sınırsızlığı kesmek.
-const CURSOR_GLOW_RANGE: std::ops::RangeInclusive<f64> = 0.0..=3.0;
+pub const CURSOR_GLOW_RANGE: std::ops::RangeInclusive<f64> = 0.0..=3.0;
 
 /// `[terminal] cursor_unfocused`: odakta olmayan pencerede imleç ne olsun.
 ///
@@ -290,22 +295,17 @@ pub enum UnfocusedCaret {
 
 impl UnfocusedCaret {
     /// Ayar dosyasındaki yazılışların **tek listesi**: ayrıştırıcı da
-    /// [`Self::name`] de buradan okuyor.
+    /// [`Self::name`] de ayar penceresinin seçenekleri de buradan okuyor.
     ///
     /// İki yerde yazılsaydı bir varyantın yazılışını değiştirmek, kullanıcıya
-    /// **ayrıştırıcının reddettiği** bir değer öneren bir tanı üretirdi —
-    /// `docs/YOL-HARITASI.md`'nin borcu bu kusuru adıyla sayıyor ("her
-    /// enum'un `name()`'i de ayrıştırıcının kollarıyla elle eşleşiyor") ve
-    /// yeni bir enum'da onu tekrarlamanın gerekçesi yok.
-    const NAMES: &'static [(&'static str, Self)] =
+    /// **ayrıştırıcının reddettiği** bir değer öneren bir tanı üretirdi. Sıra
+    /// tanı metninin sırası (`"hollow" or "solid"`).
+    pub const NAMES: &'static [(&'static str, Self)] =
         &[("hollow", Self::Hollow), ("solid", Self::Solid)];
 
     /// Ayar dosyasındaki yazılışı.
-    fn name(self) -> &'static str {
-        Self::NAMES
-            .iter()
-            .find(|(_, value)| *value == self)
-            .map_or("hollow", |(name, _)| *name)
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
     }
 }
 
@@ -333,18 +333,15 @@ pub enum ConfirmClose {
 impl ConfirmClose {
     /// Ayar dosyasındaki yazılışların tek listesi ([`UnfocusedCaret::NAMES`]
     /// ile aynı gerekçe).
-    const NAMES: &'static [(&'static str, Self)] = &[
+    pub const NAMES: &'static [(&'static str, Self)] = &[
         ("never", Self::Never),
         ("running", Self::Running),
         ("always", Self::Always),
     ];
 
     /// Ayar dosyasındaki yazılışı.
-    fn name(self) -> &'static str {
-        Self::NAMES
-            .iter()
-            .find(|(_, value)| *value == self)
-            .map_or("running", |(name, _)| *name)
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
     }
 }
 
@@ -381,14 +378,16 @@ impl Default for CaretStyle {
 }
 
 impl CaretShape {
-    /// Ayar dosyasındaki yazılışı; ayrıştırıcının kabul ettikleriyle **aynı**
-    /// olmak zorunda ([`caret_shape`]).
-    fn name(self) -> &'static str {
-        match self {
-            Self::Block => "block",
-            Self::Underline => "underline",
-            Self::Beam => "beam",
-        }
+    /// Ayar dosyasındaki yazılışların tek listesi.
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("block", Self::Block),
+        ("underline", Self::Underline),
+        ("beam", Self::Beam),
+    ];
+
+    /// Ayar dosyasındaki yazılışı.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
     }
 }
 
@@ -414,13 +413,16 @@ pub enum ReduceMotion {
 }
 
 impl ReduceMotion {
-    /// Ayar dosyasındaki yazılışı; [`CursorMotion::name`] ile aynı gerekçe.
-    fn name(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::On => "on",
-            Self::Off => "off",
-        }
+    /// Ayar dosyasındaki yazılışların tek listesi.
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("system", Self::System),
+        ("on", Self::On),
+        ("off", Self::Off),
+    ];
+
+    /// Ayar dosyasındaki yazılışı.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
     }
 }
 
@@ -445,12 +447,12 @@ pub enum SmoothScroll {
 }
 
 impl SmoothScroll {
-    /// Ayar dosyasındaki yazılışı; [`CursorMotion::name`] ile aynı gerekçe.
-    fn name(self) -> &'static str {
-        match self {
-            Self::On => "on",
-            Self::Off => "off",
-        }
+    /// Ayar dosyasındaki yazılışların tek listesi.
+    pub const NAMES: &'static [(&'static str, Self)] = &[("on", Self::On), ("off", Self::Off)];
+
+    /// Ayar dosyasındaki yazılışı.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
     }
 }
 
@@ -495,13 +497,16 @@ pub enum ShellIntegration {
 }
 
 impl ShellIntegration {
-    /// Ayar dosyasındaki yazılışı; tanı metni bunu basıyor.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Blocks => "blocks",
-            Self::Off => "off",
-        }
+    /// Ayar dosyasındaki yazılışların tek listesi.
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("auto", Self::Auto),
+        ("blocks", Self::Blocks),
+        ("off", Self::Off),
+    ];
+
+    /// Ayar dosyasındaki yazılışı.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
     }
 
     /// Sarmalayıcı kurulacak mı — `auto` ve `blocks` için evet.
@@ -653,6 +658,101 @@ impl fmt::Display for Diagnostic {
             write!(f, "line {line}: ")?;
         }
         f.write_str(&self.message)
+    }
+}
+
+/// Tek bir anahtarın yeni değeri — ayar penceresinin dosyaya yazdığı şey
+/// ([`Settings::with_edit`]).
+///
+/// Tipli, dizge değil: bölüm, anahtar ve TOML türü varyanttan türüyor, yani
+/// pencere yanlış bölüme ya da yanlış türde yazamaz. Değerin **aralığı**
+/// sınanmıyor — pencerenin kontrolleri aralıkları buradan alıyor
+/// ([`CURSOR_RADIUS_RANGE`] …); öyle olmasa da ayrıştırıcı okurken reddeder.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SettingsEdit {
+    Scrollback(usize),
+    Cursor(CaretShape),
+    CursorBlink(CursorBlink),
+    CursorRadius(f64),
+    CursorGlow(f64),
+    CursorUnfocused(UnfocusedCaret),
+    BlinkInterval(f64),
+    ConfirmClose(ConfirmClose),
+    Theme(String),
+    LightTheme(String),
+    DarkTheme(String),
+    /// Boş dizge varsayılan aile (zincir): ayrıştırıcı `family = ""`'yi öyle
+    /// okuyor ve anahtar silinmiyor.
+    FontFamily(String),
+    FontSize(f64),
+    LineHeight(f64),
+    Osc52(Osc52),
+    CursorMotion(CursorMotion),
+    ReduceMotion(ReduceMotion),
+    SmoothScroll(SmoothScroll),
+    ShellIntegration(ShellIntegration),
+}
+
+impl SettingsEdit {
+    /// Bölüm, anahtar ve tanının taşıdığı noktalı yol (`Diagnostic::key`
+    /// `'static` istiyor, o yüzden üçü de sabit).
+    fn place(&self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Scrollback(_) => ("terminal", "scrollback", "terminal.scrollback"),
+            Self::Cursor(_) => ("terminal", "cursor", "terminal.cursor"),
+            Self::CursorBlink(_) => ("terminal", "cursor_blink", "terminal.cursor_blink"),
+            Self::CursorRadius(_) => ("terminal", "cursor_radius", "terminal.cursor_radius"),
+            Self::CursorGlow(_) => ("terminal", "cursor_glow", "terminal.cursor_glow"),
+            Self::CursorUnfocused(_) => {
+                ("terminal", "cursor_unfocused", "terminal.cursor_unfocused")
+            }
+            Self::BlinkInterval(_) => (
+                "terminal",
+                "cursor_blink_interval",
+                "terminal.cursor_blink_interval",
+            ),
+            Self::ConfirmClose(_) => ("terminal", "confirm_close", "terminal.confirm_close"),
+            Self::Theme(_) => ("appearance", "theme", "appearance.theme"),
+            Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
+            Self::DarkTheme(_) => ("appearance", "dark_theme", "appearance.dark_theme"),
+            Self::FontFamily(_) => ("font", "family", "font.family"),
+            Self::FontSize(_) => ("font", "size", "font.size"),
+            Self::LineHeight(_) => ("font", "line_height", "font.line_height"),
+            Self::Osc52(_) => ("clipboard", "osc52", "clipboard.osc52"),
+            Self::CursorMotion(_) => ("motion", "cursor_motion", "motion.cursor_motion"),
+            Self::ReduceMotion(_) => ("motion", "reduce_motion", "motion.reduce_motion"),
+            Self::SmoothScroll(_) => ("motion", "smooth_scroll", "motion.smooth_scroll"),
+            Self::ShellIntegration(_) => ("shell", "integration", "shell.integration"),
+        }
+    }
+
+    /// Dosyaya yazılacak değer. Ondalık iki basamağa yuvarlanıyor: pencerenin
+    /// kaydırıcısı `0.30000000000000004` yazmasın, ve okunan değer yazılanın
+    /// ta kendisi olsun.
+    fn value(&self) -> toml_edit::Value {
+        let decimal = |value: f64| toml_edit::Value::from((value * 100.0).round() / 100.0);
+        match self {
+            // `i64`'e sığmayan satır sayısı zaten tavanın çok ötesinde.
+            Self::Scrollback(lines) => i64::try_from(*lines).unwrap_or(i64::MAX).into(),
+            Self::Cursor(shape) => shape.name().into(),
+            Self::CursorBlink(blink) => blink.name().into(),
+            Self::CursorUnfocused(unfocused) => unfocused.name().into(),
+            Self::ConfirmClose(confirm) => confirm.name().into(),
+            Self::Osc52(mode) => mode.name().into(),
+            Self::CursorMotion(motion) => motion.name().into(),
+            Self::ReduceMotion(reduce) => reduce.name().into(),
+            Self::SmoothScroll(smooth) => smooth.name().into(),
+            Self::ShellIntegration(integration) => integration.name().into(),
+            Self::CursorRadius(value)
+            | Self::CursorGlow(value)
+            | Self::BlinkInterval(value)
+            | Self::FontSize(value)
+            | Self::LineHeight(value) => decimal(*value),
+            Self::Theme(name)
+            | Self::LightTheme(name)
+            | Self::DarkTheme(name)
+            | Self::FontFamily(name) => name.as_str().into(),
+        }
     }
 }
 
@@ -835,12 +935,24 @@ integration = "auto"
                         scrollback(text, item, fallback.scrollback, &mut parsed.diagnostics);
                 }
                 if let Some(item) = terminal.get("cursor") {
-                    parsed.settings.cursor =
-                        caret_shape(text, item, fallback.cursor, &mut parsed.diagnostics);
+                    parsed.settings.cursor = named_enum(
+                        text,
+                        item,
+                        "terminal.cursor",
+                        CaretShape::NAMES,
+                        fallback.cursor,
+                        &mut parsed.diagnostics,
+                    );
                 }
                 if let Some(item) = terminal.get("cursor_blink") {
-                    parsed.settings.cursor_blink =
-                        cursor_blink(text, item, fallback.cursor_blink, &mut parsed.diagnostics);
+                    parsed.settings.cursor_blink = named_enum(
+                        text,
+                        item,
+                        "terminal.cursor_blink",
+                        CursorBlink::NAMES,
+                        fallback.cursor_blink,
+                        &mut parsed.diagnostics,
+                    );
                 }
                 if let Some(item) = terminal.get("cursor_radius") {
                     parsed.settings.caret.radius_ratio = ranged_float(
@@ -869,7 +981,6 @@ integration = "auto"
                         "terminal.cursor_unfocused",
                         UnfocusedCaret::NAMES,
                         fallback.caret.unfocused,
-                        fallback.caret.unfocused.name(),
                         &mut parsed.diagnostics,
                     );
                 }
@@ -890,7 +1001,6 @@ integration = "auto"
                         "terminal.confirm_close",
                         ConfirmClose::NAMES,
                         fallback.confirm_close,
-                        fallback.confirm_close.name(),
                         &mut parsed.diagnostics,
                     );
                 }
@@ -972,7 +1082,14 @@ integration = "auto"
         match section(text, root, "clipboard", &mut parsed.diagnostics) {
             Some(clipboard) => {
                 if let Some(item) = clipboard.get("osc52") {
-                    parsed.settings.osc52 = osc52(text, item, &mut parsed.diagnostics);
+                    parsed.settings.osc52 = named_enum(
+                        text,
+                        item,
+                        "clipboard.osc52",
+                        Osc52::NAMES,
+                        Osc52::Off,
+                        &mut parsed.diagnostics,
+                    );
                 }
             }
             None if root.contains_key("clipboard") => {
@@ -983,16 +1100,34 @@ integration = "auto"
         match section(text, root, "motion", &mut parsed.diagnostics) {
             Some(motion) => {
                 if let Some(item) = motion.get("cursor_motion") {
-                    parsed.settings.cursor_motion =
-                        cursor_motion(text, item, fallback.cursor_motion, &mut parsed.diagnostics);
+                    parsed.settings.cursor_motion = named_enum(
+                        text,
+                        item,
+                        "motion.cursor_motion",
+                        CursorMotion::NAMES,
+                        fallback.cursor_motion,
+                        &mut parsed.diagnostics,
+                    );
                 }
                 if let Some(item) = motion.get("reduce_motion") {
-                    parsed.settings.reduce_motion =
-                        reduce_motion(text, item, fallback.reduce_motion, &mut parsed.diagnostics);
+                    parsed.settings.reduce_motion = named_enum(
+                        text,
+                        item,
+                        "motion.reduce_motion",
+                        ReduceMotion::NAMES,
+                        fallback.reduce_motion,
+                        &mut parsed.diagnostics,
+                    );
                 }
                 if let Some(item) = motion.get("smooth_scroll") {
-                    parsed.settings.smooth_scroll =
-                        smooth_scroll(text, item, fallback.smooth_scroll, &mut parsed.diagnostics);
+                    parsed.settings.smooth_scroll = named_enum(
+                        text,
+                        item,
+                        "motion.smooth_scroll",
+                        SmoothScroll::NAMES,
+                        fallback.smooth_scroll,
+                        &mut parsed.diagnostics,
+                    );
                 }
             }
             None if root.contains_key("motion") => {
@@ -1005,9 +1140,11 @@ integration = "auto"
         match section(text, root, "shell", &mut parsed.diagnostics) {
             Some(shell) => {
                 if let Some(item) = shell.get("integration") {
-                    parsed.settings.shell_integration = shell_integration(
+                    parsed.settings.shell_integration = named_enum(
                         text,
                         item,
+                        "shell.integration",
+                        ShellIntegration::NAMES,
                         fallback.shell_integration,
                         &mut parsed.diagnostics,
                     );
@@ -1078,29 +1215,33 @@ integration = "auto"
         }
     }
 
-    /// Menünün tema seçimi (View ▸ Theme ▸): `settings.toml`'un metninde
-    /// `[appearance] theme`'i `name` yapar ve **geri kalan her baytı** yerinde
-    /// bırakır — yorumlar, boş satırlar, anahtar sırası, tanımadığımız
-    /// anahtarlar, değerin yanındaki yorum. Dosyayı okuyup yazan `bt-shell`.
+    /// Menünün tema seçimi (View ▸ Theme ▸): `[appearance] theme`'i `name`
+    /// yapar — [`Settings::with_edit`]'in tema hâli.
+    ///
+    /// `light_theme` ve `dark_theme`'e dokunmaz: sabit bir tema seçen
+    /// kullanıcı `"system"`'e dönünce çiftini geri bulur. Adın biçimi
+    /// sınanmıyor: menü yalnız gömülü temaların ve `themes/`'teki dosyaların
+    /// adlarını veriyor; öyle olmasa da ayrıştırıcı adı okurken reddeder.
+    pub fn with_theme(text: &str, name: &str) -> Result<String, Diagnostic> {
+        Self::with_edit(text, &SettingsEdit::Theme(name.to_owned()))
+    }
+
+    /// `settings.toml`'un metninde tek bir anahtarı `edit`'in değeri yapar ve
+    /// **geri kalan her baytı** yerinde bırakır — yorumlar, boş satırlar,
+    /// anahtar sırası, tanımadığımız anahtarlar, değerin yanındaki yorum.
+    /// Dosyayı okuyup yazan `bt-shell`; yazanlar menü ve ayar penceresi.
     ///
     /// - Bölüm yoksa sona, anahtar yoksa bölümün içine eklenir; bölümün
     ///   yazılışı (başlık, satır içi tablo, noktalı anahtar) korunur.
-    /// - `light_theme` ve `dark_theme`'e dokunmaz: sabit bir tema seçen
-    ///   kullanıcı `"system"`'e dönünce çiftini geri bulur.
     /// - **Ayrıştırılamayan metin `Err`**, yeni metin üretilmez: dosya
     ///   kullanıcının yarım işi ve üstüne yazmak onu silerdi. Aynı sebeple
-    ///   bölüm olmayan bir `appearance` (`appearance = 1`, `[[appearance]]`)
-    ///   ve bölüm olan bir `theme` (`[appearance.theme]`, `theme = { … }`) de
-    ///   `Err`: yerlerine
-    ///   yazmak içeriklerini silerdi. Kabul edilmeyen türdeki bir değer
-    ///   (`theme = 3`) ise değişir — kullanıcı bir tema seçti.
-    ///
-    /// Adın biçimi sınanmıyor: çağıran (menü) yalnız gömülü temaların ve
-    /// `themes/`'teki dosyaların adlarını veriyor; öyle olmasa da ayrıştırıcı
-    /// adı okurken reddeder.
-    pub fn with_theme(text: &str, name: &str) -> Result<String, Diagnostic> {
-        const SECTION: &str = "appearance";
-        const KEY: &str = "appearance.theme";
+    ///   bölüm olmayan bir bölüm (`appearance = 1`, `[[appearance]]`) ve bölüm
+    ///   olan bir anahtar (`[appearance.theme]`, `theme = { … }`) de `Err`:
+    ///   yerlerine yazmak içeriklerini silerdi. Kabul edilmeyen türdeki bir
+    ///   değer (`theme = 3`) ise değişir — kullanıcı bir değer seçti.
+    pub fn with_edit(text: &str, edit: &SettingsEdit) -> Result<String, Diagnostic> {
+        let (section_name, key, path) = edit.place();
+        let value = edit.value();
         let parsed = document(text)?;
         // Ret konumlu belgede: `into_mut` konumları düşürüyor, tanının satırı
         // onlardan geliyor.
@@ -1108,22 +1249,27 @@ integration = "auto"
         // Satır içi tablo (`theme = { … }`) da bir bölüm: `is_value` onu
         // geçirirdi ve yerine yazmak `[appearance.theme]`'in reddedildiği
         // içeriği bu yazılışta sessizce silerdi (`/code-review` bulgusu).
-        if let Some(appearance) = section(text, parsed.as_table(), SECTION, &mut refused)
-            && let Some(item) = appearance
-                .get("theme")
+        if let Some(table) = section(text, parsed.as_table(), section_name, &mut refused)
+            && let Some(item) = table
+                .get(key)
                 .filter(|item| !item.is_value() || item.is_inline_table())
         {
+            let expected = match value {
+                toml_edit::Value::String(_) => "a string",
+                toml_edit::Value::Integer(_) => "an integer",
+                _ => "a number",
+            };
             refused.push(Diagnostic {
-                key: Some(KEY),
+                key: Some(path),
                 line: item.span().and_then(|span| line_of(text, span.start)),
-                message: format!("`{KEY}` must be a string, found {}", kind(item)),
+                message: format!("`{path}` must be {expected}, found {}", kind(item)),
             });
         }
         if let Some(diagnostic) = refused.pop() {
             return Err(diagnostic);
         }
         let mut doc = parsed.into_mut();
-        if !doc.contains_key(SECTION) {
+        if !doc.contains_key(section_name) {
             let mut table = toml_edit::Table::new();
             // Belge sonundaki yorum `toml_edit`'te belgenin kuyruğu ve yeni
             // bölüm onun önüne yazılırdı: son bölümün altındaki
@@ -1135,21 +1281,21 @@ integration = "auto"
                 table.decor_mut().set_prefix(format!("{trailing}\n"));
                 doc.set_trailing("");
             }
-            doc.insert(SECTION, Item::Table(table));
+            doc.insert(section_name, Item::Table(table));
         }
-        // `else` dalı yok: bölüm olmayan bir `appearance` yukarıda reddedildi,
-        // eksik olan da az önce tablo olarak eklendi.
-        if let Some(appearance) = doc.get_mut(SECTION).and_then(Item::as_table_like_mut) {
-            match appearance.get_mut("theme").and_then(Item::as_value_mut) {
+        // `else` dalı yok: bölüm olmayan bir bölüm yukarıda reddedildi, eksik
+        // olan da az önce tablo olarak eklendi.
+        if let Some(table) = doc.get_mut(section_name).and_then(Item::as_table_like_mut) {
+            match table.get_mut(key).and_then(Item::as_value_mut) {
                 // Süs (`=`'den sonraki boşluk, satır sonundaki yorum) değerin
                 // üstünde duruyor; yeni değer onu devralmazsa yorum düşerdi.
-                Some(value) => {
-                    let decor = value.decor().clone();
-                    *value = name.into();
-                    *value.decor_mut() = decor;
+                Some(old) => {
+                    let decor = old.decor().clone();
+                    *old = value;
+                    *old.decor_mut() = decor;
                 }
                 None => {
-                    appearance.insert("theme", toml_edit::value(name));
+                    table.insert(key, Item::Value(value));
                 }
             }
         }
@@ -1383,7 +1529,7 @@ fn line_height(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Dia
         text,
         item,
         "font.line_height",
-        1.0..=MAX_LINE_HEIGHT,
+        LINE_HEIGHT_RANGE,
         fallback,
         diagnostics,
     )
@@ -1441,6 +1587,10 @@ fn ranged_float(
 /// Satır yüksekliği çarpanının tavanı — atlas bütçesi (bkz. [`line_height`]).
 pub const MAX_LINE_HEIGHT: f64 = 2.0;
 
+/// Satır yüksekliği çarpanının kabul aralığı: alt ucu fontun kendi metriği
+/// ([`FontOptions::line_height`]), üst ucu [`MAX_LINE_HEIGHT`].
+pub const LINE_HEIGHT_RANGE: std::ops::RangeInclusive<f64> = 1.0..=MAX_LINE_HEIGHT;
+
 fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagnostic>) -> f64 {
     const KEY: &str = "font.size";
     let line = item.span().and_then(|span| line_of(text, span.start));
@@ -1471,115 +1621,25 @@ fn font_size(text: &str, item: &Item, fallback: f64, diagnostics: &mut Vec<Diagn
     value
 }
 
-/// `clipboard.osc52`: tam olarak `"copy"` ya da `"off"`; başka her şey
-/// `"off"` ve tanı.
+/// Adlandırılmış seçenek anahtarının **tek gövdesi**: listedeki adlardan
+/// biri değilse anahtar `fallback`'te kalır ve tanı bırakılır. Her dizge
+/// enum'u (`clipboard.osc52` dahil) buradan okunuyor, tanının "must be …"
+/// listesi ve "using …" değeri de tipin `NAMES` tablosundan — yazılış tek
+/// yerde, yani tanı ayrıştırıcının reddettiği bir değeri öneremez.
 ///
-/// Büyük/küçük harf duyarlı, tema adları gibi: `"Copy"` bir yazım hatası ve
-/// hata kapalıya düşüyor. Okuma yönünün değerleri (`"paste"`, alacritty'nin
-/// `"copy_paste"`'i) de tanınmıyor — okuma yönü yok (006 Karar 5).
-fn osc52(text: &str, item: &Item, diagnostics: &mut Vec<Diagnostic>) -> Osc52 {
-    const KEY: &str = "clipboard.osc52";
-    let found = match item.as_str() {
-        Some("copy") => return Osc52::Copy,
-        Some("off") => return Osc52::Off,
-        Some(value) => format!("{value:?}"),
-        None => kind(item).to_owned(),
-    };
-    diagnostics.push(Diagnostic {
-        key: Some(KEY),
-        line: item.span().and_then(|span| line_of(text, span.start)),
-        message: format!("`{KEY}` must be \"copy\" or \"off\", found {found}; using \"off\""),
-    });
-    Osc52::Off
-}
-
-/// `motion.cursor_motion`: tam olarak `"snap"`, `"ease"` ya da `"spring"`.
-///
-/// Kabul edilmeyen değer `fallback`'i alır ve tanı bırakır, yani **öteki
-/// anahtarların kuralı**. `clipboard.osc52`'nin "kapalıya düş" istisnası
-/// buraya geçmiyor (008 Karar 6): o istisnanın gerekçesi yanlış tahminin
-/// **sessiz** olmasıydı — burada yanlış tahminin belirtisi ekranda kayan (ya
-/// da kaymayan) bir imleç, yani kullanıcı ne olduğunu görüyor.
-///
-/// Büyük/küçük harf duyarlı, tema adları ve `osc52` gibi: `"Spring"` bir
-/// yazım hatası.
-fn cursor_motion(
-    text: &str,
-    item: &Item,
-    fallback: CursorMotion,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> CursorMotion {
-    const KEY: &str = "motion.cursor_motion";
-    let found = match item.as_str() {
-        Some("snap") => return CursorMotion::Snap,
-        Some("ease") => return CursorMotion::Ease,
-        Some("spring") => return CursorMotion::Spring,
-        Some(value) => format!("{value:?}"),
-        None => kind(item).to_owned(),
-    };
-    diagnostics.push(Diagnostic {
-        key: Some(KEY),
-        line: item.span().and_then(|span| line_of(text, span.start)),
-        message: format!(
-            "`{KEY}` must be \"snap\", \"ease\" or \"spring\", found {found}; using \"{}\"",
-            fallback.name()
-        ),
-    });
-    fallback
-}
-
-/// `terminal.cursor`: tam olarak `"block"`, `"underline"` ya da `"beam"`.
-///
-/// [`cursor_motion`] ile aynı kural ve aynı gerekçe: kabul edilmeyen değer
-/// `fallback`'i alır ve tanı bırakır. Yanlış tahminin belirtisi ekrandaki
-/// imlecin şekli, yani kullanıcı ne olduğunu görüyor — `clipboard.osc52`'nin
-/// "kapalıya düş" istisnası buraya geçmiyor.
-fn caret_shape(
-    text: &str,
-    item: &Item,
-    fallback: CaretShape,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> CaretShape {
-    const KEY: &str = "terminal.cursor";
-    let found = match item.as_str() {
-        Some("block") => return CaretShape::Block,
-        Some("underline") => return CaretShape::Underline,
-        Some("beam") => return CaretShape::Beam,
-        Some(value) => format!("{value:?}"),
-        None => kind(item).to_owned(),
-    };
-    diagnostics.push(Diagnostic {
-        key: Some(KEY),
-        line: item.span().and_then(|span| line_of(text, span.start)),
-        message: format!(
-            "`{KEY}` must be \"block\", \"underline\" or \"beam\", found {found}; using \"{}\"",
-            fallback.name()
-        ),
-    });
-    fallback
-}
-
-/// Adlandırılmış seçenek anahtarının **ortak gövdesi**: listedeki adlardan
-/// biri değilse anahtar kendi değerinde kalır ve tanı bırakılır.
-///
-/// Ayrı fonksiyon, çünkü aynı kalıp depoda **beş kez** elle yazılmış
-/// (`osc52`, `cursor_motion`, `reduce_motion`, `cursor_blink`, `caret_shape`)
-/// ve `docs/YOL-HARITASI.md`'nin kayıtlı borcu altıncı kopyayı adıyla
-/// öngörüyor: *"Dördüncü anahtar altıncı kopyayı doğurur."*
-///
-/// **Beş kopya bu sette taşınmadı** — her birinin tanı cümlesi kendi
-/// sözcükleriyle yazılı ve taşımak mesajları bir turda değiştirirdi; emsal
-/// `ranged_float`'ın `font_size`'ı bırakması.
+/// Kabul edilmeyen değerin `fallback`'e düşmesi ([`Settings::parse_keeping`])
+/// bu anahtarların hepsinde doğru, çünkü yanlış tahminin belirtisi görünür:
+/// imlecin şekli, kayması, kaydırmanın adımı. Tek istisna `osc52` ve çağıran
+/// onu `Osc52::Off` vererek kuruyor — orada yanlış tahmin sessiz.
 ///
 /// Büyük/küçük harf **duyarlı**: `"Hollow"` bir yazım hatası ve sessizce
 /// kabul edilmesi kullanıcıyı yanıltırdı.
-fn named_enum<T: Copy>(
+fn named_enum<T: Copy + PartialEq>(
     text: &str,
     item: &Item,
     key: &'static str,
-    names: &[(&str, T)],
+    names: &'static [(&'static str, T)],
     fallback: T,
-    fallback_name: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> T {
     let found = match item.as_str() {
@@ -1605,131 +1665,22 @@ fn named_enum<T: Copy>(
     diagnostics.push(Diagnostic {
         key: Some(key),
         line: item.span().and_then(|span| line_of(text, span.start)),
-        message: format!("`{key}` must be {expected}, found {found}; using \"{fallback_name}\""),
-    });
-    fallback
-}
-
-/// `terminal.cursor_blink`: tam olarak `"auto"`, `"on"` ya da `"off"`.
-///
-/// [`caret_shape`] ile aynı kural: kabul edilmeyen değer `fallback`'i alır ve
-/// tanı bırakır.
-fn cursor_blink(
-    text: &str,
-    item: &Item,
-    fallback: CursorBlink,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> CursorBlink {
-    const KEY: &str = "terminal.cursor_blink";
-    let found = match item.as_str() {
-        Some("auto") => return CursorBlink::Auto,
-        Some("on") => return CursorBlink::On,
-        Some("off") => return CursorBlink::Off,
-        Some(value) => format!("{value:?}"),
-        None => kind(item).to_owned(),
-    };
-    diagnostics.push(Diagnostic {
-        key: Some(KEY),
-        line: item.span().and_then(|span| line_of(text, span.start)),
         message: format!(
-            "`{KEY}` must be \"auto\", \"on\" or \"off\", found {found}; using \"{}\"",
-            fallback.name()
+            "`{key}` must be {expected}, found {found}; using \"{}\"",
+            name_in(names, fallback)
         ),
     });
     fallback
 }
 
-/// `motion.reduce_motion`: tam olarak `"system"`, `"on"` ya da `"off"`.
-///
-/// [`cursor_motion`] ile aynı kural ve aynı gerekçe: kabul edilmeyen değer
-/// `fallback`'i alır ve tanı bırakır. Burada da yanlış tahminin belirtisi
-/// görünür (imleç kayar ya da kaymaz), yani `clipboard.osc52`'nin "kapalıya
-/// düş" istisnası buraya da geçmiyor.
-fn reduce_motion(
-    text: &str,
-    item: &Item,
-    fallback: ReduceMotion,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> ReduceMotion {
-    const KEY: &str = "motion.reduce_motion";
-    let found = match item.as_str() {
-        Some("system") => return ReduceMotion::System,
-        Some("on") => return ReduceMotion::On,
-        Some("off") => return ReduceMotion::Off,
-        Some(value) => format!("{value:?}"),
-        None => kind(item).to_owned(),
-    };
-    diagnostics.push(Diagnostic {
-        key: Some(KEY),
-        line: item.span().and_then(|span| line_of(text, span.start)),
-        message: format!(
-            "`{KEY}` must be \"system\", \"on\" or \"off\", found {found}; using \"{}\"",
-            fallback.name()
-        ),
-    });
-    fallback
-}
-
-/// `motion.smooth_scroll`: tam olarak `"on"` ya da `"off"`.
-///
-/// [`cursor_motion`] ile aynı kural ve aynı gerekçe: kabul edilmeyen değer
-/// `fallback`'i alır ve tanı bırakır; yanlış tahmin görünür (kaydırma süzülür
-/// ya da satır satır gider).
-fn smooth_scroll(
-    text: &str,
-    item: &Item,
-    fallback: SmoothScroll,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> SmoothScroll {
-    const KEY: &str = "motion.smooth_scroll";
-    let found = match item.as_str() {
-        Some("on") => return SmoothScroll::On,
-        Some("off") => return SmoothScroll::Off,
-        Some(value) => format!("{value:?}"),
-        None => kind(item).to_owned(),
-    };
-    diagnostics.push(Diagnostic {
-        key: Some(KEY),
-        line: item.span().and_then(|span| line_of(text, span.start)),
-        message: format!(
-            "`{KEY}` must be \"on\" or \"off\", found {found}; using \"{}\"",
-            fallback.name()
-        ),
-    });
-    fallback
-}
-
-/// `shell.integration`: tam olarak `"auto"` ya da `"off"`.
-///
-/// [`cursor_motion`] ile aynı kural: kabul edilmeyen değer `fallback`'i alır
-/// ve tanı bırakır. `clipboard.osc52`'nin "kapalıya düş" istisnası buraya
-/// geçmiyor ve gerekçe bu anahtarda daha da net — kapalıya düşmek, yanlış
-/// yazımın bedelini **özelliği kaybetmek** yaparken güvenlik adına hiçbir şey
-/// kazandırmazdı: sarmalayıcı kullanıcının kendi dosyalarını yüklüyor,
-/// kurulması bir risk değil.
-fn shell_integration(
-    text: &str,
-    item: &Item,
-    fallback: ShellIntegration,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> ShellIntegration {
-    const KEY: &str = "shell.integration";
-    let found = match item.as_str() {
-        Some("auto") => return ShellIntegration::Auto,
-        Some("blocks") => return ShellIntegration::Blocks,
-        Some("off") => return ShellIntegration::Off,
-        Some(value) => format!("{value:?}"),
-        None => kind(item).to_owned(),
-    };
-    diagnostics.push(Diagnostic {
-        key: Some(KEY),
-        line: item.span().and_then(|span| line_of(text, span.start)),
-        message: format!(
-            "`{KEY}` must be \"auto\", \"blocks\" or \"off\", found {found}; using \"{}\"",
-            fallback.name()
-        ),
-    });
-    fallback
+/// Değerin yazılışı `names` tablosunda. Tablolar her varyantı taşıyor
+/// (`every_name_reads_back_as_its_value` bekçi), boş dize yalnız eksik bir
+/// tablonun belirtisi olurdu.
+pub(crate) fn name_in<T: PartialEq>(names: &'static [(&'static str, T)], value: T) -> &'static str {
+    names
+        .iter()
+        .find(|(_, named)| *named == value)
+        .map_or("", |(name, _)| *name)
 }
 
 /// Bayt konumunun 1'den başlayan satırı.
@@ -3209,6 +3160,228 @@ cursor = \"spring\"
             assert_eq!(err.key, Some("appearance.theme"), "{text}");
             assert!(err.message.contains("found a section"), "{err}");
         }
+    }
+
+    /// Sınamanın kâhini: düzenlemeyi `Settings`'e **elle** uygular, yazma
+    /// yolundan bağımsız. Ondalıklar iki basamakta (yazma yolunun sözü).
+    fn applied(mut settings: Settings, edit: &SettingsEdit) -> Settings {
+        let two = |value: f64| (value * 100.0).round() / 100.0;
+        match edit.clone() {
+            SettingsEdit::Scrollback(lines) => settings.scrollback = lines,
+            SettingsEdit::Cursor(shape) => settings.cursor = shape,
+            SettingsEdit::CursorBlink(blink) => settings.cursor_blink = blink,
+            SettingsEdit::CursorRadius(ratio) => settings.caret.radius_ratio = two(ratio),
+            SettingsEdit::CursorGlow(glow) => settings.caret.glow = two(glow),
+            SettingsEdit::CursorUnfocused(unfocused) => settings.caret.unfocused = unfocused,
+            SettingsEdit::BlinkInterval(seconds) => settings.blink_interval = two(seconds),
+            SettingsEdit::ConfirmClose(confirm) => settings.confirm_close = confirm,
+            SettingsEdit::Theme(name) => settings.theme = name,
+            SettingsEdit::LightTheme(name) => settings.light_theme = name,
+            SettingsEdit::DarkTheme(name) => settings.dark_theme = name,
+            SettingsEdit::FontFamily(name) => {
+                settings.font.family = (!name.is_empty()).then_some(name);
+            }
+            SettingsEdit::FontSize(size) => settings.font.size = two(size),
+            SettingsEdit::LineHeight(height) => settings.font.line_height = two(height),
+            SettingsEdit::Osc52(mode) => settings.osc52 = mode,
+            SettingsEdit::CursorMotion(motion) => settings.cursor_motion = motion,
+            SettingsEdit::ReduceMotion(reduce) => settings.reduce_motion = reduce,
+            SettingsEdit::SmoothScroll(smooth) => settings.smooth_scroll = smooth,
+            SettingsEdit::ShellIntegration(integration) => {
+                settings.shell_integration = integration;
+            }
+        }
+        settings
+    }
+
+    /// Her anahtardan varsayılan olmayan bir değer — her varyant en az bir
+    /// kez; `FontFamily` iki kez, çünkü boş dizge "varsayılan aile" demek.
+    fn every_edit() -> Vec<SettingsEdit> {
+        vec![
+            SettingsEdit::Scrollback(2500),
+            SettingsEdit::Cursor(CaretShape::Beam),
+            SettingsEdit::CursorBlink(CursorBlink::Auto),
+            // İki basamağa yuvarlanıyor: 0.123 → 0.12.
+            SettingsEdit::CursorRadius(0.123),
+            SettingsEdit::CursorGlow(2.5),
+            SettingsEdit::CursorUnfocused(UnfocusedCaret::Solid),
+            SettingsEdit::BlinkInterval(0.75),
+            SettingsEdit::ConfirmClose(ConfirmClose::Always),
+            SettingsEdit::Theme("paper".to_owned()),
+            SettingsEdit::LightTheme("paper".to_owned()),
+            SettingsEdit::DarkTheme("ink".to_owned()),
+            SettingsEdit::FontFamily("Menlo".to_owned()),
+            SettingsEdit::FontFamily(String::new()),
+            SettingsEdit::FontSize(14.5),
+            SettingsEdit::LineHeight(1.25),
+            SettingsEdit::Osc52(Osc52::Off),
+            SettingsEdit::CursorMotion(CursorMotion::Ease),
+            SettingsEdit::ReduceMotion(ReduceMotion::On),
+            SettingsEdit::SmoothScroll(SmoothScroll::Off),
+            SettingsEdit::ShellIntegration(ShellIntegration::Blocks),
+        ]
+    }
+
+    /// `written`, `text`'ten tek satırın değişmesiyle ya da tek satırın
+    /// eklenmesiyle mi doğmuş — satır sonu `eol`.
+    fn one_line_apart(text: &str, written: &str, eol: &str) -> bool {
+        let before: Vec<&str> = text.split(eol).collect();
+        let after: Vec<&str> = written.split(eol).collect();
+        if before.len() == after.len() {
+            return before.iter().zip(&after).filter(|(a, b)| a != b).count() == 1;
+        }
+        after.len() == before.len() + 1
+            && (0..after.len()).any(|skip| {
+                let mut rest = after.clone();
+                rest.remove(skip);
+                rest == before
+            })
+    }
+
+    #[test]
+    fn every_edit_reads_back_and_touches_one_line() {
+        // Kullanıcının dosyası: şablonun yorumları ve sırası, üstüne
+        // tanımadığımız bir anahtar ve bölüm, değerin yanında yorum.
+        let rich = format!(
+            "{}future = true\n\n[notes]\nx = 1\n",
+            Settings::TEMPLATE.replace("scrollback = 10000", "scrollback = 10000  # plenty")
+        );
+        let crlf = rich.replace('\n', "\r\n");
+        for edit in every_edit() {
+            for (text, eol) in [(rich.as_str(), "\n"), (crlf.as_str(), "\r\n")] {
+                let written = Settings::with_edit(text, &edit).expect("yazılabilir metin");
+                assert!(one_line_apart(text, &written, eol), "{edit:?}\n{written}");
+                assert_eq!(
+                    clean(&written),
+                    applied(clean(text), &edit),
+                    "{edit:?}\n{written}"
+                );
+            }
+            // Boş metin: bölüm ve anahtar eklenir.
+            let written = Settings::with_edit("", &edit).expect("yazılabilir metin");
+            assert_eq!(
+                clean(&written),
+                applied(Settings::default(), &edit),
+                "{edit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn edits_keep_the_way_the_section_is_written() {
+        // `with_theme`'in sınaması her türden bir anahtar için: satır içi tablo
+        // ve noktalı anahtar yazılışlarını korur, kabul edilmeyen değerin
+        // yerine yazar (kullanıcı pencerede bir değer seçti).
+        for (text, edit, expected) in [
+            (
+                "font = { size = 13, family = \"Menlo\" }\n",
+                SettingsEdit::FontSize(14.5),
+                "font = { size = 14.5, family = \"Menlo\" }\n",
+            ),
+            (
+                "terminal.scrollback = 5\n",
+                SettingsEdit::Scrollback(2500),
+                "terminal.scrollback = 2500\n",
+            ),
+            (
+                "[motion]\ncursor_motion = 3 # oops\n",
+                SettingsEdit::CursorMotion(CursorMotion::Snap),
+                "[motion]\ncursor_motion = \"snap\" # oops\n",
+            ),
+        ] {
+            assert_eq!(
+                Settings::with_edit(text, &edit).expect("yazılabilir metin"),
+                expected
+            );
+        }
+        // Bölüm olan anahtar: yerine değer yazmak alt tabloyu silerdi.
+        for text in ["[font.size]\nx = 1\n", "[font]\nsize = { x = 1 }\n"] {
+            let err = Settings::with_edit(text, &SettingsEdit::FontSize(14.0)).expect_err("bölüm");
+            assert_eq!(err.key, Some("font.size"), "{text}");
+            assert_eq!(err.message, "`font.size` must be a number, found a section");
+        }
+        let err = Settings::with_edit(
+            "motion = 1\n",
+            &SettingsEdit::SmoothScroll(SmoothScroll::Off),
+        )
+        .expect_err("bölüm değil");
+        assert_eq!(err.key, Some("motion"));
+    }
+
+    #[test]
+    fn every_name_reads_back_as_its_value() {
+        // Tablo ↔ ayrıştırıcı bekçisi: her yazılış ayrıştırıcıdan kendi
+        // varyantını veriyor ve `name()` onu geri yazıyor.
+        fn check<T: Copy + PartialEq + std::fmt::Debug>(
+            names: &[(&str, T)],
+            name: fn(T) -> &'static str,
+            section: &str,
+            key: &str,
+            read: fn(&Settings) -> T,
+        ) {
+            for &(written, value) in names {
+                assert_eq!(name(value), written);
+                let text = format!("[{section}]\n{key} = {written:?}\n");
+                assert_eq!(read(&clean(&text)), value, "{text}");
+            }
+        }
+        check(
+            CaretShape::NAMES,
+            CaretShape::name,
+            "terminal",
+            "cursor",
+            |s| s.cursor,
+        );
+        check(
+            CursorBlink::NAMES,
+            CursorBlink::name,
+            "terminal",
+            "cursor_blink",
+            |s| s.cursor_blink,
+        );
+        check(
+            UnfocusedCaret::NAMES,
+            UnfocusedCaret::name,
+            "terminal",
+            "cursor_unfocused",
+            |s| s.caret.unfocused,
+        );
+        check(
+            ConfirmClose::NAMES,
+            ConfirmClose::name,
+            "terminal",
+            "confirm_close",
+            |s| s.confirm_close,
+        );
+        check(Osc52::NAMES, Osc52::name, "clipboard", "osc52", |s| s.osc52);
+        check(
+            CursorMotion::NAMES,
+            CursorMotion::name,
+            "motion",
+            "cursor_motion",
+            |s| s.cursor_motion,
+        );
+        check(
+            ReduceMotion::NAMES,
+            ReduceMotion::name,
+            "motion",
+            "reduce_motion",
+            |s| s.reduce_motion,
+        );
+        check(
+            SmoothScroll::NAMES,
+            SmoothScroll::name,
+            "motion",
+            "smooth_scroll",
+            |s| s.smooth_scroll,
+        );
+        check(
+            ShellIntegration::NAMES,
+            ShellIntegration::name,
+            "shell",
+            "integration",
+            |s| s.shell_integration,
+        );
     }
 
     #[test]

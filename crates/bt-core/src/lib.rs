@@ -9,8 +9,9 @@
 //! `ShellState`, `ShellPhase`, aynanın `DockState`, `DockStatus`, `DockFault`,
 //! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, bağlam satırının
 //! `DockContext`'ini, dock yüzeyinin `Dock`'unu,
-//! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`, `CursorMotion`,
-//! `ReduceMotion`, `SmoothScroll`, `ConfirmClose`'u görür (tam
+//! `Wake` ve ayar modelinin `Settings`, `SettingsEdit`, `Parsed`, `Diagnostic`,
+//! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose`'u ve geçerli
+//! değerlerin tablolarını (`NAMES`, `*_RANGE`) görür (tam
 //! liste aşağıdaki `pub use` bloğu). `Osc52` alacritty'nin aynı adlı tipinin
 //! karşılığı, kendisi değil. Kendi grid'imize geçiş (00X) bu sınırın
 //! arkasında yapılır ve renderer'ı bilmez. `toml_edit` de aynı biçimde içeride
@@ -54,9 +55,11 @@ pub use session::{
     TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
-    CURSOR_BLINK_INTERVAL, CURSOR_GLOW, CURSOR_RADIUS, CaretShape, CaretStyle, Changes,
-    ConfirmClose, CursorBlink, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion,
-    SYSTEM_THEME, Settings, ShellIntegration, SmoothScroll, UnfocusedCaret,
+    CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,
+    CURSOR_RADIUS_RANGE, CaretShape, CaretStyle, Changes, ConfirmClose, CursorBlink, CursorMotion,
+    Diagnostic, FontOptions, LINE_HEIGHT_RANGE, MAX_LINE_HEIGHT, Parsed, ReduceMotion,
+    SCROLLBACK_MAX, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
+    UnfocusedCaret,
 };
 pub use shell::{
     DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle,

@@ -41,7 +41,7 @@ mod raster;
 use std::collections::HashMap;
 
 use font::Faces;
-pub use font::{Face, FontIssue, Metrics, SizeClass};
+pub use font::{Face, FontIssue, Metrics, SizeClass, monospaced_families};
 use objc2_core_foundation::{CFRetained, CGFloat};
 use objc2_core_text::CTFont;
 use raster::DrawResult;
@@ -2385,6 +2385,26 @@ mod tests {
         let bytes = slot_bytes_of(&mut a, Sprite::Char('W'), Face::Regular);
         assert_eq!(bytes.len(), slot_len);
         assert!(bytes.iter().any(|&b| b > 0), "'W' hiç piksel boyamadı");
+    }
+
+    #[test]
+    fn monospaced_families_are_the_ones_the_chain_accepts() {
+        // Ayar penceresinin Font listesi: seçilebilen her aile zincirden
+        // uyarısız açılır — ölçüt `open_chain`'inkiyle aynı.
+        let families = monospaced_families();
+        assert!(families.iter().any(|f| f == "Menlo"), "{families:?}");
+        assert!(!families.iter().any(|f| f == "Helvetica"), "{families:?}");
+        assert!(!families.iter().any(|f| f.starts_with('.')), "{families:?}");
+        assert!(
+            families
+                .windows(2)
+                .all(|pair| pair[0].to_lowercase() <= pair[1].to_lowercase()),
+            "{families:?}"
+        );
+        for family in &families {
+            let (_, issue) = font::open_chain(Some(family), POINT_SIZE);
+            assert_eq!(issue, None, "{family}");
+        }
     }
 
     #[test]
