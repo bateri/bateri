@@ -904,7 +904,7 @@ define_class!(
                 // Dock'un statik listeleri korunuyor, yalnız efektler
                 // yeniden basılıyor (`move_caret` emsali).
                 if !fx_idle {
-                    frame.set_dock_fx(glyph_fx.iter());
+                    frame.set_dock_fx(glyph_fx.iter(), theme.cursor_linear());
                 }
                 // CPU örneği **yazılmıyor** ve bu bir eksiklik değil:
                 // `cpu_kare` `session.frame`'in kilit beklemesini ölçüyor ve
@@ -969,7 +969,7 @@ define_class!(
                             // `set_dock_fx`'e uğramadan eski listeleri yarı
                             // yolda donmuş olarak yeniden çizerdi
                             // (`/code-review`).
-                            frame.set_dock_fx(std::iter::empty());
+                            frame.set_dock_fx(std::iter::empty(), theme.cursor_linear());
                         }
                     }
                 }
@@ -1163,7 +1163,7 @@ define_class!(
                     glyph_fx.apply(edit, motion, (DOCK_TEXT_COL, iv.cols.get()));
                 }
                 frame.suppress_dock(&mut glyph_fx);
-                frame.set_dock_fx(glyph_fx.iter());
+                frame.set_dock_fx(glyph_fx.iter(), theme.cursor_linear());
                 dock_caret = dock.caret.map(|col| (col, dock.caret_text));
                 frame.push_dock_sigil(dock.sigil);
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı

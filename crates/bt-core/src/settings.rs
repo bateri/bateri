@@ -458,10 +458,12 @@ impl SmoothScroll {
 
 /// `[motion] keypress`: dock'ta yazılan glyph'in nasıl geldiği (030).
 ///
-/// **Yalnız çizilebilen adlar** ([`Self::NAMES`]): referansın listesi daha
-/// uzun ve kalanı çizildikçe buraya giriyor — popup'ta ya da dosyada
+/// **Yalnız çizilebilen adlar** ([`Self::NAMES`]) ve bugün referansın
+/// listesinin tamamı: adlar çizildikçe girdi — popup'ta ya da dosyada
 /// çizilmeyen bir ad kabul edilseydi seçmek hiçbir şey yapmazdı
 /// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 7).
+/// Görünüşlerin tanımı Karar 6'nın tablosu; genlikler `bt-gpu`'nun
+/// `shaders/glyph_fx.metal`'inde.
 ///
 /// Tüketicisi `bt-gpu` ([`CursorMotion`] emsali) ve değer **ham** gidiyor:
 /// `cursor_motion = "snap"` ile Hareketi Azalt'ın indirgemesi orada, imlecin
@@ -477,11 +479,40 @@ pub enum Keypress {
     /// Glyph yerinde saydamdan tam renge belirir.
     #[default]
     Fade,
+    /// Glyph hücrenin biraz altından yukarı kayarak yerine oturur, kayarken
+    /// belirir.
+    Rise,
+    /// Glyph küçük doğar, bir an yerinden biraz büyür ve yerine oturur.
+    Pop,
+    /// Glyph sol kenarından sağa doğru uzayarak çıkar.
+    Extrude,
+    /// Glyph temanın `cursor` renginde doğar ve kendi rengine soğur.
+    Heat,
+    /// Glyph yerinde belirir, üstünden büyüyerek sönen soluk bir kopyası
+    /// dağılır.
+    Echo,
+    /// Glyph hücrenin üstünden düşer, hafifçe sekip yerine oturur.
+    Drop,
+    /// Önce çizgilerin çekirdeği görünür, mürekkep kenarlara yayılır.
+    Ink,
+    /// Glyph yatayda sıkışmış ve dikeyde uzamış doğar, kendi oranına açılır.
+    Squeeze,
 }
 
 impl Keypress {
     /// Ayar dosyasındaki yazılışların tek listesi.
-    pub const NAMES: &'static [(&'static str, Self)] = &[("off", Self::Off), ("fade", Self::Fade)];
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("off", Self::Off),
+        ("fade", Self::Fade),
+        ("rise", Self::Rise),
+        ("pop", Self::Pop),
+        ("extrude", Self::Extrude),
+        ("heat", Self::Heat),
+        ("echo", Self::Echo),
+        ("drop", Self::Drop),
+        ("ink", Self::Ink),
+        ("squeeze", Self::Squeeze),
+    ];
 
     /// Ayar dosyasındaki yazılışı.
     pub fn name(self) -> &'static str {
@@ -932,8 +963,14 @@ reduce_motion = "system"
 # line by line. Reduce Motion and cursor_motion = "snap" also move line by
 # line.
 smooth_scroll = "on"
-# "off" | "fade". How a letter you type in the dock at the bottom of the
-# window appears: fade brings it in from clear, off shows it at once.
+# "off" | "fade" | "rise" | "pop" | "extrude" | "heat" | "echo" | "drop" |
+# "ink" | "squeeze". How a letter you type in the dock at the bottom of the
+# window appears: fade brings it in from clear, rise slides it up into place,
+# pop springs it out from small, extrude stretches it out from its left edge,
+# heat starts it in the cursor color and cools it to its own, echo sends a
+# faint copy of it rippling outward, drop lets it fall into place with a small
+# bounce, ink fills it from the middle of its strokes outward, squeeze starts
+# it narrow and tall and lets it spring into shape. off shows it at once.
 keypress = "fade"
 # "off" | "recede". How a letter you delete in the dock goes: recede shrinks
 # it away, off removes it at once. Pasting, history and deleting a whole word
@@ -2950,10 +2987,10 @@ found 1.5; using 0.1"
 
     #[test]
     fn unrecognized_keypress_and_erase_keep_their_own_keys() {
-        // `pop` referansın bir efekti ama bugün çizilmiyor: tanınmıyor, yani
-        // seçmek hiçbir şey yapmayan bir ad kabul edilmiyor (030 Karar 7).
+        // `bounce` hiçbir listede yok: tanınmıyor, yani seçmek hiçbir şey
+        // yapmayan bir ad kabul edilmiyor (030 Karar 7).
         for (value, found) in [
-            ("\"pop\"", "\"pop\""),
+            ("\"bounce\"", "\"bounce\""),
             ("\"Fade\"", "\"Fade\""),
             ("1", "an integer"),
         ] {
@@ -2972,7 +3009,9 @@ found 1.5; using 0.1"
             assert_eq!(
                 diagnostic.message,
                 format!(
-                    "`motion.keypress` must be \"off\" or \"fade\", found {found}; using \"fade\""
+                    "`motion.keypress` must be \"off\", \"fade\", \"rise\", \"pop\", \
+                     \"extrude\", \"heat\", \"echo\", \"drop\", \"ink\" or \"squeeze\", \
+                     found {found}; using \"fade\""
                 )
             );
         }

@@ -941,6 +941,7 @@ impl Renderer {
                     enc,
                     frame.dock_ghosts(),
                     frame.cursor_block(),
+                    frame.dock_fx_heat(),
                     frame.cell_px(),
                     viewport_px,
                 )
@@ -976,6 +977,7 @@ impl Renderer {
                         enc,
                         arrivals,
                         frame.cursor_block(),
+                        frame.dock_fx_heat(),
                         frame.cell_px(),
                         viewport_px,
                     )
@@ -994,7 +996,8 @@ impl Renderer {
     }
 
     /// Dock'un yazım efektlerini encode eder (030) — beşinci pipeline
-    /// (`glyph_fx`), iki doku ve [`CursorBlock`].
+    /// (`glyph_fx`), iki doku, [`CursorBlock`] ve `heat`'in kızgın rengi
+    /// ([`Frame::dock_fx_heat`]).
     ///
     /// Yuva çözümü [`Renderer::encode_glyphs`]'teki gibi atlas ödüncünün
     /// içinde doğup ölüyor. Renk dokusu henüz yoksa (hiç emoji görülmedi) renk
@@ -1006,6 +1009,7 @@ impl Renderer {
         enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         cells: &[FxCell],
         cursor: &CursorBlock,
+        heat: &[f32; 4],
         cell_px: [f32; 2],
         viewport_px: [f32; 2],
     ) -> Result<(), GpuError> {
@@ -1043,6 +1047,7 @@ impl Renderer {
         fragment_uniform(enc, cursor, 0);
         fragment_uniform(enc, &cell_px, 1);
         fragment_uniform(enc, &uv_size, 2);
+        fragment_uniform(enc, heat, 3);
         // SAFETY: tampon ve dokular bu blok boyunca yaşıyor.
         unsafe {
             enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -4329,6 +4334,10 @@ mod tests {
     // kendisi, hayalet `t = 1`'de düz zemin, komşu yuva hiç örneklenmiyor ve
     // geniş glyph tek kutu olarak dönüşüyor.
 
+    /// `heat`'in kızgın rengi: ön plandan ([`WHITE`]) ve zeminden ayrı, yani
+    /// `heat`'in ara karesi ikisiyle de karışmıyor.
+    const HEAT: LinearRgba = LinearRgba::from_srgb(0xff, 0x80, 0x20);
+
     /// Tek satırlık dock'lu bir kare: zemin [`BACKGROUND`], hücreler dock'a
     /// basılı, efektler onların üstünde.
     fn dock_fx_frame(cell_px: (u16, u16), cells: &[Cell], fx: &[Fx]) -> Frame {
@@ -4337,7 +4346,7 @@ mod tests {
         for &cell in cells {
             frame.push_dock(cell);
         }
-        frame.set_dock_fx(fx.iter().copied());
+        frame.set_dock_fx(fx.iter().copied(), HEAT);
         frame.open_dock(1, BACKGROUND, BACKGROUND);
         frame
     }
@@ -4449,6 +4458,13 @@ mod tests {
         // yuvanın dışına eşliyor; sınır testi olmasa komşu yuvanın glyph'i
         // (yuvalar arasında pay yok) efektin çevresinde belirirdi. Komşular
         // **dolu**: `@` ile `#` `.`'dan hemen önce ve sonra yuva alıyor.
+        //
+        // **`.` seçimi iddianın parçası**: kayan ve büyüyen efektler
+        // (`rise`, `drop`, `pop`, `echo`, `squeeze`) mürekkebi hücrenin dışına
+        // meşru olarak taşırabiliyor, ama `.`'nın küçük mürekkebi bugünkü
+        // genliklerde hücresinin içinde kalıyor — yani hücrenin dışındaki her
+        // piksel ancak komşu yuvadan gelebilir. Genlik büyür de `.` taşarsa
+        // burası kırmızı düşer ve sebebi sızıntı değil genliktir.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         const EDGE: usize = 128;
         let cell_px = fitting_cell_px(&r, EDGE, 8);
@@ -4504,12 +4520,44 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_ghost_recedes_as_one_box() {
+    fn heat_starts_in_the_cursor_color() {
+        // `heat`'in rengi instance'tan değil uniform'dan (`Frame::dock_fx_heat`);
+        // bağlanmasaydı ya da yanlış yuvaya bağlansaydı harf ön planın rengiyle
+        // doğardı ve `t = 1` eşitliği bunu göremezdi. Ön plan [`WHITE`]
+        // (kırmızısı mavisine eşit), [`HEAT`] turuncu: en parlak pikselde
+        // kırmızı maviyi açıkça geçmeli.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let cell_px = fitting_cell_px(&r, EDGE, 4);
+        let cell = glyph_cell(2, 'M', None);
+        let id = Keypress::Heat.id().expect("çizen efekt");
+        let pixels = render_offscreen(
+            &r,
+            EDGE,
+            BACKGROUND,
+            &dock_fx_frame(cell_px, &[cell], &[effect(cell, Kind::Arrival, id, 0.0)]),
+        );
+        let top = dock_row_top(EDGE, cell_px.1);
+        let (red, _, blue) = (top..EDGE)
+            .flat_map(|y| (0..EDGE).map(move |x| (x, y)))
+            .map(|(x, y)| pixel_at(&pixels, EDGE, x, y))
+            .max_by_key(|&(r8, g8, b8)| u32::from(r8) + u32::from(g8) + u32::from(b8))
+            .expect("piksel var");
+        assert!(
+            u32::from(red) > u32::from(blue) + 64,
+            "heat kızgın renkte doğmadı: en parlak piksel r={red} b={blue}"
+        );
+    }
+
+    #[test]
+    fn a_wide_glyph_transforms_as_one_box() {
         // Geniş glyph iki yuvaya bölünmüş ama tek kutu olarak dönüşmeli:
-        // yarılar kendi merkezlerine küçülseydi ikisinin arasında — dikişte —
-        // boş bir şerit açılırdı. Dikişin iki yanındaki sütunlarda statik
-        // glyph'in mürekkebi var; kutunun merkezi sabit nokta, yani küçülen
-        // hayalette de orada mürekkep kalmalı.
+        // yarılar kendi merkezlerine küçülseydi (ya da `extrude`'da kendi sol
+        // kenarlarından uzasaydı) ikisinin arasında — dikişte — boş bir şerit
+        // açılırdı. Dikişin iki yanındaki sütunlarda statik glyph'in mürekkebi
+        // var; kutunun merkezi ölçeklerin sabit noktası, kaymalar ise dikişi
+        // mürekkepli bir satırdan geçiriyor — yani her efektin ara karesinde
+        // de orada mürekkep kalmalı.
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         const EDGE: usize = 64;
         let cell_px = fitting_cell_px(&r, EDGE, 4);
@@ -4527,13 +4575,22 @@ mod tests {
             inked(&still),
             "önkoşul: statik `漢`'ın dikişte mürekkebi yok"
         );
-        for &erase in &Erase::effects() {
-            let id = erase.id().expect("çizen efekt");
-            let frame = dock_fx_frame(cell_px, &[], &[effect(han, Kind::Ghost, id, 0.5)]);
+        let kinds = Keypress::effects()
+            .into_iter()
+            .map(|fx| (Kind::Arrival, fx.id().expect("çizen efekt")))
+            .chain(
+                Erase::effects()
+                    .into_iter()
+                    .map(|fx| (Kind::Ghost, fx.id().expect("çizen efekt"))),
+            );
+        for (kind, id) in kinds {
+            // Gelişin statik glyph'i olmak zorunda (yoksa çizilmiyor).
+            let statics: &[Cell] = if kind == Kind::Arrival { &[han] } else { &[] };
+            let frame = dock_fx_frame(cell_px, statics, &[effect(han, kind, id, 0.5)]);
             let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
             assert!(
                 inked(&pixels),
-                "geniş hayalet dikişte yarıldı: iki yarı ayrı kutular gibi dönüştü ({erase:?})"
+                "geniş glyph dikişte yarıldı: iki yarı ayrı kutular gibi dönüştü ({kind:?} {id})"
             );
         }
     }
