@@ -198,8 +198,14 @@ sıçramıyor. Efektler `[motion] keypress`/`erase`'ten **ham** iniyor ve
 adların sözlüğü `bt-core`'un (`Keypress`/`Erase`; `NAMES` yalnız çizilebilen
 adları taşır), shader kimliği `bt-gpu`'nun (`glyph_fx::Effect`). Geometri
 ters dönüşümle (kutunun merkezi ya da sol kenarı, yarının değil) ve her
-örnekleme yuvanın içinde; genlikler hücre oranında tasarım sabiti
-(`shaders/glyph_fx.metal`). `heat`'in kızgın rengi temanın `cursor`'ı ve
+örnekleme yuvanın içinde: ölçekleyen dallar **doğrusal** örnekliyor ama
+nokta texel merkezine kırpılıyor, yani süzgeç komşu yuvaya değmiyor
+(bekçisi genlikten bağımsız: dolu ve boş komşulu iki atlas aynı kareyi
+vermeli). Genlik, süre ve eğri tasarım sabiti (`shaders/glyph_fx.metal`,
+`glyph_fx.rs`). **Efekt caret'in üstünde, kendi renginde ve dock bandıyla
+kırpılmadan** çiziliyor, çünkü Backspace'ten sonra caret tam hayaletin
+üstüne geliyor (`Renderer::encode_fx`; `phase-5.md` → Uygulama Notları).
+Parçalı efektlerin tohumu girdi başına sabit, parçalar titremiyor. `heat`'in kızgın rengi temanın `cursor`'ı ve
 instance'ta yeri olmadığı için kare başına bir uniform (`Frame::dock_fx_heat`);
 renk düzlemi (emoji) boyanmaz ve eşiklenmez, renk dokudan. İndirgeme
 `Motion::glyph_fx`'te — `snap` ikisini kapatır, Hareketi Azalt gelişi
@@ -260,7 +266,9 @@ geçiyor ve orada en üstte kalıyor; ölçülen konum kaydırma kesrinden
 **önceki**, yani kesirle banda itilen ızgara caret'i ızgarada kalıp harfiyle
 birlikte dock'un zemininin altına giriyor ve ters çevirmesi bandın tepesinde
 kırpılıyor. Ters çevirme dikdörtgeni **tek** ve pencere
-uzayında, iki glyph encode'una da aynısı gidiyor. Payı `DOCK_ROWS * cell_h` **artı iki nefes
+uzayında, iki glyph encode'una da aynısı gidiyor — yazım efektlerine
+gitmiyor: onlar caret'ten sonra ve ters çevrilmeden çiziliyor (yukarıda,
+030). Payı `DOCK_ROWS * cell_h` **artı iki nefes
 payı** (`bt_gpu::dock_px`; formülün tek kopyası orada, `split_into_grid` onu
 tüketiyor): iki satır saç çizgisine yapışınca dock bakılamaz duruyordu. Payın
 kaynağı sol payın ta kendisi (`CellMetrics::gutter_px`) — ikinci bir tasarım
@@ -988,7 +996,8 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 - **Tema = dokuz rol:** arka plan, ön plan, dim, accent, cursor ve dört durum.
   Bugün yedisi tüketiliyor — `background`, `foreground`, `dim` (SGR 2'li
   varsayılan ön plan), `accent` (koşan komut bloğunun şeridi), `cursor` (imleç
-  bloğu **ve** ANSI 258'in cevabı), `success` ve `error` (biten bloğun şeridi)
+  bloğu, ANSI 258'in cevabı **ve** dock'un `heat` efektinin kızgın rengi),
+  `success` ve `error` (biten bloğun şeridi)
   — ve yanlarında `[ansi]`'nin 16 rengi; kalan iki durum rolü (uyarı, bilgi)
   sonraki setlerde gelir. Çizilmeyen rol eklenmiyor. `cursor` **014'te
   ayrıldı**: ikisi tek değerden beslenirken "imleci altın yap" isteği koşan

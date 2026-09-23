@@ -392,7 +392,14 @@ impl Choice for Erase {
     fn title(self) -> &'static str {
         match self {
             Erase::Off => "Off",
+            Erase::Iris => "Iris",
+            Erase::Undertow => "Undertow",
+            Erase::Echo => "Echo",
+            Erase::Bleed => "Bleed",
+            Erase::Unravel => "Unravel",
             Erase::Recede => "Recede",
+            Erase::Sublime => "Sublime",
+            Erase::Shatter => "Shatter",
         }
     }
 }

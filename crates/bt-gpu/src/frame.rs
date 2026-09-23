@@ -1347,17 +1347,18 @@ impl Frame {
         let mut hidden = [usize::MAX; crate::glyph_fx::FX_MAX];
         let mut hidden_len = 0;
         for fx in fx {
-            let Some(glyph) = self.dock_glyph(fx.cell) else {
-                continue;
-            };
-            let cell = FxCell {
+            let fx_cell = |glyph| FxCell {
                 glyph,
                 t: fx.t,
                 effect: fx.effect,
                 seed: fx.seed,
             };
             match fx.kind {
-                Kind::Ghost => self.dock_ghosts.push(cell),
+                Kind::Ghost => {
+                    if let Some(glyph) = self.dock_glyph(fx.cell) {
+                        self.dock_ghosts.push(fx_cell(glyph));
+                    }
+                }
                 Kind::Arrival => {
                     // Statik glyph'i yoksa geliş çizilmiyor (bkz.
                     // [`Frame::suppress_dock`]; içerik karesi onu zaten
@@ -1369,7 +1370,12 @@ impl Frame {
                         *slot = index;
                         hidden_len += 1;
                     }
-                    self.dock_arrivals.push(cell);
+                    // **Glyph gizlenen statik glyph'in kendisi**, yazıldığı
+                    // anın hücresi değil: vurgu sonradan değişebiliyor
+                    // (`zsh-syntax-highlighting` `l`'yi kırmızı, `ls`'i yeşil
+                    // boyuyor) ve efekt eski renkle bitip yeniye sıçrardı —
+                    // `t = 1` eşitliği bozulurdu.
+                    self.dock_arrivals.push(fx_cell(self.dock_glyphs[index]));
                 }
             }
         }
@@ -3391,6 +3397,24 @@ mod tests {
         frame.set_dock_fx([], CURSOR);
         let shown: Vec<char> = frame.dock_glyphs().iter().map(|g| g.ch).collect();
         assert_eq!(shown, ['l', 's']);
+    }
+
+    #[test]
+    fn an_arrival_wears_the_static_glyphs_current_color() {
+        // Vurgu uçuşta değişebiliyor (`l` kırmızı yazıldı, `s` gelince `ls`
+        // yeşil oldu): geliş, yazıldığı anın rengini değil gizlediği statik
+        // glyph'inkini taşımalı, yoksa efekt eski renkle bitip yeniye sıçrar.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        let recolored = LinearRgba::from_srgb(0x20, 0xc0, 0x40);
+        let now = Cell {
+            fg: recolored,
+            ..typed_cell(2, 'l')
+        };
+        frame.push_dock(now);
+        frame.set_dock_fx([fx(typed_cell(2, 'l'), Kind::Arrival)], CURSOR);
+        assert_eq!(frame.dock_arrivals().len(), 1);
+        assert_eq!(frame.dock_arrivals()[0].glyph.rgba, recolored.to_array());
     }
 
     #[test]

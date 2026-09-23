@@ -31,7 +31,7 @@
 | 027 | [yumusak-kaydirma](027-yumusak-kaydirma/) | 🟢 | 3 phase + kapı tamam — trackpad parmağı piksel piksel izliyor, momentum AppKit'in olaylarıyla yavaşlıyor, jest sonunda pencere en yakın satıra süzülüyor ve tekerlek çentiği süzülüyor; `[motion] smooth_scroll = "off"`, Hareketi Azalt ve `snap` bugünkü satır adımı (1 + 1 bulgu giderildi) |
 | 028 | [kapatma-onayi](028-kapatma-onayi/) | 🟢 | 2 phase + kapı tamam — koşan süreç varken ⌘W, kırmızı düğme, "Close Other Tabs", ⇧⌘W ve ⌘Q jest başına tek soru soruyor (sayfa / uygulama uyarısı, süreç adıyla); kabuk boştayken, `exit`'te ve süreli koşuda sormuyor; `[terminal] confirm_close` |
 | 029 | [ayarlar-penceresi](029-ayarlar-penceresi/) | 🟢 | 3 phase + kapı tamam — Cmd-, yerel ayar penceresi açıyor (General / Appearance / Cursor / Motion), yalnız değiştirilen satırı `settings.toml`'a yazıyor, dosya dışarıdan değişince tazeleniyor, bozuk dosyada kilitlenip sebebini söylüyor |
-| 030 | [dock-yazim-animasyonlari](030-dock-yazim-animasyonlari/) | 🔨 | dock'ta yazılan harf efektle geliyor, Backspace'le silinen efektle gidiyor — Metalterm'in Keypress (9) ve Erase (8) efektlerinin hepsi, `[motion] keypress`/`erase` ve ayar penceresinde iki popup; yapıştırma, geçmiş ve toplu silme anında |
+| 030 | [dock-yazim-animasyonlari](030-dock-yazim-animasyonlari/) | 🟢 | 5 phase + kapı tamam — dock'ta yazılan harf Keypress'in dokuz efektinden biriyle geliyor, Backspace'le silinen Erase'in sekiz efektinden biriyle gidiyor (caret'in üstünde, çeyrek saniyede); `[motion] keypress`/`erase` ve ayar penceresinde iki popup, yapıştırma/geçmiş/toplu silme anında |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

@@ -194,9 +194,13 @@ smooth_scroll = "on"
 # bounce, ink fills it from the middle of its strokes outward, squeeze starts
 # it narrow and tall and lets it spring into shape. off shows it at once.
 keypress = "fade"
-# "off" | "recede". How a letter you delete in the dock goes: recede shrinks
-# it away, off removes it at once. Pasting, history and deleting a whole word
-# or line are instant. cursor_motion = "snap" turns both off; Reduce Motion
+# "off" | "iris" | "undertow" | "echo" | "bleed" | "unravel" | "recede" |
+# "sublime" | "shatter". How a letter you delete in the dock goes: iris closes
+# a round shutter over it, undertow pulls it down toward the cursor, echo
+# swells it outward like a ripple, bleed lets its ink spread thin, unravel
+# slides it apart in strips, recede shrinks it away, sublime lets it drift up
+# like vapor, shatter breaks it into falling pieces. off removes it at once.
+# Pasting, history and deleting a whole word or line are instant. cursor_motion = "snap" turns both off; Reduce Motion
 # keeps only a fade for typing.
 erase = "recede"
 
@@ -616,7 +620,7 @@ erase = "recede"
 | `reduce_motion` | `"system"`, `"on"` ya da `"off"` | `"system"` | animasyonların kısılıp kısılmayacağı |
 | `smooth_scroll` | `"on"` ya da `"off"` | `"on"` | geçmişte kaydırmanın pürüzsüz mü satır satır mı gittiği |
 | `keypress` | `"off"`, `"fade"`, `"rise"`, `"pop"`, `"extrude"`, `"heat"`, `"echo"`, `"drop"`, `"ink"` ya da `"squeeze"` | `"fade"` | dock'ta yazılan harfin nasıl geldiği |
-| `erase` | `"off"` ya da `"recede"` | `"recede"` | dock'ta silinen harfin nasıl gittiği |
+| `erase` | `"off"`, `"iris"`, `"undertow"`, `"echo"`, `"bleed"`, `"unravel"`, `"recede"`, `"sublime"` ya da `"shatter"` | `"recede"` | dock'ta silinen harfin nasıl gittiği |
 
 - **`"spring"`** — imleç yeni yerine bir yayla kayar ve yavaşlayarak oturur;
   hedefi aşmaz. Uzak bir sıçrama yakın bir sıçramadan biraz uzun sürer.
@@ -723,12 +727,29 @@ satırda — harflerin nasıl geldiğini ve gittiğini söyler:
     oranına açılır.
   - **`"off"`** — anında görünür.
 
-  Hepsi aynı kısa sürede (bir tuşun onayı kadar) biter ve harf en sonda
+  Hepsi aynı kısa sürede (çeyrek saniyeye yakın) biter ve harf en sonda
   statik hâliyle birebir aynı yerde durur; emoji ve geniş karakterler
   (`漢`) tek parça olarak hareket eder.
-- **`erase = "recede"`** — Backspace'le sildiğiniz harf yerinde küçülerek
-  söner; satırın ortasından sildiyseniz sağdaki metin bugünkü gibi anında
-  kayar, hayalet onun altında söner. **`"off"`** — anında kaybolur.
+- **`erase`** — Backspace'le sildiğiniz harf:
+  - **`"iris"`** — üstünde dairesel bir diyafram merkezine doğru kapanır.
+  - **`"undertow"`** — akıntıya kapılmış gibi aşağı ve imlece doğru
+    çekilerek söner.
+  - **`"echo"`** — büyüyerek dışa doğru dağılır ve söner.
+  - **`"bleed"`** — mürekkebi dağılır: kenarları yayılıp incelirken söner.
+  - **`"unravel"`** — yatay şeritlere ayrılır, şeritler yukarıdan aşağıya
+    sırayla yana kayıp çözülür.
+  - **`"recede"`** — yerinde küçülerek söner.
+  - **`"sublime"`** — buharlaşır gibi yukarı süzülür, açılıp dağılarak söner.
+  - **`"shatter"`** — parçalara kırılır; parçalar hafif dönerek dağılır,
+    düşer ve söner. Aynı harf her silinişte aynı parçalara kırılmaz.
+  - **`"off"`** — anında kaybolur.
+
+  Satırın ortasından sildiyseniz sağdaki metin bugünkü gibi anında kayar,
+  hayalet onun altında söner.
+- Efekt imlecin üstünde, harfin kendi renginde çizilir — Backspace'ten sonra
+  imleç tam silinen harfin yerine gelir ve efekt onun içinde kaybolmaz.
+  Yukarıdan gelen ya da yukarı giden efektler (`drop`, `sublime`) dock'un
+  üst çizgisini kısa bir an aşabilir.
 - Efekt **tek tek** yazılan ve silinen harfler içindir: yapıştırma, geçmişten
   (↑) gelen satır, tamamlama ve kelime/satır silme (⌥⌫, Ctrl-U) anında olur.
 - Satır dock'ta değil ızgaradayken (komut koşarken, `[shell] integration =
@@ -739,10 +760,9 @@ satırda — harflerin nasıl geldiğini ve gittiğini söyler:
   Hareketi Azalt'ta Keypress satırı açık kalır: orada da açıp kapatmak bir
   fark.
 - Kaydettiğiniz anda geçerli olur; o sırada süren bir efekt hemen biter.
-- Tanınmayan değer (`"bounce"`, `"Fade"`, `1`) yalnız kendi anahtarını
+- Tanınmayan değer (`"bounce"`, `"Fade"`, `1`, `"dissolve"`) yalnız kendi anahtarını
   etkiler (açılışta varsayılan, kayıt anında ekrandaki efekt) ve uyarı
-  görünür. Referans ürünün öteki **silme** efektlerinin adları henüz
-  tanınmıyor.
+  görünür.
 
 ### `[shell]`
 

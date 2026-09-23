@@ -16,24 +16,28 @@
 //! terimi). Kare talebi hareketin: `Waker::wake`'e dokunulmuyor, hasar
 //! dikilmiyor — efekt içeriği değil içeriğin nasıl çizildiğini değiştiriyor.
 
-use bt_core::{Cell, DockEdit, Erase, Keypress};
+use bt_core::{Cell, DockEdit, EDIT_MAX, Erase, Keypress};
 
 use crate::motion::Motion;
 
-/// Gelişin süresi, saniye — **seçilmiş, ölçülmüş değil**.
+/// Gelişin süresi, saniye — **seçilmiş, ölçülmüş değil**; referansın temel
+/// süresi (Metalterm, 240 ms).
 ///
-/// Yazım hızıyla yarışmamalı: tuşlar arası ~100 ms'lik hızlı yazımda bir
-/// önceki harf çoktan yerine oturmuş olmalı, yoksa satır sürekli titreyen
-/// bir şerit gibi okunur. İmlecin `ease` kaymasından ([`crate::motion`]'ın
-/// `EASE_DURATION`'ı) kısa, çünkü caret hedefine varmadan harf gelmiş olmalı.
-pub(crate) const KEYPRESS_DURATION: f32 = 0.12;
+/// İlk seçim 120 ms'ydi ve kullanıcı gerçek pencerede "animasyonlar hiç belli
+/// olmuyor" dedi: görünür kısım üç-dört kareye sığıyordu ve gelişin ilk anı
+/// henüz ayrılmamış caret'in içinde geçiyordu. Hızlı yazımda iki-üç geliş
+/// üst üste uçuşta ve bu bir titreme değil: her biri kendi hücresinde,
+/// sütun kuralı ([`GlyphFx::apply`]) yalnız sağdakini bitiriyor.
+pub(crate) const KEYPRESS_DURATION: f32 = 0.24;
 
 /// Hayaletin süresi, saniye — **seçilmiş, ölçülmüş değil**.
 ///
 /// Gelişten bir tık uzun: gidiş gözün takip ettiği bir hareket (neyin
-/// silindiğini okumak), geliş ise yazılanın zaten bilinen bir onayı. Basılı
-/// Backspace'te bile kısa kalıyor — hayaletler üst üste binmeden söner.
-pub(crate) const ERASE_DURATION: f32 = 0.16;
+/// silindiğini okumak), geliş ise yazılanın zaten bilinen bir onayı. İlk
+/// seçim 160 ms'ydi ve gelişinkiyle aynı sebeple uzadı; Backspace'ten sonra
+/// caret tam hayaletin sütununa geliyor, yani hayalet görünür olmak için
+/// caret'in üstünde çizilmek zorunda (`Renderer::encode_fx`).
+pub(crate) const ERASE_DURATION: f32 = 0.30;
 
 /// Uçuştaki girdilerin tavanı — **tasarım sabiti**.
 ///
@@ -89,7 +93,17 @@ impl Effect for Erase {
     fn id(self) -> Option<u32> {
         match self {
             Self::Off => None,
+            // `recede` 16'da kaldı (phase-2'nin kimliği); öteki yedi Karar 6'nın
+            // sırasıyla arkasına dizildi — kimlik yalnız shader'la sözleşme,
+            // sıranın ürün anlamı yok.
             Self::Recede => Some(16),
+            Self::Iris => Some(17),
+            Self::Undertow => Some(18),
+            Self::Echo => Some(19),
+            Self::Bleed => Some(20),
+            Self::Unravel => Some(21),
+            Self::Sublime => Some(22),
+            Self::Shatter => Some(23),
         }
     }
 
@@ -132,9 +146,10 @@ pub(crate) struct Fx {
     pub(crate) effect: u32,
     /// İlerleme, `0..=1`; eğri shader'da.
     pub(crate) t: f32,
-    /// Girdinin tohumu — parçalı efektlerin (sonraki phase'ler) rastgelesi.
-    /// Sütundan değil sıradan türüyor: pencere kayınca sütun değişiyor,
-    /// parçaların deseni değişmemeli.
+    /// Girdinin tohumu — parçalı efektlerin (`shatter`, `unravel`) rastgelesi.
+    /// Girdi doğarken bir kez veriliyor ve ömrü boyunca sabit, yani hareket
+    /// karesinde parçalar titremiyor. Sütundan değil sıradan türüyor: pencere
+    /// kayınca sütun değişiyor, parçaların deseni değişmemeli.
     pub(crate) seed: f32,
 }
 
@@ -195,12 +210,31 @@ impl GlyphFx {
             }
         };
         self.shift(shift, window);
+        // **Uçuştaki bir gelişi silmek hayalet doğurmuyor**: hayalet `t = 0`'da
+        // tam opak başlıyor, yani yarı belirmiş bir harf silinince bir kare
+        // tam renge sıçrayıp öyle giderdi — hızlı bir yazım hatası
+        // düzeltmesinin her seferinde. Harf olduğu yerden kayboluyor.
+        let mut unborn = [false; EDIT_MAX];
+        if kind == Kind::Ghost {
+            for (slot, cell) in unborn.iter_mut().zip(cells.as_slice()) {
+                *slot = self.entries.iter().any(|entry| {
+                    entry.fx.kind == Kind::Arrival
+                        && entry.fx.cell.col == cell.col
+                        && entry.fx.cell.ch == cell.ch
+                });
+            }
+        }
         self.entries
             .retain(|entry| entry.fx.kind == Kind::Ghost || entry.fx.cell.col < col);
         let Some(effect) = effect else {
             return;
         };
-        for &cell in cells.as_slice() {
+        for (&cell, _) in cells
+            .as_slice()
+            .iter()
+            .zip(unborn)
+            .filter(|&(_, unborn)| !unborn)
+        {
             if self.entries.len() >= FX_MAX {
                 // En eski girdi bitiyor: liste ekleme sırasında.
                 self.entries.remove(0);
@@ -375,15 +409,22 @@ mod tests {
         fx.apply(erase(6, 'b'), Motion::default(), WINDOW);
         assert_eq!(cols(&fx), [(4, Kind::Arrival), (6, Kind::Ghost)]);
         assert!(fx.iter().all(|fx| fx.t == 0.0));
+        // Adımlar `DT_MAX`'ın altında: tek bir büyük `dt` kırpılırdı.
+        let step = KEYPRESS_DURATION / 4.0;
+        assert!(step <= crate::motion::DT_MAX);
         // Yarı yolda ilerleme süreye göre.
-        fx.advance(KEYPRESS_DURATION / 2.0);
+        fx.advance(step);
+        fx.advance(step);
         let t: Vec<f32> = fx.iter().map(|fx| fx.t).collect();
         assert!((t[0] - 0.5).abs() < 1e-6, "{t:?}");
         assert!(t[1] < t[0], "hayaletin süresi daha uzun: {t:?}");
         // Geliş biter, hayalet sürer; sonra o da biter ve liste boşalır.
-        fx.advance(KEYPRESS_DURATION / 2.0);
+        fx.advance(step);
+        fx.advance(step);
         assert_eq!(cols(&fx), [(6, Kind::Ghost)]);
-        fx.advance(ERASE_DURATION);
+        for _ in 0..4 {
+            fx.advance(ERASE_DURATION / 4.0);
+        }
         assert!(fx.is_empty(), "süresi dolan girdi düşmedi");
     }
 
@@ -464,6 +505,37 @@ mod tests {
         // En eskiler gitti: kalanların hiçbiri ilk üç girdinin tohumunu
         // taşımıyor.
         assert!(fx.iter().all(|fx| fx.seed > 3.0), "en eski düşmedi");
+    }
+
+    #[test]
+    fn a_seed_is_fixed_for_the_life_of_an_entry() {
+        // Parçalı efektlerin deseni tohumdan: iki karede aynı girdi aynı
+        // tohumu taşımazsa `shatter`'ın parçaları her hareket karesinde
+        // yeniden dağılır. Kayma ve ilerleme tohuma dokunmuyor; yan yana iki
+        // girdinin tohumu ise ayrı (aynı desenle kırılmasınlar).
+        let mut fx = GlyphFx::default();
+        fx.apply(erase(6, 'a'), Motion::default(), WINDOW);
+        fx.apply(erase(5, 'b'), Motion::default(), WINDOW);
+        let seeds = |fx: &GlyphFx| fx.iter().map(|fx| fx.seed).collect::<Vec<f32>>();
+        let born = seeds(&fx);
+        assert_ne!(born[0], born[1], "iki girdi aynı tohumla doğdu");
+        fx.advance(ERASE_DURATION / 3.0);
+        assert_eq!(seeds(&fx), born, "ilerleme tohumu değiştirdi");
+        fx.apply(DockEdit::Shift { by: 1 }, Motion::default(), WINDOW);
+        assert_eq!(seeds(&fx), born, "kayma tohumu değiştirdi");
+    }
+
+    #[test]
+    fn erasing_an_arrival_in_flight_leaves_no_ghost() {
+        // Yarı belirmiş harfin hayaleti `t = 0`'da tam opak doğup bir kare
+        // sıçrardı: silinen geliş olduğu yerden kayboluyor. Aynı sütundaki
+        // **başka** bir harfin silinmesi (geliş çoktan bitmiş) hayalet alıyor.
+        let mut fx = GlyphFx::default();
+        fx.apply(arrive(4, 'a'), Motion::default(), WINDOW);
+        fx.apply(erase(4, 'a'), Motion::default(), WINDOW);
+        assert!(fx.is_empty(), "{:?}", cols(&fx));
+        fx.apply(erase(4, 'b'), Motion::default(), WINDOW);
+        assert_eq!(cols(&fx), [(4, Kind::Ghost)]);
     }
 
     #[test]

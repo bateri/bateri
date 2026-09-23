@@ -529,15 +529,39 @@ impl Keypress {
 pub enum Erase {
     /// Glyph anında kaybolur.
     Off,
+    /// Glyph'in üstünde dairesel bir diyafram merkezine doğru kapanır.
+    Iris,
+    /// Glyph aşağı ve caret'e doğru çekilerek söner.
+    Undertow,
+    /// Glyph büyüyerek dışa doğru bir halka gibi dağılır ve söner.
+    Echo,
+    /// Glyph'in mürekkebi dağılır: kenarlar yayılıp incelirken söner.
+    Bleed,
+    /// Glyph yatay şeritlere ayrılır, şeritler sırayla yana kayıp çözülür.
+    Unravel,
     /// Glyph merkezine doğru küçülerek geri çekilir ve söner.
     #[default]
     Recede,
+    /// Glyph buharlaşır gibi yukarı süzülür, açılarak söner.
+    Sublime,
+    /// Glyph parçalara kırılır, parçalar hafif dönerek dağılıp düşer ve
+    /// söner.
+    Shatter,
 }
 
 impl Erase {
     /// Ayar dosyasındaki yazılışların tek listesi.
-    pub const NAMES: &'static [(&'static str, Self)] =
-        &[("off", Self::Off), ("recede", Self::Recede)];
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("off", Self::Off),
+        ("iris", Self::Iris),
+        ("undertow", Self::Undertow),
+        ("echo", Self::Echo),
+        ("bleed", Self::Bleed),
+        ("unravel", Self::Unravel),
+        ("recede", Self::Recede),
+        ("sublime", Self::Sublime),
+        ("shatter", Self::Shatter),
+    ];
 
     /// Ayar dosyasındaki yazılışı.
     pub fn name(self) -> &'static str {
@@ -972,9 +996,13 @@ smooth_scroll = "on"
 # bounce, ink fills it from the middle of its strokes outward, squeeze starts
 # it narrow and tall and lets it spring into shape. off shows it at once.
 keypress = "fade"
-# "off" | "recede". How a letter you delete in the dock goes: recede shrinks
-# it away, off removes it at once. Pasting, history and deleting a whole word
-# or line are instant. cursor_motion = "snap" turns both off; Reduce Motion
+# "off" | "iris" | "undertow" | "echo" | "bleed" | "unravel" | "recede" |
+# "sublime" | "shatter". How a letter you delete in the dock goes: iris closes
+# a round shutter over it, undertow pulls it down toward the cursor, echo
+# swells it outward like a ripple, bleed lets its ink spread thin, unravel
+# slides it apart in strips, recede shrinks it away, sublime lets it drift up
+# like vapor, shatter breaks it into falling pieces. off removes it at once.
+# Pasting, history and deleting a whole word or line are instant. cursor_motion = "snap" turns both off; Reduce Motion
 # keeps only a fade for typing.
 erase = "recede"
 
@@ -3016,13 +3044,15 @@ found 1.5; using 0.1"
             );
         }
         let (settings, diagnostic) =
-            rejected("[motion]\nkeypress = \"off\"\nerase = \"shatter\"\n");
+            rejected("[motion]\nkeypress = \"off\"\nerase = \"dissolve\"\n");
         assert_eq!(settings.keypress, Keypress::Off);
         assert_eq!(settings.erase, Erase::Recede);
         assert_eq!(diagnostic.key, Some("motion.erase"));
         assert_eq!(
             diagnostic.message,
-            "`motion.erase` must be \"off\" or \"recede\", found \"shatter\"; using \"recede\""
+            "`motion.erase` must be \"off\", \"iris\", \"undertow\", \"echo\", \"bleed\", \
+             \"unravel\", \"recede\", \"sublime\" or \"shatter\", found \"dissolve\"; \
+             using \"recede\""
         );
         // Kayıt anında yerine geçen değer varsayılan değil **geçerli** ayar.
         let current = Settings {
