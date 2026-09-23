@@ -47,6 +47,7 @@ use objc2_foundation::{
 };
 
 use crate::clipboard;
+use crate::gesture::{Drag, Gesture, Press, Release};
 use crate::keys::{
     ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, encode_key, only_char, page_scroll,
 };
@@ -322,28 +323,6 @@ fn modifiers(event: &NSEvent) -> MouseModifiers {
     }
 }
 
-/// Çentiği taze hücreye taşır ve hücrenin **değiştiğini** söyler
-/// ([`ViewIvars::motion_cell`]). Basış ve bırakma da buradan geçiyor,
-/// cevabını atarak: onların işi çentiği tazelemek.
-///
-/// Serbest fonksiyon, metod değil: `define_class!` gövdeleri sınanamıyor ve
-/// kısmanın kuralı ("ilk görüşte `true`, tekrarda `false`") bir bekçi hak
-/// ediyor.
-fn moved_to_new_cell(notch: &Cell<Option<(u16, u16)>>, cell: SelectionPoint) -> bool {
-    let now = (cell.col, cell.row);
-    notch.replace(Some(now)) != Some(now)
-}
-
-/// Düğmenin [`ViewIvars::sent_buttons`] içindeki biti. Raporun düğme
-/// kodundan ([`bt_core`] içinde) **ayrı**: bu bir maske, o bir bayt değeri.
-fn button_bit(button: MouseButton) -> u8 {
-    match button {
-        MouseButton::Left => 1,
-        MouseButton::Middle => 2,
-        MouseButton::Right => 4,
-    }
-}
-
 /// Tuş vuruşu terminale gider mi — **saf karar**, sınanıyor: Command'lı tuş,
 /// **tek istisna dışında**, gitmez.
 ///
@@ -392,51 +371,11 @@ pub(crate) struct ViewIvars {
     /// `applicationDidFinishLaunching`'in içinde, **run loop dönmeden**
     /// kapanıyor, yani araya hiçbir olay düşemiyor.
     session: OnceCell<Arc<Session>>,
-    /// Sol tuş basılı ve seçim bu basışla başladı mı.
-    ///
-    /// Çapanın **kendisi** burada değil: basışın hücresi ve yarısı
-    /// `Session::set_selection`'la `bt-core`'a gidiyor ve orada grid mutlağında
-    /// kalıyor. Çapa pencere hücresi olarak burada tutulduğu sürece basılı
-    /// sürüklemenin ortasındaki kaydırma onu bayatlatıyordu — aynı satır
-    /// numarası kaydırmadan sonra başka bir içeriği gösterir (phase-1'in
-    /// devri, 006 phase-3'te kapandı). Geriye kalan soru yalnız "sürükleme
-    /// sürüyor mu": basışsız bir `mouseDragged:` eski seçimin ucunu
-    /// taşımasın.
-    dragging: Cell<bool>,
-    /// Basışı **uygulamaya raporlanmış** düğmeler — düğme başına bir bit
-    /// (sol 1, orta 2, sağ 4).
-    ///
-    /// Rota basışta kilitleniyor (R6): Shift her olayda okunsaydı
-    /// sürüklemenin ortasında Shift'i bırakmak seçim jestini rapor jestine
-    /// çevirirdi. Bırakma bu yüzden kipi değil **bu biti** soruyor.
-    ///
-    /// `dragging`'in yanında ve onun içinde değil: ikisi ayrı sorulara cevap
-    /// veriyor ("bu basış seçim başlattı" / "bu basış raporlandı") ve tek bir
-    /// jest alanına katlanamazlar — sol tuşla seçim sürerken sağ tuşa basmak
-    /// ikisini **aynı anda** doğuruyor. Bitmask, çünkü üç düğme birden basılı
-    /// tutulabilir; tek bir "son rota" alanı sol bırakmayı sağın rotasıyla
-    /// raporlardı.
-    sent_buttons: Cell<u8>,
-    /// Hareket raporunun son gittiği hücre — kısmanın çentiği.
-    ///
-    /// Rapor **hücre başına** en çok bir kez gitmeli: kısma olmadan
-    /// işaretçinin her pikseli bir rapor üretir ve boşta duran bir uygulamayı
-    /// sürekli çizdirirdi. Karşılaştırma `bt-core` çağrısından **önce**
-    /// koşuyor, yani aynı hücrede kalan hareket `Term` kilidine hiç
-    /// uğramıyor — "her pencerede dinle" kararının bedelini düşüren şey bu.
-    ///
-    /// Ölçü **görünür pencere** hücresi, grid satırı değil: uygulamanın
-    /// kendi kaydırması işaretçi dururken rapor üretmemeli (xterm de ekran
-    /// konumunda kısıyor). `half` girmiyor — rapor hücre çözünürlüğünde.
-    ///
-    /// Basış ve bırakma da çentiği **tazeliyor** (sıfırlamıyor) — ama yalnız
-    /// raporlandıklarında ([`BateriView::report_button`]): ölçüt "işaretçi
-    /// burada görüldü" değil **"burası uygulamaya bildirildi"**. `Select` ve
-    /// `Ignored` kollarında hiçbir şey gitmedi ve damgalamak o hücredeki ilk
-    /// hover raporunu sessizce yutardı. Tazelemenin kendisi şart: çentik
-    /// bayat kalsaydı basışın hücresi ikinci kez, bu kez hareket olarak
-    /// raporlanırdı.
-    motion_cell: Cell<Option<(u16, u16)>>,
+    /// Farenin jest defteri: seçim sürüklemesi, uygulamaya raporlanan
+    /// basışlar ve hareket raporunun çentiği — kuralları ve gerekçeleri
+    /// [`Gesture`]'da, sınanan bir struct'ta. `Cell` + `Copy`: her olay
+    /// al-değiştir-koy, `Session` çağrısının ortasında ödünç yok.
+    gesture: Cell<Gesture>,
     /// **Metin yığını bu olayı aldı mı** — `keyDown:`'ın yeniden giriş
     /// bayrağı. `interpretKeyEvents:` çağrılmadan önce `false`'a çekilir;
     /// `insertText:` **ve** `setMarkedText:` onu `true` yapar, `keyDown:`
@@ -451,7 +390,7 @@ pub(crate) struct ViewIvars {
     /// `Cell`, ivar: `interpretKeyEvents:` bizi **yeniden çağırıyor**, yani
     /// değer `keyDown:`'ın yığın çerçevesinde taşınamaz. Tek thread (ana
     /// thread) olduğu için paylaşılan durum değil — emsal yanındaki
-    /// [`ViewIvars::dragging`].
+    /// [`ViewIvars::gesture`].
     ///
     /// **Göremediği bir hâl var ve ölçülmedi:** bekleyen bir bileşimi
     /// yalnız `unmarkText` ile iptal eden tuş (ölü tuştan sonra Backspace ya
@@ -568,6 +507,19 @@ define_class!(
             }
         }
 
+        /// Edit ▸ Select All (⌘A): ızgaranın bütün geçmişini seçer
+        /// (`Session::select_all`) — Terminal.app'in normu.
+        ///
+        /// Menü öğesi `performKeyEquivalent:`'la `keyDown:`'dan **önce**
+        /// yakalanıyor, yani ⌘A kabuğa hiç varmıyor ve `keyDown:`'ın Cmd izin
+        /// listesi değişmiyor (sekme kısayollarının yolu).
+        #[unsafe(method(selectAll:))]
+        fn select_all(&self, _sender: Option<&AnyObject>) {
+            if let Some(session) = self.ivars().session.get() {
+                session.select_all();
+            }
+        }
+
         /// View'ın y ekseni üstten: fare noktası grid yönünde gelir.
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
@@ -594,7 +546,7 @@ define_class!(
         }
 
         /// Sol tuş basılı sürükleme — **iki jestin tek selector'ı**. Basış
-        /// raporlandıysa ([`ViewIvars::sent_buttons`]) hareket de rapor
+        /// raporlandıysa ([`Gesture::dragged`]) hareket de rapor
         /// olarak gidiyor; yoksa aktif uç farenin şimdiki yerine taşınıyor,
         /// çapa `bt-core`'da (`Session::update_selection` yalnız bitişi
         /// taşır). Çizilen aralığı değiştirmeyen olaylar (aynı yarıda
@@ -1199,9 +1151,7 @@ impl BateriView {
     pub(crate) fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ViewIvars {
             session: OnceCell::new(),
-            dragging: Cell::new(false),
-            sent_buttons: Cell::new(0),
-            motion_cell: Cell::new(None),
+            gesture: Cell::new(Gesture::default()),
             consumed: Cell::new(false),
             marked_text: RefCell::new(String::new()),
             scroll_carry: Cell::new(0.0),
@@ -1298,7 +1248,7 @@ impl BateriView {
         // kalırdı (`/code-review`). Satır adımı `Scrolled(n)` döndürüyor ve
         // `follow_pointer` bugünkü gibi koşuyor; seçerken kaydırmada hassasiyet
         // süsten önce geliyor.
-        if step.intent == ScrollIntent::Glide && self.ivars().dragging.get() {
+        if step.intent == ScrollIntent::Glide && self.ivars().gesture.get().dragging() {
             step.intent = ScrollIntent::Lines;
         }
         // İşaretçinin hücresi ve doldurma reddinin sıfırı satır kolundaki
@@ -1360,83 +1310,65 @@ impl BateriView {
         let Some(session) = self.ivars().session.get() else {
             return;
         };
-        let bit = button_bit(button);
-        let sent = &self.ivars().sent_buttons;
         if !pressed {
-            if sent.get() & bit == 0 {
-                // Rapor edilmemiş basışın bırakması: seçim jestinin sonu.
-                if button == MouseButton::Left {
-                    self.ivars().dragging.set(false);
+            if self.with_gesture(|g| g.released(button)) == Release::Report {
+                let clamp = OutOfGrid::Clamp { fill_rows: 0 };
+                if let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) {
+                    self.report_button(session, button, false, cell, event);
                 }
-                return;
-            }
-            sent.set(sent.get() & !bit);
-            let clamp = OutOfGrid::Clamp { fill_rows: 0 };
-            if let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) {
-                self.report_button(session, button, false, cell, event);
             }
             return;
         }
-        // Yeni basış yeni jest: kayıp bir `mouseUp:`'ın (sürüklemenin
-        // ortasında bir modal, bir sistem jesti) bıraktığı **bayat** bit
-        // burada iniyor — [`BateriView::follow_pointer`]'ın `dragging` için
-        // yaptığının basıştaki eşi. İnmeseydi kip bu arada kapandığında
-        // basış `Select` olur, bırakma bayat biti bulup rapor yolunu seçer ve
-        // `dragging`'i hiç düşürmezdi: sonraki her kaydırma eski seçimi
-        // sessizce uzatırdı.
-        sent.set(sent.get() & !bit);
+        self.with_gesture(|g| g.begin_press(button));
         let Some(cell) = self.window_point_cell(event.locationInWindow(), OutOfGrid::Reject) else {
             return;
         };
-        match self.report_button(session, button, true, cell, event) {
-            // Jest uygulamanın: `dragging` **kurulmuyor**, yoksa
-            // `mouseDragged:` var olan eski seçimin ucunu büyütürdü.
-            Click::Sent => sent.set(sent.get() | bit),
-            // Jest terminalin — ama seçimi yalnız sol tuş başlatır: sağ ya da
-            // orta tık beklenmedik bir vurgu üretirdi.
-            Click::Select if button == MouseButton::Left => {
-                self.ivars().dragging.set(true);
-                // İmleç çapa hücresinden sürüklenir: ters yöne ilk hareket
-                // seçimi boşaltmamalı, fare ucundan büyümeli. İki uç **aynı**
-                // olduğu sürece seçim boştur — yani sürüklemesiz tık hiçbir
-                // şey seçmez ve Cmd-C panoya dokunmaz (`selection_text()`
-                // `None`). Çapa **yarısıyla** gidiyor: basış hücrenin hangi
-                // yarısındaysa sınır oradan geçer ve sürükleme boyunca orada
-                // kalır.
-                session.set_selection(cell, cell);
-            }
-            Click::Select | Click::Ignored => {}
+        let answer = self.report_button(session, button, true, cell, event);
+        let shift = modifiers(event).shift;
+        let clicks = event.clickCount();
+        match self.with_gesture(|g| g.pressed(button, answer, clicks, shift)) {
+            // Çapa **yarısıyla** gidiyor: basış hücrenin hangi yarısındaysa
+            // sınır oradan geçer ve sürükleme boyunca orada kalır. Tek tıkta
+            // iki uç aynı ve seçim boş — sürüklemesiz tık hiçbir şey seçmez,
+            // Cmd-C panoya dokunmaz; ters yöne ilk hareket seçimi boşaltmaz,
+            // fare ucundan büyür. Çift/üçlü tıkta aynı nokta altındaki
+            // kelimeyi/satırı bütün alır.
+            Some(Press::Select(kind)) => session.set_selection(kind, cell, cell),
+            Some(Press::Extend) => session.extend_selection(cell),
+            None => {}
         }
     }
 
+    /// Jest defterinde al-değiştir-koy ([`ViewIvars::gesture`]). Kapanışın
+    /// içinde `Session` çağrılmıyor: defter saf kalsın.
+    fn with_gesture<R>(&self, change: impl FnOnce(&mut Gesture) -> R) -> R {
+        let cell = &self.ivars().gesture;
+        let mut gesture = cell.get();
+        let answer = change(&mut gesture);
+        cell.set(gesture);
+        answer
+    }
+
     /// Basılı sürüklemenin ortak gövdesi: jest uygulamanınsa hareket raporu,
-    /// terminalinse seçimin ucu.
-    ///
-    /// Rota basışta kilitlendi (R6) ve burada yeniden sorulmuyor: aynı jestin
-    /// ortasında Shift'i bırakmak ya da uygulamanın kipi kapatması yolu
-    /// değiştirmemeli. Kilidin iki yarısı da okunuyor — `sent_buttons`
-    /// raporlanan basışı, `dragging` seçim başlatan basışı biliyor ve ikisi
-    /// aynı anda kurulu olabilir (sol seçim sürerken sağ tuşa basmak).
+    /// terminalinse seçimin ucu. Rota basışta kilitlendi (R6) ve burada
+    /// yeniden sorulmuyor ([`Gesture::dragged`]): aynı jestin ortasında
+    /// Shift'i bırakmak ya da uygulamanın kipi kapatması yolu değiştirmemeli.
     fn drag_event(&self, event: &NSEvent, button: MouseButton) {
-        if self.ivars().sent_buttons.get() & button_bit(button) != 0 {
-            self.motion_event(event, Some(button));
-            return;
-        }
-        // Rapor edilmemiş sürükleme yalnız sol tuşun seçimi; sağ/orta tuşun
-        // terminalde bir jesti yok.
-        if button != MouseButton::Left || !self.ivars().dragging.get() {
-            return;
-        }
-        if let Some((session, cell)) = self.session_cell(event) {
-            session.update_selection(cell);
+        match self.ivars().gesture.get().dragged(button) {
+            Drag::Report => self.motion_event(event, Some(button)),
+            Drag::Select => {
+                if let Some((session, cell)) = self.session_cell(event) {
+                    session.update_selection(cell);
+                }
+            }
+            Drag::Ignore => {}
         }
     }
 
     /// Düğme raporunu gönderir ve **raporlandıysa** kısmanın çentiğini o
-    /// hücreye damgalar: aynı hücrede gelecek ilk hareket ikinci bir rapor
-    /// üretmesin. Ölçüt cevabın kendisi, çünkü `Select` ve `Ignored`
-    /// kollarında uygulamaya hiçbir şey gitmedi ve damgalamak oradaki ilk
-    /// hover raporunu sessizce yutardı.
+    /// hücreye damgalar ([`Gesture::stamp`]). Ölçüt cevabın kendisi, çünkü
+    /// `Select` ve `Ignored` kollarında uygulamaya hiçbir şey gitmedi ve
+    /// damgalamak oradaki ilk hover raporunu sessizce yutardı.
     fn report_button(
         &self,
         session: &Session,
@@ -1447,29 +1379,23 @@ impl BateriView {
     ) -> Click {
         let answer = session.mouse_button(button, pressed, cell, modifiers(event));
         if answer == Click::Sent {
-            moved_to_new_cell(&self.ivars().motion_cell, cell);
+            self.with_gesture(|g| g.stamp(cell));
         }
         answer
     }
 
     /// Kayıp bir `mouseUp:`'ın uygulamada basılı bıraktığı düğmeleri serbest
-    /// bırakır — [`BateriView::follow_pointer`]'ın `dragging` için yaptığının
-    /// uygulama tarafındaki eşi.
+    /// bırakır ([`Gesture::take_lost_releases`]). Biti sessizce düşürmek
+    /// yetmez: uygulama düğmeyi **hâlâ basılı** sanır ve her hareket
+    /// raporunda kendi seçimini büyütür, yani bırakmanın kendisi gönderilmek
+    /// zorunda.
     ///
-    /// **Kanıt selector'ın kendisi:** AppKit `mouseMoved:`'ı yalnız hiçbir
-    /// düğme basılı değilken gönderiyor (basılıyken `*MouseDragged:` gelir),
-    /// yani orada kurulu bir bit tek bir şey demek — bırakma olayı bu view'a
-    /// hiç varmadı (sürüklemenin ortasında bir modal, Mission Control, bir
-    /// sistem jesti). Biti sessizce düşürmek yetmez: uygulama düğmeyi
-    /// **hâlâ basılı** sanar ve her hareket raporunda kendi seçimini
-    /// büyütür, yani bırakmanın kendisi gönderilmek zorunda.
-    ///
-    /// Basıştaki bayat-bit temizliği bunun yerine geçmiyor: o, terminalin
-    /// kendi defterini düzeltiyor ve ancak kullanıcı **aynı düğmeye yeniden
-    /// bastığında** koşuyor.
+    /// Basıştaki bayat-bit temizliği ([`Gesture::begin_press`]) bunun yerine
+    /// geçmiyor: o terminalin kendi defterini düzeltiyor ve ancak kullanıcı
+    /// **aynı düğmeye yeniden bastığında** koşuyor.
     fn flush_lost_releases(&self, session: &Session, event: &NSEvent) {
-        let sent = self.ivars().sent_buttons.replace(0);
-        if sent == 0 {
+        let lost: Vec<MouseButton> = self.with_gesture(|g| g.take_lost_releases().collect());
+        if lost.is_empty() {
             return;
         }
         // Jestin devamı, başlangıcı değil: koordinat kırpılıyor (R6).
@@ -1477,20 +1403,18 @@ impl BateriView {
         let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) else {
             return;
         };
-        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
-            if sent & button_bit(button) != 0 {
-                self.report_button(session, button, false, cell, event);
-            }
+        for button in lost {
+            self.report_button(session, button, false, cell, event);
         }
     }
 
     /// Hareket raporunun tek yolu: düğmesiz (`mouseMoved:`) ve basılı
     /// (`*MouseDragged:`).
     ///
-    /// **Kısma `bt-core` çağrısından önce** ([`ViewIvars::motion_cell`]):
-    /// hücre değişmediyse `Term` kilidi hiç alınmıyor. Çentik rapor
-    /// gitmese de yazılıyor — kip kapalıyken de hücre değişimi başına tek
-    /// bir sonuçsuz çağrı kalsın, piksel başına değil.
+    /// **Kısma `bt-core` çağrısından önce** ([`Gesture::moved_to`]): hücre
+    /// değişmediyse `Term` kilidi hiç alınmıyor. Çentik rapor gitmese de
+    /// yazılıyor — kip kapalıyken de hücre değişimi başına tek bir sonuçsuz
+    /// çağrı kalsın, piksel başına değil.
     ///
     /// Hücrenin kapısı düğmeye bağlı ([`OutOfGrid`]): basılı sürükleme
     /// başlamış bir jestin devamı ve kırpılıyor, düğmesiz hareket ise bir
@@ -1509,7 +1433,7 @@ impl BateriView {
         let Some(cell) = self.window_point_cell(event.locationInWindow(), outside) else {
             return;
         };
-        if !moved_to_new_cell(&self.ivars().motion_cell, cell) {
+        if !self.with_gesture(|g| g.moved_to(cell)) {
             return;
         }
         session.mouse_motion(button, cell, modifiers(event));
@@ -1583,11 +1507,11 @@ impl BateriView {
     /// kopyalar. Tuşun **gerçekten** basılı olduğu sistemden soruluyor; değilse
     /// bayat bayrak burada iner.
     fn follow_pointer(&self, session: &Session) {
-        if !self.ivars().dragging.get() {
+        if !self.ivars().gesture.get().dragging() {
             return;
         }
         if NSEvent::pressedMouseButtons() & 1 == 0 {
-            self.ivars().dragging.set(false);
+            self.with_gesture(Gesture::lost_drag);
             return;
         }
         let Some(window) = self.window() else {
@@ -1737,25 +1661,6 @@ mod tests {
         );
         // Orijinin hemen altı geçerli.
         assert_eq!(at((51.0, 51.0), OutOfGrid::Reject).map(|p| p.row), Some(0));
-    }
-
-    #[test]
-    fn motion_is_throttled_to_one_report_per_cell() {
-        // Kısmanın tek kuralı: ilk görüşte `true`, aynı hücrenin tekrarında
-        // `false`. Bu olmadan işaretçinin her pikseli bir rapor üretir ve
-        // boşta duran bir uygulamayı sürekli çizdirirdi.
-        let notch = Cell::new(None);
-        let cell = |col, row, half| SelectionPoint { col, row, half };
-        assert!(moved_to_new_cell(&notch, cell(3, 7, CellHalf::Left)));
-        assert!(!moved_to_new_cell(&notch, cell(3, 7, CellHalf::Left)));
-        // **Yarı okunmuyor**: rapor hücre çözünürlüğünde ve hücrenin öteki
-        // yarısına geçmek yeni bir rapor doğurmamalı.
-        assert!(!moved_to_new_cell(&notch, cell(3, 7, CellHalf::Right)));
-        // Sütun ya da satır değişince rapor yeniden gidiyor.
-        assert!(moved_to_new_cell(&notch, cell(4, 7, CellHalf::Right)));
-        assert!(moved_to_new_cell(&notch, cell(4, 8, CellHalf::Right)));
-        // Geri dönüş de bir değişim.
-        assert!(moved_to_new_cell(&notch, cell(4, 7, CellHalf::Right)));
     }
 
     #[test]

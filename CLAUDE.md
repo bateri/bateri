@@ -114,7 +114,8 @@ bilerek: tekerlekte Shift'in üstüne binecek ikinci bir tüketici yok, düğmed
 iki gerçek tüketici yarışıyor. Karar `bt-core`'da (`input::button_route`,
 `wheel_route`'un yanında), cevabı üç varyantlı (`Click`) ve rapor
 `send`'den geçiyor — seçim durur, pencere dibe dönmez. Rota **basışta
-kilitleniyor** (`ViewIvars::sent_buttons`), yoksa sürüklemenin ortasında
+kilitleniyor** (`gesture::Gesture`; jest defteri `NSEvent` görmüyor ve
+sınanıyor), yoksa sürüklemenin ortasında
 Shift'i bırakmak jesti değiştirirdi; bırakma o yüzden Shift'i sormuyor ama
 **kipi soruyor** — uygulama bu arada çıkmışsa rapor kabuğun komut satırına
 düşerdi. Bırakmanın koordinatı reddedilmiyor **kırpılıyor**: düşürmek
@@ -126,11 +127,19 @@ tek cevap veren üç bit burada ayrışıyor. Pencere hareket olaylarını
 **koşulsuz** dinliyor (`setAcceptsMouseMovedEvents`), çünkü kipe göre açmak
 kipi `bt-shell`'e yayınlamayı isterdi; bedeli düşüren şey kısmanın `bt-core`
 çağrısından **önce** koşması — rapor hücre başına bir kez gidiyor
-(`ViewIvars::motion_cell`, ölçü görünür pencere hücresi) ve aynı hücrede
+(`Gesture::moved_to`, ölçü görünür pencere hücresi) ve aynı hücrede
 kalan hareket `Term` kilidine hiç uğramıyor. Çentiği basış ve bırakma da
-tazeliyor. Fareyle seçim, pano, geçmişte
+tazeliyor. **Seçimin adımı tıklama sayısından**: çift tıklama kelime, üçlü
+tıklama sarılmış mantıksal satır (`SelectKind`, alacritty'nin
+`Semantic`/`Lines`'ı) ve sürükleme o adımla büyür; kelimenin tek tanımı
+`WORD_SEPARATORS` (yol, `user@host`, `host:port` tek parça; `=` ayırıcı —
+031 Karar 5). **Shift+tıklama var olan seçimin ucunu taşır**, tipini
+koruyarak (`Session::extend_selection`; seçim yoksa oradan başlar) ve bu iki
+kipte de aynı kural — fare kipinde Shift zaten seçimin tek yolu. Fareyle
+seçim, pano, geçmişte
 kaydırma, ana menü (About, Settings…, Quit; Shell'de New Window/Tab ve
-Close Tab/Window; Edit'te Copy/Paste; View'da Theme ▸ ve Cmd +/−/0 geçici
+Close Tab/Window; Edit'te Copy/Paste/Select All — ⌘A geçmişin tamamını seçer
+ve menüden yakalanır, Cmd izin listesi değişmez; View'da Theme ▸ ve Cmd +/−/0 geçici
 punto; Window'da sekme geçişi ve Select Tab ▸) ve kapanış sırası ondadır.
 **Sekmeler macOS'un kendi sekmeleri** (026): her sekme bir `NSWindow` ve
 kendi `Session`/`DisplayLink`/`Renderer`'ı, yani "bir pencere = bir oturum"

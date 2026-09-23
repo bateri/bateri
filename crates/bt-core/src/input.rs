@@ -177,6 +177,12 @@ pub(crate) enum ButtonRoute {
     /// Uygulama fare raporu istedi (1000/1002/1003) ve Shift basılı değil.
     Report(MouseEncoding),
     /// Kip kapalı ya da Shift basılı: jest terminalin, seçim başlıyor.
+    ///
+    /// Kol Shift'i **taşımıyor** ve taşıması gerekmiyor: Shift'in ikinci
+    /// anlamı ("var olan seçimi uzat", `Session::extend_selection`) kipten
+    /// bağımsız ve onu `bt-shell`'in jest defteri okuyor. Fare kipinde
+    /// Shift+tıklamanın buraya düşmesi bu yüzden aynı zamanda uzatma — orada
+    /// seçimin tek yolu zaten Shift (031 Karar 6).
     Select,
 }
 

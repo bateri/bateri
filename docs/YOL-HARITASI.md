@@ -567,7 +567,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   jest durumunu `NSEvent` görmeyen bir struct'a taşımak; bedeli orta ve
   ancak `view.rs`'in fare yolunu zaten elden geçiren bir set içinde ucuz.
   Yamandığı yer belli değil — hareketin ikinci tüketicisi ya da çift/üçlü
-  tıkla seçim doğal ev.
+  tıkla seçim doğal ev. **031 phase-1'de kapandı:** defter `bt-shell`'in
+  `gesture::Gesture`'ına taşındı ve dört geçiş (basış, sürükleme, bırakma,
+  kayıp bırakma) orada sınanıyor → `.tasks/031-fare-ile-secim/`.
 - **Tamamlama listesi ızgarayı kaydırıyor.** ZLE'nin `BUFFER` olmayan çıktısı
   (tamamlama listesi, `menu-select`, `bck-i-search`, `zle -M`) aynada yok ve
   ızgaraya düşüyor — 012'nin kayıtlı bedeli; liste kalkınca dock ile içerik

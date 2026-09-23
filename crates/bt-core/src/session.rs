@@ -3,8 +3,8 @@
 //! Crate'in kapsül sözleşmesi `lib.rs`'te; burada onun iki pratik sonucu
 //! yaşıyor: alacritty'nin `EventListener`'ı `Adapter`'da bizim `Wake`'imize
 //! çevrilir, ve `Term` kilidi **yalnız** şu çağrı yerlerinde alınır:
-//! `frame`, `resize`, seçim yolu (`set_selection`, `update_selection`,
-//! `clear_selection`, `selection_text`), kaydırma yolu (`scroll_wheel`,
+//! `frame`, `resize`, seçim yolu (`set_selection`, `extend_selection`,
+//! `select_all`, `update_selection`, `clear_selection`, `selection_text`), kaydırma yolu (`scroll_wheel`,
 //! `scroll_page`), kullanıcı girdisinin gönderimi (`send_input`: seçimin
 //! temizliği, dibe dönüş ve okun kip sorusu aynı kilitte), `paste`'in kip
 //! sorgusu (`bracketed_paste`) ve terminal seçeneklerinin canlı değişimi
@@ -30,6 +30,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
+use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
@@ -679,12 +680,14 @@ impl Osc52 {
 /// (`Session::spawn`) ve canlı değişimin ([`Session::set_terminal_options`])
 /// tek yolu.
 ///
-/// Geri kalan alanlar (`semantic_escape_chars`, imleç biçimleri,
+/// Kelimenin tanımı (`semantic_escape_chars`) seçeneklerden değil sabitten
+/// ([`WORD_SEPARATORS`]); geri kalan alanlar (imleç biçimleri,
 /// `kitty_keyboard`) alacritty'nin varsayılanında: onları hiçbir yer
 /// kurmuyor, yani iki çağrı arasında da oynamıyorlar.
 /// `term_config_keeps_every_other_field` bunu çiviliyor.
 fn term_config(options: TerminalOptions) -> Config {
     Config {
+        semantic_escape_chars: WORD_SEPARATORS.to_owned(),
         scrolling_history: options.scrollback,
         osc52: match options.osc52 {
             Osc52::Off => TermOsc52::Disabled,
@@ -1438,6 +1441,49 @@ pub struct SelectionPoint {
     pub row: u16,
     pub half: CellHalf,
 }
+
+/// Seçimin **adımı**: harf, kelime ya da satır — tek, çift ve üçlü tıklama
+/// (`bt-shell`'in `clickCount` çevirisi).
+///
+/// Tip seçimin **içinde** yaşıyor ve sürükleme onu koruyor: çift tıklayıp
+/// sürüklemek kelime adımıyla, üçlü tıklayıp sürüklemek satır adımıyla büyür,
+/// Shift+tıklama da ([`Session::extend_selection`]) aynı adımla uzatır.
+/// Davranışın sahibi alacritty (`Simple`, `Semantic`, `Lines`); bu enum
+/// yalnız sınırın sözlüğü, `pub` API'de alacritty tipi görünmesin diye.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SelectKind {
+    /// Harf harf; iki uç eşitse seçim boştur (sürüklemesiz tık).
+    Simple,
+    /// Kelime ([`WORD_SEPARATORS`]); tek noktada bile altındaki kelimeyi
+    /// bütün alır.
+    Word,
+    /// Sarılmış **mantıksal** satır (`WRAPLINE`): ekrandaki iki fiziksel
+    /// satır tek satır sayılır.
+    Line,
+}
+
+impl SelectKind {
+    fn alacritty(self) -> SelectionType {
+        match self {
+            Self::Simple => SelectionType::Simple,
+            Self::Word => SelectionType::Semantic,
+            Self::Line => SelectionType::Lines,
+        }
+    }
+}
+
+/// Kelimenin tek tanımı: **ayırıcılar**. Geri kalan her karakter — harf,
+/// rakam, ASCII olmayan her şey (`│` hariç) ve `_ - . / ~ : @` — kelimenin
+/// içinde kalır, yani yol (`~/src/a-b.rs`), `user@host`, `host:8080`,
+/// `dosya.rs:42` ve sorgusuz bir URL tek çift tıkla gelir, `KEY=value`'da
+/// `value` tek başına (`.tasks/031-fare-ile-secim/discussion.md` → Karar 5).
+///
+/// Ayırıcıyı kelimeden ayırmanın ötesindeki davranış **alacritty'nin
+/// `Semantic`'inin**: parantez eşleme ve ayırıcının üstüne çift tıklama
+/// kuralı (`selection.rs` `range_semantic`, `term/search.rs`). Dock'un kelime
+/// sınırı (031 phase-4) aynı sabiti okuyor, ki iki yüzeyde kelime aynı şey
+/// olsun. Ayar anahtarı **yok**: istek bir varsayılan istedi.
+pub(crate) const WORD_SEPARATORS: &str = " \t`'\"│|;,=()[]{}<>!#$%&*+?\\^";
 
 /// Ucun alacritty karşılığı: nokta + yan. Eşleme **tek yerde**: iki uç için
 /// ayrı ayrı yazılsa biri `Left`/`Right` çevirmesinde kayabilir ve kayma
@@ -3675,12 +3721,68 @@ impl Session {
     /// Değişim kirli bayrağını diker **ve uyandırır**: `resize`'ın tersine
     /// uyandırma `bt-shell`'e bırakılamaz — farenin vardığı `view` link'e
     /// uzanamıyor, elindeki tek tutamak bu oturum.
-    pub fn set_selection(&self, start: SelectionPoint, end: SelectionPoint) {
-        let mut term = self.term.lock();
+    ///
+    /// `kind` seçimin adımı ([`SelectKind`]) ve seçimle birlikte saklanır:
+    /// sürükleme ([`Session::update_selection`]) ve Shift+tıklama
+    /// ([`Session::extend_selection`]) onu koruyor.
+    pub fn set_selection(&self, kind: SelectKind, start: SelectionPoint, end: SelectionPoint) {
+        let term = self.term.lock();
         let (start_point, start_side) = anchor(&term, start);
         let (end_point, end_side) = anchor(&term, end);
-        let mut selection = Selection::new(SelectionType::Simple, start_point, start_side);
+        let mut selection = Selection::new(kind.alacritty(), start_point, start_side);
         selection.update(end_point, end_side);
+        self.store_selection(term, selection);
+    }
+
+    /// Shift+tıklama: var olan seçimin **ucunu** `end`'e taşır, çapaya ve
+    /// tipe dokunmadan — kelime seçimi kelime adımıyla, satır seçimi satır
+    /// adımıyla uzar. Seçim yoksa tıklanan noktadan boş bir `Simple` başlar
+    /// (sürüklemesiz tık gibi); sürükleme oradan harf adımıyla büyür.
+    ///
+    /// [`Session::update_selection`]'dan **ayrı**, çünkü o seçimsiz hâlde
+    /// bilerek susuyor (basışsız hareket seçim doğurmamalı); Shift+tıklama
+    /// ise bir basış, yani jest başlatabilir.
+    ///
+    /// Geçmişe itilmiş (ekranda çizilmeyen) bir seçim de uzar: seçim her
+    /// hâlde saklanıyor ([`Session::set_selection`]'ın gerekçesi) ve çapası
+    /// grid mutlağında duruyor — Terminal.app'in davranışı.
+    pub fn extend_selection(&self, end: SelectionPoint) {
+        let term = self.term.lock();
+        let (point, side) = anchor(&term, end);
+        let selection = match term.selection.clone() {
+            Some(mut selection) => {
+                selection.update(point, side);
+                selection
+            }
+            None => Selection::new(SelectionType::Simple, point, side),
+        };
+        self.store_selection(term, selection);
+    }
+
+    /// Edit ▸ Select All (⌘A): geçmişin tepesinden ekranın dibine bütün
+    /// satırlar — Terminal.app'in normu. `Lines`, çünkü "bütün" satır
+    /// cinsinden bir söz ve uçların yarısı sorulmamalı.
+    ///
+    /// Uçlar grid mutlağında kuruluyor, `anchor`'dan geçmeden: o görünür
+    /// pencere hücresini grid satırına indiriyor, burada ise pencere hiç
+    /// sorulmuyor.
+    pub fn select_all(&self) {
+        let term = self.term.lock();
+        let top = Point::new(term.topmost_line(), Column(0));
+        let bottom = Point::new(term.bottommost_line(), term.last_column());
+        let mut selection = Selection::new(SelectionType::Lines, top, Side::Left);
+        selection.update(bottom, Side::Right);
+        self.store_selection(term, selection);
+    }
+
+    /// Seçimin üç kurucusunun ortak kuyruğu: saklar ve **çizilen aralık**
+    /// değiştiyse kare ister. Kilit burada bırakılıyor, ki `request_frame`
+    /// `Term` kilidi tutulurken koşmasın.
+    fn store_selection(
+        &self,
+        mut term: impl DerefMut<Target = Term<Adapter>>,
+        selection: Selection,
+    ) {
         // Kapı **çizilen aralığa** bakar, uçlara değil (`visible_range`).
         // Uçlar karşılaştırılsaydı sürükleme her hücre sınırında
         // (`(c, Right)` → `(c+1, Left)`, aynı aralık) ve her sürüklemesiz tıkta
@@ -7546,13 +7648,20 @@ mod tests {
             "auto'nun tabanı kapalı: off'tan ayırt edilemez"
         );
 
-        // **Üç** alanın dışında hiçbir şey kurulmuyor.
+        // Kelimenin tanımı her kurulumda aynı sabit — seçeneklerin hiçbiri
+        // onu oynatmıyor ve alacritty'nin varsayılanına dönmüyor.
+        for config in [&before, &scrolled, &copying, &shaped, &auto] {
+            assert_eq!(config.semantic_escape_chars, WORD_SEPARATORS);
+        }
+
+        // **Dört** alanın dışında hiçbir şey kurulmuyor.
         for config in [before, scrolled, copying, shaped] {
             assert_eq!(
                 Config {
                     scrolling_history: Config::default().scrolling_history,
                     osc52: Config::default().osc52,
                     default_cursor_style: Config::default().default_cursor_style,
+                    semantic_escape_chars: Config::default().semantic_escape_chars,
                     ..config
                 },
                 Config::default()
@@ -8020,6 +8129,142 @@ mod tests {
         session
     }
 
+    /// Kelime sınamalarının sahnesi: ayırıcıların (`WORD_SEPARATORS`) ve
+    /// kelime karakterlerinin ikisini de taşıyan tek satır, kırmızı zeminli
+    /// ki 13 hücrenin 13'ü de sayılabilsin.
+    fn separator_session() -> Session {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033[41ma b.c/d:e f=g\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+        assert_eq!(wait_cells(&session, &wake, 13).len(), 13);
+        session
+    }
+
+    #[test]
+    fn a_double_click_selects_the_word_under_the_pointer() {
+        let session = separator_session();
+        // `.`, `/` ve `:` kelimenin içinde: yol, `host:port`, `dosya.rs:42`
+        // tek çift tıkla gelir (Karar 5).
+        session.set_selection(
+            SelectKind::Word,
+            at(4, 0, CellHalf::Left),
+            at(4, 0, CellHalf::Left),
+        );
+        assert_eq!(session.selection_text().as_deref(), Some("b.c/d:e"));
+        // `=` ayırıcı: `KEY=value`'da değer tek başına.
+        session.set_selection(
+            SelectKind::Word,
+            at(12, 0, CellHalf::Left),
+            at(12, 0, CellHalf::Left),
+        );
+        assert_eq!(session.selection_text().as_deref(), Some("g"));
+        session.set_selection(
+            SelectKind::Word,
+            at(10, 0, CellHalf::Right),
+            at(10, 0, CellHalf::Right),
+        );
+        assert_eq!(session.selection_text().as_deref(), Some("f"));
+    }
+
+    #[test]
+    fn a_word_drag_grows_in_whole_words() {
+        let session = separator_session();
+        session.set_selection(
+            SelectKind::Word,
+            at(4, 0, CellHalf::Left),
+            at(4, 0, CellHalf::Left),
+        );
+        // Uç `f`'nin sol yarısında: kelime adımı onu bütün alır, `=`'de durur.
+        session.update_selection(at(10, 0, CellHalf::Left));
+        assert_eq!(session.selection_text().as_deref(), Some("b.c/d:e f"));
+        // Geriye sürükleme de kelime adımıyla: `a` bütün gelir, çapanın
+        // kelimesi de kalır.
+        session.update_selection(at(0, 0, CellHalf::Right));
+        assert_eq!(session.selection_text().as_deref(), Some("a b.c/d:e"));
+    }
+
+    #[test]
+    fn a_shift_click_extends_the_selection_and_keeps_its_kind() {
+        let session = separator_session();
+        session.set_selection(
+            SelectKind::Word,
+            at(2, 0, CellHalf::Left),
+            at(2, 0, CellHalf::Left),
+        );
+        // Uç `g`'nin sol yarısında; `Word` onu bütün alır — `Simple` olsaydı
+        // sol yarıda biten uç `g`'yi dışarıda bırakırdı.
+        session.extend_selection(at(12, 0, CellHalf::Left));
+        assert_eq!(session.selection_text().as_deref(), Some("b.c/d:e f=g"));
+    }
+
+    #[test]
+    fn a_shift_click_without_a_selection_starts_a_simple_one() {
+        let session = separator_session();
+        session.extend_selection(at(2, 0, CellHalf::Left));
+        // Sürüklemesiz tık gibi: boş seçim, kopyalanacak metin yok.
+        assert_eq!(session.selection_text(), None);
+        // Ama çapa orada: sürükleme oradan harf adımıyla büyür.
+        session.update_selection(at(4, 0, CellHalf::Right));
+        assert_eq!(session.selection_text().as_deref(), Some("b.c"));
+    }
+
+    #[test]
+    fn a_triple_click_selects_the_whole_wrapped_line() {
+        let wake = Arc::new(TestWake::default());
+        // On sütunda on beş harf: satır sarılıyor (`WRAPLINE`), yani iki
+        // fiziksel satır tek mantıksal satır.
+        let session = spawn_with_cols(
+            sh("printf '\\033[41mabcdefghijklmno\\033[0m'; sleep 5"),
+            10,
+            Arc::clone(&wake),
+        );
+        assert_eq!(wait_cells(&session, &wake, 15).len(), 15);
+        session.set_selection(
+            SelectKind::Line,
+            at(2, 0, CellHalf::Left),
+            at(2, 0, CellHalf::Left),
+        );
+        // Satır seçimi satır sonunu da taşıyor (alacritty'nin `Lines`'ı,
+        // Terminal.app'in üçlü tıklaması gibi) — ama sarılmanın yerinde satır
+        // sonu **yok**: iki fiziksel satır tek satır olarak geliyor.
+        assert_eq!(
+            session.selection_text().as_deref(),
+            Some("abcdefghijklmno\n")
+        );
+        // Alt yarıdan da aynı satır.
+        session.set_selection(
+            SelectKind::Line,
+            at(1, 1, CellHalf::Left),
+            at(1, 1, CellHalf::Left),
+        );
+        assert_eq!(
+            session.selection_text().as_deref(),
+            Some("abcdefghijklmno\n")
+        );
+    }
+
+    #[test]
+    fn select_all_covers_the_history_too() {
+        let wake = Arc::new(TestWake::default());
+        // İlk satır geçmişe itilecek kadar satır: seçim ekranın değil
+        // geçmişin tepesinden başlamalı.
+        let session = spawn_session(
+            "printf '\\033[41mtop\\033[0m'; for i in $(seq 1 40); do echo; done; \
+             printf '\\033[41mend\\033[0m'; sleep 5",
+            Arc::clone(&wake),
+        );
+        // `top` artık geçmişte: ekranda yalnız `end`'in üç kırmızı hücresi.
+        wait_frame(&session, &wake, |cells| {
+            cells.iter().any(|cell| cell.ch == Some('d'))
+        });
+        session.select_all();
+        let text = session.selection_text().unwrap_or_default();
+        assert!(text.starts_with("top"), "{text:?}");
+        assert!(text.trim_end().ends_with("end"), "{text:?}");
+    }
+
     #[test]
     fn selection_text_returns_selected_range() {
         let wake = Arc::new(TestWake::default());
@@ -8036,11 +8281,19 @@ mod tests {
         // Başlangıç ucunun sol yarısı hücreyi katar, bitiş ucunun sağ yarısı
         // katar: beş harfin beşi de içeride — eski davranışla aynı sonuç,
         // çünkü eskiden yanlar sabit bu ikisiydi.
-        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(4, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("hello"));
         // Uçlar sırasız verilebilir: tersi aynı metni verir. Yarının sıraya
         // göre atanmadığının kanıtı da bu — ters çevrilen yarılar değil.
-        session.set_selection(at(4, 0, CellHalf::Right), at(0, 0, CellHalf::Left));
+        session.set_selection(
+            SelectKind::Simple,
+            at(4, 0, CellHalf::Right),
+            at(0, 0, CellHalf::Left),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("hello"));
         // Temizleyince metin de gider.
         session.clear_selection();
@@ -8057,9 +8310,17 @@ mod tests {
         // yarı, iki farklı metin — aralığı belirleyen şey yarı.
         let session = word_session();
 
-        session.set_selection(at(0, 0, CellHalf::Right), at(4, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Right),
+            at(4, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("raba"));
-        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(4, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("araba"));
     }
 
@@ -8070,9 +8331,17 @@ mod tests {
         // ortasını geçtiği an o hücre yanar — iki uçta da kural bu.
         let session = word_session();
 
-        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(4, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("araba"));
-        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Left));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(4, 0, CellHalf::Left),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("arab"));
     }
 
@@ -8086,11 +8355,19 @@ mod tests {
         // kalır.
         let session = word_session();
 
-        session.set_selection(at(2, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(2, 0, CellHalf::Right),
+            at(2, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text(), None);
         // Sol yarısı da boş: iki uç birbirinin **aynısı** olduğu sürece
         // seçim doğmaz, yarı ne olursa olsun.
-        session.set_selection(at(2, 0, CellHalf::Left), at(2, 0, CellHalf::Left));
+        session.set_selection(
+            SelectKind::Simple,
+            at(2, 0, CellHalf::Left),
+            at(2, 0, CellHalf::Left),
+        );
         assert_eq!(session.selection_text(), None);
     }
 
@@ -8109,7 +8386,11 @@ mod tests {
         assert_eq!(wait_cells(&session, &wake, 45).len(), 45);
         // İki uç da kendi hücresini katan yarıda: 35. sütundan sarılan
         // satırın 4. sütununa kadar on hücre (eski sabit yanlarla aynı sonuç).
-        session.set_selection(at(35, 0, CellHalf::Left), at(4, 1, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(35, 0, CellHalf::Left),
+            at(4, 1, CellHalf::Right),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("5678901234"));
     }
 
@@ -8122,7 +8403,11 @@ mod tests {
         let session = spawn_session("printf '\\033[41maあb\\033[0m'; sleep 5", Arc::clone(&wake));
 
         assert_eq!(wait_cells(&session, &wake, 4).len(), 4);
-        session.set_selection(at(0, 0, CellHalf::Left), at(3, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(3, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("aあb"));
     }
 
@@ -8141,13 +8426,21 @@ mod tests {
 
         // Sürüklemesiz tık: seçim boş doğar, önceki seçim de yoktu — çizilecek
         // bir şey değişmedi.
-        session.set_selection(at(2, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(2, 0, CellHalf::Right),
+            at(2, 0, CellHalf::Right),
+        );
         assert!(
             frame_if_damaged(&session, |_| ()).is_none(),
             "boş seçim kare istememeli"
         );
 
-        session.set_selection(at(0, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(2, 0, CellHalf::Right),
+        );
         assert!(
             frame_if_damaged(&session, |_| ()).is_some(),
             "yeni aralık kare istemeli"
@@ -8155,7 +8448,11 @@ mod tests {
         assert!(frame_if_damaged(&session, |_| ()).is_none());
 
         // Hücre sınırı geçildi, aralık aynı: 2. sütunda bitiyor.
-        session.set_selection(at(0, 0, CellHalf::Left), at(3, 0, CellHalf::Left));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(3, 0, CellHalf::Left),
+        );
         assert!(
             frame_if_damaged(&session, |_| ()).is_none(),
             "aynı aralık kare istememeli"
@@ -8178,7 +8475,11 @@ mod tests {
         // ekrandan bir şey silmez.
         session.clear_selection();
         assert!(frame_if_damaged(&session, |_| ()).is_some());
-        session.set_selection(at(1, 0, CellHalf::Left), at(1, 0, CellHalf::Left));
+        session.set_selection(
+            SelectKind::Simple,
+            at(1, 0, CellHalf::Left),
+            at(1, 0, CellHalf::Left),
+        );
         session.clear_selection();
         assert!(
             frame_if_damaged(&session, |_| ()).is_none(),
@@ -8198,7 +8499,11 @@ mod tests {
         assert!(frame_if_damaged(&session, |_| ()).is_some());
         assert!(frame_if_damaged(&session, |_| ()).is_none());
 
-        session.set_selection(at(39, 0, CellHalf::Right), at(0, 1, CellHalf::Left));
+        session.set_selection(
+            SelectKind::Simple,
+            at(39, 0, CellHalf::Right),
+            at(0, 1, CellHalf::Left),
+        );
         assert!(
             frame_if_damaged(&session, |_| ()).is_none(),
             "boş seçim kare istememeli"
@@ -8218,7 +8523,11 @@ mod tests {
             Arc::clone(&wake),
         );
         assert_eq!(wait_cells(&session, &wake, 1).len(), 1);
-        session.set_selection(at(0, 0, CellHalf::Left), at(0, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(0, 0, CellHalf::Right),
+        );
         assert!(frame_if_damaged(&session, |_| ()).is_some());
 
         // `read` satır sonunu bekliyor; gelince 30 satır `x`'i geçmişe iter.
@@ -8226,7 +8535,11 @@ mod tests {
         session.write(b"\n");
         wait_seq_tail(&session, &wake);
 
-        session.set_selection(at(5, 5, CellHalf::Left), at(5, 5, CellHalf::Left));
+        session.set_selection(
+            SelectKind::Simple,
+            at(5, 5, CellHalf::Left),
+            at(5, 5, CellHalf::Left),
+        );
         assert!(
             frame_if_damaged(&session, |_| ()).is_none(),
             "geçmişteki seçimin yerine boş seçim kare istememeli"
@@ -8251,11 +8564,19 @@ mod tests {
         // Taban: seçimsiz `a`'nın ön planı. Kare istemek için seçim son
         // satıra kuruluyor — boş seçim (haklı olarak) kare istemez.
         let mut plain = Vec::new();
-        session.set_selection(at(0, 9, CellHalf::Left), at(1, 9, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 9, CellHalf::Left),
+            at(1, 9, CellHalf::Right),
+        );
         assert!(frame_if_damaged(&session, |c| plain.push(c)).is_some());
         let plain_fg = plain.iter().find(|c| c.col == 0).expect("a hücresi").fg;
 
-        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(4, 0, CellHalf::Right),
+        );
         let mut next = Vec::new();
         assert!(frame_if_damaged(&session, |c| next.push(c)).is_some());
         for col in 0..5 {
@@ -8279,7 +8600,11 @@ mod tests {
         assert!(frame_if_damaged(&session, |_| ()).is_some());
         assert!(frame_if_damaged(&session, |_| ()).is_none());
 
-        session.set_selection(at(0, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(2, 0, CellHalf::Right),
+        );
         assert!(
             frame_if_damaged(&session, |_| ()).is_some(),
             "seçim kirli bayrağını dikmeli"
@@ -8327,7 +8652,11 @@ mod tests {
             cells.iter().filter_map(|c| c.ch).collect::<String>() == "hello"
         });
         assert_eq!(backgrounds(&cells).count(), 3, "{cells:?}");
-        session.set_selection(at(1, 0, CellHalf::Left), at(3, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(1, 0, CellHalf::Left),
+            at(3, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("ell"));
 
         let mut next = Vec::new();
@@ -8373,7 +8702,11 @@ mod tests {
         };
 
         // 1. ve 2. sütun seçili: biri düz, biri sönük ters video.
-        session.set_selection(at(1, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(1, 0, CellHalf::Left),
+            at(2, 0, CellHalf::Right),
+        );
         let drawn = colors(&session);
         // Seçilmemiş ters video: renkler takaslı.
         assert_eq!(
@@ -8400,7 +8733,11 @@ mod tests {
         // koşulu onu elemeli — ekranın zeminiyle aynı renkte bir hücreyi
         // `sink`'e sokmak `hucre=` sayısını şişirirdi.
         assert!(drawn[&4].0.is_some(), "seçilmemiş boşluk boyalı: {drawn:?}");
-        session.set_selection(at(4, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(4, 0, CellHalf::Left),
+            at(4, 0, CellHalf::Right),
+        );
         let drawn = colors(&session);
         assert!(!drawn.contains_key(&4), "seçili boşluk çizildi: {drawn:?}");
         assert_eq!(
@@ -8425,7 +8762,11 @@ mod tests {
 
         // Aralık metni, sağındaki boş kuyruğu **ve** altındaki iki boş satırı
         // kapsıyor. Çizilen tek şey metnin kendisi olmalı.
-        session.set_selection(at(0, 0, CellHalf::Left), at(10, 2, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(10, 2, CellHalf::Right),
+        );
         let mut cells = Vec::new();
         assert!(frame_if_damaged(&session, |c| cells.push(c)).is_some());
         let drawn: Vec<_> = cells.iter().map(|c| (c.row, c.col)).collect();
@@ -8474,7 +8815,11 @@ mod tests {
         let session = spawn_session("printf '漢'; sleep 5", Arc::clone(&wake));
         wait_frame(&session, &wake, |cells| !cells.is_empty());
 
-        session.set_selection(at(0, 0, CellHalf::Left), at(1, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(1, 0, CellHalf::Right),
+        );
         let mut cells = Vec::new();
         assert!(frame_if_damaged(&session, |c| cells.push(c)).is_some());
         let cols: Vec<_> = cells.iter().map(|c| c.col).collect();
@@ -8515,23 +8860,39 @@ mod tests {
 
         // Bitiş ucu glyph'in sağ yarısında (spacer'ın sol yarısı): harf
         // içeride, **iki** hücresi de vurgulu.
-        session.set_selection(at(0, 0, CellHalf::Left), at(1, 0, CellHalf::Left));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(1, 0, CellHalf::Left),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("あ"));
         assert!(highlighted(&session, 1), "spacer vurgulanmalı");
 
         // Bitiş ucu glyph'in sol yarısında (baş hücrenin sağ yarısı): harf
         // dışarıda, seçim boş.
-        session.set_selection(at(0, 0, CellHalf::Left), at(0, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(0, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text(), None);
 
         // Başlangıç ucu glyph'in sağ yarısında: harf dışarıda, baş hücre
         // vurgusuz — metin ile vurgu aynı kararı veriyor.
-        session.set_selection(at(1, 0, CellHalf::Left), at(2, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(1, 0, CellHalf::Left),
+            at(2, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("b"));
         assert!(!highlighted(&session, 0), "baş hücre vurgulanmamalı");
 
         // Başlangıç ucu glyph'in sol yarısında: harf içeride.
-        session.set_selection(at(0, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Right),
+            at(2, 0, CellHalf::Right),
+        );
         assert_eq!(session.selection_text().as_deref(), Some("あb"));
     }
 
@@ -10729,7 +11090,11 @@ mod tests {
         /// `araba`'yı seçer ve seçimin karesini tüketir: sonraki kare ancak
         /// seçimden sonra olan bir şeyin karesi olabilir.
         fn select_word(session: &Session) {
-            session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+            session.set_selection(
+                SelectKind::Simple,
+                at(0, 0, CellHalf::Left),
+                at(4, 0, CellHalf::Right),
+            );
             wait_settled(session);
         }
 
@@ -10769,7 +11134,11 @@ mod tests {
         // Ekranda çizili aralık yoksa kare istenmez: sürüklemesiz tık boş seçim
         // bırakır ve temizliği her tıktan sonraki ilk tuşa boş bir kare
         // isteterdi.
-        session.set_selection(at(2, 0, CellHalf::Right), at(2, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(2, 0, CellHalf::Right),
+            at(2, 0, CellHalf::Right),
+        );
         wait_settled(&session);
         session.write(b"x");
         assert!(
@@ -10784,7 +11153,11 @@ mod tests {
         // yok, başka aday yok.
         let (history, wake) = history_session("stty -echo; seq 1 30; sleep 60");
         assert_eq!(scroll(&history, 5), Wheel::Scrolled(5));
-        history.set_selection(at(0, 0, CellHalf::Left), at(1, 0, CellHalf::Right));
+        history.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(1, 0, CellHalf::Right),
+        );
         wait_settled(&history);
         let woken = wakes(&wake);
         history.write(b"x");
@@ -10796,7 +11169,11 @@ mod tests {
         // temizlik kare istemez — kapı seçimin varlığına değil çizili aralığa
         // bakıyor. Seçim yine de gider, yoksa Cmd-C görünmeyen metni kopyalardı.
         assert_eq!(scroll(&history, 5), Wheel::Scrolled(5));
-        history.set_selection(at(0, 0, CellHalf::Left), at(1, 0, CellHalf::Right));
+        history.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(1, 0, CellHalf::Right),
+        );
         assert_eq!(scroll(&history, -5), Wheel::Scrolled(-5));
         wait_settled(&history);
         history.write(b"x");
@@ -10821,7 +11198,7 @@ mod tests {
         let (reports, _wake) = dump_session(40, "printf 'araba\\033[?1000h\\033[?1006h'", |mode| {
             mode.contains(TermMode::SGR_MOUSE)
         });
-        reports.set_selection(start, end);
+        reports.set_selection(SelectKind::Simple, start, end);
         assert_eq!(scroll(&reports, 1), Wheel::Sent);
         assert_eq!(
             reports.selection_text().as_deref(),
@@ -10845,7 +11222,7 @@ mod tests {
         let (arrows, _wake) = dump_session(40, "printf '\\033[?1049haraba\\033[?2004h'", |mode| {
             mode.contains(TermMode::ALT_SCREEN | TermMode::BRACKETED_PASTE)
         });
-        arrows.set_selection(start, end);
+        arrows.set_selection(SelectKind::Simple, start, end);
         assert_eq!(scroll(&arrows, 1), Wheel::Sent);
         assert_eq!(
             arrows.selection_text().as_deref(),
@@ -10863,7 +11240,11 @@ mod tests {
         let (session, _wake) = dump_session(40, "printf 'araba\\033[?1000h\\033[?1006h'", |mode| {
             mode.contains(TermMode::SGR_MOUSE)
         });
-        session.set_selection(at(0, 0, CellHalf::Left), at(4, 0, CellHalf::Right));
+        session.set_selection(
+            SelectKind::Simple,
+            at(0, 0, CellHalf::Left),
+            at(4, 0, CellHalf::Right),
+        );
         assert_eq!(press(&session, at(1, 0, CellHalf::Left)), Click::Sent);
         assert_eq!(
             session.selection_text().as_deref(),
@@ -10972,7 +11353,7 @@ mod tests {
 
         // Basış: `30`'un sıfırının sağ yarısı (8. satır, 1. sütun).
         let press = at(1, 8, CellHalf::Right);
-        session.set_selection(press, press);
+        session.set_selection(SelectKind::Simple, press, press);
         // Tekerlek üç satır geriye, fare pencerenin tepesine: orada artık `19`.
         assert_eq!(scroll(&session, 3), Wheel::Scrolled(3));
         session.update_selection(at(0, 0, CellHalf::Left));

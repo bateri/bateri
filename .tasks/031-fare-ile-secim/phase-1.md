@@ -56,10 +56,28 @@ _Requirements: R1.1, R1.2, R1.3, R1.4, R1.5_
 
 ## Checklist
 
-- [ ] `SelectKind` + `set_selection`/uzatma/`select_all`
-- [ ] `WORD_SEPARATORS` + `term_config`
-- [ ] `Gesture` struct'ı ve `view.rs`'in ona geçişi; `clickCount`
-- [ ] Edit ▸ Select All
-- [ ] Test: kelime/satır/uzatma sınamaları; `Gesture` geçişleri
-- [ ] `CLAUDE.md` ve yol haritası cümleleri
-- [ ] Doğrulama geçti (`make hepsi`, `make duman`)
+- [x] `SelectKind` + `set_selection`/uzatma/`select_all`
+- [x] `WORD_SEPARATORS` + `term_config`
+- [x] `Gesture` struct'ı ve `view.rs`'in ona geçişi; `clickCount`
+- [x] Edit ▸ Select All
+- [x] Test: kelime/satır/uzatma sınamaları; `Gesture` geçişleri
+- [x] `CLAUDE.md` ve yol haritası cümleleri
+- [x] Doğrulama geçti (`make hepsi`, `make duman`)
+
+## Uygulama Notları
+
+- `Gesture` `view.rs`'te değil kendi modülünde (`crates/bt-shell/src/gesture.rs`):
+  saf struct + sınamaları, `view.rs` zaten 2300 satır. `moved_to_new_cell` ile
+  `button_bit` oraya taşındı; ivar tek `Cell<Gesture>` (`Copy`, al-değiştir-koy).
+- Davranış değişikliği (tek): yeni sol basış bayat `dragging`'i de indiriyor
+  (`Gesture::begin_press`) — önceden yalnız raporlanan bit iniyordu ve
+  raporlanan basışın yanında bayat seçim sürüklemesi kalabiliyordu.
+- Satır seçimi (`Line`) satır sonunu da kopyalıyor (`"…\n"`): alacritty'nin
+  `Lines`'ı, Terminal.app'in üçlü tıklamasıyla aynı; sarılma yerinde `\n` yok.
+- Shift+tıklama tıklama sayısından önce gelir (Shift+çift tık da `Extend`).
+- `input.rs`'te kod değişmedi, yalnız `ButtonRoute::Select`'in doc'u.
+- Gözle (geçici paket, açık ve koyu tema): çift tık `b.c/d:e` ve `KEY=`'den
+  sonra `value`; Shift+tık kelime adımıyla uzattı; üçlü tık sarılmış satırın
+  iki fiziksel satırını; çift tık+sürükleme kelime adımıyla; ⌘A bütün ızgara.
+  Pano metinleri doğru. Kelime arası boşluklar vurgusuz — bugünkü hücre
+  kuralı, phase-2'nin koşusu kapatıyor.

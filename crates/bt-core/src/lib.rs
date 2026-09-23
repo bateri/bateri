@@ -4,7 +4,7 @@
 //! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`, `Block`,
 //! `Blocks`,
-//! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `ScrollIntent`,
+//! `SelectionPoint`, `SelectKind`, `CellHalf`, `Arrow`, `Wheel`, `ScrollIntent`,
 //! `ScrollGlide`, `LinearRgba`, `Theme`,
 //! `ShellState`, `ShellPhase`, aynanın `DockState`, `DockStatus`, `DockFault`,
 //! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, bağlam satırının
@@ -52,7 +52,7 @@ pub use dock::{Dock, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_T
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use session::{
     Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, ScrollGlide,
-    ScrollIntent, SelectionPoint, Session, SessionOptions, ShutdownHandle, Teardown,
+    ScrollIntent, SelectKind, SelectionPoint, Session, SessionOptions, ShutdownHandle, Teardown,
     TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
