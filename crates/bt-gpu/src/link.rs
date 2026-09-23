@@ -128,9 +128,12 @@ struct WakerInner {
     /// **Ama `Drop`'u ana thread dışında bloklar:** ana kuyruğa `exec_sync`
     /// ile iş atıp bekler. Bu gövdeyi Metal'in tamamlanma bloğu da tutuyor,
     /// yani son referans orada düşerse ve ana thread o sırada kapanışta
-    /// bekliyorsa ikisi birbirini kilitler. Kapanış yolu bu yüzden
-    /// [`DisplayLink::stop`] çağırır ve `DisplayLink`'i **düşürmez**: son
-    /// referans hep ana thread'de kalır.
+    /// bekliyorsa ikisi birbirini kilitler. Kapanış yolu bu yüzden önce
+    /// [`DisplayLink::stop`] çağırır ve **beklerken** `DisplayLink`'i
+    /// düşürmez: son referans ana thread'de kalır. Beklemeyen bir kapanış
+    /// (`bt-shell`'de tek sekmenin kapanışı) onu düşürebilir — ana thread
+    /// beklemede değilken tamamlanma bloğunun senkron işi yalnız bir tur
+    /// gecikir; okuyucu tarafındaki kopyayı ise `bt-shell` kapanışta söküyor.
     link: MainThreadBound<Retained<CAMetalDisplayLink>>,
     /// Kare çizilir mi, ritim döner mi.
     gate: Gate,
