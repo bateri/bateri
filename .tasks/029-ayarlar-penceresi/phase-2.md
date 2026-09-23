@@ -90,10 +90,52 @@ _Requirements: R4, R4.1, R4.2, R5_
 
 ## Checklist
 
-- [ ] Bayraklar gerekçeli; `Cargo.lock` değişmedi
-- [ ] Pencere iskeleti, kenar çubuğu, dört bölme, "Open settings.toml"
-- [ ] Bütün satırlar ve kontroller; bağımlı satırların devre dışı hâli
-- [ ] `save_edit`, `openSettings:` yeniden bağlandı, Hermetic no-op korundu
-- [ ] Test: popup başlığı ↔ `NAMES` eşlemesinin kapsamı (saf yardımcı), blink
+- [x] Bayraklar gerekçeli; `Cargo.lock` değişmedi
+- [x] Pencere iskeleti, kenar çubuğu, dört bölme, "Open settings.toml"
+- [x] Bütün satırlar ve kontroller; bağımlı satırların devre dışı hâli
+- [x] `save_edit`, `openSettings:` yeniden bağlandı, Hermetic no-op korundu
+- [x] Test: popup başlığı ↔ `NAMES` eşlemesinin kapsamı (saf yardımcı), blink
   slider'ının log eşlemesi uçlarda aralığın uçlarını verir
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] Doğrulama geçti (`make hepsi` + `make duman`)
+- [~] `/code-review` (riskli phase kapısı) — tetiklenmedi: `Cargo.lock`
+  oynamadı, paylaşılan durum ve `.metal` yok; set kapısı son phase'de.
+
+## Uygulama Notları
+
+- **Slider `continuous = true`**, Karar 5'in `false`'u değil: `false` iken
+  eylem yalnız bırakınca geliyor ve değer etiketi sürükleme boyunca donuyordu.
+  Yazma kararı olayın türünden (`LeftMouseDragged`/`LeftMouseDown` → yalnız
+  etiket; bırakma ve ok tuşu → yazar); gerçek pencerede sürüklemede tek
+  kayıt görüldü.
+- **Font durumu için `bt-atlas`/`bt-gpu`'ya birer küçük fonksiyon**
+  (`family_issue`, `family_notice`; phase dosyasının listesinde yoktu):
+  listede olmayan ailenin `— not found` / `— not monospaced`'ı zincirin
+  kendi sorusundan (`open_chain`), renderer'sız — pencere terminal penceresi
+  yokken de açık olabiliyor. `FontIssue → FontNotice` çevirisi tek `From`'a
+  indi.
+- **Popup sırası `NAMES`'in sırası**: Blink "Follow program / On / Off",
+  Cursor motion "Snap / Ease / Spring" — phase metnindeki sıra değil (tek
+  kaynak kuralı).
+- **Tema listesi her `refresh`'te yeniden kuruluyor** (phase-3'ün tazelik
+  kaleminin tema yarısı bedavaya geldi); dosyadaki tema listede yoksa sona
+  seçili olarak ekleniyor (Karar 3'ün Font kuralının ikizi).
+- **Size alanı yalnız `zoom`'un aralığını kabul ediyor** (4–72): yazılan
+  değer stepper'ın aralığıyla aynı; dosyadaki aralık dışı değer olduğu gibi
+  gösteriliyor.
+- **Yazma hatasında pencere dosyanın değerine dönüyor** (`save_edit` →
+  `refresh_settings_window`); pencere şeridi phase-3'te.
+- Ek bayraklar: `NSLayoutGuide` (başlık çubuğunun altı), `NSStackView`,
+  `NSLayoutAnchor`, `NSUserInterfaceLayout`, `NSFontDescriptor`,
+  `NSTableHeaderView`, `NSUserInterfaceItemIdentification` — hepsi başlık
+  bayrağı, `Cargo.lock` oynamadı.
+- **Gözle** (`HOME` geçici dizinde, paketlenmiş örnek): dört kategori
+  ikonlarıyla; Shape → Beam terminalde anında, dosyada yalnız o satır ve
+  yorumlar yerinde; dosya yokken açmak dosya yaratmadı, ilk değişiklik şablon
+  + satır yazdı; Theme → bateri Light/Dark'ı devre dışı bıraktı; Size stepper
+  anında; Scrollback'te `12x` + Enter geri döndü, yazarken dosya değişmedi,
+  Enter'da yazdı; Blocks only sonrası ⌘T sekmesi dock'suz doğdu; ayar
+  penceresi key iken ⌘T sekme değil ayrı pencere açtı, ⌘W ayar penceresini
+  kapattı, yeniden açınca aynı kategoride döndü. ⌘Q onayının ayar penceresini
+  saymaması ekranda denenmedi (yapısal: pencere `windows()` listesinde yok).
+- Türkçe Q düzeninde menü Settings…'in kısayolunu `⌘Ö` gösteriyor (virgül
+  tuşunun yeri) — bu phase'den önce de öyleydi, dokunulmadı.

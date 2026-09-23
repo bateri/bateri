@@ -84,6 +84,6 @@ Cmd-, ──► settings_window.show()   (Hermetic: no-op)
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | phase-3 | |
 | kapı | |
