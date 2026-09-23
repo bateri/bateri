@@ -358,17 +358,48 @@ fn primary_language(tag: &str) -> Option<&str> {
         .filter(|language| !language.is_empty())
 }
 
+/// Sınamanın `Wake`'i: hiçbir şey yapmıyor.
+///
+/// Kare istemeye gerek yok — sorulan tek şey `shell_state()` ve o, `Term`
+/// kilidine dokunmayan ayrı bir sorgu (`Session::shell_state`'in doc'u).
+/// Modül düzeyinde, çünkü süreç tablosunun gerçek PTY sınaması (`jobs`) da
+/// oturum doğuruyor ([`crate::settings::TempRoot`] emsali).
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct SilentWake;
+
+#[cfg(test)]
+impl bt_core::Wake for SilentWake {
+    fn wake(&self) {}
+    fn child_exit(&self, _code: Option<i32>) {}
+    fn copy_to_clipboard(&self, _text: String) {}
+    fn title_changed(&self) {}
+}
+
+/// `ready` doğru diyene kadar bekler; süre dolarsa `message` ile düşer.
+#[cfg(test)]
+pub(crate) fn wait_until(message: &str, ready: impl Fn() -> bool) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if ready() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("{message}");
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     use bt_core::{
         Blocks, CaretShape, CursorBlink, DockState, DockStatus, Osc52, ScrollGlide, Session,
-        SessionOptions, ShellPhase, ShellState, TerminalOptions, Theme, Wake,
+        SessionOptions, ShellPhase, ShellState, TerminalOptions, Theme,
     };
 
     use super::*;
@@ -543,32 +574,6 @@ mod tests {
             assert!(dir.join(file).is_file(), "sarmalayıcıda {file} yok");
         }
         assert!(!dir.join(".zlogout").exists(), ".zlogout beklenmiyordu");
-    }
-
-    /// Sınamanın `Wake`'i: hiçbir şey yapmıyor.
-    ///
-    /// Kare istemeye gerek yok — sorulan tek şey `shell_state()` ve o, `Term`
-    /// kilidine dokunmayan ayrı bir sorgu (`Session::shell_state`'in doc'u).
-    #[derive(Debug, Default)]
-    struct SilentWake;
-
-    impl Wake for SilentWake {
-        fn wake(&self) {}
-        fn child_exit(&self, _code: Option<i32>) {}
-        fn copy_to_clipboard(&self, _text: String) {}
-        fn title_changed(&self) {}
-    }
-
-    /// `ready` doğru diyene kadar bekler; süre dolarsa `message` ile düşer.
-    fn wait_until(message: &str, ready: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if ready() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        panic!("{message}");
     }
 
     /// Sarmalayıcının deponun dışına alınmış kopyası; `ZDOTDIR` olarak bu

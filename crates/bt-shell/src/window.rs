@@ -42,6 +42,7 @@ use objc2_foundation::{
 use crate::app::{self, AppDelegate, Grid, split_into_grid};
 use crate::child;
 use crate::clipboard::PendingCopy;
+use crate::jobs::{self, Foreground, Libproc, ShellParent};
 use crate::notices::{Source, font_messages};
 use crate::view::BateriView;
 use crate::zoom::Zoom;
@@ -301,6 +302,10 @@ pub(crate) struct WindowIvars {
     /// Kapanış sırasının ikinci adımı buradan çağrılır; `DisplayLink` de bir
     /// kopya tutuyor ama oraya `stop()`'tan sonra uzanmak yanlış olurdu.
     session: OnceCell<Arc<Session>>,
+    /// Kabuk PTY'nin çocuğu mu, çocuğunun çocuğu mu — oturumla aynı anda,
+    /// **komuttan** yazılıyor ([`TerminalWindow::start_session`]); koşan işin
+    /// tespiti kabuğu bununla buluyor ([`TerminalWindow::foreground`]).
+    shell_parent: OnceCell<ShellParent>,
     wake: Arc<ShellWake>,
     /// Cmd +/−/0'ın geçici punto farkı — **bu pencerenin**: renderer'a giden
     /// font `zoom.apply(&settings.font)` ([`TerminalWindow::apply_font`]).
@@ -596,6 +601,7 @@ impl TerminalWindow {
             view,
             link: OnceCell::new(),
             session: OnceCell::new(),
+            shell_parent: OnceCell::new(),
             wake: Arc::new(ShellWake {
                 id,
                 timed: run.is_some(),
@@ -713,6 +719,22 @@ impl TerminalWindow {
         self.ivars().session.get()
     }
 
+    /// Kabuğun dışında ön planda koşan iş (028 → Karar 1). Oturum yoksa ya da
+    /// okuyucu thread bittiyse boşta: kabuk gitti ve `child_pid` bayatlamış
+    /// olabilir, bayat pid'e sorulmaz.
+    #[expect(dead_code, reason = "çağıranı kapanış yolları, 028 phase-2")]
+    pub(crate) fn foreground(&self) -> Foreground {
+        let (Some(session), Some(&parent)) =
+            (self.ivars().session.get(), self.ivars().shell_parent.get())
+        else {
+            return Foreground::Idle;
+        };
+        if !session.reader_alive() {
+            return Foreground::Idle;
+        }
+        jobs::foreground(parent, session.child_pid(), &Libproc)
+    }
+
     /// Başlığı oturumdan okuyup pencereye yazar — `ShellWake::title_changed`'in
     /// ana kuyruk işi. Kare yolu başlık hesaplamıyor; yazım yalnız
     /// **değişimde** (026 R2.4). Oturum henüz yoksa başlık kurucunun
@@ -797,35 +819,44 @@ impl TerminalWindow {
         integration: Vec<(String, String)>,
         working_directory: Option<PathBuf>,
     ) -> std::io::Result<()> {
+        // Duman ve ölçüm koşularında shell sabit: sonuç kullanıcının
+        // `$SHELL`'ine ve rc dosyasına bağlı olmasın. Betiklerin
+        // sahibi `bt-core`; `smoke_shell`'in sekiz hücre ve altı
+        // glyph verdiği orada sınanıyor — `hucre=8` ve `glif=6`
+        // beklentileri bu yüzden birer belge cümlesi değil, sınanmış
+        // birer iddia.
+        //
+        // Dallanma **yükü** soruyor, süreyi değil: aynı `Run` hem
+        // deadline'ı hem bekçiyi kuruyor ve yük onlardan bağımsız.
+        //
+        // Süresiz oturumda komut artık **`None` değil**: kabuğu
+        // alacritty'nin yolundan birebir ama `-q` ile doğuruyoruz,
+        // yani `login(1)`'in `Last login:` banner'ı ızgaraya hiç
+        // düşmüyor ([`child::login_command`]). Kullanıcı ya da kabuk
+        // çözülemezse `None`'a düşüyor ve eski yol geri geliyor.
+        //
+        // Kabuğun yeri komutla **aynı** dalda kararlaşıyor, ayrı bir
+        // sorudan türetilmiyor: `login` yolu (`login_command` ya da `None`,
+        // alacritty'nin macOS yolu da `login`) ile süreli koşunun doğrudan
+        // betikleri ancak böyle ayrışamaz.
+        let (command, shell_parent) = match self.ivars().run {
+            None => (child::login_command(), ShellParent::Login),
+            Some(run) => (
+                Some(match run.workload {
+                    Workload::Smoke => smoke_shell(),
+                    // Yükün süresi deadline'la aynı: kısa kalırsa pencere
+                    // koşunun kuyruğunda boşa düşer ve ölçüm boşta kare
+                    // örnekler. Süresiz yük artık **temsil edilemiyor** —
+                    // `Run` süreyi yükün yanında taşıyor, o yüzden eski
+                    // `unwrap_or(0)` ve onu savunan `debug_assert` düştü.
+                    Workload::Load => load_shell(run.seconds),
+                }),
+                ShellParent::Direct,
+            ),
+        };
         let session = Session::spawn(
             SessionOptions {
-                // Duman ve ölçüm koşularında shell sabit: sonuç kullanıcının
-                // `$SHELL`'ine ve rc dosyasına bağlı olmasın. Betiklerin
-                // sahibi `bt-core`; `smoke_shell`'in sekiz hücre ve altı
-                // glyph verdiği orada sınanıyor — `hucre=8` ve `glif=6`
-                // beklentileri bu yüzden birer belge cümlesi değil, sınanmış
-                // birer iddia.
-                //
-                // Dallanma **yükü** soruyor, süreyi değil: aynı `Run` hem
-                // deadline'ı hem bekçiyi kuruyor ve yük onlardan bağımsız.
-                //
-                // Süresiz oturumda komut artık **`None` değil**: kabuğu
-                // alacritty'nin yolundan birebir ama `-q` ile doğuruyoruz,
-                // yani `login(1)`'in `Last login:` banner'ı ızgaraya hiç
-                // düşmüyor ([`child::login_command`]). Kullanıcı ya da kabuk
-                // çözülemezse `None`'a düşüyor ve eski yol geri geliyor.
-                command: match self.ivars().run {
-                    None => child::login_command(),
-                    Some(run) => Some(match run.workload {
-                        Workload::Smoke => smoke_shell(),
-                        // Yükün süresi deadline'la aynı: kısa kalırsa pencere
-                        // koşunun kuyruğunda boşa düşer ve ölçüm boşta kare
-                        // örnekler. Süresiz yük artık **temsil edilemiyor** —
-                        // `Run` süreyi yükün yanında taşıyor, o yüzden eski
-                        // `unwrap_or(0)` ve onu savunan `debug_assert` düştü.
-                        Workload::Load => load_shell(run.seconds),
-                    }),
-                },
+                command,
                 // Dizin ve yerel **her** oturumda aynı kuralla, süreli koşu
                 // dahil: karar tek kollu (`discussion.md` → Karar 6 eki,
                 // "istisnasız") ve iki sabit betik de dizine ve yerele bağlı
@@ -866,6 +897,7 @@ impl TerminalWindow {
         // de kendi kopyasını tutar; üçü de ana thread'de yaşıyor, yani son
         // referansın nerede düşeceği belli (bkz. `shutdown`).
         let _ = self.ivars().session.set(Arc::clone(&session));
+        let _ = self.ivars().shell_parent.set(shell_parent);
         // Oturum yuvaya girmeden önce gelmiş bir başlık haberi `refresh_title`'da
         // boş yuva bulup düşmüş olabilir; bir kez elle okumak o pencereyi
         // kapatıyor (değişmemişse aynı `bateri`'yi yazar).

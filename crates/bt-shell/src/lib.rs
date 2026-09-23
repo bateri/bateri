@@ -9,7 +9,8 @@
 //! Finder'dan bırakılan dosyanın yolu da buradan giriş satırına düşer
 //! (`view`'ın sürükleme hedefi + `quote`'un kabuk kaçışı);
 //! kabuğun hangi dizinde ve hangi yerelle açılacağına (`child`) ve kapanış
-//! sırasına da bu crate karar verir. Ayar dosyasını okuyan (`settings`),
+//! sırasına da bu crate karar verir; kabuğun ön planında koşan işi süreç
+//! tablosundan okuyan da (`jobs`). Ayar dosyasını okuyan (`settings`),
 //! kayıt anında yeniden okuyabilsin diye izleyen (`watch`) ve tanısını
 //! pencere alt başlığında gösteren (`notices`) de burası; ayrıştırma ve fark
 //! `bt-core`'da. Sistemin açık/koyu görünümünü okuyup temayı seçen de
@@ -25,6 +26,7 @@
 pub(crate) mod app;
 mod child;
 mod clipboard;
+mod jobs;
 mod keys;
 mod menu;
 mod notices;
