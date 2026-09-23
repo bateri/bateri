@@ -48,6 +48,7 @@ _Requirements: R2.5_
 - [ ] Altıncı pipeline ve encode sırası
 - [ ] Test: offscreen köşe ve içbükey piksel bekçileri
 - [ ] Zeminli seçili hücrenin köşesi (phase-2'den devir): `frame()` seçili hücrenin zeminini düşürüyor, yani yuvarlak köşede renkli bir satırın (vim durum satırı, `\e[7m`) yerine pencere zemini görünecek — gözle bak; çentik okunuyorsa zemini koşunun altında bırak (`session.rs`, `let bg = if selected`)
+- [ ] Seçim renginin okunurluğu (orkestratör, phase-2'nin gözle kontrolünden): koyu temada `#2b3a50` üstünde ANSI mavi en zayıf okunan metin. Gömülü iki temanın `selection` değerini, 16 ANSI rengi + `foreground` + `dim` seçimin üstünde okunur kalacak şekilde gözden geçir (kontrast oranını hesapla, sayıyı Uygulama Notları'na yaz); seçim yine sakin ve zemine yakın kalsın. Metin rengini değiştirmek Karar 3'ün dışında — yalnız rol değeri.
 - [ ] `CLAUDE.md`
 - [ ] Doğrulama geçti (`make shader`, `make hepsi`, `make duman`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
