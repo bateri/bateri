@@ -146,7 +146,7 @@ bildiriminden — sekme çubuğu pencereyi değil içeriği boyutlandırıyor
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı, `osc52`,
 `cursor`, `cursor_blink`, `cursor_radius`, `cursor_glow`, `cursor_unfocused`,
-`cursor_blink_interval`, `cursor_motion`, `reduce_motion` ve
+`cursor_blink_interval`, `cursor_motion`, `reduce_motion`, `smooth_scroll` ve
 `shell.integration`),
 Theme ▸'nin seçimini oraya
 yazar ve temayı `themes/{ad}.toml`'dan ya da gömülü
@@ -481,7 +481,8 @@ kural kalkmadı, **daraldı**. Terim guard'da `!snap`'in **içinde**: dışına
 yazılsaydı Rust'ın önceliği onu `animated`'ın da üstüne çıkarır, doldurmalı
 pencerede tekerlek ve geometri animasyona başlardı ve `cursor_motion =
 "snap"` ile Hareketi Azalt delinirdi. Tekerlek ve geometri
-(pencere/font/punto) ayrıca snap'ler.
+(pencere/font/punto) ötelemeyi ayrıca snap'ler — tekerleğin pürüzsüzlüğü
+ötelemeden değil kaydırmanın kesrinden geliyor (aşağıda).
 **Dolu ızgara da kayıyor** (`Motion::scroll_in`): ızgara dolunca doluluk
 sabitleniyor, yeni satırlar içeriği hücrelerin içinde kaydırıyor ve ötelemenin
 hedefi hiç oynamıyor — kayma ızgara dolana kadar vardı, sonra yoktu
@@ -554,9 +555,10 @@ kurmayı isterdi; işaret ise bir `RuleCell`. Encode sırası **ızgara →
 doldurma → dock**, çünkü ızgaranın listeleri bandın içine hiç girmiyor ama
 ötelemeden muaf olan caret girebiliyor, ve dock'un opak zemini en altta
 kalmak zorunda.
-**Kaydırma konumu göreli bir kesir taşıyor** (027; `bt-core` ve `bt-gpu`
-tarafı var, `bt-shell` henüz tam satır niyeti gönderiyor, yani ekranda kesir
-doğmuyor): `Session`'ın tek yeni kaydırma durumu
+**Kaydırma konumu göreli bir kesir taşıyor** (027): trackpad parmağı piksel
+piksel izliyor, momentum AppKit'in olaylarıyla yavaşlıyor, jest bitince pencere
+en yakın satıra süzülüyor ve klasik tekerleğin çentiği süzülüyor.
+`Session`'ın tek yeni kaydırma durumu
 `[0, 1)` satırlık bir kesir (`Cursor::scroll_frac`, ızgara o kadar
 **aşağı**), tam satırın tek yetkilisi yine `scroll_locked` ve bant eşlemesi
 dokunulmadan geçerli — mutlak bir konum `display_offset`'in dört dış
@@ -564,7 +566,15 @@ yazıcısını (dibe dönüş, Shift+PgUp, geçmişteyken gelen çıktı, resize
 karede ezerdi. `scroll_wheel` olayı kesirli ve tam satır hâliyle birlikte
 alıyor ve rota önce seçiliyor: kesir yalnız kaydırma kolunda, ok ve rapor tam
 satırla; niyet (`ScrollIntent`: satır, doğrudan, çentik, yerleşme, jest başı)
-çağıranın. Çentiğin ve yerleşmenin payı bir **istek** olarak birikiyor
+çağıranın. `bt-shell` onu olayın **jest fazından** sınıflıyor (`view::smooth_wheel`,
+saf): fazlı olay (trackpad, Magic Mouse) doğrudan kesir, `Ended`/`Cancelled`
+yerleşme, `Began`/`MayBegin` ve momentum başı jest başı; fazsız olay çentik ve
+miktarı **tam satır** — bitişini söyleyen faz yok, kesirli hedef pencereyi
+yarım satırda bırakırdı. `[motion] smooth_scroll`, Hareketi Azalt ve
+`cursor_motion = "snap"` tek `bool`'a iniyor (`app::resolve_smooth_scroll`,
+Hareketi Azalt'ın yolunda) ve `false` kolu bugünkü satır yolunun ta kendisi —
+nicemleme kaynakta, `Motion`'da değil, çünkü geri alma yolu bayt bayt bugünkü
+davranış olmalı. Çentiğin ve yerleşmenin payı bir **istek** olarak birikiyor
 (`Session::take_scroll_glide`) ve `frame()` payı **argüman** olarak alıyor —
 aynı kilit turu, uyandırma yok. Konumu dışarıdan sıfırlayan her yol (dibe
 dönüş, sayfa, satır adımı, jest başı) bir **nesil** artırıyor ve eski neslin

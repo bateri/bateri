@@ -142,6 +142,12 @@ cursor_motion = "spring"
 # "system" | "on" | "off". Whether to tone animations down to a short fade:
 # system follows the macOS Reduce Motion setting, on and off decide it here.
 reduce_motion = "system"
+# "on" | "off". How scrolling back through history moves: on follows your
+# fingers on a trackpad pixel by pixel, lets a flick coast to a stop, glides a
+# mouse wheel notch and settles on a whole line when you let go; off moves
+# line by line. Reduce Motion and cursor_motion = "snap" also move line by
+# line.
+smooth_scroll = "on"
 
 [shell]
 # "auto" | "blocks" | "off". Whether bateri sets up the shell so it can report
@@ -526,12 +532,14 @@ osc52 = "copy"
 [motion]
 cursor_motion = "spring"
 reduce_motion = "system"
+smooth_scroll = "on"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
 |---|---|---|---|
 | `cursor_motion` | `"snap"`, `"ease"` ya da `"spring"` | `"spring"` | imlecin hücreler arasında nasıl gittiği |
 | `reduce_motion` | `"system"`, `"on"` ya da `"off"` | `"system"` | animasyonların kısılıp kısılmayacağı |
+| `smooth_scroll` | `"on"` ya da `"off"` | `"on"` | geçmişte kaydırmanın pürüzsüz mü satır satır mı gittiği |
 
 - **`"spring"`** — imleç yeni yerine bir yayla kayar ve yavaşlayarak oturur;
   hedefi aşmaz. Uzak bir sıçrama yakın bir sıçramadan biraz uzun sürer.
@@ -557,9 +565,10 @@ reduce_motion = "system"
   boşluk değil, yukarıdan **gelen geçmiştir** — orada ızgara süzülerek döner.
   Ctrl-L ya da `clear` ile kasten temizlediğiniz ekran bu kolun dışında:
   geçmiş geri gelmez, yani oraya kayacak bir şey de yoktur.
-- **Izgaranın başka sebeple yer değiştirmesi de kaymaz:** geçmişte kaydırmak
-  (tekerlek), pencereyi boyutlandırmak, fontu ya da puntoyu değiştirmek. Orada
-  hareket eden şey içerik değil, pencerenin kendisidir.
+- **Izgaranın başka sebeple yer değiştirmesi de kaymaz:** pencereyi
+  boyutlandırmak, fontu ya da puntoyu değiştirmek. Orada hareket eden şey
+  içerik değil, pencerenin kendisidir. Geçmişte kaydırmanın kendi ayarı var:
+  `smooth_scroll` (aşağıda).
 - Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa `"snap"`
   onu hedefinde bitirir, öteki iki stil kaymayı bulunduğu yerden devralır:
   imleç hiçbir stil değişiminde ışınlanmaz.
@@ -589,6 +598,29 @@ reduce_motion = "system"
 - Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa hedefinde
   bitirilir — açarken de kapatırken de imleç ışınlanmaz.
 - Tanınmayan değer (`"yes"`, `"System"`, `true`) yalnız bu anahtarı etkiler.
+
+`smooth_scroll` geçmişte kaydırmanın nasıl gittiğini söyler:
+
+- **`"on"`** — trackpad'le kaydırırken ekran parmağınızı **piksel piksel**
+  izler ve tepede yarım bir satır görünebilir; fırlattığınızda macOS'un
+  momentumuyla yavaşlayarak durur. Parmağınızı kaldırdığınızda ya da momentum
+  bittiğinde ekran kısa bir süzülmeyle **en yakın satıra oturur**, yani
+  dinlenen pencerede yarım satır kalmaz. Klasik farenin tekerleği aynı
+  mesafeyi gider ama çentik sıçramaz, `cursor_motion`'ın stiliyle kısa bir
+  süzülmeyle gider.
+- **`"off"`** — satır adımı: her olay tam satırlarla kaydırır, animasyon yok.
+  Hareketi Azalt açıkken ve `cursor_motion = "snap"` iken de aynısı olur —
+  hareketi kapatmış olana kaydırma animasyon *eklemez*.
+- Yalnız bateri'nin **kendi geçmişini** kaydırırken geçerlidir. `vim`, `less`
+  gibi tam ekran uygulamalarda tekerlek ok tuşuna, fareyi isteyen
+  uygulamalarda (Claude Code, `htop`) tekerlek raporuna dönüşür ve ikisi de
+  bugünkü gibi tam satırla gider.
+- Kaydırmayı kendisi yumuşatan bir araç (Mos gibi) kullanıyorsanız ikisi
+  üst üste binmesin diye `"off"` seçebilirsiniz; referans ürün de anahtarı bu
+  gerekçeyle sunuyor (`docs/ARASTIRMA.md`). Bu araçlarla nasıl davrandığı
+  ölçülmedi.
+- Kaydettiğiniz anda geçerli olur.
+- Tanınmayan değer (`"yes"`, `"On"`, `true`) yalnız bu anahtarı etkiler.
 
 ### `[shell]`
 
