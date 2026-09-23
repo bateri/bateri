@@ -55,9 +55,18 @@ objc2-foundation = { workspace = true, features = [
 # (`app`: `ApplePressAndHoldEnabled`) `objc2-foundation`'ın varsayılan
 # setinde ve yukarıdaki liste o seti kırpmıyor, ekliyor. Kırpma günü bu satır
 # aranacak; kaydı bu yorum.
+#
+# NSAlert, NSButton, NSControl, block2: kapatma onayının sorusu (028 phase-2).
+# `addButtonWithTitle:` `NSButton` döndürüyor ve o `NSControl`'ün alt sınıfı,
+# yani ikisi `NSAlert`'in ön koşulu; `block2` bayrağı sayfanın
+# (`beginSheetModalForWindow:completionHandler:`) tamamlanma bloğunun imzasını
+# açıyor. Yeni crate değil ve sürüm oynamıyor; `Cargo.lock`'ta bu paketin ve
+# `bt-shell`'in listelerine birer `block2` satırı. Karar kaydı
+# .tasks/028-kapatma-onayi/discussion.md → Karar 2.
 objc2-app-kit = { workspace = true, features = [
-    "NSAccessibility", "NSAppearance", "NSCell", "NSColor", "NSDragging",
-    "NSMenu", "NSMenuItem", "NSTextInputClient", "NSWindowTabGroup", "NSWorkspace",
+    "NSAccessibility", "NSAlert", "NSAppearance", "NSButton", "NSCell", "NSColor",
+    "NSControl", "NSDragging", "NSMenu", "NSMenuItem", "NSTextInputClient",
+    "NSWindowTabGroup", "NSWorkspace", "block2",
 ] }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.
@@ -66,8 +75,12 @@ objc2-quartz-core = { workspace = true, features = ["CALayer"] }
 # thread'in işidir. Grafta bt-gpu üzerinden zaten vardı; bu iki satır yeni
 # crate çekmez, `Cargo.lock`'a yalnız kenar ekler. Vnode kaynakları da buradan
 # (ayar ve tema dosyasının izlenmesi, `watch`, 007 phase-4): fonksiyon
-# işaretçili işleyiciyle, `block2` kenarı yok.
+# işaretçili işleyiciyle, blok değil.
 dispatch2 = { workspace = true }
+# Kapatma onayı sayfasının tamamlanma bloğu (`RcBlock`, 028 phase-2). Grafta
+# `bt-gpu` ve `dispatch2` üzerinden zaten vardı; bu satır yalnız kenar ekler,
+# sürüm oynamaz. Karar kaydı .tasks/028-kapatma-onayi/discussion.md → Karar 2.
+block2 = { workspace = true }
 # Bekçi thread'in `write` + `_exit`'i, izleme kaynaklarının `O_EVTONLY`'si
 # (`watch`, 007 kapı) ve kabuğun passwd kaydı (`child::passwd_shell`,
 # `getpwuid_r`, 009 phase-3: Dock'tan açılışta `$SHELL` yok ve alacritty de

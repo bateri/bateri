@@ -12,8 +12,10 @@ tema seçimi ve geçici punto), `clipboard.rs` ve `app.rs`'in `ShellWake`'i
 `crates/bt-gpu/src/motion.rs` ve `link.rs` (imleç hareketinin ve Hareketi
 Azalt'ın uygulanması; üç değerli ayarın tek `bool`'a indiği yer
 `app.rs`'in `resolve_reduce_motion`'ı), `crates/bt-shell/src/child.rs`
-(hangi kabuk koşuyor, sarmalayıcı betiği nerede) ve `app.rs`'in
-`shell_integration_env`'i (shell entegrasyonu kurulacak mı ve hangi ortamla);
+(hangi kabuk koşuyor, sarmalayıcı betiği nerede), `app.rs`'in
+`shell_integration_env`'i (shell entegrasyonu kurulacak mı ve hangi ortamla),
+`jobs.rs` ile `window.rs` (kapatma onayı: ön planda ne koşuyor, ne zaman
+sorulur);
 betiğin kendisi `assets/shell/zsh/`.
 
 ## Dosyanın yeri
@@ -107,6 +109,12 @@ cursor_unfocused = "hollow"
 # long, then dark this long. Shorter costs more frames — 0.25 asks for four a
 # second — and 0.5 is a blink you notice without it tiring the eye.
 cursor_blink_interval = 0.5
+# "never" | "running" | "always". When closing a tab or window, or quitting,
+# asks first: running asks only while a program other than the shell is in
+# the foreground (vim, ssh, a build) and names it, always asks even at an idle
+# prompt, never closes without asking. Typing exit never asks, and neither do
+# programs left running in the background.
+confirm_close = "running"
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
@@ -284,6 +292,7 @@ cursor_radius = 0.10
 cursor_glow = 1.0
 cursor_unfocused = "hollow"
 cursor_blink_interval = 0.5
+confirm_close = "running"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
@@ -295,6 +304,7 @@ cursor_blink_interval = 0.5
 | `cursor_glow` | ondalık, `0.0`–`3.0` | `1.0` | imlecin çevresindeki gölgenin gücü; `0` kapatır |
 | `cursor_unfocused` | `"hollow"` \| `"solid"` | `"hollow"` | pencere odakta değilken imleç: `hollow` içini boşaltır, `solid` dokunmaz |
 | `cursor_blink_interval` | ondalık, `0.05`–`5.0` | `0.5` | blink'in **yarım** periyodu, saniye |
+| `confirm_close` | `"never"` \| `"running"` \| `"always"` | `"running"` | sekme, pencere ya da uygulama kapanırken ne zaman sorulsun |
 
 - `100000`'den büyük değer **`100000`** olur ve uyarı verir. Sınır
   alacritty'nin kendi ayar sınırı (`MAX_SCROLLBACK_LINES`); ölçülmüş bir
@@ -361,6 +371,26 @@ ister — ve alt sınır (`0.05`) tavanı orada durdurur. Bu anahtarın yanlış
 değeri `make duman`'ın sessizlik katına **yakalanmaz**: süreli koşu ayar
 dosyasını hiç okumaz ve blink varsayılanı kapalıdır, yani tek koruma kabul
 aralığının kendisidir.
+
+`confirm_close` kapatmadan önce sorulup sorulmayacağını söyler. Soru
+⌘W'de ve sekme çubuğunun × düğmesinde o sekme için, kırmızı düğmede ve
+⇧⌘W'de pencerenin bütün sekmeleri için, "Close Other Tabs"ta öteki sekmeler
+için **tek** bir sayfa, ⌘Q'da (Dock ▸ Quit, oturum kapatma
+ve yeniden başlatma dahil) bütün pencereler için **tek** bir uyarıdır ve
+koşan programları adıyla sayar; Return kapatır, Esc vazgeçer.
+
+- `"running"` (varsayılan) yalnız kabuğun **dışında** bir program ön
+  plandayken sorar: vim, `ssh`, Claude Code, süren bir derleme. `ssh`
+  sayılır, çünkü kapatmak uzaktaki oturumu da bitirir. Boş bir prompt'ta
+  sekme sormadan kapanır.
+- `"always"` boş prompt'ta da sorar; `"never"` hiç sormaz.
+- Kabukta `exit` yazmak **hiçbir** değerde sormaz: kapanışı isteyen zaten
+  kabuk.
+- Sayılmayanlar: arka plan işleri (`sleep 100 &` — zsh `exit`'te onları
+  kendisi uyarır), kabuğun kendi içinde koşan bir döngü ve kabuğun yerine
+  geçen program (`exec vim`). Üçü de kabuk boştaymış gibi görünür.
+
+Değer kapanış anında okunur, yani kaydettiğiniz anda geçerlidir.
 
 Bölüm satır içi de yazılabilir: `terminal = { scrollback = 5000 }`.
 `[[terminal]]` (bölüm dizisi) bölüm sayılmaz ve uyarı verir.

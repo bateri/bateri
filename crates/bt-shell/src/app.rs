@@ -22,9 +22,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationDelegate, NSEvent,
-    NSMenu, NSMenuDelegate, NSMenuItem, NSWorkspace,
-    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSAlertFirstButtonReturn, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+    NSApplicationDelegate, NSApplicationTerminateReply, NSEvent, NSMenu, NSMenuDelegate,
+    NSMenuItem, NSWindow, NSWorkspace, NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSKeyValueObservingOptions, NSNotification, NSNumber, NSObject,
@@ -34,7 +34,7 @@ use objc2_foundation::{
 
 use crate::notices::{Notices, Source};
 use crate::watch::{Notify, Watch};
-use crate::window::TerminalWindow;
+use crate::window::{self, CloseScope, TerminalWindow};
 use crate::{Options, Run, Workload};
 use crate::{child, settings};
 
@@ -723,7 +723,8 @@ define_class!(
             self.observe_appearance();
 
             if let Some(run) = self.ivars().run {
-                // block2 yok: zamanlayıcı performSelector ile.
+                // Zamanlayıcı bir blok değil `performSelector`: seçici bu
+                // sınıfta ve iptal edilmesi gerekmiyor.
                 // SAFETY: `runDeadline:` bu sınıfta tanımlı ve tek
                 // Option<&AnyObject> argüman alıyor. Delegate özellikleri zayıf
                 // referanstır; self'i yaşatan `run()`'daki `Retained`, o da
@@ -774,12 +775,25 @@ define_class!(
             default
         }
 
+        /// ⌘Q, Dock ▸ Quit, oturum kapatma ve yeniden başlatma: çıkmadan önce
+        /// sorulsun mu (028 → Karar 3, 5). Soru bütün pencereler için **tek**
+        /// uyarı; `runModal` eşzamanlı, yani cevap doğrudan dönüyor ve
+        /// `NSTerminateLater` gerekmiyor.
+        ///
+        /// Süreli koşu **ilk satırda** ve süreç tablosuna dokunmadan geçiyor:
+        /// kabuğun `exit`'i orada `child_exit` → `terminate:` ile buraya varıyor
+        /// ve başsız bir `runModal` bekçi kurulmadan asılırdı.
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
+            self.terminate_reply()
+        }
+
         /// AppKit'in kapanış yolu: bateri ▸ Quit (Cmd-Q, menüden `terminate:`)
         /// ve süreli koşuda `exit` yazan shell (`child_exit` → `terminate:`)
         /// buraya varır; etkileşimli oturumda kırmızı düğme ve `exit` yalnız o
         /// pencereyi kapatıyor (`TerminalWindow`'un `windowWillClose:`'u).
-        /// Cmd-Q açık programı sormadan kapatır: kapatma onayı yok
-        /// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Kapsam dışı).
+        /// Koşan iş varken Cmd-Q önce sorar (`applicationShouldTerminate:`);
+        /// buraya varıldıysa karar verilmiştir.
         /// Duman deadline'ı buraya uğramaz, `terminate:` her zaman 0 ile
         /// çıkar ve `runDeadline:` kırmızı düşebilmek zorunda. Ortak olan
         /// bildirim değil sıra: iki yol da [`AppDelegate::shutdown`] çağırır ve
@@ -908,6 +922,19 @@ define_class!(
         #[unsafe(method(newWindow:))]
         fn new_window(&self, _sender: Option<&AnyObject>) {
             self.open_from_key_window(false);
+        }
+
+        /// Shell ▸ Close Tab (⌘W) terminal olmayan bir pencere key iken (About
+        /// paneli): responder zinciri onu buraya getiriyor ve o pencere
+        /// AppKit'in kendi yolundan kapanıyor. Terminal penceresinde eylemi
+        /// pencerenin delegate'i önce karşılıyor (`TerminalWindow`'un
+        /// `closeTab:`'ı) — menü `performClose:`'dan ayrılınca ⌘W panellerde
+        /// sessizce ölmesin diye (`/code-review`).
+        #[unsafe(method(closeTab:))]
+        fn close_tab(&self, _sender: Option<&AnyObject>) {
+            if let Some(key) = NSApplication::sharedApplication(self.mtm()).keyWindow() {
+                key.performClose(None);
+            }
         }
 
         /// Shell ▸ New Tab (⌘T): etkin pencerenin grubuna yeni sekme; pencere
@@ -1482,7 +1509,7 @@ impl AppDelegate {
     /// (`sync_geometry` → [`AppDelegate::post_notices`]) ve listeyi ödünç
     /// tutarak dolaşmak ileride listeyi değiştiren bir yolda (`borrow_mut`)
     /// panikle biterdi. Bedeli birkaç `Retained` kopyası.
-    fn windows(&self) -> Vec<Retained<TerminalWindow>> {
+    pub(crate) fn windows(&self) -> Vec<Retained<TerminalWindow>> {
         self.ivars().windows.borrow().clone()
     }
 
@@ -1501,12 +1528,49 @@ impl AppDelegate {
     /// da bir panel key ise `None` ve yeni pencere evde doğuyor.
     fn key_window(&self) -> Option<Retained<TerminalWindow>> {
         let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
+        self.window_owning(&key)
+    }
+
+    /// `NSWindow`'u `window` olan terminal penceresi; listede yoksa `None`
+    /// (panel, ayar penceresi, kapanmış pencere).
+    pub(crate) fn window_owning(&self, window: &NSWindow) -> Option<Retained<TerminalWindow>> {
         self.ivars()
             .windows
             .borrow()
             .iter()
-            .find(|window| window.owns(&key))
+            .find(|candidate| candidate.owns(window))
             .cloned()
+    }
+
+    /// `applicationShouldTerminate:`'in gövdesi.
+    ///
+    /// Ayar ödüncü `runModal`'dan **önce** bırakılıyor: modal döngü run
+    /// loop'u döndürüyor ve o arada gelen bir kayıt (`reload_settings`)
+    /// açık bir ödünçle `replace` edemezdi. Uygulama önce öne alınıyor: arka
+    /// plandaki uygulamanın modali pencerelerin arkasında kalabilir ve Dock ▸
+    /// Quit tam o yol.
+    fn terminate_reply(&self) -> NSApplicationTerminateReply {
+        let timed = self.ivars().run.is_some();
+        if timed {
+            return NSApplicationTerminateReply::TerminateNow;
+        }
+        let windows = self.windows();
+        if windows.is_empty() {
+            return NSApplicationTerminateReply::TerminateNow;
+        }
+        let confirm = self.settings().confirm_close;
+        let tabs: Vec<&TerminalWindow> = windows.iter().map(|window| &**window).collect();
+        let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &tabs) else {
+            return NSApplicationTerminateReply::TerminateNow;
+        };
+        let mtm = self.mtm();
+        NSApplication::sharedApplication(mtm).activate();
+        let alert = window::alert(mtm, &window::prompt(CloseScope::Quit, &foregrounds));
+        if alert.runModal() == NSAlertFirstButtonReturn {
+            NSApplicationTerminateReply::TerminateNow
+        } else {
+            NSApplicationTerminateReply::TerminateCancel
+        }
     }
 
     /// Kapanan pencereyi listeden çıkarır — `windowWillClose:`'un bir tur

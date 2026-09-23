@@ -87,13 +87,59 @@ _Requirements: R2.1, R2.2, R2.3, R2.4, R2.5, R2.6, R2.7, R2.8, R3.1, R3.2_
 
 ## Checklist
 
-- [ ] Ölçüm: kırmızı düğme ve "Close Other Tabs" (Uygulama Notları)
-- [ ] `ConfirmClose` + şablon + `docs/AYARLAR.md`
-- [ ] `should_ask` + soru kurucusu
-- [ ] `windowShouldClose:`, sayfa yuvası, kimlik yakalayan blok
-- [ ] `closeWindow:` tek soru
-- [ ] `applicationShouldTerminate:`
-- [ ] Cargo bayrakları + kenar + yorumlar
-- [ ] Bayatlayan cümleler ve `CLAUDE.md` (`libc`'nin `proc_*` cümlesi phase-1'de girdi; kalan `block2`)
-- [ ] Test: `should_ask`, metin, ayar sınamaları
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] Ölçüm: kırmızı düğme ve "Close Other Tabs" (Uygulama Notları)
+- [x] `ConfirmClose` + şablon + `docs/AYARLAR.md`
+- [x] `should_ask` + soru kurucusu
+- [x] `windowShouldClose:`, sayfa yuvası, kimlik yakalayan blok
+- [x] `closeWindow:` tek soru
+- [x] `applicationShouldTerminate:`
+- [x] Cargo bayrakları + kenar + yorumlar
+- [x] Bayatlayan cümleler ve `CLAUDE.md` (`libc`'nin `proc_*` cümlesi phase-1'de girdi; kalan `block2`)
+- [x] Test: `should_ask`, metin, ayar sınamaları
+- [x] Doğrulama geçti (`make hepsi` + `make duman`)
+
+## Uygulama Notları
+
+- **Ölçüm (gerçek pencere, `make kur` paketi, 2026-09-23).** Kırmızı düğme
+  çok sekmeli pencerede **grubu** kapatıyor: iki sekmede grubun her
+  sekmesine birer `windowShouldClose:` (id 2, sonra 3; grup sırası, seçili
+  olan sonda). Sekme çubuğunun "Close Other Tabs"ı seçili olmayan her
+  sekmeye birer çağrı (id 1, sonra 0). Çağrıların hepsi aynı olay turunda.
+- **Grup kolu: jest bir tur sonra ve kapsamıyla karar veriyor.**
+  `windowShouldClose:` kendisi karar vermiyor; sekmeyi işaretliyor
+  (`close_requested`) ve jestin ilk isteği turun sonuna tek iş kuruyor. İş
+  işaretli sekmeleri topluyor ve **tek** soru soruyor: grubun tamamıysa
+  "Close this window?", tek sekmeyse "Close this tab?", arasıysa
+  "Close N tabs?" (`close_scope`, yeni bir `CloseScope::Tabs`). Boş sekmeler
+  de kümede: iptal hiçbir şeyi kapatmıyor ve başlık kapanacak şeyi söylüyor.
+  Sayfa grubun **seçili** sekmesinde (arka sekmedeki sayfa görünmüyor;
+  "Close Other Tabs"ta kapanacakların hiçbiri seçili değil). Blok bu yüzden
+  tek kimlik değil kimlik listesi yakalıyor — yine yalnız kimlik.
+- **⌘W `performClose:` değil `closeTab:`** (plan `performClose:` diyordu;
+  ölçüldü): kırmızı düğmenin grup kapanışı `false`'la durdurulduktan sonra
+  AppKit sonraki `performClose:`'u da grubun her sekmesine yaydı (log: ⌘W
+  id 0 ve 2'ye `windowShouldClose:`), yani ⌘W "Close this window?" sordu.
+  Kendi eylemimiz kapsamı kendisi biliyor; sekme çubuğunun menüsü ve kırmızı
+  düğme hâlâ `windowShouldClose:`'dan.
+- **Esc elle bağlandı**: belgeye rağmen "Cancel" düğmesine Esc sayfayı
+  gerçek pencerede kapatmadı (Return ilk düğmede çalıştı);
+  `setKeyEquivalent("\u{1b}")`. Bağlamadan sonraki Esc gözle kontrole kaldı
+  (ekran sürüşü yarıda kesildi).
+- **`TerminalWindow::close` açık sayfayı önce `Cancel`'la kapatıyor**: kabuk
+  sayfa açıkken çıkınca bloğun cevabı iptal ve pencere sayfasıyla gidiyor.
+- **Metin**: grupta tek koşan sekme varsa sayı değil ad ("“vim” is still
+  running."); `always`'in boş metni kapanacak oturumu söylüyor. Tırnaklar
+  tipografik.
+- **`foregrounds_to_ask`**: `running`'de tablo karar için bir kez okunuyor
+  ve metin aynı okumayı kullanıyor; `always`'de karar tabloya bakmıyor, ad
+  için soru kesinleşince okunuyor.
+- **⌘Q'nun ayar ödüncü `runModal`'dan önce bırakılıyor**: modal döngü run
+  loop'u döndürüyor ve o sırada gelen kayıt açık ödünçle panikle biterdi.
+- **Set kapısı düzeltmeleri** (`/code-review`): turun sonundaki iş isteyen
+  pencereyi değil dikili bayrakları arıyor (ilk isteyen aynı turda
+  kapanınca öteki sekmelerin bayrağı kalıcı kalıyordu); `never` ertelemeden
+  AppKit'in kendi kapanışına bırakıyor; tek hedef arka sekmeyse (× düğmesi)
+  o sekme seçilip soru onda açılıyor; ⌘W terminal olmayan pencerede (About)
+  app delegate'in `closeTab:`'ından `performClose:`'a düşüyor. Bilinen
+  sınır: "Close Other Tabs" sorusu açıkken sayfayı taşıyan seçili sekmenin
+  kabuğu çıkarsa jest düşüyor, öteki sekmeler açık kalıyor.

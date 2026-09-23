@@ -12,15 +12,17 @@
 //! farklı ölçekli ekranlardaki iki pencerede atlası birbirine çevirir ve sekme
 //! başına puntoyu imkânsız kılardı.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
+use block2::RcBlock;
 use bt_core::{
-    FontOptions, Session, SessionOptions, Settings, ShutdownHandle, Teardown, Theme, Wake,
+    ConfirmClose, FontOptions, Session, SessionOptions, Settings, ShutdownHandle, Teardown, Theme,
+    Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Surface, Waker};
@@ -29,8 +31,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSBackingStoreType, NSColor, NSMenuItem, NSPasteboard, NSTitlebarSeparatorStyle,
+    NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSColor,
+    NSMenuItem, NSModalResponse, NSModalResponseCancel, NSPasteboard, NSTitlebarSeparatorStyle,
     NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
     NSWindowOrderingMode, NSWindowStyleMask,
 };
@@ -280,6 +283,205 @@ pub(crate) fn tab_index(tag: u8, count: usize) -> Option<usize> {
     }
 }
 
+/// Kapatılan şey — sorunun başlığını ve onay düğmesini seçiyor
+/// (`.tasks/028-kapatma-onayi/discussion.md` → Karar 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseScope {
+    /// Grubunda başka sekme olan bir sekme (⌘W).
+    Tab,
+    /// Grubun bir kısmı, birden çok sekme ("Close Other Tabs").
+    Tabs(usize),
+    /// Pencerenin tamamı: tek sekmeli pencerede ⌘W, ya da ⇧⌘W.
+    Window,
+    /// Uygulama (⌘Q, Dock ▸ Quit, oturum kapatma).
+    Quit,
+}
+
+/// Bir jestin istediği sekme sayısı ve grubun boyu → sorunun kapsamı.
+///
+/// Grubun tamamı pencere (kırmızı düğme, tek sekmeli pencerede ⌘W), tek sekme
+/// sekme (⌘W), aradaki her şey sayılı sekmeler ("Close Other Tabs").
+pub(crate) fn close_scope(requested: usize, group: usize) -> CloseScope {
+    if requested >= group {
+        CloseScope::Window
+    } else if requested == 1 {
+        CloseScope::Tab
+    } else {
+        CloseScope::Tabs(requested)
+    }
+}
+
+/// Kapanış sorulsun mu — üç kapanış yolunun **tek** kararı (R2.1).
+///
+/// Süreli koşu **ilk** soru ve cevabı her ayarda hayır: süreli koşu ayar
+/// okumuyor, yani `confirm` orada varsayılan `running`, ve bekçisi
+/// kurulmamış başsız bir soru `make duman`'ı asardı. Süreç tablosu
+/// (`running`) yalnız cevap ona bağlıysa, yani yalnız `running`'de okunuyor.
+pub(crate) fn should_ask(
+    timed: bool,
+    confirm: ConfirmClose,
+    running: impl FnOnce() -> bool,
+) -> bool {
+    if timed {
+        return false;
+    }
+    match confirm {
+        ConfirmClose::Never => false,
+        ConfirmClose::Always => true,
+        ConfirmClose::Running => running(),
+    }
+}
+
+/// Sorulacaksa kapanan her sekmenin ön planı, sorulmayacaksa `None` —
+/// [`should_ask`]'ın pencereler üstündeki hâli.
+///
+/// Tablo `running`'de karar için bir kez okunuyor ve metin aynı okumayı
+/// kullanıyor; `always`'de karar tabloya bakmıyor ama metin koşan işin adını
+/// yine söylemek istiyor, o yüzden soru kesinleşince okunuyor.
+pub(crate) fn foregrounds_to_ask(
+    timed: bool,
+    confirm: ConfirmClose,
+    tabs: &[&TerminalWindow],
+) -> Option<Vec<Foreground>> {
+    let read = || tabs.iter().map(|tab| tab.foreground()).collect::<Vec<_>>();
+    let mut seen = None;
+    let ask = should_ask(timed, confirm, || {
+        let foregrounds = read();
+        let running = foregrounds
+            .iter()
+            .any(|foreground| matches!(foreground, Foreground::Running(_)));
+        seen = Some(foregrounds);
+        running
+    });
+    ask.then(|| seen.unwrap_or_else(read))
+}
+
+/// Sorunun metni: başlık, açıklama ve onay düğmesi.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Prompt {
+    pub(crate) title: String,
+    pub(crate) message: String,
+    pub(crate) confirm: &'static str,
+}
+
+/// Kapanan sekmelerin ön planlarından sorunun metni (Karar 4). Saf; soruyu
+/// kuran üç yolun da tek metin kaynağı ([`alert`]).
+///
+/// Açıklama koşan işleri **adıyla** sayıyor: tek sekmede adlar
+/// ("“claude” is still running."), birden çok sekmede sekme sayısı ve
+/// tekrarsız adlar. Adı okunamayan iş adsız söyleniyor ("A process"), koşan
+/// iş hiç yoksa (`always`) kapanacak şey.
+pub(crate) fn prompt(scope: CloseScope, tabs: &[Foreground]) -> Prompt {
+    let (title, confirm, verb) = match scope {
+        CloseScope::Tab => ("Close this tab?".to_owned(), "Close", "Closing"),
+        CloseScope::Tabs(n) => (format!("Close {n} tabs?"), "Close", "Closing"),
+        CloseScope::Window => ("Close this window?".to_owned(), "Close", "Closing"),
+        CloseScope::Quit => ("Quit bateri?".to_owned(), "Quit", "Quitting"),
+    };
+    let running: Vec<&[String]> = tabs
+        .iter()
+        .filter_map(|tab| match tab {
+            Foreground::Running(names) => Some(names.as_slice()),
+            Foreground::Idle => None,
+        })
+        .collect();
+    let message = match running.as_slice() {
+        [] => idle_message(scope, tabs.len()),
+        [names] => {
+            let (subject, pronoun) = match names {
+                [] => ("A process is".to_owned(), "it"),
+                [name] => (format!("{} is", quoted(name)), "it"),
+                _ => (format!("{} are", listed(names)), "them"),
+            };
+            format!("{subject} still running. {verb} ends {pronoun}.")
+        }
+        many => {
+            let mut names: Vec<&String> = Vec::new();
+            for name in many.iter().flat_map(|names| names.iter()) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            let count = many.len();
+            if names.is_empty() {
+                format!("Processes are running in {count} tabs. {verb} ends them.")
+            } else {
+                let names: Vec<String> = names.into_iter().map(|name| quoted(name)).collect();
+                format!(
+                    "Processes are running in {count} tabs: {}. {verb} ends them.",
+                    names.join(", ")
+                )
+            }
+        }
+    };
+    Prompt {
+        title,
+        message,
+        confirm,
+    }
+}
+
+/// `always`'in koşan işsiz metni: kapanacak şeyi söylüyor.
+fn idle_message(scope: CloseScope, tabs: usize) -> String {
+    match (scope, tabs) {
+        (CloseScope::Tab, _) => "Closing this tab ends its shell session.".to_owned(),
+        (CloseScope::Tabs(n), _) => format!("Closing these {n} tabs ends their shell sessions."),
+        (CloseScope::Window, 0 | 1) => "Closing this window ends its shell session.".to_owned(),
+        (CloseScope::Window, n) => {
+            format!("Closing this window ends the shell sessions in its {n} tabs.")
+        }
+        (CloseScope::Quit, 0 | 1) => "Quitting ends the open shell session.".to_owned(),
+        (CloseScope::Quit, n) => format!("Quitting ends {n} open shell sessions."),
+    }
+}
+
+/// macOS'un tipografik tırnağıyla ad.
+fn quoted(name: &str) -> String {
+    format!("\u{201c}{name}\u{201d}")
+}
+
+/// "“a”", "“a” and “b”", "“a”, “b” and “c”".
+fn listed(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => quoted(one),
+        [rest @ .., last] => {
+            let rest: Vec<String> = rest.iter().map(|name| quoted(name)).collect();
+            format!("{} and {}", rest.join(", "), quoted(last))
+        }
+    }
+}
+
+/// [`Prompt`]'tan `NSAlert`: onay ilk düğme (Return), "Cancel" ikinci (Esc).
+///
+/// Esc **elle** bağlanıyor: belge "Cancel" başlıklı düğmeye Esc'i kendisinin
+/// bağladığını söylüyor, ama gerçek pencerede Esc sayfayı kapatmadı
+/// (ölçüldü, phase-2 Uygulama Notları); Return ilk düğmede çalışıyordu.
+pub(crate) fn alert(mtm: MainThreadMarker, prompt: &Prompt) -> Retained<NSAlert> {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(&prompt.title));
+    alert.setInformativeText(&NSString::from_str(&prompt.message));
+    alert.addButtonWithTitle(&NSString::from_str(prompt.confirm));
+    let cancel = alert.addButtonWithTitle(ns_string!("Cancel"));
+    cancel.setKeyEquivalent(ns_string!("\u{1b}"));
+    alert
+}
+
+/// Turun sonunda `windowShouldClose:` isteklerini toplar: bayrağı dikili her
+/// grup için tek karar ([`TerminalWindow::should_close_now`]).
+fn close_requested_tabs(app: &AppDelegate) {
+    while let Some(anchor) = app
+        .windows()
+        .into_iter()
+        .find(|window| window.ivars().close_requested.get())
+    {
+        anchor.close_requested_group(app);
+        // Grubun dışına düşmüş (listede olup grubu çözülemeyen) bir bayrak
+        // döngüyü kilitlemesin.
+        anchor.ivars().close_requested.set(false);
+    }
+}
+
 /// Pencerenin durumu. `OnceCell`: oturum ve link `start` içinde bir kez doğar,
 /// sonra yalnız okunur. Pencere, view, yüzey ve renderer kurucuda doğuyor.
 pub(crate) struct WindowIvars {
@@ -343,6 +545,14 @@ pub(crate) struct WindowIvars {
     /// Kromun son boyandığı zemin ([`TerminalWindow::apply_chrome`]'un
     /// kapısı); `None`: henüz boyanmadı.
     chrome: Cell<Option<u32>>,
+    /// Bu pencerede açık kapatma sorusu (028 → R2.8): `NSAlert`'i sayfa
+    /// süresince yaşatıyor ve "sayfa açıkken ikinci soru yok" kapısı o
+    /// ([`TerminalWindow::asking`]). Tamamlanma bloğu her yanıtta boşaltıyor.
+    alert: RefCell<Option<Retained<NSAlert>>>,
+    /// Bu turda `windowShouldClose:` bu sekmeyi istedi — jestin kapsamı
+    /// turun sonunda bu bayraklardan toplanıyor
+    /// ([`TerminalWindow::close_requested_tabs`]).
+    close_requested: Cell<bool>,
 }
 
 define_class!(
@@ -430,6 +640,19 @@ define_class!(
             self.apply_focus(false);
         }
 
+        /// Kırmızı düğme ve sekme çubuğunun menüsü (Close Tab, Close Other
+        /// Tabs): kapanmadan önce sorulsun mu (028 → Karar 3). `false`
+        /// kapanışı durduruyor; soru sorulduysa kapanış onun cevabında
+        /// ([`TerminalWindow::ask`]). Ana menünün ⌘W'si buraya uğramıyor
+        /// (`closeTab:`).
+        ///
+        /// Kabuğun çıkışı buraya **uğramıyor**: `close` delegate'e sormaz
+        /// (R2.6).
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSWindow) -> bool {
+            self.should_close_now()
+        }
+
         /// Pencere (ya da sekme) kapanıyor: kırmızı düğme, ⌘W, ⇧⌘W ve
         /// kabuğun çıkışı (`ShellWake::child_exit` → `close`) buraya varır.
         ///
@@ -497,14 +720,28 @@ define_class!(
             self.change_zoom(|_, _| Zoom::default());
         }
 
+        /// Shell ▸ Close Tab (⌘W): **yalnız bu sekme**, gerekirse sorarak.
+        ///
+        /// `performClose:` değil, çünkü AppKit'in onu yorumlaması durumlu
+        /// (ölçüldü, phase-2 Uygulama Notları): kırmızı düğmenin grup kapanışı
+        /// bir `windowShouldClose:` `false`'uyla durdurulunca sonraki
+        /// `performClose:` da grubun her sekmesine `windowShouldClose:`
+        /// gönderiyor ve ⌘W pencereyi sorar oluyordu. Kendi eylemimiz
+        /// kapsamı kendisi biliyor; soru ve kapanış ⇧⌘W'ninkiyle aynı yol.
+        #[unsafe(method(closeTab:))]
+        fn close_tab(&self, _sender: Option<&AnyObject>) {
+            self.close_tab_asking();
+        }
+
         /// Shell ▸ Close Window (⇧⌘W): pencereyi **bütün sekmeleriyle**.
-        /// Her sekme kendi `performClose:`'undan geçiyor, yani her birinin
-        /// kapanışı ⌘W'ninkiyle aynı yol (`windowWillClose:`).
+        ///
+        /// Grubun tamamı için **tek** soru (R2.3) ve onayda her sekme
+        /// `close` ile kapanıyor — `performClose:` değil, çünkü o her sekmenin
+        /// `windowShouldClose:`'undan geçer ve sekme başına ikinci bir soru
+        /// doğururdu. Kapanışın kendisi yine her sekmenin `windowWillClose:`'u.
         #[unsafe(method(closeWindow:))]
         fn close_window(&self, _sender: Option<&AnyObject>) {
-            for window in self.tab_windows() {
-                window.performClose(None);
-            }
+            self.close_group_asking();
         }
 
         /// Window ▸ Select Tab ▸ Tab n (⌘1…⌘8) ve Last Tab (⌘9): öğenin `tag`'i
@@ -615,6 +852,8 @@ impl TerminalWindow {
             dock_rows: Cell::new(0),
             dock_rows_at_birth: Cell::new(0),
             chrome: Cell::new(None),
+            alert: RefCell::new(None),
+            close_requested: Cell::new(false),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -663,9 +902,218 @@ impl TerminalWindow {
         self.ivars().zoom.set(zoom);
     }
 
-    /// Pencereyi kapatır (`windowWillClose:` yolundan) — kabuğun çıkışı.
+    /// Pencereyi kapatır (`windowWillClose:` yolundan), **sormadan**: kabuğun
+    /// çıkışı ve onaylanmış bir kapatma sorusu.
+    ///
+    /// Bu pencerede açık bir soru varsa önce o düşüyor, `Cancel` cevabıyla:
+    /// cevabı bekleyen blok "kapat" dışındaki her cevabı iptal sayıyor. Soru
+    /// başka sekmeler içinse ("Close Other Tabs" ve sayfayı taşıyan seçili
+    /// sekmenin kabuğu çıktı) jest düşüyor ve o sekmeler açık kalıyor —
+    /// **bilinen sınır**, yanlışın yönü güvenli: hiçbir şey sorulmadan
+    /// kapanmıyor, jest yinelenebilir.
     pub(crate) fn close(&self) {
+        let alert = self.ivars().alert.take();
+        if let Some(alert) = alert {
+            self.ivars()
+                .window
+                .endSheet_returnCode(&alert.window(), NSModalResponseCancel);
+        }
         self.ivars().window.close();
+    }
+
+    /// Bu pencerede kapatma sorusu açık mı.
+    pub(crate) fn asking(&self) -> bool {
+        self.ivars().alert.borrow().is_some()
+    }
+
+    /// Sekme grubunun terminal pencereleri, sırasıyla; grup yoksa yalnız bu.
+    fn tab_group(&self, app: &AppDelegate) -> Vec<Retained<TerminalWindow>> {
+        self.tab_windows()
+            .iter()
+            .filter_map(|window| app.window_owning(window))
+            .collect()
+    }
+
+    /// `windowShouldClose:`'un gövdesi (⌘W, Close Tab, kırmızı düğme, "Close
+    /// Other Tabs"): şimdi kapansın mı.
+    ///
+    /// **Karar bu çağrıda verilmiyor, bir tur sonra ve jestin tamamı için**
+    /// ([`close_requested`]). Ölçüldü (phase-2 Uygulama Notları): kırmızı düğme
+    /// çok sekmeli pencerede grubun **her** sekmesine, "Close Other Tabs" öteki
+    /// her sekmeye birer `windowShouldClose:` gönderiyor, ikisi de aynı olay
+    /// turunda. Tek sekmeye bakan bir karar kırmızı düğmede sekme sekme soru
+    /// açar ya da ilk sekmeyi "Close this tab?" diye sorup geri kalanını
+    /// bırakırdı; "bir jest, en çok bir soru" ancak jestin kapsamını görerek
+    /// tutuyor.
+    ///
+    /// Süreli koşu ve `never` hiç sormuyor: cevap şimdi belli, yani AppKit'in
+    /// kendi kapanışı (`true`) — ertelemenin tek sebebi soru. Grupta soru
+    /// zaten açıksa ikinci bir istek doğmuyor.
+    fn should_close_now(&self) -> bool {
+        if self.ivars().run.is_some() {
+            return true;
+        }
+        let Some(app) = app::delegate(self.mtm()) else {
+            return true;
+        };
+        if app.settings().confirm_close == ConfirmClose::Never {
+            return true;
+        }
+        let Some(group) = self.group_unless_asking(&app) else {
+            return false;
+        };
+        // Jestin ilk isteği turun sonuna tek iş kuruyor; sonrakiler yalnız
+        // bayrağını dikiyor ve aynı işin kapsamına giriyor. İş isteyen
+        // pencereyi değil **bayrakları** arıyor: ilk isteyen o arada
+        // kapanmışsa (kabuğu aynı turda çıktı) öteki sekmelerin bayrağı
+        // kalıcı olarak dikili kalır ve kırmızı düğme bir daha iş kurmazdı
+        // (`/code-review`).
+        let first = !group.iter().any(|tab| tab.ivars().close_requested.get());
+        self.ivars().close_requested.set(true);
+        if first {
+            DispatchQueue::main().exec_async(|| {
+                // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+                let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+                if let Some(app) = app::delegate(mtm) {
+                    close_requested_tabs(&app);
+                }
+            });
+        }
+        false
+    }
+
+    /// Grubun sekmeleri — grupta açık bir soru yoksa. "Bir jest, en çok bir
+    /// soru" kapısının tek kopyası.
+    fn group_unless_asking(&self, app: &AppDelegate) -> Option<Vec<Retained<TerminalWindow>>> {
+        let group = self.tab_group(app);
+        (!group.iter().any(|tab| tab.asking())).then_some(group)
+    }
+
+    /// Bu turdaki isteklerin grubu için tek karar; bayraklar sıfırlanıyor.
+    fn close_requested_group(&self, app: &AppDelegate) {
+        let group = self.tab_group(app);
+        let mut targets = Vec::new();
+        for tab in &group {
+            if tab.ivars().close_requested.replace(false) {
+                targets.push(tab.clone());
+            }
+        }
+        if targets.is_empty() || group.iter().any(|tab| tab.asking()) {
+            return;
+        }
+        let scope = close_scope(targets.len(), group.len());
+        self.confirm_close(app, &group, &targets, scope);
+    }
+
+    /// ⌘W: bu sekme için soru, ya da sorulmayacaksa hemen kapanış.
+    fn close_tab_asking(&self) {
+        let Some(app) = app::delegate(self.mtm()) else {
+            return;
+        };
+        let Some(group) = self.group_unless_asking(&app) else {
+            return;
+        };
+        let Some(this) = app.window(self.id()) else {
+            return;
+        };
+        let scope = close_scope(1, group.len());
+        self.confirm_close(&app, &group, &[this], scope);
+    }
+
+    /// ⇧⌘W: grubun tamamı için tek soru, ya da sorulmayacaksa hemen kapanış.
+    fn close_group_asking(&self) {
+        let Some(app) = app::delegate(self.mtm()) else {
+            return;
+        };
+        if let Some(group) = self.group_unless_asking(&app) {
+            self.confirm_close(&app, &group, &group, CloseScope::Window);
+        }
+    }
+
+    /// `targets` kapanacak; sorulacaksa soru grubun **seçili** sekmesine sayfa
+    /// olarak açılıyor, değilse hepsi hemen kapanıyor.
+    ///
+    /// Sayfa seçili sekmede, çünkü arka sekmeye takılan sayfa görünmez — ve
+    /// "Close Other Tabs"ta kapanacak sekmelerin hiçbiri seçili değil. **Tek
+    /// hedef arka sekmeyse** (sekme çubuğunda arka sekmenin ×'i) o sekme önce
+    /// seçiliyor ve soru onda: "Close this tab?" gözün baktığı sekmeyi
+    /// sormalı, başka birini değil (`/code-review`).
+    fn confirm_close(
+        &self,
+        app: &AppDelegate,
+        group: &[Retained<TerminalWindow>],
+        targets: &[Retained<TerminalWindow>],
+        scope: CloseScope,
+    ) {
+        let Some(first) = targets.first() else {
+            return;
+        };
+        let tabs: Vec<&TerminalWindow> = targets.iter().map(|tab| &**tab).collect();
+        let confirm = app.settings().confirm_close;
+        let Some(foregrounds) = foregrounds_to_ask(self.ivars().run.is_some(), confirm, &tabs)
+        else {
+            targets.iter().for_each(|tab| tab.close());
+            return;
+        };
+        let selected = self
+            .ivars()
+            .window
+            .tabGroup()
+            .and_then(|tab_group| tab_group.selectedWindow())
+            .and_then(|window| app.window_owning(&window));
+        let host = match (targets, selected.as_ref()) {
+            ([only], Some(selected)) if only.id() != selected.id() => {
+                only.ivars().window.makeKeyAndOrderFront(None);
+                only
+            }
+            _ => selected
+                .as_ref()
+                .or_else(|| group.iter().find(|tab| tab.id() == self.id()))
+                .unwrap_or(first),
+        };
+        let ids = targets.iter().map(|tab| tab.id()).collect();
+        host.ask(&prompt(scope, &foregrounds), ids);
+    }
+
+    /// Soruyu bu pencereye sayfa olarak açar; onayda `targets`'taki sekmeleri
+    /// kapatır.
+    ///
+    /// **Blok yalnız kimlik yakalıyor** (R2.8, alternatif ekran habercisinin
+    /// örüntüsü): pencereleri cevap anında listeden buluyor, bulamadığını
+    /// atlıyor. Yalnız `NSAlertFirstButtonReturn` kapatıyor — kabuk sayfa
+    /// açıkken çıkarsa [`TerminalWindow::close`] sayfayı `Cancel`'la düşürüyor
+    /// ve `forget_window` bir tur ertelendiği için pencere o arada listede hâlâ
+    /// bulunabiliyor.
+    ///
+    /// Kapanış **bir ana kuyruk turu ertelenir** (`windowWillClose:`'un
+    /// örüntüsü): cevap AppKit'in sayfa sökümünün içinde geliyor ve pencereyi
+    /// orada kapatmak sökümün altını oyardı.
+    fn ask(&self, prompt: &Prompt, targets: Vec<u64>) {
+        let alert = alert(self.mtm(), prompt);
+        let host = self.id();
+        let answered = RcBlock::new(move |response: NSModalResponse| {
+            // audit: sayfanın tamamlanma bloğu AppKit'in ana thread'inde koşar.
+            let mtm = MainThreadMarker::new().expect("sayfa bloğu ana thread'dedir");
+            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(host)) {
+                drop(window.ivars().alert.take());
+            }
+            if response != NSAlertFirstButtonReturn {
+                return;
+            }
+            let targets = targets.clone();
+            DispatchQueue::main().exec_async(move || {
+                // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+                let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+                let Some(app) = app::delegate(mtm) else {
+                    return;
+                };
+                for window in targets.iter().filter_map(|&id| app.window(id)) {
+                    window.close();
+                }
+            });
+        });
+        self.ivars().alert.replace(Some(alert.clone()));
+        alert.beginSheetModalForWindow_completionHandler(&self.ivars().window, Some(&answered));
     }
 
     /// Pencereyi `from`'un sekme grubuna, seçili sekmenin **sağına** ekler ve
@@ -722,7 +1170,6 @@ impl TerminalWindow {
     /// Kabuğun dışında ön planda koşan iş (028 → Karar 1). Oturum yoksa ya da
     /// okuyucu thread bittiyse boşta: kabuk gitti ve `child_pid` bayatlamış
     /// olabilir, bayat pid'e sorulmaz.
-    #[expect(dead_code, reason = "çağıranı kapanış yolları, 028 phase-2")]
     pub(crate) fn foreground(&self) -> Foreground {
         let (Some(session), Some(&parent)) =
             (self.ivars().session.get(), self.ivars().shell_parent.get())
@@ -1266,8 +1713,21 @@ impl TerminalWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_dark_background, tab_index};
-    use bt_core::Theme;
+    use std::cell::Cell;
+
+    use super::{CloseScope, close_scope, is_dark_background, prompt, should_ask, tab_index};
+    use crate::jobs::Foreground;
+    use bt_core::{ConfirmClose, Theme};
+
+    const ALL: [ConfirmClose; 3] = [
+        ConfirmClose::Never,
+        ConfirmClose::Running,
+        ConfirmClose::Always,
+    ];
+
+    fn running(names: &[&str]) -> Foreground {
+        Foreground::Running(names.iter().map(|&name| name.to_owned()).collect())
+    }
 
     fn with_background(background: u32) -> Theme {
         Theme {
@@ -1318,6 +1778,167 @@ mod tests {
         assert_eq!(tab_index(9, 1), Some(0), "tek sekmede ⌘9 o sekme");
         assert_eq!(tab_index(9, 3), Some(2));
         assert_eq!(tab_index(9, 20), Some(19));
+    }
+
+    #[test]
+    fn a_timed_run_never_asks_and_never_reads_the_table() {
+        // Süreli koşu ayar okumuyor ve başsız bir soru `make duman`'ı asardı:
+        // cevap her ayarda hayır **ve** tablo hiç okunmuyor (R2.1).
+        for confirm in ALL {
+            for busy in [false, true] {
+                let reads = Cell::new(0);
+                let ask = should_ask(true, confirm, || {
+                    reads.set(reads.get() + 1);
+                    busy
+                });
+                assert!(!ask, "{confirm:?}");
+                assert_eq!(reads.get(), 0, "{confirm:?}: tablo okundu");
+            }
+        }
+    }
+
+    #[test]
+    fn never_and_always_decide_without_the_table() {
+        for busy in [false, true] {
+            let reads = Cell::new(0);
+            let read = || {
+                reads.set(reads.get() + 1);
+                busy
+            };
+            assert!(!should_ask(false, ConfirmClose::Never, read));
+            assert!(should_ask(false, ConfirmClose::Always, read));
+            assert_eq!(reads.get(), 0, "karar tabloya bağlı değilken okundu");
+        }
+    }
+
+    #[test]
+    fn running_asks_only_while_a_job_runs() {
+        let reads = Cell::new(0);
+        let ask = |busy| {
+            should_ask(false, ConfirmClose::Running, || {
+                reads.set(reads.get() + 1);
+                busy
+            })
+        };
+        assert!(ask(true));
+        assert!(!ask(false));
+        assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn titles_and_buttons_follow_the_scope() {
+        let vim = [running(&["vim"])];
+        let tab = prompt(CloseScope::Tab, &vim);
+        assert_eq!(
+            (tab.title.as_str(), tab.confirm),
+            ("Close this tab?", "Close")
+        );
+        let tabs = prompt(CloseScope::Tabs(2), &vim);
+        assert_eq!(
+            (tabs.title.as_str(), tabs.confirm),
+            ("Close 2 tabs?", "Close")
+        );
+        let window = prompt(CloseScope::Window, &vim);
+        assert_eq!(
+            (window.title.as_str(), window.confirm),
+            ("Close this window?", "Close")
+        );
+        let quit = prompt(CloseScope::Quit, &vim);
+        assert_eq!(
+            (quit.title.as_str(), quit.confirm),
+            ("Quit bateri?", "Quit")
+        );
+    }
+
+    #[test]
+    fn the_gesture_scope_comes_from_how_many_tabs_it_asked_for() {
+        // Ölçülen jestler (phase-2 Uygulama Notları): ⌘W tek sekme, kırmızı
+        // düğme grubun tamamı, "Close Other Tabs" seçili olmayanlar.
+        assert_eq!(close_scope(1, 1), CloseScope::Window, "tek sekmeli pencere");
+        assert_eq!(close_scope(1, 3), CloseScope::Tab, "⌘W");
+        assert_eq!(close_scope(3, 3), CloseScope::Window, "kırmızı düğme");
+        assert_eq!(close_scope(2, 3), CloseScope::Tabs(2), "Close Other Tabs");
+    }
+
+    #[test]
+    fn one_tab_names_what_runs_in_it() {
+        let message = |names: &[&str]| prompt(CloseScope::Tab, &[running(names)]).message;
+        assert_eq!(
+            message(&["claude"]),
+            "“claude” is still running. Closing ends it."
+        );
+        assert_eq!(
+            message(&["make", "cc"]),
+            "“make” and “cc” are still running. Closing ends them."
+        );
+        assert_eq!(
+            message(&["a", "b", "c"]),
+            "“a”, “b” and “c” are still running. Closing ends them."
+        );
+        // Tablo okunamadı ama iş koşuyor sayıldı (R1.5): adsız.
+        assert_eq!(message(&[]), "A process is still running. Closing ends it.");
+    }
+
+    #[test]
+    fn only_the_running_tab_counts_in_a_group() {
+        // Üç sekmeli pencerede tek sekmede iş var: sayı değil ad.
+        let tabs = [Foreground::Idle, running(&["vim"]), Foreground::Idle];
+        assert_eq!(
+            prompt(CloseScope::Window, &tabs).message,
+            "“vim” is still running. Closing ends it."
+        );
+    }
+
+    #[test]
+    fn many_tabs_are_counted_and_names_are_not_repeated() {
+        let tabs = [
+            running(&["claude"]),
+            Foreground::Idle,
+            running(&["vim"]),
+            running(&["claude"]),
+        ];
+        assert_eq!(
+            prompt(CloseScope::Window, &tabs).message,
+            "Processes are running in 3 tabs: “claude”, “vim”. Closing ends them."
+        );
+        assert_eq!(
+            prompt(CloseScope::Quit, &tabs).message,
+            "Processes are running in 3 tabs: “claude”, “vim”. Quitting ends them."
+        );
+        // Hiçbirinin adı okunamadıysa yalnız sayı.
+        assert_eq!(
+            prompt(CloseScope::Quit, &[running(&[]), running(&[])]).message,
+            "Processes are running in 2 tabs. Quitting ends them."
+        );
+    }
+
+    #[test]
+    fn always_says_what_closes_when_nothing_runs() {
+        let message = |scope, tabs: usize| prompt(scope, &vec![Foreground::Idle; tabs]).message;
+        assert_eq!(
+            message(CloseScope::Tab, 1),
+            "Closing this tab ends its shell session."
+        );
+        assert_eq!(
+            message(CloseScope::Tabs(2), 2),
+            "Closing these 2 tabs ends their shell sessions."
+        );
+        assert_eq!(
+            message(CloseScope::Window, 1),
+            "Closing this window ends its shell session."
+        );
+        assert_eq!(
+            message(CloseScope::Window, 3),
+            "Closing this window ends the shell sessions in its 3 tabs."
+        );
+        assert_eq!(
+            message(CloseScope::Quit, 1),
+            "Quitting ends the open shell session."
+        );
+        assert_eq!(
+            message(CloseScope::Quit, 4),
+            "Quitting ends 4 open shell sessions."
+        );
     }
 
     #[test]
