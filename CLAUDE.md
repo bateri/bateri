@@ -978,12 +978,17 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   anahtar opsiyonel ve eksiği gömülü `bateri`'den; biçim `docs/AYARLAR.md` →
   Temalar.
 - **Ayarlar** `~/.config/bateri/settings.toml`; bilinmeyen anahtar korunur,
-  anahtar silinmez. Dosyaya yazan iki yol var: Settings… yalnız dosya
-  **yokken** şablonu yaratır (`settings::create_if_missing`), View ▸ Theme ▸
-  yalnız `[appearance] theme`'i yazar, biçimi koruyarak
-  (`Settings::with_theme`), yerinde (sembolik bağın hedefine);
-  ayrıştırılamayan dosyaya yazmaz. Menü yalnız yazar, uygulayan dosyayı
-  okuyan yol.
+  anahtar silinmez. Dosyaya yazan üç yol var: ayar penceresinin Open
+  settings.toml düğmesi yalnız dosya **yokken** şablonu yaratır
+  (`settings::create_if_missing`), View ▸ Theme ▸ yalnız `[appearance]
+  theme`'i, **ayar penceresi** (bateri ▸ Settings…, `settings_window`) yalnız
+  değiştirilen anahtarı yazar — üçü de tek düzenlemeden, biçimi koruyarak
+  (`Settings::with_edit`, tipli `SettingsEdit`), yerinde (sembolik bağın
+  hedefine); ayrıştırılamayan dosyaya yazmaz. Menü ve pencere yalnız yazar,
+  uygulayan dosyayı okuyan yol; pencere kendi durumunu tutmaz, her okumada
+  dosyanın hâlinden (`settings::FileState`: kilit, satır tanısı; alt
+  başlıkla aynı metin) ve yazma yuvasından tazelenir, çünkü tek kaynak dosya
+  (`.tasks/029-ayarlar-penceresi/discussion.md` → Karar 7).
   Anahtarlar, varsayılanlar ve hata davranışı (pencere alt başlığı)
   `docs/AYARLAR.md`'de; ayrıştırma ve fark (`Settings::changes`)
   `bt-core::settings`'te saf, okuma ve izleme `bt-shell`'de. İzleme kaynağı

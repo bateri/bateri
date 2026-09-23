@@ -498,6 +498,8 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   Settings… mi), yedek alınıp alınmayacağı ve kullanıcının sildiği bir
   anahtarın geri gelip gelmeyeceği kararlaşmadan inmez. Kaynak: 016
   `phase-1.md`/`phase-3.md` → Uygulama Notları.
+  029'dan beri ayar penceresi de var olan dosyaya yazıyor, ama yalnız
+  değiştirilen anahtarı ve **yorumsuz** ekliyor; doldurma borcu yerinde.
 - **Ayar ayrıştırmasının beş kopyası.** `osc52`, `cursor_motion` ve
   `reduce_motion` aynı "şu üç dizgeden biri, değilse tanı bırak ve
   varsayılana düş" örüntüsünü elle tekrarlıyor; her enum'un `name()`'i de

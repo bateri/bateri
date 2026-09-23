@@ -25,15 +25,17 @@ betiğin kendisi `assets/shell/zsh/`.
 ```
 
 Dosya yoksa her şey varsayılanıyla çalışır ve hiçbir uyarı çıkmaz.
-**bateri ▸ Settings…** (Cmd ,) dosyayı editörde açar, yoksa önce yaratır
-(bkz. [Settings…](#settings)); dizini ve dosyayı elle oluşturmak da yeterli.
+**bateri ▸ Settings…** (Cmd ,) ayar penceresini açar; penceredeki **Open
+settings.toml** düğmesi dosyayı editörde açar, yoksa önce yaratır (bkz.
+[Settings…](#settings)). Dizini ve dosyayı elle oluşturmak da yeterli.
 Dosya başka bir yere sembolik bağ olabilir (dotfile deposu); bağın hedefi
 okunur.
 
-Uygulama bu dosyaya iki yerden yazar: **Settings…** dosya yokken şablonu
-yaratır, **View ▸ Theme ▸** ile tema seçince `[appearance] theme` satırını
-yazar (bkz. [View ▸ Theme ▸](#view--theme-)). Var olan dosyanın başka hiçbir
-satırına dokunulmaz.
+Uygulama bu dosyaya üç yerden yazar: **Open settings.toml** dosya yokken
+şablonu yaratır, **View ▸ Theme ▸** ile tema seçince `[appearance] theme`
+satırını yazar (bkz. [View ▸ Theme ▸](#view--theme-)) ve **ayar penceresi**
+değiştirdiğiniz ayarın satırını yazar. Var olan dosyanın başka hiçbir
+satırına — yorumlara, sıraya, tanımadığı anahtarlara — dokunulmaz.
 
 Değişiklik **kaydettiğiniz anda** geçerli olur — ayar dosyasında da,
 kullanılan temanın dosyasında da; kabuk ve içindeki program yaşamaya devam
@@ -45,8 +47,9 @@ Ayarları'nda görünüm değişince pencere de değişir.
 
 İzlenen yer `~/.config/bateri/` dizinidir. Uygulama açıkken bu dizin **hiç
 yoksa** kabuktan oluşturmak izlemeyi başlatmaz: değişiklikler uygulamayı
-yeniden açınca ya da bir kez Settings… seçilince görülür, sonrası kayıt
-anında izlenir. Settings…'in yarattığı dizin hemen izlenir.
+yeniden açınca ya da pencereden bir ayar değiştirilince (ya da Open
+settings.toml'a basılınca) görülür, sonrası kayıt anında izlenir. Pencerenin
+yarattığı dizin hemen izlenir.
 
 ### Settings…
 
@@ -54,10 +57,36 @@ Kısayol ABD düzenli klavyede Cmd `,`. macOS menü kısayolunu klavye düzenine
 göre yerleştirir; Türkçe Q klavyede aynı tuş **Cmd `ö`**, menüde de öyle
 görünür. View ▸ Bigger da bu düzende `⌘:` görünür.
 
-bateri ▸ Settings… (Cmd ,) ayar dosyasını açar: önce `.toml` dosyalarını
-açan uygulamayla, o yoksa varsayılan metin editörüyle (çoğu makinede
-TextEdit).
+bateri ▸ Settings… (Cmd ,) ayar penceresini açar: solda dört kategori
+(General, Appearance, Cursor, Motion), sağda ayarlar. Pencere yalnız
+`settings.toml`'a yazar; ekrana uygulayan, dosyayı kaydettiğinizde de koşan
+yol, yani pencereden yapılan değişiklik de anında geçerlidir.
 
+- **Ne zaman yazar:** açılır menü ve anahtar seçildiği anda, kaydırıcı
+  bırakıldığında, sayı alanı Enter'da ya da alandan çıkınca (stepper her
+  tıkta). Kabul edilmeyen girdi (harf, aralık dışı) yazılmaz, alan dosyadaki
+  değere döner. `scrollback`'i küçültmek geçmişi o anda kırpar — dosyada
+  olduğu gibi (bkz. [`[terminal]`](#terminal)).
+- **Yalnız değiştirdiğiniz satırı yazar**, yorumsuz; anahtar dosyada yoksa
+  bölümüne eklenir. Dosya yoksa önce aşağıdaki şablonla yaratılır. Pencereyi
+  açmak dosya yaratmaz.
+- **Dosya dışarıdan değişince pencere de değişir** — editörde kaydettiğiniz
+  değer, `themes/`'e koyduğunuz yeni tema.
+- **Kabul edilmeyen değer** kendi satırının altında turuncu yazılır; kontrol o
+  an geçerli olan değeri gösterir ve yeni bir değer seçmek satırı düzeltir.
+  Bir satıra ait olmayan tanı (örneğin emekli `shell.prompt`) pencerenin
+  üstündeki şeritte çıkar.
+- **Ayrıştırılamayan ya da okunamayan dosyada pencere kilitlenir:** bütün
+  kontroller kapanır, şerit sebebi başlık çubuğundaki metnin aynısıyla söyler
+  ve Open settings.toml varsayılan düğme olur (Enter). Pencere bozuk dosyaya
+  yazmaz — içindeki yarım iş sizin; düzeltip kaydettiğinizde kilit kalkar.
+- **Yazılamayan dosya** (izin) şeritte ve başlık çubuğunda söylenir, kontrol
+  dosyadaki değere döner.
+- Pencerede görünmeyenler: geçici punto (Cmd +/−; Size dosyanın değeridir) ve
+  henüz olmayan ayarlar.
+
+**Open settings.toml** dosyayı açar: önce `.toml` dosyalarını açan
+uygulamayla, o yoksa varsayılan metin editörüyle (çoğu makinede TextEdit).
 Dosya yoksa dizini ve dosyayı aşağıdaki şablonla yaratır. Şablon hiçbir şeyi
 değiştirmez: varsayılanı olan her anahtar varsayılan değeriyle yazılıdır,
 değeri yerinde değiştirip kaydetmek yeter.
@@ -65,7 +94,7 @@ değeri yerinde değiştirip kaydetmek yeter.
 - Var olan dosyaya **dokunmaz** — bozuk olsa da, başka yere sembolik bağ olsa
   da, bağın hedefi olmasa da.
 - Dosya yaratılamazsa (izin yok, `~/.config/bateri` bir dosya) ya da hiçbir
-  uygulama açamazsa başlık çubuğunda söylenir; ikincisinde dosyanın yolu da
+  uygulama açamazsa pencerenin şeridinde ve başlık çubuğunda söylenir; ikincisinde dosyanın yolu da
   yazılır.
 - Şablondaki değerler yaratıldığı günün varsayılanlarıdır: sonraki bir
   sürümde bir varsayılan değişirse bu dosya eski değeri tutar. Satırı silmek
@@ -703,7 +732,8 @@ kapanıyorsa) anahtarı **elle** kapatabilirsiniz; bateri'ye hiç ihtiyaç yok.
 Başka bir terminalden başlayın.
 
 Entegrasyon varsayılan olarak açık olduğu için ayar dosyanız **hiç
-olmayabilir** — Settings…'i bir kez bile açmadıysanız yoktur. Önce o hâli
+olmayabilir** — ayar penceresinden hiçbir şey değiştirmediyseniz ve Open
+settings.toml'a hiç basmadıysanız yoktur. Önce o hâli
 geçin; dosya yoksa tek komut yeter ve gerisini okumanıza gerek kalmaz:
 
 ```sh

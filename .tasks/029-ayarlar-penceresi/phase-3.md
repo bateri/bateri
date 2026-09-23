@@ -55,9 +55,60 @@ _Requirements: R6, R7_
 
 ## Checklist
 
-- [ ] Hâl + tanı modeli, alt başlıkla tek kaynak
-- [ ] `reload_settings` her dalda tazeliyor; yazma hatası pencerede
-- [ ] Kilit şeridi, satır tanısı
-- [ ] `docs/AYARLAR.md`, `CLAUDE.md`, `docs/YOL-HARITASI.md` borç notu
-- [ ] Test: hâl/tanı modeli üç hâlde
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] Hâl + tanı modeli, alt başlıkla tek kaynak
+- [x] `reload_settings` her dalda tazeliyor; yazma hatası pencerede
+- [x] Kilit şeridi, satır tanısı
+- [x] `docs/AYARLAR.md`, `CLAUDE.md`, `docs/YOL-HARITASI.md` borç notu
+- [x] Test: hâl/tanı modeli üç hâlde
+- [x] Doğrulama geçti (`make hepsi` + `make duman`)
+
+## Uygulama Notları
+
+- **`live()`/`at_launch()`'ın imzası değişmedi**, yanlarına `Loaded::state()`
+  → `settings::FileState` (`Missing` / `Locked(metin)` / `Usable(tanılar)`)
+  geldi ve ikisinin iletileri artık `state().notices()`'ten: şerit ile alt
+  başlık yapısal olarak aynı metin. Hâl `AppDelegate`'te bir ivar
+  (`settings_state`), açılışta da yazılıyor — bozuk dosyayla açılan
+  uygulamada pencere ilk açılışta kilitli.
+- **Yazma hatası ayrı bir yuva değil**: pencere alt başlığın yazma yuvasını
+  okuyor; o yuva başarılı yazmada ve dosya okunup uygulanınca boşalıyor.
+- **Satıra düşmeyen tanı şeritte** (phase metninde yoktu): bölüm olmayan
+  bölüm (`terminal = 5`) ve emekli `shell.prompt` alt başlıkta görünüp
+  pencerede görünmeseydi kullanıcı iki yere bakardı. Satırın tanısı yalnız
+  iletisi (satır numarası ve dosya adı yok); şeritteki alt başlık biçiminde.
+- **Satır ↔ anahtar eşlemesi `Key::path`'te**, ayrıştırıcıyla bağı bir
+  sınama tutuyor: bütün anahtarları yanlış türde yazan dosyanın 19 tanısı
+  19 satıra bire bir düşüyor; yazma tarafı da `SettingsEdit::path` (yeni,
+  `place()`'in yolu) ile aynı sınamada bağlı (`/code-review` bulgusu: yol üç
+  yerde yazılıydı, ikisi bağlıydı).
+- **Her satırın gizli bir not satırı var**; kilit ve bağımlı satır tek
+  kapıdan (`Row::set_enabled`), kapalı satırın açıklaması da soluyor.
+  `set_enabled` serbest fonksiyonu ve üç etiket alanı kalktı.
+- **Pencerenin boyu 500 → 560**: şeritli Cursor bölmesinin son açıklaması
+  "Open settings.toml"a yapışıyordu (gözle).
+- Şerit `NSBox` (özel tip, sistemin turuncusunun %10'u zemin, %35'i kenar):
+  `objc2-app-kit`'e `NSBox` başlık bayrağı, `Cargo.lock` oynamadı.
+- Canlı okumada dosya yok olursa pencere **etkin** ayarı gösterir
+  (varsayılanları değil): `live()`'ın editör kaydı gerekçesi; Karar 7'nin
+  "varsayılanları gösterir"i açılış hâli.
+- **Gözle** (debug derlemesi geçici bir `.app` sarmalında, `HOME` geçici):
+  editörde `cursor = "beam"` → popup Beam; `cursor = "bar"` → Shape altında
+  turuncu tanı, popup etkin değerde; `[terminal` → şerit + bütün kontroller
+  kapalı + düğme mavi, düzeltince kalkıyor; `themes/paper.toml` → Theme
+  listesinde; salt okunur dosyada tema seçimi → şeritte "could not be
+  written: Permission denied", popup Match System'e döndü; tanılı dosyayla
+  açılışta emekli anahtar ilk açılışta şeritte; Beam seçmek satır tanısını kaldırdı.
+- **Set kapısı `/code-review` düzeltmeleri:** değişmemiş sayı alanından
+  geçmek (Tab) artık yazmıyor (yuvarlanmış yazılış `1.125`'i `1.13` yapardı);
+  tazeleme düzenlenmekte olan alana dokunmuyor, reddedilen girdi alanı
+  doğrudan geri alıyor; stepper'ın aralığı dosyadaki aralık dışı değeri
+  kapsıyor (`size = 100`'de "yukarı" küçültüyordu); slider basınç ve
+  periyodik olayı da jestin ortası sayıyor; pencere yalnız ilk açılışta
+  ortalanıyor; kapalı pencere tazelenmiyor (açılış tazeliyor); Open
+  settings.toml'un hatası yazma yuvasına, yani şeride de gidiyor (terminal
+  penceresi yokken hiçbir yerde görünmüyordu).
+- **Waive (`/code-review`):** `with_theme` üretimde çağrılmıyor ama planın
+  R1'i onu `with_edit`'in çağıranı olarak tutuyor ve menünün sınamaları onun
+  üstünde — kaldırmak plan dışı. `monospaced_families` pencerenin ilk
+  doğuşunda ana thread'de bir kez koşuyor (phase-2 kararı, süreç başına bir
+  kez); maliyeti ölçülmedi, iddia yazılmıyor.

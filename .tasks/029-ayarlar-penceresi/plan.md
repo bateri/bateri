@@ -85,5 +85,5 @@ Cmd-, ──► settings_window.show()   (Hermetic: no-op)
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| phase-3 | |
-| kapı | |
+| phase-3 | ✅ |
+| kapı | ✅ |
