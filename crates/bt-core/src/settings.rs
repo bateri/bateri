@@ -309,6 +309,45 @@ impl UnfocusedCaret {
     }
 }
 
+/// `[terminal] confirm_close`: pencere, sekme ya da uygulama kapanırken ne
+/// zaman sorulsun (`.tasks/028-kapatma-onayi/discussion.md` → Karar 6).
+///
+/// "Koşan" kabuğun **dışında** ön planda bir program demek (vim, `ssh`,
+/// Claude Code); arka plan işi ve kabuğun kendi döngüsü sayılmıyor. Tespit
+/// `bt-shell`'de, süreç tablosundan — burada yalnız kullanıcının seçimi.
+///
+/// `TerminalOptions`'a ve [`Changes`]'e **girmiyor** (emsal [`CaretStyle`]):
+/// değer kapanış anında güncel ayardan okunuyor, yani kayıt anında geçerli
+/// olması bedava ve oturumlara giden bir yol gerekmiyor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConfirmClose {
+    /// Hiç sorma.
+    Never,
+    /// Ön planda kabuğun dışında bir program koşuyorsa sor.
+    #[default]
+    Running,
+    /// Kabuk boştayken de sor.
+    Always,
+}
+
+impl ConfirmClose {
+    /// Ayar dosyasındaki yazılışların tek listesi ([`UnfocusedCaret::NAMES`]
+    /// ile aynı gerekçe).
+    const NAMES: &'static [(&'static str, Self)] = &[
+        ("never", Self::Never),
+        ("running", Self::Running),
+        ("always", Self::Always),
+    ];
+
+    /// Ayar dosyasındaki yazılışı.
+    fn name(self) -> &'static str {
+        Self::NAMES
+            .iter()
+            .find(|(_, value)| *value == self)
+            .map_or("running", |(name, _)| *name)
+    }
+}
+
 /// `[terminal] cursor_radius` ve `cursor_glow`: imlecin **çizim** sayıları.
 ///
 /// `TerminalOptions`'a **girmiyor** ve `Session` görmüyor: ikisi de terminalin
@@ -544,6 +583,9 @@ pub struct Settings {
     /// `[shell] integration`: kabuk sarmalayıcısı kurulsun mu. **Sonraki
     /// oturumda** geçerli ([`ShellIntegration`]).
     pub shell_integration: ShellIntegration,
+    /// `[terminal] confirm_close`: kapanışta ne zaman sorulsun
+    /// ([`ConfirmClose`]). `TerminalOptions`'a girmiyor.
+    pub confirm_close: ConfirmClose,
 }
 
 impl Default for Settings {
@@ -574,6 +616,7 @@ impl Default for Settings {
             reduce_motion: ReduceMotion::default(),
             smooth_scroll: SmoothScroll::default(),
             shell_integration: ShellIntegration::default(),
+            confirm_close: ConfirmClose::default(),
         }
     }
 }
@@ -665,6 +708,12 @@ cursor_unfocused = "hollow"
 # long, then dark this long. Shorter costs more frames — 0.25 asks for four a
 # second — and 0.5 is a blink you notice without it tiring the eye.
 cursor_blink_interval = 0.5
+# "never" | "running" | "always". When closing a tab or window, or quitting,
+# asks first: running asks only while a program other than the shell is in
+# the foreground (vim, ssh, a build) and names it, always asks even at an idle
+# prompt, never closes without asking. Typing exit never asks, and neither do
+# programs left running in the background.
+confirm_close = "running"
 
 [appearance]
 # "system" or a theme name. "system" follows the macOS light/dark appearance;
@@ -834,6 +883,17 @@ integration = "auto"
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = terminal.get("confirm_close") {
+                    parsed.settings.confirm_close = named_enum(
+                        text,
+                        item,
+                        "terminal.confirm_close",
+                        ConfirmClose::NAMES,
+                        fallback.confirm_close,
+                        fallback.confirm_close.name(),
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("terminal") => {
                 parsed.settings.scrollback = fallback.scrollback;
@@ -841,6 +901,7 @@ integration = "auto"
                 parsed.settings.cursor_blink = fallback.cursor_blink;
                 parsed.settings.caret = fallback.caret;
                 parsed.settings.blink_interval = fallback.blink_interval;
+                parsed.settings.confirm_close = fallback.confirm_close;
             }
             None => {}
         }
@@ -1755,6 +1816,7 @@ mod tests {
             ("terminal", "cursor_glow"),
             ("terminal", "cursor_unfocused"),
             ("terminal", "cursor_blink_interval"),
+            ("terminal", "confirm_close"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -1945,6 +2007,7 @@ mod tests {
             reduce_motion: ReduceMotion::System,
             smooth_scroll: SmoothScroll::On,
             shell_integration: ShellIntegration::Auto,
+            confirm_close: ConfirmClose::Always,
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -2862,6 +2925,86 @@ found 1.5; using 0.1"
         assert!(written.starts_with(text), "{written}");
         let settings = clean(&written);
         assert_eq!(settings.smooth_scroll, SmoothScroll::Off);
+        assert_eq!(settings.theme, "paper");
+    }
+
+    #[test]
+    fn confirm_close_is_read() {
+        // Dosyada yoksa `running`: soru yalnız koşan bir iş varken.
+        assert_eq!(clean("").confirm_close, ConfirmClose::Running);
+        for (value, expected) in [
+            ("never", ConfirmClose::Never),
+            ("running", ConfirmClose::Running),
+            ("always", ConfirmClose::Always),
+        ] {
+            let text = format!("[terminal]\nconfirm_close = \"{value}\"\n");
+            assert_eq!(clean(&text).confirm_close, expected, "{value}");
+        }
+        // Komşu anahtarlar birbirini ezmiyor.
+        let both = clean("[terminal]\nscrollback = 42\nconfirm_close = \"never\"\n");
+        assert_eq!(both.scrollback, 42);
+        assert_eq!(both.confirm_close, ConfirmClose::Never);
+    }
+
+    #[test]
+    fn unrecognized_confirm_close_keeps_its_own_key() {
+        for (value, found) in [
+            ("\"Always\"", "\"Always\""),
+            ("\"ask\"", "\"ask\""),
+            ("true", "a boolean"),
+        ] {
+            let text = format!("[terminal]\nscrollback = 42\nconfirm_close = {value}\n");
+            let (settings, diagnostic) = rejected(&text);
+            assert_eq!(
+                settings,
+                Settings {
+                    scrollback: 42,
+                    ..Settings::default()
+                },
+                "{value}"
+            );
+            assert_eq!(diagnostic.key, Some("terminal.confirm_close"), "{value}");
+            assert_eq!(diagnostic.line, Some(3), "{value}");
+            assert_eq!(
+                diagnostic.message,
+                format!(
+                    "`terminal.confirm_close` must be \"never\", \"running\" or \"always\", \
+                     found {found}; using \"running\""
+                )
+            );
+        }
+        // Kayıt anında yerine geçen değer geçerli ayar; bölüm yanlış türdeyse
+        // de.
+        let current = Settings {
+            confirm_close: ConfirmClose::Always,
+            ..Settings::default()
+        };
+        let parsed = Settings::parse_keeping("[terminal]\nconfirm_close = \"no\"\n", &current)
+            .expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.confirm_close, ConfirmClose::Always);
+        assert!(parsed.diagnostics[0].message.ends_with("using \"always\""));
+        let parsed =
+            Settings::parse_keeping("terminal = 5\n", &current).expect("ayrıştırılabilir metin");
+        assert_eq!(parsed.settings.confirm_close, ConfirmClose::Always);
+    }
+
+    #[test]
+    fn confirm_close_change_reaches_no_session() {
+        // Kapanış anında güncel ayardan okunuyor: fark oturumlara, fonta ya da
+        // imlece hiçbir şey göndermemeli (028 → Karar 6, emsal `caret`).
+        let before = clean("");
+        let after = clean("[terminal]\nconfirm_close = \"always\"\n");
+        assert_eq!(before.terminal(), after.terminal());
+        assert_eq!(before.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn theme_write_keeps_confirm_close_and_unknown_keys() {
+        let text = "[terminal]\nconfirm_close = \"never\" # sormadan\nask_twice = true\n";
+        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        assert!(written.starts_with(text), "{written}");
+        let settings = clean(&written);
+        assert_eq!(settings.confirm_close, ConfirmClose::Never);
         assert_eq!(settings.theme, "paper");
     }
 

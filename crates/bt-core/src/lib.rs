@@ -10,7 +10,7 @@
 //! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, bağlam satırının
 //! `DockContext`'ini, dock yüzeyinin `Dock`'unu,
 //! `Wake` ve ayar modelinin `Settings`, `Parsed`, `Diagnostic`, `CursorMotion`,
-//! `ReduceMotion`, `SmoothScroll`'u görür (tam
+//! `ReduceMotion`, `SmoothScroll`, `ConfirmClose`'u görür (tam
 //! liste aşağıdaki `pub use` bloğu). `Osc52` alacritty'nin aynı adlı tipinin
 //! karşılığı, kendisi değil. Kendi grid'imize geçiş (00X) bu sınırın
 //! arkasında yapılır ve renderer'ı bilmez. `toml_edit` de aynı biçimde içeride
@@ -55,8 +55,8 @@ pub use session::{
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_GLOW, CURSOR_RADIUS, CaretShape, CaretStyle, Changes,
-    CursorBlink, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion, SYSTEM_THEME,
-    Settings, ShellIntegration, SmoothScroll, UnfocusedCaret,
+    ConfirmClose, CursorBlink, CursorMotion, Diagnostic, FontOptions, Parsed, ReduceMotion,
+    SYSTEM_THEME, Settings, ShellIntegration, SmoothScroll, UnfocusedCaret,
 };
 pub use shell::{
     DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle,

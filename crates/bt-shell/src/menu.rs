@@ -6,9 +6,9 @@
 //!
 //! **Hiçbir öğenin hedefi yok.** Eylem responder zincirinden geçip onu
 //! tanımlayan ilk nesneye varıyor: `copy:`/`paste:` first responder
-//! `BateriView`'a; punto eylemleri, `closeWindow:` ve `selectTab:` key
-//! pencerenin delegate'ine (`window::TerminalWindow` — pencereye ait);
-//! `performClose:`, `performMiniaturize:`, `performZoom:` ve sekme eylemleri
+//! `BateriView`'a; punto eylemleri, `closeTab:`, `closeWindow:` ve
+//! `selectTab:` key pencerenin delegate'ine (`window::TerminalWindow` —
+//! pencereye ait); `performMiniaturize:`, `performZoom:` ve sekme eylemleri
 //! (`selectNextTab:`, `moveTabToNewWindow:`…) `NSWindow`'un kendisine;
 //! `openSettings:`, tema eylemleri ve `newWindow:`/`newTab:` app delegate'e
 //! (ayar kaydının `settingsDidChange:`'i ile aynı yol — bütün
@@ -111,7 +111,11 @@ pub(crate) fn install(mtm: MainThreadMarker, themes: &ProtocolObject<dyn NSMenuD
             item(mtm, "New Window", sel!(newWindow:), "n"),
             item(mtm, "New Tab", sel!(newTab:), "t"),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, "Close Tab", sel!(performClose:), "w"),
+            // `performClose:` değil (028 phase-2, ölçüldü): kırmızı düğmenin
+            // iptal edilen grup kapanışından sonra AppKit `performClose:`'u
+            // grubun tamamına yayıyor, yani ⌘W bir sekme yerine pencereyi
+            // sorardı.
+            item(mtm, "Close Tab", sel!(closeTab:), "w"),
             with_modifiers(
                 item(mtm, "Close Window", sel!(closeWindow:), "w"),
                 command | NSEventModifierFlags::Shift,
