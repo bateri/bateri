@@ -15,7 +15,7 @@
 //! öğelerin sırası `bt-core`'un `NAMES` tablosunun sırası: yeni bir varyant
 //! derleme hatası verir, popup'ta sessizce eksik kalmaz.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
@@ -26,17 +26,17 @@ use bt_gpu::FontNotice;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{
-    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSButton, NSColor, NSControl, NSControlStateValueOff,
-    NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType, NSFont, NSGridCell,
-    NSGridCellPlacement, NSGridRowAlignment, NSGridView, NSImage, NSImageView, NSLayoutConstraint,
-    NSMenuItem, NSPopUpButton, NSScrollView, NSSlider, NSSplitViewController, NSSplitViewItem,
-    NSStackView, NSStepper, NSSwitch, NSTableCellView, NSTableColumn, NSTableView,
-    NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSTextField,
-    NSUserInterfaceLayoutOrientation, NSView, NSViewController, NSWindow, NSWindowStyleMask,
-    NSWindowTabbingMode, NSWindowTitleVisibility,
+    NSApplication, NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControl,
+    NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEventType,
+    NSFont, NSGridCell, NSGridCellPlacement, NSGridRow, NSGridRowAlignment, NSGridView, NSImage,
+    NSImageView, NSLayoutAttribute, NSLayoutConstraint, NSMenuItem, NSPopUpButton, NSScrollView,
+    NSSlider, NSSplitViewController, NSSplitViewItem, NSStackView, NSStepper, NSSwitch,
+    NSTableCellView, NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
+    NSTableViewStyle, NSTextField, NSTitlePosition, NSUserInterfaceLayoutOrientation, NSView,
+    NSViewController, NSWindow, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     NSArray, NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
@@ -44,12 +44,15 @@ use objc2_foundation::{
 };
 
 use crate::app;
+use crate::settings::{self, FileState};
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
 
 /// Pencerenin içerik boyu, punto. Sabit — pencere yeniden
-/// boyutlandırılamıyor (en uzun bölmenin altı satırı ve açıklamaları sığıyor,
-/// fazlası boşluk olurdu). Tasarım sabiti, ölçülmüş bir sayı değil.
-const WINDOW_SIZE: NSSize = NSSize::new(680.0, 500.0);
+/// boyutlandırılamıyor. En uzun bölme (Cursor: altı satır, dört açıklama)
+/// üstünde iki satırlık şerit ve bir satır tanısıyla da düğmeye değmiyor;
+/// 500'de şeritli Cursor bölmesi düğmeye yapışıyordu (phase-3 gözle
+/// kontrolü). Tasarım sabiti, ölçülmüş bir sayı değil.
+const WINDOW_SIZE: NSSize = NSSize::new(680.0, 560.0);
 /// Kenar çubuğunun genişliği: System Settings'inkine yakın, dört kısa başlık
 /// için bol. Tasarım sabiti.
 const SIDEBAR_WIDTH: f64 = 180.0;
@@ -64,6 +67,10 @@ const LABEL_WIDTH: f64 = 170.0;
 const POPUP_WIDTH: f64 = 230.0;
 /// Slider'ların genişliği; yanında değer etiketi duruyor.
 const SLIDER_WIDTH: f64 = 170.0;
+/// Şeridin metninin kırılma genişliği: sağ bölmenin genişliğinden iki kenar
+/// payı, kutunun iki iç payı, sembol ve aralığı düşülmüş hâli.
+const BANNER_TEXT_WIDTH: f64 =
+    WINDOW_SIZE.width - SIDEBAR_WIDTH - 2.0 * MARGIN - 2.0 * 10.0 - 16.0 - 8.0;
 /// Açıklama metninin kırılma genişliği: popup'ın genişliği — açıklama
 /// üstündeki kontrolün sağ kenarını aşmasın (ilk ekran görüntüsünde aşıyordu).
 const NOTE_WIDTH: f64 = POPUP_WIDTH;
@@ -159,6 +166,97 @@ impl Key {
 
     fn from_tag(tag: NSInteger) -> Option<Key> {
         Self::ALL.get(usize::try_from(tag).ok()?).copied()
+    }
+
+    /// Dosyadaki noktalı yolu — `Diagnostic::key`'in dili; satırın tanısı bu
+    /// eşleşmeyle bulunuyor. Ayrıştırıcıyla bağı bir sınama tutuyor
+    /// (`every_row_receives_its_own_diagnostic`).
+    fn path(self) -> &'static str {
+        match self {
+            Key::ConfirmClose => "terminal.confirm_close",
+            Key::Clipboard => "clipboard.osc52",
+            Key::Scrollback => "terminal.scrollback",
+            Key::ShellIntegration => "shell.integration",
+            Key::Theme => "appearance.theme",
+            Key::LightTheme => "appearance.light_theme",
+            Key::DarkTheme => "appearance.dark_theme",
+            Key::Font => "font.family",
+            Key::Size => "font.size",
+            Key::LineHeight => "font.line_height",
+            Key::Shape => "terminal.cursor",
+            Key::Blink => "terminal.cursor_blink",
+            Key::BlinkSpeed => "terminal.cursor_blink_interval",
+            Key::Radius => "terminal.cursor_radius",
+            Key::Glow => "terminal.cursor_glow",
+            Key::Unfocused => "terminal.cursor_unfocused",
+            Key::CursorMotion => "motion.cursor_motion",
+            Key::SmoothScroll => "motion.smooth_scroll",
+            Key::ReduceMotion => "motion.reduce_motion",
+        }
+    }
+}
+
+/// Kilitli pencerenin şeridinde sebebin altındaki cümle (029 phase-3).
+const LOCK_HINT: &str = "Fix the file and save it; this window follows.";
+
+/// Sağ bölmenin üstündeki şerit; satırı yoksa görünmez.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Banner {
+    /// Alt başlığın metinleri, aynen: yazma hatası, kilidin sebebi, hiçbir
+    /// satıra düşmeyen tanı.
+    lines: Vec<String>,
+    /// Altında, ikincil renkte: ne yapılacağı.
+    hint: Option<&'static str>,
+}
+
+/// Pencerenin dosyanın hâlinden gördüğü (029 Karar 7) — saf, yani üç hâli
+/// sınama pencere kurmadan görüyor.
+#[derive(Debug, PartialEq, Eq)]
+struct Status {
+    /// Bütün kontroller devre dışı; "Open settings.toml" varsayılan düğme.
+    locked: bool,
+    banner: Banner,
+    /// Kabul edilmeyen değerler: satır → tanının iletisi (açıklamanın
+    /// yerine). Satır numarası ve dosya adı yok — satırın kendisi bağlam.
+    rows: Vec<(Key, String)>,
+}
+
+/// Dosyanın hâli + yazma yuvası → pencerenin göreceği.
+///
+/// Bir satıra düşmeyen tanı (bölüm olmayan bölüm, emekli anahtar) şeride
+/// gidiyor: alt başlıkta görünüp pencerede görünmeyen bir tanı kullanıcıyı
+/// iki yere bakmaya zorlardı. Yazma hatası şeridin başında, çünkü
+/// kullanıcının az önce yaptığı şeyin cevabı (alt başlığın sırası).
+fn status(state: &FileState, write: &[String]) -> Status {
+    let mut banner = Banner {
+        lines: write.to_vec(),
+        hint: None,
+    };
+    let mut rows = Vec::new();
+    let locked = match state {
+        FileState::Missing => false,
+        FileState::Locked(reason) => {
+            banner.lines.push(reason.clone());
+            banner.hint = Some(LOCK_HINT);
+            true
+        }
+        FileState::Usable(diagnostics) => {
+            for diagnostic in diagnostics {
+                let key = diagnostic
+                    .key
+                    .and_then(|path| Key::ALL.into_iter().find(|key| key.path() == path));
+                match key {
+                    Some(key) => rows.push((key, diagnostic.message.clone())),
+                    None => banner.lines.push(settings::notice(diagnostic)),
+                }
+            }
+            false
+        }
+    };
+    Status {
+        locked,
+        banner,
+        rows,
     }
 }
 
@@ -438,6 +536,23 @@ fn missing_font_title(name: &str, notice: Option<FontNotice>) -> String {
 struct Number {
     field: Retained<NSTextField>,
     stepper: Retained<NSStepper>,
+    /// Stepper'ın kendi aralığı; dosyadaki değer dışındaysa o değeri de
+    /// kapsayacak kadar genişletiliyor ([`set_number`]).
+    range: (f64, f64),
+    /// Dosyanın değeri ve alanda gösterilen yazılışı — son tazelemeden.
+    /// Değişmemiş bir alandan geçip çıkmak (Tab) yazmasın diye eylem buna
+    /// bakıyor.
+    shown: RefCell<(f64, String)>,
+}
+
+impl Number {
+    /// Alanın metni dosyadakinin aynısı mı: yazılışı aynı ya da değeri
+    /// yazılacak hassasiyette (iki basamak) aynı.
+    fn unchanged(&self, text: &str, value: Option<f64>) -> bool {
+        let shown = self.shown.borrow();
+        let round = |value: f64| (value * 100.0).round();
+        text.trim() == shown.1 || value.is_some_and(|value| round(value) == round(shown.0))
+    }
 }
 
 /// Bir slider ve değer etiketi.
@@ -454,28 +569,79 @@ struct Controls {
     shell_integration: Retained<NSPopUpButton>,
     theme: Retained<NSPopUpButton>,
     light_theme: Retained<NSPopUpButton>,
-    light_label: Retained<NSTextField>,
     dark_theme: Retained<NSPopUpButton>,
-    dark_label: Retained<NSTextField>,
     font: Retained<NSPopUpButton>,
     size: Number,
     line_height: Number,
     shape: Retained<NSPopUpButton>,
     blink: Retained<NSPopUpButton>,
     blink_speed: Slide,
-    blink_speed_label: Retained<NSTextField>,
     radius: Slide,
     glow: Slide,
     unfocused: Retained<NSPopUpButton>,
     cursor_motion: Retained<NSPopUpButton>,
     smooth_scroll: Retained<NSSwitch>,
     reduce_motion: Retained<NSPopUpButton>,
+    /// Dört bölmenin satırları: kilit, bağımlı satır ve satır tanısı
+    /// buradan.
+    rows: Vec<Row>,
+}
+
+/// Izgaranın bir satırı: etiket, kontrolleri ve altındaki not satırı.
+struct Row {
+    key: Key,
+    label: Retained<NSTextField>,
+    controls: Vec<Retained<NSControl>>,
+    /// Açıklama ya da tanı; ikisi de yoksa not satırı gizli (boşluk
+    /// bırakmıyor).
+    note: Retained<NSTextField>,
+    note_row: Retained<NSGridRow>,
+    description: Option<&'static str>,
+}
+
+impl Row {
+    /// Satırın kontrolleri açık mı, etiketi soluk mu (Karar 6'nın bağımlı
+    /// satırı ve Karar 7'nin kilidi aynı kapıdan).
+    fn set_enabled(&self, enabled: bool) {
+        for control in &self.controls {
+            control.setEnabled(enabled);
+        }
+        let color = if enabled {
+            NSColor::labelColor()
+        } else {
+            NSColor::disabledControlTextColor()
+        };
+        self.label.setTextColor(Some(&color));
+    }
+
+    /// Notu tanıya ya da açıklamaya kurar; ikisi de yoksa satırı gizler.
+    /// Kapalı satırın açıklaması da etiketiyle birlikte soluyor.
+    fn set_note(&self, diagnostic: Option<&str>, enabled: bool) {
+        let (text, color) = match (diagnostic, self.description) {
+            (Some(diagnostic), _) => (diagnostic, NSColor::systemOrangeColor()),
+            (None, Some(description)) if enabled => (description, NSColor::secondaryLabelColor()),
+            (None, Some(description)) => (description, NSColor::tertiaryLabelColor()),
+            (None, None) => {
+                self.note_row.setHidden(true);
+                return;
+            }
+        };
+        self.note.setStringValue(&NSString::from_str(text));
+        self.note.setTextColor(Some(&color));
+        self.note_row.setHidden(false);
+    }
 }
 
 pub(crate) struct Ivars {
     window: OnceCell<Retained<NSWindow>>,
     sidebar: OnceCell<Retained<NSTableView>>,
     header: OnceCell<Retained<NSTextField>>,
+    banner: OnceCell<BannerView>,
+    /// Pencere bir kez gösterildi mi (ortalamanın kapısı).
+    shown_once: Cell<bool>,
+    pane_tops: OnceCell<PaneTops>,
+    /// "Open settings.toml": kilitliyken varsayılan düğme (Enter).
+    open: OnceCell<Retained<NSButton>>,
     /// Kategori başına bir ızgara; yalnız seçili olan görünür.
     panes: OnceCell<Vec<Retained<NSGridView>>>,
     controls: OnceCell<Controls>,
@@ -611,12 +777,17 @@ define_class!(
                     field.setStringValue(&NSString::from_str(&text));
                 }
             }
+            // İzleme döngüsü sürükleme dışında olay da taşıyabiliyor (Force
+            // Touch basıncı, periyodik olay): onlar da jestin ortası.
             let dragging = NSApplication::sharedApplication(self.mtm())
                 .currentEvent()
                 .is_some_and(|event| {
                     matches!(
                         event.r#type(),
-                        NSEventType::LeftMouseDragged | NSEventType::LeftMouseDown
+                        NSEventType::LeftMouseDragged
+                            | NSEventType::LeftMouseDown
+                            | NSEventType::Pressure
+                            | NSEventType::Periodic
                     )
                 });
             if dragging {
@@ -639,21 +810,41 @@ define_class!(
                 return;
             };
             let text = field.stringValue().to_string();
-            let edit = match Key::from_tag(field.tag()) {
-                Some(Key::Scrollback) => parse_scrollback(&text).map(SettingsEdit::Scrollback),
-                Some(Key::Size) => {
-                    parse_decimal(&text, MIN_SIZE..=MAX_SIZE).map(SettingsEdit::FontSize)
-                }
-                Some(Key::LineHeight) => {
-                    parse_decimal(&text, LINE_HEIGHT_RANGE).map(SettingsEdit::LineHeight)
-                }
-                _ => None,
+            let Some(controls) = self.ivars().controls.get() else {
+                return;
             };
-            if edit.is_none() {
-                self.refresh_from_delegate();
+            let (number, value) = match Key::from_tag(field.tag()) {
+                Some(Key::Scrollback) => (
+                    &controls.scrollback,
+                    parse_scrollback(&text).map(|lines| lines as f64),
+                ),
+                Some(Key::Size) => (&controls.size, parse_decimal(&text, MIN_SIZE..=MAX_SIZE)),
+                Some(Key::LineHeight) => (
+                    &controls.line_height,
+                    parse_decimal(&text, LINE_HEIGHT_RANGE),
+                ),
+                _ => return,
+            };
+            // Değişmeyen alandan geçmek yazmaz: yuvarlanmış yazılış
+            // (`1.125` → "1.13") dosyadaki değeri sessizce değiştirirdi.
+            if number.unchanged(&text, value) {
                 return;
             }
-            self.save(edit);
+            let edit = value.map(|value| match Key::from_tag(field.tag()) {
+                Some(Key::Scrollback) => SettingsEdit::Scrollback(value as usize),
+                Some(Key::Size) => SettingsEdit::FontSize(value),
+                _ => SettingsEdit::LineHeight(value),
+            });
+            match edit {
+                Some(edit) => self.save(Some(edit)),
+                // Kabul edilmeyen girdi: alan dosyadaki yazılışa döner.
+                // Doğrudan, tazelemeden değil — tazeleme düzenlenmekte olan
+                // alana dokunmuyor ([`set_number`]).
+                None => {
+                    let shown = number.shown.borrow().1.clone();
+                    field.setStringValue(&NSString::from_str(&shown));
+                }
+            }
         }
 
         #[unsafe(method(stepperChanged:))]
@@ -714,6 +905,10 @@ impl SettingsWindow {
             window: OnceCell::new(),
             sidebar: OnceCell::new(),
             header: OnceCell::new(),
+            banner: OnceCell::new(),
+            shown_once: Cell::new(false),
+            pane_tops: OnceCell::new(),
+            open: OnceCell::new(),
             panes: OnceCell::new(),
             controls: OnceCell::new(),
             themes: RefCell::new(Vec::new()),
@@ -728,12 +923,23 @@ impl SettingsWindow {
         this
     }
 
+    /// Pencere açık mı (simge durumunda da) — kapalıyken tazelemenin
+    /// anlamı yok, yeniden açılış tazeliyor.
+    pub(crate) fn is_open(&self) -> bool {
+        self.ivars()
+            .window
+            .get()
+            .is_some_and(|window| window.isVisible() || window.isMiniaturized())
+    }
+
     /// Pencereyi öne getirir (ilk açılışta ortalar); kategori son seçilen.
     pub(crate) fn show(&self) {
         let Some(window) = self.ivars().window.get() else {
             return;
         };
-        if !window.isVisible() {
+        // Yalnız ilk açılışta: kapatmak ve simge durumu da `isVisible`'ı
+        // düşürüyor ve kullanıcının taşıdığı yer her açılışta kaybolurdu.
+        if !self.ivars().shown_once.replace(true) {
             window.center();
         }
         NSApplication::sharedApplication(self.mtm()).activate();
@@ -744,7 +950,18 @@ impl SettingsWindow {
     /// kaynağı. Programla kurulan değer eylem tetiklemiyor, yani bir kontrolün
     /// eyleminin içinden (yaz → `reload_settings` → buraya) çağrılması döngü
     /// doğurmaz.
-    pub(crate) fn refresh(&self, settings: &Settings, embedded: &[&str], user: &[String]) {
+    ///
+    /// Dosyanın hâli (`state`) ve yazma yuvası (`write`) kilidi, şeridi ve
+    /// satır tanılarını kuruyor ([`status`]); her tazeleme hepsini baştan
+    /// kurduğu için düzelen hâlin izi kalmıyor.
+    pub(crate) fn refresh(
+        &self,
+        settings: &Settings,
+        state: &FileState,
+        write: &[String],
+        embedded: &[&str],
+        user: &[String],
+    ) {
         let Some(c) = self.ivars().controls.get() else {
             return;
         };
@@ -767,8 +984,6 @@ impl SettingsWindow {
         let (items, index) = theme_items(&settings.dark_theme, false, embedded, user);
         fill_themes(&c.dark_theme, &items, index);
         self.ivars().dark_themes.replace(items);
-        set_enabled(&c.light_theme, &c.light_label, follows);
-        set_enabled(&c.dark_theme, &c.dark_label, follows);
 
         let (items, index) = font_items(settings.font.family.as_deref(), &self.ivars().families);
         fill_fonts(&c.font, &items, index);
@@ -792,13 +1007,6 @@ impl SettingsWindow {
             &seconds_label(settings.blink_interval),
         );
         let blinks = settings.cursor_blink != CursorBlink::Off;
-        set_enabled(&c.blink_speed.slider, &c.blink_speed_label, blinks);
-        let value_color = if blinks {
-            NSColor::secondaryLabelColor()
-        } else {
-            NSColor::disabledControlTextColor()
-        };
-        c.blink_speed.value.setTextColor(Some(&value_color));
         set_slide(
             &c.radius,
             settings.caret.radius_ratio,
@@ -814,12 +1022,49 @@ impl SettingsWindow {
         select_choice(&c.cursor_motion, settings.cursor_motion);
         set_switch(&c.smooth_scroll, smooth_on(settings.smooth_scroll));
         select_choice(&c.reduce_motion, settings.reduce_motion);
-    }
 
-    /// Kabul edilmeyen girdiyi geri almak için: etkin ayarla yeniden doldur.
-    fn refresh_from_delegate(&self) {
-        if let Some(delegate) = app::delegate(self.mtm()) {
-            delegate.refresh_settings_window();
+        let status = status(state, write);
+        for row in &c.rows {
+            let depends = match row.key {
+                Key::LightTheme | Key::DarkTheme => follows,
+                Key::BlinkSpeed => blinks,
+                _ => true,
+            };
+            let enabled = !status.locked && depends;
+            row.set_enabled(enabled);
+            let diagnostic = status
+                .rows
+                .iter()
+                .find(|(key, _)| *key == row.key)
+                .map(|(_, message)| message.as_str());
+            row.set_note(diagnostic, enabled);
+        }
+        // Değer etiketi bir etiket, kontrol değil: soluklaşması elle.
+        let value_color = if !status.locked && blinks {
+            NSColor::secondaryLabelColor()
+        } else {
+            NSColor::disabledControlTextColor()
+        };
+        c.blink_speed.value.setTextColor(Some(&value_color));
+        for slide in [&c.radius, &c.glow] {
+            let color = if status.locked {
+                NSColor::disabledControlTextColor()
+            } else {
+                NSColor::secondaryLabelColor()
+            };
+            slide.value.setTextColor(Some(&color));
+        }
+        if let Some(banner) = self.ivars().banner.get() {
+            banner.show(&status.banner);
+        }
+        self.layout_panes(!status.banner.lines.is_empty());
+        if let Some(open) = self.ivars().open.get() {
+            // Kilitte dosyayı onarmak bir tık — Enter — uzakta.
+            open.setKeyEquivalent(if status.locked {
+                ns_string!("\r")
+            } else {
+                ns_string!("")
+            });
         }
     }
 
@@ -833,6 +1078,23 @@ impl SettingsWindow {
             // ayrışmasın.
             None => delegate.refresh_settings_window(),
         }
+    }
+
+    /// Izgaraları şeridin altına ya da başlığın altına bağlar. Önce eski
+    /// takım bırakılıyor: ikisi bir an birlikte etkin olsa çelişirlerdi.
+    fn layout_panes(&self, banner_shown: bool) {
+        let Some(tops) = self.ivars().pane_tops.get() else {
+            return;
+        };
+        let (on, off) = if banner_shown {
+            (&tops.under_banner, &tops.under_header)
+        } else {
+            (&tops.under_header, &tops.under_banner)
+        };
+        for constraint in off {
+            constraint.setActive(false);
+        }
+        activate(on);
     }
 
     /// Kenar çubuğunun seçimine göre başlığı ve ızgarayı değiştirir.
@@ -909,7 +1171,12 @@ impl SettingsWindow {
         stepper.setIncrement(step);
         stepper.setValueWraps(false);
         self.wire(&stepper, key, sel!(stepperChanged:));
-        Number { field, stepper }
+        Number {
+            field,
+            stepper,
+            range: (min, max),
+            shown: RefCell::new((0.0, String::new())),
+        }
     }
 
     fn slide(&self, key: Key, min: f64, max: f64) -> Slide {
@@ -1025,16 +1292,45 @@ impl SettingsWindow {
                 .constraintEqualToAnchor_constant(&detail.leadingAnchor(), MARGIN),
         ]);
 
+        let banner = BannerView::new(mtm);
+        add_pinned(&detail, &banner.frame);
+        activate(&[
+            banner
+                .frame
+                .topAnchor()
+                .constraintEqualToAnchor_constant(&header.bottomAnchor(), 12.0),
+            banner
+                .frame
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(&detail.leadingAnchor(), MARGIN),
+            banner
+                .frame
+                .trailingAnchor()
+                .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -MARGIN),
+        ]);
+
+        // Izgaranın tepesi iki yerden birine bağlı: şerit yokken başlığa,
+        // varken şeride ([`SettingsWindow::layout_panes`]). Şerit gizlenince
+        // yer kaplamıyor, yani ızgara başlığın altına geri çıkıyor.
         let (panes, controls) = self.build_panes();
+        let mut under_header = Vec::new();
+        let mut under_banner = Vec::new();
         for pane in &panes {
             add_pinned(&detail, pane);
-            activate(&[
+            activate(&[pane
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(&detail.leadingAnchor(), MARGIN)]);
+            under_header.push(
                 pane.topAnchor()
                     .constraintEqualToAnchor_constant(&header.bottomAnchor(), 18.0),
-                pane.leadingAnchor()
-                    .constraintEqualToAnchor_constant(&detail.leadingAnchor(), MARGIN),
-            ]);
+            );
+            under_banner.push(
+                pane.topAnchor()
+                    .constraintEqualToAnchor_constant(&banner.frame.bottomAnchor(), 16.0),
+            );
         }
+        activate(&under_header);
+        banner.frame.setHidden(true);
 
         // SAFETY: hedef zayıf referans ve süreç boyunca yaşıyor; seçici bu
         // sınıfın `openFile:`'ı.
@@ -1055,6 +1351,12 @@ impl SettingsWindow {
         ]);
 
         let _ = self.ivars().header.set(header);
+        let _ = self.ivars().banner.set(banner);
+        let _ = self.ivars().pane_tops.set(PaneTops {
+            under_header,
+            under_banner,
+        });
+        let _ = self.ivars().open.set(open);
         let _ = self.ivars().panes.set(panes);
         let _ = self.ivars().controls.set(controls);
         detail
@@ -1068,17 +1370,33 @@ impl SettingsWindow {
         let clipboard = self.switch(Key::Clipboard);
         let scrollback = self.number(Key::Scrollback, 0.0, SCROLLBACK_MAX as f64, 1000.0, 80.0);
         let shell_integration = self.popup::<ShellIntegration>(Key::ShellIntegration);
-        let general = Form::new(mtm);
-        general.row("Confirm before closing:", &confirm_close, None);
+        let mut general = Form::new(mtm);
         general.row(
+            Key::ConfirmClose,
+            "Confirm before closing:",
+            &confirm_close,
+            &[&confirm_close],
+            None,
+        );
+        general.row(
+            Key::Clipboard,
             "Clipboard access:",
             &clipboard,
+            &[&clipboard],
             Some("Lets programs copy to the clipboard, even over ssh (OSC 52)."),
         );
-        general.row("Scrollback lines:", &number_view(mtm, &scrollback), None);
         general.row(
+            Key::Scrollback,
+            "Scrollback lines:",
+            &number_view(mtm, &scrollback),
+            &number_controls(&scrollback),
+            None,
+        );
+        general.row(
+            Key::ShellIntegration,
             "Shell integration:",
             &shell_integration,
+            &[&shell_integration],
             Some("Takes effect in new tabs and windows."),
         );
 
@@ -1095,17 +1413,37 @@ impl SettingsWindow {
             0.1,
             56.0,
         );
-        let appearance = Form::new(mtm);
-        appearance.row("Theme:", &theme, None);
-        let light_label = appearance.row("Light theme:", &light_theme, None);
-        let dark_label = appearance.row(
+        let mut appearance = Form::new(mtm);
+        appearance.row(Key::Theme, "Theme:", &theme, &[&theme], None);
+        appearance.row(
+            Key::LightTheme,
+            "Light theme:",
+            &light_theme,
+            &[&light_theme],
+            None,
+        );
+        appearance.row(
+            Key::DarkTheme,
             "Dark theme:",
             &dark_theme,
+            &[&dark_theme],
             Some("Used when Theme is Match System."),
         );
-        appearance.row("Font:", &font, None);
-        appearance.row("Size:", &number_view(mtm, &size), None);
-        appearance.row("Line height:", &number_view(mtm, &line_height), None);
+        appearance.row(Key::Font, "Font:", &font, &[&font], None);
+        appearance.row(
+            Key::Size,
+            "Size:",
+            &number_view(mtm, &size),
+            &number_controls(&size),
+            None,
+        );
+        appearance.row(
+            Key::LineHeight,
+            "Line height:",
+            &number_view(mtm, &line_height),
+            &number_controls(&line_height),
+            None,
+        );
 
         // Cursor
         let shape = self.popup::<CaretShape>(Key::Shape);
@@ -1122,23 +1460,47 @@ impl SettingsWindow {
             *CURSOR_GLOW_RANGE.end(),
         );
         let unfocused = self.popup::<UnfocusedCaret>(Key::Unfocused);
-        let cursor = Form::new(mtm);
+        let mut cursor = Form::new(mtm);
         cursor.row(
+            Key::Shape,
             "Shape:",
             &shape,
+            &[&shape],
             Some("Programs like vim can change it while they run."),
         );
         cursor.row(
+            Key::Blink,
             "Blink:",
             &blink,
+            &[&blink],
             Some("Follow program blinks only when the running program asks."),
         );
-        let blink_speed_label = cursor.row("Blink speed:", &slide_view(mtm, &blink_speed), None);
-        cursor.row("Corner radius:", &slide_view(mtm, &radius), None);
-        cursor.row("Glow:", &slide_view(mtm, &glow), None);
         cursor.row(
+            Key::BlinkSpeed,
+            "Blink speed:",
+            &slide_view(mtm, &blink_speed),
+            &[&blink_speed.slider],
+            None,
+        );
+        cursor.row(
+            Key::Radius,
+            "Corner radius:",
+            &slide_view(mtm, &radius),
+            &[&radius.slider],
+            None,
+        );
+        cursor.row(
+            Key::Glow,
+            "Glow:",
+            &slide_view(mtm, &glow),
+            &[&glow.slider],
+            None,
+        );
+        cursor.row(
+            Key::Unfocused,
             "When unfocused:",
             &unfocused,
+            &[&unfocused],
             Some("How the cursor looks in a window that is not active."),
         );
 
@@ -1146,19 +1508,33 @@ impl SettingsWindow {
         let cursor_motion = self.popup::<CursorMotion>(Key::CursorMotion);
         let smooth_scroll = self.switch(Key::SmoothScroll);
         let reduce_motion = self.popup::<ReduceMotion>(Key::ReduceMotion);
-        let motion = Form::new(mtm);
+        let mut motion = Form::new(mtm);
         motion.row(
+            Key::CursorMotion,
             "Cursor motion:",
             &cursor_motion,
+            &[&cursor_motion],
             Some("How the cursor travels to its new place."),
         );
-        motion.row("Smooth scrolling:", &smooth_scroll, None);
         motion.row(
+            Key::SmoothScroll,
+            "Smooth scrolling:",
+            &smooth_scroll,
+            &[&smooth_scroll],
+            None,
+        );
+        motion.row(
+            Key::ReduceMotion,
             "Reduce motion:",
             &reduce_motion,
+            &[&reduce_motion],
             Some("On turns animations into fades and instant jumps."),
         );
 
+        let rows = [general.rows, appearance.rows, cursor.rows, motion.rows]
+            .into_iter()
+            .flatten()
+            .collect();
         let panes = vec![general.grid, appearance.grid, cursor.grid, motion.grid];
         let controls = Controls {
             confirm_close,
@@ -1167,24 +1543,114 @@ impl SettingsWindow {
             shell_integration,
             theme,
             light_theme,
-            light_label,
             dark_theme,
-            dark_label,
             font,
             size,
             line_height,
             shape,
             blink,
             blink_speed,
-            blink_speed_label,
             radius,
             glow,
             unfocused,
             cursor_motion,
             smooth_scroll,
             reduce_motion,
+            rows,
         };
         (panes, controls)
+    }
+}
+
+/// Izgaraların tepesini bağlayan iki kısıt takımı; biri etkin.
+struct PaneTops {
+    under_header: Vec<Retained<NSLayoutConstraint>>,
+    under_banner: Vec<Retained<NSLayoutConstraint>>,
+}
+
+/// Şeridin görünümü: hafif turuncu zeminli yuvarlak bir kutu, solda uyarı
+/// sembolü, sağda metin ve altında ikincil renkte ne yapılacağı. Renkler
+/// sistemin anlamsal renkleri — açık ve koyu görünümde ayrı ayrı doğru.
+struct BannerView {
+    frame: Retained<NSBox>,
+    lines: Retained<NSTextField>,
+    hint: Retained<NSTextField>,
+}
+
+impl BannerView {
+    fn new(mtm: MainThreadMarker) -> Self {
+        let frame = NSBox::new(mtm);
+        frame.setBoxType(NSBoxType::Custom);
+        frame.setTitlePosition(NSTitlePosition::NoTitle);
+        frame.setCornerRadius(8.0);
+        frame.setBorderWidth(1.0);
+        let orange = NSColor::systemOrangeColor();
+        frame.setFillColor(&orange.colorWithAlphaComponent(0.10));
+        frame.setBorderColor(&orange.colorWithAlphaComponent(0.35));
+        frame.setContentViewMargins(NSSize::new(10.0, 8.0));
+
+        let icon = NSImageView::new(mtm);
+        if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            ns_string!("exclamationmark.triangle.fill"),
+            None,
+        ) {
+            icon.setImage(Some(&image));
+        }
+        icon.setContentTintColor(Some(&orange));
+        let lines = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+        lines.setPreferredMaxLayoutWidth(BANNER_TEXT_WIDTH);
+        let hint = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+        hint.setFont(Some(&NSFont::systemFontOfSize(
+            NSFont::smallSystemFontSize(),
+        )));
+        hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        hint.setPreferredMaxLayoutWidth(BANNER_TEXT_WIDTH);
+
+        let text = NSStackView::stackViewWithViews(
+            &NSArray::from_slice(&[lines.as_super().as_super(), hint.as_super().as_super()]),
+            mtm,
+        );
+        text.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+        text.setAlignment(NSLayoutAttribute::Leading);
+        text.setSpacing(2.0);
+        let content = NSView::new(mtm);
+        add_pinned(&content, &icon);
+        add_pinned(&content, &text);
+        activate(&[
+            icon.leadingAnchor()
+                .constraintEqualToAnchor(&content.leadingAnchor()),
+            icon.firstBaselineAnchor()
+                .constraintEqualToAnchor(&lines.firstBaselineAnchor()),
+            icon.widthAnchor().constraintEqualToConstant(16.0),
+            text.leadingAnchor()
+                .constraintEqualToAnchor_constant(&icon.trailingAnchor(), 8.0),
+            text.trailingAnchor()
+                .constraintLessThanOrEqualToAnchor(&content.trailingAnchor()),
+            text.topAnchor()
+                .constraintEqualToAnchor(&content.topAnchor()),
+            text.bottomAnchor()
+                .constraintEqualToAnchor(&content.bottomAnchor()),
+        ]);
+        frame.setContentView(Some(&content));
+        BannerView { frame, lines, hint }
+    }
+
+    /// Şeridi kurar; satırı yoksa gizler.
+    fn show(&self, banner: &Banner) {
+        if banner.lines.is_empty() {
+            self.frame.setHidden(true);
+            return;
+        }
+        self.lines
+            .setStringValue(&NSString::from_str(&banner.lines.join("\n")));
+        match banner.hint {
+            Some(hint) => {
+                self.hint.setStringValue(&NSString::from_str(hint));
+                self.hint.setHidden(false);
+            }
+            None => self.hint.setHidden(true),
+        }
+        self.frame.setHidden(false);
     }
 }
 
@@ -1193,6 +1659,7 @@ impl SettingsWindow {
 struct Form {
     mtm: MainThreadMarker,
     grid: Retained<NSGridView>,
+    rows: Vec<Row>,
 }
 
 impl Form {
@@ -1201,11 +1668,24 @@ impl Form {
         grid.setRowSpacing(6.0);
         grid.setColumnSpacing(10.0);
         grid.setRowAlignment(NSGridRowAlignment::FirstBaseline);
-        Form { mtm, grid }
+        Form {
+            mtm,
+            grid,
+            rows: Vec::new(),
+        }
     }
 
-    /// Satırı ekler, etiketini döndürür (bağımlı satırın soluklaşması için).
-    fn row(&self, label: &str, control: &NSView, note: Option<&str>) -> Retained<NSTextField> {
+    /// Satırı ve altındaki not satırını ekler. Not satırı açıklaması olmayan
+    /// satırda da var — gizli; kabul edilmeyen değerin tanısı oraya çıkıyor
+    /// (Karar 7).
+    fn row(
+        &mut self,
+        key: Key,
+        label: &str,
+        control: &NSView,
+        controls: &[&NSControl],
+        description: Option<&'static str>,
+    ) {
         let mtm = self.mtm;
         let text = NSTextField::labelWithString(&NSString::from_str(label), mtm);
         let first = self.grid.numberOfRows() == 0;
@@ -1221,20 +1701,26 @@ impl Form {
             labels.setXPlacement(NSGridCellPlacement::Trailing);
             labels.setWidth(LABEL_WIDTH);
         }
-        if let Some(note) = note {
-            let empty = NSGridCell::emptyContentView(mtm);
-            let note = NSTextField::wrappingLabelWithString(&NSString::from_str(note), mtm);
-            note.setFont(Some(&NSFont::systemFontOfSize(
-                NSFont::smallSystemFontSize(),
-            )));
-            note.setTextColor(Some(&NSColor::secondaryLabelColor()));
-            note.setPreferredMaxLayoutWidth(NOTE_WIDTH);
-            let row = self
-                .grid
-                .addRowWithViews(&NSArray::from_slice(&[&*empty, note.as_super().as_super()]));
-            row.setTopPadding(-2.0);
-        }
-        text
+        let empty = NSGridCell::emptyContentView(mtm);
+        let note = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+        note.setFont(Some(&NSFont::systemFontOfSize(
+            NSFont::smallSystemFontSize(),
+        )));
+        note.setPreferredMaxLayoutWidth(NOTE_WIDTH);
+        let note_row = self
+            .grid
+            .addRowWithViews(&NSArray::from_slice(&[&*empty, note.as_super().as_super()]));
+        note_row.setTopPadding(-2.0);
+        let row = Row {
+            key,
+            label: text,
+            controls: controls.iter().map(|control| control.retain()).collect(),
+            note,
+            note_row,
+            description,
+        };
+        row.set_note(None, true);
+        self.rows.push(row);
     }
 }
 
@@ -1248,6 +1734,12 @@ fn number_view(mtm: MainThreadMarker, number: &Number) -> Retained<NSView> {
         ],
         4.0,
     )
+}
+
+/// Alanın ve stepper'ın ikisi de satırın kontrolü (kilit ikisini birden
+/// kapatıyor).
+fn number_controls(number: &Number) -> [&NSControl; 2] {
+    [&number.field, &number.stepper]
 }
 
 /// Slider + değer etiketi yan yana.
@@ -1343,25 +1835,28 @@ fn set_switch(switch: &NSSwitch, on: bool) {
     });
 }
 
+/// Alanı ve stepper'ı dosyanın değerine kurar.
+///
+/// - **Düzenlenmekte olan alana dokunulmaz**: tazeleme her kayıtta geliyor
+///   (dışarıdan kayıt, başka bir kontrolün yazması, izleyicinin ardından
+///   gelen olayı) ve değer atamak düzenlemeyi iptal edip yazılanı silerdi.
+///   Gösterilen değer yine güncellenir; alanın eylemi ona bakıyor.
+/// - **Stepper'ın aralığı dosyadaki değeri kapsar**: `size = 100` ayrıştırıcı
+///   için geçerli ve stepper onu 72'ye kırpsaydı "yukarı" tıkı küçültürdü.
 fn set_number(number: &Number, value: f64, text: &str) {
-    number.field.setStringValue(&NSString::from_str(text));
+    *number.shown.borrow_mut() = (value, text.to_owned());
+    if number.field.currentEditor().is_none() {
+        number.field.setStringValue(&NSString::from_str(text));
+    }
+    let (min, max) = number.range;
+    number.stepper.setMinValue(min.min(value));
+    number.stepper.setMaxValue(max.max(value));
     number.stepper.setDoubleValue(value);
 }
 
 fn set_slide(slide: &Slide, position: f64, text: &str) {
     slide.slider.setDoubleValue(position);
     slide.value.setStringValue(&NSString::from_str(text));
-}
-
-/// Bağımlı satır: kontrol devre dışı, etiket soluk — gizlenmiyor (Karar 6).
-fn set_enabled(control: &NSControl, label: &NSTextField, enabled: bool) {
-    control.setEnabled(enabled);
-    let color = if enabled {
-        NSColor::labelColor()
-    } else {
-        NSColor::disabledControlTextColor()
-    };
-    label.setTextColor(Some(&color));
 }
 
 fn fill_themes(popup: &NSPopUpButton, items: &[ThemeItem], selected: usize) {
@@ -1417,6 +1912,8 @@ fn fill_popup(
 
 #[cfg(test)]
 mod tests {
+    use bt_core::Diagnostic;
+
     use super::*;
 
     /// Her popup'ın başlıkları `NAMES`'in her varyantını kapsıyor, boş ve
@@ -1436,6 +1933,104 @@ mod tests {
         }
         assert_eq!(choice_at::<T>(-1), None);
         assert_eq!(choice_at::<T>(titles.len() as NSInteger), None);
+    }
+
+    /// Her satırın anahtarı ayrıştırıcının tanısında geçen anahtarın ta
+    /// kendisi: bütün anahtarları yanlış türde yazan bir dosyanın tanıları
+    /// satırlara bire bir düşüyor, eşleşmeyen ne tanı ne satır kalıyor.
+    #[test]
+    fn every_row_receives_its_own_diagnostic() {
+        let text = "[terminal]\nscrollback = []\ncursor = []\ncursor_blink = []\n\
+                    cursor_radius = []\ncursor_glow = []\ncursor_unfocused = []\n\
+                    cursor_blink_interval = []\nconfirm_close = []\n\
+                    [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
+                    [font]\nfamily = []\nsize = []\nline_height = []\n\
+                    [clipboard]\nosc52 = []\n\
+                    [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
+                    [shell]\nintegration = []\n";
+        let parsed = Settings::parse_keeping(text, &Settings::default()).expect("ayrıştırılır");
+        let seen = status(&FileState::Usable(parsed.diagnostics), &[]);
+        assert_eq!(seen.banner, Banner::default(), "eşleşmeyen tanı yok");
+        let mut keys: Vec<Key> = seen.rows.iter().map(|(key, _)| *key).collect();
+        keys.sort_by_key(|key| key.tag());
+        assert_eq!(keys, Key::ALL);
+        // Yazma tarafı da aynı yolu söylüyor: satırın düzenlemesi, satırın
+        // anahtarı (yazma reddinin tanısı da o satıra düşsün).
+        for key in Key::ALL {
+            let edit = match key {
+                Key::ConfirmClose => SettingsEdit::ConfirmClose(ConfirmClose::Never),
+                Key::Clipboard => SettingsEdit::Osc52(Osc52::Off),
+                Key::Scrollback => SettingsEdit::Scrollback(1),
+                Key::ShellIntegration => SettingsEdit::ShellIntegration(ShellIntegration::Off),
+                Key::Theme => SettingsEdit::Theme(String::new()),
+                Key::LightTheme => SettingsEdit::LightTheme(String::new()),
+                Key::DarkTheme => SettingsEdit::DarkTheme(String::new()),
+                Key::Font => SettingsEdit::FontFamily(String::new()),
+                Key::Size => SettingsEdit::FontSize(13.0),
+                Key::LineHeight => SettingsEdit::LineHeight(1.0),
+                Key::Shape => SettingsEdit::Cursor(CaretShape::Beam),
+                Key::Blink => SettingsEdit::CursorBlink(CursorBlink::On),
+                Key::BlinkSpeed => SettingsEdit::BlinkInterval(0.5),
+                Key::Radius => SettingsEdit::CursorRadius(0.1),
+                Key::Glow => SettingsEdit::CursorGlow(0.5),
+                Key::Unfocused => SettingsEdit::CursorUnfocused(UnfocusedCaret::Solid),
+                Key::CursorMotion => SettingsEdit::CursorMotion(CursorMotion::Snap),
+                Key::SmoothScroll => SettingsEdit::SmoothScroll(SmoothScroll::On),
+                Key::ReduceMotion => SettingsEdit::ReduceMotion(ReduceMotion::On),
+            };
+            assert_eq!(edit.path(), key.path(), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn file_state_decides_lock_banner_and_rows() {
+        // Dosya yok: açık, şeritsiz, satırlar açıklamalarıyla.
+        assert_eq!(
+            status(&FileState::Missing, &[]),
+            Status {
+                locked: false,
+                banner: Banner::default(),
+                rows: Vec::new(),
+            }
+        );
+
+        // Kilit: sebep alt başlıktakinin aynısı, altında ne yapılacağı.
+        let reason = "settings.toml: line 1: invalid TOML".to_owned();
+        let seen = status(&FileState::Locked(reason.clone()), &[]);
+        assert!(seen.locked);
+        assert_eq!(seen.banner.lines, [reason]);
+        assert_eq!(seen.banner.hint, Some(LOCK_HINT));
+        assert!(seen.rows.is_empty());
+
+        // Kabul edilmeyen değer kendi satırında, yalnız iletisiyle; satıra
+        // düşmeyen tanı (emekli anahtar) şeritte, alt başlıktaki biçimiyle.
+        let rejected = Diagnostic {
+            key: Some("terminal.cursor"),
+            line: Some(2),
+            message: "`terminal.cursor` must be one of …".to_owned(),
+        };
+        let retired = Diagnostic {
+            key: None,
+            line: Some(4),
+            message: "`shell.prompt` is no longer read".to_owned(),
+        };
+        let seen = status(&FileState::Usable(vec![rejected, retired]), &[]);
+        assert!(!seen.locked);
+        assert_eq!(
+            seen.rows,
+            [(Key::Shape, "`terminal.cursor` must be one of …".to_owned())]
+        );
+        assert_eq!(
+            seen.banner.lines,
+            ["settings.toml: line 4: `shell.prompt` is no longer read"]
+        );
+        assert_eq!(seen.banner.hint, None);
+
+        // Yazma hatası şeridin başında, kilitsiz.
+        let write = ["settings.toml could not be written: denied".to_owned()];
+        let seen = status(&FileState::Usable(Vec::new()), &write);
+        assert!(!seen.locked);
+        assert_eq!(seen.banner.lines, write);
     }
 
     #[test]

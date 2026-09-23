@@ -72,12 +72,13 @@ objc2-foundation = { workspace = true, features = [
 # (`NSGridView`, `NSStackView`, `NSTextField`, `NSPopUpButton`, `NSSlider`,
 # `NSStepper`, `NSSwitch`, `NSFont`, `NSFontDescriptor` — değer etiketinin
 # sabit genişlikli rakamları, `NSText`) ve yerleşim (`NSLayoutConstraint`, `NSLayoutAnchor`,
-# `NSLayoutGuide` — başlık çubuğunun altı, `NSUserInterfaceLayout`). Hepsi `objc2-app-kit`'in yalnız başlık açan
+# `NSLayoutGuide` — başlık çubuğunun altı, `NSUserInterfaceLayout`) ve bozuk
+# dosyanın şeridi (`NSBox`, phase-3). Hepsi `objc2-app-kit`'in yalnız başlık açan
 # bayrakları — bağımlılık olarak yalnız `objc2-foundation`'ın başlıklarını ve
 # grafta zaten olan `bitflags`'i istiyorlar; yeni crate değil, `Cargo.lock`
 # oynamadı. Karar kaydı .tasks/029-ayarlar-penceresi/discussion.md → Karar 4.
 objc2-app-kit = { workspace = true, features = [
-    "NSAccessibility", "NSAlert", "NSAppearance", "NSButton", "NSCell", "NSClipView",
+    "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
     "NSImageView", "NSLayoutAnchor", "NSLayoutConstraint", "NSLayoutGuide", "NSMenu", "NSMenuItem",
     "NSPopUpButton", "NSScrollView", "NSSlider", "NSSplitView", "NSSplitViewController",

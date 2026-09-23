@@ -694,6 +694,13 @@ pub enum SettingsEdit {
 }
 
 impl SettingsEdit {
+    /// Düzenlenen anahtarın noktalı yolu (`terminal.cursor`) — ayrıştırıcının
+    /// tanısında geçen [`Diagnostic::key`]'in aynısı; ayar penceresi satırını
+    /// bununla buluyor.
+    pub fn path(&self) -> &'static str {
+        self.place().2
+    }
+
     /// Bölüm, anahtar ve tanının taşıdığı noktalı yol (`Diagnostic::key`
     /// `'static` istiyor, o yüzden üçü de sabit).
     fn place(&self) -> (&'static str, &'static str, &'static str) {

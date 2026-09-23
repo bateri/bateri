@@ -363,11 +363,50 @@ impl ThemeLoaded {
 
 /// Bir tanının alt başlıktaki ve stderr'deki biçimi; iki kolun ve canlı
 /// yenilemenin (phase-4) aynı biçimi kullanması için tek yerde.
-fn notice(diagnostic: &Diagnostic) -> String {
+pub(crate) fn notice(diagnostic: &Diagnostic) -> String {
     format!("{FILE_NAME}: {diagnostic}")
 }
 
+/// Dosyanın, ayar penceresinin gördüğü hâli (029 Karar 7) — ve alt başlığın
+/// ayar yuvasındaki metnin **kaynağı** ([`FileState::notices`]): pencerenin
+/// şeridi ile alt başlık aynı cümleyi söylüyor, iki metin üretilmiyor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FileState {
+    /// Dosya yok ya da boş: kontroller açık, ilk değişiklik dosyayı yaratır.
+    Missing,
+    /// Okunamadı ya da ayrıştırılamadı: yazma reddedilecek, pencere kilitli.
+    /// Metin alt başlığınkinin ta kendisi.
+    Locked(String),
+    /// Ayrıştırıldı; tanılar kabul edilmeyen anahtarlar (anahtarlarıyla —
+    /// pencere onları kendi satırlarına eşliyor).
+    Usable(Vec<Diagnostic>),
+}
+
+impl FileState {
+    /// Alt başlığın ayar yuvasına gidecek iletiler.
+    pub(crate) fn notices(&self) -> Vec<String> {
+        match self {
+            FileState::Missing => Vec::new(),
+            FileState::Locked(reason) => vec![reason.clone()],
+            FileState::Usable(diagnostics) => diagnostics.iter().map(notice).collect(),
+        }
+    }
+}
+
 impl Loaded {
+    /// Okumanın pencereye ve alt başlığa giden hâli; hangi ayarların
+    /// uygulanacağı ayrı soru ([`Loaded::at_launch`], [`Loaded::live`]).
+    pub(crate) fn state(&self) -> FileState {
+        match self {
+            Loaded::Missing => FileState::Missing,
+            Loaded::Unreadable(err) => {
+                FileState::Locked(format!("{FILE_NAME} could not be read: {err}"))
+            }
+            Loaded::Unparseable(diagnostic) => FileState::Locked(notice(diagnostic)),
+            Loaded::Parsed(parsed) => FileState::Usable(parsed.diagnostics.clone()),
+        }
+    }
+
     /// Açılışın kuralı: kullanılacak ayarlar ve alt başlığa gidecek tanılar.
     ///
     /// Okunamayan ya da ayrıştırılamayan dosyada **varsayılanlar**, OSC 52
@@ -377,20 +416,13 @@ impl Loaded {
     /// Ayrıştırılan dosyada her anahtar kendi değerini ya da varsayılanını
     /// zaten aldı.
     pub(crate) fn at_launch(self) -> (Settings, Vec<String>) {
-        match self {
-            Loaded::Missing => (Settings::default(), Vec::new()),
-            Loaded::Unreadable(err) => (
-                Settings::for_unusable_file(),
-                vec![format!("{FILE_NAME} could not be read: {err}")],
-            ),
-            Loaded::Unparseable(diagnostic) => {
-                (Settings::for_unusable_file(), vec![notice(&diagnostic)])
-            }
-            Loaded::Parsed(parsed) => (
-                parsed.settings,
-                parsed.diagnostics.iter().map(notice).collect(),
-            ),
-        }
+        let notices = self.state().notices();
+        let settings = match self {
+            Loaded::Missing => Settings::default(),
+            Loaded::Unreadable(_) | Loaded::Unparseable(_) => Settings::for_unusable_file(),
+            Loaded::Parsed(parsed) => parsed.settings,
+        };
+        (settings, notices)
     }
 
     /// Canlı yenilemenin kuralı: uygulanacak ayarlar (`None` → **hiçbir
@@ -406,17 +438,12 @@ impl Loaded {
     ///   silen ya da boşaltan kullanıcı varsayılanları yeniden açılışta görür
     ///   (`docs/AYARLAR.md`).
     pub(crate) fn live(self) -> (Option<Settings>, Vec<String>) {
-        match self {
-            Loaded::Missing => (None, Vec::new()),
-            Loaded::Unreadable(err) => {
-                (None, vec![format!("{FILE_NAME} could not be read: {err}")])
-            }
-            Loaded::Unparseable(diagnostic) => (None, vec![notice(&diagnostic)]),
-            Loaded::Parsed(parsed) => (
-                Some(parsed.settings),
-                parsed.diagnostics.iter().map(notice).collect(),
-            ),
-        }
+        let notices = self.state().notices();
+        let settings = match self {
+            Loaded::Missing | Loaded::Unreadable(_) | Loaded::Unparseable(_) => None,
+            Loaded::Parsed(parsed) => Some(parsed.settings),
+        };
+        (settings, notices)
     }
 }
 
@@ -974,6 +1001,47 @@ mod tests {
             notices[0].starts_with("settings.toml: line 4: `appearance.theme`"),
             "{notices:?}"
         );
+    }
+
+    #[test]
+    fn file_state_is_what_the_subtitle_says() {
+        // Üç hâl ve dosyasızlık; alt başlığın metni hâlin kendisinden, yani
+        // pencerenin şeridi ile alt başlık aynı cümleyi söylüyor.
+        let root = TempRoot::new("state");
+        let path = root.0.join(FILE_NAME);
+        assert_eq!(load(&root.0).state(), FileState::Missing);
+        assert_eq!(FileState::Missing.notices(), Vec::<String>::new());
+
+        std::fs::write(&path, "[terminal]\ncursor = \"bar\"\n").expect("yazılamadı");
+        let loaded = load(&root.0);
+        let state = loaded.state();
+        let FileState::Usable(diagnostics) = &state else {
+            panic!("ayrıştırılan dosya kullanılabilir: {state:?}");
+        };
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].key, Some("terminal.cursor"));
+        assert_eq!(state.notices(), loaded.live().1);
+
+        std::fs::write(&path, "[terminal\n").expect("yazılamadı");
+        let loaded = load(&root.0);
+        let state = loaded.state();
+        let FileState::Locked(reason) = &state else {
+            panic!("ayrıştırılamayan dosya kilitli: {state:?}");
+        };
+        assert!(reason.starts_with("settings.toml: line 1: "), "{reason}");
+        assert_eq!(state.notices(), loaded.at_launch().1);
+
+        std::fs::remove_file(&path).expect("silinemedi");
+        std::os::unix::fs::symlink(root.0.join("moved.toml"), &path).expect("bağ kurulamadı");
+        let loaded = load(&root.0);
+        assert_eq!(
+            loaded.state(),
+            FileState::Locked(
+                "settings.toml could not be read: symbolic link points to a missing file"
+                    .to_owned()
+            )
+        );
+        assert_eq!(loaded.state().notices(), loaded.live().1);
     }
 
     #[test]

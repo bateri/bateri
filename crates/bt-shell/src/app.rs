@@ -682,6 +682,10 @@ pub(crate) struct Ivars {
     /// **değil** — [`Ivars::windows`]'a girmiyor, yani ⌘Q'nun onayı, ayar
     /// yayılımı ve sekme işleri onu görmüyor. Süreli koşuda hiç doğmuyor.
     settings_window: RefCell<Option<Retained<SettingsWindow>>>,
+    /// Ayar dosyasının son okunuşundaki hâli (029 Karar 7): ayar penceresinin
+    /// kilidi ve satır tanıları buradan. Açılışta ve her canlı okumada
+    /// yazılıyor, yani pencere sonradan açılsa da dosyanın hâlini görüyor.
+    settings_state: RefCell<settings::FileState>,
 }
 
 define_class!(
@@ -1499,6 +1503,7 @@ impl AppDelegate {
             next_window_id: Cell::new(0),
             appearance_dark: Cell::new(None),
             settings_window: RefCell::new(None),
+            settings_state: RefCell::new(settings::FileState::Missing),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
@@ -1730,7 +1735,9 @@ impl AppDelegate {
         let (settings, messages) = match &config_root {
             Some(root) => {
                 self.watch_config(root);
-                settings::load(root).at_launch()
+                let loaded = settings::load(root);
+                self.ivars().settings_state.replace(loaded.state());
+                loaded.at_launch()
             }
             None => (
                 Settings::for_unusable_file(),
@@ -1817,8 +1824,9 @@ impl AppDelegate {
         self.watch_config(&root);
         // Kabul edilmeyen değer geçerli ayardan (`load_keeping`): yanlış
         // türde kaydedilen `scrollback` geçmişi kırpmasın.
-        let (loaded, messages) =
-            settings::load_keeping(&root, &self.ivars().settings.borrow()).live();
+        let loaded = settings::load_keeping(&root, &self.ivars().settings.borrow());
+        self.ivars().settings_state.replace(loaded.state());
+        let (loaded, messages) = loaded.live();
         self.post_notices(Source::Settings, messages);
         if let Some(new) = loaded {
             let changes = {
@@ -1905,10 +1913,10 @@ impl AppDelegate {
     ///   dizin yeni doğduysa onu hiçbir kaynak görmüyordu. Şablon
     ///   varsayılanları söylüyor; dosyasız kullanıcıda fark boş, ekran
     ///   değişmez.
-    /// - **Hata ayar yuvasına, okumanın tanılarının arkasına** ekleniyor:
-    ///   okuma yuvayı dosyanın hâline göre yeniden yazdığı için önce
-    ///   yazılsaydı hemen silinirdi. Sonraki kayıt ya da "Settings…" yuvayı
-    ///   yeniden kurar.
+    /// - **Hata yazma yuvasına, okumadan sonra**: okuma o yuvayı dosya
+    ///   uygulanınca boşaltıyor, önce yazılsaydı hemen silinirdi. Yuva ayar
+    ///   penceresinin şeridinde de görünüyor (düğme orada); sonraki başarılı
+    ///   okuma ya da yazma onu boşaltır.
     pub(crate) fn edit_settings(&self) {
         let Inputs::User {
             config_root: Some(root),
@@ -1930,10 +1938,12 @@ impl AppDelegate {
             )),
             Ok(_) => None,
         };
+        // Yazma yuvasına: düğmeye basılan ayar penceresi o yuvayı şeridinde
+        // gösteriyor — terminal penceresi hiç yokken alt başlık da yok.
+        // Okuma yuvayı boşalttıktan sonra yazılıyor, yani görünür kalıyor.
         if let Some(problem) = problem {
-            let mut messages = self.ivars().notices.borrow().get(Source::Settings).to_vec();
-            messages.push(problem);
-            self.post_notices(Source::Settings, messages);
+            self.post_notices(Source::Write, vec![problem]);
+            self.refresh_settings_window();
         }
     }
 
@@ -1993,18 +2003,33 @@ impl AppDelegate {
             .borrow_mut()
             .get_or_insert_with(|| SettingsWindow::new(self.mtm()))
             .clone();
-        self.refresh_settings_window();
+        // Önce göster: tazeleme kapalı pencereyi atlıyor. İkisi aynı ana
+        // kuyruk turunda, arada bir kare çizilmiyor.
         window.show();
+        self.refresh_settings_window();
     }
 
     /// Açık (ya da gizli) ayar penceresini etkin ayarla doldurur; pencere
     /// hiç doğmadıysa no-op. Ayar ödüncü pencereye girmeden **kopyalanıyor**:
     /// bu yol bir kontrolün eyleminden (yaz → `reload_settings` → buraya)
     /// koşuyor ve pencere geri dönüp delegate'e uzanabiliyor.
+    ///
+    /// Dosyanın hâli [`Ivars::settings_state`]'ten, yazma hatası alt başlığın
+    /// yazma yuvasından (029 Karar 7): ikisi de tek kaynak, pencere kendi
+    /// kopyasını tutmuyor. Yazma yuvası başarılı yazmada ve dosya okunup
+    /// uygulanınca boşalıyor, yani şerit de o an kalkıyor.
+    ///
+    /// Kapalı pencere tazelenmez: her kayıtta tema dizinini okumak, dört
+    /// popup'ı yeniden kurmak ve eksik font için CoreText açmak kimsenin
+    /// görmediği bir iş olurdu; yeniden açılış tazeliyor
+    /// ([`AppDelegate::show_settings_window`]).
     pub(crate) fn refresh_settings_window(&self) {
         let Some(window) = self.ivars().settings_window.borrow().clone() else {
             return;
         };
+        if !window.is_open() {
+            return;
+        }
         let Inputs::User {
             config_root: Some(root),
         } = self.inputs()
@@ -2012,9 +2037,11 @@ impl AppDelegate {
             return;
         };
         let settings = self.ivars().settings.borrow().clone();
+        let state = self.ivars().settings_state.borrow().clone();
+        let write = self.ivars().notices.borrow().get(Source::Write).to_vec();
         let embedded: Vec<&str> = Theme::embedded_names().collect();
         let user = settings::user_theme_names(&root);
-        window.refresh(&settings, &embedded, &user);
+        window.refresh(&settings, &state, &write, &embedded, &user);
     }
 
     /// Ayar dizininin kaynaklarını yeniden kurar. Yenisi eskisi düşmeden
