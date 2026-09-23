@@ -49,10 +49,17 @@
 //! yaşıyor ([`crate::blink`]) ve tetiği saat. [`Waker::resume`] hasar
 //! dikmediği için uyanan callback "hasar yok" dalına düşüyor ve orada bugünkü
 //! hareket karesi çiziliyor — ızgara taraması yok, `Term` kilidi yok,
-//! `bt-core` yolculuğu yok. **Uyku testi bu yüzden üç soru soruyor:** blink
+//! `bt-core` yolculuğu yok. **Uyku testi bu yüzden üç soru soruyor** (030'dan
+//! beri dört — yazım efektleri de `Motion`'ın dışında, aşağıda): blink
 //! `Motion`'ın dışında olduğu için `settled()` onu görmüyor ve bekleyen bir
 //! faz değişimi sorulmasaydı `resume` kare üretmeyen bir uyan/uyu fırdöndüsü
 //! yaratırdı.
+//!
+//! **Dock'un yazım efektleri de hareket yolundan** (030,
+//! [`crate::glyph_fx`]): `Motion`'ın dışında yaşıyorlar (blink emsali) ve
+//! uyku testine kendi adlı terimleriyle giriyorlar — uçuşta bir geliş ya da
+//! hayalet varken link uyumuyor, liste boşalınca uyuyor. Hasar dikmiyorlar:
+//! efektin sürdüğü kare `kare`'yi artırıyor, `icerik`'i değil.
 //!
 //! Sözleşmenin sonucu tek cümlede: koşan komutu **ya da sönen bir imleci**
 //! olan pencere **boşta değildir**; kalan her pencere boştadır ve sıfır kare
@@ -67,8 +74,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    Blocks, CaretStyle, Cursor, CursorMotion, DirtyFlag, DockCols, DockContext, DockState,
-    LinearRgba, Session, Theme,
+    Blocks, CaretStyle, Cursor, CursorMotion, DOCK_TEXT_COL, DirtyFlag, DockCols, DockContext,
+    DockState, LinearRgba, Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -85,6 +92,7 @@ use objc2_quartz_core::{
 
 use crate::blink::Blink;
 use crate::frame::Frame;
+use crate::glyph_fx::GlyphFx;
 use crate::motion::Motion;
 use crate::renderer::{CellMetrics, Completion};
 use crate::stats::Stats;
@@ -639,6 +647,14 @@ struct LinkIvars {
     /// `frame` ödüncünün yanında ikinci bir çalışma-zamanı ödüncü demek
     /// olurdu ve kazandırdığı hiçbir şey yok.
     motion: Cell<Motion>,
+    /// Dock'un yazım efektleri (030): uçuştaki gelişler ve hayaletler.
+    ///
+    /// **`motion`'ın içinde değil yanında** ve `RefCell`: liste `Copy`
+    /// değil, `Motion`'ı `Copy`'den çıkarmak ya da her `get`/`set`'te
+    /// kopyalatmak bedeldi (`.tasks/030-dock-yazim-animasyonlari/discussion.md`
+    /// → Karar 4). Ödüncü yalnız bu callback ve `DisplayLink`'in ayar
+    /// yolları alıyor, ikisi de ana thread ve çağrı sınırında bırakıyor.
+    glyph_fx: RefCell<GlyphFx>,
     /// Geometri (pencere, font, zoom) oynadı: sıradaki içerik karesi imleci
     /// animasyonsuz taşısın.
     ///
@@ -822,7 +838,16 @@ define_class!(
                 let mut blink = iv.blink.get();
                 let flipped = blink.advance(now);
                 iv.blink.set(blink);
-                if motion.settled() && !flipped {
+                // **Dördüncü soru: yazım efektleri** (030). Soru `advance`'ten
+                // **önce** soruluyor: bu adımda biten bir efektin son hâli
+                // (geliş statik glyph'ine oturdu, hayalet kalktı) henüz
+                // çizilmedi ve uyunsaydı ekranda yarı saydam bir harf asılı
+                // kalırdı. Liste bu karede boşaldıysa kare çiziliyor, sıradaki
+                // callback uyuyor.
+                let mut glyph_fx = iv.glyph_fx.borrow_mut();
+                let fx_idle = glyph_fx.is_empty();
+                glyph_fx.advance(dt);
+                if at_rest(motion, flipped, fx_idle) {
                     // Boşta sıfır kare: yeni içerik de yerleşmemiş animasyon
                     // da yok, link uyur. Sıradaki `Wakeup` onu `Waker`
                     // üzerinden geri açar.
@@ -875,6 +900,11 @@ define_class!(
                         // ve hareket karesi de ona erişiyor.
                         iv.focused.get(),
                     );
+                }
+                // Dock'un statik listeleri korunuyor, yalnız efektler
+                // yeniden basılıyor (`move_caret` emsali).
+                if !fx_idle {
+                    frame.set_dock_fx(glyph_fx.iter());
                 }
                 // CPU örneği **yazılmıyor** ve bu bir eksiklik değil:
                 // `cpu_kare` `session.frame`'in kilit beklemesini ölçüyor ve
@@ -933,6 +963,13 @@ define_class!(
                         if iv.retry.draw_failed(&e) {
                             motion.finish();
                             iv.motion.set(motion);
+                            glyph_fx.finish();
+                            // `Frame`'deki efekt listeleri de boşalıyor: link
+                            // uyuyor ve sıradaki hasarsız kare (blink'in tiki)
+                            // `set_dock_fx`'e uğramadan eski listeleri yarı
+                            // yolda donmuş olarak yeniden çizerdi
+                            // (`/code-review`).
+                            frame.set_dock_fx(std::iter::empty());
                         }
                     }
                 }
@@ -943,7 +980,7 @@ define_class!(
                 // bir drawable daha ödenirdi — saniyede iki **görünür** kare
                 // için dört tur. Hareket sürüyorsa dokunulmuyor: onun ritmi
                 // zaten vsync.
-                if motion.settled() {
+                if motion.settled() && glyph_fx.is_empty() {
                     link.setPaused(true);
                     self.arm_clock(now);
                 }
@@ -1079,6 +1116,10 @@ define_class!(
             let viewport_height = update.drawable().texture().height() as f32;
             let dock_top = viewport_height - crate::frame::dock_px(dock_rows, iv.cell.get());
             let mut dock_caret = None;
+            // Yazım efektlerinin saati içerik karesinde de ilerliyor: hızlı
+            // yazımda her callback hasar buluyor ve hareket kolu hiç koşmuyor.
+            let mut glyph_fx = iv.glyph_fx.borrow_mut();
+            glyph_fx.advance(dt);
             if dock_rows > 0 {
                 // **Yalnız dock varken yazılıyor.** `dock_rows == 0`'da formül
                 // tam `viewport_height` verir ve o bir eşik değil pencerenin
@@ -1090,6 +1131,11 @@ define_class!(
                 frame.set_dock_top(dock_top);
                 let mut dock_state = iv.dock.borrow_mut();
                 let mut dock_context = iv.dock_context.borrow_mut();
+                // **İkinci sink yerel bir yuvaya akıyor**, doğrudan `Frame`'e
+                // değil: iki sink de `frame`'i ödünç alamaz (`fill`'in
+                // gerekçesi). Karede en çok bir düzenleme var, yani tampon bir
+                // `Option`.
+                let mut edit = None;
                 // Devrin cevabı `frame()`'den geliyor, dock yeniden
                 // hesaplamıyor: üç ön koşulu (dock'u olan pencere, alternatif
                 // ekran, aynanın tazeliği) yalnız o biliyor.
@@ -1108,17 +1154,26 @@ define_class!(
                     &mut dock_context,
                     cursor.caret_in_dock,
                     |cell| frame.push_dock(cell),
-                    // Yazım animasyonlarının düzenlemeleri (030): bu phase'de
-                    // tüketen yok, çizim bugünkü gibi. Tampona akıp `GlyphFx`'e
-                    // işlenmesi phase-2'nin işi (`discussion.md` → Karar 4).
-                    |_edit| (),
+                    |dock_edit| edit = Some(dock_edit),
                 );
+                // Sıra zorunlu: düzenleme uçuştakileri kaydırıp bitirebiliyor,
+                // statik glyph'i bulunamayan geliş ancak dock basıldıktan
+                // **sonra** bilinebiliyor ve çizilecek liste en sonda.
+                if let Some(edit) = edit {
+                    glyph_fx.apply(edit, motion, (DOCK_TEXT_COL, iv.cols.get()));
+                }
+                frame.suppress_dock(&mut glyph_fx);
+                frame.set_dock_fx(glyph_fx.iter());
                 dock_caret = dock.caret.map(|col| (col, dock.caret_text));
                 frame.push_dock_sigil(dock.sigil);
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
                 frame.open_dock(dock_rows, dock.ground, dock.separator);
+            } else {
+                // Dock yok (alternatif ekran): efektin konusu da yok.
+                glyph_fx.finish();
             }
+            drop(glyph_fx);
             // **Caret'in tek hedefi.** İki ev var ve ikisi de aynı animatöre
             // giriyor: dock devraldıysa oraya, almadıysa ızgaradaki imlece.
             // Ayrı animatörler olsaydı dock'ta kayma hiç olmaz, devir de bir
@@ -1601,6 +1656,7 @@ impl DisplayLink {
                 motion_frames: Cell::new(0),
                 slide_frames: Cell::new(0),
                 motion: Cell::new(Motion::default()),
+                glyph_fx: RefCell::new(GlyphFx::default()),
                 geometry_changed: Cell::new(false),
                 last_frame_at: Cell::new(None),
                 last_update_at: Cell::new(None),
@@ -1699,11 +1755,13 @@ impl DisplayLink {
     /// soru ise durma koşulu unutulmuş **her** animasyonu görüyor, ne kadar
     /// yavaş olursa olsun.
     ///
-    /// Gördüğünün sınırı: yalnız [`crate::motion`]'dan geçen animasyonlar.
+    /// Gördüğünün sınırı: yalnız [`crate::motion`]'dan ve dock'un yazım
+    /// efektlerinden ([`crate::glyph_fx`]) geçen animasyonlar.
     /// Altyapıyı atlayıp kendi kendine kare isteyen bir yolu bu soru göremez;
     /// onun kapısı [`Self::quiet_since`]'ın ölçülmüş eşiği.
     pub fn motion_settled(&self) -> bool {
-        self.delegate.ivars().motion.get().settled()
+        let iv = self.delegate.ivars();
+        iv.motion.get().settled() && iv.glyph_fx.borrow().is_empty()
     }
 
     /// Son çizilen kareden bu yana geçen süre — `sessiz=` jetonu.
@@ -1765,6 +1823,9 @@ impl DisplayLink {
             let mut motion = iv.motion.get();
             motion.finish();
             iv.motion.set(motion);
+            // Yazım efektleri de: arka sekmede donan bir efekt geri gelince
+            // görülmemiş bir fazdan devam ederdi.
+            iv.glyph_fx.borrow_mut().finish();
             self.link.setPaused(true);
         }
     }
@@ -1787,8 +1848,15 @@ impl DisplayLink {
     pub fn set_cursor_motion(&self, style: CursorMotion) {
         let iv = self.delegate.ivars();
         let mut motion = iv.motion.get();
-        let finished = motion.set_style(style);
+        let mut finished = motion.set_style(style);
         iv.motion.set(motion);
+        // `snap` yazım efektlerini de kapatıyor (`Motion::glyph_fx`) ve
+        // uçuştakiler hedefinde bitiyor — aynı gerekçe, aynı kare talebi.
+        if style == CursorMotion::Snap {
+            let mut glyph_fx = iv.glyph_fx.borrow_mut();
+            finished |= !glyph_fx.is_empty();
+            glyph_fx.finish();
+        }
         if finished {
             self.request_frame();
         }
@@ -1810,6 +1878,11 @@ impl DisplayLink {
         let changed = motion.reduce() != reduce;
         let finished = motion.set_reduce(reduce);
         iv.motion.set(motion);
+        // Yazım efektleri de iki yönde bitiyor (`Motion::set_reduce`'un
+        // gerekçesi); kare talebi aşağıdaki `changed`'den.
+        if changed {
+            iv.glyph_fx.borrow_mut().finish();
+        }
         // **Değişimin kendisi kare istiyor, yalnız yarıda kalan animasyon
         // değil.** Eski hâl `Motion` her animasyonun sahibiyken doğruydu;
         // blink onun dışında yaşıyor ve kapısı yalnız **içerik** karesinde
@@ -1989,6 +2062,17 @@ fn due_clock(content: Option<f64>, flip: Option<f64>) -> Option<(f64, bool)> {
     }
 }
 
+/// "Hasar yok" dalının uyku sorusu: hareket yerleşmiş, blink'in fazı
+/// dönmemiş ve yazım efektlerinde **bu adımdan önce** uçuşta bir şey yok.
+///
+/// Efektin sorusu `advance`'ten önceki hâle bakıyor ve bu şart: bu adımda
+/// biten bir efektin son hâli (geliş statik glyph'ine oturdu, hayalet kalktı)
+/// henüz çizilmedi; uyunsaydı ekranda yarı saydam bir harf asılı kalırdı.
+/// Liste boşaldığı karede çiziliyor, sıradaki callback uyuyor.
+fn at_rest(motion: Motion, flipped: bool, fx_idle: bool) -> bool {
+    motion.settled() && !flipped && fx_idle
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2013,6 +2097,55 @@ mod tests {
         // Ve o satır ızgaranın son satırının (548/18 = 30.4) **altında**:
         // yuvarlansaydı ikisi çakışırdı.
         assert!(row > dock_top / 18.0, "caret banda inmedi");
+    }
+
+    #[test]
+    fn glyph_effects_keep_the_link_awake_and_draw_their_last_frame() {
+        // Yazım efektinin uyku terimi: uçuşta bir şey varken link uyumuyor,
+        // efektin bittiği adım yine de çiziliyor ve ancak ondan sonraki
+        // callback uyuyor. Hasar dikmiyor — `GlyphFx` `Waker`'ı hiç görmüyor.
+        use crate::glyph_fx::{GlyphFx, KEYPRESS_DURATION};
+        let mut fx = GlyphFx::default();
+        let arrival = bt_core::DockEdit::Arrive {
+            col: bt_core::DOCK_TEXT_COL,
+            cells: [bt_core::Cell {
+                col: bt_core::DOCK_TEXT_COL,
+                ch: Some('a'),
+                ..bt_core::Cell::default()
+            }]
+            .into_iter()
+            .collect(),
+            shift: 0,
+        };
+        fx.apply(arrival, Motion::default(), (bt_core::DOCK_TEXT_COL, 80));
+        let dt = 1.0 / 120.0;
+        let mut drawn = 0usize;
+        let mut emptied_on_a_drawn_frame = false;
+        loop {
+            let fx_idle = fx.is_empty();
+            fx.advance(dt);
+            if at_rest(Motion::default(), false, fx_idle) {
+                break;
+            }
+            drawn += 1;
+            emptied_on_a_drawn_frame |= fx.is_empty();
+            assert!(drawn < 1000, "efekt hiç yerleşmedi");
+        }
+        assert!(
+            emptied_on_a_drawn_frame,
+            "efektin son hâli çizilmeden uyundu"
+        );
+        let expected = (KEYPRESS_DURATION / dt).ceil() as usize;
+        assert!(
+            drawn.abs_diff(expected) <= 1,
+            "efekt {drawn} kare sürdü, süresi {expected} kare"
+        );
+        // Boş listede ilk soruda uyunuyor: efektsiz pencere boşta.
+        assert!(at_rest(
+            Motion::default(),
+            false,
+            GlyphFx::default().is_empty()
+        ));
     }
 
     #[test]

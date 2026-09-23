@@ -53,6 +53,8 @@
 
 use bt_core::{CursorMotion, ScrollGlide};
 
+use crate::glyph_fx::{EraseFx, KeypressFx};
+
 /// Yay sertliği, rad/s. **Seçilmiş bir sayı, ölçülmüş değil.**
 ///
 /// Kritik sönümlemede (ζ = 1) bir hücrelik kayma bu değerde ~230 ms'de
@@ -101,7 +103,7 @@ const TIME_CEILING: f32 = 0.7;
 /// ondan sonra** ateşler: tek adımda `elapsed` tavanı aşar ve animasyon hiç
 /// görünmeden biter. Değer iki kare (~120 Hz'de 16 ms, 60 Hz'de 33 ms) ile
 /// bir göz kırpması arasında; yine seçilmiş.
-const DT_MAX: f32 = 0.1;
+pub(crate) const DT_MAX: f32 = 0.1;
 
 /// `ease` stilinin kayma süresi, saniye — **seçilmiş bir sayı, ölçülmüş
 /// değil.**
@@ -283,6 +285,25 @@ impl Motion {
             (_, true) => Mode::Fade,
             (CursorMotion::Ease, false) => Mode::Ease,
             (CursorMotion::Spring, false) => Mode::Spring,
+        }
+    }
+
+    /// Dock'un yazım efektlerinin indirgemesi (030): kullanıcının seçtiği
+    /// iki efekt → bu kipte çizilecek olanlar.
+    ///
+    /// **Yer burası**, çünkü kural [`Motion::mode`]'unkinin aynısı ve
+    /// indirgemenin tek yeri bu modül (`CLAUDE.md`): `snap` hareketi zaten
+    /// kapatmış olanın beyanı, ikisini de kapatıyor; Hareketi Azalt gelişi
+    /// imlecin kendi kipine — belirmeye — indiriyor ve hayaleti kapatıyor,
+    /// çünkü hayalet orada olmayan bir içerik. Erişilebilirlik ayarı
+    /// animasyon **eklemez**: kapalı geliş kapalı kalır
+    /// (`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 7).
+    pub(crate) fn glyph_fx(self, keypress: KeypressFx, erase: EraseFx) -> (KeypressFx, EraseFx) {
+        match (self.style, self.reduce) {
+            (CursorMotion::Snap, _) => (KeypressFx::Off, EraseFx::Off),
+            (_, true) if keypress == KeypressFx::Off => (KeypressFx::Off, EraseFx::Off),
+            (_, true) => (KeypressFx::Fade, EraseFx::Off),
+            _ => (keypress, erase),
         }
     }
 

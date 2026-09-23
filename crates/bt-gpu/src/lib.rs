@@ -12,11 +12,16 @@
 //! **dokusu** da bu crate'in: `bt-atlas` yuva numarası ve CPU bitmap'i verir,
 //! `replaceRegion` ile dokuya yazan ve `cell` pipeline'ıyla çizen buradır.
 //!
-//! **Üç pipeline var** ve ikisi vertex'i paylaşıyor: `cell_bg` (arka planlar,
+//! **Beş pipeline var** ve üçü vertex paylaşıyor: `cell_bg` (arka planlar,
 //! blok şeritleri, dock zemini), `cell` (glyph'ler ve kurallar; atlası
-//! örnekliyor) ve `caret` (`cell_bg_vertex` + `caret_fragment`). Üçüncüsü
-//! ayrı, çünkü caret'in yuvarlak köşesi, kenarı ve halesi bir SDF istiyor ve
-//! o hesabı kare başına binlerce arka plan dörtgenine ödetmenin anlamı yok.
+//! örnekliyor), `caret` (`cell_bg_vertex` + `caret_fragment`), `emoji`
+//! (`cell_vertex` + `emoji_fragment`) ve `glyph_fx` (dock'un yazım efektleri,
+//! kendi vertex'i). `caret` ayrı, çünkü caret'in yuvarlak köşesi, kenarı ve
+//! halesi bir SDF istiyor ve o hesabı kare başına binlerce arka plan
+//! dörtgenine ödetmenin anlamı yok; `glyph_fx` ayrı, çünkü dörtlüsü efekt payı
+//! kadar şişiyor ve instance'ı efektin parametrelerini taşıyor. Efektlerin
+//! **zamanı** da burada (`glyph_fx` modülü, saf): hangi glyph'in geldiğini
+//! `bt-core` söylüyor, ne kadar sürdüğünü bu crate.
 //! Kare yolunun **ölçüm defteri** de burada ([`Stats`]): zamanı kim
 //! üretiyorsa örneği de o topluyor — CPU aralıkları display link'ten, GPU
 //! deltası Metal'in tamamlanma bloğundan. Bu crate hiçbir şey **basmaz**;
@@ -28,6 +33,7 @@
 mod blink;
 mod error;
 mod frame;
+mod glyph_fx;
 mod link;
 mod motion;
 mod renderer;
