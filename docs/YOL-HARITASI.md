@@ -274,10 +274,6 @@ animasyonu), Sparkle ile güncelleme.
 > değil 012'nin kapısında ve borç olarak zaten kayıtlıydı; sıraya girmesinin
 > sebebi her yazışta görünmesi.
 
-> **On altıncı kayma (2026-09-23, kullanıcı isteği).** 026 sekme (bölmesiz)
-> oldu, 027 **yumuşak kaydırma** — ikisi de kullanıcı isteği. Materyal yüzey
-> ve bölme numarasız bekliyor.
-
 
 
 ## Sete bağlanmamış borçlar
