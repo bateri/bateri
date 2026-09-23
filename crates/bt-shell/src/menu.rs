@@ -1,5 +1,5 @@
 //! Ana menü: uygulama menüsü (About, Settings…, Hide, Quit), Shell (New
-//! Window, New Tab, Close Tab, Close Window), Edit (Copy, Paste), View (Theme
+//! Window, New Tab, Close Tab, Close Window), Edit (Copy, Paste, Select All), View (Theme
 //! ▸, Bigger, Smaller, Actual Size) ve Window (Minimize, Zoom, sekme geçişi,
 //! Select Tab ▸, Move Tab to New Window, Merge All Windows, Bring All to
 //! Front). Settings… (⌘,) ayar penceresini açıyor (`settings_window`; 029'a
@@ -7,7 +7,7 @@
 //! settings.toml" düğmesinde); öğe ve kısayol aynı.
 //!
 //! **Hiçbir öğenin hedefi yok.** Eylem responder zincirinden geçip onu
-//! tanımlayan ilk nesneye varıyor: `copy:`/`paste:` first responder
+//! tanımlayan ilk nesneye varıyor: `copy:`/`paste:`/`selectAll:` first responder
 //! `BateriView`'a; punto eylemleri, `closeTab:`, `closeWindow:` ve
 //! `selectTab:` key pencerenin delegate'ine (`window::TerminalWindow` —
 //! pencereye ait); `performMiniaturize:`, `performZoom:` ve sekme eylemleri
@@ -85,6 +85,8 @@ pub(crate) fn install(mtm: MainThreadMarker, themes: &ProtocolObject<dyn NSMenuD
         &[
             item(mtm, "Copy", sel!(copy:), "c"),
             item(mtm, "Paste", sel!(paste:), "v"),
+            NSMenuItem::separatorItem(mtm),
+            item(mtm, "Select All", sel!(selectAll:), "a"),
         ],
     );
     // Başta boş: öğeleri her açılışta `fill_themes` kuruyor.

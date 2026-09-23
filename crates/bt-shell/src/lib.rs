@@ -27,6 +27,7 @@
 pub(crate) mod app;
 mod child;
 mod clipboard;
+mod gesture;
 mod jobs;
 mod keys;
 mod menu;
