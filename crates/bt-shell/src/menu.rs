@@ -11,7 +11,7 @@
 //! `performClose:`, `performMiniaturize:`, `performZoom:` ve sekme eylemleri
 //! (`selectNextTab:`, `moveTabToNewWindow:`…) `NSWindow`'un kendisine;
 //! `openSettings:`, tema eylemleri ve `newWindow:`/`newTab:` app delegate'e
-//! (görünüm değişiminin `appearanceDidChange:`'i ile aynı yol — bütün
+//! (ayar kaydının `settingsDidChange:`'i ile aynı yol — bütün
 //! pencerelere yayılıyorlar ya da pencere yokken de çalışmalılar);
 //! `terminate:`, `hide:`, `arrangeInFront:` ve
 //! `orderFrontStandardAboutPanel:` `NSApp`'in kendisine. Menü bu

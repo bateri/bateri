@@ -13,7 +13,8 @@
 //! kayıt anında yeniden okuyabilsin diye izleyen (`watch`) ve tanısını
 //! pencere alt başlığında gösteren (`notices`) de burası; ayrıştırma ve fark
 //! `bt-core`'da. Sistemin açık/koyu görünümünü okuyup temayı seçen de
-//! (`app`, view'dan hedefsiz eylemle). Ana menü (`menu`) uygulama, Shell,
+//! (`app`, `NSApp.effectiveAppearance`'ın KVO'suyla) ve pencere kromunu
+//! temaya boyayan (`window`). Ana menü (`menu`) uygulama, Shell,
 //! Edit, View ve Window menüsü; öğeleri hedefsiz eylem. View'da Theme ▸ seçimi
 //! ayar dosyasına yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan ve pencereye
 //! ait geçici punto (`zoom`).

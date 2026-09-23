@@ -4247,8 +4247,8 @@ impl Session {
         let grid = GridSize::exact(cols, rows);
         let size = window_size(grid, cell_px);
 
-        // Ucuz kapı önce. Canlı boyutlandırmada `windowDidResize:`
-        // çağrılarının çoğu hücre sınırını geçmez ve hiçbir şey yapmaz;
+        // Ucuz kapı önce. Canlı boyutlandırmada geometri bildirimlerinin
+        // (`bt-shell`: içerik view'ının çerçeve değişimi) çoğu hücre sınırını geçmez ve hiçbir şey yapmaz;
         // `Term`'ün kilidi ise okuyucunun ayrıştırma lease'inin arkasında
         // bekleyebilir. Küçük kilitle eleyip oraya hiç girmiyoruz. Guard
         // `term`'den ÖNCE düşüyor, kilit sırası (term → size) bozulmuyor.
@@ -9950,23 +9950,30 @@ mod tests {
         // `precmd` haber doğurmaz; OSC 2 kazanır; başlık yığınından `None`
         // çıkaran `CSI 23 t` `ResetTitle` doğurur ve başlık dizine döner.
         let wake = Arc::new(TestWake::default());
+        //
+        // Her adım bir `read`'in arkasında: betik sınamanın satır sonunu
+        // bekliyor, yani okumalar uykuların süresiyle yarışmıyor
+        // (`/code-review`: paralel koşuda 0,5 sn'lik aralık aşılabiliyordu).
         let session = spawn_session(
-            "sleep 0.5; printf '\\033]7;file:///tmp\\007'; sleep 0.5; \
-             printf '\\033]7;file:///tmp\\007'; sleep 0.5; \
-             printf '\\033[22;0t\\033]2;selam\\007'; sleep 0.5; \
+            "stty -echo; read _; printf '\\033]7;file:///tmp\\007'; \
+             printf '\\033]7;file:///tmp\\007'; read _; \
+             printf '\\033[22;0t\\033]2;selam\\007'; read _; \
              printf '\\033[23;0t'; sleep 5",
             Arc::clone(&wake),
         );
-        // Betik ilk yarım saniye sessiz: bu okuma ilk OSC 7'den önce.
+        // Betik ilk `read`'de bekliyor: bu okuma ilk OSC 7'den önce.
         assert_eq!(session.title(), "bateri", "hiçbir kaynak yokken");
 
+        session.write(b"\n");
         assert!(wake.wait_titles(1, Duration::from_secs(5)) >= 1);
         assert_eq!(session.title(), "tmp");
         assert_eq!(session.working_directory(), Some(PathBuf::from("/tmp")));
 
+        session.write(b"\n");
         assert!(wake.wait_titles(2, Duration::from_secs(5)) >= 2);
         assert_eq!(session.title(), "selam");
 
+        session.write(b"\n");
         assert!(wake.wait_titles(3, Duration::from_secs(5)) >= 3);
         assert_eq!(session.title(), "tmp");
         // Aynı dizini basan ikinci OSC 7 dördüncü bir haber doğurmadı.

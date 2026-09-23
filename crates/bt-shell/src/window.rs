@@ -27,13 +27,16 @@ use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSMenuItem, NSPasteboard, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSApplication, NSBackingStoreType, NSColor, NSMenuItem, NSPasteboard, NSTitlebarSeparatorStyle,
+    NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
+    NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
+    NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
+    NSString, ns_string,
 };
 
 use crate::app::{self, AppDelegate, Grid, split_into_grid};
@@ -43,6 +46,26 @@ use crate::notices::{Source, font_messages};
 use crate::view::BateriView;
 use crate::zoom::Zoom;
 use crate::{Run, Workload};
+
+/// Temanın zemini koyu mu — pencere kromunun görünümü (Aqua / DarkAqua)
+/// buradan ([`TerminalWindow::apply_chrome`]).
+///
+/// Soru "bu zeminde hangi metin daha okunur: beyaz mı siyah mı" ve cevabı
+/// WCAG'ın kontrast oranından: zeminin bağıl parlaklığı (Rec. 709
+/// katsayıları, **lineer** bileşenlerden) beyazla daha yüksek kontrast
+/// veriyorsa zemin koyudur. Eşik uydurulmuyor, iki oranın eşitliğinden
+/// doğuyor; sistemin koyu görünümü de tam olarak "açık metin" demek.
+///
+/// `bt-core`'un `Theme`'inde değil burada: açıklık bir tema rolü değil,
+/// AppKit'in görünüm sözlüğüne bir çeviri.
+pub(crate) fn is_dark_background(theme: &Theme) -> bool {
+    let [r, g, b, _] = theme.background_linear().to_array();
+    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    // WCAG: oran = (açık + 0.05) / (koyu + 0.05); beyazın parlaklığı 1.
+    let against_white = 1.05 / (luminance + 0.05);
+    let against_black = (luminance + 0.05) / 0.05;
+    against_white > against_black
+}
 
 /// `bt-core`'un uyandırma ucu — pencere başına bir tane, oturumuyla birlikte.
 ///
@@ -312,6 +335,9 @@ pub(crate) struct WindowIvars {
     /// Koşu boyunca **oynamıyor**; alternatif ekranın geri getireceği değer bu
     /// ve tek yazanı oturumun doğumu.
     dock_rows_at_birth: Cell<u16>,
+    /// Kromun son boyandığı zemin ([`TerminalWindow::apply_chrome`]'un
+    /// kapısı); `None`: henüz boyanmadı.
+    chrome: Cell<Option<u32>>,
 }
 
 define_class!(
@@ -324,13 +350,27 @@ define_class!(
 
     unsafe impl NSObjectProtocol for TerminalWindow {}
 
-    unsafe impl NSWindowDelegate for TerminalWindow {
-        #[unsafe(method(windowDidResize:))]
-        fn window_did_resize(&self, _n: &NSNotification) {
+    impl TerminalWindow {
+        /// İçerik view'ının çerçevesi değişti (`NSViewFrameDidChangeNotification`,
+        /// gözlemci [`TerminalWindow::new`]'da kuruluyor).
+        ///
+        /// Kaynak `windowDidResize:` **değil**, çünkü içerik pencere boyutu
+        /// değişmeden de değişiyor: ikinci sekme açılınca sekme çubuğu başlık
+        /// alanına giriyor ve içerik kısalıyor, son sekme kalınca çubuk gidip
+        /// içerik uzuyor — pencerenin çerçevesi ikisinde de aynı. Pencere
+        /// bildirimine bağlı kalınca drawable eski boyda kalıyor, layer onu
+        /// yeni boya **geriyordu** ve metin dikeyde bulanıklaşıyordu (ölçüldü,
+        /// 026 phase-4 Uygulama Notları). View'ın bildirimi pencere
+        /// boyutlandırmasını da kapsıyor, yani tek kaynak.
+        #[unsafe(method(viewFrameDidChange:))]
+        fn view_frame_did_change(&self, _n: &NSNotification) {
             if let Some(app) = app::delegate(self.mtm()) {
                 self.refresh_geometry(&app);
             }
         }
+    }
+
+    unsafe impl NSWindowDelegate for TerminalWindow {
 
         // Ekranlar arası taşımada boyut (nokta) değişmez ama ölçek değişir;
         // layer-hosting view'da bunu bizden başka kimse yazmaz.
@@ -409,6 +449,12 @@ define_class!(
             // sonra bildirim göndermesin (odak, örtülme), nesne düşene kadar
             // bile.
             self.ivars().window.setDelegate(None);
+            // Çerçeve gözlemcisi de: sekme çubuğu kapanırken AppKit bu
+            // pencerenin içeriğini yeniden yerleştirebiliyor ve gözlemci
+            // kalsaydı kapanmakta olan oturum bir resize (ve düşmüş okuyucuya
+            // yazılamayan bir `Msg::Resize`) alırdı (`/code-review`).
+            // SAFETY: gözlemci bu nesne, `new`'de kaydedildi; kayıt yoksa no-op.
+            unsafe { NSNotificationCenter::defaultCenter().removeObserver(self) };
             let id = self.ivars().id;
             DispatchQueue::main().exec_async(move || {
                 // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
@@ -421,7 +467,7 @@ define_class!(
     }
 
     // **Pencereye ait eylemler** burada, uygulama geneline yayılanlar
-    // (`settingsDidChange:`, `appearanceDidChange:`, tema, `openSettings:`)
+    // (`settingsDidChange:`, tema, `openSettings:`)
     // `AppDelegate`'te. Hedefsiz eylemin responder zinciri view → pencere →
     // **pencere delegate'i** → `NSApp` → app delegate; yani bu nesne yayılan
     // bir seçiciyi uygulasaydı key pencere onu yutar ve öteki pencereler hiç
@@ -562,6 +608,7 @@ impl TerminalWindow {
             // sonra hesaplıyor.
             dock_rows: Cell::new(0),
             dock_rows_at_birth: Cell::new(0),
+            chrome: Cell::new(None),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -569,6 +616,22 @@ impl TerminalWindow {
         // bildirimi geometriyi boş bulup bayat boyutla çizmesin. Delegate
         // özelliği zayıf; sahibi `AppDelegate`'in pencere listesi.
         window.setDelegate(Some(ProtocolObject::from_ref(&*this)));
+        // İçeriğin boyu pencereden bağımsız da değişiyor (sekme çubuğu);
+        // geometri bu yüzden view'ın kendi bildiriminden
+        // (`viewFrameDidChange:`). `postsFrameChangedNotifications`
+        // varsayılanda açık. Gözlemci sökülmüyor: seçicili gözlemcileri
+        // merkez macOS 10.11'den beri zayıf tutuyor, düşen pencere sarkan bir
+        // kayıt bırakmıyor.
+        // SAFETY: seçici bu sınıfta tanımlı ve tek `&NSNotification` alıyor;
+        // ad AppKit'in dışa açtığı sabit, nesne bu pencerenin view'ı.
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                &this,
+                sel!(viewFrameDidChange:),
+                Some(NSViewFrameDidChangeNotification),
+                Some(&this.ivars().view),
+            );
+        }
         Ok(this)
     }
 
@@ -937,11 +1000,64 @@ impl TerminalWindow {
         }
     }
 
-    /// Temayı oturuma takas eder; aynı temada no-op (`Session::set_theme`).
+    /// Temayı oturuma takas eder (aynı temada no-op, `Session::set_theme`)
+    /// ve kromu ona boyar ([`TerminalWindow::apply_chrome`]).
+    ///
+    /// İkisi tek çağrıda, çünkü temayı değiştiren iki yol var
+    /// (`AppDelegate::reload_settings`, `AppDelegate::apply_appearance`) ve
+    /// biri kromu unutsaydı ızgara yeni temada, başlık çubuğu eskisinde
+    /// kalırdı — belirti tam da kullanıcının göreceği dikiş.
     pub(crate) fn set_theme(&self, theme: Theme) {
         if let Some(session) = self.ivars().session.get() {
             session.set_theme(theme);
         }
+        self.apply_chrome(&theme);
+    }
+
+    /// Pencere kromunu temaya boyar (026 → Karar 1, Seçenek C): başlık
+    /// çubuğu saydam ve ayırıcısız, pencerenin zemini temanın `background`'ı,
+    /// görünümü (trafik ışıkları, başlık metni, sekme çubuğu) zeminin
+    /// açıklığından ([`is_dark_background`]).
+    ///
+    /// Saydam başlık çubuğunun altında görünen şey pencerenin zemini, yani
+    /// tek sekmede başlık ile içerik **tek yüzey**: clear rengi aynı temadan
+    /// (`Theme::background_linear`). Renk burada **sRGB** kuruluyor, lineer
+    /// değil — lineer değer `bt-gpu`'nun, çünkü onu sRGB'ye donanım
+    /// kodluyor; `NSColor`'a lineer vermek zemini açardı (`CLAUDE.md` →
+    /// Renk uzayı).
+    ///
+    /// Pencereye görünüm kurmak onu sistemin görünümünden **koparıyor**:
+    /// view artık sistemin açık/koyu değişimini görmüyor ve görünüm değişimi
+    /// uygulamanın kendisinden izleniyor (`AppDelegate::observe_appearance`).
+    ///
+    /// Kurucuda değil pencere görünmeden hemen önce ilk kez çağrılıyor
+    /// (`AppDelegate::open_window`): tema oradan geliyor ve sonra boyamak
+    /// her ⌘T'de bir kare sistemin gri çubuğunu gösterirdi.
+    pub(crate) fn apply_chrome(&self, theme: &Theme) {
+        // Krom yalnız zeminden türüyor; aynı zeminde AppKit'e yeniden renk ve
+        // görünüm vermek her ayar kaydında bütün başlık çubuklarını yeniden
+        // çizdirirdi (`Session::set_theme`'in aynı temada no-op olmasının
+        // ikizi).
+        if self.ivars().chrome.replace(Some(theme.background)) == Some(theme.background) {
+            return;
+        }
+        let window = &self.ivars().window;
+        window.setTitlebarAppearsTransparent(true);
+        window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
+        let [r, g, b] = theme.background_srgb().map(|byte| f64::from(byte) / 255.0);
+        window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            r, g, b, 1.0,
+        )));
+        // SAFETY: AppKit'in dışa açtığı iki sabit `NSString`; süreç boyunca
+        // yaşıyorlar ve yalnız okunuyorlar (`NSRunLoopCommonModes` emsali).
+        let name = unsafe {
+            if is_dark_background(theme) {
+                NSAppearanceNameDarkAqua
+            } else {
+                NSAppearanceNameAqua
+            }
+        };
+        window.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
     }
 
     /// İmlecin stili link'e gidiyor, oturuma değil: hangi kareyi çizeceğimizi
@@ -1107,7 +1223,39 @@ impl TerminalWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::tab_index;
+    use super::{is_dark_background, tab_index};
+    use bt_core::Theme;
+
+    fn with_background(background: u32) -> Theme {
+        Theme {
+            background,
+            ..Theme::BATERI
+        }
+    }
+
+    #[test]
+    fn black_is_dark_and_white_is_light() {
+        assert!(is_dark_background(&with_background(0x000000)));
+        assert!(!is_dark_background(&with_background(0xffffff)));
+    }
+
+    #[test]
+    fn embedded_themes_get_their_own_appearance() {
+        assert!(is_dark_background(&Theme::BATERI), "bateri koyu");
+        assert!(
+            !is_dark_background(&Theme::BATERI_LIGHT),
+            "bateri-light açık"
+        );
+    }
+
+    #[test]
+    fn mid_grey_splits_at_equal_contrast() {
+        // Beyaz ve siyahla kontrastın eşitlendiği parlaklık √(1.05·0.05) −
+        // 0.05, sRGB'de #757575 ile #767676 arasına düşüyor: orta gri açık
+        // (siyah metin daha okunur), birkaç ton koyusu koyu.
+        assert!(!is_dark_background(&with_background(0x808080)));
+        assert!(is_dark_background(&with_background(0x606060)));
+    }
 
     #[test]
     fn numbered_tabs_select_the_nth_or_nothing() {

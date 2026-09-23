@@ -212,6 +212,15 @@ impl Theme {
         EMBEDDED.iter().map(|(name, _)| *name)
     }
 
+    /// Varsayılan arka planın **sRGB** baytları (`[r, g, b]`) — pencere
+    /// kromunun zemini (`bt-shell`, `NSColor` sRGB). GPU'ya giden yol
+    /// [`Theme::background_linear`]; ikisi aynı değerden ve baytları açan
+    /// kural tek ([`rgb`]), yani başlık çubuğu ile clear rengi ayrışamaz.
+    pub const fn background_srgb(&self) -> [u8; 3] {
+        let Rgb { r, g, b } = rgb(self.background);
+        [r, g, b]
+    }
+
     /// Pencerenin clear rengi, **lineer** RGBA.
     pub const fn background_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.background))
