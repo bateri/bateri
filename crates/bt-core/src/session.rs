@@ -346,7 +346,28 @@ pub struct Cursor {
     /// ([`Cursor::scrolled`]) kadar, ki ızgara hedefinin altındayken
     /// tepesinde boş bir şerit açılmasın. Uzantı yerleşince ekranın dışında
     /// kalıyor; hesabı [`Session::slide_fill_rows`]'ta.
+    ///
+    /// **Kesrin tepe satırı buraya girmiyor** ([`Cursor::top_row`]): o satır
+    /// aynı kanaldan geçiyor ama sayısı ayrı, yani `fill` bugünkü anlamında
+    /// kalıyor — `filled` biti (`bt-gpu`) ve [`Session::fill_shown`] onu
+    /// okuyor ve kaydırılmış pencerede açılmamalılar.
     pub fill: u16,
+    /// Kesrin açtığı şeridi kapatan **tepe satırı** var mı: `0` ya da `1`.
+    ///
+    /// Kesir sıfırdan büyükken ([`Cursor::scroll_frac`]) ızgara kesir kadar
+    /// aşağı çiziliyor ve tepede bir satırın parçası açılıyor; onu dolduran
+    /// satır görünen pencerenin (dibe yaslı pencerede bandın) **hemen
+    /// üstündeki** satır, `Line(-(offset + fill) - 1)`. Doldurma kanalından
+    /// geçiyor ve kanalın **en üst** satırı: fill-yerel `0`, bandın satırları
+    /// onun altında `top_row..top_row + fill`. Kanalın boyu yani
+    /// `top_row + fill`.
+    ///
+    /// **Kapısı tek: satırın defterde olması.** Bandın kapıları (dock, Ctrl-L
+    /// bayrağı, `display_offset`) burada yok — kaydırılmış pencerede, dock'suz
+    /// pencerede ve Ctrl-L'den sonra da yukarı çıkan kullanıcı tepede boş bir
+    /// yarım satır görmemeli. Kesir geçersizleşirse (defter silindi,
+    /// tekerlek artık kaydırmıyor) kare yolu onu o karede sıfırlıyor.
+    pub top_row: u16,
     /// Önceki kareden bu yana ekranın tepesinden **geçmişe kayan** satır
     /// sayısı; dolu ızgaranın kayma animasyonunun tek girdisi.
     ///
@@ -364,6 +385,19 @@ pub struct Cursor {
     /// olmayan bir satır (ters kaydırma, `CSI 3 J`) — hepsinde ya kaydırma
     /// yok ya da ızgara başka bir sebeple yer değiştirdi.
     pub scrolled: u16,
+    /// Kaydırmanın kesri, `[0, 1)` satır: ızgara bu kadar **aşağı** çizilecek
+    /// ve tepede açılan şeridi [`Cursor::top_row`] kapatacak.
+    ///
+    /// Konum `display_offset + kesir` (dibe yaslı pencerede bandın boyu +
+    /// kesir); tam satırın tek yetkilisi yine ofset, kesir onun üstüne
+    /// eklenen tek sayı ([`Session::scroll_frac`]). Alternatif ekranda ve
+    /// üstünde satır olmayan pencerede `0`.
+    pub scroll_frac: f32,
+    /// Kaydırma **nesli** — konum dışarıdan sıfırlandıkça artan sayı
+    /// ([`ScrollGlide`]). Çizen taraf onu önceki kareninkiyle karşılaştırıp
+    /// uçuştaki süzülmeyi bitiriyor: girdide dibe dönen pencereyi kalan pay
+    /// geri çekmemeli.
+    pub scroll_generation: u32,
     /// Bu karenin ızgara yüksekliği — [`Cursor::content_rows`]'un ölçeği.
     ///
     /// Redundant görünüyor (çizen taraf grid'i kendisi kurdu) ama değil:
@@ -475,7 +509,7 @@ impl Blocks {
     }
 
     /// Bu karede **doldurma bandında** çizilecek bloklar; satırlar
-    /// fill-yerel (`0..fill`).
+    /// fill-yerel (`0..top_row + fill`, [`Cursor::top_row`]).
     ///
     /// **Neden ayrı bir liste** (2026-09-20, kullanıcı bildirdi): bant ikinci
     /// bir yüzey ve ızgaradan türeyen her şeyi ayrıca kazanmak zorunda —
@@ -1650,6 +1684,13 @@ pub enum Wheel {
     /// Görsel hareket değil: doldurma bandı olan pencerenin ilk çentiği
     /// ofseti `fill + 1` yapıyor ama ekran bir satır kayıyor
     /// ([`scroll_locked`]). Tüketiciler yalnız "kaydı mı" diye soruyor.
+    ///
+    /// **Kesirli kollarda da ofset farkı** ([`ScrollIntent`]): kesir oynayıp
+    /// ofset oynamadıysa `0`, süzülme isteği ise ofseti bu olayda hiç
+    /// oynatmıyor ve hep `0` — istek kare yolunda teslim ediliyor. Yani
+    /// `Scrolled(0)` burada "uç" demek değil, "tam satır geçmedi" demek;
+    /// artığı sıfırlama kuralı ([`ScrollIntent::Lines`]'ın satır artığı) bu
+    /// kollarda konusuz, çünkü artık yok.
     Scrolled(i32),
     /// Uygulamaya gitti: fare kipinde tekerlek raporu, alternate screen'de ok.
     Sent,
@@ -1657,6 +1698,77 @@ pub enum Wheel {
     /// Shift basılı; fare kipinde işaretçi geçmişte ya da koordinat
     /// kodlamaya sığmıyor; uygulama yolunda sıfır satır.
     Ignored,
+}
+
+/// Tekerlek olayının **niyeti** — kaydırma kolunda ([`Session::scroll_wheel`]'in
+/// birincil ekranı) miktarın nasıl uygulanacağı.
+///
+/// Sınıflama `bt-shell`'in işi (hassas delta mı, jestin ve momentumun fazı;
+/// AppKit orada), uygulaması burada, çünkü kesir ve kaydırma nesli burada
+/// yaşıyor. Tip AppKit görmüyor: dört kesirli kol ve bugünkü satır yolu.
+///
+/// **Ok ve rapor kolları niyete bakmıyor**: alternatif ekranda ve fare
+/// kipinde tekerlek tam satırla gidiyor, bugünkü gibi (plan → Kapsam Dışı).
+/// Kesirli kolların her biri olayın `rows`'unu da uyguluyor — yerleşme ve
+/// jest başı olayları çoğunlukla sıfır delta taşıyor ama taşıdıklarında
+/// düşmemeli.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollIntent {
+    /// Tam satır, bugünkü yol ([`scroll_locked`]) — `smooth_scroll = "off"`,
+    /// Hareketi Azalt ve `cursor_motion = "snap"`. Kalmış bir kesir varsa
+    /// düşüyor: satır adımında dinlenen pencerenin tepesinde yarım satır
+    /// asılı kalmamalı.
+    Lines,
+    /// Kesirli delta **doğrudan**: trackpad'in parmağı ve momentumu. Ekranı
+    /// parmak sürüklüyor, animasyon yok.
+    Direct,
+    /// Çentik: miktar **süzülme isteği** olarak birikiyor ve kare yolu onu
+    /// kare kare teslim ediyor ([`Session::take_scroll_glide`]).
+    Glide,
+    /// Jest ya da momentum bitti: pencere en yakın tam satıra süzülsün. Payı
+    /// burada, kesri gören tarafta hesaplanıyor (`round(kesir) − kesir`).
+    Settle,
+    /// Parmak yeniden değdi ya da momentum başladı: bekleyen süzülme isteği
+    /// düşüyor ve nesil artıyor, yani uçuştaki yerleşme de bitiyor — ekran
+    /// yine parmağın (ya da momentumun) ve önceki jestin kalan payı onu
+    /// parmaktan uzaklaştırmamalı. Model göreli olduğu için sıçrama yok:
+    /// yeni deltalar kesrin durduğu yerden devam ediyor.
+    GestureBegan,
+}
+
+/// Kaydırmanın **süzülme payı** ve ait olduğu **nesil**.
+///
+/// İki yerde aynı biçimle geçiyor: [`Session::take_scroll_glide`] bekleyen
+/// isteği veriyor, [`Session::frame`] bu karede teslim edilen payı alıyor.
+/// Nesil ikisinde de aynı soruyu yanıtlıyor: "bu miktar pencerenin **şu anki**
+/// konumuna mı ait". Girdide dibe dönüş ve Shift+PgUp konumu dışarıdan
+/// sıfırlıyor; o sıfırlamadan önce hesaplanmış bir pay sıfırlamadan sonra
+/// uygulansaydı dibe dönen pencere yazarken bir satırın kesri kadar yukarı
+/// kayardı ve orada kalırdı.
+///
+/// `rows` artı geriye (yukarı), `Session::scroll_wheel` ile aynı yön. `f32`:
+/// payın bir kare içindeki kesri, hassasiyetin sınırı bir pikselin çok
+/// altında.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScrollGlide {
+    pub rows: f32,
+    pub generation: u32,
+}
+
+impl ScrollGlide {
+    /// Tek kelimeye paketlenmiş hâli ([`Session::scroll_glide`]): nesil üst
+    /// yarıda, miktarın bitleri alt yarıda.
+    fn pack(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.rows.to_bits())
+    }
+
+    fn unpack(word: u64) -> Self {
+        Self {
+            // `as` kesmesi bilerek: iki yarıyı ayıran şey tam olarak o.
+            rows: f32::from_bits(word as u32),
+            generation: (word >> 32) as u32,
+        }
+    }
 }
 
 /// [`Session::mouse_button`]'ın cevabı: düğme olayı nereye gitti. Basış da
@@ -1829,6 +1941,40 @@ pub struct Session {
     /// bilinirse geçmişle kapatılabiliyor. Animasyonun kendisi `bt-gpu`'da ve
     /// bu crate onu görmüyor; gördüğü şey bir satır sayısı.
     grid_top: AtomicU16,
+    /// Kaydırmanın **kesri**: `[0, 1)` satır, `f64` bitleri ([`Cursor::scroll_frac`]).
+    ///
+    /// Kaydırma konumunun **tek** yeni parçası ve bilerek göreli: tam satırın
+    /// tek yetkilisi yine `display_offset` ve onu yalnız [`scroll_locked`]
+    /// oynatıyor, bant eşlemesiyle birlikte. Mutlak bir konum tutulsaydı
+    /// `display_offset`'in dört dış yazıcısı (girdide dibe dönüş, Shift+PgUp,
+    /// geçmişteyken gelen çıktı, resize) her karede ezilirdi
+    /// (`discussion.md` → Muhakeme). Kesrin yönü **geriye**: ızgara kesir
+    /// kadar aşağı çiziliyor ve tepede açılan şeridi ızgaranın hemen
+    /// üstündeki satır kapatıyor ([`Cursor::top_row`]).
+    ///
+    /// **Kilit rejimi `Term` kilidi**: okuyan ve yazan her yol (tekerlek, kare
+    /// yolunun payı, dibe dönüş, sayfa) onu tutarken dokunuyor, yani
+    /// okuma-değiştirme-yazma turunu kilit serileştiriyor ve `Relaxed`
+    /// yetiyor ([`Session::screen_cleared`] emsali). Atomik yalnız `Sync`
+    /// için; `Term`'ün yanında durmamasının sebebi alacritty'nin tipi.
+    scroll_frac: AtomicU64,
+    /// Bekleyen **süzülme isteği** ve **kaydırma nesli**, tek kelimede
+    /// ([`ScrollGlide::pack`]).
+    ///
+    /// İstek çentiğin ve yerleşmenin birikimi (satır, işaretli); kare yolu
+    /// onu alıp sıfırlıyor ([`Session::take_scroll_glide`]) ve animatörü
+    /// üstünden kare kare teslim ediyor. Nesil konumun **dışarıdan**
+    /// sıfırlandığı her seferde artıyor: girdide dibe dönüş, Shift+PgUp,
+    /// satır adımı, jest ya da momentum başı ve kare yolunun normalleştirmesi.
+    ///
+    /// **Tek kelime olmasının sebebi yarış**, stil değil. Yazanlar olay yolu
+    /// (`Term` kilidi altında) ve kare yolu `Term` kilidine girmeden alıyor;
+    /// iki ayrı atomik olsaydı dibe dönüşün "isteği düşür, nesli artır"ı ile
+    /// kare yolunun "isteği al, neslini oku"su arasına düşen bir alım yeni
+    /// nesle ait bir çentiği eski nesille etiketler ve çentik kaybolurdu.
+    /// Yaprak kilit de olamaz: yazanlardan biri `Term`'ü tutuyor (modül
+    /// kuralı). `fetch_update` üç yolu da tek atomik adıma indiriyor.
+    scroll_glide: AtomicU64,
     /// Pencerenin dock'u var mı ([`SessionOptions::dock`]).
     ///
     /// Doğumda kararlaşıyor ve bir daha değişmiyor, o yüzden ne kilit ne
@@ -1933,6 +2079,9 @@ impl Session {
             scroll_probe_size: AtomicU32::new(0),
             // İlk karede kayma yok, ızgara hedefinde.
             grid_top: AtomicU16::new(0),
+            // Açılışta pencere dipte ve tam satırda; istek yok, nesil sıfır.
+            scroll_frac: AtomicU64::new(0),
+            scroll_glide: AtomicU64::new(0),
             dock: options.dock,
             home,
         })
@@ -1983,11 +2132,20 @@ impl Session {
     /// sonra**: kimlikler kabuk defterinden renklendirilir. Ters sıra bu
     /// modülün yazılı kuralını çiğnerdi — yaprak kilit (`shell`) `Term`
     /// kilidinin altına girmez.
+    ///
+    /// **`glide` kare yolunun bu karede teslim ettiği süzülme payı** (027): aynı
+    /// `Term` kilidinde, tarama başlamadan uygulanıyor ve **uyandırmıyor** —
+    /// animasyonun kare talebi `Waker::wake`'ten geçemez (`CLAUDE.md` → Boşta
+    /// sıfır kare), kareyi zaten çizen taraf istiyor. Ayrı bir çağrı olsaydı
+    /// kare başına ikinci bir kilit turu olurdu. Nesli güncel nesilden farklı
+    /// pay düşüyor ([`ScrollGlide`]); sıfır pay kareyi bugünküyle aynı
+    /// bırakıyor.
     pub fn frame(
         &self,
         mut sink: impl FnMut(Cell),
         mut fill_sink: impl FnMut(Cell),
         blocks: &mut Blocks,
+        glide: ScrollGlide,
     ) -> Cursor {
         // Tema `Term` kilidinden **önce** ve kopya olarak: yaprak kilit
         // kare boyunca tutulmaz, `Term` kilidinin altına ikinci bir muteks
@@ -2028,6 +2186,16 @@ impl Session {
         blocks.fill_anchors.clear();
         blocks.fill_resolved.clear();
         let mut term = self.term.lock();
+        // **Süzülme payı taramadan önce**: aşağıdaki her şey (ofset, bayrağın
+        // ömrü, doldurma, kayma sayısı) payın taşıdığı pencereyi görmeli.
+        // Nesil kilidin altında okunuyor, çünkü onu artıran yollar (dibe
+        // dönüş, sayfa) da kilidi tutuyor — sıfırlamadan önce hesaplanmış bir
+        // pay sıfırlamadan sonra uygulanamaz.
+        let generation = ScrollGlide::unpack(self.scroll_glide.load(Ordering::Relaxed)).generation;
+        if glide.rows != 0.0 && glide.generation == generation {
+            let frac = f64::from_bits(self.scroll_frac.load(Ordering::Relaxed));
+            let _ = self.scroll_fraction(&mut term, frac, f64::from(glide.rows), self.band_shown());
+        }
 
         let rows = term.screen_lines() as i32;
         // Alternatif ekranda blok **yok**: vim'in tamponunda prompt da komut da
@@ -2699,26 +2867,68 @@ impl Session {
         if offset == 0 {
             self.fill_shown.store(gap_fill, Ordering::Relaxed);
         }
+        // **Kesrin tepe satırı** ([`Cursor::top_row`]): kanalın en üstü, yani
+        // bandın (bant yoksa görünen pencerenin) hemen üstü. Tek kapısı
+        // satırın defterde olması.
+        //
+        // **Geçersiz kesir bu karede sıfırlanıyor**, nesil de artıyor:
+        // şeridi kapatacak bir şey olmadan ızgarayı aşağı çizmek tepede boş
+        // bir yarım satır bırakırdı. Kaydırma yolu böyle bir kesri zaten
+        // doğurmuyor ([`scroll_fraction_locked`]); buraya düşüren şey
+        // pencerenin altından değişen durum — `CSI 3 J`, alternatif ekrana
+        // geçiş (plan → bilinen sınır), fare kipi.
+        let stored = f64::from_bits(self.scroll_frac.load(Ordering::Relaxed));
+        let history = term.history_size() as i64;
+        // Kesrin geçerliliği **olay yolunun ölçüsüyle** soruluyor
+        // ([`scroll_fraction_locked`]: tepenin üstünde, bandın sanal
+        // kaydırmasıyla, defterde bir satır) ve tekerlek kaydırma koluna
+        // gidiyor olmalı. Kol değiştiyse (alternatif ekran, fare kipine geçen
+        // birincil ekran uygulaması) kesri artık hiçbir tekerlek olayı
+        // silemez; bırakılsaydı ızgara yarım satır aşağıda asılı kalırdı.
+        let valid = input::wheel_route(*term.mode(), false) == WheelRoute::Scroll
+            && i64::from(visual_top(offset, self.band_shown())) < history;
+        let scroll_frac = if stored > 0.0 && valid {
+            // `f32`'ye yuvarlama `1.0`'a varabilir ve `[0, 1)` sözleşmesini
+            // delerdi; sınır `1`'in hemen altındaki `f32`.
+            (stored as f32).min(1.0 - f32::EPSILON / 2.0)
+        } else {
+            if stored != 0.0 {
+                self.scroll_frac.store(0, Ordering::Relaxed);
+                self.bump_scroll_generation();
+            }
+            0.0
+        };
+        // Satırın **çizilmesi** ise kanalın bu karedeki boyuna bakıyor:
+        // tepe satırı kanalın en üstü, kaymanın uzantısı dahil. Uzantı
+        // defterin tamamını tutuyorsa üstünde satır yok ve tepe satırı
+        // doğmuyor, ama kesir kalıyor — o kare kaymanın ortasında ve uzantı
+        // pencerenin tepesine zaten ulaşıyor ([`Session::slide_fill_rows`]).
+        let has_row_above = i64::from(offset) + i64::from(fill) < history;
+        let top_row = u16::from(scroll_frac > 0.0 && has_row_above);
+        let channel = top_row + fill;
         // **Geçmişten okuma ayrı bir döngü ve bu stil değil zorunluluk.**
         // Yukarıdaki döngünün `debug_assert!((0..rows).contains(&row))`
         // bekçisi negatif satırda patlardı, ve doldurulan satırlar
         // `drawn_rows`'a **girmemeli**: girselerdi öteleme kapanır, içerik
         // tabandan kopardı (R2.3, `27a0b98`'in maliyeti).
         //
-        // Satır numarası **fill-yerel** (`0..fill`) ve sırası geçmişin kendi
-        // sırası: `0` en eski, `fill - 1` defterin en yeni satırı, yani
-        // içeriğin hemen üstü. Ekran satırına çeviren taraf **çizen** taraf
-        // (phase-3) — bu crate "hangi satırlar" der, "nereye" demez.
+        // Satır numarası **fill-yerel** (`0..top_row + fill`) ve sırası
+        // geçmişin kendi sırası: `0` en eski (kesir varsa tepe satırı),
+        // sonuncusu görünen pencerenin hemen üstü. Ekran satırına çeviren
+        // taraf **çizen** taraf (phase-3) — bu crate "hangi satırlar" der,
+        // "nereye" demez.
         //
-        // `grid_clamp` bir emniyet kemeri: `fill <= history_size` olduğu için
-        // satır zaten defterin içinde, ama `bt-core`'da indeksleme panik
-        // yasağının altında (R2.5) ve yasağı tip değil **çağrı yeri** taşıyor.
-        for fill_row in 0..fill {
-            // Ofset terimi **yok**: doldurma yalnız dibe yaslı pencerede
-            // koşuyor ([`Session::fill_rows`]), yani `Line(-1)` her zaman
-            // defterin en yeni satırı.
-            let line =
-                Line(i32::from(fill_row) - i32::from(fill)).grid_clamp(&*term, Boundary::Grid);
+        // `grid_clamp` bir emniyet kemeri: kanalın bütün satırları defterin
+        // içinde (bant `fill <= history_size`, tepe satırı yukarıdaki kapı),
+        // ama `bt-core`'da indeksleme panik yasağının altında (R2.5) ve yasağı
+        // tip değil **çağrı yeri** taşıyor.
+        for fill_row in 0..channel {
+            // **Ofset terimi tepe satırı için**: bant yalnız dibe yaslı
+            // pencerede koşuyor ([`Session::fill_rows`]) ve orada terim sıfır,
+            // yani bandın satırları bugünküyle aynı. Kaydırılmış pencerede
+            // `fill == 0` ve kanalın tek satırı `Line(-offset - 1)`.
+            let line = Line(i32::from(fill_row) - i32::from(channel) - offset)
+                .grid_clamp(&*term, Boundary::Grid);
             let cells = &term.grid()[line];
             // **`zip`, indeksleme değil** ve gerekçesi panik yasağı (R2.5):
             // `Row`'un `Index`'i sınır dışında panikliyor ve `make denetim`
@@ -2842,7 +3052,13 @@ impl Session {
             // Yukarıdaki döngünün saydığı satır sayısı; doluluğa **girmiyor**
             // ([`Cursor::fill`]).
             fill,
+            top_row,
             scrolled,
+            scroll_frac,
+            // Normalleştirmeden **sonraki** nesil: bu karede kesir düştüyse
+            // çizen taraf süzülmeyi aynı karede bitirsin.
+            scroll_generation: ScrollGlide::unpack(self.scroll_glide.load(Ordering::Relaxed))
+                .generation,
             rows: grid_rows,
             // Faz 2 dolduruyor: koşan bloğun çıpasının bu karede **görünüp
             // görünmediği** ancak orada biliniyor ve saatin durma koşulu tam
@@ -3566,16 +3782,40 @@ impl Session {
     /// değil, `Term`'in verdiği tek ölçü; kaydırma yolunun kırpması
     /// (ulaşılabilir aralık, `scroll_locked`) burada yok, çünkü uygulamanın
     /// ne kadar kayabileceğini terminal bilmiyor.
-    pub fn scroll_wheel(&self, lines: i32, at: SelectionPoint, shift: bool) -> Wheel {
+    ///
+    /// **Olay iki hâliyle birden iniyor** (027 Karar 6): `rows` kesirli
+    /// miktar, `lines` aynı olayın tam satırı (`bt-shell`'in artık yolu).
+    /// Rota **önce** seçiliyor ve kesir yalnız kaydırma kolunda anlam taşıyor;
+    /// ok ve rapor kolları `lines`'la, niyete bakmadan. Kaydırma kolunda
+    /// niyetin her varyantı ne yapıyor [`ScrollIntent`]'te, dönen
+    /// [`Wheel::Scrolled`]'in kesirli kollardaki anlamı orada.
+    ///
+    /// **Kesirli kolun karesi**: ofset ya da kesir değiştiyse ve süzülme
+    /// isteği biriktiyse kare istenir, hiçbiri değilse istenmez — geçmişin
+    /// ucunda yağan momentum da, dipte aşağı dönen çentik de boş kare
+    /// üretmemeli (R1.2).
+    pub fn scroll_wheel(
+        &self,
+        rows: f64,
+        lines: i32,
+        intent: ScrollIntent,
+        at: SelectionPoint,
+        shift: bool,
+    ) -> Wheel {
         let mut term = self.term.lock();
         let unit = match input::wheel_route(*term.mode(), shift) {
             WheelRoute::Scroll => {
                 // Yol zaten birincil ekran; `None` yalnız `scroll_locked`'ın
                 // kendi kip kapısından gelebilir.
-                let moved = scroll_locked(&mut term, lines, self.band_shown());
+                let scrolled = self.scroll_by_intent(&mut term, rows, lines, intent);
                 drop(term);
-                self.wake_if_moved(moved);
-                return moved.map_or(Wheel::Ignored, Wheel::Scrolled);
+                let Some((moved, changed)) = scrolled else {
+                    return Wheel::Ignored;
+                };
+                if changed {
+                    self.request_frame();
+                }
+                return Wheel::Scrolled(moved);
             }
             WheelRoute::Ignore => return Wheel::Ignored,
             WheelRoute::Arrows => {
@@ -3749,22 +3989,171 @@ impl Session {
     /// satır" terminalin kararı, `bt-shell`'in piksel aritmetiği değil. View
     /// sayfayı kendi ölçü önbelleğinden türetseydi ekran boyunun ikinci bir
     /// kopyasını taşır, ölçü yokken de tuşu sessizce uygulamaya düşürürdü.
+    ///
+    /// **Kesir sıfırlanıyor ve nesil artıyor** ([`Session::reset_scroll`]):
+    /// sayfa tam satırlık bir adım ve uçuştaki bir süzülme onun varış yerini
+    /// kaydırmamalı.
     pub fn scroll_page(&self, pages: i32) -> Option<i32> {
-        let moved = {
+        let (moved, dropped) = {
             let mut term = self.term.lock();
+            let dropped = self.reset_scroll();
             let lines = pages.saturating_mul(term.screen_lines() as i32);
-            scroll_locked(&mut term, lines, self.band_shown())
+            (scroll_locked(&mut term, lines, self.band_shown()), dropped)
         };
-        self.wake_if_moved(moved);
+        if dropped {
+            self.request_frame();
+        } else {
+            self.wake_if_moved(moved);
+        }
         moved
     }
 
     /// Ekranda duran doldurma bandının boyu, kaydırmanın anladığı tipte.
     ///
-    /// [`Session::fill_shown`]'ın tek okuyucusu; üç kaydırma yolu da buradan
-    /// geçiyor ki "bant nereden başlar" sorusunun tek cevabı olsun.
+    /// [`Session::fill_shown`]'ın tek okuyucusu; kaydırma yollarının hepsi
+    /// (kare yolunun süzülme payı dahil) buradan geçiyor ki "bant nereden
+    /// başlar" sorusunun tek cevabı olsun.
     fn band_shown(&self) -> i32 {
         i32::from(self.fill_shown.load(Ordering::Relaxed))
+    }
+
+    /// Kaydırma kolunun niyete göre gövdesi ([`ScrollIntent`]). **`Term`
+    /// kilidi tutulurken** çağrılır: kesrin kilit rejimi o
+    /// ([`Session::scroll_frac`]).
+    ///
+    /// Dönüş `(ofset farkı, kare gerekiyor mu)`; `None` alternatif ekran.
+    fn scroll_by_intent<T: EventListener>(
+        &self,
+        term: &mut Term<T>,
+        rows: f64,
+        lines: i32,
+        intent: ScrollIntent,
+    ) -> Option<(i32, bool)> {
+        let band = self.band_shown();
+        let frac = f64::from_bits(self.scroll_frac.load(Ordering::Relaxed));
+        match intent {
+            ScrollIntent::Lines => {
+                // Satır adımı da konumu dışarıdan sıfırlayan bir yol: kalmış
+                // kesir düşüyor ve **nesil artıyor**, yoksa ayar `off`'a
+                // çevrilirken uçuşta kalan bir süzülmenin payı güncel nesille
+                // gelir ve satır adımının sildiği kesri geri getirirdi.
+                let dropped = self.reset_scroll();
+                let moved = scroll_locked(term, lines, band)?;
+                Some((moved, moved != 0 || dropped))
+            }
+            ScrollIntent::Direct => {
+                let (moved, next) = self.scroll_fraction(term, frac, rows, band)?;
+                Some((moved, moved != 0 || next != frac))
+            }
+            ScrollIntent::Glide => {
+                // **Uçta istek birikmez**: dipte aşağı, tepede yukarı dönen
+                // çentik süzülme boyunca kare üstüne kare isterdi ve her pay
+                // kırpmaya çarpardı — hiçbir şey değiştirmeyen bir animasyon.
+                if rows == 0.0 || !rows.is_finite() || !scroll_room(term, frac, band, rows > 0.0) {
+                    return Some((0, false));
+                }
+                self.add_glide(rows);
+                Some((0, true))
+            }
+            ScrollIntent::Settle => {
+                let (moved, next) = self.scroll_fraction(term, frac, rows, band)?;
+                // `round` yarıyı yukarı (geriye) atıyor ve yukarıdaki satır
+                // kesir sıfırdan büyükken var olmak zorunda, yani iki yön de
+                // ulaşılabilir bir satıra varıyor.
+                let correction = next.round() - next;
+                if correction != 0.0 {
+                    self.add_glide(correction);
+                }
+                Some((moved, moved != 0 || next != frac || correction != 0.0))
+            }
+            ScrollIntent::GestureBegan => {
+                self.bump_scroll_generation();
+                let (moved, next) = self.scroll_fraction(term, frac, rows, band)?;
+                Some((moved, moved != 0 || next != frac))
+            }
+        }
+    }
+
+    /// Kesirli deltanın **tek** yazıcısı: olay yolu da kare yolunun payı da
+    /// buradan geçiyor ([`scroll_fraction_locked`] + kesrin kaydı). `Term`
+    /// kilidi tutulurken; kare istemez, çağıran karar verir.
+    ///
+    /// Dönüş `(ofset farkı, yeni kesir)`.
+    fn scroll_fraction<T: EventListener>(
+        &self,
+        term: &mut Term<T>,
+        frac: f64,
+        rows: f64,
+        band: i32,
+    ) -> Option<(i32, f64)> {
+        let (moved, next) = scroll_fraction_locked(term, frac, rows, band)?;
+        self.scroll_frac.store(next.to_bits(), Ordering::Relaxed);
+        Some((moved, next))
+    }
+
+    /// Bekleyen süzülme isteğini alır ve sıfırlar — **kare yolunun** çağrısı,
+    /// `Term` kilidinin dışında.
+    ///
+    /// Dönen nesil isteğin ait olduğu nesil; çizen taraf payı
+    /// [`Session::frame`]'e aynı nesille geri veriyor ve arada konum dışarıdan
+    /// sıfırlandıysa pay düşüyor ([`ScrollGlide`]).
+    pub fn take_scroll_glide(&self) -> ScrollGlide {
+        self.update_glide(|glide| ScrollGlide { rows: 0.0, ..glide })
+    }
+
+    /// Süzülme isteğine `rows` ekler; nesil yerinde kalır.
+    ///
+    /// Toplam `f64`'te yapılıp `i32` aralığına kırpılıyor, sonra `f32`'ye
+    /// iniyor: sonlu ama dev bir delta `f32`'de sonsuza taşar ve ters yöndeki
+    /// ilk ekleme isteği NaN'a çevirip süzülmeyi sessizce öldürürdü. Aralık
+    /// kaydırmanın kendi alanı (`scroll_locked`'ın `i32`'si), yani kırpma
+    /// hiçbir ulaşılabilir hedefi değiştirmiyor.
+    fn add_glide(&self, rows: f64) {
+        self.update_glide(|glide| {
+            let sum =
+                (f64::from(glide.rows) + rows).clamp(f64::from(i32::MIN), f64::from(i32::MAX));
+            ScrollGlide {
+                rows: sum as f32,
+                ..glide
+            }
+        });
+    }
+
+    /// Bekleyen isteği düşürür ve nesli artırır: konum dışarıdan
+    /// sıfırlandı, uçuştaki süzülme de bitsin.
+    fn bump_scroll_generation(&self) {
+        self.update_glide(|glide| ScrollGlide {
+            rows: 0.0,
+            generation: glide.generation.wrapping_add(1),
+        });
+    }
+
+    /// [`Session::scroll_glide`]'ın tek atomik adımı; **önceki** değeri
+    /// döndürür. Üç yazıcısının (alım, ekleme, nesil) ortak gövdesi, ki
+    /// paketleme tek yerde kalsın.
+    fn update_glide(&self, change: impl Fn(ScrollGlide) -> ScrollGlide) -> ScrollGlide {
+        let word = self
+            .scroll_glide
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
+                Some(change(ScrollGlide::unpack(word)).pack())
+            })
+            // Kapanış her zaman `Some` veriyor, yani `Err` kolu yok; `Err`'in
+            // taşıdığı da aynı kelime.
+            .unwrap_or_else(|word| word);
+        ScrollGlide::unpack(word)
+    }
+
+    /// Kaydırma konumunu dışarıdan tam satıra sıfırlar: kesir sıfır, istek
+    /// düşer, nesil artar. `Term` kilidi tutulurken; kesir sıfırdan büyüktü
+    /// ise `true` — ekran değişti ve kare gerekiyor.
+    ///
+    /// Nesil **her** çağrıda artıyor, kesir sıfır olsa da: uçuştaki bir
+    /// süzülme payını henüz teslim etmemiş olabilir (kesir sıfır, istek
+    /// çoktan alınmış) ve o hâlde de bitmek zorunda — yazmaya başlayan
+    /// kullanıcının penceresi dipten geri çekilmemeli.
+    fn reset_scroll(&self) -> bool {
+        self.bump_scroll_generation();
+        self.scroll_frac.swap(0, Ordering::Relaxed) != 0
     }
 
     /// Pencere gerçekten kaydıysa kare ister. Kaymayan kaydırma (geçmişin
@@ -4080,7 +4469,7 @@ impl Session {
     /// `bytes` kilit **altında** koşar ve `Session`'a dokunmamalı: `FairMutex`
     /// yeniden girilebilir değil, geri giren bir closure kendi kendini kilitler.
     fn send_input(&self, bytes: impl FnOnce(TermMode) -> Vec<u8>) {
-        let (bytes, cleared, moved) = {
+        let (bytes, redraw, moved) = {
             let mut term = self.term.lock();
             let bytes = bytes(*term.mode());
             if bytes.is_empty() {
@@ -4090,15 +4479,19 @@ impl Session {
             // kullanıcının baktığı pencereye sorulmalı. Pencere kayarsa kare
             // zaten isteniyor; kaymazsa iki soru aynı cevabı verir.
             let cleared = clear_selection_locked(&mut term);
+            // Dibe dönüş **kesri de** sıfırlıyor ve nesli artırıyor: uçuştaki
+            // bir süzülme yazan kullanıcının penceresini dipten geri
+            // çekmemeli ([`Session::reset_scroll`]).
+            let dropped = self.reset_scroll();
             (
                 bytes,
-                cleared,
+                cleared || dropped,
                 scroll_locked(&mut term, i32::MIN, self.band_shown()),
             )
         };
-        // Tek istek: temizlik ve dönüş aynı kareyi istiyor, vuruş başına iki
-        // uyandırma olmasın. "Kaydı mı" kuralı `wake_if_moved`'da kalıyor.
-        if cleared {
+        // Tek istek: temizlik, kesir ve dönüş aynı kareyi istiyor, vuruş başına
+        // iki uyandırma olmasın. "Kaydı mı" kuralı `wake_if_moved`'da kalıyor.
+        if redraw {
             self.request_frame();
         } else {
             self.wake_if_moved(moved);
@@ -4509,6 +4902,101 @@ fn scroll_locked<T: EventListener>(term: &mut Term<T>, lines: i32, band: i32) ->
     Some(term.grid().display_offset() as i32 - before)
 }
 
+/// Kesirli kaydırmanın gövdesi: `frac + rows`'un tam kısmını [`scroll_locked`]'a
+/// indirir ve kalan kesri döndürür. Dönüş `(ofset farkı, yeni kesir)`;
+/// `None` alternatif ekran (`scroll_locked`'ın kapısı).
+///
+/// **Bant eşlemesi ikinci kez yazılmıyor**: tam satırı taşıyan yine
+/// [`scroll_locked`], yani bandın sanal kaydırması, `1..band` muafiyeti ve
+/// kırpma olduğu gibi geçerli. Bu fonksiyonun kendi kuralı tek ve iki uçtan
+/// kesir düşürüyor (R1.2):
+///
+/// - **Tam kısım gidemediyse kesir yok.** Ekranın tepesindeki satır
+///   ([`visual_top`]) tam kısım kadar oynamadıysa kaydırma bir uca
+///   dayanmıştır: dipte negatif, geçmişin tepesinde pozitif kesir yerine
+///   pencere uçta tam satırda duruyor. Resize'ın bıraktığı iç ofsetten dibe
+///   inen adım da buraya düşüyor (orada tepe bant kadar sıçrıyor) — o iniş
+///   zaten süreksiz.
+/// - **Üstünde satır olmayan pencerede kesir yok**: kesrin açtığı şeridi
+///   kapatacak satır ([`Cursor::top_row`]) defterde değilse şerit boş kalırdı.
+///
+/// Sonlu olmayan toplam hiçbir şeyi değiştirmiyor — NaN kesre girseydi
+/// sonraki her toplam NaN olur ve kaydırma sessizce ölürdü (`bt-shell`'in
+/// `wheel_lines` emsali).
+fn scroll_fraction_locked<T: EventListener>(
+    term: &mut Term<T>,
+    frac: f64,
+    rows: f64,
+    band: i32,
+) -> Option<(i32, f64)> {
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return None;
+    }
+    let total = frac + rows;
+    if !total.is_finite() {
+        return Some((0, frac));
+    }
+    // **Tam satıra yakın toplam tam satırdır**: kare yolunun payı `f32`'de
+    // geliyor ([`ScrollGlide`]) ve yerleşmenin `−0.3`'ü `f32`'de
+    // `−0.30000001`. Toplam `−1.2e-8` olur, `floor` onu bir satır aşağı
+    // atar ve pencere `0.99999998` kesirle yerleşmemiş kalırdı — tepe
+    // satırı açık, sonraki satır adımı iki satır sıçrıyor
+    // (`/code-review`, 027 phase-1). Eşik bir pikselin çok altında; kesir
+    // bu kadar küçükse zaten çizilemiyor.
+    let nearest = total.round();
+    let total = if (total - nearest).abs() < 1e-5 {
+        nearest
+    } else {
+        total
+    };
+    let whole = total.floor();
+    // `as` doyuruyor; ulaşılabilir aralığa kırpma `scroll_locked`'ın işi.
+    let lines = whole as i32;
+    let before = term.grid().display_offset() as i32;
+    let moved = if lines == 0 {
+        0
+    } else {
+        scroll_locked(term, lines, band)?
+    };
+    let top = visual_top(before + moved, band);
+    let reached = i64::from(top) - i64::from(visual_top(before, band)) == i64::from(lines);
+    let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
+    let frac = if reached && top < history {
+        total - whole
+    } else {
+        0.0
+    };
+    Some((moved, frac))
+}
+
+/// Ekranın tepesindeki satırın geçmişteki derinliği: `Line(-visual_top)`.
+///
+/// Dibe yaslı pencerede bant bir sanal kaydırma ([`Session::fill_shown`]) ve
+/// tepe `Line(-band)`; kaydırılmış pencerede bant yok ve tepe ofsetin kendisi.
+/// Kesrin iki kuralı da bu sayıya bakıyor, ofsete değil: bandın ilk
+/// çentiğinde ofset `band + 1` sıçrarken tepe tam bir satır oynuyor.
+fn visual_top(offset: i32, band: i32) -> i32 {
+    if offset == 0 { band } else { offset }
+}
+
+/// Konum `up` yönünde oynayabilir mi — süzülme isteğinin uç kapısı.
+///
+/// Kesir sıfırdan büyükse iki yön de açık (üstündeki satır var olmak zorunda,
+/// [`scroll_fraction_locked`]). Tam satırda yukarı: tepenin üstünde defterde
+/// satır var mı; aşağı: pencere dipte değil mi.
+fn scroll_room<T>(term: &Term<T>, frac: f64, band: i32, up: bool) -> bool {
+    if frac > 0.0 {
+        return true;
+    }
+    let offset = term.grid().display_offset() as i32;
+    if up {
+        let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
+        visual_top(offset, band) < history
+    } else {
+        offset != 0
+    }
+}
+
 /// Seçimi kilit altında düşürür; ekranda **çizili** bir aralık gittiyse `true`
 /// — kareyi çağıran ister, `scroll_locked` gibi. Temizliğin iki yolunun
 /// ortak gövdesi: girdide `send_input` (üretimdeki tek temizlik yolu) ve
@@ -4600,14 +5088,14 @@ mod tests {
     fn frame_if_damaged(session: &Session, sink: impl FnMut(Cell)) -> Option<Cursor> {
         session
             .take_damage()
-            .then(|| session.frame(sink, |_| (), &mut Blocks::default()))
+            .then(|| session.frame(sink, |_| (), &mut Blocks::default(), ScrollGlide::default()))
     }
 
     /// [`frame_if_damaged`]'in blok soran kardeşi: tamponu çağıran tutar,
     /// böylece sınama hem hücreleri hem şeritleri görebilir.
     fn blocks_if_damaged(session: &Session, blocks: &mut Blocks) -> bool {
         session.take_damage() && {
-            session.frame(|_| (), |_| (), blocks);
+            session.frame(|_| (), |_| (), blocks, ScrollGlide::default());
             true
         }
     }
@@ -4918,7 +5406,12 @@ mod tests {
             loop {
                 assert!(Instant::now() < deadline, "{what} gelmedi");
                 let mut cells = Vec::new();
-                session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+                session.frame(
+                    |cell| cells.push(cell),
+                    |_| (),
+                    &mut Blocks::default(),
+                    ScrollGlide::default(),
+                );
                 if read_counter(&cells).is_some_and(|counter| ready(&counter)) {
                     return cells;
                 }
@@ -5020,7 +5513,12 @@ mod tests {
         loop {
             assert!(Instant::now() < deadline, "bitmiş süre görünmedi");
             let mut cells = Vec::new();
-            session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+            session.frame(
+                |cell| cells.push(cell),
+                |_| (),
+                &mut Blocks::default(),
+                ScrollGlide::default(),
+            );
             let row = row_glyphs(&cells, 0);
             if let Some(counter) = row.strip_prefix("$ls-la")
                 && counter.contains('.')
@@ -5061,7 +5559,12 @@ mod tests {
         loop {
             assert!(Instant::now() < deadline, "sığmayan sayaç saati söndürmedi");
             let mut cells = Vec::new();
-            let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+            let cursor = session.frame(
+                |cell| cells.push(cell),
+                |_| (),
+                &mut Blocks::default(),
+                ScrollGlide::default(),
+            );
             // Komut satırı gerçekten sağ uca dayanmış olmalı, yoksa sınama
             // sığmama kolunu hiç denemeden yeşil geçerdi.
             if row_glyphs(&cells, 0).len() >= 38 && cursor.next_tick.is_none() {
@@ -5097,7 +5600,12 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && tick.is_none() {
             tick = session
-                .frame(|_| (), |_| (), &mut Blocks::default())
+                .frame(
+                    |_| (),
+                    |_| (),
+                    &mut Blocks::default(),
+                    ScrollGlide::default(),
+                )
                 .next_tick;
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -5112,7 +5620,12 @@ mod tests {
         loop {
             assert!(Instant::now() < deadline, "komut bitti, saat sönmedi");
             if session
-                .frame(|_| (), |_| (), &mut Blocks::default())
+                .frame(
+                    |_| (),
+                    |_| (),
+                    &mut Blocks::default(),
+                    ScrollGlide::default(),
+                )
                 .next_tick
                 .is_none()
             {
@@ -5185,7 +5698,12 @@ mod tests {
         );
         wait_mirror(&session, DockStatus::Live);
 
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(
             !cursor.visible,
             "boş prompt'ta ızgara ikinci bir imleç çizdi: {cursor:?}"
@@ -5224,14 +5742,24 @@ mod tests {
             Arc::clone(&wake),
         );
         wait_mirror(&session, DockStatus::Live);
-        let empty = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let empty = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
 
         wait_until("ilk tuş aynaya düşmedi", Duration::from_secs(3), || {
             let mut dock = DockState::default();
             session.dock_state(&mut dock);
             dock.status == DockStatus::Live && dock.buffer == "l"
         });
-        let typed = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let typed = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
 
         assert_eq!(
             empty.content_rows, typed.content_rows,
@@ -5257,11 +5785,21 @@ mod tests {
         let session = spawn_docked_session("printf 'hazir'; sleep 5", Arc::clone(&wake));
         wait_until("çıktı gelmedi", Duration::from_secs(2), || {
             let mut cells = Vec::new();
-            session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+            session.frame(
+                |cell| cells.push(cell),
+                |_| (),
+                &mut Blocks::default(),
+                ScrollGlide::default(),
+            );
             !cells.is_empty()
         });
 
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(
             !cursor.visible,
             "dock canlanmadan ızgarada imleç var: {cursor:?}"
@@ -5294,10 +5832,20 @@ mod tests {
         // yapıyor — süresiz tutma burayı kızdırır.
         wait_until("caret ızgaraya dönmedi", Duration::from_secs(2), || {
             session
-                .frame(|_| (), |_| (), &mut Blocks::default())
+                .frame(
+                    |_| (),
+                    |_| (),
+                    &mut Blocks::default(),
+                    ScrollGlide::default(),
+                )
                 .visible
         });
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(cursor.visible, "koşan komutta ızgara imleçsiz: {cursor:?}");
         session.shutdown();
     }
@@ -5328,7 +5876,12 @@ mod tests {
             log.apply_scan(ScanEvent::Mark(Mark::PromptEnd));
             log.apply_scan(ScanEvent::Dock(DockEvent::End));
         }
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(cursor.caret_in_dock, "tutma devri gizlemeliydi: {cursor:?}");
         let tick = cursor.next_tick.expect("tutma kare istemedi");
         assert!(
@@ -5345,7 +5898,12 @@ mod tests {
                 id: None,
             }));
         }
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(
             cursor.next_tick, None,
             "bekleyen tutma yokken saat sönmeli: {cursor:?}"
@@ -5370,7 +5928,12 @@ mod tests {
         );
         wait_mirror(&session, DockStatus::Live);
 
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(
             cursor.visible,
             "dock'suz pencere caret'siz kaldı: {cursor:?}"
@@ -5388,7 +5951,12 @@ mod tests {
         wait_mirror(&session, DockStatus::Live);
 
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(row_glyphs(&cells, 0), "$cmd1", "geçmiş kayboldu");
         assert_eq!(row_glyphs(&cells, 1), "out", "çıktı kayboldu");
         // Giriş satırı **tamamen** boş: prompt'un `$`'ı da gitti, çünkü aralık
@@ -5417,7 +5985,7 @@ mod tests {
         wait_mirror(&session, DockStatus::Live);
 
         let mut blocks = Blocks::default();
-        session.frame(|_| (), |_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
         let rows: Vec<u16> = blocks.as_slice().iter().map(|block| block.row).collect();
         assert_eq!(rows, [0], "bastırma blok şeridini düşürdü: {blocks:?}");
         session.shutdown();
@@ -5436,7 +6004,12 @@ mod tests {
         wait_mirror(&session, DockStatus::Unavailable(DockFault::Overflow));
 
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(
             row_glyphs(&cells, 2),
             "$ls-la",
@@ -5470,7 +6043,12 @@ mod tests {
         session.key_gen.fetch_add(1, Ordering::Release);
 
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(
             row_glyphs(&cells, 2),
             "$ls-la",
@@ -5530,7 +6108,12 @@ mod tests {
         // sınamazdı. İçerik kapısı yapıştırmadan sonra hâlâ tek hakem.
         session.key_gen.fetch_add(1, Ordering::Release);
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(
             cursor.caret_in_dock,
             "birleştirici kapıyı düşürdü: satır ızgaraya fırladı ({cursor:?})"
@@ -5564,7 +6147,12 @@ mod tests {
         );
         wait_mirror(&session, DockStatus::Live);
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(
             cursor.caret_in_dock,
             "zsh'in dönüştürdüğü karakter kapıyı düşürdü: caret ızgaraya sıçradı ({cursor:?})"
@@ -5597,7 +6185,12 @@ mod tests {
             );
             wait_mirror(&session, DockStatus::Control);
             let mut cells = Vec::new();
-            let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+            let cursor = session.frame(
+                |cell| cells.push(cell),
+                |_| (),
+                &mut Blocks::default(),
+                ScrollGlide::default(),
+            );
             assert_eq!(
                 row_glyphs(&cells, 0),
                 format!("${grid}"),
@@ -5629,7 +6222,12 @@ mod tests {
         let wake = Arc::new(TestWake::default());
         let session = spawn_typing_session(&mirror("bHM", 2), Arc::clone(&wake));
         wait_mirror(&session, DockStatus::Live);
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(
             cursor.caret_in_dock,
             "sınır kapanmış görünüyor — bekçiyi ve discussion.md'yi güncelle ({cursor:?})"
@@ -5672,7 +6270,12 @@ mod tests {
         session.key_gen.fetch_add(1, Ordering::Release);
 
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(
             !cursor.caret_in_dock,
             "boş ayna boş satıra uydu: caret metnin yanında değil dock'ta ({cursor:?})"
@@ -5715,7 +6318,12 @@ mod tests {
         // sınamazdı. İçerik kapısı yapıştırmadan sonra hâlâ tek hakem.
         session.key_gen.fetch_add(1, Ordering::Release);
 
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(
             cursor.caret_in_dock,
             "boş prompt'ta caret dock'un olmalı: {cursor:?}"
@@ -5756,7 +6364,12 @@ mod tests {
         wait_mirror(&session, DockStatus::Live);
 
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(row_glyphs(&cells, 2), "", "girişin ilk satırı ızgarada");
         assert_eq!(row_glyphs(&cells, 3), "", "sarmalı kuyruk ızgarada sızdı");
         assert_eq!(
@@ -5795,7 +6408,12 @@ mod tests {
         );
         wait_mirror(&session, DockStatus::Live);
         let mut live = Vec::new();
-        session.frame(|cell| live.push(cell), |_| (), &mut Blocks::default());
+        session.frame(
+            |cell| live.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(row_glyphs(&live, 2), "", "ayna canlıyken bastırma yok");
 
         wait_mirror(&session, DockStatus::Idle);
@@ -5805,11 +6423,21 @@ mod tests {
         // yani ölçüm devir gerçekleştikten sonra alınmalı.
         wait_until("caret ızgaraya dönmedi", Duration::from_secs(2), || {
             session
-                .frame(|_| (), |_| (), &mut Blocks::default())
+                .frame(
+                    |_| (),
+                    |_| (),
+                    &mut Blocks::default(),
+                    ScrollGlide::default(),
+                )
                 .visible
         });
         let mut cells = Vec::new();
-        let cursor = session.frame(|cell| cells.push(cell), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |cell| cells.push(cell),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert_eq!(
             row_glyphs(&cells, 2),
             "$ls-la",
@@ -5913,7 +6541,7 @@ mod tests {
         });
         wait_settled(&session);
         let mut blocks = Blocks::default();
-        session.frame(|_| (), |_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -5944,14 +6572,14 @@ mod tests {
         // On satır yukarı: pencere tamamen `out` satırlarına düşüyor.
         let mut blocks = Blocks::default();
         session.term.lock().scroll_display(Scroll::Delta(10));
-        session.frame(|_| (), |_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
         assert_eq!(blocks.as_slice(), [], "çıktı satırı işaret aldı");
 
         // Dibe dönünce komutun satırı yine görünmüyor (27 satırlık içerikte
         // 10 satırlık pencere), ama ikinci prompt görünüyor ve `Pending`
         // olduğu için çizilmiyor: yine boş.
         session.term.lock().scroll_display(Scroll::Bottom);
-        session.frame(|_| (), |_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -6099,7 +6727,12 @@ mod tests {
             "çok satırlı tampon beklenirdi: {dock:?}"
         );
 
-        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         assert!(
             !cursor.caret_in_dock,
             "gösteremediğimiz satırın caret'i dock'ta kaldı: {cursor:?}"
@@ -6126,7 +6759,7 @@ mod tests {
         });
         wait_settled(&session);
         let mut blocks = Blocks::default();
-        session.frame(|_| (), |_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -6148,7 +6781,7 @@ mod tests {
         wait_frame(&session, &wake, |cells| row_text(cells, 0) == "duzenleyici");
         wait_settled(&session);
         let mut blocks = Blocks::default();
-        session.frame(|_| (), |_| (), &mut blocks);
+        session.frame(|_| (), |_| (), &mut blocks, ScrollGlide::default());
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
     }
@@ -7892,7 +8525,13 @@ mod tests {
     /// Shift'siz tekerlek, işaretçi sol üstte — birincil ekranın kaydırma
     /// sınamalarının ortak çağrısı; işaretçi o dalda okunmuyor.
     fn scroll(session: &Session, lines: i32) -> Wheel {
-        session.scroll_wheel(lines, at(0, 0, CellHalf::Left), false)
+        session.scroll_wheel(
+            f64::from(lines),
+            lines,
+            ScrollIntent::Lines,
+            at(0, 0, CellHalf::Left),
+            false,
+        )
     }
 
     /// Shift'siz sol tuş basışı — düğme sınamalarının ortak çağrısı.
@@ -7913,7 +8552,12 @@ mod tests {
     /// olmak zorunda (hareket karesi onu `link.rs`'te korunan bir değerden
     /// okuyor). Hasarsız `frame()` meşru, yalnız boşuna — doc'u öyle yazıyor.
     fn cursor_now(session: &Session) -> Cursor {
-        session.frame(|_| (), |_| (), &mut Blocks::default())
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        )
     }
 
     #[test]
@@ -8466,7 +9110,12 @@ mod tests {
     /// geçiyor.
     fn fill_now(session: &Session) -> (Cursor, Vec<Cell>) {
         let mut cells = Vec::new();
-        let cursor = session.frame(|_| (), |cell| cells.push(cell), &mut Blocks::default());
+        let cursor = session.frame(
+            |_| (),
+            |cell| cells.push(cell),
+            &mut Blocks::default(),
+            ScrollGlide::default(),
+        );
         (cursor, cells)
     }
 
@@ -8492,6 +9141,7 @@ mod tests {
             |cell| grid.push(cell),
             |cell| band.push(cell),
             &mut Blocks::default(),
+            ScrollGlide::default(),
         );
         let origin = cursor.rows - cursor.content_rows;
         let band_top = origin - cursor.fill;
@@ -8500,7 +9150,10 @@ mod tests {
                 if screen >= origin {
                     row_text(&grid, screen - origin)
                 } else if screen >= band_top {
-                    row_text(&band, screen - band_top)
+                    // Kesrin tepe satırı kanalın en üstünde ve bu listenin
+                    // dışında: yardımcı tam satırları soruyor, yarım satırı
+                    // değil.
+                    row_text(&band, screen - band_top + cursor.top_row)
                 } else {
                     // Bandın da ızgaranın da dokunmadığı satır: gerçekten boş.
                     String::new()
@@ -8779,7 +9432,12 @@ mod tests {
 
         let mut blocks = Blocks::default();
         let mut band = Vec::new();
-        let cursor = session.frame(|_| (), |cell| band.push(cell), &mut blocks);
+        let cursor = session.frame(
+            |_| (),
+            |cell| band.push(cell),
+            &mut blocks,
+            ScrollGlide::default(),
+        );
         assert!(cursor.fill > 0, "sahne bantsız kuruldu: {cursor:?}");
 
         // Çıpalı satır bandın **içinde** ve metni tanınıyor: `$ ` prompt'u
@@ -9014,6 +9672,431 @@ mod tests {
         assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
     }
 
+    /// Shift'siz kesirli tekerlek, işaretçi sol üstte — [`scroll`]'un
+    /// kesirli kardeşi. Tam satır hâli yalnız ok ve rapor kollarının girdisi
+    /// ve bu sınamalar birincil ekranda, yani kesmenin biçimi önemsiz.
+    fn smooth(session: &Session, rows: f64, intent: ScrollIntent) -> Wheel {
+        session.scroll_wheel(
+            rows,
+            rows.trunc() as i32,
+            intent,
+            at(0, 0, CellHalf::Left),
+            false,
+        )
+    }
+
+    /// Pencerenin **görsel** konumu, satır cinsinden: ekranın tepesindeki
+    /// satırın derinliği artı kesir. Dibe yaslı pencerede tepe bandın tepesi
+    /// (bant bir sanal kaydırma, [`Session::fill_shown`]); ofset ancak
+    /// banttan sonra sayıyor.
+    fn position(cursor: &Cursor) -> f64 {
+        let top = if cursor.display_offset == 0 {
+            i32::from(cursor.fill)
+        } else {
+            cursor.display_offset
+        };
+        f64::from(top) + f64::from(cursor.scroll_frac)
+    }
+
+    #[test]
+    fn fractional_deltas_move_the_screen_continuously() {
+        // **R1.1'in bekçisi**: kesirli deltaların toplamı tam satırları
+        // **sürekli** üretiyor — konum her adımda tam olarak delta kadar
+        // oynuyor ve tam satır geçtiğinde ekran tek bir satır kayıyor.
+        // Bantlı ve bantsız pencere ayrı sahneler, çünkü bandın ilk çentiği
+        // ofseti `band + 1`'e taşıyor ([`scroll_locked`]) ve kesir o
+        // eşlemenin üstünden geçmek zorunda — `0.75 + 0.25` bant boyunca
+        // sıçramamalı.
+        for (name, (session, _wake)) in [
+            ("bantlı", gapped_session(true)),
+            ("bantsız", history_session("stty -echo; seq 1 30; sleep 5")),
+        ] {
+            let (start, top) = screen_now(&session);
+            assert_eq!(start.display_offset, 0, "{name}: {start:?}");
+            let mut prev = (start, top.clone());
+            // Üç satır yukarı, üç satır geri; çeyrek satırlık adımlarla.
+            for (rows, step) in std::iter::repeat_n(0.25, 12)
+                .chain(std::iter::repeat_n(-0.25, 12))
+                .zip(1..)
+            {
+                smooth(&session, rows, ScrollIntent::Direct);
+                let (cursor, now) = screen_now(&session);
+                assert!(
+                    (position(&cursor) - position(&prev.0) - rows).abs() < 1e-6,
+                    "{name}, adım {step}: konum deltayı izlemedi\n  önce: {:?}\n  sonra: {cursor:?}",
+                    prev.0
+                );
+                assert!(
+                    (0.0..1.0).contains(&cursor.scroll_frac),
+                    "{name}, adım {step}: {cursor:?}"
+                );
+                let old = &prev.1;
+                let up = now[1..] == old[..old.len() - 1];
+                let down = now[..now.len() - 1] == old[1..];
+                assert!(
+                    now == *old || up || down,
+                    "{name}, adım {step}: ekran bir satırdan fazla oynadı\n  önce: {old:?}\n  sonra: {now:?}"
+                );
+                prev = (cursor, now);
+            }
+            // Dönüşün sonu başlangıcın ta kendisi.
+            let (end, back) = screen_now(&session);
+            assert_eq!(end.scroll_frac, 0.0, "{name}: {end:?}");
+            assert_eq!(end.fill, start.fill, "{name}: bant geri gelmedi: {end:?}");
+            assert_eq!(back, top, "{name}: ekran başladığı yere dönmedi");
+        }
+    }
+
+    #[test]
+    fn the_top_row_is_the_row_above_the_screen() {
+        // **R1.4**: kesir sıfırdan büyükken doldurma kanalının en üstünde
+        // ekranın tepesinin hemen üstündeki satır geliyor. Ölçüt sayının
+        // kendisi değil **süreklilik**: kesir tamamlanınca ızgaranın ilk
+        // satırı tam da o satır olmalı, yoksa yarım satırdan tam satıra
+        // geçerken tepe başka bir şeye dönerdi.
+        //
+        // Kaydırılmış pencere: `Line(-offset - 1)`. Ekranın dipte tepesi
+        // `22`, yani iki satır yukarıda tepe `20` ve üstü `19`.
+        let (session, _wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        smooth(&session, 2.5, ScrollIntent::Direct);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.display_offset, 2, "{cursor:?}");
+        assert_eq!(cursor.scroll_frac, 0.5, "{cursor:?}");
+        assert_eq!(cursor.top_row, 1, "{cursor:?}");
+        // Kanal yalnız tepe satırı taşıyor: bant kaydırılmış pencerede yok ve
+        // `fill` onu saymıyor.
+        assert_eq!(cursor.fill, 0, "{cursor:?}");
+        assert_eq!(row_text(&cells, 0), "19", "{cells:?}");
+        smooth(&session, 0.5, ScrollIntent::Direct);
+        let (whole, top) = screen_now(&session);
+        assert_eq!(whole.top_row, 0, "{whole:?}");
+        assert_eq!(top[0], "19", "kesir tamamlanınca tepe başka bir satır oldu");
+
+        // Bantlı dip: tepe satırı **bandın** üstünde ve bandın satırları onun
+        // altına iniyor. Bant `17`…`21`'i gösteriyor, üstü `16`.
+        let (session, _wake) = gapped_session(true);
+        let before = cursor_now(&session);
+        smooth(&session, 0.5, ScrollIntent::Direct);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.display_offset, 0, "{cursor:?}");
+        assert_eq!(
+            cursor.fill, before.fill,
+            "bandın boyu kesirden etkilendi: {cursor:?}"
+        );
+        assert_eq!(cursor.top_row, 1, "{cursor:?}");
+        let channel: Vec<String> = (0..cursor.top_row + cursor.fill)
+            .map(|row| row_text(&cells, row))
+            .collect();
+        assert_eq!(channel, ["16", "17", "18", "19", "20", "21"], "{cells:?}");
+        // Kesrin bandın sanal kaydırmasına dokunmadığının tanığı: tekerleğin
+        // okuduğu sayı hâlâ bandın kendisi.
+        assert_eq!(
+            session.fill_shown.load(Ordering::Relaxed),
+            before.fill,
+            "tepe satırı bandın boyuna karıştı"
+        );
+    }
+
+    #[test]
+    fn the_top_row_ignores_the_bands_gates() {
+        // **Tepe satırının tek kapısı defter** (`discussion.md` → Muhakeme):
+        // bandın kapıları burada yok. Ctrl-L'den sonra bant kapalı (bayrak),
+        // ama yukarı çıkan kullanıcı kesirde boş bir yarım satır görmemeli.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[2J\\033[H'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+        session.write(b"\n");
+        wait_until("ekran temizlenmedi", Duration::from_secs(5), || {
+            cursor_now(&session);
+            session.screen_cleared.load(Ordering::Relaxed)
+        });
+        smooth(&session, 0.5, ScrollIntent::Direct);
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.fill, 0, "bayrak kuruluyken bant açıldı: {cursor:?}");
+        assert_eq!(cursor.scroll_frac, 0.5, "{cursor:?}");
+        assert_eq!(
+            cursor.top_row, 1,
+            "Ctrl-L tepe satırını kapattı: {cursor:?}"
+        );
+
+        // Dock'suz pencerede de (bandın ilk kapısı): kesir bant yokken de
+        // geçerli.
+        let (session, _wake) = gapped_session(false);
+        smooth(&session, 0.25, ScrollIntent::Direct);
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.top_row, 1, "{cursor:?}");
+        assert_eq!(cursor.fill, 0, "{cursor:?}");
+    }
+
+    #[test]
+    fn a_whole_row_frame_has_no_top_row() {
+        // Kesir sıfırken kanal bugünküyle aynı: tepe satırı yok, dock'suz
+        // dolu pencerede ikinci sink hiç çağrılmıyor.
+        let (session, _wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!((cursor.scroll_frac, cursor.top_row), (0.0, 0), "{cursor:?}");
+        assert!(cells.is_empty(), "ikinci sink boşuna çağrıldı: {cells:?}");
+        // Tam satır yolu (`off`) kesir doğurmuyor.
+        assert_eq!(
+            smooth(&session, 1.0, ScrollIntent::Lines),
+            Wheel::Scrolled(1)
+        );
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!((cursor.scroll_frac, cursor.top_row), (0.0, 0), "{cursor:?}");
+        assert!(cells.is_empty(), "{cells:?}");
+    }
+
+    #[test]
+    fn the_edges_keep_no_fraction_and_ask_for_no_frame() {
+        // **R1.2**: dipte negatif, geçmişin tepesinde pozitif kesir kalmıyor
+        // ve hiçbir şeyi değiştirmeyen olay kare istemiyor — momentum uçta da
+        // olay yağdırıyor ve her biri boş bir kare olurdu.
+        let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        let woken = wakes(&wake);
+        assert_eq!(
+            smooth(&session, -0.5, ScrollIntent::Direct),
+            Wheel::Scrolled(0)
+        );
+        assert_eq!(
+            smooth(&session, -1.0, ScrollIntent::Glide),
+            Wheel::Scrolled(0)
+        );
+        assert_eq!(cursor_now(&session).scroll_frac, 0.0);
+        assert_eq!(session.take_scroll_glide().rows, 0.0, "dipte istek birikti");
+        assert_eq!(wakes(&wake), woken, "dipte kare istendi");
+
+        // Geçmişin tepesi: 21 satırlık defter.
+        smooth(&session, 100.0, ScrollIntent::Direct);
+        let top = cursor_now(&session);
+        assert_eq!((top.display_offset, top.scroll_frac), (21, 0.0), "{top:?}");
+        let woken = wakes(&wake);
+        assert_eq!(
+            smooth(&session, 0.5, ScrollIntent::Direct),
+            Wheel::Scrolled(0)
+        );
+        assert_eq!(
+            smooth(&session, 1.0, ScrollIntent::Glide),
+            Wheel::Scrolled(0)
+        );
+        assert_eq!(cursor_now(&session).scroll_frac, 0.0, "tepede kesir kaldı");
+        assert_eq!(
+            session.take_scroll_glide().rows,
+            0.0,
+            "tepede istek birikti"
+        );
+        assert_eq!(wakes(&wake), woken, "tepede kare istendi");
+
+        // Uçtan geri dönüş serbest ve kare istiyor.
+        assert_eq!(
+            smooth(&session, -0.25, ScrollIntent::Direct),
+            Wheel::Scrolled(-1)
+        );
+        let back = cursor_now(&session);
+        assert_eq!(
+            (back.display_offset, back.scroll_frac),
+            (20, 0.75),
+            "{back:?}"
+        );
+        assert!(wakes(&wake) > woken, "geri dönüş kare istemedi");
+    }
+
+    #[test]
+    fn output_while_scrolled_keeps_the_fraction() {
+        // **R1.3, dış yazıcı**: geçmişteyken gelen çıktı ofseti alacritty'nin
+        // kendi kuralıyla artırıyor (görünen satırlar yerinde kalsın) ve kesre
+        // dokunmuyor; sonraki delta yeni ofsetten devam ediyor, tam satırı
+        // geri almıyor. Mutlak bir konum tutulsaydı tam da burada ezerdi.
+        //
+        // Satır sonu `send`'den gidiyor, `write`'tan değil: kullanıcı girdisi
+        // pencereyi dibe döndürür ve sahne kendi kendini sıfırlardı.
+        let (session, _wake) = history_session("stty -echo; seq 1 30; read _; seq 31 33; sleep 5");
+        smooth(&session, 2.5, ScrollIntent::Direct);
+        session.send(Msg::Input(b"\n".to_vec().into()));
+        wait_until(
+            "çıktı geçmişi büyütmedi",
+            Duration::from_secs(5),
+            || display_offset(&session) == 5,
+        );
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.scroll_frac, 0.5, "çıktı kesre dokundu: {cursor:?}");
+
+        smooth(&session, 0.25, ScrollIntent::Direct);
+        let cursor = cursor_now(&session);
+        assert_eq!(
+            (cursor.display_offset, cursor.scroll_frac),
+            (5, 0.75),
+            "delta çıktının taşıdığı ofseti geri aldı: {cursor:?}"
+        );
+    }
+
+    #[test]
+    fn input_and_a_page_reset_the_fraction_and_the_generation() {
+        // **R1.3, iç yazıcılar**: girdide dibe dönüş ve Shift+PgUp kesri
+        // sıfırlıyor, bekleyen isteği düşürüyor ve nesli artırıyor. Nesil
+        // kare yolunun payını da eliyor: sıfırlamadan önce hesaplanmış bir
+        // pay dibe dönen pencereyi geri çekmemeli.
+        let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        let start = cursor_now(&session).scroll_generation;
+        smooth(&session, 1.5, ScrollIntent::Direct);
+        smooth(&session, 1.0, ScrollIntent::Glide);
+
+        session.write(b"x");
+        let cursor = cursor_now(&session);
+        assert_eq!(
+            (cursor.display_offset, cursor.scroll_frac),
+            (0, 0.0),
+            "{cursor:?}"
+        );
+        assert_eq!(cursor.scroll_generation, start + 1, "{cursor:?}");
+        let pending = session.take_scroll_glide();
+        assert_eq!(pending.rows, 0.0, "girdi bekleyen isteği düşürmedi");
+        assert_eq!(pending.generation, start + 1);
+
+        // Eski neslin payı düşüyor, güncelinki uygulanıyor — ve kare yolunun
+        // payı **uyandırmıyor**: kareyi zaten çizen taraf istiyor.
+        let woken = wakes(&wake);
+        let stale = ScrollGlide {
+            rows: 0.5,
+            generation: start,
+        };
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default(), stale);
+        assert_eq!(cursor.scroll_frac, 0.0, "eski neslin payı uygulandı");
+        let live = ScrollGlide {
+            rows: 0.5,
+            generation: start + 1,
+        };
+        let cursor = session.frame(|_| (), |_| (), &mut Blocks::default(), live);
+        assert_eq!(cursor.scroll_frac, 0.5, "{cursor:?}");
+        assert_eq!(wakes(&wake), woken, "kare yolunun payı uyandırdı");
+
+        // Shift+PgUp: tam bir sayfa, kesirsiz.
+        assert_eq!(session.scroll_page(1), Some(10));
+        let cursor = cursor_now(&session);
+        assert_eq!(
+            (cursor.display_offset, cursor.scroll_frac),
+            (10, 0.0),
+            "{cursor:?}"
+        );
+        assert_eq!(cursor.scroll_generation, start + 2, "{cursor:?}");
+    }
+
+    #[test]
+    fn notches_settles_and_momentum_are_glide_requests() {
+        // Olay yolunun üç istek kolu (R1.5): çentik isteği biriktirip kare
+        // istiyor, yerleşme payını kesirden hesaplıyor, momentum başı
+        // bekleyeni düşürüp nesli artırıyor. Payı teslim eden kare yolu.
+        let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        let woken = wakes(&wake);
+        assert_eq!(
+            smooth(&session, 1.0, ScrollIntent::Glide),
+            Wheel::Scrolled(0)
+        );
+        assert!(wakes(&wake) > woken, "çentik kare istemedi");
+        assert_eq!(
+            display_offset(&session),
+            0,
+            "çentik ofseti olay anında oynattı"
+        );
+        assert_eq!(session.take_scroll_glide().rows, 1.0);
+        assert_eq!(
+            session.take_scroll_glide().rows,
+            0.0,
+            "istek alınınca sıfırlanmadı"
+        );
+
+        // Yerleşme en yakın satıra: `0.7` → `+0.3`.
+        smooth(&session, 0.7, ScrollIntent::Direct);
+        smooth(&session, 0.0, ScrollIntent::Settle);
+        let settle = session.take_scroll_glide();
+        assert!((settle.rows - 0.3).abs() < 1e-6, "{settle:?}");
+        // Tam satırdaki yerleşme hiçbir şey istemiyor.
+        let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        let woken = wakes(&wake);
+        smooth(&session, 0.0, ScrollIntent::Settle);
+        assert_eq!(session.take_scroll_glide().rows, 0.0);
+        assert_eq!(wakes(&wake), woken, "tam satırdaki yerleşme kare istedi");
+
+        // Momentum başı bekleyeni düşürüyor ve nesli artırıyor; kendi
+        // deltası doğrudan uygulanıyor.
+        let generation = cursor_now(&session).scroll_generation;
+        smooth(&session, 1.0, ScrollIntent::Glide);
+        smooth(&session, 0.25, ScrollIntent::GestureBegan);
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.scroll_frac, 0.25, "{cursor:?}");
+        let pending = session.take_scroll_glide();
+        assert_eq!(pending.rows, 0.0, "momentum bekleyen isteği düşürmedi");
+        assert_eq!(pending.generation, generation + 1);
+    }
+
+    #[test]
+    fn a_settle_delivered_in_f32_lands_on_a_whole_row() {
+        // `/code-review` (027 phase-1): yerleşmenin payı `f32`'de teslim
+        // ediliyor ve `0.3 + (−0.30000001)` `floor`'da bir satır aşağı düşüp
+        // pencereyi `0.99999998` kesirle bırakıyordu. Kesirlerin dördü de
+        // ölçüldü; hepsi tam satıra oturmalı.
+        let (session, _wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        smooth(&session, 5.0, ScrollIntent::Direct);
+        for frac in [0.1, 0.2, 0.3, 0.4, 0.6, 0.7] {
+            smooth(&session, frac, ScrollIntent::Direct);
+            smooth(&session, 0.0, ScrollIntent::Settle);
+            let glide = session.take_scroll_glide();
+            let cursor = session.frame(|_| (), |_| (), &mut Blocks::default(), glide);
+            assert_eq!(
+                (cursor.display_offset, cursor.scroll_frac, cursor.top_row),
+                (if frac < 0.5 { 5 } else { 6 }, 0.0, 0),
+                "{frac}: {cursor:?}"
+            );
+            // Bir sonraki tur aynı tabandan.
+            smooth(
+                &session,
+                5.0 - f64::from(cursor.display_offset),
+                ScrollIntent::Direct,
+            );
+        }
+    }
+
+    #[test]
+    fn a_huge_glide_does_not_poison_the_request() {
+        // Sonlu ama dev bir delta `f32`'de sonsuza taşsaydı ters yöndeki ilk
+        // ekleme isteği NaN yapar ve süzülme sessizce ölürdü.
+        let (session, _wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        smooth(&session, 1e300, ScrollIntent::Glide);
+        smooth(&session, -1e300, ScrollIntent::Glide);
+        smooth(&session, 1.0, ScrollIntent::Glide);
+        let glide = session.take_scroll_glide();
+        assert!(glide.rows.is_finite(), "{glide:?}");
+    }
+
+    #[test]
+    fn a_whole_row_step_and_mouse_mode_retire_the_fraction() {
+        // Satır adımı (`off`) konumu dışarıdan sıfırlayan bir yol: kesir
+        // düşüyor ve nesil artıyor, yoksa uçuştaki süzülmenin payı güncel
+        // nesille gelip kesri geri getirirdi (`/code-review`, 027 phase-1).
+        let (session, _wake) =
+            history_session("stty -echo; seq 1 30; read _; printf '\\033[?1000h'; sleep 5");
+        smooth(&session, 2.5, ScrollIntent::Direct);
+        let before = cursor_now(&session).scroll_generation;
+        smooth(&session, 1.0, ScrollIntent::Lines);
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.scroll_frac, 0.0, "{cursor:?}");
+        assert_eq!(cursor.scroll_generation, before + 1, "{cursor:?}");
+
+        // Fare kipine geçen birincil ekran uygulaması: tekerlek artık rapor
+        // ve kesri hiçbir olay silemez, yani kare yolu siliyor. Satır sonu
+        // `send`'den — kullanıcı girdisi kesri zaten sıfırlardı.
+        smooth(&session, 0.5, ScrollIntent::Direct);
+        assert_eq!(cursor_now(&session).scroll_frac, 0.5);
+        session.send(Msg::Input(b"\n".to_vec().into()));
+        wait_until(
+            "fare kipi kesri düşürmedi",
+            Duration::from_secs(5),
+            || cursor_now(&session).scroll_frac == 0.0,
+        );
+    }
+
     /// Dolu ızgaraya `read`'in ardından `after` betiğini koşturur ve
     /// kareler boyunca [`Cursor::scrolled`]'ı toplar, `needle` görünüp akış
     /// durulana kadar. Son karenin imlecini ve hücrelerini de verir.
@@ -9228,7 +10311,13 @@ mod tests {
         // Birincil ekranda Shift tekerleği değiştirmiyor (alacritty de öyle):
         // karar tablosunda Shift yalnız alternate screen'in okunu keser.
         assert_eq!(
-            session.scroll_wheel(-1, at(0, 0, CellHalf::Left), true),
+            session.scroll_wheel(
+                f64::from(-1),
+                -1,
+                ScrollIntent::Lines,
+                at(0, 0, CellHalf::Left),
+                true
+            ),
             Wheel::Scrolled(-1)
         );
     }
@@ -9330,9 +10419,15 @@ mod tests {
             |mode| mode.contains(TermMode::ALT_SCREEN | TermMode::SGR_MOUSE),
         );
         let pointer = at(4, 2, CellHalf::Right);
-        assert_eq!(session.scroll_wheel(2, pointer, false), Wheel::Sent);
+        assert_eq!(
+            session.scroll_wheel(f64::from(2), 2, ScrollIntent::Lines, pointer, false),
+            Wheel::Sent
+        );
         expect_sent(&session, &wake, &b"\x1b[<64;5;3M".repeat(2));
-        assert_eq!(session.scroll_wheel(-1, pointer, true), Wheel::Sent);
+        assert_eq!(
+            session.scroll_wheel(f64::from(-1), -1, ScrollIntent::Lines, pointer, true),
+            Wheel::Sent
+        );
         expect_sent(&session, &wake, b"\x1b[<65;5;3M");
     }
 
@@ -9346,12 +10441,24 @@ mod tests {
         // Sığmayan koordinat hiçbir şey göndermez — önce, çünkü "hiçbir şey"
         // ancak boş blokta 16 nokta diye okunur.
         assert_eq!(
-            plain.scroll_wheel(1, at(223, 2, CellHalf::Left), false),
+            plain.scroll_wheel(
+                f64::from(1),
+                1,
+                ScrollIntent::Lines,
+                at(223, 2, CellHalf::Left),
+                false
+            ),
             Wheel::Ignored
         );
         expect_sent(&plain, &wake, b"");
         assert_eq!(
-            plain.scroll_wheel(1, at(222, 2, CellHalf::Left), false),
+            plain.scroll_wheel(
+                f64::from(1),
+                1,
+                ScrollIntent::Lines,
+                at(222, 2, CellHalf::Left),
+                false
+            ),
             Wheel::Sent
         );
         expect_sent(&plain, &wake, &[0x1b, b'[', b'M', 96, 255, 35]);
@@ -9361,11 +10468,23 @@ mod tests {
             mode.contains(TermMode::UTF8_MOUSE)
         });
         assert_eq!(
-            utf8.scroll_wheel(1, at(94, 2, CellHalf::Left), false),
+            utf8.scroll_wheel(
+                f64::from(1),
+                1,
+                ScrollIntent::Lines,
+                at(94, 2, CellHalf::Left),
+                false
+            ),
             Wheel::Sent
         );
         assert_eq!(
-            utf8.scroll_wheel(-1, at(95, 2, CellHalf::Left), false),
+            utf8.scroll_wheel(
+                f64::from(-1),
+                -1,
+                ScrollIntent::Lines,
+                at(95, 2, CellHalf::Left),
+                false
+            ),
             Wheel::Sent
         );
         expect_sent(
@@ -9392,7 +10511,13 @@ mod tests {
 
         // Ofset 5: görünen 4. satır geçmişin son satırı.
         assert_eq!(
-            session.scroll_wheel(1, at(0, 4, CellHalf::Left), false),
+            session.scroll_wheel(
+                f64::from(1),
+                1,
+                ScrollIntent::Lines,
+                at(0, 4, CellHalf::Left),
+                false
+            ),
             Wheel::Ignored
         );
         expect_sent(&session, &wake, b"");
@@ -9400,7 +10525,13 @@ mod tests {
         // uygulamanın 2. satırı → rapor 3 der.
         session.term.lock().scroll_display(Scroll::Delta(5));
         assert_eq!(
-            session.scroll_wheel(1, at(0, 7, CellHalf::Left), false),
+            session.scroll_wheel(
+                f64::from(1),
+                1,
+                ScrollIntent::Lines,
+                at(0, 7, CellHalf::Left),
+                false
+            ),
             Wheel::Sent
         );
         expect_sent(&session, &wake, b"\x1b[<64;1;3M");
@@ -9420,7 +10551,13 @@ mod tests {
             mode.contains(TermMode::ALT_SCREEN)
         });
         assert_eq!(
-            shifted.scroll_wheel(3, at(0, 0, CellHalf::Left), true),
+            shifted.scroll_wheel(
+                f64::from(3),
+                3,
+                ScrollIntent::Lines,
+                at(0, 0, CellHalf::Left),
+                true
+            ),
             Wheel::Ignored
         );
         // Sıfır satır da sessiz: boş `Msg::Input` `EventLoop`'un yazıcısını

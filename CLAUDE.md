@@ -503,7 +503,8 @@ kesirli bir piksel bütün metni bulanıklaştırırdı. Ötelemenin tek sahibi
 kare yolu; fare eşlemesi onu `bt_gpu::Origin` ile **encode edilen** değerden
 okur. **Üstte kalan boşluk artık boş değil**: `frame()` oraya defterin en yeni
 satırlarını veriyor (`Cursor::fill = min(gap, temizlemeden beri gelen satır)`),
-ama **ayrı bir sink'ten** ve satırları **fill-yerel** (`0..fill`) — doluluğa girmiyor, yani
+ama **ayrı bir sink'ten** ve satırları **fill-yerel** (`0..fill`; kesrin tepe
+satırı varsa en üstte bir fazlası) — doluluğa girmiyor, yani
 öteleme aritmetiği dokunulmadan duruyor. Kapısı tek yerde
 (`Session::fill_rows`) ve **dört** koşullu: pencerenin dock'u olacak,
 alternatif ekranda olmayacak, kasten temizleme bayrağı temiz olacak
@@ -550,6 +551,31 @@ kurmayı isterdi; işaret ise bir `RuleCell`. Encode sırası **ızgara →
 doldurma → dock**, çünkü ızgaranın listeleri bandın içine hiç girmiyor ama
 ötelemeden muaf olan caret girebiliyor, ve dock'un opak zemini en altta
 kalmak zorunda.
+**Kaydırma konumu göreli bir kesir taşıyor** (027; bugün yalnız `bt-core`
+tarafı var — `bt-shell` tam satır niyeti gönderiyor, kare yolu sıfır pay
+veriyor, yani ekranda kesir doğmuyor): `Session`'ın tek yeni kaydırma durumu
+`[0, 1)` satırlık bir kesir (`Cursor::scroll_frac`, ızgara o kadar
+**aşağı**), tam satırın tek yetkilisi yine `scroll_locked` ve bant eşlemesi
+dokunulmadan geçerli — mutlak bir konum `display_offset`'in dört dış
+yazıcısını (dibe dönüş, Shift+PgUp, geçmişteyken gelen çıktı, resize) her
+karede ezerdi. `scroll_wheel` olayı kesirli ve tam satır hâliyle birlikte
+alıyor ve rota önce seçiliyor: kesir yalnız kaydırma kolunda, ok ve rapor tam
+satırla; niyet (`ScrollIntent`: satır, doğrudan, çentik, yerleşme, jest başı)
+çağıranın. Çentiğin ve yerleşmenin payı bir **istek** olarak birikiyor
+(`Session::take_scroll_glide`) ve `frame()` payı **argüman** olarak alıyor —
+aynı kilit turu, uyandırma yok. Konumu dışarıdan sıfırlayan her yol (dibe
+dönüş, sayfa, satır adımı, jest başı) bir **nesil** artırıyor ve eski neslin
+payı düşüyor; istek ile nesil tek atomik kelimede, çünkü ikisi ayrılınca
+aradaki alım bir çentiği kaybediyordu. Uçlarda kesir kalmıyor, tam satıra
+yakın toplam tam satıra oturuyor (pay `f32`) ve hiçbir şeyi değiştirmeyen olay
+kare istemiyor. Kesrin açtığı şeridi ekranın tepesinin **hemen üstündeki
+satır** kapatıyor (`Cursor::top_row`, `Line(-(offset + fill) - 1)`): doldurma
+kanalının en üst satırı (fill-yerel `0`, bant onun altında), ama sayısı
+`fill`'e **karışmıyor** ve tek kapısı satırın defterde olması — bandın dock,
+Ctrl-L ve ofset kapıları ona uygulanmıyor, yoksa kaydırılmış pencerede tepe
+boş bir yarım satır olurdu. Tekerlek artık kaydırmıyorsa (alternatif ekran,
+fare kipi) ya da tepenin üstünde satır kalmadıysa kare yolu kesri sıfırlıyor.
+Gerekçeler `.tasks/027-yumusak-kaydirma/discussion.md` → Muhakeme.
 **Seçim içeriği vurgular, içerik yaratmaz**: vurgu yalnız seçim olmasaydı da
 çizilecek hücrelere uygulanıyor, yani boş ekranda fareyi sürüklemek hiçbir şey
 boyamıyor ve gözün gördüğü ile panonun verdiği ayrışmıyor. Ölçüt "mürekkep"

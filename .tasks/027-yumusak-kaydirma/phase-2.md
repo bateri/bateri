@@ -50,7 +50,13 @@ _Requirements: R2.1, R2.2, R2.3, R2.4_
 ## Checklist
 
 - [ ] Süzülme animatörü ve bitirme kuralları
-- [ ] Link: isteği al, payı teslim et, uçuşta içerik karesi
+- [ ] Link: isteği al, payı teslim et, uçuşta içerik karesi — pay
+  `ScrollGlide` olarak ve **`take_scroll_glide`'ın döndürdüğü nesille**
+  geri veriliyor (phase-1 Uygulama Notları); nesil değiştiyse uçuştaki
+  süzülme o karede bitiyor
+- [ ] Doldurma kanalının boyu `top_row + fill` (`set_fill_rows`,
+  `fill_origin_px`, bandın blok listesi): phase-1'den beri `frame()` tepe
+  satırını fill-yerel `0`'da veriyor
 - [ ] Orijin + kesir, tepe satırının çizimi, `Origin` yayını
 - [ ] Test: animatör, frame, kesirsiz kare aynı
 - [ ] `CLAUDE.md` cümleleri

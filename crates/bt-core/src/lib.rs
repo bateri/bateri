@@ -4,7 +4,8 @@
 //! `alacritty_terminal` **kapsüllüdür**: `pub` API'de alacritty tipi görünmez,
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`, `Block`,
 //! `Blocks`,
-//! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `LinearRgba`, `Theme`,
+//! `SelectionPoint`, `CellHalf`, `Arrow`, `Wheel`, `ScrollIntent`,
+//! `ScrollGlide`, `LinearRgba`, `Theme`,
 //! `ShellState`, `ShellPhase`, aynanın `DockState`, `DockStatus`, `DockFault`,
 //! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, bağlam satırının
 //! `DockContext`'ini, dock yüzeyinin `Dock`'unu,
@@ -48,9 +49,9 @@ pub use color::{LinearRgba, Theme};
 pub use dock::{Dock, DockCols};
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use session::{
-    Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, SelectionPoint,
-    Session, SessionOptions, ShutdownHandle, Teardown, TerminalOptions, UnderlineStyle, Wheel,
-    load_shell, smoke_shell,
+    Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, Osc52, SHUTDOWN_GRACE, ScrollGlide,
+    ScrollIntent, SelectionPoint, Session, SessionOptions, ShutdownHandle, Teardown,
+    TerminalOptions, UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_GLOW, CURSOR_RADIUS, CaretShape, CaretStyle, Changes,

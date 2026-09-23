@@ -63,11 +63,64 @@ _Requirements: R1.1, R1.2, R1.3, R1.4, R1.5_
 
 ## Checklist
 
-- [ ] Kesir, nesil, süzülme isteği ve delta çağrısı
-- [ ] `scroll_wheel`'ın yeni imzası; `view.rs` uyumu
-- [ ] Dibe dönüş ve Shift+PgUp kesri sıfırlıyor, nesil artıyor
-- [ ] `Cursor` alanları ve `frame()`'in tepe satırı (ayrı sayı, ayrı kapı)
-- [ ] Test: süreklilik, uçlar, dış yazıcılar, tepe satırı, kesirsiz kare aynı
-- [ ] `CLAUDE.md` cümleleri
-- [ ] Doğrulama geçti (`make hepsi`, `make test-yaris`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Kesir, nesil, süzülme isteği ve delta çağrısı
+- [x] `scroll_wheel`'ın yeni imzası; `view.rs` uyumu
+- [x] Dibe dönüş ve Shift+PgUp kesri sıfırlıyor, nesil artıyor
+- [x] `Cursor` alanları ve `frame()`'in tepe satırı (ayrı sayı, ayrı kapı)
+- [x] Test: süreklilik, uçlar, dış yazıcılar, tepe satırı, kesirsiz kare aynı
+- [x] `CLAUDE.md` cümleleri
+- [x] Doğrulama geçti (`make hepsi`, `make test-yaris`; ayrıca `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+
+## Uygulama Notları
+
+- **Nesil payın da içinde** (`ScrollGlide { rows, generation }`): `frame()`'in
+  argümanı çıplak bir sayı değil, `take_scroll_glide` isteği aldığı neslle
+  veriyor ve `frame()` güncel nesilden farklı payı düşürüyor (nesil `Term`
+  kilidi altında okunuyor, artıranlar da kilidi tutuyor). Yalnız
+  `Cursor::scroll_generation` yetmezdi: dibe dönüşten sonraki ilk karenin payı
+  hâlâ eski nesle ait ve uygulanırsa pencere dipten bir kesir kadar yukarıda
+  kalıyordu. İstek ile nesil **tek `AtomicU64`**'te (`fetch_update`): iki ayrı
+  atomikte "isteği düşür + nesli artır" ile "isteği al + nesli oku" arasına
+  düşen bir alım yeni nesle ait bir çentiği kaybederdi.
+- **`ScrollIntent` `session.rs`'te** (`Wheel`/`Click`'in yanında) ve beş kollu:
+  `Lines` bugünkü yol, dördü kesirli. Kesirli kolların hepsi olayın kendi
+  `rows`'unu da uyguluyor (yerleşme ve jest başı olayı delta taşıyabilir).
+  Momentum başı kolu **`GestureBegan`** oldu: parmağın yeniden değmesi de
+  uçuştaki yerleşmeyi bitirmeli, yoksa önceki jestin kalan payı ekranı
+  parmaktan uzaklaştırırdı (`/code-review`). `Lines` konumu dışarıdan
+  sıfırlayan bir yol sayılıyor: kesir düşüyor **ve nesil artıyor**
+  (`/code-review`: `off`'a geçerken uçuştaki pay kesri geri getiriyordu).
+- **Uçta çentik isteği birikmiyor** (plan "biriktir + kare iste" diyordu):
+  dipte aşağı, tepede yukarı dönen çentik hiçbir şeyi değiştirmeyen bir
+  süzülme için kare isterdi — R1.2.
+- **Kare yolu kesri normalleştiriyor**: tekerlek artık kaydırma koluna
+  gitmiyorsa (alternatif ekran, **fare kipine geçen birincil ekran
+  uygulaması** — `/code-review`) ya da tepenin üstünde defterde satır yoksa
+  (`CSI 3 J`) `frame()` kesri sıfırlayıp nesli artırıyor; planın bilinen
+  sınırı yalnız "sıfır sayılır" diyordu, kalıcı sıfırlamasaydı alternatif
+  ekrandan dönen pencere yarım satırda kalırdı.
+- **Geçerlilik ile çizim iki ayrı ölçü** (`/code-review`): kesrin geçerliliği
+  olay yolunun ölçüsüyle (`visual_top(offset, fill_shown)`), tepe satırının
+  **çizilmesi** kanalın bu karedeki boyuyla (`offset + fill`, kayma uzantısı
+  dahil). Tek ölçü uzantının defteri doldurduğu karede geçerli bir kesri
+  siliyordu.
+- **Tam satıra yakın toplam tam satır** (`1e-5` satır, `/code-review`): pay
+  `f32`'de geliyor ve yerleşmenin `−0.30000001`'i `floor`'da pencereyi bir
+  satır aşağı, `0.99999998` kesirle bırakıyordu.
+- **İstek `f64`'te toplanıp `i32` aralığına kırpılıyor** (`/code-review`):
+  sonlu dev bir delta `f32`'de sonsuza taşıp isteği NaN'a çevirirdi.
+- **Waive — çentik süzülürken gelen yerleşme**: yerleşme payını bugünkü
+  kesirden hesaplıyor, uçuştaki çentiğin kalanını bilmiyor; çentik bitince
+  pencere satırın dışında kalabilir. İkisi farklı aygıtlardan (klasik
+  tekerlek + trackpad) aynı anda gelmeli; kalanı yalnız animatör biliyor ve
+  kapatmanın yeri phase-2'nin `Motion`'ı değil bu çağrı — yönü güvenli
+  (bir sonraki jest ya da yerleşme düzeltiyor).
+- **Alan adları**: `Cursor::top_row` (`0`/`1`), `scroll_frac` (`f32`, `1`'in
+  altına kırpılı), `scroll_generation`. Kesir içeride `f64` bitleri.
+- **Testler imzayla birlikte yazıldı**, önce kırmızı değil: yeni API
+  derlenmeden sınama koşamıyordu. Isırdıklarını mutasyonla gösterdim (uç
+  kuralı, dibe dönüşün sıfırlaması ve nesil kapısı kapatılınca iki sınama
+  düşüyor).
+- `frame()`'in dördüncü argümanı ~100 sınama çağrısını `rustfmt`'le çok
+  satıra açtı; değişiklik mekanik.

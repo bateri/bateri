@@ -367,8 +367,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bt_core::{
-        Blocks, CaretShape, CursorBlink, DockState, DockStatus, Osc52, Session, SessionOptions,
-        ShellPhase, ShellState, TerminalOptions, Theme, Wake,
+        Blocks, CaretShape, CursorBlink, DockState, DockStatus, Osc52, ScrollGlide, Session,
+        SessionOptions, ShellPhase, ShellState, TerminalOptions, Theme, Wake,
     };
 
     use super::*;
@@ -617,6 +617,7 @@ mod tests {
             // ilk satırlarını ezerdi.
             |_| (),
             blocks,
+            ScrollGlide::default(),
         );
         rows.into_iter()
             .map(|row| row.into_iter().collect())

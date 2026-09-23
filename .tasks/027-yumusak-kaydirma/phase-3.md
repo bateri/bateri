@@ -61,7 +61,9 @@ _Requirements: R3.1, R3.2, R3.3, R3.4_
 
 ## Checklist
 
-- [ ] Niyet sınıflaması (saf) ve `scrollWheel:`'ın iki kolu
+- [ ] Niyet sınıflaması (saf) ve `scrollWheel:`'ın iki kolu — momentum
+  başı **ve** hassas jestin `phase == Began`'ı `ScrollIntent::GestureBegan`
+  (phase-1: parmak yeniden değince uçuştaki yerleşme bitmeli)
 - [ ] `smooth_scroll` ayarı: ayrıştırma, şablon, `changes`, uygulama
 - [ ] Tek `bool` birleşmesi ve kayıt anında yayılım
 - [ ] `docs/AYARLAR.md` ve `CLAUDE.md`

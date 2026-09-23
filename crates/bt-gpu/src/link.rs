@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 
 use bt_core::{
     Blocks, CaretStyle, Cursor, CursorMotion, DirtyFlag, DockCols, DockContext, DockState,
-    LinearRgba, Session, Theme,
+    LinearRgba, ScrollGlide, Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -966,6 +966,9 @@ define_class!(
                 |cell| frame.push(cell),
                 |cell| fill.push(cell),
                 &mut iv.blocks.borrow_mut(),
+                // Süzülme payı henüz yok: animatörü gelene kadar pay sıfır ve
+                // kare bugünküyle aynı (`Session::frame`).
+                ScrollGlide::default(),
             );
             // **Bandın boyu hücrelerden önce** (`Frame::set_fill_rows`):
             // `push_fill`'in bekçisi satırı ona göre ölçüyor. Sıfırsa sınır

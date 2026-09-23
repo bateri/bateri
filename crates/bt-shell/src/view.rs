@@ -30,7 +30,9 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 
-use bt_core::{CellHalf, Click, MouseButton, MouseModifiers, SelectionPoint, Session, Wheel};
+use bt_core::{
+    CellHalf, Click, MouseButton, MouseModifiers, ScrollIntent, SelectionPoint, Session, Wheel,
+};
 use bt_gpu::{CellMetrics, Origin};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
@@ -650,7 +652,9 @@ define_class!(
                 return;
             };
             let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
-            match session.scroll_wheel(lines, pointer, shift) {
+            // Satır yolu: kesirli miktar satırın kendisi ve niyet tam satır —
+            // kaydırma kolu da bugünkü `scroll_locked`'tan geçiyor.
+            match session.scroll_wheel(f64::from(lines), lines, ScrollIntent::Lines, pointer, shift) {
                 Wheel::Scrolled(0) | Wheel::Ignored => carry.set(0.0),
                 Wheel::Scrolled(_) => self.follow_pointer(session),
                 // Pencere kaymadı, uygulama kendi ekranını çiziyor: seçim ucu
