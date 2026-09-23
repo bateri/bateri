@@ -123,7 +123,7 @@ encode_dock: zemin → dock_bg → caret → HAYALETLER (glyph_fx) → emoji
 |-------|-------|
 | phase-1 | ✅ |
 | phase-2 | ✅ |
-| phase-3 | |
+| phase-3 | ✅ |
 | phase-4 | |
 | phase-5 | |
 | kapı | |

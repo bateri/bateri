@@ -16,7 +16,7 @@
 //! terimi). Kare talebi hareketin: `Waker::wake`'e dokunulmuyor, hasar
 //! dikilmiyor — efekt içeriği değil içeriğin nasıl çizildiğini değiştiriyor.
 
-use bt_core::{Cell, DockEdit};
+use bt_core::{Cell, DockEdit, Erase, Keypress};
 
 use crate::motion::Motion;
 
@@ -44,56 +44,60 @@ pub(crate) const ERASE_DURATION: f32 = 0.16;
 /// güvenli, efekt kısalır ama hiçbir glyph kaybolmaz.
 pub(crate) const FX_MAX: usize = 32;
 
-/// Glyph'in gelişi — `[motion] keypress`'in çizilebilen adları (phase-3'te
-/// ayara bağlanıyor, bu phase'de sabit varsayılan).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum KeypressFx {
-    /// Glyph anında belirir (efektsiz hâl).
-    Off,
-    /// Glyph yerinde saydamdan tam renge belirir.
-    #[default]
-    Fade,
-}
+/// Bir efekt adının shader'daki kimliği (`shaders/glyph_fx.metal` → `FX_*`).
+///
+/// Adların sözlüğü `bt-core`'un ([`Keypress`], [`Erase`] — ayar modeli,
+/// `CursorMotion` emsali); kimlik çizimin bilgisi ve burada. Kapsamlı
+/// `match`: `bt-core`'a yeni bir ad girdiği an burası derlenmez, yani
+/// kimliksiz bir ad popup'a sızamaz.
+pub(crate) trait Effect: Copy + PartialEq + 'static {
+    /// Gelişler `1..16`'da, hayaletler `16..32`'de: shader girdinin türünü
+    /// kimlikten okuyor ve ikinci bir bit taşımıyor. `Off` çizilmiyor,
+    /// kimliği yok.
+    fn id(self) -> Option<u32>;
 
-/// Silinen glyph'in gidişi — `[motion] erase`'in çizilebilen adları.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum EraseFx {
-    /// Glyph anında kaybolur (efektsiz hâl).
-    Off,
-    /// Glyph merkezine doğru küçülerek geri çekilir ve söner.
-    #[default]
-    Recede,
-}
-
-impl KeypressFx {
-    /// Çizen efektlerin hepsi (`Off` hariç) — hermetik değişmezlerin döngüsü
-    /// (`plan.md` → R5): her yeni efekt buraya girdiği an sınamaların altında.
+    /// Çizen efektlerin hepsi (`Off` hariç), `NAMES` sırasıyla — hermetik
+    /// değişmezlerin döngüsü (`plan.md` → R5): ayar modeline giren her ad
+    /// girdiği an sınamaların altında.
     #[cfg(test)]
-    pub(crate) const EFFECTS: &[Self] = &[Self::Fade];
+    fn effects() -> Vec<Self>;
+}
 
-    /// Shader'ın efekt kimliği (`shaders/glyph_fx.metal` → `FX_*`). Gelişler
-    /// `1..16`'da, hayaletler `16..32`'de: shader girdinin türünü kimlikten
-    /// okuyor ve ikinci bir bit taşımıyor. `Off` çizilmiyor, kimliği yok.
-    pub(crate) fn id(self) -> Option<u32> {
+impl Effect for Keypress {
+    fn id(self) -> Option<u32> {
         match self {
             Self::Off => None,
             Self::Fade => Some(1),
         }
     }
+
+    #[cfg(test)]
+    fn effects() -> Vec<Self> {
+        drawn(Self::NAMES)
+    }
 }
 
-impl EraseFx {
-    /// [`KeypressFx::EFFECTS`]'in hayalet kardeşi.
-    #[cfg(test)]
-    pub(crate) const EFFECTS: &[Self] = &[Self::Recede];
-
-    /// [`KeypressFx::id`]'nin hayalet kardeşi.
-    pub(crate) fn id(self) -> Option<u32> {
+impl Effect for Erase {
+    fn id(self) -> Option<u32> {
         match self {
             Self::Off => None,
             Self::Recede => Some(16),
         }
     }
+
+    #[cfg(test)]
+    fn effects() -> Vec<Self> {
+        drawn(Self::NAMES)
+    }
+}
+
+#[cfg(test)]
+fn drawn<T: Effect>(names: &[(&str, T)]) -> Vec<T> {
+    names
+        .iter()
+        .map(|&(_, effect)| effect)
+        .filter(|effect| effect.id().is_some())
+        .collect()
 }
 
 /// Girdinin türü: gelen glyph ya da gidenin hayaleti.
@@ -143,8 +147,8 @@ pub(crate) struct GlyphFx {
     /// Kullanıcının seçtiği geliş efekti — ham, indirgenmemiş. İndirgeme
     /// ([`Motion::glyph_fx`]) her düzenlemede yeniden soruluyor, yani
     /// Hareketi Azalt'ın değişimi bir sonraki tuşta geçerli.
-    keypress: KeypressFx,
-    erase: EraseFx,
+    keypress: Keypress,
+    erase: Erase,
     /// Tohumun kaynağı; sarması zararsız.
     serial: u32,
 }
@@ -208,6 +212,26 @@ impl GlyphFx {
                 duration,
             });
         }
+    }
+
+    /// Kullanıcının seçtiği iki efekti kurar — ham adlar, indirgeme her
+    /// düzenlemede ([`Motion::glyph_fx`]).
+    ///
+    /// **Değişince uçuştakiler biter** (`Motion::set_style`'ın emsali): eski
+    /// efektle başlamış bir girdiyi yeni efektin eğrisinde sürdürmenin
+    /// anlamı yok, `off`'a geçen kullanıcının gördüğü ise tam da "anında"
+    /// olmalı. Aynı seçim no-op. Dönüş bir şeyin bitirilip bitirilmediği:
+    /// bitirilen girdinin son hâli ekrana ancak bir kare çizilirse düşer ve
+    /// o karenin talebi çağıranın (`DisplayLink::set_glyph_fx`).
+    pub(crate) fn set_effects(&mut self, keypress: Keypress, erase: Erase) -> bool {
+        if (self.keypress, self.erase) == (keypress, erase) {
+            return false;
+        }
+        self.keypress = keypress;
+        self.erase = erase;
+        let finished = !self.is_empty();
+        self.finish();
+        finished
     }
 
     /// Uçuştakileri pencerenin kayması kadar kaydırır; metnin sütunlarından
@@ -312,6 +336,28 @@ mod tests {
 
     fn cols(fx: &GlyphFx) -> Vec<(u16, Kind)> {
         fx.iter().map(|fx| (fx.cell.col, fx.kind)).collect()
+    }
+
+    #[test]
+    fn a_new_choice_finishes_what_is_in_flight() {
+        let mut fx = GlyphFx::default();
+        fx.apply(arrive(4, 'a'), Motion::default(), WINDOW);
+        // Aynı seçimi yeniden yazan kayıt no-op: efekt sürüyor, kare de
+        // istenmiyor.
+        assert!(!fx.set_effects(Keypress::Fade, Erase::Recede));
+        assert_eq!(cols(&fx), [(4, Kind::Arrival)]);
+        // Değişim uçuştakini bitiriyor ve bunu söylüyor (link kare ister).
+        assert!(fx.set_effects(Keypress::Off, Erase::Recede));
+        assert!(fx.is_empty());
+        // Yeni seçim bir sonraki düzenlemede geçerli.
+        fx.apply(arrive(5, 'b'), Motion::default(), WINDOW);
+        fx.apply(erase(7, 'c'), Motion::default(), WINDOW);
+        assert_eq!(cols(&fx), [(7, Kind::Ghost)]);
+        assert!(fx.set_effects(Keypress::Fade, Erase::Off));
+        fx.apply(erase(7, 'c'), Motion::default(), WINDOW);
+        assert!(fx.is_empty());
+        // Boş listede değişim bir şey bitirmedi: kare gerekmiyor.
+        assert!(!fx.set_effects(Keypress::Off, Erase::Off));
     }
 
     #[test]
@@ -445,19 +491,19 @@ mod tests {
             let kinds: Vec<(Kind, u32)> = fx.iter().map(|fx| (fx.kind, fx.effect)).collect();
             assert_eq!(
                 kinds,
-                [(Kind::Arrival, KeypressFx::Fade.id().expect("fade"))],
+                [(Kind::Arrival, Keypress::Fade.id().expect("fade"))],
                 "Hareketi Azalt: geliş belirir, hayalet yok ({style:?})"
             );
             let plain = motion(style, false);
             assert_eq!(
-                plain.glyph_fx(KeypressFx::Fade, EraseFx::Recede),
-                (KeypressFx::Fade, EraseFx::Recede)
+                plain.glyph_fx(Keypress::Fade, Erase::Recede),
+                (Keypress::Fade, Erase::Recede)
             );
         }
         // Erişilebilirlik ayarı animasyon **eklemez**: kapalı geliş kapalı kalır.
         assert_eq!(
-            motion(CursorMotion::Spring, true).glyph_fx(KeypressFx::Off, EraseFx::Recede),
-            (KeypressFx::Off, EraseFx::Off)
+            motion(CursorMotion::Spring, true).glyph_fx(Keypress::Off, Erase::Recede),
+            (Keypress::Off, Erase::Off)
         );
     }
 }

@@ -185,6 +185,14 @@ reduce_motion = "system"
 # line by line. Reduce Motion and cursor_motion = "snap" also move line by
 # line.
 smooth_scroll = "on"
+# "off" | "fade". How a letter you type in the dock at the bottom of the
+# window appears: fade brings it in from clear, off shows it at once.
+keypress = "fade"
+# "off" | "recede". How a letter you delete in the dock goes: recede shrinks
+# it away, off removes it at once. Pasting, history and deleting a whole word
+# or line are instant. cursor_motion = "snap" turns both off; Reduce Motion
+# keeps only a fade for typing.
+erase = "recede"
 
 [shell]
 # "auto" | "blocks" | "off". Whether bateri sets up the shell so it can report
@@ -592,6 +600,8 @@ osc52 = "copy"
 cursor_motion = "spring"
 reduce_motion = "system"
 smooth_scroll = "on"
+keypress = "fade"
+erase = "recede"
 ```
 
 | anahtar | tür | varsayılan | anlamı |
@@ -599,13 +609,16 @@ smooth_scroll = "on"
 | `cursor_motion` | `"snap"`, `"ease"` ya da `"spring"` | `"spring"` | imlecin hücreler arasında nasıl gittiği |
 | `reduce_motion` | `"system"`, `"on"` ya da `"off"` | `"system"` | animasyonların kısılıp kısılmayacağı |
 | `smooth_scroll` | `"on"` ya da `"off"` | `"on"` | geçmişte kaydırmanın pürüzsüz mü satır satır mı gittiği |
+| `keypress` | `"off"` ya da `"fade"` | `"fade"` | dock'ta yazılan harfin nasıl geldiği |
+| `erase` | `"off"` ya da `"recede"` | `"recede"` | dock'ta silinen harfin nasıl gittiği |
 
 - **`"spring"`** — imleç yeni yerine bir yayla kayar ve yavaşlayarak oturur;
   hedefi aşmaz. Uzak bir sıçrama yakın bir sıçramadan biraz uzun sürer.
 - **`"ease"`** — kayma **sabit** sürer, mesafe ne olursa olsun; sonuna doğru
   yavaşlar, hedefi aşmaz.
 - **`"snap"`** — kayma yok, imleç doğrudan yeni hücrede görünür ve içerik de
-  anında yerine gider. Hareketi tamamen kapatmanın yolu bu.
+  anında yerine gider. Hareketi tamamen kapatmanın yolu bu: dock'taki yazma
+  ve silme efektleri de (`keypress`, `erase`) kapanır.
 - Aynı stil **içeriğin yükselmesini** de sürer: bateri içeriği pencerenin
   tabanına yaslar, yani yeni bir satır geldiğinde geçmiş yukarı kayar ve imleç
   dipteki satırında durur. Kayan şey bütün ızgaradır, imleç değil.
@@ -652,6 +665,9 @@ smooth_scroll = "on"
   yazarken — imleç tam opak kalır ve yeni yerine sessizce geçer; yoksa
   saniyede on kereden hızlı bir titreme doğardı (eski davranışta imleç akan
   çıktıda büsbütün görünmez oluyordu).
+- Dock'ta yazılan harf, `keypress` ne olursa olsun **yalnız belirir**
+  (`"fade"`); silinen harf efektsiz, anında gider. İmleçle aynı kural: kısılan
+  şey hareket, yazdığınızın onayı değil. `keypress = "off"` ise kapalı kalır.
 - `cursor_motion = "snap"` bunun **üstündedir**: hareketi zaten kapatmış
   olan kullanıcıya Hareketi Azalt bir belirme *eklemez*.
 - Kaydettiğiniz anda geçerli olur. O sırada kayan bir imleç varsa hedefinde
@@ -680,6 +696,28 @@ smooth_scroll = "on"
   ölçülmedi.
 - Kaydettiğiniz anda geçerli olur.
 - Tanınmayan değer (`"yes"`, `"On"`, `true`) yalnız bu anahtarı etkiler.
+
+`keypress` ile `erase` pencerenin altındaki **dock**'ta — komutu yazdığınız
+satırda — harflerin nasıl geldiğini ve gittiğini söyler:
+
+- **`keypress = "fade"`** — yazdığınız harf yerinde saydamdan tam renge
+  belirir. **`"off"`** — anında görünür.
+- **`erase = "recede"`** — Backspace'le sildiğiniz harf yerinde küçülerek
+  söner; satırın ortasından sildiyseniz sağdaki metin bugünkü gibi anında
+  kayar, hayalet onun altında söner. **`"off"`** — anında kaybolur.
+- Efekt **tek tek** yazılan ve silinen harfler içindir: yapıştırma, geçmişten
+  (↑) gelen satır, tamamlama ve kelime/satır silme (⌥⌫, Ctrl-U) anında olur.
+- Satır dock'ta değil ızgaradayken (komut koşarken, `[shell] integration =
+  "blocks"`, çok satırlı giriş) efekt yoktur.
+- `cursor_motion = "snap"` ikisini de kapatır; Hareketi Azalt yazmayı
+  belirmeye indirir, silmeyi kapatır (yukarıda). Ayar penceresinde (Motion)
+  ezilen satır devre dışı görünür ve nedenini söyler — `smooth_scroll` da.
+  Hareketi Azalt'ta Keypress satırı açık kalır: orada da açıp kapatmak bir
+  fark.
+- Kaydettiğiniz anda geçerli olur; o sırada süren bir efekt hemen biter.
+- Tanınmayan değer (`"pop"`, `"Fade"`, `1`) yalnız kendi anahtarını etkiler
+  (açılışta varsayılan, kayıt anında ekrandaki efekt) ve uyarı görünür.
+  Referans ürünün öteki efekt adları henüz tanınmıyor.
 
 ### `[shell]`
 

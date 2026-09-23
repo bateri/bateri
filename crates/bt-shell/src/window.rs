@@ -1394,7 +1394,12 @@ impl TerminalWindow {
         // ve buradaki çağrı onu dosyanın (ya da hermetik koşuda
         // `Settings::default()`'un) değerine çekiyor. `set_font`'un yeri
         // `load_settings` ama stilinki olamaz: link o an henüz yok.
-        link.set_cursor_motion(app.settings().cursor_motion);
+        // Dock'un yazım efektleri de aynı gerekçeyle burada.
+        {
+            let settings = app.settings();
+            link.set_cursor_motion(settings.cursor_motion);
+            link.set_glyph_fx(settings.keypress, settings.erase);
+        }
         // Açılış karesi: `Session` kirli doğar, link'i bir kez elle açıyoruz.
         link.request_frame();
         let _ = self.ivars().link.set(link);
@@ -1542,11 +1547,14 @@ impl TerminalWindow {
         window.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
     }
 
-    /// İmlecin stili link'e gidiyor, oturuma değil: hangi kareyi çizeceğimizi
-    /// değil **nasıl** çizeceğimizi değiştiriyor.
+    /// İmlecin stili ve dock'un yazım efektleri link'e gidiyor, oturuma
+    /// değil: hangi kareyi çizeceğimizi değil **nasıl** çizeceğimizi
+    /// değiştiriyorlar. Efektler **ham** iniyor; `snap` ve Hareketi Azalt'ın
+    /// indirgemesi `bt-gpu`'da (`DisplayLink::set_glyph_fx`).
     pub(crate) fn set_cursor_motion(&self, settings: &Settings) {
         if let Some(link) = self.ivars().link.get() {
             link.set_cursor_motion(settings.cursor_motion);
+            link.set_glyph_fx(settings.keypress, settings.erase);
         }
     }
 

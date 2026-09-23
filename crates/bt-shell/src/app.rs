@@ -924,6 +924,10 @@ define_class!(
             let _mtm = MainThreadMarker::new()
                 .expect("erişilebilirlik bildirimi ana thread'de bekleniyor");
             self.apply_reduce_motion();
+            // Ayar penceresinin hareket satırları sistemin cevabına bakıyor
+            // (`settings_window::motion_override`): açıksa o da tazelenmeli,
+            // yoksa sistemden açılan Hareketi Azalt satırları ezmiş görünmezdi.
+            self.refresh_settings_window();
         }
 
         /// Shell ▸ New Window (⌘N): etkin pencerenin dizininde ve punto
@@ -1843,11 +1847,11 @@ impl AppDelegate {
                     window.set_terminal_options(&new);
                 }
             }
-            // Stil link'e gidiyor, oturuma değil: hangi kareyi çizeceğimizi
-            // değil **nasıl** çizeceğimizi değiştiriyor. Link `start_session`
-            // içinde doğuyor ve bu yol ondan sonra koşuyor, ama sıra bir
-            // sözleşme değil: yuva boşsa açılış çağrısı zaten aynı değeri
-            // verecek.
+            // Stil ve dock'un yazım efektleri link'e gidiyor, oturuma değil:
+            // hangi kareyi çizeceğimizi değil **nasıl** çizeceğimizi
+            // değiştiriyorlar. Link `start_session` içinde doğuyor ve bu yol
+            // ondan sonra koşuyor, ama sıra bir sözleşme değil: yuva boşsa
+            // açılış çağrısı zaten aynı değeri verecek.
             let motion_changed = changes.motion;
             if motion_changed {
                 for window in &windows {
@@ -2041,7 +2045,8 @@ impl AppDelegate {
         let write = self.ivars().notices.borrow().get(Source::Write).to_vec();
         let embedded: Vec<&str> = Theme::embedded_names().collect();
         let user = settings::user_theme_names(&root);
-        window.refresh(&settings, &state, &write, &embedded, &user);
+        let reduce = self.reduce_motion();
+        window.refresh(&settings, reduce, &state, &write, &embedded, &user);
     }
 
     /// Ayar dizininin kaynaklarını yeniden kurar. Yenisi eskisi düşmeden

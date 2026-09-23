@@ -58,9 +58,9 @@ pub use session::{
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,
     CURSOR_RADIUS_RANGE, CaretShape, CaretStyle, Changes, ConfirmClose, CursorBlink, CursorMotion,
-    Diagnostic, FontOptions, LINE_HEIGHT_RANGE, MAX_LINE_HEIGHT, Parsed, ReduceMotion,
-    SCROLLBACK_MAX, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
-    UnfocusedCaret,
+    Diagnostic, Erase, FontOptions, Keypress, LINE_HEIGHT_RANGE, MAX_LINE_HEIGHT, Parsed,
+    ReduceMotion, SCROLLBACK_MAX, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration,
+    SmoothScroll, UnfocusedCaret,
 };
 pub use shell::{
     DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle,

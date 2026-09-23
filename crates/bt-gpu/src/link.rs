@@ -75,7 +75,7 @@ use std::time::{Duration, Instant};
 
 use bt_core::{
     Blocks, CaretStyle, Cursor, CursorMotion, DOCK_TEXT_COL, DirtyFlag, DockCols, DockContext,
-    DockState, LinearRgba, Session, Theme,
+    DockState, Erase, Keypress, LinearRgba, Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -1857,6 +1857,30 @@ impl DisplayLink {
             finished |= !glyph_fx.is_empty();
             glyph_fx.finish();
         }
+        if finished {
+            self.request_frame();
+        }
+    }
+
+    /// Dock'un yazım efektleri değişti (`[motion] keypress` / `erase`):
+    /// kullanıcı `settings.toml`'u kaydetti ya da pencere açılıyor.
+    ///
+    /// Adlar **ham** geliyor — [`DisplayLink::set_cursor_motion`]'ın aksine
+    /// burada `bt-shell`'in çözeceği bir şey yok: `snap` ile Hareketi
+    /// Azalt'ın indirgemesi imlecin kipiyle aynı yerde, `bt-gpu`'da
+    /// (`Motion::glyph_fx`), ve ikisinin girdisi zaten link'te.
+    ///
+    /// Değişim uçuştakileri bitiriyor ([`GlyphFx::set_effects`]) ve bitirilen
+    /// bir şey varsa kare istiyor — `set_cursor_motion`'ın gerekçesi: "hasar
+    /// yok" dalı yerleşmiş animasyonu çizmeden uyuyor, istenmeseydi yarı
+    /// saydam bir harf ekranda asılı kalırdı. Aynı seçim ve boş liste no-op.
+    pub fn set_glyph_fx(&self, keypress: Keypress, erase: Erase) {
+        let finished = self
+            .delegate
+            .ivars()
+            .glyph_fx
+            .borrow_mut()
+            .set_effects(keypress, erase);
         if finished {
             self.request_frame();
         }

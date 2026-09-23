@@ -19,8 +19,9 @@ use std::cell::{Cell, OnceCell, RefCell};
 
 use bt_core::{
     CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
-    CursorBlink, CursorMotion, LINE_HEIGHT_RANGE, Osc52, ReduceMotion, SCROLLBACK_MAX,
-    SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll, UnfocusedCaret,
+    CursorBlink, CursorMotion, Erase, Keypress, LINE_HEIGHT_RANGE, Osc52, ReduceMotion,
+    SCROLLBACK_MAX, SYSTEM_THEME, Settings, SettingsEdit, ShellIntegration, SmoothScroll,
+    UnfocusedCaret,
 };
 use bt_gpu::FontNotice;
 use objc2::rc::Retained;
@@ -134,11 +135,13 @@ enum Key {
     CursorMotion,
     SmoothScroll,
     ReduceMotion,
+    Keypress,
+    Erase,
 }
 
 impl Key {
     /// Sıra `tag`'in ta kendisi: `ALL[tag]`.
-    const ALL: [Key; 19] = [
+    const ALL: [Key; 21] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -158,6 +161,8 @@ impl Key {
         Key::CursorMotion,
         Key::SmoothScroll,
         Key::ReduceMotion,
+        Key::Keypress,
+        Key::Erase,
     ];
 
     fn tag(self) -> NSInteger {
@@ -192,6 +197,8 @@ impl Key {
             Key::CursorMotion => "motion.cursor_motion",
             Key::SmoothScroll => "motion.smooth_scroll",
             Key::ReduceMotion => "motion.reduce_motion",
+            Key::Keypress => "motion.keypress",
+            Key::Erase => "motion.erase",
         }
     }
 }
@@ -355,6 +362,71 @@ impl Choice for ReduceMotion {
             ReduceMotion::On => "On",
             ReduceMotion::Off => "Off",
         }
+    }
+}
+
+impl Choice for Keypress {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            Keypress::Off => "Off",
+            Keypress::Fade => "Fade",
+        }
+    }
+}
+
+impl Choice for Erase {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            Erase::Off => "Off",
+            Erase::Recede => "Recede",
+        }
+    }
+}
+
+/// Hareketi kapatan bir girdinin ezdiği satır: açık mı ve açıklamasının
+/// yerine ne söylüyor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Override {
+    enabled: bool,
+    note: &'static str,
+}
+
+/// `cursor_motion = "snap"` ya da **etkin** Hareketi Azalt (`reduce`,
+/// ayarla sistemin birleşmiş cevabı) bu satırın değerini eziyor mu — saf,
+/// yani kural pencere kurmadan sınanıyor.
+///
+/// Ezilen satır gizlenmiyor, **devre dışı** kalıyor ve nedenini söylüyor
+/// (029 Karar 6): değer görünür kalır, ezen girdi kalkınca geri gelir.
+/// Kural indirgemenin sahiplerininki (`bt_gpu`'nun `Motion::glyph_fx`'i,
+/// `app::resolve_smooth_scroll`): `snap` ikisinin de üstünde; Hareketi
+/// Azalt hayaleti ve pürüzsüz kaydırmayı kapatıyor, yazmayı ise belirmeye
+/// **indiriyor** — o satır açık kalıyor, çünkü `off` ile efekt arasındaki
+/// seçim orada da bir fark, ve kapalı yazma kapalı kaldığı için orada
+/// söylenecek bir şey yok (030 Karar 7).
+fn motion_override(key: Key, settings: &Settings, reduce: bool) -> Option<Override> {
+    let disabled = |note| {
+        Some(Override {
+            enabled: false,
+            note,
+        })
+    };
+    let snap = settings.cursor_motion == CursorMotion::Snap;
+    match key {
+        Key::Keypress | Key::Erase if snap => disabled("Off while cursor motion is Snap."),
+        Key::SmoothScroll if snap => disabled("Line by line while cursor motion is Snap."),
+        Key::Erase if reduce => disabled("Off while Reduce motion is on."),
+        Key::SmoothScroll if reduce => disabled("Line by line while Reduce motion is on."),
+        Key::Keypress if reduce && settings.keypress != Keypress::Off => Some(Override {
+            enabled: true,
+            note: "Letters only fade in while Reduce motion is on.",
+        }),
+        _ => None,
     }
 }
 
@@ -582,6 +654,8 @@ struct Controls {
     cursor_motion: Retained<NSPopUpButton>,
     smooth_scroll: Retained<NSSwitch>,
     reduce_motion: Retained<NSPopUpButton>,
+    keypress: Retained<NSPopUpButton>,
+    erase: Retained<NSPopUpButton>,
     /// Dört bölmenin satırları: kilit, bağımlı satır ve satır tanısı
     /// buradan.
     rows: Vec<Row>,
@@ -614,14 +688,19 @@ impl Row {
         self.label.setTextColor(Some(&color));
     }
 
-    /// Notu tanıya ya da açıklamaya kurar; ikisi de yoksa satırı gizler.
-    /// Kapalı satırın açıklaması da etiketiyle birlikte soluyor.
-    fn set_note(&self, diagnostic: Option<&str>, enabled: bool) {
-        let (text, color) = match (diagnostic, self.description) {
-            (Some(diagnostic), _) => (diagnostic, NSColor::systemOrangeColor()),
-            (None, Some(description)) if enabled => (description, NSColor::secondaryLabelColor()),
-            (None, Some(description)) => (description, NSColor::tertiaryLabelColor()),
-            (None, None) => {
+    /// Notu tanıya, ezen girdinin nedenine ([`motion_override`]) ya da
+    /// açıklamaya kurar — bu sırayla; hiçbiri yoksa satırı gizler. Kapalı
+    /// satırın açıklaması etiketiyle birlikte soluyor, neden soluklaşmıyor:
+    /// satırın neden kapalı olduğunu söyleyen tek metin o.
+    fn set_note(&self, diagnostic: Option<&str>, reason: Option<&str>, enabled: bool) {
+        let (text, color) = match (diagnostic, reason, self.description) {
+            (Some(diagnostic), _, _) => (diagnostic, NSColor::systemOrangeColor()),
+            (None, Some(reason), _) => (reason, NSColor::secondaryLabelColor()),
+            (None, None, Some(description)) if enabled => {
+                (description, NSColor::secondaryLabelColor())
+            }
+            (None, None, Some(description)) => (description, NSColor::tertiaryLabelColor()),
+            (None, None, None) => {
                 self.note_row.setHidden(true);
                 return;
             }
@@ -713,6 +792,8 @@ define_class!(
                 Key::Unfocused => choice_at(index).map(SettingsEdit::CursorUnfocused),
                 Key::CursorMotion => choice_at(index).map(SettingsEdit::CursorMotion),
                 Key::ReduceMotion => choice_at(index).map(SettingsEdit::ReduceMotion),
+                Key::Keypress => choice_at(index).map(SettingsEdit::Keypress),
+                Key::Erase => choice_at(index).map(SettingsEdit::Erase),
                 Key::Theme => theme_edit(&self.ivars().themes.borrow(), index)
                     .map(SettingsEdit::Theme),
                 Key::LightTheme => theme_edit(&self.ivars().light_themes.borrow(), index)
@@ -953,10 +1034,13 @@ impl SettingsWindow {
     ///
     /// Dosyanın hâli (`state`) ve yazma yuvası (`write`) kilidi, şeridi ve
     /// satır tanılarını kuruyor ([`status`]); her tazeleme hepsini baştan
-    /// kurduğu için düzelen hâlin izi kalmıyor.
+    /// kurduğu için düzelen hâlin izi kalmıyor. `reduce` Hareketi Azalt'ın
+    /// **çözülmüş** cevabı (ayar + sistem): hareket satırlarının ezilip
+    /// ezilmediği ondan ([`motion_override`]), ayarın kendisinden değil.
     pub(crate) fn refresh(
         &self,
         settings: &Settings,
+        reduce: bool,
         state: &FileState,
         write: &[String],
         embedded: &[&str],
@@ -1022,13 +1106,16 @@ impl SettingsWindow {
         select_choice(&c.cursor_motion, settings.cursor_motion);
         set_switch(&c.smooth_scroll, smooth_on(settings.smooth_scroll));
         select_choice(&c.reduce_motion, settings.reduce_motion);
+        select_choice(&c.keypress, settings.keypress);
+        select_choice(&c.erase, settings.erase);
 
         let status = status(state, write);
         for row in &c.rows {
+            let forced = motion_override(row.key, settings, reduce);
             let depends = match row.key {
                 Key::LightTheme | Key::DarkTheme => follows,
                 Key::BlinkSpeed => blinks,
-                _ => true,
+                _ => forced.is_none_or(|forced| forced.enabled),
             };
             let enabled = !status.locked && depends;
             row.set_enabled(enabled);
@@ -1037,7 +1124,7 @@ impl SettingsWindow {
                 .iter()
                 .find(|(key, _)| *key == row.key)
                 .map(|(_, message)| message.as_str());
-            row.set_note(diagnostic, enabled);
+            row.set_note(diagnostic, forced.map(|forced| forced.note), enabled);
         }
         // Değer etiketi bir etiket, kontrol değil: soluklaşması elle.
         let value_color = if !status.locked && blinks {
@@ -1508,6 +1595,8 @@ impl SettingsWindow {
         let cursor_motion = self.popup::<CursorMotion>(Key::CursorMotion);
         let smooth_scroll = self.switch(Key::SmoothScroll);
         let reduce_motion = self.popup::<ReduceMotion>(Key::ReduceMotion);
+        let keypress = self.popup::<Keypress>(Key::Keypress);
+        let erase = self.popup::<Erase>(Key::Erase);
         let mut motion = Form::new(mtm);
         motion.row(
             Key::CursorMotion,
@@ -1515,6 +1604,20 @@ impl SettingsWindow {
             &cursor_motion,
             &[&cursor_motion],
             Some("How the cursor travels to its new place."),
+        );
+        motion.row(
+            Key::Keypress,
+            "Keypress:",
+            &keypress,
+            &[&keypress],
+            Some("How a letter you type at the prompt appears."),
+        );
+        motion.row(
+            Key::Erase,
+            "Erase:",
+            &erase,
+            &[&erase],
+            Some("How a letter you delete at the prompt goes."),
         );
         motion.row(
             Key::SmoothScroll,
@@ -1556,6 +1659,8 @@ impl SettingsWindow {
             cursor_motion,
             smooth_scroll,
             reduce_motion,
+            keypress,
+            erase,
             rows,
         };
         (panes, controls)
@@ -1719,7 +1824,7 @@ impl Form {
             note_row,
             description,
         };
-        row.set_note(None, true);
+        row.set_note(None, None, true);
         self.rows.push(row);
     }
 }
@@ -1947,6 +2052,7 @@ mod tests {
                     [font]\nfamily = []\nsize = []\nline_height = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
+                    keypress = []\nerase = []\n\
                     [shell]\nintegration = []\n";
         let parsed = Settings::parse_keeping(text, &Settings::default()).expect("ayrıştırılır");
         let seen = status(&FileState::Usable(parsed.diagnostics), &[]);
@@ -1977,6 +2083,8 @@ mod tests {
                 Key::CursorMotion => SettingsEdit::CursorMotion(CursorMotion::Snap),
                 Key::SmoothScroll => SettingsEdit::SmoothScroll(SmoothScroll::On),
                 Key::ReduceMotion => SettingsEdit::ReduceMotion(ReduceMotion::On),
+                Key::Keypress => SettingsEdit::Keypress(Keypress::Off),
+                Key::Erase => SettingsEdit::Erase(Erase::Off),
             };
             assert_eq!(edit.path(), key.path(), "{key:?}");
         }
@@ -2042,6 +2150,48 @@ mod tests {
         check::<UnfocusedCaret>();
         check::<CursorMotion>();
         check::<ReduceMotion>();
+        check::<Keypress>();
+        check::<Erase>();
+    }
+
+    /// Hareketi kapatan iki girdi (030 Karar 7): ezilen satır devre dışı ve
+    /// nedenini söylüyor; Hareketi Azalt'ta yazma satırı açık kalıyor, çünkü
+    /// `off` ile efekt arasındaki seçim orada da bir fark.
+    #[test]
+    fn motion_rows_say_what_turns_them_off() {
+        let plain = Settings::default();
+        for key in Key::ALL {
+            assert_eq!(motion_override(key, &plain, false), None, "{key:?}");
+        }
+        let snap = Settings {
+            cursor_motion: CursorMotion::Snap,
+            ..Settings::default()
+        };
+        for key in [Key::Keypress, Key::Erase, Key::SmoothScroll] {
+            let forced = motion_override(key, &snap, false).expect("snap ezer");
+            assert!(!forced.enabled, "{key:?}");
+            // `snap` Hareketi Azalt'ın üstünde: iki girdi birden açıkken
+            // söylenen neden `snap`.
+            assert_eq!(motion_override(key, &snap, true), Some(forced), "{key:?}");
+        }
+        for key in [Key::Erase, Key::SmoothScroll] {
+            let forced = motion_override(key, &plain, true).expect("Hareketi Azalt ezer");
+            assert!(!forced.enabled, "{key:?}");
+        }
+        let fades = motion_override(Key::Keypress, &plain, true).expect("belirmeye iner");
+        assert!(fades.enabled);
+        assert!(fades.note.contains("fade"), "{}", fades.note);
+        // Kapalı yazma kapalı kalıyor: Hareketi Azalt animasyon eklemez,
+        // söylenecek bir şey yok.
+        let off = Settings {
+            keypress: Keypress::Off,
+            ..Settings::default()
+        };
+        assert_eq!(motion_override(Key::Keypress, &off, true), None);
+        // Öteki satırlara dokunmuyor.
+        for key in [Key::CursorMotion, Key::ReduceMotion, Key::Shape] {
+            assert_eq!(motion_override(key, &snap, true), None, "{key:?}");
+        }
     }
 
     #[test]

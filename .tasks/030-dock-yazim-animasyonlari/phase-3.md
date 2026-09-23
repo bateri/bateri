@@ -41,9 +41,39 @@ _Requirements: R7_
 
 ## Checklist
 
-- [ ] `settings.rs` enum'ları, alanlar, ayrıştırma, düzenleme, `changes`, şablon
-- [ ] `set_glyph_fx` ve `bt-shell` bağlantısı
-- [ ] İki popup + devre dışı kuralı
-- [ ] `docs/AYARLAR.md`
-- [ ] Test: ayrıştırma, round-trip, `changes`, bilinmeyen anahtar tanığı
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] `settings.rs` enum'ları, alanlar, ayrıştırma, düzenleme, `changes`, şablon
+- [x] `set_glyph_fx` ve `bt-shell` bağlantısı
+- [x] İki popup + devre dışı kuralı
+- [x] `docs/AYARLAR.md`
+- [x] Test: ayrıştırma, round-trip, `changes`, bilinmeyen anahtar tanığı
+- [x] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] Gözle (geçici `.app`, geçici HOME): Motion bölmesinde iki popup
+  029'un düzeninde; `snap`'te Keypress/Erase/Smooth scrolling devre dışı
+  ve nedenli, Hareketi Azalt açıkken Erase ve Smooth scrolling devre dışı,
+  Keypress açık ve "only fade in" notlu, `off` seçilince not açıklamaya
+  dönüyor; seçimler dosyaya yazılıyor. Dock'taki 120 ms'lik efekt ekran
+  görüntüsüyle yakalanamadı — kullanıcıya: popup'tan Keypress `Off` seçince
+  dock'ta harfler anında geliyor.
+
+## Uygulama Notları
+
+- **Tek enum:** `bt-gpu`'nun `KeypressFx`/`EraseFx`'i kalktı; `bt-core`'un
+  `Keypress`/`Erase`'i doğrudan kullanılıyor (`CursorMotion` emsali), shader
+  kimliği `glyph_fx::Effect` trait'inde (kapsamlı `match`), sınamaların
+  efekt listesi `NAMES`'ten türüyor — yeni ad iki yerde değil bir yerde
+  giriyor.
+- **Hareketi Azalt'ta Keypress satırı devre dışı değil:** Azalt yazmayı
+  belirmeye indiriyor ama `off` ile efekt arasındaki seçim orada da fark;
+  satırı kilitlemek kullanıcıyı açıp kapatamaz bırakırdı. Satır açık,
+  notu "Letters only fade in…" (`off`'ta not yok). Erase tamamen ezildiği
+  için devre dışı.
+- **Smooth scrolling satırı da aynı kurala girdi** (phase dışı, küçük):
+  `snap`/Azalt onu da eziyor (`resolve_smooth_scroll`) ve komşu satırlar
+  kilitlenirken onun açık kalması tutarsız görünürdü. Kural tek yerde:
+  `settings_window::motion_override` (saf, sınamalı).
+- `SettingsWindow::refresh` Hareketi Azalt'ın **çözülmüş** değerini alıyor;
+  sistem bildirimi (`accessibilityDisplayDidChange:`) artık açık ayar
+  penceresini de tazeliyor.
+- `GlyphFx::set_effects` değişimde uçuştakileri bitiriyor ve bir şey
+  bittiyse `set_glyph_fx` kare istiyor (`set_cursor_motion` emsali).
+- Bilinmeyen anahtar tanığı `keypress = "pop"` → `speed = "brisk"`.

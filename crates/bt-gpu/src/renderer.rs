@@ -1896,9 +1896,10 @@ mod tests {
     use bt_core::{Block, CaretShape, Cell, Cursor, Theme, UnderlineStyle};
 
     use super::*;
-    use crate::glyph_fx::{EraseFx, Fx, KeypressFx, Kind};
+    use crate::glyph_fx::{Effect, Fx, Kind};
     use crate::stats::Stats;
     use bt_core::CaretStyle;
+    use bt_core::{Erase, Keypress};
 
     /// Gömülü temanın zemini ve vurgusu: üretimde clear ve imleç rengi bu
     /// iki rolden geliyor (`link.rs`), sınamalar da aynı kaynaktan.
@@ -4372,7 +4373,7 @@ mod tests {
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         const EDGE: usize = 64;
         let cell_px = fitting_cell_px(&r, EDGE, 4);
-        for &keypress in KeypressFx::EFFECTS {
+        for &keypress in &Keypress::effects() {
             let id = keypress.id().expect("çizen efekt");
             for cell in [
                 glyph_cell(2, 'M', None),
@@ -4420,7 +4421,7 @@ mod tests {
         const EDGE: usize = 64;
         let cell_px = fitting_cell_px(&r, EDGE, 4);
         let bare = render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[], &[]));
-        for &erase in EraseFx::EFFECTS {
+        for &erase in &Erase::effects() {
             let id = erase.id().expect("çizen efekt");
             for cell in [glyph_cell(2, 'M', None), wide_cell(2, '漢')] {
                 let glyph =
@@ -4463,12 +4464,12 @@ mod tests {
             &dock_fx_frame(cell_px, &neighbours, &[]),
         );
         let dot = glyph_cell(5, '.', None);
-        let kinds = KeypressFx::EFFECTS
-            .iter()
+        let kinds = Keypress::effects()
+            .into_iter()
             .map(|fx| (Kind::Arrival, fx.id().expect("çizen efekt")))
             .chain(
-                EraseFx::EFFECTS
-                    .iter()
+                Erase::effects()
+                    .into_iter()
                     .map(|fx| (Kind::Ghost, fx.id().expect("çizen efekt"))),
             );
         let (cw, ch) = (usize::from(cell_px.0), usize::from(cell_px.1));
@@ -4526,7 +4527,7 @@ mod tests {
             inked(&still),
             "önkoşul: statik `漢`'ın dikişte mürekkebi yok"
         );
-        for &erase in EraseFx::EFFECTS {
+        for &erase in &Erase::effects() {
             let id = erase.id().expect("çizen efekt");
             let frame = dock_fx_frame(cell_px, &[], &[effect(han, Kind::Ghost, id, 0.5)]);
             let pixels = render_offscreen(&r, EDGE, BACKGROUND, &frame);
