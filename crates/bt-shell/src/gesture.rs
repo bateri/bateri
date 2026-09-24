@@ -84,8 +84,14 @@ pub(crate) enum Drag {
 pub(crate) enum Release {
     /// Basış raporlandı: bırakma da raporlanır (takılı düğme kalmasın).
     Report,
-    /// Seçim jestinin sonu ya da jestsiz bırakma: gidecek bir şey yok.
+    /// Izgaradaki seçim jestinin sonu ya da jestsiz bırakma: gidecek bir
+    /// şey yok.
     Done,
+    /// **Dock'taki** seçim jestinin sonu: sürüklemesiz tek tıksa caret
+    /// tıklanan yere taşınır (031 R4.1, `Session::dock_click`). Tıklamanın
+    /// sürüklemesiz olup olmadığını defter değil `bt-core`'un seçimi söylüyor
+    /// — boş kalan `Simple` seçim.
+    Dock,
 }
 
 impl Gesture {
@@ -177,7 +183,11 @@ impl Gesture {
         let bit = button_bit(button);
         if self.sent & bit == 0 {
             if button == MouseButton::Left {
+                let dock = self.dragging && self.dock;
                 self.dragging = false;
+                if dock {
+                    return Release::Dock;
+                }
             }
             return Release::Done;
         }
@@ -393,6 +403,9 @@ mod tests {
         assert_eq!(gesture.dragged(LEFT), Drag::SelectDock);
         // Kaydırma ızgaranın ucunu taşımamalı.
         assert!(!gesture.dragging(), "dock sürüklemesi ızgaranın sayıldı");
+        // Bırakma dock'un: tıkla-caret'in kapısı (031 phase-5). Bir kez —
+        // ikinci bırakma jestsiz.
+        assert_eq!(gesture.released(LEFT), Release::Dock);
         assert_eq!(gesture.released(LEFT), Release::Done);
         assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
         // Shift aynı kuralla uzatma.

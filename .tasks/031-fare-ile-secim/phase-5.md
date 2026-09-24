@@ -54,11 +54,44 @@ _Requirements: R4.1, R4.2, R4.3, R4.4, R4.5_
 
 ## Checklist
 
-- [ ] Widget, bağlama, yetenek; tel başlığı
-- [ ] `8133;w` çözücüsü
-- [ ] Düzenleme kapısı ve üç yardımcı
-- [ ] `view.rs` tuş tablosu, `insertText:`, tıkla-caret, `cut:` + `validateMenuItem:`
-- [ ] Edit ▸ Cut
-- [ ] Test: kapı koşulları, komut baytları; betik pty sınaması
-- [ ] `CLAUDE.md`
-- [ ] Doğrulama geçti (`make hepsi`, `make kur`, `make duman`)
+- [x] Widget, bağlama, yetenek; tel başlığı
+- [x] `8133;w` çözücüsü
+- [x] Düzenleme kapısı ve üç yardımcı
+- [x] `view.rs` tuş tablosu, `insertText:`, tıkla-caret, `cut:` + `validateMenuItem:`
+- [x] Edit ▸ Cut
+- [x] Test: kapı koşulları, komut baytları; betik pty sınaması
+- [x] `CLAUDE.md`
+- [x] Doğrulama geçti (`make hepsi`, `make kur`, `make duman`)
+
+## Uygulama Notları
+
+- Widget komuttan sonra aynayı **açıkça** basıyor (`__bateri_dock_redraw`):
+  `line-pre-redraw` yalnız görüntü değişince koşuyor ve `L`'si tutmayan ya da
+  caret'i yerinde bırakan komut cevapsız kalıp kapıyı bir sonraki tuşa kadar
+  kapatırdı. Aynı gerekçeyle `Session::dock_click` caret zaten oradaysa
+  hiçbir şey göndermiyor.
+- Bağlama + `w` ayrı bir `line-init` kancasında (`__bateri_dock_arm`), aynadan
+  önce kayıtlı; `zle -N` bir kez `__bateri_hooks`'ta.
+- Yetenek `ShellLog::dock_editable` (aynanın yanında); `e`'ye ek olarak `A`
+  da siliyor (kesilen satırda `line-finish` koşmazsa yetenek taşınmasın).
+- API: `dock_replace_selection` yerine `Session::type_text` (`insertText:`'in
+  yolu) ve `paste()`'in kendisi önce `dock_delete_selection` çağırıyor — Finder
+  damlası da seçimin yerine geçiyor. Ek: `can_edit_dock`, `can_cut`,
+  `dock_cut`, `dock_click`, `dock_key(DockKey)` (tuş tablosu `bt-core`'da,
+  `bt-shell` yalnız `keys::dock_key` ile `NSEvent`'i çeviriyor).
+- ⇧←/⇧→ de aynı dört koşullu kapıya bağlı (kabuğa bir şey göndermese de):
+  seçim caret'ten başlıyor ve caret'in yeri ancak taze aynada doğru;
+  `vicmd`'de tuş vi'nin. Seçimsiz ⇧←/⇧→ kapı açıkken hep tüketiliyor.
+- Kapsam eki: seçim yokken Shift+tık artık **caret'ten** başlıyor (phase-4'te
+  tıklanan noktadan boş başlıyordu) — metin alanı beklentisi, tek satır.
+- Bırakmanın dock kolu `Release::Dock` (gesture); tıkla-caret'in ölçütü
+  defterde değil `bt-core`'da: boş kalan `Simple` seçim (`DockSelection::click`).
+- `make kur` `APP=` ile scratchpad'e koşturuldu (yeşil, `cmp` dahil);
+  `target/release/bateri.app`'e dokunulmadı.
+- Gözle (geçici paket, açık tema): tıkla-caret, çift tık + yazma, sürükle + ⌫,
+  ⇧← ×3 + ⌘X + ⌘V, çok satırlı olmayan `Control` satırında Cut gri. `vicmd`
+  sahnesi otomasyonla kurulamadı (enjekte Escape pencereye varmadı, TR
+  düzeninde ⌃[ `^A` üretti); kapısı birim ve pty sınamalarında.
+- Set kapısı: `/code-review` tek bulgu (düşük) — bekleyen ölü tuş bileşimi
+  varken dock tuşu ⌫'yi yığından çalıyordu; kol artık `marked_text` boşken
+  soruluyor. `/audit` temiz (bağımlılık merceği ilgisiz).

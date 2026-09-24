@@ -100,7 +100,7 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
 use crate::dock::{self, DockPoint};
-use crate::session::SelectKind;
+use crate::session::{CellHalf, SelectKind};
 
 /// Kabuğun akışa bastığı tek bir OSC 133 işareti.
 ///
@@ -774,6 +774,70 @@ impl DockSelection {
     pub(crate) fn range(&self) -> Option<(usize, usize)> {
         (self.range.0 < self.range.1).then_some(self.range)
     }
+
+    /// Sürüklemesiz **tek tıklamanın** düştüğü sınır — tıkla-caret'in hedefi
+    /// (031 R4.1). Yalnız boş `Simple` seçimde: çift ve üçlü tıklama caret'i
+    /// oynatmıyor. Sürüklenip başladığı yere geri getirilen fare de boş
+    /// `Simple` bırakıyor ve caret'i taşıyor — metin alanlarının davranışı.
+    pub(crate) fn click(&self) -> Option<usize> {
+        (self.kind == SelectKind::Simple && self.range.0 == self.range.1).then_some(self.range.0)
+    }
+
+    /// ⇧← / ⇧→ (031 Karar 8): seçimin **hareketli ucunu** bir karakter
+    /// oynatır; seçim yoksa `caret`'ten başlar. Sonuç her zaman `Simple` —
+    /// kelime ya da satır adımıyla başlamış seçim klavyede harf adımıyla
+    /// büyüyor (metin alanlarının davranışı).
+    ///
+    /// **Hareketli uç** başın çapaya göre yönünden: çapanın solundaysa
+    /// aralığın başı, değilse sonu. Boş aralıkta (klavyeyle daraltılmış seçim)
+    /// iki uç aynı nokta ve adım oradan.
+    ///
+    /// Adım **karakter** ama birleştirici ile tabanı arasına düşmüyor:
+    /// `dock::selection_range`'ın `boundary` kuralının klavyedeki hâli, yoksa
+    /// `é`'nin aksanı tabanından ayrı seçilebilirdi.
+    pub(crate) fn stepped(
+        current: Option<Self>,
+        caret: usize,
+        forward: bool,
+        buffer: &str,
+    ) -> Self {
+        let chars: Vec<char> = buffer.chars().collect();
+        let len = chars.len();
+        let (fixed, active) = match current {
+            Some(selection) => {
+                let (start, end) = selection.range;
+                // Yarı sıralanmıyor (`CellHalf` `Ord` değil): sol < sağ.
+                let order = |point: DockPoint| (point.index, point.half == CellHalf::Right);
+                let backward = order(selection.head) < order(selection.anchor);
+                if backward { (end, start) } else { (start, end) }
+            }
+            None => (caret.min(len), caret.min(len)),
+        };
+        let zero_width = |index: usize| {
+            chars
+                .get(index)
+                .is_some_and(|&ch| dock::column_width(ch) == 0)
+        };
+        let mut moved = active;
+        if forward {
+            if moved < len {
+                moved += 1;
+                while moved < len && zero_width(moved) {
+                    moved += 1;
+                }
+            }
+        } else if moved > 0 {
+            moved -= 1;
+            while moved > 0 && zero_width(moved) {
+                moved -= 1;
+            }
+        }
+        let point = |index| DockPoint {
+            index,
+            half: CellHalf::Left,
+        };
+        Self::new(SelectKind::Simple, point(fixed), point(moved), buffer)
+    }
 }
 
 /// Okuyucu thread'in yazdığı, kare yolunun okuduğu kabuk defteri.
@@ -798,6 +862,18 @@ pub(crate) struct ShellLog {
     /// değişince onu silen yazıcı (okuyucu thread) ile aralığı okuyan kare
     /// aynı turda görüyor.
     pub(crate) dock_selection: Option<DockSelection>,
+    /// Kabuk **bu prompt'ta** düzenleme widget'ını bağladı mı (`8133;w`,
+    /// 031) — düzenleme kapısının dördüncü koşulu
+    /// ([`crate::Session::can_edit_dock`]).
+    ///
+    /// Aynanın **yanında**, içinde değil: tarayıcı [`DockState`]'i her `u`
+    /// yükünde toptan `clone_from` ile tazeliyor ve yetenek prompt başına bir
+    /// kez geliyor, yani içinde dursaydı ilk tuşta silinirdi. Ömrü prompt'un:
+    /// `line-finish` (`e`) ve prompt'un başı (`A`) siliyor. `A` ikinci bir
+    /// kemer — `line-finish`'in koşmadığı bir çıkış (kesilen satır) yeteneği
+    /// sonraki prompt'un `w`'sine kadar taşımasın; yanlışın yönü "düzenleme
+    /// yok".
+    pub(crate) dock_editable: bool,
     /// Koşan komutun başlangıç anı; komut koşmuyorken `None`.
     ///
     /// **Tek alan, blok başına değil:** aynı anda tek komut koşar, çünkü
@@ -1031,6 +1107,7 @@ impl ShellLog {
             dock: DockState::default(),
             context: DockContext::default(),
             dock_selection: None,
+            dock_editable: false,
             running_since: None,
             // Açılışta caret dock'un (`caret_home_raw(None, Idle)`), yani ilk
             // devir her zaman Dock→Grid yönünde ve tutma ona uygulanabilir.
@@ -1058,6 +1135,7 @@ impl ShellLog {
         match mark {
             Mark::PromptStart { id } => {
                 state.phase = ShellPhase::Prompt;
+                self.dock_editable = false;
                 // **Saatin ikinci sıfırlama noktası ve bir savunma kolu.**
                 // Prompt basılıyorsa hiçbir komut koşmuyor, yani buradaki saat
                 // tanım gereği bayat. Yalnız `D` tüketseydi kaybolan bir `D`
@@ -1199,6 +1277,7 @@ impl ShellLog {
             }
             DockEvent::End => {
                 self.dock_selection = None;
+                self.dock_editable = false;
                 self.dock.reset();
                 self.dock.status = DockStatus::Idle;
                 // Boş satır da bir cevap: bkz. [`DockState::answers`].
@@ -1217,6 +1296,7 @@ impl ShellLog {
                 self.context.branch.clear();
                 self.context.branch.push_str(branch);
             }
+            DockEvent::Editable => self.dock_editable = true,
         }
     }
 
@@ -1718,6 +1798,9 @@ pub(crate) enum DockEvent<'a> {
     /// Git dalı; boş gövde "depo değil" demek. Aynanın kanalından geliyor
     /// (`precmd` basıyor) ama aynanın **durumuna** dokunmuyor.
     Branch(&'a str),
+    /// Düzenleme widget'ı bu prompt'ta bağlı (`line-init`, 031); aynanın
+    /// durumuna dokunmuyor ([`ShellLog::dock_editable`]).
+    Editable,
 }
 
 /// İki OSC numarasını akışın içinden çeken durum makinesi.
@@ -1915,6 +1998,7 @@ impl Scanner {
                         DockOutcome::End => DockEvent::End,
                         DockOutcome::Unavailable(fault) => DockEvent::Unavailable(fault),
                         DockOutcome::Branch => DockEvent::Branch(&self.branch),
+                        DockOutcome::Editable => DockEvent::Editable,
                     }));
                 } else if is_ignored(byte) {
                 } else if self.dock.len() == DOCK_PAYLOAD_LIMIT {
@@ -2173,6 +2257,7 @@ enum DockOutcome {
     End,
     Unavailable(DockFault),
     Branch,
+    Editable,
 }
 
 /// Ayna yükünü çözer ve `line`'a yazar.
@@ -2184,10 +2269,14 @@ enum DockOutcome {
 /// ESC ] 8133 ; e BEL
 /// ESC ] 8133 ; o BEL
 /// ESC ] 8133 ; b ; {dal} BEL
+/// ESC ] 8133 ; w BEL
 /// ```
 ///
 /// `u` satırı tazeler, `e` (`line-finish`) kapatır, `o` kabuğun "bu görüntü
 /// aynaya sığmıyor" demesidir, `b` de dock'un bağlam satırındaki dalı taşır.
+/// `w` (031) "bu prompt'ta düzenleme widget'ı bağlı" der: terminalin
+/// kabuğa gönderdiği tek dizinin (`CSI 8133 ~`) ön koşulu; yükü yok ve
+/// aynanın durumuna dokunmuyor, `b` gibi.
 ///
 /// **`b` aynanın kanalında ama aynanın parçası değil:** tuş başına değil
 /// **prompt başına** geliyor (`precmd`) ve satırın durumuna dokunmuyor. Kendi
@@ -2250,6 +2339,7 @@ fn parse_dock(
         // belleğimizi koruyor. Sonucu aynı olmak **zorunda**, yoksa sınırın
         // hangi tarafta tutulduğu kullanıcıya farklı davranış olarak yansırdı.
         b"o" => unavailable(line, DockFault::Overflow),
+        b"w" => DockOutcome::Editable,
         b"u" => match decode_line(&mut fields, decoded, line) {
             Some(()) => DockOutcome::Update,
             // Durum da yazılıyor: `decode_line` daha ilk satırda `Live` diyor
@@ -3141,6 +3231,7 @@ mod tests {
         End,
         Unavailable(DockFault),
         Branch(String),
+        Editable,
     }
 
     fn dock_events_of_chunks(chunks: &[&[u8]]) -> Vec<DockSnapshot> {
@@ -3154,6 +3245,7 @@ mod tests {
                         DockEvent::End => DockSnapshot::End,
                         DockEvent::Unavailable(fault) => DockSnapshot::Unavailable(fault),
                         DockEvent::Branch(branch) => DockSnapshot::Branch(branch.to_owned()),
+                        DockEvent::Editable => DockSnapshot::Editable,
                     });
                 }
             });
@@ -4178,6 +4270,116 @@ mod tests {
             log.apply_scan(ScanEvent::Dock(event));
             assert_eq!(log.dock_selection, None, "{name} seçimi silmedi");
         }
+    }
+
+    #[test]
+    fn shift_arrows_step_the_moving_end_of_the_selection() {
+        let range = |selection: DockSelection| selection.range;
+        // Seçim yoksa caret'ten başlıyor.
+        let one = DockSelection::stepped(None, 2, true, "abcd");
+        assert_eq!(range(one), (2, 3));
+        let two = DockSelection::stepped(Some(one), 2, true, "abcd");
+        assert_eq!(range(two), (2, 4));
+        // Satırın sonunda duruyor.
+        assert_eq!(
+            range(DockSelection::stepped(Some(two), 2, true, "abcd")),
+            (2, 4)
+        );
+        let back = DockSelection::stepped(Some(two), 2, false, "abcd");
+        assert_eq!(range(back), (2, 3));
+        // Boşa inen seçim ucunu kaybetmiyor: bir sonraki adım oradan.
+        let empty = DockSelection::stepped(Some(back), 2, false, "abcd");
+        assert_eq!((empty.range(), range(empty)), (None, (2, 2)));
+        assert_eq!(
+            range(DockSelection::stepped(Some(empty), 0, false, "abcd")),
+            (1, 2)
+        );
+
+        // Baş çapanın solundaysa hareketli uç aralığın başı (sola sürüklenmiş
+        // fare seçimi).
+        let point = |index| DockPoint {
+            index,
+            half: CellHalf::Left,
+        };
+        let leftward = DockSelection::new(SelectKind::Simple, point(3), point(1), "abcd");
+        assert_eq!(
+            range(DockSelection::stepped(Some(leftward), 0, false, "abcd")),
+            (0, 3)
+        );
+        assert_eq!(
+            range(DockSelection::stepped(Some(leftward), 0, true, "abcd")),
+            (2, 3)
+        );
+
+        // Kelime seçimi harf adımıyla büyüyor, sonu hareketli.
+        let word = DockSelection::new(SelectKind::Word, point(1), point(1), "ab cd");
+        assert_eq!(range(word), (0, 2));
+        assert_eq!(
+            range(DockSelection::stepped(Some(word), 0, true, "ab cd")),
+            (0, 3)
+        );
+
+        // Birleştirici tabanından ayrılmıyor: `é` = `e` + U+0301.
+        let text = "e\u{301}x";
+        assert_eq!(range(DockSelection::stepped(None, 0, true, text)), (0, 2));
+        assert_eq!(range(DockSelection::stepped(None, 3, false, text)), (2, 3));
+        assert_eq!(range(DockSelection::stepped(None, 2, false, text)), (0, 2));
+    }
+
+    #[test]
+    fn the_edit_capability_lives_for_one_prompt() {
+        // `w` düzenleme kapısının dördüncü koşulu (031 phase-5): yükü yok,
+        // aynanın durumuna dokunmuyor ve prompt'un ömrüyle gidiyor —
+        // `line-finish` (`e`) de prompt'un başı (`A`) da siliyor.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        let mut stream = dock_update(0, "", "ls", "", &[]);
+        stream.extend_from_slice(b"\x1b]8133;w\x07");
+        scanner.feed(&stream, |event| log.apply_scan(event));
+        assert!(log.dock_editable, "w yeteneği kurmadı");
+        assert_eq!(log.dock.status, DockStatus::Live, "w aynayı oynattı");
+        assert_eq!(log.dock.buffer, "ls");
+
+        // Aynanın her tuşu yeteneği silmiyor: tarayıcının `clone_from`'u
+        // yalnız aynayı tazeliyor.
+        scanner.feed(&dock_update(0, "", "ls -l", "", &[]), |event| {
+            log.apply_scan(event)
+        });
+        assert!(log.dock_editable, "ayna yeteneği sildi");
+
+        scanner.feed(b"\x1b]8133;e\x07", |event| log.apply_scan(event));
+        assert!(!log.dock_editable, "line-finish yeteneği silmedi");
+
+        scanner.feed(b"\x1b]8133;w\x07", |event| log.apply_scan(event));
+        assert!(log.dock_editable);
+        scanner.feed(b"\x1b]133;A;bt_block=3\x07", |event| log.apply_scan(event));
+        assert!(!log.dock_editable, "prompt'un başı yeteneği silmedi");
+    }
+
+    #[test]
+    fn the_script_arms_the_widget_before_it_announces_it() {
+        // Betiğin `line-init` kancası: üç keymap'e bağlama, sonra `w`. ZLE
+        // olmadan koşuyor (`zsh -f -c`), yani sınanan şey telin iki ucunun
+        // aynı harfi konuşması; gerçek ZLE'deki bağlamayı `session.rs`'in
+        // uçtan uca sınamaları görüyor.
+        let bytes = run_script(
+            "source $ZDOTDIR/bateri.zsh
+             zmodload zsh/zle
+             __bateri_dock_arm
+             for map in main emacs viins; do bindkey -M $map $'\\e[8133~'; done",
+            &[],
+        );
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.starts_with("\x1b]8133;w\x07"),
+            "yetenek basılmadı: {text:?}"
+        );
+        assert_eq!(
+            text.matches("__bateri_dock_edit").count(),
+            3,
+            "widget üç keymap'e bağlanmadı: {text:?}"
+        );
+        assert_eq!(dock_events(&bytes[..9]), vec![DockSnapshot::Editable]);
     }
 
     #[test]
