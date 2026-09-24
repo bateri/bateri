@@ -71,5 +71,6 @@ _Requirements: R3.1, R3.2, R3.3, R3.4, R3.5, R4.1, R4.2_
 - [ ] `last_ink`, `blank_mirror`
 - [ ] Bekçiler çevrildi / eklendi; canlı zsh sınaması
 - [ ] `CLAUDE.md`, `docs/YOL-HARITASI.md`
+- [ ] phase-1'den devir: imleç bir `\n`'in arkasındayken ızgara başlangıcı ve caret kuralı (phase-1 → Uygulama Notları) — bu phase'in dock tarafına etkisini uygula ya da gerekçesiyle kapat
 - [ ] Doğrulama geçti (`make hepsi`, `make test-yaris`, `make duman`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi

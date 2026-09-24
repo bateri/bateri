@@ -53,4 +53,5 @@ _Requirements: R1.2, R1.3, R4.1, R4.2 (tek mantıksal satırda)_
 - [ ] Fare yolu satır alıyor
 - [ ] Çok satırda efektler `Reset`
 - [ ] Test: sarma, 2B isabet, satırlar arası seçim, tavan
+- [ ] phase-1'den devir: imleç bir `\n`'in arkasındayken ızgara başlangıcı ve caret kuralı (phase-1 → Uygulama Notları) — bu phase'in dock tarafına etkisini uygula ya da gerekçesiyle kapat
 - [ ] Doğrulama geçti (`make hepsi`, `make duman`)
