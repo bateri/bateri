@@ -392,7 +392,6 @@ impl Motion {
     /// küçülürken içeriğin hedefi yükselirse (satırlar ızgaraya dönüyor)
     /// ikisi birbirini götürmeli; yükselen hedef snap'leseydi ızgara bir
     /// karede zıplar, bant ise süzülürdü.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn sync(
         &mut self,
         at: Option<[f32; 2]>,

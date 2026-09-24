@@ -27,7 +27,7 @@ use crate::motion::Motion;
 /// olmuyor" dedi: görünür kısım üç-dört kareye sığıyordu ve gelişin ilk anı
 /// henüz ayrılmamış caret'in içinde geçiyordu. Hızlı yazımda iki-üç geliş
 /// üst üste uçuşta ve bu bir titreme değil: her biri kendi hücresinde,
-/// sütun kuralı ([`GlyphFx::apply`]) yalnız sağdakini bitiriyor.
+/// konum kuralı ([`GlyphFx::apply`]) yalnız sağdakini bitiriyor.
 pub(crate) const KEYPRESS_DURATION: f32 = 0.24;
 
 /// Hayaletin süresi, saniye — **seçilmiş, ölçülmüş değil**.
@@ -148,8 +148,8 @@ pub(crate) struct Fx {
     pub(crate) t: f32,
     /// Girdinin tohumu — parçalı efektlerin (`shatter`, `unravel`) rastgelesi.
     /// Girdi doğarken bir kez veriliyor ve ömrü boyunca sabit, yani hareket
-    /// karesinde parçalar titremiyor. Sütundan değil sıradan türüyor: pencere
-    /// kayınca sütun değişiyor, parçaların deseni değişmemeli.
+    /// karesinde parçalar titremiyor. Konumdan değil sıradan türüyor: pencere
+    /// kayınca satır değişiyor, parçaların deseni değişmemeli.
     pub(crate) seed: f32,
 }
 
@@ -179,37 +179,55 @@ pub(crate) struct GlyphFx {
 impl GlyphFx {
     /// Bu karenin düzenlemesini işler.
     ///
-    /// Sıra: önce pencerenin kayması (uçuştakiler metinle birlikte kayıyor ve
-    /// metnin sütunlarından — `window` — taşan düşüyor), sonra **sütun
-    /// kuralı** — yeni düzenlemenin sütununa eşit ya da sağındaki gelişler
-    /// biter (`discussion.md` → Karar 3: caret'i uçuştaki bir glyph'in soluna
-    /// taşıyıp yazan kullanıcıda o glyph erken oturur), en son yeni girdiler.
+    /// Sıra: önce dikey pencerenin kayması (uçuştakiler metinle birlikte
+    /// kayıyor ve pencerenin satırlarından — `rows` — taşan düşüyor), sonra
+    /// **konum kuralı** — yeni düzenlemenin konumunda ya da okuma sırasında
+    /// ondan sonra duran gelişler biter (`discussion.md` → Karar 3: caret'i
+    /// uçuştaki bir glyph'in soluna taşıyıp yazan kullanıcıda o glyph erken
+    /// oturur; 032 phase-6 kuralı iki eksene taşıdı — sarılan girişte
+    /// düzenlemenin arkasındaki metin alt satırlara da kayıyor), en son yeni
+    /// girdiler.
     ///
-    /// `window` giriş satırının metin sütunları, `[ilk, son)`.
-    pub(crate) fn apply(&mut self, edit: DockEdit, motion: Motion, window: (u16, u16)) {
+    /// `rows` dock'un çizilen giriş satırı sayısı (dikey pencerenin boyu).
+    pub(crate) fn apply(&mut self, edit: DockEdit, motion: Motion, rows: u16) {
         let (keypress, erase) = motion.glyph_fx(self.keypress, self.erase);
-        let (col, cells, shift, kind, effect, duration) = match edit {
+        let (at, cells, shift, kind, effect, duration) = match edit {
             DockEdit::Reset => {
                 self.finish();
                 return;
             }
             DockEdit::Shift { by } => {
-                self.shift(by, window);
+                self.shift(by, rows);
                 return;
             }
-            DockEdit::Arrive { col, cells, shift } => (
+            DockEdit::Arrive {
+                row,
                 col,
+                cells,
+                shift,
+            } => (
+                (row, col),
                 cells,
                 shift,
                 Kind::Arrival,
                 keypress.id(),
                 KEYPRESS_DURATION,
             ),
-            DockEdit::Erase { col, ghosts, shift } => {
-                (col, ghosts, shift, Kind::Ghost, erase.id(), ERASE_DURATION)
-            }
+            DockEdit::Erase {
+                row,
+                col,
+                ghosts,
+                shift,
+            } => (
+                (row, col),
+                ghosts,
+                shift,
+                Kind::Ghost,
+                erase.id(),
+                ERASE_DURATION,
+            ),
         };
-        self.shift(shift, window);
+        self.shift(shift, rows);
         // **Uçuştaki bir gelişi silmek hayalet doğurmuyor**: hayalet `t = 0`'da
         // tam opak başlıyor, yani yarı belirmiş bir harf silinince bir kare
         // tam renge sıçrayıp öyle giderdi — hızlı bir yazım hatası
@@ -219,13 +237,14 @@ impl GlyphFx {
             for (slot, cell) in unborn.iter_mut().zip(cells.as_slice()) {
                 *slot = self.entries.iter().any(|entry| {
                     entry.fx.kind == Kind::Arrival
-                        && entry.fx.cell.col == cell.col
+                        && (entry.fx.cell.row, entry.fx.cell.col) == (cell.row, cell.col)
                         && entry.fx.cell.ch == cell.ch
                 });
             }
         }
-        self.entries
-            .retain(|entry| entry.fx.kind == Kind::Ghost || entry.fx.cell.col < col);
+        self.entries.retain(|entry| {
+            entry.fx.kind == Kind::Ghost || (entry.fx.cell.row, entry.fx.cell.col) < at
+        });
         let Some(effect) = effect else {
             return;
         };
@@ -276,22 +295,24 @@ impl GlyphFx {
         finished
     }
 
-    /// Uçuştakileri pencerenin kayması kadar kaydırır; metnin sütunlarından
-    /// taşan girdi düşer (hayalet işaretin ya da sağ payın üstünde asılı
-    /// kalmasın, gelişin ise statik glyph'i zaten o pencerede yok).
-    fn shift(&mut self, by: i32, (first, end): (u16, u16)) {
-        if by == 0 {
-            return;
-        }
+    /// Uçuştakileri dikey pencerenin kayması kadar (satır) kaydırır;
+    /// pencereden taşan girdi düşer (hayalet bağlam satırının ya da ızgaranın
+    /// üstünde asılı kalmasın, gelişin ise statik glyph'i zaten o pencerede
+    /// yok). Sütun kaymıyor: yatay pencere 032'de emekli, uzun satır sarılıyor.
+    ///
+    /// Kaymasız karede de koşuyor: pencere tepesi yerinde kalırken bant
+    /// küçülebiliyor (sarılan satırın son harfi silindi) ve artık var olmayan
+    /// satırdaki hayalet bağlam satırının üstüne çizilirdi (`/code-review`,
+    /// 032 kapı).
+    fn shift(&mut self, by: i32, rows: u16) {
         self.entries.retain_mut(|entry| {
             let cell = &mut entry.fx.cell;
-            let width = if cell.wide { 2 } else { 1 };
-            let col = i32::from(cell.col) + by;
-            if col < i32::from(first) || col + width > i32::from(end) {
+            let row = i32::from(cell.row) + by;
+            if !(0..i32::from(rows.max(1))).contains(&row) {
                 return false;
             }
-            // audit: `first ≤ col < end` ve ikisi de `u16`.
-            cell.col = col as u16;
+            // audit: `0 ≤ row < rows` ve `rows` bir `u16`.
+            cell.row = row as u16;
             true
         });
     }
@@ -345,10 +366,12 @@ mod tests {
 
     use super::*;
 
-    const WINDOW: (u16, u16) = (DOCK_TEXT_COL, 80);
+    /// Dikey pencerenin boyu: tek giriş satırı.
+    const WINDOW: u16 = 1;
 
-    fn cell(col: u16, ch: char) -> Cell {
+    fn cell_at(row: u16, col: u16, ch: char) -> Cell {
         Cell {
+            row,
             col,
             ch: Some(ch),
             ..Cell::default()
@@ -361,23 +384,39 @@ mod tests {
     }
 
     fn arrive(col: u16, ch: char) -> DockEdit {
+        arrive_at(0, col, ch)
+    }
+
+    fn arrive_at(row: u16, col: u16, ch: char) -> DockEdit {
         DockEdit::Arrive {
+            row,
             col,
-            cells: cells(&[cell(col, ch)]),
+            cells: cells(&[cell_at(row, col, ch)]),
             shift: 0,
         }
     }
 
     fn erase(col: u16, ch: char) -> DockEdit {
+        erase_at(0, col, ch)
+    }
+
+    fn erase_at(row: u16, col: u16, ch: char) -> DockEdit {
         DockEdit::Erase {
+            row,
             col,
-            ghosts: cells(&[cell(col, ch)]),
+            ghosts: cells(&[cell_at(row, col, ch)]),
             shift: 0,
         }
     }
 
     fn cols(fx: &GlyphFx) -> Vec<(u16, Kind)> {
         fx.iter().map(|fx| (fx.cell.col, fx.kind)).collect()
+    }
+
+    fn places(fx: &GlyphFx) -> Vec<(u16, u16, Kind)> {
+        fx.iter()
+            .map(|fx| (fx.cell.row, fx.cell.col, fx.kind))
+            .collect()
     }
 
     #[test]
@@ -464,40 +503,87 @@ mod tests {
     }
 
     #[test]
-    fn a_shift_moves_the_flight_with_the_text_and_drops_what_leaves() {
+    fn a_new_edit_settles_the_arrivals_after_it_in_reading_order() {
+        // Sarılan girişte (032 phase-6) kural iki eksende: düzenlemenin
+        // arkasındaki metin alt satırlara da kayıyor, yani alt satırdaki
+        // gelişler de oturmalı; üst satırdakiler — sağ sütunda olsalar da —
+        // önekte ve yerlerinde.
         let mut fx = GlyphFx::default();
-        let window = (DOCK_TEXT_COL, 10);
-        fx.apply(arrive(3, 'a'), Motion::default(), window);
-        fx.apply(erase(9, 'b'), Motion::default(), window);
-        // Taşan satırın sonunda yazım: metin bir sütun sola kaydı ve yeni
-        // harf caret'in solunda.
+        fx.apply(arrive_at(0, 5, 'a'), Motion::default(), 2);
+        fx.apply(arrive_at(1, 2, 'b'), Motion::default(), 2);
+        fx.apply(arrive_at(1, 3, 'c'), Motion::default(), 2);
+        fx.apply(erase_at(1, 6, 'z'), Motion::default(), 2);
+        // İkinci satırın 3. sütununda yazım: (1, 3) ve sonrası oturur, üst
+        // satırın 5. sütunu (okuma sırasında önce) sürer, hayalet yerinde.
+        fx.apply(arrive_at(1, 3, 'x'), Motion::default(), 2);
+        assert_eq!(
+            places(&fx),
+            [
+                (0, 5, Kind::Arrival),
+                (1, 2, Kind::Arrival),
+                (1, 6, Kind::Ghost),
+                (1, 3, Kind::Arrival)
+            ]
+        );
+        // Üst satırda yazım: alt satırın bütün gelişleri oturur.
+        fx.apply(arrive_at(0, 2, 'y'), Motion::default(), 2);
+        assert_eq!(places(&fx), [(1, 6, Kind::Ghost), (0, 2, Kind::Arrival)]);
+        // Aynı sütunda ama başka satırda duran gelişin silinmesi hayalet
+        // doğuruyor: "doğmamış" ölçütü konumun iki ekseni.
+        fx.apply(erase_at(1, 2, 'y'), Motion::default(), 2);
+        assert!(
+            places(&fx).contains(&(1, 2, Kind::Ghost)),
+            "{:?}",
+            places(&fx)
+        );
+    }
+
+    #[test]
+    fn a_shift_moves_the_flight_with_the_text_and_drops_what_leaves() {
+        let rows = 3;
+        let mut fx = GlyphFx::default();
+        fx.apply(arrive_at(1, 3, 'a'), Motion::default(), rows);
+        fx.apply(erase_at(2, 9, 'b'), Motion::default(), rows);
+        // Tavanı aşan girişin son satırında yazım: dikey pencere bir satır
+        // aşağı indi, metin bir satır yukarı kaydı ve yeni harf son satırda.
         fx.apply(
             DockEdit::Arrive {
+                row: 2,
                 col: 8,
-                cells: cells(&[cell(8, 'c')]),
+                cells: cells(&[cell_at(2, 8, 'c')]),
                 shift: -1,
             },
             Motion::default(),
-            window,
+            rows,
         );
         assert_eq!(
-            cols(&fx),
-            [(2, Kind::Arrival), (8, Kind::Ghost), (8, Kind::Arrival)]
+            places(&fx),
+            [
+                (0, 3, Kind::Arrival),
+                (1, 9, Kind::Ghost),
+                (2, 8, Kind::Arrival)
+            ]
         );
-        // Caret gezindi, pencere iki sütun sağa: 8'deki iki girdi pencerenin
-        // dışına düşüyor.
-        fx.apply(DockEdit::Shift { by: 2 }, Motion::default(), window);
-        assert_eq!(cols(&fx), [(4, Kind::Arrival)]);
-        // Sola taşan da düşüyor: işaretin üstünde asılı kalmıyor.
-        fx.apply(DockEdit::Shift { by: -3 }, Motion::default(), window);
-        assert!(fx.is_empty(), "{:?}", cols(&fx));
+        // Tekerlek pencereyi iki satır yukarı taşıdı: alttaki iki girdi
+        // pencerenin dışına düşüyor.
+        fx.apply(DockEdit::Shift { by: 2 }, Motion::default(), rows);
+        assert_eq!(places(&fx), [(2, 3, Kind::Arrival)]);
+        // Yukarı taşan da düşüyor: bağlam satırının ya da ızgaranın üstünde
+        // asılı kalmıyor.
+        fx.apply(DockEdit::Shift { by: -3 }, Motion::default(), rows);
+        assert!(fx.is_empty(), "{:?}", places(&fx));
+        // Kaymasız ama küçülen pencere: sarılan satırın son harfi silindi,
+        // bant tek satıra indi ve alt satırdaki hayalet düşüyor.
+        fx.apply(erase_at(1, 2, 'e'), Motion::default(), 2);
+        fx.apply(erase_at(0, 5, 'd'), Motion::default(), 1);
+        assert_eq!(places(&fx), [(0, 5, Kind::Ghost)]);
     }
 
     #[test]
     fn a_full_list_finishes_the_oldest() {
         let mut fx = GlyphFx::default();
         for n in 0..FX_MAX + 3 {
-            // Hayaletler sütun kuralına girmiyor: hepsi yaşıyor.
+            // Hayaletler konum kuralına girmiyor: hepsi yaşıyor.
             fx.apply(erase(DOCK_TEXT_COL, 'a'), Motion::default(), WINDOW);
             fx.advance(0.0001 * n as f32);
         }
@@ -521,7 +607,7 @@ mod tests {
         assert_ne!(born[0], born[1], "iki girdi aynı tohumla doğdu");
         fx.advance(ERASE_DURATION / 3.0);
         assert_eq!(seeds(&fx), born, "ilerleme tohumu değiştirdi");
-        fx.apply(DockEdit::Shift { by: 1 }, Motion::default(), WINDOW);
+        fx.apply(DockEdit::Shift { by: 1 }, Motion::default(), 2);
         assert_eq!(seeds(&fx), born, "kayma tohumu değiştirdi");
     }
 

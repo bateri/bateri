@@ -1856,6 +1856,37 @@ fn visible_range<T>(selection: Option<&Selection>, term: &Term<T>) -> Option<Sel
     (range.end.line >= top && range.start.line <= bottom).then_some(range)
 }
 
+/// `line` satırının bir hücresi `id` bloğunun çıpasını taşıyor mu — o satırın
+/// altındaki çıpalı satır komutun **devamı**, başı değil.
+///
+/// Soru blok işaretinin ve süre sayacının yeri için ([`Session::frame`]'in
+/// çıpa toplaması, ızgara ve doldurma bandı): bağlantı `preexec`'e kadar açık
+/// ve çok satırlı bir komutun bütün satırları kimliği taşıyor, yani "ilk
+/// görünen çıpalı satır" ölçütü komutun başı ekranın üstüne kayınca işareti
+/// onun devamına oturtuyordu (032 phase-5'te görüldü).
+///
+/// Defterin dışındaki satır (boş geçmiş, en eski satır) `false`: kırpma
+/// satırı kendisine çevirir ve her prompt kendi devamı sayılırdı. Son
+/// temizlemenin kalıntısı (`boundary`, [`Session::clear_boundary`]) da
+/// `false`: Ctrl-L'nin yeniden bastığı prompt aynı kimliği taşıyor ve
+/// işaretini kaybetmemeli. Tarama satır başına bir kez ve eşleşmede duruyor.
+fn block_row_continues<T>(term: &Term<T>, line: Line, id: u32, boundary: usize) -> bool {
+    if line < term.topmost_line() || line > term.bottommost_line() {
+        return false;
+    }
+    if boundary != 0 && row_identity(term, line) == boundary {
+        return false;
+    }
+    // `grid_clamp` yalnız çağrı yerinin emniyet kemeri: aralık yukarıda
+    // soruldu (panik yasağı, `CLAUDE.md`).
+    let line = Point::new(line, Column(0))
+        .grid_clamp(term, Boundary::Grid)
+        .line;
+    term.grid()[line]
+        .into_iter()
+        .any(|cell| cell.hyperlink().and_then(|link| block_id(link.uri())) == Some(id))
+}
+
 /// Prompt hücresine iliştirilmiş OSC 8 bağlantısından blok kimliği; bizim
 /// olmayan bağlantı `None`.
 ///
@@ -2014,6 +2045,12 @@ pub enum Click {
 #[derive(Clone, Copy, Debug)]
 struct DockWindow {
     top: usize,
+    /// Son **çizilen** karenin tepesi. `top` tekerlekle kare beklemeden
+    /// değişiyor ([`Session::dock_scroll`]: sürüklemenin ucu aynı olayda yeni
+    /// pencereye çözülsün); yazım efektlerinin satır kayması ise ekranda
+    /// görülen tepeden ölçülmeli (`dock::with_shift`), yoksa tekerleğin
+    /// kaydırdığı karede uçuştaki hayaletler eski satırlarında kalırdı.
+    painted: usize,
     /// Girişin tavansız satır sayısı: tekerleğin kaydırabileceği son tepe
     /// `rows - shown` ([`Session::dock_scroll`]).
     rows: usize,
@@ -2166,6 +2203,19 @@ pub struct Session {
     /// satırların damgayı biraz yükseltmesi, yani bayrağın biraz **uzun**
     /// yaşaması — yanlışın yönü güvenli.
     screen_clear_history: AtomicUsize,
+    /// Son `CSI 2 J`'nin geçmişe ittiği **en yeni** satırın kimliği
+    /// ([`row_identity`]); `0` → yok.
+    ///
+    /// Blok işaretinin devam satırı kuralının ([`block_row_continues`])
+    /// istisnası: Ctrl-L aynı prompt'u **aynı kimlikle** yeniden basıyor ve
+    /// temizleme eski prompt satırını geçmişe itiyor, yani yeni prompt'un
+    /// üstünde aynı kimliği taşıyan bir satır duruyor — ama o satır komutun
+    /// başı değil, temizlenmiş ekranın kalıntısı (`/code-review`, 032 kapı).
+    /// Kimlik satırın tamponu, sayı değil: halka kaydırmada tamponu yerinde
+    /// tutuyor. **Bilinen sınır:** defter doyunca tampon yeni bir satıra
+    /// yeniden verilebilir ve o satır bir devam satırıysa işaret ona oturur
+    /// (kuraldan önceki hâl, yönü görünür).
+    clear_boundary: AtomicUsize,
     /// Dibe yaslı pencerede ekranda duran doldurma bandının boyu
     /// ([`Cursor::fill`]) — kaydırma yolunun okuduğu tek kare kalıntısı.
     ///
@@ -2350,6 +2400,7 @@ impl Session {
             // Damga da yok: bayrak kurulu olmadığı için okunmuyor, ilk kare
             // onu defterin boyuyla değiştiriyor.
             screen_clear_history: AtomicUsize::new(Self::UNSTAMPED),
+            clear_boundary: AtomicUsize::new(0),
             // Bant da yok: ilk kare doldurmayı hesaplayıp yazacak.
             fill_shown: AtomicU16::new(0),
             // Karşılaştırılacak kare yok: ilk kare kimliği yazıp sıfır döner.
@@ -2836,6 +2887,29 @@ impl Session {
         // sütun. `display_iter` satır sırasıyla geldiği için tek bir açık koşu
         // yetiyor; satır değişince kapanıp tampona iniyor.
         let mut open_run: Option<SelectionRun> = None;
+        // Devam satırı olduğu anlaşılan son `(satır, kimlik)`: çıpa satırın
+        // bütün hücrelerinde, üstteki satırın taraması satır başına bir kez.
+        let mut continued: Option<(u16, u32)> = None;
+        // Henüz tüketilmemiş bir temizleme: geçmişin en yeni satırı onun
+        // kalıntısı ([`Session::clear_boundary`]). Nesli tüketen yer aşağıda
+        // (`observe_screen_clear`), burası yalnız okuyor. **Damgalanmamış
+        // bayrakta bir kez daha**, damganın kendi gerekçesiyle: nesli
+        // tüketen kare ızgarayı henüz temizlenmemiş görebiliyor ve o karede
+        // okunan satır kalıntı değil; sonraki kare (damganın alındığı) doğru
+        // satırı görüyor.
+        let pending =
+            self.screen_clears.load(Ordering::Relaxed) != self.screen_seen.load(Ordering::Relaxed);
+        let unstamped = self.screen_cleared.load(Ordering::Relaxed)
+            && self.screen_clear_history.load(Ordering::Relaxed) == Self::UNSTAMPED;
+        if !alt_screen && (pending || unstamped) {
+            let boundary = if term.history_size() > 0 {
+                row_identity(&term, Line(-1))
+            } else {
+                0
+            };
+            self.clear_boundary.store(boundary, Ordering::Relaxed);
+        }
+        let clear_boundary = self.clear_boundary.load(Ordering::Relaxed);
 
         for indexed in display_iter {
             let cell = indexed.cell;
@@ -3004,11 +3078,28 @@ impl Session {
                 // taraf yalnız değişimi kaydediyor. Aynı kimliğin ikinci kez
                 // görünmesi (araya başka bir kimlik girdikten sonra) yeni bir
                 // çıpa sayılır: satırlar artan, aralıklar tutarlı kalır.
-                if blocks.anchors.last().map(|&(last, ..)| last) != Some(id) {
-                    // Son mürekkep sütunu sıfırdan başlıyor: hiç mürekkebi
-                    // olmayan komut satırında (boş prompt) sayaç sağda,
-                    // kimseye değmeden duruyor.
-                    blocks.anchors.push((id, row, 0));
+                //
+                // **Devam satırı çıpa değil** (032 phase-6): prompt'un
+                // bağlantısı `preexec`'e kadar açık, yani çok satırlı komutun
+                // (ve sarılan uzun satırın) **bütün** satırları kimliği
+                // taşıyor. Komutun ilk satırı pencerenin üstüne kayınca
+                // "görünen ilk çıpalı satır" onun devamı olurdu ve işaret ile
+                // sayaç oraya otururdu. Üstteki satır — geçmiş dahil — aynı
+                // kimliği taşıyorsa bu satır komutun başı değil: işaret
+                // komutun **kendi** satırında, görünmüyorsa hiç
+                // ([`block_row_continues`]).
+                if blocks.anchors.last().map(|&(last, ..)| last) != Some(id)
+                    && continued != Some((row, id))
+                {
+                    let above = Line(i32::from(row) - offset - 1);
+                    if block_row_continues(&term, above, id, clear_boundary) {
+                        continued = Some((row, id));
+                    } else {
+                        // Son mürekkep sütunu sıfırdan başlıyor: hiç
+                        // mürekkebi olmayan komut satırında (boş prompt) sayaç
+                        // sağda, kimseye değmeden duruyor.
+                        blocks.anchors.push((id, row, 0));
+                    }
                 }
                 // Bastırmanın üst ucu aynı okumadan: yazılmakta olan bloğun
                 // **ilk** çıpa satırı. `get_or_insert` ikinci satırı yazmıyor
@@ -3287,6 +3378,7 @@ impl Session {
         // içinde (bant `fill <= history_size`, tepe satırı yukarıdaki kapı),
         // ama `bt-core`'da indeksleme panik yasağının altında (R2.5) ve yasağı
         // tip değil **çağrı yeri** taşıyor.
+        let mut fill_continued: Option<(u16, u32)> = None;
         for fill_row in 0..channel {
             // **Ofset terimi tepe satırı için**: bant yalnız dibe yaslı
             // pencerede koşuyor ([`Session::fill_rows`]) ve orada terim sıfır,
@@ -3314,10 +3406,19 @@ impl Session {
                 // `alt_screen` kapısı yok: doldurma alternatif ekranda zaten
                 // koşmuyor ([`Session::fill_rows`]), yani koşul ölü bir dal
                 // olurdu.
+                //
+                // Devam satırı kuralı da ızgaranınkiyle aynı: bandın tepesinde
+                // çok satırlı bir komutun ortası duruyorsa işaret orada değil.
                 if let Some(id) = cell.hyperlink().and_then(|link| block_id(link.uri()))
                     && blocks.fill_anchors.last().map(|&(last, _)| last) != Some(id)
+                    && fill_continued != Some((fill_row, id))
                 {
-                    blocks.fill_anchors.push((id, fill_row));
+                    let above = Line(i32::from(fill_row) - i32::from(channel) - offset - 1);
+                    if block_row_continues(&term, above, id, clear_boundary) {
+                        fill_continued = Some((fill_row, id));
+                    } else {
+                        blocks.fill_anchors.push((id, fill_row));
+                    }
                 }
                 let flags = cell.flags;
                 let dim = flags.contains(Flags::DIM);
@@ -5108,9 +5209,10 @@ impl Session {
     /// yani `into` **son çizilen** ayna olmak zorunda — tek çağıranı
     /// `bt-gpu`'nun içerik karesi ve tamponu ondan başka kimse yazmıyor.
     /// Farkın bedeli damga kapısının arkasında (`dock::change`):
-    /// yeni girdi yoksa tek bir karşılaştırma. Taşan satırda pencerenin
-    /// kayması düzenlemeyle birlikte sütun farkı olarak geçiyor
-    /// ([`DockEdit`]'in doc'u).
+    /// yeni girdi yoksa tek bir karşılaştırma. Tavanı aşan girişte dikey
+    /// pencerenin kayması düzenlemeyle birlikte **satır** farkı olarak geçiyor
+    /// ([`DockEdit`]'in doc'u); metin değişmeden kayan pencere tek başına
+    /// `Shift`.
     ///
     /// **`input_rows` çizilecek giriş satırı sayısı** ve `frame()`'in cevabı
     /// ([`Cursor::input_rows`]): burada yeniden türetilmiyor, `caret_in_dock`
@@ -5122,6 +5224,9 @@ impl Session {
     /// sarılıyor ve seçim birden çok satıra yayılabiliyor. Çağıranın tamponu
     /// ([`SelectionRuns`] emsali), her çağrıda boşalıp doluyor; satırları
     /// dikey pencerenin içinde, dock-yerel.
+    // Argümanlar karenin tek okumasından geçen ayrı sayılar ve tamponlar
+    // (`frame()`'in cevabı, çağıranın tamponları, iki sink); bir yapıda
+    // toplamak yalnız bu çağrı için bir tip doğururdu.
     #[allow(clippy::too_many_arguments)]
     pub fn dock(
         &self,
@@ -5149,6 +5254,7 @@ impl Session {
             let range = shell.dock_selection.and_then(|selection| selection.range());
             (shell.state, change, range, shell.dock_scroll)
         };
+        let mut edit = None;
         let (dock, top, rows) = dock::render_with(
             into,
             context,
@@ -5162,11 +5268,20 @@ impl Session {
             change.as_ref(),
             runs,
             sink,
-            edits,
+            |made| edit = Some(made),
         );
         // İsabet testinin izi: bu karenin penceresi ([`Session::dock_window`]).
+        // Dikey pencerenin kayması **son çizilen** tepeden: uçuştaki efektler
+        // metinle birlikte kaysın (032 phase-6). İlk karede kayma yok.
+        let painted = lock(&self.dock_window).map(|drawn| drawn.painted);
+        let by = painted.map_or(0, |painted| painted as i64 - top as i64);
+        // audit: kırpma yalnız tip; iki tepe de girişin satır sayısıyla
+        // sınırlı.
+        let by = by.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        dock::with_shift(edit, by).into_iter().for_each(edits);
         *lock(&self.dock_window) = Some(DockWindow {
             top,
+            painted: top,
             shown: input_rows.max(1),
             rows,
             cols: cols.grid,
@@ -8122,6 +8237,57 @@ mod tests {
         );
         session.shutdown();
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_continuation_row_does_not_take_the_block_mark() {
+        // 032 phase-5'te görüldü: prompt'un bağlantısı `preexec`'e kadar açık,
+        // yani çok satırlı komutun **bütün** satırları çıpayı taşıyor. İlk
+        // satır geçmişe kayınca işaret devam satırına, ızgaranın tepesine
+        // oturuyor ve orada kalıyordu. Kural: üstteki satır (geçmiş dahil)
+        // aynı kimliği taşıyorsa satır komutun başı değil.
+        //
+        // Sahne: çıpalı üç satırlık komut (`$ a`, `b`, `c`), yedi satır
+        // çıktı; on satırlık ızgarada `$ a` geçmişe düşüyor, `b` tepede.
+        // Aynı betiğin ikinci bloğu karşı sınama: komutu bütünüyle görünen
+        // blok işaretini ilk satırında alıyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033]133;A;bt_block=1\\007\\033]8;;bateri://block/1\\007\
+             $ a\\r\\nb\\r\\nc\\033]8;;\\007\\033]133;B\\007\\033]133;C\\007\\r\\n'; \
+             seq 1 7; printf '\\033]133;D;0;bt_block=1\\007'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| {
+            row_text(cells, 0) == "b" && row_text(cells, 8) == "7"
+        });
+        wait_settled(&session);
+        let mut blocks = Blocks::default();
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        assert_eq!(blocks.as_slice(), [], "işaret devam satırına oturdu");
+
+        // Pencere bir satır yukarı: komutun başı görünüyor, işaret onun
+        // satırında ve yalnız orada.
+        session.term.lock().scroll_display(Scroll::Delta(1));
+        let mut blocks = Blocks::default();
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        let rows: Vec<u16> = blocks.as_slice().iter().map(|block| block.row).collect();
+        assert_eq!(rows, [0], "{:?}", blocks.as_slice());
+        session.shutdown();
     }
 
     #[test]
@@ -11678,6 +11844,95 @@ mod tests {
         // Izgaranın listesi **karışmıyor**: satır geçmişte, yani ızgarada
         // gösterilecek bir bloğu yok.
         assert_eq!(blocks.as_slice(), [], "işaret ızgaranın listesine sızdı");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_prompt_redrawn_after_a_clear_keeps_its_block_mark() {
+        // `/code-review` (032 kapı): Ctrl-L aynı prompt'u aynı kimlikle
+        // yeniden basıyor ve `CSI 2 J` eski prompt satırını geçmişe itiyor.
+        // Yeni prompt'un üstündeki satır aynı kimliği taşıyor ama komutun
+        // başı değil — işaret yeni prompt'ta kalmalı.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\033]133;A;bt_block=1\\007\\033]8;;bateri://block/1\\007$ ls\
+             \\033[H\\033[2J\\033]8;;bateri://block/1\\007$ ls\\033]8;;\\007\
+             \\033]133;B\\007\\033]133;C\\007'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| {
+            row_text(cells, 0).starts_with("$ls")
+        });
+        wait_until("komut koşmadı", Duration::from_secs(5), || {
+            session.shell_state().map(|s| s.phase) == Some(ShellPhase::Running)
+        });
+        wait_settled(&session);
+        assert!(
+            session.term.lock().history_size() > 0,
+            "sahne: temizleme eski prompt'u geçmişe itmedi"
+        );
+        let mut blocks = Blocks::default();
+        session.frame(
+            |_| (),
+            |_| (),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        let rows: Vec<u16> = blocks.as_slice().iter().map(|block| block.row).collect();
+        assert_eq!(rows, [0], "temizlemeden sonraki prompt işaretini kaybetti");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_continuation_row_at_the_top_of_the_fill_band_takes_no_mark() {
+        // Izgaranın devam satırı kuralının bant ikizi: doldurma bandının
+        // tepesine çok satırlı bir komutun ortası düşerse işaret orada değil.
+        // Sahne `the_fill_band_carries_its_own_block_marks`'ınki, komut beş
+        // satır (`k1`..`k5`) ve boşluk bandın tepesine `k1`'i sığdırmıyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; printf '\\033]133;A;bt_block=1\\007\\033]8;;bateri://block/1\\007\
+             $ k1\\r\\nk2\\r\\nk3\\r\\nk4\\r\\nk5\\033]8;;\\007\\033]133;B\\007\
+             \\r\\n\\033]133;C\\007'; seq 1 12; \
+             printf '\\033]133;D;0;bt_block=1\\007'; read _; \
+             printf '\\033[4A\\033[J'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| {
+            (0..10).any(|row| row_text(cells, row) == "12")
+        });
+        wait_settled(&session);
+        session.write(b"\n");
+        wait_until(
+            "içerik yukarıdan kısalmadı",
+            Duration::from_secs(5),
+            || cursor_now(&session).content_rows <= 6,
+        );
+        let mut blocks = Blocks::default();
+        let mut band = Vec::new();
+        let cursor = session.frame(
+            |_| (),
+            |cell| band.push(cell),
+            &mut blocks,
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        let band_text: Vec<String> = (0..cursor.fill).map(|r| row_text(&band, r)).collect();
+        // Sahnenin kendisi: bandın tepesi komutun bir devam satırı ve
+        // komutun başı bantta değil — yoksa iddia boşa düşerdi.
+        assert!(
+            band_text.first().is_some_and(|row| row.starts_with('k'))
+                && !band_text.iter().any(|row| row.contains("k1")),
+            "sahne kurulamadı: {band_text:?}"
+        );
+        assert_eq!(
+            blocks.fill_slice(),
+            [],
+            "işaret bandın tepesindeki devam satırına oturdu: {band_text:?}"
+        );
         session.shutdown();
     }
 

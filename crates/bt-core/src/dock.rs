@@ -192,32 +192,39 @@ pub const EDIT_MAX: usize = 8;
 /// Kural ve tablosu `.tasks/030-dock-yazim-animasyonlari/discussion.md` →
 /// Karar 2; sınırdan neden ikinci bir sink geçtiği → Karar 3.
 ///
-/// **`shift` bugün hep sıfır ve `Shift` üretilmiyor** (032 phase-3): ikisi
-/// 030'un yatay penceresinin kaymasını taşıyordu ve o pencere emekli — taşan
-/// satır artık sarılıyor (032 Karar 3). Alanlar sınırda duruyor, çünkü
-/// 032 phase-6 kaymayı iki eksende (sarma yüzünden satır değiştiren metin)
-/// yeniden tanımlıyor. **Birden çok görsel satırlık girişte her değişim
-/// `Reset`** — efektin konumu bugün tek satırın sütunu; iki eksen phase-6'nın.
+/// **Konum iki eksende** (032 phase-6): `(row, col)` dikey pencerenin satırı
+/// ve ekran sütunu, hücreler de kendi `(row, col)`'larıyla — sarılan girişte
+/// satırı dolduran harf alt satıra efektiyle geçiyor. Düzenlemenin
+/// **arkasında** sarmayla yer değiştiren metin düzenlemeye girmiyor: yeni
+/// konumunda animasyonsuz (uçuştakiler `bt-gpu`'da statik glyph'lerini
+/// bulamayıp bitiyor). **`shift` ve `Shift` satır cinsinden**: dikey
+/// pencerenin tepesi kayınca uçuştakiler metinle birlikte kayıyor (030'un
+/// yatay penceresinin kaymasının dikey karşılığı; yatay pencere 032 Karar 3
+/// ile emekli). Tepeyi karşılaştıran taraf [`crate::Session::dock`], çünkü
+/// son **çizilen** tepe çizimin değil izin bilgisi ([`with_shift`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DockEdit {
-    /// Glyph'ler geldi. `col` koşunun **ilk** ekran sütunu (yeni pencerede);
-    /// hücreler normal sink'e de gidiyor, hangisinin çizileceği boyamanın
-    /// kararı.
+    /// Glyph'ler geldi. `(row, col)` koşunun **ilk** hücresi (yeni
+    /// pencerede); hücreler normal sink'e de gidiyor, hangisinin çizileceği
+    /// boyamanın kararı.
     Arrive {
+        row: u16,
         col: u16,
         cells: EditCells,
         shift: i32,
     },
-    /// Glyph'ler gitti. `col` silinmenin ekran sütunu (caret'in sütunu, yeni
-    /// pencerede) ve hayaletler **eski** satırın vurgusuyla çözülmüş.
+    /// Glyph'ler gitti. `(row, col)` silinmenin yeri (caret, yeni pencerede)
+    /// ve hayaletler **eski** düzenin konumlarında, eski satırın vurgusuyla
+    /// çözülmüş.
     Erase {
+        row: u16,
         col: u16,
         ghosts: EditCells,
         shift: i32,
     },
-    /// Metin değişmedi ama pencere kaydı: uçuştaki efektler yalnız kayıyor,
-    /// hiçbiri bitmiyor. 032 phase-3'ten beri **üretilmiyor** (yatay pencere
-    /// emekli; bkz. tipin doc'u).
+    /// Metin değişmedi ama dikey pencere `by` satır kaydı (caret tavanı
+    /// aşan girişte satır değiştirdi ya da tekerlek): uçuştaki efektler yalnız
+    /// kayıyor, hiçbiri bitmiyor.
     Shift { by: i32 },
     /// Canlanmayan bir değişim: uçuştaki her efekt bitmeli.
     Reset,
@@ -329,11 +336,14 @@ pub(crate) fn change(old: &DockState, new: &DockState) -> Option<Change> {
 /// tek girdi ve tek glyph; birleştirici [`render`]'da da hücre almıyor.
 ///
 /// **Taban `Live` ya da `Idle`:** `Idle` boş satır — Enter'dan sonraki ilk
-/// tuşun tabanı o. `PREDISPLAY` değiştiyse metin kaymıştır, `Reset`.
+/// tuşun tabanı o. `PREDISPLAY` ya da `PREBUFFER` değiştiyse metin
+/// kaymıştır, `Reset`.
 pub(crate) fn diff(old: &DockState, new: &DockState) -> Change {
     let old_buffer = match old.status {
         DockStatus::Live => {
-            if old.predisplay != new.predisplay {
+            // `PREBUFFER` değiştiyse ZLE bir satırı kabul etti ya da bıraktı:
+            // `BUFFER`'ın satırı kaydı, düzenleme yazım değil.
+            if old.predisplay != new.predisplay || old.prebuffer != new.prebuffer {
                 return Change::Reset;
             }
             old.buffer.as_str()
@@ -388,6 +398,16 @@ pub(crate) fn diff(old: &DockState, new: &DockState) -> Change {
         // eski satır boş, yani buraya eşit uzunlukta bir değiştirme düşüyor
         // ve `k = 0` onu aşağıdaki `fits`'te eliyor.
         let count = old_len - new_len;
+        // Silinen satır sonu hayaletlerin düzenini kırar: hayalet listesi
+        // yalnız glyph taşıyor ve `\n`'in arkasındakiler aynı satıra dizilirdi.
+        if old_buffer
+            .chars()
+            .skip(caret)
+            .take(count)
+            .any(|ch| ch == '\n')
+        {
+            return Change::Reset;
+        }
         let rest = old_buffer
             .chars()
             .take(caret)
@@ -873,11 +893,11 @@ fn bracket_match(chars: &[char], index: usize) -> Option<usize> {
 ///
 /// `change` son çizilen aynadan bu yana ne değiştiği ([`change`]'in cevabı);
 /// [`DockEdit`]'e burada, **bu düzenin** sütunlarıyla çevrilip `edits`'e
-/// basılıyor — karede en çok bir kez. Canlanma yalnız metnin çizildiği,
-/// caret'in dock'ta olduğu ve girişin **tek görsel satır** olduğu kolda: satır
-/// ızgaradaysa efektin konusu yok, birden çok satırda konumu iki eksen
-/// istiyor (032 phase-6) ve her canlanmayan kol uçuştakileri bitirir
-/// (`Reset`).
+/// basılıyor — karede en çok bir kez. Canlanma yalnız metnin çizildiği ve
+/// caret'in dock'ta olduğu kolda: satır ızgaradaysa efektin konusu yok ve her
+/// canlanmayan kol uçuştakileri bitirir (`Reset`). Konum **(satır, sütun)**
+/// ve dikey pencerenin satırı (032 phase-6); pencere tepesinin kayması
+/// (`shift`) burada değil çağıranda ([`with_shift`]).
 ///
 /// `selection` dock seçiminin `BUFFER`'daki karakter aralığı (031,
 /// [`crate::shell::DockSelection::range`]); `runs`'a **görsel satır başına**
@@ -1006,12 +1026,11 @@ pub(crate) fn render_with(
     if top > 0 {
         surface.sigil = None;
     }
-    let single = rows == 1;
     let arriving = match change {
-        Some(&Change::Insert { start, end }) if owned && single => shift + start..shift + end,
+        Some(&Change::Insert { start, end }) if owned => shift + start..shift + end,
         _ => 0..0,
     };
-    let mut arrive_col = None;
+    let mut arrive_at = None;
     let mut arrived = EditCells::empty();
     // Seçim seçilebilir metnin ([`selectable`]) uzayında; akışta `PREBUFFER`
     // aynı yerde, `BUFFER` ise `PREDISPLAY` kadar ileride. Akış indeksi
@@ -1090,7 +1109,7 @@ pub(crate) fn render_with(
             // Gelen glyph'ler **aynı** döngüden ve aynı hücreyle: sarma, geniş
             // karakter ve kenar kuralı ikinci kez yazılmıyor.
             if arriving.contains(&index) {
-                arrive_col.get_or_insert(col);
+                arrive_at.get_or_insert((row, col));
                 if lead.ch.is_some() {
                     arrived.push(lead);
                 }
@@ -1133,21 +1152,25 @@ pub(crate) fn render_with(
     let caret_shown = window.contains(&end.caret_row);
     match change {
         None | Some(Change::Same) => {}
-        // Birden çok görsel satır: efektin konumu iki eksen istiyor (032
-        // phase-6); o gelene kadar uçuştakiler anında bitiyor.
-        Some(_) if !single => edits(DockEdit::Reset),
-        Some(Change::Insert { .. }) if owned => edits(DockEdit::Arrive {
-            // Koşunun hiçbir hücresi çizilmediyse (sığmayan dejenere glyph)
-            // sütun yine caret'in solunda.
-            col: arrive_col.unwrap_or(caret.col),
-            cells: arrived,
-            shift: 0,
-        }),
+        Some(Change::Insert { .. }) if owned => {
+            // Koşunun hiçbir hücresi çizilmediyse (sığmayan dejenere glyph ya
+            // da pencerenin dışı) konum yine caret'in yeri.
+            let (row, col) = arrive_at.unwrap_or((caret.row, caret.col));
+            edits(DockEdit::Arrive {
+                row,
+                col,
+                cells: arrived,
+                shift: 0,
+            });
+        }
         Some(Change::Delete { ghosts }) if owned => {
-            // Hayaletler caret'in sütunundan sağa: silme (Backspace de ileri
-            // silme de) yeni caret'te başlıyor. Aynı yürüyüş caret'ten
-            // başlayarak ve **yalnız ilk satırı**: sağ yakaya sığmayan hayalet
-            // çizilmez, alt satıra da inmez.
+            // Hayaletler caret'ten başlayarak **eski düzenin** konumlarında:
+            // silme (Backspace de ileri silme de) yeni caret'te başlıyor ve
+            // caret'e kadarki önek iki aynada aynı, yani eski düzen o noktadan
+            // aynı yürüyüşün caret'ten başlayan hâli — satırı aşan silmenin
+            // hayaleti alt satırın başına iniyor, geniş glyph yarılanmıyor.
+            // Pencerenin dışına düşen hayalet çizilmez (bağlam satırının
+            // üstüne binerdi).
             let mut cells = EditCells::empty();
             layout_with(
                 ghosts.as_slice().iter().copied(),
@@ -1157,12 +1180,14 @@ pub(crate) fn render_with(
                 usize::from(TEXT_COL),
                 |_| {},
                 |placed| {
-                    if placed.row != 0 || !placed.fits(cols.grid) {
+                    let row = end.caret_row + placed.row;
+                    if !window.contains(&row) || !placed.fits(cols.grid) {
                         return;
                     }
-                    // audit: `fits` → `col < cols`.
+                    // audit: `row - top < shown ≤ input_rows` ve `fits` →
+                    // `col < cols`; ikisi de `u16`'dan.
                     let ghost = Cell {
-                        row: caret.row,
+                        row: (row - top) as u16,
                         ..cell(
                             placed.ch,
                             placed.col as u16,
@@ -1179,6 +1204,7 @@ pub(crate) fn render_with(
                 },
             );
             edits(DockEdit::Erase {
+                row: caret.row,
                 col: caret.col,
                 ghosts: cells,
                 shift: 0,
@@ -1195,6 +1221,44 @@ pub(crate) fn render_with(
         top,
         rows,
     )
+}
+
+/// Karenin düzenlemesine dikey pencerenin kaymasını ekler: `by` satır
+/// (`son çizilen tepe − yeni tepe`; pencere aşağı inince uçuştakiler yukarı
+/// kayıyor, negatif).
+///
+/// Düzenleme varsa kayma onun alanında (`bt-gpu` karede tek düzenleme
+/// alıyor; ayrı bir `Shift` onu ezerdi), yoksa tek başına [`DockEdit::Shift`]
+/// — caret tavanı aşan girişte satır değiştirdi ya da tekerlek pencereyi
+/// kaydırdı ama metin aynı. `Reset` zaten her şeyi bitiriyor. Kaymasız kare
+/// düzenlemeyi olduğu gibi geçiriyor.
+pub(crate) fn with_shift(edit: Option<DockEdit>, by: i32) -> Option<DockEdit> {
+    if by == 0 {
+        return edit;
+    }
+    Some(match edit {
+        None => DockEdit::Shift { by },
+        Some(DockEdit::Arrive {
+            row, col, cells, ..
+        }) => DockEdit::Arrive {
+            row,
+            col,
+            cells,
+            shift: by,
+        },
+        Some(DockEdit::Erase {
+            row, col, ghosts, ..
+        }) => DockEdit::Erase {
+            row,
+            col,
+            ghosts,
+            shift: by,
+        },
+        Some(DockEdit::Shift { by: before }) => DockEdit::Shift {
+            by: before.saturating_add(by),
+        },
+        Some(DockEdit::Reset) => DockEdit::Reset,
+    })
 }
 
 /// [`render_with`]'in seçimsiz, tek giriş satırlı hâli — bu modülün
@@ -3382,27 +3446,140 @@ mod tests {
         assert_eq!(ghosts.as_slice()[0].fg, THEME.indexed_linear(2));
     }
 
-    /// Birden çok görsel satırlık girişte her düzenleme `Reset` (032
-    /// phase-3): efektin konumu bugün tek satırın sütunu ve sarma yüzünden
-    /// satır değiştiren metin iki eksen istiyor — phase-6'nın işi. 030'un
-    /// taşan satır bekçilerinin (pencere kayması) karşılığı; yatay pencere
-    /// emekli, `shift` hep sıfır.
+    /// [`edits_between`]'in giriş satırı sayısı çağırandan gelen hâli: sarılan
+    /// girişin satırları pencereye sığsın (tek satırlık pencerede alt satır
+    /// çizilmez, efekti de doğmaz).
+    fn edits_in_rows(old: &DockState, new: &DockState, cols: u16, rows: u16) -> Vec<DockEdit> {
+        let change = change(old, new);
+        let owned = caret_home(None, new.status, false) == CaretHome::Dock;
+        let mut edits = Vec::new();
+        render_with(
+            new,
+            &DockContext::default(),
+            None,
+            &THEME,
+            same(cols),
+            rows,
+            None,
+            owned,
+            None,
+            change.as_ref(),
+            &mut Vec::new(),
+            |_| (),
+            |edit| edits.push(edit),
+        );
+        edits
+    }
+
+    type Placement = ((u16, u16), Vec<(u16, u16, char)>);
+
+    /// Düzenlemenin konumu ve hücreleri `(satır, sütun, karakter)` olarak.
+    fn placed(edit: &DockEdit) -> Placement {
+        let (at, cells) = match edit {
+            DockEdit::Arrive {
+                row, col, cells, ..
+            } => ((*row, *col), cells.as_slice()),
+            DockEdit::Erase {
+                row, col, ghosts, ..
+            } => ((*row, *col), ghosts.as_slice()),
+            other => panic!("geliş ya da silme bekleniyordu: {other:?}"),
+        };
+        let cells = cells
+            .iter()
+            .filter_map(|cell| cell.ch.map(|ch| (cell.row, cell.col, ch)))
+            .collect();
+        (at, cells)
+    }
+
+    /// Sarılan girişte efektler **(satır, sütun)** konumunda (032 phase-6):
+    /// satırı dolduran harf alt satıra sarılırken efektiyle geliyor, ikinci
+    /// satırdaki Backspace hayaletini o satırda bırakıyor, birden çok
+    /// karakterlik silmenin hayaletleri eski düzenin sarmasıyla alt satıra
+    /// iniyor. Kayan harfler (sarmayla satır değiştiren kuyruk) düzenlemeye
+    /// girmiyor — yeni konumlarında animasyonsuz.
     #[test]
-    fn a_wrapped_line_resets_its_effects_until_they_learn_two_axes() {
+    fn effects_land_on_their_row_and_column_across_a_wrapped_line() {
         let cols = TEXT_COL + 4;
-        // İkinci satırda ileri silme.
-        let edits = edits_between(&typed("abcdefgh", 5, 1), &typed("abcdegh", 5, 2), cols);
-        reset(&edits, "sarılmış satırda silme");
-        // Satırı dolduran harf caret'i alt satıra indiriyor: iki satır.
-        let edits = edits_between(&at_end("abc", 1), &at_end("abcd", 2), cols);
-        reset(&edits, "sarmaya yol açan harf");
-        // Tek satıra dönen silme yine canlanıyor, kaymasız.
-        let edits = edits_between(&at_end("abcd", 2), &at_end("abc", 3), cols);
-        assert_eq!(erase(&edits), (TEXT_COL + 3, "d".into()));
+        // Satır dolu (`abcd`), `e` alt satırın başına sarılıyor.
+        let edits = edits_in_rows(&at_end("abcd", 1), &at_end("abcde", 2), cols, 2);
+        let (at, cells) = placed(only(&edits));
+        assert!(matches!(edits[0], DockEdit::Arrive { .. }), "{edits:?}");
+        assert_eq!(at, (1, TEXT_COL));
+        assert_eq!(cells, [(1, TEXT_COL, 'e')]);
+        // Satırı dolduran harf: kendi satırında, caret alt satıra iniyor.
+        let edits = edits_in_rows(&at_end("abc", 1), &at_end("abcd", 2), cols, 2);
+        assert_eq!(placed(only(&edits)).1, [(0, TEXT_COL + 3, 'd')]);
+        // İkinci satırda Backspace: hayalet ikinci satırda, caret'in sütununda.
+        let edits = edits_in_rows(&at_end("abcdef", 1), &at_end("abcde", 2), cols, 2);
+        assert!(matches!(edits[0], DockEdit::Erase { .. }), "{edits:?}");
+        let (at, ghosts) = placed(only(&edits));
+        assert_eq!(at, (1, TEXT_COL + 1));
+        assert_eq!(ghosts, [(1, TEXT_COL + 1, 'f')]);
+        // İlk satırda ileri silme: kuyruk bir satır yukarı sarılıyor ama
+        // düzenleme yalnız silinen harf.
+        let edits = edits_in_rows(&typed("abcdefgh", 1, 1), &typed("acdefgh", 1, 2), cols, 2);
+        assert_eq!(placed(only(&edits)).1, [(0, TEXT_COL + 1, 'b')]);
+        // Üç harflik silme satır sonunu aşıyor: hayaletler eski düzende —
+        // ikisi ilk satırın sonunda, üçüncüsü alt satırın başında.
+        let edits = edits_in_rows(&typed("abcdef", 2, 1), &typed("abf", 2, 4), cols, 2);
+        assert_eq!(
+            placed(only(&edits)).1,
+            [
+                (0, TEXT_COL + 2, 'c'),
+                (0, TEXT_COL + 3, 'd'),
+                (1, TEXT_COL, 'e')
+            ]
+        );
+        // Kaymasız: pencere tepesi değişmedi.
         let DockEdit::Erase { shift, .. } = only(&edits) else {
             panic!("{edits:?}");
         };
-        assert_eq!(*shift, 0, "yatay pencere emekli");
+        assert_eq!(*shift, 0);
+    }
+
+    /// Dikey pencerenin kayması satır cinsinden ve düzenlemenin **içinde**:
+    /// `bt-gpu` karede tek düzenleme alıyor, ayrı bir `Shift` onu ezerdi.
+    /// Metin değişmediyse kayma tek başına geçiyor; kaymasız kare düzenlemeyi
+    /// olduğu gibi bırakıyor.
+    #[test]
+    fn the_window_shift_rides_on_the_edit_in_rows() {
+        let cols = TEXT_COL + 4;
+        let edits = edits_in_rows(&at_end("abcdefgh", 1), &at_end("abcdefghi", 2), cols, 2);
+        let edit = *only(&edits);
+        assert_eq!(with_shift(Some(edit), 0), Some(edit));
+        let Some(DockEdit::Arrive { row, shift, .. }) = with_shift(Some(edit), -1) else {
+            panic!("{edit:?}");
+        };
+        assert_eq!((row, shift), (1, -1));
+        assert_eq!(with_shift(None, -1), Some(DockEdit::Shift { by: -1 }));
+        assert_eq!(with_shift(None, 0), None);
+        assert_eq!(with_shift(Some(DockEdit::Reset), 2), Some(DockEdit::Reset));
+    }
+
+    /// `PREBUFFER`'ın altındaki satırda yazım: efekt `BUFFER`'ın satırında,
+    /// `PREBUFFER`'ın satırları kadar aşağıda.
+    #[test]
+    fn an_edit_under_the_prebuffer_lands_on_the_buffer_row() {
+        let cols = TEXT_COL + 20;
+        let old = DockState {
+            prebuffer: "for i in 1 2\n".into(),
+            ..at_end("ech", 1)
+        };
+        let new = DockState {
+            prebuffer: "for i in 1 2\n".into(),
+            ..at_end("echo", 2)
+        };
+        let edits = edits_in_rows(&old, &new, cols, 2);
+        assert_eq!(placed(only(&edits)).1, [(1, TEXT_COL + 3, 'o')]);
+        // `PREBUFFER` değişti (ZLE bir satırı daha kabul etti): canlanmıyor.
+        let accepted = DockState {
+            prebuffer: "for i in 1 2\ndo\n".into(),
+            ..at_end("echo", 3)
+        };
+        reset(
+            &edits_in_rows(&new, &accepted, cols, 3),
+            "PREBUFFER değişti",
+        );
     }
 
     /// Öneriyle sarılan ama metni tek satır olan giriş hâlâ canlanıyor: "tek

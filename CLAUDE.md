@@ -199,13 +199,18 @@ hücrelerine çevirip sınırdan veriyor ve `bt-gpu` pencerenin altındaki **iki
 bir `setViewport`**'la çiziyor — kendi listeleri, kendi caret'i, opak zemini ve
 ızgaradan ayıran saç çizgisiyle. Aynı çağrı **ikinci bir sink**'ten, son
 çizilen aynaya karşı bulduğu en çok bir `DockEdit`'i (`Arrive`/`Erase`/
-`Reset`, ekran sütunuyla) veriyor: yalnız girdi sayısını aşmayan tek bitişik
-ekleme ya da silme canlanıyor, gerisi uçuştakileri bitiriyor — yazım
-animasyonlarının girdisi, tüketicisi `bt-gpu` (030; kural
-`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 1–3). Taşan
-satırda pencerenin kayması `Reset` değil sütun farkı (`shift`, `Shift`):
-uçuştakiler metinle birlikte kayıyor, yoksa uzun bir komutta hiçbir harf
-canlanmazdı (kullanıcı kararı, `plan.md` → R1.3). **Zaman ve çizim
+`Shift`/`Reset`, **(satır, sütun)** konumuyla) veriyor: yalnız girdi sayısını
+aşmayan tek bitişik ekleme ya da silme canlanıyor, gerisi uçuştakileri
+bitiriyor — yazım animasyonlarının girdisi, tüketicisi `bt-gpu` (030; kural
+`.tasks/030-dock-yazim-animasyonlari/discussion.md` → Karar 1–3). Sarılan ve
+çok satırlı girişte de (032 phase-6): hayaletler eski düzenin konumunda, satır
+sonunu aşan silmede alt satıra iniyor; düzenlemenin arkasında sarmayla kayan
+harf canlanmıyor (statik glyph'ini bulamayan geliş bitiyor) ve oturma kuralı
+okuma sırasında — `(satır, sütun)`'u düzenlemeninkinden büyük ya da eşit
+gelişler biter. Tavanı aşan girişte dikey pencerenin kayması `Reset` değil
+**satır** farkı (`shift`, `Shift`; son **çizilen** tepeden, `dock::with_shift`):
+uçuştakiler metinle birlikte kayıyor, pencereden taşan düşüyor. `PREBUFFER`
+değişimi ve satır sonu silen düzenleme `Reset`. **Zaman ve çizim
 `bt-gpu`'da** (`glyph_fx::GlyphFx`, `Motion`'ın yanında ayrı bir ivar, blink
 emsali): içerik karesi düzenlemeyi işliyor, uçuştaki gelişin statik glyph'i
 çizilecek listeden çıkıyor (`Frame::set_dock_fx`) ama `dock_glyphs`'ten
@@ -567,6 +572,13 @@ kalınlığından geliyor (ikinci bir sayı uydurulmadı). `bt-core` sınırdan 
 **rengini** veriyor (`Dock::sigil`, `Block::stripe`); şekil boyamanın kararı. İşaret komutun kendi satırında,
 çıktısında **değil**: hangi satırın hangi bloğa ait olduğu ancak çıpası
 görünen satırlar için biliniyor ve bölge boyamak onu tahmine çevirirdi.
+**Devam satırı da işaret almıyor** (032 phase-6): bağlantı `preexec`'e kadar
+açık, yani çok satırlı ya da sarılan bir komutun bütün satırları çıpayı
+taşıyor; üstteki satır — geçmiş dahil, ızgarada da bantta da — aynı kimliği
+taşıyorsa satır komutun başı değil ve ne işaret ne sayaç oraya oturuyor
+(`session::block_row_continues`). Komutun başı ekranda değilse işaret de yok.
+Tek istisna son `CSI 2 J`'nin geçmişe ittiği satır (`Session::clear_boundary`):
+Ctrl-L prompt'u aynı kimlikle yeniden basıyor ve o kalıntı komutun başı değil.
 **İçerik pencerenin tabanına yaslanır**: `frame()` kaç satırın dolu olduğunu
 sınırdan verir (`Cursor::content_rows`; alternatif ekranda ızgaranın tamamı),
 `DisplayLink` onu `rows - content_rows` ile ötelemeye çevirir ve `encode_pass`

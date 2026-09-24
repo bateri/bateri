@@ -74,9 +74,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    Blocks, CaretStyle, Cursor, CursorMotion, DOCK_TEXT_COL, DirtyFlag, DockBudget, DockCols,
-    DockContext, DockState, Erase, Keypress, LinearRgba, SelectionRun, SelectionRuns, Session,
-    Theme,
+    Blocks, CaretStyle, Cursor, CursorMotion, DirtyFlag, DockBudget, DockCols, DockContext,
+    DockState, Erase, Keypress, LinearRgba, SelectionRun, SelectionRuns, Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -1213,7 +1212,9 @@ define_class!(
                 // statik glyph'i bulunamayan geliş ancak dock basıldıktan
                 // **sonra** bilinebiliyor ve çizilecek liste en sonda.
                 if let Some(edit) = edit {
-                    glyph_fx.apply(edit, motion, (DOCK_TEXT_COL, iv.cols.get()));
+                    // Dikey pencerenin boyu `dock()`'a geçen sayının ta
+                    // kendisi: kaymanın pencereden taşırdığı efekt düşüyor.
+                    glyph_fx.apply(edit, motion, cursor.input_rows);
                 }
                 frame.suppress_dock(&mut glyph_fx);
                 frame.set_dock_fx(glyph_fx.iter(), theme.cursor_linear());
@@ -2375,6 +2376,7 @@ mod tests {
         use crate::glyph_fx::{GlyphFx, KEYPRESS_DURATION};
         let mut fx = GlyphFx::default();
         let arrival = bt_core::DockEdit::Arrive {
+            row: 0,
             col: bt_core::DOCK_TEXT_COL,
             cells: [bt_core::Cell {
                 col: bt_core::DOCK_TEXT_COL,
@@ -2385,7 +2387,7 @@ mod tests {
             .collect(),
             shift: 0,
         };
-        fx.apply(arrival, Motion::default(), (bt_core::DOCK_TEXT_COL, 80));
+        fx.apply(arrival, Motion::default(), 1);
         let dt = 1.0 / 120.0;
         let mut drawn = 0usize;
         let mut emptied_on_a_drawn_frame = false;
