@@ -37,8 +37,8 @@ _Requirements: R3.1, R3.2, R3.3, R3.4, R3.5, R4.1, R4.2_
 - **`CLAUDE.md`** — `Multiline`'ın bütün anılışları, "dock'u çok satırlı
   girişe göre büyütmek bilerek yapılmadı" paragrafı, "dock'un giriş satırı
   bir tane", `DOCK_ROWS * cell_h` ve `split_into_grid` cümlesi (PTY payı /
-  çizilen bant ayrımı), saç çizgisi paragrafları, 024'ün pencereleme cümlesi,
-  kaymanın yön kuralına bandın istisnası, `bt-gpu` satırındaki "kaç satır
+  çizilen bant ayrımı), saç çizgisi paragrafları (024'ün pencereleme cümlesi
+  phase-3'te sarmaya çevrildi), kaymanın yön kuralına bandın istisnası, `bt-gpu` satırındaki "kaç satır
   olduğu `DOCK_ROWS`" — kural + tek cümle gerekçe + işaretçi.
 - **`docs/YOL-HARITASI.md`** — borç kalemi (şimdiden sete bağlı) kapanış
   notuyla tek satır.

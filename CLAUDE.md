@@ -316,7 +316,13 @@ tepesi geçici olarak kırpılıyor. Bandın fazlası `Motion`'ın dördüncü
 kuralı ona uymuyor), `settled()`'e giriyor, snap/Hareketi Azalt/geometride
 oturuyor ve değiştiği karede yükselen içerik hedefi de süzülüyor ki iki eğri
 birbirini götürsün. Fare dock'u çizilen kareden okuyor (`Origin::dock`,
-orijinle aynı yazımda). Bugün `input_rows` hep 1: bant değişken, ekran aynı.
+orijinle aynı yazımda). **Uzun satır sarılıyor ve bant büyüyor**: devam
+satırları metnin sütunundan, satır sayısı `frame()`'de bastırmayla aynı
+kilit turunda dock'un düzeninden (`dock::needed_rows`; öneri sayılmıyor, her
+tuşta boyu değişip bandı nefes aldırırdı) ve tavanı ızgaranın yarısı
+(`bt_gpu::DOCK_MAX_SHARE`; `DockBudget` oran taşıyor, çünkü satır sayısının
+tek okuması `frame()`'de). Aşan girişte caret'i izleyen durumsuz bir dikey
+pencere açılıyor. Gerekçeler `.tasks/032-cok-satirli-dock/phase-3.md`.
 Dock ötelemeden
 **yapısal olarak** muaf:
 listeleri dock-yerel doğuyor, ekrana taşıyan şey o ikinci viewport. Üst
@@ -364,10 +370,12 @@ bir sonraki turunda koşuyor. Bedel komut başına değil **geçiş başına**: 
 log` gibi alternatif ekrana girmeyen komutlar hiç resize görmüyor. Dock'u
 olmayan pencerede haberci **hiç kurulmuyor**, yani yol yapısal olarak kapalı ve
 alternatif ekrandan çıkış orada dock doğurmuyor.
-**Dock sütun sayıyor** (024): giriş satırının pencerelemesi, caret'in yeri ve
+**Dock sütun sayıyor** (024): giriş satırının sarması, caret'in yeri ve
 geniş karakterin iki hücresi karakter indeksinden değil **genişlikten**
-birikiyor; pencere caret'in altındaki karakterin tamamını ayırıyor ve iki
-kenarda da geniş glyph yarılanmıyor — sığmayan karakter hiç çizilmiyor.
+birikiyor ve satır sonunda geniş glyph yarılanmıyor — sığmayan karakter alt
+satıra iniyor, arkasında boş bir sütun kalıyor (ızgaranın
+`LEADING_WIDE_CHAR_SPACER` kuralı; tek yürüyüş `dock::layout_with`, dock
+parametrizasyonu `dock::dock_layout`).
 `region_highlight`'ın aralıkları **karakter** indeksinde kalıyor, çünkü
 ZLE'nin birimi o; yayılan şey boyanan **zemin** ve onu baş hücrenin `wide`'ı
 ile spacer sütununa düşen glyph'siz bir hücre taşıyor. **Bağlam satırı
@@ -728,21 +736,25 @@ gerçekten boş ve yukarıdan başlayan sürükleme ilk satırı seçime katmal�
 Tekerleğin işaretçisi reddin dışında, çünkü o bir seçim ucu değil rapora
 giden koordinat — reddedilseydi band ekrandayken kaydırma büsbütün ölürdü.
 **Dock'un giriş satırı da seçiliyor** (031 phase-4) ve ızgaranın
-görünüşüyle — aynı pipeline, renk ve yarıçap, tek satırlık koşu
-(`Dock::selection`, ekran sütunu, pencerelenmiş). Seçim `bt-core`'da,
+görünüşüyle — aynı pipeline, renk ve yarıçap, görsel satır başına bir koşu
+(`Session::dock`'un `runs` tamponu, dikey pencerenin satırı ve ekran sütunu;
+032 sarmasıyla birden çok satır). Seçim `bt-core`'da,
 aynanın **yanında** (`ShellLog::dock_selection`, `BUFFER`'ın karakter
 indeksleri; içinde dursaydı `dock::diff` her sürükleme adımında yazım
 efektlerini sıfırlardı) ve `BUFFER` değişince kalkıyor. Yalnız `BUFFER`
 seçiliyor: `PREDISPLAY` başına, öneri sonuna iniyor. Kelime ızgaranın
 kelimesi (`dock::selection_range`, alacritty'nin `Semantic`'inin tek boyutlu
-kopyası; bekçisi iki yüzeyi aynı dizgide karşılaştırıyor), üçlü tık bütün
-`BUFFER` ve kopyası satır sonu **taşımıyor** — kabuğa geri yapıştırılan satır
-çalışmasın. İsabet testi dock'un **tek sütun yürüyüşünden** (`dock::columns`;
-`render`, hayaletler ve fare aynı yürüyüşü okuyor) ve **son çizilen**
-pencereye karşı (`Session::dock_window`: kayma + `BUFFER` boyu; canlı ayna
+kopyası; bekçisi iki yüzeyi aynı dizgide karşılaştırıyor), üçlü tık
+**mantıksal satırı** (`\n`'ler arası, sarılmış görsel satırlarıyla; ızgaranın
+ve macOS'un paragraf seçimi — tek satırda bütün `BUFFER`, ⌘A her zaman) ve
+kopyası satır sonu **taşımıyor** — kabuğa geri yapıştırılan satır
+çalışmasın. İsabet testi (satır, sütun) ve dock'un **tek düzen
+yürüyüşünden** (`dock::dock_layout`; çizim, hayaletler, satır sayısı ve fare
+aynı yürüyüşü okuyor) ve **son çizilen** pencereye karşı
+(`Session::dock_window`: dikey pencerenin tepesi + `BUFFER` boyu; canlı ayna
 o kareden beri başka bir `BUFFER`'a geçtiyse tık seçim kurmuyor). Fare kipi
 dock'a hiç uygulanmıyor, hedef basışta kilitleniyor (`Gesture`, `Drag::SelectDock`)
-ve sürükleme satırın içine kırpılıyor. **Pencerede tek seçim**: birinde
+ve sürükleme giriş bloğunun içine kırpılıyor. **Pencerede tek seçim**: birinde
 başlamak ötekini temizliyor, girdi (`send_input`) ikisini de; ⌘C sahibin
 metnini (`Session::selection_text`), ⌘A dock caret'in sahibiyken ve satırda
 metin varken dock'u seçiyor (`frame()`'in yayınladığı `caret_in_dock`).

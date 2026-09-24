@@ -31,7 +31,8 @@ pub(crate) struct Gesture {
     /// Seçim sürüklemesi **dock'un** giriş satırında mı (031 phase-4).
     ///
     /// Hedef basışta kilitleniyor, raporun rotası gibi: sürükleme bandın
-    /// dışına taşsa da dock'un seçimini büyütüyor (satırın içine kırpılarak),
+    /// dışına taşsa da dock'un seçimini büyütüyor (giriş bloğunun içine
+    /// kırpılarak),
     /// ızgaraya geçmiyor. Anlamı yalnız `dragging` kuruluyken var.
     dock: bool,
     /// Basışı **uygulamaya raporlanmış** düğmeler, düğme başına bir bit

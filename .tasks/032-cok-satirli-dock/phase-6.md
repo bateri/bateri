@@ -16,7 +16,9 @@ _Requirements: R6_
   eşlenemeyen hâl `Reset`.
 - **`crates/bt-gpu/src/glyph_fx.rs`** — girdiler (satır, sütun) anahtarlı;
   `shift` ve `retain` iki boyutlu pencereyle; phase-3'ün çok satırlı
-  `Reset`'i kalkar.
+  `Reset`'i kalkar — o kapı `bt-core`'da, `dock::render_with`'in `single`
+  koşulu (phase-3 → Uygulama Notları); `DockEdit::Shift` phase-3'ten beri
+  üretilmiyor.
 
 ## Kabul
 

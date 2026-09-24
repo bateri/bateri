@@ -562,6 +562,21 @@ pub(crate) fn band_px(input_rows: u16, cell: CellMetrics) -> f32 {
     dock_px(input_rows.saturating_add(1), cell)
 }
 
+/// Dock'un giriş satırlarının tavanı: ızgaranın satırlarının **yarısı**
+/// (032 Karar 4) — **tasarım sabiti**, ölçülmüş bir sayı değil
+/// ([`bt_atlas::CONTEXT_SCALE`]'in emsali).
+///
+/// Gerekçe: komutun yazıldığı yüzey ile onun bağlamı olan çıktı eşit kalsın,
+/// editör pencereyi yutmasın. **Oran**, mutlak sayı değil: pencereyle ve
+/// puntoyla ölçekleniyor. Aşan girişte dock kendi içinde caret'i izleyen
+/// dikey bir pencere açıyor (`bt_core`'un `dock::window_top`'u).
+///
+/// Yerleşim kararı çizenin, yani sabit burada; `bt-core` onu bütçe olarak
+/// alıyor ([`bt_core::DockBudget::share`]) ve ızgaranın satır sayısının tek
+/// okumasına uyguluyor — bu katman satır sayısının ikinci bir kopyasını
+/// tutmuyor (`Layout`'un doc'u).
+pub(crate) const DOCK_MAX_SHARE: f32 = 0.5;
+
 /// Bağlam satırının sütun bütçesi: **aynı piksel şeridi, küçük adım**.
 ///
 /// Dock sol payı ızgarayla paylaşıyor ([`Frame::dock_pos`]), yani iki satırın
@@ -1149,21 +1164,17 @@ impl Frame {
         self.selection = out;
     }
 
-    /// Dock'un seçim koşusu: giriş satırında `first..=last` ekran sütunları
-    /// ([`bt_core::Dock::selection`]). Izgaranın şekliyle **aynı** yoldan
-    /// ([`Frame::selection_parts`]) ve tek satır olduğu için dört köşesi de
-    /// yuvarlak; konum dock-yerel ([`Frame::dock_pos`]). Renk ile yarıçap
-    /// ızgaranınkiyle aynı uniform — pencerede tek seçim var ve rengi
+    /// Dock'un seçim koşuları: giriş bloğunun görsel satırı başına bir koşu
+    /// (`bt_core::Session::dock`'un `runs`'ı; uzun satır sarılıyor, 032).
+    /// Izgaranın şekliyle **aynı** yoldan ([`Frame::selection_parts`]) — köşe
+    /// kararı komşu satırın koşusuna bakıyor, yani satırlar arası seçim tek
+    /// parça bir şekil; konum dock-yerel ([`Frame::dock_pos`]). Renk ile
+    /// yarıçap ızgaranınkiyle aynı uniform — pencerede tek seçim var ve rengi
     /// [`Frame::push_selection`] her içerik karesinde yazıyor.
-    pub(crate) fn push_dock_selection(&mut self, first: u16, last: u16) {
+    pub(crate) fn push_dock_selection(&mut self, runs: &[SelectionRun]) {
         debug_assert!(self.cell_px.0 > 0.0, "clear(metrics) çağrılmadı");
-        let run = [SelectionRun {
-            row: 0,
-            first,
-            last,
-        }];
         let mut out = std::mem::take(&mut self.dock_selection);
-        self.selection_parts(&run, |frame, col, row| frame.dock_pos(col, row), &mut out);
+        self.selection_parts(runs, |frame, col, row| frame.dock_pos(col, row), &mut out);
         self.dock_selection = out;
     }
 
@@ -3470,7 +3481,11 @@ mod tests {
         let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("sıfır olmayan hücre");
         frame.clear(metrics, CaretStyle::default());
         frame.push_selection(&[], BG);
-        frame.push_dock_selection(3, 5);
+        frame.push_dock_selection(&[SelectionRun {
+            row: 0,
+            first: 3,
+            last: 5,
+        }]);
         assert!(frame.selection_instances().is_empty(), "ızgaraya sızdı");
         let [run] = frame.dock_selection_instances() else {
             panic!(
@@ -3487,6 +3502,42 @@ mod tests {
         // İçerik karesi listeyi boşaltıyor.
         frame.clear(metrics, CaretStyle::default());
         assert!(frame.dock_selection_instances().is_empty());
+    }
+
+    /// Sarılan girişte seçim satır başına bir koşu (032): ikinci koşu bir
+    /// hücre aşağıda — giriş satırları bitişik, aralarında boşluk yok — ve
+    /// köşe kararı ızgaranınki gibi komşu satıra bakıyor.
+    #[test]
+    fn a_dock_selection_across_rows_stacks_its_runs() {
+        let mut frame = Frame::default();
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("sıfır olmayan hücre");
+        frame.clear(metrics, CaretStyle::default());
+        frame.set_dock_rows(3);
+        frame.push_dock_selection(&[
+            SelectionRun {
+                row: 0,
+                first: 5,
+                last: 9,
+            },
+            SelectionRun {
+                row: 1,
+                first: 2,
+                last: 7,
+            },
+        ]);
+        let runs: Vec<&Instance> = frame
+            .dock_selection_instances()
+            .iter()
+            .filter(|part| part.size[1] == 18.0)
+            .collect();
+        let [top, bottom] = runs[..] else {
+            panic!("iki koşu beklendi: {runs:?}");
+        };
+        assert_eq!(bottom.pos[1] - top.pos[1], 18.0, "satırlar bitişik değil");
+        // Tek parça şekil: iki koşunun örtüşen kenarındaki köşeler kare
+        // (içbükey basamak), açıkta kalanlar yuvarlak.
+        assert_eq!(top.rgba, [1.0, 1.0, 1.0, 0.0], "üst koşu");
+        assert_eq!(bottom.rgba, [1.0, 0.0, 1.0, 1.0], "alt koşu");
     }
 
     #[test]

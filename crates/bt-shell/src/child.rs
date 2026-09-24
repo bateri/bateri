@@ -624,7 +624,10 @@ mod tests {
             blocks,
             &mut bt_core::SelectionRuns::default(),
             ScrollGlide::default(),
-            bt_core::DockBudget { rows: 1, cols: 80 },
+            bt_core::DockBudget {
+                share: 0.5,
+                cols: 80,
+            },
         );
         rows.into_iter()
             .map(|row| row.into_iter().collect())
