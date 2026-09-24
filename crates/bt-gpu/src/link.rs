@@ -1180,6 +1180,12 @@ define_class!(
                 frame.suppress_dock(&mut glyph_fx);
                 frame.set_dock_fx(glyph_fx.iter(), theme.cursor_linear());
                 dock_caret = dock.caret.map(|col| (col, dock.caret_text));
+                // Dock'un seçimi ızgaranınkiyle aynı şekil ve aynı renk
+                // uniform'u (031 R3.2); renk yukarıda `push_selection`'la
+                // yazıldı — pencerede tek seçim, tek renk.
+                if let Some((first, last)) = dock.selection {
+                    frame.push_dock_selection(first, last);
+                }
                 frame.push_dock_sigil(dock.sigil);
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).

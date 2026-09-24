@@ -228,6 +228,20 @@ pub(crate) fn caret_radius_px(cell_px: (f32, f32), ratio: f32) -> f32 {
         .min(cell_px.1 / 2.0)
 }
 
+/// Seçim şeklinin köşe yarıçapı, hücre **yüksekliğinin** oranı — tasarım
+/// sabiti, ölçülmüş bir sayı değil.
+///
+/// Caret'in oranından ([`bt_core::CURSOR_RADIUS`]) **ayrı** ve iki katından
+/// büyük: seçim bir metin bloğunu saran yüzey, caret ise hücre boyunda bir
+/// blok — aynı piksel yarıçapı seçimde köşeyi görünmez kılıyordu (031
+/// phase-3'ün gözle kontrolü, kullanıcı: "radius değerini biraz daha
+/// arttırabilirsin"; 13pt@2x'te ≈3 px → ≈7 px). Oran, piksel değil: Cmd +/−
+/// ile köşe de büyüyor. Kırpma [`caret_radius_px`]'ten: tek hücrelik seçimde
+/// yarıçap hücrenin kısa kenarının yarısını aşmıyor, yani şekil hap olsa da
+/// bozulmuyor. Kullanıcının `cursor_radius`'u buna dokunmuyor (Karar 10:
+/// anahtar imlecin).
+pub(crate) const SELECTION_RADIUS: f32 = 0.22;
+
 /// Seçim şeklinin bir köşesi (031 phase-3); sırası [`selection_corners`]'ın
 /// dizisinde TL, TR, BR, BL — `selection_fragment`'in maske sırası.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -650,6 +664,11 @@ pub(crate) struct Frame {
     /// bekçisini delerdi. Sayacı **yok**: duman reçetesinde seçim yok, yani
     /// jeton hiçbir şey söylemezdi; kanıtı `renderer.rs`'in offscreen okuması.
     selection: Vec<Instance>,
+    /// Dock'un seçim koşusu (031 phase-4): `selection`'ın dock yüzeyindeki
+    /// ikizi — aynı pipeline, aynı renk ve yarıçap uniform'u, dock'un kendi
+    /// viewport'unda ([`Frame::push_dock_selection`]). Ayrı liste, çünkü
+    /// ızgaranın listesi ötelemeyle kayıyor, dock ise ondan muaf.
+    dock_selection: Vec<Instance>,
     /// Seçimin bu karedeki rengi ([`Frame::push_selection`] yazıyor);
     /// hareket karesi listeyi koruduğu gibi onu da koruyor.
     selection_rgba: [f32; 4],
@@ -881,6 +900,7 @@ impl Frame {
         self.stripes.clear();
         self.bg.clear();
         self.selection.clear();
+        self.dock_selection.clear();
         self.glyphs.clear();
         self.rules.clear();
         self.bg_count = 0;
@@ -1071,14 +1091,46 @@ impl Frame {
     pub(crate) fn push_selection(&mut self, runs: &[SelectionRun], rgba: LinearRgba) {
         debug_assert!(self.cell_px.0 > 0.0, "clear(metrics) çağrılmadı");
         self.selection_rgba = rgba.to_array();
+        let mut out = std::mem::take(&mut self.selection);
+        self.selection_parts(runs, |frame, col, row| frame.pos(col, row), &mut out);
+        self.selection = out;
+    }
+
+    /// Dock'un seçim koşusu: giriş satırında `first..=last` ekran sütunları
+    /// ([`bt_core::Dock::selection`]). Izgaranın şekliyle **aynı** yoldan
+    /// ([`Frame::selection_parts`]) ve tek satır olduğu için dört köşesi de
+    /// yuvarlak; konum dock-yerel ([`Frame::dock_pos`]). Renk ile yarıçap
+    /// ızgaranınkiyle aynı uniform — pencerede tek seçim var ve rengi
+    /// [`Frame::push_selection`] her içerik karesinde yazıyor.
+    pub(crate) fn push_dock_selection(&mut self, first: u16, last: u16) {
+        debug_assert!(self.cell_px.0 > 0.0, "clear(metrics) çağrılmadı");
+        let run = [SelectionRun {
+            row: 0,
+            first,
+            last,
+        }];
+        let mut out = std::mem::take(&mut self.dock_selection);
+        self.selection_parts(&run, |frame, col, row| frame.dock_pos(col, row), &mut out);
+        self.dock_selection = out;
+    }
+
+    /// Seçim koşularının dörtgenleri ve içbükey dolguları, `pos`'un
+    /// koordinat uzayında — iki yüzeyin (ızgara, dock) **tek** şekil
+    /// kararı; ayrışan yalnız hücrenin yeri.
+    fn selection_parts(
+        &self,
+        runs: &[SelectionRun],
+        pos: impl Fn(&Self, u16, u16) -> [f32; 2],
+        out: &mut Vec<Instance>,
+    ) {
         let r = self.selection_radius();
         let (cw, ch) = self.cell_px;
         for (index, run) in runs.iter().enumerate() {
             debug_assert!(run.first <= run.last, "ters koşu: {run:?}");
             let corners = selection_corners(runs, index);
-            let pos = self.pos(run.first, run.row);
+            let pos = pos(self, run.first, run.row);
             let width = (f32::from(run.last.saturating_sub(run.first)) + 1.0) * cw;
-            self.selection.push(Instance {
+            out.push(Instance {
                 pos,
                 size: [width, ch],
                 rgba: corners.map(|c| if c == Corner::Convex { 1.0 } else { 0.0 }),
@@ -1104,7 +1156,7 @@ impl Frame {
                 }
                 let mut mask = [0.0; 4];
                 mask[centre] = -1.0;
-                self.selection.push(Instance {
+                out.push(Instance {
                     pos: fill_pos,
                     size: [r, r],
                     rgba: mask,
@@ -1118,17 +1170,22 @@ impl Frame {
         &self.selection
     }
 
+    /// Dock'un seçim parçaları, dock-yerel ([`Frame::push_dock_selection`]).
+    pub(crate) fn dock_selection_instances(&self) -> &[Instance] {
+        &self.dock_selection
+    }
+
     /// Seçimin rengi, lineer — `selection_fragment`'in renk uniform'u.
     pub(crate) fn selection_rgba(&self) -> [f32; 4] {
         self.selection_rgba
     }
 
-    /// Seçimin köşe yarıçapı, piksel: caret'in **varsayılan** oranı
-    /// ([`bt_core::CURSOR_RADIUS`]), kullanıcının `cursor_radius`'u değil
-    /// (Karar 10 — anahtar imlecin). Kırpması [`caret_radius_px`]'ten, yani
-    /// tek hücrelik koşuda yarım genişlik.
+    /// Seçimin köşe yarıçapı, piksel: seçimin kendi oranı
+    /// ([`SELECTION_RADIUS`]), kullanıcının `cursor_radius`'u değil (Karar
+    /// 10 — anahtar imlecin). Kırpması [`caret_radius_px`]'ten, yani tek
+    /// hücrelik koşuda yarım genişlik.
     pub(crate) fn selection_radius(&self) -> f32 {
-        caret_radius_px(self.cell_px, bt_core::CURSOR_RADIUS as f32)
+        caret_radius_px(self.cell_px, SELECTION_RADIUS)
     }
 
     /// Bir komut bloğunun işareti: **0. sütuna**, komutun kendi satırına
@@ -3246,6 +3303,34 @@ mod tests {
         let caret = frame.dock_caret(64.0).expect("caret dock yuvasında değil");
         assert_eq!(caret.pos[1], 0.0, "dock caret'i kesirle kaydı");
         assert_eq!(frame.cursor_block().rect[1], 64.0);
+    }
+
+    /// Dock'un seçimi ızgaranın şekliyle: tek satır, dört köşe yuvarlak,
+    /// dock-yerel konum (sol pay + nefes payı) ve ızgaranın listesine
+    /// **girmiyor** — dock ötelemeden muaf, kendi viewport'unda çiziliyor.
+    #[test]
+    fn a_dock_selection_is_one_rounded_run_in_dock_space() {
+        let mut frame = Frame::default();
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("sıfır olmayan hücre");
+        frame.clear(metrics, CaretStyle::default());
+        frame.push_selection(&[], BG);
+        frame.push_dock_selection(3, 5);
+        assert!(frame.selection_instances().is_empty(), "ızgaraya sızdı");
+        let [run] = frame.dock_selection_instances() else {
+            panic!(
+                "tek dörtgen beklendi: {:?}",
+                frame.dock_selection_instances()
+            );
+        };
+        let pad = f32::from(GUTTER);
+        assert_eq!(run.pos, [pad + 3.0 * 9.0, pad]);
+        assert_eq!(run.size, [27.0, 18.0]);
+        assert_eq!(run.rgba, [1.0; 4], "köşeler yuvarlak değil");
+        // Renk ızgaranınkiyle aynı uniform.
+        assert_eq!(frame.selection_rgba(), BG.to_array());
+        // İçerik karesi listeyi boşaltıyor.
+        frame.clear(metrics, CaretStyle::default());
+        assert!(frame.dock_selection_instances().is_empty());
     }
 
     #[test]

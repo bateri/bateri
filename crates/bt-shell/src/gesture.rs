@@ -28,6 +28,12 @@ pub(crate) struct Gesture {
     /// (`Session::set_selection`). Kalan soru yalnız "sürükleme sürüyor mu":
     /// basışsız bir `mouseDragged:` eski seçimin ucunu taşımasın.
     dragging: bool,
+    /// Seçim sürüklemesi **dock'un** giriş satırında mı (031 phase-4).
+    ///
+    /// Hedef basışta kilitleniyor, raporun rotası gibi: sürükleme bandın
+    /// dışına taşsa da dock'un seçimini büyütüyor (satırın içine kırpılarak),
+    /// ızgaraya geçmiyor. Anlamı yalnız `dragging` kuruluyken var.
+    dock: bool,
     /// Basışı **uygulamaya raporlanmış** düğmeler, düğme başına bir bit
     /// ([`button_bit`]).
     ///
@@ -64,8 +70,10 @@ pub(crate) enum Press {
 pub(crate) enum Drag {
     /// Basış raporlandı: hareket de rapor.
     Report,
-    /// Basış seçim başlattı: seçimin ucu taşınır.
+    /// Basış ızgarada seçim başlattı: seçimin ucu taşınır.
     Select,
+    /// Basış dock'ta seçim başlattı: dock seçiminin ucu taşınır.
+    SelectDock,
     /// İkisi de değil (sağ/orta tuşun terminalde jesti yok, basışsız
     /// sürükleme): olay düşer.
     Ignore,
@@ -92,6 +100,22 @@ impl Gesture {
         self.sent &= !button_bit(button);
         if button == MouseButton::Left {
             self.dragging = false;
+            self.dock = false;
+        }
+    }
+
+    /// Sol tuşun basışı dock'un giriş satırında: jest **terminalin** (fare
+    /// kipi dock'a hiç uygulanmıyor — bant uygulamanın ekranı değil) ve
+    /// tıklama sayısı ile Shift ızgaradaki kuralla okunuyor
+    /// ([`Gesture::pressed`]). Çağıran önce [`Gesture::begin_press`]'i
+    /// çağırmış olmalı.
+    pub(crate) fn pressed_dock(&mut self, clicks: isize, shift: bool) -> Press {
+        self.dragging = true;
+        self.dock = true;
+        if shift {
+            Press::Extend
+        } else {
+            Press::Select(click_kind(clicks))
         }
     }
 
@@ -138,6 +162,8 @@ impl Gesture {
     pub(crate) fn dragged(&self, button: MouseButton) -> Drag {
         if self.sent & button_bit(button) != 0 {
             Drag::Report
+        } else if button == MouseButton::Left && self.dragging && self.dock {
+            Drag::SelectDock
         } else if button == MouseButton::Left && self.dragging {
             Drag::Select
         } else {
@@ -180,9 +206,11 @@ impl Gesture {
         self.dragging = false;
     }
 
-    /// Seçim sürüklemesi sürüyor mu.
+    /// **Izgarada** seçim sürüklemesi sürüyor mu — kaydırmanın ucu fareye
+    /// taşıma sorusu. Dock'un sürüklemesi burada `false`: dock kaymıyor,
+    /// yani pencere kayınca taşınacak bir uç da yok.
     pub(crate) fn dragging(&self) -> bool {
-        self.dragging
+        self.dragging && !self.dock
     }
 
     /// Çentiği taze hücreye taşır ve hücrenin **değiştiğini** söyler — ilk
@@ -352,6 +380,28 @@ mod tests {
             "raporlanan basışın yanında bayat seçim"
         );
         assert_eq!(gesture.dragged(LEFT), Drag::Report);
+    }
+
+    #[test]
+    fn a_dock_press_drags_the_dock_selection() {
+        let mut gesture = Gesture::default();
+        gesture.begin_press(LEFT);
+        assert_eq!(
+            gesture.pressed_dock(2, false),
+            Press::Select(SelectKind::Word)
+        );
+        assert_eq!(gesture.dragged(LEFT), Drag::SelectDock);
+        // Kaydırma ızgaranın ucunu taşımamalı.
+        assert!(!gesture.dragging(), "dock sürüklemesi ızgaranın sayıldı");
+        assert_eq!(gesture.released(LEFT), Release::Done);
+        assert_eq!(gesture.dragged(LEFT), Drag::Ignore);
+        // Shift aynı kuralla uzatma.
+        gesture.begin_press(LEFT);
+        assert_eq!(gesture.pressed_dock(1, true), Press::Extend);
+        // Izgaradaki yeni basış hedefi geri alıyor.
+        press(&mut gesture, Click::Select, 1, false);
+        assert_eq!(gesture.dragged(LEFT), Drag::Select);
+        assert!(gesture.dragging());
     }
 
     #[test]

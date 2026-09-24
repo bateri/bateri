@@ -1354,7 +1354,7 @@ impl TerminalWindow {
         // Fare çevirisi oturumla aynı grid'i görmeli: ölçü ve sayı yukarıdaki
         // `SessionOptions`'a gidenlerin aynısı. `resize` yolunda da aynı üçlü
         // (`refresh_geometry`) birlikte yazılıyor.
-        view.set_metrics(grid);
+        view.set_metrics(grid, self.ivars().dock_rows.get());
         let link = DisplayLink::new(
             mtm,
             &self.ivars().surface,
@@ -1668,7 +1668,9 @@ impl TerminalWindow {
         let Some(grid) = self.sync_geometry(app) else {
             return;
         };
-        self.ivars().view.set_metrics(grid);
+        self.ivars()
+            .view
+            .set_metrics(grid, self.ivars().dock_rows.get());
         if let Some(link) = self.ivars().link.get() {
             link.resize(
                 grid.cols,
