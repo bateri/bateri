@@ -82,10 +82,13 @@ Cmd-T kabuğa `t` yazar) ve geçen tuş da yığına girmez,
 Shift+PgUp/PgDn terminalin kaydırmasıdır, **Control'lü
 olay yığına hiç girmez** (numpad Enter'ın U+0003'ü Ctrl-C ile, Ctrl-Y'nin
 U+0019'u Shift+Tab ile paylaşımlı; kolu AppKit'e bırakmak her komutu
-kesebilirdi), **dock seçiminin tuşları** — değiştiricisiz ⌫/⌦/←/→ ve
-⇧←/⇧→ (`keys::dock_key`) — yığından önce `Session::dock_key`'e sorulur
+kesebilirdi), **dock seçiminin tuşları** — değiştiricisiz ⌫/⌦/←/→,
+⇧←/⇧→ ve ⇧⏎ (`keys::dock_key`) — yığından önce `Session::dock_key`'e sorulur
 (tüketmezse bugünkü yolundan devam) ve kalanı `interpretKeyEvents:` ile
-metin yığınına verilir.
+metin yığınına verilir. ⇧⏎ dock'ta satırı çalıştırmadan satır sonu ekliyor
+ve **yapıştırmanın yolundan** gidiyor (`paste(b"\n")`): bracketed sarma
+her keymap'te harfi harfine ekliyor, `\e\r` ise `viins`'te satırı kabul
+ederdi (bekçisi iki keymap'te canlı zsh ile).
 Ölü tuş bileşimini (`Option+ü` + boşluk → `~`) o yığın tamamlıyor, düzen
 verisini biz okumuyoruz; `BateriView` bunun için `NSTextInputClient`'ın **11
 zorunlu** metodunu uyguluyor — kısmi uyum yok, `define_class!` eksiğinde
