@@ -34,6 +34,7 @@
 | 030 | [dock-yazim-animasyonlari](030-dock-yazim-animasyonlari/) | 🟢 | 5 phase + kapı tamam — dock'ta yazılan harf Keypress'in dokuz efektinden biriyle geliyor, Backspace'le silinen Erase'in sekiz efektinden biriyle gidiyor (caret'in üstünde, çeyrek saniyede); `[motion] keypress`/`erase` ve ayar penceresinde iki popup, yapıştırma/geçmiş/toplu silme anında |
 | 031 | [fare-ile-secim](031-fare-ile-secim/) | 🟢 | 5 phase + kapı tamam — ızgarada kelime/satır/Shift seçimi, dock'ta seçim, tıkla-caret, sil/yerine yaz/kes (tek komutlu zsh widget'ı), `selection` rengiyle yuvarlak köşeli tek parça vurgu |
 | 032 | [cok-satirli-dock](032-cok-satirli-dock/) | 🟢 | 6 phase + kapı tamam — çok satırlı giriş dock'ta (sarma, `PREBUFFER`, büyüyen bant, iki eksenli yazım efektleri), blok işareti devam satırına oturmuyor |
+| 033 | [gecmiste-arama](033-gecmiste-arama/) | 📐 | ⌘F geçmişte arama: yazdıkça vurgu, "3 of 17", ⏎/⌘G gezinme, düz metin/regex; AppKit paneli, parça parça dizin |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
