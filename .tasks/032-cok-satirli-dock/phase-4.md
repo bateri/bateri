@@ -72,5 +72,7 @@ _Requirements: R3.1, R3.2, R3.3, R3.4, R3.5, R4.1, R4.2_
 - [ ] Bekçiler çevrildi / eklendi; canlı zsh sınaması
 - [ ] `CLAUDE.md`, `docs/YOL-HARITASI.md`
 - [ ] phase-1'den devir: imleç bir `\n`'in arkasındayken ızgara başlangıcı ve caret kuralı (phase-1 → Uygulama Notları) — bu phase'in dock tarafına etkisini uygula ya da gerekçesiyle kapat
+- [ ] Orkestratör (phase-3'ün waive 2'sinden, kullanıcı tarafı): tavanı aşan girişte dikey pencerenin dışındaki satırlara fare de ulaşabilsin — işaretçi dock'un üstündeyken tekerlek/trackpad dock'un dikey penceresini kaydırsın (ızgarayı değil); bırakınca caret'i izleme yeniden başlasın (yazınca/caret hareket edince pencere caret'e döner). Sürükleyerek seçim pencerenin kenarına değince pencere kaysın.
+- [ ] Orkestratör (phase-3'ün gözlemi): punto büyütmeden (resize) sonra ızgarada eski bir satır kalıyordu — HEAD'de (032 öncesi, 9a0dd82) de oluyor mu ölç; 032'nin getirdiğiyse düzelt, değilse Uygulama Notları'na bilinen sınır olarak yaz.
 - [ ] Doğrulama geçti (`make hepsi`, `make test-yaris`, `make duman`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
