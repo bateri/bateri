@@ -742,6 +742,9 @@ define_class!(
             if lines == 0 {
                 return;
             }
+            if self.dock_wheel(event, session, lines) {
+                return;
+            }
             // İşaretçinin hücresi fare kipinde rapora giriyor; yarısı girmiyor
             // (`bt-core` okumuyor). Kenar dışı nokta yapışır, `None` yalnız
             // sıfır boyutlu grid'de.
@@ -1327,6 +1330,18 @@ impl BateriView {
         let Some(mut step) = step else {
             return;
         };
+        // Dock'un üstündeki tekerlek dock'un (tam satırla; yarım satırda
+        // dinlenen bir dock penceresi olmadığı için süzülme yok). **Jestin
+        // başı ve sonu ızgaranın kalıyor** (`/code-review`): ızgarada başlayıp
+        // momentumu dock'un üstünde biten bir kaydırmanın `Settle`'ı
+        // yutulsaydı ızgara yarım satırda asılı kalırdı.
+        if !matches!(
+            step.intent,
+            ScrollIntent::GestureBegan | ScrollIntent::Settle
+        ) && self.dock_wheel(event, session, step.lines)
+        {
+            return;
+        }
         // **Basılı sürüklemede çentik süzülmüyor**, satır adımıyla gidiyor:
         // süzülmenin payı pencereyi kare yolunda kaydırıyor ve orada seçimin
         // ucunu fareye taşıyan kimse yok — fare kıpırdamazken uç eski satırda
@@ -1467,14 +1482,22 @@ impl BateriView {
                 }
             }
             // Dock'ta başlamış sürükleme dock'ta kalıyor: nokta giriş
-            // bloğunun içine kırpılıyor, ızgaraya taşmıyor.
+            // bloğunun içine kırpılıyor, ızgaraya taşmıyor. **Bloğun
+            // kenarını aşan sürükleme dikey pencereyi kaydırıyor** (032
+            // phase-4): tavanı aşan girişte görünmeyen satırlara seçim
+            // uzayabilsin. Olay başına bir satır, yani fare kenarın ötesinde
+            // kıpırdadıkça — periyodik bir zamanlayıcı yok.
             Drag::SelectDock => {
+                let at = event.locationInWindow();
                 let clamp = OutOfGrid::Clamp { fill_rows: 0 };
-                if let (Some(session), Some(point)) = (
-                    self.ivars().session.get(),
-                    self.window_point_dock(event.locationInWindow(), clamp),
-                ) {
-                    session.dock_drag(point);
+                if let Some(session) = self.ivars().session.get() {
+                    let edge = self.dock_edge(at);
+                    if edge != 0 {
+                        session.dock_scroll(edge);
+                    }
+                    if let Some(point) = self.window_point_dock(at, clamp) {
+                        session.dock_drag(point);
+                    }
                 }
             }
             Drag::Ignore => {}
@@ -1627,6 +1650,40 @@ impl BateriView {
             ),
         };
         point_to_cell((point.x, point.y), metrics, top, outside, scale, cols, rows)
+    }
+
+    /// Tekerlek dock'un giriş bloğunun üstündeyse onu dock'un dikey
+    /// penceresine verir (032 phase-4); `true` → olay tüketildi. Dock taşmıyorsa
+    /// (`Session::dock_scroll` `false`) olay ızgaranın, bugünkü gibi.
+    fn dock_wheel(&self, event: &NSEvent, session: &Session, lines: i32) -> bool {
+        self.window_point_dock(event.locationInWindow(), OutOfGrid::Reject)
+            .is_some()
+            && session.dock_scroll(lines)
+    }
+
+    /// Nokta dock'un giriş bloğunun neresinde: üstündeyse `1` (pencere geriye
+    /// kaysın), altındaysa `-1`, içindeyse ya da dock yoksa `0` —
+    /// `Session::dock_scroll`'un yönü. Geometri [`Self::window_point_dock`]'unki.
+    fn dock_edge(&self, in_window: NSPoint) -> i32 {
+        let Some((metrics, _)) = self.ivars().metrics.get() else {
+            return 0;
+        };
+        let Some((top, rows)) = self.ivars().origin.get().and_then(Origin::dock) else {
+            return 0;
+        };
+        let Some(window) = self.window() else {
+            return 0;
+        };
+        let y = self.convertPoint_fromView(in_window, None).y * window.backingScaleFactor()
+            - f64::from(top);
+        let height = f64::from(metrics.cell_px().1) * f64::from(rows);
+        if y < 0.0 {
+            1
+        } else if y >= height {
+            -1
+        } else {
+            0
+        }
     }
 
     /// Çizilen karenin doldurma bandının boyu — orijinle **aynı gövdeden**

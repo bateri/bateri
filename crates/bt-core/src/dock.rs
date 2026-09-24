@@ -425,6 +425,37 @@ fn display(state: &DockState) -> impl Iterator<Item = char> + '_ {
         .chain(state.postdisplay.chars())
 }
 
+/// Dock'un **akışı**: `PREBUFFER ++ PREDISPLAY ++ BUFFER ++ POSTDISPLAY`
+/// (032 Karar 2). `PREBUFFER` ZLE'nin kabul ettiği önceki satırlar ve her
+/// zaman `\n`'le bitiyor, yani düzenlenebilir satırlar kendiliğinden bir alt
+/// satırdan ve aynı girintiden başlıyor. Akışın indeksi görüntününkinden
+/// [`prebuffer_chars`] kadar ileride — `CURSOR` ve `region_highlight` o
+/// kaydırmayla okunuyor.
+fn stream(state: &DockState) -> impl Iterator<Item = char> + '_ {
+    state.prebuffer.chars().chain(display(state))
+}
+
+/// `PREBUFFER`'ın karakter sayısı: akış ile görüntü uzayı arasındaki
+/// kaydırma, ve **seçilebilir metnin** (`PREBUFFER ++ BUFFER`, [`selectable`])
+/// `BUFFER`'dan önceki kısmı.
+pub(crate) fn prebuffer_chars(state: &DockState) -> usize {
+    state.prebuffer.chars().count()
+}
+
+/// Dock'ta **seçilebilen** metin: `PREBUFFER ++ BUFFER` (032 Karar 2) —
+/// [`DockPoint`]'in ve seçim aralığının uzayı. `PREBUFFER` seçilip
+/// kopyalanabiliyor (bütün döngüyü kopyalamak beklenen şey) ama ZLE onu
+/// düzenleyemiyor: ona değen aralık düzenleme komutu doğurmuyor
+/// (`Session::dock_edit_line`). `PREBUFFER` boşken `BUFFER`'ın kendisi,
+/// ayırma yok.
+pub(crate) fn selectable(state: &DockState) -> std::borrow::Cow<'_, str> {
+    if state.prebuffer.is_empty() {
+        std::borrow::Cow::Borrowed(&state.buffer)
+    } else {
+        std::borrow::Cow::Owned(format!("{}{}", state.prebuffer, state.buffer))
+    }
+}
+
 /// [`layout`]'un **dock** parametrizasyonu (032 Karar 3 ve 7): ilk satır da
 /// devam satırları da metnin sütunundan ([`TEXT_COL`], asma girinti), genişlik
 /// ızgaranınki. Sütunlar doğrudan **ekran** sütunu — işaretin ve nefes payının
@@ -479,7 +510,8 @@ pub(crate) fn needed_rows(state: &DockState, cols: u16) -> usize {
 /// efektlerin kapısı aynı sayıya bakıyor — ayrı ölçülerde öneriyle sarılan
 /// tek satırlık giriş her tuşta efektlerini sıfırlıyordu (`/code-review`).
 fn measure(state: &DockState, cols: u16) -> (usize, usize) {
-    let text = state.predisplay.chars().count() + state.buffer.chars().count();
+    let shift = prebuffer_chars(state);
+    let text = shift + state.predisplay.chars().count() + state.buffer.chars().count();
     // Metnin son satırı: metinden başlayan her satır, artı metnin sonundaki
     // satır sonunun açtığı boş satır (sarmanın açtığı satır değil — o öneriye
     // ait). Satır sonu satırı `end + 1`'den, sarma `end`'den açıyor.
@@ -487,8 +519,8 @@ fn measure(state: &DockState, cols: u16) -> (usize, usize) {
     let mut last = 0;
     let mut previous_end = None;
     let end = dock_layout(
-        display(state).map(|ch| (ch, ())),
-        state.cursor,
+        stream(state).map(|ch| (ch, ())),
+        shift + state.cursor,
         cols,
         |line| {
             let after_newline = previous_end.is_some_and(|end: usize| end + 1 == line.start);
@@ -511,24 +543,27 @@ fn window_top(caret_row: usize, shown: usize) -> usize {
     caret_row.saturating_sub(shown.max(1) - 1)
 }
 
-/// Görüntünün bir karakteri hangi dizgiden: yalnız `BUFFER` seçilebiliyor
-/// (031 Karar 8), `PREDISPLAY` ile öneri isabet testinde `BUFFER`'ın iki
-/// ucuna iniyor.
+/// Akışın bir karakteri hangi dizgiden: yalnız `PREBUFFER ++ BUFFER`
+/// seçilebiliyor (031 Karar 8, 032 Karar 2), `PREDISPLAY` ile öneri isabet
+/// testinde `BUFFER`'ın iki ucuna iniyor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Part {
     Pre,
-    /// `BUFFER`'ın bu karakter indeksi.
+    /// Seçilebilir metnin ([`selectable`]) bu karakter indeksi — `PREBUFFER`
+    /// ya da `BUFFER`.
     Buffer(usize),
     Post,
 }
 
-/// Dock'un giriş bloğunda bir nokta: `BUFFER`'ın karakter indeksi ve
+/// Dock'un giriş bloğunda bir nokta: seçilebilir metnin ([`selectable`],
+/// `PREBUFFER ++ BUFFER`; `PREBUFFER` boşken `BUFFER`'ın kendisi) karakter
+/// indeksi ve
 /// karakterin hangi yarısı — ızgaranın [`crate::SelectionPoint`]'inin
 /// **metin uzayındaki** karşılığı (alacritty'nin `Anchor`'ı: nokta + yan).
 /// Satır yok: sarma bir görüntü kararı, indeks hangi görsel satırda olursa
 /// olsun aynı karakteri gösteriyor.
 ///
-/// `index ≥ BUFFER'ın uzunluğu` geçerli ve anlamı "satırın sonundaki boşluk",
+/// `index ≥ metnin uzunluğu` geçerli ve anlamı "satırın sonundaki boşluk",
 /// ızgarada satırın sağındaki boş hücreler gibi: metnin hemen sağındaki
 /// sütun `len`, bir ötesi `len + 1`… Öneriye ya da boşluğa yapılan tıklama
 /// oraya iniyor; sınır (`Simple`) `len`'e kırpılıyor, kelime (`Word`) ise
@@ -540,7 +575,8 @@ pub(crate) struct DockPoint {
 }
 
 /// Fare isabet testi: dock'un giriş bloğunda `row`. satırın (dikey
-/// pencerenin içinde) `col` sütununun `half` yarısı → `BUFFER`'da bir nokta.
+/// pencerenin içinde) `col` sütununun `half` yarısı → seçilebilir metinde
+/// ([`selectable`]) bir nokta.
 /// Ayna `Live` değilse ya da metin sığmıyorsa `None` (seçilecek metin yok).
 ///
 /// **Yürüyüş [`render_with`]'inkinin ta kendisi** ([`dock_layout`]): aynı
@@ -554,6 +590,8 @@ pub(crate) struct DockPoint {
 ///   sol sütunu sol yarı, sağ sütunu (spacer) sağ yarı — hücre değil glyph.
 /// - `PREDISPLAY` `BUFFER`'ın başına, öneri (`POSTDISPLAY`) `BUFFER`'ın
 ///   sonuna iner: ikisi de seçilemiyor ama tıklamanın gideceği yer belli.
+/// - `PREBUFFER` (032) seçilebilir metnin başı: kendi karakterine iner. Caret
+///   oraya taşınamıyor — o karar düzenleme kapısında, burada değil.
 /// - Satırın solundaki sütun (işaret, nefes payı, asma girinti) o satırın ilk
 ///   çizilen karakterinin sol yarısı.
 /// - Satırın sağındaki boşluk: `BUFFER` alt satırda sürüyorsa (sarma) o
@@ -570,12 +608,18 @@ pub(crate) fn hit(
     if state.status != DockStatus::Live || cols <= TEXT_COL {
         return None;
     }
-    let len = state.buffer.chars().count();
+    let shift = prebuffer_chars(state);
+    let buffer = state.buffer.chars().count();
+    // Seçilebilir metnin uzunluğu: boşluk ve öneri onun ötesine iniyor.
+    let len = shift + buffer;
     let pre = state.predisplay.chars().count();
-    let part = |index: usize| match index.checked_sub(pre) {
-        None => Part::Pre,
-        Some(offset) if offset < len => Part::Buffer(offset),
-        Some(_) => Part::Post,
+    let part = |index: usize| match index.checked_sub(shift) {
+        None => Part::Buffer(index),
+        Some(shown) => match shown.checked_sub(pre) {
+            None => Part::Pre,
+            Some(offset) if offset < buffer => Part::Buffer(shift + offset),
+            Some(_) => Part::Post,
+        },
     };
     // Boşluk ve öneri, metnin (`PREDISPLAY` + `BUFFER`) çizilen son
     // sütununun bir sağından uzaklığıyla `len`'in ötesine iniyor.
@@ -585,7 +629,7 @@ pub(crate) fn hit(
     };
     let at = |part: Part, half: CellHalf, text_end: u16| match part {
         Part::Pre => DockPoint {
-            index: 0,
+            index: shift,
             half: CellHalf::Left,
         },
         Part::Buffer(index) => DockPoint { index, half },
@@ -598,8 +642,8 @@ pub(crate) fn hit(
     let mut last = None;
     let mut text_end = TEXT_COL;
     dock_layout(
-        display(state).map(|ch| (ch, ())),
-        state.cursor,
+        stream(state).map(|ch| (ch, ())),
+        shift + state.cursor,
         cols,
         |line| {
             if lines == target {
@@ -645,7 +689,7 @@ pub(crate) fn hit(
         Some(Part::Buffer(index)) if index + 1 < len => {
             at(Part::Buffer(index), CellHalf::Right, text_end)
         }
-        Some(Part::Pre) if len > 0 => at(Part::Buffer(0), CellHalf::Left, text_end),
+        Some(Part::Pre) if buffer > 0 => at(Part::Buffer(shift), CellHalf::Left, text_end),
         // Çizilen karakteri olmayan satır (satır sonunun açtığı boş satır ya
         // da pencerenin ötesi): satırın başladığı yer.
         None => match target_line.map(|line| part(line.start)) {
@@ -842,8 +886,15 @@ fn bracket_match(chars: &[char], index: usize) -> Option<usize> {
 /// Karar 4): koşu satırın ilk çizilir seçili hücresinden sonuncusuna,
 /// aradaki boşluklar köprülü. `runs` baştan boşaltılıyor.
 ///
-/// Dönüşün ikinci yarısı dikey pencerenin ilk satırı ([`window_top`]):
-/// isabet testinin izi ([`crate::Session::dock`] yazıyor).
+/// Dönüşün ikinci yarısı dikey pencerenin ilk satırı ([`window_top`]) ve
+/// girişin tavansız satır sayısı: isabet testinin ve tekerleğin izi
+/// ([`crate::Session::dock`] yazıyor).
+///
+/// `scroll` kullanıcının tekerlekle seçtiği pencere tepesi
+/// ([`crate::shell::ShellLog::dock_scroll`]); `None` → pencere caret'i
+/// izliyor. Seçilen tepe satır sayısına kırpılıyor; caret pencerenin
+/// dışında kalırsa çizilmiyor (bir metin alanının caret'ten uzağa
+/// kaydırılmış hâli) — yazmak ya da caret'i oynatmak izlemeyi geri getiriyor.
 ///
 /// **Yürüyüş iki kez koşuyor** ve ikisi aynı fonksiyon ([`dock_layout`]):
 /// pencerenin tepesi caret'in satırına bağlı ve o satır ancak yürüyüşün
@@ -863,13 +914,14 @@ pub(crate) fn render_with(
     theme: &Theme,
     cols: DockCols,
     input_rows: u16,
+    scroll: Option<usize>,
     owned: bool,
     selection: Option<(usize, usize)>,
     change: Option<&Change>,
     runs: &mut Vec<SelectionRun>,
     mut sink: impl FnMut(Cell),
     mut edits: impl FnMut(DockEdit),
-) -> (Dock, usize) {
+) -> (Dock, usize, usize) {
     runs.clear();
     let mut surface = Dock {
         ground: theme.background_linear(),
@@ -880,7 +932,7 @@ pub(crate) fn render_with(
     };
     if cols.grid == 0 {
         settle(change, &mut edits);
-        return (surface, 0);
+        return (surface, 0, 1);
     }
     // **Caret'in sahibi burada sorulmuyor, cevabı hazır geliyor** (`owned`).
     // Eskiden burada [`caret_home`] ikinci kez çağrılıyordu ve o çağrı
@@ -900,7 +952,7 @@ pub(crate) fn render_with(
 
     if cols.grid <= TEXT_COL {
         settle(change, &mut edits);
-        return (surface, 0);
+        return (surface, 0, 1);
     }
     // `Live` olmayan ayna metin çizdirmiyor ve ikisi de doğru cevap: `Idle`'da
     // ZLE satır düzenlemiyor, `Unavailable`'da gösteremediğimiz bir satır var
@@ -919,13 +971,21 @@ pub(crate) fn render_with(
             });
         }
         settle(change, &mut edits);
-        return (surface, 0);
+        return (surface, 0, 1);
     }
     let fixed = theme.foreground_linear();
     // Öneri sönük: "henüz yazılmamış metin" ile SGR 2'nin sorduğu şey aynı.
     let suggestion = theme.dim_linear();
-    let text = state.predisplay.chars().count() + state.buffer.chars().count();
-    let stream = display(state)
+    // **`PREBUFFER` akışın başında** (032 Karar 2, [`stream`]): ZLE'nin kabul
+    // ettiği önceki satırlar düzenlenebilir satırların üstünde, aynı renkte
+    // ve aynı girintide — dock bir editör, `for` döngüsü tek parça metin.
+    // Görüntünün indeksleri (`CURSOR`, `region_highlight`, efektler) akışta
+    // `shift` kadar ileride.
+    let shift = prebuffer_chars(state);
+    let pre = state.predisplay.chars().count();
+    let buffer = state.buffer.chars().count();
+    let text = shift + pre + buffer;
+    let stream = stream(state)
         .enumerate()
         .map(|(index, ch)| (ch, if index < text { fixed } else { suggestion }));
 
@@ -937,7 +997,10 @@ pub(crate) fn render_with(
     // büyütüyor (032 phase-1 → Uygulama Notları).
     let (caret_row, rows) = measure(state, cols.grid);
     let shown = usize::from(input_rows.max(1));
-    let top = window_top(caret_row, shown);
+    let top = scroll.map_or_else(
+        || window_top(caret_row, shown),
+        |top| top.min(rows.saturating_sub(shown)),
+    );
     let window = top..top + shown;
     // İlk satır pencerenin dışındaysa işaret de: prompt'un yeri ekranda değil.
     if top > 0 {
@@ -945,23 +1008,29 @@ pub(crate) fn render_with(
     }
     let single = rows == 1;
     let arriving = match change {
-        Some(&Change::Insert { start, end }) if owned && single => start..end,
+        Some(&Change::Insert { start, end }) if owned && single => shift + start..shift + end,
         _ => 0..0,
     };
     let mut arrive_col = None;
     let mut arrived = EditCells::empty();
-    // Seçimin görüntü uzayındaki aralığı: `BUFFER`'ın indeksleri `PREDISPLAY`
-    // kadar kayıyor (`region_highlight`'ın uzayı). Önek yalnız seçim varken
-    // sayılıyor — seçimsiz karenin bedeli sıfır.
-    let selected = selection.map_or(0..0, |(start, end)| {
-        let pre = state.predisplay.chars().count();
-        pre + start..pre + end
-    });
+    // Seçim seçilebilir metnin ([`selectable`]) uzayında; akışta `PREBUFFER`
+    // aynı yerde, `BUFFER` ise `PREDISPLAY` kadar ileride. Akış indeksi
+    // seçilebilir indekse çevriliyor, `PREDISPLAY` ile öneri hiçbir indekse
+    // düşmüyor.
+    let selected = selection.map_or(0..0, |(start, end)| start..end);
+    let selectable_at = |index: usize| {
+        if index < shift {
+            Some(index)
+        } else {
+            let offset = (index - shift).checked_sub(pre)?;
+            (offset < buffer).then_some(shift + offset)
+        }
+    };
     let mut run: Option<SelectionRun> = None;
 
     let end = dock_layout(
         stream,
-        state.cursor,
+        shift + state.cursor,
         cols.grid,
         |_| {},
         |placed| {
@@ -983,8 +1052,11 @@ pub(crate) fn render_with(
             // audit: `row - top < shown ≤ input_rows` ve `col + width ≤ cols`;
             // ikisi de `u16`'dan geliyor, taşamaz.
             let (row, col) = ((row - top) as u16, col as u16);
-            let style = style_at(state, index);
-            let is_selected = selected.contains(&index);
+            // `PREBUFFER`'ın vurgusu yok: `region_highlight` yalnız görüntünün.
+            let style = index
+                .checked_sub(shift)
+                .map_or_else(HighlightStyle::default, |shown| style_at(state, shown));
+            let is_selected = selectable_at(index).is_some_and(|at| selected.contains(&at));
             let lead = Cell {
                 row,
                 ..cell(ch, col, base, style, theme, width == 2, is_selected)
@@ -1052,11 +1124,13 @@ pub(crate) fn render_with(
     runs.extend(run);
 
     // audit: caret'in sütunu `< cols` ([`layout`]'un caret kuralı: sıradaki
-    // bir sütunluk karakterin sığdığı yer) ve satırı `window`'un içinde.
+    // bir sütunluk karakterin sığdığı yer) ve satırı `window`'un içinde —
+    // tekerlekle kaydırılmış pencerede dışındaysa aşağıda çizilmiyor.
     let caret = DockCaret {
         col: end.caret_col as u16,
-        row: (end.caret_row - top) as u16,
+        row: end.caret_row.saturating_sub(top) as u16,
     };
+    let caret_shown = window.contains(&end.caret_row);
     match change {
         None | Some(Change::Same) => {}
         // Birden çok görsel satır: efektin konumu iki eksen istiyor (032
@@ -1115,10 +1189,11 @@ pub(crate) fn render_with(
 
     (
         Dock {
-            caret: owned.then_some(caret),
+            caret: (owned && caret_shown).then_some(caret),
             ..surface
         },
         top,
+        rows,
     )
 }
 
@@ -1144,6 +1219,7 @@ pub(crate) fn render(
         theme,
         cols,
         CONTEXT_ROW,
+        None,
         owned,
         None,
         change,
@@ -1618,10 +1694,16 @@ pub(crate) fn layout_with<T>(
 /// (`cursor_col`) eksi imleçten önceki metnin sütunu, `width` modunda.
 ///
 /// **Gözlem imlecin mantıksal satırı ilk satırsa kesin.** İmleç bir `\n`'in
-/// arkasındaysa ilk satırın başı bu sütundan çıkmıyor ve `0` varsayılıyor —
-/// ilk satırı en az satıra sığdıran varsayım, yani üst uç eksik bastırır,
-/// fazla değil. Bugün bu kola hiçbir satır gelmiyor: satır sonlu görüntü
-/// `Multiline` ve bastırılmıyor; kolun asıl sahibi 032 phase-4.
+/// arkasındaysa ilk satırın başı bu sütundan çıkmıyor ve [`TEXT_COL`]
+/// varsayılıyor: bastırma yalnız dock'lu kademede koşuyor ve orada `PS1`
+/// tam o kadar sütun (betiğin iki boşluğu ile bu sabiti bir sınama
+/// bağlıyor). Varsayım yanlışsa üst uç çağıranda çıpanın satırıyla
+/// kırpılıyor (`from.max(floor)`), yani prompt'un üstüne taşamaz.
+/// **Bilinen sınır:** `PS2` satırında (`for> `) `BUFFER`'ın ilk satırı
+/// `PS2`'nin arkasında başlıyor ve genişliği aynada yok; o hâlde
+/// `PREBUFFER` dolu ve üst taban zaten çıpanın satırı
+/// ([`crate::shell::SuppressedInput::from_anchor`]), yani bu sayı
+/// kullanılmıyor.
 ///
 /// **Bilinen sınır, yönü güvenli:** geniş karakterin satır sonunda bıraktığı
 /// boş sütun imleçten **önceyse** gözlenen başlangıç o kadar sağa kayar ve
@@ -1650,7 +1732,7 @@ pub(crate) fn grid_span(
     let first = if first_line {
         (cursor_col % width + width - on_line % width) % width
     } else {
-        0
+        usize::from(TEXT_COL)
     };
     let end = layout(display.chars(), caret, width, first, 0, |_| {});
     (end.caret_row, end.rows - 1 - end.caret_row)
@@ -1753,21 +1835,6 @@ mod tests {
             display_chars: predisplay.chars().count()
                 + buffer.chars().count()
                 + postdisplay.chars().count(),
-            // Sütun ikizleri **aynı fonksiyondan** ([`column_width`]), yani
-            // elle kurulmuş bir durum da üretimdeki aritmetiği taşıyor.
-            display_cols: predisplay
-                .chars()
-                .chain(buffer.chars())
-                .chain(postdisplay.chars())
-                .map(column_width)
-                .sum(),
-            cursor_col: predisplay
-                .chars()
-                .chain(buffer.chars())
-                .chain(postdisplay.chars())
-                .take(cursor)
-                .map(column_width)
-                .sum(),
             last_ink: predisplay
                 .chars()
                 .chain(buffer.chars())
@@ -1878,15 +1945,27 @@ mod tests {
         input_rows: u16,
         selection: Option<(usize, usize)>,
     ) -> (Vec<Cell>, Dock, Vec<SelectionRun>, usize) {
+        draw_scrolled(state, cols, input_rows, None, selection)
+    }
+
+    /// [`draw_rows`]'un tekerlekle kaydırılmış pencereli hâli.
+    fn draw_scrolled(
+        state: &DockState,
+        cols: u16,
+        input_rows: u16,
+        scroll: Option<usize>,
+        selection: Option<(usize, usize)>,
+    ) -> (Vec<Cell>, Dock, Vec<SelectionRun>, usize) {
         let mut cells = Vec::new();
         let mut runs = Vec::new();
-        let (dock, top) = render_with(
+        let (dock, top, _) = render_with(
             state,
             &DockContext::default(),
             None,
             &THEME,
             same(cols),
             input_rows,
+            scroll,
             true,
             selection,
             None,
@@ -2086,24 +2165,79 @@ mod tests {
     }
 
     #[test]
-    fn a_multiline_mirror_draws_nothing_and_keeps_the_caret_in_the_grid() {
-        // **Dock'un giriş satırı bir tane.** Çok satırlı bir görüntüyü tek
-        // satıra yassıltmak metni görünmez boşluklarla ezer ve caret'i
-        // hiçbir harfin üstünde durmayan bir sütuna koyardı — belirti
-        // kullanıcıda görüldü (2026-09-21, çok satırlı yapıştırma). Kural
-        // `Unavailable`'ınkiyle aynı: satır da caret'i de ızgarada kalır.
+    fn a_multiline_mirror_draws_its_rows_and_keeps_the_caret() {
+        // **032'ye kadar bu ayna `Multiline`'dı ve dock hiçbir şey
+        // çizmiyordu** (satır da caret'i de ızgaradaydı; tek satıra
+        // yassıltmak metni görünmez boşluklarla eziyordu). Artık satır sonu
+        // satır kırıyor: her mantıksal satır kendi görsel satırında, metnin
+        // sütunundan, caret de kendi satırında.
+        let state = live("", "echo a\necho b", "", 9);
+        assert_eq!(needed_rows(&state, COLS), 2);
+        let (cells, dock, _, top) = draw_rows(&state, COLS, 2, None);
+        assert_eq!(top, 0);
+        assert_eq!(row_text(&cells, 0), "  echo a");
+        assert_eq!(row_text(&cells, 1), "  echo b");
+        assert_eq!(
+            dock.caret,
+            Some(DockCaret {
+                col: TEXT_COL + 2,
+                row: 1
+            })
+        );
+    }
+
+    /// **`PREBUFFER` düzenlenebilir satırların üstünde** (032 Karar 2): ZLE'nin
+    /// kabul ettiği `for` satırı dock'ta, aynı girintide ve aynı renkte;
+    /// işaret komutun başladığı satırda, caret `BUFFER`'ın satırında. Seçim
+    /// onun üstüne de uzanıyor (seçilebilir, kopyalanabilir), isabet testi de
+    /// oraya iniyor.
+    #[test]
+    fn the_prebuffer_rows_sit_above_the_editable_rows() {
         let state = DockState {
-            status: DockStatus::Multiline,
-            ..live("% ", "echo a\necho b", "", 4)
+            prebuffer: "for i in 1 2; do\n".into(),
+            ..live("", "echo $i", "", 7)
         };
-        let (cells, dock) = draw(&state, COLS);
-        assert_eq!(text(&cells), "", "gösteremediğimiz satır dock'a çizildi");
-        assert_eq!(dock.caret, None, "çok satırlı aynada dock caret'i aldı");
-        // Yüzeyin kendisi duruyor: bant kalkmıyor, yalnız sahiplik ızgaraya
-        // geçiyor — bağlam satırı `Live` kapısının **üstünde** çiziliyor
-        // ([`render`]), yani dizin ile dal yerinde kalıyor.
-        let (with_context, _) = draw_with(&state, &context("/tmp/x", "main"), COLS);
-        assert_eq!(row_text(&with_context, CONTEXT_ROW), "/tmp/x | main");
+        assert_eq!(needed_rows(&state, COLS), 2);
+        let (cells, dock, _, top) = draw_rows(&state, COLS, 2, None);
+        assert_eq!(top, 0);
+        assert_eq!(row_text(&cells, 0), "  for i in 1 2; do");
+        assert_eq!(row_text(&cells, 1), "  echo $i");
+        assert_eq!(
+            dock.caret,
+            Some(DockCaret {
+                col: TEXT_COL + 7,
+                row: 1
+            })
+        );
+        assert!(dock.sigil.is_some(), "işaret komutun ilk satırında");
+        let fg = THEME.foreground_linear();
+        assert!(
+            cells
+                .iter()
+                .filter(|cell| cell.ch.is_some())
+                .all(|cell| cell.fg == fg),
+            "PREBUFFER metnin rengiyle çizilmeli"
+        );
+
+        // İsabet: `PREBUFFER`'a düşen nokta seçilebilir metnin başında, `BUFFER`'a
+        // düşen `PREBUFFER`'ın uzunluğu kadar ileride.
+        let shift = prebuffer_chars(&state);
+        assert_eq!(shift, 17);
+        let at = |row, col| hit(&state, 0, COLS, row, col, CellHalf::Left).map(|p| p.index);
+        assert_eq!(at(0, TEXT_COL + 4), Some(4));
+        assert_eq!(at(1, TEXT_COL), Some(shift));
+        assert_eq!(at(1, TEXT_COL + 3), Some(shift + 3));
+        assert_eq!(selectable(&state), "for i in 1 2; do\necho $i");
+
+        // Seçim iki satıra yayılıyor: `PREBUFFER`'ın sonundan `BUFFER`'ın başına.
+        let (_, _, runs, _) = draw_rows(&state, COLS, 2, Some((10, shift + 4)));
+        assert_eq!(
+            runs,
+            [
+                run(0, TEXT_COL + 11, TEXT_COL + 15),
+                run(1, TEXT_COL, TEXT_COL + 3)
+            ]
+        );
     }
 
     #[test]
@@ -2120,6 +2254,7 @@ mod tests {
             &THEME,
             same(COLS),
             3,
+            None,
             true,
             None,
             None,
@@ -2225,6 +2360,34 @@ mod tests {
         assert_eq!(top, 0);
         assert_eq!(row_text(&cells, 1), "  ijklmnop");
         assert!(dock.sigil.is_some());
+    }
+
+    /// **Tekerlekle seçilen pencere tepesi** (032 phase-4): tavanı aşan
+    /// girişte caret'in dışındaki satırlara fare de ulaşıyor. Tepe satır
+    /// sayısına kırpılıyor; caret pencerenin dışındaysa çizilmiyor, işaret
+    /// ilk satır ekrandaysa geri geliyor.
+    #[test]
+    fn a_scrolled_window_shows_the_rows_the_wheel_chose() {
+        let cols = 10;
+        let buffer: String = ('a'..='z').collect();
+        let state = live("", &buffer, "", 26);
+        let (cells, dock, _, top) = draw_scrolled(&state, cols, 2, Some(0), None);
+        assert_eq!(top, 0);
+        assert_eq!(row_text(&cells, 0), "  abcdefgh");
+        assert_eq!(row_text(&cells, 1), "  ijklmnop");
+        assert_eq!(dock.caret, None, "caret pencerenin dışında");
+        assert!(dock.sigil.is_some(), "ilk satır ekranda, işaret de");
+        // Taşan tepe son pencereye kırpılıyor: dört satırın son ikisi.
+        let (cells, dock, _, top) = draw_scrolled(&state, cols, 2, Some(9), None);
+        assert_eq!(top, 2);
+        assert_eq!(row_text(&cells, 1), "  yz");
+        assert_eq!(
+            dock.caret,
+            Some(DockCaret {
+                col: TEXT_COL + 2,
+                row: 1
+            })
+        );
     }
 
     /// `frame()`'in satır sayısı dock'un kendi düzeninden: `Live` olmayan

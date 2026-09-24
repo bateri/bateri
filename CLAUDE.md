@@ -289,13 +289,15 @@ birlikte dock'un zemininin altına giriyor ve ters çevirmesi bandın tepesinde
 kırpılıyor. Ters çevirme dikdörtgeni **tek** ve pencere
 uzayında, iki glyph encode'una da aynısı gidiyor — yazım efektlerine
 gitmiyor: onlar caret'ten sonra ve ters çevrilmeden çiziliyor (yukarıda,
-030). Payı `DOCK_ROWS * cell_h` **artı iki nefes
+030). PTY payı `DOCK_ROWS * cell_h` **artı iki nefes
 payı** (`bt_gpu::dock_px`; formülün tek kopyası orada, `split_into_grid` onu
-tüketiyor): iki satır saç çizgisine yapışınca dock bakılamaz duruyordu. Payın
+tüketiyor; çizilen bant aşağıda ayrı): iki satır saç çizgisine yapışınca dock
+bakılamaz duruyordu. Payın
 kaynağı sol payın ta kendisi (`CellMetrics::gutter_px`) — ikinci bir tasarım
 sabiti yok, aynı içi girinti iki eksende ve punto büyüyünce pay da büyüyor.
-Saç çizgisi payın **üstünde**, viewport'un tepesinde; **ikincisi** iki satırın
-arasındaki boşluğun ortasında, aynı renk ve aynı kalınlıkta — boşluk ayrımı
+Saç çizgisi bandın **üstünde**, viewport'un tepesinde; **ikincisi** giriş
+bloğu ile bağlam satırı arasındaki boşluğun ortasında (giriş satırlarının
+kendi arasında çizgi yok — tek editör), aynı renk ve aynı kalınlıkta — boşluk ayrımı
 önerir, çizgi söyler. Kenara değil ortaya konuyor, yoksa bir satıra yapışır ve
 ona ait görünürdü. Satır arası boşluk bu yüzden dış payın **iki katı**: çizgi
 her satırı kendi bandı yaptığı için bandın içi simetrik olmalı ve çizginin iki
@@ -321,8 +323,18 @@ satırları metnin sütunundan, satır sayısı `frame()`'de bastırmayla aynı
 kilit turunda dock'un düzeninden (`dock::needed_rows`; öneri sayılmıyor, her
 tuşta boyu değişip bandı nefes aldırırdı) ve tavanı ızgaranın yarısı
 (`bt_gpu::DOCK_MAX_SHARE`; `DockBudget` oran taşıyor, çünkü satır sayısının
-tek okuması `frame()`'de). Aşan girişte caret'i izleyen durumsuz bir dikey
-pencere açılıyor. Gerekçeler `.tasks/032-cok-satirli-dock/phase-3.md`.
+tek okuması `frame()`'de). Aşan girişte caret'i izleyen bir dikey pencere
+açılıyor; dock'un üstündeki tekerlek ve bloğun kenarını aşan sürükleme onu
+kaydırıyor (`Session::dock_scroll`; tepe aynanın yanında,
+`ShellLog::dock_scroll`), caret'in yeri değişince pencere yine caret'i
+izliyor. **Çok satır da dock'ta** (032 phase-4): satır sonlu görüntü
+(yapıştırma, `Esc-Enter`) satır kırıyor ve `PREBUFFER` (ZLE'nin kabul
+ettiği `for`/heredoc/`\`-devam satırları) düzenlenebilir satırların
+**üstünde**, aynı girintide çiziliyor — seçilebilir ve kopyalanabilir ama
+salt okunur: seçimin uzayı `PREBUFFER ++ BUFFER` (`dock::selectable`), ona
+değen aralıkta düzenleme tuşları komut göndermiyor, tık caret'i taşımıyor;
+⌘A ekrandaki bütün komutu seçiyor. Gerekçeler
+`.tasks/032-cok-satirli-dock/phase-3.md` ve `phase-4.md`.
 Dock ötelemeden
 **yapısal olarak** muaf:
 listeleri dock-yerel doğuyor, ekrana taşıyan şey o ikinci viewport. Üst
@@ -396,20 +408,22 @@ geniş karakter ızgaradaki gibi yürünüyor, sütun bölmesiyle sayılmıyor, 
 dock'un çizimi de aynı fonksiyondan okuyacak ve iki aritmetik ayrıştığı gün
 biri gizlenir öteki görünür (032).
 Kapı çıpa taramasından **sonra**, yoksa blok şeridi de ölürdü. Ayna
-gösteremiyorsa (`Unavailable`), görüntü **satır sonu taşıyorsa**
-(`Multiline`), ZLE satırı bırakmışsa (`Idle`) ya da ayna **bayatsa** bastırma
-**yok**: gösteremediğimiz satır ızgarada kalmak zorunda. `Multiline`
-`Unavailable`'ın kardeşi, kolu değil — orada kanal bozuk ya da yük sınırı
-aşmış, burada veri sağlam ve **yüzey dar**: dock'un giriş satırı bir tane, çok
-satırlı bir `BUFFER` tek satıra yassılırdı (`\n` glyph üretmiyor ama sütun
-tüketiyor) ve caret düz karakter indeksinden geldiği için hiçbir harfin
-üstünde durmazdı. Belirti kullanıcıda görüldü: çok satırlı yapıştırmada metin
-ızgarada kalıyor, caret dock'a iniyordu. Ölçüt `BUFFER` değil **görüntünün
-tamamı** ve dönüş kuralı kendiliğinden — durum her ayna yükünde yeniden
-hesaplanıyor, yani satır sonu silinince bir sonraki aynada `Live`. Dock'u çok
-satırlı girişe göre **büyütmek** ayrı bir iş ve bilerek yapılmadı: bandın boyu
-ızgaranın satırlarından düşüldüğü için her yeni satır bir PTY resize'ı, yani
-kullanıcı yazarken nefes alan bir ekran demekti.
+gösteremiyorsa (`Unavailable`), ZLE satırı bırakmışsa (`Idle`) ya da ayna
+**bayatsa** bastırma **yok**: gösteremediğimiz satır ızgarada kalmak zorunda.
+Çok satırlı giriş bastırılıyor ve **bütün** satırları: imlecin altındakiler
+de (`BUFFER`'ın imleçten sonraki satırları, sarmalarıyla), `PREBUFFER`
+doluysa üst taban **çıpanın satırı** (`SuppressedInput::from_anchor`;
+`PS2`'nin genişliği aynada yok, bağlantı `preexec`'e kadar açık). İmleç bir
+`\n`'in arkasındayken ilk satırın başı gözlenemiyor ve `dock::TEXT_COL`
+varsayılıyor (bastırma yalnız dayatılan `PS1`'le koşuyor). **`PS2`
+satırları arasındaki `line-finish` tutuluyor** (`ShellLog::end_since`,
+`HANDOVER_HOLD` kadar; `u`, bir 133 işareti ya da süre bitiriyor, süreyi
+kare yolu çözüyor ve saate giriyor): zsh her kabulde `e` basıyor ve tutma
+olmasaydı her ⏎'de bant bir kare küçülüp kabul edilen satır ızgarada
+belirirdi. Bedeli `CORRECT`'in `[nyae]` sorusunun 150 ms geç görünmesi.
+032'ye kadar satır sonlu görüntü `Multiline` ile ızgarada kalıyordu; dock
+satır kırmayı ve büyümeyi öğrenince kol kalktı (PTY'nin boyu değişmiyor,
+yani "nefes alan ekran" gerekçesi konusuz) — `.tasks/032-cok-satirli-dock/`.
 Bayatlık kip sezerek anlaşılmıyor ve **önce zaman soruluyor** (025):
 kullanıcı girdisinin tek hunisi (`Session::send_input`) her gönderimde bir
 nesil artırıyor, okuyucu ayna çözüldüğü anda o nesli aynanın **yanına**
@@ -421,7 +435,9 @@ soruya kalır. Gerekçe kullanıcıda görüldü: zsh bazı kod noktalarını
 ise ham emojiyi taşıyor; içerik karşılaştırması onları hiç eşleştiremiyor
 ve caret yazarken ızgaraya sıçrıyordu. **Cevap gelmediyse** (yapıştırmanın
 `bracketed-paste-magic` kolu) kapı iki kesin veriyi karşılaştırıyor —
-ızgaranın son mürekkebi ile aynanınki (`DockState::last_ink`); yanlış alarmın
+ızgaranın son giriş satırının mürekkebi ile aynanın **son satırınınki**
+(`DockState::last_ink`; sondaki satır sonunun açtığı boş satırda ikisi de
+`None`); yanlış alarmın
 yönü güvenli, satırı iki yerde gösterir ama sessizce kaybetmez. Zamansal
 sorunun **üç bilinen sınırı** var ve üçü de adıyla yazılı
 (`.tasks/025-tazelik-zamansal/discussion.md` → Karar 2): damga aynanın ne
@@ -431,11 +447,12 @@ kabuğun dışından gelen yazım (arka plan işinin satıra bastığı çıktı
 oynatmıyor, düzenleme boyunca bastırılan aralıkta gizli kalıyor; zsh'in
 redisplay'siz tuttuğu tuş (`^X` öneki, vi'de çıplak `Esc`) ise nesli
 ilerletip ayna doğurmuyor ve o süre kapı içeriğe düşüyor. **Dock'un
-çizmediği kontrol karakteri** (sekme hariç) satırı `DockStatus::Control`'e
-indiriyor — `Multiline`'ın kardeşi, aynı kural: gösteremediğimiz satır
-ızgarada, okunur `^A` ile. Bu kol gelmeden önce karar kapının tesadüfüne
+çizmediği kontrol karakteri** (sekme ve satır sonu hariç, `PREBUFFER` dahil)
+satırı `DockStatus::Control`'e indiriyor — gösteremediğimiz satır ızgarada,
+okunur `^A` ile. Bu kol gelmeden önce karar kapının tesadüfüne
 kalıyordu ve `^A` satırın ortasındaysa satır dock'a gidip kayboluyordu. **Aynanın hiç
-karakteri yoksa o karşılaştırma vakuma düşüyor** (iki taraf da `None`) ve
+karakteri yoksa** (`SuppressedInput::blank`: ne görüntüde ne `PREBUFFER`'da;
+tek bir `\n` de imleci iter) **o karşılaştırma vakuma düşüyor** (iki taraf da `None`) ve
 ayıran ikinci veri çıpanın satırı (`session::anchor_row_at_or_above`):
 karakteri olmayan bir ayna imleci prompt'un satırından aşağı itemez, yani
 imleç çıpanın satırında olmak zorunda. Boş prompt'ta öyle — `PS1`'in iki
@@ -452,8 +469,8 @@ boş prompt'ta hiçbir hücre çıpayı taşımadığı için satır çizilmiyor
 doluluğa **giriyordu**, ilk tuşta çıpa doğunca doluluk bir satır düşüyor ve
 ızgaranın tamamı oynuyordu — satır gizliydi ama yer kaplıyordu. Tek yüklem
 `display: none` veriyor. Caret'in sahibi satırın nerede çizildiğine uyuyor:
-komut koşarken (`Running`), ayna gösterilemiyorken (`Unavailable`), görüntü
-tek satıra sığmıyorken (`Multiline`) ve ZLE satırı bırakmışken (`Input` +
+komut koşarken (`Running`), ayna gösterilemiyorken (`Unavailable`,
+`Control`) ve ZLE satırı bırakmışken (`Input` +
 `Idle`; `CORRECT`'in `[nyae]`'i, R3.3) ızgaranın;
 **kalan her hâlde dock'un** — kabuğun henüz hiç konuşmadığı açılış, prompt
 çizilirken ve iki komut arası (`Finished`, içinde bir `git` fork'u) dahil,
@@ -472,10 +489,9 @@ yazarak değil: süre sayacının tiki de aynı yuvayı kullanıyor ve ezilseydi
 koşan komutun sayacı donardı. Ters yön (Grid→Dock) **tutulmuyor** — komut
 bitince caret ızgarada asılı kalsaydı kullanıcı yazmaya başladığında dock'ta
 caret'siz bir satır görürdü, yani yanlışın yönü güvenli değil. Aynanın
-**arızası** da tutmanın dışında (`Unavailable`, `Multiline`): gösteremediğimiz
+**arızası** da tutmanın dışında (`Unavailable`, `Control`): gösteremediğimiz
 satır ızgarada duruyor, caret'i de orada durmalı, ve arıza zaten bir sıçrama
-üretmiyor; tutma çok satırlıyı kapsasaydı yapıştırmadan sonra caret 150 ms
-dock'ta kalırdı. Cevap
+üretmiyor. Cevap
 **hesaplandığı yerden geçiyor**, ikinci kez türetilmiyor: `frame()` onu
 `Cursor::caret_in_dock` ile veriyor, `Session::dock` argüman olarak alıyor.
 Dock kendi başına sorduğunda üç ön koşulu bilmiyordu ve bayat aynada **iki
@@ -931,9 +947,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 
 | crate | sorumluluk | görebildiği platform kütüphanesi |
 |---|---|---|
-| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread (PTY okuma yolu **taranıyor**: araya giren sarmalayıcı baytları aynen geçirir, geçerken **üç** OSC numarasını ve **bir** CSI dizisini çeker), OSC (0/2/7/8/9/52; 0/2 uygulamanın başlığını `Term` kilidi altındaki olaydan yaprak bir yuvaya indirir ve pencere başlığı ondan kurulur — öncelik OSC 0/2 → dizinin son bileşeni (ev `~`) → `bateri`, `Session::title`; başlık ya da **değişen** OSC 7 dizini `Wake::title_changed` ile yüksüz haber verir, 7 çalışma dizinini dock'un bağlam satırına verir (`Session::working_directory` onu okur), 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, farenin düğme/hareket/tekerlek raporu; kipten karar veren tablolar `input::button_route`/`motion_route`/`wheel_route`), ayar modeli, shell bağlamı. Tarayıcının üç kolu var ve üçü de alacritty'de **yok** (`vte` üçünü de `unhandled`'a düşürüyor): OSC 133 oturumun safhasını ve blok kimliklerini `ShellState`'e yazar (`Session::shell_state()`), OSC 8133 ZLE'nin görüntü aynasını — `PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlight`, `CURSOR`, base64 gövdelerle; `KEYMAP` ve `PREBUFFER` sondaki isteğe bağlı gövdeler, eski betik onlarsız da çözülüyor — çözüp `DockState`'e (`Session::dock_state()`), dalı `DockContext`'e ve düzenleme widget'ının yeteneğini (`8133;w`) `ShellLog::dock_editable`'a, OSC 7 de çalışma dizinini yine `DockContext`'e (yüzde çözme ve yabancı host elenmesi orada; bozuk URI panik değil yoksayma). Aynanın kendi yük sınırı var ve aşımı **görünür** (`DockStatus::Unavailable`), sessizce düşmez; satır sonu taşıyan görüntü de görünür bir durum (`DockStatus::Multiline`) — dock tek satır, satırı ızgaraya bırakıyor. **Dördüncü kol OSC değil CSI** ve yükü yok: `CSI 2 J`'yi tanıyıp "ekran kasten temizlendi" bayrağını kurar (`Session::observe_screen_clear`; `3J` ve RIS için kol **yok**, ikisi de geçmişi siliyor). **Alternatif ekranda kurmaz** — orada `ClearMode::All` `reset_region(..)` çağırıyor, geçmiş büyümüyor ve birincil ekranın durumuna dokunulmuyor, yani geri getirilmeyecek bir şey yok; nesil yine de **tüketilir**, yoksa `vim`'den çıkışta birikmiş sayaç bayrağı kurar ve doldurma ilk `vim`'den sonra kalıcı olarak kapanırdı. Bayrak **defter temizlemeden sonra büyüyünce** düşer: geçmişe temizlemeden sonra satır düşmüş demektir ve doldurma o kadarını güvenle geri verebilir. Ölçüt bir damga ve tek karşılaştırma (`Session::screen_clear_history`); damga bayrak kurulduktan **sonraki** ilk karede alınıyor, çünkü kuran kare ızgarayı henüz temizlenmemiş görebiliyor ve temizlemenin kendisi satırları geçmişe itiyor — bayat damga anında aşılırdı. Üstünde iki koşul var — alternatif ekranda değil ve `display_offset == 0`; ikincisi olmasa geçmişe kaydırılan pencere dolu **görünür** ve tek bir tekerlek jesti Ctrl-L'i geri alırdı. (Bu koşul **bayrağın ömrüne** ait; doldurmanın kendi `display_offset` kapısı ayrı bir şey ve ayrı gerekçeli.) **Bayrak bir kapı, damga bir ölçü:** kapı "hiç" der, aynı damga doldurmada ikinci kez okunup `fill`'i temizlemeden beri gelen satır sayısına **kırpar** — yoksa tek satırlık bir büyüme bayrağı düşürür ve doldurma boşluğun tamamını, yani kullanıcının sildiği ekranı geri getirirdi (ölçüldü). `content_rows == rows` kolu yok: dock'lu pencerede doluluk giriş satırını saymadığı için erişilemez. **Bilinen sınır**, defter `scrollback`'te doyunca damganın üstüne çıkacak sayı kalmıyor ve o oturumda bir Ctrl-L'den sonra doldurma koşmuyor; yönü güvenli. Yarışı kapatan şey bir **nesil sayacı**: tarayıcı baytları uygulamadan **önce** sayıyor, kare yolu sayacı `Term` kilidinin **altında** doluluk sayısıyla aynı okumada tüketiyor, ve henüz hesaba katılmamış bir nesil aynı karede doldurma kuralını ezer. Bayrağın tek tüketicisi doldurmanın kapısı (`Session::fill_rows`) ve sıra zorunlu: ömür **önce** işliyor. Komut blokları `frame()` sınırından **çözülmüş** geçer (komutun satırı + renk, çıkış kodu değil; bölge değil işaret): kimlik prompt'un OSC 8 çıpasından `Term` kilidi altında toplanır, renk kilit bırakıldıktan sonra kabuk defterinden çözülür. Giriş satırının **bastırılması** da burada: safha ile aynanın durumu tek yüklemde birleşiyor (`ShellLog::suppressed_input`) ve kopya `Term` kilidinden **önce** alınıyor — yaprak kilit `Term`'ün altına girmez | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir |
+| `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve okuyucu thread (PTY okuma yolu **taranıyor**: araya giren sarmalayıcı baytları aynen geçirir, geçerken **üç** OSC numarasını ve **bir** CSI dizisini çeker), OSC (0/2/7/8/9/52; 0/2 uygulamanın başlığını `Term` kilidi altındaki olaydan yaprak bir yuvaya indirir ve pencere başlığı ondan kurulur — öncelik OSC 0/2 → dizinin son bileşeni (ev `~`) → `bateri`, `Session::title`; başlık ya da **değişen** OSC 7 dizini `Wake::title_changed` ile yüksüz haber verir, 7 çalışma dizinini dock'un bağlam satırına verir (`Session::working_directory` onu okur), 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, girdi kodlaması (DECCKM'e uyan oklar, farenin düğme/hareket/tekerlek raporu; kipten karar veren tablolar `input::button_route`/`motion_route`/`wheel_route`), ayar modeli, shell bağlamı. Tarayıcının üç kolu var ve üçü de alacritty'de **yok** (`vte` üçünü de `unhandled`'a düşürüyor): OSC 133 oturumun safhasını ve blok kimliklerini `ShellState`'e yazar (`Session::shell_state()`), OSC 8133 ZLE'nin görüntü aynasını — `PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlight`, `CURSOR`, base64 gövdelerle; `KEYMAP` ve `PREBUFFER` sondaki isteğe bağlı gövdeler, eski betik onlarsız da çözülüyor — çözüp `DockState`'e (`Session::dock_state()`), dalı `DockContext`'e ve düzenleme widget'ının yeteneğini (`8133;w`) `ShellLog::dock_editable`'a, OSC 7 de çalışma dizinini yine `DockContext`'e (yüzde çözme ve yabancı host elenmesi orada; bozuk URI panik değil yoksayma). Aynanın kendi yük sınırı var ve aşımı **görünür** (`DockStatus::Unavailable`), sessizce düşmez; dock'un çizmediği kontrol karakteri de görünür bir durum (`DockStatus::Control`) ve satırı ızgaraya bırakıyor. **Dördüncü kol OSC değil CSI** ve yükü yok: `CSI 2 J`'yi tanıyıp "ekran kasten temizlendi" bayrağını kurar (`Session::observe_screen_clear`; `3J` ve RIS için kol **yok**, ikisi de geçmişi siliyor). **Alternatif ekranda kurmaz** — orada `ClearMode::All` `reset_region(..)` çağırıyor, geçmiş büyümüyor ve birincil ekranın durumuna dokunulmuyor, yani geri getirilmeyecek bir şey yok; nesil yine de **tüketilir**, yoksa `vim`'den çıkışta birikmiş sayaç bayrağı kurar ve doldurma ilk `vim`'den sonra kalıcı olarak kapanırdı. Bayrak **defter temizlemeden sonra büyüyünce** düşer: geçmişe temizlemeden sonra satır düşmüş demektir ve doldurma o kadarını güvenle geri verebilir. Ölçüt bir damga ve tek karşılaştırma (`Session::screen_clear_history`); damga bayrak kurulduktan **sonraki** ilk karede alınıyor, çünkü kuran kare ızgarayı henüz temizlenmemiş görebiliyor ve temizlemenin kendisi satırları geçmişe itiyor — bayat damga anında aşılırdı. Üstünde iki koşul var — alternatif ekranda değil ve `display_offset == 0`; ikincisi olmasa geçmişe kaydırılan pencere dolu **görünür** ve tek bir tekerlek jesti Ctrl-L'i geri alırdı. (Bu koşul **bayrağın ömrüne** ait; doldurmanın kendi `display_offset` kapısı ayrı bir şey ve ayrı gerekçeli.) **Bayrak bir kapı, damga bir ölçü:** kapı "hiç" der, aynı damga doldurmada ikinci kez okunup `fill`'i temizlemeden beri gelen satır sayısına **kırpar** — yoksa tek satırlık bir büyüme bayrağı düşürür ve doldurma boşluğun tamamını, yani kullanıcının sildiği ekranı geri getirirdi (ölçüldü). `content_rows == rows` kolu yok: dock'lu pencerede doluluk giriş satırını saymadığı için erişilemez. **Bilinen sınır**, defter `scrollback`'te doyunca damganın üstüne çıkacak sayı kalmıyor ve o oturumda bir Ctrl-L'den sonra doldurma koşmuyor; yönü güvenli. Yarışı kapatan şey bir **nesil sayacı**: tarayıcı baytları uygulamadan **önce** sayıyor, kare yolu sayacı `Term` kilidinin **altında** doluluk sayısıyla aynı okumada tüketiyor, ve henüz hesaba katılmamış bir nesil aynı karede doldurma kuralını ezer. Bayrağın tek tüketicisi doldurmanın kapısı (`Session::fill_rows`) ve sıra zorunlu: ömür **önce** işliyor. Komut blokları `frame()` sınırından **çözülmüş** geçer (komutun satırı + renk, çıkış kodu değil; bölge değil işaret): kimlik prompt'un OSC 8 çıpasından `Term` kilidi altında toplanır, renk kilit bırakıldıktan sonra kabuk defterinden çözülür. Giriş satırının **bastırılması** da burada: safha ile aynanın durumu tek yüklemde birleşiyor (`ShellLog::suppressed_input`) ve kopya `Term` kilidinden **önce** alınıyor — yaprak kilit `Term`'ün altına girmez | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, **iki düzlem** (maske `R8`, renk `RGBA8`; ayrı sayaç, ortak yuva ızgarası), **geniş glyph'in iki yarısı** (`Half`; kutu iki hücre, yuva yine bir hücre), **sistemin cascade'inden yedek glyph** (kapı geometrik ve **sıralı**: önce tek hücre, sonra iki; ikisine de sığmayan aday kutu kalır), **yordamsal karakterler** (blok elemanları, Braille ve çizgi çizim — köşegenler hariç; fonta sorulmadan, yüzden bağımsız, yalnız büyük sınıfta), font seti. **Doku kenarı sabit değil**: hedeflenen **yuva sayısından** türüyor (`SLOT_TARGET` = 1024 yuva; kenarın kendisi `MIN_EDGE` = 1024 px ile `MAX_EDGE` = 4096 px arasında, iki 1024 tesadüfen aynı sayı), çünkü hücre büyüdükçe kapasite düşüyor ve bir yerde yordamsal ailenin altına iniyordu — ölçülen kırılma Retina'da 29pt'ti (406 yuva, ailenin istediği 429: 421 karakter + tofu + kural payı). Varsayılan punto tabanda kalıyor, yani ızgara ve raster bit bit aynı. Tahliye **yok**: dolan atlas hâlâ tofu'ya düşüyor ve kalan senaryo (tek karede hedeften fazla farklı glyph) ölçülmedi | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
-| `bt-gpu` | Metal renderer, shader'lar (`.metal`), **geniş glyph'in yelpazelenmesi** (`prepare`; karar `Atlas::slot`'ta doğduğu için sink'te değil), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `setViewport`, kendi listeleri ve caret'i; kaç satır olduğu `DOCK_ROWS`), **doldurma bandı** (üçüncü `setViewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
+| `bt-gpu` | Metal renderer, shader'lar (`.metal`), **geniş glyph'in yelpazelenmesi** (`prepare`; karar `Atlas::slot`'ta doğduğu için sink'te değil), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `setViewport`, kendi listeleri ve caret'i; PTY payı `DOCK_ROWS`, çizilen bant `Cursor::input_rows` giriş satırı + bağlam satırı), **doldurma bandı** (üçüncü `setViewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet, arama), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye (metin yolu AppKit'in yığınından: `BateriView` `NSTextInputClient`, ölü tuş bileşimi orada tamamlanır), **Finder damlası** (`NSDraggingDestination`, yalnız dosya URL'si; yol `quote::shell_quote`'tan geçip `Session::paste`'e gider), servisler, ayar penceresi; kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini, yereli, hangi kabuğun koşacağı ve sarmalayıcı betiğinin yeri (`child`), entegrasyonun kurulup kurulmayacağı ve `ZDOTDIR`/`BATERI_ZDOTDIR` çifti (`app::shell_integration_env`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `block2` (kapatma sorusu sayfasının tamamlanma bloğu), `dispatch2` (ana kuyruk: `child_exit` → o pencerenin kapanışı, süreli koşuda `terminate:`; OSC 52'nin pano işi; vnode kaynakları: ayar izleme), `libc` (bekçinin `write` + `_exit`'i, izlemenin `O_EVTONLY`'si, kabuğun passwd kaydı için `getpwuid_r`, kapanışta ön plandaki işi soran `proc_*` — `jobs`) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 

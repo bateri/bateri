@@ -39,4 +39,5 @@ _Requirements: R5_
 - [ ] Tel başlığı
 - [ ] Test: kapının dört kolu; canlı zsh
 - [ ] Ölçüm: oh-my-zsh'li gerçek pencere
+- [ ] phase-4'ten devir (gözle görülen): dolu ızgarada 16 satırlık çok satırlı yapıştırmadan sonra ızgaranın **tepe satırında** ekrana sabit bir glyph artığı kaldı (`l7` üstünde yarım bir harf; içerik kaydıkça yerinde durdu, tema değişimi silmedi, `clear` sildi). Yapıştırmanın bayat aynası (satır bir tuş ızgarada, standout'lu) sürerken oluştu; yazarak kurulan aynı büyüklükte heredoc'ta tekrar etmedi, HEAD'de sınanmadı (pano gerekiyordu). `r` ölçümüyle aynı sahnede yeniden üret, 032'nin getirdiğiyse düzelt
 - [ ] Doğrulama geçti (`make hepsi`, `make kur`)

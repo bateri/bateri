@@ -255,8 +255,8 @@ pub struct Cursor {
     /// ayırdığı pay bundan **bağımsız** — o `bt-gpu`'nun `DOCK_ROWS`'u ve hiç
     /// değişmiyor; bu sayı yalnız çizimi büyütüyor (032 Karar 1).
     ///
-    /// 032 phase-3'ten beri uzun tek satır sarılıp bandı büyütüyor; satır
-    /// sonlu görüntü `DockStatus::Multiline` ve hâlâ tek satır (phase-4).
+    /// Uzun tek satır sarılıp, satır sonlu görüntü (yapıştırma, `Esc-Enter`)
+    /// ve `PREBUFFER` (`for`, heredoc) kendi satırlarıyla bandı büyütüyor.
     pub input_rows: u16,
     /// Caret'in **şekli** — uygulamanın DECSCUSR'ı ya da ayarın varsayılanı.
     ///
@@ -1576,7 +1576,22 @@ pub enum DockKey {
 struct DockEditLine {
     len: usize,
     caret: usize,
+    /// `PREBUFFER`'ın karakter sayısı: seçimin uzayı `PREBUFFER ++ BUFFER`
+    /// ([`dock::selectable`]), komutunki `BUFFER` — aradaki kaydırma.
+    shift: usize,
     selection: Option<DockSelection>,
+}
+
+impl DockEditLine {
+    /// Seçimin **`BUFFER`'daki** aralığı; seçim yoksa, boşsa ya da
+    /// `PREBUFFER`'a değiyorsa `None` (032 Karar 2). ZLE kabul ettiği
+    /// satırları düzenleyemiyor: o seçimde düzenleme tuşları komut
+    /// göndermiyor, bugünkü yoldan gidiyor ve seçimi kaldırıyor (031 Karar
+    /// 8'in "başka her tuş" kolu).
+    fn buffer_range(&self) -> Option<(usize, usize)> {
+        let (start, end) = self.selection.and_then(|selection| selection.range())?;
+        Some((start.checked_sub(self.shift)?, end - self.shift))
+    }
 }
 
 /// Terminalden kabuğa giden tek dizinin başı (`CSI 8133 ~`); biçimi
@@ -1994,10 +2009,14 @@ pub enum Click {
 #[derive(Clone, Copy, Debug)]
 struct DockWindow {
     top: usize,
+    /// Girişin tavansız satır sayısı: tekerleğin kaydırabileceği son tepe
+    /// `rows - shown` ([`Session::dock_scroll`]).
+    rows: usize,
     /// Çizilen giriş satırı sayısı: pencerenin dışındaki bir satıra (ayrı
     /// karelerden yayınlanan geometri) düşen nokta reddediliyor.
     shown: u16,
     cols: u16,
+    /// Seçilebilir metnin (`PREBUFFER ++ BUFFER`) bayt uzunluğu.
     buffer_bytes: usize,
 }
 
@@ -2005,7 +2024,9 @@ impl DockWindow {
     /// `point` giriş bloğunda bir hücre: satırı dikey pencerenin içinde,
     /// sütunu ekran sütunu (`bt-shell`'in `window_point_dock`'u).
     fn hit(&self, state: &DockState, point: SelectionPoint) -> Option<DockPoint> {
-        if state.buffer.len() != self.buffer_bytes || point.row >= self.shown {
+        if state.prebuffer.len() + state.buffer.len() != self.buffer_bytes
+            || point.row >= self.shown
+        {
             return None;
         }
         dock::hit(state, self.top, self.cols, point.row, point.col, point.half)
@@ -2454,16 +2475,24 @@ impl Session {
         // bastırmanın ızgara parametrizasyonundan **ayrı** — sarılan satırda
         // ikisi ayrışıyor (dock iki sütun girintili sarıyor, zsh 0. sütundan),
         // biri ötekinin yerine kullanılamaz. Metin gerektirmiyor, kopya yok.
-        let (suppressed_block, caret, needed_rows) = {
-            let log = lock(&self.shell);
+        //
+        // **Tutulan `line-finish` de bu turun başında çözülüyor** (032 Karar
+        // 11, [`crate::shell::ShellLog::expire_end`]): süresi dolduysa ayna
+        // burada sıfırlanıyor, yani bastırma, bant ve caret aynı aynayı
+        // görüyor; dolmadıysa kalan saate giriyor.
+        let (suppressed_block, caret, needed_rows, end_left) = {
+            let now = Instant::now();
+            let mut log = lock(&self.shell);
+            let end_left = log.expire_end(now);
             let suppressed = log.suppressed_input();
             if suppressed.is_some() {
                 blocks.input_caret = log.display_into(&mut blocks.input);
             }
             (
                 suppressed,
-                log.caret(Instant::now()),
+                log.caret(now),
                 dock::needed_rows(&log.dock, budget.cols),
+                end_left,
             )
         };
         blocks.anchors.clear();
@@ -2601,9 +2630,9 @@ impl Session {
         // ayrılık bir düzeltme: satır sonuna sığmayan geniş glyph ızgarada alt
         // satıra iniyor ve bölme bunu görmüyordu, yani imleçten sonraki
         // kuyruğu **eksik** sayıyor, son satırı ızgarada sızdırıyordu. Satır sonu (`PS2`, Esc-Enter)
-        // taşıyan görüntü bugün bu hesaba hiç gelmiyor (`Multiline`
-        // bastırılmıyor); yürüyüş onu da satır satır sayıyor ve anlamını 032
-        // phase-4 veriyor. Tek fazla-bastırma yolu hâlâ bayat ayna
+        // taşıyan görüntü (032) de aynı yürüyüşten: `BUFFER`'ın devam satırları
+        // 0. sütundan, alt uç imleçten sonraki satırlar sarmalarıyla
+        // ([`dock::grid_span`]). Tek fazla-bastırma yolu hâlâ bayat ayna
         // (`line-pre-redraw` çizimden önce koşuyor) ve o bir karelik.
         //
         // **Birim sütun, karakter değil** (024): birleştirici sıfır, geniş
@@ -2670,7 +2699,12 @@ impl Session {
             // yok, yani karar bugünkü karşılaştırmaya kalıyor. Kapının yönü
             // her iki kolda da aynı: şüpheli hâl bastırmayı **bırakıyor**,
             // yani en kötü ihtimalle satır iki yerde görünür.
-            let blank_mirror = input.cols_before_cursor == 0 && input.cols_after_cursor == 0;
+            //
+            // **Boşluğun ölçütü karakter** (032, [`crate::shell::SuppressedInput::blank`]):
+            // tek başına bir `\n` de imleci aşağı itiyor. `PREBUFFER`'lı
+            // aynada soru hiç sorulmuyor — `for>` satırında imleç meşru
+            // olarak çıpanın aşağısında.
+            let blank_mirror = input.blank;
             let at_anchor = !blank_mirror
                 || anchor_row_at_or_above(&term, to, offset, input.block)
                     .is_none_or(|anchor| anchor == to);
@@ -2715,7 +2749,19 @@ impl Session {
         // hâlde bastırılırdı — gözlendi, bir `od` dökümü bütünüyle
         // kayboluyordu. İki aday arasından **alttaki** seçiliyor: çıpa
         // satırı, ya da aynanın hesapladığı ilk satır.
-        let suppress_floor = span.map_or(0, |(above, _)| cursor_screen_row.saturating_sub(above));
+        //
+        // **`PREBUFFER` doluysa taban çıpanın satırı** (032 Karar 7,
+        // [`crate::shell::SuppressedInput::from_anchor`]): kabul edilmiş
+        // satırlar `PS2`'leriyle ızgarada ve `PS2`'nin genişliği aynada yok;
+        // bağlantı `preexec`'e kadar açık, yani bütün komut çıpayı taşıyor.
+        // Taban `0` → aşağıdaki `from.max(floor)` çıpayı seçiyor.
+        let suppress_floor = suppressed_block.zip(span).map_or(0, |(input, (above, _))| {
+            if input.from_anchor {
+                0
+            } else {
+                cursor_screen_row.saturating_sub(above)
+            }
+        });
         // **Devrin tek yüklemi ve dört tüketicisi var**: hangi hücrelerin
         // atlanacağı, imlecin çizilip çizilmeyeceği, **doluluk sayısı** ve
         // dock'un kendi caret'i (`Session::dock`'a argüman olarak gidiyor).
@@ -3425,11 +3471,16 @@ impl Session {
         // yalnız ham cevap `Grid` iken doluyor, ham cevabın `Grid` olması ise
         // `Running`, `Unavailable` ya da `Input`+`Idle` demek;
         // `suppressed_input()` ise yalnız `Input`+`Live`'da dolu. İkisi
-        // **ayrık**, yani tutma sürerken `suppressed_block` her zaman `None`.
-        // Değişmez bu yüzden güçlü hâlinde yazılabiliyor: tutma boyunca
-        // `caret_in_dock == self.dock && !alt_screen && home == Dock`.
+        // **tek istisnayla ayrık**: tutulan `line-finish` (032 Karar 11)
+        // aynayı `Live` bırakıyor, devri ise `Idle` sayıyor — o süre bastırma
+        // da sürüyor ve `e`'nin damgası (⏎'in cevabı) tazelik kapısını
+        // geçiriyor. İstisnanın kendi saati var (`end_left`) ve iki tutma
+        // aynı andan sayıyor.
         if self.dock && !alt_screen {
-            cursor.next_tick = crate::shell::sooner(cursor.next_tick, caret.hold_left);
+            cursor.next_tick = crate::shell::sooner(
+                cursor.next_tick,
+                crate::shell::sooner(caret.hold_left, end_left),
+            );
         }
         cursor
     }
@@ -4674,26 +4725,77 @@ impl Session {
         let mut log = lock(&self.shell);
         let point = window.and_then(|window| window.hit(&log.dock, at));
         let before = log.dock_selection.and_then(|selection| selection.range());
-        let caret = buffer_caret(&log.dock);
-        let after = change(log.dock_selection, point, &log.dock.buffer, caret);
+        // Seçimin uzayı `PREBUFFER ++ BUFFER` ([`dock::selectable`]); caret
+        // o uzayda `PREBUFFER` kadar ileride.
+        let caret = dock::prebuffer_chars(&log.dock) + buffer_caret(&log.dock);
+        let text = dock::selectable(&log.dock);
+        let after = change(log.dock_selection, point, &text, caret);
+        drop(text);
         log.dock_selection = after;
         before != after.and_then(|selection| selection.range())
     }
 
-    /// ⌘A'nın dock kolu: `Live` ve boş olmayan bir satırda bütün `BUFFER`.
-    /// Seçecek bir şey yoksa `false` ve çağıran ızgaraya düşer.
+    /// Tekerlek (ya da kenara değen sürükleme) dock'un giriş bloğunun
+    /// üstünde: dikey pencereyi `lines` satır kaydırır — artı **geriye**
+    /// (yukarı), [`Session::scroll_wheel`] ile aynı yön (032 phase-4).
+    ///
+    /// `true` → olay dock'un: giriş tavanı aşıyor ve pencere kayabiliyor (uçta
+    /// kıpırdamasa da — ızgaraya düşmesin, kullanıcı dock'u kaydırıyor).
+    /// `false` → dock taşmıyor ya da hiç çizilmedi; çağıran ızgarayı kaydırır.
+    ///
+    /// Tepe **son çizilen** pencereden ([`Session::dock_window`]) hesaplanıyor
+    /// ve ize de hemen yazılıyor: sürüklemenin ucu aynı olayda yeni pencereye
+    /// karşı çözülsün. Çizim tepeyi [`crate::shell::ShellLog::dock_scroll`]'dan
+    /// okuyor; caret'in yeri değişince (yazmak, ok) o kalkıyor ve pencere yine
+    /// caret'i izliyor.
+    pub fn dock_scroll(&self, lines: i32) -> bool {
+        let Some(window) = *lock(&self.dock_window) else {
+            return false;
+        };
+        let shown = usize::from(window.shown);
+        if window.rows <= shown {
+            return false;
+        }
+        let last = window.rows - shown;
+        let top = (window.top as i64 - i64::from(lines)).clamp(0, last as i64) as usize;
+        if top != window.top {
+            lock(&self.shell).dock_scroll = Some(top);
+            if let Some(drawn) = lock(&self.dock_window).as_mut() {
+                drawn.top = top;
+            }
+            self.request_frame();
+        }
+        true
+    }
+
+    /// ⌘A'nın dock kolu: `Live` ve boş olmayan bir satırda seçilebilir
+    /// metnin tamamı — `PREBUFFER ++ BUFFER`, yani ekrandaki bütün komut
+    /// (032: `for` döngüsünü kopyalamak beklenen şey; `PREBUFFER`'a değen
+    /// seçimde düzenleme tuşları bugünkü yoldan gidiyor). Seçecek bir şey
+    /// yoksa `false` ve çağıran ızgaraya düşer.
+    ///
+    /// Adım `Simple` ve iki uç metnin iki ucu: `Line` 032'den beri
+    /// **mantıksal satırı** seçiyor ve çok satırlı `BUFFER`'da yalnız ilk
+    /// satırı alırdı.
     fn dock_select_all(&self) -> bool {
         let changed = {
             let mut log = lock(&self.shell);
-            if log.dock.status != DockStatus::Live || log.dock.buffer.is_empty() {
+            let text = dock::selectable(&log.dock);
+            if log.dock.status != DockStatus::Live || text.is_empty() {
                 return false;
             }
-            let start = DockPoint {
-                index: 0,
+            let point = |index| DockPoint {
+                index,
                 half: CellHalf::Left,
             };
             let before = log.dock_selection.and_then(|selection| selection.range());
-            let all = DockSelection::new(SelectKind::Line, start, start, &log.dock.buffer);
+            let all = DockSelection::new(
+                SelectKind::Simple,
+                point(0),
+                point(text.chars().count()),
+                &text,
+            );
+            drop(text);
             log.dock_selection = Some(all);
             before != all.range()
         };
@@ -4704,16 +4806,19 @@ impl Session {
         true
     }
 
-    /// Dock seçiminin metni: `BUFFER`'ın seçili dilimi, satır sonu **eklenmeden**
-    /// — ızgaranın satır seçimi (`Lines`) `\n` taşıyor ama dock'un satırını
-    /// kabuğa geri yapıştırmak onu **çalıştırırdı**.
+    /// Dock seçiminin metni: seçilebilir metnin (`PREBUFFER ++ BUFFER`)
+    /// seçili dilimi, sona satır sonu **eklenmeden** — ızgaranın satır seçimi
+    /// (`Lines`) `\n` taşıyor ama dock'un satırını kabuğa geri yapıştırmak
+    /// onu **çalıştırırdı**. Metnin **içindeki** satır sonları (çok satırlı
+    /// komut) olduğu gibi kalıyor.
     fn dock_selection_text(&self) -> Option<String> {
         let log = lock(&self.shell);
         let (start, end) = log.dock_selection?.range()?;
         Some(
             log.dock
-                .buffer
+                .prebuffer
                 .chars()
+                .chain(log.dock.buffer.chars())
                 .skip(start)
                 .take(end - start)
                 .collect(),
@@ -4733,7 +4838,7 @@ impl Session {
     /// şu an ZLE'ye gidebilir mi. Dört koşul, dördü de var olan yüklemler:
     ///
     /// - dock satırın sahibi ([`ShellLog::suppressed_input`]: safha `Input`,
-    ///   ayna `Live`, blok açık) — `Running`, `Multiline`, `Unavailable` ve
+    ///   ayna `Live`, blok açık) — `Running`, `Unavailable` ve
     ///   `Control` burada kapanıyor;
     /// - ZLE ekleme keymap'inde ([`DockState::insert_keymap`]) — `vicmd`'de
     ///   dizi bağlı değil ve baytları **komut** olurdu (`~` harfin büyüklüğünü
@@ -4761,6 +4866,7 @@ impl Session {
         Some(DockEditLine {
             len: log.dock.buffer.chars().count(),
             caret: buffer_caret(&log.dock),
+            shift: dock::prebuffer_chars(&log.dock),
             selection: log.dock_selection,
         })
     }
@@ -4776,7 +4882,7 @@ impl Session {
     /// açık. Izgarada kesilecek bir şey yok (031 Karar 7).
     pub fn can_cut(&self) -> bool {
         self.dock_edit_line()
-            .is_some_and(|line| line.selection.and_then(|s| s.range()).is_some())
+            .is_some_and(|line| line.buffer_range().is_some())
     }
 
     /// Dock seçimini siler (`d;S;E;L`) — ⌫/⌦'nin, ve yazmadan ya da
@@ -4789,7 +4895,7 @@ impl Session {
         let Some(line) = self.dock_edit_line() else {
             return false;
         };
-        let Some((start, end)) = line.selection.and_then(|s| s.range()) else {
+        let Some((start, end)) = line.buffer_range() else {
             return false;
         };
         self.send_dock_edit(start, end, line.len);
@@ -4813,7 +4919,13 @@ impl Session {
         let Some(line) = self.dock_edit_line() else {
             return;
         };
-        let Some(index) = line.selection.and_then(|s| s.click()) else {
+        // `PREBUFFER`'a düşen tık caret'i taşımıyor: ZLE o satırları kabul
+        // etti ve caret'in gidebileceği yer yalnız `BUFFER` (032 Karar 2).
+        let Some(index) = line
+            .selection
+            .and_then(|s| s.click())
+            .and_then(|index| index.checked_sub(line.shift))
+        else {
             return;
         };
         if index != line.caret {
@@ -4833,7 +4945,9 @@ impl Session {
         let Some(line) = self.dock_edit_line() else {
             return false;
         };
-        let range = line.selection.and_then(|s| s.range());
+        // `PREBUFFER`'a değen seçim düzenleme tuşlarında seçim yokmuş gibi:
+        // tuş bugünkü yolundan gidiyor ve seçimi kaldırıyor (032 Karar 2).
+        let range = line.buffer_range();
         match (key, range) {
             (DockKey::Backspace | DockKey::Delete, Some((start, end))) => {
                 self.send_dock_edit(start, end, line.len);
@@ -4846,16 +4960,22 @@ impl Session {
                     let mut log = lock(&self.shell);
                     // Kapıdan bu yana ayna değiştiyse (`BUFFER` başka) seçim
                     // o aynanın metnine karşı yeniden kurulmamalı: tuş düşer.
-                    if log.dock.buffer.chars().count() != line.len {
+                    if log.dock.buffer.chars().count() != line.len
+                        || dock::prebuffer_chars(&log.dock) != line.shift
+                    {
                         return true;
                     }
                     let before = log.dock_selection.and_then(|s| s.range());
+                    // Seçimin uzayında (`PREBUFFER ++ BUFFER`): ⇧← `PREBUFFER`'a
+                    // da uzanabiliyor — seçmek serbest, düzenlemek değil.
+                    let text = dock::selectable(&log.dock);
                     let after = DockSelection::stepped(
                         log.dock_selection,
-                        line.caret,
+                        line.shift + line.caret,
                         forward,
-                        &log.dock.buffer,
+                        &text,
                     );
+                    drop(text);
                     log.dock_selection = Some(after);
                     before != after.range()
                 };
@@ -5010,7 +5130,7 @@ impl Session {
         edits: impl FnMut(DockEdit),
     ) -> Dock {
         let theme = *lock(&self.adapter.0.theme);
-        let (shell, change, selection) = {
+        let (shell, change, selection, scroll) = {
             let shell = lock(&self.shell);
             // Fark **kopyadan önce**: `into` şu an son çizilen ayna ve bir
             // satır sonra yenisiyle eziliyor.
@@ -5022,15 +5142,16 @@ impl Session {
             // Seçim de: `BUFFER` değişince onu silen yazıcı aynı kilidi
             // tutuyor, yani aralık bu aynanın metnine ait.
             let range = shell.dock_selection.and_then(|selection| selection.range());
-            (shell.state, change, range)
+            (shell.state, change, range, shell.dock_scroll)
         };
-        let (dock, top) = dock::render_with(
+        let (dock, top, rows) = dock::render_with(
             into,
             context,
             shell,
             &theme,
             cols,
             input_rows,
+            scroll,
             caret_in_dock,
             selection,
             change.as_ref(),
@@ -5042,8 +5163,9 @@ impl Session {
         *lock(&self.dock_window) = Some(DockWindow {
             top,
             shown: input_rows.max(1),
+            rows,
             cols: cols.grid,
-            buffer_bytes: into.buffer.len(),
+            buffer_bytes: into.prebuffer.len() + into.buffer.len(),
         });
         dock
     }
@@ -5360,10 +5482,16 @@ impl Session {
     /// yol (`bracketed-paste` ve `bracketed-paste-magic`) her keymap'te
     /// harfi harfine ekliyor, yani istisna kapanınca davranış doğruya dönüyor.
     fn can_be_typed(&self, bytes: &[u8]) -> bool {
-        if !lock(&self.shell)
-            .suppressed_input()
-            .is_some_and(|input| input.insert_keymap)
-        {
+        // Tutulan `line-finish` (032 Karar 11) istisnayı kapatıyor: ayna
+        // kabul edilmiş satırın, keymap'i de onun — yeni satırınki değil.
+        let typed = {
+            let log = lock(&self.shell);
+            !log.holding_end()
+                && log
+                    .suppressed_input()
+                    .is_some_and(|input| input.insert_keymap)
+        };
+        if !typed {
             return false;
         }
         std::str::from_utf8(bytes).is_ok_and(|text| !text.chars().any(char::is_control))
@@ -7316,11 +7444,28 @@ mod tests {
         );
         assert_eq!(row_glyphs(&live, 2), "", "ayna canlıyken bastırma yok");
 
-        wait_mirror(&session, DockStatus::Idle);
-        // Bastırma **anında** kalkıyor (`suppressed_input` aynanın `Live`
-        // olmasını istiyor), caret ise tutma kadar gecikiyor (015 R1.1) —
-        // ikisi ayrı yüklem ve ayrı hızda. `content_rows` caret'e bağlı,
-        // yani ölçüm devir gerçekleştikten sonra alınmalı.
+        // **`line-finish` safha `Input`'tayken tutuluyor** (032 Karar 11):
+        // ayna `HANDOVER_HOLD` boyunca `Live` kalıyor ve tutmayı kare yolu
+        // çözüyor (`ShellLog::expire_end`), yani `Idle`'ı görmek için kare
+        // koşmak gerekiyor. Caret'in tutması aynı andan sayıyor; `content_rows`
+        // caret'e bağlı, yani ölçüm devir gerçekleştikten sonra alınmalı.
+        let mut state = DockState::default();
+        wait_until(
+            "ayna tutmadan sonra Idle olmadı",
+            Duration::from_secs(5),
+            || {
+                session.frame(
+                    |_| (),
+                    |_| (),
+                    &mut Blocks::default(),
+                    &mut SelectionRuns::default(),
+                    ScrollGlide::default(),
+                    BUDGET,
+                );
+                session.dock_state(&mut state);
+                state.status == DockStatus::Idle
+            },
+        );
         wait_until("caret ızgaraya dönmedi", Duration::from_secs(2), || {
             session
                 .frame(
@@ -7613,58 +7758,151 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// **Çok satırlı yapıştırma satırı ızgaraya bırakıyor** — uçtan uca.
+    /// Kareyi `ready` doğru dönene kadar koşar; ızgaranın hücreleri ve
+    /// imleç. Canlı zsh sınamalarının ortak bekleyişi — ayna ile ızgara iki
+    /// ayrı akış ve ikisinin de oturması gerekiyor.
+    fn frame_until(
+        session: &Session,
+        budget: DockBudget,
+        ready: impl Fn(&[Cell], &Cursor) -> bool,
+    ) -> (Vec<Cell>, Cursor) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut cells = Vec::new();
+            let cursor = session.frame(
+                |cell| cells.push(cell),
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                ScrollGlide::default(),
+                budget,
+            );
+            if ready(&cells, &cursor) {
+                return (cells, cursor);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "kare beklenen hâle gelmedi: {cursor:?}, ızgara {:?}",
+                (0..cursor.rows)
+                    .map(|row| row_glyphs(&cells, row))
+                    .collect::<Vec<_>>()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Izgaranın herhangi bir satırı `needle`'ı taşıyor mu (boşluksuz
+    /// glyph dizisi — [`row_glyphs`] boşluk hücresi üretmiyor).
+    fn grid_shows(cells: &[Cell], rows: u16, needle: &str) -> bool {
+        (0..rows).any(|row| row_glyphs(cells, row).contains(needle))
+    }
+
+    /// **Çok satırlı yapıştırma dock'ta** — uçtan uca (032 phase-4).
     ///
-    /// Zincirin tamamı sınanıyor: gerçek zsh bracketed yapıştırmayı alıyor,
-    /// `BUFFER`'ı satır sonlarıyla birlikte tutuyor (ölçüldü, saf PTY:
-    /// `BUFFER='echo a\necho b\n'`), ZLE kancası onu aynaya basıyor, çözücü
-    /// "bu görüntü tek satıra sığmaz" diyor ve caret ızgarada kalıyor.
-    ///
-    /// Belirti kullanıcıda görüldü (2026-09-21): metin ızgarada, caret
-    /// dock'un prompt işaretinin yanında — yazdığı yeri göremiyordu.
+    /// Gerçek zsh bracketed yapıştırmayı alıyor, `BUFFER`'ı satır sonlarıyla
+    /// birlikte tutuyor (ölçüldü, saf PTY: `BUFFER='echo a\necho b\n'`), ZLE
+    /// kancası onu aynaya basıyor ve ayna `Live`: satırlar dock'ta, ızgarada
+    /// bastırılmış, caret dock'ta. 032'ye kadar bu ayna `Multiline`'dı ve
+    /// satır da caret de ızgarada kalıyordu. Son satır sonu tamponda, yani
+    /// ızgaranın imleci boş bir satırda — tazelik kapısının son mürekkebi o
+    /// satırdan sorulduğu için (`the_last_ink_comes_from_the_last_row_of_the_display`)
+    /// cevapsız bir karede de taze.
     #[test]
-    fn a_bracketed_multiline_paste_leaves_the_line_and_the_caret_in_the_grid() {
-        let home = empty_home("dock-paste");
-        let wake = Arc::new(TestWake::default());
-        let mut options = test_options(("/bin/zsh".into(), vec!["-i".into()]), 40);
-        options
-            .env
-            .insert("HOME".into(), home.display().to_string());
-        options
-            .env
-            .insert("ZDOTDIR".into(), wrapper_dir().display().to_string());
-        let session = Session::spawn(options, wake).unwrap();
-
+    fn a_bracketed_multiline_paste_stays_in_the_dock() {
+        let (session, home) = spawn_editing_zsh("dock-paste");
         let mut dock = DockState::default();
-        wait_dock(&session, &mut dock, |dock| {
-            dock.status == DockStatus::Live && dock.buffer.is_empty()
-        });
-
-        // Bracketed yapıştırma: iki satır ve **kapanış satır sonu**. Son satır
-        // sonu tamponda kalıyor, yani ızgaranın imleci boş bir satıra düşüyor
-        // — tazelik kapısının kör noktasını doğuran şekil.
         session.write(b"\x1b[200~echo a\necho b\n\x1b[201~");
         wait_dock(&session, &mut dock, |dock| {
-            dock.status == DockStatus::Multiline
+            dock.status == DockStatus::Live && dock.buffer == "echo a\necho b\n"
         });
+        let budget = DockBudget {
+            share: 0.5,
+            cols: 60,
+        };
+        let (_, cursor) = frame_until(&session, budget, |cells, cursor| {
+            cursor.caret_in_dock
+                && !grid_shows(cells, cursor.rows, "echoa")
+                && !grid_shows(cells, cursor.rows, "echob")
+        });
+        assert_eq!(cursor.input_rows, 3, "iki satır ve sondaki boş satır");
+
+        // **İçerik kapısı tek başına da taze diyor**: nesli ileri alıp
+        // zamansal soruyu düşürünce karar ızgaranın son satırı (boş) ile
+        // aynanın son satırına (boş) kalıyor.
+        session.key_gen.fetch_add(1, Ordering::AcqRel);
+        let (_, cursor) = frame_until(&session, budget, |_, cursor| cursor.caret_in_dock);
+        assert_eq!(cursor.input_rows, 3);
+
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// **`for` döngüsü dock'ta** — `PREBUFFER` uçtan uca (032 phase-4).
+    ///
+    /// `for i in 1 2; do` ⏎: zsh satırı kabul ediyor, `PS2`'yi basıyor ve
+    /// yeni satırın aynası `PREBUFFER`'ı taşıyor. Dock iki satır çiziyor,
+    /// ızgarada `for` satırı da `PS2` satırı da bastırılmış (taban çıpanın
+    /// satırı), caret dock'ta. ⏎ anındaki `line-finish` tutuluyor (Karar 11):
+    /// kabul edilen satır arada ızgaraya dönmüyor — tutmanın zamanlaması
+    /// burada değil `shell.rs`'in bekçisinde, canlı sınamada yarışa açık.
+    #[test]
+    fn a_for_loop_keeps_its_rows_in_the_dock() {
+        let (session, home) = spawn_editing_zsh("dock-for");
+        let mut dock = DockState::default();
+        let budget = DockBudget {
+            share: 0.5,
+            cols: 60,
+        };
+        session.write(b"for i in 1 2; do");
+        wait_dock(&session, &mut dock, |dock| {
+            dock.buffer == "for i in 1 2; do"
+        });
+        session.write(b"\r");
+        wait_dock(&session, &mut dock, |dock| {
+            dock.status == DockStatus::Live
+                && dock.prebuffer == "for i in 1 2; do\n"
+                && dock.buffer.is_empty()
+        });
+        session.write(b"echo $i");
+        wait_dock(&session, &mut dock, |dock| dock.buffer == "echo $i");
+        let (cells, cursor) = frame_until(&session, budget, |cells, cursor| {
+            cursor.caret_in_dock && !grid_shows(cells, cursor.rows, "echo$i")
+        });
+        assert_eq!(cursor.input_rows, 2, "PREBUFFER ve BUFFER");
         assert!(
-            dock.buffer.contains('\n'),
-            "çok satırlı tampon beklenirdi: {dock:?}"
+            !grid_shows(&cells, cursor.rows, "fori"),
+            "kabul edilen satır ızgarada bastırılmalı"
         );
 
-        let cursor = session.frame(
+        // Dock'un çizimi: `for` satırı üstte, `echo $i` altında, caret onun
+        // sonunda.
+        let mut into = DockState::default();
+        let mut dock_cells = Vec::new();
+        let drawn = session.dock(
+            DockCols {
+                grid: 60,
+                context: 60,
+            },
+            cursor.input_rows,
+            &mut into,
+            &mut DockContext::default(),
+            cursor.caret_in_dock,
+            &mut Vec::new(),
+            |cell| dock_cells.push(cell),
             |_| (),
-            |_| (),
-            &mut Blocks::default(),
-            &mut SelectionRuns::default(),
-            ScrollGlide::default(),
-            BUDGET,
         );
-        assert!(
-            !cursor.caret_in_dock,
-            "gösteremediğimiz satırın caret'i dock'ta kaldı: {cursor:?}"
+        assert_eq!(
+            row_glyphs(&dock_cells, 0),
+            "fori in 1 2; do".replace(' ', "")
         );
-        assert!(cursor.visible, "{cursor:?}");
+        assert_eq!(row_glyphs(&dock_cells, 1), "echo$i");
+        assert_eq!(
+            drawn.caret,
+            Some(crate::dock::DockCaret {
+                col: dock::TEXT_COL + 7,
+                row: 1
+            })
+        );
 
         session.shutdown();
         let _ = std::fs::remove_dir_all(&home);
@@ -9526,6 +9764,47 @@ mod tests {
         session.select_all();
         assert_eq!(session.selection_text().as_deref(), Some("echo foo bar"));
         assert_eq!(session.term.lock().selection_to_string(), None);
+        session.shutdown();
+    }
+
+    /// **Tekerlek dock'un dikey penceresini kaydırıyor** (032 phase-4): tavanı
+    /// aşan girişte caret'in dışındaki satırlara fare de ulaşıyor. Uçta
+    /// kırpılıyor, taşmayan dock olayı ızgaraya bırakıyor; caret'in yeri
+    /// değişince pencere caret'e dönüyor (bekçisi `shell.rs`'in `apply_dock`'u).
+    #[test]
+    fn the_wheel_scrolls_an_overflowing_dock() {
+        let wake = Arc::new(TestWake::default());
+        // Kırk sütunda, metin sütunundan sonra 38 harf: 231 harf yedi satır,
+        // tavan (on satırın yarısı) beş.
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}{}'; sleep 5",
+                anchored_prompt(1),
+                mirror(&"YWFh".repeat(77), 231),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        let (dock, _) = draw_dock(&session);
+        assert!(dock.caret.is_some() && dock.sigil.is_none(), "{dock:?}");
+        let top = || lock(&session.dock_window).map(|window| window.top);
+        assert_eq!(top(), Some(2), "pencere caret'i izliyor");
+
+        assert!(session.dock_scroll(1), "taşan dock tekerleği almalı");
+        assert_eq!(top(), Some(1), "iz hemen: sürüklemenin ucu yeni pencerede");
+        assert!(session.dock_scroll(10), "uçta da dock'un");
+        let (dock, _) = draw_dock(&session);
+        assert_eq!(top(), Some(0));
+        assert_eq!(dock.caret, None, "caret pencerenin dışında");
+        assert!(dock.sigil.is_some(), "ilk satır ekranda");
+        assert!(session.dock_scroll(-100));
+        draw_dock(&session);
+        assert_eq!(top(), Some(2));
+        session.shutdown();
+
+        // Taşmayan dock tekerleği ızgaraya bırakıyor.
+        let session = dock_selection_session();
+        assert!(!session.dock_scroll(1));
         session.shutdown();
     }
 

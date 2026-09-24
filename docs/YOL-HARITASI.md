@@ -343,9 +343,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   mesajı çiziliyor ve doluluk sayısı onları sayınca bastırılan satır arada
   görünür bir boşluk oluyor. `display: none` yalnız giriş satırı son çizilen
   satırken tam. Aynanın görsel dikişi borcunun (012 satırı) görünür belirtisi.
-- **Dock çok satırlı girişi göstermiyor, ızgaraya bırakıyor.** Sete bağlandı
-  → `.tasks/032-cok-satirli-dock/` (dock çizim tarafında büyüyor, PTY resize
-  yok; ayrıntı ve eski gerekçe o setin `context.md`'sinde).
+- **Dock çok satırlı girişi göstermiyor, ızgaraya bırakıyor.** **Kapandı
+  (032 phase-4):** satır sonlu görüntü ve `PREBUFFER` dock'ta, bastırma
+  bütün satırlarda, `Multiline` kalktı → `.tasks/032-cok-satirli-dock/`.
 - **Aynanın `CURSOR`'u karakter indeksi, sütun değil.** **Kapandı (024)** ve
   kapanışın şekli kalemin kendi yazdığından daha geniş: kalem "caret kayıyor"
   diyordu, çaresi "dock sütun saysın" çıktı ve aynı çare üç belirtiyi birden

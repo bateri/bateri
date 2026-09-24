@@ -113,7 +113,7 @@ bt-shell window_point_cell (px)   window_point_dock (Drawn.dock, rows n)
 | phase-1 | ✅ |
 | phase-2 | ✅ |
 | phase-3 | ✅ |
-| phase-4 | |
+| phase-4 | ✅ |
 | phase-5 | |
 | phase-6 | |
 | kapı | |
