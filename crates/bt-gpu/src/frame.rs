@@ -1594,10 +1594,11 @@ impl Frame {
     /// Uçuştaki gelişlerden **statik glyph'i bulunamayanları** bitirir —
     /// içerik karesinde, dock basıldıktan sonra.
     ///
-    /// Eşleşme sütun (aynı [`Frame::dock_pos`]'tan geçen konum, yani tam
-    /// eşitlik) ve karakter. Bulunamayan geliş ya pencerenin dışına düştü ya
-    /// da o karakter artık orada değil; çizilseydi satırda olmayan bir harf
-    /// belirirdi. Hayaletler sorulmuyor: onların statik glyph'i zaten yok.
+    /// Eşleşme konum (satır ve sütun; aynı [`Frame::dock_pos`]'tan geçen
+    /// piksel, yani tam eşitlik) ve karakter. Bulunamayan geliş ya pencerenin
+    /// dışına düştü ya da o karakter artık orada değil — sarılan girişte
+    /// düzenlemenin arkasında kayan harf de buradan bitiyor (032 phase-6);
+    /// çizilseydi satırda olmayan bir harf belirirdi. Hayaletler sorulmuyor: onların statik glyph'i zaten yok.
     pub(crate) fn suppress_dock(&self, fx: &mut GlyphFx) {
         fx.retain(|fx| fx.kind == Kind::Ghost || self.static_arrival(fx).is_some());
     }
@@ -4045,26 +4046,29 @@ mod tests {
         frame.push_dock(typed_cell(2, 'l'));
         let mut glyph_fx = GlyphFx::default();
         let motion = crate::motion::Motion::default();
-        let window = (bt_core::DOCK_TEXT_COL, 80);
+        let rows = 1;
         for edit in [
             bt_core::DockEdit::Arrive {
+                row: 0,
                 col: 2,
                 cells: [typed_cell(2, 'l')].into_iter().collect(),
                 shift: 0,
             },
             bt_core::DockEdit::Erase {
+                row: 0,
                 col: 5,
                 ghosts: [typed_cell(5, 'q')].into_iter().collect(),
                 shift: 0,
             },
             // Yanlış karakter: sütun tutuyor ama `x` orada değil.
             bt_core::DockEdit::Arrive {
+                row: 0,
                 col: 6,
                 cells: [typed_cell(6, 'x')].into_iter().collect(),
                 shift: 0,
             },
         ] {
-            glyph_fx.apply(edit, motion, window);
+            glyph_fx.apply(edit, motion, rows);
         }
         frame.suppress_dock(&mut glyph_fx);
         let left: Vec<(u16, Kind)> = glyph_fx.iter().map(|fx| (fx.cell.col, fx.kind)).collect();
