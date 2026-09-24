@@ -81,6 +81,7 @@ hiç kurulmasın) ve o değişmez bir kod kısıtından *karar* diye türetilmi�
 | 029 | ayarlar penceresi | **Kullanıcı isteği (2026-09-23)**: "güzel olmalı ve anlaşılır, abartmadan temiz" — bugün her ayar TOML'u elle düzenlemek demek. Yerel pencere, kenar çubuğunda dört kategori; tek kaynak yine `settings.toml`, yazma `with_theme`'in genellemesi ve geçerli değerler ayrıştırıcının tablolarından (aşağıdaki "beş kopya" borcunun `name()` yarısı burada kapanıyor) → `.tasks/029-ayarlar-penceresi/` |
 | 030 | dock'ta yazma ve silme animasyonları | **Kullanıcı isteği (2026-09-23)**: "metalterm için bunlar animasyonlu ayarlanmış, oradaki seçenekler gibi istiyorum" — 012'nin adıyla ertelediği `keypress`/`delete_mode` (yukarıdaki 012 satırı). Ön şartları yerinde: ayna (012), dock'un sütun aritmetiği (024), tazelik (025) ve 029'un Motion bölmesi. Bedeli beşinci pipeline (`glyph_fx`) ve `Motion`'ın yanında ayrı bir animatör (`GlyphFx`, uyku testinde adlı terim) → `.tasks/030-dock-yazim-animasyonlari/` |
 | 031 | fareyle seçim: ızgara ve dock | **Kullanıcı isteği (2026-09-24)**: "çift tıklamada hiçbir aksiyon yok. özellikle dock kısmında metin seçme yok" — ızgarada kelime/satır seçimi ve Shift+tıklama, dock'ta tıkla-caret, seçip silme ve yerine yazma, temaya `selection` rolü ve yuvarlak köşeli vurgu. Aşağıdaki "Farenin jest durumu sınanamıyor" kalemi burada kapanıyor (kalemin kendi dediği ev). Bedeli altıncı pipeline ve sarmalayıcıda bir widget → `.tasks/031-fare-ile-secim/` |
+| 032 | çok satırlı dock | **Kullanıcı isteği (2026-09-24)**: çok satırlı giriş (yapıştırma, `for`, heredoc, `\`-devam) ızgaraya gidiyor ve 030/031'in dock davranışı orada kayboluyor — aşağıdaki "Dock çok satırlı girişi göstermiyor" borcu. Dock yukarı doğru büyüyor ama **yalnız çizimde**: PTY sabit, ızgara ötelenir, yani borcun "nefes alan ekran" gerekçesi konusuz. Bedeli betikte yedinci ayna gövdesi (`PREBUFFER`); kullanıcının `PS2`'sine dokunulmuyor → `.tasks/032-cok-satirli-dock/` |
 | — | bölme | 2026-09-23'te sekmeden ayrıldı (026 yalnız sekme). **Bedeli kayıtlı:** komut blokları, Input Dock ve doldurma bandı "bir yüzey = bir oturum" varsayımıyla indi; bölme tek pencerede N yüzey demek. 026 sekmeyi pencereye koydu (`TerminalWindow`: pencere başına oturum, link ve renderer), yani bölmenin bedeli **ödenmedi, ertelendi** — bölme o nesneyi pencere başına bir yerine yüzey başına bir yapmak demek |
 
 Sonrası (sırasız): palet ve arama overlay'leri, durum çubuğu (+ sayaç
@@ -342,20 +343,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   mesajı çiziliyor ve doluluk sayısı onları sayınca bastırılan satır arada
   görünür bir boşluk oluyor. `display: none` yalnız giriş satırı son çizilen
   satırken tam. Aynanın görsel dikişi borcunun (012 satırı) görünür belirtisi.
-- **Dock çok satırlı girişi göstermiyor, ızgaraya bırakıyor.** 2026-09-21'de
-  kapatılan kusurun kalan yarısı: satır sonu taşıyan görüntü artık **görünür**
-  bir durum (`DockStatus::Multiline`) ve satır da caret'i de ızgarada kalıyor,
-  yani "metin yukarıda, imleç aşağıda" bitti. Dock'un kendisi hâlâ **bir**
-  satır; çok satırlı bir `for` döngüsünü ya da heredoc'u dock'ta göstermek
-  bandı büyütmeyi gerektiriyor ve bedeli ölçülü bir tasarım sorusu: bant
-  ızgaranın satırlarından düşüldüğü için her yeni satır bir PTY resize'ı, yani
-  kullanıcı yazarken nefes alan bir ekran ve yukarıdaki sarmalı geçmişin
-  yeniden akışı. Örtmek (opak bandı büyütmek) de tersi: tam o anda
-  kullanıcının görmek istediği şeyi — koşmak üzere olduğu komutun üstündeki
-  çıktıyı — kapatır. İstenirse kendi setini hak ediyor. **012 phase-4'ün
-  "çok satırlı `BUFFER`" bilinen sınırı** (bastırma aritmetiği satır sonlarını
-  saymıyor, kuyruk sızıyor) bu kararla **konusuz kaldı**: çok satırlı ayna
-  bastırmaya hiç girmiyor.
+- **Dock çok satırlı girişi göstermiyor, ızgaraya bırakıyor.** Sete bağlandı
+  → `.tasks/032-cok-satirli-dock/` (dock çizim tarafında büyüyor, PTY resize
+  yok; ayrıntı ve eski gerekçe o setin `context.md`'sinde).
 - **Aynanın `CURSOR`'u karakter indeksi, sütun değil.** **Kapandı (024)** ve
   kapanışın şekli kalemin kendi yazdığından daha geniş: kalem "caret kayıyor"
   diyordu, çaresi "dock sütun saysın" çıktı ve aynı çare üç belirtiyi birden
