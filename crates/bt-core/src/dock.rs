@@ -1281,6 +1281,198 @@ pub(crate) fn column_width(ch: char) -> usize {
     UnicodeWidthChar::width(ch).unwrap_or(1)
 }
 
+/// Düzenin bir **görsel** satırı: hangi karakter aralığı, hangi sütundan.
+///
+/// Aralık [`layout`]'a verilen akışın karakter indeksinde ve **yarı açık**;
+/// satırı kıran `\n` hiçbir satırın aralığında değil (glyph'i yok, sütunu
+/// yok). Sarmanın ve satır sonunun bıraktığı satırlar aynı tipte: ayrımı
+/// tüketicinin sorusu değil.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VisualLine {
+    /// İlk karakterin indeksi.
+    pub(crate) start: usize,
+    /// Son karakterin bir sonrası; boş satırda `start`.
+    pub(crate) end: usize,
+    /// Satırın başladığı sütun ([`layout`]'un `first`/`rest`'i).
+    pub(crate) col: usize,
+}
+
+/// [`layout`]'un kare başına tek olan cevabı.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LayoutEnd {
+    /// Caret'in görsel satırı, `0`'dan.
+    pub(crate) caret_row: usize,
+    /// Caret'in sütunu.
+    pub(crate) caret_col: usize,
+    /// Görsel satır sayısı, caret'in satırı dahil; en az 1.
+    pub(crate) rows: usize,
+}
+
+/// Görüntünün **satır farkında** düzeni — tek yürüyüş (032 Karar 7).
+///
+/// Akışı `\n`'lerde böler ve `width` sütunda sarar; ilk satır `first`
+/// sütunundan, devam satırlarının hepsi (sarmanın ve `\n`'in açtıkları)
+/// `rest`'ten başlıyor. Görsel satırlar `line`'a sırayla akıyor, ayırma yok —
+/// kare yolu bunu her karede koşuyor.
+///
+/// **Sütun sayısının tek yetkilisi yine [`column_width`]:** ızgaranın
+/// sarması, dock'un çizimi ve bastırmanın satır aritmetiği aynı tablodan
+/// sayıyor (024 Karar 1), yoksa biri gizlenir öteki görünürdü.
+///
+/// Kurallar ve her birinin nedeni:
+///
+/// - **`\n` sütun almaz, satır kırar.** Glyph'i yok; 032 öncesinde dock onu
+///   tek satıra yassıltıyordu ve sütun tüketip metni eziyordu.
+/// - **Geniş karakter yarılanmaz**, sığmıyorsa alt satıra geçer ve arkasında
+///   boş bir sütun kalır — ızgaranın (`LEADING_WIDE_CHAR_SPACER`) ve dock'un
+///   ([`columns`]) aynı kuralı.
+/// - **Sarma tembel:** satır yalnız bir karakter sığmadığında açılıyor, yani
+///   tam dolan satırın ardından boş satır doğmuyor.
+/// - **Caret, sıradaki karakterin gideceği yerde**; sonda ise bir sütunluk bir
+///   karakterin gideceği yerde. Tam dolan satırın sonundaki caret bu yüzden
+///   **alt satırın başında** ve o satır sayılıyor: zsh imleci satır sonunun
+///   bekleyen sarma hâlinde bırakmıyor, alt satıra indiriyor — bastırmanın
+///   eski formülündeki `saturating_sub(1)` kuralının karşılığı.
+/// - **Sığmayan boş satır taşar, sonsuza sarmaz:** devam satırının başında
+///   bile sığmayan karakter (bir sütunluk pencerede geniş glyph) yerinde
+///   duruyor. `first` `rest`'ten sağdaysa ilk satır boş kalıp sarabiliyor —
+///   ızgarada prompt'un bitirdiği satır.
+///
+/// `caret` akışın indeksinde; akıştan büyükse sona kırpılıyor.
+pub(crate) fn layout(
+    chars: impl IntoIterator<Item = char>,
+    caret: usize,
+    width: usize,
+    first: usize,
+    rest: usize,
+    mut line: impl FnMut(VisualLine),
+) -> LayoutEnd {
+    let width = width.max(1);
+    let first = first.min(width);
+    let mut row = 0;
+    let mut col = first;
+    let mut open = VisualLine {
+        start: 0,
+        end: 0,
+        col: first,
+    };
+    let mut at_caret = None;
+    // Karakter `col`'a sığıyor mu; sığmıyorsa satır sarılabiliyor mu. Boş ve
+    // `rest`'ten sağda olmayan satırda sarmak aynı yere dönmek olurdu.
+    let fits = |col: usize, w: usize, open: &VisualLine, at: usize| {
+        col + w <= width || (open.start == at && col <= rest)
+    };
+    let mut count = 0;
+    for (index, ch) in chars.into_iter().enumerate() {
+        count = index + 1;
+        if ch == '\n' {
+            if index == caret {
+                at_caret = Some(if fits(col, 1, &open, index) {
+                    (row, col)
+                } else {
+                    (row + 1, rest)
+                });
+            }
+            open.end = index;
+            line(open);
+            row += 1;
+            col = rest;
+            open = VisualLine {
+                start: index + 1,
+                end: index + 1,
+                col: rest,
+            };
+            continue;
+        }
+        let w = column_width(ch);
+        if !fits(col, w, &open, index) {
+            open.end = index;
+            line(open);
+            row += 1;
+            col = rest;
+            open = VisualLine {
+                start: index,
+                end: index,
+                col: rest,
+            };
+        }
+        if index == caret {
+            at_caret = Some((row, col));
+        }
+        col += w;
+    }
+    open.end = count;
+    let (caret_row, caret_col) = match at_caret {
+        Some(at) => at,
+        None if fits(col, 1, &open, count) => (row, col),
+        None => {
+            // Sondaki caret tam dolan satırın ardında: satırı kapat, caret'e
+            // kendi (boş) satırını aç.
+            line(open);
+            row += 1;
+            open = VisualLine {
+                start: count,
+                end: count,
+                col: rest,
+            };
+            (row, rest)
+        }
+    };
+    line(open);
+    LayoutEnd {
+        caret_row,
+        caret_col,
+        rows: row + 1,
+    }
+}
+
+/// Bastırmanın satır aritmetiği: giriş imlecin ızgaradaki satırının kaç satır
+/// **üstünden** başlıyor ve kaç satır **altına** uzanıyor.
+///
+/// [`layout`]'un **ızgara** parametrizasyonu (032 Karar 7): zsh'in düzeni —
+/// ilk satır prompt'un bittiği sütundan, devam satırları `0`'dan. Prompt'un
+/// genişliği aynada yok ama gözleniyor: imlecin ızgaradaki sütunu
+/// (`cursor_col`) eksi imleçten önceki metnin sütunu, `width` modunda.
+///
+/// **Gözlem imlecin mantıksal satırı ilk satırsa kesin.** İmleç bir `\n`'in
+/// arkasındaysa ilk satırın başı bu sütundan çıkmıyor ve `0` varsayılıyor —
+/// ilk satırı en az satıra sığdıran varsayım, yani üst uç eksik bastırır,
+/// fazla değil. Bugün bu kola hiçbir satır gelmiyor: satır sonlu görüntü
+/// `Multiline` ve bastırılmıyor; kolun asıl sahibi 032 phase-4.
+///
+/// **Bilinen sınır, yönü güvenli:** geniş karakterin satır sonunda bıraktığı
+/// boş sütun imleçten **önceyse** gözlenen başlangıç o kadar sağa kayar ve
+/// üst uç bir satır fazla çıkabilir; üst uç çağıranda çıpanın satırıyla
+/// kırpıldığı için (`from.max(floor)`) prompt'un üstüne taşamaz. Eski sütun
+/// bölmesinin de aynı sınırı vardı. İmleçten **sonrası** ise artık doğru:
+/// orada bölme boşluğu görmüyor ve kuyruğu eksik sayıyordu.
+pub(crate) fn grid_span(
+    display: &str,
+    caret: usize,
+    cursor_col: usize,
+    width: usize,
+) -> (usize, usize) {
+    let width = width.max(1);
+    // İmlecin mantıksal satırında, imleçten önceki sütunlar.
+    let mut on_line = 0;
+    let mut first_line = true;
+    for ch in display.chars().take(caret) {
+        if ch == '\n' {
+            on_line = 0;
+            first_line = false;
+        } else {
+            on_line += column_width(ch);
+        }
+    }
+    let first = if first_line {
+        (cursor_col % width + width - on_line % width) % width
+    } else {
+        0
+    };
+    let end = layout(display.chars(), caret, width, first, 0, |_| {});
+    (end.caret_row, end.rows - 1 - end.caret_row)
+}
+
 /// Bir karakterin hücresi: taban rengi + aralığın stili.
 ///
 /// **Seçili hücre ızgaranın kuralıyla** (031 Karar 3): metin kendi ön
@@ -1369,6 +1561,7 @@ mod tests {
             predisplay: predisplay.into(),
             buffer: buffer.into(),
             postdisplay: postdisplay.into(),
+            prebuffer: String::new(),
             cursor,
             highlights: Vec::new(),
             // Çözücünün saydığı uzunluk; burada elle kuruluyor çünkü bu
@@ -2242,6 +2435,153 @@ mod tests {
             let caret = dock.caret.expect("{label}: caret dock'un");
             assert_eq!(caret, TEXT_COL, "{label}: caret {caret}");
         }
+    }
+
+    // ---- Satır farkında düzen (032) ----
+
+    /// Düzenin görsel satırları, metin olarak; ve sonu.
+    fn laid_out(
+        text: &str,
+        caret: usize,
+        width: usize,
+        first: usize,
+        rest: usize,
+    ) -> (Vec<(String, usize)>, LayoutEnd) {
+        let chars: Vec<char> = text.chars().collect();
+        let mut lines = Vec::new();
+        let end = layout(text.chars(), caret, width, first, rest, |line| {
+            lines.push((chars[line.start..line.end].iter().collect(), line.col));
+        });
+        (lines, end)
+    }
+
+    fn end(caret_row: usize, caret_col: usize, rows: usize) -> LayoutEnd {
+        LayoutEnd {
+            caret_row,
+            caret_col,
+            rows,
+        }
+    }
+
+    #[test]
+    fn layout_breaks_at_newlines_and_the_newline_takes_no_column() {
+        // Devam satırları `rest`'ten, ilk satır `first`'ten; `\n` hiçbir
+        // satırın aralığında değil.
+        let (lines, at) = laid_out("for i\ndo\ndone", 14, 20, 2, 2);
+        assert_eq!(
+            lines,
+            vec![("for i".into(), 2), ("do".into(), 2), ("done".into(), 2)]
+        );
+        assert_eq!(at, end(2, 6, 3));
+    }
+
+    #[test]
+    fn layout_wraps_at_the_width_and_lazily() {
+        // Altı sütun, ilk satır 2'den: `abcd` sığıyor, `efghij` ikinci
+        // satırı tam dolduruyor ve arkasında **boş satır doğmuyor** — caret
+        // metnin ortasında.
+        let (lines, at) = laid_out("abcdefghij", 1, 6, 2, 0);
+        assert_eq!(lines, vec![("abcd".into(), 2), ("efghij".into(), 0)]);
+        assert_eq!(at, end(0, 3, 2));
+    }
+
+    #[test]
+    fn a_caret_after_a_full_row_starts_the_next_row() {
+        // zsh imleci bekleyen sarma hâlinde bırakmıyor: tam dolan satırın
+        // sonundaki caret alt satırın başında ve o satır sayılıyor.
+        let (lines, at) = laid_out("abcd", 4, 4, 0, 0);
+        assert_eq!(lines, vec![("abcd".into(), 0), (String::new(), 0)]);
+        assert_eq!(at, end(1, 0, 2));
+        // Dolmamış satırda caret satırın sonunda kalıyor.
+        let (_, at) = laid_out("abc", 3, 4, 0, 0);
+        assert_eq!(at, end(0, 3, 1));
+    }
+
+    #[test]
+    fn a_wide_char_is_not_split_at_the_end_of_a_row() {
+        // Beş sütun, `abcd` dört; `日` iki sütun ve beşinci sütuna sığmıyor:
+        // bütünüyle alt satıra iniyor, sağda bir boş sütun kalıyor.
+        let (lines, at) = laid_out("abcd日x", 4, 5, 0, 0);
+        assert_eq!(lines, vec![("abcd".into(), 0), ("日x".into(), 0)]);
+        // Caret geniş karakterin önünde: karakterin **gideceği** yerde, yani
+        // alt satırın başında, eski satırın sonunda değil.
+        assert_eq!(at, end(1, 0, 2));
+        // Tam sığdığında inmiyor.
+        let (lines, _) = laid_out("abc日", 0, 5, 0, 0);
+        assert_eq!(lines, vec![("abc日".into(), 0)]);
+    }
+
+    #[test]
+    fn a_trailing_newline_leaves_an_empty_last_row() {
+        // `echo a` + satır sonu: ikinci satır boş ama var, caret orada.
+        let (lines, at) = laid_out("echo a\n", 7, 20, 2, 2);
+        assert_eq!(lines, vec![("echo a".into(), 2), (String::new(), 2)]);
+        assert_eq!(at, end(1, 2, 2));
+    }
+
+    #[test]
+    fn a_caret_right_after_a_newline_sits_at_the_next_row_start() {
+        let (_, at) = laid_out("ab\ncd", 3, 20, 2, 2);
+        assert_eq!(at, end(1, 2, 2));
+        // Caret `\n`'in **önünde**: önceki satırın sonunda.
+        let (_, at) = laid_out("ab\ncd", 2, 20, 2, 2);
+        assert_eq!(at, end(0, 4, 2));
+        // Tam dolan satırın ardındaki `\n` boş satır açmıyor: `\n`'in açtığı
+        // satır sarmanın açacağıyla aynı satır ve önündeki caret orada.
+        let (lines, at) = laid_out("abcd\ne", 4, 4, 0, 0);
+        assert_eq!(lines, vec![("abcd".into(), 0), ("e".into(), 0)]);
+        assert_eq!(at, end(1, 0, 2));
+    }
+
+    #[test]
+    fn a_first_row_past_the_margin_wraps_before_its_first_char() {
+        // Izgarada prompt satırı tam doldurmuş: ilk satır boş kalıyor, metin
+        // alt satırdan başlıyor. Devam satırının başında bile sığmayan
+        // karakter ise sonsuza sarmıyor, taşıyor.
+        let (lines, at) = laid_out("ab", 0, 4, 4, 0);
+        assert_eq!(lines, vec![(String::new(), 4), ("ab".into(), 0)]);
+        assert_eq!(at, end(1, 0, 2));
+        let (lines, _) = laid_out("日", 0, 1, 0, 0);
+        assert_eq!(lines, vec![("日".into(), 0)]);
+    }
+
+    #[test]
+    fn grid_span_matches_the_column_division_on_one_line() {
+        // **Eşdeğerlik bekçisi** (032 phase-1): bastırmanın satır aritmetiği
+        // sütun bölmesinden düzen yürüyüşüne taşındı ve tek satırlık bir
+        // görüntüde sonuç **aynı** kalmak zorunda — tam dolan satırın
+        // `saturating_sub(1)` kuralı dahil. Eski formül burada olduğu gibi
+        // duruyor; tarama bütün küçük ızgaraları, imlecin her sütununu ve
+        // caret'in iki yanındaki her uzunluğu deniyor.
+        let old = |cursor_col: usize, before: usize, after: usize, cols: usize| {
+            let above = before.saturating_sub(cursor_col).div_ceil(cols);
+            let below = (cursor_col + after).saturating_sub(1) / cols;
+            (above, below)
+        };
+        for cols in 1..=10 {
+            for cursor_col in 0..cols {
+                for before in 0..3 * cols {
+                    for after in 0..3 * cols {
+                        let text = "x".repeat(before + after);
+                        assert_eq!(
+                            grid_span(&text, before, cursor_col, cols),
+                            old(cursor_col, before, after, cols),
+                            "cols={cols} cursor_col={cursor_col} before={before} after={after}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grid_span_counts_the_row_a_wide_char_is_pushed_to() {
+        // Eski bölmenin görmediği tek ayrım ve yönü güvenli: beş sütunluk
+        // ızgarada imleç 0. sütunda, arkasında `abcd日日日` — ilk `日` satıra
+        // sığmıyor ve alt satıra iniyor, üçüncüsü de bu yüzden bir satır daha
+        // aşağıda. Bölme 10 sütunu 5'e bölüp imlecin altında bir satır
+        // diyordu (`(10 - 1) / 5`); ızgarada kuyruk iki satır aşağıda.
+        assert_eq!(grid_span("abcd日日日", 0, 0, 5), (0, 2));
     }
 
     // ---- Yazım animasyonlarının düzenlemesi (030) ----
