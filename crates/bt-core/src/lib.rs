@@ -5,6 +5,7 @@
 //! dışarısı yalnız `Session`, `Cell`, `UnderlineStyle`, `Cursor`, `Block`,
 //! `Blocks`,
 //! `SelectionPoint`, `SelectKind`, `CellHalf`, `Arrow`, `Wheel`, `ScrollIntent`,
+//! aramanın `SearchQuery`, `SearchStatus`, `SearchRun`, `SearchRuns`'u,
 //! `ScrollGlide`, `LinearRgba`, `Theme`,
 //! `ShellState`, `ShellPhase`, aynanın `DockState`, `DockStatus`, `DockFault`,
 //! `Highlight`, `HighlightStyle`, `HighlightColor`'ı, bağlam satırının
@@ -41,6 +42,7 @@
 mod color;
 mod dock;
 mod input;
+mod search;
 mod session;
 mod settings;
 mod shell;
@@ -52,6 +54,7 @@ pub use dock::{
     Dock, DockBudget, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_TEXT_COL,
 };
 pub use input::{Arrow, MouseButton, MouseModifiers};
+pub use search::{SearchQuery, SearchRun, SearchRuns, SearchStatus, escape as escape_search};
 pub use session::{
     Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, Osc52, SHUTDOWN_GRACE,
     ScrollGlide, ScrollIntent, SelectKind, SelectionPoint, SelectionRun, SelectionRuns, Session,

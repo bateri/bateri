@@ -75,7 +75,8 @@ use std::time::{Duration, Instant};
 
 use bt_core::{
     Blocks, CaretStyle, Cursor, CursorMotion, DirtyFlag, DockBudget, DockCols, DockContext,
-    DockState, Erase, Keypress, LinearRgba, SelectionRun, SelectionRuns, Session, Theme,
+    DockState, Erase, Keypress, LinearRgba, SearchRuns, SelectionRun, SelectionRuns, Session,
+    Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -546,6 +547,9 @@ struct LinkIvars {
     /// aynı gerekçe — `Frame`'in içinde değil yanında, `Frame::push_selection`
     /// onu dörtgenlere çeviriyor.
     selection: RefCell<SelectionRuns>,
+    /// Arama vurgusunun koşuları (033); `selection` ile aynı ömür ve aynı
+    /// gerekçe. Bu phase'de yalnız doluyor, çizimi phase-2.
+    search: RefCell<SearchRuns>,
     /// Dock seçiminin görsel satır başına koşuları (032); `selection` ile aynı
     /// gerekçe — `bt_core::Session::dock` her içerik karesinde boşaltıp
     /// dolduruyor, kapasite korunuyor.
@@ -1061,6 +1065,7 @@ define_class!(
                 |cell| fill.push(cell),
                 &mut iv.blocks.borrow_mut(),
                 &mut iv.selection.borrow_mut(),
+                &mut iv.search.borrow_mut(),
                 // Pay **uyandırmıyor**: kareyi zaten bu callback çiziyor
                 // (`Session::frame`). Nesli değiştiyse orada düşüyor.
                 glide,
@@ -1767,6 +1772,7 @@ impl DisplayLink {
                 frame: RefCell::new(Frame::default()),
                 blocks: RefCell::new(Blocks::default()),
                 selection: RefCell::new(SelectionRuns::default()),
+                search: RefCell::new(SearchRuns::default()),
                 dock_selection: RefCell::new(Vec::new()),
                 fill: RefCell::new(Vec::new()),
                 dock: RefCell::new(DockState::default()),

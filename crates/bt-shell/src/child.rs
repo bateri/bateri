@@ -623,6 +623,7 @@ mod tests {
             |_| (),
             blocks,
             &mut bt_core::SelectionRuns::default(),
+            &mut bt_core::SearchRuns::default(),
             ScrollGlide::default(),
             bt_core::DockBudget {
                 share: 0.5,

@@ -11,10 +11,12 @@
 //! (`set_terminal_options`).
 //! Kilit **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
 //! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa kilitlenme
-//! doğar. `theme` ve `shell` bu sıranın dışında birer **yaprak** kilittir:
+//! doğar. `theme`, `shell` ve `search` bu sıranın dışında birer **yaprak** kilittir:
 //! tutulurken başka hiçbir kilit alınmaz, yani hangi kilidin altında alındığı
 //! önemsizdir — `frame` temanın kopyasını `term`'den önce alıp bırakır, renk
-//! sorusu `term` tutulurken okur, `set_theme` tek başına yazar.
+//! sorusu `term` tutulurken okur, `set_theme` tek başına yazar; `frame`
+//! aramanın desenini `term`'den önce ödünç alır ve bıraktıktan sonra geri
+//! koyar (`SearchSlot`).
 //!
 //! `shell` için kural tek yönlüdür ve yönü şudur: **`shell` tutulurken `term`
 //! alınmaz.** Okuyucu thread `shell`'i zaten `term`'ün *altında* yazıyor —
@@ -30,7 +32,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
-use std::ops::DerefMut;
+use std::ops::{DerefMut, RangeInclusive};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
@@ -49,6 +51,7 @@ use alacritty_terminal::term::TermMode;
 // (`CLAUDE.md` → hücre sabit boyuttadır).
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::color::Colors;
+use alacritty_terminal::term::search as search_engine;
 use alacritty_terminal::term::{Config, Osc52 as TermOsc52, RenderableContent, Term};
 // `EventedReadWrite` ada geliyor çünkü `io::Read` gövdesi `Pty::reader()`'ı
 // çağırıyor, yani kendi impl bloğunun dışından; `EventedPty` ve `io::Read`
@@ -65,6 +68,7 @@ use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
 };
+use crate::search::{self, SearchQuery, SearchRun, SearchRuns, SearchSlot, SearchStatus};
 use crate::settings::{CaretShape, CursorBlink};
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockSelection, DockState, DockStatus,
@@ -1848,6 +1852,138 @@ fn cell_style(
     }
 }
 
+/// Bastırılan giriş satırının ızgaradaki satır aralığı — `display: none`
+/// satırlar; `None` → bastırma yok.
+///
+/// **Tek yüklem, üç tüketici** ([`Session::frame`]): atlanan hücreler, seçim
+/// koşuları ve arama eşleşmeleri aynı aralıktan soruyor. Üst uç çıpanın
+/// satırı ile aynanın tabanının alttakisi (`from.max(floor)`), alt uç
+/// tazelik kapısını geçmiş imleç kuyruğu; ikisinin gerekçesi `frame()`'in
+/// yorumlarında.
+fn suppressed_rows(
+    caret_in_dock: bool,
+    from: Option<u16>,
+    to: Option<u16>,
+    floor: u16,
+) -> Option<RangeInclusive<u16>> {
+    match (caret_in_dock, from, to) {
+        (true, Some(from), Some(to)) => Some(from.max(floor)..=to),
+        _ => None,
+    }
+}
+
+/// Arama taramasının penceresi: ızgaranın ofseti ve boyu, doldurma
+/// kanalının boyu (`top_row + fill`) ve bastırılan satırlar.
+struct SearchWindow {
+    offset: i32,
+    rows: i32,
+    channel: i32,
+    hidden: Option<RangeInclusive<u16>>,
+}
+
+/// Çizilen satırların eşleşmelerini koşulara çevirir (033 phase-1).
+///
+/// **`Term` kilidi tutulurken** ([`Session::frame`]). Satır `L` ızgarada
+/// `L + offset` (`0..rows`), kanalda `L + offset + channel` (`0..channel`);
+/// ikisinin dışı çizilmiyor ve koşu vermiyor. Eşleşme satır başına bir koşuya
+/// bölünüyor, ilkinden sonrakiler `continues`.
+///
+/// **Dışlanan iki eşleşme**, ikisi de bütünüyle — yarım vurgulanmış bir
+/// eşleşme sayımda (phase-5) tek eşleşme ama ekranda başka bir şey olurdu:
+///
+/// - Bastırılan giriş satırına değen (Karar 8): o satır ızgarada çizilmiyor
+///   ve dock ayrı bir yüzey; görünmeyen bir satıra vurgu, sayı ya da gezinme
+///   hedefi verilmez.
+/// - Mürekkepsiz ([`search::has_ink`]): yalnız boşluktan oluşan eşleşme boş
+///   satırları boyardı — vurgu içerik yaratmaz.
+///
+/// **Geçerli eşleşme** bu phase'de görünürdeki en alttaki, yani son
+/// eşleşme; gezinme phase-4'te.
+fn search_visible<T>(
+    term: &Term<T>,
+    regex: &mut search_engine::RegexSearch,
+    out: &mut SearchRuns,
+    window: SearchWindow,
+) {
+    let SearchWindow {
+        offset,
+        rows,
+        channel,
+        hidden,
+    } = window;
+    let top = Line(-offset - channel);
+    let bottom = Line(rows - 1 - offset);
+    let last_col = term.columns().saturating_sub(1);
+    // Son kabul edilen eşleşmenin iki listedeki başlangıcı: `current` en
+    // sonda ona işaretleniyor.
+    let mut current: Option<(usize, usize)> = None;
+    search::scan(term, regex, top, bottom, |found| {
+        let (start, end) = (*found.start(), *found.end());
+        let lines = start.line.0..=end.line.0;
+        if let Some(hidden) = &hidden
+            && lines
+                .clone()
+                .any(|line| u16::try_from(line + offset).is_ok_and(|row| hidden.contains(&row)))
+        {
+            return;
+        }
+        if !search::has_ink(term, found) {
+            return;
+        }
+        let mark = (out.runs.len(), out.fill_runs.len());
+        let mut shown = false;
+        for line in lines {
+            if line < top.0 || line > bottom.0 {
+                continue;
+            }
+            let first = if line == start.line.0 {
+                start.column.0
+            } else {
+                0
+            };
+            let last = if line == end.line.0 {
+                // Geniş karakter iki sütun: koşu spacer'ına kadar (seçimin
+                // aritmetiği).
+                let wide = term.grid()[end].flags.contains(Flags::WIDE_CHAR);
+                (end.column.0 + usize::from(wide)).min(last_col)
+            } else {
+                last_col
+            };
+            let (Ok(first), Ok(last)) = (u16::try_from(first), u16::try_from(last)) else {
+                continue;
+            };
+            let run = |row: i32| {
+                u16::try_from(row).ok().map(|row| SearchRun {
+                    row,
+                    first,
+                    last,
+                    current: false,
+                    continues: line != start.line.0,
+                })
+            };
+            let grid_row = line + offset;
+            let pushed = if grid_row >= 0 {
+                run(grid_row).map(|run| out.runs.push(run))
+            } else {
+                run(grid_row + channel).map(|run| out.fill_runs.push(run))
+            };
+            shown |= pushed.is_some();
+        }
+        if shown {
+            current = Some(mark);
+        }
+    });
+    if let Some((grid, fill)) = current {
+        // `get_mut`, indeksleme değil: işaretler az önce bu listelerden
+        // alındı ve taşamaz, ama `bt-core`'da panik yasağı çağrı yerinin.
+        let grid = out.runs.get_mut(grid..).unwrap_or_default();
+        let fill = out.fill_runs.get_mut(fill..).unwrap_or_default();
+        for run in grid.iter_mut().chain(fill) {
+            run.current = true;
+        }
+    }
+}
+
 /// Seçimin **ekranda** çizilen aralığı — `frame()`, kare kapısı ve temizleme
 /// hep bunu sorar, ki "çizili mi" sorusunun tek cevabı olsun. Çıktının
 /// görünür pencerenin üstüne ittiği bir aralık grid'de durur ama çizilmez.
@@ -2135,6 +2271,9 @@ pub struct Session {
     /// o kararı yeniden türetmek `frame()`'in üç ön koşulunu ikinci kez
     /// yazmak olurdu.
     caret_in_dock: AtomicBool,
+    /// Geçmişte aramanın derlenmiş deseni ve nesli (033) — **yaprak kilit**,
+    /// `theme` emsali; ödünç alma kuralı [`SearchSlot`]'ta.
+    search: Mutex<SearchSlot>,
     /// Dock'un **son çizilen** penceresinin izi ([`DockWindow`]): isabet
     /// testi canlı aynaya değil ekrandakine bakıyor (031 R3.5).
     ///
@@ -2392,6 +2531,7 @@ impl Session {
             // Açılışta alternatif ekran yok; ilk içerik karesi zaten yazacak.
             alt_screen: AtomicBool::new(false),
             caret_in_dock: AtomicBool::new(false),
+            search: Mutex::new(SearchSlot::default()),
             dock_window: Mutex::new(None),
             screen_clears,
             key_gen,
@@ -2483,12 +2623,21 @@ impl Session {
     /// tavan ve sarma genişliği çizen tarafın yerleşim kararı, bu crate
     /// yalnız sayıyı kırpıyor ve [`Cursor::input_rows`] olarak sınırdan
     /// veriyor.
+    ///
+    /// **`search` arama vurgusunun koşuları** ([`SearchRuns`], 033): arama
+    /// etkinken çizilen satırların eşleşmeleri, ızgara ve doldurma kanalı
+    /// ayrı listelerde; desen yoksa iki liste de boş ve tarama koşmuyor.
+    // Argümanlar karenin tek okumasından geçen iki sink ve çağıranın
+    // tamponları (`Session::dock` emsali); bir yapıda toplamak yalnız bu
+    // çağrı için bir tip doğururdu.
+    #[allow(clippy::too_many_arguments)]
     pub fn frame(
         &self,
         mut sink: impl FnMut(Cell),
         mut fill_sink: impl FnMut(Cell),
         blocks: &mut Blocks,
         selection: &mut SelectionRuns,
+        search: &mut SearchRuns,
         glide: ScrollGlide,
         budget: DockBudget,
     ) -> Cursor {
@@ -2561,6 +2710,15 @@ impl Session {
         selection.runs.clear();
         selection.color = theme.selection_linear();
         selection.unfocused = theme.selection_unfocused_linear();
+        // **Aramanın deseni ödünç, `Term` kilidinden önce** ([`SearchSlot`]):
+        // `RegexIter` `&mut` istiyor ve yaprak kilit `Term`'ün altına girmez.
+        // Desen yoksa (arama kapalı, sorgu boş ya da geçersiz) tarama hiç
+        // koşmuyor ve iki liste boş kalıyor (R2.2).
+        search.clear();
+        let (search_generation, mut search_pattern) = {
+            let mut slot = lock(&self.search);
+            (slot.generation, slot.pattern.take())
+        };
         let mut term = self.term.lock();
         // **Süzülme payı taramadan önce**: aşağıdaki her şey (ofset, bayrağın
         // ömrü, doldurma, kayma sayısı) payın taşıdığı pencereyi görmeli.
@@ -3125,9 +3283,8 @@ impl Session {
             // sayılmaz, yoksa 011'in tabana yapışması çizilmeyen bir satır
             // için yer ayırır ve dock ile içerik arasında boş bir şerit
             // kalırdı.
-            if caret_in_dock
-                && let (Some(from), Some(to)) = (suppress_from, suppress_to)
-                && (from.max(suppress_floor)..=to).contains(&row)
+            if suppressed_rows(caret_in_dock, suppress_from, suppress_to, suppress_floor)
+                .is_some_and(|hidden| hidden.contains(&row))
             {
                 continue;
             }
@@ -3209,8 +3366,13 @@ impl Session {
         // döngüden **sonra**, çünkü bastırmanın üst ucu (`suppress_from`)
         // çıpa taramasıyla döngünün içinde doğuyor; koşu ise kapıdan önce
         // birikmek zorunda.
-        if caret_in_dock && let (Some(from), Some(to)) = (suppress_from, suppress_to) {
-            let hidden = from.max(suppress_floor)..=to;
+        //
+        // **Aralık tek yüklemden** ([`suppressed_rows`]) ve üç tüketicisi
+        // var: atlanan hücreler (döngünün içinde), seçim koşuları ve arama
+        // eşleşmeleri (aşağıda). Ayrı yazılsalardı biri ötekinden ayrışır ve
+        // görünmeyen bir satır vurgulanırdı (015'in dersi).
+        let hidden = suppressed_rows(caret_in_dock, suppress_from, suppress_to, suppress_floor);
+        if let Some(hidden) = &hidden {
             selection.runs.retain(|run| !hidden.contains(&run.row));
         }
 
@@ -3469,6 +3631,26 @@ impl Session {
             }
         }
 
+        // **Arama vurgusu** (033): çizilen satırların eşleşmeleri, ızgara ve
+        // doldurma kanalı birlikte — ikisi ardışık satırlar
+        // (`-offset - channel ..= rows - 1 - offset`), yani kanalın dibinden
+        // ızgaranın tepesine sarılan bir eşleşme iki listeye bölünüyor ama
+        // tek eşleşme kalıyor. Döngülerden **sonra**, çünkü bastırmanın üst
+        // ucu ızgara döngüsünde doğuyor (seçim süzgecinin gerekçesi).
+        if let Some(regex) = search_pattern.as_mut() {
+            search_visible(
+                &term,
+                regex,
+                search,
+                SearchWindow {
+                    offset,
+                    rows,
+                    channel: i32::from(channel),
+                    hidden: hidden.clone(),
+                },
+            );
+        }
+
         // **İmleç döngülerden sonra kuruluyor** ve sebebi iki alan:
         // `content_rows` ancak ızgara döngüsü bitince, `fill` de ondan sonra
         // biliniyor. İmlecin girdilerinin tamamı (şekil, nokta, satır,
@@ -3549,6 +3731,14 @@ impl Session {
             next_tick: None,
         };
         drop(term);
+        // Desen yuvaya geri, **yalnız nesil aynıysa**: tur sürerken yeni bir
+        // sorgu geldiyse (ya da arama kapandıysa) yuvadaki onundur.
+        if let Some(pattern) = search_pattern {
+            let mut slot = lock(&self.search);
+            if slot.generation == search_generation && slot.pattern.is_none() {
+                slot.pattern = Some(pattern);
+            }
+        }
 
         // **Faz 2**, `Term` kilidi düştükten sonra: kimlikler kabuk
         // defterinden renklendirilir ve süre sayaçları basılır.
@@ -5306,6 +5496,43 @@ impl Session {
         dock
     }
 
+    /// Geçmişte aramanın sorgusunu kurar ve derlenmiş hâlinin durumunu
+    /// döndürür (033); vurguyu bir sonraki içerik karesi çiziyor.
+    ///
+    /// Derleme yaprak kilidin **dışında**: uzun bir desenin DFA kurulumu
+    /// kare yolunun yuvayı beklediği süreye girmesin. Nesil her çağrıda
+    /// artıyor, yani kare yolunun ödünç aldığı eski desen geri konmuyor
+    /// ([`SearchSlot`]). Kare yalnız ekranda bir şey değişebiliyorsa
+    /// isteniyor: önceki ya da yeni sorgudan biri bir desen taşımalı — boş
+    /// sorgudan boş sorguya geçiş boşta sıfır kareyi bozmaz.
+    pub fn set_search(&self, query: &SearchQuery) -> SearchStatus {
+        let (status, pattern) = search::compile(query);
+        self.store_search(pattern);
+        status
+    }
+
+    /// Aramayı kapatır: desen düşer, bir sonraki içerik karesi vurgusuz.
+    pub fn clear_search(&self) {
+        self.store_search(None);
+    }
+
+    /// [`Session::set_search`] ile [`Session::clear_search`]'ün ortak yazımı.
+    fn store_search(&self, pattern: Option<search_engine::RegexSearch>) {
+        let active = pattern.is_some();
+        let was_active = {
+            let mut slot = lock(&self.search);
+            slot.generation = slot.generation.wrapping_add(1);
+            slot.pattern = pattern;
+            std::mem::replace(&mut slot.active, active)
+        };
+        // Kare isteği yaprak kilit **bırakıldıktan sonra** (`set_theme`
+        // emsali): `request_frame` uyandırıcıya gidiyor ve yuvayı tutarken
+        // dışarı uzanmamalı.
+        if active || was_active {
+            self.request_frame();
+        }
+    }
+
     /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve
     /// imleç sıradaki karede yeni temadan.
     ///
@@ -6161,6 +6388,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 BUDGET,
             )
@@ -6179,6 +6407,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut runs,
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -6199,6 +6428,7 @@ mod tests {
                 |_| (),
                 blocks,
                 &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -6394,6 +6624,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 DockBudget { share, cols: 80 },
             );
@@ -6538,6 +6769,7 @@ mod tests {
                     |_| (),
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
+                    &mut SearchRuns::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 );
@@ -6647,6 +6879,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -6695,6 +6928,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -6738,6 +6972,7 @@ mod tests {
                     |_| (),
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
+                    &mut SearchRuns::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -6760,6 +6995,7 @@ mod tests {
                     |_| (),
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
+                    &mut SearchRuns::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -6840,6 +7076,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -6886,6 +7123,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -6900,6 +7138,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -6933,6 +7172,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -6944,6 +7184,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -6984,6 +7225,7 @@ mod tests {
                     |_| (),
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
+                    &mut SearchRuns::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -6994,6 +7236,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7032,6 +7275,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7056,6 +7300,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7088,6 +7333,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7113,6 +7359,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7149,6 +7396,7 @@ mod tests {
             |_| (),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7175,6 +7423,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7216,6 +7465,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7286,6 +7536,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7327,6 +7578,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7367,6 +7619,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -7406,6 +7659,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7456,6 +7710,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7506,6 +7761,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7554,6 +7810,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7600,6 +7857,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7620,6 +7878,7 @@ mod tests {
                     |_| (),
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
+                    &mut SearchRuns::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 );
@@ -7634,6 +7893,7 @@ mod tests {
                     |_| (),
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
+                    &mut SearchRuns::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -7645,6 +7905,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7756,6 +8017,7 @@ mod tests {
             |_| (),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7794,6 +8056,7 @@ mod tests {
             |_| (),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7808,6 +8071,7 @@ mod tests {
             |_| (),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -7935,6 +8199,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 budget,
             );
@@ -8313,6 +8578,7 @@ mod tests {
             |_| (),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8327,6 +8593,7 @@ mod tests {
             |_| (),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8356,6 +8623,7 @@ mod tests {
             |_| (),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8385,6 +8653,7 @@ mod tests {
             |_| (),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -9932,6 +10201,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -10020,6 +10290,7 @@ mod tests {
                     |_| (),
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
+                    &mut SearchRuns::default(),
                     ScrollGlide::default(),
                     DockBudget { share, cols: 40 },
                 )
@@ -10766,6 +11037,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut runs,
+                &mut SearchRuns::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -10973,6 +11245,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         )
@@ -11533,6 +11806,7 @@ mod tests {
             |cell| cells.push(cell),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -11562,6 +11836,7 @@ mod tests {
             |cell| band.push(cell),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -11859,6 +12134,7 @@ mod tests {
             |cell| band.push(cell),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -11922,6 +12198,7 @@ mod tests {
             |_| (),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -11962,6 +12239,7 @@ mod tests {
             |cell| band.push(cell),
             &mut blocks,
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -12480,6 +12758,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             stale,
             BUDGET,
         );
@@ -12493,6 +12772,7 @@ mod tests {
             |_| (),
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
+            &mut SearchRuns::default(),
             live,
             BUDGET,
         );
@@ -12575,6 +12855,7 @@ mod tests {
                 |_| (),
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
                 glide,
                 BUDGET,
             );
@@ -14217,6 +14498,420 @@ mod tests {
             roomy > 0,
             "yarış boyunca ekran hiç taze temizlenmedi: yüklem boşta"
         );
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
+        session.shutdown();
+    }
+
+    // --- Geçmişte arama (033 phase-1) ---
+
+    /// Düz metin sorgusu; `Aa` kapalı (akıllı kip).
+    fn plain(text: &str) -> SearchQuery {
+        SearchQuery {
+            text: text.into(),
+            regex: false,
+            case_sensitive: false,
+        }
+    }
+
+    /// Hasar sormadan bu anın arama koşuları — iki liste birlikte.
+    fn search_now(session: &Session) -> (Cursor, SearchRuns) {
+        let mut runs = SearchRuns::default();
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            &mut runs,
+            ScrollGlide::default(),
+            BUDGET,
+        );
+        (cursor, runs)
+    }
+
+    /// Koşuların `(satır, ilk, son)` üçlüleri — bitleri ayrıca sorulmayan
+    /// sınamalar için.
+    fn spans(runs: &[SearchRun]) -> Vec<(u16, u16, u16)> {
+        runs.iter()
+            .map(|run| (run.row, run.first, run.last))
+            .collect()
+    }
+
+    /// Tek satırlık metin basan dock'suz oturum; kare durulmuş.
+    fn text_session(text: &str) -> Session {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!("stty -echo; printf '%s\\n' '{text}'; sleep 5"),
+            Arc::clone(&wake),
+        );
+        // Bütün mürekkep, satır sırasıyla: sarılan metin de beklenebilsin.
+        let ink: String = text.chars().filter(|c| *c != ' ').collect();
+        wait_frame(&session, &wake, |cells| {
+            cells.iter().filter_map(|cell| cell.ch).collect::<String>() == ink
+        });
+        wait_settled(&session);
+        session
+    }
+
+    #[test]
+    fn escape_prefixes_every_meta_character() {
+        assert_eq!(search::escape("a.b"), "a\\.b");
+        assert_eq!(search::escape("(x)|y"), "\\(x\\)\\|y");
+        assert_eq!(search::escape("düz metin"), "düz metin");
+    }
+
+    #[test]
+    fn a_plain_query_matches_every_meta_character_literally() {
+        // **Kaçırma kümesinin bekçisi** (Karar 11): küme `regex-syntax`'ın
+        // meta kümesinin kopyası ve eksik bir karakter ya desen hatası
+        // (`(`) ya da yanlış eşleşme (`.` her harfi) doğururdu. Satırda her
+        // meta karakter bir kez geçiyor; düz sorgu tam onun sütununu bulmalı.
+        let line = "a\\.+*?()|[]{}^$#&-~";
+        let session = text_session(line);
+        for (col, ch) in line.chars().enumerate() {
+            let status = session.set_search(&plain(&ch.to_string()));
+            assert_eq!(status, SearchStatus::Ready, "{ch:?}");
+            let (_, runs) = search_now(&session);
+            let col = col as u16;
+            assert_eq!(spans(runs.as_slice()), [(0, col, col)], "{ch:?}");
+        }
+        // Çok karakterli düz metin de tek eşleşme.
+        session.set_search(&plain("()|"));
+        let (_, runs) = search_now(&session);
+        assert_eq!(spans(runs.as_slice()), [(0, 6, 8)]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_case_is_smart_unless_forced() {
+        let session = text_session("Foo foo FOO");
+        session.set_search(&plain("foo"));
+        let (_, runs) = search_now(&session);
+        assert_eq!(
+            spans(runs.as_slice()),
+            [(0, 0, 2), (0, 4, 6), (0, 8, 10)],
+            "küçük harfli sorgu duyarsız olmalı"
+        );
+        session.set_search(&plain("Foo"));
+        let (_, runs) = search_now(&session);
+        assert_eq!(
+            spans(runs.as_slice()),
+            [(0, 0, 2)],
+            "büyük harf duyarlılık açar"
+        );
+        session.set_search(&SearchQuery {
+            case_sensitive: true,
+            ..plain("foo")
+        });
+        let (_, runs) = search_now(&session);
+        assert_eq!(spans(runs.as_slice()), [(0, 4, 6)], "Aa her zaman duyarlı");
+        // Regex kipinde de aynı önek.
+        session.set_search(&SearchQuery {
+            text: "f.o".into(),
+            regex: true,
+            case_sensitive: true,
+        });
+        let (_, runs) = search_now(&session);
+        assert_eq!(spans(runs.as_slice()), [(0, 4, 6)]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn an_invalid_or_empty_query_scans_nothing() {
+        let session = text_session("abc (x)");
+        let invalid = SearchQuery {
+            text: "(".into(),
+            regex: true,
+            case_sensitive: false,
+        };
+        assert_eq!(session.set_search(&invalid), SearchStatus::Invalid);
+        let (_, runs) = search_now(&session);
+        assert!(runs.as_slice().is_empty(), "{runs:?}");
+        assert_eq!(session.set_search(&plain("")), SearchStatus::Empty);
+        let (_, runs) = search_now(&session);
+        assert!(runs.as_slice().is_empty(), "{runs:?}");
+        // Aynı metin düz sorguda geçerli.
+        assert_eq!(session.set_search(&plain("(")), SearchStatus::Ready);
+        let (_, runs) = search_now(&session);
+        assert_eq!(spans(runs.as_slice()), [(0, 4, 4)]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn empty_and_blank_matches_are_not_highlighted() {
+        // Boş eşleşme (`^`, `z*`) vurgulanmaz (Karar 11) ve yalnız boşluktan
+        // oluşan eşleşme de: vurgu içerik yaratmaz.
+        let session = text_session("abc def");
+        for pattern in ["^", "z*", "\\s+", " "] {
+            session.set_search(&SearchQuery {
+                text: pattern.into(),
+                regex: true,
+                case_sensitive: false,
+            });
+            let (_, runs) = search_now(&session);
+            assert!(runs.as_slice().is_empty(), "{pattern:?}: {runs:?}");
+            assert!(runs.fill_slice().is_empty(), "{pattern:?}: {runs:?}");
+        }
+        // Boşluk mürekkepli bir eşleşmenin **içinde** vurgulanıyor.
+        session.set_search(&plain("c d"));
+        let (_, runs) = search_now(&session);
+        assert_eq!(spans(runs.as_slice()), [(0, 2, 4)]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn search_is_empty_while_off_and_survives_across_frames() {
+        let session = text_session("needle");
+        let (_, runs) = search_now(&session);
+        assert!(
+            runs.as_slice().is_empty(),
+            "arama kapalıyken koşu: {runs:?}"
+        );
+        session.set_search(&plain("needle"));
+        // Desen ödünç alınıp geri konuyor: ikinci kare de buluyor.
+        for _ in 0..2 {
+            let (_, runs) = search_now(&session);
+            let run = runs.as_slice();
+            assert_eq!(spans(run), [(0, 0, 5)]);
+            assert!(run[0].current && !run[0].continues, "{run:?}");
+        }
+        session.clear_search();
+        let (_, runs) = search_now(&session);
+        assert!(
+            runs.as_slice().is_empty(),
+            "kapandıktan sonra koşu: {runs:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn two_matches_on_one_row_are_two_runs_and_the_lowest_is_current() {
+        // Bantlı dip ([`gapped_session`]): ızgarada `22`…`26`, bantta
+        // `17`…`21`. `2` bantta `20` ve `21`'in başında, ızgarada her satırın
+        // başında ve `22`'de iki kez — ayrı eşleşmeler, ayrı koşular.
+        let (session, _wake) = gapped_session(true);
+        session.set_search(&plain("2"));
+        let (cursor, runs) = search_now(&session);
+        assert_eq!(cursor.fill, 5, "{cursor:?}");
+        assert_eq!(spans(runs.fill_slice()), [(3, 0, 0), (4, 0, 0)], "{runs:?}");
+        assert_eq!(
+            spans(runs.as_slice()),
+            [
+                (0, 0, 0),
+                (0, 1, 1),
+                (1, 0, 0),
+                (2, 0, 0),
+                (3, 0, 0),
+                (4, 0, 0)
+            ],
+            "{runs:?}"
+        );
+        // Geçerli: görünürdeki en alttaki, yani `26`'nın `2`'si — tek koşu.
+        let current: Vec<_> = runs
+            .as_slice()
+            .iter()
+            .chain(runs.fill_slice())
+            .filter(|run| run.current)
+            .map(|run| (run.row, run.first))
+            .collect();
+        assert_eq!(current, [(4, 0)], "{runs:?}");
+        // Bantta tek satır: `19` fill-yerel ikinci satırda.
+        session.set_search(&plain("19"));
+        let (_, runs) = search_now(&session);
+        assert_eq!(spans(runs.fill_slice()), [(2, 0, 1)], "{runs:?}");
+        assert!(runs.as_slice().is_empty(), "{runs:?}");
+        assert!(runs.fill_slice()[0].current, "{runs:?}");
+    }
+
+    #[test]
+    fn a_scrolled_window_and_its_top_row_are_searched() {
+        // Kaydırılmış pencere (ofset 2): ekranda `20`…`29`, kesrin tepe
+        // satırı `19` kanalın fill-yerel `0`'ında ([`Cursor::top_row`]).
+        let (session, _wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        smooth(&session, 2.5, ScrollIntent::Direct);
+        session.set_search(&plain("25"));
+        let (cursor, runs) = search_now(&session);
+        assert_eq!(
+            (cursor.display_offset, cursor.top_row),
+            (2, 1),
+            "{cursor:?}"
+        );
+        assert_eq!(spans(runs.as_slice()), [(5, 0, 1)], "{runs:?}");
+        assert!(runs.fill_slice().is_empty(), "{runs:?}");
+        session.set_search(&plain("19"));
+        let (_, runs) = search_now(&session);
+        assert_eq!(spans(runs.fill_slice()), [(0, 0, 1)], "{runs:?}");
+        assert!(runs.as_slice().is_empty(), "{runs:?}");
+        // Pencerenin dışındaki satır koşu vermiyor.
+        session.set_search(&plain("15"));
+        let (_, runs) = search_now(&session);
+        assert!(runs.as_slice().is_empty() && runs.fill_slice().is_empty());
+    }
+
+    #[test]
+    fn a_wrapped_match_is_split_per_row_and_continues() {
+        // 40 sütun: 38 `x` + `abcd` → `ab` 0. satırın sonunda, `cd` 1.
+        // satırın başında. Tek eşleşme, iki koşu, ikincisi devam.
+        let text = format!("{}abcd", "x".repeat(38));
+        let session = text_session(&text);
+        session.set_search(&plain("abcd"));
+        let (_, runs) = search_now(&session);
+        assert_eq!(
+            runs.as_slice(),
+            [
+                SearchRun {
+                    row: 0,
+                    first: 38,
+                    last: 39,
+                    current: true,
+                    continues: false,
+                },
+                SearchRun {
+                    row: 1,
+                    first: 0,
+                    last: 1,
+                    current: true,
+                    continues: true,
+                },
+            ]
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_match_that_starts_above_the_window_is_found() {
+        // Sarılmış satırın başı geçmişte, kuyruğu ekranın tepesinde: tarama
+        // görünür tepeden başlasaydı `abcd`'yi hiç bulmazdı (`search::scan`'in
+        // mantıksal satır genişletmesi). 10 satır: sarılı iki satır + `1`…`8`
+        // + imleç = 11, yani sarılı satırın ilk yarısı geçmişte.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            &format!(
+                "stty -echo; printf '%s\\n' '{}abcd'; seq 1 8; sleep 5",
+                "x".repeat(38)
+            ),
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| row_text(cells, 8) == "8");
+        wait_settled(&session);
+        session.set_search(&plain("abcd"));
+        let (cursor, runs) = search_now(&session);
+        assert_eq!((cursor.fill, cursor.top_row), (0, 0), "{cursor:?}");
+        assert_eq!(
+            runs.as_slice(),
+            [SearchRun {
+                row: 0,
+                first: 0,
+                last: 1,
+                current: true,
+                continues: true,
+            }]
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_hard_line_break_ends_every_match() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf 'ab\\ncd\\n'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| row_text(cells, 1) == "cd");
+        session.set_search(&SearchQuery {
+            text: "b.*c".into(),
+            regex: true,
+            case_sensitive: false,
+        });
+        let (_, runs) = search_now(&session);
+        assert!(runs.as_slice().is_empty(), "{runs:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_suppressed_input_line_is_not_searched() {
+        // Izgara: `$ cmd1` (0), `out` (1), `$ ls -la` (2, dock'ta; ızgarada
+        // bastırılmış). Görünmeyen satır vurgu almaz (Karar 8).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_typing_session(&mirror("bHMgLWxh", 6), Arc::clone(&wake));
+        wait_mirror(&session, DockStatus::Live);
+        session.set_search(&plain("ls"));
+        let (cursor, runs) = search_now(&session);
+        assert!(cursor.caret_in_dock, "{cursor:?}");
+        assert!(
+            runs.as_slice().is_empty(),
+            "bastırılan satır arandı: {runs:?}"
+        );
+        session.set_search(&plain("cmd"));
+        let (_, runs) = search_now(&session);
+        assert_eq!(spans(runs.as_slice()), [(0, 2, 4)], "{runs:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_alternate_screen_searches_its_visible_grid() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf 'hello\\n\\033[?1049h\\033[Hvim hello'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| row_text(cells, 0) == "vimhello");
+        session.set_search(&plain("hello"));
+        let (cursor, runs) = search_now(&session);
+        assert_eq!(cursor.content_rows, cursor.rows, "{cursor:?}");
+        assert_eq!(spans(runs.as_slice()), [(0, 4, 8)], "{runs:?}");
+        assert!(runs.fill_slice().is_empty(), "{runs:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_set_search_and_frame() {
+        // Desen kare boyunca **ödünçte** ([`SearchSlot`]) ve sorgu ana
+        // thread'den her an değişebiliyor. Kilit sırası bozulursa sınama
+        // asılı kalır; geri koyma kuralı bozulursa son sorgu kaybolur ya da
+        // eski desen yenisinin yerine geçer — sondaki iki kare onu soruyor.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "stty -echo; while :; do printf 'alpha beta\\n'; sleep 0.01; done",
+            Arc::clone(&wake),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let writer = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut sets = 0u64;
+                while Instant::now() < deadline {
+                    match sets % 3 {
+                        0 => {
+                            session.set_search(&plain("alpha"));
+                        }
+                        1 => {
+                            session.set_search(&plain("beta"));
+                        }
+                        _ => session.clear_search(),
+                    }
+                    sets += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                sets
+            })
+        };
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            search_now(&session);
+            frames += 1;
+        }
+        assert!(writer.join().unwrap() > 0, "hiç sorgu yazılmadı");
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
+        session.set_search(&plain("beta"));
+        for _ in 0..2 {
+            let (_, runs) = search_now(&session);
+            assert!(
+                runs.as_slice().iter().all(|run| run.first == 6),
+                "eski desen yenisinin yerine geçti: {runs:?}"
+            );
+            assert!(!runs.as_slice().is_empty(), "son sorgu kayboldu");
+        }
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }

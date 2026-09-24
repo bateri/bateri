@@ -62,5 +62,6 @@ _Requirements: R8_
 - [ ] `Wake` haberi ve sürücü
 - [ ] Geçerli eşleşmenin kayması
 - [ ] `docs/OLCUMLER.md` bekleyen iddia, `CLAUDE.md` sözleşme cümleleri
+- [ ] Dizinin eşleşme kümesi vurgununkiyle aynı (phase-1'den devir): bastırılan giriş satırına değen ve mürekkepsiz eşleşme sayılmaz (`suppressed_rows`, `search::has_ink`); bekçisi aynı ekranda vurgu ile dizinin sayısını karşılaştırır
 - [ ] Test: yukarıdaki senaryolar
 - [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)

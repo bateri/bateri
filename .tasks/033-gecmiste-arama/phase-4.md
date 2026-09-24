@@ -74,5 +74,6 @@ _Requirements: R4, R5, R6, R7_
 - [ ] Alan delegesi: ⏎/⇧⏎/Esc
 - [ ] Odak iki bit
 - [ ] `search_next` + reveal + süzülme; Esc→seçim; ⌘E + find panosu
+- [ ] Gezinmenin (`search_next`) hedefi vurgunun kümesinden (phase-1'den devir): bastırılan satıra değen ya da mürekkepsiz eşleşme atlanır; desen `SearchSlot`'tan ödünç ya da ayrı bir kopya (yuva bugün tek desen tutuyor ve kare onu ödünç alıyor); ⌘E'nin kaçırması `bt_core::escape_search`
 - [ ] Test: yukarıdaki hermetik senaryolar
 - [ ] Doğrulama geçti (`make hepsi` + `make duman`)
