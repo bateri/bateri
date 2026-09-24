@@ -74,8 +74,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    Blocks, CaretStyle, Cursor, CursorMotion, DOCK_TEXT_COL, DirtyFlag, DockCols, DockContext,
-    DockState, Erase, Keypress, LinearRgba, SelectionRuns, Session, Theme,
+    Blocks, CaretStyle, Cursor, CursorMotion, DOCK_TEXT_COL, DirtyFlag, DockBudget, DockCols,
+    DockContext, DockState, Erase, Keypress, LinearRgba, SelectionRuns, Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -91,7 +91,7 @@ use objc2_quartz_core::{
 };
 
 use crate::blink::Blink;
-use crate::frame::Frame;
+use crate::frame::{DOCK_ROWS, Frame};
 use crate::glyph_fx::GlyphFx;
 use crate::motion::Motion;
 use crate::renderer::{CellMetrics, Completion};
@@ -339,11 +339,14 @@ impl Waker {
 #[derive(Clone, Default)]
 pub struct Origin(Rc<Cell<Drawn>>);
 
-/// [`Origin`]'in gövdesi: tek karenin iki sayısı, birlikte yayınlanır.
+/// [`Origin`]'in gövdesi: tek karenin geometrisi, birlikte yayınlanır.
 #[derive(Clone, Copy, Default)]
 struct Drawn {
     px: f32,
     fill_rows: u16,
+    /// Dock'un giriş bloğunun tepesi (fiziksel piksel, üstten) ve giriş
+    /// satırı sayısı (032); `None` → bu karede dock yok.
+    dock: Option<(f32, u16)>,
 }
 
 impl Origin {
@@ -362,9 +365,26 @@ impl Origin {
         self.0.get().fill_rows
     }
 
+    /// Çizilen karenin dock geometrisi: giriş bloğunun tepesi (**fiziksel
+    /// piksel**, dokunun tepesinden) ve giriş satırı sayısı; `None` → dock
+    /// yok ya da henüz hiç çizilmedi.
+    ///
+    /// Orijinle **aynı gövdede** ve aynı sebeple (032): bant büyürken ızgara
+    /// yukarı, giriş bloğu satır satır genişliyor ve ikisi ayrı karelerden
+    /// yayınlansaydı tıklama orijini yeni, bloğu eski bir kareye göre
+    /// çevirebilirdi. Değer **yerleşimin** (`Frame::dock_hit`): metin dibe
+    /// yaslı ve animasyon boyunca yerinde duruyor.
+    pub fn dock(&self) -> Option<(f32, u16)> {
+        self.0.get().dock
+    }
+
     /// Yalnız kare yolu yazar; `pub` değil ve olmamalı.
-    fn set(&self, px: f32, fill_rows: u16) {
-        self.0.set(Drawn { px, fill_rows });
+    fn set(&self, px: f32, fill_rows: u16, dock: Option<(f32, u16)>) {
+        self.0.set(Drawn {
+            px,
+            fill_rows,
+            dock,
+        });
     }
 }
 
@@ -882,13 +902,14 @@ define_class!(
                     iv.slide_frames.set(iv.slide_frames.get() + 1);
                 }
                 let theme = iv.theme.get();
+                let bottom = update.drawable().texture().height() as f32;
                 // **Ötelemenin ikinci yazma noktası** (R2.5). Bu kolda
                 // `frame()` de `clear` de çağrılmıyor, yani öteleme
                 // **korunuyor** — ama animasyonun tanımı iki içerik karesi
                 // arasında *değişmek* ve korunan bir değer değişemez.
                 // `move_caret`'dan **önce**: imlecin dikdörtgeni bu ötelemeyi
                 // pişiriyor.
-                self.set_origin(&mut frame, motion.origin());
+                self.set_origin(&mut frame, motion, bottom);
                 // Liste korunuyor, yalnız imleç taşınıyor: grid kirli değil,
                 // yani glyph ve kural listeleri hâlâ geçerli. `Term` kilidine
                 // saniyede 120 kez girmek "render yolu bloklanmaz" ile tam
@@ -1016,7 +1037,10 @@ define_class!(
             // doldurma bandı kapatıyor (`Session::set_grid_top`). Değer bu
             // karenin `advance`'inden önceki konum — yerleşmeye giden kayma
             // için gereğinden bir parça büyük, yani fazlası ekranın dışında.
-            let grid_top = motion.origin();
+            //
+            // **Bandın fazlası düşülmüş** (032): ızgara çizimde bant kadar
+            // yukarıda ve açılan şerit o kadar yukarıda.
+            let grid_top = motion.origin() - motion.band();
             // **Geçen süre taramadan önce işleniyor** ve sebebi süzülme: payı
             // konumun bu karedeki değişimi ve `frame()`'in argümanı, yani
             // `frame()`'den önce belli olmak zorunda. İmleç ve öteleme için
@@ -1036,6 +1060,13 @@ define_class!(
                 // Pay **uyandırmıyor**: kareyi zaten bu callback çiziyor
                 // (`Session::frame`). Nesli değiştiyse orada düşüyor.
                 glide,
+                // **Tavan henüz tek satır** (032 phase-2): bant değişken ama
+                // görünmez; oranı (`DOCK_MAX_SHARE`) sarma getiriyor. Sarmanın
+                // genişliği ızgaranınki — dock aynı sütunları kullanıyor.
+                DockBudget {
+                    rows: 1,
+                    cols: iv.cols.get(),
+                },
             );
             // **Nesil ikinci kez, `frame()`'den sonra**: `frame()` kesri
             // geçersiz bulunca (`CSI 3 J`, alternatif ekran, fare kipi) nesli
@@ -1122,28 +1153,25 @@ define_class!(
             // oluyor. Dock bu yüzden kendi kare talebini taşımıyor — boşta
             // sıfır kare sözleşmesi dokunulmadan kalıyor.
             let dock_rows = iv.dock_rows.get();
-            // Dock bandının tepesi, **pencere uzayında**: caret'in hedefi de
-            // çizim yuvası da ona bağlı. Yükseklik dokudan okunuyor, çünkü tek
+            // Pencerenin dibi, **pencere uzayında**: dock'un bandı da caret'in
+            // hedefi de ona yaslı. Yükseklik dokudan okunuyor, çünkü tek
             // doğru kaynağı o — `rows * cell_h` artık şeridi (yüksekliğin
             // hücre boyuna bölünmesinden artan piksel) görmezdi ve caret bir
             // hücreye kadar yukarıda dururdu. `Renderer::encode_dock` viewport
             // orijinini aynı çıkarmayla kuruyor, yani ikisi aynı satır.
             let viewport_height = update.drawable().texture().height() as f32;
-            let dock_top = viewport_height - crate::frame::dock_px(dock_rows, iv.cell.get());
             let mut dock_caret = None;
             // Yazım efektlerinin saati içerik karesinde de ilerliyor: hızlı
             // yazımda her callback hasar buluyor ve hareket kolu hiç koşmuyor.
             let mut glyph_fx = iv.glyph_fx.borrow_mut();
             glyph_fx.advance(dt);
             if dock_rows > 0 {
-                // **Yalnız dock varken yazılıyor.** `dock_rows == 0`'da formül
-                // tam `viewport_height` verir ve o bir eşik değil pencerenin
-                // dibi: dibe değen bir caret dock yuvasına düşer, `encode_dock`
-                // da dock olmadığı için erken döner — caret sessizce
-                // kaybolurdu. Yazılmazsa `clear`'ın koyduğu sonsuz kalıyor,
-                // yani kapı yapısal (`Frame::dock_top_px`'in doc'u bunu
-                // söylüyor ve söylediği doğru olmak zorunda).
-                frame.set_dock_top(dock_top);
+                // **Yerleşim hücrelerden önce** (`Frame::set_dock_rows`): giriş
+                // satırları + bağlam satırı, `frame()`'in bastırmayla aynı
+                // okumada verdiği sayıdan. Bandın tepesi burada yazılmıyor —
+                // bant animasyonun değeri ve `sync`'ten sonra
+                // (`LinkDelegate::set_origin`).
+                frame.set_dock_rows(cursor.input_rows.saturating_add(1));
                 let mut dock_state = iv.dock.borrow_mut();
                 let mut dock_context = iv.dock_context.borrow_mut();
                 // **İkinci sink yerel bir yuvaya akıyor**, doğrudan `Frame`'e
@@ -1165,6 +1193,9 @@ define_class!(
                         // görmüyor.
                         context: crate::frame::context_cols(iv.cols.get(), iv.cell.get()),
                     },
+                    // Sayı hesaplandığı yerden geçiyor, dock yeniden
+                    // türetmiyor (`caret_in_dock`'un emsali).
+                    cursor.input_rows,
                     &mut dock_state,
                     &mut dock_context,
                     cursor.caret_in_dock,
@@ -1189,7 +1220,7 @@ define_class!(
                 frame.push_dock_sigil(dock.sigil);
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
-                frame.open_dock(dock_rows, dock.ground, dock.separator);
+                frame.open_dock(dock.ground, dock.separator);
             } else {
                 // Dock yok (alternatif ekran): efektin konusu da yok.
                 glyph_fx.finish();
@@ -1210,14 +1241,25 @@ define_class!(
             // kalıyordu (set kapısı, `/code-review`). Sıra yine de yazılı
             // duruyor: caret'in iki yerde çizilmesindense yanlış yerde
             // çizilmesi görünür bir kusurdur.
+            //
+            // **Bandın fazlası iki hedefte** (032): ızgaranın caret'i ızgarayla
+            // birlikte bandın **hedef** fazlası kadar yukarıda, dock'unki dibe
+            // yaslı giriş satırında. Bu phase'de caret giriş bloğunun ilk
+            // satırında — tek satır.
+            let band_target = band_target(cursor, dock_rows);
             let caret = dock_caret
-                .map(|(col, text)| (dock_caret_at(col, dock_top, iv.cell.get()), text))
+                .map(|(col, text)| {
+                    let at =
+                        dock_caret_at(col, 0, cursor.input_rows, viewport_height, iv.cell.get());
+                    (at, text)
+                })
                 .or_else(|| {
                     cursor.visible.then(|| {
                         (
                             [
                                 f32::from(cursor.col),
-                                f32::from(cursor.row.saturating_add(origin_target(cursor))),
+                                f32::from(cursor.row) + f32::from(origin_target(cursor))
+                                    - f32::from(band_target),
                             ],
                             cursor.text,
                         )
@@ -1271,6 +1313,7 @@ define_class!(
             motion.sync(
                 caret.map(|(at, _)| at),
                 origin_target(cursor),
+                band_target,
                 cursor.display_offset,
                 // Geometri bayrağı burada **tüketiliyor**: tüketilmeseydi
                 // bir pencere sürüklemesinden sonraki her kare snap'lerdi.
@@ -1287,7 +1330,7 @@ define_class!(
             // hedef değil animasyonun bu karedeki yeri. `push_caret`'ten
             // **önce** olmak da zorunlu — caret'in dikdörtgeni bu ötelemeyi
             // pişiriyor.
-            self.set_origin(&mut frame, motion.origin());
+            self.set_origin(&mut frame, motion, viewport_height);
             if let (Some(at), Some((_, text))) = (motion.position(), caret) {
                 frame.push_caret(
                     at,
@@ -1411,8 +1454,13 @@ impl LinkDelegate {
     /// [`Origin`]'e ancak `draw` `Ok` dönünce yazılıyor
     /// ([`Self::publish_origin`]): encode edilemeyen karede ekranda önceki
     /// kare kalır ve tıklama onun ötelemesine göre çevrilmeli.
-    fn set_origin(&self, frame: &mut Frame, origin_rows: f32) {
-        frame.set_origin_rows(origin_rows);
+    ///
+    /// **Bandın birleştiği yer de burası** (032): bandın o anki boyu da iki
+    /// kare yolundan buraya yazılıyor ve ızgaranın çizilen orijini
+    /// `origin − band` ([`compose`]). Öteleme `u16` hedefli kalıyor, işaretli
+    /// bir hedefe geçmiyor — birleştirme yalnız çizimde.
+    fn set_origin(&self, frame: &mut Frame, motion: Motion, bottom_px: f32) {
+        compose(frame, motion, bottom_px, self.ivars().dock_rows.get() > 0);
     }
 
     /// Çizilen ötelemeyi **ve doldurma bandının boyunu** fare eşlemesine
@@ -1432,7 +1480,7 @@ impl LinkDelegate {
     fn publish_origin(&self, frame: &Frame) {
         self.ivars()
             .origin
-            .set(frame.origin_px(), frame.fill_rows());
+            .set(frame.origin_px(), frame.fill_rows(), frame.dock_hit());
     }
 
     /// **Saat**: kare talebinin üçüncü sebebi (modül başlığı).
@@ -1528,6 +1576,40 @@ fn origin_target(cursor: Cursor) -> u16 {
     cursor.rows.saturating_sub(cursor.content_rows)
 }
 
+/// Bu karenin bant **fazlası** hedefi, satır: çizilecek giriş satırlarının
+/// PTY payına sığmayanı (032). Dock'u olmayan karede (alternatif ekran,
+/// entegrasyonsuz kabuk) sıfır — bant yok, ızgara ötelenmiyor.
+fn band_target(cursor: Cursor, dock_rows: u16) -> u16 {
+    if dock_rows == 0 {
+        return 0;
+    }
+    cursor.input_rows.saturating_sub(DOCK_ROWS - 1)
+}
+
+/// Kareye bandın ve ötelemenin **o anki** değerini yazar — iki kare yolunun
+/// ortak noktası ([`LinkDelegate::set_origin`]).
+///
+/// Sıra: önce bant, sonra öteleme; `Frame::origin_px` ikisini okuma anında
+/// birleştiriyor (`öteleme − bandın fazlası`), yani sıra sonucu
+/// değiştirmiyor ama bandın tepesi (`Frame::dock_top_px`) caret'ten
+/// **önce** yazılmak zorunda — caret'in yuvası ona bakıyor.
+///
+/// Dock yoksa bant hiç yazılmıyor: `clear`'ın bıraktığı "söylenmedi"
+/// ızgaraya sıfır fazla katıyor ve caret'in yuva sınırı sonsuzda kalıyor.
+/// Ayrı bir fonksiyon, çünkü bileşim bekçisi onu `LinkDelegate`'siz
+/// koşturuyor.
+///
+/// Kapı pencerenin dock'u **ve** bu karenin açık yüzeyi: alternatif ekrandan
+/// çıkışta pencerenin payı geri gelmiş ama son içerik karesi dock'suz olabilir
+/// ve o arada koşan hareket karesi bandı yazsaydı ızgaranın alt satırındaki
+/// caret çizilmeyen dock yuvasına düşüp kaybolurdu (`/code-review`).
+fn compose(frame: &mut Frame, motion: Motion, bottom_px: f32, dock: bool) {
+    if dock && frame.dock().is_some() {
+        frame.set_dock_band(bottom_px, motion.band());
+    }
+    frame.set_origin_rows(motion.origin());
+}
+
 /// Dock caret'inin hedefi, **ekran hücresi** cinsinden — [`Motion`]'ın uzayı.
 ///
 /// Dikey bileşen tam sayı **değil** ve olamaz: dock bandı nefes payı kadar
@@ -1539,10 +1621,21 @@ fn origin_target(cursor: Cursor) -> u16 {
 /// **Neden piksel değil de hücre:** `Motion`'ın yay sabitleri ve durma eşiği
 /// hücre biriminde ayarlı. Uzayı piksele çevirmek o eşiği sessizce değiştirir
 /// ve animasyonun hissi ölçülmemiş bir sayıya bağlanırdı.
-fn dock_caret_at(col: u16, dock_top_px: f32, cell: CellMetrics) -> [f32; 2] {
+///
+/// **Dibe yaslı** (032): `row`. giriş satırının tepesi, `input_rows` satırlık
+/// bir bandın dibe yaslı yerleşiminde — bandın o anki (animasyonlu) boyundan
+/// değil, çünkü hücreler yerleşimde duruyor ve caret onların üstünde.
+fn dock_caret_at(
+    col: u16,
+    row: u16,
+    input_rows: u16,
+    bottom_px: f32,
+    cell: CellMetrics,
+) -> [f32; 2] {
     let cell_h = f32::from(cell.cell_px().1);
     let pad = f32::from(cell.gutter_px());
-    [f32::from(col), (dock_top_px + pad) / cell_h]
+    let top = bottom_px - crate::frame::band_px(input_rows, cell);
+    [f32::from(col), (top + pad) / cell_h + f32::from(row)]
 }
 
 /// Ekranın tazeleme ritmine bağlı kare sürücüsü.
@@ -2141,13 +2234,124 @@ mod tests {
         let dock_top = 600.0 - crate::frame::dock_px(2, cell);
         assert_eq!(dock_top, 532.0);
 
-        let [col, row] = dock_caret_at(3, dock_top, cell);
+        let [col, row] = dock_caret_at(3, 0, 1, 600.0, cell);
         assert_eq!(col, 3.0, "sütun ızgarayla aynı uzayda");
         // Caret bandın **ilk satırında**, yani dış payın altında: (532+8)/18.
         assert_eq!(row, 540.0 / 18.0);
         // Ve o satır ızgaranın son satırının (548/18 = 30.4) **altında**:
         // yuvarlansaydı ikisi çakışırdı.
         assert!(row > dock_top / 18.0, "caret banda inmedi");
+
+        // **Dibe yaslı** (032): üç giriş satırlık bantta bandın tepesi iki
+        // satır yukarıda (600 − 104 = 496), ilk satır (496+8)/18'de ve **son**
+        // satır tek satırlık bantın satırıyla aynı yerde — bant yukarı
+        // büyüyor, caret'in yazdığı satır yerinden oynamıyor.
+        assert_eq!(dock_caret_at(3, 0, 3, 600.0, cell)[1], 504.0 / 18.0);
+        assert_eq!(dock_caret_at(3, 2, 3, 600.0, cell)[1], row);
+    }
+
+    #[test]
+    fn the_grid_the_fill_band_and_the_dock_band_meet_in_every_frame() {
+        // **Bileşim bekçisi** (032 phase-2, `n = 3`): ızgaranın alt kenarı,
+        // doldurma bandı ve dock bandının üst kenarı **aynı karede**
+        // çakışıyor — animasyonun ortasında da. Bileşenleri ayrı ayrı sınamak
+        // yetmez: bant ve öteleme iki ayrı animatör, birleştikleri yer çizim
+        // (`compose`) ve iki ayrı yuvarlama bir piksel ayrışabilirdi.
+        //
+        // @1x, 9×18 hücre, pay 8, 600 px pencere: PTY payı `2·18 + 2·8 + 16 =
+        // 68`, ızgara `⌊532/18⌋ = 29` satır ve artık şerit 10 px. Şerit bant
+        // büyürken de 10 px kalmalı: ızgara bandla birlikte yukarı gidiyor.
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
+        const BOTTOM: f32 = 600.0;
+        const ROWS: f32 = 29.0;
+        const FILL: u16 = 2;
+        let strip = BOTTOM - crate::frame::dock_px(DOCK_ROWS, cell) - ROWS * 18.0;
+        assert_eq!(strip, 10.0);
+
+        // İçerik tabana yaslı (öteleme 5), bant tek satırda; sonra dock üç
+        // giriş satırı istiyor: bandın fazlası 0 → 2.
+        let mut motion = Motion::default();
+        motion.sync(Some([0.0, 30.0]), 5, 0, 0, false, false);
+        motion.sync(Some([0.0, 30.0]), 5, 2, 0, false, false);
+        let mut frames = 0;
+        let mut mid = false;
+        loop {
+            let mut frame = Frame::default();
+            frame.clear(cell, CaretStyle::default());
+            frame.set_dock_rows(4);
+            frame.set_fill_rows(FILL);
+            frame.open_dock(
+                Theme::BATERI.background_linear(),
+                Theme::BATERI.accent_linear(),
+            );
+            compose(&mut frame, motion, BOTTOM, true);
+
+            // İçeriğin alt kenarı: orijin + dolu satırlar (`29 − 5`).
+            let grid_bottom = frame.origin_px() + (ROWS - 5.0) * 18.0;
+            let band_top = BOTTOM - frame.dock_band_px();
+            assert_eq!(
+                band_top - grid_bottom,
+                strip,
+                "kare {frames}: ızgara ile bant ayrıştı (bant {})",
+                motion.band()
+            );
+            assert_eq!(
+                frame.fill_origin_px() + f32::from(FILL) * 18.0,
+                frame.origin_px(),
+                "kare {frames}: doldurma bandı ızgaradan koptu"
+            );
+            mid |= motion.band() > 0.0 && motion.band() < 2.0;
+            if motion.settled() {
+                break;
+            }
+            motion.advance(1.0 / 120.0);
+            frames += 1;
+            assert!(frames < 1000, "bant yerleşmedi");
+        }
+        assert!(mid, "animasyonun ortası hiç sınanmadı");
+        // Yerleşince bant yerleşimin boyunda ve ızgara iki satır yukarıda.
+        let mut frame = Frame::default();
+        frame.clear(cell, CaretStyle::default());
+        frame.set_dock_rows(4);
+        frame.open_dock(
+            Theme::BATERI.background_linear(),
+            Theme::BATERI.accent_linear(),
+        );
+        compose(&mut frame, motion, BOTTOM, true);
+        assert_eq!(frame.dock_band_px(), frame.dock_layout_px());
+        assert_eq!(frame.origin_px(), (5.0 - 2.0) * 18.0);
+    }
+
+    #[test]
+    fn a_full_grid_is_clipped_from_the_top_while_the_band_is_tall() {
+        // Dolu ızgarada (öteleme 0) bant büyüyünce orijin **negatife** iniyor
+        // ve ızgaranın tepesi pencerenin dışında kalıyor — geçici, giriş
+        // bitince döner. Fare aynı orijini okuyor (`Origin::px`), yani
+        // görünen satıra tıklanan nokta doğru satır (`point_to_cell`'in
+        // negatif orijin kolu).
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
+        let mut motion = Motion::default();
+        motion.sync(None, 0, 2, 0, false, false);
+        let mut frame = Frame::default();
+        frame.clear(cell, CaretStyle::default());
+        frame.set_dock_rows(4);
+        frame.open_dock(
+            Theme::BATERI.background_linear(),
+            Theme::BATERI.accent_linear(),
+        );
+        compose(&mut frame, motion, 600.0, true);
+        assert_eq!(frame.origin_px(), -36.0);
+        // Dock'suz pencerede bant hiç yazılmıyor: orijin yalnız öteleme.
+        let mut frame = Frame::default();
+        frame.clear(cell, CaretStyle::default());
+        compose(&mut frame, motion, 600.0, false);
+        assert_eq!(frame.origin_px(), 0.0);
+        // Pencerenin payı var ama bu karenin yüzeyi kapalı (vim'den çıkışın
+        // arası): bant yazılmıyor, caret'in yuva sınırı sonsuzda kalıyor.
+        let mut frame = Frame::default();
+        frame.clear(cell, CaretStyle::default());
+        compose(&mut frame, motion, 600.0, true);
+        assert_eq!(frame.origin_px(), 0.0, "yüzeysiz karede bant yazıldı");
     }
 
     #[test]

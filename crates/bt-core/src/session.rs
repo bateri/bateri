@@ -60,7 +60,7 @@ use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Handler};
 use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
-use crate::dock::{self, Dock, DockCols, DockEdit, DockPoint};
+use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
 use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
@@ -242,6 +242,20 @@ pub struct Cursor {
     /// gizlemesiyle de, geçmişe kaydırmayla da görünmez olur ve o hâllerde
     /// devralan kimse yoktur.
     pub caret_in_dock: bool,
+    /// Dock'un bu karede çizeceği **giriş** satırı sayısı; bağlam satırı
+    /// sayılmıyor. Her zaman `≥ 1` ve verilen bütçenin ([`DockBudget::rows`])
+    /// altında.
+    ///
+    /// Bir **sınır kaydı**, grid hücresi değil: bandın çizilen yüksekliği
+    /// (`bt-gpu`) ve dock'un hücrelerinin yerleşimi ([`Session::dock`]) aynı
+    /// sayıyı okuyor ve sayı bastırma kararıyla **aynı okumada** doğuyor
+    /// (`caret_in_dock`'un emsali: cevap hesaplandığı yerden geçer). PTY'nin
+    /// ayırdığı pay bundan **bağımsız** — o `bt-gpu`'nun `DOCK_ROWS`'u ve hiç
+    /// değişmiyor; bu sayı yalnız çizimi büyütüyor (032 Karar 1).
+    ///
+    /// 032 phase-2'de değeri hep `1`: bant değişken ama görünmez; sarma ve çok
+    /// satır sonraki phase'lerin.
+    pub input_rows: u16,
     /// Caret'in **şekli** — uygulamanın DECSCUSR'ı ya da ayarın varsayılanı.
     ///
     /// `visible` ile ayrı sorular: bu "hangi biçim", o "çizilecek mi".
@@ -2377,6 +2391,11 @@ impl Session {
     /// kare başına ikinci bir kilit turu olurdu. Nesli güncel nesilden farklı
     /// pay düşüyor ([`ScrollGlide`]); sıfır pay kareyi bugünküyle aynı
     /// bırakıyor.
+    ///
+    /// **`budget` dock'un giriş bloğuna ayrılabilecek yer** ([`DockBudget`]):
+    /// tavan ve sarma genişliği çizen tarafın yerleşim kararı, bu crate
+    /// yalnız sayıyı kırpıyor ve [`Cursor::input_rows`] olarak sınırdan
+    /// veriyor.
     pub fn frame(
         &self,
         mut sink: impl FnMut(Cell),
@@ -2384,6 +2403,7 @@ impl Session {
         blocks: &mut Blocks,
         selection: &mut SelectionRuns,
         glide: ScrollGlide,
+        budget: DockBudget,
     ) -> Cursor {
         // Tema `Term` kilidinden **önce** ve kopya olarak: yaprak kilit
         // kare boyunca tutulmaz, `Term` kilidinin altına ikinci bir muteks
@@ -3300,6 +3320,9 @@ impl Session {
             // buradaki üç ön koşulu (pencerenin dock'u, alternatif ekran,
             // tazelik) bilmiyordu — ve bayat aynada **iki caret** doğuyordu.
             caret_in_dock,
+            // Bütçeye kırpılmış satır sayısı; bu phase'de görüntü hep tek
+            // satır istiyor (032 phase-2: bant değişken, ekran aynı).
+            input_rows: budget.fit(1),
             // Şekil döngüden **önce** okundu (`cursor_shape`) ve oradan
             // geliyor: `RenderableCursor` onu `Term::cursor_style()`'dan
             // çözüyor, yani DECSCUSR ile ayarın varsayılanı zaten birleşmiş
@@ -4935,9 +4958,17 @@ impl Session {
     /// yeni girdi yoksa tek bir karşılaştırma. Taşan satırda pencerenin
     /// kayması düzenlemeyle birlikte sütun farkı olarak geçiyor
     /// ([`DockEdit`]'in doc'u).
+    ///
+    /// **`input_rows` çizilecek giriş satırı sayısı** ve `frame()`'in cevabı
+    /// ([`Cursor::input_rows`]): burada yeniden türetilmiyor, `caret_in_dock`
+    /// gibi hesaplandığı yerden geçiyor. Bağlam satırı onun **altında**, yani
+    /// satır numarası bu sayının ta kendisi; iki ayrı kilit turundan
+    /// türetilseydi bant ile dock'un satırları bir kare ayrışabilirdi.
+    #[allow(clippy::too_many_arguments)]
     pub fn dock(
         &self,
         cols: DockCols,
+        input_rows: u16,
         into: &mut DockState,
         context: &mut DockContext,
         caret_in_dock: bool,
@@ -4965,6 +4996,7 @@ impl Session {
             shell,
             &theme,
             cols,
+            input_rows,
             caret_in_dock,
             selection,
             change.as_ref(),
@@ -5776,6 +5808,10 @@ mod tests {
     /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
     const THEME: Theme = Theme::BATERI;
 
+    /// Sınamaların dock bütçesi: tek giriş satırı, 80 sütun. Tavanı soran
+    /// sınama kendi bütçesini kuruyor.
+    const BUDGET: DockBudget = DockBudget { rows: 1, cols: 80 };
+
     /// Hasar sorusu + tarama, eski `frame()`'in şekliyle: `None` → kare
     /// istenmedi.
     ///
@@ -5796,6 +5832,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 ScrollGlide::default(),
+                BUDGET,
             )
         })
     }
@@ -5813,6 +5850,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut runs,
                 ScrollGlide::default(),
+                BUDGET,
             );
             (cells, runs.as_slice().to_vec(), cursor)
         })
@@ -5832,6 +5870,7 @@ mod tests {
                 blocks,
                 &mut SelectionRuns::default(),
                 ScrollGlide::default(),
+                BUDGET,
             );
             true
         }
@@ -6012,6 +6051,27 @@ mod tests {
     }
 
     #[test]
+    fn the_frame_reports_one_input_row_within_the_budget() {
+        // 032 phase-2: bant değişken ama görünmez — `frame()` bütçeyi alıyor
+        // ve her karede **bir** giriş satırı bildiriyor; sıfır tavan da bir
+        // satır (dock'un giriş satırı hiç kaybolmuyor).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf 'merhaba'; sleep 5", Arc::clone(&wake));
+        wait_settled(&session);
+        for rows in [0, 1, 7] {
+            let cursor = session.frame(
+                |_| (),
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                ScrollGlide::default(),
+                DockBudget { rows, cols: 80 },
+            );
+            assert_eq!(cursor.input_rows, 1, "tavan {rows}");
+        }
+    }
+
+    #[test]
     fn marks_from_the_stream_walk_the_shell_state() {
         // Tek bir gerçek PTY turunda iki iddia birden: durum işaretleri
         // izliyor **ve** baytlar aynen geçiyor. İkincisi ızgaradan okunuyor —
@@ -6149,6 +6209,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     ScrollGlide::default(),
+                    BUDGET,
                 );
                 if read_counter(&cells).is_some_and(|counter| ready(&counter)) {
                     return cells;
@@ -6257,6 +6318,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 ScrollGlide::default(),
+                BUDGET,
             );
             let row = row_glyphs(&cells, 0);
             if let Some(counter) = row.strip_prefix("$ls-la")
@@ -6304,6 +6366,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 ScrollGlide::default(),
+                BUDGET,
             );
             // Komut satırı gerçekten sağ uca dayanmış olmalı, yoksa sınama
             // sığmama kolunu hiç denemeden yeşil geçerdi.
@@ -6346,6 +6409,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     ScrollGlide::default(),
+                    BUDGET,
                 )
                 .next_tick;
             std::thread::sleep(Duration::from_millis(20));
@@ -6367,6 +6431,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     ScrollGlide::default(),
+                    BUDGET,
                 )
                 .next_tick
                 .is_none()
@@ -6446,6 +6511,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(
             !cursor.visible,
@@ -6491,6 +6557,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
 
         wait_until("ilk tuş aynaya düşmedi", Duration::from_secs(3), || {
@@ -6504,6 +6571,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
 
         assert_eq!(
@@ -6536,6 +6604,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 ScrollGlide::default(),
+                BUDGET,
             );
             !cells.is_empty()
         });
@@ -6546,6 +6615,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(
             !cursor.visible,
@@ -6585,6 +6655,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     ScrollGlide::default(),
+                    BUDGET,
                 )
                 .visible
         });
@@ -6594,6 +6665,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(cursor.visible, "koşan komutta ızgara imleçsiz: {cursor:?}");
         session.shutdown();
@@ -6631,6 +6703,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(cursor.caret_in_dock, "tutma devri gizlemeliydi: {cursor:?}");
         let tick = cursor.next_tick.expect("tutma kare istemedi");
@@ -6654,6 +6727,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(
             cursor.next_tick, None,
@@ -6685,6 +6759,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(
             cursor.visible,
@@ -6709,6 +6784,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(row_glyphs(&cells, 0), "$cmd1", "geçmiş kayboldu");
         assert_eq!(row_glyphs(&cells, 1), "out", "çıktı kayboldu");
@@ -6744,6 +6820,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         let rows: Vec<u16> = blocks.as_slice().iter().map(|block| block.row).collect();
         assert_eq!(rows, [0], "bastırma blok şeridini düşürdü: {blocks:?}");
@@ -6769,6 +6846,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(
             row_glyphs(&cells, 2),
@@ -6809,6 +6887,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(
             row_glyphs(&cells, 2),
@@ -6829,6 +6908,7 @@ mod tests {
                 grid: 40,
                 context: 40,
             },
+            1,
             &mut DockState::default(),
             &mut DockContext::default(),
             cursor.caret_in_dock,
@@ -6876,6 +6956,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(
             cursor.caret_in_dock,
@@ -6916,6 +6997,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(
             cursor.caret_in_dock,
@@ -6955,6 +7037,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 ScrollGlide::default(),
+                BUDGET,
             );
             assert_eq!(
                 row_glyphs(&cells, 0),
@@ -6993,6 +7076,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(
             cursor.caret_in_dock,
@@ -7042,6 +7126,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(
             !cursor.caret_in_dock,
@@ -7091,6 +7176,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(
             cursor.caret_in_dock,
@@ -7138,6 +7224,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(row_glyphs(&cells, 2), "", "girişin ilk satırı ızgarada");
         assert_eq!(row_glyphs(&cells, 3), "", "sarmalı kuyruk ızgarada sızdı");
@@ -7183,6 +7270,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(row_glyphs(&live, 2), "", "ayna canlıyken bastırma yok");
 
@@ -7199,6 +7287,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     ScrollGlide::default(),
+                    BUDGET,
                 )
                 .visible
         });
@@ -7209,6 +7298,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(
             row_glyphs(&cells, 2),
@@ -7319,6 +7409,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
@@ -7356,6 +7447,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(blocks.as_slice(), [], "çıktı satırı işaret aldı");
 
@@ -7369,6 +7461,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
@@ -7523,6 +7616,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(
             !cursor.caret_in_dock,
@@ -7709,6 +7803,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
@@ -7737,6 +7832,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert_eq!(blocks.as_slice(), []);
         session.shutdown();
@@ -9219,12 +9315,14 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         session.dock(
             DockCols {
                 grid: 40,
                 context: 40,
             },
+            1,
             &mut DockState::default(),
             &mut DockContext::default(),
             cursor.caret_in_dock,
@@ -9927,6 +10025,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut runs,
                 ScrollGlide::default(),
+                BUDGET,
             );
             (runs.color(true), runs.color(false))
         };
@@ -10133,6 +10232,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         )
     }
 
@@ -10692,6 +10792,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         (cursor, cells)
     }
@@ -10720,6 +10821,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         let origin = cursor.rows - cursor.content_rows;
         let band_top = origin - cursor.fill;
@@ -11016,6 +11118,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             ScrollGlide::default(),
+            BUDGET,
         );
         assert!(cursor.fill > 0, "sahne bantsız kuruldu: {cursor:?}");
 
@@ -11547,6 +11650,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             stale,
+            BUDGET,
         );
         assert_eq!(cursor.scroll_frac, 0.0, "eski neslin payı uygulandı");
         let live = ScrollGlide {
@@ -11559,6 +11663,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             live,
+            BUDGET,
         );
         assert_eq!(cursor.scroll_frac, 0.5, "{cursor:?}");
         assert_eq!(wakes(&wake), woken, "kare yolunun payı uyandırdı");
@@ -11640,6 +11745,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 glide,
+                BUDGET,
             );
             assert_eq!(
                 (cursor.display_offset, cursor.scroll_frac, cursor.top_row),
@@ -13143,6 +13249,7 @@ mod tests {
                             grid: 80,
                             context: 80,
                         },
+                        1,
                         &mut dock,
                         &mut context,
                         cursor.caret_in_dock,

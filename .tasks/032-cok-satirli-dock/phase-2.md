@@ -61,10 +61,56 @@ _Requirements: R2.1, R2.2, R2.3, R2.4_
 
 ## Checklist
 
-- [ ] PTY payı ile çizilen bandın ayrılması, dipten yerleşim
-- [ ] Bandın `Slide`'ı, `settled()`, snap kolları, yön biti
-- [ ] `set_origin`'de birleştirme; caret hedefi
-- [ ] `Drawn` dock geometrisi; `window_point_dock`
-- [ ] `Cursor`'un giriş satırı sayısı ve `frame()`'in bütçe argümanı (hep 1)
-- [ ] Test: `n = 3` bileşim bekçisi
-- [ ] Doğrulama geçti (`make hepsi`, `make duman`)
+- [x] PTY payı ile çizilen bandın ayrılması, dipten yerleşim
+- [x] Bandın `Slide`'ı, `settled()`, snap kolları, yön biti
+- [x] `set_origin`'de birleştirme; caret hedefi
+- [x] `Drawn` dock geometrisi; `window_point_dock`
+- [x] `Cursor`'un giriş satırı sayısı ve `frame()`'in bütçe argümanı (hep 1)
+- [x] Test: `n = 3` bileşim bekçisi
+- [x] Doğrulama geçti (`make hepsi`, `make duman`, `make test-yaris` — kare yolu değişti)
+- [x] Riskli phase: `/code-review` koştu, iki bulgu giderildi
+
+## Uygulama Notları
+
+- **Test-first sırası tutmadı:** bileşim bekçisi kodla aynı turda yazıldı;
+  yerine mutasyonla doğrulandı — `Frame::origin_px`'ten bandın fazlası
+  çıkarılınca bekçi ilk animasyon karesinde düşüyor, makas kaldırılınca
+  offscreen bekçi (`a_growing_band_reveals_its_rows_from_the_bottom`) düşüyor.
+- **İki viewport + makas:** hücreler push anında piştiği için dibe yaslılık
+  encode anında iki orijinle kuruldu — zemin/saç çizgileri bandın o anki
+  boyundan (`yükseklik − bant`), hücreler/caret/efektler yerleşimden
+  (`yükseklik − yerleşim`). Büyüyen bantta yerleşim bandın tepesini aşıyor ve
+  taşan satırı `setScissorRect` kesiyor; makas yalnız o karelerde, çünkü
+  dinlenen bantta efektlerin saç çizgisini aşan payını keserdi.
+- **Bandın fazlası tek yuvarlama:** `Frame::set_dock_band` fazlayı bir kez
+  piksele yuvarlıyor, bandın boyu (`PTY payı + fazla`) ve ızgaranın orijini
+  (`… − fazla`) aynı sayıyı okuyor; iki ayrı yuvarlama bir piksel
+  ayrışabilirdi. Birleştirme `link::compose`'ta (iki kare yolunun ortak
+  noktası, `LinkDelegate`'siz sınanabilsin diye serbest fonksiyon).
+- **Yön biti çağırandan gelmiyor:** "bandın hedefi bu karede değişti"yi
+  `Motion::sync` kendisi hesaplıyor (bandın geçmişini bilen tek yer), `sync`
+  yalnız bandın hedefini (`u16`) ek argüman olarak alıyor.
+- **Bant snap'leri:** geometri ve öteleme kipinin snap'i (`snap`, Hareketi
+  Azalt); tekerlek bandı snap'lemiyor — kaydırma dock'un satırını
+  değiştirmiyor.
+- **`Frame`'in satır sayısı toplam satır** (giriş + bağlam,
+  `set_dock_rows`, hücrelerden önce); bağlam satırı "iki ve fazla satırda
+  son satır". Tek satırlık sınama dock'ları (`renderer.rs`) bu yüzden
+  geometrisi değişmeden kaldı: `open_dock(1, …)` → `set_dock_rows(1)` +
+  `open_dock(…)`. `dock_height` artık tek satır arası boşluk veriyor; iki
+  satırda eski formülle aynı sayı.
+- **`bt-core`'un bağlam satırı `input_rows`. satır** (`render_with`'e
+  `input_rows`), sabit `1` değil; `Session::dock` sayıyı argüman alıyor.
+- **Bütçe bu phase'de `rows: 1`** (`link.rs`): tavan oranı (`DOCK_MAX_SHARE`)
+  sarmayla gelsin diye phase-3'ün checklist'ine yazıldı.
+- **`/code-review` bulguları:** (1) `compose` bandı yalnız bu karenin dock
+  yüzeyi açıkken yazıyor — vim'den çıkışta payı dönmüş ama yüzeysiz bir
+  karede hareket karesi caret'i çizilmeyen dock yuvasına atabilirdi;
+  (2) büyüyen bantın makası dock caret'ini kesmiyor (yarım blok yerine bir
+  kare boyunca bandın üstünde tam blok).
+- **Duman:** ilk koşular HEAD'de de aynı "animasyon yerleşmedi" ile kırmızıydı
+  (ortam — pencere görünmüyordu); gerçek pencere açıkken yeşil. Gözle kontrol
+  (geçici paket, açık tema): tek satır, `for` döngüsü ve `PS2` satırları
+  032 öncesiyle aynı görünüyor.
+- `Frame::set_dock_top` yalnız sınamalarda kaldı (`#[cfg(test)]`); üretimde
+  tepe bandın boyuyla aynı çağrıda yazılıyor.

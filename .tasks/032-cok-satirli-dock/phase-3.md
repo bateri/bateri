@@ -54,4 +54,5 @@ _Requirements: R1.2, R1.3, R4.1, R4.2 (tek mantıksal satırda)_
 - [ ] Çok satırda efektler `Reset`
 - [ ] Test: sarma, 2B isabet, satırlar arası seçim, tavan
 - [ ] phase-1'den devir: imleç bir `\n`'in arkasındayken ızgara başlangıcı ve caret kuralı (phase-1 → Uygulama Notları) — bu phase'in dock tarafına etkisini uygula ya da gerekçesiyle kapat
+- [ ] phase-2'den devir: `link.rs`'in `DockBudget { rows: 1, … }`'ı → `DOCK_MAX_SHARE` tavanı; `dock_caret_at`'in satır argümanı bugün sabit `0` (caret'in dock satırı); `window_point_dock` bloğun satırını zaten döndürüyor, çağıranlar (`dock_select`/`dock_extend`) onu henüz yoksayıyor
 - [ ] Doğrulama geçti (`make hepsi`, `make duman`)

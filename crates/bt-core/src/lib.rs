@@ -48,7 +48,9 @@ mod theme;
 mod wake;
 
 pub use color::{LinearRgba, Theme};
-pub use dock::{Dock, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_TEXT_COL};
+pub use dock::{
+    Dock, DockBudget, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_TEXT_COL,
+};
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use session::{
     Block, Blocks, Cell, CellHalf, Click, Cursor, DirtyFlag, DockKey, Osc52, SHUTDOWN_GRACE,

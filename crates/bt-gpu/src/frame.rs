@@ -490,17 +490,13 @@ fn rule_kind(underline: UnderlineStyle) -> Option<RuleKind> {
     }
 }
 
-/// Dock'un kare başına tek olan değerleri: kaç satır ve iki rengi.
+/// Dock'un kare başına tek olan iki rengi.
 ///
-/// Satır sayısı **oturumun sabiti** ama burada kare başına yeniden yazılıyor
-/// ([`Frame::clear`] onu da sıfırlıyor): tek alternatifi `Frame`'e kurucuda
-/// girmesiydi ve o, hücre ölçüsünün `clear`'ın parametresi olmasıyla aynı
-/// gerekçeyle reddedildi — kurucuda donan bir geometri ekran ölçeği ya da
-/// oturum değişince sessizce bayatlar.
+/// Satır sayısı burada **değil** (032): hücrelerin yerleşimi ona bağlı ve
+/// hücreler yüzeyden **önce** basılıyor ([`Frame::open_dock`]), yani sayı
+/// hücrelerden önce yazılan ayrı bir alanda ([`Frame::set_dock_rows`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DockSurface {
-    /// Dock'un yüksekliği, **satır**. Piksel karşılığı `px`.
-    rows: u16,
     /// Yüzeyin zemini; **opak** (`bt_core::Dock::ground`). Kayma boyunca
     /// ızgaranın taşan alt satırı bunun altında kalıyor.
     ground: [f32; 4],
@@ -508,32 +504,29 @@ pub(crate) struct DockSurface {
     separator: [f32; 4],
 }
 
-/// Dock'un yüksekliği, **satır**: giriş satırı + bağlam satırı.
+/// PTY'nin dock'a **ayırdığı** pay, satır: bir giriş satırı + bağlam satırı.
 ///
 /// İki, çünkü dock'un tasarımı iki satır (`plan.md` → Hedef): üstte
 /// `>` + ZLE'nin görüntüsü, altta `[klasör] | [dal]`. Pay ızgaranın
 /// yüksekliğinden düşülüyor, yani sayıyı sonradan büyütmek kullanıcının
 /// penceresini bir satır kısaltan ikinci bir `TIOCSWINSZ` demek.
 ///
+/// **Ayrılan, çizilen değil** (032): dock'un çizilen bandı giriş satırı
+/// sayısıyla büyüyor ([`band_px`]) ama bu pay **hiç değişmiyor** — kabuk
+/// SIGWINCH görmüyor, ızgara çizimde yukarı ötelenerek yer açıyor
+/// (`.tasks/032-cok-satirli-dock/discussion.md` → Karar 1).
+///
 /// Bu crate'in sabiti çünkü çizen bu crate; `bt-shell` onu ızgara
 /// aritmetiğinde (`split_into_grid`) **tüketiyor** ve ikinci bir kopya
 /// tutmuyor — payın `CellMetrics` ile taşınmasıyla aynı disiplin.
 pub const DOCK_ROWS: u16 = 2;
 
-/// Bağlam satırının dock-yerel satır numarası: giriş satırının **altı**.
-///
-/// `bt-core`'un `dock::CONTEXT_ROW`'uyla aynı sayı ve ikisi de [`DOCK_ROWS`]'un
-/// tüketicisi — biri satırı doğuruyor, öteki çiziyor. Sınırdan bir bayrak
-/// geçirmek yerine satır numarasına bakılıyor, çünkü "hangi satır küçük"
-/// çizimin kararı: `bt-core` hücreyi verir, punto sınıfını bu katman seçer
-/// (`Dock::sigil`'in şeklinin burada seçilmesiyle aynı ayrım).
-pub(crate) const DOCK_CONTEXT_ROW: u16 = 1;
-
-/// Dock'un kapladığı yükseklik, **piksel**; `dock_rows == 0` ise sıfır.
+/// PTY'nin dock'a **ayırdığı** yükseklik, **piksel**; `dock_rows == 0` ise
+/// sıfır. Çizilen bandın boyu bu değil: o [`band_px`].
 ///
 /// Formülün **tek** kopyası burası ve iki tüketicisi var: ızgaranın satır
 /// aritmetiği (`bt_shell`'in `split_into_grid`'i) ve ikinci viewport'un
-/// orijini ([`Frame::dock_px`]). Ayrı ayrı yazılsalardı yeniden boyutlandırmada
+/// orijini ([`Frame::dock_layout_px`]). Ayrı ayrı yazılsalardı yeniden boyutlandırmada
 /// bir kare boyunca ayrışırlardı — `DOCK_ROWS`'un `bt-shell` tarafından
 /// tüketilmesiyle aynı disiplin.
 ///
@@ -551,6 +544,22 @@ pub fn dock_px(dock_rows: u16, cell: CellMetrics) -> f32 {
         f32::from(cell.cell_px().1),
         f32::from(cell.gutter_px()),
     )
+}
+
+/// Dock'un **çizilen** bandının yüksekliği, piksel: `input_rows` giriş satırı
+/// artı bağlam satırı (032).
+///
+/// [`dock_px`]'in (PTY'nin **ayırdığı** pay) kardeşi ve ondan ayrı bir ad,
+/// çünkü iki sayı artık ayrışıyor: pay [`DOCK_ROWS`]'la sabit, bant giriş
+/// satırlarıyla büyüyor ve aradaki fark ızgaranın çizimde yukarı
+/// ötelenmesiyle kapanıyor. `input_rows == 1`'de ikisi **aynı** piksel.
+///
+/// Giriş satırları arasında boşluk yok — tek bir editör yüzeyi; boşluk ve
+/// ikinci saç çizgisi yalnız giriş bloğu ile bağlam satırı arasında
+/// (`discussion.md` → Karar 9). Formülün gövdesi yine [`dock_height`]: bant
+/// `input_rows + 1` satırlık bir dock.
+pub(crate) fn band_px(input_rows: u16, cell: CellMetrics) -> f32 {
+    dock_px(input_rows.saturating_add(1), cell)
 }
 
 /// Bağlam satırının sütun bütçesi: **aynı piksel şeridi, küçük adım**.
@@ -575,11 +584,18 @@ pub(crate) fn context_cols(cols: u16, cell: CellMetrics) -> u16 {
 /// paylaşsın diye ayrı. `Frame` [`CellMetrics`]'i alan olarak tutamıyor
 /// (kurucusu sıfırı eliyor, yani `Default`'u yok), ama iki bileşeni zaten
 /// elinde.
+///
+/// **Tek satır arası boşluk** (032): bağlam satırı ile üstündeki giriş bloğu
+/// arasında. Giriş satırları kendi aralarında bitişik, yani `rows` satırlık
+/// bir dock `rows · cell_h + 2 · pad + gap`; tek satırlık dock (yalnız
+/// sınamalarda) boşluksuz. 032'den önce her satır arasında bir boşluk vardı
+/// ve iki satırlık dock'ta iki formül aynı sayıyı veriyor.
 fn dock_height(rows: u16, cell_h: f32, pad: f32) -> f32 {
     if rows == 0 {
         return 0.0;
     }
-    f32::from(rows) * cell_h + 2.0 * pad + f32::from(rows - 1) * dock_row_gap(pad)
+    let gap = if rows >= 2 { dock_row_gap(pad) } else { 0.0 };
+    f32::from(rows) * cell_h + 2.0 * pad + gap
 }
 
 /// Dock satırlarının **arasındaki** boşluk, piksel.
@@ -713,14 +729,40 @@ pub(crate) struct Frame {
     /// ikisi birlikte tazelenir. Ayrı bir sabitten okunsaydı `cols` hesabıyla
     /// ayrışabilirdi — üçünün tek kaynağı olması 010 Karar 3'ün şartı.
     gutter_px: f32,
-    /// Dock bandının tepesi, **pencere uzayında piksel**; dock yoksa
-    /// sonsuz (caret hiçbir zaman dock yuvasına düşmez).
+    /// Dock bandının **çizilen** tepesi, **pencere uzayında piksel**; dock
+    /// yoksa sonsuz (caret hiçbir zaman dock yuvasına düşmez).
     ///
-    /// Çağıran yazıyor ([`Frame::set_dock_top`]), çünkü dokunun boyunu bilen
+    /// Çağıran yazıyor ([`Frame::set_dock_band`], bandın boyuyla aynı
+    /// çağrıda), çünkü dokunun boyunu bilen
     /// tek yer kare yolu; `Frame` listelerin uzayını biliyor, pencereninkini
     /// değil ([`Frame::dock_ground`]'un genişliği argüman almasıyla aynı
     /// gerekçe).
     dock_top_px: f32,
+    /// Dock'un **yerleşim** satırları: giriş satırları + bağlam satırı
+    /// ([`Frame::set_dock_rows`]). Hücrelerin yeri ([`Frame::dock_pos`]) ve
+    /// bağlam satırının hangisi olduğu buradan; bandın **çizilen** boyu
+    /// ([`Frame::dock_band`]) ise animasyonun o anki değeri ve ondan ayrı.
+    ///
+    /// [`Frame::clear`] [`DOCK_ROWS`]'a döndürüyor; hareket karesi `clear`
+    /// çağırmadığı için değeri koruyor — hücreler de korunuyor.
+    dock_rows: u16,
+    /// Çizilen bandın PTY payından **fazlası**, piksel (aygıt ızgarasına
+    /// yuvarlı); `None` → bu kare söylemedi ve band yerleşimin boyunda
+    /// ([`Frame::set_dock_band`]).
+    ///
+    /// İki tüketicisi aynı sayıyı okuyor ve ayrışamıyorlar: bandın boyu
+    /// ([`Frame::dock_band_px`]) ve ızgaranın çizilen orijini
+    /// ([`Frame::origin_px`], `− fazla`). Izgaranın alt kenarı ile bandın üst
+    /// kenarı bu yüzden **yapısal olarak** birlikte kayıyor — iki ayrı
+    /// yuvarlama bir piksel ayrışabilirdi.
+    ///
+    /// Encode anında okunuyor (`fill_origin_px`'in emsali) ve **iki** kare yolu
+    /// da yazıyor: hareket karesi `clear` çağırmıyor ama bant onun karesinde de
+    /// ilerliyor.
+    dock_band: Option<f32>,
+    /// Pencerenin dibi, piksel — bandın dibe yaslı tepesinin ve fareye
+    /// yayınlanan dock geometrisinin tabanı ([`Frame::set_dock_band`]).
+    dock_bottom_px: f32,
     /// Caret'in ızgara yuvası: ızgaranın arka planlarından sonra, glyph'lerinden
     /// önce çizilir.
     grid_caret: Option<Caret>,
@@ -936,11 +978,17 @@ impl Frame {
         self.rule_px = f32::from(metrics.rule_px());
         self.gutter_px = f32::from(metrics.gutter_px());
         // **Sonsuz**, sıfır değil: sıfır "dock bandı pencerenin tepesinde"
-        // demek olurdu ve her caret dock yuvasına düşerdi. Çağıran her içerik
-        // karesinde üstüne yazıyor ([`Frame::set_dock_top`]); hareket karesi
-        // `clear` çağırmadığı için değeri **koruyor** ve caret'in yuva kararı
-        // animasyon boyunca aynı bandı görüyor.
+        // demek olurdu ve her caret dock yuvasına düşerdi. Çağıran dock'lu
+        // her karede üstüne yazıyor ([`Frame::set_dock_band`]) — hareket
+        // karesi de, çünkü bant onun karesinde de ilerliyor ve caret'in yuva
+        // kararı bandın o anki tepesine bakmalı.
         self.dock_top_px = f32::INFINITY;
+        // Yerleşim tek giriş satırına, bant "söylenmedi"ye dönüyor: içerik
+        // karesi ikisini de yeniden söylüyor, söylemeyen (dock'suz) kare
+        // bandı ızgaraya hiç katmıyor.
+        self.dock_rows = DOCK_ROWS;
+        self.dock_band = None;
+        self.dock_bottom_px = 0.0;
         // Orijin **sıfırlanıyor**, geometriden gelmiyor: kaynağı bu karenin
         // doluluk sayısı ve o ancak sink döngüsü bitince biliniyor. Sıfırda
         // bırakmak "bu kare daha söylemedi" demek ve söylemeyen bir kare
@@ -1001,9 +1049,14 @@ impl Frame {
     }
 
     /// Bu karenin dikey orijini, piksel; `setViewport`'un `originY`'si —
-    /// öteleme artı kaydırmanın kesri.
+    /// öteleme artı kaydırmanın kesri, **eksi bandın fazlası** (032).
+    ///
+    /// Bandın çizilen boyu PTY payını aştıkça ızgara o kadar yukarı
+    /// çiziliyor: dolu ızgaranın tepesi kırpılıyor, doldurma bandı ve fare
+    /// eşlemesi de aynı değeri okuyor ([`Frame::dock_band`]). Bant yoksa ya da
+    /// payın boyundaysa terim sıfır ve kare bugünküyle bit bit aynı.
     pub(crate) fn origin_px(&self) -> f32 {
-        self.origin_px + self.frac_px
+        self.origin_px + self.frac_px - self.dock_band.unwrap_or(0.0)
     }
 
     /// Sink'in tek girişi: hücrenin arka planı varsa boyanır, mürekkebi varsa
@@ -1508,7 +1561,7 @@ impl Frame {
             face: face(cell.bold, cell.italic),
             // Konumla **aynı eşik** ([`Frame::column_px`]): ayrışsalardı
             // harf bir ölçüde, adımı başka ölçüde olurdu.
-            size: if cell.row >= DOCK_CONTEXT_ROW {
+            size: if self.is_context_row(cell.row) {
                 SizeClass::Small
             } else {
                 SizeClass::Normal
@@ -1624,16 +1677,43 @@ impl Frame {
         });
     }
 
-    /// Dock yüzeyini bu kare için açar: kaç satır ve iki rengi.
+    /// Dock'un bu karedeki **yerleşim** satırları: giriş satırları + bağlam
+    /// satırı ([`Frame::dock_rows`]); hücrelerden **önce** çağrılıyor, çünkü
+    /// hücrenin yeri ona bağlı.
+    ///
+    /// Sayı `bt_core::Cursor::input_rows`'tan geliyor ve `+ 1` çağıranda:
+    /// `Frame` bağlam satırının varlığını sınır tipinden değil satır
+    /// sayısından biliyor (iki ve fazlası → son satır bağlam).
+    pub(crate) fn set_dock_rows(&mut self, rows: u16) {
+        self.dock_rows = rows;
+    }
+
+    /// Bandın bu karede **çizilen** boyu: pencerenin dibi ve PTY payından
+    /// fazlası, satır (`crate::motion::Motion::band`, kesirli).
+    ///
+    /// İki kare yolu da çağırıyor ([`Frame::dock_band`]); caret'in yuvasını
+    /// seçen bandın tepesi de ([`Frame::dock_top_px`]) aynı çağrıda yazılıyor —
+    /// ayrı yazılsalardı caret bir yüzeyin tepesine, bant başka bir tepeye
+    /// bakabilirdi.
+    ///
+    /// Fazlanın pikseli **aygıt ızgarasına yuvarlanıyor** (`set_origin_rows`'un
+    /// gerekçesi): ızgaranın orijini de aynı yuvarlanmış sayıyı çıkarıyor.
+    pub(crate) fn set_dock_band(&mut self, bottom_px: f32, extra_rows: f32) {
+        debug_assert!(self.cell_px.1 > 0.0, "clear(metrics) çağrılmadı");
+        self.dock_band = Some((extra_rows * self.cell_px.1).round());
+        self.dock_bottom_px = bottom_px;
+        self.dock_top_px = bottom_px - self.band_height();
+    }
+
+    /// Dock yüzeyini bu kare için açar: iki rengi.
     ///
     /// Hücrelerden **sonra** çağrılıyor ve bu bir sıra tercihi değil zorunluk:
     /// renkler `bt-core`'un dock çağrısından dönüyor ve o çağrı hücreleri
     /// sink'e basarken doğuruyor onları. `Frame` bu yüzden yüzeyi hücrelerden
     /// bağımsız tutuyor — listeler doluyken `dock` hâlâ `None` olabilir ve o
     /// hâlde hiçbir şey çizilmez, yani "yarım açılmış dock" temsil edilemez.
-    pub(crate) fn open_dock(&mut self, rows: u16, ground: LinearRgba, separator: LinearRgba) {
+    pub(crate) fn open_dock(&mut self, ground: LinearRgba, separator: LinearRgba) {
         self.dock = Some(DockSurface {
-            rows,
             ground: ground.to_array(),
             separator: separator.to_array(),
         });
@@ -1644,12 +1724,64 @@ impl Frame {
         self.dock
     }
 
-    /// Dock'un yüksekliği, piksel; ikinci viewport'un orijinini ve caret'in
-    /// kaymasını veren tek sayı. Dock yoksa sıfır.
-    pub(crate) fn dock_px(&self) -> f32 {
-        self.dock.map_or(0.0, |dock| {
-            dock_height(dock.rows, self.cell_px.1, self.gutter_px)
-        })
+    /// Dock'un **yerleşiminin** yüksekliği, piksel: hücrelerin viewport'unun
+    /// orijinini ve caret'in kaymasını veren sayı. Dock yoksa sıfır.
+    ///
+    /// Bandın çizilen boyu ([`Frame::dock_band_px`]) animasyon boyunca bundan
+    /// ayrışıyor; hücreler dibe yaslı olduğu için (bağlam satırı dipte)
+    /// ayrışma yalnız zeminin ve üst saç çizgisinin yerini oynatıyor.
+    pub(crate) fn dock_layout_px(&self) -> f32 {
+        if self.dock.is_none() {
+            return 0.0;
+        }
+        dock_height(self.dock_rows, self.cell_px.1, self.gutter_px)
+    }
+
+    /// Bandın bu karede **çizilen** yüksekliği, piksel: zeminin ve üst saç
+    /// çizgisinin viewport'unu veren sayı. Dock yoksa sıfır; bant
+    /// söylenmediyse yerleşimin boyu.
+    pub(crate) fn dock_band_px(&self) -> f32 {
+        if self.dock.is_none() {
+            return 0.0;
+        }
+        self.band_height()
+    }
+
+    /// [`Frame::dock_band_px`]'in dock'tan bağımsız gövdesi: bant söylendiyse
+    /// PTY payı artı fazlası, söylenmediyse yerleşimin boyu.
+    fn band_height(&self) -> f32 {
+        match self.dock_band {
+            Some(extra) => dock_height(DOCK_ROWS, self.cell_px.1, self.gutter_px) + extra,
+            None => dock_height(self.dock_rows, self.cell_px.1, self.gutter_px),
+        }
+    }
+
+    /// Fare eşlemesinin dock geometrisi: giriş bloğunun tepesi (pencere
+    /// uzayında piksel, üstten) ve giriş satırı sayısı. Dock yoksa ya da bu
+    /// kare pencerenin dibini söylemediyse `None`.
+    ///
+    /// **Yerleşimden**, çizilen banttan değil: metin dibe yaslı ve animasyon
+    /// boyunca yerinde duruyor, yani tıklanan harf yerleşimin harfi.
+    pub(crate) fn dock_hit(&self) -> Option<(f32, u16)> {
+        self.dock_band?;
+        self.dock?;
+        Some((
+            self.dock_bottom_px - self.dock_layout_px() + self.dock_pad(),
+            self.dock_rows.saturating_sub(1).max(1),
+        ))
+    }
+
+    /// Bu satır bağlam satırı mı: yerleşimin **son** satırı, iki ve fazla
+    /// satırlık dock'ta. Punto sınıfının, sütun adımının ve satır arası
+    /// boşluğun tek karar noktası — ayrı eşiklere baksalardı harf bir ölçüde,
+    /// adımı başka ölçüde olurdu.
+    ///
+    /// Satır numarasına bakılıyor, sınırdan bir bayrak geçmiyor: "hangi satır
+    /// küçük" çizimin kararı, `bt-core` hücreyi verir (bağlam satırını giriş
+    /// bloğunun altına, `input_rows`. satıra koyarak), punto sınıfını bu
+    /// katman seçer.
+    fn is_context_row(&self, row: u16) -> bool {
+        self.dock_rows >= 2 && row == self.dock_rows - 1
     }
 
     /// Dock içeriğinin dock-yerel dikey kayması: **nefes payı**.
@@ -1672,22 +1804,30 @@ impl Frame {
     /// Zemin **opak** ve tam genişlik: kayma boyunca ızgaranın taşan alt
     /// satırı dock'un üstüne düşüyor (`LinkDelegate::set_origin`'in yazdığı
     /// taşma) ve onu örten tek şey bu dikdörtgen.
+    ///
+    /// **Bandın uzayında** (032): üçü de çizilen bandın viewport'undan
+    /// çiziliyor (`Renderer::encode_dock`, `yükseklik − bant`), yani zemin ve
+    /// üst saç çizgisi animasyonla birlikte yükselip iniyor; ikinci saç
+    /// çizgisi ise **dibe yaslı** — bağlam satırının üstündeki boşlukta
+    /// kalıyor ve yeri bandın boyu ile yerleşiminki arasındaki farktan.
     pub(crate) fn dock_ground(&self, width_px: f32) -> [Instance; 3] {
         let dock = self.dock.unwrap_or(DockSurface {
-            rows: 0,
             ground: [0.0; 4],
             separator: [0.0; 4],
         });
+        let band = self.dock_band_px();
+        let rows = if self.dock.is_some() {
+            self.dock_rows
+        } else {
+            0
+        };
         [
             Instance {
                 // Zemin **paylar dahil** bütün yüzeyi kaplıyor: pay kadar
                 // eksik bir dikdörtgen, kayma boyunca taşan ızgara satırını
                 // tam da nefes payının olduğu yerde gösterirdi.
                 pos: [0.0, 0.0],
-                size: [
-                    width_px,
-                    dock_height(dock.rows, self.cell_px.1, self.gutter_px),
-                ],
+                size: [width_px, band],
                 rgba: dock.ground,
             },
             // Ayraç zeminin **üstünde** ve dock'un en üst pikselinde: ızgara
@@ -1710,19 +1850,23 @@ impl Frame {
             // Dizinin boyu sabit kalıyor ki çağıran kolu dallanmasın; sıfır
             // yükseklikli dikdörtgen hiç fragment üretmiyor.
             Instance {
-                pos: [0.0, self.dock_row_divider_y(dock.rows)],
-                size: [width_px, if dock.rows < 2 { 0.0 } else { SEPARATOR_PX }],
+                pos: [
+                    0.0,
+                    band - self.dock_layout_px() + self.dock_row_divider_y(rows),
+                ],
+                size: [width_px, if rows < 2 { 0.0 } else { SEPARATOR_PX }],
                 rgba: dock.separator,
             },
         ]
     }
 
-    /// İki dock satırını ayıran çizginin **üst** kenarı, dock-yerel piksel.
+    /// Giriş bloğunu bağlam satırından ayıran çizginin **üst** kenarı,
+    /// yerleşimin uzayında piksel.
     ///
-    /// Satırların yerleşimi [`Frame::dock_pos`]'ta: `r`. satır
-    /// `pad + r·(cell_h + gap)` yüksekliğinde başlıyor, yani boşluk
-    /// `pad + cell_h` ile `pad + cell_h + gap` arasında. Çizgi o aralığın
-    /// ortasına oturuyor.
+    /// Satırların yerleşimi [`Frame::dock_pos`]'ta: giriş satırları
+    /// `pad + r·cell_h`'de bitişik, bağlam satırı boşluğun altında — yani
+    /// boşluk `pad + (rows − 1)·cell_h` ile onun `gap` fazlası arasında. Çizgi
+    /// o aralığın ortasına oturuyor.
     fn dock_row_divider_y(&self, rows: u16) -> f32 {
         if rows < 2 {
             return 0.0;
@@ -1732,7 +1876,7 @@ impl Frame {
         // Yuvarlanıyor: aygıt ızgarasına oturmayan bir saç çizgisi iki piksele
         // yayılıp soluklaşırdı — `SEPARATOR_PX`'in ölçekle çarpılmama
         // gerekçesiyle aynı yerden.
-        (pad + self.cell_px.1 + (gap - SEPARATOR_PX) * 0.5).round()
+        (pad + f32::from(rows - 1) * self.cell_px.1 + (gap - SEPARATOR_PX) * 0.5).round()
     }
 
     pub(crate) fn dock_bg(&self) -> &[Instance] {
@@ -1808,7 +1952,10 @@ impl Frame {
         })
     }
 
-    /// Dock bandının tepesini bu kare için yazar; caret'in yuvasını o belirliyor.
+    /// Dock bandının tepesini doğrudan yazar — **sınamaların kısayolu**.
+    /// Üretimde tepe bandın boyuyla aynı çağrıda yazılıyor
+    /// ([`Frame::set_dock_band`]) ve ikisi ayrışamıyor.
+    #[cfg(test)]
     pub(crate) fn set_dock_top(&mut self, top_px: f32) {
         self.dock_top_px = top_px;
     }
@@ -2076,13 +2223,21 @@ impl Frame {
         // Dikey aritmetik **değişmiyor**: satırın yüksekliği de payı da
         // ortak, küçük glyph büyük hücrenin taban çizgisinde duruyor. Band
         // ([`dock_px`]) bu yüzden hiç kısalmıyor.
+        //
+        // **Satır arası boşluk yalnız bağlam satırının üstünde** (032): giriş
+        // satırları tek bir editör yüzeyi, bitişik. Yerleşim tepeden sayılıyor
+        // ama viewport'u dibe yaslı (`yükseklik − yerleşim`,
+        // `Renderer::encode_dock`), yani bağlam satırı her zaman bandın dibinde
+        // ve giriş satırları onun üstüne diziliyor.
         let [_, y] = self.pos(0, row);
         let w = self.column_px(row);
         let pad = self.dock_pad();
-        [
-            self.gutter_px + f32::from(col) * w,
-            y + pad + f32::from(row) * dock_row_gap(pad),
-        ]
+        let gap = if self.is_context_row(row) {
+            dock_row_gap(pad)
+        } else {
+            0.0
+        };
+        [self.gutter_px + f32::from(col) * w, y + pad + gap]
     }
 
     /// Dock'un `row` satırındaki sütun adımı, piksel.
@@ -2091,7 +2246,7 @@ impl Frame {
     /// [`Frame::push_dock`]'ta sorulur, ikisi de aynı sabite bakar. Ayrı
     /// eşiklere baksalardı konum küçük, glyph büyük (ya da tersi) olurdu.
     fn column_px(&self, row: u16) -> f32 {
-        if row >= DOCK_CONTEXT_ROW {
+        if self.is_context_row(row) {
             self.context_cell_px
         } else {
             self.cell_px.0
@@ -2265,6 +2420,7 @@ mod tests {
             visible,
             // Bu modül ızgaranın listelerini sınıyor; devir `link`'in sorusu.
             caret_in_dock: false,
+            input_rows: 1,
             shape: CaretShape::Block,
             blink: false,
             text: TEXT,
@@ -2904,9 +3060,9 @@ mod tests {
             g[2].pos[1] - g[0].pos[1],
             20.0 + dock_row_gap(GUTTER as f32)
         );
-        frame.open_dock(DOCK_ROWS, BG, CURSOR);
+        frame.open_dock(BG, CURSOR);
         assert_eq!(
-            frame.dock_px(),
+            frame.dock_layout_px(),
             dock_px(
                 DOCK_ROWS,
                 CellMetrics::new(10, 20, 8, GUTTER, 1).expect("ölçü")
@@ -2984,7 +3140,7 @@ mod tests {
             underline: UnderlineStyle::Single,
             ..dock_cell(1)
         });
-        frame.open_dock(2, BG, CURSOR);
+        frame.open_dock(BG, CURSOR);
 
         assert_eq!(frame.bg_count(), 1, "dock hücre sayıldı");
         assert_eq!(frame.glyph_count(), 0, "dock glyph sayıldı");
@@ -3341,8 +3497,8 @@ mod tests {
         // alt satırı onun altında kalıyor.
         let mut frame = Frame::default();
         frame.clear(grid(9, 18), CaretStyle::default());
-        frame.open_dock(2, BG, CURSOR);
-        assert_eq!(frame.dock_px(), 36.0, "iki satır piksele çevrilmedi");
+        frame.open_dock(BG, CURSOR);
+        assert_eq!(frame.dock_layout_px(), 36.0, "iki satır piksele çevrilmedi");
 
         let [ground, separator, divider] = frame.dock_ground(500.0);
         assert_eq!(ground.pos, [0.0, 0.0], "zemin sol paydan başlamamalı");
@@ -3361,7 +3517,7 @@ mod tests {
 
         // Dock'suz kare hiçbir yükseklik vermiyor: ikinci viewport kurulmaz.
         frame.clear(grid(9, 18), CaretStyle::default());
-        assert_eq!(frame.dock_px(), 0.0);
+        assert_eq!(frame.dock_layout_px(), 0.0);
     }
 
     #[test]
@@ -3374,11 +3530,11 @@ mod tests {
             CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
-        frame.open_dock(2, BG, CURSOR);
+        frame.open_dock(BG, CURSOR);
         // 2×18 + 2×GUTTER + 1×(2×GUTTER) = 36 + 14 + 14 = 64. Satır arası
         // boşluk dış payın **iki katı**, çünkü ortasından bir çizgi geçiyor:
         // çizginin iki yanına birer pay düşünce dört boşluk da eşitleniyor.
-        assert_eq!(frame.dock_px(), 64.0, "pay yüksekliğe girmedi");
+        assert_eq!(frame.dock_layout_px(), 64.0, "pay yüksekliğe girmedi");
 
         // **Zemin payları da kaplıyor**: pay kadar eksik bir dikdörtgen,
         // kayma boyunca taşan ızgara satırını tam da nefes payında gösterirdi.
@@ -3400,7 +3556,7 @@ mod tests {
         assert_eq!(row1_top, 39.0);
         assert_eq!(divider.pos[1] - (f32::from(GUTTER) + 18.0), 7.0);
         assert_eq!(row1_top - (divider.pos[1] + SEPARATOR_PX), 6.0);
-        assert_eq!(frame.dock_px() - (row1_top + 18.0), 7.0);
+        assert_eq!(frame.dock_layout_px() - (row1_top + 18.0), 7.0);
         assert_eq!(divider.size, [500.0, SEPARATOR_PX]);
         // Saç çizgisi payın **üstünde**, viewport'un tepesinde: ızgarayla
         // sınır orası ve payı onun üstüne koymak çizgiyi ızgaraya sokardı.
@@ -3417,7 +3573,7 @@ mod tests {
             ch: Some('x'),
             ..Cell::default()
         });
-        frame.open_dock(2, BG, CURSOR);
+        frame.open_dock(BG, CURSOR);
         assert_eq!(
             frame.dock_glyphs()[0].pos[1],
             f32::from(GUTTER),
@@ -3441,6 +3597,91 @@ mod tests {
             f32::from(GUTTER) + 18.0 + 2.0 * f32::from(GUTTER),
             "satır arası boşluk ya da dış pay yanlış uygulandı"
         );
+    }
+
+    /// Üç giriş satırlık bir dock'un hücresi: `row` 0..3 giriş, 3 bağlam.
+    fn dock_row(row: u16) -> Cell {
+        Cell {
+            col: 0,
+            row,
+            ch: Some('x'),
+            ..Cell::default()
+        }
+    }
+
+    #[test]
+    fn a_three_row_band_stacks_its_input_above_the_context_row() {
+        // **032 phase-2'nin sınama kancası** (`n = 3`): bant `n` giriş satırı
+        // artı bağlam satırı; giriş satırları bitişik, boşluk ve ikinci saç
+        // çizgisi yalnız giriş bloğu ile bağlam satırı arasında. @1x, 9×18
+        // hücre, pay 7: `4·18 + 2·7 + 14 = 100` px.
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü");
+        assert_eq!(band_px(3, metrics), 100.0);
+        // Tek satırda PTY payının ta kendisi — ekran bit bit aynı.
+        assert_eq!(band_px(1, metrics), dock_px(DOCK_ROWS, metrics));
+
+        let mut frame = Frame::default();
+        frame.clear(metrics, CaretStyle::default());
+        frame.set_dock_rows(4);
+        for row in 0..4 {
+            frame.push_dock(dock_row(row));
+        }
+        frame.set_dock_band(600.0, 2.0);
+        frame.open_dock(BG, CURSOR);
+        assert_eq!(frame.dock_layout_px(), 100.0);
+        assert_eq!(
+            frame.dock_band_px(),
+            100.0,
+            "dinlenen bant yerleşimden ayrıştı"
+        );
+
+        // Giriş satırları payın altından bitişik; bağlam satırı boşluğun
+        // altında ve küçük sınıfta yalnız o.
+        let ys: Vec<f32> = frame.dock_glyphs().iter().map(|g| g.pos[1]).collect();
+        assert_eq!(ys, [7.0, 25.0, 43.0, 75.0]);
+        let small: Vec<bool> = frame
+            .dock_glyphs()
+            .iter()
+            .map(|g| g.size == SizeClass::Small)
+            .collect();
+        assert_eq!(small, [false, false, false, true]);
+        // Bağlam satırı bandın **dibinde**: altında yalnız dış pay.
+        assert_eq!(frame.dock_layout_px() - (ys[3] + 18.0), 7.0);
+
+        // Tek saç çizgisi giriş bloğunun altında, boşluğun ortasında:
+        // 7 + 3·18 + (14 − 1)/2 = 67,5 → 68. Giriş satırları arasında çizgi yok.
+        let [ground, separator, divider] = frame.dock_ground(500.0);
+        assert_eq!(ground.size, [500.0, 100.0]);
+        assert_eq!(separator.pos, [0.0, 0.0]);
+        assert_eq!(divider.pos, [0.0, 68.0]);
+        assert!(divider.pos[1] > ys[2] + 18.0 && divider.pos[1] < ys[3]);
+
+        // Fareye giden geometri: giriş bloğunun tepesi (600 − 100 + 7) ve
+        // üç satır.
+        assert_eq!(frame.dock_hit(), Some((507.0, 3)));
+    }
+
+    #[test]
+    fn a_growing_band_keeps_its_rows_and_divider_on_the_bottom() {
+        // **Dibe yaslı** (032): bant yarı yoldayken (fazla 2 hedefli, şu an
+        // 0,5) zemin ve üst saç çizgisi animasyonun boyunda, hücreler ve ikinci
+        // saç çizgisi yerleşimde — metin yerinde duruyor, yalnız bandın tepesi
+        // yükseliyor. Izgaranın orijini bandın fazlası kadar yukarıda.
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü");
+        let mut frame = Frame::default();
+        frame.clear(metrics, CaretStyle::default());
+        frame.set_dock_rows(4);
+        frame.set_origin_rows(5.0);
+        frame.set_dock_band(600.0, 0.5);
+        frame.open_dock(BG, CURSOR);
+        // PTY payı 64 + yarım satırın yuvarlanmış pikseli 9.
+        assert_eq!(frame.dock_band_px(), 73.0);
+        assert_eq!(frame.origin_px(), 5.0 * 18.0 - 9.0);
+        let [ground, _, divider] = frame.dock_ground(500.0);
+        assert_eq!(ground.size, [500.0, 73.0]);
+        // Çizgi pencere uzayında yerleşimdekiyle aynı pikselde: bandın
+        // viewport'u `600 − 73`'te, yerleşiminki `600 − 100`'de.
+        assert_eq!(600.0 - 73.0 + divider.pos[1], 600.0 - 100.0 + 68.0);
     }
 
     #[test]

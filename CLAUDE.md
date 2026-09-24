@@ -302,7 +302,22 @@ her satırı kendi bandı yaptığı için bandın içi simetrik olmalı ve çiz
 yanına birer pay düşünce dock'un dört boşluğu da eşitleniyor (kalan ±1 px
 çizgilerin kendi kalınlığından). phase-9'un `pad / 2`'si "dış boşluk içtekinden
 büyük" kuralındandı; o kural **gruplar** için doğru, araya çizgi girince grup
-kalmıyor. Dock ötelemeden
+kalmıyor. **PTY'nin ayırdığı pay ile çizilen bant ayrı** (032): pay
+`DOCK_ROWS`'la sabit ve hiç değişmiyor (kabuk SIGWINCH görmüyor), çizilen
+bant `Cursor::input_rows` giriş satırı + bağlam satırı (`bt_gpu::band_px`;
+boşluk ve ikinci saç çizgisi yalnız giriş bloğu ile bağlam satırı arasında)
+ve **dibe yaslı** — hücreler yerleşimin viewport'undan, zemin bandın o anki
+boyundan, büyüyen bandın üstüne taşan satırı makas kesiyor. Fark ızgaranın
+çizimde yukarı ötelenmesiyle kapanıyor: çizilen orijin `origin − band`, tek
+yerde (`link::compose`) ve aynı yuvarlanmış pikselle, yani ızgaranın alt
+kenarı, doldurma bandı ve bandın tepesi aynı karede çakışıyor; dolu ızgaranın
+tepesi geçici olarak kırpılıyor. Bandın fazlası `Motion`'ın dördüncü
+`Slide`'ında **iki yönde** süzülüyor (panelin boyu içerik değil, 011'in yön
+kuralı ona uymuyor), `settled()`'e giriyor, snap/Hareketi Azalt/geometride
+oturuyor ve değiştiği karede yükselen içerik hedefi de süzülüyor ki iki eğri
+birbirini götürsün. Fare dock'u çizilen kareden okuyor (`Origin::dock`,
+orijinle aynı yazımda). Bugün `input_rows` hep 1: bant değişken, ekran aynı.
+Dock ötelemeden
 **yapısal olarak** muaf:
 listeleri dock-yerel doğuyor, ekrana taşıyan şey o ikinci viewport. Üst
 satırında prompt işareti (safha rengiyle), metin, sönük öneri,

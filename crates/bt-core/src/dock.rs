@@ -83,6 +83,36 @@ pub struct DockCols {
     pub context: u16,
 }
 
+/// Dock'un giriş bloğuna ayrılabilecek yer: kaç satıra kadar ve kaç sütunda
+/// sarılarak — [`crate::Session::frame`]'in argümanı (032).
+///
+/// **Yerleşim kararı çizenin**, sayıyı `bt-gpu` veriyor ([`DockCols`]'un
+/// emsali): tavan pencerenin ızgara satırlarından türeyen bir tasarım oranı ve
+/// bu crate piksel de pencere de görmüyor. `frame()` çizilecek giriş satırı
+/// sayısını ([`crate::Cursor::input_rows`]) bastırma kararıyla **aynı
+/// okumada** bu bütçeyle kırpıyor; iki ayrı kilit turundan türetilseydi bant ile
+/// dock'un satırları bir kare ayrışabilirdi.
+///
+/// İki sayı tek tipte ve adlı alanlarda, `DockCols` ile aynı gerekçe: yan yana
+/// iki `u16` sessizce ters geçirilebilirdi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DockBudget {
+    /// Giriş satırlarının tavanı; `0` da en az bir satır demek (dock'un giriş
+    /// satırı hiç kaybolmuyor).
+    pub rows: u16,
+    /// Sarmanın genişliği, sütun: dock'un giriş satırının ızgarayla paylaştığı
+    /// genişlik ([`DockCols::grid`]).
+    pub cols: u16,
+}
+
+impl DockBudget {
+    /// Bu bütçeyle çizilecek giriş satırı sayısı, `needed` satır isteyen bir
+    /// görüntü için: tavana kırpılmış ve **en az bir**.
+    pub(crate) fn fit(self, needed: u16) -> u16 {
+        needed.min(self.rows).max(1)
+    }
+}
+
 /// Metnin başladığı sütun: işaret bir hücre, bir hücre de nefes payı.
 ///
 /// Sabit, çünkü işaret **tek** karakter ve ayna onu görmüyor — aynanın
@@ -108,10 +138,14 @@ const SEPARATOR: &str = " | ";
 /// giriş satırının devamı değil, dock'un **altbilgisi**.
 const CONTEXT_COL: u16 = 0;
 
-/// Bağlam satırının dock-yerel satır numarası; giriş satırının **altı**.
+/// Tek giriş satırlı dock'ta bağlam satırının dock-yerel satır numarası —
+/// bu modülün sınamalarının sayısı.
 ///
-/// `DOCK_ROWS`'un ikinci satırı ve orası bu crate'te değil `bt-gpu`'da
-/// sayılıyor; buradaki sabit onun tüketicisi, ikinci bir kaynak değil.
+/// Üretimde sabit değil: bağlam satırı giriş bloğunun **altında**, yani
+/// satırı giriş satırı sayısının ta kendisi ([`crate::Cursor::input_rows`],
+/// [`render_with`]'in `input_rows`'u). `bt-gpu` aynı sayıdan bandın dibine
+/// yerleştiriyor.
+#[cfg(test)]
 const CONTEXT_ROW: u16 = 1;
 
 /// Soldan kısaltılmış yolun başındaki işaret.
@@ -760,6 +794,7 @@ pub(crate) fn render_with(
     shell: Option<ShellState>,
     theme: &Theme,
     cols: DockCols,
+    input_rows: u16,
     owned: bool,
     selection: Option<(usize, usize)>,
     change: Option<&Change>,
@@ -792,7 +827,7 @@ pub(crate) fn render_with(
     // Bağlam satırı aynanın **durumundan önce**: dizin ve dal ZLE satırı
     // düzenlemese de doğru ve kullanıcı komut koşarken de onlara bakıyor.
     // Aşağıdaki `Live` kapısının altında kalsaydı her komutta kaybolurdu.
-    render_context(context, theme, cols.context, &mut sink);
+    render_context(context, theme, cols.context, input_rows, &mut sink);
 
     let available = usize::from(cols.grid.saturating_sub(TEXT_COL));
     if available == 0 {
@@ -1038,7 +1073,17 @@ pub(crate) fn render(
     edits: impl FnMut(DockEdit),
 ) -> Dock {
     render_with(
-        state, context, shell, theme, cols, owned, None, change, sink, edits,
+        state,
+        context,
+        shell,
+        theme,
+        cols,
+        CONTEXT_ROW,
+        owned,
+        None,
+        change,
+        sink,
+        edits,
     )
     .0
 }
@@ -1070,7 +1115,13 @@ fn settle(change: Option<&Change>, edits: &mut impl FnMut(DockEdit)) {
 ///
 /// **Ayraç iki yan da doluysa çizilir.** Depo olmayan dizinde asılı bir `|`
 /// "dal okunamadı" derdi; okunacak dal yok.
-fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut impl FnMut(Cell)) {
+fn render_context(
+    context: &DockContext,
+    theme: &Theme,
+    cols: u16,
+    row: u16,
+    sink: &mut impl FnMut(Cell),
+) {
     let available = usize::from(cols.saturating_sub(CONTEXT_COL));
     if available == 0 {
         return;
@@ -1183,7 +1234,7 @@ fn render_context(context: &DockContext, theme: &Theme, cols: u16, sink: &mut im
         sink(Cell {
             // audit: `offset < available ≤ cols` ve `cols` `u16`; toplam taşamaz.
             col: CONTEXT_COL + offset as u16,
-            row: CONTEXT_ROW,
+            row,
             ch: Some(ch),
             // Satırın tamamı sönük kalıyor — bağlam okunur ama giriş satırıyla
             // yarışmaz — ve **içinde** ikinci bir kademe var (yukarıda).
@@ -1889,6 +1940,50 @@ mod tests {
         // ([`render`]), yani dizin ile dal yerinde kalıyor.
         let (with_context, _) = draw_with(&state, &context("/tmp/x", "main"), COLS);
         assert_eq!(row_text(&with_context, CONTEXT_ROW), "/tmp/x | main");
+    }
+
+    #[test]
+    fn the_context_row_sits_under_the_input_block() {
+        // **Bağlam satırı giriş bloğunun altında** (032 phase-2): satır
+        // numarası çizilecek giriş satırı sayısının ta kendisi, sabit `1`
+        // değil. `bt-gpu` aynı sayıdan bandın dibine yerleştiriyor; burada
+        // ayrışsalardı bağlam satırı bir giriş satırının yerine düşerdi.
+        let mut cells = Vec::new();
+        render_with(
+            &live("", "ls", "", 2),
+            &context("/tmp/x", "main"),
+            None,
+            &THEME,
+            same(COLS),
+            3,
+            true,
+            None,
+            None,
+            |cell| cells.push(cell),
+            |_| (),
+        );
+        assert_eq!(row_text(&cells, 3), "/tmp/x | main");
+        assert_eq!(
+            row_text(&cells, CONTEXT_ROW),
+            "",
+            "bağlam eski satırda kaldı"
+        );
+        assert_eq!(
+            row_text(&cells, 0).trim(),
+            "ls",
+            "giriş satırı yerinden oynadı"
+        );
+    }
+
+    #[test]
+    fn the_budget_keeps_at_least_one_input_row() {
+        // Tavan satırı kırpıyor ama dock'un giriş satırı hiç kaybolmuyor:
+        // sıfır bütçe (sıfır satırlık ızgara) bile bir satır veriyor.
+        let budget = |rows| DockBudget { rows, cols: 80 };
+        assert_eq!(budget(4).fit(1), 1);
+        assert_eq!(budget(4).fit(9), 4);
+        assert_eq!(budget(0).fit(3), 1);
+        assert_eq!(budget(5).fit(0), 1);
     }
 
     #[test]
@@ -2986,6 +3081,7 @@ mod tests {
             None,
             &THEME,
             same(cols),
+            CONTEXT_ROW,
             true,
             selection,
             None,
