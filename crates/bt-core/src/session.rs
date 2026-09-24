@@ -1565,6 +1565,9 @@ pub enum DockKey {
     ShiftLeft,
     /// ⇧→ — [`DockKey::ShiftLeft`]'in aynası.
     ShiftRight,
+    /// ⇧⏎ — satırı çalıştırmadan imlecin yerine bir satır sonu ekler (varsa
+    /// seçimin yerine). Seçim olsa da olmasa da tüketilir.
+    NewLine,
 }
 
 /// Düzenleme kapısının açık olduğu andaki satır: `BUFFER`'ın karakter
@@ -5092,6 +5095,19 @@ impl Session {
                     self.request_frame();
                 }
             }
+            // **Satır sonu yapıştırmanın yolundan** (`paste`): bracketed sarma
+            // her keymap'te harfi harfine ekliyor, yani `viins`'te de satırı
+            // çalıştırmıyor — `\e\r` orada `vicmd`'ye geçip satırı kabul
+            // ederdi, `^V^J` ise `vicmd`'de çıplak `^J` olurdu. Seçimin yerine
+            // geçmek ve aynayı tazeleyen komut da oradan bedava geliyor. Sarma
+            // kapalıysa çıplak `\n` satırı çalıştırırdı: tuş bugünkü yolundan
+            // (Enter) gidiyor.
+            (DockKey::NewLine, _) => {
+                if !self.bracketed_paste() {
+                    return false;
+                }
+                self.paste(b"\n".to_vec());
+            }
             (DockKey::Backspace | DockKey::Delete | DockKey::Left | DockKey::Right, None) => {
                 return false;
             }
@@ -8213,6 +8229,35 @@ mod tests {
             assert!(session.dock_key(DockKey::Delete), "{setup}");
             wait_edited(&session, &mut dock, "dëf");
             assert_eq!(caret_of(&dock), 0, "{setup}");
+            session.shutdown();
+            let _ = std::fs::remove_dir_all(&home);
+        }
+    }
+
+    #[test]
+    fn shift_return_inserts_a_newline_without_running_the_line() {
+        // ⇧⏎ yapıştırmanın yolundan tek bir `\n`: satır çalışmıyor, caret
+        // yeni satırın başında ve yazılan harf oraya gidiyor — `viins`'te de
+        // (`\e\r` orada satırı kabul ederdi).
+        for setup in ["bindkey -e", "bindkey -v"] {
+            let (session, home) = spawn_editing_zsh("dock-newline");
+            let mut dock = DockState::default();
+            session.write(format!("{setup}\r").as_bytes());
+            wait_dock(&session, &mut dock, |dock| {
+                dock.status == DockStatus::Live && dock.buffer.is_empty()
+            });
+            wait_until(
+                "kapı yeni prompt'ta açılmadı",
+                Duration::from_secs(5),
+                || session.can_edit_dock(),
+            );
+            session.write(b"echo a");
+            wait_edited(&session, &mut dock, "echo a");
+            assert!(session.dock_key(DockKey::NewLine), "{setup}");
+            wait_edited(&session, &mut dock, "echo a\n");
+            session.write(b"b");
+            wait_edited(&session, &mut dock, "echo a\nb");
+            assert_eq!(caret_of(&dock), "echo a\nb".chars().count(), "{setup}");
             session.shutdown();
             let _ = std::fs::remove_dir_all(&home);
         }

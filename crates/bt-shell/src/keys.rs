@@ -277,7 +277,7 @@ pub(crate) fn page_scroll(chars: &str, shift: bool) -> Option<i32> {
 /// hangisinin ne yapacağı `bt-core`'da (`Session::dock_key`), burası yalnız
 /// `NSEvent`'in sözlüğü.
 ///
-/// **Değiştiricisiz** ⌫, ⌦, ←, → ve Shift'li iki ok. Option, Control ya da
+/// **Değiştiricisiz** ⌫, ⌦, ←, →, Shift'li iki ok ve ⇧⏎. Option, Control ya da
 /// Command taşıyan tuş hiç dock tuşu değil: ⌥⌫ `backward-kill-word`, ⌘⌫
 /// `kill-whole-line` ve ikisi de bugünkü yolundan gidip seçimi kaldırıyor —
 /// "başka her tuş" kolu. Shift'li ⌫ düz ⌫ sayılıyor: macOS'ta da aynı tuş.
@@ -292,6 +292,10 @@ pub(crate) fn dock_key(key: KeyPress<'_>, shift: bool) -> Option<DockKey> {
         (ARROW_RIGHT, false) => Some(DockKey::Right),
         (ARROW_LEFT, true) => Some(DockKey::ShiftLeft),
         (ARROW_RIGHT, true) => Some(DockKey::ShiftRight),
+        // ⇧⏎: dock'ta satırı çalıştırmadan yeni satır (iTerm'in ve Claude
+        // Code'un alışkanlığı). Kapı kapalıysa `bt-core` tüketmiyor ve tuş
+        // bugünkü gibi Enter olarak gidiyor.
+        ('\r', true) => Some(DockKey::NewLine),
         _ => None,
     }
 }
@@ -301,7 +305,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_dock_keys_are_the_plain_six() {
+    fn the_dock_keys_are_the_plain_seven() {
         assert_eq!(dock_key(plain("\u{7f}"), false), Some(DockKey::Backspace));
         assert_eq!(dock_key(plain("\u{7f}"), true), Some(DockKey::Backspace));
         assert_eq!(dock_key(plain("\u{f728}"), false), Some(DockKey::Delete));
@@ -309,6 +313,18 @@ mod tests {
         assert_eq!(dock_key(plain("\u{f703}"), false), Some(DockKey::Right));
         assert_eq!(dock_key(plain("\u{f702}"), true), Some(DockKey::ShiftLeft));
         assert_eq!(dock_key(plain("\u{f703}"), true), Some(DockKey::ShiftRight));
+        assert_eq!(dock_key(plain("\r"), true), Some(DockKey::NewLine));
+        // ⌥⇧⏎ ve ⌃⇧⏎ dock tuşu değil.
+        assert_eq!(
+            dock_key(
+                KeyPress {
+                    option: true,
+                    ..plain("\r")
+                },
+                true
+            ),
+            None
+        );
         // "Başka her tuş": değiştiricili olanlar ve metin.
         for key in [
             KeyPress {
