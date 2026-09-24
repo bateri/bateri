@@ -114,6 +114,6 @@ tuş / menü (dock seçimi varken, kapı açık)
 | phase-1 | ✅ |
 | phase-2 | ✅ |
 | phase-3 | ✅ |
-| phase-4 | |
+| phase-4 | ✅ |
 | phase-5 | |
 | kapı | |

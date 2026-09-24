@@ -182,6 +182,20 @@ pub(crate) fn point_to_cell(
     Some(SelectionPoint { col, row, half })
 }
 
+/// Dock'un giriş satırının tepesi, view'ın fiziksel pikselinde (üstten).
+///
+/// Dock bandı pencerenin dibinde ve boyu `bt-gpu`'nun formülü
+/// ([`bt_gpu::dock_px`]; `split_into_grid`'in ve ikinci viewport'un
+/// kullandığı **tek** kopya), giriş satırı bandın nefes payının altında —
+/// payın kaynağı sol pay ([`CellMetrics::gutter_px`], `Frame::dock_pos`).
+/// Satır bu değerle [`point_to_cell`]'e **tek satırlık bir ızgara** olarak
+/// veriliyor: sütun ve yarı aritmetiği ızgarayla aynı gövdeden, basışın reddi
+/// ("bağlam satırı ve bandın payı hiçbir şey yapmaz") ve sürüklemenin kırpması
+/// ("satırın içine") da. Saf, sınanabilir.
+pub(crate) fn dock_input_top_px(height_px: f64, metrics: CellMetrics, dock_rows: u16) -> f64 {
+    height_px - f64::from(bt_gpu::dock_px(dock_rows, metrics)) + f64::from(metrics.gutter_px())
+}
+
 /// Hücre içi x'in yarısı — seçim sınırını çizen tek girdi.
 ///
 /// Yarı `col`'dan **türetilemez**: `col` tam sayıya kesiyor ve kesme artığı
@@ -445,6 +459,11 @@ pub(crate) struct ViewIvars {
     /// reddediyor (`Session::resize`) ve `point_to_cell` sıfır satır/sütunda
     /// `None` dönüyor, yani iki taraf da aynı yerde susuyor.
     metrics: Cell<Option<(CellMetrics, (u16, u16))>>,
+    /// Dock'un satır sayısı; `0` → pencerede dock yok (entegrasyonsuz kabuk,
+    /// alternatif ekran). `metrics` ile **aynı** çağrıda yazılıyor
+    /// (`set_metrics`): dock alternatif ekranda kalkınca ızgara da yeniden
+    /// boyutlanıyor, yani ikisi aynı geometrinin iki yarısı.
+    dock_rows: Cell<u16>,
     /// Çizilen karenin dikey orijini — kare yolunun yazdığı gövdenin okuma
     /// ucu ([`bt_gpu::Origin`]).
     ///
@@ -480,7 +499,9 @@ define_class!(
         }
 
         /// Edit ▸ Copy (Cmd-C): seçili metni genel panoya yazar. Seçim yoksa
-        /// ya da boşsa pano el değmeden kalır (`clipboard::copy`).
+        /// ya da boşsa pano el değmeden kalır (`clipboard::copy`). Pencerede
+        /// tek seçim var — ızgara ya da dock — ve metni sahibinden
+        /// `Session::selection_text` veriyor (031 Karar 7).
         ///
         /// Menü öğesinin hedefi yok: eylem responder zincirinden first
         /// responder'a, yani buraya varıyor (`menu`). Metin `selection_text()`'ten
@@ -507,8 +528,9 @@ define_class!(
             }
         }
 
-        /// Edit ▸ Select All (⌘A): ızgaranın bütün geçmişini seçer
-        /// (`Session::select_all`) — Terminal.app'in normu.
+        /// Edit ▸ Select All (⌘A): dock caret'in sahibiyken ve satırda metin
+        /// varken dock'un bütün `BUFFER`'ını, değilse ızgaranın bütün
+        /// geçmişini seçer (`Session::select_all`; Terminal.app'in normu).
         ///
         /// Menü öğesi `performKeyEquivalent:`'la `keyDown:`'dan **önce**
         /// yakalanıyor, yani ⌘A kabuğa hiç varmıyor ve `keyDown:`'ın Cmd izin
@@ -1157,6 +1179,7 @@ impl BateriView {
             scroll_carry: Cell::new(0.0),
             smooth_scroll: Cell::new(true),
             metrics: Cell::new(None),
+            dock_rows: Cell::new(0),
             origin: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
@@ -1196,10 +1219,11 @@ impl BateriView {
     /// Fare çevirisinin girdilerini tazeler: `start_session` ve `resize`
     /// yolundan, oturuma ve link'e giden grid'in aynısıyla. Üçü aynı çağrı
     /// yerinde yazılıyor; biri değişip öteki eski kalamıyor.
-    pub(crate) fn set_metrics(&self, grid: crate::app::Grid) {
+    pub(crate) fn set_metrics(&self, grid: crate::app::Grid, dock_rows: u16) {
         self.ivars()
             .metrics
             .set(Some((grid.cell, (grid.cols, grid.rows))));
+        self.ivars().dock_rows.set(dock_rows);
     }
 
     /// Kaydırmanın pürüzsüz mü satır adımıyla mı gideceği — pencere
@@ -1320,6 +1344,21 @@ impl BateriView {
             return;
         }
         self.with_gesture(|g| g.begin_press(button));
+        // **Dock'un giriş satırı ızgaradan önce** ve fare kipine hiç
+        // sorulmadan: bant uygulamanın ekranı değil, terminalin kendi yüzeyi
+        // (031 phase-4). Yalnız sol tuş; bağlam satırı ve bandın payı
+        // reddediliyor, yani orada basış hiçbir şey yapmıyor.
+        if button == MouseButton::Left
+            && let Some(point) = self.window_point_dock(event.locationInWindow(), OutOfGrid::Reject)
+        {
+            let shift = modifiers(event).shift;
+            let clicks = event.clickCount();
+            match self.with_gesture(|g| g.pressed_dock(clicks, shift)) {
+                Press::Select(kind) => session.dock_select(kind, point.col, point.half),
+                Press::Extend => session.dock_extend(point.col, point.half),
+            }
+            return;
+        }
         let Some(cell) = self.window_point_cell(event.locationInWindow(), OutOfGrid::Reject) else {
             return;
         };
@@ -1359,6 +1398,17 @@ impl BateriView {
             Drag::Select => {
                 if let Some((session, cell)) = self.session_cell(event) {
                     session.update_selection(cell);
+                }
+            }
+            // Dock'ta başlamış sürükleme dock'ta kalıyor: nokta satırın
+            // içine kırpılıyor, ızgaraya taşmıyor.
+            Drag::SelectDock => {
+                let clamp = OutOfGrid::Clamp { fill_rows: 0 };
+                if let (Some(session), Some(point)) = (
+                    self.ivars().session.get(),
+                    self.window_point_dock(event.locationInWindow(), clamp),
+                ) {
+                    session.dock_drag(point.col, point.half);
                 }
             }
             Drag::Ignore => {}
@@ -1483,6 +1533,25 @@ impl BateriView {
             cols,
             rows,
         )
+    }
+
+    /// Pencere noktası → dock'un giriş satırında sütun + yarı
+    /// ([`dock_input_top_px`]); `row` her zaman `0`. Dock yoksa ya da nokta
+    /// (`Reject`'te) giriş satırının dışındaysa `None`.
+    ///
+    /// Yükseklik view'ın bounds'undan: drawable'ın boyu onunla aynı çağrıda
+    /// kuruluyor (`TerminalWindow::sync_geometry`), dock'un ikinci viewport'u
+    /// da dokunun dibine yaslanıyor.
+    fn window_point_dock(&self, in_window: NSPoint, outside: OutOfGrid) -> Option<SelectionPoint> {
+        let (metrics, (cols, _)) = self.ivars().metrics.get()?;
+        let dock_rows = self.ivars().dock_rows.get();
+        if dock_rows == 0 {
+            return None;
+        }
+        let point = self.convertPoint_fromView(in_window, None);
+        let scale = self.window()?.backingScaleFactor();
+        let top = dock_input_top_px(self.bounds().size.height * scale, metrics, dock_rows);
+        point_to_cell((point.x, point.y), metrics, top, outside, scale, cols, 1)
     }
 
     /// Çizilen karenin doldurma bandının boyu — orijinle **aynı gövdeden**
@@ -1928,6 +1997,40 @@ mod tests {
         };
         assert_eq!(thin(0.0), None, "bandın üstünde kalan boşluk");
         assert_eq!(thin(89.0), None, "bandın içi");
+    }
+
+    /// Dock'un giriş satırı `bt-gpu`'nun çizdiği yerde: bandın dibe yaslı
+    /// tepesinin nefes payı kadar altı. Basış yalnız o satırda bir nokta
+    /// veriyor — saç çizgisi, pay ve bağlam satırı reddediliyor — sürükleme
+    /// ise satırın içine kırpılıyor. @1x, 9×18 hücre, pay 7: band
+    /// `2·18 + 2·7 + 14 = 64` px, yani 400 px'lik view'da giriş satırı
+    /// 343..361.
+    #[test]
+    fn the_dock_input_row_is_where_the_dock_draws_it() {
+        let metrics = grid(7);
+        let top = dock_input_top_px(400.0, metrics, 2);
+        assert_eq!(top, 343.0);
+        let press =
+            |x: f64, y: f64| point_to_cell((x, y), metrics, top, OutOfGrid::Reject, 1.0, 40, 1);
+        // Satırın içi: sütun ızgaranın aritmetiğiyle (sol pay düşülüyor).
+        let point = press(7.0 + 3.0 * 9.0 + 6.0, 350.0).expect("satırda nokta yok");
+        assert_eq!((point.col, point.row, point.half), (3, 0, CellHalf::Right));
+        // Bandın payı, bağlam satırı ve ızgaranın alanı hiçbir şey.
+        for y in [337.0, 342.0, 362.0, 390.0, 100.0] {
+            assert_eq!(press(20.0, y), None, "y = {y}");
+        }
+        // Sürükleme satırın içine kırpılıyor.
+        let drag = point_to_cell(
+            (1000.0, 390.0),
+            metrics,
+            top,
+            OutOfGrid::Clamp { fill_rows: 0 },
+            1.0,
+            40,
+            1,
+        )
+        .expect("kırpma yok");
+        assert_eq!((drag.col, drag.row, drag.half), (39, 0, CellHalf::Right));
     }
 
     #[test]

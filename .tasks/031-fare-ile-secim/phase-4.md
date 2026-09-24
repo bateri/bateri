@@ -57,12 +57,59 @@ _Requirements: R3.1, R3.2, R3.3, R3.4, R3.5_
 
 ## Checklist
 
-- [ ] Sütun yürüyüşü iteratörü; `render`/`diff` ona geçer
-- [ ] `DockSelection`, çizilen pencerenin izi, `Dock::selection`
-- [ ] Kelime fonksiyonu + alacritty ile karşılaştırma sınaması
-- [ ] `view.rs` isabet testi, tek sahip, ⌘C/⌘A
-- [ ] `bt-gpu` dock seçim listesi
-- [ ] Test: eşleme, kelime paritesi, temizleme kuralları
-- [ ] `CLAUDE.md`
-- [ ] Doğrulama geçti (`make hepsi`, `make test-yaris`, `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Sütun yürüyüşü iteratörü; `render`/`diff` ona geçer
+- [x] `DockSelection`, çizilen pencerenin izi, `Dock::selection`
+- [x] Kelime fonksiyonu + alacritty ile karşılaştırma sınaması
+- [x] `view.rs` isabet testi, tek sahip, ⌘C/⌘A
+- [x] `bt-gpu` dock seçim listesi
+- [x] Test: eşleme, kelime paritesi, temizleme kuralları
+- [x] `CLAUDE.md`
+- [x] Doğrulama geçti (`make hepsi`, `make test-yaris`, `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+
+## Uygulama Notları
+
+- Yürüyüş `dock::columns`: `render`'ın hücreleri, silmenin hayaletleri ve
+  isabet testi (`dock::hit`) onu okuyor. `diff` yürüyüşe **geçmedi** — sütun
+  yürümüyor, yalnız `window_skip`'i paylaşıyor.
+- `render` → `render_with` (seçim parametresi, dönüşte `skip`); eski
+  imza `#[cfg(test)]` sarmalayıcı, sınamalar dokunulmadan kaldı.
+- İz yaprak bir yuvada ama `shell`'de değil, ayrı kilitte
+  (`Session::dock_window`: kayma, sütun, `BUFFER` **bayt** boyu): kayma
+  pencerelemeden sonra doğuyor ve `shell`'e ikinci tur yerine ayrı kilit.
+  Canlı `BUFFER` iz ile aynı boyda değilse tık seçim kurmuyor.
+- Uçlar `DockPoint { index, half }` (alacritty'nin `Anchor`'ı): `Simple`
+  yarıdan sınır çiziyor, yani sürüklemesiz tık boş seçim (phase-5'in
+  tıkla-caret'i buna dayanacak). Aralık mutasyonda bir kez çözülüp seçimin
+  yanında saklanıyor; kare yolu kelime aramıyor.
+- API planın adlarından sapıyor: `dock_select(kind, col, half)`,
+  `dock_extend` (Shift+tık, seçim yoksa başlatır), `dock_drag` (sürükleme,
+  seçimsiz sessiz); `dock_selection_text` / `dock_select_all` özel —
+  `selection_text` ve `select_all` sahibe soruyor, view'ın `copy:`/`selectAll:`
+  gövdesi değişmedi. ⌘A'nın sahibi `frame()`'in yayınladığı
+  `caret_in_dock` (atomik, `alt_screen` emsali).
+- ⌘A boş dock satırında ızgaraya düşüyor (seçilecek bir şey yok; Terminal.app
+  normu). Üçlü tık kopyası `\n` **taşımıyor** (ızgaranın `Lines`'ı taşıyor):
+  kabuğa geri yapıştırılan satır çalışmasın.
+- Seçili dock hücresi ızgaranın kuralıyla: zemin düşük, `standout` çözülmüş
+  (zsh'in yapıştırma vurgusu varsayılan `standout`).
+- Orkestratör/kullanıcı eki: seçimin yarıçapı kendi sabitine çıktı —
+  `bt_gpu::frame::SELECTION_RADIUS = 0.22` (hücre yüksekliği oranı;
+  caret'in 0.10'u; 16pt@2x'te ≈8.6 px, tek hücrede kısa kenarın yarısına
+  kırpılı). Karar 10'un "caret'in varsayılanı" yarısı buna göre değişti;
+  `cursor_radius` hâlâ dokunmuyor. İki renderer bekçisinin sayıları güncellendi.
+- Gözle (geçici paket, 16pt, koyu ve açık tema): dock'ta çift tık yol
+  (`~/src/a-b.rs`), paranteze çift tık `(x y)`, ayırıcıya çift tık iki yandaki
+  kelime (alacritty kuralı), üçlü tık bütün satır, sürükleme; pano metinleri
+  doğru. Izgarada sürükleme dock seçimini kaldırıyor, ⌘A dock'u seçiyor,
+  yazmak seçimi kaldırıyor. Yeni yarıçapla çok satırlı şekil (içbükey köşe
+  dahil) temiz, tek karakter hap biçiminde ama bozulmadan.
+- `/code-review` (medium) iki bulgu, ikisi de düzeltildi: (1) yürüyüş
+  `filter_map`'le sağ yakada **durmuyordu** — sığmayan geniş karakterden
+  sonraki dar karakter onun sütununa kayıyordu (`render`'ın eski `break`'i);
+  `map_while` + bekçi `the_walk_stops_at_a_wide_char_that_does_not_fit`.
+  (2) boşluğa/öneriye çift tık son kelimeyi seçiyordu; boşluk artık
+  `len + uzaklık`'a iniyor, yani ızgaradaki gibi yalnız bitişik sütun son
+  kelimeyi alıyor.
+- `make hepsi` iki koşuda bir kez `bt-shell` lib sınamalarında bilinen
+  SIGSEGV ile düştü (021/026/030 notları), yeniden koşu yeşil.

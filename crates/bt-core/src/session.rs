@@ -60,15 +60,15 @@ use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Handler};
 use polling::{Event as PollingEvent, PollMode, Poller};
 
 use crate::color::{self, LinearRgba, Theme};
-use crate::dock::{self, Dock, DockCols, DockEdit};
+use crate::dock::{self, Dock, DockCols, DockEdit, DockPoint};
 use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
 };
 use crate::settings::{CaretShape, CursorBlink};
 use crate::shell::{
-    COUNTER_FLOOR, CaretHome, Counter, DockContext, DockState, Precision, Scanner, ShellLog,
-    ShellState, Stripe,
+    COUNTER_FLOOR, CaretHome, Counter, DockContext, DockSelection, DockState, DockStatus,
+    Precision, Scanner, ShellLog, ShellState, Stripe,
 };
 use crate::wake::Wake;
 
@@ -1907,6 +1907,33 @@ pub enum Click {
     Ignored,
 }
 
+/// Dock'un son çizilen penceresi: isabet testinin izi (031 R3.5).
+///
+/// Fare ekrandakine tıklıyor ve ekrandaki satır **son çizilen** ayna; canlı
+/// ayna o kareden beri ilerlemiş olabilir (yeni bir tuşun aynası, öneri).
+/// İz pencerenin kaymasını ve o aynanın `BUFFER`'ının uzunluğunu taşıyor:
+/// canlı `BUFFER` aynı uzunluktaysa metin aynı kabul edilip çizilen kaymayla
+/// eşleniyor, değilse tık seçim doğurmuyor — ekranda görülmemiş bir metne
+/// seçim kurmaktansa hiç kurmamak (bir kare sonra doğru satır çizilmiş olur).
+/// Uzunluk **bayt**: karşılaştırma kare yolunda ikinci bir sayım
+/// istemesin; bir damga, bir ölçü değil.
+#[derive(Clone, Copy, Debug)]
+struct DockWindow {
+    skip: usize,
+    cols: u16,
+    buffer_bytes: usize,
+}
+
+impl DockWindow {
+    fn hit(&self, state: &DockState, col: u16, half: CellHalf) -> Option<DockPoint> {
+        if state.buffer.len() != self.buffer_bytes {
+            return None;
+        }
+        let available = usize::from(self.cols.saturating_sub(dock::TEXT_COL));
+        dock::hit(state, self.skip, available, col, half)
+    }
+}
+
 /// PTY'si, okuyucu thread'i ve grid'i olan bir terminal oturumu.
 pub struct Session {
     term: Arc<FairMutex<Term<Adapter>>>,
@@ -1945,6 +1972,23 @@ pub struct Session {
     /// (`alacritty_terminal`'ın `pty_read`'i) ve arkasından bir içerik karesi
     /// geliyor.
     alt_screen: AtomicBool,
+    /// Caret'in sahibi dock mu — **son karedeki** hâl ([`Cursor::caret_in_dock`]),
+    /// [`Session::frame`]'in yayınladığı değer.
+    ///
+    /// [`Session::alt_screen`]'in ikizi ve aynı gerekçeyle atomik: yazan tek
+    /// yer `frame()`, okuyan Edit ▸ Select All ([`Session::select_all`]) —
+    /// ⌘A dock caret'in sahibiyken dock'un satırını seçiyor (031 Karar 7) ve
+    /// o kararı yeniden türetmek `frame()`'in üç ön koşulunu ikinci kez
+    /// yazmak olurdu.
+    caret_in_dock: AtomicBool,
+    /// Dock'un **son çizilen** penceresinin izi ([`DockWindow`]): isabet
+    /// testi canlı aynaya değil ekrandakine bakıyor (031 R3.5).
+    ///
+    /// Yaprak kilit ve `shell`'den **ayrı**: yazanı [`Session::dock`]
+    /// pencereleme hesabından **sonra** (kayma orada doğuyor), `shell`
+    /// kilidini bıraktıktan sonra; okuyanı isabet testi, `shell`'i almadan
+    /// önce. İkisi iç içe hiç alınmıyor.
+    dock_window: Mutex<Option<DockWindow>>,
     /// Tarayıcının saydığı `CSI 2 J` — **nesil sayacı**, bayrağın kendisi
     /// değil. Artıranı okuyucu thread'i ([`TappedPty::read`]), okuyanı
     /// [`Session::observe_screen_clear`].
@@ -2180,6 +2224,8 @@ impl Session {
             shell,
             // Açılışta alternatif ekran yok; ilk içerik karesi zaten yazacak.
             alt_screen: AtomicBool::new(false),
+            caret_in_dock: AtomicBool::new(false),
+            dock_window: Mutex::new(None),
             screen_clears,
             key_gen,
             // Açılışta sindirilmemiş temizleme yok: sayaç da, hesaba katılan
@@ -2579,6 +2625,8 @@ impl Session {
             && !alt_screen
             && caret.home == CaretHome::Dock
             && (suppressed_block.is_none() || suppress_to.is_some());
+        // Select All'ün okuduğu kopya ([`Session::caret_in_dock`]'un doc'u).
+        self.caret_in_dock.store(caret_in_dock, Ordering::Relaxed);
 
         // Mürekkebi olmayan dört durum tek `None`'a iniyor ve çizen taraf
         // bayrak sormuyor. Biri `HIDDEN` (`\e[8m`) ve o bu maskede **değil**:
@@ -3847,7 +3895,15 @@ impl Session {
     /// Uçlar grid mutlağında kuruluyor, `anchor`'dan geçmeden: o görünür
     /// pencere hücresini grid satırına indiriyor, burada ise pencere hiç
     /// sorulmuyor.
+    ///
+    /// **Sahibe gidiyor** (031 Karar 7): dock caret'in sahibiyken ve satırda
+    /// metin varken dock'un bütün `BUFFER`'ı seçiliyor — kullanıcının yazdığı
+    /// yer orası. Satır boşsa ızgara: dock'ta seçilecek bir şey yok ve boş
+    /// bir ⌘A'nın geçmişi seçmesi Terminal.app'in normu.
     pub fn select_all(&self) {
+        if self.caret_in_dock.load(Ordering::Relaxed) && self.dock_select_all() {
+            return;
+        }
         let term = self.term.lock();
         let top = Point::new(term.topmost_line(), Column(0));
         let bottom = Point::new(term.bottommost_line(), term.last_column());
@@ -3878,7 +3934,11 @@ impl Session {
             visible_range(term.selection.as_ref(), &term) != visible_range(Some(&selection), &term);
         term.selection = Some(selection);
         drop(term);
-        if changed {
+        // **Tek sahip** (031 Karar 7): ızgarada seçim başlamak dock'unkini
+        // kaldırıyor. `Term` kilidi düştükten sonra — yaprak kilit onun altına
+        // girmiyor.
+        let dock = self.clear_dock_selection();
+        if changed || dock {
             self.request_frame();
         }
     }
@@ -4385,8 +4445,139 @@ impl Session {
     ///
     /// Okumadır, seçimi **temizlemez**: Cmd-C girdi değil, `send_input`'a hiç
     /// varmaz — kopyaladıktan sonra vurgu ekranda kalır (alacritty de öyle).
+    ///
+    /// **Sahibin metni** (031 Karar 7): pencerede tek seçim var, dock'ta bir
+    /// aralık seçiliyse onun `BUFFER` dilimi, değilse ızgaranınki. İkisi aynı
+    /// anda dolu olamıyor — birinde başlamak ötekini temizliyor.
     pub fn selection_text(&self) -> Option<String> {
+        if let Some(text) = self.dock_selection_text() {
+            return Some(text);
+        }
         self.term.lock().selection_to_string()
+    }
+
+    /// Dock'ta yeni seçim: basış, tıklama sayısının adımıyla (031 R3.1).
+    ///
+    /// `col` dock'un **ekran** sütunu (işaret 0'da, metin
+    /// [`crate::DOCK_TEXT_COL`]'da), `half` o sütunun yarısı — ızgaranın
+    /// [`SelectionPoint`]'inin tek satırlık hâli; satır yok, çünkü dock'un
+    /// seçilebilir tek satırı giriş satırı. Nokta **son çizilen** pencereye
+    /// karşı çözülüyor ([`Session::dock_window`]); ayna o kareden beri
+    /// `BUFFER`'ı değiştirdiyse ya da `Live` değilse seçim yok.
+    ///
+    /// **Tek sahip**: ızgaranın seçimi her durumda kalkıyor — dock'a yapılan
+    /// tık "başka yere tıklamak". Sürüklemesiz tek tık boş seçimdir ve
+    /// eski vurguyu kaldırır (ızgaranın kuralı).
+    pub fn dock_select(&self, kind: SelectKind, col: u16, half: CellHalf) {
+        let grid = clear_selection_locked(&mut self.term.lock());
+        let dock = self.change_dock_selection(col, half, |_, point, buffer| {
+            point.map(|point| DockSelection::new(kind, point, point, buffer))
+        });
+        if grid || dock {
+            self.request_frame();
+        }
+    }
+
+    /// Shift+tıklama dock'ta: var olan seçimin ucunu taşır, adımı korur;
+    /// seçim yoksa tıklanan noktadan boş bir `Simple` başlar — ızgaranın
+    /// [`Session::extend_selection`]'ı. Izgaranın seçimi kalkar (tek sahip).
+    pub fn dock_extend(&self, col: u16, half: CellHalf) {
+        let grid = clear_selection_locked(&mut self.term.lock());
+        let dock = self.change_dock_selection(col, half, |current, point, buffer| {
+            let point = point?;
+            Some(match current {
+                Some(selection) => selection.extended(point, buffer),
+                None => DockSelection::new(SelectKind::Simple, point, point, buffer),
+            })
+        });
+        if grid || dock {
+            self.request_frame();
+        }
+    }
+
+    /// Dock'ta basılı sürüklemenin ucu: yalnız bitiş taşınır. Seçim yoksa
+    /// **sessiz** — `BUFFER` sürüklemenin ortasında değiştiyse seçim kalktı
+    /// ve fare hareketi yeni bir seçim doğurmamalı
+    /// ([`Session::update_selection`]'ın kuralı). Nokta çözülemezse (ayna
+    /// değişti) uç yerinde kalır.
+    pub fn dock_drag(&self, col: u16, half: CellHalf) {
+        let changed = self.change_dock_selection(col, half, |current, point, buffer| {
+            let current = current?;
+            Some(point.map_or(current, |point| current.extended(point, buffer)))
+        });
+        if changed {
+            self.request_frame();
+        }
+    }
+
+    /// Dock seçiminin üç kurucusunun ortak gövdesi: noktayı çizilen pencereye
+    /// karşı çözer, `change`'in cevabını yazar ve **çizilen aralık**
+    /// değiştiyse `true` döner — ızgaranın `store_selection` kapısı: yarım
+    /// hücre titreyen bir sürükleme boş kare istemesin.
+    ///
+    /// Kilitler sırayla, iç içe değil: önce iz, sonra `shell`.
+    fn change_dock_selection(
+        &self,
+        col: u16,
+        half: CellHalf,
+        change: impl FnOnce(Option<DockSelection>, Option<DockPoint>, &str) -> Option<DockSelection>,
+    ) -> bool {
+        let window = *lock(&self.dock_window);
+        let mut log = lock(&self.shell);
+        let point = window.and_then(|window| window.hit(&log.dock, col, half));
+        let before = log.dock_selection.and_then(|selection| selection.range());
+        let after = change(log.dock_selection, point, &log.dock.buffer);
+        log.dock_selection = after;
+        before != after.and_then(|selection| selection.range())
+    }
+
+    /// ⌘A'nın dock kolu: `Live` ve boş olmayan bir satırda bütün `BUFFER`.
+    /// Seçecek bir şey yoksa `false` ve çağıran ızgaraya düşer.
+    fn dock_select_all(&self) -> bool {
+        let changed = {
+            let mut log = lock(&self.shell);
+            if log.dock.status != DockStatus::Live || log.dock.buffer.is_empty() {
+                return false;
+            }
+            let start = DockPoint {
+                index: 0,
+                half: CellHalf::Left,
+            };
+            let before = log.dock_selection.and_then(|selection| selection.range());
+            let all = DockSelection::new(SelectKind::Line, start, start, &log.dock.buffer);
+            log.dock_selection = Some(all);
+            before != all.range()
+        };
+        let grid = clear_selection_locked(&mut self.term.lock());
+        if changed || grid {
+            self.request_frame();
+        }
+        true
+    }
+
+    /// Dock seçiminin metni: `BUFFER`'ın seçili dilimi, satır sonu **eklenmeden**
+    /// — ızgaranın satır seçimi (`Lines`) `\n` taşıyor ama dock'un satırını
+    /// kabuğa geri yapıştırmak onu **çalıştırırdı**.
+    fn dock_selection_text(&self) -> Option<String> {
+        let log = lock(&self.shell);
+        let (start, end) = log.dock_selection?.range()?;
+        Some(
+            log.dock
+                .buffer
+                .chars()
+                .skip(start)
+                .take(end - start)
+                .collect(),
+        )
+    }
+
+    /// Dock seçimini kaldırır; çizili bir aralık kalktıysa `true` (kareyi
+    /// çağıran istiyor — genellikle başka bir sebeple zaten istiyor).
+    fn clear_dock_selection(&self) -> bool {
+        lock(&self.shell)
+            .dock_selection
+            .take()
+            .is_some_and(|selection| selection.range().is_some())
     }
 
     /// Oturumun o anki teması, kopya olarak — `bt-gpu`'nun clear ve imleç
@@ -4512,7 +4703,7 @@ impl Session {
         edits: impl FnMut(DockEdit),
     ) -> Dock {
         let theme = *lock(&self.adapter.0.theme);
-        let (shell, change) = {
+        let (shell, change, selection) = {
             let shell = lock(&self.shell);
             // Fark **kopyadan önce**: `into` şu an son çizilen ayna ve bir
             // satır sonra yenisiyle eziliyor.
@@ -4521,19 +4712,30 @@ impl Session {
             // Bağlam **aynı kilit turunda**: ayrı bir turda alınsaydı araya
             // düşen bir prompt dizini yeni, dalı eski bir satırla eşleştirirdi.
             context.clone_from(&shell.context);
-            (shell.state, change)
+            // Seçim de: `BUFFER` değişince onu silen yazıcı aynı kilidi
+            // tutuyor, yani aralık bu aynanın metnine ait.
+            let selection = shell.dock_selection.and_then(|selection| selection.range());
+            (shell.state, change, selection)
         };
-        dock::render(
+        let (dock, skip) = dock::render_with(
             into,
             context,
             shell,
             &theme,
             cols,
             caret_in_dock,
+            selection,
             change.as_ref(),
             sink,
             edits,
-        )
+        );
+        // İsabet testinin izi: bu karenin penceresi ([`Session::dock_window`]).
+        *lock(&self.dock_window) = Some(DockWindow {
+            skip,
+            cols: cols.grid,
+            buffer_bytes: into.buffer.len(),
+        });
+        dock
     }
 
     /// Temayı takas eder ve kare ister — zemin, hücre renkleri, clear ve
@@ -4714,6 +4916,9 @@ impl Session {
                 scroll_locked(&mut term, i32::MIN, self.band_shown()),
             )
         };
+        // Dock'un seçimi de (031 R3.4): girdi iki seçimi birden temizliyor,
+        // tek huni burası. Yaprak kilit `Term`'ün **dışında**.
+        let redraw = self.clear_dock_selection() || redraw;
         // Tek istek: temizlik, kesir ve dönüş aynı kareyi istiyor, vuruş başına
         // iki uyandırma olmasın. "Kaydı mı" kuralı `wake_if_moved`'da kalıyor.
         if redraw {
@@ -8388,6 +8593,165 @@ mod tests {
         // Ama çapa orada: sürükleme oradan harf adımıyla büyür.
         session.update_selection(at(4, 0, CellHalf::Right));
         assert_eq!(session.selection_text().as_deref(), Some("b.c"));
+    }
+
+    /// Dock'ta kelime ızgaradaki kelimeyle **aynı şey** (031 Karar 5): aynı
+    /// dizgi iki yüzeyde, her sütunda aynı aralığı veriyor — ayırıcılar,
+    /// ayırıcının üstüne çift tıklama ve parantez eşleme dahil. Izgaranın
+    /// cevabı alacritty'nin `Semantic`'inden, dock'unki onun kopyasından
+    /// (`dock::selection_range`); ikisi ayrıştığı gün bu sınama kırmızı.
+    #[test]
+    fn a_dock_word_matches_the_grid_word() {
+        for line in ["a b.c/d:e f=g", "f (a (b) c) [x] <y>", "k=v;x  y|z"] {
+            let wake = Arc::new(TestWake::default());
+            let session = spawn_session(
+                &format!("printf '\\033[41m{line}\\033[0m'; sleep 5"),
+                Arc::clone(&wake),
+            );
+            let len = line.chars().count();
+            assert_eq!(wait_cells(&session, &wake, len).len(), len);
+            for col in 0..len {
+                let at_col = at(col as u16, 0, CellHalf::Left);
+                session.set_selection(SelectKind::Word, at_col, at_col);
+                let grid = session.selection_text().unwrap_or_default();
+                let point = DockPoint {
+                    index: col,
+                    half: CellHalf::Left,
+                };
+                let (start, end) = dock::selection_range(line, SelectKind::Word, point, point);
+                let dock: String = line.chars().skip(start).take(end - start).collect();
+                assert_eq!(dock, grid, "{line:?} sütun {col}");
+            }
+            session.shutdown();
+        }
+    }
+
+    /// Dock seçiminin sahnesi: ızgarada `hello world`, altında çıpalı bir
+    /// prompt ve aynası `echo foo bar` olan giriş satırı; dock bir kez
+    /// **çizilmiş** — isabet testi çizilen pencereye bakıyor.
+    fn dock_selection_session() -> Session {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "printf 'hello world\\r\\n{}echo foo bar{}'; sleep 5",
+                anchored_prompt(1),
+                mirror("ZWNobyBmb28gYmFy", 12),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        draw_dock(&session);
+        session
+    }
+
+    /// Bir kare ve dock'u: üretimdeki sıra (`frame()` caret'in sahibini
+    /// veriyor, dock onu alıyor ve penceresinin izini bırakıyor).
+    fn draw_dock(session: &Session) -> Dock {
+        let cursor = session.frame(
+            |_| (),
+            |_| (),
+            &mut Blocks::default(),
+            &mut SelectionRuns::default(),
+            ScrollGlide::default(),
+        );
+        session.dock(
+            DockCols {
+                grid: 40,
+                context: 40,
+            },
+            &mut DockState::default(),
+            &mut DockContext::default(),
+            cursor.caret_in_dock,
+            |_| (),
+            |_| (),
+        )
+    }
+
+    /// Dock'un ekran sütunu: `BUFFER`'ın `index`. karakteri (ASCII, pencere
+    /// kaymamış).
+    fn dock_col(index: u16) -> u16 {
+        dock::TEXT_COL + index
+    }
+
+    #[test]
+    fn the_dock_line_is_selected_by_drag_double_and_triple_click() {
+        let session = dock_selection_session();
+        // Çift tık `foo`'nun içinde.
+        session.dock_select(SelectKind::Word, dock_col(6), CellHalf::Left);
+        assert_eq!(session.selection_text().as_deref(), Some("foo"));
+        // Üçlü tık bütün `BUFFER`, satır sonu **olmadan**: kabuğa geri
+        // yapıştırılan satır çalışmasın.
+        session.dock_select(SelectKind::Line, dock_col(1), CellHalf::Left);
+        assert_eq!(session.selection_text().as_deref(), Some("echo foo bar"));
+        // Sürükleme harf adımıyla; sürüklemesiz tık boş.
+        session.dock_select(SelectKind::Simple, dock_col(0), CellHalf::Left);
+        assert_eq!(session.selection_text(), None);
+        session.dock_drag(dock_col(3), CellHalf::Right);
+        assert_eq!(session.selection_text().as_deref(), Some("echo"));
+        // Shift+tık ucu taşıyor, çapa yerinde.
+        session.dock_extend(dock_col(7), CellHalf::Right);
+        assert_eq!(session.selection_text().as_deref(), Some("echo foo"));
+        // Çizim de aynı aralığı söylüyor: `e`'den ikinci `o`'ya.
+        assert_eq!(
+            draw_dock(&session).selection,
+            Some((dock_col(0), dock_col(7)))
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn one_selection_per_window() {
+        let session = dock_selection_session();
+        let hello = at(1, 0, CellHalf::Left);
+        session.set_selection(SelectKind::Word, hello, hello);
+        assert_eq!(session.selection_text().as_deref(), Some("hello"));
+        // Dock'ta başlamak ızgaranınkini kaldırıyor.
+        session.dock_select(SelectKind::Word, dock_col(10), CellHalf::Left);
+        assert_eq!(session.term.lock().selection_to_string(), None);
+        assert_eq!(session.selection_text().as_deref(), Some("bar"));
+        // Izgarada başlamak dock'unkini.
+        session.set_selection(SelectKind::Word, hello, hello);
+        assert_eq!(session.dock_selection_text(), None);
+        assert_eq!(session.selection_text().as_deref(), Some("hello"));
+        // Dock'a sürüklemesiz tık da "başka yere tıklamak".
+        session.dock_select(SelectKind::Simple, dock_col(0), CellHalf::Left);
+        assert_eq!(session.selection_text(), None);
+        session.shutdown();
+    }
+
+    #[test]
+    fn input_clears_the_dock_selection() {
+        let session = dock_selection_session();
+        session.dock_select(SelectKind::Word, dock_col(6), CellHalf::Left);
+        assert_eq!(session.selection_text().as_deref(), Some("foo"));
+        // Tek huni `send_input`: yazma, yapıştırma ve ok aynı kapıdan.
+        session.write(b" ");
+        assert_eq!(session.selection_text(), None);
+        session.shutdown();
+    }
+
+    #[test]
+    fn select_all_goes_to_the_dock_when_it_owns_the_caret() {
+        let session = dock_selection_session();
+        session.select_all();
+        assert_eq!(session.selection_text().as_deref(), Some("echo foo bar"));
+        assert_eq!(session.term.lock().selection_to_string(), None);
+        session.shutdown();
+    }
+
+    /// İsabet testi **çizilen** pencereye bakıyor: ayna o kareden beri
+    /// başka bir `BUFFER`'a geçtiyse ekranda görülmemiş metne seçim kurulmuyor.
+    #[test]
+    fn a_click_on_a_line_that_was_not_drawn_selects_nothing() {
+        let session = dock_selection_session();
+        {
+            let mut window = lock(&session.dock_window);
+            let drawn = window.as_mut().expect("iz yok");
+            drawn.buffer_bytes += 1;
+        }
+        session.dock_select(SelectKind::Word, dock_col(6), CellHalf::Left);
+        assert_eq!(session.selection_text(), None);
+        session.shutdown();
     }
 
     #[test]

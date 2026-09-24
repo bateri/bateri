@@ -99,6 +99,9 @@ use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::dock::{self, DockPoint};
+use crate::session::SelectKind;
+
 /// Kabuğun akışa bastığı tek bir OSC 133 işareti.
 ///
 /// Dördü de kabuktan bağımsızdır: tipte ne zsh, ne bash, ne fish geçer
@@ -727,6 +730,52 @@ impl BlockLog {
     }
 }
 
+/// Dock'un giriş satırındaki fareyle seçim (031 phase-4): iki uç, adım ve
+/// çözülmüş aralık — **`BUFFER`'ın karakter indeksleriyle**.
+///
+/// **Aynanın yanında yaşıyor, içinde değil** ([`ShellLog::dock_selection`]).
+/// [`DockState`]'in içinde dursaydı kare yolunun farkı (`dock::change` /
+/// `diff`) onu da karşılaştırır ve her sürükleme adımı 030'un yazım
+/// efektlerini `Reset`'lerdi; üstelik tarayıcı aynayı toptan `clone_from`
+/// ile tazeliyor ve seçimi her tuşta ezerdi. Seçim yine de aynaya **bağlı**:
+/// `BUFFER` değişince kalkıyor ([`ShellLog::apply_dock`]), çünkü indeksler
+/// artık başka bir metni gösterirdi.
+///
+/// Aralık uçlar değiştiğinde bir kez çözülüyor (`dock::selection_range`) ve
+/// burada saklanıyor: kare yolu kelime aramıyor, yalnız iki sayı okuyor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DockSelection {
+    /// Basışın noktası; sürükleme ve Shift+tıklama onu taşımıyor.
+    anchor: DockPoint,
+    /// Sürüklemenin ucu.
+    head: DockPoint,
+    kind: SelectKind,
+    /// `[start, end)`; boş seçimde `start == end`.
+    range: (usize, usize),
+}
+
+impl DockSelection {
+    /// `buffer` seçimin ait olduğu `BUFFER`: aralık ona karşı çözülüyor.
+    pub(crate) fn new(kind: SelectKind, anchor: DockPoint, head: DockPoint, buffer: &str) -> Self {
+        Self {
+            anchor,
+            head,
+            kind,
+            range: dock::selection_range(buffer, kind, anchor, head),
+        }
+    }
+
+    /// Ucu `head`'e taşır; çapa ve adım yerinde (sürükleme, Shift+tıklama).
+    pub(crate) fn extended(self, head: DockPoint, buffer: &str) -> Self {
+        Self::new(self.kind, self.anchor, head, buffer)
+    }
+
+    /// Seçili aralık; boşsa `None` — sürüklemesiz tık hiçbir şey seçmez.
+    pub(crate) fn range(&self) -> Option<(usize, usize)> {
+        (self.range.0 < self.range.1).then_some(self.range)
+    }
+}
+
 /// Okuyucu thread'in yazdığı, kare yolunun okuduğu kabuk defteri.
 ///
 /// İki kayıt **tek** yaprak kilidin altında: ikisini de besleyen aynı işaret
@@ -744,6 +793,11 @@ pub(crate) struct ShellLog {
     /// Dock'un bağlam satırı: dizin ve dal. Aynanın **yanında**, içinde değil
     /// ([`DockContext`]); aynı kilit, ayrı ömür.
     pub(crate) context: DockContext,
+    /// Dock'un fareyle seçimi; `None` → seçim yok. Aynanın **yanında**
+    /// ([`DockSelection`]'ın doc'u) ve aynı kilidin altında: `BUFFER`
+    /// değişince onu silen yazıcı (okuyucu thread) ile aralığı okuyan kare
+    /// aynı turda görüyor.
+    pub(crate) dock_selection: Option<DockSelection>,
     /// Koşan komutun başlangıç anı; komut koşmuyorken `None`.
     ///
     /// **Tek alan, blok başına değil:** aynı anda tek komut koşar, çünkü
@@ -976,6 +1030,7 @@ impl ShellLog {
             blocks: BlockLog::new(scrollback),
             dock: DockState::default(),
             context: DockContext::default(),
+            dock_selection: None,
             running_since: None,
             // Açılışta caret dock'un (`caret_home_raw(None, Idle)`), yani ilk
             // devir her zaman Dock→Grid yönünde ve tutma ona uygulanabilir.
@@ -1127,19 +1182,30 @@ impl ShellLog {
     /// bayat bir satır bırakmak, phase-4'te ızgara bastırılırken dock'un bir
     /// önceki komutu göstermesi demek olurdu — kullanıcının yazdığıyla
     /// gördüğünün sessizce ayrılması, bu deponun yasakladığı belirti sınıfı.
+    ///
+    /// **`BUFFER`'ı değişen ayna dock seçimini siler** (031 R3.4): indeksler
+    /// artık başka bir metnin karakterlerini gösterirdi. Yalnız `BUFFER` —
+    /// prompt'un yeniden çizilmesi (`PREDISPLAY`) ya da önerinin değişmesi
+    /// seçili metni oynatmıyor. `End` ile `Unavailable` metni boşaltıyor,
+    /// seçimi de.
     fn apply_dock(&mut self, event: DockEvent<'_>, answers: u64) {
         match event {
             DockEvent::Update(staged) => {
+                if self.dock.buffer != staged.buffer {
+                    self.dock_selection = None;
+                }
                 self.dock.clone_from(staged);
                 self.dock.answers = answers;
             }
             DockEvent::End => {
+                self.dock_selection = None;
                 self.dock.reset();
                 self.dock.status = DockStatus::Idle;
                 // Boş satır da bir cevap: bkz. [`DockState::answers`].
                 self.dock.answers = answers;
             }
             DockEvent::Unavailable(fault) => {
+                self.dock_selection = None;
                 self.dock.reset();
                 self.dock.status = DockStatus::Unavailable(fault);
             }
@@ -2529,6 +2595,7 @@ fn b64_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::CellHalf;
 
     /// Diziyi verilen parçalar hâlinde besler; tarayıcı parçalar arasında
     /// durumunu taşımak zorunda.
@@ -4062,6 +4129,55 @@ mod tests {
         log.apply_scan(ScanEvent::Dock(DockEvent::End));
         assert_eq!(log.dock.status, DockStatus::Idle);
         assert_eq!(log.dock.buffer, "");
+    }
+
+    #[test]
+    fn a_new_buffer_clears_the_dock_selection_and_a_new_prompt_does_not() {
+        // 031 R3.4: seçimin indeksleri `BUFFER`'ın karakterleri; `BUFFER`
+        // değişince başka bir metni gösterirlerdi. Prompt'un yeniden
+        // çizilmesi ya da önerinin değişmesi seçili metni oynatmıyor.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut staged = DockState {
+            status: DockStatus::Live,
+            predisplay: "% ".to_string(),
+            buffer: "git status".to_string(),
+            cursor: 12,
+            ..DockState::default()
+        };
+        log.apply_scan(ScanEvent::Dock(DockEvent::Update(&staged)));
+        let word = DockPoint {
+            index: 0,
+            half: CellHalf::Left,
+        };
+        let select = |log: &mut ShellLog| {
+            log.dock_selection = Some(DockSelection::new(
+                SelectKind::Word,
+                word,
+                word,
+                &log.dock.buffer,
+            ));
+        };
+        select(&mut log);
+        assert_eq!(log.dock_selection.and_then(|s| s.range()), Some((0, 3)));
+
+        staged.predisplay = "%% ".to_string();
+        staged.postdisplay = " -s".to_string();
+        log.apply_scan(ScanEvent::Dock(DockEvent::Update(&staged)));
+        assert!(log.dock_selection.is_some(), "prompt değişimi seçimi sildi");
+
+        staged.buffer = "git statu".to_string();
+        log.apply_scan(ScanEvent::Dock(DockEvent::Update(&staged)));
+        assert_eq!(log.dock_selection, None, "yeni BUFFER seçimi silmedi");
+
+        for (name, event) in [
+            ("End", DockEvent::End),
+            ("Unavailable", DockEvent::Unavailable(DockFault::Overflow)),
+        ] {
+            log.apply_scan(ScanEvent::Dock(DockEvent::Update(&staged)));
+            select(&mut log);
+            log.apply_scan(ScanEvent::Dock(event));
+            assert_eq!(log.dock_selection, None, "{name} seçimi silmedi");
+        }
     }
 
     #[test]

@@ -937,6 +937,18 @@ impl Renderer {
         // caret) onların üstüne gelmek zorunda.
         self.encode_quads(enc, &frame.dock_ground(viewport_px[0]), viewport_px)
             .and_then(|()| self.encode_quads(enc, frame.dock_bg(), viewport_px))
+            // **Seçim ızgaradakiyle aynı sırada** (031 R3.2): vurgu
+            // aralıklarının zemininden sonra, caret'ten ve glyph'lerden önce —
+            // metin seçimin üstünde kendi renginde, caret seçimin üstünde.
+            .and_then(|()| {
+                self.encode_selection(
+                    enc,
+                    frame.dock_selection_instances(),
+                    frame.selection_rgba(),
+                    frame.selection_radius(),
+                    viewport_px,
+                )
+            })
             // Caret'in dock yuvası: opak zeminden **sonra** (yoksa zemin onu
             // örterdi) ve glyph'lerden **önce** (yoksa harfi boyardı).
             // Instance pencere uzayında doğuyor, viewport ise dock-yerel:
@@ -2561,7 +2573,7 @@ mod tests {
         let cell = |col: usize| cell_rows(&pixels, EDGE, (cw, ch), col).concat();
         // Koşunun dört köşesi yuvarlak (phase-3): köşeye `inset` pikselden
         // yakın olanlar sorunun dışında, onları köşe bekçileri soruyor.
-        let inset = caret_radius_px((cw, ch), bt_core::CURSOR_RADIUS as f32);
+        let inset = caret_radius_px((cw, ch), crate::frame::SELECTION_RADIUS);
         let body = |col: usize, left: bool| -> Band {
             let rows = cell_rows(&pixels, EDGE, (cw, ch), col);
             let (w, h) = (usize::from(cw), usize::from(ch));
@@ -2613,7 +2625,7 @@ mod tests {
     }
 
     /// Seçim bekçilerinin ortak kurulumu: köşe yarıçapı birkaç piksel olsun
-    /// diye **büyük** yapay hücre (40×80 → yarıçap 8), atlas gerekmiyor —
+    /// diye **büyük** yapay hücre (40×80 → yarıçap 17.6), atlas gerekmiyor —
     /// karede glyph yok. Dönen şey pikselin ara tona (seçim) mi clear'a mı
     /// yakın olduğunu söyleyen okuyucu.
     fn render_selection(runs: &[SelectionRun]) -> impl Fn(usize, usize) -> &'static str {
@@ -2621,7 +2633,11 @@ mod tests {
         let r = Renderer::system_default().expect("Metal device ve pipeline");
         let mut frame = Frame::default();
         frame.clear(grid(40, 80), CaretStyle::default());
-        assert_eq!(frame.selection_radius(), 8.0, "yarıçap varsayımı");
+        assert!(
+            (frame.selection_radius() - 17.6).abs() < 1e-4,
+            "yarıçap varsayımı: {}",
+            frame.selection_radius()
+        );
         frame.push_selection(runs, MIDTONE);
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
         let srgb = |hex: u32| ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
@@ -2646,7 +2662,7 @@ mod tests {
     #[test]
     fn a_lone_selection_run_has_round_corners_and_a_solid_body() {
         // İki hücrelik koşu: x 0..80, y 0..80. Köşe pikselinin merkezi
-        // yarıçapı 8 olan yayın 2.6 px dışında → clear; kenarın ortası ve
+        // yarıçapı 17.6 olan yayın çok dışında → clear; kenarın ortası ve
         // yayın içi seçim rengi — kenarlar piksel ızgarasında, yani düz
         // kenarda yarım alfa yok.
         let at = render_selection(&[SelectionRun {
@@ -2657,7 +2673,7 @@ mod tests {
         for (x, y) in [(0, 0), (79, 0), (79, 79), (0, 79)] {
             assert_eq!(at(x, y), "clear", "köşe ({x},{y}) yuvarlanmadı");
         }
-        for (x, y) in [(40, 0), (0, 40), (79, 40), (40, 79), (40, 40), (4, 4)] {
+        for (x, y) in [(40, 0), (0, 40), (79, 40), (40, 79), (40, 40), (8, 8)] {
             assert_eq!(at(x, y), "selection", "gövde ({x},{y}) boyanmadı");
         }
         assert_eq!(at(80, 40), "clear", "koşu taştı");
@@ -2666,9 +2682,9 @@ mod tests {
     #[test]
     fn a_selection_step_fills_its_concave_corner() {
         // Üstte 2..=3 (x 80..160), altta 0..=3 (x 0..160): üst koşunun sol
-        // alt köşesi içbükey. Dolgu [72,80]×[72,80]'de, merkezi (72,72) olan
-        // dairenin dışını boyuyor: basamağın dibindeki piksel seçim rengi,
-        // dairenin merkezindeki clear.
+        // alt köşesi içbükey. Dolgu [62.4,80]×[62.4,80]'de, merkezi
+        // (62.4,62.4) olan dairenin dışını boyuyor: basamağın dibindeki piksel
+        // seçim rengi, dairenin içindeki (72,72) clear.
         let at = render_selection(&[
             SelectionRun {
                 row: 0,

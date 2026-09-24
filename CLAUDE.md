@@ -142,8 +142,9 @@ koruyarak (`Session::extend_selection`; seçim yoksa oradan başlar) ve bu iki
 kipte de aynı kural — fare kipinde Shift zaten seçimin tek yolu. Fareyle
 seçim, pano, geçmişte
 kaydırma, ana menü (About, Settings…, Quit; Shell'de New Window/Tab ve
-Close Tab/Window; Edit'te Copy/Paste/Select All — ⌘A geçmişin tamamını seçer
-ve menüden yakalanır, Cmd izin listesi değişmez; View'da Theme ▸ ve Cmd +/−/0 geçici
+Close Tab/Window; Edit'te Copy/Paste/Select All — ⌘A geçmişin tamamını
+(dock caret'in sahibiyken dock'un satırını) seçer ve menüden yakalanır, Cmd
+izin listesi değişmez; View'da Theme ▸ ve Cmd +/−/0 geçici
 punto; Window'da sekme geçişi ve Select Tab ▸) ve kapanış sırası ondadır.
 **Sekmeler macOS'un kendi sekmeleri** (026): her sekme bir `NSWindow` ve
 kendi `Session`/`DisplayLink`/`Renderer`'ı, yani "bir pencere = bir oturum"
@@ -676,8 +677,10 @@ tamponu; `bt-gpu` onu zeminden sonra, caret ve glyph'lerden önce çiziyor) ve
 koşular **yuvarlak köşeli tek parça** bir şekil: açıkta kalan köşe dışbükey,
 bitişik satırın koşusunca örtülen köşe kare, basamakta içbükey dolgu — karar
 saf bir fonksiyonda (`frame::selection_corners`) ve boş ara satır şekli
-bölüyor. Yarıçap caret'in **varsayılan** oranı (`CURSOR_RADIUS`), kullanıcının
-`cursor_radius`'u değil (031 Karar 10: anahtar imlecin). Koşu satırın **ilk çizilir seçili hücresinden
+bölüyor. Yarıçap seçimin **kendi** oranı (`frame::SELECTION_RADIUS`, hücre
+yüksekliğinin 0.22'si, tek hücrede kısa kenarın yarısına kırpılı) — caret'in
+oranı metin bloğunu saran bir yüzeyde köşeyi görünmez kılıyordu; kullanıcının
+`cursor_radius`'u ona dokunmuyor (031 Karar 10: anahtar imlecin). Koşu satırın **ilk çizilir seçili hücresinden
 sonuncusuna** uzanıyor — aradaki boşluklar köprülü, çünkü pano onları zaten
 kopyalıyor; boş kuyruk ve boş satır koşusuz, yani boş ekranda fareyi
 sürüklemek hiçbir şey boyamıyor (031 Karar 4). Ölçüt "mürekkep" değil
@@ -697,6 +700,25 @@ ikincisi. Kırpma **kalkmıyor**, yanına geçiyor: doldurma yokken orası
 gerçekten boş ve yukarıdan başlayan sürükleme ilk satırı seçime katmalı.
 Tekerleğin işaretçisi reddin dışında, çünkü o bir seçim ucu değil rapora
 giden koordinat — reddedilseydi band ekrandayken kaydırma büsbütün ölürdü.
+**Dock'un giriş satırı da seçiliyor** (031 phase-4) ve ızgaranın
+görünüşüyle — aynı pipeline, renk ve yarıçap, tek satırlık koşu
+(`Dock::selection`, ekran sütunu, pencerelenmiş). Seçim `bt-core`'da,
+aynanın **yanında** (`ShellLog::dock_selection`, `BUFFER`'ın karakter
+indeksleri; içinde dursaydı `dock::diff` her sürükleme adımında yazım
+efektlerini sıfırlardı) ve `BUFFER` değişince kalkıyor. Yalnız `BUFFER`
+seçiliyor: `PREDISPLAY` başına, öneri sonuna iniyor. Kelime ızgaranın
+kelimesi (`dock::selection_range`, alacritty'nin `Semantic`'inin tek boyutlu
+kopyası; bekçisi iki yüzeyi aynı dizgide karşılaştırıyor), üçlü tık bütün
+`BUFFER` ve kopyası satır sonu **taşımıyor** — kabuğa geri yapıştırılan satır
+çalışmasın. İsabet testi dock'un **tek sütun yürüyüşünden** (`dock::columns`;
+`render`, hayaletler ve fare aynı yürüyüşü okuyor) ve **son çizilen**
+pencereye karşı (`Session::dock_window`: kayma + `BUFFER` boyu; canlı ayna
+o kareden beri başka bir `BUFFER`'a geçtiyse tık seçim kurmuyor). Fare kipi
+dock'a hiç uygulanmıyor, hedef basışta kilitleniyor (`Gesture`, `Drag::SelectDock`)
+ve sürükleme satırın içine kırpılıyor. **Pencerede tek seçim**: birinde
+başlamak ötekini temizliyor, girdi (`send_input`) ikisini de; ⌘C sahibin
+metnini (`Session::selection_text`), ⌘A dock caret'in sahibiyken ve satırda
+metin varken dock'u seçiyor (`frame()`'in yayınladığı `caret_in_dock`).
 Dock ve komutlar arası atlama henüz yok. `make kur` `bateri.app` paketini
 üretir.
 **Geniş karakter ve renkli emoji çiziliyor** (023) ve ikisi tek
