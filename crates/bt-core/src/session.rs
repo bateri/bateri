@@ -1601,6 +1601,11 @@ const DOCK_EDIT_PREFIX: &str = "\x1b[8133~";
 /// Düzenleme komutu: `BUFFER`'ın `[start, end)` aralığını sil, caret'i
 /// `start`'a koy; `len` terminalin gördüğü `${#BUFFER}` (tutmazsa widget
 /// hiçbir şey yapmaz). Serbest ve saf: baytları sınama doğrudan karşılaştırıyor.
+/// Tazeleme komutu (032 R5): widget'ın tanımadığı yük `BUFFER`'a dokunmuyor
+/// ama aynayı yine basıyor, yani `r` "yalnız aynala" demek. Satır sonlu
+/// yapıştırmanın arkasına gidiyor ([`Session::paste`]).
+const DOCK_REFRESH_COMMAND: &[u8] = b"\x1b[8133~r\x07";
+
 fn dock_edit_command(start: usize, end: usize, len: usize) -> Vec<u8> {
     format!("{DOCK_EDIT_PREFIX}d;{start};{end};{len}\x07").into_bytes()
 }
@@ -5411,6 +5416,9 @@ impl Session {
         if bytes.is_empty() {
             return;
         }
+        // Tazeleme kararı **her şeyden önce**: seçimin silinmesi nesli
+        // ilerletiyor ve kapının "ayna cevap verdi" koşulunu kapatırdı.
+        let refresh = self.paste_refreshes(&bytes);
         // **Seçimin yerine yapıştır** (031 Karar 8): dock'ta seçim varken ve
         // düzenleme kapısı açıkken önce seçim silinir, yük ardından bu
         // yoldan — sarma kararı yine aşağıda, silmeden bağımsız.
@@ -5418,7 +5426,7 @@ impl Session {
         // Sarma sorgusu **önce ve tek başına**: iki kilit (`Term`, sonra
         // `shell`) ardışık alınıyor, iç içe değil.
         if self.bracketed_paste() && !self.can_be_typed(&bytes) {
-            let mut wrapped = Vec::with_capacity(bytes.len() + 12);
+            let mut wrapped = Vec::with_capacity(bytes.len() + 12 + DOCK_REFRESH_COMMAND.len());
             // `b"\e[200~"` yazılamaz: `\e` Rust kaçışı değil. Altı baytın
             // altısı da ASCII, `extend_from_slice` kopyalar.
             wrapped.extend_from_slice(b"\x1b[200~");
@@ -5431,6 +5439,11 @@ impl Session {
             // Emsal alacritty (`ActionContext::paste`) aynı iki baytı süzüyor.
             wrapped.extend(bytes.into_iter().filter(|b| !matches!(b, 0x1b | 0x03)));
             wrapped.extend_from_slice(b"\x1b[201~");
+            // Aynı yazımda, kapanış iğnesinin arkasında: ayrı bir gönderim
+            // nesli ikinci kez ilerletir ve araya kullanıcının tuşu girebilirdi.
+            if refresh {
+                wrapped.extend_from_slice(DOCK_REFRESH_COMMAND);
+            }
             self.write_owned(wrapped);
         } else {
             // Ham dal sıfır kopya: sahiplenen bayt doğrudan kanala gider.
@@ -5481,6 +5494,23 @@ impl Session {
     /// çalışmıyor (satır sonu yok) ama tampon sessizce değişiyordu. İki sarılı
     /// yol (`bracketed-paste` ve `bracketed-paste-magic`) her keymap'te
     /// harfi harfine ekliyor, yani istisna kapanınca davranış doğruya dönüyor.
+    /// Satır sonlu yapıştırmanın arkasına tazeleme komutu eklenecek mi
+    /// (032 R5): yük satır sonu taşıyor **ve** düzenleme kapısının dört
+    /// koşulu yapıştırmadan **önce** açık ([`Session::can_edit_dock`]).
+    ///
+    /// **Neden.** `bracketed-paste-magic` (oh-my-zsh kuruyor) yükü `zle -U`
+    /// ile kuyruğa geri basıyor ve ZLE typeahead varken redisplay'i
+    /// atlıyor: ayna bir tuş boyunca bayat, tazelik kapısı satırı o süre
+    /// ızgarada tutuyor. Kuyruğun arkasındaki komut widget'ı koşturuyor ve
+    /// widget aynayı yapıştırmanın sonucuyla basıyor. Tek satırlık yük
+    /// buraya hiç uğramıyor: [`Session::can_be_typed`] onu zaten sarmıyor.
+    ///
+    /// **Kapı tam**, gevşek değil: `vicmd`'de dizi bağlı değil ve baytları
+    /// komut olurdu, bağlamasız kabukta BEL `send-break`.
+    fn paste_refreshes(&self, bytes: &[u8]) -> bool {
+        bytes.iter().any(|b| matches!(b, b'\n' | b'\r')) && self.dock_edit_line().is_some()
+    }
+
     fn can_be_typed(&self, bytes: &[u8]) -> bool {
         // Tutulan `line-finish` (032 Karar 11) istisnayı kapatıyor: ayna
         // kabul edilmiş satırın, keymap'i de onun — yeni satırınki değil.
@@ -7837,6 +7867,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// **`bracketed-paste-magic`'in arkasındaki tazeleme** (032 R5), gerçek
+    /// ZLE'de. Widget yükü `zle -U` ile kuyruğa geri basıyor ve typeahead
+    /// varken redisplay atlanıyor; `r` komutu kuyruğun **arkasında** geldiği
+    /// için widget aynayı yapıştırmanın sonucuyla basıyor ve ayna son
+    /// girdinin cevabı oluyor — kapı bir tuş beklemeden yeniden açık.
+    #[test]
+    fn a_multiline_paste_is_answered_under_bracketed_paste_magic() {
+        let (session, home) = spawn_editing_zsh("dock-paste-magic");
+        let mut dock = DockState::default();
+        session.write(
+            b"autoload -Uz bracketed-paste-magic; zle -N bracketed-paste bracketed-paste-magic\r",
+        );
+        wait_dock(&session, &mut dock, |dock| {
+            dock.status == DockStatus::Live && dock.buffer.is_empty()
+        });
+        wait_until(
+            "kapı yeni prompt'ta açılmadı",
+            Duration::from_secs(10),
+            || session.can_edit_dock(),
+        );
+        session.paste(b"echo a\necho b".to_vec());
+        wait_until(
+            "yapıştırmanın aynası cevap vermedi",
+            Duration::from_secs(5),
+            || {
+                session.dock_state(&mut dock);
+                dock.buffer == "echo a\necho b" && session.can_edit_dock()
+            },
+        );
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// **`for` döngüsü dock'ta** — `PREBUFFER` uçtan uca (032 phase-4).
     ///
     /// `for i in 1 2; do` ⏎: zsh satırı kabul ediyor, `PS2`'yi basıyor ve
@@ -9332,6 +9395,69 @@ mod tests {
         session.paste(PASTE_PAYLOAD.to_vec());
         wait_ink(&session, &wake, "1b5b3230307e");
         session.shutdown();
+    }
+
+    #[test]
+    fn the_refresh_command_is_the_wire_format() {
+        assert_eq!(DOCK_REFRESH_COMMAND, b"\x1b[8133~r\x07");
+        assert!(DOCK_REFRESH_COMMAND.starts_with(DOCK_EDIT_PREFIX.as_bytes()));
+    }
+
+    #[test]
+    fn a_multiline_paste_asks_for_a_refresh_behind_the_closing_bracket() {
+        // 032 R5: sarılı yükün **arkasında**, aynı yazımda. Sarılı hâl
+        // 6 + 4 + 6 = 16 bayt, yani `od`'nin ilk satırı; komut (9 bayt) ve
+        // ardından yazılan yedi bayt ikinci satırı dolduruyor — iğne tek
+        // döküm satırında kalıyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_editable_od(Arc::clone(&wake), HELLO, EDITABLE);
+        wait_bracketed_mode(&session);
+        wait_mirror(&session, DockStatus::Live);
+        wait_until("kapı açılmadı", Duration::from_secs(5), || {
+            session.can_edit_dock()
+        });
+        session.paste(b"ab\nc".to_vec());
+        session.write(b"ABCDEF\n");
+        let cells = wait_ink(&session, &wake, "4142434445460a");
+        let text = glyph_text(&cells);
+        assert!(
+            text.contains("1b5b3230317e1b5b383133337e7207"),
+            "tazeleme kapanış iğnesinin arkasında değil: {cells:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_paste_refresh_goes_only_through_the_full_edit_gate() {
+        // Kapının dört kolu (vicmd, yetenek yok, bayat ayna) ve tek satırlık
+        // yük: hiçbirinde komut eklenmiyor. `vicmd`'de baytlar komut olurdu,
+        // bağlamasız kabukta BEL `send-break`.
+        let open = spawn_editable_od(Arc::new(TestWake::default()), HELLO, EDITABLE);
+        wait_mirror(&open, DockStatus::Live);
+        wait_until("kapı açılmadı", Duration::from_secs(5), || {
+            open.can_edit_dock()
+        });
+        assert!(open.paste_refreshes(b"a\nb"));
+        assert!(open.paste_refreshes(b"a\rb"));
+        assert!(!open.paste_refreshes(b"ab"), "tek satırda tazeleme");
+        open.key_gen.fetch_add(1, Ordering::Release);
+        assert!(!open.paste_refreshes(b"a\nb"), "bayat aynada tazeleme");
+        open.shutdown();
+
+        for (name, mirror, tail) in [
+            (
+                "vicmd",
+                "\\033]8133;u;5;;aGVsbG8=;;;dmljbWQ=\\007",
+                EDITABLE,
+            ),
+            ("yetenek yok", HELLO, ""),
+        ] {
+            let session = spawn_editable_od(Arc::new(TestWake::default()), mirror, tail);
+            wait_mirror(&session, DockStatus::Live);
+            wait_settled(&session);
+            assert!(!session.paste_refreshes(b"a\nb"), "{name}");
+            session.shutdown();
+        }
     }
 
     #[test]
