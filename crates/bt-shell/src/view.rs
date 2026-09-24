@@ -1420,8 +1420,8 @@ impl BateriView {
             let shift = modifiers(event).shift;
             let clicks = event.clickCount();
             match self.with_gesture(|g| g.pressed_dock(clicks, shift)) {
-                Press::Select(kind) => session.dock_select(kind, point.col, point.half),
-                Press::Extend => session.dock_extend(point.col, point.half),
+                Press::Select(kind) => session.dock_select(kind, point),
+                Press::Extend => session.dock_extend(point),
             }
             return;
         }
@@ -1466,15 +1466,15 @@ impl BateriView {
                     session.update_selection(cell);
                 }
             }
-            // Dock'ta başlamış sürükleme dock'ta kalıyor: nokta satırın
-            // içine kırpılıyor, ızgaraya taşmıyor.
+            // Dock'ta başlamış sürükleme dock'ta kalıyor: nokta giriş
+            // bloğunun içine kırpılıyor, ızgaraya taşmıyor.
             Drag::SelectDock => {
                 let clamp = OutOfGrid::Clamp { fill_rows: 0 };
                 if let (Some(session), Some(point)) = (
                     self.ivars().session.get(),
                     self.window_point_dock(event.locationInWindow(), clamp),
                 ) {
-                    session.dock_drag(point.col, point.half);
+                    session.dock_drag(point);
                 }
             }
             Drag::Ignore => {}

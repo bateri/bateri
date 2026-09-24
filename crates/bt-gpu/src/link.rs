@@ -75,7 +75,8 @@ use std::time::{Duration, Instant};
 
 use bt_core::{
     Blocks, CaretStyle, Cursor, CursorMotion, DOCK_TEXT_COL, DirtyFlag, DockBudget, DockCols,
-    DockContext, DockState, Erase, Keypress, LinearRgba, SelectionRuns, Session, Theme,
+    DockContext, DockState, Erase, Keypress, LinearRgba, SelectionRun, SelectionRuns, Session,
+    Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -546,6 +547,10 @@ struct LinkIvars {
     /// aynı gerekçe — `Frame`'in içinde değil yanında, `Frame::push_selection`
     /// onu dörtgenlere çeviriyor.
     selection: RefCell<SelectionRuns>,
+    /// Dock seçiminin görsel satır başına koşuları (032); `selection` ile aynı
+    /// gerekçe — `bt_core::Session::dock` her içerik karesinde boşaltıp
+    /// dolduruyor, kapasite korunuyor.
+    dock_selection: RefCell<Vec<SelectionRun>>,
     /// Doldurulan satırların tamponu; `blocks` ile aynı ömür ve **aynı
     /// gerekçe**: `Frame`'in içinde değil yanında.
     ///
@@ -602,7 +607,7 @@ struct LinkIvars {
     /// Dock'u olmayan pencerede `None` ve bu **yapısal**: yol o oturumda hiç
     /// kurulmuyor, bir koşulla kapatılmıyor.
     alt_screen_changed: Option<Box<dyn Fn()>>,
-    /// Izgaranın genişliği, sütun; dock'un taşan satırı pencerelemesi için
+    /// Izgaranın genişliği, sütun; dock'un taşan satırı sarması için
     /// [`Session::dock`]'a giriyor.
     ///
     /// `Cell`: [`DisplayLink::resize`] yazıyor, içerik karesi okuyor — ikisi
@@ -1060,11 +1065,12 @@ define_class!(
                 // Pay **uyandırmıyor**: kareyi zaten bu callback çiziyor
                 // (`Session::frame`). Nesli değiştiyse orada düşüyor.
                 glide,
-                // **Tavan henüz tek satır** (032 phase-2): bant değişken ama
-                // görünmez; oranı (`DOCK_MAX_SHARE`) sarma getiriyor. Sarmanın
-                // genişliği ızgaranınki — dock aynı sütunları kullanıyor.
+                // **Tavan bir oran** (`DOCK_MAX_SHARE`, 032 Karar 4): satır
+                // sayısını `frame()` `Term` kilidinin altında okuyor, bu katman
+                // onun bir kopyasını tutmuyor. Sarmanın genişliği ızgaranınki —
+                // dock aynı sütunları kullanıyor.
                 DockBudget {
-                    rows: 1,
+                    share: crate::frame::DOCK_MAX_SHARE,
                     cols: iv.cols.get(),
                 },
             );
@@ -1199,6 +1205,7 @@ define_class!(
                     &mut dock_state,
                     &mut dock_context,
                     cursor.caret_in_dock,
+                    &mut iv.dock_selection.borrow_mut(),
                     |cell| frame.push_dock(cell),
                     |dock_edit| edit = Some(dock_edit),
                 );
@@ -1210,14 +1217,15 @@ define_class!(
                 }
                 frame.suppress_dock(&mut glyph_fx);
                 frame.set_dock_fx(glyph_fx.iter(), theme.cursor_linear());
-                dock_caret = dock.caret.map(|col| (col, dock.caret_text));
+                dock_caret = dock.caret.map(|at| (at, dock.caret_text));
                 // Dock'un seçimi ızgaranınkiyle aynı şekil ve aynı renk
                 // uniform'u (031 R3.2); renk yukarıda `push_selection`'la
                 // yazıldı — pencerede tek seçim, tek renk.
-                if let Some((first, last)) = dock.selection {
-                    frame.push_dock_selection(first, last);
+                frame.push_dock_selection(&iv.dock_selection.borrow());
+                // İşaret yoksa girişin ilk satırı dikey pencerenin dışında.
+                if let Some(sigil) = dock.sigil {
+                    frame.push_dock_sigil(sigil);
                 }
-                frame.push_dock_sigil(dock.sigil);
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
                 frame.open_dock(dock.ground, dock.separator);
@@ -1244,13 +1252,17 @@ define_class!(
             //
             // **Bandın fazlası iki hedefte** (032): ızgaranın caret'i ızgarayla
             // birlikte bandın **hedef** fazlası kadar yukarıda, dock'unki dibe
-            // yaslı giriş satırında. Bu phase'de caret giriş bloğunun ilk
-            // satırında — tek satır.
+            // yaslı giriş bloğunda, sarılan satırın kendi satırında.
             let band_target = band_target(cursor, dock_rows);
             let caret = dock_caret
-                .map(|(col, text)| {
-                    let at =
-                        dock_caret_at(col, 0, cursor.input_rows, viewport_height, iv.cell.get());
+                .map(|(at, text)| {
+                    let at = dock_caret_at(
+                        at.col,
+                        at.row,
+                        cursor.input_rows,
+                        viewport_height,
+                        iv.cell.get(),
+                    );
                     (at, text)
                 })
                 .or_else(|| {
@@ -1665,7 +1677,7 @@ pub struct DisplayLink {
 /// olarak orada yasaklanmış.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
-    /// Izgaranın genişliği, sütun; dock'un taşan satırı pencerelemesi için
+    /// Izgaranın genişliği, sütun; dock'un taşan satırı sarması için
     /// gerekiyor. [`DisplayLink::resize`] tazeliyor.
     pub cols: u16,
     /// Dock kaç satır; `0` → bu pencerede dock yok.
@@ -1754,6 +1766,7 @@ impl DisplayLink {
                 frame: RefCell::new(Frame::default()),
                 blocks: RefCell::new(Blocks::default()),
                 selection: RefCell::new(SelectionRuns::default()),
+                dock_selection: RefCell::new(Vec::new()),
                 fill: RefCell::new(Vec::new()),
                 dock: RefCell::new(DockState::default()),
                 dock_context: RefCell::new(DockContext::default()),
@@ -2146,7 +2159,7 @@ impl DisplayLink {
         // çizmiyor, ama payı eski değerde bırakmak alternatif ekrandan
         // çıkarken dock'u bir kare geç geri getirirdi.
         iv.dock_rows.set(dock_rows);
-        // Sütun sayısı **kapının dışında**: dock'un pencerelemesi çizilen
+        // Sütun sayısı **kapının dışında**: dock'un sarması çizilen
         // genişliği görmeli ve reddedilen bir boyutta (simge durumundaki
         // pencere) `cols` zaten sıfır — dock o karede metin çizmiyor
         // (`bt_core::dock::render`), yani ızgaranın eski ölçüde kalmasıyla
@@ -2154,7 +2167,7 @@ impl DisplayLink {
         iv.cols.set(cols);
         iv.geometry_changed.set(true);
         // Yazım efektleri de bitiyor (`Motion`'ın geometri snap'inin
-        // kardeşi): sütun sayısı ya da hücre değişince dock'un pencerelemesi
+        // kardeşi): sütun sayısı ya da hücre değişince dock'un sarması
         // yeni bir ayna gelmeden kayabiliyor ve uçuştakiler eski sütunlarında
         // başka bir harfin üstünde kalırdı.
         iv.glyph_fx.borrow_mut().finish();

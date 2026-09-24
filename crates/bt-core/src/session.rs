@@ -243,8 +243,10 @@ pub struct Cursor {
     /// devralan kimse yoktur.
     pub caret_in_dock: bool,
     /// Dock'un bu karede çizeceği **giriş** satırı sayısı; bağlam satırı
-    /// sayılmıyor. Her zaman `≥ 1` ve verilen bütçenin ([`DockBudget::rows`])
-    /// altında.
+    /// sayılmıyor. Her zaman `≥ 1` ve verilen bütçenin ([`DockBudget::share`],
+    /// ızgaranın satırlarının payı) altında: görüntünün sarılmış satır sayısı
+    /// ([`dock::needed_rows`]) tavana kırpılmış hâli — aşan girişte dock kendi
+    /// içinde dikey pencere açıyor.
     ///
     /// Bir **sınır kaydı**, grid hücresi değil: bandın çizilen yüksekliği
     /// (`bt-gpu`) ve dock'un hücrelerinin yerleşimi ([`Session::dock`]) aynı
@@ -253,8 +255,8 @@ pub struct Cursor {
     /// ayırdığı pay bundan **bağımsız** — o `bt-gpu`'nun `DOCK_ROWS`'u ve hiç
     /// değişmiyor; bu sayı yalnız çizimi büyütüyor (032 Karar 1).
     ///
-    /// 032 phase-2'de değeri hep `1`: bant değişken ama görünmez; sarma ve çok
-    /// satır sonraki phase'lerin.
+    /// 032 phase-3'ten beri uzun tek satır sarılıp bandı büyütüyor; satır
+    /// sonlu görüntü `DockStatus::Multiline` ve hâlâ tek satır (phase-4).
     pub input_rows: u16,
     /// Caret'in **şekli** — uygulamanın DECSCUSR'ı ya da ayarın varsayılanı.
     ///
@@ -1982,7 +1984,8 @@ pub enum Click {
 ///
 /// Fare ekrandakine tıklıyor ve ekrandaki satır **son çizilen** ayna; canlı
 /// ayna o kareden beri ilerlemiş olabilir (yeni bir tuşun aynası, öneri).
-/// İz pencerenin kaymasını ve o aynanın `BUFFER`'ının uzunluğunu taşıyor:
+/// İz dikey pencerenin tepesini (032: sarılan giriş tavanı aşınca), sarmanın
+/// genişliğini ve o aynanın `BUFFER`'ının uzunluğunu taşıyor:
 /// canlı `BUFFER` aynı uzunluktaysa metin aynı kabul edilip çizilen kaymayla
 /// eşleniyor, değilse tık seçim doğurmuyor — ekranda görülmemiş bir metne
 /// seçim kurmaktansa hiç kurmamak (bir kare sonra doğru satır çizilmiş olur).
@@ -1990,18 +1993,22 @@ pub enum Click {
 /// istemesin; bir damga, bir ölçü değil.
 #[derive(Clone, Copy, Debug)]
 struct DockWindow {
-    skip: usize,
+    top: usize,
+    /// Çizilen giriş satırı sayısı: pencerenin dışındaki bir satıra (ayrı
+    /// karelerden yayınlanan geometri) düşen nokta reddediliyor.
+    shown: u16,
     cols: u16,
     buffer_bytes: usize,
 }
 
 impl DockWindow {
-    fn hit(&self, state: &DockState, col: u16, half: CellHalf) -> Option<DockPoint> {
-        if state.buffer.len() != self.buffer_bytes {
+    /// `point` giriş bloğunda bir hücre: satırı dikey pencerenin içinde,
+    /// sütunu ekran sütunu (`bt-shell`'in `window_point_dock`'u).
+    fn hit(&self, state: &DockState, point: SelectionPoint) -> Option<DockPoint> {
+        if state.buffer.len() != self.buffer_bytes || point.row >= self.shown {
             return None;
         }
-        let available = usize::from(self.cols.saturating_sub(dock::TEXT_COL));
-        dock::hit(state, self.skip, available, col, half)
+        dock::hit(state, self.top, self.cols, point.row, point.col, point.half)
     }
 }
 
@@ -2440,13 +2447,24 @@ impl Session {
         // aritmetiği onu `Term` kilidinin altında yürüyor ([`dock::grid_span`])
         // ve ayrı bir turdan alınsaydı sayılar başka bir aynaya ait olurdu.
         // Yalnız bastırılan bir satır varken kopyalanıyor.
-        let (suppressed_block, caret) = {
+        //
+        // **Dock'un satır sayısı da aynı turdan** (032 phase-3): bant, bastırma
+        // ve caret aynı aynaya ait olmalı. Yürüyüş dock parametrizasyonu
+        // ([`dock::needed_rows`]; asma girinti, ızgaranın genişliği) ve
+        // bastırmanın ızgara parametrizasyonundan **ayrı** — sarılan satırda
+        // ikisi ayrışıyor (dock iki sütun girintili sarıyor, zsh 0. sütundan),
+        // biri ötekinin yerine kullanılamaz. Metin gerektirmiyor, kopya yok.
+        let (suppressed_block, caret, needed_rows) = {
             let log = lock(&self.shell);
             let suppressed = log.suppressed_input();
             if suppressed.is_some() {
                 blocks.input_caret = log.display_into(&mut blocks.input);
             }
-            (suppressed, log.caret(Instant::now()))
+            (
+                suppressed,
+                log.caret(Instant::now()),
+                dock::needed_rows(&log.dock, budget.cols),
+            )
         };
         blocks.anchors.clear();
         blocks.resolved.clear();
@@ -3320,9 +3338,20 @@ impl Session {
             // buradaki üç ön koşulu (pencerenin dock'u, alternatif ekran,
             // tazelik) bilmiyordu — ve bayat aynada **iki caret** doğuyordu.
             caret_in_dock,
-            // Bütçeye kırpılmış satır sayısı; bu phase'de görüntü hep tek
-            // satır istiyor (032 phase-2: bant değişken, ekran aynı).
-            input_rows: budget.fit(1),
+            // Bütçeye kırpılmış satır sayısı: tavan ızgaranın satırlarının
+            // payı ve satır sayısı burada, `Term` kilidinin altında okundu —
+            // çizen taraf onun ikinci bir kopyasını tutmuyor.
+            //
+            // Dock'u olmayan pencerede ve alternatif ekranda tek satır: bant
+            // orada yok ve `bt-shell`'in resize'ı payı sıfırlayana kadarki geçiş
+            // karesinde `Live` kalmış bir ayna (ZLE'nin `edit-command-line`'ı
+            // vim'i açarken) ızgarayı bant kadar yukarı itmemeli
+            // (`/code-review`).
+            input_rows: if self.dock && !alt_screen {
+                budget.fit(needed_rows, grid_rows)
+            } else {
+                1
+            },
             // Şekil döngüden **önce** okundu (`cursor_shape`) ve oradan
             // geliyor: `RenderableCursor` onu `Term::cursor_style()`'dan
             // çözüyor, yani DECSCUSR ile ayarın varsayılanı zaten birleşmiş
@@ -4565,19 +4594,19 @@ impl Session {
 
     /// Dock'ta yeni seçim: basış, tıklama sayısının adımıyla (031 R3.1).
     ///
-    /// `col` dock'un **ekran** sütunu (işaret 0'da, metin
-    /// [`crate::DOCK_TEXT_COL`]'da), `half` o sütunun yarısı — ızgaranın
-    /// [`SelectionPoint`]'inin tek satırlık hâli; satır yok, çünkü dock'un
-    /// seçilebilir tek satırı giriş satırı. Nokta **son çizilen** pencereye
+    /// `point` dock'un giriş bloğunda bir hücre ve yarısı: `col` **ekran**
+    /// sütunu (işaret 0'da, metin [`crate::DOCK_TEXT_COL`]'da), `row` giriş
+    /// bloğunun **çizilen** satırı (dikey pencerenin içinde, 032) — ızgaranın
+    /// [`SelectionPoint`]'i, dock-yerel. Nokta **son çizilen** pencereye
     /// karşı çözülüyor ([`Session::dock_window`]); ayna o kareden beri
     /// `BUFFER`'ı değiştirdiyse ya da `Live` değilse seçim yok.
     ///
     /// **Tek sahip**: ızgaranın seçimi her durumda kalkıyor — dock'a yapılan
     /// tık "başka yere tıklamak". Sürüklemesiz tek tık boş seçimdir ve
     /// eski vurguyu kaldırır (ızgaranın kuralı).
-    pub fn dock_select(&self, kind: SelectKind, col: u16, half: CellHalf) {
+    pub fn dock_select(&self, kind: SelectKind, point: SelectionPoint) {
         let grid = clear_selection_locked(&mut self.term.lock());
-        let dock = self.change_dock_selection(col, half, |_, point, buffer, _| {
+        let dock = self.change_dock_selection(point, |_, point, buffer, _| {
             point.map(|point| DockSelection::new(kind, point, point, buffer))
         });
         if grid || dock {
@@ -4590,9 +4619,9 @@ impl Session {
     /// metin alanının Shift+tıklaması (031 phase-5; phase-4'te tıklanan
     /// noktadan boş başlıyordu, çünkü caret'i taşıyan yol henüz yoktu).
     /// Izgaranın seçimi kalkar (tek sahip).
-    pub fn dock_extend(&self, col: u16, half: CellHalf) {
+    pub fn dock_extend(&self, point: SelectionPoint) {
         let grid = clear_selection_locked(&mut self.term.lock());
-        let dock = self.change_dock_selection(col, half, |current, point, buffer, caret| {
+        let dock = self.change_dock_selection(point, |current, point, buffer, caret| {
             let point = point?;
             Some(match current {
                 Some(selection) => selection.extended(point, buffer),
@@ -4615,8 +4644,8 @@ impl Session {
     /// ve fare hareketi yeni bir seçim doğurmamalı
     /// ([`Session::update_selection`]'ın kuralı). Nokta çözülemezse (ayna
     /// değişti) uç yerinde kalır.
-    pub fn dock_drag(&self, col: u16, half: CellHalf) {
-        let changed = self.change_dock_selection(col, half, |current, point, buffer, _| {
+    pub fn dock_drag(&self, point: SelectionPoint) {
+        let changed = self.change_dock_selection(point, |current, point, buffer, _| {
             let current = current?;
             Some(point.map_or(current, |point| current.extended(point, buffer)))
         });
@@ -4633,8 +4662,7 @@ impl Session {
     /// Kilitler sırayla, iç içe değil: önce iz, sonra `shell`.
     fn change_dock_selection(
         &self,
-        col: u16,
-        half: CellHalf,
+        at: SelectionPoint,
         change: impl FnOnce(
             Option<DockSelection>,
             Option<DockPoint>,
@@ -4644,7 +4672,7 @@ impl Session {
     ) -> bool {
         let window = *lock(&self.dock_window);
         let mut log = lock(&self.shell);
-        let point = window.and_then(|window| window.hit(&log.dock, col, half));
+        let point = window.and_then(|window| window.hit(&log.dock, at));
         let before = log.dock_selection.and_then(|selection| selection.range());
         let caret = buffer_caret(&log.dock);
         let after = change(log.dock_selection, point, &log.dock.buffer, caret);
@@ -4964,6 +4992,11 @@ impl Session {
     /// gibi hesaplandığı yerden geçiyor. Bağlam satırı onun **altında**, yani
     /// satır numarası bu sayının ta kendisi; iki ayrı kilit turundan
     /// türetilseydi bant ile dock'un satırları bir kare ayrışabilirdi.
+    ///
+    /// **`runs` seçimin görsel satır başına koşuları** (032): uzun satır
+    /// sarılıyor ve seçim birden çok satıra yayılabiliyor. Çağıranın tamponu
+    /// ([`SelectionRuns`] emsali), her çağrıda boşalıp doluyor; satırları
+    /// dikey pencerenin içinde, dock-yerel.
     #[allow(clippy::too_many_arguments)]
     pub fn dock(
         &self,
@@ -4972,6 +5005,7 @@ impl Session {
         into: &mut DockState,
         context: &mut DockContext,
         caret_in_dock: bool,
+        runs: &mut Vec<SelectionRun>,
         sink: impl FnMut(Cell),
         edits: impl FnMut(DockEdit),
     ) -> Dock {
@@ -4980,17 +5014,17 @@ impl Session {
             let shell = lock(&self.shell);
             // Fark **kopyadan önce**: `into` şu an son çizilen ayna ve bir
             // satır sonra yenisiyle eziliyor.
-            let change = dock::change(into, &shell.dock, cols.grid);
+            let change = dock::change(into, &shell.dock);
             into.clone_from(&shell.dock);
             // Bağlam **aynı kilit turunda**: ayrı bir turda alınsaydı araya
             // düşen bir prompt dizini yeni, dalı eski bir satırla eşleştirirdi.
             context.clone_from(&shell.context);
             // Seçim de: `BUFFER` değişince onu silen yazıcı aynı kilidi
             // tutuyor, yani aralık bu aynanın metnine ait.
-            let selection = shell.dock_selection.and_then(|selection| selection.range());
-            (shell.state, change, selection)
+            let range = shell.dock_selection.and_then(|selection| selection.range());
+            (shell.state, change, range)
         };
-        let (dock, skip) = dock::render_with(
+        let (dock, top) = dock::render_with(
             into,
             context,
             shell,
@@ -5000,12 +5034,14 @@ impl Session {
             caret_in_dock,
             selection,
             change.as_ref(),
+            runs,
             sink,
             edits,
         );
         // İsabet testinin izi: bu karenin penceresi ([`Session::dock_window`]).
         *lock(&self.dock_window) = Some(DockWindow {
-            skip,
+            top,
+            shown: input_rows.max(1),
             cols: cols.grid,
             buffer_bytes: into.buffer.len(),
         });
@@ -5808,9 +5844,14 @@ mod tests {
     /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
     const THEME: Theme = Theme::BATERI;
 
-    /// Sınamaların dock bütçesi: tek giriş satırı, 80 sütun. Tavanı soran
-    /// sınama kendi bütçesini kuruyor.
-    const BUDGET: DockBudget = DockBudget { rows: 1, cols: 80 };
+    /// Sınamaların dock bütçesi: üretimin oranı (ızgaranın yarısı) ve
+    /// sınamaların varsayılan genişliği ([`test_options`]'ın 40 sütunu) —
+    /// sarmanın genişliği ızgaranınki olmak zorunda. Tavanı soran sınama kendi
+    /// bütçesini kuruyor.
+    const BUDGET: DockBudget = DockBudget {
+        share: 0.5,
+        cols: 40,
+    };
 
     /// Hasar sorusu + tarama, eski `frame()`'in şekliyle: `None` → kare
     /// istenmedi.
@@ -6051,23 +6092,23 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_reports_one_input_row_within_the_budget() {
-        // 032 phase-2: bant değişken ama görünmez — `frame()` bütçeyi alıyor
-        // ve her karede **bir** giriş satırı bildiriyor; sıfır tavan da bir
-        // satır (dock'un giriş satırı hiç kaybolmuyor).
+    fn the_frame_reports_one_input_row_without_a_mirror() {
+        // Aynasız oturumda (entegrasyonsuz kabuk) dock'un görüntüsü yok:
+        // `frame()` her tavanda **bir** giriş satırı bildiriyor; sıfır pay da
+        // bir satır (dock'un giriş satırı hiç kaybolmuyor).
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("printf 'merhaba'; sleep 5", Arc::clone(&wake));
         wait_settled(&session);
-        for rows in [0, 1, 7] {
+        for share in [0.0, 0.5, 1.0] {
             let cursor = session.frame(
                 |_| (),
                 |_| (),
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 ScrollGlide::default(),
-                DockBudget { rows, cols: 80 },
+                DockBudget { share, cols: 80 },
             );
-            assert_eq!(cursor.input_rows, 1, "tavan {rows}");
+            assert_eq!(cursor.input_rows, 1, "pay {share}");
         }
     }
 
@@ -6912,6 +6953,7 @@ mod tests {
             &mut DockState::default(),
             &mut DockContext::default(),
             cursor.caret_in_dock,
+            &mut Vec::new(),
             |_| (),
             |_| (),
         );
@@ -9307,8 +9349,9 @@ mod tests {
     }
 
     /// Bir kare ve dock'u: üretimdeki sıra (`frame()` caret'in sahibini
-    /// veriyor, dock onu alıyor ve penceresinin izini bırakıyor).
-    fn draw_dock(session: &Session) -> Dock {
+    /// veriyor, dock onu alıyor ve penceresinin izini bırakıyor). Dönüşün
+    /// ikinci yarısı seçimin görsel satır başına koşuları.
+    fn draw_dock(session: &Session) -> (Dock, Vec<SelectionRun>) {
         let cursor = session.frame(
             |_| (),
             |_| (),
@@ -9317,49 +9360,132 @@ mod tests {
             ScrollGlide::default(),
             BUDGET,
         );
-        session.dock(
+        let mut runs = Vec::new();
+        let dock = session.dock(
             DockCols {
                 grid: 40,
                 context: 40,
             },
-            1,
+            cursor.input_rows,
             &mut DockState::default(),
             &mut DockContext::default(),
             cursor.caret_in_dock,
+            &mut runs,
             |_| (),
             |_| (),
-        )
+        );
+        (dock, runs)
     }
 
-    /// Dock'un ekran sütunu: `BUFFER`'ın `index`. karakteri (ASCII, pencere
-    /// kaymamış).
-    fn dock_col(index: u16) -> u16 {
-        dock::TEXT_COL + index
+    /// Dock'un giriş bloğunda `BUFFER`'ın `index`. karakterinin hücresi
+    /// (ASCII, tek satır) ve yarısı.
+    fn dock_point(index: u16, half: CellHalf) -> SelectionPoint {
+        SelectionPoint {
+            col: dock::TEXT_COL + index,
+            row: 0,
+            half,
+        }
     }
 
     #[test]
     fn the_dock_line_is_selected_by_drag_double_and_triple_click() {
         let session = dock_selection_session();
         // Çift tık `foo`'nun içinde.
-        session.dock_select(SelectKind::Word, dock_col(6), CellHalf::Left);
+        session.dock_select(SelectKind::Word, dock_point(6, CellHalf::Left));
         assert_eq!(session.selection_text().as_deref(), Some("foo"));
         // Üçlü tık bütün `BUFFER`, satır sonu **olmadan**: kabuğa geri
         // yapıştırılan satır çalışmasın.
-        session.dock_select(SelectKind::Line, dock_col(1), CellHalf::Left);
+        session.dock_select(SelectKind::Line, dock_point(1, CellHalf::Left));
         assert_eq!(session.selection_text().as_deref(), Some("echo foo bar"));
         // Sürükleme harf adımıyla; sürüklemesiz tık boş.
-        session.dock_select(SelectKind::Simple, dock_col(0), CellHalf::Left);
+        session.dock_select(SelectKind::Simple, dock_point(0, CellHalf::Left));
         assert_eq!(session.selection_text(), None);
-        session.dock_drag(dock_col(3), CellHalf::Right);
+        session.dock_drag(dock_point(3, CellHalf::Right));
         assert_eq!(session.selection_text().as_deref(), Some("echo"));
         // Shift+tık ucu taşıyor, çapa yerinde.
-        session.dock_extend(dock_col(7), CellHalf::Right);
+        session.dock_extend(dock_point(7, CellHalf::Right));
         assert_eq!(session.selection_text().as_deref(), Some("echo foo"));
         // Çizim de aynı aralığı söylüyor: `e`'den ikinci `o`'ya.
         assert_eq!(
-            draw_dock(&session).selection,
-            Some((dock_col(0), dock_col(7)))
+            draw_dock(&session).1,
+            [SelectionRun {
+                row: 0,
+                first: dock::TEXT_COL,
+                last: dock::TEXT_COL + 7,
+            }]
         );
+        session.shutdown();
+    }
+
+    /// Sarılan uzun satır (032 phase-3): `frame()` dock'un satır sayısını
+    /// ızgaranın payıyla kırpıyor, dock'un fare yolu ikinci ve üçüncü görsel
+    /// satırı seçebiliyor ve vurgu satır başına bir koşu.
+    #[test]
+    fn a_wrapped_dock_line_grows_to_its_ceiling_and_selects_across_rows() {
+        let wake = Arc::new(TestWake::default());
+        // 40 sütun, metne 38: 38 `a`, 38 `b`, 24 `c` — üç görsel satır, caret
+        // sonda. Izgara on satır, yani yarısı beş.
+        let session = spawn_docked_session(
+            &format!(
+                "printf '{}{}'; sleep 5",
+                anchored_prompt(1),
+                mirror(
+                    "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFiYmJiYmJiYmJiYmJi\
+                     YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw==",
+                    100
+                ),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        let rows = |share| {
+            session
+                .frame(
+                    |_| (),
+                    |_| (),
+                    &mut Blocks::default(),
+                    &mut SelectionRuns::default(),
+                    ScrollGlide::default(),
+                    DockBudget { share, cols: 40 },
+                )
+                .input_rows
+        };
+        assert_eq!(rows(0.5), 3, "tavanın altında bütün satırlar");
+        assert_eq!(rows(0.2), 2, "tavan ızgaranın payı");
+        assert_eq!(rows(0.0), 1, "en az bir satır");
+
+        let (_, runs) = draw_dock(&session);
+        assert!(runs.is_empty());
+        let at = |col, row, half| SelectionPoint {
+            col: dock::TEXT_COL + col,
+            row,
+            half,
+        };
+        // İkinci satırın başından üçüncünün ikinci harfine sürükleme.
+        session.dock_select(SelectKind::Simple, at(0, 1, CellHalf::Left));
+        session.dock_drag(at(1, 2, CellHalf::Right));
+        let expected = format!("{}cc", "b".repeat(38));
+        assert_eq!(session.selection_text(), Some(expected));
+        let (_, runs) = draw_dock(&session);
+        assert_eq!(
+            runs,
+            [
+                SelectionRun {
+                    row: 1,
+                    first: dock::TEXT_COL,
+                    last: dock::TEXT_COL + 37,
+                },
+                SelectionRun {
+                    row: 2,
+                    first: dock::TEXT_COL,
+                    last: dock::TEXT_COL + 1,
+                },
+            ]
+        );
+        // Üçlü tık mantıksal satırı alıyor: satır sonu yok, yani `BUFFER`'ın
+        // tamamı — sarılmış görsel satırlarıyla.
+        session.dock_select(SelectKind::Line, at(5, 2, CellHalf::Left));
+        assert_eq!(session.selection_text().map(|text| text.len()), Some(100));
         session.shutdown();
     }
 
@@ -9370,7 +9496,7 @@ mod tests {
         session.set_selection(SelectKind::Word, hello, hello);
         assert_eq!(session.selection_text().as_deref(), Some("hello"));
         // Dock'ta başlamak ızgaranınkini kaldırıyor.
-        session.dock_select(SelectKind::Word, dock_col(10), CellHalf::Left);
+        session.dock_select(SelectKind::Word, dock_point(10, CellHalf::Left));
         assert_eq!(session.term.lock().selection_to_string(), None);
         assert_eq!(session.selection_text().as_deref(), Some("bar"));
         // Izgarada başlamak dock'unkini.
@@ -9378,7 +9504,7 @@ mod tests {
         assert_eq!(session.dock_selection_text(), None);
         assert_eq!(session.selection_text().as_deref(), Some("hello"));
         // Dock'a sürüklemesiz tık da "başka yere tıklamak".
-        session.dock_select(SelectKind::Simple, dock_col(0), CellHalf::Left);
+        session.dock_select(SelectKind::Simple, dock_point(0, CellHalf::Left));
         assert_eq!(session.selection_text(), None);
         session.shutdown();
     }
@@ -9386,7 +9512,7 @@ mod tests {
     #[test]
     fn input_clears_the_dock_selection() {
         let session = dock_selection_session();
-        session.dock_select(SelectKind::Word, dock_col(6), CellHalf::Left);
+        session.dock_select(SelectKind::Word, dock_point(6, CellHalf::Left));
         assert_eq!(session.selection_text().as_deref(), Some("foo"));
         // Tek huni `send_input`: yazma, yapıştırma ve ok aynı kapıdan.
         session.write(b" ");
@@ -9413,7 +9539,7 @@ mod tests {
             let drawn = window.as_mut().expect("iz yok");
             drawn.buffer_bytes += 1;
         }
-        session.dock_select(SelectKind::Word, dock_col(6), CellHalf::Left);
+        session.dock_select(SelectKind::Word, dock_point(6, CellHalf::Left));
         assert_eq!(session.selection_text(), None);
         session.shutdown();
     }
@@ -13253,6 +13379,7 @@ mod tests {
                         &mut dock,
                         &mut context,
                         cursor.caret_in_dock,
+                        &mut Vec::new(),
                         |_| (),
                         |_| (),
                     )

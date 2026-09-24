@@ -49,7 +49,7 @@ mod wake;
 
 pub use color::{LinearRgba, Theme};
 pub use dock::{
-    Dock, DockBudget, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_TEXT_COL,
+    Dock, DockBudget, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_TEXT_COL,
 };
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use session::{
