@@ -230,8 +230,9 @@ pub(crate) enum Stripe {
 
 /// ZLE'nin görüntü aynası — dock'un çizeceği her şey, **çözülmüş**.
 ///
-/// Beş değişken taşınıyor ([`DOCK_OSC`]'un yükü) ve burada üç dizgi, bir
-/// sütun ve bir aralık listesine iniyor. Yalnız `BUFFER` taşınsaydı bastırma
+/// Beş görüntü değişkeni taşınıyor ([`DOCK_OSC`]'un yükü; yanlarında
+/// `KEYMAP` ve 032'den beri `PREBUFFER`) ve burada dizgilere, bir sütuna ve
+/// bir aralık listesine iniyor. Yalnız `BUFFER` taşınsaydı bastırma
 /// bilgi kaybına dönerdi: `POSTDISPLAY` autosuggestions'ın önerisi,
 /// `region_highlight` de syntax highlighting'in rengi — ikisi de en yaygın iki
 /// eklenti ve dock onlarsız kullanıcının gördüğünden **eksik** olurdu
@@ -259,6 +260,17 @@ pub struct DockState {
     /// `POSTDISPLAY` — satırın **arkasına** eklenen, düzenlenemeyen metin;
     /// bugünkü tek üreticisi zsh-autosuggestions'ın önerisi.
     pub postdisplay: String,
+    /// `PREBUFFER` — çok satırlı bir komutun ZLE'nin **kabul ettiği** önceki
+    /// satırları (`for`, heredoc, `\`-devam); her zaman `\n`'le bitiyor ve
+    /// artık düzenlenemiyor. Aynanın yedinci, **isteğe bağlı** gövdesi (032);
+    /// eski betikte boş.
+    ///
+    /// **Görüntü uzayının dışında:** [`Self::cursor`], [`Self::display_chars`],
+    /// sütun ikizleri, [`Self::last_ink`] ve [`DockStatus::Multiline`]
+    /// kontrolü onu saymıyor. Bu phase'de yalnız taşınıyor; dock'ta
+    /// düzenlenebilir satırların üstünde çizilmesi ve bastırmadaki anlamı
+    /// `.tasks/032-cok-satirli-dock/` → phase-4.
+    pub prebuffer: String,
     /// Caret'in **karakter** ofseti, [`Highlight::start`] ile **aynı uzayda**:
     /// `PREDISPLAY ++ BUFFER ++ POSTDISPLAY` dizgisinin başından sayılıyor.
     ///
@@ -364,6 +376,8 @@ impl Clone for DockState {
         self.buffer.push_str(&source.buffer);
         self.postdisplay.clear();
         self.postdisplay.push_str(&source.postdisplay);
+        self.prebuffer.clear();
+        self.prebuffer.push_str(&source.prebuffer);
         self.cursor = source.cursor;
         self.display_chars = source.display_chars;
         self.cursor_col = source.cursor_col;
@@ -385,6 +399,7 @@ impl DockState {
         self.predisplay.clear();
         self.buffer.clear();
         self.postdisplay.clear();
+        self.prebuffer.clear();
         self.cursor = 0;
         self.display_chars = 0;
         self.cursor_col = 0;
@@ -1068,19 +1083,15 @@ pub(crate) struct SuppressedInput {
     /// Yazılmakta olan bloğun kimliği; **satırı** [`crate::Session::frame`]
     /// çıpadan bulur — kabuk hangi satırda olduğunu bilmiyor.
     pub(crate) block: u32,
-    /// Caret'ten **sonra** gelen **sütun** sayısı; girişin imleç satırının
-    /// altında kaç satır daha sürdüğü bundan çıkıyor. Karakter değil sütun,
-    /// çünkü ızgarada satır sarması sütunla oluyor
-    /// ([`DockState::display_cols`]).
+    /// Caret'ten **sonra** gelen **sütun** sayısı ([`DockState::display_cols`]
+    /// eksi [`DockState::cursor_col`]).
+    ///
+    /// 032'den beri aralığın satır sayısını **vermiyor** — o düzen
+    /// yürüyüşünün ([`crate::dock::grid_span`]); bugün tek tüketicisi
+    /// tazelik kapısının boş ayna sorusu (`blank_mirror`).
     pub(crate) cols_after_cursor: usize,
     /// Caret'ten **önce** gelen **sütun** sayısı ([`DockState::cursor_col`]);
-    /// girişin imleç satırının üstünde kaç satır sürdüğü bundan çıkıyor.
-    ///
-    /// Aralığın üstünü yalnız çıpaya bağlamak **yetmiyor**: çıpa prompt'un
-    /// satırında duruyor ve imleç oradan uzaklaşırsa (araya başka bir şey
-    /// basılırsa) ikisinin arasındaki satırlar girişin değil, yine de
-    /// bastırılırdı. Ayna kaç satır tuttuğunu biliyor; üst uç ikisinin
-    /// **alttakini** seçiyor.
+    /// [`Self::cols_after_cursor`] ile aynı durum.
     pub(crate) cols_before_cursor: usize,
     /// Görüntünün son mürekkebi ([`DockState::last_ink`]) — tazelik kapısının
     /// aynadaki yarısı.
@@ -1353,6 +1364,22 @@ impl ShellLog {
             }),
             (_, Outcome::Finished { .. }) => None,
         }
+    }
+
+    /// Aynanın görüntüsünü (`PREDISPLAY ++ BUFFER ++ POSTDISPLAY`) `into`'ya
+    /// yazar, kapasitesini koruyarak; caret'in karakter indeksini döndürür
+    /// ([`DockState::cursor`], aynı uzay).
+    ///
+    /// Tüketicisi bastırmanın satır aritmetiği ([`crate::dock::grid_span`]) ve
+    /// [`Self::suppressed_input`] ile **aynı kilit turunda** çağrılıyor.
+    /// `PREBUFFER` girmiyor: ızgarada o satırlar zsh'in `PS2`'siyle çoktan
+    /// basılmış, düzeni yürüyen hesabın konusu değil (032 Karar 7).
+    pub(crate) fn display_into(&self, into: &mut String) -> usize {
+        into.clear();
+        into.push_str(&self.dock.predisplay);
+        into.push_str(&self.dock.buffer);
+        into.push_str(&self.dock.postdisplay);
+        self.dock.cursor
     }
 
     /// Caret'in bu an kimin ve tutmanın kalanı — [`caret_home`]'un defter
@@ -2362,7 +2389,9 @@ fn unavailable(line: &mut DockState, fault: DockFault) -> DockOutcome {
     DockOutcome::Unavailable(fault)
 }
 
-/// `u` yükünün beş alanını `line`'a çözer; eksik ya da bozuk alanda `None`.
+/// `u` yükünün alanlarını `line`'a çözer; zorunlu beşinden biri eksik ya da
+/// herhangi bir metin gövdesi bozuksa `None`. Son ikisi (`KEYMAP`,
+/// `PREBUFFER`) isteğe bağlı.
 fn decode_line<'a>(
     fields: &mut impl Iterator<Item = &'a [u8]>,
     decoded: &mut Vec<u8>,
@@ -2507,6 +2536,19 @@ fn decode_line<'a>(
         decode_base64(field, decoded).is_some()
             && std::str::from_utf8(decoded).is_ok_and(|name| INSERT_KEYMAPS.contains(&name))
     });
+    // PREBUFFER **yedinci, isteğe bağlı gövde** (032) ve `KEYMAP`'in
+    // arkasında, çünkü tel yalnız sona büyüyebiliyor: eski betikle koşan
+    // pencere onu hiç göndermiyor ve yokluğu yükü bozmuyor, boş bırakıyor.
+    // Bozuk bir gövde ise öteki metin gövdeleriyle aynı kuralda — yük bozuk.
+    //
+    // Görüntü uzayına **girmiyor**: yukarıdaki üç uzunluk, sütun ikizleri,
+    // son mürekkep ve `Multiline` kontrolü onu görmüyor. Her zaman `\n`'le
+    // bittiği için o kontrole girseydi `for`'un ikinci satırı (bugün `Live`,
+    // dock'ta) ızgaraya düşerdi.
+    line.prebuffer.clear();
+    if let Some(field) = fields.next() {
+        decode_text(field, decoded, &mut line.prebuffer)?;
+    }
     Some(())
 }
 
@@ -3883,6 +3925,50 @@ mod tests {
     }
 
     #[test]
+    fn a_six_body_mirror_from_an_old_script_still_decodes() {
+        // **Eski betikle koşan pencere** (032 phase-1): yedinci gövde
+        // (`PREBUFFER`) hiç yok. Yokluğu yükü bozmuyor, `PREBUFFER` boş
+        // sayılıyor — `KEYMAP`'in emsali.
+        let sequence = format!("\x1b]8133;u;2;;{};;;{}\x07", b64(b"ls"), b64(b"main"));
+        let line = dock_line(sequence.as_bytes());
+        assert_eq!(line.status, DockStatus::Live);
+        assert_eq!(line.buffer, "ls");
+        assert!(line.insert_keymap);
+        assert_eq!(line.prebuffer, "");
+    }
+
+    #[test]
+    fn the_seventh_body_carries_the_prebuffer_and_stays_out_of_the_line() {
+        // `for i in 1 2` + Enter: ZLE önceki satırı `PREBUFFER`'a alıyor ve
+        // `BUFFER` yeni satırla başlıyor. `PREBUFFER` **her zaman** `\n`'le
+        // bitiyor, yani `Multiline` kontrolüne girseydi `for`'un ikinci
+        // satırı ızgaraya düşerdi; anlamını phase-4 veriyor. Görüntü uzayına
+        // da girmiyor: caret, uzunluk ve son mürekkep yalnız `PREDISPLAY ++
+        // BUFFER ++ POSTDISPLAY`'den.
+        let sequence = format!(
+            "\x1b]8133;u;2;;{};;;{};{}\x07",
+            b64(b"do"),
+            b64(b"main"),
+            b64(b"for i in 1 2\n")
+        );
+        let line = dock_line(sequence.as_bytes());
+        assert_eq!(line.status, DockStatus::Live);
+        assert_eq!(line.prebuffer, "for i in 1 2\n");
+        assert_eq!(line.buffer, "do");
+        assert_eq!(line.cursor, 2);
+        assert_eq!(line.display_chars, 2);
+        assert_eq!(line.last_ink, Some('o'));
+
+        // Bozuk yedinci gövde öteki metin gövdeleriyle aynı kuralda: yük
+        // bozuk, satır ızgarada.
+        let broken = format!("\x1b]8133;u;0;;{};;;{};!!!!\x07", b64(b"ls"), b64(b"main"));
+        assert_eq!(
+            dock_events(broken.as_bytes()),
+            vec![DockSnapshot::Unavailable(DockFault::Malformed)]
+        );
+    }
+
+    #[test]
     fn a_broken_branch_never_drops_the_mirror() {
         // Dalın iki bozulma biçimi de yalnız dalı düşürmeli: `Unavailable`
         // "giriş satırını gösteremiyorum" demek ve ızgarayı devreye sokardı —
@@ -3962,10 +4048,22 @@ mod tests {
         post: &str,
         highlights: &[&str],
     ) -> Vec<u8> {
+        script_output_after(cursor, "", pre, buffer, post, highlights)
+    }
+
+    /// [`script_output`], `PREBUFFER` doluyken (032).
+    fn script_output_after(
+        cursor: usize,
+        prebuffer: &str,
+        pre: &str,
+        buffer: &str,
+        post: &str,
+        highlights: &[&str],
+    ) -> Vec<u8> {
         run_script(
             "source $ZDOTDIR/bateri.zsh
              PREDISPLAY=$T_PRE BUFFER=$T_BUF POSTDISPLAY=$T_POST CURSOR=$T_CURSOR
-             region_highlight=( ${(f)T_HL} ) KEYMAP=$T_KEYMAP
+             region_highlight=( ${(f)T_HL} ) KEYMAP=$T_KEYMAP PREBUFFER=$T_PREBUF
              __bateri_dock_redraw",
             &[
                 ("T_CURSOR", &cursor.to_string()),
@@ -3976,6 +4074,8 @@ mod tests {
                 // `$KEYMAP` ZLE'nin parametresi ve kanca dışında boş; sınama
                 // onu elle kuruyor ki telin altıncı gövdesi de koşsun.
                 ("T_KEYMAP", "main"),
+                // `$PREBUFFER` da öyle; yedinci gövde.
+                ("T_PREBUF", prebuffer),
             ],
         )
     }
@@ -4036,6 +4136,21 @@ mod tests {
     }
 
     #[test]
+    fn the_script_sends_the_prebuffer_as_the_seventh_body() {
+        // `for` döngüsünün ikinci satırı: kabuk `PREBUFFER`'ı basıyor,
+        // çözücü onu ayrı tutuyor ve satır tek satırlık `BUFFER`'la `Live`.
+        let line = dock_line(&script_output_after(2, "for i in 1 2\n", "", "do", "", &[]));
+        assert_eq!(line.status, DockStatus::Live);
+        assert_eq!(line.prebuffer, "for i in 1 2\n");
+        assert_eq!(line.buffer, "do");
+        assert_eq!(line.cursor, 2);
+        // Boş `PREBUFFER` (olağan tek satırlık komut) da bir alan: boş gövde.
+        let line = dock_line(&script_output(0, "", "ls", "", &[]));
+        assert_eq!(line.prebuffer, "");
+        assert_eq!(line.status, DockStatus::Live);
+    }
+
+    #[test]
     fn the_script_encodes_every_padding_remainder() {
         // base64 üçer bayt öğütüyor; artığı 0, 1 ve 2 olan üç uzunluk da
         // sınanıyor. UTF-8 karakter başına birden çok bayt, yani "karakter
@@ -4074,6 +4189,15 @@ mod tests {
         assert_eq!(
             dock_line(&script_output(0, "", &fits, "", &[])).buffer,
             fits
+        );
+
+        // **`PREBUFFER` de toplama giriyor** (032): yapıştırılmış bir
+        // döngünün önceki satırları görüntünün parçası ve sınırı `BUFFER`
+        // ile birlikte aşabilir.
+        let before = format!("{}\n", "x".repeat(4095));
+        assert_eq!(
+            dock_events(&script_output_after(0, &before, "", "ls", "", &[])),
+            vec![DockSnapshot::Unavailable(DockFault::Overflow)]
         );
 
         // **Dördüncü gövde de kapıya tabi.** Sözdizimi vurgusu jeton başına bir

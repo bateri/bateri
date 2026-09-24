@@ -33,7 +33,7 @@
 | 029 | [ayarlar-penceresi](029-ayarlar-penceresi/) | 🟢 | 3 phase + kapı tamam — Cmd-, yerel ayar penceresi açıyor (General / Appearance / Cursor / Motion), yalnız değiştirilen satırı `settings.toml`'a yazıyor, dosya dışarıdan değişince tazeleniyor, bozuk dosyada kilitlenip sebebini söylüyor |
 | 030 | [dock-yazim-animasyonlari](030-dock-yazim-animasyonlari/) | 🟢 | 5 phase + kapı tamam — dock'ta yazılan harf Keypress'in dokuz efektinden biriyle geliyor, Backspace'le silinen Erase'in sekiz efektinden biriyle gidiyor (caret'in üstünde, çeyrek saniyede); `[motion] keypress`/`erase` ve ayar penceresinde iki popup, yapıştırma/geçmiş/toplu silme anında |
 | 031 | [fare-ile-secim](031-fare-ile-secim/) | 🟢 | 5 phase + kapı tamam — ızgarada kelime/satır/Shift seçimi, dock'ta seçim, tıkla-caret, sil/yerine yaz/kes (tek komutlu zsh widget'ı), `selection` rengiyle yuvarlak köşeli tek parça vurgu |
-| 032 | [cok-satirli-dock](032-cok-satirli-dock/) | 📐 | çok satırlı giriş (yapıştırma, `for`, heredoc) dock'ta kalıyor: dock yukarı doğru büyüyor, PTY sabit, ızgara ötelenir; `Multiline` durumu kalkıyor |
+| 032 | [cok-satirli-dock](032-cok-satirli-dock/) | 🔨 | çok satırlı giriş (yapıştırma, `for`, heredoc) dock'ta kalıyor: dock yukarı doğru büyüyor, PTY sabit, ızgara ötelenir; `Multiline` durumu kalkıyor |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

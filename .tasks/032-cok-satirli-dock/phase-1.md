@@ -49,9 +49,34 @@ _Requirements: R1.1, R3.3 (tel ve çözme yarısı)_
 
 ## Checklist
 
-- [ ] `dock::layout` ve sınamaları
-- [ ] `suppress_to`/`suppress_floor` `layout`'tan; eşdeğerlik bekçisi
-- [ ] Yedinci gövde: betik + çözücü + bütçe
-- [ ] Test: altı gövdeli (eski betik) ayna hâlâ çözülüyor
-- [ ] Doğrulama geçti (`make hepsi`, `make kur`, `make test-yaris`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] `dock::layout` ve sınamaları
+- [x] `suppress_to`/`suppress_floor` `layout`'tan; eşdeğerlik bekçisi
+- [x] Yedinci gövde: betik + çözücü + bütçe
+- [x] Test: altı gövdeli (eski betik) ayna hâlâ çözülüyor
+- [x] Doğrulama geçti (`make hepsi`, `make test-yaris`)
+- [~] `make kur` — otonom şeritte yasak (`target/release/bateri.app` kullanıcının açık örneği olabilir); yerine geçici paket kuruldu, beş betik dosyası `cmp` ile aynı, gerçek pencerede tek satır / `for` / iki satırlı yapıştırma HEAD'le aynı davrandı
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+
+## Uygulama Notları
+
+- **Metin `frame()`'e `Blocks`'un içinden geçiyor** (`input`, `input_caret`):
+  `SuppressedInput` `Copy` ve metin taşımıyor, yürüyüş ise `Term` kilidinin
+  altında (genişlik ve imlecin sütunu) koşmak zorunda. Kopya
+  `suppressed_input()` ile aynı yaprak kilit turunda
+  (`ShellLog::display_into`), yalnız bastırılan satır varken; çağıranın
+  tamponu olduğu için kare başına ayırma yok ve `bt-gpu` değişmedi.
+- **Izgara parametrizasyonu ayrı bir yardımcı** (`dock::grid_span`): ilk
+  satırın başı `(cursor_col − imlecin mantıksal satırında imleçten önceki
+  sütun) mod genişlik`. İmleç bir `\n`'in arkasındaysa başlangıç
+  gözlenemiyor ve `0` varsayılıyor (üst uç eksik bastırır); bugün bu kola
+  satır gelmiyor (`Multiline`), phase-4 kararını versin.
+- **Caret kuralı:** caret sıradaki karakterin gideceği yerde, sonda bir
+  sütunluk karakterin gideceği yerde — tam dolan satırın ardındaki caret alt
+  satırın başında ve o satır sayılıyor. Eşdeğerlik bu kurala dayanıyor;
+  phase-3 dock'ta aynı kuralı kullanırsa tam genişlikte yazılan satır dock'u
+  bir satır büyütür (zsh'in ızgarasıyla aynı).
+- **Eski formülden tek ayrılık geniş karakter:** imleçten sonraki kuyrukta
+  satır sonuna sığmayan geniş glyph bölmede eksik sayılıyordu; yürüyüş doğru
+  sayıyor (`grid_span_counts_the_row_a_wide_char_is_pushed_to`).
+- **Bozuk yedinci gövde yükü bozuyor** (`Malformed`), yokluğu bozmuyor —
+  öteki metin gövdeleriyle aynı kural.

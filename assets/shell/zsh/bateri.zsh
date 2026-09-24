@@ -491,7 +491,7 @@ __bateri_preexec() {
 #
 #   ESC ] 8133 ; u ; CURSOR ; b64(PREDISPLAY) ; b64(BUFFER) ;
 #                             b64(POSTDISPLAY) ; b64(region_highlight) ;
-#                             b64(KEYMAP) BEL
+#                             b64(KEYMAP) ; b64(PREBUFFER) BEL
 #   ESC ] 8133 ; e BEL   satır bitti (`line-finish`)
 #   ESC ] 8133 ; o BEL   görüntü aynaya sığmıyor (aşağıdaki kapı)
 #   ESC ] 8133 ; b ; b64(dal) BEL   bağlam satırının dalı (`precmd`)
@@ -517,6 +517,12 @@ __bateri_preexec() {
 # taraf terminal (`bt-core`, `insert_keymap`). Adı olduğu gibi gönderiyoruz,
 # çünkü `bindkey -N` ile kullanıcı kendi keymap'ini yaratabiliyor ve bu uçta
 # onu sınıflandıracak bilgi yok. base64, çünkü o ad `;` taşıyabilir.
+#
+# PREBUFFER YEDİNCİ GÖVDE (032): çok satırlı bir komutun ZLE'nin artık
+# düzenlemediği önceki satırları (`for`, heredoc, `\`-devam). Sona eklendi,
+# çünkü tel yalnız sona büyüyor — çözücü onu isteğe bağlı okuyor, yani eski
+# betikle koşan pencere de çözülüyor. Görüntünün parçası, yani taşma kapısının
+# toplamına giriyor.
 #
 # GÖVDELER base64: kullanıcının yazdığı metnin içinde `;`, `ESC` ve C0
 # baytları olabilir ve üçü de dizinin çerçevesini bozar. base64'ün alfabesinde
@@ -639,14 +645,16 @@ __bateri_dock_redraw() {
   __bateri_prompt_guard
   # Kayıtlar satır sonuyla ayrılıyor; çözücü gövdeyi `lines()` ile okuyor.
   # Birleştirme kapıdan ÖNCE, çünkü dördüncü gövde de kapıya tabi.
-  local REPLY entries=${(F)region_highlight} pre buf post highlights keymap
-  # Kapı KODLAMADAN ÖNCE, çünkü bütün anlamı kodlamadan kaçınmak — ve DÖRT
-  # gövdeyi birden ölçüyor. `region_highlight` ayrı sayılıyor, toplama
+  local REPLY entries=${(F)region_highlight} pre buf post highlights keymap prebuf
+  # Kapı KODLAMADAN ÖNCE, çünkü bütün anlamı kodlamadan kaçınmak — ve BEŞ
+  # gövdeyi birden ölçüyor (`PREBUFFER` 032'de toplama girdi: görüntünün
+  # parçası ve yapıştırılmış bir döngünün önceki satırları sınırı tek başına
+  # aşabilir). `region_highlight` ayrı sayılıyor, toplama
   # girmiyor: sözdizimi vurgusu jeton başına bir kayıt bırakıyor, yani uzun
   # bir satırda metnin kendisiyle aynı mertebede ve **kendi başına** sınırı
   # aşabilir (`DOCK_PAYLOAD_LIMIT`'in türetmesi de onu metnin yanında ayrı bir
   # terim sayıyor).
-  if (( ${#PREDISPLAY} + ${#BUFFER} + ${#POSTDISPLAY} > __bateri_dock_limit
+  if (( ${#PREBUFFER} + ${#PREDISPLAY} + ${#BUFFER} + ${#POSTDISPLAY} > __bateri_dock_limit
         || ${#entries} > __bateri_dock_limit )); then
     print -nr -- $'\e]8133;o\a'
     return 0
@@ -655,6 +663,7 @@ __bateri_dock_redraw() {
   __bateri_b64 "$BUFFER"; buf=$REPLY
   __bateri_b64 "$POSTDISPLAY"; post=$REPLY
   __bateri_b64 "$entries"; highlights=$REPLY
+  __bateri_b64 "$PREBUFFER"; prebuf=$REPLY
   # KEYMAP kapının DIŞINDA sayılıyor: en uzun keymap adı bir avuç bayt ve onu
   # yük bütçesine katmak, sınırı taşan bir satırda aynanın susmasına ikinci bir
   # gerekçe eklerdi.
@@ -662,7 +671,7 @@ __bateri_dock_redraw() {
   # `$CURSOR` KARAKTER ofsetidir ve teli de karakter istiyor — `BUFFER`'ın
   # başından sayılan hâli olduğu gibi gidiyor, `PREDISPLAY`'e kaydırmayı
   # sınırın öteki tarafı yapıyor (`DockState::cursor`'ın doc'u).
-  print -nr -- $'\e]8133;u;'$CURSOR';'$pre';'$buf';'$post';'$highlights';'$keymap$'\a'
+  print -nr -- $'\e]8133;u;'$CURSOR';'$pre';'$buf';'$post';'$highlights';'$keymap';'$prebuf$'\a'
 }
 
 # `line-finish`: ZLE satırı bıraktı, ayna kapanıyor.

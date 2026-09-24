@@ -501,6 +501,17 @@ pub struct Blocks {
     fill_anchors: Vec<(u32, u16)>,
     /// Bandın çözülmüş listesi; satırlar **fill-yerel**.
     fill_resolved: Vec<Block>,
+    /// Bastırılan giriş satırının görüntüsü (`PREDISPLAY ++ BUFFER ++
+    /// POSTDISPLAY`) ve caret'in karakter indeksi — bastırmanın satır
+    /// aritmetiğinin ([`crate::dock::grid_span`]) girdisi (032).
+    ///
+    /// Metin yaprak kilidin (`shell`) altında kopyalanıyor ve `Term` kilidinin
+    /// altında yürünüyor: yürüyüş ızgaranın genişliğini ve imlecin sütununu
+    /// istiyor, yaprak kilit ise `Term`'ün altına giremiyor. Burada, çünkü
+    /// tampon çağıranın ömründe kapasitesini koruyor — kare başına ayırma yok
+    /// (tipin öteki alanlarının gerekçesi).
+    input: String,
+    input_caret: usize,
 }
 
 impl Blocks {
@@ -2404,9 +2415,18 @@ impl Session {
         // **Caret'in sahibi aynı turdan**: ayrı bir `lock()` ile sorulsaydı iki
         // cevap iki ana ait olurdu ve aralarına düşen bir `line-finish` imleci
         // gizlenmiş **ve** dock'u boşalmış bir kare doğururdu.
+        //
+        // **Görüntünün metni de aynı turdan** (032): bastırmanın satır
+        // aritmetiği onu `Term` kilidinin altında yürüyor ([`dock::grid_span`])
+        // ve ayrı bir turdan alınsaydı sayılar başka bir aynaya ait olurdu.
+        // Yalnız bastırılan bir satır varken kopyalanıyor.
         let (suppressed_block, caret) = {
             let log = lock(&self.shell);
-            (log.suppressed_input(), log.caret(Instant::now()))
+            let suppressed = log.suppressed_input();
+            if suppressed.is_some() {
+                blocks.input_caret = log.display_into(&mut blocks.input);
+            }
+            (suppressed, log.caret(Instant::now()))
         };
         blocks.anchors.clear();
         blocks.resolved.clear();
@@ -2528,31 +2548,45 @@ impl Session {
         // ve **kalıcı** olur (`/code-review`, phase-4).
         //
         // Uç kesin veriden çıkıyor, davranıştan sezilmiyor: caret'in sütunu
-        // ızgaradan, arkasındaki karakter sayısı aynadan. Son karakterin
-        // sütunu `cursor_col + chars_after - 1`, satır farkı da onun `cols`'a
-        // bölümü; `saturating_sub(1)` şart, çünkü satırı **tam dolduran**
-        // metin bir satır fazla verirdi ve o satır tamamlama listesinin ilki
-        // olurdu.
+        // ızgaradan, metin aynadan, ve ikisini birleştiren **tek düzen
+        // yürüyüşü** ([`dock::grid_span`] → [`dock::layout`], 032 Karar 7):
+        // görüntü zsh'in ızgaradaki düzeniyle yürünüyor — ilk satır prompt'un
+        // bittiği sütundan (imlecin sütunundan gözleniyor), sarma ızgaranın
+        // genişliğinde — ve imlecin üstünde ve altında kaç satır kaldığı
+        // oradan okunuyor. Tam dolan satırın bir satır fazla vermemesi (eski
+        // formülün `saturating_sub(1)`'i) düzenin caret kuralında; tek
+        // satırlık görüntüde sonuç eski sütun bölmesiyle **aynı** ve bir
+        // bekçi ikisini karşılaştırıyor
+        // (`dock::tests::grid_span_matches_the_column_division_on_one_line`).
         //
-        // **Hatası yönlü ve bu bilinçli:** `BUFFER`'da satır sonu (PS2,
-        // Esc-Enter) varsa gerçek satır sayısı hesaptan büyüktür, yani
-        // **eksik** bastırılır — sızıntı o satırlarla sınırlı kalır, fazla
-        // bastırma olmaz. Tek fazla-bastırma yolu bayat ayna
+        // **Yürüyüşün eski bölmeden ayrıldığı tek yer geniş karakter** ve
+        // ayrılık bir düzeltme: satır sonuna sığmayan geniş glyph ızgarada alt
+        // satıra iniyor ve bölme bunu görmüyordu, yani imleçten sonraki
+        // kuyruğu **eksik** sayıyor, son satırı ızgarada sızdırıyordu. Satır sonu (`PS2`, Esc-Enter)
+        // taşıyan görüntü bugün bu hesaba hiç gelmiyor (`Multiline`
+        // bastırılmıyor); yürüyüş onu da satır satır sayıyor ve anlamını 032
+        // phase-4 veriyor. Tek fazla-bastırma yolu hâlâ bayat ayna
         // (`line-pre-redraw` çizimden önce koşuyor) ve o bir karelik.
         //
-        // **Geniş glyph ve birleştirici bu listeden 024'te çıktı.** Sayı artık
-        // **sütun** (`DockState::display_cols`), karakter değil: karakterle
-        // sayıldığında geniş glyph eksik bastırıyordu (güvenli yön) ama
-        // birleştirici **fazla** bastırıyordu ve o güvensiz yön — NFD bir
-        // dosya adı (`é` = iki karakter, bir sütun) satırı tam `cols`'un
-        // altına getirdiğinde `below` bir satır fazla yuvarlıyor ve altındaki
-        // tamamlama listesinin ilk satırını gizliyordu; tam da aşağıdaki
-        // `saturating_sub(1)`'in korumaya çalıştığı satır. Set kapısı
-        // (`/code-review`) yakaladı.
-        let suppress_to = suppressed_block.and_then(|input| {
-            let cols = usize::from(term.columns().max(1) as u16);
-            let last = usize::from(cursor_col).saturating_add(input.cols_after_cursor);
-            let below = u16::try_from(last.saturating_sub(1) / cols).unwrap_or(u16::MAX);
+        // **Birim sütun, karakter değil** (024): birleştirici sıfır, geniş
+        // glyph iki sütun — [`dock::column_width`]'in tablosu, ızgaranın
+        // sarmasıyla aynı. Karakterle sayıldığında NFD bir dosya adı (`é` =
+        // iki karakter, bir sütun) satırı fazla yuvarlıyor ve altındaki
+        // tamamlama listesinin ilk satırını gizliyordu. Set kapısı
+        // (`/code-review`) yakalamıştı.
+        let span = suppressed_block.map(|_| {
+            let (above, below) = dock::grid_span(
+                &blocks.input,
+                blocks.input_caret,
+                usize::from(cursor_col),
+                term.columns(),
+            );
+            (
+                u16::try_from(above).unwrap_or(u16::MAX),
+                u16::try_from(below).unwrap_or(u16::MAX),
+            )
+        });
+        let suppress_to = suppressed_block.zip(span).and_then(|(input, (_, below))| {
             let to = cursor_screen_row
                 .saturating_add(below)
                 .min(grid_rows.saturating_sub(1));
@@ -2643,14 +2677,7 @@ impl Session {
         // hâlde bastırılırdı — gözlendi, bir `od` dökümü bütünüyle
         // kayboluyordu. İki aday arasından **alttaki** seçiliyor: çıpa
         // satırı, ya da aynanın hesapladığı ilk satır.
-        let suppress_floor = suppressed_block.map_or(0, |input| {
-            let cols = usize::from(term.columns().max(1) as u16);
-            let above = input
-                .cols_before_cursor
-                .saturating_sub(usize::from(cursor_col))
-                .div_ceil(cols);
-            cursor_screen_row.saturating_sub(u16::try_from(above).unwrap_or(u16::MAX))
-        });
+        let suppress_floor = span.map_or(0, |(above, _)| cursor_screen_row.saturating_sub(above));
         // **Devrin tek yüklemi ve dört tüketicisi var**: hangi hücrelerin
         // atlanacağı, imlecin çizilip çizilmeyeceği, **doluluk sayısı** ve
         // dock'un kendi caret'i (`Session::dock`'a argüman olarak gidiyor).
@@ -3708,6 +3735,7 @@ impl Session {
             resolved,
             fill_anchors,
             fill_resolved,
+            ..
         } = blocks;
         let shell = lock(&self.shell);
         let running = shell.running();
