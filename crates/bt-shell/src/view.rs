@@ -1601,13 +1601,16 @@ impl BateriView {
         )
     }
 
-    /// Pencere noktası → dock'un giriş satırında sütun + yarı
-    /// ([`dock_input_top_px`]); `row` her zaman `0`. Dock yoksa ya da nokta
-    /// (`Reject`'te) giriş satırının dışındaysa `None`.
+    /// Pencere noktası → dock'un giriş bloğunda satır + sütun + yarı. Dock
+    /// yoksa ya da nokta (`Reject`'te) giriş bloğunun dışındaysa `None`.
     ///
-    /// Yükseklik view'ın bounds'undan: drawable'ın boyu onunla aynı çağrıda
-    /// kuruluyor (`TerminalWindow::sync_geometry`), dock'un ikinci viewport'u
-    /// da dokunun dibine yaslanıyor.
+    /// Geometri **çizilen kareden** ([`bt_gpu::Origin::dock`], 032): bloğun
+    /// tepesi ve satır sayısı ızgaranın orijiniyle aynı yazımda yayınlanıyor,
+    /// yani bant büyürken fare ne ızgarayı ne bloğu bir kare geriden okuyor.
+    /// Henüz hiç kare çizilmediyse PTY payının tek satırlık bloğu
+    /// ([`dock_input_top_px`]); yükseklik o kolda view'ın bounds'undan —
+    /// drawable'ın boyu onunla aynı çağrıda kuruluyor
+    /// (`TerminalWindow::sync_geometry`).
     fn window_point_dock(&self, in_window: NSPoint, outside: OutOfGrid) -> Option<SelectionPoint> {
         let (metrics, (cols, _)) = self.ivars().metrics.get()?;
         let dock_rows = self.ivars().dock_rows.get();
@@ -1616,8 +1619,14 @@ impl BateriView {
         }
         let point = self.convertPoint_fromView(in_window, None);
         let scale = self.window()?.backingScaleFactor();
-        let top = dock_input_top_px(self.bounds().size.height * scale, metrics, dock_rows);
-        point_to_cell((point.x, point.y), metrics, top, outside, scale, cols, 1)
+        let (top, rows) = match self.ivars().origin.get().and_then(Origin::dock) {
+            Some((top, rows)) => (f64::from(top), rows),
+            None => (
+                dock_input_top_px(self.bounds().size.height * scale, metrics, dock_rows),
+                1,
+            ),
+        };
+        point_to_cell((point.x, point.y), metrics, top, outside, scale, cols, rows)
     }
 
     /// Çizilen karenin doldurma bandının boyu — orijinle **aynı gövdeden**
@@ -2063,6 +2072,24 @@ mod tests {
         };
         assert_eq!(thin(0.0), None, "bandın üstünde kalan boşluk");
         assert_eq!(thin(89.0), None, "bandın içi");
+    }
+
+    /// **Dolu ızgara bant kadar yukarıda** (032): dock üç giriş satırına
+    /// büyüyünce çizilen orijin negatife iniyor (iki satır, `-36` px) ve
+    /// ızgaranın tepesi pencerenin dışında. Görünen ilk piksel 2. satır ve
+    /// tıklama orayı seçmeli — orijini yok sayan bir eşleme 0. satırı, yani
+    /// ekranda olmayan bir satırı seçerdi. @1x, paysız.
+    #[test]
+    fn a_negative_origin_maps_the_clipped_grid_to_the_visible_row() {
+        let press = |y: f64| {
+            point_to_cell((20.0, y), grid(0), -36.0, OutOfGrid::Reject, 1.0, 40, 29)
+                .map(|point| point.row)
+        };
+        assert_eq!(press(0.0), Some(2));
+        assert_eq!(press(17.0), Some(2));
+        assert_eq!(press(18.0), Some(3));
+        // Izgaranın son satırı da iki satır yukarıda: 28. satır 468..486.
+        assert_eq!(press(470.0), Some(28));
     }
 
     /// Dock'un giriş satırı `bt-gpu`'nun çizdiği yerde: bandın dibe yaslı

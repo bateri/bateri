@@ -21,8 +21,8 @@ use objc2_metal::{
     MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary,
     MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
     MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-    MTLResourceOptions, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
-    MTLTextureUsage, MTLViewport,
+    MTLResourceOptions, MTLScissorRect, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
+    MTLTextureDescriptor, MTLTextureUsage, MTLViewport,
 };
 use objc2_quartz_core::CAMetalDrawable;
 
@@ -931,11 +931,32 @@ impl Renderer {
         // dock kendi bandının üstüne, yani ızgaranın alanına taşardı.
         // Izgaranın payı zaten sıfır satıra inmiş oluyor (`split_into_grid`)
         // ve `Session::resize` o boyutu yoksayıyor.
-        let origin_y = (viewport_px[1] - frame.dock_px()).max(0.0);
-        enc.setViewport(viewport_at(origin_y, viewport_px));
+        //
+        // **İki orijin** (032): zemin ve saç çizgileri **çizilen bandın**
+        // viewport'undan (`yükseklik − bant`, animasyonun o anki değeri),
+        // hücreler, caret ve efektler **yerleşimin** viewport'undan
+        // (`yükseklik − yerleşim`). Hücreler push anında pişiyor ve hareket
+        // karesi onları yeniden basmıyor; yerleşim dibe yaslı olduğu için bant
+        // büyüyüp küçülürken metin yerinde kalıyor, yalnız bandın tepesi
+        // yükselip iniyor. Bant yerleşime eşitken (dinlenen kare) iki orijin
+        // aynı sayı ve kare 032'den önceki hâliyle bit bit aynı.
+        let band_y = (viewport_px[1] - frame.dock_band_px()).max(0.0);
+        let origin_y = (viewport_px[1] - frame.dock_layout_px()).max(0.0);
+        enc.setViewport(viewport_at(band_y, viewport_px));
         // Zemin ve ayraç önce: dock'un kendi arka planları (vurgu aralıkları,
         // caret) onların üstüne gelmek zorunda.
-        self.encode_quads(enc, &frame.dock_ground(viewport_px[0]), viewport_px)
+        let ground = self.encode_quads(enc, &frame.dock_ground(viewport_px[0]), viewport_px);
+        enc.setViewport(viewport_at(origin_y, viewport_px));
+        // **Büyüyen bant kırpıyor.** Yerleşim bandın o anki tepesinin üstüne
+        // taşıyorsa (bant henüz yükselmedi) taşan giriş satırları zeminsiz,
+        // ızgaranın alt satırlarının üstüne çizilirdi. Kırpma yalnız o
+        // karelerde: dinlenen bantta kurulsaydı yazım efektlerinin saç
+        // çizgisinin üstüne taşan payını (`glyph_fx.metal` → `FX_PAD`) keserdi.
+        let clipped = band_y > origin_y;
+        if clipped {
+            enc.setScissorRect(scissor_below(band_y, viewport_px));
+        }
+        let result = ground
             .and_then(|()| self.encode_quads(enc, frame.dock_bg(), viewport_px))
             // **Seçim ızgaradakiyle aynı sırada** (031 R3.2): vurgu
             // aralıklarının zemininden sonra, caret'ten ve glyph'lerden önce —
@@ -956,13 +977,24 @@ impl Renderer {
             // bandına taşıyor ve bu encode en sonda olduğu için her şeyin
             // üstünde kalıyor — yarısı kırpılmış bir blok görünmüyor.
             .and_then(|()| {
-                self.encode_caret(
+                // **Caret makasın dışında**: devirde ya da yeni bir giriş
+                // satırında bandın tepesine değen caret yarısı kesik bir blok
+                // olurdu; bütün kalıp bandın üstünde bir kare kadar görünmesi
+                // kesik bir bloktan iyi (`/code-review`).
+                if clipped {
+                    enc.setScissorRect(scissor_below(0.0, viewport_px));
+                }
+                let caret = self.encode_caret(
                     enc,
                     frame.dock_caret(origin_y).as_slice(),
                     frame.caret_core(),
                     frame.caret_sdf(),
                     viewport_px,
-                )
+                );
+                if clipped {
+                    enc.setScissorRect(scissor_below(band_y, viewport_px));
+                }
+                caret
             })
             // **Hayaletler dock glyph'lerinden önce** (030): satır ortasında
             // silinen harfin yerine kayan harf hayaletin üstünde durmalı —
@@ -1023,7 +1055,13 @@ impl Renderer {
                         viewport_px,
                     )
                 })
-            })
+            });
+        // Kırpma geri alınıyor: dock en son çiziliyor ama sıradaki bir encode
+        // (bugün yok) bandın altında kalmış bir makasla başlamamalı.
+        if clipped {
+            enc.setScissorRect(scissor_below(0.0, viewport_px));
+        }
+        result
     }
 
     /// Dock'un yazım efektlerini encode eder (030) — beşinci pipeline
@@ -1464,6 +1502,22 @@ fn pipeline(
 /// Dokunun boyunda, `origin_y`'den başlayan viewport — dock'un ve (sıfırla)
 /// yazım efektlerinin ([`Renderer::encode_fx`]). Boy dokunun boyu: NDC
 /// ölçeği `viewport_px` uniform'uyla aynı kalmalı (`encode_dock`'un doc'u).
+/// Dokunun `top_px`'ten dibe kadarki şeridi, makas olarak (032, büyüyen
+/// bant). Makas dokunun içinde kalmak zorunda (Metal'in doğrulaması), yani
+/// sınırlar dokunun boyuna kırpılıyor ve en az bir satır bırakıyor; `0.0`
+/// bütün doku.
+fn scissor_below(top_px: f32, viewport_px: [f32; 2]) -> MTLScissorRect {
+    let width = viewport_px[0].max(0.0) as usize;
+    let height = viewport_px[1].max(0.0) as usize;
+    let y = (top_px.max(0.0).round() as usize).min(height.saturating_sub(1));
+    MTLScissorRect {
+        x: 0,
+        y,
+        width,
+        height: height - y,
+    }
+}
+
 fn viewport_at(origin_y: f32, viewport_px: [f32; 2]) -> MTLViewport {
     MTLViewport {
         originX: 0.0,
@@ -2906,7 +2960,8 @@ mod tests {
         // orijinde düşseydi dock da çizilmezdi, yani dock'un zemini bütün
         // pass'in sağ çıktığının tanığı.
         frame.set_origin_rows(-FILL_PX / f32::from(CELL));
-        frame.open_dock(1, blue, WHITE);
+        frame.set_dock_rows(1);
+        frame.open_dock(blue, WHITE);
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
         assert!(
             near(pixel_at(&pixels, EDGE, 14, 12), (0, 0, 255)),
@@ -3176,7 +3231,8 @@ mod tests {
         frame.clear(grid(CELL, CELL), CaretStyle::default());
         frame.push(bg_cell(0, 0, red));
         frame.push_dock(bg_cell(0, 0, blue));
-        frame.open_dock(1, green, WHITE);
+        frame.set_dock_rows(1);
+        frame.open_dock(green, WHITE);
 
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
         let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
@@ -3216,6 +3272,64 @@ mod tests {
     }
 
     #[test]
+    fn a_growing_band_reveals_its_rows_from_the_bottom() {
+        // **032 phase-2, piksel yarısı.** Üç giriş satırlık dock (dört satırlık
+        // yerleşim): hücreler dibe yaslı ve yerleşimin viewport'undan, zemin
+        // bandın o anki boyundan. Bant henüz yükselmemişken (fazla 0) bandın
+        // tepesinin üstüne taşan giriş satırı **çizilmemeli** — zeminsiz,
+        // ızgaranın alt satırlarının üstünde bir metin olurdu. Kırpmayı makas
+        // yapıyor (`scissor_below`) ve yalnız büyüyen bantta.
+        //
+        // 48 px doku, 8 px hücre, paysız: yerleşim 32 px (16..48), PTY payı
+        // iki satır (32..48). Satır 0 → 16..24, satır 2 → 32..40, bağlam
+        // satırı → 40..48.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 48;
+        const CELL: u16 = 8;
+        let blue = LinearRgba::from_srgb(0x00, 0x00, 0xff);
+        let red = LinearRgba::from_srgb(0xff, 0x00, 0x00);
+        let green = LinearRgba::from_srgb(0x00, 0xff, 0x00);
+        let draw = |extra: f32| {
+            let mut frame = Frame::default();
+            frame.clear(grid(CELL, CELL), CaretStyle::default());
+            frame.set_dock_rows(4);
+            frame.push_dock(bg_cell(0, 0, blue));
+            frame.push_dock(bg_cell(0, 2, blue));
+            frame.push_dock(bg_cell(0, 3, red));
+            frame.set_dock_band(EDGE as f32, extra);
+            frame.open_dock(green, WHITE);
+            render_offscreen(&r, EDGE, ACCENT, &frame)
+        };
+
+        // Dinlenen bant: üç satır da yerinde, zemin yerleşimi kaplıyor.
+        let pixels = draw(2.0);
+        let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
+        assert_eq!(pixel(2, 20), (0, 0, 255), "ilk giriş satırı çizilmedi");
+        assert_eq!(pixel(2, 36), (0, 0, 255), "son giriş satırı yerinde değil");
+        assert_eq!(pixel(2, 44), (255, 0, 0), "bağlam satırı dipte değil");
+        assert_eq!(pixel(2, 28), (0, 255, 0), "zemin giriş bloğunu kaplamadı");
+
+        // Büyümenin başı: bant PTY payının boyunda. Bağlam satırı ve son giriş
+        // satırı **aynı pikselde** (dibe yaslı), bandın üstündeki satır yok.
+        let pixels = draw(0.0);
+        let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
+        assert_eq!(pixel(2, 44), (255, 0, 0), "bağlam satırı bantla kaydı");
+        assert_eq!(pixel(2, 36), (0, 0, 255), "son giriş satırı bantla kaydı");
+        assert_ne!(
+            pixel(2, 20),
+            (0, 0, 255),
+            "bandın üstüne taşan satır çizildi"
+        );
+        assert_ne!(pixel(2, 28), (0, 255, 0), "zemin bandın üstüne taştı");
+        // Bandın tepesi saç çizgisi: 48 − 16 = 32.
+        assert_eq!(
+            pixel(20, 32),
+            (255, 255, 255),
+            "üst saç çizgisi bandla yükselmedi"
+        );
+    }
+
+    #[test]
     fn the_dock_draws_glyphs_and_its_own_caret() {
         // Dock'un ikinci pipeline'ı: glyph'ler ve caret. Caret'in dikdörtgeni
         // fragment'in `[[position]]`'ı ile karşılaştırılıyor ve o koordinat
@@ -3248,7 +3362,8 @@ mod tests {
             CaretShape::Block,
             true,
         );
-        frame.open_dock(1, red, WHITE);
+        frame.set_dock_rows(1);
+        frame.open_dock(red, WHITE);
 
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
         // Dock dokunun **dibine** yaslı, tepeden hücre sayarak değil: ofset
@@ -3534,6 +3649,7 @@ mod tests {
             visible: true,
             // Bu sınamalar pikseli soruyor; devir `link`'in sorusu.
             caret_in_dock: false,
+            input_rows: 1,
             shape: CaretShape::Block,
             blink: false,
             text,
@@ -4614,7 +4730,8 @@ mod tests {
             frame.push_dock(cell);
         }
         frame.set_dock_fx(fx.iter().copied(), HEAT);
-        frame.open_dock(1, BACKGROUND, BACKGROUND);
+        frame.set_dock_rows(1);
+        frame.open_dock(BACKGROUND, BACKGROUND);
         frame
     }
 
