@@ -1,4 +1,5 @@
-//! Tuş vuruşu → PTY baytları ya da ok, ve Shift+PgUp/PgDn'in kaydırma kararı.
+//! Tuş vuruşu → PTY baytları ya da ok, Shift+PgUp/PgDn'in kaydırma kararı ve
+//! dock seçiminin tuşları ([`dock_key`]).
 //! **Saf ve AppKit'siz**, bu yüzden sınanabilir.
 //!
 //! Okun baytı burada **yazılmaz**, yalnız hangi ok olduğu (`bt_core::Arrow`,
@@ -6,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use bt_core::Arrow;
+use bt_core::{Arrow, DockKey};
 
 /// AppKit'in fonksiyon tuşu aralığı: U+F700–U+F8FF. Adlandırılmış sabitler
 /// (`NSUpArrowFunctionKey` … `NSModeSwitchFunctionKey`) bunun ilk dilimini
@@ -43,6 +44,10 @@ pub(crate) const BACKSPACE: char = '\u{7f}';
 /// birinde kayardı. Yukarı/aşağı ok literal kalıyor: onları tek yer okuyor.
 pub(crate) const ARROW_LEFT: char = '\u{f702}';
 pub(crate) const ARROW_RIGHT: char = '\u{f703}';
+
+/// `NSDeleteFunctionKey` — ileri silme (⌦, fn-⌫). İki yerde okunuyor:
+/// baytı ([`encode_key`]) ve dock seçiminin tuşu ([`dock_key`]).
+const FORWARD_DELETE: char = '\u{f728}';
 
 /// Dizge **tam olarak tek karakter** mi — öyleyse o karakter, değilse `None`.
 ///
@@ -221,7 +226,7 @@ pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // olduğu için aşağıdaki yutma kolundan **önce** yazılı; değiştiricili
         // hâli (`\e[3;5~`) oklar gibi kapsam dışı ve düz diziyi alır.
         // `NSDeleteFunctionKey`: fn+Backspace, tam klavyede Delete (⌦).
-        ('\u{f728}', _) if single => Cow::Borrowed(b"\x1b[3~"),
+        (FORWARD_DELETE, _) if single => Cow::Borrowed(b"\x1b[3~"),
         // AppKit Control'ü `characters`'a çoğu tuşta kendi uygular (Ctrl-C →
         // U+0003) ve o hâl aşağıdaki düz metin dalından geçer. Ama hepsinde
         // uygulamaz — Ctrl-Shift-C'de harf harf kalır. İki yol da aynı baytı
@@ -268,9 +273,64 @@ pub(crate) fn page_scroll(chars: &str, shift: bool) -> Option<i32> {
     }
 }
 
+/// Dock seçimi varken terminalin karşılayabileceği tuş (031 Karar 8) —
+/// hangisinin ne yapacağı `bt-core`'da (`Session::dock_key`), burası yalnız
+/// `NSEvent`'in sözlüğü.
+///
+/// **Değiştiricisiz** ⌫, ⌦, ←, → ve Shift'li iki ok. Option, Control ya da
+/// Command taşıyan tuş hiç dock tuşu değil: ⌥⌫ `backward-kill-word`, ⌘⌫
+/// `kill-whole-line` ve ikisi de bugünkü yolundan gidip seçimi kaldırıyor —
+/// "başka her tuş" kolu. Shift'li ⌫ düz ⌫ sayılıyor: macOS'ta da aynı tuş.
+pub(crate) fn dock_key(key: KeyPress<'_>, shift: bool) -> Option<DockKey> {
+    if key.ctrl || key.option || key.command {
+        return None;
+    }
+    match (only_char(key.chars)?, shift) {
+        (BACKSPACE, _) => Some(DockKey::Backspace),
+        (FORWARD_DELETE, _) => Some(DockKey::Delete),
+        (ARROW_LEFT, false) => Some(DockKey::Left),
+        (ARROW_RIGHT, false) => Some(DockKey::Right),
+        (ARROW_LEFT, true) => Some(DockKey::ShiftLeft),
+        (ARROW_RIGHT, true) => Some(DockKey::ShiftRight),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dock_keys_are_the_plain_six() {
+        assert_eq!(dock_key(plain("\u{7f}"), false), Some(DockKey::Backspace));
+        assert_eq!(dock_key(plain("\u{7f}"), true), Some(DockKey::Backspace));
+        assert_eq!(dock_key(plain("\u{f728}"), false), Some(DockKey::Delete));
+        assert_eq!(dock_key(plain("\u{f702}"), false), Some(DockKey::Left));
+        assert_eq!(dock_key(plain("\u{f703}"), false), Some(DockKey::Right));
+        assert_eq!(dock_key(plain("\u{f702}"), true), Some(DockKey::ShiftLeft));
+        assert_eq!(dock_key(plain("\u{f703}"), true), Some(DockKey::ShiftRight));
+        // "Başka her tuş": değiştiricili olanlar ve metin.
+        for key in [
+            KeyPress {
+                option: true,
+                ..plain("\u{7f}")
+            },
+            KeyPress {
+                command: true,
+                ..plain("\u{7f}")
+            },
+            KeyPress {
+                ctrl: true,
+                ..plain("\u{f702}")
+            },
+            plain("a"),
+            plain("\r"),
+            plain("\u{f700}"),
+            plain("\u{7f}\u{7f}"),
+        ] {
+            assert_eq!(dock_key(key, false), None, "{:?}", key.chars);
+        }
+    }
 
     /// Değiştiricisiz vuruş. Tek bayrağı açan kollar `..plain(chars)` ile
     /// yazılıyor, yani sınama satırı hangi bayrağın konu olduğunu adıyla

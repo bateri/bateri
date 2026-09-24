@@ -36,10 +36,12 @@ use bt_core::{
 use bt_gpu::{CellMetrics, Origin};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
-use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
     NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventModifierFlags,
-    NSEventPhase, NSPasteboard, NSPasteboardTypeFileURL, NSTextInputClient, NSView,
+    NSEventPhase, NSMenuItem, NSPasteboard, NSPasteboardTypeFileURL, NSTextInputClient, NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint,
@@ -49,7 +51,8 @@ use objc2_foundation::{
 use crate::clipboard;
 use crate::gesture::{Drag, Gesture, Press, Release};
 use crate::keys::{
-    ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, encode_key, only_char, page_scroll,
+    ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, dock_key, encode_key, only_char,
+    page_scroll,
 };
 use crate::quote::shell_quote;
 
@@ -513,11 +516,43 @@ define_class!(
             }
         }
 
+        /// Edit ▸ Cut (⌘X): dock seçiminin metnini panoya yazar ve seçimi
+        /// siler (031 Karar 7). Yalnız düzenleme kapısı açıkken bir şey
+        /// yapıyor (`Session::dock_cut`); menü öğesi o zaman etkin
+        /// ([`BateriView::validate_menu_item`]), yani kısayol da kapı
+        /// kapalıyken buraya varmıyor. Izgarada kesilecek bir şey yok.
+        #[unsafe(method(cut:))]
+        fn cut_selection(&self, _sender: Option<&AnyObject>) {
+            if let Some(session) = self.ivars().session.get()
+                && let Some(text) = session.dock_cut()
+            {
+                clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
+            }
+        }
+
+        /// Menü öğesinin etkinliği: `validateMenuItem:` tanımlanınca AppKit
+        /// **her** öğeyi sorar, yani varsayılan cevap `true` — Copy, Paste ve
+        /// Select All bugünkü gibi hep etkin. Tek istisna Cut: dock'ta seçim
+        /// yoksa ya da düzenleme kapısı kapalıysa (`vicmd`, bayat ayna, komut
+        /// koşuyor) gri.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            // `return` yok: `define_class!` `bool`'u gövdenin **sonunda**
+            // `Bool`'a çeviriyor, erken dönüş derlenmiyor.
+            item.action() != Some(sel!(cut:))
+                || self
+                    .ivars()
+                    .session
+                    .get()
+                    .is_some_and(|session| session.can_cut())
+        }
+
         /// Edit ▸ Paste (Cmd-V): panodaki metni oturuma yapıştırır.
         ///
         /// `paste()` yolundan girer: 2004 setse bracketed sarılır, değilse ham
         /// yazılır. Ham bayt `session.write`'a değmez. Panoda metin yoksa
-        /// sessiz.
+        /// sessiz. Dock'ta seçim varsa yük onun yerine geçer — silme de
+        /// `paste()`'in içinde (031 Karar 8).
         #[unsafe(method(paste:))]
         fn paste_clipboard(&self, _sender: Option<&AnyObject>) {
             let Some(session) = self.ivars().session.get() else {
@@ -806,6 +841,30 @@ define_class!(
                 return;
             }
             let ctrl = flags.contains(NSEventModifierFlags::Control);
+            let option = flags.contains(NSEventModifierFlags::Option);
+            // **Dock seçiminin tuşları** (031 Karar 8), yığından ÖNCE: ⌫ ve
+            // oklar yığında `doCommandBySelector:`'a düşüp baytlarını
+            // `encode_key`'den alırdı, yani seçimi silmek yerine bir karakter
+            // silerlerdi. Tüketilmeyen tuş (kapı kapalı, seçim yok, başka tuş)
+            // aşağıdan bugünkü yolunu izler ve girdi seçimi kaldırır.
+            // **Bekleyen bileşim varken sorulmuyor**: ⌫ onu iptal etmeli
+            // (Option+e'den sonraki ⌫ yığına gitmezse bir sonraki harf
+            // aksanlı çıkardı; `/code-review`, 031 kapı).
+            if self.ivars().marked_text.borrow().is_empty()
+                && let Some(chars) = chars.as_deref()
+                && let Some(key) = dock_key(
+                    KeyPress {
+                        chars,
+                        ctrl,
+                        option,
+                        command,
+                    },
+                    shift,
+                )
+                && session.dock_key(key)
+            {
+                return;
+            }
             // `!command` R4.2'nin **uygulandığı** yer: izin listesinden geçen
             // üç tuş da yığına girmiyor. Girseydi yığın onları
             // `deleteToBeginningOfLine:`/`moveToBeginningOfLine:`/`moveToEndOfLine:`e
@@ -837,7 +896,7 @@ define_class!(
             let key = KeyPress {
                 chars: &chars,
                 ctrl,
-                option: flags.contains(NSEventModifierFlags::Option),
+                option,
                 command,
             };
             match encode_key(key) {
@@ -890,8 +949,10 @@ define_class!(
             // yazıldı" değil. Oturum henüz bağlanmadıysa tuş kaybolur ama
             // `encode_key` onu ikinci kez göndermez.
             self.ivars().consumed.set(true);
+            // `type_text`, `write` değil: dock'ta seçim varsa harf onun
+            // yerine yazılıyor (031 Karar 8).
             if let Some(session) = self.ivars().session.get() {
-                session.write(text.as_bytes());
+                session.type_text(&text);
             }
         }
 
@@ -1335,11 +1396,16 @@ impl BateriView {
             return;
         };
         if !pressed {
-            if self.with_gesture(|g| g.released(button)) == Release::Report {
-                let clamp = OutOfGrid::Clamp { fill_rows: 0 };
-                if let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) {
-                    self.report_button(session, button, false, cell, event);
+            match self.with_gesture(|g| g.released(button)) {
+                Release::Report => {
+                    let clamp = OutOfGrid::Clamp { fill_rows: 0 };
+                    if let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) {
+                        self.report_button(session, button, false, cell, event);
+                    }
                 }
+                // Dock'taki jest bitti: sürüklemesiz tıksa caret oraya.
+                Release::Dock => session.dock_click(),
+                Release::Done => {}
             }
             return;
         }

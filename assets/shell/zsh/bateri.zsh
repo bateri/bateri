@@ -298,6 +298,12 @@ __bateri_hooks() {
   # değil — hele maliyetin şekli zaten borç listesinde dururken.
   if (( __bateri_dock )); then
     autoload -Uz add-zle-hook-widget
+    # DÜZENLEME WIDGET'I (031): terminalin tek komutu buraya gidiyor. Tanımı
+    # bir kez, bağlaması her `line-init`'te (`__bateri_dock_arm`) — ve arm
+    # aynadan ÖNCE kayıtlı, yani yetenek aynı prompt'un ilk aynasından önce
+    # telde.
+    zle -N __bateri_dock_edit
+    add-zle-hook-widget line-init __bateri_dock_arm
     add-zle-hook-widget line-init __bateri_dock_redraw
     add-zle-hook-widget line-pre-redraw __bateri_dock_redraw
     add-zle-hook-widget line-finish __bateri_dock_finish
@@ -489,6 +495,22 @@ __bateri_preexec() {
 #   ESC ] 8133 ; e BEL   satır bitti (`line-finish`)
 #   ESC ] 8133 ; o BEL   görüntü aynaya sığmıyor (aşağıdaki kapı)
 #   ESC ] 8133 ; b ; b64(dal) BEL   bağlam satırının dalı (`precmd`)
+#   ESC ] 8133 ; w BEL   bu prompt'ta düzenleme widget'ı bağlı (`line-init`)
+#
+# TERS YÖN — TERMİNALDEN KABUĞA, telin tek böyle dizisi (031):
+#
+#   ESC [ 8133 ~ d ; S ; E ; L BEL
+#
+# `BUFFER`'ın `[S, E)` karakter aralığını sil, caret'i `S`'e koy; `S == E`
+# yalnız caret'i taşır. `L` terminalin gördüğü `${#BUFFER}`: tutmazsa
+# terminal bayat bir aynaya bakıyordu ve widget HİÇBİR ŞEY yapmıyor. Dizi
+# kullanıcının girdisiyle aynı PTY'den geliyor ve ZLE onu bir tuş gibi
+# okuyor; `CSI 8133 ~` hiçbir klavyenin üretmediği bir tuş, numarası aynanın
+# numarası. Metin tele HİÇ girmiyor: seçimin yerine yazılan harf `d`'den
+# sonra olağan yoldan geliyor, yani kabukta base64 çözücü yok ve harf yine
+# `self-insert`'ten geçiyor. Terminal diziyi yalnız bu prompt'ta `w`'yi
+# gördüyse gönderiyor — bağlamasız bir kabukta sondaki BEL `send-break`
+# olurdu (ölçüldü, 031 discussion → Muhakeme).
 #
 # KEYMAP ALTINCI GÖVDE ve taşıdığı şey bir POLİTİKA DEĞİL, ZLE'nin durumu:
 # hangi keymap'lerin "yazılan tuş metne dönüşür" anlamına geldiğine karar veren
@@ -650,6 +672,77 @@ __bateri_dock_redraw() {
 __bateri_dock_finish() {
   emulate -L zsh
   print -nr -- $'\e]8133;e\a'
+}
+
+# Düzenleme komutunun yükünü beklemenin üst sınırı, SANİYE.
+#
+# Terminal diziyi tek yazımda gönderiyor, yani yük widget koştuğunda zaten
+# okunmayı bekliyor ve süre hiç harcanmıyor. Sınır yalnız BOZUK bir telde —
+# BEL'i gelmeyen bir dizide — ZLE'nin ne kadar donacağını belirliyor:
+# kullanıcının fark edeceği ama kabuğu kilitlemeyecek bir an. Ölçülmüş bir
+# sayı değil, bir his eşiği (emsal `HANDOVER_HOLD`).
+typeset -g __bateri_dock_edit_wait=0.5
+
+# Terminalin düzenleme komutu (`CSI 8133 ~ d;S;E;L BEL`, tel başlığı yukarıda).
+#
+# HER KOŞULDA SESSİZ: bozuk yük, tutmayan `L` ya da aralık dışı sayı
+# `BUFFER`'a dokunmadan dönüyor. Yanlışın yönü "düzenleme olmadı" — satırı
+# bozmaktansa kullanıcının tuşu boşa gitsin.
+#
+# `S == E` BUFFER'A YAZMIYOR, yalnız `CURSOR`: atama boş bile olsa bir geri
+# alma kaydı doğururdu. Silme ise ZLE'nin tek geri alma birimi (ölçüldü,
+# `context.md` → Ölçüm).
+#
+# AYNA WIDGET'IN SONUNDA AÇIKÇA BASILIYOR: `line-pre-redraw` yalnız görüntü
+# değişince koşuyor ve caret'i zaten olduğu yere koyan (ya da `L` tutmadığı
+# için hiçbir şey yapmayan) bir komut hiç ayna doğurmazdı. Terminal her
+# girdisine bir cevap bekliyor (`DockState::answers`); cevapsız kalan komut
+# düzenleme kapısını bir sonraki tuşa kadar kapalı bırakırdı.
+__bateri_dock_edit() {
+  emulate -L zsh
+  local payload= ch=
+  while read -k 1 -t $__bateri_dock_edit_wait ch; do
+    [[ $ch == $'\a' ]] && break
+    payload+=$ch
+    # Meşru yük dört sayı: sınırsız okumak bozuk bir telde satırı yutardı.
+    (( ${#payload} > 64 )) && break
+  done
+  if [[ $ch == $'\a' && $payload == d\;<->\;<->\;<-> ]]; then
+    local -a field
+    field=( ${(s:;:)payload} )
+    local -i start=$field[2] end=$field[3] len=$field[4]
+    if (( len == ${#BUFFER} && start <= end && end <= len )); then
+      if (( start < end )); then
+        BUFFER=${BUFFER[1,start]}${BUFFER[end+1,-1]}
+      fi
+      CURSOR=$start
+    fi
+  fi
+  __bateri_dock_redraw
+}
+
+# `line-init`: widget'ı bağla ve yeteneği bildir.
+#
+# HER PROMPT'TA YENİDEN, çünkü bağlama kalıcı değil: `bindkey -v`/`-e` yeni
+# bir keymap'i `main`'e bağlıyor, ertelenmiş bir eklenti keymap'i
+# sıfırlayabiliyor ve `bindkey -A mymap main` diyen kullanıcının keymap'i
+# bizim kurulumumuzdan sonra doğuyor. Üçü de bir sonraki prompt'ta
+# onarılıyor. Bedeli üç yerleşik — fork yok.
+#
+# `main` DAHİL: kullanıcının kendi keymap'ini `main`'e bağlaması yaygın ve
+# `emacs`/`viins`'e bağlamak onu kapsamazdı. Terminal diziyi yalnız ekleme
+# keymap'inde gönderiyor (`INSERT_KEYMAPS`), yani `vicmd` bilerek dışarıda.
+#
+# `w` BAĞLAMADAN SONRA: yetenek "şu an bağlı" demek. Terminal onu
+# `line-finish`'te (`e`) unutuyor, yani betiği eski olan ya da bu kanca
+# ezilmiş bir oturumda kapı kapalı kalıyor ve dizi hiç gönderilmiyor.
+__bateri_dock_arm() {
+  emulate -L zsh
+  local map
+  for map in main emacs viins; do
+    bindkey -M $map $'\e[8133~' __bateri_dock_edit
+  done
+  print -nr -- $'\e]8133;w\a'
 }
 
 # Kullanıcının ZDOTDIR'ını KALICI olarak geri koyar ve izlerimizi siler.

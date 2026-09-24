@@ -1517,6 +1517,52 @@ pub enum SelectKind {
     Line,
 }
 
+/// Dock seçimi varken **terminalin** karşıladığı tuşlar (031 Karar 8) —
+/// [`Session::dock_key`]'in sözlüğü. Kalan her tuş bugünkü yolundan gider
+/// ve girdi seçimi kaldırır ([`Session::send_input`]).
+///
+/// `bt-core`'un tipi, çünkü karar burada: `bt-shell` `NSEvent`'i yalnız bu
+/// altı tuşa çeviriyor, hangisinin ne yapacağını sormuyor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DockKey {
+    /// ⌫ — seçimi siler.
+    Backspace,
+    /// ⌦ (fn-⌫) — seçimi siler.
+    Delete,
+    /// ← — seçim kalkar, caret seçimin başına.
+    Left,
+    /// → — seçim kalkar, caret seçimin sonuna.
+    Right,
+    /// ⇧← — seçimin hareketli ucu bir karakter sola; seçim yoksa caret'ten
+    /// başlar. Kabuğa hiçbir şey gitmez.
+    ShiftLeft,
+    /// ⇧→ — [`DockKey::ShiftLeft`]'in aynası.
+    ShiftRight,
+}
+
+/// Düzenleme kapısının açık olduğu andaki satır: `BUFFER`'ın karakter
+/// sayısı, caret'in `BUFFER`'daki yeri ve seçim — **tek kilit turundan**.
+///
+/// Ayrı turlarda okunsalardı komutun `L`'si bir aynaya, aralığı öbürüne ait
+/// olabilirdi; widget'ın `L` kemeri o hâli yakalar ama kemere hiç
+/// düşmemek daha iyi.
+struct DockEditLine {
+    len: usize,
+    caret: usize,
+    selection: Option<DockSelection>,
+}
+
+/// Terminalden kabuğa giden tek dizinin başı (`CSI 8133 ~`); biçimi
+/// betiğin tel başlığında (`assets/shell/zsh/bateri.zsh`).
+const DOCK_EDIT_PREFIX: &str = "\x1b[8133~";
+
+/// Düzenleme komutu: `BUFFER`'ın `[start, end)` aralığını sil, caret'i
+/// `start`'a koy; `len` terminalin gördüğü `${#BUFFER}` (tutmazsa widget
+/// hiçbir şey yapmaz). Serbest ve saf: baytları sınama doğrudan karşılaştırıyor.
+fn dock_edit_command(start: usize, end: usize, len: usize) -> Vec<u8> {
+    format!("{DOCK_EDIT_PREFIX}d;{start};{end};{len}\x07").into_bytes()
+}
+
 impl SelectKind {
     fn alacritty(self) -> SelectionType {
         match self {
@@ -1932,6 +1978,16 @@ impl DockWindow {
         let available = usize::from(self.cols.saturating_sub(dock::TEXT_COL));
         dock::hit(state, self.skip, available, col, half)
     }
+}
+
+/// Caret'in `BUFFER`'daki karakter indeksi: aynanın caret'i görüntü
+/// uzayında (`PREDISPLAY ++ BUFFER ++ …`, [`DockState::cursor`]), ZLE'nin
+/// `$CURSOR`'ı ve düzenleme komutu ise `BUFFER`'ın başından sayıyor.
+fn buffer_caret(state: &DockState) -> usize {
+    state
+        .cursor
+        .saturating_sub(state.predisplay.chars().count())
+        .min(state.buffer.chars().count())
 }
 
 /// PTY'si, okuyucu thread'i ve grid'i olan bir terminal oturumu.
@@ -4470,7 +4526,7 @@ impl Session {
     /// eski vurguyu kaldırır (ızgaranın kuralı).
     pub fn dock_select(&self, kind: SelectKind, col: u16, half: CellHalf) {
         let grid = clear_selection_locked(&mut self.term.lock());
-        let dock = self.change_dock_selection(col, half, |_, point, buffer| {
+        let dock = self.change_dock_selection(col, half, |_, point, buffer, _| {
             point.map(|point| DockSelection::new(kind, point, point, buffer))
         });
         if grid || dock {
@@ -4479,15 +4535,23 @@ impl Session {
     }
 
     /// Shift+tıklama dock'ta: var olan seçimin ucunu taşır, adımı korur;
-    /// seçim yoksa tıklanan noktadan boş bir `Simple` başlar — ızgaranın
-    /// [`Session::extend_selection`]'ı. Izgaranın seçimi kalkar (tek sahip).
+    /// seçim yoksa **caret'ten** tıklanan noktaya bir `Simple` başlar — bir
+    /// metin alanının Shift+tıklaması (031 phase-5; phase-4'te tıklanan
+    /// noktadan boş başlıyordu, çünkü caret'i taşıyan yol henüz yoktu).
+    /// Izgaranın seçimi kalkar (tek sahip).
     pub fn dock_extend(&self, col: u16, half: CellHalf) {
         let grid = clear_selection_locked(&mut self.term.lock());
-        let dock = self.change_dock_selection(col, half, |current, point, buffer| {
+        let dock = self.change_dock_selection(col, half, |current, point, buffer, caret| {
             let point = point?;
             Some(match current {
                 Some(selection) => selection.extended(point, buffer),
-                None => DockSelection::new(SelectKind::Simple, point, point, buffer),
+                None => {
+                    let caret = DockPoint {
+                        index: caret,
+                        half: CellHalf::Left,
+                    };
+                    DockSelection::new(SelectKind::Simple, caret, point, buffer)
+                }
             })
         });
         if grid || dock {
@@ -4501,7 +4565,7 @@ impl Session {
     /// ([`Session::update_selection`]'ın kuralı). Nokta çözülemezse (ayna
     /// değişti) uç yerinde kalır.
     pub fn dock_drag(&self, col: u16, half: CellHalf) {
-        let changed = self.change_dock_selection(col, half, |current, point, buffer| {
+        let changed = self.change_dock_selection(col, half, |current, point, buffer, _| {
             let current = current?;
             Some(point.map_or(current, |point| current.extended(point, buffer)))
         });
@@ -4520,13 +4584,19 @@ impl Session {
         &self,
         col: u16,
         half: CellHalf,
-        change: impl FnOnce(Option<DockSelection>, Option<DockPoint>, &str) -> Option<DockSelection>,
+        change: impl FnOnce(
+            Option<DockSelection>,
+            Option<DockPoint>,
+            &str,
+            usize,
+        ) -> Option<DockSelection>,
     ) -> bool {
         let window = *lock(&self.dock_window);
         let mut log = lock(&self.shell);
         let point = window.and_then(|window| window.hit(&log.dock, col, half));
         let before = log.dock_selection.and_then(|selection| selection.range());
-        let after = change(log.dock_selection, point, &log.dock.buffer);
+        let caret = buffer_caret(&log.dock);
+        let after = change(log.dock_selection, point, &log.dock.buffer, caret);
         log.dock_selection = after;
         before != after.and_then(|selection| selection.range())
     }
@@ -4578,6 +4648,150 @@ impl Session {
             .dock_selection
             .take()
             .is_some_and(|selection| selection.range().is_some())
+    }
+
+    /// **Düzenleme kapısı** (031 R4.4): dock'un satırını değiştiren bir komut
+    /// şu an ZLE'ye gidebilir mi. Dört koşul, dördü de var olan yüklemler:
+    ///
+    /// - dock satırın sahibi ([`ShellLog::suppressed_input`]: safha `Input`,
+    ///   ayna `Live`, blok açık) — `Running`, `Multiline`, `Unavailable` ve
+    ///   `Control` burada kapanıyor;
+    /// - ZLE ekleme keymap'inde ([`DockState::insert_keymap`]) — `vicmd`'de
+    ///   dizi bağlı değil ve baytları **komut** olurdu (`~` harfin büyüklüğünü
+    ///   çeviriyor; ölçüldü);
+    /// - ayna kullanıcının son girdisinin cevabı (`answers == key_gen`, 025)
+    ///   — gönderilen indeksler ZLE'nin gördüğü `BUFFER`'a ait olmalı;
+    /// - kabuk bu prompt'ta widget'ı bağladığını söyledi
+    ///   ([`ShellLog::dock_editable`]) — bağlamasız kabukta sondaki BEL
+    ///   `send-break` olur ve satır ölür (ölçüldü, 031 → Muhakeme).
+    ///
+    /// Kapı kapalıyken **hiçbir komut gitmiyor**: seçim yine kopyalanabilir,
+    /// tuşlar bugünkü yolundan gidip seçimi kaldırır.
+    pub fn can_edit_dock(&self) -> bool {
+        self.dock_edit_line().is_some()
+    }
+
+    /// Kapı açıksa satırın o anki hâli; kapalıysa `None`. Tek kilit turu.
+    fn dock_edit_line(&self) -> Option<DockEditLine> {
+        let generation = self.key_gen.load(Ordering::Acquire);
+        let log = lock(&self.shell);
+        let input = log.suppressed_input()?;
+        if !(log.dock_editable && input.insert_keymap && input.answers == generation) {
+            return None;
+        }
+        Some(DockEditLine {
+            len: log.dock.buffer.chars().count(),
+            caret: buffer_caret(&log.dock),
+            selection: log.dock_selection,
+        })
+    }
+
+    /// Düzenleme komutunu kullanıcı girdisinin tek hunisinden gönderir: nesil
+    /// ilerler (widget'ın aynası ona cevap olur), iki seçim de kalkar.
+    fn send_dock_edit(&self, start: usize, end: usize, len: usize) {
+        let bytes = dock_edit_command(start, end, len);
+        self.send_input(|_| bytes);
+    }
+
+    /// Edit ▸ Cut etkin mi: dock'ta boş olmayan bir seçim var **ve** kapı
+    /// açık. Izgarada kesilecek bir şey yok (031 Karar 7).
+    pub fn can_cut(&self) -> bool {
+        self.dock_edit_line()
+            .is_some_and(|line| line.selection.and_then(|s| s.range()).is_some())
+    }
+
+    /// Dock seçimini siler (`d;S;E;L`) — ⌫/⌦'nin, ve yazmadan ya da
+    /// yapıştırmadan **önce** çağrıldığında "seçimin yerine yaz"ın ilk yarısı:
+    /// metin ardından olağan yoldan gidiyor ([`Session::write`],
+    /// [`Session::paste`] — sarma kararı hâlâ `paste`'in), yani tele hiç
+    /// girmiyor. Seçim yoksa ya da kapı kapalıysa hiçbir şey göndermez ve
+    /// `false` döner; çağıran o zaman bugünkü yoldan devam eder.
+    pub fn dock_delete_selection(&self) -> bool {
+        let Some(line) = self.dock_edit_line() else {
+            return false;
+        };
+        let Some((start, end)) = line.selection.and_then(|s| s.range()) else {
+            return false;
+        };
+        self.send_dock_edit(start, end, line.len);
+        true
+    }
+
+    /// Edit ▸ Cut (⌘X): seçili metin ve silme komutu. Kapı kapalıysa ya da
+    /// seçim yoksa `None` ve pano el değmeden kalır.
+    pub fn dock_cut(&self) -> Option<String> {
+        let text = self.dock_selection_text()?;
+        self.dock_delete_selection().then_some(text)
+    }
+
+    /// Dock'taki jestin bırakılışı: sürüklemesiz tek tıklama caret'i
+    /// tıklanan sınıra taşır (031 R4.1, `d;N;N;L`). Öneriye ya da satırın
+    /// sağındaki boşluğa düşen tık `BUFFER`'ın sonuna iniyor (isabet testi).
+    ///
+    /// Caret zaten oradaysa **gönderilmiyor**: boşa bir girdi nesli ilerletir
+    /// ve kapı, cevabı gelene kadar bir sonraki düzenlemeyi beklerdi.
+    pub fn dock_click(&self) {
+        let Some(line) = self.dock_edit_line() else {
+            return;
+        };
+        let Some(index) = line.selection.and_then(|s| s.click()) else {
+            return;
+        };
+        if index != line.caret {
+            self.send_dock_edit(index, index, line.len);
+        }
+    }
+
+    /// Dock seçimi varken tuşun terminaldeki karşılığı (031 Karar 8);
+    /// `true` → tuş tüketildi, çağıran onu kabuğa **göndermemeli**.
+    ///
+    /// Kapı kapalıysa hep `false`: tuş bugünkü yolundan gider, seçim kalkar.
+    /// Seçim yoksa yalnız ⇧←/⇧→ tüketiliyor (caret'ten seçim başlatır);
+    /// ⌫, ⌦, ←, → bugünkü yolunda. ⇧←/⇧→ da kapıya bağlı, kabuğa hiçbir şey
+    /// göndermese bile: seçim caret'ten başlıyor ve caret'in yeri ancak taze
+    /// bir aynada doğru — `vicmd`'de ise tuş vi'nin.
+    pub fn dock_key(&self, key: DockKey) -> bool {
+        let Some(line) = self.dock_edit_line() else {
+            return false;
+        };
+        let range = line.selection.and_then(|s| s.range());
+        match (key, range) {
+            (DockKey::Backspace | DockKey::Delete, Some((start, end))) => {
+                self.send_dock_edit(start, end, line.len);
+            }
+            (DockKey::Left, Some((start, _))) => self.send_dock_edit(start, start, line.len),
+            (DockKey::Right, Some((_, end))) => self.send_dock_edit(end, end, line.len),
+            (DockKey::ShiftLeft | DockKey::ShiftRight, _) => {
+                let forward = key == DockKey::ShiftRight;
+                let changed = {
+                    let mut log = lock(&self.shell);
+                    // Kapıdan bu yana ayna değiştiyse (`BUFFER` başka) seçim
+                    // o aynanın metnine karşı yeniden kurulmamalı: tuş düşer.
+                    if log.dock.buffer.chars().count() != line.len {
+                        return true;
+                    }
+                    let before = log.dock_selection.and_then(|s| s.range());
+                    let after = DockSelection::stepped(
+                        log.dock_selection,
+                        line.caret,
+                        forward,
+                        &log.dock.buffer,
+                    );
+                    log.dock_selection = Some(after);
+                    before != after.range()
+                };
+                // Tek sahip: klavyeyle başlayan dock seçimi ızgaranınkini
+                // kaldırıyor, fareyle başlayanın kuralı.
+                let grid = clear_selection_locked(&mut self.term.lock());
+                if changed || grid {
+                    self.request_frame();
+                }
+            }
+            (DockKey::Backspace | DockKey::Delete | DockKey::Left | DockKey::Right, None) => {
+                return false;
+            }
+        }
+        true
     }
 
     /// Oturumun o anki teması, kopya olarak — `bt-gpu`'nun clear ve imleç
@@ -4831,6 +5045,20 @@ impl Session {
         self.write_owned(bytes.to_vec());
     }
 
+    /// Klavyenin **metni** — AppKit'in metin yığınının teslim ettiği harf
+    /// (`insertText:`). [`Session::write`]'tan tek farkı dock seçimi: seçim
+    /// varken ve düzenleme kapısı açıkken metin seçimin **yerine** yazılır
+    /// (031 Karar 8) — önce silme komutu, sonra harf olağan yoldan, yani yine
+    /// `self-insert`'ten geçiyor. Fonksiyon tuşları, Enter ve Control'lü
+    /// baytlar `write`'ta kalıyor: onlar seçimi kaldırıp bugünkü işini yapar.
+    pub fn type_text(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.dock_delete_selection();
+        self.write(text.as_bytes());
+    }
+
     /// Sahiplenen yazma: `write` ile aynı kapı, ama baytları bir kez daha
     /// kopyalamaz. Yapıştırma yükü pano mertebesinde olabilir (kopyalanmış
     /// bir log dosyası); sarma dalı tamponu zaten kuruyorken `write`'a
@@ -4965,6 +5193,10 @@ impl Session {
         if bytes.is_empty() {
             return;
         }
+        // **Seçimin yerine yapıştır** (031 Karar 8): dock'ta seçim varken ve
+        // düzenleme kapısı açıkken önce seçim silinir, yük ardından bu
+        // yoldan — sarma kararı yine aşağıda, silmeden bağımsız.
+        self.dock_delete_selection();
         // Sarma sorgusu **önce ve tek başına**: iki kilit (`Term`, sonra
         // `shell`) ardışık alınıyor, iç içe değil.
         if self.bracketed_paste() && !self.can_be_typed(&bytes) {
@@ -7274,6 +7506,159 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// Gerçek zsh + sarmalayıcı: 031'in düzenleme sınamalarının kurulumu.
+    /// Dönen oturum boş bir prompt'ta, ayna `Live` ve yetenek görülmüş.
+    fn spawn_editing_zsh(name: &str) -> (Session, PathBuf) {
+        let home = empty_home(name);
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(("/bin/zsh".into(), vec!["-i".into()]), 60);
+        options.dock = true;
+        options
+            .env
+            .insert("HOME".into(), home.display().to_string());
+        options
+            .env
+            .insert("ZDOTDIR".into(), wrapper_dir().display().to_string());
+        let session = Session::spawn(options, wake).unwrap();
+        wait_until(
+            "kapı prompt'ta açılmadı",
+            Duration::from_secs(10),
+            || session.can_edit_dock(),
+        );
+        (session, home)
+    }
+
+    /// Satır `buffer`'a varana ve **kapı yeniden açılana** kadar bekler — bir
+    /// sonraki komut ancak aynanın cevabından sonra gidebilir.
+    fn wait_edited(session: &Session, dock: &mut DockState, buffer: &str) {
+        wait_dock(session, dock, |dock| dock.buffer == buffer);
+        wait_until("kapı yeniden açılmadı", Duration::from_secs(5), || {
+            session.can_edit_dock()
+        });
+        session.dock_state(dock);
+    }
+
+    /// `BUFFER`'ın `[start, end)` aralığını seçer (fareyi atlayarak; isabet
+    /// testinin kendi sınamaları var).
+    fn select_dock(session: &Session, start: usize, end: usize) {
+        let mut log = lock(&session.shell);
+        let point = |index| DockPoint {
+            index,
+            half: CellHalf::Left,
+        };
+        log.dock_selection = Some(DockSelection::new(
+            SelectKind::Simple,
+            point(start),
+            point(end),
+            &log.dock.buffer,
+        ));
+    }
+
+    /// Caret'in `BUFFER`'daki yeri, aynadan.
+    fn caret_of(dock: &DockState) -> usize {
+        buffer_caret(dock)
+    }
+
+    #[test]
+    fn the_widget_deletes_moves_and_types_over_a_selection_in_zle() {
+        // **Uçtan uca, emacs keymap'i** (031 phase-5): terminalin komutu
+        // gerçek ZLE'de `BUFFER`'ı değiştiriyor ve cevabı aynaya dönüyor.
+        let (session, home) = spawn_editing_zsh("dock-edit");
+        let mut dock = DockState::default();
+        session.write("hello wörld".as_bytes());
+        wait_edited(&session, &mut dock, "hello wörld");
+
+        // ⌫ seçimi siler, caret seçimin başına.
+        select_dock(&session, 0, 6);
+        assert!(session.dock_key(DockKey::Backspace));
+        wait_edited(&session, &mut dock, "wörld");
+        assert_eq!(caret_of(&dock), 0);
+
+        // Tıkla-caret: boş `Simple` seçim → `d;N;N;L`.
+        select_dock(&session, 3, 3);
+        session.dock_click();
+        wait_dock(&session, &mut dock, |dock| caret_of(dock) == 3);
+
+        // Seçimin üstüne yazma: silme + harf olağan yoldan.
+        wait_edited(&session, &mut dock, "wörld");
+        select_dock(&session, 1, 3);
+        session.type_text("Z");
+        wait_edited(&session, &mut dock, "wZld");
+        assert_eq!(caret_of(&dock), 2);
+
+        // → seçimi sonuna daraltır, ← başına.
+        select_dock(&session, 1, 3);
+        assert!(session.dock_key(DockKey::Right));
+        wait_dock(&session, &mut dock, |dock| caret_of(dock) == 3);
+        wait_edited(&session, &mut dock, "wZld");
+        select_dock(&session, 1, 3);
+        assert!(session.dock_key(DockKey::Left));
+        wait_dock(&session, &mut dock, |dock| caret_of(dock) == 1);
+
+        // **`L` tutmazsa no-op**: bayat bir aynaya göre gönderilmiş komut
+        // satıra dokunmuyor, ardından yazılan harf olağan yerine gidiyor.
+        wait_edited(&session, &mut dock, "wZld");
+        session.write(b"\x1b[8133~d;0;4;99\x07");
+        session.write(b"Y");
+        wait_edited(&session, &mut dock, "wYZld");
+
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_widget_is_bound_in_viins_and_in_a_keymap_linked_to_main() {
+        // Bağlama her `line-init`'te `main`/`emacs`/`viins`'e: `bindkey -v`
+        // sonrası ve kendi keymap'ini `main`'e bağlayan kullanıcıda da komut
+        // tutuyor (031 → Muhakeme, bağlamasız dizi satırı bozuyordu).
+        for setup in [
+            "bindkey -v",
+            "bindkey -N mymap emacs; bindkey -A mymap main",
+        ] {
+            let (session, home) = spawn_editing_zsh("dock-keymap");
+            let mut dock = DockState::default();
+            session.write(format!("{setup}\r").as_bytes());
+            // Yeni prompt: `line-finish` kapıyı kapattı, `line-init` açtı.
+            wait_dock(&session, &mut dock, |dock| {
+                dock.status == DockStatus::Live && dock.buffer.is_empty()
+            });
+            wait_until(
+                "kapı yeni prompt'ta açılmadı",
+                Duration::from_secs(5),
+                || session.can_edit_dock(),
+            );
+            session.write("abc dëf".as_bytes());
+            wait_edited(&session, &mut dock, "abc dëf");
+            select_dock(&session, 0, 4);
+            assert!(session.dock_key(DockKey::Delete), "{setup}");
+            wait_edited(&session, &mut dock, "dëf");
+            assert_eq!(caret_of(&dock), 0, "{setup}");
+            session.shutdown();
+            let _ = std::fs::remove_dir_all(&home);
+        }
+    }
+
+    #[test]
+    fn the_gate_closes_when_the_line_is_finished() {
+        // Yetenek prompt'un: Enter'dan sonra komut koşarken kapı kapalı, yeni
+        // prompt'un `line-init`'i yeniden açıyor.
+        let (session, home) = spawn_editing_zsh("dock-gate");
+        let mut dock = DockState::default();
+        session.write(b"sleep 2\r");
+        // Girdi nesli kapıyı zaten kapatıyor (ayna henüz cevap vermedi);
+        // sınanan şey yeteneğin kendisinin `line-finish`'le gitmesi.
+        wait_dock(&session, &mut dock, |dock| dock.status == DockStatus::Idle);
+        assert!(!lock(&session.shell).dock_editable, "{dock:?}");
+        assert!(!session.can_edit_dock());
+        wait_until(
+            "kapı yeni prompt'ta açılmadı",
+            Duration::from_secs(10),
+            || session.can_edit_dock(),
+        );
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn a_window_without_anchors_is_empty_at_the_prompt() {
         // Aynı pencere, `Input` safhasında: hangi bloğa ait olduğunu söyleyen
@@ -8330,6 +8715,159 @@ mod tests {
             "dock satırın sahibiyken düz metin sarıldı: {cells:?}"
         );
         session.shutdown();
+    }
+
+    /// Düzenlenebilir bir dock satırı (`hello`) ve arkasında `od`: kapının
+    /// dört koşulu `tail` ile bozulabiliyor. 60 sütun, çünkü `od`'nin 16
+    /// baytlık satırı (48 karakter) tek satıra sığsın.
+    fn spawn_editable_od(wake: Arc<TestWake>, mirror: &str, tail: &str) -> Session {
+        spawn_docked_with_cols(
+            &format!(
+                "printf '\\033[?2004h{}{mirror}{tail}'; exec od -An -tx1",
+                anchored_prompt(1),
+            ),
+            60,
+            wake,
+        )
+    }
+
+    /// `hello` (`aGVsbG8=`), caret sonda, keymap `main`.
+    const HELLO: &str = "\\033]8133;u;5;;aGVsbG8=;;;bWFpbg==\\007";
+    /// Yetenek: bu prompt'ta widget bağlı.
+    const EDITABLE: &str = "\\033]8133;w\\007";
+
+    #[test]
+    fn the_edit_command_is_the_wire_format() {
+        assert_eq!(dock_edit_command(1, 3, 5), b"\x1b[8133~d;1;3;5\x07");
+        assert_eq!(dock_edit_command(0, 0, 0), b"\x1b[8133~d;0;0;0\x07");
+    }
+
+    #[test]
+    fn each_condition_of_the_edit_gate_closes_it_alone() {
+        // Dört koşul, her biri tek başına (031 R4.4). Kapalı kapıda seçim
+        // duruyor ama tuş tüketilmiyor: bugünkü yolundan gidecek.
+        let open = spawn_editable_od(Arc::new(TestWake::default()), HELLO, EDITABLE);
+        wait_mirror(&open, DockStatus::Live);
+        wait_until("kapı açılmadı", Duration::from_secs(5), || {
+            open.can_edit_dock()
+        });
+        select_dock(&open, 1, 3);
+        assert!(open.can_cut());
+        // Nesil ilerledi, ayna henüz cevap vermedi: bayat.
+        open.key_gen.fetch_add(1, Ordering::Release);
+        assert!(!open.can_edit_dock(), "bayat aynada kapı açık");
+        assert!(!open.dock_key(DockKey::Backspace));
+        assert!(!open.can_cut());
+        open.shutdown();
+
+        for (name, mirror, tail) in [
+            // `dmljbWQ=` = `vicmd`.
+            (
+                "vicmd",
+                "\\033]8133;u;5;;aGVsbG8=;;;dmljbWQ=\\007",
+                EDITABLE,
+            ),
+            ("yetenek yok", HELLO, ""),
+            ("Running", HELLO, "\\033]8133;w\\007\\033]133;C\\007"),
+        ] {
+            let session = spawn_editable_od(Arc::new(TestWake::default()), mirror, tail);
+            wait_until(
+                &format!("{name}: ayna gelmedi"),
+                Duration::from_secs(5),
+                || {
+                    let mut state = DockState::default();
+                    session.dock_state(&mut state);
+                    state.buffer == "hello" && session.shell_state().is_some()
+                },
+            );
+            wait_settled(&session);
+            select_dock(&session, 1, 3);
+            assert!(!session.can_edit_dock(), "{name}: kapı açık");
+            assert!(!session.dock_key(DockKey::Backspace), "{name}");
+            assert!(!session.dock_key(DockKey::ShiftLeft), "{name}");
+            session.dock_click();
+            assert_eq!(
+                session.key_gen.load(Ordering::Acquire),
+                0,
+                "{name}: komut gitti"
+            );
+            session.shutdown();
+        }
+    }
+
+    #[test]
+    fn backspace_over_a_selection_writes_exactly_the_edit_command() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_editable_od(Arc::clone(&wake), HELLO, EDITABLE);
+        wait_mirror(&session, DockStatus::Live);
+        select_dock(&session, 1, 3);
+        assert!(session.dock_key(DockKey::Backspace));
+        // Komut 15 bayt; satır sonu `od`'nin 16 baytlık bloğunu tamamlıyor.
+        session.write(b"\n");
+        let cells = wait_ink(&session, &wake, "0a");
+        assert!(
+            glyph_text(&cells).contains("1b5b383133337e643b313b333b35070a"),
+            "komut baytları: {cells:?}"
+        );
+        assert_eq!(
+            lock(&session.shell).dock_selection,
+            None,
+            "komut seçimi kaldırmadı"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn shift_arrows_select_from_the_caret_without_writing() {
+        // ⇧←/⇧→ yalnız terminalde (031 Karar 8): kabuğa hiçbir şey gitmiyor,
+        // yani nesil de ilerlemiyor ve kapı açık kalıyor.
+        let session = spawn_editable_od(Arc::new(TestWake::default()), HELLO, EDITABLE);
+        wait_mirror(&session, DockStatus::Live);
+        wait_until("kapı açılmadı", Duration::from_secs(5), || {
+            session.can_edit_dock()
+        });
+        assert!(
+            !session.dock_key(DockKey::Backspace),
+            "seçimsiz ⌫ tüketildi"
+        );
+        assert!(session.dock_key(DockKey::ShiftLeft));
+        assert!(session.dock_key(DockKey::ShiftLeft));
+        let range = lock(&session.shell).dock_selection.and_then(|s| s.range());
+        assert_eq!(range, Some((3, 5)));
+        assert_eq!(session.dock_selection_text().as_deref(), Some("lo"));
+        assert_eq!(session.key_gen.load(Ordering::Acquire), 0);
+        assert!(session.can_edit_dock());
+        session.shutdown();
+    }
+
+    #[test]
+    fn typing_and_pasting_replace_the_selection() {
+        // Metin tele girmiyor: önce `d`, sonra olağan yol — yapıştırmanın
+        // sarma kararı dahil (tek satır, dock sahibi: yazılmış girdi gibi).
+        for (name, act, needle) in [
+            // Kanonik tty `od`'ye satır sonunda veriyor, `od` de yalnız dolu
+            // 16 baytlık blokları döküyor: iğne ilk bloğun sonu.
+            ("yazma", 0, "643b313b333b35075a"),
+            ("yapıştırma", 1, "643b313b333b3507616263"),
+        ] {
+            let wake = Arc::new(TestWake::default());
+            let session = spawn_editable_od(Arc::clone(&wake), HELLO, EDITABLE);
+            wait_bracketed_mode(&session);
+            wait_mirror(&session, DockStatus::Live);
+            select_dock(&session, 1, 3);
+            if act == 0 {
+                session.type_text("Z");
+            } else {
+                session.paste(b"abcdefghijklmnopqrst".to_vec());
+            }
+            session.write(b"\n");
+            let cells = wait_ink(&session, &wake, needle);
+            assert!(
+                !glyph_text(&cells).contains("1b5b3230307e"),
+                "{name}: sarıldı: {cells:?}"
+            );
+            session.shutdown();
+        }
     }
 
     #[test]
