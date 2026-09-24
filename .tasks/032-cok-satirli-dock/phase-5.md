@@ -35,9 +35,36 @@ _Requirements: R5_
 
 ## Checklist
 
-- [ ] `paste`'e `r` eki, tam kapıyla
-- [ ] Tel başlığı
-- [ ] Test: kapının dört kolu; canlı zsh
-- [ ] Ölçüm: oh-my-zsh'li gerçek pencere
-- [ ] phase-4'ten devir (gözle görülen): dolu ızgarada 16 satırlık çok satırlı yapıştırmadan sonra ızgaranın **tepe satırında** ekrana sabit bir glyph artığı kaldı (`l7` üstünde yarım bir harf; içerik kaydıkça yerinde durdu, tema değişimi silmedi, `clear` sildi). Yapıştırmanın bayat aynası (satır bir tuş ızgarada, standout'lu) sürerken oluştu; yazarak kurulan aynı büyüklükte heredoc'ta tekrar etmedi, HEAD'de sınanmadı (pano gerekiyordu). `r` ölçümüyle aynı sahnede yeniden üret, 032'nin getirdiğiyse düzelt
-- [ ] Doğrulama geçti (`make hepsi`, `make kur`)
+- [x] `paste`'e `r` eki, tam kapıyla
+- [x] Tel başlığı
+- [x] Test: kapının dört kolu; canlı zsh
+- [x] Ölçüm: oh-my-zsh'li gerçek pencere
+- [x] phase-4'ten devir (gözle görülen): dolu ızgarada 16 satırlık çok satırlı yapıştırmadan sonra ızgaranın **tepe satırında** ekrana sabit bir glyph artığı kaldı (`l7` üstünde yarım bir harf; içerik kaydıkça yerinde durdu, tema değişimi silmedi, `clear` sildi). Yapıştırmanın bayat aynası (satır bir tuş ızgarada, standout'lu) sürerken oluştu; yazarak kurulan aynı büyüklükte heredoc'ta tekrar etmedi, HEAD'de sınanmadı (pano gerekiyordu). `r` ölçümüyle aynı sahnede yeniden üret, 032'nin getirdiğiyse düzelt
+- [x] Doğrulama geçti (`make hepsi`, `make duman`)
+- [~] `make kur` — otonom şeridin talimatı koşturmuyor (`target/release/bateri.app` kullanıcının açık örneği olabilir); betiğin pakete kopyası sabit kimlikli geçici pakette `cmp` ile denetlendi
+
+## Uygulama Notları
+
+- **Tazeleme kararı `paste`'in ilk satırında**, `dock_delete_selection`'dan
+  önce: seçimin silinmesi nesli ilerletiyor ve kapının "ayna cevap verdi"
+  koşulunu kapatırdı. Satır sonu ölçütü `\n` **ya da** `\r`.
+- **Canlı zsh sınaması `bracketed-paste-magic`'i yüklüyor** (oh-my-zsh'siz,
+  sistem fonksiyonu, komut satırından): `r`'siz koşuda ayna 5 s içinde
+  cevap vermedi (fail-first ölçüldü), `r`'le veriyor. Düz `bracketed-paste`'te
+  sınama `r`'siz de geçerdi, yani bekçi değil.
+- **Ölçüm (gerçek pencere, oh-my-zsh + robbyrussell, `bracketed-paste-magic`
+  bağlı):** üç satırlık ve 16 satırlık yapıştırma, yapıştırmadan 150 ms sonraki
+  karede bile dock'ta; ızgarada standout'lu satır görünmedi. Bilinen sınır
+  yazılmadı.
+- **phase-4'ün tepe satırı artığı yeniden üretildi ve 032'nin değil**: artık
+  bir glyph değil **blok işareti** (yeşil chevron). 16 satırlık komut koşup
+  ekran kayınca ızgaranın ikinci satırına oturuyor ve içerik kaydıkça yerinde
+  kalıyor. Sebep çıpa toplamada: prompt'un OSC 8 bağlantısı `preexec`'e kadar
+  açık, yani çok satırlı komutun **bütün** satırları çıpayı taşıyor ve
+  `blocks.anchors` "görünen ilk çıpalı satırı" komut satırı sayıyor — komutun
+  ilk satırı ekranın üstüne kayınca işaret onun devamına düşüyor. Kural 010'dan
+  ve bağlantının açıklığı 012'den; 032 öncesinde de çok satırlı yapıştırma
+  ızgarada aynı satırları bırakıyordu (HEAD'de koşulmadı, mantıkla). `clear`
+  satırları sildiği için siliyor, tema değişimi silmiyor. Çaresi (çıpa
+  değişiminde üstteki satır aynı kimliği taşıyorsa işaret ve sayaç çizilmez)
+  blok modeline dokunduğu için bu phase'in kapsamı dışında → phase-6'ya devir.

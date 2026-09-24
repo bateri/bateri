@@ -33,4 +33,5 @@ _Requirements: R6_
 - [ ] `DockEdit` (satır, sütun)
 - [ ] `glyph_fx` iki eksen
 - [ ] Test: sarma sınırında ekleme, ikinci satırda silme
+- [ ] phase-5'ten devir (gözle görülen, 032'nin değil): çok satırlı komutun ilk satırı ekranın üstüne kayınca blok işareti (chevron) devam satırına, ızgaranın tepesine oturup orada kalıyor — çıpa `preexec`'e kadar açık, `blocks.anchors` görünen ilk çıpalı satırı komut satırı sayıyor (teşhis `phase-5.md` → Uygulama Notları). Çare: çıpa değişiminde üstteki satır (geçmiş dahil) aynı kimliği taşıyorsa o satıra işaret ve sayaç çizme; doldurma bandının devamında da aynı soru. Kapsam dışı sayılırsa `docs/YOL-HARITASI.md`'ye adıyla
 - [ ] Doğrulama geçti (`make hepsi`)

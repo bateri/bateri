@@ -497,9 +497,14 @@ __bateri_preexec() {
 #   ESC ] 8133 ; b ; b64(dal) BEL   bağlam satırının dalı (`precmd`)
 #   ESC ] 8133 ; w BEL   bu prompt'ta düzenleme widget'ı bağlı (`line-init`)
 #
-# TERS YÖN — TERMİNALDEN KABUĞA, telin tek böyle dizisi (031):
+# TERS YÖN — TERMİNALDEN KABUĞA, telin iki dizisi (031, 032):
 #
 #   ESC [ 8133 ~ d ; S ; E ; L BEL
+#   ESC [ 8133 ~ r BEL   yalnız aynala (032): satır sonlu yapıştırmanın
+#                        arkasında; `bracketed-paste-magic` yükü `zle -U` ile
+#                        kuyruğa basıp redisplay'i atlattığı için ayna bir tuş
+#                        bayat kalıyordu. Widget'ın `d` olmayan her yükteki
+#                        davranışı zaten bu: `BUFFER`'a dokunmadan aynayı basar.
 #
 # `BUFFER`'ın `[S, E)` karakter aralığını sil, caret'i `S`'e koy; `S == E`
 # yalnız caret'i taşır. `L` terminalin gördüğü `${#BUFFER}`: tutmazsa

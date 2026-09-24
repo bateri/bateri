@@ -511,7 +511,11 @@ kontrol karakteri taşımayan yük bracketed sarmadan akıtılıyor
 koruduğu iki şey de koşulun dışında. Keymap koşulu şart: `vicmd`'de aynı
 baytlar metin değil **komut** olurdu (panodaki `dd` satırı siler) ve keymap
 aynanın altıncı gövdesiyle geliyor; bilinmeyen ya da hiç gelmemiş keymap
-istisnayı **kapatıyor**. Prompt artık
+istisnayı **kapatıyor**. Satır sonlu yük sarılı kalıyor ama düzenleme kapısı
+yapıştırmadan **önce** açıksa arkasına aynı yazımda `CSI 8133 ~ r BEL`
+gidiyor (`Session::paste_refreshes`; widget `BUFFER`'a dokunmadan yalnız
+aynalıyor): kuyruğun arkasındaki komut aynayı yapıştırmanın sonucuyla
+bastırıyor ve satır bir tuş boyunca ızgarada kalmıyor (032 phase-5). Prompt artık
 **terminalin**: `RPS1` sıfır görünür genişliğe iniyor, `PS1` ise **iki sütuna**
 — iki sıfır genişlikli işaret artı iki **gerçek** boşluk. O iki sütun ızgaranın
 blok işaretinin yeri: chevron 0. sütuna oturuyor, komut 2.'den başlıyor ve
