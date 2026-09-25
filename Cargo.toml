@@ -73,7 +73,13 @@ block2 = "0.6"
 # KAPSÜLLER: pub API'de alacritty tipi görünmez. Kullanıcı onaylı bağımlılık
 # kararı: .tasks/002-vt-motoru/discussion.md → Karar. Tek varsayılan feature
 # serde'dir ve kapatılır: hiçbir yerde serialize etmiyoruz.
-alacritty_terminal = { version = "0.26", default-features = false }
+# Sürüm **tam** sabit (`=`): okuyucu döngüsü bu sürümün `event_loop.rs`'inin
+# kopyası (`bt-core/src/reader.rs`) ve kopya onun `pub(crate)` iki sabitine
+# (PTY token'ları) yaslanıyor — yama sürümü bile onları sessizce kaydırabilirdi
+# (035 phase-2). vte'yi bu pin sabitlemiyor (alacritty onu `^0.15.0` istiyor):
+# onun sürümünü `Cargo.lock`, `Handler`'a gelecek yeni metodu da
+# sarmalayıcının `missing_trait_methods` bekçisi tutuyor.
+alacritty_terminal = { version = "=0.26.0", default-features = false }
 # Ayar ve tema dosyası (`bt-core::settings`). Kullanıcı onaylı bağımlılık
 # kararı: .tasks/007-ayarlar-ve-tema/discussion.md → Karar. `toml` + `serde`
 # yerine: menüden seçilen tema dosyaya yazılacak ve sözleşme "tanımadığını
@@ -84,6 +90,15 @@ alacritty_terminal = { version = "0.26", default-features = false }
 # zayıf `serde_core?/std` özelliği kilit dosyasına yazdırıyor, `cargo tree -p
 # bt-core` onları göstermez.
 toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
+# `Handler`'ı aktaran sarmalayıcı için (`bt-core::handler`): trait'in
+# `set_mouse_cursor_icon` metodu imzasında `CursorIcon` geçiriyor ve ne vte ne
+# alacritty onu yeniden ihraç ediyor (vte `ansi`'de özel `use`). Aktarım
+# listesinin bekçisi `clippy::missing_trait_methods` metodu atlamaya izin
+# vermiyor. `polling` emsali: yeni bir crate DEĞİL — grafta zaten vardı (vte'nin
+# `ansi` özelliği), aynı 1.2.0'a çözülüyor; `Cargo.lock`'ta yalnız `bt-core`'un
+# bağımlılık listesine bir kenar ekleniyor. Kullanıcı kararı:
+# .tasks/035-grapheme-dizileri/discussion.md → Karar.
+cursor-icon = { version = "1.2", default-features = false }
 # Bekçi thread'in son çaresi: `write(2, …)` + `_exit(70)`, ikisi de
 # async-signal-safe (`bt-shell::bekci`). Yeni bir crate DEĞİL — grafta zaten
 # vardı (alacritty PTY'yi onunla açıyor) ve sürüm oynamıyor; `Cargo.lock`'ta
