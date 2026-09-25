@@ -515,6 +515,12 @@ pub(crate) struct LedgerMark {
     pub(crate) user: i64,
     /// PTY çıktısının nesli (`Wakeup` başına bir): arada çıktı var mı.
     pub(crate) epoch: u64,
+    /// Ekranı temizlemenin nesli ([`crate::Session::clear_to_start`],
+    /// [`crate::Session::clear_scrollback`]): arada terminal tarafı bir
+    /// temizlik var mı. `epoch`'tan ayrı, çünkü doymamış defterde `epoch`
+    /// okunmuyor ve geçmişi boş bir oturumda temizlik `history` farkını
+    /// sıfır bırakıp satırları yine de kaydırıyor (0 → 0).
+    pub(crate) wipes: u64,
     pub(crate) columns: usize,
     pub(crate) lines: usize,
     pub(crate) alt: bool,
@@ -543,10 +549,15 @@ pub(crate) enum Shift {
 /// - Kalan her şey (doymuş defterin dibi, tavandaki ofset, boyut değişimi,
 ///   alternatif ekran geçişi, silinen geçmiş) **kayıp**: yanlış satırı
 ///   geçerli göstermektense hiçbirini göstermemek.
+/// - Terminal tarafı temizlik (`wipes`, ⌘K/⌥⌘K) her kolda **kayıp** —
+///   geçmiş 0 → 0 kaldığında da (`history` farkı onu göremiyor) ve hiçbir
+///   satır kaymadığında da (⌥⌘K'nin boş geçmişi): temizlik kaymayı
+///   söylemiyor, yalnız olduğunu söylüyor, ve bilinmeyen kayma kayıptır.
 pub(crate) fn ledger_shift(prev: LedgerMark, now: LedgerMark, limit: usize) -> Shift {
     if prev.columns != now.columns
         || prev.lines != now.lines
         || prev.alt != now.alt
+        || prev.wipes != now.wipes
         || now.history < prev.history
     {
         return Shift::Lost;

@@ -7,8 +7,10 @@
 //! `select_all`, `update_selection`, `clear_selection`, `selection_text`), kaydırma yolu (`scroll_wheel`,
 //! `scroll_page`), kullanıcı girdisinin gönderimi (`send_input`: seçimin
 //! temizliği, dibe dönüş ve okun kip sorusu aynı kilitte), `paste`'in kip
-//! sorgusu (`bracketed_paste`) ve terminal seçeneklerinin canlı değişimi
-//! (`set_terminal_options`).
+//! sorgusu (`bracketed_paste`), terminal seçeneklerinin canlı değişimi
+//! (`set_terminal_options`) ve ekranı temizleme (`clear_to_start`,
+//! `clear_scrollback`: dibe dönüş, kaydırma, geçmiş, seçim ve `2J` nesli
+//! aynı kilitte).
 //! Kilit **sırası** her yerde aynıdır — `term` önce, `size` sonra; yeni bir yer
 //! eklerken bu sıraya uyulur, çünkü iki kilit ters sırada alınırsa kilitlenme
 //! doğar. `theme`, `shell` ve `search` bu sıranın dışında birer **yaprak** kilittir:
@@ -59,7 +61,7 @@ use alacritty_terminal::term::{Config, Osc52 as TermOsc52, RenderableContent, Te
 // çağırıyor, yani kendi impl bloğunun dışından; `EventedPty` ve `io::Read`
 // gelmiyor, onların tek çağrı yeri kendi impl blokları.
 use alacritty_terminal::tty::{self, EventedReadWrite as _, Pty, Shell};
-use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Handler};
+use alacritty_terminal::vte::ansi::{ClearMode, CursorShape, CursorStyle, Handler};
 // `Event` adı bu modülde alacritty'nin olayına ait; `polling`'inki `TappedPty`
 // dışında hiç geçmediği için ada gelen o, takma alan o.
 use polling::{Event as PollingEvent, PollMode, Poller};
@@ -1093,11 +1095,19 @@ struct AdapterInner {
     /// [`Session::title`] onu `Term`'e dokunmadan, tek başına alıyor.
     title: Mutex<Option<String>>,
     /// PTY çıktısının **nesli**: alacritty'nin her `Wakeup`'ı (ayrıştırılmış
-    /// bir okuma turu) bir artırıyor, `Term` kilidi altında. Geçerli arama
+    /// bir okuma turu) bir artırıyor, `Term` kilidi altında. Ekranı
+    /// temizlemek defteri değiştiriyor ama bunu artırmıyor — onun nesli
+    /// ayrı ([`AdapterInner::wipes`]). Geçerli arama
     /// eşleşmesinin kaymasının "arada çıktı var mı" sorusu
     /// ([`search::ledger_shift`]); oturumun kendi kare isteği
     /// ([`Session::request_frame`]) onu oynatmıyor.
     ledger: AtomicU64,
+    /// Ekranı temizlemenin nesli (034): [`Session::clear_to_start`] ve
+    /// [`Session::clear_scrollback`] bir artırıyor, `Term` kilidi altında.
+    /// Geçerli arama eşleşmesinin "arada temizlik var mı" sorusu
+    /// ([`search::LedgerMark::wipes`]) — `ledger`'dan ayrı, çünkü doymamış
+    /// defterde `ledger` okunmuyor.
+    wipes: AtomicU64,
     /// Arama açık mı (033) — [`Session::store_search`] yazıyor; defter
     /// haberinin kapısı.
     search_active: AtomicBool,
@@ -1119,6 +1129,7 @@ impl Adapter {
             blink: Mutex::new(blink),
             title: Mutex::new(None),
             ledger: AtomicU64::new(0),
+            wipes: AtomicU64::new(0),
             search_active: AtomicBool::new(false),
             search_pending: AtomicBool::new(false),
         }))
@@ -1310,7 +1321,10 @@ struct TappedPty {
     /// thread'i), okuyan [`Session::shell_state`].
     shell: Arc<Mutex<ShellLog>>,
     /// [`Session::screen_clears`]'in aynı yuvası: tarayıcının saydığı
-    /// `CSI 2 J`. Artıran **yalnız** burası.
+    /// `CSI 2 J`. Burası **okuyucu thread'inin** yazarı; ikinci yazar ana
+    /// thread'de terminal tarafı temizlik ([`Session::note_screen_clear`]).
+    /// İkisi de yalnız artırıyor, yani sıraları önemsiz: sayaç bir nesil,
+    /// okuyanı yalnız "değişti mi" diye soruyor.
     screen_clears: Arc<AtomicU32>,
     /// [`Session::key_gen`]'in aynı yuvası. Burası yalnız **okuyor**: ayna
     /// olayı çözüldüğü anda nesli damga olarak deftere geçiriyor.
@@ -1802,6 +1816,58 @@ fn anchor_row_at_or_above<T>(term: &Term<T>, row: u16, offset: i32, block: u32) 
                 == Some(block)
         })
     })
+}
+
+/// Ekranı temizlemenin iki kipi ([`Session::clear_to_start`],
+/// [`Session::clear_scrollback`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClearKind {
+    /// ⌘K: korunan bloğun üstü ve geçmiş.
+    ToStart,
+    /// ⌥⌘K: yalnız geçmiş.
+    Scrollback,
+}
+
+/// Ekranın `line` satırının taşıdığı blok kimliği — [`block_id`]'nin satır
+/// hâli, [`block_row_continues`]'un okuma deyimi. İlk bulunan kazanıyor: bir
+/// satırda iki bloğun çıpası olamıyor (bağlantı `preexec`'te kapanıyor).
+fn row_block<T>(term: &Term<T>, line: Line) -> Option<u32> {
+    term.grid()[line]
+        .into_iter()
+        .find_map(|cell| cell.hyperlink().and_then(|link| block_id(link.uri())))
+}
+
+/// ⌘K'nin **korunan ilk satırı** (034 R1.1): o satırın üstü ekrandan atılır.
+///
+/// Bloğun kimliğini taşıyan **en üstteki** ekran satırı, imlecin satırı ve
+/// üstü arasında — [`anchor_row_at_or_above`] değil: o imlece **en yakın**
+/// çıpalı satırı veriyor ve bağlantı `preexec`'e kadar açık olduğu için
+/// sarılan ya da çok satırlı girişte bu imlecin kendi satırı, yani girişin
+/// üst satırları giderdi (`discussion.md` → Muhakeme). Bitişik satırlarda
+/// yürümek de değil: çok satırlı girişin **boş** satırı (`Esc-Enter` iki
+/// kez) hiç hücre yazmıyor, zsh orada yalnız siliyor ve silme bağlantısız
+/// hücre bırakıyor — yürüyüş o boşlukta durur, prompt ile girişin üstü
+/// giderdi (`/code-review`, 034 phase-1). En üstteki satır doğru, çünkü
+/// kimlik prompt başına tek: aynı kimliği ekranda taşıyan başka bir bölge
+/// yok (Ctrl-L'in bıraktığı kopya geçmişte).
+///
+/// Blok 0. satırda başlıyorsa (ya da başı geçmişte) cevap `0`: hiçbir satır
+/// atılmaz, yalnız geçmiş silinir.
+///
+/// Kimlik imlecin satırından; satır çıpasızsa ve kabuk girdi safhasındaysa
+/// (`input_block`, imleç girişin henüz yazılmamış bir satırında) kabuğun
+/// defterinden. İkisi de yoksa (komut koşuyor, entegrasyonsuz kabuk)
+/// korunan yalnız imlecin satırı. Safha `Term` kilidinden önce okundu
+/// (yaprak kilit sırası).
+///
+/// `Term` kilidi tutulurken, pencere dipteyken (imlecin satırı ekran satırı).
+fn protected_top<T>(term: &Term<T>, input_block: Option<u32>) -> usize {
+    let row = term.grid().cursor.point.line.0.max(0);
+    let top = row_block(term, Line(row))
+        .or(input_block)
+        .and_then(|id| (0..=row).find(|&probe| row_block(term, Line(probe)) == Some(id)))
+        .unwrap_or(row);
+    usize::try_from(top).unwrap_or(0)
 }
 
 /// Kapıdan geçmiş bir hücrenin **mürekkep yarısı**: ön plan rengi ve kural
@@ -2474,9 +2540,16 @@ pub struct Session {
     /// kilidini bıraktıktan sonra; okuyanı isabet testi, `shell`'i almadan
     /// önce. İkisi iç içe hiç alınmıyor.
     dock_window: Mutex<Option<DockWindow>>,
-    /// Tarayıcının saydığı `CSI 2 J` — **nesil sayacı**, bayrağın kendisi
-    /// değil. Artıranı okuyucu thread'i ([`TappedPty::read`]), okuyanı
-    /// [`Session::observe_screen_clear`].
+    /// "Ekran kasten temizlendi" olaylarının **nesil sayacı**, bayrağın
+    /// kendisi değil. **İki yazarı** var ve ikisi de yalnız artırıyor:
+    /// okuyucu thread'i tarayıcının saydığı `CSI 2 J`'yi baytlar
+    /// uygulanmadan **önce** ([`TappedPty::read`]), ana thread terminal
+    /// tarafı temizliği (⌘K/⌥⌘K) `Term` kilidi altında ve uygulandıktan
+    /// **sonra** ([`Session::note_screen_clear`]). Okuyanı
+    /// [`Session::observe_screen_clear`]; ikisinin sırası farklı ama sonucu
+    /// aynı — kilidin altında okunan nesil ya henüz uygulanmamış bir `2J`'yi
+    /// (bayrağı kurmak için okunuyor, düşürmek için değil) ya da çoktan
+    /// uygulanmış bir temizliği gösteriyor.
     ///
     /// `Arc`, çünkü öteki ucu sarmalayıcıyla okuyucu thread'inde ([`shell`]
     /// emsali). Atomik ve **yaprak kilit değil**, çünkü okunduğu yer `Term`
@@ -4022,6 +4095,14 @@ impl Session {
     ///    sonra yazılsaydı, arada gelen taze bir `CSI 2 J` ezilirdi —
     ///    Ctrl-L'i sessizce geri alan dizi tam olarak bu.
     ///
+    /// **Sayacın iki yazarı var** ([`Session::screen_clears`]): okuyucunun
+    /// saydığı `CSI 2 J` ve ana thread'in terminal tarafı temizliği
+    /// ([`Session::note_screen_clear`], ⌘K/⌥⌘K). Buradaki mantık ikisini
+    /// ayırt etmiyor ve etmemeli: ikincisi kilit altında, uygulandıktan sonra
+    /// artırıyor, yani (1)'in "henüz uygulanmamış" penceresi onda hiç yok ve
+    /// bayrağı kuran kare zaten temiz ekranı görüyor. Temizlik geçmişi de
+    /// sildiği için damga sıfırdan alınıyor.
+    ///
     /// **Yeni nesil, doldurma kuralını aynı karede eziyor.** Sayaç
     /// [`Session::screen_seen`]'den farklıysa ortada henüz hesaba katılmamış
     /// bir temizleme var ve o kare bayrağı **kurar** — ızgara hâlâ dolu
@@ -4980,6 +5061,108 @@ impl Session {
         moved
     }
 
+    /// Edit ▸ Clear to Start (⌘K): ekranı ve geçmişi siler, **o anki bloğu**
+    /// bırakır — Terminal.app'in Clear to Start'ı (034 Karar 1, Seçenek A).
+    ///
+    /// Korunan ilk satırın üstü ızgaranın tepesinden dışarı kaydırılıyor,
+    /// geçmiş siliniyor; yukarı kaydıracak hiçbir şey kalmıyor. Korunan
+    /// bloğun ne olduğu [`protected_top`]'ta: imlecin satırının blok
+    /// kimliğini taşıyan bitişik satırlar (sarılan ve çok satırlı giriş,
+    /// `PREBUFFER`, çok satırlı `PS1`), kimlik yoksa (komut koşuyor,
+    /// entegrasyonsuz kabuk) imlecin satırı.
+    ///
+    /// **Kabuğa ve koşan programa tek bayt gitmiyor**: temizlik terminalin
+    /// defterinde oluyor, `send_input`'a hiç uğramıyor — yani komut koşarken
+    /// de çalışıyor ve `cat`'in girdisine `^L` yazmıyor.
+    ///
+    /// Alternatif ekranda hiçbir şey yapmıyor ve `false` dönüyor (Karar 2):
+    /// birincil ızgaranın geçmişi `Term::inactive_grid`'de ve alan özel.
+    pub fn clear_to_start(&self) -> bool {
+        self.clear(ClearKind::ToStart)
+    }
+
+    /// Edit ▸ Clear Scrollback (⌥⌘K): yalnız geçmişi siler; ızgara bayt bayt
+    /// aynı kalıyor. [`Session::clear_to_start`]'ın gövdesi, dışarı kaydırılan
+    /// satır sıfır — alternatif ekran kuralı da aynı.
+    pub fn clear_scrollback(&self) -> bool {
+        self.clear(ClearKind::Scrollback)
+    }
+
+    /// İki temizliğin tek gövdesi, **tek** `Term` kilidi turunda.
+    ///
+    /// Sıra zorunlu:
+    ///
+    /// - **Dibe dönüş kaydırmadan önce** — `send_input`'un ikilisinin aynısı
+    ///   (`reset_scroll` + dibe `scroll_user`, gerekçesi [`Session::write_owned`]'ın
+    ///   doc'unda): `Grid::scroll_up` kaydırılmış pencerenin ofsetini
+    ///   büyütüyor, yani önce dönülmezse pencere geçmişe itilirdi.
+    /// - **Kaydırma bölgeyi (DECSTBM) bilerek atlıyor**: `Grid::scroll_up`
+    ///   ekranın tamamında. Temizlik bölgeye değil ekrana ait — bölgeyle
+    ///   kaydırsaydık altta sabit satırı olan bir programda korunan blok
+    ///   bölgenin dışında kalır ve hiçbir şey gitmezdi.
+    /// - `Grid::scroll_up` imleci ve seçimi **taşımıyor** (alacritty'nin
+    ///   `Term::scroll_up_relative`'i taşıyor ama bölgeye bağlı): imleç ve
+    ///   DECSC'nin kaydı aynı miktarda elle düşüyor, seçim koşulsuz kalkıyor
+    ///   — `ClearMode::Saved` yalnız geçmişe değen seçimi süzüyor ve kayan
+    ///   satırlardaki seçim yanlış metni vurgulardı.
+    /// - Geçmiş **kaydırmadan sonra** siliniyor: dışarı kaydırılan satırlar
+    ///   önce geçmişe düşüyor.
+    /// - `2J` nesli temizlik **uygulandıktan sonra** ([`Session::note_screen_clear`]):
+    ///   kare yolu nesli gördüğünde ızgara zaten temiz.
+    ///
+    /// Kilitten sonra dock seçimi (yaprak kilit `Term`'ün dışında,
+    /// `send_input` emsali), arama haberi ve kare.
+    fn clear(&self, kind: ClearKind) -> bool {
+        // Yaprak kilit `Term`'den **önce** (modül başlığı): `shell` tutulurken
+        // `Term` alınmaz.
+        let input_block = lock(&self.shell).input_block();
+        {
+            let mut term = self.term.lock();
+            if term.mode().contains(TermMode::ALT_SCREEN) {
+                return false;
+            }
+            self.reset_scroll();
+            self.scroll_user(&mut term, i32::MIN, self.band_shown());
+            if kind == ClearKind::ToStart {
+                let top = protected_top(&term, input_block);
+                if top > 0 {
+                    let rows = term.screen_lines();
+                    let grid = term.grid_mut();
+                    grid.scroll_up(&(Line(0)..Line(rows as i32)), top);
+                    let by = i32::try_from(top).unwrap_or(i32::MAX);
+                    grid.cursor.point.line = Line((grid.cursor.point.line.0 - by).max(0));
+                    grid.saved_cursor.point.line =
+                        Line((grid.saved_cursor.point.line.0 - by).max(0));
+                }
+            }
+            term.clear_screen(ClearMode::Saved);
+            clear_selection_locked(&mut term);
+            self.note_screen_clear();
+            self.adapter.0.wipes.fetch_add(1, Ordering::AcqRel);
+        }
+        self.clear_dock_selection();
+        self.adapter.search_changed();
+        self.request_frame();
+        true
+    }
+
+    /// `CSI 2 J` neslinin **ikinci yazarı** ([`Session::screen_clears`]):
+    /// terminal tarafı temizlik (⌘K/⌥⌘K) bayrağın bütün tüketicilerine gerçek
+    /// bir `2J` gibi görünsün diye — doldurma kapısı, kayma sayısı, damga ve
+    /// [`Session::clear_boundary`].
+    ///
+    /// **`Term` kilidi tutulurken ve temizlik uygulandıktan sonra** çağrılır.
+    /// Okuyucunun kuralının tersi yönde ("uygulamadan önce say") ama aynı
+    /// sonuç: kare yolu sayacı `Term` kilidinin altında okuyor ve nesli
+    /// gördüğü turda ızgara zaten temiz, yani bayrağı kuran kare temiz ekranı
+    /// görüyor. Geçmiş boş olduğu için bayrak olmadan da doldurma bugün
+    /// tesadüfen sıfır verirdi; nesil temizliği bayrağın **bugünkü ve
+    /// gelecekteki** tüketicilerine tek kelimeyle söylüyor (`discussion.md`
+    /// → Muhakeme, reddedilenler).
+    fn note_screen_clear(&self) {
+        self.screen_clears.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Ekranda duran doldurma bandının boyu, kaydırmanın anladığı tipte.
     ///
     /// [`Session::fill_shown`]'ın tek okuyucusu; kaydırma yollarının hepsi
@@ -5098,6 +5281,7 @@ impl Session {
             offset: term.grid().display_offset(),
             user: self.user_scroll.load(Ordering::Relaxed),
             epoch: self.adapter.0.ledger.load(Ordering::Acquire),
+            wipes: self.adapter.0.wipes.load(Ordering::Acquire),
             columns: term.columns(),
             lines: term.screen_lines(),
             alt: term.mode().contains(TermMode::ALT_SCREEN),
@@ -5186,6 +5370,10 @@ impl Session {
     /// dizinine "defter değişti" diyor (033) — seçim ve kaydırma defteri
     /// değiştirmiyor. `Term` kilidi **bırakıldıktan sonra**
     /// çağrılır: uyandırma çift muteksli `FairMutex` tutulurken koşmamalı.
+    ///
+    /// **İstisnası ekranı temizlemek** ([`Session::clear_to_start`]): defteri
+    /// gerçekten değiştiriyor, ama haberini yine bu yoldan değil adıyla
+    /// veriyor — temizliğin nesli ve arama haberi, sonra bu kare isteği.
     ///
     /// `resize` bunu **kullanmıyor**: onun uyandırması `bt-shell`'in işi
     /// (link'i kendisi açıyor). Buradaki çağıranların (seçim ve kaydırma)
@@ -16300,6 +16488,7 @@ mod tests {
             offset,
             user,
             epoch,
+            wipes: 0,
             columns: 40,
             lines: 10,
             alt: false,
@@ -16343,6 +16532,14 @@ mod tests {
             ledger_shift(mark(10, 0, 0, 1), mark(0, 0, 0, 2), 100),
             Shift::Lost
         );
+        // Terminal tarafı temizlik (034): geçmiş 0 → 0 kalsa da, nesil
+        // oynamasa da kayıp — `history` farkı onu `Still` sanardı.
+        let mut wiped = mark(0, 0, 0, 1);
+        wiped.wipes = 1;
+        assert_eq!(ledger_shift(mark(0, 0, 0, 1), wiped, 100), Shift::Lost);
+        let mut saturated = mark(20, 4, 0, 1);
+        saturated.wipes = 1;
+        assert_eq!(ledger_shift(mark(20, 4, 0, 1), saturated, 20), Shift::Lost);
     }
 
     #[test]
@@ -16384,6 +16581,389 @@ mod tests {
         assert!(driver.join().unwrap() > 0, "hiç sayılmadı");
         assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         assert!(session.search_step().is_some(), "dizin yarışta kayboldu");
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
+        session.shutdown();
+    }
+
+    // --- Ekranı temizle (034 phase-1) ---
+
+    /// Kabuğun gerçekten bastığı çıpalı prompt: bağlantı `preexec`'e kadar
+    /// **açık** ([`anchored_prompt`] onu `$ `'dan sonra kapatıyor), yani
+    /// arkasından yazılan giriş de kimliği taşıyor — sarılan ve çok satırlı
+    /// girişin sınamalarının öncülü.
+    fn open_prompt(id: u32) -> String {
+        format!(
+            "\\033]133;A;bt_block={id}\\007\
+             \\033]8;;bateri://block/{id}\\007$ \\033]133;B\\007"
+        )
+    }
+
+    /// Ekranın bütün satırları, sondaki boşluklar kırpılmış — ⌥⌘K'nin "bayt
+    /// bayt aynı"sının ve ⌘K'nin "yalnız korunan satırlar"ının okuması.
+    fn screen_lines(session: &Session) -> Vec<String> {
+        (0..10).map(|line| line_text(session, line)).collect()
+    }
+
+    /// İmlecin ekran konumu, `Term`'den doğrudan.
+    fn cursor_point(session: &Session) -> (i32, usize) {
+        let term = session.term.lock();
+        let point = term.grid().cursor.point;
+        (point.line.0, point.column.0)
+    }
+
+    fn history_size(session: &Session) -> usize {
+        session.term.lock().history_size()
+    }
+
+    #[test]
+    fn clear_to_start_leaves_only_the_prompt_row_at_the_top() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!("stty -echo; seq 1 30; printf '{}'; sleep 5", open_prompt(1)),
+            Arc::clone(&wake),
+        );
+        wait_until("prompt gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 9) == "$"
+        });
+        // Kayma sayısının öncülü: önceki karenin tepe satırı ölçülmüş olsun.
+        cursor_now(&session);
+        assert!(history_size(&session) > 0, "sahne geçmişsiz kuruldu");
+        let (_, col) = cursor_point(&session);
+
+        assert!(session.clear_to_start());
+        assert_eq!(history_size(&session), 0, "geçmiş silinmedi");
+        assert_eq!(cursor_point(&session), (0, col), "imleç prompt'la gitmedi");
+        let mut expected = vec![String::new(); 10];
+        expected[0] = "$".into();
+        assert_eq!(screen_lines(&session), expected);
+
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.fill, 0, "{cursor:?}");
+        assert_eq!(cursor.scrolled, 0, "{cursor:?}");
+        assert!(screen_cleared(&session), "temizlik `2J` neslini artırmadı");
+        let cursor = cursor_now(&session);
+        assert_eq!(cursor.fill, 0, "damgalı karede bant açıldı: {cursor:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn clear_to_start_keeps_every_row_of_a_wrapped_input() {
+        // Bekçi: bağlantı açık olduğu için girişin iki satırı da kimliği
+        // taşıyor; imlece en yakın çıpalı satır (`anchor_row_at_or_above`)
+        // girişin **alt** satırı olurdu ve üstü giderdi.
+        let wake = Arc::new(TestWake::default());
+        let typed = "a".repeat(60);
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; seq 1 30; printf '{}{typed}'; sleep 5",
+                open_prompt(1)
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until("giriş sarılmadı", Duration::from_secs(5), || {
+            line_text(&session, 9) == "a".repeat(22)
+        });
+
+        assert!(session.clear_to_start());
+        assert_eq!(history_size(&session), 0);
+        let lines = screen_lines(&session);
+        assert_eq!(lines[0], format!("$ {}", "a".repeat(38)), "{lines:?}");
+        assert_eq!(lines[1], "a".repeat(22), "{lines:?}");
+        assert!(lines[2..].iter().all(String::is_empty), "{lines:?}");
+        assert_eq!(cursor_point(&session), (1, 22));
+        session.shutdown();
+    }
+
+    #[test]
+    fn clear_to_start_keeps_the_prompt_above_an_empty_input_row() {
+        // Çok satırlı girişin henüz yazılmamış satırı (`Esc-Enter`): imlecin
+        // satırı çıpasız ama kabuk girdi safhasında, yani blok o kimliğin
+        // çıpasından yürünüyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; seq 1 30; printf '{}echo\\r\\n'; sleep 5",
+                open_prompt(1)
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until("giriş gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 8) == "$ echo" && cursor_point(&session) == (9, 0)
+        });
+
+        assert!(session.clear_to_start());
+        let lines = screen_lines(&session);
+        assert_eq!(lines[0], "$ echo", "{lines:?}");
+        assert!(lines[1..].iter().all(String::is_empty), "{lines:?}");
+        assert_eq!(cursor_point(&session), (1, 0));
+        session.shutdown();
+    }
+
+    #[test]
+    fn clear_to_start_keeps_a_multiline_input_across_an_empty_row() {
+        // `/code-review` bulgusu (034 phase-1): `echo 1`, iki kez
+        // `Esc-Enter`, `echo 2`. Ortadaki boş satır hücre yazmıyor, yani
+        // bağlantı taşımıyor; bitişik satırlarda yürüyen bir kural orada
+        // durur ve prompt ile `echo 1`'i silerdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; seq 1 30; printf '{}echo 1\\r\\n\\033]8;;\\007\\r\\n\
+                 \\033]8;;bateri://block/1\\007echo 2'; sleep 5",
+                open_prompt(1)
+            ),
+            Arc::clone(&wake),
+        );
+        wait_until("giriş gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 9) == "echo 2"
+        });
+        assert_eq!(line_text(&session, 7), "$ echo 1");
+        assert_eq!(line_text(&session, 8), "");
+
+        assert!(session.clear_to_start());
+        let lines = screen_lines(&session);
+        assert_eq!(lines[0], "$ echo 1", "{lines:?}");
+        assert_eq!(lines[1], "", "{lines:?}");
+        assert_eq!(lines[2], "echo 2", "{lines:?}");
+        assert!(lines[3..].iter().all(String::is_empty), "{lines:?}");
+        assert_eq!(cursor_point(&session), (2, 6));
+        session.shutdown();
+    }
+
+    #[test]
+    fn clear_to_start_under_a_running_command_keeps_the_cursor_row_and_sends_nothing() {
+        // Koşan komut: imlecin satırı çıpasız, korunan yalnız o. `cat -v`
+        // kabuğa ya da programa giden her baytı görünür kılıyor — `^L`
+        // gitseydi satır `^Lz` olurdu.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("stty -echo; seq 1 30; exec cat -v", Arc::clone(&wake));
+        wait_until("çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 8) == "30"
+        });
+
+        assert!(session.clear_to_start());
+        assert_eq!(history_size(&session), 0);
+        assert_eq!(screen_lines(&session), vec![String::new(); 10]);
+        assert_eq!(cursor_point(&session), (0, 0));
+
+        session.write(b"z\n");
+        wait_until("program yanıt vermedi", Duration::from_secs(5), || {
+            !line_text(&session, 0).is_empty()
+        });
+        assert_eq!(
+            line_text(&session, 0),
+            "z",
+            "temizlik programa bayt yolladı"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn clear_scrollback_leaves_the_screen_untouched() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("stty -echo; seq 1 30; sleep 5", Arc::clone(&wake));
+        wait_seq_tail(&session, &wake);
+        let before = (screen_lines(&session), cursor_point(&session));
+        assert!(history_size(&session) > 0, "sahne geçmişsiz kuruldu");
+
+        assert!(session.clear_scrollback());
+        assert_eq!(history_size(&session), 0, "geçmiş silinmedi");
+        assert_eq!((screen_lines(&session), cursor_point(&session)), before);
+        session.shutdown();
+    }
+
+    #[test]
+    fn clearing_does_nothing_on_the_alternate_screen() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; seq 1 30; read _; printf '\\033[?1049halt'; read _; \
+             printf '\\033[?1049l'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+        let alt = || session.term.lock().mode().contains(TermMode::ALT_SCREEN);
+        session.write(b"\n");
+        wait_until(
+            "alternatif ekrana geçilmedi",
+            Duration::from_secs(5),
+            || alt() && screen_lines(&session).iter().any(|line| line == "alt"),
+        );
+        let before = (screen_lines(&session), cursor_point(&session));
+
+        assert!(!session.clear_to_start(), "alternatif ekranda temizlendi");
+        assert!(!session.clear_scrollback(), "alternatif ekranda temizlendi");
+        assert_eq!((screen_lines(&session), cursor_point(&session)), before);
+
+        // Birincil ekranın geçmişi de yerinde.
+        session.write(b"\n");
+        wait_until(
+            "birincil ekrana dönülmedi",
+            Duration::from_secs(5),
+            || !alt(),
+        );
+        assert_eq!(history_size(&session), 21);
+        assert_eq!(line_text(&session, 8), "30");
+        session.shutdown();
+    }
+
+    #[test]
+    fn after_a_clear_the_fill_brings_back_only_the_new_rows() {
+        // `the_fill_stops_at_the_rows_that_arrived_after_the_clear`'ın
+        // reçetesi, `CSI 2 J` yerine temizlikle: `seq 101 110` tek satırı
+        // geçmişe itiyor ve doldurma yalnız onu veriyor — silinen ekran geri
+        // gelmiyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            "stty -echo; seq 1 30; read _; seq 101 110; read _; \
+             printf '\\033[6A\\033[J'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+
+        assert!(session.clear_to_start());
+        // Bayrağı kuran kare ve damgayı alan kare, çıktı gelmeden: damga bir
+        // kare geç alınıyor ([`Session::screen_clear_history`]).
+        cursor_now(&session);
+        cursor_now(&session);
+        assert!(screen_cleared(&session), "temizlik bayrağı kurmadı");
+
+        session.write(b"\n");
+        wait_until("çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 8) == "110"
+        });
+        assert_eq!(history_size(&session), 1);
+        session.write(b"\n");
+        wait_until("içerik kısalmadı", Duration::from_secs(5), || {
+            cursor_now(&session).content_rows <= 4
+        });
+
+        let (cursor, cells) = fill_now(&session);
+        assert!(!screen_cleared(&session), "defter büyüdü ama bayrak durdu");
+        assert!(
+            cursor.rows - cursor.content_rows > cursor.fill,
+            "sahne kırpmasız kuruldu: {cursor:?}"
+        );
+        let text: Vec<String> = (0..cursor.fill).map(|r| row_text(&cells, r)).collect();
+        assert_eq!(text, ["101"], "{cells:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn clearing_drops_both_selections_and_returns_the_window_to_the_bottom() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "seq 1 30; printf 'hello world\\r\\n{}echo foo bar{}'; sleep 5",
+                anchored_prompt(1),
+                mirror("ZWNobyBmb28gYmFy", 12),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        draw_dock(&session);
+        assert!(matches!(scroll(&session, 3), Wheel::Scrolled(n) if n > 0));
+        session
+            .scroll_frac
+            .store(0.5f64.to_bits(), Ordering::Relaxed);
+        {
+            let mut term = session.term.lock();
+            let mut selection = Selection::new(
+                SelectionType::Simple,
+                Point::new(Line(0), Column(0)),
+                Side::Left,
+            );
+            selection.update(Point::new(Line(0), Column(3)), Side::Right);
+            term.selection = Some(selection);
+        }
+        select_dock(&session, 0, 4);
+        assert!(lock(&session.shell).dock_selection.is_some());
+
+        assert!(session.clear_to_start());
+        assert!(
+            session.term.lock().selection.is_none(),
+            "ızgara seçimi kaldı"
+        );
+        assert!(
+            lock(&session.shell).dock_selection.is_none(),
+            "dock seçimi kaldı"
+        );
+        assert_eq!(display_offset(&session), 0, "pencere dibe dönmedi");
+        assert_eq!(
+            session.scroll_frac.load(Ordering::Relaxed),
+            0,
+            "kesir kaldı"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn clearing_loses_the_current_match_even_with_an_empty_history() {
+        // Geçmiş 0 → 0: `history` farkı sıfır ve temizlik olmasa kayma
+        // `Still` çıkar — geçerli eşleşme artık boş olan satırı gösterirdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf 'foo\\nbar\\n'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until("çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 1) == "bar"
+        });
+        assert_eq!(history_size(&session), 0, "sahne geçmişle kuruldu");
+        assert_eq!(session.set_search(&plain("foo")), SearchStatus::Ready);
+        assert_eq!(current_at(&session), Some((0, 0)));
+        count_all(&session);
+        let searches = || wake.state.lock().unwrap().searches;
+        let base = searches();
+
+        assert!(session.clear_to_start());
+        assert_eq!(history_size(&session), 0);
+        assert_eq!(searches(), base + 1, "sayım yeniden başlatılmadı");
+        search_now(&session);
+        assert_eq!(current_at(&session), None, "kaymış satır geçerli kaldı");
+        let report = count_all(&session);
+        assert_eq!(report.total, 0, "{report:?}");
+        assert_eq!(current_at(&session), None);
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_clear_to_start_and_frame() {
+        // 034 `screen_clears`'a **ikinci yazar** getirdi: ana thread ⌘K'de
+        // `Term` kilidi altında artırıyor, okuyucu thread `CSI 2 J`'yi
+        // kilitsiz sayıyor, kare yolu ikisini kilit altında tüketiyor.
+        // Çıktı akarken üç yol yarışıyor; kilit sırası bozulursa sınama
+        // asılı kalır; birincil ekranda her temizlik `true` dönmek zorunda.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_docked_session(
+            "stty -echo; while :; do seq 1 12; printf '\\033[2J\\033[H'; sleep 0.01; done",
+            Arc::clone(&wake),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let clearer = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut clears = 0u64;
+                while Instant::now() < deadline {
+                    let cleared = if clears % 3 == 0 {
+                        session.clear_scrollback()
+                    } else {
+                        session.clear_to_start()
+                    };
+                    assert!(cleared, "birincil ekranda temizlenmedi");
+                    clears += 1;
+                    std::thread::sleep(Duration::from_millis(3));
+                }
+                clears
+            })
+        };
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            cursor_now(&session);
+            frames += 1;
+        }
+        assert!(clearer.join().unwrap() > 0, "hiç temizlenmedi");
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }
