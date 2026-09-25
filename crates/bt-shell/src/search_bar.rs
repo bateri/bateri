@@ -398,12 +398,14 @@ pub(crate) fn selection_query(selection: &str, regex: bool) -> Option<String> {
 
 /// Yüzeyin iki rengi, sRGB: zemin ve (kenar, alfa).
 ///
-/// Zemin temanın zemininin ön plana doğru küçük bir karışımı — koyu temada
-/// bir adım açık, açık temada bir adım koyu; ayrı bir tema rolü değil
-/// (`Theme`'in "çizilmeyen rol eklenmiyor" kuralı). Oranlar tasarım sabiti,
-/// gerçek pencerede iki gömülü temada gözle indi.
+/// Zemin temanın zemininin ön plana doğru bir karışımı — koyu temada açık,
+/// açık temada koyu; ayrı bir tema rolü değil (`Theme`'in "çizilmeyen rol
+/// eklenmiyor" kuralı). Oranlar tasarım sabiti ve **terminalden ayrı bir
+/// yüzey** okunacak kadar: ilk değerler (0.11 / 0.045) saf siyah zeminde
+/// panelin zeminini görünmez kılıyordu ve kontroller terminal metni gibi
+/// okunuyordu (kullanıcı gördü). Alt sınırı sınama tutuyor.
 fn surface_colors(background: u32, foreground: u32, dark: bool) -> (u32, (u32, f64)) {
-    let (lift, edge) = if dark { (0.11, 0.16) } else { (0.045, 0.14) };
+    let (lift, edge) = if dark { (0.20, 0.30) } else { (0.08, 0.24) };
     (mix(background, foreground, lift), (foreground, edge))
 }
 
@@ -430,9 +432,10 @@ fn width(view: &NSView, points: f64) {
         .setActive(true);
 }
 
-/// Açık/kapalı iki konumlu küçük bir anahtar (`Aa`, `.*`): kapalıyken yalnız
-/// metin, açıkken ve üstüne gelince çerçeveli — Safari'nin ve Xcode'un bul
-/// çubuğundaki seçenek düğmeleri gibi.
+/// Açık/kapalı iki konumlu küçük bir anahtar (`Aa`, `.*`): çerçevesi **hep**
+/// görünür, açıkken dolu. Yalnız fare üstündeyken çerçevelenen hâli bir
+/// düğme değil terminal metni gibi okunuyordu (kullanıcı gördü) — anahtarın
+/// iki konumu olduğu ancak görünür bir yüzeyle anlaşılıyor.
 fn toggle(mtm: MainThreadMarker, title: &str, tip: &str, target: &AnyObject) -> Retained<NSButton> {
     // SAFETY: hedef zayıf ve pencere paneli yaşattığı sürece yaşıyor; seçici
     // pencerede tek `Option<&AnyObject>` argümanlı bir eylem.
@@ -447,7 +450,7 @@ fn toggle(mtm: MainThreadMarker, title: &str, tip: &str, target: &AnyObject) -> 
     button.setButtonType(NSButtonType::PushOnPushOff);
     width(&button, BUTTON_WIDTH);
     button.setBezelStyle(NSBezelStyle::AccessoryBar);
-    button.setShowsBorderOnlyWhileMouseInside(true);
+    button.setShowsBorderOnlyWhileMouseInside(false);
     button.setControlSize(NSControlSize::Small);
     button.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(
         NSFont::smallSystemFontSize(),
@@ -488,7 +491,7 @@ fn symbol(
 #[cfg(test)]
 mod tests {
     use super::{count_label, mix, selection_query, surface_colors};
-    use bt_core::{SearchReport, SearchStatus};
+    use bt_core::{SearchReport, SearchStatus, Theme};
 
     #[test]
     fn the_label_says_what_the_query_found() {
@@ -543,8 +546,47 @@ mod tests {
         assert_eq!(mix(0x000000, 0xffffff, 0.0), 0x000000);
         assert_eq!(mix(0x000000, 0xffffff, 1.0), 0xffffff);
         let (dark, _) = surface_colors(0x000000, 0xe6e6e6, true);
-        assert!(dark > 0x000000 && dark < 0x303030, "{dark:06x}");
+        assert!(dark > 0x000000 && dark < 0x404040, "{dark:06x}");
         let (light, _) = surface_colors(0xffffff, 0x1a1a1a, false);
         assert!(light < 0xffffff && light > 0xe0e0e0, "{light:06x}");
+    }
+
+    #[test]
+    fn the_surface_stands_apart_from_the_terminal() {
+        // Panel terminalin üstünde yüzüyor; zemini terminalinkinden
+        // ayrılmazsa kontroller terminal metni gibi okunuyor (kullanıcı
+        // gördü: 0.11'lik adım saf siyahta ≈ #191919'du). Alt sınırlar
+        // tasarım sabiti, WCAG oranıyla: koyu temada belirgin bir adım,
+        // açık temada Safari'nin bul çubuğu kadar.
+        for (theme, dark, floor) in [
+            (Theme::BATERI, true, 1.4),
+            (Theme::BATERI_LIGHT, false, 1.12),
+        ] {
+            let (fill, _) = surface_colors(theme.background, theme.foreground, dark);
+            let ratio = contrast(fill, theme.background);
+            assert!(
+                ratio >= floor,
+                "{fill:06x} / {:06x}: {ratio:.2}",
+                theme.background
+            );
+        }
+    }
+
+    /// WCAG kontrast oranı, iki `0xRRGGBB` arasında (`bt_core::color`'ın
+    /// sınamasındakiyle aynı ölçü).
+    fn contrast(a: u32, b: u32) -> f64 {
+        let luminance = |hex: u32| {
+            let channel = |shift: u32| {
+                let c = f64::from((hex >> shift) & 0xff) / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+        };
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
     }
 }
