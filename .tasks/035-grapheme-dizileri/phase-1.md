@@ -50,8 +50,34 @@ _Requirements: R1, R1.1_
 
 ## Checklist
 
-- [ ] Feature'lar eklendi, `Cargo.lock` değişmedi
-- [ ] `Sprite::Cluster` + interner + `slot` kolu
-- [ ] `CTLine` şekillendirme + kapı + taban karaktere düşüş
-- [ ] Test: beş dizi çift yuva, önbellek, şekillenmeyen dizgi
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] Feature'lar eklendi, `Cargo.lock` değişmedi
+- [x] `Sprite::Cluster` + interner + `slot` kolu
+- [x] `CTLine` şekillendirme + kapı + taban karaktere düşüş
+- [x] Test: beş dizi çift yuva, önbellek, şekillenmeyen dizgi
+- [x] Doğrulama geçti (`make hepsi`)
+
+## Uygulama Notları
+
+- **Feature'lar**: plandakilere ek olarak `objc2-core-foundation`'da
+  `CFArray` (`CTLineGetGlyphRuns`'ın dönüşü adıyla kullanılıyor); `CTLine`
+  onu zaten açıyor, `Cargo.lock` değişmedi.
+- **Ölçülen font run'ın kendisi**: kapı ve çizim `CTFontCreateForString`
+  adayını değil run'ın `kCTFontAttributeName`'ini kullanıyor (gerekçe
+  `font::shape_cluster`'ın doc'unda). Kapı yedekle ortak (`font::accept`),
+  çizim ortak (`Atlas::draw_accepted`, `raster::draw_glyph` /
+  `draw_color_glyph` glyph numarasıyla).
+- **Bulunan kusur — renk düzleminin 0. yuvası `TOFU` değil.** Taban karaktere
+  düşüşün takma adı (`Atlas::cluster_as_base`) reddi `slot == TOFU` ile
+  tanıyordu; renk düzleminin ilk emojisi de 0. yuvada, yani ilk renkli taban
+  karakterin takma adı tofu'ya çivileniyordu. Ölçüt artık düzlemle birlikte
+  (`plane == Mask`).
+- **Sınamalar Retina'da** (`CLUSTER_SCALE = 2.0`): 13pt@1x'te tek kod
+  noktalı `👍` bile iki hücrelik kapıdan dönüyor (bayrağın glyph'inde
+  ölçüldü: mürekkep 16.25 pt, iki hücre 15.65 pt; `👍` aynı kapıdan tofu'ya
+  düşüyor) — 023'ün bugünkü hâli, bu setin konusu değil. @1x'te
+  taban karaktere düşüş sınaması tofu'ya karşı boşuna yeşil kalıyordu.
+- **Kararsız sınama (bu phase'in dışında)**: `make hepsi`'nin ilk koşusunda
+  `bt-shell` `clipboard::tests::copy_writes_selection_text_to_clipboard`
+  SIGSEGV verdi; `bt-shell` iki kez ayrı ve `make hepsi` bir kez daha yeşil
+  koştu. Değişiklik `bt-shell`'e dokunmuyor — pano sınamasının kendi
+  kararsızlığı, bu phase'in değil.

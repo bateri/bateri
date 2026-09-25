@@ -8,12 +8,13 @@
 use std::ptr::{self, NonNull};
 
 use objc2_core_foundation::{
-    CFDictionary, CFIndex, CFNumber, CFRange, CFRetained, CFString, CGFloat, CGRect, CGSize,
+    CFAttributedString, CFDictionary, CFIndex, CFNumber, CFRange, CFRetained, CFString, CFType,
+    CGFloat, CGRect, CGSize,
 };
 use objc2_core_graphics::CGGlyph;
 use objc2_core_text::{
-    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, kCTFontFamilyNameAttribute,
-    kCTFontSymbolicTrait, kCTFontTraitsAttribute,
+    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTLine, CTRun,
+    kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontSymbolicTrait, kCTFontTraitsAttribute,
 };
 
 /// Tercih sırası. Bulunamayan ad **sessizce** atlanır: SF Mono Xcode ile
@@ -708,6 +709,22 @@ pub(crate) fn fallback_font(
     // SAFETY: `base` ve `text` bu kapsamda canlı; `range` string'in tamamı.
     let candidate = unsafe { base.for_string(&text, range) };
     let glyph = glyph_index(&candidate, ch)?;
+    accept(candidate, glyph, cell_advance, cols)
+}
+
+/// Mürekkep kapısı: adayın glyph'i önce tek hücreye, sonra (iki sütun ilan
+/// edilmişse) iki hücreye sığıyor mu.
+///
+/// Tek glyph'lik yedek ([`fallback_font`]) ile grapheme dizisinin
+/// ([`shape_cluster`]) **ortak** kapısı — "kutu ya da tam glyph" sözleşmesi
+/// ikisinde de aynı sıradan geçiyor, yani dizinin glyph'i tek kod noktalı
+/// emojiden farklı bir ölçütle kabul edilemez.
+fn accept(
+    candidate: CFRetained<CTFont>,
+    glyph: CGGlyph,
+    cell_advance: CGFloat,
+    cols: u8,
+) -> Option<Accepted> {
     // **Sıra zorunlu: önce tek hücre.** Tek hücreye sığan bir aday bugün de
     // sığıyor ve tek yuvadan çiziliyor; doğrudan iki hücrelik kutuyla
     // sorulsaydı `centre_shift` onu iki hücrenin ortasına kaydırır ve
@@ -719,6 +736,7 @@ pub(crate) fn fallback_font(
     if ink_fits_box(&candidate, glyph, cell_advance) {
         return Some(Accepted {
             font: candidate,
+            glyph,
             cols: 1,
         });
     }
@@ -729,10 +747,94 @@ pub(crate) fn fallback_font(
     if cols >= 2 && ink_fits_box(&candidate, glyph, cell_advance * CGFloat::from(cols)) {
         return Some(Accepted {
             font: candidate,
+            glyph,
             cols,
         });
     }
     None
+}
+
+/// Grapheme dizisini (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) **tek glyph**'e şekillendirir
+/// ve [`fallback_font`]'un kapısından geçirir; `None` "tek glyph değil ya da
+/// kapıdan döndü" demek ve çağıran taban karaktere düşüyor (035 R1.1).
+///
+/// Şekillendirme `CTLine`'dan, çünkü dizinin glyph'i hiçbir kod noktasının
+/// glyph'i değil: bayrağın iki RI'si, ZWJ ailesi ve ten rengi fontun
+/// ligatür/`morx` tablosunda **tek** glyph'e birleşiyor ve bunu soran tek
+/// API satır düzeni. [`glyph_index`]'in sarıldığı
+/// `CTFontGetGlyphsForCharacters` kod noktası başına bakıyor ve `🇹🇷`'yi iki
+/// ayrı harf olarak verirdi.
+///
+/// Font **iki kez** soruluyor ve ikisi ayrı sorular: aday dizginin tamamı
+/// için cascade'den (`CTFontCreateForString`, [`fallback_font`]'un 1. adımı)
+/// ve satıra o veriliyor; ölçülen ve çizilen font ise **run'ın kendi**
+/// fontu. Aday dizinin bir parçasını çizemezse `CTLine` şekillendirme
+/// sırasında yeniden ikame edebiliyor ve ilerleme, mürekkep ve düzlem
+/// glyph'i gerçekten üreten fontun ölçüsü olmak zorunda — başka bir fontun
+/// glyph numarasını adayla çizmek bambaşka bir harf çizerdi.
+///
+/// **Log yok**, [`fallback_font`] ile aynı gerekçe: çizim yolunda.
+pub(crate) fn shape_cluster(
+    base: &CTFont,
+    text: &str,
+    cell_advance: CGFloat,
+    cols: u8,
+) -> Option<Accepted> {
+    let string = CFString::from_str(text);
+    let range = CFRange {
+        location: 0,
+        // UTF-16 birimi, bayt değil ([`fallback_font`]'un aynı tuzağı): ZWJ
+        // ailesi beş kod noktası ama sekiz birim.
+        length: text.encode_utf16().count() as CFIndex,
+    };
+    // SAFETY: `base` ve `string` bu kapsamda canlı; `range` dizginin tamamı.
+    let candidate = unsafe { base.for_string(&string, range) };
+    // SAFETY: anahtar CoreText'in dışa açtığı sabit, program boyunca canlı.
+    let font_key = unsafe { kCTFontAttributeName };
+    let attributes = CFDictionary::from_slices(&[font_key], &[&*candidate]);
+    // SAFETY: ayırıcı varsayılan (`None`), dizgi ve sözlük canlı; sözlük
+    // CoreText'in beklediği biçimde — `kCTFontAttributeName` → `CTFont`.
+    let attributed =
+        unsafe { CFAttributedString::new(None, Some(&string), Some(attributes.as_opaque())) }?;
+    // SAFETY: `attributed` canlı; satır onu kopyalıyor.
+    let line = unsafe { CTLine::with_attributed_string(&attributed) };
+    // SAFETY: `line` canlı; saf okuma.
+    if unsafe { line.glyph_count() } != 1 {
+        return None;
+    }
+    // SAFETY: `line` canlı; belgeye göre dizinin öğeleri `CTRun`.
+    let runs = unsafe { line.glyph_runs() };
+    // SAFETY: işlevin belgesi öğe tipini `CTRun` diye veriyor.
+    let runs = unsafe { runs.cast_unchecked::<CTRun>() };
+    // Tek glyph tek run demek; ikinci bir run'ın glyph'i olamaz.
+    let run = runs.get(0)?;
+    let mut glyph: CGGlyph = 0;
+    // SAFETY: run tek glyph taşıyor (satırın sayısı 1), aralık `0..1` ve
+    // tampon tek eleman.
+    unsafe {
+        run.glyphs(
+            CFRange {
+                location: 0,
+                length: 1,
+            },
+            NonNull::from(&mut glyph),
+        )
+    };
+    // `.notdef` bir glyph değil: fontun "bunu çizemem" cevabı.
+    if glyph == 0 {
+        return None;
+    }
+    // SAFETY: `run` canlı; öznitelik sözlüğü satırınkinin run'a düşen hâli,
+    // anahtarları `CFString`.
+    let attributes = unsafe { run.attributes() };
+    // SAFETY: CoreText'in öznitelik sözlüğünün anahtarları `CFString`;
+    // değerin tipi aşağıda `downcast` ile sınanıyor.
+    let attributes = unsafe { attributes.cast_unchecked::<CFString, CFType>() };
+    let font = attributes
+        .get(font_key)
+        .and_then(|font| font.downcast::<CTFont>().ok())
+        .unwrap_or(candidate);
+    accept(font, glyph, cell_advance, cols)
 }
 
 /// Fontun glyph'leri **renkli** mi.
@@ -757,6 +859,9 @@ pub(crate) fn has_color_glyphs(font: &CTFont) -> bool {
 /// dönüyor ve tek yuvadan çiziliyor.
 pub(crate) struct Accepted {
     pub(crate) font: CFRetained<CTFont>,
+    /// Kapının ölçtüğü glyph — çizilecek olan da o. Tek kod noktasında
+    /// [`glyph_index`]'in cevabı, dizide `CTLine`'ın şekillendirdiği.
+    pub(crate) glyph: CGGlyph,
     pub(crate) cols: u8,
 }
 
