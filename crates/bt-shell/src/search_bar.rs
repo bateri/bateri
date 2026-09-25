@@ -379,10 +379,14 @@ pub(crate) fn count_label(status: SearchStatus, report: SearchReport) -> String 
 /// ⌘E'nin sorgusu (Karar 6): seçimin **ilk satırı** — arama sert satır
 /// sonunu aşmıyor, yani sonraki satırlar hiçbir şeyle eşleşemezdi — ve regex
 /// kipindeyse kaçırılmış hâli, ki seçilen metin kendisini düz eşleştirsin.
-/// Boş seçimde `None`.
+/// Boş ya da **yalnız boşluktan** oluşan ilk satırda `None`: mürekkepsiz
+/// eşleşme vurgulanmıyor ve sayılmıyor (`search::has_ink`), yani böyle bir
+/// sorgu alanı görünmez bir metinle doldurup "no matches" gösterirdi. Find
+/// panosunun metni de ([`crate::window`]) aynı süzgeçten geçiyor — başka bir
+/// uygulamanın ⌘E'si oraya boşluk bırakabiliyor (kullanıcı gördü).
 pub(crate) fn selection_query(selection: &str, regex: bool) -> Option<String> {
     let line = selection.lines().next().unwrap_or_default();
-    if line.is_empty() {
+    if line.trim().is_empty() {
         return None;
     }
     Some(if regex {
@@ -526,6 +530,12 @@ mod tests {
         );
         assert_eq!(selection_query("", true), None);
         assert_eq!(selection_query("\nx", false), None);
+        // Yalnız boşluk: find panosunda `"     \n"` bulundu ve alan onunla
+        // açılıyordu.
+        assert_eq!(selection_query("     \n", false), None);
+        assert_eq!(selection_query(" \t ", true), None);
+        // İçinde boşluk olan sorgu olduğu gibi kalıyor.
+        assert_eq!(selection_query(" a b ", false).as_deref(), Some(" a b "));
     }
 
     #[test]
