@@ -132,6 +132,18 @@ test-yaris:
 # kopya "tanımlanmamış geliştirici" uyarısına iniyor ve Sistem Ayarları →
 # Gizlilik ve Güvenlik → "Yine de Aç" ile açılıyor.
 #
+# `SIGN_ID` verilirse ad-hoc yerine o anahtarlık kimliğiyle imzalanır
+# (`make kur SIGN_ID="bateri-local"`, ya da ortamda ihraç edilmiş). Fark
+# kimliğin **kalıcılığı**: ad-hoc imzanın tanımladığı gereksinim paketin
+# kendi parmak izi ve her derlemede değişiyor, yani macOS her derlemeyi
+# başka bir uygulama sayıyor ve verilen izinler (erişilebilirlik, tam disk
+# erişimi) güncellemeden sonra yeniden soruluyor. Anahtarlıkta üretilmiş
+# kendi sertifikan o gereksinimi sertifikaya bağlıyor ve derlemeler arasında
+# sabit tutuyor. Başka bir Mac'te Gatekeeper açısından hiçbir şey değişmiyor
+# — sertifikaya kimse güvenmiyor, uyarı aynı; onu yalnız Developer ID ile
+# notarization kaldırır. Kimlik yoksa `codesign`'dan önce adıyla düşer.
+SIGN_ID ?= -
+#
 # Paket önce `$(STAGE)`'de kurulur ve yalnız denetimden geçerse `$(APP)`'in
 # yerine taşınır: yerinde kurulsaydı düşen bir koşu Dock'un gösterdiği yolda
 # lisanssız ya da ikonsuz, açılabilir bir paket bırakırdı.
@@ -194,7 +206,9 @@ kur:
 		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh \
 		$(STAGE)/Contents/Resources/shell/zsh/
 	@# İmza en son: paketin içine sonradan giren her bayt mührü bozardı.
-	codesign --force --sign - --timestamp=none $(STAGE)
+	@test '$(SIGN_ID)' = - || security find-identity -p codesigning | grep -qF '"$(SIGN_ID)"' || \
+		{ echo "kur: anahtarlıkta '$(SIGN_ID)' adlı kod imzalama kimliği yok (security find-identity -p codesigning)"; exit 1; }
+	codesign --force --sign '$(SIGN_ID)' --timestamp=none $(STAGE)
 	codesign --verify --deep --strict $(STAGE)
 	@c=$(STAGE)/Contents; fail() { echo "kur: içerik denetimi düştü — $$1"; exit 1; }; \
 	key() { plutil -extract "$$1" raw $$c/Info.plist 2>/dev/null; }; \
@@ -211,7 +225,7 @@ kur:
 		cmp -s assets/shell/$$f $$c/Resources/shell/$$f || fail "shell/$$f pakette yok ya da girdiden farklı"; \
 	done; \
 	rm -rf $(APP) && mv $(STAGE) $(APP) && \
-	echo "kur: $(APP) (sürüm $(VERSION), taban macOS $$minos)"
+	echo "kur: $(APP) (sürüm $(VERSION), taban macOS $$minos, imza $(if $(filter -,$(SIGN_ID)),ad-hoc,'$(SIGN_ID)'))"
 
 # Girdisi henüz olmayan hedefler. Var olurlar ki `proje.md`'nin doğrulama
 # tablosu var olmayan bir hedef adı taşımasın; koşarlarsa "henüz yok" deyip
