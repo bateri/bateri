@@ -833,6 +833,52 @@ define_class!(
             self.use_selection();
         }
 
+        /// Edit ▸ Clear to Start (⌘K; 034 Karar 1): ekranı ve geçmişi
+        /// siler, o anki blok kalır — `Session::clear_to_start`. Kabuğa bayt
+        /// gitmiyor; alternatif ekranda öğe gri ve çağrı zaten no-op.
+        #[unsafe(method(clearToStart:))]
+        fn clear_to_start(&self, _sender: Option<&AnyObject>) {
+            if let Some(session) = self.ivars().session.get() {
+                session.clear_to_start();
+            }
+        }
+
+        /// Edit ▸ Clear Scrollback (⌥⌘K): yalnız geçmiş —
+        /// `Session::clear_scrollback`.
+        #[unsafe(method(clearScrollback:))]
+        fn clear_scrollback(&self, _sender: Option<&AnyObject>) {
+            if let Some(session) = self.ivars().session.get() {
+                session.clear_scrollback();
+            }
+        }
+
+        /// View ▸ Scroll to Top (⌘Home): geçmişin başı. `bt-core`'a yeni
+        /// kaydırma API'si yok (034 Muhakeme): `scroll_page`'in
+        /// `saturating_mul`'u `i32::MAX` sayfayı geçmişin ucuna kırpıyor.
+        #[unsafe(method(scrollToTop:))]
+        fn scroll_to_top(&self, _sender: Option<&AnyObject>) {
+            self.scroll_pages(i32::MAX);
+        }
+
+        /// View ▸ Scroll to Bottom (⌘End): dip — `scroll_locked` bant
+        /// kuralıyla dibe iniyor.
+        #[unsafe(method(scrollToBottom:))]
+        fn scroll_to_bottom(&self, _sender: Option<&AnyObject>) {
+            self.scroll_pages(-i32::MAX);
+        }
+
+        /// View ▸ Page Up (⌘PgUp): Shift+PgUp'ın yolu.
+        #[unsafe(method(scrollPageUp:))]
+        fn scroll_page_up(&self, _sender: Option<&AnyObject>) {
+            self.scroll_pages(1);
+        }
+
+        /// View ▸ Page Down (⌘PgDn): Shift+PgDn'ın yolu.
+        #[unsafe(method(scrollPageDown:))]
+        fn scroll_page_down(&self, _sender: Option<&AnyObject>) {
+            self.scroll_pages(-1);
+        }
+
         /// Panelin kapatma düğmesi — Esc ile aynı yol (Karar 5).
         #[unsafe(method(closeSearch:))]
         fn close_search_action(&self, _sender: Option<&AnyObject>) {
@@ -884,13 +930,21 @@ define_class!(
             }
         }
 
-        /// Find öğelerinin etkinliği; **bilinmeyen öğe `true`** — punto,
-        /// sekme ve kapatma eylemleri bugünkü gibi hep etkin.
+        /// Find öğelerinin, temizlemenin ve kaydırmanın etkinliği;
+        /// **bilinmeyen öğe `true`** — punto, sekme ve kapatma eylemleri
+        /// bugünkü gibi hep etkin. Temizleme ve kaydırma alternatif ekranda
+        /// gri (034 Karar 2): birincil geçmiş orada erişilemez, gri öğe
+        /// dürüst bir "burada olmaz"; oturum yoksa da gri.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             let action = item.action();
             // `return` yok: `define_class!` `bool`'u gövdenin sonunda çeviriyor.
-            if action == Some(sel!(findNextMatch:)) || action == Some(sel!(findPreviousMatch:)) {
+            if action.is_some_and(is_scrollback_action) {
+                self.ivars()
+                    .session
+                    .get()
+                    .is_some_and(|session| !session.alt_screen())
+            } else if action == Some(sel!(findNextMatch:)) || action == Some(sel!(findPreviousMatch:)) {
                 self.has_query()
             } else if action == Some(sel!(useSelectionForFind:)) {
                 self.ivars()
@@ -920,6 +974,21 @@ define_class!(
         }
     }
 );
+
+/// Alternatif ekranda gri olan altı öğe mi (034 Karar 2): temizlemenin iki
+/// kipi ve dört kaydırma — hepsi birincil geçmişe dokunuyor ve o geçmiş
+/// alternatif ekranda erişilemez.
+fn is_scrollback_action(action: Sel) -> bool {
+    [
+        sel!(clearToStart:),
+        sel!(clearScrollback:),
+        sel!(scrollToTop:),
+        sel!(scrollToBottom:),
+        sel!(scrollPageUp:),
+        sel!(scrollPageDown:),
+    ]
+    .contains(&action)
+}
 
 impl TerminalWindow {
     /// Pencereyi, view'ı, yüzeyi ve renderer'ı kurar; oturum ve link **henüz
@@ -1341,6 +1410,16 @@ impl TerminalWindow {
 
     pub(crate) fn link(&self) -> Option<&DisplayLink> {
         self.ivars().link.get()
+    }
+
+    /// View ▸'nin dört kaydırması: `Session::scroll_page`'in yolu
+    /// (Shift+PgUp/PgDn'ın ta kendisi) — kesir sıfırlanıyor, süzülme nesli
+    /// artıyor, bant kuralı `scroll_locked`'ta. Alternatif ekranda `None` ve
+    /// öğeler zaten gri; cevap burada okunmuyor.
+    fn scroll_pages(&self, pages: i32) {
+        if let Some(session) = self.ivars().session.get() {
+            session.scroll_page(pages);
+        }
     }
 
     pub(crate) fn session(&self) -> Option<&Arc<Session>> {
