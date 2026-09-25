@@ -83,6 +83,9 @@ hiç kurulmasın) ve o değişmez bir kod kısıtından *karar* diye türetilmi�
 | 031 | fareyle seçim: ızgara ve dock | **Kullanıcı isteği (2026-09-24)**: "çift tıklamada hiçbir aksiyon yok. özellikle dock kısmında metin seçme yok" — ızgarada kelime/satır seçimi ve Shift+tıklama, dock'ta tıkla-caret, seçip silme ve yerine yazma, temaya `selection` rolü ve yuvarlak köşeli vurgu. Aşağıdaki "Farenin jest durumu sınanamıyor" kalemi burada kapanıyor (kalemin kendi dediği ev). Bedeli altıncı pipeline ve sarmalayıcıda bir widget → `.tasks/031-fare-ile-secim/` |
 | 032 | çok satırlı dock | **Kullanıcı isteği (2026-09-24)**: çok satırlı giriş (yapıştırma, `for`, heredoc, `\`-devam) ızgaraya gidiyor ve 030/031'in dock davranışı orada kayboluyor — aşağıdaki "Dock çok satırlı girişi göstermiyor" borcu. Dock yukarı doğru büyüyor ama **yalnız çizimde**: PTY sabit, ızgara ötelenir, yani borcun "nefes alan ekran" gerekçesi konusuz. Bedeli betikte yedinci ayna gövdesi (`PREBUFFER`); kullanıcının `PS2`'sine dokunulmuyor → `.tasks/032-cok-satirli-dock/` |
 | 033 | geçmişte arama | **Kullanıcı isteği (2026-09-25)**: "arama için bir akış oluştur; kullanıcı deneyimi güzel olsun, UI ve UX temiz ve güzel olsun" — aşağıdaki "Sonrası" listesinin arama overlay'i. Eşleştirme alacritty'de hazır (`RegexSearch`; regex yeni bağımlılık değil), vurgu 031'in `selection` pipeline'ı, gezinme 027'nin süzülmesi. Çubuk Metal overlay değil AppKit paneli (metin girişinin doğruluğu bedava, IME borcuna dokunmuyor) ve PTY'yi yeniden boyutlandırmıyor → `.tasks/033-gecmiste-arama/` |
+| 034 | ekranı temizle + standart menü kalanları | **Kullanıcı isteği (2026-09-25)**: "⌘K ile ekranın temizlenmesi olmuyor … başka koymadığımız davranışlar var mı bak". Terminal.app'in Clear to Start / Clear Scrollback'i terminal tarafında (kabuğa bayt gitmez), yanına aynı turda tek menü öğesiyle kapanan kalanlar: ⌘Home/⌘End/⌘PgUp/⌘PgDn kaydırma ve ⌃⌘V Paste Escaped Text. Envanterin kendi tasarımını isteyen yarısı aşağıdaki iki satırda → `.tasks/034-ekrani-temizle/` |
+| — | komut işaretleri üstünde gezinme | 034'ün envanterinden (2026-09-25): ⌘↑/⌘↓ komutlar arası atlama, Select Between Marks, ⌘L Clear to Previous Mark, "son komutun çıktısını kopyala" — Terminal.app'in Edit ▸ Navigate Marks'ı, iTerm2'nin shell integration'ı. `CLAUDE.md`'nin "komutlar arası atlama henüz yok" borcu bu satır. **Neden ayrı set:** bloklar bugün yalnız **görünür** çıpalardan ve yalnız **komutun satırı** olarak çözülüyor (işaret, bölge değil — 010 Karar); dördü de geçmişte çıpa taraması ve bir blok **bölgesi** (komut satırı → sonraki prompt) istiyor, yani `frame()` sınırında değil defter üstünde yeni bir dizin. Arama sayımının parça parça yürüyüşü (033, `SearchIndex`) o dizinin emsali. Sırası: 034'ten sonra, ön koşulu yok |
+| — | tıklanabilir bağlantılar | 034'ün envanterinden (2026-09-25): ⌘-tık ile URL ve dosya yolu açma, OSC 8 bağlantıları (Terminal.app, iTerm2, Ghostty; referansta `path_link`, `docs/ARASTIRMA.md`). Bugün OSC 8 yalnız blok çıpası olarak okunuyor. **Neden ayrı set:** algılama (regex + OSC 8), üstüne gelince vurgu (031'in `selection` pipeline'ının üçüncü kullanıcısı) ve fare rotasının dördüncü kolu (`input::button_route`; fare kipinde ⌘'nin anlamı bir ürün kararı) birlikte geliyor |
 | — | bölme | 2026-09-23'te sekmeden ayrıldı (026 yalnız sekme). **Bedeli kayıtlı:** komut blokları, Input Dock ve doldurma bandı "bir yüzey = bir oturum" varsayımıyla indi; bölme tek pencerede N yüzey demek. 026 sekmeyi pencereye koydu (`TerminalWindow`: pencere başına oturum, link ve renderer), yani bölmenin bedeli **ödenmedi, ertelendi** — bölme o nesneyi pencere başına bir yerine yüzey başına bir yapmak demek |
 
 Sonrası (sırasız): palet overlay'i (arama → 033), durum çubuğu (+ sayaç
@@ -286,6 +289,18 @@ animasyonu), Sparkle ile güncelleme.
 
 Bunlar kendi setlerini hak etmiyor; yukarıdaki setlerden birine yamanırlar.
 Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
+
+- **Zil (BEL) yutuluyor.** `Event::Bell` `session.rs`'in olay kolunda boş
+  düşüyor: ne ses, ne görsel zil, ne arka sekmede işaret (Terminal.app ve
+  iTerm2'nin üçü de var). 034'ün envanterinde çıktı (2026-09-25). Ayar
+  anahtarı (`bell`), görsel efekt (hareket saatinden, durma koşullu) ve
+  sekme/Dock rozeti ister; yamanacağı set belli değil.
+- **Reset / Hard Reset yok.** Terminal.app Shell ▸ Reset (⌥⌘R) ve Hard Reset
+  (⌃⌥⌘R). 034'ün envanterinde çıktı (2026-09-25). RIS geçmişi siliyor ve
+  `CSI 2 J` bayrağının, dock aynasının ve blok defterinin RIS'e karşı ne
+  yapacağı tasarlanmadı (`CLAUDE.md`: "`3J` ve RIS için kol yok"); 034'ün
+  terminal tarafı temizliği o sorunun yarısını cevaplıyor, yani doğal evi
+  034'ten sonraki ilk kabuk/terminal durumu seti.
 
 - **Duman kapısı saatin meşru karelerini ayırt edemiyor.** 013 kare talebinin
   üçüncü sebebini (**saat**) getirdi ve periyodu 1000 ms; kapının en duyarlı
