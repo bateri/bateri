@@ -124,9 +124,13 @@ test-yaris:
 	$(CARGO) test --workspace -- --include-ignored --test-threads=1
 
 # Release derler ve `bateri.app`'i target/ altında kurar (/Applications'a
-# DEĞİL). İmza, notarization ve Sparkle yok (006 Karar 6): yerel kopya
-# linker'ın ad-hoc imzasıyla açılıyor, `codesign -vv` paketi "no resources"
-# diye reddediyor ve bu beklenen hâl.
+# DEĞİL). Developer ID imzası, notarization ve Sparkle yok (006 Karar 6).
+# Paket yine de denetimden önce **ad-hoc** imzalanıyor (`codesign -s -`):
+# linker'ın binary'ye koyduğu imza paketin kaynaklarını mühürlemiyor ve
+# başka bir Mac'e zip'le giden kopyayı Gatekeeper "hasarlı" deyip çöpe
+# atıyordu (kullanıcının arkadaşında görüldü). Geçerli ad-hoc imzayla aynı
+# kopya "tanımlanmamış geliştirici" uyarısına iniyor ve Sistem Ayarları →
+# Gizlilik ve Güvenlik → "Yine de Aç" ile açılıyor.
 #
 # Paket önce `$(STAGE)`'de kurulur ve yalnız denetimden geçerse `$(APP)`'in
 # yerine taşınır: yerinde kurulsaydı düşen bir koşu Dock'un gösterdiği yolda
@@ -189,6 +193,9 @@ kur:
 	cp assets/shell/zsh/.zshenv assets/shell/zsh/.zprofile assets/shell/zsh/.zshrc \
 		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh \
 		$(STAGE)/Contents/Resources/shell/zsh/
+	@# İmza en son: paketin içine sonradan giren her bayt mührü bozardı.
+	codesign --force --sign - --timestamp=none $(STAGE)
+	codesign --verify --deep --strict $(STAGE)
 	@c=$(STAGE)/Contents; fail() { echo "kur: içerik denetimi düştü — $$1"; exit 1; }; \
 	key() { plutil -extract "$$1" raw $$c/Info.plist 2>/dev/null; }; \
 	plutil -lint -s $$c/Info.plist || fail "Info.plist geçersiz"; \
