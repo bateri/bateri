@@ -280,11 +280,13 @@ fn alt_screen_notifier(id: u64) -> Box<dyn Fn()> {
 }
 
 /// Sistemin find panosundaki metin (Karar 6: ⌘E'nin uygulamalar arası
-/// normu); boşsa `None`.
+/// normu), ⌘E'nin sorgusuyla aynı süzgeçten: ilk satırı, boş ya da yalnız
+/// boşluksa `None` ([`selection_query`]).
 fn find_pasteboard_text() -> Option<String> {
     // SAFETY: AppKit'in dışa açtığı sabit ad, süreç boyunca yaşıyor.
     let name = unsafe { NSPasteboardNameFind };
-    clipboard::read(&NSPasteboard::pasteboardWithName(name)).filter(|text| !text.is_empty())
+    clipboard::read(&NSPasteboard::pasteboardWithName(name))
+        .and_then(|text| selection_query(&text, false))
 }
 
 /// Başlamış bir pencere kapanışı ([`TerminalWindow::begin_close`]).
