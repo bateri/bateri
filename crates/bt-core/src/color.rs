@@ -179,13 +179,14 @@ impl Theme {
         // ayrık — seçim bir `\e[40m` bloğu gibi okunmamalı.
         selection: 0x283042,
         // Arama sıcak bir aile, seçimin soğuk arduvazından **ton** olarak
-        // ayrık: eşleşmeler koyu bir zeytin-kahve (zemine karşı 1.50, geri
-        // planda), geçerli eşleşme doygun bir kehribar (1.95). Tavanı seçimin
+        // ayrık: eşleşmeler koyu, doygun bir zeytin-kahve (zemine karşı 1.64,
+        // geri planda; 1.50'lik ilk değer siyah zeminde gerçek pencerede
+        // seçilmiyordu), geçerli eşleşme doygun bir kehribar (1.95). Tavanı seçimin
         // ölçütü koyuyor — zeminde 3:1'i geçen her metin iki vurguda da
         // geçiyor; en zayıfı geçerli eşleşmede `red`, 3.13
         // (`search_highlights_keep_every_readable_text_readable`). **Zevk
         // kararı**, offscreen dökümle seçildi (033 phase-2 → Uygulama Notları).
-        search_match: 0x302c1e,
+        search_match: 0x3a3212,
         search_current: 0x503a0c,
         success: 0x8bb58b,
         error: 0xd16d6a,
