@@ -937,7 +937,7 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   koyu temanın arduvazıyla (`#283042`) çizilir — açık bir temada koyu metnin
   altında zor okunur, yani açık bir tema `selection`'ını yazmalı. Aynısı
   `search_match` ile `search_current` için: yazılmazlarsa arama vurgusu koyu
-  temanın koyu sıcak tonlarıyla (`#302c1e`, `#503a0c`) gelir.
+  temanın koyu sıcak tonlarıyla (`#3a3212`, `#503a0c`) gelir.
 
 ### Gömülü `bateri`
 
@@ -950,7 +950,7 @@ dim = "#909093"
 accent = "#7a9cc6"
 cursor = "#d9b063"
 selection = "#283042"
-search_match = "#302c1e"
+search_match = "#3a3212"
 search_current = "#503a0c"
 success = "#8bb58b"
 error = "#d16d6a"

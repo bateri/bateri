@@ -167,6 +167,13 @@ impl SearchBar {
         stack.setCustomSpacing_afterView(6.0, &newer);
 
         let surface = NSBox::new(mtm);
+        // **Kendi katmanı şart**: kapsayıcının bir kardeşi Metal'in katmanını
+        // taşıyan (layer-hosting) terminal view'ı ve katmansız bir `NSBox`'ın
+        // dolgusu, kenarı ve gölgesi o hiyerarşide hiç çizilmiyordu — alanla
+        // düğmeler görünüyor, yüzey görünmüyordu ve kontroller terminal
+        // metninin üstüne biniyordu (kullanıcı gördü, gerçek pencerede
+        // ölçüldü).
+        surface.setWantsLayer(true);
         surface.setBoxType(NSBoxType::Custom);
         surface.setTitlePosition(NSTitlePosition::NoTitle);
         surface.setCornerRadius(RADIUS);
