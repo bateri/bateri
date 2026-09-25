@@ -4,7 +4,7 @@
 //! burada piksele çevrilir ve GPU'nun göreceği düzene girer. Renderer "ne
 //! çizileceğini" buradan okur, "ne anlama geldiğini" bilmez.
 //!
-//! **On liste (artı dock'un iki efekt listesi), üç yüzey, üç pipeline**
+//! **On liste (artı dock'un iki efekt, seçimin iki ve aramanın dört listesi), üç yüzey, üç pipeline**
 //! (buradaki listelerin; efektler beşincisinden, `glyph_fx`). Listeler yüzey başına dörtlü/üçlü
 //! gruplar hâlinde: ızgaranın dördü (komut bloğu şeritleri, arka planlar,
 //! glyph'ler, kural çizgileri), dock'un üçü (`dock_bg`/`dock_glyphs`/
@@ -15,7 +15,9 @@
 //! yüzeyden bağımsız: şeritler ve arka planlar `cell_bg`'nin, glyph'ler ve
 //! kural çizgileri `cell`'in, caret de `cell_bg`'nin vertex'ini paylaşan
 //! kardeş fragment'in (`caret`). Seçimin listesi (031) altıncı pipeline'ın
-//! (`selection`): aynı `Instance`, kendi vertex'i ve köşe maskeli fragment'i. Grubun içindeki listelerin ayrı durmasının
+//! (`selection`): aynı `Instance`, kendi vertex'i ve köşe maskeli fragment'i;
+//! aramanın dört listesi (033; ızgarada ve bantta ikişer, rol başına bir)
+//! aynı pipeline'ı paylaşıyor. Grubun içindeki listelerin ayrı durmasının
 //! sebebi çizim sırası — glyph'ler arka planların, kurallar da glyph'lerin
 //! **üstüne** gelmek zorunda ve tek listede sıra hücre hücre karışırdı. Glyph
 //! ile kuralın ayrı listede olması da aynı cümlenin devamı: ikisi aynı
@@ -28,7 +30,8 @@ use std::mem::offset_of;
 
 use bt_atlas::{Face, RuleKind, SizeClass};
 use bt_core::{
-    Block, CaretShape, CaretStyle, Cell, LinearRgba, SelectionRun, UnderlineStyle, UnfocusedCaret,
+    Block, CaretShape, CaretStyle, Cell, LinearRgba, SearchRun, SelectionRun, UnderlineStyle,
+    UnfocusedCaret,
 };
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
@@ -703,6 +706,21 @@ pub(crate) struct Frame {
     /// Seçimin bu karedeki rengi ([`Frame::push_selection`] yazıyor);
     /// hareket karesi listeyi koruduğu gibi onu da koruyor.
     selection_rgba: [f32; 4],
+    /// Arama vurgusunun parçaları (033), `selection`'ın pipeline'ından ve
+    /// şeklinden: bütün eşleşmeler (`search_match`) ve geçerli eşleşme
+    /// (`search_current`). **Rol başına bir liste**, çünkü renk çağrı başına
+    /// uniform — iki rol iki encode ([`Frame::push_search`]). Seçimden ayrı,
+    /// çünkü seçim aramanın **üstünde** çiziliyor (Karar 7) ve kendi rengini
+    /// taşıyor. Sayacı yok, seçiminkiyle aynı gerekçe.
+    search_match: Vec<Instance>,
+    search_current: Vec<Instance>,
+    /// İki rolün bu karedeki renkleri; `selection_rgba` gibi hareket
+    /// karesinde korunuyor.
+    search_match_rgba: [f32; 4],
+    search_current_rgba: [f32; 4],
+    /// Eşleşme başına köşe kararının geçici tamponu
+    /// ([`Frame::search_parts`]): kare başına ayırma yok.
+    search_scratch: Vec<SelectionRun>,
     glyphs: Vec<GlyphCell>,
     /// Kural çizgileri; glyph'lerle **aynı** pipeline'dan ama onlardan sonra
     /// çizilir (üstü çizili, altındaki harfin üstünden geçmeli).
@@ -922,6 +940,12 @@ pub(crate) struct Frame {
     fill_bg: Vec<Instance>,
     fill_glyphs: Vec<GlyphCell>,
     fill_rules: Vec<RuleCell>,
+    /// Doldurma bandının arama vurgusu (033 Karar 8): bandın satırları
+    /// gerçek geçmiş ve eşleşmeleri ızgaradakiler gibi vurgulanıyor —
+    /// satırlar fill-yerel, bandın viewport'unda çiziliyor. Renkler
+    /// ızgaranınkiyle aynı uniform. Bantta seçim çizimi yok (Karar 12).
+    fill_search_match: Vec<Instance>,
+    fill_search_current: Vec<Instance>,
     /// Doldurma bandının yüksekliği, **satır** (`bt_core::Cursor::fill`);
     /// sıfır → bant yok ve üçüncü viewport hiç kurulmuyor.
     ///
@@ -958,6 +982,8 @@ impl Frame {
         self.bg.clear();
         self.selection.clear();
         self.dock_selection.clear();
+        self.search_match.clear();
+        self.search_current.clear();
         self.glyphs.clear();
         self.rules.clear();
         self.bg_count = 0;
@@ -976,6 +1002,8 @@ impl Frame {
         self.fill_bg.clear();
         self.fill_glyphs.clear();
         self.fill_rules.clear();
+        self.fill_search_match.clear();
+        self.fill_search_current.clear();
         // **Bant da her karede yeniden söyleniyor** ve sıfırlanması dock'un
         // yüzeyiyle aynı gerekçeyi taşıyor: korunsaydı doldurmayı kapatan ilk
         // karede (Ctrl-L, alternatif ekrana giriş, dock'u olmayan pencere)
@@ -1227,6 +1255,121 @@ impl Frame {
                 });
             }
         }
+    }
+
+    /// Arama vurgusunun ızgaradaki koşuları (033): seçimin şekli
+    /// ([`Frame::selection_parts`], `SELECTION_RADIUS`) ama köşeler
+    /// **eşleşme başına** — [`selection_corners`] satır başına tek koşu ve
+    /// dizi komşuluğu varsayıyor, arama ise bir satıra birden çok koşu
+    /// koyuyor ve ardışık satırlardaki iki ayrı eşleşme tek şekle
+    /// kaynamamalı (Karar 7). Sarılan tek eşleşme kaynıyor: onu
+    /// `SearchRun::continues` söylüyor.
+    ///
+    /// Renkler odağa göre çağıranın seçimi (`bt_core::SearchRuns`), seçimin
+    /// kuralı.
+    pub(crate) fn push_search(
+        &mut self,
+        runs: &[SearchRun],
+        matched: LinearRgba,
+        current: LinearRgba,
+    ) {
+        debug_assert!(self.cell_px.0 > 0.0, "clear(metrics) çağrılmadı");
+        self.search_match_rgba = matched.to_array();
+        self.search_current_rgba = current.to_array();
+        let mut lists = (
+            std::mem::take(&mut self.search_match),
+            std::mem::take(&mut self.search_current),
+        );
+        self.search_parts(runs, &mut lists);
+        (self.search_match, self.search_current) = lists;
+    }
+
+    /// Doldurma bandının arama koşuları; satırlar fill-yerel ve bandın
+    /// kendi viewport'unda çiziliyor ([`Frame::push_fill_block`] emsali —
+    /// konum yine [`Frame::pos`], uzay viewport'un). Renkler
+    /// [`Frame::push_search`]'ün yazdığı uniform: önce o çağrılmalı.
+    pub(crate) fn push_fill_search(&mut self, runs: &[SearchRun]) {
+        debug_assert!(
+            runs.iter().all(|run| run.row < self.fill_rows),
+            "doldurma araması bandın dışında: {runs:?} / {}",
+            self.fill_rows
+        );
+        let mut lists = (
+            std::mem::take(&mut self.fill_search_match),
+            std::mem::take(&mut self.fill_search_current),
+        );
+        self.search_parts(runs, &mut lists);
+        (self.fill_search_match, self.fill_search_current) = lists;
+    }
+
+    /// Koşuları eşleşmelere böler ve her eşleşmeyi kendi diliminde
+    /// [`Frame::selection_parts`]'tan geçirir; geçerli eşleşme ikinci
+    /// listeye. Eşleşme `continues` bitiyle bitişik koşular: `bt-core` bir
+    /// eşleşmenin koşularını art arda veriyor ama sonraki eşleşme daha üst
+    /// bir satırda başlayabiliyor (5–6'ya sarılan eşleşmeden sonra 5'teki
+    /// ikincisi), yani liste **sıralanmıyor**, yalnız bölünüyor. Listenin ilk
+    /// koşusu `continues` olsa da yeni bir eşleşme sayılıyor — başı öteki
+    /// yüzeyde (bant) ya da ekranın dışında.
+    fn search_parts(&mut self, runs: &[SearchRun], lists: &mut (Vec<Instance>, Vec<Instance>)) {
+        let mut scratch = std::mem::take(&mut self.search_scratch);
+        let mut start = 0;
+        while start < runs.len() {
+            let head = runs[start];
+            // Devam koşusu bir önceki koşunun **hemen altındaki** satırda;
+            // satırı tutmayan devam (yalnız bozuk girdide) şekli bölüyor,
+            // kaynatmıyor.
+            let end = runs
+                .windows(2)
+                .skip(start)
+                .position(|pair| {
+                    !pair[1].continues || Some(pair[1].row) != pair[0].row.checked_add(1)
+                })
+                .map_or(runs.len(), |i| start + 1 + i);
+            scratch.clear();
+            scratch.extend(runs[start..end].iter().map(|run| SelectionRun {
+                row: run.row,
+                first: run.first,
+                last: run.last,
+            }));
+            let out = if head.current {
+                &mut lists.1
+            } else {
+                &mut lists.0
+            };
+            self.selection_parts(&scratch, |frame, col, row| frame.pos(col, row), out);
+            start = end;
+        }
+        self.search_scratch = scratch;
+    }
+
+    /// Bu karenin eşleşme vurgusu parçaları ([`Frame::push_search`]).
+    pub(crate) fn search_match_instances(&self) -> &[Instance] {
+        &self.search_match
+    }
+
+    /// Bu karenin geçerli eşleşme parçaları ([`Frame::push_search`]).
+    pub(crate) fn search_current_instances(&self) -> &[Instance] {
+        &self.search_current
+    }
+
+    /// Bandın eşleşme vurgusu parçaları, fill-yerel.
+    pub(crate) fn fill_search_match_instances(&self) -> &[Instance] {
+        &self.fill_search_match
+    }
+
+    /// Bandın geçerli eşleşme parçaları, fill-yerel.
+    pub(crate) fn fill_search_current_instances(&self) -> &[Instance] {
+        &self.fill_search_current
+    }
+
+    /// `search_match` rengi, lineer — `selection_fragment`'in renk uniform'u.
+    pub(crate) fn search_match_rgba(&self) -> [f32; 4] {
+        self.search_match_rgba
+    }
+
+    /// `search_current` rengi, lineer.
+    pub(crate) fn search_current_rgba(&self) -> [f32; 4] {
+        self.search_current_rgba
     }
 
     /// Bu karenin seçim parçaları; [`Frame::push_selection`]'ın dörtgenleri.
@@ -3503,6 +3646,143 @@ mod tests {
         // İçerik karesi listeyi boşaltıyor.
         frame.clear(metrics, CaretStyle::default());
         assert!(frame.dock_selection_instances().is_empty());
+    }
+
+    fn search_run(row: u16, first: u16, last: u16, current: bool, continues: bool) -> SearchRun {
+        SearchRun {
+            row,
+            first,
+            last,
+            current,
+            continues,
+        }
+    }
+
+    /// Arama çizimi için hazır bir kare: 9×18 hücre, renkler iki ayrık ton.
+    fn search_frame() -> Frame {
+        let mut frame = Frame::default();
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("sıfır olmayan hücre");
+        frame.clear(metrics, CaretStyle::default());
+        frame
+    }
+
+    /// 033 Karar 7: köşeler **eşleşme başına**. Ardışık satırlardaki iki ayrı
+    /// eşleşme iki ayrı şekil — dört köşesi de yuvarlak, içbükey dolgu yok —;
+    /// aynı iki koşu tek eşleşmenin sarılması olunca tek şekle kaynıyor ve
+    /// basamaklar dolguyla kapanıyor.
+    #[test]
+    fn search_corners_are_per_match() {
+        let mut frame = search_frame();
+        let red = LinearRgba::from_srgb(0xff, 0, 0);
+        let green = LinearRgba::from_srgb(0, 0xff, 0);
+        frame.push_search(
+            &[
+                search_run(0, 2, 4, false, false),
+                search_run(1, 0, 6, false, false),
+            ],
+            red,
+            green,
+        );
+        let separate = frame.search_match_instances();
+        assert_eq!(separate.len(), 2, "içbükey dolgu doğdu: {separate:?}");
+        assert!(
+            separate.iter().all(|part| part.rgba == [1.0; 4]),
+            "iki ayrı eşleşme kaynadı: {separate:?}"
+        );
+        assert_eq!(frame.search_match_rgba(), red.to_array());
+        assert_eq!(frame.search_current_rgba(), green.to_array());
+
+        let mut frame = search_frame();
+        frame.push_search(
+            &[
+                search_run(0, 2, 4, false, false),
+                search_run(1, 0, 6, false, true),
+            ],
+            red,
+            green,
+        );
+        let wrapped = frame.search_match_instances();
+        // Üst koşunun iki alt köşesi içbükey: iki dolgu parçası.
+        assert_eq!(wrapped.len(), 4, "sarılan eşleşme kaynamadı: {wrapped:?}");
+        assert_eq!(
+            wrapped[0].rgba,
+            [1.0, 1.0, 0.0, 0.0],
+            "üst koşunun köşeleri"
+        );
+        // Alt koşu üstünü aşıyor: köşeleri basamağın dışında, yani açıkta.
+        assert_eq!(wrapped[3].rgba, [1.0; 4], "alt koşunun köşeleri");
+    }
+
+    /// Sonraki eşleşme daha üst bir satırda başlayabiliyor (5–6'ya sarılan
+    /// eşleşmenin ardından 5. satırdaki ikincisi): liste sıralanmıyor,
+    /// `continues`'la bölünüyor. Geçerli eşleşme kendi listesine gidiyor ve
+    /// iki liste de içerik karesinde boşalıyor.
+    #[test]
+    fn search_runs_split_by_match_and_role() {
+        let mut frame = search_frame();
+        let color = LinearRgba::from_srgb(0x80, 0x80, 0x80);
+        frame.push_search(
+            &[
+                search_run(5, 3, 6, false, false),
+                search_run(6, 0, 1, false, true),
+                search_run(5, 8, 9, true, false),
+            ],
+            color,
+            color,
+        );
+        let [upper, lower] = frame.search_match_instances() else {
+            panic!("iki parça beklendi: {:?}", frame.search_match_instances());
+        };
+        // Sarılan eşleşmenin iki koşusu çaprazdan değiyor: kaynıyor ama
+        // örtüşmüyor, dört köşe de açıkta.
+        assert_eq!((upper.rgba, lower.rgba), ([1.0; 4], [1.0; 4]));
+        let [current] = frame.search_current_instances() else {
+            panic!("tek geçerli parça: {:?}", frame.search_current_instances());
+        };
+        assert_eq!(current.pos, frame.pos(8, 5));
+        assert_eq!(current.size, [18.0, 18.0]);
+        assert_eq!(current.rgba, [1.0; 4]);
+        assert!(frame.selection_instances().is_empty(), "seçime sızdı");
+        assert!(
+            frame.fill_search_match_instances().is_empty(),
+            "banda sızdı"
+        );
+
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("sıfır olmayan hücre");
+        frame.clear(metrics, CaretStyle::default());
+        assert!(frame.search_match_instances().is_empty());
+        assert!(frame.search_current_instances().is_empty());
+    }
+
+    /// Bandın koşuları bandın listelerine, fill-yerel satırla; ızgaranın
+    /// listeleri boş kalıyor.
+    #[test]
+    fn fill_search_runs_stay_in_the_band() {
+        let mut frame = search_frame();
+        let color = LinearRgba::from_srgb(0x80, 0x80, 0x80);
+        frame.set_fill_rows(2);
+        frame.push_search(&[], color, color);
+        frame.push_fill_search(&[
+            search_run(0, 1, 2, false, false),
+            search_run(1, 0, 0, true, false),
+        ]);
+        assert!(frame.search_match_instances().is_empty(), "ızgaraya sızdı");
+        assert!(
+            frame.search_current_instances().is_empty(),
+            "ızgaraya sızdı"
+        );
+        let [matched] = frame.fill_search_match_instances() else {
+            panic!("{:?}", frame.fill_search_match_instances());
+        };
+        assert_eq!(matched.pos, frame.pos(1, 0));
+        let [current] = frame.fill_search_current_instances() else {
+            panic!("{:?}", frame.fill_search_current_instances());
+        };
+        assert_eq!(current.pos, frame.pos(0, 1));
+        let metrics = CellMetrics::new(9, 18, 9, GUTTER, 1).expect("sıfır olmayan hücre");
+        frame.clear(metrics, CaretStyle::default());
+        assert!(frame.fill_search_match_instances().is_empty());
+        assert!(frame.fill_search_current_instances().is_empty());
     }
 
     /// Sarılan girişte seçim satır başına bir koşu (032): ikinci koşu bir

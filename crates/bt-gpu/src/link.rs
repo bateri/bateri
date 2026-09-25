@@ -1136,6 +1136,20 @@ define_class!(
             // Dilim bir kerede: köşe kararı komşu satırın koşusuna bakıyor.
             frame.push_selection(selection.as_slice(), rgba);
             drop(selection);
+            // **Arama vurgusu da aynı kuralla** (033 Karar 7): iki rol, renk
+            // odaktan; ızgaranın ve bandın koşuları aynı `frame()`
+            // turundan. Bandınkiler `set_fill_rows`'tan sonra — bekçisi
+            // bandın boyunu okuyor — ve renkleri `push_search`'ün yazdığı
+            // uniform. Hareket karesi listeleri koruyor, taramaz (R2.2).
+            let search = iv.search.borrow();
+            let focused = iv.focused.get();
+            frame.push_search(
+                search.as_slice(),
+                search.match_color(focused),
+                search.current_color(focused),
+            );
+            frame.push_fill_search(search.fill_slice());
+            drop(search);
             // Kapının operandı burada artıyor: hasar bulundu, kare çizilecek.
             // `kare`'den önce ve ondan bağımsız — GPU'nun bitirmesini
             // beklemiyor (bkz. `LinkIvars::content_frames`).

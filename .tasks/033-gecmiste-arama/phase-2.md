@@ -40,9 +40,39 @@ _Requirements: R2, R3_
 
 ## Checklist
 
-- [ ] Tema rolleri, gömülü değerler, odaksız karşılıklar
-- [ ] `Frame`: ızgara + bant listeleri, eşleşme başına köşe
-- [ ] `Renderer`: ek encode'lar ve sıra
-- [ ] `docs/AYARLAR.md`, `CLAUDE.md`
-- [ ] Test: yukarıdaki senaryolar
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] Tema rolleri, gömülü değerler, odaksız karşılıklar
+- [x] `Frame`: ızgara + bant listeleri, eşleşme başına köşe
+- [x] `Renderer`: ek encode'lar ve sıra
+- [x] `docs/AYARLAR.md`, `CLAUDE.md`
+- [x] Test: yukarıdaki senaryolar
+- [x] Doğrulama geçti (`make hepsi`; çizim yolu değişti, `make duman` de yeşil)
+- [~] Riskli phase `/code-review`: tetiklenmedi — shader ve `#[repr(C)]` düzeni aynı, paylaşılan durum ya da kilit değişmedi
+
+## Uygulama Notları
+
+- **Test-first sırası:** sınamalar uygulamadan sonra yazıldı; ısırdıkları
+  mutasyonla gösterildi (`continues` bölünmesini kaldırmak üç `Frame`
+  sınamasını, arama encode'unu seçimin arkasına almak GPU sıra bekçisini,
+  `search_current` satırını `roles`'tan silmek tema sınamasını, geçerli
+  eşleşmeyi `#5a4718`'e açmak okunurluk bekçisini kırdı).
+- **Renklerin sözleşmesi bir bekçi oldu**
+  (`color::tests::search_highlights_keep_every_readable_text_readable`):
+  031'in ölçütü (zeminde 3:1'i geçen her metin rengi vurguda da 3:1) ve
+  "geçerli eşleşme zemine karşı ötekinden parlak". Seçimin değeri bu bekçiyi
+  almadı — kapsam dışı.
+- **Değerler** (WCAG, zemine karşı / en zayıf metin): koyu `search_match`
+  `#302c1e` 1.50 / `red` 4.06, `search_current` `#503a0c` 1.95 / `red`
+  3.13; açık `#f9f1d2` 1.05 / `bright_yellow` 3.37, `#fee29a` 1.17 /
+  `bright_yellow` 3.01. Sıcak aile, seçimin soğuk arduvaz/buz mavisinden ton
+  olarak ayrık. Açık temada ayrımı tavan (3:1) sıkıştırıyor; ilk aday
+  (`#f8edc2`/`#fae3a0`) dökümde geçerli eşleşmeyi ötekinden zor ayırıyordu,
+  eşleşme kreme soluklaştırılıp geçerli eşleşme bala doyuruldu.
+- **Gözle kontrol offscreen dökümle** (512² kare, 18 satır; ön plan, `dim`
+  ve 16 ANSI rengi, eşleşme + geçerli + üstünde seçim, iki tema): ⌘F
+  phase-4'te geldiği için gerçek pencerede görülemedi; döküm kodu depoya
+  girmedi. Gerçek pencere kontrolü phase-4'e devredildi.
+- **Odak tek bit:** vurgu rengi bugün `link.rs`'in `focused`'ından (seçimle
+  aynı); vurgu/seçim solmasının "yalnız key değilse" biti phase-4'ün "Odak
+  iki bit" maddesi.
+- `SearchRuns` artık renkleri taşıyor (`SelectionRuns` emsali), yani
+  `Default`'u elle — `LinearRgba`'nın `Default`'u yok.

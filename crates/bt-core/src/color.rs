@@ -70,8 +70,9 @@ impl LinearRgba {
 ///
 /// **Dokuz rollü** modelin yedisi burada: 007'nin dördü, 010'un iki durum rolü
 /// (`success`, `error`) ve 014'ün `cursor`'ı; yanlarında 031'in `selection`'ı
-/// (dokuzun dışında: model Metalterm'in, seçim rengi terminalin kendi
-/// yüzeyi). Kalan iki durum rolü (uyarı, bilgi) sonraki setlere kalıyor —
+/// ile 033'ün iki arama vurgusu (`search_match`, `search_current`) —
+/// dokuzun dışında: model Metalterm'in, seçim ve arama rengi terminalin kendi
+/// yüzeyi. Kalan iki durum rolü (uyarı, bilgi) sonraki setlere kalıyor —
 /// **çizilmeyen rol eklenmiyor**, çünkü tüketicisi olmayan bir anahtar tema
 /// dosyasına girdiği gün biçim sözü verir ve sözün karşılığı yoktur.
 /// Alanlar `0xRRGGBB` (üst bayt okunmaz) ve `pub`: tip bir
@@ -113,6 +114,19 @@ pub struct Theme {
     /// Odaksız pencerede zemine doğru soluklaşıyor
     /// ([`Theme::selection_unfocused_linear`]).
     pub selection: u32,
+    /// Geçmişte aramanın (⌘F) bütün eşleşmelerinin vurgusu — geri planda
+    /// kalan, "burada da var" diyen ton (033 Karar 7).
+    ///
+    /// Seçimle aynı sözleşme: metin kendi ön planıyla çiziliyor, yani ölçüt
+    /// `selection`'ınki (zeminde okunan metin vurgunun üstünde de okunur) ve
+    /// odaksız pencerede zemine doğru soluklaşıyor
+    /// ([`Theme::search_match_unfocused_linear`]). Seçimden **ton** olarak
+    /// ayrık olmalı: seçim aramanın üstünde çiziliyor ve ikisi yan yana
+    /// durabiliyor.
+    pub search_match: u32,
+    /// Geçerli eşleşmenin vurgusu — ⏎/⌘G'nin gösterdiği tek eşleşme;
+    /// `search_match`'ten **belirgin** ama aynı sözleşmeyle.
+    pub search_current: u32,
     /// Durum: başarı. Bugün sıfır çıkış koduyla biten komut bloğunun şeridi.
     pub success: u32,
     /// Durum: hata. Bugün sıfırdan farklı çıkış koduyla biten komut bloğunun
@@ -164,6 +178,15 @@ impl Theme {
         // griye yakın iki siyahından (`0x22252b`, `0x4a4e57`) ton olarak
         // ayrık — seçim bir `\e[40m` bloğu gibi okunmamalı.
         selection: 0x283042,
+        // Arama sıcak bir aile, seçimin soğuk arduvazından **ton** olarak
+        // ayrık: eşleşmeler koyu bir zeytin-kahve (zemine karşı 1.50, geri
+        // planda), geçerli eşleşme doygun bir kehribar (1.95). Tavanı seçimin
+        // ölçütü koyuyor — zeminde 3:1'i geçen her metin iki vurguda da
+        // geçiyor; en zayıfı geçerli eşleşmede `red`, 3.13
+        // (`search_highlights_keep_every_readable_text_readable`). **Zevk
+        // kararı**, offscreen dökümle seçildi (033 phase-2 → Uygulama Notları).
+        search_match: 0x302c1e,
+        search_current: 0x503a0c,
         success: 0x8bb58b,
         error: 0xd16d6a,
         ansi: [
@@ -211,6 +234,12 @@ impl Theme {
         // bir önceki değer (`0xc9d8ee`) parlak sarı, yeşil ve camgöbeğini 3:1'in
         // altına indiriyordu. Parlak beyazdan (`0xdcdee3`) ton olarak ayrık.
         selection: 0xdde6f3,
+        // Açık temada aynı aile zeminin bir adım koyusu: eşleşmeler soluk bir
+        // krem (1.05 — ayrımı parlaklık değil ton taşıyor), geçerli eşleşme
+        // doygun bir bal (1.17). Ölçütün en zayıfı yine `bright_yellow`,
+        // geçerli eşleşmede 3.01; seçimin buz mavisinden ton olarak ayrık.
+        search_match: 0xf9f1d2,
+        search_current: 0xfee29a,
         success: 0x3b7a3b,
         error: 0xb5423d,
         ansi: [
@@ -277,6 +306,27 @@ impl Theme {
     /// girmiyor (031 Karar 9).
     pub const fn selection_unfocused_linear(&self) -> LinearRgba {
         linear_rgba(dim_toward(rgb(self.selection), self.background_rgb()))
+    }
+
+    /// Arama eşleşmelerinin vurgusu, **lineer** RGBA — odaktaki pencerede.
+    pub const fn search_match_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.search_match))
+    }
+
+    /// Odaksız penceredeki eşleşme vurgusu: seçimin kuralı
+    /// ([`Theme::selection_unfocused_linear`]), aynı üçte bir.
+    pub const fn search_match_unfocused_linear(&self) -> LinearRgba {
+        linear_rgba(dim_toward(rgb(self.search_match), self.background_rgb()))
+    }
+
+    /// Geçerli eşleşmenin vurgusu, **lineer** RGBA — odaktaki pencerede.
+    pub const fn search_current_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.search_current))
+    }
+
+    /// Odaksız penceredeki geçerli eşleşme vurgusu; seçimin kuralı.
+    pub const fn search_current_unfocused_linear(&self) -> LinearRgba {
+        linear_rgba(dim_toward(rgb(self.search_current), self.background_rgb()))
     }
 
     /// Varsayılan ön plan, **lineer** RGBA; dock'un yazdığı metnin rengi.
@@ -809,5 +859,56 @@ mod tests {
         assert_eq!(resolve(Color::Spec(green), &colors, &THEME), green);
         // Tabloda olmayan girdi temadan gelir.
         assert_eq!(resolve(Color::Indexed(2), &colors, &THEME), green);
+    }
+
+    /// WCAG kontrast oranı, iki `0xRRGGBB` arasında — 031 phase-3'ün seçim
+    /// renginde kullandığı ölçünün kendisi.
+    fn contrast(a: u32, b: u32) -> f64 {
+        let luminance = |hex: u32| {
+            let channel = |shift: u32| {
+                let c = f64::from((hex >> shift) & 0xff) / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+        };
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn search_highlights_keep_every_readable_text_readable() {
+        // 033'ün iki vurgusu seçimin ölçütünü taşıyor (Karar 7: metin kendi
+        // ön planında): gömülü temanın zemininde 3:1'i geçen her metin rengi
+        // (ön plan, `dim`, 16 ANSI) vurgunun üstünde de 3:1'i geçiyor.
+        // Geçerli eşleşme ötekinden **belirgin** olmalı ve rol değerleri
+        // bunu parlaklıkla da söylemeli — yalnız tona bırakılan ayrım
+        // odaksız pencerede soluklaşınca kaybolurdu.
+        for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
+            let texts = [theme.foreground, theme.dim]
+                .into_iter()
+                .chain(theme.ansi)
+                .filter(|&text| contrast(text, theme.background) >= 3.0);
+            for text in texts {
+                for highlight in [theme.search_match, theme.search_current] {
+                    let ratio = contrast(text, highlight);
+                    assert!(
+                        ratio >= 3.0,
+                        "#{text:06x} metin #{highlight:06x} vurguda {ratio:.2}"
+                    );
+                }
+            }
+            let (matched, current) = (
+                contrast(theme.search_match, theme.background),
+                contrast(theme.search_current, theme.background),
+            );
+            assert!(
+                matched > 1.0 && current > matched,
+                "geçerli eşleşme ötekinden belirgin değil: {matched:.2} / {current:.2}"
+            );
+        }
     }
 }

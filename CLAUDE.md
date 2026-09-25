@@ -71,7 +71,14 @@ dönüşümüyle glyph uzayına çeviriyor; iki dokuyu birden bağlıyor, düzle
 instance'tan. `selection` `Instance`'ı **aynen** okuyan kendi vertex'ini
 taşıyor, çünkü fragment dörtgenini bilmek zorunda (caret onu tek dörtgen
 olduğu için uniform'dan alıyor); `rgba` yuvası orada renk değil köşe
-maskesi, renk ile yarıçap uniform. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
+maskesi, renk ile yarıçap uniform. **Geçmişte aramanın vurgusu (033) aynı
+pipeline'ı ve şekli paylaşıyor**: renk uniform olduğu için rol başına bir
+encode (`search_match`, sonra `search_current`), sıra zemin → eşleşme →
+geçerli eşleşme → seçim → caret → glyph, yani kullanıcının seçimi aramanın
+üstünde ve metin kendi renginde; ızgarada ve doldurma bandının viewport'unda
+ayrı listeler. Köşeler **eşleşme başına** (`Frame::push_search`,
+`SearchRun::continues`): ardışık satırlardaki iki eşleşme iki şekil, sarılan
+tek eşleşme tek şekil. `bt-shell` klavyeyi PTY'ye akıtır ve **metin yolu AppKit'in
 yığınından geçer**: `keyDown:` tek kapı değil beş kollu bir arbitraj —
 Cmd'li olay **kapalı bir izin listesinin üç tuşu dışında** yutulur (⌘⌫ →
 `\x15` `kill-whole-line`, ⌘← → `\x01` `beginning-of-line`, ⌘→ → `\x05`
@@ -1151,7 +1158,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   bloğu, ANSI 258'in cevabı **ve** dock'un `heat` efektinin kızgın rengi),
   `success` ve `error` (biten bloğun şeridi)
   — ve yanlarında `selection` (fareyle seçimin vurgusu, modelin dışında;
-  031) ile `[ansi]`'nin 16 rengi; kalan iki durum rolü (uyarı, bilgi)
+  031), `search_match`/`search_current` (geçmişte aramanın vurgusu, yine
+  modelin dışında; ölçütü seçiminki — zeminde 3:1'i geçen metin vurguda da
+  geçer, bekçisi `color::tests`; odaksız pencerede aynı kuralla soluyor, 033)
+  ile `[ansi]`'nin 16 rengi; kalan iki durum rolü (uyarı, bilgi)
   sonraki setlerde gelir. Çizilmeyen rol eklenmiyor. `cursor` **014'te
   ayrıldı**: ikisi tek değerden beslenirken "imleci altın yap" isteği koşan
   komutun şeridini de altın yapıyordu, ve 258 yuvası zaten `accent`'e takma

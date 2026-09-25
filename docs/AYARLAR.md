@@ -889,7 +889,7 @@ bateri – themes/paper.toml: line 3: `ansi.red` must be a color like "#rrggbb",
 
 ### Biçim
 
-Sekiz rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
+On rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
 bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 
 | anahtar | anlamı |
@@ -900,6 +900,8 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 | `accent` | vurgu; **koşan** komutun işareti |
 | `cursor` | imleç bloğunun rengi |
 | `selection` | fareyle seçimin vurgusu; seçili metin kendi renginde kalır, odakta olmayan pencerede vurgu zemine doğru soluklaşır |
+| `search_match` | geçmişte aramanın (⌘F) bütün eşleşmelerinin vurgusu; metin kendi renginde kalır, odakta olmayan pencerede soluklaşır |
+| `search_current` | geçerli eşleşmenin vurgusu — ⏎/⌘G'nin gösterdiği; `search_match`'ten belirgin, seçim ikisinin de üstünde çizilir |
 | `success` | durum: başarı; sıfır çıkış koduyla biten komutun işareti |
 | `error` | durum: hata; sıfırdan farklı çıkış koduyla biten komutun işareti |
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |
@@ -933,7 +935,9 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   koyu temanın grisiyle (`#909093`), `success`/`error` yazılmazsa komut
   işaretleri koyu temanın yeşil ve kırmızısıyla, `selection` yazılmazsa seçim
   koyu temanın arduvazıyla (`#283042`) çizilir — açık bir temada koyu metnin
-  altında zor okunur, yani açık bir tema `selection`'ını yazmalı.
+  altında zor okunur, yani açık bir tema `selection`'ını yazmalı. Aynısı
+  `search_match` ile `search_current` için: yazılmazlarsa arama vurgusu koyu
+  temanın koyu sıcak tonlarıyla (`#302c1e`, `#503a0c`) gelir.
 
 ### Gömülü `bateri`
 
@@ -946,6 +950,8 @@ dim = "#909093"
 accent = "#7a9cc6"
 cursor = "#d9b063"
 selection = "#283042"
+search_match = "#302c1e"
+search_current = "#503a0c"
 success = "#8bb58b"
 error = "#d16d6a"
 
@@ -981,6 +987,8 @@ dim = "#696b70"
 accent = "#3d6aa8"
 cursor = "#8a6512"
 selection = "#dde6f3"
+search_match = "#f9f1d2"
+search_current = "#fee29a"
 success = "#3b7a3b"
 error = "#b5423d"
 

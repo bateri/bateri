@@ -42,7 +42,8 @@ impl Theme {
     /// ayrıştırılamadı.
     ///
     /// Roller (`background`, `foreground`, `dim`, `accent`, `cursor`,
-    /// `selection`, `success`, `error`) kökte, 16 renk
+    /// `selection`, `search_match`, `search_current`, `success`, `error`)
+    /// kökte, 16 renk
     /// `[ansi]` bölümünde; renk `"#rrggbb"` (büyük harf de olur). `Err` yalnız
     /// geçersiz TOML'da, ayar dosyasındaki anlamıyla.
     ///
@@ -62,6 +63,8 @@ impl Theme {
             ("accent", &mut theme.accent),
             ("cursor", &mut theme.cursor),
             ("selection", &mut theme.selection),
+            ("search_match", &mut theme.search_match),
+            ("search_current", &mut theme.search_current),
             ("success", &mut theme.success),
             ("error", &mut theme.error),
         ];
@@ -135,6 +138,8 @@ mod tests {
         accent: 0x000004,
         cursor: 0x000007,
         selection: 0x000008,
+        search_match: 0x000009,
+        search_current: 0x00000a,
         success: 0x000005,
         error: 0x000006,
         ansi: [
@@ -266,6 +271,30 @@ mod tests {
         assert_eq!(
             (inherited.success, inherited.error),
             (Theme::BATERI.success, Theme::BATERI.error)
+        );
+    }
+
+    #[test]
+    fn search_roles_are_read_and_inherited() {
+        // 033'ün iki rolü de kuralın istisnası değil: yazılan okunuyor,
+        // yazılmayan tabandan geliyor — biri yazılıp öteki yazılmasa da.
+        let theme = clean("search_current = \"#0a0b0c\"\n", &SENTINEL);
+        assert_eq!(
+            theme,
+            Theme {
+                search_current: 0x0a0b0c,
+                ..SENTINEL
+            }
+        );
+        let theme = clean("search_match = \"#0d0e0f\"\n", &SENTINEL);
+        assert_eq!(
+            (theme.search_match, theme.search_current),
+            (0x0d0e0f, SENTINEL.search_current)
+        );
+        let inherited = clean("background = \"#ffffff\"\n", &Theme::BATERI);
+        assert_eq!(
+            (inherited.search_match, inherited.search_current),
+            (Theme::BATERI.search_match, Theme::BATERI.search_current)
         );
     }
 

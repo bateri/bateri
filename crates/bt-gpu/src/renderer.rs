@@ -769,6 +769,11 @@ impl Renderer {
                 viewport_px,
             )
             .and_then(|()| self.encode_quads(&enc, frame.bg_instances(), viewport_px))
+            // **Arama zeminden sonra, seçimden önce** (033 Karar 7): önce
+            // bütün eşleşmeler, üstüne geçerli eşleşme, en üstte kullanıcının
+            // seçimi — Esc geçerli eşleşmeyi seçime çevirdiğinde de seçim
+            // görünür kalıyor. Metin hepsinin üstünde kendi renginde.
+            .and_then(|()| self.encode_search(&enc, frame, false, viewport_px))
             // **Seçim zeminden sonra, caret'ten ve glyph'lerden önce** (031):
             // metin seçimin üstünde kendi renginde okunuyor ve imleç seçimin
             // üstünde kalıyor — ters videonun "imleç kazanır" kuralı, artık
@@ -865,6 +870,9 @@ impl Renderer {
             zfar: 1.0,
         });
         self.encode_quads(enc, frame.fill_bg(), viewport_px)
+            // Arama bandın zemininden sonra, harflerinden önce — ızgaranın
+            // sırası (033 Karar 8); bantta seçim çizilmiyor.
+            .and_then(|()| self.encode_search(enc, frame, true, viewport_px))
             .and_then(|()| {
                 self.encode_glyphs(
                     enc,
@@ -1208,8 +1216,9 @@ impl Renderer {
 
     /// Seçimin parçalarını encode eder — [`Renderer::encode_caret`]'ın
     /// kardeşi: altıncı pipeline, iki fragment uniform'u (renk, yarıçap).
-    /// Uniform'lar kare başına tek, çünkü bir pencerede tek seçim ve tek renk
-    /// var; köşe kararı instance'ın maskesinde.
+    /// Uniform'lar çağrı başına tek: bir pencerede tek seçim ve tek renk var,
+    /// arama ise rol başına bir çağrı yapıyor ([`Renderer::encode_search`]);
+    /// köşe kararı instance'ın maskesinde.
     fn encode_selection(
         &self,
         enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
@@ -1226,6 +1235,42 @@ impl Renderer {
         fragment_uniform(enc, &rgba, 0);
         fragment_uniform(enc, &radius, 1);
         self.draw_quads(enc, instances, viewport_px)
+    }
+
+    /// Arama vurgusunu encode eder (033): seçimin pipeline'ından iki çağrı,
+    /// rol başına bir — renk uniform, yani iki rol iki encode. Sıra
+    /// `search_match` → `search_current`: geçerli eşleşme ötekilerin
+    /// üstünde. `fill` bandın listelerini seçiyor; viewport'u çağıran kurmuş.
+    /// Arama kapalıyken iki liste de boş ve encoder hiçbir şey görmüyor.
+    fn encode_search(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        frame: &Frame,
+        fill: bool,
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
+        let (matched, current) = if fill {
+            (
+                frame.fill_search_match_instances(),
+                frame.fill_search_current_instances(),
+            )
+        } else {
+            (
+                frame.search_match_instances(),
+                frame.search_current_instances(),
+            )
+        };
+        let radius = frame.selection_radius();
+        self.encode_selection(enc, matched, frame.search_match_rgba(), radius, viewport_px)
+            .and_then(|()| {
+                self.encode_selection(
+                    enc,
+                    current,
+                    frame.search_current_rgba(),
+                    radius,
+                    viewport_px,
+                )
+            })
     }
 
     /// Caret'i encode eder — [`Renderer::encode_quads`]'ın kardeşi, tek farkı
@@ -2042,7 +2087,9 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    use bt_core::{Block, CaretShape, Cell, Cursor, SelectionRun, Theme, UnderlineStyle};
+    use bt_core::{
+        Block, CaretShape, Cell, Cursor, SearchRun, SelectionRun, Theme, UnderlineStyle,
+    };
 
     use super::*;
     use crate::glyph_fx::{Effect, Fx, Kind};
@@ -2761,6 +2808,167 @@ mod tests {
         assert_eq!(at(100, 79), "selection", "iki satırın dikişi");
         assert_eq!(at(100, 80), "selection", "iki satırın dikişi");
         assert_eq!(at(159, 159), "clear", "alt koşunun sağ altı");
+    }
+
+    /// Arama bekçilerinin iki rengi: ara tonlar (sabit nokta değil), seçimin
+    /// [`MIDTONE`]'undan ve clear'ın `ACCENT`'inden ayrık — dördü de piksel
+    /// okumasında ayırt edilebilmeli.
+    const MATCH_SRGB: u32 = 0x3c6e5a;
+    const CURRENT_SRGB: u32 = 0x8a5a2c;
+
+    fn srgb_linear(hex: u32) -> LinearRgba {
+        LinearRgba::from_srgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+    }
+
+    fn search_run(row: u16, first: u16, last: u16, current: bool, continues: bool) -> SearchRun {
+        SearchRun {
+            row,
+            first,
+            last,
+            current,
+            continues,
+        }
+    }
+
+    /// Arama bekçilerinin ortak kurulumu, [`render_selection`] emsali: 40×80
+    /// yapay hücre (yarıçap 17.6), atlas yok. `fill` sıfır değilse bant o
+    /// kadar satır ve ızgara bir satır aşağıda ([`Frame::set_origin_rows`]),
+    /// yani bandın 0. satırı pencerenin 0..80'i. Okuyucu pikselin hangi
+    /// yüzeye ait olduğunu söyler.
+    fn render_search(
+        grid_runs: &[SearchRun],
+        fill_runs: &[SearchRun],
+        selection: &[SelectionRun],
+    ) -> impl Fn(usize, usize) -> &'static str + use<> {
+        const EDGE: usize = 256;
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let mut frame = Frame::default();
+        frame.clear(grid(40, 80), CaretStyle::default());
+        if !fill_runs.is_empty() {
+            frame.set_fill_rows(1);
+        }
+        frame.push_search(
+            grid_runs,
+            srgb_linear(MATCH_SRGB),
+            srgb_linear(CURRENT_SRGB),
+        );
+        frame.push_fill_search(fill_runs);
+        frame.push_selection(selection, MIDTONE);
+        if !fill_runs.is_empty() {
+            frame.set_origin_rows(1.0);
+        }
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        let srgb = |hex: u32| ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let near = |seen: (u8, u8, u8), expected: (u8, u8, u8)| {
+            seen.0.abs_diff(expected.0) <= 1
+                && seen.1.abs_diff(expected.1) <= 1
+                && seen.2.abs_diff(expected.2) <= 1
+        };
+        move |x, y| {
+            let p = pixel_at(&pixels, EDGE, x, y);
+            [
+                (MATCH_SRGB, "match"),
+                (CURRENT_SRGB, "current"),
+                (MIDTONE_SRGB, "selection"),
+                (Theme::BATERI.accent, "clear"),
+            ]
+            .into_iter()
+            .find(|&(hex, _)| near(p, srgb(hex)))
+            .map_or("blend", |(_, name)| name)
+        }
+    }
+
+    #[test]
+    fn search_roles_paint_their_colors_under_the_selection() {
+        // 033 Karar 7'nin sırası GPU'da: zemin → `search_match` →
+        // `search_current` → seçim. Eşleşme 0. satırın 0..=2'si, geçerli
+        // eşleşme 2. satırın 0..=1'i; seçim 0. satırın 2..=3'ü ve eşleşmenin
+        // son hücresini örtüyor — kullanıcının seçimi aramanın üstünde.
+        let at = render_search(
+            &[
+                search_run(0, 0, 2, false, false),
+                search_run(2, 0, 1, true, false),
+            ],
+            &[],
+            &[SelectionRun {
+                row: 0,
+                first: 2,
+                last: 3,
+            }],
+        );
+        assert_eq!(at(40, 40), "match", "eşleşme kendi renginde değil");
+        assert_eq!(
+            at(40, 200),
+            "current",
+            "geçerli eşleşme kendi renginde değil"
+        );
+        assert_eq!(at(100, 40), "selection", "seçim aramanın altında kaldı");
+        assert_eq!(at(140, 40), "selection");
+        // Yuvarlak köşe ve koşunun dışı.
+        assert_eq!(at(0, 0), "clear", "eşleşmenin köşesi yuvarlanmadı");
+        assert_eq!(at(0, 160), "clear", "geçerli eşleşmenin köşesi");
+        assert_eq!(at(40, 120), "clear", "satırlar arası boyandı");
+    }
+
+    #[test]
+    fn adjacent_matches_are_two_shapes_and_a_wrapped_match_is_one() {
+        // Ardışık satırlarda hizalı iki koşu: iki ayrı eşleşmeyse dikişte
+        // dört yuvarlak köşe (sol kenarın 79/80. satırları clear), tek
+        // eşleşmenin sarılmasıysa düz kenar (boyalı).
+        let runs = |continues| {
+            [
+                search_run(0, 0, 1, false, false),
+                search_run(1, 0, 1, false, continues),
+            ]
+        };
+        let at = render_search(&runs(false), &[], &[]);
+        assert_eq!(at(0, 79), "clear", "üst eşleşmenin alt köşesi kare");
+        assert_eq!(at(0, 80), "clear", "alt eşleşmenin üst köşesi kare");
+        assert_eq!(at(40, 40), "match");
+        assert_eq!(at(40, 120), "match");
+        let at = render_search(&runs(true), &[], &[]);
+        assert_eq!(at(0, 79), "match", "sarılan eşleşme ikiye bölündü");
+        assert_eq!(at(0, 80), "match", "sarılan eşleşme ikiye bölündü");
+    }
+
+    #[test]
+    fn the_fill_band_highlights_its_matches() {
+        // 033 Karar 8: bandın satırları gerçek geçmiş, eşleşmeleri de
+        // vurgulanıyor — bandın kendi viewport'unda. Bant 0..80'de (ızgara bir
+        // satır aşağıda); ızgaranın aynı numaralı satırına (80..160) hiçbir
+        // şey düşmemeli.
+        let at = render_search(&[], &[search_run(0, 0, 1, true, false)], &[]);
+        assert_eq!(at(40, 40), "current", "bantta vurgu yok");
+        assert_eq!(at(40, 120), "clear", "bandın vurgusu ızgaraya düştü");
+    }
+
+    #[test]
+    fn a_frame_without_search_draws_todays_picture() {
+        // Arama kapalıyken (iki liste boş) encoder vurguyu hiç görmüyor ve
+        // kare bugünküyle **bit bit** aynı; doldurmanın geri alma şeridiyle
+        // aynı örüntü. Açıkken ayrışmak zorunda, yoksa eşitlik bir şey
+        // söylemez.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let draw = |search: Option<&[SearchRun]>| {
+            let mut frame = Frame::default();
+            frame.clear(grid(16, 32), CaretStyle::default());
+            frame.push(bg_cell(0, 0, MIDTONE));
+            frame.set_fill_rows(1);
+            frame.push_fill(bg_cell(1, 0, MIDTONE));
+            if let Some(runs) = search {
+                frame.push_search(runs, srgb_linear(MATCH_SRGB), srgb_linear(CURRENT_SRGB));
+                frame.push_fill_search(&[]);
+            }
+            frame.set_origin_rows(1.0);
+            render_offscreen(&r, EDGE, ACCENT, &frame)
+        };
+        let today = draw(None);
+        assert!(today == draw(Some(&[])), "boş arama kareyi değiştirdi");
+        assert!(
+            today != draw(Some(&[search_run(0, 1, 2, false, false)])),
+            "arama hiç çizilmedi"
+        );
     }
 
     /// Bir dörtgen bölgenin pikselleri, [`pixel_at`]'in üçlüsüyle.

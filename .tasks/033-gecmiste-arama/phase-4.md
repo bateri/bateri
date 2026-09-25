@@ -75,5 +75,6 @@ _Requirements: R4, R5, R6, R7_
 - [ ] Odak iki bit
 - [ ] `search_next` + reveal + süzülme; Esc→seçim; ⌘E + find panosu
 - [ ] Gezinmenin (`search_next`) hedefi vurgunun kümesinden (phase-1'den devir): bastırılan satıra değen ya da mürekkepsiz eşleşme atlanır; desen `SearchSlot`'tan ödünç ya da ayrı bir kopya (yuva bugün tek desen tutuyor ve kare onu ödünç alıyor); ⌘E'nin kaçırması `bt_core::escape_search`
+- [ ] Arama vurgusunun renkleri gerçek pencerede, iki gömülü temada (phase-2'den devir: ⌘F olmadan gerçek pencerede görülemedi, değerler offscreen dökümle seçildi): eşleşme ile geçerli eşleşme ayrışıyor mu, seçimle (üstünde) karışıyor mu, sarı/kehribar metin okunuyor mu; odaksız pencerede solma. Vurgu rengi bugün `link.rs`'te tek `focused` bitinden — "Odak iki bit" maddesi onu da key bitine taşımalı
 - [ ] Test: yukarıdaki hermetik senaryolar
 - [ ] Doğrulama geçti (`make hepsi` + `make duman`)
