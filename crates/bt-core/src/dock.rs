@@ -18,6 +18,7 @@
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::cluster::{ClusterId, Clusters, Walk};
 use crate::color::{self, LinearRgba, Theme};
 use crate::session::{Cell, CellHalf, SelectKind, SelectionRun, UnderlineStyle, WORD_SEPARATORS};
 
@@ -284,6 +285,10 @@ impl FromIterator<Cell> for EditCells {
 /// Eski taraftan yalnız yeni tamponda artık olmayan şey taşınıyor — hayaletin
 /// karakteri ve vurgusu — çünkü çağıran ([`crate::Session::dock`]) bu
 /// hesaptan hemen sonra tamponu yeni aynayla eziyor.
+// `Delete`'in hayalet listesi kod noktası kapasitesiyle büyük (~0.8 KB,
+// [`GHOST_CHARS`]): değer karede bir kez ve yığında doğuyor, `Box` ise hem
+// kare başına bir ayırma hem `Copy`'nin kaybı olurdu.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Change {
     /// Canlanmayan değişim.
@@ -297,11 +302,59 @@ pub(crate) enum Change {
     Delete { ghosts: Ghosts },
 }
 
-/// Silinen glyph'ler ve eski satırdaki vurguları.
+/// Silinen kod noktaları ve eski satırdaki vurguları.
+///
+/// **Bütün kod noktaları**, yalnız glyph'ler değil (035): hayaletlerin
+/// düzeni kümeyi yeni düzendekiyle aynı kurabilsin — `🇹🇷`'nin hayaleti tek
+/// glyph, `❤️`'nin VS16'sı taban karakterinin emoji sunumunu taşıyor.
+/// Sıfır genişlikli kod noktası düzende hücre almıyor, yani kümeleme
+/// kapalıyken hayaletlerin konumu bugünküyle aynı.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Ghosts {
     len: usize,
-    chars: [(char, HighlightStyle); EDIT_MAX],
+    chars: [(char, HighlightStyle); GHOST_CHARS],
+}
+
+/// [`Ghosts`]'un kod noktası kapasitesi: [`EDIT_MAX`] glyph'in her biri
+/// birkaç kod noktalı bir küme olabiliyor (`👍🏽` iki, `❤️` iki, aile beş).
+/// Aşan silme [`Change::Reset`]'e düşüyor — [`EDIT_MAX`]'ın kuralı.
+const GHOST_CHARS: usize = EDIT_MAX * 4;
+
+/// `index`'i içeren kümenin aralığı, `[start, end)` — dock'un seçim uçları,
+/// ⇧←/⇧→ adımı ve dört düzenleme tuşunun (035 Karar 7) kümeyi bölmemesi.
+/// Kümeleme kapalıyken tek kod noktası; `index` metnin dışındaysa `None`.
+///
+/// Tek küme kuralı ([`Walk`]): düzen, ızgara ve tazelik kapısıyla aynı.
+pub(crate) fn cluster_span(
+    chars: impl IntoIterator<Item = char>,
+    index: usize,
+    cluster: bool,
+) -> Option<(usize, usize)> {
+    if !cluster {
+        return chars.into_iter().nth(index).map(|_| (index, index + 1));
+    }
+    let mut found = None;
+    Walk::new().run(chars, |span| {
+        if (span.start..span.end).contains(&index) {
+            found = Some((span.start, span.end));
+        }
+    });
+    found
+}
+
+/// `index` `text`'te bir küme sınırı mı (035 R4.2): düzenleme bir kümenin
+/// içinden başlıyor ya da bitiyorsa (`🇹🇷`'nin yalnız `🇷`'si silindi, `👍`'e
+/// ten rengi eklendi) canlanan şey yarım bir glyph olurdu ve fark
+/// [`Change::Reset`]'e düşüyor — metin anında belirir. Tek küme kuralı
+/// ([`Walk`]); sona eşit indeks sınır.
+fn is_cluster_boundary(text: &str, index: usize) -> bool {
+    let mut boundary = index == 0;
+    let mut len = 0;
+    Walk::new().run(text.chars(), |cluster| {
+        boundary |= cluster.start == index;
+        len = cluster.end;
+    });
+    boundary || index >= len
 }
 
 impl Ghosts {
@@ -367,8 +420,21 @@ pub(crate) fn diff(old: &DockState, new: &DockState) -> Change {
     };
     let old_len = old_buffer.chars().count();
     let new_len = new.buffer.chars().count();
-    let glyphs =
-        |run: &mut dyn Iterator<Item = char>| run.filter(|&ch| column_width(ch) > 0).count();
+    // Glyph sayısı: kümeleme açıkken **küme** (035) — `🇹🇷` tek girdi ve tek
+    // glyph, iki RI değil. Aralığın iki ucu aşağıda küme sınırı diye
+    // sınanıyor, yani aralığı tek başına kümelemek bağlamındakiyle aynı.
+    let glyphs = |run: &mut dyn Iterator<Item = char>| {
+        if new.cluster {
+            let mut count = 0;
+            Walk::new().run(run, |cluster| count += usize::from(cluster.width > 0));
+            count
+        } else {
+            run.filter(|&ch| column_width(ch) > 0).count()
+        }
+    };
+    let bounds = |text: &str, at: &[usize]| {
+        !new.cluster || at.iter().all(|&index| is_cluster_boundary(text, index))
+    };
     let fits = |count: usize| count > 0 && count <= EDIT_MAX && count as u64 <= inputs;
 
     if new_len > old_len {
@@ -382,6 +448,11 @@ pub(crate) fn diff(old: &DockState, new: &DockState) -> Change {
             .take(start)
             .chain(new.buffer.chars().skip(caret));
         if !old_buffer.chars().eq(rest) {
+            return Change::Reset;
+        }
+        // Eklemenin iki ucu yeni metinde, birleşme noktası eski metinde küme
+        // sınırı olmalı: `👍`'e eklenen ten rengi yeni bir glyph değil.
+        if !bounds(&new.buffer, &[start, caret]) || !bounds(old_buffer, &[start]) {
             return Change::Reset;
         }
         if !fits(glyphs(
@@ -415,12 +486,18 @@ pub(crate) fn diff(old: &DockState, new: &DockState) -> Change {
         if count == 0 || !new.buffer.chars().eq(rest) {
             return Change::Reset;
         }
+        // Silinen aralığın iki ucu eski metinde, birleşme noktası yeni
+        // metinde küme sınırı olmalı: `🇹🇷`'nin yarısı silinmiş bir glyph
+        // değil, `🇹x🇷`'den `x`'in silinmesi iki yarıyı bayrağa birleştiriyor.
+        if !bounds(old_buffer, &[caret, caret + count]) || !bounds(&new.buffer, &[caret]) {
+            return Change::Reset;
+        }
         let mut ghosts = Ghosts {
             len: 0,
-            chars: [(' ', HighlightStyle::default()); EDIT_MAX],
+            chars: [(' ', HighlightStyle::default()); GHOST_CHARS],
         };
         let run = old_buffer.chars().enumerate().skip(caret).take(count);
-        for (index, ch) in run.filter(|&(_, ch)| column_width(ch) > 0) {
+        for (index, ch) in run {
             let Some(slot) = ghosts.chars.get_mut(ghosts.len) else {
                 return Change::Reset;
             };
@@ -428,7 +505,7 @@ pub(crate) fn diff(old: &DockState, new: &DockState) -> Change {
             *slot = (ch, style_at(old, pre + index));
             ghosts.len += 1;
         }
-        if !fits(ghosts.len) {
+        if !fits(glyphs(&mut ghosts.as_slice().iter().map(|&(ch, _)| ch))) {
             return Change::Reset;
         }
         Change::Delete { ghosts }
@@ -709,7 +786,9 @@ pub(crate) fn hit(
                 if part != Part::Post {
                     text_end = end;
                 }
-                last = Some(part);
+                // Kümenin kod noktası sayısıyla (035): sarma sorusu kümenin
+                // **arkasına** bakıyor, baş karakterin değil.
+                last = Some((part, placed.end - placed.index));
             }
         },
     );
@@ -718,10 +797,12 @@ pub(crate) fn hit(
     }
     Some(match last {
         // `BUFFER` bu satırdan sonra sürüyor (sarma): son çizilenin sağ yarısı.
-        Some(Part::Buffer(index)) if index + 1 < len => {
+        // Son çizilen bir kümeyse sorulan şey kümenin arkası (`span`): `🇹🇷`
+        // ile biten `BUFFER`'da `🇷` sürüyor sayılmamalı.
+        Some((Part::Buffer(index), span)) if index + span < len => {
             at(Part::Buffer(index), CellHalf::Right, text_end)
         }
-        Some(Part::Pre) if buffer > 0 => at(Part::Buffer(shift), CellHalf::Left, text_end),
+        Some((Part::Pre, _)) if buffer > 0 => at(Part::Buffer(shift), CellHalf::Left, text_end),
         // Çizilen karakteri olmayan satır (satır sonunun açtığı boş satır ya
         // da pencerenin ötesi): satırın başladığı yer.
         None => match target_line.map(|line| part(line.start)) {
@@ -754,11 +835,16 @@ pub(crate) fn hit(
 ///
 /// Kare yolunda **koşmuyor**: aralık seçim değiştiğinde bir kez çözülüp
 /// seçimin yanında saklanıyor ([`crate::shell::DockSelection`]).
+///
+/// `cluster` aynanın kümeleme bayrağı ([`DockState::cluster`]): uçlar küme
+/// sınırına iniyor ([`boundary`]). Kelime ve satır adımı zaten sınırda —
+/// ayırıcılar ve `\n` hiçbir kümenin içinde değil.
 pub(crate) fn selection_range(
     buffer: &str,
     kind: SelectKind,
     anchor: DockPoint,
     head: DockPoint,
+    cluster: bool,
 ) -> (usize, usize) {
     let chars: Vec<char> = buffer.chars().collect();
     let len = chars.len();
@@ -778,7 +864,10 @@ pub(crate) fn selection_range(
             (start, end.max(start))
         }
         SelectKind::Simple => {
-            let (a, h) = (boundary(&chars, anchor), boundary(&chars, head));
+            let (a, h) = (
+                boundary(&chars, anchor, cluster),
+                boundary(&chars, head, cluster),
+            );
             (a.min(h), a.max(h))
         }
         SelectKind::Word => {
@@ -804,8 +893,22 @@ pub(crate) fn selection_range(
 /// Noktanın sınırı: sol yarı karakterin önü, sağ yarı arkası — arkasındaki
 /// sıfır genişlikliler (birleştiriciler) karakterle birlikte kalıyor, yoksa
 /// `é` harfi aksanından ayrılırdı.
-fn boundary(chars: &[char], point: DockPoint) -> usize {
+///
+/// **Kümeleme açıkken birim küme** (035 R4.2): [`hit`] kümenin baş
+/// karakterini veriyor ve sağ yarı kümenin **sonuna** iniyor — `🇹🇷`'nin sağ
+/// yarısına tık iki RI'nin arasına değil bayrağın arkasına düşüyor. Sol yarı
+/// da kümenin başına: uç hiçbir yoldan bir kümenin içinde kalmıyor.
+fn boundary(chars: &[char], point: DockPoint, cluster: bool) -> usize {
     let len = chars.len();
+    if cluster && point.index < len {
+        let (start, end) = cluster_span(chars.iter().copied(), point.index, true)
+            .unwrap_or((point.index, point.index + 1));
+        return if point.half == CellHalf::Left {
+            start
+        } else {
+            end
+        };
+    }
     if point.half == CellHalf::Left || point.index >= len {
         return point.index.min(len);
     }
@@ -951,6 +1054,7 @@ pub(crate) fn render_with(
     selection: Option<(usize, usize)>,
     change: Option<&Change>,
     runs: &mut Vec<SelectionRun>,
+    clusters: &mut Clusters,
     mut sink: impl FnMut(Cell),
     mut edits: impl FnMut(DockEdit),
 ) -> (Dock, usize, usize) {
@@ -1075,7 +1179,7 @@ pub(crate) fn render_with(
             }
             let Placed {
                 index,
-                end: _,
+                end,
                 ch,
                 width,
                 row,
@@ -1092,6 +1196,11 @@ pub(crate) fn render_with(
             let is_selected = selectable_at(index).is_some_and(|at| selected.contains(&at));
             let lead = Cell {
                 row,
+                // Kümenin metni akıştan: küme nadir ve akış kısa, yani
+                // yürüyüşün ikinci bir tamponu yok ([`placed_cluster`]).
+                cluster: placed_cluster(end - index, width, clusters, || {
+                    self::stream(state).skip(index).take(end - index)
+                }),
                 ..cell(ch, col, base, style, theme, width == 2, is_selected)
             };
             // **Seçim içerik yaratmaz** (Karar 4, ızgaranın kuralı): koşu ilk
@@ -1192,10 +1301,10 @@ pub(crate) fn render_with(
                 usize::from(cols.grid),
                 end.caret_col,
                 usize::from(TEXT_COL),
-                // Hayalet listesi yalnız glyph taşıyor (sıfır genişlikliler
-                // süzülmüş), yani küme kurulamaz; farkın küme sınırına
-                // hizalanması R4.2'nin (phase-4).
-                false,
+                // Hayalet listesi silinen **bütün** kod noktalarını taşıyor
+                // ([`Ghosts`]), yani küme yeni düzendekiyle aynı kuruluyor:
+                // `🇹🇷`'nin hayaleti tek glyph, yarım bayrak değil.
+                state.cluster,
                 |_| {},
                 |placed| {
                     let row = end.caret_row + placed.row;
@@ -1206,6 +1315,19 @@ pub(crate) fn render_with(
                     // `col < cols`; ikisi de `u16`'dan.
                     let ghost = Cell {
                         row: (row - top) as u16,
+                        cluster: placed_cluster(
+                            placed.end - placed.index,
+                            placed.width,
+                            clusters,
+                            || {
+                                ghosts
+                                    .as_slice()
+                                    .iter()
+                                    .skip(placed.index)
+                                    .take(placed.end - placed.index)
+                                    .map(|&(ch, _)| ch)
+                            },
+                        ),
                         ..cell(
                             placed.ch,
                             placed.col as u16,
@@ -1306,6 +1428,7 @@ pub(crate) fn render(
         None,
         change,
         &mut Vec::new(),
+        &mut Clusters::default(),
         sink,
         edits,
     )
@@ -1944,7 +2067,25 @@ fn cell(
         // boyamıyor. 023'te bu satır `false` sabitiydi ve gerekçesi *o
         // aritmetikle* sağlamdı; aritmetik değişince değişmez de kalktı.
         wide,
+        // Kümeyi çağıran koyuyor: bu fonksiyon tek karakter görüyor.
+        cluster: None,
     }
+}
+
+/// Düzendeki bir kümenin sınır kimliği (035 Karar 4B/6): yalnız **geniş** ve
+/// birden çok kod noktalı küme tabloya iniyor — ızgaranın kuralı
+/// (`session::cell_cluster`). `chars` kümenin kod noktaları; yalnız küme
+/// doğacaksa okunuyor, yani düz metin bir karşılaştırmadan fazlasını
+/// ödemiyor. Kümeleme kapalıyken `len` her zaman `1`.
+fn placed_cluster<I: Iterator<Item = char>>(
+    len: usize,
+    width: usize,
+    clusters: &mut Clusters,
+    chars: impl FnOnce() -> I,
+) -> Option<ClusterId> {
+    (len > 1 && width == 2)
+        .then(|| clusters.push_chars(chars()))
+        .flatten()
 }
 
 /// Aynanın renk kaydı → çizilecek renk.
@@ -2120,6 +2261,7 @@ mod tests {
             selection,
             None,
             &mut runs,
+            &mut Clusters::default(),
             |cell| cells.push(cell),
             |_| (),
         );
@@ -2409,6 +2551,7 @@ mod tests {
             None,
             None,
             &mut Vec::new(),
+            &mut Clusters::default(),
             |cell| cells.push(cell),
             |_| (),
         );
@@ -3682,6 +3825,7 @@ mod tests {
             None,
             change.as_ref(),
             &mut Vec::new(),
+            &mut Clusters::default(),
             |_| (),
             |edit| edits.push(edit),
         );
@@ -3972,10 +4116,19 @@ mod tests {
         assert_eq!(far, point(18, CellHalf::Left));
         // Sınır `len`'e kırpılıyor; kelime ızgaradaki gibi yalnız bitişikte
         // son kelimeyi alıyor, uzakta hiçbir şeyi.
-        assert_eq!(selection_range("ls", SelectKind::Simple, far, far), (2, 2));
-        assert_eq!(selection_range("ls", SelectKind::Word, far, far), (2, 2));
+        assert_eq!(
+            selection_range("ls", SelectKind::Simple, far, far, false),
+            (2, 2)
+        );
+        assert_eq!(
+            selection_range("ls", SelectKind::Word, far, far, false),
+            (2, 2)
+        );
         let near = point(2, CellHalf::Left);
-        assert_eq!(selection_range("ls", SelectKind::Word, near, near), (0, 2));
+        assert_eq!(
+            selection_range("ls", SelectKind::Word, near, near, false),
+            (0, 2)
+        );
         // `Live` olmayan aynada seçilecek metin yok.
         let idle = DockState {
             status: DockStatus::Idle,
@@ -4084,7 +4237,7 @@ mod tests {
     #[test]
     fn simple_and_line_selections_resolve_to_buffer_ranges() {
         let buffer = "ls -la";
-        let range = |kind, a, b| selection_range(buffer, kind, a, b);
+        let range = |kind, a, b| selection_range(buffer, kind, a, b, false);
         // Sürüklemesiz tık boş.
         let at = point(2, CellHalf::Left);
         assert_eq!(range(SelectKind::Simple, at, at), (2, 2));
@@ -4117,6 +4270,7 @@ mod tests {
                 SelectKind::Line,
                 point(a, CellHalf::Left),
                 point(b, CellHalf::Left),
+                false,
             )
         };
         assert_eq!(line(9, 9), (7, 13));
@@ -4131,7 +4285,8 @@ mod tests {
                 composed,
                 SelectKind::Simple,
                 point(0, CellHalf::Left),
-                point(0, CellHalf::Right)
+                point(0, CellHalf::Right),
+                false
             ),
             (0, 2)
         );
@@ -4141,7 +4296,7 @@ mod tests {
     fn a_word_selection_follows_alacritty_semantic_rules() {
         let word = |buffer: &str, index: usize| {
             let at = point(index, CellHalf::Left);
-            let (start, end) = selection_range(buffer, SelectKind::Word, at, at);
+            let (start, end) = selection_range(buffer, SelectKind::Word, at, at, false);
             buffer
                 .chars()
                 .skip(start)
@@ -4165,7 +4320,161 @@ mod tests {
             SelectKind::Word,
             point(1, CellHalf::Left),
             point(9, CellHalf::Left),
+            false,
         );
         assert_eq!((start, end), (0, 13));
+    }
+
+    // ---- Kümenin çizimi ve düzenlemesi (035 phase-4) ----
+
+    /// Kümeli ayna (`cluster` açık), satır sonunda caret.
+    fn clustered(buffer: &str, answers: u64) -> DockState {
+        DockState {
+            cluster: true,
+            ..at_end(buffer, answers)
+        }
+    }
+
+    /// Eski aynadan yenisine kümeli çizim: hücreler, düzenlemeler ve tablo.
+    fn clustered_render(old: &DockState, new: &DockState) -> (Vec<Cell>, Vec<DockEdit>, Clusters) {
+        let change = change(old, new);
+        let (mut cells, mut edits, mut clusters) = (Vec::new(), Vec::new(), Clusters::default());
+        render_with(
+            new,
+            &DockContext::default(),
+            None,
+            &THEME,
+            same(COLS),
+            CONTEXT_ROW,
+            None,
+            true,
+            None,
+            change.as_ref(),
+            &mut Vec::new(),
+            &mut clusters,
+            |cell| cells.push(cell),
+            |edit| edits.push(edit),
+        );
+        (cells, edits, clusters)
+    }
+
+    fn cluster_text(clusters: &Clusters, cell: &Cell) -> Option<String> {
+        cell.cluster
+            .and_then(|id| clusters.get(id))
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn a_dock_cluster_reaches_the_sink_as_one_string() {
+        let state = clustered("a🇹🇷e\u{301}", 1);
+        let (cells, _, clusters) = clustered_render(&state, &state);
+        let texts: Vec<(Option<char>, Option<String>)> = cells
+            .iter()
+            .filter(|cell| cell.ch.is_some())
+            .map(|cell| (cell.ch, cluster_text(&clusters, cell)))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                (Some('a'), None),
+                (Some('🇹'), Some("🇹🇷".into())),
+                // Tek sütunlu birleştirici taban karakterle (Karar 6).
+                (Some('e'), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_whole_cluster_erased_leaves_one_clustered_ghost() {
+        // Widget `[S,E)`'yi siliyor: tek girdi, tek glyph, tek hayalet.
+        let (_, edits, clusters) = clustered_render(&clustered("a🇹🇷", 1), &clustered("a", 2));
+        let DockEdit::Erase { ghosts, .. } = only(&edits) else {
+            panic!("silme bekleniyordu: {edits:?}");
+        };
+        let ghosts = ghosts.as_slice();
+        assert_eq!(ghosts.len(), 1, "{ghosts:?}");
+        assert!(ghosts[0].wide);
+        assert_eq!(cluster_text(&clusters, &ghosts[0]).as_deref(), Some("🇹🇷"));
+        // Gelen bayrak da tek glyph ve kümesiyle.
+        let (_, edits, clusters) = clustered_render(&clustered("a", 1), &clustered("a🇹🇷", 2));
+        let DockEdit::Arrive { cells, .. } = only(&edits) else {
+            panic!("geliş bekleniyordu: {edits:?}");
+        };
+        assert_eq!(cells.as_slice().len(), 1);
+        assert_eq!(
+            cluster_text(&clusters, &cells.as_slice()[0]).as_deref(),
+            Some("🇹🇷")
+        );
+    }
+
+    #[test]
+    fn an_edit_inside_a_cluster_does_not_animate_half_of_it() {
+        // Kapı kapalıyken ZLE kod noktası siliyor: yarım bayrak canlanmıyor,
+        // metin anında değişiyor. Ten rengi eklemek de yeni bir glyph değil.
+        for (old, new) in [("a🇹🇷", "a🇹"), ("a👍", "a👍🏽"), ("🇹x🇷", "🇹🇷")]
+        {
+            let (_, edits, _) = clustered_render(&clustered(old, 1), &clustered(new, 2));
+            assert_eq!(edits, vec![DockEdit::Reset], "{old:?} → {new:?}");
+        }
+        // Kümeleme kapalıyken bugünkü gibi: yarım bayrak tek RI'lik silme.
+        let (old, new) = (at_end("a🇹🇷", 1), at_end("a🇹", 2));
+        assert!(matches!(
+            only(&edits_between(&old, &new, COLS)),
+            DockEdit::Erase { .. }
+        ));
+    }
+
+    #[test]
+    fn selection_ends_snap_to_cluster_bounds() {
+        let point = |index, half| DockPoint { index, half };
+        // `a🇹🇷b`: bayrağın sağ yarısı arkasına, sol yarısı önüne iniyor.
+        let simple = |a, h, cluster| selection_range("a🇹🇷b", SelectKind::Simple, a, h, cluster);
+        assert_eq!(
+            simple(point(0, CellHalf::Left), point(1, CellHalf::Right), true),
+            (0, 3)
+        );
+        assert_eq!(
+            simple(point(4, CellHalf::Left), point(2, CellHalf::Left), true),
+            (1, 4),
+            "kümenin içine düşen uç başına"
+        );
+        assert_eq!(
+            simple(point(0, CellHalf::Left), point(1, CellHalf::Right), false),
+            (0, 2),
+            "kapalı okunuş kod noktası"
+        );
+        // Çift tık bayrağı bütün alıyor.
+        let at = point(2, CellHalf::Left);
+        assert_eq!(
+            selection_range("a 🇹🇷 b", SelectKind::Word, at, at, true),
+            (2, 4)
+        );
+    }
+
+    #[test]
+    fn the_right_half_of_a_cluster_hits_past_it() {
+        // `🇹🇷` metin sütununda: sağ yarıya tık baş karakterin sağ yarısı ve
+        // sınırı kümenin arkası — `🇹`/`🇷` arası değil.
+        let state = clustered("🇹🇷", 1);
+        let right = hit(&state, 0, COLS, 0, TEXT_COL + 1, CellHalf::Right).expect("isabet");
+        assert_eq!(
+            right,
+            DockPoint {
+                index: 0,
+                half: CellHalf::Right
+            }
+        );
+        let chars: Vec<char> = state.buffer.chars().collect();
+        assert_eq!(boundary(&chars, right, true), 2);
+        // Metnin sağındaki boşluk `BUFFER`'ın ötesine (sonu + uzaklık, kelime
+        // seçiminin "boşluk" kuralı): son küme sarılmış bir satırın devamı
+        // sayılmıyor — sayılsaydı cevap bayrağın sağ yarısı olurdu.
+        assert_eq!(
+            hit(&state, 0, COLS, 0, TEXT_COL + 5, CellHalf::Left),
+            Some(DockPoint {
+                index: 5,
+                half: CellHalf::Left
+            }),
+        );
     }
 }

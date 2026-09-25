@@ -38,4 +38,5 @@ _Requirements: R5_
 - [ ] Varsayılan açık
 - [ ] `CLAUDE.md` ve yol haritası
 - [ ] `Atlas::slot`'un Left→Whole kısayolu `slot != TOFU`'yu düzlemsiz soruyor (023 kodu; renk düzleminin 0. yuvası TOFU sanılır — phase-1'in `cluster_as_base`'te düzelttiği karışıklığın ikizi): düzlem koşulunu ekle, bekçi yaz ← phase-1 ARTIK
+- [ ] Basılı ⌫/⌦/←/→ kümeyi yine bölebiliyor: küme komutu nesli ilerletiyor, ayna cevap verene kadar kapı kapalı ve araya düşen tekrar tuşu bugünkü yoldan ZLE'ye kod noktası olarak gidiyor (`🇹🇷🇺🇸`'de ikinci ⌫ yalnız `🇷`'yi silebilir). Kapı kapalıyken son aynaya göre tüketmek/kuyruklamak bir tuş davranışı kararı — varsayılan açılmadan önce seç ya da bilinen sınır olarak yaz ← phase-4 `/code-review`
 - [ ] Doğrulama geçti (`make hepsi` + `make duman`)

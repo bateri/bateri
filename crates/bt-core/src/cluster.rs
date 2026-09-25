@@ -20,6 +20,8 @@
 //! almak, yani alacritty'nin özel yollarını yeniden yazmak olurdu. Dock aynı
 //! sayıyı buradan okuduğu için ızgarayla bit bit aynı sütunu tutuyor.
 
+use std::num::NonZeroU32;
+
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Sıfır genişlikli birleştirici (U+200D). Arkasındaki emoji sunumlu kod
@@ -194,9 +196,102 @@ impl Walk {
     }
 }
 
+/// Karede bir kümenin kimliği — [`Clusters`]'taki sırası.
+///
+/// `NonZeroU32` (sıra + 1): `Option<ClusterId>` niche ile 4 bayt, yani
+/// sınır [`crate::Cell`]'i kümesiz hücrede de aynı kalıbı taşıyor ve kümesiz
+/// hücre bir dal fazlasını bile ödemiyor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ClusterId(NonZeroU32);
+
+/// Kare başına küme tablosu (035 Karar 4B): sınır hücresinin
+/// [`crate::Cell::cluster`]'ı buradaki bir dizgiyi gösteriyor.
+///
+/// **Sahibi çizen taraf, dolduran [`crate::Session`]** — [`crate::SelectionRuns`]
+/// emsali: tablo `frame()`'in ve `dock()`'un `&mut` argümanı, çağıran onu
+/// listeleriyle birlikte tutup temizliyor. Hücreye dizgi koymak (4A) her
+/// çizilen hücreyi ~40 bayt büyütürdü; oturum ömürlü bir interner (4C)
+/// sonsuz büyür ve kilit isterdi.
+///
+/// Dizgiler tek tamponda, uçlarıyla: kare başına küme başına ayırma yok,
+/// `clear` kapasiteyi koruyor.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Clusters {
+    text: String,
+    /// Her kümenin `text`'teki **bitişi**; başı bir öncekinin bitişi.
+    ends: Vec<u32>,
+}
+
+impl Clusters {
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.ends.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    /// Dizgiyi ekler ve kimliğini verir. Kimlik ya da bayt uzayı tükendiyse
+    /// `None` — hücre o zaman kümesiz, yani **taban karakteriyle** çiziliyor
+    /// (şekillenmeyen kümenin cevabıyla aynı, 035 R1.1).
+    pub fn push(&mut self, cluster: &str) -> Option<ClusterId> {
+        self.push_chars(cluster.chars())
+    }
+
+    /// [`Clusters::push`]'un kod noktası kod noktası hâli: ızgaranın hücresi
+    /// kümeyi taban + `zerowidth` olarak, dock'un düzeni akışın bir aralığı
+    /// olarak taşıyor — ikisi de ara bir `String` kurmadan doğrudan tampona.
+    pub(crate) fn push_chars(
+        &mut self,
+        chars: impl IntoIterator<Item = char>,
+    ) -> Option<ClusterId> {
+        let start = self.text.len();
+        self.text.extend(chars);
+        let id = u32::try_from(self.ends.len() + 1)
+            .ok()
+            .and_then(NonZeroU32::new);
+        match (u32::try_from(self.text.len()), id) {
+            (Ok(end), Some(id)) => {
+                self.ends.push(end);
+                Some(ClusterId(id))
+            }
+            _ => {
+                self.text.truncate(start);
+                None
+            }
+        }
+    }
+
+    /// Kimliğin dizgisi; başka bir tablonun (ya da temizlenmiş bir karenin)
+    /// kimliği `None` — çizim yolunda, yani panik değil taban karakter.
+    pub fn get(&self, id: ClusterId) -> Option<&str> {
+        let index = id.0.get() as usize - 1;
+        let end = *self.ends.get(index)? as usize;
+        let start = match index.checked_sub(1) {
+            Some(before) => *self.ends.get(before)? as usize,
+            None => 0,
+        };
+        self.text.get(start..end)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cluster_table_returns_what_was_pushed() {
+        let mut table = Clusters::default();
+        let flag = table.push("🇹🇷").expect("kimlik");
+        let family = table.push("👨\u{200D}👩\u{200D}👧").expect("kimlik");
+        assert_eq!(table.get(flag), Some("🇹🇷"));
+        assert_eq!(table.get(family), Some("👨\u{200D}👩\u{200D}👧"));
+        assert_eq!(std::mem::size_of::<Option<ClusterId>>(), 4);
+        table.clear();
+        assert!(table.is_empty());
+        assert_eq!(table.get(flag), None, "temizlenmiş tablonun kimliği");
+    }
 
     /// Dizgiyi kümelere böler: her kümenin metni ve sütunu.
     fn split(text: &str) -> Vec<(String, usize)> {

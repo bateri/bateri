@@ -74,9 +74,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    Blocks, CaretStyle, Cursor, CursorMotion, DirtyFlag, DockBudget, DockCols, DockContext,
-    DockState, Erase, Keypress, LinearRgba, SearchRuns, SelectionRun, SelectionRuns, Session,
-    Theme,
+    Blocks, CaretStyle, Clusters, Cursor, CursorMotion, DirtyFlag, DockBudget, DockCols,
+    DockContext, DockState, Erase, Keypress, LinearRgba, SearchRuns, SelectionRun, SelectionRuns,
+    Session, Theme,
 };
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
@@ -958,7 +958,7 @@ define_class!(
                 // Dock'un statik listeleri korunuyor, yalnız efektler
                 // yeniden basılıyor (`move_caret` emsali).
                 if !fx_idle {
-                    frame.set_dock_fx(glyph_fx.iter(), theme.cursor_linear());
+                    frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), theme.cursor_linear());
                 }
                 // CPU örneği **yazılmıyor** ve bu bir eksiklik değil:
                 // `cpu_kare` `session.frame`'in kilit beklemesini ölçüyor ve
@@ -1023,7 +1023,11 @@ define_class!(
                             // `set_dock_fx`'e uğramadan eski listeleri yarı
                             // yolda donmuş olarak yeniden çizerdi
                             // (`/code-review`).
-                            frame.set_dock_fx(std::iter::empty(), theme.cursor_linear());
+                            frame.set_dock_fx(
+                                std::iter::empty(),
+                                &Clusters::default(),
+                                theme.cursor_linear(),
+                            );
                         }
                     }
                 }
@@ -1081,12 +1085,17 @@ define_class!(
             motion.request_glide(iv.session.take_scroll_glide());
             let glide = motion.take_glide();
             iv.session.set_grid_top(grid_top.max(0.0).ceil() as u16);
+            // Küme tablosu çağrı boyunca `Frame`'in **dışında**: sink'ler
+            // `frame`'i ödünç alıyor (`Frame::take_clusters`). `clear`
+            // yukarıda onu boşalttı; iki sink aynı tabloya yazıyor.
+            let mut clusters = frame.take_clusters();
             let cursor = iv.session.frame(
                 |cell| frame.push(cell),
                 |cell| fill.push(cell),
                 &mut iv.blocks.borrow_mut(),
                 &mut iv.selection.borrow_mut(),
                 &mut iv.search.borrow_mut(),
+                &mut clusters,
                 // Pay **uyandırmıyor**: kareyi zaten bu callback çiziyor
                 // (`Session::frame`). Nesli değiştiyse orada düşüyor.
                 glide,
@@ -1105,6 +1114,7 @@ define_class!(
             // soruluyor: pay konumu oynatmadıysa pencere geçmişin ucunda ve
             // süzülme orada bitiyor (`Motion::observe_scroll`) — ikisinde de
             // yoksa kırpmaya çarpan paylar için kare üstüne kare çizilirdi.
+            frame.put_clusters(clusters);
             motion.observe_scroll(
                 cursor.scroll_generation,
                 (cursor.display_offset, cursor.scroll_frac),
@@ -1224,6 +1234,8 @@ define_class!(
                 // gerekçesi). Karede en çok bir düzenleme var, yani tampon bir
                 // `Option`.
                 let mut edit = None;
+                // Izgaranın tablosunun ikizi, aynı gerekçe.
+                let mut dock_clusters = frame.take_dock_clusters();
                 // Devrin cevabı `frame()`'den geliyor, dock yeniden
                 // hesaplamıyor: üç ön koşulu (dock'u olan pencere, alternatif
                 // ekran, aynanın tazeliği) yalnız o biliyor.
@@ -1245,19 +1257,21 @@ define_class!(
                     &mut dock_context,
                     cursor.caret_in_dock,
                     &mut iv.dock_selection.borrow_mut(),
+                    &mut dock_clusters,
                     |cell| frame.push_dock(cell),
                     |dock_edit| edit = Some(dock_edit),
                 );
+                frame.put_dock_clusters(dock_clusters);
                 // Sıra zorunlu: düzenleme uçuştakileri kaydırıp bitirebiliyor,
                 // statik glyph'i bulunamayan geliş ancak dock basıldıktan
                 // **sonra** bilinebiliyor ve çizilecek liste en sonda.
                 if let Some(edit) = edit {
                     // Dikey pencerenin boyu `dock()`'a geçen sayının ta
                     // kendisi: kaymanın pencereden taşırdığı efekt düşüyor.
-                    glyph_fx.apply(edit, motion, cursor.input_rows);
+                    glyph_fx.apply(edit, motion, cursor.input_rows, frame.dock_clusters());
                 }
                 frame.suppress_dock(&mut glyph_fx);
-                frame.set_dock_fx(glyph_fx.iter(), theme.cursor_linear());
+                frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), theme.cursor_linear());
                 dock_caret = dock.caret.map(|at| (at, dock.caret_text));
                 // Dock'un seçimi ızgaranınkiyle aynı şekil ve aynı renk
                 // uniform'u (031 R3.2); renk yukarıda `push_selection`'la
@@ -2445,7 +2459,7 @@ mod tests {
             .collect(),
             shift: 0,
         };
-        fx.apply(arrival, Motion::default(), 1);
+        fx.apply(arrival, Motion::default(), 1, &Clusters::default());
         let dt = 1.0 / 120.0;
         let mut drawn = 0usize;
         let mut emptied_on_a_drawn_frame = false;

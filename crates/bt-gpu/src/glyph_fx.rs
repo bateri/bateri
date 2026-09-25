@@ -16,8 +16,9 @@
 //! terimi). Kare talebi hareketin: `Waker::wake`'e dokunulmuyor, hasar
 //! dikilmiyor — efekt içeriği değil içeriğin nasıl çizildiğini değiştiriyor.
 
-use bt_core::{Cell, DockEdit, EDIT_MAX, Erase, Keypress};
+use bt_core::{Cell, Clusters, DockEdit, EDIT_MAX, Erase, Keypress};
 
+use crate::frame::copy_cluster;
 use crate::motion::Motion;
 
 /// Gelişin süresi, saniye — **seçilmiş, ölçülmüş değil**; referansın temel
@@ -174,6 +175,14 @@ pub(crate) struct GlyphFx {
     erase: Erase,
     /// Tohumun kaynağı; sarması zararsız.
     serial: u32,
+    /// Girdilerin küme tablosu (035): düzenlemenin hücreleri dock'un kare
+    /// tablosunu gösteriyor ve o tablo her içerik karesinde temizleniyor,
+    /// efekt ise karelerce yaşıyor. Kimlikler buraya kopyalanıyor ve tablo
+    /// her düzenlemede yaşayan girdilerden yeniden kuruluyor — boyu
+    /// [`FX_MAX`] kümeyi aşmıyor.
+    clusters: Clusters,
+    /// Yeniden kurmanın ikinci tamponu; kapasitesi korunuyor.
+    scratch: Clusters,
 }
 
 impl GlyphFx {
@@ -188,8 +197,9 @@ impl GlyphFx {
     /// düzenlemenin arkasındaki metin alt satırlara da kayıyor), en son yeni
     /// girdiler.
     ///
-    /// `rows` dock'un çizilen giriş satırı sayısı (dikey pencerenin boyu).
-    pub(crate) fn apply(&mut self, edit: DockEdit, motion: Motion, rows: u16) {
+    /// `rows` dock'un çizilen giriş satırı sayısı (dikey pencerenin boyu);
+    /// `table` düzenlemenin hücrelerinin küme tablosu (dock'unki).
+    pub(crate) fn apply(&mut self, edit: DockEdit, motion: Motion, rows: u16, table: &Clusters) {
         let (keypress, erase) = motion.glyph_fx(self.keypress, self.erase);
         let (at, cells, shift, kind, effect, duration) = match edit {
             DockEdit::Reset => {
@@ -248,6 +258,7 @@ impl GlyphFx {
         let Some(effect) = effect else {
             return;
         };
+        self.rebuild_clusters();
         for (&cell, _) in cells
             .as_slice()
             .iter()
@@ -259,6 +270,10 @@ impl GlyphFx {
                 self.entries.remove(0);
             }
             self.serial = self.serial.wrapping_add(1);
+            let cell = Cell {
+                cluster: copy_cluster(cell.cluster, table, &mut self.clusters),
+                ..cell
+            };
             self.entries.push(Entry {
                 fx: Fx {
                     cell,
@@ -273,6 +288,22 @@ impl GlyphFx {
                 duration,
             });
         }
+    }
+
+    /// Küme tablosunu yaşayan girdilerden yeniden kurar: düşen girdilerin
+    /// dizgileri tabloda birikmesin.
+    fn rebuild_clusters(&mut self) {
+        self.scratch.clear();
+        for entry in &mut self.entries {
+            entry.fx.cell.cluster =
+                copy_cluster(entry.fx.cell.cluster, &self.clusters, &mut self.scratch);
+        }
+        std::mem::swap(&mut self.clusters, &mut self.scratch);
+    }
+
+    /// Girdilerin ([`GlyphFx::iter`]) küme tablosu.
+    pub(crate) fn clusters(&self) -> &Clusters {
+        &self.clusters
     }
 
     /// Kullanıcının seçtiği iki efekti kurar — ham adlar, indirgeme her
@@ -422,7 +453,12 @@ mod tests {
     #[test]
     fn a_new_choice_finishes_what_is_in_flight() {
         let mut fx = GlyphFx::default();
-        fx.apply(arrive(4, 'a'), Motion::default(), WINDOW);
+        fx.apply(
+            arrive(4, 'a'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         // Aynı seçimi yeniden yazan kayıt no-op: efekt sürüyor, kare de
         // istenmiyor.
         assert!(!fx.set_effects(Keypress::Fade, Erase::Recede));
@@ -431,11 +467,26 @@ mod tests {
         assert!(fx.set_effects(Keypress::Off, Erase::Recede));
         assert!(fx.is_empty());
         // Yeni seçim bir sonraki düzenlemede geçerli.
-        fx.apply(arrive(5, 'b'), Motion::default(), WINDOW);
-        fx.apply(erase(7, 'c'), Motion::default(), WINDOW);
+        fx.apply(
+            arrive(5, 'b'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase(7, 'c'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         assert_eq!(cols(&fx), [(7, Kind::Ghost)]);
         assert!(fx.set_effects(Keypress::Fade, Erase::Off));
-        fx.apply(erase(7, 'c'), Motion::default(), WINDOW);
+        fx.apply(
+            erase(7, 'c'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         assert!(fx.is_empty());
         // Boş listede değişim bir şey bitirmedi: kare gerekmiyor.
         assert!(!fx.set_effects(Keypress::Off, Erase::Off));
@@ -444,8 +495,18 @@ mod tests {
     #[test]
     fn an_arrival_and_a_ghost_live_for_their_duration() {
         let mut fx = GlyphFx::default();
-        fx.apply(arrive(4, 'a'), Motion::default(), WINDOW);
-        fx.apply(erase(6, 'b'), Motion::default(), WINDOW);
+        fx.apply(
+            arrive(4, 'a'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase(6, 'b'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         assert_eq!(cols(&fx), [(4, Kind::Arrival), (6, Kind::Ghost)]);
         assert!(fx.iter().all(|fx| fx.t == 0.0));
         // Adımlar `DT_MAX`'ın altında: tek bir büyük `dt` kırpılırdı.
@@ -470,20 +531,55 @@ mod tests {
     #[test]
     fn a_reset_finishes_everything() {
         let mut fx = GlyphFx::default();
-        fx.apply(arrive(4, 'a'), Motion::default(), WINDOW);
-        fx.apply(erase(6, 'b'), Motion::default(), WINDOW);
-        fx.apply(DockEdit::Reset, Motion::default(), WINDOW);
+        fx.apply(
+            arrive(4, 'a'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase(6, 'b'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        fx.apply(
+            DockEdit::Reset,
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         assert!(fx.is_empty());
     }
 
     #[test]
     fn a_new_edit_settles_the_arrivals_at_and_right_of_its_column() {
         let mut fx = GlyphFx::default();
-        fx.apply(arrive(4, 'a'), Motion::default(), WINDOW);
-        fx.apply(arrive(5, 'b'), Motion::default(), WINDOW);
-        fx.apply(erase(9, 'z'), Motion::default(), WINDOW);
+        fx.apply(
+            arrive(4, 'a'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        fx.apply(
+            arrive(5, 'b'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase(9, 'z'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         // Normal yazım: sonraki tuş sağa ekliyor, önceki gelişler sürüyor.
-        fx.apply(arrive(6, 'c'), Motion::default(), WINDOW);
+        fx.apply(
+            arrive(6, 'c'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         assert_eq!(
             cols(&fx),
             [
@@ -495,7 +591,12 @@ mod tests {
         );
         // Caret sola taşındı ve 5'te yazıldı: 5 ve sağındaki gelişler oturur,
         // hayalet yerinde kalır.
-        fx.apply(arrive(5, 'x'), Motion::default(), WINDOW);
+        fx.apply(
+            arrive(5, 'x'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         assert_eq!(
             cols(&fx),
             [(4, Kind::Arrival), (9, Kind::Ghost), (5, Kind::Arrival)]
@@ -509,13 +610,38 @@ mod tests {
         // gelişler de oturmalı; üst satırdakiler — sağ sütunda olsalar da —
         // önekte ve yerlerinde.
         let mut fx = GlyphFx::default();
-        fx.apply(arrive_at(0, 5, 'a'), Motion::default(), 2);
-        fx.apply(arrive_at(1, 2, 'b'), Motion::default(), 2);
-        fx.apply(arrive_at(1, 3, 'c'), Motion::default(), 2);
-        fx.apply(erase_at(1, 6, 'z'), Motion::default(), 2);
+        fx.apply(
+            arrive_at(0, 5, 'a'),
+            Motion::default(),
+            2,
+            &Clusters::default(),
+        );
+        fx.apply(
+            arrive_at(1, 2, 'b'),
+            Motion::default(),
+            2,
+            &Clusters::default(),
+        );
+        fx.apply(
+            arrive_at(1, 3, 'c'),
+            Motion::default(),
+            2,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase_at(1, 6, 'z'),
+            Motion::default(),
+            2,
+            &Clusters::default(),
+        );
         // İkinci satırın 3. sütununda yazım: (1, 3) ve sonrası oturur, üst
         // satırın 5. sütunu (okuma sırasında önce) sürer, hayalet yerinde.
-        fx.apply(arrive_at(1, 3, 'x'), Motion::default(), 2);
+        fx.apply(
+            arrive_at(1, 3, 'x'),
+            Motion::default(),
+            2,
+            &Clusters::default(),
+        );
         assert_eq!(
             places(&fx),
             [
@@ -526,11 +652,21 @@ mod tests {
             ]
         );
         // Üst satırda yazım: alt satırın bütün gelişleri oturur.
-        fx.apply(arrive_at(0, 2, 'y'), Motion::default(), 2);
+        fx.apply(
+            arrive_at(0, 2, 'y'),
+            Motion::default(),
+            2,
+            &Clusters::default(),
+        );
         assert_eq!(places(&fx), [(1, 6, Kind::Ghost), (0, 2, Kind::Arrival)]);
         // Aynı sütunda ama başka satırda duran gelişin silinmesi hayalet
         // doğuruyor: "doğmamış" ölçütü konumun iki ekseni.
-        fx.apply(erase_at(1, 2, 'y'), Motion::default(), 2);
+        fx.apply(
+            erase_at(1, 2, 'y'),
+            Motion::default(),
+            2,
+            &Clusters::default(),
+        );
         assert!(
             places(&fx).contains(&(1, 2, Kind::Ghost)),
             "{:?}",
@@ -542,8 +678,18 @@ mod tests {
     fn a_shift_moves_the_flight_with_the_text_and_drops_what_leaves() {
         let rows = 3;
         let mut fx = GlyphFx::default();
-        fx.apply(arrive_at(1, 3, 'a'), Motion::default(), rows);
-        fx.apply(erase_at(2, 9, 'b'), Motion::default(), rows);
+        fx.apply(
+            arrive_at(1, 3, 'a'),
+            Motion::default(),
+            rows,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase_at(2, 9, 'b'),
+            Motion::default(),
+            rows,
+            &Clusters::default(),
+        );
         // Tavanı aşan girişin son satırında yazım: dikey pencere bir satır
         // aşağı indi, metin bir satır yukarı kaydı ve yeni harf son satırda.
         fx.apply(
@@ -555,6 +701,7 @@ mod tests {
             },
             Motion::default(),
             rows,
+            &Clusters::default(),
         );
         assert_eq!(
             places(&fx),
@@ -566,16 +713,36 @@ mod tests {
         );
         // Tekerlek pencereyi iki satır yukarı taşıdı: alttaki iki girdi
         // pencerenin dışına düşüyor.
-        fx.apply(DockEdit::Shift { by: 2 }, Motion::default(), rows);
+        fx.apply(
+            DockEdit::Shift { by: 2 },
+            Motion::default(),
+            rows,
+            &Clusters::default(),
+        );
         assert_eq!(places(&fx), [(2, 3, Kind::Arrival)]);
         // Yukarı taşan da düşüyor: bağlam satırının ya da ızgaranın üstünde
         // asılı kalmıyor.
-        fx.apply(DockEdit::Shift { by: -3 }, Motion::default(), rows);
+        fx.apply(
+            DockEdit::Shift { by: -3 },
+            Motion::default(),
+            rows,
+            &Clusters::default(),
+        );
         assert!(fx.is_empty(), "{:?}", places(&fx));
         // Kaymasız ama küçülen pencere: sarılan satırın son harfi silindi,
         // bant tek satıra indi ve alt satırdaki hayalet düşüyor.
-        fx.apply(erase_at(1, 2, 'e'), Motion::default(), 2);
-        fx.apply(erase_at(0, 5, 'd'), Motion::default(), 1);
+        fx.apply(
+            erase_at(1, 2, 'e'),
+            Motion::default(),
+            2,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase_at(0, 5, 'd'),
+            Motion::default(),
+            1,
+            &Clusters::default(),
+        );
         assert_eq!(places(&fx), [(0, 5, Kind::Ghost)]);
     }
 
@@ -584,7 +751,12 @@ mod tests {
         let mut fx = GlyphFx::default();
         for n in 0..FX_MAX + 3 {
             // Hayaletler konum kuralına girmiyor: hepsi yaşıyor.
-            fx.apply(erase(DOCK_TEXT_COL, 'a'), Motion::default(), WINDOW);
+            fx.apply(
+                erase(DOCK_TEXT_COL, 'a'),
+                Motion::default(),
+                WINDOW,
+                &Clusters::default(),
+            );
             fx.advance(0.0001 * n as f32);
         }
         assert_eq!(fx.iter().count(), FX_MAX);
@@ -600,14 +772,29 @@ mod tests {
         // yeniden dağılır. Kayma ve ilerleme tohuma dokunmuyor; yan yana iki
         // girdinin tohumu ise ayrı (aynı desenle kırılmasınlar).
         let mut fx = GlyphFx::default();
-        fx.apply(erase(6, 'a'), Motion::default(), WINDOW);
-        fx.apply(erase(5, 'b'), Motion::default(), WINDOW);
+        fx.apply(
+            erase(6, 'a'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase(5, 'b'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         let seeds = |fx: &GlyphFx| fx.iter().map(|fx| fx.seed).collect::<Vec<f32>>();
         let born = seeds(&fx);
         assert_ne!(born[0], born[1], "iki girdi aynı tohumla doğdu");
         fx.advance(ERASE_DURATION / 3.0);
         assert_eq!(seeds(&fx), born, "ilerleme tohumu değiştirdi");
-        fx.apply(DockEdit::Shift { by: 1 }, Motion::default(), 2);
+        fx.apply(
+            DockEdit::Shift { by: 1 },
+            Motion::default(),
+            2,
+            &Clusters::default(),
+        );
         assert_eq!(seeds(&fx), born, "kayma tohumu değiştirdi");
     }
 
@@ -617,17 +804,37 @@ mod tests {
         // sıçrardı: silinen geliş olduğu yerden kayboluyor. Aynı sütundaki
         // **başka** bir harfin silinmesi (geliş çoktan bitmiş) hayalet alıyor.
         let mut fx = GlyphFx::default();
-        fx.apply(arrive(4, 'a'), Motion::default(), WINDOW);
-        fx.apply(erase(4, 'a'), Motion::default(), WINDOW);
+        fx.apply(
+            arrive(4, 'a'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
+        fx.apply(
+            erase(4, 'a'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         assert!(fx.is_empty(), "{:?}", cols(&fx));
-        fx.apply(erase(4, 'b'), Motion::default(), WINDOW);
+        fx.apply(
+            erase(4, 'b'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         assert_eq!(cols(&fx), [(4, Kind::Ghost)]);
     }
 
     #[test]
     fn finish_empties_the_flight() {
         let mut fx = GlyphFx::default();
-        fx.apply(arrive(4, 'a'), Motion::default(), WINDOW);
+        fx.apply(
+            arrive(4, 'a'),
+            Motion::default(),
+            WINDOW,
+            &Clusters::default(),
+        );
         fx.finish();
         assert!(fx.is_empty());
     }
@@ -645,15 +852,15 @@ mod tests {
         for reduce in [false, true] {
             let snap = motion(CursorMotion::Snap, reduce);
             let mut fx = GlyphFx::default();
-            fx.apply(arrive(4, 'a'), snap, WINDOW);
-            fx.apply(erase(6, 'b'), snap, WINDOW);
+            fx.apply(arrive(4, 'a'), snap, WINDOW, &Clusters::default());
+            fx.apply(erase(6, 'b'), snap, WINDOW, &Clusters::default());
             assert!(fx.is_empty(), "snap animasyon doğurdu (reduce={reduce})");
         }
         for style in [CursorMotion::Ease, CursorMotion::Spring] {
             let reduced = motion(style, true);
             let mut fx = GlyphFx::default();
-            fx.apply(arrive(4, 'a'), reduced, WINDOW);
-            fx.apply(erase(6, 'b'), reduced, WINDOW);
+            fx.apply(arrive(4, 'a'), reduced, WINDOW, &Clusters::default());
+            fx.apply(erase(6, 'b'), reduced, WINDOW, &Clusters::default());
             let kinds: Vec<(Kind, u32)> = fx.iter().map(|fx| (fx.kind, fx.effect)).collect();
             assert_eq!(
                 kinds,

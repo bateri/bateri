@@ -744,22 +744,33 @@ pub(crate) struct DockSelection {
     kind: SelectKind,
     /// `[start, end)`; boş seçimde `start == end`.
     range: (usize, usize),
+    /// Aynanın kümeleme bayrağı ([`DockState::cluster`]): uçlar ve ⇧←/⇧→
+    /// adımı küme sınırında (035 R4.2). Seçimle birlikte taşınıyor, yani
+    /// uzatma onu yeniden sormuyor.
+    cluster: bool,
 }
 
 impl DockSelection {
     /// `buffer` seçimin ait olduğu `BUFFER`: aralık ona karşı çözülüyor.
-    pub(crate) fn new(kind: SelectKind, anchor: DockPoint, head: DockPoint, buffer: &str) -> Self {
+    pub(crate) fn new(
+        kind: SelectKind,
+        anchor: DockPoint,
+        head: DockPoint,
+        buffer: &str,
+        cluster: bool,
+    ) -> Self {
         Self {
             anchor,
             head,
             kind,
-            range: dock::selection_range(buffer, kind, anchor, head),
+            range: dock::selection_range(buffer, kind, anchor, head, cluster),
+            cluster,
         }
     }
 
     /// Ucu `head`'e taşır; çapa ve adım yerinde (sürükleme, Shift+tıklama).
     pub(crate) fn extended(self, head: DockPoint, buffer: &str) -> Self {
-        Self::new(self.kind, self.anchor, head, buffer)
+        Self::new(self.kind, self.anchor, head, buffer, self.cluster)
     }
 
     /// Seçili aralık; boşsa `None` — sürüklemesiz tık hiçbir şey seçmez.
@@ -786,12 +797,14 @@ impl DockSelection {
     ///
     /// Adım **karakter** ama birleştirici ile tabanı arasına düşmüyor:
     /// `dock::selection_range`'ın `boundary` kuralının klavyedeki hâli, yoksa
-    /// `é`'nin aksanı tabanından ayrı seçilebilirdi.
+    /// `é`'nin aksanı tabanından ayrı seçilebilirdi. Kümeleme açıkken
+    /// (`cluster`, 035) adım **küme**: `🇹🇷`'nin yarısı seçilemiyor.
     pub(crate) fn stepped(
         current: Option<Self>,
         caret: usize,
         forward: bool,
         buffer: &str,
+        cluster: bool,
     ) -> Self {
         let chars: Vec<char> = buffer.chars().collect();
         let len = chars.len();
@@ -803,7 +816,20 @@ impl DockSelection {
                 let backward = order(selection.head) < order(selection.anchor);
                 if backward { (end, start) } else { (start, end) }
             }
-            None => (caret.min(len), caret.min(len)),
+            None => {
+                let caret = caret.min(len);
+                // Caret bir kümenin **içindeyse** (ZLE oraya koyabiliyor) ⇧←'in
+                // sabit ucu kümenin arkası: yoksa `boundary` onu kümenin başına
+                // indirir ve ilk adım boş bir seçim verirdi (`/code-review`).
+                let fixed = if cluster && !forward {
+                    dock::cluster_span(chars.iter().copied(), caret, true)
+                        .filter(|&(start, _)| start < caret)
+                        .map_or(caret, |(_, end)| end)
+                } else {
+                    caret
+                };
+                (fixed, caret)
+            }
         };
         let zero_width = |index: usize| {
             chars
@@ -811,7 +837,19 @@ impl DockSelection {
                 .is_some_and(|&ch| dock::column_width(ch) == 0)
         };
         let mut moved = active;
-        if forward {
+        let span = |index| dock::cluster_span(chars.iter().copied(), index, true);
+        if cluster {
+            // Hareketli uç bir kümenin sınırında (aralık [`boundary`]'den);
+            // bir sonraki sınır kümenin arkası, bir önceki öncekinin başı.
+            moved = if forward {
+                span(moved).map_or(moved, |(_, end)| end)
+            } else {
+                moved
+                    .checked_sub(1)
+                    .and_then(span)
+                    .map_or(moved, |(start, _)| start)
+            };
+        } else if forward {
             if moved < len {
                 moved += 1;
                 while moved < len && zero_width(moved) {
@@ -828,7 +866,13 @@ impl DockSelection {
             index,
             half: CellHalf::Left,
         };
-        Self::new(SelectKind::Simple, point(fixed), point(moved), buffer)
+        Self::new(
+            SelectKind::Simple,
+            point(fixed),
+            point(moved),
+            buffer,
+            cluster,
+        )
     }
 }
 
@@ -4662,6 +4706,7 @@ mod tests {
                 word,
                 word,
                 &log.dock.buffer,
+                false,
             ));
         };
         select(&mut log);
@@ -4691,22 +4736,22 @@ mod tests {
     fn shift_arrows_step_the_moving_end_of_the_selection() {
         let range = |selection: DockSelection| selection.range;
         // Seçim yoksa caret'ten başlıyor.
-        let one = DockSelection::stepped(None, 2, true, "abcd");
+        let one = DockSelection::stepped(None, 2, true, "abcd", false);
         assert_eq!(range(one), (2, 3));
-        let two = DockSelection::stepped(Some(one), 2, true, "abcd");
+        let two = DockSelection::stepped(Some(one), 2, true, "abcd", false);
         assert_eq!(range(two), (2, 4));
         // Satırın sonunda duruyor.
         assert_eq!(
-            range(DockSelection::stepped(Some(two), 2, true, "abcd")),
+            range(DockSelection::stepped(Some(two), 2, true, "abcd", false)),
             (2, 4)
         );
-        let back = DockSelection::stepped(Some(two), 2, false, "abcd");
+        let back = DockSelection::stepped(Some(two), 2, false, "abcd", false);
         assert_eq!(range(back), (2, 3));
         // Boşa inen seçim ucunu kaybetmiyor: bir sonraki adım oradan.
-        let empty = DockSelection::stepped(Some(back), 2, false, "abcd");
+        let empty = DockSelection::stepped(Some(back), 2, false, "abcd", false);
         assert_eq!((empty.range(), range(empty)), (None, (2, 2)));
         assert_eq!(
-            range(DockSelection::stepped(Some(empty), 0, false, "abcd")),
+            range(DockSelection::stepped(Some(empty), 0, false, "abcd", false)),
             (1, 2)
         );
 
@@ -4716,29 +4761,79 @@ mod tests {
             index,
             half: CellHalf::Left,
         };
-        let leftward = DockSelection::new(SelectKind::Simple, point(3), point(1), "abcd");
+        let leftward = DockSelection::new(SelectKind::Simple, point(3), point(1), "abcd", false);
         assert_eq!(
-            range(DockSelection::stepped(Some(leftward), 0, false, "abcd")),
+            range(DockSelection::stepped(
+                Some(leftward),
+                0,
+                false,
+                "abcd",
+                false
+            )),
             (0, 3)
         );
         assert_eq!(
-            range(DockSelection::stepped(Some(leftward), 0, true, "abcd")),
+            range(DockSelection::stepped(
+                Some(leftward),
+                0,
+                true,
+                "abcd",
+                false
+            )),
             (2, 3)
         );
 
         // Kelime seçimi harf adımıyla büyüyor, sonu hareketli.
-        let word = DockSelection::new(SelectKind::Word, point(1), point(1), "ab cd");
+        let word = DockSelection::new(SelectKind::Word, point(1), point(1), "ab cd", false);
         assert_eq!(range(word), (0, 2));
         assert_eq!(
-            range(DockSelection::stepped(Some(word), 0, true, "ab cd")),
+            range(DockSelection::stepped(Some(word), 0, true, "ab cd", false)),
             (0, 3)
         );
 
         // Birleştirici tabanından ayrılmıyor: `é` = `e` + U+0301.
         let text = "e\u{301}x";
-        assert_eq!(range(DockSelection::stepped(None, 0, true, text)), (0, 2));
-        assert_eq!(range(DockSelection::stepped(None, 3, false, text)), (2, 3));
-        assert_eq!(range(DockSelection::stepped(None, 2, false, text)), (0, 2));
+        assert_eq!(
+            range(DockSelection::stepped(None, 0, true, text, false)),
+            (0, 2)
+        );
+        assert_eq!(
+            range(DockSelection::stepped(None, 3, false, text, false)),
+            (2, 3)
+        );
+        assert_eq!(
+            range(DockSelection::stepped(None, 2, false, text, false)),
+            (0, 2)
+        );
+    }
+
+    #[test]
+    fn shift_arrows_step_over_a_cluster_whole() {
+        // 035 R4.2: `a🇹🇷b`'de ⇧← sondan bayrağı bütün alıyor, ⇧→ baştan
+        // `a`'dan sonra bayrağı. Kapalı okunuşta adım kod noktası.
+        let range = |selection: DockSelection| selection.range;
+        let text = "a🇹🇷b";
+        let back = DockSelection::stepped(None, 3, false, text, true);
+        assert_eq!(range(back), (1, 3));
+        // Caret iki RI'nin arasında: iki yön de bayrağı bütün alıyor.
+        assert_eq!(
+            range(DockSelection::stepped(None, 2, false, text, true)),
+            (1, 3)
+        );
+        assert_eq!(
+            range(DockSelection::stepped(None, 2, true, text, true)),
+            (1, 3)
+        );
+        let forward = DockSelection::stepped(None, 1, true, text, true);
+        assert_eq!(range(forward), (1, 3));
+        assert_eq!(
+            range(DockSelection::stepped(Some(forward), 1, true, text, true)),
+            (1, 4)
+        );
+        assert_eq!(
+            range(DockSelection::stepped(None, 3, false, text, false)),
+            (2, 3)
+        );
     }
 
     #[test]

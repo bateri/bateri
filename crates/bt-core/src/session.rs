@@ -66,6 +66,7 @@ use alacritty_terminal::vte::ansi::{ClearMode, CursorShape, CursorStyle, Handler
 // dışında hiç geçmediği için ada gelen o, takma alan o.
 use polling::{Event as PollingEvent, PollMode, Poller};
 
+use crate::cluster::{ClusterId, Clusters};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
 use crate::input::{
@@ -123,8 +124,9 @@ pub enum UnderlineStyle {
 /// başına ve yalnız **çizilen** hücreler için doğuyor; sink jenerik
 /// (`impl FnMut(Cell)`) ve satır içine alınıyor, yani kopyalama da bir çağrı
 /// sınırından geçmiyor. Seyrek veri yan tabloya taşınacaksa ölçüt o assert
-/// değil, bu tipin kare başına maliyeti olur. **Ölçüldü** (023): tip bugün
-/// **72 bayt**, hizalama 4 ve dolgu sıfır; tek **tamponlanan** dizisi
+/// değil, bu tipin kare başına maliyeti olur. **Ölçüldü** (035): tip bugün
+/// **76 bayt**, hizalama 4 — 023'ün 72'si artı küme kimliğinin 4'ü
+/// ([`Cell::cluster`], niche'li `Option`); tek **tamponlanan** dizisi
 /// doldurma bandının `Vec<Cell>`'i (`bt_gpu::link`, kapasitesi korunuyor),
 /// kalan her yol satır içine alınmış değer-geçişli sink.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -193,6 +195,15 @@ pub struct Cell {
     /// geniş karakterin bıraktığı boşluk bir baş hücre değil ve sağ yarı
     /// orada kopmuş bir glyph çizerdi.
     pub wide: bool,
+    /// Hücre bir emoji **dizisinin** (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) baş hücresiyse
+    /// dizginin çağıranın tablosundaki kimliği ([`Clusters`], 035 Karar 4B);
+    /// [`Cell::ch`] yine taban karakter.
+    ///
+    /// Yalnız **geniş** ve birden çok kod noktalı hücrede ve yalnız
+    /// kümeleme açıkken doğuyor: tek sütunlu birleştirici (`é`, `⌚︎`)
+    /// bugünkü gibi taban karakterle çiziliyor (Karar 6), yani kümesiz
+    /// hücre hiçbir şey ödemiyor ve kümeleme kapalıyken kare bit bit aynı.
+    pub cluster: Option<ClusterId>,
 }
 
 /// **Yalnız sınama literalleri için**: `bt-gpu`'nun kare sınamaları hücreyi
@@ -218,6 +229,7 @@ impl Default for Cell {
             underline_color: None,
             strikeout: false,
             wide: false,
+            cluster: None,
         }
     }
 }
@@ -1659,6 +1671,12 @@ struct DockEditLine {
     /// ([`dock::selectable`]), komutunki `BUFFER` — aradaki kaydırma.
     shift: usize,
     selection: Option<DockSelection>,
+    /// Caret'in solundaki ve sağındaki küme, `BUFFER`'da `[start, end)` —
+    /// yalnız kümeleme açıkken ve birden çok kod noktalıysa (035 Karar 7):
+    /// ⌫/← soldakini, ⌦/→ sağdakini bütün yürütüyor. Caret bir kümenin
+    /// **içindeyse** (ZLE oraya koyabiliyor) iki taraf da o küme.
+    before: Option<(usize, usize)>,
+    after: Option<(usize, usize)>,
 }
 
 impl DockEditLine {
@@ -1899,6 +1917,29 @@ struct CellStyle {
     underline: UnderlineStyle,
     strikeout: bool,
     underline_color: Option<LinearRgba>,
+}
+
+/// Hücrenin kümesi (035 Karar 4B/6): kümeleme açık, hücre **geniş** ve
+/// taban karakterin arkasında `zerowidth` varsa dizgi tabloya iner.
+///
+/// Geniş şartı kararın ta kendisi: tek sütunlu birleştirici (`é`, Arapça
+/// hareke, `⌚︎`) bugünkü gibi taban karakterle çiziliyor. `ch` `None`'sa
+/// (gizli, spacer) çizilecek bir şey yok. Yan tabloya (`CellExtra`) inen
+/// okuma yalnız geniş hücrede, yani düz metin bedeli bir bayrak testi.
+/// Izgara sink'i ile doldurma sink'i **aynı** fonksiyondan: bandın satırı
+/// ekrana çıktığındakiyle aynı glyph'i çizmek zorunda.
+fn cell_cluster(
+    enabled: bool,
+    cell: &TermCell,
+    ch: Option<char>,
+    clusters: &mut Clusters,
+) -> Option<ClusterId> {
+    if !enabled || !cell.flags.contains(Flags::WIDE_CHAR) {
+        return None;
+    }
+    let head = ch?;
+    let rest = cell.zerowidth().filter(|rest| !rest.is_empty())?;
+    clusters.push_chars(std::iter::once(head).chain(rest.iter().copied()))
 }
 
 /// Atlama kapısından **sonra** çözülen alanlar; `inverse`, `dim` ve `ruled`
@@ -2726,6 +2767,9 @@ pub struct Session {
     /// atomik: `[shell] integration` **sonraki oturumda** geçerli (`CLAUDE.md`)
     /// ve dock'un varlığı ona bağlı.
     dock: bool,
+    /// [`SessionOptions::cluster`]; `dock` gibi doğumda kararlaşıyor. Sınır
+    /// hücresinin kümesi ([`Cell::cluster`]) yalnız açıkken doğuyor.
+    cluster: bool,
     /// [`SessionOptions::home`]; yalnız [`Session::title`] okuyor.
     home: Option<PathBuf>,
     /// PTY'nin çocuğunun pid'i ([`Session::child_pid`]). Doğumda alınıyor,
@@ -2844,6 +2888,7 @@ impl Session {
             scroll_frac: AtomicU64::new(0),
             scroll_glide: AtomicU64::new(0),
             dock: options.dock,
+            cluster: options.cluster,
             home,
             child_pid,
         })
@@ -2927,6 +2972,7 @@ impl Session {
         blocks: &mut Blocks,
         selection: &mut SelectionRuns,
         search: &mut SearchRuns,
+        clusters: &mut Clusters,
         glide: ScrollGlide,
         budget: DockBudget,
     ) -> Cursor {
@@ -3650,6 +3696,7 @@ impl Session {
                 // zorunda — ikisi ayrışsa sayacın payı ile çizimin genişliği
                 // ayrılırdı.
                 wide: flags.contains(Flags::WIDE_CHAR),
+                cluster: cell_cluster(self.cluster, cell, ch, clusters),
             });
         }
         selection.runs.extend(open_run);
@@ -3923,6 +3970,7 @@ impl Session {
                     // satırı ekrana çıktığındakiyle aynı genişlikte
                     // çizilmek zorunda.
                     wide: flags.contains(Flags::WIDE_CHAR),
+                    cluster: cell_cluster(self.cluster, cell, ch, clusters),
                 });
             }
         }
@@ -4534,6 +4582,7 @@ impl Session {
                                     // Sayacın rakamları ASCII: `Counter`
                                     // yalnız rakam, `.`, `m` ve `s` üretiyor.
                                     wide: false,
+                                    cluster: None,
                                 });
                             }
                             counted_row = Some(row);
@@ -5450,8 +5499,8 @@ impl Session {
     /// eski vurguyu kaldırır (ızgaranın kuralı).
     pub fn dock_select(&self, kind: SelectKind, point: SelectionPoint) {
         let grid = clear_selection_locked(&mut self.term.lock());
-        let dock = self.change_dock_selection(point, |_, point, buffer, _| {
-            point.map(|point| DockSelection::new(kind, point, point, buffer))
+        let dock = self.change_dock_selection(point, |_, point, buffer, _, cluster| {
+            point.map(|point| DockSelection::new(kind, point, point, buffer, cluster))
         });
         if grid || dock {
             self.request_frame();
@@ -5465,7 +5514,7 @@ impl Session {
     /// Izgaranın seçimi kalkar (tek sahip).
     pub fn dock_extend(&self, point: SelectionPoint) {
         let grid = clear_selection_locked(&mut self.term.lock());
-        let dock = self.change_dock_selection(point, |current, point, buffer, caret| {
+        let dock = self.change_dock_selection(point, |current, point, buffer, caret, cluster| {
             let point = point?;
             Some(match current {
                 Some(selection) => selection.extended(point, buffer),
@@ -5474,7 +5523,7 @@ impl Session {
                         index: caret,
                         half: CellHalf::Left,
                     };
-                    DockSelection::new(SelectKind::Simple, caret, point, buffer)
+                    DockSelection::new(SelectKind::Simple, caret, point, buffer, cluster)
                 }
             })
         });
@@ -5489,7 +5538,7 @@ impl Session {
     /// ([`Session::update_selection`]'ın kuralı). Nokta çözülemezse (ayna
     /// değişti) uç yerinde kalır.
     pub fn dock_drag(&self, point: SelectionPoint) {
-        let changed = self.change_dock_selection(point, |current, point, buffer, _| {
+        let changed = self.change_dock_selection(point, |current, point, buffer, _, _| {
             let current = current?;
             Some(point.map_or(current, |point| current.extended(point, buffer)))
         });
@@ -5512,6 +5561,7 @@ impl Session {
             Option<DockPoint>,
             &str,
             usize,
+            bool,
         ) -> Option<DockSelection>,
     ) -> bool {
         let window = *lock(&self.dock_window);
@@ -5522,7 +5572,7 @@ impl Session {
         // o uzayda `PREBUFFER` kadar ileride.
         let caret = dock::prebuffer_chars(&log.dock) + buffer_caret(&log.dock);
         let text = dock::selectable(&log.dock);
-        let after = change(log.dock_selection, point, &text, caret);
+        let after = change(log.dock_selection, point, &text, caret, log.dock.cluster);
         drop(text);
         log.dock_selection = after;
         before != after.and_then(|selection| selection.range())
@@ -5587,6 +5637,7 @@ impl Session {
                 point(0),
                 point(text.chars().count()),
                 &text,
+                log.dock.cluster,
             );
             drop(text);
             log.dock_selection = Some(all);
@@ -5656,11 +5707,21 @@ impl Session {
         if !(log.dock_editable && input.insert_keymap && input.answers == generation) {
             return None;
         }
+        let caret = buffer_caret(&log.dock);
+        // Tek kod noktalı "küme" bugünkü yolun işi: yazım efektleri ve
+        // ZLE'nin kendi silmesi aynen kalsın.
+        let span = |index: Option<usize>| {
+            let index = index.filter(|_| log.dock.cluster)?;
+            dock::cluster_span(log.dock.buffer.chars(), index, true)
+                .filter(|(start, end)| end - start > 1)
+        };
         Some(DockEditLine {
             len: log.dock.buffer.chars().count(),
-            caret: buffer_caret(&log.dock),
+            caret,
             shift: dock::prebuffer_chars(&log.dock),
             selection: log.dock_selection,
+            before: span(caret.checked_sub(1)),
+            after: span(Some(caret)),
         })
     }
 
@@ -5730,8 +5791,9 @@ impl Session {
     /// `true` → tuş tüketildi, çağıran onu kabuğa **göndermemeli**.
     ///
     /// Kapı kapalıysa hep `false`: tuş bugünkü yolundan gider, seçim kalkar.
-    /// Seçim yoksa yalnız ⇧←/⇧→ tüketiliyor (caret'ten seçim başlatır);
-    /// ⌫, ⌦, ←, → bugünkü yolunda. ⇧←/⇧→ da kapıya bağlı, kabuğa hiçbir şey
+    /// Seçim yoksa ⇧←/⇧→ tüketiliyor (caret'ten seçim başlatır); ⌫, ⌦, ←, →
+    /// yalnız caret'in bitişiğinde birden çok kod noktalı bir küme varsa
+    /// (035 Karar 7), yoksa bugünkü yolunda. ⇧←/⇧→ da kapıya bağlı, kabuğa hiçbir şey
     /// göndermese bile: seçim caret'ten başlıyor ve caret'in yeri ancak taze
     /// bir aynada doğru — `vicmd`'de ise tuş vi'nin.
     pub fn dock_key(&self, key: DockKey) -> bool {
@@ -5767,6 +5829,7 @@ impl Session {
                         line.shift + line.caret,
                         forward,
                         &text,
+                        log.dock.cluster,
                     );
                     drop(text);
                     log.dock_selection = Some(after);
@@ -5792,8 +5855,24 @@ impl Session {
                 }
                 self.paste(b"\n".to_vec());
             }
+            // **Seçimsiz dört tuş kümeyi bütün yürütüyor** (035 Karar 7): ZLE
+            // kod noktası kod noktası yürüyor ve `🇹🇷`'de ⌫ yalnız `🇷`'yi
+            // silerdi. Bitişik küme birden çok kod noktalıysa tuş widget'ın
+            // tek komutu oluyor (⌫/⌦ `[S,E)`, ←/→ `S == E`); değilse bugünkü
+            // yol — `self-insert`, yazım efektleri ve ZLE'nin silmesi aynen.
             (DockKey::Backspace | DockKey::Delete | DockKey::Left | DockKey::Right, None) => {
-                return false;
+                let span = match key {
+                    DockKey::Backspace | DockKey::Left => line.before,
+                    _ => line.after,
+                };
+                let Some((start, end)) = span else {
+                    return false;
+                };
+                match key {
+                    DockKey::Left => self.send_dock_edit(start, start, line.len),
+                    DockKey::Right => self.send_dock_edit(end, end, line.len),
+                    _ => self.send_dock_edit(start, end, line.len),
+                }
             }
         }
         true
@@ -5936,6 +6015,7 @@ impl Session {
         context: &mut DockContext,
         caret_in_dock: bool,
         runs: &mut Vec<SelectionRun>,
+        clusters: &mut Clusters,
         sink: impl FnMut(Cell),
         edits: impl FnMut(DockEdit),
     ) -> Dock {
@@ -5967,6 +6047,7 @@ impl Session {
             selection,
             change.as_ref(),
             runs,
+            clusters,
             sink,
             |made| edit = Some(made),
         );
@@ -7326,6 +7407,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
             )
@@ -7345,6 +7427,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut runs,
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -7366,6 +7449,7 @@ mod tests {
                 blocks,
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -7570,6 +7654,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 DockBudget { share, cols: 80 },
             );
@@ -7715,6 +7800,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 );
@@ -7825,6 +7911,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -7874,6 +7961,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -7918,6 +8006,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -7941,6 +8030,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -8022,6 +8112,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8069,6 +8160,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8084,6 +8176,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8118,6 +8211,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -8130,6 +8224,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8171,6 +8266,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -8182,6 +8278,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8221,6 +8318,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8246,6 +8344,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8279,6 +8378,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8305,6 +8405,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8342,6 +8443,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8369,6 +8471,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8411,6 +8514,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8438,6 +8542,7 @@ mod tests {
             &mut DockContext::default(),
             cursor.caret_in_dock,
             &mut Vec::new(),
+            &mut Clusters::default(),
             |_| (),
             |_| (),
         );
@@ -8482,6 +8587,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8524,6 +8630,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8565,6 +8672,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -8605,6 +8713,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8656,6 +8765,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8707,6 +8817,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8756,6 +8867,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8803,6 +8915,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8824,6 +8937,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 );
@@ -8839,6 +8953,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut Clusters::default(),
                     ScrollGlide::default(),
                     BUDGET,
                 )
@@ -8851,6 +8966,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -8963,6 +9079,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -9002,6 +9119,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -9017,6 +9135,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -9145,6 +9264,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 budget,
             );
@@ -9292,6 +9412,7 @@ mod tests {
             &mut DockContext::default(),
             cursor.caret_in_dock,
             &mut Vec::new(),
+            &mut Clusters::default(),
             |cell| dock_cells.push(cell),
             |_| (),
         );
@@ -9357,6 +9478,7 @@ mod tests {
             point(start),
             point(end),
             &log.dock.buffer,
+            false,
         ));
     }
 
@@ -9524,6 +9646,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -9539,6 +9662,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -9569,6 +9693,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -9599,6 +9724,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -10709,6 +10835,54 @@ mod tests {
         session.shutdown();
     }
 
+    /// `a🇹🇷` (`YfCfh7nwn4e3`), caret sonda (3), keymap `main`.
+    const FLAG_LINE: &str = "\\033]8133;u;3;;YfCfh7nwn4e3;;;bWFpbg==\\007";
+
+    #[test]
+    fn plain_keys_walk_a_cluster_whole() {
+        // 035 Karar 7: kapı açıkken caret'in bitişiğindeki bayrak ⌫ ile
+        // bütün siliniyor, ← ile bütün geçiliyor — kabuğa tek komut. Seçim
+        // yok; kümeleme kapalıyken aynı tuş bugünkü yolundan (tüketilmiyor).
+        for (name, cluster, key, needle) in [
+            ("⌫", true, DockKey::Backspace, Some("643b313b333b33070a")),
+            ("←", true, DockKey::Left, Some("643b313b313b33070a")),
+            ("kümesiz ⌫", false, DockKey::Backspace, None),
+        ] {
+            let wake = Arc::new(TestWake::default());
+            let mut options = test_options(
+                sh(&format!(
+                    "printf '\\033[?2004h{}{FLAG_LINE}{EDITABLE}'; exec od -An -tx1",
+                    anchored_prompt(1),
+                )),
+                60,
+            );
+            options.dock = true;
+            options.cluster = cluster;
+            let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+            wait_mirror(&session, DockStatus::Live);
+            wait_until(
+                &format!("{name}: kapı açılmadı"),
+                Duration::from_secs(5),
+                || session.can_edit_dock(),
+            );
+            let Some(needle) = needle else {
+                assert!(!session.dock_key(key), "{name}: tuş tüketildi");
+                assert_eq!(session.key_gen.load(Ordering::Acquire), 0, "{name}");
+                session.shutdown();
+                continue;
+            };
+            assert!(session.dock_key(key), "{name}: tuş tüketilmedi");
+            // Komut 15 bayt; satır sonu `od`'nin bloğunu tamamlıyor.
+            session.write(b"\n");
+            let cells = wait_ink(&session, &wake, "0a");
+            assert!(
+                glyph_text(&cells).contains(needle),
+                "{name}: komut baytları: {cells:?}"
+            );
+            session.shutdown();
+        }
+    }
+
     #[test]
     fn shift_arrows_select_from_the_caret_without_writing() {
         // ⇧←/⇧→ yalnız terminalde (031 Karar 8): kabuğa hiçbir şey gitmiyor,
@@ -11111,7 +11285,8 @@ mod tests {
                     index: col,
                     half: CellHalf::Left,
                 };
-                let (start, end) = dock::selection_range(line, SelectKind::Word, point, point);
+                let (start, end) =
+                    dock::selection_range(line, SelectKind::Word, point, point, false);
                 let dock: String = line.chars().skip(start).take(end - start).collect();
                 assert_eq!(dock, grid, "{line:?} sütun {col}");
             }
@@ -11147,6 +11322,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -11161,6 +11337,7 @@ mod tests {
             &mut DockContext::default(),
             cursor.caret_in_dock,
             &mut runs,
+            &mut Clusters::default(),
             |_| (),
             |_| (),
         );
@@ -11236,6 +11413,7 @@ mod tests {
                     &mut Blocks::default(),
                     &mut SelectionRuns::default(),
                     &mut SearchRuns::default(),
+                    &mut Clusters::default(),
                     ScrollGlide::default(),
                     DockBudget { share, cols: 40 },
                 )
@@ -11986,6 +12164,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut runs,
                 &mut search,
+                &mut Clusters::default(),
                 ScrollGlide::default(),
                 BUDGET,
             );
@@ -12204,6 +12383,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         )
@@ -12765,6 +12945,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -12795,6 +12976,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -13093,6 +13275,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -13157,6 +13340,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -13198,6 +13382,7 @@ mod tests {
             &mut blocks,
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );
@@ -13717,6 +13902,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             stale,
             BUDGET,
         );
@@ -13731,6 +13917,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut SearchRuns::default(),
+            &mut Clusters::default(),
             live,
             BUDGET,
         );
@@ -13814,6 +14001,7 @@ mod tests {
                 &mut Blocks::default(),
                 &mut SelectionRuns::default(),
                 &mut SearchRuns::default(),
+                &mut Clusters::default(),
                 glide,
                 BUDGET,
             );
@@ -14799,6 +14987,95 @@ mod tests {
     /// `stop_sync`'ten ulaşıyor. Sarmalayıcıdan geçmeselerdi iki RI iki dar
     /// hücre olurdu; kümeli oturumda tek geniş hücre ve `🇷` hiçbir hücrede
     /// yok.
+    /// `🇹🇷` (iki RI), `👨‍👩‍👧` (ZWJ ailesi) ve tek sütunlu `é` (`e` + U+0301)
+    /// yan yana, arkalarında bir çapa noktası.
+    const CLUSTERS_PRINTF: &str = "printf '\\360\\237\\207\\271\\360\\237\\207\\267\
+\\360\\237\\221\\250\\342\\200\\215\\360\\237\\221\\251\\342\\200\\215\\360\\237\\221\\247\
+e\\314\\201.'; sleep 5";
+
+    /// Kümelemeli (ya da kümelemesiz) bir oturumun çapaya kadarki karesi ve
+    /// kare tablosu.
+    fn cluster_frame(cluster: bool) -> (Session, Vec<Cell>, Clusters) {
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(sh(CLUSTERS_PRINTF), 40);
+        options.cluster = cluster;
+        let session = Session::spawn(options, wake).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut cells = Vec::new();
+            let mut clusters = Clusters::default();
+            session.frame(
+                |cell| cells.push(cell),
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
+                &mut clusters,
+                ScrollGlide::default(),
+                BUDGET,
+            );
+            if cells.iter().any(|cell| cell.ch == Some('.')) {
+                return (session, cells, clusters);
+            }
+            assert!(Instant::now() < deadline, "çapa gelmedi: {cells:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_wide_cluster_reaches_the_frame_as_one_string() {
+        // 035 R4.1: baş hücre taban karakteri ve tablodaki dizgiyi taşıyor;
+        // tek sütunlu birleştirici (`é`) bugünkü gibi taban karakter (Karar 6).
+        let (session, cells, clusters) = cluster_frame(true);
+        let text = |ch| {
+            let cell = cells
+                .iter()
+                .find(|cell| cell.ch == Some(ch))
+                .unwrap_or_else(|| panic!("{ch} çizilmedi: {cells:?}"));
+            cell.cluster
+                .and_then(|id| clusters.get(id).map(str::to_owned))
+        };
+        assert_eq!(text('🇹').as_deref(), Some("🇹🇷"));
+        assert_eq!(
+            text('👨').as_deref(),
+            Some("👨\u{200D}👩\u{200D}👧"),
+            "aile beş kod noktası"
+        );
+        assert_eq!(text('e'), None, "tek sütunlu birleştirici küme doğurdu");
+        assert_eq!(text('.'), None);
+        session.shutdown();
+    }
+
+    #[test]
+    fn without_clustering_no_cell_carries_a_cluster() {
+        // Bayrak kapalıyken kare bugünküyle aynı: tablo boş, kimlik yok.
+        let (session, cells, clusters) = cluster_frame(false);
+        assert!(cells.iter().all(|cell| cell.cluster.is_none()), "{cells:?}");
+        assert!(clusters.is_empty());
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_selected_family_copies_every_code_point() {
+        // Izgara seçiminin kopyası kümeyi alacritty'nin satır metninden
+        // bütün alıyor (035 R4.2) — kod değişmedi, sözleşme sabitlendi.
+        let (session, cells, _) = cluster_frame(true);
+        let family = cells
+            .iter()
+            .find(|cell| cell.ch == Some('👨'))
+            .expect("aile çizilmedi");
+        session.set_selection(
+            SelectKind::Simple,
+            at(family.col, family.row, CellHalf::Left),
+            at(family.col + 1, family.row, CellHalf::Right),
+        );
+        assert_eq!(
+            session.selection_text().as_deref(),
+            Some("👨\u{200D}👩\u{200D}👧")
+        );
+        session.shutdown();
+    }
+
     #[test]
     fn a_timed_out_synchronized_update_is_clustered() {
         let wake = Arc::new(TestWake::default());
@@ -15372,6 +15649,7 @@ mod tests {
                         &mut context,
                         cursor.caret_in_dock,
                         &mut Vec::new(),
+                        &mut Clusters::default(),
                         |_| (),
                         |_| (),
                     )
@@ -15579,6 +15857,7 @@ mod tests {
             &mut Blocks::default(),
             &mut SelectionRuns::default(),
             &mut runs,
+            &mut Clusters::default(),
             ScrollGlide::default(),
             BUDGET,
         );

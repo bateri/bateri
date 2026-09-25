@@ -52,6 +52,7 @@ mod shell;
 mod theme;
 mod wake;
 
+pub use cluster::{ClusterId, Clusters};
 pub use color::{LinearRgba, Theme};
 pub use dock::{
     Dock, DockBudget, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_TEXT_COL,
