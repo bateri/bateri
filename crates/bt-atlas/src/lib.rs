@@ -47,12 +47,19 @@ use objc2_core_text::CTFont;
 use raster::DrawResult;
 pub use raster::RuleKind;
 
-/// Atlasta yuva tutan şey: bir karakter ya da bir kural çizgisi.
+/// Atlasta yuva tutan şey: bir karakter, bir kural çizgisi ya da bir grapheme
+/// dizisi.
 ///
-/// İkisi aynı ızgarada yaşıyor çünkü ikisi de **hücre boyunda bir kapsama
-/// maskesi**; `bt-gpu` ikisini de aynı `cell` pipeline'ından çiziyor ve rengi
-/// instance'tan veriyor. Emoji bu birliği bozar (iki hücre, renkli doku) ve
-/// tam bu yüzden ayrı bir sete bırakıldı.
+/// Üçü aynı ızgarada yaşıyor çünkü üçü de **hücre boyunda** yuvalara
+/// rasterize oluyor: emoji ve geniş glyph 023'ten beri iki yarıya ([`Half`])
+/// ve renk düzlemine ([`Plane`]) bölünerek aynı birliğe girdi, yani ayrı bir
+/// doku ya da ayrı bir paketleyici doğmadı.
+///
+/// [`Sprite::Cluster`] bir dizginin (bayrak `🇹🇷`, ZWJ `👨‍👩‍👧`, ten rengi
+/// `👍🏽`, VS16 `❤️`) **atlasın kendi** interner'ındaki kimliği
+/// ([`Atlas::intern`]); `Sprite` o sayede `Copy + Hash` kalıyor ve yuva
+/// anahtarı bir dizgi taşımıyor. Dizi tek glyph'e şekillenmezse cevabı taban
+/// karakterinki ([`Atlas::slot`]).
 ///
 /// Yordamsal çizilen karakterler (blok, Braille) **üçüncü bir varyant
 /// almadı**: bir karakterdirler ve `Char` olarak yaşıyorlar. `Sprite::Box`
@@ -65,6 +72,7 @@ pub use raster::RuleKind;
 pub enum Sprite {
     Char(char),
     Rule(RuleKind),
+    Cluster(u32),
 }
 
 /// Bir glyph'in hücre ızgarasındaki **yarısı** — yuva anahtarının dördüncü
@@ -329,6 +337,18 @@ pub struct Atlas {
     color_buffer_right: Vec<u8>,
     /// Rezident tofu kutusu; ömür boyu değişmez.
     tofu: Vec<u8>,
+    /// Interner'ın dizgileri: [`Sprite::Cluster`]'ın kimliği bu listenin
+    /// indeksi.
+    ///
+    /// Tahliye yok ve politika **yuvalarınkiyle aynı**: kayıt atlasın ömrü
+    /// boyunca yaşıyor, [`Atlas::ensure`] atlası yeniden kurunca yuvalarla
+    /// birlikte düşüyor. Ayrı ömürlü olsaydı yeniden kurulmuş bir atlasta
+    /// kimliği canlı ama yuvası ölü diziler kalırdı; yuvalarla aynı anda
+    /// düşünce çağıranın elindeki eski kimlik ya yeniden sorulur ya da
+    /// [`Atlas::slot`]'ta tofu'ya düşer.
+    clusters: Vec<Box<str>>,
+    /// Dizgi → kimlik; [`Atlas::clusters`]'ın ters yönü.
+    cluster_ids: HashMap<Box<str>, u32>,
 }
 
 /// Atlasın anahtarı: bu dördünden biri değişirse metrik, raster ve yuva
@@ -433,6 +453,8 @@ impl Atlas {
             color_buffer: vec![0u8; metrics.slot_bytes_rgba()],
             color_buffer_right: vec![0u8; metrics.slot_bytes_rgba()],
             tofu: tofu_buffer(metrics),
+            clusters: Vec::new(),
+            cluster_ids: HashMap::new(),
         }
     }
 
@@ -503,6 +525,33 @@ impl Atlas {
         ((slot % self.grid.0) * w, (slot / self.grid.0) * h)
     }
 
+    /// Dizginin sprite'ı: aynı dizgi her zaman aynı kimliği alır.
+    ///
+    /// **Tek kod noktalı dizgi `Char`'a iniyor** — kümenin yolu yalnız birden
+    /// çok kod noktasına açık ve tek karakteri `Cluster` olarak tutmak aynı
+    /// glyph'i iki anahtarda, iki yuvada rasterize ederdi. Boş dizgi
+    /// çizilecek bir şey taşımıyor; boşluğa iniyor.
+    pub fn intern(&mut self, text: &str) -> Sprite {
+        let mut chars = text.chars();
+        let base = match (chars.next(), chars.next()) {
+            (None, _) => return Sprite::Char(' '),
+            (Some(ch), None) => return Sprite::Char(ch),
+            (Some(ch), Some(_)) => ch,
+        };
+        if let Some(&id) = self.cluster_ids.get(text) {
+            return Sprite::Cluster(id);
+        }
+        // Kimlik uzayı tükendiyse (bir atlasın ömründe dört milyar farklı
+        // dizi) dizi **taban karakterine** iniyor: şekillenmeyen kümenin
+        // cevabı da o, yani görüntü bugünkü hâlden kötü olmuyor.
+        let Ok(id) = u32::try_from(self.clusters.len()) else {
+            return Sprite::Char(base);
+        };
+        self.clusters.push(text.into());
+        self.cluster_ids.insert(text.into(), id);
+        Sprite::Cluster(id)
+    }
+
     /// Yuva [`TOFU`]'nun kalıcı içeriği; `bt-gpu` doku kurulumunda bir kez
     /// yazar. [`Atlas::slot`] tofu'ya düştüğünde bitmap **vermez**: veri
     /// zaten dokuda ve her düşüşte yeniden yüklemek boşa yazma olurdu.
@@ -566,6 +615,12 @@ impl Atlas {
                 (Face::Regular, SizeClass::Normal)
             }
             (Sprite::Char(_), SizeClass::Normal) => (self.faces.effective(face), SizeClass::Normal),
+            // Dizinin yüzü **düz**: şekillenen glyph renkli emoji fontundan
+            // geliyor ve orada kalın/eğik yok, yani dört yüz dört ayrı yuvada
+            // bayt bayt aynı bitmap'i tutardı. Şekillenmeyen dizinin taban
+            // karakteri de düz yüzden soruluyor (aynı anahtarın takma adı).
+            // Boy sınıfı korunuyor: küçük satırın glyph'i küçük fontun.
+            (Sprite::Cluster(_), size) => (Face::Regular, size),
         };
         // Anahtar **istenen** yarıyı taşıyor ama cevabın yarısı istenenle
         // aynı olmak zorunda değil: `Left` istenip tek hücreye sığan bir
@@ -622,7 +677,7 @@ impl Atlas {
         // kurallar tembel kalır ama yerleri garantidir.
         let cap = match sprite {
             Sprite::Rule(_) => self.capacity(),
-            Sprite::Char(_) => self.capacity().saturating_sub(RULE_RESERVE),
+            Sprite::Char(_) | Sprite::Cluster(_) => self.capacity().saturating_sub(RULE_RESERVE),
         };
         // **Geniş istek iki yuva ister ve ikisini birden ister.** Sayı
         // `want`'tan geliyor, kapıdan değil: kapı ancak çizim sırasında
@@ -749,86 +804,53 @@ impl Atlas {
                     // sonra iki.
                     let cols = if want == Half::Left { 2 } else { 1 };
                     match font::fallback_font(font, ch, cell_advance, cols) {
-                        Some(alt) => {
-                            // **Düzlem adayın kendi özelliğinden**: renkli
-                            // glyph taşıyan bir font `RGBA8` düzlemine,
-                            // ötekiler maskeye. Ölçüt trait biti, aile adı
-                            // değil (gerekçe [`font::has_color_glyphs`]).
-                            let plane = if font::has_color_glyphs(&alt.font) {
-                                Plane::Color
-                            } else {
-                                Plane::Mask
-                            };
-                            // İki yarı **aynı kutuya** ortalanıyor ve ikisi de
-                            // aynı çağrıda çiziliyor: sağ yarının ofseti tam
-                            // sayı piksel, yani AA fazı ikisinde birebir aynı.
-                            let pair = alt.cols >= 2;
-                            let box_advance = cell_advance * f64::from(alt.cols);
-                            let shift = f64::from(self.metrics.cell_px.0);
-                            let half = if pair { Half::Left } else { Half::Whole };
-                            // Tek çizici, iki reçete: `Plane` hangisi
-                            // olacağını söylüyor ve tampon da onunla
-                            // eşleşiyor. Eşleşmezse `raster`'ın ön koşul
-                            // assert'i düşer — o assert yanlış düzlemi
-                            // yakalayan tek şey.
-                            let left = match plane {
-                                Plane::Mask => raster::draw(
-                                    &alt.font,
-                                    ch,
-                                    self.metrics,
-                                    box_advance,
-                                    0.0,
-                                    &mut self.buffer,
-                                ),
-                                Plane::Color => raster::draw_color(
-                                    &alt.font,
-                                    ch,
-                                    self.metrics,
-                                    box_advance,
-                                    0.0,
-                                    &mut self.color_buffer,
-                                ),
-                            };
-                            if !pair {
-                                (left, half, plane)
-                            } else {
-                                let right = match plane {
-                                    Plane::Mask => raster::draw(
-                                        &alt.font,
-                                        ch,
-                                        self.metrics,
-                                        box_advance,
-                                        shift,
-                                        &mut self.buffer_right,
-                                    ),
-                                    Plane::Color => raster::draw_color(
-                                        &alt.font,
-                                        ch,
-                                        self.metrics,
-                                        box_advance,
-                                        shift,
-                                        &mut self.color_buffer_right,
-                                    ),
-                                };
-                                // İki çağrı aynı fontun aynı glyph'ini
-                                // soruyor, yani ikisi birden başarılı ya da
-                                // ikisi birden değil. Yine de **ikisi de**
-                                // sınanıyor: biri düşerse çift kabul
-                                // edilmemeli, yoksa yarısı boş bir glyph
-                                // çizilirdi.
-                                let both = left == DrawResult::Drawn && right == DrawResult::Drawn;
-                                let worst = if both {
-                                    DrawResult::Drawn
-                                } else {
-                                    DrawResult::NoGlyph
-                                };
-                                (worst, half, plane)
-                            }
-                        }
+                        Some(alt) => self.draw_accepted(&alt, cell_advance),
                         None => (drawn, Half::Whole, Plane::Mask),
                     }
                 } else {
                     (drawn, Half::Whole, Plane::Mask)
+                }
+            }
+            // **Dizi** `Char`'ın font kolunun kardeşi: yordamsal kapı ona
+            // uygulanmıyor (bir dizi blok ya da çizgi karakteri değil) ve
+            // aday yine sınıfın kendi fontundan cascade'e gidiyor.
+            Sprite::Cluster(id) => {
+                let Some(text) = self.clusters.get(id as usize) else {
+                    // Kimlik bu atlasın interner'ında yok: çağıran yeniden
+                    // kurulmadan önceki bir atlastan kalma bir kimlik
+                    // taşıyor ([`Atlas::clusters`]). **Önbelleklenmiyor** —
+                    // dolu atlasın gerekçesiyle: kimlik kalıcı bir gerçek
+                    // değil, yeniden sorulduğunda başka bir dizgiye
+                    // bağlanabilir. Panik değil, çünkü `slot()` display
+                    // link'in callback'inde.
+                    return (
+                        Placed {
+                            slot: TOFU,
+                            half: Half::Whole,
+                            plane: Plane::Mask,
+                        },
+                        None,
+                    );
+                };
+                // Taban `intern`'ün ayırdığı gibi en az iki kod noktası
+                // taşıyan dizginin ilk karakteri; boş olamaz ama `slot()`
+                // çizim yolunda, yani varsayım bir panik değil boşluk.
+                let base = text.chars().next().unwrap_or(' ');
+                let (font, cell_advance) = match size {
+                    SizeClass::Normal => (self.faces.get(face), self.cell_advance),
+                    SizeClass::Small => (&*self.small, self.context_advance),
+                };
+                // Sütun sayısı `Char`'ınkiyle aynı kaynaktan (çağıranın
+                // istediği yarı) ve kapının sırası aynı: önce tek, sonra iki.
+                let cols = if want == Half::Left { 2 } else { 1 };
+                match font::shape_cluster(font, text, cell_advance, cols) {
+                    Some(alt) => self.draw_accepted(&alt, cell_advance),
+                    // Tek glyph'e şekillenmedi ya da kapıdan döndü: cevap
+                    // **taban karakterin** (035 R1.1). Kutu değil, çünkü
+                    // taban karakteri çoğu zaman çizilebiliyor (`👍👍`'nin
+                    // `👍`'si); yarım glyph değil, çünkü taban karakter kendi
+                    // kapısından geçiyor.
+                    None => return self.cluster_as_base(sprite, base, size, want),
                 }
             }
             // Yordamsal çizim başarısız olamaz: font sorulmuyor, bağlam
@@ -1033,6 +1055,148 @@ impl Atlas {
                 )
             }
         }
+    }
+
+    /// Kapıdan geçmiş adayı çizer: düzlem, bir ya da iki yarı ve ikisinin
+    /// birlikte başarısı.
+    ///
+    /// Yedek karakter ile grapheme dizisinin **ortak** çizimi; ayrı
+    /// yazılsalardı iki yarının aynı kutuya ortalanması ve çiftin atomik
+    /// kabulü iki kopyada yaşar, biri ayrıştığında öteki fark etmezdi.
+    fn draw_accepted(
+        &mut self,
+        alt: &font::Accepted,
+        cell_advance: CGFloat,
+    ) -> (DrawResult, Half, Plane) {
+        // **Düzlem adayın kendi özelliğinden**: renkli glyph taşıyan bir font
+        // `RGBA8` düzlemine, ötekiler maskeye. Ölçüt trait biti, aile adı
+        // değil (gerekçe [`font::has_color_glyphs`]).
+        let plane = if font::has_color_glyphs(&alt.font) {
+            Plane::Color
+        } else {
+            Plane::Mask
+        };
+        // İki yarı **aynı kutuya** ortalanıyor ve ikisi de aynı çağrıda
+        // çiziliyor: sağ yarının ofseti tam sayı piksel, yani AA fazı ikisinde
+        // birebir aynı.
+        let pair = alt.cols >= 2;
+        let box_advance = cell_advance * f64::from(alt.cols);
+        let shift = f64::from(self.metrics.cell_px.0);
+        let half = if pair { Half::Left } else { Half::Whole };
+        // Tek çizici, iki reçete: `Plane` hangisi olacağını söylüyor ve tampon
+        // da onunla eşleşiyor. Eşleşmezse `raster`'ın ön koşul assert'i düşer
+        // — o assert yanlış düzlemi yakalayan tek şey.
+        let left = match plane {
+            Plane::Mask => raster::draw_glyph(
+                &alt.font,
+                alt.glyph,
+                self.metrics,
+                box_advance,
+                0.0,
+                &mut self.buffer,
+            ),
+            Plane::Color => raster::draw_color_glyph(
+                &alt.font,
+                alt.glyph,
+                self.metrics,
+                box_advance,
+                0.0,
+                &mut self.color_buffer,
+            ),
+        };
+        if !pair {
+            return (left, half, plane);
+        }
+        let right = match plane {
+            Plane::Mask => raster::draw_glyph(
+                &alt.font,
+                alt.glyph,
+                self.metrics,
+                box_advance,
+                shift,
+                &mut self.buffer_right,
+            ),
+            Plane::Color => raster::draw_color_glyph(
+                &alt.font,
+                alt.glyph,
+                self.metrics,
+                box_advance,
+                shift,
+                &mut self.color_buffer_right,
+            ),
+        };
+        // İki çağrı aynı fontun aynı glyph'ini soruyor, yani ikisi birden
+        // başarılı ya da ikisi birden değil. Yine de **ikisi de** sınanıyor:
+        // biri düşerse çift kabul edilmemeli, yoksa yarısı boş bir glyph
+        // çizilirdi.
+        let both = left == DrawResult::Drawn && right == DrawResult::Drawn;
+        let worst = if both {
+            DrawResult::Drawn
+        } else {
+            DrawResult::NoGlyph
+        };
+        (worst, half, plane)
+    }
+
+    /// Şekillenmeyen dizinin cevabı: **taban karakterin** yuvası, dizinin
+    /// anahtarına takma adla.
+    ///
+    /// Yüz merdiveninin takma adıyla (`DrawResult::NoGlyph if face !=
+    /// Regular` kolu) aynı örüntü ve aynı gerekçe: takma ad yazılmasaydı dizi
+    /// her karede yeniden `CTLine` kurar, şekillendirir ve kapıdan döner —
+    /// ana thread'de, kare bütçesinin ortasında. Taban karakterin kendi
+    /// kaydı ayrı yaşıyor, yani ızgarada tek başına duran aynı karakter
+    /// ikinci bir yuva açmıyor.
+    fn cluster_as_base(
+        &mut self,
+        sprite: Sprite,
+        base: char,
+        size: SizeClass,
+        want: Half,
+    ) -> (Placed, Option<Upload<'_>>) {
+        let (placed, upload) = self.slot(Sprite::Char(base), Face::Regular, size, want);
+        // `upload` burada tüketiliyor ki `self.buffer` ödüncü bitsin; tampon
+        // özyineli çağrının çizdiği baytları hâlâ taşıyor.
+        let origin = upload.as_ref().map(|upload| upload.origin);
+        let right = upload.as_ref().and_then(|upload| upload.right);
+        let key = |half| (sprite, Face::Regular, size, half);
+        // Taban karakterin **çözdüğü** yarı yazılıyor, istenen değil: `❤️`'nin
+        // `❤`'si tek hücreye sığabiliyor ve takma adı `Left` diye yazmak
+        // çağırana ikinci bir instance bastırırdı.
+        self.slots
+            .insert(key(placed.half), (placed.slot, placed.plane));
+        // Sağ yarının takma adı çözülen yarıdan, yüklemeden değil: taban
+        // karakter önbellekten döndüyse yükleme yok ama çift yine de iki
+        // komşu yuva.
+        if placed.half == Half::Left {
+            self.slots.insert(
+                key(Half::Right),
+                (placed.slot.saturating_add(1), placed.plane),
+            );
+        }
+        // Ret de **istenen** anahtara yazılıyor (negatif önbelleğin kuralı):
+        // ret her zaman `Whole` çözüyor, yani `Left` isteği yazılmasaydı her
+        // karede yeniden şekillendirilirdi. Düzlem de sorulmak zorunda:
+        // `TOFU` maske düzleminin 0. yuvası, renk düzleminin 0. yuvası ise
+        // ilk emojinin gerçek yuvası.
+        if placed.slot == TOFU && placed.plane == Plane::Mask {
+            self.slots.insert(key(want), (TOFU, Plane::Mask));
+            if want == Half::Left {
+                self.slots.insert(key(Half::Right), (TOFU, Plane::Mask));
+            }
+        }
+        let (bytes, right_bytes) = match placed.plane {
+            Plane::Mask => (&self.buffer, &self.buffer_right),
+            Plane::Color => (&self.color_buffer, &self.color_buffer_right),
+        };
+        let upload = origin.map(|origin| Upload {
+            origin,
+            bytes,
+            right,
+            right_bytes,
+            plane: placed.plane,
+        });
+        (placed, upload)
     }
 
     /// (kullanılan, toplam) yuva.
@@ -4256,5 +4420,180 @@ mod tests {
                 "{half:?} anahtarı yazılmadı: o istek her karede cascade yürür"
             );
         }
+    }
+
+    /// Setin beş örnek dizisi: bayrak (iki RI), ZWJ, ten rengi ve iki VS16 —
+    /// `❤` ile `🌡` tek başına tek sütunlu 78'den, yani iki sütunu VS16
+    /// getiriyor.
+    const CLUSTERS: [&str; 5] = [
+        "\u{1F1F9}\u{1F1F7}",                          // 🇹🇷
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", // 👨‍👩‍👧
+        "\u{1F44D}\u{1F3FD}",                          // 👍🏽
+        "\u{2764}\u{FE0F}",                            // ❤️
+        "\u{1F321}\u{FE0F}",                           // 🌡️
+    ];
+
+    /// Dizi sınamalarının ölçeği: **Retina**.
+    ///
+    /// 13pt@1x'te tek kod noktalı `👍` bile iki hücrelik kapıdan dönüyor
+    /// (bayrağın glyph'inde ölçüldü: mürekkep 16.25 pt, iki hücre 15.65 pt;
+    /// `👍` aynı kapıdan tofu'ya düşüyor) — 023'ün bugünkü hâli, bu setin konusu değil. O ölçekte dizinin kapıdan dönmesi
+    /// şekillendirme hakkında hiçbir şey söylemez ve taban karaktere düşüş
+    /// sınaması tofu'ya karşı boşuna yeşil kalırdı.
+    const CLUSTER_SCALE: f64 = 2.0;
+
+    /// Dizi **tek glyph**'e şekilleniyor ve renk düzleminde iki yarıyla
+    /// geliyor.
+    ///
+    /// Ölçüt ızgaranın ayırdığı iki sütun: dizi glyph'inin geometrisi tek kod
+    /// noktalı emojinin aynısı (035 `context.md` → Ölçülen: şekillendirme),
+    /// yani 023'ün iki hücrelik kapısından geçmeli. Sağ yarının boş olmaması
+    /// şart — boş bir sağ yarı "iki yuva aldı" sınamasını yeşil bırakıp
+    /// ekranda yarım bir emoji çizerdi.
+    #[test]
+    fn a_cluster_takes_two_colour_slots() {
+        let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
+        for text in CLUSTERS {
+            let sprite = a.intern(text);
+            assert!(
+                matches!(sprite, Sprite::Cluster(_)),
+                "'{text}' birden çok kod noktası: küme olmalı"
+            );
+            let before = a.color_occupancy().0;
+            let (placed, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
+            assert_eq!(
+                placed.plane,
+                Plane::Color,
+                "'{text}' renk düzleminde olmalı"
+            );
+            assert_eq!(placed.half, Half::Left, "'{text}' iki yarıyla gelmeli");
+            let upload = upload.expect("yeni çift yükleme vermeli");
+            assert!(
+                upload.right.is_some(),
+                "'{text}' sağ yarısı aynı dönüşte gelmeli"
+            );
+            assert!(
+                upload.bytes.iter().any(|&b| b > 0),
+                "'{text}' sol yarısı boş"
+            );
+            assert!(
+                upload.right_bytes.iter().any(|&b| b > 0),
+                "'{text}' sağ yarısı boş"
+            );
+            assert_eq!(
+                a.color_occupancy().0 - before,
+                2,
+                "'{text}' tam iki renk yuvası harcamalı"
+            );
+        }
+    }
+
+    /// Aynı dizgi aynı kimliği ve aynı yuvayı alıyor; farklı dizgiler farklı
+    /// kimlik.
+    ///
+    /// Kimlik anahtarın parçası, yani ikinci soruluşta yeni bir kimlik
+    /// üretmek aynı glyph'i her karede yeniden şekillendirip yeni yuvaya
+    /// koymak olurdu — atlas dolana kadar sessizce.
+    #[test]
+    fn the_same_cluster_is_interned_and_cached_once() {
+        let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
+        let first = a.intern(CLUSTERS[0]);
+        assert_eq!(a.intern(CLUSTERS[0]), first, "aynı dizgi aynı kimlik");
+        let ids: Vec<Sprite> = CLUSTERS.iter().map(|text| a.intern(text)).collect();
+        for (i, x) in ids.iter().enumerate() {
+            for y in &ids[i + 1..] {
+                assert_ne!(x, y, "farklı dizgiler aynı kimliği aldı");
+            }
+        }
+        let (placed, upload) = a.slot(first, Face::Regular, SizeClass::Normal, Half::Left);
+        assert!(upload.is_some(), "ilk soruluş yükleme vermeli");
+        let occupied = a.color_occupancy().0;
+        // Yüz **düz yüze iniyor**: kalın bir satırdaki bayrak ayrı yuva açmamalı.
+        for face in [Face::Regular, Face::Bold] {
+            let sprite = a.intern(CLUSTERS[0]);
+            let (again, upload) = a.slot(sprite, face, SizeClass::Normal, Half::Left);
+            assert_eq!(again, placed, "{face:?}: ikinci soruluş aynı cevap");
+            assert!(
+                upload.is_none(),
+                "{face:?}: yüklü yuva yeniden yüklenmemeli"
+            );
+        }
+        assert_eq!(
+            a.color_occupancy().0,
+            occupied,
+            "ikinci soruluş yuva açmamalı"
+        );
+        // Tek kod noktası küme değil: aynı glyph iki anahtarda tutulmamalı.
+        assert_eq!(a.intern("A"), Sprite::Char('A'));
+        assert_eq!(a.intern(""), Sprite::Char(' '));
+    }
+
+    /// Tek glyph'e şekillenmeyen dizgi **taban karakterin** cevabını alıyor —
+    /// kutu değil, yarım glyph değil (R1.1).
+    ///
+    /// `👍👍` iki ayrı glyph'e şekilleniyor; ızgara onu hiç kümelemez ama
+    /// sınır bu kolu sınamanın en temiz yolu. Cevap bayt bayt `Char('👍')`'nin
+    /// ki: ayrı bir atlasta sorulan tek karakterle karşılaştırılıyor, yani
+    /// "taban karakter" bir benzetme değil aynı raster.
+    #[test]
+    fn an_unshaped_cluster_answers_with_its_base_char() {
+        const BASE: char = '\u{1F44D}'; // 👍
+        let mut reference = atlas(POINT_SIZE, CLUSTER_SCALE);
+        let (base, base_upload) = reference.slot(
+            Sprite::Char(BASE),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Left,
+        );
+        assert_eq!(base.plane, Plane::Color, "taban karakter çizilebilmeli");
+        let base_upload = base_upload.expect("ilk soruluş yükleme vermeli");
+        let base_bytes = (base_upload.bytes.to_vec(), base_upload.right_bytes.to_vec());
+
+        let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
+        let sprite = a.intern("\u{1F44D}\u{1F44D}");
+        let (placed, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
+        assert_eq!(
+            placed, base,
+            "şekillenmeyen dizi taban karakterin cevabını almalı"
+        );
+        let upload = upload.expect("ilk soruluş yükleme vermeli");
+        assert_eq!(
+            (upload.bytes.to_vec(), upload.right_bytes.to_vec()),
+            base_bytes,
+            "raster taban karakterinkiyle bit bit aynı olmalı"
+        );
+        // Takma ad yazıldı: ikinci soruluş şekillendirmeyi yeniden koşmuyor.
+        let (again, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
+        assert_eq!(again, placed);
+        assert!(upload.is_none(), "takma ad önbellekte olmalı");
+        let (right, _) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Right);
+        assert_eq!(
+            right.slot,
+            placed.slot + 1,
+            "sağ yarının takma adı da yazılmalı"
+        );
+    }
+
+    /// Yeniden kurulan atlasta eski kimlik **tofu**, panik değil.
+    ///
+    /// Interner yuvalarla birlikte düşüyor ([`Atlas::clusters`]); çağıranın
+    /// elinde kalmış bir kimlik `slot()`'a — display link'in callback'ine —
+    /// gelebilir ve orada bir panik kareyi düşürürdü.
+    #[test]
+    fn a_stale_cluster_id_is_tofu() {
+        let mut a = atlas(POINT_SIZE, CLUSTER_SCALE);
+        let sprite = a.intern(CLUSTERS[0]);
+        assert!(
+            a.ensure(None, POINT_SIZE + 1.0, 1.0, 1.0),
+            "anahtar değişti"
+        );
+        let (placed, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
+        assert_eq!(placed.slot, TOFU);
+        assert!(upload.is_none());
+        assert_eq!(
+            a.intern(CLUSTERS[0]),
+            sprite,
+            "yeniden sorulan dizi yeniden kimlik alır"
+        );
     }
 }

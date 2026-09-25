@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 
 use objc2_core_foundation::{CGFloat, CGPoint};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, kCGColorSpaceSRGB,
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, kCGColorSpaceSRGB,
 };
 use objc2_core_text::CTFont;
 
@@ -47,15 +47,32 @@ pub(crate) fn draw(
     x_offset: CGFloat,
     target: &mut [u8],
 ) -> DrawResult {
+    let Some(glyph) = font::glyph_index(font, ch) else {
+        return DrawResult::NoGlyph;
+    };
+    draw_glyph(font, glyph, m, box_advance, x_offset, target)
+}
+
+/// [`draw`]'in glyph numarasıyla çağrılan gövdesi.
+///
+/// Ayrı olmasının sebebi grapheme dizisi (035): dizinin glyph'i bir kod
+/// noktasından değil `CTLine`'ın şekillendirmesinden geliyor
+/// ([`font::shape_cluster`]), yani `glyph_index(ch)` sorusu orada sorulamıyor.
+/// Yerleşim, ortalama ve bağlam **tek yerde** kalıyor; [`draw`] yalnız
+/// numarayı buluyor, yani bugünkü raster bit bit aynı.
+pub(crate) fn draw_glyph(
+    font: &CTFont,
+    glyph: CGGlyph,
+    m: Metrics,
+    box_advance: CGFloat,
+    x_offset: CGFloat,
+    target: &mut [u8],
+) -> DrawResult {
     // `debug_assert` değil: bu satır aşağıdaki `unsafe` bloğun ön koşulu.
     // CG'ye `width`/`height` `m`'den, işaretçi `target`ten gidiyor; ikisi
     // ayrışırsa CG kısa tamponun ötesine yazar ve release derlemede hiçbir şey
     // fark etmez — `make hepsi` sınamaları debug koşuyor.
     assert_eq!(target.len(), m.slot_bytes(), "tampon tam bir yuva olmalı");
-
-    let Some(glyph) = font::glyph_index(font, ch) else {
-        return DrawResult::NoGlyph;
-    };
 
     let (w, h) = m.cell_wh();
     // Alfa-only bağlam: renk uzayı **yok** (`space: None`), bileşen başına
@@ -136,7 +153,7 @@ pub(crate) fn draw(
 
 /// `target`e `ch`'in **renkli** piksellerini çizer (`RGBA8`, ön çarpımlı).
 ///
-/// [`draw`]'in kardeşi ve ondan **ayrı** bir fonksiyon, parametreli bir dalı
+/// [`draw_glyph`]'in kardeşi ve ondan **ayrı** bir fonksiyon, parametreli bir dalı
 /// değil: iki reçetenin ortak yanı yalnız konum aritmetiği, ayrıştıkları şey
 /// bağlamın kendisi — bu bağlamın bir renk uzayı var (`sRGB`), piksel başına
 /// dört bileşeni ve ön çarpımlı alfası; [`draw`]'inki alfa-only ve renk
@@ -153,9 +170,14 @@ pub(crate) fn draw(
 /// çünkü CoreGraphics renkli glyph'i öyle veriyor ve geri almak düşük alfada
 /// hassasiyet kaybı + yuva başına bir CPU turu demek. Bedeli blend tarafında
 /// ödeniyor: o pipeline'ın RGB kaynak çarpanı `One`.
-pub(crate) fn draw_color(
+///
+/// Glyph **numarasıyla** çağrılıyor, karakterle değil: renkli glyph'in iki
+/// kaynağı da (yedek adayı ve grapheme dizisi) numarayı kapıdan geçerken
+/// zaten bulmuş oluyor ([`font::Accepted`]), yani karakterli bir sarmalayıcının
+/// çağıranı yok.
+pub(crate) fn draw_color_glyph(
     font: &CTFont,
-    ch: char,
+    glyph: CGGlyph,
     m: Metrics,
     box_advance: CGFloat,
     x_offset: CGFloat,
@@ -169,10 +191,6 @@ pub(crate) fn draw_color(
         m.slot_bytes_rgba(),
         "tampon tam bir RGBA yuva olmalı"
     );
-
-    let Some(glyph) = font::glyph_index(font, ch) else {
-        return DrawResult::NoGlyph;
-    };
 
     let (w, h) = m.cell_wh();
     // SAFETY: adlandırılmış sistem sabiti; dönüş non-null.
