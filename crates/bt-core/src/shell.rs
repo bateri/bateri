@@ -347,6 +347,17 @@ pub struct DockState {
     /// okumuyor ([`ShellLog::suppressed_input`] `Live` ister), yani ona etkisi
     /// yok.
     pub answers: u64,
+    /// Ayna kümeyle mi okunuyor (035, `SessionOptions::cluster`): dock'un
+    /// düzeni ([`crate::dock::layout_with`]) ve [`Self::last_ink`] emoji
+    /// dizisini tek küme sayıyor.
+    ///
+    /// **Aynanın içeriği değil, okunuşu** ve oturum boyunca sabit: tarayıcı
+    /// kendi kopyasına açılışta yazıyor ([`Scanner::cluster`]), `clone_from`
+    /// taşıyor, [`Self::reset`] dokunmuyor. Burada durmasının sebebi
+    /// tüketicilerin hepsinin elinde zaten bu kayıt olması — dock'un çizimi,
+    /// isabet testi, satır sayısı ve tazelik kapısı; ayrı bir argüman o
+    /// imzaların hepsine bir parametre eklerdi.
+    pub cluster: bool,
 }
 
 impl Clone for DockState {
@@ -371,6 +382,7 @@ impl Clone for DockState {
         self.last_ink = source.last_ink;
         self.insert_keymap = source.insert_keymap;
         self.answers = source.answers;
+        self.cluster = source.cluster;
         self.highlights.clear();
         self.highlights.extend_from_slice(&source.highlights);
     }
@@ -1993,6 +2005,13 @@ impl Scanner {
         }
     }
 
+    /// Aynayı kümeyle okuyan tarayıcı ([`DockState::cluster`]); açılışta
+    /// bir kez, `SessionOptions::cluster`'dan.
+    pub(crate) fn cluster(mut self, on: bool) -> Self {
+        self.line.cluster = on;
+        self
+    }
+
     /// Son çağrıdan bu yana görülen `CSI 2 J` sayısı; sayacı **boşaltır**.
     ///
     /// Sayı, çünkü tüketicisi bir **nesil sayacına** ekliyor
@@ -2487,6 +2506,27 @@ fn unavailable(line: &mut DockState, fault: DockFault) -> DockOutcome {
     DockOutcome::Unavailable(fault)
 }
 
+/// [`DockState::last_ink`]'in kümeli hâli: görüntünün son satırının son
+/// mürekkepli **kümesinin** baş karakteri. Kümeler ancak ileri doğru
+/// yürünebiliyor ([`crate::cluster::Walk`]), yani son `\n`'den sonrası
+/// baştan taranıyor — satır sonunda cevap sıfırlanıyor.
+fn last_cluster_ink(line: &DockState) -> Option<char> {
+    let display = line
+        .predisplay
+        .chars()
+        .chain(line.buffer.chars())
+        .chain(line.postdisplay.chars());
+    let mut ink = None;
+    crate::cluster::Walk::new().run(display, |cluster| {
+        if cluster.head == '\n' {
+            ink = None;
+        } else if cluster.head != ' ' && cluster.head != '\t' && cluster.width > 0 {
+            ink = Some(cluster.head);
+        }
+    });
+    ink
+}
+
 /// `u` yükünün alanlarını `line`'a çözer; zorunlu beşinden biri eksik ya da
 /// herhangi bir metin gövdesi bozuksa `None`. Son ikisi (`KEYMAP`,
 /// `PREBUFFER`) isteğe bağlı.
@@ -2532,53 +2572,62 @@ fn decode_line<'a>(
     // ayrışıyor ve cevapsız karede içerik kapısı "bayat" diyor; zamansal
     // kapı (`line-init`'in aynası ⏎'in cevabı) bugün olduğu gibi kurtarıyor,
     // kurtaramadığı anda (redisplay'siz tuş) satır iki yerde görünür.
-    line.last_ink = line
-        .predisplay
-        .chars()
-        .chain(line.buffer.chars())
-        .chain(line.postdisplay.chars())
-        .rev()
-        .take_while(|&ch| ch != '\n')
-        // **Ölçüt `' '` ve `'\t'`; `is_whitespace()` değil** ve bu bilerek
-        // dar: kapının öteki yarısı ızgarayı tarıyor
-        // (`Session::last_ink_in_row`) ve o da `frame()`'in atlama kapısına
-        // çivili — orada mürekkepsizlik yalnız boşluk, spacer ve gizli hücre.
-        // `is_whitespace()` deseydik satır sonu NBSP (U+00A0, U+2007, U+3000)
-        // taşıyan bir tamponda ayna önceki harfi, ızgara NBSP'yi söyler,
-        // ikisi hiç eşleşmez ve satır kalıcı olarak **bayat** sayılırdı: hem
-        // ızgarada hem dock'ta çizilirdi.
-        //
-        // **Sekme ise tersi ve ölçüldü** (kullanıcı, 2026-09-18): ayna **ham**
-        // tamponu taşıyor, ızgara ise **çizilmiş** hâli tutuyor. Terminal
-        // sekmeyi boşluğa açtığı için o karakter hücreye hiç ulaşmıyor —
-        // gerçek zsh'te boş satırda Tab `BUFFER='\t'` yapıyor, yani ayna
-        // `Some('\t')`, ızgara `None` diyor ve kapı düşüyordu. Belirtisi
-        // görünürdü: bastırma kalkıyor, caret dock'tan ızgaraya sıçrıyordu.
-        // Sekmeyi de mürekkepsiz saymak iki yarıyı yeniden eşitliyor — `"ls\t"`
-        // ikisinde de `'s'`, `"\t"` ikisinde de `None`.
-        //
-        // **Ham kontrol karakteri bu karşılaştırmaya hiç gelmiyor** (025):
-        // ZLE `\x01`'i ızgarada `^A` diye çiziyor ve dock onu hiç çizmiyor,
-        // yani o satır [`DockStatus::Control`] ile ızgarada kalıyor ve
-        // bastırılmıyor. Bir dönem burada "kalan sınır" diye yazılıydı ve
-        // yazıldığından kötüydü: `^A` yalnız **son** karakterken kapı
-        // düşüyordu, ortadayken satır dock'a gidip kayboluyordu.
-        //
-        // **Üçüncü ölçüt sıfır genişlik ve o 024'te geldi** (kullanıcı
-        // bildirdi, ölçüldü): birleştirici kod noktaları (VS16, ZWJ, ten
-        // rengi) ızgara hücresine **hiç girmiyor** — alacritty onları
-        // `CellExtra`'da tutuyor ve `cell.c` taban karakteri taşıyor. Yani
-        // `❤️` (U+2764 + U+FE0F) yazan bir tamponda ayna `U+FE0F`, ızgara
-        // `U+2764` diyor ve ikisi **hiçbir zaman** eşleşmiyor: kapı kalıcı
-        // olarak "bayat" der, bastırma her tuşta kalkar ve giriş satırı
-        // dock'tan ızgaraya fırlar. Sekmenin yukarıdaki gerekçesiyle aynı
-        // cümle — ayna **ham** tamponu, ızgara **çizilmiş** hâli taşıyor — ve
-        // çaresi de aynı: ızgaraya ulaşmayan karakteri ayna da saymıyor.
-        //
-        // Ölçüt `unicode-width`'in `Some(0)`'ı, yani `dock::column_width`'in
-        // beslendiği kaynağın ta kendisi. Kontrol karakterleri `None` dönüyor
-        // ve bu süzgece **girmiyor**: taşıyan satır zaten `Control`.
-        .find(|ch| *ch != ' ' && *ch != '\t' && UnicodeWidthChar::width(*ch) != Some(0));
+    //
+    // **Kümeleme açıkken (035) ölçüt kümenin baş karakteri**: ızgara
+    // `👍🏽`'yi tek hücrede tutuyor ve hücrenin `c`'si `👍`; ayna `🏽` deseydi
+    // kapı 024'ün belirtisini — satır her tuşta ızgaraya fırlar — geri
+    // getirirdi. Aşağıdaki üç ölçüt aynen: kümeye katılan birleştirici
+    // zaten ayrı sayılmıyor, başsız birleştirici (sütunu sıfır) atlanıyor.
+    line.last_ink = if line.cluster {
+        last_cluster_ink(line)
+    } else {
+        line.predisplay
+            .chars()
+            .chain(line.buffer.chars())
+            .chain(line.postdisplay.chars())
+            .rev()
+            .take_while(|&ch| ch != '\n')
+            // **Ölçüt `' '` ve `'\t'`; `is_whitespace()` değil** ve bu bilerek
+            // dar: kapının öteki yarısı ızgarayı tarıyor
+            // (`Session::last_ink_in_row`) ve o da `frame()`'in atlama kapısına
+            // çivili — orada mürekkepsizlik yalnız boşluk, spacer ve gizli hücre.
+            // `is_whitespace()` deseydik satır sonu NBSP (U+00A0, U+2007, U+3000)
+            // taşıyan bir tamponda ayna önceki harfi, ızgara NBSP'yi söyler,
+            // ikisi hiç eşleşmez ve satır kalıcı olarak **bayat** sayılırdı: hem
+            // ızgarada hem dock'ta çizilirdi.
+            //
+            // **Sekme ise tersi ve ölçüldü** (kullanıcı, 2026-09-18): ayna **ham**
+            // tamponu taşıyor, ızgara ise **çizilmiş** hâli tutuyor. Terminal
+            // sekmeyi boşluğa açtığı için o karakter hücreye hiç ulaşmıyor —
+            // gerçek zsh'te boş satırda Tab `BUFFER='\t'` yapıyor, yani ayna
+            // `Some('\t')`, ızgara `None` diyor ve kapı düşüyordu. Belirtisi
+            // görünürdü: bastırma kalkıyor, caret dock'tan ızgaraya sıçrıyordu.
+            // Sekmeyi de mürekkepsiz saymak iki yarıyı yeniden eşitliyor — `"ls\t"`
+            // ikisinde de `'s'`, `"\t"` ikisinde de `None`.
+            //
+            // **Ham kontrol karakteri bu karşılaştırmaya hiç gelmiyor** (025):
+            // ZLE `\x01`'i ızgarada `^A` diye çiziyor ve dock onu hiç çizmiyor,
+            // yani o satır [`DockStatus::Control`] ile ızgarada kalıyor ve
+            // bastırılmıyor. Bir dönem burada "kalan sınır" diye yazılıydı ve
+            // yazıldığından kötüydü: `^A` yalnız **son** karakterken kapı
+            // düşüyordu, ortadayken satır dock'a gidip kayboluyordu.
+            //
+            // **Üçüncü ölçüt sıfır genişlik ve o 024'te geldi** (kullanıcı
+            // bildirdi, ölçüldü): birleştirici kod noktaları (VS16, ZWJ, ten
+            // rengi) ızgara hücresine **hiç girmiyor** — alacritty onları
+            // `CellExtra`'da tutuyor ve `cell.c` taban karakteri taşıyor. Yani
+            // `❤️` (U+2764 + U+FE0F) yazan bir tamponda ayna `U+FE0F`, ızgara
+            // `U+2764` diyor ve ikisi **hiçbir zaman** eşleşmiyor: kapı kalıcı
+            // olarak "bayat" der, bastırma her tuşta kalkar ve giriş satırı
+            // dock'tan ızgaraya fırlar. Sekmenin yukarıdaki gerekçesiyle aynı
+            // cümle — ayna **ham** tamponu, ızgara **çizilmiş** hâli taşıyor — ve
+            // çaresi de aynı: ızgaraya ulaşmayan karakteri ayna da saymıyor.
+            //
+            // Ölçüt `unicode-width`'in `Some(0)`'ı, yani `dock::column_width`'in
+            // beslendiği kaynağın ta kendisi. Kontrol karakterleri `None` dönüyor
+            // ve bu süzgece **girmiyor**: taşıyan satır zaten `Control`.
+            .find(|ch| *ch != ' ' && *ch != '\t' && UnicodeWidthChar::width(*ch) != Some(0))
+    };
 
     decoded.clear();
     decode_base64(fields.next()?, decoded)?;
@@ -3825,6 +3874,35 @@ mod tests {
             dock_line(&dock_update(0, "", "ls\ngi", "t", &[])).last_ink,
             Some('t')
         );
+    }
+
+    /// **Kümeli okunuşta son mürekkep son kümenin başı** (035): ızgaranın
+    /// hücresi `👍🏽`'yi `c = 👍` ile tutuyor; ayna `🏽` deseydi kapı kalıcı
+    /// olarak "bayat" derdi (024'ün bekçisinin kümeli kardeşi). Kapalı
+    /// okunuş bugünkü gibi: ten rengi kendi başına bir mürekkep.
+    #[test]
+    fn the_clustered_last_ink_is_the_head_of_the_last_cluster() {
+        let ink = |cluster: bool, buffer: &str| {
+            let mut scanner = Scanner::new().cluster(cluster);
+            let mut seen = None;
+            scanner.feed(&dock_update(0, "", buffer, "", &[]), |event| {
+                if let ScanEvent::Dock(DockEvent::Update(line)) = event {
+                    assert_eq!(line.cluster, cluster, "okunuş aynaya taşınmadı");
+                    seen = Some(line.last_ink);
+                }
+            });
+            seen.expect("güncelleme bekleniyordu")
+        };
+        assert_eq!(ink(true, "ls 👍🏽"), Some('👍'));
+        assert_eq!(ink(true, "🇹🇷"), Some('🇹'));
+        assert_eq!(ink(true, "a 👨\u{200D}👩\u{200D}👧"), Some('👨'));
+        assert_eq!(ink(true, "❤\u{FE0F} "), Some('❤'));
+        assert_eq!(ink(true, "a\n🇹🇷\n"), None, "son satır boş");
+        assert_eq!(ink(true, "ls\t"), Some('s'), "sekme mürekkep değil");
+        // Kapalı okunuş: kod noktası kod noktası, sıfır genişlik atlanıyor.
+        assert_eq!(ink(false, "ls 👍🏽"), Some('🏽'));
+        assert_eq!(ink(false, "🇹🇷"), Some('🇷'));
+        assert_eq!(ink(false, "❤\u{FE0F}"), Some('❤'));
     }
 
     /// **Dock'un çizmediği kontrol karakteri satırı `Control`'e indiriyor**

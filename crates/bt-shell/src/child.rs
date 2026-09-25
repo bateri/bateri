@@ -682,6 +682,7 @@ mod tests {
                 // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
                 // dock alırdı.
                 dock: true,
+                cluster: false,
             },
             Arc::new(SilentWake),
         )
@@ -759,6 +760,99 @@ mod tests {
         session.shutdown();
     }
 
+    /// **`👍🏽` zsh'in sarma sınırında** (035 phase-3, `discussion.md` →
+    /// Karar, bedel 3): zsh diziyi wcwidth'le dört sütun sayıyor, kümeli
+    /// ızgara ve dock iki. On sütunda prompt'un iki boşluğu + `abcdef`
+    /// `👍`'yi son iki sütuna koyuyor — zsh'e göre `🏽` alt satırda, ızgarada
+    /// aynı hücrede; dokuz sütunda `👍` sığmayıp iniyor. İki hâlde de
+    /// bastırmanın aralığı girişin **bütün** satırlarını örtmeli ve üstteki
+    /// çıktıya taşmamalı: giriş ızgarada hiç görünmüyor, `TOP3` görünüyor.
+    /// Gerçek zsh'ten başka tanığı yok — bastırmanın birim bekçileri
+    /// ızgarayı elle basıyor, yani zsh'in kendi aritmetiğini göremez.
+    #[test]
+    fn a_clustered_emoji_at_the_wrap_edge_stays_suppressed() {
+        for cols in [9, 10] {
+            let root = TempRoot::new("cluster-wrap");
+            let home = root.0.join("home");
+            std::fs::create_dir_all(&home).expect("sahte ev dizini kurulamadı");
+            std::fs::write(home.join(".zshrc"), "").expect(".zshrc yazılamadı");
+            let wrapper = copy_wrapper(&root.0);
+            let session = Session::spawn(
+                SessionOptions {
+                    command: Some((
+                        "/bin/zsh".to_owned(),
+                        vec!["-l".to_owned(), "-i".to_owned()],
+                    )),
+                    working_directory: Some(home.clone()),
+                    home: Some(home.clone()),
+                    env: HashMap::from([
+                        ("HOME".to_owned(), home.display().to_string()),
+                        ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
+                        // zsh çok baytlı karakteri ancak UTF-8 yerelde
+                        // tek karakter sayıyor.
+                        ("LANG".to_owned(), "en_US.UTF-8".to_owned()),
+                    ]),
+                    cols,
+                    rows: 10,
+                    cell_px: (9, 18),
+                    terminal: TerminalOptions {
+                        scrollback: 100,
+                        osc52: Osc52::Off,
+                        cursor: CaretShape::default(),
+                        blink: CursorBlink::default(),
+                    },
+                    theme: Theme::BATERI,
+                    dock: true,
+                    cluster: true,
+                },
+                Arc::new(SilentWake),
+            )
+            .expect("oturum açılamadı");
+            session.write(b"echo TOP3\n");
+            wait_until("komut bitmedi", || {
+                session.shell_state()
+                    == Some(ShellState {
+                        phase: ShellPhase::Input,
+                        last_exit: Some(0),
+                    })
+            });
+            // İki durak: satır `👍🏽`'de bitiyorken (zsh'e göre `🏽` alt
+            // satırda) ve arkasına düz harfler geldikten sonra. Tazelik
+            // kapısının içerik yarısını bu bekçi görmüyor — ayna tuşun
+            // cevabıyken kapı zamandan "taze" diyor (ölçüldü: aynayı kümesiz
+            // okuyan mutasyonda yeşil); o yarının bekçisi
+            // `the_clustered_last_ink_is_the_head_of_the_last_cluster`.
+            let mut typed = String::new();
+            for (piece, hidden) in [
+                ("abcdef\u{1F44D}\u{1F3FD}", ["abc", "\u{1F44D}"]),
+                ("xy", ["xy", "\u{1F44D}"]),
+            ] {
+                session.write(piece.as_bytes());
+                typed.push_str(piece);
+                wait_until("ayna yazılan satırı göstermedi", || {
+                    let mut mirror = DockState::default();
+                    session.dock_state(&mut mirror);
+                    mirror.status == DockStatus::Live && mirror.buffer == typed
+                });
+                // Aynadan sonra ızgaranın da oturması için bir tur: zsh satırı
+                // aynadan önce basıyor, yani bu bir güvenlik payı.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let drawn = screen(&session, &mut Blocks::default()).join("\n");
+                assert!(
+                    drawn.contains("TOP3"),
+                    "bastırma üstteki çıktıya taştı ({cols} sütun, {typed:?}):\n{drawn}"
+                );
+                for piece in hidden {
+                    assert!(
+                        !drawn.contains(piece),
+                        "giriş ızgarada da çizildi ({cols} sütun, {typed:?}, {piece:?}):\n{drawn}"
+                    );
+                }
+            }
+            session.shutdown();
+        }
+    }
+
     #[test]
     fn the_shell_keeps_the_prompt_when_the_user_asks_for_it() {
         // `integration = "blocks"`in öteki ucu: ortama `BATERI_DOCK=off`
@@ -799,6 +893,7 @@ mod tests {
                 // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
                 // dock alırdı.
                 dock: true,
+                cluster: false,
             },
             Arc::new(SilentWake),
         )
@@ -929,6 +1024,7 @@ mod tests {
                 // Gerçek zsh, gerçek sarmalayıcı: uygulamada bu oturum
                 // dock alırdı.
                 dock: true,
+                cluster: false,
             },
             Arc::new(SilentWake),
         )
@@ -1062,6 +1158,7 @@ mod tests {
                 },
                 theme: Theme::BATERI,
                 dock: true,
+                cluster: false,
             },
             Arc::new(SilentWake),
         )

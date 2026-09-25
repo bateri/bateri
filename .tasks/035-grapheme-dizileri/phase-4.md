@@ -55,6 +55,11 @@ _Requirements: R4, R4.1, R4.2, R4.3_
 - [ ] Sınır `Cell`'i + tablo argümanı + üç yüzey
 - [ ] `bt-gpu` tablosu listelerle yaşıyor; `fan` ve `prepare_fx`
 - [ ] Dock seçimi / silme / fark hizası
+- [ ] İsabet testinin sağ yarısı küme sonuna: `hit` kümeli düzende baş
+  karakterin `DockPoint`'ini veriyor, `boundary` `index + 1`'e adımlıyor
+  (yalnız sıfır genişlikleri atlıyor) ve `🇹🇷`'nin sağ yarısına tık
+  `🇹`/`🇷` arasına düşüyor; `hit`'in `index + 1 < len` geri dönüşü de aynı.
+  Adım `Placed::end`'e (phase-3'te doğdu) ← phase-3 `/code-review`
 - [ ] Dört tuşun küme kolu (kapı açıkken)
 - [ ] Test: renderer (üç yüzey), hareket karesi, dock düzenleme, ızgara kopyası
 - [ ] Doğrulama geçti (`make hepsi` + `make duman`)
