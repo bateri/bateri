@@ -996,7 +996,8 @@ make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı bas
                   # hareket ile kayma iki ayrı animatörün tanığı (imleç / içeriğin ötelemesi): aynı karede ikisi birden artabilir, toplamları kare değildir.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
-make kur          # release derler, target/release/bateri.app'i kurar ve içeriğini denetler (Info.plist, ikon, lisans, shell betiği); imza yok
+make kur          # release derler, target/release/bateri.app'i kurar, ad-hoc imzalar ve içeriğini denetler (Info.plist, ikon, lisans, shell betiği); Developer ID yok
+make paket        # kur + gönderilecek zip: target/release/bateri-<sürüm>.zip (ditto)
 ```
 
 Girdisi henüz olmayan hedefler "henüz yok" deyip kırmızı düşer; hangileri
