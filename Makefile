@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite sırası yalnız seri make'te garantidir; -j altında "en ucuz kapı
 # önce" ve "sürüm başta" sözü bozulur.
 .NOTPARALLEL:
-.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris kur
+.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris kur paket
 
 # Definition of done. Homebrew rustc pin'li değil (rust-toolchain.toml bilinçli
 # olarak yok): bir `brew upgrade` sonrası gelen clippy kırmızısını kod
@@ -219,6 +219,21 @@ kur:
 # ayırt edici sinyal stdout'taki "henüz yok" metnidir. Hedef gerçek olunca
 # satırı sil, proje.md başındaki listeden de çıkar.
 henuz_yok = @echo "henüz yok: $(1)"; exit 1
+
+
+# Başka bir Mac'e gönderilecek zip: `kur`'un denetlenmiş paketini
+# `ditto` ile sıkıştırır (Finder'ın "Sıkıştır"ıyla aynı biçim; `zip -r`
+# macOS'un genişletilmiş özniteliklerini ve imza mührünü bozabiliyor).
+# Adında sürüm var, eski bir zip yanlışlıkla gönderilmesin. Alıcı ilk
+# açılışta Gatekeeper uyarısını Sistem Ayarları → Gizlilik ve Güvenlik →
+# "Yine de Aç" ile geçer — Developer ID ve notarization yok (006 Karar 6).
+ZIP = $(TARGET_DIR)/release/bateri-$(VERSION).zip
+
+paket: kur
+	codesign --verify --deep --strict $(APP)
+	rm -f $(ZIP)
+	ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP)
+	@echo "paket: $(ZIP) ($$(lipo -archs $(APP)/Contents/MacOS/bateri), macOS $$(plutil -extract LSMinimumSystemVersion raw $(APP)/Contents/Info.plist)+)"
 
 terminfo:
 	$(call henuz_yok,assets/terminfo bir shell/TERM setiyle gelir)
