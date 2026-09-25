@@ -1,17 +1,22 @@
 //! Ana menü: uygulama menüsü (About, Settings…, Hide, Quit), Shell (New
-//! Window, New Tab, Close Tab, Close Window), Edit (Cut, Copy, Paste, Select
-//! All, Find ▸ Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸, Bigger, Smaller, Actual Size) ve Window (Minimize,
+//! Window, New Tab, Close Tab, Close Window), Edit (Cut, Copy, Paste, Paste
+//! Escaped Text, Select All, Clear to Start, Clear Scrollback, Find ▸
+//! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
+//! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
+//! Page Down) ve Window (Minimize,
 //! Zoom, sekme geçişi, Select Tab ▸, Move Tab to New Window, Merge All
 //! Windows, Bring All to Front). Settings… (⌘,) ayar penceresini açıyor
 //! (`settings_window`; 029'a kadar dosyayı editörde açıyordu, o iş artık
 //! pencerenin "Open settings.toml" düğmesinde); öğe ve kısayol aynı.
 //!
 //! **Hiçbir öğenin hedefi yok.** Eylem responder zincirinden geçip onu
-//! tanımlayan ilk nesneye varıyor: `cut:`/`copy:`/`paste:`/`selectAll:` first
-//! responder `BateriView`'a (Cut'ın etkinliği onun `validateMenuItem:`'ında
-//! — yalnız dock seçimi varken ve düzenleme kapısı açıkken); punto
-//! eylemleri, `closeTab:`, `closeWindow:`, `selectTab:` ve Find ▸'nin dört
-//! eylemi key pencerenin
+//! tanımlayan ilk nesneye varıyor: `cut:`/`copy:`/`paste:`/`pasteEscaped:`/
+//! `selectAll:` first responder `BateriView`'a (Cut'ın etkinliği onun
+//! `validateMenuItem:`'ında — yalnız dock seçimi varken ve düzenleme kapısı
+//! açıkken; Paste Escaped Text'inki panoda metin varken); punto
+//! eylemleri, `closeTab:`, `closeWindow:`, `selectTab:`, Find ▸'nin dört
+//! eylemi, temizlemenin iki eylemi ve dört kaydırma (alternatif ekranda
+//! gri, 034 Karar 2) key pencerenin
 //! delegate'ine (`window::TerminalWindow` — pencereye ait);
 //! `performMiniaturize:`, `performZoom:` ve sekme eylemleri
 //! (`selectNextTab:`, `moveTabToNewWindow:`…) `NSWindow`'un kendisine;
@@ -32,6 +37,11 @@
 //! **Control'lü tuş da** menüye önce soruluyor (026 phase-3, ölçüldü): ⌃⇥ ve
 //! ⌃⇧⇥ gizli Window öğeleri olarak sekme geçiriyor ve `keyDown:`'ın Cmd
 //! izin listesi el değmeden kalıyor; Ctrl-I zsh'e hâlâ sekme olarak gidiyor.
+//! **Fonksiyon tuşu da** (034): ⌘Home/⌘End/⌘PgUp/⌘PgDn View öğeleri,
+//! kısayol karakteri AppKit'in fonksiyon tuşu kod noktası
+//! (`NSHomeFunctionKey` U+F729 …). Tuş kodlaması değil menü kısayolu — Home/
+//! End'in `keyDown:`'da yutulması ve `bt_core::Arrow`'un değişmezi el
+//! değmiyor.
 //!
 //! **Sekme öğelerini AppKit eklemiyor** (ölçüldü): tabbing açıkken View'a
 //! Show Tab Bar / Show All Tabs, Window'a pencere yerleşimi öğeleri geliyor
@@ -113,8 +123,20 @@ pub(crate) fn install(mtm: MainThreadMarker, themes: &ProtocolObject<dyn NSMenuD
             item(mtm, "Cut", sel!(cut:), "x"),
             item(mtm, "Copy", sel!(copy:), "c"),
             item(mtm, "Paste", sel!(paste:), "v"),
+            with_modifiers(
+                item(mtm, "Paste Escaped Text", sel!(pasteEscaped:), "v"),
+                command | NSEventModifierFlags::Control,
+            ),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Select All", sel!(selectAll:), "a"),
+            NSMenuItem::separatorItem(mtm),
+            // Terminal.app'in yeri ve kısayolları (034 Karar 4); seçiciler
+            // kendi adlarımız, karşılayan `TerminalWindow`.
+            item(mtm, "Clear to Start", sel!(clearToStart:), "k"),
+            with_modifiers(
+                item(mtm, "Clear Scrollback", sel!(clearScrollback:), "k"),
+                command | NSEventModifierFlags::Option,
+            ),
             NSMenuItem::separatorItem(mtm),
             find_menu,
         ],
@@ -136,6 +158,14 @@ pub(crate) fn install(mtm: MainThreadMarker, themes: &ProtocolObject<dyn NSMenuD
             item(mtm, "Bigger", sel!(makeFontBigger:), "+"),
             item(mtm, "Smaller", sel!(makeFontSmaller:), "-"),
             item(mtm, "Actual Size", sel!(resetFontSize:), "0"),
+            NSMenuItem::separatorItem(mtm),
+            // AppKit'in fonksiyon tuşu kod noktaları (`NSHomeFunctionKey`,
+            // `NSEndFunctionKey`, `NSPageUpFunctionKey`,
+            // `NSPageDownFunctionKey`): menü onları "⌘↖" gibi gösteriyor.
+            item(mtm, "Scroll to Top", sel!(scrollToTop:), "\u{F729}"),
+            item(mtm, "Scroll to Bottom", sel!(scrollToBottom:), "\u{F72B}"),
+            item(mtm, "Page Up", sel!(scrollPageUp:), "\u{F72C}"),
+            item(mtm, "Page Down", sel!(scrollPageDown:), "\u{F72D}"),
         ],
     );
     let shell_menu = submenu(

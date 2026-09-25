@@ -87,5 +87,5 @@ frame(): nesil → bayrak, damga 0, fill 0, scrolled 0, clear_boundary 0
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
-| kapı | |
+| phase-2 | ✅ |
+| kapı | ✅ |

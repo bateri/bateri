@@ -55,7 +55,7 @@ use crate::keys::{
     ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, dock_key, encode_key, only_char,
     page_scroll,
 };
-use crate::quote::shell_quote;
+use crate::quote::{paste_quote, shell_quote};
 
 /// Izgaranın dışına düşen noktaya ne olacağı — [`point_to_cell`]'in tek
 /// karar ekseni.
@@ -584,19 +584,25 @@ define_class!(
 
         /// Menü öğesinin etkinliği: `validateMenuItem:` tanımlanınca AppKit
         /// **her** öğeyi sorar, yani varsayılan cevap `true` — Copy, Paste ve
-        /// Select All bugünkü gibi hep etkin. Tek istisna Cut: dock'ta seçim
+        /// Select All bugünkü gibi hep etkin. İki istisna: Cut dock'ta seçim
         /// yoksa ya da düzenleme kapısı kapalıysa (`vicmd`, bayat ayna, komut
-        /// koşuyor) gri.
+        /// koşuyor) gri; Paste Escaped Text panoda metin yoksa gri (034) —
+        /// Paste'in kendisi bugünkü gibi hep etkin ve boş panoda sessiz.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             // `return` yok: `define_class!` `bool`'u gövdenin **sonunda**
             // `Bool`'a çeviriyor, erken dönüş derlenmiyor.
-            item.action() != Some(sel!(cut:))
-                || self
-                    .ivars()
+            let action = item.action();
+            if action == Some(sel!(cut:)) {
+                self.ivars()
                     .session
                     .get()
                     .is_some_and(|session| session.can_cut())
+            } else if action == Some(sel!(pasteEscaped:)) {
+                clipboard::read(&NSPasteboard::generalPasteboard()).is_some()
+            } else {
+                true
+            }
         }
 
         /// Edit ▸ Paste (Cmd-V): panodaki metni oturuma yapıştırır.
@@ -612,6 +618,26 @@ define_class!(
             };
             if let Some(text) = clipboard::read(&NSPasteboard::generalPasteboard()) {
                 session.paste(text.into_bytes());
+            }
+        }
+
+        /// Edit ▸ Paste Escaped Text (⌃⌘V; 034 Karar 3): panodaki metni
+        /// kabuğa **tek argüman** olarak yazılabilir hâle getirip
+        /// yapıştırır — satır sonu yoksa Finder damlasının ters bölüsüyle,
+        /// varsa bütünüyle tek tırnakla ([`crate::quote::paste_quote`]).
+        /// Sonrası Paste'in yolu (`Session::paste`: bracketed sarma, dock
+        /// seçiminin yerine geçme).
+        ///
+        /// Burada, `TerminalWindow`'da değil (`paste:` emsali, Karar 4):
+        /// arama alanı odaktayken responder zinciri bu view'dan geçmiyor ve
+        /// öğe gri — alana kaçırılmış metin yapıştırmanın anlamı yok.
+        #[unsafe(method(pasteEscaped:))]
+        fn paste_escaped(&self, _sender: Option<&AnyObject>) {
+            let Some(session) = self.ivars().session.get() else {
+                return;
+            };
+            if let Some(text) = clipboard::read(&NSPasteboard::generalPasteboard()) {
+                session.paste(paste_quote(&text).into_bytes());
             }
         }
 

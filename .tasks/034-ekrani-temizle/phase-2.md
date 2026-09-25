@@ -68,9 +68,46 @@ _Requirements: R2, R2.1, R2.2, R2.3, R3_
 
 ## Checklist
 
-- [ ] Menü öğeleri ve başlık belgesi (`menu.rs`)
-- [ ] `TerminalWindow` eylemleri + `validateMenuItem:` kolu
-- [ ] `pasteEscaped:` + tek tırnak kuralı (`view.rs`, `quote.rs`)
-- [ ] Test: `quote.rs` pano kuralı
-- [ ] `CLAUDE.md` kural + gerekçe + işaretçi
-- [ ] Doğrulama geçti (kapı komutu + `make duman`)
+- [x] Menü öğeleri ve başlık belgesi (`menu.rs`)
+- [x] `TerminalWindow` eylemleri + `validateMenuItem:` kolu
+- [x] `pasteEscaped:` + tek tırnak kuralı (`view.rs`, `quote.rs`)
+- [x] Test: `quote.rs` pano kuralı
+- [x] `CLAUDE.md` kural + gerekçe + işaretçi
+- [x] Doğrulama geçti (kapı komutu + `make duman`)
+
+## Uygulama Notları
+
+- **Etkinliğin kolu bir yüklem fonksiyonu** (`window::is_scrollback_action`),
+  sabit dizi değil: `sel!` `const` bağlamda değerlendirilemiyor.
+- **Tek tırnak kuralı `quote::paste_quote`**; satır sonu ölçütü `\n` **ya
+  da** `\r` (Windows'tan gelen pano `\r\n` taşıyabilir, ikisi de kabukta
+  komut sınırı). Test önce yazıldı; çok satırlı kol `shell_quote`'a
+  düşürülünce `paste_quote_wraps_multiline_text_in_single_quotes` kırmızı.
+- **Gözle kontrol** (`bateri-dev` / `dev.bateri.agent-check`, geçici HOME,
+  2026-09-25): `seq 1 300` → ⌘PgUp bir sayfa, ⌘Home geçmişin başı (`seq`'in
+  komut satırı), ⌘End dip — fonksiyon tuşu kısayolları menüde
+  yakalanıyor; yarım yazılmış `echo yarim` ile ⌘K → ekran boş, satır dock'ta,
+  caret yerinde, tekerlek ve ⌘Home hiçbir şey göstermiyor, Enter komutu
+  çalıştırdı; ardından Tab tamamlaması silinen çıktıyı bant olarak geri
+  getirmedi; `vim`'de Edit ▸ Clear to Start/Clear Scrollback gri; koşan
+  `ping`'de ⌥⌘K geçmişi sildi (tekerlek ekranın üstüne çıkmıyor), ⌘K ekranı
+  temizledi ve `ping` sürdü. **Görülmeyen:** View ▸'nin alternatif ekrandaki
+  grisi (menü açılmadı; kol Edit'inkiyle aynı yüklem) ve ⌃⌘V'nin kendisi —
+  panoya yazmak kullanıcının panosunu ezerdi; kural birim sınamasında.
+- **Set kapısı `/code-review`** — iki bulgu:
+  - *Giderildi:* `paste_quote` `\r\n`'i olduğu gibi geçiriyordu; zsh'in
+    bracketed okuyucusu her `\r`'yi `\n` yaptığı için Windows panosu satır
+    başına iki satır sonu olurdu. Tırnağın içinde `\r\n` ve tek `\r` `\n`'e
+    iniyor, bekçisi aynı sınamada.
+  - *WAIVE (orkestratörün kabulüne):* `protected_top` "kimlik prompt başına
+    tek" varsayıyor; zsh prompt'u `precmd` koşmadan yeniden bastığında
+    (ekranı aşan tamamlama listesi, `setopt notify`'ın arka plan iş
+    bildirimi) eski prompt satırı da aynı kimliği taşıyor ve ⌘K eski
+    prompt + liste/bildirim + yeni prompt'u tutuyor. Ayırt edecek veri
+    ızgarada yok: bağlantı `preexec`'e kadar açık, yani liste ve bildirim
+    satırları da aynı kimliği taşıyor (mürekkep ya da bitişiklik ölçütü
+    onları ayıramaz). Çare prompt çizimi başına bir işaret — betik
+    değişikliği, bu setin kapsamı dışında (`assets/shell` değişmiyor).
+    Yanlışın yönü güvenli: fazladan satır kalıyor, güncel blok asla
+    silinmiyor. Tetik dar (LISTMAX=0 + ALWAYS_LAST_PROMPT'ta sığan liste
+    prompt'u yeniden basmıyor).

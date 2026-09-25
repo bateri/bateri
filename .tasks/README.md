@@ -35,7 +35,7 @@
 | 031 | [fare-ile-secim](031-fare-ile-secim/) | 🟢 | 5 phase + kapı tamam — ızgarada kelime/satır/Shift seçimi, dock'ta seçim, tıkla-caret, sil/yerine yaz/kes (tek komutlu zsh widget'ı), `selection` rengiyle yuvarlak köşeli tek parça vurgu |
 | 032 | [cok-satirli-dock](032-cok-satirli-dock/) | 🟢 | 6 phase + kapı tamam — çok satırlı giriş dock'ta (sarma, `PREBUFFER`, büyüyen bant, iki eksenli yazım efektleri), blok işareti devam satırına oturmuyor |
 | 033 | [gecmiste-arama](033-gecmiste-arama/) | 🟢 | 5 phase + kapı tamam — ⌘F paneli, yazdıkça vurgu, bütün defterin "3 of 17" sayımı, ⏎/⌘G süzülen gezinme; panel gerçek pencerede henüz görülmedi |
-| 034 | [ekrani-temizle](034-ekrani-temizle/) | 🔨 | ⌘K Clear to Start ve ⌥⌘K Clear Scrollback (terminal tarafı, kabuğa bayt gitmez), ⌘Home/⌘End/⌘PgUp/⌘PgDn kaydırma, ⌃⌘V Paste Escaped Text; eksik davranış envanterinin kalanı yol haritasında |
+| 034 | [ekrani-temizle](034-ekrani-temizle/) | 🟢 | 2 phase + kapı tamam — ⌘K/⌥⌘K terminal tarafında (kabuğa bayt gitmez), ⌘Home/⌘End/⌘PgUp/⌘PgDn kaydırma ve ⌃⌘V Paste Escaped Text menüde; envanterin kalanı yol haritasında |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

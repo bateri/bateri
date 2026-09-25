@@ -1,9 +1,10 @@
-//! Sürüklenen dosya yolları → kabuğa yazılabilir tek satır. **Saf ve
-//! AppKit'siz**, bu yüzden sınanabilir.
+//! Sürüklenen dosya yolları ve Edit ▸ Paste Escaped Text'in pano metni →
+//! kabuğa yazılabilir metin. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
 //!
 //! `keys.rs`'in içinde değil **kardeşi**: o modülün başlığı "tuş vuruşu →
-//! PTY baytları" diyor ve buradaki soru bir tuş değil bir damla. Tek
-//! tüketicisi `view::BateriView`'ın `performDragOperation:`'ı; çıkışı oradan
+//! PTY baytları" diyor ve buradaki soru bir tuş değil bir damla ya da bir
+//! pano. İki tüketicisi `view::BateriView`'ın `performDragOperation:`'ı
+//! ([`shell_quote`]) ve `pasteEscaped:`'i ([`paste_quote`]); çıkış ikisinde de
 //! `Session::paste`'e gidiyor, yani bracketed paste sarması ve dock istisnası
 //! bu modülün konusu değil.
 
@@ -45,6 +46,42 @@ pub(crate) fn shell_quote(paths: &[String]) -> String {
         }
     }
     line
+}
+
+/// Edit ▸ Paste Escaped Text'in (⌃⌘V) kuralı (034 Karar 3): satır sonu
+/// taşımayan metin Finder damlasının kaçırmasından ([`shell_quote`], görüntü
+/// aynı); satır sonu taşıyan metin **bütünüyle tek tırnakla** sarılır ve
+/// içindeki `'` `'\''` olur.
+///
+/// İki kol, çünkü [`shell_quote`]'un "patolojik" diye kabul ettiği sınır —
+/// `\` + satır sonu kabukta satır devamıdır, parçalar birleşir — pano
+/// metninde olağan. POSIX tek tırnağı satır sonunu harfi harfine taşır ve
+/// tırnak kapanmadan satır bitmediği için bracketed sarma olmadan da hiçbir
+/// satır kendiliğinden çalışmaz. Tek satırda ters bölü tercih ediliyor:
+/// damlayla aynı görüntü, ve tırnak kullanıcının sonradan düzenlediği
+/// satırda daha çok karakter demek.
+///
+/// Satır sonu `\n` **ya da** `\r` (pano Windows'tan `\r\n` taşıyabilir):
+/// ikisi de kabukta komut sınırı. Tırnağın içinde `\r\n` ve tek `\r` `\n`'e
+/// iniyor, çünkü zsh'in bracketed okuyucusu her `\r`'yi `\n` yapıyor ve
+/// `\r\n` satır başına iki satır sonu olurdu — metin satır satır aynı
+/// kalsın. Boş metin boş dizge.
+pub(crate) fn paste_quote(text: &str) -> String {
+    if !text.contains(['\n', '\r']) {
+        return shell_quote(&[text.to_owned()]);
+    }
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('\'');
+    for c in text.chars() {
+        if c == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(c);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// Beyaz listenin kendisi: ASCII harf/rakam ve dört noktalama geçer, ASCII
@@ -134,5 +171,33 @@ mod tests {
         );
         // Boş damla boş dizge: okunabilen yol yoksa yazılacak şey de yok.
         assert_eq!(shell_quote(&[]), "");
+    }
+
+    #[test]
+    fn paste_quote_escapes_a_single_line_like_a_drop() {
+        // Satır sonu yoksa kural damlanınkinin ta kendisi: görüntü aynı.
+        assert_eq!(
+            paste_quote("/tmp/İki Kelime/a'b"),
+            "/tmp/İki\\ Kelime/a\\'b"
+        );
+        assert_eq!(
+            paste_quote("/tmp/İki Kelime/a'b"),
+            quote("/tmp/İki Kelime/a'b")
+        );
+        assert_eq!(paste_quote(""), "");
+    }
+
+    #[test]
+    fn paste_quote_wraps_multiline_text_in_single_quotes() {
+        // Satır sonlu metin bütünüyle tek tırnakta: `\` + satır sonu satır
+        // devamı olurdu ve parçalar birleşirdi. İçteki `'` kapat-kaçır-aç.
+        assert_eq!(paste_quote("a b\nc"), "'a b\nc'");
+        assert_eq!(paste_quote("it's\nok"), "'it'\\''s\nok'");
+        // Windows satır sonu ve tek `\r` tek `\n`'e iniyor: zsh bracketed
+        // okuyucusu `\r`'yi zaten `\n` yapıyor, `\r\n` iki satır olurdu.
+        assert_eq!(paste_quote("x\r\ny"), "'x\ny'");
+        assert_eq!(paste_quote("x\ry"), "'x\ny'");
+        // Tırnağın içinde hiçbir metakarakter kaçmıyor — harfi harfine.
+        assert_eq!(paste_quote("$HOME\n`x`"), "'$HOME\n`x`'");
     }
 }
