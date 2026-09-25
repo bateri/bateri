@@ -32,10 +32,10 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSColor,
-    NSMenuItem, NSModalResponse, NSModalResponseCancel, NSPasteboard, NSTitlebarSeparatorStyle,
-    NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
-    NSWindowOrderingMode, NSWindowStyleMask,
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions,
+    NSBackingStoreType, NSColor, NSMenuItem, NSModalResponse, NSModalResponseCancel, NSPasteboard,
+    NSTitlebarSeparatorStyle, NSView, NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate,
+    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -498,7 +498,8 @@ pub(crate) struct WindowIvars {
     surface: Surface,
     window: Retained<NSWindow>,
     /// Fare çevirisinin girdileri pencere boyuyla tazeleniyor (`set_metrics`);
-    /// view'a `contentView`'dan (`NSView`) inilemiyor, o yüzden burada tutuluyor.
+    /// `contentView` kapsayıcı (`NSView`), terminal onun çocuğu — o yüzden
+    /// burada tutuluyor. Geometrinin kaynağı da bu view (`sync_geometry`).
     view: Retained<BateriView>,
     link: OnceCell<DisplayLink>,
     /// Kapanış sırasının ikinci adımı buradan çağrılır; `DisplayLink` de bir
@@ -807,7 +808,25 @@ impl TerminalWindow {
         // layer'ını kurdurur ve CAMetalLayer düşer.
         view.setLayer(Some(surface.ca_layer()));
         view.setWantsLayer(true);
-        window.setContentView(Some(&view));
+        // İçerik view'ı düz bir **kapsayıcı**, `BateriView` onun çocuğu
+        // (033 → R4.1): arama paneli terminalin üstünde yüzecek ve Metal
+        // katmanının kardeşi olmak zorunda, çocuğu değil — layer-hosting
+        // view'ın alt view'ları AppKit'in sözleşmesi dışında. Kapsayıcı
+        // layer-backed, yoksa kardeş panel Metal katmanının **altında**
+        // kalabilir. Kendisi hiçbir şey çizmiyor ve olay almıyor: `BateriView`
+        // onu tamamen dolduruyor, isabet testi en üstteki çocuğa düşüyor.
+        let container = NSView::initWithFrame(NSView::alloc(mtm), rect);
+        container.setWantsLayer(true);
+        window.setContentView(Some(&container));
+        // Kapsayıcının çerçevesini pencere kuruyor; çocuk ona sonradan
+        // oturtuluyor ve boyu autoresizing'le izliyor. Geometrinin kaynağı
+        // yine `BateriView` (`sync_geometry`), bildirimi de onun çerçevesi.
+        view.setFrame(container.bounds());
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        container.addSubview(&view);
         window.setTitle(ns_string!("bateri"));
         // **Native sekmeler** (026 → Karar 1): aynı kimliği taşıyan pencereleri
         // AppKit tek pencerede sekme olarak topluyor. `tabbingMode` bilerek
@@ -823,8 +842,8 @@ impl TerminalWindow {
         // `bt-shell`'e yayınlamayı isterdi
         // (`.tasks/020-fare-raporlama/discussion.md` → Karar 4).
         window.setAcceptsMouseMovedEvents(true);
-        // Klavyenin PTY'ye varan yolu buradan başlıyor. `contentView`
-        // otomatik first responder DEĞİLDİR; bu satır olmadan pencere
+        // Klavyenin PTY'ye varan yolu buradan başlıyor. View (kapsayıcının
+        // çocuğu da olsa) otomatik first responder DEĞİLDİR; bu satır olmadan pencere
         // key olur, tuşlar view'a hiç uğramaz ve terminal sessizce
         // yazmaz. `acceptsFirstResponder` da şart, ikisi bir arada.
         let accepted = window.makeFirstResponder(Some(&view));
@@ -1246,12 +1265,7 @@ impl TerminalWindow {
         self.ivars().dock_rows.set(birth);
         // Grid ölçüsü pencereden türer; oturum ilk boyutuyla doğsun ki
         // shell açılışta doğru `TIOCSWINSZ` görsün.
-        // audit: pencere ve contentView kurucuda kuruldu; `None` dönmesi
-        // programlama hatası olurdu ve yedek bir ölçü uydurmak hücre boyutu
-        // için ikinci bir kaynak doğururdu — tek kaynak `Renderer::cell_metrics`.
-        let grid = self
-            .sync_geometry(app)
-            .expect("pencere ve contentView kuruldu");
+        let grid = self.sync_geometry(app);
         self.start_session(app, mtm, grid, theme, integration, working_directory)
     }
 
@@ -1665,9 +1679,7 @@ impl TerminalWindow {
     /// `Retained<BateriView>` olarak duruyor ve pencere nesnesiyle birlikte
     /// gidiyor.
     pub(crate) fn refresh_geometry(&self, app: &AppDelegate) {
-        let Some(grid) = self.sync_geometry(app) else {
-            return;
-        };
+        let grid = self.sync_geometry(app);
         self.ivars()
             .view
             .set_metrics(grid, self.ivars().dock_rows.get());
@@ -1696,9 +1708,11 @@ impl TerminalWindow {
     /// Font yuvası da burada, sonda yazılıyor: atlası (yeniden) kuran tek
     /// yol `cell_metrics` ve font bildirimi ancak ondan sonra güncel. Ekran
     /// değişimi atlası yeniden kursa da aile aynı, yuva oynamaz.
-    fn sync_geometry(&self, app: &AppDelegate) -> Option<Grid> {
+    fn sync_geometry(&self, app: &AppDelegate) -> Grid {
         let window = &self.ivars().window;
-        let view = window.contentView()?;
+        // Kapsayıcı değil terminal view'ı: ikisi bugün aynı boyda ama çizilen
+        // yüzey bu view'ın layer'ı, ölçü de onun olmalı.
+        let view = &self.ivars().view;
         let scale = window.backingScaleFactor();
         let bounds = view.bounds().size;
         let (width_px, height_px) = (bounds.width * scale, bounds.height * scale);
@@ -1712,12 +1726,7 @@ impl TerminalWindow {
         let renderer = &self.ivars().renderer;
         let cell = renderer.cell_metrics(scale);
         app.post_notices(Source::Font, font_messages(renderer.font_notice()));
-        Some(split_into_grid(
-            width_px,
-            height_px,
-            cell,
-            self.ivars().dock_rows.get(),
-        ))
+        split_into_grid(width_px, height_px, cell, self.ivars().dock_rows.get())
     }
 }
 
