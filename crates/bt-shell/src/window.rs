@@ -21,21 +21,23 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use bt_core::{
-    ConfirmClose, FontOptions, Session, SessionOptions, Settings, ShutdownHandle, Teardown, Theme,
-    Wake,
+    ConfirmClose, FontOptions, SearchCover, SearchDirection, SearchReport, SearchStatus, Session,
+    SessionOptions, Settings, ShutdownHandle, Teardown, Theme, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSColor, NSMenuItem, NSModalResponse, NSModalResponseCancel, NSPasteboard,
-    NSTitlebarSeparatorStyle, NSView, NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSControlTextEditingDelegate, NSEventModifierFlags, NSMenuItem,
+    NSModalResponse, NSModalResponseCancel, NSPasteboard, NSPasteboardNameFind,
+    NSSearchFieldDelegate, NSTextFieldDelegate, NSTitlebarSeparatorStyle, NSView,
+    NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
+    NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -44,9 +46,10 @@ use objc2_foundation::{
 
 use crate::app::{self, AppDelegate, Grid, split_into_grid};
 use crate::child;
-use crate::clipboard::PendingCopy;
+use crate::clipboard::{self, PendingCopy};
 use crate::jobs::{self, Foreground, Libproc, ShellParent};
 use crate::notices::{Source, font_messages};
+use crate::search_bar::{SearchBar, selection_query};
 use crate::view::BateriView;
 use crate::zoom::Zoom;
 use crate::{Run, Workload};
@@ -249,6 +252,14 @@ fn alt_screen_notifier(id: u64) -> Box<dyn Fn()> {
             }
         });
     })
+}
+
+/// Sistemin find panosundaki metin (Karar 6: ⌘E'nin uygulamalar arası
+/// normu); boşsa `None`.
+fn find_pasteboard_text() -> Option<String> {
+    // SAFETY: AppKit'in dışa açtığı sabit ad, süreç boyunca yaşıyor.
+    let name = unsafe { NSPasteboardNameFind };
+    clipboard::read(&NSPasteboard::pasteboardWithName(name)).filter(|text| !text.is_empty())
 }
 
 /// Başlamış bir pencere kapanışı ([`TerminalWindow::begin_close`]).
@@ -554,6 +565,12 @@ pub(crate) struct WindowIvars {
     /// turun sonunda bu bayraklardan toplanıyor
     /// ([`TerminalWindow::close_requested_tabs`]).
     close_requested: Cell<bool>,
+    /// Geçmişte aramanın paneli (033) — ilk ⌘F'de doğuyor: hiç aranmayan
+    /// sekme görünümlerini taşımıyor. Sorgu ve anahtarlar panelde, yani
+    /// **sekme başına** ve kapanınca unutulmuyor (Karar 6).
+    search: OnceCell<SearchBar>,
+    /// Oturuma verilen son sorgunun durumu — etiketin girdisi.
+    search_status: Cell<SearchStatus>,
 }
 
 define_class!(
@@ -695,6 +712,12 @@ define_class!(
         }
     }
 
+    // Arama alanının delegesi (033): üç protokolün de bütün yöntemleri
+    // isteğe bağlı; kullanılanlar aşağıdaki `impl`'de.
+    unsafe impl NSControlTextEditingDelegate for TerminalWindow {}
+    unsafe impl NSTextFieldDelegate for TerminalWindow {}
+    unsafe impl NSSearchFieldDelegate for TerminalWindow {}
+
     // **Pencereye ait eylemler** burada, uygulama geneline yayılanlar
     // (`settingsDidChange:`, tema, `openSettings:`)
     // `AppDelegate`'te. Hedefsiz eylemin responder zinciri view → pencere →
@@ -743,6 +766,111 @@ define_class!(
         #[unsafe(method(closeWindow:))]
         fn close_window(&self, _sender: Option<&AnyObject>) {
             self.close_group_asking();
+        }
+
+        /// Edit ▸ Find ▸ Find… (⌘F): paneli açar, alanı odaklar ve metnini
+        /// seçer (Karar 5); panel açıksa yalnız odak ve seçim. Sekmenin
+        /// sorgusu yoksa alan find panosunun metniyle doluyor (Karar 6).
+        ///
+        /// Seçiciler **kendi adlarımız**, `performFindPanelAction:` değil
+        /// (Karar 10): alan odaktayken first responder AppKit'in alan
+        /// düzenleyicisi ve o seçiciyi kendisi uygulayıp yutardı. Eylemler
+        /// pencerenin delegesinde, çünkü alan odaktayken responder zinciri
+        /// `BateriView`'dan geçmiyor.
+        #[unsafe(method(findInScrollback:))]
+        fn find_in_scrollback(&self, _sender: Option<&AnyObject>) {
+            self.open_search(true);
+        }
+
+        /// Edit ▸ Find ▸ Find Next (⌘G) ve panelin yukarı oku: bir önceki,
+        /// **daha eski** eşleşme (Karar 3).
+        #[unsafe(method(findNextMatch:))]
+        fn find_next_match(&self, _sender: Option<&AnyObject>) {
+            self.search_step(SearchDirection::Older);
+        }
+
+        /// Edit ▸ Find ▸ Find Previous (⇧⌘G) ve panelin aşağı oku: daha yeni.
+        #[unsafe(method(findPreviousMatch:))]
+        fn find_previous_match(&self, _sender: Option<&AnyObject>) {
+            self.search_step(SearchDirection::Newer);
+        }
+
+        /// Edit ▸ Find ▸ Use Selection for Find (⌘E; Karar 6): seçim (ızgara
+        /// ya da dock) sorgu olur — regex kipinde kaçırılarak — ve sistemin
+        /// find panosuna da yazılır, panel açılır.
+        #[unsafe(method(useSelectionForFind:))]
+        fn use_selection_for_find(&self, _sender: Option<&AnyObject>) {
+            self.use_selection();
+        }
+
+        /// Panelin kapatma düğmesi — Esc ile aynı yol (Karar 5).
+        #[unsafe(method(closeSearch:))]
+        fn close_search_action(&self, _sender: Option<&AnyObject>) {
+            self.close_search();
+        }
+
+        /// Alanın eylemi: her metin değişimi (`sendsSearchStringImmediately`)
+        /// ve ⊗ düğmesi.
+        #[unsafe(method(searchFieldChanged:))]
+        fn search_field_changed(&self, _sender: Option<&AnyObject>) {
+            self.apply_search();
+        }
+
+        /// `Aa` ya da `.*` anahtarı değişti.
+        #[unsafe(method(searchOptionsChanged:))]
+        fn search_options_changed(&self, _sender: Option<&AnyObject>) {
+            self.apply_search();
+        }
+
+        /// Alanın komut kancası (Karar 10): ⏎ bir önceki (daha eski), ⇧⏎
+        /// bir sonraki (daha yeni) eşleşme; Esc paneli kapatır —
+        /// `NSSearchField`'ın "metni sil" varsayılanı yerine. Kalan komutlar
+        /// alanın kendisine (`false`).
+        ///
+        /// Shift seçiciden okunamıyor — iki tuş da `insertNewline:` — o yüzden
+        /// olayın kendisinden.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn control_do_command(
+            &self,
+            _control: &AnyObject,
+            _text_view: &AnyObject,
+            command: Sel,
+        ) -> bool {
+            if command == sel!(insertNewline:) {
+                let shift = NSApplication::sharedApplication(self.mtm())
+                    .currentEvent()
+                    .is_some_and(|event| event.modifierFlags().contains(NSEventModifierFlags::Shift));
+                self.search_step(if shift {
+                    SearchDirection::Newer
+                } else {
+                    SearchDirection::Older
+                });
+                true
+            } else if command == sel!(cancelOperation:) {
+                self.close_search();
+                true
+            } else {
+                false
+            }
+        }
+
+        /// Find öğelerinin etkinliği; **bilinmeyen öğe `true`** — punto,
+        /// sekme ve kapatma eylemleri bugünkü gibi hep etkin.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            let action = item.action();
+            // `return` yok: `define_class!` `bool`'u gövdenin sonunda çeviriyor.
+            if action == Some(sel!(findNextMatch:)) || action == Some(sel!(findPreviousMatch:)) {
+                self.has_query()
+            } else if action == Some(sel!(useSelectionForFind:)) {
+                self.ivars()
+                    .session
+                    .get()
+                    .and_then(|session| session.selection_text())
+                    .is_some_and(|text| !text.is_empty())
+            } else {
+                true
+            }
         }
 
         /// Window ▸ Select Tab ▸ Tab n (⌘1…⌘8) ve Last Tab (⌘9): öğenin `tag`'i
@@ -873,6 +1001,8 @@ impl TerminalWindow {
             chrome: Cell::new(None),
             alert: RefCell::new(None),
             close_requested: Cell::new(false),
+            search: OnceCell::new(),
+            search_status: Cell::new(SearchStatus::Empty),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1513,6 +1643,11 @@ impl TerminalWindow {
             session.set_theme(theme);
         }
         self.apply_chrome(&theme);
+        // Arama panelinin yüzeyi de temadan; panel henüz doğmadıysa ilk
+        // ⌘F'de oturumun temasıyla boyanıyor.
+        if let Some(bar) = self.ivars().search.get() {
+            bar.paint(&theme, is_dark_background(&theme));
+        }
     }
 
     /// Pencere kromunu temaya boyar (026 → Karar 1, Seçenek C): başlık
@@ -1609,6 +1744,185 @@ impl TerminalWindow {
     /// satır yolunun ta kendisi (027 Karar 5).
     pub(crate) fn set_smooth_scroll(&self, smooth: bool) {
         self.ivars().view.set_smooth_scroll(smooth);
+    }
+
+    /// Klavye terminale geldi (`here`) ya da arama alanına gitti —
+    /// `BateriView`'ın first responder kancaları veriyor (033 R7). Odağın
+    /// ikinci biti; iki bitin birleşimi `bt-gpu`'da
+    /// (`DisplayLink::set_keyboard_in_terminal`). Süreli koşuda
+    /// [`TerminalWindow::apply_focus`]'un kapısıyla susuyor.
+    pub(crate) fn keyboard_moved(&self, here: bool) {
+        if self.ivars().run.is_some() {
+            return;
+        }
+        if let Some(link) = self.ivars().link.get() {
+            link.set_keyboard_in_terminal(here);
+        }
+    }
+
+    /// Arama paneli — ilk çağrıda kurulur, temaya boyanır.
+    fn search_bar(&self) -> &SearchBar {
+        self.ivars().search.get_or_init(|| {
+            let view = &self.ivars().view;
+            // İçerik view'ı kapsayıcı (phase-3) ve kurucudan beri hep var;
+            // yokluğu ancak kapanan pencerede, o zaman panel view'ın içine
+            // düşer ve yine görünür.
+            let container: Retained<NSView> = match self.ivars().window.contentView() {
+                Some(container) => container,
+                None => Retained::into_super(view.clone()),
+            };
+            let bar = SearchBar::new(
+                self.mtm(),
+                &container,
+                view,
+                self,
+                ProtocolObject::from_ref(self),
+            );
+            if let Some(session) = self.ivars().session.get() {
+                let theme = session.theme();
+                bar.paint(&theme, is_dark_background(&theme));
+            }
+            bar
+        })
+    }
+
+    /// Paneli açar (açıksa yerinde bırakır) ve sorguyu uygular; `focus`
+    /// ise alanı odaklayıp metnini seçer (⌘F).
+    /// Sorgu bu çağrıda oturuma verildiyse `true` ([`TerminalWindow::apply_search`]).
+    fn open_search(&self, focus: bool) -> bool {
+        let bar = self.search_bar();
+        if bar.query().text.is_empty()
+            && let Some(text) = find_pasteboard_text()
+        {
+            bar.set_text(&text);
+        }
+        let animate = app::delegate(self.mtm()).is_some_and(|app| !app.reduce_motion());
+        bar.show(animate);
+        if focus {
+            self.ivars().window.makeFirstResponder(Some(bar.field()));
+            // SAFETY: gönderen isteğe bağlı; alanın kendi eylemi.
+            unsafe { bar.field().selectText(None) };
+        }
+        self.apply_search()
+    }
+
+    /// Alanın ve anahtarların sorgusu değiştiyse oturuma verir, geçerli
+    /// eşleşmeyi açığa çıkarır ve etiketi yazar; verdiyse `true`. Aynı sorgu
+    /// no-op.
+    fn apply_search(&self) -> bool {
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.ivars().session.get())
+        else {
+            return false;
+        };
+        if !bar.is_shown() {
+            return false;
+        }
+        let query = bar.query();
+        if !bar.take_change(&query) {
+            return false;
+        }
+        let status = session.set_search(&query);
+        self.ivars().search_status.set(status);
+        let report = if status == SearchStatus::Ready {
+            session.search_reveal(self.search_cover(), self.smooth_scroll())
+        } else {
+            SearchReport::default()
+        };
+        bar.set_count(status, report);
+        true
+    }
+
+    /// ⏎ / ⌘G / ⇧⏎ / ⇧⌘G: panel kapalıysa önce açılıyor (odak yerinde
+    /// kalıyor), sonra bir sonraki eşleşme.
+    ///
+    /// Açılış sorguyu **yeniden** verdiyse (Esc aramayı kapatmıştı) adım
+    /// o seçimin kendisi: `set_search` en yakın eşleşmeyi seçip açığa
+    /// çıkardı ve üstüne bir adım daha ⇧⌘G'yi en eskiye sardırırdı
+    /// (`/code-review`).
+    fn search_step(&self, direction: SearchDirection) {
+        if self.open_search(false) {
+            return;
+        }
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.ivars().session.get())
+        else {
+            return;
+        };
+        let status = self.ivars().search_status.get();
+        if status != SearchStatus::Ready {
+            return;
+        }
+        let report = session.search_next(direction, self.search_cover(), self.smooth_scroll());
+        bar.set_count(status, report);
+    }
+
+    /// Esc ve kapatma düğmesi (Karar 5): panel gider, **pencere yerinde
+    /// kalır**, geçerli eşleşme ızgaranın seçimi olur ve klavye terminale
+    /// döner. Sorgu alanda kalıyor (Karar 6).
+    fn close_search(&self) {
+        let Some(bar) = self.ivars().search.get() else {
+            return;
+        };
+        let animate = app::delegate(self.mtm()).is_some_and(|app| !app.reduce_motion());
+        bar.hide(animate);
+        bar.forget_applied();
+        if let Some(session) = self.ivars().session.get() {
+            session.select_search_match();
+            session.clear_search();
+        }
+        self.ivars().search_status.set(SearchStatus::Empty);
+        self.ivars()
+            .window
+            .makeFirstResponder(Some(&self.ivars().view));
+    }
+
+    /// ⌘E (Karar 6): seçimin ilk satırı sorgu olur (regex kipinde
+    /// kaçırılarak), find panosuna yazılır ve panel alanı odaklanmış açılır.
+    fn use_selection(&self) {
+        let Some(text) = self
+            .ivars()
+            .session
+            .get()
+            .and_then(|session| session.selection_text())
+        else {
+            return;
+        };
+        let bar = self.search_bar();
+        let Some(query) = selection_query(&text, bar.regex()) else {
+            return;
+        };
+        bar.set_text(&query);
+        // Pano **düz** metni taşıyor: öteki uygulamalar regex kipini bilmiyor.
+        if let Some(plain) = selection_query(&text, false) {
+            // SAFETY: AppKit'in dışa açtığı sabit ad, süreç boyunca yaşıyor.
+            let name = unsafe { NSPasteboardNameFind };
+            clipboard::copy(&NSPasteboard::pasteboardWithName(name), Some(plain));
+        }
+        self.open_search(true);
+    }
+
+    /// Find Next/Previous'ın kapısı: sekmenin sorgusu ya da find panosunda
+    /// metin var mı.
+    fn has_query(&self) -> bool {
+        self.ivars()
+            .search
+            .get()
+            .is_some_and(|bar| !bar.query().text.is_empty())
+            || find_pasteboard_text().is_some()
+    }
+
+    /// Panelin örttüğü hücreler; panel kapalıysa hiçbiri.
+    fn search_cover(&self) -> SearchCover {
+        let Some(bar) = self.ivars().search.get().filter(|bar| bar.is_shown()) else {
+            return SearchCover::default();
+        };
+        let view = &self.ivars().view;
+        view.search_cover(view.convertRect_fromView(bar.resting_frame(), Some(bar.parent())))
+    }
+
+    /// Kaydırmanın çözülmüş kipi: süzülme mi anında mı (`smooth_scroll`,
+    /// Hareketi Azalt, `snap` — `app::resolve_smooth_scroll`).
+    fn smooth_scroll(&self) -> bool {
+        app::delegate(self.mtm()).is_some_and(|app| app.smooth_scroll())
     }
 
     /// Odak değişti — `bt-gpu`'ya iletir.

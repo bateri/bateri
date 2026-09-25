@@ -31,7 +31,8 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 
 use bt_core::{
-    CellHalf, Click, MouseButton, MouseModifiers, ScrollIntent, SelectionPoint, Session, Wheel,
+    CellHalf, Click, MouseButton, MouseModifiers, ScrollIntent, SearchCover, SelectionPoint,
+    Session, Wheel,
 };
 use bt_gpu::{CellMetrics, Origin};
 use objc2::rc::Retained;
@@ -183,6 +184,32 @@ pub(crate) fn point_to_cell(
         (cols - 1, CellHalf::Right)
     };
     Some(SelectionPoint { col, row, half })
+}
+
+/// Arama panelinin örttüğü hücreler — **saf**, [`point_to_cell`]'in
+/// aritmetiğiyle: panelin alt kenarı ve sol kenarı fiziksel pikselde (view'ın
+/// üstünden ve solundan), `origin_px` çizilen karenin dikey orijini
+/// ([`bt_gpu::Origin`]).
+///
+/// İlk tam görünür satır panelin altına **tavan** yuvarlanıyor: yarısı
+/// panelin altında kalan satır örtülü sayılır. Negatif olabilir — orijinin
+/// üstündeki doldurma bandının satırları. Sütun ise **taban**: panelin sol
+/// kenarının düştüğü hücre örtülü.
+pub(crate) fn cover_of(
+    bottom_px: f64,
+    left_px: f64,
+    origin_px: f64,
+    metrics: CellMetrics,
+) -> SearchCover {
+    let (cell_w, cell_h) = metrics.cell_px();
+    let (cell_w, cell_h) = (f64::from(cell_w.max(1)), f64::from(cell_h.max(1)));
+    let first_row = ((bottom_px - origin_px) / cell_h).ceil();
+    let from_col = ((left_px - f64::from(metrics.gutter_px())) / cell_w).floor();
+    SearchCover {
+        // `as` doyuruyor: dev bir pencerede de taşma yok.
+        first_row: first_row as i32,
+        from_col: from_col.max(0.0) as u16,
+    }
 }
 
 /// Dock'un giriş satırının tepesi, view'ın fiziksel pikselinde (üstten).
@@ -499,6 +526,31 @@ define_class!(
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
+        }
+
+        /// Klavye terminale geldi (033 R7): arama panelinin alanından
+        /// dönüş — Esc, kapatma ya da terminale tık. Caret'in odağı "pencere
+        /// key **ve** klavye terminalde" ve ikinci bit tek kaynaktan, buradan
+        /// (`TerminalWindow::keyboard_moved`).
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            // SAFETY: `NSResponder`'ın argümansız, `BOOL` dönen yöntemi.
+            let accepted: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if accepted {
+                self.keyboard_moved(true);
+            }
+            accepted
+        }
+
+        /// Klavye terminalden gitti (arama alanı first responder oldu).
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            // SAFETY: `NSResponder`'ın argümansız, `BOOL` dönen yöntemi.
+            let resigned: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            if resigned {
+                self.keyboard_moved(false);
+            }
+            resigned
         }
 
         /// Edit ▸ Copy (Cmd-C): seçili metni genel panoya yazar. Seçim yoksa
@@ -1382,6 +1434,36 @@ impl BateriView {
     /// geometrisinden, bu link'ten geliyor ve link `set_metrics`'ten sonra
     /// kuruluyor (`window::TerminalWindow::start_session`). İkinci çağrı sessizce düşseydi fare
     /// eski gövdeyi, yani sonsuza kadar sıfır bir orijin okurdu.
+    /// Klavyenin yerini pencereye bildirir; pencere yoksa (kurucunun ilk
+    /// `makeFirstResponder`'ı) sessiz.
+    fn keyboard_moved(&self, here: bool) {
+        let window = self.window();
+        let delegate = window.as_ref().and_then(|window| window.delegate());
+        if let Some(owner) = delegate.as_deref().and_then(|delegate| {
+            AsRef::<AnyObject>::as_ref(delegate).downcast_ref::<crate::window::TerminalWindow>()
+        }) {
+            owner.keyboard_moved(here);
+        }
+    }
+
+    /// Arama panelinin örttüğü hücreler ([`SearchCover`]) — `panel` view'ın
+    /// kendi koordinatında (nokta). Ölçü ya da ölçek yoksa hiçbir şey
+    /// örtülmüyor.
+    pub(crate) fn search_cover(&self, panel: NSRect) -> SearchCover {
+        let (Some((metrics, _)), Some(window)) = (self.ivars().metrics.get(), self.window()) else {
+            return SearchCover::default();
+        };
+        let scale = window.backingScaleFactor();
+        let origin = self.ivars().origin.get().map_or(0.0, Origin::px);
+        // View çevrilmiş: panelin alt kenarı `maxY`.
+        cover_of(
+            (panel.origin.y + panel.size.height) * scale,
+            panel.origin.x * scale,
+            f64::from(origin),
+            metrics,
+        )
+    }
+
     pub(crate) fn attach_origin(&self, origin: Origin) {
         assert!(
             self.ivars().origin.set(origin).is_ok(),
@@ -1739,6 +1821,27 @@ mod tests {
     /// var: hücre aritmetiği (pay sıfır) ve payın kendisi.
     fn grid(gutter: u16) -> CellMetrics {
         CellMetrics::new(9, 18, 9, gutter, 1).expect("sıfır olmayan hücre")
+    }
+
+    #[test]
+    fn the_search_panel_covers_whole_rows_and_the_columns_under_it() {
+        // 9×18 hücre, 4 px pay. Panelin altı 40 px: 0. ve 1. satır (0…36)
+        // ve 2. satırın yarısı örtülü, ilk tam görünür satır 3.
+        let cover = cover_of(40.0, 4.0 + 9.0 * 30.5, 0.0, grid(4));
+        assert_eq!(
+            cover,
+            SearchCover {
+                first_row: 3,
+                from_col: 30
+            }
+        );
+        // Satır sınırında biten panel o satırı örtmüyor.
+        assert_eq!(cover_of(36.0, 4.0, 0.0, grid(4)).first_row, 2);
+        // Orijin aşağıda (tabana yaslı içerik): panel ızgaraya hiç değmiyor,
+        // bandın satırları açıkta — negatif.
+        assert_eq!(cover_of(40.0, 4.0, 76.0, grid(4)).first_row, -2);
+        // Payın içindeki sol kenar 0. sütuna kırpılıyor.
+        assert_eq!(cover_of(40.0, 0.0, 0.0, grid(4)).from_col, 0);
     }
 
     /// Testlerin ortak sahnesi: 100×33 grid, 9×18 hücre, @2x.

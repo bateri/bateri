@@ -1,6 +1,6 @@
 //! Ana menü: uygulama menüsü (About, Settings…, Hide, Quit), Shell (New
 //! Window, New Tab, Close Tab, Close Window), Edit (Cut, Copy, Paste, Select
-//! All), View (Theme ▸, Bigger, Smaller, Actual Size) ve Window (Minimize,
+//! All, Find ▸ Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸, Bigger, Smaller, Actual Size) ve Window (Minimize,
 //! Zoom, sekme geçişi, Select Tab ▸, Move Tab to New Window, Merge All
 //! Windows, Bring All to Front). Settings… (⌘,) ayar penceresini açıyor
 //! (`settings_window`; 029'a kadar dosyayı editörde açıyordu, o iş artık
@@ -10,7 +10,8 @@
 //! tanımlayan ilk nesneye varıyor: `cut:`/`copy:`/`paste:`/`selectAll:` first
 //! responder `BateriView`'a (Cut'ın etkinliği onun `validateMenuItem:`'ında
 //! — yalnız dock seçimi varken ve düzenleme kapısı açıkken); punto
-//! eylemleri, `closeTab:`, `closeWindow:` ve `selectTab:` key pencerenin
+//! eylemleri, `closeTab:`, `closeWindow:`, `selectTab:` ve Find ▸'nin dört
+//! eylemi key pencerenin
 //! delegate'ine (`window::TerminalWindow` — pencereye ait);
 //! `performMiniaturize:`, `performZoom:` ve sekme eylemleri
 //! (`selectNextTab:`, `moveTabToNewWindow:`…) `NSWindow`'un kendisine;
@@ -81,6 +82,30 @@ pub(crate) fn install(mtm: MainThreadMarker, themes: &ProtocolObject<dyn NSMenuD
             item(mtm, "Quit bateri", sel!(terminate:), "q"),
         ],
     );
+    // Edit ▸ Find (033 Karar 10): macOS'un alt menüsü ve kısayolları.
+    // Seçiciler **kendi adlarımız** — `performFindPanelAction:` alan
+    // odaktayken AppKit'in alan düzenleyicisine yutulurdu; karşılayan
+    // `TerminalWindow` (pencerenin delegesi, responder zincirinde alanın da
+    // üstünde). `keyDown:`'ın Cmd izin listesi değişmiyor: menü tuşu önce
+    // yakalıyor (⌘A emsali).
+    let find_menu = submenu(
+        mtm,
+        "Find",
+        &[
+            item(mtm, "Find…", sel!(findInScrollback:), "f"),
+            item(mtm, "Find Next", sel!(findNextMatch:), "g"),
+            with_modifiers(
+                item(mtm, "Find Previous", sel!(findPreviousMatch:), "g"),
+                command | NSEventModifierFlags::Shift,
+            ),
+            item(
+                mtm,
+                "Use Selection for Find",
+                sel!(useSelectionForFind:),
+                "e",
+            ),
+        ],
+    );
     let edit_menu = submenu(
         mtm,
         "Edit",
@@ -90,6 +115,8 @@ pub(crate) fn install(mtm: MainThreadMarker, themes: &ProtocolObject<dyn NSMenuD
             item(mtm, "Paste", sel!(paste:), "v"),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Select All", sel!(selectAll:), "a"),
+            NSMenuItem::separatorItem(mtm),
+            find_menu,
         ],
     );
     // Başta boş: öğeleri her açılışta `fill_themes` kuruyor.

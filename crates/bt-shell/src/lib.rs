@@ -33,6 +33,7 @@ mod keys;
 mod menu;
 mod notices;
 mod quote;
+mod search_bar;
 mod settings;
 mod settings_window;
 mod view;

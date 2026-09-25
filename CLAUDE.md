@@ -159,8 +159,20 @@ Close Tab/Window; Edit'te Cut/Copy/Paste/Select All — Cut yalnız dock
 seçimi varken ve düzenleme kapısı açıkken etkin (`validateMenuItem:`,
 varsayılan cevabı `true`); ⌘A geçmişin tamamını
 (dock caret'in sahibiyken dock'un satırını) seçer ve menüden yakalanır, Cmd
-izin listesi değişmez; View'da Theme ▸ ve Cmd +/−/0 geçici
+izin listesi değişmez; Edit ▸ Find ▸'de Find…/Find Next/Find Previous/Use
+Selection for Find (⌘F/⌘G/⇧⌘G/⌘E), seçicileri kendi adlarımız ve karşılayanı
+`TerminalWindow` — `performFindPanelAction:` alan odaktayken alan
+düzenleyicisine yutulurdu; View'da Theme ▸ ve Cmd +/−/0 geçici
 punto; Window'da sekme geçişi ve Select Tab ▸) ve kapanış sırası ondadır.
+**Geçmişte arama paneli AppKit'in** (033, `search_bar`): içerik view'ı düz
+bir kapsayıcı, `BateriView` onun çocuğu ve panel (`NSSearchField` + `Aa`/`.*`
++ sayım + oklar + kapatma) sağ üstte üstüne biniyor — PTY boyutu ⌘F'de
+değişmiyor. Alanda ⏎ daha eski, ⇧⏎ daha yeni eşleşme, Esc paneli kapatıp
+geçerli eşleşmeyi seçim bırakır ve pencereyi yerinde tutar; geçerli
+eşleşme, gezinme ve pencerenin ona süzülmesi `bt-core`'da
+(`Session::set_search`/`search_next`/`search_reveal`, hedef vurgunun
+kümesinden) ve panelin örttüğü hücreleri `bt-shell` satır/sütun olarak
+veriyor (`SearchCover`). Gerekçeler `.tasks/033-gecmiste-arama/`.
 **Sekmeler macOS'un kendi sekmeleri** (026): her sekme bir `NSWindow` ve
 kendi `Session`/`DisplayLink`/`Renderer`'ı, yani "bir pencere = bir oturum"
 bozulmuyor; yeni sekme etkin sekmenin OSC 7 dizininde ve punto farkıyla
@@ -280,7 +292,11 @@ ortasındaki metin zemin renginde çizilir ve görünmez olurdu. `caret_rect`'in
 iki dikdörtgeni tam burada ayrılıyor: boyanan duruyor, opak iç boşalıyor.
 İçi boşalma **yalnız bloğa**; alt çizgi ve dikey çubuk zaten `rule_px`
 kalınlığında birer şerit ve çıkarma onları büsbütün yutardı, o şekillerde
-sinyal blink'in durması. Odak `bt-core`'a **hiç girmiyor**
+sinyal blink'in durması. **Odak iki bit** (033): caret "pencere key **ve**
+klavye terminalde" değilse odaksız (`DisplayLink::set_keyboard_in_terminal`,
+kaynağı `BateriView`'ın first responder kancaları — arama alanına yazarken
+caret içi boş), seçim ve arama vurgusu ise yalnız pencere key değilken
+soluyor; birleştirme `bt-gpu`'da tek yerde. Odak `bt-core`'a **hiç girmiyor**
 (`DisplayLink::set_focused`; `CaretShape`'e de eklenmedi — o enum ayar
 dosyasının sözlüğü, odak ona dik bir eksen) ve hermetik koşuda **hiç
 okunmuyor**: kapı çağrı yerinde, `bt-shell`'in pencere delegate'inde. **Alternatif ekrandan çıkışta imlecin

@@ -63,5 +63,7 @@ _Requirements: R8_
 - [ ] Geçerli eşleşmenin kayması
 - [ ] `docs/OLCUMLER.md` bekleyen iddia, `CLAUDE.md` sözleşme cümleleri
 - [ ] Dizinin eşleşme kümesi vurgununkiyle aynı (phase-1'den devir): bastırılan giriş satırına değen ve mürekkepsiz eşleşme sayılmaz (`suppressed_rows`, `search::has_ink`); bekçisi aynı ekranda vurgu ile dizinin sayısını karşılaştırır
+- [ ] Geçerli eşleşmenin yuvadaki mutlak `Match`'i (`SearchSlot::current`, phase-4) kaymanın konusu: `display_offset`/`history_size` farkı onu taşımalı; etiketin görünür sayımı (`SearchReport::visible`) bütün defterin "3 of 17"sine dönmeli (phase-4'ten devir)
+- [ ] Gerçek pencerede gözle kontrol (phase-4'ten devir, computer-use meşguldü): panelin iki temadaki yüzeyi (zemin/kenar/gölge), açılış/kapanış animasyonunun hissi (180 ms), vurgu renkleri (eşleşme/geçerli/seçim ayrımı, odaksız solma), alan odaktayken caret'in içi boş ve vurgu tam renkli, ⏎/⇧⏎/Esc/⌘G/⌘E, ölü tuş ve ⌘V alanda, panel açık boştayken kare yok; phase-3'ün regresyon listesi (yazma, fareyle seçim, Finder damlası, boyutlandırma, ikinci sekme, Cmd +/−)
 - [ ] Test: yukarıdaki senaryolar
 - [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
