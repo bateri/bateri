@@ -1015,6 +1015,7 @@ make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
 make kur          # release derler, target/release/bateri.app'i kurar, ad-hoc imzalar ve içeriğini denetler (Info.plist, ikon, lisans, shell betiği); Developer ID yok
 make paket        # kur + gönderilecek zip: target/release/bateri-<sürüm>.zip (ditto)
+make yukle        # kur + bu Mac'e kurar: /Applications/bateri.app (INSTALL_DIR ile değişir); açık bateri varken durur
 ```
 
 Girdisi henüz olmayan hedefler "henüz yok" deyip kırmızı düşer; hangileri

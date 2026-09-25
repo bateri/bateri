@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite sırası yalnız seri make'te garantidir; -j altında "en ucuz kapı
 # önce" ve "sürüm başta" sözü bozulur.
 .NOTPARALLEL:
-.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris kur paket
+.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris kur paket yukle
 
 # Definition of done. Homebrew rustc pin'li değil (rust-toolchain.toml bilinçli
 # olarak yok): bir `brew upgrade` sonrası gelen clippy kırmızısını kod
@@ -234,6 +234,26 @@ paket: kur
 	rm -f $(ZIP)
 	ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP)
 	@echo "paket: $(ZIP) ($$(lipo -archs $(APP)/Contents/MacOS/bateri), macOS $$(plutil -extract LSMinimumSystemVersion raw $(APP)/Contents/Info.plist)+)"
+
+# Bu Mac'e kurar: `kur`'un denetlenmiş paketini `$(INSTALL_DIR)`'a koyar.
+# Eski paketin üstüne `ditto` ile yazılmıyor, çünkü `ditto` birleştirir ve
+# yeni sürümde silinmiş bir dosya eski paketten kalırdı. Kopya önce yanda
+# geçici bir ada iniyor ve eskinin yerine ancak kopya bittiğinde geçiyor:
+# yarıda kesilen bir kurulum çalışan paketi yok etmesin. Açık bir bateri
+# varken durur ve kapatmaz — kullanıcının oturumundaki kabukları öldürmek
+# bir derleme hedefinin kararı değil.
+INSTALL_DIR ?= /Applications
+INSTALLED = $(INSTALL_DIR)/bateri.app
+
+yukle: kur
+	@if pgrep -f '$(INSTALLED)/Contents/MacOS/bateri' >/dev/null; then \
+		echo "yukle: $(INSTALLED) açık — önce kapat (⌘Q), sonra yeniden dene"; exit 1; fi
+	rm -rf $(INSTALLED).new
+	ditto $(APP) $(INSTALLED).new
+	codesign --verify --deep --strict $(INSTALLED).new
+	rm -rf $(INSTALLED)
+	mv $(INSTALLED).new $(INSTALLED)
+	@echo "yukle: $(INSTALLED)"
 
 terminfo:
 	$(call henuz_yok,assets/terminfo bir shell/TERM setiyle gelir)
