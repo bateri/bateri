@@ -5,7 +5,8 @@
 //! discussion.md` → Karar 2, Muhakeme): vurgu her içerik karesinde
 //! [`crate::Session::frame`]'in zaten aldığı `Term` kilidi turunda, yalnız
 //! **çizilen** satırlar üzerinde koşuyor — maliyeti ekranın boyuyla sınırlı.
-//! Bütün defterin sayımı ayrı bir yol (phase-5).
+//! Bütün defterin sayımı ayrı bir yol: çıpasız, dipten yukarı parça parça
+//! bir dizin ([`SearchIndex`], [`crate::Session::search_step`]).
 //!
 //! Eşleştiricinin kendisi alacritty'nin (`RegexSearch`, `RegexIter`) ve o tip
 //! `pub` API'de görünmüyor (`lib.rs` → kapsül sözleşmesi): dışarısı yalnız
@@ -348,17 +349,25 @@ impl Default for SearchCover {
     }
 }
 
-/// Gezinmenin ve açığa çıkarmanın cevabı — panelin etiketinin girdisi.
+/// Aramanın panele cevabı — etiketin ("3 of 17", "3 of 17…") girdisi
+/// (Karar 3).
 ///
-/// `visible` pencerenin **varacağı** yerde (süzülme bitince) kaç eşleşmenin
-/// çizileceği: vurgunun kuralıyla (bastırılan satıra değen ve mürekkepsiz
-/// eşleşme sayılmıyor). Sayımın bütün deftere çıkışı phase-5'in işi.
+/// Sayı ve sıra **bütün defterin dizininden** ([`SearchIndex`]): dizin
+/// parça parça kurulurken `complete` yanlış ve sayı o ana kadar sayılanlar.
+/// Vurgunun kümesiyle aynı küme (bastırılan satıra değen ve mürekkepsiz
+/// eşleşme sayılmıyor, [`eligible`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SearchReport {
-    /// Geçerli bir eşleşme var mı.
+    /// Geçerli bir eşleşme var mı — ya da defterin kayması onu kaybettirdi
+    /// ve dizinin sonunda yeniden seçilecek ([`Relocate`]).
     pub found: bool,
-    /// Varılan pencerede çizilen eşleşme sayısı.
-    pub visible: usize,
+    /// Sayılan eşleşme sayısı; `complete` değilse şimdiye kadarki.
+    pub total: usize,
+    /// Geçerli eşleşmenin sırası, en yeni (en alttaki) = 1; dizin ona henüz
+    /// varmadıysa `None`.
+    pub ordinal: Option<usize>,
+    /// Dizin bütün defteri saydı ve bekleyen bir defter değişimi yok.
+    pub complete: bool,
 }
 
 /// Eşleşme **vurgunun kümesinde** mi (phase-1'in iki dışlaması): bastırılan
@@ -438,6 +447,262 @@ pub(crate) fn same_place(a: &Match, b: &Match) -> bool {
     a.start() == b.start() || a.end() == b.end()
 }
 
+/// Dizinin bir parçasının satır sayısı (Karar 2-B): [`crate::Session::search_step`]
+/// `Term` kilidini bu kadar satırı tarayacak kadar tutuyor, sonra ana kuyruğa
+/// dönüyor ve tuş olayları parçaların arasına giriyor.
+///
+/// **Ölçülmedi**, tasarım sabiti (`GUTTER_PT` emsali); türetmesi yok. Kilit
+/// altında tarama süresini ölçen bir kanca yok ve iddia ("parça boyu tuş
+/// gecikmesi hissettirmiyor") `docs/OLCUMLER.md` → Bekleyen iddialar'da.
+/// Güvenliği sayıdan değil parçanın sınırlı ve iptal edilebilir olmasından:
+/// sarılmış bir satır parçayı en çok [`WRAP_REACH`] kadar uzatıyor.
+pub(crate) const CHUNK_LINES: i32 = 500;
+
+/// Bütün defterin sayımı (phase-5): **çıpasız** ve dipten yukarı parça parça
+/// (`discussion.md` → Muhakeme: `row_identity` uzun tutulan bir çıpa olamaz).
+///
+/// Eşleşmeler **saklanmıyor**, sayılıyor: etiketin istediği sayı ve geçerli
+/// eşleşmenin sırası, ve `.` gibi bir desen on bin satırda milyonlarca
+/// eşleşme demek. Gezinme dizini kullanmıyor (`Term::search_next`, phase-4);
+/// sıra gezinmede ±1 taşınıyor ([`crate::Session::search_next`]).
+///
+/// Sorgu değişince ([`SearchSlot::generation`]) ve defter değişince (bekleyen
+/// haber, [`crate::Session::search_step`]) **baştan** kuruluyor.
+#[derive(Debug, Default)]
+pub(crate) struct SearchIndex {
+    /// Dizinin **kendi** desen kopyası (Muhakeme: kare yolunun ödünç aldığı
+    /// desenle yarışmasın); parça sürerken `None`.
+    pub(crate) pattern: Option<RegexSearch>,
+    /// Sıradaki parçanın **dip** satırı (mutlak); `None` → geçiş bitti.
+    /// [`INDEX_START`] "defterin dibinden".
+    pub(crate) next: Option<i32>,
+    /// Şimdiye kadar sayılan eşleşmeler.
+    pub(crate) total: usize,
+    /// Geçerli eşleşmenin sırası (en yeni = 1).
+    pub(crate) ordinal: Option<usize>,
+    /// Kaybedilen geçerli eşleşmenin adayı ([`Relocate`]): eşleşme ve sırası.
+    pub(crate) candidate: Option<(Match, usize, i32)>,
+}
+
+/// [`SearchIndex::next`]'in "baştan" değeri: ilk parça defterin dibinden.
+pub(crate) const INDEX_START: i32 = i32::MAX;
+
+impl SearchIndex {
+    /// Dizini baştan kurar: `pattern` dizinin yeni kopyası (`None` →
+    /// yuvadaki kalıyor).
+    pub(crate) fn restart(&mut self, pattern: Option<RegexSearch>) {
+        if pattern.is_some() {
+            self.pattern = pattern;
+        }
+        self.next = Some(INDEX_START);
+        self.total = 0;
+        self.ordinal = None;
+        self.candidate = None;
+    }
+}
+
+/// Defterin bir gözlemdeki hâli — geçerli eşleşmenin kaymasının girdisi
+/// ([`ledger_shift`]). Her gözlemde `Term` kilidi altında okunuyor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LedgerMark {
+    /// `history_size()`.
+    pub(crate) history: usize,
+    /// `display_offset()`.
+    pub(crate) offset: usize,
+    /// Kullanıcının kaydırmasının birikmiş ofset farkı
+    /// ([`crate::Session::scroll_user`]): ofsetin çıktıdan gelen payı ondan
+    /// ayrılıyor.
+    pub(crate) user: i64,
+    /// PTY çıktısının nesli (`Wakeup` başına bir): arada çıktı var mı.
+    pub(crate) epoch: u64,
+    pub(crate) columns: usize,
+    pub(crate) lines: usize,
+    pub(crate) alt: bool,
+}
+
+/// İki gözlem arasında defterin satırları ne kadar kaydı.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Shift {
+    /// Hiç kaymadı.
+    Still,
+    /// Her satır `n` satır yukarı (daha eski) kaydı.
+    By(i32),
+    /// Kayma bilinemiyor: geçerli eşleşme kayboldu.
+    Lost,
+}
+
+/// Geçerli eşleşmenin kayması (Karar 9, Muhakeme) — **yalnız kesin
+/// kaynaklardan**:
+///
+/// - Defter doymamışken `history_size` farkı: geçmişi büyüten tek şey
+///   çıktının kaydırması, pencere kaydırılmış olsun olmasın.
+/// - Doymuş defterde pencere kaydırılmışsa `display_offset` farkı —
+///   kullanıcının kendi kaydırması düşülerek: alacritty pencereyi yeni
+///   çıktıya karşı tam kayan satır kadar ötelliyor (tavana kadar); fark
+///   negatifse kayıp.
+/// - Kalan her şey (doymuş defterin dibi, tavandaki ofset, boyut değişimi,
+///   alternatif ekran geçişi, silinen geçmiş) **kayıp**: yanlış satırı
+///   geçerli göstermektense hiçbirini göstermemek.
+pub(crate) fn ledger_shift(prev: LedgerMark, now: LedgerMark, limit: usize) -> Shift {
+    if prev.columns != now.columns
+        || prev.lines != now.lines
+        || prev.alt != now.alt
+        || now.history < prev.history
+    {
+        return Shift::Lost;
+    }
+    if now.history < limit {
+        let grown = now.history - prev.history;
+        return match i32::try_from(grown).unwrap_or(i32::MAX) {
+            0 => Shift::Still,
+            grown => Shift::By(grown),
+        };
+    }
+    // Doymuş ve kaydırılmış: ofset farkı **nesle bakmadan** — alacritty'nin
+    // senkron güncelleme zaman aşımı `Wakeup`'ı kilidi bıraktıktan sonra
+    // yolluyor, yani nesil içerikten bir gözlem geç kalabilir; ofsetin
+    // kullanıcı dışındaki tek yazarı çıktının kaydırması.
+    if prev.offset > 0 && now.offset > 0 && now.offset < limit {
+        let moved = now.offset as i64 - prev.offset as i64 - (now.user - prev.user);
+        return match i32::try_from(moved) {
+            Ok(0) => Shift::Still,
+            Ok(moved) if moved > 0 => Shift::By(moved),
+            _ => Shift::Lost,
+        };
+    }
+    // Doymuş dip: kayma görünmüyor. Çıktı yoksa kaymadı; varsa bilinemiyor.
+    // Nesil geç kaldıysa kayıp bir sonraki gözlemde yakalanıyor.
+    if now.epoch == prev.epoch {
+        Shift::Still
+    } else {
+        Shift::Lost
+    }
+}
+
+/// Kaybedilen geçerli eşleşmenin dizinin sonunda nereye geçeceği.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Relocate {
+    /// Pencereye en yakın eşleşmeye (kayma bilinemedi).
+    Nearest,
+    /// Kalan en eski eşleşmeye: geçerli eşleşme doymuş defterin tepesinden
+    /// düştü (Karar 9).
+    Oldest,
+}
+
+/// Geçerli eşleşmenin izlenen durumu — yuvadan kopyalanıp `Term` kilidi
+/// altında [`track`] ile kaydırılıyor, sonra (izi değişmediyse) geri
+/// yazılıyor.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Tracking {
+    pub(crate) current: Option<Match>,
+    pub(crate) origin: Option<Point>,
+    pub(crate) mark: Option<LedgerMark>,
+    pub(crate) relocate: Option<Relocate>,
+}
+
+/// Noktayı `by` satır yukarı taşır.
+fn lift(point: Point, by: i32) -> Point {
+    Point::new(Line(point.line.0 - by), point.column)
+}
+
+/// Defterin `now` hâline göre geçerli eşleşmeyi ve başlangıcı kaydırır
+/// ([`ledger_shift`]); tepeden düşen eşleşme en eskiye, kaybolan en yakına
+/// geçmek üzere işaretleniyor ([`Relocate`]). `Term` kilidi tutulurken.
+pub(crate) fn track<T>(term: &Term<T>, tracking: &mut Tracking, now: LedgerMark, limit: usize) {
+    let Some(prev) = tracking.mark.replace(now) else {
+        return;
+    };
+    match ledger_shift(prev, now, limit) {
+        Shift::Still | Shift::By(0) => {}
+        Shift::By(by) => {
+            tracking.origin = tracking.origin.map(|point| lift(point, by));
+            if let Some(found) = tracking.current.take() {
+                let start = lift(*found.start(), by);
+                if start.line < term.topmost_line() {
+                    tracking.relocate = Some(Relocate::Oldest);
+                } else {
+                    tracking.current = Some(start..=lift(*found.end(), by));
+                }
+            }
+        }
+        Shift::Lost => {
+            tracking.origin = None;
+            if tracking.current.take().is_some() {
+                tracking.relocate = Some(Relocate::Nearest);
+            }
+        }
+    }
+}
+
+/// Dizinin bir parçası: `index.next`'ten yukarı `chunk` satırı sayar
+/// (üretimde [`CHUNK_LINES`]; sınamalar dikişi sık görmek için küçültüyor).
+///
+/// **Parça sınırında kayıp ya da çift sayım yok:** tarama sarılmış satırın
+/// mantıksal başına genişliyor ([`scan`]), ama eşleşme yalnız **son
+/// satırı** parçanın içindeyse sayılıyor — iki parçaya değen eşleşme
+/// alttakinde. Sayım dipten yukarı: parçanın eşleşmeleri ters sırayla.
+///
+/// `tracking`'in geçerli eşleşmesinin sırası bulunursa yazılıyor, kaybolduysa
+/// adayı onun kuralıyla ([`Relocate`]); `window` pencerenin çizilen satırları
+/// (en yakının ölçüsü). `Term` kilidi tutulurken.
+pub(crate) fn index_chunk<T>(
+    term: &Term<T>,
+    regex: &mut RegexSearch,
+    index: &mut SearchIndex,
+    hidden: Option<&RangeInclusive<i32>>,
+    tracking: &Tracking,
+    window: RangeInclusive<i32>,
+    chunk: i32,
+) {
+    let (current, relocate) = (tracking.current.as_ref(), tracking.relocate);
+    let Some(next) = index.next else {
+        return;
+    };
+    let top = term.topmost_line().0;
+    let high = next.min(term.bottommost_line().0);
+    if high < top {
+        index.next = None;
+        return;
+    }
+    let low = (high - chunk.max(1) + 1).max(top);
+    let mut found = Vec::new();
+    scan(term, regex, Line(low), Line(high), |each| {
+        let end = each.end().line.0;
+        if (low..=high).contains(&end) && eligible(term, each, hidden) {
+            found.push(each.clone());
+        }
+    });
+    for each in found.into_iter().rev() {
+        index.total += 1;
+        let ordinal = index.total;
+        if current.is_some_and(|current| same_place(&each, current)) {
+            index.ordinal = Some(ordinal);
+        }
+        match relocate {
+            Some(Relocate::Oldest) => index.candidate = Some((each, ordinal, 0)),
+            Some(Relocate::Nearest) => {
+                let lines = each.start().line.0..=each.end().line.0;
+                let distance = if lines.start() > window.end() {
+                    lines.start() - window.end()
+                } else if lines.end() < window.start() {
+                    window.start() - lines.end()
+                } else {
+                    0
+                };
+                if index
+                    .candidate
+                    .as_ref()
+                    .is_none_or(|(_, _, best)| distance < *best)
+                {
+                    index.candidate = Some((each, ordinal, distance));
+                }
+            }
+            None => {}
+        }
+    }
+    index.next = (low > top).then_some(low - 1);
+}
+
 /// Oturumun arama yuvası — **yaprak kilit** (`theme` emsali).
 ///
 /// Derlenmiş desen `Term` kilidinin altında `&mut` istiyor (`RegexIter`) ve
@@ -460,8 +725,8 @@ pub(crate) struct SearchSlot {
     /// değişince yeniden seçiliyor, gezinme onu taşıyor, kare onu
     /// `search_current` rengiyle işaretliyor ([`same_place`]).
     ///
-    /// **Bilinen sınır:** mutlak satır, çıktı defteri kaydırınca içerikten
-    /// kayıyor — geçerli eşleşmenin içeriğine yapışması phase-5'in işi.
+    /// Mutlak satır çıktıyla kayıyor; her gözlemde defterin kaymasıyla
+    /// içeriğine yapıştırılıyor ([`track`]).
     pub(crate) current: Option<Match>,
     /// Aramanın başladığı pencerenin dibi: yazarken geçerli eşleşme,
     /// pencerede görünür eşleşme yoksa buradan yukarı ilk eşleşme. İlk
@@ -473,4 +738,40 @@ pub(crate) struct SearchSlot {
     /// aralığı — gezinme ve sayım vurgunun dışladığını dışlasın diye karenin
     /// kendi cevabı ([`eligible`]); ikinci kez türetilmiyor (015'in dersi).
     pub(crate) hidden: Option<RangeInclusive<i32>>,
+    /// Defterin son gözlemi — [`current`](SearchSlot::current) ile
+    /// [`origin`](SearchSlot::origin) bu hâle göre ([`track`]). Arama
+    /// kapalıyken `None`.
+    pub(crate) mark: Option<LedgerMark>,
+    /// Geçerli eşleşme defterin kaymasıyla kaybedildi: dizinin sonunda
+    /// yeniden seçilecek.
+    pub(crate) relocate: Option<Relocate>,
+    /// Bütün defterin sayımı (phase-5).
+    pub(crate) index: SearchIndex,
+}
+
+impl SearchSlot {
+    /// İzlenen durumun kopyası ([`Tracking`]).
+    pub(crate) fn tracking(&self) -> Tracking {
+        Tracking {
+            current: self.current.clone(),
+            origin: self.origin,
+            mark: self.mark,
+            relocate: self.relocate,
+        }
+    }
+
+    /// `tracking`'i geri yazar — **yalnız** yuvanın izi kopyanın alındığı
+    /// izse (`taken`): arada başka bir gözlem yuvayı ilerlettiyse onunki
+    /// yenidir ve bu kopya bayat bir kaymayı ikinci kez uygulardı.
+    pub(crate) fn settle(&mut self, taken: Option<LedgerMark>, tracking: Tracking) -> bool {
+        if self.mark != taken {
+            return false;
+        }
+        let changed = self.current != tracking.current;
+        self.current = tracking.current;
+        self.origin = tracking.origin;
+        self.mark = tracking.mark;
+        self.relocate = tracking.relocate;
+        changed
+    }
 }

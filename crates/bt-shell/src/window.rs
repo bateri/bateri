@@ -109,6 +109,9 @@ struct ShellWake {
     /// (`PendingCopy`'nin örüntüsü, yük yerine bayrak: başlığın kendisi
     /// oturumda, iş onu okuyor).
     title_pending: Arc<AtomicBool>,
+    /// Arama sayımının defter haberi ana kuyrukta bekliyor mu —
+    /// `title_pending`'in ikizi (033).
+    search_pending: Arc<AtomicBool>,
 }
 
 impl ShellWake {
@@ -211,6 +214,28 @@ impl Wake for ShellWake {
             // Pencere bu arada kapanmışsa yazacak bir başlık da yok.
             if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
                 window.refresh_title();
+            }
+        });
+    }
+
+    fn search_changed(&self) {
+        // Okuyucu thread, `Term` kilidi tutuluyor olabilir (ya da ana
+        // thread'in `resize`'ı): `title_changed`'in örüntüsü — ana kuyruğa en
+        // çok bir iş. Çekirdek zaten kenarda haber veriyor; bu bayrak iki
+        // haber arasında iş kuyrukta beklerken ikincisini katlıyor.
+        if self.search_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.search_pending);
+        let id = self.id;
+        DispatchQueue::main().exec_async(move || {
+            pending.swap(false, Ordering::AcqRel);
+            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+            // Arka sekmede de işliyor: haber kare yoluna bağlı değil. Pencere
+            // bu arada kapandıysa sayacak bir şey yok.
+            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
+                window.kick_search();
             }
         });
     }
@@ -571,6 +596,9 @@ pub(crate) struct WindowIvars {
     search: OnceCell<SearchBar>,
     /// Oturuma verilen son sorgunun durumu — etiketin girdisi.
     search_status: Cell<SearchStatus>,
+    /// Sayım dizininin sürücüsü ana kuyrukta bir tur bekliyor mu
+    /// ([`TerminalWindow::kick_search`]): ikinci bir sürücü kurulmasın.
+    search_driving: Cell<bool>,
 }
 
 define_class!(
@@ -866,8 +894,7 @@ define_class!(
                 self.ivars()
                     .session
                     .get()
-                    .and_then(|session| session.selection_text())
-                    .is_some_and(|text| !text.is_empty())
+                    .is_some_and(|session| session.has_selection())
             } else {
                 true
             }
@@ -992,6 +1019,7 @@ impl TerminalWindow {
                 waker: Mutex::new(None),
                 pending_copy: Arc::default(),
                 title_pending: Arc::default(),
+                search_pending: Arc::default(),
             }),
             zoom: Cell::new(Zoom::default()),
             // Açılışta dock yok: kararı `start` veriyor ve geometriyi ondan
@@ -1003,6 +1031,7 @@ impl TerminalWindow {
             close_requested: Cell::new(false),
             search: OnceCell::new(),
             search_status: Cell::new(SearchStatus::Empty),
+            search_driving: Cell::new(false),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1829,7 +1858,66 @@ impl TerminalWindow {
             SearchReport::default()
         };
         bar.set_count(status, report);
+        self.kick_search();
         true
+    }
+
+    /// Sayım dizininin sürücüsünü kurar (phase-5, Karar 2-B): ana kuyrukta
+    /// bir sonraki turda bir parça. Zaten kuruluysa, panel kapalıysa ya da
+    /// sorgu sayılacak bir desen değilse no-op.
+    ///
+    /// Çağıranları: sorgu değişimi, gezinme (sırası bilinmeyen yeni bir
+    /// eşleşme bir geçiş daha isteyebilir) ve defter haberi
+    /// ([`Wake::search_changed`]) — sonuncusu arka sekmede de.
+    pub(crate) fn kick_search(&self) {
+        let shown = self.ivars().search.get().is_some_and(SearchBar::is_shown);
+        if !shown
+            || self.ivars().search_status.get() != SearchStatus::Ready
+            || self.ivars().search_driving.replace(true)
+        {
+            return;
+        }
+        self.schedule_search_chunk();
+    }
+
+    /// Sürücünün bir turu ana kuyruğa: pencere kimlikle bulunuyor
+    /// (`ShellWake`'in örüntüsü), kapanan sekmede iş düşüyor.
+    fn schedule_search_chunk(&self) {
+        let id = self.id();
+        DispatchQueue::main().exec_async(move || {
+            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
+                window.search_chunk();
+            }
+        });
+    }
+
+    /// Dizinin bir parçası ve etiket; sayım bitmediyse bir sonraki tura
+    /// yeniden kuruluyor — tuş olayları turların arasına giriyor. Durma
+    /// koşulu çekirdeğin `complete`'i (geçiş bitti **ve** bekleyen defter
+    /// haberi yok), panelin kapanması ya da aramanın düşmesi.
+    fn search_chunk(&self) {
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.ivars().session.get())
+        else {
+            self.ivars().search_driving.set(false);
+            return;
+        };
+        let status = self.ivars().search_status.get();
+        if !bar.is_shown() || status != SearchStatus::Ready {
+            self.ivars().search_driving.set(false);
+            return;
+        }
+        let Some(report) = session.search_step() else {
+            self.ivars().search_driving.set(false);
+            return;
+        };
+        bar.set_count(status, report);
+        if report.complete {
+            self.ivars().search_driving.set(false);
+        } else {
+            self.schedule_search_chunk();
+        }
     }
 
     /// ⏎ / ⌘G / ⇧⏎ / ⇧⌘G: panel kapalıysa önce açılıyor (odak yerinde
@@ -1853,6 +1941,9 @@ impl TerminalWindow {
         }
         let report = session.search_next(direction, self.search_cover(), self.smooth_scroll());
         bar.set_count(status, report);
+        if !report.complete {
+            self.kick_search();
+        }
     }
 
     /// Esc ve kapatma düğmesi (Karar 5): panel gider, **pencere yerinde

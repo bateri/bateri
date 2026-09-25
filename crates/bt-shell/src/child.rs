@@ -374,6 +374,7 @@ impl bt_core::Wake for SilentWake {
     fn child_exit(&self, _code: Option<i32>) {}
     fn copy_to_clipboard(&self, _text: String) {}
     fn title_changed(&self) {}
+    fn search_changed(&self) {}
 }
 
 /// `ready` doğru diyene kadar bekler; süre dolarsa `message` ile düşer.
