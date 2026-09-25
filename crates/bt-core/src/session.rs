@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Boundary, Column, Line, Point, Side};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::TermMode;
@@ -68,7 +68,10 @@ use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
 };
-use crate::search::{self, SearchQuery, SearchRun, SearchRuns, SearchSlot, SearchStatus};
+use crate::search::{
+    self, SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns,
+    SearchSlot, SearchStatus,
+};
 use crate::settings::{CaretShape, CursorBlink};
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockSelection, DockState, DockStatus,
@@ -1897,11 +1900,13 @@ struct SearchWindow {
 /// - Mürekkepsiz ([`search::has_ink`]): yalnız boşluktan oluşan eşleşme boş
 ///   satırları boyardı — vurgu içerik yaratmaz.
 ///
-/// **Geçerli eşleşme** bu phase'de görünürdeki en alttaki, yani son
-/// eşleşme; gezinme phase-4'te.
+/// **Geçerli eşleşme** yuvanın seçtiği ([`SearchSlot::current`]): onunla
+/// aynı yerdeki eşleşmenin koşuları `current`. Yuvada eşleşme yoksa (ya da
+/// çıktı onu kaydırdıysa) hiçbir koşu işaretlenmiyor.
 fn search_visible<T>(
     term: &Term<T>,
     regex: &mut search_engine::RegexSearch,
+    current: Option<&search_engine::Match>,
     out: &mut SearchRuns,
     window: SearchWindow,
 ) {
@@ -1914,9 +1919,6 @@ fn search_visible<T>(
     let top = Line(-offset - channel);
     let bottom = Line(rows - 1 - offset);
     let last_col = term.columns().saturating_sub(1);
-    // Son kabul edilen eşleşmenin iki listedeki başlangıcı: `current` en
-    // sonda ona işaretleniyor.
-    let mut current: Option<(usize, usize)> = None;
     search::scan(term, regex, top, bottom, |found| {
         let (start, end) = (*found.start(), *found.end());
         let lines = start.line.0..=end.line.0;
@@ -1930,8 +1932,7 @@ fn search_visible<T>(
         if !search::has_ink(term, found) {
             return;
         }
-        let mark = (out.runs.len(), out.fill_runs.len());
-        let mut shown = false;
+        let is_current = current.is_some_and(|current| search::same_place(found, current));
         for line in lines {
             if line < top.0 || line > bottom.0 {
                 continue;
@@ -1957,31 +1958,148 @@ fn search_visible<T>(
                     row,
                     first,
                     last,
-                    current: false,
+                    current: is_current,
                     continues: line != start.line.0,
                 })
             };
             let grid_row = line + offset;
-            let pushed = if grid_row >= 0 {
-                run(grid_row).map(|run| out.runs.push(run))
+            if grid_row >= 0 {
+                out.runs.extend(run(grid_row));
             } else {
-                run(grid_row + channel).map(|run| out.fill_runs.push(run))
-            };
-            shown |= pushed.is_some();
-        }
-        if shown {
-            current = Some(mark);
+                out.fill_runs.extend(run(grid_row + channel));
+            }
         }
     });
-    if let Some((grid, fill)) = current {
-        // `get_mut`, indeksleme değil: işaretler az önce bu listelerden
-        // alındı ve taşamaz, ama `bt-core`'da panik yasağı çağrı yerinin.
-        let grid = out.runs.get_mut(grid..).unwrap_or_default();
-        let fill = out.fill_runs.get_mut(fill..).unwrap_or_default();
-        for run in grid.iter_mut().chain(fill) {
-            run.current = true;
-        }
+}
+/// [`Session::with_search`]'ün `work`'üne verilen durum: yuvadan alınan
+/// geçerli eşleşme ve başlangıç (değiştirilebilir, geri konuyor) ve son
+/// karenin bastırılan satırları (salt okunur).
+struct SearchState<'a> {
+    current: Option<search_engine::Match>,
+    origin: Option<Point>,
+    hidden: Option<&'a RangeInclusive<i32>>,
+}
+
+/// Nokta defterin içinde mi. Yuvada saklanan mutlak koordinat çıktıyla ya da
+/// resize'la defterin dışına düşebiliyor (bilinen sınır, [`SearchSlot::current`])
+/// ve alacritty'nin ızgara indeksi dışarıda panikler.
+fn in_grid<T>(term: &Term<T>, point: Point) -> bool {
+    point.line >= term.topmost_line()
+        && point.line <= term.bottommost_line()
+        && point.column <= term.last_column()
+}
+
+/// Eşleşmenin iki ucu da defterin içinde mi ([`in_grid`]).
+fn match_in_grid<T>(term: &Term<T>, found: &search_engine::Match) -> bool {
+    in_grid(term, *found.start()) && in_grid(term, *found.end())
+}
+
+/// Görünür pencerenin sağ alt hücresi — yazarken aramanın başladığı yer.
+fn window_bottom<T>(term: &Term<T>) -> Point {
+    let offset = term.grid().display_offset() as i32;
+    let bottom = term.screen_lines() as i32 - 1 - offset;
+    Point::new(Line(bottom), term.last_column())
+}
+
+/// Pencerenin **çizilen** satırları, mutlak: `offset` ofsetli pencerede
+/// ızgara ve (dipteyse) doldurma bandı.
+fn drawn_lines<T>(term: &Term<T>, offset: i32, band: i32) -> RangeInclusive<i32> {
+    let band = if offset == 0 { band } else { 0 };
+    -offset - band..=term.screen_lines() as i32 - 1 - offset
+}
+
+/// Yazarken geçerli eşleşme (Karar 3): pencerede çizilen bir eşleşme varsa
+/// en alttaki, yoksa `origin`'den yukarı ilk eşleşme (uçta sarar).
+fn nearest_match<T>(
+    term: &Term<T>,
+    regex: &mut search_engine::RegexSearch,
+    origin: Point,
+    hidden: Option<&RangeInclusive<i32>>,
+    band: i32,
+) -> Option<search_engine::Match> {
+    let offset = term.grid().display_offset() as i32;
+    let drawn = drawn_lines(term, offset, band);
+    // Pencerenin dibinden yukarı ilk eşleşme ya pencerededir — o zaman en
+    // alttaki odur — ya da yukarıda (ya da sarıp aşağıda) ve pencerede hiç
+    // yoktur.
+    let bottom = window_bottom(term);
+    if let Some(found) = search::next_eligible(term, regex, bottom, Direction::Left, hidden)
+        && drawn.contains(&found.end().line.0)
+    {
+        return Some(found);
     }
+    search::next_eligible(term, regex, origin, Direction::Left, hidden)
+}
+
+/// Eşleşme panelin altında olmadan görünür mü (Karar 4): bütün satırları
+/// çizilen pencerede ve örtülen satırlardakiler panelin solunda.
+fn match_visible<T>(
+    term: &Term<T>,
+    found: &search_engine::Match,
+    cover: SearchCover,
+    band: i32,
+) -> bool {
+    let offset = term.grid().display_offset() as i32;
+    let drawn = drawn_lines(term, offset, band);
+    let covered_above = cover.first_row.saturating_sub(offset);
+    let (start, end) = (*found.start(), *found.end());
+    (start.line.0..=end.line.0).all(|line| {
+        if !drawn.contains(&line) {
+            return false;
+        }
+        let last = if line == end.line.0 {
+            end.column.0
+        } else {
+            term.last_column().0
+        };
+        line >= covered_above || last < usize::from(cover.from_col)
+    })
+}
+
+/// Eşleşmeyi pencerenin ortasına getiren **görsel tepe** ([`visual_top`]'un
+/// uzayı): başlangıç satırı ekranın orta satırında, defterin iki ucuna
+/// kırpılı. Tepe bandın içine düşüyorsa hedef dip — `1..=band` ekranda hiç
+/// görülmeyen ofsetler ([`scroll_locked`]).
+fn reveal_target<T>(term: &Term<T>, found: &search_engine::Match, band: i32) -> i32 {
+    let rows = term.screen_lines() as i32;
+    let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
+    let top = (rows / 2 - found.start().line.0).clamp(0, history);
+    top.max(band)
+}
+
+/// Görsel tepesi `top` olan pencerede ([`reveal_target`]; `None` → bugünkü
+/// pencere) çizilen eşleşmelerin sayısı, vurgunun kümesiyle
+/// ([`search::eligible`]).
+fn count_drawn<T>(
+    term: &Term<T>,
+    regex: &mut search_engine::RegexSearch,
+    top: Option<i32>,
+    band: i32,
+    hidden: Option<&RangeInclusive<i32>>,
+) -> usize {
+    let offset = match top {
+        Some(top) if top <= band => 0,
+        Some(top) => top,
+        None => term.grid().display_offset() as i32,
+    };
+    let drawn = drawn_lines(term, offset, band);
+    let mut count = 0;
+    search::scan(
+        term,
+        regex,
+        Line(*drawn.start()),
+        Line(*drawn.end()),
+        |found| {
+            let lines = found.start().line.0..=found.end().line.0;
+            if lines.start() <= drawn.end()
+                && drawn.start() <= lines.end()
+                && search::eligible(term, found, hidden)
+            {
+                count += 1;
+            }
+        },
+    );
+    count
 }
 
 /// Seçimin **ekranda** çizilen aralığı — `frame()`, kare kapısı ve temizleme
@@ -2716,9 +2834,9 @@ impl Session {
         // koşmuyor ve iki liste boş kalıyor (R2.2).
         search.clear();
         search.colors = search::SearchColors::of(&theme);
-        let (search_generation, mut search_pattern) = {
+        let (search_generation, mut search_pattern, search_current) = {
             let mut slot = lock(&self.search);
-            (slot.generation, slot.pattern.take())
+            (slot.generation, slot.pattern.take(), slot.current.clone())
         };
         let mut term = self.term.lock();
         // **Süzülme payı taramadan önce**: aşağıdaki her şey (ofset, bayrağın
@@ -3376,6 +3494,9 @@ impl Session {
         if let Some(hidden) = &hidden {
             selection.runs.retain(|run| !hidden.contains(&run.row));
         }
+        let search_hidden = hidden
+            .as_ref()
+            .map(|rows| i32::from(*rows.start()) - offset..=i32::from(*rows.end()) - offset);
 
         // **Doluluk sayısı kayıttan önce bir yerele çıkıyor** ve sebebi iki
         // tüketicisi: bayrağın ömrü ([`Session::observe_screen_clear`]) ve
@@ -3642,6 +3763,7 @@ impl Session {
             search_visible(
                 &term,
                 regex,
+                search_current.as_ref(),
                 search,
                 SearchWindow {
                     offset,
@@ -3734,9 +3856,20 @@ impl Session {
         drop(term);
         // Desen yuvaya geri, **yalnız nesil aynıysa**: tur sürerken yeni bir
         // sorgu geldiyse (ya da arama kapandıysa) yuvadaki onundur.
-        if let Some(pattern) = search_pattern {
+        //
+        //
+        // Bastırılan satırlar da yuvaya, **mutlak** satır olarak ve arama
+        // kapalıyken de: gezinme ve sayım karenin dışında koşuyor ve vurgunun
+        // dışladığını dışlamak zorunda ([`search::eligible`]) — ilk sorgu
+        // (aramanın henüz hiç karesi yokken) da. Bedeli içerik karesi başına
+        // yarışmasız bir yaprak kilit.
+        {
             let mut slot = lock(&self.search);
-            if slot.generation == search_generation && slot.pattern.is_none() {
+            slot.hidden = search_hidden;
+            if let Some(pattern) = search_pattern
+                && slot.generation == search_generation
+                && slot.pattern.is_none()
+            {
                 slot.pattern = Some(pattern);
             }
         }
@@ -5506,24 +5639,290 @@ impl Session {
     /// ([`SearchSlot`]). Kare yalnız ekranda bir şey değişebiliyorsa
     /// isteniyor: önceki ya da yeni sorgudan biri bir desen taşımalı — boş
     /// sorgudan boş sorguya geçiş boşta sıfır kareyi bozmaz.
+    ///
+    /// **Geçerli eşleşmeyi de seçiyor** (Karar 3): pencerede çizilen bir
+    /// eşleşme varsa en alttaki, yoksa aramanın başladığı pencerenin dibinden
+    /// ([`SearchSlot::origin`]) yukarı ilk eşleşme. Pencereyi oynatmıyor —
+    /// açığa çıkarmak panelin geometrisini bilen çağıranın ikinci adımı
+    /// ([`Session::search_reveal`]).
     pub fn set_search(&self, query: &SearchQuery) -> SearchStatus {
-        let (status, pattern) = search::compile(query);
-        self.store_search(pattern);
+        let (status, mut pattern) = search::compile(query);
+        let (origin, hidden) = {
+            let slot = lock(&self.search);
+            (slot.origin, slot.hidden.clone())
+        };
+        let (current, origin) = match pattern.as_mut() {
+            Some(regex) => {
+                let term = self.term.lock();
+                let origin = origin
+                    .filter(|point| in_grid(&term, *point))
+                    .unwrap_or_else(|| window_bottom(&term));
+                let band = self.search_band(&term);
+                let current = nearest_match(&term, regex, origin, hidden.as_ref(), band);
+                (current, Some(origin))
+            }
+            None => (None, origin),
+        };
+        self.store_search(pattern, current, origin);
         status
     }
 
-    /// Aramayı kapatır: desen düşer, bir sonraki içerik karesi vurgusuz.
+    /// Aramayı kapatır: desen, geçerli eşleşme ve başlangıç düşer; bir
+    /// sonraki içerik karesi vurgusuz.
     pub fn clear_search(&self) {
-        self.store_search(None);
+        self.store_search(None, None, None);
+    }
+
+    /// Geçerli eşleşmeden `direction` yönündeki bir sonrakine geçer (⏎/⌘G,
+    /// ⇧⏎/⇧⌘G; Karar 3) ve onu açığa çıkarır ([`Session::search_reveal`]'ın
+    /// kuralı). Uçta sarar; geçerli eşleşme yoksa [`Session::set_search`]'ün
+    /// seçimi.
+    ///
+    /// **Hedef vurgunun kümesinden** ([`search::eligible`]): bastırılan
+    /// satıra değen ya da mürekkepsiz eşleşme atlanıyor — ⏎ pencereyi
+    /// görünmeyen bir yere götürmemeli.
+    ///
+    /// Desen yuvadan **ödünç** ([`SearchSlot`]), `Term` kilidinden önce;
+    /// arada yeni bir sorgu geldiyse sonuç yazılmıyor (nesil kuralı).
+    pub fn search_next(
+        &self,
+        direction: SearchDirection,
+        cover: SearchCover,
+        smooth: bool,
+    ) -> SearchReport {
+        self.with_search(|term, regex, state| {
+            let band = self.search_band(term);
+            let current = state
+                .current
+                .take()
+                .filter(|found| match_in_grid(term, found));
+            let found = match current {
+                Some(current) => {
+                    let way = match direction {
+                        SearchDirection::Older => Direction::Left,
+                        SearchDirection::Newer => Direction::Right,
+                    };
+                    let from = search::step_past(term, &current, way);
+                    search::next_eligible(term, regex, from, way, state.hidden)
+                }
+                None => {
+                    let origin = state
+                        .origin
+                        .filter(|point| in_grid(term, *point))
+                        .unwrap_or_else(|| window_bottom(term));
+                    nearest_match(term, regex, origin, state.hidden, band)
+                }
+            };
+            // Sorguyu daraltmak bulunan yerin yakınında kalsın: başlangıç
+            // geçerli eşleşmenin ucuna çekiliyor.
+            if let Some(found) = &found {
+                state.origin = Some(*found.end());
+            }
+            state.current = found;
+            self.reveal_current(term, regex, state, cover, smooth)
+        })
+        .unwrap_or_default()
+    }
+
+    /// Geçerli eşleşme görünür değilse pencereyi ona götürür (Karar 4):
+    /// panelin altında ([`SearchCover`]) ya da pencerenin dışındaysa satırı
+    /// ortaya gelecek kadar, bir ekran içinde süzülerek (027'nin `Glide`'ı),
+    /// uzaktaysa hedefin bir ekran yakınına anında konup kalan ekranı
+    /// süzülerek; `smooth == false` (`smooth_scroll = "off"`, Hareketi
+    /// Azalt, `snap`) anında. Görünür eşleşmede pencere **oynamaz**.
+    ///
+    /// Dönen sayım pencerenin **varacağı** yerde ([`SearchReport`]).
+    pub fn search_reveal(&self, cover: SearchCover, smooth: bool) -> SearchReport {
+        self.with_search(|term, regex, state| {
+            if state
+                .current
+                .as_ref()
+                .is_some_and(|found| !match_in_grid(term, found))
+            {
+                state.current = None;
+            }
+            self.reveal_current(term, regex, state, cover, smooth)
+        })
+        .unwrap_or_default()
+    }
+
+    /// Geçerli eşleşmeyi ızgaranın seçimi yapar (Esc, kapatma düğmesi; Karar
+    /// 5): ⌘C onu hemen kopyalar. Pencere oynamıyor. Eşleşme yoksa `false`.
+    ///
+    /// Uçlar defterin mutlak koordinatında, yani eşleşme doldurma bandında
+    /// da olsa seçim kuruluyor — bant seçim çizmiyor (017'nin borcu, Karar
+    /// 5'in bilinen sınırı) ama ⌘C kopyalıyor.
+    pub fn select_search_match(&self) -> bool {
+        let current = lock(&self.search).current.clone();
+        let Some(found) = current else {
+            return false;
+        };
+        let term = self.term.lock();
+        if !match_in_grid(&term, &found) {
+            return false;
+        }
+        let mut selection = Selection::new(SelectionType::Simple, *found.start(), Side::Left);
+        selection.update(*found.end(), Side::Right);
+        self.store_selection(term, selection);
+        true
+    }
+
+    /// Aramanın `Term` kilidi altındaki işlerinin ortak kalıbı: deseni ve
+    /// durumu yaprak yuvadan **önce** alır, `Term` kilidi altında `work`'ü
+    /// koşturur, kilit düştükten sonra nesil aynıysa hepsini geri koyar ve
+    /// `work` pencereyi oynattıysa kare ister. Desen yoksa (arama kapalı,
+    /// sorgu boş ya da geçersiz) `None`.
+    fn with_search(
+        &self,
+        work: impl FnOnce(
+            &mut Term<Adapter>,
+            &mut search_engine::RegexSearch,
+            &mut SearchState<'_>,
+        ) -> (SearchReport, bool),
+    ) -> Option<SearchReport> {
+        let (generation, mut pattern, current, origin, hidden) = {
+            let mut slot = lock(&self.search);
+            (
+                slot.generation,
+                slot.pattern.take(),
+                slot.current.clone(),
+                slot.origin,
+                slot.hidden.clone(),
+            )
+        };
+        let regex = pattern.as_mut()?;
+        let mut state = SearchState {
+            current,
+            origin,
+            hidden: hidden.as_ref(),
+        };
+        let mut term = self.term.lock();
+        let (report, moved) = work(&mut term, regex, &mut state);
+        drop(term);
+        let SearchState {
+            current, origin, ..
+        } = state;
+        let changed = {
+            let mut slot = lock(&self.search);
+            if slot.generation == generation && slot.pattern.is_none() {
+                slot.pattern = pattern;
+                let changed = slot.current != current;
+                slot.current = current;
+                slot.origin = origin;
+                changed
+            } else {
+                false
+            }
+        };
+        if moved || changed {
+            self.request_frame();
+        }
+        Some(report)
+    }
+
+    /// Geçerli eşleşmeyi açığa çıkarır ve varılan pencerenin sayımını verir
+    /// — [`Session::search_next`] ile [`Session::search_reveal`]'ın ortak
+    /// kuyruğu, `Term` kilidi altında. İkinci değer: pencere oynadı mı.
+    fn reveal_current(
+        &self,
+        term: &mut Term<Adapter>,
+        regex: &mut search_engine::RegexSearch,
+        state: &SearchState<'_>,
+        cover: SearchCover,
+        smooth: bool,
+    ) -> (SearchReport, bool) {
+        let band = self.search_band(term);
+        let moved = state
+            .current
+            .as_ref()
+            .is_some_and(|found| self.reveal_locked(term, found, cover, band, smooth));
+        // Sayım **varılacak** pencerede: süzülme henüz teslim edilmedi, yani
+        // hedefin ofseti buradan türüyor ([`reveal_target`]).
+        let target = state
+            .current
+            .as_ref()
+            .filter(|_| moved)
+            .map(|found| reveal_target(term, found, band));
+        let visible = count_drawn(term, regex, target, band, state.hidden);
+        (
+            SearchReport {
+                found: state.current.is_some(),
+                visible,
+            },
+            moved,
+        )
+    }
+
+    /// Eşleşme görünür değilse pencereyi ona götürür; oynadıysa `true`.
+    /// `Term` kilidi tutulurken — kaydırmanın bütün yolları gibi
+    /// ([`scroll_locked`], [`Session::add_glide`]).
+    fn reveal_locked(
+        &self,
+        term: &mut Term<Adapter>,
+        found: &search_engine::Match,
+        cover: SearchCover,
+        band: i32,
+        smooth: bool,
+    ) -> bool {
+        // Alternatif ekranın defteri yok: gezinme kaydırmıyor (Karar 8).
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return false;
+        }
+        if match_visible(term, found, cover, band) {
+            // **Pencere yerinde kalıyor — uçuştaki süzülme dahil.** Önceki
+            // gezinmenin süzülmesi hâlâ yoldaysa görünür eşleşmeyi taşıyıp
+            // götürürdü (⏎'den hemen sonra ⇧⏎; `/code-review`): nesil artıyor
+            // ve süzülme bulunduğu yerde bitiyor. Kesir düştüyse kare gerekir.
+            return self.reset_scroll();
+        }
+        let offset = term.grid().display_offset() as i32;
+        let delta = reveal_target(term, found, band) - visual_top(offset, band);
+        if delta == 0 {
+            return false;
+        }
+        // Konumu dışarıdan sıfırlayan her yol gibi (027): uçuştaki süzülme
+        // düşer, kesir sıfırlanır, nesil artar.
+        self.reset_scroll();
+        let rows = term.screen_lines() as i32;
+        if !smooth {
+            scroll_locked(term, delta, band);
+        } else if delta.abs() <= rows {
+            self.add_glide(f64::from(delta));
+        } else {
+            // **Uzakta konup son ekranı süz** (`scroll_in`'in patlama
+            // emsali): her gezinme aynı hareketle okunuyor ve uzun bir
+            // süzülme binlerce satırı göz önünden geçirirdi.
+            let screen = delta.signum() * rows;
+            scroll_locked(term, delta - screen, band);
+            self.add_glide(f64::from(screen));
+        }
+        true
+    }
+
+    /// Doldurma bandının arama için boyu: dibe yaslı birincil ekranda
+    /// ekrandaki bant ([`Session::band_shown`]), alternatif ekranda sıfır.
+    fn search_band<T>(&self, term: &Term<T>) -> i32 {
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            0
+        } else {
+            self.band_shown()
+        }
     }
 
     /// [`Session::set_search`] ile [`Session::clear_search`]'ün ortak yazımı.
-    fn store_search(&self, pattern: Option<search_engine::RegexSearch>) {
+    fn store_search(
+        &self,
+        pattern: Option<search_engine::RegexSearch>,
+        current: Option<search_engine::Match>,
+        origin: Option<Point>,
+    ) {
         let active = pattern.is_some();
         let was_active = {
             let mut slot = lock(&self.search);
             slot.generation = slot.generation.wrapping_add(1);
             slot.pattern = pattern;
+            slot.current = current;
+            slot.origin = origin;
             std::mem::replace(&mut slot.active, active)
         };
         // Kare isteği yaprak kilit **bırakıldıktan sonra** (`set_theme`
@@ -14877,6 +15276,246 @@ mod tests {
         session.shutdown();
     }
 
+    // --- Gezinme (033 phase-4) ---
+
+    /// Panelin hiçbir şeyi örtmediği pencere.
+    const OPEN: SearchCover = SearchCover {
+        first_row: i32::MIN,
+        from_col: 0,
+    };
+
+    /// Geçerli eşleşmenin başladığı mutlak satır ve sütun — yuvadan.
+    fn current_at(session: &Session) -> Option<(i32, usize)> {
+        let slot = lock(&session.search);
+        slot.current
+            .as_ref()
+            .map(|found| (found.start().line.0, found.start().column.0))
+    }
+
+    /// Kaydırma konumu ve bekleyen süzülme: `(ofset, istek)`.
+    fn scroll_state(session: &Session) -> (i32, f32) {
+        let offset = session.term.lock().grid().display_offset() as i32;
+        (offset, session.take_scroll_glide().rows)
+    }
+
+    /// `seq 1 30` + 10 satır: ekranda `22`…`30` (satır 0…8), geçmişte
+    /// `1`…`21` (`Line(-21)`…`Line(-1)`). `7` üç yerde: `Line(-15)`,
+    /// `Line(-5)`, `Line(5)`.
+    fn sevens() -> (Session, Arc<TestWake>) {
+        let (session, wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        assert_eq!(session.set_search(&plain("7")), SearchStatus::Ready);
+        (session, wake)
+    }
+
+    #[test]
+    fn typing_picks_the_lowest_visible_match_and_leaves_the_window() {
+        let (session, _wake) = sevens();
+        assert_eq!(current_at(&session), Some((5, 1)), "`27`'nin `7`'si");
+        let report = session.search_reveal(OPEN, true);
+        assert_eq!(
+            report,
+            SearchReport {
+                found: true,
+                visible: 1
+            }
+        );
+        assert_eq!(
+            scroll_state(&session),
+            (0, 0.0),
+            "görünür eşleşmede pencere oynadı"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn typing_without_a_visible_match_searches_up_from_the_window() {
+        let (session, _wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        session.set_search(&plain("15"));
+        assert_eq!(current_at(&session), Some((-7, 0)));
+        let report = session.search_reveal(OPEN, false);
+        assert!(report.found, "{report:?}");
+        // Ortalanıyor: `Line(-7)` ekranın 5. satırına, ofset 12.
+        assert_eq!(scroll_state(&session), (12, 0.0));
+        session.shutdown();
+    }
+
+    #[test]
+    fn next_goes_up_to_older_matches_and_wraps() {
+        // `smooth == false`: pencere anında, satırı ortada.
+        let (session, _wake) = sevens();
+        let report = session.search_next(SearchDirection::Older, OPEN, false);
+        assert_eq!(current_at(&session), Some((-5, 1)), "`17`");
+        assert_eq!(scroll_state(&session), (10, 0.0));
+        assert_eq!(report.visible, 1, "{report:?}");
+        session.search_next(SearchDirection::Older, OPEN, false);
+        assert_eq!(current_at(&session), Some((-15, 0)), "`7`");
+        assert_eq!(scroll_state(&session).0, 20);
+        // Tepede sarıyor: en yenisine, dibe.
+        session.search_next(SearchDirection::Older, OPEN, false);
+        assert_eq!(current_at(&session), Some((5, 1)), "`27`");
+        assert_eq!(scroll_state(&session).0, 0);
+        // Aşağı yön de dipte sarıyor: en eskisine.
+        session.search_next(SearchDirection::Newer, OPEN, false);
+        assert_eq!(current_at(&session), Some((-15, 0)), "`7`");
+        session.search_next(SearchDirection::Newer, OPEN, false);
+        assert_eq!(current_at(&session), Some((-5, 1)), "`17`");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_near_match_glides_and_a_far_one_lands_then_glides_the_last_screen() {
+        let (session, _wake) = sevens();
+        // Bir ekran içinde (10 satır): pencere yerinde, istek 10 satır.
+        session.search_next(SearchDirection::Older, OPEN, true);
+        assert_eq!(scroll_state(&session), (0, 10.0));
+        // Süzülme teslim edilmeden bir sonraki: hedef 20 satır uzakta. Eski
+        // istek düşüyor (nesil), pencere bir ekran yakına konuyor ve son
+        // ekran süzülüyor.
+        session.search_next(SearchDirection::Older, OPEN, true);
+        assert_eq!(scroll_state(&session), (10, 10.0));
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_visible_match_stops_the_glide_toward_the_previous_one() {
+        // ⏎ süzülmeyi başlatıyor, teslim edilmeden ⇧⏎ görünür eşleşmeye
+        // dönüyor: bekleyen istek düşmeli ve nesil artmalı, yoksa süzülme
+        // pencereyi eşleşmeden uzağa taşırdı.
+        let (session, _wake) = sevens();
+        let before = session.take_scroll_glide().generation;
+        session.search_next(SearchDirection::Older, OPEN, true);
+        session.search_next(SearchDirection::Newer, OPEN, true);
+        assert_eq!(current_at(&session), Some((5, 1)), "`27`");
+        let glide = session.take_scroll_glide();
+        assert_eq!(glide.rows, 0.0, "{glide:?}");
+        assert_eq!(glide.generation, before.wrapping_add(2), "{glide:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_match_under_the_panel_is_revealed_and_one_beside_it_is_not() {
+        // `22` 0. satırda, 0…1. sütunlarda.
+        let (session, _wake) = history_session("stty -echo; seq 1 30; sleep 5");
+        session.set_search(&plain("22"));
+        assert_eq!(current_at(&session), Some((0, 0)));
+        let beside = SearchCover {
+            first_row: 1,
+            from_col: 10,
+        };
+        session.search_reveal(beside, true);
+        assert_eq!(
+            scroll_state(&session),
+            (0, 0.0),
+            "panelin solundaki eşleşme görünür"
+        );
+        let over = SearchCover {
+            first_row: 1,
+            from_col: 1,
+        };
+        session.search_reveal(over, true);
+        assert_eq!(
+            scroll_state(&session),
+            (0, 5.0),
+            "panelin altındaki eşleşme ortaya"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_match_in_the_fill_band_is_visible() {
+        // Bantlı dip: `19` bantta ([`gapped_session`]).
+        let (session, _wake) = gapped_session(true);
+        search_now(&session);
+        session.set_search(&plain("19"));
+        let report = session.search_reveal(OPEN, true);
+        assert!(report.found, "{report:?}");
+        assert_eq!(
+            scroll_state(&session),
+            (0, 0.0),
+            "bant satırı görünür sayılmadı"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn navigation_skips_the_suppressed_line_and_blank_matches() {
+        // `ls` yalnız bastırılan satırda: gezinmenin hedefi değil.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_typing_session(&mirror("bHMgLWxh", 6), Arc::clone(&wake));
+        wait_mirror(&session, DockStatus::Live);
+        search_now(&session);
+        session.set_search(&plain("ls"));
+        assert_eq!(current_at(&session), None);
+        let report = session.search_next(SearchDirection::Older, OPEN, true);
+        assert!(!report.found, "{report:?}");
+        // `1` hem `cmd1`'de hem bastırılan satırda değil: tek hedef.
+        session.set_search(&plain("cmd"));
+        let first = current_at(&session);
+        assert_eq!(first, Some((0, 2)));
+        session.search_next(SearchDirection::Older, OPEN, true);
+        assert_eq!(current_at(&session), first, "tek eşleşmede sarıp aynı yere");
+        session.shutdown();
+        // Mürekkepsiz eşleşme de atlanıyor.
+        let session = text_session("abc def");
+        session.set_search(&SearchQuery {
+            text: "\\s+".into(),
+            regex: true,
+            case_sensitive: false,
+        });
+        assert_eq!(current_at(&session), None);
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_current_match_is_the_one_marked_in_the_frame() {
+        let (session, _wake) = sevens();
+        session.search_next(SearchDirection::Older, OPEN, false);
+        let (_, runs) = search_now(&session);
+        let current: Vec<_> = runs
+            .as_slice()
+            .iter()
+            .filter(|run| run.current)
+            .map(|run| (run.row, run.first))
+            .collect();
+        // Ofset 10: `17` (`Line(-5)`) ekranın 5. satırında.
+        assert_eq!(current, [(5, 1)], "{runs:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn escape_turns_the_current_match_into_the_selection() {
+        let (session, _wake) = sevens();
+        session.search_next(SearchDirection::Older, OPEN, true);
+        let before = scroll_state(&session).0;
+        assert!(session.select_search_match());
+        assert_eq!(session.selection_text().as_deref(), Some("7"));
+        assert_eq!(scroll_state(&session).0, before, "seçim pencereyi oynattı");
+        session.clear_search();
+        assert!(!session.select_search_match(), "kapalı aramada seçim");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_alternate_screen_does_not_scroll_to_a_match() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; printf 'hello\\n\\033[?1049h\\033[Hvim hello'; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_frame(&session, &wake, |cells| row_text(cells, 0) == "vimhello");
+        session.set_search(&plain("hello"));
+        let report = session.search_next(SearchDirection::Older, OPEN, true);
+        assert_eq!(
+            report,
+            SearchReport {
+                found: true,
+                visible: 1
+            }
+        );
+        assert_eq!(scroll_state(&session), (0, 0.0));
+        session.shutdown();
+    }
+
     #[test]
     #[ignore = "make test-yaris ile koşar"]
     fn race_set_search_and_frame() {
@@ -14926,6 +15565,54 @@ mod tests {
             );
             assert!(!runs.as_slice().is_empty(), "son sorgu kayboldu");
         }
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_search_next_and_frame() {
+        // Gezinme deseni kareyle **aynı yuvadan** ödünç alıyor ve ikinci bir
+        // `Term` kilidi sahibi: kilit sırası bozulursa sınama asılı kalır,
+        // geri koyma kuralı bozulursa desen kaybolur ve son gezinme hiçbir
+        // şey bulamaz.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "stty -echo; while :; do printf 'alpha beta\\n'; sleep 0.01; done",
+            Arc::clone(&wake),
+        ));
+        session.set_search(&plain("alpha"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let walker = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut steps = 0u64;
+                while Instant::now() < deadline {
+                    let direction = if steps % 2 == 0 {
+                        SearchDirection::Older
+                    } else {
+                        SearchDirection::Newer
+                    };
+                    session.search_next(direction, OPEN, steps % 3 == 0);
+                    if steps % 5 == 0 {
+                        session.set_search(&plain("alpha"));
+                    }
+                    steps += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                steps
+            })
+        };
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            search_now(&session);
+            session.take_scroll_glide();
+            frames += 1;
+        }
+        assert!(walker.join().unwrap() > 0, "hiç gezinilmedi");
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
+        let report = session.search_next(SearchDirection::Older, OPEN, true);
+        assert!(report.found, "desen yarışta kayboldu: {report:?}");
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }

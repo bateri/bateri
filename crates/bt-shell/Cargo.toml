@@ -77,6 +77,14 @@ objc2-foundation = { workspace = true, features = [
 # bayrakları — bağımlılık olarak yalnız `objc2-foundation`'ın başlıklarını ve
 # grafta zaten olan `bitflags`'i istiyorlar; yeni crate değil, `Cargo.lock`
 # oynamadı. Karar kaydı .tasks/029-ayarlar-penceresi/discussion.md → Karar 4.
+# Arama paneli (033 phase-4): `NSSearchField` ve hücre zinciri
+# (`NSSearchFieldCell` → `NSTextFieldCell` → `NSActionCell`), anahtar ve ok
+# düğmelerinin tipi ve çerçevesi (`NSButtonCell`), yüzeyin gölgesi
+# (`NSShadow`; zemin ve kenar `NSBox`'ın, `CGColor` isteyen katman yolu
+# `objc2-core-graphics` kenarı eklerdi) ve açılış/kapanış animasyonu
+# (`NSAnimationContext`, `animator()` `NSAnimation` başlığında). Yalnız
+# başlık bayrakları; `Cargo.lock` oynamadı. Karar kaydı
+# .tasks/033-gecmiste-arama/discussion.md → Karar.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -85,11 +93,16 @@ objc2-app-kit = { workspace = true, features = [
     "NSSplitViewItem", "NSStackView", "NSStepper", "NSSwitch", "NSTableCellView",
     "NSTableColumn", "NSTableHeaderView", "NSTableView", "NSText", "NSTextField",
     "NSTextInputClient", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSViewController", "NSWindowTabGroup", "NSWorkspace",
-    "block2",
+    "NSActionCell", "NSAnimation", "NSAnimationContext", "NSButtonCell", "NSSearchField",
+    "NSSearchFieldCell",
+    "NSShadow", "NSTextFieldCell", "block2",
 ] }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.
-objc2-quartz-core = { workspace = true, features = ["CALayer"] }
+# `CAMediaTimingFunction`: arama panelinin belirmesinin eğrisi (033
+# phase-4) — `NSAnimationContext::setTimingFunction`'ın argümanı; yalnız
+# başlık bayrağı.
+objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMediaTimingFunction"] }
 # Ana kuyruk: `Wake::child_exit` okuyucu thread'de gelir ve `terminate:` ana
 # thread'in işidir. Grafta bt-gpu üzerinden zaten vardı; bu iki satır yeni
 # crate çekmez, `Cargo.lock`'a yalnız kenar ekler. Vnode kaynakları da buradan

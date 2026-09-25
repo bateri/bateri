@@ -14,8 +14,10 @@
 //! sarılmamış satır sonunda durumunu sıfırlıyor — ve boş eşleşmeyi (`^`,
 //! `a*`) kendisi atlıyor.
 
+use std::ops::RangeInclusive;
+
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Direction, Line, Point};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
@@ -309,6 +311,133 @@ impl SearchRuns {
     }
 }
 
+/// Gezinmenin yönü (Karar 3): terminal en yenisi altta okunur, ⏎ ve ⌘G
+/// **yukarı**, daha eskiye gider; ⇧⏎ ve ⇧⌘G aşağıya.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchDirection {
+    /// Yukarı, daha eski eşleşmeye (⏎, ⌘G).
+    Older,
+    /// Aşağı, daha yeni eşleşmeye (⇧⏎, ⇧⌘G).
+    Newer,
+}
+
+/// Arama panelinin ızgaranın üstünde örttüğü alan, **satır ve sütun**
+/// cinsinden — `bt-core` piksel görmüyor, çeviriyi paneli yerleştiren
+/// `bt-shell` yapıyor.
+///
+/// `first_row` ızgaranın 0. ekran satırına göre panelin altındaki **ilk tam
+/// görünür** satır: `0` hiçbir satırı örtmüyor, negatif değer doldurma
+/// bandının o kadar satırının da açıkta olduğunu söylüyor. Örtülen satırların
+/// yalnız `from_col` ve sağı panelin altında; solundaki eşleşme görünür
+/// (Karar 4: "panelin altında değilse pencere oynamaz").
+///
+/// Varsayılanı **hiçbir şeyi örtmüyor** (`first_row` en küçük değer): `0`
+/// bandın satırlarını örtülmüş sayardı.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchCover {
+    pub first_row: i32,
+    pub from_col: u16,
+}
+
+impl Default for SearchCover {
+    fn default() -> Self {
+        Self {
+            first_row: i32::MIN,
+            from_col: 0,
+        }
+    }
+}
+
+/// Gezinmenin ve açığa çıkarmanın cevabı — panelin etiketinin girdisi.
+///
+/// `visible` pencerenin **varacağı** yerde (süzülme bitince) kaç eşleşmenin
+/// çizileceği: vurgunun kuralıyla (bastırılan satıra değen ve mürekkepsiz
+/// eşleşme sayılmıyor). Sayımın bütün deftere çıkışı phase-5'in işi.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchReport {
+    /// Geçerli bir eşleşme var mı.
+    pub found: bool,
+    /// Varılan pencerede çizilen eşleşme sayısı.
+    pub visible: usize,
+}
+
+/// Eşleşme **vurgunun kümesinde** mi (phase-1'in iki dışlaması): bastırılan
+/// giriş satırına değmiyor ve mürekkebi var. Gezinme ve sayım aynı kümeden
+/// sorulur, yoksa ⏎ pencereyi görünmeyen bir satıra götürürdü.
+///
+/// `hidden` bastırılan satırların **mutlak** aralığı (`Line`), son içerik
+/// karesinin ([`SearchSlot::hidden`]).
+pub(crate) fn eligible<T>(
+    term: &Term<T>,
+    found: &Match,
+    hidden: Option<&RangeInclusive<i32>>,
+) -> bool {
+    let lines = found.start().line.0..=found.end().line.0;
+    let touches =
+        hidden.is_some_and(|hidden| lines.start() <= hidden.end() && hidden.start() <= lines.end());
+    !touches && has_ink(term, found)
+}
+
+/// `origin`'den `direction` yönünde **vurgunun kümesindeki** ilk eşleşme;
+/// defterin ucunda sarar (alacritty'nin `search_next`'i `max_lines = None`
+/// ile bütün defteri dolaşıyor).
+///
+/// Kümenin dışında kalan eşleşme atlanıyor ve atlama bir döngü: sıra ilk
+/// bulunana geri döndüyse kümede hiç eşleşme yok demektir. Tavan
+/// ([`SKIP_LIMIT`]) ikinci bir emniyet — dışlanan eşleşmeler bastırılan tek
+/// satırın ve mürekkepsiz eşleşmelerin sayısı kadar, yani pratikte birkaç.
+pub(crate) fn next_eligible<T>(
+    term: &Term<T>,
+    regex: &mut RegexSearch,
+    origin: Point,
+    direction: Direction,
+    hidden: Option<&RangeInclusive<i32>>,
+) -> Option<Match> {
+    let first = term.search_next(regex, origin, direction, Side::Left, None)?;
+    let mut found = first.clone();
+    for _ in 0..SKIP_LIMIT {
+        if eligible(term, &found, hidden) {
+            return Some(found);
+        }
+        found = term.search_next(
+            regex,
+            step_past(term, &found, direction),
+            direction,
+            Side::Left,
+            None,
+        )?;
+        if found == first {
+            return None;
+        }
+    }
+    None
+}
+
+/// [`next_eligible`]'ın atlama tavanı. **Ölçülmedi**, emniyet sabiti: her
+/// adım bir `search_next`, yani defter başına bir tarama; sayı kümenin dışında
+/// kalan eşleşmelerin gerçekçi sayısının çok üstünde.
+const SKIP_LIMIT: usize = 64;
+
+/// `found`'un `direction` yönündeki bir sonraki hücresi — gezinmenin yeni
+/// başlangıcı (alacritty'nin kendi `advance_search_origin`'i): eski
+/// eşleşmenin kendisi bir daha bulunmuyor. Defterin ucunda sarar.
+pub(crate) fn step_past<T>(term: &Term<T>, found: &Match, direction: Direction) -> Point {
+    match direction {
+        Direction::Right => found.end().add(term, Boundary::None, 1),
+        Direction::Left => found.start().sub(term, Boundary::None, 1),
+    }
+}
+
+/// İki eşleşme aynı yer mi — geçerli eşleşmenin karede işaretlenmesi.
+///
+/// Uçlardan biri tutması yetiyor: kare eşleşmeyi soldan sağa taramayla
+/// (`RegexIter`), gezinme iki yönde (`search_next`) buluyor ve açgözlü bir
+/// desende iki yol aynı yerin farklı bir ucunda durabilir. Farklı iki
+/// eşleşme aynı hücrede başlayıp bitemez.
+pub(crate) fn same_place(a: &Match, b: &Match) -> bool {
+    a.start() == b.start() || a.end() == b.end()
+}
+
 /// Oturumun arama yuvası — **yaprak kilit** (`theme` emsali).
 ///
 /// Derlenmiş desen `Term` kilidinin altında `&mut` istiyor (`RegexIter`) ve
@@ -327,4 +456,21 @@ pub(crate) struct SearchSlot {
     pub(crate) pattern: Option<RegexSearch>,
     /// Bir desen var mı (ödünçte olsa bile) — kare isteğinin kapısı.
     pub(crate) active: bool,
+    /// **Geçerli eşleşme** (Karar 3), defterin mutlak koordinatında. Sorgu
+    /// değişince yeniden seçiliyor, gezinme onu taşıyor, kare onu
+    /// `search_current` rengiyle işaretliyor ([`same_place`]).
+    ///
+    /// **Bilinen sınır:** mutlak satır, çıktı defteri kaydırınca içerikten
+    /// kayıyor — geçerli eşleşmenin içeriğine yapışması phase-5'in işi.
+    pub(crate) current: Option<Match>,
+    /// Aramanın başladığı pencerenin dibi: yazarken geçerli eşleşme,
+    /// pencerede görünür eşleşme yoksa buradan yukarı ilk eşleşme. İlk
+    /// sorguda kuruluyor, aramanın kapanışında (`clear_search`) düşüyor;
+    /// gezinme onu geçerli eşleşmeye çekiyor ki sorguyu daraltmak bulunan
+    /// yerin yakınında kalsın.
+    pub(crate) origin: Option<Point>,
+    /// Son içerik karesinde bastırılan giriş satırları, **mutlak** `Line`
+    /// aralığı — gezinme ve sayım vurgunun dışladığını dışlasın diye karenin
+    /// kendi cevabı ([`eligible`]); ikinci kez türetilmiyor (015'in dersi).
+    pub(crate) hidden: Option<RangeInclusive<i32>>,
 }

@@ -752,6 +752,17 @@ struct LinkIvars {
     /// yetmezdi, çünkü koşu sırasında açılan bir Spotlight
     /// `windowDidResignKey:` doğurup kare isterdi.
     focused: Cell<bool>,
+    /// Klavye **terminalde** mi — `bt-shell`'in cevabı (033 R7): arama
+    /// panelinin alanı first responder olunca `false`.
+    ///
+    /// **Odak iki bit** (033 → Muhakeme) ve birleştirme burada, tek yerde
+    /// ([`LinkIvars::caret_focused`]): caret'in içinin boşalması ve blink'in
+    /// durması "pencere key **ve** klavye terminalde" sorusunun cevabı — caret
+    /// klavyenin nereye gittiğini söyleyen tek sinyal. Seçim ve arama
+    /// vurgusunun solması ise yalnız [`LinkIvars::focused`]'tan: alana
+    /// yazarken vurgular tam renkli kalmalı. Tek bit olsaydı ikisinden biri
+    /// yanlış olurdu.
+    keyboard: Cell<bool>,
     /// İmlecin **ayardan gelen** çizim sayıları.
     ///
     /// `cell`/`motion`/`blink` ile aynı yuvada ve aynı gerekçeyle: kare yolu
@@ -808,6 +819,16 @@ struct LinkIvars {
     ///
     /// `None` → hiç kare çizilmedi; jeton o zaman `sessiz=none`.
     last_frame_at: Cell<Option<f64>>,
+}
+
+impl LinkIvars {
+    /// Caret'in odağı: pencere key **ve** klavye terminalde (033 → Muhakeme,
+    /// "odak iki bit"). İçinin boşalması, blink'in kapısı ve hareket
+    /// karesindeki yeniden çizimi buradan; vurgu ve seçim rengi yalnız
+    /// `focused`'tan.
+    fn caret_focused(&self) -> bool {
+        self.focused.get() && self.keyboard.get()
+    }
 }
 
 define_class!(
@@ -931,7 +952,7 @@ define_class!(
                         // **Odak her karede taze okunuyor**, `Frame`'de
                         // saklanandan değil: bu bit `bt-gpu`'nun kendi kararı
                         // ve hareket karesi de ona erişiyor.
-                        iv.focused.get(),
+                        iv.caret_focused(),
                     );
                 }
                 // Dock'un statik listeleri korunuyor, yalnız efektler
@@ -1316,7 +1337,9 @@ define_class!(
             // `enabled=false` → `lit=true`, `next_flip=None`) bugün gizli
             // imleci koruyor; bu onun üçüncü tüketicisi. Yan kazancı boşta
             // sıfır kare tarafında: odaksız boş pencere saat kurmuyor.
-            let focused = iv.focused.get();
+            // Caret'in odağı iki bitin birleşimi ([`LinkIvars::caret_focused`]):
+            // alana yazarken de blink duruyor ve caret içi boş.
+            let focused = iv.caret_focused();
             // **Ayarın periyodu burada uygulanıyor** ve `content_frame`'den
             // önce: tik mutlak bir son tarih, yani yeniden kurulurken bu
             // karenin damgası gerekiyor. Aynı değerde no-op.
@@ -1816,6 +1839,7 @@ impl DisplayLink {
                 content_deadline: Cell::new(None),
                 blink: Cell::new(Blink::default()),
                 focused: Cell::new(true),
+                keyboard: Cell::new(true),
                 caret_style: Cell::new(CaretStyle::default()),
                 blink_interval: Cell::new(bt_core::CURSOR_BLINK_INTERVAL),
                 clock_generation: Arc::new(AtomicU64::new(0)),
@@ -2097,6 +2121,20 @@ impl DisplayLink {
     pub fn set_blink_interval(&self, half_period: f64) {
         let iv = self.delegate.ivars();
         if iv.blink_interval.replace(half_period) == half_period {
+            return;
+        }
+        self.request_frame();
+    }
+
+    /// Klavye terminale geldi ya da gitti — `bt-shell`'in view'ı first
+    /// responder olunca/bırakınca veriyor (033 R7; arama panelinin alanı).
+    ///
+    /// [`DisplayLink::set_focused`]'ın kuralı: aynı değerde no-op, değişimde
+    /// kare — caret'in içi boşalacak ya da dolacak, blink duracak ya da
+    /// başlayacak.
+    pub fn set_keyboard_in_terminal(&self, keyboard: bool) {
+        let iv = self.delegate.ivars();
+        if iv.keyboard.replace(keyboard) == keyboard {
             return;
         }
         self.request_frame();
