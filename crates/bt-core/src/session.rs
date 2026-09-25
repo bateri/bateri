@@ -2715,6 +2715,7 @@ impl Session {
         // Desen yoksa (arama kapalı, sorgu boş ya da geçersiz) tarama hiç
         // koşmuyor ve iki liste boş kalıyor (R2.2).
         search.clear();
+        search.colors = search::SearchColors::of(&theme);
         let (search_generation, mut search_pattern) = {
             let mut slot = lock(&self.search);
             (slot.generation, slot.pattern.take())
@@ -11026,33 +11027,46 @@ mod tests {
     fn the_selection_colors_come_from_the_theme() {
         // İki renk `bt-core`'dan hazır geliyor, hangisinin çizileceğini odak
         // bilen `bt-gpu` seçiyor (Karar 9). Tema takası bir sonraki karede
-        // ikisini birden değiştiriyor — ayrı bir sorgu yok.
+        // ikisini birden değiştiriyor — ayrı bir sorgu yok. Aramanın iki rolü
+        // (033) aynı kopyadan ve arama **kapalıyken** de: renk koşudan
+        // bağımsız, tarama değil.
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("printf 'ab'; sleep 5", Arc::clone(&wake));
         wait_frame(&session, &wake, |cells| cells.len() == 2);
         let mut runs = SelectionRuns::default();
+        let mut search = SearchRuns::default();
         let mut frame = |session: &Session| {
             session.frame(
                 |_| (),
                 |_| (),
                 &mut Blocks::default(),
                 &mut runs,
-                &mut SearchRuns::default(),
+                &mut search,
                 ScrollGlide::default(),
                 BUDGET,
             );
-            (runs.color(true), runs.color(false))
+            (
+                (runs.color(true), runs.color(false)),
+                (search.match_color(true), search.match_color(false)),
+                (search.current_color(true), search.current_color(false)),
+            )
         };
-        assert_eq!(
-            frame(&session),
-            (THEME.selection_linear(), THEME.selection_unfocused_linear())
-        );
+        let colors = |theme: Theme| {
+            (
+                (theme.selection_linear(), theme.selection_unfocused_linear()),
+                (
+                    theme.search_match_linear(),
+                    theme.search_match_unfocused_linear(),
+                ),
+                (
+                    theme.search_current_linear(),
+                    theme.search_current_unfocused_linear(),
+                ),
+            )
+        };
+        assert_eq!(frame(&session), colors(THEME));
         session.set_theme(Theme::BATERI_LIGHT);
-        let light = Theme::BATERI_LIGHT;
-        assert_eq!(
-            frame(&session),
-            (light.selection_linear(), light.selection_unfocused_linear())
-        );
+        assert_eq!(frame(&session), colors(Theme::BATERI_LIGHT));
     }
 
     #[test]

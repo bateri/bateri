@@ -20,6 +20,8 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 
+use crate::color::{LinearRgba, Theme};
+
 /// Kullanıcının sorgusu: metin ve paneldeki iki anahtar.
 ///
 /// Sekme başına tutulması ve ayar dosyasına yazılmaması çağıranın işi (Karar
@@ -227,13 +229,70 @@ pub struct SearchRun {
 ///
 /// Arama kapalıyken, sorgu boş ya da geçersizken iki liste de **boş** ve
 /// tarama hiç koşmuyor (R2.2'nin durma koşulu).
-#[derive(Debug, Default)]
+///
+/// **Renkler de sınırdan hazır** ([`crate::SelectionRuns`] emsali, 031 Karar
+/// 9): iki rol ve odaksız eşleri `frame()`'in zaten aldığı tema kopyasından
+/// yazılıyor; hangisinin çizileceği odağı bilen `bt-gpu`'nun kararı.
+#[derive(Debug)]
 pub struct SearchRuns {
     pub(crate) runs: Vec<SearchRun>,
     pub(crate) fill_runs: Vec<SearchRun>,
+    pub(crate) colors: SearchColors,
+}
+
+/// [`SearchRuns`]'ın dört rengi, lineer: iki rol × odak.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SearchColors {
+    pub(crate) matched: LinearRgba,
+    pub(crate) matched_unfocused: LinearRgba,
+    pub(crate) current: LinearRgba,
+    pub(crate) current_unfocused: LinearRgba,
+}
+
+impl SearchColors {
+    pub(crate) const fn of(theme: &Theme) -> Self {
+        Self {
+            matched: theme.search_match_linear(),
+            matched_unfocused: theme.search_match_unfocused_linear(),
+            current: theme.search_current_linear(),
+            current_unfocused: theme.search_current_unfocused_linear(),
+        }
+    }
+}
+
+/// Koşusuz boş tampon; renkler gömülü temadan, ilk kare üstüne yazıyor
+/// ([`crate::SelectionRuns`]'ın `Default`'u ile aynı gerekçe: `LinearRgba`'nın
+/// `Default`'u yok, renk uydurulmuyor).
+impl Default for SearchRuns {
+    fn default() -> Self {
+        Self {
+            runs: Vec::new(),
+            fill_runs: Vec::new(),
+            colors: SearchColors::of(&Theme::BATERI),
+        }
+    }
 }
 
 impl SearchRuns {
+    /// Eşleşmelerin vurgusu: odaktaki pencerede `search_match`, değilse
+    /// zemine doğru soluklaşmış eşi.
+    pub fn match_color(&self, focused: bool) -> LinearRgba {
+        if focused {
+            self.colors.matched
+        } else {
+            self.colors.matched_unfocused
+        }
+    }
+
+    /// Geçerli eşleşmenin vurgusu; [`SearchRuns::match_color`]'ın kuralı.
+    pub fn current_color(&self, focused: bool) -> LinearRgba {
+        if focused {
+            self.colors.current
+        } else {
+            self.colors.current_unfocused
+        }
+    }
+
     /// Izgaranın koşuları, satır sırasıyla; bastırılan giriş satırı hariç.
     pub fn as_slice(&self) -> &[SearchRun] {
         &self.runs
