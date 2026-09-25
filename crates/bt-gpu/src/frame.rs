@@ -30,8 +30,8 @@ use std::mem::offset_of;
 
 use bt_atlas::{Face, RuleKind, SizeClass};
 use bt_core::{
-    Block, CaretShape, CaretStyle, Cell, LinearRgba, SearchRun, SelectionRun, UnderlineStyle,
-    UnfocusedCaret,
+    Block, CaretShape, CaretStyle, Cell, ClusterId, Clusters, LinearRgba, SearchRun, SelectionRun,
+    UnderlineStyle, UnfocusedCaret,
 };
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
@@ -421,6 +421,25 @@ pub(crate) struct GlyphCell {
     /// Yelpazeleme bu yüzden `AtlasTexture::prepare`'de: orada atlas zaten
     /// ödünç alınmış ve hücre ölçüsü elde.
     pub(crate) wide: bool,
+    /// Sınırın `Cell::cluster`'ı: emoji dizisinin **listenin kendi**
+    /// tablosundaki kimliği (035 Karar 4B) — ızgara ve doldurma bandı
+    /// [`Frame::clusters`], dock [`Frame::dock_clusters`], hayaletler
+    /// [`Frame::fx_clusters`]. Dizgi atlasa `prepare` anında iniyor
+    /// (`Atlas::intern`), `ch` gibi: bu liste atlası görmüyor.
+    pub(crate) cluster: Option<ClusterId>,
+}
+
+/// Bir küme kimliğini `from` tablosundan `to` tablosuna taşır (035): ömrü
+/// kaynağınkini aşan listeler (yazım efektleri) dizgiyi kendi tablolarına
+/// kopyalıyor. Kaynakta bulunamayan kimlik `None` — glyph taban karakterle
+/// çiziliyor, yanlış bir dizgiyle değil.
+pub(crate) fn copy_cluster(
+    id: Option<ClusterId>,
+    from: &Clusters,
+    to: &mut Clusters,
+) -> Option<ClusterId> {
+    id.and_then(|id| from.get(id))
+        .and_then(|text| to.push(text))
 }
 
 /// Çizilecek bir yazım efekti: glyph'i ve efektin parametreleri — uv'siz,
@@ -903,6 +922,21 @@ pub(crate) struct Frame {
     dock_bg: Vec<Instance>,
     dock_glyphs: Vec<GlyphCell>,
     dock_rules: Vec<RuleCell>,
+    /// Kümelerin tabloları (035 Karar 4B): listelerle **birlikte** yaşıyor ve
+    /// temizleniyor, yani hareket karesi (listeleri koruyan) aynı kimlikleri
+    /// aynı dizgilerle çiziyor. Üç tablo, çünkü üç yazar var: `frame()`
+    /// ızgara ile doldurma bandını tek çağrıda dolduruyor (`clusters`),
+    /// `dock()` ayrı bir çağrı (`dock_clusters`), hayaletler ise dock
+    /// tablosunu aşan ömürlü efektlerden her karede yeniden kuruluyor
+    /// (`fx_clusters`, [`Frame::set_dock_fx`]). Gelişler statik glyph'in
+    /// kopyası, yani dock tablosunu okuyor.
+    ///
+    /// Doldurulurken tablo `Frame`'in dışında ([`Frame::take_clusters`]):
+    /// sink'ler `Frame`'i ödünç aldığı için aynı çağrıya ikinci bir `&mut`
+    /// veremezler (`fill`'in gerekçesi).
+    clusters: Clusters,
+    dock_clusters: Clusters,
+    fx_clusters: Clusters,
     /// Dock'un yazım efektleri (030): silinen glyph'lerin hayaletleri ve
     /// gelen glyph'ler. İki liste, çünkü çizim sıraları ayrı — hayaletler
     /// dock glyph'lerinden **önce**, gelişler **sonra**
@@ -994,6 +1028,8 @@ impl Frame {
         self.dock_bg.clear();
         self.dock_glyphs.clear();
         self.dock_rules.clear();
+        self.clusters.clear();
+        self.dock_clusters.clear();
         // Efektler de: dock'u olmayan bir karede (alternatif ekran) önceki
         // karenin hayaleti asılı kalmasın.
         self.dock_ghosts.clear();
@@ -1146,6 +1182,7 @@ impl Frame {
                 size: SizeClass::Normal,
                 rgba: cell.fg.to_array(),
                 wide: cell.wide,
+                cluster: cell.cluster,
             });
         }
         if let Some(kind) = rule_kind(cell.underline) {
@@ -1731,6 +1768,9 @@ impl Frame {
             // çünkü sabit yazılmamıştı.
             wide: cell.wide,
             rgba: cell.fg.to_array(),
+            // Bağlam satırı (küçük sınıf) küme taşımıyor (Karar 6): sınır
+            // oraya kümeli hücre basmıyor.
+            cluster: cell.cluster,
         })
     }
 
@@ -1765,9 +1805,19 @@ impl Frame {
     ///
     /// `heat` temanın `cursor` rengi (`heat` efektinin kızgın rengi); iki
     /// yazar da temayı elinde tutuyor.
-    pub(crate) fn set_dock_fx(&mut self, fx: impl IntoIterator<Item = Fx>, heat: LinearRgba) {
+    ///
+    /// `table` efektlerin küme tablosu ([`GlyphFx::clusters`]); hayaletlerin
+    /// kümeleri [`Frame::fx_clusters`]'a kopyalanıyor, gelişler statik
+    /// glyph'in kopyası olduğu için dock'un tablosunda.
+    pub(crate) fn set_dock_fx(
+        &mut self,
+        fx: impl IntoIterator<Item = Fx>,
+        table: &Clusters,
+        heat: LinearRgba,
+    ) {
         self.dock_fx_heat = heat.to_array();
         self.dock_ghosts.clear();
+        self.fx_clusters.clear();
         self.dock_arrivals.clear();
         self.dock_shown.clear();
         let mut hidden = [usize::MAX; crate::glyph_fx::FX_MAX];
@@ -1782,7 +1832,9 @@ impl Frame {
             match fx.kind {
                 Kind::Ghost => {
                     if let Some(glyph) = self.dock_glyph(fx.cell) {
-                        self.dock_ghosts.push(fx_cell(glyph));
+                        let cluster = copy_cluster(glyph.cluster, table, &mut self.fx_clusters);
+                        self.dock_ghosts
+                            .push(fx_cell(GlyphCell { cluster, ..glyph }));
                     }
                 }
                 Kind::Arrival => {
@@ -2180,6 +2232,7 @@ impl Frame {
                 size: SizeClass::Normal,
                 rgba: cell.fg.to_array(),
                 wide: cell.wide,
+                cluster: cell.cluster,
             });
         }
         if let Some(kind) = rule_kind(cell.underline) {
@@ -2346,6 +2399,42 @@ impl Frame {
 
     pub(crate) fn glyphs(&self) -> &[GlyphCell] {
         &self.glyphs
+    }
+
+    /// Izgara ile doldurma bandının küme tablosu ([`GlyphCell::cluster`]).
+    pub(crate) fn clusters(&self) -> &Clusters {
+        &self.clusters
+    }
+
+    /// Dock'un (ve gelişlerin) küme tablosu.
+    pub(crate) fn dock_clusters(&self) -> &Clusters {
+        &self.dock_clusters
+    }
+
+    /// Hayaletlerin küme tablosu ([`Frame::set_dock_fx`]).
+    pub(crate) fn fx_clusters(&self) -> &Clusters {
+        &self.fx_clusters
+    }
+
+    /// Izgaranın tablosunu `frame()`'in doldurması için **dışarı** alır;
+    /// çağrıdan sonra [`Frame::put_clusters`] geri koyar. Taşıma, kopya değil:
+    /// sink'ler `Frame`'i ödünç alırken tablo aynı çağrının ikinci `&mut`'u
+    /// olamaz. Temizleme [`Frame::clear`]'da, yani alınan tablo boş.
+    pub(crate) fn take_clusters(&mut self) -> Clusters {
+        std::mem::take(&mut self.clusters)
+    }
+
+    pub(crate) fn put_clusters(&mut self, clusters: Clusters) {
+        self.clusters = clusters;
+    }
+
+    /// Dock'un tablosu için [`Frame::take_clusters`]'ın ikizi.
+    pub(crate) fn take_dock_clusters(&mut self) -> Clusters {
+        std::mem::take(&mut self.dock_clusters)
+    }
+
+    pub(crate) fn put_dock_clusters(&mut self, clusters: Clusters) {
+        self.dock_clusters = clusters;
     }
 
     pub(crate) fn rules(&self) -> &[RuleCell] {
@@ -4203,6 +4292,7 @@ mod tests {
                 size: SizeClass::Normal,
                 rgba: CURSOR.to_array(),
                 wide: false,
+                cluster: None,
             }
         );
 
@@ -4287,14 +4377,18 @@ mod tests {
         frame.clear(grid(8, 16), CaretStyle::default());
         frame.push_dock(typed_cell(2, 'l'));
         frame.push_dock(typed_cell(3, 's'));
-        frame.set_dock_fx([fx(typed_cell(3, 's'), Kind::Arrival)], CURSOR);
+        frame.set_dock_fx(
+            [fx(typed_cell(3, 's'), Kind::Arrival)],
+            &Clusters::default(),
+            CURSOR,
+        );
         let shown: Vec<char> = frame.dock_glyphs().iter().map(|g| g.ch).collect();
         assert_eq!(shown, ['l']);
         assert_eq!(frame.dock_arrivals().len(), 1);
         assert_eq!(frame.dock_arrivals()[0].glyph, frame.dock_glyphs[1]);
         // Efekt bitti (hareket karesi, liste boş): statik glyph dock yeniden
         // basılmadan geri geliyor.
-        frame.set_dock_fx([], CURSOR);
+        frame.set_dock_fx([], &Clusters::default(), CURSOR);
         let shown: Vec<char> = frame.dock_glyphs().iter().map(|g| g.ch).collect();
         assert_eq!(shown, ['l', 's']);
     }
@@ -4312,9 +4406,53 @@ mod tests {
             ..typed_cell(2, 'l')
         };
         frame.push_dock(now);
-        frame.set_dock_fx([fx(typed_cell(2, 'l'), Kind::Arrival)], CURSOR);
+        frame.set_dock_fx(
+            [fx(typed_cell(2, 'l'), Kind::Arrival)],
+            &Clusters::default(),
+            CURSOR,
+        );
         assert_eq!(frame.dock_arrivals().len(), 1);
         assert_eq!(frame.dock_arrivals()[0].glyph.rgba, recolored.to_array());
+    }
+
+    #[test]
+    fn a_clustered_ghost_outlives_the_dock_table() {
+        // 035 R4.1: hayaletin hücresi dock'un kare tablosunu gösteriyor ve o
+        // tablo sonraki içerik karesinde temizleniyor; efekt dizgiyi kendi
+        // tablosuna, `Frame` hayalet listesinin tablosuna kopyalıyor.
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 16), CaretStyle::default());
+        let mut dock = Clusters::default();
+        let ghost = Cell {
+            wide: true,
+            cluster: dock.push("🇹🇷"),
+            ..typed_cell(4, '🇹')
+        };
+        let mut glyph_fx = GlyphFx::default();
+        glyph_fx.apply(
+            bt_core::DockEdit::Erase {
+                row: 0,
+                col: 4,
+                ghosts: [ghost].into_iter().collect(),
+                shift: 0,
+            },
+            crate::motion::Motion::default(),
+            1,
+            &dock,
+        );
+        dock.clear();
+        dock.push("başka");
+        for _ in 0..2 {
+            // İkinci tur hareket karesi: tablo her yazımda yeniden kuruluyor.
+            frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), CURSOR);
+            let ghosts = frame.dock_ghosts();
+            assert_eq!(ghosts.len(), 1);
+            let text = ghosts[0]
+                .glyph
+                .cluster
+                .and_then(|id| frame.fx_clusters().get(id));
+            assert_eq!(text, Some("🇹🇷"));
+        }
     }
 
     #[test]
@@ -4348,12 +4486,12 @@ mod tests {
                 shift: 0,
             },
         ] {
-            glyph_fx.apply(edit, motion, rows);
+            glyph_fx.apply(edit, motion, rows, &Clusters::default());
         }
         frame.suppress_dock(&mut glyph_fx);
         let left: Vec<(u16, Kind)> = glyph_fx.iter().map(|fx| (fx.cell.col, fx.kind)).collect();
         assert_eq!(left, [(2, Kind::Arrival), (5, Kind::Ghost)]);
-        frame.set_dock_fx(glyph_fx.iter(), CURSOR);
+        frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), CURSOR);
         assert_eq!(frame.dock_ghosts().len(), 1);
         assert_eq!(frame.dock_arrivals().len(), 1);
         assert!(
@@ -4368,7 +4506,11 @@ mod tests {
         // asılı kalmamalı.
         let mut frame = Frame::default();
         frame.clear(grid(8, 16), CaretStyle::default());
-        frame.set_dock_fx([fx(typed_cell(3, 's'), Kind::Ghost)], CURSOR);
+        frame.set_dock_fx(
+            [fx(typed_cell(3, 's'), Kind::Ghost)],
+            &Clusters::default(),
+            CURSOR,
+        );
         assert_eq!(frame.dock_ghosts().len(), 1);
         frame.clear(grid(8, 16), CaretStyle::default());
         assert!(frame.dock_ghosts().is_empty() && frame.dock_arrivals().is_empty());

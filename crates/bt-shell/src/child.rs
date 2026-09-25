@@ -625,6 +625,7 @@ mod tests {
             blocks,
             &mut bt_core::SelectionRuns::default(),
             &mut bt_core::SearchRuns::default(),
+            &mut bt_core::Clusters::default(),
             ScrollGlide::default(),
             bt_core::DockBudget {
                 share: 0.5,

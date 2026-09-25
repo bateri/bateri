@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use block2::RcBlock;
 use bt_atlas::{Atlas, Face, FontIssue, Half, Metrics, Placed, Plane, SizeClass, Sprite, TOFU};
-use bt_core::{FontOptions, LinearRgba};
+use bt_core::{Clusters, FontOptions, LinearRgba};
 use dispatch2::DispatchData;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
@@ -763,6 +763,7 @@ impl Renderer {
             .encode_glyphs(
                 &enc,
                 &[],
+                frame.clusters(),
                 frame.stripes(),
                 &CursorBlock::default(),
                 frame.cell_px(),
@@ -813,6 +814,7 @@ impl Renderer {
                 self.encode_glyphs(
                     &enc,
                     frame.glyphs(),
+                    frame.clusters(),
                     frame.rules(),
                     frame.cursor_block(),
                     frame.cell_px(),
@@ -877,6 +879,8 @@ impl Renderer {
                 self.encode_glyphs(
                     enc,
                     frame.fill_glyphs(),
+                    // Band ızgarayla aynı `frame()` çağrısından, aynı tablo.
+                    frame.clusters(),
                     frame.fill_rules(),
                     // Ters çevirme dikdörtgeni **dejenere** (emsal: sol payın
                     // blok işaretleri): bandın caret yuvası yok — caret'in
@@ -1011,6 +1015,7 @@ impl Renderer {
                 self.encode_fx(
                     enc,
                     frame.dock_ghosts(),
+                    frame.fx_clusters(),
                     frame.dock_fx_heat(),
                     frame.cell_px(),
                     viewport_px,
@@ -1038,6 +1043,7 @@ impl Renderer {
                 self.encode_glyphs(
                     enc,
                     frame.dock_glyphs(),
+                    frame.dock_clusters(),
                     glyph_rules,
                     frame.cursor_block(),
                     frame.cell_px(),
@@ -1047,6 +1053,8 @@ impl Renderer {
                     self.encode_fx(
                         enc,
                         arrivals,
+                        // Gelişler statik glyph'in kopyası: dock'un tablosu.
+                        frame.dock_clusters(),
                         frame.dock_fx_heat(),
                         frame.cell_px(),
                         viewport_px,
@@ -1057,6 +1065,7 @@ impl Renderer {
                     self.encode_glyphs(
                         enc,
                         &[],
+                        frame.dock_clusters(),
                         late_rules,
                         frame.cursor_block(),
                         frame.cell_px(),
@@ -1100,10 +1109,13 @@ impl Renderer {
     /// düzlemindeki instance zaten doğamıyor; doğduysa ve doku kurulamadıysa
     /// o instance **çizilmiyor** — maske dokusunu renk diye okumak rastgele
     /// piksel olurdu.
+    // `encode_glyphs`'in gerekçesi: tablo `cells`'in yarısı.
+    #[allow(clippy::too_many_arguments)]
     fn encode_fx(
         &self,
         enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         cells: &[FxCell],
+        clusters: &Clusters,
         heat: &[f32; 4],
         cell_px: [f32; 2],
         viewport_px: [f32; 2],
@@ -1114,7 +1126,7 @@ impl Renderer {
         }
         let mut atlas = self.atlas.borrow_mut();
         let atlas_tex = atlas.as_mut().ok_or(GpuError::NoAtlas)?;
-        atlas_tex.prepare_fx(&self.device, cells)?;
+        atlas_tex.prepare_fx(&self.device, cells, clusters)?;
         if atlas_tex.color_texture.is_none() {
             atlas_tex
                 .fx_instances
@@ -1345,10 +1357,14 @@ impl Renderer {
     /// `draw` boyunca tutuyor: aynı şekil atlas için kopyalansaydı ilk
     /// glyph'li karede `BorrowMutError` olurdu. Panik çizim yolunda ve
     /// `Retry` `GpuError` için tasarlandı, unwind için değil.
+    // Tablo `glyphs`'in ayrılmaz yarısı (kimlikleri onu gösteriyor); ikisini
+    // bir yapıya sarmak her çağrı yerine bir kurucu eklerdi.
+    #[allow(clippy::too_many_arguments)]
     fn encode_glyphs(
         &self,
         enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         glyphs: &[GlyphCell],
+        clusters: &Clusters,
         rules: &[RuleCell],
         cursor: &CursorBlock,
         cell_px: [f32; 2],
@@ -1366,7 +1382,7 @@ impl Renderer {
         // "ölçeği hiç söylemeden glyph çizmek" demek; sessizce @1x bir atlas
         // uydurmak yerine kare düşer.
         let atlas_tex = atlas.as_mut().ok_or(GpuError::NoAtlas)?;
-        atlas_tex.prepare(&self.device, glyphs, rules)?;
+        atlas_tex.prepare(&self.device, glyphs, clusters, rules)?;
         // audit: `prepare` `Ok` döndüyse dokuyu kurmuştur; tek çıkış yolu `?`.
         let atlas_texture = atlas_tex.texture.as_ref().expect("prepare dokuyu kurdu");
         let instances = &atlas_tex.instances;
@@ -1595,6 +1611,7 @@ impl AtlasTexture {
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
         glyphs: &[GlyphCell],
+        clusters: &Clusters,
         rules: &[RuleCell],
     ) -> Result<(), GpuError> {
         self.ensure_texture(device)?;
@@ -1635,6 +1652,7 @@ impl AtlasTexture {
                 metrics,
                 inv,
                 glyph,
+                clusters,
             )
             .into_iter()
             .flatten()
@@ -1722,6 +1740,7 @@ impl AtlasTexture {
         &mut self,
         device: &ProtocolObject<dyn MTLDevice>,
         cells: &[FxCell],
+        clusters: &Clusters,
     ) -> Result<(), GpuError> {
         self.ensure_texture(device)?;
         // audit: `ensure_texture` `Ok` döndüyse dokuyu kurmuştur.
@@ -1742,6 +1761,7 @@ impl AtlasTexture {
                 metrics,
                 inv,
                 &cell.glyph,
+                clusters,
             )
             .into_iter()
             .flatten()
@@ -1806,8 +1826,18 @@ fn fan(
     metrics: Metrics,
     inv: (f32, f32),
     glyph: &GlyphCell,
+    clusters: &Clusters,
 ) -> [Option<Part>; 2] {
     let want = if glyph.wide { Half::Left } else { Half::Whole };
+    // **Küme burada atlasa iniyor** (035 Karar 4B): interning atlasın ödüncü
+    // gerektiriyor ve sink onu alamıyor (023). İki yarı aynı sprite'tan.
+    // Taban karaktere düşüş ikinci kez yazılmıyor: tabloda bulunamayan
+    // kimlik `Char`, şekillenmeyen ya da kapıdan dönen küme ise
+    // `Atlas::slot`'un kendi cevabı (taban karakter, R1.1).
+    let sprite = glyph
+        .cluster
+        .and_then(|id| clusters.get(id))
+        .map_or(Sprite::Char(glyph.ch), |text| atlas.intern(text));
     let (uv0, placed) = slot_uv(
         atlas,
         texture,
@@ -1815,7 +1845,7 @@ fn fan(
         metrics,
         inv,
         SlotAsk {
-            sprite: Sprite::Char(glyph.ch),
+            sprite,
             face: glyph.face,
             size: glyph.size,
             want,
@@ -1842,7 +1872,7 @@ fn fan(
         metrics,
         inv,
         SlotAsk {
-            sprite: Sprite::Char(glyph.ch),
+            sprite,
             face: glyph.face,
             size: glyph.size,
             want: Half::Right,
@@ -4557,8 +4587,10 @@ mod tests {
             size: SizeClass::Normal,
             rgba: [1.0, 1.0, 1.0, 1.0],
             wide: true,
+            cluster: None,
         }];
-        tex.prepare(&device, &glyphs, &[]).expect("prepare");
+        tex.prepare(&device, &glyphs, &Clusters::default(), &[])
+            .expect("prepare");
         assert_eq!(
             tex.instances.len(),
             2,
@@ -4607,8 +4639,10 @@ mod tests {
             size: SizeClass::Normal,
             rgba: [1.0, 1.0, 1.0, 1.0],
             wide: true,
+            cluster: None,
         }];
-        tex.prepare(&device, &glyphs, &[]).expect("prepare");
+        tex.prepare(&device, &glyphs, &Clusters::default(), &[])
+            .expect("prepare");
         assert_eq!(
             tex.instances.len(),
             1,
@@ -4790,6 +4824,95 @@ mod tests {
         pixel_at(&pixels, edge, 2, 2)
     }
 
+    /// Kümenin (`🇹🇷`) üç yüzeyde de **tek** renkli glyph'e inmesi (035
+    /// R4.1): ızgara, doldurma bandı ve dock hücreyi kendi tablosuyla
+    /// taşıyor, `prepare` onu atlasa `Sprite::Cluster` diye soruyor ve geniş
+    /// glyph renk düzleminden iki dörtlü basıyor — kutu yuvası değil, iki RI
+    /// de değil. Listeler korunan (hareket) karede ikinci `prepare` aynı
+    /// yuvaları veriyor: tablo listelerle birlikte yaşıyor.
+    #[test]
+    fn a_cluster_is_one_color_glyph_on_every_surface() {
+        let device = MTLCreateSystemDefaultDevice().expect("Metal device");
+        let mut tex = AtlasTexture {
+            // Retina: 13pt@1x'te bayrağın mürekkebi iki hücreyi aşıyor ve
+            // küme taban karaktere düşüyor (`bt-atlas`'ın küme sınamalarının
+            // ölçeği, 035 phase-1 → Uygulama Notları).
+            atlas: Atlas::new(None, 13.0, 2.0, 1.0),
+            texture: None,
+            instances: Vec::new(),
+            color_texture: None,
+            color_instances: Vec::new(),
+            fx_instances: Vec::new(),
+        };
+        let mut frame = Frame::default();
+        frame.clear(grid(16, 32), CaretStyle::default());
+        let mut clusters = frame.take_clusters();
+        let cell = Cell {
+            ch: Some('🇹'),
+            wide: true,
+            cluster: clusters.push("🇹🇷"),
+            ..Default::default()
+        };
+        frame.put_clusters(clusters);
+        frame.push(cell);
+        frame.set_fill_rows(1);
+        frame.push_fill(cell);
+        let mut dock = frame.take_dock_clusters();
+        let dock_cell = Cell {
+            cluster: dock.push("🇹🇷"),
+            ..cell
+        };
+        frame.put_dock_clusters(dock);
+        frame.push_dock(dock_cell);
+
+        let surfaces = [
+            ("ızgara", frame.glyphs(), frame.clusters()),
+            ("bant", frame.fill_glyphs(), frame.clusters()),
+            ("dock", frame.dock_glyphs(), frame.dock_clusters()),
+        ];
+        let mut first = None;
+        for (name, glyphs, clusters) in surfaces {
+            for pass in ["içerik", "hareket"] {
+                tex.prepare(&device, glyphs, clusters, &[])
+                    .expect("prepare");
+                // Renkli bayrak fontu yoksa sınama konusuz; `🎉`'nin emsali.
+                if tex.color_instances.is_empty() && tex.instances.is_empty() {
+                    return;
+                }
+                assert_eq!(
+                    tex.color_instances.len(),
+                    2,
+                    "{name}/{pass}: bayrak renk düzleminden iki dörtlü olmalı"
+                );
+                assert!(
+                    tex.instances.is_empty(),
+                    "{name}/{pass}: maske listesine düştü (kutu ya da tek RI)"
+                );
+                let uvs: Vec<[f32; 2]> = tex.color_instances.iter().map(|part| part.uv0).collect();
+                assert_eq!(*first.get_or_insert(uvs.clone()), uvs, "{name}/{pass}");
+            }
+        }
+        // Tek başına `🇹` (kümesiz aynı hücre) **başka** yuvalar: yukarıdaki
+        // dörtlüler kümenin, taban karakterin değil.
+        let lone = [GlyphCell {
+            cluster: None,
+            ..frame.glyphs()[0]
+        }];
+        tex.prepare(&device, &lone, frame.clusters(), &[])
+            .expect("prepare");
+        let lone: Vec<[f32; 2]> = tex
+            .color_instances
+            .iter()
+            .chain(&tex.instances)
+            .map(|part| part.uv0)
+            .collect();
+        assert_ne!(
+            first,
+            Some(lone),
+            "küme taban karakterin yuvasından çizildi"
+        );
+    }
+
     /// Renkli aday **renk düzlemine** gidiyor ve maske listesine hiç
     /// girmiyor.
     ///
@@ -4816,8 +4939,10 @@ mod tests {
             size: SizeClass::Normal,
             rgba: [1.0, 1.0, 1.0, 1.0],
             wide: true,
+            cluster: None,
         }];
-        tex.prepare(&device, &glyphs, &[]).expect("prepare");
+        tex.prepare(&device, &glyphs, &Clusters::default(), &[])
+            .expect("prepare");
         // Karakteri taşıyan renkli bir font kurulu değilse sınama konusuz —
         // ama kaçış dalı **regresyonu görmek zorunda**: `has_color_glyphs`
         // bozulursa `🎉` maske düzlemine düşer ve `color_instances` yine boş
@@ -4937,7 +5062,7 @@ mod tests {
         for &cell in cells {
             frame.push_dock(cell);
         }
-        frame.set_dock_fx(fx.iter().copied(), HEAT);
+        frame.set_dock_fx(fx.iter().copied(), &Clusters::default(), HEAT);
         frame.set_dock_rows(1);
         frame.open_dock(BACKGROUND, BACKGROUND);
         frame
