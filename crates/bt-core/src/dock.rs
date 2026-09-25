@@ -491,11 +491,21 @@ pub(crate) fn dock_layout<T>(
     items: impl IntoIterator<Item = (char, T)>,
     caret: usize,
     cols: u16,
+    cluster: bool,
     line: impl FnMut(VisualLine),
     place: impl FnMut(Placed<T>),
 ) -> LayoutEnd {
     let text = usize::from(TEXT_COL);
-    layout_with(items, caret, usize::from(cols), text, text, line, place)
+    layout_with(
+        items,
+        caret,
+        usize::from(cols),
+        text,
+        text,
+        cluster,
+        line,
+        place,
+    )
 }
 
 /// Görüntünün dock'ta istediği giriş satırı sayısı — sarılmış hâliyle,
@@ -542,6 +552,7 @@ fn measure(state: &DockState, cols: u16) -> (usize, usize) {
         stream(state).map(|ch| (ch, ())),
         shift + state.cursor,
         cols,
+        state.cluster,
         |line| {
             let after_newline = previous_end.is_some_and(|end: usize| end + 1 == line.start);
             if lines == 0 || line.start < text || (line.start == text && after_newline) {
@@ -665,6 +676,7 @@ pub(crate) fn hit(
         stream(state).map(|ch| (ch, ())),
         shift + state.cursor,
         cols,
+        state.cluster,
         |line| {
             if lines == target {
                 target_line = Some(line);
@@ -1051,6 +1063,7 @@ pub(crate) fn render_with(
         stream,
         shift + state.cursor,
         cols.grid,
+        state.cluster,
         |_| {},
         |placed| {
             // Pencerenin dışındaki satır (dikey pencere) ve sığmayan dejenere
@@ -1062,6 +1075,7 @@ pub(crate) fn render_with(
             }
             let Placed {
                 index,
+                end: _,
                 ch,
                 width,
                 row,
@@ -1178,6 +1192,10 @@ pub(crate) fn render_with(
                 usize::from(cols.grid),
                 end.caret_col,
                 usize::from(TEXT_COL),
+                // Hayalet listesi yalnız glyph taşıyor (sıfır genişlikliler
+                // süzülmüş), yani küme kurulamaz; farkın küme sınırına
+                // hizalanması R4.2'nin (phase-4).
+                false,
                 |_| {},
                 |placed| {
                     let row = end.caret_row + placed.row;
@@ -1602,6 +1620,7 @@ pub(crate) fn layout(
     width: usize,
     first: usize,
     rest: usize,
+    cluster: bool,
     line: impl FnMut(VisualLine),
 ) -> LayoutEnd {
     layout_with(
@@ -1610,6 +1629,7 @@ pub(crate) fn layout(
         width,
         first,
         rest,
+        cluster,
         line,
         |_| {},
     )
@@ -1621,8 +1641,14 @@ pub(crate) struct Placed<T> {
     /// Akıştaki sırası (sıfır genişlikliler ve `\n` de sayılıyor): görüntünün
     /// karakter indeksi, `region_highlight`'ın ve `CURSOR`'ın birimi.
     pub(crate) index: usize,
+    /// Kümenin bir sonrası (035): kümeleme açıkken kümenin kalan kod
+    /// noktaları (`🇹🇷`'nin `🇷`'si, VS16, ZWJ'li parçalar) `index..end`
+    /// aralığında ve kendi `Placed`'leri yok; kapalıyken `index + 1`.
+    pub(crate) end: usize,
+    /// Kümenin **baş** karakteri — ızgaranın hücresindeki `c`.
     pub(crate) ch: char,
-    /// Sütun genişliği, `1` ya da `2` ([`column_width`]; sıfır buraya gelmiyor).
+    /// Sütun genişliği, `1` ya da `2` ([`column_width`], kümeleme açıkken
+    /// [`crate::cluster::width`]; sıfır buraya gelmiyor).
     pub(crate) width: usize,
     /// Görsel satır, `0`'dan.
     pub(crate) row: usize,
@@ -1651,12 +1677,22 @@ impl<T> Placed<T> {
 /// çizimi, isabet testi) onu kullanıyor. İki ayrı yürüyüş olsaydı sarma ya da
 /// geniş karakter kuralı ikisinde ayrıştığı gün bant bir satır, fare bir
 /// sütun kayardı.
+///
+/// **Kümeleme açıkken (`cluster`, 035) birim küme**, kod noktası değil:
+/// ızgaranın sarmalayıcısıyla aynı kural ([`crate::cluster::extends`]) ve
+/// aynı sütun ([`crate::cluster::width`]), yani `👨‍👩‍👧` ızgarada da dock'ta
+/// da iki sütun ve bastırmanın aralığı ızgarayla ayrışmıyor. Küme tek
+/// `Placed` (baş karakter ve baş karakterin etiketi), sarma kararı kümenin
+/// tamamına; `caret` bir kümenin **içine** düşerse caret kümenin başında
+/// (Karar 7) — kümenin ortasına yazılacak bir sütun yok.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_with<T>(
     items: impl IntoIterator<Item = (char, T)>,
     caret: usize,
     width: usize,
     first: usize,
     rest: usize,
+    cluster: bool,
     mut line: impl FnMut(VisualLine),
     mut place: impl FnMut(Placed<T>),
 ) -> LayoutEnd {
@@ -1664,7 +1700,7 @@ pub(crate) fn layout_with<T>(
     let first = first.min(width);
     let mut row = 0;
     let mut col = first;
-    let mut open = VisualLine {
+    let mut visual = VisualLine {
         start: 0,
         end: 0,
         col: first,
@@ -1672,49 +1708,75 @@ pub(crate) fn layout_with<T>(
     let mut at_caret = None;
     // Karakter `col`'a sığıyor mu; sığmıyorsa satır sarılabiliyor mu. Boş ve
     // `rest`'ten sağda olmayan satırda sarmak aynı yere dönmek olurdu.
-    let fits = |col: usize, w: usize, open: &VisualLine, at: usize| {
-        col + w <= width || (open.start == at && col <= rest)
+    let fits = |col: usize, w: usize, visual: &VisualLine, at: usize| {
+        col + w <= width || (visual.start == at && col <= rest)
     };
     let mut count = 0;
-    for (index, (ch, tag)) in items.into_iter().enumerate() {
+    // Açık kümenin metni; yalnız kümeleme açıkken dolduruluyor.
+    let mut text = String::new();
+    let mut items = items.into_iter().enumerate().peekable();
+    while let Some((index, (ch, tag))) = items.next() {
         count = index + 1;
         if ch == '\n' {
             if index == caret {
-                at_caret = Some(if fits(col, 1, &open, index) {
+                at_caret = Some(if fits(col, 1, &visual, index) {
                     (row, col)
                 } else {
                     (row + 1, rest)
                 });
             }
-            open.end = index;
-            line(open);
+            visual.end = index;
+            line(visual);
             row += 1;
             col = rest;
-            open = VisualLine {
+            visual = VisualLine {
                 start: index + 1,
                 end: index + 1,
                 col: rest,
             };
             continue;
         }
-        let w = column_width(ch);
-        if !fits(col, w, &open, index) {
-            open.end = index;
-            line(open);
+        // Kümenin metni yalnız sıradaki kod noktası uzatabilecekse kuruluyor
+        // ([`crate::cluster::Walk`]'un gerekçesi): düz metinde kare başına
+        // ayırma yok. Tek kod noktalı kümenin sütunu [`column_width`]'in ta
+        // kendisi, yani kümeleme düz metinde hiçbir şeyi değiştirmiyor.
+        let (end, w) = if cluster
+            && items
+                .peek()
+                .is_some_and(|&(_, (next, _))| crate::cluster::may_extend(next))
+        {
+            text.clear();
+            text.push(ch);
+            // Kümenin kalanı kendi `Placed`'ini almıyor; etiketi baş
+            // karakterin (sıfır genişliklilerin bugünkü kuralı).
+            while let Some((next, (c, _))) =
+                items.next_if(|(_, (next, _))| crate::cluster::extends(&text, *next))
+            {
+                text.push(c);
+                count = next + 1;
+            }
+            (count, crate::cluster::width(&text))
+        } else {
+            (index + 1, column_width(ch))
+        };
+        if !fits(col, w, &visual, index) {
+            visual.end = index;
+            line(visual);
             row += 1;
             col = rest;
-            open = VisualLine {
+            visual = VisualLine {
                 start: index,
                 end: index,
                 col: rest,
             };
         }
-        if index == caret {
+        if (index..end).contains(&caret) {
             at_caret = Some((row, col));
         }
         if w > 0 {
             place(Placed {
                 index,
+                end,
                 ch,
                 width: w,
                 row,
@@ -1724,16 +1786,16 @@ pub(crate) fn layout_with<T>(
         }
         col += w;
     }
-    open.end = count;
+    visual.end = count;
     let (caret_row, caret_col) = match at_caret {
         Some(at) => at,
-        None if fits(col, 1, &open, count) => (row, col),
+        None if fits(col, 1, &visual, count) => (row, col),
         None => {
             // Sondaki caret tam dolan satırın ardında: satırı kapat, caret'e
             // kendi (boş) satırını aç.
-            line(open);
+            line(visual);
             row += 1;
-            open = VisualLine {
+            visual = VisualLine {
                 start: count,
                 end: count,
                 col: rest,
@@ -1741,7 +1803,7 @@ pub(crate) fn layout_with<T>(
             (row, rest)
         }
     };
-    line(open);
+    line(visual);
     LayoutEnd {
         caret_row,
         caret_col,
@@ -1780,17 +1842,39 @@ pub(crate) fn grid_span(
     caret: usize,
     cursor_col: usize,
     width: usize,
+    cluster: bool,
 ) -> (usize, usize) {
     let width = width.max(1);
-    // İmlecin mantıksal satırında, imleçten önceki sütunlar.
+    // İmlecin mantıksal satırında, imleçten önceki sütunlar — kümeleme
+    // açıkken kümeyle ([`layout_with`]'in birimi). **İmlecin içine düştüğü
+    // küme sayılmıyor**: ZLE kümeyi bilmiyor (wcwidth, kod noktası kod
+    // noktası), yani `👍🏽`'den sonra ← `CURSOR`'ı `🏽`'nin önüne koyuyor ve
+    // ızgaranın imleci kümenin baş sütununda; düzen de caret'i kümenin
+    // başına oturtuyor (Karar 7). Yarım kümeyi saymak başlangıç sütununu
+    // iki sütun sola kaydırır ve sarma sınırında bastırma bir satır şaşardı
+    // (`/code-review`, phase-3).
     let mut on_line = 0;
     let mut first_line = true;
-    for ch in display.chars().take(caret) {
-        if ch == '\n' {
-            on_line = 0;
-            first_line = false;
-        } else {
-            on_line += column_width(ch);
+    if cluster {
+        crate::cluster::Walk::new().run(display.chars(), |at| {
+            if at.end > caret {
+                return;
+            }
+            if at.head == '\n' {
+                on_line = 0;
+                first_line = false;
+            } else {
+                on_line += at.width;
+            }
+        });
+    } else {
+        for ch in display.chars().take(caret) {
+            if ch == '\n' {
+                on_line = 0;
+                first_line = false;
+            } else {
+                on_line += column_width(ch);
+            }
         }
     }
     let first = if first_line {
@@ -1798,7 +1882,7 @@ pub(crate) fn grid_span(
     } else {
         usize::from(TEXT_COL)
     };
-    let end = layout(display.chars(), caret, width, first, 0, |_| {});
+    let end = layout(display.chars(), caret, width, first, 0, cluster, |_| {});
     (end.caret_row, end.rows - 1 - end.caret_row)
 }
 
@@ -1910,6 +1994,8 @@ mod tests {
             insert_keymap: true,
             // Tazelik kapısının damgası; `render` okumuyor.
             answers: 0,
+            // Kümesiz okunuş: kümeli sınamalar bunu açıyor.
+            cluster: false,
         }
     }
 
@@ -3007,7 +3093,7 @@ mod tests {
     ) -> (Vec<(String, usize)>, LayoutEnd) {
         let chars: Vec<char> = text.chars().collect();
         let mut lines = Vec::new();
-        let end = layout(text.chars(), caret, width, first, rest, |line| {
+        let end = layout(text.chars(), caret, width, first, rest, false, |line| {
             lines.push((chars[line.start..line.end].iter().collect(), line.col));
         });
         (lines, end)
@@ -3122,7 +3208,7 @@ mod tests {
                     for after in 0..3 * cols {
                         let text = "x".repeat(before + after);
                         assert_eq!(
-                            grid_span(&text, before, cursor_col, cols),
+                            grid_span(&text, before, cursor_col, cols, false),
                             old(cursor_col, before, after, cols),
                             "cols={cols} cursor_col={cursor_col} before={before} after={after}"
                         );
@@ -3139,7 +3225,138 @@ mod tests {
         // sığmıyor ve alt satıra iniyor, üçüncüsü de bu yüzden bir satır daha
         // aşağıda. Bölme 10 sütunu 5'e bölüp imlecin altında bir satır
         // diyordu (`(10 - 1) / 5`); ızgarada kuyruk iki satır aşağıda.
-        assert_eq!(grid_span("abcd日日日", 0, 0, 5), (0, 2));
+        assert_eq!(grid_span("abcd日日日", 0, 0, 5, false), (0, 2));
+    }
+
+    // ---- Kümeleme (035) ----
+
+    /// Kümeli dizilerin parçaları ve her birinin yerine geçecek tek geniş
+    /// karakter: kümeli okunuşta `👍🏽` bir `日` kadar yer tutmalı.
+    const CLUSTERED: [(&str, &str); 6] = [
+        ("🇹🇷", "日"),
+        ("👍🏽", "日"),
+        ("👨\u{200D}👩\u{200D}👧", "日"),
+        ("❤\u{FE0F}", "日"),
+        ("1\u{FE0F}\u{20E3}", "日"),
+        ("x", "x"),
+    ];
+
+    /// Kümeli okunuşta bastırmanın ızgara yürüyüşü her kümeyi bir geniş
+    /// karakter sayıyor — kümesiz yürüyüşün `日`'lı dizgide verdiğinin
+    /// aynısı, satır sonuna düşen küme (`👍🏽` son iki sütunda ya da
+    /// sığmayıp alt satırda) dahil. Izgaranın aynı eşdeğerliği
+    /// `handler::tests`'te; ikisi birlikte "`grid_span` ızgarayla eşleşiyor".
+    #[test]
+    fn clustered_grid_span_counts_a_cluster_as_one_wide_char() {
+        // Parça dizileri: her uzunlukta, her parça kombinasyonundan birkaçı.
+        let sequences: Vec<Vec<usize>> = (0..CLUSTERED.len())
+            .flat_map(|a| (0..CLUSTERED.len()).map(move |b| vec![a, 5, b, a, 5, 5, b, a, b]))
+            .collect();
+        for parts in &sequences {
+            let clustered: Vec<&str> = parts.iter().map(|&i| CLUSTERED[i].0).collect();
+            let wide: Vec<&str> = parts.iter().map(|&i| CLUSTERED[i].1).collect();
+            for caret_part in 0..=parts.len() {
+                let caret_of =
+                    |pieces: &[&str]| -> usize { pieces[..caret_part].concat().chars().count() };
+                for cols in 2..=9 {
+                    for cursor_col in 0..cols {
+                        assert_eq!(
+                            grid_span(
+                                &clustered.concat(),
+                                caret_of(&clustered),
+                                cursor_col,
+                                cols,
+                                true
+                            ),
+                            grid_span(&wide.concat(), caret_of(&wide), cursor_col, cols, false),
+                            "{clustered:?} caret={caret_part} cols={cols} cursor_col={cursor_col}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// ZLE kümeyi bilmiyor: `👍🏽`'den sonra ← `CURSOR`'ı `🏽`'nin önüne
+    /// koyuyor ve ızgaranın imleci kümenin baş sütununda. Yürüyüş o hâli
+    /// caret kümenin başındaymış gibi saymalı — yarım küme sayılsaydı
+    /// başlangıç sütunu iki sola kayardı (`/code-review`, phase-3).
+    #[test]
+    fn a_caret_inside_a_cluster_counts_like_its_head_in_grid_span() {
+        let text = "abc👍🏽de\u{1F1F9}\u{1F1F7}f";
+        for cols in 2..=9 {
+            for cursor_col in 0..cols {
+                assert_eq!(
+                    grid_span(text, 4, cursor_col, cols, true),
+                    grid_span(text, 3, cursor_col, cols, true),
+                    "ten rengi, cols={cols} cursor_col={cursor_col}"
+                );
+                assert_eq!(
+                    grid_span(text, 8, cursor_col, cols, true),
+                    grid_span(text, 7, cursor_col, cols, true),
+                    "RI çifti, cols={cols} cursor_col={cursor_col}"
+                );
+            }
+        }
+    }
+
+    /// Kapalı okunuşta kümeleme yok: `👍🏽` iki geniş karakter.
+    #[test]
+    fn unclustered_grid_span_keeps_code_points() {
+        assert_eq!(grid_span("👍🏽👍🏽", 0, 0, 4, false), (0, 1));
+        assert_eq!(grid_span("👍🏽👍🏽", 0, 0, 4, true), (0, 0));
+    }
+
+    /// Dock'un düzeni kümeyi tek geniş glyph çiziyor: aile iki sütun, tek
+    /// hücre; arkasındaki harf iki sütun sağda. Kapalı okunuşta aile üç
+    /// geniş glyph (ZWJ'ler sütunsuz).
+    #[test]
+    fn a_clustered_family_takes_two_dock_columns() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let text = format!("{family}x");
+        let count = text.chars().count();
+        let mut state = live("", &text, "", count);
+        state.cluster = true;
+        let (cells, dock) = draw(&state, COLS);
+        let glyphs: Vec<(char, u16)> = cells
+            .iter()
+            .filter_map(|cell| cell.ch.map(|ch| (ch, cell.col)))
+            .collect();
+        assert_eq!(glyphs, vec![('👨', TEXT_COL), ('x', TEXT_COL + 2)]);
+        assert_eq!(dock.caret, caret_at(TEXT_COL + 3));
+        state.cluster = false;
+        let (cells, _) = draw(&state, COLS);
+        let x = cells
+            .iter()
+            .find(|cell| cell.ch == Some('x'))
+            .expect("'x' çizilmeli");
+        assert_eq!(x.col, TEXT_COL + 6, "kapalı okunuş bugünkü gibi");
+    }
+
+    /// `CURSOR` kümenin **içine** düşerse caret kümenin başında (Karar 7):
+    /// iki RI'nin arasında da, ZWJ'li dizinin ortasında da.
+    #[test]
+    fn a_caret_inside_a_cluster_sits_at_its_head() {
+        for (text, inside) in [("a🇹🇷b", 2), ("a👨\u{200D}👩\u{200D}👧b", 3), ("a👍🏽b", 2)]
+        {
+            let mut state = live("", text, "", inside);
+            state.cluster = true;
+            let (_, dock) = draw(&state, COLS);
+            assert_eq!(dock.caret, caret_at(TEXT_COL + 1), "{text:?} @ {inside}");
+        }
+    }
+
+    /// Satır sayısı da aynı yürüyüşten: `👍🏽` son iki sütuna sığıyor ve
+    /// bant bir satır kalıyor; kapalı okunuşta ten rengi alt satıra iniyor.
+    #[test]
+    fn a_cluster_on_the_last_two_columns_keeps_one_row() {
+        // `TEXT_COL + 2` harf + küme = tam dolu satır; caret başta.
+        let cols = TEXT_COL + 4;
+        let mut state = live("", "ab👍🏽", "", 0);
+        state.cluster = true;
+        assert_eq!(needed_rows(&state, cols), 1);
+        state.cluster = false;
+        assert_eq!(needed_rows(&state, cols), 2);
     }
 
     // ---- Yazım animasyonlarının düzenlemesi (030) ----
@@ -3834,6 +4051,7 @@ mod tests {
             4,
             0,
             0,
+            false,
             |_| {},
             |at| placed.push((at.ch, at.row, at.col)),
         );

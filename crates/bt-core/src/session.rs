@@ -540,6 +540,9 @@ pub struct Blocks {
     /// (tipin öteki alanlarının gerekçesi).
     input: String,
     input_caret: usize,
+    /// Aynanın okunuşu ([`crate::shell::DockState::cluster`]) — metinle
+    /// aynı kilit turunda, aynı kayıttan.
+    input_cluster: bool,
 }
 
 impl Blocks {
@@ -690,6 +693,16 @@ pub struct SessionOptions {
     /// dock'u olmayan pencerede caret'i devralacak kimse yok ve gizlemek
     /// pencereyi caret'siz bırakırdı. Duman reçetesi (`/bin/sh`) tam da bu kol.
     pub dock: bool,
+    /// Emoji dizileri (`🇹🇷`, `👍🏽`, `👨‍👩‍👧`, `❤️`) tek hücrede kümelensin mi
+    /// (035; kural `crate::cluster`'da).
+    ///
+    /// **Tek kaynak, bütün tüketicileri buradan:** ızgaranın sarmalayıcısı
+    /// (okuyucu döngü), dock'un düzeni, bastırmanın ızgara yürüyüşü ve
+    /// tazelik kapısının ayna yarısı. Açılışta bir kez okunuyor ve oturum
+    /// boyunca sabit; ayrı ayrı açılabilseydi ızgara diziyi iki, dock dört
+    /// sütun sayar ve bastırmanın aralığı ızgaradan ayrışırdı (032'nin "iki
+    /// aritmetik" belirtisi). Varsayılanı çizim hazır olana kadar kapalı.
+    pub cluster: bool,
 }
 
 /// Oturum yaşarken değişebilen terminal seçenekleri — alacritty `Config`'inin
@@ -2760,13 +2773,17 @@ impl Session {
         // Defterin tavanı `scrollback`'ten: blok başına en az bir satır düştüğü
         // için geçmişte görünebilecek blok sayısının üst sınırı odur.
         let scrollback = options.terminal.scrollback;
-        let shell = Arc::new(Mutex::new(ShellLog::new(scrollback)));
+        let mut log = ShellLog::new(scrollback);
+        // Tarayıcının kopyası her aynada bunun üstüne yazılıyor; ilk aynadan
+        // önce de aynı okunuş olsun.
+        log.dock.cluster = options.cluster;
+        let shell = Arc::new(Mutex::new(log));
         // Sayacın da iki ucu var ve ikisi de aynı gerekçeyle burada doğuyor.
         let screen_clears = Arc::new(AtomicU32::new(0));
         let key_gen = Arc::new(AtomicU64::new(0));
         let pty = TappedPty {
             pty,
-            scanner: Scanner::new(),
+            scanner: Scanner::new().cluster(options.cluster),
             shell: Arc::clone(&shell),
             screen_clears: Arc::clone(&screen_clears),
             key_gen: Arc::clone(&key_gen),
@@ -2785,6 +2802,7 @@ impl Session {
             adapter.clone(),
             pty,
             pty_options.drain_on_exit,
+            options.cluster,
         )?;
         let sender = event_loop.channel();
         // Kanal ancak burada doğar; adapter'ın kopyaları aynı gövdeyi
@@ -2966,6 +2984,7 @@ impl Session {
             let suppressed = log.suppressed_input();
             if suppressed.is_some() {
                 blocks.input_caret = log.display_into(&mut blocks.input);
+                blocks.input_cluster = log.dock.cluster;
             }
             (
                 suppressed,
@@ -3137,6 +3156,7 @@ impl Session {
                 blocks.input_caret,
                 usize::from(cursor_col),
                 term.columns(),
+                blocks.input_cluster,
             );
             (
                 u16::try_from(above).unwrap_or(u16::MAX),
@@ -7519,6 +7539,7 @@ mod tests {
             // yüzeyi olduğunu iddia eden sınama bunu `spawn_docked_*` ile
             // açıkça söylüyor.
             dock: false,
+            cluster: false,
         }
     }
 
@@ -14772,6 +14793,35 @@ mod tests {
         });
     }
 
+    /// **Zaman aşımıyla uygulanan DEC 2026 bloğu da kümeleniyor** (035
+    /// phase-3; phase-2'nin parite bekçisinin açık kalan yarısı): blok
+    /// `🇹🇷` taşıyor ve kapanmıyor, yani baytlar `Term`'e yalnız
+    /// `stop_sync`'ten ulaşıyor. Sarmalayıcıdan geçmeselerdi iki RI iki dar
+    /// hücre olurdu; kümeli oturumda tek geniş hücre ve `🇷` hiçbir hücrede
+    /// yok.
+    #[test]
+    fn a_timed_out_synchronized_update_is_clustered() {
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("printf '\\033[?2026h\\360\\237\\207\\271\\360\\237\\207\\267.'; sleep 5"),
+            40,
+        );
+        options.cluster = true;
+        let session = Session::spawn(options, wake).unwrap();
+        let (cells, _) = frame_until(&session, BUDGET, |cells, cursor| {
+            grid_shows(cells, cursor.rows, ".")
+        });
+        let flag = cells
+            .iter()
+            .find(|cell| cell.ch == Some('🇹'))
+            .expect("bayrağın baş hücresi çizilmeli");
+        assert!(flag.wide, "küme geniş hücre olmadı: {flag:?}");
+        assert!(
+            cells.iter().all(|cell| cell.ch != Some('🇷')),
+            "ikinci RI kendi hücresini aldı — `stop_sync` sarmalayıcıyı atladı"
+        );
+    }
+
     #[test]
     fn shutdown_returns_within_limit() {
         let wake = Arc::new(TestWake::default());
@@ -15336,6 +15386,57 @@ mod tests {
         assert!(reader.join().unwrap() > 0, "ayna hiç okunmadı");
         assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         assert!(docked > 0, "kare yolu aynayı hiç canlı görmedi");
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
+        session.shutdown();
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_cluster_split_and_resize() {
+        // Kümeleme (035) açık kümenin konumunu saklamıyor, her kod noktasında
+        // ızgaradan türetiyor ([`crate::handler::ClusterHandler`]). Yarışan
+        // yol: bir kümenin iki yarısı iki ayrı `read`'le geliyor (`printf`
+        // arasında `sleep`) ve arada ana thread `resize` ile satırı yeniden
+        // akıtıyor — baş hücre sütunu değişmiş, spacer'a ya da ızgaranın
+        // dışına düşmüş olabilir. Aranan hata sınıfı panik (indeksleme,
+        // `bt-core`'da yasak) ve okuyucunun ölmesi.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("while :; do \
+                printf 'ab\\360\\237\\221\\215'; sleep 0.002; \
+                printf '\\360\\237\\217\\275\\360\\237\\207\\271'; sleep 0.002; \
+                printf '\\360\\237\\207\\267\\342\\235\\244'; sleep 0.002; \
+                printf '\\357\\270\\217 '; sleep 0.002; \
+                done"),
+            40,
+        );
+        options.cluster = true;
+        let session = Arc::new(Session::spawn(options, wake).unwrap());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let resizer = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut n = 0u16;
+                while Instant::now() < deadline {
+                    // Tek ve çift genişlikler: kümenin satır sonuna düştüğü
+                    // ve son iki sütuna sığdığı hâller sırayla.
+                    let _ = session.resize(3 + n % 9, 4 + n % 3, (9, 18));
+                    n = n.wrapping_add(1);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+        };
+
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            if frame_if_damaged(&session, |_| ()).is_some() {
+                frames += 1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        resizer.join().unwrap();
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }

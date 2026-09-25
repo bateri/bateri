@@ -468,6 +468,7 @@ mod tests {
                 },
                 theme: Theme::BATERI,
                 dock: false,
+                cluster: false,
             },
             Arc::new(SilentWake),
         )

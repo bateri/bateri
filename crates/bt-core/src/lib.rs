@@ -39,6 +39,7 @@
 //! bağımlılık düzeyinde bir vekildir; gerçek kapı
 //! `--target x86_64-unknown-linux-gnu` ile derlemedir, `rustup` gelene kadar kapalı.
 
+mod cluster;
 mod color;
 mod dock;
 mod handler;

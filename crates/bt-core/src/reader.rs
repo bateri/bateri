@@ -128,6 +128,10 @@ pub(crate) struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
+    /// Son `Handler` çağrısı `input` mıydı — [`ClusterHandler`]'ın tek
+    /// durumu. Sarmalayıcı her `advance`'te yeniden doğduğu için burada:
+    /// iki `read` parçasına bölünen bir küme (`👍` · `🏽`) yine kapanmamış.
+    last_input: bool,
 }
 
 impl State {
@@ -197,6 +201,9 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     terminal: Arc<FairMutex<Term<U>>>,
     event_proxy: U,
     drain_on_exit: bool,
+    /// Kümeleme açık mı (`SessionOptions::cluster`); sarmalayıcıya her
+    /// çağrıda geçiyor.
+    cluster: bool,
 }
 
 impl<T, U> EventLoop<T, U>
@@ -209,6 +216,7 @@ where
         event_proxy: U,
         pty: T,
         drain_on_exit: bool,
+        cluster: bool,
     ) -> io::Result<EventLoop<T, U>> {
         let (tx, rx) = mpsc::channel();
         let poll = Poller::new()?.into();
@@ -220,6 +228,7 @@ where
             terminal,
             event_proxy,
             drain_on_exit,
+            cluster,
         })
     }
 
@@ -284,7 +293,7 @@ where
 
             // Gelen baytları ayrıştır — `Term`'e sarmalayıcının içinden.
             state.parser.advance(
-                &mut ClusterHandler::new(&mut **terminal),
+                &mut ClusterHandler::new(&mut **terminal, self.cluster, &mut state.last_input),
                 &buf[..unprocessed],
             );
 
@@ -380,9 +389,11 @@ where
                 // — `Term`'e doğrudan verilseydi kümeleme (035) bu kolda
                 // atlanırdı.
                 if events.is_empty() && self.rx.peek().is_none() {
-                    state
-                        .parser
-                        .stop_sync(&mut ClusterHandler::new(&mut *self.terminal.lock()));
+                    state.parser.stop_sync(&mut ClusterHandler::new(
+                        &mut *self.terminal.lock(),
+                        self.cluster,
+                        &mut state.last_input,
+                    ));
                     self.event_proxy.send_event(Event::Wakeup);
                     continue;
                 }
