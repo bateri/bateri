@@ -132,8 +132,12 @@ test-yaris:
 # kopya "tanımlanmamış geliştirici" uyarısına iniyor ve Sistem Ayarları →
 # Gizlilik ve Güvenlik → "Yine de Aç" ile açılıyor.
 #
-# `SIGN_ID` verilirse ad-hoc yerine o anahtarlık kimliğiyle imzalanır
-# (`make kur SIGN_ID="bateri-local"`, ya da ortamda ihraç edilmiş). Fark
+# İmza kimliği (`SIGN_ID`) **kendiliğinden seçiliyor**: anahtarlıkta geçerli
+# bir "Developer ID Application" varsa o, yoksa "Apple Development", ikisi de
+# yoksa ad-hoc (`-`). Hatırlanacak bir ayar olmasın diye; sertifikanın adı
+# kişisel veri taşıdığı için (e-posta) depoya yazılmıyor, her koşuda
+# anahtarlıktan okunuyor. Elle ezilir: `make kur SIGN_ID=-` ad-hoc'u,
+# `SIGN_ID="ad"` belirli bir kimliği zorlar. Fark
 # kimliğin **kalıcılığı**: ad-hoc imzanın tanımladığı gereksinim paketin
 # kendi parmak izi ve her derlemede değişiyor, yani macOS her derlemeyi
 # başka bir uygulama sayıyor ve verilen izinler (erişilebilirlik, tam disk
@@ -142,7 +146,11 @@ test-yaris:
 # sabit tutuyor. Başka bir Mac'te Gatekeeper açısından hiçbir şey değişmiyor
 # — sertifikaya kimse güvenmiyor, uyarı aynı; onu yalnız Developer ID ile
 # notarization kaldırır. Kimlik yoksa `codesign`'dan önce adıyla düşer.
-SIGN_ID ?= -
+SIGN_ID ?= $(eval SIGN_ID := $$(shell ids=$$$$(security find-identity -v -p codesigning 2>/dev/null); \
+	for kind in "Developer ID Application" "Apple Development"; do \
+		n=$$$$(printf '%s\n' "$$$$ids" | sed -n "s/.*\"\($$$$kind: [^\"]*\)\".*/\1/p" | head -n 1); \
+		[ -n "$$$$n" ] && { echo "$$$$n"; exit 0; }; \
+	done; echo -))$(SIGN_ID)
 #
 # Paket önce `$(STAGE)`'de kurulur ve yalnız denetimden geçerse `$(APP)`'in
 # yerine taşınır: yerinde kurulsaydı düşen bir koşu Dock'un gösterdiği yolda
