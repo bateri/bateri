@@ -1405,6 +1405,25 @@ impl ShellLog {
         }
     }
 
+    /// Safha `Input` iken yazılmakta olan bloğun kimliği — aynanın durumuna
+    /// **bakmadan** ([`Self::suppressed_input`]'ın ayna koşulsuz hâli).
+    ///
+    /// Tüketicisi ekranı temizlemenin korunan ilk satırı
+    /// ([`crate::Session::clear_to_start`]): imlecin satırı çıpasızsa (çok
+    /// satırlı girişin boş bir satırı) blok çıpadan bulunuyor, ve orada soru
+    /// "satır nerede çiziliyor" değil "hangi satırlar girişin" — aynanın
+    /// canlı olup olmaması cevabı değiştirmiyor. İkinci koşul
+    /// [`Self::running`]'inkiyle aynı gerekçeyle.
+    pub(crate) fn input_block(&self) -> Option<u32> {
+        if self.state?.phase != ShellPhase::Input {
+            return None;
+        }
+        match self.blocks.last()? {
+            (id, Outcome::Pending) => Some(id),
+            (_, Outcome::Finished { .. }) => None,
+        }
+    }
+
     /// Kullanıcının **şu an yazdığı** bloğun kimliği — giriş satırı ızgaradan
     /// bastırılacaksa `Some`, değilse `None`.
     ///
