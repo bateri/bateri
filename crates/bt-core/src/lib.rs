@@ -41,7 +41,9 @@
 
 mod color;
 mod dock;
+mod handler;
 mod input;
+mod reader;
 mod search;
 mod session;
 mod settings;

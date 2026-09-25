@@ -300,6 +300,12 @@ sordu ve kullanıcı **B**'yi seçti. Aşağıdaki iki ürün etkisi kararın
   değiştirir; bu set sormadan açmıyor.
 - **Seçilen — Karar 7:** kapı açıkken dört tuş kümeyi widget'la bütün
   yürütür; kapı kapalıyken kod noktası birimi, caret kümenin başında.
+- **Seçilen — bağımlılık kenarı `cursor-icon` (phase-2'de çıktı,
+  kullanıcı onayı):** sarmalayıcının `set_mouse_cursor_icon` aktarımı
+  `CursorIcon`'u adlandırmak zorunda ve ne vte ne alacritty onu yeniden
+  ihraç ediyor; lint bekçisi metodu atlamaya izin vermiyor. Yeni bir crate
+  değil (grafta 1.2.0, vte'nin `ansi` özelliği), `Cargo.lock`'ta yalnız
+  `bt-core`'un listesine bir satır — `polling` emsali.
 - **Reddedilen — 1A (yalnız çizim):** bayrağı onarır, `❤️ 👍🏽 👨‍👩‍👧`'yi
   onaramaz ve Claude Code'un satır kaymasını bırakır.
 - **Reddedilen — 1C (alacritty yaması):** B'nin kazancını kalıcı bakım

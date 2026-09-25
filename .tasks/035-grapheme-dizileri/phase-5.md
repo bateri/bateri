@@ -37,4 +37,5 @@ _Requirements: R5_
 
 - [ ] Varsayılan açık
 - [ ] `CLAUDE.md` ve yol haritası
+- [ ] `Atlas::slot`'un Left→Whole kısayolu `slot != TOFU`'yu düzlemsiz soruyor (023 kodu; renk düzleminin 0. yuvası TOFU sanılır — phase-1'in `cluster_as_base`'te düzelttiği karışıklığın ikizi): düzlem koşulunu ekle, bekçi yaz ← phase-1 ARTIK
 - [ ] Doğrulama geçti (`make hepsi` + `make duman`)

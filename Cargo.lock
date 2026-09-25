@@ -89,6 +89,7 @@ name = "bt-core"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "cursor-icon",
  "polling",
  "toml_edit",
  "unicode-width",

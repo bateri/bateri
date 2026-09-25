@@ -1055,8 +1055,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   `LSMinimumSystemVersion`'ı binary'nin `minos`'undan, yani dolaylı olarak yine
   oradan doldurur. Metalterm'in tabanıyla aynı.
 - **Bağımlılık mimari karardır**, kendiliğinden eklenmez. Taban:
-  `alacritty_terminal` (VT ayrıştırma, grid, PTY ve okuyucu thread; kendi
-  ayrıştırıcımızı yazmıyoruz — `bt-core` onu **kapsüller**, `pub` API'de
+  `alacritty_terminal` (VT ayrıştırma, grid ve PTY; okuyucu döngü 035'ten
+  beri onun 0.26.0 döngüsünün `bt-core`'daki kopyası, `reader.rs` — sürüm
+  `=` ile sabit; kendi ayrıştırıcımızı yazmıyoruz — `bt-core` onu **kapsüller**, `pub` API'de
   alacritty tipi görünmez), `objc2` ailesi (CoreText ve CoreGraphics dahil;
   servo ailesi `core-text` ikinci bir CF sarmalayıcı yığını olacağı için
   **reddedildi**), `unicode-width` (dock'un sütun aritmetiği ve bastırmanın tazelik kapısı,
@@ -1074,7 +1075,12 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   yalnız bir kenar ekliyor — `EventedReadWrite`'ı uygulamak imzadaki
   `Poller`/`Event`/`PollMode`'u adlandırmayı gerektiriyor ve alacritty onları
   yeniden ihraç etmiyor (`.tasks/009-shell-entegrasyonu/phase-2.md` → Uygulama
-  Notları). `Cargo.lock` depodadır.
+  Notları). `cursor-icon` de aynı emsal: grafta 1.2.0 (vte'nin `ansi`'si),
+  `Handler`'ı aktaran sarmalayıcı `set_mouse_cursor_icon`'un tipini
+  adlandırmak zorunda — ne vte ne alacritty onu yeniden ihraç ediyor ve
+  aktarımın `missing_trait_methods` bekçisi metodu atlamaya izin vermiyor
+  (`.tasks/035-grapheme-dizileri/discussion.md` → Karar). `Cargo.lock`
+  depodadır.
   `alacritty_terminal` **Apache-2.0**: lisans metni
   `assets/bundle/THIRD-PARTY-LICENSES.txt` ile pakete girer, atfı
   `Credits.html`'de durur; atıf isteyen yeni bağımlılık da o iki dosyaya

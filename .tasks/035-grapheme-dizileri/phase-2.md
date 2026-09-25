@@ -44,11 +44,48 @@ _Requirements: R2, R2.1, R2.2_
 
 ## Checklist
 
-- [ ] Sürüm sabitlendi, `Cargo.lock` değişmedi
-- [ ] Döngü kopyası + Apache bildirimi
-- [ ] Sarmalayıcı: makro listesi + `missing_trait_methods`
-- [ ] `stop_sync` ve `Wakeup` kuralı
-- [ ] `session.rs` bağlandı, doc'lar güncel
-- [ ] Test: DEC 2026 zaman aşımı sarmalayıcıdan geçiyor
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Sürüm sabitlendi; `Cargo.lock` yalnız `cursor-icon` kenarıyla değişti (karar kaydında)
+- [x] Döngü kopyası + Apache bildirimi
+- [x] Sarmalayıcı: makro listesi + `missing_trait_methods`
+- [x] `stop_sync` ve `Wakeup` kuralı
+- [x] `session.rs` bağlandı, doc'lar güncel
+- [x] Test: DEC 2026 zaman aşımı sarmalayıcıdan geçiyor
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+
+## Uygulama Notları
+
+- **Bağımlılık kenarı `cursor-icon` (kullanıcı kararı).**
+  `Handler::set_mouse_cursor_icon`'un parametresi `cursor_icon::CursorIcon`;
+  vte onu `ansi`'de özel bir `use` ile alıyor, ne vte ne alacritty yeniden
+  ihraç ediyor, yani aktarım tipi adlandıramıyordu ve kenarsız yol
+  `missing_trait_methods`'u kırmızı bırakıyordu (ölçüldü: tek bulgu o
+  metot). Kullanıcı `bt-core`'a `cursor-icon = "1.2"` kenarını seçti:
+  grafta zaten 1.2.0, `Cargo.lock`'ta yalnız `bt-core`'un listesine bir
+  satır. Kayıt `discussion.md` → Karar ve kök `Cargo.toml`.
+- **Kopyanın panik yolları düştü** (`bt-core`'da gerekçesiz panik yok):
+  kanalın ölümü boş okuma (döngü kendi `tx`'ini tuttuğu için erişilemez),
+  olay kapasitesi `const` (sıfır derleme hatası). `reregister`'in paniği
+  `// audit:` gerekçesiyle **korundu** (`/code-review`): `break`'e indirmek
+  çöküşü `kapanis=`'ten gizliyordu.
+  `ref_test` kaydı ve `Notifier` çıkarıldı; `log::error!` → `eprintln!`
+  (`log` bağımlılık değil). PTY token'ları alacritty'de `pub(crate)`,
+  değerleri kopyalandı — `=0.26.0`'ın bir gerekçesi de bu. Linux `EIO`
+  dalı `libc` yerine sayıyla (5), `libc` `bt-core`'un bağımlılığı değil.
+- **Sarmalayıcı ayrı modülde** (`handler.rs`), döngü `reader.rs`'te: Apache
+  bildirimi yalnız kopyanın dosyasında kalsın, phase-3'ün kümelemesi
+  bizim dosyamıza girsin.
+- **DEC 2026 sınaması eski döngüde de yeşil** — bir parite bekçisi;
+  kırmızısı mutasyonla gösterildi: `stop_sync` çağrısı silinince
+  `an_unterminated_synchronized_update_lands_on_timeout` düşüyor. Çağrının
+  `Term`'e sarmalayıcıdan gittiğini bugün ayırt edemiyor (sarmalayıcı düz
+  aktarım); o ayrım phase-3'ün checklist'ine devredildi.
+- **`/code-review` bulguları giderildi:** `Drop` yorumu, CLAUDE.md'nin
+  "okuyucu thread alacritty'nin" cümlesi, sınamanın doc bağlantısı,
+  `ClusterHandler`'ın ömrü (kilit turu değil `advance` başına), pin
+  yorumunun vte iddiası düzeltildi; `cursor-icon` `default-features =
+  false` (vte'nin kenarıyla aynı özellik kümesi). Linux `EIO` sayısı (5)
+  kaldı: `libc` kenarı ikinci bir bağımlılık kararı olurdu.
+- **Lint bekçisi elle sınandı:** listeden `bell` silinince `cargo clippy -p
+  bt-core -- -D warnings` "missing trait method provided by default: `bell`"
+  ile kırmızı; geri alındı.

@@ -22,8 +22,9 @@
 //!
 //! `shell` için kural tek yönlüdür ve yönü şudur: **`shell` tutulurken `term`
 //! alınmaz.** Okuyucu thread `shell`'i zaten `term`'ün *altında* yazıyor —
-//! alacritty `pty_read` boyunca terminal lease'ini elinde tutuyor
-//! (`event_loop.rs`, `_terminal_lease`) ve bizim `TappedPty::read`'imiz o
+//! okuyucu döngü `pty_read` boyunca terminal lease'ini elinde tutuyor
+//! (`reader.rs`, `_terminal_lease`; alacritty'nin döngüsünün kopyası ve bu
+//! sözleşmeyi aynen koruyor) ve bizim `TappedPty::read`'imiz o
 //! guard altında koşuyor — yani `term` → `shell` sırası okuyucunun kendi
 //! sırası ve kilitlenemez. Kapanabilecek tek döngünün öteki kenarı ters yön
 //! olurdu, o yüzden `frame`'in ikinci fazı (blok şeritleri) `shell`'i **`term`
@@ -44,7 +45,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
@@ -72,6 +72,7 @@ use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
 };
+use crate::reader::{EventLoop, EventLoopSender, Msg, State};
 use crate::search::{
     self, SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns,
     SearchSlot, SearchStatus,
@@ -1294,10 +1295,13 @@ impl EventListener for Adapter {
 
 /// Okuma yolundan geçen baytları tarayan `Pty`.
 ///
-/// `EventLoop` PTY tipinde jenerik; araya giren tek şey bu sarmalayıcı ve
-/// **baytlara dokunmuyor** — [`io::Read::read`] içerideki `Pty`'den ne
+/// `EventLoop` ([`crate::reader`]) PTY tipinde jenerik; **bayt** yoluna
+/// araya giren tek şey bu sarmalayıcı ve **baytlara dokunmuyor** — [`io::Read::read`] içerideki `Pty`'den ne
 /// okuduysa aynen döndürüyor, yalnız dönmeden önce dilimi tarayıcıya
 /// gösteriyor. Ayrıştırıcı bu yüzden bugünküyle birebir aynı akışı görüyor.
+/// Ayrıştırıcının **çağrı** yoluna giren ikincisi ayrı bir katman
+/// ([`crate::handler::ClusterHandler`]): baytları değil `Term`'e giden
+/// `Handler` çağrılarını görüyor, yani ikisi birbirinin işini görmüyor.
 ///
 /// **`Reader = Self` kararın çekirdeği.** `Pty::reader()` `&mut File`
 /// döndürüyor, yani okuyucuyu devretmek için ödünç yetiyor: taramak için
@@ -2781,7 +2785,6 @@ impl Session {
             adapter.clone(),
             pty,
             pty_options.drain_on_exit,
-            false,
         )?;
         let sender = event_loop.channel();
         // Kanal ancak burada doğar; adapter'ın kopyaları aynı gövdeyi
@@ -7007,8 +7010,9 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // `shutdown()`suz düşen bir oturumda alacritty'nin okuyucu thread'i
-        // "event loop channel closed" diye panikler.
+        // `shutdown()`suz düşen bir oturumda okuyucu döngü `Msg::Shutdown`
+        // almaz; kanalın ölümü alacritty'nin kopyasında panik değil boş okuma
+        // ([`crate::reader`]) ve döngü çocuk çıkana kadar koşar.
         //
         // Sonuç bilerek yutuluyor: `Drop`'un raporlayacak bir yeri yok. Rapor
         // yolunda buraya zaten [`Teardown::AlreadyDone`] kalır
@@ -14747,6 +14751,25 @@ mod tests {
             "kapanış sınırı aşıldı: {elapsed:?}"
         );
         elapsed
+    }
+
+    /// **DEC 2026 bloğu kapanmasa da zaman aşımında uygulanıyor** — ve
+    /// okuyucu döngünün kendi kolundan (035 phase-2): bloğun baytları
+    /// ayrıştırıcının tamponunda bekliyor, `EventLoop` poller'ı vte'nin son
+    /// tarihine kadar bekletiyor ve süre dolunca `stop_sync` tamponu
+    /// sarmalayıcıya ([`crate::handler::ClusterHandler`]) veriyor.
+    /// **Bir parite bekçisi**: kolun varlığını sınıyor, `Term`'e sarmalayıcıdan
+    /// mı doğrudan mı gittiğini ayırt edemiyor (sarmalayıcı bugün düz
+    /// aktarım); o ayrımı phase-3'ün kümeleme sınaması görecek.
+    /// Kol düşseydi `synced` hiç görünmezdi: `sleep` boyunca başka bayt
+    /// gelmiyor, yani tamponu boşaltacak ikinci bir yol yok.
+    #[test]
+    fn an_unterminated_synchronized_update_lands_on_timeout() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("printf '\\033[?2026hsynced'; sleep 5", wake);
+        frame_until(&session, BUDGET, |cells, cursor| {
+            grid_shows(cells, cursor.rows, "synced")
+        });
     }
 
     #[test]

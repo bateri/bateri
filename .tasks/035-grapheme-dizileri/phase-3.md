@@ -71,5 +71,6 @@ _Requirements: R3, R3.1, R3.2, R3.3, R3.4_
 - [ ] Dock düzeni ve tazelik kümeli
 - [ ] Test: son sütun, IRM, bölge dibi, `CUP` araya girmesi, `race_*`
 - [ ] Test: dock sütunu, `grid_span`, tazelik, küme içi caret, sarma sınırında `👍🏽`
+- [ ] Test: DEC 2026 bloğunda gelen dizi zaman aşımında (`stop_sync`) da kümeleniyor — phase-2'nin sınaması yalnız kolun varlığını görüyor, `Term`'e sarmalayıcıdan gittiğini değil ← phase-2 `/code-review`
 - [ ] Doğrulama geçti (`make hepsi` + `make test-yaris`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
