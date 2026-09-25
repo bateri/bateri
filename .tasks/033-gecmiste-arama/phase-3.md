@@ -27,6 +27,16 @@ _Requirements: R4.1_
 
 ## Checklist
 
-- [ ] Kapsayıcı + `BateriView` çocuğu, first responder
-- [ ] Geometri `BateriView`'dan
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] Kapsayıcı + `BateriView` çocuğu, first responder
+- [x] Geometri `BateriView`'dan
+- [x] Doğrulama geçti (`make hepsi` + `make duman`)
+- [~] Gerçek pencerede gözle kontrol — computer-use başka bir oturumca
+  kullanılıyordu; sahne kapanış mesajında kullanıcıya bırakıldı
+
+## Uygulama Notları
+
+- `sync_geometry` artık `Option` dönmüyor: kaynak `WindowIvars.view`
+  (`contentView()` değil), yani `None` kolu ve `start`'taki `expect`
+  konusuz kaldı ve silindi.
+- `view.rs`'e dokunulmadı: sürükleme kaydı ve `convertPoint_fromView(_, None)`
+  zaten view-yereldi.

@@ -180,9 +180,12 @@ pencerenin zemini temanın `background`'ı (sRGB), görünümü zeminin
 açıklığından (`window::is_dark_background`), yani tek sekmede başlık ile
 içerik tek yüzey. Görünümü kurulan pencere sistemden miras almayı bıraktığı
 için açık/koyu değişimi view'dan değil `NSApp.effectiveAppearance`'ın
-KVO'sundan geliyor, geometri de pencereden değil içerik view'ının çerçeve
+KVO'sundan geliyor, geometri de pencereden değil `BateriView`'ın çerçeve
 bildiriminden — sekme çubuğu pencereyi değil içeriği boyutlandırıyor
-(`.tasks/026-sekmeler/phase-4.md` → Uygulama Notları). Uygulamanın
+(`.tasks/026-sekmeler/phase-4.md` → Uygulama Notları). İçerik view'ı
+layer-backed düz bir **kapsayıcı** ve `BateriView` onu autoresizing'le
+dolduran çocuğu, çünkü yüzen arama paneli Metal katmanının kardeşi olmak
+zorunda (033 → R4.1). Uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard`) genel panoya o yazar;
 `settings.toml`'u okur (bugün `scrollback`, tema seçimi, font ailesi/puntosu/satır aralığı, `osc52`,
 `cursor`, `cursor_blink`, `cursor_radius`, `cursor_glow`, `cursor_unfocused`,
