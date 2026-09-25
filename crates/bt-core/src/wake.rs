@@ -72,4 +72,16 @@ pub trait Wake: Send + Sync + 'static {
     /// basan bir kabuk ya da döngüdeki `printf` çağrıyı sık yapabilir ve
     /// görülecek olan zaten son başlık.
     fn title_changed(&self);
+
+    /// Geçmişte arama açıkken **defter değişti** (033): PTY çıktısı geldi
+    /// ya da pencere yeniden sarıldı. Alıcı sayım dizinini sürer
+    /// ([`crate::Session::search_step`]); dizin bir sonraki geçişini baştan
+    /// başlatıyor.
+    ///
+    /// **Kenarda ve yüksüz** ([`Wake::title_changed`] emsali): bekleyen haber
+    /// dizin onu tüketene kadar ikincisini doğurmuyor, yani `yes` akarken de
+    /// çağrı sayısı geçiş sayısıyla sınırlı. Okuyucu thread'de `Term` kilidi
+    /// **tutulurken** ya da ana thread'de (`resize`) gelir; üstteki üç yasak
+    /// geçerli. Arama kapalıyken hiç gelmez.
+    fn search_changed(&self);
 }

@@ -1012,6 +1012,10 @@ yüzeyin de ön koşulu.
 - 022 B.1 — sekme başına bellek: `## Bellek` boş, araç dışarıdan
   (`footprint`, `vmmap`). Doku en kötü köşede ~16 MB'a çıkıyor.
 - 011 — kaymanın yerleşme süresi (kanca yok; setin kendi `[~]` kaydı)
+- 033 — "sayım dizininin parça boyu (`search::CHUNK_LINES`, 500 satır)
+  `Term` kilidini tuş gecikmesi hissettirmeyecek kadar kısa tutuyor": kilit
+  altında tarama süresini ölçen kanca yok; güvenliği sayıdan değil parçanın
+  sınırlı ve iptal edilebilir olmasından
 
 ## Bellek
 

@@ -1427,13 +1427,6 @@ impl BateriView {
         }
     }
 
-    /// Fare çevirisinin dikey orijinini bağlar; link doğduktan hemen sonra,
-    /// bir kez.
-    ///
-    /// `set_metrics`'ten ayrı çağrı, çünkü kaynağı ayrı: o üçlü pencere
-    /// geometrisinden, bu link'ten geliyor ve link `set_metrics`'ten sonra
-    /// kuruluyor (`window::TerminalWindow::start_session`). İkinci çağrı sessizce düşseydi fare
-    /// eski gövdeyi, yani sonsuza kadar sıfır bir orijin okurdu.
     /// Klavyenin yerini pencereye bildirir; pencere yoksa (kurucunun ilk
     /// `makeFirstResponder`'ı) sessiz.
     fn keyboard_moved(&self, here: bool) {
@@ -1464,6 +1457,13 @@ impl BateriView {
         )
     }
 
+    /// Fare çevirisinin dikey orijinini bağlar; link doğduktan hemen sonra,
+    /// bir kez.
+    ///
+    /// `set_metrics`'ten ayrı çağrı, çünkü kaynağı ayrı: o üçlü pencere
+    /// geometrisinden, bu link'ten geliyor ve link `set_metrics`'ten sonra
+    /// kuruluyor (`window::TerminalWindow::start_session`). İkinci çağrı sessizce düşseydi fare
+    /// eski gövdeyi, yani sonsuza kadar sıfır bir orijin okurdu.
     pub(crate) fn attach_origin(&self, origin: Origin) {
         assert!(
             self.ivars().origin.set(origin).is_ok(),

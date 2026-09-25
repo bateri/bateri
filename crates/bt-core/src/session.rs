@@ -34,7 +34,9 @@ use std::fs::File;
 use std::io;
 use std::ops::{DerefMut, RangeInclusive};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -1090,6 +1092,19 @@ struct AdapterInner {
     /// orada alması gibi: sıra `Term` → yaprak, tersi hiçbir yerde yok.
     /// [`Session::title`] onu `Term`'e dokunmadan, tek başına alıyor.
     title: Mutex<Option<String>>,
+    /// PTY çıktısının **nesli**: alacritty'nin her `Wakeup`'ı (ayrıştırılmış
+    /// bir okuma turu) bir artırıyor, `Term` kilidi altında. Geçerli arama
+    /// eşleşmesinin kaymasının "arada çıktı var mı" sorusu
+    /// ([`search::ledger_shift`]); oturumun kendi kare isteği
+    /// ([`Session::request_frame`]) onu oynatmıyor.
+    ledger: AtomicU64,
+    /// Arama açık mı (033) — [`Session::store_search`] yazıyor; defter
+    /// haberinin kapısı.
+    search_active: AtomicBool,
+    /// Defter, dizinin son geçişinden beri değişti mi — **kenar**: `false →
+    /// true` geçişi [`Wake::search_changed`] doğuruyor, tüketeni
+    /// [`Session::search_step`] (bir sonraki geçişi baştan başlatarak).
+    search_pending: AtomicBool,
 }
 
 impl Adapter {
@@ -1103,7 +1118,28 @@ impl Adapter {
             theme: Mutex::new(theme),
             blink: Mutex::new(blink),
             title: Mutex::new(None),
+            ledger: AtomicU64::new(0),
+            search_active: AtomicBool::new(false),
+            search_pending: AtomicBool::new(false),
         }))
+    }
+
+    /// Kirli bayrağını diker ve uyandırır. Sıra önemli: bayrak uyandırmadan
+    /// ÖNCE dikilir — ters sırada uyanan taraf bayrağı henüz görmeden bakar
+    /// ve kare kaçar.
+    fn wake_frame(&self) {
+        self.0.dirty.store(true, Ordering::Release);
+        self.0.wake.wake();
+    }
+
+    /// Arama açıksa defterin değiştiğini **kenarda** haber verir: bekleyen
+    /// bir haber varsa ikincisi yok ([`AdapterInner::search_pending`]).
+    fn search_changed(&self) {
+        if self.0.search_active.load(Ordering::Acquire)
+            && !self.0.search_pending.swap(true, Ordering::AcqRel)
+        {
+            self.0.wake.search_changed();
+        }
     }
 
     /// Uygulamanın sorduğuna PTY'den yanıt verir. Kanala yazmak kilitsizdir;
@@ -1146,10 +1182,12 @@ impl EventListener for Adapter {
     fn send_event(&self, event: Event) {
         match event {
             Event::Wakeup => {
-                // Sıra önemli: bayrak uyandırmadan ÖNCE dikilir. Ters sırada
-                // uyanan taraf bayrağı henüz görmeden bakar ve kare kaçar.
-                self.0.dirty.store(true, Ordering::Release);
-                self.0.wake.wake();
+                // Çıktının nesli ve arama haberi `Term` kilidi altında
+                // (`pty_read` ayrıştırdıktan sonra kilidi tutarken yolluyor):
+                // nesli okuyan gözlem onu içerikle aynı turda görüyor.
+                self.0.ledger.fetch_add(1, Ordering::AcqRel);
+                self.search_changed();
+                self.wake_frame();
             }
             Event::ChildExit(status) => self.0.wake.child_exit(status.code()),
             Event::PtyWrite(text) => self.reply(text),
@@ -1980,8 +2018,71 @@ struct SearchState<'a> {
     hidden: Option<&'a RangeInclusive<i32>>,
 }
 
-/// Nokta defterin içinde mi. Yuvada saklanan mutlak koordinat çıktıyla ya da
-/// resize'la defterin dışına düşebiliyor (bilinen sınır, [`SearchSlot::current`])
+/// Gezinmenin sıra numarasına etkisi ([`Session::with_search`]): dizin
+/// eşleşmeleri saklamıyor, geçerli eşleşmenin sırası komşuya ±1 taşınıyor.
+#[derive(Clone, Copy, Debug)]
+enum OrdinalStep {
+    /// Geçerli eşleşme yerinde.
+    Kept,
+    /// Komşuya geçti; `wrapped` → defterin ucunda sardı.
+    Moved {
+        direction: SearchDirection,
+        wrapped: bool,
+    },
+    /// Sırası bilinmeyen yeni bir eşleşme seçildi.
+    Fresh,
+}
+
+impl OrdinalStep {
+    /// Sırayı taşır; dizin bitmişken sıra bulunamıyorsa `true` — çağıran
+    /// bir geçiş daha ister.
+    fn apply(self, index: &mut search::SearchIndex) -> bool {
+        match self {
+            Self::Kept => false,
+            Self::Moved {
+                direction: SearchDirection::Older,
+                wrapped: false,
+            } => {
+                index.ordinal = index.ordinal.map(|ordinal| ordinal + 1);
+                false
+            }
+            Self::Moved {
+                direction: SearchDirection::Older,
+                wrapped: true,
+            } => {
+                // En eskiden en yeniye.
+                index.ordinal = Some(1);
+                false
+            }
+            Self::Moved {
+                direction: SearchDirection::Newer,
+                wrapped: false,
+            } => {
+                index.ordinal = index
+                    .ordinal
+                    .and_then(|ordinal| ordinal.checked_sub(1))
+                    .filter(|ordinal| *ordinal > 0);
+                false
+            }
+            Self::Moved {
+                direction: SearchDirection::Newer,
+                wrapped: true,
+            } => {
+                // En yeniden en eskiye: sayısı ancak dizin bitmişse biliniyor.
+                let done = index.next.is_none();
+                index.ordinal = done.then_some(index.total);
+                false
+            }
+            Self::Fresh => {
+                index.ordinal = None;
+                index.next.is_none()
+            }
+        }
+    }
+}
+
+/// Nokta defterin içinde mi. Yuvada saklanan mutlak koordinat kayıp bir
+/// kaymadan sonra defterin dışına düşebiliyor ([`search::track`])
 /// ve alacritty'nin ızgara indeksi dışarıda panikler.
 fn in_grid<T>(term: &Term<T>, point: Point) -> bool {
     point.line >= term.topmost_line()
@@ -2065,41 +2166,6 @@ fn reveal_target<T>(term: &Term<T>, found: &search_engine::Match, band: i32) -> 
     let history = i32::try_from(term.history_size()).unwrap_or(i32::MAX);
     let top = (rows / 2 - found.start().line.0).clamp(0, history);
     top.max(band)
-}
-
-/// Görsel tepesi `top` olan pencerede ([`reveal_target`]; `None` → bugünkü
-/// pencere) çizilen eşleşmelerin sayısı, vurgunun kümesiyle
-/// ([`search::eligible`]).
-fn count_drawn<T>(
-    term: &Term<T>,
-    regex: &mut search_engine::RegexSearch,
-    top: Option<i32>,
-    band: i32,
-    hidden: Option<&RangeInclusive<i32>>,
-) -> usize {
-    let offset = match top {
-        Some(top) if top <= band => 0,
-        Some(top) => top,
-        None => term.grid().display_offset() as i32,
-    };
-    let drawn = drawn_lines(term, offset, band);
-    let mut count = 0;
-    search::scan(
-        term,
-        regex,
-        Line(*drawn.start()),
-        Line(*drawn.end()),
-        |found| {
-            let lines = found.start().line.0..=found.end().line.0;
-            if lines.start() <= drawn.end()
-                && drawn.start() <= lines.end()
-                && search::eligible(term, found, hidden)
-            {
-                count += 1;
-            }
-        },
-    );
-    count
 }
 
 /// Seçimin **ekranda** çizilen aralığı — `frame()`, kare kapısı ve temizleme
@@ -2392,6 +2458,14 @@ pub struct Session {
     /// Geçmişte aramanın derlenmiş deseni ve nesli (033) — **yaprak kilit**,
     /// `theme` emsali; ödünç alma kuralı [`SearchSlot`]'ta.
     search: Mutex<SearchSlot>,
+    /// Defterin tavanı (`scrollback`) — geçerli arama eşleşmesinin kaymasının
+    /// "defter doydu mu" sorusu ([`search::ledger_shift`]). Yazanı açılış ve
+    /// [`Session::set_terminal_options`].
+    scrollback: AtomicUsize,
+    /// Kullanıcının kaydırmasının **birikmiş ofset farkı**
+    /// ([`Session::scroll_user`]): doymuş defterde ofsetin çıktıdan gelen
+    /// payı bundan ayrılıyor ([`search::LedgerMark::user`]).
+    user_scroll: AtomicI64,
     /// Dock'un **son çizilen** penceresinin izi ([`DockWindow`]): isabet
     /// testi canlı aynaya değil ekrandakine bakıyor (031 R3.5).
     ///
@@ -2608,7 +2682,8 @@ impl Session {
         // thread'ine gidiyor, öteki ucu `Session`'da kalıyor.
         // Defterin tavanı `scrollback`'ten: blok başına en az bir satır düştüğü
         // için geçmişte görünebilecek blok sayısının üst sınırı odur.
-        let shell = Arc::new(Mutex::new(ShellLog::new(options.terminal.scrollback)));
+        let scrollback = options.terminal.scrollback;
+        let shell = Arc::new(Mutex::new(ShellLog::new(scrollback)));
         // Sayacın da iki ucu var ve ikisi de aynı gerekçeyle burada doğuyor.
         let screen_clears = Arc::new(AtomicU32::new(0));
         let key_gen = Arc::new(AtomicU64::new(0));
@@ -2650,6 +2725,8 @@ impl Session {
             alt_screen: AtomicBool::new(false),
             caret_in_dock: AtomicBool::new(false),
             search: Mutex::new(SearchSlot::default()),
+            scrollback: AtomicUsize::new(scrollback),
+            user_scroll: AtomicI64::new(0),
             dock_window: Mutex::new(None),
             screen_clears,
             key_gen,
@@ -2834,10 +2911,11 @@ impl Session {
         // koşmuyor ve iki liste boş kalıyor (R2.2).
         search.clear();
         search.colors = search::SearchColors::of(&theme);
-        let (search_generation, mut search_pattern, search_current) = {
+        let (search_generation, mut search_pattern, mut search_tracking) = {
             let mut slot = lock(&self.search);
-            (slot.generation, slot.pattern.take(), slot.current.clone())
+            (slot.generation, slot.pattern.take(), slot.tracking())
         };
+        let search_taken = search_tracking.mark;
         let mut term = self.term.lock();
         // **Süzülme payı taramadan önce**: aşağıdaki her şey (ofset, bayrağın
         // ömrü, doldurma, kayma sayısı) payın taşıdığı pencereyi görmeli.
@@ -3760,10 +3838,19 @@ impl Session {
         // tek eşleşme kalıyor. Döngülerden **sonra**, çünkü bastırmanın üst
         // ucu ızgara döngüsünde doğuyor (seçim süzgecinin gerekçesi).
         if let Some(regex) = search_pattern.as_mut() {
+            // Geçerli eşleşme önce içeriğine yapıştırılıyor (phase-5): çıktı
+            // defteri kaydırdıysa vurgusu kaydırılmış yerinde.
+            let now = self.ledger_now(&term);
+            search::track(
+                &term,
+                &mut search_tracking,
+                now,
+                self.scrollback.load(Ordering::Relaxed),
+            );
             search_visible(
                 &term,
                 regex,
-                search_current.as_ref(),
+                search_tracking.current.as_ref(),
                 search,
                 SearchWindow {
                     offset,
@@ -3871,6 +3958,7 @@ impl Session {
                 && slot.pattern.is_none()
             {
                 slot.pattern = Some(pattern);
+                slot.settle(search_taken, search_tracking);
             }
         }
 
@@ -4879,7 +4967,10 @@ impl Session {
             let mut term = self.term.lock();
             let dropped = self.reset_scroll();
             let lines = pages.saturating_mul(term.screen_lines() as i32);
-            (scroll_locked(&mut term, lines, self.band_shown()), dropped)
+            (
+                self.scroll_user(&mut term, lines, self.band_shown()),
+                dropped,
+            )
         };
         if dropped {
             self.request_frame();
@@ -4919,7 +5010,7 @@ impl Session {
                 // çevrilirken uçuşta kalan bir süzülmenin payı güncel nesille
                 // gelir ve satır adımının sildiği kesri geri getirirdi.
                 let dropped = self.reset_scroll();
-                let moved = scroll_locked(term, lines, band)?;
+                let moved = self.scroll_user(term, lines, band)?;
                 Some((moved, moved != 0 || dropped))
             }
             ScrollIntent::Direct => {
@@ -4968,8 +5059,49 @@ impl Session {
         band: i32,
     ) -> Option<(i32, f64)> {
         let (moved, next) = scroll_fraction_locked(term, frac, rows, band)?;
+        self.note_user_scroll(moved);
         self.scroll_frac.store(next.to_bits(), Ordering::Relaxed);
         Some((moved, next))
+    }
+
+    /// [`scroll_locked`]'ın oturumdan çağrısı: ofsetin kullanıcıdan gelen
+    /// payını da biriktiriyor ([`Session::user_scroll`]). Kaydırmanın bütün
+    /// yolları buradan ya da [`Session::scroll_fraction`]'dan geçiyor —
+    /// yoksa doymuş defterde arama eşleşmesi kullanıcının kaydırması kadar
+    /// yanlış satıra kayardı ([`search::ledger_shift`]).
+    fn scroll_user<T: EventListener>(
+        &self,
+        term: &mut Term<T>,
+        lines: i32,
+        band: i32,
+    ) -> Option<i32> {
+        let moved = scroll_locked(term, lines, band)?;
+        self.note_user_scroll(moved);
+        Some(moved)
+    }
+
+    /// Kullanıcının kaydırdığı ofset farkını biriktirir. `Term` kilidi
+    /// altında çağrılıyor, yani gözlem ([`Session::ledger_now`]) onu ofsetle
+    /// aynı turda görüyor.
+    fn note_user_scroll(&self, moved: i32) {
+        if moved != 0 {
+            self.user_scroll
+                .fetch_add(i64::from(moved), Ordering::Relaxed);
+        }
+    }
+
+    /// Defterin bu anki hâli ([`search::LedgerMark`]); `Term` kilidi
+    /// tutulurken.
+    fn ledger_now<T>(&self, term: &Term<T>) -> search::LedgerMark {
+        search::LedgerMark {
+            history: term.history_size(),
+            offset: term.grid().display_offset(),
+            user: self.user_scroll.load(Ordering::Relaxed),
+            epoch: self.adapter.0.ledger.load(Ordering::Acquire),
+            columns: term.columns(),
+            lines: term.screen_lines(),
+            alt: term.mode().contains(TermMode::ALT_SCREEN),
+        }
     }
 
     /// Bekleyen süzülme isteğini alır ve sıfırlar — **kare yolunun** çağrısı,
@@ -5048,15 +5180,18 @@ impl Session {
     }
 
     /// Kirli bayrağını diker ve uyandırır — `Adapter`'ın `Wakeup` kolunun
-    /// **kendisi**, ikinci bir kopyası değil: "bayrak uyandırmadan önce"
-    /// sırası tek yerde yaşıyor. `Term` kilidi **bırakıldıktan sonra**
+    /// kullandığı yolun **kendisi** (`Adapter::wake_frame`), ikinci bir kopyası
+    /// değil: "bayrak uyandırmadan önce" sırası tek yerde yaşıyor. `Wakeup`
+    /// olayından geçmiyor, çünkü o kol çıktının neslini artırıyor ve arama
+    /// dizinine "defter değişti" diyor (033) — seçim ve kaydırma defteri
+    /// değiştirmiyor. `Term` kilidi **bırakıldıktan sonra**
     /// çağrılır: uyandırma çift muteksli `FairMutex` tutulurken koşmamalı.
     ///
     /// `resize` bunu **kullanmıyor**: onun uyandırması `bt-shell`'in işi
     /// (link'i kendisi açıyor). Buradaki çağıranların (seçim ve kaydırma)
     /// ise elinde link yok.
     fn request_frame(&self) {
-        self.adapter.send_event(Event::Wakeup);
+        self.adapter.wake_frame();
     }
 
     /// Seçili aralığın metni — kopyalamanın (phase-2) ve sınamaların **tek**
@@ -5074,6 +5209,20 @@ impl Session {
             return Some(text);
         }
         self.term.lock().selection_to_string()
+    }
+
+    /// Seçim var mı — metni kurmadan ([`Session::selection_text`]'in ucuz
+    /// sorusu): menünün doğrulaması (⌘E) her açılışta geçmişin tamamını
+    /// dizgiye çevirmesin. Dock'un seçimi `BUFFER`'ın dilimi, yani kısa.
+    pub fn has_selection(&self) -> bool {
+        self.dock_selection_text()
+            .is_some_and(|text| !text.is_empty())
+            || self
+                .term
+                .lock()
+                .selection
+                .as_ref()
+                .is_some_and(|selection| !selection.is_empty())
     }
 
     /// Dock'ta yeni seçim: basış, tıklama sayısının adımıyla (031 R3.1).
@@ -5651,7 +5800,7 @@ impl Session {
             let slot = lock(&self.search);
             (slot.origin, slot.hidden.clone())
         };
-        let (current, origin) = match pattern.as_mut() {
+        let (current, origin, mark) = match pattern.as_mut() {
             Some(regex) => {
                 let term = self.term.lock();
                 let origin = origin
@@ -5659,18 +5808,20 @@ impl Session {
                     .unwrap_or_else(|| window_bottom(&term));
                 let band = self.search_band(&term);
                 let current = nearest_match(&term, regex, origin, hidden.as_ref(), band);
-                (current, Some(origin))
+                (current, Some(origin), Some(self.ledger_now(&term)))
             }
-            None => (None, origin),
+            // Desensiz arama defteri izlemiyor ([`search::track`]): başlangıç
+            // bayatlamasın diye düşüyor, sonraki sorgu pencerenin dibinden.
+            None => (None, None, None),
         };
-        self.store_search(pattern, current, origin);
+        self.store_search(pattern, current, origin, mark);
         status
     }
 
-    /// Aramayı kapatır: desen, geçerli eşleşme ve başlangıç düşer; bir
+    /// Aramayı kapatır: desen, geçerli eşleşme, başlangıç ve dizin düşer; bir
     /// sonraki içerik karesi vurgusuz.
     pub fn clear_search(&self) {
-        self.store_search(None, None, None);
+        self.store_search(None, None, None, None);
     }
 
     /// Geçerli eşleşmeden `direction` yönündeki bir sonrakine geçer (⏎/⌘G,
@@ -5680,7 +5831,8 @@ impl Session {
     ///
     /// **Hedef vurgunun kümesinden** ([`search::eligible`]): bastırılan
     /// satıra değen ya da mürekkepsiz eşleşme atlanıyor — ⏎ pencereyi
-    /// görünmeyen bir yere götürmemeli.
+    /// görünmeyen bir yere götürmemeli. Aynı küme dizinin kümesi, yani sıra
+    /// numarası komşuya ±1 taşınıyor (uçta sararak).
     ///
     /// Desen yuvadan **ödünç** ([`SearchSlot`]), `Term` kilidinden önce;
     /// arada yeni bir sorgu geldiyse sonuç yazılmıyor (nesil kuralı).
@@ -5696,21 +5848,31 @@ impl Session {
                 .current
                 .take()
                 .filter(|found| match_in_grid(term, found));
-            let found = match current {
+            let (found, step) = match current {
                 Some(current) => {
                     let way = match direction {
                         SearchDirection::Older => Direction::Left,
                         SearchDirection::Newer => Direction::Right,
                     };
                     let from = search::step_past(term, &current, way);
-                    search::next_eligible(term, regex, from, way, state.hidden)
+                    let found = search::next_eligible(term, regex, from, way, state.hidden);
+                    // Sarma: yukarı giderken bulunan aşağıda (ya da tersi).
+                    let step = found.as_ref().map(|found| {
+                        let wrapped = match direction {
+                            SearchDirection::Older => found.start() >= current.start(),
+                            SearchDirection::Newer => found.start() <= current.start(),
+                        };
+                        OrdinalStep::Moved { direction, wrapped }
+                    });
+                    (found, step.unwrap_or(OrdinalStep::Fresh))
                 }
                 None => {
                     let origin = state
                         .origin
                         .filter(|point| in_grid(term, *point))
                         .unwrap_or_else(|| window_bottom(term));
-                    nearest_match(term, regex, origin, state.hidden, band)
+                    let found = nearest_match(term, regex, origin, state.hidden, band);
+                    (found, OrdinalStep::Fresh)
                 }
             };
             // Sorguyu daraltmak bulunan yerin yakınında kalsın: başlangıç
@@ -5719,7 +5881,7 @@ impl Session {
                 state.origin = Some(*found.end());
             }
             state.current = found;
-            self.reveal_current(term, regex, state, cover, smooth)
+            (self.reveal_current(term, state, cover, smooth), step)
         })
         .unwrap_or_default()
     }
@@ -5731,9 +5893,9 @@ impl Session {
     /// süzülerek; `smooth == false` (`smooth_scroll = "off"`, Hareketi
     /// Azalt, `snap`) anında. Görünür eşleşmede pencere **oynamaz**.
     ///
-    /// Dönen sayım pencerenin **varacağı** yerde ([`SearchReport`]).
+    /// Dönen rapor dizinin o anki hâli ([`SearchReport`]).
     pub fn search_reveal(&self, cover: SearchCover, smooth: bool) -> SearchReport {
-        self.with_search(|term, regex, state| {
+        self.with_search(|term, _, state| {
             if state
                 .current
                 .as_ref()
@@ -5741,9 +5903,133 @@ impl Session {
             {
                 state.current = None;
             }
-            self.reveal_current(term, regex, state, cover, smooth)
+            (
+                self.reveal_current(term, state, cover, smooth),
+                OrdinalStep::Kept,
+            )
         })
         .unwrap_or_default()
+    }
+
+    /// Dizinin bir parçası (phase-5, Karar 2-B): bütün defterin sayımını
+    /// dipten yukarı [`search::CHUNK_LINES`] satır ilerletir ve panelin
+    /// raporunu verir. Arama kapalıysa (desen yok) `None`.
+    ///
+    /// Sürücüsü `bt-shell` — ana kuyrukta parça başına bir tur, `complete`
+    /// gelene kadar; tuş olayları parçaların arasına giriyor.
+    ///
+    /// **Yakınsama kuralı:** defter haberi ([`Wake::search_changed`])
+    /// uçuştaki geçişi **kesmez**. Geçiş bitince bekleyen haber varsa
+    /// tüketilip tam olarak bir yeni geçiş başlıyor; haber kenarda kurulduğu
+    /// için bir çıktı patlaması başına en çok bir ek geçiş. Rapor ancak geçiş
+    /// bittiğinde **ve** bekleyen haber yokken `complete` — sürücünün durma
+    /// koşulu. Kesen bir kural `yes` akarken geçişi hiç bitirmez ve ana
+    /// kuyruk `Term`'i sonsuza dek her turda kilitlerdi.
+    ///
+    /// **Parça kare istemez** — sonucu yalnız AppKit'in etiketi. Tek istisna
+    /// defterin kaymasıyla kaybedilen geçerli eşleşmenin geçişin sonunda
+    /// yeniden seçilmesi ([`search::Relocate`]): vurgusu ekranda yer
+    /// değiştiriyor.
+    ///
+    /// Desen dizinin **kendi** kopyası ([`search::SearchIndex::pattern`]):
+    /// kare yolunun ödünç aldığı desenle yarışmıyor; `Term` altında hiçbir
+    /// kilit alınmıyor.
+    pub fn search_step(&self) -> Option<SearchReport> {
+        let (generation, mut pattern, mut index, mut tracking, hidden) = {
+            let mut slot = lock(&self.search);
+            if !slot.active {
+                return None;
+            }
+            if slot.index.pattern.is_none() {
+                // Başka bir parça uçuşta (yalnız sınamalar koşturabiliyor):
+                // bekleyen haber ona kalıyor.
+                return Some(self.report_of(&slot));
+            }
+            if slot.index.next.is_none() {
+                if !self.adapter.0.search_pending.swap(false, Ordering::AcqRel) {
+                    return Some(self.report_of(&slot));
+                }
+                slot.index.restart(None);
+            }
+            let Some(pattern) = slot.index.pattern.take() else {
+                return Some(self.report_of(&slot));
+            };
+            (
+                slot.generation,
+                pattern,
+                std::mem::take(&mut slot.index),
+                slot.tracking(),
+                slot.hidden.clone(),
+            )
+        };
+        let taken = tracking.mark;
+        let term = self.term.lock();
+        search::track(
+            &term,
+            &mut tracking,
+            self.ledger_now(&term),
+            self.scrollback.load(Ordering::Relaxed),
+        );
+        let offset = term.grid().display_offset() as i32;
+        let window = drawn_lines(&term, offset, self.search_band(&term));
+        search::index_chunk(
+            &term,
+            &mut pattern,
+            &mut index,
+            hidden.as_ref(),
+            &tracking,
+            window,
+            search::CHUNK_LINES,
+        );
+        drop(term);
+        let (report, relocated) = {
+            let mut slot = lock(&self.search);
+            if slot.generation != generation {
+                // Araya yeni bir sorgu (ya da kapanış) girdi: parça düşüyor.
+                return Some(self.report_of(&slot));
+            }
+            index.pattern = Some(pattern);
+            let mut relocated = false;
+            // Kaybedilen geçerli eşleşme ancak **son** geçişin sonunda
+            // yeniden seçiliyor: bekleyen bir haber varsa dizinin
+            // koordinatları çoktan kaymış olabilir.
+            if index.next.is_none()
+                && tracking.relocate.is_some()
+                && !self.adapter.0.search_pending.load(Ordering::Acquire)
+            {
+                tracking.relocate = None;
+                if let Some((found, ordinal, _)) = index.candidate.take() {
+                    tracking.origin = Some(*found.end());
+                    tracking.current = Some(found);
+                    index.ordinal = Some(ordinal);
+                    relocated = true;
+                }
+            }
+            slot.index = index;
+            let settled = slot.settle(taken, tracking);
+            (self.report_of(&slot), relocated && settled)
+        };
+        if relocated {
+            self.request_frame();
+        }
+        Some(report)
+    }
+
+    /// Panelin raporu yuvanın hâlinden ([`SearchReport`]).
+    fn report_of(&self, slot: &SearchSlot) -> SearchReport {
+        let pending = self.adapter.0.search_pending.load(Ordering::Acquire);
+        SearchReport {
+            // Geçerli eşleşme yoksa da dizinin saydığı eşleşme "var" demek:
+            // sonradan gelen çıktı vurgulanıyor ve sayılıyor, etiket "No
+            // matches" dememeli.
+            found: slot.current.is_some() || slot.relocate.is_some() || slot.index.total > 0,
+            total: slot.index.total,
+            ordinal: slot.current.as_ref().and(slot.index.ordinal),
+            complete: slot.active
+                && slot.index.pattern.is_some()
+                && slot.index.next.is_none()
+                && !pending,
+        }
     }
 
     /// Geçerli eşleşmeyi ızgaranın seçimi yapar (Esc, kapatma düğmesi; Karar
@@ -5753,11 +6039,19 @@ impl Session {
     /// da olsa seçim kuruluyor — bant seçim çizmiyor (017'nin borcu, Karar
     /// 5'in bilinen sınırı) ama ⌘C kopyalıyor.
     pub fn select_search_match(&self) -> bool {
-        let current = lock(&self.search).current.clone();
-        let Some(found) = current else {
+        let tracking = lock(&self.search).tracking();
+        let term = self.term.lock();
+        // Son gözlemden beri çıktı geldiyse eşleşme içeriğine yapışsın.
+        let mut tracking = tracking;
+        search::track(
+            &term,
+            &mut tracking,
+            self.ledger_now(&term),
+            self.scrollback.load(Ordering::Relaxed),
+        );
+        let Some(found) = tracking.current else {
             return false;
         };
-        let term = self.term.lock();
         if !match_in_grid(&term, &found) {
             return false;
         }
@@ -5768,50 +6062,73 @@ impl Session {
     }
 
     /// Aramanın `Term` kilidi altındaki işlerinin ortak kalıbı: deseni ve
-    /// durumu yaprak yuvadan **önce** alır, `Term` kilidi altında `work`'ü
-    /// koşturur, kilit düştükten sonra nesil aynıysa hepsini geri koyar ve
-    /// `work` pencereyi oynattıysa kare ister. Desen yoksa (arama kapalı,
-    /// sorgu boş ya da geçersiz) `None`.
+    /// durumu yaprak yuvadan **önce** alır, `Term` kilidi altında geçerli
+    /// eşleşmeyi içeriğine yapıştırıp ([`search::track`]) `work`'ü koşturur,
+    /// kilit düştükten sonra nesil aynıysa hepsini geri koyar, sıra
+    /// numarasını `work`'ün adımıyla taşır ve pencere oynadıysa ya da geçerli
+    /// eşleşme değiştiyse kare ister. Desen yoksa (arama kapalı, sorgu boş ya
+    /// da geçersiz) `None`.
     fn with_search(
         &self,
         work: impl FnOnce(
             &mut Term<Adapter>,
             &mut search_engine::RegexSearch,
             &mut SearchState<'_>,
-        ) -> (SearchReport, bool),
+        ) -> (bool, OrdinalStep),
     ) -> Option<SearchReport> {
-        let (generation, mut pattern, current, origin, hidden) = {
+        let (generation, mut pattern, mut tracking, hidden) = {
             let mut slot = lock(&self.search);
             (
                 slot.generation,
                 slot.pattern.take(),
-                slot.current.clone(),
-                slot.origin,
+                slot.tracking(),
                 slot.hidden.clone(),
             )
         };
+        let taken = tracking.mark;
         let regex = pattern.as_mut()?;
+        let mut term = self.term.lock();
+        search::track(
+            &term,
+            &mut tracking,
+            self.ledger_now(&term),
+            self.scrollback.load(Ordering::Relaxed),
+        );
         let mut state = SearchState {
-            current,
-            origin,
+            current: tracking.current.take(),
+            origin: tracking.origin,
             hidden: hidden.as_ref(),
         };
-        let mut term = self.term.lock();
-        let (report, moved) = work(&mut term, regex, &mut state);
+        let (moved, step) = work(&mut term, regex, &mut state);
+        // Kaydırma ofseti oynattı: iz o hâle çekiliyor ki bir sonraki gözlem
+        // kullanıcının kaydırmasını çıktı sanmasın.
+        tracking.mark = Some(self.ledger_now(&term));
         drop(term);
         let SearchState {
             current, origin, ..
         } = state;
-        let changed = {
+        if current.is_some() {
+            tracking.relocate = None;
+        }
+        tracking.current = current;
+        tracking.origin = origin;
+        let (changed, report) = {
             let mut slot = lock(&self.search);
             if slot.generation == generation && slot.pattern.is_none() {
                 slot.pattern = pattern;
-                let changed = slot.current != current;
-                slot.current = current;
-                slot.origin = origin;
-                changed
+                let index = &mut slot.index;
+                let restart = step.apply(index);
+                if restart {
+                    // Sırası bilinmeyen yeni bir geçerli eşleşme ve bitmiş
+                    // bir dizin: sayım bir geçiş daha koşup sırayı buluyor.
+                    // Rapordan **önce**: `complete` yanlış dönmeli ki
+                    // çağıran sürücüyü kursun.
+                    self.adapter.0.search_pending.store(true, Ordering::Release);
+                }
+                let changed = slot.settle(taken, tracking);
+                (changed, self.report_of(&slot))
             } else {
-                false
+                (false, self.report_of(&slot))
             }
         };
         if moved || changed {
@@ -5820,37 +6137,21 @@ impl Session {
         Some(report)
     }
 
-    /// Geçerli eşleşmeyi açığa çıkarır ve varılan pencerenin sayımını verir
-    /// — [`Session::search_next`] ile [`Session::search_reveal`]'ın ortak
-    /// kuyruğu, `Term` kilidi altında. İkinci değer: pencere oynadı mı.
+    /// Geçerli eşleşmeyi açığa çıkarır — [`Session::search_next`] ile
+    /// [`Session::search_reveal`]'ın ortak kuyruğu, `Term` kilidi altında.
+    /// Pencere oynadıysa `true`.
     fn reveal_current(
         &self,
         term: &mut Term<Adapter>,
-        regex: &mut search_engine::RegexSearch,
         state: &SearchState<'_>,
         cover: SearchCover,
         smooth: bool,
-    ) -> (SearchReport, bool) {
+    ) -> bool {
         let band = self.search_band(term);
-        let moved = state
+        state
             .current
             .as_ref()
-            .is_some_and(|found| self.reveal_locked(term, found, cover, band, smooth));
-        // Sayım **varılacak** pencerede: süzülme henüz teslim edilmedi, yani
-        // hedefin ofseti buradan türüyor ([`reveal_target`]).
-        let target = state
-            .current
-            .as_ref()
-            .filter(|_| moved)
-            .map(|found| reveal_target(term, found, band));
-        let visible = count_drawn(term, regex, target, band, state.hidden);
-        (
-            SearchReport {
-                found: state.current.is_some(),
-                visible,
-            },
-            moved,
-        )
+            .is_some_and(|found| self.reveal_locked(term, found, cover, band, smooth))
     }
 
     /// Eşleşme görünür değilse pencereyi ona götürür; oynadıysa `true`.
@@ -5885,7 +6186,7 @@ impl Session {
         self.reset_scroll();
         let rows = term.screen_lines() as i32;
         if !smooth {
-            scroll_locked(term, delta, band);
+            self.scroll_user(term, delta, band);
         } else if delta.abs() <= rows {
             self.add_glide(f64::from(delta));
         } else {
@@ -5893,7 +6194,7 @@ impl Session {
             // emsali): her gezinme aynı hareketle okunuyor ve uzun bir
             // süzülme binlerce satırı göz önünden geçirirdi.
             let screen = delta.signum() * rows;
-            scroll_locked(term, delta - screen, band);
+            self.scroll_user(term, delta - screen, band);
             self.add_glide(f64::from(screen));
         }
         true
@@ -5909,20 +6210,38 @@ impl Session {
         }
     }
 
-    /// [`Session::set_search`] ile [`Session::clear_search`]'ün ortak yazımı.
+    /// [`Session::set_search`] ile [`Session::clear_search`]'ün ortak yazımı:
+    /// desen, geçerli eşleşme, başlangıç ve defterin izi; dizin yeni desenin
+    /// kopyasıyla baştan (desen yoksa boş), bekleyen defter haberi düşüyor —
+    /// baştan başlayan geçiş onu zaten kapsıyor.
     fn store_search(
         &self,
         pattern: Option<search_engine::RegexSearch>,
         current: Option<search_engine::Match>,
         origin: Option<Point>,
+        mark: Option<search::LedgerMark>,
     ) {
         let active = pattern.is_some();
         let was_active = {
             let mut slot = lock(&self.search);
             slot.generation = slot.generation.wrapping_add(1);
+            slot.index = search::SearchIndex::default();
+            if let Some(pattern) = &pattern {
+                slot.index.restart(Some(pattern.clone()));
+            }
             slot.pattern = pattern;
             slot.current = current;
             slot.origin = origin;
+            slot.mark = mark;
+            slot.relocate = None;
+            self.adapter
+                .0
+                .search_pending
+                .store(false, Ordering::Release);
+            self.adapter
+                .0
+                .search_active
+                .store(active, Ordering::Release);
             std::mem::replace(&mut slot.active, active)
         };
         // Kare isteği yaprak kilit **bırakıldıktan sonra** (`set_theme`
@@ -5996,6 +6315,9 @@ impl Session {
         // ondan **sonra** alınıyor; ters sıra okuyucu thread'in sırasıyla
         // (`Term` → `shell`) döngü kapatırdı.
         lock(&self.shell).set_scrollback(scrollback);
+        self.scrollback.store(scrollback, Ordering::Relaxed);
+        // Küçülen `scrollback` geçmişi kırpıyor: arama açıksa sayım baştan.
+        self.adapter.search_changed();
         self.request_frame();
     }
 
@@ -6122,7 +6444,7 @@ impl Session {
             (
                 bytes,
                 cleared || dropped,
-                scroll_locked(&mut term, i32::MIN, self.band_shown()),
+                self.scroll_user(&mut term, i32::MIN, self.band_shown()),
             )
         };
         // Dock'un seçimi de (031 R3.4): girdi iki seçimi birden temizliyor,
@@ -6343,6 +6665,9 @@ impl Session {
         // bayrağı bu yüzden elle dikiyoruz. Uyandırmak çağıranın işi
         // (`bt-shell` resize'dan sonra link'i açar); bayrak kimseyi uyandırmaz.
         self.adapter.0.dirty.store(true, Ordering::Release);
+        // Yeniden sarma defterin satırlarını değiştirdi: arama açıksa sayım
+        // baştan (033; geçerli eşleşmenin kaybı `search::ledger_shift`'te).
+        self.adapter.search_changed();
         true
     }
 
@@ -6852,6 +7177,8 @@ mod tests {
         copies: Vec<String>,
         /// [`Wake::title_changed`] kaç kez geldi.
         titles: u32,
+        /// [`Wake::search_changed`] kaç kez geldi.
+        searches: u32,
     }
 
     impl TestWake {
@@ -6917,6 +7244,11 @@ mod tests {
 
         fn title_changed(&self) {
             self.state.lock().unwrap().titles += 1;
+            self.cond.notify_all();
+        }
+
+        fn search_changed(&self) {
+            self.state.lock().unwrap().searches += 1;
             self.cond.notify_all();
         }
     }
@@ -15278,6 +15610,18 @@ mod tests {
 
     // --- Gezinme (033 phase-4) ---
 
+    /// Dizini sonuna kadar sürer (`bt-shell`'in sürücüsünün sınamadaki
+    /// eşi) ve son raporu verir; tavan sonsuz bir sürücüye karşı.
+    fn count_all(session: &Session) -> SearchReport {
+        for _ in 0..10_000 {
+            let report = session.search_step().expect("arama açık olmalı");
+            if report.complete {
+                return report;
+            }
+        }
+        panic!("dizin bitmedi");
+    }
+
     /// Panelin hiçbir şeyi örtmediği pencere.
     const OPEN: SearchCover = SearchCover {
         first_row: i32::MIN,
@@ -15312,17 +15656,21 @@ mod tests {
         let (session, _wake) = sevens();
         assert_eq!(current_at(&session), Some((5, 1)), "`27`'nin `7`'si");
         let report = session.search_reveal(OPEN, true);
-        assert_eq!(
-            report,
-            SearchReport {
-                found: true,
-                visible: 1
-            }
-        );
+        assert!(report.found, "{report:?}");
         assert_eq!(
             scroll_state(&session),
             (0, 0.0),
             "görünür eşleşmede pencere oynadı"
+        );
+        assert_eq!(
+            count_all(&session),
+            SearchReport {
+                found: true,
+                total: 3,
+                ordinal: Some(1),
+                complete: true,
+            },
+            "en alttaki en yeni"
         );
         session.shutdown();
     }
@@ -15342,23 +15690,30 @@ mod tests {
     #[test]
     fn next_goes_up_to_older_matches_and_wraps() {
         // `smooth == false`: pencere anında, satırı ortada.
+        // Sıra numarası da komşuya taşınıyor (phase-5): önce sayım bitsin.
         let (session, _wake) = sevens();
+        assert_eq!(count_all(&session).ordinal, Some(1));
         let report = session.search_next(SearchDirection::Older, OPEN, false);
         assert_eq!(current_at(&session), Some((-5, 1)), "`17`");
         assert_eq!(scroll_state(&session), (10, 0.0));
-        assert_eq!(report.visible, 1, "{report:?}");
-        session.search_next(SearchDirection::Older, OPEN, false);
+        assert_eq!((report.ordinal, report.total), (Some(2), 3), "{report:?}");
+        let report = session.search_next(SearchDirection::Older, OPEN, false);
         assert_eq!(current_at(&session), Some((-15, 0)), "`7`");
         assert_eq!(scroll_state(&session).0, 20);
+        assert_eq!(report.ordinal, Some(3), "{report:?}");
         // Tepede sarıyor: en yenisine, dibe.
-        session.search_next(SearchDirection::Older, OPEN, false);
+        let report = session.search_next(SearchDirection::Older, OPEN, false);
         assert_eq!(current_at(&session), Some((5, 1)), "`27`");
         assert_eq!(scroll_state(&session).0, 0);
+        assert_eq!(report.ordinal, Some(1), "{report:?}");
         // Aşağı yön de dipte sarıyor: en eskisine.
-        session.search_next(SearchDirection::Newer, OPEN, false);
+        let report = session.search_next(SearchDirection::Newer, OPEN, false);
         assert_eq!(current_at(&session), Some((-15, 0)), "`7`");
-        session.search_next(SearchDirection::Newer, OPEN, false);
+        assert_eq!(report.ordinal, Some(3), "{report:?}");
+        let report = session.search_next(SearchDirection::Newer, OPEN, false);
         assert_eq!(current_at(&session), Some((-5, 1)), "`17`");
+        assert_eq!(report.ordinal, Some(2), "{report:?}");
+        assert!(report.complete, "gezinme sayımı bozmamalı: {report:?}");
         session.shutdown();
     }
 
@@ -15505,14 +15860,12 @@ mod tests {
         wait_frame(&session, &wake, |cells| row_text(cells, 0) == "vimhello");
         session.set_search(&plain("hello"));
         let report = session.search_next(SearchDirection::Older, OPEN, true);
-        assert_eq!(
-            report,
-            SearchReport {
-                found: true,
-                visible: 1
-            }
-        );
+        assert!(report.found, "{report:?}");
         assert_eq!(scroll_state(&session), (0, 0.0));
+        // Sayım alternatif ekranın görünür ızgarası (Karar 8): birincil
+        // ekranın `hello`'su sayılmıyor.
+        let report = count_all(&session);
+        assert_eq!((report.total, report.ordinal), (1, Some(1)), "{report:?}");
         session.shutdown();
     }
 
@@ -15613,6 +15966,424 @@ mod tests {
         assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
         let report = session.search_next(SearchDirection::Older, OPEN, true);
         assert!(report.found, "desen yarışta kayboldu: {report:?}");
+        assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
+        session.shutdown();
+    }
+
+    // --- Bütün defterin sayımı (033 phase-5) ---
+
+    /// `scrollback`'i çağırandan gelen dock'suz oturum: doymuş defterin
+    /// sınamaları.
+    fn spawn_with_scrollback(script: &str, scrollback: usize, wake: Arc<TestWake>) -> Session {
+        let mut options = test_options(sh(script), 40);
+        options.terminal.scrollback = scrollback;
+        Session::spawn(options, wake).unwrap()
+    }
+
+    /// Defterin mutlak `line` satırının metni, sondaki boşluklar kırpılmış.
+    fn line_text(session: &Session, line: i32) -> String {
+        let term = session.term.lock();
+        term.grid()[Line(line)]
+            .into_iter()
+            .map(|cell| cell.c)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// Geçerli eşleşmenin satırının metni — "doğru içerikte mi" sorusu.
+    fn current_text(session: &Session) -> Option<String> {
+        current_at(session).map(|(line, _)| line_text(session, line))
+    }
+
+    /// Dizini tek başına, `chunk` satırlık parçalarla sonuna kadar sürer ve
+    /// sayısını verir (sürücüsüz; parça dikişinin sınaması).
+    fn index_with(session: &Session, query: &SearchQuery, chunk: i32) -> usize {
+        let (_, pattern) = search::compile(query);
+        let mut regex = pattern.expect("geçerli desen");
+        let mut index = search::SearchIndex::default();
+        index.restart(None);
+        let term = session.term.lock();
+        while index.next.is_some() {
+            search::index_chunk(
+                &term,
+                &mut regex,
+                &mut index,
+                None,
+                &search::Tracking::default(),
+                0..=0,
+                chunk,
+            );
+        }
+        index.total
+    }
+
+    #[test]
+    fn chunk_seams_neither_lose_nor_double_count_a_wrapped_match() {
+        // 25 satır × 100 karakter, 40 sütunda üçer satıra sarılıyor ve her
+        // satırda iki `needle` tam sarma sınırını (40 ve 80) geçiyor: dikiş
+        // hangi satıra düşerse düşsün her eşleşme bir kez sayılmalı.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; for i in $(seq 1 25); do printf '%036dneedle%034dneedle%018d\\n' 0 0 0; done; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until(
+            "sarılmış satırlar gelmedi",
+            Duration::from_secs(5),
+            || session.term.lock().history_size() >= 66,
+        );
+        wait_settled(&session);
+        for chunk in [1, 2, 3, 4, 5, 7, 11, search::CHUNK_LINES] {
+            assert_eq!(
+                index_with(&session, &plain("needle"), chunk),
+                50,
+                "parça {chunk}"
+            );
+        }
+        // Sürücünün yolu da aynı sayıyı veriyor.
+        session.set_search(&plain("needle"));
+        let report = count_all(&session);
+        assert_eq!((report.total, report.ordinal), (50, Some(1)), "{report:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_whole_ledger_is_counted_newest_first() {
+        // `seq 1 60`: `1` her sayının her birinde (`11` iki kez).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("stty -echo; seq 1 60; sleep 5", Arc::clone(&wake));
+        wait_until("defter dolmadı", Duration::from_secs(5), || {
+            line_text(&session, 8) == "60"
+        });
+        let expected = (1..=60)
+            .map(|n: u32| n.to_string().matches('1').count())
+            .sum::<usize>();
+        session.set_search(&plain("1"));
+        let report = count_all(&session);
+        assert_eq!(report.total, expected, "{report:?}");
+        // Geçerli eşleşme en alttaki görünür `1` (`51`), sırası 1.
+        assert_eq!(current_text(&session).as_deref(), Some("51"));
+        assert_eq!(report.ordinal, Some(1), "{report:?}");
+        // En eskiye (sarma) gidince sıra toplam.
+        let report = session.search_next(SearchDirection::Newer, OPEN, false);
+        assert_eq!(current_text(&session).as_deref(), Some("1"));
+        assert_eq!(report.ordinal, Some(expected), "{report:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_new_query_restarts_the_count_and_a_step_asks_for_no_frame() {
+        let (session, wake) = sevens();
+        let before = wakes(&wake);
+        let report = count_all(&session);
+        assert_eq!(report.total, 3, "{report:?}");
+        assert_eq!(wakes(&wake), before, "parça kare istedi");
+        // Yeni sorgu dizini baştan kuruyor: eski neslin sayısı taşınmıyor.
+        session.set_search(&plain("2"));
+        let report = session.search_step().expect("arama açık");
+        // `2`, `12`, `20`…`29` (`22` iki kez): 13.
+        assert_eq!(report.total, 13, "{report:?}");
+        assert!(report.complete, "{report:?}");
+        session.clear_search();
+        assert_eq!(session.search_step(), None, "kapalı arama saymaz");
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_index_and_the_highlight_agree_on_one_screen() {
+        // Bastırılan satır (`ls -la`) ve mürekkepsiz eşleşme ikisinde de
+        // yok: vurgunun eşleşme sayısı (satır başına bölünmemiş) dizinin
+        // sayısına eşit.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_typing_session(&mirror("bHMgLWxh", 6), Arc::clone(&wake));
+        wait_mirror(&session, DockStatus::Live);
+        session.set_search(&SearchQuery {
+            text: "[a-z]+| +".into(),
+            regex: true,
+            case_sensitive: false,
+        });
+        let (cursor, runs) = search_now(&session);
+        assert!(cursor.caret_in_dock, "{cursor:?}");
+        let highlighted = runs
+            .as_slice()
+            .iter()
+            .chain(runs.fill_slice())
+            .filter(|run| !run.continues)
+            .count();
+        let report = count_all(&session);
+        assert_eq!(report.total, highlighted, "{runs:?} {report:?}");
+        // `cmd` ve `out`: bastırılan `ls`/`la` ve boşluklar yok.
+        assert_eq!(report.total, 2, "{report:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_ledger_change_is_announced_once_until_the_index_takes_it() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; seq 1 30; while read x; do echo \"$x\"; done",
+            Arc::clone(&wake),
+        );
+        wait_seq_tail(&session, &wake);
+        session.set_search(&plain("7"));
+        count_all(&session);
+        let searches = || wake.state.lock().unwrap().searches;
+        let base = searches();
+        session.write(b"a\n");
+        wait_until("çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 8) == "a"
+        });
+        session.write(b"b\n");
+        wait_until("çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 8) == "b"
+        });
+        assert_eq!(
+            searches(),
+            base + 1,
+            "tüketilmemiş haber ikincisini doğurdu"
+        );
+        let report = count_all(&session);
+        assert!(report.complete, "{report:?}");
+        session.write(b"c\n");
+        wait_until("çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 8) == "c"
+        });
+        assert_eq!(
+            searches(),
+            base + 2,
+            "tüketilen haberden sonra yenisi gelmedi"
+        );
+        // Arama kapalıyken haber yok.
+        session.clear_search();
+        session.write(b"d\n");
+        wait_until("çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 8) == "d"
+        });
+        assert_eq!(searches(), base + 2, "kapalı aramaya haber gitti");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_scrolled_window_keeps_the_current_match_on_its_content() {
+        // Defter doymamış: `history_size` farkı.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; seq 1 30; sleep 1; seq 31 35; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until("defter dolmadı", Duration::from_secs(5), || {
+            line_text(&session, 8) == "30"
+        });
+        session.scroll_page(1);
+        session.set_search(&plain("15"));
+        assert_eq!(current_at(&session), Some((-7, 0)));
+        wait_until("ikinci çıktı gelmedi", Duration::from_secs(5), || {
+            session.term.lock().history_size() == 26
+        });
+        let (_, runs) = search_now(&session);
+        assert_eq!(current_at(&session), Some((-12, 0)), "içeriğinden kaydı");
+        assert_eq!(current_text(&session).as_deref(), Some("15"));
+        assert!(
+            runs.as_slice().iter().any(|run| run.current),
+            "geçerli vurgu kayboldu: {runs:?}"
+        );
+        session.shutdown();
+
+        // Defter doymuş, pencere kaydırılmış: `display_offset` farkı, eksi
+        // kullanıcının kendi kaydırması.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_scrollback(
+            "stty -echo; seq 1 40; sleep 1; seq 41 43; sleep 5",
+            20,
+            Arc::clone(&wake),
+        );
+        wait_until("defter dolmadı", Duration::from_secs(5), || {
+            line_text(&session, 8) == "40"
+        });
+        session.scroll_page(1);
+        session.set_search(&plain("25"));
+        assert_eq!(current_text(&session).as_deref(), Some("25"));
+        // Kullanıcı bir satır daha kaydırıyor: çıktı sayılmamalı.
+        session.scroll_page(-1);
+        session.scroll_page(1);
+        wait_until("ikinci çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 8) == "43"
+        });
+        search_now(&session);
+        assert_eq!(
+            current_text(&session).as_deref(),
+            Some("25"),
+            "doymuş defterde kaydı"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_saturated_ledger_never_shows_the_current_match_on_a_wrong_row() {
+        // Doymuş defterin dibinde kayma bilinemiyor: geçerli eşleşme yanlış
+        // satıra geçmek yerine kayboluyor, sayımın sonunda en yakına dönüyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_scrollback(
+            "stty -echo; seq 1 50; read x; seq 51 53; sleep 5",
+            20,
+            Arc::clone(&wake),
+        );
+        wait_until("defter dolmadı", Duration::from_secs(5), || {
+            line_text(&session, 8) == "50"
+        });
+        session.set_search(&plain("45"));
+        assert_eq!(current_text(&session).as_deref(), Some("45"));
+        session.write(b"\n");
+        wait_until("ikinci çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 8) == "53"
+        });
+        let (_, runs) = search_now(&session);
+        let shown = current_text(&session);
+        assert!(
+            shown.is_none() || shown.as_deref() == Some("45"),
+            "geçerli eşleşme yanlış satırda: {shown:?}"
+        );
+        if shown.is_none() {
+            assert!(!runs.as_slice().iter().any(|run| run.current), "{runs:?}");
+        }
+        let before = wakes(&wake);
+        let report = count_all(&session);
+        assert!(report.found, "{report:?}");
+        assert_eq!(current_text(&session).as_deref(), Some("45"));
+        assert_eq!(report.ordinal, Some(1), "{report:?}");
+        if shown.is_none() {
+            assert!(wakes(&wake) > before, "yeniden seçim kare istemedi");
+        }
+        session.shutdown();
+    }
+
+    #[test]
+    fn matches_that_arrive_later_are_found_and_navigation_orders_them() {
+        // Sorgu yazılırken eşleşme yok; çıktıyla geliyor. Vurgu ve sayım onu
+        // görüyor, etiket "No matches" dememeli; ⏎ onu geçerli yapınca sıra
+        // bitmiş dizinde bir geçiş daha isteyip bulunuyor (`/code-review`).
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; seq 1 5; read x; echo zebra; sleep 5",
+            Arc::clone(&wake),
+        );
+        wait_until("çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 4) == "5"
+        });
+        session.set_search(&plain("zebra"));
+        assert!(!count_all(&session).found, "henüz eşleşme yok");
+        session.write(b"\n");
+        wait_until("çıktı gelmedi", Duration::from_secs(5), || {
+            line_text(&session, 5) == "zebra"
+        });
+        let report = count_all(&session);
+        assert_eq!(current_at(&session), None);
+        assert!(report.found, "sayılan eşleşme 'yok' denildi: {report:?}");
+        assert_eq!((report.total, report.ordinal), (1, None), "{report:?}");
+        let report = session.search_next(SearchDirection::Older, OPEN, false);
+        assert_eq!(current_text(&session).as_deref(), Some("zebra"));
+        assert!(
+            !report.complete,
+            "sırasız eşleşme bitmiş sayıldı: {report:?}"
+        );
+        let report = count_all(&session);
+        assert_eq!(report.ordinal, Some(1), "{report:?}");
+        session.shutdown();
+    }
+
+    #[test]
+    fn ledger_shift_uses_only_exact_sources() {
+        use search::{LedgerMark, Shift, ledger_shift};
+        let mark = |history, offset, user, epoch| LedgerMark {
+            history,
+            offset,
+            user,
+            epoch,
+            columns: 40,
+            lines: 10,
+            alt: false,
+        };
+        // Doymamış: geçmişin büyümesi, pencere nerede olursa olsun.
+        assert_eq!(
+            ledger_shift(mark(10, 0, 0, 1), mark(13, 0, 0, 2), 100),
+            Shift::By(3)
+        );
+        assert_eq!(
+            ledger_shift(mark(10, 4, 0, 1), mark(13, 7, 0, 2), 100),
+            Shift::By(3)
+        );
+        // Çıktı yok: kullanıcının kaydırması kayma değil.
+        assert_eq!(
+            ledger_shift(mark(20, 4, 0, 1), mark(20, 9, 5, 1), 20),
+            Shift::Still
+        );
+        // Doymuş ve kaydırılmış: ofset farkı eksi kullanıcının payı.
+        assert_eq!(
+            ledger_shift(mark(20, 4, 0, 1), mark(20, 9, 2, 2), 20),
+            Shift::By(3)
+        );
+        // Doymuş dip, tavandaki ofset, boyut ve ekran değişimi: kayıp.
+        assert_eq!(
+            ledger_shift(mark(20, 0, 0, 1), mark(20, 0, 0, 2), 20),
+            Shift::Lost
+        );
+        assert_eq!(
+            ledger_shift(mark(20, 4, 0, 1), mark(20, 20, 0, 2), 20),
+            Shift::Lost
+        );
+        let mut wide = mark(10, 0, 0, 1);
+        wide.columns = 80;
+        assert_eq!(ledger_shift(mark(10, 0, 0, 1), wide, 100), Shift::Lost);
+        let mut alt = mark(0, 0, 0, 2);
+        alt.alt = true;
+        assert_eq!(ledger_shift(mark(10, 0, 0, 1), alt, 100), Shift::Lost);
+        // Silinen geçmiş.
+        assert_eq!(
+            ledger_shift(mark(10, 0, 0, 1), mark(0, 0, 0, 2), 100),
+            Shift::Lost
+        );
+    }
+
+    #[test]
+    #[ignore = "make test-yaris ile koşar"]
+    fn race_search_step_and_frame() {
+        // Dizin ikinci bir `Term` kilidi sahibi ve kendi desen kopyasını
+        // taşıyor; çıktı akarken haber, sorgu değişimi ve kare aynı yuvaya
+        // yazıyor. Kilit sırası bozulursa sınama asılı kalır; nesil kuralı
+        // bozulursa eski sorgunun sayımı yenisine karışır.
+        let wake = Arc::new(TestWake::default());
+        let session = Arc::new(spawn_session(
+            "stty -echo; while :; do printf 'alpha beta\\n'; sleep 0.01; done",
+            Arc::clone(&wake),
+        ));
+        session.set_search(&plain("alpha"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let driver = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let mut steps = 0u64;
+                while Instant::now() < deadline {
+                    session.search_step();
+                    if steps % 50 == 0 {
+                        session.set_search(&plain(if steps % 100 == 0 { "beta" } else { "alpha" }));
+                    }
+                    if steps % 7 == 0 {
+                        session.search_next(SearchDirection::Older, OPEN, false);
+                    }
+                    steps += 1;
+                }
+                steps
+            })
+        };
+        let mut frames = 0u64;
+        while Instant::now() < deadline {
+            search_now(&session);
+            frames += 1;
+        }
+        assert!(driver.join().unwrap() > 0, "hiç sayılmadı");
+        assert!(frames > 0, "yarış boyunca hiç kare üretilmedi");
+        assert!(session.search_step().is_some(), "dizin yarışta kayboldu");
         assert!(session.reader_alive(), "okuyucu thread yarışta öldü");
         session.shutdown();
     }

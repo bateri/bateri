@@ -57,9 +57,10 @@ const RADIUS: f64 = 11.0;
 /// terminalin sağ üst köşesini gereğinden fazla örtmeyecek kadar.
 const FIELD_WIDTH: f64 = 190.0;
 
-/// Sayım etiketinin **sabit** genişliği: "Invalid pattern" ve "999 matches"
-/// sığıyor, yani etiket değişince panel eni zıplamıyor.
-const COUNT_WIDTH: f64 = 84.0;
+/// Sayım etiketinin **sabit** genişliği: "Invalid pattern" ve "999 of 9999…"
+/// sığıyor, yani sayım ilerlerken panel eni zıplamıyor. Daha uzun bir sayım
+/// (beş haneli) kuyruğundan kırpılıyor.
+const COUNT_WIDTH: f64 = 96.0;
 
 /// Anahtarların ve simgeli düğmelerin sabit genişliği, nokta: çerçevenin
 /// varsayılan iç payı bir-iki harflik başlığı gereğinden geniş gösteriyordu.
@@ -337,7 +338,7 @@ impl SearchBar {
         self.applied.borrow_mut().take();
     }
 
-    /// Sayım etiketini yazar (Karar 3; bu phase'de görünür eşleşmeler).
+    /// Sayım etiketini yazar (Karar 3).
     pub(crate) fn set_count(&self, status: SearchStatus, report: SearchReport) {
         self.count
             .setStringValue(&NSString::from_str(&count_label(status, report)));
@@ -354,16 +355,23 @@ impl SearchBar {
 }
 
 /// Etiketin metni (Karar 3). Boş sorguda boş; geçersiz desende "Invalid
-/// pattern"; eşleşme yoksa "No matches"; varsa varılan pencerede çizilen
-/// eşleşme sayısı — bütün defterin "3 of 17"si phase-5'te.
+/// pattern"; eşleşme yoksa "No matches"; varsa bütün defterin sayımı —
+/// "3 of 17", geçerli eşleşmenin sırası henüz bilinmiyorsa "17 matches".
+/// Sayım sürerken (dizin parça parça ilerliyor ya da defter değişti) sonda
+/// "…": sayı o ana kadar sayılanlar.
 pub(crate) fn count_label(status: SearchStatus, report: SearchReport) -> String {
+    let more = if report.complete { "" } else { "…" };
     match status {
         SearchStatus::Empty => String::new(),
         SearchStatus::Invalid => "Invalid pattern".to_owned(),
         SearchStatus::Ready if !report.found => "No matches".to_owned(),
-        SearchStatus::Ready => match report.visible.max(1) {
-            1 => "1 match".to_owned(),
-            n => format!("{n} matches"),
+        SearchStatus::Ready => match (report.ordinal, report.total) {
+            (_, 0) if !report.complete => "…".to_owned(),
+            (Some(ordinal), total) if ordinal <= total => {
+                format!("{ordinal} of {total}{more}")
+            }
+            (_, 1) => format!("1 match{more}"),
+            (_, total) => format!("{total} matches{more}"),
         },
     }
 }
@@ -480,21 +488,28 @@ mod tests {
 
     #[test]
     fn the_label_says_what_the_query_found() {
-        let report = |found, visible| SearchReport { found, visible };
-        assert_eq!(count_label(SearchStatus::Empty, report(false, 0)), "");
+        let report = |found, total, ordinal, complete| SearchReport {
+            found,
+            total,
+            ordinal,
+            complete,
+        };
+        let ready = |r| count_label(SearchStatus::Ready, r);
         assert_eq!(
-            count_label(SearchStatus::Invalid, report(false, 0)),
+            count_label(SearchStatus::Empty, report(false, 0, None, true)),
+            ""
+        );
+        assert_eq!(
+            count_label(SearchStatus::Invalid, report(false, 0, None, true)),
             "Invalid pattern"
         );
-        assert_eq!(
-            count_label(SearchStatus::Ready, report(false, 0)),
-            "No matches"
-        );
-        assert_eq!(count_label(SearchStatus::Ready, report(true, 1)), "1 match");
-        assert_eq!(
-            count_label(SearchStatus::Ready, report(true, 12)),
-            "12 matches"
-        );
+        assert_eq!(ready(report(false, 0, None, true)), "No matches");
+        assert_eq!(ready(report(true, 17, Some(3), true)), "3 of 17");
+        assert_eq!(ready(report(true, 17, Some(3), false)), "3 of 17…");
+        assert_eq!(ready(report(true, 17, None, true)), "17 matches");
+        assert_eq!(ready(report(true, 1, None, true)), "1 match");
+        assert_eq!(ready(report(true, 40, None, false)), "40 matches…");
+        assert_eq!(ready(report(true, 0, None, false)), "…");
     }
 
     #[test]
