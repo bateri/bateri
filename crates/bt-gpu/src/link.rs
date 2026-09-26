@@ -1283,7 +1283,7 @@ define_class!(
                 }
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
-                frame.open_dock(dock.ground, dock.separator);
+                frame.open_dock(dock.ground, dock.edge, dock.separator);
             } else {
                 // Dock yok (alternatif ekran): efektin konusu da yok.
                 glyph_fx.finish();
@@ -2369,6 +2369,7 @@ mod tests {
             frame.open_dock(
                 Theme::BATERI.background_linear(),
                 Theme::BATERI.accent_linear(),
+                Theme::BATERI.accent_linear(),
             );
             compose(&mut frame, motion, BOTTOM, true);
 
@@ -2402,6 +2403,7 @@ mod tests {
         frame.open_dock(
             Theme::BATERI.background_linear(),
             Theme::BATERI.accent_linear(),
+            Theme::BATERI.accent_linear(),
         );
         compose(&mut frame, motion, BOTTOM, true);
         assert_eq!(frame.dock_band_px(), frame.dock_layout_px());
@@ -2423,6 +2425,7 @@ mod tests {
         frame.set_dock_rows(4);
         frame.open_dock(
             Theme::BATERI.background_linear(),
+            Theme::BATERI.accent_linear(),
             Theme::BATERI.accent_linear(),
         );
         compose(&mut frame, motion, 600.0, true);

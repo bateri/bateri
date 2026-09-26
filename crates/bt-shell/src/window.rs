@@ -239,6 +239,14 @@ impl Wake for ShellWake {
             }
         });
     }
+
+    fn command_started(&self) {
+        // **Bilerek boş** (036 phase-1): uzak oturum modeli `bt-core`'da
+        // kuruldu ama üretimde henüz kimse yoklamıyor, yani `set_remote` hiç
+        // çağrılmıyor ve görünen davranış değişmiyor. Süreç tablosu
+        // yoklaması (ana kuyruğa en çok bir iş, `title_changed`'in
+        // örüntüsü) phase-3'te buraya iniyor.
+    }
 }
 
 /// `bt-gpu`'nun alternatif ekran habercisi: işi **ana kuyruğa** atar.

@@ -431,6 +431,20 @@ pub struct DockContext {
     /// dal yerine kısa SHA — kabuk hangisi olduğunu söylemiyor, yalnız
     /// gösterilecek adı gönderiyor.
     pub branch: String,
+    /// Uzak oturumun host'u, **kullanıcının yazdığı gibi** (`prod`,
+    /// `deploy@10.0.0.5`); uzak oturum yoksa `None` (036).
+    ///
+    /// Yazarı `bt-shell`'in süreç tablosu yoklaması
+    /// ([`crate::Session::set_remote`]); `C`, `D` ve `A`'da kendiliğinden
+    /// siliniyor ([`ShellLog::apply`]). Bağlamın içinde, çünkü kare yolu
+    /// bağlamı kilidin altında `clone_from` ile alıyor ve çizimi kilitten
+    /// sonra yapıyor: `ShellLog`'un kendi alanı olsaydı ya kare başına bir
+    /// `String` ayırmak ya da kilidi çizim boyunca tutmak gerekirdi.
+    pub remote: Option<String>,
+    /// Uzak tarafın OSC 7 dizini (036 Karar 4); gelmediyse boş. **Yalnız
+    /// [`Self::remote`] doluyken okunuyor** — etkin değilken de yazılıyor
+    /// (yabancı yetkili OSC 7), yoklama OSC 7'den sonra sonuçlanabilsin diye.
+    pub remote_cwd: String,
 }
 
 impl Clone for DockContext {
@@ -445,6 +459,25 @@ impl Clone for DockContext {
         self.cwd.push_str(&source.cwd);
         self.branch.clear();
         self.branch.push_str(&source.branch);
+        // Kapasite korunuyor: ayırma yalnız uzak oturumun **kenarında**.
+        match (&mut self.remote, &source.remote) {
+            (Some(host), Some(from)) => {
+                host.clear();
+                host.push_str(from);
+            }
+            (host, from) => host.clone_from(from),
+        }
+        self.remote_cwd.clear();
+        self.remote_cwd.push_str(&source.remote_cwd);
+    }
+}
+
+impl DockContext {
+    /// Uzak durumu siler; **başlığın girdisi değiştiyse** (host vardı)
+    /// `true`. Uzak yuva da gidiyor: bir sonraki oturumun dizini değil.
+    fn clear_remote(&mut self) -> bool {
+        self.remote_cwd.clear();
+        self.remote.take().is_some()
     }
 }
 
@@ -459,11 +492,28 @@ impl Clone for DockContext {
 ///    olan son bileşen.
 /// 3. `bateri`.
 ///
-/// Saf ve iki yuvadan beslenir; okuyan [`crate::Session::title`]. Ev dizini
+/// **Uzak oturum etkinken** (036 Karar 5, `remote` = host) başlık
+/// [`crate::dock::REMOTE_MARK`] önekini taşıyor: `⇄ {OSC başlığı}`, başlık
+/// yoksa `⇄ {host}`; yerel dizin hiç sorulmuyor. Önek koşulsuz, çünkü uzak
+/// kabukların çoğu başlığa `user@host: dir` basıyor ve sekmeler arasında
+/// uzağı ayırt eden şey o; alternatif ekranda (uzakta vim) dock kalktığı için
+/// göstergeyi yalnız başlık taşıyor.
+///
+/// Saf ve üç yuvadan beslenir; okuyan [`crate::Session::title`]. Ev dizini
 /// argüman, çünkü bu crate ortam okumaz — değeri uygulama veriyor
 /// ([`crate::SessionOptions::home`]).
-pub(crate) fn title_of(osc_title: Option<&str>, cwd: Option<&str>, home: Option<&Path>) -> String {
-    if let Some(title) = osc_title.filter(|title| !title.trim().is_empty()) {
+pub(crate) fn title_of(
+    osc_title: Option<&str>,
+    cwd: Option<&str>,
+    home: Option<&Path>,
+    remote: Option<&str>,
+) -> String {
+    let osc_title = osc_title.filter(|title| !title.trim().is_empty());
+    if let Some(host) = remote {
+        let mark = crate::dock::REMOTE_MARK;
+        return format!("{mark} {}", osc_title.unwrap_or(host));
+    }
+    if let Some(title) = osc_title {
         return title.to_owned();
     }
     let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) else {
@@ -956,6 +1006,19 @@ pub(crate) struct ShellLog {
     /// `Instant`, sistem saati değil: kullanıcı saati değiştirse ya da yaz
     /// saati geçse bile süre geriye akmaz.
     pub(crate) running_since: Option<Instant>,
+    /// Komut nesli: safha `Running`'e her **geçişte** bir artıyor (036
+    /// Karar 2).
+    ///
+    /// Uzak oturum yoklamasının bayat cevap kapısı: yoklama ana thread'de,
+    /// `D` okuyucu thread'de, ve arada biten komutun cevabı bir sonrakine
+    /// sızmamalı. Çağıran nesli yoklamadan önce alıyor
+    /// ([`crate::Session::running_command`]) ve cevapla geri veriyor
+    /// ([`crate::Session::set_remote`]); tutmazsa cevap düşüyor.
+    ///
+    /// **İkinci `C` geçiş değil** ve nesli oynatmıyor — saatin "ilk `C`
+    /// kazanır" kuralının ([`Self::running_since`]) aynı yeri: iTerm2'nin komut
+    /// ortasındaki `C`'si koşan bir ssh'ın cevabını geçersiz kılmamalı.
+    pub(crate) command: u64,
     /// Devrin **ham** cevabı, en son gözlendiği hâliyle.
     ///
     /// Damga [`Self::apply_scan`]'de tutuluyor — tek giriş noktası ve yaprak
@@ -1199,6 +1262,7 @@ impl ShellLog {
             dock_editable: false,
             dock_pending: None,
             running_since: None,
+            command: 0,
             // Açılışta caret dock'un (`caret_home_raw(None, Idle)`), yani ilk
             // devir her zaman Dock→Grid yönünde ve tutma ona uygulanabilir.
             caret_raw: CaretHome::Dock,
@@ -1218,13 +1282,17 @@ impl ShellLog {
     /// Durum yuvası `Option` olduğu için "hiç işaret görmedik" ile
     /// "prompt'tayız" karışmıyor: besleyen yokken yuva boş kalır ve dışarıya
     /// "entegrasyon yok" der.
-    pub(crate) fn apply(&mut self, mark: Mark) {
+    ///
+    /// Dönüş çağıranın vereceği haberler ([`ScanOutcome`]): `Running`'e
+    /// geçiş ve uzak durumun silinmesi (036).
+    pub(crate) fn apply(&mut self, mark: Mark) -> ScanOutcome {
         // **Tutulan `line-finish` her işarette biter** (Karar 11): `C` komutun
         // koştuğunu, `A` yeni prompt'u söylüyor — ikisinde de kabul edilen
         // satır artık ızgaranın kalıcı içeriği.
         if self.end_since.take().is_some() {
             self.end_line();
         }
+        let mut outcome = ScanOutcome::default();
         let state = self.state.get_or_insert(ShellState {
             phase: ShellPhase::Prompt,
             last_exit: None,
@@ -1232,6 +1300,11 @@ impl ShellLog {
         match mark {
             Mark::PromptStart { id } => {
                 state.phase = ShellPhase::Prompt;
+                // Uzak durum **kendiliğinden** gidiyor (036 Karar 2): bitiş
+                // için `bt-shell`'e gidiş-dönüş yok. `A` `D`'nin savunma kolu
+                // — saatinki gibi, kaybolan bir `D` uzak göstergeyi sonraki
+                // prompt'a taşımasın.
+                outcome.title = self.context.clear_remote();
                 self.dock_editable = false;
                 self.dock_pending = None;
                 // **Saatin ikinci sıfırlama noktası ve bir savunma kolu.**
@@ -1249,6 +1322,15 @@ impl ShellLog {
             }
             Mark::PromptEnd => state.phase = ShellPhase::Input,
             Mark::CommandStart => {
+                // **Geçiş** yalnız safha `Running` değilken: ikinci `C`
+                // (iTerm2 entegrasyonu) ne nesli ne uzak durumu oynatıyor
+                // ([`Self::command`]). Yoklama `D`'ye kadar kilitli, yani o
+                // `C` host'u silseydi gösterge geri gelmezdi.
+                if state.phase != ShellPhase::Running {
+                    self.command += 1;
+                    outcome.started = true;
+                    outcome.title = self.context.clear_remote();
+                }
                 state.phase = ShellPhase::Running;
                 // Saatin dikildiği yer: `C` komutun **çalışmaya başladığını**
                 // söylüyor; prompt'un basılması ya da kullanıcının yazdığı
@@ -1266,6 +1348,7 @@ impl ShellLog {
             }
             Mark::CommandEnd { exit, id } => {
                 state.phase = ShellPhase::Finished;
+                outcome.title = self.context.clear_remote();
                 // Kodu **her hâlde** tazeliyoruz: okunamayan bir kodu eskisiyle
                 // doldurmak, biten komutu başkasının koduyla etiketlemek olurdu.
                 state.last_exit = exit;
@@ -1294,6 +1377,7 @@ impl ShellLog {
                 }
             }
         }
+        outcome
     }
 
     /// Tarayıcının çıkardığı olayı doğru kola uygular.
@@ -1312,29 +1396,83 @@ impl ShellLog {
     /// taraf (`session`'ın `TappedPty`'si) nesli olay başına bir atomik
     /// okumayla getiriyor.
     ///
-    /// Dönüş "başlığın girdisi değişti mi": yalnız **farklı** bir OSC 7
-    /// dizini `true` verir ve çağıran o zaman [`crate::Wake::title_changed`]'i
-    /// kilidi bıraktıktan sonra çağırır. Aynı dizini basan her `precmd` haber
-    /// doğursaydı her prompt ana kuyruğa boşuna bir iş atardı.
-    pub(crate) fn apply_scan_answering(&mut self, event: ScanEvent<'_>, answers: u64) -> bool {
-        let mut cwd_changed = false;
+    /// Dönüş çağıranın vereceği iki haber ([`ScanOutcome`]); ikisini de
+    /// kilidi bıraktıktan sonra verir. Başlığın haberi yalnız **farklı** bir
+    /// yerel OSC 7 dizininde ya da uzak durumun silinmesinde: aynı dizini
+    /// basan her `precmd` haber doğursaydı her prompt ana kuyruğa boşuna bir
+    /// iş atardı.
+    pub(crate) fn apply_scan_answering(
+        &mut self,
+        event: ScanEvent<'_>,
+        answers: u64,
+    ) -> ScanOutcome {
+        let mut outcome = ScanOutcome::default();
         match event {
-            ScanEvent::Mark(mark) => self.apply(mark),
+            ScanEvent::Mark(mark) => outcome = self.apply(mark),
             ScanEvent::Dock(event) => self.apply_dock(event, answers),
-            // Dizin **kabul edilmiş** geliyor: şemayı, yetkiyi ve yüzde
-            // çözmeyi tarayıcı yaptı, buraya yalnız çizilebilir bir yol
-            // ulaşıyor. Reddedilen bir OSC 7 hiç olay doğurmuyor, yani eski
-            // yol yerinde kalıyor — yanlış yol göstermektense bayat yol.
-            ScanEvent::Cwd(path) => {
-                if self.context.cwd != path {
+            // Dizin **çözülmüş** geliyor: şemayı, yolu ve yüzde çözmeyi
+            // tarayıcı yaptı, buraya yalnız çizilebilir bir yol ve yetkinin
+            // yerel olup olmadığı ulaşıyor. Reddedilen bir OSC 7 hiç olay
+            // doğurmuyor, yani eski yol yerinde kalıyor — yanlış yol
+            // göstermektense bayat yol.
+            //
+            // **Hangi yuvaya** (036 Karar 4): uzak oturum etkinken **her**
+            // OSC 7 uzak tarafın — yerel kabuk ssh'ın arkasında bloklu, yani
+            // `file:///…` basan bir uzak kabuk yerel dizini ezmemeli. Etkin
+            // değilken yabancı yetki uzak yuvaya: OSC 7 yoklamadan önce
+            // gelebiliyor ve sonucu değiştirmemeli. Uzak yuva başlığa
+            // girmiyor, yani haber yok.
+            ScanEvent::Cwd { path, local } => {
+                if self.context.remote.is_some() || !local {
+                    self.context.remote_cwd.clear();
+                    self.context.remote_cwd.push_str(path);
+                } else if self.context.cwd != path {
                     self.context.cwd.clear();
                     self.context.cwd.push_str(path);
-                    cwd_changed = true;
+                    outcome.title = true;
                 }
             }
         }
         self.observe_caret();
-        cwd_changed
+        outcome
+    }
+
+    /// Koşan komutun nesli ([`Self::command`]); safha `Running` değilse
+    /// `None`. Bayat cevap kapısının iki yarısının ([`crate::Session::running_command`],
+    /// [`crate::Session::set_remote`]) **tek** tanımı: ayrışsalardı yoklama
+    /// `set_remote`'un reddedeceği bir nesil alabilirdi.
+    pub(crate) fn running_command(&self) -> Option<u64> {
+        self.state
+            .is_some_and(|state| state.phase == ShellPhase::Running)
+            .then_some(self.command)
+    }
+
+    /// Uzak oturumun host'unu yazar (036); **başlığın girdisi değiştiyse**
+    /// `true`.
+    ///
+    /// Kapı çağıranda ([`crate::Session::set_remote`]: nesil ve safha); burada
+    /// yalnız yazma. Boş host "uzak değil" demek — gösterilecek bir ad yok.
+    ///
+    /// **Kontrol karakteri taşıyan host da yok sayılıyor**: ad süreç
+    /// tablosundan, yani kullanıcının yazdığı argv'den geliyor ve satır sonu
+    /// ya da ESC pencere başlığına ve bağlam satırına (kutu olarak) giderdi.
+    /// Yanlışın yönü güvenli: gösterge çıkmıyor, yanlış bir ad çizilmiyor.
+    pub(crate) fn set_remote(&mut self, host: Option<&str>) -> bool {
+        let host = host.filter(|host| !host.is_empty() && !host.chars().any(char::is_control));
+        if self.context.remote.as_deref() == host {
+            return false;
+        }
+        match host {
+            Some(host) => {
+                let slot = self.context.remote.get_or_insert_with(String::new);
+                slot.clear();
+                slot.push_str(host);
+            }
+            // Uzak yuva kalıyor: yoklama "yerel" dediyse zaten okunmuyor ve
+            // `C`/`D`/`A` onu siliyor.
+            None => self.context.remote = None,
+        }
+        true
     }
 
     /// Devrin ham cevabını damgalar; **değişmediyse damga kıpırdamaz**.
@@ -1978,6 +2116,20 @@ enum Arm {
     Cwd,
 }
 
+/// [`ShellLog::apply_scan_answering`]'in cevabı: okuyucu thread'in kilidi
+/// bıraktıktan sonra vereceği haberler (036).
+///
+/// Tek dönüş yolu, iki haber: ikinci bir yol açmak (defterde bayrak, ayrı
+/// sorgu) haberi kilidin ikinci bir turuna bağlardı.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScanOutcome {
+    /// Başlığın girdisi değişti — farklı bir yerel dizin ya da uzak durumun
+    /// silinmesi → [`crate::Wake::title_changed`].
+    pub(crate) title: bool,
+    /// Safha `Running`'e **geçti** → [`crate::Wake::command_started`].
+    pub(crate) started: bool,
+}
+
 /// Tarayıcının dışarıya verdiği olay.
 ///
 /// İki kol tek `enum`'da, çünkü tek çağrı: okuyucu thread'i kilidi olay
@@ -1990,10 +2142,15 @@ enum Arm {
 pub(crate) enum ScanEvent<'a> {
     Mark(Mark),
     Dock(DockEvent<'a>),
-    /// Çalışma dizini, **kabul edilmiş ve çözülmüş** tam yol. Reddedilen bir
-    /// URI hiç olay doğurmuyor: "dizin okunamadı" diye bir hâl yok, çünkü
-    /// doğru cevap eskisini bırakmak.
-    Cwd(&'a str),
+    /// Çalışma dizini, **çözülmüş** tam yol, ve yetkinin bu makine olup
+    /// olmadığı ([`LOCAL_AUTHORITIES`]). Reddedilen bir URI hiç olay
+    /// doğurmuyor: "dizin okunamadı" diye bir hâl yok, çünkü doğru cevap
+    /// eskisini bırakmak. Yabancı yetki 036'dan beri reddedilmiyor, uzak
+    /// yuvaya gidiyor ([`ShellLog::apply_scan_answering`]).
+    Cwd {
+        path: &'a str,
+        local: bool,
+    },
 }
 
 /// Ayna kolunun olayları.
@@ -2233,8 +2390,11 @@ impl Scanner {
                     // Çözme `close`'dan **önce**: `close` tamponu boşaltıyor.
                     let read = parse_cwd(&self.cwd, &mut self.decoded, &mut self.path);
                     self.close(byte);
-                    if read.is_some() {
-                        on_event(ScanEvent::Cwd(&self.path));
+                    if let Some(local) = read {
+                        on_event(ScanEvent::Cwd {
+                            path: &self.path,
+                            local,
+                        });
                     }
                 } else if is_ignored(byte) {
                 } else if self.cwd.len() == CWD_PAYLOAD_LIMIT {
@@ -2365,7 +2525,10 @@ fn parse_mark(payload: &[u8]) -> Option<Mark> {
     }
 }
 
-/// Bu makineyi gösteren yetki (authority) değerleri.
+/// Bu makineyi gösteren yetki (authority) değerleri — "yerel mi" sorusunun
+/// cevabı, **kabul listesi değil** (036): yabancı yetkili OSC 7 de olay
+/// doğuruyor ve uzak yuvaya gidiyor ([`ShellLog::apply_scan_answering`]),
+/// yalnız yerel dizine yazmıyor.
 ///
 /// **Adlı her host yabancı sayılıyor** ve bu, "kendi ad'ımızla karşılaştır"
 /// yerine bilinçli seçildi: karşılaştırma `gethostname` demek, o da `bt-core`'a
@@ -2375,24 +2538,27 @@ fn parse_mark(payload: &[u8]) -> Option<Mark> {
 /// makine yeniden adlandırılınca sessizce kapanmıyor.
 ///
 /// **Bilinen sınır:** `file://$HOST$PWD` basan üçüncü taraf kancalar
-/// (oh-my-zsh'in `termsupport.zsh`'i gibi) yoksayılıyor. Kayıp yalnız komutun
+/// (oh-my-zsh'in `termsupport.zsh`'i gibi) yerel dizine yazmıyor — uzak
+/// yuvaya düşüyorlar, o da yalnız uzak oturum etkinken okunuyor ve `C`, `D`,
+/// `A`'da siliniyor, yani yerel davranış 036'dan önceki gibi. Kayıp yalnız komutun
 /// *ortasında* yapılan bir `cd`'nin canlı yansıması; dizin bir sonraki
 /// prompt'ta kendi `precmd`'imizden zaten geliyor. İstenirse çare yine
 /// bağımlılık değil politika: `bt-shell` (elinde `libc` var) adı okur ve
 /// `SessionOptions` ile geçirir — `decide_locale` emsali.
 const LOCAL_AUTHORITIES: [&str; 2] = ["", "localhost"];
 
-/// `7;` sonrasındaki URI'yi çizilebilir bir yola çevirir; tanımadığını
-/// **yoksayar** (`None`).
+/// `7;` sonrasındaki URI'yi çizilebilir bir yola çevirir ve yetkinin yerel
+/// olup olmadığını döndürür; tanımadığını **yoksayar** (`None`).
 ///
 /// **Yük alanlara bölünmüyor** ([`parse_mark`] ve [`parse_dock`]'un aksine):
 /// `;` bir dosya adında geçerli bir karakter ve yükü bölseydik `/tmp/a;b`
 /// yolunu `/tmp/a` diye okurduk.
 ///
 /// Reddedilen her hâlin sonucu aynı ve **panik değil yoksayma**
-/// (`CLAUDE.md` → PTY yolunda panik yok): şema `file:` değil, yetki bu makine
+/// (`CLAUDE.md` → PTY yolunda panik yok): şema `file:` değil, yetki UTF-8
 /// değil, yol `/` ile başlamıyor, yüzde kaçışı bozuk ya da sonuç UTF-8 değil.
-fn parse_cwd(payload: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option<()> {
+/// Yabancı yetki bir ret değil (036): cevap `Some(false)`.
+fn parse_cwd(payload: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option<bool> {
     // Şema harf duyarsız (RFC 3986 §3.1); `file:` beş bayt.
     let rest = payload
         .get(..5)
@@ -2405,19 +2571,16 @@ fn parse_cwd(payload: &[u8], decoded: &mut Vec<u8>, into: &mut String) -> Option
     let at = rest.iter().position(|&b| b == b'/')?;
     let (authority, path) = rest.split_at(at);
     let authority = std::str::from_utf8(authority).ok()?;
-    if !LOCAL_AUTHORITIES
+    let local = LOCAL_AUTHORITIES
         .iter()
-        .any(|local| authority.eq_ignore_ascii_case(local))
-    {
-        return None;
-    }
+        .any(|local| authority.eq_ignore_ascii_case(local));
 
     decoded.clear();
     decode_percent(path, decoded)?;
     let text = std::str::from_utf8(decoded).ok()?;
     into.clear();
     into.push_str(text);
-    Some(())
+    Some(local)
 }
 
 /// Yüzde kaçışlarını çözer; `%` iki onaltılık haneyle **gelmek zorunda**.
@@ -3698,12 +3861,20 @@ mod tests {
         assert!(matches!(&seen[1], DockSnapshot::Update(line) if line.buffer == "ok"));
     }
 
-    /// Dizin kolunun çözdüğü yollar.
+    /// Dizin kolunun çözdüğü **yerel** yollar.
     fn cwd_events(bytes: &[u8]) -> Vec<String> {
+        cwd_events_of(bytes, true)
+    }
+
+    /// Dizin kolunun çözdüğü, yetkisi yerel olan (`local`) ya da olmayan
+    /// yollar.
+    fn cwd_events_of(bytes: &[u8], local: bool) -> Vec<String> {
         let mut scanner = Scanner::new();
         let mut seen = Vec::new();
         scanner.feed(bytes, |event| {
-            if let ScanEvent::Cwd(path) = event {
+            if let ScanEvent::Cwd { path, local: is } = event
+                && is == local
+            {
                 seen.push(path.to_owned());
             }
         });
@@ -3728,21 +3899,25 @@ mod tests {
     }
 
     #[test]
-    fn a_named_host_or_a_broken_uri_is_ignored() {
-        // Hepsinin tek yanıtı: hiçbir olay. Yön güvenli — eski yol ekranda
-        // kalıyor, başkasının makinesindeki yol bizimmiş gibi çizilmiyor.
+    fn a_named_host_is_foreign_and_a_broken_uri_is_ignored() {
+        // Adlı host **yabancı** (036): olay doğuruyor ama yerel değil, yani
+        // yerel dizine hiç yazmıyor — uzak yuvaya gidiyor.
+        let named = b"\x1b]7;file://remote.example/tmp\x07";
+        assert_eq!(cwd_events(named), Vec::<String>::new());
+        assert_eq!(cwd_events_of(named, false), ["/tmp"]);
+        // Kalanların tek yanıtı: hiçbir olay. Yön güvenli — eski yol ekranda
+        // kalıyor.
         for sequence in [
-            &b"\x1b]7;file://remote.example/tmp\x07"[..], // yabancı host
-            b"\x1b]7;/tmp\x07",                           // şema yok
-            b"\x1b]7;http://host/tmp\x07",                // yabancı şema
-            b"\x1b]7;file:/tmp\x07",                      // yetki bölümü yok
-            b"\x1b]7;file://localhost\x07",               // yol yok
-            b"\x1b]7;file:///tmp/%zz\x07",                // bozuk yüzde
-            b"\x1b]7;file:///tmp/%e0%80\x07",             // UTF-8 değil
-            b"\x1b]7;\x07",                               // boş yük
+            &b"\x1b]7;/tmp\x07"[..],          // şema yok
+            b"\x1b]7;http://host/tmp\x07",    // yabancı şema
+            b"\x1b]7;file:/tmp\x07",          // yetki bölümü yok
+            b"\x1b]7;file://localhost\x07",   // yol yok
+            b"\x1b]7;file:///tmp/%zz\x07",    // bozuk yüzde
+            b"\x1b]7;file:///tmp/%e0%80\x07", // UTF-8 değil
+            b"\x1b]7;\x07",                   // boş yük
         ] {
             assert!(
-                cwd_events(sequence).is_empty(),
+                cwd_events(sequence).is_empty() && cwd_events_of(sequence, false).is_empty(),
                 "dizi geçti: {}",
                 String::from_utf8_lossy(sequence)
             );
@@ -4657,7 +4832,7 @@ mod tests {
             ScanEvent::Mark(mark) => marks.push(mark),
             ScanEvent::Dock(DockEvent::Update(line)) => lines.push(line.buffer.clone()),
             ScanEvent::Dock(_) => {}
-            ScanEvent::Cwd(path) => paths.push(path.to_owned()),
+            ScanEvent::Cwd { path, .. } => paths.push(path.to_owned()),
         });
 
         assert_eq!(marks, vec![Mark::PromptEnd]);
@@ -5181,38 +5356,194 @@ mod tests {
     fn the_title_prefers_the_application_then_the_directory() {
         let home = Path::new("/Users/someone");
         // OSC 0/2 kazanır, dizin ne olursa olsun.
-        assert_eq!(title_of(Some("vim"), Some("/tmp"), Some(home)), "vim");
+        assert_eq!(title_of(Some("vim"), Some("/tmp"), Some(home), None), "vim");
         // Boş (ya da yalnız boşluk) OSC başlığı yok sayılır, dizine düşer.
-        assert_eq!(title_of(Some(""), Some("/tmp"), Some(home)), "tmp");
-        assert_eq!(title_of(Some("  "), Some("/tmp"), Some(home)), "tmp");
+        assert_eq!(title_of(Some(""), Some("/tmp"), Some(home), None), "tmp");
+        assert_eq!(title_of(Some("  "), Some("/tmp"), Some(home), None), "tmp");
         // `ResetTitle` yuvayı siliyor: başlık dizine döner.
-        assert_eq!(title_of(None, Some("/usr/local/bin"), Some(home)), "bin");
-        // Ev dizininin kendisi `~`, alt dizini son bileşen.
-        assert_eq!(title_of(None, Some("/Users/someone"), Some(home)), "~");
-        assert_eq!(title_of(None, Some("/Users/someone/"), Some(home)), "~");
         assert_eq!(
-            title_of(None, Some("/Users/someone/proj"), Some(home)),
+            title_of(None, Some("/usr/local/bin"), Some(home), None),
+            "bin"
+        );
+        // Ev dizininin kendisi `~`, alt dizini son bileşen.
+        assert_eq!(
+            title_of(None, Some("/Users/someone"), Some(home), None),
+            "~"
+        );
+        assert_eq!(
+            title_of(None, Some("/Users/someone/"), Some(home), None),
+            "~"
+        );
+        assert_eq!(
+            title_of(None, Some("/Users/someone/proj"), Some(home), None),
             "proj"
         );
         // Ev dizini bilinmiyorsa ev de sıradan bir dizin.
-        assert_eq!(title_of(None, Some("/Users/someone"), None), "someone");
+        assert_eq!(
+            title_of(None, Some("/Users/someone"), None, None),
+            "someone"
+        );
         // Kök.
-        assert_eq!(title_of(None, Some("/"), Some(home)), "/");
+        assert_eq!(title_of(None, Some("/"), Some(home), None), "/");
         // Hiçbiri: uygulamanın adı.
-        assert_eq!(title_of(None, None, Some(home)), "bateri");
-        assert_eq!(title_of(None, Some(""), Some(home)), "bateri");
+        assert_eq!(title_of(None, None, Some(home), None), "bateri");
+        assert_eq!(title_of(None, Some(""), Some(home), None), "bateri");
+    }
+
+    #[test]
+    fn a_remote_session_marks_the_title() {
+        // 036 Karar 5: uzak etkinken dizin hiç sorulmuyor; OSC başlığı
+        // önekle, yoksa host.
+        let home = Path::new("/Users/someone");
+        let remote = Some("prod");
+        assert_eq!(
+            title_of(Some("deploy@prod: ~"), Some("/tmp"), Some(home), remote),
+            "⇄ deploy@prod: ~"
+        );
+        assert_eq!(title_of(None, Some("/tmp"), Some(home), remote), "⇄ prod");
+        // Boş OSC başlığı yok sayılıyor: host'a düşer, dizine değil.
+        assert_eq!(
+            title_of(Some(" "), Some("/tmp"), Some(home), remote),
+            "⇄ prod"
+        );
+        // Dizin hiç yokken de host.
+        assert_eq!(title_of(None, None, None, remote), "⇄ prod");
     }
 
     #[test]
     fn only_a_different_directory_changes_the_title_input() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
-        assert!(log.apply_scan_answering(ScanEvent::Cwd("/tmp"), 0));
+        let title = |log: &mut ShellLog, event| log.apply_scan_answering(event, 0).title;
+        assert!(title(&mut log, local_cwd("/tmp")));
         // Aynı dizini basan ikinci `precmd` haber doğurmaz.
-        assert!(!log.apply_scan_answering(ScanEvent::Cwd("/tmp"), 0));
-        assert!(log.apply_scan_answering(ScanEvent::Cwd("/"), 0));
+        assert!(!title(&mut log, local_cwd("/tmp")));
+        assert!(title(&mut log, local_cwd("/")));
         // Dizin dışı olaylar başlığın girdisine hiç dokunmaz.
-        assert!(!log.apply_scan_answering(ScanEvent::Mark(Mark::PromptEnd), 0));
-        assert!(!log.apply_scan_answering(ScanEvent::Dock(DockEvent::End), 0));
+        assert!(!title(&mut log, ScanEvent::Mark(Mark::PromptEnd)));
+        assert!(!title(&mut log, ScanEvent::Dock(DockEvent::End)));
+        // Uzak durum yokken `A` ile `D` de dokunmaz.
+        assert!(!title(
+            &mut log,
+            ScanEvent::Mark(Mark::PromptStart { id: None })
+        ));
         assert_eq!(log.context.cwd, "/");
+    }
+
+    fn local_cwd(path: &str) -> ScanEvent<'_> {
+        ScanEvent::Cwd { path, local: true }
+    }
+
+    fn foreign_cwd(path: &str) -> ScanEvent<'_> {
+        ScanEvent::Cwd { path, local: false }
+    }
+
+    /// Komut koşan (`C`) bir defter; nesli ve safhası hazır.
+    fn running_log() -> ShellLog {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply(Mark::PromptStart { id: Some(1) });
+        log.apply(Mark::PromptEnd);
+        log.apply(Mark::CommandStart);
+        log
+    }
+
+    #[test]
+    fn only_the_transition_into_running_starts_a_command() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        assert_eq!(log.command, 0);
+        let first = log.apply(Mark::CommandStart);
+        assert!(first.started, "ilk `C` bir geçiş");
+        assert_eq!(log.command, 1);
+        // İkinci `C` (iTerm2) geçiş değil: nesil oynamıyor, haber yok.
+        assert!(!log.apply(Mark::CommandStart).started);
+        assert_eq!(log.command, 1);
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: None,
+        });
+        log.apply(Mark::PromptStart { id: None });
+        assert!(log.apply(Mark::CommandStart).started);
+        assert_eq!(log.command, 2);
+    }
+
+    #[test]
+    fn the_second_command_start_keeps_the_remote_host() {
+        let mut log = running_log();
+        assert!(log.set_remote(Some("prod")));
+        // Komut ortasındaki ikinci `C` uzak durumu silmiyor: yoklama `D`'ye
+        // kadar kilitli ve gösterge geri gelmezdi.
+        let outcome = log.apply(Mark::CommandStart);
+        assert_eq!(outcome, ScanOutcome::default());
+        assert_eq!(log.context.remote.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn end_and_prompt_clear_the_remote_state() {
+        for mark in [
+            Mark::CommandEnd {
+                exit: Some(0),
+                id: None,
+            },
+            Mark::PromptStart { id: None },
+        ] {
+            let mut log = running_log();
+            assert!(log.set_remote(Some("prod")));
+            log.apply_scan_answering(foreign_cwd("/srv"), 0);
+            assert_eq!(log.context.remote_cwd, "/srv");
+            let outcome = log.apply(mark);
+            assert!(outcome.title, "{mark:?}: silme başlığın girdisi");
+            assert_eq!(log.context.remote, None, "{mark:?}");
+            assert_eq!(log.context.remote_cwd, "", "{mark:?}");
+            // Silinmiş durumu ikinci kez silmek haber değil.
+            assert!(!log.apply(mark).title, "{mark:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_command_clears_a_foreign_directory() {
+        // Yoklamadan önce gelen yabancı OSC 7 uzak yuvada bekliyor; ama bir
+        // önceki komutun kalıntısı bir sonrakine taşınmıyor.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply_scan_answering(foreign_cwd("/srv"), 0);
+        assert_eq!(log.context.remote_cwd, "/srv");
+        log.apply(Mark::CommandStart);
+        assert_eq!(log.context.remote_cwd, "");
+    }
+
+    #[test]
+    fn osc7_routes_by_authority_and_remote_state() {
+        let mut log = running_log();
+        // Yerel yetki bugünkü gibi yerel dizine.
+        assert!(log.apply_scan_answering(local_cwd("/Users/me"), 0).title);
+        // Yabancı yetki uzak yuvaya; yerel dizin ve başlık kıpırdamıyor.
+        let outcome = log.apply_scan_answering(foreign_cwd("/var/www"), 0);
+        assert!(!outcome.title);
+        assert_eq!(
+            (log.context.cwd.as_str(), log.context.remote_cwd.as_str()),
+            ("/Users/me", "/var/www")
+        );
+        // Uzak etkinken **boş yetki de** uzak yuvaya: ssh'ın arkasında yerel
+        // kabuk bloklu.
+        assert!(log.set_remote(Some("prod")));
+        let outcome = log.apply_scan_answering(local_cwd("/home/deploy"), 0);
+        assert!(!outcome.title);
+        assert_eq!(
+            (log.context.cwd.as_str(), log.context.remote_cwd.as_str()),
+            ("/Users/me", "/home/deploy")
+        );
+    }
+
+    #[test]
+    fn set_remote_reports_only_a_change() {
+        let mut log = running_log();
+        assert!(!log.set_remote(None), "yok → yok değişim değil");
+        assert!(!log.set_remote(Some("")), "boş host uzak değil");
+        assert!(!log.set_remote(Some("prod\n")), "kontrol karakteri");
+        assert!(!log.set_remote(Some("\u{1b}[31mprod")), "ESC");
+        assert!(log.set_remote(Some("prod")));
+        assert!(!log.set_remote(Some("prod")));
+        assert!(log.set_remote(Some("deploy@10.0.0.5")));
+        assert_eq!(log.context.remote.as_deref(), Some("deploy@10.0.0.5"));
+        assert!(log.set_remote(None));
+        assert_eq!(log.context.remote, None);
     }
 }

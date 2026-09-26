@@ -3199,7 +3199,7 @@ mod tests {
         // pass'in sağ çıktığının tanığı.
         frame.set_origin_rows(-FILL_PX / f32::from(CELL));
         frame.set_dock_rows(1);
-        frame.open_dock(blue, WHITE);
+        frame.open_dock(blue, WHITE, WHITE);
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
         assert!(
             near(pixel_at(&pixels, EDGE, 14, 12), (0, 0, 255)),
@@ -3470,7 +3470,7 @@ mod tests {
         frame.push(bg_cell(0, 0, red));
         frame.push_dock(bg_cell(0, 0, blue));
         frame.set_dock_rows(1);
-        frame.open_dock(green, WHITE);
+        frame.open_dock(green, WHITE, WHITE);
 
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
         let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE, x, y);
@@ -3535,7 +3535,7 @@ mod tests {
             frame.push_dock(bg_cell(0, 2, blue));
             frame.push_dock(bg_cell(0, 3, red));
             frame.set_dock_band(EDGE as f32, extra);
-            frame.open_dock(green, WHITE);
+            frame.open_dock(green, WHITE, WHITE);
             render_offscreen(&r, EDGE, ACCENT, &frame)
         };
 
@@ -3601,7 +3601,7 @@ mod tests {
             true,
         );
         frame.set_dock_rows(1);
-        frame.open_dock(red, WHITE);
+        frame.open_dock(red, WHITE, WHITE);
 
         let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
         // Dock dokunun **dibine** yaslı, tepeden hücre sayarak değil: ofset
@@ -5064,7 +5064,7 @@ mod tests {
         }
         frame.set_dock_fx(fx.iter().copied(), &Clusters::default(), HEAT);
         frame.set_dock_rows(1);
-        frame.open_dock(BACKGROUND, BACKGROUND);
+        frame.open_dock(BACKGROUND, BACKGROUND, BACKGROUND);
         frame
     }
 

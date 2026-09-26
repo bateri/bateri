@@ -522,7 +522,11 @@ pub(crate) struct DockSurface {
     /// Yüzeyin zemini; **opak** (`bt_core::Dock::ground`). Kayma boyunca
     /// ızgaranın taşan alt satırı bunun altında kalıyor.
     ground: [f32; 4],
-    /// Dock'u ızgaradan ayıran saç çizgisi.
+    /// Dock'u ızgaradan ayıran **üst** saç çizgisi (`bt_core::Dock::edge`):
+    /// uzak oturumda ayrı bir renk (036), yani ikinci çizgiyle aynı alan
+    /// olamaz.
+    edge: [f32; 4],
+    /// Giriş bloğunu bağlam satırından ayıran saç çizgisi.
     separator: [f32; 4],
 }
 
@@ -1912,16 +1916,22 @@ impl Frame {
         self.dock_top_px = bottom_px - self.band_height();
     }
 
-    /// Dock yüzeyini bu kare için açar: iki rengi.
+    /// Dock yüzeyini bu kare için açar: zemini ve iki saç çizgisinin rengi.
     ///
     /// Hücrelerden **sonra** çağrılıyor ve bu bir sıra tercihi değil zorunluk:
     /// renkler `bt-core`'un dock çağrısından dönüyor ve o çağrı hücreleri
     /// sink'e basarken doğuruyor onları. `Frame` bu yüzden yüzeyi hücrelerden
     /// bağımsız tutuyor — listeler doluyken `dock` hâlâ `None` olabilir ve o
     /// hâlde hiçbir şey çizilmez, yani "yarım açılmış dock" temsil edilemez.
-    pub(crate) fn open_dock(&mut self, ground: LinearRgba, separator: LinearRgba) {
+    pub(crate) fn open_dock(
+        &mut self,
+        ground: LinearRgba,
+        edge: LinearRgba,
+        separator: LinearRgba,
+    ) {
         self.dock = Some(DockSurface {
             ground: ground.to_array(),
+            edge: edge.to_array(),
             separator: separator.to_array(),
         });
     }
@@ -2020,6 +2030,7 @@ impl Frame {
     pub(crate) fn dock_ground(&self, width_px: f32) -> [Instance; 3] {
         let dock = self.dock.unwrap_or(DockSurface {
             ground: [0.0; 4],
+            edge: [0.0; 4],
             separator: [0.0; 4],
         });
         let band = self.dock_band_px();
@@ -2038,15 +2049,16 @@ impl Frame {
                 rgba: dock.ground,
             },
             // Ayraç zeminin **üstünde** ve dock'un en üst pikselinde: ızgara
-            // ile dock arasındaki sınır orası.
+            // ile dock arasındaki sınır orası. Rengi kendi alanından: uzak
+            // oturumda yüzeyin kenarı uzaklığı söylüyor (036), bölme değil.
             Instance {
                 pos: [0.0, 0.0],
                 size: [width_px, SEPARATOR_PX],
-                rgba: dock.separator,
+                rgba: dock.edge,
             },
-            // **İkinci ayraç: giriş satırı ile bağlam satırı arasında.** Aynı
-            // renk ve aynı kalınlık, çünkü aynı şeyi söylüyor — "bunlar ayrı
-            // iki yüzey". phase-9 araya boşluk koymuştu; boşluk ayrımı
+            // **İkinci ayraç: giriş satırı ile bağlam satırı arasında.** Yerelde
+            // üsttekiyle aynı renk ve aynı kalınlık, çünkü aynı şeyi söylüyor —
+            // "bunlar ayrı iki yüzey"; uzak oturumun rengini almıyor. phase-9 araya boşluk koymuştu; boşluk ayrımı
             // *önerir*, çizgi **söyler** (kullanıcı istedi).
             //
             // Yeri boşluğun **ortası**, üst ya da alt kenarı değil: kenara
@@ -3304,7 +3316,7 @@ mod tests {
             g[2].pos[1] - g[0].pos[1],
             20.0 + dock_row_gap(GUTTER as f32)
         );
-        frame.open_dock(BG, CURSOR);
+        frame.open_dock(BG, CURSOR, CURSOR);
         assert_eq!(
             frame.dock_layout_px(),
             dock_px(
@@ -3384,7 +3396,7 @@ mod tests {
             underline: UnderlineStyle::Single,
             ..dock_cell(1)
         });
-        frame.open_dock(BG, CURSOR);
+        frame.open_dock(BG, CURSOR, CURSOR);
 
         assert_eq!(frame.bg_count(), 1, "dock hücre sayıldı");
         assert_eq!(frame.glyph_count(), 0, "dock glyph sayıldı");
@@ -3918,7 +3930,9 @@ mod tests {
         // alt satırı onun altında kalıyor.
         let mut frame = Frame::default();
         frame.clear(grid(9, 18), CaretStyle::default());
-        frame.open_dock(BG, CURSOR);
+        // Üst çizginin rengi ayrı bir alan (036): iki çizgi iki ayrı renkle
+        // açılıyor ki biri ötekinin rengini alsa görünsün.
+        frame.open_dock(BG, SUCCESS, CURSOR);
         assert_eq!(frame.dock_layout_px(), 36.0, "iki satır piksele çevrilmedi");
 
         let [ground, separator, divider] = frame.dock_ground(500.0);
@@ -3929,9 +3943,14 @@ mod tests {
         // Ayraç dock'un **en üst** pikselinde: ızgarayla sınır orası.
         assert_eq!(separator.pos, [0.0, 0.0]);
         assert_eq!(separator.size, [500.0, SEPARATOR_PX]);
-        assert_eq!(separator.rgba, CURSOR.to_array());
-        // İkinci ayraç iki satırın **arasında** ve aynı renkte. Paysız bu
-        // ölçüde satır arası boşluk sıfır, yani çizgi tam satır sınırında.
+        assert_eq!(
+            separator.rgba,
+            SUCCESS.to_array(),
+            "üst çizgi kenarın rengi"
+        );
+        // İkinci ayraç iki satırın **arasında** ve ayracın renginde — uzak
+        // oturumun kenar rengini almıyor. Paysız bu ölçüde satır arası boşluk
+        // sıfır, yani çizgi tam satır sınırında.
         assert_eq!(divider.pos, [0.0, 18.0]);
         assert_eq!(divider.size, [500.0, SEPARATOR_PX]);
         assert_eq!(divider.rgba, CURSOR.to_array());
@@ -3951,7 +3970,7 @@ mod tests {
             CellMetrics::new(9, 18, 9, GUTTER, 1).expect("ölçü"),
             CaretStyle::default(),
         );
-        frame.open_dock(BG, CURSOR);
+        frame.open_dock(BG, CURSOR, CURSOR);
         // 2×18 + 2×GUTTER + 1×(2×GUTTER) = 36 + 14 + 14 = 64. Satır arası
         // boşluk dış payın **iki katı**, çünkü ortasından bir çizgi geçiyor:
         // çizginin iki yanına birer pay düşünce dört boşluk da eşitleniyor.
@@ -3994,7 +4013,7 @@ mod tests {
             ch: Some('x'),
             ..Cell::default()
         });
-        frame.open_dock(BG, CURSOR);
+        frame.open_dock(BG, CURSOR, CURSOR);
         assert_eq!(
             frame.dock_glyphs()[0].pos[1],
             f32::from(GUTTER),
@@ -4048,7 +4067,7 @@ mod tests {
             frame.push_dock(dock_row(row));
         }
         frame.set_dock_band(600.0, 2.0);
-        frame.open_dock(BG, CURSOR);
+        frame.open_dock(BG, CURSOR, CURSOR);
         assert_eq!(frame.dock_layout_px(), 100.0);
         assert_eq!(
             frame.dock_band_px(),
@@ -4094,7 +4113,7 @@ mod tests {
         frame.set_dock_rows(4);
         frame.set_origin_rows(5.0);
         frame.set_dock_band(600.0, 0.5);
-        frame.open_dock(BG, CURSOR);
+        frame.open_dock(BG, CURSOR, CURSOR);
         // PTY payı 64 + yarım satırın yuvarlanmış pikseli 9.
         assert_eq!(frame.dock_band_px(), 73.0);
         assert_eq!(frame.origin_px(), 5.0 * 18.0 - 9.0);

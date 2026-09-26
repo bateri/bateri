@@ -132,6 +132,14 @@ pub struct Theme {
     /// Durum: hata. Bugün sıfırdan farklı çıkış koduyla biten komut bloğunun
     /// şeridi.
     pub error: u32,
+    /// Durum: bilgi. Bugün **uzak oturum** (036): bağlam satırında `⇄` ile
+    /// host ve dock'un üst saç çizgisi.
+    ///
+    /// `accent` değil, çünkü o koşan komutun şeridi ve ssh da koşan bir komut
+    /// — aynı renk iki anlam taşırdı ("bir şey koşuyor" / "uzaktasın").
+    /// Zeminde okunur olmalı (3:1, `color::tests`): host bağlam satırında
+    /// metin.
+    pub info: u32,
     /// 16 ANSI rengi: siyah, kırmızı, yeşil, sarı, mavi, macenta, camgöbeği,
     /// beyaz, sonra aynı sırada parlak sekizlisi.
     pub ansi: [u32; 16],
@@ -190,6 +198,9 @@ impl Theme {
         search_current: 0x503a0c,
         success: 0x8bb58b,
         error: 0xd16d6a,
+        // Kendi temasının ANSI camgöbeği (036 Karar 6), `success`/`error`'ın
+        // paletin kendi renkleri olmasıyla aynı emsal.
+        info: 0x79b3b3,
         ansi: [
             0x22252b, 0xd16d6a, 0x8bb58b, 0xd6b16a, // siyah   kırmızı  yeşil    sarı
             0x7a9cc6, 0xb08ec0, 0x79b3b3, 0xc8c9cc, // mavi    macenta  camgöbeği beyaz
@@ -243,6 +254,8 @@ impl Theme {
         search_current: 0xfee29a,
         success: 0x3b7a3b,
         error: 0xb5423d,
+        // Kendi temasının ANSI camgöbeği (036 Karar 6).
+        info: 0x23787f,
         ansi: [
             0x2b2e35, 0xb5423d, 0x3b7a3b, 0x8f6a00, // siyah   kırmızı  yeşil    sarı
             0x3a66a6, 0x8a4c9c, 0x23787f, 0xb9bbc1, // mavi    macenta  camgöbeği beyaz
@@ -401,6 +414,12 @@ impl Theme {
     /// Hatayla biten bloğun şerit rengi, **lineer** RGBA.
     pub const fn error_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.error))
+    }
+
+    /// Bilgi rolü, **lineer** RGBA — uzak oturumun host'u ve dock'un üst saç
+    /// çizgisi (036).
+    pub const fn info_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.info))
     }
 
     /// Paletin `index` numaralı rengi. Numaralandırma alacritty'nin
@@ -878,6 +897,16 @@ mod tests {
         };
         let (x, y) = (luminance(a), luminance(b));
         (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn the_info_role_reads_on_the_ground() {
+        // 036 Karar 6: host bağlam satırında **metin**, yani ölçüt metnin
+        // ölçütü — zeminde 3:1.
+        for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
+            let ratio = contrast(theme.info, theme.background);
+            assert!(ratio >= 3.0, "#{:06x} zeminde {ratio:.2}", theme.info);
+        }
     }
 
     #[test]

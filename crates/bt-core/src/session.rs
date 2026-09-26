@@ -1380,16 +1380,20 @@ impl io::Read for TappedPty {
         // okumak bir şey kazandırmazdı — neslin yazarı defterin kilidini
         // hiç almıyor.
         //
-        // Başlık haberi defterin kilidi **bırakıldıktan sonra**: `let`'in
-        // sonunda guard düşüyor. Haber yalnız değişen dizinde
-        // (`apply_scan_answering`'in dönüşü).
+        // Haberler defterin kilidi **bırakıldıktan sonra**: `let`'in sonunda
+        // guard düşüyor. Başlığınki yalnız başlığın girdisi değişince (farklı
+        // dizin, uzak durumun silinmesi), komutunki yalnız `Running`'e
+        // geçişte (`apply_scan_answering`'in dönüşü).
         let key_gen = &self.key_gen;
         let wake = &self.wake;
         self.scanner.feed(&buf[..read], |event| {
             let answers = key_gen.load(Ordering::Acquire);
-            let cwd_changed = lock(&self.shell).apply_scan_answering(event, answers);
-            if cwd_changed {
+            let outcome = lock(&self.shell).apply_scan_answering(event, answers);
+            if outcome.title {
                 wake.title_changed();
+            }
+            if outcome.started {
+                wake.command_started();
             }
         });
         // **CSI kolu kilide hiç uğramıyor**: yükü yok, tüketicisi bir sayaç.
@@ -5985,15 +5989,59 @@ impl Session {
     }
 
     /// Pencerenin başlığı: uygulamanın OSC 0/2 başlığı → dizinin son
-    /// bileşeni (ev `~`) → `bateri` (kural `shell::title_of`).
+    /// bileşeni (ev `~`) → `bateri`; uzak oturumda `⇄ {OSC başlığı}`, yoksa
+    /// `⇄ {host}` (kural `shell::title_of`).
     ///
     /// İki yaprak kilidi **sırayla** alır, iç içe değil; `Term` kilidine
-    /// dokunmaz. Kare yolu bunu çağırmıyor: değişimi [`Wake::title_changed`]
-    /// haber veriyor ve okuyan o haberin alıcısı.
+    /// dokunmaz. Dizin ile uzak host **aynı** kilit turunda: ayrı turlarda
+    /// araya düşen bir `D` yerel dizini uzak bir host'la eşleştirebilirdi.
+    /// Kare yolu bunu çağırmıyor: değişimi [`Wake::title_changed`] (ya da
+    /// [`Session::set_remote`]'in dönüşü) haber veriyor ve okuyan o haberin
+    /// alıcısı.
     pub fn title(&self) -> String {
         let osc = lock(&self.adapter.0.title).clone();
-        let cwd = lock(&self.shell).context.cwd.clone();
-        crate::shell::title_of(osc.as_deref(), Some(&cwd), self.home.as_deref())
+        let (cwd, remote) = {
+            let log = lock(&self.shell);
+            (log.context.cwd.clone(), log.context.remote.clone())
+        };
+        crate::shell::title_of(
+            osc.as_deref(),
+            Some(&cwd),
+            self.home.as_deref(),
+            remote.as_deref(),
+        )
+    }
+
+    /// Koşan komutun nesli; safha `Running` değilse `None` (036 Karar 2).
+    ///
+    /// Uzak oturum yoklamasının ilk yarısı: çağıran nesli yoklamadan
+    /// **önce** alır ve cevabı onunla [`Session::set_remote`]'e geri verir.
+    /// Yaprak kilit; `Term`'e dokunmaz.
+    pub fn running_command(&self) -> Option<u64> {
+        lock(&self.shell).running_command()
+    }
+
+    /// Uzak oturumun host'unu bildirir (`None` = yerel); başlığın girdisi
+    /// **değiştiyse** `true` ve çağıran başlığı tazeler (036 Karar 1, 5).
+    ///
+    /// **Bayat cevap kapısı:** `command` [`Session::running_command`]'ın
+    /// verdiği nesil; tutmuyorsa ya da safha `Running` değilse çağrı no-op —
+    /// yoklama ile `D` arasında biten komutun cevabı sonraki prompt'a
+    /// sızmamalı. Uzak durumu silmek için çağrı yok: `C`, `D` ve `A` onu
+    /// kendiliğinden siliyor.
+    ///
+    /// Değiştiyse kare ister ([`Session::set_theme`] örüntüsü: bağlam satırı
+    /// ve dock'un üst çizgisi değişti, alacritty'nin hasarı bunu bilmiyor).
+    /// Yaprak kilit `request_frame`'den önce düşüyor; `Term`'e dokunulmuyor.
+    pub fn set_remote(&self, command: u64, host: Option<&str>) -> bool {
+        let changed = {
+            let mut log = lock(&self.shell);
+            log.running_command() == Some(command) && log.set_remote(host)
+        };
+        if changed {
+            self.request_frame();
+        }
+        changed
     }
 
     /// Uygulama alternatif ekranda mı — **son karedeki** hâl.
@@ -7548,6 +7596,8 @@ mod tests {
         titles: u32,
         /// [`Wake::search_changed`] kaç kez geldi.
         searches: u32,
+        /// [`Wake::command_started`] kaç kez geldi.
+        commands: u32,
     }
 
     impl TestWake {
@@ -7579,6 +7629,16 @@ mod tests {
         /// Şimdiye kadar gelen başlık haberleri.
         fn titles(&self) -> u32 {
             self.state.lock().unwrap().titles
+        }
+
+        /// En az `target` komut haberi gelene kadar bekler.
+        fn wait_commands(&self, target: u32, timeout: Duration) -> u32 {
+            let state = self.state.lock().unwrap();
+            let (state, _) = self
+                .cond
+                .wait_timeout_while(state, timeout, |state| state.commands < target)
+                .unwrap();
+            state.commands
         }
 
         /// En az `target` başlık haberi gelene kadar bekler.
@@ -7618,6 +7678,11 @@ mod tests {
 
         fn search_changed(&self) {
             self.state.lock().unwrap().searches += 1;
+            self.cond.notify_all();
+        }
+
+        fn command_started(&self) {
+            self.state.lock().unwrap().commands += 1;
             self.cond.notify_all();
         }
     }
@@ -15399,6 +15464,39 @@ e\\314\\201.'; sleep 5";
             blink: CursorBlink::default(),
         });
         assert_eq!(wake.titles(), 3);
+    }
+
+    #[test]
+    fn a_command_start_is_reported_once_per_transition() {
+        // 036 Karar 2: haber `Running`'e **geçişte**; aynı komutta ikinci `C`
+        // (iTerm2) geçiş değil. Nesil yalnız koşarken var ve yoklamanın
+        // cevabı onu tutmazsa düşüyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "stty -echo; read _; printf '\\033]133;C\\007\\033]133;C\\007'; read _; \
+             printf '\\033]133;D;0\\007\\033]133;A\\007\\033]133;C\\007'; sleep 5",
+            Arc::clone(&wake),
+        );
+        assert_eq!(session.running_command(), None, "komut koşmuyor");
+
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let first = session.running_command().expect("`C`'den sonra koşuyor");
+        assert!(session.set_remote(first, Some("prod")));
+        assert_eq!(session.title(), "⇄ prod");
+
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(2, Duration::from_secs(5)), 2);
+        let second = session.running_command().expect("ikinci komut koşuyor");
+        assert_ne!(first, second, "yeni komut yeni nesil");
+        // `D` uzak durumu sildi ve başlığa haber verdi.
+        assert_eq!(session.title(), "bateri");
+        // Bayat nesil: ilk komutun cevabı ikinciye yazılmıyor.
+        assert!(!session.set_remote(first, Some("prod")));
+        assert_eq!(session.title(), "bateri");
+        // İkinci `C` haber doğurmadı: sayı ikide duruyor.
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(wake.state.lock().unwrap().commands, 2);
     }
 
     #[test]
