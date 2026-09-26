@@ -449,12 +449,19 @@ impl Theme {
     /// kendiliğinden taşıyor: `Session` yalnız işareti tutuyor, rengi kare
     /// o karenin temasından çözüyor.
     pub const fn mark_linear(&self, mark: HostMark) -> LinearRgba {
+        linear_rgba(rgb(self.mark_rgb(mark)))
+    }
+
+    /// İşaretin rengi, **sRGB** `0xRRGGBB` — eşlemenin kendisi
+    /// ([`Theme::mark_linear`] onu lineerleştiriyor). sRGB'yi isteyen
+    /// sekmenin noktası (`NSColor`, 037 Karar 4); lineer değer yalnız GPU'nun.
+    pub const fn mark_rgb(&self, mark: HostMark) -> u32 {
         match mark {
-            HostMark::Production => self.error_linear(),
-            HostMark::Staging => self.warning_linear(),
-            HostMark::Development => self.success_linear(),
-            HostMark::None => self.info_linear(),
-            HostMark::Rgb(hex) => linear_rgba(rgb(hex)),
+            HostMark::Production => self.error,
+            HostMark::Staging => self.warning,
+            HostMark::Development => self.success,
+            HostMark::None => self.info,
+            HostMark::Rgb(hex) => hex,
         }
     }
 
@@ -966,6 +973,9 @@ mod tests {
             theme.mark_linear(HostMark::Rgb(0xc678dd)),
             LinearRgba::from_srgb(0xc6, 0x78, 0xdd)
         );
+        // Sekmenin noktası sRGB'yi aynı eşlemeden alıyor.
+        assert_eq!(theme.mark_rgb(HostMark::Production), theme.error);
+        assert_eq!(theme.mark_rgb(HostMark::Rgb(0xc678dd)), 0xc678dd);
     }
 
     #[test]

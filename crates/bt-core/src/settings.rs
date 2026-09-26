@@ -667,6 +667,18 @@ impl HostMark {
         ("development", Self::Development),
         ("none", Self::None),
     ];
+
+    /// Ayar dosyasındaki yazılışı: adlı işaretin adı ([`Self::NAMES`]),
+    /// doğrudan rengin `"#rrggbb"`'si — ayrıştırıcının okuduğunun tersi.
+    pub fn written(self) -> String {
+        match self {
+            Self::Rgb(hex) => format!("#{hex:06x}"),
+            named => Self::NAMES
+                .iter()
+                .find(|(_, mark)| *mark == named)
+                .map_or_else(String::new, |(name, _)| (*name).to_owned()),
+        }
+    }
 }
 
 /// `[remote] hosts` dizisinin bir girdisi: desen ve işareti (037 Karar 2).
@@ -692,7 +704,7 @@ pub struct HostRule {
 /// Saf ve kare yolunda değil: `Session` onu yalnız uzak durumun ve listenin
 /// değiştiği iki kenarda çağırıyor.
 pub fn host_mark(rules: &[HostRule], host: &str) -> HostMark {
-    let bare = host.rsplit('@').next().unwrap_or(host);
+    let bare = bare_host(host);
     rules
         .iter()
         .find(|rule| {
@@ -924,6 +936,15 @@ pub enum SettingsEdit {
     Keypress(Keypress),
     Erase(Erase),
     ShellIntegration(ShellIntegration),
+    /// Shell ▸ Mark … as ▸ (037 Karar 5): `host`'un işaretini `mark` yapan
+    /// `[remote] hosts` düzenlemesi. Tek bir anahtarın değeri değil, dizinin
+    /// girdileri — kuralı [`Settings::with_edit`]'in bu kolunda. `host` uzak
+    /// oturumun gösterdiği hâli (`user@` dahil, eşleşmenin girdisi); yazılan
+    /// desen onun `user@`'siz kısmı. [`HostMark::None`] menünün "None"u.
+    RemoteHostMark {
+        host: String,
+        mark: HostMark,
+    },
 }
 
 impl SettingsEdit {
@@ -965,6 +986,7 @@ impl SettingsEdit {
             Self::Keypress(_) => ("motion", "keypress", "motion.keypress"),
             Self::Erase(_) => ("motion", "erase", "motion.erase"),
             Self::ShellIntegration(_) => ("shell", "integration", "shell.integration"),
+            Self::RemoteHostMark { .. } => ("remote", "hosts", "remote.hosts"),
         }
     }
 
@@ -987,6 +1009,8 @@ impl SettingsEdit {
             Self::Keypress(keypress) => keypress.name().into(),
             Self::Erase(erase) => erase.name().into(),
             Self::ShellIntegration(integration) => integration.name().into(),
+            // Dizinin kendisi değil, yazılan girdinin `mark`'ı.
+            Self::RemoteHostMark { mark, .. } => mark.written().into(),
             Self::CursorRadius(value)
             | Self::CursorGlow(value)
             | Self::BlinkInterval(value)
@@ -1136,7 +1160,8 @@ integration = "auto"
 # (green), "none" (no mark), or a color like "#c678dd". In a pattern * stands
 # for any run of characters and ? for one, ignoring case; a pattern without @
 # matches the host after any user@. The first entry that matches wins, so put
-# exact names before wide patterns; "none" stops the search.
+# exact names before wide patterns; "none" stops the search. Shell > Mark
+# "host" as writes the entry for the host of the ssh tab you are in.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },
@@ -1555,7 +1580,15 @@ hosts = []
     ///   olan bir anahtar (`[appearance.theme]`, `theme = { … }`) de `Err`:
     ///   yerlerine yazmak içeriklerini silerdi. Kabul edilmeyen türdeki bir
     ///   değer (`theme = 3`) ise değişir — kullanıcı bir değer seçti.
+    ///
+    /// [`SettingsEdit::RemoteHostMark`] tek bir değer değil dizinin
+    /// girdilerini yazıyor; kuralı [`with_host_mark`]'ta, aynı sözleşmeyle
+    /// (ayrıştırılamayan metin ve bozuk dizi `Err`, geri kalan her bayt
+    /// yerinde).
     pub fn with_edit(text: &str, edit: &SettingsEdit) -> Result<String, Diagnostic> {
+        if let SettingsEdit::RemoteHostMark { host, mark } = edit {
+            return with_host_mark(text, host, *mark);
+        }
         let (section_name, key, path) = edit.place();
         let value = edit.value();
         let parsed = document(text)?;
@@ -1585,20 +1618,7 @@ hosts = []
             return Err(diagnostic);
         }
         let mut doc = parsed.into_mut();
-        if !doc.contains_key(section_name) {
-            let mut table = toml_edit::Table::new();
-            // Belge sonundaki yorum `toml_edit`'te belgenin kuyruğu ve yeni
-            // bölüm onun önüne yazılırdı: son bölümün altındaki
-            // `# family = "Menlo"` `[appearance]`'a geçer, yorumu kaldıran
-            // kullanıcının satırı sessizce yoksayılırdı. Kuyruk yeni başlığın
-            // önüne alınıyor, yani yazıldığı bölümde kalıyor.
-            let trailing = doc.trailing().as_str().unwrap_or_default().to_owned();
-            if !trailing.trim().is_empty() {
-                table.decor_mut().set_prefix(format!("{trailing}\n"));
-                doc.set_trailing("");
-            }
-            doc.insert(section_name, Item::Table(table));
-        }
+        ensure_section(&mut doc, section_name);
         // `else` dalı yok: bölüm olmayan bir bölüm yukarıda reddedildi, eksik
         // olan da az önce tablo olarak eklendi.
         if let Some(table) = doc.get_mut(section_name).and_then(Item::as_table_like_mut) {
@@ -1615,24 +1635,240 @@ hosts = []
                 }
             }
         }
-        // `toml_edit` satır sonlarını LF yazıyor. İlk satırı CRLF olan dosya
-        // CRLF kalıyor; yoksa tek bir seçim dotfile deposunda bütün dosyayı
-        // değişmiş gösterirdi. Karışık satır sonlu dosya ilk satırınkini alır.
-        //
-        // Önce LF'ye indirilip sonra çevriliyor (`/code-review` bulgusu):
-        // `toml_edit` çok satırlı metnin **içindeki** `\r\n`'i olduğu gibi
-        // bırakıyor ve doğrudan çeviri onu `\r\r\n` yapardı — geçersiz TOML,
-        // yani dosyaya bir daha yazılamaz ve hiçbir kayıt uygulanmazdı.
-        let crlf = text
-            .find('\n')
-            .is_some_and(|end| text.as_bytes()[..end].ends_with(b"\r"));
-        let written = doc.to_string();
-        Ok(if crlf {
-            written.replace("\r\n", "\n").replace('\n', "\r\n")
-        } else {
-            written
-        })
+        Ok(rendered(text, &doc))
     }
+}
+
+/// Bölüm yoksa belgeye boş bir `[name]` ekler; varsa dokunmaz.
+///
+/// Belge sonundaki yorum `toml_edit`'te belgenin kuyruğu ve yeni bölüm onun
+/// önüne yazılırdı: son bölümün altındaki `# family = "Menlo"`
+/// `[appearance]`'a geçer, yorumu kaldıran kullanıcının satırı sessizce
+/// yoksayılırdı. Kuyruk yeni başlığın önüne alınıyor, yani yazıldığı bölümde
+/// kalıyor.
+fn ensure_section(doc: &mut toml_edit::DocumentMut, name: &str) {
+    if doc.contains_key(name) {
+        return;
+    }
+    let mut table = toml_edit::Table::new();
+    let trailing = doc.trailing().as_str().unwrap_or_default().to_owned();
+    if !trailing.trim().is_empty() {
+        table.decor_mut().set_prefix(format!("{trailing}\n"));
+        doc.set_trailing("");
+    }
+    doc.insert(name, Item::Table(table));
+}
+
+/// Düzenlenmiş belgenin metni, `text`'in satır sonlarıyla.
+///
+/// `toml_edit` satır sonlarını LF yazıyor. İlk satırı CRLF olan dosya CRLF
+/// kalıyor; yoksa tek bir seçim dotfile deposunda bütün dosyayı değişmiş
+/// gösterirdi. Karışık satır sonlu dosya ilk satırınkini alır.
+///
+/// Önce LF'ye indirilip sonra çevriliyor (`/code-review` bulgusu):
+/// `toml_edit` çok satırlı metnin **içindeki** `\r\n`'i olduğu gibi
+/// bırakıyor ve doğrudan çeviri onu `\r\r\n` yapardı — geçersiz TOML, yani
+/// dosyaya bir daha yazılamaz ve hiçbir kayıt uygulanmazdı.
+fn rendered(text: &str, doc: &toml_edit::DocumentMut) -> String {
+    let crlf = text
+        .find('\n')
+        .is_some_and(|end| text.as_bytes()[..end].ends_with(b"\r"));
+    let written = doc.to_string();
+    if crlf {
+        written.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        written
+    }
+}
+
+/// [`with_host_mark`]'ın dizide yapacakları ([`host_mark_plan`]).
+#[derive(Debug, PartialEq, Eq)]
+struct MarkPlan {
+    /// Bu indeksteki girdinin `mark`'ı yerinde değişiyor.
+    in_place: Option<usize>,
+    /// Silinen girdiler, artan sırayla.
+    remove: Vec<usize>,
+    /// Dizinin başına `{ host = <user@'siz host>, mark }` giriyor.
+    prepend: bool,
+}
+
+/// Menünün yazım kuralı (037 Karar 5), saf: `rules`'u `host`'un çözümü
+/// `mark` olacak biçimde en az bozan düzenleme; çözüm zaten `mark`'sa `None`
+/// (no-op).
+///
+/// - Tam bu host'u yazan (desen, harf duyarsız, `user@`'siz ya da tam
+///   host'a eşit) ilk girdinin işareti **yerinde** değişiyor — kullanıcının
+///   koyduğu sıra bozulmuyor.
+/// - Yerinde değişim sonucu vermiyorsa (girdi yok ya da önünde başka bir
+///   işaret veren bir glob var) tam girdiler siliniyor ve yenisi **başa**
+///   yazılıyor: kullanıcı "bu makine prod" dedi, o cümle bir globun arkasında
+///   kalıp etkisiz görünmemeli. Karar "yoksa başa" diyor; önünde glob olan
+///   tam girdi aynı gerekçeyle başa taşınıyor.
+/// - **None** tam girdileri siliyor; ardından bir glob hâlâ işaret
+///   veriyorsa başa `mark = "none"` yazılıyor.
+fn host_mark_plan(rules: &[HostRule], host: &str, mark: HostMark) -> Option<MarkPlan> {
+    if host_mark(rules, host) == mark {
+        return None;
+    }
+    let bare = bare_host(host).to_lowercase();
+    let full = host.to_lowercase();
+    let exact: Vec<usize> = rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| {
+            let pattern = rule.pattern.to_lowercase();
+            pattern == bare || pattern == full
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if mark != HostMark::None
+        && let Some(&first) = exact.first()
+    {
+        let mut edited = rules.to_vec();
+        edited[first].mark = mark;
+        if host_mark(&edited, host) == mark {
+            return Some(MarkPlan {
+                in_place: Some(first),
+                remove: Vec::new(),
+                prepend: false,
+            });
+        }
+    }
+    let kept: Vec<HostRule> = rules
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !exact.contains(index))
+        .map(|(_, rule)| rule.clone())
+        .collect();
+    Some(MarkPlan {
+        in_place: None,
+        prepend: host_mark(&kept, host) != mark,
+        remove: exact,
+    })
+}
+
+/// Host'un `user@`'siz kısmı: desende `@` yoksa eşleşmenin girdisi
+/// ([`host_mark`]) ve menünün başlığındaki ad.
+pub fn bare_host(host: &str) -> &str {
+    host.rsplit('@').next().unwrap_or(host)
+}
+
+/// [`SettingsEdit::RemoteHostMark`]'ın yazımı: [`host_mark_plan`]'ı
+/// `[remote] hosts`'a uygular. İki yazılış da (satır içi dizi ve
+/// `[[remote.hosts]]`) kendi biçiminde kalıyor; bölüm ya da anahtar yoksa
+/// satır içi dizi olarak doğuyor. Ayrıştırılamayan metin ve bozuk dizi
+/// `Err` — bozuk bir girdiyi yerinde bırakıp önüne yazmak listenin anlamını
+/// tahmin etmek olurdu.
+fn with_host_mark(text: &str, host: &str, mark: HostMark) -> Result<String, Diagnostic> {
+    let parsed = document(text)?;
+    let mut refused = Vec::new();
+    let rules = match section(text, parsed.as_table(), "remote", &mut refused)
+        .and_then(|remote| remote.get("hosts"))
+    {
+        Some(item) => host_rules(text, item, &[], &mut refused),
+        None => Vec::new(),
+    };
+    if let Some(diagnostic) = refused.pop() {
+        return Err(diagnostic);
+    }
+    let Some(plan) = host_mark_plan(&rules, host, mark) else {
+        return Ok(text.to_owned());
+    };
+    let pattern = bare_host(host);
+    let written = mark.written();
+    let mut doc = parsed.into_mut();
+    ensure_section(&mut doc, "remote");
+    // `else` dalı yok: bölüm olmayan bir bölüm yukarıda reddedildi, eksik
+    // olan az önce eklendi.
+    if let Some(remote) = doc.get_mut("remote").and_then(Item::as_table_like_mut) {
+        match remote.get_mut("hosts") {
+            Some(Item::ArrayOfTables(tables)) => {
+                if let Some(index) = plan.in_place
+                    && let Some(table) = tables.get_mut(index)
+                {
+                    set_keeping_decor(table.get_mut("mark"), &written);
+                }
+                for &index in plan.remove.iter().rev() {
+                    tables.remove(index);
+                }
+                if plan.prepend {
+                    let mut table = toml_edit::Table::new();
+                    table.insert("host", toml_edit::value(pattern));
+                    table.insert("mark", toml_edit::value(written.as_str()));
+                    // Eski ilk bölümün yeri ve üstündeki yorum yeniye geçiyor
+                    // (yazılış sırası konumdan; eşit konumda dizinin sırası),
+                    // eskisi bir boş satırla ayrılıyor.
+                    if let Some(first) = tables.get_mut(0) {
+                        table.set_position(first.position());
+                        *table.decor_mut() = first.decor().clone();
+                        first.decor_mut().set_prefix("\n");
+                    }
+                    tables.insert(0, table);
+                }
+            }
+            Some(Item::Value(toml_edit::Value::Array(array))) => {
+                if let Some(index) = plan.in_place
+                    && let Some(entry) = array
+                        .get_mut(index)
+                        .and_then(toml_edit::Value::as_inline_table_mut)
+                    && let Some(old) = entry.get_mut("mark")
+                {
+                    let decor = old.decor().clone();
+                    *old = written.as_str().into();
+                    *old.decor_mut() = decor;
+                }
+                for &index in plan.remove.iter().rev() {
+                    array.remove(index);
+                }
+                if plan.prepend {
+                    prepend_entry(array, pattern, &written);
+                }
+            }
+            // Anahtar yok (dizi boşmuş gibi): yalnız başa yazma olabilir.
+            _ => {
+                let mut array = toml_edit::Array::new();
+                if plan.prepend {
+                    prepend_entry(&mut array, pattern, &written);
+                }
+                remote.insert("hosts", Item::Value(array.into()));
+            }
+        }
+    }
+    Ok(rendered(text, &doc))
+}
+
+/// `item` bir değerse onu `written` yapar, süsünü (yanındaki yorum)
+/// koruyarak — `[[remote.hosts]]` girdisinin `mark = "…"` satırı.
+fn set_keeping_decor(item: Option<&mut Item>, written: &str) {
+    if let Some(old) = item.and_then(Item::as_value_mut) {
+        let decor = old.decor().clone();
+        *old = written.into();
+        *old.decor_mut() = decor;
+    }
+}
+
+/// Satır içi dizinin başına `{ host, mark }` yazar ve dizinin yazılışını
+/// sürdürür: yeni girdi eski ilk girdinin süsünü (çok satırlı dizide
+/// `\n  ` girintisi) alıyor; eski ilk girdi tek satırlı dizide virgülden
+/// sonra bir boşluk kazanıyor, yoksa `{…},{…}` yapışırdı.
+fn prepend_entry(array: &mut toml_edit::Array, pattern: &str, written: &str) {
+    let mut entry = toml_edit::InlineTable::new();
+    entry.insert("host", pattern.into());
+    entry.insert("mark", written.into());
+    entry.fmt();
+    let mut value = toml_edit::Value::InlineTable(entry);
+    if let Some(first) = array.get_mut(0) {
+        *value.decor_mut() = first.decor().clone();
+        let multiline = first
+            .decor()
+            .prefix()
+            .and_then(|prefix| prefix.as_str())
+            .is_some_and(|prefix| prefix.contains('\n'));
+        if !multiline {
+            first.decor_mut().set_prefix(" ");
+        }
+    }
+    array.insert_formatted(0, value);
 }
 
 /// İki [`Settings`] arasındaki fark ([`Settings::changes`]).
@@ -3897,6 +4133,15 @@ cursor = \"spring\"
             SettingsEdit::ShellIntegration(integration) => {
                 settings.shell_integration = integration;
             }
+            // Kâhin yalnız boş listeden doğru: `every_edit`'in iki metni de
+            // `hosts = []` taşıyor. Dolu listenin kuralı kendi sınamasında.
+            SettingsEdit::RemoteHostMark { host, mark } => settings.remote_hosts.insert(
+                0,
+                HostRule {
+                    pattern: bare_host(&host).to_owned(),
+                    mark,
+                },
+            ),
         }
         settings
     }
@@ -3928,7 +4173,173 @@ cursor = \"spring\"
             SettingsEdit::Keypress(Keypress::Off),
             SettingsEdit::Erase(Erase::Off),
             SettingsEdit::ShellIntegration(ShellIntegration::Blocks),
+            SettingsEdit::RemoteHostMark {
+                host: "deploy@prod".to_owned(),
+                mark: HostMark::Production,
+            },
         ]
+    }
+
+    fn marked(text: &str, host: &str, mark: HostMark) -> String {
+        let edit = SettingsEdit::RemoteHostMark {
+            host: host.to_owned(),
+            mark,
+        };
+        Settings::with_edit(text, &edit).expect("yazılabilir metin")
+    }
+
+    #[test]
+    fn marking_a_host_creates_the_list() {
+        // Boş dosya: bölüm ve anahtar doğuyor; desen `user@`'siz.
+        assert_eq!(
+            marked("", "deploy@prod", HostMark::Production),
+            "[remote]\nhosts = [{ host = \"prod\", mark = \"production\" }]\n"
+        );
+        // Bölüm var, anahtar yok.
+        assert_eq!(
+            marked("[remote]\nfuture = 1\n", "vm", HostMark::Staging),
+            "[remote]\nfuture = 1\nhosts = [{ host = \"vm\", mark = \"staging\" }]\n"
+        );
+        // Tek satırlı dizinin başına, virgülden sonra boşlukla.
+        assert_eq!(
+            marked(
+                "[remote]\nhosts = [{ host = \"a\", mark = \"staging\" }]\n",
+                "b",
+                HostMark::Development
+            ),
+            "[remote]\nhosts = [{ host = \"b\", mark = \"development\" }, \
+             { host = \"a\", mark = \"staging\" }]\n"
+        );
+    }
+
+    #[test]
+    fn marking_a_host_keeps_the_list_as_written() {
+        // Yorumlar, bilinmeyen anahtar ve kullanıcının sırası yerinde.
+        let text = "# üst\n[remote]\n# prod kırmızı\nhosts = [\n  \
+                    { host = \"db\", mark = \"staging\" }, # veri\n  \
+                    { host = \"prod-*\", mark = \"production\" },\n]\nfuture = 1\n";
+        // Eşit desen (harf duyarsız) yerinde değişiyor, sıra korunuyor.
+        assert_eq!(
+            marked(text, "root@DB", HostMark::Development),
+            text.replace("mark = \"staging\"", "mark = \"development\"")
+        );
+        // Yeni host başa, dizinin girintisiyle.
+        assert_eq!(
+            marked(text, "cache", HostMark::Production),
+            text.replace(
+                "hosts = [\n",
+                "hosts = [\n  { host = \"cache\", mark = \"production\" },\n"
+            )
+        );
+        // None tam girdiyi siliyor; glob eşleşmiyorsa başka bir şey yazılmıyor.
+        let removed = marked(text, "db", HostMark::None);
+        assert_eq!(clean(&removed).remote_hosts.len(), 1, "{removed}");
+        assert!(removed.contains("# prod kırmızı") && removed.contains("future = 1"));
+        assert!(!removed.contains("\"db\""), "{removed}");
+        // Seçilen zaten geçerli çözüm (glob'dan gelse de): metin aynen.
+        assert_eq!(marked(text, "db", HostMark::Staging), text);
+        assert_eq!(marked(text, "prod-web", HostMark::Production), text);
+        assert_eq!(marked(text, "vm", HostMark::None), text);
+    }
+
+    #[test]
+    fn marking_a_host_beats_the_globs_in_front() {
+        let resolved = |text: &str, host: &str| host_mark(&clean(text).remote_hosts, host);
+        let globs = "[remote]\nhosts = [\n  { host = \"prod-*\", mark = \"production\" },\n]\n";
+        // None bir globun yakaladığı host'u işaretsiz bırakıyor: başa `none`.
+        let none = marked(globs, "prod-canary", HostMark::None);
+        assert_eq!(
+            none,
+            "[remote]\nhosts = [\n  { host = \"prod-canary\", mark = \"none\" },\n  \
+             { host = \"prod-*\", mark = \"production\" },\n]\n"
+        );
+        assert_eq!(resolved(&none, "prod-canary"), HostMark::None);
+        assert_eq!(resolved(&none, "prod-web"), HostMark::Production);
+        // Önünde glob olan tam girdi yerinde değişse etkisiz kalırdı: başa
+        // taşınıyor.
+        let behind = "[remote]\nhosts = [\n  { host = \"*\", mark = \"development\" },\n  \
+                      { host = \"db\", mark = \"production\" },\n]\n";
+        let moved = marked(behind, "db", HostMark::Staging);
+        assert_eq!(
+            moved,
+            "[remote]\nhosts = [\n  { host = \"db\", mark = \"staging\" },\n  \
+             { host = \"*\", mark = \"development\" },\n]\n"
+        );
+        // `user@`'li glob: None'ın yazdığı `user@`'siz desen onu geçiyor.
+        let user = "[remote]\nhosts = [{ host = \"root@*\", mark = \"staging\" }]\n";
+        let none = marked(user, "root@db", HostMark::None);
+        assert_eq!(resolved(&none, "root@db"), HostMark::None);
+        assert_eq!(resolved(&none, "root@web"), HostMark::Staging);
+    }
+
+    #[test]
+    fn marking_a_host_in_an_array_of_sections() {
+        let text = "[[remote.hosts]]\nhost = \"db\"\nmark = \"staging\" # veri\n\n\
+                    [[remote.hosts]]\nhost = \"prod-*\"\nmark = \"production\"\n";
+        let in_place = marked(text, "db", HostMark::Development);
+        assert_eq!(
+            in_place,
+            text.replace("mark = \"staging\"", "mark = \"development\"")
+        );
+        let prepended = marked(text, "cache", HostMark::Production);
+        assert_eq!(
+            clean(&prepended).remote_hosts,
+            [
+                HostRule {
+                    pattern: "cache".to_owned(),
+                    mark: HostMark::Production
+                },
+                HostRule {
+                    pattern: "db".to_owned(),
+                    mark: HostMark::Staging
+                },
+                HostRule {
+                    pattern: "prod-*".to_owned(),
+                    mark: HostMark::Production
+                },
+            ],
+            "{prepended}"
+        );
+        assert!(prepended.contains("# veri"), "{prepended}");
+        // Önde ve arkada başka bölümler: yeni girdi dizinin yerinde doğuyor.
+        let around = format!("[font]\nsize = 13\n\n# liste\n{text}\n[notes]\nx = 1\n");
+        assert_eq!(
+            marked(&around, "cache", HostMark::Production),
+            around.replace(
+                "# liste\n",
+                "# liste\n[[remote.hosts]]\nhost = \"cache\"\nmark = \"production\"\n\n"
+            )
+        );
+        let removed = marked(text, "db", HostMark::None);
+        assert_eq!(clean(&removed).remote_hosts.len(), 1, "{removed}");
+    }
+
+    #[test]
+    fn marking_a_host_refuses_a_broken_list() {
+        // Ayrıştırılamayan metin ve bozuk dizi yazılmıyor: kullanıcının yarım
+        // işi.
+        for text in [
+            "[remote\n",
+            "[remote]\nhosts = [{ host = \"a\", mark = \"prod\" }]\n",
+            "[remote]\nhosts = \"a\"\n",
+            "remote = 1\n",
+        ] {
+            let edit = SettingsEdit::RemoteHostMark {
+                host: "b".to_owned(),
+                mark: HostMark::Production,
+            };
+            assert!(Settings::with_edit(text, &edit).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_mark_is_written_the_way_it_is_read() {
+        for (_, mark) in HostMark::NAMES {
+            let text = marked("", "a", HostMark::Production);
+            let text = marked(&text, "a", *mark);
+            assert_eq!(host_mark(&clean(&text).remote_hosts, "a"), *mark, "{text}");
+        }
+        assert_eq!(HostMark::Rgb(0x0a0b0c).written(), "#0a0b0c");
     }
 
     /// `written`, `text`'ten tek satırın değişmesiyle ya da tek satırın

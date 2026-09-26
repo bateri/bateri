@@ -28,9 +28,19 @@
 //! yüzden kimseye referans tutmuyor; eylemi karşılayan yoksa AppKit öğeyi devre
 //! dışı gösteriyor.
 //!
-//! Tek istisna Theme ▸'nin **delegate**'i (app delegate): alt menü sabit
-//! değil, açılırken `themes/`'ten doluyor ([`fill_themes`]). Delegate zayıf
-//! referans; app delegate süreç boyunca yaşıyor.
+//! İki istisna delegate'ler. Theme ▸'ninki app delegate: alt menü sabit
+//! değil, açılırken `themes/`'ten doluyor ([`fill_themes`]). Shell'inki
+//! [`ShellMenuDelegate`]: Mark “{host}” as ▸'nin başlığı, etkinliği ve onay
+//! işareti etkin sekmeye göre ([`mark_menu`], 037 Karar 5). Delegate zayıf
+//! referans; ikisini de app delegate süreç boyunca yaşatıyor.
+//!
+//! Shell'in delegate'i **ayrı bir nesne ve yalnız `menuWillOpen:`**:
+//! `menuNeedsUpdate:` ya da `menuHasKeyEquivalent:…` tanımlayan delegate
+//! AppKit'in kısayol aramasına giriyor — app delegate'inki "kısayol yok"
+//! diyor ve Shell'e bağlansaydı ⌘N/⌘T/⌘W ölürdü. Alt menünün tutucusu
+//! doğrulamadan geçmiyor (ölçüldü: hedefi alt menünün kendisi,
+//! `submenuAction:`, ve `update` onun `setEnabled`'ına dokunmuyor), yani
+//! gri ve başlık açılışta elle kuruluyor.
 //!
 //! Kısayollar da buradan: AppKit Command'lı tuşu `keyDown:`'dan önce ana
 //! menüye veriyor (`performKeyEquivalent:`), yakalanmayanı `view` yutuyor.
@@ -55,14 +65,106 @@
 //! "View" adlı menüye tam ekran öğesini ekliyor; `setWindowsMenu` ile
 //! kaydedilen Window menüsüne de pencere listesini ve yerleşim öğelerini.
 
-use bt_core::SYSTEM_THEME;
+use bt_core::{HostMark, SYSTEM_THEME, bare_host};
 use objc2::rc::Retained;
 use objc2::runtime::{ProtocolObject, Sel};
-use objc2::{MainThreadMarker, MainThreadOnly, sel};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
+    NSMenuDelegate, NSMenuItem,
 };
-use objc2_foundation::NSString;
+use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
+
+/// Shell ▸ Mark … as ▸'nin tutucusunun `tag`'i: [`ShellMenuDelegate`] onu
+/// Shell menüsünde bununla buluyor.
+const MARK_HOLDER_TAG: isize = 37;
+
+/// Mark … as ▸'nin öğeleri, sırasıyla; öğenin `tag`'i buradaki indeks ve
+/// eylem (`markHost:`) işareti oradan okuyor ([`mark_of_tag`]). Doğrudan renk
+/// yok: menü onu hiç yazmıyor (037 Karar 2).
+const MARKS: [(&str, HostMark); 4] = [
+    ("Production", HostMark::Production),
+    ("Staging", HostMark::Staging),
+    ("Development", HostMark::Development),
+    ("None", HostMark::None),
+];
+
+/// Mark … as ▸'nin öğesinin `tag`'inden işaret; bilinmeyen `tag` `None`.
+pub(crate) fn mark_of_tag(tag: isize) -> Option<HostMark> {
+    usize::try_from(tag)
+        .ok()
+        .and_then(|index| MARKS.get(index))
+        .map(|(_, mark)| *mark)
+}
+
+/// Mark … as ▸'nin o anki hâli ([`mark_menu`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MarkMenu {
+    pub(crate) title: String,
+    pub(crate) enabled: bool,
+    /// Onaylı öğenin [`MARKS`]'taki indeksi; doğrudan renkte ve yerelde yok.
+    pub(crate) checked: Option<usize>,
+}
+
+/// Menünün modeli, saf (037 Karar 5): uzak sekmede başlık host'un
+/// `user@`'siz kısmını taşıyor ve onay **geçerli çözümde** (glob'dan gelse
+/// de); yerelde (`None`) "Mark Host as" ve gri.
+pub(crate) fn mark_menu(remote: Option<(&str, HostMark)>) -> MarkMenu {
+    match remote {
+        Some((host, mark)) => MarkMenu {
+            title: format!("Mark \u{201c}{}\u{201d} as", bare_host(host)),
+            enabled: true,
+            checked: MARKS.iter().position(|(_, candidate)| *candidate == mark),
+        },
+        None => MarkMenu {
+            title: "Mark Host as".to_owned(),
+            enabled: false,
+            checked: None,
+        },
+    }
+}
+
+define_class!(
+    // SAFETY: NSObject alt sınıflama şartı taşımaz; Drop uygulanmıyor.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriShellMenuDelegate"]
+    pub(crate) struct ShellMenuDelegate;
+
+    unsafe impl NSObjectProtocol for ShellMenuDelegate {}
+
+    unsafe impl NSMenuDelegate for ShellMenuDelegate {
+        /// Shell açılıyor: Mark … as ▸ etkin sekmenin uzak hâlinden
+        /// kuruluyor. Yalnız açılışta — kısayol araması buraya uğramıyor.
+        #[unsafe(method(menuWillOpen:))]
+        fn menu_will_open(&self, menu: &NSMenu) {
+            let Some(holder) = menu.itemWithTag(MARK_HOLDER_TAG) else {
+                return;
+            };
+            let remote = crate::app::delegate(self.mtm()).and_then(|app| app.key_remote_mark());
+            let model = mark_menu(remote.as_ref().map(|(host, mark)| (host.as_str(), *mark)));
+            holder.setTitle(&NSString::from_str(&model.title));
+            holder.setEnabled(model.enabled);
+            if let Some(submenu) = holder.submenu() {
+                for (index, item) in submenu.itemArray().iter().enumerate() {
+                    item.setState(if model.checked == Some(index) {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    });
+                }
+            }
+        }
+    }
+);
+
+impl ShellMenuDelegate {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: `NSObject`'in `init`'i; alt sınıfın ivar'ı yok.
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 /// Menü çubuğunu kurar. `applicationDidFinishLaunching:`'in başında, pencere
 /// öne alınmadan: menü uygulama etkinleşmeden yerinde olsun.
@@ -72,7 +174,12 @@ use objc2_foundation::NSString;
 /// dolumunda veriyor (`app::Inputs`).
 ///
 /// `themes`: Theme ▸'nin delegate'i — `menuNeedsUpdate:` ile doldurur.
-pub(crate) fn install(mtm: MainThreadMarker, themes: &ProtocolObject<dyn NSMenuDelegate>) {
+/// Dönen Shell menüsünün delegate'i; delegate zayıf referans, çağıran onu
+/// süreç boyunca tutuyor.
+pub(crate) fn install(
+    mtm: MainThreadMarker,
+    themes: &ProtocolObject<dyn NSMenuDelegate>,
+) -> Retained<ShellMenuDelegate> {
     let command = NSEventModifierFlags::Command;
     let app_menu = submenu(
         mtm,
@@ -175,6 +282,10 @@ pub(crate) fn install(mtm: MainThreadMarker, themes: &ProtocolObject<dyn NSMenuD
             item(mtm, "New Window", sel!(newWindow:), "n"),
             item(mtm, "New Tab", sel!(newTab:), "t"),
             NSMenuItem::separatorItem(mtm),
+            // Başlığı ve grisi açılışta ([`ShellMenuDelegate`]); öğeler
+            // `markHost:`'la app delegate'e (etkin sekmenin host'u).
+            mark_holder(mtm),
+            NSMenuItem::separatorItem(mtm),
             // `performClose:` değil (028 phase-2, ölçüldü): kırmızı düğmenin
             // iptal edilen grup kapanışından sonra AppKit `performClose:`'u
             // grubun tamamına yayıyor, yani ⌘W bir sekme yerine pencereyi
@@ -231,6 +342,25 @@ pub(crate) fn install(mtm: MainThreadMarker, themes: &ProtocolObject<dyn NSMenuD
     let app = NSApplication::sharedApplication(mtm);
     app.setMainMenu(Some(&bar));
     app.setWindowsMenu(window_menu.submenu().as_deref());
+    let shell_delegate = ShellMenuDelegate::new(mtm);
+    if let Some(menu) = shell_menu.submenu() {
+        menu.setDelegate(Some(ProtocolObject::from_ref(&*shell_delegate)));
+    }
+    shell_delegate
+}
+
+/// Shell ▸ Mark … as ▸: dört öğe ([`MARKS`]), `tag`'leri sıraları. Başta
+/// yerel sekmenin hâli; açılışta [`ShellMenuDelegate`] kuruyor.
+fn mark_holder(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+    let items: Vec<_> = (0u8..)
+        .zip(MARKS)
+        .map(|(tag, (title, _))| tagged(item(mtm, title, sel!(markHost:), ""), tag))
+        .collect();
+    let model = mark_menu(None);
+    let holder = submenu(mtm, &model.title, &items);
+    holder.setTag(MARK_HOLDER_TAG);
+    holder.setEnabled(model.enabled);
+    holder
 }
 
 /// Theme ▸'yi baştan kurar: "Match System", ayırıcı, gömülü temalar ve (varsa)
@@ -310,7 +440,7 @@ fn hidden_shortcut(item: Retained<NSMenuItem>) -> Retained<NSMenuItem> {
 }
 
 /// Öğenin `tag`'ini `tag` yapar — Select Tab ▸'nin sırası
-/// (`window::tab_index`).
+/// (`window::tab_index`) ve Mark … as ▸'nin işareti ([`mark_of_tag`]).
 fn tagged(item: Retained<NSMenuItem>, tag: u8) -> Retained<NSMenuItem> {
     item.setTag(isize::from(tag));
     item
@@ -332,4 +462,48 @@ fn submenu(
     holder.setTitle(&title);
     holder.setSubmenu(Some(&menu));
     holder
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mark_menu_follows_the_active_tab() {
+        // Yerel sekme: genel ad ve gri.
+        assert_eq!(
+            mark_menu(None),
+            MarkMenu {
+                title: "Mark Host as".to_owned(),
+                enabled: false,
+                checked: None,
+            }
+        );
+        // Uzak sekme: başlıkta `user@`'siz host, onay geçerli çözümde.
+        assert_eq!(
+            mark_menu(Some(("deploy@prod-web", HostMark::Staging))),
+            MarkMenu {
+                title: "Mark \u{201c}prod-web\u{201d} as".to_owned(),
+                enabled: true,
+                checked: Some(1),
+            }
+        );
+        // İşaretsiz host "None"da onaylı; doğrudan renk hiçbir öğede değil.
+        assert_eq!(mark_menu(Some(("vm", HostMark::None))).checked, Some(3));
+        assert_eq!(
+            mark_menu(Some(("vm", HostMark::Rgb(0xc678dd)))).checked,
+            None
+        );
+    }
+
+    #[test]
+    fn every_mark_item_reads_back_its_mark() {
+        for (index, (_, mark)) in MARKS.iter().enumerate() {
+            let tag = isize::try_from(index).expect("küçük indeks");
+            assert_eq!(mark_of_tag(tag), Some(*mark));
+            assert_eq!(mark_menu(Some(("h", *mark))).checked, Some(index));
+        }
+        assert_eq!(mark_of_tag(-1), None);
+        assert_eq!(mark_of_tag(4), None);
+    }
 }

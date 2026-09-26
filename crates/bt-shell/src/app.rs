@@ -5,7 +5,7 @@
 //! link, dock payı, geçici punto) `window`'da. Çizim çağrısı burada **yok**,
 //! bu dosyanın işi bağlamak.
 
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::ffi::{OsString, c_void};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bt_core::{
-    CursorMotion, ReduceMotion, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit,
+    CursorMotion, HostMark, ReduceMotion, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit,
     ShellIntegration, SmoothScroll, Teardown, Theme,
 };
 use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Stats};
@@ -32,6 +32,7 @@ use objc2_foundation::{
     NSRunLoopCommonModes, NSString, NSURL, NSUserDefaults, ns_string,
 };
 
+use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
 use crate::settings_window::SettingsWindow;
 use crate::watch::{Notify, Watch};
@@ -686,6 +687,9 @@ pub(crate) struct Ivars {
     /// kilidi ve satır tanıları buradan. Açılışta ve her canlı okumada
     /// yazılıyor, yani pencere sonradan açılsa da dosyanın hâlini görüyor.
     settings_state: RefCell<settings::FileState>,
+    /// Shell menüsünün delegate'i ([`crate::menu::install`]): menü onu zayıf
+    /// tutuyor, yaşatan burası.
+    shell_menu: OnceCell<Retained<ShellMenuDelegate>>,
 }
 
 define_class!(
@@ -706,7 +710,8 @@ define_class!(
             // Native sekmeler açık (026 → Karar 1): `setAllowsAutomaticWindowTabbing`
             // varsayılanında, pencereler ortak `tabbingIdentifier` taşıyor
             // (`TerminalWindow::new`).
-            crate::menu::install(mtm, ProtocolObject::from_ref(self));
+            let shell_menu = crate::menu::install(mtm, ProtocolObject::from_ref(self));
+            let _ = self.ivars().shell_menu.set(shell_menu);
             // Ayarlar ilk pencereden **önce** okunuyor: `scrollback` ve tema
             // `SessionOptions`'a giriyor, font ayarı da hücre ölçüsünü, yani
             // ilk grid'i ve kabuğun gördüğü ilk `TIOCSWINSZ`'yi belirliyor.
@@ -980,6 +985,25 @@ define_class!(
                 return;
             };
             self.save_theme(&item.title().to_string());
+        }
+
+        /// Shell ▸ Mark “{host}” as ▸ {işaret} (037 Karar 5): öğenin `tag`'i
+        /// işaret ([`crate::menu::mark_of_tag`]), host etkin sekmenin uzak
+        /// host'u. Menü yalnız **yazar** — dosyayı okuyan yol uygular
+        /// ([`AppDelegate::save_edit`], Theme ▸ emsali); ayrıştırılamayan
+        /// dosyaya yazılmıyor, tanı yazma yuvasına. Sekme bu arada yerelleştiyse
+        /// no-op.
+        #[unsafe(method(markHost:))]
+        fn mark_host(&self, sender: Option<&AnyObject>) {
+            let Some(mark) = sender
+                .and_then(|sender| sender.downcast_ref::<NSMenuItem>())
+                .and_then(|item| crate::menu::mark_of_tag(item.tag()))
+            else {
+                return;
+            };
+            if let Some((host, _)) = self.key_remote_mark() {
+                self.save_edit(&SettingsEdit::RemoteHostMark { host, mark });
+            }
         }
 
         /// View ▸ Theme ▸ Match System.
@@ -1508,6 +1532,7 @@ impl AppDelegate {
             appearance_dark: Cell::new(None),
             settings_window: RefCell::new(None),
             settings_state: RefCell::new(settings::FileState::Missing),
+            shell_menu: OnceCell::new(),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }
@@ -1546,6 +1571,13 @@ impl AppDelegate {
     fn key_window(&self) -> Option<Retained<TerminalWindow>> {
         let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
         self.window_owning(&key)
+    }
+
+    /// Etkin sekmenin uzak host'u ve çözülmüş işareti; yerel sekmede ya da
+    /// terminal penceresi key değilken `None` — Shell ▸ Mark … as ▸'nin
+    /// girdisi (037 Karar 5).
+    pub(crate) fn key_remote_mark(&self) -> Option<(String, HostMark)> {
+        self.key_window()?.remote_mark()
     }
 
     /// `NSWindow`'u `window` olan terminal penceresi; listede yoksa `None`
