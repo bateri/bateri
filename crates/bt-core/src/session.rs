@@ -1210,21 +1210,27 @@ impl Adapter {
     /// Uygulamanın sorduğuna PTY'den yanıt verir. Kanala yazmak kilitsizdir;
     /// `Term` kilidi tutulurken çağrılmak serbesttir.
     fn reply(&self, text: String) {
-        // Sıfır baytlık yazma `EventLoop`'un yazıcısını kilitler: `write`
-        // `Ok(0)` döner, öge kuyruğun başına geri konur ve bir daha hiç
-        // emilmez — poller seviye tetiklemeli olduğu için thread de %100'de
-        // döner. alacritty kendi `Notifier`'ında aynı korumayı taşıyor.
-        if text.is_empty() {
-            return;
-        }
-        if let Some(sender) = self.0.sender.get() {
-            // Kanal yalnız kapanışta ölür; o yolda sessiz kalmak doğrudur.
-            let _ = sender.send(Msg::Input(text.into_bytes().into()));
-        }
+        self.input(text.into_bytes());
     }
 }
 
 impl Adapter {
+    /// Baytları döngünün yazma kuyruğuna koyar — uygulamanın sorusuna yanıt
+    /// ([`Self::reply`]) ve oturumun ilk girdisi (037 Karar 6) buradan.
+    fn input(&self, bytes: Vec<u8>) {
+        // Sıfır baytlık yazma `EventLoop`'un yazıcısını kilitler: `write`
+        // `Ok(0)` döner, öge kuyruğun başına geri konur ve bir daha hiç
+        // emilmez — poller seviye tetiklemeli olduğu için thread de %100'de
+        // döner. alacritty kendi `Notifier`'ında aynı korumayı taşıyor.
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(sender) = self.0.sender.get() {
+            // Kanal yalnız kapanışta ölür; o yolda sessiz kalmak doğrudur.
+            let _ = sender.send(Msg::Input(bytes.into()));
+        }
+    }
+
     /// Başlık yuvasını yazar; **değiştiyse** yaprak kilidi bıraktıktan sonra
     /// [`Wake::title_changed`]. `Term` kilidi tutulurken çağrılır.
     fn store_title(&self, title: Option<String>) {
@@ -1393,6 +1399,9 @@ struct TappedPty {
     /// ([`SessionOptions::shell_marks`]); `take` tek atımlığı veriyor.
     /// Doğumda yazılan kolda (sarmalayıcısız) burası hep `None`.
     initial_input: Option<String>,
+    /// [`Session::held_input`]'in aynı yuvası: ilk girdi giderken tutulan
+    /// baytlar **arkasından**, aynı kilit turunda ve aynı gönderimde gidiyor.
+    held_input: HeldInput,
     /// Oturumun `Adapter`'ı — ilk girdi onun kanalından ([`Adapter::reply`])
     /// gidiyor, PTY'ye doğrudan değil: `read` `Term` kilidi tutulurken de
     /// koşabiliyor (`reader::EventLoop::pty_read` kilidi okumalar boyunca
@@ -1428,6 +1437,7 @@ impl io::Read for TappedPty {
         let key_gen = &self.key_gen;
         let wake = &self.wake;
         let initial_input = &mut self.initial_input;
+        let held_input = &self.held_input;
         let adapter = &self.adapter;
         self.scanner.feed(&buf[..read], |event| {
             let answers = key_gen.load(Ordering::Acquire);
@@ -1442,8 +1452,16 @@ impl io::Read for TappedPty {
                 && let Some(mut line) = initial_input.take()
             {
                 line.push('\r');
+                let mut bytes = line.into_bytes();
+                // Tutulan girdi satırın **arkasında** ve gönderim yuvanın
+                // kilidi altında: `send_input` yuvayı boş görünce gönderiyor,
+                // yani ondan sonraki her tuş kanala bu satırdan sonra giriyor.
+                let mut held = lock(held_input);
+                if let Some(typed) = held.take() {
+                    bytes.extend_from_slice(&typed);
+                }
                 key_gen.fetch_add(1, Ordering::Release);
-                adapter.reply(line);
+                adapter.input(bytes);
             }
         });
         // **CSI kolu kilide hiç uğramıyor**: yükü yok, tüketicisi bir sayaç.
@@ -1517,6 +1535,18 @@ impl OnResize for TappedPty {
         self.pty.on_resize(window_size);
     }
 }
+
+/// İlk girdi giderken tutulan kullanıcı girdisi (037 phase-4): `Some` →
+/// tutuluyor, `None` → tutma yok ya da bitti. Yazarları iki thread —
+/// kullanıcı girdisi ana thread'de ([`Session::send_or_hold`]), teslim okuyucu
+/// thread'inde (`TappedPty::read`) — ve ikisi de aynı kanala **kilidin
+/// altında** yazıyor; yaprak kilit, `Term`'e dokunmuyor.
+type HeldInput = Arc<Mutex<Option<Vec<u8>>>>;
+
+/// Tutulanı gönderen baytlar ([`Session::send_or_hold`]): satırı sonlandıran
+/// (`\r` Enter, `\n` yapıştırma) ve kesen (`^C`). Kullanıcının "şimdi"
+/// dediği tuşlar — kimlikli `A` hiç gelmezse klavyeyi canlı tutan kenar.
+const RELEASES_HOLD: [u8; 3] = [b'\r', b'\n', 0x03];
 
 /// Okuyucu thread'in tutamağı. `join()` döngüyü ve PTY'yi geri verir;
 /// `SIGHUP` bu ikilinin düşmesiyle gider.
@@ -1711,6 +1741,10 @@ pub enum DockKey {
     /// ⇧⏎ — satırı çalıştırmadan imlecin yerine bir satır sonu ekler (varsa
     /// seçimin yerine). Seçim olsa da olmasa da tüketilir.
     NewLine,
+    /// ⏎ — yalnız yeniden bağlanma teklifi varken ve satır boşken tüketilir
+    /// (037 Karar 8): teklifin satırını yazılmış gibi gönderir. Teklif yoksa
+    /// hiç tüketilmez ve Enter bayt bayt bugünkü yolundan gider.
+    Enter,
 }
 
 /// Düzenleme kapısının açık olduğu andaki satır: `BUFFER`'ın karakter
@@ -2696,6 +2730,10 @@ pub struct Session {
     /// kuralı aynı. `Adapter::reply` ve tekerlek raporu buradan geçmiyor ve
     /// geçmemeli — onlar kullanıcının yazdığı bir şey değil.
     key_gen: Arc<AtomicU64>,
+    /// İlk girdi ([`SessionOptions::initial_input`]) bizim ilk kimlikli
+    /// `A`'mızı beklerken **tutulan** kullanıcı girdisi; `None` → tutma yok
+    /// ([`HeldInput`]).
+    held_input: HeldInput,
     /// [`Session::screen_clears`]'in kare yolunun **hesaba kattığı** hâli.
     ///
     /// İkisi ayrıştığı anda ortada henüz sindirilmemiş bir temizleme var
@@ -2919,6 +2957,9 @@ impl Session {
         } else {
             (None, initial_input)
         };
+        // Tutma yalnız ilk girdi **prompt'u beklerken** (Karar 6'nın
+        // sarmalayıcılı kolu); doğumda yazılan satır zaten her tuştan önce.
+        let held_input: HeldInput = Arc::new(Mutex::new(at_prompt.is_some().then(Vec::new)));
         let pty = TappedPty {
             pty,
             scanner: Scanner::new().cluster(options.cluster),
@@ -2927,6 +2968,7 @@ impl Session {
             key_gen: Arc::clone(&key_gen),
             wake,
             initial_input: at_prompt,
+            held_input: Arc::clone(&held_input),
             adapter: adapter.clone(),
         };
 
@@ -2960,6 +3002,7 @@ impl Session {
             dock_window: Mutex::new(None),
             screen_clears,
             key_gen,
+            held_input,
             // Açılışta sindirilmemiş temizleme yok: sayaç da, hesaba katılan
             // nesil de sıfır. Üçünü de sıfırdan başlatmak, ilk karenin
             // bayrağı sebepsiz kurmasını önlüyor.
@@ -5836,6 +5879,48 @@ impl Session {
         self.dock_edit_line().is_some()
     }
 
+    /// Yeniden bağlanma teklifinin ⏎'si (037 Karar 8); `true` → satır gitti.
+    ///
+    /// Kapı: teklif var, dock caret'in sahibi (son karenin cevabı, ⌘A'nın
+    /// okuduğu), ayna kullanıcının son girdisinin cevabı, satır (`BUFFER`,
+    /// `PREBUFFER` ve öneri) boş, `line-finish` tutulmuyor ve ZLE **ekleme
+    /// keymap'inde** — giden şey yazılmış gibi satır + `\r` ve `vicmd`'de o
+    /// baytlar komut olurdu (`s` satırı değiştirip `sh prod`'u koştururdu;
+    /// [`Session::can_be_typed`]'ın aynı kemeri). Yer tutucu da aynı kapının
+    /// arkasında çiziliyor (`dock::render_reconnect`). Düzenleme widget'ına
+    /// (`8133;w`) **bağlı değil**: komut değil metin gidiyor ve geçmişe
+    /// giriyor. Teklif yoksa ilk soruda `false` — Enter'ın yolu bayt bayt
+    /// bugünkü.
+    ///
+    /// Gönderim `send_input`'tan ve yaprak kilit **bırakıldıktan sonra**
+    /// (`send_input` onu yeniden alıyor); teklifi de o siliyor.
+    fn reconnect(&self) -> bool {
+        let generation = self.key_gen.load(Ordering::Acquire);
+        let line = {
+            let log = lock(&self.shell);
+            let Some(offer) = &log.context.reconnect else {
+                return false;
+            };
+            let typable = log
+                .suppressed_input()
+                .is_some_and(|input| input.answers == generation && input.insert_keymap);
+            if !(typable
+                && !log.holding_end()
+                && log.dock.buffer.is_empty()
+                && log.dock.prebuffer.is_empty()
+                && log.dock.postdisplay.is_empty()
+                && self.caret_in_dock.load(Ordering::Relaxed))
+            {
+                return false;
+            }
+            let mut line = offer.line.clone().into_bytes();
+            line.push(b'\r');
+            line
+        };
+        self.write_owned(line);
+        true
+    }
+
     /// Kapı açıksa satırın o anki hâli; kapalıysa `None`. Tek kilit turu.
     ///
     /// Satırın iki kaynağı var: son girdiye cevap veren ayna ya da, ayna
@@ -5987,6 +6072,11 @@ impl Session {
     /// göndermese bile: seçim caret'ten başlıyor ve caret'in yeri ancak taze
     /// bir aynada doğru — `vicmd`'de ise tuş vi'nin.
     pub fn dock_key(&self, key: DockKey) -> bool {
+        // ⏎ düzenleme kapısından **önce** ve ona bağlı değil (Karar 8): giden
+        // şey yazılmış baytlar, widget komutu değil.
+        if key == DockKey::Enter {
+            return self.reconnect();
+        }
         let Some(line) = self.dock_edit_line() else {
             return false;
         };
@@ -6042,6 +6132,8 @@ impl Session {
             // geçmek ve aynayı tazeleyen komut da oradan bedava geliyor. Sarma
             // kapalıysa çıplak `\n` satırı çalıştırırdı: tuş bugünkü yolundan
             // (Enter) gidiyor.
+            // Yukarıda cevaplandı.
+            (DockKey::Enter, _) => return false,
             (DockKey::NewLine, _) => {
                 if !self.bracketed_paste() {
                     return false;
@@ -7040,6 +7132,10 @@ impl Session {
         // Dock'un seçimi de (031 R3.4): girdi iki seçimi birden temizliyor,
         // tek huni burası. Yaprak kilit `Term`'ün **dışında**.
         let redraw = self.clear_dock_selection() || redraw;
+        // Yeniden bağlanma teklifi de (037 Karar 8): **ilk tuşta** kalkıyor —
+        // kullanıcı başka bir şey yazmaya başladıysa niyeti bağlanmak değil.
+        // Yer tutucu alacritty'nin hasarında yok, yani kare burada isteniyor.
+        let redraw = lock(&self.shell).context.reconnect.take().is_some() || redraw;
         // Tek istek: temizlik, kesir ve dönüş aynı kareyi istiyor, vuruş başına
         // iki uyandırma olmasın. "Kaydı mı" kuralı `wake_if_moved`'da kalıyor.
         if redraw {
@@ -7049,8 +7145,43 @@ impl Session {
         }
         // Nesil **gönderimden önce** ([`Session::key_gen`]'in doc'u).
         let generation = self.key_gen.fetch_add(1, Ordering::Release) + 1;
-        self.send(Msg::Input(bytes.into()));
+        self.send_or_hold(bytes);
         Some(generation)
+    }
+
+    /// Baytları gönderir — ya da ilk girdi henüz gitmediyse **tutar**
+    /// ([`HeldInput`]; phase-3'ten devralınan `/code-review` bulgusu).
+    ///
+    /// ⌘T'nin uzak sekmesinde satır bizim ilk kimlikli `A`'mızda gidiyor ve
+    /// o ana kadar yazılan tuşlar ZLE'nin typeahead'inde satırın **önüne**
+    /// yapışırdı (`ls` + `ssh prod⏎` → `lsssh prod`). Tutulan baytlar
+    /// satırdan sonra, aynı sırayla gidiyor: ssh'ın girdisine, yani uzağa —
+    /// kullanıcı o sekmeyi uzak için açtı.
+    ///
+    /// **Tutma satır satır çözülüyor, süreyle değil:** satırı sonlandıran ya
+    /// da kesen bir bayt (`\r`, `\n`, `^C` — [`RELEASES_HOLD`]) o ana kadar
+    /// biriken baytları gönderiyor ve tutma **sürüyor** — ssh'ın satırı hâlâ
+    /// bekliyor ve arkasından yazılan yarım satır onun önüne yapışırdı
+    /// (`ls⏎pwd` → `ls` koşar, sonra `pwd` satırın arkasından). Tutmayı
+    /// yalnız satırın teslimi bitiriyor. Kimlikli `A` hiç gelmezse (Karar 6'nın
+    /// bilinen sınırı: rc'nin sonunda `exec fish`) ya da rc stdin'den satır
+    /// okuyorsa klavye ölmüyor: her ⏎ ya da ^C yazılanı yolluyor. Bedeli
+    /// (yankısızlık, tek tuş okuyan bir sorunun ⏎ istemesi) phase-4'ün
+    /// Uygulama Notları'nda.
+    ///
+    /// Gönderim yuvanın kilidi **altında**: okuyucu thread'in teslimi de
+    /// aynı kilitte ve aynı kanala yazıyor, yani kanalın sırası tutmanın
+    /// sırası.
+    fn send_or_hold(&self, bytes: Vec<u8>) {
+        let mut held = lock(&self.held_input);
+        let Some(typed) = held.as_mut() else {
+            self.send(Msg::Input(bytes.into()));
+            return;
+        };
+        typed.extend_from_slice(&bytes);
+        if bytes.iter().any(|byte| RELEASES_HOLD.contains(byte)) {
+            self.send(Msg::Input(std::mem::take(typed).into()));
+        }
     }
 
     /// Yapıştırma bu kapıdan girer — **ham bayt bu kapının dışında kalır**.
@@ -8036,6 +8167,188 @@ mod tests {
             grid_glyphs(cells).contains("birth-42")
         });
         assert_eq!(session.key_gen.load(Ordering::Acquire), 1);
+    }
+
+    /// Sahte kabuğun ızgarası, `until` görünene kadar (ilk girdi ve teklif
+    /// sınamaları).
+    fn wait_text(session: &Session, until: &str) -> String {
+        let mut text = String::new();
+        wait_until(until, Duration::from_secs(8), || {
+            let mut cells = Vec::new();
+            session.frame(
+                |cell| cells.push(cell),
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
+                &mut Clusters::default(),
+                ScrollGlide::default(),
+                BUDGET,
+            );
+            text = grid_glyphs(&cells);
+            text.contains(until)
+        });
+        text
+    }
+
+    #[test]
+    fn keys_typed_before_the_initial_input_follow_it() {
+        // phase-3'ün `/code-review` bulgusu: ⌘T'nin uzak sekmesinde satır
+        // bizim ilk `A`'mızda gidiyor ve ondan önce yazılan tuşlar tutuluyor,
+        // sonra satırın **arkasından** aynı sırayla gidiyor — `lsfirst`
+        // değil, `first` sonra `ls`. Sahte kabuk `READY`'den sonra bir
+        // saniye `A`'yı bekletiyor; o arada yazılan `ls` tutulmalı.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("stty -echo; printf 'READY'; sleep 1; \
+                printf '\\033]133;A;bt_block=1\\007'; \
+                read x; read y; printf 'GOT:%s|%s\\r\\n' \"$x\" \"$y\"; sleep 5"),
+            80,
+        );
+        options.initial_input = Some("first".to_owned());
+        options.shell_marks = true;
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_text(&session, "READY");
+        session.write(b"l");
+        session.write(b"s");
+        // Teslim nesli bir kez daha ilerletiyor: satır ve tutulanlar gitti.
+        wait_until("ilk girdi gitmedi", Duration::from_secs(5), || {
+            session.key_gen.load(Ordering::Acquire) == 3
+        });
+        session.write(b"\r");
+        let text = wait_text(&session, "GOT:");
+        assert!(text.contains("GOT:first|ls"), "{text:?}");
+    }
+
+    #[test]
+    fn a_return_sends_the_held_input_without_a_prompt() {
+        // Kimlikli `A` hiç gelmezse (Karar 6'nın bilinen sınırı: `exec fish`,
+        // rc'nin stdin sorusu) klavye ölmüyor: ⏎ biriken baytları o anda
+        // gönderiyor.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("stty -echo; printf 'READY'; read x; printf 'GOT:%s\\r\\n' \"$x\"; sleep 5"),
+            80,
+        );
+        options.initial_input = Some("first".to_owned());
+        options.shell_marks = true;
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_text(&session, "READY");
+        session.write(b"ls");
+        assert_eq!(lock(&session.held_input).as_deref(), Some(&b"ls"[..]));
+        session.write(b"\r");
+        // Gönderildi ama tutma sürüyor: satır hâlâ `A`'yı bekliyor.
+        assert_eq!(lock(&session.held_input).as_deref(), Some(&b""[..]));
+        let text = wait_text(&session, "GOT:");
+        assert!(text.contains("GOT:ls"), "{text:?}");
+    }
+
+    #[test]
+    fn a_line_after_the_release_still_follows_the_initial_input() {
+        // `/code-review` (phase-4): ⏎ tutulanı gönderince tutma bitseydi,
+        // arkasından yazılan yarım satır ssh'ın satırının önüne yapışırdı
+        // (`ls⏎pwd` → `pwdfirst`). Tutma satırın teslimine kadar sürüyor.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("stty -echo; printf 'READY'; read x; sleep 1; \
+                printf '\\033]133;A;bt_block=1\\007'; \
+                read y; read z; printf 'GOT:%s|%s|%s\\r\\n' \"$x\" \"$y\" \"$z\"; sleep 5"),
+            80,
+        );
+        options.initial_input = Some("first".to_owned());
+        options.shell_marks = true;
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_text(&session, "READY");
+        session.write(b"ls\r");
+        session.write(b"pwd");
+        wait_until("ilk girdi gitmedi", Duration::from_secs(5), || {
+            session.key_gen.load(Ordering::Acquire) == 3
+        });
+        assert_eq!(*lock(&session.held_input), None, "teslim tutmayı bitirir");
+        session.write(b"\r");
+        let text = wait_text(&session, "GOT:");
+        assert!(text.contains("GOT:ls|first|pwd"), "{text:?}");
+    }
+
+    /// Teklif sınamalarının oturumu: sahte kabuk bir satır okuyup basıyor;
+    /// defter prompt'ta, ayna canlı ve boş, dock caret'in sahibi — gerçek
+    /// kabuğun yerine elle kuruluyor. Düzenleme widget'ı **bildirilmemiş**
+    /// (`8133;w` yok): ⏎ ona bağlı değil.
+    fn offered_session(offer: bool) -> (Session, Arc<TestWake>) {
+        let wake = Arc::new(TestWake::default());
+        let options = test_options(
+            sh("stty -echo; read x; printf 'GOT:%s\\r\\n' \"$x\"; sleep 5"),
+            80,
+        );
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        {
+            let mut log = lock(&session.shell);
+            log.apply(crate::shell::Mark::PromptStart { id: Some(1) });
+            log.apply(crate::shell::Mark::PromptEnd);
+            log.dock.status = DockStatus::Live;
+            log.dock.insert_keymap = true;
+            assert!(!log.dock_editable);
+            if offer {
+                log.context.reconnect = Some(crate::shell::Reconnect {
+                    host: "prod".to_owned(),
+                    mark: HostMark::None,
+                    line: "ssh -p 2222 prod".to_owned(),
+                });
+            }
+        }
+        session.caret_in_dock.store(true, Ordering::Relaxed);
+        (session, wake)
+    }
+
+    #[test]
+    fn return_on_the_empty_line_sends_the_offered_line() {
+        let (session, _wake) = offered_session(true);
+        assert!(session.dock_key(DockKey::Enter));
+        assert_eq!(
+            lock(&session.shell).context.reconnect,
+            None,
+            "gönderim siliyor"
+        );
+        assert_eq!(session.key_gen.load(Ordering::Acquire), 1, "yazılmış gibi");
+        let text = wait_text(&session, "GOT:");
+        assert!(text.contains("GOT:ssh-p2222prod"), "{text:?}");
+    }
+
+    #[test]
+    fn return_without_an_offer_is_not_the_docks() {
+        // Teklif yoksa Enter bayt bayt bugünkü yolundan: tüketilmiyor ve
+        // PTY'ye hiçbir şey gitmiyor (nesil kıpırdamıyor).
+        let (session, _wake) = offered_session(false);
+        assert!(!session.dock_key(DockKey::Enter));
+        assert_eq!(session.key_gen.load(Ordering::Acquire), 0);
+        // Teklif varken de kapının öteki üç koşulu.
+        let (session, _wake) = offered_session(true);
+        lock(&session.shell).dock.buffer = "ls".to_owned();
+        assert!(!session.dock_key(DockKey::Enter), "satır dolu");
+        lock(&session.shell).dock.buffer.clear();
+        lock(&session.shell).dock.postdisplay = "ls -la".to_owned();
+        assert!(!session.dock_key(DockKey::Enter), "öneri var");
+        lock(&session.shell).dock.postdisplay.clear();
+        lock(&session.shell).dock.insert_keymap = false;
+        assert!(!session.dock_key(DockKey::Enter), "vicmd");
+        lock(&session.shell).dock.insert_keymap = true;
+        session.caret_in_dock.store(false, Ordering::Relaxed);
+        assert!(!session.dock_key(DockKey::Enter), "caret ızgarada");
+        session.caret_in_dock.store(true, Ordering::Relaxed);
+        lock(&session.shell).dock.answers = 7;
+        assert!(!session.dock_key(DockKey::Enter), "ayna bayat");
+        assert_eq!(session.key_gen.load(Ordering::Acquire), 0);
+        assert!(lock(&session.shell).context.reconnect.is_some());
+    }
+
+    #[test]
+    fn any_input_drops_the_offer() {
+        // Ömür ilk tuşta (Karar 8): yazılan harf teklifi kaldırıyor ve silip
+        // boşaltmak onu geri getirmiyor.
+        let (session, _wake) = offered_session(true);
+        session.write(b"x");
+        assert_eq!(lock(&session.shell).context.reconnect, None);
+        assert!(!session.dock_key(DockKey::Enter));
     }
 
     #[test]

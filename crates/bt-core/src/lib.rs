@@ -77,7 +77,7 @@ pub use settings::{
 };
 pub use shell::{
     DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle,
-    RemoteKind, RemoteTarget, ShellPhase, ShellState,
+    Reconnect, RemoteKind, RemoteTarget, ShellPhase, ShellState,
 };
 pub use wake::Wake;
 
