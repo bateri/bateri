@@ -982,6 +982,20 @@ impl Renderer {
                     viewport_px,
                 )
             })
+            // Yükleme satırının düğmeleri (037 phase-6): zeminin ve seçimin
+            // üstünde, etiketlerinin (glyph) altında. Düğme başına dolgu ve
+            // çerçeve, ikisi de caret'in fragment'inden.
+            .and_then(|()| {
+                frame.dock_button_draws(origin_y).try_for_each(|draw| {
+                    self.encode_rounded(
+                        enc,
+                        std::slice::from_ref(&draw.instance),
+                        draw.core,
+                        draw.shape,
+                        viewport_px,
+                    )
+                })
+            })
             // Caret'in dock yuvası: opak zeminden **sonra** (yoksa zemin onu
             // örterdi) ve glyph'lerden **önce** (yoksa harfi boyardı).
             // Instance pencere uzayında doğuyor, viewport ise dock-yerel:
@@ -1309,6 +1323,20 @@ impl Renderer {
         // ikincisi ya boş ya tuhaf kırpılmış çıkar — sessiz bir kusur
         // (`/code-review`). Sözleşme doc'ta yazılıydı, artık koda da bağlı.
         debug_assert!(instances.len() == 1, "caret kare başına tek dörtgen");
+        self.encode_rounded(enc, instances, core, shape, viewport_px)
+    }
+
+    /// `caret_fragment`'in çıplak çizimi: yuvarlak dikdörtgen, `core`'a göre.
+    /// İkinci tüketicisi yükleme düğmeleri (037 phase-6, [`Frame::dock_button_draws`]);
+    /// uniform çizim başına, yani her çağrı tek dörtlü.
+    fn encode_rounded(
+        &self,
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        instances: &[Instance],
+        core: [f32; 4],
+        shape: [f32; 4],
+        viewport_px: [f32; 2],
+    ) -> Result<(), GpuError> {
         enc.setRenderPipelineState(&self.caret);
         // İndeksler `cell_bg.metal`'deki `caret_fragment`'in bildirimleriyle
         // aynı; fragment'in tampon alanı vertex'inkinden **ayrı**.
@@ -2125,7 +2153,7 @@ mod tests {
     use crate::glyph_fx::{Effect, Fx, Kind};
     use crate::stats::Stats;
     use bt_core::CaretStyle;
-    use bt_core::{Erase, Keypress};
+    use bt_core::{ButtonState, DockButton, Erase, Keypress};
 
     /// Gömülü temanın zemini ve vurgusu: üretimde clear ve imleç rengi bu
     /// iki rolden geliyor (`link.rs`), sınamalar da aynı kaynaktan.
@@ -3634,6 +3662,65 @@ mod tests {
         assert!(
             darkest < 0x80,
             "caret'in altındaki glyph zemin rengine boyanmadı: {cell:?}"
+        );
+    }
+
+    #[test]
+    fn an_upload_button_paints_a_fill_and_a_brighter_edge_in_the_dock() {
+        // 037 phase-6: düğmenin dolgusu ve çerçevesi caret'in fragment'inden,
+        // dock'un viewport'unda. Çekirdek pencere uzayında olmak zorunda:
+        // dock-yerel kalsaydı SDF dörtlünün dışını ölçer ve hiçbir piksel
+        // boyanmazdı — sayaçların göremediği sınıf.
+        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        const EDGE: usize = 64;
+        let (cw, ch) = fitting_cell_px(&r, EDGE, 4);
+        let black = LinearRgba::from_srgb(0, 0, 0);
+        let red = LinearRgba::from_srgb(0xff, 0, 0);
+        let render = |state: ButtonState| {
+            let mut frame = Frame::default();
+            frame.clear(grid(cw, ch), CaretStyle::default());
+            frame.set_dock_rows(1);
+            frame.open_dock(black, black, black);
+            frame.set_dock_buttons([
+                None,
+                Some(DockButton {
+                    start: 0,
+                    end: 3,
+                    color: red,
+                    state,
+                }),
+            ]);
+            let origin_y = EDGE as f32 - frame.dock_layout_px();
+            let core = frame
+                .dock_button_draws(origin_y)
+                .next()
+                .expect("dolgu")
+                .core;
+            (render_offscreen(&r, EDGE, ACCENT, &frame), core)
+        };
+        let (idle, core) = render(ButtonState::Idle);
+        let (hover, _) = render(ButtonState::Hover);
+        let mid_y = ((core[1] + core[3]) / 2.0) as usize;
+        let mid_x = ((core[0] + core[2]) / 2.0) as usize;
+        let inside = pixel_at(&idle, EDGE, mid_x, mid_y);
+        let edge = pixel_at(&idle, EDGE, core[0] as usize, mid_y);
+        let outside = pixel_at(&idle, EDGE, core[2] as usize + 2, mid_y);
+        assert!(
+            inside.0 > 0x10 && inside.1 < 0x08,
+            "dolgu çizilmedi: {inside:02x?}"
+        );
+        assert!(
+            edge.0 > inside.0,
+            "çerçeve dolgudan belirgin değil: {edge:02x?} ≤ {inside:02x?}"
+        );
+        assert!(
+            outside.0 < 0x08,
+            "düğme aralığının dışı boyandı: {outside:02x?}"
+        );
+        let hovered = pixel_at(&hover, EDGE, mid_x, mid_y);
+        assert!(
+            hovered.0 > inside.0,
+            "fare üstündeyken koyulaşmadı: {hovered:02x?}"
         );
     }
 

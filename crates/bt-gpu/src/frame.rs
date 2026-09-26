@@ -30,8 +30,8 @@ use std::mem::offset_of;
 
 use bt_atlas::{Face, RuleKind, SizeClass};
 use bt_core::{
-    Block, CaretShape, CaretStyle, Cell, ClusterId, Clusters, LinearRgba, SearchRun, SelectionRun,
-    UnderlineStyle, UnfocusedCaret,
+    Block, ButtonState, CaretShape, CaretStyle, Cell, ClusterId, Clusters, DockButton, LinearRgba,
+    SearchRun, SelectionRun, UnderlineStyle, UnfocusedCaret,
 };
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
@@ -531,6 +531,33 @@ pub(crate) struct DockSurface {
     /// Üst çizginin dolan payı, `0..=1` ([`Frame::set_dock_progress`]);
     /// `None` → çizgi bütünüyle `edge`.
     progress: Option<f32>,
+    /// Yükleme satırının düğmeleri ([`Frame::set_dock_buttons`]); açılış
+    /// her karede siliyor, yani düğme yalnız söylendiği karede var.
+    buttons: [Option<DockButton>; 2],
+}
+
+/// Yükleme düğmesinin dolgusunun ve çerçevesinin alfası, durum başına (037
+/// phase-6) — **tasarım sabiti**, onaylanan tasarımın değerleri: dinlenen
+/// düğme sönük bir dolgu ve belirgin bir çerçeve, fare üstündeyken ikisi de
+/// koyulaşıyor, basılıyken dolgu bir ton daha.
+///
+/// Alfa burada, `bt-core`'da değil: renk paletin (işaretin rengi), opaklık bu
+/// karenin çizim durumu ([`with_alpha`]'nın gerekçesi).
+const fn button_alpha(state: ButtonState) -> (f32, f32) {
+    match state {
+        ButtonState::Idle => (0.16, 0.38),
+        ButtonState::Hover => (0.34, 0.7),
+        ButtonState::Pressed => (0.5, 0.7),
+    }
+}
+
+/// Yuvarlak dikdörtgenin bir çizimi: dörtlü (dock-yerel), `caret_fragment`'in
+/// pencere uzayındaki çekirdeği ve şekil uniform'u.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RoundedDraw {
+    pub(crate) instance: Instance,
+    pub(crate) core: [f32; 4],
+    pub(crate) shape: [f32; 4],
 }
 
 /// PTY'nin dock'a **ayırdığı** pay, satır: bir giriş satırı + bağlam satırı.
@@ -622,6 +649,19 @@ pub(crate) const DOCK_MAX_SHARE: f32 = 0.5;
 pub fn context_cols(cols: u16, cell: CellMetrics) -> u16 {
     let span = u32::from(cols) * u32::from(cell.cell_px().0);
     u16::try_from(span / u32::from(cell.context_cell_px())).unwrap_or(u16::MAX)
+}
+
+/// Bağlam satırının hücre bandının tepesi, giriş bloğunun **dibinden**
+/// ölçülen piksel: giriş satırı varsa satır arası boşluk, yoksa (uzak oturum,
+/// 036) sıfır — [`Frame::dock_pos`]'un kuralı. Fare yükleme düğmesinin
+/// dikey aralığını bundan okuyor (037 phase-6): dolgu tam o bantta
+/// ([`Frame::dock_button_draws`]).
+pub fn context_row_offset(input_rows: u16, cell: CellMetrics) -> f32 {
+    if input_rows == 0 {
+        0.0
+    } else {
+        dock_row_gap(f32::from(cell.gutter_px()))
+    }
 }
 
 /// Formülün gövdesi, ham sayılarla: [`dock_px`] ile [`Frame`] aynı aritmetiği
@@ -1966,7 +2006,67 @@ impl Frame {
             edge: edge.to_array(),
             separator: separator.to_array(),
             progress: None,
+            buttons: [None; 2],
         });
+    }
+
+    /// Yükleme satırının düğmeleri (`bt_core::Dock::buttons`, 037 phase-6):
+    /// [`Frame::open_dock`]'tan sonra; dock açık değilse no-op.
+    pub(crate) fn set_dock_buttons(&mut self, buttons: [Option<DockButton>; 2]) {
+        if let Some(dock) = &mut self.dock {
+            dock.buttons = buttons;
+        }
+    }
+
+    /// Yükleme düğmelerinin çizimleri: düğme başına **dolgu, sonra çerçeve**
+    /// — ikisi de `caret_fragment`'ten (yuvarlak dikdörtgenin SDF'i ve kenar
+    /// bandı zaten orada; yeni bir pipeline ya da shader yok). Dörtlü
+    /// dock-yerel, çekirdek pencere uzayında (`origin_y` kadar aşağıda):
+    /// fragment onu `[[position]]` ile karşılaştırıyor ([`Frame::dock_caret`]'in
+    /// tersi yönde aynı çeviri).
+    ///
+    /// Dikdörtgen bağlam satırının hücre bandı: yatayda düğmenin sütun
+    /// aralığı ([`Frame::dock_pos`], küçük sınıfın adımı), dikeyde satırın
+    /// yüksekliği. **Tıklama alanının ta kendisi** — fare aynı sütun
+    /// aralığını `bt_core::transfer_button_at`'ten okuyor. Kenarlar aygıt
+    /// pikseline yuvarlanıyor: çerçeve saç çizgisi kalınlığında ve
+    /// oturmayan kenar iki piksele yayılıp soluklaşırdı.
+    ///
+    /// Yarıçap seçiminki ([`Frame::selection_radius`]), kalınlık fontun kendi
+    /// kural metriği — ikinci bir sayı uydurulmadı.
+    pub(crate) fn dock_button_draws(
+        &self,
+        origin_y: f32,
+    ) -> impl Iterator<Item = RoundedDraw> + '_ {
+        let buttons = self.dock.map_or([None; 2], |dock| dock.buttons);
+        let row = self.dock_rows.saturating_sub(1);
+        let radius = self.selection_radius();
+        let stroke = self.rule_px.max(1.0);
+        buttons.into_iter().flatten().flat_map(move |button| {
+            let [x0, y0] = self.dock_pos(button.start, row);
+            let [x1, _] = self.dock_pos(button.end, row);
+            let (x0, x1) = (x0.round(), x1.round());
+            let (y0, y1) = (y0.round(), (y0 + self.cell_px.1).round());
+            let (fill, edge) = button_alpha(button.state);
+            let instance = |alpha: f32| Instance {
+                pos: [x0, y0],
+                size: [x1 - x0, y1 - y0],
+                rgba: with_alpha(button.color, alpha),
+            };
+            let core = [x0, y0 + origin_y, x1, y1 + origin_y];
+            [
+                RoundedDraw {
+                    instance: instance(fill),
+                    core,
+                    shape: [radius, 0.0, 0.0, 0.0],
+                },
+                RoundedDraw {
+                    instance: instance(edge),
+                    core,
+                    shape: [radius, stroke, 0.0, 0.0],
+                },
+            ]
+        })
     }
 
     /// Üst saç çizgisini bu kare için bir **ilerleme çubuğuna** çevirir
@@ -2081,6 +2181,7 @@ impl Frame {
             edge: [0.0; 4],
             separator: [0.0; 4],
             progress: None,
+            buttons: [None; 2],
         });
         // İlerleme varken çizginin zemini ayracın rengi ve üstüne dolan kısım
         // kenarın renginde; yokken zemin kenarın kendisi ve dolgu sıfır
@@ -3397,6 +3498,77 @@ mod tests {
         // Izgara küçük sınıfa **hiç** girmiyor: tek tüketici dock'un alt satırı.
         frame.push(at(0, 1));
         assert_eq!(frame.glyphs()[0].size, SizeClass::Normal);
+    }
+
+    #[test]
+    fn an_upload_button_fills_its_columns_on_the_context_row() {
+        // 037 phase-6: dolgunun kenarı düğmenin sütun sınırı — farenin
+        // isabet aralığı (`bt_core::transfer_button_at`) ile aynı sütunlar,
+        // bağlam satırının küçük adımında. Etiketin glyph'i o aralığın içinde.
+        let metrics = CellMetrics::new(10, 20, 8, GUTTER, 1).expect("ölçü");
+        let mut frame = Frame::default();
+        frame.clear(metrics, CaretStyle::default());
+        frame.push_dock(Cell {
+            col: 3,
+            row: 1,
+            ch: Some('C'),
+            ..Cell::default()
+        });
+        frame.open_dock(BG, CURSOR, CURSOR);
+        assert_eq!(frame.dock_button_draws(0.0).count(), 0, "düğme söylenmedi");
+        let button = DockButton {
+            start: 2,
+            end: 5,
+            color: CURSOR,
+            state: ButtonState::Hover,
+        };
+        frame.set_dock_buttons([None, Some(button)]);
+        let draws: Vec<_> = frame.dock_button_draws(100.0).collect();
+        assert_eq!(draws.len(), 2, "dolgu + çerçeve");
+        let [fill, edge] = [draws[0], draws[1]];
+        let glyph = frame.dock_glyphs()[0].pos;
+        assert_eq!(
+            fill.instance.pos,
+            [glyph[0] - 8.0, glyph[1]],
+            "sol kenar etiketten bir sütun önce"
+        );
+        assert_eq!(
+            fill.instance.size,
+            [24.0, 20.0],
+            "üç küçük sütun, bir satır"
+        );
+        // Farenin dikey aralığı aynı bant: giriş bloğunun tepesi (pay) + bir
+        // giriş satırı + `context_row_offset` (`BateriView::context_column`).
+        assert_eq!(
+            fill.instance.pos[1],
+            (GUTTER as f32 + 20.0 + context_row_offset(1, metrics)).round(),
+            "fare ile dolgu aynı satır bandını okumuyor"
+        );
+        assert_eq!(fill.instance.rgba[3], 0.34);
+        assert_eq!(edge.instance.rgba[3], 0.7);
+        assert_eq!(fill.shape[1], 0.0, "dolgu");
+        assert_eq!(edge.shape[1], 1.0, "çerçeve kural kalınlığında");
+        assert_eq!(fill.shape[0], frame.selection_radius());
+        // Çekirdek pencere uzayında: dörtlü dock-yerel, viewport `origin_y`
+        // kadar aşağıda.
+        assert_eq!(fill.core[1], fill.instance.pos[1] + 100.0);
+        assert_eq!(fill.core[2] - fill.core[0], 24.0);
+
+        frame.set_dock_buttons([
+            None,
+            Some(DockButton {
+                state: ButtonState::Idle,
+                ..button
+            }),
+        ]);
+        let idle: Vec<_> = frame.dock_button_draws(0.0).collect();
+        assert!(
+            idle[0].instance.rgba[3] < fill.instance.rgba[3],
+            "fare üstünde koyulaşıyor"
+        );
+        // Açılış her karede siliyor.
+        frame.open_dock(BG, CURSOR, CURSOR);
+        assert_eq!(frame.dock_button_draws(0.0).count(), 0);
     }
 
     #[test]

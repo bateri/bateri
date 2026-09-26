@@ -19,13 +19,13 @@ use std::thread;
 use std::time::Instant;
 
 use block2::RcBlock;
-use bt_core::{HostMark, Transfer};
+use bt_core::{HostMark, Transfer, TransferAction};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSImageScaling, NSImageView, NSMenu,
-    NSMenuItem, NSModalResponse, NSProgressIndicator, NSProgressIndicatorStyle, NSView,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSCursor, NSImageScaling, NSImageView,
+    NSMenu, NSMenuItem, NSModalResponse, NSProgressIndicator, NSProgressIndicatorStyle, NSView,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
 
@@ -231,6 +231,7 @@ impl TerminalWindow {
         let status = self.uploads().borrow_mut().status(Instant::now());
         if let Some(status) = status {
             self.show_transfer(Some(status));
+            self.rehover_upload();
         }
         refresh_dock_tile(self.mtm());
     }
@@ -272,14 +273,68 @@ impl TerminalWindow {
     }
 
     /// Durum satırını oturuma yazar ve farenin düğme sorusu için saklar.
+    /// Düğmesiz satır farenin üstünde durduğu düğmeyi de kaldırıyor: el
+    /// imleci orada asılı kalmasın.
     fn show_transfer(&self, transfer: Option<Transfer>) {
         if let Some(session) = self.session() {
             session.set_transfer(transfer.as_ref());
         }
-        self.uploads().borrow_mut().set_shown(transfer);
+        let dropped = {
+            let mut uploads = self.uploads().borrow_mut();
+            let had = uploads.hover().is_some();
+            uploads.set_shown(transfer);
+            had && uploads.hover().is_none()
+        };
+        if dropped {
+            NSCursor::arrowCursor().set();
+        }
     }
 
-    /// ⌘. ve satırın ✕'i: bütün kuyruk.
+    /// Fare bağlam satırında dock-yerel `col` sütununda (`None` → satırın
+    /// dışında; `context` bağlam satırının bütçesi): üstündeki düğme
+    /// **değiştiyse** satırı yeniden yazar (kare yalnız o kenarda) ve imleci
+    /// el ↔ ok çevirir (037 phase-6). Yükleme yoksa ilk soruda çıkıyor —
+    /// boştaki pencerenin her hareketi bir ödünç almaya mal oluyor.
+    pub(crate) fn upload_hover(&self, at: Option<(u16, u16)>) {
+        let (before, after, fresh) = {
+            let mut uploads = self.uploads().borrow_mut();
+            let Some(shown) = uploads.shown() else {
+                return;
+            };
+            let hover =
+                at.and_then(|(col, context)| bt_core::transfer_button_at(shown, context, col));
+            let before = uploads.hover();
+            let fresh = uploads.set_hover(hover);
+            (before, uploads.hover(), fresh)
+        };
+        if let Some(fresh) = fresh {
+            self.show_transfer(Some(fresh));
+        }
+        // Düğmenin üstündeyken her soruda el: AppKit imleci kendi başına
+        // oka döndürebiliyor (pencere yeniden key oldu) ve hover değişmediği
+        // için kenar bunu görmezdi. Bedeli bir `set`.
+        if after.is_some() {
+            NSCursor::pointingHandCursor().set();
+        } else if before.is_some() {
+            NSCursor::arrowCursor().set();
+        }
+    }
+
+    /// Hover'ı farenin **şimdiki** yerinden yeniden hesaplar: düğmeler sağa
+    /// yaslı ve genişlikleri durumdan (öğe sayısı, `Hide files`), yani satır
+    /// kıpırdamayan farenin altında değişebiliyor — `/code-review`.
+    pub(crate) fn rehover_upload(&self) {
+        let at = self.view().pointer_context_column();
+        self.upload_hover(at);
+    }
+
+    /// Pencere key olmaktan çıktı: `mouseMoved:` artık gelmiyor, düğme
+    /// hover'da asılı kalmasın.
+    pub(crate) fn unhover_upload(&self) {
+        self.upload_hover(None);
+    }
+
+    /// ⌘. ve satırın `Cancel`'ı: bütün kuyruk.
     pub(crate) fn cancel_uploads(&self) {
         let end = self.uploads().borrow_mut().cancel();
         if let Some((line, serial)) = end {
@@ -327,31 +382,45 @@ impl TerminalWindow {
     /// küçük sınıfın adımında): düğmeye düştüyse işini yapar ve `true`.
     /// `context` bağlam satırının bütçesi (`bt_gpu::context_cols`).
     pub(crate) fn upload_click(&self, col: u16, context: u16, at: NSPoint) -> bool {
-        let control = {
+        let action = {
             let uploads = self.uploads().borrow();
             let Some(shown) = uploads.shown() else {
                 return false;
             };
-            let Some(start) = bt_core::transfer_controls_col(shown, context) else {
-                return false;
-            };
-            let Some(offset) = col.checked_sub(start) else {
-                return false;
-            };
-            upload::control_at(usize::from(offset))
+            bt_core::transfer_button_at(shown, context, col)
         };
-        match control {
-            Some(upload::Control::Cancel) => self.cancel_uploads(),
-            Some(upload::Control::List) => self.show_upload_list(at),
+        match action {
+            Some(TransferAction::Cancel) => self.cancel_uploads(),
+            Some(TransferAction::List) => self.show_upload_list(at),
             None => return false,
         }
         true
     }
 
-    /// "▴ list": dock'un üstünde küçük bir liste — öğe başına ✕ ve "Cancel
-    /// All" (Kullanıcı kararı 4). AppKit'in açılır menüsü: klavye ve
+    /// "Show files (N)": dock'un üstünde küçük bir liste — öğe başına ✕ ve
+    /// "Cancel All" (Kullanıcı kararı 4). AppKit'in açılır menüsü: klavye ve
     /// erişilebilirlik bedava, kapanması tıklamanın kendisi.
+    ///
+    /// Menü açıkken düğme `Hide files` diyor ve basılı tonda (phase-6):
+    /// `popUpMenu…` iç içe bir run loop'ta dönüyor ama display link ortak
+    /// kiplerde, yani kare o arada da çiziliyor. "Gizle" tıklaması menünün
+    /// kendi kapanışı — menü dışına tık onu kapatıyor.
     fn show_upload_list(&self, at: NSPoint) {
+        let opened = self.uploads().borrow_mut().set_list_open(true);
+        if let Some(line) = opened {
+            self.show_transfer(Some(line));
+        }
+        self.pop_upload_list(at);
+        let closed = self.uploads().borrow_mut().set_list_open(false);
+        if let Some(line) = closed {
+            self.show_transfer(Some(line));
+        }
+        // Menü açıkken hareketler ona gitti: fare artık başka yerde olabilir.
+        self.rehover_upload();
+    }
+
+    /// Listenin menüsü; menü kapanınca döner.
+    fn pop_upload_list(&self, at: NSPoint) {
         let items = self.uploads().borrow().items();
         if items.is_empty() {
             return;

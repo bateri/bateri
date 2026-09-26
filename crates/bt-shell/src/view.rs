@@ -716,8 +716,13 @@ define_class!(
         /// göre açmak kipi `bt-shell`'e yayınlamayı, yani yeni bir paylaşılan
         /// durumu isterdi (`.tasks/020-fare-raporlama/discussion.md` →
         /// Karar 4); belirti görülürse o kola dönülür.
+        ///
+        /// Yükleme satırının düğmesi ([`BateriView::upload_hover`]) hareket
+        /// raporundan **önce** ve ondan bağımsız soruluyor: bağlam satırı
+        /// ızgaranın dışında ve rapor yolu orayı reddediyor.
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
+            self.upload_hover(event);
             self.motion_event(event, None);
         }
 
@@ -1786,32 +1791,60 @@ impl BateriView {
         crate::app::delegate(self.mtm())?.window_owning(&window)
     }
 
-    /// Tık yükleme satırının bir düğmesine mi düştü (037 Karar 7): bağlam
-    /// satırı giriş bloğunun **altında**, sütun adımı küçük sınıfın
-    /// ilerlemesi. Düğmenin yeri çizimle aynı yerleşimden
-    /// (`bt_core::transfer_controls_col`); `true` → tık tüketildi.
-    fn upload_control(&self, event: &NSEvent) -> bool {
-        let Some((metrics, (cols, _))) = self.ivars().metrics.get() else {
-            return false;
-        };
-        let Some((top, rows)) = self.ivars().origin.get().and_then(Origin::dock) else {
-            return false;
-        };
-        let Some(scale) = self.window().map(|window| window.backingScaleFactor()) else {
-            return false;
-        };
-        let at = self.convertPoint_fromView(event.locationInWindow(), None);
-        let context_top = f64::from(top) + f64::from(metrics.cell_px().1) * f64::from(rows);
+    /// Pencere noktası → bağlam satırında dock-yerel sütun ve bağlam
+    /// satırının bütçesi (037 Karar 7, phase-6): satır giriş bloğunun
+    /// **altında**, sütun adımı küçük sınıfın ilerlemesi. Dock yoksa, kare
+    /// henüz yoksa ya da nokta bağlam satırında değilse `None`.
+    ///
+    /// Tık ve hover'ın **tek** geometrisi; düğmenin sütun aralığı çizimle aynı
+    /// yerleşimden (`bt_core::transfer_button_at`), yani ikisinin göreceği
+    /// sütun ile çizilen dolgu ayrışamıyor.
+    fn context_column(&self, in_window: NSPoint) -> Option<(u16, u16)> {
+        let (metrics, (cols, _)) = self.ivars().metrics.get()?;
+        let (top, rows) = self.ivars().origin.get().and_then(Origin::dock)?;
+        let scale = self.window()?.backingScaleFactor();
+        let at = self.convertPoint_fromView(in_window, None);
+        // Bağlam satırının hücre bandı: dolgunun ta kendisi
+        // (`Frame::dock_button_draws`); üstündeki boşluk ve altındaki nefes
+        // payı dolgunun dışında, orada tık düğmeye düşmüyor.
+        let context_top = f64::from(top)
+            + f64::from(metrics.cell_px().1) * f64::from(rows)
+            + f64::from(bt_gpu::context_row_offset(rows, metrics));
+        let bottom = context_top + f64::from(metrics.cell_px().1);
+        let y = at.y * scale;
         let x = at.x * scale - f64::from(metrics.gutter_px());
-        if at.y * scale < context_top || x < 0.0 {
-            return false;
+        if y < context_top || y >= bottom || x < 0.0 {
+            return None;
         }
         // audit: `x ≥ 0` ve pencere genişliği `u16` sütuna sığıyor; taşan
         // değer yalnız hiçbir düğmeye düşmeyen bir sütun olur.
         let col = (x / f64::from(metrics.context_cell_px())).floor() as u16;
-        let context = bt_gpu::context_cols(cols, metrics);
-        self.terminal_window()
-            .is_some_and(|window| window.upload_click(col, context, at))
+        Some((col, bt_gpu::context_cols(cols, metrics)))
+    }
+
+    /// Tık yükleme satırının bir düğmesine mi düştü (037 Karar 7); `true` →
+    /// tık tüketildi. Geometri [`Self::context_column`]'unki.
+    fn upload_control(&self, event: &NSEvent) -> bool {
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.context_column(event.locationInWindow())
+            .zip(self.terminal_window())
+            .is_some_and(|((col, context), window)| window.upload_click(col, context, at))
+    }
+
+    /// Farenin **şimdiki** yeri bağlam satırında ([`Self::context_column`]):
+    /// olaysız soru — satır farenin altında değiştiğinde (tazeleme, liste
+    /// kapandı, pencere key oldu) hover yeniden hesaplansın.
+    pub(crate) fn pointer_context_column(&self) -> Option<(u16, u16)> {
+        self.context_column(self.window()?.mouseLocationOutsideOfEventStream())
+    }
+
+    /// Farenin altındaki yükleme düğmesi (037 phase-6): pencere değişimi
+    /// yalnız düğme değişince kare istiyor ve imleci çeviriyor
+    /// (`TerminalWindow::upload_hover`).
+    fn upload_hover(&self, event: &NSEvent) {
+        if let Some(window) = self.terminal_window() {
+            window.upload_hover(self.context_column(event.locationInWindow()));
+        }
     }
 
     /// Tekerlek dock'un giriş bloğunun üstündeyse onu dock'un dikey

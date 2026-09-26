@@ -23,8 +23,8 @@ use crate::color::{self, LinearRgba, Theme};
 use crate::session::{Cell, CellHalf, SelectKind, SelectionRun, UnderlineStyle, WORD_SEPARATORS};
 
 use crate::shell::{
-    DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, Reconnect, ShellPhase,
-    ShellState, Transfer,
+    ButtonState, DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, Reconnect,
+    ShellPhase, ShellState, Transfer, TransferAction,
 };
 
 /// Dock'un karedeki yüzeyi — hücrelerin **dışında** kalan her şey, çözülmüş.
@@ -77,6 +77,27 @@ pub struct Dock {
     /// Kullanıcı kararı 4). Dolan kısım [`Self::edge`]'in renginde, kalanı
     /// [`Self::separator`]'ınkinde; `None` → çizgi bütünüyle `edge`.
     pub progress: Option<u16>,
+    /// Yükleme satırının düğmeleri (037 phase-6), soldan sağa; en çok iki.
+    /// Hücreler (etiket) sink'ten akıyor, dolgu ve çerçeve buradan — çizimin
+    /// kararı değil, yerleşimin ([`transfer_button_at`] aynı yerleşimi
+    /// okuyor).
+    pub buttons: [Option<DockButton>; 2],
+}
+
+/// Yükleme satırının bir düğmesi: bağlam satırında **dock-yerel** sütun
+/// aralığı `[start, end)` (küçük sınıfın adımında), rengi ve durumu.
+///
+/// Aralık dolgunun tamamı ve tıklama alanının ta kendisi: iç pay aralığın
+/// içinde (etiket `start + 1`'den başlıyor), yani dolgunun kenarı ile
+/// isabetin kenarı aynı sütun sınırı.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DockButton {
+    pub start: u16,
+    pub end: u16,
+    /// Dolgunun ve çerçevenin rengi: host'un işaretinin rengi; alfası
+    /// durumdan, `bt-gpu`'da.
+    pub color: LinearRgba,
+    pub state: ButtonState,
 }
 
 /// Dock caret'inin yeri: giriş bloğunda **ekran** sütunu ve dikey pencerenin
@@ -213,8 +234,9 @@ const REMOTE_GAP: &str = "  ";
 /// 4) — `bt-shell`'in biçimlediği metnin **sözlüğü**. Metin orada doğuyor,
 /// ama küçük sınıfta kutu çıkmadığının kapısı `bt-atlas`'ta ve o crate iki
 /// yanı da göremiyor; kopyalar bu listeye bağlı
-/// (`the_upload_row_is_the_one_the_atlas_checks`).
-pub const UPLOAD_GLYPHS: [char; 7] = ['↑', '▴', '✕', '✓', '—', '·', '…'];
+/// (`the_upload_row_is_the_one_the_atlas_checks`). Düğmelerin `⌘`'si de
+/// burada: etiketi bu crate yazıyor ama glyph'i yine küçük sınıfta.
+pub const UPLOAD_GLYPHS: [char; 6] = ['↑', '⌘', '✓', '—', '·', '…'];
 
 /// Bir düzenlemenin taşıyabileceği en çok glyph — **tasarım sabiti**.
 ///
@@ -1195,6 +1217,7 @@ pub(crate) fn render_with(
             .transfer
             .as_ref()
             .and_then(|transfer| transfer.progress),
+        buttons: [None; 2],
     };
     if cols.grid == 0 {
         settle(change, &mut edits);
@@ -1216,7 +1239,7 @@ pub(crate) fn render_with(
     // Bağlam satırı aynanın **durumundan önce**: dizin ve dal ZLE satırı
     // düzenlemese de doğru ve kullanıcı komut koşarken de onlara bakıyor.
     // Aşağıdaki `Live` kapısının altında kalsaydı her komutta kaybolurdu.
-    render_context(context, theme, cols.context, input_rows, &mut sink);
+    surface.buttons = render_context(context, theme, cols.context, input_rows, &mut sink);
 
     // **Sıfır giriş satırı** (036 Karar 8): bant yalnız bağlam satırı. Caret
     // yok (`owned` zaten `false` — `frame()`'in dördüncü ön koşulu), satır
@@ -1618,22 +1641,23 @@ fn settle(change: Option<&Change>, edits: &mut impl FnMut(DockEdit)) {
 ///
 /// **Ayraç iki yan da doluysa çizilir.** Depo olmayan dizinde asılı bir `|`
 /// "dal okunamadı" derdi; okunacak dal yok.
+///
+/// Dönüş yükleme satırının düğmeleri ([`Dock::buttons`]); başka biçimde yok.
 fn render_context(
     context: &DockContext,
     theme: &Theme,
     cols: u16,
     row: u16,
     sink: &mut impl FnMut(Cell),
-) {
+) -> [Option<DockButton>; 2] {
     let available = usize::from(cols.saturating_sub(CONTEXT_COL));
     if available == 0 {
-        return;
+        return [None; 2];
     }
     // Yükleme satırı uzak biçimden **önce**: kendi host'unu taşıyor ve ssh
     // kapandıktan sonra da sonucunu göstermek zorunda (037 Karar 7).
     if let Some(transfer) = &context.transfer {
-        render_transfer(transfer, theme, available, row, sink);
-        return;
+        return render_transfer(transfer, theme, available, row, sink);
     }
     if let Some(host) = context.remote_host() {
         let color = theme.mark_linear(context.remote_mark);
@@ -1646,7 +1670,7 @@ fn render_context(
             row,
             sink,
         );
-        return;
+        return [None; 2];
     }
     let branch_chars = context.branch.chars().count();
     // Bütçe **önce dala** ayrılıyor; yol kalanı alıyor. Ayraç da yolun
@@ -1688,6 +1712,7 @@ fn render_context(
                 .flatten(),
         );
     emit_context(line, available, row, sink);
+    [None; 2]
 }
 
 /// Bağlam satırının **uzak** biçimi (036 R4.1): `⇄ {host}` işaretin
@@ -1742,22 +1767,102 @@ struct TransferLayout {
     body: usize,
     /// Gövde kısaltıldı mı (`…` sonda).
     clipped: bool,
-    /// Düğmelerin bağlam-yerel sütunu; `None` → sığmadı ya da yok.
-    controls: Option<usize>,
+    /// Düğmeler, soldan sağa; sığmayan ya da olmayan `None`.
+    buttons: [Option<ButtonSpan>; 2],
 }
 
-/// Gövde ile düğmeler arasındaki boşluk.
+/// Yerleşimin bir düğmesi: bağlam-yerel sütun aralığı `[start, end)` — iç
+/// pay dahil, yani dolgunun ve tıklama alanının tamamı.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ButtonSpan {
+    action: TransferAction,
+    label: ButtonLabel,
+    /// `⌘.` ipucu etiketin sağında mı.
+    hint: bool,
+    start: usize,
+    end: usize,
+}
+
+/// Düğmenin etiketi — UI dizgisi. **Simge değil fiil** (kullanıcı, gözle
+/// kontrol: `✕` "kapat" da okunuyordu, `▴` küçük puntoda metinden ayırt
+/// edilmiyordu).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ButtonLabel {
+    Cancel,
+    CancelAll,
+    /// Listedeki öğe sayısıyla.
+    ShowFiles(u16),
+    HideFiles,
+}
+
+impl ButtonLabel {
+    /// Etiketin karakterleri — kare başına ayırma yok, sayı yerinde basılıyor.
+    fn chars(self) -> impl Iterator<Item = char> + Clone {
+        let (head, count, tail) = match self {
+            Self::Cancel => ("Cancel", None, ""),
+            Self::CancelAll => ("Cancel all", None, ""),
+            Self::HideFiles => ("Hide files", None, ""),
+            Self::ShowFiles(items) => ("Show files (", Some(items), ")"),
+        };
+        head.chars()
+            .chain(count.into_iter().flat_map(decimal))
+            .chain(tail.chars())
+    }
+
+    fn len(self) -> usize {
+        self.chars().count()
+    }
+}
+
+/// `n`'nin ondalık basamakları, ayırmasız.
+fn decimal(n: u16) -> impl Iterator<Item = char> + Clone {
+    let n = u32::from(n);
+    let digits = n.checked_ilog10().unwrap_or(0) + 1;
+    (0..digits)
+        .rev()
+        // audit: `n / 10^p % 10` 0..=9, `from_digit` hep `Some`.
+        .map(move |p| char::from_digit(n / 10u32.pow(p) % 10, 10).unwrap_or('0'))
+}
+
+/// Gövde ile düğmeler arasındaki en az boşluk.
 const CONTROLS_GAP: usize = 2;
 
-/// Yükleme satırının yerleşimi: `⇄ {host}  {body}  {controls}`.
+/// Düğmenin iç payı, sütun — etiketin iki yanında birer boş sütun ve dolgu
+/// onları da kaplıyor. Tasarım sabiti: küçük sınıfın bir sütunu kabaca
+/// yarım büyük hücre, onaylanan tasarımın iç payı.
+const BUTTON_PAD: usize = 1;
+
+/// İki düğmenin arası, sütun: dolgular birbirine değmesin.
+const BUTTON_GAP: usize = 1;
+
+/// İptalin klavye ipucu — UI dizgisi; menünün Cancel Upload (⌘.) tuşu.
+/// Düğmenin içinde ve sönük: klavyeden iptali öğretiyor, etiketle yarışmıyor.
+const CANCEL_HINT: &str = "⌘.";
+
+/// Bir düğmenin genişliği, sütun: `pad + etiket [+ boşluk + ⌘.] + pad`.
+fn button_width(label: ButtonLabel, hint: bool) -> usize {
+    let hint = if hint {
+        1 + CANCEL_HINT.chars().count()
+    } else {
+        0
+    };
+    BUTTON_PAD + label.len() + hint + BUTTON_PAD
+}
+
+/// Yükleme satırının yerleşimi: `⇄ {host}  {body}` solda, düğmeler **sağa
+/// yaslı**.
 ///
 /// **Bütçe önce `⇄ host`'a, sonra düğmelere, kalan gövdeye.** Host
 /// kısalmıyor (uzak biçimin gerekçesi: kısalmış bir host başka bir makine
-/// okunur); düğmeler de kısalmıyor — yarım bir `▴ li` tıklanacak bir şey
-/// söylemiyor — ve sığmazsa hiç çizilmiyor. Gövde sağdan `…` ile kısalıyor:
-/// bilgisi başında (hangi dosya, kaçıncı).
+/// okunur); düğmeler de kısalmıyor — yarım bir etiket tıklanacak bir şey
+/// söylemiyor. Sığmazlarsa sırayla düşüyorlar: önce `⌘.` ipucu, sonra liste
+/// düğmesi, `Cancel` en son — iptal satırın tek acil işi. Gövde sağdan `…`
+/// ile kısalıyor: bilgisi başında (hangi dosya, kaçıncı).
 ///
-/// Çizim ([`render_transfer`]) ve fare ([`transfer_controls_col`]) bunu
+/// Sağa yaslı, çünkü gövde her tazelemede boy değiştiriyor (hız, kalan süre)
+/// ve arkasına yapışık düğmeler farenin altından kayardı (037 phase-6).
+///
+/// Çizim ([`render_transfer`]) ve fare ([`transfer_button_at`]) bunu
 /// okuyor; iki aritmetik ayrışsaydı tık düğmenin yanına düşerdi.
 fn transfer_layout(transfer: &Transfer, available: usize) -> TransferLayout {
     let head_chars = 2 + transfer.host.chars().count();
@@ -1766,19 +1871,65 @@ fn transfer_layout(transfer: &Transfer, available: usize) -> TransferLayout {
             head: false,
             body: 0,
             clipped: false,
-            controls: None,
+            buttons: [None; 2],
         };
     }
     let rest = available - head_chars;
     let rest = rest.saturating_sub(REMOTE_GAP.chars().count());
     let body_chars = transfer.body.chars().count();
-    let controls_chars = transfer.controls.chars().count();
-    let with_controls = controls_chars > 0 && controls_chars <= rest;
-    let budget = if with_controls {
-        rest - controls_chars
+
+    let controls = transfer.controls;
+    let cancel = if controls.items > 1 {
+        ButtonLabel::CancelAll
     } else {
-        rest
+        ButtonLabel::Cancel
     };
+    let list = (controls.items > 1).then_some(if controls.list_open {
+        ButtonLabel::HideFiles
+    } else {
+        ButtonLabel::ShowFiles(controls.items)
+    });
+    // Düşme sırası: ipucu, liste, (iptal hiç yoksa düğme yok).
+    let options = [(list, true), (list, false), (None, false)];
+    let chosen = (controls.items > 0)
+        .then(|| {
+            options.into_iter().find(|&(list, hint)| {
+                let list_width = list.map_or(0, |label| button_width(label, false) + BUTTON_GAP);
+                list_width + button_width(cancel, hint) <= rest
+            })
+        })
+        .flatten();
+    let mut buttons = [None; 2];
+    let mut controls_width = 0;
+    if let Some((list, hint)) = chosen {
+        let cancel_width = button_width(cancel, hint);
+        // Sağ kenar bağlam-yerel `head + gap + rest`, yani `available`'ın
+        // kendisi (gap kırpıldıysa `rest` sıfıra inmiştir ve düğme yok).
+        let right = head_chars + REMOTE_GAP.chars().count() + rest;
+        let cancel_start = right - cancel_width;
+        buttons[1] = Some(ButtonSpan {
+            action: TransferAction::Cancel,
+            label: cancel,
+            hint,
+            start: cancel_start,
+            end: right,
+        });
+        controls_width = cancel_width;
+        if let Some(label) = list {
+            let end = cancel_start - BUTTON_GAP;
+            let start = end - button_width(label, false);
+            buttons[0] = Some(ButtonSpan {
+                action: TransferAction::List,
+                label,
+                hint: false,
+                start,
+                end,
+            });
+            controls_width = right - start;
+        }
+    }
+    let with_controls = controls_width > 0;
+    let budget = rest - controls_width;
     // Gövdeyle düğmeler arasına boşluk yalnız ikisi de varsa; boşluğa yer
     // yoksa gövde çekiliyor, düğmeler değil.
     let budget = if with_controls && body_chars > 0 {
@@ -1792,61 +1943,54 @@ fn transfer_layout(transfer: &Transfer, available: usize) -> TransferLayout {
         // İşaretin kendisi de bir sütun.
         (budget.saturating_sub(1), budget > 0)
     };
-    let shown = body + usize::from(clipped);
-    let controls = with_controls.then(|| {
-        head_chars + REMOTE_GAP.chars().count() + shown + if shown > 0 { CONTROLS_GAP } else { 0 }
-    });
     TransferLayout {
         head: true,
         body,
         clipped,
-        controls,
+        buttons,
     }
 }
 
-/// Yükleme satırının düğmelerinin **dock-yerel** sütunu (bağlam satırının
-/// sütun adımında, yani küçük sınıfta); `None` → çizilmiyor. `context` bağlam
+/// Bağlam satırının dock-yerel `col` sütunu yükleme satırının hangi
+/// düğmesinde; `None` → hiçbirinde ya da düğme yok. `context` bağlam
 /// satırının bütçesi ([`DockCols::context`]).
 ///
-/// Farenin tek girdisi: çizimle aynı yerleşimden ([`transfer_layout`]).
-pub fn transfer_controls_col(transfer: &Transfer, context: u16) -> Option<u16> {
+/// Farenin tek girdisi: çizimle aynı yerleşimden ([`transfer_layout`]) ve
+/// aralık dolgunun tamamı — iç pay dahil, yani tık etiketin yanındaki boş
+/// sütuna düşse de düğmeyi buluyor.
+pub fn transfer_button_at(transfer: &Transfer, context: u16, col: u16) -> Option<TransferAction> {
     let available = usize::from(context.saturating_sub(CONTEXT_COL));
-    let col = transfer_layout(transfer, available).controls?;
-    // audit: `col < available ≤ context` ve `context` `u16`.
-    Some(CONTEXT_COL + col as u16)
+    let col = usize::from(col.checked_sub(CONTEXT_COL)?);
+    transfer_layout(transfer, available)
+        .buttons
+        .into_iter()
+        .flatten()
+        .find(|button| (button.start..button.end).contains(&col))
+        .map(|button| button.action)
 }
 
-/// Bağlam satırının **yükleme** biçimi (037 Karar 7 → Kullanıcı kararı 4):
-/// `⇄ {host}` işaretin renginde (uzak biçimin öneki ve rengi korunuyor),
-/// gövde sönük, düğmeler yine işaretin renginde — tıklanacak şeyler
-/// okunacak metinden ayrılsın.
+/// Bağlam satırının **yükleme** biçimi (037 Karar 7 → Kullanıcı kararı 4,
+/// düğmeler phase-6): `⇄ {host}` işaretin renginde (uzak biçimin öneki ve
+/// rengi korunuyor), gövde sönük, sağda düğmeler.
+///
+/// Düğmenin etiketi **ön planda** — satırdaki tek ön plan metni, tıklanacak
+/// şey okunacak metinden ayrılsın; `⌘.` ipucu sönük, fare üstündeyken ön
+/// planda. Dolgu ve çerçeve hücre değil, dönüşte ([`Dock::buttons`]).
 fn render_transfer(
     transfer: &Transfer,
     theme: &Theme,
     available: usize,
     row: u16,
     sink: &mut impl FnMut(Cell),
-) {
+) -> [Option<DockButton>; 2] {
     let accent = theme.mark_linear(transfer.mark);
     let layout = transfer_layout(transfer, available);
     let mark = std::iter::once((REMOTE_MARK, accent));
     if !layout.head {
         emit_context(mark, available, row, sink);
-        return;
+        return [None; 2];
     }
     let dim = theme.dim_linear();
-    let shown = layout.body + usize::from(layout.clipped);
-    let gap = if layout.controls.is_some() && shown > 0 {
-        CONTROLS_GAP
-    } else {
-        0
-    };
-    let controls = layout
-        .controls
-        .is_some()
-        .then(|| transfer.controls.chars().map(move |ch| (ch, accent)))
-        .into_iter()
-        .flatten();
     let line = mark
         .chain(std::iter::once((' ', accent)))
         .chain(transfer.host.chars().map(move |ch| (ch, accent)))
@@ -1858,10 +2002,45 @@ fn render_transfer(
                 .take(layout.body)
                 .map(move |ch| (ch, dim)),
         )
-        .chain(layout.clipped.then_some((ELLIPSIS, dim)))
-        .chain(std::iter::repeat_n((' ', dim), gap))
-        .chain(controls);
+        .chain(layout.clipped.then_some((ELLIPSIS, dim)));
     emit_context(line, available, row, sink);
+
+    let controls = transfer.controls;
+    layout.buttons.map(|button| {
+        let button = button?;
+        let state = match button.action {
+            TransferAction::List if controls.list_open => ButtonState::Pressed,
+            action if controls.hover == Some(action) => ButtonState::Hover,
+            _ => ButtonState::Idle,
+        };
+        let hint_color = if state == ButtonState::Idle {
+            dim
+        } else {
+            theme.foreground_linear()
+        };
+        let label = button
+            .label
+            .chars()
+            .map(|ch| (ch, theme.foreground_linear()))
+            .chain(
+                button
+                    .hint
+                    .then(|| {
+                        std::iter::once((' ', dim))
+                            .chain(CANCEL_HINT.chars().map(|ch| (ch, hint_color)))
+                    })
+                    .into_iter()
+                    .flatten(),
+            );
+        emit_context_at(button.start + BUTTON_PAD, label, available, row, sink);
+        Some(DockButton {
+            // audit: `end ≤ available ≤ context` ve `context` `u16`.
+            start: CONTEXT_COL + button.start as u16,
+            end: CONTEXT_COL + button.end as u16,
+            color: accent,
+            state,
+        })
+    })
 }
 
 /// Bir yolun bağlam satırındaki hücreleri, `budget` karaktere **soldan**
@@ -1942,10 +2121,23 @@ fn emit_context(
     row: u16,
     sink: &mut impl FnMut(Cell),
 ) {
+    emit_context_at(0, line, available, row, sink);
+}
+
+/// [`emit_context`], bağlam-yerel `start` sütunundan başlayarak (yükleme
+/// satırının sağa yaslı düğmeleri).
+fn emit_context_at(
+    start: usize,
+    line: impl Iterator<Item = (char, LinearRgba)>,
+    available: usize,
+    row: u16,
+    sink: &mut impl FnMut(Cell),
+) {
     // `take` bir bekçi, bir politika değil: çağıranın bütçesi zaten
     // `available` sütunu aşmıyor. Sağdan taşan bir hücre ızgaranın dışına
     // yazardı ve o aritmetik hatası burada sessizce durur.
-    for (offset, (ch, fg)) in line.take(available).enumerate() {
+    for (offset, (ch, fg)) in line.take(available.saturating_sub(start)).enumerate() {
+        let offset = start + offset;
         // Boşluk glyph üretmiyor (`cell`'in kuralı); ayracın iki yanı da
         // buradan eleniyor.
         if ch == ' ' {
@@ -2478,7 +2670,9 @@ mod tests {
     // Sahiplik artık `render`'ın argümanı; yüklemi yalnız burası çağırıyor,
     // üretimde cevabı `Session::frame` veriyor.
     use crate::settings::HostMark;
-    use crate::shell::{CaretHome, DockFault, Highlight, RemoteTarget, caret_home};
+    use crate::shell::{
+        CaretHome, DockFault, Highlight, RemoteTarget, TransferControls, caret_home,
+    };
 
     const THEME: Theme = Theme::BATERI;
 
@@ -3226,70 +3420,204 @@ mod tests {
         }
     }
 
-    fn uploading(body: &str, controls: &str, progress: Option<u16>) -> DockContext {
+    fn uploading(body: &str, items: u16, progress: Option<u16>) -> DockContext {
         DockContext {
             transfer: Some(Transfer {
                 host: "prod".into(),
                 mark: HostMark::Production,
                 body: body.into(),
-                controls: controls.into(),
+                controls: TransferControls {
+                    items,
+                    ..TransferControls::default()
+                },
                 progress,
             }),
             ..remote("prod", "/srv")
         }
     }
 
+    fn with_controls(
+        mut context: DockContext,
+        change: impl FnOnce(&mut TransferControls),
+    ) -> DockContext {
+        if let Some(transfer) = &mut context.transfer {
+            change(&mut transfer.controls);
+        }
+        context
+    }
+
+    fn color_at(cells: &[Cell], row: u16, col: u16) -> Option<LinearRgba> {
+        cells
+            .iter()
+            .find(|cell| cell.row == row && cell.col == col)
+            .map(|cell| cell.fg)
+    }
+
     #[test]
     fn an_upload_takes_over_the_context_row_and_the_edge() {
         // 037 Karar 7 → Kullanıcı kararı 4: `⇄ host` önek ve rengi korunuyor,
-        // yanında durum ve düğmeler; üst çizgi işaretin renginde bir çubuk.
+        // yanında durum; üst çizgi işaretin renginde bir çubuk. Tek öğede
+        // yalnız `Cancel ⌘.` (phase-6), sağa yaslı.
         let state = live("", "", "", 0);
-        let context = uploading("↑ 1 of 2 · a.tar", "▴ list  ✕", Some(2_500));
+        let context = uploading("↑ a.tar", 1, Some(2_500));
         let (cells, dock) = draw_with(&state, &context, COLS);
-        assert_eq!(row_text(&cells, 1), "⇄ prod  ↑ 1 of 2 · a.tar  ▴ list  ✕");
-        let color = |col: u16| {
-            cells
-                .iter()
-                .find(|cell| cell.row == 1 && cell.col == col)
-                .map(|cell| cell.fg)
-        };
-        assert_eq!(color(2), Some(THEME.error_linear()), "host");
-        assert_eq!(color(8), Some(THEME.dim_linear()), "gövde");
-        assert_eq!(color(26), Some(THEME.error_linear()), "düğme");
+        assert_eq!(
+            row_text(&cells, 1),
+            format!("{:<30}Cancel ⌘.", "⇄ prod  ↑ a.tar")
+        );
+        assert_eq!(color_at(&cells, 1, 2), Some(THEME.error_linear()), "host");
+        assert_eq!(color_at(&cells, 1, 8), Some(THEME.dim_linear()), "gövde");
+        assert_eq!(
+            color_at(&cells, 1, 30),
+            Some(THEME.foreground_linear()),
+            "etiket ön planda"
+        );
+        assert_eq!(
+            color_at(&cells, 1, 37),
+            Some(THEME.dim_linear()),
+            "ipucu sönük"
+        );
         assert_eq!(dock.edge, THEME.error_linear());
         assert_eq!(dock.progress, Some(2_500));
         assert_eq!(
-            transfer_controls_col(context.transfer.as_ref().unwrap(), COLS),
-            Some(26)
+            dock.buttons,
+            [
+                None,
+                Some(DockButton {
+                    start: 29,
+                    end: 40,
+                    color: THEME.error_linear(),
+                    state: ButtonState::Idle,
+                })
+            ]
         );
-        // Uzak durum bittikten sonra da (ssh kapandı) satır kendi host'uyla.
+        // Tıklama alanı dolgunun tamamı: iç pay dahil, kenar sütunlar da.
+        let transfer = context.transfer.as_ref().unwrap();
+        assert_eq!(transfer_button_at(transfer, COLS, 28), None);
+        assert_eq!(
+            transfer_button_at(transfer, COLS, 29),
+            Some(TransferAction::Cancel)
+        );
+        assert_eq!(
+            transfer_button_at(transfer, COLS, 39),
+            Some(TransferAction::Cancel)
+        );
+        assert_eq!(transfer_button_at(transfer, COLS, 40), None);
+        // Uzak durum bittikten sonra da (ssh kapandı) satır kendi host'uyla;
+        // sonuç satırı düğmesiz.
         let closed = DockContext {
             remote: None,
-            ..uploading("Connection closed", "", None)
+            ..uploading("Connection closed", 0, None)
         };
         let (cells, dock) = draw_with(&state, &closed, COLS);
         assert_eq!(row_text(&cells, 1), "⇄ prod  Connection closed");
         assert_eq!(dock.edge, THEME.error_linear());
         assert_eq!(dock.progress, None);
+        assert_eq!(dock.buttons, [None; 2]);
+        let transfer = closed.transfer.as_ref().unwrap();
+        assert!((0..COLS).all(|col| transfer_button_at(transfer, COLS, col).is_none()));
     }
 
     #[test]
-    fn an_upload_row_clips_the_body_and_keeps_the_controls_whole() {
+    fn a_queue_gets_a_list_button_and_the_pointer_state() {
         let state = live("", "", "", 0);
-        let context = uploading("↑ backup.tar.gz  18.2 / 44.6 MB", "▴ list  ✕", None);
+        let context = uploading("↑ 1 of 2 · a.tar", 2, None);
+        let (cells, dock) = draw_with(&state, &context, 60);
+        assert_eq!(
+            row_text(&cells, 1),
+            format!(
+                "{:<29}{:<17}Cancel all ⌘.",
+                "⇄ prod  ↑ 1 of 2 · a.tar", "Show files (2)"
+            )
+        );
+        assert_eq!(
+            dock.buttons.map(|b| b.map(|b| (b.start, b.end))),
+            [Some((28, 44)), Some((45, 60))]
+        );
         let transfer = context.transfer.as_ref().unwrap();
-        // 6 (`⇄ prod`) + 2 + gövde + 2 + 9 (düğmeler) = 30 sütunda gövde 11.
+        assert_eq!(
+            transfer_button_at(transfer, 60, 28),
+            Some(TransferAction::List)
+        );
+        assert_eq!(
+            transfer_button_at(transfer, 60, 43),
+            Some(TransferAction::List)
+        );
+        assert_eq!(
+            transfer_button_at(transfer, 60, 44),
+            None,
+            "iki düğmenin arası"
+        );
+        assert_eq!(
+            transfer_button_at(transfer, 60, 45),
+            Some(TransferAction::Cancel)
+        );
+
+        // Fare iptalin üstünde: durum ve ipucu ön planda; liste etkilenmiyor.
+        let hovered = with_controls(context.clone(), |c| c.hover = Some(TransferAction::Cancel));
+        let (cells, dock) = draw_with(&state, &hovered, 60);
+        assert_eq!(
+            dock.buttons.map(|b| b.map(|b| b.state)),
+            [Some(ButtonState::Idle), Some(ButtonState::Hover)]
+        );
+        assert_eq!(
+            color_at(&cells, 1, 57),
+            Some(THEME.foreground_linear()),
+            "ipucu"
+        );
+
+        // Liste açık: etiket `Hide files`, düğme basılı tonda.
+        let open = with_controls(context, |c| c.list_open = true);
+        let (cells, dock) = draw_with(&state, &open, 60);
+        assert!(row_text(&cells, 1).contains("Hide files"));
+        assert_eq!(dock.buttons[0].map(|b| b.state), Some(ButtonState::Pressed));
+    }
+
+    #[test]
+    fn the_buttons_drop_the_hint_then_the_list_then_cancel() {
+        let state = live("", "", "", 0);
+        let labels = |context: &DockContext, cols: u16| {
+            let (cells, _) = draw_with(&state, context, cols);
+            row_text(&cells, 1)
+        };
+        // `⇄ prod  ` sekiz sütun; kalan bütçe `cols - 8`.
+        let queue = uploading("↑ a", 2, None);
+        assert!(labels(&queue, 40).ends_with("Show files (2)   Cancel all ⌘."));
+        assert!(labels(&queue, 39).ends_with("Show files (2)   Cancel all"));
+        let cancel_only = labels(&queue, 36);
+        assert!(cancel_only.ends_with("Cancel all"));
+        assert!(!cancel_only.contains("Show"));
+        assert!(!labels(&queue, 19).contains("Cancel"), "iptal de sığmıyor");
+
+        let single = uploading("↑ a", 1, None);
+        assert!(labels(&single, 18).ends_with("Cancel"));
+        assert!(!labels(&single, 18).contains('⌘'));
+        assert!(!labels(&single, 15).contains("Cancel"));
+    }
+
+    #[test]
+    fn an_upload_row_clips_the_body_and_keeps_the_buttons_whole() {
+        let state = live("", "", "", 0);
+        let context = uploading("↑ backup.tar.gz  18.2 / 44.6 MB", 1, None);
+        let transfer = context.transfer.as_ref().unwrap();
+        // 6 (`⇄ prod`) + 2 + gövde + 2 + 11 (düğme) = 30 sütunda gövde 9.
         let (cells, _) = draw_with(&state, &context, 30);
-        assert_eq!(row_text(&cells, 1), "⇄ prod  ↑ backup.t…  ▴ list  ✕");
-        assert_eq!(transfer_controls_col(transfer, 30), Some(21));
-        // Düğmeler sığmıyorsa hiç yok; gövde kalanı alıyor.
+        assert_eq!(
+            row_text(&cells, 1),
+            format!("{:<20}Cancel ⌘.", "⇄ prod  ↑ backup…")
+        );
+        assert_eq!(
+            transfer_button_at(transfer, 30, 19),
+            Some(TransferAction::Cancel)
+        );
+        // Düğme sığmıyorsa yok; gövde kalanı alıyor.
         let (cells, _) = draw_with(&state, &context, 14);
         assert_eq!(row_text(&cells, 1), "⇄ prod  ↑ bac…");
-        assert_eq!(transfer_controls_col(transfer, 14), None);
+        assert!((0..14).all(|col| transfer_button_at(transfer, 14, col).is_none()));
         // Host bile sığmıyorsa yalnız işaret.
-        let (cells, _) = draw_with(&state, &context, 4);
+        let (cells, dock) = draw_with(&state, &context, 4);
         assert_eq!(row_text(&cells, 1), "⇄");
-        assert_eq!(transfer_controls_col(transfer, 4), None);
+        assert_eq!(dock.buttons, [None; 2]);
     }
 
     #[test]
@@ -3297,7 +3625,13 @@ mod tests {
         // `bt-atlas` durum satırının ASCII dışı karakterlerini küçük sınıfta
         // elle soruyor (`the_upload_row_has_no_box_in_the_small_class`); dizge
         // `bt-shell`'de (`upload`) ama karakter kümesi burada sabitleniyor.
-        assert_eq!(UPLOAD_GLYPHS, ['↑', '▴', '✕', '✓', '—', '·', '…']);
+        assert_eq!(UPLOAD_GLYPHS, ['↑', '⌘', '✓', '—', '·', '…']);
+        assert!(
+            CANCEL_HINT
+                .chars()
+                .filter(|ch| !ch.is_ascii())
+                .all(|ch| UPLOAD_GLYPHS.contains(&ch))
+        );
     }
 
     fn offered(host: &str, mark: HostMark) -> DockContext {

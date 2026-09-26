@@ -790,11 +790,13 @@ define_class!(
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
             self.apply_focus(true);
+            self.rehover_upload();
         }
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _n: &NSNotification) {
             self.apply_focus(false);
+            self.unhover_upload();
         }
 
         /// Kırmızı düğme ve sekme çubuğunun menüsü (Close Tab, Close Other

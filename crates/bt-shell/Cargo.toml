@@ -92,6 +92,9 @@ objc2-foundation = { workspace = true, features = [
 # `NSDockTile` (`NSApp.dockTile`, içerik view'ı) ve `NSProgressIndicator`
 # (çubuk). Yalnız başlık bayrakları; `Cargo.lock` oynamadı. Karar kaydı
 # .tasks/037-ssh-ikinci-tur/discussion.md → Karar 7 → Kullanıcı kararı 4.
+# Yükleme düğmelerinin el imleci (037 phase-6): `NSCursor`
+# (`pointingHandCursor`/`arrowCursor`). Yalnız başlık bayrağı; `Cargo.lock`
+# oynamadı. Karar kaydı .tasks/037-ssh-ikinci-tur/phase-6.md.
 objc2-app-kit = { workspace = true, features = [
     "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -103,6 +106,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSActionCell", "NSAnimation", "NSAnimationContext", "NSButtonCell", "NSSearchField",
     "NSSearchFieldCell",
     "NSShadow", "NSTextFieldCell", "NSWindowTab", "block2", "NSDockTile", "NSProgressIndicator",
+    "NSCursor",
 ] }
 # Yalnız CALayer tipi için: NSView::setLayer(Option<&CALayer>) ister.
 # Katman tablosu (CLAUDE.md) bunu "yalnız CALayer takma" diye kayda aldı.
