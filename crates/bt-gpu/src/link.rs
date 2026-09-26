@@ -1084,7 +1084,12 @@ define_class!(
             // uyanan link'in kırpılmış `dt`'si yeni çentiğe uygulanmasın.
             motion.request_glide(iv.session.take_scroll_glide());
             let glide = motion.take_glide();
-            iv.session.set_grid_top(grid_top.max(0.0).ceil() as u16);
+            // Bandın PTY payından kısalığı (uzak oturum, 036) ayrıca: ızgara
+            // o kadar kalıcı olarak aşağıda ve şerit kaydırılmış pencerede de
+            // kapatılmalı (`Session::slide_fill_rows`).
+            let lowered = (-motion.band()).max(0.0).ceil() as u16;
+            iv.session
+                .set_grid_top(grid_top.max(0.0).ceil() as u16, lowered);
             // Küme tablosu çağrı boyunca `Frame`'in **dışında**: sink'ler
             // `frame`'i ödünç alıyor (`Frame::take_clusters`). `clear`
             // yukarıda onu boşalttı; iki sink aynı tabloya yazıyor.
@@ -1221,12 +1226,12 @@ define_class!(
             let mut glyph_fx = iv.glyph_fx.borrow_mut();
             glyph_fx.advance(dt);
             if dock_rows > 0 {
-                // **Yerleşim hücrelerden önce** (`Frame::set_dock_rows`): giriş
+                // **Yerleşim hücrelerden önce** (`Frame::set_dock_input_rows`): giriş
                 // satırları + bağlam satırı, `frame()`'in bastırmayla aynı
                 // okumada verdiği sayıdan. Bandın tepesi burada yazılmıyor —
                 // bant animasyonun değeri ve `sync`'ten sonra
                 // (`LinkDelegate::set_origin`).
-                frame.set_dock_rows(cursor.input_rows.saturating_add(1));
+                frame.set_dock_input_rows(cursor.input_rows);
                 let mut dock_state = iv.dock.borrow_mut();
                 let mut dock_context = iv.dock_context.borrow_mut();
                 // **İkinci sink yerel bir yuvaya akıyor**, doğrudan `Frame`'e
@@ -1265,7 +1270,13 @@ define_class!(
                 // Sıra zorunlu: düzenleme uçuştakileri kaydırıp bitirebiliyor,
                 // statik glyph'i bulunamayan geliş ancak dock basıldıktan
                 // **sonra** bilinebiliyor ve çizilecek liste en sonda.
-                if let Some(edit) = edit {
+                if cursor.input_rows == 0 {
+                    // Giriş satırı yok (uzak oturum, 036): efektin yüzeyi de
+                    // yok. Koşulsuz bitiyor — `Reset` yalnız ayna değiştiyse
+                    // geliyor ve uçuşta kalan bir geliş 0. satıra, yani artık
+                    // bağlam satırının yerine yanlış boyda çizilirdi.
+                    glyph_fx.finish();
+                } else if let Some(edit) = edit {
                     // Dikey pencerenin boyu `dock()`'a geçen sayının ta
                     // kendisi: kaymanın pencereden taşırdığı efekt düşüyor.
                     glyph_fx.apply(edit, motion, cursor.input_rows, frame.dock_clusters());
@@ -1308,7 +1319,7 @@ define_class!(
             // **Bandın fazlası iki hedefte** (032): ızgaranın caret'i ızgarayla
             // birlikte bandın **hedef** fazlası kadar yukarıda, dock'unki dibe
             // yaslı giriş bloğunda, sarılan satırın kendi satırında.
-            let band_target = band_target(cursor, dock_rows);
+            let band_target = band_target(cursor.input_rows, dock_rows, iv.cell.get());
             let caret = dock_caret
                 .map(|(at, text)| {
                     let at = dock_caret_at(
@@ -1326,7 +1337,7 @@ define_class!(
                             [
                                 f32::from(cursor.col),
                                 f32::from(cursor.row) + f32::from(origin_target(cursor))
-                                    - f32::from(band_target),
+                                    - band_target,
                             ],
                             cursor.text,
                         )
@@ -1645,14 +1656,24 @@ fn origin_target(cursor: Cursor) -> u16 {
     cursor.rows.saturating_sub(cursor.content_rows)
 }
 
-/// Bu karenin bant **fazlası** hedefi, satır: çizilecek giriş satırlarının
-/// PTY payına sığmayanı (032). Dock'u olmayan karede (alternatif ekran,
-/// entegrasyonsuz kabuk) sıfır — bant yok, ızgara ötelenmiyor.
-fn band_target(cursor: Cursor, dock_rows: u16) -> u16 {
+/// Bu karenin bant **fazlası** hedefi, satır: çizilecek bandın PTY payından
+/// farkı (032). Dock'u olmayan karede (alternatif ekran, entegrasyonsuz
+/// kabuk) sıfır — bant yok, ızgara ötelenmiyor.
+///
+/// **Kesirli ve işaretli, tek formül** (036 Karar 8): `(band_px − dock_px) /
+/// cell_h`. Bir ve fazla giriş satırında fark tam satır (`input_rows − 1`;
+/// ikisinin de satır arası boşluğu var), sıfır giriş satırında (uzak oturum)
+/// **negatif** ve bir hücre artı satır arası boşluk — bant yalnız bağlam
+/// satırına iniyor, ızgara o kadar aşağı çiziliyor ve tepede açılan şeridi
+/// doldurma bandı kapatıyor (`Session::set_grid_top`). Formülün tek
+/// kopyası piksellerden, yani bandın çizilen boyu ile ızgaranın ötelemesi
+/// aynı sayıdan.
+fn band_target(input_rows: u16, dock_rows: u16, cell: CellMetrics) -> f32 {
     if dock_rows == 0 {
-        return 0;
+        return 0.0;
     }
-    cursor.input_rows.saturating_sub(DOCK_ROWS - 1)
+    let cell_h = f32::from(cell.cell_px().1);
+    (crate::frame::band_px(input_rows, cell) - crate::frame::dock_px(DOCK_ROWS, cell)) / cell_h
 }
 
 /// Kareye bandın ve ötelemenin **o anki** değerini yazar — iki kare yolunun
@@ -2357,8 +2378,8 @@ mod tests {
         // İçerik tabana yaslı (öteleme 5), bant tek satırda; sonra dock üç
         // giriş satırı istiyor: bandın fazlası 0 → 2.
         let mut motion = Motion::default();
-        motion.sync(Some([0.0, 30.0]), 5, 0, 0, false, false);
-        motion.sync(Some([0.0, 30.0]), 5, 2, 0, false, false);
+        motion.sync(Some([0.0, 30.0]), 5, 0.0, 0, false, false);
+        motion.sync(Some([0.0, 30.0]), 5, 2.0, 0, false, false);
         let mut frames = 0;
         let mut mid = false;
         loop {
@@ -2411,6 +2432,104 @@ mod tests {
     }
 
     #[test]
+    fn the_band_target_is_one_fractional_signed_formula() {
+        // @1x, 9×18 hücre, pay 8: PTY payı 68 px, satır arası boşluk 16.
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
+        // Bir ve fazla giriş satırında tam satır — tam sayılı pikseller,
+        // yani `f32`'de de bit bit: bugünkü kare değişmiyor.
+        assert_eq!(band_target(1, DOCK_ROWS, cell), 0.0);
+        assert_eq!(band_target(3, DOCK_ROWS, cell), 2.0);
+        // Sıfır giriş satırında (uzak oturum, 036) negatif: bir hücre artı
+        // satır arası boşluk, `(34 − 68) / 18`.
+        let remote = band_target(0, DOCK_ROWS, cell);
+        assert!(remote < -1.0, "{remote}");
+        assert!((remote * 18.0 + (18.0 + 16.0)).abs() < 1e-4, "{remote}");
+        // Dock'suz karede bant yok.
+        assert_eq!(band_target(0, 0, cell), 0.0);
+    }
+
+    #[test]
+    fn a_remote_band_drops_the_input_row_and_the_grid_moves_down() {
+        // **Bileşim bekçisi** (036 Karar 8): giriş satırı kalkınca bandın
+        // çizilen boyu `band_px(0)` (yalnız bağlam satırı), ızgaranın orijini
+        // o fark kadar aşağıda, doldurma bandı ızgaraya yapışık ve ızgara ile
+        // bant her karede çakışıyor — iki yönde de. Kurulum
+        // `the_grid_the_fill_band_and_the_dock_band_meet_in_every_frame`'inki.
+        let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
+        const BOTTOM: f32 = 600.0;
+        const ROWS: f32 = 29.0;
+        const FILL: u16 = 7;
+        let strip = BOTTOM - crate::frame::dock_px(DOCK_ROWS, cell) - ROWS * 18.0;
+        let frame_at = |motion: Motion, input_rows: u16| {
+            let mut frame = Frame::default();
+            frame.clear(cell, CaretStyle::default());
+            frame.set_dock_input_rows(input_rows);
+            frame.set_fill_rows(FILL);
+            frame.open_dock(
+                Theme::BATERI.background_linear(),
+                Theme::BATERI.info_linear(),
+                Theme::BATERI.accent_linear(),
+            );
+            compose(&mut frame, motion, BOTTOM, true);
+            frame
+        };
+        let mut motion = Motion::default();
+        motion.sync(Some([0.0, 30.0]), 5, 0.0, 0, false, false);
+        let local = frame_at(motion, 1);
+        let local_origin = local.origin_px();
+        assert_eq!(local_origin, 5.0 * 18.0, "tek giriş satırında bugünkü kare");
+
+        let remote = band_target(0, DOCK_ROWS, cell);
+        for (input_rows, target) in [(0, remote), (1, 0.0)] {
+            motion.sync(Some([0.0, 30.0]), 5, target, 0, false, false);
+            let mut frames = 0;
+            let mut mid = false;
+            loop {
+                let frame = frame_at(motion, input_rows);
+                let grid_bottom = frame.origin_px() + (ROWS - 5.0) * 18.0;
+                let band_top = BOTTOM - frame.dock_band_px();
+                assert_eq!(
+                    band_top - grid_bottom,
+                    strip,
+                    "{input_rows}/{frames}: ızgara ile bant ayrıştı ({})",
+                    motion.band()
+                );
+                assert_eq!(
+                    frame.fill_origin_px() + f32::from(FILL) * 18.0,
+                    frame.origin_px(),
+                    "{input_rows}/{frames}: doldurma bandı ızgaradan koptu"
+                );
+                mid |= motion.band() < 0.0 && motion.band() > remote;
+                if motion.settled() {
+                    break;
+                }
+                motion.advance(1.0 / 120.0);
+                frames += 1;
+                assert!(frames < 1000, "bant yerleşmedi");
+            }
+            assert!(mid, "{input_rows}: animasyonun ortası hiç sınanmadı");
+        }
+
+        motion.sync(Some([0.0, 30.0]), 5, remote, 0, true, false);
+        let frame = frame_at(motion, 0);
+        let band = crate::frame::band_px(0, cell);
+        assert_eq!(band, 18.0 + 2.0 * 8.0, "yalnız bağlam satırı");
+        assert_eq!(frame.dock_band_px(), band);
+        assert_eq!(frame.dock_band_px(), frame.dock_layout_px());
+        // Izgara bir hücre artı satır arası boşluk aşağıda.
+        assert_eq!(frame.origin_px(), local_origin + 18.0 + 16.0);
+        // Ayraçlar `frame::tests`'te (`Instance`'ın alanları o modülün).
+        // Fare: giriş bloğu yok, satır sayısı sıfır (`None` değil).
+        assert_eq!(frame.dock_hit().map(|(_, rows)| rows), Some(0));
+        // Tek giriş satırında kare yerleşik bugünküyle aynı.
+        motion.sync(Some([0.0, 30.0]), 5, 0.0, 0, true, false);
+        let frame = frame_at(motion, 1);
+        assert_eq!(frame.origin_px(), local_origin);
+        assert_eq!(frame.dock_band_px(), crate::frame::dock_px(DOCK_ROWS, cell));
+        assert_eq!(frame.dock_hit().map(|(_, rows)| rows), Some(1));
+    }
+
+    #[test]
     fn a_full_grid_is_clipped_from_the_top_while_the_band_is_tall() {
         // Dolu ızgarada (öteleme 0) bant büyüyünce orijin **negatife** iniyor
         // ve ızgaranın tepesi pencerenin dışında kalıyor — geçici, giriş
@@ -2419,7 +2538,7 @@ mod tests {
         // negatif orijin kolu).
         let cell = CellMetrics::new(9, 18, 9, 8, 1).expect("ölçü");
         let mut motion = Motion::default();
-        motion.sync(None, 0, 2, 0, false, false);
+        motion.sync(None, 0, 2.0, 0, false, false);
         let mut frame = Frame::default();
         frame.clear(cell, CaretStyle::default());
         frame.set_dock_rows(4);

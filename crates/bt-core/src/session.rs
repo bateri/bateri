@@ -260,17 +260,23 @@ pub struct Cursor {
     pub visible: bool,
     /// Caret'i bu karede **dock** devraldı mı.
     ///
-    /// Devrin tek yükleminin (`shell::caret_home` + üç ön koşul + **tutma**)
+    /// Devrin tek yükleminin (`shell::caret_home` + dört ön koşul + **tutma**)
     /// sınırdan geçen hâli: [`Session::dock`] onu **argüman** olarak alıyor ve yeniden
     /// hesaplamıyor. `!visible` ile karıştırılmamalı — imleç uygulamanın
     /// gizlemesiyle de, geçmişe kaydırmayla da görünmez olur ve o hâllerde
     /// devralan kimse yoktur.
     pub caret_in_dock: bool,
     /// Dock'un bu karede çizeceği **giriş** satırı sayısı; bağlam satırı
-    /// sayılmıyor. Her zaman `≥ 1` ve verilen bütçenin ([`DockBudget::share`],
-    /// ızgaranın satırlarının payı) altında: görüntünün sarılmış satır sayısı
+    /// sayılmıyor. Verilen bütçenin ([`DockBudget::share`], ızgaranın
+    /// satırlarının payı) altında: görüntünün sarılmış satır sayısı
     /// ([`dock::needed_rows`]) tavana kırpılmış hâli — aşan girişte dock kendi
     /// içinde dikey pencere açıyor.
+    ///
+    /// **Sıfır = giriş satırı yok** (036 Karar 8): uzak oturumda (ssh, mosh)
+    /// dock yalnız bağlam satırından ibaret bir durum çubuğuna iniyor, caret
+    /// ızgarada ([`Cursor::caret_in_dock`] `false`) ve dock'a tık hiçbir şey
+    /// yapmıyor. Dock'u olmayan pencerede ve alternatif ekranda `1` — bant
+    /// orada yok ve sayı ızgarayı ötelememeli.
     ///
     /// Bir **sınır kaydı**, grid hücresi değil: bandın çizilen yüksekliği
     /// (`bt-gpu`) ve dock'un hücrelerinin yerleşimi ([`Session::dock`]) aynı
@@ -2742,6 +2748,13 @@ pub struct Session {
     /// bilinirse geçmişle kapatılabiliyor. Animasyonun kendisi `bt-gpu`'da ve
     /// bu crate onu görmüyor; gördüğü şey bir satır sayısı.
     grid_top: AtomicU16,
+    /// `grid_top`'un **bandın kısalığından** gelen payı: dock bandı PTY
+    /// payından kısa çiziliyor (uzak oturumda yalnız bağlam satırı, 036 Karar
+    /// 8) ve ızgara o kadar aşağıda — geçici bir kayma değil, uzak oturum
+    /// boyunca kalıcı. Ayrı sayı, çünkü kaydırılmış pencerede de kapatılmak
+    /// zorunda ve orada `grid_top`'un geri kalanı (öteleme boşluğu) doldurulmamalı
+    /// ([`Session::slide_fill_rows`]).
+    grid_lowered: AtomicU16,
     /// Kaydırmanın **kesri**: `[0, 1)` satır, `f64` bitleri ([`Cursor::scroll_frac`]).
     ///
     /// Kaydırma konumunun **tek** yeni parçası ve bilerek göreli: tam satırın
@@ -2899,6 +2912,7 @@ impl Session {
             scroll_probe_size: AtomicU32::new(0),
             // İlk karede kayma yok, ızgara hedefinde.
             grid_top: AtomicU16::new(0),
+            grid_lowered: AtomicU16::new(0),
             // Açılışta pencere dipte ve tam satırda; istek yok, nesil sıfır.
             scroll_frac: AtomicU64::new(0),
             scroll_glide: AtomicU64::new(0),
@@ -3038,7 +3052,12 @@ impl Session {
         // 11, [`crate::shell::ShellLog::expire_end`]): süresi dolduysa ayna
         // burada sıfırlanıyor, yani bastırma, bant ve caret aynı aynayı
         // görüyor; dolmadıysa kalan saate giriyor.
-        let (suppressed_block, caret, needed_rows, end_left) = {
+        //
+        // **Uzak oturum da bu turdan** (036 Karar 8): giriş satırı sayısı ve
+        // caret'in sahibi ([`crate::shell::ShellLog::caret`]) aynı uzak
+        // durumu görmeli — ayrı turlarda araya düşen bir `D` sıfır satırlık
+        // bir bantta dock caret'i doğururdu.
+        let (suppressed_block, caret, needed_rows, end_left, remote) = {
             let now = Instant::now();
             let mut log = lock(&self.shell);
             let end_left = log.expire_end(now);
@@ -3052,6 +3071,7 @@ impl Session {
                 log.caret(now),
                 dock::needed_rows(&log.dock, budget.cols),
                 end_left,
+                log.context.remote.is_some(),
             )
         };
         blocks.anchors.clear();
@@ -3352,6 +3372,13 @@ impl Session {
         // - Bastırılan bir satır varsa **tazelik kapısı**: `suppress_to` onu
         //   taşıyor (bayat aynada `None`). Bastırılan satır yokken sorulacak
         //   bir tazelik de yok — dock metin değil boş bir caret gösteriyor.
+        //
+        // **Dördüncüsü uzak oturum** (036 Karar 8) ve burada değil
+        // `caret.home`'un içinde ([`crate::shell::ShellLog::caret`]), çünkü
+        // tutmadan **önce** uygulanmak zorunda: `C`'den sonraki tutma
+        // penceresine düşen `set_remote` aksi hâlde `input_rows == 0` ile
+        // `caret_in_dock` doğurur ve caret bağlam satırına otururdu. Orada
+        // kalan süreyi de söndürüyor — çevrilmeyen cevap saat kurmuyor.
         //
         // Burada `suppress_floor <= suppress_to` diye bir karşılaştırma
         // **yok** ve olmamalı: ikisi de imlecin satırından türüyor
@@ -3819,8 +3846,7 @@ impl Session {
         // çiziliyor ve tepesinde açılan şerit boş kalırdı. Kapatan satırlar
         // tam da az önce ekranın tepesinden geçmişe düşenler, yani bant
         // yalnız **uzuyor** — yeni bir kaynak yok, aynı fill-yerel satırlar.
-        let fill =
-            gap_fill.max(self.slide_fill_rows(&term, gap, alt_screen, offset != 0, scrolled));
+        let fill = gap_fill.max(self.slide_fill_rows(&term, gap, alt_screen, offset, scrolled));
         // **Bandın boyu kaydırma yoluna emanet ediliyor** ([`scroll_locked`]):
         // tekerlek `frame()`'in taramasını tekrarlayamaz (doluluk ızgaranın
         // bütün hücrelerini geziyor), ama ekranda duran bandı bilmek zorunda
@@ -4053,10 +4079,17 @@ impl Session {
             // karesinde `Live` kalmış bir ayna (ZLE'nin `edit-command-line`'ı
             // vim'i açarken) ızgarayı bant kadar yukarı itmemeli
             // (`/code-review`).
-            input_rows: if self.dock && !alt_screen {
-                budget.fit(needed_rows, grid_rows)
-            } else {
+            //
+            // **Uzak oturumda sıfır** (036 Karar 8): ssh sürerken kabuğun
+            // giriş satırı yok, dock yalnız bağlam satırına iniyor ve ızgara
+            // aşağı çiziliyor (`bt-gpu`'nun bant fazlası). Alternatif ekranda
+            // kural değişmiyor — dock orada zaten kalkıyor.
+            input_rows: if !self.dock || alt_screen {
                 1
+            } else if remote {
+                0
+            } else {
+                budget.fit(needed_rows, grid_rows)
             },
             // Şekil döngüden **önce** okundu (`cursor_shape`) ve oradan
             // geliyor: `RenderableCursor` onu `Term::cursor_style()`'dan
@@ -4438,20 +4471,33 @@ impl Session {
     ///
     /// Tavan `gap + grid_rows`: çizen taraf kaymayı hedefin en çok bir ekran
     /// altından başlatıyor, bandın ondan fazlası hiç görünmez.
+    ///
+    /// **Kaydırılmış pencerede yalnız bandın kısalığı** ([`Session::grid_lowered`],
+    /// 036): uzak oturumda ızgara bir satır artı boşluk aşağıda ve tepedeki
+    /// şerit geçmişe bakarken de açık. O pay her çentikte **aynı**, yani
+    /// kaydırma her çentikte tam bir satır ilerliyor — 017'nin reddettiği
+    /// şey çentikle değişen öteleme boşluğunu doldurmaktı ve o burada
+    /// doldurulmuyor. Satırlar pencerenin tepesinin üstündekiler, yani
+    /// defterde ofsetin ötesinde kalan kadar.
     fn slide_fill_rows<T>(
         &self,
         term: &Term<T>,
         gap: u16,
         alt_screen: bool,
-        scrolled_window: bool,
+        offset: i32,
         scrolled: u16,
     ) -> u16 {
-        if alt_screen
-            || scrolled_window
-            || !(self.dock || gap == 0)
-            || self.screen_cleared.load(Ordering::Relaxed)
-        {
+        if alt_screen || !(self.dock || gap == 0) || self.screen_cleared.load(Ordering::Relaxed) {
             return 0;
+        }
+        if offset != 0 {
+            let above = self
+                .fresh_history(term)
+                .saturating_sub(usize::try_from(offset).unwrap_or(usize::MAX));
+            return self
+                .grid_lowered
+                .load(Ordering::Relaxed)
+                .min(u16::try_from(above).unwrap_or(u16::MAX));
         }
         let rows = u16::try_from(term.screen_lines()).unwrap_or(u16::MAX);
         // Bir ekran ya da fazlası tek karede kaydıysa çizen taraf kaymayı
@@ -4485,8 +4531,12 @@ impl Session {
     /// Yazan çizen taraf (`bt-gpu`) ve her içerik karesinden **önce**: bu
     /// crate animasyonu görmüyor, yalnız sonucunu bir satır sayısı olarak
     /// alıyor. Yazılmazsa değer sıfır ve bant bugünkü boyunda kalıyor.
-    pub fn set_grid_top(&self, rows: u16) {
+    ///
+    /// `lowered` bunun **bandın kısalığından** gelen payı ([`Session::grid_lowered`]):
+    /// kaydırılmış pencerede de kapatılan tek kısım.
+    pub fn set_grid_top(&self, rows: u16, lowered: u16) {
         self.grid_top.store(rows, Ordering::Relaxed);
+        self.grid_lowered.store(lowered, Ordering::Relaxed);
     }
 
     /// Faz 2: çıpalardan komut işaretleri, defterden renkler.
@@ -6181,7 +6231,10 @@ impl Session {
         *lock(&self.dock_window) = Some(DockWindow {
             top,
             painted: top,
-            shown: input_rows.max(1),
+            // Sıfır giriş satırında (uzak oturum) sıfır: isabet testi her
+            // noktayı reddediyor ([`DockWindow::hit`]), tekerlek dock'u
+            // kaydırmıyor — tıklanacak bir giriş satırı yok (036 R5.3).
+            shown: input_rows,
             rows,
             cols: cols.grid,
             buffer_bytes: into.prebuffer.len() + into.buffer.len(),
@@ -11573,6 +11626,66 @@ mod tests {
         }
     }
 
+    /// **Uzak oturumda giriş satırı yok** (036 R5.1, R5.3, R5.4): dock'lu
+    /// pencerede `input_rows == 0`, caret ızgarada, dock'un işareti yok ve
+    /// dock'a tık ne seçim kuruyor ne kabuğa komut gönderiyor — aynı nokta
+    /// `set_remote`'tan önce `foo`'yu seçiyordu. Alternatif ekranda sayı
+    /// bugünkü gibi `1`.
+    #[test]
+    fn a_remote_session_has_no_input_row_in_the_dock() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf 'hello world\\r\\n{}echo foo bar{}'; read _; \
+                 printf '\\033]133;C\\007'; read _; printf '\\033[?1049h'; sleep 5",
+                anchored_prompt(1),
+                mirror("ZWNobyBmb28gYmFy", 12),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        let (dock, _) = draw_dock(&session);
+        assert!(dock.sigil.is_some(), "yerelde işaret var");
+        session.dock_select(SelectKind::Word, dock_point(6, CellHalf::Left));
+        assert_eq!(session.selection_text().as_deref(), Some("foo"));
+        session.clear_selection();
+
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("`C`'den sonra koşuyor");
+        assert!(session.set_remote(command, Some("prod")));
+
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert_eq!(cursor.input_rows, 0, "uzakta giriş satırı yok: {cursor:?}");
+        assert!(!cursor.caret_in_dock, "uzakta caret ızgarada: {cursor:?}");
+        assert!(cursor.visible, "ızgaranın imleci çiziliyor: {cursor:?}");
+        let (dock, runs) = draw_dock(&session);
+        assert_eq!(dock.sigil, None, "bağlam satırına işaret oturmamalı");
+        assert_eq!(dock.caret, None);
+        assert!(runs.is_empty());
+
+        let generation = session.key_gen.load(Ordering::Acquire);
+        session.dock_select(SelectKind::Word, dock_point(6, CellHalf::Left));
+        assert_eq!(
+            session.selection_text(),
+            None,
+            "giriş satırı yokken seçim yok"
+        );
+        session.dock_click();
+        assert!(!session.dock_scroll(1), "kaydırılacak giriş bloğu yok");
+        assert_eq!(
+            session.key_gen.load(Ordering::Acquire),
+            generation,
+            "dock'a tık kabuğa hiçbir şey göndermemeli"
+        );
+
+        session.write(b"\n");
+        let (_, cursor) = frame_until(&session, BUDGET, |_, cursor| {
+            cursor.content_rows == cursor.rows
+        });
+        assert_eq!(cursor.input_rows, 1, "alternatif ekranda bugünkü değer");
+    }
+
     #[test]
     fn the_dock_line_is_selected_by_drag_double_and_triple_click() {
         let session = dock_selection_session();
@@ -14385,7 +14498,7 @@ mod tests {
         wait_ink(&session, &wake, "33");
         wait_settled(&session);
         // Çizen taraf: "ızgara şu an üç satır aşağıda".
-        session.set_grid_top(3);
+        session.set_grid_top(3, 0);
         let (cursor, cells) = fill_now(&session);
         assert_eq!(cursor.fill, 3, "{cursor:?}");
         // Ekranın tepesi `25` (`26..33` ve imlecin satırı); üstündekiler
@@ -14396,7 +14509,36 @@ mod tests {
         // hâlâ `0`'dan başlıyor.
         assert_eq!(session.fill_shown.load(Ordering::Relaxed), 0);
         // Kayma yerleşti: bant eski boyuna döner.
-        session.set_grid_top(0);
+        session.set_grid_top(0, 0);
+        assert_eq!(fill_now(&session).0.fill, 0);
+    }
+
+    #[test]
+    fn a_lowered_grid_keeps_its_strip_filled_while_scrolled_back() {
+        // **Bandın kısalığı** (036 Karar 8): uzak oturumda ızgara bir satır
+        // artı boşluk aşağıda ve tepedeki şerit geçmişe bakarken de açık.
+        // Kaydırılmış pencerede yalnız o pay kapatılıyor — her çentikte aynı
+        // sayı, yani ekran çentik başına tam bir satır kayıyor. Kaymanın
+        // geçici uzantısı orada bugünkü gibi yok.
+        let (session, _wake) = history_session("stty -echo; seq 1 30; read _; sleep 5");
+        session.set_grid_top(2, 2);
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.fill, 2, "{cursor:?}");
+        let text: Vec<String> = (0..cursor.fill).map(|r| row_text(&cells, r)).collect();
+        assert_eq!(text, ["20", "21"], "{cells:?}");
+
+        session.term.lock().scroll_display(Scroll::Delta(1));
+        let (cursor, cells) = fill_now(&session);
+        assert_eq!(cursor.display_offset, 1);
+        assert_eq!(
+            cursor.fill, 2,
+            "kaydırılmış pencerede şerit açık: {cursor:?}"
+        );
+        let text: Vec<String> = (0..cursor.fill).map(|r| row_text(&cells, r)).collect();
+        assert_eq!(text, ["19", "20"], "pencerenin tepesinin üstü: {cells:?}");
+
+        // Yalnız kaymanın uzantısı: kaydırılmış pencerede bant yok.
+        session.set_grid_top(2, 0);
         assert_eq!(fill_now(&session).0.fill, 0);
     }
 
@@ -15484,6 +15626,10 @@ e\\314\\201.'; sleep 5";
         let first = session.running_command().expect("`C`'den sonra koşuyor");
         assert!(session.set_remote(first, Some("prod")));
         assert_eq!(session.title(), "⇄ prod");
+        // Dock'suz pencerede uzak oturum giriş satırı sayısını oynatmıyor:
+        // bant yok (036 R5.1).
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert_eq!(cursor.input_rows, 1, "dock'suz pencere: {cursor:?}");
 
         session.write(b"\n");
         assert_eq!(wake.wait_commands(2, Duration::from_secs(5)), 2);

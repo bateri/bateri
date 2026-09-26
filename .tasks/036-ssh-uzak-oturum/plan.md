@@ -104,6 +104,6 @@ zsh preexec ── 133;C ──▶ reader: ShellLog Running'e geçti (nesil n)
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | phase-3 | |
 | kapı | |

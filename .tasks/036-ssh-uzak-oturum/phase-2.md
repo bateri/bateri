@@ -65,11 +65,61 @@ _Requirements: R5.1, R5.2, R5.3, R5.4_
 
 ## Checklist
 
-- [ ] `frame()`: uzakta `input_rows = 0`; doc
-- [ ] `Session::dock` ve `dock::render_with`: sıfır satır, `sigil` yok
-- [ ] `band_target`: kesirli işaretli fazla, tek formül
-- [ ] `Frame`/`Motion`: negatif fazla, piksel yuvarlama, iki yönlü süzülme
-- [ ] `caret_in_dock`: uzak oturum dördüncü ön koşul, tutmadan önce
-- [ ] Fare: giriş satırı yokken dock tık/seçim no-op
-- [ ] Test: yukarıdaki Kabul maddeleri
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] `frame()`: uzakta `input_rows = 0`; doc
+- [x] `Session::dock` ve `dock::render_with`: sıfır satır, `sigil` yok
+- [x] `band_target`: kesirli işaretli fazla, tek formül
+- [x] `Frame`/`Motion`: negatif fazla, piksel yuvarlama, iki yönlü süzülme
+- [x] `caret_in_dock`: uzak oturum dördüncü ön koşul, tutmadan önce
+- [x] Fare: giriş satırı yokken dock tık/seçim no-op
+- [x] Test: yukarıdaki Kabul maddeleri
+- [x] Doğrulama geçti (`make hepsi` + `make duman`; kare yolu değiştiği için `make test-yaris` da)
+- [x] Riskli phase: `/code-review` koştu (render thread'in kare yolu değişti → `make test-yaris` tetiklendi); bulgular aşağıda
+
+## Uygulama Notları
+
+- **Dördüncü ön koşul `ShellLog::caret`'in içinde**, `caret_in_dock`'un
+  ifadesinde değil: orada kalsaydı `hold_left` dolu kalır ve saat 150 ms
+  sonra aynı kareyi çizdirirdi. Uzakta `caret` tutmadan önce `Grid` +
+  `None` dönüyor; ham cevabın damgası (`observe_caret`) değişmiyor.
+- **`Frame` bağlam satırını artık açık bir bayraktan biliyor**
+  (`dock_context`): tek satırlık yerleşimin iki anlamı var — uzak oturumun
+  yalnız-bağlam bandı ve sınamaların bağlamsız tek giriş satırı. Üretim
+  `set_dock_input_rows(input_rows)`'a geçti; `set_dock_rows` yalnız
+  sınamada (`#[cfg(test)]`) ve eski "iki ve fazlası → bağlam" kuralıyla.
+  Satır arası boşluk yalnız üstünde giriş satırı olan bağlam satırına.
+- **`dock_hit` sıfırda `Some((top, 0))`**, `None` değil: `None` fare
+  tarafında tek satırlık geri düşüşe gidip hayalet bir giriş bloğu doğururdu;
+  `point_to_cell` sıfır satırı zaten reddediyor. `DockWindow.shown` da sıfır
+  (isabet testi her noktayı reddediyor), `render_with`'in izi `(0, 0)` —
+  `dock_scroll` kaydırmıyor.
+- **Yazım efektleri sıfırda koşulsuz bitiyor** (`glyph_fx.finish()`),
+  yalnız `Reset`'te değil; `GlyphFx::shift`'in `.max(1)`'i kalktı.
+- `band_target` `Cursor` yerine `input_rows` alıyor (sınanabilirlik);
+  `Motion::sync`'in bant argümanı `f32`.
+- Doldurma bandı için ek kod gerekmedi: negatif bant `grid_top`'u büyütüyor
+  ve `slide_fill_rows` şeridi kapatıyor (bileşim sınaması doğruluyor).
+- `/code-review` (high) sekiz bulgu. **Düzeltilen:**
+  - *Kaydırılmış pencerede tepedeki şerit boş kalıyordu* (ve ilk çentik bir
+    satırdan fazla kayıyordu): `slide_fill_rows` kaydırılmış pencerede 0
+    dönüyordu. `set_grid_top(rows, lowered)` bandın kısalığını ayrı taşıyor
+    (`Session::grid_lowered`) ve kaydırılmış pencerede yalnız o pay, ofsetin
+    ötesindeki defterle kapatılıyor — çentik başına sabit, yani 017'nin
+    reddettiği çentikle değişen boşluk doldurulmuyor.
+  - *Kesirli bant fazlasının `f32` hatası* son satırdaki ızgara caret'ini
+    dock yuvasına itebiliyordu: `push_caret`'in örtüşme ölçütü yarım piksel
+    toleranslı.
+  - `cols.grid == 0` erken dönüşü sıfır giriş satırında `rows = 1`
+    bırakıyordu (tekerlek kaydırırdı); `Motion::sync`'in artık yeniden
+    bağlaması.
+  **Waive:**
+  - *`frame()` ile `Session::dock` uzak durumu ayrı kilit turlarında okuyor*:
+    ssh'ın iki kenarında bir kare giriş satırı sayısı ile bağlam satırının
+    biçimi ayrışabilir. `render_with`'in belgelediği "bilinen sınır, bir
+    kare"nin kardeşi; kapatmak uzak durumu `Cursor` üstünden taşımak demek —
+    bir karelik görsel fark için sınır tipine alan.
+  - *`dock_context` alanı sınamalar için var*: `set_dock_rows(1)` kullanan
+    renderer/efekt sınamaları büyük yüzlü bağlamsız giriş satırı istiyor;
+    onları `set_dock_input_rows`'a taşımak satırı küçük yüze çevirip
+    sınadıkları şeyi değiştirirdi.
+  - *`CLAUDE.md` güncellenmedi*: sözleşme phase-3'ün (R7); çelişen cümleler
+    phase-3 checklist'ine yazıldı.

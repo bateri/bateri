@@ -75,6 +75,12 @@ _Requirements: R6.1, R6.2, R6.3, R7_
 - [ ] `ShellWake::command_started`/`wake` silahı ve ana kuyruk işi
 - [ ] `set_remote` → `refresh_title`
 - [ ] `CLAUDE.md` (yol haritası satırı gerekiyorsa tazelenir)
+- [ ] (phase-2'den devralınan, `/code-review` bulgusu) `CLAUDE.md`'nin
+  phase-2'yle çelişen cümleleri: devrin "üç ön koşul"u → dört (uzak oturum,
+  tutmadan önce, `ShellLog::caret`); "çizilen bant `Cursor::input_rows` giriş
+  satırı + bağlam satırı" ve "fark ızgaranın yukarı ötelenmesiyle kapanıyor"
+  → uzakta `input_rows == 0`, bant PTY payından kısa, ızgara aşağı ve şeridi
+  doldurma bandı kaydırılmış pencerede de kapatıyor (`grid_lowered`)
 - [ ] (phase-1'den devralınan, `/code-review` bulgusu) **Uzak kabuğun kendi
   OSC 133 işaretleri** (fish 4, iTerm2/WezTerm/kitty entegrasyonu) ssh'ın
   içinden aynı PTY'ye geliyor: uzak `A` safhayı `Prompt`'a çekip uzak durumu
