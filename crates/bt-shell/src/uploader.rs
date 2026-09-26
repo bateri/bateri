@@ -24,7 +24,7 @@ use block2::RcBlock;
 use bt_core::{HostMark, Transfer, TransferAction};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSBox, NSBoxType,
@@ -33,10 +33,13 @@ use objc2_app_kit::{
     NSPopoverBehavior, NSProgressIndicator, NSProgressIndicatorStyle, NSTextField, NSView,
     NSViewController,
 };
-use objc2_foundation::{NSBundle, NSPoint, NSRect, NSRectEdge, NSSize, NSString, ns_string};
-// Kullanımdan kalkmış bildirim API'si: gerekçesi `notify`'ın doc'unda.
-#[allow(deprecated)]
-use objc2_foundation::{NSUserNotification, NSUserNotificationCenter};
+use objc2_foundation::{
+    NSBundle, NSError, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSUUID, ns_string,
+};
+use objc2_user_notifications::{
+    UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
+    UNUserNotificationCenter,
+};
 
 use crate::app;
 use crate::upload::{
@@ -982,12 +985,20 @@ fn remove_monitor(monitor: Option<Retained<AnyObject>>) {
 /// bateri arkadayken macOS bildirimi (037 phase-7): kuyruk bitti, hata verdi
 /// ya da bağlantı koptu. Önde iken yok — sonuç dock'ta ve başlıkta.
 ///
-/// `NSUserNotification` (Foundation, varsayılan bayrak seti — yeni crate
-/// yok): yerine geçen `UserNotifications` çerçevesi ayrı bir crate
-/// (`objc2-user-notifications`) ve o bir bağımlılık kararı. API macOS 11'den
-/// beri kullanımdan kalkmış sayılıyor; paketlenmemiş süreçte (`cargo run`)
-/// merkez `nil` dönüyor, o yüzden paket kimliği yoksa hiç çağrılmıyor.
-#[allow(deprecated)]
+/// `UNUserNotificationCenter` (kullanıcı onaylı bağımlılık, karar kaydı
+/// `.tasks/037-ssh-ikinci-tur/phase-7.md` → Uygulama Notları). Üç kural:
+///
+/// - **İzin ilk bildirimde isteniyor**, açılışta değil: hiç arkada yükleme
+///   bitirmemiş kullanıcı soruyu hiç görmüyor. Her çağrıda istemek bedava —
+///   cevap bir kez verildiyse sistem sormadan saklı cevabı dönüyor. Bildirim
+///   cevabın tamamlanma bloğunda kuruluyor, yani ilk bildirim kaybolmuyor;
+///   reddedilirse yalnız bildirim yok, yükleme hiç beklemiyor.
+/// - **Önde gösterim yok ve delegate kurulmuyor:** `willPresentNotification`'ı
+///   uygulamayan merkez önde gelen bildirimi susturuyor (Apple'ın belgelediği
+///   varsayılan), yani arkadayken kurulup kullanıcı döndükten sonra teslim
+///   edilen bildirim de "önde iken yok" kuralına uyuyor.
+/// - **Paket kimliği yoksa hiç çağrılmıyor:** `currentNotificationCenter`
+///   paketsiz süreçte (`cargo run`, sınamalar, süreli koşu) istisna atıyor.
 fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
     if NSApplication::sharedApplication(mtm).isActive() {
         return;
@@ -995,10 +1006,28 @@ fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
         return;
     }
-    let notification = NSUserNotification::new();
-    notification.setTitle(Some(&NSString::from_str(title)));
-    notification.setInformativeText(Some(&NSString::from_str(body)));
-    NSUserNotificationCenter::defaultUserNotificationCenter().deliverNotification(&notification);
+    let (title, body) = (title.to_owned(), body.to_owned());
+    // Blok arka plandaki bir kuyrukta koşuyor: yalnız sahip olunan dizgiler
+    // taşınıyor, merkez yeniden alınıyor ve AppKit'e dokunulmuyor.
+    let deliver = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
+        if !granted.as_bool() {
+            return;
+        }
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(&title));
+        content.setBody(&NSString::from_str(&body));
+        // Benzersiz kimlik: aynı kimlik öncekinin yerine geçerdi, sonuçlar
+        // üst üste binmeli.
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSUUID::new().UUIDString(),
+            &content,
+            None,
+        );
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, None);
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert, &deliver);
 }
 
 /// Akış thread'inin ilerleme haberi: ana kuyrukta en çok bir.

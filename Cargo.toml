@@ -62,6 +62,17 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std", "CFString", "CFCGTypes", "CFAttributedString", "CFDictionary", "CFArray",
 ] }
+# Yüklemenin macOS bildirimi (`bt-shell::uploader::notify`, 037 phase-7).
+# Kullanıcı onaylı bağımlılık kararı (2026-09-27): kullanımdan kalkmış
+# `NSUserNotification` yerine Apple'ın desteklediği `UNUserNotificationCenter`
+# — kayıt .tasks/037-ssh-ikinci-tur/phase-7.md → Uygulama Notları. Aynı objc2
+# nesli (0.3.2). Varsayılan set `objc2-core-location`'ı çekiyordu; kırpma onu
+# grafın dışında tutuyor. `UNNotificationTrigger` süs değil:
+# `requestWithIdentifier:content:trigger:` o bayrağın arkasında.
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std", "block2", "UNUserNotificationCenter", "UNNotificationContent",
+    "UNNotificationRequest", "UNNotificationTrigger",
+] }
 # DispatchData kurucuları `block2` feature'ının arkasında; objc2-metal bunu
 # açmaz. Kullanıcı onaylı bağımlılık kararı: .tasks/001 discussion.md → Karar.
 dispatch2 = { version = "0.3", features = ["block2"] }
