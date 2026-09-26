@@ -1716,7 +1716,23 @@ impl ShellLog {
     /// burada karşılanıyor: içerik gerçekten değişiyor (caret yer değiştiriyor
     /// **ve** doluluk sayısı oynuyor), tek atımlık, ve durma koşulu
     /// adlandırılmış — tutma doldu ya da yüklem `Dock`'a geri döndü.
+    ///
+    /// **Uzak oturum tutmadan önce** (036 Karar 8): uzakta dock'un giriş
+    /// satırı yok (`Cursor::input_rows == 0`), yani devralacak bir yüzey de
+    /// yok — caret ızgarada, tutma yok. Tutma sonra uygulansaydı `C`'den
+    /// hemen sonra gelen `set_remote` caret'i 150 ms boyunca bağlam satırına
+    /// oturturdu; tutmanın gerekçesi (yarı yolda geri dönen caret) burada
+    /// konusuz, çünkü uzak durum yalnız `D`/`A`/yeni `C` ile kalkıyor. Kalan
+    /// süre de `None`: çevrilmeyen bir cevap için kare istenmez. Ham cevabın
+    /// damgası ([`Self::observe_caret`]) buna bakmıyor — uzak durum safhayı
+    /// değiştirmiyor.
     pub(crate) fn caret(&self, now: Instant) -> CaretDecision {
+        if self.context.remote.is_some() {
+            return CaretDecision {
+                home: CaretHome::Grid,
+                hold_left: None,
+            };
+        }
         let held = HANDOVER_HOLD
             .checked_sub(now.saturating_duration_since(self.caret_since))
             .filter(|left| !left.is_zero());
@@ -4056,6 +4072,36 @@ mod tests {
         let back = log.caret(expired);
         assert_eq!(back.home, CaretHome::Dock, "Grid→Dock geciktirilmemeli");
         assert_eq!(back.hold_left, None);
+    }
+
+    /// **Uzak oturum tutmadan önce** (036 Karar 8): `C`'den hemen sonra,
+    /// tutma sürerken gelen `set_remote` caret'i ızgaraya alıyor ve saat
+    /// kurmuyor — giriş satırı olmayan bir bantta caret bağlam satırına
+    /// otururdu. `D` uzak durumu silince yüklem bugünkü cevabına dönüyor.
+    #[test]
+    fn a_remote_session_takes_the_caret_before_the_hold() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let mut scanner = Scanner::new();
+        scanner.feed(b"\x1b]133;A\x07\x1b]133;B\x07", |event| {
+            log.apply_scan(event)
+        });
+        scanner.feed(&dock_update(8, "% ", "ssh prod", "", &[]), |event| {
+            log.apply_scan(event)
+        });
+        scanner.feed(b"\x1b]8133;e\x07\x1b]133;C\x07", |event| {
+            log.apply_scan(event)
+        });
+        let now = Instant::now();
+        assert_eq!(log.caret(now).home, CaretHome::Dock, "tutma sürüyor");
+
+        assert!(log.set_remote(Some("prod")));
+        let remote = log.caret(now);
+        assert_eq!(remote.home, CaretHome::Grid, "uzakta caret ızgarada");
+        assert_eq!(remote.hold_left, None, "çevrilmeyen cevap kare istemez");
+
+        scanner.feed(b"\x1b]133;D;0\x07", |event| log.apply_scan(event));
+        assert_eq!(log.context.remote, None);
+        assert_eq!(log.caret(now + HANDOVER_HOLD).home, CaretHome::Dock);
     }
 
     /// Damga **değişimde** kıpırdıyor, her olayda değil.

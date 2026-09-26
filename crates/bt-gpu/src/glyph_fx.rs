@@ -339,7 +339,7 @@ impl GlyphFx {
         self.entries.retain_mut(|entry| {
             let cell = &mut entry.fx.cell;
             let row = i32::from(cell.row) + by;
-            if !(0..i32::from(rows.max(1))).contains(&row) {
+            if !(0..i32::from(rows)).contains(&row) {
                 return false;
             }
             // audit: `0 ≤ row < rows` ve `rows` bir `u16`.

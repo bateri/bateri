@@ -1046,6 +1046,10 @@ fn bracket_match(chars: &[char], index: usize) -> Option<usize> {
 /// girişin tavansız satır sayısı: isabet testinin ve tekerleğin izi
 /// ([`crate::Session::dock`] yazıyor).
 ///
+/// **`input_rows == 0` giriş satırı yok demek** (036 Karar 8, uzak oturum):
+/// yalnız bağlam satırı 0. satırda basılıyor, prompt işareti ve caret yok,
+/// iz `(0, 0)` — tıklanacak ya da kaydırılacak bir giriş bloğu yok.
+///
 /// `scroll` kullanıcının tekerlekle seçtiği pencere tepesi
 /// ([`crate::shell::ShellLog::dock_scroll`]); `None` → pencere caret'i
 /// izliyor. Seçilen tepe satır sayısına kırpılıyor; caret pencerenin
@@ -1061,7 +1065,11 @@ fn bracket_match(chars: &[char], index: usize) -> Option<usize> {
 /// bu çağrının aynasından; iki kilit turunun arasına sarma sınırını geçen bir
 /// tuşun aynası düşerse o kare pencere bir satır kayık çizilir (tavanı aşan
 /// girişin kuralı) ve bir sonraki kare düzeltir — `line-finish`'in aynı
-/// aralıktaki bilinen sınırının kardeşi (`Session::frame`).
+/// aralıktaki bilinen sınırının kardeşi (`Session::frame`). Uzak oturumun
+/// iki kenarı da aynı sınıfta (036): `frame()`'in uzak kararı ile bu
+/// çağrının bağlamı ayrı kilit turlarından ve araya düşen bir `set_remote`
+/// ya da `D` bir kare boyunca giriş satırı sayısı ile bağlam satırının
+/// biçimini (ve üst çizginin rengini) ayrıştırabilir; sonraki kare düzeltir.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_with(
     state: &DockState,
@@ -1090,11 +1098,16 @@ pub(crate) fn render_with(
         separator: theme.separator_linear(),
         caret: None,
         caret_text: theme.background_linear(),
-        sigil: Some(sigil_color(shell, theme)),
+        // Giriş satırı yoksa (uzak oturum, 036) işaret de yok: işaret giriş
+        // satırının başı ve bağlam satırına oturmamalı. Erken dönüşlerin
+        // hepsinden önce, ki hiçbir kol onu geri getirmesin.
+        sigil: (input_rows > 0).then(|| sigil_color(shell, theme)),
     };
     if cols.grid == 0 {
         settle(change, &mut edits);
-        return (surface, 0, 1);
+        // Giriş satırı yoksa iz sıfır satır (aşağıdaki `input_rows == 0`
+        // kolunun kuralı): tekerlek kaydıracak bir pencere bulmamalı.
+        return (surface, 0, usize::from(input_rows.min(1)));
     }
     // **Caret'in sahibi burada sorulmuyor, cevabı hazır geliyor** (`owned`).
     // Eskiden burada [`caret_home`] ikinci kez çağrılıyordu ve o çağrı
@@ -1112,6 +1125,14 @@ pub(crate) fn render_with(
     // Aşağıdaki `Live` kapısının altında kalsaydı her komutta kaybolurdu.
     render_context(context, theme, cols.context, input_rows, &mut sink);
 
+    // **Sıfır giriş satırı** (036 Karar 8): bant yalnız bağlam satırı. Caret
+    // yok (`owned` zaten `false` — `frame()`'in dördüncü ön koşulu), satır
+    // sayısı da sıfır: tekerleğin kaydırabileceği bir pencere yok
+    // ([`crate::Session::dock_scroll`], `rows <= shown`).
+    if input_rows == 0 {
+        settle(change, &mut edits);
+        return (surface, 0, 0);
+    }
     if cols.grid <= TEXT_COL {
         settle(change, &mut edits);
         return (surface, 0, 1);
@@ -1158,7 +1179,8 @@ pub(crate) fn render_with(
     // ızgarasıyla aynı, yani tam genişlikte yazılan satır dock'u da bir satır
     // büyütüyor (032 phase-1 → Uygulama Notları).
     let (caret_row, rows) = measure(state, cols.grid);
-    let shown = usize::from(input_rows.max(1));
+    // Yukarıdaki kol sıfırı aldı: burada `input_rows ≥ 1`.
+    let shown = usize::from(input_rows);
     let top = scroll.map_or_else(
         || window_top(caret_row, shown),
         |top| top.min(rows.saturating_sub(shown)),
