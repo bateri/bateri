@@ -84,6 +84,6 @@ open bateri://tab/<id> ─► LaunchServices ─► application:openURLs:
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | kapı | |

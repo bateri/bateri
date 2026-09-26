@@ -90,6 +90,7 @@ Bilinen sınırlar (kodlanırken değişmezse bu hâliyle kalır):
 
 - [ ] `Info.plist.in` `CFBundleURLTypes`
 - [ ] `make kur` içerik denetimi + yorum
+- [ ] `TerminalWindow::tab_id` erişicisi (phase-1'den devredildi: ilk tüketicisi burada)
 - [ ] Kimlikle pencere yardımcısı, `application:openURLs:`, odak yöntemi
 - [ ] Soğuk başlatma sırası gözlendi, notu yazıldı
 - [ ] `CLAUDE.md` üç yer, `docs/YOL-HARITASI.md` tek cümle

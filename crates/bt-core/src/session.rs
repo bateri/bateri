@@ -69,6 +69,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::cluster::{ClusterId, Clusters};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
+use crate::identity::{TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
 use crate::input::{
     self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
     WheelRoute,
@@ -678,8 +679,10 @@ pub struct SessionOptions {
     pub home: Option<PathBuf>,
     /// Çocuğa **eklenen** ortam değişkenleri; geri kalanı miras.
     ///
-    /// Öncelik, güçlüden zayıfa: `TERM` ve `COLORTERM` (bu crate'in sabiti,
-    /// ezilemez — `TERM` bir sözleşme, bkz. `CLAUDE.md`) > bu harita >
+    /// Öncelik, güçlüden zayıfa: `TERM`, `COLORTERM` ve kimlik ailesi
+    /// (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `TERM_SESSION_ID`,
+    /// `BATERI_TAB_URL`; bu crate'in yazdıkları, ezilemez — `TERM` bir
+    /// sözleşme, bkz. `CLAUDE.md`) > bu harita >
     /// alacritty'nin koşulsuz yazdıkları (`USER`, `HOME`,
     /// `ALACRITTY_WINDOW_ID`, `WINDOWID`) > miras. Tek istisna alacritty'nin
     /// en sonda **sildiği** iki anahtar (`XDG_ACTIVATION_TOKEN`,
@@ -743,6 +746,11 @@ pub struct SessionOptions {
     /// rc'nin sonunda `exec fish`) satır hiç gitmiyor; zaman aşımı ölçülmemiş
     /// bir sayı olurdu (037 Karar 6).
     pub shell_marks: bool,
+    /// Sekmenin kimliği (038): verildiyse çocuk `TERM_SESSION_ID` ve
+    /// `BATERI_TAB_URL` alır ([`TabId::url`]). `None` yalnız sınama ve
+    /// gömülü kullanım; uygulama her pencerede veriyor (`bt-shell`
+    /// `window`, `NSUUID`'den).
+    pub tab_id: Option<TabId>,
 }
 
 /// Oturum yaşarken değişebilen terminal seçenekleri — alacritty `Config`'inin
@@ -2442,6 +2450,7 @@ fn block_row_continues<T>(term: &Term<T>, line: Line, id: u32, boundary: usize) 
 /// `assets/shell/zsh/bateri.zsh`.
 ///
 /// Kimlik `u32` ve ondalık: betiğin sayacı `%9v` ile genişliyor, yani metin.
+/// Şemanın öbür yolu (`bateri://tab/`, sekmenin dış adı) `crate::identity`'de.
 fn block_id(uri: &str) -> Option<u32> {
     uri.strip_prefix("bateri://block/")?.parse().ok()
 }
@@ -2911,6 +2920,20 @@ impl Session {
         let mut env = options.env;
         env.insert("TERM".to_owned(), "xterm-256color".to_owned());
         env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
+        // Kimlik ailesi aynı katmanda (038). Ezilemez olmasının yan kazancı:
+        // başka bir terminalden miras kalan `TERM_PROGRAM=Apple_Terminal`,
+        // `/etc/zshrc` üzerinden Apple'ın oturum betiğini sarmalayıcının
+        // `ZDOTDIR`'ına yazdırıyordu (`.tasks/038-terminal-kimligi/context.md`
+        // → Kanıt).
+        env.insert("TERM_PROGRAM".to_owned(), TERM_PROGRAM.to_owned());
+        env.insert(
+            "TERM_PROGRAM_VERSION".to_owned(),
+            TERM_PROGRAM_VERSION.to_owned(),
+        );
+        if let Some(id) = &options.tab_id {
+            env.insert("TERM_SESSION_ID".to_owned(), id.as_str().to_owned());
+            env.insert("BATERI_TAB_URL".to_owned(), id.url());
+        }
         let pty_options = tty::Options {
             shell: options
                 .command
@@ -8117,6 +8140,7 @@ mod tests {
             cluster: false,
             initial_input: None,
             shell_marks: false,
+            tab_id: None,
         }
     }
 
@@ -11011,6 +11035,53 @@ mod tests {
             child_output(options),
             "env=reached|xterm-256color|truecolor;"
         );
+    }
+
+    #[test]
+    fn identity_env_reaches_child_without_being_overridden() {
+        // Kimlik ailesi `TERM`'ün katmanında (038): ek ortam dördünü de
+        // başka değerle veriyor ve hiçbiri çocuğa ulaşmıyor.
+        let script = "printf 'id=%s|%s|%s|%s;' \"$TERM_PROGRAM\" \
+                      \"$TERM_PROGRAM_VERSION\" \"$TERM_SESSION_ID\" \
+                      \"$BATERI_TAB_URL\"; sleep 5";
+        let id = TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
+        let options = SessionOptions {
+            env: HashMap::from([
+                ("TERM_PROGRAM".into(), "Apple_Terminal".into()),
+                ("TERM_PROGRAM_VERSION".into(), "0".into()),
+                ("TERM_SESSION_ID".into(), "foreign".into()),
+                ("BATERI_TAB_URL".into(), "bateri://tab/foreign".into()),
+            ]),
+            tab_id: Some(id.clone()),
+            ..test_options(sh(script), 200)
+        };
+
+        assert_eq!(
+            child_output(options),
+            format!(
+                "id=bateri|{TERM_PROGRAM_VERSION}|{}|{};",
+                id.as_str(),
+                id.url()
+            )
+        );
+    }
+
+    #[test]
+    fn identity_env_without_tab_id_leaves_session_keys_to_the_map() {
+        // `tab_id: None`'da ezilecek sabit yok: haritadaki değer çocuğa aynen
+        // geçiyor; `TERM_PROGRAM` yine koşulsuz.
+        let script = "printf 'id=%s|%s|%s;' \"$TERM_PROGRAM\" \
+                      \"$TERM_SESSION_ID\" \"$BATERI_TAB_URL\"; sleep 5";
+        let options = SessionOptions {
+            env: HashMap::from([
+                ("TERM_PROGRAM".into(), "Apple_Terminal".into()),
+                ("TERM_SESSION_ID".into(), "outer".into()),
+                ("BATERI_TAB_URL".into(), "outer-url".into()),
+            ]),
+            ..test_options(sh(script), 200)
+        };
+
+        assert_eq!(child_output(options), "id=bateri|outer|outer-url;");
     }
 
     #[test]

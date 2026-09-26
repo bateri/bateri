@@ -39,7 +39,7 @@
 | 035 | [grapheme-dizileri](035-grapheme-dizileri/) | 🟢 | 5 phase + kapı tamam — bayrak, ZWJ, ten rengi ve VS16 dizileri üç yüzeyde tek glyph ve iki sütun, dock düzenlemesi kümeyi bölmüyor |
 | 036 | [ssh-uzak-oturum](036-ssh-uzak-oturum/) | 🟢 | 3 phase + kapı tamam — ssh/mosh süreç tablosundan algılanıyor, dock tek satırda `⇄ host  /uzak/yol` (`info` rengi), başlıkta ve sekmede `⇄` |
 | 037 | [ssh-ikinci-tur](037-ssh-ikinci-tur/) | 🟢 | 7 phase + kapı tamam — host işareti ve rengi, ⌘T aynı host'a, "⏎ reconnect", Finder damlasının uzak dizine yüklenmesi (popover, yapıştırmasız sonuç satırı, durdurma sorusu, başlıkta yüzde, bildirim). |
-| 038 | [terminal-kimligi](038-terminal-kimligi/) | 📐 | kabuğa `TERM_PROGRAM=bateri` ailesi, sekme başına `TERM_SESSION_ID` ve `BATERI_TAB_URL`; `open bateri://tab/<id>` o sekmeyi öne getiriyor |
+| 038 | [terminal-kimligi](038-terminal-kimligi/) | 🔨 | kabuğa `TERM_PROGRAM=bateri` ailesi, sekme başına `TERM_SESSION_ID` ve `BATERI_TAB_URL`; `open bateri://tab/<id>` o sekmeyi öne getiriyor |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

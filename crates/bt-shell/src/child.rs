@@ -689,6 +689,7 @@ mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
+                tab_id: None,
             },
             Arc::new(SilentWake),
         )
@@ -812,6 +813,7 @@ mod tests {
                     cluster: true,
                     initial_input: None,
                     shell_marks: false,
+                    tab_id: None,
                 },
                 Arc::new(SilentWake),
             )
@@ -904,6 +906,7 @@ mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
+                tab_id: None,
             },
             Arc::new(SilentWake),
         )
@@ -1037,6 +1040,7 @@ mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
+                tab_id: None,
             },
             Arc::new(SilentWake),
         )
@@ -1173,6 +1177,7 @@ mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
+                tab_id: None,
             },
             Arc::new(SilentWake),
         )

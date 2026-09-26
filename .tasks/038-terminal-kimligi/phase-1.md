@@ -73,11 +73,28 @@ _Requirements: R1, R1.1, R1.2, R1.3, R2, R2.1_
 
 ## Checklist
 
-- [ ] `identity` modülü: `TabId`, `url`/`from_url`, iki sabit, başlık yorumu
-- [ ] `SessionOptions::tab_id`, `spawn`'da dört değişken, öncelik doc'u
-- [ ] Bütün `SessionOptions` kurucuları güncel (bt-core, bt-shell)
-- [ ] `NSUUID` bayrağı + yorum; pencere kimliği ivar ve erişici
-- [ ] Test: ezilmezlik (dört anahtar) ve `tab_id: None` kolu
-- [ ] Test: `from_url` ↔ `url` gidiş-dönüş ve ret listesi
-- [ ] Test: sürüm eşitliği, iki `NSUUID` kimliği
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
+- [x] `identity` modülü: `TabId`, `url`/`from_url`, iki sabit, başlık yorumu
+- [x] `SessionOptions::tab_id`, `spawn`'da dört değişken, öncelik doc'u
+- [x] Bütün `SessionOptions` kurucuları güncel (bt-core, bt-shell)
+- [x] `NSUUID` bayrağı + yorum; pencere kimliği ivar (erişici phase-2'ye devredildi, Uygulama Notları)
+- [x] Test: ezilmezlik (dört anahtar) ve `tab_id: None` kolu
+- [x] Test: `from_url` ↔ `url` gidiş-dönüş ve ret listesi
+- [x] Test: sürüm eşitliği, iki `NSUUID` kimliği
+- [x] Doğrulama geçti (`make hepsi` + `make duman`)
+
+## Uygulama Notları
+
+- **Erişici `TerminalWindow::tab_id` phase-2'ye devredildi.** Tüketicisi
+  yok (ilk okuyanı phase-2'nin kimlikle pencere yardımcısı) ve `clippy -D
+  warnings` onu `dead_code` diye kırmızıya çeviriyor; `#[allow]` yerine
+  ilk tüketicisiyle birlikte iniyor — phase-2 checklist'ine madde yazıldı.
+  İvar bugün `start`'ta okunuyor (oturuma giden kopya).
+- UUID üretimi `window::new_tab_id` adlı serbest fonksiyonda (plan
+  `TerminalWindow::new`'un içinde diyordu): iki `NSUUID` kimliği sınaması
+  pencere kurmadan onu çağırabilsin diye.
+- `TabId` ayrıca `PartialEq`/`Hash` taşıyor (plan `Eq` diyordu; `Eq`
+  `PartialEq`'i ister, `Hash` phase-2'nin arama yolu için ucuz).
+- Doğrulama: `make hepsi` exit 0; `make duman` yeşil (`kare=30 hucre=8
+  glif=6 kural=15 … kapanis=clean pipeline=ok`). Riskli phase tetikleyicisi
+  yok (`Cargo.lock` oynamadı, paylaşılan durum/shader yok) → `/code-review`
+  set kapısında.

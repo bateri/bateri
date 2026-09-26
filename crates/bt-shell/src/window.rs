@@ -22,7 +22,7 @@ use std::time::Instant;
 use block2::RcBlock;
 use bt_core::{
     ConfirmClose, FontOptions, HostMark, RemoteTarget, SearchCover, SearchDirection, SearchReport,
-    SearchStatus, Session, SessionOptions, Settings, ShutdownHandle, Teardown, Theme, Wake,
+    SearchStatus, Session, SessionOptions, Settings, ShutdownHandle, TabId, Teardown, Theme, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Surface, Waker};
@@ -41,7 +41,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString, ns_string,
+    NSString, NSUUID, ns_string,
 };
 
 use crate::app::{self, AppDelegate, Grid, split_into_grid};
@@ -709,6 +709,13 @@ pub(crate) struct WindowIvars {
     /// Popover'ı kapatan olayın zamanı (`popoverWillClose:`): düğmeye
     /// yeniden basış popover'ı yeniden açmasın.
     list_closed_at: Cell<Option<f64>>,
+    /// Sekmenin kalıcı kimliği (038): kabuğa `TERM_SESSION_ID` ve
+    /// `BATERI_TAB_URL` olarak gidiyor, `bateri://tab/<id>` onunla
+    /// pencereyi buluyor. Pencerenin ömrü boyunca sabit; süreç içi [`id`]
+    /// ayrı bir şey (alternatif ekran habercisinin anahtarı).
+    ///
+    /// [`id`]: WindowIvars::id
+    tab_id: TabId,
 }
 
 /// Yeni kabuğun doğum bilgisi — [`TerminalWindow::start`]'ın çağırandan
@@ -1272,6 +1279,7 @@ impl TerminalWindow {
             upload_stop: RefCell::new(None),
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
+            tab_id: new_tab_id(),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1931,6 +1939,9 @@ impl TerminalWindow {
                 // pencere, ⌘T yok), yani sabit betikleri bundan etkilenmiyor.
                 initial_input,
                 shell_marks,
+                // Kimlik her pencerede, süreli koşu dahil (038 Karar 8):
+                // değişkenler dosya okumuyor ve jetonları oynatmıyor.
+                tab_id: Some(self.ivars().tab_id.clone()),
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );
@@ -2576,8 +2587,30 @@ impl TerminalWindow {
     }
 }
 
+/// Yeni bir sekme kimliği, `NSUUID`'den (038 Karar 2).
+fn new_tab_id() -> TabId {
+    // `UUIDString` kanonik 8-4-4-4-12 biçimini veriyor; `parse` onu
+    // reddederse kusur `bt-core`'un sözleşmesinde, bu satırda değil.
+    TabId::parse(&NSUUID::new().UUIDString().to_string())
+        .expect("NSUUID'nin UUIDString'i kanonik UUID olmalı")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tab_ids_are_canonical_and_distinct() {
+        let (a, b) = (super::new_tab_id(), super::new_tab_id());
+        assert_ne!(a, b, "iki NSUUID kimliği ayrı olmalı");
+        assert_eq!(bt_core::TabId::from_url(&a.url()), Some(a));
+    }
+
+    #[test]
+    fn term_program_version_is_the_workspace_version() {
+        // Karar 3'ün bekçisi: `bt-core`'un sabiti ile uygulamanın sürümü aynı
+        // alandan (`version.workspace = true`); biri ayrışırsa burada kızarır.
+        assert_eq!(bt_core::TERM_PROGRAM_VERSION, env!("CARGO_PKG_VERSION"));
+    }
+
     #[test]
     fn remote_probe_repeats_only_while_undecided() {
         use super::RemoteProbe;
