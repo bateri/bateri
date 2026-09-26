@@ -56,10 +56,13 @@ pub(crate) fn copy(board: &NSPasteboard, text: Option<String>) -> bool {
     // çözümlenmiyor.
     //
     // Bağlam `MainThreadMarker` değil: `NSPasteboard` `objc2`'de `AnyThread`,
-    // yani tip ana thread'i zorlamıyor. Üretimde iki çağıran da ana
-    // thread'de (Edit ▸ Copy'nin `copy:`'i ve OSC 52'nin ana kuyruk işi) ve
-    // sınama onu işçi thread'lerden çağırıyor — ölçülen davranış ikisinde de
-    // aynı.
+    // yani tip ana thread'i zorlamıyor. Ama `NSPasteboard` **eşzamanlı**
+    // kullanıma dayanıklı değil — ayrı benzersiz panolar bile süreç çapında
+    // bir tip önbelleğini paylaşıyor (`+[NSPasteboard(NSTypeConversion) …]`)
+    // ve iki thread aynı anda dokununca `_updateTypeCacheIfNeeded`'de
+    // SIGSEGV ya da bir panonun ötekinin metnini okuması doğuyor. Üretimde
+    // bütün çağıranlar ana thread'de, yani sıralı; sınamalar aynı sırayı
+    // [`tests::pasteboard_lock`] ile kuruyor.
     unsafe { board.setString_forType(&string, NSPasteboardTypeString) }
 }
 
@@ -140,8 +143,23 @@ impl Drop for PendingCopy {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// Panoya dokunan her sınamanın **ilk** satırı: `NSPasteboard`'a aynı
+    /// anda tek thread girer (gerekçe [`copy`]'nin içinde).
+    ///
+    /// Gereken ana thread değil **sıra**: `--test-threads=1` her sınamayı
+    /// yine bir işçi thread'de koşturuyor ve pano sınamaları orada 300/300
+    /// geçti, paralel koşuda 5/300 düştü (2026-09-27). Kilit yalnız pano
+    /// sınamalarını sıralıyor, kalan sınamalar paralel koşmaya devam ediyor.
+    /// Zehirlenme yutuluyor: bir sınamanın iddiası öteki sınamaları
+    /// düşürmemeli.
+    pub(crate) fn pasteboard_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     /// Canlı bir pano; başsız ortamda (CI, `cargo test` ssh üstünde) `None`.
     ///
@@ -168,6 +186,7 @@ mod tests {
 
     #[test]
     fn copy_writes_selection_text_to_clipboard() {
+        let _pasteboard = pasteboard_lock();
         let Some(board) = board() else {
             eprintln!("{HEADLESS}");
             return;
@@ -178,6 +197,7 @@ mod tests {
 
     #[test]
     fn copy_without_selection_leaves_board_untouched() {
+        let _pasteboard = pasteboard_lock();
         let Some(board) = board() else {
             eprintln!("{HEADLESS}");
             return;
@@ -190,6 +210,7 @@ mod tests {
 
     #[test]
     fn copy_of_empty_text_leaves_board_untouched() {
+        let _pasteboard = pasteboard_lock();
         // `Some("")` = seçim var ama metin boş: boş bir satırın üstünde
         // sürükleme. Kapı bunu da eler, yoksa Cmd-C kullanıcının panosunu
         // boşaltırdı. Pano gerektirmeyen kısım her ortamda ölçülür
@@ -226,6 +247,7 @@ mod tests {
 
     #[test]
     fn pending_copy_delivers_to_the_given_board() {
+        let _pasteboard = pasteboard_lock();
         // Dışarıdan verilen pano, genel pano değil: sınama kullanıcının
         // panosuna dokunmaz.
         let slot = PendingCopy::default();
