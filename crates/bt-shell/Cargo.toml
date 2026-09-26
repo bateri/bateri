@@ -93,8 +93,8 @@ objc2-foundation = { workspace = true, features = [
 # (çubuk). Yalnız başlık bayrakları; `Cargo.lock` oynamadı. Karar kaydı
 # .tasks/037-ssh-ikinci-tur/discussion.md → Karar 7 → Kullanıcı kararı 4.
 # Yükleme düğmelerinin el imleci (037 phase-6): `NSCursor`
-# (`pointingHandCursor`/`arrowCursor`). Yalnız başlık bayrağı; `Cargo.lock`
-# oynamadı. Karar kaydı .tasks/037-ssh-ikinci-tur/phase-6.md.
+# (`pointingHandCursor`, view'ın cursor rect'ine veriliyor). Yalnız başlık
+# bayrağı; `Cargo.lock` oynamadı. Karar kaydı .tasks/037-ssh-ikinci-tur/phase-6.md.
 # Yükleme kuyruğunun popover'ı (037 phase-7): `NSPopover` (ve delegate'i) ile
 # uzun adın ortadan kısalması (`NSParagraphStyle`: `NSLineBreakMode`). Yalnız
 # başlık bayrakları; `Cargo.lock` oynamadı. Karar kaydı
