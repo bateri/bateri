@@ -189,7 +189,7 @@ olarak da iş görüyor. 026'nın dizin mirası ikisinde de aynen.
 - *Yalnız host'u taşımak* — `-p`/`-i`/`-J` ile bağlanan kullanıcının ikinci
   sekmesi bağlanamaz; beklenti "aynı yere".
 
-## Karar 7: Finder damlası ssh'ta → ⏳ ürün kararı, kullanıcıya gidiyor (öneri: yükleme)
+## Karar 7: Finder damlası ssh'ta → ✅ uzak dizine yükleme (kullanıcı onayı, genişletilmiş)
 
 Bugün uzak kabuğun satırına **yerel** yol yazılıyor (kusur). İki yol
 kullanıcının gördüğünde ayrışıyor:
@@ -242,6 +242,26 @@ anlamı "bu dosyayı buraya getir". A'nın tek üstünlüğü ucuzluk ve parolal
 host'ta B'nin de düşeceği yer açık bir hata, sessiz bir yanlış değil. Bu
 bölüm kullanıcının cevabıyla kapanır; seçim tek bir phase'i (phase-5)
 değiştirir, geri kalan phase'ler iki seçenekte de aynı.
+
+### Kullanıcı kararı
+
+**Kullanıcı kararı (2026-09-26, sohbette; çizimler https://claude.ai/artifact/6JNurpXmNo4EgyEQFCEx7x):** Seçilen B, yani uzak dizine yükleme. Öneriyi aşağıdaki kurallarla genişletiyor. Phase-5 bu metne göre yazılır.
+
+1. **Onay sayfası.** Damla önce sorulur. Hedef uzak OSC 7 dizini; bilinmiyorsa uzak ev dizini ve sayfa bunu söyler.
+   - Uzakta aynı adlı öğe varsa sessizce üzerine yazılmaz. Dosyada düğme "Replace" olur. Klasörde "Merge" olur ve sayfa "same-named files are replaced, others are kept" der. Klasörü silip yerine koymak yok.
+   - Klasörde sayfa dosya sayısını ve toplam boyutu yazar. İkisi yerelde, yükleme başlamadan hesaplanır.
+   - **Boş alan ön kontrolü.** Sayfa açılmadan uzakta `df` sorulur. Yer yetmiyorsa sayfa bunu söyler ("prod-web-1 has 12 MB free, “static” needs 38.2 MB") ve Upload düğmesi devre dışı kalır.
+2. **Taşıma.** Klasör tek bir sıkıştırmasız `tar c | ssh … tar x` akışıyla gider. Diskte, ne yerelde ne uzakta, ara arşiv oluşmaz. İzinler ve sembolik bağlar korunur. Baytları biz akıttığımız için ilerleme kesin. Tek dosyada aynı yol ya da `scp` kullanılabilir; bu implementer'ın seçimi, kullanıcının gördüğü davranış ikisinde aynı. Uzakta `tar` yoksa açık bir hata verilir.
+3. **Kuyruk.** Yükleme sürerken gelen yeni damla da onay sorar; bu sırada yükleme durmaz. Onaylanan öğe kuyruğun sonuna girer ve öğeler **sırayla** yüklenir, paralel değil. Klasör tek kalem sayılır; karışık bir damla her öğe için bir kalem açar. Her öğe bitince uzak yolu uzak kabuğa yapıştırılır.
+4. **İlerleme (tasarım A).** Dock'un durum çubuğu `⇄ host` önekini ve rengini korur. Yanında `↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB · 1.2 MB/s · 22s` yazar; klasörde ek olarak `57 of 124 files`. Dock'un üst saç çizgisi, bütün kuyruğun baytlarına göre soldan sağa dolan ilerleme çubuğu olur ve host'un rengini taşır (işaretliyse işaretin rengi). Giriş satırı geri gelmez. Satırdaki "▴ list" dock'un üstünde küçük bir liste açar: öğe başına ✕ ve "Cancel all". Bitince satır bir süre "✓ N files uploaded" gösterir, sonra eski hâline döner. Uygulamanın Dock simgesinde de ilerleme çubuğu olur.
+5. **İptal.** ⌘. ve satırdaki ✕ bütün kuyruğu iptal eder. Esc yok, çünkü klavye o sırada uzak kabuğa gidiyor.
+   - Tek dosyada yarım kalan dosya uzakta silinir.
+   - Klasörde yalnız o an yazılan dosya silinir, bitmiş dosyalar kalır. Satır "Cancelled — 57 of 124 files uploaded" der.
+6. **Disk dolarsa.** Yükleme iptal gibi biter ve satır "Disk full on host — 57 of 124 files uploaded" der. ssh kapanırsa bekleyen öğeler iptal olur ve satır bunu söyler.
+7. **Kuyruğun sahibi o sekmenin ssh bağlantısı.** Başka sekmeye geçmek yüklemeyi durdurmaz.
+8. **Sekme noktası** yalnız işaretli host'ta çıkar. RFC'nin önerisi onaylandı.
+
+Bu genişleme phase-5'i büyütüyor. Tek phase'e sığmıyorsa implementer phase'i 5a/5b'ye bölebilir (`duzen.md` → Ek phase eşiği).
 
 ## Karar 8: bağlantı kopunca → ✅ ssh 255'te dock'un boş giriş satırında teklif, ilk tuşta kalkar; mosh'ta yok
 
