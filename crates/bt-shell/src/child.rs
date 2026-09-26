@@ -375,8 +375,8 @@ impl bt_core::Wake for SilentWake {
     fn copy_to_clipboard(&self, _text: String) {}
     fn title_changed(&self) {}
     fn search_changed(&self) {}
-    // Uzak oturum yoklaması (036) üretimde de henüz yok; sınamanın uyandırması
-    // zaten hiçbir şey yapmıyor.
+    // Sınama uzak oturumu yoklamıyor (036); süreli koşunun `ShellWake`'i de
+    // yoklamıyor (`timed` kolu).
     fn command_started(&self) {}
 }
 

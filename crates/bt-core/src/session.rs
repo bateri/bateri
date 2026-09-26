@@ -6062,7 +6062,8 @@ impl Session {
         )
     }
 
-    /// Koşan komutun nesli; safha `Running` değilse `None` (036 Karar 2).
+    /// Koşan komutun nesli; komut koşmuyorsa `None` (036 Karar 2;
+    /// tanımı `ShellLog::running_command`).
     ///
     /// Uzak oturum yoklamasının ilk yarısı: çağıran nesli yoklamadan
     /// **önce** alır ve cevabı onunla [`Session::set_remote`]'e geri verir.
@@ -6075,7 +6076,7 @@ impl Session {
     /// **değiştiyse** `true` ve çağıran başlığı tazeler (036 Karar 1, 5).
     ///
     /// **Bayat cevap kapısı:** `command` [`Session::running_command`]'ın
-    /// verdiği nesil; tutmuyorsa ya da safha `Running` değilse çağrı no-op —
+    /// verdiği nesil; tutmuyorsa ya da komut koşmuyorsa çağrı no-op —
     /// yoklama ile `D` arasında biten komutun cevabı sonraki prompt'a
     /// sızmamalı. Uzak durumu silmek için çağrı yok: `C`, `D` ve `A` onu
     /// kendiliğinden siliyor.

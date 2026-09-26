@@ -70,27 +70,33 @@ _Requirements: R6.1, R6.2, R6.3, R7_
 
 ## Checklist
 
-- [ ] `ProcessTable::args` ve `KERN_PROCARGS2` gövdesi
-- [ ] `jobs::remote` ve ssh/mosh ayrıştırıcıları
-- [ ] `ShellWake::command_started`/`wake` silahı ve ana kuyruk işi
-- [ ] `set_remote` → `refresh_title`
-- [ ] `CLAUDE.md` (yol haritası satırı gerekiyorsa tazelenir)
-- [ ] (phase-2'den devralınan, `/code-review` bulgusu) `CLAUDE.md`'nin
+- [x] `ProcessTable::args` ve `KERN_PROCARGS2` gövdesi
+- [x] `jobs::remote` ve ssh/mosh ayrıştırıcıları
+- [x] `ShellWake::command_started`/`wake` silahı ve ana kuyruk işi
+- [x] `set_remote` → `refresh_title`
+- [x] `CLAUDE.md` (yol haritası satırı gerekiyorsa tazelenir)
+- [x] (phase-2'den devralınan, `/code-review` bulgusu) `CLAUDE.md`'nin
   phase-2'yle çelişen cümleleri: devrin "üç ön koşul"u → dört (uzak oturum,
   tutmadan önce, `ShellLog::caret`); "çizilen bant `Cursor::input_rows` giriş
   satırı + bağlam satırı" ve "fark ızgaranın yukarı ötelenmesiyle kapanıyor"
   → uzakta `input_rows == 0`, bant PTY payından kısa, ızgara aşağı ve şeridi
   doldurma bandı kaydırılmış pencerede de kapatıyor (`grid_lowered`)
-- [ ] (phase-1'den devralınan, `/code-review` bulgusu) **Uzak kabuğun kendi
+- [x] (phase-1'den devralınan, `/code-review` bulgusu) **Uzak kabuğun kendi
   OSC 133 işaretleri** (fish 4, iTerm2/WezTerm/kitty entegrasyonu) ssh'ın
   içinden aynı PTY'ye geliyor: uzak `A` safhayı `Prompt`'a çekip uzak durumu
   siliyor, uzak `C` yeni bir `Running` kenarı (nesil +1, yeni yoklama). Karar:
   bilinen sınır mı (belgele), yoksa `A`/`D`'de silmeyi bizim kimliğimize
   (`bt_block`) bağlamak mı — saatin "yalnız BİZİM `D`'miz" emsali; gözle
-  kontrolde 133 basan bir uzak kabukla sına
-- [ ] Test: yukarıdaki Kabul maddeleri
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Gözle kontrol (devir mesajının cümlesi): `ssh <gerçek bir host>` —
+  kontrolde 133 basan bir uzak kabukla sına.
+  **Orkestratör kararı (2026-09-26): bağla, belgeleme.** Uzak durumu silen
+  ve nesli ilerleten kenarlar yalnız bizim kimliğimizi taşıyan işaretler
+  olacak. Uzakta fish 4 ya da kitty/iTerm2 entegrasyonu yaygın ve bilinen
+  sınır olarak bıraksaydık gösterge o kullanıcılarda ilk uzak prompt'ta
+  kaybolurdu (CLAUDE.md → "Boşlukta kullanıcı tarafı seçilir"). Bir
+  sınamayla bağla: ssh sürerken yabancı `A`/`C`/`D` uzak durumu silmiyor.
+- [x] Test: yukarıdaki Kabul maddeleri
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
+- [x] Gözle kontrol (devir mesajının cümlesi): `ssh <gerçek bir host>` —
   **dock**: giriş satırı süzülerek kalkıyor, tek satırda `⇄ host` camgöbeği,
   uzak kabuk OSC 7 basıyorsa yanında yol, üst çizgi camgöbeği; **ızgara**
   aşağı iniyor, **doldurma bandı** tepedeki şeridi geçmişle dolduruyor (uzakta
@@ -99,3 +105,44 @@ _Requirements: R6.1, R6.2, R6.3, R7_
   `exit` → bant süzülerek geri, yerel yol ve dal geri, başlıktan `⇄` gidiyor.
   `ssh host uptime` dock'u oynatmıyor. Varsa `mosh host` da aynı. SF Mono
   kurulu bir makinede bağlam satırındaki `⇄` kutu değil.
+
+## Uygulama Notları
+
+- **Yabancı 133 kapısı uzak oturuma ve "kimliğimizi gördük"e bağlı**
+  (`ShellLog::apply`, yapışkan `ours`): bizim `C`'miz kimliksiz, yani
+  "kimlikli işaret" kuralı ancak uzak oturumu **bitirmeye** uygulanabiliyor —
+  uzak oturum etkinken kimliksiz `A`/`B`/`C`/`D` yok sayılıyor. İlk sürüm
+  kapıyı `Running`'e bağlamıştı; `/code-review` `exec fish`/`exec zsh`'in
+  (kimliğimizi bir daha basmayan kabuk) `Running`'i sonsuza kadar tuttuğunu
+  buldu (saat, boşta kare). Yoklamadan önce aynı okumada gelen uzak `A`'nın
+  yarışını ayrı bir bit kapatıyor: `command_open` (bizim `C`'mizle açılır,
+  bizim kimlikli `D`/`A`'mızla kapanır) `running_command()`'ı safha
+  `Prompt`'a dönmüş olsa da `Some` tutuyor. `ours` olmadan kapı
+  entegrasyonsuz kabuğun kendi 133'ünde uzak durumu hiç silmezdi.
+  `end_and_prompt_clear_the_remote_state`'in işaretleri kimlik taşıyor.
+  **Bilinen sınır:** `exec fish` sonrası fish'in içinden açılan ssh'ın
+  göstergesi fish'in `D`'sini göremiyor ve bir sonraki kimlikli işarete
+  (sekme kapanana dek) kalıyor.
+- **`mosh-client`'ın `-#`'i bütün komut satırı** (`"-# {argv} |"`, seçenekler
+  dahil), "ilk sözcük" değil: değer mosh'un kendi ayrıştırıcısından geçiyor.
+  mosh bu makinede kurulu değil; biçim mosh.pl'nin `exec`'inden, sınama
+  sahte tabloyla.
+- `probe_remote` `Local`'de `set_remote(None)` çağırmıyor: uzak durum `C`'de
+  zaten silindi. Süreli koşu `ShellWake::command_started`'da `timed` koluyla
+  yoklamıyor (`SilentWake` yalnız sınamanın).
+- **Silahın sırası**: iş silahı yoklamadan **önce** indiriyor, kararsızda
+  geri kuruyor — yoklama sürerken gelen yeni `C`'nin silahını eski komutun
+  kesin cevabı ezmesin (`RemoteProbe`, saf sınama).
+- Yol haritasının 036 satırı tazelenmedi (sapma yok).
+- `/code-review` (set kapısı, high) sekiz bulgu. **Düzeltilen:** yukarıdaki
+  `exec` kabuk kilidi; hedeften sonraki seçenekler (`ssh prod -p 2222`,
+  OpenSSH onları yeniden ayrıştırıyor); `-o RequestTTY=…`/`SessionType=…`;
+  tırnaklı `--ssh="…"`'in `mosh-client` satırında host sanılması (host'ta
+  olamayacak `/ = ~`'lu sözcük atlanıyor); yarı `exec` etmiş boru hattı
+  (`ssh prod | tee`) artık `Undecided` — kural "bütün üyeler" değil "hiçbir
+  şey tanınmadı ve bir üye kabuğun adını taşıyor"; boru hattında
+  etkileşimli ssh etkileşimsizden önce geliyor; `kern.argmax` bir kez
+  soruluyor. **Waive:** kabuğun kendi döngüsü ya da `zsh betik` komut boyunca
+  `Undecided` kalıp çıktı kenarı başına yoklama doğuruyor — Karar 2'nin adıyla
+  kabul ettiği bedel ("ana kuyruk turu başına en çok bir yoklama"); sınır
+  koymak ölçülmemiş bir sayı olurdu.
