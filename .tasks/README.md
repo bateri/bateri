@@ -38,6 +38,7 @@
 | 034 | [ekrani-temizle](034-ekrani-temizle/) | 🟢 | 2 phase + kapı tamam — ⌘K/⌥⌘K terminal tarafında (kabuğa bayt gitmez), ⌘Home/⌘End/⌘PgUp/⌘PgDn kaydırma ve ⌃⌘V Paste Escaped Text menüde; envanterin kalanı yol haritasında |
 | 035 | [grapheme-dizileri](035-grapheme-dizileri/) | 🟢 | 5 phase + kapı tamam — bayrak, ZWJ, ten rengi ve VS16 dizileri üç yüzeyde tek glyph ve iki sütun, dock düzenlemesi kümeyi bölmüyor |
 | 036 | [ssh-uzak-oturum](036-ssh-uzak-oturum/) | 🟢 | 3 phase + kapı tamam — ssh/mosh süreç tablosundan algılanıyor, dock tek satırda `⇄ host  /uzak/yol` (`info` rengi), başlıkta ve sekmede `⇄` |
+| 037 | [ssh-ikinci-tur](037-ssh-ikinci-tur/) | 📐 | 5 phase — host'a göre renk (desen + menü, `warning` rolü, sekmede nokta), ⌘T aynı host'a, ssh kopunca "⏎ reconnect"; Finder damlası kullanıcının kararını bekliyor |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
