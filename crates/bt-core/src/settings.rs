@@ -634,6 +634,114 @@ impl ShellIntegration {
     }
 }
 
+/// Bir uzak host'un işareti (037 Karar 2, 3): anlam, renk değil — rengi
+/// temanın rolünden ([`crate::Theme::mark_linear`]), yani açık/koyu geçişi
+/// işareti kendiliğinden taşıyor.
+///
+/// `None` "işaretsiz" demek (uzak oturumun bugünkü `info`'su) ve desen
+/// listesinde eşleşmeyi **bitiriyor** ([`host_mark`]): bir globun yakaladığı
+/// tek bir host'u işaretsiz bırakmanın tek yolu o.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HostMark {
+    /// Temanın `error`'u.
+    Production,
+    /// Temanın `warning`'i.
+    Staging,
+    /// Temanın `success`'i.
+    Development,
+    /// İşaretsiz: temanın `info`'su.
+    #[default]
+    None,
+    /// Doğrudan renk, `0xRRGGBB` (`"#rrggbb"`). Temayla değişmiyor ve açık
+    /// temada okunur olacağını kimse denetlemiyor — bedeli Karar 2'de adıyla;
+    /// menü onu hiç yazmıyor.
+    Rgb(u32),
+}
+
+impl HostMark {
+    /// Adlı işaretlerin ayar dosyasındaki yazılışları; `Rgb` bir ad değil,
+    /// `"#rrggbb"` biçimi.
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("production", Self::Production),
+        ("staging", Self::Staging),
+        ("development", Self::Development),
+        ("none", Self::None),
+    ];
+}
+
+/// `[remote] hosts` dizisinin bir girdisi: desen ve işareti (037 Karar 2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRule {
+    /// `*` (boş dahil herhangi bir dizi) ve `?` (tek karakter), harf
+    /// duyarsız; `@` taşıyorsa host'un tamamıyla, taşımıyorsa son `@`'ten
+    /// sonrasıyla eşleşiyor ([`host_mark`]).
+    pub pattern: String,
+    pub mark: HostMark,
+}
+
+/// Host'un işareti: `rules`'un **ilk** eşleşen girdisininki, eşleşme yoksa
+/// [`HostMark::None`] (037 Karar 2).
+///
+/// Girdi uzak oturumun gösterdiği host (036: kullanıcının yazdığı gibi,
+/// şema ve port atılmış). Desende `@` yoksa girdinin son `@`'ten sonraki
+/// kısmı eşleşiyor — `deploy@prod` ile `prod` aynı makine; desende `@` varsa
+/// girdinin tamamı, yani `root@*` yazılabiliyor. Sıra dizide, çünkü TOML
+/// tablosunun anahtarları anlamca sırasız. `None` girdisi eşleşmeyi orada
+/// bitiriyor ve sonucu da `None`.
+///
+/// Saf ve kare yolunda değil: `Session` onu yalnız uzak durumun ve listenin
+/// değiştiği iki kenarda çağırıyor.
+pub fn host_mark(rules: &[HostRule], host: &str) -> HostMark {
+    let bare = host.rsplit('@').next().unwrap_or(host);
+    rules
+        .iter()
+        .find(|rule| {
+            let subject = if rule.pattern.contains('@') {
+                host
+            } else {
+                bare
+            };
+            glob_matches(&rule.pattern, subject)
+        })
+        .map_or(HostMark::None, |rule| rule.mark)
+}
+
+/// `*` ve `?`'li desen, harf duyarsız; sınıf (`[a-z]`) ve küme (`{a,b}`)
+/// yok — onlar ayrı bir glob kütüphanesi demek (Karar 2).
+///
+/// İki taraf da **bir kez** küçük harfe iniyor ve karşılaştırma karakter
+/// dizileri üstünde: harf katlaması bir karakteri birden çoğuna açabiliyor
+/// (`İ`), yani karakter karakter katlamak `?`'in saydığını kaydırırdı.
+/// Geri izleme yalnız son `*`'a — klasik doğrusal eşleştirici.
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    let text: Vec<char> = text.to_lowercase().chars().collect();
+    let (mut p, mut t) = (0, 0);
+    // Son `*`'ın desendeki yeri ve o an metinde nereye kadar yuttuğu.
+    let mut star: Option<(usize, usize)> = None;
+    while t < text.len() {
+        match pattern.get(p) {
+            Some('*') => {
+                star = Some((p, t));
+                p += 1;
+            }
+            Some(&c) if c == '?' || c == text[t] => {
+                p += 1;
+                t += 1;
+            }
+            _ => match star {
+                Some((at, swallowed)) => {
+                    p = at + 1;
+                    t = swallowed + 1;
+                    star = Some((at, swallowed + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    pattern[p..].iter().all(|&c| c == '*')
+}
+
 /// Emekli anahtarlar: dosyada durmaya devam eder, **okunmaz**, ve görülünce
 /// tanı bırakır.
 ///
@@ -708,6 +816,9 @@ pub struct Settings {
     /// `[terminal] confirm_close`: kapanışta ne zaman sorulsun
     /// ([`ConfirmClose`]). `TerminalOptions`'a girmiyor.
     pub confirm_close: ConfirmClose,
+    /// `[remote] hosts`: uzak host'ların işaret desenleri, dosyadaki
+    /// sırasıyla (037 Karar 2; eşleşme [`host_mark`]). Varsayılan boş.
+    pub remote_hosts: Vec<HostRule>,
 }
 
 impl Default for Settings {
@@ -741,6 +852,7 @@ impl Default for Settings {
             erase: Erase::default(),
             shell_integration: ShellIntegration::default(),
             confirm_close: ConfirmClose::default(),
+            remote_hosts: Vec::new(),
         }
     }
 }
@@ -905,7 +1017,7 @@ impl Settings {
     ///
     /// Metin İngilizce: kullanıcının açtığı dosya bir UI dizgisi
     /// (`CLAUDE.md` → Dil).
-    pub const TEMPLATE: &str = r#"# bateri settings. Changes apply as soon as you save this file.
+    pub const TEMPLATE: &str = r##"# bateri settings. Changes apply as soon as you save this file.
 # A key you delete goes back to its default. Values are case-sensitive; one that
 # is not understood leaves its key alone and says so under the title — except
 # clipboard.osc52, which turns off instead.
@@ -1016,7 +1128,21 @@ erase = "recede"
 # Unlike every other key here, this one only takes effect in shells started
 # after the change; shells already open keep what they were started with.
 integration = "auto"
-"#;
+
+[remote]
+# Colors the dock of an ssh or mosh session by the host it is on, so a
+# production machine is never mistaken for another. Each entry names a host
+# pattern and a mark: "production" (red), "staging" (yellow), "development"
+# (green), "none" (no mark), or a color like "#c678dd". In a pattern * stands
+# for any run of characters and ? for one, ignoring case; a pattern without @
+# matches the host after any user@. The first entry that matches wins, so put
+# exact names before wide patterns; "none" stops the search.
+# hosts = [
+#   { host = "prod-*", mark = "production" },
+#   { host = "*.staging.example.com", mark = "staging" },
+# ]
+hosts = []
+"##;
 
     /// Dosya **var ama kullanılamıyor** (okunamıyor ya da geçersiz TOML)
     /// iken açılışın ayarları: varsayılanlar, yalnız OSC 52 **kapalı**.
@@ -1337,6 +1463,21 @@ integration = "auto"
             }
             None => {}
         }
+        match section(text, root, "remote", &mut parsed.diagnostics) {
+            Some(remote) => {
+                if let Some(item) = remote.get("hosts") {
+                    parsed.settings.remote_hosts =
+                        host_rules(text, item, &fallback.remote_hosts, &mut parsed.diagnostics);
+                }
+            }
+            None if root.contains_key("remote") => {
+                parsed
+                    .settings
+                    .remote_hosts
+                    .clone_from(&fallback.remote_hosts);
+            }
+            None => {}
+        }
         Ok(parsed)
     }
 
@@ -1386,6 +1527,7 @@ integration = "auto"
                 || self.keypress != new.keypress
                 || self.erase != new.erase,
             caret: self.caret != new.caret || self.blink_interval != new.blink_interval,
+            remote: self.remote_hosts != new.remote_hosts,
         }
     }
 
@@ -1530,6 +1672,10 @@ pub struct Changes {
     /// alana binselerdi bir yarıçap değişimi `TerminalOptions`'ı baştan
     /// `Session`'a gönderirdi.
     pub caret: bool,
+    /// [`Settings::remote_hosts`] değişti: desen listesi her oturuma gider
+    /// (`Session::set_host_marks`) ve etkin uzak host'un işareti yeniden
+    /// çözülür (037 Karar 2).
+    pub remote: bool,
 }
 
 /// Metni TOML belgesine ayrıştırır; ayrıştırılamıyorsa tek satırlık tanı.
@@ -1847,6 +1993,88 @@ fn named_enum<T: Copy + PartialEq>(
     fallback
 }
 
+/// `remote.hosts`: `{ host, mark }` girdilerinin dizisi (037 Karar 2).
+///
+/// **Bozuk tek bir girdi anahtarın tamamını reddediyor** ve `fallback`'in
+/// listesi kalıyor — `parse_keeping`'in kuralı, istisnasız: listeden yalnız
+/// bozuk girdiyi atmak sırayı değiştirir ve bir globun arkasındaki tam adı
+/// öne çıkarıp işareti sessizce değiştirebilirdi. Tanı ilk bozuk girdinin
+/// satırını söylüyor.
+///
+/// Satır içi dizi de (`hosts = [{ … }]`) bölüm dizisi de (`[[remote.hosts]]`)
+/// kabul: ikisi de aynı listeyi yazıyor ve TOML'u elle yazan kullanıcı
+/// ikincisini de seçebilir.
+fn host_rules(
+    text: &str,
+    item: &Item,
+    fallback: &[HostRule],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<HostRule> {
+    const KEY: &str = "remote.hosts";
+    let reject = |span: Option<std::ops::Range<usize>>, found: String| Diagnostic {
+        key: Some(KEY),
+        line: span.and_then(|span| line_of(text, span.start)),
+        message: format!(
+            "`{KEY}` must be a list of {{ host = \"pattern\", mark = \"production\", \
+             \"staging\", \"development\", \"none\" or \"#rrggbb\" }}, found {found}; \
+             keeping the previous list"
+        ),
+    };
+    let mut entries: Vec<(&dyn TableLike, Option<std::ops::Range<usize>>)> = Vec::new();
+    if let Some(array) = item.as_array() {
+        for value in array {
+            let Some(table) = value.as_inline_table() else {
+                let found = "an entry that is not a { … } table".to_owned();
+                diagnostics.push(reject(value.span(), found));
+                return fallback.to_vec();
+            };
+            entries.push((table, value.span()));
+        }
+    } else if let Some(tables) = item.as_array_of_tables() {
+        entries.extend(
+            tables
+                .iter()
+                .map(|table| (table as &dyn TableLike, table.span())),
+        );
+    } else {
+        diagnostics.push(reject(item.span(), kind(item).to_owned()));
+        return fallback.to_vec();
+    }
+    let mut rules = Vec::with_capacity(entries.len());
+    for (table, span) in entries {
+        let pattern = table
+            .get("host")
+            .and_then(Item::as_str)
+            .filter(|pattern| !pattern.is_empty());
+        let mark = table.get("mark").and_then(Item::as_str).and_then(|mark| {
+            HostMark::NAMES
+                .iter()
+                .find(|(name, _)| *name == mark)
+                .map(|(_, named)| *named)
+                .or_else(|| crate::theme::hex_color(mark).map(HostMark::Rgb))
+        });
+        match (pattern, mark) {
+            (Some(pattern), Some(mark)) => rules.push(HostRule {
+                pattern: pattern.to_owned(),
+                mark,
+            }),
+            (None, _) => {
+                diagnostics.push(reject(span, "an entry without a host".to_owned()));
+                return fallback.to_vec();
+            }
+            (Some(pattern), None) => {
+                let found = match table.get("mark").and_then(Item::as_str) {
+                    Some(mark) => format!("mark {mark:?} for {pattern:?}"),
+                    None => format!("no mark for {pattern:?}"),
+                };
+                diagnostics.push(reject(span, found));
+                return fallback.to_vec();
+            }
+        }
+    }
+    rules
+}
+
 /// Değerin yazılışı `names` tablosunda. Tablolar her varyantı taşıyor
 /// (`every_name_reads_back_as_its_value` bekçi), boş dize yalnız eksik bir
 /// tablonun belirtisi olurdu.
@@ -1954,6 +2182,7 @@ mod tests {
             ("motion", "keypress"),
             ("motion", "erase"),
             ("shell", "integration"),
+            ("remote", "hosts"),
         ] {
             assert!(
                 doc.get(section).and_then(|s| s.get(key)).is_some(),
@@ -2095,7 +2324,8 @@ mod tests {
                 terminal: true,
                 font: false,
                 motion: false,
-                caret: false
+                caret: false,
+                remote: false,
             }
         );
         assert_eq!(
@@ -2137,6 +2367,7 @@ mod tests {
             erase: Erase::Recede,
             shell_integration: ShellIntegration::Auto,
             confirm_close: ConfirmClose::Always,
+            remote_hosts: Vec::new(),
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -2288,6 +2519,7 @@ mod tests {
             font: true,
             motion: false,
             caret: false,
+            remote: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
         assert_eq!(
@@ -2377,7 +2609,8 @@ mod tests {
                 terminal: true,
                 font: false,
                 motion: false,
-                caret: false
+                caret: false,
+                remote: false,
             }
         );
         assert_eq!(
@@ -2524,7 +2757,8 @@ found {found}; using \"spring\""
                 terminal: false,
                 font: false,
                 motion: true,
-                caret: false
+                caret: false,
+                remote: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -2609,7 +2843,8 @@ found {found}; using \"system\""
                 terminal: false,
                 font: false,
                 motion: true,
-                caret: false
+                caret: false,
+                remote: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -3091,7 +3326,8 @@ found 1.5; using 0.1"
                     terminal: false,
                     font: false,
                     motion: true,
-                    caret: false
+                    caret: false,
+                    remote: false,
                 },
                 "{text}"
             );
@@ -3153,7 +3389,8 @@ found 1.5; using 0.1"
                 terminal: false,
                 font: false,
                 motion: true,
-                caret: false
+                caret: false,
+                remote: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -3248,6 +3485,182 @@ found 1.5; using 0.1"
         assert!(written.starts_with(text), "{written}");
         let settings = clean(&written);
         assert_eq!(settings.confirm_close, ConfirmClose::Never);
+        assert_eq!(settings.theme, "paper");
+    }
+
+    fn host_rule(pattern: &str, mark: HostMark) -> HostRule {
+        HostRule {
+            pattern: pattern.to_owned(),
+            mark,
+        }
+    }
+
+    #[test]
+    fn a_host_pattern_matches_with_star_and_question_ignoring_case() {
+        // 037 Karar 2: `*` boş dahil herhangi bir dizi, `?` tek karakter.
+        let prod = [host_rule("prod-*", HostMark::Production)];
+        assert_eq!(host_mark(&prod, "prod-web-1"), HostMark::Production);
+        assert_eq!(host_mark(&prod, "PROD-WEB-1"), HostMark::Production);
+        assert_eq!(host_mark(&prod, "prod-"), HostMark::Production);
+        assert_eq!(host_mark(&prod, "preprod-web"), HostMark::None);
+        let one = [host_rule("prod-?", HostMark::Staging)];
+        assert_eq!(host_mark(&one, "prod-1"), HostMark::Staging);
+        assert_eq!(host_mark(&one, "prod-10"), HostMark::None);
+        assert_eq!(host_mark(&one, "prod-"), HostMark::None);
+        // Nokta sıradan bir karakter; `*` onu da yutuyor.
+        let domain = [host_rule("*.staging.example.com", HostMark::Staging)];
+        assert_eq!(
+            host_mark(&domain, "a.b.staging.example.com"),
+            HostMark::Staging
+        );
+        assert_eq!(host_mark(&domain, "staging.example.com"), HostMark::None);
+        // Geri izleme: `*`'ın ilk denemesi yanlış yerde bitiyor.
+        let tricky = [host_rule("*a*b?", HostMark::Development)];
+        assert_eq!(host_mark(&tricky, "xaxbxbz"), HostMark::Development);
+        assert_eq!(host_mark(&tricky, "xaxb"), HostMark::None);
+    }
+
+    #[test]
+    fn a_pattern_without_at_matches_the_host_after_the_user() {
+        // `deploy@prod` ile `prod` aynı makine; `@`'li desen kullanıcıyı da
+        // soruyor.
+        let bare = [host_rule("prod", HostMark::Production)];
+        assert_eq!(host_mark(&bare, "deploy@prod"), HostMark::Production);
+        assert_eq!(host_mark(&bare, "prod"), HostMark::Production);
+        let root = [host_rule("root@*", HostMark::Staging)];
+        assert_eq!(host_mark(&root, "root@db"), HostMark::Staging);
+        assert_eq!(host_mark(&root, "deploy@db"), HostMark::None);
+        assert_eq!(host_mark(&root, "db"), HostMark::None);
+    }
+
+    #[test]
+    fn the_first_matching_host_rule_wins_and_none_stops_the_search() {
+        let rules = [
+            host_rule("prod-canary", HostMark::None),
+            host_rule("prod-db", HostMark::Rgb(0xc678dd)),
+            host_rule("prod-*", HostMark::Production),
+            host_rule("*", HostMark::Development),
+        ];
+        assert_eq!(host_mark(&rules, "prod-canary"), HostMark::None);
+        assert_eq!(host_mark(&rules, "prod-db"), HostMark::Rgb(0xc678dd));
+        assert_eq!(host_mark(&rules, "prod-web"), HostMark::Production);
+        assert_eq!(host_mark(&rules, "vm"), HostMark::Development);
+        assert_eq!(host_mark(&[], "vm"), HostMark::None);
+    }
+
+    #[test]
+    fn remote_hosts_are_read_in_order() {
+        let settings = clean(
+            "[remote]\nhosts = [\n  { host = \"prod-*\", mark = \"production\" },\n  \
+             { host = \"stage\", mark = \"staging\" },\n  { host = \"dev\", mark = \"development\" },\n  \
+             { host = \"vm\", mark = \"#C678dd\" },\n  { host = \"x\", mark = \"none\" },\n]\n",
+        );
+        assert_eq!(
+            settings.remote_hosts,
+            [
+                host_rule("prod-*", HostMark::Production),
+                host_rule("stage", HostMark::Staging),
+                host_rule("dev", HostMark::Development),
+                host_rule("vm", HostMark::Rgb(0xc678dd)),
+                host_rule("x", HostMark::None),
+            ]
+        );
+        // Bölüm dizisi aynı listeyi yazıyor.
+        let tables = clean(
+            "[[remote.hosts]]\nhost = \"prod-*\"\nmark = \"production\"\n\
+             [[remote.hosts]]\nhost = \"vm\"\nmark = \"#c678dd\"\n",
+        );
+        assert_eq!(
+            tables.remote_hosts,
+            [
+                host_rule("prod-*", HostMark::Production),
+                host_rule("vm", HostMark::Rgb(0xc678dd)),
+            ]
+        );
+        assert_eq!(clean("[remote]\nhosts = []\n").remote_hosts, []);
+    }
+
+    #[test]
+    fn a_broken_host_entry_rejects_the_whole_list() {
+        // Kayıt anının kuralı: bozuk tek girdi anahtarın tamamını reddediyor
+        // ve verilen liste kalıyor; tanı ilk bozuk girdinin satırını söylüyor.
+        let current = Settings {
+            remote_hosts: vec![host_rule("old", HostMark::Staging)],
+            ..Settings::default()
+        };
+        for (text, found) in [
+            (
+                "[remote]\nhosts = [\n  { host = \"a\", mark = \"production\" },\n  \
+                 { host = \"b\", mark = \"prod\" },\n]\n",
+                "found mark \"prod\" for \"b\"",
+            ),
+            (
+                "[remote]\nhosts = [\n  { host = \"a\", mark = \"production\" },\n  \
+                 { mark = \"staging\" },\n]\n",
+                "found an entry without a host",
+            ),
+            (
+                "[remote]\nhosts = [\n  { host = \"a\", mark = \"production\" },\n  \
+                 { host = \"b\" },\n]\n",
+                "found no mark for \"b\"",
+            ),
+            (
+                "[remote]\nhosts = [\n  { host = \"a\", mark = \"production\" },\n  \
+                 { host = \"b\", mark = \"#12345\" },\n]\n",
+                "found mark \"#12345\" for \"b\"",
+            ),
+            (
+                "[remote]\nhosts = [\n  { host = \"a\", mark = \"production\" },\n  \
+                 \"b\",\n]\n",
+                "found an entry that is not a { … } table",
+            ),
+            ("[remote]\n\nhosts = \"prod\"\n", "found a string"),
+        ] {
+            let parsed = Settings::parse_keeping(text, &current).expect("ayrıştırılabilir metin");
+            assert_eq!(parsed.settings.remote_hosts, current.remote_hosts, "{text}");
+            let [diagnostic] = <[Diagnostic; 1]>::try_from(parsed.diagnostics)
+                .unwrap_or_else(|got| panic!("tek tanı beklendi: {got:?}"));
+            assert_eq!(diagnostic.key, Some("remote.hosts"));
+            assert!(diagnostic.message.contains(found), "{diagnostic}");
+            assert!(diagnostic.message.ends_with("keeping the previous list"));
+            // Bozuk girdi dördüncü satırda; `hosts`'un kendisi üçüncüde.
+            let line = if found == "found a string" { 3 } else { 4 };
+            assert_eq!(diagnostic.line, Some(line), "{text}");
+        }
+        // Açılışta aynı metin boş listeye düşüyor; yanlış türde bölüm de
+        // verilen listeyi tutuyor.
+        let (settings, _) = rejected("[remote]\nhosts = [{ host = \"b\", mark = \"x\" }]\n");
+        assert_eq!(settings.remote_hosts, []);
+        let parsed = Settings::parse_keeping("remote = 1\n", &current).expect("ayrıştırılabilir");
+        assert_eq!(parsed.settings.remote_hosts, current.remote_hosts);
+    }
+
+    #[test]
+    fn a_remote_hosts_change_is_its_own_field() {
+        let before = clean("");
+        let after = clean("[remote]\nhosts = [{ host = \"prod\", mark = \"production\" }]\n");
+        assert_eq!(
+            before.changes(&after),
+            Changes {
+                remote: true,
+                ..Changes::default()
+            }
+        );
+        assert_eq!(after.changes(&after), Changes::default());
+    }
+
+    #[test]
+    fn theme_write_keeps_remote_hosts_comments_and_unknown_keys() {
+        // R2.4: dosyaya yazan her yol `[remote]`'ı, yorumunu ve tanımadığımız
+        // anahtarı yerinde bırakıyor.
+        let text = "[remote]\n# prod kırmızı\nhosts = [\n  { host = \"prod\", mark = \"production\" }, # canlı\n]\nfuture = 1\n";
+        let written = Settings::with_theme(text, "paper").expect("yazılabilir metin");
+        assert!(written.starts_with(text), "{written}");
+        let settings = clean(&written);
+        assert_eq!(
+            settings.remote_hosts,
+            [host_rule("prod", HostMark::Production)]
+        );
         assert_eq!(settings.theme, "paper");
     }
 

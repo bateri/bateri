@@ -36,7 +36,8 @@ pub struct Dock {
     /// Yüzeyin zemini; **opak** olmak zorunda (bkz. [`render`]).
     pub ground: LinearRgba,
     /// Dock'u ızgaradan ayıran **üst** saç çizgisinin rengi: uzak oturumda
-    /// temanın `info`'su, değilse [`Self::separator`] (036 Karar 6).
+    /// host'un işaretinin rengi (işaretsizde temanın `info`'su; 036 Karar 6,
+    /// 037 Karar 3), değilse [`Self::separator`].
     ///
     /// Ayrı alan, çünkü ikinci saç çizgisi (giriş bloğu ile bağlam satırı
     /// arası) uzaklığı söylemiyor — o bir bölme, bu yüzeyin kenarı.
@@ -1091,7 +1092,7 @@ pub(crate) fn render_with(
     let mut surface = Dock {
         ground: theme.background_linear(),
         edge: if context.remote.is_some() {
-            theme.info_linear()
+            theme.mark_linear(context.remote_mark)
         } else {
             theme.separator_linear()
         },
@@ -1522,8 +1523,17 @@ fn render_context(
     if available == 0 {
         return;
     }
-    if let Some(host) = &context.remote {
-        render_remote_context(host, &context.remote_cwd, theme, available, row, sink);
+    if let Some(host) = context.remote_host() {
+        let color = theme.mark_linear(context.remote_mark);
+        render_remote_context(
+            host,
+            &context.remote_cwd,
+            color,
+            theme,
+            available,
+            row,
+            sink,
+        );
         return;
     }
     let branch_chars = context.branch.chars().count();
@@ -1568,8 +1578,8 @@ fn render_context(
     emit_context(line, available, row, sink);
 }
 
-/// Bağlam satırının **uzak** biçimi (036 R4.1): `⇄ {host}` temanın `info`
-/// renginde, iki boşluk, sonra uzak yol yerel yolun iki kademesinde; dal ve
+/// Bağlam satırının **uzak** biçimi (036 R4.1): `⇄ {host}` işaretin
+/// renginde (`color`; işaretsizde temanın `info`'su, 037 Karar 3), iki boşluk, sonra uzak yol yerel yolun iki kademesinde; dal ve
 /// `|` yok — dal yerel deponun, uzak tarafınki bilinmiyor.
 ///
 /// **Bütçe önce `⇄ host`'a.** Host **kısalmıyor**, dalın kuralıyla aynı
@@ -1580,12 +1590,12 @@ fn render_context(
 fn render_remote_context(
     host: &str,
     remote_cwd: &str,
+    info: LinearRgba,
     theme: &Theme,
     available: usize,
     row: u16,
     sink: &mut impl FnMut(Cell),
 ) {
-    let info = theme.info_linear();
     let mark = std::iter::once((REMOTE_MARK, info));
     // `⇄` + boşluk + host.
     let head_chars = 2 + host.chars().count();
@@ -2223,7 +2233,8 @@ mod tests {
     use super::*;
     // Sahiplik artık `render`'ın argümanı; yüklemi yalnız burası çağırıyor,
     // üretimde cevabı `Session::frame` veriyor.
-    use crate::shell::{CaretHome, DockFault, Highlight, caret_home};
+    use crate::settings::HostMark;
+    use crate::shell::{CaretHome, DockFault, Highlight, RemoteTarget, caret_home};
 
     const THEME: Theme = Theme::BATERI;
 
@@ -2963,7 +2974,8 @@ mod tests {
             // Yerel yol ve dal **dolu**: uzak biçim onları hiç göstermemeli.
             cwd: "/Users/me/proj".into(),
             branch: "main".into(),
-            remote: Some(host.into()),
+            remote: Some(RemoteTarget::ssh(host)),
+            remote_mark: HostMark::None,
             remote_cwd: remote_cwd.into(),
         }
     }
@@ -2997,6 +3009,40 @@ mod tests {
         // Üst saç çizgisi `info`, ikincisi ayracın renginde kalıyor.
         assert_eq!(dock.edge, THEME.info_linear());
         assert_eq!(dock.separator, THEME.separator_linear());
+    }
+
+    #[test]
+    fn a_marked_host_takes_its_mark_color() {
+        // 037 Karar 3: `⇄ host` ve üst çizgi işaretin renginde; yol
+        // kademeleri ve ikinci çizgi değişmiyor.
+        let state = live("", "", "", 0);
+        for (mark, expected) in [
+            (HostMark::Production, THEME.error_linear()),
+            (HostMark::Staging, THEME.warning_linear()),
+            (HostMark::Development, THEME.success_linear()),
+            (
+                HostMark::Rgb(0xc678dd),
+                LinearRgba::from_srgb(0xc6, 0x78, 0xdd),
+            ),
+            (HostMark::None, THEME.info_linear()),
+        ] {
+            let context = DockContext {
+                remote_mark: mark,
+                ..remote("prod", "/var/www/app")
+            };
+            let (cells, dock) = draw_with(&state, &context, COLS);
+            let color = |col: u16| {
+                cells
+                    .iter()
+                    .find(|cell| cell.row == 1 && cell.col == col)
+                    .map(|cell| cell.fg)
+            };
+            assert_eq!(color(0), Some(expected), "{mark:?}: işaret");
+            assert_eq!(color(2), Some(expected), "{mark:?}: host");
+            assert_eq!(color(17), Some(THEME.dim_linear()), "{mark:?}: yol");
+            assert_eq!(dock.edge, expected, "{mark:?}: üst çizgi");
+            assert_eq!(dock.separator, THEME.separator_linear());
+        }
     }
 
     #[test]

@@ -31,6 +31,8 @@
 //! sınırları `.tasks/036-ssh-uzak-oturum/discussion.md` → Karar 2: ssh'ı
 //! sonradan başlatan sarmalayıcı betik ilk yoklamada "yerel" kilitleniyor,
 //! `exec ssh` `C` üretmiyor, `~^Z` göstergeyi `fg`'ye kadar kaldırıyor.
+//! Cevap host'tan fazlası (037 Karar 1, [`Target`]): aynı yere ikinci bir
+//! kapı açacak argv de aynı yürüyüşten çıkıyor.
 //!
 //! **Bilinen sınırlar** (Karar 7): arka plan işleri (`sleep 100 &`) ön planda
 //! değil ve sayılmıyor; kabuğun kendi içinde koşan iş (yerleşik döngü, `read`
@@ -38,6 +40,8 @@
 //! vim` kabuğun pid'ini ve grubunu devraldığı için o da boşta.
 
 use std::ffi::{c_int, c_void};
+
+use bt_core::RemoteKind;
 
 /// Kabuğun PTY çocuğuna göre yeri — kabuğu doğuran taraf biliyor ve
 /// doğumda kaydediyor (`window::TerminalWindow::start_session`), ad
@@ -77,8 +81,20 @@ pub(crate) enum Probe {
     Undecided,
     /// Ön planda ssh/mosh yok, etkileşimli değil ya da tablo okunamadı.
     Local,
-    /// Etkileşimli bir ssh/mosh; host kullanıcının yazdığı gibi.
-    Remote(String),
+    /// Etkileşimli bir ssh/mosh ve hedefi ([`Target`]).
+    Remote(Target),
+}
+
+/// Yoklamanın bulduğu uzak hedef (037 Karar 1): gösterilecek host ve aynı
+/// yere ikinci bir kapı açacak argv. Kaçırılmış satırı `window::probe_remote`
+/// üretiyor (`quote::command_line`), yani burada ne kabuk ne kaçırma var.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Target {
+    /// Kullanıcının yazdığı gibi; `ssh://` şeması ve port atılmış.
+    pub(crate) host: String,
+    pub(crate) kind: RemoteKind,
+    /// Yeniden koşturulacak argv ([`ssh_target`], [`mosh_argv`]).
+    pub(crate) argv: Vec<String>,
 }
 
 /// Kararın süreç tablosundan sorduğu altı şey.
@@ -161,7 +177,7 @@ pub(crate) fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable)
     members.sort_unstable();
     let names: Vec<Option<String>> = members.iter().map(|&pid| table.name(pid)).collect();
     // Tanınan üyeler ve hedefleri; argv yalnız aday adlılara soruluyor.
-    let recognized: Vec<(u32, Option<String>)> = members
+    let recognized: Vec<(u32, Option<Target>)> = members
         .iter()
         .zip(&names)
         .filter_map(|(&pid, name)| {
@@ -196,8 +212,8 @@ pub(crate) fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable)
     let mut found = false;
     for (_, target) in top {
         found = true;
-        if let Some(host) = target {
-            return Probe::Remote(host.clone());
+        if let Some(target) = target {
+            return Probe::Remote(target.clone());
         }
     }
     if found {
@@ -221,10 +237,13 @@ fn is_candidate(name: &str) -> bool {
 
 /// Tanınan bir sürecin hedefi: dıştaki `None` "tanınmadı", içteki `None`
 /// "tanındı ama etkileşimli bir uzak oturum değil".
-fn remote_target(name: &str, args: &[String]) -> Option<Option<String>> {
+fn remote_target(name: &str, args: &[String]) -> Option<Option<Target>> {
     let rest = args.get(1..).unwrap_or_default();
     if name == "ssh" {
-        return Some(ssh_target(rest));
+        // argv[0] sürecin verdiği gibi (`ssh`, `/usr/bin/ssh`): takma adla
+        // (`alias s=ssh`) yazılan komut da süreçte `ssh`.
+        let program = args.first().map_or("ssh", String::as_str);
+        return Some(ssh_target(program, rest));
     }
     if name == "mosh-client" {
         return Some(mosh_client_target(rest));
@@ -232,7 +251,23 @@ fn remote_target(name: &str, args: &[String]) -> Option<Option<String>> {
     // Yorumlayıcı: ilk seçenek-olmayan argüman betiğin yolu.
     let script = rest.iter().position(|arg| !arg.starts_with('-'))?;
     let base = rest[script].rsplit('/').next().unwrap_or_default();
-    (base == "mosh").then(|| mosh_target(&rest[script + 1..]))
+    let script_args = &rest[script + 1..];
+    (base == "mosh").then(|| {
+        mosh_target(script_args).map(|host| Target {
+            host,
+            kind: RemoteKind::Mosh,
+            argv: mosh_argv(script_args),
+        })
+    })
+}
+
+/// mosh'un yeniden koşturma argv'si: `mosh` + betiğin argümanları, olduğu
+/// gibi (037 Karar 6). Yerel yönlendirme mosh'ta yok, ayıklanacak bir şey de.
+fn mosh_argv<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+    std::iter::once("mosh")
+        .chain(args.iter().map(AsRef::as_ref))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// ssh'ın değer alan kısa seçenekleri (`ssh(1)`'in SYNOPSIS'i).
@@ -240,28 +275,46 @@ const SSH_VALUED: &str = "BbcDEeFIiJLlmOoPpQRSWw";
 /// Varlığı oturumu etkileşimsiz yapan seçenekler: tünel (`-N`), yönlendirme
 /// (`-W`), denetim (`-O`), sorgu (`-Q`, `-G`, `-V`) ve pty'siz (`-T`).
 const SSH_NON_INTERACTIVE: &str = "NWOQGVT";
+/// Yeniden koşturmada **düşen** seçenekler (037 Karar 6): yerel
+/// yönlendirmeler (`-L`, `-R`, `-D`, değerleriyle) ikinci oturumda aynı yerel
+/// portu bağlamaya çalışıp uyarı basar ya da `ExitOnForwardFailure`'da hiç
+/// bağlanmaz; `-M` ikinci bir ControlMaster açar; `-f` arka plana düşer.
+/// `-o LocalForward=…` biçimi ayıklanmıyor (bilinen sınır).
+const SSH_NOT_REPEATED: &str = "LRDMf";
 
-/// ssh argv'si (argv[0] hariç) → etkileşimli oturumun hedefi (036 Karar 3).
+/// ssh argv'si (argv[0] `program`, `args` sonrası) → etkileşimli oturumun
+/// hedefi (036 Karar 3) ve yeniden koşturma argv'si (037 Karar 6).
 ///
 /// Hedeften sonra bir komut varsa oturum `-t` olmadan etkileşimli değil:
 /// `ssh prod uptime` bir saniyelik komut ve dock'u kısıp açmak tam da
 /// kullanıcının reddettiği sıçrama olurdu.
-fn ssh_target(args: &[String]) -> Option<String> {
+///
+/// argv aynı yürüyüşten ([`SshSession::options`]'ın `kept`'i), ikinci bir
+/// ayrıştırıcıdan değil: [`SSH_NOT_REPEATED`] düşüyor, kalan her şey
+/// sırasıyla — hedef ve `-t`'li uzak komut dahil.
+fn ssh_target(program: &str, args: &[String]) -> Option<Target> {
     let mut session = SshSession::default();
-    let (index, terminated) = session.options(args, 0);
+    let mut argv = vec![program.to_owned()];
+    let (index, terminated) = session.options(args, 0, &mut argv);
     let target = args.get(index)?;
+    argv.push(target.clone());
     // OpenSSH hedeften sonra seçenekleri **yeniden** ayrıştırıyor
     // (`ssh prod -p 2222`); `--` ile bitmişse ayrıştırmıyor.
     let rest = if terminated {
         index + 1
     } else {
-        session.options(args, index + 1).0
+        session.options(args, index + 1, &mut argv).0
     };
     let command = rest < args.len();
     if session.quiet || (command && !session.tty) {
         return None;
     }
-    Some(ssh_host(target))
+    argv.extend(args[rest..].iter().cloned());
+    Some(Target {
+        host: ssh_host(target),
+        kind: RemoteKind::Ssh,
+        argv,
+    })
 }
 
 /// ssh seçeneklerinin etkileşim hakkında söyledikleri.
@@ -277,15 +330,28 @@ struct SshSession {
 impl SshSession {
     /// `args[index..]`'teki seçenek kümesini okur; ilk seçenek-olmayan
     /// argümanın indeksini ve `--` ile bitip bitmediğini döndürür.
-    fn options(&mut self, args: &[String], mut index: usize) -> (usize, bool) {
+    ///
+    /// Okuduğu seçenekleri yeniden koşturma için `kept`'e yazıyor (037
+    /// Karar 6): [`SSH_NOT_REPEATED`]'in bayrağı kümeden düşüyor, değer
+    /// alanın değeri de (bitişik ya da ayrı argüman); bayrağı kalmayan küme
+    /// bütünüyle düşüyor (`-fM` → yok, `-vL 1:x:1` → `-v`).
+    fn options(
+        &mut self,
+        args: &[String],
+        mut index: usize,
+        kept: &mut Vec<String>,
+    ) -> (usize, bool) {
         while let Some(arg) = args.get(index) {
             if arg == "--" {
+                kept.push(arg.clone());
                 return (index + 1, true);
             }
             let Some(cluster) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
                 break;
             };
             index += 1;
+            let mut flags = String::from("-");
+            let mut separate = None;
             for (at, flag) in cluster.char_indices() {
                 if SSH_NON_INTERACTIVE.contains(flag) {
                     self.quiet = true;
@@ -293,13 +359,24 @@ impl SshSession {
                 if flag == 't' {
                     self.tty = true;
                 }
+                let repeated = !SSH_NOT_REPEATED.contains(flag);
+                if repeated {
+                    flags.push(flag);
+                }
                 if SSH_VALUED.contains(flag) {
                     // Değer ya kümenin kalanı (`-p22`) ya sonraki argüman.
                     let attached = &cluster[at + flag.len_utf8()..];
                     let value = if attached.is_empty() {
                         index += 1;
-                        args.get(index - 1).map(String::as_str)
+                        let value = args.get(index - 1);
+                        if repeated {
+                            separate = value.cloned();
+                        }
+                        value.map(String::as_str)
                     } else {
+                        if repeated {
+                            flags.push_str(attached);
+                        }
                         Some(attached)
                     };
                     if flag == 'o'
@@ -310,6 +387,10 @@ impl SshSession {
                     break;
                 }
             }
+            if flags.len() > 1 {
+                kept.push(flags);
+            }
+            kept.extend(separate);
         }
         (index, false)
     }
@@ -389,7 +470,13 @@ fn mosh_target<S: AsRef<str>>(args: &[S]) -> Option<String> {
 
 /// `mosh-client`'ın `-#`'i: betik ona kendi komut satırını tek argümanda
 /// veriyor (`"-# {argv} |"`), yani hedef o satırın mosh ayrıştırmasından.
-fn mosh_client_target(args: &[String]) -> Option<String> {
+///
+/// Yeniden koşturma argv'si de o satırdan: `mosh` + boşlukla bölünmüş
+/// sözcükleri (037 Karar 6). **Bilinen sınır:** betik satırı tırnaksız
+/// birleştiriyor, yani boşluklu bir değer (`--ssh="ssh -i k"`) geri
+/// kurulamıyor ve bölünmüş hâliyle yazılıyor — host'un 036'daki sınırıyla
+/// aynı kök.
+fn mosh_client_target(args: &[String]) -> Option<Target> {
     let at = args.iter().position(|arg| arg.starts_with("-#"))?;
     let mut line = args[at].strip_prefix("-#").unwrap_or_default().trim();
     if line.is_empty() {
@@ -403,7 +490,13 @@ fn mosh_client_target(args: &[String]) -> Option<String> {
         .split_whitespace()
         .filter(|word| !word.contains(['/', '=', '~']))
         .collect();
-    mosh_target(&words)
+    let host = mosh_target(&words)?;
+    let all: Vec<&str> = line.split_whitespace().collect();
+    Some(Target {
+        host,
+        kind: RemoteKind::Mosh,
+        argv: mosh_argv(&all),
+    })
 }
 
 /// Ön plan grubunun adları: yapraklar (grubun başka bir üyesinin ebeveyni
@@ -838,7 +931,7 @@ mod tests {
     }
 
     /// `login` 100 → `zsh` 101; ön plan grubu 200 ve üyeleri `argv`'lerle.
-    fn remote_of(procs: &[(u32, u32, &[&'static str])]) -> Probe {
+    fn probe_of(procs: &[(u32, u32, &[&'static str])]) -> Probe {
         let mut table = login_shell(200);
         for &(pid, parent, argv) in procs {
             table = table.run(pid, parent, 200, argv);
@@ -846,8 +939,113 @@ mod tests {
         remote(ShellParent::Login, 100, &table)
     }
 
+    /// [`probe_of`]'un **yalnız host'a** bakan hâli: 036'nın sınamaları
+    /// hedefin argv'sini ve türünü sormuyor (037'ninkiler [`target_of`]).
+    fn remote_of(procs: &[(u32, u32, &[&'static str])]) -> Probe {
+        match probe_of(procs) {
+            Probe::Remote(target) => remote_host(&target.host),
+            other => other,
+        }
+    }
+
     fn remote_host(host: &str) -> Probe {
-        Probe::Remote(host.to_owned())
+        Probe::Remote(Target {
+            host: host.to_owned(),
+            kind: RemoteKind::Ssh,
+            argv: Vec::new(),
+        })
+    }
+
+    /// Tek süreçli grubun bütün hedefi; uzak değilse sınama düşer.
+    fn target_of(argv: &[&'static str]) -> Target {
+        match probe_of(&[(200, 101, argv)]) {
+            Probe::Remote(target) => target,
+            other => panic!("uzak bir hedef beklendi: {argv:?} → {other:?}"),
+        }
+    }
+
+    fn words(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_rerun_argv_drops_local_forwards_master_and_background() {
+        // 037 Karar 6: `-L -R -D` değerleriyle, `-M` ve `-f` düşüyor; kalan
+        // her şey sırasıyla.
+        let target = target_of(&["ssh", "-p", "2222", "-J", "jump", "-L", "8080:x:80", "prod"]);
+        assert_eq!(target.host, "prod");
+        assert_eq!(target.kind, RemoteKind::Ssh);
+        assert_eq!(
+            target.argv,
+            words(&["ssh", "-p", "2222", "-J", "jump", "prod"])
+        );
+        // Birleşik kümeler 036'nın yürüyüşüyle bölünüyor: bitişik değer
+        // bayrağıyla gidiyor, bayrağı kalmayan küme bütünüyle düşüyor.
+        assert_eq!(
+            target_of(&[
+                "ssh", "-vL", "1:x:1", "-p2222", "-MR9:y:9", "-D1080", "-4", "prod"
+            ])
+            .argv,
+            words(&["ssh", "-v", "-p2222", "-4", "prod"])
+        );
+        assert_eq!(
+            target_of(&["ssh", "-fM", "-o", "User=x", "--", "prod"]).argv,
+            words(&["ssh", "-o", "User=x", "--", "prod"])
+        );
+        // Hedeften sonraki seçenekler de süzülüyor (OpenSSH onları yeniden
+        // okuyor); argv[0] sürecin verdiği gibi.
+        assert_eq!(
+            target_of(&["/usr/bin/ssh", "prod", "-L", "1:x:1", "-v"]).argv,
+            words(&["/usr/bin/ssh", "prod", "-v"])
+        );
+    }
+
+    #[test]
+    fn a_forced_tty_command_is_kept_in_the_rerun_argv() {
+        assert_eq!(
+            target_of(&["ssh", "-t", "prod", "tmux", "attach"]).argv,
+            words(&["ssh", "-t", "prod", "tmux", "attach"])
+        );
+        // `-f` etkileşimsiz kalıyor (036'nın cevabı değişmedi).
+        assert_eq!(
+            remote_of(&[(200, 101, &["ssh", "-fN", "prod"])]),
+            Probe::Local
+        );
+    }
+
+    #[test]
+    fn mosh_reruns_as_mosh_with_the_script_arguments() {
+        // Betik görülüyorsa `mosh` + betiğin argümanları, olduğu gibi.
+        let probe = probe_of(&[(
+            200,
+            101,
+            &[
+                "/usr/bin/perl5.34",
+                "-w",
+                "/opt/homebrew/bin/mosh",
+                "--ssh=ssh -p 2",
+                "prod",
+            ],
+        )]);
+        let Probe::Remote(target) = probe else {
+            panic!("mosh uzak: {probe:?}");
+        };
+        assert_eq!(target.kind, RemoteKind::Mosh);
+        assert_eq!(target.host, "prod");
+        assert_eq!(target.argv, words(&["mosh", "--ssh=ssh -p 2", "prod"]));
+        // Yalnız `mosh-client` görüldüyse `-#` satırı, boşlukla bölünmüş.
+        let target = target_of(&[
+            "mosh-client",
+            "-# -p 60001 --ssh=ssh deploy@prod |",
+            "10.0.0.5",
+            "60001",
+        ]);
+        assert_eq!(target.kind, RemoteKind::Mosh);
+        assert_eq!(target.host, "deploy@prod");
+        assert_eq!(
+            target.argv,
+            words(&["mosh", "-p", "60001", "--ssh=ssh", "deploy@prod"])
+        );
     }
 
     #[test]

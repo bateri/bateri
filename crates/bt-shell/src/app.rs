@@ -1847,6 +1847,11 @@ impl AppDelegate {
                     window.set_terminal_options(&new);
                 }
             }
+            if changes.remote {
+                for window in &windows {
+                    window.set_host_marks(&new);
+                }
+            }
             // Stil ve dock'un yazım efektleri link'e gidiyor, oturuma değil:
             // hangi kareyi çizeceğimizi değil **nasıl** çizeceğimizi
             // değiştiriyorlar. Link `start_session` içinde doğuyor ve bu yol

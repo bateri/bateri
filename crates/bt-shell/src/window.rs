@@ -21,8 +21,8 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use bt_core::{
-    ConfirmClose, FontOptions, SearchCover, SearchDirection, SearchReport, SearchStatus, Session,
-    SessionOptions, Settings, ShutdownHandle, Teardown, Theme, Wake,
+    ConfirmClose, FontOptions, RemoteTarget, SearchCover, SearchDirection, SearchReport,
+    SearchStatus, Session, SessionOptions, Settings, ShutdownHandle, Teardown, Theme, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Surface, Waker};
@@ -49,6 +49,7 @@ use crate::child;
 use crate::clipboard::{self, PendingCopy};
 use crate::jobs::{self, Foreground, Libproc, Probe, ShellParent};
 use crate::notices::{Source, font_messages};
+use crate::quote;
 use crate::search_bar::{SearchBar, selection_query};
 use crate::view::BateriView;
 use crate::zoom::Zoom;
@@ -1554,8 +1555,17 @@ impl TerminalWindow {
         match jobs::remote(parent, session.child_pid(), &Libproc) {
             Probe::Undecided => true,
             Probe::Local => false,
-            Probe::Remote(host) => {
-                if session.set_remote(command, Some(&host)) {
+            Probe::Remote(target) => {
+                // Satır argüman başına, okunur kaçırmayla (037 Karar 1);
+                // `bt-core` kuralı ikinci kez yazmıyor, dizgiyi saklıyor.
+                let line = quote::command_line(&target.argv);
+                let target = RemoteTarget {
+                    host: target.host,
+                    kind: target.kind,
+                    argv: target.argv,
+                    line,
+                };
+                if session.set_remote(command, Some(&target)) {
                     self.refresh_title();
                 }
                 false
@@ -1724,6 +1734,9 @@ impl TerminalWindow {
         // referansın nerede düşeceği belli (bkz. `shutdown`).
         let _ = self.ivars().session.set(Arc::clone(&session));
         let _ = self.ivars().shell_parent.set(shell_parent);
+        // Host işaretlerinin listesi doğumda (037 Karar 2); canlı değişimi
+        // `AppDelegate::reload_settings` getiriyor ([`Self::set_host_marks`]).
+        session.set_host_marks(&app.settings().remote_hosts);
         // Oturum yuvaya girmeden önce gelmiş bir başlık haberi `refresh_title`'da
         // boş yuva bulup düşmüş olabilir; bir kez elle okumak o pencereyi
         // kapatıyor (değişmemişse aynı `bateri`'yi yazar).
@@ -1856,6 +1869,14 @@ impl TerminalWindow {
         let font = self.ivars().zoom.get().apply(&app.settings().font);
         if self.ivars().renderer.set_font(&font) {
             self.refresh_geometry(app);
+        }
+    }
+
+    /// `[remote] hosts` değişti — desen listesi oturuma; etkin uzak host'un
+    /// işareti orada yeniden çözülüyor (037 Karar 2).
+    pub(crate) fn set_host_marks(&self, settings: &Settings) {
+        if let Some(session) = self.ivars().session.get() {
+            session.set_host_marks(&settings.remote_hosts);
         }
     }
 

@@ -8,6 +8,8 @@
 //! `Session::paste`'e gidiyor, yani bracketed paste sarması ve dock istisnası
 //! bu modülün konusu değil.
 
+use std::fmt::Write as _;
+
 /// Yolları ters bölüyle kaçırır ve **tek boşlukla** birleştirir — Terminal.app
 /// paritesi (`/Users/…/İki\ Kelime/a.txt`).
 ///
@@ -82,6 +84,61 @@ pub(crate) fn paste_quote(text: &str) -> String {
     }
     quoted.push('\'');
     quoted
+}
+
+/// Uzak oturumun **yeniden koşturma satırı** (037 Karar 1): argv → kabuğa
+/// yazılacak, okunur tek satır. ⌘T'nin ve yeniden bağlanmanın yazdığı satır
+/// kullanıcının gözünün önünde (yeni sekmenin dock'u, geçmiş), yani
+/// [`shell_quote`]'un damla için dar beyaz listesi burada `ssh deploy\@prod
+/// -o User\=x` okunurdu.
+///
+/// Kural [`shell_quote`]'unki, üç genişlemeyle: `@ : , +` her yerde geçer
+/// (kabukta özel değiller), `=` **sözcüğün başı dışında** geçer — zsh'in
+/// `EQUALS`'ı `=cmd`'yi yalnız sözcük başında açıyor —, ve **boş argüman**
+/// `''` olur, yoksa satırda iz bırakmadan kaybolurdu. Kontrol karakteri
+/// taşıyan argüman `$'…'`'e giriyor. Argümanlar tek boşlukla
+/// birleşiyor. Damlanın kuralı değişmiyor: ayrı giriş noktası.
+pub(crate) fn command_line(argv: &[String]) -> String {
+    let mut line = String::new();
+    for arg in argv {
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        if arg.is_empty() {
+            line.push_str("''");
+            continue;
+        }
+        // Kontrol karakteri (satır sonu en başta) ters bölüyle kaçamaz: `\` +
+        // satır sonu kabukta satır devamı ve argümanı birleştirirdi, ESC ham
+        // giderdi. O argüman bütünüyle ANSI-C tırnağında (`$'…'`, zsh ve
+        // bash) ve karakter okunur bir kaçışla yazılıyor.
+        if arg.chars().any(char::is_control) {
+            line.push_str("$'");
+            for c in arg.chars() {
+                match c {
+                    '\\' => line.push_str("\\\\"),
+                    '\'' => line.push_str("\\'"),
+                    '\n' => line.push_str("\\n"),
+                    '\t' => line.push_str("\\t"),
+                    '\r' => line.push_str("\\r"),
+                    c if c.is_control() => {
+                        let _ = write!(line, "\\u{:04x}", u32::from(c));
+                    }
+                    c => line.push(c),
+                }
+            }
+            line.push('\'');
+            continue;
+        }
+        for (at, c) in arg.chars().enumerate() {
+            let readable = matches!(c, '@' | ':' | ',' | '+') || (c == '=' && at > 0);
+            if needs_escape(c) && !readable {
+                line.push('\\');
+            }
+            line.push(c);
+        }
+    }
+    line
 }
 
 /// Beyaz listenin kendisi: ASCII harf/rakam ve dört noktalama geçer, ASCII
@@ -171,6 +228,55 @@ mod tests {
         );
         // Boş damla boş dizge: okunabilen yol yoksa yazılacak şey de yok.
         assert_eq!(shell_quote(&[]), "");
+    }
+
+    fn line(argv: &[&str]) -> String {
+        command_line(&argv.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_command_line_stays_readable() {
+        // 037 Karar 1: `@ : , +` ve sözcük içindeki `=` kaçmıyor.
+        assert_eq!(
+            line(&["ssh", "-o", "User=x", "deploy@prod"]),
+            "ssh -o User=x deploy@prod"
+        );
+        assert_eq!(
+            line(&["ssh", "-J", "jump:2222,bastion", "-p", "2222", "host+1"]),
+            "ssh -J jump:2222,bastion -p 2222 host+1"
+        );
+    }
+
+    #[test]
+    fn a_command_line_escapes_what_the_shell_would_read() {
+        // Sözcük başındaki `=` zsh'te `=cmd` açılımı; boşluklu argüman tek
+        // argüman kalmalı; boş argüman kaybolmamalı; kalan metakarakterler
+        // damlanın kuralıyla.
+        assert_eq!(line(&["ssh", "=x"]), "ssh \\=x");
+        assert_eq!(
+            line(&["mosh", "--ssh=ssh -p 2", "prod"]),
+            "mosh --ssh=ssh\\ -p\\ 2 prod"
+        );
+        assert_eq!(line(&["ssh", "-o", "", "prod"]), "ssh -o '' prod");
+        assert_eq!(
+            line(&["ssh", "-t", "prod", "a;b", "$HOME"]),
+            "ssh -t prod a\\;b \\$HOME"
+        );
+        assert_eq!(line(&[]), "");
+    }
+
+    #[test]
+    fn a_control_character_puts_its_argument_in_ansi_c_quotes() {
+        // `\` + satır sonu satır devamı olurdu (`/code-review`): argüman
+        // `$'…'`'e giriyor, içindeki `\` ve `'` kaçıyor.
+        assert_eq!(
+            line(&["ssh", "-t", "prod", "echo a\necho 'b'\\"]),
+            "ssh -t prod $'echo a\\necho \\'b\\'\\\\'"
+        );
+        assert_eq!(
+            line(&["ssh", "-t", "prod", "a\u{1b}b\tc"]),
+            "ssh -t prod $'a\\u001bb\\tc'"
+        );
     }
 
     #[test]
