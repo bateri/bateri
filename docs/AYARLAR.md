@@ -214,6 +214,20 @@ erase = "recede"
 # Unlike every other key here, this one only takes effect in shells started
 # after the change; shells already open keep what they were started with.
 integration = "auto"
+
+[remote]
+# Colors the dock of an ssh or mosh session by the host it is on, so a
+# production machine is never mistaken for another. Each entry names a host
+# pattern and a mark: "production" (red), "staging" (yellow), "development"
+# (green), "none" (no mark), or a color like "#c678dd". In a pattern * stands
+# for any run of characters and ? for one, ignoring case; a pattern without @
+# matches the host after any user@. The first entry that matches wins, so put
+# exact names before wide patterns; "none" stops the search.
+# hosts = [
+#   { host = "prod-*", mark = "production" },
+#   { host = "*.staging.example.com", mark = "staging" },
+# ]
+hosts = []
 ```
 
 Blok bir sınamayla şablona bağlıdır (`documented_template_is_the_template`).
@@ -872,6 +886,48 @@ altta) ve imleç ikisi arasında sıçrıyordu. "Prompt benim olsun" demek zaten
 Devir yalnız **zsh**'te oluyor. bash, fish, SSH'ın öte tarafı ve
 `integration = "off"` oturumu prompt'unuzu zaten olduğu gibi gösterir.
 
+### `[remote]`
+
+```toml
+[remote]
+hosts = [
+  { host = "prod-*", mark = "production" },
+  { host = "*.staging.example.com", mark = "staging" },
+  { host = "vm", mark = "#c678dd" },
+]
+```
+
+| anahtar | tür | varsayılan | anlamı |
+|---|---|---|---|
+| `hosts` | `{ host, mark }` dizisi | `[]` | uzak host'ların işareti: ssh ya da mosh o host'tayken dock'un renkleri |
+
+ssh ya da mosh ile uzak bir makinedeyken dock'un bağlam satırı `⇄ host`
+gösterir ve üst çizgisi renklenir. `hosts` o rengi host'a göre seçer, yani
+prod'da olduğunuzu renkten bilirsiniz.
+
+- **`mark`**: `"production"` (temanın `error`'u, kırmızı), `"staging"`
+  (`warning`, sarı), `"development"` (`success`, yeşil), `"none"` (işaretsiz —
+  temanın `info`'su, camgöbeği) ya da `"#rrggbb"` biçiminde bir renk. Adlı
+  işaretler temanın rolünden geldiği için açık/koyu temada kendiliğinden
+  okunur; doğrudan renk temayla değişmez ve okunurluğunu kimse denetlemez.
+- **`host`** bir desen: `*` herhangi bir karakter dizisi (boş ve nokta dahil),
+  `?` tek karakter; büyük/küçük harf fark etmez. `[a-z]` ve `{a,b}` yok.
+- Desen `@` taşımıyorsa host'un **son `@`'ten sonrası** ile karşılaştırılır:
+  `ssh deploy@prod` de `ssh prod` de `prod` desenine uyar. `root@*` gibi `@`'li
+  bir desen kullanıcı adını da sorar.
+- Host, `ssh`'a **yazdığınız** addır (`ssh prod` → `prod`, `ssh
+  deploy@10.0.0.5` → `deploy@10.0.0.5`); `~/.ssh/config`'in `HostName`'i
+  çözülmez. Takma adla bağlanıyorsanız deseni takma ada yazın.
+- **İlk eşleşen kazanır**, dizideki sırayla: tam adları geniş desenlerden önce
+  yazın. `"none"` aramayı orada bitirir — bir globun yakaladığı tek bir
+  host'u işaretsiz bırakmanın yolu o.
+- Satır içi dizi yerine `[[remote.hosts]]` bölüm dizisi de yazılabilir.
+- Kaydettiğiniz anda geçerli olur, ssh sürerken de.
+- **Bozuk bir girdi** (bilinmeyen `mark`, `host`'suz girdi, tablo olmayan
+  öğe) listenin **tamamını** reddeder: açılışta liste boş, kayıt anında
+  ekrandaki liste kalır ve uyarı görünür. Yalnız bozuk girdiyi atmak sırayı
+  değiştirip bir host'un işaretini sessizce değiştirebilirdi.
+
 ## Temalar
 
 Kullanıcı temaları şu dizinde, tema başına bir dosya:
@@ -889,7 +945,7 @@ bateri – themes/paper.toml: line 3: `ansi.red` must be a color like "#rrggbb",
 
 ### Biçim
 
-On bir rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
+On iki rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
 bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 
 | anahtar | anlamı |
@@ -905,6 +961,7 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 | `success` | durum: başarı; sıfır çıkış koduyla biten komutun işareti |
 | `error` | durum: hata; sıfırdan farklı çıkış koduyla biten komutun işareti |
 | `info` | durum: bilgi; uzak oturum — bağlam satırında host ve dock'un üst çizgisi |
+| `warning` | durum: uyarı; `staging` işaretli uzak host — bağlam satırında host ve dock'un üst çizgisi |
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |
 | `[ansi]` `bright_black` … `bright_white` | ANSI 8–15, aynı sırada |
 
@@ -924,8 +981,7 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   kaydederken dosyayı önce boşaltır ve kaydın ortasında pencere tabana
   çakmamalı. Kaydettiğiniz anda ekrandaki tema kalır, açılışta görünüme uyan
   gömülü tema gelir; ikisinde de uyarı çıkar.
-- Tanınmayan anahtar sessizce yoksayılır. Sonraki sürümlerin kalan durum
-  rolü (uyarı) bu yüzden bugünden yazılabilir.
+- Tanınmayan anahtar sessizce yoksayılır.
 - **Sönük metin** (SGR 2) iki yoldan gelir. Varsayılan ön plan sönükse
   temanın `dim` rengi kullanılır. Adlı ve 256 renkli metnin sönüğü ise bir
   kuraldır: renk temanın `background`'una doğru üçte bir yol alır — koyu
@@ -940,7 +996,8 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   `search_match` ile `search_current` için: yazılmazlarsa arama vurgusu koyu
   temanın koyu sıcak tonlarıyla (`#3a3212`, `#503a0c`) gelir. `info`
   yazılmazsa uzak oturumun host'u ve üst çizgisi koyu temanın camgöbeğiyle
-  (`#79b3b3`) çizilir.
+  (`#79b3b3`), `warning` yazılmazsa `staging` işaretli host koyu temanın
+  sarısıyla (`#d6b16a`) çizilir.
 
 ### Gömülü `bateri`
 
@@ -958,6 +1015,7 @@ search_current = "#503a0c"
 success = "#8bb58b"
 error = "#d16d6a"
 info = "#79b3b3"
+warning = "#d6b16a"
 
 [ansi]
 black = "#22252b"
@@ -996,6 +1054,7 @@ search_current = "#fee29a"
 success = "#3b7a3b"
 error = "#b5423d"
 info = "#23787f"
+warning = "#8f6a00"
 
 [ansi]
 black = "#2b2e35"

@@ -13,6 +13,8 @@
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
+use crate::settings::HostMark;
+
 /// Çizim hedefinin uzayındaki renk: **lineer** RGBA.
 ///
 /// Newtype, çünkü simetrik hatanın yalnız yarısı temsil edilemezdi: `bt-gpu`
@@ -140,6 +142,14 @@ pub struct Theme {
     /// Zeminde okunur olmalı (3:1, `color::tests`): host bağlam satırında
     /// metin.
     pub info: u32,
+    /// Durum: uyarı. Bugün **staging** işaretli uzak host (037 Karar 3):
+    /// `⇄ host`, dock'un üst saç çizgisi ve sekmenin noktası.
+    ///
+    /// Değeri temanın kendi ANSI sarısı (`info`'nun camgöbeği emsali).
+    /// [`Self::cursor`] altın ve paletin sarısından bilerek ayrık, yani bu rol
+    /// imleçle karışmıyor. Zeminde okunur olmalı (3:1, `color::tests`):
+    /// host bağlam satırında metin.
+    pub warning: u32,
     /// 16 ANSI rengi: siyah, kırmızı, yeşil, sarı, mavi, macenta, camgöbeği,
     /// beyaz, sonra aynı sırada parlak sekizlisi.
     pub ansi: [u32; 16],
@@ -201,6 +211,8 @@ impl Theme {
         // Kendi temasının ANSI camgöbeği (036 Karar 6), `success`/`error`'ın
         // paletin kendi renkleri olmasıyla aynı emsal.
         info: 0x79b3b3,
+        // Kendi temasının ANSI sarısı (037 Karar 3).
+        warning: 0xd6b16a,
         ansi: [
             0x22252b, 0xd16d6a, 0x8bb58b, 0xd6b16a, // siyah   kırmızı  yeşil    sarı
             0x7a9cc6, 0xb08ec0, 0x79b3b3, 0xc8c9cc, // mavi    macenta  camgöbeği beyaz
@@ -256,6 +268,8 @@ impl Theme {
         error: 0xb5423d,
         // Kendi temasının ANSI camgöbeği (036 Karar 6).
         info: 0x23787f,
+        // Kendi temasının ANSI sarısı (037 Karar 3).
+        warning: 0x8f6a00,
         ansi: [
             0x2b2e35, 0xb5423d, 0x3b7a3b, 0x8f6a00, // siyah   kırmızı  yeşil    sarı
             0x3a66a6, 0x8a4c9c, 0x23787f, 0xb9bbc1, // mavi    macenta  camgöbeği beyaz
@@ -420,6 +434,28 @@ impl Theme {
     /// çizgisi (036).
     pub const fn info_linear(&self) -> LinearRgba {
         linear_rgba(rgb(self.info))
+    }
+
+    /// Uyarı rolü, **lineer** RGBA — staging işaretli uzak host (037).
+    pub const fn warning_linear(&self) -> LinearRgba {
+        linear_rgba(rgb(self.warning))
+    }
+
+    /// Uzak host'un işaretinden renge **tek** yol (037 Karar 3), **lineer**:
+    /// production `error`, staging `warning`, development `success`,
+    /// işaretsiz `info`; doğrudan renk kendisi, sRGB'den lineerleşerek.
+    ///
+    /// Anlam ile renk burada birleşiyor, yani tema değişimi işareti
+    /// kendiliğinden taşıyor: `Session` yalnız işareti tutuyor, rengi kare
+    /// o karenin temasından çözüyor.
+    pub const fn mark_linear(&self, mark: HostMark) -> LinearRgba {
+        match mark {
+            HostMark::Production => self.error_linear(),
+            HostMark::Staging => self.warning_linear(),
+            HostMark::Development => self.success_linear(),
+            HostMark::None => self.info_linear(),
+            HostMark::Rgb(hex) => linear_rgba(rgb(hex)),
+        }
     }
 
     /// Paletin `index` numaralı rengi. Numaralandırma alacritty'nin
@@ -902,11 +938,34 @@ mod tests {
     #[test]
     fn the_info_role_reads_on_the_ground() {
         // 036 Karar 6: host bağlam satırında **metin**, yani ölçüt metnin
-        // ölçütü — zeminde 3:1.
+        // ölçütü — zeminde 3:1. 037'nin `warning`'i aynı yerde (staging
+        // işaretli host) ve aynı ölçütle.
         for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
-            let ratio = contrast(theme.info, theme.background);
-            assert!(ratio >= 3.0, "#{:06x} zeminde {ratio:.2}", theme.info);
+            for role in [theme.info, theme.warning] {
+                let ratio = contrast(role, theme.background);
+                assert!(ratio >= 3.0, "#{role:06x} zeminde {ratio:.2}");
+            }
         }
+    }
+
+    #[test]
+    fn a_host_mark_takes_its_role_color() {
+        // 037 Karar 3: anlam → rol; doğrudan renk sRGB'den lineerleşiyor.
+        let theme = Theme::BATERI;
+        assert_eq!(
+            theme.mark_linear(HostMark::Production),
+            theme.error_linear()
+        );
+        assert_eq!(theme.mark_linear(HostMark::Staging), theme.warning_linear());
+        assert_eq!(
+            theme.mark_linear(HostMark::Development),
+            theme.success_linear()
+        );
+        assert_eq!(theme.mark_linear(HostMark::None), theme.info_linear());
+        assert_eq!(
+            theme.mark_linear(HostMark::Rgb(0xc678dd)),
+            LinearRgba::from_srgb(0xc6, 0x78, 0xdd)
+        );
     }
 
     #[test]

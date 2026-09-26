@@ -101,6 +101,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::dock::{self, DockPoint};
 use crate::session::{CellHalf, SelectKind};
+use crate::settings::{HostMark, HostRule};
 
 /// Kabuğun akışa bastığı tek bir OSC 133 işareti.
 ///
@@ -431,8 +432,8 @@ pub struct DockContext {
     /// dal yerine kısa SHA — kabuk hangisi olduğunu söylemiyor, yalnız
     /// gösterilecek adı gönderiyor.
     pub branch: String,
-    /// Uzak oturumun host'u, **kullanıcının yazdığı gibi** (`prod`,
-    /// `deploy@10.0.0.5`); uzak oturum yoksa `None` (036).
+    /// Uzak oturumun hedefi (037 Karar 1: host, tür, yeniden koşturulacak
+    /// argv ve satırı); uzak oturum yoksa `None` (036).
     ///
     /// Yazarı `bt-shell`'in süreç tablosu yoklaması
     /// ([`crate::Session::set_remote`]); `C`, `D` ve `A`'da kendiliğinden
@@ -440,7 +441,13 @@ pub struct DockContext {
     /// bağlamı kilidin altında `clone_from` ile alıyor ve çizimi kilitten
     /// sonra yapıyor: `ShellLog`'un kendi alanı olsaydı ya kare başına bir
     /// `String` ayırmak ya da kilidi çizim boyunca tutmak gerekirdi.
-    pub remote: Option<String>,
+    pub remote: Option<RemoteTarget>,
+    /// Etkin uzak host'un **çözülmüş** işareti (037 Karar 2); yalnız
+    /// [`Self::remote`] doluyken anlamlı, yerelde [`HostMark::None`].
+    ///
+    /// Desen burada değil `ShellLog`'da ve çözüm iki kenarda (uzak durumun
+    /// ve listenin değişimi): kare yolu desen görmüyor, yalnız bunu okuyor.
+    pub remote_mark: HostMark,
     /// Uzak tarafın OSC 7 dizini (036 Karar 4); gelmediyse boş. **Yalnız
     /// [`Self::remote`] doluyken okunuyor** — etkin değilken de yazılıyor
     /// (yabancı yetkili OSC 7), yoklama OSC 7'den sonra sonuçlanabilsin diye.
@@ -459,25 +466,87 @@ impl Clone for DockContext {
         self.cwd.push_str(&source.cwd);
         self.branch.clear();
         self.branch.push_str(&source.branch);
-        // Kapasite korunuyor: ayırma yalnız uzak oturumun **kenarında**.
-        match (&mut self.remote, &source.remote) {
-            (Some(host), Some(from)) => {
-                host.clear();
-                host.push_str(from);
-            }
-            (host, from) => host.clone_from(from),
-        }
+        // Kapasite korunuyor: ayırma yalnız uzak oturumun **kenarında**
+        // (`Option::clone_from` `Some`/`Some`'da `RemoteTarget::clone_from`'a
+        // iniyor).
+        self.remote.clone_from(&source.remote);
+        self.remote_mark = source.remote_mark;
         self.remote_cwd.clear();
         self.remote_cwd.push_str(&source.remote_cwd);
     }
 }
 
 impl DockContext {
+    /// Uzak oturumun host'u; yerelde `None`.
+    pub fn remote_host(&self) -> Option<&str> {
+        self.remote.as_ref().map(|target| target.host.as_str())
+    }
+
     /// Uzak durumu siler; **başlığın girdisi değiştiyse** (host vardı)
     /// `true`. Uzak yuva da gidiyor: bir sonraki oturumun dizini değil.
     fn clear_remote(&mut self) -> bool {
         self.remote_cwd.clear();
+        self.remote_mark = HostMark::None;
         self.remote.take().is_some()
+    }
+}
+
+/// Uzak oturumun türü (037 Karar 1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteKind {
+    #[default]
+    Ssh,
+    Mosh,
+}
+
+/// Uzak oturumun hedefi — yoklamanın bulduğu, bütün olarak (037 Karar 1).
+///
+/// ⌘T ve yeniden bağlanma aynı komutu **yeniden koşturuyor**: host tek
+/// başına yetmiyor (port, `-i`, `-J` olmadan ikinci bağlantı kurulamaz).
+/// `bt-core` pid ya da `libc` görmüyor, taşınan şey dizgi; kaçırma kuralı da
+/// `bt-shell`'in (`quote`), burada yalnız sonucu ([`Self::line`]) duruyor.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RemoteTarget {
+    /// Kullanıcının yazdığı gibi (`prod`, `deploy@10.0.0.5`); `ssh://`
+    /// şeması ve port atılmış (036 Karar 3).
+    pub host: String,
+    pub kind: RemoteKind,
+    /// Yeniden koşturulacak argv — ssh'ta yerel yönlendirmeler (`-L -R -D`),
+    /// `-M` ve `-f` ayıklanmış; mosh'ta `mosh` + betiğin argümanları.
+    pub argv: Vec<String>,
+    /// [`Self::argv`]'nin kabuk için kaçırılmış, okunur satırı.
+    pub line: String,
+}
+
+#[cfg(test)]
+impl RemoteTarget {
+    /// Sınamaların hedefi: `ssh {host}`.
+    pub(crate) fn ssh(host: &str) -> Self {
+        Self {
+            host: host.to_owned(),
+            kind: RemoteKind::Ssh,
+            argv: vec!["ssh".to_owned(), host.to_owned()],
+            line: format!("ssh {host}"),
+        }
+    }
+}
+
+impl Clone for RemoteTarget {
+    fn clone(&self) -> Self {
+        let mut fresh = Self::default();
+        fresh.clone_from(self);
+        fresh
+    }
+
+    /// Kare yolu bağlamı her karede `clone_from` ile alıyor: türetilmiş
+    /// `Clone`'un varsayılanı (`*self = source.clone()`) her karede argv'yi
+    /// ve iki dizgiyi yeniden ayırırdı. `Vec<String>::clone_from` öğelerin
+    /// kapasitesini koruyor.
+    fn clone_from(&mut self, source: &Self) {
+        self.host.clone_from(&source.host);
+        self.kind = source.kind;
+        self.argv.clone_from(&source.argv);
+        self.line.clone_from(&source.line);
     }
 }
 
@@ -964,6 +1033,9 @@ pub(crate) struct ShellLog {
     /// Dock'un bağlam satırı: dizin ve dal. Aynanın **yanında**, içinde değil
     /// ([`DockContext`]); aynı kilit, ayrı ömür.
     pub(crate) context: DockContext,
+    /// `[remote] hosts`'un desen listesi (037 Karar 2); uzak host'un işareti
+    /// ([`DockContext::remote_mark`]) bundan, iki kenarda çözülüyor.
+    pub(crate) host_rules: Vec<HostRule>,
     /// Dock'un fareyle seçimi; `None` → seçim yok. Aynanın **yanında**
     /// ([`DockSelection`]'ın doc'u) ve aynı kilidin altında: `BUFFER`
     /// değişince onu silen yazıcı (okuyucu thread) ile aralığı okuyan kare
@@ -1273,6 +1345,7 @@ impl ShellLog {
             blocks: BlockLog::new(scrollback),
             dock: DockState::default(),
             context: DockContext::default(),
+            host_rules: Vec::new(),
             dock_selection: None,
             dock_scroll: None,
             dock_editable: false,
@@ -1509,22 +1582,48 @@ impl ShellLog {
     /// tablosundan, yani kullanıcının yazdığı argv'den geliyor ve satır sonu
     /// ya da ESC pencere başlığına ve bağlam satırına (kutu olarak) giderdi.
     /// Yanlışın yönü güvenli: gösterge çıkmıyor, yanlış bir ad çizilmiyor.
-    pub(crate) fn set_remote(&mut self, host: Option<&str>) -> bool {
-        let host = host.filter(|host| !host.is_empty() && !host.chars().any(char::is_control));
-        if self.context.remote.as_deref() == host {
-            return false;
-        }
-        match host {
-            Some(host) => {
-                let slot = self.context.remote.get_or_insert_with(String::new);
-                slot.clear();
-                slot.push_str(host);
+    ///
+    /// Hedef bütün olarak yazılıyor (037 Karar 1) ve işaret burada, desen
+    /// listesinden ([`Self::host_rules`]) çözülüyor; dönüş yine yalnız
+    /// **host**'un değişimi — başlığın girdisi o.
+    pub(crate) fn set_remote(&mut self, target: Option<&RemoteTarget>) -> bool {
+        let target = target
+            .filter(|target| !target.host.is_empty() && !target.host.chars().any(char::is_control));
+        let changed = self.context.remote_host() != target.map(|target| target.host.as_str());
+        match target {
+            Some(target) => {
+                match &mut self.context.remote {
+                    Some(slot) => slot.clone_from(target),
+                    slot => *slot = Some(target.clone()),
+                }
+                self.context.remote_mark =
+                    crate::settings::host_mark(&self.host_rules, &target.host);
             }
             // Uzak yuva kalıyor: yoklama "yerel" dediyse zaten okunmuyor ve
             // `C`/`D`/`A` onu siliyor.
-            None => self.context.remote = None,
+            None => {
+                self.context.remote = None;
+                self.context.remote_mark = HostMark::None;
+            }
         }
-        true
+        changed
+    }
+
+    /// Host işaretlerinin desen listesini yazar ve etkin uzak host'un
+    /// işaretini yeniden çözer (037 Karar 2); **işaret değiştiyse** `true`.
+    /// Aynı liste no-op.
+    pub(crate) fn set_host_rules(&mut self, rules: &[HostRule]) -> bool {
+        if self.host_rules == rules {
+            return false;
+        }
+        self.host_rules = rules.to_vec();
+        let Some(host) = self.context.remote_host() else {
+            return false;
+        };
+        let mark = crate::settings::host_mark(&self.host_rules, host);
+        let changed = mark != self.context.remote_mark;
+        self.context.remote_mark = mark;
+        changed
     }
 
     /// Devrin ham cevabını damgalar; **değişmediyse damga kıpırdamaz**.
@@ -4146,7 +4245,7 @@ mod tests {
         let now = Instant::now();
         assert_eq!(log.caret(now).home, CaretHome::Dock, "tutma sürüyor");
 
-        assert!(log.set_remote(Some("prod")));
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         let remote = log.caret(now);
         assert_eq!(remote.home, CaretHome::Grid, "uzakta caret ızgarada");
         assert_eq!(remote.hold_left, None, "çevrilmeyen cevap kare istemez");
@@ -5566,12 +5665,12 @@ mod tests {
     #[test]
     fn the_second_command_start_keeps_the_remote_host() {
         let mut log = running_log();
-        assert!(log.set_remote(Some("prod")));
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         // Komut ortasındaki ikinci `C` uzak durumu silmiyor: yoklama `D`'ye
         // kadar kilitli ve gösterge geri gelmezdi.
         let outcome = log.apply(Mark::CommandStart);
         assert_eq!(outcome, ScanOutcome::default());
-        assert_eq!(log.context.remote.as_deref(), Some("prod"));
+        assert_eq!(log.context.remote_host(), Some("prod"));
     }
 
     #[test]
@@ -5584,7 +5683,7 @@ mod tests {
             Mark::PromptStart { id: Some(2) },
         ] {
             let mut log = running_log();
-            assert!(log.set_remote(Some("prod")));
+            assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
             log.apply_scan_answering(foreign_cwd("/srv"), 0);
             assert_eq!(log.context.remote_cwd, "/srv");
             let outcome = log.apply(mark);
@@ -5604,7 +5703,7 @@ mod tests {
         let mut log = running_log();
         let command = log.running_command();
         assert!(command.is_some());
-        assert!(log.set_remote(Some("prod")));
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         for mark in [
             Mark::PromptStart { id: None },
             Mark::PromptEnd,
@@ -5615,7 +5714,7 @@ mod tests {
             },
         ] {
             assert_eq!(log.apply(mark), ScanOutcome::default(), "{mark:?}");
-            assert_eq!(log.context.remote.as_deref(), Some("prod"), "{mark:?}");
+            assert_eq!(log.context.remote_host(), Some("prod"), "{mark:?}");
             assert_eq!(log.running_command(), command, "{mark:?}");
         }
         // Bizim `D`'miz komutu bitiriyor ve uzak durumu siliyor.
@@ -5638,7 +5737,7 @@ mod tests {
         log.apply(Mark::PromptStart { id: None });
         log.apply(Mark::PromptEnd);
         assert_eq!(log.running_command(), command);
-        assert!(log.set_remote(Some("prod")));
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         log.apply(Mark::CommandEnd {
             exit: Some(0),
             id: Some(1),
@@ -5705,7 +5804,7 @@ mod tests {
         );
         // Uzak etkinken **boş yetki de** uzak yuvaya: ssh'ın arkasında yerel
         // kabuk bloklu.
-        assert!(log.set_remote(Some("prod")));
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
         let outcome = log.apply_scan_answering(local_cwd("/home/deploy"), 0);
         assert!(!outcome.title);
         assert_eq!(
@@ -5718,14 +5817,77 @@ mod tests {
     fn set_remote_reports_only_a_change() {
         let mut log = running_log();
         assert!(!log.set_remote(None), "yok → yok değişim değil");
-        assert!(!log.set_remote(Some("")), "boş host uzak değil");
-        assert!(!log.set_remote(Some("prod\n")), "kontrol karakteri");
-        assert!(!log.set_remote(Some("\u{1b}[31mprod")), "ESC");
-        assert!(log.set_remote(Some("prod")));
-        assert!(!log.set_remote(Some("prod")));
-        assert!(log.set_remote(Some("deploy@10.0.0.5")));
-        assert_eq!(log.context.remote.as_deref(), Some("deploy@10.0.0.5"));
+        assert!(
+            !log.set_remote(Some(&RemoteTarget::ssh(""))),
+            "boş host uzak değil"
+        );
+        assert!(
+            !log.set_remote(Some(&RemoteTarget::ssh("prod\n"))),
+            "kontrol karakteri"
+        );
+        assert!(
+            !log.set_remote(Some(&RemoteTarget::ssh("\u{1b}[31mprod"))),
+            "ESC"
+        );
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        assert!(!log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("deploy@10.0.0.5"))));
+        assert_eq!(log.context.remote_host(), Some("deploy@10.0.0.5"));
         assert!(log.set_remote(None));
         assert_eq!(log.context.remote, None);
+    }
+
+    fn rule(pattern: &str, mark: HostMark) -> HostRule {
+        HostRule {
+            pattern: pattern.to_owned(),
+            mark,
+        }
+    }
+
+    #[test]
+    fn the_remote_target_is_kept_whole_and_its_mark_resolved() {
+        // 037 Karar 1, 2: hedef bütün olarak duruyor; işaret `set_remote`'ta
+        // ve listenin değişiminde çözülüyor, `C`/`D`/`A` onu da siliyor.
+        let mut log = running_log();
+        assert!(!log.set_host_rules(&[rule("prod-*", HostMark::Production)]));
+        let target = RemoteTarget {
+            host: "deploy@prod-web-1".to_owned(),
+            kind: RemoteKind::Ssh,
+            argv: ["ssh", "-p", "2222", "deploy@prod-web-1"]
+                .map(str::to_owned)
+                .to_vec(),
+            line: "ssh -p 2222 deploy@prod-web-1".to_owned(),
+        };
+        assert!(log.set_remote(Some(&target)));
+        assert_eq!(log.context.remote.as_ref(), Some(&target));
+        assert_eq!(log.context.remote_mark, HostMark::Production);
+
+        // Aynı host, başka argv: hedef yazılıyor ama başlığın girdisi aynı.
+        let other = RemoteTarget {
+            argv: ["ssh", "deploy@prod-web-1"].map(str::to_owned).to_vec(),
+            line: "ssh deploy@prod-web-1".to_owned(),
+            ..target.clone()
+        };
+        assert!(!log.set_remote(Some(&other)));
+        assert_eq!(log.context.remote.as_ref(), Some(&other));
+
+        // Liste değişimi işareti yeniden çözüyor; aynı liste no-op, işareti
+        // oynatmayan liste `false`.
+        let staging = [rule("*", HostMark::Staging)];
+        assert!(log.set_host_rules(&staging));
+        assert_eq!(log.context.remote_mark, HostMark::Staging);
+        assert!(!log.set_host_rules(&staging));
+        assert!(!log.set_host_rules(&[rule("prod-web-?", HostMark::Staging)]));
+        assert!(log.set_host_rules(&[]));
+        assert_eq!(log.context.remote_mark, HostMark::None);
+
+        // Bizim `D`'miz uzak durumu işaretiyle birlikte siliyor.
+        assert!(log.set_host_rules(&staging));
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert_eq!(log.context.remote, None);
+        assert_eq!(log.context.remote_mark, HostMark::None);
     }
 }

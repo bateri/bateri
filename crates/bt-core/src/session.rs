@@ -78,10 +78,10 @@ use crate::search::{
     self, SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns,
     SearchSlot, SearchStatus,
 };
-use crate::settings::{CaretShape, CursorBlink};
+use crate::settings::{CaretShape, CursorBlink, HostRule};
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection, DockState,
-    DockStatus, Precision, Scanner, ShellLog, ShellState, Stripe,
+    DockStatus, Precision, RemoteTarget, Scanner, ShellLog, ShellState, Stripe,
 };
 use crate::wake::Wake;
 
@@ -6052,7 +6052,10 @@ impl Session {
         let osc = lock(&self.adapter.0.title).clone();
         let (cwd, remote) = {
             let log = lock(&self.shell);
-            (log.context.cwd.clone(), log.context.remote.clone())
+            (
+                log.context.cwd.clone(),
+                log.context.remote_host().map(str::to_owned),
+            )
         };
         crate::shell::title_of(
             osc.as_deref(),
@@ -6072,8 +6075,11 @@ impl Session {
         lock(&self.shell).running_command()
     }
 
-    /// Uzak oturumun host'unu bildirir (`None` = yerel); başlığın girdisi
+    /// Uzak oturumun hedefini bildirir (`None` = yerel; 037 Karar 1: host,
+    /// tür, argv ve satır bütün olarak); başlığın girdisi (host)
     /// **değiştiyse** `true` ve çağıran başlığı tazeler (036 Karar 1, 5).
+    /// Host'un işareti burada, desen listesinden çözülüyor
+    /// ([`Session::set_host_marks`]).
     ///
     /// **Bayat cevap kapısı:** `command` [`Session::running_command`]'ın
     /// verdiği nesil; tutmuyorsa ya da komut koşmuyorsa çağrı no-op —
@@ -6084,11 +6090,34 @@ impl Session {
     /// Değiştiyse kare ister ([`Session::set_theme`] örüntüsü: bağlam satırı
     /// ve dock'un üst çizgisi değişti, alacritty'nin hasarı bunu bilmiyor).
     /// Yaprak kilit `request_frame`'den önce düşüyor; `Term`'e dokunulmuyor.
-    pub fn set_remote(&self, command: u64, host: Option<&str>) -> bool {
-        let changed = {
+    pub fn set_remote(&self, command: u64, target: Option<&RemoteTarget>) -> bool {
+        let (changed, repaint) = {
             let mut log = lock(&self.shell);
-            log.running_command() == Some(command) && log.set_remote(host)
+            if log.running_command() == Some(command) {
+                let mark = log.context.remote_mark;
+                let changed = log.set_remote(target);
+                (changed, changed || mark != log.context.remote_mark)
+            } else {
+                (false, false)
+            }
         };
+        if repaint {
+            self.request_frame();
+        }
+        changed
+    }
+
+    /// `[remote] hosts`'un desen listesini yazar ve etkin uzak host'un
+    /// işaretini yeniden çözer (037 Karar 2) — ayar dosyasının açılışı ve
+    /// canlı yenilemesi. **İşaret değiştiyse** `true` ve kare ister
+    /// ([`Session::set_theme`] emsali: dock'un iki rengi değişti, alacritty'nin
+    /// hasarı bunu bilmiyor); aynı liste ya da işareti oynatmayan liste
+    /// no-op. Dönüş görünen bir şeyin değiştiğini söylüyor, listenin değil.
+    ///
+    /// Yaprak kilit, `request_frame`'den önce düşüyor; `Term`'e dokunmuyor.
+    /// Kare yolu desen görmüyor, yalnız çözülmüş işareti okuyor.
+    pub fn set_host_marks(&self, rules: &[HostRule]) -> bool {
+        let changed = lock(&self.shell).set_host_rules(rules);
         if changed {
             self.request_frame();
         }
@@ -7548,6 +7577,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::settings::HostMark;
     use crate::shell::{DockContext, DockFault, DockState, DockStatus, ShellPhase};
 
     /// Sınamaların teması: gömülü koyu tema, `bt-shell`'in süreli koşusu gibi.
@@ -11654,7 +11684,7 @@ mod tests {
         session.write(b"\n");
         assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
         let command = session.running_command().expect("`C`'den sonra koşuyor");
-        assert!(session.set_remote(command, Some("prod")));
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
 
         let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
         assert_eq!(cursor.input_rows, 0, "uzakta giriş satırı yok: {cursor:?}");
@@ -11685,6 +11715,51 @@ mod tests {
             cursor.content_rows == cursor.rows
         });
         assert_eq!(cursor.input_rows, 1, "alternatif ekranda bugünkü değer");
+    }
+
+    #[test]
+    fn a_marked_remote_host_paints_the_dock_edge_in_its_color() {
+        // 037 Karar 2, 3: işaret `set_remote`'ta ve `set_host_marks`'ta
+        // çözülüyor; dock'un üst çizgisi işaretin renginde, işaretsizde
+        // bugünkü `info`. Değişen işaret kare istiyor, aynı liste istemiyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}echo{}'; read _; printf '\\033]133;C\\007'; sleep 5",
+                anchored_prompt(1),
+                mirror("ZWNobw==", 4),
+            ),
+            Arc::clone(&wake),
+        );
+        wait_mirror(&session, DockStatus::Live);
+        assert!(
+            !session.set_host_marks(&[HostRule {
+                pattern: "prod-*".to_owned(),
+                mark: HostMark::Staging,
+            }]),
+            "yerelde görünen bir şey değişmiyor"
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("`C`'den sonra koşuyor");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("deploy@prod-web"))));
+        let theme = session.theme();
+        assert_eq!(draw_dock(&session).0.edge, theme.warning_linear());
+
+        let wakes = wake.state.lock().unwrap().wakes;
+        let production = [HostRule {
+            pattern: "prod-web".to_owned(),
+            mark: HostMark::Production,
+        }];
+        assert!(session.set_host_marks(&production));
+        assert!(
+            wake.state.lock().unwrap().wakes > wakes,
+            "işaret değişimi kare istemeli"
+        );
+        assert_eq!(draw_dock(&session).0.edge, theme.error_linear());
+        assert!(!session.set_host_marks(&production), "aynı liste no-op");
+        assert!(session.set_host_marks(&[]));
+        assert_eq!(draw_dock(&session).0.edge, theme.info_linear());
     }
 
     #[test]
@@ -15625,7 +15700,7 @@ e\\314\\201.'; sleep 5";
         session.write(b"\n");
         assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
         let first = session.running_command().expect("`C`'den sonra koşuyor");
-        assert!(session.set_remote(first, Some("prod")));
+        assert!(session.set_remote(first, Some(&RemoteTarget::ssh("prod"))));
         assert_eq!(session.title(), "⇄ prod");
         // Dock'suz pencerede uzak oturum giriş satırı sayısını oynatmıyor:
         // bant yok (036 R5.1).
@@ -15639,7 +15714,7 @@ e\\314\\201.'; sleep 5";
         // `D` uzak durumu sildi ve başlığa haber verdi.
         assert_eq!(session.title(), "bateri");
         // Bayat nesil: ilk komutun cevabı ikinciye yazılmıyor.
-        assert!(!session.set_remote(first, Some("prod")));
+        assert!(!session.set_remote(first, Some(&RemoteTarget::ssh("prod"))));
         assert_eq!(session.title(), "bateri");
         // İkinci `C` haber doğurmadı: sayı ikide duruyor.
         std::thread::sleep(Duration::from_millis(200));

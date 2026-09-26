@@ -43,7 +43,7 @@ impl Theme {
     ///
     /// Roller (`background`, `foreground`, `dim`, `accent`, `cursor`,
     /// `selection`, `search_match`, `search_current`, `success`, `error`,
-    /// `info`) kökte, 16 renk
+    /// `info`, `warning`) kökte, 16 renk
     /// `[ansi]` bölümünde; renk `"#rrggbb"` (büyük harf de olur). `Err` yalnız
     /// geçersiz TOML'da, ayar dosyasındaki anlamıyla.
     ///
@@ -68,6 +68,7 @@ impl Theme {
             ("success", &mut theme.success),
             ("error", &mut theme.error),
             ("info", &mut theme.info),
+            ("warning", &mut theme.warning),
         ];
         for (key, slot) in roles {
             read_color(text, root, key, key, slot, &mut diagnostics);
@@ -116,7 +117,7 @@ fn read_color(
 
 /// `"#rrggbb"` → `0xRRGGBB`. Kısa (`#rgb`) ve alfalı (`#rrggbbaa`) biçim yok:
 /// tek biçim, tek tanı.
-fn hex_color(value: &str) -> Option<u32> {
+pub(crate) fn hex_color(value: &str) -> Option<u32> {
     let digits = value.strip_prefix('#')?;
     // `from_str_radix` baştaki `+`'yı kabul ediyor; önce altı hane mi bak.
     if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -144,6 +145,7 @@ mod tests {
         success: 0x000005,
         error: 0x000006,
         info: 0x00000b,
+        warning: 0x00000c,
         ansi: [
             0x000010, 0x000011, 0x000012, 0x000013, 0x000014, 0x000015, 0x000016, 0x000017,
             0x000018, 0x000019, 0x00001a, 0x00001b, 0x00001c, 0x00001d, 0x00001e, 0x00001f,
@@ -289,6 +291,21 @@ mod tests {
         );
         let inherited = clean("background = \"#ffffff\"\n", &Theme::BATERI);
         assert_eq!(inherited.info, Theme::BATERI.info);
+    }
+
+    #[test]
+    fn the_warning_role_is_read_and_inherited() {
+        // 037 Karar 3: `info`'nun kuralı — opsiyonel, eksikse tabandan.
+        let theme = clean("warning = \"#0a0b0c\"\n", &SENTINEL);
+        assert_eq!(
+            theme,
+            Theme {
+                warning: 0x0a0b0c,
+                ..SENTINEL
+            }
+        );
+        let inherited = clean("background = \"#ffffff\"\n", &Theme::BATERI);
+        assert_eq!(inherited.warning, Theme::BATERI.warning);
     }
 
     #[test]

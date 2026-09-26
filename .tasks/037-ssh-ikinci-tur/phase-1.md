@@ -73,19 +73,56 @@ _Requirements: R1.1, R1.2, R2.1, R2.2, R2.3, R2.4, R3.1, R3.2_
 
 ## Checklist
 
-- [ ] `jobs`: hedef tipi, argv ayıklama, mosh `-#`
-- [ ] Yeniden koşturma satırının kaçırması (`quote.rs`)
-- [ ] `probe_remote` satır üretimi; ayarın oturumlara canlı gidişi
-- [ ] `DockContext` hedef + işaret; `set_remote` imzası; `set_host_marks`
-- [ ] `[remote] hosts` ayrıştırma, eşleştirici, `changes`
-- [ ] `warning` rolü ve bekçisi; işaret → renk
-- [ ] Dock'un iki rengi
-- [ ] `docs/AYARLAR.md`
-- [ ] Test: yukarıdaki Kabul maddeleri
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] `jobs`: hedef tipi, argv ayıklama, mosh `-#`
+- [x] Yeniden koşturma satırının kaçırması (`quote.rs`)
+- [x] `probe_remote` satır üretimi; ayarın oturumlara canlı gidişi
+- [x] `DockContext` hedef + işaret; `set_remote` imzası; `set_host_marks`
+- [x] `[remote] hosts` ayrıştırma, eşleştirici, `changes`
+- [x] `warning` rolü ve bekçisi; işaret → renk
+- [x] Dock'un iki rengi
+- [x] `docs/AYARLAR.md`
+- [x] Test: yukarıdaki Kabul maddeleri
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
 - [ ] Gözle kontrol (devir mesajının cümlesi): `settings.toml`'a
   `[remote] hosts = [{ host = "<gerçek host>", mark = "production" }]` yaz ve
   kaydet, `ssh <host>` — **dock**'ta `⇄ host` ve üst çizgi kırmızı (`error`),
   `staging` sarı, `development` yeşil; deseni silince camgöbeğine dönüyor
   (ssh sürerken, kayıt anında). Açık temada da okunuyor.
+
+## Uygulama Notları
+
+- **Uzak yuva iki alan:** `DockContext::remote: Option<RemoteTarget>` ve
+  yanında `remote_mark: HostMark`; işaret `clear_remote`'ta sıfırlanıyor.
+  `RemoteTarget`'ın `Clone`'u elle (`clone_from` argv'nin ve iki dizginin
+  kapasitesini koruyor — kare yolu bağlamı her karede kopyalıyor). Host
+  okuyan yerler `DockContext::remote_host()`'tan.
+- **Desen listesi `ShellLog`'da** (`host_rules`), `Session`'da değil: çözüm
+  `set_remote` ile aynı yaprak kilitte. `Session::set_host_marks`'ın dönüşü
+  **görünen işaretin** değişimi (phase-2'nin sekme noktası onu tüketecek),
+  listenin değil; `set_remote` de host aynı kalıp işaret değişirse (liste
+  arada değişmişse) kare istiyor.
+- **`[remote] hosts` iki yazılışı da okuyor**: satır içi dizi ve
+  `[[remote.hosts]]` bölüm dizisi. Tablo olmayan öğe, `host`'suz ya da boş
+  `host`'lu girdi, bilinmeyen/eksik `mark` anahtarın tamamını reddediyor;
+  tanı ilk bozuk girdinin satırında. `theme::hex_color` `pub(crate)` oldu
+  (doğrudan renk aynı ayrıştırıcıdan).
+- **Şablon `r##"…"##`**: `"#c678dd"` örneği `r#"` sınırlayıcısını kapatıyordu.
+  Şablona `[remote] hosts = []` ve yorumlu örnek girdi; `docs/AYARLAR.md`'ye
+  `[remote]` bölümü, `warning` satırı ve iki gömülü tema bloğuna `warning`.
+- **mosh argv'si:** betik görüldüyse `mosh` + betiğin argümanları; yalnız
+  `mosh-client` görüldüyse `-#` satırı **boşlukla bölünüyor** — betik satırı
+  tırnaksız birleştirdiği için boşluklu bir değer (`--ssh="ssh -i k"`) geri
+  kurulamıyor (036'nın host sınırıyla aynı kök). mosh.pl sonunda
+  `mosh-client`'a `exec` ettiği için bu kol mosh'un olağan hâli.
+- `command_line` boş argümanı `''` yazıyor (yoksa satırdan düşerdi);
+  kontrol karakterli argümanı `$'…'`'e alıyor (`/code-review` bulgusu: `\` +
+  satır sonu satır devamı olup argümanı birleştirirdi).
+- `jobs` sınamalarında `remote_of` artık yalnız host'a bakıyor (036'nın
+  sınamaları değişmeden); 037'ninkiler `target_of`/`probe_of`'la bütün hedefe.
+- `CLAUDE.md` bu phase'te güncellenmedi (R9 phase-5'in): "sekizi tüketiliyor"
+  ve ayar anahtarları listesi (`[remote] hosts` yok) şimdilik eski.
+- `make hepsi`'nin ilk koşusu `bt-shell` sınamalarında SIGSEGV ile düştü
+  (bilinen, 021/030/035'te kayıtlı ara sıra çökme); `bt-shell` üç kez ayrı ve
+  `make hepsi` bir kez daha yeşil.
+

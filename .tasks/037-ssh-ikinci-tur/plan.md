@@ -115,7 +115,7 @@ Finder damlası (uzak) ──▶ Karar 7: yükle (scp → uzak yolu yapıştır)
 
 | Phase | Durum |
 |-------|-------|
-| phase-1 | |
+| phase-1 | ✅ |
 | phase-2 | |
 | phase-3 | |
 | phase-4 | |
