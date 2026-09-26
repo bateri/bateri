@@ -122,6 +122,10 @@ objc2-app-kit = { workspace = true, features = [
 # phase-4) — `NSAnimationContext::setTimingFunction`'ın argümanı; yalnız
 # başlık bayrağı.
 objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMediaTimingFunction"] }
+# Yüklemenin bildirimi (037 phase-7): `UNUserNotificationCenter`. Yeni crate,
+# kullanıcı onaylı; bayrakların gerekçesi workspace manifest'inde, karar kaydı
+# .tasks/037-ssh-ikinci-tur/phase-7.md → Uygulama Notları.
+objc2-user-notifications = { workspace = true }
 # Ana kuyruk: `Wake::child_exit` okuyucu thread'de gelir ve `terminate:` ana
 # thread'in işidir. Grafta bt-gpu üzerinden zaten vardı; bu iki satır yeni
 # crate çekmez, `Cargo.lock`'a yalnız kenar ekler. Vnode kaynakları da buradan

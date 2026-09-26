@@ -108,11 +108,23 @@ Karar 7 → Kullanıcı kararı'nın **üstünde**; çelişirse bu kazanır.
   (`Upload failed` / `Connection to {host} lost. k of n uploaded.`).
 - **`1 finished file stays`**: tekilde fiil tekil (demo çoğulu tekilde de
   kullanıyordu).
-- **Bildirim `NSUserNotification`** (Foundation'ın varsayılan bayrak
-  setinde, yeni crate yok; `UserNotifications` ayrı bir crate ve bağımlılık
-  kararı). Kullanımdan kalkmış, `#[allow(deprecated)]` gerekçeli; paket kimliği
-  yoksa (`cargo run`) merkez `nil` döndüğü için çağrılmıyor. macOS 26'da
-  gerçekten görünüp görünmediği gözle kontrolde.
+- **Bildirim `UNUserNotificationCenter`** — karar kaydı: kullanıcı
+  `objc2-user-notifications` bağımlılığına **2026-09-27'de onay verdi**
+  (0.3.2, objc2 ailesinin graftaki nesli; varsayılan set kırpık, çünkü
+  `objc2-core-location`'ı çekiyordu — `Cargo.lock`'a yalnız bu paket ve
+  `bt-shell`'in kenarı girdi). **Reddedilen:** phase'in ilk hâli olan
+  `NSUserNotification` (Foundation'ın varsayılan setinde, yeni crate
+  istemiyordu) — macOS 11'den beri kullanımdan kalkmış ve macOS 26'da
+  göründüğü doğrulanmamıştı. İzin (`Alert`; ses yok, eski yol da ses
+  çalmıyordu) **ilk bildirimde** isteniyor ve bildirim cevabın bloğunda
+  kuruluyor; reddedilirse yükleme değişmiyor, yalnız bildirim yok. Delegate
+  kurulmuyor: `willPresentNotification`'ı olmayan merkez önde gelen bildirimi
+  susturuyor, yani "önde iken yok" teslim anında da geçerli. Paket kimliği
+  yoksa (`cargo run`, sınamalar, süreli koşu) merkez hiç çağrılmıyor —
+  `currentNotificationCenter` orada istisna atıyor. Lisans `Zlib OR
+  Apache-2.0 OR MIT`: `THIRD-PARTY-LICENSES.txt`/`Credits.html`'e bu commit'te
+  satır girmedi — objc2 ailesinin bildirimi `docs/YOL-HARITASI.md`'deki MIT
+  borcunun parçası. Gerekçeler `notify`'ın doc'unda.
 - **⌘. alternatif ekranda:** koddan doğrulandı — menü kısayolu
   `performKeyEquivalent:` ile `keyDown:`'dan önce yakalanıyor ve
   `validateMenuItem:`'ın `cancelUpload:` kapısı yalnız kuyruğa bakıyor.
