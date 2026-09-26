@@ -36,7 +36,7 @@
 | 032 | [cok-satirli-dock](032-cok-satirli-dock/) | 🟢 | 6 phase + kapı tamam — çok satırlı giriş dock'ta (sarma, `PREBUFFER`, büyüyen bant, iki eksenli yazım efektleri), blok işareti devam satırına oturmuyor |
 | 033 | [gecmiste-arama](033-gecmiste-arama/) | 🟢 | 5 phase + kapı tamam — ⌘F paneli, yazdıkça vurgu, bütün defterin "3 of 17" sayımı, ⏎/⌘G süzülen gezinme; panel gerçek pencerede henüz görülmedi |
 | 034 | [ekrani-temizle](034-ekrani-temizle/) | 🟢 | 2 phase + kapı tamam — ⌘K/⌥⌘K terminal tarafında (kabuğa bayt gitmez), ⌘Home/⌘End/⌘PgUp/⌘PgDn kaydırma ve ⌃⌘V Paste Escaped Text menüde; envanterin kalanı yol haritasında |
-| 035 | [grapheme-dizileri](035-grapheme-dizileri/) | 🔨 | bayrak, ZWJ, ten rengi ve VS16 dizileri tek glyph ve uygulamanın saydığı sütun sayısıyla (bayrak bugün iki kutu) |
+| 035 | [grapheme-dizileri](035-grapheme-dizileri/) | 🟢 | 5 phase + kapı tamam — bayrak, ZWJ, ten rengi ve VS16 dizileri üç yüzeyde tek glyph ve iki sütun, dock düzenlemesi kümeyi bölmüyor |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

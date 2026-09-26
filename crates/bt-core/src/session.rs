@@ -80,8 +80,8 @@ use crate::search::{
 };
 use crate::settings::{CaretShape, CursorBlink};
 use crate::shell::{
-    COUNTER_FLOOR, CaretHome, Counter, DockContext, DockSelection, DockState, DockStatus,
-    Precision, Scanner, ShellLog, ShellState, Stripe,
+    COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection, DockState,
+    DockStatus, Precision, Scanner, ShellLog, ShellState, Stripe,
 };
 use crate::wake::Wake;
 
@@ -713,7 +713,8 @@ pub struct SessionOptions {
     /// tazelik kapısının ayna yarısı. Açılışta bir kez okunuyor ve oturum
     /// boyunca sabit; ayrı ayrı açılabilseydi ızgara diziyi iki, dock dört
     /// sütun sayar ve bastırmanın aralığı ızgaradan ayrışırdı (032'nin "iki
-    /// aritmetik" belirtisi). Varsayılanı çizim hazır olana kadar kapalı.
+    /// aritmetik" belirtisi). Uygulamanın her penceresi açıyor (`bt-shell`
+    /// `window`); alan kalıyor, çünkü geri alma tek satır olmalı.
     pub cluster: bool,
 }
 
@@ -1665,16 +1666,26 @@ pub enum DockKey {
 /// olabilirdi; widget'ın `L` kemeri o hâli yakalar ama kemere hiç
 /// düşmemek daha iyi.
 struct DockEditLine {
+    /// `BUFFER`'ın kendisi: komutun beklenen sonucu ondan hesaplanıyor
+    /// ([`DockPrediction`]). Tuş başına bir kopya.
+    buffer: String,
     len: usize,
     caret: usize,
     /// `PREBUFFER`'ın karakter sayısı: seçimin uzayı `PREBUFFER ++ BUFFER`
     /// ([`dock::selectable`]), komutunki `BUFFER` — aradaki kaydırma.
     shift: usize,
     selection: Option<DockSelection>,
+    /// Satır aynadan mı (`true`) yoksa bekleyen komutun tahmininden mi.
+    /// ⇧←/⇧→ yalnız aynada: seçim aynanın metnine karşı kuruluyor.
+    fresh: bool,
     /// Caret'in solundaki ve sağındaki küme, `BUFFER`'da `[start, end)` —
     /// yalnız kümeleme açıkken ve birden çok kod noktalıysa (035 Karar 7):
     /// ⌫/← soldakini, ⌦/→ sağdakini bütün yürütüyor. Caret bir kümenin
-    /// **içindeyse** (ZLE oraya koyabiliyor) iki taraf da o küme.
+    /// **içindeyse** (ZLE oraya koyabiliyor) iki taraf da o küme. Satırda bir
+    /// **emoji** kümesi varsa tek kod noktalı komşu da komutla gidiyor
+    /// (phase-5): ZLE'ye giden tuş tahmin zincirini kırar ve aynadan hızlı
+    /// gelen tekrarı kapalı kapıdan ZLE'ye, yani kümenin ortasına düşürürdü
+    /// ([`DockPrediction`]).
     before: Option<(usize, usize)>,
     after: Option<(usize, usize)>,
 }
@@ -5700,26 +5711,59 @@ impl Session {
     }
 
     /// Kapı açıksa satırın o anki hâli; kapalıysa `None`. Tek kilit turu.
+    ///
+    /// Satırın iki kaynağı var: son girdiye cevap veren ayna ya da, ayna
+    /// yoldayken, son düzenleme komutunun beklenen sonucu
+    /// ([`DockPrediction`]; aynı nesil). Tahminde seçim yok — her gönderim
+    /// seçimi kaldırıyor ve arada fareyle kurulan seçim bayat aynanın
+    /// metnine karşı kuruldu: kapı kapanıyor.
     fn dock_edit_line(&self) -> Option<DockEditLine> {
         let generation = self.key_gen.load(Ordering::Acquire);
         let log = lock(&self.shell);
         let input = log.suppressed_input()?;
-        if !(log.dock_editable && input.insert_keymap && input.answers == generation) {
+        if !(log.dock_editable && input.insert_keymap) {
             return None;
         }
-        let caret = buffer_caret(&log.dock);
-        // Tek kod noktalı "küme" bugünkü yolun işi: yazım efektleri ve
-        // ZLE'nin kendi silmesi aynen kalsın.
+        let fresh = input.answers == generation;
+        let (buffer, caret, selection) = if fresh {
+            (
+                log.dock.buffer.as_str(),
+                buffer_caret(&log.dock),
+                log.dock_selection,
+            )
+        } else {
+            let pending = log
+                .dock_pending
+                .as_ref()
+                .filter(|p| p.generation == generation && log.dock_selection.is_none())?;
+            (pending.buffer.as_str(), pending.caret, None)
+        };
+        // Birden çok kod noktalı komşu küme komutla gidiyor (phase-4). Tek kod
+        // noktalı komşu yalnız **emoji kümesi** (iki sütunlu) taşıyan satırda:
+        // zincir orada kırılmamalı ([`DockEditLine::before`]). Ölçüt
+        // birleştirici değil emoji, çünkü NFD bir yol (`Masaüstü`, macOS'un
+        // dosya adları) satırı kümeli yapıp düz tuşları ZLE'nin
+        // bağlamalarından (autopair gibi eklentiler) koparırdı. Kalan
+        // satırda yazım efektleri ve ZLE'nin kendi silmesi aynen.
+        let emoji = log.dock.cluster && {
+            let mut found = false;
+            crate::cluster::Walk::new().run(buffer.chars(), |c| {
+                found |= c.end - c.start > 1 && c.width > 1;
+            });
+            found
+        };
         let span = |index: Option<usize>| {
             let index = index.filter(|_| log.dock.cluster)?;
-            dock::cluster_span(log.dock.buffer.chars(), index, true)
-                .filter(|(start, end)| end - start > 1)
+            dock::cluster_span(buffer.chars(), index, true)
+                .filter(|(start, end)| emoji || end - start > 1)
         };
         Some(DockEditLine {
-            len: log.dock.buffer.chars().count(),
+            buffer: buffer.to_owned(),
+            len: buffer.chars().count(),
             caret,
             shift: dock::prebuffer_chars(&log.dock),
-            selection: log.dock_selection,
+            selection,
+            fresh,
             before: span(caret.checked_sub(1)),
             after: span(Some(caret)),
         })
@@ -5727,9 +5771,29 @@ impl Session {
 
     /// Düzenleme komutunu kullanıcı girdisinin tek hunisinden gönderir: nesil
     /// ilerler (widget'ın aynası ona cevap olur), iki seçim de kalkar.
-    fn send_dock_edit(&self, start: usize, end: usize, len: usize) {
-        let bytes = dock_edit_command(start, end, len);
-        self.send_input(|_| bytes);
+    ///
+    /// Komutun beklenen sonucu gönderimin nesliyle damgalanıyor
+    /// ([`DockPrediction`]): ayna gelene kadar kapı ona bakıyor. Damga
+    /// gönderimden **sonra** ve yaprak kilidin ayrı turunda — `send_input`
+    /// o kilidi kendisi alıyor; araya giren tek yazıcı okuyucu thread ve o
+    /// yalnız aynayı tazeliyor, tahmin aynanın cevabına yenik düşüyor.
+    fn send_dock_edit(&self, line: &DockEditLine, start: usize, end: usize) {
+        let bytes = dock_edit_command(start, end, line.len);
+        let Some(generation) = self.send_input(|_| bytes) else {
+            return;
+        };
+        let buffer = line
+            .buffer
+            .chars()
+            .enumerate()
+            .filter(|&(index, _)| !(start..end).contains(&index))
+            .map(|(_, ch)| ch)
+            .collect();
+        lock(&self.shell).dock_pending = Some(DockPrediction {
+            generation,
+            buffer,
+            caret: start,
+        });
     }
 
     /// Edit ▸ Cut etkin mi: dock'ta boş olmayan bir seçim var **ve** kapı
@@ -5752,7 +5816,7 @@ impl Session {
         let Some((start, end)) = line.buffer_range() else {
             return false;
         };
-        self.send_dock_edit(start, end, line.len);
+        self.send_dock_edit(&line, start, end);
         true
     }
 
@@ -5783,7 +5847,7 @@ impl Session {
             return;
         };
         if index != line.caret {
-            self.send_dock_edit(index, index, line.len);
+            self.send_dock_edit(&line, index, index);
         }
     }
 
@@ -5805,10 +5869,13 @@ impl Session {
         let range = line.buffer_range();
         match (key, range) {
             (DockKey::Backspace | DockKey::Delete, Some((start, end))) => {
-                self.send_dock_edit(start, end, line.len);
+                self.send_dock_edit(&line, start, end);
             }
-            (DockKey::Left, Some((start, _))) => self.send_dock_edit(start, start, line.len),
-            (DockKey::Right, Some((_, end))) => self.send_dock_edit(end, end, line.len),
+            (DockKey::Left, Some((start, _))) => self.send_dock_edit(&line, start, start),
+            (DockKey::Right, Some((_, end))) => self.send_dock_edit(&line, end, end),
+            // Tahmin satırında ⇧←/⇧→ bugünkü yolundan (phase-5 öncesi kapalı
+            // kapının cevabı): seçim bayat aynanın metnine kurulamaz.
+            (DockKey::ShiftLeft | DockKey::ShiftRight, _) if !line.fresh => return false,
             (DockKey::ShiftLeft | DockKey::ShiftRight, _) => {
                 let forward = key == DockKey::ShiftRight;
                 let changed = {
@@ -5857,9 +5924,12 @@ impl Session {
             }
             // **Seçimsiz dört tuş kümeyi bütün yürütüyor** (035 Karar 7): ZLE
             // kod noktası kod noktası yürüyor ve `🇹🇷`'de ⌫ yalnız `🇷`'yi
-            // silerdi. Bitişik küme birden çok kod noktalıysa tuş widget'ın
-            // tek komutu oluyor (⌫/⌦ `[S,E)`, ←/→ `S == E`); değilse bugünkü
-            // yol — `self-insert`, yazım efektleri ve ZLE'nin silmesi aynen.
+            // silerdi. Satırda birden çok kod noktalı bir küme varsa tuş
+            // widget'ın tek komutu oluyor (⌫/⌦ `[S,E)`, ←/→ `S == E`) ve
+            // beklenen sonucu basılı tuşun tekrarına kapıyı açık tutuyor
+            // ([`DockPrediction`]); kümesiz satırda ve satırın ucunda bugünkü
+            // yol — `self-insert`, yazım efektleri, ZLE'nin silmesi ve
+            // sondaki →'nun öneriyi kabul etmesi aynen.
             (DockKey::Backspace | DockKey::Delete | DockKey::Left | DockKey::Right, None) => {
                 let span = match key {
                     DockKey::Backspace | DockKey::Left => line.before,
@@ -5869,9 +5939,9 @@ impl Session {
                     return false;
                 };
                 match key {
-                    DockKey::Left => self.send_dock_edit(start, start, line.len),
-                    DockKey::Right => self.send_dock_edit(end, end, line.len),
-                    _ => self.send_dock_edit(start, end, line.len),
+                    DockKey::Left => self.send_dock_edit(&line, start, start),
+                    DockKey::Right => self.send_dock_edit(&line, end, end),
+                    _ => self.send_dock_edit(&line, start, end),
                 }
             }
         }
@@ -6718,12 +6788,14 @@ impl Session {
     ///
     /// `bytes` kilit **altında** koşar ve `Session`'a dokunmamalı: `FairMutex`
     /// yeniden girilebilir değil, geri giren bir closure kendi kendini kilitler.
-    fn send_input(&self, bytes: impl FnOnce(TermMode) -> Vec<u8>) {
+    ///
+    /// Gönderimin doğurduğu nesli döndürür; boş baytta `None`.
+    fn send_input(&self, bytes: impl FnOnce(TermMode) -> Vec<u8>) -> Option<u64> {
         let (bytes, redraw, moved) = {
             let mut term = self.term.lock();
             let bytes = bytes(*term.mode());
             if bytes.is_empty() {
-                return;
+                return None;
             }
             // Seçim dibe dönüşten **önce** düşer: "çizili miydi" sorusu
             // kullanıcının baktığı pencereye sorulmalı. Pencere kayarsa kare
@@ -6750,8 +6822,9 @@ impl Session {
             self.wake_if_moved(moved);
         }
         // Nesil **gönderimden önce** ([`Session::key_gen`]'in doc'u).
-        self.key_gen.fetch_add(1, Ordering::Release);
+        let generation = self.key_gen.fetch_add(1, Ordering::Release) + 1;
         self.send(Msg::Input(bytes.into()));
+        Some(generation)
     }
 
     /// Yapıştırma bu kapıdan girer — **ham bayt bu kapının dışında kalır**.
@@ -10881,6 +10954,87 @@ mod tests {
             );
             session.shutdown();
         }
+    }
+
+    /// `🇹🇷a🇺🇸` (`8J+HufCfh7dh8J+HuvCfh7g=`), caret sonda (5), keymap `main`.
+    const FLAGS_LINE: &str = "\\033]8133;u;5;;8J+HufCfh7dh8J+HuvCfh7g=;;;bWFpbg==\\007";
+
+    /// Kümeli dock'ta `od`'ye bağlı bir oturum: kabuk hiç ayna basmıyor,
+    /// yani ilk komuttan sonra ayna **bayat kalıyor** — basılı tuşun
+    /// tekrarının aynadan hızlı geldiği an, kalıcı olarak.
+    fn spawn_line_od(wake: &Arc<TestWake>, line: &str) -> Session {
+        let mut options = test_options(
+            sh(&format!(
+                "printf '\\033[?2004h{}{line}{EDITABLE}'; exec od -An -tx1",
+                anchored_prompt(1),
+            )),
+            60,
+        );
+        options.dock = true;
+        options.cluster = true;
+        let session = Session::spawn(options, Arc::clone(wake) as Arc<dyn Wake>).unwrap();
+        wait_mirror(&session, DockStatus::Live);
+        wait_until("kapı açılmadı", Duration::from_secs(5), || {
+            session.can_edit_dock()
+        });
+        session
+    }
+
+    #[test]
+    fn a_held_backspace_never_splits_a_cluster() {
+        // 035 phase-5: ayna ilk komuta cevap vermeden gelen tekrarlar
+        // komutun beklenen sonucuna karşı karar veriyor. Kümeli satırda tek
+        // kod noktalı `a` da komutla gidiyor, yoksa zincir kırılır ve
+        // üçüncü ⌫ ZLE'ye gidip `🇹🇷`'nin yalnız `🇷`'sini silerdi.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_line_od(&wake, FLAGS_LINE);
+        for _ in 0..3 {
+            assert!(session.dock_key(DockKey::Backspace), "tekrar kapıdan döndü");
+        }
+        // Satır boşaldı: dördüncü ⌫ bugünkü yolda (ucunda bölünecek bir şey yok).
+        assert!(!session.dock_key(DockKey::Backspace));
+        // Üç komut 45 bayt; üç satır sonu `od`'nin üçüncü bloğunu tamamlıyor.
+        session.write(b"\n\n\n");
+        let cells = wait_ink(&session, &wake, "0a0a0a");
+        assert!(
+            glyph_text(&cells).contains(
+                "643b333b353b35071b5b383133337e643b323b333b33071b5b383133337e643b303b323b3207"
+            ),
+            "komut baytları: {cells:?}"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn only_an_emoji_line_routes_single_code_points() {
+        // NFD bir yol (`u` + U+0308, macOS'un dosya adları) satırı emoji
+        // satırı yapmıyor: tek kod noktalı `x` ZLE'nin kendi silmesinde
+        // kalıyor (autopair gibi bağlamalar), birleştiricili `ü` yine bütün.
+        let wake = Arc::new(TestWake::default());
+        // Caret `ü` ile `x`'in arasında (2).
+        let session = spawn_line_od(&wake, "\\033]8133;u;2;;dcyIeA==;;;bWFpbg==\\007");
+        assert!(!session.dock_key(DockKey::Delete), "düz `x` komutla gitti");
+        assert!(session.dock_key(DockKey::Left), "`ü` bütün geçilmedi");
+        session.shutdown();
+    }
+
+    #[test]
+    fn other_input_ends_the_prediction() {
+        // Tahmin yalnız kendi neslinde: araya giren girdinin etkisini
+        // bilmiyoruz, kapı yine bayat aynaya bakıp kapanıyor.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_line_od(&wake, FLAGS_LINE);
+        assert!(session.dock_key(DockKey::Left));
+        assert!(session.can_edit_dock(), "tahmin kapıyı açmadı");
+        // ⇧←/⇧→ tahmin satırında bugünkü yolundan: seçim bayat aynaya kurulmaz.
+        assert!(!session.dock_key(DockKey::ShiftLeft), "⇧← tahminde yutuldu");
+        session.write(b"x");
+        assert!(
+            !session.can_edit_dock(),
+            "araya giren girdiden sonra kapı açık"
+        );
+        assert!(!session.dock_key(DockKey::Backspace));
+        session.shutdown();
     }
 
     #[test]

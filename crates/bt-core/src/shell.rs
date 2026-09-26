@@ -881,6 +881,27 @@ impl DockSelection {
 /// İki kayıt **tek** yaprak kilidin altında: ikisini de besleyen aynı işaret
 /// akışı ve ikisini de okuyan aynı kare. Ayrı kilitler, aynı kareyi bir
 /// işaretin iki yarısı arasında yakalayabilirdi.
+/// Düzenleme komutunun beklenen sonucu: `BUFFER` ve caret, komutun
+/// gönderildiği **nesille** damgalı.
+///
+/// Basılı ⌫'nin tekrarı aynadan hızlı gelebiliyor; kapı bayat aynaya
+/// bakıp kapansaydı tekrar ZLE'ye kod noktası olarak gider ve `🇹🇷🇺🇸`'de
+/// ikinci ⌫ yalnız `🇷`'yi silerdi. Komutun etkisini biz tanımlıyoruz
+/// (`d;S;E;L`: `[S,E)` silinir, caret `S`), yani sonuç kesin; yanlış çıktığı
+/// tek yol widget'ın komutu reddetmesi ya da kabuğun dışından bir yazım ve
+/// ikisi de uzunluğu değiştiriyor — sonraki komutun `L`'si tutmuyor, widget
+/// hiçbir şey yapmıyor: tekrar kaybolur, küme bölünmez
+/// (`.tasks/035-grapheme-dizileri/phase-5.md` → Uygulama Notları).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DockPrediction {
+    /// Komutun gönderilmesiyle doğan nesil ([`crate::Session`]'ın
+    /// `key_gen`'i); başka bir nesilde tahmin geçersiz.
+    pub(crate) generation: u64,
+    pub(crate) buffer: String,
+    /// `BUFFER`'da karakter indeksi.
+    pub(crate) caret: usize,
+}
+
 pub(crate) struct ShellLog {
     /// Kabuğun o anki durumu; `None` = entegrasyon yok.
     pub(crate) state: Option<ShellState>,
@@ -920,6 +941,11 @@ pub(crate) struct ShellLog {
     /// sonraki prompt'un `w`'sine kadar taşımasın; yanlışın yönü "düzenleme
     /// yok".
     pub(crate) dock_editable: bool,
+    /// Son düzenleme komutunun **beklenen** sonucu (035 phase-5): ayna o
+    /// komuta cevap verene kadar düzenleme kapısı bu satıra bakıyor
+    /// ([`DockPrediction`]). Ömrü yalnız bir nesil — araya giren her girdi
+    /// onu geçersiz kılıyor; `e` ve `A` de siliyor.
+    pub(crate) dock_pending: Option<DockPrediction>,
     /// Koşan komutun başlangıç anı; komut koşmuyorken `None`.
     ///
     /// **Tek alan, blok başına değil:** aynı anda tek komut koşar, çünkü
@@ -1171,6 +1197,7 @@ impl ShellLog {
             dock_selection: None,
             dock_scroll: None,
             dock_editable: false,
+            dock_pending: None,
             running_since: None,
             // Açılışta caret dock'un (`caret_home_raw(None, Idle)`), yani ilk
             // devir her zaman Dock→Grid yönünde ve tutma ona uygulanabilir.
@@ -1206,6 +1233,7 @@ impl ShellLog {
             Mark::PromptStart { id } => {
                 state.phase = ShellPhase::Prompt;
                 self.dock_editable = false;
+                self.dock_pending = None;
                 // **Saatin ikinci sıfırlama noktası ve bir savunma kolu.**
                 // Prompt basılıyorsa hiçbir komut koşmuyor, yani buradaki saat
                 // tanım gereği bayat. Yalnız `D` tüketseydi kaybolan bir `D`
@@ -1354,6 +1382,7 @@ impl ShellLog {
                 self.dock_selection = None;
                 self.dock_scroll = None;
                 self.dock_editable = false;
+                self.dock_pending = None;
                 // Boş satır da bir cevap: bkz. [`DockState::answers`]. Tutulan
                 // satır da — `e` ⏎'in cevabı ve tazelik kapısı tutma boyunca
                 // onu soruyor (imleç `PS2`'nin satırına inmiş olabilir).

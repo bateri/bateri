@@ -84,6 +84,7 @@ hiç kurulmasın) ve o değişmez bir kod kısıtından *karar* diye türetilmi�
 | 032 | çok satırlı dock | **Kullanıcı isteği (2026-09-24)**: çok satırlı giriş (yapıştırma, `for`, heredoc, `\`-devam) ızgaraya gidiyor ve 030/031'in dock davranışı orada kayboluyor — aşağıdaki "Dock çok satırlı girişi göstermiyor" borcu. Dock yukarı doğru büyüyor ama **yalnız çizimde**: PTY sabit, ızgara ötelenir, yani borcun "nefes alan ekran" gerekçesi konusuz. Bedeli betikte yedinci ayna gövdesi (`PREBUFFER`); kullanıcının `PS2`'sine dokunulmuyor → `.tasks/032-cok-satirli-dock/` |
 | 033 | geçmişte arama | **Kullanıcı isteği (2026-09-25)**: "arama için bir akış oluştur; kullanıcı deneyimi güzel olsun, UI ve UX temiz ve güzel olsun" — aşağıdaki "Sonrası" listesinin arama overlay'i. Eşleştirme alacritty'de hazır (`RegexSearch`; regex yeni bağımlılık değil), vurgu 031'in `selection` pipeline'ı, gezinme 027'nin süzülmesi. Çubuk Metal overlay değil AppKit paneli (metin girişinin doğruluğu bedava, IME borcuna dokunmuyor) ve PTY'yi yeniden boyutlandırmıyor → `.tasks/033-gecmiste-arama/` |
 | 034 | ekranı temizle + standart menü kalanları | **Kullanıcı isteği (2026-09-25)**: "⌘K ile ekranın temizlenmesi olmuyor … başka koymadığımız davranışlar var mı bak". Terminal.app'in Clear to Start / Clear Scrollback'i terminal tarafında (kabuğa bayt gitmez), yanına aynı turda tek menü öğesiyle kapanan kalanlar: ⌘Home/⌘End/⌘PgUp/⌘PgDn kaydırma ve ⌃⌘V Paste Escaped Text. Envanterin kendi tasarımını isteyen yarısı aşağıdaki iki satırda → `.tasks/034-ekrani-temizle/` |
+| 035 | grapheme dizileri | **Kullanıcı gördü (2026-09-25)**: Claude Code'un `🇹🇷 "…"` satırlarındaki bayraklar yan yana iki kutu çıkıyor. 024'ün adıyla bıraktığı "grapheme dizileri taban karakteriyle" sınırı. Emoji dizileri (bayrak, ZWJ, ten rengi, VS16) ızgarada tek geniş hücrede kümeleniyor (okuyucu döngü `bt-core`'a geçti), atlas diziyi `CTLine` ile tek glyph'e şekillendiriyor, dock düzenlemesi kümeyi bölmüyor. **Kapandı** → `.tasks/035-grapheme-dizileri/`. Kapsam dışı kalanlar aşağıdaki borç listesinde. |
 | — | komut işaretleri üstünde gezinme | 034'ün envanterinden (2026-09-25): ⌘↑/⌘↓ komutlar arası atlama, Select Between Marks, ⌘L Clear to Previous Mark, "son komutun çıktısını kopyala" — Terminal.app'in Edit ▸ Navigate Marks'ı, iTerm2'nin shell integration'ı. `CLAUDE.md`'nin "komutlar arası atlama henüz yok" borcu bu satır. **Neden ayrı set:** bloklar bugün yalnız **görünür** çıpalardan ve yalnız **komutun satırı** olarak çözülüyor (işaret, bölge değil — 010 Karar); dördü de geçmişte çıpa taraması ve bir blok **bölgesi** (komut satırı → sonraki prompt) istiyor, yani `frame()` sınırında değil defter üstünde yeni bir dizin. Arama sayımının parça parça yürüyüşü (033, `SearchIndex`) o dizinin emsali. Sırası: 034'ten sonra, ön koşulu yok |
 | — | tıklanabilir bağlantılar | 034'ün envanterinden (2026-09-25): ⌘-tık ile URL ve dosya yolu açma, OSC 8 bağlantıları (Terminal.app, iTerm2, Ghostty; referansta `path_link`, `docs/ARASTIRMA.md`). Bugün OSC 8 yalnız blok çıpası olarak okunuyor. **Neden ayrı set:** algılama (regex + OSC 8), üstüne gelince vurgu (031'in `selection` pipeline'ının üçüncü kullanıcısı) ve fare rotasının dördüncü kolu (`input::button_route`; fare kipinde ⌘'nin anlamı bir ürün kararı) birlikte geliyor |
 | — | bölme | 2026-09-23'te sekmeden ayrıldı (026 yalnız sekme). **Bedeli kayıtlı:** komut blokları, Input Dock ve doldurma bandı "bir yüzey = bir oturum" varsayımıyla indi; bölme tek pencerede N yüzey demek. 026 sekmeyi pencereye koydu (`TerminalWindow`: pencere başına oturum, link ve renderer), yani bölmenin bedeli **ödenmedi, ertelendi** — bölme o nesneyi pencere başına bir yerine yüzey başına bir yapmak demek |
@@ -290,6 +291,17 @@ animasyonu), Sparkle ile güncelleme.
 Bunlar kendi setlerini hak etmiyor; yukarıdaki setlerden birine yamanırlar.
 Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
 
+- **035'in kapsam dışı bıraktığı kümeler.** Emoji dizileri tek glyph, ama:
+  eşlenmemiş tek RI kutu kalıyor; emoji dışı UAX #29 kümeleri (Arapça
+  lam-elif, Hangul jamo, Hint SpacingMark) ve tek sütunlu birleştirici
+  (aksan, hareke, `⌚︎`) taban karakteriyle çiziliyor; ⌘F kümenin ikinci kod
+  noktasını görmüyor (`🇹🇷` taban karakteriyle bulunur — `RegexIter`
+  alacritty'nin); dock'un bağlam satırı karakter biriminde; dock'ta küme
+  `BUFFER`/öneri sınırını aşabiliyor (`👍` yazılı, öneri `🏽` ile başlıyor —
+  caret iki sütun solda; `phase-5.md` → Uygulama Notları). Çıplak 78 tek
+  sütunlu emoji aşağıdaki küçültme kalemine bağlı
+  (`.tasks/035-grapheme-dizileri/plan.md` → Kapsam Dışı).
+
 - **Zil (BEL) yutuluyor.** `Event::Bell` `session.rs`'in olay kolunda boş
   düşüyor: ne ses, ne görsel zil, ne arka sekmede işaret (Terminal.app ve
   iTerm2'nin üçü de var). 034'ün envanterinde çıktı (2026-09-25). Ayar
@@ -369,8 +381,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   birleştirici taşıyan satırın ızgaraya fırlaması. Kalan **iki bilinen
   sınır** adıyla yazılı ve bekçili: bağlam satırı karakter biriminde
   (küçük boy sınıfı, 021'in emsali — CJK'lı bir yol orada hâlâ sütun
-  kaydırıyor) ve grapheme dizileri taban karakteriyle çiziliyor (atlas
-  anahtarı `Sprite::Char(char)`, ayrı set). Ayrıntısı
+  kaydırıyor) ve grapheme dizileri taban karakteriyle çiziliyor — **ikincisi
+  kapandı (035)**: emoji dizileri üç yüzeyde tek glyph ve iki sütun
+  (`.tasks/035-grapheme-dizileri/`). Ayrıntısı
   `.tasks/024-dock-sutun-aritmetigi/`'de. Aşağıdaki gerekçe tarih olarak
   duruyor: 023'ün panelinde
   çıktı (2026-09-22) ve o setin kapsamı dışında bırakıldı: `dock::render`

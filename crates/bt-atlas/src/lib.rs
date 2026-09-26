@@ -541,9 +541,16 @@ impl Atlas {
         if let Some(&id) = self.cluster_ids.get(text) {
             return Sprite::Cluster(id);
         }
-        // Kimlik uzayı tükendiyse (bir atlasın ömründe dört milyar farklı
-        // dizi) dizi **taban karakterine** iniyor: şekillenmeyen kümenin
-        // cevabı da o, yani görüntü bugünkü hâlden kötü olmuyor.
+        // Tablo **tavanlı** ve tavanı negatif önbelleğinki: tahliye yok ve
+        // her farklı dizgi atlasın ömrü boyunca yaşıyor, yani tavansız bir
+        // interner rastgele çıktının (`cat` edilmiş ikili veri, birleştirici
+        // taşıyan geniş hücreler) belleğini hiç geri vermezdi. Tavanın
+        // ötesindeki yeni dizi **taban karakterine** iniyor — şekillenmeyen
+        // kümenin cevabı da o, yani görüntü 035 öncesinden kötü olmuyor; o
+        // kadar farklı diziyi zaten atlasın yuvaları da tutamazdı.
+        if self.clusters.len() >= self.negative_cache_cap() {
+            return Sprite::Char(base);
+        }
         let Ok(id) = u32::try_from(self.clusters.len()) else {
             return Sprite::Char(base);
         };
@@ -654,10 +661,16 @@ impl Atlas {
         // ızgaraya `wide: true` ile geliyor, `Left` anahtarını bulamıyor,
         // buradan `TOFU` alıyor ve setin tamamı o karakter için atlasın ömrü
         // boyunca **ölü** kalıyordu.
+        //
+        // Ret **kaydın tamamıyla** tanınıyor, yuva numarasıyla değil: renk
+        // düzleminin 0. yuvası ilk emojinin gerçek yuvası ve numaraya bakan
+        // bir kapı onun tek hücrelik kabulünü ret sanıp ikinci kez
+        // rasterize ederdi (`cluster_as_base`'in ve negatif önbellek
+        // süzgecinin ikizi).
         if want == Half::Left {
             let whole = (sprite, face, size, Half::Whole);
             if let Some(&(slot, plane)) = self.slots.get(&whole)
-                && slot != TOFU
+                && (slot, plane) != (TOFU, Plane::Mask)
             {
                 return (
                     Placed {
@@ -1869,6 +1882,30 @@ mod tests {
             .is_none(),
             "rezident yuva yeniden yüklenmez"
         );
+    }
+
+    /// Renk düzleminin 0. yuvasındaki tek hücrelik kabul `Left` isteğine de
+    /// cevap: numara `TOFU` ile aynı ama kayıt ret değil. Bekçi iç tabloyu
+    /// kuruyor, çünkü tek hücreye sığan renkli bir glyph bugünkü fontlarda
+    /// yok — kural yine de yolun kendisi.
+    #[test]
+    fn color_slot_zero_answers_the_left_request() {
+        let mut a = atlas(POINT_SIZE, 1.0);
+        let sprite = Sprite::Char('😀');
+        let whole = (sprite, Face::Regular, SizeClass::Normal, Half::Whole);
+        a.slots.insert(whole, (TOFU, Plane::Color));
+        let before = (a.occupancy(), a.color_occupancy());
+        let (placed, upload) = a.slot(sprite, Face::Regular, SizeClass::Normal, Half::Left);
+        assert_eq!(
+            (placed.slot, placed.half, placed.plane),
+            (TOFU, Half::Whole, Plane::Color),
+            "renk düzleminin 0. yuvası ret sanıldı"
+        );
+        assert!(
+            upload.is_none(),
+            "kabul edilmiş glyph yeniden rasterize edildi"
+        );
+        assert_eq!((a.occupancy(), a.color_occupancy()), before);
     }
 
     #[test]
@@ -4525,6 +4562,19 @@ mod tests {
         );
         // Tek kod noktası küme değil: aynı glyph iki anahtarda tutulmamalı.
         assert_eq!(a.intern("A"), Sprite::Char('A'));
+        // Tavan: tablo dolunca yeni dizi taban karakterine iniyor, bilinen
+        // dizi kimliğini koruyor.
+        let known = a.intern("\u{1F44D}\u{1F3FD}");
+        let cap = a.negative_cache_cap();
+        for n in 0..cap {
+            let _ = a.intern(&format!("\u{1F44D}{n}"));
+        }
+        assert!(a.clusters.len() <= cap, "tablo tavanı aştı");
+        assert_eq!(a.intern("\u{1F44D}\u{1F3FD}"), known);
+        assert_eq!(
+            a.intern("\u{1F4A9}\u{200D}\u{1F525}"),
+            Sprite::Char('\u{1F4A9}')
+        );
         assert_eq!(a.intern(""), Sprite::Char(' '));
     }
 
