@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use bt_core::{
     CursorMotion, HostMark, ReduceMotion, SHUTDOWN_GRACE, SYSTEM_THEME, Settings, SettingsEdit,
-    ShellIntegration, SmoothScroll, Teardown, Theme,
+    ShellIntegration, SmoothScroll, TabId, Teardown, Theme,
 };
 use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, Stats};
 use dispatch2::DispatchQueue;
@@ -813,6 +813,34 @@ define_class!(
             default
         }
 
+        /// `bateri://…` açıldı (`open`, tarayıcı, başka bir uygulama; 038
+        /// Karar 4–6). URL'ler sırayla işleniyor, sonuncusu öne gelir.
+        ///
+        /// **Güvenlik değişmezi: bu yol yalnız odaklar.** Şemayı her uygulama
+        /// açabilir; burada kabuğa tek bayt gitmez, komut koşmaz, pencere
+        /// açılmaz. Kollar: `bateri://tab/<id>` ve yaşayan sekme → o sekme öne
+        /// ([`TerminalWindow::bring_to_front`]); tanınan ama ölü kimlik →
+        /// yalnız uygulama öne; başka her biçim (`block/` dahil) → hiçbir şey.
+        ///
+        /// Soğuk başlatmada liste boş (URL `applicationDidFinishLaunching:`'ten
+        /// önce gelebiliyor) ve kol "ölü kimlik"; ilk pencere olağan yolundan
+        /// bir kez açılıyor.
+        #[unsafe(method(application:openURLs:))]
+        fn open_urls(&self, _app: &NSApplication, urls: &NSArray<NSURL>) {
+            for url in urls {
+                let Some(text) = url.absoluteString() else {
+                    continue;
+                };
+                let Some(id) = TabId::from_url(&text.to_string()) else {
+                    continue;
+                };
+                match self.window_by_tab(&id) {
+                    Some(window) => window.bring_to_front(),
+                    None => NSApplication::sharedApplication(self.mtm()).activate(),
+                }
+            }
+        }
+
         /// ⌘Q, Dock ▸ Quit, oturum kapatma ve yeniden başlatma: çıkmadan önce
         /// sorulsun mu (028 → Karar 3, 5). Soru bütün pencereler için **tek**
         /// uyarı; `runModal` eşzamanlı, yani cevap doğrudan dönüyor ve
@@ -1596,6 +1624,19 @@ impl AppDelegate {
             .borrow()
             .iter()
             .find(|window| window.id() == id)
+            .cloned()
+    }
+
+    /// Sekme kimliği `id` olan pencere; kapanmışsa `None` (`bateri://tab/`,
+    /// `application:openURLs:`). [`AppDelegate::window`]'ın ikizi, bir farkla:
+    /// `windowWillClose:`'u geçmiş ama listeden henüz çıkmamış pencere de
+    /// `None` — öne getirilse oturumsuz bir pencere ekrana dönerdi.
+    fn window_by_tab(&self, id: &TabId) -> Option<Retained<TerminalWindow>> {
+        self.ivars()
+            .windows
+            .borrow()
+            .iter()
+            .find(|window| window.tab_id() == id && !window.is_closed())
             .cloned()
     }
 

@@ -85,14 +85,34 @@ Bilinen sınırlar (kodlanırken değişmezse bu hâliyle kalır):
   taşır; sonradan başka sekmeden bağlanan istemci eski sekmeyi görür
   (Terminal.app'in `TERM_SESSION_ID`'siyle aynı sınır; çare kullanıcının
   `update-environment`'ı).
+- **Gözle kontrol ve soğuk başlatma gözlemi bu otonom koşuda yapılmadı.**
+  `open bateri://…` LaunchServices'ten geçiyor; kayıt paketi açmakla
+  kendiliğinden oluyor ve worktree'nin `bateri.app`'i kurulu
+  `/Applications/bateri.app` ile aynı paket kimliğini ve şemayı taşıyor —
+  denemek kullanıcının kurulu uygulamasının şema kaydıyla yarışırdı. Beş
+  sahne ve `applicationDidFinishLaunching:` ↔ `application:openURLs:` sırası
+  `make yukle` sonrası elle bakılacak. Kodun soğuk başlatmadaki varsayımı
+  sıradan bağımsız: liste boşken URL yalnız `activate` çağırıyor, pencereyi
+  açan tek yol `applicationDidFinishLaunching:`, yani iki sırada da tek
+  pencere.
+- `make kur` şemayı buluyor; şablondaki şema `notbateri`'ye çevrilince
+  "URL şeması (bateri) Info.plist'te yok" ile düştü (geri alındı).
+- **Set kapısı.** `/code-review` tek bulgu (düşük): `windowWillClose:`
+  ile `forget_window` arasındaki turda URL kapanmakta olan sekmeyi bulup
+  öne getirebiliyordu — oturumsuz bir pencere ekrana dönerdi. Düzeltildi:
+  pencerede `closed` bayrağı (`windowWillClose:` kurar), `window_by_tab`
+  onu atlar, kol "ölü kimlik"e düşer. `/audit`: `make denetim` temiz, yedi
+  mercekten dördü temiz, üçü ilgisiz; bulgu yok.
+- Doğrulama (düzeltmeden sonra yeniden): `make hepsi` exit 0, `make kur` yeşil, `make duman` yeşil
+  (`kare=29 hucre=8 glif=6 kural=15 … kapanis=clean pipeline=ok`).
 
 ## Checklist
 
-- [ ] `Info.plist.in` `CFBundleURLTypes`
-- [ ] `make kur` içerik denetimi + yorum
-- [ ] `TerminalWindow::tab_id` erişicisi (phase-1'den devredildi: ilk tüketicisi burada)
-- [ ] Kimlikle pencere yardımcısı, `application:openURLs:`, odak yöntemi
-- [ ] Soğuk başlatma sırası gözlendi, notu yazıldı
-- [ ] `CLAUDE.md` üç yer, `docs/YOL-HARITASI.md` tek cümle
-- [ ] Doğrulama geçti (`make hepsi` + `make kur` + `make duman`)
-- [ ] Elle: Kabul'deki beş sahne kurulu pakette
+- [x] `Info.plist.in` `CFBundleURLTypes`
+- [x] `make kur` içerik denetimi + yorum
+- [x] `TerminalWindow::tab_id` erişicisi (phase-1'den devredildi: ilk tüketicisi burada)
+- [x] Kimlikle pencere yardımcısı, `application:openURLs:`, odak yöntemi
+- [~] Soğuk başlatma sırası gözlendi, notu yazıldı — gözlenmedi, Uygulama Notları
+- [x] `CLAUDE.md` üç yer, `docs/YOL-HARITASI.md` tek cümle
+- [x] Doğrulama geçti (`make hepsi` + `make kur` + `make duman`)
+- [~] Elle: Kabul'deki beş sahne kurulu pakette — gözle kontrol bekliyor, Uygulama Notları
