@@ -43,6 +43,7 @@ mod cluster;
 mod color;
 mod dock;
 mod handler;
+mod identity;
 mod input;
 mod reader;
 mod search;
@@ -58,6 +59,7 @@ pub use dock::{
     Dock, DockBudget, DockButton, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells,
     TEXT_COL as DOCK_TEXT_COL, UPLOAD_GLYPHS, transfer_button_at, transfer_button_span,
 };
+pub use identity::{TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,
