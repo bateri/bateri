@@ -78,7 +78,7 @@ use crate::search::{
     self, SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns,
     SearchSlot, SearchStatus,
 };
-use crate::settings::{CaretShape, CursorBlink, HostRule};
+use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule};
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection, DockState,
     DockStatus, Precision, RemoteTarget, Scanner, ShellLog, ShellState, Stripe,
@@ -6124,6 +6124,17 @@ impl Session {
         changed
     }
 
+    /// Uzak oturumun host'u (gösterildiği gibi, `user@` dahil) ve çözülmüş
+    /// işareti; yerelde `None` (037 Karar 4, 5). Okuyanlar sekmenin noktası
+    /// ve Shell ▸ Mark … as ▸ — ikisi de ana thread'de, kenarda; kare yolu
+    /// bunu çağırmıyor. Yaprak kilit, `Term`'e dokunmuyor.
+    pub fn remote_mark(&self) -> Option<(String, HostMark)> {
+        let log = lock(&self.shell);
+        log.context
+            .remote_host()
+            .map(|host| (host.to_owned(), log.context.remote_mark))
+    }
+
     /// Uygulama alternatif ekranda mı — **son karedeki** hâl.
     ///
     /// Kendi sorgusu, [`Cursor`]'ın alanı **değil**: `Cursor` bir kare kaydı
@@ -11742,9 +11753,15 @@ mod tests {
         session.write(b"\n");
         assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
         let command = session.running_command().expect("`C`'den sonra koşuyor");
+        assert_eq!(session.remote_mark(), None, "yerel");
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("deploy@prod-web"))));
         let theme = session.theme();
         assert_eq!(draw_dock(&session).0.edge, theme.warning_linear());
+        // Sekmenin noktası ve menü aynı çözümü okuyor (037 Karar 4, 5).
+        assert_eq!(
+            session.remote_mark(),
+            Some(("deploy@prod-web".to_owned(), HostMark::Staging))
+        );
 
         let wakes = wake.state.lock().unwrap().wakes;
         let production = [HostRule {
@@ -11757,6 +11774,10 @@ mod tests {
             "işaret değişimi kare istemeli"
         );
         assert_eq!(draw_dock(&session).0.edge, theme.error_linear());
+        assert_eq!(
+            session.remote_mark().map(|(_, mark)| mark),
+            Some(HostMark::Production)
+        );
         assert!(!session.set_host_marks(&production), "aynı liste no-op");
         assert!(session.set_host_marks(&[]));
         assert_eq!(draw_dock(&session).0.edge, theme.info_linear());

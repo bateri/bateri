@@ -73,7 +73,7 @@ pub use settings::{
     CURSOR_RADIUS_RANGE, CaretShape, CaretStyle, Changes, ConfirmClose, CursorBlink, CursorMotion,
     Diagnostic, Erase, FontOptions, HostMark, HostRule, Keypress, LINE_HEIGHT_RANGE,
     MAX_LINE_HEIGHT, Parsed, ReduceMotion, SCROLLBACK_MAX, SYSTEM_THEME, Settings, SettingsEdit,
-    ShellIntegration, SmoothScroll, UnfocusedCaret,
+    ShellIntegration, SmoothScroll, UnfocusedCaret, bare_host,
 };
 pub use shell::{
     DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle,

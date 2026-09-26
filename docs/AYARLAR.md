@@ -31,10 +31,11 @@ settings.toml** düğmesi dosyayı editörde açar, yoksa önce yaratır (bkz.
 Dosya başka bir yere sembolik bağ olabilir (dotfile deposu); bağın hedefi
 okunur.
 
-Uygulama bu dosyaya üç yerden yazar: **Open settings.toml** dosya yokken
+Uygulama bu dosyaya dört yerden yazar: **Open settings.toml** dosya yokken
 şablonu yaratır, **View ▸ Theme ▸** ile tema seçince `[appearance] theme`
-satırını yazar (bkz. [View ▸ Theme ▸](#view--theme-)) ve **ayar penceresi**
-değiştirdiğiniz ayarın satırını yazar. Var olan dosyanın başka hiçbir
+satırını yazar (bkz. [View ▸ Theme ▸](#view--theme-)), **Shell ▸ Mark “host”
+as ▸** `[remote] hosts`'a o host'un girdisini yazar (bkz. [`[remote]`](#remote))
+ve **ayar penceresi** değiştirdiğiniz ayarın satırını yazar. Var olan dosyanın başka hiçbir
 satırına — yorumlara, sıraya, tanımadığı anahtarlara — dokunulmaz.
 
 Değişiklik **kaydettiğiniz anda** geçerli olur — ayar dosyasında da,
@@ -222,7 +223,8 @@ integration = "auto"
 # (green), "none" (no mark), or a color like "#c678dd". In a pattern * stands
 # for any run of characters and ? for one, ignoring case; a pattern without @
 # matches the host after any user@. The first entry that matches wins, so put
-# exact names before wide patterns; "none" stops the search.
+# exact names before wide patterns; "none" stops the search. Shell > Mark
+# "host" as writes the entry for the host of the ssh tab you are in.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },
@@ -922,6 +924,17 @@ prod'da olduğunuzu renkten bilirsiniz.
   yazın. `"none"` aramayı orada bitirir — bir globun yakaladığı tek bir
   host'u işaretsiz bırakmanın yolu o.
 - Satır içi dizi yerine `[[remote.hosts]]` bölüm dizisi de yazılabilir.
+- **Menüden**: ssh sekmesindeyken **Shell ▸ Mark “host” as ▸** Production /
+  Staging / Development / None; onay işareti host'un şu anki işaretinde (bir
+  desenden gelse de), yerel sekmede öğe gri. Seçim dosyaya yazılır: tam o
+  host'un girdisi varsa işareti yerinde değişir, yoksa dizinin **başına**
+  eklenir (önünde bir glob varsa girdi başa taşınır). **None** o host'un
+  girdisini siler; bir desen hâlâ yakalıyorsa başa `mark = "none"` yazar.
+  Desen host'un `user@`'siz kısmıdır. Yorumlara ve dizinin yazılışına
+  dokunulmaz; dosya ayrıştırılamıyorsa ya da liste bozuksa yazılmaz.
+- İşaretli bir host'un sekmesi, sekme çubuğu görünürken başlığının yanında
+  işaretin renginde küçük bir nokta taşır; işaretsiz uzak sekmede nokta
+  yoktur.
 - Kaydettiğiniz anda geçerli olur, ssh sürerken de.
 - **Bozuk bir girdi** (bilinmeyen `mark`, `host`'suz girdi, tablo olmayan
   öğe) listenin **tamamını** reddeder: açılışta liste boş, kayıt anında

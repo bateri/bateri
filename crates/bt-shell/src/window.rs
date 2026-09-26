@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use bt_core::{
-    ConfirmClose, FontOptions, RemoteTarget, SearchCover, SearchDirection, SearchReport,
+    ConfirmClose, FontOptions, HostMark, RemoteTarget, SearchCover, SearchDirection, SearchReport,
     SearchStatus, Session, SessionOptions, Settings, ShutdownHandle, Teardown, Theme, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
@@ -33,11 +33,11 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSColor, NSControlTextEditingDelegate, NSEventModifierFlags, NSMenuItem,
-    NSModalResponse, NSModalResponseCancel, NSPasteboard, NSPasteboardNameFind,
-    NSSearchFieldDelegate, NSTextFieldDelegate, NSTitlebarSeparatorStyle, NSView,
-    NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
-    NSWindowOrderingMode, NSWindowStyleMask,
+    NSBackingStoreType, NSBox, NSBoxType, NSColor, NSControlTextEditingDelegate,
+    NSEventModifierFlags, NSMenuItem, NSModalResponse, NSModalResponseCancel, NSPasteboard,
+    NSPasteboardNameFind, NSSearchFieldDelegate, NSTextFieldDelegate, NSTitlePosition,
+    NSTitlebarSeparatorStyle, NSView, NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate,
+    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -674,6 +674,9 @@ pub(crate) struct WindowIvars {
     /// Kromun son boyandığı zemin ([`TerminalWindow::apply_chrome`]'un
     /// kapısı); `None`: henüz boyanmadı.
     chrome: Cell<Option<u32>>,
+    /// Sekmenin noktasının son kurulan rengi, sRGB
+    /// ([`TerminalWindow::refresh_tab_mark`]'ın kapısı); `None`: nokta yok.
+    tab_mark: Cell<Option<u32>>,
     /// Bu pencerede açık kapatma sorusu (028 → R2.8): `NSAlert`'i sayfa
     /// süresince yaşatıyor ve "sayfa açıkken ikinci soru yok" kapısı o
     /// ([`TerminalWindow::asking`]). Tamamlanma bloğu her yanıtta boşaltıyor.
@@ -1189,6 +1192,7 @@ impl TerminalWindow {
             dock_rows: Cell::new(0),
             dock_rows_at_birth: Cell::new(0),
             chrome: Cell::new(None),
+            tab_mark: Cell::new(None),
             alert: RefCell::new(None),
             close_requested: Cell::new(false),
             search: OnceCell::new(),
@@ -1577,12 +1581,77 @@ impl TerminalWindow {
     /// ana kuyruk işi. Kare yolu başlık hesaplamıyor; yazım yalnız
     /// **değişimde** (026 R2.4). Oturum henüz yoksa başlık kurucunun
     /// `bateri`'si kalıyor.
+    ///
+    /// Sekmenin noktası da buradan tazeleniyor ([`Self::refresh_tab_mark`]):
+    /// uzak durumun iki kenarı (`set_remote`'un dönüşü, `D`/`A`'nın silmesini
+    /// getiren `title_changed`) başlığınkilerle aynı (037 Karar 4).
     pub(crate) fn refresh_title(&self) {
         if let Some(session) = self.ivars().session.get() {
             self.ivars()
                 .window
                 .setTitle(&NSString::from_str(&session.title()));
         }
+        self.refresh_tab_mark();
+    }
+
+    /// Uzak sekmenin host'u ve çözülmüş işareti; yerelde `None`
+    /// (`Session::remote_mark`).
+    pub(crate) fn remote_mark(&self) -> Option<(String, HostMark)> {
+        self.ivars().session.get()?.remote_mark()
+    }
+
+    /// Sekmenin noktası (037 Karar 4): işaretli uzak host'ta sekme
+    /// başlığının yanında işaretin renginde küçük, dolu bir daire
+    /// (`NSWindowTab.accessoryView`); işaretsiz uzakta ve yerelde yok —
+    /// işaretsiz uzak sekme başlığında zaten `⇄` taşıyor ve her ssh
+    /// sekmesine bir nokta prod'un kırmızısını sulandırırdı.
+    ///
+    /// Renk oturumun temasından, dock'unkiyle aynı eşlemeden
+    /// (`Theme::mark_rgb`), sRGB — `NSColor` onu kendisi kodluyor. Tetikleri
+    /// uzak durumun kenarları ([`Self::refresh_title`]), ayar
+    /// ([`Self::set_host_marks`]) ve tema ([`Self::set_theme`]); aynı renkte
+    /// no-op, yani AppKit'e her başlık haberinde yeni bir view gitmiyor.
+    ///
+    /// Çizim `NSBox` (033 panelinin emsali): katman yoluyla renk istemek
+    /// `CGColor`'u, yani `objc2-core-graphics` kenarını isterdi. Nokta yalnız
+    /// sekme çubuğu görünürken var; tek sekmeli pencerede gösterge dock'un
+    /// üst çizgisi.
+    fn refresh_tab_mark(&self) {
+        let color = self.ivars().session.get().and_then(|session| {
+            let (_, mark) = session.remote_mark()?;
+            (mark != HostMark::None).then(|| session.theme().mark_rgb(mark))
+        });
+        if self.ivars().tab_mark.replace(color) == color {
+            return;
+        }
+        let tab = self.ivars().window.tab();
+        let Some(color) = color else {
+            tab.setAccessoryView(None);
+            return;
+        };
+        const DIAMETER: f64 = 8.0;
+        let mtm = self.mtm();
+        let dot = NSBox::new(mtm);
+        dot.setBoxType(NSBoxType::Custom);
+        dot.setTitlePosition(NSTitlePosition::NoTitle);
+        dot.setBorderWidth(0.0);
+        dot.setCornerRadius(DIAMETER / 2.0);
+        let byte = |shift: u32| f64::from((color >> shift) & 0xff) / 255.0;
+        dot.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            byte(16),
+            byte(8),
+            byte(0),
+            1.0,
+        ));
+        // Sekme aksesuarını Auto Layout boyutlandırıyor: ölçü kısıtla.
+        dot.setTranslatesAutoresizingMaskIntoConstraints(false);
+        dot.widthAnchor()
+            .constraintEqualToConstant(DIAMETER)
+            .setActive(true);
+        dot.heightAnchor()
+            .constraintEqualToConstant(DIAMETER)
+            .setActive(true);
+        tab.setAccessoryView(Some(&dot));
     }
 
     /// Alt başlığın yazımı; metni kuran `AppDelegate::post_notices`.
@@ -1878,6 +1947,7 @@ impl TerminalWindow {
         if let Some(session) = self.ivars().session.get() {
             session.set_host_marks(&settings.remote_hosts);
         }
+        self.refresh_tab_mark();
     }
 
     /// Terminal seçenekleri değişti — oturuma, **tamamıyla**.
@@ -1899,6 +1969,8 @@ impl TerminalWindow {
             session.set_theme(theme);
         }
         self.apply_chrome(&theme);
+        // Sekmenin noktası işaretin rolünden; rol yeni temada başka bir renk.
+        self.refresh_tab_mark();
         // Arama panelinin yüzeyi de temadan; panel henüz doğmadıysa ilk
         // ⌘F'de oturumun temasıyla boyanıyor.
         if let Some(bar) = self.ivars().search.get() {

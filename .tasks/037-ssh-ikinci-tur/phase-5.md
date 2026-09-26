@@ -39,7 +39,9 @@ _Requirements: R8, R9_
   (uyarı) sonraki setlerde" → dokuzu, `warning` host işaretinden; ssh
   paragrafı (036): host işareti ve renkleri, sekmenin noktası, teklif,
   ⌘T/⌥⌘T; ana menü listesi (Shell'de New Local Tab ve Mark … as ▸); Finder
-  damlası cümlesi uzak kolla; ayar anahtarları listesine `[remote] hosts`.
+  damlası cümlesi uzak kolla; ayar anahtarları listesine `[remote] hosts`;
+  "Ayarlar" maddesinin "Dosyaya yazan üç yol" cümlesine dördüncü yol
+  (Shell ▸ Mark … as ▸, `SettingsEdit::RemoteHostMark`; phase-2'den devir).
   Kural + tek cümle gerekçe + işaretçi (`.tasks/037-ssh-ikinci-tur/`),
   tarihçe değil.
 - **`docs/YOL-HARITASI.md`** — 037 satırı set açılırken yazıldı; sapma
