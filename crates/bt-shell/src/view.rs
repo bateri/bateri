@@ -2828,6 +2828,7 @@ mod tests {
     /// kullanıcının kopyaladığı şeyi silerdi.
     #[test]
     fn only_file_urls_become_dropped_paths() {
+        let _pasteboard = crate::clipboard::tests::pasteboard_lock();
         let board = NSPasteboard::pasteboardWithUniqueName();
         let file = NSURL::fileURLWithPath(ns_string!("/tmp/bir dosya.txt"));
         let web = NSURL::URLWithString(ns_string!("http://example.com/foo")).expect("geçerli URL");
