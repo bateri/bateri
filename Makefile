@@ -168,6 +168,10 @@ SIGN_ID ?= $(eval SIGN_ID := $$(shell ids=$$$$(security find-identity -v -p code
 # binary'den okununca ikisi hiç ayrışamaz — ayrışsa LaunchServices uygulamayı
 # açamayacağı bir sistemde açardı.
 #
+# URL şeması (`CFBundleURLTypes` → `bateri`, 038) da ürünün içinde aranıyor:
+# `bateri://tab/<id>` LaunchServices'e yalnız paketin plist'inden kayıtlı ve
+# şablondan düşen şema sessizce "open hiçbir şey açmıyor"a dönerdi.
+#
 # `X = $(eval X := $$(shell …))$(X)`: tembel VE bir kez. Düz `=` her açılışta
 # komutu yeniden koşardı (`$(APP)` tarifte yirmiden fazla açılıyor), `:=` ise
 # her make çağrısında — `hepsi` dahil. Hedef dizini `cargo metadata`'dan:
@@ -226,6 +230,7 @@ kur:
 	minos=$$(vtool -show-build $$exe | awk '$$1=="minos"{print $$2; exit}'); \
 	test -n "$$minos" && test "$$(key LSMinimumSystemVersion)" = "$$minos" || fail "LSMinimumSystemVersion binary'nin minos'u ('$$minos') değil"; \
 	test -s "$$c/Resources/$$(key CFBundleIconFile).icns" || fail "ikon pakette yok"; \
+	test "$$(key CFBundleURLTypes.0.CFBundleURLSchemes.0)" = bateri || fail "URL şeması (bateri) Info.plist'te yok"; \
 	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f pakette yok ya da girdiden farklı"; \
 	done; \

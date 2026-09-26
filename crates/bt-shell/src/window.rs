@@ -716,6 +716,10 @@ pub(crate) struct WindowIvars {
     ///
     /// [`id`]: WindowIvars::id
     tab_id: TabId,
+    /// `windowWillClose:` geçti: pencere listeden bir tur sonra çıkıyor
+    /// (`forget_window`) ve o arada `bateri://tab/` onu bulup öne getirirse
+    /// oturumsuz, delegate'siz bir pencere ekrana dönerdi (`/code-review`).
+    closed: Cell<bool>,
 }
 
 /// Yeni kabuğun doğum bilgisi — [`TerminalWindow::start`]'ın çağırandan
@@ -846,6 +850,7 @@ define_class!(
         /// örüntüsü); nesne yine ana thread'de düşüyor.
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _n: &NSNotification) {
+            self.ivars().closed.set(true);
             drop(self.begin_close());
             // Delegate'i şimdi bırak: AppKit kapanmakta olan pencereye bundan
             // sonra bildirim göndermesin (odak, örtülme), nesne düşene kadar
@@ -1280,6 +1285,7 @@ impl TerminalWindow {
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
             tab_id: new_tab_id(),
+            closed: Cell::new(false),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1308,6 +1314,35 @@ impl TerminalWindow {
 
     pub(crate) fn id(&self) -> u64 {
         self.ivars().id
+    }
+
+    /// Sekmenin kalıcı kimliği (`TERM_SESSION_ID`, `bateri://tab/<id>`;
+    /// 038). Süreç içi [`TerminalWindow::id`]'den ayrı: o haberci yollarının
+    /// anahtarı, bu dışarıya verilen ad.
+    pub(crate) fn tab_id(&self) -> &TabId {
+        &self.ivars().tab_id
+    }
+
+    /// `windowWillClose:` geçti mi — listede bir tur daha duran kapanmış
+    /// pencere URL'le öne getirilmesin ([`WindowIvars::closed`]).
+    pub(crate) fn is_closed(&self) -> bool {
+        self.ivars().closed.get()
+    }
+
+    /// `bateri://tab/<id>`'nin tek etkisi (038 Karar 4, 6): küçültülmüşse
+    /// geri açar, seçili sekme ve key yapar, uygulamayı öne alır. Kabuğa bayt
+    /// göndermez.
+    ///
+    /// `makeKeyAndOrderFront` sekme grubundaki pencereyi seçili sekme
+    /// yapıyor (`selectTab:`'ın emsali); küçültülmüş pencerede ise yalnız
+    /// sırayı değiştirip Dock'ta bırakırdı, `deminiaturize` o yüzden önce.
+    pub(crate) fn bring_to_front(&self) {
+        let window = &self.ivars().window;
+        if window.isMiniaturized() {
+            window.deminiaturize(None);
+        }
+        window.makeKeyAndOrderFront(None);
+        NSApplication::sharedApplication(self.mtm()).activate();
     }
 
     /// Bu nesnenin `NSWindow`'u mu — etkin pencere `NSApp.keyWindow`'dan
