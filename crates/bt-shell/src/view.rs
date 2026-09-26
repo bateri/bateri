@@ -46,7 +46,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint,
-    NSRange, NSRangePointer, NSRect, NSString, NSUInteger, NSURL,
+    NSRange, NSRangePointer, NSRect, NSSize, NSString, NSUInteger, NSURL,
 };
 
 use crate::clipboard;
@@ -1231,8 +1231,9 @@ define_class!(
 
         /// Damla bırakıldı: yerel oturumda yollar kaçırılıp giriş satırına
         /// yazılır; **uzak oturumda** yerel yol uzak kabuğa yazılmıyor —
-        /// damla uzak dizine yükleniyor (037 Karar 7; onay sayfası, kuyruk ve
-        /// bitince uzak yol `crate::uploader`'da).
+        /// damla uzak dizine yükleniyor (037 Karar 7; onay sayfası ve kuyruk
+        /// `crate::uploader`'da) ve hiçbir yol kendiliğinden yapıştırılmıyor
+        /// (phase-7).
         ///
         /// Çıkış [`Session::paste`] — `session.write` **değil**: bracketed
         /// paste sarması ve dock istisnası oradan bedavaya geliyor
@@ -1822,13 +1823,31 @@ impl BateriView {
         Some((col, bt_gpu::context_cols(cols, metrics)))
     }
 
+    /// Bağlam satırında dock-yerel `[start, end)` sütun aralığının view
+    /// noktasındaki dikdörtgeni — [`Self::context_column`]'un tersi, aynı
+    /// geometriden: "Show files (N)" popover'ının çıpası (037 phase-7).
+    pub(crate) fn context_span_rect(&self, start: u16, end: u16) -> Option<NSRect> {
+        let (metrics, _) = self.ivars().metrics.get()?;
+        let (top, rows) = self.ivars().origin.get().and_then(Origin::dock)?;
+        let scale = self.window()?.backingScaleFactor();
+        let context_top = f64::from(top)
+            + f64::from(metrics.cell_px().1) * f64::from(rows)
+            + f64::from(bt_gpu::context_row_offset(rows, metrics));
+        let cell = f64::from(metrics.context_cell_px());
+        let x = f64::from(metrics.gutter_px()) + f64::from(start) * cell;
+        let width = f64::from(end.saturating_sub(start)) * cell;
+        Some(NSRect::new(
+            NSPoint::new(x / scale, context_top / scale),
+            NSSize::new(width / scale, f64::from(metrics.cell_px().1) / scale),
+        ))
+    }
+
     /// Tık yükleme satırının bir düğmesine mi düştü (037 Karar 7); `true` →
     /// tık tüketildi. Geometri [`Self::context_column`]'unki.
     fn upload_control(&self, event: &NSEvent) -> bool {
-        let at = self.convertPoint_fromView(event.locationInWindow(), None);
         self.context_column(event.locationInWindow())
             .zip(self.terminal_window())
-            .is_some_and(|((col, context), window)| window.upload_click(col, context, at))
+            .is_some_and(|((col, context), window)| window.upload_click(col, context))
     }
 
     /// Farenin **şimdiki** yeri bağlam satırında ([`Self::context_column`]):

@@ -531,6 +531,9 @@ pub(crate) struct DockSurface {
     /// Üst çizginin dolan payı, `0..=1` ([`Frame::set_dock_progress`]);
     /// `None` → çizgi bütünüyle `edge`.
     progress: Option<f32>,
+    /// İlerleme çubuğunun boş izi (`bt_core::Dock::track`, 037 phase-7);
+    /// yalnız `progress` varken çiziliyor.
+    track: [f32; 4],
     /// Yükleme satırının düğmeleri ([`Frame::set_dock_buttons`]); açılış
     /// her karede siliyor, yani düğme yalnız söylendiği karede var.
     buttons: [Option<DockButton>; 2],
@@ -2006,6 +2009,7 @@ impl Frame {
             edge: edge.to_array(),
             separator: separator.to_array(),
             progress: None,
+            track: separator.to_array(),
             buttons: [None; 2],
         });
     }
@@ -2071,12 +2075,14 @@ impl Frame {
 
     /// Üst saç çizgisini bu kare için bir **ilerleme çubuğuna** çevirir
     /// (`bt_core::Dock::progress`, onbinde; 037 Karar 7): dolan kısım
-    /// `edge`'in, kalanı `separator`'ın renginde. [`Frame::open_dock`]'tan
-    /// sonra; açılış her karede `None`'a sıfırlıyor, yani çubuk yalnız
-    /// söylendiği karede var. Dock açık değilse no-op.
-    pub(crate) fn set_dock_progress(&mut self, progress: Option<u16>) {
+    /// `edge`'in, kalanı `track`'in renginde (`bt_core::Dock::track`, 037
+    /// phase-7). [`Frame::open_dock`]'tan sonra; açılış her karede `None`'a
+    /// sıfırlıyor, yani çubuk yalnız söylendiği karede var. Dock açık değilse
+    /// no-op.
+    pub(crate) fn set_dock_progress(&mut self, progress: Option<u16>, track: LinearRgba) {
         if let Some(dock) = &mut self.dock {
             dock.progress = progress.map(|p| f32::from(p.min(10_000)) / 10_000.0);
+            dock.track = track.to_array();
         }
     }
 
@@ -2181,13 +2187,14 @@ impl Frame {
             edge: [0.0; 4],
             separator: [0.0; 4],
             progress: None,
+            track: [0.0; 4],
             buttons: [None; 2],
         });
-        // İlerleme varken çizginin zemini ayracın rengi ve üstüne dolan kısım
+        // İlerleme varken çizginin zemini boş iz ve üstüne dolan kısım
         // kenarın renginde; yokken zemin kenarın kendisi ve dolgu sıfır
         // genişlik (dizinin boyu sabit, çağıran dallanmasın).
         let (edge_base, fill) = match dock.progress {
-            Some(p) => (dock.separator, width_px * p.clamp(0.0, 1.0)),
+            Some(p) => (dock.track, width_px * p.clamp(0.0, 1.0)),
             None => (dock.edge, 0.0),
         };
         let band = self.dock_band_px();
@@ -4195,12 +4202,14 @@ mod tests {
         assert_eq!(divider.size, [500.0, SEPARATOR_PX]);
         assert_eq!(divider.rgba, CURSOR.to_array());
 
-        // Yükleme sürerken (037 Karar 7) üst çizgi bir çubuk: zemini ayracın
-        // renginde, soldan dolan kısmı kenarın renginde.
-        frame.set_dock_progress(Some(2_500));
-        let [_, base, fill, _] = frame.dock_ground(500.0);
+        // Yükleme sürerken (037 Karar 7) üst çizgi bir çubuk: zemini boş izin
+        // renginde (phase-7), soldan dolan kısmı kenarın renginde; ikinci
+        // ayraç kendi renginde kalıyor.
+        frame.set_dock_progress(Some(2_500), BG);
+        let [_, base, fill, divider] = frame.dock_ground(500.0);
         assert_eq!(base.size, [500.0, SEPARATOR_PX]);
-        assert_eq!(base.rgba, CURSOR.to_array(), "çubuğun zemini ayraç");
+        assert_eq!(base.rgba, BG.to_array(), "çubuğun zemini boş iz");
+        assert_eq!(divider.rgba, CURSOR.to_array(), "ayraç izi taşımıyor");
         assert_eq!(fill.pos, [0.0, 0.0]);
         assert_eq!(fill.size, [125.0, SEPARATOR_PX]);
         assert_eq!(fill.rgba, SUCCESS.to_array(), "dolan kısım kenarın rengi");

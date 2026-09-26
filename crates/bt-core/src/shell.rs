@@ -494,6 +494,13 @@ pub struct Transfer {
     pub mark: HostMark,
     /// Durum metni (`↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB · …`).
     pub body: String,
+    /// Gövdenin başındaki [`Self::lead`] karakterin tonu; kalanı sönük
+    /// (037 phase-7): sonuç satırı sonucun rengini taşıyor — başarı
+    /// `success`, hata metni `error`, iptal ve ilerleme sönük.
+    pub tone: TransferTone,
+    /// [`Self::tone`]'da çizilen baştaki karakter sayısı: hata satırında
+    /// `Failed — {sebep}` kırmızı, arkasındaki ` · k of n uploaded` sönük.
+    pub lead: usize,
     /// Satırın sağındaki düğmelerin durumu; öğe sayısı sıfırsa düğme yok
     /// (sonuç satırı).
     pub controls: TransferControls,
@@ -517,9 +524,23 @@ impl Clone for Transfer {
         self.host.clone_from(&source.host);
         self.mark = source.mark;
         self.body.clone_from(&source.body);
+        self.tone = source.tone;
+        self.lead = source.lead;
         self.controls = source.controls;
         self.progress = source.progress;
     }
+}
+
+/// Yükleme satırı gövdesinin baştaki tonu ([`Transfer::tone`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransferTone {
+    /// Sönük (`dim`): ilerleme ve iptal.
+    #[default]
+    Quiet,
+    /// Temanın `success`'i: kuyruk bitti.
+    Success,
+    /// Temanın `error`'u: kuyruk hatayla bitti.
+    Error,
 }
 
 /// Yükleme satırının düğmelerinin durumu (037 phase-6): etiketler ve
@@ -532,10 +553,11 @@ impl Clone for Transfer {
 /// yalnız durum değişince isteniyor.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransferControls {
-    /// Listede görünen öğe sayısı (akan + bekleyen). `0` → düğme yok, `1` →
-    /// yalnız `Cancel`, fazlası → `Show files (N)` + `Cancel all`.
+    /// Listede görünen kalem sayısı — biten, akan ve bekleyen (037
+    /// phase-7). `0` → düğme yok, `1` → yalnız `Cancel`, fazlası →
+    /// `Show files (N)` + `Cancel all`.
     pub items: u16,
-    /// Liste açık: liste düğmesi `Hide files` diyor ve basılı tonda.
+    /// Liste (popover) açık: liste düğmesi basılı tonda; etiketi değişmiyor.
     pub list_open: bool,
     /// Farenin altındaki düğme.
     pub hover: Option<TransferAction>,

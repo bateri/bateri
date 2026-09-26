@@ -22,9 +22,10 @@ use crate::cluster::{ClusterId, Clusters, Walk};
 use crate::color::{self, LinearRgba, Theme};
 use crate::session::{Cell, CellHalf, SelectKind, SelectionRun, UnderlineStyle, WORD_SEPARATORS};
 
+use crate::settings::HostMark;
 use crate::shell::{
     ButtonState, DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, Reconnect,
-    ShellPhase, ShellState, Transfer, TransferAction,
+    ShellPhase, ShellState, Transfer, TransferAction, TransferTone,
 };
 
 /// Dock'un karedeki yüzeyi — hücrelerin **dışında** kalan her şey, çözülmüş.
@@ -75,8 +76,14 @@ pub struct Dock {
     /// Üst saç çizgisinin **dolan** payı, onbinde (`0..=10_000`): uzak
     /// dizine yükleme sürerken çizgi bir ilerleme çubuğu (037 Karar 7 →
     /// Kullanıcı kararı 4). Dolan kısım [`Self::edge`]'in renginde, kalanı
-    /// [`Self::separator`]'ınkinde; `None` → çizgi bütünüyle `edge`.
+    /// [`Self::track`]'inkinde; `None` → çizgi bütünüyle `edge`.
     pub progress: Option<u16>,
+    /// İlerleme çubuğunun **boş izi** (037 phase-7): işaretli host'ta
+    /// işaretin rengi, işaretsizde ayracınki. Dolan kısım ise her zaman
+    /// temanın `info`'su ([`Self::edge`]) — prod'da kırmızı dolan bir çubuk
+    /// hata gibi okunuyordu (kullanıcı, gözle kontrol). Ayrı alan, çünkü
+    /// [`Self::separator`] ikinci saç çizgisinin de rengi.
+    pub track: LinearRgba,
     /// Yükleme satırının düğmeleri (037 phase-6), soldan sağa; en çok iki.
     /// Hücreler (etiket) sink'ten akıyor, dolgu ve çerçeve buradan — çizimin
     /// kararı değil, yerleşimin ([`transfer_button_at`] aynı yerleşimi
@@ -236,7 +243,7 @@ const REMOTE_GAP: &str = "  ";
 /// yanı da göremiyor; kopyalar bu listeye bağlı
 /// (`the_upload_row_is_the_one_the_atlas_checks`). Düğmelerin `⌘`'si de
 /// burada: etiketi bu crate yazıyor ama glyph'i yine küçük sınıfta.
-pub const UPLOAD_GLYPHS: [char; 6] = ['↑', '⌘', '✓', '—', '·', '…'];
+pub const UPLOAD_GLYPHS: [char; 7] = ['↑', '⌘', '✓', '—', '·', '…', '→'];
 
 /// Bir düzenlemenin taşıyabileceği en çok glyph — **tasarım sabiti**.
 ///
@@ -1201,7 +1208,9 @@ pub(crate) fn render_with(
         ground: theme.background_linear(),
         // Yükleme sürerken çizgi kuyruğun host'unun renginde (ssh kapandıktan
         // sonra da, sonuç satırı gösterildiği sürece).
+        // İlerleme sürerken dolan kısım `info` (işaretin anlamı boş izde).
         edge: match (&context.transfer, &context.remote) {
+            (Some(transfer), _) if transfer.progress.is_some() => theme.info_linear(),
             (Some(transfer), _) => theme.mark_linear(transfer.mark),
             (None, Some(_)) => theme.mark_linear(context.remote_mark),
             (None, None) => theme.separator_linear(),
@@ -1217,6 +1226,10 @@ pub(crate) fn render_with(
             .transfer
             .as_ref()
             .and_then(|transfer| transfer.progress),
+        track: match &context.transfer {
+            Some(transfer) if transfer.mark != HostMark::None => theme.mark_linear(transfer.mark),
+            _ => theme.separator_linear(),
+        },
         buttons: [None; 2],
     };
     if cols.grid == 0 {
@@ -1790,9 +1803,9 @@ struct ButtonSpan {
 enum ButtonLabel {
     Cancel,
     CancelAll,
-    /// Listedeki öğe sayısıyla.
+    /// Listedeki kalem sayısıyla; liste açıkken de aynı etiket (037
+    /// phase-7: `Hide files` kalktı, düğme basılı tonda).
     ShowFiles(u16),
-    HideFiles,
 }
 
 impl ButtonLabel {
@@ -1801,7 +1814,6 @@ impl ButtonLabel {
         let (head, count, tail) = match self {
             Self::Cancel => ("Cancel", None, ""),
             Self::CancelAll => ("Cancel all", None, ""),
-            Self::HideFiles => ("Hide files", None, ""),
             Self::ShowFiles(items) => ("Show files (", Some(items), ")"),
         };
         head.chars()
@@ -1884,11 +1896,7 @@ fn transfer_layout(transfer: &Transfer, available: usize) -> TransferLayout {
     } else {
         ButtonLabel::Cancel
     };
-    let list = (controls.items > 1).then_some(if controls.list_open {
-        ButtonLabel::HideFiles
-    } else {
-        ButtonLabel::ShowFiles(controls.items)
-    });
+    let list = (controls.items > 1).then_some(ButtonLabel::ShowFiles(controls.items));
     // Düşme sırası: ipucu, liste, (iptal hiç yoksa düğme yok).
     let options = [(list, true), (list, false), (None, false)];
     let chosen = (controls.items > 0)
@@ -1969,6 +1977,30 @@ pub fn transfer_button_at(transfer: &Transfer, context: u16, col: u16) -> Option
         .map(|button| button.action)
 }
 
+/// Düğmenin bağlam satırındaki **dock-yerel** sütun aralığı `[start, end)`
+/// — dolgunun tamamı; düğme yoksa ya da sığmadıysa `None`. Liste
+/// popover'ının çıpası (037 phase-7): popover tıklanan noktaya değil
+/// düğmeye bağlı. [`transfer_button_at`]'ın tersi, aynı yerleşimden.
+pub fn transfer_button_span(
+    transfer: &Transfer,
+    context: u16,
+    action: TransferAction,
+) -> Option<(u16, u16)> {
+    let available = usize::from(context.saturating_sub(CONTEXT_COL));
+    transfer_layout(transfer, available)
+        .buttons
+        .into_iter()
+        .flatten()
+        .find(|button| button.action == action)
+        // audit: `end ≤ available ≤ context` ve `context` `u16`.
+        .map(|button| {
+            (
+                CONTEXT_COL + button.start as u16,
+                CONTEXT_COL + button.end as u16,
+            )
+        })
+}
+
 /// Bağlam satırının **yükleme** biçimi (037 Karar 7 → Kullanıcı kararı 4,
 /// düğmeler phase-6): `⇄ {host}` işaretin renginde (uzak biçimin öneki ve
 /// rengi korunuyor), gövde sönük, sağda düğmeler.
@@ -1991,6 +2023,14 @@ fn render_transfer(
         return [None; 2];
     }
     let dim = theme.dim_linear();
+    // Sonucun tonu gövdenin başında (037 phase-7): başarı yeşil, hata
+    // metni kırmızı; kalanı sönük.
+    let toned = match transfer.tone {
+        TransferTone::Quiet => dim,
+        TransferTone::Success => theme.success_linear(),
+        TransferTone::Error => theme.error_linear(),
+    };
+    let lead = transfer.lead;
     let line = mark
         .chain(std::iter::once((' ', accent)))
         .chain(transfer.host.chars().map(move |ch| (ch, accent)))
@@ -2000,7 +2040,8 @@ fn render_transfer(
                 .body
                 .chars()
                 .take(layout.body)
-                .map(move |ch| (ch, dim)),
+                .enumerate()
+                .map(move |(i, ch)| (ch, if i < lead { toned } else { dim })),
         )
         .chain(layout.clipped.then_some((ELLIPSIS, dim)));
     emit_context(line, available, row, sink);
@@ -3431,6 +3472,7 @@ mod tests {
                     ..TransferControls::default()
                 },
                 progress,
+                ..Transfer::default()
             }),
             ..remote("prod", "/srv")
         }
@@ -3456,8 +3498,9 @@ mod tests {
     #[test]
     fn an_upload_takes_over_the_context_row_and_the_edge() {
         // 037 Karar 7 → Kullanıcı kararı 4: `⇄ host` önek ve rengi korunuyor,
-        // yanında durum; üst çizgi işaretin renginde bir çubuk. Tek öğede
-        // yalnız `Cancel ⌘.` (phase-6), sağa yaslı.
+        // yanında durum; üst çizgi bir çubuk — dolan kısım `info`, boş iz
+        // işaretin renginde (phase-7). Tek öğede yalnız `Cancel ⌘.`
+        // (phase-6), sağa yaslı.
         let state = live("", "", "", 0);
         let context = uploading("↑ a.tar", 1, Some(2_500));
         let (cells, dock) = draw_with(&state, &context, COLS);
@@ -3477,7 +3520,8 @@ mod tests {
             Some(THEME.dim_linear()),
             "ipucu sönük"
         );
-        assert_eq!(dock.edge, THEME.error_linear());
+        assert_eq!(dock.edge, THEME.info_linear(), "dolan kısım her zaman info");
+        assert_eq!(dock.track, THEME.error_linear(), "boş iz işaretin renginde");
         assert_eq!(dock.progress, Some(2_500));
         assert_eq!(
             dock.buttons,
@@ -3566,11 +3610,59 @@ mod tests {
             "ipucu"
         );
 
-        // Liste açık: etiket `Hide files`, düğme basılı tonda.
+        // Liste açık: etiket değişmiyor (`Hide files` yok, phase-7), düğme
+        // basılı tonda; popover'ın çıpası düğmenin tam aralığı.
         let open = with_controls(context, |c| c.list_open = true);
         let (cells, dock) = draw_with(&state, &open, 60);
-        assert!(row_text(&cells, 1).contains("Hide files"));
+        assert!(row_text(&cells, 1).contains("Show files (2)"));
+        assert!(!row_text(&cells, 1).contains("Hide"));
         assert_eq!(dock.buttons[0].map(|b| b.state), Some(ButtonState::Pressed));
+        let transfer = open.transfer.as_ref().unwrap();
+        assert_eq!(
+            transfer_button_span(transfer, 60, TransferAction::List),
+            Some((28, 44))
+        );
+        assert_eq!(
+            transfer_button_span(transfer, 60, TransferAction::Cancel),
+            Some((45, 60))
+        );
+    }
+
+    #[test]
+    fn the_end_line_carries_the_outcome_colour_and_an_unmarked_track() {
+        // 037 phase-7: başarı yeşil, hata metni kırmızı ve tally'si sönük,
+        // iptal sönük. İşaretsiz host'ta boş iz ayracın renginde.
+        let state = live("", "", "", 0);
+        let line = |body: &str, tone: TransferTone, lead: usize| DockContext {
+            transfer: Some(Transfer {
+                host: "vm".into(),
+                body: body.into(),
+                tone,
+                lead,
+                ..Transfer::default()
+            }),
+            ..remote("vm", "/srv")
+        };
+        let done = "✓ a.tar → /srv";
+        let (cells, _) = draw_with(&state, &line(done, TransferTone::Success, 14), COLS);
+        assert_eq!(row_text(&cells, 1), format!("⇄ vm  {done}"));
+        assert_eq!(color_at(&cells, 1, 6), Some(THEME.success_linear()));
+        assert_eq!(color_at(&cells, 1, 19), Some(THEME.success_linear()));
+        let failed = "Failed — disk full · 0 of 3 uploaded";
+        let (cells, _) = draw_with(&state, &line(failed, TransferTone::Error, 18), 60);
+        assert_eq!(color_at(&cells, 1, 6), Some(THEME.error_linear()));
+        assert_eq!(color_at(&cells, 1, 23), Some(THEME.error_linear()), "sebep");
+        assert_eq!(color_at(&cells, 1, 25), Some(THEME.dim_linear()), "tally");
+        let (cells, _) = draw_with(&state, &line("Cancelled", TransferTone::Quiet, 9), COLS);
+        assert_eq!(color_at(&cells, 1, 6), Some(THEME.dim_linear()));
+
+        let mut running = line("↑ a", TransferTone::Quiet, 0);
+        if let Some(transfer) = &mut running.transfer {
+            transfer.progress = Some(10);
+        }
+        let (_, dock) = draw_with(&state, &running, COLS);
+        assert_eq!(dock.edge, THEME.info_linear());
+        assert_eq!(dock.track, THEME.separator_linear());
     }
 
     #[test]
@@ -3625,7 +3717,7 @@ mod tests {
         // `bt-atlas` durum satırının ASCII dışı karakterlerini küçük sınıfta
         // elle soruyor (`the_upload_row_has_no_box_in_the_small_class`); dizge
         // `bt-shell`'de (`upload`) ama karakter kümesi burada sabitleniyor.
-        assert_eq!(UPLOAD_GLYPHS, ['↑', '⌘', '✓', '—', '·', '…']);
+        assert_eq!(UPLOAD_GLYPHS, ['↑', '⌘', '✓', '—', '·', '…', '→']);
         assert!(
             CANCEL_HINT
                 .chars()
