@@ -1,5 +1,5 @@
 //! Ana menü: uygulama menüsü (About, Settings…, Hide, Quit), Shell (New
-//! Window, New Tab, Close Tab, Close Window), Edit (Cut, Copy, Paste, Paste
+//! Window, New Tab, New Local Tab, Mark Host as ▸, Close Tab, Close Window), Edit (Cut, Copy, Paste, Paste
 //! Escaped Text, Select All, Clear to Start, Clear Scrollback, Find ▸
 //! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
@@ -20,7 +20,8 @@
 //! delegate'ine (`window::TerminalWindow` — pencereye ait);
 //! `performMiniaturize:`, `performZoom:` ve sekme eylemleri
 //! (`selectNextTab:`, `moveTabToNewWindow:`…) `NSWindow`'un kendisine;
-//! `openSettings:`, tema eylemleri ve `newWindow:`/`newTab:` app delegate'e
+//! `openSettings:`, tema eylemleri, `markHost:` ve
+//! `newWindow:`/`newTab:`/`newLocalTab:` app delegate'e
 //! (ayar kaydının `settingsDidChange:`'i ile aynı yol — bütün
 //! pencerelere yayılıyorlar ya da pencere yokken de çalışmalılar);
 //! `terminate:`, `hide:`, `arrangeInFront:` ve
@@ -281,6 +282,12 @@ pub(crate) fn install(
         &[
             item(mtm, "New Window", sel!(newWindow:), "n"),
             item(mtm, "New Tab", sel!(newTab:), "t"),
+            // Uzak sekmede ⌘T aynı host'a gidiyor; bu her zaman yerel (037
+            // Karar 6).
+            with_modifiers(
+                item(mtm, "New Local Tab", sel!(newLocalTab:), "t"),
+                command | NSEventModifierFlags::Option,
+            ),
             NSMenuItem::separatorItem(mtm),
             // Başlığı ve grisi açılışta ([`ShellMenuDelegate`]); öğeler
             // `markHost:`'la app delegate'e (etkin sekmenin host'u).

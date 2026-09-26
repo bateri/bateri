@@ -696,6 +696,15 @@ pub(crate) struct WindowIvars {
     search_driving: Cell<bool>,
 }
 
+/// Yeni kabuğun doğum bilgisi — [`TerminalWindow::start`]'ın çağırandan
+/// aldığı iki karar (`AppDelegate::open_window`).
+pub(crate) struct Launch {
+    /// Başlangıç dizini (026 → Karar 4: etkin sekmenin dizini, yoksa ev).
+    pub(crate) working_directory: Option<PathBuf>,
+    /// Kabuğun ilk girdisi (037 Karar 6); `None` → sıradan yerel kabuk.
+    pub(crate) initial_input: Option<String>,
+}
+
 define_class!(
     // SAFETY: NSObject alt sınıflama şartı taşımaz; TerminalWindow Drop uygulamaz.
     #[unsafe(super(NSObject))]
@@ -1694,12 +1703,15 @@ impl TerminalWindow {
     /// dizini, yoksa ev). Hata çağırana dönüyor: ilk pencerede süreç çıkıyor,
     /// ⌘T/⌘N'de yalnız o pencere kapanıyor — öteki sekmelerin kabukları bir
     /// yenisinin doğamamasıyla ölmemeli.
+    ///
+    /// `launch.initial_input` kabuğun ilk girdisi (037 Karar 6: uzak sekmede
+    /// ⌘T, `AppDelegate::open_window`'un kararı); `None` → sıradan yerel kabuk.
     pub(crate) fn start(
         &self,
         app: &AppDelegate,
         mtm: MainThreadMarker,
         theme: Theme,
-        working_directory: Option<PathBuf>,
+        launch: Launch,
     ) -> std::io::Result<()> {
         let (integration, birth) = app.shell_integration();
         self.ivars().dock_rows_at_birth.set(birth);
@@ -1707,7 +1719,7 @@ impl TerminalWindow {
         // Grid ölçüsü pencereden türer; oturum ilk boyutuyla doğsun ki
         // shell açılışta doğru `TIOCSWINSZ` görsün.
         let grid = self.sync_geometry(app);
-        self.start_session(app, mtm, grid, theme, integration, working_directory)
+        self.start_session(app, mtm, grid, theme, integration, launch)
     }
 
     /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
@@ -1719,8 +1731,12 @@ impl TerminalWindow {
         grid: Grid,
         theme: Theme,
         integration: Vec<(String, String)>,
-        working_directory: Option<PathBuf>,
+        launch: Launch,
     ) -> std::io::Result<()> {
+        let Launch {
+            working_directory,
+            initial_input,
+        } = launch;
         // Duman ve ölçüm koşularında shell sabit: sonuç kullanıcının
         // `$SHELL`'ine ve rc dosyasına bağlı olmasın. Betiklerin
         // sahibi `bt-core`; `smoke_shell`'in sekiz hücre ve altı
@@ -1756,6 +1772,10 @@ impl TerminalWindow {
                 ShellParent::Direct,
             ),
         };
+        // Sarmalayıcı kuruldu mu: entegrasyonun ortamı boş değilse kabuk
+        // kimliğimizi basacak (`blocks` kademesi dock'suz ama işaretli, yani
+        // `dock`'tan türetilemez). Ortam aşağıda `env`'e taşınmadan **önce**.
+        let shell_marks = !integration.is_empty();
         let session = Session::spawn(
             SessionOptions {
                 command,
@@ -1792,6 +1812,10 @@ impl TerminalWindow {
                 // Kümeleme (035) bütün pencerelerde açık, süreli koşu dahil.
                 // Ayar anahtarı değil (035 Karar 2): geri alma bu tek satır.
                 cluster: true,
+                // Süreli koşu `open_window`'dan hep `None` alıyor (tek
+                // pencere, ⌘T yok), yani sabit betikleri bundan etkilenmiyor.
+                initial_input,
+                shell_marks,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );

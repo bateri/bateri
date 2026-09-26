@@ -687,6 +687,8 @@ mod tests {
                 // dock alırdı.
                 dock: true,
                 cluster: false,
+                initial_input: None,
+                shell_marks: false,
             },
             Arc::new(SilentWake),
         )
@@ -808,6 +810,8 @@ mod tests {
                     theme: Theme::BATERI,
                     dock: true,
                     cluster: true,
+                    initial_input: None,
+                    shell_marks: false,
                 },
                 Arc::new(SilentWake),
             )
@@ -898,6 +902,8 @@ mod tests {
                 // dock alırdı.
                 dock: true,
                 cluster: false,
+                initial_input: None,
+                shell_marks: false,
             },
             Arc::new(SilentWake),
         )
@@ -1029,6 +1035,8 @@ mod tests {
                 // dock alırdı.
                 dock: true,
                 cluster: false,
+                initial_input: None,
+                shell_marks: false,
             },
             Arc::new(SilentWake),
         )
@@ -1163,6 +1171,8 @@ mod tests {
                 theme: Theme::BATERI,
                 dock: true,
                 cluster: false,
+                initial_input: None,
+                shell_marks: false,
             },
             Arc::new(SilentWake),
         )
