@@ -51,6 +51,7 @@ use crate::jobs::{self, Foreground, Libproc, Probe, ShellParent};
 use crate::notices::{Source, font_messages};
 use crate::quote;
 use crate::search_bar::{SearchBar, selection_query};
+use crate::upload::Uploads;
 use crate::view::BateriView;
 use crate::zoom::Zoom;
 use crate::{Run, Workload};
@@ -694,6 +695,12 @@ pub(crate) struct WindowIvars {
     /// Sayım dizininin sürücüsü ana kuyrukta bir tur bekliyor mu
     /// ([`TerminalWindow::kick_search`]): ikinci bir sürücü kurulmasın.
     search_driving: Cell<bool>,
+    /// Finder damlasının uzak dizine yüklenmesi (037 Karar 7): sıra,
+    /// ilerleme ve sonuç satırı ([`crate::upload::Uploads`]). Kuyruk **bu
+    /// sekmenin ssh bağlantısının** — başka sekmeye geçmek onu durdurmuyor.
+    uploads: RefCell<Uploads>,
+    /// Açık yükleme sayfası (onay ya da hata): sayfa süresince yaşıyor.
+    upload_alert: RefCell<Option<Retained<NSAlert>>>,
 }
 
 /// Yeni kabuğun doğum bilgisi — [`TerminalWindow::start`]'ın çağırandan
@@ -1053,8 +1060,31 @@ define_class!(
                     .session
                     .get()
                     .is_some_and(|session| session.has_selection())
+            } else if action == Some(sel!(cancelUpload:)) {
+                // ⌘. yalnız bu sekmede kuyruk varken (037 Karar 7); gri
+                // öğenin kısayolu `keyDown:`'a düşüyor ve orada yutuluyor.
+                self.ivars().uploads.borrow().active()
             } else {
                 true
+            }
+        }
+
+        /// Shell ▸ Cancel Upload (⌘.) ve durum satırının ✕'i: bu sekmenin
+        /// **bütün** yükleme kuyruğunu iptal eder (037 Karar 7 → Kullanıcı
+        /// kararı 5). Esc değil, çünkü klavye o sırada uzak kabuğa gidiyor.
+        #[unsafe(method(cancelUpload:))]
+        fn cancel_upload(&self, _sender: Option<&AnyObject>) {
+            self.cancel_uploads();
+        }
+
+        /// Durum satırının listesinde bir öğenin ✕'i: `tag` listedeki sırası.
+        #[unsafe(method(cancelUploadItem:))]
+        fn cancel_upload_item(&self, sender: Option<&AnyObject>) {
+            let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>()) else {
+                return;
+            };
+            if let Ok(index) = usize::try_from(item.tag()) {
+                self.cancel_upload_at(index);
             }
         }
 
@@ -1207,6 +1237,8 @@ impl TerminalWindow {
             search: OnceCell::new(),
             search_status: Cell::new(SearchStatus::Empty),
             search_driving: Cell::new(false),
+            uploads: RefCell::new(Uploads::default()),
+            upload_alert: RefCell::new(None),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1526,6 +1558,26 @@ impl TerminalWindow {
         }
     }
 
+    /// Yükleme kuyruğu (`uploader`'ın yarısı).
+    pub(crate) fn uploads(&self) -> &RefCell<Uploads> {
+        &self.ivars().uploads
+    }
+
+    /// Açık yükleme sayfasının yuvası.
+    pub(crate) fn upload_alert(&self) -> &RefCell<Option<Retained<NSAlert>>> {
+        &self.ivars().upload_alert
+    }
+
+    /// Bu sekmenin `NSWindow`'u (sayfanın sahibi).
+    pub(crate) fn ns_window(&self) -> &NSWindow {
+        &self.ivars().window
+    }
+
+    /// Terminal view'ı (listenin açıldığı yer).
+    pub(crate) fn view(&self) -> &BateriView {
+        &self.ivars().view
+    }
+
     pub(crate) fn session(&self) -> Option<&Arc<Session>> {
         self.ivars().session.get()
     }
@@ -1601,6 +1653,9 @@ impl TerminalWindow {
                 .setTitle(&NSString::from_str(&session.title()));
         }
         self.refresh_tab_mark();
+        // Uzak durumun kenarı yükleme kuyruğunun da kenarı: ssh kapandıysa
+        // bekleyenler iptal (037 Karar 7 → Kullanıcı kararı 6).
+        self.check_upload_connection();
     }
 
     /// Uzak sekmenin host'u ve çözülmüş işareti; yerelde `None`
@@ -2387,6 +2442,9 @@ impl TerminalWindow {
     /// mandallı, `detach` `take`, `begin_shutdown` `Option`). Oturum hiç
     /// doğmadıysa `None` — kapanacak bir şey yok.
     pub(crate) fn begin_close(&self) -> Option<Closing> {
+        // Yükleme sekmeyle gidiyor: süreçler öldürülüyor ve yarım dosya
+        // siliniyor; sonucu gösterecek bir dock kalmadı.
+        self.abandon_uploads();
         if let Some(link) = self.ivars().link.get() {
             link.stop();
         }

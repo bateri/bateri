@@ -1,5 +1,5 @@
 //! Ana menü: uygulama menüsü (About, Settings…, Hide, Quit), Shell (New
-//! Window, New Tab, New Local Tab, Mark Host as ▸, Close Tab, Close Window), Edit (Cut, Copy, Paste, Paste
+//! Window, New Tab, New Local Tab, Mark Host as ▸, Cancel Upload, Close Tab, Close Window), Edit (Cut, Copy, Paste, Paste
 //! Escaped Text, Select All, Clear to Start, Clear Scrollback, Find ▸
 //! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
@@ -292,6 +292,9 @@ pub(crate) fn install(
             // Başlığı ve grisi açılışta ([`ShellMenuDelegate`]); öğeler
             // `markHost:`'la app delegate'e (etkin sekmenin host'u).
             mark_holder(mtm),
+            // Uzak dizine yüklemenin bütün kuyruğu (037 Karar 7); yalnız
+            // kuyruk varken etkin (`TerminalWindow`'un `validateMenuItem:`'ı).
+            item(mtm, "Cancel Upload", sel!(cancelUpload:), "."),
             NSMenuItem::separatorItem(mtm),
             // `performClose:` değil (028 phase-2, ölçüldü): kırmızı düğmenin
             // iptal edilen grup kapanışından sonra AppKit `performClose:`'u

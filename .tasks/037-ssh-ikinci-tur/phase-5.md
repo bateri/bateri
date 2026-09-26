@@ -67,18 +67,83 @@ _Requirements: R8, R9_
 
 ## Checklist
 
-- [ ] Karar 7'nin cevabı `discussion.md`'ye işlendi
-- [ ] (B) `upload.rs` saf yarı ve süreç yarısı
-- [ ] (B) Onay sayfası, tek yükleme bayrağı, nesil kapılı yapıştırma, hata sayfası
-- [ ] (A) Uzak kolda ret ve doc
-- [ ] `CLAUDE.md` ve yol haritası
-- [ ] Test: yukarıdaki Kabul maddeleri
-- [ ] Doğrulama geçti (`make hepsi` + `make duman`)
-- [ ] Gözle kontrol (devir mesajının cümlesi): (B) anahtarla girilen bir
-  host'ta `ssh <host>`, uzak kabuk OSC 7 basıyorsa bir dizine `cd`, Finder'dan
-  bir dosya bırak — sayfa hedefi söylüyor, Upload sonrası uzak kabuğun
-  satırında (**ızgara**, ssh'ın içi) `/uzak/yol/dosya` yazılı ve `ls` onu
-  gösteriyor; parolalı bir host'ta sayfa açık bir hata söylüyor, asılı
-  kalmıyor. (A) ssh sekmesine sürüklenen dosyada imleç "+" göstermiyor,
-  bırakınca geri dönüyor. İkisinde de yerel sekmede damla **dock**'a yolu
-  yazıyor.
+- [x] Karar 7'nin cevabı `discussion.md`'ye işlendi (B, genişletilmiş — "Kullanıcı kararı")
+- [x] (B) `upload.rs` saf yarı ve süreç yarısı
+- [x] (B) Onay sayfası, tek yükleme bayrağı, nesil kapılı yapıştırma, hata sayfası
+- [x] (Kullanıcı kararı) Replace/Merge, `df` ön kontrolü, klasörde sayı ve boyut
+- [x] (Kullanıcı kararı) ara arşivsiz `tar c | ssh … tar x`, sıralı kuyruk, `▴ list` (öğe başına ✕, Cancel All)
+- [x] (Kullanıcı kararı) durum satırı, üst çizgide ilerleme, Dock simgesinde ilerleme
+- [x] (Kullanıcı kararı) ⌘. ve ✕ ile iptal + yarım dosyanın silinmesi; disk dolu; ssh kapanması
+- [~] (A) Uzak kolda ret ve doc — A seçilmedi
+- [x] `CLAUDE.md` ve yol haritası (phase-2'den devralınan "dört yol" dahil)
+- [x] Test: yukarıdaki Kabul maddeleri
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
+- [x] Gözle kontrol (devir mesajının cümlesi)
+
+## Uygulama Notları
+
+- **Kapsam kullanıcı kararıyla genişledi ve tek phase'te kaldı** (bölünmedi):
+  B'nin `scp`'si yerine `tar c | ssh … tar x` (dosyada da — kullanıcının
+  gördüğü aynı, ilerleme kesin). Yukarıdaki "Değişiklikler"in `scp` çeviri
+  tablosu yerine `upload::ssh_argv`: seçenekler **süzülüyor** (bağlantıyı
+  değiştirenler kalıyor, `-t -n -N -W -s -O -v` düşüyor) ve bizimkiler başta
+  (`-T -o BatchMode=yes -o ControlMaster=no`) — ssh bir anahtarın **ilk**
+  değerini alıyor. `ControlMaster=no` açık bir ana bağlantıyı kullanıyor ama
+  ana olmuyor (arka plana düşen ana bağlantı borunun ucunu tutardı).
+- **Uzak komut `sh -c '…'`, tırnak ters bölüsüz** (`'"'"'`): giriş kabuğu fish
+  olabilir ve fish tek tırnağın içinde `\'`'yi kaçış sayıyor. Kalan delik
+  adıyla: adında ters bölü ya da kontrol karakteri olan öğe (ya da uzak
+  dizin) sayfada reddediliyor. Yoklama tek bağlantıda (`echo BT-UPLOAD`
+  işaretiyle rc gürültüsünü atlıyor; adlar değil indeksler); sınaması betiği
+  `/bin/sh`, `bash` ve `zsh` giriş kabuğu altında gerçekten koşturuyor.
+- **Akışın sınaması bağlantısız:** ssh'ın yerine `/bin/sh -c` — uzakta koşacak
+  betik ve akış bayt bayt aynı (`a_folder_travels_through_the_stream…`).
+- **İlerleme `TarWatcher`'dan:** bsdtar'ın pax başlıkları (`path=`) ve 256
+  tabanlı boy okunuyor; `COPYFILE_DISABLE=1` + `--no-mac-metadata --no-xattrs
+  --no-acls` (yoksa uzakta `._ad` dosyaları ve GNU tar'da uyarı). Bayt
+  sayacı içerik baytı (başlıklar hariç), yani `18.2 / 44.6 MB` dosyaların
+  boyuna göre. Uzakta `tar -x -p -o` (root'a yüklenen dosya yerel uid'ye
+  düşmesin).
+- **İptal süreçleri öldürüyor** (`Shared::kill`, `libc::kill`): akış thread'i
+  yavaş bağlantıda yazımda bloklu ve bayrağa bakmıyor. Yarım dosya akışın son
+  başlığından (`TarWatcher::current`), siliniyor ayrı bir `ssh … rm -f`.
+  Disk dolu stderr'deki `No space left on device` satırından (GNU tar hatadan
+  sonra akışı yutmaya devam ediyor; satır görülünce akış hemen duruyor).
+- **ssh kapanınca akan öğe kendi bağlantısıyla bitiyor**, yalnız bekleyenler
+  iptal ("bekleyen öğeler iptal olur") ve yolu yapıştırılmıyor. Kenar
+  `refresh_title` (`D`/`A`'nın `title_changed`'i). Sekme kapanınca
+  (`begin_close`) kuyruk iptal.
+- **Durum satırı `bt-core`'da çiziliyor, metni `bt-shell`'de doğuyor**
+  (`DockContext::transfer`): gövde sağdan `…` ile kısalıyor, düğmeler
+  kısalmıyor ve sığmazsa yok. Düğmelerin yeri çizim ile farenin tek formülü
+  (`bt_core::transfer_controls_col`); tık bağlam satırında küçük sınıfın
+  adımıyla sütuna iniyor (`bt_gpu::context_cols` `pub` oldu). Satırın ASCII
+  dışı karakterleri `bt_core::UPLOAD_GLYPHS` sözlüğünde ve `bt-atlas`
+  küçük sınıfta kutu olmadıklarını soruyor.
+- **Liste AppKit'in açılır menüsü** (öğe başına `✕ ad`, akan öğede
+  "(uploading)", ayraç, Cancel All): "dock'un üstünde küçük bir liste"nin
+  yerli karşılığı. Akan öğenin ✕'i yalnız onu durduruyor, kuyruk sürüyor.
+- **Üst çizgi çubuğa dönüyor:** `Frame::dock_ground` dört dörtlü (zemin,
+  çizginin zemini, dolan kısım, ikinci ayraç); ilerlemede çizginin zemini
+  ayracın rengi, dolan kısım işaretin. Kalınlık saç çizgisininki.
+- Boş alan yalnız bu damlayla karşılaştırılıyor (kuyrukta bekleyen baytlar
+  düşülmüyor — bilinen sınır, `upload::sheet`'in doc'u). Hedef bilinmiyorsa
+  (OSC 7 yok) ev dizini ve yapıştırılan yol mutlak (`pwd`'den), `~/ad` değil.
+- Üç tasarım sabiti: `upload::TICK` (200 ms haber aralığı), `SPEED_WINDOW`
+  (3 s), `LINGER` (4 s sonuç satırı — durma koşulu).
+- `objc2-app-kit`'e `NSDockTile` ve `NSProgressIndicator` bayrakları (yalnız
+  başlık, `Cargo.lock` oynamadı); `make denetim` `Cargo.toml` farkı için
+  uyarıyor, karar kaydı Kullanıcı kararı 4.
+- **Bilinen sınırlar:** parola sorulamaz (BatchMode; anahtar/agent ya da açık
+  ControlMaster); dock'suz pencerede (`[shell] integration = "blocks"`) durum
+  satırı yok, ilerleme yalnız Dock simgesinde; dosya ↔ klasör tür çakışması
+  (uzakta aynı adda klasör, yerelde dosya) tar'ın hatasıyla bitiyor.
+- **Set kapısı `/code-review` bulguları (beşi de giderildi):** sekme kapanınca
+  Dock simgesinin çubuğu donuyordu (`abandon_uploads` kuyruğu bırakıp simgeyi
+  tazeliyor); `df` hiçbir şey basmazsa yoklamanın cevabı bir satır kayıyordu
+  (satırlar kendi işaretini taşıyor, `BT-DF`); iptal edilip henüz bitmemiş
+  kuyruğa onaylanan damla sessizce düşüyordu (`can_accept` o hâlde hayır);
+  tek öğeyi listeden iptal "✓" diyordu (sırada başka öğe yoksa kuyruğun
+  iptali); iptal toplanmış bir pid'e sinyal gönderebiliyordu
+  (`wait_untracked`: `waitid(WNOWAIT)` → listeden çıkar → topla).
+  `/audit`: mekanik temiz, yedi mercek temiz.

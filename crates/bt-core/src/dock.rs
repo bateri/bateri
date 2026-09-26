@@ -24,7 +24,7 @@ use crate::session::{Cell, CellHalf, SelectKind, SelectionRun, UnderlineStyle, W
 
 use crate::shell::{
     DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, Reconnect, ShellPhase,
-    ShellState,
+    ShellState, Transfer,
 };
 
 /// Dock'un karedeki yüzeyi — hücrelerin **dışında** kalan her şey, çözülmüş.
@@ -72,6 +72,11 @@ pub struct Dock {
     /// çağıranın tamponuna akıyorlar ([`crate::Session::dock`]'un
     /// `selection`'ı, [`crate::SelectionRuns`] emsali).
     pub sigil: Option<LinearRgba>,
+    /// Üst saç çizgisinin **dolan** payı, onbinde (`0..=10_000`): uzak
+    /// dizine yükleme sürerken çizgi bir ilerleme çubuğu (037 Karar 7 →
+    /// Kullanıcı kararı 4). Dolan kısım [`Self::edge`]'in renginde, kalanı
+    /// [`Self::separator`]'ınkinde; `None` → çizgi bütünüyle `edge`.
+    pub progress: Option<u16>,
 }
 
 /// Dock caret'inin yeri: giriş bloğunda **ekran** sütunu ve dikey pencerenin
@@ -203,6 +208,13 @@ const RECONNECT_HINT: &str = "  Connection lost · ⏎ reconnect";
 /// Uzak biçimde host ile yol arasındaki boşluk: iki sütun — `|` ayracı yok,
 /// çünkü dal yok ve iki yan aynı şeyin (uzak konum) iki parçası.
 const REMOTE_GAP: &str = "  ";
+
+/// Yükleme satırının ASCII dışı karakterleri (037 Karar 7 → Kullanıcı kararı
+/// 4) — `bt-shell`'in biçimlediği metnin **sözlüğü**. Metin orada doğuyor,
+/// ama küçük sınıfta kutu çıkmadığının kapısı `bt-atlas`'ta ve o crate iki
+/// yanı da göremiyor; kopyalar bu listeye bağlı
+/// (`the_upload_row_is_the_one_the_atlas_checks`).
+pub const UPLOAD_GLYPHS: [char; 7] = ['↑', '▴', '✕', '✓', '—', '·', '…'];
 
 /// Bir düzenlemenin taşıyabileceği en çok glyph — **tasarım sabiti**.
 ///
@@ -1165,10 +1177,12 @@ pub(crate) fn render_with(
     runs.clear();
     let mut surface = Dock {
         ground: theme.background_linear(),
-        edge: if context.remote.is_some() {
-            theme.mark_linear(context.remote_mark)
-        } else {
-            theme.separator_linear()
+        // Yükleme sürerken çizgi kuyruğun host'unun renginde (ssh kapandıktan
+        // sonra da, sonuç satırı gösterildiği sürece).
+        edge: match (&context.transfer, &context.remote) {
+            (Some(transfer), _) => theme.mark_linear(transfer.mark),
+            (None, Some(_)) => theme.mark_linear(context.remote_mark),
+            (None, None) => theme.separator_linear(),
         },
         separator: theme.separator_linear(),
         caret: None,
@@ -1177,6 +1191,10 @@ pub(crate) fn render_with(
         // satırının başı ve bağlam satırına oturmamalı. Erken dönüşlerin
         // hepsinden önce, ki hiçbir kol onu geri getirmesin.
         sigil: (input_rows > 0).then(|| sigil_color(shell, theme)),
+        progress: context
+            .transfer
+            .as_ref()
+            .and_then(|transfer| transfer.progress),
     };
     if cols.grid == 0 {
         settle(change, &mut edits);
@@ -1611,6 +1629,12 @@ fn render_context(
     if available == 0 {
         return;
     }
+    // Yükleme satırı uzak biçimden **önce**: kendi host'unu taşıyor ve ssh
+    // kapandıktan sonra da sonucunu göstermek zorunda (037 Karar 7).
+    if let Some(transfer) = &context.transfer {
+        render_transfer(transfer, theme, available, row, sink);
+        return;
+    }
     if let Some(host) = context.remote_host() {
         let color = theme.mark_linear(context.remote_mark);
         render_remote_context(
@@ -1705,6 +1729,138 @@ fn render_remote_context(
         .chain(host.chars().map(|ch| (ch, info)))
         .chain(REMOTE_GAP.chars().map(|ch| (ch, info)))
         .chain(path);
+    emit_context(line, available, row, sink);
+}
+
+/// Yükleme satırının yerleşimi ([`transfer_layout`]): satır nereye kadar
+/// ne gösteriyor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TransferLayout {
+    /// `⇄ host` sığdı mı; sığmadıysa satır yalnız `⇄`.
+    head: bool,
+    /// Gövdeden gösterilen karakter sayısı (kısaltma işareti hariç).
+    body: usize,
+    /// Gövde kısaltıldı mı (`…` sonda).
+    clipped: bool,
+    /// Düğmelerin bağlam-yerel sütunu; `None` → sığmadı ya da yok.
+    controls: Option<usize>,
+}
+
+/// Gövde ile düğmeler arasındaki boşluk.
+const CONTROLS_GAP: usize = 2;
+
+/// Yükleme satırının yerleşimi: `⇄ {host}  {body}  {controls}`.
+///
+/// **Bütçe önce `⇄ host`'a, sonra düğmelere, kalan gövdeye.** Host
+/// kısalmıyor (uzak biçimin gerekçesi: kısalmış bir host başka bir makine
+/// okunur); düğmeler de kısalmıyor — yarım bir `▴ li` tıklanacak bir şey
+/// söylemiyor — ve sığmazsa hiç çizilmiyor. Gövde sağdan `…` ile kısalıyor:
+/// bilgisi başında (hangi dosya, kaçıncı).
+///
+/// Çizim ([`render_transfer`]) ve fare ([`transfer_controls_col`]) bunu
+/// okuyor; iki aritmetik ayrışsaydı tık düğmenin yanına düşerdi.
+fn transfer_layout(transfer: &Transfer, available: usize) -> TransferLayout {
+    let head_chars = 2 + transfer.host.chars().count();
+    if head_chars > available {
+        return TransferLayout {
+            head: false,
+            body: 0,
+            clipped: false,
+            controls: None,
+        };
+    }
+    let rest = available - head_chars;
+    let rest = rest.saturating_sub(REMOTE_GAP.chars().count());
+    let body_chars = transfer.body.chars().count();
+    let controls_chars = transfer.controls.chars().count();
+    let with_controls = controls_chars > 0 && controls_chars <= rest;
+    let budget = if with_controls {
+        rest - controls_chars
+    } else {
+        rest
+    };
+    // Gövdeyle düğmeler arasına boşluk yalnız ikisi de varsa; boşluğa yer
+    // yoksa gövde çekiliyor, düğmeler değil.
+    let budget = if with_controls && body_chars > 0 {
+        budget.saturating_sub(CONTROLS_GAP)
+    } else {
+        budget
+    };
+    let (body, clipped) = if body_chars <= budget {
+        (body_chars, false)
+    } else {
+        // İşaretin kendisi de bir sütun.
+        (budget.saturating_sub(1), budget > 0)
+    };
+    let shown = body + usize::from(clipped);
+    let controls = with_controls.then(|| {
+        head_chars + REMOTE_GAP.chars().count() + shown + if shown > 0 { CONTROLS_GAP } else { 0 }
+    });
+    TransferLayout {
+        head: true,
+        body,
+        clipped,
+        controls,
+    }
+}
+
+/// Yükleme satırının düğmelerinin **dock-yerel** sütunu (bağlam satırının
+/// sütun adımında, yani küçük sınıfta); `None` → çizilmiyor. `context` bağlam
+/// satırının bütçesi ([`DockCols::context`]).
+///
+/// Farenin tek girdisi: çizimle aynı yerleşimden ([`transfer_layout`]).
+pub fn transfer_controls_col(transfer: &Transfer, context: u16) -> Option<u16> {
+    let available = usize::from(context.saturating_sub(CONTEXT_COL));
+    let col = transfer_layout(transfer, available).controls?;
+    // audit: `col < available ≤ context` ve `context` `u16`.
+    Some(CONTEXT_COL + col as u16)
+}
+
+/// Bağlam satırının **yükleme** biçimi (037 Karar 7 → Kullanıcı kararı 4):
+/// `⇄ {host}` işaretin renginde (uzak biçimin öneki ve rengi korunuyor),
+/// gövde sönük, düğmeler yine işaretin renginde — tıklanacak şeyler
+/// okunacak metinden ayrılsın.
+fn render_transfer(
+    transfer: &Transfer,
+    theme: &Theme,
+    available: usize,
+    row: u16,
+    sink: &mut impl FnMut(Cell),
+) {
+    let accent = theme.mark_linear(transfer.mark);
+    let layout = transfer_layout(transfer, available);
+    let mark = std::iter::once((REMOTE_MARK, accent));
+    if !layout.head {
+        emit_context(mark, available, row, sink);
+        return;
+    }
+    let dim = theme.dim_linear();
+    let shown = layout.body + usize::from(layout.clipped);
+    let gap = if layout.controls.is_some() && shown > 0 {
+        CONTROLS_GAP
+    } else {
+        0
+    };
+    let controls = layout
+        .controls
+        .is_some()
+        .then(|| transfer.controls.chars().map(move |ch| (ch, accent)))
+        .into_iter()
+        .flatten();
+    let line = mark
+        .chain(std::iter::once((' ', accent)))
+        .chain(transfer.host.chars().map(move |ch| (ch, accent)))
+        .chain(REMOTE_GAP.chars().map(move |ch| (ch, accent)))
+        .chain(
+            transfer
+                .body
+                .chars()
+                .take(layout.body)
+                .map(move |ch| (ch, dim)),
+        )
+        .chain(layout.clipped.then_some((ELLIPSIS, dim)))
+        .chain(std::iter::repeat_n((' ', dim), gap))
+        .chain(controls);
     emit_context(line, available, row, sink);
 }
 
@@ -3066,7 +3222,82 @@ mod tests {
             remote_mark: HostMark::None,
             remote_cwd: remote_cwd.into(),
             reconnect: None,
+            transfer: None,
         }
+    }
+
+    fn uploading(body: &str, controls: &str, progress: Option<u16>) -> DockContext {
+        DockContext {
+            transfer: Some(Transfer {
+                host: "prod".into(),
+                mark: HostMark::Production,
+                body: body.into(),
+                controls: controls.into(),
+                progress,
+            }),
+            ..remote("prod", "/srv")
+        }
+    }
+
+    #[test]
+    fn an_upload_takes_over_the_context_row_and_the_edge() {
+        // 037 Karar 7 → Kullanıcı kararı 4: `⇄ host` önek ve rengi korunuyor,
+        // yanında durum ve düğmeler; üst çizgi işaretin renginde bir çubuk.
+        let state = live("", "", "", 0);
+        let context = uploading("↑ 1 of 2 · a.tar", "▴ list  ✕", Some(2_500));
+        let (cells, dock) = draw_with(&state, &context, COLS);
+        assert_eq!(row_text(&cells, 1), "⇄ prod  ↑ 1 of 2 · a.tar  ▴ list  ✕");
+        let color = |col: u16| {
+            cells
+                .iter()
+                .find(|cell| cell.row == 1 && cell.col == col)
+                .map(|cell| cell.fg)
+        };
+        assert_eq!(color(2), Some(THEME.error_linear()), "host");
+        assert_eq!(color(8), Some(THEME.dim_linear()), "gövde");
+        assert_eq!(color(26), Some(THEME.error_linear()), "düğme");
+        assert_eq!(dock.edge, THEME.error_linear());
+        assert_eq!(dock.progress, Some(2_500));
+        assert_eq!(
+            transfer_controls_col(context.transfer.as_ref().unwrap(), COLS),
+            Some(26)
+        );
+        // Uzak durum bittikten sonra da (ssh kapandı) satır kendi host'uyla.
+        let closed = DockContext {
+            remote: None,
+            ..uploading("Connection closed", "", None)
+        };
+        let (cells, dock) = draw_with(&state, &closed, COLS);
+        assert_eq!(row_text(&cells, 1), "⇄ prod  Connection closed");
+        assert_eq!(dock.edge, THEME.error_linear());
+        assert_eq!(dock.progress, None);
+    }
+
+    #[test]
+    fn an_upload_row_clips_the_body_and_keeps_the_controls_whole() {
+        let state = live("", "", "", 0);
+        let context = uploading("↑ backup.tar.gz  18.2 / 44.6 MB", "▴ list  ✕", None);
+        let transfer = context.transfer.as_ref().unwrap();
+        // 6 (`⇄ prod`) + 2 + gövde + 2 + 9 (düğmeler) = 30 sütunda gövde 11.
+        let (cells, _) = draw_with(&state, &context, 30);
+        assert_eq!(row_text(&cells, 1), "⇄ prod  ↑ backup.t…  ▴ list  ✕");
+        assert_eq!(transfer_controls_col(transfer, 30), Some(21));
+        // Düğmeler sığmıyorsa hiç yok; gövde kalanı alıyor.
+        let (cells, _) = draw_with(&state, &context, 14);
+        assert_eq!(row_text(&cells, 1), "⇄ prod  ↑ bac…");
+        assert_eq!(transfer_controls_col(transfer, 14), None);
+        // Host bile sığmıyorsa yalnız işaret.
+        let (cells, _) = draw_with(&state, &context, 4);
+        assert_eq!(row_text(&cells, 1), "⇄");
+        assert_eq!(transfer_controls_col(transfer, 4), None);
+    }
+
+    #[test]
+    fn the_upload_row_is_the_one_the_atlas_checks() {
+        // `bt-atlas` durum satırının ASCII dışı karakterlerini küçük sınıfta
+        // elle soruyor (`the_upload_row_has_no_box_in_the_small_class`); dizge
+        // `bt-shell`'de (`upload`) ama karakter kümesi burada sabitleniyor.
+        assert_eq!(UPLOAD_GLYPHS, ['↑', '▴', '✕', '✓', '—', '·', '…']);
     }
 
     fn offered(host: &str, mark: HostMark) -> DockContext {

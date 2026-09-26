@@ -464,6 +464,59 @@ pub struct DockContext {
     /// Bağlamın içinde, [`Self::remote`]'un gerekçesiyle: dock'un yer
     /// tutucusu onu kare yolunda bağlamla aynı kilit turunda alıyor.
     pub reconnect: Option<Reconnect>,
+    /// Uzak dizine yüklemenin durum satırı (037 Karar 7 → Kullanıcı kararı
+    /// 4); yükleme yoksa `None`.
+    ///
+    /// Yazarı `bt-shell`'in yükleme kuyruğu ([`crate::Session::set_transfer`]);
+    /// ne `C`/`D`/`A` ne girdi siliyor — kuyruğun kendi ömrü var ve bitince
+    /// satır bir süre sonucu gösterip kalkıyor. Uzak durumdan **ayrı**, çünkü
+    /// ssh kapandığında da ("bağlantı kapandı") görünmek zorunda: host'u ve
+    /// işareti kendisi taşıyor.
+    pub transfer: Option<Transfer>,
+}
+
+/// Yükleme kuyruğunun dock'taki durum satırı (037 Karar 7 → Kullanıcı kararı
+/// 4): bağlam satırının yerine `⇄ {host}  {body}{controls}` ve üst saç
+/// çizgisinde ilerleme.
+///
+/// Metin `bt-shell`'de biçimleniyor (bayt, hız, süre, dosya sayısı): bu crate
+/// yalnız satırı çiziyor ve **kırpıyor** — `body` sığmazsa `…` ile kısalıyor,
+/// `controls` ise hiç kısalmıyor ve sığmazsa hiç çizilmiyor (yarım bir düğme
+/// tıklanamaz). Yerini [`crate::transfer_controls_col`] söylüyor; çizim ve
+/// fare aynı fonksiyonu okuyor.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Transfer {
+    /// Hedefin host'u, gösterildiği gibi ([`RemoteTarget::host`]).
+    pub host: String,
+    /// Host'un çözülmüş işareti: `⇄ host`'un ve ilerleme çubuğunun rengi.
+    pub mark: HostMark,
+    /// Durum metni (`↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB · …`).
+    pub body: String,
+    /// Satırın sonundaki düğmeler (`▴ list  ✕`); boşsa yok.
+    pub controls: String,
+    /// Bütün kuyruğun baytlarına göre ilerleme, **onbinde** (`0..=10_000`);
+    /// `None` → çubuk yok (sonuç satırı). Tamsayı, çünkü bağlam `Eq` ve kare
+    /// yolu onu karşılaştırıyor; onbinde 4K'lık bir pencerede yarım pikselin
+    /// altında.
+    pub progress: Option<u16>,
+}
+
+impl Clone for Transfer {
+    fn clone(&self) -> Self {
+        let mut fresh = Self::default();
+        fresh.clone_from(self);
+        fresh
+    }
+
+    /// [`RemoteTarget::clone_from`]'un gerekçesi: kare yolu bağlamı her
+    /// karede kopyalıyor, dizgilerin kapasitesi korunmalı.
+    fn clone_from(&mut self, source: &Self) {
+        self.host.clone_from(&source.host);
+        self.mark = source.mark;
+        self.body.clone_from(&source.body);
+        self.controls.clone_from(&source.controls);
+        self.progress = source.progress;
+    }
 }
 
 /// Yeniden bağlanma teklifi (037 Karar 8): yer tutucunun host'u ve işareti,
@@ -515,6 +568,7 @@ impl Clone for DockContext {
         self.remote_cwd.clear();
         self.remote_cwd.push_str(&source.remote_cwd);
         self.reconnect.clone_from(&source.reconnect);
+        self.transfer.clone_from(&source.transfer);
     }
 }
 

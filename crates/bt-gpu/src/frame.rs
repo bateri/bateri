@@ -528,6 +528,9 @@ pub(crate) struct DockSurface {
     edge: [f32; 4],
     /// Giriş bloğunu bağlam satırından ayıran saç çizgisi.
     separator: [f32; 4],
+    /// Üst çizginin dolan payı, `0..=1` ([`Frame::set_dock_progress`]);
+    /// `None` → çizgi bütünüyle `edge`.
+    progress: Option<f32>,
 }
 
 /// PTY'nin dock'a **ayırdığı** pay, satır: bir giriş satırı + bağlam satırı.
@@ -616,7 +619,7 @@ pub(crate) const DOCK_MAX_SHARE: f32 = 0.5;
 ///
 /// Bölen ≥ 1 ve bu **yapısal**: [`CellMetrics::new`] sıfır bağlam genişliğini
 /// eliyor, yani burada ikinci bir kapı yok.
-pub(crate) fn context_cols(cols: u16, cell: CellMetrics) -> u16 {
+pub fn context_cols(cols: u16, cell: CellMetrics) -> u16 {
     let span = u32::from(cols) * u32::from(cell.cell_px().0);
     u16::try_from(span / u32::from(cell.context_cell_px())).unwrap_or(u16::MAX)
 }
@@ -1962,7 +1965,19 @@ impl Frame {
             ground: ground.to_array(),
             edge: edge.to_array(),
             separator: separator.to_array(),
+            progress: None,
         });
+    }
+
+    /// Üst saç çizgisini bu kare için bir **ilerleme çubuğuna** çevirir
+    /// (`bt_core::Dock::progress`, onbinde; 037 Karar 7): dolan kısım
+    /// `edge`'in, kalanı `separator`'ın renginde. [`Frame::open_dock`]'tan
+    /// sonra; açılış her karede `None`'a sıfırlıyor, yani çubuk yalnız
+    /// söylendiği karede var. Dock açık değilse no-op.
+    pub(crate) fn set_dock_progress(&mut self, progress: Option<u16>) {
+        if let Some(dock) = &mut self.dock {
+            dock.progress = progress.map(|p| f32::from(p.min(10_000)) / 10_000.0);
+        }
     }
 
     /// Bu karenin dock yüzeyi; `None` → dock yok, ikinci viewport kurulmaz.
@@ -2060,12 +2075,20 @@ impl Frame {
     /// üst saç çizgisi animasyonla birlikte yükselip iniyor; ikinci saç
     /// çizgisi ise **dibe yaslı** — bağlam satırının üstündeki boşlukta
     /// kalıyor ve yeri bandın boyu ile yerleşiminki arasındaki farktan.
-    pub(crate) fn dock_ground(&self, width_px: f32) -> [Instance; 3] {
+    pub(crate) fn dock_ground(&self, width_px: f32) -> [Instance; 4] {
         let dock = self.dock.unwrap_or(DockSurface {
             ground: [0.0; 4],
             edge: [0.0; 4],
             separator: [0.0; 4],
+            progress: None,
         });
+        // İlerleme varken çizginin zemini ayracın rengi ve üstüne dolan kısım
+        // kenarın renginde; yokken zemin kenarın kendisi ve dolgu sıfır
+        // genişlik (dizinin boyu sabit, çağıran dallanmasın).
+        let (edge_base, fill) = match dock.progress {
+            Some(p) => (dock.separator, width_px * p.clamp(0.0, 1.0)),
+            None => (dock.edge, 0.0),
+        };
         let band = self.dock_band_px();
         let rows = if self.dock.is_some() {
             self.dock_rows
@@ -2087,6 +2110,15 @@ impl Frame {
             Instance {
                 pos: [0.0, 0.0],
                 size: [width_px, SEPARATOR_PX],
+                rgba: edge_base,
+            },
+            // Yükleme sürerken (037 Karar 7) çizginin soldan dolan kısmı:
+            // bütün kuyruğun baytlarına göre, host'un renginde. Yuvarlanıyor
+            // (saç çizgisinin gerekçesi: aygıt ızgarasına oturmayan kenar
+            // soluklaşırdı).
+            Instance {
+                pos: [0.0, 0.0],
+                size: [fill.round(), SEPARATOR_PX],
                 rgba: dock.edge,
             },
             // **İkinci ayraç: giriş satırı ile bağlam satırı arasında.** Yerelde
@@ -3971,7 +4003,7 @@ mod tests {
         frame.open_dock(BG, SUCCESS, CURSOR);
         assert_eq!(frame.dock_layout_px(), 36.0, "iki satır piksele çevrilmedi");
 
-        let [ground, separator, divider] = frame.dock_ground(500.0);
+        let [ground, separator, _, divider] = frame.dock_ground(500.0);
         assert_eq!(ground.pos, [0.0, 0.0], "zemin sol paydan başlamamalı");
         assert_eq!(ground.size, [500.0, 36.0]);
         assert_eq!(ground.rgba, BG.to_array());
@@ -3990,6 +4022,21 @@ mod tests {
         assert_eq!(divider.pos, [0.0, 18.0]);
         assert_eq!(divider.size, [500.0, SEPARATOR_PX]);
         assert_eq!(divider.rgba, CURSOR.to_array());
+
+        // Yükleme sürerken (037 Karar 7) üst çizgi bir çubuk: zemini ayracın
+        // renginde, soldan dolan kısmı kenarın renginde.
+        frame.set_dock_progress(Some(2_500));
+        let [_, base, fill, _] = frame.dock_ground(500.0);
+        assert_eq!(base.size, [500.0, SEPARATOR_PX]);
+        assert_eq!(base.rgba, CURSOR.to_array(), "çubuğun zemini ayraç");
+        assert_eq!(fill.pos, [0.0, 0.0]);
+        assert_eq!(fill.size, [125.0, SEPARATOR_PX]);
+        assert_eq!(fill.rgba, SUCCESS.to_array(), "dolan kısım kenarın rengi");
+        // Açılış her karede sıfırlıyor: çubuk yalnız söylendiği karede.
+        frame.open_dock(BG, SUCCESS, CURSOR);
+        let [_, base, fill, _] = frame.dock_ground(500.0);
+        assert_eq!(base.rgba, SUCCESS.to_array());
+        assert_eq!(fill.size[0], 0.0);
 
         // Dock'suz kare hiçbir yükseklik vermiyor: ikinci viewport kurulmaz.
         frame.clear(grid(9, 18), CaretStyle::default());
@@ -4014,7 +4061,7 @@ mod tests {
 
         // **Zemin payları da kaplıyor**: pay kadar eksik bir dikdörtgen,
         // kayma boyunca taşan ızgara satırını tam da nefes payında gösterirdi.
-        let [ground, separator, divider] = frame.dock_ground(500.0);
+        let [ground, separator, _, divider] = frame.dock_ground(500.0);
         assert_eq!(ground.size, [500.0, 64.0]);
         // Satır arası çizgi boşluğun **ortasında**: pay 7, hücre 18, boşluk 14
         // → 7 + 18 + (14 − 1)/2 = 31,5 → 32. Kenara konsaydı bir satıra
@@ -4111,7 +4158,7 @@ mod tests {
             f32::from(metrics.context_cell_px()),
             "bağlam satırının adımı küçük yüzün ilerlemesi"
         );
-        let [ground, separator, divider] = frame.dock_ground(500.0);
+        let [ground, separator, _, divider] = frame.dock_ground(500.0);
         assert_eq!(ground.size, [500.0, band]);
         assert_eq!(separator.pos, [0.0, 0.0]);
         assert_eq!(separator.rgba, edge.to_array());
@@ -4179,7 +4226,7 @@ mod tests {
 
         // Tek saç çizgisi giriş bloğunun altında, boşluğun ortasında:
         // 7 + 3·18 + (14 − 1)/2 = 67,5 → 68. Giriş satırları arasında çizgi yok.
-        let [ground, separator, divider] = frame.dock_ground(500.0);
+        let [ground, separator, _, divider] = frame.dock_ground(500.0);
         assert_eq!(ground.size, [500.0, 100.0]);
         assert_eq!(separator.pos, [0.0, 0.0]);
         assert_eq!(divider.pos, [0.0, 68.0]);
@@ -4206,7 +4253,7 @@ mod tests {
         // PTY payı 64 + yarım satırın yuvarlanmış pikseli 9.
         assert_eq!(frame.dock_band_px(), 73.0);
         assert_eq!(frame.origin_px(), 5.0 * 18.0 - 9.0);
-        let [ground, _, divider] = frame.dock_ground(500.0);
+        let [ground, _, _, divider] = frame.dock_ground(500.0);
         assert_eq!(ground.size, [500.0, 73.0]);
         // Çizgi pencere uzayında yerleşimdekiyle aynı pikselde: bandın
         // viewport'u `600 − 73`'te, yerleşiminki `600 − 100`'de.

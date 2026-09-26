@@ -1187,12 +1187,16 @@ define_class!(
     /// "evet" varsayıp doğrudan `performDragOperation:`e geçiyor, yani
     /// yazılacak gövde sabit bir `true` olurdu.
     unsafe impl NSDraggingDestination for BateriView {
-        /// İşaretçi damlayla pencereye girdi: cevap **kopya**.
+        /// İşaretçi damlayla pencereye girdi: cevap **kopya** — bu sekmede
+        /// bir yükleme sayfası (yoklama dahil) sürmüyorsa.
         ///
-        /// Koşulsuz, çünkü eleme kayıtta yapıldı
-        /// ([`BateriView::new`]'daki `registerForDraggedTypes`): bu metot
-        /// ancak panoda bir dosya URL'si varsa çağrılıyor ve ikinci bir
-        /// eleme aynı soruyu iki kez sormak olurdu.
+        /// Tip elemesi kayıtta yapıldı ([`BateriView::new`]'daki
+        /// `registerForDraggedTypes`): bu metot ancak panoda bir dosya
+        /// URL'si varsa çağrılıyor. Sorulan tek şey uzak dizine yüklemenin
+        /// (037 Karar 7) sayfası: iki sayfa üst üste açılamaz ve sürerken
+        /// gelen damla `performDragOperation:`'da reddedilecekti — "+"
+        /// göstermek yalan olurdu. Yükleme **akarken** damla kabul: kuyruğa
+        /// giriyor.
         ///
         /// **Kopya**, taşıma değil: Finder'daki dosya yerinde kalmalı, biz
         /// yalnız yolunu yazıyoruz. `draggingUpdated:` de uygulanmıyor —
@@ -1213,10 +1217,17 @@ define_class!(
             &self,
             _sender: &ProtocolObject<dyn NSDraggingInfo>,
         ) -> NSDragOperation {
-            NSDragOperation::Copy
+            if self.terminal_window().is_none_or(|window| window.accepts_drop()) {
+                NSDragOperation::Copy
+            } else {
+                NSDragOperation::None
+            }
         }
 
-        /// Damla bırakıldı: yollar kaçırılıp giriş satırına yazılır.
+        /// Damla bırakıldı: yerel oturumda yollar kaçırılıp giriş satırına
+        /// yazılır; **uzak oturumda** yerel yol uzak kabuğa yazılmıyor —
+        /// damla uzak dizine yükleniyor (037 Karar 7; onay sayfası, kuyruk ve
+        /// bitince uzak yol `crate::uploader`'da).
         ///
         /// Çıkış [`Session::paste`] — `session.write` **değil**: bracketed
         /// paste sarması ve dock istisnası oradan bedavaya geliyor
@@ -1237,10 +1248,13 @@ define_class!(
         /// çelişip derlemeyi kırardı.
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-            let line = shell_quote(&dropped_paths(&sender.draggingPasteboard()));
+            let paths = dropped_paths(&sender.draggingPasteboard());
             match self.ivars().session.get() {
-                Some(session) if !line.is_empty() => {
-                    session.paste(line.into_bytes());
+                Some(session) if !paths.is_empty() && session.remote_target().is_some() => self
+                    .terminal_window()
+                    .is_some_and(|window| window.upload_drop(paths)),
+                Some(session) if !paths.is_empty() => {
+                    session.paste(shell_quote(&paths).into_bytes());
                     true
                 }
                 _ => false,
@@ -1532,6 +1546,11 @@ impl BateriView {
             }
             return;
         }
+        // Yükleme satırının düğmeleri (037 Karar 7): bağlam satırında, jest
+        // defterine girmeden — tık bir düğme, sürükleme başlatmıyor.
+        if button == MouseButton::Left && self.upload_control(event) {
+            return;
+        }
         self.with_gesture(|g| g.begin_press(button));
         // **Dock'un giriş satırı ızgaradan önce** ve fare kipine hiç
         // sorulmadan: bant uygulamanın ekranı değil, terminalin kendi yüzeyi
@@ -1758,6 +1777,41 @@ impl BateriView {
             ),
         };
         point_to_cell((point.x, point.y), metrics, top, outside, scale, cols, rows)
+    }
+
+    /// Bu view'ın terminal penceresi (sekmesi); ayar penceresinde ya da
+    /// kapanmış bir pencerede `None`.
+    fn terminal_window(&self) -> Option<Retained<crate::window::TerminalWindow>> {
+        let window = self.window()?;
+        crate::app::delegate(self.mtm())?.window_owning(&window)
+    }
+
+    /// Tık yükleme satırının bir düğmesine mi düştü (037 Karar 7): bağlam
+    /// satırı giriş bloğunun **altında**, sütun adımı küçük sınıfın
+    /// ilerlemesi. Düğmenin yeri çizimle aynı yerleşimden
+    /// (`bt_core::transfer_controls_col`); `true` → tık tüketildi.
+    fn upload_control(&self, event: &NSEvent) -> bool {
+        let Some((metrics, (cols, _))) = self.ivars().metrics.get() else {
+            return false;
+        };
+        let Some((top, rows)) = self.ivars().origin.get().and_then(Origin::dock) else {
+            return false;
+        };
+        let Some(scale) = self.window().map(|window| window.backingScaleFactor()) else {
+            return false;
+        };
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let context_top = f64::from(top) + f64::from(metrics.cell_px().1) * f64::from(rows);
+        let x = at.x * scale - f64::from(metrics.gutter_px());
+        if at.y * scale < context_top || x < 0.0 {
+            return false;
+        }
+        // audit: `x ≥ 0` ve pencere genişliği `u16` sütuna sığıyor; taşan
+        // değer yalnız hiçbir düğmeye düşmeyen bir sütun olur.
+        let col = (x / f64::from(metrics.context_cell_px())).floor() as u16;
+        let context = bt_gpu::context_cols(cols, metrics);
+        self.terminal_window()
+            .is_some_and(|window| window.upload_click(col, context, at))
     }
 
     /// Tekerlek dock'un giriş bloğunun üstündeyse onu dock'un dikey

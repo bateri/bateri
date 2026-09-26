@@ -271,7 +271,7 @@ fn mosh_argv<S: AsRef<str>>(args: &[S]) -> Vec<String> {
 }
 
 /// ssh'ın değer alan kısa seçenekleri (`ssh(1)`'in SYNOPSIS'i).
-const SSH_VALUED: &str = "BbcDEeFIiJLlmOoPpQRSWw";
+pub(crate) const SSH_VALUED: &str = "BbcDEeFIiJLlmOoPpQRSWw";
 /// Varlığı oturumu etkileşimsiz yapan seçenekler: tünel (`-N`), yönlendirme
 /// (`-W`), denetim (`-O`), sorgu (`-Q`, `-G`, `-V`) ve pty'siz (`-T`).
 const SSH_NON_INTERACTIVE: &str = "NWOQGVT";
