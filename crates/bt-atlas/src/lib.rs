@@ -2718,6 +2718,29 @@ mod tests {
     }
 
     #[test]
+    fn the_reconnect_placeholder_has_no_box_in_the_normal_class() {
+        // 037 Karar 8: yeniden bağlanma teklifinin yer tutucusu **giriş
+        // satırında**, yani büyük sınıfta — 036'nın sınaması yalnız küçük
+        // sınıfı (bağlam satırı) sordu ve yüz merdiveni orada başka. ASCII
+        // dışı üç karakteri de: işaret, ayraç ve ⏎. Kutu çıkarsa dizge
+        // `bt-core`'da (`dock::RECONNECT_HINT`) değişmeli. Menlo, adıyla.
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
+        assert_eq!(menlo.font_issue(), None, "Menlo açılmadı");
+        for ch in [REMOTE_MARK, '·', '⏎'] {
+            let slot = menlo
+                .slot(
+                    Sprite::Char(ch),
+                    Face::Regular,
+                    SizeClass::Normal,
+                    Half::Whole,
+                )
+                .0
+                .slot;
+            assert_ne!(slot, TOFU, "'{ch}' Menlo'nun büyük sınıfında kutu");
+        }
+    }
+
+    #[test]
     fn the_small_class_is_narrower_and_keeps_its_own_slot() {
         let mut a = atlas(POINT_SIZE, 1.0);
 

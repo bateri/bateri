@@ -452,6 +452,47 @@ pub struct DockContext {
     /// [`Self::remote`] doluyken okunuyor** — etkin değilken de yazılıyor
     /// (yabancı yetkili OSC 7), yoklama OSC 7'den sonra sonuçlanabilsin diye.
     pub remote_cwd: String,
+    /// Kopan ssh'ın yeniden bağlanma teklifi (037 Karar 8); yoksa `None`.
+    ///
+    /// Kuruluşu tek kolda: uzak oturum etkin, tür ssh ve **bizim** kimlikli
+    /// `D`'miz 255 taşıyor ([`ShellLog::apply`]) — uzak durumun silindiği
+    /// aynı yerde, hedef buraya geçiyor. Silen üç kenar: bir sonraki
+    /// `Running` geçişi, yeni bir uzak hedef ([`ShellLog::set_remote`]) ve
+    /// kullanıcının herhangi bir girdisi ([`crate::Session::send_input`]).
+    /// `A` silmiyor: teklif tam o prompt'ta doğuyor.
+    ///
+    /// Bağlamın içinde, [`Self::remote`]'un gerekçesiyle: dock'un yer
+    /// tutucusu onu kare yolunda bağlamla aynı kilit turunda alıyor.
+    pub reconnect: Option<Reconnect>,
+}
+
+/// Yeniden bağlanma teklifi (037 Karar 8): yer tutucunun host'u ve işareti,
+/// ⏎'nin göndereceği satır.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Reconnect {
+    /// Kopan hedefin host'u, gösterildiği gibi ([`RemoteTarget::host`]).
+    pub host: String,
+    /// Host'un **çözülmüş** işareti; liste değişince yeniden çözülüyor
+    /// ([`ShellLog::set_host_rules`]).
+    pub mark: HostMark,
+    /// Yeniden koşturulacak, kaçırılmış satır ([`RemoteTarget::line`]).
+    pub line: String,
+}
+
+impl Clone for Reconnect {
+    fn clone(&self) -> Self {
+        let mut fresh = Self::default();
+        fresh.clone_from(self);
+        fresh
+    }
+
+    /// [`RemoteTarget::clone_from`]'un gerekçesi: kare yolu bağlamı her
+    /// karede kopyalıyor, dizgilerin kapasitesi korunmalı.
+    fn clone_from(&mut self, source: &Self) {
+        self.host.clone_from(&source.host);
+        self.mark = source.mark;
+        self.line.clone_from(&source.line);
+    }
 }
 
 impl Clone for DockContext {
@@ -473,6 +514,7 @@ impl Clone for DockContext {
         self.remote_mark = source.remote_mark;
         self.remote_cwd.clear();
         self.remote_cwd.push_str(&source.remote_cwd);
+        self.reconnect.clone_from(&source.reconnect);
     }
 }
 
@@ -1451,6 +1493,8 @@ impl ShellLog {
                     self.command_open = true;
                     outcome.started = true;
                     outcome.title = self.context.clear_remote();
+                    // Teklifin ömrü bir sonraki komuta kadar (Karar 8).
+                    self.context.reconnect = None;
                 }
                 state.phase = ShellPhase::Running;
                 // Saatin dikildiği yer: `C` komutun **çalışmaya başladığını**
@@ -1469,6 +1513,25 @@ impl ShellLog {
             }
             Mark::CommandEnd { exit, id } => {
                 state.phase = ShellPhase::Finished;
+                // **Teklif uzak durum silinmeden önce** (037 Karar 8): hedef
+                // ve işaret `clear_remote`'la gidiyor. Kimlik şart — kimliğimizi
+                // hiç görmemiş kabukta kimliksiz `D` buraya ulaşıyor ve ssh'ın
+                // öbür ucundaki bir `D;255` teklif doğurmamalı. 255 ssh'ın
+                // kendi hatası (kopma ya da bağlanamama); mosh kopmada
+                // çıkmıyor, yani onun 255'i bu anlamı taşımıyor.
+                if id.is_some()
+                    && exit == Some(255)
+                    && let Some(target) = &self.context.remote
+                    && target.kind == RemoteKind::Ssh
+                {
+                    let offer = self
+                        .context
+                        .reconnect
+                        .get_or_insert_with(Reconnect::default);
+                    offer.host.clone_from(&target.host);
+                    offer.line.clone_from(&target.line);
+                    offer.mark = self.context.remote_mark;
+                }
                 outcome.title = self.context.clear_remote();
                 // Kodu **her hâlde** tazeliyoruz: okunamayan bir kodu eskisiyle
                 // doldurmak, biten komutu başkasının koduyla etiketlemek olurdu.
@@ -1599,6 +1662,8 @@ impl ShellLog {
                 }
                 self.context.remote_mark =
                     crate::settings::host_mark(&self.host_rules, &target.host);
+                // Yeni bir uzak oturum eskisinin teklifini geçersiz kılıyor.
+                self.context.reconnect = None;
             }
             // Uzak yuva kalıyor: yoklama "yerel" dediyse zaten okunmuyor ve
             // `C`/`D`/`A` onu siliyor.
@@ -1618,11 +1683,18 @@ impl ShellLog {
             return false;
         }
         self.host_rules = rules.to_vec();
+        // Teklifin rengi de işaretin: yer tutucunun host'u onunla boyanıyor.
+        let mut changed = false;
+        if let Some(offer) = &mut self.context.reconnect {
+            let mark = crate::settings::host_mark(&self.host_rules, &offer.host);
+            changed |= mark != offer.mark;
+            offer.mark = mark;
+        }
         let Some(host) = self.context.remote_host() else {
-            return false;
+            return changed;
         };
         let mark = crate::settings::host_mark(&self.host_rules, host);
-        let changed = mark != self.context.remote_mark;
+        changed |= mark != self.context.remote_mark;
         self.context.remote_mark = mark;
         changed
     }
@@ -5920,5 +5992,100 @@ mod tests {
         });
         assert_eq!(log.context.remote, None);
         assert_eq!(log.context.remote_mark, HostMark::None);
+    }
+
+    /// `D;{exit}` bizim kimliğimizle.
+    fn our_end(exit: i32) -> Mark {
+        Mark::CommandEnd {
+            exit: Some(exit),
+            id: Some(1),
+        }
+    }
+
+    #[test]
+    fn our_ssh_255_leaves_a_reconnect_offer() {
+        // 037 Karar 8: uzak ssh + bizim `D;255` → teklif (host, çözülmüş
+        // işaret, satır); `A` silmiyor, bir sonraki `C` siliyor.
+        let mut log = running_log();
+        log.set_host_rules(&[rule("prod", HostMark::Production)]);
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        log.apply(our_end(255));
+        assert_eq!(log.context.remote, None, "uzak durum yine siliniyor");
+        let offer = Reconnect {
+            host: "prod".to_owned(),
+            mark: HostMark::Production,
+            line: "ssh prod".to_owned(),
+        };
+        assert_eq!(log.context.reconnect.as_ref(), Some(&offer));
+        log.apply(Mark::PromptStart { id: Some(2) });
+        log.apply(Mark::PromptEnd);
+        assert_eq!(
+            log.context.reconnect.as_ref(),
+            Some(&offer),
+            "`A`/`B` silmiyor"
+        );
+        // İşaret değişimi teklifin rengini tazeliyor ve bunu haber veriyor.
+        assert!(log.set_host_rules(&[]));
+        assert_eq!(
+            log.context.reconnect.as_ref().map(|offer| offer.mark),
+            Some(HostMark::None)
+        );
+        log.apply(Mark::CommandStart);
+        assert_eq!(log.context.reconnect, None, "sonraki `C` siliyor");
+    }
+
+    #[test]
+    fn only_our_ssh_255_makes_an_offer() {
+        let mosh = RemoteTarget {
+            kind: RemoteKind::Mosh,
+            argv: vec!["mosh".to_owned(), "prod".to_owned()],
+            line: "mosh prod".to_owned(),
+            ..RemoteTarget::ssh("prod")
+        };
+        for (target, end) in [
+            (RemoteTarget::ssh("prod"), our_end(0)),
+            (RemoteTarget::ssh("prod"), our_end(1)),
+            // mosh kopmada çıkmıyor; 255'i bu anlamı taşımıyor.
+            (mosh, our_end(255)),
+        ] {
+            let mut log = running_log();
+            assert!(log.set_remote(Some(&target)));
+            log.apply(end);
+            assert_eq!(log.context.reconnect, None, "{end:?} {:?}", target.kind);
+        }
+        // Uzak oturum yokken 255 bir yerel komutun kodu.
+        let mut log = running_log();
+        log.apply(our_end(255));
+        assert_eq!(log.context.reconnect, None);
+        // Kimliksiz `D;255`: kimliğimizi görmüş oturumda uzak kabuğun işareti
+        // (hiçbir şeye dokunmuyor), görmemiş oturumda da teklif doğurmuyor.
+        let foreign = Mark::CommandEnd {
+            exit: Some(255),
+            id: None,
+        };
+        let mut log = running_log();
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        log.apply(foreign);
+        assert_eq!(log.context.reconnect, None);
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply(Mark::CommandStart);
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        log.apply(foreign);
+        assert_eq!(log.context.remote, None, "yabancı kabukta `D` bitiriyor");
+        assert_eq!(log.context.reconnect, None);
+    }
+
+    #[test]
+    fn a_new_remote_target_drops_the_offer() {
+        let mut log = running_log();
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        log.apply(our_end(255));
+        assert!(log.context.reconnect.is_some());
+        log.apply(Mark::PromptStart { id: Some(2) });
+        // Yeni bir uzak oturum (yoklama `C`'den sonra) eskisinin teklifini
+        // bırakmıyor — `C` zaten sildi, `set_remote` ikinci kemer.
+        log.context.reconnect = Some(Reconnect::default());
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("staging"))));
+        assert_eq!(log.context.reconnect, None);
     }
 }

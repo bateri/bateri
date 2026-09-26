@@ -23,7 +23,8 @@ use crate::color::{self, LinearRgba, Theme};
 use crate::session::{Cell, CellHalf, SelectKind, SelectionRun, UnderlineStyle, WORD_SEPARATORS};
 
 use crate::shell::{
-    DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, ShellPhase, ShellState,
+    DockContext, DockState, DockStatus, HighlightColor, HighlightStyle, Reconnect, ShellPhase,
+    ShellState,
 };
 
 /// Dock'un karedeki yüzeyi — hücrelerin **dışında** kalan her şey, çözülmüş.
@@ -193,6 +194,11 @@ const ELLIPSIS: char = '…';
 /// crate bunu göremediği için karakteri elle yazıyor; iki kopyayı
 /// `the_remote_mark_is_the_one_the_atlas_checks` bağlıyor.
 pub(crate) const REMOTE_MARK: char = '⇄';
+
+/// Yeniden bağlanma teklifinin yer tutucusunun host'tan sonraki kısmı (037
+/// Karar 8) — UI dizgisi. Tek metin: ssh'ın 255'i kopmayı başarısız
+/// bağlantıdan ayırmıyor, ayıran bilgi ssh'ın hemen üstteki kendi satırı.
+const RECONNECT_HINT: &str = "  Connection lost · ⏎ reconnect";
 
 /// Uzak biçimde host ile yol arasındaki boşluk: iki sütun — `|` ayracı yok,
 /// çünkü dal yok ve iki yan aynı şeyin (uzak konum) iki parçası.
@@ -671,6 +677,74 @@ fn measure(state: &DockState, cols: u16) -> (usize, usize) {
 /// çizilecek giriş satırı sayısı; `0` da bir satır.
 fn window_top(caret_row: usize, shown: usize) -> usize {
     caret_row.saturating_sub(shown.max(1) - 1)
+}
+
+/// Teklifin yer tutucusu: `⇄ {host}` işaretin renginde, [`RECONNECT_HINT`]
+/// `dim`'de, satır boşken caret'ten sonra (037 Karar 8).
+///
+/// Öneriyle aynı katman ve **aynı yürüyüş** ([`dock_layout`]): akış
+/// `PREDISPLAY ++ yer tutucu`, yani yer tutucu caret'in sütunundan başlıyor.
+/// Satır **sarılmıyor**: yalnız ilk karakterinin satırı çiziliyor, sığmayan
+/// kuyruk kırpılıyor — ve satır sayısına girmiyor ([`needed_rows`] onu
+/// görmüyor), yoksa bant bir ipucu yüzünden büyürdü.
+fn render_reconnect(
+    state: &DockState,
+    offer: &Reconnect,
+    theme: &Theme,
+    cols: u16,
+    window: &std::ops::Range<usize>,
+    top: usize,
+    sink: &mut impl FnMut(Cell),
+) {
+    let accent = theme.mark_linear(offer.mark);
+    let dim = theme.dim_linear();
+    // `PREDISPLAY` yalnız sütunu taşıyor (`None`): hücreleri ana yürüyüşte
+    // çizildi.
+    let items = state
+        .predisplay
+        .chars()
+        .map(|ch| (ch, None))
+        .chain(
+            [REMOTE_MARK, ' ']
+                .into_iter()
+                .chain(offer.host.chars())
+                .map(|ch| (ch, Some(accent))),
+        )
+        .chain(RECONNECT_HINT.chars().map(|ch| (ch, Some(dim))));
+    let mut first_row = None;
+    dock_layout(
+        items,
+        state.predisplay.chars().count(),
+        cols,
+        state.cluster,
+        |_| {},
+        |placed| {
+            let Some(color) = placed.tag else {
+                return;
+            };
+            let row = *first_row.get_or_insert(placed.row);
+            if placed.row != row || !window.contains(&row) || !placed.fits(cols) {
+                return;
+            }
+            // audit: `row - top < input_rows` ve `col + width ≤ cols`; ikisi
+            // de `u16`'dan geliyor, taşamaz.
+            let lead = Cell {
+                row: (row - top) as u16,
+                ..cell(
+                    placed.ch,
+                    placed.col as u16,
+                    color,
+                    HighlightStyle::default(),
+                    theme,
+                    placed.width == 2,
+                    false,
+                )
+            };
+            if lead.ch.is_some() {
+                sink(lead);
+            }
+        },
+    );
 }
 
 /// Akışın bir karakteri hangi dizgiden: yalnız `PREBUFFER ++ BUFFER`
@@ -1313,6 +1387,20 @@ pub(crate) fn render_with(
         },
     );
     runs.extend(run);
+    // **Yeniden bağlanma teklifinin yer tutucusu** (037 Karar 8): satır
+    // boşken, caret'ten sonra — önerinin katmanı.
+    // Kapı ⏎'ninkiyle aynı (`Session::reconnect`): görünen ipucu çalışmalı.
+    // Tazelik burada sorulamıyor (nesil bu modülde yok) ama gerek de yok —
+    // her girdi teklifi siliyor, yani teklif varken ayna son girdinin cevabı.
+    if let Some(offer) = &context.reconnect
+        && owned
+        && state.insert_keymap
+        && state.buffer.is_empty()
+        && state.prebuffer.is_empty()
+        && state.postdisplay.is_empty()
+    {
+        render_reconnect(state, offer, theme, cols.grid, &window, top, &mut sink);
+    }
 
     // audit: caret'in sütunu `< cols` ([`layout`]'un caret kuralı: sıradaki
     // bir sütunluk karakterin sığdığı yer) ve satırı `window`'un içinde —
@@ -2977,7 +3065,87 @@ mod tests {
             remote: Some(RemoteTarget::ssh(host)),
             remote_mark: HostMark::None,
             remote_cwd: remote_cwd.into(),
+            reconnect: None,
         }
+    }
+
+    fn offered(host: &str, mark: HostMark) -> DockContext {
+        DockContext {
+            reconnect: Some(Reconnect {
+                host: host.into(),
+                mark,
+                line: format!("ssh {host}"),
+            }),
+            ..context("/Users/me", "")
+        }
+    }
+
+    #[test]
+    fn the_reconnect_hint_is_the_one_the_atlas_checks() {
+        // `bt-atlas` yer tutucunun ASCII dışı karakterlerini büyük sınıfta
+        // elle soruyor (`the_reconnect_placeholder_has_no_box_in_the_normal_class`):
+        // dizge değişirse bu düşer ve o sınamaya gönderir.
+        let outside: Vec<char> = RECONNECT_HINT.chars().filter(|ch| !ch.is_ascii()).collect();
+        assert_eq!(outside, ['·', '⏎']);
+    }
+
+    #[test]
+    fn a_reconnect_offer_fills_the_empty_line() {
+        // 037 Karar 8: boş giriş satırında caret'ten sonra `⇄ host` işaretin
+        // renginde, kalanı `dim`; caret satırın başında, bağlam satırı yerel.
+        let state = live("", "", "", 0);
+        let (cells, dock) = draw_with(&state, &offered("prod", HostMark::Production), COLS);
+        assert_eq!(text(&cells), "  ⇄ prod  Connection lost · ⏎ reconnect");
+        let color = |col: u16| {
+            cells
+                .iter()
+                .find(|cell| cell.row == 0 && cell.col == col)
+                .map(|cell| cell.fg)
+        };
+        assert_eq!(color(2), Some(THEME.error_linear()), "işaret");
+        assert_eq!(color(4), Some(THEME.error_linear()), "host");
+        assert_eq!(color(10), Some(THEME.dim_linear()), "metin");
+        assert_eq!(dock.caret, caret_at(TEXT_COL));
+        assert_eq!(row_text(&cells, 1), "/Users/me");
+        // İşaretsiz host `info`, bağlam satırının uzak biçimiyle aynı.
+        let (cells, _) = draw_with(&state, &offered("prod", HostMark::None), COLS);
+        let mark = cells.iter().find(|cell| cell.row == 0 && cell.col == 2);
+        assert_eq!(mark.map(|cell| cell.fg), Some(THEME.info_linear()));
+    }
+
+    #[test]
+    fn the_reconnect_placeholder_is_clipped_not_wrapped() {
+        let state = live("", "", "", 0);
+        let (cells, _) = draw_with(&state, &offered("prod", HostMark::None), 20);
+        assert_eq!(text(&cells), "  ⇄ prod  Connection");
+        // Sarmıyor: bağlam satırından başka satır yok ve bant büyümüyor.
+        assert!(cells.iter().all(|cell| cell.row <= 1), "{cells:?}");
+        assert_eq!(needed_rows(&state, 20), 1);
+    }
+
+    #[test]
+    fn the_reconnect_placeholder_only_fills_an_empty_line() {
+        let offer = offered("prod", HostMark::None);
+        for state in [
+            live("", "ls", "", 2),
+            // Öneri de satırı dolduruyor: ikisi aynı katman.
+            live("", "", "ls -la", 0),
+        ] {
+            let (cells, _) = draw_with(&state, &offer, COLS);
+            assert!(!text(&cells).contains('⇄'), "{:?}", text(&cells));
+        }
+        let mut state = live("", "", "", 0);
+        state.prebuffer = "for x in 1\n".into();
+        let (cells, _) = draw_with(&state, &offer, COLS);
+        assert!(cells.iter().all(|cell| cell.ch != Some('⇄')));
+        // `vicmd`'de ⏎ satırı göndermiyor, ipucu da yok.
+        let mut state = live("", "", "", 0);
+        state.insert_keymap = false;
+        let (cells, _) = draw_with(&state, &offer, COLS);
+        assert!(cells.iter().all(|cell| cell.ch != Some('⇄')));
+        // Teklif yoksa boş satır boş.
+        let (cells, _) = draw_with(&live("", "", "", 0), &context("/Users/me", ""), COLS);
+        assert_eq!(text(&cells), "");
     }
 
     #[test]

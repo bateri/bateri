@@ -56,16 +56,70 @@ _Requirements: R7.1, R7.2, R7.3, R7.4_
 
 ## Checklist
 
-- [ ] Teklif yuvası, kuruluş ve silinme kenarları
-- [ ] `send_input` silmesi; `dock_key` ⏎ kolu (teklifsiz erken `false`)
-- [ ] `keys::dock_key` düz ⏎
-- [ ] Yer tutucu çizimi; `⇄`'in büyük sınıf sınaması
-- [ ] Test: yukarıdaki Kabul maddeleri
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Teklif yuvası, kuruluş ve silinme kenarları
+- [x] `send_input` silmesi; `dock_key` ⏎ kolu (teklifsiz erken `false`)
+- [x] `keys::dock_key` düz ⏎
+- [x] Yer tutucu çizimi; `⇄`'in büyük sınıf sınaması
+- [x] Test: yukarıdaki Kabul maddeleri
+- [x] (phase-3'ten devralınan, `/code-review` bulgusu; orkestratör kararı
+  2026-09-26) **⌘T'den hemen sonra yazılan tuşlar ssh satırının önüne
+  yapışıyor** (`ls` + ssh satırı → `lsssh …`). Phase-3'ün önerdiği iki çare
+  de reddedildi. `^U` kullanıcının yazdığını sessizce yutar. Tuşları satırın
+  arkasına eklemek ise `ssh prod ls` üretip komutu uzakta etkileşimsiz
+  koşturur. **Karar:** ⌘T ile doğan uzak sekmede kullanıcı girdisi ilk
+  satırımız gidene kadar **tutulur**. Satır, yani ssh komutu artı ⏎, gittikten
+  sonra tutulan baytlar **arkasından** aynı sırayla gönderilir. Böylece ssh'ın
+  girdisine, yani uzağa düşerler: kullanıcı o sekmeyi uzak için açtı. Hiçbir
+  tuş kaybolmaz ve komut bozulmaz. Tutma kimlikli `A` hiç gelmezse de sonsuza
+  kadar sürmemeli (Karar 6'nın bilinen sınırı). Çözülmenin tetiği ölçülmemiş
+  bir zaman aşımı olmasın: var olan bir kenara bağla (ör. kabuğun çıkışı ya da
+  kabuğun ilk çıktısından sonraki ilk kullanıcı tuşu) ve seçimi Uygulama
+  Notları'na yaz. Sınama: tutulan girdi satırdan sonra ve sırasıyla gidiyor.
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
 - [ ] Gözle kontrol (devir mesajının cümlesi): `ssh <host>`'ta `~.` — ssh
   "Connection to host closed." basıyor, **dock**'un boş giriş satırında
   `⇄ host  Connection lost · ⏎ reconnect` (host işaret renginde), ⏎ aynı
   komutu yeniden koşturup bağlanıyor; ikinci denemede bir harf yazınca yer
   tutucu kalkıyor ve geri gelmiyor. Uzakta `exit` (kod 0) teklif göstermiyor.
   Yer tutucu bir tuş vuruşu boyunca bile ızgaraya sıçramıyor.
+
+## Uygulama Notları
+
+- **Teklif `DockContext`'te** (`reconnect: Option<Reconnect>`; host, çözülmüş
+  işaret, satır), `ShellLog`'un kendi alanı değil: kare yolu bağlamı zaten
+  aynı kilit turunda `clone_from` ile alıyor. `Reconnect`'in `Clone`'u elle
+  (kapasite). `set_host_rules` teklifin işaretini de yeniden çözüyor ve
+  değişimini `true` diye bildiriyor (sekme noktası tazelemesi zararsız no-op).
+- `send_input` teklifi yaprak kilitte siliyor ve varsa kare istiyor (yer
+  tutucu alacritty'nin hasarında yok).
+- **Numpad Enter da `DockKey::Enter`** (Control'süz U+0003; `encode_key` onu
+  `\r`'ye çeviriyor): aynı tuşun ikinci yüzü, teklif yokken fark yok.
+- Yer tutucu yalnız `BUFFER`, `PREBUFFER` **ve** `POSTDISPLAY` boşken (öneri
+  aynı katman). `·` ve `⏎` de Menlo'nun büyük sınıfında sınanıyor (Kabul
+  yalnız `⇄`'i istiyordu; üçü de kutu değil); dizge ile atlas sınaması
+  `the_reconnect_hint_is_the_one_the_atlas_checks` ile bağlı.
+- **Devralınan: ⌘T'den önce yazılan tuşlar tutuluyor.** Tutma yuvası
+  (`HeldInput`, `Arc<Mutex<Option<Vec<u8>>>>`) yalnız ilk girdi prompt'u
+  beklerken kuruluyor; `send_input` gönderimi `send_or_hold`'dan geçiyor,
+  okuyucu thread'i satırı + tutulanları **tek gönderimde ve yuvanın kilidi
+  altında** yolluyor — iki yazar aynı kanala, sıra kilidin sırası. Nesil
+  tutulan her tuşta da artıyor (tazelik kapısı yalnız "değişti mi" soruyor).
+  **Sonsuz tutmayı önleyen kenar: kullanıcının `\r`, `\n` ya da `^C`'si**
+  tutulanı o anda gönderiyor; tutma **satırın teslimine kadar sürüyor**
+  (`/code-review`: ilk ⏎'de bitseydi `ls⏎pwd` → `pwdssh …`). Orkestratörün
+  iki örneği tartıldı: "kabuğun çıkışı" tek başına yetmiyor (kabuk yaşıyor
+  ama `A` basmıyor: `exec fish`); "ilk çıktıdan sonraki ilk tuş" p10k
+  instant prompt'ta ve motd basan rc'de `A`'dan çok önce ateşleniyor, yani
+  `lsssh`'ı o kullanıcılara geri getirirdi. **Bilinen sınırlar:** tutma
+  boyunca yankı yok (yazılan ⏎'ye kadar görünmüyor); `A` hiç gelmezse
+  (`exec fish`) o sekme satır satır kalıyor — tab tamamlama ve oklar ⏎'yi
+  bekliyor; rc'de tek tuş okuyan bir soru (`read -k 1`) ⏎ istiyor ve fazla
+  `\r` boş bir komut satırı olarak düşüyor.
+- **`/code-review` bulguları (dördü de giderildi):** ⏎'nin kapısına ekleme
+  keymap'i ve `holding_end` (`can_be_typed`'ın kemeri — `vicmd`'de `ssh
+  prod⏎` vi komutu olurdu); tutmanın yukarıdaki süreklilik kuralı; tek tuşluk
+  soru notu (yukarıda); çizim ile ⏎'nin kapısı hizalandı — ⏎ öneriyi de
+  soruyor, yer tutucu `owned` ve ekleme keymap'i istiyor (tazelik çizimde
+  sorulamıyor ama teklif her girdide silindiği için teklif varken ayna
+  zaten son girdinin cevabı).
