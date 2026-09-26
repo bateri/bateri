@@ -12227,7 +12227,7 @@ mod tests {
             host: "prod".into(),
             mark: HostMark::Production,
             body: "↑ a".into(),
-            controls: String::new(),
+            controls: crate::TransferControls::default(),
             progress: Some(5_000),
         };
         assert!(session.set_transfer(Some(&transfer)));

@@ -479,11 +479,13 @@ pub struct DockContext {
 /// 4): bağlam satırının yerine `⇄ {host}  {body}{controls}` ve üst saç
 /// çizgisinde ilerleme.
 ///
-/// Metin `bt-shell`'de biçimleniyor (bayt, hız, süre, dosya sayısı): bu crate
-/// yalnız satırı çiziyor ve **kırpıyor** — `body` sığmazsa `…` ile kısalıyor,
-/// `controls` ise hiç kısalmıyor ve sığmazsa hiç çizilmiyor (yarım bir düğme
-/// tıklanamaz). Yerini [`crate::transfer_controls_col`] söylüyor; çizim ve
-/// fare aynı fonksiyonu okuyor.
+/// Gövdenin metni `bt-shell`'de biçimleniyor (bayt, hız, süre, dosya sayısı);
+/// düğmelerin etiketi ise buradaki durumdan ([`TransferControls`]) bu crate'te
+/// doğuyor, çünkü etiketin boyu yerleşimin girdisi. Bu crate satırı çiziyor ve
+/// **kırpıyor** — `body` sığmazsa `…` ile kısalıyor, düğmeler kısalmıyor ve
+/// sığmazsa sırayla düşüyor (yarım bir düğme tıklanamaz). Hangi sütunun hangi
+/// düğme olduğunu [`crate::transfer_button_at`] söylüyor; çizim ve fare aynı
+/// yerleşimi okuyor (037 phase-6).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Transfer {
     /// Hedefin host'u, gösterildiği gibi ([`RemoteTarget::host`]).
@@ -492,8 +494,9 @@ pub struct Transfer {
     pub mark: HostMark,
     /// Durum metni (`↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB · …`).
     pub body: String,
-    /// Satırın sonundaki düğmeler (`▴ list  ✕`); boşsa yok.
-    pub controls: String,
+    /// Satırın sağındaki düğmelerin durumu; öğe sayısı sıfırsa düğme yok
+    /// (sonuç satırı).
+    pub controls: TransferControls,
     /// Bütün kuyruğun baytlarına göre ilerleme, **onbinde** (`0..=10_000`);
     /// `None` → çubuk yok (sonuç satırı). Tamsayı, çünkü bağlam `Eq` ve kare
     /// yolu onu karşılaştırıyor; onbinde 4K'lık bir pencerede yarım pikselin
@@ -514,9 +517,49 @@ impl Clone for Transfer {
         self.host.clone_from(&source.host);
         self.mark = source.mark;
         self.body.clone_from(&source.body);
-        self.controls.clone_from(&source.controls);
+        self.controls = source.controls;
         self.progress = source.progress;
     }
+}
+
+/// Yükleme satırının düğmelerinin durumu (037 phase-6): etiketler ve
+/// düğmelerin sayısı bundan doğuyor ([`crate::dock`]'un yerleşimi).
+///
+/// Farenin altındaki düğme ve listenin açıklığı **burada**, satırla birlikte:
+/// satır her tazelemede yeniden yazılıyor ve fare durumu ayrı bir yolda
+/// dursaydı ya o yol ya tazeleme öbürünü ezerdi. Değişimi
+/// [`crate::Session::set_transfer`]'ın eşitlik kapısından geçiyor, yani kare
+/// yalnız durum değişince isteniyor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransferControls {
+    /// Listede görünen öğe sayısı (akan + bekleyen). `0` → düğme yok, `1` →
+    /// yalnız `Cancel`, fazlası → `Show files (N)` + `Cancel all`.
+    pub items: u16,
+    /// Liste açık: liste düğmesi `Hide files` diyor ve basılı tonda.
+    pub list_open: bool,
+    /// Farenin altındaki düğme.
+    pub hover: Option<TransferAction>,
+}
+
+/// Yükleme satırının bir düğmesinin işi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferAction {
+    /// Kuyruğun listesini aç.
+    List,
+    /// Bütün kuyruğu iptal et.
+    Cancel,
+}
+
+/// Bir düğmenin çizimdeki durumu: dolgunun ve çerçevenin tonu `bt-gpu`'nun
+/// kararı (alfa bir çizim durumu, paletin değil).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ButtonState {
+    #[default]
+    Idle,
+    /// Fare üstünde.
+    Hover,
+    /// Basılı — bugün yalnız açık listenin düğmesi.
+    Pressed,
 }
 
 /// Yeniden bağlanma teklifi (037 Karar 8): yer tutucunun host'u ve işareti,

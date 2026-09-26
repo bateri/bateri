@@ -59,6 +59,11 @@ kabuğa yerel bir yol yazmasın.
   kullanıcının seçimine göre yükleme ya da ret). Yerel sekmede bugünkü gibi.
 - **R9** — Sözleşme: `CLAUDE.md` (dokuz rolün dokuzu, menü listesi, ⌘T,
   teklif, damla) ve yol haritasının 037 satırı.
+- **R10** — Yükleme satırının düğmeleri (gözle kontrol, 2026-09-26): simge
+  değil fiil etiketi (`Cancel ⌘.`; çok öğede `Show files (N)`/`Hide files` +
+  `Cancel all ⌘.`), dolgulu ve çerçeveli, fare üstündeyken koyulaşıyor ve el
+  imleci; tıklama alanı dolgunun tamamı, çizim ile isabet testi tek
+  yerleşimden; sığmazsa önce ipucu, sonra liste düşer; sonuç satırı düğmesiz.
 
 ## Yaklaşım
 
@@ -73,6 +78,8 @@ kabuğa yerel bir yol yazmasın.
 4. **phase-4 teklif** — `ShellLog`'un teklif yuvası, dock'un yer tutucusu, ⏎.
 5. **phase-5 Finder ve sözleşme** — Karar 7'nin seçimi; `CLAUDE.md` ve yol
    haritası.
+6. **phase-6 yükleme düğmeleri** — gözle kontrolün kusuru: satırın
+   düğmeleri tıklanabilir görünmüyordu (R10).
 
 Gerekçeler `discussion.md` → Karar 1–8.
 
@@ -120,4 +127,5 @@ Finder damlası (uzak) ──▶ Karar 7: yükle (scp → uzak yolu yapıştır)
 | phase-3 | ✅ |
 | phase-4 | ✅ |
 | phase-5 | ✅ |
+| phase-6 | ✅ |
 | kapı | ✅ |

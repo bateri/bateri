@@ -62,7 +62,8 @@ kurallar (`cell`), caret (`caret_fragment`), renkli emoji
 paylaşımla doğdu: caret `cell_bg`'nin, emoji `cell`'in **vertex'ini aynen**
 paylaşıyor ve ayrılan yalnız fragment. Caret'te sebep bir SDF (yuvarlak
 köşe, kenar, hale) ve o hesabı kare başına binlerce arka plan dörtgenine
-ödetmenin anlamı yok; emojide sebep rengi dokudan alması (instance'tan
+ödetmenin anlamı yok — aynı fragment'in ikinci tüketicisi yükleme satırının
+düğmeleri (dolgu + çerçeve, çizim başına bir dörtlü, `Renderer::encode_rounded`); emojide sebep rengi dokudan alması (instance'tan
 değil) — baytlar **düz alfa** (ön çarpım yüklemeden önce geri alınıyor,
 `raster::unpremultiply`), yani blend altı pipeline'da aynı (`SourceAlpha`).
 `glyph_fx` kendi vertex'ini ve 48 baytlık instance'ını taşıyor, çünkü
@@ -471,11 +472,15 @@ yetmiyorsa düğme kapalı), sonra **sıralı** bir kuyruk: ara arşivsiz `tar c
 ssh … tar x` akışı, baytlar bizden geçtiği için ilerleme kesin
 (`upload::TarWatcher`). Durum satırı bağlam satırının yerini alıyor
 (`DockContext::transfer`, `Session::set_transfer`; `⇄ host`'un öneki ve
-rengi korunuyor, sonunda `▴ list  ✕` düğmeleri — yeri çizimle fareye tek
-formülden, `bt_core::transfer_controls_col`), üst saç çizgisi bütün
+rengi korunuyor; sağa yaslı, fiil etiketli düğmeler — tek öğede `Cancel
+⌘.`, fazlasında `Show files (N)`/`Hide files` ve `Cancel all ⌘.`, sığmazsa
+önce ipucu sonra liste düşer; dolgu ve çerçeve işaretin renginde,
+`caret_fragment`'ten, fare üstündeyken koyulaşıyor ve el imleci — kare
+yalnız düğme değişince; tıklama alanı dolgunun tamamı ve çizimle fareye tek
+yerleşimden, `bt_core::transfer_button_at`, 037 phase-6), üst saç çizgisi bütün
 kuyruğun baytlarına göre dolan bir çubuk (`Dock::progress`) ve uygulamanın
 Dock simgesinde de bir çubuk; her öğe bitince uzak yolu uzak kabuğa
-yapıştırılıyor — uzak oturumun nesli hâlâ tutuyorsa. ⌘. ve ✕ bütün kuyruğu
+yapıştırılıyor — uzak oturumun nesli hâlâ tutuyorsa. ⌘. ve `Cancel` bütün kuyruğu
 iptal edip yazılmakta olan dosyayı uzakta siliyor; disk dolunca ve ssh
 kapanınca da kuyruk bitiyor ve sonuç satırı `upload::LINGER` kadar kalıyor
 — durma koşulu o. ssh `BatchMode=yes` ile koşuyor: parola sorulamaz,

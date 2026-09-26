@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bt_core::{HostMark, RemoteKind, RemoteTarget, Transfer};
+use bt_core::{HostMark, RemoteKind, RemoteTarget, Transfer, TransferAction, TransferControls};
 
 use crate::jobs::SSH_VALUED;
 
@@ -46,33 +46,6 @@ const SPEED_WINDOW: Duration = Duration::from_secs(3);
 /// süre — **tasarım sabiti**. Durma koşulu bu: süre dolunca satır kalkıyor
 /// ve bir daha kare istenmiyor.
 pub(crate) const LINGER: Duration = Duration::from_secs(4);
-
-/// Satırın düğmeleri — tıklanınca liste (`▴ list`) ve bütün kuyruğun iptali
-/// (`✕`). Karakterleri `bt_core::UPLOAD_GLYPHS`'in sözlüğünde.
-pub(crate) const CONTROLS: &str = "▴ list  ✕";
-
-/// [`CONTROLS`]'ta listenin karakter aralığı ve iptalin sütunu.
-const LIST_CONTROL: std::ops::Range<usize> = 0..6;
-const CANCEL_CONTROL: usize = 8;
-
-/// Satırın düğmelerinden hangisine basıldı.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Control {
-    List,
-    Cancel,
-}
-
-/// Düğmeler dizgesinde `offset`'teki karakter hangi düğmenin: tık bir sütun
-/// sağa ya da sola kaysa da düğmeyi bulsun diye iptal üç sütun.
-pub(crate) fn control_at(offset: usize) -> Option<Control> {
-    if LIST_CONTROL.contains(&offset) {
-        Some(Control::List)
-    } else if offset.abs_diff(CANCEL_CONTROL) <= 1 {
-        Some(Control::Cancel)
-    } else {
-        None
-    }
-}
 
 // ─── ssh ve uzak betikler ────────────────────────────────────────────────
 
@@ -1174,6 +1147,11 @@ pub(crate) struct Uploads {
     serial: u64,
     /// Dock'a son yazılan satır ([`Self::shown`]).
     shown: Option<Transfer>,
+    /// Farenin altındaki düğme ve listenin açıklığı (037 phase-6): satır her
+    /// tazelemede yeniden doğuyor, bu ikisi her doğumda ona damgalanıyor —
+    /// yoksa 200 ms'lik tazeleme fare durumunu ezerdi.
+    hover: Option<TransferAction>,
+    list_open: bool,
 }
 
 /// Bir öğe bittiğinde yapılacaklar.
@@ -1401,7 +1379,7 @@ impl Uploads {
                 host: queue.host,
                 mark: queue.mark,
                 body,
-                controls: String::new(),
+                controls: TransferControls::default(),
                 progress: None,
             },
             self.serial,
@@ -1409,14 +1387,58 @@ impl Uploads {
     }
 
     /// Dock'a son yazılan durum satırı — farenin düğme sorusunun girdisi
-    /// (`bt_core::transfer_controls_col` çizimle aynı yerleşimi okuyor).
+    /// (`bt_core::transfer_button_at` çizimle aynı yerleşimi okuyor).
     pub(crate) fn shown(&self) -> Option<&Transfer> {
         self.shown.as_ref()
     }
 
-    /// [`Self::shown`]'ı yazar.
+    /// [`Self::shown`]'ı yazar. Düğmesiz satır (sonuç ya da hiç) fare
+    /// durumunu da düşürüyor: altında düğme kalmadı.
     pub(crate) fn set_shown(&mut self, transfer: Option<Transfer>) {
+        if transfer.as_ref().is_none_or(|t| t.controls.items == 0) {
+            self.hover = None;
+            self.list_open = false;
+        }
         self.shown = transfer;
+    }
+
+    /// Farenin altındaki düğme değişti mi; değiştiyse damgalı satır —
+    /// yazılacak olan (çağıran oturuma verir). Aynı düğmede kalan hareket
+    /// `None`: kare istenmiyor.
+    pub(crate) fn set_hover(&mut self, hover: Option<TransferAction>) -> Option<Transfer> {
+        // Düğmesiz satırda fare hiçbir düğmenin üstünde değil.
+        let buttons = self.shown.as_ref().is_some_and(|t| t.controls.items > 0);
+        let hover = hover.filter(|_| buttons);
+        if self.hover == hover {
+            return None;
+        }
+        self.hover = hover;
+        self.restamp()
+    }
+
+    /// Farenin altındaki düğme (imlecin kararı).
+    pub(crate) fn hover(&self) -> Option<TransferAction> {
+        self.hover
+    }
+
+    /// Liste açıldı/kapandı; değiştiyse damgalı satır.
+    pub(crate) fn set_list_open(&mut self, open: bool) -> Option<Transfer> {
+        if self.list_open == open {
+            return None;
+        }
+        self.list_open = open;
+        self.restamp()
+    }
+
+    /// Gösterilen satırın düğme durumunu yeniler; düğmesiz satırda `None`.
+    fn restamp(&self) -> Option<Transfer> {
+        let mut shown = self.shown.clone()?;
+        if shown.controls.items == 0 {
+            return None;
+        }
+        shown.controls.hover = self.hover;
+        shown.controls.list_open = self.list_open;
+        Some(shown)
     }
 
     /// Kuyruğun geçen ve toplam baytı (Dock simgesinin çubuğu); kuyruk yoksa
@@ -1538,7 +1560,13 @@ impl Uploads {
             host: queue.host.clone(),
             mark: queue.mark,
             body,
-            controls: CONTROLS.to_owned(),
+            controls: TransferControls {
+                // Listenin gösterdiği sayı ([`Self::items`]): akan + bekleyen.
+                // audit: kuyruk damla başına öğe; `u16`'ya kırpılıyor.
+                items: u16::try_from(queue.waiting.len() + 1).unwrap_or(u16::MAX),
+                list_open: self.list_open,
+                hover: self.hover,
+            },
             progress: Some(progress),
         })
     }
@@ -1914,7 +1942,14 @@ mod tests {
         shared.bytes.store(18_200_000, Ordering::Release);
         let status = uploads.status(start).expect("satır");
         assert_eq!(status.body, "↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB");
-        assert_eq!(status.controls, CONTROLS);
+        assert_eq!(
+            status.controls,
+            TransferControls {
+                items: 2,
+                ..TransferControls::default()
+            },
+            "listede akan + bekleyen"
+        );
         assert_eq!(status.mark, HostMark::Production);
         // Çubuk bütün kuyruğun baytlarına göre: 18.2 / (44.6 + 1.0).
         assert_eq!(status.progress, Some(3_991));
@@ -1947,7 +1982,11 @@ mod tests {
         assert_eq!(done.paste.as_deref(), Some("/srv/static"));
         let (line, serial) = done.end.expect("kuyruk bitti");
         assert_eq!(line.body, "✓ 125 files uploaded");
-        assert_eq!((line.progress, line.controls.as_str()), (None, ""));
+        assert_eq!(
+            (line.progress, line.controls),
+            (None, TransferControls::default()),
+            "sonuç satırı düğmesiz"
+        );
         assert!(!uploads.active());
         assert!(uploads.linger_over(serial));
     }
@@ -2075,14 +2114,36 @@ mod tests {
     }
 
     #[test]
-    fn the_controls_map_clicks_to_buttons() {
-        assert_eq!(control_at(0), Some(Control::List));
-        assert_eq!(control_at(5), Some(Control::List));
-        assert_eq!(control_at(6), None);
-        assert_eq!(control_at(8), Some(Control::Cancel));
-        assert_eq!(control_at(9), Some(Control::Cancel));
-        assert_eq!(CONTROLS.chars().nth(CANCEL_CONTROL), Some('✕'));
-        assert_eq!(CONTROLS.chars().next(), Some('▴'));
+    fn the_pointer_state_survives_the_refresh_and_changes_only_on_edges() {
+        let mut uploads = queue_of(vec![job("a", false, 1, 10), job("b", false, 1, 10)]);
+        let (_, _, _shared) = uploads.start_next().expect("ilk öğe");
+        let now = Instant::now();
+        let status = uploads.status(now).expect("satır");
+        uploads.set_shown(Some(status));
+        let hovered = uploads
+            .set_hover(Some(TransferAction::Cancel))
+            .expect("değişti");
+        assert_eq!(hovered.controls.hover, Some(TransferAction::Cancel));
+        uploads.set_shown(Some(hovered));
+        assert_eq!(
+            uploads.set_hover(Some(TransferAction::Cancel)),
+            None,
+            "aynı düğmede kalan hareket kare istemiyor"
+        );
+        // 200 ms'lik tazeleme fare durumunu ezmiyor.
+        let status = uploads.status(now).expect("satır");
+        assert_eq!(status.controls.hover, Some(TransferAction::Cancel));
+        let open = uploads.set_list_open(true).expect("değişti");
+        assert!(open.controls.list_open);
+        // Düğmesiz satır (sonuç) fare durumunu düşürüyor.
+        uploads.set_shown(Some(Transfer::default()));
+        assert_eq!(uploads.hover(), None);
+        assert_eq!(
+            uploads.set_hover(Some(TransferAction::List)),
+            None,
+            "düğme yok"
+        );
+        assert_eq!(uploads.hover(), None);
     }
 
     #[test]
@@ -2091,7 +2152,6 @@ mod tests {
         // (`the_upload_row_has_no_box_in_the_small_class`); satırın her
         // dizgesi o sözlüğün içinde kalmalı.
         let texts = [
-            CONTROLS.to_owned(),
             end_body(&End::Done, "h", (1, 1)),
             end_body(&End::Cancelled, "h", (1, 2)),
             end_body(&End::DiskFull, "h", (1, 2)),

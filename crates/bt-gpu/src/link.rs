@@ -1296,6 +1296,7 @@ define_class!(
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
                 frame.open_dock(dock.ground, dock.edge, dock.separator);
                 frame.set_dock_progress(dock.progress);
+                frame.set_dock_buttons(dock.buttons);
             } else {
                 // Dock yok (alternatif ekran): efektin konusu da yok.
                 glyph_fx.finish();
