@@ -3688,6 +3688,44 @@ mod tests {
     }
 
     #[test]
+    fn a_still_pointer_stays_on_its_button_while_the_row_refreshes() {
+        // Tazeleme her tikte gövdeyi değiştiriyor (bayt, hız, kalan süre)
+        // ve fare durunca hover'ın tek girdisi sütun: düğmeler gövdeyle
+        // kaysaydı duran farenin altında vurgu gidip gelirdi. Durum
+        // (hover, açık liste) da genişliği oynatmamalı.
+        let bodies = [
+            "↑ 1 of 3 · a  1 / 44.6 MB",
+            "↑ 1 of 3 · a  12.4 / 44.6 MB · 10.1 MB/s · 3s",
+            "↑ 1 of 3 · a  18.2 / 44.6 MB · 0.1 MB/s · 12m 05s",
+            "↑ 3 of 3 · a-very-long-file-name-that-clips.tar.gz  44.6 / 44.6 MB",
+        ];
+        let spans = |body: &str, hover: Option<TransferAction>, list_open: bool| {
+            let mut context = uploading(body, 3, Some(5_000));
+            let transfer = context.transfer.as_mut().unwrap();
+            transfer.controls.hover = hover;
+            transfer.controls.list_open = list_open;
+            let transfer = context.transfer.as_ref().unwrap();
+            (0..80)
+                .map(|col| transfer_button_at(transfer, 80, col))
+                .collect::<Vec<_>>()
+        };
+        let first = spans(bodies[0], None, false);
+        assert!(first.contains(&Some(TransferAction::List)));
+        assert!(first.contains(&Some(TransferAction::Cancel)));
+        for body in bodies {
+            for hover in [
+                None,
+                Some(TransferAction::List),
+                Some(TransferAction::Cancel),
+            ] {
+                for list_open in [false, true] {
+                    assert_eq!(spans(body, hover, list_open), first, "{body}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn an_upload_row_clips_the_body_and_keeps_the_buttons_whole() {
         let state = live("", "", "", 0);
         let context = uploading("↑ backup.tar.gz  18.2 / 44.6 MB", 1, None);

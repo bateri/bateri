@@ -41,8 +41,9 @@ use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventModifierFlags,
-    NSEventPhase, NSMenuItem, NSPasteboard, NSPasteboardTypeFileURL, NSTextInputClient, NSView,
+    NSCursor, NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent,
+    NSEventModifierFlags, NSEventPhase, NSMenuItem, NSPasteboard, NSPasteboardTypeFileURL,
+    NSTextInputClient, NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint,
@@ -494,6 +495,9 @@ pub(crate) struct ViewIvars {
     /// (`set_metrics`): dock alternatif ekranda kalkınca ızgara da yeniden
     /// boyutlanıyor, yani ikisi aynı geometrinin iki yarısı.
     dock_rows: Cell<u16>,
+    /// Son `resetCursorRects`'in kurduğu el imleci dikdörtgenleri
+    /// ([`BateriView::sync_cursor_rects`]'in karşılaştırdığı).
+    cursor_rects: RefCell<Vec<NSRect>>,
     /// Çizilen karenin dikey orijini — kare yolunun yazdığı gövdenin okuma
     /// ucu ([`bt_gpu::Origin`]).
     ///
@@ -707,6 +711,14 @@ define_class!(
                 return;
             }
             self.drag_event(event, MouseButton::Middle);
+        }
+
+        /// AppKit'in cursor rect'leri yeniden kurma çağrısı: çerçeve
+        /// değişince kendiliğinden, düğmelerin yeri değişince
+        /// `invalidateCursorRectsForView:` ile ([`BateriView::sync_cursor_rects`]).
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            self.upload_cursor_rects();
         }
 
         /// Düğmesiz hareket. Pencere `setAcceptsMouseMovedEvents:` ile
@@ -1342,6 +1354,7 @@ impl BateriView {
             smooth_scroll: Cell::new(true),
             metrics: Cell::new(None),
             dock_rows: Cell::new(0),
+            cursor_rects: RefCell::new(Vec::new()),
             origin: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
@@ -1805,41 +1818,77 @@ impl BateriView {
         let (top, rows) = self.ivars().origin.get().and_then(Origin::dock)?;
         let scale = self.window()?.backingScaleFactor();
         let at = self.convertPoint_fromView(in_window, None);
-        // Bağlam satırının hücre bandı: dolgunun ta kendisi
-        // (`Frame::dock_button_draws`); üstündeki boşluk ve altındaki nefes
-        // payı dolgunun dışında, orada tık düğmeye düşmüyor.
-        let context_top = f64::from(top)
-            + f64::from(metrics.cell_px().1) * f64::from(rows)
-            + f64::from(bt_gpu::context_row_offset(rows, metrics));
-        let bottom = context_top + f64::from(metrics.cell_px().1);
-        let y = at.y * scale;
-        let x = at.x * scale - f64::from(metrics.gutter_px());
-        if y < context_top || y >= bottom || x < 0.0 {
-            return None;
-        }
-        // audit: `x ≥ 0` ve pencere genişliği `u16` sütuna sığıyor; taşan
-        // değer yalnız hiçbir düğmeye düşmeyen bir sütun olur.
-        let col = (x / f64::from(metrics.context_cell_px())).floor() as u16;
+        let col = context_col_at(metrics, top, rows, (at.x * scale, at.y * scale))?;
         Some((col, bt_gpu::context_cols(cols, metrics)))
     }
 
     /// Bağlam satırında dock-yerel `[start, end)` sütun aralığının view
     /// noktasındaki dikdörtgeni — [`Self::context_column`]'un tersi, aynı
-    /// geometriden: "Show files (N)" popover'ının çıpası (037 phase-7).
+    /// geometriden ([`context_span_px`]): "Show files (N)" popover'ının
+    /// çıpası (037 phase-7) ve düğmelerin el imleci ([`Self::upload_cursor_rects`]).
     pub(crate) fn context_span_rect(&self, start: u16, end: u16) -> Option<NSRect> {
         let (metrics, _) = self.ivars().metrics.get()?;
         let (top, rows) = self.ivars().origin.get().and_then(Origin::dock)?;
         let scale = self.window()?.backingScaleFactor();
-        let context_top = f64::from(top)
-            + f64::from(metrics.cell_px().1) * f64::from(rows)
-            + f64::from(bt_gpu::context_row_offset(rows, metrics));
-        let cell = f64::from(metrics.context_cell_px());
-        let x = f64::from(metrics.gutter_px()) + f64::from(start) * cell;
-        let width = f64::from(end.saturating_sub(start)) * cell;
+        let (x, y, width, height) = context_span_px(metrics, top, rows, start, end);
         Some(NSRect::new(
-            NSPoint::new(x / scale, context_top / scale),
-            NSSize::new(width / scale, f64::from(metrics.cell_px().1) / scale),
+            NSPoint::new(x / scale, y / scale),
+            NSSize::new(width / scale, height / scale),
         ))
+    }
+
+    /// Bağlam satırının bütçesi ([`bt_gpu::context_cols`]); ölçü yoksa `None`.
+    pub(crate) fn context_budget(&self) -> Option<u16> {
+        let (metrics, (cols, _)) = self.ivars().metrics.get()?;
+        Some(bt_gpu::context_cols(cols, metrics))
+    }
+
+    /// Yükleme düğmelerinin el imleci (037 phase-6 sonrası): AppKit'in
+    /// **cursor rect**'i, düğmenin dolgusunun tamamı. `set()` değil, çünkü
+    /// pencerenin imleci yeniden değerlendirmesi (başlığın her `↑ N%`
+    /// yazımı, key olma, çerçeve) view'a `cursorUpdate:` yolluyor ve
+    /// `NSView`'ın varsayılanı oku kuruyor — ölçüldü; elle kurulan el her
+    /// yüzde değişiminde oka dönüp bir sonraki tazelemede geri geliyordu.
+    /// Cursor rect o değerlendirmenin **girdisi**: dikdörtgenin içinde AppKit
+    /// kendisi el kuruyor, dışında ok, key olmayan pencerede hiç.
+    fn upload_cursor_rects(&self) {
+        let rects = self.upload_button_rects();
+        let hand = NSCursor::pointingHandCursor();
+        for rect in &rects {
+            self.addCursorRect_cursor(*rect, &hand);
+        }
+        self.ivars().cursor_rects.replace(rects);
+    }
+
+    /// Düğmelerin şimdiki dikdörtgenleri, view noktasında — tık ve hover'ın
+    /// geometrisinden ([`Self::context_span_rect`]); yükleme yoksa boş.
+    fn upload_button_rects(&self) -> Vec<NSRect> {
+        let (Some(window), Some(context)) = (self.terminal_window(), self.context_budget()) else {
+            return Vec::new();
+        };
+        window
+            .upload_button_spans(context)
+            .into_iter()
+            .filter_map(|(start, end)| self.context_span_rect(start, end))
+            .collect()
+    }
+
+    /// Kurulu cursor rect'ler bayatsa yeniletir: düğmeler belirdi ya da
+    /// kalktı (el asılı kalmasın), ya da dock'un **çizilen** yeri oynadı —
+    /// punto, pencere boyu, bandın süzülmesi, alternatif ekran. Dikdörtgen
+    /// son çizilen kareden okunuyor ve AppKit'in kendi tetikleri (çerçeve)
+    /// o kareden önce koşabiliyor, yani ölçüt geometrinin kendisi.
+    /// Çağıranlar her hareket ve her tazeleme (`TerminalWindow::upload_hover`,
+    /// `show_transfer`); aynı dikdörtgende no-op, yani imleç yeniden
+    /// değerlendirilmiyor.
+    pub(crate) fn sync_cursor_rects(&self) {
+        let fresh = self.upload_button_rects();
+        if *self.ivars().cursor_rects.borrow() == fresh {
+            return;
+        }
+        if let Some(window) = self.window() {
+            window.invalidateCursorRectsForView(self);
+        }
     }
 
     /// Tık yükleme satırının bir düğmesine mi düştü (037 Karar 7); `true` →
@@ -1944,6 +1993,48 @@ impl BateriView {
     }
 }
 
+/// Bağlam satırının hücre bandı, fiziksel piksel ve view'ın (çevrilmiş)
+/// uzayında: `[üst, alt)`. `top`/`rows` çizilen karenin dock'u
+/// (`Origin::dock`). Bant dolgunun ta kendisi (`Frame::dock_button_draws`);
+/// üstündeki boşluk ve altındaki nefes payı dolgunun dışında.
+fn context_band_px(metrics: CellMetrics, top: f32, rows: u16) -> (f64, f64) {
+    let band_top = f64::from(top)
+        + f64::from(metrics.cell_px().1) * f64::from(rows)
+        + f64::from(bt_gpu::context_row_offset(rows, metrics));
+    (band_top, band_top + f64::from(metrics.cell_px().1))
+}
+
+/// Fiziksel piksel noktası → bağlam satırında dock-yerel sütun; bandın ya da
+/// sol payın dışındaysa `None`. Sütun adımı küçük sınıfın ilerlemesi.
+/// [`context_span_px`]'in tersi: tık, hover ve el imleci bu ikisini okuyor,
+/// yani sütun ile dikdörtgen ayrışamıyor.
+fn context_col_at(metrics: CellMetrics, top: f32, rows: u16, (x, y): (f64, f64)) -> Option<u16> {
+    let (band_top, band_bottom) = context_band_px(metrics, top, rows);
+    let x = x - f64::from(metrics.gutter_px());
+    if y < band_top || y >= band_bottom || x < 0.0 {
+        return None;
+    }
+    // audit: `x ≥ 0` ve pencere genişliği `u16` sütuna sığıyor; taşan
+    // değer yalnız hiçbir düğmeye düşmeyen bir sütun olur.
+    Some((x / f64::from(metrics.context_cell_px())).floor() as u16)
+}
+
+/// Dock-yerel `[start, end)` sütun aralığının dikdörtgeni, fiziksel piksel:
+/// `(x, y, en, boy)` — [`context_col_at`]'in tersi.
+fn context_span_px(
+    metrics: CellMetrics,
+    top: f32,
+    rows: u16,
+    start: u16,
+    end: u16,
+) -> (f64, f64, f64, f64) {
+    let (band_top, band_bottom) = context_band_px(metrics, top, rows);
+    let cell = f64::from(metrics.context_cell_px());
+    let x = f64::from(metrics.gutter_px()) + f64::from(start) * cell;
+    let width = f64::from(end.saturating_sub(start)) * cell;
+    (x, band_top, width, band_bottom - band_top)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1953,6 +2044,37 @@ mod tests {
     /// var: hücre aritmetiği (pay sıfır) ve payın kendisi.
     fn grid(gutter: u16) -> CellMetrics {
         CellMetrics::new(9, 18, 9, gutter, 1).expect("sıfır olmayan hücre")
+    }
+
+    #[test]
+    fn the_button_rect_and_the_pointer_column_read_one_geometry() {
+        // Düğmenin el imleci (cursor rect) ile tık/hover'ın sütunu aynı
+        // bandı ve aynı adımı okumalı: ayrışsalar el düğmenin yanında çıkar.
+        // İki dock biçimi: giriş satırlı (satır arası boşluk) ve uzak oturum
+        // (giriş satırı sıfır, 036).
+        let metrics = CellMetrics::new(16, 33, 13, 8, 2).expect("hücre");
+        for (top, rows) in [(500.0_f32, 2_u16), (620.0, 0)] {
+            let (start, end) = (40_u16, 52_u16);
+            let (x, y, width, height) = context_span_px(metrics, top, rows, start, end);
+            assert_eq!(height, f64::from(metrics.cell_px().1));
+            let at = |px: f64, py: f64| context_col_at(metrics, top, rows, (px, py));
+            let mid = y + height / 2.0;
+            assert_eq!(at(x + 0.01, mid), Some(start), "sol kenar ilk sütun");
+            assert_eq!(
+                at(x + width - 0.01, mid),
+                Some(end - 1),
+                "sağ kenarın içi son sütun"
+            );
+            assert_eq!(at(x + width, mid), Some(end), "sağ kenar aralığın dışı");
+            assert_eq!(at(x + 0.01, y), Some(start), "bandın tepesi içeride");
+            assert_eq!(at(x + 0.01, y - 0.01), None, "bandın üstü dışarıda");
+            assert_eq!(at(x + 0.01, y + height), None, "bandın altı dışarıda");
+            assert_eq!(
+                at(f64::from(metrics.gutter_px()) - 0.01, mid),
+                None,
+                "sol pay dışarıda"
+            );
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSBox, NSBoxType,
-    NSButton, NSColor, NSControlSize, NSCursor, NSEvent, NSEventMask, NSFont, NSFontWeightRegular,
+    NSButton, NSColor, NSControlSize, NSEvent, NSEventMask, NSFont, NSFontWeightRegular,
     NSImageScaling, NSImageView, NSLineBreakMode, NSModalResponse, NSModalResponseAbort, NSPopover,
     NSPopoverBehavior, NSProgressIndicator, NSProgressIndicatorStyle, NSTextField, NSView,
     NSViewController,
@@ -307,50 +307,55 @@ impl TerminalWindow {
     }
 
     /// Durum satırını oturuma yazar ve farenin düğme sorusu için saklar.
-    /// Düğmesiz satır farenin üstünde durduğu düğmeyi de kaldırıyor: el
-    /// imleci orada asılı kalmasın.
+    /// El imlecini AppKit'in cursor rect'i kuruyor
+    /// (`BateriView::upload_cursor_rects`); düğmeler belirdi ya da kalktıysa
+    /// rect'ler burada yenileniyor, yani düğme kalkınca farenin altında el
+    /// asılı kalmıyor.
     fn show_transfer(&self, transfer: Option<Transfer>) {
         if let Some(session) = self.session() {
             session.set_transfer(transfer.as_ref());
         }
-        let dropped = {
-            let mut uploads = self.uploads().borrow_mut();
-            let had = uploads.hover().is_some();
-            uploads.set_shown(transfer);
-            had && uploads.hover().is_none()
+        self.uploads().borrow_mut().set_shown(transfer);
+        // `borrow_mut` bitti: rect'lerin hesabı `uploads`'ı yeniden ödünç
+        // alıyor.
+        self.view().sync_cursor_rects();
+    }
+
+    /// Gösterilen satırın düğmelerinin dock-yerel sütun aralıkları
+    /// (`context` bağlam satırının bütçesi) — cursor rect'lerin girdisi, tık
+    /// ve hover'la aynı yerleşimden (`bt_core::transfer_button_span`).
+    pub(crate) fn upload_button_spans(&self, context: u16) -> Vec<(u16, u16)> {
+        let uploads = self.uploads().borrow();
+        let Some(shown) = uploads.shown() else {
+            return Vec::new();
         };
-        if dropped {
-            NSCursor::arrowCursor().set();
-        }
+        [TransferAction::List, TransferAction::Cancel]
+            .into_iter()
+            .filter_map(|action| bt_core::transfer_button_span(shown, context, action))
+            .collect()
     }
 
     /// Fare bağlam satırında dock-yerel `col` sütununda (`None` → satırın
     /// dışında; `context` bağlam satırının bütçesi): üstündeki düğme
-    /// **değiştiyse** satırı yeniden yazar (kare yalnız o kenarda) ve imleci
-    /// el ↔ ok çevirir (037 phase-6). Yükleme yoksa ilk soruda çıkıyor —
+    /// **değiştiyse** satırı yeniden yazar — hover tonu, kare yalnız o
+    /// kenarda (037 phase-6). İmleci kurmuyor: el cursor rect'ten, burada
+    /// yalnız bayatsa yenileniyor. Yükleme yoksa ilk soruda çıkıyor —
     /// boştaki pencerenin her hareketi bir ödünç almaya mal oluyor.
     pub(crate) fn upload_hover(&self, at: Option<(u16, u16)>) {
-        let (before, after, fresh) = {
+        let fresh = {
             let mut uploads = self.uploads().borrow_mut();
             let Some(shown) = uploads.shown() else {
                 return;
             };
             let hover =
                 at.and_then(|(col, context)| bt_core::transfer_button_at(shown, context, col));
-            let before = uploads.hover();
-            let fresh = uploads.set_hover(hover);
-            (before, uploads.hover(), fresh)
+            uploads.set_hover(hover)
         };
-        if let Some(fresh) = fresh {
-            self.show_transfer(Some(fresh));
-        }
-        // Düğmenin üstündeyken her soruda el: AppKit imleci kendi başına
-        // oka döndürebiliyor (pencere yeniden key oldu) ve hover değişmediği
-        // için kenar bunu görmezdi. Bedeli bir `set`.
-        if after.is_some() {
-            NSCursor::pointingHandCursor().set();
-        } else if before.is_some() {
-            NSCursor::arrowCursor().set();
+        match fresh {
+            Some(fresh) => self.show_transfer(Some(fresh)),
+            // Dock'un çizilen yeri oynadıysa (punto, pencere boyu, bant) el
+            // imlecinin dikdörtgeni de oynamalı.
+            None => self.view().sync_cursor_rects(),
         }
     }
 

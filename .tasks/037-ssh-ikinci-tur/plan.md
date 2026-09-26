@@ -134,3 +134,4 @@ Finder damlası (uzak) ──▶ Karar 7: yükle (scp → uzak yolu yapıştır)
 | phase-7 | ✅ |
 | kapı | ✅ |
 - Sonradan: dock satırı bayt, hız ve kalan süreyi akan kalemin değil kuyruğun toplamından yazıyor, klasörün dosya sayısı adın yanında (onaylı demoya hizalama; çubuk zaten kuyruğa göre doluyordu).
+- Sonradan: düğmelerin el imleci AppKit'in cursor rect'inden (`BateriView::upload_cursor_rects`); elle `set()` her `↑ N%` başlık yazımının getirdiği `cursorUpdate:`'te oka dönüyor ve fare dururken el ↔ ok titriyordu (ölçüldü: her `setTitle` bir `cursorUpdate:`, `NSView`'ın varsayılanı ok). Hover tonu sahte yüklemede (yerel ve ssh biçimi) sabit kaldı; bekçisi `a_still_pointer_stays_on_its_button_while_the_row_refreshes`.

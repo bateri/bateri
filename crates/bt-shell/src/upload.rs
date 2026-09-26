@@ -1759,7 +1759,9 @@ impl Uploads {
         self.restamp()
     }
 
-    /// Farenin altındaki düğme (imlecin kararı).
+    /// Farenin altındaki düğme. Yalnız sınamalar soruyor: imleci AppKit'in
+    /// cursor rect'i kuruyor, hover yalnız dolgunun tonu.
+    #[cfg(test)]
     pub(crate) fn hover(&self) -> Option<TransferAction> {
         self.hover
     }
