@@ -263,6 +263,8 @@ değiştirir, geri kalan phase'ler iki seçenekte de aynı.
 
 Bu genişleme phase-5'i büyütüyor. Tek phase'e sığmıyorsa implementer phase'i 5a/5b'ye bölebilir (`duzen.md` → Ek phase eşiği).
 
+> **phase-7 → hedef, kullanıcı onayı 2026-09-26.** Yüklemenin hedef tasarımı `phase-7.md` → Hedef'te ve bu bloğun üstünde; çelişirse o kazanır.
+
 ## Karar 8: bağlantı kopunca → ✅ ssh 255'te dock'un boş giriş satırında teklif, ilk tuşta kalkar; mosh'ta yok
 
 **Tetik:** uzak oturum etkinken ve tür **ssh** iken bizim (kimlikli) `D`'miz

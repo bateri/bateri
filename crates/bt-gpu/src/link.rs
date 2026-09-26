@@ -1295,7 +1295,7 @@ define_class!(
                 // Yüzey hücrelerden **sonra** açılıyor: renkleri getiren çağrı
                 // hücreleri basan çağrının ta kendisi (`Frame::open_dock`).
                 frame.open_dock(dock.ground, dock.edge, dock.separator);
-                frame.set_dock_progress(dock.progress);
+                frame.set_dock_progress(dock.progress, dock.track);
                 frame.set_dock_buttons(dock.buttons);
             } else {
                 // Dock yok (alternatif ekran): efektin konusu da yok.

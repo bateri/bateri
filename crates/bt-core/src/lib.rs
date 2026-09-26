@@ -56,7 +56,7 @@ pub use cluster::{ClusterId, Clusters};
 pub use color::{LinearRgba, Theme};
 pub use dock::{
     Dock, DockBudget, DockButton, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells,
-    TEXT_COL as DOCK_TEXT_COL, UPLOAD_GLYPHS, transfer_button_at,
+    TEXT_COL as DOCK_TEXT_COL, UPLOAD_GLYPHS, transfer_button_at, transfer_button_span,
 };
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use search::{
@@ -79,7 +79,7 @@ pub use settings::{
 pub use shell::{
     ButtonState, DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor,
     HighlightStyle, Reconnect, RemoteKind, RemoteTarget, ShellPhase, ShellState, Transfer,
-    TransferAction, TransferControls,
+    TransferAction, TransferControls, TransferTone,
 };
 pub use wake::Wake;
 

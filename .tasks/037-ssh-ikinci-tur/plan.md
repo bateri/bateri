@@ -80,6 +80,9 @@ kabuğa yerel bir yol yazmasın.
    haritası.
 6. **phase-6 yükleme düğmeleri** — gözle kontrolün kusuru: satırın
    düğmeleri tıklanabilir görünmüyordu (R10).
+7. **phase-7 yüklemenin hedef tasarımı** — kullanıcının yeniden onayladığı
+   hedef (popover, yapıştırmasız sonuç satırı, durdurma sorusu, başlık,
+   bildirim, çubuğun rengi); hedef `phase-7.md`'de.
 
 Gerekçeler `discussion.md` → Karar 1–8.
 
@@ -128,4 +131,5 @@ Finder damlası (uzak) ──▶ Karar 7: yükle (scp → uzak yolu yapıştır)
 | phase-4 | ✅ |
 | phase-5 | ✅ |
 | phase-6 | ✅ |
+| phase-7 | ✅ |
 | kapı | ✅ |

@@ -2748,7 +2748,7 @@ mod tests {
         // bağlıyor). Kutu çıkarsa dizge `bt-shell`'de değişmeli. Menlo, adıyla.
         let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
         assert_eq!(menlo.font_issue(), None, "Menlo açılmadı");
-        for ch in ['↑', '⌘', '✓', '—', '·', '…'] {
+        for ch in ['↑', '⌘', '✓', '—', '·', '…', '→'] {
             let slot = menlo
                 .slot(
                     Sprite::Char(ch),

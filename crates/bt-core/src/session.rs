@@ -6314,9 +6314,9 @@ impl Session {
     /// Uzak oturumun **tek okumada** hedefi, uzak dizini ve komutunun nesli;
     /// yerelde ya da komut koşmuyorken `None` (037 Karar 7).
     ///
-    /// Okuyanı Finder damlasının yüklemesi: nesil damlada alınıyor ve her
-    /// öğenin yolu uzak kabuğa yapıştırılmadan önce yeniden soruluyor —
-    /// tutmuyorsa ssh bitmiş ve yol yerel kabuğa düşerdi. Üçü aynı yaprak
+    /// Okuyanı Finder damlasının yüklemesi: nesil damlada alınıyor ve
+    /// onaydan sonra ve kuyruğun ömrü boyunca yeniden soruluyor — tutmuyorsa
+    /// ssh bitmiş, bekleyenler iptal (037 Karar 7). Üçü aynı yaprak
     /// kilit turunda, yani bir `D` hedefi eskisiyle, nesli yenisiyle
     /// eşleştiremiyor. Ana thread'de, kenarda; `Term`'e dokunmuyor.
     pub fn remote_target(&self) -> Option<(u64, RemoteTarget, String)> {
@@ -12229,6 +12229,7 @@ mod tests {
             body: "↑ a".into(),
             controls: crate::TransferControls::default(),
             progress: Some(5_000),
+            ..Transfer::default()
         };
         assert!(session.set_transfer(Some(&transfer)));
         assert!(
@@ -12237,7 +12238,9 @@ mod tests {
         );
         let (dock, _) = draw_dock(&session);
         assert_eq!(dock.progress, Some(5_000));
-        assert_eq!(dock.edge, session.theme().error_linear());
+        // Dolan kısım `info`, işaret boş izde (037 phase-7).
+        assert_eq!(dock.edge, session.theme().info_linear());
+        assert_eq!(dock.track, session.theme().error_linear());
         assert!(session.set_transfer(None));
         assert!(!session.set_transfer(None));
         let (dock, _) = draw_dock(&session);

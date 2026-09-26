@@ -33,11 +33,11 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSBox, NSBoxType, NSColor, NSControlTextEditingDelegate,
+    NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControlTextEditingDelegate,
     NSEventModifierFlags, NSMenuItem, NSModalResponse, NSModalResponseCancel, NSPasteboard,
-    NSPasteboardNameFind, NSSearchFieldDelegate, NSTextFieldDelegate, NSTitlePosition,
-    NSTitlebarSeparatorStyle, NSView, NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate,
-    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
+    NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextFieldDelegate,
+    NSTitlePosition, NSTitlebarSeparatorStyle, NSView, NSViewFrameDidChangeNotification, NSWindow,
+    NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -51,7 +51,8 @@ use crate::jobs::{self, Foreground, Libproc, Probe, ShellParent};
 use crate::notices::{Source, font_messages};
 use crate::quote;
 use crate::search_bar::{SearchBar, selection_query};
-use crate::upload::Uploads;
+use crate::upload::{self, Uploads};
+use crate::uploader::{StopSheet, UploadPopover};
 use crate::view::BateriView;
 use crate::zoom::Zoom;
 use crate::{Run, Workload};
@@ -701,6 +702,13 @@ pub(crate) struct WindowIvars {
     uploads: RefCell<Uploads>,
     /// Açık yükleme sayfası (onay ya da hata): sayfa süresince yaşıyor.
     upload_alert: RefCell<Option<Retained<NSAlert>>>,
+    /// Açık durdurma sorusu (037 phase-7, [`crate::uploader`]).
+    upload_stop: RefCell<Option<StopSheet>>,
+    /// Açık "Show files (N)" popover'ı (037 phase-7).
+    upload_list: RefCell<Option<UploadPopover>>,
+    /// Popover'ı kapatan olayın zamanı (`popoverWillClose:`): düğmeye
+    /// yeniden basış popover'ı yeniden açmasın.
+    list_closed_at: Cell<Option<f64>>,
 }
 
 /// Yeni kabuğun doğum bilgisi — [`TerminalWindow::start`]'ın çağırandan
@@ -855,6 +863,21 @@ define_class!(
 
     // Arama alanının delegesi (033): üç protokolün de bütün yöntemleri
     // isteğe bağlı; kullanılanlar aşağıdaki `impl`'de.
+    /// "Show files (N)" popover'ının kapanışı (037 phase-7): `transient`
+    /// popover'ı AppKit de kapatıyor (dışarı tık) ve düğmenin basılı tonu
+    /// ile Esc izleyicisi o zaman da kalkmalı.
+    unsafe impl NSPopoverDelegate for TerminalWindow {
+        #[unsafe(method(popoverWillClose:))]
+        fn popover_will_close(&self, _n: &NSNotification) {
+            self.upload_list_will_close();
+        }
+
+        #[unsafe(method(popoverDidClose:))]
+        fn popover_did_close(&self, _n: &NSNotification) {
+            self.close_upload_list();
+        }
+    }
+
     unsafe impl NSControlTextEditingDelegate for TerminalWindow {}
     unsafe impl NSTextFieldDelegate for TerminalWindow {}
     unsafe impl NSSearchFieldDelegate for TerminalWindow {}
@@ -1071,22 +1094,26 @@ define_class!(
             }
         }
 
-        /// Shell ▸ Cancel Upload (⌘.) ve durum satırının ✕'i: bu sekmenin
-        /// **bütün** yükleme kuyruğunu iptal eder (037 Karar 7 → Kullanıcı
-        /// kararı 5). Esc değil, çünkü klavye o sırada uzak kabuğa gidiyor.
+        /// Shell ▸ Cancel Upload (⌘.) ve popover'ın `Cancel all ⌘.`'u: bu
+        /// sekmenin **bütün** yükleme kuyruğu (037 Karar 7 → Kullanıcı kararı
+        /// 5); akan kalem 30 saniyeyi geçtiyse önce sorar (phase-7). Esc
+        /// değil, çünkü klavye o sırada uzak kabuğa gidiyor. Menü kısayolu
+        /// `keyDown:`'dan önce yakalanıyor, yani alternatif ekranda (vim)
+        /// da çalışıyor — kapısı yalnız kuyruk (`validateMenuItem:`).
         #[unsafe(method(cancelUpload:))]
         fn cancel_upload(&self, _sender: Option<&AnyObject>) {
-            self.cancel_uploads();
+            self.request_stop(true);
         }
 
-        /// Durum satırının listesinde bir öğenin ✕'i: `tag` listedeki sırası.
-        #[unsafe(method(cancelUploadItem:))]
-        fn cancel_upload_item(&self, sender: Option<&AnyObject>) {
-            let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>()) else {
+        /// Popover satırının düğmesi (`Cancel`/`Remove`): `tag` kalemin
+        /// kimliği, sırası değil — sıra biten ve çıkarılan kalemlerle kayar.
+        #[unsafe(method(uploadRowAction:))]
+        fn upload_row_action_sent(&self, sender: Option<&AnyObject>) {
+            let Some(button) = sender.and_then(|sender| sender.downcast_ref::<NSButton>()) else {
                 return;
             };
-            if let Ok(index) = usize::try_from(item.tag()) {
-                self.cancel_upload_at(index);
+            if let Ok(id) = u64::try_from(button.tag()) {
+                self.upload_row_action(id);
             }
         }
 
@@ -1241,6 +1268,9 @@ impl TerminalWindow {
             search_driving: Cell::new(false),
             uploads: RefCell::new(Uploads::default()),
             upload_alert: RefCell::new(None),
+            upload_stop: RefCell::new(None),
+            upload_list: RefCell::new(None),
+            list_closed_at: Cell::new(None),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1570,6 +1600,21 @@ impl TerminalWindow {
         &self.ivars().upload_alert
     }
 
+    /// Açık durdurma sorusunun yuvası.
+    pub(crate) fn upload_stop(&self) -> &RefCell<Option<StopSheet>> {
+        &self.ivars().upload_stop
+    }
+
+    /// Açık "Show files (N)" popover'ının yuvası.
+    pub(crate) fn upload_list(&self) -> &RefCell<Option<UploadPopover>> {
+        &self.ivars().upload_list
+    }
+
+    /// Popover'ı kapatan olayın zamanı.
+    pub(crate) fn list_closed_at(&self) -> &Cell<Option<f64>> {
+        &self.ivars().list_closed_at
+    }
+
     /// Bu sekmenin `NSWindow`'u (sayfanın sahibi).
     pub(crate) fn ns_window(&self) -> &NSWindow {
         &self.ivars().window
@@ -1649,15 +1694,27 @@ impl TerminalWindow {
     /// uzak durumun iki kenarı (`set_remote`'un dönüşü, `D`/`A`'nın silmesini
     /// getiren `title_changed`) başlığınkilerle aynı (037 Karar 4).
     pub(crate) fn refresh_title(&self) {
-        if let Some(session) = self.ivars().session.get() {
-            self.ivars()
-                .window
-                .setTitle(&NSString::from_str(&session.title()));
-        }
+        self.apply_title();
         self.refresh_tab_mark();
         // Uzak durumun kenarı yükleme kuyruğunun da kenarı: ssh kapandıysa
         // bekleyenler iptal (037 Karar 7 → Kullanıcı kararı 6).
         self.check_upload_connection();
+    }
+
+    /// Pencerenin (ve sekmenin) başlığını oturumdan yazar; yükleme akarken
+    /// önünde `↑ N% · ` (037 phase-7, `upload::titled`). Uzak durumun
+    /// kenarını sormuyor — yükleme yolu onu kendi kenarında çağırıyor ve
+    /// `check_upload_connection` kuyruğu bitirip buraya geri dönerdi.
+    pub(crate) fn apply_title(&self) {
+        if let Some(session) = self.ivars().session.get() {
+            let percent = self.ivars().uploads.borrow().title_percent();
+            self.ivars()
+                .window
+                .setTitle(&NSString::from_str(&upload::titled(
+                    percent,
+                    &session.title(),
+                )));
+        }
     }
 
     /// Uzak sekmenin host'u ve çözülmüş işareti; yerelde `None`
