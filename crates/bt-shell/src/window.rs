@@ -1588,9 +1588,9 @@ impl TerminalWindow {
                 // satır önce yazdı) ve alternatif ekran habercisinin kapısı da
                 // aynı yuvayı okuyor, yani ayrışamazlar.
                 dock: self.ivars().dock_rows_at_birth.get() > 0,
-                // Kümeleme (035) çizim yolu hazır olana kadar kapalı; açılışı
-                // setin son phase'i.
-                cluster: false,
+                // Kümeleme (035) bütün pencerelerde açık, süreli koşu dahil.
+                // Ayar anahtarı değil (035 Karar 2): geri alma bu tek satır.
+                cluster: true,
             },
             Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
         );

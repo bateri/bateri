@@ -1808,6 +1808,8 @@ impl<T> Placed<T> {
 /// `Placed` (baş karakter ve baş karakterin etiketi), sarma kararı kümenin
 /// tamamına; `caret` bir kümenin **içine** düşerse caret kümenin başında
 /// (Karar 7) — kümenin ortasına yazılacak bir sütun yok.
+// Sekizinci argüman `cluster` (035): oturumun tek bayrağı, dört çağıranın
+// hepsi aynı yürüyüşü paylaştığı için bir yapıya sarılması kurucu eklerdi.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_with<T>(
     items: impl IntoIterator<Item = (char, T)>,

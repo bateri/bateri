@@ -125,8 +125,18 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         let at = self.head();
         let cell = &mut self.term.grid_mut()[at.line][at.column];
         let mut chars = open.chars();
-        cell.c = chars.next().unwrap_or(' ');
-        chars.for_each(|c| cell.push_zerowidth(c));
+        let head = chars.next().unwrap_or(' ');
+        // Yazılmayan hücre (DECAWM kapalı, son sütun) kümenin eski
+        // kalanını hâlâ taşıyor: yeniden basılsaydı `❤‍🔥`'nin ZWJ'i iki kez
+        // girer ve küme şekillenmezdi. Yazılan hücrenin `c`'si yer tutucu,
+        // yani orada taşınan kalan yok.
+        let kept = if cell.c == head {
+            cell.zerowidth().map_or(0, <[char]>::len)
+        } else {
+            0
+        };
+        cell.c = head;
+        chars.skip(kept).for_each(|c| cell.push_zerowidth(c));
     }
 }
 
@@ -410,6 +420,11 @@ mod tests {
         let mut t = term(10, 2);
         feed(&mut t, true, "\x1b[?7l123456789❤\u{FE0F}");
         assert_eq!(rows(&t)[0], "1|2|3|4|5|6|7|8|9|❤\u{FE0F}");
+        // Kalanı zaten hücrede olan küme (`❤` + ZWJ, sonra `🔥`): eski
+        // kalan ikinci kez basılmıyor.
+        let mut t = term(10, 2);
+        feed(&mut t, true, "\x1b[?7l123456789❤\u{200D}🔥");
+        assert_eq!(rows(&t)[0], "1|2|3|4|5|6|7|8|9|❤\u{200D}🔥");
     }
 
     #[test]
