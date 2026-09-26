@@ -81,7 +81,7 @@ use crate::search::{
 use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule};
 use crate::shell::{
     COUNTER_FLOOR, CaretHome, Counter, DockContext, DockPrediction, DockSelection, DockState,
-    DockStatus, Precision, RemoteTarget, Scanner, ShellLog, ShellState, Stripe,
+    DockStatus, Precision, RemoteTarget, Scanner, ShellLog, ShellState, Stripe, Transfer,
 };
 use crate::wake::Wake;
 
@@ -6311,6 +6311,49 @@ impl Session {
             .map(|target| target.line.clone())
     }
 
+    /// Uzak oturumun **tek okumada** hedefi, uzak dizini ve komutunun nesli;
+    /// yerelde ya da komut koşmuyorken `None` (037 Karar 7).
+    ///
+    /// Okuyanı Finder damlasının yüklemesi: nesil damlada alınıyor ve her
+    /// öğenin yolu uzak kabuğa yapıştırılmadan önce yeniden soruluyor —
+    /// tutmuyorsa ssh bitmiş ve yol yerel kabuğa düşerdi. Üçü aynı yaprak
+    /// kilit turunda, yani bir `D` hedefi eskisiyle, nesli yenisiyle
+    /// eşleştiremiyor. Ana thread'de, kenarda; `Term`'e dokunmuyor.
+    pub fn remote_target(&self) -> Option<(u64, RemoteTarget, String)> {
+        let log = lock(&self.shell);
+        let command = log.running_command()?;
+        let target = log.context.remote.clone()?;
+        Some((command, target, log.context.remote_cwd.clone()))
+    }
+
+    /// Yükleme kuyruğunun durum satırını yazar (`None` = kaldır; 037 Karar
+    /// 7). **Değiştiyse** kare ister ([`Session::set_remote`] örüntüsü: satır
+    /// alacritty'nin hasarında yok) ve `true` döner.
+    ///
+    /// Durma koşulu çağıranın: kuyruk bitince sonuç satırı bir süre kalıp
+    /// `None`'la kalkıyor ve bu çağrı aynı değeri ikinci kez aldığında kare
+    /// istemiyor — boşta sıfır kare. Yaprak kilit `request_frame`'den önce
+    /// düşüyor.
+    pub fn set_transfer(&self, transfer: Option<&Transfer>) -> bool {
+        let changed = {
+            let mut log = lock(&self.shell);
+            let slot = &mut log.context.transfer;
+            if slot.as_ref() == transfer {
+                false
+            } else {
+                match (slot.as_mut(), transfer) {
+                    (Some(current), Some(fresh)) => current.clone_from(fresh),
+                    _ => *slot = transfer.cloned(),
+                }
+                true
+            }
+        };
+        if changed {
+            self.request_frame();
+        }
+        changed
+    }
+
     /// Uygulama alternatif ekranda mı — **son karedeki** hâl.
     ///
     /// Kendi sorgusu, [`Cursor`]'ın alanı **değil**: `Cursor` bir kare kaydı
@@ -12152,6 +12195,55 @@ mod tests {
     /// dock'a tık ne seçim kuruyor ne kabuğa komut gönderiyor — aynı nokta
     /// `set_remote`'tan önce `foo`'yu seçiyordu. Alternatif ekranda sayı
     /// bugünkü gibi `1`.
+    /// 037 Karar 7: yüklemenin iki kapısı — hedef, uzak dizin ve nesil tek
+    /// okumada (`remote_target`), durum satırı yalnız değişince kare istiyor
+    /// ve dock'un üst çizgisini çubuğa çeviriyor.
+    #[test]
+    fn an_upload_reads_the_remote_target_and_paints_its_row() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        assert_eq!(session.remote_target(), None, "yerelde hedef yok");
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("`C`'den sonra koşuyor");
+        assert_eq!(
+            session.remote_target(),
+            None,
+            "komut koşuyor ama uzak değil"
+        );
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert_eq!(
+            session.remote_target(),
+            Some((command, RemoteTarget::ssh("prod"), String::new()))
+        );
+
+        let transfer = Transfer {
+            host: "prod".into(),
+            mark: HostMark::Production,
+            body: "↑ a".into(),
+            controls: String::new(),
+            progress: Some(5_000),
+        };
+        assert!(session.set_transfer(Some(&transfer)));
+        assert!(
+            !session.set_transfer(Some(&transfer)),
+            "aynı satır kare istemiyor"
+        );
+        let (dock, _) = draw_dock(&session);
+        assert_eq!(dock.progress, Some(5_000));
+        assert_eq!(dock.edge, session.theme().error_linear());
+        assert!(session.set_transfer(None));
+        assert!(!session.set_transfer(None));
+        let (dock, _) = draw_dock(&session);
+        assert_eq!(dock.progress, None);
+    }
+
     #[test]
     fn a_remote_session_has_no_input_row_in_the_dock() {
         let wake = Arc::new(TestWake::default());

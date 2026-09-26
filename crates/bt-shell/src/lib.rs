@@ -36,6 +36,8 @@ mod quote;
 mod search_bar;
 mod settings;
 mod settings_window;
+mod upload;
+mod uploader;
 mod view;
 mod watch;
 mod window;

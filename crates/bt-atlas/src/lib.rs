@@ -2741,6 +2741,28 @@ mod tests {
     }
 
     #[test]
+    fn the_upload_row_has_no_box_in_the_small_class() {
+        // 037 Karar 7: yüklemenin durum satırı bağlam satırında, yani küçük
+        // sınıfta. Karakterler `bt-core`'un `UPLOAD_GLYPHS`'inin elle kopyası
+        // (bu crate onu göremiyor; `the_upload_row_is_the_one_the_atlas_checks`
+        // bağlıyor). Kutu çıkarsa dizge `bt-shell`'de değişmeli. Menlo, adıyla.
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
+        assert_eq!(menlo.font_issue(), None, "Menlo açılmadı");
+        for ch in ['↑', '▴', '✕', '✓', '—', '·', '…'] {
+            let slot = menlo
+                .slot(
+                    Sprite::Char(ch),
+                    Face::Regular,
+                    SizeClass::Small,
+                    Half::Whole,
+                )
+                .0
+                .slot;
+            assert_ne!(slot, TOFU, "'{ch}' Menlo'nun küçük sınıfında kutu");
+        }
+    }
+
+    #[test]
     fn the_small_class_is_narrower_and_keeps_its_own_slot() {
         let mut a = atlas(POINT_SIZE, 1.0);
 

@@ -55,7 +55,8 @@ mod wake;
 pub use cluster::{ClusterId, Clusters};
 pub use color::{LinearRgba, Theme};
 pub use dock::{
-    Dock, DockBudget, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells, TEXT_COL as DOCK_TEXT_COL,
+    Dock, DockBudget, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells,
+    TEXT_COL as DOCK_TEXT_COL, UPLOAD_GLYPHS, transfer_controls_col,
 };
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use search::{
@@ -77,7 +78,7 @@ pub use settings::{
 };
 pub use shell::{
     DockContext, DockFault, DockState, DockStatus, Highlight, HighlightColor, HighlightStyle,
-    Reconnect, RemoteKind, RemoteTarget, ShellPhase, ShellState,
+    Reconnect, RemoteKind, RemoteTarget, ShellPhase, ShellState, Transfer,
 };
 pub use wake::Wake;
 
