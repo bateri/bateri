@@ -9,7 +9,7 @@
 //! bırakabilir. Hata kuralı ayar dosyasınınkiyle aynı: ayrıştırılamayan metin
 //! ayrı sonuç (`Err`), ayrıştırılan metinde kabul edilmeyen renk tabandaki
 //! değeri alır ve tanı bırakır, bilinmeyen anahtar sessiz — 013'ün kalan durum
-//! rolleri (uyarı, bilgi) bugünkü sürümde hata sayılmamalı.
+//! rolü (uyarı) bugünkü sürümde hata sayılmamalı.
 
 use toml_edit::TableLike;
 
@@ -42,8 +42,8 @@ impl Theme {
     /// ayrıştırılamadı.
     ///
     /// Roller (`background`, `foreground`, `dim`, `accent`, `cursor`,
-    /// `selection`, `search_match`, `search_current`, `success`, `error`)
-    /// kökte, 16 renk
+    /// `selection`, `search_match`, `search_current`, `success`, `error`,
+    /// `info`) kökte, 16 renk
     /// `[ansi]` bölümünde; renk `"#rrggbb"` (büyük harf de olur). `Err` yalnız
     /// geçersiz TOML'da, ayar dosyasındaki anlamıyla.
     ///
@@ -67,6 +67,7 @@ impl Theme {
             ("search_current", &mut theme.search_current),
             ("success", &mut theme.success),
             ("error", &mut theme.error),
+            ("info", &mut theme.info),
         ];
         for (key, slot) in roles {
             read_color(text, root, key, key, slot, &mut diagnostics);
@@ -142,6 +143,7 @@ mod tests {
         search_current: 0x00000a,
         success: 0x000005,
         error: 0x000006,
+        info: 0x00000b,
         ansi: [
             0x000010, 0x000011, 0x000012, 0x000013, 0x000014, 0x000015, 0x000016, 0x000017,
             0x000018, 0x000019, 0x00001a, 0x00001b, 0x00001c, 0x00001d, 0x00001e, 0x00001f,
@@ -244,7 +246,7 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_silent() {
-        // 013'ün **kalan** durum rolleri ve başka terminallerin ek anahtarları.
+        // 013'ün **kalan** durum rolü ve başka terminallerin ek anahtarları.
         // Sentinel 010'da değişti: `success` artık bilinen bir anahtar ve
         // sınama onu örnek olarak kullansaydı sessizce hiçbir şey sormaz olurdu.
         let theme = clean(
@@ -272,6 +274,21 @@ mod tests {
             (inherited.success, inherited.error),
             (Theme::BATERI.success, Theme::BATERI.error)
         );
+    }
+
+    #[test]
+    fn the_info_role_is_read_and_inherited() {
+        // 036: kuralın istisnası yok — yazılan okunuyor, yazılmayan tabandan.
+        let theme = clean("info = \"#0a0b0c\"\n", &SENTINEL);
+        assert_eq!(
+            theme,
+            Theme {
+                info: 0x0a0b0c,
+                ..SENTINEL
+            }
+        );
+        let inherited = clean("background = \"#ffffff\"\n", &Theme::BATERI);
+        assert_eq!(inherited.info, Theme::BATERI.info);
     }
 
     #[test]

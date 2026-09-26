@@ -96,14 +96,56 @@ _Requirements: R1.1, R1.2, R1.3, R2, R3, R4.1, R4.2, R4.3_
 
 ## Checklist
 
-- [ ] `ShellLog`: komut nesli, uzak host, uzak yuva, silme noktaları
-- [ ] Tarayıcı: `Cwd` olayı yetkisiyle; Karar 4 yönlendirmesi
-- [ ] `title_of` ve `Session::title` uzak kolu
-- [ ] `Session::running_command` / `set_remote`; `Wake::command_started` ve üç uygulayıcı
-- [ ] `info` rolü: `Theme`, iki değer, `theme.rs`, 3:1 bekçisi, `docs/AYARLAR.md`
-- [ ] `Dock`'un üst çizgi rengi; `bt-gpu`'nun `open_dock`/`dock_ground`'ı
-- [ ] `render_context` uzak biçimi; `REMOTE_MARK`
-- [ ] Test: `⇄` Menlo'da küçük sınıfta kutu değil (ya da `↔` yedeği); SF Mono kuruluysa koşullu sorgu
-- [ ] Test: yukarıdaki Kabul maddeleri
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] `ShellLog`: komut nesli, uzak host, uzak yuva, silme noktaları
+- [x] Tarayıcı: `Cwd` olayı yetkisiyle; Karar 4 yönlendirmesi
+- [x] `title_of` ve `Session::title` uzak kolu
+- [x] `Session::running_command` / `set_remote`; `Wake::command_started` ve üç uygulayıcı
+- [x] `info` rolü: `Theme`, iki değer, `theme.rs`, 3:1 bekçisi, `docs/AYARLAR.md`
+- [x] `Dock`'un üst çizgi rengi; `bt-gpu`'nun `open_dock`/`dock_ground`'ı
+- [x] `render_context` uzak biçimi; `REMOTE_MARK`
+- [x] Test: `⇄` Menlo'da küçük sınıfta kutu değil (ya da `↔` yedeği); SF Mono kuruluysa koşullu sorgu
+- [x] Test: yukarıdaki Kabul maddeleri
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi (ikisi düzeltildi, kalanı aşağıda waive)
+
+## Uygulama Notları
+
+- **Uzak host ve uzak yuva `DockContext`'te** (`remote: Option<String>`,
+  `remote_cwd`), `ShellLog`'un kendi alanında değil: kare yolu bağlamı
+  kilidin altında `clone_from` ile alıp kilitten sonra çiziyor; ayrı alan ya
+  kare başına bir `String` ya da çizim boyunca kilit isterdi. `clone_from`
+  kapasiteyi koruyor, ayırma yalnız uzak oturumun kenarında.
+- **`C` uzak durumu yalnız `Running`'e geçişte siliyor**, her `C`'de değil:
+  iTerm2'nin komut ortasındaki ikinci `C`'si host'u silseydi, `D`'ye kadar
+  kilitli yoklama onu geri getirmezdi. `D` ve `A` koşulsuz siliyor.
+- **`set_remote(None)` host'u siliyor ama uzak yuvayı bırakıyor**: "yerel"
+  cevabında yuva zaten okunmuyor ve bir sonraki `C`/`D`/`A` onu siliyor.
+- `ScanEvent::Cwd` adlı alanlı bir varyant oldu (`{ path, local }`);
+  `apply`'ın dönüşü de `ScanOutcome` (`apply_scan_answering`'in `bool`'unun
+  yerini alan tip), yani `A`/`D`'deki silme `apply`'ın kendi cevabı.
+- `render_context`'in yol kısaltması ve iki kademesi `path_cells`'e,
+  hücre basımı `emit_context`'e çıktı; uzak biçim ikisini paylaşıyor. Yerel
+  biçimin sınamaları değişmeden yeşil.
+- `⇄` Menlo'da küçük sınıfta kutu değil (`↔` yedeği gerekmedi). SF Mono bu
+  makinede kurulu değil; koşullu sorgu atlandı ve bunu basıyor.
+- `/code-review` (high) dokuz bulgu: **düzeltilen** — host'ta kontrol
+  karakteri başlığa/bağlam satırına gidiyordu (artık yok sayılıyor);
+  "safha `Running`" iki yerde yazılıydı (`ShellLog::running_command`'da
+  tekleşti). **Waive:**
+  - *Uzak kabuğun OSC 133 işaretleri uzak durumu siliyor / nesli oynatıyor*
+    (iki bulgu): Karar 2 `A`/`D`'de silmeyi seçti; uzaktan gelen 133
+    işaretlerinin safhayı oynatması 036'dan önce de vardı ve çaresi (silmeyi
+    `bt_block` kimliğine bağlamak) algılama bağlanınca sınanabilir →
+    phase-3 checklist'ine yazıldı.
+  - *Yoklamadan önce gelen boş yetkili uzak OSC 7 yerel dizini ezer*: Karar
+    4'ün adıyla yazılı bilinen sınırı.
+  - *Yerel kabuğun kalan OSC başlığı `⇄ {host}`'u gölgeler*: Karar 5 önekli
+    OSC başlığını seçti; bedeli `⇄ ssh prod` gibi yine uzaklığı söyleyen bir
+    başlık.
+  - *`set_remote` başlık haberi vermiyor, `bool` dönüyor*: planın sözleşmesi
+    (çağıran tazeler); phase-3 checklist'inde `set_remote` → `refresh_title`.
+  - *`CLAUDE.md` güncellenmedi*: plan sözleşmeyi phase-3'e koydu ve bu phase
+    üretimde tetiksiz (`set_remote`'u kimse çağırmıyor).
+  - *SF Mono kolunun `eprintln!`'i yakalanıyor*: phase dosyası "sınama bunu
+    söyler" diyor; `--nocapture` ile görünüyor, kapı değil.
+

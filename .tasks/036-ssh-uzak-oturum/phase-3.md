@@ -75,6 +75,13 @@ _Requirements: R6.1, R6.2, R6.3, R7_
 - [ ] `ShellWake::command_started`/`wake` silahı ve ana kuyruk işi
 - [ ] `set_remote` → `refresh_title`
 - [ ] `CLAUDE.md` (yol haritası satırı gerekiyorsa tazelenir)
+- [ ] (phase-1'den devralınan, `/code-review` bulgusu) **Uzak kabuğun kendi
+  OSC 133 işaretleri** (fish 4, iTerm2/WezTerm/kitty entegrasyonu) ssh'ın
+  içinden aynı PTY'ye geliyor: uzak `A` safhayı `Prompt`'a çekip uzak durumu
+  siliyor, uzak `C` yeni bir `Running` kenarı (nesil +1, yeni yoklama). Karar:
+  bilinen sınır mı (belgele), yoksa `A`/`D`'de silmeyi bizim kimliğimize
+  (`bt_block`) bağlamak mı — saatin "yalnız BİZİM `D`'miz" emsali; gözle
+  kontrolde 133 basan bir uzak kabukla sına
 - [ ] Test: yukarıdaki Kabul maddeleri
 - [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
 - [ ] Gözle kontrol (devir mesajının cümlesi): `ssh <gerçek bir host>` —

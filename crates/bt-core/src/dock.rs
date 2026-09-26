@@ -35,7 +35,13 @@ use crate::shell::{
 pub struct Dock {
     /// Yüzeyin zemini; **opak** olmak zorunda (bkz. [`render`]).
     pub ground: LinearRgba,
-    /// Dock'u ızgaradan ayıran saç çizgisi.
+    /// Dock'u ızgaradan ayıran **üst** saç çizgisinin rengi: uzak oturumda
+    /// temanın `info`'su, değilse [`Self::separator`] (036 Karar 6).
+    ///
+    /// Ayrı alan, çünkü ikinci saç çizgisi (giriş bloğu ile bağlam satırı
+    /// arası) uzaklığı söylemiyor — o bir bölme, bu yüzeyin kenarı.
+    pub edge: LinearRgba,
+    /// Giriş bloğunu bağlam satırından ayıran saç çizgisi.
     pub separator: LinearRgba,
     /// Caret'in giriş bloğundaki yeri — satır **ve** sütun (032): uzun satır
     /// sarılıyor, yani caret ikinci görsel satırda da durabiliyor. Satır
@@ -175,6 +181,21 @@ const CONTEXT_ROW: u16 = 1;
 
 /// Soldan kısaltılmış yolun başındaki işaret.
 const ELLIPSIS: char = '…';
+
+/// Uzak oturumun işareti (036 Karar 7): bağlam satırında host'un önünde,
+/// başlıkta ve sekmede önek ([`crate::shell::title_of`]). Bu crate'te **tek
+/// kopya**.
+///
+/// Yordamsal değil, fonttan: bağlam satırının sıradan bir hücresi. Küçük boy
+/// sınıfında kutu çıkmadığının kapısı `bt-atlas`'ta
+/// (`the_remote_mark_is_a_glyph_in_the_small_class`, Menlo adıyla) ve o
+/// crate bunu göremediği için karakteri elle yazıyor; iki kopyayı
+/// `the_remote_mark_is_the_one_the_atlas_checks` bağlıyor.
+pub(crate) const REMOTE_MARK: char = '⇄';
+
+/// Uzak biçimde host ile yol arasındaki boşluk: iki sütun — `|` ayracı yok,
+/// çünkü dal yok ve iki yan aynı şeyin (uzak konum) iki parçası.
+const REMOTE_GAP: &str = "  ";
 
 /// Bir düzenlemenin taşıyabileceği en çok glyph — **tasarım sabiti**.
 ///
@@ -1061,6 +1082,11 @@ pub(crate) fn render_with(
     runs.clear();
     let mut surface = Dock {
         ground: theme.background_linear(),
+        edge: if context.remote.is_some() {
+            theme.info_linear()
+        } else {
+            theme.separator_linear()
+        },
         separator: theme.separator_linear(),
         caret: None,
         caret_text: theme.background_linear(),
@@ -1443,7 +1469,8 @@ fn settle(change: Option<&Change>, edits: &mut impl FnMut(DockEdit)) {
     }
 }
 
-/// Dock'un **alt** satırı: `{tam yol} | {dal}`, sol altta ve sönük.
+/// Dock'un **alt** satırı: `{tam yol} | {dal}`, sol altta ve sönük; uzak
+/// oturumda `⇄ {host}  {uzak yol}` ([`render_remote_context`]).
 ///
 /// **Taşmada yol soldan kısalır, dal asla kısalmaz.** Gerekçe iki ayrı:
 /// yolun bilgisi kuyruğunda (hangi klasördesin), yani baştan kesmek en
@@ -1473,8 +1500,11 @@ fn render_context(
     if available == 0 {
         return;
     }
+    if let Some(host) = &context.remote {
+        render_remote_context(host, &context.remote_cwd, theme, available, row, sink);
+        return;
+    }
     let branch_chars = context.branch.chars().count();
-    let path_chars = context.cwd.chars().count();
     // Bütçe **önce dala** ayrılıyor; yol kalanı alıyor. Ayraç da yolun
     // tarafında sayılıyor, çünkü yol düşerse ayraç da düşüyor.
     //
@@ -1496,22 +1526,91 @@ fn render_context(
         available
     };
 
-    // `skip` yolun **başından** atılan karakter sayısı; `mark` kısaltmanın
-    // görünür işareti. Yol hiç çizilmiyorsa ikisi de baştan susuyor.
-    let (mark, skip) = if path_budget == 0 || path_chars == 0 {
-        (None, path_chars)
-    } else if path_chars <= path_budget {
-        (None, 0)
-    } else {
-        // İşaretin kendisi de bir sütun: kuyruktan `path_budget - 1` karakter.
-        (Some(ELLIPSIS), path_chars - (path_budget - 1))
-    };
-    let shows_path = mark.is_some() || skip < path_chars;
+    let normal = theme.dim_linear();
+    let quiet = theme.quiet_linear();
+    let (shows_path, path) = path_cells(&context.cwd, path_budget, normal, quiet);
     let separator = if shows_path && shows_branch {
         SEPARATOR
     } else {
         ""
     };
+    let line = path
+        // Ayraç bir bölme işareti, içerik değil: en sessiz tonda.
+        .chain(separator.chars().map(|ch| (ch, quiet)))
+        .chain(
+            shows_branch
+                .then(|| context.branch.chars().map(|ch| (ch, normal)))
+                .into_iter()
+                .flatten(),
+        );
+    emit_context(line, available, row, sink);
+}
+
+/// Bağlam satırının **uzak** biçimi (036 R4.1): `⇄ {host}` temanın `info`
+/// renginde, iki boşluk, sonra uzak yol yerel yolun iki kademesinde; dal ve
+/// `|` yok — dal yerel deponun, uzak tarafınki bilinmiyor.
+///
+/// **Bütçe önce `⇄ host`'a.** Host **kısalmıyor**, dalın kuralıyla aynı
+/// gerekçe: kısalmış bir host adı (`prod-we…`) başka bir makine olarak
+/// okunabilir. Sığmazsa yalnız `⇄` kalıyor — uzakta olduğunu söylemek hâlâ
+/// doğru bilgi. Yol kalanı alıyor ve soldan kısalıyor; uzak kabuk OSC 7
+/// basmıyorsa yol hiç yok.
+fn render_remote_context(
+    host: &str,
+    remote_cwd: &str,
+    theme: &Theme,
+    available: usize,
+    row: u16,
+    sink: &mut impl FnMut(Cell),
+) {
+    let info = theme.info_linear();
+    let mark = std::iter::once((REMOTE_MARK, info));
+    // `⇄` + boşluk + host.
+    let head_chars = 2 + host.chars().count();
+    if head_chars > available {
+        emit_context(mark, available, row, sink);
+        return;
+    }
+    let path_budget = available
+        .saturating_sub(head_chars)
+        .saturating_sub(REMOTE_GAP.chars().count());
+    let (_, path) = path_cells(
+        remote_cwd,
+        path_budget,
+        theme.dim_linear(),
+        theme.quiet_linear(),
+    );
+    let line = mark
+        .chain(std::iter::once((' ', info)))
+        .chain(host.chars().map(|ch| (ch, info)))
+        .chain(REMOTE_GAP.chars().map(|ch| (ch, info)))
+        .chain(path);
+    emit_context(line, available, row, sink);
+}
+
+/// Bir yolun bağlam satırındaki hücreleri, `budget` karaktere **soldan**
+/// kısaltılmış ve iki kademeli; ilk değer yolun görünüp görünmediği.
+///
+/// Yerel ve uzak biçimin ortak parçası: kural ikisinde de aynı, çünkü ikisi
+/// de "hangi klasördesin" sorusunun cevabı.
+fn path_cells(
+    path: &str,
+    budget: usize,
+    normal: LinearRgba,
+    quiet: LinearRgba,
+) -> (bool, impl Iterator<Item = (char, LinearRgba)> + '_) {
+    let path_chars = path.chars().count();
+    // `skip` yolun **başından** atılan karakter sayısı; `mark` kısaltmanın
+    // görünür işareti. Yol hiç çizilmiyorsa ikisi de baştan susuyor.
+    let (mark, skip) = if budget == 0 || path_chars == 0 {
+        (None, path_chars)
+    } else if path_chars <= budget {
+        (None, 0)
+    } else {
+        // İşaretin kendisi de bir sütun: kuyruktan `budget - 1` karakter.
+        (Some(ELLIPSIS), path_chars - (budget - 1))
+    };
+    let shows = mark.is_some() || skip < path_chars;
 
     // **Yolun son bileşeni öne çıkıyor, öncesi geri çekiliyor.** Kullanıcının
     // aradığı bilgi "hangi klasördeyim"; üst dizinler onu yerleştiren bağlam.
@@ -1521,13 +1620,11 @@ fn render_context(
     // (`Theme::quiet_linear`), yani aynı kuralın (`dim_toward`) ikinci
     // uygulaması. Saç çizgisi bir adım daha ötede ve orada durmasının sebebi
     // var: o **mürekkep değil**, bu hâlâ okunması gereken bir yol.
-    let normal = theme.dim_linear();
-    let quiet = theme.quiet_linear();
+    //
     // Son bileşenin yoldaki **karakter** sırası: son `/`'ten sonrası.
-    // Bölme yok, `char_indices` değil `enumerate`: aşağıdaki `skip` de
+    // Bölme yok, `char_indices` değil `enumerate`: yukarıdaki `skip` de
     // karakter sayıyor ve ikisi aynı birimde olmak zorunda.
-    let head_end = context
-        .cwd
+    let head_end = path
         .chars()
         .enumerate()
         .filter(|(_, ch)| *ch == '/')
@@ -1539,18 +1636,16 @@ fn render_context(
     // bilgiyi gizlemez, hepsini soluklaştırmak gizlerdi.
     let head_end = if head_end >= path_chars { 0 } else { head_end };
 
-    let line = mark
+    let cells = mark
         // Kısaltma işareti atılan **üst** dizinlerin yerinde duruyor, yani
         // onlarla aynı tonda.
         .map(|ch| (ch, quiet))
         .into_iter()
         .chain(
-            context
-                .cwd
-                .chars()
+            path.chars()
                 .skip(skip)
                 .enumerate()
-                .map(|(offset, ch)| {
+                .map(move |(offset, ch)| {
                     (
                         ch,
                         if skip + offset < head_end {
@@ -1560,18 +1655,20 @@ fn render_context(
                         },
                     )
                 }),
-        )
-        // Ayraç bir bölme işareti, içerik değil: en sessiz tonda.
-        .chain(separator.chars().map(|ch| (ch, quiet)))
-        .chain(
-            shows_branch
-                .then(|| context.branch.chars().map(|ch| (ch, normal)))
-                .into_iter()
-                .flatten(),
         );
-    // `take` bir bekçi, bir politika değil: yukarıdaki bütçe zaten `available`
-    // sütunu aşmıyor. Sağdan taşan bir hücre ızgaranın dışına yazardı ve o
-    // aritmetik hatası burada sessizce durur.
+    (shows, cells)
+}
+
+/// Bağlam satırının hücrelerini `available` sütunla sink'e basar.
+fn emit_context(
+    line: impl Iterator<Item = (char, LinearRgba)>,
+    available: usize,
+    row: u16,
+    sink: &mut impl FnMut(Cell),
+) {
+    // `take` bir bekçi, bir politika değil: çağıranın bütçesi zaten
+    // `available` sütunu aşmıyor. Sağdan taşan bir hücre ızgaranın dışına
+    // yazardı ve o aritmetik hatası burada sessizce durur.
     for (offset, (ch, fg)) in line.take(available).enumerate() {
         // Boşluk glyph üretmiyor (`cell`'in kuralı); ayracın iki yanı da
         // buradan eleniyor.
@@ -1584,7 +1681,8 @@ fn render_context(
             row,
             ch: Some(ch),
             // Satırın tamamı sönük kalıyor — bağlam okunur ama giriş satırıyla
-            // yarışmaz — ve **içinde** ikinci bir kademe var (yukarıda).
+            // yarışmaz — ve **içinde** ikinci bir kademe var (yukarıda). Uzak
+            // biçimin host'u tek istisna: uzaklık bu satırın asıl haberi.
             fg,
             ..Cell::default()
         });
@@ -2203,6 +2301,7 @@ mod tests {
         DockContext {
             cwd: cwd.into(),
             branch: branch.into(),
+            ..DockContext::default()
         }
     }
 
@@ -2837,6 +2936,81 @@ mod tests {
         assert_eq!(row_text(&cells, 1), "");
     }
 
+    fn remote(host: &str, remote_cwd: &str) -> DockContext {
+        DockContext {
+            // Yerel yol ve dal **dolu**: uzak biçim onları hiç göstermemeli.
+            cwd: "/Users/me/proj".into(),
+            branch: "main".into(),
+            remote: Some(host.into()),
+            remote_cwd: remote_cwd.into(),
+        }
+    }
+
+    #[test]
+    fn the_remote_mark_is_the_one_the_atlas_checks() {
+        // `bt-atlas` `bt-core`'u göremiyor ve karakteri elle yazıyor
+        // (`the_remote_mark_is_a_glyph_in_the_small_class`): işaret değişirse
+        // bu düşer ve o sınamanın sabitine gönderir.
+        assert_eq!(REMOTE_MARK, '⇄');
+    }
+
+    #[test]
+    fn a_remote_session_shows_the_host_and_the_remote_path() {
+        // 036 R4.1: `⇄ host`, iki boşluk, uzak yol; yerel yol ve dal yok.
+        let state = live("", "", "", 0);
+        let (cells, dock) = draw_with(&state, &remote("prod", "/var/www/app"), COLS);
+        assert_eq!(row_text(&cells, 1), "⇄ prod  /var/www/app");
+        // İşaret ve host `info`, yol yerelinkinin iki kademesi.
+        let color = |col: u16| {
+            cells
+                .iter()
+                .find(|cell| cell.row == 1 && cell.col == col)
+                .map(|cell| cell.fg)
+        };
+        // Sütunlar: `⇄` 0, host 2..6, yol 8'den (`/var/www/` 8..17, `app` 17..).
+        assert_eq!(color(0), Some(THEME.info_linear()));
+        assert_eq!(color(2), Some(THEME.info_linear()), "host");
+        assert_eq!(color(9), Some(THEME.quiet_linear()), "üst dizin");
+        assert_eq!(color(17), Some(THEME.dim_linear()), "son bileşen");
+        // Üst saç çizgisi `info`, ikincisi ayracın renginde kalıyor.
+        assert_eq!(dock.edge, THEME.info_linear());
+        assert_eq!(dock.separator, THEME.separator_linear());
+    }
+
+    #[test]
+    fn a_remote_session_without_a_path_shows_only_the_host() {
+        // Uzak kabuk OSC 7 basmıyorsa yalnız host.
+        let state = live("", "", "", 0);
+        let (cells, _) = draw_with(&state, &remote("deploy@10.0.0.5", ""), COLS);
+        assert_eq!(row_text(&cells, 1), "⇄ deploy@10.0.0.5");
+    }
+
+    #[test]
+    fn a_narrow_remote_line_trims_the_path_and_never_the_host() {
+        let state = live("", "", "", 0);
+        let context = remote("prod", "/var/www/app");
+        // 14 sütun: `⇄ prod` altı, boşluk iki, yola altı — `…` ile son beş.
+        let (cells, _) = draw_with(&state, &context, 14);
+        assert_eq!(row_text(&cells, 1), "⇄ prod  …w/app");
+        // Yola yer yoksa yalnız `⇄ host`.
+        let (cells, _) = draw_with(&state, &context, 6);
+        assert_eq!(row_text(&cells, 1), "⇄ prod");
+        // Host sığmıyorsa **kırpılmıyor**: yalnız işaret kalıyor.
+        let (cells, _) = draw_with(&state, &context, 5);
+        assert_eq!(row_text(&cells, 1), "⇄");
+        let (cells, _) = draw_with(&state, &context, 1);
+        assert_eq!(row_text(&cells, 1), "⇄");
+    }
+
+    #[test]
+    fn a_local_session_keeps_the_separator_on_the_edge() {
+        // Yerelde üst çizgi bugünkü ayraç rengi: iki çizgi aynı renk.
+        let state = live("", "", "", 0);
+        let (_, dock) = draw_with(&state, &context("/tmp", "main"), COLS);
+        assert_eq!(dock.edge, THEME.separator_linear());
+        assert_eq!(dock.separator, THEME.separator_linear());
+    }
+
     #[test]
     fn a_narrow_dock_trims_the_path_from_the_left_and_keeps_the_branch() {
         // Kuyruk daha bilgilendirici: hangi depodasın sondaki bileşenlerde
@@ -3157,6 +3331,7 @@ mod tests {
             &DockContext {
                 cwd: "/tmp/漢字".into(),
                 branch: "主".into(),
+                ..DockContext::default()
             },
             COLS,
         );

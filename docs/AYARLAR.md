@@ -889,7 +889,7 @@ bateri – themes/paper.toml: line 3: `ansi.red` must be a color like "#rrggbb",
 
 ### Biçim
 
-On rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
+On bir rol kökte, 16 ANSI rengi `[ansi]` bölümünde. Renk `"#rrggbb"` biçiminde
 bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 
 | anahtar | anlamı |
@@ -904,6 +904,7 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
 | `search_current` | geçerli eşleşmenin vurgusu — ⏎/⌘G'nin gösterdiği; `search_match`'ten belirgin, seçim ikisinin de üstünde çizilir |
 | `success` | durum: başarı; sıfır çıkış koduyla biten komutun işareti |
 | `error` | durum: hata; sıfırdan farklı çıkış koduyla biten komutun işareti |
+| `info` | durum: bilgi; uzak oturum — bağlam satırında host ve dock'un üst çizgisi |
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |
 | `[ansi]` `bright_black` … `bright_white` | ANSI 8–15, aynı sırada |
 
@@ -923,8 +924,8 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   kaydederken dosyayı önce boşaltır ve kaydın ortasında pencere tabana
   çakmamalı. Kaydettiğiniz anda ekrandaki tema kalır, açılışta görünüme uyan
   gömülü tema gelir; ikisinde de uyarı çıkar.
-- Tanınmayan anahtar sessizce yoksayılır. Sonraki sürümlerin kalan iki durum
-  rolü (uyarı, bilgi) bu yüzden bugünden yazılabilir.
+- Tanınmayan anahtar sessizce yoksayılır. Sonraki sürümlerin kalan durum
+  rolü (uyarı) bu yüzden bugünden yazılabilir.
 - **Sönük metin** (SGR 2) iki yoldan gelir. Varsayılan ön plan sönükse
   temanın `dim` rengi kullanılır. Adlı ve 256 renkli metnin sönüğü ise bir
   kuraldır: renk temanın `background`'una doğru üçte bir yol alır — koyu
@@ -937,7 +938,9 @@ bir metindir (büyük harf de olur; `#rgb` ve alfa yok).
   koyu temanın arduvazıyla (`#283042`) çizilir — açık bir temada koyu metnin
   altında zor okunur, yani açık bir tema `selection`'ını yazmalı. Aynısı
   `search_match` ile `search_current` için: yazılmazlarsa arama vurgusu koyu
-  temanın koyu sıcak tonlarıyla (`#3a3212`, `#503a0c`) gelir.
+  temanın koyu sıcak tonlarıyla (`#3a3212`, `#503a0c`) gelir. `info`
+  yazılmazsa uzak oturumun host'u ve üst çizgisi koyu temanın camgöbeğiyle
+  (`#79b3b3`) çizilir.
 
 ### Gömülü `bateri`
 
@@ -954,6 +957,7 @@ search_match = "#3a3212"
 search_current = "#503a0c"
 success = "#8bb58b"
 error = "#d16d6a"
+info = "#79b3b3"
 
 [ansi]
 black = "#22252b"
@@ -991,6 +995,7 @@ search_match = "#f9f1d2"
 search_current = "#fee29a"
 success = "#3b7a3b"
 error = "#b5423d"
+info = "#23787f"
 
 [ansi]
 black = "#2b2e35"

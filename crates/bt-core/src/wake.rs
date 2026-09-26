@@ -84,4 +84,18 @@ pub trait Wake: Send + Sync + 'static {
     /// **tutulurken** ya da ana thread'de (`resize`) gelir; üstteki üç yasak
     /// geçerli. Arama kapalıyken hiç gelmez.
     fn search_changed(&self);
+
+    /// Kabuğun safhası `Running`'e **geçti** (OSC 133 `C`; 036 Karar 2): bir
+    /// komut başladı. Alıcı ön plandaki programı yoklayıp
+    /// [`crate::Session::set_remote`] ile uzak oturumu bildirir.
+    ///
+    /// **Kenarda ve yüksüz** ([`Wake::title_changed`] emsali): aynı komutta
+    /// ikinci bir `C` (iTerm2 entegrasyonu) geçiş değil ve haber doğurmuyor.
+    /// Yük yok, çünkü alıcı komutun neslini kendisi okuyor
+    /// ([`crate::Session::running_command`]) ve yoklamanın cevabını onunla
+    /// geri veriyor — araya bir `D` girerse bayat cevap düşüyor. Okuyucu
+    /// thread'de gelir; defterin yaprak kilidi bırakıldıktan sonra, ama
+    /// sözleşme `Term` kilidinin tutulabileceğini varsayar ve üstteki üç yasak
+    /// geçerli. Uygulayan kuyruğa **en çok bir** iş atar.
+    fn command_started(&self);
 }

@@ -2673,6 +2673,50 @@ mod tests {
         assert_eq!(slots.len(), 4);
     }
 
+    /// Uzak oturumun işareti (`bt_core::dock::REMOTE_MARK`, 036 Karar 7).
+    ///
+    /// **İkinci kopya ve bilerek**: bu crate `bt-core`'u görmüyor (katman
+    /// yönü), yani karakter burada elle yazılı. Bağ `bt-core`'daki
+    /// `the_remote_mark_is_the_one_the_atlas_checks` sınamasında: işaret
+    /// değişirse o düşer ve bu sabite gönderir.
+    const REMOTE_MARK: char = '⇄';
+
+    #[test]
+    fn the_remote_mark_is_a_glyph_in_the_small_class() {
+        // İşaret bağlam satırının sıradan bir hücresi ve bağlam satırı küçük
+        // boy sınıfında (yordamsal kapı orada kapalı, yedek açık). Kapı
+        // **Menlo, adıyla**: varsayılan zincir makineden makineye değişiyor
+        // (SF Mono kuruluysa o açılır), ölçülen font Menlo.
+        let slot_of = |a: &mut Atlas| {
+            a.slot(
+                Sprite::Char(REMOTE_MARK),
+                Face::Regular,
+                SizeClass::Small,
+                Half::Whole,
+            )
+            .0
+            .slot
+        };
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, 1.0);
+        assert_eq!(menlo.font_issue(), None, "Menlo açılmadı");
+        assert_ne!(
+            slot_of(&mut menlo),
+            TOFU,
+            "'{REMOTE_MARK}' Menlo'nun küçük sınıfında kutu"
+        );
+
+        // SF Mono **kapı değil**: kurulu değilse sorgu atlanıyor ve bunu
+        // söylüyor; kuruluysa sonucu gözle kontrolün konusu, burada yalnız
+        // basılıyor.
+        let mut sf = Atlas::new(Some("SF Mono"), POINT_SIZE, 1.0, 1.0);
+        if sf.font_issue().is_some() {
+            eprintln!("SF Mono kurulu değil; '{REMOTE_MARK}' sorgusu atlandı");
+        } else {
+            let tofu = slot_of(&mut sf) == TOFU;
+            eprintln!("SF Mono küçük sınıfta '{REMOTE_MARK}': kutu = {tofu}");
+        }
+    }
+
     #[test]
     fn the_small_class_is_narrower_and_keeps_its_own_slot() {
         let mut a = atlas(POINT_SIZE, 1.0);
