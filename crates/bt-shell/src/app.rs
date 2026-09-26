@@ -36,7 +36,7 @@ use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
 use crate::settings_window::SettingsWindow;
 use crate::watch::{Notify, Watch};
-use crate::window::{self, CloseScope, TerminalWindow};
+use crate::window::{self, CloseScope, Launch, TerminalWindow};
 use crate::{Options, Run, Workload};
 use crate::{child, settings};
 
@@ -304,6 +304,29 @@ fn resolve_smooth_scroll(settings: &Settings, reduce: bool) -> bool {
     settings.smooth_scroll == SmoothScroll::On
         && !reduce
         && settings.cursor_motion != CursorMotion::Snap
+}
+
+/// Yeni pencerenin nasıl açıldığı — [`AppDelegate::open_window`]'un iki
+/// kararı buradan: sekme mi pencere mi, ve kabuk ilk girdi alıyor mu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opening {
+    /// ⌘N, Dock ikonu, açılışın ilk penceresi: ayrı pencere, yerel kabuk.
+    Window,
+    /// ⌘T ve sekme çubuğunun `+`'sı: `from`'un grubunda sekme; `from`
+    /// uzaktaysa aynı host'a (037 Karar 6).
+    Tab,
+    /// Shell ▸ New Local Tab (⌥⌘T): sekme, her zaman yerel kabuk.
+    LocalTab,
+}
+
+/// Yeni kabuğun ilk girdisi: yalnız ⌘T ve yalnız uzak bir `from`'dan —
+/// satır `from`'un uzak hedefinin kaçırılmış satırı ([`bt_core::Session::remote_line`]).
+/// ⌘N yeni bir çalışma alanı, ⌥⌘T kaçış yolu; ikisi de yerel (037 Karar 6).
+fn initial_line(opening: Opening, remote_line: Option<String>) -> Option<String> {
+    match opening {
+        Opening::Tab => remote_line,
+        Opening::Window | Opening::LocalTab => None,
+    }
 }
 
 /// Shell entegrasyonunun çocuğa eklediği ortam — kurulmuyorsa boş.
@@ -726,7 +749,7 @@ define_class!(
             // `run`'ın döndürdüğü hata `main`'de aynı satırla ve aynı çıkış
             // koduyla basılıyordu. **Yalnız ilk pencerede**: ⌘T/⌘N'nin hatası
             // süreci bitirmiyor ([`AppDelegate::open_window_or_report`]).
-            if let Err(e) = self.open_window(None, false) {
+            if let Err(e) = self.open_window(None, Opening::Window) {
                 eprintln!("bateri: {e}");
                 std::process::exit(1);
             }
@@ -785,7 +808,7 @@ define_class!(
             // durumundakileri zaten kapsıyor.
             let default = !self.ivars().windows.borrow().is_empty();
             if !default {
-                self.open_window_or_report(None, false);
+                self.open_window_or_report(None, Opening::Window);
             }
             default
         }
@@ -940,7 +963,7 @@ define_class!(
         /// değil: pencere yokken de çalışmalı.
         #[unsafe(method(newWindow:))]
         fn new_window(&self, _sender: Option<&AnyObject>) {
-            self.open_from_key_window(false);
+            self.open_from_key_window(Opening::Window);
         }
 
         /// Shell ▸ Close Tab (⌘W) terminal olmayan bir pencere key iken (About
@@ -957,17 +980,27 @@ define_class!(
         }
 
         /// Shell ▸ New Tab (⌘T): etkin pencerenin grubuna yeni sekme; pencere
-        /// yoksa yeni pencere.
+        /// yoksa yeni pencere. Etkin sekme uzaktaysa yeni sekme aynı ssh/mosh
+        /// komutuyla doğuyor (037 Karar 6, [`initial_line`]).
         #[unsafe(method(newTab:))]
         fn new_tab(&self, _sender: Option<&AnyObject>) {
-            self.open_from_key_window(true);
+            self.open_from_key_window(Opening::Tab);
+        }
+
+        /// Shell ▸ New Local Tab (⌥⌘T): uzak sekmeden de **her zaman** yerel
+        /// bir sekme (037 Karar 6) — ⌘T'nin kaçış yolu; yerel sekmede ⌘T ile
+        /// aynı şey.
+        #[unsafe(method(newLocalTab:))]
+        fn new_local_tab(&self, _sender: Option<&AnyObject>) {
+            self.open_from_key_window(Opening::LocalTab);
         }
 
         /// Sekme çubuğunun `+` düğmesi. AppKit düğmeyi yalnız responder
-        /// zincirinde bu seçiciyi tanıyan biri varsa gösteriyor; iş ⌘T'ninki.
+        /// zincirinde bu seçiciyi tanıyan biri varsa gösteriyor; iş ⌘T'ninki,
+        /// uzak sekmede aynı host dahil.
         #[unsafe(method(newWindowForTab:))]
         fn new_window_for_tab(&self, _sender: Option<&AnyObject>) {
-            self.open_from_key_window(true);
+            self.open_from_key_window(Opening::Tab);
         }
 
         /// bateri ▸ Settings… (Cmd-,), hedefsiz menü öğesinden (`menu`):
@@ -1644,7 +1677,10 @@ impl AppDelegate {
     /// `from` etkin pencere; yeni kabuk onun OSC 7 dizininde (yoksa evde,
     /// 026 → Karar 4), geçici punto farkı ondan (Karar 3) ve tema onun
     /// oturumundan — bütün pencereler aynı temada; `from` yoksa tema
-    /// ayarlardan çözülüyor. `as_tab` ama `from` yoksa ayrı pencere.
+    /// ayarlardan çözülüyor. Sekme isteği ama `from` yoksa ayrı pencere.
+    /// Kabuğun ilk girdisi `opening` ile `from`'un uzak hedefinden
+    /// ([`initial_line`]); dizin mirası üç açılışta da aynı — uzak sekmede
+    /// `working_directory()` yerel dizini veriyor (036 Karar 4).
     ///
     /// Sıra: punto, alt başlık ve krom pencere görünmeden, liste yerleşimden önce
     /// (geometri olayları pencereyi listede bulsun), oturum yerleşimden
@@ -1655,7 +1691,7 @@ impl AppDelegate {
     fn open_window(
         &self,
         from: Option<&TerminalWindow>,
-        as_tab: bool,
+        opening: Opening,
     ) -> Result<Retained<TerminalWindow>, String> {
         let mtm = self.mtm();
         let window = TerminalWindow::new(mtm, self.next_window_id(), self.ivars().run)
@@ -1674,30 +1710,35 @@ impl AppDelegate {
         // sistemin gri başlık çubuğunu gösterirdi.
         window.apply_chrome(&theme);
         match from {
-            Some(from) if as_tab => window.show_as_tab_of(from),
+            Some(from) if opening != Opening::Window => window.show_as_tab_of(from),
             _ => window.show_after(from),
         }
         let dir = session
             .and_then(|session| session.working_directory())
             .or_else(child::working_directory);
-        if let Err(e) = window.start(self, mtm, theme, dir) {
+        let initial = initial_line(opening, session.and_then(|session| session.remote_line()));
+        let launch = Launch {
+            working_directory: dir,
+            initial_input: initial,
+        };
+        if let Err(e) = window.start(self, mtm, theme, launch) {
             window.close();
             return Err(format!("shell başlatılamadı: {e}"));
         }
         Ok(window)
     }
 
-    /// Etkin pencereden türeyen yeni pencere ya da sekme (⌘N, ⌘T, `+`).
-    fn open_from_key_window(&self, as_tab: bool) {
+    /// Etkin pencereden türeyen yeni pencere ya da sekme (⌘N, ⌘T, ⌥⌘T, `+`).
+    fn open_from_key_window(&self, opening: Opening) {
         let from = self.key_window();
-        self.open_window_or_report(from.as_deref(), as_tab);
+        self.open_window_or_report(from.as_deref(), opening);
     }
 
     /// [`AppDelegate::open_window`], hatası stderr'e — ⌘N/⌘T/`+`/Dock'un
     /// yolu. Süreç **çıkmıyor**: öteki pencerelerin kabukları bir yenisinin
     /// doğamamasıyla ölmemeli (yalnız ilk pencere çıkar, `didFinishLaunching`).
-    fn open_window_or_report(&self, from: Option<&TerminalWindow>, as_tab: bool) {
-        if let Err(e) = self.open_window(from, as_tab) {
+    fn open_window_or_report(&self, from: Option<&TerminalWindow>, opening: Opening) {
+        if let Err(e) = self.open_window(from, opening) {
             eprintln!("bateri: {e}");
         }
     }
@@ -3417,6 +3458,22 @@ mod tests {
                 Some("/home/someone/zsh".into()),
             );
             assert!(env.is_empty(), "{setting:?} hermetik koşuda ortam ekledi");
+        }
+    }
+
+    #[test]
+    fn only_a_new_tab_follows_a_remote_tab() {
+        // 037 Karar 6'nın üç kolu: uzak sekmede ⌘T (ve `+`) aynı komutu
+        // taşıyor; ⌥⌘T ve ⌘N uzak sekmeden de yerel; yerel sekmede ⌘T yerel.
+        let remote = || Some("ssh -p 2222 prod".to_owned());
+        assert_eq!(
+            initial_line(Opening::Tab, remote()).as_deref(),
+            Some("ssh -p 2222 prod")
+        );
+        assert_eq!(initial_line(Opening::LocalTab, remote()), None);
+        assert_eq!(initial_line(Opening::Window, remote()), None);
+        for opening in [Opening::Tab, Opening::LocalTab, Opening::Window] {
+            assert_eq!(initial_line(opening, None), None, "{opening:?}");
         }
     }
 

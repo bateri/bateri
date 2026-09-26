@@ -722,6 +722,27 @@ pub struct SessionOptions {
     /// aritmetik" belirtisi). Uygulamanın her penceresi açıyor (`bt-shell`
     /// `window`); alan kalıyor, çünkü geri alma tek satır olmalı.
     pub cluster: bool,
+    /// Kabuğa **ilk girdi** olarak yazılacak satır, `\r`'siz (037 Karar 6:
+    /// uzak sekmede ⌘T aynı ssh/mosh komutunu yeni sekmede koşturuyor).
+    /// `None` ya da boş satır → hiçbir şey yazılmıyor.
+    ///
+    /// Ne zaman yazılacağı [`SessionOptions::shell_marks`]'tan; yazım
+    /// kullanıcı girdisinin yolundan (nesil ilerliyor, tazelik kapısı onu
+    /// bir tuş gibi görüyor) ve **tek atımlık** — ikinci prompt'ta yeniden
+    /// gitmiyor. Satırın kaçırılması çağıranın (`RemoteTarget::line`).
+    pub initial_input: Option<String>,
+    /// Kabuğa sarmalayıcımız kuruldu mu — yani kimliğimizi taşıyan OSC 133
+    /// `A`'yı basacak mı. [`SessionOptions::dock`]'tan **ayrı**: `[shell]
+    /// integration = "blocks"` sarmalayıcıyı kuruyor ama dock açmıyor.
+    ///
+    /// Tek tüketicisi [`SessionOptions::initial_input`]'un teslimi: `true`
+    /// iken satır bizim **ilk kimlikli `A`'mızda** gidiyor (kabuk prompt'a
+    /// vardı; rc dosyalarının okuduğu stdin'i — oh-my-zsh'in güncelleme
+    /// sorusu — yemiyor), `false` iken doğumda, kabuğun typeahead'i olarak.
+    /// **Bilinen sınır:** `true` ama kimlikli `A` hiç gelmiyorsa (bozuk rc,
+    /// rc'nin sonunda `exec fish`) satır hiç gitmiyor; zaman aşımı ölçülmemiş
+    /// bir sayı olurdu (037 Karar 6).
+    pub shell_marks: bool,
 }
 
 /// Oturum yaşarken değişebilen terminal seçenekleri — alacritty `Config`'inin
@@ -1368,6 +1389,16 @@ struct TappedPty {
     /// `Adapter`'ın taşıdığı uyandırma ucunun kopyası: OSC 7 dizini
     /// **değişince** başlık haberi buradan gidiyor ([`Wake::title_changed`]).
     wake: Arc<dyn Wake>,
+    /// Oturumun ilk girdisi, bizim ilk kimlikli `A`'mızı bekliyor
+    /// ([`SessionOptions::shell_marks`]); `take` tek atımlığı veriyor.
+    /// Doğumda yazılan kolda (sarmalayıcısız) burası hep `None`.
+    initial_input: Option<String>,
+    /// Oturumun `Adapter`'ı — ilk girdi onun kanalından ([`Adapter::reply`])
+    /// gidiyor, PTY'ye doğrudan değil: `read` `Term` kilidi tutulurken de
+    /// koşabiliyor (`reader::EventLoop::pty_read` kilidi okumalar boyunca
+    /// tutuyor) ve kanal kilitsiz. Baytları PTY'ye döngünün kendi yazma
+    /// kuyruğu yazıyor.
+    adapter: Adapter,
 }
 
 impl io::Read for TappedPty {
@@ -1390,8 +1421,14 @@ impl io::Read for TappedPty {
         // guard düşüyor. Başlığınki yalnız başlığın girdisi değişince (farklı
         // dizin, uzak durumun silinmesi), komutunki yalnız `Running`'e
         // geçişte (`apply_scan_answering`'in dönüşü).
+        //
+        // İlk girdi de kilit bırakıldıktan sonra ve nesil **gönderimden
+        // önce** ([`Session::key_gen`]'in doc'u; `send_input`'un sırası):
+        // kabuğun bu girdiye cevabı olan ayna taze sayılmalı.
         let key_gen = &self.key_gen;
         let wake = &self.wake;
+        let initial_input = &mut self.initial_input;
+        let adapter = &self.adapter;
         self.scanner.feed(&buf[..read], |event| {
             let answers = key_gen.load(Ordering::Acquire);
             let outcome = lock(&self.shell).apply_scan_answering(event, answers);
@@ -1400,6 +1437,13 @@ impl io::Read for TappedPty {
             }
             if outcome.started {
                 wake.command_started();
+            }
+            if outcome.prompt
+                && let Some(mut line) = initial_input.take()
+            {
+                line.push('\r');
+                key_gen.fetch_add(1, Ordering::Release);
+                adapter.reply(line);
             }
         });
         // **CSI kolu kilide hiç uğramıyor**: yükü yok, tüketicisi bir sayaç.
@@ -2853,19 +2897,39 @@ impl Session {
         // Sayacın da iki ucu var ve ikisi de aynı gerekçeyle burada doğuyor.
         let screen_clears = Arc::new(AtomicU32::new(0));
         let key_gen = Arc::new(AtomicU64::new(0));
+        // **Blink de açılışta geçiyor**, temanın yanında: tek yazıcısı
+        // `set_terminal_options` olsaydı ayar yalnız oturum içinde bir kayıttan
+        // **sonra** uygulanır, taze pencerede sessizce yok sayılırdı.
+        //
+        // `TappedPty`'den **önce**: ilk girdi onun kanalından gidiyor.
+        let adapter = Adapter::new(
+            Arc::clone(&wake),
+            size,
+            options.theme,
+            options.terminal.blink,
+        );
+        // İlk girdinin iki teslim yolu (037 Karar 6): sarmalayıcılı oturumda
+        // okuyucu thread'i bizim ilk kimlikli `A`'mızda, sarmalayıcısızda
+        // aşağıda, doğumda. Boş satır hiç yok: sıfır baytlık bir `Input`
+        // yazıcıyı kilitlerdi (`Adapter::reply`) ve `\r` tek başına boş bir
+        // komut koştururdu.
+        let initial_input = options.initial_input.filter(|line| !line.is_empty());
+        let (at_prompt, at_birth) = if options.shell_marks {
+            (initial_input, None)
+        } else {
+            (None, initial_input)
+        };
         let pty = TappedPty {
             pty,
             scanner: Scanner::new().cluster(options.cluster),
             shell: Arc::clone(&shell),
             screen_clears: Arc::clone(&screen_clears),
             key_gen: Arc::clone(&key_gen),
-            wake: Arc::clone(&wake),
+            wake,
+            initial_input: at_prompt,
+            adapter: adapter.clone(),
         };
 
-        // **Blink de açılışta geçiyor**, temanın yanında: tek yazıcısı
-        // `set_terminal_options` olsaydı ayar yalnız oturum içinde bir kayıttan
-        // **sonra** uygulanır, taze pencerede sessizce yok sayılırdı.
-        let adapter = Adapter::new(wake, size, options.theme, options.terminal.blink);
         let config = term_config(options.terminal);
         let term = Arc::new(FairMutex::new(Term::new(config, &grid, adapter.clone())));
 
@@ -2881,7 +2945,7 @@ impl Session {
         // paylaştığı için tek `set` hepsini bağlar.
         let _ = adapter.0.sender.set(sender.clone());
 
-        Ok(Self {
+        let session = Self {
             term,
             sender,
             adapter,
@@ -2920,7 +2984,15 @@ impl Session {
             cluster: options.cluster,
             home,
             child_pid,
-        })
+        };
+        // Sarmalayıcısız oturumun ilk girdisi: kabuğun typeahead'i, kullanıcı
+        // girdisinin **aynı** yolundan (nesil dahil). Taze oturumda seçim ve
+        // kaydırma yok, yani `send_input`'un öteki işleri no-op.
+        if let Some(mut line) = at_birth {
+            line.push('\r');
+            session.write_owned(line.into_bytes());
+        }
+        Ok(session)
     }
 
     /// Çizilecek kareyi verir — **koşulsuz tarar**, hasar sormaz.
@@ -6135,6 +6207,18 @@ impl Session {
             .map(|host| (host.to_owned(), log.context.remote_mark))
     }
 
+    /// Uzak hedefin kabuk için kaçırılmış satırı (`ssh -p 2222 prod`); yerelde
+    /// `None` (037 Karar 6). Okuyanı ⌘T: yeni sekmenin ilk girdisi
+    /// ([`SessionOptions::initial_input`]). Ana thread'de, kenarda; yaprak
+    /// kilit, `Term`'e dokunmuyor.
+    pub fn remote_line(&self) -> Option<String> {
+        lock(&self.shell)
+            .context
+            .remote
+            .as_ref()
+            .map(|target| target.line.clone())
+    }
+
     /// Uygulama alternatif ekranda mı — **son karedeki** hâl.
     ///
     /// Kendi sorgusu, [`Cursor`]'ın alanı **değil**: `Cursor` bir kare kaydı
@@ -7857,6 +7941,8 @@ mod tests {
             // açıkça söylüyor.
             dock: false,
             cluster: false,
+            initial_input: None,
+            shell_marks: false,
         }
     }
 
@@ -7870,6 +7956,86 @@ mod tests {
         let session = spawn_session("printf 'merhaba'; sleep 5", Arc::clone(&wake));
         wait_settled(&session);
         assert_eq!(session.shell_state(), None);
+    }
+
+    /// Bütün ızgaranın glyph'leri, satır satır — ilk girdi sınamalarının
+    /// "hangi işaret basıldı" sorusu.
+    fn grid_glyphs(cells: &[Cell]) -> String {
+        let rows = cells.iter().map(|cell| cell.row + 1).max().unwrap_or(0);
+        (0..rows)
+            .map(|row| row_text(cells, row))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_initial_input_waits_for_our_first_identified_prompt() {
+        // 037 Karar 6: sarmalayıcılı oturumda ilk girdi bizim ilk kimlikli
+        // `A`'mızda gidiyor. Sahte kabuk üç kapı kuruyor: kimliksiz `A`'dan
+        // sonra bir saniye bekleyip bir şey geldiyse `EARLY`, kimlikli
+        // `A`'dan sonra satırı okuyup `GOT:`, ikinci kimlikli `A`'dan sonra
+        // bir saniye bekleyip bir şey geldiyse `TWICE`. `read -t` şart: onsuz
+        // erken gelen baytlar tty tamponunda bekler ve sonraki `read`
+        // onları ayırt edilemez biçimde tüketirdi.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(
+            sh("stty -echo; \
+                printf '\\033]133;A\\007'; \
+                if read -t 1 x; then printf 'EARLY'; fi; \
+                printf '\\033]133;A;bt_block=1\\007'; \
+                read x; printf 'GOT:%s\\r\\n' \"$x\"; \
+                printf '\\033]133;A;bt_block=2\\007'; \
+                if read -t 1 y; then printf 'TWICE'; fi; \
+                printf 'END'; sleep 5"),
+            80,
+        );
+        options.initial_input = Some("echo hi".to_owned());
+        options.shell_marks = true;
+        let generation = |session: &Session| session.key_gen.load(Ordering::Acquire);
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        // İki `read -t 1` iki saniye; pay onların üstüne.
+        let mut text = String::new();
+        wait_until("sahte kabuk bitmedi", Duration::from_secs(8), || {
+            let mut cells = Vec::new();
+            session.frame(
+                |cell| cells.push(cell),
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
+                &mut Clusters::default(),
+                ScrollGlide::default(),
+                BUDGET,
+            );
+            text = grid_glyphs(&cells);
+            text.contains("END")
+        });
+        assert!(
+            !text.contains("EARLY"),
+            "kimliksiz A ilk girdiyi saldı: {text:?}"
+        );
+        assert!(text.contains("GOT:echohi"), "ilk girdi gelmedi: {text:?}");
+        assert!(
+            !text.contains("TWICE"),
+            "ilk girdi ikinci A'da yinelendi: {text:?}"
+        );
+        // Kullanıcı girdisinin yolu: nesil tam bir kez ilerledi.
+        assert_eq!(generation(&session), 1);
+    }
+
+    #[test]
+    fn the_initial_input_goes_at_birth_without_the_wrapper() {
+        // Sarmalayıcısız oturum (zsh değil, entegrasyon kapalı): satır doğumda,
+        // kabuğun typeahead'i olarak. Yankı kapalı, yani ızgaradaki `birth-42`
+        // satırın **çıktısı**, yankısı değil.
+        let wake = Arc::new(TestWake::default());
+        let mut options = test_options(sh("stty -echo; read x; eval \"$x\"; sleep 5"), 80);
+        options.initial_input = Some("echo birth-$((6*7))".to_owned());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_frame(&session, &wake, |cells| {
+            grid_glyphs(cells).contains("birth-42")
+        });
+        assert_eq!(session.key_gen.load(Ordering::Acquire), 1);
     }
 
     #[test]

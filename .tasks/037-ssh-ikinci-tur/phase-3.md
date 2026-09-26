@@ -48,16 +48,50 @@ _Requirements: R6.1, R6.2, R6.3_
 
 ## Checklist
 
-- [ ] `SessionOptions` ilk girdi ve teslim kuralı
-- [ ] Okuyucu döngüden `A`'da yazım
-- [ ] `open_window` başlatma argümanı; ⌘T/`+` uzak, ⌘N yerel
-- [ ] New Local Tab (⌥⌘T)
-- [ ] Test: yukarıdaki Kabul maddeleri
-- [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] `SessionOptions` ilk girdi ve teslim kuralı
+- [x] Okuyucu döngüden `A`'da yazım (`reader.rs` değişmedi, notlarda)
+- [x] `open_window` başlatma argümanı; ⌘T/`+` uzak, ⌘N yerel
+- [x] New Local Tab (⌥⌘T)
+- [x] Test: yukarıdaki Kabul maddeleri
+- [x] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make duman`)
+- [x] Riskli phase: `/code-review` koştu; tek bulgu waive (notlarda, kullanıcıya soru)
 - [ ] Gözle kontrol (devir mesajının cümlesi): `ssh -p <port> <host>` (ya da
   `-J`'li) sekmede ⌘T — yeni sekmenin **dock**'unda aynı komut belirip
   koşuyor, **ızgarada** komut bloğu işaretiyle, bağlanınca dock tek satırlık
   `⇄ host`'a iniyor ve başlık `⇄`; `exit` yeni sekmeyi yerel kabukta,
   ⌘T'nin açıldığı yerel dizinde bırakıyor. ⌥⌘T ve ⌘N aynı sekmeden yerel
   açıyor. Sekme çubuğunun `+`'sı ⌘T gibi.
+
+## Uygulama Notları
+
+- **`reader.rs`'e dokunulmadı.** Teslim `TappedPty::read`'de: `ScanOutcome`
+  yeni `prompt` bayrağını (yalnız kimlikli `A`) taşıyor ve satır + `\r`
+  `Adapter::reply`'ın kanalından döngünün yazma kuyruğuna gidiyor — kanal
+  kilitsiz, `read` `Term` kilidi altında da koşabildiği için PTY'ye doğrudan
+  yazılmıyor. `TappedPty` bunun için `Adapter`'ın bir kopyasını taşıyor
+  (`Adapter::new` `TappedPty`'nin önüne alındı).
+- **"`send_input`'un yolundan"ın iki hâli:** doğumda (sarmalayıcısız)
+  gerçekten `write_owned` → `send_input`; `A`'da okuyucu thread'i `Session`'ı
+  görmediği için yalnız neslin artışı + kanal. Seçim temizliği ve dibe
+  dönüş orada yok — taze oturumda ikisi de no-op; kullanıcı ilk prompt'tan
+  önce geçmişe kaydırmışsa pencere dibe dönmüyor (bilinen, kozmetik).
+- `SessionOptions`'a iki alan: `initial_input` ve `shell_marks`
+  (sarmalayıcı kuruldu mu; `bt-shell`'de `!integration.is_empty()`, `dock`'tan
+  türetilmiyor — `blocks` kademesi). Boş satır `None` sayılıyor.
+- `open_window`'un `as_tab`'ı üç kollu `Opening`'e döndü (Window/Tab/
+  LocalTab); karar saf `initial_line`'da. `TerminalWindow::start`'ın dizin ve
+  ilk girdisi `window::Launch`'ta (clippy'nin argüman sınırı).
+- Yeni API: `Session::remote_line` (yaprak kilit).
+- **Waive (`/code-review`, orta): açılış sırasında yazılan tuşlar satırın
+  önüne yapışıyor.** Sarmalayıcılı oturumda satır ilk kimlikli `A`'da
+  gidiyor; kullanıcı ⌘T'den hemen sonra rc yüklenirken `ls` yazarsa ZLE
+  `ls` + `ssh -p 2222 prod⏎`'i tek satır okuyor ve `lsssh …` koşuyor. Doğum
+  kolunda (sarmalayıcısız) yok. Giderilmedi, çünkü iki çare kullanıcının
+  gördüğünde ayrışıyor ve bu bir ürün kararı: (a) satırın önüne `^U`
+  (`kill-whole-line`) — önceden yazılan tuşlar sessizce **düşer**; (b) ilk
+  girdi gidene kadar kullanıcı girdisini tutup satırın **arkasına** eklemek
+  — tuşlar uzak kabuğa gider ama kimlikli `A` hiç gelmezse (Karar 6'nın
+  bilinen sınırı) klavye ölür, yani bir zaman aşımı (ölçülmemiş sayı)
+  ister. Bugünkü hâl: yanlış komut koşar, sekme bağlanmaz; kullanıcı
+  görür ve yeniden yazar.
+

@@ -1437,6 +1437,7 @@ impl ShellLog {
                 self.running_since = None;
                 if let Some(id) = id {
                     self.blocks.start(id);
+                    outcome.prompt = true;
                 }
             }
             Mark::PromptEnd => state.phase = ShellPhase::Input,
@@ -2295,6 +2296,11 @@ pub(crate) struct ScanOutcome {
     pub(crate) title: bool,
     /// Safha `Running`'e **geçti** → [`crate::Wake::command_started`].
     pub(crate) started: bool,
+    /// **Bizim** kimlikli `A`'mız geldi: kabuk prompt'a vardı (037 Karar 6).
+    /// Tüketicisi oturumun ilk girdisi (`SessionOptions::initial_input`);
+    /// kimliksiz `A` saymıyor — ssh'ın öbür ucundaki ya da başka bir aracın
+    /// `A`'sı bizim kabuğun prompt'a vardığını söylemez.
+    pub(crate) prompt: bool,
 }
 
 /// Tarayıcının dışarıya verdiği olay.
@@ -5693,6 +5699,31 @@ mod tests {
             // Silinmiş durumu ikinci kez silmek haber değil.
             assert!(!log.apply(mark).title, "{mark:?}");
         }
+    }
+
+    #[test]
+    fn only_our_identified_prompt_announces_the_prompt() {
+        // Oturumun ilk girdisinin tetiği (037 Karar 6): yalnız kimlikli `A`.
+        // Kimliksiz `A` (başka bir aracın entegrasyonu) ve öteki işaretler
+        // kabuğumuzun prompt'a vardığını söylemiyor.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        for mark in [
+            Mark::PromptStart { id: None },
+            Mark::PromptEnd,
+            Mark::CommandStart,
+            Mark::CommandEnd {
+                exit: Some(0),
+                id: Some(1),
+            },
+        ] {
+            assert!(!log.apply(mark).prompt, "{mark:?}");
+        }
+        assert!(log.apply(Mark::PromptStart { id: Some(2) }).prompt);
+        // Uzak oturum sürerken de: kimlikli `A` uzak durumu silip geçiyor.
+        let mut log = running_log();
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        assert!(!log.apply(Mark::PromptStart { id: None }).prompt);
+        assert!(log.apply(Mark::PromptStart { id: Some(3) }).prompt);
     }
 
     #[test]

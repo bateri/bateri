@@ -1332,6 +1332,8 @@ mod tests {
                 theme: Theme::BATERI,
                 dock: false,
                 cluster: false,
+                initial_input: None,
+                shell_marks: false,
             },
             Arc::new(SilentWake),
         )
