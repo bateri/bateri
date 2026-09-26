@@ -133,3 +133,4 @@ Finder damlası (uzak) ──▶ Karar 7: yükle (scp → uzak yolu yapıştır)
 | phase-6 | ✅ |
 | phase-7 | ✅ |
 | kapı | ✅ |
+- Sonradan: dock satırı bayt, hız ve kalan süreyi akan kalemin değil kuyruğun toplamından yazıyor, klasörün dosya sayısı adın yanında (onaylı demoya hizalama; çubuk zaten kuyruğa göre doluyordu).

@@ -1944,16 +1944,11 @@ impl Uploads {
             let _ = write!(body, "{} of {} · ", index + 1, items);
         }
         body.push_str(&local.name);
-        body.push_str("  ");
-        body.push_str(&format_pair(bytes.min(local.bytes), local.bytes));
-        if let Some(rate) = rate {
-            body.push_str(" · ");
-            body.push_str(&format_rate(rate));
-            let left = local.bytes.saturating_sub(bytes) as f64 / rate;
-            // audit: kalan süre saniyeye yuvarlanıyor; sonsuz/NaN yok (`rate > 0`).
-            body.push_str(" · ");
-            body.push_str(&format_duration(left.ceil() as u64));
+        if local.dir {
+            body.push('/');
         }
+        // Klasörün dosya sayısı adın yanında: kalemin kendi bilgisi, baytlar
+        // ise kuyruğun (kullanıcının onayladığı demo, 037 phase-7 sonrası).
         if local.dir {
             let _ = write!(
                 body,
@@ -1962,6 +1957,20 @@ impl Uploads {
                 local.files,
                 files_word(local.files)
             );
+        }
+        // Bayt, hız ve kalan süre **bütün kuyruğun**: çubuk da kuyruğa göre
+        // doluyor ve metin başka bir oranı söyleseydi ikisi çelişirdi.
+        let total = queue.bytes_total;
+        let shown = sent.min(total);
+        body.push_str("  ");
+        body.push_str(&format_pair(shown, total));
+        if let Some(rate) = rate {
+            body.push_str(" · ");
+            body.push_str(&format_rate(rate));
+            let left = total.saturating_sub(shown) as f64 / rate;
+            // audit: kalan süre saniyeye yuvarlanıyor; sonsuz/NaN yok (`rate > 0`).
+            body.push_str(" · ");
+            body.push_str(&format_duration(left.ceil() as u64));
         }
         let progress = if queue.bytes_total == 0 {
             0
@@ -2506,7 +2515,7 @@ mod tests {
 
         shared.bytes.store(18_200_000, Ordering::Release);
         let status = uploads.status(start).expect("satır");
-        assert_eq!(status.body, "↑ 1 of 2 · backup.tar.gz  18.2 / 44.6 MB");
+        assert_eq!(status.body, "↑ 1 of 2 · backup.tar.gz  18.2 / 45.6 MB");
         assert_eq!(
             status.controls,
             TransferControls {
@@ -2521,7 +2530,7 @@ mod tests {
         let status = uploads.status(start + Duration::from_secs(1)).unwrap();
         assert_eq!(
             status.body,
-            "↑ 1 of 2 · backup.tar.gz  19.4 / 44.6 MB · 1.2 MB/s · 21s"
+            "↑ 1 of 2 · backup.tar.gz  19.4 / 45.6 MB · 1.2 MB/s · 22s"
         );
 
         // Biten kalem kuyruğu bitirmiyor ve hiçbir yol yapıştırılmıyor —
@@ -2532,15 +2541,13 @@ mod tests {
         shared.files.store(57, Ordering::Release);
         let status = uploads.status(start + Duration::from_secs(2)).unwrap();
         assert!(
-            status.body.starts_with("↑ 2 of 2 · static  "),
+            status
+                .body
+                .starts_with("↑ 2 of 2 · static/ · 57 of 124 files  "),
             "{}",
             status.body
         );
-        assert!(
-            status.body.ends_with(" · 57 of 124 files"),
-            "{}",
-            status.body
-        );
+        assert!(status.body.contains(" / 45.6 MB"), "{}", status.body);
         // Biten kalem sayıda kalıyor: "Show files (2)".
         assert_eq!(status.controls.items, 2);
 
@@ -2861,7 +2868,7 @@ mod tests {
                 ]
             })
             .collect();
-        texts.push("↑ 1 of 2 · a  1.0 / 2.0 MB · 1.0 MB/s · 1s · 1 of 2 files".to_owned());
+        texts.push("↑ 1 of 2 · a/ · 1 of 2 files  1.0 / 2.0 MB · 1.0 MB/s · 1s".to_owned());
         for text in texts {
             for ch in text.chars().filter(|ch| !ch.is_ascii()) {
                 assert!(bt_core::UPLOAD_GLYPHS.contains(&ch), "'{ch}' in {text:?}");
