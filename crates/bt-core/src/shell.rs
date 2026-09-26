@@ -1019,6 +1019,22 @@ pub(crate) struct ShellLog {
     /// kazanır" kuralının ([`Self::running_since`]) aynı yeri: iTerm2'nin komut
     /// ortasındaki `C`'si koşan bir ssh'ın cevabını geçersiz kılmamalı.
     pub(crate) command: u64,
+    /// Kabuk **bizim** kimliğimizi taşıyan bir işaret bastı mı
+    /// (`bt_block=`'lı `A` ya da `D`) — yapışkan; [`Self::apply`]'ın yabancı
+    /// işaret kapısının ön koşulu.
+    ///
+    /// Kapı bu bayrak olmadan kurulamaz: entegrasyonu kapalı ama kendi OSC
+    /// 133'ünü basan bir kabukta (iTerm2, kitty) **bütün** işaretler
+    /// kimliksiz ve uzak durum hiç silinmezdi.
+    ours: bool,
+    /// Son `Running` geçişinin açtığı komut **bizim** `D`/`A`'mızla henüz
+    /// kapanmadı ([`Self::running_command`]'ın ikinci kolu).
+    ///
+    /// Safha tek başına yetmiyor: ssh'ın öbür ucundaki entegrasyonun `A`'sı
+    /// yoklamadan **önce** aynı okumada gelebiliyor ve safhayı `Prompt`'a
+    /// çekiyor — komut hâlâ koşarken nesil `None` görünür, yoklama düşer ve
+    /// gösterge hiç çıkmazdı.
+    command_open: bool,
     /// Devrin **ham** cevabı, en son gözlendiği hâliyle.
     ///
     /// Damga [`Self::apply_scan`]'de tutuluyor — tek giriş noktası ve yaprak
@@ -1263,6 +1279,8 @@ impl ShellLog {
             dock_pending: None,
             running_since: None,
             command: 0,
+            ours: false,
+            command_open: false,
             // Açılışta caret dock'un (`caret_home_raw(None, Idle)`), yani ilk
             // devir her zaman Dock→Grid yönünde ve tutma ona uygulanabilir.
             caret_raw: CaretHome::Dock,
@@ -1286,6 +1304,33 @@ impl ShellLog {
     /// Dönüş çağıranın vereceği haberler ([`ScanOutcome`]): `Running`'e
     /// geçiş ve uzak durumun silinmesi (036).
     pub(crate) fn apply(&mut self, mark: Mark) -> ScanOutcome {
+        // **Uzak oturumu yalnız BİZİM işaretimiz bitiriyor** (036 phase-3):
+        // kabuk kimliğimizi bir kez bastıysa ve uzak oturum etkinse,
+        // kimliksiz işaret (`A`/`D` kimliksiz, her `B` ve `C`) hiçbir şeye
+        // dokunmuyor. Kaynağı ssh'ın öbür ucu: fish 4 ya da kitty/iTerm2
+        // entegrasyonu aynı PTY'ye 133 basıyor ve uzak `A` göstergeyi
+        // silerdi, uzak `C` yeni bir komut nesli açardı. Yerel kabuk ssh'ın
+        // arkasında bloklu, yani o sırada gelen kimliksiz işaret bizim
+        // olamaz. Kapı **uzak oturumla sınırlı**, `Running`'le değil: `exec
+        // fish` gibi kimliğimizi bir daha basmayacak bir kabuğa geçişte
+        // `Running` hiç bitmez, saat durmaz ve sayaç boşta kare isterdi.
+        // Yoklamadan önceki yarış [`Self::command_open`]'da.
+        let identified = match mark {
+            Mark::PromptStart { id } | Mark::CommandEnd { id, .. } => id.is_some(),
+            Mark::PromptEnd | Mark::CommandStart => false,
+        };
+        if identified {
+            self.ours = true;
+        } else if self.ours && self.context.remote.is_some() {
+            return ScanOutcome::default();
+        }
+        // Komutu kapatan: bizim kimlikli `A`/`D`'miz; kimliğimizi hiç
+        // görmemiş kabukta her `A`/`D`.
+        if matches!(mark, Mark::PromptStart { .. } | Mark::CommandEnd { .. })
+            && (identified || !self.ours)
+        {
+            self.command_open = false;
+        }
         // **Tutulan `line-finish` her işarette biter** (Karar 11): `C` komutun
         // koştuğunu, `A` yeni prompt'u söylüyor — ikisinde de kabul edilen
         // satır artık ızgaranın kalıcı içeriği.
@@ -1303,7 +1348,8 @@ impl ShellLog {
                 // Uzak durum **kendiliğinden** gidiyor (036 Karar 2): bitiş
                 // için `bt-shell`'e gidiş-dönüş yok. `A` `D`'nin savunma kolu
                 // — saatinki gibi, kaybolan bir `D` uzak göstergeyi sonraki
-                // prompt'a taşımasın.
+                // prompt'a taşımasın. Uzak kabuğun kimliksiz `A`'sı buraya
+                // hiç ulaşmıyor (yukarıdaki kapı).
                 outcome.title = self.context.clear_remote();
                 self.dock_editable = false;
                 self.dock_pending = None;
@@ -1328,6 +1374,7 @@ impl ShellLog {
                 // `C` host'u silseydi gösterge geri gelmezdi.
                 if state.phase != ShellPhase::Running {
                     self.command += 1;
+                    self.command_open = true;
                     outcome.started = true;
                     outcome.title = self.context.clear_remote();
                 }
@@ -1437,14 +1484,19 @@ impl ShellLog {
         outcome
     }
 
-    /// Koşan komutun nesli ([`Self::command`]); safha `Running` değilse
+    /// Koşan komutun nesli ([`Self::command`]); komut koşmuyorsa
     /// `None`. Bayat cevap kapısının iki yarısının ([`crate::Session::running_command`],
     /// [`crate::Session::set_remote`]) **tek** tanımı: ayrışsalardı yoklama
     /// `set_remote`'un reddedeceği bir nesil alabilirdi.
+    ///
+    /// İkinci kol [`Self::command_open`]: kimliğimizi basan bir kabukta
+    /// komut, safhayı yabancı bir `A` oynatmış olsa da bizim `D`'mize kadar
+    /// koşuyor.
     pub(crate) fn running_command(&self) -> Option<u64> {
-        self.state
-            .is_some_and(|state| state.phase == ShellPhase::Running)
-            .then_some(self.command)
+        let running = self
+            .state
+            .is_some_and(|state| state.phase == ShellPhase::Running);
+        (running || (self.ours && self.command_open)).then_some(self.command)
     }
 
     /// Uzak oturumun host'unu yazar (036); **başlığın girdisi değiştiyse**
@@ -5527,9 +5579,9 @@ mod tests {
         for mark in [
             Mark::CommandEnd {
                 exit: Some(0),
-                id: None,
+                id: Some(1),
             },
-            Mark::PromptStart { id: None },
+            Mark::PromptStart { id: Some(2) },
         ] {
             let mut log = running_log();
             assert!(log.set_remote(Some("prod")));
@@ -5542,6 +5594,90 @@ mod tests {
             // Silinmiş durumu ikinci kez silmek haber değil.
             assert!(!log.apply(mark).title, "{mark:?}");
         }
+    }
+
+    #[test]
+    fn foreign_marks_leave_a_remote_session_alone() {
+        // ssh'ın öbür ucundaki fish 4 / kitty entegrasyonu: uzak `A`, `B`,
+        // `C`, `D` bizim kimliğimizi taşımıyor ve ne uzak durumu siliyor ne
+        // nesli ilerletiyor ne de safhayı `Running`'den çıkarıyor.
+        let mut log = running_log();
+        let command = log.running_command();
+        assert!(command.is_some());
+        assert!(log.set_remote(Some("prod")));
+        for mark in [
+            Mark::PromptStart { id: None },
+            Mark::PromptEnd,
+            Mark::CommandStart,
+            Mark::CommandEnd {
+                exit: Some(1),
+                id: None,
+            },
+        ] {
+            assert_eq!(log.apply(mark), ScanOutcome::default(), "{mark:?}");
+            assert_eq!(log.context.remote.as_deref(), Some("prod"), "{mark:?}");
+            assert_eq!(log.running_command(), command, "{mark:?}");
+        }
+        // Bizim `D`'miz komutu bitiriyor ve uzak durumu siliyor.
+        let outcome = log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert!(outcome.title);
+        assert_eq!(log.context.remote, None);
+        assert_eq!(log.running_command(), None);
+    }
+
+    #[test]
+    fn a_foreign_prompt_before_the_probe_keeps_the_command_running() {
+        // Uzak `A` yoklamadan önce aynı okumada geldi: safha `Prompt`'a
+        // döndü ama bizim `D`'miz gelmedi, yani komut koşuyor ve yoklamanın
+        // cevabı kabul ediliyor.
+        let mut log = running_log();
+        let command = log.running_command();
+        log.apply(Mark::PromptStart { id: None });
+        log.apply(Mark::PromptEnd);
+        assert_eq!(log.running_command(), command);
+        assert!(log.set_remote(Some("prod")));
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert_eq!(log.running_command(), None);
+    }
+
+    #[test]
+    fn a_foreign_shell_without_a_remote_session_drives_the_phase() {
+        // `exec fish`: kimliğimiz bir daha gelmiyor. Uzak oturum yokken
+        // fish'in işaretleri safhayı sürüyor, yoksa `Running` hiç bitmez ve
+        // saat boşta kare isterdi.
+        let mut log = running_log();
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: None,
+        });
+        log.apply(Mark::PromptStart { id: None });
+        assert_ne!(
+            log.state.map(|state| state.phase),
+            Some(ShellPhase::Running)
+        );
+        assert_eq!(log.running_since, None, "saat durdu");
+    }
+
+    #[test]
+    fn without_our_marks_foreign_marks_still_drive_the_phase() {
+        // Entegrasyonu kapalı kabuk + kendi 133'ü: kimliğimiz hiç gelmedi,
+        // yani kimliksiz `D` komutu bitirmek zorunda — yoksa `Running`
+        // sonsuza kadar sürer.
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply(Mark::PromptStart { id: None });
+        log.apply(Mark::CommandStart);
+        assert!(log.running_command().is_some());
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: None,
+        });
+        assert_eq!(log.running_command(), None);
     }
 
     #[test]

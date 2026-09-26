@@ -47,7 +47,7 @@ use objc2_foundation::{
 use crate::app::{self, AppDelegate, Grid, split_into_grid};
 use crate::child;
 use crate::clipboard::{self, PendingCopy};
-use crate::jobs::{self, Foreground, Libproc, ShellParent};
+use crate::jobs::{self, Foreground, Libproc, Probe, ShellParent};
 use crate::notices::{Source, font_messages};
 use crate::search_bar::{SearchBar, selection_query};
 use crate::view::BateriView;
@@ -112,9 +112,82 @@ struct ShellWake {
     /// Arama sayımının defter haberi ana kuyrukta bekliyor mu —
     /// `title_pending`'in ikizi (033).
     search_pending: Arc<AtomicBool>,
+    /// Uzak oturum yoklamasının silahı ve bekleyen işi (036); `Arc`, çünkü
+    /// ana kuyruğun işi onu tutuyor.
+    remote_probe: Arc<RemoteProbe>,
+}
+
+/// Uzak oturum yoklamasının iki biti (036 Karar 2): **silah** (bu komut için
+/// kesin bir cevap henüz yok) ve **bekleyen iş** (ana kuyrukta bir yoklama
+/// var — en çok bir tane, `title_pending`'in örüntüsü).
+///
+/// Silah `C` kenarında kuruluyor; kuruluyken her `wake` (PTY'den gelen
+/// çıktı) bir iş atıyor, kesin cevap onu indiriyor ve sonraki çıktılar
+/// yoklamıyor. Akan bir `cat`'in bedeli tek yoklama.
+///
+/// **İş silahı yoklamadan önce indiriyor**, sonra değil, ve kararsız cevapta
+/// geri kuruyor: yoklama sürerken okuyucu thread'de gelen yeni bir `C` silahı
+/// kurup yeni bir iş atabiliyor ve bitmekte olan eski komutun kesin cevabı
+/// onu indirseydi yeni komut hiç yoklanmazdı.
+#[derive(Debug, Default)]
+struct RemoteProbe {
+    armed: AtomicBool,
+    pending: AtomicBool,
+}
+
+impl RemoteProbe {
+    /// `C` kenarı: silahı kurar; ana kuyruğa iş atılacaksa `true`.
+    fn command_started(&self) -> bool {
+        self.armed.store(true, Ordering::Release);
+        self.claim()
+    }
+
+    /// Çıktı kenarı (okuyucu thread, `Term` kilidi altında olabilir): silah
+    /// kuruluysa ve iş beklemiyorsa `true`. Silahsızken tek bir atomik okuma.
+    fn output(&self) -> bool {
+        self.armed.load(Ordering::Acquire) && self.claim()
+    }
+
+    /// Bekleyen işin yuvasını alır; zaten bekleyen varsa `false`.
+    fn claim(&self) -> bool {
+        !self.pending.swap(true, Ordering::AcqRel)
+    }
+
+    /// Ana kuyruktaki işin başı: yuvayı bırakır ve silahı indirir; silah
+    /// kurulu değilse (kesin cevap verildi) yoklama yok.
+    fn begin(&self) -> bool {
+        self.pending.store(false, Ordering::Release);
+        self.armed.swap(false, Ordering::AcqRel)
+    }
+
+    /// Kararsız cevap: silah geri kuruluyor, iş atılmıyor — sonraki çıktı
+    /// atar.
+    fn rearm(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
 }
 
 impl ShellWake {
+    /// Uzak oturum yoklamasını ana kuyruğa atar ([`RemoteProbe`]).
+    fn dispatch_remote_probe(&self) {
+        let probe = Arc::clone(&self.remote_probe);
+        let id = self.id;
+        DispatchQueue::main().exec_async(move || {
+            if !probe.begin() {
+                return;
+            }
+            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+            // Pencere bu arada kapandıysa yoklanacak bir kabuk da yok.
+            let undecided = app::delegate(mtm)
+                .and_then(|app| app.window(id))
+                .is_some_and(|window| window.probe_remote());
+            if undecided {
+                probe.rearm();
+            }
+        });
+    }
+
     /// Yaprak kilidi alır; zehirlenmişse içindekiyle devam eder — yuvanın tek
     /// değişmezi "ya `Waker` var ya yok" ve yarım yazılmış bir hâli olamaz.
     fn slot(&self) -> MutexGuard<'_, Option<Waker>> {
@@ -137,6 +210,11 @@ impl Wake for ShellWake {
         // kapattığı yolun ta kendisi.
         if let Some(waker) = self.slot().as_ref() {
             waker.wake();
+        }
+        // Uzak oturum yoklaması kararsız kaldıysa bu çıktı onu yeniden
+        // tetikliyor (036 Karar 2); silahsızken bedel bir atomik okuma.
+        if self.remote_probe.output() {
+            self.dispatch_remote_probe();
         }
     }
 
@@ -241,11 +319,14 @@ impl Wake for ShellWake {
     }
 
     fn command_started(&self) {
-        // **Bilerek boş** (036 phase-1): uzak oturum modeli `bt-core`'da
-        // kuruldu ama üretimde henüz kimse yoklamıyor, yani `set_remote` hiç
-        // çağrılmıyor ve görünen davranış değişmiyor. Süreç tablosu
-        // yoklaması (ana kuyruğa en çok bir iş, `title_changed`'in
-        // örüntüsü) phase-3'te buraya iniyor.
+        // Okuyucu thread, kilitsiz. Süreli koşu algılamıyor: jetonları
+        // bugünkü kalmalı (ve sabit betiğin entegrasyonu da yok).
+        if self.timed {
+            return;
+        }
+        if self.remote_probe.command_started() {
+            self.dispatch_remote_probe();
+        }
     }
 }
 
@@ -1099,6 +1180,7 @@ impl TerminalWindow {
                 pending_copy: Arc::default(),
                 title_pending: Arc::default(),
                 search_pending: Arc::default(),
+                remote_probe: Arc::default(),
             }),
             zoom: Cell::new(Zoom::default()),
             // Açılışta dock yok: kararı `start` veriyor ve geometriyi ondan
@@ -1447,6 +1529,38 @@ impl TerminalWindow {
             return Foreground::Idle;
         }
         jobs::foreground(parent, session.child_pid(), &Libproc)
+    }
+
+    /// Uzak oturum yoklaması (036 Karar 2): koşan komutun neslini alır, ön
+    /// plan grubunu yoklar ve ssh/mosh bulduysa oturuma bildirir. Dönüş
+    /// **kararsız mı** — `true` ise silah kurulu kalır ve sonraki çıktı
+    /// yeniden yoklar ([`RemoteProbe`]).
+    ///
+    /// Nesil yoklamadan **önce**: arada biten komutun cevabını
+    /// `Session::set_remote` reddediyor. Okuyucu bittiyse yoklama yok
+    /// ([`Self::foreground`]'ın kuralı: bayat pid'e sorulmaz).
+    fn probe_remote(&self) -> bool {
+        let (Some(session), Some(&parent)) =
+            (self.ivars().session.get(), self.ivars().shell_parent.get())
+        else {
+            return false;
+        };
+        if !session.reader_alive() {
+            return false;
+        }
+        let Some(command) = session.running_command() else {
+            return false;
+        };
+        match jobs::remote(parent, session.child_pid(), &Libproc) {
+            Probe::Undecided => true,
+            Probe::Local => false,
+            Probe::Remote(host) => {
+                if session.set_remote(command, Some(&host)) {
+                    self.refresh_title();
+                }
+                false
+            }
+        }
     }
 
     /// Başlığı oturumdan okuyup pencereye yazar — `ShellWake::title_changed`'in
@@ -2229,6 +2343,33 @@ impl TerminalWindow {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_probe_repeats_only_while_undecided() {
+        use super::RemoteProbe;
+        let probe = RemoteProbe::default();
+        // Silahsızken çıktı yoklama atmıyor.
+        assert!(!probe.output());
+        // `C` kenarı silahı kurar ve tek bir iş atar; iş beklerken gelen
+        // çıktı ikinci bir iş atmıyor.
+        assert!(probe.command_started());
+        assert!(!probe.output());
+        // İş başlıyor, yoklama kararsız: silah geri kurulur, sonraki çıktı
+        // tekrar atar.
+        assert!(probe.begin());
+        probe.rearm();
+        assert!(probe.output());
+        // İş başlıyor, cevap kesin: silah inik kalır, çıktı atmıyor.
+        assert!(probe.begin());
+        assert!(!probe.output());
+        // Kesin cevap yoklanırken gelen yeni `C` ezilmiyor.
+        assert!(probe.command_started());
+        assert!(probe.begin());
+        assert!(probe.command_started());
+        assert!(probe.begin(), "yeni komut yoklanmalı");
+        // Silah inikken kuyruğa düşmüş bir iş yoklamıyor.
+        assert!(!probe.begin());
+    }
+
     use std::cell::Cell;
 
     use super::{CloseScope, close_scope, is_dark_background, prompt, should_ask, tab_index};
