@@ -170,7 +170,8 @@ Selection for Find (⌘F/⌘G/⇧⌘G/⌘E), seçicileri kendi adlarımız ve ka
 düzenleyicisine yutulurdu; View'da Theme ▸, Cmd +/−/0 geçici
 punto ve Scroll to Top/Bottom, Page Up/Down (⌘Home/⌘End/⌘PgUp/⌘PgDn,
 `scroll_page`'in yolu; menü kısayolu, tuş kodlaması değil); Window'da sekme
-geçişi ve Select Tab ▸) ve kapanış sırası ondadır.
+geçişi, Select Tab ▸ ve bölmeler — Select Previous/Next Split, Select
+Split ▸, Resize Split ▸, Equalize Splits, Zoom Split) ve kapanış sırası ondadır.
 **⌘K terminalin işi, kabuğun değil** (034): Clear to Start ekranı ve
 geçmişi siler, ⌥⌘K Clear Scrollback yalnız geçmişi; ikisi de tek `Term`
 kilidi turunda (`Session::clear_to_start`/`clear_scrollback`) ve kabuğa ya
@@ -211,8 +212,9 @@ aşağı böler; yeni pane odaktakinin dizinini, punto farkını, temasını ve 
 satırını devralır (⌘T'nin kuralı, `Opening::Split`) ve iki yarıdan biri en
 küçük pane sınırının (`MIN_PANE_COLS`/`MIN_PANE_ROWS`, tasarım sabiti)
 altına düşecekse bölme gri ve no-op. **Odaktaki pane** pencerenin first
-responder'ının pane'i (`TerminalWindow::focused_pane`; klavyenin gelişi
-`PaneHost::focused`): başlık, `⇄`, yükleme yüzdesi ve sekme noktası ondan
+responder'ının pane'i (`TerminalWindow::focused_pane`; değişimi pencerenin
+`firstResponder`'ının KVO'sundan — arama alanına tık dahil — ve
+`PaneHost::focused`'tan): başlık, `⇄`, yükleme yüzdesi ve sekme noktası ondan
 ve odakla değişir; odakta olmayan pane'in caret'i içi boş (odağın ikinci
 biti, `bt-gpu` değişmeden), pencerenin key biti, örtülme ve ölçek bütün
 pane'lere. ⌘W odaktaki pane'i kapatır (koşan iş varsa yalnız onu sorar,
@@ -220,7 +222,23 @@ pane'lere. ⌘W odaktaki pane'i kapatır (koşan iş varsa yalnız onu sorar,
 kapanır ve odak ağaçtaki komşuya geçer; ⇧⌘W, kırmızı düğme ve ⌘Q bütün
 pane'leri kapatır ve soruyu pane'lerden toplar — tek pane'li sekmede metin
 bölmelerden öncekinin aynısı, çok pane'de "pane" sayar (`window::unit_for`).
-Gerekçeler `.tasks/039-terminal-pane-bolmeler/discussion.md` → Karar 6–14. **Pane ile sahibi arasındaki sınır üç parça** (039 Karar 1–3):
+**Gezinme ve düzen de ağaç işlemi** (039 phase-4): ⌘[ / ⌘] ağaç sırasında
+döngüsel, ⌥⌘ + ok yöndeki pane (kenardan, dik eksende en çok örtüşen;
+`split::Layout::neighbour`), ⌃⌘ + ok o eksendeki en yakın ayırıcıyı odaktaki
+pane'in bir hücresi kadar taşır, ayırıcı sürüklemesi de (isabet alanı
+çizgiden geniş, pane'lerin üstündeki saydam tutamak; `split_view`), ⌃⌘=
+aynı eksendeki pane'leri eşitler, ⇧⌘↩ odaktaki pane'i büyütür/geri alır
+(ötekiler gizli ve link'leri örtülmüş pencere gibi sıfır kare çiziyor;
+bölme, gezinme, boyutlama, eşitleme ve pane kapanışı büyütmeyi bırakır).
+Boyutlama ve sürükleme **en küçük pane sınırında** durur ve sınır yaprak
+başına, pane'in kendi hücresinden (`TerminalPane::min_size`; bölmenin
+kapısı da o); pencere küçülünce pane'ler oranlarını korur. Hepsi Window
+menüsünün öğesi, tek pane'de gri; menü `keyDown:`'dan önce eşlediği için
+Cmd izin listesi üç tuşta kalıyor ve dock'un ⇧⏎'si değişmiyor. **Odakta
+olmayan pane soluk** (Karar 7): pane'in en üstündeki `hitTest` → `nil` bir
+AppKit örtüsü (temanın zemini, `DIM_ALPHA` saydamlığında, tasarım sabiti) —
+kare yolunun ve `bt-gpu`'nun dışında, yani boşta sıfır kare korunuyor; tek
+pane'de örtü yok. Gerekçeler `.tasks/039-terminal-pane-bolmeler/discussion.md` → Karar 6–14. **Pane ile sahibi arasındaki sınır üç parça** (039 Karar 1–3):
 girdiler doğumda tek pakette (`PaneLaunch`: ayar anlık görüntüsü, tema,
 `Run`, `Stats`, entegrasyon ortamı + dock payı, kimlik, dizin ve ilk girdi,
 hareket bayrakları; canlı değişim pane'in `set_*` yöntemleriyle), olaylar
@@ -231,8 +249,8 @@ menünün karşıladığı her pane işi pane'de adlı bir yöntem, seçici onu
 kaydır, `cancelUpload:`) ile arama paneli ve yükleme kuyruğu pane'de,
 çünkü responder zinciri `BateriView` → pane → kapsayıcı → pencere →
 delegate — hedefsiz öğe odaktaki pane'e varıyor, arama alanı odaktayken de;
-sekme işleri (`closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`,
-`splitDown:`) pencerede. Pane modülü
+sekme işleri (`closeTab:`, `closeWindow:`, `selectTab:`, bölme, gezinme ve
+düzen eylemleri) pencerede. Pane modülü
 `AppDelegate`'e uzanmıyor: ana kuyruk dönüşleri pane'i sahibin verdiği
 yoldan (`PaneLookup`, düz `fn`) kimlikle buluyor, `BateriView` sahibini
 `superview()`'dan. Arama paneli kapsayıcısını **tutmuyor** (pane → panel →

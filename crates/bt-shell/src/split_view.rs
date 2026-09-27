@@ -17,18 +17,159 @@
 //! kapsayıcıyı **oturtulmadan** dolduruyor — bölmeden önceki düzenin aynısı.
 //!
 //! Pane'in çerçevesi değişince geometrisini pane kendisi tazeliyor
-//! (`TerminalPane::observe_frame`); burada yalnız `setFrame` var.
+//! (`TerminalPane::observe_frame`); burada yalnız `setFrame` var — ayırıcı
+//! sürüklenirken de, yani PTY sürükleme boyunca pencere boyutlandırmasının
+//! yolundan boyutlanıyor.
+//!
+//! **Sürükleme tutamakları** (039 phase-4): çizilen çizgi bir piksel, isabet
+//! alanı ise her yana [`HANDLE_PT`] geniş ve pane'lerin **üstünde** duran
+//! saydam bir view ([`DividerHandle`]) — pane'ler opak ve çizginin dışındaki
+//! her noktayı kaplıyor, yani alan arkadaki dolguda olamazdı. İmleci
+//! `resizeLeftRight`/`resizeUpDown`. Tutamaklar yalnız ayırıcı **sayısı**
+//! değişince yeniden kuruluyor (yeni pane onların üstüne eklendiği için o an
+//! en üste geri alınmaları gerekiyor); sürükleme boyunca aynı view kalıyor,
+//! çünkü AppKit `mouseDragged:`'ı basışı alan view'a veriyor.
+//!
+//! **Büyütme** (⇧⌘↩): büyütülmüş pane bütün alanı alıyor
+//! ([`Tree::layout_zoomed`]), öteki pane'ler **gizli** ve çerçeveleri (yani
+//! ızgaraları) olduğu gibi kalıyor; ayırıcı ve tutamak yok. Gizli pane'in
+//! link'i örtülmüş pencereninki gibi uyuyor ([`SplitView::apply_visibility`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use bt_core::Theme;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
-use objc2_app_kit::{NSBox, NSBoxType, NSColor, NSTitlePosition, NSView};
+use objc2_app_kit::{NSBox, NSBoxType, NSColor, NSCursor, NSEvent, NSTitlePosition, NSView};
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 
 use crate::pane::TerminalPane;
-use crate::split::{self, Axis, Rect, Removal, Tree};
+use crate::split::{self, Axis, Direction, Divider, Rect, Removal, Size, Tree};
+
+/// Ayırıcının isabet alanının çizginin her yanına taşan payı, nokta. Ölçülmüş
+/// değil, bir tasarım sabiti: bir piksellik çizgi fareyle tutulamıyor, altı
+/// noktalık bant tutuluyor ve pane'in kenarındaki metinden çok az şey
+/// yiyor (bandın içindeki tık pane'e değil ayırıcıya gidiyor).
+const HANDLE_PT: f64 = 3.0;
+
+pub(crate) struct HandleIvars {
+    /// [`split::Layout::dividers`]'taki sırası — [`Tree::drag`]'in indeksi.
+    index: Cell<usize>,
+    /// Ayırdığı bölmenin ekseni: yan yana bölmenin tutamağı yatay
+    /// sürükleniyor.
+    axis: Cell<Axis>,
+    /// Çizginin eksendeki konumu, kapsayıcının koordinatında (nokta).
+    line: Cell<f64>,
+    /// Basışta işaretçi ile çizgi arasındaki fark: çizgi işaretçinin altında
+    /// sıçramasın, tutulduğu yerden kaysın.
+    grab: Cell<f64>,
+}
+
+define_class!(
+    // SAFETY: NSView alt sınıflama için tasarlanmıştır; DividerHandle `Drop`
+    // uygulamaz ve `initWithFrame:` dışında bir kurucu sunmaz.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriDividerHandle"]
+    #[ivars = HandleIvars]
+    pub(crate) struct DividerHandle;
+
+    unsafe impl NSObjectProtocol for DividerHandle {}
+
+    impl DividerHandle {
+        /// `resizeLeftRightCursor`/`resizeUpDownCursor` kullanımdan kalkmış
+        /// ama yerini alan `columnResizeCursorInDirections:` macOS 15'te
+        /// geliyor; taban macOS 14 (`CLAUDE.md` → Taban).
+        #[unsafe(method(resetCursorRects))]
+        #[allow(deprecated)]
+        fn reset_cursor_rects(&self) {
+            let cursor = match self.ivars().axis.get() {
+                Axis::Horizontal => NSCursor::resizeLeftRightCursor(),
+                Axis::Vertical => NSCursor::resizeUpDownCursor(),
+            };
+            self.addCursorRect_cursor(self.bounds(), &cursor);
+        }
+
+        /// Basış yutuluyor (responder zincirine, pencereye çıkmasın) ve
+        /// tutulan yer kaydediliyor.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            if let Some(along) = self.along(event) {
+                self.ivars().grab.set(along - self.ivars().line.get());
+            }
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            let Some(along) = self.along(event) else {
+                return;
+            };
+            if let Some(container) = self.container() {
+                container.drag_divider(self.ivars().index.get(), along - self.ivars().grab.get());
+            }
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {}
+    }
+);
+
+impl DividerHandle {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(HandleIvars {
+            index: Cell::new(0),
+            axis: Cell::new(Axis::Horizontal),
+            line: Cell::new(0.0),
+            grab: Cell::new(0.0),
+        });
+        // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
+        // set edildi.
+        unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+    }
+
+    fn container(&self) -> Option<Retained<SplitView>> {
+        // SAFETY: üst view'ı okumak; ana thread'deyiz (`MainThreadOnly`).
+        unsafe { self.superview() }?.downcast::<SplitView>().ok()
+    }
+
+    /// Olayın konumu kapsayıcının (üstten aşağı) koordinatında, tutamağın
+    /// ekseni boyunca.
+    fn along(&self, event: &NSEvent) -> Option<f64> {
+        let container = self.container()?;
+        let point = container.convertPoint_fromView(event.locationInWindow(), None);
+        Some(match self.ivars().axis.get() {
+            Axis::Horizontal => point.x,
+            Axis::Vertical => point.y,
+        })
+    }
+
+    /// Ayırıcıya oturur: sırası, ekseni, çizgisi ve çizgiden [`HANDLE_PT`]
+    /// taşan çerçevesi (kapsayıcının sınırına kırpılmış).
+    fn place(&self, index: usize, divider: Divider, bounds: NSSize) {
+        let iv = self.ivars();
+        iv.index.set(index);
+        iv.axis.set(divider.axis);
+        let rect = divider.rect;
+        let frame = match divider.axis {
+            Axis::Horizontal => {
+                iv.line.set(rect.x);
+                let x = (rect.x - HANDLE_PT).max(0.0);
+                let right = (rect.x + rect.width + HANDLE_PT).min(bounds.width);
+                NSRect::new(NSPoint::new(x, rect.y), NSSize::new(right - x, rect.height))
+            }
+            Axis::Vertical => {
+                iv.line.set(rect.y);
+                let y = (rect.y - HANDLE_PT).max(0.0);
+                let bottom = (rect.y + rect.height + HANDLE_PT).min(bounds.height);
+                NSRect::new(NSPoint::new(rect.x, y), NSSize::new(rect.width, bottom - y))
+            }
+        };
+        self.setFrame(frame);
+        if let Some(window) = self.window() {
+            window.invalidateCursorRectsForView(self);
+        }
+    }
+}
 
 pub(crate) struct SplitIvars {
     /// Bölme ağacı; yaprakları [`SplitIvars::panes`]'in kimlikleri.
@@ -39,6 +180,11 @@ pub(crate) struct SplitIvars {
     panes: RefCell<Vec<Retained<TerminalPane>>>,
     /// Ayırıcıların rengi: pane'lerin arkasındaki dolgu.
     backdrop: Retained<NSBox>,
+    /// Büyütülmüş pane (⇧⌘↩); `None` → bölmeler görünüyor.
+    zoomed: Cell<Option<u64>>,
+    /// Ayırıcıların sürükleme tutamakları, [`split::Layout::dividers`]'ın
+    /// sırasıyla.
+    handles: RefCell<Vec<Retained<DividerHandle>>>,
 }
 
 define_class!(
@@ -86,6 +232,8 @@ impl SplitView {
             tree: RefCell::new(Tree::Leaf(first.id())),
             panes: RefCell::new(vec![first.retain()]),
             backdrop: backdrop.clone(),
+            zoomed: Cell::new(None),
+            handles: RefCell::new(Vec::new()),
         });
         // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
         // set edildi.
@@ -188,6 +336,121 @@ impl SplitView {
         Some(removed)
     }
 
+    /// Büyütülmüş pane; `None` → bölmeler görünüyor.
+    pub(crate) fn zoomed(&self) -> Option<u64> {
+        self.ivars().zoomed.get()
+    }
+
+    /// Büyütmeyi kurar ya da bırakır ve pane'leri yeniden oturtur. Link'lerin
+    /// görünürlüğü çağıranın ([`SplitView::apply_visibility`]): pencerenin
+    /// örtülme durumunu o biliyor.
+    pub(crate) fn set_zoomed(&self, zoomed: Option<u64>) {
+        self.ivars().zoomed.set(zoomed);
+        self.layout_panes();
+    }
+
+    /// Link'lerin görünürlüğü: pencere görünür **ve** pane gizli değil.
+    /// Gizli pane (büyütmenin arkasında kalan) örtülmüş pencere gibi sıfır
+    /// kare çiziyor; geri gelince bir kare istiyor (`DisplayLink::set_visible`).
+    pub(crate) fn apply_visibility(&self, window_visible: bool) {
+        for pane in self.ivars().panes.borrow().iter() {
+            if let Some(link) = pane.link() {
+                link.set_visible(window_visible && !pane.isHidden());
+            }
+        }
+    }
+
+    /// Ağacın sıradan (büyütmesiz) düzeni: gezinme onu soruyor.
+    fn plain_layout(&self) -> split::Layout {
+        self.ivars()
+            .tree
+            .borrow()
+            .layout(self.bounds_rect(), self.scale())
+    }
+
+    /// `from`'un yöndeki komşusu (⌥⌘ + ok; [`split::Layout::neighbour`]).
+    pub(crate) fn neighbour(&self, from: u64, direction: Direction) -> Option<u64> {
+        self.plain_layout().neighbour(from, direction)
+    }
+
+    /// Sıradaki ya da önceki pane (⌘] / ⌘[; [`Tree::cycle`]).
+    pub(crate) fn cycle(&self, from: u64, forward: bool) -> Option<u64> {
+        self.ivars().tree.borrow().cycle(from, forward)
+    }
+
+    /// En küçük pane sınırı, yaprak başına (039 Karar 14): pane'in kendi
+    /// hücresinden (`TerminalPane::min_size`). Ölçemeyen pane sınırsız.
+    fn limits(&self) -> impl Fn(u64) -> Size + use<> {
+        let panes = self.ivars().panes.borrow().clone();
+        move |id| {
+            panes
+                .iter()
+                .find(|pane| pane.id() == id)
+                .and_then(|pane| pane.min_size())
+                .map_or(Size::new(0.0, 0.0), |min| Size::new(min.width, min.height))
+        }
+    }
+
+    /// ⌃⌘ + ok: `target`'ın o eksendeki en yakın ayırıcısını `step` nokta
+    /// taşır ([`Tree::resize`]), sınırda kırparak. Oynadıysa `true`.
+    pub(crate) fn resize(&self, target: u64, direction: Direction, step: f64) -> bool {
+        let limits = self.limits();
+        let moved = self.ivars().tree.borrow_mut().resize(
+            target,
+            direction,
+            step,
+            self.bounds_rect(),
+            self.scale(),
+            &limits,
+        );
+        if moved {
+            self.layout_panes();
+        }
+        moved
+    }
+
+    /// ⌃⌘=: aynı eksendeki pane'ler eşit ([`Tree::equalize`]).
+    pub(crate) fn equalize(&self) {
+        self.ivars().tree.borrow_mut().equalize();
+        self.layout_panes();
+    }
+
+    /// Tutamağın sürüklemesi: `index`'inci ayırıcı `position`'a
+    /// ([`Tree::drag`]).
+    fn drag_divider(&self, index: usize, position: f64) {
+        let limits = self.limits();
+        let moved = self.ivars().tree.borrow_mut().drag(
+            index,
+            position,
+            self.bounds_rect(),
+            self.scale(),
+            &limits,
+        );
+        if moved {
+            self.layout_panes();
+        }
+    }
+
+    /// Tutamakları ayırıcılara oturtur; sayı değiştiyse hepsini yeniden
+    /// kurup en üste ekler (modül başlığı).
+    fn sync_handles(&self, dividers: &[Divider]) {
+        let mut handles = self.ivars().handles.borrow_mut();
+        if handles.len() != dividers.len() {
+            for handle in handles.drain(..) {
+                handle.removeFromSuperview();
+            }
+            for _ in dividers {
+                let handle = DividerHandle::new(self.mtm());
+                self.addSubview(&handle);
+                handles.push(handle);
+            }
+        }
+        let size = self.bounds().size;
+        for (index, (handle, divider)) in handles.iter().zip(dividers).enumerate() {
+            handle.place(index, *divider, size);
+        }
+    }
+
     /// Ayırıcının rengi temadan (039 Karar 7): `Theme::separator_srgb` —
     /// dock'un saç çizgileriyle aynı kademe. `NSColor` sRGB alıyor, lineer
     /// değer GPU'nun (`CLAUDE.md` → Renk uzayı).
@@ -199,30 +462,39 @@ impl SplitView {
     }
 
     /// Ağacın çerçevelerini pane'lere uygular. Tek pane'de oturtma yok: pane
-    /// kapsayıcının sınırının ta kendisi, bölmeden önceki gibi.
+    /// kapsayıcının sınırının ta kendisi, bölmeden önceki gibi. Büyütülmüşken
+    /// yalnız büyütülen pane görünüyor, ötekiler gizli ve çerçeveleri yerinde.
     pub(crate) fn layout_panes(&self) {
         let panes = self.ivars().panes.borrow().clone();
+        let zoomed = self.ivars().zoomed.get();
         // `resizeSubviewsWithOldSize:`'ı biz karşılıyoruz, yani AppKit'in
         // autoresizing'i bu view'ın çocuklarına uygulanmıyor: dolgu da elle.
         let backdrop = &self.ivars().backdrop;
         backdrop.setFrame(self.bounds());
-        backdrop.setHidden(panes.len() <= 1);
+        backdrop.setHidden(panes.len() <= 1 || zoomed.is_some());
         if let [only] = panes.as_slice() {
+            only.setHidden(false);
             only.setFrame(self.bounds());
+            self.sync_handles(&[]);
             return;
         }
-        let layout = self
-            .ivars()
-            .tree
-            .borrow()
-            .layout(self.bounds_rect(), self.scale());
-        for (id, rect) in layout.panes {
-            if let Some(pane) = panes.iter().find(|pane| pane.id() == id) {
-                pane.setFrame(NSRect::new(
-                    NSPoint::new(rect.x, rect.y),
-                    NSSize::new(rect.width, rect.height),
-                ));
+        let layout =
+            self.ivars()
+                .tree
+                .borrow()
+                .layout_zoomed(self.bounds_rect(), self.scale(), zoomed);
+        for pane in &panes {
+            match layout.panes.iter().find(|(id, _)| *id == pane.id()) {
+                Some((_, rect)) => {
+                    pane.setHidden(false);
+                    pane.setFrame(NSRect::new(
+                        NSPoint::new(rect.x, rect.y),
+                        NSSize::new(rect.width, rect.height),
+                    ));
+                }
+                None => pane.setHidden(true),
             }
         }
+        self.sync_handles(&layout.dividers);
     }
 }

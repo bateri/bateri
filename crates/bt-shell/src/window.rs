@@ -3,13 +3,19 @@
 //! (`pane::TerminalPane` — oturum, link, renderer, yüzey, `BateriView`,
 //! arama paneli, yükleme kuyruğu), ve **sekmeye** ait olan her şey: krom,
 //! başlık, sekme noktası, kapatma sorusu, sekme ve bölme eylemleri
-//! (`closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`, `splitDown:`);
-//! pencerenin `NSWindowDelegate`'i de burada.
+//! (`closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`, `splitDown:`,
+//! `selectPreviousSplit:`/`selectNextSplit:`, `selectSplit:`, `resizeSplit:`,
+//! `equalizeSplits:`, `toggleSplitZoom:`); pencerenin `NSWindowDelegate`'i de
+//! burada.
 //!
 //! **Odaktaki pane** pencerenin first responder'ının pane'i
 //! ([`TerminalWindow::focused_pane`]; 039 Karar 11): başlık, `⇄`, yükleme
 //! yüzdesi, sekme noktası ve yeni sekmenin/bölmenin mirası ondan. ⌘W onu
-//! kapatır, son pane'de sekmeyi (Karar 8).
+//! kapatır, son pane'de sekmeyi (Karar 8). Öteki pane'ler soluk örtünün
+//! altında ([`TerminalWindow::refresh_dim`], Karar 7). Bölme, gezinme,
+//! boyutlama, eşitleme ve pane kapanışı büyütmeyi (⇧⌘↩) bırakıyor (Karar 8;
+//! boyutlama ve eşitleme kullanıcı bir düzen değişikliği istediği için —
+//! gizli düzeni sessizce değiştirmek görünmez bir etki olurdu).
 //!
 //! Pane'in sahibi burası (039 Karar 3): pane'in olayları [`WindowHost`]'tan
 //! (`PaneHost`) gelip pencereye ya da uygulamaya varıyor, girdileri
@@ -23,6 +29,7 @@
 //! Renderer pane başına (`pane`'in başlığı; 039 Karar 5).
 
 use std::cell::{Cell, RefCell};
+use std::ffi::c_void;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -36,12 +43,13 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSBox,
-    NSBoxType, NSColor, NSMenuItem, NSModalResponse, NSModalResponseCancel, NSTitlePosition,
-    NSTitlebarSeparatorStyle, NSView, NSWindow, NSWindowDelegate, NSWindowOcclusionState,
-    NSWindowOrderingMode, NSWindowStyleMask,
+    NSBoxType, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSMenuItem, NSModalResponse,
+    NSModalResponseCancel, NSTitlePosition, NSTitlebarSeparatorStyle, NSView, NSWindow,
+    NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
+    NSKeyValueObservingOptions, NSNotification, NSObject, NSObjectNSKeyValueObserverRegistration,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
 };
 
 use crate::Run;
@@ -49,7 +57,7 @@ use crate::app::{self, AppDelegate};
 use crate::jobs::Foreground;
 use crate::notices::Source;
 use crate::pane::{PaneHost, PaneLaunch, TerminalPane};
-use crate::split::{Axis, Removal};
+use crate::split::{Axis, Direction, Removal};
 use crate::split_view::SplitView;
 use crate::upload;
 use crate::uploader;
@@ -424,6 +432,12 @@ fn pane_containing(view: Retained<NSView>) -> Option<Retained<TerminalPane>> {
     None
 }
 
+/// Select/Resize Split ▸ öğesinin yönü: gönderenin `tag`'i.
+fn direction_of(sender: Option<&AnyObject>) -> Option<Direction> {
+    let item = sender?.downcast_ref::<NSMenuItem>()?;
+    Direction::from_tag(item.tag())
+}
+
 /// Turun sonunda `windowShouldClose:` isteklerini toplar: bayrağı dikili her
 /// grup için tek karar ([`TerminalWindow::should_close_now`]).
 fn close_requested_tabs(app: &AppDelegate) {
@@ -533,11 +547,9 @@ define_class!(
                 .window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::Visible);
-            for pane in self.panes() {
-                if let Some(link) = pane.link() {
-                    link.set_visible(visible);
-                }
-            }
+            // Büyütmenin arkasındaki gizli pane örtülü sayılıyor
+            // (`SplitView::apply_visibility`).
+            self.ivars().container.apply_visibility(visible);
         }
 
         // **Odak yolu.** Odakta olmayan pencerede caret'in içi boşalıyor ve
@@ -608,6 +620,14 @@ define_class!(
             // sonra bildirim göndermesin (odak, örtülme), nesne düşene kadar
             // bile.
             self.ivars().window.setDelegate(None);
+            // SAFETY: kayıt `observe_focus`'ta bu gözlemci ve bu yol için
+            // yapıldı; pencere bu nesneyle düşüyor ve gözlemcisi kayıtlıyken
+            // düşmemeli.
+            unsafe {
+                self.ivars()
+                    .window
+                    .removeObserver_forKeyPath(self, ns_string!("firstResponder"));
+            }
             let id = self.ivars().id;
             DispatchQueue::main().exec_async(move || {
                 // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
@@ -629,6 +649,25 @@ define_class!(
     // duymazdı.
     impl TerminalWindow {
 
+        /// Pencerenin first responder'ı değişti (`observe_focus`): klavye
+        /// başka bir pane'e geçtiyse odak onun. `BateriView`'ın kendi
+        /// kancası (`PaneHost::focused`) arama alanına tıklamayı görmüyordu
+        /// — klavye öteki pane'in alanına geçer, örtü ve başlık eski pane'de
+        /// kalırdı (`/code-review`, set kapısı). Tek kaynak bu: odak
+        /// değişiminin **her** yolu (tık, alan, menü) buradan geçiyor.
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observe_value(
+            &self,
+            _key_path: Option<&NSString>,
+            _object: Option<&AnyObject>,
+            _change: Option<&AnyObject>,
+            _context: *mut c_void,
+        ) {
+            if let Some(pane) = self.responder_pane() {
+                self.pane_focused(pane.id());
+            }
+        }
+
         /// ⌘W'nin başlığı ve bölmenin etkinliği; **bilinmeyen öğe `true`**.
         /// Çok pane'de ⌘W "Close" (odaktaki pane), tek pane'de "Close Tab"
         /// (039 Karar 8). Bölme, yarılardan biri en küçük pane sınırının
@@ -644,9 +683,71 @@ define_class!(
                 self.can_split(Axis::Horizontal)
             } else if action == Some(sel!(splitDown:)) {
                 self.can_split(Axis::Vertical)
+            } else if action == Some(sel!(toggleSplitZoom:)) {
+                let zoomed = self.ivars().container.zoomed().is_some();
+                item.setState(if zoomed {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                self.panes().len() > 1
+            } else if [
+                sel!(selectPreviousSplit:),
+                sel!(selectNextSplit:),
+                sel!(selectSplit:),
+                sel!(resizeSplit:),
+                sel!(equalizeSplits:),
+            ]
+            .into_iter()
+            .any(|split| action == Some(split))
+            {
+                // Tek pane'de gezinecek, boyutlanacak bir şey yok.
+                self.panes().len() > 1
             } else {
                 true
             }
+        }
+
+        /// Window ▸ Select Previous Split (⌘[): ağaç sırasında önceki pane,
+        /// döngüsel.
+        #[unsafe(method(selectPreviousSplit:))]
+        fn select_previous_split(&self, _sender: Option<&AnyObject>) {
+            self.select_split(false);
+        }
+
+        /// Window ▸ Select Next Split (⌘]).
+        #[unsafe(method(selectNextSplit:))]
+        fn select_next_split(&self, _sender: Option<&AnyObject>) {
+            self.select_split(true);
+        }
+
+        /// Window ▸ Select Split ▸ (⌥⌘ + ok): öğenin `tag`'i yön
+        /// ([`Direction::from_tag`]).
+        #[unsafe(method(selectSplit:))]
+        fn select_split_action(&self, sender: Option<&AnyObject>) {
+            if let Some(direction) = direction_of(sender) {
+                self.select_split_toward(direction);
+            }
+        }
+
+        /// Window ▸ Resize Split ▸ (⌃⌘ + ok).
+        #[unsafe(method(resizeSplit:))]
+        fn resize_split_action(&self, sender: Option<&AnyObject>) {
+            if let Some(direction) = direction_of(sender) {
+                self.resize_split(direction);
+            }
+        }
+
+        /// Window ▸ Equalize Splits (⌃⌘=).
+        #[unsafe(method(equalizeSplits:))]
+        fn equalize_splits_action(&self, _sender: Option<&AnyObject>) {
+            self.equalize_splits();
+        }
+
+        /// Window ▸ Zoom Split (⇧⌘↩).
+        #[unsafe(method(toggleSplitZoom:))]
+        fn toggle_split_zoom_action(&self, _sender: Option<&AnyObject>) {
+            self.toggle_split_zoom();
         }
 
         /// Shell ▸ Split Right (⌘D): odaktaki pane'i ikiye böler, yenisi
@@ -799,6 +900,7 @@ impl TerminalWindow {
         // (`TerminalPane::observe_frame`). Kurucunun son adımı: önceki
         // adımların yerleşimi geometriyi pencere hazır olmadan kurdurmasın.
         pane.observe_frame();
+        this.observe_focus();
         Ok(this)
     }
 
@@ -820,21 +922,45 @@ impl TerminalWindow {
     /// pane.
     pub(crate) fn focused_pane(&self) -> Retained<TerminalPane> {
         let panes = self.panes();
-        let responder = self
-            .ivars()
-            .window
-            .firstResponder()
-            .and_then(|responder| responder.downcast::<NSView>().ok())
-            .and_then(pane_containing);
         let focused = self.ivars().focused.get();
-        responder
-            .filter(|pane| panes.iter().any(|candidate| candidate.id() == pane.id()))
+        self.responder_pane()
             .or_else(|| panes.iter().find(|pane| pane.id() == focused).cloned())
             .or_else(|| panes.first().cloned())
             // audit: kapsayıcı hiç boşalmıyor (`SplitIvars::panes`): son
             // pane'i kapatmak sekmeyi kapatıyor ve pencere kurucusu bir
             // pane'le doğuyor.
             .expect("sekmenin en az bir pane'i var")
+    }
+
+    /// First responder'ın pane'i — bu sekmenin pane'lerinden biriyse
+    /// (`BateriView` ya da arama alanının alan düzenleyicisi); değilse `None`.
+    fn responder_pane(&self) -> Option<Retained<TerminalPane>> {
+        let pane = self
+            .ivars()
+            .window
+            .firstResponder()
+            .and_then(|responder| responder.downcast::<NSView>().ok())
+            .and_then(pane_containing)?;
+        self.panes()
+            .into_iter()
+            .find(|candidate| candidate.id() == pane.id())
+    }
+
+    /// Pencerenin first responder'ını izler (KVO; macOS 10.14'ten beri
+    /// uyumlu). Kurucunun sonunda, ilk first responder kurulduktan sonra;
+    /// kayıt `windowWillClose:`'da sökülüyor.
+    fn observe_focus(&self) {
+        // SAFETY: gözlemci bu sınıf ve `observeValueForKeyPath:…`'u
+        // uyguluyor; bağlam boş, izlenen tek yol bu. Kayıt pencere
+        // kapanırken sökülüyor.
+        unsafe {
+            self.ivars().window.addObserver_forKeyPath_options_context(
+                self,
+                ns_string!("firstResponder"),
+                NSKeyValueObservingOptions::empty(),
+                std::ptr::null_mut(),
+            );
+        }
     }
 
     /// Pane'in `BateriView`'ı first responder oldu (`PaneHost::focused`):
@@ -855,14 +981,118 @@ impl TerminalWindow {
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
             if let Some(window) = app::delegate(mtm).and_then(|app| app.window(window)) {
                 window.refresh_title();
+                window.refresh_dim();
             }
         });
     }
 
     /// Klavyeyi `pane`'e verir (first responder) ve odağı ona taşır.
+    /// Büyütülmüş başka bir pane varsa büyütme önce bırakılıyor: gizli
+    /// pane'e klavye verilmez (gezinme, kapanışın komşusu, `bateri://tab/`).
     fn focus_pane(&self, pane: &TerminalPane) {
+        if self
+            .ivars()
+            .container
+            .zoomed()
+            .is_some_and(|zoomed| zoomed != pane.id())
+        {
+            self.set_zoom(None);
+        }
         let _ = self.ivars().window.makeFirstResponder(Some(pane.view()));
         self.pane_focused(pane.id());
+        self.refresh_dim();
+    }
+
+    /// Odakta olmayan pane'lerin soluk örtüsü (039 Karar 7, R4.4): pencerede
+    /// birden çok pane varken odaktaki dışındakiler. Tek pane'de örtü yok.
+    /// AppKit'in işi, kare istemiyor.
+    pub(crate) fn refresh_dim(&self) {
+        let panes = self.panes();
+        let focused = self.focused_pane().id();
+        let many = panes.len() > 1;
+        for pane in &panes {
+            pane.set_dimmed(many && pane.id() != focused);
+        }
+    }
+
+    /// Büyütmeyi kurar ya da bırakır; gizlenen pane'lerin link'i uyuyor,
+    /// geri gelenlerinki bir kare istiyor (pencere görünürse).
+    fn set_zoom(&self, zoomed: Option<u64>) {
+        let container = &self.ivars().container;
+        if container.zoomed() == zoomed {
+            return;
+        }
+        container.set_zoomed(zoomed);
+        let visible = self
+            .ivars()
+            .window
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible);
+        container.apply_visibility(visible);
+        self.refresh_dim();
+    }
+
+    /// ⌘] / ⌘[: ağaç sırasında sonraki ya da önceki pane (039 R4.1).
+    pub(crate) fn select_split(&self, forward: bool) {
+        let from = self.focused_pane();
+        if let Some(next) = self
+            .ivars()
+            .container
+            .cycle(from.id(), forward)
+            .and_then(|id| self.ivars().container.pane(id))
+        {
+            self.focus_pane(&next);
+        }
+    }
+
+    /// ⌥⌘ + ok: yöndeki pane (039 R4.1); kenardaysa no-op. Komşu büyütmesiz
+    /// düzenden — büyütülmüşken de pane'lerin gerçek yerleri.
+    pub(crate) fn select_split_toward(&self, direction: Direction) {
+        let from = self.focused_pane();
+        if let Some(next) = self
+            .ivars()
+            .container
+            .neighbour(from.id(), direction)
+            .and_then(|id| self.ivars().container.pane(id))
+        {
+            self.focus_pane(&next);
+        }
+    }
+
+    /// ⌃⌘ + ok: odaktaki pane'in o eksendeki ayırıcısını bir hücre taşır
+    /// (039 R4.2). Adım odaktaki pane'in **bir hücresi** — her basış ızgarayı
+    /// bir sütun ya da satır değiştiriyor; tasarım kararı, sayı fonttan.
+    /// En küçük pane sınırında duruyor.
+    pub(crate) fn resize_split(&self, direction: Direction) {
+        self.set_zoom(None);
+        let pane = self.focused_pane();
+        let Some(cell) = pane.cell_size() else {
+            return;
+        };
+        let step = match direction {
+            Direction::Left | Direction::Right => cell.width,
+            Direction::Up | Direction::Down => cell.height,
+        };
+        self.ivars().container.resize(pane.id(), direction, step);
+    }
+
+    /// ⌃⌘=: aynı eksendeki pane'ler eşit (039 R4.3).
+    pub(crate) fn equalize_splits(&self) {
+        self.set_zoom(None);
+        self.ivars().container.equalize();
+    }
+
+    /// ⇧⌘↩: odaktaki pane'i büyütür ya da büyütmeyi geri alır (039 R4.3).
+    /// Tek pane'de no-op.
+    pub(crate) fn toggle_split_zoom(&self) {
+        if self.panes().len() < 2 {
+            return;
+        }
+        let zoomed = match self.ivars().container.zoomed() {
+            Some(_) => None,
+            None => Some(self.focused_pane().id()),
+        };
+        self.set_zoom(zoomed);
     }
 
     /// Odaktaki pane `axis`'te bölünebilir mi (039 Karar 14): iki yarının
@@ -882,6 +1112,9 @@ impl TerminalWindow {
     /// satır odaktakinden, 039 Karar 9). Sınırın altına düşecekse no-op
     /// (Karar 14).
     fn split(&self, axis: Axis) {
+        // Büyütme önce bırakılıyor (Karar 8): bölmenin sınırı büyütmesiz
+        // düzenden soruluyor (`can_split`) ve yeni pane görünmeli.
+        self.set_zoom(None);
         if !self.can_split(axis) {
             return;
         }
@@ -944,12 +1177,14 @@ impl TerminalWindow {
             Removal::Missing => {}
             Removal::Last => self.close(),
             Removal::Removed { focus } => {
+                self.set_zoom(None);
                 if was_focused && let Some(next) = container.pane(focus) {
                     self.focus_pane(&next);
                 }
                 drop(pane.begin_close());
                 drop(container.detach(id));
                 self.refresh_title();
+                self.refresh_dim();
                 if let Some(app) = app::delegate(self.mtm()) {
                     app.refresh_dock_tile();
                 }

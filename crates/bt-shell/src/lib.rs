@@ -31,8 +31,10 @@
 //! ait geçici punto (`zoom`).
 //! **Çok pencere ve macOS'un kendi sekmeleri** (`.tasks/026-sekmeler`): her
 //! sekme bir `NSWindow` (`window`); **bölmeler** (`.tasks/039-terminal-pane-bolmeler`)
-//! sekmeyi pane'lere ayırıyor — düzen saf bir ağaçta (`split`), onu uygulayan
-//! kapsayıcı `split_view`, her pane'in kendi oturumu (`pane`). Pencereleri ve
+//! sekmeyi pane'lere ayırıyor — düzen, gezinme, boyutlama, eşitleme ve büyütme
+//! saf bir ağaçta (`split`), onu uygulayan ve ayırıcı sürüklemesini ağaca
+//! yazan kapsayıcı `split_view`, her pane'in kendi oturumu ve soluk örtüsü
+//! (`pane`). Pencereleri ve
 //! bölmeleri açan, listeleyen ve kapanışı paralel yürüten `app`. IME sonraki
 //! setlerde.
 

@@ -8,8 +8,10 @@
 //! Koordinatlar **üstten aşağı** (kapsayıcı `isFlipped`): "aşağı böl"ün
 //! ikinci yaprağı altta, yani işaret çevirmek gerekmiyor.
 //!
-//! Yöne göre komşu, boyutlama, eşitleme ve büyütme phase-4'ün işlemleri ve
-//! ilk tüketicileriyle birlikte buraya gelecek.
+//! Gezinme (sıra ve yön), boyutlama (klavye adımı ve ayırıcı sürüklemesi),
+//! eşitleme ve büyütme de birer ağaç işlemi (039 phase-4). **En küçük pane**
+//! (Karar 14) ağaca yaprak başına bir boyut olarak veriliyor (`min`): punto
+//! farkı pane başına, yani hücre de; sınırın kaynağı pane'in kendisi.
 
 /// Bölmenin ekseni.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +20,63 @@ pub(crate) enum Axis {
     Horizontal,
     /// Üst üste — Split Down (⇧⌘D): ikinci yaprak altta.
     Vertical,
+}
+
+/// Gezinme ve boyutlamanın yönü (⌥⌘ / ⌃⌘ + ok).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Direction {
+    /// Menü öğesinin `tag`'inden yön (`menu`'nün Select/Resize Split ▸
+    /// öğeleri); bilinmeyen `tag` `None`.
+    pub(crate) fn from_tag(tag: isize) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Left),
+            1 => Some(Self::Right),
+            2 => Some(Self::Up),
+            3 => Some(Self::Down),
+            _ => None,
+        }
+    }
+
+    /// Bu yönün ayırıcısını taşıyan bölmenin ekseni: sola/sağa yan yana
+    /// bölmenin, yukarı/aşağı üst üste bölmenin ayırıcısı.
+    fn axis(self) -> Axis {
+        match self {
+            Self::Left | Self::Right => Axis::Horizontal,
+            Self::Up | Self::Down => Axis::Vertical,
+        }
+    }
+
+    /// Koordinatın büyüdüğü yön mü (sağ, aşağı — üstten aşağı düzende).
+    fn forward(self) -> bool {
+        matches!(self, Self::Right | Self::Down)
+    }
+}
+
+/// Boyut, nokta cinsinden — en küçük pane'in ölçüsü.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Size {
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+}
+
+impl Size {
+    pub(crate) const fn new(width: f64, height: f64) -> Self {
+        Self { width, height }
+    }
+
+    fn along(self, axis: Axis) -> f64 {
+        match axis {
+            Axis::Horizontal => self.width,
+            Axis::Vertical => self.height,
+        }
+    }
 }
 
 /// Dikdörtgen, nokta cinsinden, üstten aşağı.
@@ -36,6 +95,14 @@ impl Rect {
             y,
             width,
             height,
+        }
+    }
+
+    /// Eksendeki başlangıç ve uzunluk.
+    fn span(self, axis: Axis) -> (f64, f64) {
+        match axis {
+            Axis::Horizontal => (self.x, self.width),
+            Axis::Vertical => (self.y, self.height),
         }
     }
 
@@ -134,8 +201,59 @@ pub(crate) enum Removal {
 pub(crate) struct Layout {
     /// Pane kimliği ve çerçevesi, ağaç sırasıyla.
     pub(crate) panes: Vec<(u64, Rect)>,
-    /// Ayırıcılar.
-    pub(crate) dividers: Vec<Rect>,
+    /// Ayırıcılar, ağacın **sıra içi** düzeninde (ilk alt ağacınkiler,
+    /// düğümünki, ikincininkiler): [`Tree::drag`]'in indeksi bu sıra.
+    pub(crate) dividers: Vec<Divider>,
+}
+
+/// Bir ayırıcı: çizgisi ve ayırdığı bölmenin ekseni (yan yana bölmenin
+/// ayırıcısı dikey bir çizgi, sürüklemesi yatay).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Divider {
+    pub(crate) rect: Rect,
+    pub(crate) axis: Axis,
+}
+
+/// Kayan nokta karşılaştırmasının payı: çerçeveler aygıt pikseline oturmuş
+/// noktalar, yani eşitlik bir yuvarlama gürültüsünden ibaret.
+const EPSILON: f64 = 1e-6;
+
+/// `[a, a + a_len)` ile `[b, b + b_len)`'in örtüşen uzunluğu (negatifse sıfır).
+fn overlap(a: f64, a_len: f64, b: f64, b_len: f64) -> f64 {
+    ((a + a_len).min(b + b_len) - a.max(b)).max(0.0)
+}
+
+impl Layout {
+    /// `from`'un `direction`'daki komşusu (⌥⌘ + ok): o kenarın ötesinde,
+    /// kenara en yakın ve dik eksende en çok örtüşen pane; eşitlikte ağaç
+    /// sırasında önce gelen. Kenarda (ötesinde pane yoksa) ya da `from`
+    /// düzende değilse `None`.
+    pub(crate) fn neighbour(&self, from: u64, direction: Direction) -> Option<u64> {
+        let (_, f) = self.panes.iter().find(|(id, _)| *id == from)?;
+        let mut best: Option<(u64, f64, f64)> = None;
+        for (id, r) in &self.panes {
+            if *id == from {
+                continue;
+            }
+            let (gap, shared) = match direction {
+                Direction::Right => (r.x - (f.x + f.width), overlap(f.y, f.height, r.y, r.height)),
+                Direction::Left => (f.x - (r.x + r.width), overlap(f.y, f.height, r.y, r.height)),
+                Direction::Down => (r.y - (f.y + f.height), overlap(f.x, f.width, r.x, r.width)),
+                Direction::Up => (f.y - (r.y + r.height), overlap(f.x, f.width, r.x, r.width)),
+            };
+            if gap < -EPSILON || shared <= EPSILON {
+                continue;
+            }
+            let better = best.is_none_or(|(_, best_gap, best_shared)| {
+                gap < best_gap - EPSILON
+                    || ((gap - best_gap).abs() <= EPSILON && shared > best_shared + EPSILON)
+            });
+            if better {
+                best = Some((*id, gap, shared));
+            }
+        }
+        best.map(|(id, _, _)| id)
+    }
 }
 
 impl Tree {
@@ -169,6 +287,22 @@ impl Tree {
             Tree::Leaf(id) => *id,
             Tree::Split { second, .. } => second.last_leaf(),
         }
+    }
+
+    /// `from`'dan sonraki (`forward`) ya da önceki pane, ağaç sırasında ve
+    /// döngüsel (⌘] / ⌘[). Tek pane'de ya da `from` ağaçta değilse `None`.
+    pub(crate) fn cycle(&self, from: u64, forward: bool) -> Option<u64> {
+        let leaves = self.leaves();
+        if leaves.len() < 2 {
+            return None;
+        }
+        let index = leaves.iter().position(|id| *id == from)?;
+        let next = if forward {
+            (index + 1) % leaves.len()
+        } else {
+            (index + leaves.len() - 1) % leaves.len()
+        };
+        Some(leaves[next])
     }
 
     /// `target` yaprağını `axis`'te ikiye böler: eski pane ilk yarıda
@@ -220,10 +354,140 @@ impl Tree {
         for (_, rect) in &mut out.panes {
             *rect = rect.scaled(points);
         }
-        for rect in &mut out.dividers {
-            *rect = rect.scaled(points);
+        for divider in &mut out.dividers {
+            divider.rect = divider.rect.scaled(points);
         }
         out
+    }
+
+    /// [`Tree::layout`], büyütülmüş yaprakla (⇧⌘↩): `zoomed` ağaçtaysa
+    /// yalnız o, bütün alanı kaplayarak ve ayırıcısız; öteki pane'ler
+    /// düzende yok (kapsayıcı onları gizliyor). `None` ya da ağaçta olmayan
+    /// yaprak sıradan düzen — geri almak ağacı değiştirmediği için eski
+    /// çerçeveler bit bit geri geliyor.
+    pub(crate) fn layout_zoomed(&self, bounds: Rect, scale: f64, zoomed: Option<u64>) -> Layout {
+        match zoomed {
+            Some(id) if self.leaves().contains(&id) => Layout {
+                panes: vec![(id, snap(bounds, scale).scaled(1.0 / scale))],
+                dividers: Vec::new(),
+            },
+            _ => self.layout(bounds, scale),
+        }
+    }
+
+    /// ⌃⌘ + ok: `target`'ın `direction`'ın eksenindeki **en yakın atasının**
+    /// ayırıcısını o yöne `step` nokta taşır (Ghostty'nin davranışı: ok
+    /// ayırıcının gideceği yön, büyüyen pane'in değil). İki taraf en küçük
+    /// pane sınırında kırpılıyor ([`place_divider`]). O eksende atası yoksa,
+    /// ayırıcı zaten sınırdaysa ya da yaprak ağaçta değilse `false`.
+    pub(crate) fn resize(
+        &mut self,
+        target: u64,
+        direction: Direction,
+        step: f64,
+        bounds: Rect,
+        scale: f64,
+        min: &dyn Fn(u64) -> Size,
+    ) -> bool {
+        let step_px = (step * scale).round();
+        let delta = if direction.forward() {
+            step_px
+        } else {
+            -step_px
+        };
+        let limits = Limits { min, scale };
+        matches!(
+            resize_in(
+                self,
+                snap(bounds, scale),
+                target,
+                direction.axis(),
+                delta,
+                &limits
+            ),
+            Found::Done(true)
+        )
+    }
+
+    /// Ayırıcı sürüklemesi: [`Layout::dividers`]'ın `index`'inci ayırıcısını
+    /// `position`'a (kapsayıcının koordinatında, nokta, ayırıcının ekseni
+    /// boyunca) taşır, sınırda kırparak. Konum değiştiyse `true`.
+    pub(crate) fn drag(
+        &mut self,
+        index: usize,
+        position: f64,
+        bounds: Rect,
+        scale: f64,
+        min: &dyn Fn(u64) -> Size,
+    ) -> bool {
+        let limits = Limits { min, scale };
+        let mut index = index;
+        drag_in(
+            self,
+            snap(bounds, scale),
+            &mut index,
+            position * scale,
+            &limits,
+        ) == Some(true)
+    }
+
+    /// ⌃⌘=: her düğümün oranı alt ağaçlarının **o eksendeki** pane
+    /// sayısından — aynı eksende zincirlenmiş bölmeler çocuklarını sayıyor,
+    /// öteki eksendeki bir alt ağaç tek sütun (ya da satır). Sonuç: aynı
+    /// eksendeki bütün pane'ler eşit (L düzeninde sol pane yarı genişlik,
+    /// üçte bir değil).
+    pub(crate) fn equalize(&mut self) {
+        if let Tree::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        {
+            first.equalize();
+            second.equalize();
+            let a = first.weight(*axis) as f64;
+            let b = second.weight(*axis) as f64;
+            *ratio = a / (a + b);
+        }
+    }
+
+    /// `axis`'te yan yana duran pane sayısı ([`Tree::equalize`]).
+    fn weight(&self, axis: Axis) -> usize {
+        match self {
+            Tree::Split {
+                axis: own,
+                first,
+                second,
+                ..
+            } if *own == axis => first.weight(axis) + second.weight(axis),
+            _ => 1,
+        }
+    }
+
+    /// Bu alt ağacın `axis`'teki en küçük uzunluğu, piksel: her yaprağı en
+    /// küçük pane sınırında tutan uzunluk. İç bölmelerin oranı **sabit**
+    /// sayılıyor (boyutlama yalnız bir düğümü oynatıyor), yani aynı eksendeki
+    /// bölmede sınır toplam değil, payı küçük tarafın payından.
+    fn min_px(&self, axis: Axis, limits: &Limits<'_>) -> f64 {
+        match self {
+            Tree::Leaf(id) => ((limits.min)(*id).along(axis) * limits.scale).ceil(),
+            Tree::Split {
+                axis: own,
+                ratio,
+                first,
+                second,
+            } => {
+                let a = first.min_px(axis, limits);
+                let b = second.min_px(axis, limits);
+                if *own == axis {
+                    let r = ratio.clamp(EPSILON, 1.0 - EPSILON);
+                    (a / r).max(b / (1.0 - r)).ceil() + DIVIDER_PX
+                } else {
+                    a.max(b)
+                }
+            }
+        }
     }
 
     fn place(&self, rect: Rect, out: &mut Layout) {
@@ -237,11 +501,142 @@ impl Tree {
             } => {
                 let (a, divider, b) = halves_px(rect, *axis, *ratio);
                 first.place(a, out);
-                out.dividers.push(divider);
+                out.dividers.push(Divider {
+                    rect: divider,
+                    axis: *axis,
+                });
                 second.place(b, out);
             }
         }
     }
+}
+
+/// Boyutlamanın sınırı: yaprak başına en küçük boyut (nokta) ve ölçek.
+struct Limits<'a> {
+    min: &'a dyn Fn(u64) -> Size,
+    scale: f64,
+}
+
+/// Bir düğümün ayırıcısını ilk yarının `desired` piksel olacağı yere
+/// taşımayı dener: iki taraf da en küçük uzunluğunun altına inmez
+/// ([`Tree::min_px`]). İki sınır birbirini geçiyorsa (alan zaten dar)
+/// hiçbir şey değişmez. İlk yarının piksel boyu değiştiyse `true`.
+fn place_divider(
+    axis: Axis,
+    ratio: &mut f64,
+    first: &Tree,
+    second: &Tree,
+    rect: Rect,
+    desired: f64,
+    limits: &Limits<'_>,
+) -> bool {
+    let (_, span) = rect.span(axis);
+    let available = (span - DIVIDER_PX).max(0.0);
+    if available <= 0.0 {
+        return false;
+    }
+    let low = first.min_px(axis, limits);
+    let high = available - second.min_px(axis, limits);
+    if low > high {
+        return false;
+    }
+    let current = (available * *ratio).round().clamp(0.0, available);
+    let target = desired.round().clamp(low, high);
+    if target == current {
+        return false;
+    }
+    *ratio = target / available;
+    true
+}
+
+/// [`Tree::resize`]'ın aramasının sonucu.
+enum Found {
+    /// Yaprak bu alt ağaçta değil.
+    Absent,
+    /// Yaprak burada ama henüz o eksende bir ata bulunmadı.
+    Pending,
+    /// Ata bulundu; ayırıcı oynadıysa `true`.
+    Done(bool),
+}
+
+fn resize_in(
+    node: &mut Tree,
+    rect: Rect,
+    target: u64,
+    axis: Axis,
+    delta: f64,
+    limits: &Limits<'_>,
+) -> Found {
+    match node {
+        Tree::Leaf(id) if *id == target => Found::Pending,
+        Tree::Leaf(_) => Found::Absent,
+        Tree::Split {
+            axis: own,
+            ratio,
+            first,
+            second,
+        } => {
+            let (a, _, b) = halves_px(rect, *own, *ratio);
+            let found = match resize_in(first, a, target, axis, delta, limits) {
+                Found::Absent => resize_in(second, b, target, axis, delta, limits),
+                found => found,
+            };
+            match found {
+                Found::Pending if *own == axis => {
+                    let (_, current) = a.span(axis);
+                    Found::Done(place_divider(
+                        axis,
+                        ratio,
+                        first,
+                        second,
+                        rect,
+                        current + delta,
+                        limits,
+                    ))
+                }
+                found => found,
+            }
+        }
+    }
+}
+
+/// [`Tree::drag`]'in yürüyüşü: ayırıcıları [`Tree::place`]'in sırasıyla
+/// sayıyor, `index` sıfıra inen düğümün ayırıcısını `position`'a (piksel)
+/// taşıyor. Ayırıcı bulunmadıysa `None`.
+fn drag_in(
+    node: &mut Tree,
+    rect: Rect,
+    index: &mut usize,
+    position: f64,
+    limits: &Limits<'_>,
+) -> Option<bool> {
+    let Tree::Split {
+        axis,
+        ratio,
+        first,
+        second,
+    } = node
+    else {
+        return None;
+    };
+    let (a, _, b) = halves_px(rect, *axis, *ratio);
+    if let Some(done) = drag_in(first, a, index, position, limits) {
+        return Some(done);
+    }
+    if *index == 0 {
+        let (start, _) = rect.span(*axis);
+        return Some(place_divider(
+            *axis,
+            ratio,
+            first,
+            second,
+            rect,
+            position - start,
+            limits,
+        ));
+    }
+    *index -= 1;
+    drag_in(second, b, index, position, limits)
 }
 
 /// [`Tree::remove`]'un düğüm yarısı: `node`'un çocuklarından biri `target`
@@ -265,7 +660,7 @@ fn remove_in(node: &mut Tree, target: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Axis, Rect, Removal, Tree, split_halves};
+    use super::{Axis, Direction, Divider, Layout, Rect, Removal, Size, Tree, split_halves};
 
     fn area(rect: &Rect) -> f64 {
         rect.width * rect.height
@@ -294,7 +689,13 @@ mod tests {
         };
         assert_eq!(left.width, right.width, "alan eşit bölünür");
         assert_eq!(left.height, 600.0);
-        assert_eq!(layout.dividers, vec![Rect::new(400.0, 0.0, 1.0, 600.0)]);
+        assert_eq!(
+            layout.dividers,
+            vec![Divider {
+                rect: Rect::new(400.0, 0.0, 1.0, 600.0),
+                axis: Axis::Horizontal,
+            }]
+        );
     }
 
     #[test]
@@ -378,7 +779,7 @@ mod tests {
             assert!(tree.split(1, Axis::Vertical, 4));
             let layout = tree.layout(bounds, scale);
             let mut rects: Vec<Rect> = layout.panes.iter().map(|(_, rect)| *rect).collect();
-            rects.extend(layout.dividers.iter().copied());
+            rects.extend(layout.dividers.iter().map(|divider| divider.rect));
             let total: f64 = rects.iter().map(area).sum();
             // Kesirli nokta sınırı 1×'te piksele iniyor (901.5 → 902):
             // kaplanan alan oturtulmuş sınırınki.
@@ -401,12 +802,240 @@ mod tests {
                 }
             }
             for divider in &layout.dividers {
+                let divider = divider.rect;
                 assert!(
                     (divider.width.min(divider.height) * scale - 1.0).abs() < 1e-9,
                     "ayırıcı bir piksel: {divider:?}"
                 );
             }
         }
+    }
+
+    fn frame_of(layout: &Layout, id: u64) -> Rect {
+        layout
+            .panes
+            .iter()
+            .find(|(pane, _)| *pane == id)
+            .map(|(_, rect)| *rect)
+            .expect("pane düzende olmalı")
+    }
+
+    fn no_min(_: u64) -> Size {
+        Size::new(0.0, 0.0)
+    }
+
+    #[test]
+    fn the_neighbour_is_found_by_direction_in_an_l_layout() {
+        // Düzen: sol 1 (tam boy) | sağ üst 2 / sağ alt 3.
+        let tree = three();
+        let layout = tree.layout(Rect::new(0.0, 0.0, 801.0, 601.0), 1.0);
+        assert_eq!(
+            layout.neighbour(1, Direction::Right),
+            Some(2),
+            "eşit örtüşmede ağaç sırası"
+        );
+        assert_eq!(layout.neighbour(2, Direction::Left), Some(1));
+        assert_eq!(layout.neighbour(3, Direction::Left), Some(1));
+        assert_eq!(layout.neighbour(2, Direction::Down), Some(3));
+        assert_eq!(layout.neighbour(3, Direction::Up), Some(2));
+        assert_eq!(
+            layout.neighbour(1, Direction::Left),
+            None,
+            "kenarda komşu yok"
+        );
+        assert_eq!(layout.neighbour(1, Direction::Up), None);
+        assert_eq!(layout.neighbour(2, Direction::Up), None);
+        assert_eq!(
+            layout.neighbour(9, Direction::Up),
+            None,
+            "düzende olmayan pane"
+        );
+        // Sağ alt yukarı taşınınca sol pane en çok 3'le örtüşüyor.
+        let mut tree = three();
+        assert!(tree.resize(
+            3,
+            Direction::Up,
+            200.0,
+            Rect::new(0.0, 0.0, 801.0, 601.0),
+            1.0,
+            &no_min
+        ));
+        let layout = tree.layout(Rect::new(0.0, 0.0, 801.0, 601.0), 1.0);
+        assert_eq!(
+            layout.neighbour(1, Direction::Right),
+            Some(3),
+            "en çok örtüşen"
+        );
+    }
+
+    #[test]
+    fn next_and_previous_cycle_in_tree_order() {
+        let tree = three();
+        assert_eq!(tree.cycle(1, true), Some(2));
+        assert_eq!(tree.cycle(3, true), Some(1), "sondan başa");
+        assert_eq!(tree.cycle(1, false), Some(3), "baştan sona");
+        assert_eq!(Tree::Leaf(1).cycle(1, true), None, "tek pane");
+        assert_eq!(tree.cycle(9, true), None);
+    }
+
+    #[test]
+    fn resizing_moves_the_nearest_divider_on_that_axis() {
+        let bounds = Rect::new(0.0, 0.0, 801.0, 601.0);
+        let mut tree = three();
+        // 2 sağ üstte: yatay eksendeki en yakın ata kök. Sağa → ayırıcı sağa.
+        assert!(tree.resize(2, Direction::Right, 10.0, bounds, 1.0, &no_min));
+        let layout = tree.layout(bounds, 1.0);
+        assert_eq!(frame_of(&layout, 1).width, 410.0);
+        assert_eq!(frame_of(&layout, 2).width, 390.0);
+        assert_eq!(frame_of(&layout, 3).width, 390.0, "aynı alt ağaç birlikte");
+        // Dikey eksende en yakın ata sağ alt ağaç; 1'in dikey atası yok.
+        assert!(tree.resize(2, Direction::Down, 20.0, bounds, 1.0, &no_min));
+        let layout = tree.layout(bounds, 1.0);
+        assert_eq!(frame_of(&layout, 2).height, 320.0);
+        assert_eq!(frame_of(&layout, 3).height, 280.0);
+        assert!(!tree.resize(1, Direction::Down, 20.0, bounds, 1.0, &no_min));
+        assert!(!tree.resize(9, Direction::Right, 20.0, bounds, 1.0, &no_min));
+    }
+
+    #[test]
+    fn resizing_stops_at_the_minimum_and_keeps_the_area() {
+        let bounds = Rect::new(0.0, 0.0, 801.0, 601.0);
+        let min = |_: u64| Size::new(200.0, 150.0);
+        let mut tree = three();
+        let covered = |layout: &Layout| -> f64 {
+            layout.panes.iter().map(|(_, r)| area(r)).sum::<f64>()
+                + layout.dividers.iter().map(|d| area(&d.rect)).sum::<f64>()
+        };
+        let area_before = covered(&tree.layout(bounds, 1.0));
+        // Sola sürekli: 1 en küçük genişlikte duruyor.
+        let mut steps = 0;
+        while tree.resize(1, Direction::Left, 50.0, bounds, 1.0, &min) {
+            steps += 1;
+            assert!(steps < 100, "sınırda durmalı");
+        }
+        let layout = tree.layout(bounds, 1.0);
+        assert_eq!(frame_of(&layout, 1).width, 200.0);
+        let area_after = covered(&layout);
+        assert_eq!(area_before, area_after, "toplam alan korunuyor");
+        // Sağa sürekli: sağ alt ağaç en küçük genişlikte duruyor.
+        while tree.resize(1, Direction::Right, 50.0, bounds, 1.0, &min) {}
+        let layout = tree.layout(bounds, 1.0);
+        assert_eq!(frame_of(&layout, 2).width, 200.0);
+        assert_eq!(frame_of(&layout, 3).width, 200.0);
+        // Aşağı: 3 en küçük boyda.
+        while tree.resize(2, Direction::Down, 50.0, bounds, 1.0, &min) {}
+        assert_eq!(frame_of(&tree.layout(bounds, 1.0), 3).height, 150.0);
+    }
+
+    #[test]
+    fn a_nested_side_is_limited_by_its_smallest_pane() {
+        // Sol [1 | 4] (4 dar ama sınırın üstünde), sağ 2. Sol alt ağacı daraltmak 4'ü de
+        // daraltıyor: sınır toplam değil, 4'ün payından.
+        let bounds = Rect::new(0.0, 0.0, 1001.0, 400.0);
+        let mut tree = Tree::Leaf(1);
+        assert!(tree.split(1, Axis::Horizontal, 2));
+        assert!(tree.split(1, Axis::Horizontal, 4));
+        let layout = tree.layout(bounds, 1.0);
+        let divider = layout.dividers[0];
+        assert!(tree.drag(0, divider.rect.x + 140.0, bounds, 1.0, &no_min));
+        assert!(frame_of(&tree.layout(bounds, 1.0), 4).width > 100.0);
+        let min = |_: u64| Size::new(100.0, 10.0);
+        while tree.resize(2, Direction::Left, 25.0, bounds, 1.0, &min) {}
+        let layout = tree.layout(bounds, 1.0);
+        for id in [1, 2, 4] {
+            assert!(frame_of(&layout, id).width >= 100.0, "{id}: {layout:?}");
+        }
+    }
+
+    #[test]
+    fn a_drag_moves_exactly_the_dragged_divider() {
+        let bounds = Rect::new(0.0, 0.0, 801.0, 601.0);
+        let mut tree = three();
+        assert!(tree.split(1, Axis::Vertical, 4));
+        let before = tree.layout(bounds, 1.0);
+        for (index, divider) in before.dividers.iter().enumerate() {
+            let mut moved = tree.clone();
+            let (position, axis) = match divider.axis {
+                Axis::Horizontal => (divider.rect.x - 30.0, Axis::Horizontal),
+                Axis::Vertical => (divider.rect.y - 30.0, Axis::Vertical),
+            };
+            assert!(moved.drag(index, position, bounds, 1.0, &no_min));
+            let after = moved.layout(bounds, 1.0);
+            for (other, (a, b)) in before.dividers.iter().zip(&after.dividers).enumerate() {
+                if other == index {
+                    let (was, now) = match axis {
+                        Axis::Horizontal => (a.rect.x, b.rect.x),
+                        Axis::Vertical => (a.rect.y, b.rect.y),
+                    };
+                    assert_eq!(now, was - 30.0, "sürüklenen ayırıcı {index} işaretçide");
+                } else if a.axis == b.axis && a.axis != axis {
+                    // Öteki eksendeki ayırıcıların konumu kaymaz (boyu değişebilir).
+                    let (was, now) = match a.axis {
+                        Axis::Horizontal => (a.rect.x, b.rect.x),
+                        Axis::Vertical => (a.rect.y, b.rect.y),
+                    };
+                    assert_eq!(was, now, "ayırıcı {other} yerinde");
+                }
+            }
+        }
+        // Sınırın dışına sürükleme kırpılıyor, olmayan ayırıcı no-op.
+        let min = |_: u64| Size::new(100.0, 100.0);
+        let mut tree = three();
+        assert!(tree.drag(0, -500.0, bounds, 1.0, &min));
+        assert_eq!(frame_of(&tree.layout(bounds, 1.0), 1).width, 100.0);
+        assert!(!tree.drag(7, 10.0, bounds, 1.0, &min));
+    }
+
+    #[test]
+    fn equalizing_gives_panes_on_one_axis_the_same_span() {
+        let bounds = Rect::new(0.0, 0.0, 901.0, 601.0);
+        // Üç sütun [1 | 2 | 3] (iç içe) ve sağ sütun ikiye bölünmüş: sütunlar
+        // eşit, sağ sütunun iki pane'i eşit.
+        let mut tree = Tree::Leaf(1);
+        assert!(tree.split(1, Axis::Horizontal, 2));
+        assert!(tree.split(2, Axis::Horizontal, 3));
+        assert!(tree.split(3, Axis::Vertical, 4));
+        assert!(tree.drag(0, 100.0, bounds, 1.0, &no_min));
+        assert!(tree.drag(2, 150.0, bounds, 1.0, &no_min));
+        tree.equalize();
+        let layout = tree.layout(bounds, 1.0);
+        let widths: Vec<f64> = [1, 2, 3]
+            .iter()
+            .map(|id| frame_of(&layout, *id).width)
+            .collect();
+        for width in &widths {
+            assert!(
+                (width - widths[0]).abs() <= 1.0,
+                "sütunlar eşit: {widths:?}"
+            );
+        }
+        assert!((frame_of(&layout, 3).height - frame_of(&layout, 4).height).abs() <= 1.0);
+        // L düzeninde sol pane yarı genişlik: yaprak sayısı değil eksendeki sayı.
+        let mut tree = three();
+        assert!(tree.drag(0, 100.0, bounds, 1.0, &no_min));
+        tree.equalize();
+        let layout = tree.layout(bounds, 1.0);
+        assert_eq!(frame_of(&layout, 1).width, frame_of(&layout, 2).width);
+    }
+
+    #[test]
+    fn a_zoomed_leaf_takes_the_whole_area_and_gives_it_back() {
+        let bounds = Rect::new(0.0, 0.0, 801.5, 601.0);
+        let tree = three();
+        let before = tree.layout(bounds, 2.0);
+        let zoomed = tree.layout_zoomed(bounds, 2.0, Some(3));
+        assert_eq!(zoomed.panes, vec![(3, Rect::new(0.0, 0.0, 801.5, 601.0))]);
+        assert!(zoomed.dividers.is_empty(), "büyütülmüşken ayırıcı yok");
+        assert_eq!(
+            tree.layout_zoomed(bounds, 2.0, None),
+            before,
+            "geri alınınca eski çerçeveler"
+        );
+        assert_eq!(
+            tree.layout_zoomed(bounds, 2.0, Some(9)),
+            before,
+            "ağaçta olmayan yaprak"
+        );
     }
 
     #[test]

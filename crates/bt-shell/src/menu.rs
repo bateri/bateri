@@ -5,8 +5,9 @@
 //! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
 //! Page Down) ve Window (Minimize,
-//! Zoom, sekme geçişi, Select Tab ▸, Move Tab to New Window, Merge All
-//! Windows, Bring All to Front). Settings… (⌘,) ayar penceresini açıyor
+//! Zoom, sekme geçişi, Select Tab ▸, bölmeler — Select Previous/Next Split,
+//! Select Split ▸, Resize Split ▸, Equalize Splits, Zoom Split —, Move Tab
+//! to New Window, Merge All Windows, Bring All to Front). Settings… (⌘,) ayar penceresini açıyor
 //! (`settings_window`; 029'a kadar dosyayı editörde açıyordu, o iş artık
 //! pencerenin "Open settings.toml" düğmesinde); öğe ve kısayol aynı.
 //!
@@ -18,9 +19,11 @@
 //! eylemleri, Find ▸'nin dört eylemi, temizlemenin iki eylemi, dört
 //! kaydırma (alternatif ekranda gri, 034 Karar 2) ve `cancelUpload:`
 //! odaktaki pane'e (`pane::TerminalPane`, `BateriView`'ın üst view'ı — 039
-//! Karar 2); `closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:` ve
-//! `splitDown:` key pencerenin delegate'ine (`window::TerminalWindow` —
-//! sekmeye ait);
+//! Karar 2); `closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`,
+//! `splitDown:` ve bölmelerin gezinme/düzen eylemleri
+//! (`selectPreviousSplit:`, `selectNextSplit:`, `selectSplit:`,
+//! `resizeSplit:`, `equalizeSplits:`, `toggleSplitZoom:`; tek pane'de gri)
+//! key pencerenin delegate'ine (`window::TerminalWindow` — sekmeye ait);
 //! `performMiniaturize:`, `performZoom:` ve sekme eylemleri
 //! (`selectNextTab:`, `moveTabToNewWindow:`…) `NSWindow`'un kendisine;
 //! `openSettings:`, tema eylemleri, `markHost:` ve
@@ -55,7 +58,10 @@
 //! kısayol karakteri AppKit'in fonksiyon tuşu kod noktası
 //! (`NSHomeFunctionKey` U+F729 …). Tuş kodlaması değil menü kısayolu — Home/
 //! End'in `keyDown:`'da yutulması ve `bt_core::Arrow`'un değişmezi el
-//! değmiyor.
+//! değmiyor. Bölmelerin kısayolları (039 Karar 8) da aynı yoldan: ⌘[ / ⌘],
+//! ⌥⌘/⌃⌘ + ok (ok tuşlarının kod noktaları U+F700–U+F703), ⌃⌘= ve ⇧⌘↩ —
+//! `keyDown:`'ın üç tuşluk Cmd izin listesi (⌘⌫, ⌘←, ⌘→) ve dock'un ⇧⏎'si
+//! değişmiyor, çünkü menü onları değiştiricileriyle birlikte eşliyor.
 //!
 //! **Sekme öğelerini AppKit eklemiyor** (ölçüldü): tabbing açıkken View'a
 //! Show Tab Bar / Show All Tabs, Window'a pencere yerleşimi öğeleri geliyor
@@ -329,6 +335,29 @@ pub(crate) fn install(
         })
         .collect();
     select_tab.push(tagged(item(mtm, "Last Tab", sel!(selectTab:), "9"), 9));
+    // Yön öğeleri: `tag` `split::Direction::from_tag`'in sırası (sol, sağ,
+    // yukarı, aşağı); kısayol AppKit'in ok tuşu kod noktaları
+    // (`NSLeftArrowFunctionKey` U+F702, `NSRightArrowFunctionKey` U+F703,
+    // `NSUpArrowFunctionKey` U+F700, `NSDownArrowFunctionKey` U+F701).
+    let arrows = [
+        ("Left", "\u{F702}"),
+        ("Right", "\u{F703}"),
+        ("Up", "\u{F700}"),
+        ("Down", "\u{F701}"),
+    ];
+    let directed = |action, modifiers| -> Vec<_> {
+        (0u8..)
+            .zip(arrows)
+            .map(|(tag, (title, key))| {
+                tagged(
+                    with_modifiers(item(mtm, title, action, key), modifiers),
+                    tag,
+                )
+            })
+            .collect()
+    };
+    let select_split = directed(sel!(selectSplit:), command | NSEventModifierFlags::Option);
+    let resize_split = directed(sel!(resizeSplit:), command | NSEventModifierFlags::Control);
     let window_menu = submenu(
         mtm,
         "Window",
@@ -349,6 +378,26 @@ pub(crate) fn install(
                 NSEventModifierFlags::Control,
             )),
             submenu(mtm, "Select Tab", &select_tab),
+            NSMenuItem::separatorItem(mtm),
+            // Bölmeler (039 Karar 8, Ghostty/iTerm2 emsali): karşılayan
+            // `TerminalWindow`; tek pane'de gri (`validateMenuItem:`).
+            item(
+                mtm,
+                "Select Previous Split",
+                sel!(selectPreviousSplit:),
+                "[",
+            ),
+            item(mtm, "Select Next Split", sel!(selectNextSplit:), "]"),
+            submenu(mtm, "Select Split", &select_split),
+            submenu(mtm, "Resize Split", &resize_split),
+            with_modifiers(
+                item(mtm, "Equalize Splits", sel!(equalizeSplits:), "="),
+                command | NSEventModifierFlags::Control,
+            ),
+            with_modifiers(
+                item(mtm, "Zoom Split", sel!(toggleSplitZoom:), "\r"),
+                command | NSEventModifierFlags::Shift,
+            ),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Move Tab to New Window", sel!(moveTabToNewWindow:), ""),
             item(mtm, "Merge All Windows", sel!(mergeAllWindows:), ""),
