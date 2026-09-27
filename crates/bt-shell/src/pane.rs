@@ -7,9 +7,11 @@
 //! `TerminalPane` bir `NSView` alt sınıfı ve bugünkü içerik kapsayıcısının ta
 //! kendisi (033 → R4.1): `BateriView` onu autoresizing'le dolduran çocuğu,
 //! arama paneli Metal katmanının kardeşi olarak onun içinde yüzüyor. Pencere
-//! (`window::TerminalWindow`) pane'i `contentView` yapıyor ve krom, başlık,
-//! sekme, kapatma sorusu gibi **pencereye** ait işleri tutuyor; geometri,
-//! örtülme ve odak pencereden buraya dağıtılıyor.
+//! (`window::TerminalWindow`) pane'i bölmelerin kapsayıcısına
+//! (`split_view::SplitView`) takıyor ve krom, başlık, sekme, kapatma sorusu
+//! gibi **sekmeye** ait işleri tutuyor; geometri, örtülme ve odak pencereden
+//! bütün pane'lere dağıtılıyor. Bir sekmede birden çok pane olabilir (039
+//! bölmeleri): her biri kendi oturumu, link'i ve renderer'ıyla.
 //!
 //! **Sınır üç parça** (Karar 1, 3): pane girdilerini doğumda tek pakette alır
 //! ([`PaneLaunch`]: ayar anlık görüntüsü, tema, süreli koşu tarifi, ölçüm
@@ -48,7 +50,9 @@ use objc2_app_kit::{
     NSEventModifierFlags, NSMenuItem, NSPasteboard, NSPasteboardNameFind, NSPopoverDelegate,
     NSSearchFieldDelegate, NSTextFieldDelegate, NSView, NSViewFrameDidChangeNotification,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSRect, NSUUID};
+use objc2_foundation::{
+    NSNotification, NSNotificationCenter, NSObjectProtocol, NSRect, NSSize, NSUUID,
+};
 
 use crate::app::{self, Grid, split_into_grid};
 use crate::child;
@@ -68,7 +72,7 @@ use crate::{Run, Workload};
 /// `window::WindowHost`, yarın bir gömme uygulaması.
 ///
 /// Hepsi **ana thread'de** ve pane'in kimliğiyle çağrılıyor ([`TerminalPane::id`]):
-/// sahip birden çok pane tutabilir (phase-3) ve olayın hangisinden geldiğini
+/// sahip birden çok pane tutuyor (bölmeler) ve olayın hangisinden geldiğini
 /// bilmeli. Yöntemler AppKit tipi taşımıyor, yani sahip sahte bir uygulamayla
 /// sınanabiliyor. Sayfalar ve popover pane view'ının kendi `window()`'unu
 /// kullanıyor; onlar için sahibe sorulmuyor.
@@ -76,8 +80,13 @@ pub(crate) trait PaneHost {
     /// Başlık, çalışma dizini, uzak durum ya da yükleme yüzdesi değişti:
     /// pencerenin başlığını ve sekmenin noktasını pane'den yeniden okumalı.
     fn title_changed(&self, pane: u64);
-    /// Kabuk çıktı: pane'in dayanağı kalmadı, kapanmalı (026 → Karar 5).
+    /// Kabuk çıktı: pane'in dayanağı kalmadı, kapanmalı (026 → Karar 5) —
+    /// yalnız bu pane, sekme değil (039 Karar 8).
     fn shell_exited(&self, pane: u64);
+    /// Klavye bu pane'in terminaline geldi (`BateriView` first responder
+    /// oldu): odaktaki pane artık bu — başlık, sekme noktası ve yeni
+    /// bölmenin mirası ondan (039 Karar 11).
+    fn focused(&self, pane: u64);
     /// Yükleme kuyruğunun ilerlemesi ya da varlığı değişti — uygulamanın
     /// Dock simgesi bütün pane'lerin toplamı ([`TerminalPane::upload_totals`]).
     fn uploads_changed(&self, pane: u64);
@@ -91,6 +100,19 @@ pub(crate) trait PaneHost {
         clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
     }
 }
+
+/// En küçük pane'in sütun sayısı (039 Karar 14): bölme bunun altına
+/// düşecekse yapılmıyor. Ölçülmüş değil, bir tasarım sabiti — prompt'un iki
+/// sütunu, kısa bir komut ve dock'un bağlam satırındaki klasör adı için yer;
+/// daha darı kabuğun kendi satır sarmasını anlamsız kılıyor. Gözle kontrolde
+/// ayarlanır.
+const MIN_PANE_COLS: u16 = 20;
+
+/// En küçük pane'in satır sayısı (039 Karar 14), dock'un payı **hariç**
+/// ızgara satırı. Tasarım sabiti: bir komut ve birkaç satırlık çıktısı;
+/// tam ekran bir program (vim, htop) bunun altında durum satırından başka
+/// bir şey gösteremiyor.
+const MIN_PANE_ROWS: u16 = 5;
 
 /// Ana kuyruk dönüşlerinin pane'i kimlikle bulduğu yol; sahip veriyor
 /// (bugün `app::pane_by_id`). Düz bir `fn` göstericisi, closure değil: `Send`
@@ -1453,6 +1475,10 @@ impl TerminalPane {
     /// ikinci biti; iki bitin birleşimi `bt-gpu`'da
     /// (`DisplayLink::set_keyboard_in_terminal`). Süreli koşuda
     /// [`TerminalPane::apply_focus`]'un kapısıyla susuyor.
+    ///
+    /// Klavyenin gelişi sahibe de odak olayı olarak gidiyor
+    /// ([`PaneHost::focused`]); gidişi gitmiyor, çünkü arama alanına geçen
+    /// klavye aynı pane'de kalıyor.
     pub(crate) fn keyboard_moved(&self, here: bool) {
         if self.ivars().run.is_some() {
             return;
@@ -1460,6 +1486,28 @@ impl TerminalPane {
         if let Some(link) = self.ivars().link.get() {
             link.set_keyboard_in_terminal(here);
         }
+        if here {
+            self.host().focused(self.ivars().id);
+        }
+    }
+
+    /// `size` (nokta) boyunda bir pane'in ızgarası en küçük pane sınırını
+    /// geçiyor mu (039 Karar 14) — bölmenin kapısı. Ölçü bu pane'in hücresi
+    /// ve dock payı: yeni bölme ikisini de ondan devralıyor, ızgarayı da aynı
+    /// formül kuruyor ([`split_into_grid`]). Pencereye takılı değilse `false`.
+    pub(crate) fn grid_fits(&self, size: NSSize) -> bool {
+        let Some(window) = self.window() else {
+            return false;
+        };
+        let scale = window.backingScaleFactor();
+        let cell = self.ivars().renderer.cell_metrics(scale);
+        let grid = split_into_grid(
+            size.width * scale,
+            size.height * scale,
+            cell,
+            self.ivars().dock_rows.get(),
+        );
+        grid.cols >= MIN_PANE_COLS && grid.rows >= MIN_PANE_ROWS
     }
 
     /// Kabuğun dışında ön planda koşan iş (028 → Karar 1). Oturum yoksa ya da
@@ -1549,10 +1597,11 @@ impl TerminalPane {
     }
 
     /// Kapanış sırasının pane'e düşen adımları — **başlatır, beklemez**.
-    /// Çağıranı pencerenin `begin_close`'u; onun iki çağıranı var: pencerenin
-    /// kapanışı (`windowWillClose:`, tutamak düşüyor) ve uygulamanın kapanışı
+    /// Çağıranları pencerenin `begin_close`'u — pencerenin kapanışı
+    /// (`windowWillClose:`, tutamak düşüyor) ve uygulamanın kapanışı
     /// (`AppDelegate::shutdown`, bütün tutamaklar tek son tarihe kadar
-    /// bekleniyor).
+    /// bekleniyor) — ile tek pane'in kapanışı (`TerminalWindow::close_pane`,
+    /// tutamak düşüyor; bölme doğamadıysa `add_pane`'in geri sökümü).
     ///
     /// Sıra zorunlu: önce yükleme kuyruğu bırakılıyor (süreçler öldürülüyor
     /// ve yarım dosya siliniyor; sonucu gösterecek bir dock kalmadı), **sonra**
@@ -2040,6 +2089,9 @@ mod tests {
     impl super::PaneHost for FakeHost {
         fn title_changed(&self, pane: u64) {
             self.0.borrow_mut().push((pane, "title".into()));
+        }
+        fn focused(&self, pane: u64) {
+            self.0.borrow_mut().push((pane, "focused".into()));
         }
         fn shell_exited(&self, pane: u64) {
             self.0.borrow_mut().push((pane, "exit".into()));

@@ -37,6 +37,7 @@ use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
 use crate::pane::{PaneLaunch, TerminalPane};
 use crate::settings_window::SettingsWindow;
+use crate::split::Axis;
 use crate::watch::{Notify, Watch};
 use crate::window::{self, CloseScope, Launch, TerminalWindow, WindowHost};
 use crate::zoom::Zoom;
@@ -320,14 +321,18 @@ enum Opening {
     Tab,
     /// Shell ▸ New Local Tab (⌥⌘T): sekme, her zaman yerel kabuk.
     LocalTab,
+    /// Shell ▸ Split Right / Split Down (⌘D / ⇧⌘D): odaktaki pane'in
+    /// yanında bölme; ⌘T'nin kuralıyla, uzak pane'den aynı host'a (039
+    /// Karar 9). Ekseni [`AppDelegate::open_split`] taşıyor.
+    Split,
 }
 
-/// Yeni kabuğun ilk girdisi: yalnız ⌘T ve yalnız uzak bir `from`'dan —
+/// Yeni kabuğun ilk girdisi: yalnız ⌘T ile bölme ve yalnız uzak bir `from`'dan —
 /// satır `from`'un uzak hedefinin kaçırılmış satırı ([`bt_core::Session::remote_line`]).
 /// ⌘N yeni bir çalışma alanı, ⌥⌘T kaçış yolu; ikisi de yerel (037 Karar 6).
 fn initial_line(opening: Opening, remote_line: Option<String>) -> Option<String> {
     match opening {
-        Opening::Tab => remote_line,
+        Opening::Tab | Opening::Split => remote_line,
         Opening::Window | Opening::LocalTab => None,
     }
 }
@@ -844,8 +849,9 @@ define_class!(
         ///
         /// **Güvenlik değişmezi: bu yol yalnız odaklar.** Şemayı her uygulama
         /// açabilir; burada kabuğa tek bayt gitmez, komut koşmaz, pencere
-        /// açılmaz. Kollar: `bateri://tab/<id>` ve yaşayan sekme → o sekme öne
-        /// ([`TerminalWindow::bring_to_front`]); tanınan ama ölü kimlik →
+        /// açılmaz. Kollar: `bateri://tab/<id>` ve yaşayan pane → sekmesi öne
+        /// ve klavye o pane'e ([`TerminalWindow::bring_to_front`], 039 Karar
+        /// 10); tanınan ama ölü kimlik →
         /// yalnız uygulama öne; başka her biçim (`block/` dahil) → hiçbir şey.
         ///
         /// Soğuk başlatmada liste boş (URL `applicationDidFinishLaunching:`'ten
@@ -860,8 +866,8 @@ define_class!(
                 let Some(id) = TabId::from_url(&text.to_string()) else {
                     continue;
                 };
-                match self.window_by_tab(&id) {
-                    Some(window) => window.bring_to_front(),
+                match self.pane_by_tab(&id) {
+                    Some((window, pane)) => window.bring_to_front(&pane),
                     None => NSApplication::sharedApplication(self.mtm()).activate(),
                 }
             }
@@ -1031,6 +1037,18 @@ define_class!(
             if let Some(key) = NSApplication::sharedApplication(self.mtm()).keyWindow() {
                 key.performClose(None);
             }
+        }
+
+        /// ⌘W'nin başlığı terminal olmayan pencere key iken: bölmeli bir
+        /// sekmenin bıraktığı "Close" (`TerminalWindow`'un
+        /// `validateMenuItem:`'ı, 039 Karar 8) panelde kalmasın. **Bilinmeyen
+        /// öğe `true`** — tanımlanmadan önceki davranış.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            if item.action() == Some(sel!(closeTab:)) {
+                item.setTitle(&NSString::from_str(window::close_title(1)));
+            }
+            true
         }
 
         /// Shell ▸ New Tab (⌘T): etkin pencerenin grubuna yeni sekme; pencere
@@ -1660,38 +1678,49 @@ impl AppDelegate {
     ///
     /// [`AppDelegate::window`]'ın aksine kapanışı başlamış pane'i **bulmuyor**
     /// ([`find_open`]): pencere listeden bir tur sonra çıkıyor ve o arada
-    /// gelen bayat bir haber kapanmış oturuma iş yapmamalı. Bugün pencere
-    /// başına tek pane (bölmeler phase-3'te).
+    /// gelen bayat bir haber kapanmış oturuma iş yapmamalı. Arama bütün
+    /// pencerelerin bütün pane'lerinde (bölmeler).
     pub(crate) fn pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
-        find_open(self.windows(), |window| {
-            let pane = window.pane();
-            (pane.id() == id, pane.is_closed())
-        })
-        .map(|window| window.pane_handle())
+        find_open(self.all_panes(), |pane| (pane.id() == id, pane.is_closed()))
+    }
+
+    /// Bütün pencerelerin bütün pane'leri — dolaşan yolların (ayar dağıtımı,
+    /// Dock simgesi, kimlikle arama) listesi; pencere listesi gibi bir kopya.
+    fn all_panes(&self) -> Vec<Retained<TerminalPane>> {
+        self.windows()
+            .iter()
+            .flat_map(|window| window.panes())
+            .collect()
     }
 
     /// Uygulamanın Dock simgesindeki yükleme çubuğu — bütün pane'lerin
     /// toplamı (`uploader::refresh_dock_tile`); pane'in
     /// `PaneHost::uploads_changed` olayı buraya iniyor.
     pub(crate) fn refresh_dock_tile(&self) {
-        let windows = self.windows();
-        let panes: Vec<&TerminalPane> = windows.iter().map(|window| window.pane()).collect();
+        let panes = self.all_panes();
+        let panes: Vec<&TerminalPane> = panes.iter().map(|pane| &**pane).collect();
         crate::uploader::refresh_dock_tile(self.mtm(), &panes);
     }
 
-    /// Sekme kimliği `id` olan pane'in penceresi; kapanmışsa `None`
+    /// Sekme kimliği `id` olan pane ve penceresi; kapanmışsa `None`
     /// (`bateri://tab/`, `application:openURLs:`): kapanışı başlamış ama
-    /// listeden henüz çıkmamış pencere öne getirilse oturumsuz bir pencere
-    /// ekrana dönerdi ([`find_open`]).
-    fn window_by_tab(&self, id: &TabId) -> Option<Retained<TerminalWindow>> {
-        find_open(self.windows(), |window| {
-            let pane = window.pane();
-            (pane.tab_id() == id, pane.is_closed())
+    /// listeden henüz çıkmamış pane öne getirilse oturumsuz bir pencere
+    /// ekrana dönerdi ([`find_open`]). Kimlik pane başına (039 Karar 10).
+    fn pane_by_tab(
+        &self,
+        id: &TabId,
+    ) -> Option<(Retained<TerminalWindow>, Retained<TerminalPane>)> {
+        self.windows().into_iter().find_map(|window| {
+            let pane = find_open(window.panes(), |pane| {
+                (pane.tab_id() == id, pane.is_closed())
+            })?;
+            Some((window, pane))
         })
     }
 
     /// Etkin pencere: `NSApp.keyWindow` listede aranıyor. Ayar penceresi ya
-    /// da bir panel key ise `None` ve yeni pencere evde doğuyor.
+    /// da bir panel key ise `None` ve yeni pencere evde doğuyor. Mirasın
+    /// kaynağı onun **odaktaki pane'i** (`TerminalWindow::focused_pane`).
     fn key_window(&self) -> Option<Retained<TerminalWindow>> {
         let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
         self.window_owning(&key)
@@ -1732,13 +1761,15 @@ impl AppDelegate {
             return NSApplicationTerminateReply::TerminateNow;
         }
         let confirm = self.settings().confirm_close;
-        let tabs: Vec<&TerminalWindow> = windows.iter().map(|window| &**window).collect();
-        let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &tabs) else {
+        // Soru koşan işi pane'lerden topluyor (039 Karar 11).
+        let panes = self.all_panes();
+        let unit = window::unit_for(panes.len(), windows.len());
+        let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &panes) else {
             return NSApplicationTerminateReply::TerminateNow;
         };
         let mtm = self.mtm();
         NSApplication::sharedApplication(mtm).activate();
-        let alert = window::alert(mtm, &window::prompt(CloseScope::Quit, &foregrounds));
+        let alert = window::alert(mtm, &window::prompt(CloseScope::Quit, unit, &foregrounds));
         if alert.runModal() == NSAlertFirstButtonReturn {
             NSApplicationTerminateReply::TerminateNow
         } else {
@@ -1785,21 +1816,55 @@ impl AppDelegate {
         opening: Opening,
     ) -> Result<Retained<TerminalWindow>, String> {
         let mtm = self.mtm();
-        // Pencere ve pane aynı sayaçtan: tek ad alanı, çakışma yok.
-        let (id, pane_id) = (self.next_window_id(), self.next_window_id());
-        let session = from.and_then(|from| from.pane().session());
+        let id = self.next_window_id();
+        // Miras etkin pencerenin **odaktaki pane'inden** (039 Karar 9).
+        let source = from.map(TerminalWindow::focused_pane);
+        let (launch, theme) = self.pane_launch(id, source.as_deref(), opening);
+        let window = TerminalWindow::new(mtm, id, launch).map_err(|e| e.to_string())?;
+        window.set_subtitle(&NSString::from_str(
+            &self.ivars().notices.borrow().subtitle(),
+        ));
+        self.ivars().windows.borrow_mut().push(window.clone());
+        // Krom pencere **görünmeden**: sonra boyansaydı her ⌘T bir kare
+        // sistemin gri başlık çubuğunu gösterirdi. Ayırıcının rengi de aynı
+        // temadan (`TerminalWindow::set_theme`'in ilk hâli).
+        window.set_theme(theme);
+        match from {
+            Some(from) if opening != Opening::Window => window.show_as_tab_of(from),
+            _ => window.show_after(from),
+        }
+        if let Err(e) = window.start(mtm) {
+            window.close();
+            return Err(format!("shell başlatılamadı: {e}"));
+        }
+        Ok(window)
+    }
+
+    /// Yeni pane'in doğum paketi (039 Karar 3) ve teması — pencere doğuran
+    /// yolun da bölmenin de tek kaynağı. Girdilerin hepsi burada, pane
+    /// `AppDelegate`'e uzanmıyor. Pane kimliği pencerelerinkiyle aynı
+    /// sayaçtan (tek ad alanı); sahibi `window`'un [`WindowHost`]'u.
+    ///
+    /// `from` mirasın kaynağı (odaktaki pane): OSC 7 dizini (yoksa ev, 026
+    /// → Karar 4), punto farkı (Karar 3), tema ve uzak satır ([`initial_line`]);
+    /// `from` yoksa tema ayarlardan çözülüyor. Entegrasyon **bir kez**
+    /// soruluyor ve iki cevabı birden veriyor (ortam + dock payı).
+    fn pane_launch(
+        &self,
+        window: u64,
+        from: Option<&TerminalPane>,
+        opening: Opening,
+    ) -> (PaneLaunch, Theme) {
+        let session = from.and_then(|from| from.session());
         let theme = session.map_or_else(|| self.resolve_theme(), |session| session.theme());
         let dir = session
             .and_then(|session| session.working_directory())
             .or_else(child::working_directory);
         let initial = initial_line(opening, session.and_then(|session| session.remote_line()));
-        // Pane'in doğum paketi (039 Karar 3): girdilerin hepsi burada, pane
-        // `AppDelegate`'e uzanmıyor. Entegrasyon **bir kez** soruluyor ve
-        // iki cevabı birden veriyor (ortam + dock payı).
         let launch = PaneLaunch {
-            id: pane_id,
+            id: self.next_window_id(),
             run: self.ivars().run,
-            host: Rc::new(WindowHost::new(id)),
+            host: Rc::new(WindowHost::new(window)),
             lookup: pane_by_id,
             stats: self.stats(),
             settings: self.settings().clone(),
@@ -1811,25 +1876,20 @@ impl AppDelegate {
             integration: self.shell_integration(),
             reduce_motion: self.reduce_motion(),
             smooth_scroll: self.smooth_scroll(),
-            zoom: from.map_or_else(Zoom::default, |from| from.pane().zoom()),
+            zoom: from.map_or_else(Zoom::default, TerminalPane::zoom),
         };
-        let window = TerminalWindow::new(mtm, id, launch).map_err(|e| e.to_string())?;
-        window.set_subtitle(&NSString::from_str(
-            &self.ivars().notices.borrow().subtitle(),
-        ));
-        self.ivars().windows.borrow_mut().push(window.clone());
-        // Krom pencere **görünmeden**: sonra boyansaydı her ⌘T bir kare
-        // sistemin gri başlık çubuğunu gösterirdi.
-        window.apply_chrome(&theme);
-        match from {
-            Some(from) if opening != Opening::Window => window.show_as_tab_of(from),
-            _ => window.show_after(from),
+        (launch, theme)
+    }
+
+    /// ⌘D / ⇧⌘D (`TerminalWindow`'un `splitRight:`/`splitDown:`'ı): `from`'un
+    /// yanında yeni bir pane, `from`'un mirasıyla ([`Opening::Split`]). Hata
+    /// stderr'e; sekme açık kalıyor — öteki pane'lerin kabukları bir yenisinin
+    /// doğamamasıyla ölmemeli.
+    pub(crate) fn open_split(&self, window: &TerminalWindow, from: &TerminalPane, axis: Axis) {
+        let (launch, _) = self.pane_launch(window.id(), Some(from), Opening::Split);
+        if let Err(e) = window.add_pane(self.mtm(), launch, from.id(), axis) {
+            eprintln!("bateri: {e}");
         }
-        if let Err(e) = window.start(mtm) {
-            window.close();
-            return Err(format!("shell başlatılamadı: {e}"));
-        }
-        Ok(window)
     }
 
     /// Etkin pencereden türeyen yeni pencere ya da sekme (⌘N, ⌘T, ⌥⌘T, `+`).
@@ -1849,11 +1909,11 @@ impl AppDelegate {
 
     /// Süreli koşunun tek penceresinin sessizlik damgası (`sessiz=`).
     ///
-    /// Süreli koşuda tek pencere var ve rapor onu okuyor; listenin ilki o.
+    /// Süreli koşuda tek pencere ve tek pane var (039 Karar 12) ve rapor
+    /// onu okuyor; listenin ilki o.
     fn quiet_since(&self) -> Option<Duration> {
-        self.windows()
-            .first()
-            .and_then(|window| window.pane().link().and_then(DisplayLink::quiet_since))
+        let pane = self.windows().first().map(|window| window.focused_pane());
+        pane.and_then(|pane| pane.link().and_then(DisplayLink::quiet_since))
     }
 
     /// Geçerli ayarlar — pencerelerin okuduğu yol. Ödünç kısa tutulmalı:
@@ -2002,6 +2062,7 @@ impl AppDelegate {
         // dönünce düşebiliyor) yöntemleri kendi yuvalarına bakıp sessizce
         // dönüyor; bu bir sıra değişikliğine karşı.
         let windows = self.windows();
+        let panes = self.all_panes();
         self.watch_config(&root);
         // Kabul edilmeyen değer geçerli ayardan (`load_keeping`): yanlış
         // türde kaydedilen `scrollback` geçmişi kırpmasın.
@@ -2012,16 +2073,16 @@ impl AppDelegate {
         if let Some(new) = loaded {
             let changes = {
                 let old = self.ivars().settings.borrow();
-                // Punto farkı **pencere başına** (026 → Karar 3) ve her
-                // pencerede aynı kuralla sıfırlanıyor.
-                for window in &windows {
-                    window.pane().zoom_after_reload(&old.font, &new.font);
+                // Punto farkı **pane başına** (026 → Karar 3, 039 Karar 5)
+                // ve her pane'de aynı kuralla sıfırlanıyor.
+                for pane in &panes {
+                    pane.zoom_after_reload(&old.font, &new.font);
                 }
                 old.changes(&new)
             };
             if changes.terminal {
-                for window in &windows {
-                    window.pane().set_terminal_options(&new);
+                for pane in &panes {
+                    pane.set_terminal_options(&new);
                 }
             }
             if changes.remote {
@@ -2036,8 +2097,8 @@ impl AppDelegate {
             // açılış çağrısı zaten aynı değeri verecek.
             let motion_changed = changes.motion;
             if motion_changed {
-                for window in &windows {
-                    window.pane().set_cursor_motion(&new);
+                for pane in &panes {
+                    pane.set_cursor_motion(&new);
                 }
             }
             // İmlecin çizim sayıları da link'e, aynı gerekçeyle: **nasıl**
@@ -2046,8 +2107,8 @@ impl AppDelegate {
             // girmiyor ve `changes.terminal`'a binselerdi bir yarıçap
             // değişimi oturumu baştan kurdururdu.
             if changes.caret {
-                for window in &windows {
-                    window.pane().apply_caret(&new);
+                for pane in &panes {
+                    pane.apply_caret(&new);
                 }
             }
             self.ivars().settings.replace(new);
@@ -2062,8 +2123,8 @@ impl AppDelegate {
             // Fark yazıldıktan **sonra**: pane fontu yeni farkla uyguluyor.
             if changes.font {
                 let font = self.settings().font.clone();
-                for window in &windows {
-                    window.pane().set_font(&font);
+                for pane in &panes {
+                    pane.set_font(&font);
                 }
             }
             self.post_notices(Source::Write, Vec::new());
@@ -2314,10 +2375,7 @@ impl AppDelegate {
         // görülmüş sayılıyor, sonra doğan pencere temayı zaten görünümden
         // seçiyor.
         let windows = self.windows();
-        if windows
-            .iter()
-            .all(|window| window.pane().session().is_none())
-        {
+        if self.all_panes().iter().all(|pane| pane.session().is_none()) {
             return;
         }
         // Ödünç `choose_theme`'in sonunda düşüyor; oradaki `post_notices`
@@ -2383,9 +2441,9 @@ impl AppDelegate {
     fn apply_reduce_motion(&self) {
         let reduce = self.reduce_motion();
         let smooth = resolve_smooth_scroll(&self.ivars().settings.borrow(), reduce);
-        for window in self.windows() {
-            window.pane().set_reduce_motion(reduce);
-            window.pane().set_smooth_scroll(smooth);
+        for pane in self.all_panes() {
+            pane.set_reduce_motion(reduce);
+            pane.set_smooth_scroll(smooth);
         }
     }
 
@@ -2486,8 +2544,9 @@ impl AppDelegate {
     /// yani sınır dolduğunda `"PTY teardown"` thread'inde kalan kopyalar
     /// `Waker` taşımıyor (`wake.rs` → Sahiplik).
     ///
-    /// Dönen sonuç **ilk** pencerenin: raporu isteyen tek yol süreli koşu ve
-    /// orada tek pencere var (026 → Karar 9). Etkileşimli kapanışta sonuç
+    /// Dönen sonuç **ilk** pencerenin ilk pane'inin: raporu isteyen tek yol
+    /// süreli koşu ve orada tek pencere, tek pane var (026 → Karar 9, 039
+    /// Karar 12). Etkileşimli kapanışta sonuç
     /// atılıyor — toplanmıyor, çünkü okuyan yok.
     fn shutdown(&self) -> Option<Teardown> {
         // Bekçinin bütçesi **kapanıştan** başlıyor, süreç başından değil:
@@ -2498,7 +2557,12 @@ impl AppDelegate {
             crate::watchdog();
         }
         let windows = self.windows();
-        let closing: Vec<_> = windows.iter().map(|window| window.begin_close()).collect();
+        // Pane başına bir kapanış, bütün pencerelerin pane'leri (039): hepsi
+        // başlıyor, sonra tek son tarihe kadar paralel bekleniyor.
+        let closing: Vec<_> = windows
+            .iter()
+            .flat_map(|window| window.begin_close())
+            .collect();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
         // Sonuç raporu besliyor (`kapanis=`): oturum hiç doğmadıysa `None` ve
         // o da bir cevap — kapanacak bir şey yoktu.
@@ -2534,8 +2598,9 @@ impl AppDelegate {
     /// sayaçlar sıfır ve kapı `MissingCounter` diyor.
     fn report_and_exit(&self, run: Run, teardown: Option<Teardown>, quiet: Option<Duration>) -> ! {
         let windows = self.windows();
-        let window = windows.first();
-        let renderer = window.map(|window| window.pane().renderer());
+        // Süreli koşunun tek penceresinin tek pane'i (039 Karar 12).
+        let pane = windows.first().map(|window| window.focused_pane());
+        let renderer = pane.as_deref().map(TerminalPane::renderer);
         // Dört sayaç dört ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
         // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi, `glif`
         // çizilen glyph, `kural` çizilen alt çizgi/üstü çizili. Biri sıfırken
@@ -2569,7 +2634,7 @@ impl AppDelegate {
         // tarafında (tamamlanma bloğu), `icerik` ana thread'de
         // (`needs_update`). Kapının üst sınırı buna bağlı ve alt sınır hâlâ
         // `kare`'de — hangi sorunun hangi sayacı sorduğu [`verdict`]'te.
-        let link = window.and_then(|window| window.pane().link());
+        let link = pane.as_deref().and_then(TerminalPane::link);
         let counters = Counters {
             frames: n,
             content: link.map_or(0, DisplayLink::content_frames),
@@ -3589,9 +3654,19 @@ mod tests {
             initial_line(Opening::Tab, remote()).as_deref(),
             Some("ssh -p 2222 prod")
         );
+        assert_eq!(
+            initial_line(Opening::Split, remote()).as_deref(),
+            Some("ssh -p 2222 prod"),
+            "bölme de ⌘T gibi aynı host'a (039 Karar 9)"
+        );
         assert_eq!(initial_line(Opening::LocalTab, remote()), None);
         assert_eq!(initial_line(Opening::Window, remote()), None);
-        for opening in [Opening::Tab, Opening::LocalTab, Opening::Window] {
+        for opening in [
+            Opening::Tab,
+            Opening::LocalTab,
+            Opening::Window,
+            Opening::Split,
+        ] {
             assert_eq!(initial_line(opening, None), None, "{opening:?}");
         }
     }
