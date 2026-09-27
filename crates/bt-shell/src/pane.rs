@@ -1,7 +1,8 @@
 //! Terminal pane'i: tek bir terminal oturumunun **bütün çekirdeği** — oturum,
 //! kareyi süren display link, kendi `Renderer`'ı, `CAMetalLayer` yüzeyi,
 //! `BateriView`, kabuğun uyandırma ucu (`ShellWake`), dock payı, geçici punto
-//! farkı ve sekme kimliği (039 Karar 1–2).
+//! farkı, sekme kimliği, geçmişte aramanın paneli ve yükleme kuyruğu (039
+//! Karar 1–3).
 //!
 //! `TerminalPane` bir `NSView` alt sınıfı ve bugünkü içerik kapsayıcısının ta
 //! kendisi (033 → R4.1): `BateriView` onu autoresizing'le dolduran çocuğu,
@@ -10,39 +11,179 @@
 //! sekme, kapatma sorusu gibi **pencereye** ait işleri tutuyor; geometri,
 //! örtülme ve odak pencereden buraya dağıtılıyor.
 //!
+//! **Sınır üç parça** (Karar 1, 3): pane girdilerini doğumda tek pakette alır
+//! ([`PaneLaunch`]: ayar anlık görüntüsü, tema, süreli koşu tarifi, ölçüm
+//! defteri, entegrasyon ortamı + dock payı, kimlik, başlangıç dizini ve ilk
+//! girdi, hareket bayrakları), olaylarını sahibine [`PaneHost`]'tan verir
+//! (başlık, kabuğun çıkışı, yükleme durumu, bildirim, alt başlık tanısı, OSC
+//! 52 kopyası) ve menünün karşıladığı her iş burada adlı bir yöntemdir —
+//! seçici onu çağıran bir satır. Pane düzeyindeki seçiciler (punto, bul,
+//! temizle, kaydır, yükleme iptali) pane'de, çünkü responder zinciri
+//! `BateriView` → **pane** → pencere → delegate: hedefsiz menü öğesi onlara
+//! odaktaki pane'den varıyor, arama alanı odaktayken de (alan pane'in
+//! torunu). Bu modülde `AppDelegate`'e uzanan yol yok: ana kuyruk dönüşleri
+//! pane'i sahibin verdiği arama fonksiyonuyla ([`PaneLookup`]) kimlikle
+//! buluyor.
+//!
 //! **Renderer pane başına** (039 Karar 5; 026 → Karar 2a): atlasın anahtarı
 //! ölçek ve punto içeriyor, punto farkı ise pane'in.
-//!
-//! Bu phase'de pane hâlâ `app::delegate`'e uzanıyor (ayarlar, alt başlık,
-//! ölçüm defteri); sahip arayüzü (`PaneLaunch`/`PaneHost`) phase-2'nin işi.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use bt_core::{FontOptions, RemoteTarget, Session, SessionOptions, Settings, TabId, Theme, Wake};
+use bt_core::{
+    FontOptions, RemoteTarget, SearchCover, SearchDirection, SearchReport, SearchStatus, Session,
+    SessionOptions, Settings, TabId, Theme, Wake,
+};
 use bt_core::{load_shell, smoke_shell};
-use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Surface, Waker};
+use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Stats, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSPasteboard, NSView,
-    NSViewFrameDidChangeNotification,
+    NSAlert, NSApplication, NSAutoresizingMaskOptions, NSButton, NSControlTextEditingDelegate,
+    NSEventModifierFlags, NSMenuItem, NSPasteboard, NSPasteboardNameFind, NSPopoverDelegate,
+    NSSearchFieldDelegate, NSTextFieldDelegate, NSView, NSViewFrameDidChangeNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSRect, NSUUID};
 
-use crate::app::{self, AppDelegate, Grid, split_into_grid};
+use crate::app::{self, Grid, split_into_grid};
 use crate::child;
-use crate::clipboard::PendingCopy;
+use crate::clipboard::{self, PendingCopy};
 use crate::jobs::{self, Foreground, Libproc, Probe, ShellParent};
 use crate::notices::{Source, font_messages};
 use crate::quote;
+use crate::search_bar::{SearchBar, selection_query};
+use crate::upload::Uploads;
+use crate::uploader::{StopSheet, UploadPopover};
 use crate::view::BateriView;
-use crate::window::{Closing, Launch};
+use crate::window::{Closing, Launch, is_dark_background};
 use crate::zoom::Zoom;
 use crate::{Run, Workload};
+
+/// Pane'in sahibine verdiği olaylar (039 Karar 3) — bugün
+/// `window::WindowHost`, yarın bir gömme uygulaması.
+///
+/// Hepsi **ana thread'de** ve pane'in kimliğiyle çağrılıyor ([`TerminalPane::id`]):
+/// sahip birden çok pane tutabilir (phase-3) ve olayın hangisinden geldiğini
+/// bilmeli. Yöntemler AppKit tipi taşımıyor, yani sahip sahte bir uygulamayla
+/// sınanabiliyor. Sayfalar ve popover pane view'ının kendi `window()`'unu
+/// kullanıyor; onlar için sahibe sorulmuyor.
+pub(crate) trait PaneHost {
+    /// Başlık, çalışma dizini, uzak durum ya da yükleme yüzdesi değişti:
+    /// pencerenin başlığını ve sekmenin noktasını pane'den yeniden okumalı.
+    fn title_changed(&self, pane: u64);
+    /// Kabuk çıktı: pane'in dayanağı kalmadı, kapanmalı (026 → Karar 5).
+    fn shell_exited(&self, pane: u64);
+    /// Yükleme kuyruğunun ilerlemesi ya da varlığı değişti — uygulamanın
+    /// Dock simgesi bütün pane'lerin toplamı ([`TerminalPane::upload_totals`]).
+    fn uploads_changed(&self, pane: u64);
+    /// Kullanıcıya bildirim (yükleme bitti, hata verdi, bağlantı koptu).
+    fn notify(&self, pane: u64, title: &str, body: &str);
+    /// Alt başlık tanısı (bugün yalnız fontunki, `sync_geometry`).
+    fn post_notices(&self, pane: u64, source: Source, messages: Vec<String>);
+    /// Uzaktan kopya (OSC 52). Varsayılan kol genel panoya yazar — Cmd-C'nin
+    /// panosu; panoyu ayırmak bir sahip kararı olarak açık duruyor.
+    fn copy_to_clipboard(&self, _pane: u64, text: String) {
+        clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
+    }
+}
+
+/// Ana kuyruk dönüşlerinin pane'i kimlikle bulduğu yol; sahip veriyor
+/// (bugün `app::pane_by_id`). Düz bir `fn` göstericisi, closure değil: `Send`
+/// ve `Copy`, yani okuyucu thread'den ana kuyruğa atılan her iş onu
+/// yakalayabiliyor ve bir referans çemberi açmıyor. Kapanışı başlamış pane'i
+/// bulmamalı ([`TerminalPane::is_closed`]).
+pub(crate) type PaneLookup = fn(MainThreadMarker, u64) -> Option<Retained<TerminalPane>>;
+
+/// Pane'in doğum paketi (039 Karar 3): girdilerin tamamı tek yapıda, sahipten.
+/// Canlı değişim ayrı yoldan, pane'in `set_*` yöntemleriyle.
+pub(crate) struct PaneLaunch {
+    /// Süreç içi kimlik ([`TerminalPane::id`]).
+    pub(crate) id: u64,
+    /// Süreli koşunun tarifi; `None` → etkileşimli.
+    pub(crate) run: Option<Run>,
+    /// Olayların sahibi.
+    pub(crate) host: Rc<dyn PaneHost>,
+    /// Ana kuyruk dönüşlerinin pane'i bulduğu yol.
+    pub(crate) lookup: PaneLookup,
+    /// Ölçüm defteri (süreli koşunun `BT_FRAME_STATS`'ı), link'e gidiyor.
+    pub(crate) stats: Option<Arc<Stats>>,
+    /// Ayarların doğum anındaki kopyası.
+    pub(crate) settings: Settings,
+    /// Oturumun teması.
+    pub(crate) theme: Theme,
+    /// Başlangıç dizini ve ilk girdi.
+    pub(crate) launch: Launch,
+    /// Shell entegrasyonunun ortamı ve dock payı — **tek sorudan**
+    /// (`AppDelegate::shell_integration`): iki ayrı çağrı ayrışabilirdi.
+    pub(crate) integration: (Vec<(String, String)>, u16),
+    /// Hareketi Azalt'ın çözülmüş değeri.
+    pub(crate) reduce_motion: bool,
+    /// Tekerleğin çözülmüş kipi.
+    pub(crate) smooth_scroll: bool,
+    /// Devralınan geçici punto farkı (026 → Karar 3).
+    pub(crate) zoom: Zoom,
+}
+
+/// Doğum paketinin yalnız [`TerminalPane::start`]'ın tükettiği yarısı.
+struct Birth {
+    stats: Option<Arc<Stats>>,
+    settings: Settings,
+    theme: Theme,
+    launch: Launch,
+    integration: (Vec<(String, String)>, u16),
+}
+
+/// Başlık haberinin ana kuyruk yarısı: bayrak **her okumadan önce** iniyor
+/// (okumadan sonra gelen bir değişiklik yeni bir iş ister ve kaçmaz), sonra
+/// pane'in kendi kenarı (`edge`: yükleme kuyruğunun bağlantısı) ve sahip
+/// başlığı yeniden okuyor. Kenar da bayraktan sonra olmalı: arada biten ssh
+/// iş doğurmaz ve kuyruk ölü bağlantıda kalırdı (`/code-review`). `swap`,
+/// çünkü okuma-değiştirme-yazma yazarın `swap`'ıyla eşleşiyor ve onun yuvaya
+/// yazdığını görünür kılıyor.
+fn announce_title(pending: &AtomicBool, edge: impl FnOnce(), host: &dyn PaneHost, pane: u64) {
+    pending.swap(false, Ordering::AcqRel);
+    edge();
+    host.title_changed(pane);
+}
+
+/// OSC 52 kopyasının ana kuyruk yarısı: yuvadaki metin sahibe
+/// ([`PaneHost::copy_to_clipboard`]); yuva boşsa (yarışta başka iş almış)
+/// olay yok.
+fn announce_copy(pending: &PendingCopy, host: &dyn PaneHost, pane: u64) {
+    if let Some(text) = pending.take() {
+        host.copy_to_clipboard(pane, text);
+    }
+}
+
+/// Sistemin find panosundaki metin (033 Karar 6: ⌘E'nin uygulamalar arası
+/// normu), ⌘E'nin sorgusuyla aynı süzgeçten: ilk satırı, boş ya da yalnız
+/// boşluksa `None` ([`selection_query`]).
+fn find_pasteboard_text() -> Option<String> {
+    // SAFETY: AppKit'in dışa açtığı sabit ad, süreç boyunca yaşıyor.
+    let name = unsafe { NSPasteboardNameFind };
+    clipboard::read(&NSPasteboard::pasteboardWithName(name))
+        .and_then(|text| selection_query(&text, false))
+}
+
+/// Alternatif ekranda gri olan altı öğe mi (034 Karar 2): temizlemenin iki
+/// kipi ve dört kaydırma — hepsi birincil geçmişe dokunuyor ve o geçmiş
+/// alternatif ekranda erişilemez.
+fn is_scrollback_action(action: Sel) -> bool {
+    [
+        sel!(clearToStart:),
+        sel!(clearScrollback:),
+        sel!(scrollToTop:),
+        sel!(scrollToBottom:),
+        sel!(scrollPageUp:),
+        sel!(scrollPageDown:),
+    ]
+    .contains(&action)
+}
 
 /// `bt-core`'un uyandırma ucu — pane başına bir tane, oturumuyla birlikte.
 ///
@@ -51,14 +192,16 @@ use crate::{Run, Workload};
 /// karesi zaten elle isteniyor ve o ana kadar okunmuş her bayt hasar
 /// bayrağında birikmiş olur.
 struct ShellWake {
-    /// Pane'in kimliği: ana kuyruk işleri pane'i (ya da pane'in penceresini)
-    /// bununla buluyor (`AppDelegate::pane`, alternatif ekran habercisinin
-    /// örüntüsü) — `Session`'a ya da pane'e referans tutmak `wake.rs`'in
-    /// Sahiplik çemberini kapatırdı.
+    /// Pane'in kimliği: ana kuyruk işleri pane'i bununla buluyor
+    /// ([`PaneLookup`], alternatif ekran habercisinin örüntüsü) —
+    /// `Session`'a ya da pane'e referans tutmak `wake.rs`'in Sahiplik
+    /// çemberini kapatırdı.
     id: u64,
+    /// Kimlikten pane'e giden yol, sahipten ([`PaneLaunch::lookup`]).
+    lookup: PaneLookup,
     /// Süreli koşu mu: `child_exit` iki yola ayrılıyor ([`Wake::child_exit`]'in
-    /// gövdesi). `AppDelegate`'inkinin kopyası; okuyucu thread'den uygulama
-    /// delegate'ine uzanılamaz.
+    /// gövdesi). Doğum paketindeki tarifin (`PaneLaunch::run`) özeti;
+    /// okuyucu thread'den pane'e uzanılamaz.
     timed: bool,
     /// Link'in `Waker`'ı — **yaprak kilit** altında ve **sökülebilir**.
     ///
@@ -142,7 +285,7 @@ impl ShellWake {
     /// Uzak oturum yoklamasını ana kuyruğa atar ([`RemoteProbe`]).
     fn dispatch_remote_probe(&self) {
         let probe = Arc::clone(&self.remote_probe);
-        let id = self.id;
+        let (id, lookup) = (self.id, self.lookup);
         DispatchQueue::main().exec_async(move || {
             if !probe.begin() {
                 return;
@@ -150,19 +293,14 @@ impl ShellWake {
             // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
             // Pane bu arada kapandıysa yoklanacak bir kabuk da yok.
-            let Some(app) = app::delegate(mtm) else {
-                return;
-            };
-            let Some(pane) = app.pane(id) else {
+            let Some(pane) = lookup(mtm, id) else {
                 return;
             };
             let outcome = pane.probe_remote();
-            // Uzak durumun kenarı pencerenin başlığını ve sekmenin noktasını
-            // tazeliyor (`TerminalWindow::refresh_title`).
-            if outcome.changed
-                && let Some(window) = app.window_of_pane(id)
-            {
-                window.refresh_title();
+            // Uzak durumun kenarı yükleme kuyruğunun, pencerenin başlığının ve
+            // sekmenin noktasının kenarı ([`TerminalPane::remote_or_title_changed`]).
+            if outcome.changed {
+                pane.remote_or_title_changed();
             }
             if outcome.undecided {
                 probe.rearm();
@@ -224,7 +362,7 @@ impl Wake for ShellWake {
         // ikincisi renderer'a terminal bilgisi sokar. `bateri -e cmd` yolu
         // geldiğinde `drain_on_exit` ile birlikte tasarlanacak
         // (`.tasks/002-vt-motoru/phase-4.md` → Uygulama Notları).
-        let (timed, id) = (self.timed, self.id);
+        let (timed, id, lookup) = (self.timed, self.id, self.lookup);
         DispatchQueue::main().exec_async(move || {
             // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
@@ -233,9 +371,10 @@ impl Wake for ShellWake {
                 return;
             }
             // Pane bu arada kapandıysa (⌘W'nin `SIGHUP`'ı kabuğu öldürdü
-            // ve haber sonradan geldi) kapatacak bir şey yok.
-            if let Some(window) = app::delegate(mtm).and_then(|app| app.window_of_pane(id)) {
-                window.close();
+            // ve haber sonradan geldi) kapatacak bir şey yok. Kapatmak
+            // sahibin işi ([`PaneHost::shell_exited`]).
+            if let Some(pane) = lookup(mtm, id) {
+                pane.host().shell_exited(id);
             }
         });
     }
@@ -245,12 +384,18 @@ impl Wake for ShellWake {
         // ana kuyruğa en çok **bir** iş (`PendingCopy`'nin doc'u). Yuvada
         // bekleyen metin varsa onu alacak iş zaten kuyrukta.
         //
-        // Pano genel pano, Cmd-C'ninkiyle aynı (`view.rs` → `copy:`); işin
-        // sırası `child_exit`'inkiyle aynı gerekçeden: ana kuyruk.
+        // Panoyu sahip seçiyor ([`PaneHost::copy_to_clipboard`]; varsayılan
+        // genel pano, Cmd-C'ninkiyle aynı); işin sırası `child_exit`'inkiyle
+        // aynı gerekçeden: ana kuyruk. Pane bu arada kapandıysa metin düşüyor.
         if self.pending_copy.put(text) {
             let pending = Arc::clone(&self.pending_copy);
+            let (id, lookup) = (self.id, self.lookup);
             DispatchQueue::main().exec_async(move || {
-                pending.deliver(&NSPasteboard::generalPasteboard());
+                // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+                let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+                if let Some(pane) = lookup(mtm, id) {
+                    announce_copy(&pending, pane.host(), id);
+                }
             });
         }
     }
@@ -262,18 +407,16 @@ impl Wake for ShellWake {
             return;
         }
         let pending = Arc::clone(&self.title_pending);
-        let id = self.id;
+        let (id, lookup) = (self.id, self.lookup);
         DispatchQueue::main().exec_async(move || {
-            // Bayrak başlık **okunmadan önce** iniyor: okumadan sonra gelen
-            // bir değişiklik yeni bir iş ister ve kaçmaz. `swap`, çünkü
-            // okuma-değiştirme-yazma yazarın `swap`'ıyla eşleşiyor ve onun
-            // yuvaya yazdığını görünür kılıyor.
-            pending.swap(false, Ordering::AcqRel);
             // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            // Pane bu arada kapanmışsa yazacak bir başlık da yok.
-            if let Some(window) = app::delegate(mtm).and_then(|app| app.window_of_pane(id)) {
-                window.refresh_title();
+            // Pane bu arada kapanmışsa yazacak bir başlık da yok (bayrak
+            // dikili kalıyor; kapanmış pane'in haberi zaten düşüyor).
+            if let Some(pane) = lookup(mtm, id) {
+                // Uzak durumun kenarı (`D`/`A`'nın silmesi) yükleme kuyruğunun
+                // da kenarı — önce o, sonra sahip başlığı okuyor.
+                announce_title(&pending, || pane.check_upload_connection(), pane.host(), id);
             }
         });
     }
@@ -287,15 +430,15 @@ impl Wake for ShellWake {
             return;
         }
         let pending = Arc::clone(&self.search_pending);
-        let id = self.id;
+        let (id, lookup) = (self.id, self.lookup);
         DispatchQueue::main().exec_async(move || {
             pending.swap(false, Ordering::AcqRel);
             // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
             // Arka sekmede de işliyor: haber kare yoluna bağlı değil. Pane
             // bu arada kapandıysa sayacak bir şey yok.
-            if let Some(window) = app::delegate(mtm).and_then(|app| app.window_of_pane(id)) {
-                window.kick_search();
+            if let Some(pane) = lookup(mtm, id) {
+                pane.kick_search();
             }
         });
     }
@@ -322,8 +465,8 @@ impl Wake for ShellWake {
 ///
 /// **Hedefsiz eylem değil, pane kimliği.** Responder zinciri key pencereye
 /// gidiyor: arka sekmede vim'den çıkış yanlış pane'i boyutlandırırdı. İş
-/// kimliği (`id`) yakalıyor, `AppDelegate`'in listesinden pane'i buluyor ve
-/// bulamazsa düşüyor — pane o arada kapanmışsa boyutlandıracak bir şey de
+/// kimliği (`id`) yakalıyor, pane'i sahibin yolundan ([`PaneLookup`]) buluyor
+/// ve bulamazsa düşüyor — pane o arada kapanmışsa boyutlandıracak bir şey de
 /// yok.
 ///
 /// Yakaladığı tek şey bir tamsayı. Eski "hiçbir şey yakalamıyor" kuralının
@@ -335,16 +478,13 @@ impl Wake for ShellWake {
 /// Yük taşımıyor: alıcı gerçeği yeniden okuyor ([`TerminalPane::alt_screen_did_change`]),
 /// yani birbirini kovalayan iki geçiş (vim aç-kapa) bayat bir değerle
 /// davranamıyor.
-fn alt_screen_notifier(id: u64) -> Box<dyn Fn()> {
+fn alt_screen_notifier(id: u64, lookup: PaneLookup) -> Box<dyn Fn()> {
     Box::new(move || {
         DispatchQueue::main().exec_async(move || {
             // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            let Some(app) = app::delegate(mtm) else {
-                return;
-            };
-            if let Some(pane) = app.pane(id) {
-                pane.alt_screen_did_change(&app);
+            if let Some(pane) = lookup(mtm, id) {
+                pane.alt_screen_did_change();
             }
         });
     })
@@ -373,10 +513,24 @@ pub(crate) struct PaneIvars {
     /// sayaçtan): okuyucu thread'den ana kuyruğa dönen işlerin pane'i
     /// bulduğu anahtar (`AppDelegate::pane`).
     id: u64,
-    /// Süreli koşunun tarifi, `AppDelegate`'inkinin kopyası (`Copy`): odak
-    /// yolu onu her uygulama geçişinde soruyor ve uygulama delegate'ine
-    /// uzanmadan cevaplayabilmeli ([`TerminalPane::apply_focus`]).
+    /// Süreli koşunun tarifi, doğum paketinden (`Copy`): odak yolu onu her
+    /// uygulama geçişinde soruyor ([`TerminalPane::apply_focus`]).
     run: Option<Run>,
+    /// Olayların sahibi ([`PaneHost`]).
+    host: Rc<dyn PaneHost>,
+    /// Ana kuyruk dönüşlerinin pane'i bulduğu yol ([`PaneLookup`]).
+    lookup: PaneLookup,
+    /// Doğum paketinin `start`'ın tükettiği yarısı; `start`'tan sonra `None`.
+    birth: RefCell<Option<Birth>>,
+    /// Ayarın fontu — punto farkı ona uygulanıyor
+    /// ([`TerminalPane::change_zoom`]); canlı değişimi [`TerminalPane::set_font`].
+    font: RefCell<FontOptions>,
+    /// Hareketi Azalt'ın çözülmüş değeri — arama panelinin animasyonu da
+    /// ona bakıyor; canlı değişimi [`TerminalPane::set_reduce_motion`].
+    reduce_motion: Cell<bool>,
+    /// Tekerleğin çözülmüş kipi — aramanın eşleşmeye gidişi de ona bakıyor;
+    /// canlı değişimi [`TerminalPane::set_smooth_scroll`].
+    smooth_scroll: Cell<bool>,
     /// `Rc`: renderer ana thread'e çivili (bkz. `bt_gpu::DisplayLink`) ve
     /// link de bir kopya tutuyor.
     renderer: Rc<Renderer>,
@@ -439,6 +593,28 @@ pub(crate) struct PaneIvars {
     /// kapanmış oturuma iş yapmasın, `bateri://tab/` da oturumsuz bir
     /// pencereyi ekrana döndürmesin (`/code-review`, 038).
     closed: Cell<bool>,
+    /// Geçmişte aramanın paneli (033) — ilk ⌘F'de doğuyor: hiç aranmayan
+    /// pane görünümlerini taşımıyor. Sorgu ve anahtarlar panelde, yani
+    /// **pane başına** ve kapanınca unutulmuyor (Karar 6).
+    search: OnceCell<SearchBar>,
+    /// Oturuma verilen son sorgunun durumu — etiketin girdisi.
+    search_status: Cell<SearchStatus>,
+    /// Sayım dizininin sürücüsü ana kuyrukta bir tur bekliyor mu
+    /// ([`TerminalPane::kick_search`]): ikinci bir sürücü kurulmasın.
+    search_driving: Cell<bool>,
+    /// Finder damlasının uzak dizine yüklenmesi (037 Karar 7): sıra,
+    /// ilerleme ve sonuç satırı ([`crate::upload::Uploads`]). Kuyruk **bu
+    /// pane'in ssh bağlantısının** — başka sekmeye geçmek onu durdurmuyor.
+    uploads: RefCell<Uploads>,
+    /// Açık yükleme sayfası (onay ya da hata): sayfa süresince yaşıyor.
+    upload_alert: RefCell<Option<Retained<NSAlert>>>,
+    /// Açık durdurma sorusu (037 phase-7, [`crate::uploader`]).
+    upload_stop: RefCell<Option<StopSheet>>,
+    /// Açık "Show files (N)" popover'ı (037 phase-7).
+    upload_list: RefCell<Option<UploadPopover>>,
+    /// Popover'ı kapatan olayın zamanı (`popoverWillClose:`): düğmeye
+    /// yeniden basış popover'ı yeniden açmasın.
+    list_closed_at: Cell<Option<f64>>,
 }
 
 define_class!(
@@ -466,8 +642,219 @@ define_class!(
         /// boyutlandırmasını da kapsıyor, yani tek kaynak.
         #[unsafe(method(viewFrameDidChange:))]
         fn view_frame_did_change(&self, _n: &NSNotification) {
-            if let Some(app) = app::delegate(self.mtm()) {
-                self.refresh_geometry(&app);
+            self.refresh_geometry();
+        }
+    }
+
+    /// "Show files (N)" popover'ının kapanışı (037 phase-7): `transient`
+    /// popover'ı AppKit de kapatıyor (dışarı tık) ve düğmenin basılı tonu
+    /// ile Esc izleyicisi o zaman da kalkmalı.
+    unsafe impl NSPopoverDelegate for TerminalPane {
+        #[unsafe(method(popoverWillClose:))]
+        fn popover_will_close(&self, _n: &NSNotification) {
+            self.upload_list_will_close();
+        }
+
+        #[unsafe(method(popoverDidClose:))]
+        fn popover_did_close(&self, _n: &NSNotification) {
+            self.close_upload_list();
+        }
+    }
+
+    // Arama alanının delegesi (033): üç protokolün de bütün yöntemleri
+    // isteğe bağlı; kullanılanlar aşağıdaki `impl`'de.
+    unsafe impl NSControlTextEditingDelegate for TerminalPane {}
+    unsafe impl NSTextFieldDelegate for TerminalPane {}
+    unsafe impl NSSearchFieldDelegate for TerminalPane {}
+
+    // **Pane düzeyindeki menü seçicileri** (039 Karar 2): her biri adlı bir
+    // yöntemin tek satırlık sarmalayıcısı (R2.3) — menüsüz bir sahip aynı
+    // yöntemi doğrudan çağırabilir. Hedefsiz eylemin responder zinciri
+    // `BateriView` → pane → pencere → delegate, arama alanı odaktayken alan
+    // düzenleyicisi → alan → … → pane; yani öğe odaktaki pane'e varıyor ve
+    // 033'ün "alan odaktayken zincir `BateriView`'dan geçmiyor" gerekçesi
+    // konusuz. Uygulama geneline yayılanlar (`settingsDidChange:`, tema)
+    // `AppDelegate`'te, sekme işleri (`closeTab:`, `selectTab:`) pencerede.
+    impl TerminalPane {
+        /// View ▸ Bigger (Cmd +).
+        #[unsafe(method(makeFontBigger:))]
+        fn make_font_bigger(&self, _sender: Option<&AnyObject>) {
+            self.zoom_in();
+        }
+
+        /// View ▸ Smaller (Cmd −).
+        #[unsafe(method(makeFontSmaller:))]
+        fn make_font_smaller(&self, _sender: Option<&AnyObject>) {
+            self.zoom_out();
+        }
+
+        /// View ▸ Actual Size (Cmd 0).
+        #[unsafe(method(resetFontSize:))]
+        fn reset_font_size(&self, _sender: Option<&AnyObject>) {
+            self.zoom_reset();
+        }
+
+        /// Edit ▸ Find ▸ Find… (⌘F).
+        ///
+        /// Seçiciler **kendi adlarımız**, `performFindPanelAction:` değil
+        /// (033 Karar 10): alan odaktayken first responder AppKit'in alan
+        /// düzenleyicisi ve o seçiciyi kendisi uygulayıp yutardı.
+        #[unsafe(method(findInScrollback:))]
+        fn find_in_scrollback(&self, _sender: Option<&AnyObject>) {
+            self.find();
+        }
+
+        /// Edit ▸ Find ▸ Find Next (⌘G) ve panelin yukarı oku.
+        #[unsafe(method(findNextMatch:))]
+        fn find_next_match(&self, _sender: Option<&AnyObject>) {
+            self.find_next();
+        }
+
+        /// Edit ▸ Find ▸ Find Previous (⇧⌘G) ve panelin aşağı oku.
+        #[unsafe(method(findPreviousMatch:))]
+        fn find_previous_match(&self, _sender: Option<&AnyObject>) {
+            self.find_previous();
+        }
+
+        /// Edit ▸ Find ▸ Use Selection for Find (⌘E).
+        #[unsafe(method(useSelectionForFind:))]
+        fn use_selection_for_find_action(&self, _sender: Option<&AnyObject>) {
+            self.use_selection_for_find();
+        }
+
+        /// Edit ▸ Clear to Start (⌘K).
+        #[unsafe(method(clearToStart:))]
+        fn clear_to_start_action(&self, _sender: Option<&AnyObject>) {
+            self.clear_to_start();
+        }
+
+        /// Edit ▸ Clear Scrollback (⌥⌘K).
+        #[unsafe(method(clearScrollback:))]
+        fn clear_scrollback_action(&self, _sender: Option<&AnyObject>) {
+            self.clear_scrollback();
+        }
+
+        /// View ▸ Scroll to Top (⌘Home).
+        #[unsafe(method(scrollToTop:))]
+        fn scroll_to_top_action(&self, _sender: Option<&AnyObject>) {
+            self.scroll_to_top();
+        }
+
+        /// View ▸ Scroll to Bottom (⌘End).
+        #[unsafe(method(scrollToBottom:))]
+        fn scroll_to_bottom_action(&self, _sender: Option<&AnyObject>) {
+            self.scroll_to_bottom();
+        }
+
+        /// View ▸ Page Up (⌘PgUp).
+        #[unsafe(method(scrollPageUp:))]
+        fn scroll_page_up_action(&self, _sender: Option<&AnyObject>) {
+            self.page_up();
+        }
+
+        /// View ▸ Page Down (⌘PgDn).
+        #[unsafe(method(scrollPageDown:))]
+        fn scroll_page_down_action(&self, _sender: Option<&AnyObject>) {
+            self.page_down();
+        }
+
+        /// Panelin kapatma düğmesi — Esc ile aynı yol (033 Karar 5).
+        #[unsafe(method(closeSearch:))]
+        fn close_search_action(&self, _sender: Option<&AnyObject>) {
+            self.close_search();
+        }
+
+        /// Alanın eylemi: her metin değişimi (`sendsSearchStringImmediately`)
+        /// ve ⊗ düğmesi.
+        #[unsafe(method(searchFieldChanged:))]
+        fn search_field_changed(&self, _sender: Option<&AnyObject>) {
+            self.apply_search();
+        }
+
+        /// `Aa` ya da `.*` anahtarı değişti.
+        #[unsafe(method(searchOptionsChanged:))]
+        fn search_options_changed(&self, _sender: Option<&AnyObject>) {
+            self.apply_search();
+        }
+
+        /// Alanın komut kancası (033 Karar 10): ⏎ bir önceki (daha eski), ⇧⏎
+        /// bir sonraki (daha yeni) eşleşme; Esc paneli kapatır —
+        /// `NSSearchField`'ın "metni sil" varsayılanı yerine. Kalan komutlar
+        /// alanın kendisine (`false`).
+        ///
+        /// Shift seçiciden okunamıyor — iki tuş da `insertNewline:` — o yüzden
+        /// olayın kendisinden.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn control_do_command(
+            &self,
+            _control: &AnyObject,
+            _text_view: &AnyObject,
+            command: Sel,
+        ) -> bool {
+            if command == sel!(insertNewline:) {
+                let shift = NSApplication::sharedApplication(self.mtm())
+                    .currentEvent()
+                    .is_some_and(|event| event.modifierFlags().contains(NSEventModifierFlags::Shift));
+                self.search_step(if shift {
+                    SearchDirection::Newer
+                } else {
+                    SearchDirection::Older
+                });
+                true
+            } else if command == sel!(cancelOperation:) {
+                self.close_search();
+                true
+            } else {
+                false
+            }
+        }
+
+        /// Find öğelerinin, temizlemenin, kaydırmanın ve yükleme iptalinin
+        /// etkinliği; **bilinmeyen öğe `true`** — punto hep etkin.
+        /// Temizleme ve kaydırma alternatif ekranda gri (034 Karar 2):
+        /// birincil geçmiş orada erişilemez, gri öğe dürüst bir "burada
+        /// olmaz"; oturum yoksa da gri.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            let action = item.action();
+            // `return` yok: `define_class!` `bool`'u gövdenin sonunda çeviriyor.
+            if action.is_some_and(is_scrollback_action) {
+                self.session()
+                    .is_some_and(|session| !session.alt_screen())
+            } else if action == Some(sel!(findNextMatch:)) || action == Some(sel!(findPreviousMatch:)) {
+                self.has_query()
+            } else if action == Some(sel!(useSelectionForFind:)) {
+                self.session()
+                    .is_some_and(|session| session.has_selection())
+            } else if action == Some(sel!(cancelUpload:)) {
+                // ⌘. yalnız bu pane'de kuyruk varken (037 Karar 7); gri
+                // öğenin kısayolu `keyDown:`'a düşüyor ve orada yutuluyor.
+                self.ivars().uploads.borrow().active()
+            } else {
+                true
+            }
+        }
+
+        /// Shell ▸ Cancel Upload (⌘.) ve popover'ın `Cancel all ⌘.`'u: bu
+        /// pane'in **bütün** yükleme kuyruğu (037 Karar 7 → Kullanıcı kararı
+        /// 5); akan kalem 30 saniyeyi geçtiyse önce sorar (phase-7). Esc
+        /// değil, çünkü klavye o sırada uzak kabuğa gidiyor. Menü kısayolu
+        /// `keyDown:`'dan önce yakalanıyor, yani alternatif ekranda (vim)
+        /// da çalışıyor — kapısı yalnız kuyruk (`validateMenuItem:`).
+        #[unsafe(method(cancelUpload:))]
+        fn cancel_upload(&self, _sender: Option<&AnyObject>) {
+            self.cancel_uploads();
+        }
+
+        /// Popover satırının düğmesi (`Cancel`/`Remove`): `tag` kalemin
+        /// kimliği, sırası değil — sıra biten ve çıkarılan kalemlerle kayar.
+        #[unsafe(method(uploadRowAction:))]
+        fn upload_row_action_sent(&self, sender: Option<&AnyObject>) {
+            let Some(button) = sender.and_then(|sender| sender.downcast_ref::<NSButton>()) else {
+                return;
+            };
+            if let Ok(id) = u64::try_from(button.tag()) {
+                self.upload_row_action(id);
             }
         }
     }
@@ -480,13 +867,29 @@ impl TerminalPane {
     /// ([`TerminalPane::observe_frame`]).
     ///
     /// Renderer burada doğuyor ve hatası çağırana dönüyor: Metal device ya da
-    /// metallib yoksa pane'in çizebileceği bir şey de yok.
+    /// metallib yoksa pane'in çizebileceği bir şey de yok. Font renderer'a
+    /// burada **istek** olarak veriliyor, devralınan punto farkıyla
+    /// ([`TerminalPane::request_font`]): ilk atlas `start`'ın geometrisinde
+    /// büyütülmüş puntoyla açılıyor.
     pub(crate) fn new(
         mtm: MainThreadMarker,
-        id: u64,
-        run: Option<Run>,
         frame: NSRect,
+        launch: PaneLaunch,
     ) -> Result<Retained<Self>, GpuError> {
+        let PaneLaunch {
+            id,
+            run,
+            host,
+            lookup,
+            stats,
+            settings,
+            theme,
+            launch,
+            integration,
+            reduce_motion,
+            smooth_scroll,
+            zoom,
+        } = launch;
         let renderer = Rc::new(Renderer::system_default()?);
         let surface = renderer.surface();
         let view = BateriView::new(mtm, frame);
@@ -494,9 +897,22 @@ impl TerminalPane {
         // layer'ını kurdurur ve CAMetalLayer düşer.
         view.setLayer(Some(surface.ca_layer()));
         view.setWantsLayer(true);
+        let font = settings.font.clone();
         let this = Self::alloc(mtm).set_ivars(PaneIvars {
             id,
             run,
+            host,
+            lookup,
+            birth: RefCell::new(Some(Birth {
+                stats,
+                settings,
+                theme,
+                launch,
+                integration,
+            })),
+            font: RefCell::new(font),
+            reduce_motion: Cell::new(reduce_motion),
+            smooth_scroll: Cell::new(smooth_scroll),
             renderer,
             surface,
             view: view.clone(),
@@ -505,6 +921,7 @@ impl TerminalPane {
             shell_parent: OnceCell::new(),
             wake: Arc::new(ShellWake {
                 id,
+                lookup,
                 timed: run.is_some(),
                 waker: Mutex::new(None),
                 pending_copy: Arc::default(),
@@ -512,13 +929,21 @@ impl TerminalPane {
                 search_pending: Arc::default(),
                 remote_probe: Arc::default(),
             }),
-            zoom: Cell::new(Zoom::default()),
+            zoom: Cell::new(zoom),
             // Açılışta dock yok: kararı `start` veriyor ve geometriyi ondan
             // sonra hesaplıyor.
             dock_rows: Cell::new(0),
             dock_rows_at_birth: Cell::new(0),
             tab_id: new_tab_id(),
             closed: Cell::new(false),
+            search: OnceCell::new(),
+            search_status: Cell::new(SearchStatus::Empty),
+            search_driving: Cell::new(false),
+            uploads: RefCell::new(Uploads::default()),
+            upload_alert: RefCell::new(None),
+            upload_stop: RefCell::new(None),
+            upload_list: RefCell::new(None),
+            list_closed_at: Cell::new(None),
         });
         // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
         // set edildi.
@@ -540,6 +965,8 @@ impl TerminalPane {
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         this.addSubview(&view);
+        let font = this.ivars().font.borrow().clone();
+        this.request_font(&font);
         Ok(this)
     }
 
@@ -587,10 +1014,15 @@ impl TerminalPane {
         self.ivars().zoom.get()
     }
 
-    /// Devralınan punto farkı; oturum doğmadan, [`TerminalPane::request_font`]'tan
-    /// önce yazılır ki ilk atlas büyütülmüş puntoyla açılsın.
-    pub(crate) fn set_zoom(&self, zoom: Zoom) {
-        self.ivars().zoom.set(zoom);
+    /// Olayların sahibi ([`PaneHost`]).
+    pub(crate) fn host(&self) -> &dyn PaneHost {
+        &*self.ivars().host
+    }
+
+    /// Ana kuyruk dönüşlerinin pane'i bulduğu yol (`uploader`'ın işleri de
+    /// onu yakalıyor).
+    pub(crate) fn lookup(&self) -> PaneLookup {
+        self.ivars().lookup
     }
 
     /// Rapor yolu sayaçlarını buradan okuyor (`AppDelegate::report_and_exit`).
@@ -612,11 +1044,10 @@ impl TerminalPane {
     }
 
     /// Renderer'a ayarın fontunu bu pane'in punto farkıyla **istek**
-    /// olarak verir — açılışın yolu (`AppDelegate::load_settings`): atlas
-    /// hemen ardından gelen `sync_geometry`'de açılıyor ve font yuvasını da o
-    /// yazıyor. Dönüş (değişti mi) burada soru değil: geometri henüz hiç
-    /// kurulmadı.
-    pub(crate) fn request_font(&self, font: &FontOptions) {
+    /// olarak verir — açılışın yolu ([`TerminalPane::new`]): atlas `start`'ın
+    /// `sync_geometry`'sinde açılıyor ve font yuvasını da o yazıyor. Dönüş
+    /// (değişti mi) burada soru değil: geometri henüz hiç kurulmadı.
+    fn request_font(&self, font: &FontOptions) {
         let _ = self
             .ivars()
             .renderer
@@ -631,11 +1062,12 @@ impl TerminalPane {
         self.ivars().zoom.set(zoom);
     }
 
-    /// Entegrasyonu sorar, dock payını kararlaştırır, ilk geometriyi kurar ve
-    /// oturumu açar.
+    /// Doğum paketinin kalanını tüketir: dock payını kararlaştırır, ilk
+    /// geometriyi kurar ve oturumu açar.
     ///
-    /// Entegrasyon **bir kez** soruluyor ve iki cevabı birden veriyor:
-    /// çocuğun ortamı ile dock'un varlığı (`AppDelegate::shell_integration`).
+    /// Entegrasyon sahip tarafında **bir kez** soruldu ve iki cevabı birden
+    /// verdi: çocuğun ortamı ile dock'un varlığı (`AppDelegate::shell_integration`,
+    /// [`PaneLaunch::integration`]).
     /// İki ayrı çağrı olsaydı ikisi ayrışabilirdi — pencereden iki satır
     /// giden ama dock'u olmayan (ya da tersi) bir oturum, ve belirti sessiz
     /// olurdu. Geometriden **önce**: ızgara yüksekliği dock payını görmeli,
@@ -651,36 +1083,38 @@ impl TerminalPane {
     /// ⌘T, `AppDelegate::open_window`'un kararı); `None` → sıradan yerel kabuk.
     ///
     /// Pane pencereye takılı olmalı (`contentView`): ölçek ondan okunuyor
-    /// ([`TerminalPane::sync_geometry`]); değilse hata.
-    pub(crate) fn start(
-        &self,
-        app: &AppDelegate,
-        mtm: MainThreadMarker,
-        theme: Theme,
-        launch: Launch,
-    ) -> std::io::Result<()> {
-        let (integration, birth) = app.shell_integration();
-        self.ivars().dock_rows_at_birth.set(birth);
-        self.ivars().dock_rows.set(birth);
+    /// ([`TerminalPane::sync_geometry`]); değilse hata. İkinci çağrı da hata:
+    /// paket bir kez tükeniyor.
+    pub(crate) fn start(&self, mtm: MainThreadMarker) -> std::io::Result<()> {
+        let Some(birth) = self.ivars().birth.take() else {
+            return Err(std::io::Error::other("pane ikinci kez başlatıldı"));
+        };
+        let (_, rows) = birth.integration;
+        self.ivars().dock_rows_at_birth.set(rows);
+        self.ivars().dock_rows.set(rows);
         // Grid ölçüsü pencereden türer; oturum ilk boyutuyla doğsun ki
         // shell açılışta doğru `TIOCSWINSZ` görsün.
-        let Some(grid) = self.sync_geometry(app) else {
+        let Some(grid) = self.sync_geometry() else {
             return Err(std::io::Error::other("pane bir pencereye takılı değil"));
         };
-        self.start_session(app, mtm, grid, theme, integration, launch)
+        self.start_session(mtm, grid, birth)
     }
 
     /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
     /// `Wake`'i ister, link `Session`'ı ister, `Waker` link'ten doğar.
     fn start_session(
         &self,
-        app: &AppDelegate,
         mtm: MainThreadMarker,
         grid: Grid,
-        theme: Theme,
-        integration: Vec<(String, String)>,
-        launch: Launch,
+        birth: Birth,
     ) -> std::io::Result<()> {
+        let Birth {
+            stats,
+            settings,
+            theme,
+            launch,
+            integration: (integration, _),
+        } = birth;
         let Launch {
             working_directory,
             initial_input,
@@ -750,7 +1184,7 @@ impl TerminalPane {
                 cols: grid.cols,
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
-                terminal: app.settings().terminal(),
+                terminal: settings.terminal(),
                 theme,
                 // Dock'un **varlığı**, payı değil: `bt-core` caret'i ona göre
                 // devrediyor. Kaynağı doğum payının yuvası (`start` onu bir
@@ -780,7 +1214,7 @@ impl TerminalPane {
         let _ = self.ivars().shell_parent.set(shell_parent);
         // Host işaretlerinin listesi doğumda (037 Karar 2); canlı değişimi
         // `AppDelegate::reload_settings` getiriyor ([`Self::set_host_marks`]).
-        session.set_host_marks(&app.settings().remote_hosts);
+        session.set_host_marks(&settings.remote_hosts);
         // Oturum yuvaya girmeden önce gelmiş bir başlık haberi boş yuva bulup
         // düşmüş olabilir; o pencereyi pencerenin `start`'ı kapatıyor
         // (`TerminalWindow::start` → `refresh_title`), bu çağrı döner dönmez.
@@ -800,14 +1234,14 @@ impl TerminalPane {
                 dock_rows: self.ivars().dock_rows.get(),
                 cell: grid.cell,
             },
-            app.stats(),
+            stats,
             // **Yol yalnız dock'u olan pencerede kuruluyor** ve bu yapısal
             // (R5.1): dock'suz bir oturumda alternatif ekran geçişi hiçbir
             // şeyi değiştiremeyeceği için nöbet de yok. Bir koşulla
             // kapatılsaydı "hiç resize yok" iddiası bir dalın doğruluğuna
             // bağlı kalırdı.
             (self.ivars().dock_rows_at_birth.get() > 0)
-                .then(|| alt_screen_notifier(self.ivars().id)),
+                .then(|| alt_screen_notifier(self.ivars().id, self.ivars().lookup)),
         );
         // Uyandırma yolu kapanmadan kare istemiyoruz: aradaki bir `Wakeup`
         // sessizce düşerdi.
@@ -830,28 +1264,26 @@ impl TerminalPane {
         // `Settings::default()`'un) değerine çekiyor. `set_font`'un yeri
         // `load_settings` ama stilinki olamaz: link o an henüz yok.
         // Dock'un yazım efektleri de aynı gerekçeyle burada.
-        {
-            let settings = app.settings();
-            link.set_cursor_motion(settings.cursor_motion);
-            link.set_glyph_fx(settings.keypress, settings.erase);
-        }
+        link.set_cursor_motion(settings.cursor_motion);
+        link.set_glyph_fx(settings.keypress, settings.erase);
         // Açılış karesi: `Session` kirli doğar, link'i bir kez elle açıyoruz.
         link.request_frame();
         let _ = self.ivars().link.set(link);
-        // Hareketi Azalt link yuvaya girdikten **sonra**: ilk değer bu
-        // pencerenin link'ine buradan iniyor, sistemin bildirimi ve ayar
-        // kaydı sonradan `AppDelegate::apply_reduce_motion` ile bütün
-        // pencerelere. Hermetik koşuda çözülmüş değer `false` ve link o
-        // değerle doğuyor, yani çağrı no-op (`DisplayLink::set_reduce_motion`).
-        self.set_reduce_motion(app.reduce_motion());
+        // Hareketi Azalt link yuvaya girdikten **sonra**: ilk değer (doğum
+        // paketinin çözülmüş değeri) bu pane'in link'ine buradan iniyor,
+        // sistemin bildirimi ve ayar kaydı sonradan
+        // `AppDelegate::apply_reduce_motion` ile bütün pane'lere. Hermetik
+        // koşuda çözülmüş değer `false` ve link o değerle doğuyor, yani çağrı
+        // no-op (`DisplayLink::set_reduce_motion`).
+        self.set_reduce_motion(self.ivars().reduce_motion.get());
         // Tekerleğin kipi de aynı çözülmüş girdiden (Hareketi Azalt ayarın
         // üçüncü girdisi) ve aynı sonraki yoldan (`apply_reduce_motion`).
-        self.set_smooth_scroll(app.smooth_scroll());
+        self.set_smooth_scroll(self.ivars().smooth_scroll.get());
         // İmlecin çizim sayıları da açılışta bir kez iniyor ve **yuvadan**
         // okunuyor, elde kalan `link`'ten değil: link o çağrıda yuvaya
         // taşındı. `set_caret_style` aynı değerde no-op, yani kayıt anı
         // yoluyla çakışmıyor.
-        self.apply_caret(&app.settings());
+        self.apply_caret(&settings);
         // **Odak da tohumlanıyor** ve gerekçesi aynı sıralama: pencere
         // `makeKeyAndOrderFront` ile key oluyor, yani `windowDidBecomeKey:`
         // link yuvaya girmeden **önce** düşüyor ve o çağrı sessizce atılıyor.
@@ -873,7 +1305,7 @@ impl TerminalPane {
     /// geçiş birbirini kovalarsa (vim aç-kapa) kuyrukta bekleyen iki iş de
     /// aynı, güncel cevabı görür. Değişmemişse **hiçbir şey yapmıyor** —
     /// "geçiş başına bir resize" (R5.3) iddiasını tutan kapı bu.
-    pub(crate) fn alt_screen_did_change(&self, app: &AppDelegate) {
+    pub(crate) fn alt_screen_did_change(&self) {
         let Some(session) = self.ivars().session.get() else {
             return;
         };
@@ -884,19 +1316,39 @@ impl TerminalPane {
         }
         // Pay, ızgara ve link **tek blokta**: kare yolu da ana thread'de,
         // yani araya bir kare giremiyor ve yarım bir durum çizilmiyor.
-        self.refresh_geometry(app);
+        self.refresh_geometry();
+    }
+
+    /// View ▸ Bigger (Cmd +): punto farkı bir adım büyür.
+    pub(crate) fn zoom_in(&self) {
+        self.change_zoom(Zoom::bigger);
+    }
+
+    /// View ▸ Smaller (Cmd −): punto farkı bir adım küçülür.
+    pub(crate) fn zoom_out(&self) {
+        self.change_zoom(Zoom::smaller);
+    }
+
+    /// View ▸ Actual Size (Cmd 0): fark sıfırlanır, ayarın puntosu.
+    pub(crate) fn zoom_reset(&self) {
+        self.change_zoom(|_, _| Zoom::default());
     }
 
     /// Bigger, Smaller, Actual Size: bu pane'in geçici punto farkını
     /// `step` ile değiştirir ve fontu uygular. Dosyaya dokunmaz, süreli koşuda
     /// da çalışır — kullanıcının dünyasından bir şey okumuyor.
-    pub(crate) fn change_zoom(&self, step: impl FnOnce(Zoom, &FontOptions) -> Zoom) {
-        let Some(app) = app::delegate(self.mtm()) else {
-            return;
-        };
-        let zoom = step(self.ivars().zoom.get(), &app.settings().font);
+    fn change_zoom(&self, step: impl FnOnce(Zoom, &FontOptions) -> Zoom) {
+        let zoom = step(self.ivars().zoom.get(), &self.ivars().font.borrow());
         self.ivars().zoom.set(zoom);
-        self.apply_font(&app);
+        self.apply_font();
+    }
+
+    /// Ayarın fontu değişti (`AppDelegate::reload_settings`, farkın
+    /// [`TerminalPane::zoom_after_reload`]'la güncellenmesinden sonra):
+    /// saklanır ve uygulanır.
+    pub(crate) fn set_font(&self, font: &FontOptions) {
+        self.ivars().font.replace(font.clone());
+        self.apply_font();
     }
 
     /// Renderer'a ayarın fontunu bu pane'in geçici punto farkıyla verir;
@@ -908,10 +1360,10 @@ impl TerminalPane {
     /// değiştiğini söylüyor, `set_font` renderer'ın zaten o fontu isteyip
     /// istemediğini — uçtaki basış ya da farkla aynı puntoyu yazan kayıt
     /// atlası yeniden kurdurmaz.
-    pub(crate) fn apply_font(&self, app: &AppDelegate) {
-        let font = self.ivars().zoom.get().apply(&app.settings().font);
+    fn apply_font(&self) {
+        let font = self.ivars().zoom.get().apply(&self.ivars().font.borrow());
         if self.ivars().renderer.set_font(&font) {
-            self.refresh_geometry(app);
+            self.refresh_geometry();
         }
     }
 
@@ -931,12 +1383,16 @@ impl TerminalPane {
         }
     }
 
-    /// Temayı oturuma takas eder (aynı temada no-op, `Session::set_theme`).
-    /// Kromu, sekmenin noktasını ve arama panelini pencere boyuyor
-    /// (`TerminalWindow::set_theme`, bu çağrının tek çağıranı).
+    /// Temayı oturuma takas eder (aynı temada no-op, `Session::set_theme`)
+    /// ve arama panelini ona boyar; panel henüz doğmadıysa ilk ⌘F'de
+    /// oturumun temasıyla boyanıyor. Kromu ve sekmenin noktasını pencere
+    /// boyuyor (`TerminalWindow::set_theme`, bu çağrının tek çağıranı).
     pub(crate) fn set_theme(&self, theme: Theme) {
         if let Some(session) = self.ivars().session.get() {
             session.set_theme(theme);
+        }
+        if let Some(bar) = self.ivars().search.get() {
+            bar.paint(&theme, is_dark_background(&theme));
         }
     }
 
@@ -977,6 +1433,7 @@ impl TerminalPane {
     /// (`AppDelegate::reduce_motion`). Değer değişmediyse no-op
     /// (`bt_gpu::DisplayLink::set_reduce_motion`); link yoksa sessizce döner.
     pub(crate) fn set_reduce_motion(&self, reduce: bool) {
+        self.ivars().reduce_motion.set(reduce);
         if let Some(link) = self.ivars().link.get() {
             link.set_reduce_motion(reduce);
         }
@@ -987,6 +1444,7 @@ impl TerminalPane {
     /// sınıflamasında, `scrollWheel:`'de veriliyor ve `false` kolu bugünkü
     /// satır yolunun ta kendisi (027 Karar 5).
     pub(crate) fn set_smooth_scroll(&self, smooth: bool) {
+        self.ivars().smooth_scroll.set(smooth);
         self.ivars().view.set_smooth_scroll(smooth);
     }
 
@@ -1091,10 +1549,15 @@ impl TerminalPane {
     }
 
     /// Kapanış sırasının pane'e düşen adımları — **başlatır, beklemez**.
-    /// Çağıranı pencerenin `begin_close`'u (yükleme kuyruğunu bıraktıktan
-    /// sonra); onun iki çağıranı var: pencerenin kapanışı (`windowWillClose:`,
-    /// tutamak düşüyor) ve uygulamanın kapanışı (`AppDelegate::shutdown`,
-    /// bütün tutamaklar tek son tarihe kadar bekleniyor).
+    /// Çağıranı pencerenin `begin_close`'u; onun iki çağıranı var: pencerenin
+    /// kapanışı (`windowWillClose:`, tutamak düşüyor) ve uygulamanın kapanışı
+    /// (`AppDelegate::shutdown`, bütün tutamaklar tek son tarihe kadar
+    /// bekleniyor).
+    ///
+    /// Sıra zorunlu: önce yükleme kuyruğu bırakılıyor (süreçler öldürülüyor
+    /// ve yarım dosya siliniyor; sonucu gösterecek bir dock kalmadı), **sonra**
+    /// ritim, `Waker` ve `SIGHUP` — ters sırada iptal kabuğun `SIGHUP`'ından
+    /// sonra giderdi.
     ///
     /// 0. Pane'i kapanmış say ([`PaneIvars::closed`]) ve çerçeve gözlemcisini
     ///    sök: sekme çubuğu kapanırken AppKit içeriği yeniden yerleştirebiliyor
@@ -1119,6 +1582,7 @@ impl TerminalPane {
     /// sökümü kayıt yoksa no-op). Oturum hiç doğmadıysa `None` — kapanacak
     /// bir şey yok.
     pub(crate) fn begin_close(&self) -> Option<Closing> {
+        self.abandon_uploads();
         self.ivars().closed.set(true);
         // SAFETY: gözlemci bu nesne, `observe_frame`'de kaydedildi; kayıt
         // yoksa no-op.
@@ -1143,8 +1607,8 @@ impl TerminalPane {
     /// `Retained<BateriView>` olarak duruyor ve pane nesnesiyle birlikte
     /// gidiyor. Pane bir pencereye takılı değilse ölçek yok ve hiçbir şey
     /// yapılmıyor ([`TerminalPane::sync_geometry`]).
-    pub(crate) fn refresh_geometry(&self, app: &AppDelegate) {
-        let Some(grid) = self.sync_geometry(app) else {
+    pub(crate) fn refresh_geometry(&self) {
+        let Some(grid) = self.sync_geometry() else {
             return;
         };
         self.ivars()
@@ -1178,7 +1642,7 @@ impl TerminalPane {
     ///
     /// Ölçek pane'in **penceresinden** (`NSView::window`); pane bir pencereye
     /// takılı değilse `None` — uydurulmuş bir ölçek atlası yanlış kurardı.
-    fn sync_geometry(&self, app: &AppDelegate) -> Option<Grid> {
+    fn sync_geometry(&self) -> Option<Grid> {
         let scale = self.window()?.backingScaleFactor();
         // Pane değil terminal view'ı: ikisi bugün aynı boyda ama çizilen
         // yüzey bu view'ın layer'ı, ölçü de onun olmalı.
@@ -1194,13 +1658,360 @@ impl TerminalPane {
         // belirti bir piksellik hücre kayması, yani sessiz olurdu.
         let renderer = &self.ivars().renderer;
         let cell = renderer.cell_metrics(scale);
-        app.post_notices(Source::Font, font_messages(renderer.font_notice()));
+        self.host().post_notices(
+            self.ivars().id,
+            Source::Font,
+            font_messages(renderer.font_notice()),
+        );
         Some(split_into_grid(
             width_px,
             height_px,
             cell,
             self.ivars().dock_rows.get(),
         ))
+    }
+}
+
+/// Pane düzeyindeki eylemler (R2.3) ve geçmişte arama (033) — menü
+/// seçicileri ve arama panelinin kontrolleri buraya iniyor.
+impl TerminalPane {
+    /// Uzak durum ya da başlık değişti: önce yükleme kuyruğunun bağlantı
+    /// kenarı ([`TerminalPane::check_upload_connection`]; ssh kapandıysa
+    /// bekleyenler iptal — 037 Karar 7 → Kullanıcı kararı 6), sonra sahip
+    /// başlığı ve sekmenin noktasını yeniden okuyor
+    /// ([`PaneHost::title_changed`]).
+    pub(crate) fn remote_or_title_changed(&self) {
+        self.check_upload_connection();
+        self.host().title_changed(self.ivars().id);
+    }
+
+    /// Edit ▸ Find ▸ Find… (⌘F): paneli açar, alanı odaklar ve metnini
+    /// seçer (033 Karar 5); panel açıksa yalnız odak ve seçim. Pane'in
+    /// sorgusu yoksa alan find panosunun metniyle doluyor (Karar 6).
+    pub(crate) fn find(&self) {
+        self.open_search(true);
+    }
+
+    /// Edit ▸ Find ▸ Find Next (⌘G): bir önceki, **daha eski** eşleşme
+    /// (033 Karar 3).
+    pub(crate) fn find_next(&self) {
+        self.search_step(SearchDirection::Older);
+    }
+
+    /// Edit ▸ Find ▸ Find Previous (⇧⌘G): daha yeni eşleşme.
+    pub(crate) fn find_previous(&self) {
+        self.search_step(SearchDirection::Newer);
+    }
+
+    /// Edit ▸ Clear to Start (⌘K; 034 Karar 1): ekranı ve geçmişi
+    /// siler, o anki blok kalır — `Session::clear_to_start`. Kabuğa bayt
+    /// gitmiyor; alternatif ekranda öğe gri ve çağrı zaten no-op.
+    pub(crate) fn clear_to_start(&self) {
+        if let Some(session) = self.session() {
+            session.clear_to_start();
+        }
+    }
+
+    /// Edit ▸ Clear Scrollback (⌥⌘K): yalnız geçmiş —
+    /// `Session::clear_scrollback`.
+    pub(crate) fn clear_scrollback(&self) {
+        if let Some(session) = self.session() {
+            session.clear_scrollback();
+        }
+    }
+
+    /// View ▸ Scroll to Top (⌘Home): geçmişin başı. `bt-core`'a yeni
+    /// kaydırma API'si yok (034 Muhakeme): `scroll_page`'in
+    /// `saturating_mul`'u `i32::MAX` sayfayı geçmişin ucuna kırpıyor.
+    pub(crate) fn scroll_to_top(&self) {
+        self.scroll_pages(i32::MAX);
+    }
+
+    /// View ▸ Scroll to Bottom (⌘End): dip — `scroll_locked` bant
+    /// kuralıyla dibe iniyor.
+    pub(crate) fn scroll_to_bottom(&self) {
+        self.scroll_pages(-i32::MAX);
+    }
+
+    /// View ▸ Page Up (⌘PgUp): Shift+PgUp'ın yolu.
+    pub(crate) fn page_up(&self) {
+        self.scroll_pages(1);
+    }
+
+    /// View ▸ Page Down (⌘PgDn): Shift+PgDn'ın yolu.
+    pub(crate) fn page_down(&self) {
+        self.scroll_pages(-1);
+    }
+
+    /// Shell ▸ Cancel Upload (⌘.): bu pane'in bütün yükleme kuyruğu, akan
+    /// kalem uzun sürdüyse önce sorarak ([`TerminalPane::request_stop`]).
+    pub(crate) fn cancel_uploads(&self) {
+        self.request_stop(true);
+    }
+
+    /// View ▸'nin dört kaydırması: `Session::scroll_page`'in yolu
+    /// (Shift+PgUp/PgDn'ın ta kendisi) — kesir sıfırlanıyor, süzülme nesli
+    /// artıyor, bant kuralı `scroll_locked`'ta. Alternatif ekranda `None` ve
+    /// öğeler zaten gri; cevap burada okunmuyor.
+    fn scroll_pages(&self, pages: i32) {
+        if let Some(session) = self.session() {
+            session.scroll_page(pages);
+        }
+    }
+
+    /// Arama paneli — ilk çağrıda kurulur, temaya boyanır.
+    fn search_bar(&self) -> &SearchBar {
+        self.ivars().search.get_or_init(|| {
+            // Panel pane'in içinde, Metal katmanını taşıyan view'ın kardeşi
+            // (033 → R4.1; pane o kapsayıcının ta kendisi, 039 Karar 2).
+            // Alanın delegesi ve kontrollerin hedefi pane — ikisi de zayıf,
+            // paneli pane tutuyor.
+            let bar = SearchBar::new(
+                self.mtm(),
+                self,
+                self.view(),
+                self,
+                ProtocolObject::from_ref(self),
+            );
+            if let Some(session) = self.session() {
+                let theme = session.theme();
+                bar.paint(&theme, is_dark_background(&theme));
+            }
+            bar
+        })
+    }
+
+    /// Paneli açar (açıksa yerinde bırakır) ve sorguyu uygular; `focus`
+    /// ise alanı odaklayıp metnini seçer (⌘F).
+    /// Sorgu bu çağrıda oturuma verildiyse `true` ([`TerminalPane::apply_search`]).
+    fn open_search(&self, focus: bool) -> bool {
+        let bar = self.search_bar();
+        if bar.query().text.is_empty()
+            && let Some(text) = find_pasteboard_text()
+        {
+            bar.set_text(&text);
+        }
+        bar.show(!self.ivars().reduce_motion.get());
+        if focus && let Some(window) = self.window() {
+            window.makeFirstResponder(Some(bar.field()));
+            // SAFETY: gönderen isteğe bağlı; alanın kendi eylemi.
+            unsafe { bar.field().selectText(None) };
+        }
+        self.apply_search()
+    }
+
+    /// Alanın ve anahtarların sorgusu değiştiyse oturuma verir, geçerli
+    /// eşleşmeyi açığa çıkarır ve etiketi yazar; verdiyse `true`. Aynı sorgu
+    /// no-op.
+    fn apply_search(&self) -> bool {
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.session()) else {
+            return false;
+        };
+        if !bar.is_shown() {
+            return false;
+        }
+        let query = bar.query();
+        if !bar.take_change(&query) {
+            return false;
+        }
+        let status = session.set_search(&query);
+        self.ivars().search_status.set(status);
+        let report = if status == SearchStatus::Ready {
+            session.search_reveal(self.search_cover(), self.ivars().smooth_scroll.get())
+        } else {
+            SearchReport::default()
+        };
+        bar.set_count(status, report);
+        self.kick_search();
+        true
+    }
+
+    /// Sayım dizininin sürücüsünü kurar (033 phase-5, Karar 2-B): ana
+    /// kuyrukta bir sonraki turda bir parça. Zaten kuruluysa, panel kapalıysa
+    /// ya da sorgu sayılacak bir desen değilse no-op.
+    ///
+    /// Çağıranları: sorgu değişimi, gezinme (sırası bilinmeyen yeni bir
+    /// eşleşme bir geçiş daha isteyebilir) ve defter haberi
+    /// ([`Wake::search_changed`]) — sonuncusu arka sekmede de.
+    pub(crate) fn kick_search(&self) {
+        let shown = self.ivars().search.get().is_some_and(SearchBar::is_shown);
+        if !shown
+            || self.ivars().search_status.get() != SearchStatus::Ready
+            || self.ivars().search_driving.replace(true)
+        {
+            return;
+        }
+        self.schedule_search_chunk();
+    }
+
+    /// Sürücünün bir turu ana kuyruğa: pane kimlikle bulunuyor
+    /// (`ShellWake`'in örüntüsü), kapanan pane'de iş düşüyor.
+    fn schedule_search_chunk(&self) {
+        let (id, lookup) = (self.ivars().id, self.ivars().lookup);
+        DispatchQueue::main().exec_async(move || {
+            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
+            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.search_chunk();
+            }
+        });
+    }
+
+    /// Dizinin bir parçası ve etiket; sayım bitmediyse bir sonraki tura
+    /// yeniden kuruluyor — tuş olayları turların arasına giriyor. Durma
+    /// koşulu çekirdeğin `complete`'i (geçiş bitti **ve** bekleyen defter
+    /// haberi yok), panelin kapanması ya da aramanın düşmesi.
+    fn search_chunk(&self) {
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.session()) else {
+            self.ivars().search_driving.set(false);
+            return;
+        };
+        let status = self.ivars().search_status.get();
+        if !bar.is_shown() || status != SearchStatus::Ready {
+            self.ivars().search_driving.set(false);
+            return;
+        }
+        let Some(report) = session.search_step() else {
+            self.ivars().search_driving.set(false);
+            return;
+        };
+        bar.set_count(status, report);
+        if report.complete {
+            self.ivars().search_driving.set(false);
+        } else {
+            self.schedule_search_chunk();
+        }
+    }
+
+    /// ⏎ / ⌘G / ⇧⏎ / ⇧⌘G: panel kapalıysa önce açılıyor (odak yerinde
+    /// kalıyor), sonra bir sonraki eşleşme.
+    ///
+    /// Açılış sorguyu **yeniden** verdiyse (Esc aramayı kapatmıştı) adım
+    /// o seçimin kendisi: `set_search` en yakın eşleşmeyi seçip açığa
+    /// çıkardı ve üstüne bir adım daha ⇧⌘G'yi en eskiye sardırırdı
+    /// (`/code-review`).
+    fn search_step(&self, direction: SearchDirection) {
+        if self.open_search(false) {
+            return;
+        }
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.session()) else {
+            return;
+        };
+        let status = self.ivars().search_status.get();
+        if status != SearchStatus::Ready {
+            return;
+        }
+        let report = session.search_next(
+            direction,
+            self.search_cover(),
+            self.ivars().smooth_scroll.get(),
+        );
+        bar.set_count(status, report);
+        if !report.complete {
+            self.kick_search();
+        }
+    }
+
+    /// Esc ve kapatma düğmesi (033 Karar 5): panel gider, **pencere yerinde
+    /// kalır**, geçerli eşleşme ızgaranın seçimi olur ve klavye terminale
+    /// döner. Sorgu alanda kalıyor (Karar 6).
+    pub(crate) fn close_search(&self) {
+        let Some(bar) = self.ivars().search.get() else {
+            return;
+        };
+        bar.hide(!self.ivars().reduce_motion.get());
+        bar.forget_applied();
+        if let Some(session) = self.session() {
+            session.select_search_match();
+            session.clear_search();
+        }
+        self.ivars().search_status.set(SearchStatus::Empty);
+        if let Some(window) = self.window() {
+            window.makeFirstResponder(Some(self.view()));
+        }
+    }
+
+    /// Edit ▸ Find ▸ Use Selection for Find (⌘E; 033 Karar 6): seçimin ilk
+    /// satırı (ızgara ya da dock) sorgu olur — regex kipinde kaçırılarak —,
+    /// find panosuna yazılır ve panel alanı odaklanmış açılır.
+    pub(crate) fn use_selection_for_find(&self) {
+        let Some(text) = self.session().and_then(|session| session.selection_text()) else {
+            return;
+        };
+        let bar = self.search_bar();
+        let Some(query) = selection_query(&text, bar.regex()) else {
+            return;
+        };
+        bar.set_text(&query);
+        // Pano **düz** metni taşıyor: öteki uygulamalar regex kipini bilmiyor.
+        if let Some(plain) = selection_query(&text, false) {
+            // SAFETY: AppKit'in dışa açtığı sabit ad, süreç boyunca yaşıyor.
+            let name = unsafe { NSPasteboardNameFind };
+            clipboard::copy(&NSPasteboard::pasteboardWithName(name), Some(plain));
+        }
+        self.open_search(true);
+    }
+
+    /// Find Next/Previous'ın kapısı: pane'in sorgusu ya da find panosunda
+    /// metin var mı.
+    fn has_query(&self) -> bool {
+        self.ivars()
+            .search
+            .get()
+            .is_some_and(|bar| !bar.query().text.is_empty())
+            || find_pasteboard_text().is_some()
+    }
+
+    /// Panelin örttüğü hücreler; panel kapalıysa hiçbiri. Panelin
+    /// koordinatı pane'in (kapsayıcısı o).
+    fn search_cover(&self) -> SearchCover {
+        let Some(bar) = self.ivars().search.get().filter(|bar| bar.is_shown()) else {
+            return SearchCover::default();
+        };
+        let view = self.view();
+        view.search_cover(view.convertRect_fromView(bar.resting_frame(), Some(self)))
+    }
+
+    /// Yükleme kuyruğu (`uploader`'ın yarısı).
+    pub(crate) fn uploads(&self) -> &RefCell<Uploads> {
+        &self.ivars().uploads
+    }
+
+    /// Açık yükleme sayfasının yuvası.
+    pub(crate) fn upload_alert(&self) -> &RefCell<Option<Retained<NSAlert>>> {
+        &self.ivars().upload_alert
+    }
+
+    /// Açık durdurma sorusunun yuvası.
+    pub(crate) fn upload_stop(&self) -> &RefCell<Option<StopSheet>> {
+        &self.ivars().upload_stop
+    }
+
+    /// Açık "Show files (N)" popover'ının yuvası.
+    pub(crate) fn upload_list(&self) -> &RefCell<Option<UploadPopover>> {
+        &self.ivars().upload_list
+    }
+
+    /// Popover'ı kapatan olayın zamanı.
+    pub(crate) fn list_closed_at(&self) -> &Cell<Option<f64>> {
+        &self.ivars().list_closed_at
+    }
+
+    /// Kuyruğun gönderilen ve toplam baytı; kuyruk yoksa `None` — sahibin
+    /// Dock simgesi toplamının girdisi ([`PaneHost::uploads_changed`]).
+    pub(crate) fn upload_totals(&self) -> Option<(u64, u64)> {
+        self.ivars().uploads.borrow().totals()
+    }
+
+    /// Kuyruk sürüyor mu (Dock simgesi, `cancelUpload:`'ın kapısı).
+    pub(crate) fn upload_active(&self) -> bool {
+        self.ivars().uploads.borrow().active()
+    }
+
+    /// Başlığın `↑ N% · ` önekinin yüzdesi; yükleme akmıyorsa `None`
+    /// (`upload::titled`).
+    pub(crate) fn upload_title_percent(&self) -> Option<u8> {
+        self.ivars().uploads.borrow().title_percent()
     }
 }
 
@@ -1219,6 +2030,60 @@ mod tests {
         let (a, b) = (super::new_tab_id(), super::new_tab_id());
         assert_ne!(a, b, "iki NSUUID kimliği ayrı olmalı");
         assert_eq!(bt_core::TabId::from_url(&a.url()), Some(a));
+    }
+
+    /// Sahte sahip: olayları kimlikleriyle kaydediyor — pencere yok, pano
+    /// yok (039 phase-2).
+    #[derive(Default)]
+    struct FakeHost(std::cell::RefCell<Vec<(u64, String)>>);
+
+    impl super::PaneHost for FakeHost {
+        fn title_changed(&self, pane: u64) {
+            self.0.borrow_mut().push((pane, "title".into()));
+        }
+        fn shell_exited(&self, pane: u64) {
+            self.0.borrow_mut().push((pane, "exit".into()));
+        }
+        fn uploads_changed(&self, pane: u64) {
+            self.0.borrow_mut().push((pane, "uploads".into()));
+        }
+        fn notify(&self, pane: u64, title: &str, _body: &str) {
+            self.0.borrow_mut().push((pane, format!("notify {title}")));
+        }
+        fn post_notices(&self, pane: u64, _source: crate::notices::Source, _messages: Vec<String>) {
+            self.0.borrow_mut().push((pane, "notices".into()));
+        }
+        fn copy_to_clipboard(&self, pane: u64, text: String) {
+            self.0.borrow_mut().push((pane, format!("copy {text}")));
+        }
+    }
+
+    #[test]
+    fn title_and_copy_events_reach_the_host_with_the_pane_id() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let host = FakeHost::default();
+        // Başlık: bayrak iniyor, olay sahibe pane'in kimliğiyle.
+        // Pane'in kenarı bayrak indikten sonra koşuyor.
+        let pending = AtomicBool::new(true);
+        let edge_saw = std::cell::Cell::new(true);
+        super::announce_title(
+            &pending,
+            || edge_saw.set(pending.load(Ordering::Acquire)),
+            &host,
+            7,
+        );
+        assert!(!pending.load(Ordering::Acquire));
+        assert!(!edge_saw.get(), "kenar bayrak inmeden koştu");
+        // Kopya: yuvadaki metin sahibe gidiyor, genel panoya değil; boş yuva
+        // olay doğurmuyor.
+        let copy = crate::clipboard::PendingCopy::default();
+        assert!(copy.put("osc52".into()));
+        super::announce_copy(&copy, &host, 7);
+        super::announce_copy(&copy, &host, 7);
+        assert_eq!(
+            *host.0.borrow(),
+            vec![(7, "title".to_owned()), (7, "copy osc52".to_owned())]
+        );
     }
 
     #[test]

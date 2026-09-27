@@ -9,6 +9,7 @@ use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::ffi::{OsString, c_void};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,10 +35,11 @@ use objc2_foundation::{
 
 use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
-use crate::pane::TerminalPane;
+use crate::pane::{PaneLaunch, TerminalPane};
 use crate::settings_window::SettingsWindow;
 use crate::watch::{Notify, Watch};
-use crate::window::{self, CloseScope, Launch, TerminalWindow};
+use crate::window::{self, CloseScope, Launch, TerminalWindow, WindowHost};
+use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
 use crate::{child, settings};
 
@@ -522,6 +524,14 @@ pub(crate) fn delegate(mtm: MainThreadMarker) -> Option<Retained<AppDelegate>> {
     object.downcast_ref::<AppDelegate>().map(Message::retain)
 }
 
+/// Kimliği `id` olan açık pane — pane'in doğum paketindeki arama yolu
+/// (`pane::PaneLookup`): okuyucu thread'den ve arka plan işlerinden ana
+/// kuyruğa dönen işler pane'i bununla buluyor (039 Karar 3). Düz bir `fn`,
+/// yani `Send` ve pane'in modülü `AppDelegate`'i görmüyor.
+pub(crate) fn pane_by_id(mtm: MainThreadMarker, id: u64) -> Option<Retained<TerminalPane>> {
+    delegate(mtm)?.pane(id)
+}
+
 /// İzleme kaynaklarının bildirimi ([`notify_settings_changed`]).
 fn watch_notify() -> Notify {
     Arc::new(notify_settings_changed)
@@ -580,7 +590,7 @@ pub(crate) fn dock_rows_for(alt_screen: bool, birth: u16) -> u16 {
 }
 
 /// Anahtarı tutan ve **kapanmamış** ilk öğe — kimlikle aramaların
-/// (`AppDelegate::pane`, `window_of_pane`, `window_by_tab`) tek kuralı.
+/// (`AppDelegate::pane`, `window_by_tab`) tek kuralı.
 /// `key` öğe başına `(eşleşiyor mu, kapandı mı)` verir.
 ///
 /// Kapanmış öğe eşleşse de `None`: pane'in penceresi listeden bir tur sonra
@@ -1632,8 +1642,8 @@ impl AppDelegate {
         self.ivars().windows.borrow().clone()
     }
 
-    /// Kimliği `id` olan pencere; kapanmışsa `None` (alternatif ekran
-    /// habercisi, `window::alt_screen_notifier`).
+    /// Kimliği `id` olan pencere; listeden çıktıysa `None` — pane'in sahip
+    /// tutamağı (`window::WindowHost`), kapatma sorusu ve arama yolları.
     pub(crate) fn window(&self, id: u64) -> Option<Retained<TerminalWindow>> {
         self.ivars()
             .windows
@@ -1643,24 +1653,30 @@ impl AppDelegate {
             .cloned()
     }
 
-    /// Kimliği `id` olan pane'in penceresi; pane kapanmışsa `None` — okuyucu
-    /// thread'den ana kuyruğa dönen işlerin (`ShellWake`, alternatif ekran
-    /// habercisi) pencereye ait işi (başlık, arama sayımı, kapanış) buradan.
+    /// Kimliği `id` olan pane; kapanmışsa `None` — okuyucu thread'den ana
+    /// kuyruğa dönen işlerin (`ShellWake`, alternatif ekran habercisi,
+    /// yükleme) yolu ([`pane_by_id`]). Pencereye ait işi pane sahibinden
+    /// istiyor (`window::WindowHost`).
     ///
     /// [`AppDelegate::window`]'ın aksine kapanışı başlamış pane'i **bulmuyor**
     /// ([`find_open`]): pencere listeden bir tur sonra çıkıyor ve o arada
-    /// gelen bayat bir haber kapanmış oturuma iş yapmamalı.
-    pub(crate) fn window_of_pane(&self, id: u64) -> Option<Retained<TerminalWindow>> {
+    /// gelen bayat bir haber kapanmış oturuma iş yapmamalı. Bugün pencere
+    /// başına tek pane (bölmeler phase-3'te).
+    pub(crate) fn pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
         find_open(self.windows(), |window| {
             let pane = window.pane();
             (pane.id() == id, pane.is_closed())
         })
+        .map(|window| window.pane_handle())
     }
 
-    /// Kimliği `id` olan pane; kapanmışsa `None` ([`AppDelegate::window_of_pane`]).
-    /// Bu phase'de pencere başına tek pane (039 phase-1).
-    pub(crate) fn pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
-        self.window_of_pane(id).map(|window| window.pane_handle())
+    /// Uygulamanın Dock simgesindeki yükleme çubuğu — bütün pane'lerin
+    /// toplamı (`uploader::refresh_dock_tile`); pane'in
+    /// `PaneHost::uploads_changed` olayı buraya iniyor.
+    pub(crate) fn refresh_dock_tile(&self) {
+        let windows = self.windows();
+        let panes: Vec<&TerminalPane> = windows.iter().map(|window| window.pane()).collect();
+        crate::uploader::refresh_dock_tile(self.mtm(), &panes);
     }
 
     /// Sekme kimliği `id` olan pane'in penceresi; kapanmışsa `None`
@@ -1771,20 +1787,37 @@ impl AppDelegate {
         let mtm = self.mtm();
         // Pencere ve pane aynı sayaçtan: tek ad alanı, çakışma yok.
         let (id, pane_id) = (self.next_window_id(), self.next_window_id());
-        let window =
-            TerminalWindow::new(mtm, id, pane_id, self.ivars().run).map_err(|e| e.to_string())?;
-        if let Some(from) = from {
-            window.pane().set_zoom(from.pane().zoom());
-        }
-        window
-            .pane()
-            .request_font(&self.ivars().settings.borrow().font);
+        let session = from.and_then(|from| from.pane().session());
+        let theme = session.map_or_else(|| self.resolve_theme(), |session| session.theme());
+        let dir = session
+            .and_then(|session| session.working_directory())
+            .or_else(child::working_directory);
+        let initial = initial_line(opening, session.and_then(|session| session.remote_line()));
+        // Pane'in doğum paketi (039 Karar 3): girdilerin hepsi burada, pane
+        // `AppDelegate`'e uzanmıyor. Entegrasyon **bir kez** soruluyor ve
+        // iki cevabı birden veriyor (ortam + dock payı).
+        let launch = PaneLaunch {
+            id: pane_id,
+            run: self.ivars().run,
+            host: Rc::new(WindowHost::new(id)),
+            lookup: pane_by_id,
+            stats: self.stats(),
+            settings: self.settings().clone(),
+            theme,
+            launch: Launch {
+                working_directory: dir,
+                initial_input: initial,
+            },
+            integration: self.shell_integration(),
+            reduce_motion: self.reduce_motion(),
+            smooth_scroll: self.smooth_scroll(),
+            zoom: from.map_or_else(Zoom::default, |from| from.pane().zoom()),
+        };
+        let window = TerminalWindow::new(mtm, id, launch).map_err(|e| e.to_string())?;
         window.set_subtitle(&NSString::from_str(
             &self.ivars().notices.borrow().subtitle(),
         ));
         self.ivars().windows.borrow_mut().push(window.clone());
-        let session = from.and_then(TerminalWindow::session);
-        let theme = session.map_or_else(|| self.resolve_theme(), |session| session.theme());
         // Krom pencere **görünmeden**: sonra boyansaydı her ⌘T bir kare
         // sistemin gri başlık çubuğunu gösterirdi.
         window.apply_chrome(&theme);
@@ -1792,15 +1825,7 @@ impl AppDelegate {
             Some(from) if opening != Opening::Window => window.show_as_tab_of(from),
             _ => window.show_after(from),
         }
-        let dir = session
-            .and_then(|session| session.working_directory())
-            .or_else(child::working_directory);
-        let initial = initial_line(opening, session.and_then(|session| session.remote_line()));
-        let launch = Launch {
-            working_directory: dir,
-            initial_input: initial,
-        };
-        if let Err(e) = window.start(self, mtm, theme, launch) {
+        if let Err(e) = window.start(mtm) {
             window.close();
             return Err(format!("shell başlatılamadı: {e}"));
         }
@@ -2034,11 +2059,11 @@ impl AppDelegate {
             if motion_changed {
                 self.apply_reduce_motion();
             }
-            // Ayarlar ve fark yazıldıktan **sonra**: `apply_font` ikisini de
-            // okuyor.
+            // Fark yazıldıktan **sonra**: pane fontu yeni farkla uyguluyor.
             if changes.font {
+                let font = self.settings().font.clone();
                 for window in &windows {
-                    window.pane().apply_font(self);
+                    window.pane().set_font(&font);
                 }
             }
             self.post_notices(Source::Write, Vec::new());
@@ -2289,7 +2314,10 @@ impl AppDelegate {
         // görülmüş sayılıyor, sonra doğan pencere temayı zaten görünümden
         // seçiyor.
         let windows = self.windows();
-        if windows.iter().all(|window| window.session().is_none()) {
+        if windows
+            .iter()
+            .all(|window| window.pane().session().is_none())
+        {
             return;
         }
         // Ödünç `choose_theme`'in sonunda düşüyor; oradaki `post_notices`

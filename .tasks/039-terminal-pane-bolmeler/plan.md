@@ -103,7 +103,7 @@ AppDelegate.reload_settings ─▶ her pencere ─▶ her pane.set_*()
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | phase-3 | |
 | phase-4 | |
 | kapı | |

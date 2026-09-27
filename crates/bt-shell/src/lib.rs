@@ -5,8 +5,15 @@
 //! başına bir renderer (`pane`). Kareyi de sürmez: pane'i, oturumu ve
 //! display link'i birbirine bağlar, gerisi `bt-gpu`'nun ritmidir. Uygulama
 //! geneli (`app`), pencere başına olan (`window`: krom, sekme, kapatma
-//! sorusu) ve oturum başına olan (`pane`: `NSView` alt sınıfı, oturumun
-//! çekirdeği) ayrı nesnelerde. Klavye buradan PTY'ye akar (`keys`, `view`,
+//! sorusu, sekme eylemleri) ve oturum başına olan (`pane`: `NSView` alt
+//! sınıfı; oturumun çekirdeği, arama paneli, yükleme kuyruğu ve pane
+//! düzeyindeki menü seçicileri) ayrı nesnelerde. Pane ile sahibi arasındaki
+//! sınır üç parça (039 Karar 1–3): girdiler doğumda tek pakette
+//! (`pane::PaneLaunch`), olaylar bir trait'ten (`pane::PaneHost`; bugünkü
+//! sahip `window::WindowHost`), menünün karşıladığı her iş pane'de adlı bir
+//! yöntem — seçici onu çağıran sarmalayıcı. Pane modülü `AppDelegate`'e
+//! uzanmıyor; ana kuyruk dönüşleri pane'i sahibin verdiği yoldan
+//! (`pane::PaneLookup`) kimlikle buluyor. Klavye buradan PTY'ye akar (`keys`, `view`,
 //! `clipboard`), fare de buradan oturuma (seçim ve kaydırma, `view`);
 //! Finder'dan bırakılan dosyanın yolu da buradan giriş satırına düşer
 //! (`view`'ın sürükleme hedefi + `quote`'un kabuk kaçışı);
@@ -20,7 +27,7 @@
 //! (`app`, `NSApp.effectiveAppearance`'ın KVO'suyla) ve pencere kromunu
 //! temaya boyayan (`window`). Ana menü (`menu`) uygulama, Shell,
 //! Edit, View ve Window menüsü; öğeleri hedefsiz eylem. View'da Theme ▸ seçimi
-//! ayar dosyasına yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan ve pencereye
+//! ayar dosyasına yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan ve pane'e
 //! ait geçici punto (`zoom`).
 //! **Çok pencere ve macOS'un kendi sekmeleri** (`.tasks/026-sekmeler`): her
 //! sekme bir `NSWindow` ve tek pane'inde kendi oturumu (`window`, `pane`); pencereleri açan,

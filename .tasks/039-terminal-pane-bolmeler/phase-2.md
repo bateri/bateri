@@ -62,13 +62,73 @@ _Requirements: R2.1, R2.2, R2.3, R5_
 
 ## Checklist
 
-- [ ] Arama ve delegesi pane'de
-- [ ] Pane düzeyi seçiciler + adlı eylem yöntemleri pane'de
-- [ ] Yükleme (`uploader.rs`) pane'de
-- [ ] `PaneLaunch` + `PaneHost`; pane'de `app::delegate` yok
-- [ ] `view.rs` sahibi `superview()`'dan
-- [ ] `CLAUDE.md` ve `lib.rs` başlığı
-- [ ] Test: `PaneHost`'un sahte bir uygulamasıyla başlık/kopya olayının
+- [x] Arama ve delegesi pane'de
+- [x] Pane düzeyi seçiciler + adlı eylem yöntemleri pane'de
+- [x] Yükleme (`uploader.rs`) pane'de
+- [x] `PaneLaunch` + `PaneHost`; pane'de `app::delegate` yok
+- [x] `view.rs` sahibi `superview()`'dan
+- [x] `CLAUDE.md` ve `lib.rs` başlığı
+- [x] Test: `PaneHost`'un sahte bir uygulamasıyla başlık/kopya olayının
       pencereye değil sahibe gittiği (AppKit'siz sınanabilen kısım)
-- [ ] Doğrulama geçti (`make hepsi`, `make duman`, `make test-yaris`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] Doğrulama geçti (`make hepsi`, `make duman`, `make test-yaris`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+
+## Uygulama Notları
+
+- **Sahip tutamağı pencereyi kimlikle buluyor** (`window::WindowHost {
+  window: u64 }`, `app.window(id)`): pencere kimliği `open_window`'da pencere
+  doğmadan çekiliyor, yani tutamak doğum paketine girebiliyor — sonradan
+  kurulan yuva, geri referans ya da çember yok. `PaneHost`'un yöntemleri
+  AppKit tipi değil pane kimliği (`u64`) alıyor: sahte sahiple sınanabilen
+  kısım bu sayede var ve phase-3'te sahip olayın hangi pane'den geldiğini
+  biliyor.
+- **Ana kuyruk dönüşleri `PaneLookup` ile** (`fn(MainThreadMarker, u64) ->
+  Option<Retained<TerminalPane>>`, sahibin verdiği `app::pane_by_id`): düz
+  `fn` göstericisi `Send + Copy`, yani `ShellWake`, alternatif ekran
+  habercisi, uzak yoklama, arama sürücüsü, yükleme thread'leri ve Esc
+  izleyicileri onu yakalıyor. `AppDelegate::window_of_pane` kalktı; `pane(id)`
+  doğrudan `find_open`'dan (`lookup_skips_closed_panes` bekçisi aynen).
+- **Doğum paketi `new`'de**, `start`'ta değil: `TerminalPane::new(mtm, frame,
+  PaneLaunch)` kalıcı alanları ivar'a yazıyor (sahip, arama yolu, font,
+  Hareketi Azalt, tekerlek kipi, punto farkı), yalnız `start`'ın tükettiği
+  yarıyı (`Birth`: `Stats`, ayar kopyası, tema, `Launch`, entegrasyon)
+  `RefCell<Option<_>>`'da tutuyor. `request_font` artık `new`'in son adımı
+  (önceki sıra: `new` → `set_zoom` → `request_font`; arada iş yoktu).
+  Entegrasyon, tema ve dizin `open_window`'da pencere doğmadan çözülüyor —
+  hepsi ayardan ya da `from`'dan, geometriye bağlı değil.
+- **Başlık yolu ikiye bölündü**: pencerenin `refresh_title`'ı yalnız başlık +
+  sekme noktası; yükleme kuyruğunun bağlantı kenarı
+  (`check_upload_connection`) pane'in ve olaydan **önce** koşuyor
+  (`TerminalPane::remote_or_title_changed`, başlık işi). Yükleme yüzdesinin
+  başlığı `host.title_changed` — kenarı sormuyor, döngü yok.
+- **Retain çemberi kapatıldı**: `SearchBar` kapsayıcısını (`parent`)
+  tutuyordu; pane paneli tuttuğu için pane → panel → pane çemberi pane'i
+  (renderer, link) hiç düşürmezdi. Alan kalktı, `resting_frame` ölçüyü
+  yüzeyin `superview`'ından alıyor, `search_cover` pane'i kaynak veriyor.
+- **Kapanış sırası pane'de**: `begin_close` önce `abandon_uploads`, sonra
+  ritim/`Waker`/`SIGHUP` (iptal `SIGHUP`'tan önce).
+- **Davranış farkı (bilinçli)**: OSC 52 kopyası `put` ile ana kuyruk işi
+  arasında pane'i kapanmışsa artık düşüyor (eskiden genel panoya yine
+  yazılıyordu) — metin sahibe gidiyor ve kapanmış pane'in sahibi yok.
+  `PendingCopy::deliver` kalktı; iş `take` + `PaneHost::copy_to_clipboard`
+  (varsayılan kol `clipboard::copy(genel pano)`), pano sınaması iki adımla.
+- Pencerenin `validateMenuItem:`'ı kalktı: kalan üç eylemi hep etkindi ve
+  yanıt vermeyen hedefin öğesi etkin sayılıyor. `session()`/`view()`/
+  `ns_window()`/`uploads()` ileticileri pencereden kalktı.
+- Pane modülü `app`'ten yalnız saf parçaları alıyor (`Grid`,
+  `split_into_grid`, `dock_rows_for`); `grep 'app::delegate' pane.rs` boş,
+  `uploader.rs`'te de yok.
+- Test-first: `title_and_copy_events_reach_the_host_with_the_pane_id` önce
+  derlenmeyerek kırmızı (trait ve iki yardımcı yoktu).
+- Duman öncesi/sonrası aynı: `kare=29 hucre=8 glif=6 kural=15 yuva=13/1984
+  yuva2=0/1984 yuk=smoke istek=4 icerik=2 hareket=27 kayma=0 kapanis=clean
+  pipeline=ok`.
+- Gözle kontrol bu otonom koşuda yapılmadı (⌘F alanında ⌘G/⇧⌘G/Esc, ⌘E,
+  ⌘K/⌥⌘K, ⌘Home/⌘End, Cmd +/−/0, Edit menüsünün gri öğeleri; ssh
+  sekmesinde damla → onay sayfası, popover, ⌘. sorusu, başlık yüzdesi, Dock
+  simgesi) — set kapısında.
+- `/code-review` (medium) tek bulgu (düşük): başlık işi yükleme bağlantı
+  kenarını `title_pending` inmeden okuyordu — arada biten ssh yeni iş
+  doğurmaz, kuyruk ölü bağlantıda kalırdı. Giderildi: `announce_title`
+  bayrağı indirip **sonra** kenarı (`edge`) ve sahibi çağırıyor; bekçi aynı
+  sınamada (kenar bayrağı inik görmeli). Kapı yeniden yeşil.

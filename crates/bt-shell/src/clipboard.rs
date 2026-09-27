@@ -79,7 +79,7 @@ pub(crate) fn read(board: &NSPasteboard) -> Option<String> {
 /// sınırsız büyür ve pano aynı saniyede yüz kez yazılırdı; kullanıcının
 /// göreceği tek şey zaten sonuncusu. Yuva boşken dolduran çağrı **tek** iş
 /// ister ([`PendingCopy::put`] `true`), iş yuvayı boşaltıp yazar
-/// ([`PendingCopy::deliver`]). Değişmez: yuva doluysa onu alacak bir iş
+/// ([`PendingCopy::take`]). Değişmez: yuva doluysa onu alacak bir iş
 /// kuyrukta ve henüz almamış — boş→dolu geçişi her zaman iş istiyor, işin
 /// kendi takası yuvayı boşaltıyor. Yani kuyrukta en çok bir bekleyen, bir de
 /// koşan iş olur ve son metin kaybolmaz.
@@ -89,8 +89,8 @@ pub(crate) fn read(board: &NSPasteboard) -> Option<String> {
 /// `discussion.md` → Karar 5). `AtomicPtr` + `Box`: std'de sahip olunan bir
 /// değeri atomik takaslayan başka tip yok.
 ///
-/// AppKit'ten ayrık: pano `deliver`'a parametre, yuva mantığı panosuz
-/// sınanıyor.
+/// AppKit'ten ayrık: yuva mantığı panosuz sınanıyor, panoyu alan taraf
+/// seçiyor.
 #[derive(Default)]
 pub(crate) struct PendingCopy(AtomicPtr<String>);
 
@@ -114,20 +114,15 @@ impl PendingCopy {
         false
     }
 
-    /// Yuvadaki metni alır ve yuvayı boşaltır; boşsa `None`.
-    fn take(&self) -> Option<String> {
+    /// Ana kuyruğun işi: yuvadaki metni alır ve yuvayı boşaltır; boşsa
+    /// `None` (yarışta başka bir iş almış olabilir). Metni panoya pane'in
+    /// sahibi yazıyor (`pane::PaneHost::copy_to_clipboard`; varsayılan kol
+    /// genel panoya [`copy`] ile).
+    pub(crate) fn take(&self) -> Option<String> {
         let old = self.0.swap(ptr::null_mut(), Ordering::AcqRel);
         // SAFETY: `put`'taki gerekçe — işaretçi `Box::into_raw`'dan ve takas
         // onu yuvadan tek başına çıkardı.
         (!old.is_null()).then(|| *unsafe { Box::from_raw(old) })
-    }
-
-    /// Ana kuyruğun işi: yuvadaki metni `board`'a yazar.
-    ///
-    /// Yuva boşsa (yarışta başka bir iş almış olabilir) pano el değmeden
-    /// kalır; boş metnin kapısı [`copy`]'nin.
-    pub(crate) fn deliver(&self, board: &NSPasteboard) -> bool {
-        copy(board, self.take())
     }
 }
 
@@ -252,8 +247,11 @@ pub(crate) mod tests {
         // panosuna dokunmaz.
         let slot = PendingCopy::default();
         let fresh = NSPasteboard::pasteboardWithUniqueName();
-        // Boş yuva panoya yazmaz — pano gerektirmeyen yarı.
-        assert!(!slot.deliver(&fresh));
+        // Boş yuva panoya yazmaz — pano gerektirmeyen yarı. İşin iki adımı
+        // üretimdeki gibi: yuvadan al (`take`), panoya yaz (`copy`, sahibin
+        // varsayılan kolu).
+        let deliver = |board: &NSPasteboard| copy(board, slot.take());
+        assert!(!deliver(&fresh));
 
         let Some(board) = board() else {
             eprintln!("{HEADLESS}");
@@ -261,10 +259,10 @@ pub(crate) mod tests {
         };
         assert!(slot.put("ilk".to_owned()));
         assert!(!slot.put("son".to_owned()));
-        assert!(slot.deliver(&board));
+        assert!(deliver(&board));
         assert_eq!(read(&board).as_deref(), Some("son"));
         // Yuva boşaldı: ikinci iş panoyu el değmeden bırakır.
-        assert!(!slot.deliver(&board));
+        assert!(!deliver(&board));
         assert_eq!(read(&board).as_deref(), Some("son"));
     }
 

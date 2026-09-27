@@ -14,10 +14,11 @@
 //! `selectAll:` first responder `BateriView`'a (Cut'ın etkinliği onun
 //! `validateMenuItem:`'ında — yalnız dock seçimi varken ve düzenleme kapısı
 //! açıkken; Paste Escaped Text'inki panoda metin varken); punto
-//! eylemleri, `closeTab:`, `closeWindow:`, `selectTab:`, Find ▸'nin dört
-//! eylemi, temizlemenin iki eylemi ve dört kaydırma (alternatif ekranda
-//! gri, 034 Karar 2) key pencerenin
-//! delegate'ine (`window::TerminalWindow` — pencereye ait);
+//! eylemleri, Find ▸'nin dört eylemi, temizlemenin iki eylemi, dört
+//! kaydırma (alternatif ekranda gri, 034 Karar 2) ve `cancelUpload:`
+//! odaktaki pane'e (`pane::TerminalPane`, `BateriView`'ın üst view'ı — 039
+//! Karar 2); `closeTab:`, `closeWindow:` ve `selectTab:` key pencerenin
+//! delegate'ine (`window::TerminalWindow` — sekmeye ait);
 //! `performMiniaturize:`, `performZoom:` ve sekme eylemleri
 //! (`selectNextTab:`, `moveTabToNewWindow:`…) `NSWindow`'un kendisine;
 //! `openSettings:`, tema eylemleri, `markHost:` ve
@@ -203,8 +204,7 @@ pub(crate) fn install(
     // Edit ▸ Find (033 Karar 10): macOS'un alt menüsü ve kısayolları.
     // Seçiciler **kendi adlarımız** — `performFindPanelAction:` alan
     // odaktayken AppKit'in alan düzenleyicisine yutulurdu; karşılayan
-    // `TerminalWindow` (pencerenin delegesi, responder zincirinde alanın da
-    // üstünde). `keyDown:`'ın Cmd izin listesi değişmiyor: menü tuşu önce
+    // `TerminalPane` (alanın atası, responder zincirinde alanın da üstünde). `keyDown:`'ın Cmd izin listesi değişmiyor: menü tuşu önce
     // yakalıyor (⌘A emsali).
     let find_menu = submenu(
         mtm,
@@ -239,7 +239,7 @@ pub(crate) fn install(
             item(mtm, "Select All", sel!(selectAll:), "a"),
             NSMenuItem::separatorItem(mtm),
             // Terminal.app'in yeri ve kısayolları (034 Karar 4); seçiciler
-            // kendi adlarımız, karşılayan `TerminalWindow`.
+            // kendi adlarımız, karşılayan `TerminalPane`.
             item(mtm, "Clear to Start", sel!(clearToStart:), "k"),
             with_modifiers(
                 item(mtm, "Clear Scrollback", sel!(clearScrollback:), "k"),
@@ -293,7 +293,7 @@ pub(crate) fn install(
             // `markHost:`'la app delegate'e (etkin sekmenin host'u).
             mark_holder(mtm),
             // Uzak dizine yüklemenin bütün kuyruğu (037 Karar 7); yalnız
-            // kuyruk varken etkin (`TerminalWindow`'un `validateMenuItem:`'ı).
+            // kuyruk varken etkin (`TerminalPane`'in `validateMenuItem:`'ı).
             item(mtm, "Cancel Upload", sel!(cancelUpload:), "."),
             NSMenuItem::separatorItem(mtm),
             // `performClose:` değil (028 phase-2, ölçüldü): kırmızı düğmenin
@@ -419,7 +419,8 @@ pub(crate) fn fill_themes(
 /// Hedefsiz bir öğe. `key` boşsa kısayol yok; değiştirici varsayılanı Command.
 fn item(mtm: MainThreadMarker, title: &str, action: Sel, key: &str) -> Retained<NSMenuItem> {
     // SAFETY: `action` `sel!` ile kurulmuş geçerli bir seçici ve her alıcısı
-    // (`BateriView`, `TerminalWindow`, `NSWindow`, `AppDelegate`, `NSApplication`) onu tek
+    // (`BateriView`, `TerminalPane`, `TerminalWindow`, `NSWindow`, `AppDelegate`,
+    // `NSApplication`) onu tek
     // `Option<&AnyObject>` argümanlı, dönüşsüz bir eylem olarak tanımlıyor.
     unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(

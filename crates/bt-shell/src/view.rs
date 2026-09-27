@@ -56,6 +56,7 @@ use crate::keys::{
     ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, dock_key, encode_key, only_char,
     page_scroll,
 };
+use crate::pane::TerminalPane;
 use crate::quote::{paste_quote, shell_quote};
 
 /// Izgaranın dışına düşen noktaya ne olacağı — [`point_to_cell`]'in tek
@@ -632,7 +633,7 @@ define_class!(
         /// Sonrası Paste'in yolu (`Session::paste`: bracketed sarma, dock
         /// seçiminin yerine geçme).
         ///
-        /// Burada, `TerminalWindow`'da değil (`paste:` emsali, Karar 4):
+        /// Burada, `TerminalPane`'de değil (`paste:` emsali, 034 Karar 4):
         /// arama alanı odaktayken responder zinciri bu view'dan geçmiyor ve
         /// öğe gri — alana kaçırılmış metin yapıştırmanın anlamı yok.
         #[unsafe(method(pasteEscaped:))]
@@ -1234,7 +1235,7 @@ define_class!(
             &self,
             _sender: &ProtocolObject<dyn NSDraggingInfo>,
         ) -> NSDragOperation {
-            if self.terminal_window().is_none_or(|window| window.accepts_drop()) {
+            if self.pane().is_none_or(|pane| pane.accepts_drop()) {
                 NSDragOperation::Copy
             } else {
                 NSDragOperation::None
@@ -1269,8 +1270,8 @@ define_class!(
             let paths = dropped_paths(&sender.draggingPasteboard());
             match self.ivars().session.get() {
                 Some(session) if !paths.is_empty() && session.remote_target().is_some() => self
-                    .terminal_window()
-                    .is_some_and(|window| window.upload_drop(paths)),
+                    .pane()
+                    .is_some_and(|pane| pane.upload_drop(paths)),
                 Some(session) if !paths.is_empty() => {
                     session.paste(shell_quote(&paths).into_bytes());
                     true
@@ -1490,13 +1491,7 @@ impl BateriView {
     /// takılı değilse sessiz. Sahip `superview()`'dan (039 Karar 2): pane
     /// bu view'ın doğrudan üstü.
     fn keyboard_moved(&self, here: bool) {
-        // SAFETY: üst view'ı okumak; dönen `Retained` onu bu çağrı boyunca
-        // yaşatıyor ve ana thread'deyiz (`MainThreadOnly`).
-        let parent = unsafe { self.superview() };
-        if let Some(pane) = parent
-            .as_deref()
-            .and_then(|parent| parent.downcast_ref::<crate::pane::TerminalPane>())
-        {
+        if let Some(pane) = self.pane() {
             pane.keyboard_moved(here);
         }
     }
@@ -1801,11 +1796,14 @@ impl BateriView {
         point_to_cell((point.x, point.y), metrics, top, outside, scale, cols, rows)
     }
 
-    /// Bu view'ın terminal penceresi (sekmesi); ayar penceresinde ya da
-    /// kapanmış bir pencerede `None`.
-    fn terminal_window(&self) -> Option<Retained<crate::window::TerminalWindow>> {
-        let window = self.window()?;
-        crate::app::delegate(self.mtm())?.window_owning(&window)
+    /// Bu view'ın sahibi pane — doğrudan üst view'ı (039 Karar 2); view
+    /// henüz bir pane'e takılı değilse `None`. Pencere listesinde doğrusal
+    /// arama ya da uygulama delegate'ine uzanma yok: sahip görünüm ağacında.
+    fn pane(&self) -> Option<Retained<TerminalPane>> {
+        // SAFETY: üst view'ı okumak; dönen `Retained` onu çağıran boyunca
+        // yaşatıyor ve ana thread'deyiz (`MainThreadOnly`).
+        let parent = unsafe { self.superview() }?;
+        parent.downcast::<TerminalPane>().ok()
     }
 
     /// Pencere noktası → bağlam satırında dock-yerel sütun ve bağlam
@@ -1866,11 +1864,10 @@ impl BateriView {
     /// Düğmelerin şimdiki dikdörtgenleri, view noktasında — tık ve hover'ın
     /// geometrisinden ([`Self::context_span_rect`]); yükleme yoksa boş.
     fn upload_button_rects(&self) -> Vec<NSRect> {
-        let (Some(window), Some(context)) = (self.terminal_window(), self.context_budget()) else {
+        let (Some(pane), Some(context)) = (self.pane(), self.context_budget()) else {
             return Vec::new();
         };
-        window
-            .upload_button_spans(context)
+        pane.upload_button_spans(context)
             .into_iter()
             .filter_map(|(start, end)| self.context_span_rect(start, end))
             .collect()
@@ -1881,7 +1878,7 @@ impl BateriView {
     /// punto, pencere boyu, bandın süzülmesi, alternatif ekran. Dikdörtgen
     /// son çizilen kareden okunuyor ve AppKit'in kendi tetikleri (çerçeve)
     /// o kareden önce koşabiliyor, yani ölçüt geometrinin kendisi.
-    /// Çağıranlar her hareket ve her tazeleme (`TerminalWindow::upload_hover`,
+    /// Çağıranlar her hareket ve her tazeleme (`TerminalPane::upload_hover`,
     /// `show_transfer`); aynı dikdörtgende no-op, yani imleç yeniden
     /// değerlendirilmiyor.
     pub(crate) fn sync_cursor_rects(&self) {
@@ -1898,8 +1895,8 @@ impl BateriView {
     /// tık tüketildi. Geometri [`Self::context_column`]'unki.
     fn upload_control(&self, event: &NSEvent) -> bool {
         self.context_column(event.locationInWindow())
-            .zip(self.terminal_window())
-            .is_some_and(|((col, context), window)| window.upload_click(col, context))
+            .zip(self.pane())
+            .is_some_and(|((col, context), pane)| pane.upload_click(col, context))
     }
 
     /// Farenin **şimdiki** yeri bağlam satırında ([`Self::context_column`]):
@@ -1911,10 +1908,10 @@ impl BateriView {
 
     /// Farenin altındaki yükleme düğmesi (037 phase-6): pencere değişimi
     /// yalnız düğme değişince kare istiyor ve imleci çeviriyor
-    /// (`TerminalWindow::upload_hover`).
+    /// (`TerminalPane::upload_hover`).
     fn upload_hover(&self, event: &NSEvent) {
-        if let Some(window) = self.terminal_window() {
-            window.upload_hover(self.context_column(event.locationInWindow()));
+        if let Some(pane) = self.pane() {
+            pane.upload_hover(self.context_column(event.locationInWindow()));
         }
     }
 
