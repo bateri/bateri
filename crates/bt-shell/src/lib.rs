@@ -30,8 +30,11 @@
 //! ayar dosyasına yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan ve pane'e
 //! ait geçici punto (`zoom`).
 //! **Çok pencere ve macOS'un kendi sekmeleri** (`.tasks/026-sekmeler`): her
-//! sekme bir `NSWindow` ve tek pane'inde kendi oturumu (`window`, `pane`); pencereleri açan,
-//! listeleyen ve kapanışı paralel yürüten `app`. Bölme ve IME sonraki setlerde.
+//! sekme bir `NSWindow` (`window`); **bölmeler** (`.tasks/039-terminal-pane-bolmeler`)
+//! sekmeyi pane'lere ayırıyor — düzen saf bir ağaçta (`split`), onu uygulayan
+//! kapsayıcı `split_view`, her pane'in kendi oturumu (`pane`). Pencereleri ve
+//! bölmeleri açan, listeleyen ve kapanışı paralel yürüten `app`. IME sonraki
+//! setlerde.
 
 pub(crate) mod app;
 mod child;
@@ -46,6 +49,8 @@ mod quote;
 mod search_bar;
 mod settings;
 mod settings_window;
+mod split;
+mod split_view;
 mod upload;
 mod uploader;
 mod view;

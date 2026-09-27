@@ -1,5 +1,6 @@
 //! Ana menü: uygulama menüsü (About, Settings…, Hide, Quit), Shell (New
-//! Window, New Tab, New Local Tab, Mark Host as ▸, Cancel Upload, Close Tab, Close Window), Edit (Cut, Copy, Paste, Paste
+//! Window, New Tab, New Local Tab, Mark Host as ▸, Cancel Upload, Split
+//! Right, Split Down, Close Tab/Close, Close Window), Edit (Cut, Copy, Paste, Paste
 //! Escaped Text, Select All, Clear to Start, Clear Scrollback, Find ▸
 //! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸,
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
@@ -17,8 +18,9 @@
 //! eylemleri, Find ▸'nin dört eylemi, temizlemenin iki eylemi, dört
 //! kaydırma (alternatif ekranda gri, 034 Karar 2) ve `cancelUpload:`
 //! odaktaki pane'e (`pane::TerminalPane`, `BateriView`'ın üst view'ı — 039
-//! Karar 2); `closeTab:`, `closeWindow:` ve `selectTab:` key pencerenin
-//! delegate'ine (`window::TerminalWindow` — sekmeye ait);
+//! Karar 2); `closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:` ve
+//! `splitDown:` key pencerenin delegate'ine (`window::TerminalWindow` —
+//! sekmeye ait);
 //! `performMiniaturize:`, `performZoom:` ve sekme eylemleri
 //! (`selectNextTab:`, `moveTabToNewWindow:`…) `NSWindow`'un kendisine;
 //! `openSettings:`, tema eylemleri, `markHost:` ve
@@ -296,10 +298,21 @@ pub(crate) fn install(
             // kuyruk varken etkin (`TerminalPane`'in `validateMenuItem:`'ı).
             item(mtm, "Cancel Upload", sel!(cancelUpload:), "."),
             NSMenuItem::separatorItem(mtm),
+            // Bölmeler (039 Karar 8, Ghostty/iTerm2 emsali): karşılayan
+            // `TerminalWindow` (odaktaki pane'i böler); en küçük pane
+            // sınırında gri (`validateMenuItem:`).
+            item(mtm, "Split Right", sel!(splitRight:), "d"),
+            with_modifiers(
+                item(mtm, "Split Down", sel!(splitDown:), "d"),
+                command | NSEventModifierFlags::Shift,
+            ),
+            NSMenuItem::separatorItem(mtm),
             // `performClose:` değil (028 phase-2, ölçüldü): kırmızı düğmenin
             // iptal edilen grup kapanışından sonra AppKit `performClose:`'u
             // grubun tamamına yayıyor, yani ⌘W bir sekme yerine pencereyi
-            // sorardı.
+            // sorardı. Başlığı çok pane'de "Close" (odaktaki pane'i
+            // kapatıyor; `TerminalWindow`'un `validateMenuItem:`'ı, 039
+            // Karar 8).
             item(mtm, "Close Tab", sel!(closeTab:), "w"),
             with_modifiers(
                 item(mtm, "Close Window", sel!(closeWindow:), "w"),

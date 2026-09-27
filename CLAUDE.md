@@ -157,8 +157,9 @@ koruyarak (`Session::extend_selection`; seçim yoksa oradan başlar) ve bu iki
 kipte de aynı kural — fare kipinde Shift zaten seçimin tek yolu. Fareyle
 seçim, pano, geçmişte
 kaydırma, ana menü (About, Settings…, Quit; Shell'de New Window/Tab, New
-Local Tab (⌥⌘T), Mark “{host}” as ▸, Cancel Upload (⌘.) ve
-Close Tab/Window; Edit'te Cut/Copy/Paste/Paste Escaped Text/Select All
+Local Tab (⌥⌘T), Mark “{host}” as ▸, Cancel Upload (⌘.), Split
+Right/Down (⌘D/⇧⌘D) ve Close Tab/Window — çok pane'de ⌘W'nin başlığı
+"Close"; Edit'te Cut/Copy/Paste/Paste Escaped Text/Select All
 ve Clear to Start/Clear Scrollback — Cut yalnız dock
 seçimi varken ve düzenleme kapısı açıkken etkin (`validateMenuItem:`,
 varsayılan cevabı `true`); ⌘A geçmişin tamamını
@@ -197,9 +198,29 @@ başına **bir parça** süren `TerminalPane::kick_search` sürüyor, çünkü t
 olayları turların arasına girmeli; tetiği yüksüz ve kenarda
 `Wake::search_changed` (arka sekmede de). Gerekçeler
 `.tasks/033-gecmiste-arama/`.
-**Sekmeler macOS'un kendi sekmeleri** (026): her sekme bir `NSWindow` ve
-onun tek pane'i (`TerminalPane`, 039) kendi `Session`/`DisplayLink`/`Renderer`'ı, yani "bir pencere = bir oturum"
-bozulmuyor. **Pane ile sahibi arasındaki sınır üç parça** (039 Karar 1–3):
+**Sekmeler macOS'un kendi sekmeleri** (026) ve **sekme bölünüyor** (039):
+her sekme bir `NSWindow`, içinde bir ya da daha çok pane (`TerminalPane`) ve
+her pane'in kendi `Session`/`DisplayLink`/`Renderer`'ı — kural artık "bir
+pane = bir oturum" (renderer pane başına, çünkü atlasın anahtarı punto ve
+punto farkı pane'in; 039 Karar 5). Düzen saf bir ikili ağaçta (`split`:
+yaprak pane kimliği, düğüm eksen + oran; çerçeveler ayırıcı dahil aygıt
+pikseline oturuyor) ve onu pane'lere uygulayan `contentView` kapsayıcısında
+(`split_view::SplitView`; ayırıcı bir piksel, temanın `separator` tonu —
+`Theme::separator_srgb`, dock'un çizgileriyle tek zincir). ⌘D sağa, ⇧⌘D
+aşağı böler; yeni pane odaktakinin dizinini, punto farkını, temasını ve uzak
+satırını devralır (⌘T'nin kuralı, `Opening::Split`) ve iki yarıdan biri en
+küçük pane sınırının (`MIN_PANE_COLS`/`MIN_PANE_ROWS`, tasarım sabiti)
+altına düşecekse bölme gri ve no-op. **Odaktaki pane** pencerenin first
+responder'ının pane'i (`TerminalWindow::focused_pane`; klavyenin gelişi
+`PaneHost::focused`): başlık, `⇄`, yükleme yüzdesi ve sekme noktası ondan
+ve odakla değişir; odakta olmayan pane'in caret'i içi boş (odağın ikinci
+biti, `bt-gpu` değişmeden), pencerenin key biti, örtülme ve ölçek bütün
+pane'lere. ⌘W odaktaki pane'i kapatır (koşan iş varsa yalnız onu sorar,
+"Close this pane?"), son pane'de sekmeyi; kabuk çıkınca yalnız o pane
+kapanır ve odak ağaçtaki komşuya geçer; ⇧⌘W, kırmızı düğme ve ⌘Q bütün
+pane'leri kapatır ve soruyu pane'lerden toplar — tek pane'li sekmede metin
+bölmelerden öncekinin aynısı, çok pane'de "pane" sayar (`window::unit_for`).
+Gerekçeler `.tasks/039-terminal-pane-bolmeler/discussion.md` → Karar 6–14. **Pane ile sahibi arasındaki sınır üç parça** (039 Karar 1–3):
 girdiler doğumda tek pakette (`PaneLaunch`: ayar anlık görüntüsü, tema,
 `Run`, `Stats`, entegrasyon ortamı + dock payı, kimlik, dizin ve ilk girdi,
 hareket bayrakları; canlı değişim pane'in `set_*` yöntemleriyle), olaylar
@@ -208,9 +229,10 @@ alt başlık tanısı, OSC 52 kopyası; bugünkü sahip `window::WindowHost`) ve
 menünün karşıladığı her pane işi pane'de adlı bir yöntem, seçici onu
 çağıran bir satır. Pane düzeyindeki seçiciler (punto, bul, temizle,
 kaydır, `cancelUpload:`) ile arama paneli ve yükleme kuyruğu pane'de,
-çünkü responder zinciri `BateriView` → pane → pencere → delegate —
-hedefsiz öğe odaktaki pane'e varıyor, arama alanı odaktayken de; sekme
-işleri (`closeTab:`, `closeWindow:`, `selectTab:`) pencerede. Pane modülü
+çünkü responder zinciri `BateriView` → pane → kapsayıcı → pencere →
+delegate — hedefsiz öğe odaktaki pane'e varıyor, arama alanı odaktayken de;
+sekme işleri (`closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`,
+`splitDown:`) pencerede. Pane modülü
 `AppDelegate`'e uzanmıyor: ana kuyruk dönüşleri pane'i sahibin verdiği
 yoldan (`PaneLookup`, düz `fn`) kimlikle buluyor, `BateriView` sahibini
 `superview()`'dan. Arama paneli kapsayıcısını **tutmuyor** (pane → panel →
@@ -221,11 +243,12 @@ sarmalayıcılı oturumda ilk kimlikli `A`'da; o ana kadar yazılan tuşlar
 satırın **arkasına** tutuluyor. ⌥⌘T New Local Tab ve ⌘N her zaman yerel;
 037 Karar 6), sekme kısayolları (⌃⇥ dahil) menü öğesidir ve `keyDown:`'ın Cmd
 izin listesi üç tuşta kalır, arka sekme örtülme yolundan sıfır kare çizer, kabuk çıkınca
-yalnız o sekme kapanır ve son pencere kapanınca uygulama açık kalır —
+yalnız o pane (son pane'se sekme) kapanır ve son pencere kapanınca uygulama açık kalır —
 gerekçeler `.tasks/026-sekmeler/discussion.md` → Karar. **`bateri://`
 şemasının iki yolu var** (038): `block/N` prompt'un iç OSC 8 çıpası ve
-dışarıya hiç verilmiyor; `tab/<id>` sekmenin dış adı (`BATERI_TAB_URL`) —
-`open` ile o sekme öne gelir (küçültülmüşse geri açılır), ölü kimlikte
+dışarıya hiç verilmiyor; `tab/<id>` **pane'in** dış adı (`BATERI_TAB_URL`,
+`TERM_SESSION_ID`; pane başına, 039 Karar 10) — `open` ile o pane'in
+sekmesi öne gelir (küçültülmüşse geri açılır) ve klavye o pane'e, ölü kimlikte
 yalnız uygulama, başka her biçimde hiçbir şey (`application:openURLs:`).
 **URL yalnız odaklar**: kabuğa bayt göndermez, komut koşturmaz, pencere
 açmaz — bir güvenlik değişmezi, çünkü şemayı her uygulama açabilir
@@ -245,9 +268,11 @@ için açık/koyu değişimi view'dan değil `NSApp.effectiveAppearance`'ın
 KVO'sundan geliyor, geometri de pencereden değil `BateriView`'ın çerçeve
 bildiriminden — sekme çubuğu pencereyi değil içeriği boyutlandırıyor
 (`.tasks/026-sekmeler/phase-4.md` → Uygulama Notları). İçerik view'ı
-pane (`TerminalPane`, `NSView` alt sınıfı; oturumun çekirdeği onda —
-039 Karar 1–2), layer-backed düz bir **kapsayıcı** ve `BateriView` onu
-autoresizing'le dolduran çocuğu, çünkü yüzen arama paneli Metal katmanının kardeşi olmak
+bölmelerin kapsayıcısı (`SplitView`, üstten aşağı koordinat, pane'leri
+kendi `resizeSubviewsWithOldSize:`'ında oturtuyor; tek pane'de pane sınırın
+ta kendisi), her pane (`TerminalPane`, `NSView` alt sınıfı; oturumun
+çekirdeği onda — 039 Karar 1–2) layer-backed düz bir **kapsayıcı** ve
+`BateriView` onu autoresizing'le dolduran çocuğu, çünkü yüzen arama paneli Metal katmanının kardeşi olmak
 zorunda (033 → R4.1). Uygulamanın
 OSC 52 kopyasını (`Wake::copy_to_clipboard` → `PaneHost::copy_to_clipboard`)
 genel panoya o yazar;
@@ -1175,7 +1200,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve **okuyucu döngünün sahibi** (alacritty 0.26.0 döngüsünün kopyası, `reader`; `Term` `Handler`'ı aktaran sarmalayıcının arkasında, `handler` — emoji dizisini ızgarada orada kümeliyor, 035), PTY okuma yolu **taranıyor** (araya giren sarmalayıcı baytları aynen geçirir, geçerken **üç** OSC numarasını ve **bir** CSI dizisini çeker), OSC (0/2/7/8/9/52; 0/2 uygulamanın başlığını `Term` kilidi altındaki olaydan yaprak bir yuvaya indirir ve pencere başlığı ondan kurulur — öncelik OSC 0/2 → dizinin son bileşeni (ev `~`) → `bateri`, `Session::title`; uzak oturumda (036) `⇄ {OSC başlığı}`, yoksa `⇄ {host}`; başlık ya da **değişen** OSC 7 dizini `Wake::title_changed` ile yüksüz haber verir, 7 çalışma dizinini **yetkisiyle** verir (yerel yetki dock'un bağlam satırına, uzak oturumda ya da yabancı yetkide uzak yuvaya) (`Session::working_directory` onu okur), 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, geçmişte arama (sorgunun derlenmesi, görünür satırların eşleşmeleri, bütün defterin parça parça sayımı; `search`), girdi kodlaması (DECCKM'e uyan oklar, farenin düğme/hareket/tekerlek raporu; kipten karar veren tablolar `input::button_route`/`motion_route`/`wheel_route`), ayar modeli, shell bağlamı. Tarayıcının üç kolu var ve üçü de alacritty'de **yok** (`vte` üçünü de `unhandled`'a düşürüyor): OSC 133 oturumun safhasını ve blok kimliklerini `ShellState`'e yazar (`Session::shell_state()`) ve `Running`'e her **geçişte** bir komut nesli artırıp `Wake::command_started` ile yüksüz haber verir (036, uzak oturum yoklamasının tetiği); kimliğimizi (`bt_block=`) bir kez görmüş bir oturumda **uzak oturumu yalnız bizim işaretimiz bitiriyor** — uzak oturum etkinken kimliksiz `A`/`B`/`C`/`D` yok sayılıyor, çünkü ssh'ın öbür ucundaki fish 4 ya da kitty/iTerm2 entegrasyonu aynı PTY'ye 133 basıyor ve uzak `A` göstergeyi silip uzak `C` yeni bir nesil açardı; yoklamadan önce gelen uzak `A` için komut bizim `D`'mize kadar açık sayılıyor (`ShellLog::command_open`). Kapı `Running`'e değil uzak oturuma bağlı, yoksa `exec fish` `Running`'i hiç bitirmez ve saat boşta kare isterdi (`.tasks/036-ssh-uzak-oturum/phase-3.md` → Uygulama Notları), OSC 8133 ZLE'nin görüntü aynasını — `PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlight`, `CURSOR`, base64 gövdelerle; `KEYMAP` ve `PREBUFFER` sondaki isteğe bağlı gövdeler, eski betik onlarsız da çözülüyor — çözüp `DockState`'e (`Session::dock_state()`), dalı `DockContext`'e ve düzenleme widget'ının yeteneğini (`8133;w`) `ShellLog::dock_editable`'a, OSC 7 de çalışma dizinini yine `DockContext`'e (yüzde çözme ve yabancı host elenmesi orada; bozuk URI panik değil yoksayma). Aynanın kendi yük sınırı var ve aşımı **görünür** (`DockStatus::Unavailable`), sessizce düşmez; dock'un çizmediği kontrol karakteri de görünür bir durum (`DockStatus::Control`) ve satırı ızgaraya bırakıyor. **Dördüncü kol OSC değil CSI** ve yükü yok: `CSI 2 J`'yi tanıyıp "ekran kasten temizlendi" bayrağını kurar (`Session::observe_screen_clear`; `3J` ve RIS için kol **yok**, ikisi de geçmişi siliyor — geçmişi silen tek yol terminal tarafı temizlik, ⌘K/⌥⌘K). **Sayacın iki yazarı var** (`screen_clears`): tarayıcı `2J`'yi baytlar uygulanmadan **önce** sayıyor, terminal tarafı temizlik (034) `Term` kilidi altında ve uygulandıktan **sonra** adlı tek yöntemden (`Session::note_screen_clear`) — ikisi de yalnız artırıyor ve tüketici tek. **Alternatif ekranda kurmaz** — orada `ClearMode::All` `reset_region(..)` çağırıyor, geçmiş büyümüyor ve birincil ekranın durumuna dokunulmuyor, yani geri getirilmeyecek bir şey yok; nesil yine de **tüketilir**, yoksa `vim`'den çıkışta birikmiş sayaç bayrağı kurar ve doldurma ilk `vim`'den sonra kalıcı olarak kapanırdı. Bayrak **defter temizlemeden sonra büyüyünce** düşer: geçmişe temizlemeden sonra satır düşmüş demektir ve doldurma o kadarını güvenle geri verebilir. Ölçüt bir damga ve tek karşılaştırma (`Session::screen_clear_history`); damga bayrak kurulduktan **sonraki** ilk karede alınıyor, çünkü kuran kare ızgarayı henüz temizlenmemiş görebiliyor ve temizlemenin kendisi satırları geçmişe itiyor — bayat damga anında aşılırdı. Üstünde iki koşul var — alternatif ekranda değil ve `display_offset == 0`; ikincisi olmasa geçmişe kaydırılan pencere dolu **görünür** ve tek bir tekerlek jesti Ctrl-L'i geri alırdı. (Bu koşul **bayrağın ömrüne** ait; doldurmanın kendi `display_offset` kapısı ayrı bir şey ve ayrı gerekçeli.) **Bayrak bir kapı, damga bir ölçü:** kapı "hiç" der, aynı damga doldurmada ikinci kez okunup `fill`'i temizlemeden beri gelen satır sayısına **kırpar** — yoksa tek satırlık bir büyüme bayrağı düşürür ve doldurma boşluğun tamamını, yani kullanıcının sildiği ekranı geri getirirdi (ölçüldü). `content_rows == rows` kolu yok: dock'lu pencerede doluluk giriş satırını saymadığı için erişilemez. **Bilinen sınır**, defter `scrollback`'te doyunca damganın üstüne çıkacak sayı kalmıyor ve o oturumda bir Ctrl-L'den sonra doldurma koşmuyor; yönü güvenli. Yarışı kapatan şey bir **nesil sayacı**: tarayıcı baytları uygulamadan **önce** sayıyor, kare yolu sayacı `Term` kilidinin **altında** doluluk sayısıyla aynı okumada tüketiyor, ve henüz hesaba katılmamış bir nesil aynı karede doldurma kuralını ezer. Bayrağın tek tüketicisi doldurmanın kapısı (`Session::fill_rows`) ve sıra zorunlu: ömür **önce** işliyor. Komut blokları `frame()` sınırından **çözülmüş** geçer (komutun satırı + renk, çıkış kodu değil; bölge değil işaret): kimlik prompt'un OSC 8 çıpasından `Term` kilidi altında toplanır, renk kilit bırakıldıktan sonra kabuk defterinden çözülür. Giriş satırının **bastırılması** da burada: safha ile aynanın durumu tek yüklemde birleşiyor (`ShellLog::suppressed_input`) ve kopya `Term` kilidinden **önce** alınıyor — yaprak kilit `Term`'ün altına girmez | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, **emoji dizisinin şekillendirilmesi** (`Sprite::Cluster`, `CTLine` ile tek glyph; atlasın interner'ı, şekillenmeyen dizi taban karakteriyle), **iki düzlem** (maske `R8`, renk `RGBA8`; ayrı sayaç, ortak yuva ızgarası), **geniş glyph'in iki yarısı** (`Half`; kutu iki hücre, yuva yine bir hücre), **sistemin cascade'inden yedek glyph** (kapı geometrik ve **sıralı**: önce tek hücre, sonra iki; ikisine de sığmayan aday kutu kalır), **yordamsal karakterler** (blok elemanları, Braille ve çizgi çizim — köşegenler hariç; fonta sorulmadan, yüzden bağımsız, yalnız büyük sınıfta), font seti. **Doku kenarı sabit değil**: hedeflenen **yuva sayısından** türüyor (`SLOT_TARGET` = 1024 yuva; kenarın kendisi `MIN_EDGE` = 1024 px ile `MAX_EDGE` = 4096 px arasında, iki 1024 tesadüfen aynı sayı), çünkü hücre büyüdükçe kapasite düşüyor ve bir yerde yordamsal ailenin altına iniyordu — ölçülen kırılma Retina'da 29pt'ti (406 yuva, ailenin istediği 429: 421 karakter + tofu + kural payı). Varsayılan punto tabanda kalıyor, yani ızgara ve raster bit bit aynı. Tahliye **yok**: dolan atlas hâlâ tofu'ya düşüyor ve kalan senaryo (tek karede hedeften fazla farklı glyph) ölçülmedi | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
 | `bt-gpu` | Metal renderer, shader'lar (`.metal`), **geniş glyph'in yelpazelenmesi** (`prepare`; karar `Atlas::slot`'ta doğduğu için sink'te değil), display link ve `Waker` (kareyi süren ritim), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `setViewport`, kendi listeleri ve caret'i; PTY payı `DOCK_ROWS`, çizilen bant `Cursor::input_rows` giriş satırı + bağlam satırı), **doldurma bandı** (üçüncü `setViewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet), durum çubuğu | `objc2`, `objc2-foundation`, `objc2-metal`, `objc2-quartz-core`, `dispatch2` (metallib yükleme, ana kuyruk), `block2` (tamamlanma bloğu) |
-| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye (metin yolu AppKit'in yığınından: `BateriView` `NSTextInputClient`, ölü tuş bileşimi orada tamamlanır), **Finder damlası** (`NSDraggingDestination`, yalnız dosya URL'si; yol `quote::shell_quote`'tan geçip `Session::paste`'e gider), servisler, ayar penceresi, **terminal pane'i** (`pane::TerminalPane`, `NSView` alt sınıfı: oturumun çekirdeği, pane düzeyindeki menü seçicileri; sahiple sınırı `PaneLaunch` + `PaneHost`, 039), **arama paneli** ve sayım dizininin ana kuyruk sürücüsü (`search_bar`, `TerminalPane::kick_search`), **uzak oturumun algılanması** (036: `C` kenarında ön plan grubunun en üstteki ssh/mosh süreci ve argv'sinden hedefi, `jobs::remote`; kararsızsa sonraki çıktıda yeniden, ana kuyrukta en çok bir iş — `pane::RemoteProbe`; host yazıldığı gibi, etkileşimsiz ssh uzak sayılmıyor), **uzak dizine yükleme** (037: kural ve metin saf `upload`'da, `ssh`/`tar` süreçleri `std::process` ile arka plan thread'inde; sayfa, kuyruk sürücüsü, popover, durdurma sorusu, başlık öneki, bildirim ve Dock simgesi `uploader`'da; kuyruk pane'in, Dock simgesi pane'lerin toplamı); kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini, yereli, hangi kabuğun koşacağı ve sarmalayıcı betiğinin yeri (`child`), entegrasyonun kurulup kurulmayacağı ve `ZDOTDIR`/`BATERI_ZDOTDIR` çifti (`app::shell_integration_env`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli; `NSUUID`: sekme kimliği), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `objc2-user-notifications` (yüklemenin bildirimi, `UNUserNotificationCenter`; paketsiz süreçte çağrılmıyor), `block2` (kapatma sorusu sayfasının tamamlanma bloğu), `dispatch2` (ana kuyruk: `child_exit` → o pencerenin kapanışı, süreli koşuda `terminate:`; OSC 52'nin pano işi; arama sayımının parçaları; uzak oturum yoklaması; vnode kaynakları: ayar izleme), `libc` (bekçinin `write` + `_exit`'i, izlemenin `O_EVTONLY`'si, kabuğun passwd kaydı için `getpwuid_r`, kapanışta ön plandaki işi soran `proc_*`, uzak oturum yoklamasının argv'si için `sysctl(KERN_PROCARGS2)` — `jobs` — ve yükleme iptalinin `kill`'i — `upload`) |
+| `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye (metin yolu AppKit'in yığınından: `BateriView` `NSTextInputClient`, ölü tuş bileşimi orada tamamlanır), **Finder damlası** (`NSDraggingDestination`, yalnız dosya URL'si; yol `quote::shell_quote`'tan geçip `Session::paste`'e gider), servisler, ayar penceresi, **terminal pane'i** (`pane::TerminalPane`, `NSView` alt sınıfı: oturumun çekirdeği, pane düzeyindeki menü seçicileri; sahiple sınırı `PaneLaunch` + `PaneHost`, 039), **bölmeler** (saf ağaç `split`, kapsayıcı `split_view`; 039), **arama paneli** ve sayım dizininin ana kuyruk sürücüsü (`search_bar`, `TerminalPane::kick_search`), **uzak oturumun algılanması** (036: `C` kenarında ön plan grubunun en üstteki ssh/mosh süreci ve argv'sinden hedefi, `jobs::remote`; kararsızsa sonraki çıktıda yeniden, ana kuyrukta en çok bir iş — `pane::RemoteProbe`; host yazıldığı gibi, etkileşimsiz ssh uzak sayılmıyor), **uzak dizine yükleme** (037: kural ve metin saf `upload`'da, `ssh`/`tar` süreçleri `std::process` ile arka plan thread'inde; sayfa, kuyruk sürücüsü, popover, durdurma sorusu, başlık öneki, bildirim ve Dock simgesi `uploader`'da; kuyruk pane'in, Dock simgesi pane'lerin toplamı); kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini, yereli, hangi kabuğun koşacağı ve sarmalayıcı betiğinin yeri (`child`), entegrasyonun kurulup kurulmayacağı ve `ZDOTDIR`/`BATERI_ZDOTDIR` çifti (`app::shell_integration_env`) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli; `NSUUID`: sekme kimliği), `objc2-app-kit`, `objc2-quartz-core` (yalnız `CALayer` takma), `objc2-user-notifications` (yüklemenin bildirimi, `UNUserNotificationCenter`; paketsiz süreçte çağrılmıyor), `block2` (kapatma sorusu sayfasının tamamlanma bloğu), `dispatch2` (ana kuyruk: `child_exit` → o pane'in kapanışı, süreli koşuda `terminate:`; OSC 52'nin pano işi; arama sayımının parçaları; uzak oturum yoklaması; vnode kaynakları: ayar izleme), `libc` (bekçinin `write` + `_exit`'i, izlemenin `O_EVTONLY`'si, kabuğun passwd kaydı için `getpwuid_r`, kapanışta ön plandaki işi soran `proc_*`, uzak oturum yoklamasının argv'si için `sysctl(KERN_PROCARGS2)` — `jobs` — ve yükleme iptalinin `kill`'i — `upload`) |
 | `bateri` | `main`, app bundle, Sparkle | — |
 
 `bt-core`'un platformsuzluğu bir zevk değil kapıdır: Metalterm'in yol haritasında
@@ -1307,12 +1332,12 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   `join`'den sonra vermediği için kopya baştan alınmak zorunda. Sonuç
   `Teardown` olarak döner ve süreli koşu onu `kapanis=` jetonuyla basar
   (değerler `teardown_token`'da). Duman bekçisi (`_exit(70)`) kapanış yolunun
-  başka asılmalarına karşı durur. **Bir sekmenin kapanışı beklemez**
-  (`TerminalPane::begin_close`: yükleme kuyruğunu bırakır, ritmi keser,
+  başka asılmalarına karşı durur. **Bir sekmenin ya da pane'in kapanışı beklemez**
+  (her pane'de `TerminalPane::begin_close`: yükleme kuyruğunu bırakır, ritmi keser,
   `Waker`'ı ana thread'de `ShellWake`'ten söker, kapanışı başlatır ve
   tutamağı düşürür); ⌘Q koşan
   iş varsa önce sorar (`applicationShouldTerminate:`), sonra bütün
-  oturumları başlatıp **tek** son tarihe kadar paralel bekler; süreli koşuda
+  pane'lerin oturumlarını başlatıp **tek** son tarihe kadar paralel bekler; süreli koşuda
   kabuğun çıkışı doğrudan `terminate:` — rapor pencereyi listede bulmalı
   (026 → Karar 5, 9).
 - **Render yolu bloklanmaz.** PTY okuma ve ayrıştırma kendi thread'inde; AppKit

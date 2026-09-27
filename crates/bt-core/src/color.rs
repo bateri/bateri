@@ -403,10 +403,24 @@ impl Theme {
     /// (kullanıcı, 012: "çizgilerin renklerini daha da koyult, bu kadar belli
     /// olmasın"). Görülmeli ama okunacak bir şey olmamalı.
     pub const fn separator_linear(&self) -> LinearRgba {
-        linear_rgba(dim_toward(
+        linear_rgba(self.separator_rgb())
+    }
+
+    /// Saç çizgilerinin rengi, **sRGB** baytları (`[r, g, b]`) — bölmeler
+    /// arasındaki ayırıcı (`bt-shell`, `NSColor` sRGB; 039 Karar 7). GPU'ya
+    /// giden yol [`Theme::separator_linear`]; ikisi aynı zincirden
+    /// ([`Theme::background_srgb`] ile `background_linear`'ın emsali), yani
+    /// ayırıcı ile dock'un çizgileri ayrışamaz.
+    pub const fn separator_srgb(&self) -> [u8; 3] {
+        let Rgb { r, g, b } = self.separator_rgb();
+        [r, g, b]
+    }
+
+    const fn separator_rgb(&self) -> Rgb {
+        dim_toward(
             dim_toward(rgb(self.dim), self.background_rgb()),
             self.background_rgb(),
-        ))
+        )
     }
 
     /// Paletin `index` numaralı renginin **lineer** RGBA'sı.
@@ -734,6 +748,18 @@ mod tests {
             rgb(THEME.cursor)
         );
         assert_eq!(THEME.accent_linear(), linear_rgba(rgb(THEME.accent)));
+    }
+
+    #[test]
+    fn separator_has_one_source() {
+        // Bölmelerin ayırıcısı (sRGB, `NSColor`) ile dock'un saç çizgileri
+        // (lineer, GPU) aynı değerden: ikisi ayrışırsa bölme çizgisi dock'un
+        // çizgisinden başka bir tonda durur (039 Karar 7).
+        for theme in [Theme::BATERI, Theme::BATERI_LIGHT] {
+            let [r, g, b] = theme.separator_srgb();
+            let hex = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+            assert_eq!(linear_hex(hex), theme.separator_linear());
+        }
     }
 
     #[test]

@@ -68,12 +68,91 @@ _Requirements: R3.1, R3.2, R3.3, R3.4, R3.5, R5_
 
 ## Checklist
 
-- [ ] `split.rs` saf ağaç + sınamalar
-- [ ] `split_view.rs` kapsayıcı + ayırıcı
-- [ ] ⌘D / ⇧⌘D, devralma, bölünme sınırı
-- [ ] Pane kapanışı (⌘W, kabuk çıkışı), odak komşuya, son pane → sekme
-- [ ] Sekme düzeyi toplamalar (başlık, soru, örtülme, ölçek, odak)
-- [ ] Pane başına kimlik ve `bateri://` pane'i odaklıyor
-- [ ] Menü öğeleri
-- [ ] `CLAUDE.md`, `lib.rs`, `docs/YOL-HARITASI.md`
-- [ ] Doğrulama geçti (`make hepsi`, `make duman`)
+- [x] `split.rs` saf ağaç + sınamalar
+- [x] `split_view.rs` kapsayıcı + ayırıcı
+- [x] ⌘D / ⇧⌘D, devralma, bölünme sınırı
+- [x] Pane kapanışı (⌘W, kabuk çıkışı), odak komşuya, son pane → sekme
+- [x] Sekme düzeyi toplamalar (başlık, soru, örtülme, ölçek, odak)
+- [x] Pane başına kimlik ve `bateri://` pane'i odaklıyor
+- [x] Menü öğeleri
+- [x] `CLAUDE.md`, `lib.rs`, `docs/YOL-HARITASI.md`
+- [x] Doğrulama geçti (`make hepsi`, `make duman`)
+
+## Uygulama Notları
+
+- **Sapma — ağaç ve pane listesi kapsayıcıda** (`SplitView`), pencerede
+  değil: kapsayıcının boyu pencereden bağımsız değişiyor (sekme çubuğu) ve
+  o bildirimi alan `resizeSubviewsWithOldSize:` onun; ağaç pencerede
+  dursaydı view her boy değişiminde pencereye geri uzanırdı. Pencere
+  kapsayıcıdan okuyor (`panes()`, `halves`, `insert`, `remove_leaf` +
+  `detach`). Kapsayıcı `isFlipped` (ağaç üstten aşağı), `resizeSubviews`'ı
+  kendisi karşıladığı için dolgunun çerçevesini de elle kuruyor. Tek pane'de
+  oturtma yok: pane sınırın ta kendisi (bölmeden önceki düzen).
+- **Ayırıcı bir boşluk**: pane'ler opak, aralarında bir aygıt pikseli açık
+  ve oradan pane'lerin arkasındaki tek `NSBox`'ın dolgusu görünüyor
+  (`drawRect:` ve `CGColor` yok; tek pane'de kutu gizli). **Sapma —
+  `bt-core`'a dokunuldu**: `NSColor` sRGB istiyor ve yalnız
+  `separator_linear` vardı; `Theme::separator_srgb` eklendi, iki çıkış tek
+  zincirden (`separator_rgb`), bekçisi `color::tests::separator_has_one_source`.
+- **Odak**: `focused_pane` pencerenin first responder'ından üst view zinciriyle
+  pane'e çıkıyor (arama alanının alan düzenleyicisi de pane'in torunu);
+  first responder bir pane'de değilse son odaklanan (`focused` ivar'ı), o da
+  yoksa ilk pane. Başlığın tazelenmesi için `PaneHost`'a `focused(pane)`
+  eklendi (klavyenin **gelişi**, `keyboard_moved(true)`; gidişi değil, arama
+  alanına geçen klavye aynı pane'de). `becomeFirstResponder` sırasında
+  `firstResponder` henüz güncel değil, o yüzden olay kimlikle geliyor ve
+  başlığın tazelenmesi bir ana kuyruk turu erteleniyor (`focused_pane`
+  first responder'ı ivar'dan önce soruyor; o an okusaydı eski pane'in
+  başlığını yazabilirdi).
+  Pencere kurucusunda pencere listede olmadığı için olay düşüyor; ivar
+  kurucuda tohumlanıyor. **Bilinen sınır**: başka bir pane'in arama alanına
+  doğrudan tıklamak başlığı tazelemiyor (olay yalnız `BateriView`'dan);
+  menü eylemleri ve bölme doğru pane'i first responder'dan buluyor.
+- **Sapma — `Opening::Split` yüksüz**: `initial_line` ekseni kullanmıyor,
+  eksen `AppDelegate::open_split`'in argümanı. Doğum paketi `pane_launch`'a
+  ayrıldı (pencere doğuran yol ve bölme tek kaynak); miras etkin
+  pencerenin **odaktaki pane'inden**. `open_window` kromu artık
+  `set_theme` ile boyuyor (pane'ler oturumsuz, no-op; ayırıcının rengi de
+  aynı çağrıdan).
+- **Bölünme sınırı** `TerminalPane::grid_fits` (odaktakinin hücresi ve dock
+  payı, `split_into_grid`) ve iki yarı çerçeve hesabının aynı aritmetiğinden
+  (`split::split_halves`); sabitler `MIN_PANE_COLS = 20`,
+  `MIN_PANE_ROWS = 5` (dock hariç), tasarım sabiti, gözle kontrolde
+  ayarlanacak. Menü öğesi sınırda gri, eylem no-op.
+- **Kapanış**: ⌘W çok pane'de `close_pane_asking` (`CloseScope::Pane`,
+  "Close this pane?"), onayda `CloseTarget::Pane`; sekme soruları
+  `CloseTarget::Tabs`. Soru pane'lerden (`foregrounds_to_ask` artık pane
+  listesi alıyor) ve birim `unit_for(pane, sekme)`: tek pane'li sekmelerde
+  metin bayt bayt aynı (eski sınamalar `Unit::Tab` ile değişmeden geçiyor).
+  `close_pane` odaktaki pane kapanıyorsa odağı **sökümden önce** komşuya
+  veriyor. `begin_close` pencerede pane başına sonuç (`Vec<Option<Closing>>`),
+  `shutdown` düzleştiriyor (ilk pane'in sonucu raporda). **Bilinen sınır**:
+  pane sorusu açıkken o pane'in kabuğu çıkarsa sayfa açık kalıyor, onayı
+  no-op (pane zaten yok).
+- ⌘W'nin başlığı `TerminalWindow`'un yeni `validateMenuItem:`'ında
+  (`close_title`); terminal olmayan pencere key iken bölmeli sekmenin
+  bıraktığı "Close" kalmasın diye `AppDelegate`'e de `validateMenuItem:`
+  eklendi (yalnız başlığı sıfırlıyor, cevabı hep `true`).
+- `bateri://tab/<id>`: `AppDelegate::pane_by_tab` (pencere + pane) →
+  `TerminalWindow::bring_to_front(pane)` klavyeyi o pane'e veriyor.
+  `TabId` zaten pane başınaydı (phase-1).
+- Test-first kısmen: `split` sınamaları uygulamayla aynı turda yazıldı; ilk
+  koşuda biri kırmızıydı (1×'te kesirli nokta sınırı piksele iniyor —
+  beklenti oturtulmuş alana düzeltildi, kod değil). Kapatma metni
+  sınamaları (`one_pane_per_tab_keeps_the_tab_wording`,
+  `many_panes_are_counted_as_panes`, `one_pane_asks_about_the_pane`) imza
+  değişimiyle birlikte.
+- Riskli phase tetikleyicisi yok (PTY okuyucu, render thread, `.metal`,
+  kilit dosyası dokunulmadı): `/code-review` set kapısında.
+- Duman öncesi/sonrası aynı: `kare=29 hucre=8 glif=6 kural=15 yuva=13/1984
+  yuva2=0/1984 yuk=smoke istek=4 icerik=2 hareket=27 kayma=0 kapanis=clean
+  pipeline=ok`.
+- Gözle kontrol bu otonom koşuda yapılmadı — set kapısında: ⌘D/⇧⌘D, her
+  pane'de dock/doldurma bandı/blok işaretleri, yeni pane'in dizini (ssh
+  pane'inde aynı host), odaksız pane'de içi boş caret, **tıkla odak
+  değişiyor mu** (`BateriView` `mouseDown:`'ı override ediyor; first
+  responder'ı AppKit'in `sendEvent:`'i veriyor olmalı), `exit` yalnız o
+  pane, koşan işli pane'de ⌘W sorusu, son pane'de ⌘W sekmeyi kapatıyor,
+  başlık odakla, iki pane'de `echo $TERM_SESSION_ID` farklı ve
+  `open bateri://tab/<id>` o pane'i odaklıyor, ayırıcının tonu ve
+  Retina'da keskinliği, en küçük pane sınırının sayıları.
