@@ -1,10 +1,12 @@
 //! bt-shell — AppKit kabuğu: pencere, sekme, bölme, menü, klavye, servisler.
 //!
 //! `objc2-app-kit` üzerinden doğrudan AppKit; Metal'i görmez, çizimi
-//! `bt-gpu`'ya bırakır ve device'ı `Renderer::system_default` kurar — pencere
-//! başına bir renderer (`window`). Kareyi de sürmez: pencereyi, oturumu ve
+//! `bt-gpu`'ya bırakır ve device'ı `Renderer::system_default` kurar — pane
+//! başına bir renderer (`pane`). Kareyi de sürmez: pane'i, oturumu ve
 //! display link'i birbirine bağlar, gerisi `bt-gpu`'nun ritmidir. Uygulama
-//! geneli (`app`) ile pencere başına olan (`window`) ayrı nesnelerde. Klavye buradan PTY'ye akar (`keys`, `view`,
+//! geneli (`app`), pencere başına olan (`window`: krom, sekme, kapatma
+//! sorusu) ve oturum başına olan (`pane`: `NSView` alt sınıfı, oturumun
+//! çekirdeği) ayrı nesnelerde. Klavye buradan PTY'ye akar (`keys`, `view`,
 //! `clipboard`), fare de buradan oturuma (seçim ve kaydırma, `view`);
 //! Finder'dan bırakılan dosyanın yolu da buradan giriş satırına düşer
 //! (`view`'ın sürükleme hedefi + `quote`'un kabuk kaçışı);
@@ -21,7 +23,7 @@
 //! ayar dosyasına yazar (`settings`), Cmd +/−/0 dosyaya dokunmayan ve pencereye
 //! ait geçici punto (`zoom`).
 //! **Çok pencere ve macOS'un kendi sekmeleri** (`.tasks/026-sekmeler`): her
-//! sekme bir `NSWindow` ve kendi oturumu (`window`); pencereleri açan,
+//! sekme bir `NSWindow` ve tek pane'inde kendi oturumu (`window`, `pane`); pencereleri açan,
 //! listeleyen ve kapanışı paralel yürüten `app`. Bölme ve IME sonraki setlerde.
 
 pub(crate) mod app;
@@ -32,6 +34,7 @@ mod jobs;
 mod keys;
 mod menu;
 mod notices;
+mod pane;
 mod quote;
 mod search_bar;
 mod settings;

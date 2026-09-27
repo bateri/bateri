@@ -34,6 +34,7 @@ use objc2_foundation::{
 
 use crate::menu::ShellMenuDelegate;
 use crate::notices::{Notices, Source};
+use crate::pane::TerminalPane;
 use crate::settings_window::SettingsWindow;
 use crate::watch::{Notify, Watch};
 use crate::window::{self, CloseScope, Launch, TerminalWindow};
@@ -440,7 +441,7 @@ pub(crate) struct Grid {
 
 /// Piksel geometrisi + ızgara ölçüsü → grid.
 ///
-/// `TerminalWindow::sync_geometry`'den ayrı duruyor çünkü saf olan tek parça
+/// `TerminalPane::sync_geometry`'den ayrı duruyor çünkü saf olan tek parça
 /// bu; geri kalanı pencere ve layer, yani sınanamaz. Ölçü **argüman**: bu gövdeye
 /// gizlenmiş bir sabit `cell_metrics_come_from_outside`'i düşürür.
 ///
@@ -458,13 +459,13 @@ pub(crate) struct Grid {
 ///
 /// **Dock payı satırlardan düşülür** (012) ve sol payın tersine **koşullu**:
 /// dock yalnız entegrasyonlu zsh oturumunda var ve karar oturum doğarken
-/// veriliyor (`TerminalWindow::start`). Payı koşulsuz ayırmak dock'u
+/// veriliyor (`TerminalPane::start`). Payı koşulsuz ayırmak dock'u
 /// olmayan pencereden sebepsiz iki satır götürürdü — sol payın sekiz
 /// noktasıyla kıyaslanmayacak bir bedel.
 ///
 /// **Pay koşu boyunca oynuyor** (R5.2): alternatif ekranda sıfıra iniyor,
 /// çıkışta doğum değerine dönüyor (`dock_rows_for`,
-/// `TerminalWindow::alt_screen_did_change`).
+/// `TerminalPane::alt_screen_did_change`).
 /// Oynamanın bedeli bir `TIOCSWINSZ` ve o bedel **komut başına değil geçiş
 /// başına** ödeniyor — `git log` gibi alternatif ekrana girmeyen komutlar
 /// bayrağı hiç oynatmıyor, yani bu fonksiyon da yeniden çağrılmıyor.
@@ -576,6 +577,21 @@ fn dock_rows_at_birth(integration: &[(String, String)], setting: ShellIntegratio
 /// Saf: `bt-shell`'in AppKit'siz sınanabilen tek yarısı burası.
 pub(crate) fn dock_rows_for(alt_screen: bool, birth: u16) -> u16 {
     if alt_screen { 0 } else { birth }
+}
+
+/// Anahtarı tutan ve **kapanmamış** ilk öğe — kimlikle aramaların
+/// (`AppDelegate::pane`, `window_of_pane`, `window_by_tab`) tek kuralı.
+/// `key` öğe başına `(eşleşiyor mu, kapandı mı)` verir.
+///
+/// Kapanmış öğe eşleşse de `None`: pane'in penceresi listeden bir tur sonra
+/// çıkıyor (`forget_window`) ve o arada okuyucu thread'in bayat bir haberi
+/// ya da bir `bateri://tab/` açılışı kapanmış oturumu bulmamalı. Saf,
+/// sınanıyor.
+fn find_open<T>(items: impl IntoIterator<Item = T>, key: impl Fn(&T) -> (bool, bool)) -> Option<T> {
+    items.into_iter().find(|item| {
+        let (matches, closed) = key(item);
+        matches && !closed
+    })
 }
 
 /// Dosyayı kullanıcının editöründe açar; hiçbir yol açamadıysa `false`.
@@ -1627,17 +1643,35 @@ impl AppDelegate {
             .cloned()
     }
 
-    /// Sekme kimliği `id` olan pencere; kapanmışsa `None` (`bateri://tab/`,
-    /// `application:openURLs:`). [`AppDelegate::window`]'ın ikizi, bir farkla:
-    /// `windowWillClose:`'u geçmiş ama listeden henüz çıkmamış pencere de
-    /// `None` — öne getirilse oturumsuz bir pencere ekrana dönerdi.
+    /// Kimliği `id` olan pane'in penceresi; pane kapanmışsa `None` — okuyucu
+    /// thread'den ana kuyruğa dönen işlerin (`ShellWake`, alternatif ekran
+    /// habercisi) pencereye ait işi (başlık, arama sayımı, kapanış) buradan.
+    ///
+    /// [`AppDelegate::window`]'ın aksine kapanışı başlamış pane'i **bulmuyor**
+    /// ([`find_open`]): pencere listeden bir tur sonra çıkıyor ve o arada
+    /// gelen bayat bir haber kapanmış oturuma iş yapmamalı.
+    pub(crate) fn window_of_pane(&self, id: u64) -> Option<Retained<TerminalWindow>> {
+        find_open(self.windows(), |window| {
+            let pane = window.pane();
+            (pane.id() == id, pane.is_closed())
+        })
+    }
+
+    /// Kimliği `id` olan pane; kapanmışsa `None` ([`AppDelegate::window_of_pane`]).
+    /// Bu phase'de pencere başına tek pane (039 phase-1).
+    pub(crate) fn pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
+        self.window_of_pane(id).map(|window| window.pane_handle())
+    }
+
+    /// Sekme kimliği `id` olan pane'in penceresi; kapanmışsa `None`
+    /// (`bateri://tab/`, `application:openURLs:`): kapanışı başlamış ama
+    /// listeden henüz çıkmamış pencere öne getirilse oturumsuz bir pencere
+    /// ekrana dönerdi ([`find_open`]).
     fn window_by_tab(&self, id: &TabId) -> Option<Retained<TerminalWindow>> {
-        self.ivars()
-            .windows
-            .borrow()
-            .iter()
-            .find(|window| window.tab_id() == id && !window.is_closed())
-            .cloned()
+        find_open(self.windows(), |window| {
+            let pane = window.pane();
+            (pane.tab_id() == id, pane.is_closed())
+        })
     }
 
     /// Etkin pencere: `NSApp.keyWindow` listede aranıyor. Ayar penceresi ya
@@ -1735,12 +1769,16 @@ impl AppDelegate {
         opening: Opening,
     ) -> Result<Retained<TerminalWindow>, String> {
         let mtm = self.mtm();
-        let window = TerminalWindow::new(mtm, self.next_window_id(), self.ivars().run)
-            .map_err(|e| e.to_string())?;
+        // Pencere ve pane aynı sayaçtan: tek ad alanı, çakışma yok.
+        let (id, pane_id) = (self.next_window_id(), self.next_window_id());
+        let window =
+            TerminalWindow::new(mtm, id, pane_id, self.ivars().run).map_err(|e| e.to_string())?;
         if let Some(from) = from {
-            window.set_zoom(from.zoom());
+            window.pane().set_zoom(from.pane().zoom());
         }
-        window.request_font(&self.ivars().settings.borrow().font);
+        window
+            .pane()
+            .request_font(&self.ivars().settings.borrow().font);
         window.set_subtitle(&NSString::from_str(
             &self.ivars().notices.borrow().subtitle(),
         ));
@@ -1790,7 +1828,7 @@ impl AppDelegate {
     fn quiet_since(&self) -> Option<Duration> {
         self.windows()
             .first()
-            .and_then(|window| window.link().and_then(DisplayLink::quiet_since))
+            .and_then(|window| window.pane().link().and_then(DisplayLink::quiet_since))
     }
 
     /// Geçerli ayarlar — pencerelerin okuduğu yol. Ödünç kısa tutulmalı:
@@ -1835,7 +1873,7 @@ impl AppDelegate {
     /// ([`settings::Loaded::at_launch`], [`AppDelegate::choose_theme`]).
     ///
     /// Font pencerenin renderer'ına pencere doğarken **yalnız istek** olarak
-    /// gidiyor ([`AppDelegate::open_window`] → [`TerminalWindow::request_font`]):
+    /// gidiyor ([`AppDelegate::open_window`] → [`TerminalPane::request_font`]):
     /// atlas hemen ardından gelen `sync_geometry`'de açılıyor ve font yuvasını
     /// da o yazıyor.
     ///
@@ -1913,7 +1951,7 @@ impl AppDelegate {
     ///   kabul edilmeyen anahtar geçerli değerini tutar
     ///   ([`settings::load_keeping`]) ve fark alınır: terminal seçenekleri
     ///   **tamamıyla** oturuma gider; font pencerenin geçici punto farkıyla
-    ///   renderer'a gider ([`TerminalWindow::apply_font`]) — `size`
+    ///   renderer'a gider ([`TerminalPane::apply_font`]) — `size`
     ///   değiştiyse fark sıfırlanarak ([`Zoom::after_reload`]); imleç stili link'e gider
     ///   ([`bt_gpu::DisplayLink::set_cursor_motion`]). Dosya okunup uygulanınca yazma
     ///   yuvası da boşalır: Theme ▸'nin reddettiği dosya düzeltildiyse ret
@@ -1952,13 +1990,13 @@ impl AppDelegate {
                 // Punto farkı **pencere başına** (026 → Karar 3) ve her
                 // pencerede aynı kuralla sıfırlanıyor.
                 for window in &windows {
-                    window.zoom_after_reload(&old.font, &new.font);
+                    window.pane().zoom_after_reload(&old.font, &new.font);
                 }
                 old.changes(&new)
             };
             if changes.terminal {
                 for window in &windows {
-                    window.set_terminal_options(&new);
+                    window.pane().set_terminal_options(&new);
                 }
             }
             if changes.remote {
@@ -1974,7 +2012,7 @@ impl AppDelegate {
             let motion_changed = changes.motion;
             if motion_changed {
                 for window in &windows {
-                    window.set_cursor_motion(&new);
+                    window.pane().set_cursor_motion(&new);
                 }
             }
             // İmlecin çizim sayıları da link'e, aynı gerekçeyle: **nasıl**
@@ -1984,7 +2022,7 @@ impl AppDelegate {
             // değişimi oturumu baştan kurdururdu.
             if changes.caret {
                 for window in &windows {
-                    window.apply_caret(&new);
+                    window.pane().apply_caret(&new);
                 }
             }
             self.ivars().settings.replace(new);
@@ -2000,7 +2038,7 @@ impl AppDelegate {
             // okuyor.
             if changes.font {
                 for window in &windows {
-                    window.apply_font(self);
+                    window.pane().apply_font(self);
                 }
             }
             self.post_notices(Source::Write, Vec::new());
@@ -2318,8 +2356,8 @@ impl AppDelegate {
         let reduce = self.reduce_motion();
         let smooth = resolve_smooth_scroll(&self.ivars().settings.borrow(), reduce);
         for window in self.windows() {
-            window.set_reduce_motion(reduce);
-            window.set_smooth_scroll(smooth);
+            window.pane().set_reduce_motion(reduce);
+            window.pane().set_smooth_scroll(smooth);
         }
     }
 
@@ -2469,7 +2507,7 @@ impl AppDelegate {
     fn report_and_exit(&self, run: Run, teardown: Option<Teardown>, quiet: Option<Duration>) -> ! {
         let windows = self.windows();
         let window = windows.first();
-        let renderer = window.map(|window| window.renderer());
+        let renderer = window.map(|window| window.pane().renderer());
         // Dört sayaç dört ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
         // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi, `glif`
         // çizilen glyph, `kural` çizilen alt çizgi/üstü çizili. Biri sıfırken
@@ -2503,7 +2541,7 @@ impl AppDelegate {
         // tarafında (tamamlanma bloğu), `icerik` ana thread'de
         // (`needs_update`). Kapının üst sınırı buna bağlı ve alt sınır hâlâ
         // `kare`'de — hangi sorunun hangi sayacı sorduğu [`verdict`]'te.
-        let link = window.and_then(|window| window.link());
+        let link = window.and_then(|window| window.pane().link());
         let counters = Counters {
             frames: n,
             content: link.map_or(0, DisplayLink::content_frames),
@@ -2871,6 +2909,18 @@ mod tests {
             loose.rows,
             tight.rows
         );
+    }
+
+    #[test]
+    fn lookup_skips_closed_panes() {
+        // (kimlik, kapandı mı): kapanışı başlamış pane listede dursa da
+        // bulunmuyor; açık olan bulunuyor; olmayan kimlik hiçbir şey.
+        let panes = [(1_u64, false), (2, true), (3, false)];
+        let find = |id| find_open(panes, |&(pane, closed)| (pane == id, closed));
+        assert_eq!(find(1), Some((1, false)));
+        assert_eq!(find(2), None, "kapanmış pane bulunmamalı");
+        assert_eq!(find(3), Some((3, false)));
+        assert_eq!(find(4), None);
     }
 
     #[test]
