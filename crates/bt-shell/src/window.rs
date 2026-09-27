@@ -1,61 +1,53 @@
-//! Terminal penceresi: bir `NSWindow`, onun `BateriView`'ı, `CAMetalLayer`
-//! yüzeyi, kendi `Renderer`'ı, shell oturumu ve kareyi süren display link —
-//! **pencere başına** olan her şey ve pencerenin `NSWindowDelegate`'i.
+//! Terminal penceresi: bir `NSWindow`, onun tek pane'i (`pane::TerminalPane`
+//! — oturum, link, renderer, yüzey, `BateriView`) ve **pencereye** ait olan
+//! her şey: krom, başlık, sekme noktası, kapatma sorusu, arama paneli ve
+//! yükleme kuyruğu; pencerenin `NSWindowDelegate`'i de burada.
 //!
 //! Uygulama geneli (ayarlar, izleme, alt başlık yuvaları, ölçüm defteri,
 //! süreli koşu tarifi, pencere listesi) `app`'te; oradan gelen kayıt anı
-//! yolları buradaki yöntemlere **her pencere için** varır. Çizim çağrısı
-//! burada da yok, bu dosyanın işi bağlamak.
+//! yolları **her pane'e** varır (`TerminalWindow::pane`). Pencerenin
+//! geometri, örtülme ve odak bildirimleri de pane'e dağıtılıyor. Çizim
+//! çağrısı burada da yok, bu dosyanın işi bağlamak.
 //!
-//! **Renderer pencere başına** (`.tasks/026-sekmeler/discussion.md` → Karar
-//! 2a): atlasın anahtarı ölçek ve punto içeriyor, yani paylaşılan tek renderer
-//! farklı ölçekli ekranlardaki iki pencerede atlası birbirine çevirir ve sekme
-//! başına puntoyu imkânsız kılardı.
+//! Renderer pane başına (`pane`'in başlığı; 039 Karar 5).
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::PathBuf;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::time::Instant;
 
 use block2::RcBlock;
 use bt_core::{
-    ConfirmClose, FontOptions, HostMark, RemoteTarget, SearchCover, SearchDirection, SearchReport,
-    SearchStatus, Session, SessionOptions, Settings, ShutdownHandle, TabId, Teardown, Theme, Wake,
+    ConfirmClose, HostMark, SearchCover, SearchDirection, SearchReport, SearchStatus, Session,
+    Settings, ShutdownHandle, Teardown, Theme,
 };
-use bt_core::{load_shell, smoke_shell};
-use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Surface, Waker};
+use bt_gpu::GpuError;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControlTextEditingDelegate,
-    NSEventModifierFlags, NSMenuItem, NSModalResponse, NSModalResponseCancel, NSPasteboard,
-    NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextFieldDelegate,
-    NSTitlePosition, NSTitlebarSeparatorStyle, NSView, NSViewFrameDidChangeNotification, NSWindow,
-    NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSBox,
+    NSBoxType, NSButton, NSColor, NSControlTextEditingDelegate, NSEventModifierFlags, NSMenuItem,
+    NSModalResponse, NSModalResponseCancel, NSPasteboard, NSPasteboardNameFind, NSPopoverDelegate,
+    NSSearchFieldDelegate, NSTextFieldDelegate, NSTitlePosition, NSTitlebarSeparatorStyle, NSView,
+    NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString, NSUUID, ns_string,
+    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
 };
 
-use crate::app::{self, AppDelegate, Grid, split_into_grid};
-use crate::child;
-use crate::clipboard::{self, PendingCopy};
-use crate::jobs::{self, Foreground, Libproc, Probe, ShellParent};
-use crate::notices::{Source, font_messages};
-use crate::quote;
+use crate::Run;
+use crate::app::{self, AppDelegate};
+use crate::clipboard;
+use crate::jobs::Foreground;
+use crate::pane::TerminalPane;
 use crate::search_bar::{SearchBar, selection_query};
 use crate::upload::{self, Uploads};
 use crate::uploader::{StopSheet, UploadPopover};
 use crate::view::BateriView;
 use crate::zoom::Zoom;
-use crate::{Run, Workload};
 
 /// Temanın zemini koyu mu — pencere kromunun görünümü (Aqua / DarkAqua)
 /// buradan ([`TerminalWindow::apply_chrome`]).
@@ -75,300 +67,6 @@ pub(crate) fn is_dark_background(theme: &Theme) -> bool {
     let against_white = 1.05 / (luminance + 0.05);
     let against_black = (luminance + 0.05) / 0.05;
     against_white > against_black
-}
-
-/// `bt-core`'un uyandırma ucu — pencere başına bir tane, oturumuyla birlikte.
-///
-/// `Session::spawn` `Wake`'i link'ten **önce** ister, `Waker` ise link'ten
-/// sonra doğar; boşluğu yuvanın `None`'ı kapatır. Kaçan kare yok: açılış
-/// karesi zaten elle isteniyor ve o ana kadar okunmuş her bayt hasar
-/// bayrağında birikmiş olur.
-struct ShellWake {
-    /// Pencerenin kimliği: ana kuyruk işleri pencereyi listeden bununla
-    /// buluyor (alternatif ekran habercisinin örüntüsü) — `Session`'a ya da
-    /// pencereye referans tutmak `wake.rs`'in Sahiplik çemberini kapatırdı.
-    id: u64,
-    /// Süreli koşu mu: `child_exit` iki yola ayrılıyor ([`Wake::child_exit`]'in
-    /// gövdesi). `AppDelegate`'inkinin kopyası; okuyucu thread'den uygulama
-    /// delegate'ine uzanılamaz.
-    timed: bool,
-    /// Link'in `Waker`'ı — **yaprak kilit** altında ve **sökülebilir**.
-    ///
-    /// Pencere kapanırken ana thread'de `take()` ediliyor
-    /// ([`ShellWake::detach`]): bu nesnenin son kopyası `"PTY teardown"`
-    /// thread'inde düşebilir (`wake.rs` → Sahiplik) ve `Waker`'ın
-    /// `MainThreadBound`'u oraya düşerse `Drop`'u ana kuyruğa senkron iş atar.
-    /// Sökülmüş yuva o `Drop`'u yapısal olarak ana thread'e çiviliyor; eskiden
-    /// tek koruma pencere listesinin `app.run()`'ı aşmasıydı.
-    ///
-    /// Kilit yaprak: `wake()` onu `Term` kilidi altında alıp bırakıyor ve
-    /// altında başka kilit alınmıyor (`Theme`'in yaprak kilidi emsali).
-    waker: Mutex<Option<Waker>>,
-    /// OSC 52'nin ana kuyruğa bekleyen metni. `Arc`, çünkü ana kuyruğun işi
-    /// `'static` ister ve `Wake`'in çağrısı yalnız `&self` veriyor; iş
-    /// `ShellWake`'i değil yalnız yuvayı tutar.
-    pending_copy: Arc<PendingCopy>,
-    /// Başlık işi ana kuyrukta bekliyor mu — kuyruğa **en çok bir** iş
-    /// (`PendingCopy`'nin örüntüsü, yük yerine bayrak: başlığın kendisi
-    /// oturumda, iş onu okuyor).
-    title_pending: Arc<AtomicBool>,
-    /// Arama sayımının defter haberi ana kuyrukta bekliyor mu —
-    /// `title_pending`'in ikizi (033).
-    search_pending: Arc<AtomicBool>,
-    /// Uzak oturum yoklamasının silahı ve bekleyen işi (036); `Arc`, çünkü
-    /// ana kuyruğun işi onu tutuyor.
-    remote_probe: Arc<RemoteProbe>,
-}
-
-/// Uzak oturum yoklamasının iki biti (036 Karar 2): **silah** (bu komut için
-/// kesin bir cevap henüz yok) ve **bekleyen iş** (ana kuyrukta bir yoklama
-/// var — en çok bir tane, `title_pending`'in örüntüsü).
-///
-/// Silah `C` kenarında kuruluyor; kuruluyken her `wake` (PTY'den gelen
-/// çıktı) bir iş atıyor, kesin cevap onu indiriyor ve sonraki çıktılar
-/// yoklamıyor. Akan bir `cat`'in bedeli tek yoklama.
-///
-/// **İş silahı yoklamadan önce indiriyor**, sonra değil, ve kararsız cevapta
-/// geri kuruyor: yoklama sürerken okuyucu thread'de gelen yeni bir `C` silahı
-/// kurup yeni bir iş atabiliyor ve bitmekte olan eski komutun kesin cevabı
-/// onu indirseydi yeni komut hiç yoklanmazdı.
-#[derive(Debug, Default)]
-struct RemoteProbe {
-    armed: AtomicBool,
-    pending: AtomicBool,
-}
-
-impl RemoteProbe {
-    /// `C` kenarı: silahı kurar; ana kuyruğa iş atılacaksa `true`.
-    fn command_started(&self) -> bool {
-        self.armed.store(true, Ordering::Release);
-        self.claim()
-    }
-
-    /// Çıktı kenarı (okuyucu thread, `Term` kilidi altında olabilir): silah
-    /// kuruluysa ve iş beklemiyorsa `true`. Silahsızken tek bir atomik okuma.
-    fn output(&self) -> bool {
-        self.armed.load(Ordering::Acquire) && self.claim()
-    }
-
-    /// Bekleyen işin yuvasını alır; zaten bekleyen varsa `false`.
-    fn claim(&self) -> bool {
-        !self.pending.swap(true, Ordering::AcqRel)
-    }
-
-    /// Ana kuyruktaki işin başı: yuvayı bırakır ve silahı indirir; silah
-    /// kurulu değilse (kesin cevap verildi) yoklama yok.
-    fn begin(&self) -> bool {
-        self.pending.store(false, Ordering::Release);
-        self.armed.swap(false, Ordering::AcqRel)
-    }
-
-    /// Kararsız cevap: silah geri kuruluyor, iş atılmıyor — sonraki çıktı
-    /// atar.
-    fn rearm(&self) {
-        self.armed.store(true, Ordering::Release);
-    }
-}
-
-impl ShellWake {
-    /// Uzak oturum yoklamasını ana kuyruğa atar ([`RemoteProbe`]).
-    fn dispatch_remote_probe(&self) {
-        let probe = Arc::clone(&self.remote_probe);
-        let id = self.id;
-        DispatchQueue::main().exec_async(move || {
-            if !probe.begin() {
-                return;
-            }
-            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            // Pencere bu arada kapandıysa yoklanacak bir kabuk da yok.
-            let undecided = app::delegate(mtm)
-                .and_then(|app| app.window(id))
-                .is_some_and(|window| window.probe_remote());
-            if undecided {
-                probe.rearm();
-            }
-        });
-    }
-
-    /// Yaprak kilidi alır; zehirlenmişse içindekiyle devam eder — yuvanın tek
-    /// değişmezi "ya `Waker` var ya yok" ve yarım yazılmış bir hâli olamaz.
-    fn slot(&self) -> MutexGuard<'_, Option<Waker>> {
-        self.waker.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// `Waker`'ı yuvadan söker ve çağırana verir — ana thread'de düşsün diye
-    /// ([`ShellWake::waker`]). İkinci çağrı `None`.
-    fn detach(&self) -> Option<Waker> {
-        self.slot().take()
-    }
-}
-
-impl Wake for ShellWake {
-    fn wake(&self) {
-        // Okuyucu thread; `Term` kilidi tutuluyor olabilir. Tek iş: ana
-        // kuyruğa "link'i aç" işini at, hemen dön.
-        // Kopya **alınmıyor**, kilit altında çağrılıyor: kopya burada son
-        // referans kalıp okuyucu thread'de düşebilirdi — sökmenin
-        // kapattığı yolun ta kendisi.
-        if let Some(waker) = self.slot().as_ref() {
-            waker.wake();
-        }
-        // Uzak oturum yoklaması kararsız kaldıysa bu çıktı onu yeniden
-        // tetikliyor (036 Karar 2); silahsızken bedel bir atomik okuma.
-        if self.remote_probe.output() {
-            self.dispatch_remote_probe();
-        }
-    }
-
-    fn child_exit(&self, _code: Option<i32>) {
-        // Shell gitti, pencerenin dayanağı kalmadı: **o pencere** kapanır
-        // (026 → Karar 5), uygulama değil. Kapanış pencerenin kendi
-        // `windowWillClose:`'undan geçiyor — kırmızı düğme, ⌘W ve `exit` aynı
-        // sıraya varır.
-        //
-        // **Süreli koşuda** eski yol: doğrudan `terminate:`. Rapor pencerenin
-        // sayaçlarını okuyor ve pencere rapordan önce listeden düşseydi duman
-        // reçetesi deadline'dan kısa bittiğinde rapor boş listeyle koşardı
-        // (`will_terminate`'in doc'u).
-        //
-        // Ana kuyruğa atılmasının iki sebebi var ve ikisi de zorunlu: AppKit
-        // ana thread ister, ve bu çağrı **okuyucu thread'de** geliyor —
-        // kapanışa giden senkron bir yol okuyucu thread'i kendi kapanışında
-        // bekletirdi (`wake.rs` → Sahiplik).
-        //
-        // **Bilinen sınır:** shell'in son çıktısı ekrana gelmeyebilir.
-        // alacritty sırayı `ChildExit` → `Wakeup` diye kuruyor, yani buraya
-        // geldiğimizde son bayt henüz çizilmemiş olabilir; kapanış da araya
-        // bir vsync girmeden koşar. Garanti etmek ya sihirli bir gecikme ya da
-        // display link'e "hasar tükendi, şimdi çık" semantiği eklemek olurdu —
-        // ikincisi renderer'a terminal bilgisi sokar. `bateri -e cmd` yolu
-        // geldiğinde `drain_on_exit` ile birlikte tasarlanacak
-        // (`.tasks/002-vt-motoru/phase-4.md` → Uygulama Notları).
-        let (timed, id) = (self.timed, self.id);
-        DispatchQueue::main().exec_async(move || {
-            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            if timed {
-                NSApplication::sharedApplication(mtm).terminate(None);
-                return;
-            }
-            // Pencere bu arada kapandıysa (⌘W'nin `SIGHUP`'ı kabuğu öldürdü
-            // ve haber sonradan geldi) kapatacak bir şey yok.
-            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
-                window.close();
-            }
-        });
-    }
-
-    fn copy_to_clipboard(&self, text: String) {
-        // Okuyucu thread, `Term` kilidi tutuluyor: metin kilitsiz yuvaya,
-        // ana kuyruğa en çok **bir** iş (`PendingCopy`'nin doc'u). Yuvada
-        // bekleyen metin varsa onu alacak iş zaten kuyrukta.
-        //
-        // Pano genel pano, Cmd-C'ninkiyle aynı (`view.rs` → `copy:`); işin
-        // sırası `child_exit`'inkiyle aynı gerekçeden: ana kuyruk.
-        if self.pending_copy.put(text) {
-            let pending = Arc::clone(&self.pending_copy);
-            DispatchQueue::main().exec_async(move || {
-                pending.deliver(&NSPasteboard::generalPasteboard());
-            });
-        }
-    }
-
-    fn title_changed(&self) {
-        // Okuyucu thread (ya da ayar kaydının thread'i), `Term` kilidi
-        // tutuluyor olabilir: bayrağı kur, iş zaten bekliyorsa dön.
-        if self.title_pending.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let pending = Arc::clone(&self.title_pending);
-        let id = self.id;
-        DispatchQueue::main().exec_async(move || {
-            // Bayrak başlık **okunmadan önce** iniyor: okumadan sonra gelen
-            // bir değişiklik yeni bir iş ister ve kaçmaz. `swap`, çünkü
-            // okuma-değiştirme-yazma yazarın `swap`'ıyla eşleşiyor ve onun
-            // yuvaya yazdığını görünür kılıyor.
-            pending.swap(false, Ordering::AcqRel);
-            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            // Pencere bu arada kapanmışsa yazacak bir başlık da yok.
-            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
-                window.refresh_title();
-            }
-        });
-    }
-
-    fn search_changed(&self) {
-        // Okuyucu thread, `Term` kilidi tutuluyor olabilir (ya da ana
-        // thread'in `resize`'ı): `title_changed`'in örüntüsü — ana kuyruğa en
-        // çok bir iş. Çekirdek zaten kenarda haber veriyor; bu bayrak iki
-        // haber arasında iş kuyrukta beklerken ikincisini katlıyor.
-        if self.search_pending.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let pending = Arc::clone(&self.search_pending);
-        let id = self.id;
-        DispatchQueue::main().exec_async(move || {
-            pending.swap(false, Ordering::AcqRel);
-            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            // Arka sekmede de işliyor: haber kare yoluna bağlı değil. Pencere
-            // bu arada kapandıysa sayacak bir şey yok.
-            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
-                window.kick_search();
-            }
-        });
-    }
-
-    fn command_started(&self) {
-        // Okuyucu thread, kilitsiz. Süreli koşu algılamıyor: jetonları
-        // bugünkü kalmalı (ve sabit betiğin entegrasyonu da yok).
-        if self.timed {
-            return;
-        }
-        if self.remote_probe.command_started() {
-            self.dispatch_remote_probe();
-        }
-    }
-}
-
-/// `bt-gpu`'nun alternatif ekran habercisi: işi **ana kuyruğa** atar.
-///
-/// Çağrısı kare yolundan, yani zaten ana thread'den geliyor — kuyruk bir
-/// thread geçişi için değil, **bir tur ertelemek** için: çağrıldığı an kare
-/// çizilmiş durumda ve pencere geometrisini (drawable ölçüsü, ızgara,
-/// `DisplayLink` yerleşimi) orada değiştirmek çizilen karenin altını oymak
-/// olurdu.
-///
-/// **Hedefsiz eylem değil, pencere kimliği.** Responder zinciri key pencereye
-/// gidiyor: arka sekmede vim'den çıkış yanlış pencereyi boyutlandırırdı. İş
-/// kimliği (`id`) yakalıyor, `AppDelegate`'in listesinden pencereyi buluyor ve
-/// bulamazsa düşüyor — pencere o arada kapanmışsa boyutlandıracak bir şey de
-/// yok.
-///
-/// Yakaladığı tek şey bir tamsayı. Eski "hiçbir şey yakalamıyor" kuralının
-/// gerekçesi bir **referans çemberiydi** (`DisplayLink` pencerenin ivar'ında
-/// duruyor, pencereyi tutan bir closure onu kendine bağlardı); bir tamsayı
-/// çember açmıyor. Üstelik `exec_async` `Send` istiyor ve pencere nesnesi
-/// ana thread'e çivili — tutabileceği başka bir şey de yoktu.
-///
-/// Yük taşımıyor: alıcı gerçeği yeniden okuyor ([`TerminalWindow::alt_screen_did_change`]),
-/// yani birbirini kovalayan iki geçiş (vim aç-kapa) bayat bir değerle
-/// davranamıyor.
-fn alt_screen_notifier(id: u64) -> Box<dyn Fn()> {
-    Box::new(move || {
-        DispatchQueue::main().exec_async(move || {
-            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            let Some(app) = app::delegate(mtm) else {
-                return;
-            };
-            if let Some(window) = app.window(id) {
-                window.alt_screen_did_change(&app);
-            }
-        });
-    })
 }
 
 /// Sistemin find panosundaki metin (Karar 6: ⌘E'nin uygulamalar arası
@@ -473,7 +171,11 @@ pub(crate) fn foregrounds_to_ask(
     confirm: ConfirmClose,
     tabs: &[&TerminalWindow],
 ) -> Option<Vec<Foreground>> {
-    let read = || tabs.iter().map(|tab| tab.foreground()).collect::<Vec<_>>();
+    let read = || {
+        tabs.iter()
+            .map(|tab| tab.pane().foreground())
+            .collect::<Vec<_>>()
+    };
     let mut seen = None;
     let ask = should_ask(timed, confirm, || {
         let foregrounds = read();
@@ -612,67 +314,23 @@ fn close_requested_tabs(app: &AppDelegate) {
     }
 }
 
-/// Pencerenin durumu. `OnceCell`: oturum ve link `start` içinde bir kez doğar,
-/// sonra yalnız okunur. Pencere, view, yüzey ve renderer kurucuda doğuyor.
+/// Pencerenin durumu — **pencereye** ait olan: krom, sekme noktası, kapatma
+/// sorusu, arama paneli ve yükleme kuyruğu. Oturumun çekirdeği (oturum,
+/// link, renderer, yüzey, view, dock payı, punto, kimlik) pencerenin tek
+/// pane'inde ([`TerminalPane`], 039 Karar 1–2).
 pub(crate) struct WindowIvars {
-    /// Kendi sayacımız ([`AppDelegate`] dağıtıyor): alternatif ekran
-    /// habercisinin pencereyi listeden bulduğu anahtar.
+    /// Kendi sayacımız ([`AppDelegate`] dağıtıyor): kapatma sorusunun ve
+    /// listeden çıkışın pencereyi bulduğu anahtar. Pane'in kimliği ayrı
+    /// ([`TerminalPane::id`]) ve aynı sayaçtan.
     id: u64,
-    /// Süreli koşunun tarifi, `AppDelegate`'inkinin kopyası (`Copy`): odak
-    /// yolu onu her uygulama geçişinde soruyor ve uygulama delegate'ine
-    /// uzanmadan cevaplayabilmeli ([`TerminalWindow::apply_focus`]).
+    /// Süreli koşunun tarifi, `AppDelegate`'inkinin kopyası (`Copy`):
+    /// kapatma sorusu süreli koşuda hiç sorulmuyor ve uygulama delegate'ine
+    /// uzanmadan cevaplayabilmeli ([`TerminalWindow::should_close_now`]).
     run: Option<Run>,
-    /// `Rc`: renderer ana thread'e çivili (bkz. `bt_gpu::DisplayLink`) ve
-    /// link de bir kopya tutuyor.
-    renderer: Rc<Renderer>,
-    surface: Surface,
     window: Retained<NSWindow>,
-    /// Fare çevirisinin girdileri pencere boyuyla tazeleniyor (`set_metrics`);
-    /// `contentView` kapsayıcı (`NSView`), terminal onun çocuğu — o yüzden
-    /// burada tutuluyor. Geometrinin kaynağı da bu view (`sync_geometry`).
-    view: Retained<BateriView>,
-    link: OnceCell<DisplayLink>,
-    /// Kapanış sırasının ikinci adımı buradan çağrılır; `DisplayLink` de bir
-    /// kopya tutuyor ama oraya `stop()`'tan sonra uzanmak yanlış olurdu.
-    session: OnceCell<Arc<Session>>,
-    /// Kabuk PTY'nin çocuğu mu, çocuğunun çocuğu mu — oturumla aynı anda,
-    /// **komuttan** yazılıyor ([`TerminalWindow::start_session`]); koşan işin
-    /// tespiti kabuğu bununla buluyor ([`TerminalWindow::foreground`]).
-    shell_parent: OnceCell<ShellParent>,
-    wake: Arc<ShellWake>,
-    /// Cmd +/−/0'ın geçici punto farkı — **bu pencerenin**: renderer'a giden
-    /// font `zoom.apply(&settings.font)` ([`TerminalWindow::apply_font`]).
-    /// Dosyadaki `size` değişince sıfırlanır ([`TerminalWindow::zoom_after_reload`]).
-    zoom: Cell<Zoom>,
-    /// Dock kaç satır; `0` → bu pencerede dock yok.
-    ///
-    /// **Oturum doğarken kararlaşıyor** (012 → R5.1): kaynağı entegrasyonun
-    /// kurulup kurulmadığı ve o [`TerminalWindow::start`]'ta **bir kez**
-    /// soruluyor. Yuva o yüzden var: `sync_geometry` her pencere olayında
-    /// koşuyor ve ızgara yüksekliğini hesaplarken cevabı bilmek zorunda;
-    /// ikinci kez sormak, iki çağrının ayrışabildiği bir gelecekte "pencere
-    /// iki satır kaybetti ama dock yok" demekti.
-    ///
-    /// Sonucu: `/bin/sh` koşan duman reçetesi dock **almıyor**, yani
-    /// `smoke_shell` ve ona bağlı `hucre=8 glif=6 kural=15` sözleşmesi
-    /// dokunulmadan kalıyor.
-    ///
-    /// `Cell`, `OnceCell` değil: açılış öncesi değeri `0` ve o **doğru** cevap
-    /// (henüz oturum yok, ilk kare de yok); `OnceCell` bu yolu bir `unwrap`
-    /// ile kapatırdı.
-    ///
-    /// **Bu alan o anki pay**, doğum değeri değil: alternatif ekranda sıfıra
-    /// iniyor ve çıkışta geri geliyor (R5.2). Doğum değeri ayrı bir alanda
-    /// ([`WindowIvars::dock_rows_at_birth`]) ve ikisinin ayrı durması şart —
-    /// yoksa alternatif ekrandan çıkış, dock'u hiç olmayan bir pencerede dock
-    /// doğururdu.
-    dock_rows: Cell<u16>,
-    /// Oturum doğarken kararlaşan dock payı: entegrasyon kurulduysa
-    /// `DOCK_ROWS`, kurulmadıysa `0` (R5.1).
-    ///
-    /// Koşu boyunca **oynamıyor**; alternatif ekranın geri getireceği değer bu
-    /// ve tek yazanı oturumun doğumu.
-    dock_rows_at_birth: Cell<u16>,
+    /// Pencerenin tek pane'i ve `contentView`'ı: `NSWindow` onu zaten güçlü
+    /// tutuyor, bu kopya tipli erişim için ([`TerminalWindow::pane`]).
+    pane: Retained<TerminalPane>,
     /// Kromun son boyandığı zemin ([`TerminalWindow::apply_chrome`]'un
     /// kapısı); `None`: henüz boyanmadı.
     chrome: Cell<Option<u32>>,
@@ -709,17 +367,6 @@ pub(crate) struct WindowIvars {
     /// Popover'ı kapatan olayın zamanı (`popoverWillClose:`): düğmeye
     /// yeniden basış popover'ı yeniden açmasın.
     list_closed_at: Cell<Option<f64>>,
-    /// Sekmenin kalıcı kimliği (038): kabuğa `TERM_SESSION_ID` ve
-    /// `BATERI_TAB_URL` olarak gidiyor, `bateri://tab/<id>` onunla
-    /// pencereyi buluyor. Pencerenin ömrü boyunca sabit; süreç içi [`id`]
-    /// ayrı bir şey (alternatif ekran habercisinin anahtarı).
-    ///
-    /// [`id`]: WindowIvars::id
-    tab_id: TabId,
-    /// `windowWillClose:` geçti: pencere listeden bir tur sonra çıkıyor
-    /// (`forget_window`) ve o arada `bateri://tab/` onu bulup öne getirirse
-    /// oturumsuz, delegate'siz bir pencere ekrana dönerdi (`/code-review`).
-    closed: Cell<bool>,
 }
 
 /// Yeni kabuğun doğum bilgisi — [`TerminalWindow::start`]'ın çağırandan
@@ -741,26 +388,6 @@ define_class!(
 
     unsafe impl NSObjectProtocol for TerminalWindow {}
 
-    impl TerminalWindow {
-        /// İçerik view'ının çerçevesi değişti (`NSViewFrameDidChangeNotification`,
-        /// gözlemci [`TerminalWindow::new`]'da kuruluyor).
-        ///
-        /// Kaynak `windowDidResize:` **değil**, çünkü içerik pencere boyutu
-        /// değişmeden de değişiyor: ikinci sekme açılınca sekme çubuğu başlık
-        /// alanına giriyor ve içerik kısalıyor, son sekme kalınca çubuk gidip
-        /// içerik uzuyor — pencerenin çerçevesi ikisinde de aynı. Pencere
-        /// bildirimine bağlı kalınca drawable eski boyda kalıyor, layer onu
-        /// yeni boya **geriyordu** ve metin dikeyde bulanıklaşıyordu (ölçüldü,
-        /// 026 phase-4 Uygulama Notları). View'ın bildirimi pencere
-        /// boyutlandırmasını da kapsıyor, yani tek kaynak.
-        #[unsafe(method(viewFrameDidChange:))]
-        fn view_frame_did_change(&self, _n: &NSNotification) {
-            if let Some(app) = app::delegate(self.mtm()) {
-                self.refresh_geometry(&app);
-            }
-        }
-    }
-
     unsafe impl NSWindowDelegate for TerminalWindow {
 
         // Ekranlar arası taşımada boyut (nokta) değişmez ama ölçek değişir;
@@ -768,7 +395,7 @@ define_class!(
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, _n: &NSNotification) {
             if let Some(app) = app::delegate(self.mtm()) {
-                self.refresh_geometry(&app);
+                self.pane().refresh_geometry(&app);
             }
         }
 
@@ -793,7 +420,7 @@ define_class!(
                 .window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::Visible);
-            if let Some(link) = self.ivars().link.get() {
+            if let Some(link) = self.pane().link() {
                 link.set_visible(visible);
             }
         }
@@ -808,13 +435,13 @@ define_class!(
         // veriyor — birleştirecek genel bir sinyal yok.
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
-            self.apply_focus(true);
+            self.pane().apply_focus(true);
             self.rehover_upload();
         }
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _n: &NSNotification) {
-            self.apply_focus(false);
+            self.pane().apply_focus(false);
             self.unhover_upload();
         }
 
@@ -850,18 +477,14 @@ define_class!(
         /// örüntüsü); nesne yine ana thread'de düşüyor.
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _n: &NSNotification) {
-            self.ivars().closed.set(true);
+            // Pane'in kapanışı çerçeve gözlemcisini de söküyor ve pane'i
+            // `AppDelegate::pane`'in aramasından düşürüyor
+            // (`TerminalPane::begin_close`).
             drop(self.begin_close());
             // Delegate'i şimdi bırak: AppKit kapanmakta olan pencereye bundan
             // sonra bildirim göndermesin (odak, örtülme), nesne düşene kadar
             // bile.
             self.ivars().window.setDelegate(None);
-            // Çerçeve gözlemcisi de: sekme çubuğu kapanırken AppKit bu
-            // pencerenin içeriğini yeniden yerleştirebiliyor ve gözlemci
-            // kalsaydı kapanmakta olan oturum bir resize (ve düşmüş okuyucuya
-            // yazılamayan bir `Msg::Resize`) alırdı (`/code-review`).
-            // SAFETY: gözlemci bu nesne, `new`'de kaydedildi; kayıt yoksa no-op.
-            unsafe { NSNotificationCenter::defaultCenter().removeObserver(self) };
             let id = self.ivars().id;
             DispatchQueue::main().exec_async(move || {
                 // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
@@ -905,19 +528,19 @@ define_class!(
         /// View ▸ Bigger (Cmd +).
         #[unsafe(method(makeFontBigger:))]
         fn make_font_bigger(&self, _sender: Option<&AnyObject>) {
-            self.change_zoom(Zoom::bigger);
+            self.pane().change_zoom(Zoom::bigger);
         }
 
         /// View ▸ Smaller (Cmd −).
         #[unsafe(method(makeFontSmaller:))]
         fn make_font_smaller(&self, _sender: Option<&AnyObject>) {
-            self.change_zoom(Zoom::smaller);
+            self.pane().change_zoom(Zoom::smaller);
         }
 
         /// View ▸ Actual Size (Cmd 0): fark sıfırlanır, ayarın puntosu.
         #[unsafe(method(resetFontSize:))]
         fn reset_font_size(&self, _sender: Option<&AnyObject>) {
-            self.change_zoom(|_, _| Zoom::default());
+            self.pane().change_zoom(|_, _| Zoom::default());
         }
 
         /// Shell ▸ Close Tab (⌘W): **yalnız bu sekme**, gerekirse sorarak.
@@ -984,7 +607,7 @@ define_class!(
         /// gitmiyor; alternatif ekranda öğe gri ve çağrı zaten no-op.
         #[unsafe(method(clearToStart:))]
         fn clear_to_start(&self, _sender: Option<&AnyObject>) {
-            if let Some(session) = self.ivars().session.get() {
+            if let Some(session) = self.session() {
                 session.clear_to_start();
             }
         }
@@ -993,7 +616,7 @@ define_class!(
         /// `Session::clear_scrollback`.
         #[unsafe(method(clearScrollback:))]
         fn clear_scrollback(&self, _sender: Option<&AnyObject>) {
-            if let Some(session) = self.ivars().session.get() {
+            if let Some(session) = self.session() {
                 session.clear_scrollback();
             }
         }
@@ -1086,16 +709,12 @@ define_class!(
             let action = item.action();
             // `return` yok: `define_class!` `bool`'u gövdenin sonunda çeviriyor.
             if action.is_some_and(is_scrollback_action) {
-                self.ivars()
-                    .session
-                    .get()
+                self.session()
                     .is_some_and(|session| !session.alt_screen())
             } else if action == Some(sel!(findNextMatch:)) || action == Some(sel!(findPreviousMatch:)) {
                 self.has_query()
             } else if action == Some(sel!(useSelectionForFind:)) {
-                self.ivars()
-                    .session
-                    .get()
+                self.session()
                     .is_some_and(|session| session.has_selection())
             } else if action == Some(sel!(cancelUpload:)) {
                 // ⌘. yalnız bu sekmede kuyruk varken (037 Karar 7); gri
@@ -1164,8 +783,8 @@ fn is_scrollback_action(action: Sel) -> bool {
 }
 
 impl TerminalWindow {
-    /// Pencereyi, view'ı, yüzeyi ve renderer'ı kurar; oturum ve link **henüz
-    /// yok** ([`TerminalWindow::start`]).
+    /// Pencereyi ve tek pane'ini (view, yüzey, renderer) kurar; oturum ve
+    /// link **henüz yok** ([`TerminalWindow::start`]).
     ///
     /// İki adım olmasının sebebi aradaki iş: ayarlar pencere doğduktan
     /// **sonra** (tanı alt başlığa yazılabilsin) ve geometriden **önce**
@@ -1173,16 +792,18 @@ impl TerminalWindow {
     /// gördüğü ilk `TIOCSWINSZ`'yi belirliyor. Tek kurucu o sırayı ya bozar ya
     /// da ayar okumayı pencerenin içine taşırdı.
     ///
-    /// Renderer burada doğuyor ve hatası çağırana dönüyor: Metal device ya da
-    /// metallib yoksa pencerenin çizebileceği bir şey de yok.
+    /// Renderer pane'le doğuyor ve hatası çağırana dönüyor: Metal device ya
+    /// da metallib yoksa pencerenin çizebileceği bir şey de yok. `pane_id`
+    /// pane'in kimliği ([`TerminalPane::id`]), pencerenin kimliğiyle aynı
+    /// sayaçtan.
     pub(crate) fn new(
         mtm: MainThreadMarker,
         id: u64,
+        pane_id: u64,
         run: Option<Run>,
     ) -> Result<Retained<Self>, GpuError> {
-        let renderer = Rc::new(Renderer::system_default()?);
-        let surface = renderer.surface();
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0));
+        let pane = TerminalPane::new(mtm, pane_id, run, rect)?;
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
@@ -1202,30 +823,10 @@ impl TerminalWindow {
         };
         // SAFETY: yalnız sahiplik semantiğini değiştirir; Retained sahibi biziz.
         unsafe { window.setReleasedWhenClosed(false) };
-        let view = BateriView::new(mtm, rect);
-        // Sıra önemli: önce layer, sonra wantsLayer — tersi AppKit'e kendi
-        // layer'ını kurdurur ve CAMetalLayer düşer.
-        view.setLayer(Some(surface.ca_layer()));
-        view.setWantsLayer(true);
-        // İçerik view'ı düz bir **kapsayıcı**, `BateriView` onun çocuğu
-        // (033 → R4.1): arama paneli terminalin üstünde yüzecek ve Metal
-        // katmanının kardeşi olmak zorunda, çocuğu değil — layer-hosting
-        // view'ın alt view'ları AppKit'in sözleşmesi dışında. Kapsayıcı
-        // layer-backed, yoksa kardeş panel Metal katmanının **altında**
-        // kalabilir. Kendisi hiçbir şey çizmiyor ve olay almıyor: `BateriView`
-        // onu tamamen dolduruyor, isabet testi en üstteki çocuğa düşüyor.
-        let container = NSView::initWithFrame(NSView::alloc(mtm), rect);
-        container.setWantsLayer(true);
-        window.setContentView(Some(&container));
-        // Kapsayıcının çerçevesini pencere kuruyor; çocuk ona sonradan
-        // oturtuluyor ve boyu autoresizing'le izliyor. Geometrinin kaynağı
-        // yine `BateriView` (`sync_geometry`), bildirimi de onun çerçevesi.
-        view.setFrame(container.bounds());
-        view.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
-        container.addSubview(&view);
+        // İçerik view'ı pane (layer-backed düz kapsayıcı, `BateriView` onun
+        // çocuğu — `TerminalPane::new`); çerçevesini pencere kuruyor, çocuk
+        // boyu autoresizing'le izliyor.
+        window.setContentView(Some(&pane));
         window.setTitle(ns_string!("bateri"));
         // **Native sekmeler** (026 → Karar 1): aynı kimliği taşıyan pencereleri
         // AppKit tek pencerede sekme olarak topluyor. `tabbingMode` bilerek
@@ -1242,36 +843,17 @@ impl TerminalWindow {
         // `bt-shell`'e yayınlamayı isterdi
         // (`.tasks/020-fare-raporlama/discussion.md` → Karar 4).
         window.setAcceptsMouseMovedEvents(true);
-        // Klavyenin PTY'ye varan yolu buradan başlıyor. View (kapsayıcının
+        // Klavyenin PTY'ye varan yolu buradan başlıyor. View (pane'in
         // çocuğu da olsa) otomatik first responder DEĞİLDİR; bu satır olmadan pencere
         // key olur, tuşlar view'a hiç uğramaz ve terminal sessizce
         // yazmaz. `acceptsFirstResponder` da şart, ikisi bir arada.
-        let accepted = window.makeFirstResponder(Some(&view));
+        let accepted = window.makeFirstResponder(Some(pane.view()));
         debug_assert!(accepted, "BateriView first responder olmalı");
         let this = Self::alloc(mtm).set_ivars(WindowIvars {
             id,
             run,
-            renderer,
-            surface,
             window: window.clone(),
-            view,
-            link: OnceCell::new(),
-            session: OnceCell::new(),
-            shell_parent: OnceCell::new(),
-            wake: Arc::new(ShellWake {
-                id,
-                timed: run.is_some(),
-                waker: Mutex::new(None),
-                pending_copy: Arc::default(),
-                title_pending: Arc::default(),
-                search_pending: Arc::default(),
-                remote_probe: Arc::default(),
-            }),
-            zoom: Cell::new(Zoom::default()),
-            // Açılışta dock yok: kararı `start` veriyor ve geometriyi ondan
-            // sonra hesaplıyor.
-            dock_rows: Cell::new(0),
-            dock_rows_at_birth: Cell::new(0),
+            pane: pane.clone(),
             chrome: Cell::new(None),
             tab_mark: Cell::new(None),
             alert: RefCell::new(None),
@@ -1284,8 +866,6 @@ impl TerminalWindow {
             upload_stop: RefCell::new(None),
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
-            tab_id: new_tab_id(),
-            closed: Cell::new(false),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1294,21 +874,10 @@ impl TerminalWindow {
         // özelliği zayıf; sahibi `AppDelegate`'in pencere listesi.
         window.setDelegate(Some(ProtocolObject::from_ref(&*this)));
         // İçeriğin boyu pencereden bağımsız da değişiyor (sekme çubuğu);
-        // geometri bu yüzden view'ın kendi bildiriminden
-        // (`viewFrameDidChange:`). `postsFrameChangedNotifications`
-        // varsayılanda açık. Gözlemci sökülmüyor: seçicili gözlemcileri
-        // merkez macOS 10.11'den beri zayıf tutuyor, düşen pencere sarkan bir
-        // kayıt bırakmıyor.
-        // SAFETY: seçici bu sınıfta tanımlı ve tek `&NSNotification` alıyor;
-        // ad AppKit'in dışa açtığı sabit, nesne bu pencerenin view'ı.
-        unsafe {
-            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
-                &this,
-                sel!(viewFrameDidChange:),
-                Some(NSViewFrameDidChangeNotification),
-                Some(&this.ivars().view),
-            );
-        }
+        // geometri bu yüzden view'ın kendi bildiriminden, gözlemcisi pane
+        // (`TerminalPane::observe_frame`). Kurucunun son adımı: önceki
+        // adımların yerleşimi geometriyi pencere hazır olmadan kurdurmasın.
+        pane.observe_frame();
         Ok(this)
     }
 
@@ -1316,17 +885,14 @@ impl TerminalWindow {
         self.ivars().id
     }
 
-    /// Sekmenin kalıcı kimliği (`TERM_SESSION_ID`, `bateri://tab/<id>`;
-    /// 038). Süreç içi [`TerminalWindow::id`]'den ayrı: o haberci yollarının
-    /// anahtarı, bu dışarıya verilen ad.
-    pub(crate) fn tab_id(&self) -> &TabId {
-        &self.ivars().tab_id
+    /// Pencerenin tek pane'i (039 Karar 1; bölmeler phase-3'te).
+    pub(crate) fn pane(&self) -> &TerminalPane {
+        &self.ivars().pane
     }
 
-    /// `windowWillClose:` geçti mi — listede bir tur daha duran kapanmış
-    /// pencere URL'le öne getirilmesin ([`WindowIvars::closed`]).
-    pub(crate) fn is_closed(&self) -> bool {
-        self.ivars().closed.get()
+    /// Pane'in `Retained` kopyası — kimlikle arama (`AppDelegate::pane`).
+    pub(crate) fn pane_handle(&self) -> Retained<TerminalPane> {
+        self.ivars().pane.clone()
     }
 
     /// `bateri://tab/<id>`'nin tek etkisi (038 Karar 4, 6): küçültülmüşse
@@ -1349,18 +915,6 @@ impl TerminalWindow {
     /// listede böyle aranıyor (`AppDelegate::key_window`).
     pub(crate) fn owns(&self, window: &NSWindow) -> bool {
         std::ptr::eq(&*self.ivars().window, window)
-    }
-
-    /// Bu pencerenin geçici punto farkı — yeni sekme onu devralıyor
-    /// (026 → Karar 3).
-    pub(crate) fn zoom(&self) -> Zoom {
-        self.ivars().zoom.get()
-    }
-
-    /// Devralınan punto farkı; oturum doğmadan, [`TerminalWindow::request_font`]'tan
-    /// önce yazılır ki ilk atlas büyütülmüş puntoyla açılsın.
-    pub(crate) fn set_zoom(&self, zoom: Zoom) {
-        self.ivars().zoom.set(zoom);
     }
 
     /// Pencereyi kapatır (`windowWillClose:` yolundan), **sormadan**: kabuğun
@@ -1615,21 +1169,12 @@ impl TerminalWindow {
         }
     }
 
-    /// Rapor yolu sayaçlarını buradan okuyor (`AppDelegate::report_and_exit`).
-    pub(crate) fn renderer(&self) -> &Renderer {
-        &self.ivars().renderer
-    }
-
-    pub(crate) fn link(&self) -> Option<&DisplayLink> {
-        self.ivars().link.get()
-    }
-
     /// View ▸'nin dört kaydırması: `Session::scroll_page`'in yolu
     /// (Shift+PgUp/PgDn'ın ta kendisi) — kesir sıfırlanıyor, süzülme nesli
     /// artıyor, bant kuralı `scroll_locked`'ta. Alternatif ekranda `None` ve
     /// öğeler zaten gri; cevap burada okunmuyor.
     fn scroll_pages(&self, pages: i32) {
-        if let Some(session) = self.ivars().session.get() {
+        if let Some(session) = self.session() {
             session.scroll_page(pages);
         }
     }
@@ -1664,69 +1209,15 @@ impl TerminalWindow {
         &self.ivars().window
     }
 
-    /// Terminal view'ı (listenin açıldığı yer).
+    /// Terminal view'ı (listenin açıldığı yer) — pane'inki.
     pub(crate) fn view(&self) -> &BateriView {
-        &self.ivars().view
+        self.pane().view()
     }
 
+    /// Pane'in oturumu; arama ve yükleme bu phase'de pencerede ve oturuma
+    /// buradan uzanıyor.
     pub(crate) fn session(&self) -> Option<&Arc<Session>> {
-        self.ivars().session.get()
-    }
-
-    /// Kabuğun dışında ön planda koşan iş (028 → Karar 1). Oturum yoksa ya da
-    /// okuyucu thread bittiyse boşta: kabuk gitti ve `child_pid` bayatlamış
-    /// olabilir, bayat pid'e sorulmaz.
-    pub(crate) fn foreground(&self) -> Foreground {
-        let (Some(session), Some(&parent)) =
-            (self.ivars().session.get(), self.ivars().shell_parent.get())
-        else {
-            return Foreground::Idle;
-        };
-        if !session.reader_alive() {
-            return Foreground::Idle;
-        }
-        jobs::foreground(parent, session.child_pid(), &Libproc)
-    }
-
-    /// Uzak oturum yoklaması (036 Karar 2): koşan komutun neslini alır, ön
-    /// plan grubunu yoklar ve ssh/mosh bulduysa oturuma bildirir. Dönüş
-    /// **kararsız mı** — `true` ise silah kurulu kalır ve sonraki çıktı
-    /// yeniden yoklar ([`RemoteProbe`]).
-    ///
-    /// Nesil yoklamadan **önce**: arada biten komutun cevabını
-    /// `Session::set_remote` reddediyor. Okuyucu bittiyse yoklama yok
-    /// ([`Self::foreground`]'ın kuralı: bayat pid'e sorulmaz).
-    fn probe_remote(&self) -> bool {
-        let (Some(session), Some(&parent)) =
-            (self.ivars().session.get(), self.ivars().shell_parent.get())
-        else {
-            return false;
-        };
-        if !session.reader_alive() {
-            return false;
-        }
-        let Some(command) = session.running_command() else {
-            return false;
-        };
-        match jobs::remote(parent, session.child_pid(), &Libproc) {
-            Probe::Undecided => true,
-            Probe::Local => false,
-            Probe::Remote(target) => {
-                // Satır argüman başına, okunur kaçırmayla (037 Karar 1);
-                // `bt-core` kuralı ikinci kez yazmıyor, dizgiyi saklıyor.
-                let line = quote::command_line(&target.argv);
-                let target = RemoteTarget {
-                    host: target.host,
-                    kind: target.kind,
-                    argv: target.argv,
-                    line,
-                };
-                if session.set_remote(command, Some(&target)) {
-                    self.refresh_title();
-                }
-                false
-            }
-        }
+        self.pane().session()
     }
 
     /// Başlığı oturumdan okuyup pencereye yazar — `ShellWake::title_changed`'in
@@ -1750,7 +1241,7 @@ impl TerminalWindow {
     /// kenarını sormuyor — yükleme yolu onu kendi kenarında çağırıyor ve
     /// `check_upload_connection` kuyruğu bitirip buraya geri dönerdi.
     pub(crate) fn apply_title(&self) {
-        if let Some(session) = self.ivars().session.get() {
+        if let Some(session) = self.session() {
             let percent = self.ivars().uploads.borrow().title_percent();
             self.ivars()
                 .window
@@ -1764,7 +1255,7 @@ impl TerminalWindow {
     /// Uzak sekmenin host'u ve çözülmüş işareti; yerelde `None`
     /// (`Session::remote_mark`).
     pub(crate) fn remote_mark(&self) -> Option<(String, HostMark)> {
-        self.ivars().session.get()?.remote_mark()
+        self.session()?.remote_mark()
     }
 
     /// Sekmenin noktası (037 Karar 4): işaretli uzak host'ta sekme
@@ -1784,7 +1275,7 @@ impl TerminalWindow {
     /// sekme çubuğu görünürken var; tek sekmeli pencerede gösterge dock'un
     /// üst çizgisi.
     fn refresh_tab_mark(&self) {
-        let color = self.ivars().session.get().and_then(|session| {
+        let color = self.session().and_then(|session| {
             let (_, mark) = session.remote_mark()?;
             (mark != HostMark::None).then(|| session.theme().mark_rgb(mark))
         });
@@ -1826,44 +1317,11 @@ impl TerminalWindow {
         self.ivars().window.setSubtitle(subtitle);
     }
 
-    /// Renderer'a ayarın fontunu bu pencerenin punto farkıyla **istek**
-    /// olarak verir — açılışın yolu (`AppDelegate::load_settings`): atlas
-    /// hemen ardından gelen `sync_geometry`'de açılıyor ve font yuvasını da o
-    /// yazıyor. Dönüş (değişti mi) burada soru değil: geometri henüz hiç
-    /// kurulmadı.
-    pub(crate) fn request_font(&self, font: &FontOptions) {
-        let _ = self
-            .ivars()
-            .renderer
-            .set_font(&self.ivars().zoom.get().apply(font));
-    }
-
-    /// Dosyadaki font değişti: punto farkı [`Zoom::after_reload`]'ın
-    /// kuralıyla güncellenir. Fontu uygulamaz; ayarlar yazıldıktan sonra
-    /// [`TerminalWindow::apply_font`] uygular.
-    pub(crate) fn zoom_after_reload(&self, old: &FontOptions, new: &FontOptions) {
-        let zoom = self.ivars().zoom.get().after_reload(old, new);
-        self.ivars().zoom.set(zoom);
-    }
-
-    /// Entegrasyonu sorar, dock payını kararlaştırır, ilk geometriyi kurar ve
-    /// oturumu açar.
-    ///
-    /// Entegrasyon **bir kez** soruluyor ve iki cevabı birden veriyor:
-    /// çocuğun ortamı ile dock'un varlığı (`AppDelegate::shell_integration`).
-    /// İki ayrı çağrı olsaydı ikisi ayrışabilirdi — pencereden iki satır
-    /// giden ama dock'u olmayan (ya da tersi) bir oturum, ve belirti sessiz
-    /// olurdu. Geometriden **önce**: ızgara yüksekliği dock payını görmeli,
-    /// yoksa kabuk açılışta bir satır fazlasıyla doğar ve ilk kare düzeltme
-    /// için bir `TIOCSWINSZ` yer.
-    ///
-    /// `working_directory` çağıranın kararı (026 → Karar 4: etkin sekmenin
-    /// dizini, yoksa ev). Hata çağırana dönüyor: ilk pencerede süreç çıkıyor,
-    /// ⌘T/⌘N'de yalnız o pencere kapanıyor — öteki sekmelerin kabukları bir
-    /// yenisinin doğamamasıyla ölmemeli.
-    ///
-    /// `launch.initial_input` kabuğun ilk girdisi (037 Karar 6: uzak sekmede
-    /// ⌘T, `AppDelegate::open_window`'un kararı); `None` → sıradan yerel kabuk.
+    /// Pane'in oturumunu açar ([`TerminalPane::start`]) ve başlığı bir kez
+    /// oturumdan okur: oturum yuvaya girmeden önce gelmiş bir başlık haberi
+    /// boş yuva bulup düşmüş olabilir; bu okuma o pencereyi kapatıyor
+    /// (değişmemişse aynı `bateri`'yi yazar). Hata çağırana dönüyor: ilk
+    /// pencerede süreç çıkıyor, ⌘T/⌘N'de yalnız o pencere kapanıyor.
     pub(crate) fn start(
         &self,
         app: &AppDelegate,
@@ -1871,288 +1329,27 @@ impl TerminalWindow {
         theme: Theme,
         launch: Launch,
     ) -> std::io::Result<()> {
-        let (integration, birth) = app.shell_integration();
-        self.ivars().dock_rows_at_birth.set(birth);
-        self.ivars().dock_rows.set(birth);
-        // Grid ölçüsü pencereden türer; oturum ilk boyutuyla doğsun ki
-        // shell açılışta doğru `TIOCSWINSZ` görsün.
-        let grid = self.sync_geometry(app);
-        self.start_session(app, mtm, grid, theme, integration, launch)
-    }
-
-    /// Oturumu açar ve kareyi süren link'i bağlar. Sıra zorunlu: `Session`
-    /// `Wake`'i ister, link `Session`'ı ister, `Waker` link'ten doğar.
-    fn start_session(
-        &self,
-        app: &AppDelegate,
-        mtm: MainThreadMarker,
-        grid: Grid,
-        theme: Theme,
-        integration: Vec<(String, String)>,
-        launch: Launch,
-    ) -> std::io::Result<()> {
-        let Launch {
-            working_directory,
-            initial_input,
-        } = launch;
-        // Duman ve ölçüm koşularında shell sabit: sonuç kullanıcının
-        // `$SHELL`'ine ve rc dosyasına bağlı olmasın. Betiklerin
-        // sahibi `bt-core`; `smoke_shell`'in sekiz hücre ve altı
-        // glyph verdiği orada sınanıyor — `hucre=8` ve `glif=6`
-        // beklentileri bu yüzden birer belge cümlesi değil, sınanmış
-        // birer iddia.
-        //
-        // Dallanma **yükü** soruyor, süreyi değil: aynı `Run` hem
-        // deadline'ı hem bekçiyi kuruyor ve yük onlardan bağımsız.
-        //
-        // Süresiz oturumda komut artık **`None` değil**: kabuğu
-        // alacritty'nin yolundan birebir ama `-q` ile doğuruyoruz,
-        // yani `login(1)`'in `Last login:` banner'ı ızgaraya hiç
-        // düşmüyor ([`child::login_command`]). Kullanıcı ya da kabuk
-        // çözülemezse `None`'a düşüyor ve eski yol geri geliyor.
-        //
-        // Kabuğun yeri komutla **aynı** dalda kararlaşıyor, ayrı bir
-        // sorudan türetilmiyor: `login` yolu (`login_command` ya da `None`,
-        // alacritty'nin macOS yolu da `login`) ile süreli koşunun doğrudan
-        // betikleri ancak böyle ayrışamaz.
-        let (command, shell_parent) = match self.ivars().run {
-            None => (child::login_command(), ShellParent::Login),
-            Some(run) => (
-                Some(match run.workload {
-                    Workload::Smoke => smoke_shell(),
-                    // Yükün süresi deadline'la aynı: kısa kalırsa pencere
-                    // koşunun kuyruğunda boşa düşer ve ölçüm boşta kare
-                    // örnekler. Süresiz yük artık **temsil edilemiyor** —
-                    // `Run` süreyi yükün yanında taşıyor, o yüzden eski
-                    // `unwrap_or(0)` ve onu savunan `debug_assert` düştü.
-                    Workload::Load => load_shell(run.seconds),
-                }),
-                ShellParent::Direct,
-            ),
-        };
-        // Sarmalayıcı kuruldu mu: entegrasyonun ortamı boş değilse kabuk
-        // kimliğimizi basacak (`blocks` kademesi dock'suz ama işaretli, yani
-        // `dock`'tan türetilemez). Ortam aşağıda `env`'e taşınmadan **önce**.
-        let shell_marks = !integration.is_empty();
-        let session = Session::spawn(
-            SessionOptions {
-                command,
-                // Dizin ve yerel **her** oturumda aynı kuralla, süreli koşu
-                // dahil: karar tek kollu (`discussion.md` → Karar 6 eki,
-                // "istisnasız") ve iki sabit betik de dizine ve yerele bağlı
-                // değil — `printf` ile `sleep`, `date` ile `printf`; yolları
-                // mutlak ya da `PATH`'ten, çıktıları ASCII.
-                //
-                // Dizin artık çağırandan: yeni sekme etkin sekmenin OSC 7
-                // dizininde (026 → Karar 4); süreli koşuda ve ilk pencerede
-                // `child::working_directory()`.
-                working_directory,
-                // Başlığın `~` kuralı; dizinle **aynı çözüm** (`child::home`).
-                home: child::home(),
-                // Shell entegrasyonu yerelin yanında, aynı haritada: ikisi de
-                // çocuğa **eklenen** ortam ve ikisi de yalnız çocuğa gidiyor.
-                // Anahtarları ayrık (`LANG` ↔ `ZDOTDIR`), yani sıranın
-                // önemi yok.
-                // Entegrasyonun ortamı **çağırandan** geliyor: aynı cevap
-                // dock'un varlığını da belirliyor (`start`) ve burada ikinci
-                // kez sorulsaydı iki karar ayrışabilirdi.
-                env: child::locale_env().into_iter().chain(integration).collect(),
-                cols: grid.cols,
-                rows: grid.rows,
-                cell_px: grid.cell.cell_px(),
-                terminal: app.settings().terminal(),
-                theme,
-                // Dock'un **varlığı**, payı değil: `bt-core` caret'i ona göre
-                // devrediyor. Kaynağı doğum payının yuvası (`start` onu bir
-                // satır önce yazdı) ve alternatif ekran habercisinin kapısı da
-                // aynı yuvayı okuyor, yani ayrışamazlar.
-                dock: self.ivars().dock_rows_at_birth.get() > 0,
-                // Kümeleme (035) bütün pencerelerde açık, süreli koşu dahil.
-                // Ayar anahtarı değil (035 Karar 2): geri alma bu tek satır.
-                cluster: true,
-                // Süreli koşu `open_window`'dan hep `None` alıyor (tek
-                // pencere, ⌘T yok), yani sabit betikleri bundan etkilenmiyor.
-                initial_input,
-                shell_marks,
-                // Kimlik her pencerede, süreli koşu dahil (038 Karar 8):
-                // değişkenler dosya okumuyor ve jetonları oynatmıyor.
-                tab_id: Some(self.ivars().tab_id.clone()),
-            },
-            Arc::clone(&self.ivars().wake) as Arc<dyn Wake>,
-        );
-        // Shell'siz bir terminal penceresi boş bir kutudur; ne yapılacağı
-        // çağıranın (ilk pencere: süreç çıkar; sonrakiler: o pencere kapanır).
-        let session = Arc::new(session?);
-        // Kapanış sırası oturuma link üzerinden değil buradan uzanır, klavye
-        // de kendi kopyasını tutar; üçü de ana thread'de yaşıyor, yani son
-        // referansın nerede düşeceği belli (bkz. `shutdown`).
-        let _ = self.ivars().session.set(Arc::clone(&session));
-        let _ = self.ivars().shell_parent.set(shell_parent);
-        // Host işaretlerinin listesi doğumda (037 Karar 2); canlı değişimi
-        // `AppDelegate::reload_settings` getiriyor ([`Self::set_host_marks`]).
-        session.set_host_marks(&app.settings().remote_hosts);
-        // Oturum yuvaya girmeden önce gelmiş bir başlık haberi `refresh_title`'da
-        // boş yuva bulup düşmüş olabilir; bir kez elle okumak o pencereyi
-        // kapatıyor (değişmemişse aynı `bateri`'yi yazar).
+        self.pane().start(app, mtm, theme, launch)?;
         self.refresh_title();
-        let view = &self.ivars().view;
-        view.attach(Arc::clone(&session));
-        // Fare çevirisi oturumla aynı grid'i görmeli: ölçü ve sayı yukarıdaki
-        // `SessionOptions`'a gidenlerin aynısı. `resize` yolunda da aynı üçlü
-        // (`refresh_geometry`) birlikte yazılıyor.
-        view.set_metrics(grid, self.ivars().dock_rows.get());
-        let link = DisplayLink::new(
-            mtm,
-            &self.ivars().surface,
-            Rc::clone(&self.ivars().renderer),
-            session,
-            Layout {
-                cols: grid.cols,
-                dock_rows: self.ivars().dock_rows.get(),
-                cell: grid.cell,
-            },
-            app.stats(),
-            // **Yol yalnız dock'u olan pencerede kuruluyor** ve bu yapısal
-            // (R5.1): dock'suz bir oturumda alternatif ekran geçişi hiçbir
-            // şeyi değiştiremeyeceği için nöbet de yok. Bir koşulla
-            // kapatılsaydı "hiç resize yok" iddiası bir dalın doğruluğuna
-            // bağlı kalırdı.
-            (self.ivars().dock_rows_at_birth.get() > 0)
-                .then(|| alt_screen_notifier(self.ivars().id)),
-        );
-        // Uyandırma yolu kapanmadan kare istemiyoruz: aradaki bir `Wakeup`
-        // sessizce düşerdi.
-        //
-        // audit: `start_session` pencere başına bir kez, `start`'tan çağrılır.
-        // Sessizce yutulan bir `Err` burada en sinsi hatayı üretirdi: eski
-        // link'in `Waker`'ı kalır, pencere shell çıktısına bir daha hiç
-        // uyanmaz ve tek satır iz kalmaz.
-        assert!(
-            self.ivars().wake.slot().replace(link.waker()).is_none(),
-            "waker ikinci kez kuruldu"
-        );
-        // Fare eşlemesinin dikey orijini: `set_metrics` gibi pencere değil
-        // **kare** yolundan geliyor, o yüzden link doğduktan sonra ve bir kez.
-        // Fare böylece çizilen ötelemeyi okuyor; ikinci bir hesap "tıklama bir
-        // satır kayıyor" demekti (`bt_gpu::Origin`).
-        view.attach_origin(link.origin());
-        // İmlecin stili de ayarın: link `CursorMotion::default()` ile doğuyor
-        // ve buradaki çağrı onu dosyanın (ya da hermetik koşuda
-        // `Settings::default()`'un) değerine çekiyor. `set_font`'un yeri
-        // `load_settings` ama stilinki olamaz: link o an henüz yok.
-        // Dock'un yazım efektleri de aynı gerekçeyle burada.
-        {
-            let settings = app.settings();
-            link.set_cursor_motion(settings.cursor_motion);
-            link.set_glyph_fx(settings.keypress, settings.erase);
-        }
-        // Açılış karesi: `Session` kirli doğar, link'i bir kez elle açıyoruz.
-        link.request_frame();
-        let _ = self.ivars().link.set(link);
-        // Hareketi Azalt link yuvaya girdikten **sonra**: ilk değer bu
-        // pencerenin link'ine buradan iniyor, sistemin bildirimi ve ayar
-        // kaydı sonradan `AppDelegate::apply_reduce_motion` ile bütün
-        // pencerelere. Hermetik koşuda çözülmüş değer `false` ve link o
-        // değerle doğuyor, yani çağrı no-op (`DisplayLink::set_reduce_motion`).
-        self.set_reduce_motion(app.reduce_motion());
-        // Tekerleğin kipi de aynı çözülmüş girdiden (Hareketi Azalt ayarın
-        // üçüncü girdisi) ve aynı sonraki yoldan (`apply_reduce_motion`).
-        self.set_smooth_scroll(app.smooth_scroll());
-        // İmlecin çizim sayıları da açılışta bir kez iniyor ve **yuvadan**
-        // okunuyor, elde kalan `link`'ten değil: link o çağrıda yuvaya
-        // taşındı. `set_caret_style` aynı değerde no-op, yani kayıt anı
-        // yoluyla çakışmıyor.
-        self.apply_caret(&app.settings());
-        // **Odak da tohumlanıyor** ve gerekçesi aynı sıralama: pencere
-        // `makeKeyAndOrderFront` ile key oluyor, yani `windowDidBecomeKey:`
-        // link yuvaya girmeden **önce** düşüyor ve o çağrı sessizce atılıyor.
-        // Tohumlama olmasaydı arka planda açılan bir pencerede (`open -g`,
-        // login item, başka uygulama öndeyken betikten açılış) hiçbir bildirim
-        // gelmez ve `focused` `true` kalırdı: odaksız pencere dolu caret
-        // çizer ve blink saatini kurardı (`/code-review`).
-        self.apply_focus(self.ivars().window.isKeyWindow());
         Ok(())
     }
 
-    /// Alternatif ekran değişti: dock kalkıyor ya da iniyor.
-    ///
-    /// Gönderen kare yolunun habercisi ([`alt_screen_notifier`]) ve bu metot
-    /// **bir sonraki ana kuyruk turunda** koşuyor — çizilmiş bir karenin
-    /// altını oymamak için.
-    ///
-    /// **Gerçeği yeniden okuyor**, bildirimin taşıdığına bakmıyor: iki
-    /// geçiş birbirini kovalarsa (vim aç-kapa) kuyrukta bekleyen iki iş de
-    /// aynı, güncel cevabı görür. Değişmemişse **hiçbir şey yapmıyor** —
-    /// "geçiş başına bir resize" (R5.3) iddiasını tutan kapı bu.
-    fn alt_screen_did_change(&self, app: &AppDelegate) {
-        let Some(session) = self.ivars().session.get() else {
-            return;
-        };
-        let wanted =
-            app::dock_rows_for(session.alt_screen(), self.ivars().dock_rows_at_birth.get());
-        if self.ivars().dock_rows.replace(wanted) == wanted {
-            return;
-        }
-        // Pay, ızgara ve link **tek blokta**: kare yolu da ana thread'de,
-        // yani araya bir kare giremiyor ve yarım bir durum çizilmiyor.
-        self.refresh_geometry(app);
-    }
-
-    /// Bigger, Smaller, Actual Size: bu pencerenin geçici punto farkını
-    /// `step` ile değiştirir ve fontu uygular. Dosyaya dokunmaz, süreli koşuda
-    /// da çalışır — kullanıcının dünyasından bir şey okumuyor.
-    fn change_zoom(&self, step: impl FnOnce(Zoom, &FontOptions) -> Zoom) {
-        let Some(app) = app::delegate(self.mtm()) else {
-            return;
-        };
-        let zoom = step(self.ivars().zoom.get(), &app.settings().font);
-        self.ivars().zoom.set(zoom);
-        self.apply_font(&app);
-    }
-
-    /// Renderer'a ayarın fontunu bu pencerenin geçici punto farkıyla verir;
-    /// istek değiştiyse geometri yeniden kurulur
-    /// ([`TerminalWindow::refresh_geometry`]: atlas, grid, PTY boyutu, font
-    /// yuvası).
-    ///
-    /// İki kapı, ikisi de gerekli: çağıranın kapısı (fark, basış) bir şeyin
-    /// değiştiğini söylüyor, `set_font` renderer'ın zaten o fontu isteyip
-    /// istemediğini — uçtaki basış ya da farkla aynı puntoyu yazan kayıt
-    /// atlası yeniden kurdurmaz.
-    pub(crate) fn apply_font(&self, app: &AppDelegate) {
-        let font = self.ivars().zoom.get().apply(&app.settings().font);
-        if self.ivars().renderer.set_font(&font) {
-            self.refresh_geometry(app);
-        }
-    }
-
-    /// `[remote] hosts` değişti — desen listesi oturuma; etkin uzak host'un
-    /// işareti orada yeniden çözülüyor (037 Karar 2).
+    /// `[remote] hosts` değişti — desen listesi pane'in oturumuna
+    /// ([`TerminalPane::set_host_marks`]), sekmenin noktası yeni çözümden.
     pub(crate) fn set_host_marks(&self, settings: &Settings) {
-        if let Some(session) = self.ivars().session.get() {
-            session.set_host_marks(&settings.remote_hosts);
-        }
+        self.pane().set_host_marks(settings);
         self.refresh_tab_mark();
     }
 
-    /// Terminal seçenekleri değişti — oturuma, **tamamıyla**.
-    pub(crate) fn set_terminal_options(&self, settings: &Settings) {
-        if let Some(session) = self.ivars().session.get() {
-            session.set_terminal_options(settings.terminal());
-        }
-    }
-
-    /// Temayı oturuma takas eder (aynı temada no-op, `Session::set_theme`)
-    /// ve kromu ona boyar ([`TerminalWindow::apply_chrome`]).
+    /// Temayı pane'in oturumuna takas eder ([`TerminalPane::set_theme`]) ve
+    /// kromu ona boyar ([`TerminalWindow::apply_chrome`]).
     ///
     /// İkisi tek çağrıda, çünkü temayı değiştiren iki yol var
     /// (`AppDelegate::reload_settings`, `AppDelegate::apply_appearance`) ve
     /// biri kromu unutsaydı ızgara yeni temada, başlık çubuğu eskisinde
     /// kalırdı — belirti tam da kullanıcının göreceği dikiş.
     pub(crate) fn set_theme(&self, theme: Theme) {
-        if let Some(session) = self.ivars().session.get() {
-            session.set_theme(theme);
-        }
+        self.pane().set_theme(theme);
         self.apply_chrome(&theme);
         // Sekmenin noktası işaretin rolünden; rol yeni temada başka bir renk.
         self.refresh_tab_mark();
@@ -2209,89 +1406,20 @@ impl TerminalWindow {
         window.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
     }
 
-    /// İmlecin stili ve dock'un yazım efektleri link'e gidiyor, oturuma
-    /// değil: hangi kareyi çizeceğimizi değil **nasıl** çizeceğimizi
-    /// değiştiriyorlar. Efektler **ham** iniyor; `snap` ve Hareketi Azalt'ın
-    /// indirgemesi `bt-gpu`'da (`DisplayLink::set_glyph_fx`).
-    pub(crate) fn set_cursor_motion(&self, settings: &Settings) {
-        if let Some(link) = self.ivars().link.get() {
-            link.set_cursor_motion(settings.cursor_motion);
-            link.set_glyph_fx(settings.keypress, settings.erase);
-        }
-    }
-
-    /// İmlecin ayardan inen değerlerini link'e verir.
-    ///
-    /// **Açılış ile kayıt anı aynı koddan geçiyor** ve gerekçesi bir kusur
-    /// sınıfı (`/code-review`, 016): iki liste ayrı yazılsaydı sapabilirlerdi
-    /// — yalnız tohumlanan bir anahtar kayıt anında uygulanmaz, yalnız
-    /// yeniden yüklenen bir anahtar açılışta varsayılanda kalırdı. İkisi de
-    /// sessiz ve `plan.md` o sınıfı adıyla sayıyor ("yarısı inen anahtar
-    /// hiçbir kapıda görünmez").
-    ///
-    /// Tek `Changes::caret` alanı, iki çağrı: varış yerleri ayrı (çizim
-    /// sayıları `Frame`'e, periyot `bt_gpu::blink`'e) ama ikisi de aynı
-    /// kaydın sonucu — emsal `Changes::motion`'ın iki anahtarı.
-    ///
-    /// Link yoksa sessizce dönüyor: açılış çağrısı aynı değeri zaten verecek.
-    pub(crate) fn apply_caret(&self, settings: &Settings) {
-        let Some(link) = self.ivars().link.get() else {
-            return;
-        };
-        link.set_caret_style(settings.caret);
-        link.set_blink_interval(settings.blink_interval);
-    }
-
-    /// Hareketi Azalt'ın **çözülmüş** değerini link'e verir
-    /// (`AppDelegate::reduce_motion`). Değer değişmediyse no-op
-    /// (`bt_gpu::DisplayLink::set_reduce_motion`); link yoksa sessizce döner.
-    pub(crate) fn set_reduce_motion(&self, reduce: bool) {
-        if let Some(link) = self.ivars().link.get() {
-            link.set_reduce_motion(reduce);
-        }
-    }
-
-    /// Kaydırmanın **çözülmüş** kipini view'a verir
-    /// (`AppDelegate::smooth_scroll`). Link'e değil view'a: karar olayın
-    /// sınıflamasında, `scrollWheel:`'de veriliyor ve `false` kolu bugünkü
-    /// satır yolunun ta kendisi (027 Karar 5).
-    pub(crate) fn set_smooth_scroll(&self, smooth: bool) {
-        self.ivars().view.set_smooth_scroll(smooth);
-    }
-
-    /// Klavye terminale geldi (`here`) ya da arama alanına gitti —
-    /// `BateriView`'ın first responder kancaları veriyor (033 R7). Odağın
-    /// ikinci biti; iki bitin birleşimi `bt-gpu`'da
-    /// (`DisplayLink::set_keyboard_in_terminal`). Süreli koşuda
-    /// [`TerminalWindow::apply_focus`]'un kapısıyla susuyor.
-    pub(crate) fn keyboard_moved(&self, here: bool) {
-        if self.ivars().run.is_some() {
-            return;
-        }
-        if let Some(link) = self.ivars().link.get() {
-            link.set_keyboard_in_terminal(here);
-        }
-    }
-
     /// Arama paneli — ilk çağrıda kurulur, temaya boyanır.
     fn search_bar(&self) -> &SearchBar {
         self.ivars().search.get_or_init(|| {
-            let view = &self.ivars().view;
-            // İçerik view'ı kapsayıcı (phase-3) ve kurucudan beri hep var;
-            // yokluğu ancak kapanan pencerede, o zaman panel view'ın içine
-            // düşer ve yine görünür.
-            let container: Retained<NSView> = match self.ivars().window.contentView() {
-                Some(container) => container,
-                None => Retained::into_super(view.clone()),
-            };
+            // Panel pane'in içinde, Metal katmanını taşıyan view'ın kardeşi
+            // (033 → R4.1; pane o kapsayıcının ta kendisi, 039 Karar 2).
+            let pane: &NSView = self.pane();
             let bar = SearchBar::new(
                 self.mtm(),
-                &container,
-                view,
+                pane,
+                self.view(),
                 self,
                 ProtocolObject::from_ref(self),
             );
-            if let Some(session) = self.ivars().session.get() {
+            if let Some(session) = self.session() {
                 let theme = session.theme();
                 bar.paint(&theme, is_dark_background(&theme));
             }
@@ -2323,8 +1451,7 @@ impl TerminalWindow {
     /// eşleşmeyi açığa çıkarır ve etiketi yazar; verdiyse `true`. Aynı sorgu
     /// no-op.
     fn apply_search(&self) -> bool {
-        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.ivars().session.get())
-        else {
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.session()) else {
             return false;
         };
         if !bar.is_shown() {
@@ -2382,8 +1509,7 @@ impl TerminalWindow {
     /// koşulu çekirdeğin `complete`'i (geçiş bitti **ve** bekleyen defter
     /// haberi yok), panelin kapanması ya da aramanın düşmesi.
     fn search_chunk(&self) {
-        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.ivars().session.get())
-        else {
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.session()) else {
             self.ivars().search_driving.set(false);
             return;
         };
@@ -2415,8 +1541,7 @@ impl TerminalWindow {
         if self.open_search(false) {
             return;
         }
-        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.ivars().session.get())
-        else {
+        let (Some(bar), Some(session)) = (self.ivars().search.get(), self.session()) else {
             return;
         };
         let status = self.ivars().search_status.get();
@@ -2440,25 +1565,18 @@ impl TerminalWindow {
         let animate = app::delegate(self.mtm()).is_some_and(|app| !app.reduce_motion());
         bar.hide(animate);
         bar.forget_applied();
-        if let Some(session) = self.ivars().session.get() {
+        if let Some(session) = self.session() {
             session.select_search_match();
             session.clear_search();
         }
         self.ivars().search_status.set(SearchStatus::Empty);
-        self.ivars()
-            .window
-            .makeFirstResponder(Some(&self.ivars().view));
+        self.ivars().window.makeFirstResponder(Some(self.view()));
     }
 
     /// ⌘E (Karar 6): seçimin ilk satırı sorgu olur (regex kipinde
     /// kaçırılarak), find panosuna yazılır ve panel alanı odaklanmış açılır.
     fn use_selection(&self) {
-        let Some(text) = self
-            .ivars()
-            .session
-            .get()
-            .and_then(|session| session.selection_text())
-        else {
+        let Some(text) = self.session().and_then(|session| session.selection_text()) else {
             return;
         };
         let bar = self.search_bar();
@@ -2490,7 +1608,7 @@ impl TerminalWindow {
         let Some(bar) = self.ivars().search.get().filter(|bar| bar.is_shown()) else {
             return SearchCover::default();
         };
-        let view = &self.ivars().view;
+        let view = self.view();
         view.search_cover(view.convertRect_fromView(bar.resting_frame(), Some(bar.parent())))
     }
 
@@ -2500,177 +1618,29 @@ impl TerminalWindow {
         app::delegate(self.mtm()).is_some_and(|app| app.smooth_scroll())
     }
 
-    /// Odak değişti — `bt-gpu`'ya iletir.
-    ///
-    /// **Hermetik koşuda hiç çağrılmıyor** (R7.1) ve kapı burada, `bt-gpu`'nun
-    /// varsayılanında değil: `DisplayLink`'in `focused`'ı zaten `true`
-    /// doğuyor ama o tek başına yetmez — `make duman` koşarken açılan bir
-    /// Spotlight `windowDidResignKey:` doğurur, o da kare ister ve kapı bir
-    /// makinede yeşil bir makinede kırmızı düşerdi. Emsal
-    /// `app::resolve_reduce_motion`'ın `Inputs`'a bakması.
-    ///
-    /// Link yoksa sessizce dönüyor: key olayı `start_session`'dan önce de
-    /// düşebilir ve o hâlde varsayılan (`true`) zaten doğru.
-    fn apply_focus(&self, focused: bool) {
-        // Kapı `run` **bayrağına** bakıyor, `inputs()`'a değil: `inputs()`
-        // `child::home()`'u argüman olarak çözüyor (passwd kaydına kadar
-        // gidebilir) ve odak her uygulama geçişinde değişiyor. Bayrağın
-        // kopyası bu yüzden pencerenin kendisinde: uygulama delegate'ine
-        // uzanmak da gerekmiyor.
-        if self.ivars().run.is_some() {
-            return;
-        }
-        if let Some(link) = self.ivars().link.get() {
-            link.set_focused(focused);
-        }
-    }
-
     /// Kapanış sırasının pencereye düşen adımları — **başlatır, beklemez**.
     /// İki çağıranı var: pencerenin kapanışı (`windowWillClose:`, tutamak
     /// düşüyor) ve uygulamanın kapanışı (`AppDelegate::shutdown`, bütün
     /// tutamaklar tek son tarihe kadar bekleniyor).
     ///
-    /// 1. Ritmi kes (`DisplayLink::stop`): link durur, run loop'tan çıkar ve
-    ///    uyandırma kapısı kapanır. Bundan sonra yeni kare istenmez.
-    /// 2. `Waker`'ı `ShellWake`'ten **sök** ve burada, ana thread'de düşür
-    ///    ([`ShellWake::detach`]): `ShellWake`'in son kopyası okuyucu ya da
-    ///    `"PTY teardown"` thread'inde düşebilir ve orada `Waker` taşımamalı.
-    /// 3. Oturumun kapanışını başlat (`Session::begin_shutdown`: `SIGHUP` +
-    ///    okuyucu thread'in bitişi arkada).
-    ///
-    /// `DisplayLink` artık **düşürülebilir** ve pencere nesnesiyle ana
-    /// thread'de düşüyor: son `Waker` kopyası sökmeden sonra ya bu nesnede ya
-    /// da Metal'in tamamlanma bloğunda; ikincisi ana kuyruğa senkron iş atar
-    /// ama ana thread o sırada beklemede değil — pencere kapanışı beklemiyor,
-    /// ⌘Q ise pencereleri bekleme bitene kadar listede tutuyor.
-    ///
-    /// İdempotent: ikinci çağrı [`Closing::AlreadyDone`] döner (`stop`
-    /// mandallı, `detach` `take`, `begin_shutdown` `Option`). Oturum hiç
-    /// doğmadıysa `None` — kapanacak bir şey yok.
+    /// Sıra zorunlu: önce yükleme kuyruğu bırakılıyor (süreçler öldürülüyor
+    /// ve yarım dosya siliniyor; sonucu gösterecek bir dock kalmadı), **sonra**
+    /// pane'in kapanışı ([`TerminalPane::begin_close`]: ritim, `Waker`,
+    /// `SIGHUP`) — ters sırada iptal kabuğun `SIGHUP`'ından sonra giderdi.
+    /// İdempotent; oturum hiç doğmadıysa `None`.
     pub(crate) fn begin_close(&self) -> Option<Closing> {
-        // Yükleme sekmeyle gidiyor: süreçler öldürülüyor ve yarım dosya
-        // siliniyor; sonucu gösterecek bir dock kalmadı.
         self.abandon_uploads();
-        if let Some(link) = self.ivars().link.get() {
-            link.stop();
-        }
-        drop(self.ivars().wake.detach());
-        let session = self.ivars().session.get()?;
-        Some(match session.begin_shutdown() {
-            Some(handle) => Closing::Started(handle),
-            None => Closing::AlreadyDone,
-        })
+        self.pane().begin_close()
     }
-
-    /// Pencere geometrisi ya da font oynadı: layer'ı eşle, grid'i güncelle,
-    /// kare iste. Aynı grid'e düşen font değişimi de yeniden çizilir:
-    /// `DisplayLink::resize` kareyi koşulsuz istiyor ve kare istemek hasar
-    /// bayrağını da dikiyor.
-    ///
-    /// Fare girdileri de burada tazeleniyor: view `WindowIvars.view`'da
-    /// `Retained<BateriView>` olarak duruyor ve pencere nesnesiyle birlikte
-    /// gidiyor.
-    pub(crate) fn refresh_geometry(&self, app: &AppDelegate) {
-        let grid = self.sync_geometry(app);
-        self.ivars()
-            .view
-            .set_metrics(grid, self.ivars().dock_rows.get());
-        if let Some(link) = self.ivars().link.get() {
-            link.resize(
-                grid.cols,
-                grid.rows,
-                grid.cell,
-                self.ivars().dock_rows.get(),
-            );
-        }
-    }
-
-    /// Layer'ın drawable boyutunu view'ın backing geometrisiyle eşler **ve**
-    /// grid ölçüsünü döndürür — ad ikisini birden söylüyor çünkü çağıranın
-    /// ikisine de ihtiyacı var ve boyutu yazmadan ölçüyü türetmek yanlış
-    /// sonuç verirdi. Ölçek tek kaynaktan okunur ve piksel boyutu ondan
-    /// çarpılır; `drawableSize` ile `contentsScale` ayrışırsa bulanıklık olur.
-    ///
-    /// **Ölçeğin iki kapısı** (`Surface::set_size`, `Renderer::cell_metrics`;
-    /// 003'ten beri borç) birleştirilmiyor: ikisinin tek çağıranı bu
-    /// fonksiyon, ölçek burada bir kez okunuyor ve ikisine aynı yerelden
-    /// gidiyor; font ayarı ölçeğe dokunmuyor
-    /// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 6).
-    ///
-    /// Font yuvası da burada, sonda yazılıyor: atlası (yeniden) kuran tek
-    /// yol `cell_metrics` ve font bildirimi ancak ondan sonra güncel. Ekran
-    /// değişimi atlası yeniden kursa da aile aynı, yuva oynamaz.
-    fn sync_geometry(&self, app: &AppDelegate) -> Grid {
-        let window = &self.ivars().window;
-        // Kapsayıcı değil terminal view'ı: ikisi bugün aynı boyda ama çizilen
-        // yüzey bu view'ın layer'ı, ölçü de onun olmalı.
-        let view = &self.ivars().view;
-        let scale = window.backingScaleFactor();
-        let bounds = view.bounds().size;
-        let (width_px, height_px) = (bounds.width * scale, bounds.height * scale);
-        self.ivars().surface.set_size(width_px, height_px, scale);
-
-        // Hücre ölçüsü `bt-gpu` üzerinden `bt-atlas`'ın font metriğinden
-        // geliyor ve ölçekle çarpma da orada. Burada ikinci bir yuvarlama
-        // kuralı **yok**: eski `.round()` bloğu bilerek silindi. İki kural
-        // yan yana dursaydı hangisinin kazandığı çağrı sırasına bağlanır ve
-        // belirti bir piksellik hücre kayması, yani sessiz olurdu.
-        let renderer = &self.ivars().renderer;
-        let cell = renderer.cell_metrics(scale);
-        app.post_notices(Source::Font, font_messages(renderer.font_notice()));
-        split_into_grid(width_px, height_px, cell, self.ivars().dock_rows.get())
-    }
-}
-
-/// Yeni bir sekme kimliği, `NSUUID`'den (038 Karar 2).
-fn new_tab_id() -> TabId {
-    // `UUIDString` kanonik 8-4-4-4-12 biçimini veriyor; `parse` onu
-    // reddederse kusur `bt-core`'un sözleşmesinde, bu satırda değil.
-    TabId::parse(&NSUUID::new().UUIDString().to_string())
-        .expect("NSUUID'nin UUIDString'i kanonik UUID olmalı")
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn tab_ids_are_canonical_and_distinct() {
-        let (a, b) = (super::new_tab_id(), super::new_tab_id());
-        assert_ne!(a, b, "iki NSUUID kimliği ayrı olmalı");
-        assert_eq!(bt_core::TabId::from_url(&a.url()), Some(a));
-    }
-
-    #[test]
     fn term_program_version_is_the_workspace_version() {
         // Karar 3'ün bekçisi: `bt-core`'un sabiti ile uygulamanın sürümü aynı
         // alandan (`version.workspace = true`); biri ayrışırsa burada kızarır.
         assert_eq!(bt_core::TERM_PROGRAM_VERSION, env!("CARGO_PKG_VERSION"));
-    }
-
-    #[test]
-    fn remote_probe_repeats_only_while_undecided() {
-        use super::RemoteProbe;
-        let probe = RemoteProbe::default();
-        // Silahsızken çıktı yoklama atmıyor.
-        assert!(!probe.output());
-        // `C` kenarı silahı kurar ve tek bir iş atar; iş beklerken gelen
-        // çıktı ikinci bir iş atmıyor.
-        assert!(probe.command_started());
-        assert!(!probe.output());
-        // İş başlıyor, yoklama kararsız: silah geri kurulur, sonraki çıktı
-        // tekrar atar.
-        assert!(probe.begin());
-        probe.rearm();
-        assert!(probe.output());
-        // İş başlıyor, cevap kesin: silah inik kalır, çıktı atmıyor.
-        assert!(probe.begin());
-        assert!(!probe.output());
-        // Kesin cevap yoklanırken gelen yeni `C` ezilmiyor.
-        assert!(probe.command_started());
-        assert!(probe.begin());
-        assert!(probe.command_started());
-        assert!(probe.begin(), "yeni komut yoklanmalı");
-        // Silah inikken kuyruğa düşmüş bir iş yoklamıyor.
-        assert!(!probe.begin());
     }
 
     use std::cell::Cell;

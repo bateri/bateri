@@ -44,7 +44,7 @@ use std::ffi::{c_int, c_void};
 use bt_core::RemoteKind;
 
 /// Kabuğun PTY çocuğuna göre yeri — kabuğu doğuran taraf biliyor ve
-/// doğumda kaydediyor (`window::TerminalWindow::start_session`), ad
+/// doğumda kaydediyor (`pane::TerminalPane::start_session`), ad
 /// karşılaştırmasıyla tahmin edilmiyor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShellParent {

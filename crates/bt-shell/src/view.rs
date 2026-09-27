@@ -535,7 +535,7 @@ define_class!(
         /// Klavye terminale geldi (033 R7): arama panelinin alanından
         /// dönüş — Esc, kapatma ya da terminale tık. Caret'in odağı "pencere
         /// key **ve** klavye terminalde" ve ikinci bit tek kaynaktan, buradan
-        /// (`TerminalWindow::keyboard_moved`).
+        /// (`TerminalPane::keyboard_moved`).
         #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
             // SAFETY: `NSResponder`'ın argümansız, `BOOL` dönen yöntemi.
@@ -1403,7 +1403,7 @@ impl BateriView {
 
     /// Kaydırmanın pürüzsüz mü satır adımıyla mı gideceği — pencere
     /// çözülmüş `bool`'u açılışta ve her kayıtta/sistem bildiriminde veriyor
-    /// (`TerminalWindow::set_smooth_scroll`).
+    /// (`TerminalPane::set_smooth_scroll`).
     ///
     /// `false`'a geçiş uçuştaki süzülmeye dokunmuyor: Hareketi Azalt ve
     /// `snap` onu link'te zaten bitiriyor, `"off"`'un kendisinde ise sıradaki
@@ -1486,15 +1486,18 @@ impl BateriView {
         }
     }
 
-    /// Klavyenin yerini pencereye bildirir; pencere yoksa (kurucunun ilk
-    /// `makeFirstResponder`'ı) sessiz.
+    /// Klavyenin yerini sahibi pane'e bildirir; view henüz bir pane'e
+    /// takılı değilse sessiz. Sahip `superview()`'dan (039 Karar 2): pane
+    /// bu view'ın doğrudan üstü.
     fn keyboard_moved(&self, here: bool) {
-        let window = self.window();
-        let delegate = window.as_ref().and_then(|window| window.delegate());
-        if let Some(owner) = delegate.as_deref().and_then(|delegate| {
-            AsRef::<AnyObject>::as_ref(delegate).downcast_ref::<crate::window::TerminalWindow>()
-        }) {
-            owner.keyboard_moved(here);
+        // SAFETY: üst view'ı okumak; dönen `Retained` onu bu çağrı boyunca
+        // yaşatıyor ve ana thread'deyiz (`MainThreadOnly`).
+        let parent = unsafe { self.superview() };
+        if let Some(pane) = parent
+            .as_deref()
+            .and_then(|parent| parent.downcast_ref::<crate::pane::TerminalPane>())
+        {
+            pane.keyboard_moved(here);
         }
     }
 
@@ -1521,7 +1524,7 @@ impl BateriView {
     ///
     /// `set_metrics`'ten ayrı çağrı, çünkü kaynağı ayrı: o üçlü pencere
     /// geometrisinden, bu link'ten geliyor ve link `set_metrics`'ten sonra
-    /// kuruluyor (`window::TerminalWindow::start_session`). İkinci çağrı sessizce düşseydi fare
+    /// kuruluyor (`pane::TerminalPane::start_session`). İkinci çağrı sessizce düşseydi fare
     /// eski gövdeyi, yani sonsuza kadar sıfır bir orijin okurdu.
     pub(crate) fn attach_origin(&self, origin: Origin) {
         assert!(
@@ -1779,7 +1782,7 @@ impl BateriView {
     /// Henüz hiç kare çizilmediyse PTY payının tek satırlık bloğu
     /// ([`dock_input_top_px`]); yükseklik o kolda view'ın bounds'undan —
     /// drawable'ın boyu onunla aynı çağrıda kuruluyor
-    /// (`TerminalWindow::sync_geometry`).
+    /// (`TerminalPane::sync_geometry`).
     fn window_point_dock(&self, in_window: NSPoint, outside: OutOfGrid) -> Option<SelectionPoint> {
         let (metrics, (cols, _)) = self.ivars().metrics.get()?;
         let dock_rows = self.ivars().dock_rows.get();
