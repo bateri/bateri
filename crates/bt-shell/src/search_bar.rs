@@ -11,8 +11,8 @@
 //! **Bu dosyada karar yok, görünüş var.** Sorgunun derlenmesi, geçerli
 //! eşleşme ve pencerenin eşleşmeye gidişi `bt-core`'da
 //! (`Session::set_search`, `search_next`, `search_reveal`); olayların
-//! sahibi pencere (`window::TerminalWindow` alanın delegesi ve düğmelerin
-//! hedefi — ikisi de zayıf referans, paneli pencere tutuyor). Burada kalan:
+//! sahibi pane (`pane::TerminalPane` alanın delegesi ve düğmelerin
+//! hedefi — ikisi de zayıf referans, paneli pane tutuyor). Burada kalan:
 //! görünümlerin kurulması, temaya boyanması, yeri ve açılış/kapanış
 //! animasyonu, anahtarların ve etiketin okunup yazılması.
 //!
@@ -28,7 +28,7 @@ use block2::RcBlock;
 use bt_core::{SearchQuery, SearchReport, SearchStatus, Theme, escape_search};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{MainThreadMarker, Message, sel};
+use objc2::{MainThreadMarker, sel};
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSAutoresizingMaskOptions, NSBezelStyle,
     NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlSize, NSControlStateValueOff,
@@ -78,8 +78,6 @@ const SLIDE: f64 = 6.0;
 
 /// Panelin görünümleri ve animasyonun nesli.
 pub(crate) struct SearchBar {
-    /// Panelin kapsayıcısı (pencerenin içerik view'ı) — yerleşimin ölçüsü.
-    parent: Retained<NSView>,
     surface: Retained<NSBox>,
     field: Retained<NSSearchField>,
     case: Retained<NSButton>,
@@ -101,7 +99,10 @@ impl SearchBar {
     /// Paneli kurar ve `parent`'a, `below`'un **üstüne** ekler; gizli doğar.
     ///
     /// `target` düğmelerin ve alanın eylem hedefi, `delegate` alanın delegesi
-    /// — ikisi de pencere ve ikisi de zayıf tutuluyor.
+    /// — ikisi de pane ve ikisi de zayıf tutuluyor. Kapsayıcı da
+    /// **tutulmuyor**: kapsayıcı pane ve paneli o tutuyor — geri referans
+    /// bir çember olur, pane (ve renderer'ı, link'i) hiç düşmezdi. Yerleşimin
+    /// ölçüsü yüzeyin kendi `superview`'ından.
     pub(crate) fn new(
         mtm: MainThreadMarker,
         parent: &NSView,
@@ -116,8 +117,8 @@ impl SearchBar {
         // doğurmuyor).
         field.setSendsSearchStringImmediately(true);
         field.setSendsWholeSearchString(false);
-        // SAFETY: hedef zayıf ve pencere paneli yaşattığı sürece yaşıyor;
-        // seçici pencerede tek `Option<&AnyObject>` argümanlı bir eylem.
+        // SAFETY: hedef zayıf ve pane paneli yaşattığı sürece yaşıyor;
+        // seçici pane'de tek `Option<&AnyObject>` argümanlı bir eylem.
         unsafe {
             field.setTarget(Some(target));
             field.setAction(Some(sel!(searchFieldChanged:)));
@@ -201,7 +202,6 @@ impl SearchBar {
         parent.addSubview_positioned_relativeTo(&surface, NSWindowOrderingMode::Above, Some(below));
 
         SearchBar {
-            parent: parent.retain(),
             surface,
             field,
             case,
@@ -218,11 +218,6 @@ impl SearchBar {
         self.shown.get()
     }
 
-    /// Panelin kapsayıcısı — [`SearchBar::resting_frame`]'in koordinatı.
-    pub(crate) fn parent(&self) -> &NSView {
-        &self.parent
-    }
-
     /// Arama alanı — first responder yapılacak görünüm.
     pub(crate) fn field(&self) -> &NSSearchField {
         &self.field
@@ -232,7 +227,11 @@ impl SearchBar {
     /// köşe, iç payla. Animasyon sürerken görünümün kendi çerçevesi yolda;
     /// örtülen hücreler varılacak yerden sorulmalı.
     pub(crate) fn resting_frame(&self) -> NSRect {
-        let bounds = self.parent.bounds();
+        // SAFETY: üst view'ı okumak; dönen `Retained` onu bu çağrı boyunca
+        // yaşatıyor ve ana thread'deyiz. Yüzey kurucuda kapsayıcıya
+        // takılıyor ve hiç sökülmüyor; `None` kolu yalnız savunma.
+        let bounds =
+            unsafe { self.surface.superview() }.map_or(NSRect::ZERO, |parent| parent.bounds());
         let size = self.surface.frame().size;
         let origin = NSPoint::new(
             (bounds.size.width - INSET - size.width).max(0.0),

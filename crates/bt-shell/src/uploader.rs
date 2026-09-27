@@ -1,12 +1,17 @@
-//! Yükleme kuyruğunun **pencere yarısı** (037 Karar 7 → Kullanıcı kararı):
+//! Yükleme kuyruğunun **AppKit yarısı** (037 Karar 7 → Kullanıcı kararı):
 //! damladan onay sayfasına, sayfadan akışa, akıştan dock'un durum satırına,
-//! "Show files (N)" popover'ına, durdurma sorusuna, pencere başlığına,
-//! bildirime ve uygulamanın Dock simgesine giden AppKit ve dispatch işi.
+//! "Show files (N)" popover'ına ve durdurma sorusuna giden AppKit ve
+//! dispatch işi. Kuyruk **pane'in** (039 phase-2): sayfalar pane view'ının
+//! penceresine, popover pane'in `BateriView`'ına bağlanıyor; başlığın `↑ N%`
+//! öneki, bildirim ve Dock simgesi pane'in sahibinden ([`crate::pane::PaneHost`] —
+//! `title_changed`, `notify`, `uploads_changed`), Dock simgesinin kendisi
+//! bütün pane'lerin toplamı ([`refresh_dock_tile`], sahip gezer).
 //!
 //! Kural ve metin `upload`'da (saf, sınanan); burada yalnız bağlama var.
-//! Arka plan thread'lerinin her haberi ana kuyruğa **pencere kimliğiyle**
-//! gidiyor ve pencereyi listeden buluyor (alternatif ekran habercisinin
-//! örüntüsü): kapanmış bir sekmenin haberi sessizce düşüyor.
+//! Arka plan thread'lerinin her haberi ana kuyruğa **pane kimliğiyle**
+//! gidiyor ve pane'i sahibin yolundan buluyor ([`PaneLookup`], alternatif
+//! ekran habercisinin örüntüsü): kapanmış bir pane'in haberi sessizce
+//! düşüyor.
 //!
 //! **Boşta sıfır kare:** ilerleme haberi akış sürerken en sık
 //! [`upload::TICK`]'te bir ve ana kuyrukta en çok bir tane; kuyruk bitince
@@ -41,12 +46,11 @@ use objc2_user_notifications::{
     UNUserNotificationCenter,
 };
 
-use crate::app;
+use crate::pane::{PaneLookup, TerminalPane};
 use crate::upload::{
     self, Ended, Job, Local, Outcome, ProbeReply, RowAction, RowStatus, Shared, Stop, StopQuestion,
     UploadList,
 };
-use crate::window::TerminalWindow;
 
 /// Arka planın yoklamasından ana thread'e dönen her şey.
 struct Asked {
@@ -67,18 +71,18 @@ struct Confirmed {
     jobs: Vec<Job>,
 }
 
-/// `id`'li pencereyi ana thread'de bulur ve `work`'ü ona uygular.
-fn on_window(id: u64, work: impl FnOnce(&TerminalWindow) + Send + 'static) {
+/// `id`'li pane'i ana thread'de bulur ve `work`'ü ona uygular.
+fn on_pane(lookup: PaneLookup, id: u64, work: impl FnOnce(&TerminalPane) + Send + 'static) {
     DispatchQueue::main().exec_async(move || {
         // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
         let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-        if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
-            work(&window);
+        if let Some(pane) = lookup(mtm, id) {
+            work(&pane);
         }
     });
 }
 
-impl TerminalWindow {
+impl TerminalPane {
     /// Finder damlası uzak oturumda (037 Karar 7): yerel ölçüm ve uzak
     /// yoklama arka planda, sonra onay sayfası. `false` → damla reddedildi
     /// (yerel oturum, ya da başka bir sayfa sürüyor — iki sayfa üst üste
@@ -99,7 +103,7 @@ impl TerminalWindow {
         let ssh = upload::ssh_argv(&target);
         let host = target.host;
         let reported = !cwd.is_empty();
-        let id = self.id();
+        let (id, lookup) = (self.id(), self.lookup());
         self.uploads().borrow_mut().set_asking(true);
         let spawned = thread::Builder::new()
             .name("upload probe".into())
@@ -114,7 +118,7 @@ impl TerminalWindow {
                     reported,
                     result,
                 };
-                on_window(id, move |window| window.upload_asked(asked));
+                on_pane(lookup, id, move |pane| pane.upload_asked(asked));
             });
         if spawned.is_err() {
             self.uploads().borrow_mut().set_asking(false);
@@ -123,7 +127,7 @@ impl TerminalWindow {
         true
     }
 
-    /// Damla bu sekmeye bırakılabilir mi — `draggingEntered:`'ın sorusu: bir
+    /// Damla bu pane'e bırakılabilir mi — `draggingEntered:`'ın sorusu: bir
     /// yükleme sayfası (yoklama dahil) sürerken hayır.
     pub(crate) fn accepts_drop(&self) -> bool {
         self.uploads().borrow().can_accept() && self.upload_stop().borrow().is_none()
@@ -136,10 +140,12 @@ impl TerminalWindow {
             .session()
             .and_then(|session| session.remote_target())
             .is_some_and(|(command, ..)| command == asked.command);
-        if !alive {
+        // Sayfanın penceresi pane view'ınınki; pane pencereden söküldüyse
+        // sorulacak yer de yok.
+        let Some(window) = self.window().filter(|_| alive) else {
             self.uploads().borrow_mut().set_asking(false);
             return;
-        }
+        };
         let mtm = self.mtm();
         let alert = NSAlert::new(mtm);
         let confirmed = match asked.result {
@@ -177,26 +183,26 @@ impl TerminalWindow {
                 })
             }
         };
-        let id = self.id();
+        let (id, lookup) = (self.id(), self.lookup());
         // Blok `Fn`: yük bir kez alınıyor.
         let confirmed = RefCell::new(confirmed);
         let answered = RcBlock::new(move |response: NSModalResponse| {
             // audit: sayfanın tamamlanma bloğu AppKit'in ana thread'inde koşar.
             let mtm = MainThreadMarker::new().expect("sayfa bloğu ana thread'dedir");
-            let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) else {
+            let Some(pane) = lookup(mtm, id) else {
                 return;
             };
-            drop(window.upload_alert().take());
-            window.uploads().borrow_mut().set_asking(false);
+            drop(pane.upload_alert().take());
+            pane.uploads().borrow_mut().set_asking(false);
             if response != NSAlertFirstButtonReturn {
                 return;
             }
             if let Some(confirmed) = confirmed.borrow_mut().take() {
-                window.upload_confirmed(confirmed);
+                pane.upload_confirmed(confirmed);
             }
         });
         self.upload_alert().replace(Some(alert.clone()));
-        alert.beginSheetModalForWindow_completionHandler(self.ns_window(), Some(&answered));
+        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
     }
 
     /// Onay: öğeler kuyruğun sonuna, kuyruk boştaysa ilk öğe başlıyor.
@@ -229,14 +235,14 @@ impl TerminalWindow {
             return;
         };
         self.upload_refresh();
-        let id = self.id();
+        let (id, lookup) = (self.id(), self.lookup());
         let spawned = thread::Builder::new().name("upload".into()).spawn({
             let shared = Arc::clone(&shared);
             move || {
                 let outcome = upload::transfer(&ssh, &job.local, &job.dir, &shared, || {
-                    tick(id, &shared);
+                    tick(lookup, id, &shared);
                 });
-                on_window(id, move |window| window.upload_finished(outcome));
+                on_pane(lookup, id, move |pane| pane.upload_finished(outcome));
             }
         });
         if let Err(error) = spawned {
@@ -254,7 +260,12 @@ impl TerminalWindow {
         }
         self.refresh_upload_list();
         self.refresh_upload_title();
-        refresh_dock_tile(self.mtm());
+        self.uploads_changed();
+    }
+
+    /// Sahibin Dock simgesi (bütün pane'lerin toplamı) tazelensin.
+    fn uploads_changed(&self) {
+        self.host().uploads_changed(self.id());
     }
 
     /// Akan öğe bitti: sıradakine geç ya da sonucu göster. Hiçbir yol
@@ -267,7 +278,7 @@ impl TerminalWindow {
             Some(ended) => self.show_end(ended),
             None => self.upload_next(),
         }
-        refresh_dock_tile(self.mtm());
+        self.uploads_changed();
     }
 
     /// Sonuç satırını gösterir, popover'ı ve eskiyen soruyu kapatır, başlığı
@@ -279,9 +290,9 @@ impl TerminalWindow {
         self.show_transfer(Some(ended.line));
         self.refresh_upload_title();
         if let Some((title, body)) = ended.notice {
-            notify(self.mtm(), &title, &body);
+            self.host().notify(self.id(), &title, &body);
         }
-        let id = self.id();
+        let (id, lookup) = (self.id(), self.lookup());
         let serial = ended.serial;
         let Ok(when) = DispatchTime::try_from(upload::LINGER) else {
             return;
@@ -291,21 +302,25 @@ impl TerminalWindow {
         let _ = DispatchQueue::main().after(when, move || {
             // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
             let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
-            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id))
-                && window.uploads().borrow().linger_over(serial)
+            if let Some(pane) = lookup(mtm, id)
+                && pane.uploads().borrow().linger_over(serial)
             {
-                window.show_transfer(None);
+                pane.show_transfer(None);
             }
         });
     }
 
-    /// Başlığın `↑ N% · ` öneki (037 phase-7): yüzde değiştiyse başlığı
-    /// yeniden yazar — yüzde başına en çok bir kez. Alternatif ekranda dock
-    /// yok ve ilerlemeyi gösteren tek yer başlık ile sekme.
+    /// Başlığın `↑ N% · ` öneki (037 phase-7): yüzde değiştiyse sahip
+    /// başlığı yeniden yazar — yüzde başına en çok bir kez. Alternatif
+    /// ekranda dock yok ve ilerlemeyi gösteren tek yer başlık ile sekme.
+    ///
+    /// Yalnız sahibe haber veriyor, uzak durumun kenarını sormuyor
+    /// ([`TerminalPane::remote_or_title_changed`] değil): o kenar
+    /// `check_upload_connection` → `show_end` → buraya geri dönerdi.
     fn refresh_upload_title(&self) {
         let changed = self.uploads().borrow_mut().title_percent_changed();
         if changed {
-            self.apply_title();
+            self.host().title_changed(self.id());
         }
     }
 
@@ -406,7 +421,7 @@ impl TerminalWindow {
             Some(ended) => self.show_end(ended),
             None => self.upload_refresh(),
         }
-        refresh_dock_tile(self.mtm());
+        self.uploads_changed();
     }
 
     /// "Stop uploading?" sayfası: `Keep uploading` varsayılan (Return) ve
@@ -425,20 +440,23 @@ impl TerminalWindow {
         alert.addButtonWithTitle(ns_string!("Keep uploading"));
         let stop = alert.addButtonWithTitle(ns_string!("Stop"));
         stop.setHasDestructiveAction(true);
-        let id = self.id();
+        let Some(window) = self.window() else {
+            return;
+        };
+        let (id, lookup) = (self.id(), self.lookup());
         let (item, all) = (question.id, question.all);
         let answered = RcBlock::new(move |response: NSModalResponse| {
             // audit: sayfanın tamamlanma bloğu AppKit'in ana thread'inde koşar.
             let mtm = MainThreadMarker::new().expect("sayfa bloğu ana thread'dedir");
-            let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) else {
+            let Some(pane) = lookup(mtm, id) else {
                 return;
             };
-            let sheet = window.upload_stop().borrow_mut().take();
+            let sheet = pane.upload_stop().borrow_mut().take();
             if let Some(sheet) = sheet {
                 remove_monitor(sheet.monitor);
             }
             if response == NSAlertSecondButtonReturn {
-                window.apply_stop(Some(item), all);
+                pane.apply_stop(Some(item), all);
             }
         });
         let sheet_window = alert.window();
@@ -456,10 +474,8 @@ impl TerminalWindow {
             if !on_sheet {
                 return false;
             }
-            if let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) {
-                window
-                    .ns_window()
-                    .endSheet_returnCode(&sheet_window, NSAlertFirstButtonReturn);
+            if let Some(window) = lookup(mtm, id).and_then(|pane| pane.window()) {
+                window.endSheet_returnCode(&sheet_window, NSAlertFirstButtonReturn);
             }
             true
         });
@@ -468,7 +484,7 @@ impl TerminalWindow {
             id: item,
             monitor,
         }));
-        alert.beginSheetModalForWindow_completionHandler(self.ns_window(), Some(&answered));
+        alert.beginSheetModalForWindow_completionHandler(&window, Some(&answered));
     }
 
     /// Durdurma sorusu artık akmayan bir kalem içinse sayfayı kapatır
@@ -481,21 +497,20 @@ impl TerminalWindow {
             .as_ref()
             .filter(|sheet| running != Some(sheet.id))
             .map(|sheet| sheet.alert.window());
-        if let Some(sheet_window) = stale {
-            self.ns_window()
-                .endSheet_returnCode(&sheet_window, NSModalResponseAbort);
+        if let (Some(sheet_window), Some(window)) = (stale, self.window()) {
+            window.endSheet_returnCode(&sheet_window, NSModalResponseAbort);
         }
     }
 
-    /// Sekme kapanıyor (`begin_close`): kuyruk iptal ve **bırakılıyor** —
+    /// Pane kapanıyor (`begin_close`): kuyruk iptal ve **bırakılıyor** —
     /// sonucu gösterecek bir dock kalmadı ve akış thread'inin haberi bu
-    /// pencereyi artık bulamayacak; Dock simgesi şimdi tazeleniyor, yoksa
+    /// pane'i artık bulamayacak; Dock simgesi şimdi tazeleniyor, yoksa
     /// yarım bir çubukta donardı.
     pub(crate) fn abandon_uploads(&self) {
         self.close_upload_list();
         self.uploads().borrow_mut().abandon();
         self.dismiss_stale_stop();
-        refresh_dock_tile(self.mtm());
+        self.uploads_changed();
     }
 
     /// Popover satırının düğmesi (`tag` kalemin kimliği): akan kalemde
@@ -517,7 +532,8 @@ impl TerminalWindow {
         }
     }
 
-    /// Uzak oturum bitti mi (`refresh_title`'ın kenarı): bittiyse
+    /// Uzak oturum bitti mi (başlık ve uzak durum haberinin kenarı,
+    /// [`TerminalPane::remote_or_title_changed`]): bittiyse
     /// bekleyenler iptal, akan öğe kendi bağlantısıyla bitiyor.
     pub(crate) fn check_upload_connection(&self) {
         let Some(command) = self.uploads().borrow().command() else {
@@ -536,7 +552,7 @@ impl TerminalWindow {
             // Bekleyenler artık başlamayacak: popover kapanıyor.
             None => self.refresh_upload_list(),
         }
-        refresh_dock_tile(self.mtm());
+        self.uploads_changed();
     }
 
     /// Durum satırında dock-yerel `col` sütununa tık (bağlam satırında,
@@ -596,6 +612,9 @@ impl TerminalWindow {
         else {
             return;
         };
+        let Some(window) = self.window() else {
+            return;
+        };
         let mtm = self.mtm();
         let popover = NSPopover::new(mtm);
         popover.setBehavior(NSPopoverBehavior::Transient);
@@ -606,26 +625,26 @@ impl TerminalWindow {
         controller.setView(&content);
         popover.setContentViewController(Some(&controller));
         popover.setContentSize(size);
-        let id = self.id();
-        let number = self.ns_window().windowNumber();
+        let (id, lookup) = (self.id(), self.lookup());
+        let number = window.windowNumber();
         // Esc: terminal penceresi key kalıyor, yani Esc popover'a değil
         // `keyDown:`'a — oradan uzak kabuğa — giderdi. İzleyici popover
-        // açıkken bu penceredeki Esc'i yutup popover'ı kapatıyor.
+        // açıkken pane'in penceresindeki Esc'i yutup popover'ı kapatıyor.
         let monitor = add_key_monitor(move |event| {
             if event.keyCode() != ESCAPE || event.windowNumber() != number {
                 return false;
             }
             // audit: yerel olay izleyicisi ana thread'de koşar.
             let mtm = MainThreadMarker::new().expect("olay izleyicisi ana thread'dedir");
-            let Some(window) = app::delegate(mtm).and_then(|app| app.window(id)) else {
+            let Some(pane) = lookup(mtm, id) else {
                 return false;
             };
-            if window.upload_list().borrow().is_some() {
-                window.close_upload_list();
+            if pane.upload_list().borrow().is_some() {
+                pane.close_upload_list();
                 return true;
             }
             // Popover Esc'i kendisi kapattıysa da tuş kabuğa gitmesin.
-            window.closed_by_current_event()
+            pane.closed_by_current_event()
         });
         self.upload_list().replace(Some(UploadPopover {
             popover: popover.clone(),
@@ -817,8 +836,8 @@ impl TerminalWindow {
                     RowAction::Remove => ns_string!("Remove"),
                 };
                 // SAFETY: seçici bu sınıfın `uploadRowAction:`'ı ve tek
-                // `Option<&AnyObject>` alıyor; hedef bu pencere nesnesi ve
-                // pencere listesinde yaşıyor.
+                // `Option<&AnyObject>` alıyor; hedef bu pane ve popover'ı
+                // pane yaşatıyor (hedef zayıf).
                 let button = unsafe {
                     NSButton::buttonWithTitle_target_action(
                         title,
@@ -983,7 +1002,9 @@ fn remove_monitor(monitor: Option<Retained<AnyObject>>) {
 }
 
 /// bateri arkadayken macOS bildirimi (037 phase-7): kuyruk bitti, hata verdi
-/// ya da bağlantı koptu. Önde iken yok — sonuç dock'ta ve başlıkta.
+/// ya da bağlantı koptu. Önde iken yok — sonuç dock'ta ve başlıkta. Pane'in
+/// isteği sahipten geçiyor ([`crate::pane::PaneHost::notify`]); bugünkü sahip buraya
+/// iniyor (`window::WindowHost`).
 ///
 /// `UNUserNotificationCenter` (kullanıcı onaylı bağımlılık, karar kaydı
 /// `.tasks/037-ssh-ikinci-tur/phase-7.md` → Uygulama Notları). Üç kural:
@@ -999,7 +1020,7 @@ fn remove_monitor(monitor: Option<Retained<AnyObject>>) {
 ///   edilen bildirim de "önde iken yok" kuralına uyuyor.
 /// - **Paket kimliği yoksa hiç çağrılmıyor:** `currentNotificationCenter`
 ///   paketsiz süreçte (`cargo run`, sınamalar, süreli koşu) istisna atıyor.
-fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
+pub(crate) fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
     if NSApplication::sharedApplication(mtm).isActive() {
         return;
     }
@@ -1031,35 +1052,28 @@ fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
 }
 
 /// Akış thread'inin ilerleme haberi: ana kuyrukta en çok bir.
-fn tick(id: u64, shared: &Arc<Shared>) {
+fn tick(lookup: PaneLookup, id: u64, shared: &Arc<Shared>) {
     if shared.tick_pending.swap(true, Ordering::AcqRel) {
         return;
     }
     let shared = Arc::clone(shared);
-    on_window(id, move |window| {
+    on_pane(lookup, id, move |pane| {
         shared.tick_pending.store(false, Ordering::Release);
-        window.upload_refresh();
+        pane.upload_refresh();
     });
 }
 
-/// Uygulamanın Dock simgesinde bütün pencerelerin yüklemesinin ilerlemesi
-/// (Kullanıcı kararı 4). Yükleme yoksa simge kendi hâline dönüyor. İlk
-/// yüklemeye kadar hiç dokunulmuyor — açılış (ve süreli koşu) Dock
-/// simgesine uğramıyor.
-fn refresh_dock_tile(mtm: MainThreadMarker) {
-    let Some(app) = app::delegate(mtm) else {
-        return;
-    };
-    let (sent, total) = app
-        .windows()
+/// Uygulamanın Dock simgesinde bütün pane'lerin yüklemesinin ilerlemesi
+/// (Kullanıcı kararı 4); pane'leri sahip geziyor (`AppDelegate::refresh_dock_tile`).
+/// Yükleme yoksa simge kendi hâline dönüyor. İlk yüklemeye kadar hiç
+/// dokunulmuyor — açılış (ve süreli koşu) Dock simgesine uğramıyor.
+pub(crate) fn refresh_dock_tile(mtm: MainThreadMarker, panes: &[&TerminalPane]) {
+    let (sent, total) = panes
         .iter()
-        .filter_map(|window| window.uploads().borrow().totals())
+        .filter_map(|pane| pane.upload_totals())
         .fold((0u64, 0u64), |(a, b), (sent, total)| (a + sent, b + total));
     let tile = NSApplication::sharedApplication(mtm).dockTile();
-    let active = app
-        .windows()
-        .iter()
-        .any(|window| window.uploads().borrow().active());
+    let active = panes.iter().any(|pane| pane.upload_active());
     if !active {
         if tile.contentView(mtm).is_some() {
             tile.setContentView(None);
