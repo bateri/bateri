@@ -40,6 +40,7 @@
 | 036 | [ssh-uzak-oturum](036-ssh-uzak-oturum/) | 🟢 | 3 phase + kapı tamam — ssh/mosh süreç tablosundan algılanıyor, dock tek satırda `⇄ host  /uzak/yol` (`info` rengi), başlıkta ve sekmede `⇄` |
 | 037 | [ssh-ikinci-tur](037-ssh-ikinci-tur/) | 🟢 | 7 phase + kapı tamam — host işareti ve rengi, ⌘T aynı host'a, "⏎ reconnect", Finder damlasının uzak dizine yüklenmesi (popover, yapıştırmasız sonuç satırı, durdurma sorusu, başlıkta yüzde, bildirim). |
 | 038 | [terminal-kimligi](038-terminal-kimligi/) | 🟢 | 2 phase + kapı tamam: kabukta `TERM_PROGRAM=bateri` ailesi ve sekme başına `BATERI_TAB_URL`, `open bateri://tab/<id>` o sekmeyi öne getiriyor (gözle kontrol bekliyor) |
+| 039 | [terminal-pane-bolmeler](039-terminal-pane-bolmeler/) | 📐 | sekme içeriği NSWindow'dan bağımsız `TerminalPane`'e (tek NSView + olay geri bildirimi + eylem API'si), üstüne ⌘D/⇧⌘D bölmeler, gezinme, boyutlama, eşitleme, büyütme |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
