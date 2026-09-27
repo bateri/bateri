@@ -46,12 +46,13 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSAutoresizingMaskOptions, NSButton, NSControlTextEditingDelegate,
-    NSEventModifierFlags, NSMenuItem, NSPasteboard, NSPasteboardNameFind, NSPopoverDelegate,
-    NSSearchFieldDelegate, NSTextFieldDelegate, NSView, NSViewFrameDidChangeNotification,
+    NSAlert, NSApplication, NSAutoresizingMaskOptions, NSBox, NSBoxType, NSButton, NSColor,
+    NSControlTextEditingDelegate, NSEventModifierFlags, NSMenuItem, NSPasteboard,
+    NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextFieldDelegate,
+    NSTitlePosition, NSView, NSViewFrameDidChangeNotification,
 };
 use objc2_foundation::{
-    NSNotification, NSNotificationCenter, NSObjectProtocol, NSRect, NSSize, NSUUID,
+    NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSUUID,
 };
 
 use crate::app::{self, Grid, split_into_grid};
@@ -113,6 +114,58 @@ const MIN_PANE_COLS: u16 = 20;
 /// tam ekran bir program (vim, htop) bunun altında durum satırından başka
 /// bir şey gösteremiyor.
 const MIN_PANE_ROWS: u16 = 5;
+
+/// Odakta olmayan pane'in örtüsünün saydamlığı (039 Karar 7): temanın
+/// zemini bu oranda metnin üstüne biniyor. Ölçülmüş değil, bir tasarım
+/// sabiti (`GUTTER_PT` emsali) — Ghostty'nin `unfocused-split-opacity`'sinin
+/// varsayılanı `0.7`, yani örtü `0.3`; aynı oran: odak bir bakışta
+/// okunuyor, soluk pane'in metni yine okunuyor. Gözle kontrolde ayarlanır.
+const DIM_ALPHA: f64 = 0.3;
+
+define_class!(
+    // SAFETY: NSBox alt sınıflama için tasarlanmıştır; DimOverlay `Drop`
+    // uygulamaz, ivar'ı yok ve NSBox'ın kurucusuyla (`new`) doğuyor.
+    #[unsafe(super(NSBox))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriDimOverlay"]
+    pub(crate) struct DimOverlay;
+
+    unsafe impl NSObjectProtocol for DimOverlay {}
+
+    impl DimOverlay {
+        /// İsabet testine hiç girmiyor: tık, sürükleme ve tekerlek altındaki
+        /// `BateriView`'a düşüyor — soluk pane'e tıklamak onu odaklıyor
+        /// (039 phase-3'ün tıklama yolu) ve örtü bunu kesmemeli.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+    }
+);
+
+impl DimOverlay {
+    /// Gizli doğuyor; rengi [`DimOverlay::paint`], görünürlüğü sahip
+    /// ([`TerminalPane::set_dimmed`]).
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // SAFETY: `NSBox`'ın `init`'i; alt sınıfın ivar'ı yok.
+        let this = Self::alloc(mtm).set_ivars(());
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        this.setBoxType(NSBoxType::Custom);
+        this.setTitlePosition(NSTitlePosition::NoTitle);
+        this.setBorderWidth(0.0);
+        this.setHidden(true);
+        this
+    }
+
+    /// Temanın zemini, [`DIM_ALPHA`] saydamlığında. `NSColor` sRGB alıyor
+    /// (`CLAUDE.md` → Renk uzayı; ayırıcının `separator_srgb` emsali).
+    fn paint(&self, theme: &Theme) {
+        let [r, g, b] = theme.background_srgb().map(|byte| f64::from(byte) / 255.0);
+        self.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            r, g, b, DIM_ALPHA,
+        ));
+    }
+}
 
 /// Ana kuyruk dönüşlerinin pane'i kimlikle bulduğu yol; sahip veriyor
 /// (bugün `app::pane_by_id`). Düz bir `fn` göstericisi, closure değil: `Send`
@@ -560,6 +613,10 @@ pub(crate) struct PaneIvars {
     /// Fare çevirisinin girdileri pane boyuyla tazeleniyor (`set_metrics`);
     /// geometrinin kaynağı da bu view (`sync_geometry`).
     view: Retained<BateriView>,
+    /// Odakta olmayan pane'in soluk örtüsü (039 Karar 7): pane'in en üstteki
+    /// çocuğu, Metal katmanının kardeşi — kare yoluna girmiyor, bileşimi
+    /// CoreAnimation'ın. Görünürlüğü sahip belirliyor.
+    dim: Retained<DimOverlay>,
     link: OnceCell<DisplayLink>,
     /// Kapanış sırasının ikinci adımı buradan çağrılır; `DisplayLink` de bir
     /// kopya tutuyor ama oraya `stop()`'tan sonra uzanmak yanlış olurdu.
@@ -920,6 +977,8 @@ impl TerminalPane {
         view.setLayer(Some(surface.ca_layer()));
         view.setWantsLayer(true);
         let font = settings.font.clone();
+        let dim = DimOverlay::new(mtm);
+        dim.paint(&theme);
         let this = Self::alloc(mtm).set_ivars(PaneIvars {
             id,
             run,
@@ -938,6 +997,7 @@ impl TerminalPane {
             renderer,
             surface,
             view: view.clone(),
+            dim: dim.clone(),
             link: OnceCell::new(),
             session: OnceCell::new(),
             shell_parent: OnceCell::new(),
@@ -987,6 +1047,15 @@ impl TerminalPane {
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         this.addSubview(&view);
+        // Örtü en üstte: arama paneli `view`'ın hemen üstüne giriyor
+        // (`SearchBar::new`), yani o da örtünün altında kalıyor ve soluk
+        // pane'in paneli de soluk.
+        dim.setFrame(this.bounds());
+        dim.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        this.addSubview(&dim);
         let font = this.ivars().font.borrow().clone();
         this.request_font(&font);
         Ok(this)
@@ -1416,6 +1485,14 @@ impl TerminalPane {
         if let Some(bar) = self.ivars().search.get() {
             bar.paint(&theme, is_dark_background(&theme));
         }
+        self.ivars().dim.paint(&theme);
+    }
+
+    /// Soluk örtüyü gösterir ya da gizler (039 Karar 7, R4.4). Karar sahibin
+    /// ("odakta değil ve pencerede birden çok pane",
+    /// `TerminalWindow::refresh_dim`); kare istemiyor — örtü AppKit'in.
+    pub(crate) fn set_dimmed(&self, dimmed: bool) {
+        self.ivars().dim.setHidden(!dimmed);
     }
 
     /// İmlecin stili ve dock'un yazım efektleri link'e gidiyor, oturuma
@@ -1491,23 +1568,40 @@ impl TerminalPane {
         }
     }
 
-    /// `size` (nokta) boyunda bir pane'in ızgarası en küçük pane sınırını
-    /// geçiyor mu (039 Karar 14) — bölmenin kapısı. Ölçü bu pane'in hücresi
-    /// ve dock payı: yeni bölme ikisini de ondan devralıyor, ızgarayı da aynı
-    /// formül kuruyor ([`split_into_grid`]). Pencereye takılı değilse `false`.
-    pub(crate) fn grid_fits(&self, size: NSSize) -> bool {
-        let Some(window) = self.window() else {
-            return false;
-        };
-        let scale = window.backingScaleFactor();
+    /// En küçük pane'in boyu, nokta (039 Karar 14): ızgarası tam
+    /// [`MIN_PANE_COLS`] × [`MIN_PANE_ROWS`] olan pane — [`split_into_grid`]'in
+    /// tersi (sol pay + sütunlar, dock payı + satırlar). Ölçü bu pane'in
+    /// hücresi ve dock payı: punto farkı pane başına. Bölmenin kapısı
+    /// ([`TerminalPane::grid_fits`]) ve boyutlamanın sınırı
+    /// (`SplitView::resize`) buradan. Pencereye takılı değilse `None`.
+    pub(crate) fn min_size(&self) -> Option<NSSize> {
+        let scale = self.window()?.backingScaleFactor();
         let cell = self.ivars().renderer.cell_metrics(scale);
-        let grid = split_into_grid(
-            size.width * scale,
-            size.height * scale,
-            cell,
-            self.ivars().dock_rows.get(),
-        );
-        grid.cols >= MIN_PANE_COLS && grid.rows >= MIN_PANE_ROWS
+        let (cell_w, cell_h) = cell.cell_px();
+        let width = f64::from(cell.gutter_px()) + f64::from(MIN_PANE_COLS) * f64::from(cell_w);
+        let height = f64::from(bt_gpu::dock_px(self.ivars().dock_rows.get(), cell))
+            + f64::from(MIN_PANE_ROWS) * f64::from(cell_h);
+        Some(NSSize::new(width / scale, height / scale))
+    }
+
+    /// Bir hücrenin boyu, nokta — klavyeyle boyutlamanın adımı
+    /// (`TerminalWindow::resize_split`). Pencereye takılı değilse `None`.
+    pub(crate) fn cell_size(&self) -> Option<NSSize> {
+        let scale = self.window()?.backingScaleFactor();
+        let (cell_w, cell_h) = self.ivars().renderer.cell_metrics(scale).cell_px();
+        Some(NSSize::new(
+            f64::from(cell_w) / scale,
+            f64::from(cell_h) / scale,
+        ))
+    }
+
+    /// `size` (nokta) boyunda bir pane'in ızgarası en küçük pane sınırını
+    /// geçiyor mu (039 Karar 14) — bölmenin kapısı. Yeni bölme hücreyi ve
+    /// dock payını bu pane'den devralıyor ([`TerminalPane::min_size`]).
+    /// Pencereye takılı değilse `false`.
+    pub(crate) fn grid_fits(&self, size: NSSize) -> bool {
+        self.min_size()
+            .is_some_and(|min| size.width >= min.width && size.height >= min.height)
     }
 
     /// Kabuğun dışında ön planda koşan iş (028 → Karar 1). Oturum yoksa ya da
