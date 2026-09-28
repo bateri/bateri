@@ -359,8 +359,8 @@ paket: kur
 # indirme adresi ve sürüm `wrangler.jsonc`'ye. İndirme adresi **göreli**
 # (`/download`'ın 302'si): site hangi alan adında sunulursa orada çalışır;
 # beslemenin adresleri ise mutlak, çünkü kurulu kopya onları sitenin
-# dışından okuyor. Yayınlamaz — deploy ve
-# commit sitenin deposunda elle (`npm run deploy`).
+# dışından okuyor. Yayınlamaz: sitenin deposunda commit + push yeter,
+# Cloudflare `main`'e gelen push'u kendiliğinden deploy ediyor.
 #
 # Besleme `generate_appcast`'ten: klasördeki bütün zip'leri okuyup her
 # sürümü gizli EdDSA anahtarıyla imzalıyor (anahtar anahtarlıkta,
@@ -383,7 +383,7 @@ yayin: paket
 		--download-url-prefix '$(RELEASES_URL)' -o $(SITE)/public/appcast.xml $(SITE)/public/releases
 	sed -i '' -e 's|"DOWNLOAD_URL": "[^"]*"|"DOWNLOAD_URL": "/releases/bateri-$(VERSION).zip"|' \
 		-e 's|"VERSION": "[^"]*"|"VERSION": "$(VERSION)"|' $(SITE)/wrangler.jsonc
-	@echo "yayin: $(VERSION) → $(SITE) (releases/, appcast.xml, wrangler.jsonc); sitenin deposunda commit + npm run deploy"
+	@echo "yayin: $(VERSION) → $(SITE) (releases/, appcast.xml, wrangler.jsonc); sitenin deposunda commit + push (Cloudflare kendiliğinden deploy eder)"
 
 # Bu Mac'e kurar: `kur`'un denetlenmiş paketini `$(INSTALL_DIR)`'a koyar.
 # Eski paketin üstüne `ditto` ile yazılmıyor, çünkü `ditto` birleştirir ve

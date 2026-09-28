@@ -1202,7 +1202,7 @@ make tarama       # yedek glyph kapısının envanteri (041): sembol/emoji blokl
 make linux        # bt-core'un Linux kapısı: Docker'da clippy -D warnings + test --locked; yerel rustc ≠ imaj etiketi kırmızı, Docker yoksa ATLANDI
 make kur          # release derler, target/release/bateri.app'i kurar (Sparkle dahil; ilk koşuda sha256'lı indirir), anahtarlıktaki Developer ID ya da Apple Development kimliğiyle hardened runtime'la, yoksa ad-hoc imzalar (SIGN_ID ile ezilir) ve içeriğini denetler (Info.plist, URL şeması, ikon, lisans, shell betiği, Sparkle ve imzaları)
 make paket        # kur + gönderilecek zip: target/release/bateri-<sürüm>.zip; Developer ID'de notarize + staple (anahtarlık profili NOTARY_PROFILE=bateri-notary)
-make yayin        # paket + siteye koyar (SITE=../bateri-landing): zip releases/'e, Sparkle beslemesi appcast.xml'e, sürüm wrangler.jsonc'ye; deploy elle
+make yayin        # paket + siteye koyar (SITE=../bateri-landing): zip releases/'e, Sparkle beslemesi appcast.xml'e, sürüm wrangler.jsonc'ye; yayın sitenin deposunda commit + push (Cloudflare kendiliğinden deploy eder)
 make yukle        # kur + bu Mac'e kurar: /Applications/bateri.app (INSTALL_DIR ile değişir); açık bateri varken durur
 ```
 
