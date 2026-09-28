@@ -203,9 +203,6 @@ TARGET_DIR = $(eval TARGET_DIR := $$(shell $(CARGO) metadata --format-version 1 
 APP = $(TARGET_DIR)/release/bateri.app
 STAGE = $(APP).partial
 ICONSET = $(TARGET_DIR)/release/bateri.iconset
-# `cargo pkgid` sürümü `…#0.1.0` ya da `…#bateri@0.1.0` biçiminde verir;
-# sed son ayırıcıya kadar siler. Ayırıcıyı adıyla yazamıyoruz: make o
-# karakteri satırın içinde de yorum başı sayıyor.
 # Güncelleme: Sparkle 2 (`bt-shell::updater` onu çalışma zamanında yüklüyor).
 # Framework depoya girmiyor; sürüm ve sha256 burada sabit, tarball ilk
 # `kur`'da `$(SPARKLE_DIR)`'e iniyor ve özeti tutmayan indirme düşüyor.
@@ -233,7 +230,11 @@ sparkle:
 		{ echo "sparkle: Sparkle-$(SPARKLE_VERSION).tar.xz indirilemedi ya da özeti tutmuyor"; rm -f $(SPARKLE_DIR).tar.xz; exit 1; }; \
 	tar -xJf $(SPARKLE_DIR).tar.xz -C $(SPARKLE_DIR) && rm -f $(SPARKLE_DIR).tar.xz && touch $(SPARKLE_DIR)/.verified
 
-VERSION = $(eval VERSION := $$(shell $(CARGO) pkgid -p bateri | sed 's/.*[^0-9A-Za-z.+-]//'))$(VERSION)
+# Sürüm manifestten (`cargo metadata --no-deps`), `cargo pkgid`'den değil:
+# pkgid Cargo.lock'u okuyor ve lock ancak derlemede güncelleniyor — sürüm
+# yükseltildikten sonraki ilk `make yayin` eski numarayla paket çıkarıyordu
+# (ölçüldü, güncelleme denemesinde).
+VERSION = $(eval VERSION := $$(shell $(CARGO) metadata --format-version 1 --no-deps | sed -n 's/.*"name":"bateri","version":"\([^"]*\)".*/\1/p'))$(VERSION)
 # İkonun adı tek yerde: şablonun `CFBundleIconFile`'ı.
 ICON = $(eval ICON := $$(shell plutil -extract CFBundleIconFile raw assets/bundle/Info.plist.in))$(ICON)
 
