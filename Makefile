@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite sırası yalnız seri make'te garantidir; -j altında "en ucuz kapı
 # önce" ve "sürüm başta" sözü bozulur.
 .NOTPARALLEL:
-.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris tarama kur paket yukle yayin sparkle linux
+.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris tarama kur paket yukle yayin yayin-kapisi sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc pin'li değil (rust-toolchain.toml bilinçli
 # olarak yok): bir `brew upgrade` sonrası gelen clippy kırmızısını kod
@@ -329,61 +329,140 @@ henuz_yok = @echo "henüz yok: $(1)"; exit 1
 # "Notarized Developer ID" demesi. Başka kimlikte notarization yok ve alıcı
 # ilk açılışta Gatekeeper uyarısını Sistem Ayarları → Gizlilik ve Güvenlik →
 # "Yine de Aç" ile geçer.
+#
+# **İki çıktı, iki okur.** Zip Sparkle'ın: güncellemede kullanıcı hiçbir şey
+# sürüklemiyor ve zip küçük. DMG sitenin: ilk kurulumda Finder penceresi
+# uygulamayı Applications'a sürükleten tek bir iş gösteriyor (arka plan,
+# ok, Applications kısayolu; düzen `assets/dmg/settings.py`, görsel
+# `tools/dmg_background.py`). Zip'le gelen uygulama İndirilenler'de kalıp
+# oradan açılıyordu; macOS öyle açılan uygulamayı salt okunur bir kopyadan
+# koşturuyor (App Translocation) ve Sparkle onu güncelleyemiyor. DMG,
+# içindeki zımbalı uygulamadan kuruluyor ve kendisi de ayrıca imzalanıp
+# notarize ediliyor, zımbalanıyor — indirilen DMG'yi açan Mac de soru
+# sormamalı.
+#
+# DMG'yi `dmgbuild` kuruyor (sürümü ve bağımlılıkları sabit, ilk koşuda
+# `$(DMGBUILD_DIR)`'e bir venv'e iniyor, depoya girmiyor): Finder'ın düzen
+# dosyasını (`.DS_Store`) kendisi yazıyor, yani AppleScript'le Finder'ı
+# sürmüyor — başsız ve izin sormadan koşuyor.
 ZIP = $(TARGET_DIR)/release/bateri-$(VERSION).zip
+DMG = $(TARGET_DIR)/release/bateri-$(VERSION).dmg
 NOTARY_PROFILE ?= bateri-notary
+DMGBUILD_VERSION = 1.6.7
+DMGBUILD_DIR = $(TARGET_DIR)/dmgbuild-$(DMGBUILD_VERSION)
 
-paket: kur
+dmgbuild:
+	@test -x $(DMGBUILD_DIR)/bin/dmgbuild && exit 0; \
+	rm -rf $(DMGBUILD_DIR) && python3 -m venv $(DMGBUILD_DIR) && \
+	$(DMGBUILD_DIR)/bin/pip install -q --disable-pip-version-check \
+		dmgbuild==$(DMGBUILD_VERSION) ds_store==1.3.3 mac_alias==2.2.3 || \
+		{ echo "dmgbuild: kurulamadı (python3 -m venv + pip, ağ ister)"; rm -rf $(DMGBUILD_DIR); exit 1; }
+
+# Notarize edip zımbalar: $(1) Apple'a giden dosya, $(2) zımbalanacak öğe.
+# Developer ID dışındaki kimlikte hiç çağrılmıyor.
+define notarize
+	out=$$(xcrun notarytool submit $(1) --keychain-profile '$(NOTARY_PROFILE)' --wait 2>&1) || true; \
+	echo "$$out" | tail -n 2; \
+	echo "$$out" | grep -q 'status: Accepted' || { \
+		id=$$(echo "$$out" | sed -n 's/^ *id: //p' | head -n 1); \
+		echo "paket: notarization kabul edilmedi$${id:+ — ayrıntı: xcrun notarytool log $$id --keychain-profile $(NOTARY_PROFILE)}"; exit 1; }; \
+	xcrun stapler staple -q $(2); \
+	xcrun stapler validate -q $(2)
+endef
+
+paket: kur dmgbuild
 	codesign --verify --deep --strict $(APP)
-	rm -f $(ZIP) $(ZIP).notary
+	rm -f $(ZIP) $(ZIP).notary $(DMG)
 	@if printf '%s' '$(SIGN_ID)' | grep -q '^Developer ID Application:'; then \
 		set -e; \
 		ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP).notary; \
-		echo "paket: notarization için Apple'a gönderiliyor (birkaç dakika sürebilir)"; \
-		out=$$(xcrun notarytool submit $(ZIP).notary --keychain-profile '$(NOTARY_PROFILE)' --wait 2>&1) || true; \
-		rm -f $(ZIP).notary; echo "$$out" | tail -n 4; \
-		echo "$$out" | grep -q 'status: Accepted' || { \
-			id=$$(echo "$$out" | sed -n 's/^ *id: //p' | head -n 1); \
-			echo "paket: notarization kabul edilmedi$${id:+ — ayrıntı: xcrun notarytool log $$id --keychain-profile $(NOTARY_PROFILE)}"; exit 1; }; \
-		xcrun stapler staple -q $(APP); \
-		xcrun stapler validate -q $(APP); \
+		echo "paket: uygulama notarization için Apple'a gönderiliyor (birkaç dakika sürebilir)"; \
+		$(call notarize,$(ZIP).notary,$(APP)); \
+		rm -f $(ZIP).notary; \
 		spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' || \
 			{ echo "paket: spctl paketi notarize görmüyor"; spctl -a -vv -t exec $(APP); exit 1; }; \
 	else \
 		echo "paket: notarize EDİLMEDİ — imza '$(SIGN_ID)', Developer ID değil"; \
 	fi
 	ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP)
-	@echo "paket: $(ZIP) ($$(lipo -archs $(APP)/Contents/MacOS/bateri), macOS $$(plutil -extract LSMinimumSystemVersion raw $(APP)/Contents/Info.plist)+)"
+	$(DMGBUILD_DIR)/bin/dmgbuild -s assets/dmg/settings.py -D app=$(APP) \
+		-D icon=$(APP)/Contents/Resources/$(ICON).icns -D here=$(CURDIR)/assets/dmg bateri $(DMG)
+	@if printf '%s' '$(SIGN_ID)' | grep -q '^Developer ID Application:'; then \
+		set -e; \
+		codesign --force --sign '$(SIGN_ID)' --timestamp $(DMG); \
+		echo "paket: DMG notarization için Apple'a gönderiliyor"; \
+		$(call notarize,$(DMG),$(DMG)); \
+		spctl -a -vv -t open --context context:primary-signature $(DMG) 2>&1 | grep -q 'source=Notarized Developer ID' || \
+			{ echo "paket: spctl DMG'yi notarize görmüyor"; spctl -a -vv -t open --context context:primary-signature $(DMG); exit 1; }; \
+	fi
+	@echo "paket: $(ZIP) + $(DMG) ($$(lipo -archs $(APP)/Contents/MacOS/bateri), macOS $$(plutil -extract LSMinimumSystemVersion raw $(APP)/Contents/Info.plist)+)"
 
-# Sürümü siteye koyar (`$(SITE)`, bateri-landing deposu): notarize zip
-# `public/releases/`'e, Sparkle'ın beslemesi `public/appcast.xml`'e,
-# indirme adresi ve sürüm `wrangler.jsonc`'ye. İndirme adresi **göreli**
-# (`/download`'ın 302'si): site hangi alan adında sunulursa orada çalışır;
-# beslemenin adresleri ise mutlak, çünkü kurulu kopya onları sitenin
-# dışından okuyor. Yayınlamaz: sitenin deposunda commit + push yeter,
-# Cloudflare `main`'e gelen push'u kendiliğinden deploy ediyor.
+# Sürümü siteye koyar (`$(SITE)`, bateri-landing deposu): notarize zip ve
+# sürüm notu `public/releases/`'e, Sparkle'ın beslemesi
+# `public/appcast.xml`'e, notarize DMG `public/downloads/`'a, indirme
+# adresi ve sürüm `wrangler.jsonc`'ye, sayfadaki sürüm yazısı
+# (`data-version`'lı öğeler) `index.html`'e. Yayınlamaz: sitenin deposunda
+# commit + push yeter, Cloudflare `main`'e gelen push'u kendiliğinden
+# deploy ediyor.
 #
-# Besleme `generate_appcast`'ten: klasördeki bütün zip'leri okuyup her
-# sürümü gizli EdDSA anahtarıyla imzalıyor (anahtar anahtarlıkta,
-# `generate_keys`; kaybolursa kurulu kopyalara bir daha güncelleme
-# gönderilemez — yedeği `generate_keys -x`). Eski zip'ler klasörde kalıyor,
-# yani besleme bütün sürümleri taşıyor. Delta güncelleme yok
-# (`--maximum-deltas 0`): paket küçük ve deltalar klasörü şişirirdi.
-# Notarize edilmemiş paket yayına girmiyor: Sparkle'ın indirdiği kopya da
-# Gatekeeper'dan geçmek zorunda.
+# **Önce kapılar, sonra paket** (`yayin-kapisi`; paket dakikalar sürüyor ve
+# kapı ucuz): bir sürüm yalnız bilinen bir koddan çıkar — ağaç temiz, dal
+# `main`, HEAD `v$(VERSION)` etiketli — ve sürüm notuyla çıkar
+# (`assets/release-notes/$(VERSION).md`, İngilizce; Sparkle "yeni sürüm
+# var" penceresinde onu gösteriyor, notsuz pencere kullanıcıyı neyi
+# kurduğunu bilmeden "Install"a itiyordu). Deneme koşusu (`DENEME=1`, ör.
+# güncelleme döngüsünü sınamak için başka bir `SITE` ve `FEED_URL`'le)
+# yalnız dal/etiket/temizlik kapısını atlar; notarization ve not kapısı
+# her koşuda.
+#
+# Besleme `generate_appcast`'ten: klasördeki zip'leri okuyup her sürümü
+# gizli EdDSA anahtarıyla imzalıyor (anahtar anahtarlıkta, `generate_keys`;
+# kaybolursa kurulu kopyalara bir daha güncelleme gönderilemez — yedeği
+# `generate_keys -x`). Beslemede son üç sürüm kalıyor (aracın varsayılanı);
+# araç eskileri `releases/old_updates/`'e taşıyor ve orası siliniyor —
+# güncelleme her zaman en yeniye gidiyor, eski zip'e kimse bakmıyor. Delta
+# güncelleme yok (`--maximum-deltas 0`): paket küçük. Notarize edilmemiş
+# paket yayına girmiyor: Sparkle'ın indirdiği kopya da Gatekeeper'dan
+# geçmek zorunda.
+#
+# İndirme adresi **göreli** (`/download`'ın 302'si): site hangi alan
+# adında sunulursa orada çalışır; beslemenin adresleri ise mutlak, çünkü
+# kurulu kopya onları sitenin dışından okuyor. DMG ayrı klasörde:
+# `generate_appcast` releases/'teki her arşivi bir güncelleme sayar ve aynı
+# sürümün zip'i ile DMG'si çakışırdı; indirme yalnız en yeniyi istiyor,
+# eskiler siliniyor.
+#
+# Hatalı bir sürümün geri alınışı **yeni bir sürüm**: Sparkle eski sürüme
+# inmiyor ve beslemeden bir öğeyi silmek kurulu kopyaları o sürümde bırakır.
 SITE ?= ../bateri-landing
 RELEASES_URL = $(patsubst %/appcast.xml,%/releases/,$(FEED_URL))
+NOTES = assets/release-notes/$(VERSION).md
 
-yayin: paket
+yayin-kapisi:
 	@test -d $(SITE)/public && test -f $(SITE)/wrangler.jsonc || { echo "yayin: $(SITE) bateri-landing deposu değil (SITE=… ile ver)"; exit 1; }
+	@test -s $(NOTES) || { echo "yayin: sürüm notu yok — $(NOTES) (İngilizce, Sparkle'ın penceresinde görünüyor)"; exit 1; }
+	@test '$(DENEME)' = 1 && { echo "yayin: DENEME=1 — dal, etiket ve temizlik kapısı atlandı"; exit 0; }; \
+	test -z "$$(git status --porcelain)" || { echo "yayin: çalışma ağacı temiz değil, sürüm bilinen bir koddan çıkmalı"; exit 1; }; \
+	test "$$(git branch --show-current)" = main || { echo "yayin: dal main değil ($$(git branch --show-current))"; exit 1; }; \
+	git tag --points-at HEAD | grep -qx 'v$(VERSION)' || { echo "yayin: HEAD v$(VERSION) etiketli değil (git tag v$(VERSION))"; exit 1; }
+
+yayin: yayin-kapisi paket
 	@spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' && xcrun stapler validate -q $(APP) || \
 		{ echo "yayin: paket notarize değil, yayına girmez"; exit 1; }
-	mkdir -p $(SITE)/public/releases
+	@spctl -a -vv -t open --context context:primary-signature $(DMG) 2>&1 | grep -q 'source=Notarized Developer ID' || \
+		{ echo "yayin: DMG notarize değil, yayına girmez"; exit 1; }
+	mkdir -p $(SITE)/public/releases $(SITE)/public/downloads
 	cp $(ZIP) $(SITE)/public/releases/
-	$(SPARKLE_DIR)/bin/generate_appcast --maximum-deltas 0 \
+	cp $(NOTES) $(SITE)/public/releases/bateri-$(VERSION).md
+	$(SPARKLE_DIR)/bin/generate_appcast --maximum-deltas 0 --embed-release-notes \
 		--download-url-prefix '$(RELEASES_URL)' -o $(SITE)/public/appcast.xml $(SITE)/public/releases
-	sed -i '' -e 's|"DOWNLOAD_URL": "[^"]*"|"DOWNLOAD_URL": "/releases/bateri-$(VERSION).zip"|' \
+	rm -rf $(SITE)/public/releases/old_updates
+	rm -f $(SITE)/public/downloads/bateri-*.dmg
+	cp $(DMG) $(SITE)/public/downloads/
+	sed -i '' -e 's|"DOWNLOAD_URL": "[^"]*"|"DOWNLOAD_URL": "/downloads/bateri-$(VERSION).dmg"|' \
 		-e 's|"VERSION": "[^"]*"|"VERSION": "$(VERSION)"|' $(SITE)/wrangler.jsonc
-	@echo "yayin: $(VERSION) → $(SITE) (releases/, appcast.xml, wrangler.jsonc); sitenin deposunda commit + push (Cloudflare kendiliğinden deploy eder)"
+	sed -i '' -E 's|(<[^>]* data-version>)v[^<]*|\1v$(VERSION)|g' $(SITE)/public/index.html
+	@echo "yayin: $(VERSION) → $(SITE) (releases/ zip + not + appcast.xml, downloads/ DMG, wrangler.jsonc, index.html); sitenin deposunda commit + push (Cloudflare kendiliğinden deploy eder)"
 
 # Bu Mac'e kurar: `kur`'un denetlenmiş paketini `$(INSTALL_DIR)`'a koyar.
 # Eski paketin üstüne `ditto` ile yazılmıyor, çünkü `ditto` birleştirir ve
