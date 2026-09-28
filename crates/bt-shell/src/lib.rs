@@ -53,6 +53,7 @@ mod settings;
 mod settings_window;
 mod split;
 mod split_view;
+mod updater;
 mod upload;
 mod uploader;
 mod view;

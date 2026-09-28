@@ -1,4 +1,4 @@
-//! Ana menü: uygulama menüsü (About, Settings…, Hide, Quit), Shell (New
+//! Ana menü: uygulama menüsü (About, Check for Updates…, Settings…, Hide, Quit), Shell (New
 //! Window, New Tab, New Local Tab, Mark Host as ▸, Cancel Upload, Split
 //! Right, Split Down, Close Tab/Close, Close Window), Edit (Cut, Copy, Paste, Paste
 //! Escaped Text, Select All, Clear to Start, Clear Scrollback, Find ▸
@@ -11,7 +11,7 @@
 //! (`settings_window`; 029'a kadar dosyayı editörde açıyordu, o iş artık
 //! pencerenin "Open settings.toml" düğmesinde); öğe ve kısayol aynı.
 //!
-//! **Hiçbir öğenin hedefi yok.** Eylem responder zincirinden geçip onu
+//! **Bir istisna dışında hiçbir öğenin hedefi yok** (aşağıda). Eylem responder zincirinden geçip onu
 //! tanımlayan ilk nesneye varıyor: `cut:`/`copy:`/`paste:`/`pasteEscaped:`/
 //! `selectAll:` first responder `BateriView`'a (Cut'ın etkinliği onun
 //! `validateMenuItem:`'ında — yalnız dock seçimi varken ve düzenleme kapısı
@@ -34,6 +34,12 @@
 //! `orderFrontStandardAboutPanel:` `NSApp`'in kendisine. Menü bu
 //! yüzden kimseye referans tutmuyor; eylemi karşılayan yoksa AppKit öğeyi devre
 //! dışı gösteriyor.
+//!
+//! **Tek hedefli öğe "Check for Updates…"**: eylemi (`checkForUpdates:`)
+//! Sparkle'ın güncelleyicisinde ve o responder zincirinde değil
+//! ([`crate::updater`]); etkinliğini de kendi `validateMenuItem:`'ı veriyor
+//! (kontrol sürerken gri). Güncelleyici yoksa (paketsiz koşu, süreli koşu)
+//! öğe hiç eklenmiyor — gri bir öğe hiç çalışmayacak bir şeyi vaat ederdi.
 //!
 //! İki istisna delegate'ler. Theme ▸'ninki app delegate: alt menü sabit
 //! değil, açılırken `themes/`'ten doluyor ([`fill_themes`]). Shell'inki
@@ -77,7 +83,7 @@
 
 use bt_core::{HostMark, SYSTEM_THEME, bare_host};
 use objc2::rc::Retained;
-use objc2::runtime::{ProtocolObject, Sel};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
@@ -184,31 +190,47 @@ impl ShellMenuDelegate {
 /// dolumunda veriyor (`app::Inputs`).
 ///
 /// `themes`: Theme ▸'nin delegate'i — `menuNeedsUpdate:` ile doldurur.
+/// `updater`: Sparkle'ın güncelleyicisi; varsa "Check for Updates…"ın hedefi
+/// (öğe zayıf tutuyor, yaşatan çağıran).
 /// Dönen Shell menüsünün delegate'i; delegate zayıf referans, çağıran onu
 /// süreç boyunca tutuyor.
 pub(crate) fn install(
     mtm: MainThreadMarker,
     themes: &ProtocolObject<dyn NSMenuDelegate>,
+    updater: Option<&AnyObject>,
 ) -> Retained<ShellMenuDelegate> {
     let command = NSEventModifierFlags::Command;
-    let app_menu = submenu(
+    let mut app_items = vec![item(
         mtm,
-        "bateri",
-        &[
-            item(mtm, "About bateri", sel!(orderFrontStandardAboutPanel:), ""),
-            NSMenuItem::separatorItem(mtm),
-            item(mtm, "Settings…", sel!(openSettings:), ","),
-            NSMenuItem::separatorItem(mtm),
-            item(mtm, "Hide bateri", sel!(hide:), "h"),
-            with_modifiers(
-                item(mtm, "Hide Others", sel!(hideOtherApplications:), "h"),
-                command | NSEventModifierFlags::Option,
-            ),
-            item(mtm, "Show All", sel!(unhideAllApplications:), ""),
-            NSMenuItem::separatorItem(mtm),
-            item(mtm, "Quit bateri", sel!(terminate:), "q"),
-        ],
-    );
+        "About bateri",
+        sel!(orderFrontStandardAboutPanel:),
+        "",
+    )];
+    // macOS'un yeri: About'un hemen altı (Sparkle'ın belgesi de orayı
+    // gösteriyor).
+    if let Some(updater) = updater {
+        let check = item(mtm, "Check for Updates…", sel!(checkForUpdates:), "");
+        // SAFETY: hedef `SPUStandardUpdaterController`; `checkForUpdates:`
+        // onun belgelenmiş, tek `id` argümanlı, dönüşsüz eylemi. Öğe hedefi
+        // zayıf tutuyor ve güncelleyiciyi süreç boyunca app delegate
+        // yaşatıyor.
+        unsafe { check.setTarget(Some(updater)) };
+        app_items.push(check);
+    }
+    app_items.extend([
+        NSMenuItem::separatorItem(mtm),
+        item(mtm, "Settings…", sel!(openSettings:), ","),
+        NSMenuItem::separatorItem(mtm),
+        item(mtm, "Hide bateri", sel!(hide:), "h"),
+        with_modifiers(
+            item(mtm, "Hide Others", sel!(hideOtherApplications:), "h"),
+            command | NSEventModifierFlags::Option,
+        ),
+        item(mtm, "Show All", sel!(unhideAllApplications:), ""),
+        NSMenuItem::separatorItem(mtm),
+        item(mtm, "Quit bateri", sel!(terminate:), "q"),
+    ]);
+    let app_menu = submenu(mtm, "bateri", &app_items);
     // Edit ▸ Find (033 Karar 10): macOS'un alt menüsü ve kısayolları.
     // Seçiciler **kendi adlarımız** — `performFindPanelAction:` alan
     // odaktayken AppKit'in alan düzenleyicisine yutulurdu; karşılayan

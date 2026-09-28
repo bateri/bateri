@@ -208,3 +208,353 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+
+================================================================================
+The following Rust crates are used under the MIT License (each offers
+MIT, alone or as one of its license options). The license text follows
+the list.
+================================================================================
+
+aho-corasick 1.1.5
+  Copyright (c) 2015 Andrew Gallant
+  https://github.com/BurntSushi/aho-corasick
+
+arrayvec 0.7.8
+  Copyright (c) Ulrik Sverdrup "bluss" 2015-2023
+  https://github.com/bluss/arrayvec
+
+base64 0.22.1
+  Copyright (c) 2015 Alice Maz
+  https://github.com/marshallpierce/rust-base64
+
+bitflags 2.13.2
+  Copyright (c) 2014 The Rust Project Developers
+  https://github.com/bitflags/bitflags
+
+block2 0.6.2
+  Copyright (c) Mads Marquart
+  https://github.com/madsmtm/objc2
+
+cfg-if 1.0.4
+  Copyright (c) 2014 Alex Crichton
+  https://github.com/rust-lang/cfg-if
+
+cursor-icon 1.2.0
+  Copyright (c) 2023 Kirill Chibisov
+  https://github.com/rust-windowing/cursor-icon
+
+dispatch2 0.3.1
+  Copyright (c) Mads Marquart, Mary
+  https://github.com/madsmtm/objc2
+
+equivalent 1.0.2
+  Copyright (c) the equivalent developers
+  https://github.com/indexmap-rs/equivalent
+
+errno 0.3.14
+  Copyright (c) 2014 Chris Wong
+  https://github.com/lambda-fairy/rust-errno
+
+hashbrown 0.17.1
+  Copyright (c) 2016 Amanieu d'Antras
+  https://github.com/rust-lang/hashbrown
+
+home 0.5.12
+  Copyright (c) Brian Anderson
+  https://github.com/rust-lang/cargo
+
+indexmap 2.14.2
+  Copyright (c) the indexmap developers
+  https://github.com/indexmap-rs/indexmap
+
+libc 0.2.189
+  Copyright (c) The Rust Project Developers
+  https://github.com/rust-lang/libc
+
+lock_api 0.4.14
+  Copyright (c) 2016 The Rust Project Developers
+  https://github.com/Amanieu/parking_lot
+
+log 0.4.34
+  Copyright (c) 2014 The Rust Project Developers
+  https://github.com/rust-lang/log
+
+memchr 2.8.3
+  Copyright (c) 2015 Andrew Gallant
+  https://github.com/BurntSushi/memchr
+
+objc2 0.6.4
+  Copyright (c) Mads Marquart
+  https://github.com/madsmtm/objc2
+
+objc2-app-kit 0.3.2
+  Copyright (c) the objc2-app-kit developers
+  https://github.com/madsmtm/objc2
+
+objc2-core-foundation 0.3.2
+  Copyright (c) the objc2-core-foundation developers
+  https://github.com/madsmtm/objc2
+
+objc2-core-graphics 0.3.2
+  Copyright (c) the objc2-core-graphics developers
+  https://github.com/madsmtm/objc2
+
+objc2-core-text 0.3.2
+  Copyright (c) the objc2-core-text developers
+  https://github.com/madsmtm/objc2
+
+objc2-encode 4.1.0
+  Copyright (c) Mads Marquart
+  https://github.com/madsmtm/objc2
+
+objc2-foundation 0.3.2
+  Copyright (c) the objc2-foundation developers
+  https://github.com/madsmtm/objc2
+
+objc2-metal 0.3.2
+  Copyright (c) the objc2-metal developers
+  https://github.com/madsmtm/objc2
+
+objc2-quartz-core 0.3.2
+  Copyright (c) the objc2-quartz-core developers
+  https://github.com/madsmtm/objc2
+
+objc2-user-notifications 0.3.2
+  Copyright (c) the objc2-user-notifications developers
+  https://github.com/madsmtm/objc2
+
+parking_lot 0.12.5
+  Copyright (c) 2016 The Rust Project Developers
+  https://github.com/Amanieu/parking_lot
+
+parking_lot_core 0.9.12
+  Copyright (c) 2016 The Rust Project Developers
+  https://github.com/Amanieu/parking_lot
+
+polling 3.11.0
+  Copyright (c) Stjepan Glavina, John Nunley
+  https://github.com/smol-rs/polling
+
+regex-automata 0.4.18
+  Copyright (c) 2014 The Rust Project Developers
+  https://github.com/rust-lang/regex
+
+regex-syntax 0.8.11
+  Copyright (c) 2014 The Rust Project Developers
+  https://github.com/rust-lang/regex
+
+rustix 1.1.4
+  Copyright (c) Dan Gohman, Jakub Konka
+  https://github.com/bytecodealliance/rustix
+
+rustix-openpty 0.2.0
+  Copyright (c) Dan Gohman
+  https://github.com/sunfishcode/rustix-openpty
+
+scopeguard 1.2.0
+  Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
+  https://github.com/bluss/scopeguard
+
+signal-hook 0.4.4
+  Copyright (c) 2017 tokio-jsonrpc developers
+  https://github.com/vorner/signal-hook
+
+signal-hook-registry 1.4.8
+  Copyright (c) 2017 tokio-jsonrpc developers
+  https://github.com/vorner/signal-hook
+
+smallvec 1.16.0
+  Copyright (c) 2018 The Servo Project Developers
+  https://github.com/servo/rust-smallvec
+
+toml_datetime 1.1.1+spec-1.1.0
+  Copyright (c) Individual contributors
+  https://github.com/toml-rs/toml
+
+toml_edit 0.25.15+spec-1.1.0
+  Copyright (c) Individual contributors
+  https://github.com/toml-rs/toml
+
+toml_parser 1.1.3+spec-1.1.0
+  Copyright (c) Individual contributors
+  https://github.com/toml-rs/toml
+
+toml_writer 1.1.2+spec-1.1.0
+  Copyright (c) Individual contributors
+  https://github.com/toml-rs/toml
+
+unicode-width 0.2.2
+  Copyright (c) 2015 The Rust Project Developers
+  https://github.com/unicode-rs/unicode-width
+
+vte 0.15.0
+  Copyright (c) 2016 Joe Wilm
+  https://github.com/alacritty/vte
+
+winnow 1.0.4
+  Copyright (c) the winnow developers
+  https://github.com/winnow-rs/winnow
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+Sparkle
+https://sparkle-project.org
+Licensed under the MIT License, with the external notices it carries;
+full text below.
+================================================================================
+
+Copyright (c) 2006-2013 Andy Matuschak.
+Copyright (c) 2009-2013 Elgato Systems GmbH.
+Copyright (c) 2011-2014 Kornel Lesiński.
+Copyright (c) 2015-2017 Mayur Pawashe.
+Copyright (c) 2014 C.W. Betts.
+Copyright (c) 2014 Petroules Corporation.
+Copyright (c) 2014 Big Nerd Ranch.
+All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+=================
+EXTERNAL LICENSES
+=================
+
+bspatch.c and bsdiff.c, from bsdiff 4.3 <http://www.daemonology.net/bsdiff/>:
+
+Copyright 2003-2005 Colin Percival
+All rights reserved
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted providing that the following conditions 
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+--
+
+sais.c and sais.h, from sais-lite (2010/08/07) <https://sites.google.com/site/yuta256/sais>:
+
+The sais-lite copyright is as follows:
+
+Copyright (c) 2008-2010 Yuta Mori All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+--
+
+Portable C implementation of Ed25519, from https://github.com/orlp/ed25519
+
+Copyright (c) 2015 Orson Peters <orsonpeters@gmail.com>
+
+This software is provided 'as-is', without any express or implied warranty. In no event will the
+authors be held liable for any damages arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose, including commercial
+applications, and to alter it and redistribute it freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim that you wrote the
+   original software. If you use this software in a product, an acknowledgment in the product
+   documentation would be appreciated but is not required.
+
+2. Altered source versions must be plainly marked as such, and must not be misrepresented as
+   being the original software.
+
+3. This notice may not be removed or altered from any source distribution.
+
+--
+
+SUSignatureVerifier.m:
+
+Copyright (c) 2011 Mark Hamlin.
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted providing that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

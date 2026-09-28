@@ -744,6 +744,10 @@ pub(crate) struct Ivars {
     /// Shell menüsünün delegate'i ([`crate::menu::install`]): menü onu zayıf
     /// tutuyor, yaşatan burası.
     shell_menu: OnceCell<Retained<ShellMenuDelegate>>,
+    /// Sparkle'ın güncelleyicisi ([`crate::updater`]): "Check for
+    /// Updates…" onu zayıf tutuyor, yaşatan burası. Paketsiz ve süreli
+    /// koşuda boş.
+    updater: OnceCell<Retained<AnyObject>>,
 }
 
 define_class!(
@@ -764,7 +768,18 @@ define_class!(
             // Native sekmeler açık (026 → Karar 1): `setAllowsAutomaticWindowTabbing`
             // varsayılanında, pencereler ortak `tabbingIdentifier` taşıyor
             // (`TerminalWindow::new`).
-            let shell_menu = crate::menu::install(mtm, ProtocolObject::from_ref(self));
+            // Güncelleyici menüden **önce**: öğesinin hedefi o. Süreli koşu
+            // ağa çıkmıyor ve bir güncelleme sorusu pencereyi örtmemeli.
+            if self.ivars().run.is_none()
+                && let Some(updater) = crate::updater::start()
+            {
+                let _ = self.ivars().updater.set(updater);
+            }
+            let shell_menu = crate::menu::install(
+                mtm,
+                ProtocolObject::from_ref(self),
+                self.ivars().updater.get().map(|u| &**u),
+            );
             let _ = self.ivars().shell_menu.set(shell_menu);
             // Ayarlar ilk pencereden **önce** okunuyor: `scrollback` ve tema
             // `SessionOptions`'a giriyor, font ayarı da hücre ölçüsünü, yani
@@ -1638,6 +1653,7 @@ impl AppDelegate {
             settings_window: RefCell::new(None),
             settings_state: RefCell::new(settings::FileState::Missing),
             shell_menu: OnceCell::new(),
+            updater: OnceCell::new(),
         });
         // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
         unsafe { msg_send![super(this), init] }

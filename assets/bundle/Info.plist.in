@@ -11,7 +11,7 @@
 	<key>CFBundleIconFile</key>
 	<string>bateri</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.bateri.bateri</string>
+	<string>dev.bateri.bateri</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -28,7 +28,7 @@
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 			<key>CFBundleURLName</key>
-			<string>io.github.bateri.bateri</string>
+			<string>dev.bateri.bateri</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>bateri</string>
@@ -60,6 +60,12 @@
 	<key>NSSystemAdministrationUsageDescription</key>
 	<string>A program running in bateri requires administrator privileges.</string>
 	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>@FEED_URL@</string>
+	<key>SUPublicEDKey</key>
+	<string>WC9PPr7SL5v2LvmQShrOYVEawDoB5wWngrinpVZE6Tw=</string>
+	<key>SUEnableAutomaticChecks</key>
 	<true/>
 </dict>
 </plist>

@@ -105,6 +105,29 @@ fn info_plist_template_derives_version_and_minimum_os() {
     assert_eq!(plist_value("CFBundleVersion").as_deref(), Some("@VERSION@"));
 }
 
+/// Sparkle'ın üç anahtarı. Besleme bir yer tutucu, çünkü `make kur` onu
+/// `FEED_URL`'den dolduruyor (denemede başka bir adrese ezilebilsin); açık
+/// anahtar ise sabit — değişirse kurulu kopyalar yeni sürümlerin imzasını
+/// reddeder, yani onu değiştiren bir diff bu sınamayı da değiştirmek
+/// zorunda kalsın. Paket kimliği de Sparkle'ın ölçüsü: güncelleme ancak aynı
+/// `CFBundleIdentifier`'a kuruluyor.
+#[test]
+fn info_plist_template_carries_the_updater_keys() {
+    assert_eq!(plist_value("SUFeedURL").as_deref(), Some("@FEED_URL@"));
+    assert_eq!(
+        plist_value("SUPublicEDKey").as_deref(),
+        Some("WC9PPr7SL5v2LvmQShrOYVEawDoB5wWngrinpVZE6Tw=")
+    );
+    assert_eq!(
+        plist_value("SUEnableAutomaticChecks").as_deref(),
+        Some("true")
+    );
+    assert_eq!(
+        plist_value("CFBundleIdentifier").as_deref(),
+        Some("dev.bateri.bateri")
+    );
+}
+
 /// zsh sarmalayıcısının envanteri **tam olarak** bu beş dosya.
 ///
 /// "Eksiği yok" yarısını `bt-shell` de soruyor (`child::zsh_wrapper_dir`'in
@@ -144,12 +167,19 @@ fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     );
 }
 
-/// Apache-2.0 §4(a): alıcıya lisansın bir kopyası verilir. Atıf metni
+/// Apache-2.0 §4(a) ve MIT: alıcıya lisansın bir kopyası verilir (dosya
+/// `tools/third_party_notices.py`'nin çıktısı). Atıf metni
 /// (`Credits.html`) AppKit'in standart About panelinin okuduğu dosya.
 #[test]
 fn third_party_license_ships_with_attribution() {
     let licenses = read_asset("THIRD-PARTY-LICENSES.txt");
-    for needle in ["alacritty_terminal", "Apache License", "Version 2.0"] {
+    for needle in [
+        "alacritty_terminal",
+        "Apache License",
+        "Version 2.0",
+        "MIT License",
+        "Sparkle",
+    ] {
         assert!(
             licenses.contains(needle),
             "THIRD-PARTY-LICENSES.txt içinde {needle:?} yok"
@@ -159,6 +189,8 @@ fn third_party_license_ships_with_attribution() {
     for needle in [
         "alacritty_terminal",
         "Apache License",
+        "Sparkle",
+        "MIT License",
         "THIRD-PARTY-LICENSES.txt",
     ] {
         assert!(
