@@ -91,8 +91,9 @@ Sıra kullanıcıya etkisine göre kabaca verildi.
 13. **SGR-pixel fare raporu (1016)** (0.1.9). Bizde 1006, 1005 ve X10 var;
     1016 kodda adıyla kapsam dışı.
 14. **Dağıtım.** Sparkle ile otomatik güncelleme, universal binary (Intel +
-    Apple silicon), Homebrew cask, notarization. Bizde `make paket`'in zip'i
-    var; Developer ID, notarization ve Sparkle yok.
+    Apple silicon), Homebrew cask, notarization. Bizde Developer ID imzası,
+    notarization (`make paket`) ve Sparkle (`make yayin`, `bateri.dev`) var;
+    paket yalnız Apple silicon ve Homebrew cask yok.
 15. **Satır içi alt komut önerisi** (0.1.7). git, paket, container, bulut ve
     derleme araçlarının alt komutları geçmişte olmasa da öneriliyor. Bizde
     öneri yalnız kullanıcının zsh eklentisinin `POSTDISPLAY`'inden geliyor.

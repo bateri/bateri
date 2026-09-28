@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite sırası yalnız seri make'te garantidir; -j altında "en ucuz kapı
 # önce" ve "sürüm başta" sözü bozulur.
 .NOTPARALLEL:
-.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris tarama kur paket yukle linux
+.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris tarama kur paket yukle yayin sparkle linux
 
 # Definition of done. Homebrew rustc pin'li değil (rust-toolchain.toml bilinçli
 # olarak yok): bir `brew upgrade` sonrası gelen clippy kırmızısını kod
@@ -134,8 +134,9 @@ tarama:
 	$(CARGO) test -p bt-atlas --release -- --ignored census --nocapture
 
 # Release derler ve `bateri.app`'i target/ altında kurar (/Applications'a
-# DEĞİL). Developer ID imzası, notarization ve Sparkle yok (006 Karar 6).
-# Paket yine de denetimden önce **ad-hoc** imzalanıyor (`codesign -s -`):
+# DEĞİL). İçinde Sparkle (`Contents/Frameworks/`, aşağıda) ve imza var;
+# notarization `paket`'in işi, çünkü Apple'a gidiyor ve dakikalar sürüyor.
+# İmzasız paket de denetimden önce en az **ad-hoc** imzalanıyor (`codesign -s -`):
 # linker'ın binary'ye koyduğu imza paketin kaynaklarını mühürlemiyor ve
 # başka bir Mac'e zip'le giden kopyayı Gatekeeper "hasarlı" deyip çöpe
 # atıyordu (kullanıcının arkadaşında görüldü). Geçerli ad-hoc imzayla aynı
@@ -156,6 +157,16 @@ tarama:
 # sabit tutuyor. Başka bir Mac'te Gatekeeper açısından hiçbir şey değişmiyor
 # — sertifikaya kimse güvenmiyor, uyarı aynı; onu yalnız Developer ID ile
 # notarization kaldırır. Kimlik yoksa `codesign`'dan önce adıyla düşer.
+#
+# Kimlik ad-hoc değilse imza **hardened runtime**'la (`-o runtime`) atılıyor:
+# notarization onu istiyor ve kütüphane doğrulaması paketteki Sparkle'ı
+# yalnız aynı takımın imzasıyla yüklüyor. Developer ID'de ayrıca **güvenli
+# zaman damgası** (`--timestamp`, Apple'ın sunucusu — `kur` o kimlikle ağ
+# ister); notarization damgasız imzayı reddediyor. Apple Development ve
+# ad-hoc damgasız kalıyor: notarize edilmeyecekler ve `make yukle` çevrimdışı
+# da çalışmalı.
+SIGN_OPTS = $(if $(filter -,$(SIGN_ID)),--timestamp=none,--options runtime $(if $(findstring Developer ID Application:,$(SIGN_ID)),--timestamp,--timestamp=none))
+SIGN = codesign --force --sign '$(SIGN_ID)' $(SIGN_OPTS)
 SIGN_ID ?= $(eval SIGN_ID := $$(shell ids=$$$$(security find-identity -v -p codesigning 2>/dev/null); \
 	for kind in "Developer ID Application" "Apple Development"; do \
 		n=$$$$(printf '%s\n' "$$$$ids" | sed -n "s/.*\"\($$$$kind: [^\"]*\)\".*/\1/p" | head -n 1); \
@@ -195,11 +206,38 @@ ICONSET = $(TARGET_DIR)/release/bateri.iconset
 # `cargo pkgid` sürümü `…#0.1.0` ya da `…#bateri@0.1.0` biçiminde verir;
 # sed son ayırıcıya kadar siler. Ayırıcıyı adıyla yazamıyoruz: make o
 # karakteri satırın içinde de yorum başı sayıyor.
+# Güncelleme: Sparkle 2 (`bt-shell::updater` onu çalışma zamanında yüklüyor).
+# Framework depoya girmiyor; sürüm ve sha256 burada sabit, tarball ilk
+# `kur`'da `$(SPARKLE_DIR)`'e iniyor ve özeti tutmayan indirme düşüyor.
+# Yalnız `kur` yolunda: `make hepsi`, `duman` ve `cargo run` Sparkle'sız.
+# Pakete `ditto --arch arm64` ile giriyor (tarball universal, paket yalnız
+# Apple silicon) ve XPC servisleri atılıyor — Sparkle'ın belgesi onları
+# yalnız sandbox'lı uygulamaya istiyor, bateri sandbox'lı değil (kabuk
+# doğuruyor). Kalan iki yardımcı (`Autoupdate`, `Updater.app`) ve framework
+# **içten dışa** bizim kimliğimizle yeniden imzalanıyor: dış paketin imzası
+# içtekileri imzalamaz ve Sparkle ad-hoc imzalı geliyor. `--deep` yok
+# (Sparkle'ın belgesi).
+SPARKLE_VERSION = 2.10.0
+SPARKLE_SHA256 = c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
+SPARKLE_DIR = $(TARGET_DIR)/sparkle-$(SPARKLE_VERSION)
+# Sparkle'ın okuduğu besleme; `Info.plist`'e `kur` anında yazılıyor.
+# Denemede ezilir: `make paket FEED_URL=https://…/appcast.xml`.
+FEED_URL ?= https://bateri.dev/appcast.xml
+
+sparkle:
+	@test -f $(SPARKLE_DIR)/.verified && exit 0; \
+	rm -rf $(SPARKLE_DIR) && mkdir -p $(SPARKLE_DIR) && \
+	curl -fsSL -o $(SPARKLE_DIR).tar.xz \
+		https://github.com/sparkle-project/Sparkle/releases/download/$(SPARKLE_VERSION)/Sparkle-$(SPARKLE_VERSION).tar.xz && \
+	echo '$(SPARKLE_SHA256)  $(SPARKLE_DIR).tar.xz' | shasum -a 256 -c - >/dev/null || \
+		{ echo "sparkle: Sparkle-$(SPARKLE_VERSION).tar.xz indirilemedi ya da özeti tutmuyor"; rm -f $(SPARKLE_DIR).tar.xz; exit 1; }; \
+	tar -xJf $(SPARKLE_DIR).tar.xz -C $(SPARKLE_DIR) && rm -f $(SPARKLE_DIR).tar.xz && touch $(SPARKLE_DIR)/.verified
+
 VERSION = $(eval VERSION := $$(shell $(CARGO) pkgid -p bateri | sed 's/.*[^0-9A-Za-z.+-]//'))$(VERSION)
 # İkonun adı tek yerde: şablonun `CFBundleIconFile`'ı.
 ICON = $(eval ICON := $$(shell plutil -extract CFBundleIconFile raw assets/bundle/Info.plist.in))$(ICON)
 
-kur:
+kur: sparkle
 	@case '$(APP)' in *[[:space:]]*) echo "kur: hedef dizininde boşluk var ($(APP)); tarif yolları bölerdi"; exit 1;; esac
 	@# CFBundleVersion en çok üç noktalı tamsayı ister; `0.2.0-alpha.1` plutil'den geçer ama LaunchServices'ten geçmez.
 	@echo '$(VERSION)' | grep -Eq '^[0-9]+(\.[0-9]+){0,2}$$' || { echo "kur: sürüm '$(VERSION)' CFBundleVersion biçiminde değil"; exit 1; }
@@ -208,7 +246,7 @@ kur:
 	mkdir -p $(STAGE)/Contents/MacOS $(STAGE)/Contents/Resources $(ICONSET)
 	cp $(TARGET_DIR)/release/bateri $(STAGE)/Contents/MacOS/
 	minos=$$(vtool -show-build $(STAGE)/Contents/MacOS/bateri | awk '$$1=="minos"{print $$2; exit}'); \
-	sed -e 's/@VERSION@/$(VERSION)/g' -e "s/@MACOS_MIN@/$$minos/g" \
+	sed -e 's/@VERSION@/$(VERSION)/g' -e "s/@MACOS_MIN@/$$minos/g" -e 's|@FEED_URL@|$(FEED_URL)|g' \
 		assets/bundle/Info.plist.in > $(STAGE)/Contents/Info.plist
 	@# iconutil standart on boyutu ister; `sips -s format icns` 1024'ü reddediyor.
 	@for s in 16 32 128 256 512; do \
@@ -227,10 +265,18 @@ kur:
 	cp assets/shell/zsh/.zshenv assets/shell/zsh/.zprofile assets/shell/zsh/.zshrc \
 		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh \
 		$(STAGE)/Contents/Resources/shell/zsh/
-	@# İmza en son: paketin içine sonradan giren her bayt mührü bozardı.
+	mkdir -p $(STAGE)/Contents/Frameworks
+	ditto --arch arm64 $(SPARKLE_DIR)/Sparkle.framework $(STAGE)/Contents/Frameworks/Sparkle.framework
+	rm -rf $(STAGE)/Contents/Frameworks/Sparkle.framework/XPCServices \
+		$(STAGE)/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices
+	@# İmza en son ve içten dışa: paketin içine sonradan giren her bayt
+	@# mührü bozardı, dıştaki imza da içtekileri mühürlüyor.
 	@test '$(SIGN_ID)' = - || security find-identity -p codesigning | grep -qF '"$(SIGN_ID)"' || \
 		{ echo "kur: anahtarlıkta '$(SIGN_ID)' adlı kod imzalama kimliği yok (security find-identity -p codesigning)"; exit 1; }
-	codesign --force --sign '$(SIGN_ID)' --timestamp=none $(STAGE)
+	$(SIGN) $(STAGE)/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate
+	$(SIGN) $(STAGE)/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app
+	$(SIGN) $(STAGE)/Contents/Frameworks/Sparkle.framework
+	$(SIGN) $(STAGE)
 	codesign --verify --deep --strict $(STAGE)
 	@c=$(STAGE)/Contents; fail() { echo "kur: içerik denetimi düştü — $$1"; exit 1; }; \
 	key() { plutil -extract "$$1" raw $$c/Info.plist 2>/dev/null; }; \
@@ -241,6 +287,17 @@ kur:
 	test -n "$$minos" && test "$$(key LSMinimumSystemVersion)" = "$$minos" || fail "LSMinimumSystemVersion binary'nin minos'u ('$$minos') değil"; \
 	test -s "$$c/Resources/$$(key CFBundleIconFile).icns" || fail "ikon pakette yok"; \
 	test "$$(key CFBundleURLTypes.0.CFBundleURLSchemes.0)" = bateri || fail "URL şeması (bateri) Info.plist'te yok"; \
+	test "$$(key SUFeedURL)" = '$(FEED_URL)' || fail "SUFeedURL '$(FEED_URL)' değil"; \
+	test -n "$$(key SUPublicEDKey)" || fail "SUPublicEDKey Info.plist'te yok"; \
+	fw=$$c/Frameworks/Sparkle.framework; \
+	test -f $$fw/Versions/B/Sparkle && test -x $$fw/Versions/B/Autoupdate || fail "Sparkle.framework pakette yok"; \
+	test ! -e $$fw/Versions/B/XPCServices || fail "Sparkle'ın XPC servisleri pakette kalmış"; \
+	test "$$(lipo -archs $$fw/Versions/B/Sparkle)" = arm64 || fail "Sparkle arm64'e inceltilmemiş"; \
+	team() { codesign -dv "$$1" 2>&1 | sed -n 's/^TeamIdentifier=//p'; }; \
+	for x in $$fw $$fw/Versions/B/Autoupdate $$fw/Versions/B/Updater.app; do \
+		test "$$(team $$x)" = "$$(team $(STAGE))" || fail "$$x paketle aynı kimlikle imzalı değil"; \
+	done; \
+	test '$(SIGN_ID)' = - || codesign -dv $(STAGE) 2>&1 | grep -q 'flags=.*runtime' || fail "hardened runtime yok"; \
 	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f pakette yok ya da girdiden farklı"; \
 	done; \
@@ -261,16 +318,69 @@ henuz_yok = @echo "henüz yok: $(1)"; exit 1
 # Başka bir Mac'e gönderilecek zip: `kur`'un denetlenmiş paketini
 # `ditto` ile sıkıştırır (Finder'ın "Sıkıştır"ıyla aynı biçim; `zip -r`
 # macOS'un genişletilmiş özniteliklerini ve imza mührünü bozabiliyor).
-# Adında sürüm var, eski bir zip yanlışlıkla gönderilmesin. Alıcı ilk
-# açılışta Gatekeeper uyarısını Sistem Ayarları → Gizlilik ve Güvenlik →
-# "Yine de Aç" ile geçer — Developer ID ve notarization yok (006 Karar 6).
+# Adında sürüm var, eski bir zip yanlışlıkla gönderilmesin.
+#
+# **Developer ID'yle notarize ediliyor**: paket zip'lenip Apple'a gidiyor
+# (`notarytool submit --wait`, anahtarlıktaki `$(NOTARY_PROFILE)` profili —
+# kurulumu `xcrun notarytool store-credentials`, parola depoya girmiyor),
+# kabul edilirse bilet pakete **zımbalanıyor** (`stapler`) ve zip ondan
+# SONRA yeniden alınıyor: bilet paketin içinde, zımbasız zip'i çevrimdışı
+# açan Mac Apple'a soramaz ve uyarıya düşerdi. Kapı `spctl`'ın
+# "Notarized Developer ID" demesi. Başka kimlikte notarization yok ve alıcı
+# ilk açılışta Gatekeeper uyarısını Sistem Ayarları → Gizlilik ve Güvenlik →
+# "Yine de Aç" ile geçer.
 ZIP = $(TARGET_DIR)/release/bateri-$(VERSION).zip
+NOTARY_PROFILE ?= bateri-notary
 
 paket: kur
 	codesign --verify --deep --strict $(APP)
-	rm -f $(ZIP)
+	rm -f $(ZIP) $(ZIP).notary
+	@if printf '%s' '$(SIGN_ID)' | grep -q '^Developer ID Application:'; then \
+		set -e; \
+		ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP).notary; \
+		echo "paket: notarization için Apple'a gönderiliyor (birkaç dakika sürebilir)"; \
+		out=$$(xcrun notarytool submit $(ZIP).notary --keychain-profile '$(NOTARY_PROFILE)' --wait 2>&1) || true; \
+		rm -f $(ZIP).notary; echo "$$out" | tail -n 4; \
+		echo "$$out" | grep -q 'status: Accepted' || { \
+			id=$$(echo "$$out" | sed -n 's/^ *id: //p' | head -n 1); \
+			echo "paket: notarization kabul edilmedi$${id:+ — ayrıntı: xcrun notarytool log $$id --keychain-profile $(NOTARY_PROFILE)}"; exit 1; }; \
+		xcrun stapler staple -q $(APP); \
+		xcrun stapler validate -q $(APP); \
+		spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' || \
+			{ echo "paket: spctl paketi notarize görmüyor"; spctl -a -vv -t exec $(APP); exit 1; }; \
+	else \
+		echo "paket: notarize EDİLMEDİ — imza '$(SIGN_ID)', Developer ID değil"; \
+	fi
 	ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP)
 	@echo "paket: $(ZIP) ($$(lipo -archs $(APP)/Contents/MacOS/bateri), macOS $$(plutil -extract LSMinimumSystemVersion raw $(APP)/Contents/Info.plist)+)"
+
+# Sürümü siteye koyar (`$(SITE)`, bateri-landing deposu): notarize zip
+# `public/releases/`'e, Sparkle'ın beslemesi `public/appcast.xml`'e,
+# indirme adresi ve sürüm `wrangler.jsonc`'ye. Yayınlamaz — deploy ve
+# commit sitenin deposunda elle (`npm run deploy`).
+#
+# Besleme `generate_appcast`'ten: klasördeki bütün zip'leri okuyup her
+# sürümü gizli EdDSA anahtarıyla imzalıyor (anahtar anahtarlıkta,
+# `generate_keys`; kaybolursa kurulu kopyalara bir daha güncelleme
+# gönderilemez — yedeği `generate_keys -x`). Eski zip'ler klasörde kalıyor,
+# yani besleme bütün sürümleri taşıyor. Delta güncelleme yok
+# (`--maximum-deltas 0`): paket küçük ve deltalar klasörü şişirirdi.
+# Notarize edilmemiş paket yayına girmiyor: Sparkle'ın indirdiği kopya da
+# Gatekeeper'dan geçmek zorunda.
+SITE ?= ../bateri-landing
+RELEASES_URL = $(patsubst %/appcast.xml,%/releases/,$(FEED_URL))
+
+yayin: paket
+	@test -d $(SITE)/public && test -f $(SITE)/wrangler.jsonc || { echo "yayin: $(SITE) bateri-landing deposu değil (SITE=… ile ver)"; exit 1; }
+	@spctl -a -t exec $(APP) 2>&1 | grep -q accepted && xcrun stapler validate -q $(APP) || \
+		{ echo "yayin: paket notarize değil, yayına girmez"; exit 1; }
+	mkdir -p $(SITE)/public/releases
+	cp $(ZIP) $(SITE)/public/releases/
+	$(SPARKLE_DIR)/bin/generate_appcast --maximum-deltas 0 \
+		--download-url-prefix '$(RELEASES_URL)' -o $(SITE)/public/appcast.xml $(SITE)/public/releases
+	sed -i '' -e 's|"DOWNLOAD_URL": "[^"]*"|"DOWNLOAD_URL": "$(RELEASES_URL)bateri-$(VERSION).zip"|' \
+		-e 's|"VERSION": "[^"]*"|"VERSION": "$(VERSION)"|' $(SITE)/wrangler.jsonc
+	@echo "yayin: $(VERSION) → $(SITE) (releases/, appcast.xml, wrangler.jsonc); sitenin deposunda commit + npm run deploy"
 
 # Bu Mac'e kurar: `kur`'un denetlenmiş paketini `$(INSTALL_DIR)`'a koyar.
 # Eski paketin üstüne `ditto` ile yazılmıyor, çünkü `ditto` birleştirir ve

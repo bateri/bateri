@@ -101,7 +101,8 @@ hiç kurulmasın) ve o değişmez bir kod kısıtından *karar* diye türetilmi�
 | — | Linux paketleme | Son: `.deb` ve AppImage. Flatpak **sonra**: sandbox kullanıcının host kabuğunu koşturmayı engelliyor ve terminalin varlık sebebi o |
 
 Sonrası (sırasız): palet overlay'i (arama → 033), durum çubuğu (+ sayaç
-animasyonu), Sparkle ile güncelleme.
+animasyonu). Sparkle ile güncelleme geldi (2026-09-28, set açılmadan:
+Developer ID + notarization + Sparkle 2, besleme `bateri.dev`).
 
 > **Sıra değişti (2026-09-15, kullanıcı kararı).** Kullanıcı Metalterm'in
 > asıl değerini "animasyonlar, görünüş" diye koydu; eski sıra hareketi ve
@@ -560,7 +561,10 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   **sete bağlanmadı** — `bt-core`'un kapanış tasarımına meşru biçimde dokunan
   ilk set toplar. Ayrıntısı ve çürütülmüş çaresi `CLAUDE.md`'nin kapanış
   maddesinde; artık **ölçülebilir** de (`kapanis=abandoned`).
-- **Üçüncü taraf bildirimlerinin geri kalanı.** 006 yalnız `alacritty_terminal`'ın
+- ~~**Üçüncü taraf bildirimlerinin geri kalanı.**~~ **Kapandı (2026-09-28):**
+  bildirimler `tools/third_party_notices.py` ile ürün grafından üretiliyor
+  (MIT'in hepsi + Sparkle). Gatekeeper'ın indirilen kopyadaki davranışı
+  notarize paketle ölçülecek. Eski metin: 006 yalnız `alacritty_terminal`'ın
   (Apache-2.0) borcunu kapattı. macOS ağacındaki diğer dış paketlerin çoğu
   MIT ya da MIT seçeneği taşıyor (`objc2` ailesinin dördü yalnız MIT) ve MIT
   de bildirimin kopyalarla gitmesini istiyor. 007 phase-1 `toml_edit` ile
