@@ -356,7 +356,10 @@ paket: kur
 
 # Sürümü siteye koyar (`$(SITE)`, bateri-landing deposu): notarize zip
 # `public/releases/`'e, Sparkle'ın beslemesi `public/appcast.xml`'e,
-# indirme adresi ve sürüm `wrangler.jsonc`'ye. Yayınlamaz — deploy ve
+# indirme adresi ve sürüm `wrangler.jsonc`'ye. İndirme adresi **göreli**
+# (`/download`'ın 302'si): site hangi alan adında sunulursa orada çalışır;
+# beslemenin adresleri ise mutlak, çünkü kurulu kopya onları sitenin
+# dışından okuyor. Yayınlamaz — deploy ve
 # commit sitenin deposunda elle (`npm run deploy`).
 #
 # Besleme `generate_appcast`'ten: klasördeki bütün zip'leri okuyup her
@@ -378,7 +381,7 @@ yayin: paket
 	cp $(ZIP) $(SITE)/public/releases/
 	$(SPARKLE_DIR)/bin/generate_appcast --maximum-deltas 0 \
 		--download-url-prefix '$(RELEASES_URL)' -o $(SITE)/public/appcast.xml $(SITE)/public/releases
-	sed -i '' -e 's|"DOWNLOAD_URL": "[^"]*"|"DOWNLOAD_URL": "$(RELEASES_URL)bateri-$(VERSION).zip"|' \
+	sed -i '' -e 's|"DOWNLOAD_URL": "[^"]*"|"DOWNLOAD_URL": "/releases/bateri-$(VERSION).zip"|' \
 		-e 's|"VERSION": "[^"]*"|"VERSION": "$(VERSION)"|' $(SITE)/wrangler.jsonc
 	@echo "yayin: $(VERSION) → $(SITE) (releases/, appcast.xml, wrangler.jsonc); sitenin deposunda commit + npm run deploy"
 
