@@ -41,6 +41,7 @@
 | 037 | [ssh-ikinci-tur](037-ssh-ikinci-tur/) | 🟢 | 7 phase + kapı tamam — host işareti ve rengi, ⌘T aynı host'a, "⏎ reconnect", Finder damlasının uzak dizine yüklenmesi (popover, yapıştırmasız sonuç satırı, durdurma sorusu, başlıkta yüzde, bildirim). |
 | 038 | [terminal-kimligi](038-terminal-kimligi/) | 🟢 | 2 phase + kapı tamam: kabukta `TERM_PROGRAM=bateri` ailesi ve sekme başına `BATERI_TAB_URL`, `open bateri://tab/<id>` o sekmeyi öne getiriyor (gözle kontrol bekliyor) |
 | 039 | [terminal-pane-bolmeler](039-terminal-pane-bolmeler/) | 🟢 | 4 phase + kapı tamam — sekme `TerminalPane`'lere bölünüyor: ⌘D/⇧⌘D, ⌘[/⌘] ve ⌥⌘ ok ile gezinme, ⌃⌘ ok ve sürüklemeyle boyutlama, ⌃⌘= eşitleme, ⇧⌘↩ büyütme, odaksız pane soluk (gözle kontrol bekliyor) |
+| 040 | [linux-kapisi-ve-wgpu](040-linux-kapisi-ve-wgpu/) | 📐 | Linux'a ilk adım: `make linux` (Docker) kapısı ve renderer'ın wgpu'ya ölçümlü geçişi — macOS'ta görünür fark yok |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.
