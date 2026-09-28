@@ -408,10 +408,13 @@ paket: kur dmgbuild
 #
 # **Önce kapılar, sonra paket** (`yayin-kapisi`; paket dakikalar sürüyor ve
 # kapı ucuz): bir sürüm yalnız bilinen bir koddan çıkar — ağaç temiz, dal
-# `main`, HEAD `v$(VERSION)` etiketli — ve sürüm notuyla çıkar
-# (`assets/release-notes/$(VERSION).md`, İngilizce; Sparkle "yeni sürüm
-# var" penceresinde onu gösteriyor, notsuz pencere kullanıcıyı neyi
-# kurduğunu bilmeden "Install"a itiyordu). Deneme koşusu (`DENEME=1`, ör.
+# `main`, HEAD `v$(VERSION)` etiketli — ve sürüm notuyla çıkar. Notun tek
+# kaynağı kökteki `CHANGELOG.md` (Keep a Changelog, İngilizce): kapı
+# `## [$(VERSION)]` bölümünü kesip `$(NOTES)`'a yazıyor, bölüm yoksa ya da
+# boşsa paket derlenmeden duruyor; landing yalnız yayınlanan kopyayı
+# tutuyor. Sparkle "yeni sürüm var" penceresinde onu gösteriyor — notsuz
+# pencere kullanıcıyı neyi kurduğunu bilmeden "Install"a itiyordu. Deneme
+# koşusu (`DENEME=1`, ör.
 # güncelleme döngüsünü sınamak için başka bir `SITE` ve `FEED_URL`'le)
 # yalnız dal/etiket/temizlik kapısını atlar; notarization ve not kapısı
 # her koşuda.
@@ -437,11 +440,13 @@ paket: kur dmgbuild
 # inmiyor ve beslemeden bir öğeyi silmek kurulu kopyaları o sürümde bırakır.
 SITE ?= ../bateri-landing
 RELEASES_URL = $(patsubst %/appcast.xml,%/releases/,$(FEED_URL))
-NOTES = assets/release-notes/$(VERSION).md
+NOTES = $(TARGET_DIR)/release/bateri-$(VERSION).md
 
 yayin-kapisi:
 	@test -d $(SITE)/public && test -f $(SITE)/wrangler.jsonc || { echo "yayin: $(SITE) bateri-landing deposu değil (SITE=… ile ver)"; exit 1; }
-	@test -s $(NOTES) || { echo "yayin: sürüm notu yok — $(NOTES) (İngilizce, Sparkle'ın penceresinde görünüyor)"; exit 1; }
+	@mkdir -p $(dir $(NOTES)); \
+	awk -v v='$(VERSION)' '/^## \[/ { if (on) exit; if (index($$0, "## [" v "]") == 1) { on = 1; next } } on' CHANGELOG.md > $(NOTES); \
+	grep -q '[^[:space:]]' $(NOTES) || { echo "yayin: CHANGELOG.md'de '## [$(VERSION)]' bölümü yok ya da boş (Unreleased'i sürüme çevir)"; exit 1; }
 	@test '$(DENEME)' = 1 && { echo "yayin: DENEME=1 — dal, etiket ve temizlik kapısı atlandı"; exit 0; }; \
 	test -z "$$(git status --porcelain)" || { echo "yayin: çalışma ağacı temiz değil, sürüm bilinen bir koddan çıkmalı"; exit 1; }; \
 	test "$$(git branch --show-current)" = main || { echo "yayin: dal main değil ($$(git branch --show-current))"; exit 1; }; \
