@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite sırası yalnız seri make'te garantidir; -j altında "en ucuz kapı
 # önce" ve "sürüm başta" sözü bozulur.
 .NOTPARALLEL:
-.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris kur paket yukle
+.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris kur paket yukle linux
 
 # Definition of done. Homebrew rustc pin'li değil (rust-toolchain.toml bilinçli
 # olarak yok): bir `brew upgrade` sonrası gelen clippy kırmızısını kod
@@ -284,3 +284,43 @@ yukle: kur
 
 terminfo:
 	$(call henuz_yok,assets/terminfo bir shell/TERM setiyle gelir)
+
+# bt-core'un Linux kapısı: `clippy -D warnings` ve `test`, Docker'da,
+# `tools/linux/Dockerfile`'ın imajında, `--locked` (Cargo.lock'u değiştiren
+# koşu kırmızı düşer, sessizce yeni sürüm çözmez). CLAUDE.md'nin "bt-core
+# platformsuz, kapı Linux hedefiyle derlemedir" sözü bu komuttur.
+# `make hepsi`'nin DIŞINDA, çünkü Docker ister ve ilk koşusu imajı kurup bütün
+# grafı Linux için derler; ne zaman koştuğu `.claude/is-akisi/proje.md` →
+# Doğrulama'da (Linux'ta derlenen bir crate değiştiyse).
+# Kapsam setlerle büyür — bugün yalnız bt-core; sırası (bt-atlas + lavapipe
+# üstünde bt-gpu, sonra bt-shell-common) `docs/YOL-HARITASI.md`'de. Büyürken
+# `-p` listesi ve imaj tarifi birlikte değişir.
+# Sıra:
+# 1. Sürüm: yerel `rustc`'nin major.minor'ü imaj etiketininkiyle aynı değilse
+#    KIRMIZI (exit 1) — iki derleyicinin clippy'si iki ayrı kapıdır. Bu bir
+#    "koşamadı" değildir: çaresi Dockerfile'ın `FROM` satırını güncellemek.
+# 2. Docker yoksa ya da daemon cevap vermiyorsa stdout'a "ATLANDI" basıp 78
+#    ile çıkar; make bunu 2 olarak döndürür — `make duman`'daki gibi ayırt
+#    edici sinyal stdout metnidir, çıkış kodu değil. Doğrulamada `[~]` yalnız
+#    bu kolda yazılır.
+# 3. İmajı kurar (katman önbellekli) ve konteynerde koşar: depo `/w`'ye bağlı,
+#    çıktılar `target/linux`'a (macOS derlemesiyle karışmasın; `/target/`
+#    zaten .gitignore'da), crate indirmeleri adlı bir volume'da.
+LINUX_DOCKERFILE = tools/linux/Dockerfile
+LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
+LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
+LINUX_CRATES = -p bt-core
+
+linux:
+	@yerel=$$(rustc --version | sed -n 's/^rustc \([0-9]*\.[0-9]*\).*/\1/p'); \
+	if [ -z "$(LINUX_RUST)" ]; then \
+		echo "linux: $(LINUX_DOCKERFILE)'ın FROM satırından rust sürümü okunamadı"; exit 1; fi; \
+	if [ "$$yerel" != "$(LINUX_RUST)" ]; then \
+		echo "linux: yerel rustc $$yerel, imaj rust:$(LINUX_RUST) — sürümler uyuşmuyor; $(LINUX_DOCKERFILE)'ın FROM satırını yerel sürüme çek"; exit 1; fi
+	@if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then \
+		echo "ATLANDI: Docker yok ya da daemon cevap vermiyor — make linux koşamadı"; exit 78; fi
+	docker build -q -t $(LINUX_IMAGE) -f $(LINUX_DOCKERFILE) tools/linux
+	docker run --rm -v "$(CURDIR)":/w -v bateri-linux-cargo:/usr/local/cargo/registry \
+		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) sh -c '\
+		cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
+		cargo test $(LINUX_CRATES) --locked'

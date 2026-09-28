@@ -44,6 +44,7 @@ ajan onu zaten yükler, iki kopya hem bağlam hem drift demektir.
 | `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz girdisi yok*: koşunca "henüz yok" deyip kırmızı düşer; tetiklenirse doğrulama "yeşil" değil "koşamadı"dır, `[~]` işaretlenir |
 | `assets/bundle/*`, `assets/shell/*`, `crates/bateri` ya da `kur` hedefi değiştiyse | `make kur` — **ürünü** denetler, düşerse çıkış 2; neyi denetlediği `Makefile`'ın `kur` yorumunda. İmza yok. `assets/shell/*` aynı satırda, çünkü betik de pakete kopyalanıp `cmp` ile denetleniyor ve `make hepsi` yalnız **girdiyi** görüyor |
 | PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — iki zamanlama profili, ikisi de geçmeli. TSan nightly ister ve araç zinciri pin'li değil: "TSan koşmadı" waive değil, bilinen sınırdır |
+| Linux'ta derlenen bir crate (bugün `bt-core`) değiştiyse | `make linux` — Docker'da `clippy -D warnings` + `test`, `--locked`; ne sınadığı `Makefile`'ın `linux` yorumunda. Docker yoksa ya da daemon cevap vermiyorsa "ATLANDI" → `[~]`, **yalnız** o kolda; yerel rustc ile imaj etiketinin uyuşmazlığı "koşamadı" değil kırmızıdır (çaresi `tools/linux/Dockerfile`'ın `FROM` satırı) |
 | pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — geçme ölçütü `CLAUDE.md` → Komutlar'da, jetonların anlamı `Makefile`'ın `duman` yorumunda ve `Report::token_line`'da. Sayaçlar CPU'nundur: GPU'nun boyadığını `make hepsi`'deki offscreen sınamalar, pencerenin görünürlüğünü hiçbiri kanıtlamaz. Başsız ortamda "ATLANDI" → `[~]`. `IDLE_FRAME_LIMIT` ölçülmüş bir sözleşmedir: değişikliği kod phase'lerinden **ayrı** commit'le iner |
 
 **Araç zinciri pin'li değil** (Homebrew rustc; `rustup` ve
@@ -132,7 +133,7 @@ konuları:
 - **Uygulamanın süreç adı** `bateri`: `pkill`/`killall bateri` yasak,
   kullanıcı aynı anda kendi örneğini açık tutuyor olabilir.
 - **Uzun komutlar** (ön planda, `timeout`'la): `make hepsi`, `make kur`,
-  `make test-yaris`.
+  `make test-yaris`, `make linux`.
 - **Yayın etkili sürprizler** (eskalasyon): beklenmeyen `Cargo.lock`
   değişimi, yeni bağımlılık ihtiyacı, ayar şeması / `TERM` / shell
   entegrasyonu etkisi, beklenmeyen ölçüm gerilemesi ya da boşta kare üreten

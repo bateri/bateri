@@ -59,9 +59,24 @@ _Requirements: R1.1, R1.2_
 
 ## Checklist
 
-- [ ] İmaj tarifi (pin'li taban, zsh, `LANG`)
-- [ ] `make linux` hedefi: sürüm eşleşmesi, `--locked`, `target/linux`, volume, Docker yokken ayırt edilir çıkış
-- [ ] `proje.md` Doğrulama satırı ve uzun komut listesi
-- [ ] `CLAUDE.md` Komutlar satırı ve `bt-core` kapısı cümlesi
-- [ ] Test: `make linux` yeşil; sürüm uyuşmazlığında kırmızı; koşu sonrası `git status` temiz
-- [ ] Doğrulama geçti (`make hepsi` + `make linux`)
+- [x] İmaj tarifi (pin'li taban, zsh, `LANG`)
+- [x] `make linux` hedefi: sürüm eşleşmesi, `--locked`, `target/linux`, volume, Docker yokken ayırt edilir çıkış
+- [x] `proje.md` Doğrulama satırı ve uzun komut listesi
+- [x] `CLAUDE.md` Komutlar satırı ve `bt-core` kapısı cümlesi
+- [x] Test: `make linux` yeşil; sürüm uyuşmazlığında kırmızı; koşu sonrası `git status` temiz
+- [x] Doğrulama geçti (`make hepsi` + `make linux`)
+
+## Uygulama Notları
+
+- İmaj tarifi `tools/linux/Dockerfile`. Sürüm yalnız onun `FROM` satırında
+  yaşıyor ve `make linux` major.minor'ü oradan okuyor (imaj etiketi
+  `bateri-linux:{sürüm}`). Uyuşmazlık sınaması `FROM`'u geçici olarak
+  1.87'ye çekerek yapıldı: exit 1, tanı basıldı.
+- Tarife `rustup component add clippy` eklendi. Clippy'nin derleyiciyle
+  aynı sürümden geldiği böylece açıkça garanti ediliyor; imajda zaten
+  varsa komut hiçbir şey yapmıyor.
+- "Koşamadı" kolu `make duman`'ın emsaliyle çalışıyor: stdout'a `ATLANDI`
+  basıp 78 ile çıkıyor, make bunu 2 olarak döndürüyor. Ayırt edici sinyal
+  çıkış kodu değil metin. Kol, `docker`'sız bir `PATH` ile sınandı.
+- `.gitignore` değişmedi: `/target/` zaten `target/linux`'u da kapsıyor.
+  Koşudan sonra `git status` yalnız bu phase'in dosyalarını gösterdi.
