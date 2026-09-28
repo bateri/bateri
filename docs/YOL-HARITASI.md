@@ -563,8 +563,9 @@ Yamandıkları yer belli olunca buradan silinip o setin dosyasına geçerler.
   maddesinde; artık **ölçülebilir** de (`kapanis=abandoned`).
 - ~~**Üçüncü taraf bildirimlerinin geri kalanı.**~~ **Kapandı (2026-09-28):**
   bildirimler `tools/third_party_notices.py` ile ürün grafından üretiliyor
-  (MIT'in hepsi + Sparkle). Gatekeeper'ın indirilen kopyadaki davranışı
-  notarize paketle ölçülecek. Eski metin: 006 yalnız `alacritty_terminal`'ın
+  (MIT'in hepsi + Sparkle). 006 phase-4'ün açık sorusu da kapandı: karantina
+  etiketli indirilen zip'i Gatekeeper `accepted, source=Notarized Developer
+  ID` diye geçiriyor (notarize + zımbalı paket, `make paket`). Eski metin: 006 yalnız `alacritty_terminal`'ın
   (Apache-2.0) borcunu kapattı. macOS ağacındaki diğer dış paketlerin çoğu
   MIT ya da MIT seçeneği taşıyor (`objc2` ailesinin dördü yalnız MIT) ve MIT
   de bildirimin kopyalarla gitmesini istiyor. 007 phase-1 `toml_edit` ile
