@@ -372,7 +372,7 @@ RELEASES_URL = $(patsubst %/appcast.xml,%/releases/,$(FEED_URL))
 
 yayin: paket
 	@test -d $(SITE)/public && test -f $(SITE)/wrangler.jsonc || { echo "yayin: $(SITE) bateri-landing deposu değil (SITE=… ile ver)"; exit 1; }
-	@spctl -a -t exec $(APP) 2>&1 | grep -q accepted && xcrun stapler validate -q $(APP) || \
+	@spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' && xcrun stapler validate -q $(APP) || \
 		{ echo "yayin: paket notarize değil, yayına girmez"; exit 1; }
 	mkdir -p $(SITE)/public/releases
 	cp $(ZIP) $(SITE)/public/releases/
