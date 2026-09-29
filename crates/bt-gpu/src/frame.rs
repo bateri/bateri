@@ -62,6 +62,17 @@ const _: () = assert!(size_of::<Instance>() == 32);
 const _: () = assert!(offset_of!(Instance, size) == 8);
 const _: () = assert!(offset_of!(Instance, rgba) == 16);
 
+/// `Instance`'s field offsets, for the wgpu vertex layout
+/// (`crate::wgpu_renderer`): the fields are private and `offset_of!` only sees
+/// them here. The layout's second consumer is fed from next to the asserts,
+/// not from three hand-written numbers (040 phase-2 `/code-review`).
+#[cfg(test)]
+pub(crate) const INSTANCE_OFFSETS: [u64; 3] = [
+    offset_of!(Instance, pos) as u64,
+    offset_of!(Instance, size) as u64,
+    offset_of!(Instance, rgba) as u64,
+];
+
 /// `shaders/cell.metal` → `GlyphInstance` ile alan alan aynı.
 ///
 /// **`size` yok, uv boyutu yok**: bu sette her glyph tam bir hücre boyunda
