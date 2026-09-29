@@ -31,9 +31,9 @@
 //! **boyayacağı piksel** hücrenin dışına taşıyorsa reddediliyor. Ölçülen şey
 //! ilerleme değil mürekkep, çünkü sembol fontlarının glyph'leri
 //! ilerlemelerinden dar boyuyor (`⏺` U+23FA) ve ilerlemeyi ölçen bir kapı
-//! onları hücreye sığdıkları hâlde eliyordu. Emoji, CJK ve geniş glyph hâlâ
-//! [`TOFU`] — onları gerçekten çizmek (iki hücre, renkli doku) ayrı bir sete
-//! kaldı.
+//! onları hücreye sığdıkları hâlde eliyordu. Sığmayan aday iki sütunluysa iki
+//! hücreye (023), sığmıyorsa ve taşması sınırın içindeyse küçük puntolu
+//! kopyasıyla çiziliyor (041, `font::SHRINK_LIMIT`); kalanı [`TOFU`].
 
 // Yedek kapısının taraması ve araç karakterlerinin bekçisi; üretimde
 // tüketicisi yok (041 phase-1).
@@ -42,7 +42,7 @@ mod census;
 mod font;
 mod raster;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use font::Faces;
 pub use font::{Face, FontIssue, Metrics, SizeClass, family_issue, monospaced_families};
@@ -302,6 +302,16 @@ pub struct Atlas {
     /// tanımadığı karakter de burada [`TOFU`] olarak yaşıyor, yoksa aynı
     /// karakter her karede CoreText'e yeniden sorulurdu.
     slots: HashMap<(Sprite, Face, SizeClass, Half), (u16, Plane)>,
+    /// Tek hücrelik kaydı **küçültülerek** kabul edilmiş anahtarlar (041).
+    ///
+    /// `Left` isteğinin `Whole` kısayolu yalnız "tek hücreye tam boyuyla
+    /// sığıyor" kaydına güvenebilir: küçültülmüş bir `Whole` iki hücrelik
+    /// isteğe cevap olsaydı glyph geniş hücrenin solunda küçük durur, sağ
+    /// yarısı boş kalırdı — ve hangi isteğin önce geldiğine bağlı olarak.
+    /// Ayrı bir küme, çünkü `slots`'un değeri yirmiden fazla yerde okunuyor
+    /// ve bit yalnız bu kısayolun sorusu; takma adlar (yüz merdiveni,
+    /// `cluster_as_base`) biti kaynaklarından taşıyor.
+    shrunk: HashSet<(Sprite, Face, SizeClass)>,
     /// Bir sonraki boş yuva; [`TOFU`] ayrılmış olduğu için 1'den başlar.
     /// `slots.len()`'den türetilemez: tofu'ya çözümlenen kayıtlar yuva
     /// harcamıyor, yani iki sayı bilerek ayrışıyor.
@@ -450,6 +460,7 @@ impl Atlas {
             font_issue,
             grid,
             slots: HashMap::new(),
+            shrunk: HashSet::new(),
             next: TOFU + 1,
             buffer: vec![0u8; metrics.slot_bytes()],
             buffer_right: vec![0u8; metrics.slot_bytes()],
@@ -657,11 +668,10 @@ impl Atlas {
         // **ret** iki hücrelik isteğin cevabı **değil**: `Whole` isteği
         // `cols = 1` ile eleniyor ve o ölçüt iki hücrelikten kesin olarak
         // daha sıkı, yani çıkarım tek yönlü — `Left` reddedildiyse `Whole` da
-        // reddedilir, tersi değil. Kapı olmadan yol şöyle ölüyordu: dock giriş
-        // satırını **her zaman** `wide: false` ile soruyor
-        // (`bt_core::dock`'un değişmezi) ve dock'un satırı `SizeClass::Normal`,
-        // yani prompt'a yazılan bir CJK karakteri önce `Whole` olarak
-        // sorulup negatif önbelleğe giriyor; Enter'dan sonra aynı karakter
+        // reddedilir, tersi değil. Kapı olmadan yol şöyle ölüyordu (dock 024'e
+        // kadar giriş satırını **her zaman** `wide: false` ile soruyordu ve
+        // satırı `SizeClass::Normal`): prompt'a yazılan bir CJK karakteri
+        // önce `Whole` olarak sorulup negatif önbelleğe giriyor; Enter'dan sonra aynı karakter
         // ızgaraya `wide: true` ile geliyor, `Left` anahtarını bulamıyor,
         // buradan `TOFU` alıyor ve setin tamamı o karakter için atlasın ömrü
         // boyunca **ölü** kalıyordu.
@@ -671,7 +681,11 @@ impl Atlas {
         // bir kapı onun tek hücrelik kabulünü ret sanıp ikinci kez
         // rasterize ederdi (`cluster_as_base`'in ve negatif önbellek
         // süzgecinin ikizi).
-        if want == Half::Left {
+        //
+        // **Küçültülmüş kabul de bu daldan geçmiyor** (041, [`Atlas::shrunk`]):
+        // tek hücreye küçültülen `漢` iki hücrelik istekte tam boyuyla çift
+        // olmalı, tek hücrelik küçük kopyası değil.
+        if want == Half::Left && !self.shrunk.contains(&(sprite, face, size)) {
             let whole = (sprite, face, size, Half::Whole);
             if let Some(&(slot, plane)) = self.slots.get(&whole)
                 && (slot, plane) != (TOFU, Plane::Mask)
@@ -754,6 +768,9 @@ impl Atlas {
         // orada kalsaydı kolların içinde `&self.buffer` alınamazdı.
         // Kutunun ilerlemesi: `Whole` bir hücre, `Left` iki. `Right` buraya
         // ulaşmıyor (yukarıda).
+        // Kabul edilen aday küçültme kolundan mı geldi: `Whole` kaydının
+        // yanına [`Atlas::shrunk`]'a yazılıyor.
+        let mut shrunk = false;
         let result = match sprite {
             // **Yordamsal çizim fonttan önce.** Sıra zorunlu ve "fontta
             // yoksa yordamsal çiz" yanlış kol olurdu: `█` Menlo'da *var* ama
@@ -821,7 +838,10 @@ impl Atlas {
                     // sonra iki.
                     let cols = if want == Half::Left { 2 } else { 1 };
                     match font::fallback_font(font, ch, cell_advance, cols) {
-                        Some(alt) => self.draw_accepted(&alt, cell_advance),
+                        Some(alt) => {
+                            shrunk = alt.shrunk;
+                            self.draw_accepted(&alt, cell_advance)
+                        }
                         None => (drawn, Half::Whole, Plane::Mask),
                     }
                 } else {
@@ -861,7 +881,10 @@ impl Atlas {
                 // istediği yarı) ve kapının sırası aynı: önce tek, sonra iki.
                 let cols = if want == Half::Left { 2 } else { 1 };
                 match font::shape_cluster(font, text, cell_advance, cols) {
-                    Some(alt) => self.draw_accepted(&alt, cell_advance),
+                    Some(alt) => {
+                        shrunk = alt.shrunk;
+                        self.draw_accepted(&alt, cell_advance)
+                    }
                     // Tek glyph'e şekillenmedi ya da kapıdan döndü: cevap
                     // **taban karakterin** (035 R1.1). Kutu değil, çünkü
                     // taban karakteri çoğu zaman çizilebiliyor (`👍👍`'nin
@@ -924,6 +947,9 @@ impl Atlas {
                     Plane::Color => self.color_next += step,
                 }
                 self.slots.insert(key, (slot, plane));
+                if shrunk && !pair {
+                    self.shrunk.insert((sprite, face, size));
+                }
                 let right = pair.then(|| {
                     let right_slot = slot + 1;
                     self.slots
@@ -988,6 +1014,11 @@ impl Atlas {
                     (sprite, face, size, placed.half),
                     (placed.slot, placed.plane),
                 );
+                if placed.half == Half::Whole
+                    && self.shrunk.contains(&(sprite, Face::Regular, size))
+                {
+                    self.shrunk.insert((sprite, face, size));
+                }
                 if right.is_some() {
                     // Sağ yarının takma adı da yazılıyor, yoksa kalın yüzde
                     // sorulan sağ yarı düz yüzü yeniden rasterize ederdi.
@@ -1100,6 +1131,7 @@ impl Atlas {
         let box_advance = cell_advance * f64::from(alt.cols);
         let shift = f64::from(self.metrics.cell_px.0);
         let half = if pair { Half::Left } else { Half::Whole };
+        let rise = alt.rise(self.metrics);
         // Tek çizici, iki reçete: `Plane` hangisi olacağını söylüyor ve tampon
         // da onunla eşleşiyor. Eşleşmezse `raster`'ın ön koşul assert'i düşer
         // — o assert yanlış düzlemi yakalayan tek şey.
@@ -1110,6 +1142,7 @@ impl Atlas {
                 self.metrics,
                 box_advance,
                 0.0,
+                rise,
                 &mut self.buffer,
             ),
             Plane::Color => raster::draw_color_glyph(
@@ -1118,6 +1151,7 @@ impl Atlas {
                 self.metrics,
                 box_advance,
                 0.0,
+                rise,
                 &mut self.color_buffer,
             ),
         };
@@ -1131,6 +1165,7 @@ impl Atlas {
                 self.metrics,
                 box_advance,
                 shift,
+                rise,
                 &mut self.buffer_right,
             ),
             Plane::Color => raster::draw_color_glyph(
@@ -1139,6 +1174,7 @@ impl Atlas {
                 self.metrics,
                 box_advance,
                 shift,
+                rise,
                 &mut self.color_buffer_right,
             ),
         };
@@ -1182,6 +1218,13 @@ impl Atlas {
         // çağırana ikinci bir instance bastırırdı.
         self.slots
             .insert(key(placed.half), (placed.slot, placed.plane));
+        if placed.half == Half::Whole
+            && self
+                .shrunk
+                .contains(&(Sprite::Char(base), Face::Regular, size))
+        {
+            self.shrunk.insert((sprite, Face::Regular, size));
+        }
         // Sağ yarının takma adı çözülen yarıdan, yüklemeden değil: taban
         // karakter önbellekten döndüyse yükleme yok ama çift yine de iki
         // komşu yuva.
@@ -1363,18 +1406,19 @@ mod tests {
     /// için; ikisi ayrışırsa bu sınama köşeyi kaçırır, yanlış çizim üretmez.
     const LARGEST_LINE_HEIGHT: f64 = 2.0;
     const POINT_SIZE: f64 = 13.0;
-    /// Tofu'ya düşen karakter — ve **iki** kapıdan birden düşüyor.
+    /// Tofu'ya düşen karakter — kapının **üç** kolundan birden düşüyor.
     ///
-    /// Menlo ile SF Mono CJK içermez, yani taban font `.notdef` veriyor
-    /// (`CTFontGetGlyphsForCharacters` cascade'e inmiyor). Yedek aramanın
-    /// gelişiyle yol bir adım uzadı: cascade **bir aday buluyor** (PingFang
-    /// SC) ve o aday mürekkep kapısından dönüyor — hücre 7.827 iken mürekkebi
-    /// 0.70'ten 12.49'a uzanıyor (ölçüldü, bu makine, Menlo 13pt). CJK'de
-    /// ilerleme ile mürekkep birlikte geniş, yani kapı ölçütü değiştiğinde bu
-    /// karakterin cevabı değişmedi. Bu sabite dayanan sınamalar "tofu" derken
-    /// kapının da çalıştığını varsayıyor; kapının kendi bekçisi
+    /// On altıncı düzlemin özel kullanım alanı: Unicode bu kod noktasına
+    /// hiçbir zaman karakter atamayacak ve hiçbir kurulu font onu
+    /// kapsamıyor, yani cascade `.LastResort`'u veriyor. Onun mürekkebi
+    /// hücrenin 1.494 katı (ölçüldü, `make tarama`, dört birleşimde aynı):
+    /// tek hücreye sığmıyor ve küçültme kolu onu adıyla dışarıda tutuyor
+    /// (`font::is_last_resort`, 041 R3.2), iki hücreye ise sığıyor — geniş
+    /// istekte çift. 041'e kadar bu sabit `漢`'ti; küçültme onu tek hücreye
+    /// sığdırdığı için artık tofu değil. Bu sabite dayanan sınamalar "tofu"
+    /// derken kapının da çalıştığını varsayıyor; kapının kendi bekçisi
     /// [`the_gate_decides_by_ink_alone`].
-    const UNKNOWN_CHAR: char = '漢';
+    const UNKNOWN_CHAR: char = '\u{10FFFC}';
     /// Yedeğin **kabul ettiği** karakter ve setin varlık sebebi: `⏵` Menlo'da
     /// yok, Claude Code'un `⏵⏵ auto mode on` göstergesi iki kutu çıkıyordu.
     /// Ölçüldü (bu makine, macOS 26.4.1): STIX Two Math'ten geliyor,
@@ -1618,7 +1662,8 @@ mod tests {
         // mürekkebi sessizce kesiyor ve bitmap yine dolu görünür. Kapı
         // yatayda artık mürekkebi ölçüyor, ama **dikeyde ölçmüyor** (gerekçe
         // `font::ink_fits_cell`'in doc'unda: dikeyi eleyen tek küme emoji ve
-        // o zaten yatayda dönüyor) — ascent'i yüksek bir aday kapıyı geçip
+        // o tam boyuyla yatayda dönüyor, küçültülünce hücrede ortalanıyor) —
+        // ascent'i yüksek bir aday kapıyı geçip
         // yine kırpılabilir. Ölçüt bu yüzden fontun kendi sınır dikdörtgeni
         // ve **dört kenar birden**: yatayda kapının tanığı, dikeyde tek
         // bekçi.
@@ -1736,14 +1781,19 @@ mod tests {
                 let ink = font::glyph_ink(&open, glyph);
                 let left = ink.origin.x + font::centre_shift(cell, advance);
                 let right = left + ink.size.width;
+                // Sığmayan aday sınırın içindeyse ve `.LastResort` değilse
+                // küçültülerek çiziliyor (041); beklenti yine adayın kendi
+                // ölçüsünden, küçültmenin katsayısıyla aynı fonksiyondan.
+                let fit = font::fit_ratio(cell, advance, ink);
+                let shrinks = fit <= font::SHRINK_LIMIT && !font::is_last_resort(&open);
                 let family = unsafe { open.family_name() }.to_string();
                 plan.push((
                     ch,
                     size,
-                    left >= 0.0 && right <= cell,
+                    (left >= 0.0 && right <= cell) || shrinks,
                     format!(
                         "{label}, {family}, mürekkep {left}..{right} / hücre {cell} \
-                         (ilerleme {advance})"
+                         (ilerleme {advance}, fit {fit:.3})"
                     ),
                 ));
             }
@@ -1751,12 +1801,19 @@ mod tests {
 
         let (mut fits, mut wide) = (0usize, 0usize);
         for (ch, size, should_fit, why) in plan {
-            let slot = a
-                .slot(Sprite::Char(ch), Face::Regular, size, Half::Whole)
-                .0
-                .slot;
+            let placed = a.slot(Sprite::Char(ch), Face::Regular, size, Half::Whole).0;
+            // Renk düzleminin 0. yuvası gerçek bir yuva, `TOFU` ile aynı
+            // numarayı taşısa da ([`color_slot_zero_answers_the_left_request`]).
+            let slot = if placed.plane == Plane::Color {
+                TOFU + 1
+            } else {
+                placed.slot
+            };
             if should_fit {
-                assert_ne!(slot, TOFU, "hücreye sığan aday çizilmedi: '{ch}' ({why})");
+                assert_ne!(
+                    slot, TOFU,
+                    "hücreye sığan ya da küçülen aday çizilmedi: '{ch}' ({why})"
+                );
                 fits += 1;
             } else {
                 assert_eq!(slot, TOFU, "hücreye sığmayan aday çizildi: '{ch}' ({why})");
@@ -1771,11 +1828,12 @@ mod tests {
             "kapı tek yönde sınandı: sığan {fits}, sığmayan {wide}"
         );
         // Reddedilen aday **yuva harcamıyor**; olmasaydı bir CJK dosyası
-        // atlası tüketirdi. `fits` kadar yuva + tofu bekleniyor.
+        // atlası tüketirdi. `fits` kadar yuva + tofu bekleniyor, iki düzlemin
+        // toplamında: küçültülen emoji renk düzlemine gidiyor.
         assert_eq!(
-            a.occupancy().0,
+            a.occupancy().0 + a.color_occupancy().0,
             fits + 1,
-            "reddedilen aday yuva harcadı (sığan {fits})"
+            "reddedilen aday yuva harcadı (çizilen {fits})"
         );
     }
 
@@ -2347,16 +2405,17 @@ mod tests {
         // daraltmak gerekmedi, sayısı ve ortamı
         // `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama Notları'nda emanette.
         //
-        // Havuz **filtreli** ve bu bir kolaylık değil zorunluluk: kapı
-        // ilerlemeyi ölçerken CJK'nın tamamı dönüyordu, mürekkebi ölçerken
-        // dar boyayan üyeleri (`丨` U+4E28 bir dikey çubuk) geçiyor ve yuva
-        // alıyor. Deneyin konusu negatif önbellek, yani havuza yalnız
-        // gerçekten reddedilenler giriyor; kapının kendi bekçisi
-        // [`the_gate_decides_by_ink_alone`] ve filtre onun cevabını
-        // sormaktan ibaret.
+        // Havuz **filtreli** ve bu bir kolaylık değil zorunluluk: kapının
+        // cevabı karakterin hangi fonta düştüğüne bağlı. Havuz 041'e kadar
+        // CJK'ydı; küçültme onu tek hücreye sığdırınca havuz on altıncı
+        // düzlemin özel kullanım alanına taşındı ([`UNKNOWN_CHAR`]'ın
+        // gerekçesi: `.LastResort`, küçültülmüyor). Deneyin konusu negatif
+        // önbellek, yani havuza yalnız gerçekten reddedilenler giriyor;
+        // kapının kendi bekçisi [`the_gate_decides_by_ink_alone`] ve filtre
+        // onun cevabını sormaktan ibaret.
         let pool: Vec<char> = {
             let (_, base, cell) = size_classes(&a)[0];
-            ('\u{4e00}'..'\u{9fff}')
+            ('\u{100000}'..'\u{10FFFD}')
                 .filter(|&ch| font::fallback_font(base, ch, cell, 1).is_none())
                 .take(cap * 3)
                 .collect()
@@ -2426,10 +2485,10 @@ mod tests {
         // ikincisi yeni: `font::fallback_font`'un `CFRange`'i de UTF-16 birimi
         // sayıyor, yani `len_utf16` yerine `1` yazılsaydı vekil çiftinin
         // yarısı istenir ve cascade yanlış karakteri arardı. Bu sınama artık
-        // o aralığın da bekçisi — sonuç yine tofu, ama sebebi uzadı: aday
-        // (STIX Two Math) bulunuyor ve genişlik kapısından dönüyor (1.07×).
+        // o aralığın da bekçisi. Aday (STIX Two Math) bulunuyor, mürekkep
+        // kapısından dönüyor (1.07×) ve 041'den beri küçültülerek çiziliyor.
         let mut a = atlas(POINT_SIZE, 1.0);
-        assert_eq!(
+        assert_ne!(
             a.slot(
                 Sprite::Char('𝔸'),
                 Face::Regular,
@@ -2439,7 +2498,7 @@ mod tests {
             .0
             .slot,
             TOFU,
-            "Menlo/SF Mono matematik alfabesi içermez, yedeği de hücreye sığmaz"
+            "Menlo/SF Mono matematik alfabesi içermez; yedeği küçültülerek çizilmeli"
         );
         // BMP dışı bir karakter kapıyı **geçebilse** aynı aralık çizim yolunda
         // da doğru olmak zorunda; `\u{10FFFD}` (.LastResort, 1.83×) ile `𝔸`
@@ -4462,7 +4521,7 @@ mod tests {
     #[test]
     fn a_single_cell_rejection_does_not_answer_the_wide_request() {
         let mut a = atlas(POINT_SIZE, 1.0);
-        // 1. Dock'un sorusu: tek hücre, ve `漢` oraya sığmıyor.
+        // 1. Dock'un sorusu: tek hücre, ve karakter oraya sığmıyor.
         let (whole, _) = a.slot(
             Sprite::Char(UNKNOWN_CHAR),
             Face::Regular,

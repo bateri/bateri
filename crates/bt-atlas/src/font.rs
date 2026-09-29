@@ -633,8 +633,10 @@ pub(crate) fn centre_shift(box_advance: CGFloat, advance: CGFloat) -> CGFloat {
 ///
 /// Ölçüt yatay ve yalnız yatay. Dikeyi de sınamak bugün **hiçbir adayı
 /// elemiyor** (ölçüldü: yatay kapıyı geçen her aday hücrenin taban çizgisi
-/// penceresine de sığıyor; dikeyde taşan tek küme emoji ve o zaten yatayda
-/// dönüyor), yani ikinci ölçüt yazılmış ama tanığı olmayan bir kural olurdu.
+/// penceresine de sığıyor; dikeyde taşan tek küme emoji, tam boyuyla tek
+/// hücrede yatayda dönüyor ve küçültülen kopyası hücrede dikey ortalanıp
+/// içine giriyor — [`Accepted::rise`]), yani ikinci ölçüt yazılmış ama tanığı
+/// olmayan bir kural olurdu.
 /// Sınır adıyla yazılı: dikeyde taşan bir aday bugün kutuya değil **kırpmaya**
 /// düşer.
 fn ink_fits_box(font: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> bool {
@@ -675,12 +677,13 @@ pub(crate) fn ink_fits_placed(box_advance: CGFloat, advance: CGFloat, ink: CGRec
 ///    dönebilir ve o hâlde bu adım `None` verir — buraya ancak `base`
 ///    `.notdef` verdikten sonra düşülüyor, yani ayrı bir "aynı font mu"
 ///    karşılaştırması gerekmiyor.
-/// 3. **Mürekkep kapısı** ([`ink_fits_cell`]). Aday, çizileceği yerde
-///    hücrenin dışına boyuyor mu — ve **reddin tek ölçütü bu**: emoji, CJK ve
-///    `.LastResort` aynı kapıdan eleniyor, çünkü onların mürekkebi
-///    ilerlemeleri kadar geniş. Aile adı karşılaştırması, trait biti ve
-///    sihirli dizge yok; ölçülen sayılar
-///    `.tasks/019-glyph-yedegi/phase-1.md`'de. Sınır **kesirli** hücre
+/// 3. **Mürekkep kapısı** ([`accept`]). Aday, çizileceği yerde hücrenin
+///    dışına boyuyor mu — sığmayan aday sınırın içindeyse küçültülüyor
+///    ([`SHRINK_LIMIT`]), değilse kutu. Ölçüt geometrik: aile adı ve trait
+///    biti yok, tek istisna küçültme kolunun `.LastResort`'u
+///    ([`is_last_resort`]; geometri onu emojiden ayıramıyor). Ölçülen
+///    sayılar `.tasks/019-glyph-yedegi/phase-1.md` ve
+///    `.tasks/041-yedek-glyph-kucultme/`'de. Sınır **kesirli** hücre
 ///    ilerlemesi ([`space_advance`]), yuvarlanmış hücre genişliği değil: aynı
 ///    sayı `raster::draw`'in ortalamasını da besliyor ve iki iş için iki sayı
 ///    tutmak ikisini ayrıştırırdı.
@@ -695,7 +698,8 @@ pub(crate) fn ink_fits_placed(box_advance: CGFloat, advance: CGFloat, ink: CGRec
 ///
 /// Ölçütün değişmesi ters yöndeki boşluğu da kapatıyor: dar ilerleyip geniş
 /// boyayan bir aday artık **kutu**, eskiden sessizce sağdan kırpılıyordu.
-/// "Kutu ya da tam glyph" ilk kez bir dilek değil sözleşme.
+/// "Kutu ya da tam glyph" ilk kez bir dilek değil sözleşme; 041'den beri
+/// "kutu, tam glyph ya da sığacak kadar küçültülmüş glyph".
 ///
 /// Mürekkebi olmayan aday kapıdan **geçer** (sıfır genişlik her hücreye
 /// sığar); çizilecek şey görünmez bir glyph olur, kutu değil. Bugün bu yol
@@ -739,13 +743,13 @@ pub(crate) fn cascade_candidate(base: &CTFont, ch: char) -> CFRetained<CTFont> {
 }
 
 /// Mürekkep kapısı: adayın glyph'i önce tek hücreye, sonra (iki sütun ilan
-/// edilmişse) iki hücreye sığıyor mu.
+/// edilmişse) iki hücreye sığıyor mu — sığmıyorsa **küçültülerek** sığıyor mu.
 ///
 /// Tek glyph'lik yedek ([`fallback_font`]) ile grapheme dizisinin
-/// ([`shape_cluster`]) **ortak** kapısı — "kutu ya da tam glyph" sözleşmesi
-/// ikisinde de aynı sıradan geçiyor, yani dizinin glyph'i tek kod noktalı
-/// emojiden farklı bir ölçütle kabul edilemez. Taramanın (`census`) da
-/// kapısı bu, yani `pub(crate)`.
+/// ([`shape_cluster`]) **ortak** kapısı — "kutu, tam glyph ya da sığacak kadar
+/// küçültülmüş glyph" sözleşmesi ikisinde de aynı sıradan geçiyor, yani
+/// dizinin glyph'i tek kod noktalı emojiden farklı bir ölçütle kabul
+/// edilemez. Taramanın (`census`) da kapısı bu, yani `pub(crate)`.
 pub(crate) fn accept(
     candidate: CFRetained<CTFont>,
     glyph: CGGlyph,
@@ -765,20 +769,178 @@ pub(crate) fn accept(
             font: candidate,
             glyph,
             cols: 1,
+            shrunk: false,
         });
     }
     // İkinci kapı yalnız **iki sütun ilan edilmiş** karakterde açılıyor. Tek
     // sütunlu bir karaktere iki hücre vermek komşusunun üstüne boyamak olurdu:
     // ızgara ona spacer ayırmıyor ve o hücrenin kendi mürekkebi var. Ölçüt bu
     // yüzden `min(sütun, mürekkep)`.
-    if cols >= 2 && ink_fits_box(&candidate, glyph, cell_advance * CGFloat::from(cols)) {
+    let box_advance = cell_advance * CGFloat::from(cols.max(1));
+    if cols >= 2 && ink_fits_box(&candidate, glyph, box_advance) {
         return Some(Accepted {
             font: candidate,
             glyph,
             cols,
+            shrunk: false,
         });
     }
-    None
+    // **Üçüncü kol: küçültme** (041). En son kol, yani iki kapıdan birini
+    // geçen aday buraya hiç gelmiyor ve rasteri bit bit bugünkü (R3.3).
+    shrink(&candidate, glyph, box_advance).map(|font| Accepted {
+        font,
+        glyph,
+        cols: cols.max(1),
+        shrunk: true,
+    })
+}
+
+/// Kapıdan dönmüş adayın, kutuya sığacak puntodaki kopyası — sınırın
+/// içindeyse.
+///
+/// Kutu ızgaranın o karaktere ayırdığı alan: tek sütunluda bir hücre, iki
+/// sütunluda iki hücre. İki sütunluda tek hücrelik kutu ayrıca denenmiyor:
+/// daha dar kutu daha çok küçültme ister, yani iki hücreye sınırın içinde
+/// sığmayan aday tek hücreye hiç sığmaz.
+///
+/// Katsayı [`fit_ratio`]'dan, mürekkep/kutu oranından değil: küçültme
+/// ilerlemeyi de küçültüyor ve ilerlemesi kutuyu hâlâ aşan glyph
+/// [`centre_shift`]'in kuralıyla sola yapışıyor. `⧉` bunun örneği — oranla
+/// (1.11) küçültülen kopya yeniden sınamada yine dönüyor, gereken 1.22
+/// (`.tasks/041-yedek-glyph-kucultme/phase-1.md` → Uygulama Notları).
+///
+/// Kopya **aynı fontun** başka puntodaki hâli (`CTFontCreateCopyWithAttributes`):
+/// glyph numarası, renk trait'i ve dolayısıyla düzlem değişmiyor, çizim
+/// (`raster::draw_glyph` / `draw_color_glyph`) ve ortalama ([`centre_shift`])
+/// dokunulmadan kalıyor. Kopya [`ink_fits_box`] ile **yeniden** sınanıyor —
+/// kapı adayın çizileceği yerdeki mürekkebi ölçer kuralı küçük kopyada da
+/// geçerli; geçmezse kutu.
+///
+/// `.LastResort` bu kolda kabul edilmiyor (R3.2): gerekçe [`is_last_resort`].
+fn shrink(candidate: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> Option<CFRetained<CTFont>> {
+    let fit = fit_ratio(
+        box_advance,
+        glyph_advance(candidate, glyph),
+        glyph_ink(candidate, glyph),
+    );
+    if !(fit.is_finite() && fit <= SHRINK_LIMIT) || is_last_resort(candidate) {
+        return None;
+    }
+    // SAFETY: `candidate` canlı; saf okuma.
+    let size = unsafe { candidate.size() };
+    // SAFETY: `candidate` canlı; matris `NULL` (fontun kendi matrisi) ve
+    // öznitelik yok, yani tek değişen punto.
+    let at = |s: CGFloat| unsafe { candidate.copy_with_attributes(s, ptr::null(), None) };
+    let fits = |f: &CTFont| ink_fits_box(f, glyph, box_advance);
+    let first = at(size / fit);
+    if fits(&first) {
+        return Some(first);
+    }
+    // Katsayı puntoyla doğrusal ölçeklenmeyen fontta ıskalıyor: Apple Color
+    // Emoji'nin ilerlemesi tam sayıya yuvarlı ve küçük puntoda orantısından
+    // geniş (16pt @2x'te 1.661 ile küçültülen kopya 23 px ilerliyor, hücre
+    // 19.27). Kalan payı kopyanın **kendi** ölçüsü buluyor: sığan en büyük
+    // punto, `size / fit` ile onun yarısı arasında ikiye bölmeyle.
+    let (mut hi, mut lo) = (size / fit, size / fit / 2.0);
+    let mut best = at(lo);
+    if !fits(&best) {
+        return None;
+    }
+    for _ in 0..SHRINK_STEPS {
+        let mid = (lo + hi) / 2.0;
+        let copy = at(mid);
+        if fits(&copy) {
+            lo = mid;
+            best = copy;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(best)
+}
+
+/// [`shrink`]'in ikinci turundaki ikiye bölme adımı: aralık `size / fit` ile
+/// onun yarısı, on adımda puntonun binde birinin altına iniyor (32 pt'de
+/// 0.016 pt). Yetiyor: taramada (`make tarama`, dört birleşim) sınırın içinde
+/// olup yeniden sınamadan dönen aday **sıfır**.
+const SHRINK_STEPS: usize = 10;
+
+/// Küçültmenin üst sınırı: [`fit_ratio`]'su bundan büyük aday kutu kalır.
+///
+/// Tasarım sabiti (`GUTTER_PT` emsali), değeri taramanın dağılımından
+/// (`make tarama`, Menlo 13/16 pt × @1x/@2x, `.tasks/041-yedek-glyph-kucultme/`
+/// → phase-2 Uygulama Notları):
+///
+/// - **İçeride kalması gereken en büyük** Apple Color Emoji'nin tek sütunlu
+///   `fit`'i: @2x'te 1.661–1.681, @1x'te **2.124** (Karar 2, kullanıcı
+///   küçük emojiyi kutuya tercih etti; Retina olmayan ekran da kullanıcı).
+///   İki sütunlu emoji @1x'te iki hücreye de sığmıyor ve iki hücrelik
+///   kutuda `fit`'i 1.062 — aynı kol onu da kapsıyor.
+/// - **Dışında kalan en küçük** 2.250 (Apple Symbols'un tek glyph'i); sonra
+///   STIX Two Math 2.307 / 2.583, Symbol 2.803, kullanıcı fontu Inter
+///   Display 4.2. Bunlar yarıdan fazla küçülürdü ve hücrede bir nokta olurdu.
+///
+/// 2.2 ikisinin arasında: emojinin %3.6 üstünde, dışarıdakinin %2.2 altında.
+/// `.LastResort` (1.660) sınırın **altında** ve geometriyle ayrılamıyor —
+/// onu dışarıda tutan [`is_last_resort`].
+pub(crate) const SHRINK_LIMIT: f64 = 2.2;
+
+/// CoreText'in cascade'inin son halkası `.LastResort`'un PostScript adı.
+pub(crate) const LAST_RESORT: &str = "LastResort";
+
+/// Aday cascade'in son çaresi mi — küçültme kolunun **tek** ad ölçütü (R3.2).
+///
+/// `.LastResort` "hiçbir kurulu font bu karakteri çizemiyor" cevabı ve
+/// glyph'i karakterin kendisi değil, bloğunun **temsilî kutusu**:
+/// küçültülse de kullanıcı yine bir kutu görür, üstelik bizim
+/// [`crate::TOFU`]'muzdan farklı bir kutu. Mürekkep kapısı onu bugüne kadar
+/// geometriyle eliyordu, ama küçültme kolunda geometri **ayıramıyor**: `fit`'i
+/// her glyph'te 1.660, tek sütunlu emojinin (1.661–2.124) altında, yani
+/// emojiyi kapsayan her sınır onu da kapsar.
+///
+/// Yapısal bir sinyal bulunmadı: cascade her zaman bir font veriyor ve
+/// `.LastResort`'un cmap'i karakteri **kapsıyor** (taramada "hiçbir fontta
+/// yok" grubu sıfır, 7189 kod noktası `.LastResort`'un gerçek glyph'iyle
+/// dönüyor), yani "aday yok" sorusu onu göremiyor. Karşılaştırma bu yüzden
+/// adla, ve PostScript adıyla, çünkü o fontun tekil kimliği. Kapsamı yalnız bu kol:
+/// iki kapı onu bugünkü gibi geometriyle eliyor (ya da geniş karakterde iki
+/// hücreye sığdırıyor), yani ad bugün kabul edilen hiçbir çizimi değiştirmiyor.
+pub(crate) fn is_last_resort(font: &CTFont) -> bool {
+    // SAFETY: `font` canlı; saf okuma.
+    unsafe { font.post_script_name() }.to_string() == LAST_RESORT
+}
+
+/// Glyph'i `1 / fit` ölçeğiyle küçültünce kapının geçtiği en küçük `fit`.
+///
+/// İkiye bölme, kapalı form değil: kural [`ink_fits_placed`]'in kendisi ve
+/// kapalı form onu (sola yapışma kolu dahil) ikinci kez yazmak olurdu. Ölçek
+/// sıfıra giderken her glyph kutunun ortasına küçülüp sığıyor, yani alt uç
+/// her zaman geçer; kapıdan geçen adayda `1`. İki tüketici: küçültmenin
+/// katsayısı ([`shrink`]) ve tarama (`census`) — ayrı yazılsalardı taramanın
+/// "sınırın içinde" dediği ile kapının küçülttüğü ayrışabilirdi.
+///
+/// Mürekkep ve ilerleme puntoyla **doğrusal** ölçekleniyor varsayımı
+/// kopyanın yeniden sınamasıyla örtülüyor ([`shrink`]).
+pub(crate) fn fit_ratio(box_advance: CGFloat, advance: CGFloat, ink: CGRect) -> f64 {
+    let fits = |s: CGFloat| {
+        let mut scaled = ink;
+        scaled.origin.x *= s;
+        scaled.size.width *= s;
+        ink_fits_placed(box_advance, advance * s, scaled)
+    };
+    if fits(1.0) {
+        return 1.0;
+    }
+    let (mut lo, mut hi) = (0.0, 1.0);
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    1.0 / lo
 }
 
 /// Grapheme dizisini (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) **tek glyph**'e şekillendirir
@@ -890,6 +1052,38 @@ pub(crate) struct Accepted {
     /// [`glyph_index`]'in cevabı, dizide `CTLine`'ın şekillendirdiği.
     pub(crate) glyph: CGGlyph,
     pub(crate) cols: u8,
+    /// Aday küçültme kolundan mı geldi ([`shrink`]). İki kapıdan geçen adayda
+    /// `false` ve o hâlde çizim bugünküyle bit bit aynı (R3.3).
+    pub(crate) shrunk: bool,
+}
+
+impl Accepted {
+    /// Glyph'in taban çizgisinden dikey kaydırması (px, yukarı pozitif) —
+    /// **tek formül**, çizimin iki reçetesi (`raster::draw_glyph`,
+    /// `raster::draw_color_glyph`) buradan okuyor.
+    ///
+    /// Küçültülmemiş adayda sıfır: bugün kabul edilen her glyph tabanında
+    /// kalıyor. Küçültülende mürekkebin dikey ortası **hücrenin** ortasına
+    /// geliyor, çünkü punto taban çizgisinin üstündeki orijine göre
+    /// küçülüyor ve glyph tabana doğru çöküyor — yarısına inen emoji
+    /// harflerin yanında alçakta, alt ucu `y`'nin kuyruğunun hizasında
+    /// duruyordu. Seçim gözle yapıldı: taban, hücre ortası ve x-yüksekliğinin
+    /// ortası yan yana çizildi ve emoji ile `⧉` ikincisinde metinle birlikte
+    /// okunuyor (`.tasks/041-yedek-glyph-kucultme/phase-2.md` → Uygulama
+    /// Notları). Tam sayı piksele yuvarlanıyor: taban çizgisi zaten tam sayı
+    /// ve kesirli kaydırma AA fazını değiştirip kenarı bulanıklaştırırdı.
+    ///
+    /// Yatay kapı bundan etkilenmiyor (ölçütü yalnız yatay,
+    /// [`ink_fits_box`]); hücrenin ortası dikeyde taşmayı da azaltıyor.
+    pub(crate) fn rise(&self, m: Metrics) -> CGFloat {
+        if !self.shrunk {
+            return 0.0;
+        }
+        let ink = glyph_ink(&self.font, self.glyph);
+        let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px);
+        (CGFloat::from(m.cell_px.1) / 2.0 - baseline - (ink.origin.y + ink.size.height / 2.0))
+            .round()
+    }
 }
 
 /// Yukarı yuvarlar ve `u16`'ya sıkıştırır.

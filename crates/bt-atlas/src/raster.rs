@@ -50,7 +50,7 @@ pub(crate) fn draw(
     let Some(glyph) = font::glyph_index(font, ch) else {
         return DrawResult::NoGlyph;
     };
-    draw_glyph(font, glyph, m, box_advance, x_offset, target)
+    draw_glyph(font, glyph, m, box_advance, x_offset, 0.0, target)
 }
 
 /// [`draw`]'in glyph numarasıyla çağrılan gövdesi.
@@ -60,12 +60,17 @@ pub(crate) fn draw(
 /// ([`font::shape_cluster`]), yani `glyph_index(ch)` sorusu orada sorulamıyor.
 /// Yerleşim, ortalama ve bağlam **tek yerde** kalıyor; [`draw`] yalnız
 /// numarayı buluyor, yani bugünkü raster bit bit aynı.
+///
+/// `rise` taban çizgisinden dikey kaydırma (px, yukarı pozitif); yalnız
+/// küçültülmüş yedekte sıfırdan farklı ve formülü tek yerde
+/// ([`font::Accepted::rise`]).
 pub(crate) fn draw_glyph(
     font: &CTFont,
     glyph: CGGlyph,
     m: Metrics,
     box_advance: CGFloat,
     x_offset: CGFloat,
+    rise: CGFloat,
     target: &mut [u8],
 ) -> DrawResult {
     // `debug_assert` değil: bu satır aşağıdaki `unsafe` bloğun ön koşulu.
@@ -115,7 +120,7 @@ pub(crate) fn draw_glyph(
     // hücrenin altından `cell_h - baseline_px` kadar yukarıda. Çıkarma taşmaz:
     // `font::metrics` yüksekliği taban + (descent+leading) olarak kuruyor ve
     // ikinci parça en az 1.
-    let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px);
+    let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px) + rise;
     // Glyph hücrede **yatay olarak ortalanıyor**: yedek fontun ilerlemesi
     // hücrenin ilerlemesinden dar olabiliyor ve sola yapışmış bir işaret
     // komşularının arasında hizasız görünür. Kural **evrensel**, yedeğe
@@ -181,6 +186,7 @@ pub(crate) fn draw_color_glyph(
     m: Metrics,
     box_advance: CGFloat,
     x_offset: CGFloat,
+    rise: CGFloat,
     target: &mut [u8],
 ) -> DrawResult {
     // `debug_assert` değil: aşağıdaki `unsafe` bloğun ön koşulu ve **maske
@@ -222,10 +228,10 @@ pub(crate) fn draw_color_glyph(
     CGContext::set_allows_font_smoothing(Some(&ctx), false);
     CGContext::set_should_smooth_fonts(Some(&ctx), false);
 
-    // Konum aritmetiği [`draw`] ile **birebir aynı** ve olmak zorunda: geniş
-    // emoji de `Half` mekanizmasından geçiyor, yani sağ yarısı aynı tam sayı
-    // ofsetle elde ediliyor.
-    let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px);
+    // Konum aritmetiği [`draw_glyph`] ile **birebir aynı** ve olmak zorunda:
+    // geniş emoji de `Half` mekanizmasından geçiyor, yani sağ yarısı aynı tam
+    // sayı ofsetle elde ediliyor; `rise` de aynı ([`font::Accepted::rise`]).
+    let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px) + rise;
     let x = font::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
     let position = CGPoint::new(x, baseline);
     // SAFETY: tek glyph, tek konum, sayı ikisiyle tutarlı; bağlam canlı.
