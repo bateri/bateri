@@ -119,6 +119,17 @@ const EASE_DURATION: f32 = 0.18;
 // ekranda kesilen bir kaymada değil.
 const _: () = assert!(EASE_DURATION < TIME_CEILING);
 
+/// How long a run of screenful scrolls still counts as one burst, seconds
+/// ([`Motion::scroll_in`]) — derived, not measured.
+///
+/// It is the slide's own length: [`EASE_DURATION`] ends the `ease` slide, and
+/// at that point the spring has `(1 + ωt)·e^(−ωt) ≈ 0.029` of its distance
+/// left (ωt = [`OMEGA`] × 0.18 = 5.4), under one row of a 30-row screen —
+/// computed from the closed form, not measured. A screenful that arrives
+/// later lands on a slide that is visually over, so output is still pouring;
+/// the reads of one short burst arrive within a few frames of each other.
+const BURST_WINDOW: f32 = EASE_DURATION;
+
 // Belirmenin "duraksama" ölçütü `dt`'nin kırpılmasına **yaslanıyor**
 // (`Motion::sync`): link uyuduktan sonraki ilk kare `DT_MAX` kadar sayılıyor ve
 // bunun bir duraksama sayılması için kırpmanın belirmeden uzun olması şart.
@@ -190,13 +201,17 @@ pub(crate) struct Motion {
     /// İmlecinkiyle aynı `Option` sözleşmesi ve aynı sebeple: yokluk da ilk
     /// kare de "sıradaki hedefe anında otur" demek.
     origin: Option<Slide>,
-    /// Whether the previous content frame scrolled a screen or more
-    /// ([`Motion::scroll_in`]): output is pouring and a screenful scroll is
-    /// part of the stream, not a burst on a resting grid.
+    /// Age, in seconds, of the current run of content frames that each
+    /// scrolled a screen or more ([`Motion::scroll_in`]); `None` once a
+    /// content frame scrolls less than a screen.
     ///
-    /// The slide's own state cannot tell the two apart: the stream branch
-    /// finishes the slide, so the next screenful frame finds it at rest.
-    origin_pouring: bool,
+    /// A run younger than [`BURST_WINDOW`] is one burst arriving in several
+    /// PTY reads and keeps sliding; an older one is a stream. It is a clock,
+    /// not a frame count: how many frames a burst is split into is up to the
+    /// reader and varies from run to run. The slide's own state cannot tell
+    /// the two apart either: the stream branch finishes the slide, so the next
+    /// screenful frame finds it at rest.
+    screenful_run: Option<f32>,
     /// Son kareden görülen kaydırma ofseti; `None` → henüz hiç kare yok.
     ///
     /// Ayrı tutuluyor çünkü `state` boşalsa da (görünmez imleç) ofsetin
@@ -515,25 +530,32 @@ impl Motion {
     /// kalırdı. Tavan konumu **aşağı çekmiyor**, yalnız daha fazla itmiyor.
     ///
     /// **Tek karede `limit` ya da daha fazla satır kaydıysa iki kol var ve
-    /// ayıran şey kaymanın uçuşta olup olmadığı ya da bir önceki içerik
-    /// karesinin de ekran boyu kaydırıp kaydırmadığı.** Durgun ızgarada bu tek
-    /// seferlik bir patlama (dolu ekranda `seq 1 200`): son ekran tam bir
-    /// ekran aşağıdan süzülerek geliyor, yani boş ızgaradaki büyümeyle aynı
-    /// his. Kayma zaten sürüyorsa çıktı **akıyor** ve kayma bitiriliyor —
-    /// tavanın ikinci yarısı. Ölçüldü (`BT_SCROLL_TEST`, kare başına 45–467
-    /// satır): bu kol olmadan öteleme tavanda asılı kalıyor ve pencere akış
-    /// boyunca en yeni çıktıyı **bir ekran geriden** gösteriyordu. İki kolu
-    /// tek ölçüte ("bir ekran ya da fazlası → bitir") bağlamak patlamayı da
-    /// akış sanıyordu: dolu ızgarada taşan çıktı hiç kaymıyordu (kullanıcı
-    /// bildirdi, 2026-09-23). Akışın ilk karesi de patlama gibi süzülmeye
-    /// başlıyor; ikinci büyük karede bitiyor, yani gecikme en çok bir kare.
+    /// ayıran şey süre** ([`Motion::screenful_run`], [`BURST_WINDOW`]).
+    /// Kısa bir patlama (dolu ekranda `seq 1 200`, `ls -la`) PTY'den bir,
+    /// iki ya da üç okumada, yani o kadar içerik karesinde geliyor ve sayı
+    /// koşudan koşuya değişiyor: pencerenin içindeki ekran boyu kareler
+    /// sıradan kola düşüyor — konum tavana kırpılıyor, kayma bitmiyor ve son
+    /// ekran tam bir ekran aşağıdan süzülüyor. Ekran boyu kareler pencereyi
+    /// aşarak sürerse çıktı **akıyor** ve kayma bitiriliyor — tavanın ikinci
+    /// yarısı. Ölçüldü (`BT_SCROLL_TEST`, kare başına 45–467 satır): bu kol
+    /// olmadan öteleme tavanda asılı kalıyor ve pencere akış boyunca en yeni
+    /// çıktıyı **bir ekran geriden** gösteriyordu. Ayrımı kare sayısına
+    /// bağlamak ("ikinci büyük kare akıştır" ya da "kayma uçuştayken gelen
+    /// ekran boyu kare akıştır") parçalı gelen patlamayı rastgele kesiyordu:
+    /// ilk `ls -la` süzülüyor, peşindekiler süzülmüyordu (kullanıcı bildirdi,
+    /// 2026-09-30). Bedeli: akışın ilk [`BURST_WINDOW`]'u patlama gibi
+    /// tavanda süzülüyor.
     ///
-    /// The stream is remembered, not re-derived from the slide
-    /// ([`Motion::origin_pouring`]): the finish branch leaves the slide at
-    /// rest, so under sustained output every other screenful frame used to
-    /// re-arm the burst — the grid was drawn a screen low and the fill band
-    /// stretched by a screen on half the frames (measured 2026-09-30,
-    /// `docs/OLCUMLER.md`: release `cpu_encode` p95 0.23 → 0.33).
+    /// Akış **hatırlanıyor**, kaymadan yeniden türetilmiyor: bitirme kolu
+    /// kaymayı yerleşik bırakıyor ve sürekli akışta her ikinci ekran boyu
+    /// kare patlamayı yeniden kuruyordu — ızgara bir ekran aşağıda çiziliyor,
+    /// doldurma bandı bir ekran uzuyordu (ölçüldü 2026-09-30,
+    /// `docs/OLCUMLER.md`: release `cpu_encode` p95 0,23 → 0,33). Koşuyu
+    /// ekrandan az kaydıran bir içerik karesi (sıfır dahil) bitiriyor, yani
+    /// sonraki patlama yine süzülüyor. **Bilinen sınır:** aralarında böyle
+    /// bir kare olmayan, boşlukla ayrılmış ekran boyu kareler
+    /// (`while sleep 1; do seq 200; done`) bir kez süzülüp sonra akış
+    /// sayılıyor — önceki kuralda da öyleydi.
     ///
     /// Belirme ve `Snap` kiplerinde hiçbir şey: öteleme o kiplerde zaten
     /// kaymıyor ([`Motion::origin_mode`]). İlk karede de hiçbir şey — kayacak
@@ -541,26 +563,27 @@ impl Motion {
     pub(crate) fn scroll_in(&mut self, rows: u16, limit: u16) {
         // Recorded before any early return: only content frames reach this
         // call, so a frame that scrolls less than a screen (including zero
-        // rows) is the only thing that ends a stream.
-        let pouring = self.origin_pouring;
-        self.origin_pouring = rows >= limit;
+        // rows) is the only thing that ends a run.
+        let stream = if rows >= limit {
+            let age = *self.screenful_run.get_or_insert(0.0);
+            age >= BURST_WINDOW
+        } else {
+            self.screenful_run = None;
+            false
+        };
         if rows == 0 || self.origin_mode() == Mode::Snap {
             return;
         }
-        let mode = self.origin_mode();
         if let Some(slide) = &mut self.origin {
-            if rows >= limit {
-                let burst = slide.settled(mode) && !pouring;
-                slide.pos = if burst {
-                    slide.target + f32::from(limit)
-                } else {
-                    slide.target
-                };
+            if stream {
+                slide.pos = slide.target;
                 slide.vel = 0.0;
                 slide.from = slide.pos;
                 slide.elapsed = 0.0;
                 return;
             }
+            // A burst, whole or in pieces: on a resting grid this lands
+            // exactly a screen low, on a sliding one it continues at the cap.
             let cap = slide.target + f32::from(limit);
             slide.pos = (slide.pos + f32::from(rows)).min(cap).max(slide.pos);
             slide.from = slide.pos;
@@ -807,6 +830,9 @@ impl Motion {
     /// sayaç görmez, göz görür.
     pub(crate) fn advance(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, DT_MAX);
+        if let Some(age) = &mut self.screenful_run {
+            *age += dt;
+        }
         self.advance_origin(dt);
         self.advance_glide(dt);
         // Bant ötelemeyle **aynı fizik ve aynı kip**: ikisi de ızgaranın yer
@@ -2352,14 +2378,11 @@ mod tests {
         motion.scroll_in(5, 30);
         assert_eq!(motion.origin(), 30.0);
 
-        // Kayma sürerken bir ekran ya da fazlası tek karede: çıktı akıyor,
-        // kayma bitiyor ve en yeni çıktı hemen yerinde.
+        // A screenful while the slide is in flight is not a stream by itself:
+        // it continues at the cap ([`BURST_WINDOW`] decides, not the flight).
         motion.scroll_in(30, 30);
-        assert!(
-            motion.settled(),
-            "akışta ekran boyu kaydırma kaymayı sürdürdü"
-        );
-        assert_eq!(motion.origin(), 0.0);
+        assert_eq!(motion.origin(), 30.0);
+        assert!(!motion.origin_settled());
     }
 
     #[test]
@@ -2383,10 +2406,7 @@ mod tests {
             last = motion.origin();
         }
 
-        // Akış: ikinci büyük kare uçuştaki kaymayı bitiriyor — pencere en
-        // yeni çıktının bir ekran gerisinde asılı kalmıyor.
-        motion.scroll_in(200, 30);
-        assert!(motion.settled(), "akış kaymayı sürdürdü");
+        run_to_rest(&mut motion, TICK);
         assert_eq!(motion.origin(), 0.0);
     }
 
@@ -2397,32 +2417,52 @@ mod tests {
         // slide at rest, so the next screenful frame used to read as a burst
         // on a resting grid: every other frame drew the grid one screen low
         // and stretched the fill band by a screen (cpu_encode p95 0.23 -> 0.33).
+        // Within [`BURST_WINDOW`] the run is still one burst and slides at the
+        // cap; past it the stream finishes the slide once and never re-arms.
         let mut motion = full_grid();
-        motion.advance(TICK);
-        motion.scroll_in(200, 30);
-        assert_eq!(motion.origin(), 30.0, "the first frame is still a burst");
-        for frame in 2..=6 {
+        let mut age = 0.0;
+        let mut frame = 0;
+        loop {
+            motion.advance(TICK);
+            if frame > 0 {
+                age += TICK;
+            }
+            frame += 1;
+            motion.scroll_in(200, 30);
+            if age >= BURST_WINDOW {
+                break;
+            }
+            assert_eq!(motion.origin(), 30.0, "frame {frame} left the burst");
+            assert!(!motion.origin_settled(), "frame {frame} left the burst");
+        }
+        assert_eq!(motion.origin(), 0.0, "the stream did not finish the slide");
+        assert!(motion.settled(), "the stream did not finish the slide");
+        for later in 1..=30 {
             motion.advance(TICK);
             motion.scroll_in(200, 30);
             assert_eq!(
                 motion.origin(),
                 0.0,
-                "frame {frame} of the stream re-armed the burst"
+                "frame {later} past the window re-armed the burst"
             );
-            assert!(motion.settled(), "frame {frame} left the stream sliding");
+            assert!(motion.settled(), "frame {later} past the window slid");
         }
     }
 
     #[test]
     fn a_burst_after_a_stream_still_slides_once_output_rests() {
-        // The stream flag is cleared only by a content frame that scrolls less
-        // than a screen (typing the next command, the prompt repaint); idle
-        // produces no frames. Once cleared, `seq 1 200` must slide in again.
+        // The run is cleared only by a content frame that scrolls less than a
+        // screen (typing the next command, the prompt repaint); idle produces
+        // no frames. Once cleared, `seq 1 200` must slide in again.
         let mut motion = full_grid();
-        for _ in 0..3 {
+        for _ in 0..40 {
             motion.advance(TICK);
             motion.scroll_in(200, 30);
         }
+        assert!(
+            motion.settled(),
+            "40 screenful frames did not read as a stream"
+        );
         for _ in 0..3 {
             motion.advance(TICK);
             motion.scroll_in(0, 30);
@@ -2438,6 +2478,85 @@ mod tests {
         assert!(
             !motion.origin_settled(),
             "a burst after the stream did not slide"
+        );
+    }
+
+    #[test]
+    fn a_burst_split_across_frames_still_slides_in() {
+        // Guard for the 2026-09-30 eye check: a short burst (`ls -la`,
+        // `seq 1 200`) reaches the grid in one, two or three PTY reads, i.e.
+        // content frames. Only the first one used to slide; the second
+        // screenful frame read as a stream and finished the slide.
+        for chunks in [2, 3] {
+            let mut motion = full_grid();
+            for chunk in 0..chunks {
+                motion.advance(TICK);
+                motion.scroll_in(200, 30);
+                assert_eq!(
+                    motion.origin(),
+                    30.0,
+                    "chunk {chunk} of {chunks} did not keep the burst a screen low"
+                );
+                assert!(
+                    !motion.origin_settled(),
+                    "chunk {chunk} of {chunks} finished the burst"
+                );
+            }
+            run_to_rest(&mut motion, TICK);
+            assert_eq!(motion.origin(), 0.0);
+        }
+
+        // A first chunk shorter than a screen starts an ordinary slide; the
+        // screenful that follows continues it at the cap instead of ending it.
+        let mut motion = full_grid();
+        motion.advance(TICK);
+        motion.scroll_in(20, 30);
+        motion.advance(TICK);
+        motion.scroll_in(30, 30);
+        assert_eq!(motion.origin(), 30.0, "the screenful chunk ended the slide");
+        assert!(
+            !motion.origin_settled(),
+            "the screenful chunk ended the slide"
+        );
+        run_to_rest(&mut motion, TICK);
+        assert_eq!(motion.origin(), 0.0);
+    }
+
+    #[test]
+    fn back_to_back_bursts_both_slide() {
+        // The user's "art arda": a burst, the prompt repaint in between (a
+        // content frame that scrolls less than a screen), then another burst —
+        // at rest or while the first one is still sliding in.
+        let mut motion = full_grid();
+        for burst in 0..2 {
+            motion.advance(TICK);
+            motion.scroll_in(200, 30);
+            motion.advance(TICK);
+            motion.scroll_in(200, 30);
+            assert_eq!(motion.origin(), 30.0, "burst {burst} did not slide");
+            assert!(!motion.origin_settled(), "burst {burst} did not slide");
+            run_to_rest(&mut motion, TICK);
+            motion.advance(TICK);
+            motion.scroll_in(0, 30);
+        }
+
+        let mut motion = full_grid();
+        motion.advance(TICK);
+        motion.scroll_in(200, 30);
+        for _ in 0..3 {
+            motion.advance(TICK);
+        }
+        motion.scroll_in(1, 30);
+        motion.advance(TICK);
+        motion.scroll_in(200, 30);
+        assert_eq!(
+            motion.origin(),
+            30.0,
+            "a burst over a sliding grid was finished"
+        );
+        assert!(
+            !motion.origin_settled(),
+            "a burst over a sliding grid was finished"
         );
     }
 

@@ -860,6 +860,54 @@ içerik bu sayıyı ödemiyor.
 
 ## Kare süresi
 
+### 2026-09-30 — patlama ile akışı süre ayırıyor: encode payı korunuyor
+
+Aşağıdaki bloğun düzeltmesinin takibi. Gözle kontrolde (gerçek pencere)
+parçalı gelen kısa patlama (`ls -la`, `seq 1 200`) bazen süzülüyor bazen
+süzülmüyordu: ayrım kare sayısına dayanıyordu ve ikinci ekran boyu kare akış
+sanılıyordu. Yeni ölçüt süre: ekran boyu karelerin kesintisiz koşusu
+`BURST_WINDOW`'dan (`EASE_DURATION`, 0,18 sn) gençse aynı patlama (konum
+tavana kırpılır, kayma sürer), yaşlıysa akış (kayma bitirilir, koşu bitene
+kadar yeniden kurulmaz). `Motion::origin_pouring` → `Motion::screenful_run`.
+Soru: akışın ilk 0,18 sn'si artık tavanda süzüldüğüne göre encode payı geri
+geliyor mu?
+
+Reçete aşağıdakinin aynısı: release, binary doğrudan, `BT_FRAME_STATS=1
+BT_SCROLL_TEST=1`, 10 saniye, 10 koşu. Ağaç `123ae5d` + bu düzeltme
+(commit'lenmemiş hâli). MacBook Pro M1 Pro, macOS 26.4.1 (25E253), rustc
+1.88.0, **prizde** (%100, dolu). Yük ortalaması 1,66 (5 dk'lık 2,71); açık
+bateri yok.
+
+| # | cpu_kare p95 / max | cpu_encode p95 / max | gpu p95 / max | acilis | kare | istek | kapanis |
+|---|---|---|---|---|---|---|---|
+| 1 | 0,07 / 0,40 | 0,27 / 1,44 | 0,25 / 0,36 | 200,78 | 1198 | 337847 | clean |
+| 2 | 0,08 / 0,15 | 0,28 / 1,50 | 0,25 / 0,58 | 207,98 | 1197 | 330559 | abandoned |
+| 3 | 0,07 / 0,24 | 0,28 / 1,48 | 0,25 / 0,58 | 205,08 | 1197 | 333091 | clean |
+| 4 | 0,08 / 0,16 | 0,28 / 1,51 | 0,25 / 0,58 | 183,99 | 1197 | 332886 | abandoned |
+| 5 | 0,08 / 0,18 | 0,27 / 1,48 | 0,25 / 0,72 | 186,75 | 1198 | 324550 | clean |
+| 6 | 0,08 / 0,15 | 0,26 / 1,43 | 0,25 / 0,58 | 171,65 | 1198 | 332839 | clean |
+| 7 | 0,08 / 0,28 | 0,27 / 1,42 | 0,25 / 0,58 | 172,60 | 1198 | 331044 | abandoned |
+| 8 | 0,08 / 0,14 | 0,27 / 1,53 | 0,25 / 0,58 | 215,60 | 1197 | 336662 | abandoned |
+| 9 | 0,07 / 0,15 | 0,28 / 1,44 | 0,25 / 0,58 | 195,76 | 1198 | 329895 | clean |
+| 10 | 0,08 / 0,55 | 0,29 / 1,52 | 0,25 / 0,58 | 211,91 | **610** | 346992 | clean |
+
+Sabit jetonlar bir kez: `hucre=0 glif=1785 kural=0 yuva=37/1984
+yuva2=0/1984 yuk=load hareket=0 kayma=0 profil=release dusen=0
+gpu_elenen=0 taban=20 pipeline=ok`; `icerik`/`ornek`/`gpu_ornek` = `kare`.
+`sessiz=0.00ms` dokuz koşuda. Tam satırlar
+`target/olcum-kare/burst-window/run-*.out`.
+
+**Sapma ayıklanmadı:** 10. koşu `kare=610`, `sessiz=4878.47ms` — aşağıdaki
+bloğun 6. koşusuyla aynı desen (link koşunun yarısını uyudu); p95'leri
+öteki dokuzla aynı bantta.
+
+**Sonuç.** `cpu_encode_p95` **0,26–0,29** (önce 0,25–0,28), `cpu_kare_p95`
+**0,07–0,08** (aynı), `gpu_p95` **0,25** (aynı). Akışın ilk 0,18 sn'si
+(~22 kare, 10 sn'lik koşunun ~%2'si) koşunun en pahalı kareleri, yani üst
+%5'e (~60 kare) giriyor ve p95'i en çok o kadar itebilir; ölçülen +0,01
+bununla tutarlı ya da gürültü, ayrılamıyor. Belirgin bir geri çıkış yok,
+123ae5d'nin kazancı korundu.
+
 ### 2026-09-30 — birinci basamağın düzeltmesi: akış hatırlanıyor
 
 Aşağıdaki bloğun `0777e13` mekanizması doğrulandı ve kapatıldı. Kod

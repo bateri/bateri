@@ -826,16 +826,20 @@ hedefi hiç oynamıyor — kayma ızgara dolana kadar vardı, sonra yoktu
 (kullanıcı bildirdi). Kaç satırın geçmişe kaydığı sınırdan ayrı geçiyor
 (`Cursor::scrolled`) ve ötelemenin **konumu** o kadar geri alınıp hedefine
 yeniden süzülüyor; tavanı bir ekran. Tek karede bir ekran ya da fazlası
-kaydıysa ayıran şey kaymanın uçuşta olması: durgun ızgarada bu bir
-**patlama** ve son ekran bir ekran aşağıdan süzülüyor (dolu ekranda `seq 1
-200` hiç kaymıyordu, kullanıcı bildirdi), kayma sürüyorsa **ya da bir
-önceki içerik karesi de ekran boyu kaydırdıysa** çıktı **akıyor** ve kayma
+kaydıysa ayıran şey **süre**, kare sayısı değil (`Motion::screenful_run`,
+`BURST_WINDOW` = kaymanın kendi süresi, `EASE_DURATION`): kısa bir patlama
+(dolu ekranda `seq 1 200`, `ls -la`) PTY'den bir, iki ya da üç okumada gelip
+rastgele parçalanıyor ve pencerenin içindeki ekran boyu kareler aynı
+patlamanın devamı — konum tavana kırpılıyor, son ekran bir ekran aşağıdan
+süzülüyor (dolu ekranda `seq 1 200` hiç kaymıyordu; kare sayısına bağlı
+ölçütte de yalnız ilk `ls -la` süzülüyordu — kullanıcı iki kez bildirdi).
+Ekran boyu kareler pencereyi aşarak sürerse çıktı **akıyor** ve kayma
 bitiriliyor (ölçüldü: `BT_SCROLL_TEST`'te öteleme tavanda asılı kalıp en
-yeni çıktıyı bir ekran geriden gösteriyordu). Akış **hatırlanıyor**
-(`Motion::origin_pouring`), kaymadan türetilmiyor: bitirme kaymayı yerleşik
-bırakıyor ve akışta her ikinci kare patlamayı yeniden kurup bandı bir ekran
-uzatıyordu (ölçüldü, `docs/OLCUMLER.md` 2026-09-30); akışı yalnız ekrandan
-az kaydıran bir içerik karesi bitiriyor. Sayının ölçütü defterin boyu **değil**
+yeni çıktıyı bir ekran geriden gösteriyordu). Akış **hatırlanıyor**,
+kaymadan türetilmiyor: bitirme kaymayı yerleşik bırakıyor ve akışta her
+ikinci kare patlamayı yeniden kurup bandı bir ekran uzatıyordu (ölçüldü,
+`docs/OLCUMLER.md` 2026-09-30); koşuyu yalnız ekrandan az kaydıran bir içerik
+karesi bitiriyor, yani sonraki patlama yine süzülüyor. Sayının ölçütü defterin boyu **değil**
 ekran tepesindeki satırın kimliği (`session::row_identity`, hücre tamponunun
 adresi): `history_size()` `scrollback`'te doyuyor ve ondan türeyen sayı on
 bin satır sonra aynı kusuru geri getirirdi, satırın tamponu ise alacritty'nin
