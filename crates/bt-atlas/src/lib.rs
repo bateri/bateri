@@ -35,6 +35,10 @@
 //! [`TOFU`] — onları gerçekten çizmek (iki hücre, renkli doku) ayrı bir sete
 //! kaldı.
 
+// Yedek kapısının taraması ve araç karakterlerinin bekçisi; üretimde
+// tüketicisi yok (041 phase-1).
+#[cfg(test)]
+mod census;
 mod font;
 mod raster;
 
