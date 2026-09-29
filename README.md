@@ -6,7 +6,9 @@ web layer in between. It aims to feel calm: commands are grouped into blocks,
 the line you type lives in a dock at the bottom of the window, the cursor
 glides instead of jumping, and an idle window draws nothing at all.
 
-**[Download for macOS →](https://bateri.dev)** · macOS 14 or later · Apple silicon
+**[Download for macOS →](https://github.com/bateri/bateri/releases/latest/download/bateri.dmg)**
+· macOS 14 or later · Apple silicon · [bateri.dev](https://bateri.dev) ·
+[Changelog](CHANGELOG.md) · Free software (GPL-3.0)
 
 ## Features
 
@@ -33,13 +35,23 @@ glides instead of jumping, and an idle window draws nothing at all.
   follows the system's Reduce Motion setting.
 - **Zero idle frames.** Nothing is drawn unless something changed, so an idle
   window costs no GPU time.
-- **Automatic updates** via Sparkle, signed and notarized.
+- **Automatic updates** from GitHub Releases via Sparkle, signed and notarized.
 
 ## Install
 
-Download the DMG from [bateri.dev](https://bateri.dev), open it and drag
-**bateri** into **Applications**. Updates arrive automatically; you can also
-check any time with **bateri ▸ Check for Updates…**.
+Download [`bateri.dmg`](https://github.com/bateri/bateri/releases/latest/download/bateri.dmg)
+from the [latest release](https://github.com/bateri/bateri/releases/latest),
+open it and drag **bateri** into **Applications**. The app is signed with a
+Developer ID and notarized by Apple, so it opens without a warning.
+
+### Updates
+
+bateri checks for a new version once a day and asks before installing it; you
+can also check any time with **bateri ▸ Check for Updates…**. The check goes
+straight to this repository's releases
+(`releases/latest/download/appcast.xml`) — there is no update server of our
+own, and nothing but the version check is sent. Every update is signed with
+bateri's EdDSA key and verified before it is installed.
 
 ## Shell integration
 
@@ -137,14 +149,45 @@ also built and tested on Linux (`make linux`).
 
 ## Releasing
 
-User-facing changes go under **Unreleased** in [`CHANGELOG.md`](CHANGELOG.md).
-To release, rename that section to the new version, bump the version in
-`Cargo.toml`, tag `v<version>` on `main` and run `make yayin`: it builds,
-notarizes the app and the DMG, and places the DMG, the update archive, the
-release notes and the Sparkle feed in the website repository, which deploys on
-push.
+Releases are cut from `main` on a Mac with the Developer ID certificate, a
+`notarytool` keychain profile (`bateri-notary`) and Sparkle's signing key in
+the keychain.
+
+1. Put user-facing changes under **Unreleased** in
+   [`CHANGELOG.md`](CHANGELOG.md) as they land.
+2. To release, bump `version` in `Cargo.toml`, rename **Unreleased** to that
+   version and today's date, and commit.
+3. Run `make gonder`. It builds and notarizes the app and the disk image,
+   writes a one-item Sparkle feed signed with the EdDSA key, pushes `main`,
+   tags the built commit `v<version>` and creates the GitHub release with
+   `bateri.dmg`, `bateri-<version>.zip` and `appcast.xml`, using the changelog
+   section as its notes.
+
+`make gonder` is `make yayin` (build everything locally, nothing public yet —
+try the app first) followed by a push and `make yayinla` (tag and publish).
+Publishing the release is publishing the update: installed copies read the
+newest release's `appcast.xml`, and the website's download button points at
+the newest `bateri.dmg`, so neither needs a change. A bad release is fixed by
+releasing a newer version; Sparkle never downgrades.
+
+## Contributing
+
+Bug reports and pull requests are welcome on
+[GitHub](https://github.com/bateri/bateri). By contributing you agree that your
+contribution is licensed under the same terms as bateri (GPL-3.0-or-later).
+Run `make hepsi` before opening a pull request; it is the same gate the project
+uses.
 
 ## License
 
-MIT. bateri includes third-party software; see
+bateri is free software: you can redistribute it and/or modify it under the
+terms of the [GNU General Public License](LICENSE) as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. It is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; see the license for details.
+
+Copyright © 2026 Ömer Kala.
+
+bateri includes third-party software under their own licenses (Apache-2.0,
+MIT); see
 [`assets/bundle/THIRD-PARTY-LICENSES.txt`](assets/bundle/THIRD-PARTY-LICENSES.txt).

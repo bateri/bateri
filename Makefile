@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite sırası yalnız seri make'te garantidir; -j altında "en ucuz kapı
 # önce" ve "sürüm başta" sözü bozulur.
 .NOTPARALLEL:
-.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris tarama kur paket yukle yayin yayin-kapisi sparkle dmgbuild linux
+.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris tarama kur paket yukle yayin yayinla gonder yayin-kapisi sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc pin'li değil (rust-toolchain.toml bilinçli
 # olarak yok): bir `brew upgrade` sonrası gelen clippy kırmızısını kod
@@ -218,8 +218,12 @@ SPARKLE_VERSION = 2.10.0
 SPARKLE_SHA256 = c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
 SPARKLE_DIR = $(TARGET_DIR)/sparkle-$(SPARKLE_VERSION)
 # Sparkle'ın okuduğu besleme; `Info.plist`'e `kur` anında yazılıyor.
-# Denemede ezilir: `make paket FEED_URL=https://…/appcast.xml`.
-FEED_URL ?= https://bateri.dev/appcast.xml
+# GitHub'ın `releases/latest/download/` adresi her zaman en yeni release'in
+# aynı adlı dosyasını veriyor, yani sürüm yayınlamak güncellemeyi
+# yayınlamak — sitenin sürümle hiçbir işi yok, site bir gün kapansa da kurulu
+# kopyalar güncellenir. Denemede ezilir: `make paket FEED_URL=https://…`.
+REPO = bateri/bateri
+FEED_URL ?= https://github.com/$(REPO)/releases/latest/download/appcast.xml
 
 sparkle:
 	@test -f $(SPARKLE_DIR)/.verified && exit 0; \
@@ -256,7 +260,8 @@ kur: sparkle
 	done
 	iconutil -c icns $(ICONSET) -o $(STAGE)/Contents/Resources/$(ICON).icns
 	rm -rf $(ICONSET)
-	cp assets/bundle/Credits.html assets/bundle/THIRD-PARTY-LICENSES.txt $(STAGE)/Contents/Resources/
+	@# GPL-3.0 §4: binary lisansın bir kopyasıyla gider; kaynağı kökteki LICENSE.
+	cp LICENSE assets/bundle/Credits.html assets/bundle/THIRD-PARTY-LICENSES.txt $(STAGE)/Contents/Resources/
 	@# Sarmalayıcı dosya dosya kopyalanıyor, `cp -R assets/shell` ile DEĞİL:
 	@# ZDOTDIR bizim dizinimizi gösterdiği sürece oraya yazan bir kol (009
 	@# phase-3'te `/etc/zshrc` bir kez `.zsh_history` doğurdu) ya da bir
@@ -299,6 +304,7 @@ kur: sparkle
 		test "$$(team $$x)" = "$$(team $(STAGE))" || fail "$$x paketle aynı kimlikle imzalı değil"; \
 	done; \
 	test '$(SIGN_ID)' = - || codesign -dv $(STAGE) 2>&1 | grep -q 'flags=.*runtime' || fail "hardened runtime yok"; \
+	cmp -s LICENSE $$c/Resources/LICENSE || fail "LICENSE pakette yok ya da girdiden farklı"; \
 	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f pakette yok ya da girdiden farklı"; \
 	done; \
@@ -332,7 +338,10 @@ henuz_yok = @echo "henüz yok: $(1)"; exit 1
 # "Yine de Aç" ile geçer.
 #
 # **İki çıktı, iki okur.** Zip Sparkle'ın: güncellemede kullanıcı hiçbir şey
-# sürüklemiyor ve zip küçük. DMG sitenin: ilk kurulumda Finder penceresi
+# sürüklemiyor ve zip küçük; beslemenin öğesi onu sürümüyle adlandırıyor.
+# DMG ilk kurulumun ve adında **sürüm yok**: GitHub'ın
+# `releases/latest/download/bateri.dmg` bağlantısı böylece hiç bayatlamıyor
+# ve site onu olduğu gibi gösteriyor. İlk kurulumda Finder penceresi
 # uygulamayı Applications'a sürükleten tek bir iş gösteriyor (arka plan,
 # ok, Applications kısayolu; düzen `assets/dmg/settings.py`, görsel
 # `tools/dmg_background.py`). Zip'le gelen uygulama İndirilenler'de kalıp
@@ -347,7 +356,7 @@ henuz_yok = @echo "henüz yok: $(1)"; exit 1
 # dosyasını (`.DS_Store`) kendisi yazıyor, yani AppleScript'le Finder'ı
 # sürmüyor — başsız ve izin sormadan koşuyor.
 ZIP = $(TARGET_DIR)/release/bateri-$(VERSION).zip
-DMG = $(TARGET_DIR)/release/bateri-$(VERSION).dmg
+DMG = $(TARGET_DIR)/release/bateri.dmg
 NOTARY_PROFILE ?= bateri-notary
 DMGBUILD_VERSION = 1.6.7
 DMGBUILD_DIR = $(TARGET_DIR)/dmgbuild-$(DMGBUILD_VERSION)
@@ -398,77 +407,104 @@ paket: kur dmgbuild
 	fi
 	@echo "paket: $(ZIP) + $(DMG) ($$(lipo -archs $(APP)/Contents/MacOS/bateri), macOS $$(plutil -extract LSMinimumSystemVersion raw $(APP)/Contents/Info.plist)+)"
 
-# Sürümü siteye koyar (`$(SITE)`, bateri-landing deposu): notarize zip ve
-# sürüm notu `public/releases/`'e, Sparkle'ın beslemesi
-# `public/appcast.xml`'e, notarize DMG `public/downloads/`'a, indirme
-# adresi ve sürüm `wrangler.jsonc`'ye, sayfadaki sürüm yazısı
-# (`data-version`'lı öğeler) `index.html`'e. Yayınlamaz: sitenin deposunda
-# commit + push yeter, Cloudflare `main`'e gelen push'u kendiliğinden
-# deploy ediyor.
+# Bir sürümü yayınlamak tek komut, bu Mac'te:
+#
+#   make gonder      yayin + main'i push + yayinla — baştan sona
+#
+# İki yarısı ayrıca da çağrılabiliyor, çünkü bölünmenin kendisi amaç: zip
+# herkese açılmadan önce bu Mac'te denenir.
+#
+#   make yayin       kapılar, paket (derle, imzala, notarize et, zımbala),
+#                    sürüm notu ve besleme → $(RELEASE_DIR); Apple'ın
+#                    notarization'ı dışında makineden hiçbir şey çıkmıyor
+#   make yayinla     derlenen commit'i v<sürüm> diye etiketler, etiketi
+#                    push eder ve GitHub release'ini zip, DMG ve beslemeyle
+#                    açar (`gh`)
 #
 # **Önce kapılar, sonra paket** (`yayin-kapisi`; paket dakikalar sürüyor ve
-# kapı ucuz): bir sürüm yalnız bilinen bir koddan çıkar — ağaç temiz, dal
-# `main`, HEAD `v$(VERSION)` etiketli — ve sürüm notuyla çıkar. Notun tek
-# kaynağı kökteki `CHANGELOG.md` (Keep a Changelog, İngilizce): kapı
-# `## [$(VERSION)]` bölümünü kesip `$(NOTES)`'a yazıyor, bölüm yoksa ya da
-# boşsa paket derlenmeden duruyor; landing yalnız yayınlanan kopyayı
-# tutuyor. Sparkle "yeni sürüm var" penceresinde onu gösteriyor — notsuz
-# pencere kullanıcıyı neyi kurduğunu bilmeden "Install"a itiyordu. Deneme
-# koşusu (`DENEME=1`, ör.
-# güncelleme döngüsünü sınamak için başka bir `SITE` ve `FEED_URL`'le)
-# yalnız dal/etiket/temizlik kapısını atlar; notarization ve not kapısı
-# her koşuda.
+# kapı ucuz): sürüm bilinen bir koddan çıkar — ağaç temiz ve `v$(VERSION)`
+# ne burada ne origin'de var — ve sürüm notuyla çıkar. Dal sorulmuyor: asıl
+# güvence `yayinla`'nın "commit origin/main'de" kapısı, yani main'e giden bir
+# commit başka bir worktree'de de paketlenebilir. Notun
+# tek kaynağı kökteki `CHANGELOG.md` (Keep a Changelog, İngilizce): kapı
+# `## [$(VERSION)]` bölümünü kesiyor, bölüm yoksa ya da boşsa paket
+# derlenmeden duruyor. Not hem release sayfasında hem Sparkle'ın "yeni sürüm
+# var" penceresinde görünüyor — notsuz pencere kullanıcıyı neyi kurduğunu
+# bilmeden "Install"a itiyordu. Sürüm numarası `Cargo.toml`'un; kapı onu
+# okuyor, `VERSION=` vermek gerekmiyor.
 #
-# Besleme `generate_appcast`'ten: klasördeki zip'leri okuyup her sürümü
-# gizli EdDSA anahtarıyla imzalıyor (anahtar anahtarlıkta, `generate_keys`;
-# kaybolursa kurulu kopyalara bir daha güncelleme gönderilemez — yedeği
-# `generate_keys -x`). Beslemede son üç sürüm kalıyor (aracın varsayılanı);
-# araç eskileri `releases/old_updates/`'e taşıyor ve orası siliniyor —
-# güncelleme her zaman en yeniye gidiyor, eski zip'e kimse bakmıyor. Delta
-# güncelleme yok (`--maximum-deltas 0`): paket küçük. Notarize edilmemiş
-# paket yayına girmiyor: Sparkle'ın indirdiği kopya da Gatekeeper'dan
-# geçmek zorunda.
+# `yayin` derlediği commit'i `$(RELEASE_DIR)/commit`'e yazıyor ve `yayinla`
+# **o** commit'i etiketliyor, o an HEAD neyse onu değil — etiket her zaman
+# zip'in içindeki kodu adlandırıyor. Etiket tek başına push edilmiyor:
+# commit origin/main'de değilse `yayinla` duruyor, yoksa hiçbir dalın
+# tutmadığı bir commit yayınlanırdı.
 #
-# İndirme adresi **göreli** (`/download`'ın 302'si): site hangi alan
-# adında sunulursa orada çalışır; beslemenin adresleri ise mutlak, çünkü
-# kurulu kopya onları sitenin dışından okuyor. DMG ayrı klasörde:
-# `generate_appcast` releases/'teki her arşivi bir güncelleme sayar ve aynı
-# sürümün zip'i ile DMG'si çakışırdı; indirme yalnız en yeniyi istiyor,
-# eskiler siliniyor.
+# **Besleme tek öğeli.** `releases/latest/download/appcast.xml` her zaman en
+# yeni release'inkini veriyor, yani okunan tek öğe en yenisi; eski
+# sürümlerin öğesi hiçbir kurulu kopyaya ulaşmazdı. `generate_appcast`
+# yalnız bu sürümün zip'ini ve notunu tutan geçici bir klasörden koşuyor,
+# zip'i gizli EdDSA anahtarıyla imzalıyor (anahtar anahtarlıkta,
+# `generate_keys`; kaybolursa kurulu kopyalara bir daha güncelleme
+# gönderilemez — yedeği `generate_keys -x`) ve indirme adresi release'in
+# kendi adresi (`releases/download/v<sürüm>/`). Delta güncelleme yok
+# (`--maximum-deltas 0`): paket küçük. Notarize edilmemiş paket yayına
+# girmiyor: Sparkle'ın indirdiği kopya da Gatekeeper'dan geçmek zorunda.
 #
 # Hatalı bir sürümün geri alınışı **yeni bir sürüm**: Sparkle eski sürüme
-# inmiyor ve beslemeden bir öğeyi silmek kurulu kopyaları o sürümde bırakır.
-SITE ?= ../bateri-landing
-RELEASES_URL = $(patsubst %/appcast.xml,%/releases/,$(FEED_URL))
-NOTES = $(TARGET_DIR)/release/bateri-$(VERSION).md
+# inmiyor ve bir release'i silmek `latest`'i bir öncekine döndürür ama o
+# sürümü kurmuş kopyaları olduğu yerde bırakır.
+RELEASE_DIR = $(TARGET_DIR)/release/v$(VERSION)
+NOTES = $(RELEASE_DIR)/notes.md
+RELEASE_URL = https://github.com/$(REPO)/releases/download/v$(VERSION)/
 
 yayin-kapisi:
-	@test -d $(SITE)/public && test -f $(SITE)/wrangler.jsonc || { echo "yayin: $(SITE) bateri-landing deposu değil (SITE=… ile ver)"; exit 1; }
-	@mkdir -p $(dir $(NOTES)); \
-	awk -v v='$(VERSION)' '/^## \[/ { if (on) exit; if (index($$0, "## [" v "]") == 1) { on = 1; next } } on' CHANGELOG.md > $(NOTES); \
+	@echo '$(VERSION)' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || { echo "yayin: sürüm '$(VERSION)' x.y.z değil (Cargo.toml)"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "yayin: çalışma ağacı temiz değil, sürüm bilinen bir koddan çıkmalı"; exit 1; }
+	@! git rev-parse -q --verify 'refs/tags/v$(VERSION)' >/dev/null || { echo "yayin: v$(VERSION) etiketi zaten var — Cargo.toml'da sürümü yükselt"; exit 1; }
+	@! git ls-remote --exit-code --tags origin 'refs/tags/v$(VERSION)' >/dev/null || { echo "yayin: v$(VERSION) etiketi origin'de zaten var"; exit 1; }
+	@rm -rf $(RELEASE_DIR) && mkdir -p $(RELEASE_DIR); \
+	awk -v v='$(VERSION)' '/^## \[/ { if (on) exit; if (index($$0, "## [" v "]") == 1) { on = 1; next } } on' CHANGELOG.md \
+		| awk 'NF { p = 1 } p' | awk '{ l[NR] = $$0 } END { n = NR; while (n > 0 && l[n] ~ /^[[:space:]]*$$/) n--; for (i = 1; i <= n; i++) print l[i] }' > $(NOTES); \
 	grep -q '[^[:space:]]' $(NOTES) || { echo "yayin: CHANGELOG.md'de '## [$(VERSION)]' bölümü yok ya da boş (Unreleased'i sürüme çevir)"; exit 1; }
-	@test '$(DENEME)' = 1 && { echo "yayin: DENEME=1 — dal, etiket ve temizlik kapısı atlandı"; exit 0; }; \
-	test -z "$$(git status --porcelain)" || { echo "yayin: çalışma ağacı temiz değil, sürüm bilinen bir koddan çıkmalı"; exit 1; }; \
-	test "$$(git branch --show-current)" = main || { echo "yayin: dal main değil ($$(git branch --show-current))"; exit 1; }; \
-	git tag --points-at HEAD | grep -qx 'v$(VERSION)' || { echo "yayin: HEAD v$(VERSION) etiketli değil (git tag v$(VERSION))"; exit 1; }
 
 yayin: yayin-kapisi paket
 	@spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' && xcrun stapler validate -q $(APP) || \
 		{ echo "yayin: paket notarize değil, yayına girmez"; exit 1; }
 	@spctl -a -vv -t open --context context:primary-signature $(DMG) 2>&1 | grep -q 'source=Notarized Developer ID' || \
 		{ echo "yayin: DMG notarize değil, yayına girmez"; exit 1; }
-	mkdir -p $(SITE)/public/releases $(SITE)/public/downloads
-	cp $(ZIP) $(SITE)/public/releases/
-	cp $(NOTES) $(SITE)/public/releases/bateri-$(VERSION).md
+	@test "$$(plutil -extract SUFeedURL raw $(APP)/Contents/Info.plist)" = '$(FEED_URL)' || { echo "yayin: paketin beslemesi $(FEED_URL) değil"; exit 1; }
+	cp $(ZIP) $(DMG) $(RELEASE_DIR)/
+	rm -rf $(RELEASE_DIR)/feed && mkdir -p $(RELEASE_DIR)/feed
+	cp $(ZIP) $(RELEASE_DIR)/feed/
+	cp $(NOTES) $(RELEASE_DIR)/feed/bateri-$(VERSION).md
 	$(SPARKLE_DIR)/bin/generate_appcast --maximum-deltas 0 --embed-release-notes \
-		--download-url-prefix '$(RELEASES_URL)' -o $(SITE)/public/appcast.xml $(SITE)/public/releases
-	rm -rf $(SITE)/public/releases/old_updates
-	rm -f $(SITE)/public/downloads/bateri-*.dmg
-	cp $(DMG) $(SITE)/public/downloads/
-	sed -i '' -e 's|"DOWNLOAD_URL": "[^"]*"|"DOWNLOAD_URL": "/downloads/bateri-$(VERSION).dmg"|' \
-		-e 's|"VERSION": "[^"]*"|"VERSION": "$(VERSION)"|' $(SITE)/wrangler.jsonc
-	sed -i '' -E 's|(<[^>]* data-version>)v[^<]*|\1v$(VERSION)|g' $(SITE)/public/index.html
-	@echo "yayin: $(VERSION) → $(SITE) (releases/ zip + not + appcast.xml, downloads/ DMG, wrangler.jsonc, index.html); sitenin deposunda commit + push (Cloudflare kendiliğinden deploy eder)"
+		--download-url-prefix '$(RELEASE_URL)' -o $(RELEASE_DIR)/appcast.xml $(RELEASE_DIR)/feed
+	rm -rf $(RELEASE_DIR)/feed
+	@test "$$(grep -c '<item>' $(RELEASE_DIR)/appcast.xml)" = 1 && grep -q 'url="$(RELEASE_URL)bateri-$(VERSION).zip"' $(RELEASE_DIR)/appcast.xml \
+		&& grep -q 'sparkle:edSignature=' $(RELEASE_DIR)/appcast.xml || { echo "yayin: besleme tek, imzalı ve release'i gösteren bir öğe değil"; exit 1; }
+	git rev-parse HEAD > $(RELEASE_DIR)/commit
+	@echo "yayin: $(RELEASE_DIR) ($$(cat $(RELEASE_DIR)/commit)) — $(APP)'i dene, sonra: make yayinla"
+
+yayinla:
+	@for f in bateri-$(VERSION).zip bateri.dmg appcast.xml notes.md commit; do \
+		test -f $(RELEASE_DIR)/$$f || { echo "yayinla: $(RELEASE_DIR)/$$f yok — önce make yayin"; exit 1; }; \
+	done
+	@! git ls-remote --exit-code --tags origin 'refs/tags/v$(VERSION)' >/dev/null || { echo "yayinla: v$(VERSION) etiketi origin'de zaten var"; exit 1; }
+	git fetch -q origin main
+	@git merge-base --is-ancestor "$$(cat $(RELEASE_DIR)/commit)" origin/main || { echo "yayinla: derlenen commit origin/main'de değil — önce main'i push et"; exit 1; }
+	git tag -a 'v$(VERSION)' -m 'bateri $(VERSION)' "$$(cat $(RELEASE_DIR)/commit)"
+	git push origin 'v$(VERSION)'
+	gh release create 'v$(VERSION)' $(RELEASE_DIR)/bateri.dmg $(RELEASE_DIR)/bateri-$(VERSION).zip $(RELEASE_DIR)/appcast.xml \
+		--repo '$(REPO)' --verify-tag --latest --title 'bateri $(VERSION)' --notes-file $(NOTES)
+	@echo "yayinla: v$(VERSION) — https://github.com/$(REPO)/releases/tag/v$(VERSION)"
+
+# main dışında notarization beklemesinden ÖNCE duruyor, sonra değil:
+# `yayinla` commit'i origin/main'de istiyor ve burada yalnız main push ediliyor.
+gonder:
+	@test "$$(git branch --show-current)" = main || { echo "gonder: dal main değil"; exit 1; }
+	$(MAKE) yayin
+	git push origin main
+	$(MAKE) yayinla
 
 # Bu Mac'e kurar: `kur`'un denetlenmiş paketini `$(INSTALL_DIR)`'a koyar.
 # Eski paketin üstüne `ditto` ile yazılmıyor, çünkü `ditto` birleştirir ve

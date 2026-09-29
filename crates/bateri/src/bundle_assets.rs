@@ -167,6 +167,34 @@ fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     );
 }
 
+/// GPL-3.0 §4: binary'yi alan herkese lisansın bir kopyası verilir. Metin
+/// depo kökündeki `LICENSE` (gnu.org'un metni, `make kur` onu pakete
+/// kopyalayıp `cmp`'liyor), About paneli (`Credits.html`) lisansı ve
+/// kaynağın yerini söylüyor ve manifestin SPDX'i aynı lisans — üçünden biri
+/// ayrışırsa hiçbir derleme kızarmaz, ihlal sessiz olur.
+#[test]
+fn own_license_ships_with_notice() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let license = std::fs::read_to_string(root.join("LICENSE")).expect("LICENSE okunamadı");
+    assert!(
+        license.starts_with("                    GNU GENERAL PUBLIC LICENSE\n                       Version 3, 29 June 2007"),
+        "LICENSE GPL-3.0'ın gnu.org metni değil"
+    );
+    let credits = read_asset("Credits.html");
+    for needle in [
+        "GNU General Public License, version 3",
+        "or any later version",
+        "github.com/bateri/bateri",
+        "Contents/Resources/LICENSE",
+    ] {
+        assert!(
+            credits.contains(needle),
+            "Credits.html içinde {needle:?} yok"
+        );
+    }
+    assert_eq!(env!("CARGO_PKG_LICENSE"), "GPL-3.0-or-later");
+}
+
 /// Apache-2.0 §4(a) ve MIT: alıcıya lisansın bir kopyası verilir (dosya
 /// `tools/third_party_notices.py`'nin çıktısı). Atıf metni
 /// (`Credits.html`) AppKit'in standart About panelinin okuduğu dosya.
