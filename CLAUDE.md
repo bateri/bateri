@@ -1201,8 +1201,10 @@ make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaşt
 make tarama       # yedek glyph kapısının envanteri (041): sembol/emoji bloklarını 13/16pt × @1x/@2x kapıdan geçirir; make hepsi'de yok (kurulu fontlara bağlı), BT_SCAN_FONT taban aileyi değiştirir
 make linux        # bt-core'un Linux kapısı: Docker'da clippy -D warnings + test --locked; yerel rustc ≠ imaj etiketi kırmızı, Docker yoksa ATLANDI
 make kur          # release derler, target/release/bateri.app'i kurar (Sparkle dahil; ilk koşuda sha256'lı indirir), anahtarlıktaki Developer ID ya da Apple Development kimliğiyle hardened runtime'la, yoksa ad-hoc imzalar (SIGN_ID ile ezilir) ve içeriğini denetler (Info.plist, URL şeması, ikon, lisans, shell betiği, Sparkle ve imzaları)
-make paket        # kur + target/release/bateri-<sürüm>.zip (Sparkle'ın) ve .dmg (sitenin, dmgbuild; düzen assets/dmg/); Developer ID'de ikisi de notarize + staple (NOTARY_PROFILE=bateri-notary)
-make yayin        # önce kapı (temiz ağaç, main, v<sürüm> etiketi, CHANGELOG.md'de ## [<sürüm>] bölümü — sürüm notu oradan kesilir; DENEME=1 ilk üçünü atlar), sonra paket + siteye koyar (SITE=../bateri-landing); yayın sitenin deposunda commit + push (Cloudflare kendiliğinden deploy eder)
+make paket        # kur + target/release/bateri-<sürüm>.zip (Sparkle'ın) ve bateri.dmg (ilk kurulumun, sürümsüz ad; dmgbuild, düzen assets/dmg/); Developer ID'de ikisi de notarize + staple (NOTARY_PROFILE=bateri-notary)
+make yayin        # kapı (temiz ağaç, v<sürüm> etiketi yok, CHANGELOG.md'de ## [<sürüm>] — not oradan kesilir) + paket + tek öğeli imzalı appcast → target/release/v<sürüm>/; derlenen commit'i kaydeder, hiçbir şey yayınlamaz
+make yayinla      # o commit origin/main'deyse v<sürüm> diye etiketler, push eder ve GitHub release'ini (bateri.dmg, zip, appcast.xml, notlar) --latest açar
+make gonder       # main'de: yayin + git push origin main + yayinla — sürüm yayınlamanın tek komutu
 make yukle        # kur + bu Mac'e kurar: /Applications/bateri.app (INSTALL_DIR ile değişir); açık bateri varken durur
 ```
 
@@ -1271,7 +1273,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   **Sparkle 2** bir crate değil, pakete gömülen bir framework (`make kur`
   sürümü ve sha256'sı `Makefile`'da sabit indirir, depoya girmez) ve
   `bt-shell` onu link'lemeden, çalışma zamanında yüklüyor
-  (`bt-shell::updater`). Besleme `https://bateri.dev/appcast.xml`, açık
+  (`bt-shell::updater`). Besleme GitHub'ın
+`releases/latest/download/appcast.xml`'i — her zaman en yeni release'in
+tek öğeli beslemesi, yani sürüm yayınlamak güncellemeyi yayınlamak ve site
+sürüm tutmuyor (indirme düğmesi aynı yolun `bateri.dmg`'si); açık
   EdDSA anahtarı `Info.plist.in`'de, gizli anahtar kullanıcının
   anahtarlığında (`generate_keys`); paket kimliği `dev.bateri.bateri` ve
   güncellemeler ona bağlı, değişmez.
@@ -1282,6 +1287,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   merkez hiç çağrılmıyor (kullanıcı onayı 2026-09-27,
   `.tasks/037-ssh-ikinci-tur/phase-7.md` → Uygulama Notları). `Cargo.lock`
   depodadır.
+  **bateri'nin kendi lisansı GPL-3.0-or-later** (`Cargo.toml`; metni kökteki
+  `LICENSE`, gnu.org'un metni, `make kur` onu pakete kopyalayıp `cmp`'liyor,
+  bekçisi `bundle_assets::own_license_ships_with_notice`): ürün grafındaki
+  her lisans (Apache-2.0, MIT, Zlib, Unlicense) v3'le uyumlu ve yeni
+  bağımlılık da öyle olmak zorunda — **GPL-2.0-only bir crate giremez**.
   `alacritty_terminal` **Apache-2.0**: lisans metni
   `assets/bundle/THIRD-PARTY-LICENSES.txt` ile pakete girer, atfı
   `Credits.html`'de durur. Geri kalan her crate MIT'le (hepsi MIT'i seçenek

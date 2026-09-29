@@ -102,7 +102,8 @@ hiç kurulmasın) ve o değişmez bir kod kısıtından *karar* diye türetilmi�
 
 Sonrası (sırasız): palet overlay'i (arama → 033), durum çubuğu (+ sayaç
 animasyonu). Sparkle ile güncelleme geldi (2026-09-28, set açılmadan:
-Developer ID + notarization + Sparkle 2, besleme `bateri.dev`).
+Developer ID + notarization + Sparkle 2; 2026-09-30'da besleme ve indirme
+GitHub Releases'a taşındı, lisans GPL-3.0-or-later oldu).
 
 > **Sıra değişti (2026-09-15, kullanıcı kararı).** Kullanıcı Metalterm'in
 > asıl değerini "animasyonlar, görünüş" diye koydu; eski sıra hareketi ve

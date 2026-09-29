@@ -92,7 +92,7 @@ Sıra kullanıcıya etkisine göre kabaca verildi.
     1016 kodda adıyla kapsam dışı.
 14. **Dağıtım.** Sparkle ile otomatik güncelleme, universal binary (Intel +
     Apple silicon), Homebrew cask, notarization. Bizde Developer ID imzası,
-    notarization (`make paket`) ve Sparkle (`make yayin`, `bateri.dev`) var;
+    notarization (`make paket`) ve Sparkle (`make gonder`, besleme GitHub Releases) var;
     paket yalnız Apple silicon ve Homebrew cask yok.
 15. **Satır içi alt komut önerisi** (0.1.7). git, paket, container, bulut ve
     derleme araçlarının alt komutları geçmişte olmasa da öneriliyor. Bizde
