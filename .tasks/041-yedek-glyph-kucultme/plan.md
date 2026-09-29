@@ -75,5 +75,5 @@ aday (cascade) ──► tek hücre sığar? ── evet ──► bugünkü yol
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
-| kapı | |
+| phase-2 | ✅ |
+| kapı | ✅ |

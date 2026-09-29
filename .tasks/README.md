@@ -42,7 +42,7 @@
 | 038 | [terminal-kimligi](038-terminal-kimligi/) | 🟢 | 2 phase + kapı tamam: kabukta `TERM_PROGRAM=bateri` ailesi ve sekme başına `BATERI_TAB_URL`, `open bateri://tab/<id>` o sekmeyi öne getiriyor (gözle kontrol bekliyor) |
 | 039 | [terminal-pane-bolmeler](039-terminal-pane-bolmeler/) | 🟢 | 4 phase + kapı tamam — sekme `TerminalPane`'lere bölünüyor: ⌘D/⇧⌘D, ⌘[/⌘] ve ⌥⌘ ok ile gezinme, ⌃⌘ ok ve sürüklemeyle boyutlama, ⌃⌘= eşitleme, ⇧⌘↩ büyütme, odaksız pane soluk (gözle kontrol bekliyor) |
 | 040 | [linux-kapisi-ve-wgpu](040-linux-kapisi-ve-wgpu/) | 🔨 | Linux'a ilk adım: `make linux` (Docker) kapısı ve renderer'ın wgpu'ya ölçümlü geçişi — macOS'ta görünür fark yok |
-| 041 | [yedek-glyph-kucultme](041-yedek-glyph-kucultme/) | 🔨 | Hücreyi az aşan yedek glyph (`⧉`) kutu yerine küçültülerek çiziliyor; önce bütün sembol aralıklarını kapıdan geçiren bir tarama, sınır onun dağılımından |
+| 041 | [yedek-glyph-kucultme](041-yedek-glyph-kucultme/) | 🟢 | 2 phase + kapı tamam — hücreyi aşan yedek glyph (`⧉`, tek sütunlu emoji) sınırın içindeyse küçük puntoyla ve hücrede ortalanarak çiziliyor; `make tarama` envanteri ve araç karakterlerinin bekçisi (gözle kontrol bekliyor) |
 
 Durum işaretleri: **📐 planlama** · **🔨 devam** · **🟢 bitti** · **🗄️ arşiv**.
 Düzen `.claude/is-akisi/duzen.md`'de.

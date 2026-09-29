@@ -23,9 +23,10 @@ karakter sistemin cascade'inden geliyor** (`font::fallback_font`, 019): yüz
 merdiveni tükendikten sonra, negatif önbellekten önce, yani anahtar başına
 atlasın ömründe bir kez ve kabul edilen aday sıradan bir yuvaya düşüyor —
 yeni önbellek, yeni tavan, yeni tahliye yok. **Kapı geometrik**: adayın
-**boyayacağı piksel** hücrenin dışına taşıyorsa kutu kalıyor, ve emoji,
-`.LastResort`, CJK ile geniş matematik harfi o **tek** kapıdan eleniyor — aile
-adı karşılaştırması, trait biti ve sihirli dizge yok (oranlar ölçüldü, sayıları
+**boyayacağı piksel** hücrenin dışına taşıyorsa kutu kalıyor — aile adı ve
+trait biti yok; **tek ad** küçültme kolunun `.LastResort`'u (041,
+`font::is_last_resort`, PostScript adı), çünkü geometri onu emojiden
+ayıramıyor ve küçültülse de bir kutu çizer (oranlar ölçüldü, sayıları
 `.tasks/019-glyph-yedegi/phase-1.md` → Uygulama Notları). Ölçülen şey
 **mürekkep**, ilerleme değil, ve ölçüt sonradan değişti: 019 kapıyı
 ilerlemeye kurmuştu ve belirtisi kullanıcıda görüldü — Claude Code'un araç işareti `⏺`
@@ -36,9 +37,17 @@ fontlarına karşı hiç sınanmamıştı. Ölçüt ters yöndeki boşluğu da k
 dar ilerleyip geniş boyayan aday eskiden geçip sağdan kırpılıyordu, artık
 kutu — yani "kutu ya da tam glyph" ilk kez bir dilek değil sözleşme.
 Alternatifi yarım çizilmiş bir glyph'ti: kutu görünür bir eksiklik, kırpılmış
-glyph sessiz bir bozulma. Ölçüt **yatay ve yalnız yatay**; dikeyi de sınamak
-bugün hiçbir adayı elemiyor (ölçüldü: dikeyde taşan tek küme emoji ve o zaten
-yatayda dönüyor), o yüzden dikey taşma kutuya değil kırpmaya düşüyor ve sınır
+glyph sessiz bir bozulma. **041'den beri sözleşme "kutu, tam glyph ya da
+sığacak kadar küçültülmüş glyph"**: iki kapıdan da dönen aday, bugünkü
+yerleşimle sığması için gereken küçültme (`font::fit_ratio`) sınırın
+içindeyse (`font::SHRINK_LIMIT`, taramanın dağılımından; tek sütunlu emojiyi
+@1x'te de kapsıyor — kullanıcı küçük emojiyi kutuya tercih etti) küçük
+puntolu kopyasıyla kabul ediliyor, kopya kapıdan **yeniden** geçiyor ve
+mürekkebi hücrede dikey ortalanıyor (`font::Accepted::rise`); iki kapıdan
+geçen aday bit bit aynı. Gerekçeler `.tasks/041-yedek-glyph-kucultme/`.
+Ölçüt **yatay ve yalnız yatay**; dikeyi de sınamak
+bugün hiçbir adayı elemiyor (ölçüldü: dikeyde taşan tek küme emoji; tam
+boyuyla yatayda dönüyor, küçültülünce hücrede ortalanıp içine giriyor), o yüzden dikey taşma kutuya değil kırpmaya düşüyor ve sınır
 adıyla yazılı (`font::ink_fits_cell`). Kaydırmanın formülü **tek yerde**
 (`font::centre_shift`, iki tüketici): kapı adayın **çizileceği** yerdeki
 mürekkebini ölçmek zorunda, yoksa çizilmeyen bir yerleşimi sınardı. Boy sınıfının ikisi
@@ -1064,9 +1073,8 @@ ikinci bir `Metrics`'i doğururdu; düzlemin **kendi monoton sayacı** var (uv
 `prepare` anında pişiyor, kare ortasında anlamı değişen paylaşımlı bir sayaç
 önceki geçişlerin uv'lerini geçersizleştirirdi) ve dokusu **tembel**, ilk
 renkli yuvayla doğuyor. Düzlem kararı fontun **trait bitinden**
-(`kCTFontTraitColorGlyphs`), aile adından değil. Kapsam dışı ve adıyla
-yazılı: **tek sütunlu emojinin 78'i** (rengi var, iki sütunu yok,
-mürekkebi 1.66 hücre — çaresi küçültme ve o ayrı bir karar).
+(`kCTFontTraitColorGlyphs`), aile adından değil. Tek sütunlu emoji (iki
+sütunu yok, mürekkebi 1.66 hücre) küçültülerek çiziliyor (041).
 **Emoji dizileri tek glyph ve tek geniş hücre** (035): bayrak (`🇹🇷`), ZWJ
 (`👨‍👩‍👧`), ten rengi (`👍🏽`) ve VS16 (`❤️`) ızgarada **bir** geniş hücrede
 kümeleniyor — taban karakter hücrenin kendisi, kalanı `zerowidth` — ve
@@ -1190,6 +1198,7 @@ make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı bas
                   # hareket ile kayma iki ayrı animatörün tanığı (imleç / içeriğin ötelemesi): aynı karede ikisi birden artabilir, toplamları kare değildir.
 make terminfo     # assets/terminfo'yu tic -x ile geçici dizine derler
 make test-yaris   # yarış stresi: race_* (--ignored) + tek thread karşılaştırma koşusu
+make tarama       # yedek glyph kapısının envanteri (041): sembol/emoji bloklarını 13/16pt × @1x/@2x kapıdan geçirir; make hepsi'de yok (kurulu fontlara bağlı), BT_SCAN_FONT taban aileyi değiştirir
 make linux        # bt-core'un Linux kapısı: Docker'da clippy -D warnings + test --locked; yerel rustc ≠ imaj etiketi kırmızı, Docker yoksa ATLANDI
 make kur          # release derler, target/release/bateri.app'i kurar, anahtarlıktaki Developer ID ya da Apple Development kimliğiyle, yoksa ad-hoc imzalar (SIGN_ID ile ezilir) ve içeriğini denetler (Info.plist, URL şeması, ikon, lisans, shell betiği); Developer ID yok
 make paket        # kur + gönderilecek zip: target/release/bateri-<sürüm>.zip (ditto)
