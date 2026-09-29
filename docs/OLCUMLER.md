@@ -860,6 +860,54 @@ içerik bu sayıyı ödemiyor.
 
 ## Kare süresi
 
+### 2026-09-30 — birinci basamağın düzeltmesi: akış hatırlanıyor
+
+Aşağıdaki bloğun `0777e13` mekanizması doğrulandı ve kapatıldı. Kod
+okuması + sınama: `Motion::scroll_in`'in akış kolu kaymayı bitirip yerleşik
+bırakıyor, yani sürekli akışta bir sonraki ekran boyu kare kaymayı "durgun"
+buluyor ve patlamayı yeniden kuruyordu — N patlama, N+1 bitir, N+2 yine
+patlama (`a_stream_of_screenful_scrolls_never_bursts_again` düzeltmeden önce
+3. karede 30,0 ile kırmızıydı). Düzeltme: bir önceki içerik karesi de ekran
+boyu kaydırdıysa patlama kurulmuyor (`Motion::origin_pouring`); durgun
+ızgaradaki tek patlama (`seq 1 200`) aynen süzülüyor.
+
+Reçete aşağıdakinin aynısı: release, binary doğrudan, `BT_FRAME_STATS=1
+BT_SCROLL_TEST=1`, 10 saniye, 10 koşu. Ağaç `14c4dac` + bu düzeltme
+(commit'lenmemiş hâli, yalnız `motion.rs`). MacBook Pro M1 Pro, macOS 26.4.1
+(25E253), rustc 1.88.0, **prizde** (%100, dolu). Makine sessiz: yük
+ortalaması 1,65 (5 dk'lık 2,04), `top`'ta %1'i geçen süreç yok; açık kalan
+tek bateri kullanıcının `/Applications/bateri.app`'i.
+
+| # | cpu_kare p95 / max | cpu_encode p95 / max | gpu p95 / max | acilis | kare | istek | kapanis |
+|---|---|---|---|---|---|---|---|
+| 1 | 0,07 / 0,15 | 0,26 / 1,43 | 0,25 / 0,58 | 206,37 | 1198 | 355893 | abandoned |
+| 2 | 0,08 / 0,19 | 0,27 / 1,54 | 0,25 / 0,58 | 220,93 | 1198 | 335683 | abandoned |
+| 3 | 0,07 / 0,15 | 0,26 / 1,39 | 0,25 / 0,58 | 206,24 | 1198 | 351216 | clean |
+| 4 | 0,07 / 0,50 | 0,27 / 1,50 | 0,25 / 0,58 | 193,93 | 1197 | 333588 | abandoned |
+| 5 | 0,07 / 0,15 | 0,27 / 1,50 | 0,25 / 0,58 | 205,48 | 1197 | 341079 | clean |
+| 6 | 0,08 / 0,17 | 0,28 / 1,45 | 0,25 / 0,63 | 181,00 | **514** | 345725 | abandoned |
+| 7 | 0,07 / 0,17 | 0,25 / 1,57 | 0,25 / 0,58 | 227,64 | 1193 | 361711 | clean |
+| 8 | 0,07 / 0,18 | 0,25 / 1,39 | 0,25 / 0,72 | 223,66 | 1194 | 358844 | clean |
+| 9 | 0,08 / 0,17 | 0,26 / 1,57 | 0,25 / 0,58 | 224,00 | 1194 | 354941 | abandoned |
+| 10 | 0,08 / 0,16 | 0,25 / 1,47 | 0,25 / 0,58 | 228,60 | 1193 | 352490 | clean |
+
+Sabit jetonlar bir kez: `hucre=0 glif=1785 kural=0 yuva=37/1984
+yuva2=0/1984 yuk=load hareket=0 profil=release dusen=0 gpu_elenen=0
+taban=20 pipeline=ok`; `icerik`/`ornek`/`gpu_ornek` = `kare` (8. ve 10.
+koşuda biri bir eksik, 8.'de `kayma=1`). `sessiz=0.00ms` dokuz koşuda. Tam
+satırlar `target/olcum-kare/pouring-fix/run-*.out`.
+
+**Sapma ayıklanmadı:** 6. koşu `kare=514`, `sessiz=5696.41ms` — link
+koşunun yarısından fazlasını uyuyarak geçirdi (pencere örtülmüş olabilir;
+sebebi aranmadı). p95'leri öteki dokuzla aynı bantta.
+
+**Sonuç.** `cpu_encode_p95` **0,25–0,28** (önce 0,36–0,39), `cpu_kare_p95`
+**0,07–0,08** (önce 0,13–0,14), `gpu_p95` **0,25** (önce 0,43–0,49).
+`cpu_kare` ile `gpu` `5f74180`'in sayısına (0,06–0,07 / 0,25) döndü, yani
+birinci basamağın payı tamamen kalktı; encode'da kalan ~+0,03 ikinci
+basamağın (`c0b9571`, glyph_fx, +0,04) ve üçüncü küçük kaymanın payı,
+dokunulmadı.
+
 ### 2026-09-30 — 0,24 → 0,41 sıçraması: sessiz makinede iki commit ve bisect
 
 2026-09-28 bloğunun ayıramadığı soru: artış koddan mı, makinenin yükünden
