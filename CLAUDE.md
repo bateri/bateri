@@ -1274,9 +1274,9 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   sürümü ve sha256'sı `Makefile`'da sabit indirir, depoya girmez) ve
   `bt-shell` onu link'lemeden, çalışma zamanında yüklüyor
   (`bt-shell::updater`). Besleme GitHub'ın
-`releases/latest/download/appcast.xml`'i — her zaman en yeni release'in
-tek öğeli beslemesi, yani sürüm yayınlamak güncellemeyi yayınlamak ve site
-sürüm tutmuyor (indirme düğmesi aynı yolun `bateri.dmg`'si); açık
+  `releases/latest/download/appcast.xml`'i — her zaman en yeni release'in
+  tek öğeli beslemesi, yani sürüm yayınlamak güncellemeyi yayınlamak ve site
+  sürüm tutmuyor (indirme düğmesi aynı yolun `bateri.dmg`'si); açık
   EdDSA anahtarı `Info.plist.in`'de, gizli anahtar kullanıcının
   anahtarlığında (`generate_keys`); paket kimliği `dev.bateri.bateri` ve
   güncellemeler ona bağlı, değişmez.
