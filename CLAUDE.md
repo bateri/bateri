@@ -1186,7 +1186,7 @@ make fmt          # cargo fmt --all -- --check
 make denetim      # kuralların mekanik yarısı: katman yönü, bt-core'da gerekçesiz panik, rc dosyasına yazma; Cargo.lock değiştiyse uyarır
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
-make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te)
+make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te) + .wgsl kolu: cargo test -p bt-gpu wgsl_pipelines_build
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
                   # kare=N hucre=K glif=G kural=R yuva=U/T yuva2=U/T yuk=smoke istek=I icerik=C hareket=M kayma=S sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
                   # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT ise, sessiz < QUIET_FLOOR ya da sessiz=none ise
@@ -1270,6 +1270,11 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   adlandırmak zorunda — ne vte ne alacritty onu yeniden ihraç ediyor ve
   aktarımın `missing_trait_methods` bekçisi metodu atlamaya izin vermiyor
   (`.tasks/035-grapheme-dizileri/discussion.md` → Karar).
+  `wgpu` (30, `std`/`wgsl`/`metal`/`vulkan`; renderer'ın Metal'den ölçümlü
+  geçişi) bugün **yalnız `bt-gpu`'nun dev-dependency'si** — renderer
+  `cfg(test)` arkasında, Metal kâhinine karşı sınanıyor ve ürün grafına
+  040 phase-5'te giriyor (`.tasks/040-linux-kapisi-ve-wgpu/discussion.md` →
+  Karar 3, 10).
   **Sparkle 2** bir crate değil, pakete gömülen bir framework (`make kur`
   sürümü ve sha256'sı `Makefile`'da sabit indirir, depoya girmez) ve
   `bt-shell` onu link'lemeden, çalışma zamanında yüklüyor
@@ -1546,7 +1551,12 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   donmuş, **değer İngilizce**, tanı metni satırın dışında (gerekçe
   `Report::token_line`'ın doc'unda). Depo geneli kural: **jeton silinmez,
   eklenir** — okuyan taraf tanımadığı jetonu atlayabilir, kaybolanı arayamaz.
-  `ATLANDI` da aynı sözleşmenin parçası.
+  `ATLANDI` da aynı sözleşmenin parçası. **İstisna — Linux/wgpu refactor'ı:**
+  refactor'ın yazdığı, baştan yazdığı ya da taşıdığı kodda (wgpu renderer,
+  `.wgsl`, `Pacer`, `FontSystem`, `bt-shell-common`/`-linux`…) yorumlar,
+  doc-comment'ler ve tanı metinleri İngilizce; refactor dışı küçük dokunuşta
+  yalnız yeni yorum — Linux'a açılan kod Türkçe bilmeyen katkıcıya da
+  okunmalı (`.tasks/040-linux-kapisi-ve-wgpu/plan.md` → Yaklaşım).
 
 ## İş akışı
 

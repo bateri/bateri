@@ -1596,15 +1596,23 @@ fn pipeline(
 /// sınırlar dokunun boyuna kırpılıyor ve en az bir satır bırakıyor; `0.0`
 /// bütün doku.
 fn scissor_below(top_px: f32, viewport_px: [f32; 2]) -> MTLScissorRect {
+    let [x, y, width, height] = scissor_rect_below(top_px, viewport_px);
+    MTLScissorRect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// [`scissor_below`]'s arithmetic, backend-independent: (x, y, width, height).
+/// A single copy, because the wgpu renderer (`crate::wgpu_renderer`) must set
+/// the same scissor and two copies could drift in the clamping rule.
+pub(crate) fn scissor_rect_below(top_px: f32, viewport_px: [f32; 2]) -> [usize; 4] {
     let width = viewport_px[0].max(0.0) as usize;
     let height = viewport_px[1].max(0.0) as usize;
     let y = (top_px.max(0.0).round() as usize).min(height.saturating_sub(1));
-    MTLScissorRect {
-        x: 0,
-        y,
-        width,
-        height: height - y,
-    }
+    [0, y, width, height - y]
 }
 
 fn viewport_at(origin_y: f32, viewport_px: [f32; 2]) -> MTLViewport {
@@ -2141,7 +2149,7 @@ fn upload_slot(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -2157,8 +2165,8 @@ mod tests {
 
     /// Gömülü temanın zemini ve vurgusu: üretimde clear ve imleç rengi bu
     /// iki rolden geliyor (`link.rs`), sınamalar da aynı kaynaktan.
-    const BACKGROUND: LinearRgba = Theme::BATERI.background_linear();
-    const ACCENT: LinearRgba = Theme::BATERI.accent_linear();
+    pub(crate) const BACKGROUND: LinearRgba = Theme::BATERI.background_linear();
+    pub(crate) const ACCENT: LinearRgba = Theme::BATERI.accent_linear();
 
     /// sRGB lineerleştirmesinin **hücre yolundaki** tanığı: bir ara ton.
     ///
@@ -2167,8 +2175,8 @@ mod tests {
     /// yani zemin saf siyaha çekildiği gün (öyle oldu) bu iddia lineerleştirme
     /// olsa da olmasa da geçerdi ve tek bekçi sessizce körleşirdi. Değer eski
     /// zeminin ta kendisi — kaydı `CLAUDE.md`'de aynı sayıyla duruyor.
-    const MIDTONE_SRGB: u32 = 0x1a1c21;
-    const MIDTONE: LinearRgba = {
+    pub(crate) const MIDTONE_SRGB: u32 = 0x1a1c21;
+    pub(crate) const MIDTONE: LinearRgba = {
         let (r, g, b) = (
             (MIDTONE_SRGB >> 16) as u8,
             (MIDTONE_SRGB >> 8) as u8,
@@ -2185,19 +2193,19 @@ mod tests {
     /// bir kolaylık değil **doğru soru**: bu sınamaların konusu payın
     /// geometrisi değil, GPU'nun hangi rengi hangi hücreye boyadığı. Payın
     /// orijine eklendiğini `frame.rs` tarafında `pos` sınamaları tutuyor.
-    fn grid(width: u16, height: u16) -> CellMetrics {
+    pub(crate) fn grid(width: u16, height: u16) -> CellMetrics {
         CellMetrics::new(width, height, width, 0, 1).expect("sıfır olmayan hücre")
     }
 
     /// Payı **sıfır olmayan** ızgara: halenin payı sol paydan türüyor
     /// ([`Frame::glow_px`]), yani paysız bir ızgarada hale hiç doğmuyor ve
     /// onu sınayan hiçbir şey göremez.
-    fn grid_with_gutter(width: u16, height: u16, gutter: u16) -> CellMetrics {
+    pub(crate) fn grid_with_gutter(width: u16, height: u16, gutter: u16) -> CellMetrics {
         CellMetrics::new(width, height, width, gutter, 1).expect("sıfır olmayan hücre")
     }
 
     /// Yalnız arka planı olan hücre; `ch: None` glyph üretmez.
-    fn bg_cell(col: u16, row: u16, bg: LinearRgba) -> Cell {
+    pub(crate) fn bg_cell(col: u16, row: u16, bg: LinearRgba) -> Cell {
         Cell {
             col,
             row,
@@ -2340,7 +2348,10 @@ mod tests {
 
     /// Sınama için küçük bir offscreen render hedefi; `Shared` depolama
     /// `getBytes` ile CPU'dan okumaya izin verir.
-    fn target_texture(r: &Renderer, edge: usize) -> Retained<ProtocolObject<dyn MTLTexture>> {
+    pub(crate) fn target_texture(
+        r: &Renderer,
+        edge: usize,
+    ) -> Retained<ProtocolObject<dyn MTLTexture>> {
         let desc = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
                 // Formatı `Renderer`'dan: pipeline hangi formata derlendiyse
@@ -2384,7 +2395,7 @@ mod tests {
     }
 
     /// Bayt sırası B, G, R, A (formatın `_sRGB` eki sırayı değiştirmez).
-    fn pixel_at(pixels: &[u8], edge: usize, x: usize, y: usize) -> (u8, u8, u8) {
+    pub(crate) fn pixel_at(pixels: &[u8], edge: usize, x: usize, y: usize) -> (u8, u8, u8) {
         let i = (y * edge + x) * 4;
         (pixels[i + 2], pixels[i + 1], pixels[i])
     }
@@ -2395,7 +2406,7 @@ mod tests {
     /// veriyor, yani "kural ön plan rengiyle çizildi" iddiası eşitlikle
     /// sorulabiliyor. Paletten değil, çünkü sınamaların sorduğu şey renk değil
     /// **rengin nereden geldiği**.
-    const WHITE: LinearRgba = LinearRgba::from_srgb(0xff, 0xff, 0xff);
+    pub(crate) const WHITE: LinearRgba = LinearRgba::from_srgb(0xff, 0xff, 0xff);
 
     /// Kareyi offscreen bir dokuya çizer ve pikselleri CPU'ya okur.
     ///
@@ -2408,7 +2419,12 @@ mod tests {
     /// 64 olarak ayrışıyor, clear rengi ise `cell_bg_paints_pixels_on_the_gpu`
     /// için bilerek ötekilerden **farklı** (hücre yolu ile clear yolu ayrık iki
     /// renkle kanıtlanıyor).
-    fn render_offscreen(r: &Renderer, edge: usize, clear: LinearRgba, frame: &Frame) -> Vec<u8> {
+    pub(crate) fn render_offscreen(
+        r: &Renderer,
+        edge: usize,
+        clear: LinearRgba,
+        frame: &Frame,
+    ) -> Vec<u8> {
         let texture = target_texture(r, edge);
         let cmd = r.queue.commandBuffer().expect("komut tamponu");
         r.encode_pass(&cmd, &texture, clear, frame)
@@ -2419,12 +2435,33 @@ mod tests {
         read_pixels(&texture, edge)
     }
 
+    /// Encodes the frame and **commits** it without waiting: the Metal half of
+    /// the wgpu measurement hook (`crate::wgpu_renderer`'s tests). Like
+    /// `link.rs`'s `cpu_encode`, the span runs from creating the command buffer
+    /// to `commit`; waiting is the caller's, outside the span. One pool per
+    /// frame, as in `draw`, so temporaries do not pile up over thousands of
+    /// frames.
+    pub(crate) fn commit_offscreen(
+        r: &Renderer,
+        texture: &ProtocolObject<dyn MTLTexture>,
+        clear: LinearRgba,
+        frame: &Frame,
+    ) -> Retained<ProtocolObject<dyn MTLCommandBuffer>> {
+        autoreleasepool(|_| {
+            let cmd = r.queue.commandBuffer().expect("komut tamponu");
+            r.encode_pass(&cmd, texture, clear, frame)
+                .expect("pass encode edilemedi");
+            cmd.commit();
+            cmd
+        })
+    }
+
     /// `col` sütunundaki hücrenin pikselleri, **satır satır** (üstten alta).
     ///
     /// Satır yapısı korunuyor çünkü kural sınamalarının sorduğu şey tam olarak
     /// bir satırın x boyunca tekdüze olup olmadığı; düzleştirilmiş bir liste
     /// o soruyu soramaz. Düz liste isteyen `.concat()` diyor.
-    fn cell_rows(
+    pub(crate) fn cell_rows(
         pixels: &[u8],
         edge: usize,
         cell_px: (u16, u16),
@@ -2446,7 +2483,7 @@ mod tests {
     /// Ortak yardımcı, çünkü caret sınamalarının hepsi aynı soruyu soruyor ve
     /// her biri kendi kopyasını taşıyordu (`/code-review`): bir düzeltme
     /// kopyaların birinde unutulabilirdi.
-    fn brightness(pixels: &[u8], edge: usize, x: usize, y: usize) -> u32 {
+    pub(crate) fn brightness(pixels: &[u8], edge: usize, x: usize, y: usize) -> u32 {
         let (r8, g8, b8) = pixel_at(pixels, edge, x, y);
         u32::from(r8) + u32::from(g8) + u32::from(b8)
     }
@@ -3966,7 +4003,7 @@ mod tests {
 
     /// Görünür imleç; blok altındaki metin rengi çağrıda söyleniyor çünkü her
     /// sınama onu ayrı bir iddia için seçiyor.
-    fn cursor_at(col: u16, text: LinearRgba) -> Cursor {
+    pub(crate) fn cursor_at(col: u16, text: LinearRgba) -> Cursor {
         Cursor {
             next_tick: None,
             col,
@@ -4001,7 +4038,7 @@ mod tests {
 
     /// İmleci **kendi** hücresine çizer: bu sınamaların hepsi yerleşmiş bloğa
     /// bakıyor, ara konuma değil (onun sınaması `frame.rs`'te).
-    fn push_settled(frame: &mut Frame, cursor: Cursor, rgba: LinearRgba) {
+    pub(crate) fn push_settled(frame: &mut Frame, cursor: Cursor, rgba: LinearRgba) {
         if cursor.visible {
             frame.push_caret(
                 [f32::from(cursor.col), f32::from(cursor.row)],

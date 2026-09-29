@@ -106,11 +106,15 @@ test:
 duman:
 	env -u BT_SCROLL_TEST -u BT_FRAME_STATS BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
 
-# build.rs'in yaptığını cargo'nun bayatlık takibini atlayarak koşturur;
-# derleme reçetesi burada TEKRARLANMAZ.
+# Two branches. `.metal`: runs what build.rs does, bypassing cargo's
+# staleness tracking; the build recipe is NOT repeated here. `.wgsl`: the
+# shader is embedded with `include_str!` and has no build step, so the canary
+# is the test that builds its pipelines (naga + pipeline creation, 040 Karar 9).
+# The `.metal` branch stays until Metal is removed (040 phase-7).
 shader:
 	touch $(wildcard crates/bt-gpu/shaders/*.metal)
 	$(CARGO) build -p bt-gpu
+	$(CARGO) test -p bt-gpu wgsl_pipelines_build
 
 # Paylaşılan duruma (PTY okuyucu thread'i ↔ kare üreten taraf) dokunan
 # değişikliklerde koşar. ThreadSanitizer nightly ister; araç zinciri pin'li

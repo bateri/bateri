@@ -124,6 +124,11 @@ Taban ancak şimdi alınabilir, çünkü Metal sökülünce bir daha alınamaz.
   kötüyse** set durur ve eskale olur.
 - Örtüşüyorsa sürer.
 
+**Sonuç (phase-2):** kural tetiklendi (release `cpu_encode_p95` Metal
+95–107 µs, wgpu 172–191 µs). Kullanıcı kararı 2026-09-29: (a) mutlak ölçek
+kabul — fark kare başına ~80 µs, bütçenin çok altında, boşta sıfır kare
+etkilenmiyor; set sürüyor.
+
 GPU sütunu karara girmiyor. Aynı binary'de bile gezindiği kayıtlı
 (`docs/OLCUMLER.md` → "GPU sütununun gezintisi"). Bu sütun raporlanır ama
 karar vermez. Plana eşik yazılmaz.

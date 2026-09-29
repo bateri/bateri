@@ -14,6 +14,8 @@ wgpu hâlâ `cfg(test)` / dev-dependency.
 
 _Requirements: R3.1_
 
+_Kısıt: yazılan/taşınan kodun yorumları, doc-comment'leri ve tanı metinleri İngilizce (plan.md → Yaklaşım, dil kısıtı)._
+
 ## Değişiklikler
 
 - **`crates/bt-gpu/shaders/cell.wgsl` (yeni)** — `cell.metal`'in karşılığı:
@@ -57,10 +59,13 @@ _Requirements: R3.1_
 
 ## Checklist
 
+- [ ] Yazılan/taşınan kodun yorumları ve tanı metinleri İngilizce
 - [ ] `cell.wgsl`: glyph, kural, `emoji_fragment`; vertex paylaşımı
 - [ ] Atlas dokuları (maske + tembel renk), `write_texture` yüklemesi, tek `prepare`
 - [ ] Encode sırası ve üç viewport
 - [ ] Kâhin listesine grubun sahneleri
+- [ ] Kâhin listesine **blok şeridi** sahnesi (phase-2'den devir: şerit bugün `RuleCell` / chevron sprite, `cell` pipeline'ından çiziliyor; `cell_bg` + caret denemesinde çizilemedi)
 - [ ] Grubun bekçi ikizleri
+- [ ] Paylaşılan wgpu device'ında error scope yığını thread başına değil device başına: paralel sınamada bir doğrulama hatası başka sınamanın `pop`'una düşebilir — scope'lu çizimleri sıraya sok ya da paylaşımı bırak (phase-2'den not)
 - [ ] Doğrulama geçti (`make hepsi` + `make shader`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi

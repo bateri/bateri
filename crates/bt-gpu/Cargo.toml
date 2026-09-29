@@ -17,3 +17,9 @@ objc2-metal = { workspace = true }
 objc2-quartz-core = { workspace = true, features = ["CABase", "CALayer", "CAMetalLayer", "CAMetalDisplayLink", "objc2-metal", "objc2-core-foundation"] }
 dispatch2 = { workspace = true }
 block2 = { workspace = true }
+
+# wgpu trial (040 phase-2): the renderer sits behind `cfg(test)`, outside the
+# product graph — backing out is a single `git revert`. Rationale in the
+# workspace `Cargo.toml`.
+[dev-dependencies]
+wgpu = { workspace = true }

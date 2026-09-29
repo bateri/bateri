@@ -9,6 +9,8 @@ kâhin sahne listesinde kalıyor. wgpu hâlâ `cfg(test)`.
 
 _Requirements: R3.2, R3.3, R3.4_
 
+_Kısıt: yazılan/taşınan kodun yorumları, doc-comment'leri ve tanı metinleri İngilizce (plan.md → Yaklaşım, dil kısıtı)._
+
 ## Değişiklikler
 
 ### Kalan shader'lar
@@ -80,6 +82,7 @@ tam bir kare.
 
 ## Checklist
 
+- [ ] Yazılan/taşınan kodun yorumları ve tanı metinleri İngilizce
 - [ ] `glyph_fx.wgsl` (texel merkezine kırpma, `t = 1` eşitliği)
 - [ ] `selection` pipeline'ı + arama vurgusu, encode sırası
 - [ ] Tamamlanma modeli: indeks + poll, `kare=` hatasız, `Retry`, `acilis=`, uykudan önceki kare

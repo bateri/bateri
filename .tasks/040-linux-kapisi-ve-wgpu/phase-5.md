@@ -13,6 +13,8 @@ Pencere yolunu wgpu renderer'ına bağlamak:
 
 _Requirements: R4.1, R4.2, R4.3_
 
+_Kısıt: yazılan/taşınan kodun yorumları, doc-comment'leri ve tanı metinleri İngilizce (plan.md → Yaklaşım, dil kısıtı)._
+
 ## Değişiklikler
 
 ### `crates/bt-gpu/src/link.rs`
@@ -113,6 +115,7 @@ dosyadan çıkıyor.
 
 ## Checklist
 
+- [ ] Yazılan/taşınan kodun yorumları ve tanı metinleri İngilizce
 - [ ] `Pacer` (dört görev, zaman tabanı sözleşmesi) + platformsuz `tick(damga, hedef)`
 - [ ] `Waker`, `arm_clock`, uykudan önceki kare poll'u `Pacer`'a bağlı
 - [ ] wgpu `Surface` + `Renderer` ürün yolunda, Metal `cfg(test)` kâhini

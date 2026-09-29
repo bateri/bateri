@@ -81,6 +81,8 @@ animasyonlar, dock ve boşta sıfır kare aynı kalıyor.
 
 Gerekçeler `discussion.md` → Karar 1–11.
 
+**Dil kısıtı (kullanıcı kararı 2026-09-30):** Linux/wgpu refactor'ının yazdığı, baştan yazdığı ya da taşıdığı kodda yorumlar, doc-comment'ler ve tanı metinleri İngilizce; refactor dışı küçük dokunuşta yalnız yeni yorum. Commit iletileri ve `.tasks/` Türkçe; `Makefile` hedefleri ve jeton anahtarları değişmez.
+
 ## Kapsam Dışı
 
 - `FontSystem` trait'i ve Linux font yığını, `bt-shell` ayrımı,
@@ -112,7 +114,7 @@ phase-7  Metal söküm + denetim + belgeler + set kapısı
 | Phase | Durum |
 |-------|-------|
 | phase-1 | ✅ |
-| phase-2 | |
+| phase-2 | ✅ |
 | phase-3 | |
 | phase-4 | |
 | phase-5 | |

@@ -7,9 +7,10 @@ sahibinde yazılı (`/audit` → Ölçüm sahipliği).
 Ölçüm bir **kapı değildir** (`.claude/is-akisi/proje.md` → Doğrulama): gerçek
 pencere, sessiz makine ve dakikalar ister. Kullanıcı ister, `/measure` koşturur.
 
-Dosya 006 phase-5'te kuruldu ve bugün **dört** ölçüm taşıyor: boşta kare,
-atlas yuva ayak izi, kare süresi ve açılış. Sondaki ikisi 2026-09-21'de
-girdi. Kare süresinin **CPU sütunları** ile açılış taban; **GPU sütunu
+Dosya 006 phase-5'te kuruldu ve bugün **beş** ölçüm taşıyor: boşta kare,
+atlas yuva ayak izi, kare süresi, açılış ve wgpu denemesinin iki arka uçlu
+offscreen karşılaştırması. Kare süresi ile açılış 2026-09-21'de girdi,
+wgpu denemesi 2026-09-28'de (040 phase-2). Kare süresinin **CPU sütunları** ile açılış taban; **GPU sütunu
 değil** — aynı kaynak ve bayt bayt aynı shader ikilisiyle 2,7 kat dolaştı ve
 sınanan dört hipotezin hiçbiri onu ayıramadı (`## Kare süresi` → GPU
 sütununun gezintisi). Bellek, giriş gecikmesi ve bench bölümlerinde sayı
@@ -186,6 +187,43 @@ başına en az on).
   derleme üzerinden ortalama. Bunu çözmeden alınacak bir "materyal %X
   yavaşlattı" cümlesi ölçüm değil gürültü olur.
 
+### wgpu denemesi (offscreen, iki arka uç)
+
+040'ın durak kuralının ölçümü (`.tasks/040-linux-kapisi-ve-wgpu/discussion.md`
+→ Karar 3): aynı `Frame`, aynı sayıda, bugünkü Metal renderer'ı ve `cfg(test)`
+wgpu renderer'ı ile offscreen çiziliyor. Kanca `#[ignore]`'lu bir sınama
+(`bt-gpu` → `wgpu_renderer::tests::offscreen_frame_loop_on_both_backends`);
+arka uç başına **bir satır** basıyor (`arka_uc=… profil=… kare=… ornek=…
+cpu_kare_p95/max cpu_encode_p95/max gpu_p95/max`, değerler mikrosaniye).
+
+- **Aralıklar `Stats`'ın aynısı.** `cpu_kare` karenin kurulması (`Frame::clear`
+  + push'lar; iki arka uçta **aynı kod**, yani koşunun gürültüsünün tanığı),
+  `cpu_encode` encode + gönderim — Metal'de komut tamponunun kurulmasından
+  `commit`'e, wgpu'da `write_buffer`'dan `submit`'e. **Karar veren sütun
+  `cpu_encode`.** GPU'nun bitirmesi beklenir ama aralığın **dışında**:
+  kareler birbirinin arkasında kuyruğa girmesin.
+- **Kare:** 1024×1024 doku, 8×16 hücre, her hücrede zemin (~7 700 dörtlü),
+  caret ve iki satırlık dock — o phase'in iki pipeline'ının (`cell_bg` +
+  caret) çizebildiği en ağır kare. 1000 kare, önünde sayılmayan 50 ısınma.
+- **Arka uçlar kare kare dönüşümlü.** Sıralı koşuda (önce 1000 Metal, sonra
+  1000 wgpu) aynı kodun `cpu_kare_p95`'i iki yarıda 63 / 85 µs çıktı, yani
+  sıra bir arka uca yazılan bir fark üretiyordu; dönüşümlüde 71,5 / 72,8 µs.
+  Dönüşümlü koşu bu yüzden yöntem.
+- **GPU sütunu karar vermiyor** (Karar 3): Metal'de `GPUStartTime`/`EndTime`,
+  wgpu'da `unsupported` (damga `TIMESTAMP_QUERY` ister, 040 phase-4).
+- **Durak:** profil başına on koşu; release `cpu_encode_p95` kümeleri
+  **örtüşmüyor ve wgpu'nunki daha kötüyse** set durur ve eskale edilir. Debug
+  kaydedilir, karar vermez.
+- **Kapsam — iki yarının tampon stratejisi farklı.** Metal yarısı üretimin
+  yolu (liste başına kare başına `newBufferWithBytes`), wgpu yarısı kalıcı tek
+  tampon + `write_buffer` ve planın kare başına bir ara kopyası. Fark bu
+  yüzden "arka uç" ile "tampon stratejisi"nin toplamı; ayrıştırma aşağıdaki
+  gözlemde (040 phase-2 `/code-review`).
+- **Kapsam — offscreen pencere yolu değil.** Drawable, display link ve
+  compositor yok; bu karşılaştırma Metal'in pencere yolu tabanıyla (`## Kare
+  süresi`) **karşılaştırılmaz**, o taban 040 phase-5'in geçiş ölçümünün
+  karşılığıdır.
+
 ### Atlas yuva ayak izi
 
 **Bu tür bir sayımdır, bir süre değil** ve üstteki kuralların üçü ona
@@ -290,6 +328,25 @@ Her koşunun **tam jeton satırı** saklanır. Yorumlamadan önce üç yoklama:
 `ornek` ile `gpu_ornek` tabanın (`taban=`, bugün 20) üstünde mi,
 `insufficient` var mı, ve `kare / süre` tazeleme hızına yakın mı — sonuncusu
 rejim tanığı (`## Yöntem`, altıncı kalem).
+
+### wgpu denemesi
+
+Ölçüm pencere açmıyor; sınama binary'si koşuyor. Satır başına bir arka uç,
+koşu başına iki satır:
+
+```sh
+mkdir -p target/olcum-wgpu
+for i in $(seq 1 10); do
+  cargo test --release -p bt-gpu offscreen_frame_loop -- --ignored --nocapture \
+    | grep '^arka_uc' >> target/olcum-wgpu/release.txt
+done
+# debug için aynı döngü `--release` olmadan (device kurulumu bu makinede
+# koşu başına ~30 sn sürüyor — ortam, kod değil)
+```
+
+Yorumlamadan önce iki yoklama: `ornek=1000` (her iki arka uçta) ve
+`cpu_kare`'nin iki arka uçta örtüşmesi — örtüşmüyorsa koşu koşulları arka
+uçlar arasında ayrışmıştır ve `cpu_encode` farkı yorumlanamaz.
 
 ### Atlas yuva ayak izi
 
@@ -803,6 +860,66 @@ içerik bu sayıyı ödemiyor.
 
 ## Kare süresi
 
+### 2026-09-28 — Metal pencere yolu tabanı, wgpu geçişinden önce (040 phase-2)
+
+wgpu geçişinin (040 phase-5) karşılaştıracağı taban; Metal sökülünce bir
+daha alınamaz. Ölçülen ağaç `27d295b` + 040 phase-2'nin commit'lenmemiş
+değişikliği (yalnız `cfg(test)` kodu ve dev-dependency — ürün binary'sine
+girmiyor), binary doğrudan çağrıldı. MacBook Pro M1 Pro, macOS 26.4.1
+(25E253), rustc 1.88.0, `kare / süre ≈ 120`. Yük `BT_SCROLL_TEST=1`, 10
+saniye, profil başına 10 koşu, **prizde** (%86, şarj oluyor, düşük güç kipi
+kapalı). **Makine sessiz değildi:** bir tarayıcı süreci ~%77 CPU'daydı, yük
+ortalaması ~4 — kullanıcının oturumu, kapatılamadı.
+
+**release**
+
+| # | cpu_kare p95 / max | cpu_encode p95 / max | gpu p95 / max | acilis | kare | istek | kapanis |
+|---|---|---|---|---|---|---|---|
+| 1 | 0,14 / 0,21 | 0,41 / 1,59 | 0,57 / 3,79 | 314,07 | 1197 | 275290 | abandoned |
+| 2 | 0,14 / 0,44 | 0,42 / 1,76 | 0,54 / 2,71 | 200,51 | 1198 | 263791 | clean |
+| 3 | 0,14 / 0,45 | 0,42 / 1,42 | 0,54 / 2,18 | 199,32 | 1197 | 273700 | clean |
+| 4 | 0,14 / 0,34 | 0,41 / 1,47 | 0,46 / 3,90 | 216,61 | 1198 | 276873 | abandoned |
+| 5 | 0,15 / 0,40 | 0,40 / 1,55 | 0,49 / 3,96 | 249,51 | 1197 | 274837 | clean |
+| 6 | 0,14 / 0,24 | 0,40 / 1,49 | 0,37 / 2,06 | 192,53 | 1198 | 277851 | abandoned |
+| 7 | 0,14 / 0,23 | 0,42 / 1,54 | 0,56 / 2,08 | 224,24 | 1198 | 267472 | abandoned |
+| 8 | 0,14 / 0,22 | 0,41 / 1,34 | 0,39 / 2,06 | 218,53 | 1199 | 284002 | abandoned |
+| 9 | 0,14 / 0,44 | 0,42 / 1,48 | 0,47 / 2,09 | 215,00 | 1198 | 267210 | clean |
+| 10 | 0,14 / 0,63 | 0,41 / 1,55 | 0,48 / 2,07 | 218,43 | 1198 | 272021 | clean |
+
+**debug**
+
+| # | cpu_kare p95 / max | cpu_encode p95 / max | gpu p95 / max | acilis | kare | istek | kapanis |
+|---|---|---|---|---|---|---|---|
+| 1 | 3,05 / 4,00 | 2,38 / 3,03 | 1,55 / 1,90 | 303,76 | 1198 | 2646 | clean |
+| 2 | 3,05 / 4,17 | 2,35 / 3,03 | 1,63 / 2,27 | 223,71 | 1198 | 2515 | clean |
+| 3 | 3,04 / 3,88 | 2,37 / 2,94 | 1,61 / 2,23 | 215,53 | 1198 | 2614 | clean |
+| 4 | 3,10 / 3,65 | 2,36 / 3,00 | 1,59 / 2,79 | 205,92 | 1198 | 2578 | clean |
+| 5 | 3,12 / 4,29 | 2,36 / 2,94 | 1,54 / 2,19 | 223,04 | 1198 | 2572 | clean |
+| 6 | 3,05 / 4,03 | 2,39 / 2,71 | 1,49 / 1,88 | 204,91 | 1197 | 2763 | clean |
+| 7 | 3,10 / 11,71 | 2,39 / 2,81 | 1,52 / 3,02 | 221,84 | 1197 | 2594 | clean |
+| 8 | 3,09 / 5,00 | 2,35 / 2,87 | 1,48 / 2,82 | 208,11 | 1198 | 2629 | clean |
+| 9 | 3,07 / 3,98 | 2,36 / 3,02 | 1,60 / 2,42 | 224,41 | 1198 | 2513 | abandoned |
+| 10 | 3,17 / 4,21 | 2,36 / 2,97 | 1,50 / 2,43 | 238,25 | 1197 | 2521 | clean |
+
+Sabit jetonlar bir kez (iki profilde de): `hucre=0 glif=1785 kural=0
+yuva=37/1984 yuva2=0/1984 yuk=load hareket=0 sessiz=0.00ms dusen=0
+gpu_elenen=0 taban=20 pipeline=ok`; `ornek`/`gpu_ornek`/`icerik` = `kare`
+(debug 1. ve 8. koşuda `ornek` ve `icerik` bir eksik, `kayma=1` — hareket
+karesi CPU örneği yazmıyor, `## Yöntem` üçüncü kalem). Tam satırlar
+`target/olcum-kare/040-{release,debug}-run-*.out`.
+
+**release CPU tabanı:** `cpu_kare_p95` 0,14–0,15 ms, `cpu_encode_p95`
+0,40–0,42 ms; uçlar `cpu_kare_max` 0,21–0,63, `cpu_encode_max` 1,34–1,76.
+**debug:** 3,04–3,17 ve 2,35–2,39 ms. GPU sütunu raporlanıyor, taban değil
+(0,37–0,57 ms; gezintisi aşağıda).
+
+**2026-09-21 tabanından yüksek ve sebebi aranmadı:** o gün `cpu_kare_p95`
+0,07–0,08, `cpu_encode_p95` 0,23–0,24 ms'ydi; iki dağılım örtüşmüyor. Arada
+iki şey değişti ve ayrılmadı — kod (o günden bu yana gelen setler, kare yolu
+dahil) ve makinenin yükü (yukarıda). Bu tablo 040'ın **karşılaştırma**
+tabanı: phase-5'in wgpu pencere yolu aynı koşullarla (aynı gün, aynı yük)
+ölçülmeli, 2026-09-21'le değil.
+
 ### 2026-09-21 — taban: CPU ve açılış (prizde); GPU alınamadı
 
 Ölçülen commit `5f74180`, `profil=release`, binary doğrudan çağrıldı. MacBook
@@ -947,6 +1064,13 @@ bir ölçüm yolu on koşuda aynı sayıyı verirdi, bloklar arası sıçrama
 
 ## Açılış
 
+### 2026-09-28 — Metal pencere yolu, wgpu geçişinden önce (040 phase-2)
+
+`## Kare süresi` → 2026-09-28 bloğunun `acilis=` jetonu (ortam orada; makine
+sessiz değildi). release **192,53 – 314,07 ms**, dokuz koşu 192–250 ve 1.
+koşu (derlemeden sonraki ilk koşu) 314,07; debug **204,91 – 303,76 ms**, yine
+1. koşu ayrışıyor. 2026-09-21'in priz tabanıyla (233–330) örtüşüyor.
+
 ### 2026-09-21 — taban (prizde)
 
 Üstteki priz bloğunun `acilis=` jetonu; ortam aynı, sınırları `## Yöntem` →
@@ -964,6 +1088,98 @@ Pildeki blok (gözlem) 253,53 – 392,23 ms verdi ve oradaki 392,23 de
 derlemeden sonraki ilk koşuydu. İki bloğun sıcak koşuları örtüşüyor
 (priz 233–269, pil 253–275), yani **açılış güç durumundan etkilenmiyor** —
 kare süresinin CPU sütunlarıyla aynı sonuç.
+
+## wgpu denemesi
+
+### 2026-09-28 — `cell_bg` + caret, offscreen, iki arka uç (040 phase-2)
+
+Yöntem `## Yöntem` → wgpu denemesi. Ortam `## Kare süresi` → 2026-09-28
+bloğunun aynısı (aynı makine, aynı oturum, prizde, makine sessiz değil).
+wgpu 30.0.1, Metal arka ucu. Değerler mikrosaniye, her satır bir koşunun
+p95'i (1000 kare).
+
+| profil | sütun | Metal (10 koşu) | wgpu (10 koşu) |
+|---|---|---|---|
+| release | `cpu_kare_p95` (tanık) | 55,0 – 61,8 | 53,5 – 62,1 |
+| release | **`cpu_encode_p95`** | **95,4 – 107,2** | **172,4 – 190,6** |
+| release | `cpu_encode_max` | 158,8 – 293,9 | 246,8 – 751,0 |
+| release | `gpu_p95` | 114,0 – 266,4 | unsupported |
+| debug | `cpu_kare_p95` (tanık) | 679,4 – 702,5 | 684,2 – 705,4 |
+| debug | `cpu_encode_p95` | 294,6 – 315,4 | 746,7 – 823,3 |
+| debug | `cpu_encode_max` | 366,2 – 497,0 | 936,6 – 1516,9 |
+| debug | `gpu_p95` | 414,7 – 557,5 | unsupported |
+
+Koşu başına değerler (release `cpu_encode_p95`, sırayla): Metal 106,1 103,9
+101,8 106,1 106,3 104,6 107,2 106,1 102,0 95,4; wgpu 190,6 178,4 182,1 181,2
+177,1 181,7 179,8 181,7 172,4 178,3. Tam satırlar, koşu sırasıyla (her
+koşu iki satır, önce Metal):
+
+```text
+# release
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=61.8us cpu_kare_max=136.8us cpu_encode_p95=106.1us cpu_encode_max=211.2us gpu_p95=266.4us gpu_max=1816.1us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=62.1us cpu_kare_max=100.3us cpu_encode_p95=190.6us cpu_encode_max=520.9us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=58.2us cpu_kare_max=142.4us cpu_encode_p95=103.9us cpu_encode_max=158.8us gpu_p95=124.1us gpu_max=1809.1us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=59.8us cpu_kare_max=144.3us cpu_encode_p95=178.4us cpu_encode_max=267.4us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=61.4us cpu_kare_max=157.9us cpu_encode_p95=101.8us cpu_encode_max=214.7us gpu_p95=149.6us gpu_max=630.0us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=58.2us cpu_kare_max=119.6us cpu_encode_p95=182.1us cpu_encode_max=277.6us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=57.2us cpu_kare_max=153.0us cpu_encode_p95=106.1us cpu_encode_max=231.8us gpu_p95=118.1us gpu_max=1436.1us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=59.1us cpu_kare_max=132.4us cpu_encode_p95=181.2us cpu_encode_max=751.0us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=55.1us cpu_kare_max=129.2us cpu_encode_p95=106.3us cpu_encode_max=179.6us gpu_p95=146.2us gpu_max=657.0us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=58.4us cpu_kare_max=120.5us cpu_encode_p95=177.1us cpu_encode_max=246.8us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=55.8us cpu_kare_max=132.2us cpu_encode_p95=104.6us cpu_encode_max=248.0us gpu_p95=127.7us gpu_max=671.7us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=59.0us cpu_kare_max=104.4us cpu_encode_p95=181.7us cpu_encode_max=302.0us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=57.8us cpu_kare_max=144.5us cpu_encode_p95=107.2us cpu_encode_max=174.9us gpu_p95=166.2us gpu_max=659.0us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=59.3us cpu_kare_max=118.3us cpu_encode_p95=179.8us cpu_encode_max=308.0us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=56.6us cpu_kare_max=124.5us cpu_encode_p95=106.1us cpu_encode_max=205.0us gpu_p95=161.5us gpu_max=627.1us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=58.7us cpu_kare_max=136.4us cpu_encode_p95=181.7us cpu_encode_max=347.1us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=55.2us cpu_kare_max=120.8us cpu_encode_p95=102.0us cpu_encode_max=194.0us gpu_p95=114.0us gpu_max=670.8us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=53.5us cpu_kare_max=123.1us cpu_encode_p95=172.4us cpu_encode_max=263.6us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=release kare=1000 ornek=1000 cpu_kare_p95=55.0us cpu_kare_max=134.7us cpu_encode_p95=95.4us cpu_encode_max=293.9us gpu_p95=114.4us gpu_max=600.3us
+arka_uc=wgpu profil=release kare=1000 ornek=1000 cpu_kare_p95=58.8us cpu_kare_max=97.5us cpu_encode_p95=178.3us cpu_encode_max=286.2us gpu_p95=unsupported gpu_max=unsupported
+# debug
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=683.3us cpu_kare_max=830.2us cpu_encode_p95=294.6us cpu_encode_max=366.2us gpu_p95=419.7us gpu_max=1849.0us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=690.2us cpu_kare_max=917.8us cpu_encode_p95=746.7us cpu_encode_max=1039.5us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=689.1us cpu_kare_max=791.1us cpu_encode_p95=311.2us cpu_encode_max=385.8us gpu_p95=442.6us gpu_max=1806.3us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=691.8us cpu_kare_max=810.9us cpu_encode_p95=770.8us cpu_encode_max=1000.0us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=694.5us cpu_kare_max=864.0us cpu_encode_p95=308.3us cpu_encode_max=387.7us gpu_p95=515.6us gpu_max=1850.9us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=705.0us cpu_kare_max=1334.7us cpu_encode_p95=786.6us cpu_encode_max=1065.4us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=694.2us cpu_kare_max=766.6us cpu_encode_p95=306.8us cpu_encode_max=412.9us gpu_p95=473.2us gpu_max=1853.4us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=705.4us cpu_kare_max=820.7us cpu_encode_p95=777.8us cpu_encode_max=936.6us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=694.2us cpu_kare_max=1227.6us cpu_encode_p95=312.3us cpu_encode_max=449.8us gpu_p95=557.5us gpu_max=1850.1us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=700.9us cpu_kare_max=1252.3us cpu_encode_p95=823.3us cpu_encode_max=1516.9us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=702.5us cpu_kare_max=919.8us cpu_encode_p95=315.4us cpu_encode_max=497.0us gpu_p95=479.6us gpu_max=1783.4us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=703.7us cpu_kare_max=1557.8us cpu_encode_p95=797.5us cpu_encode_max=1120.7us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=681.6us cpu_kare_max=767.7us cpu_encode_p95=301.5us cpu_encode_max=398.8us gpu_p95=414.7us gpu_max=1828.2us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=686.8us cpu_kare_max=966.5us cpu_encode_p95=765.5us cpu_encode_max=951.9us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=687.5us cpu_kare_max=793.2us cpu_encode_p95=307.6us cpu_encode_max=419.3us gpu_p95=441.4us gpu_max=1811.3us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=686.0us cpu_kare_max=823.6us cpu_encode_p95=771.9us cpu_encode_max=975.2us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=679.4us cpu_kare_max=781.7us cpu_encode_p95=296.8us cpu_encode_max=414.3us gpu_p95=422.3us gpu_max=1802.7us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=684.2us cpu_kare_max=830.2us cpu_encode_p95=765.9us cpu_encode_max=971.1us gpu_p95=unsupported gpu_max=unsupported
+arka_uc=metal profil=debug kare=1000 ornek=1000 cpu_kare_p95=688.5us cpu_kare_max=781.2us cpu_encode_p95=307.2us cpu_encode_max=422.8us gpu_p95=457.6us gpu_max=2285.7us
+arka_uc=wgpu profil=debug kare=1000 ornek=1000 cpu_kare_p95=684.2us cpu_kare_max=803.2us cpu_encode_p95=778.3us cpu_encode_max=1036.2us gpu_p95=unsupported gpu_max=unsupported
+```
+
+**Tanık geçti:** aynı kodun `cpu_kare`'si iki arka uçta örtüşüyor (release
+55–62 / 53–62), yani koşu koşulları arka uçlar arasında ayrışmadı.
+
+**Durak kuralı tetiklendi** (kullanıcı kararı 2026-09-29: mutlak ölçek
+kabul, set sürüyor): release `cpu_encode_p95` kümeleri örtüşmüyor
+(Metal'in en kötüsü 107,2, wgpu'nun en iyisi 172,4) ve wgpu daha kötü —
+p95 ortalarında ~1,7 kat. Debug'da ~2,5 kat. Mutlak ölçek: iki release
+değeri de 120 Hz'in 8,33 ms'lik kare bütçesinin %1,3 ile %2,3'ü.
+
+**Ayrıştırma — gözlem, taban değil** (tek koşular, release, sıralı ya da
+dönüşümlü olduğu yanında):
+
+- Planı boş bir kare (tampon yok, çizim yok; yalnız encoder, pass ve
+  `submit`): wgpu `cpu_encode_p95` **57 µs** (sıralı) — wgpu-core'un kare
+  başına sabit bedeli, Metal'in bütün karesinin (~105 µs) yarısı.
+- Instance tamponu **kare başına** `create_buffer_init` ile: 177 µs (sıralı),
+  228 µs (dönüşümlü). Kalıcı tampon + `write_buffer` (ölçülen tasarım): 149
+  µs (sıralı), 177–187 µs (dönüşümlü). Tampon stratejisi farkın bir kısmı;
+  sabit bedel yapısal.
+- wgpu yarısını kare başına bir `autoreleasepool`'a sarmak (Metal yarısında
+  var) sayıyı oynatmadı (196 / 185 µs, iki koşu).
 
 ## Bekleyen iddialar
 
@@ -1002,6 +1218,13 @@ yüzeyin de ön koşulu.
 - 019 B.1 — yedek glyph'in etkisi. **İkinci bir sebebi var:** ölçüm yükü
   (`load_shell`) düz ASCII basıyor, yani yedek yoluna hiç girmiyor — bugünkü
   kancayla bu iddianın tanığı yok, ölçüm yolunun kendisi genişlemeli.
+
+### Sebebi aranmamış gerileme
+
+- 040 phase-2 — Metal pencere yolunun release `cpu_encode_p95`'i 2026-09-21'de
+  0,23–0,24 ms, 2026-09-28'de 0,40–0,42 ms (`cpu_kare_p95` 0,07–0,08 →
+  0,14–0,15). Arada kod da makinenin yükü de değişti ve ayrılmadı
+  (`## Kare süresi` → 2026-09-28). Sessiz makinede, iki commit'te koşulmalı.
 
 ### Kancası ya da yükü olmayanlar
 

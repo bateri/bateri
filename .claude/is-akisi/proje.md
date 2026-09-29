@@ -40,7 +40,7 @@ ajan onu zaten yükler, iki kopya hem bağlam hem drift demektir.
 | **kapı komutu** — her phase | `make hepsi` — sürüm + `fmt` + `denetim` + `clippy -D warnings` + `test` |
 | hızlı iç döngü | `cargo test -p {crate}` |
 | mekanik denetim (kapının içinde) | `make denetim` — katman yönü, `bt-core`'da gerekçesiz panik, rc dosyasına yazma, bağımlılık uyarısı, genel iş akışı dosyalarının projeden bağımsızlığı |
-| `.metal` ya da `build.rs` değiştiyse | `make shader` — cargo'nun bayatlık takibini atlayan kanarya; derleme reçetesi yalnız `build.rs`'te |
+| `.metal`, `.wgsl` ya da `build.rs` değiştiyse | `make shader` — iki kolu var: `.metal` için cargo'nun bayatlık takibini atlayan kanarya (derleme reçetesi yalnız `build.rs`'te), `.wgsl` için pipeline'ları kuran sınama (`wgsl_pipelines_build`: naga doğrulaması + Vulkan'ın immediate tabanıyla istenmiş device'ta pipeline kurulumu). `.metal` kolu Metal sökülene kadar (040 phase-7) kalıyor |
 | `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz girdisi yok*: koşunca "henüz yok" deyip kırmızı düşer; tetiklenirse doğrulama "yeşil" değil "koşamadı"dır, `[~]` işaretlenir |
 | `assets/bundle/*`, `assets/shell/*`, `crates/bateri` ya da `kur` hedefi değiştiyse | `make kur` — **ürünü** denetler, düşerse çıkış 2; neyi denetlediği `Makefile`'ın `kur` yorumunda. Developer ID varsa imza zaman damgalı, yani ağ ister; notarization yalnız `make paket`'te. `assets/shell/*` aynı satırda, çünkü betik de pakete kopyalanıp `cmp` ile denetleniyor ve `make hepsi` yalnız **girdiyi** görüyor |
 | PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — iki zamanlama profili, ikisi de geçmeli. TSan nightly ister ve araç zinciri pin'li değil: "TSan koşmadı" waive değil, bilinen sınırdır |
@@ -69,7 +69,9 @@ başta basar; kırmızıda önce sürüme bak.
 
 Doğrulama tablosundan türer, ayrı tutulmaz: phase `make test-yaris`
 (paylaşılan durum) ya da `make shader` (`#[repr(C)]` ↔ `.metal` düzeni)
-gerektirdiyse, ya da kilit dosyası değiştiyse.
+gerektirdiyse, ya da kilit dosyası değiştiyse. `#[repr(C)]` ↔ `.wgsl`
+düzeni (`var<immediate>` blokları ve instance'ın vertex düzeni) `.metal`'le
+aynı sınıftır: yapı ya da alan değiştiyse phase risklidir.
 
 ## Set kapısı ekleri
 
@@ -168,9 +170,18 @@ onların **kontrol edilebilir hâlleridir**. Mekanik yarı `make denetim`'de.
    assert güncel ve gerekçeli mi, alan yan tabloya mı gitmeliydi? `.metal`
    struct'ı değiştiyse Rust `#[repr(C)]` karşılığı alan sırası, tip ve
    hizalama ile aynı mı (`float3`'ün 16 bayt hizası)? Attribute indeksleri
-   eşleşiyor mu?
+   eşleşiyor mu? `.wgsl` tarafında aynı soru WGSL'in kurallarıyla:
+   `vec3`/`vec4` 16, `vec2` 8 hizalı ve yapının boyu en büyük hizaya
+   yuvarlanıyor, yani Rust ikizinde görünmez dolgu **açık alan** olarak
+   yazılı mı; `var<immediate>` bloğu bütçenin (`IMMEDIATE_BUDGET`, Vulkan'ın
+   128 baytı) altında mı ve `set_immediates` ofset/uzunluğu 4'ün katı mı;
+   uniform'a giden yapıda dizi adımı 16 mı; `VertexBufferLayout`'un ofsetleri
+   ve `@location`'lar `#[repr(C)]`'nin `offset_of` assert'leriyle aynı mı?
 7. **Belge ve dil.** Yeni crate'in `lib.rs` başlık yorumu var mı? Yorumlar
    "neden"i mi anlatıyor? Yorumlar Türkçe, **kod tanımlayıcılarının tamamı
    İngilizce** mi (`build.rs` dahil)? Türkçe kalan üç öbek yerinde mi (tanı
    metni, `Makefile` hedefleri, jeton satırının anahtarları) ve jeton
-   **değerleri** İngilizce mi (`CLAUDE.md` → Dil)? `#[allow]` gerekçeli mi?
+   **değerleri** İngilizce mi (`CLAUDE.md` → Dil)? İstisna: Linux/wgpu
+   refactor'ının yazdığı ya da taşıdığı kodda yorumlar ve tanı metinleri
+   **İngilizce** olmalı (`CLAUDE.md` → Dil, 040 `plan.md`). `#[allow]`
+   gerekçeli mi?

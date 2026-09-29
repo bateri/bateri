@@ -14,6 +14,8 @@ Set kapısı bu phase'in commit'inden önce koşar.
 
 _Requirements: R6.1, R6.2, R6.3_
 
+_Kısıt: yazılan/taşınan kodun yorumları, doc-comment'leri ve tanı metinleri İngilizce (plan.md → Yaklaşım, dil kısıtı)._
+
 ## Değişiklikler
 
 - **`crates/bt-gpu/src/renderer.rs`**
@@ -72,6 +74,7 @@ _Requirements: R6.1, R6.2, R6.3_
 
 ## Checklist
 
+- [ ] Yazılan/taşınan kodun yorumları ve tanı metinleri İngilizce
 - [ ] Metal kâhini, `.metal`'ler, `build.rs` silindi
 - [ ] `bt-gpu` platform bağımlılıkları (dev dahil) ve kullanılmayan workspace satırları gitti
 - [ ] `make shader` WGSL-only; `make denetim` `bt-gpu` platformsuzluk satırı (+ (a) istisnası gerekiyorsa)

@@ -105,13 +105,63 @@ _Requirements: R2.1, R2.2, R2.3, R2.4_
 
 ## Checklist
 
-- [ ] `wgpu` workspace + `bt-gpu` dev-dependency, özellik seti ve yorum
-- [ ] `cfg(test)` wgpu iskeleti: device, `block_on`, offscreen hedef, geri okuma
-- [ ] `cell_bg.wgsl`: `cell_bg` + `caret_fragment`; immediate/uniform seçimi yapı başına
-- [ ] Bekçi ikizleri (`MIDTONE`, dejenere caret bit bit, köşe/kenar/hale)
-- [ ] Kâhin sahne listesi ve pipeline kurulum sınaması
-- [ ] Ölçüm kancası (`#[ignore]`) + `olcum.md` tür satırı
-- [ ] `proje.md` üç WGSL satırı + `make shader`'ın `.wgsl` kolu
-- [ ] `/measure`: offscreen karşılaştırma + Metal pencere tabanı → `docs/OLCUMLER.md`; durak kuralı uygulandı
-- [ ] Doğrulama geçti (`make hepsi` + `make shader`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi
+- [x] `wgpu` workspace + `bt-gpu` dev-dependency, özellik seti ve yorum
+- [x] `cfg(test)` wgpu iskeleti: device, `block_on`, offscreen hedef, geri okuma
+- [x] `cell_bg.wgsl`: `cell_bg` + `caret_fragment`; immediate/uniform seçimi yapı başına
+- [x] Bekçi ikizleri (`MIDTONE`, dejenere caret bit bit, köşe/kenar/hale)
+- [x] Kâhin sahne listesi ve pipeline kurulum sınaması
+- [x] Ölçüm kancası (`#[ignore]`) + `olcum.md` tür satırı
+- [x] `proje.md` üç WGSL satırı + `make shader`'ın `.wgsl` kolu
+- [x] `/measure`: offscreen karşılaştırma + Metal pencere tabanı → `docs/OLCUMLER.md`; durak kuralı uygulandı
+- [x] Doğrulama geçti (`make hepsi` + `make shader`)
+- [x] Yazılan kodun yorumları ve tanı metinleri İngilizce (kullanıcı kararı 2026-09-30)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi
+
+## Uygulama Notları
+
+- **Durak kuralı tetiklendi** (release `cpu_encode_p95`: Metal 95–107 µs,
+  wgpu 172–191 µs; örtüşmüyor, wgpu kötü) → eskale edildi. **Kullanıcı
+  kararı 2026-09-29: (a) mutlak ölçek kabul** — fark kare başına ~80 µs,
+  8,33 ms bütçenin çok altında ve boşta sıfır kare etkilenmiyor; set sürüyor.
+  Sayılar `docs/OLCUMLER.md` → `## wgpu denemesi`.
+- Kâhin listesinde **blok şeridi yok**: şerit bugün `RuleCell` (chevron
+  sprite) ve `cell` pipeline'ından çiziliyor. Sahne phase-3'ün checklist'ine
+  devredildi.
+- Instance **storage buffer değil, instance adımlı vertex buffer**: storage
+  buffer kare başına bir bind group isterdi. Pipeline'ların bind group'u yok.
+- `Immediates` tek blok, iki pipeline paylaşıyor: core@0, shape@16,
+  viewport_px@32, boy 48 (WGSL'in sondaki 8 baytı Rust'ta açık `pad` alanı).
+  48 ≤ 128 (`IMMEDIATE_BUDGET`, device tam bu sınırla isteniyor), yani uniform
+  buffer kaçışı gerekmedi.
+- Instance tamponu kare başına değil **renderer boyunca**, `write_buffer` ile
+  (kilit yazımdan `submit`'e kadar). Kare başına `create_buffer_init`
+  `cpu_encode`'u belirgin büyütüyordu; ayrıştırma OLCUMLER'de gözlem olarak.
+- Kanca "basmıyor"un okuması: jeton sözleşmesi yok, sınama `--nocapture`
+  altında arka uç başına bir düz satır basıyor (µs); okuma talimatı
+  `olcum.md`'de. Arka uçlar kare kare **dönüşümlü** (sıralı koşuda aynı kodun
+  `cpu_kare`'si iki yarıda ayrışıyordu).
+- Metal test yardımcıları (`render_offscreen`, `target_texture`, `grid`, …)
+  `pub(crate)` oldu, `renderer::tests` `pub(crate) mod`; ekleme
+  `commit_offscreen` (kancanın Metal yarısı). `scissor_below` wgpu modülünde
+  ikiz (Metal'inki `MTLScissorRect` döndürüyor; söküm phase-7'de birini bırakır).
+- Metal pencere yolu tabanı 2026-09-21'inkinden yüksek (`cpu_encode_p95`
+  0,40–0,42 / 0,23–0,24 ms); makine sessiz değildi ve kod arada değişti,
+  sebep aranmadı — açık kalem, bu setin kapsamı değil (`docs/OLCUMLER.md` →
+  Bekleyen iddialar).
+- `make hepsi` ~10 dk sürdü (600 sn sınırına yakın): bu makinede Metal
+  device kurulumu debug sınamada ~30 sn; wgpu sınamaları paylaşılan device
+  kullanıyor. `make linux` yeşil (yeni `Cargo.lock` `--locked` ile çözülüyor).
+- **Dil kısıtı (kullanıcı kararı 2026-09-30):** `wgpu_renderer.rs`,
+  `cell_bg.wgsl` ve bu phase'in `renderer.rs`/`frame.rs`/`lib.rs`/`Cargo.toml`/
+  `Makefile`'a eklediği yorumlar İngilizce; kural `CLAUDE.md` → Dil, `plan.md`
+  ve phase-3…7'ye yazıldı. Ölçüm satırının anahtarları (`arka_uc=`, `kare=`…)
+  jeton sözleşmesi olarak Türkçe kaldı.
+- `/code-review` bulguları: paylaşılan device'ta `map_async` sonucu çağrının
+  kendi kanalından bekleniyor; kâhin listesine doldurma bandı (negatif orijin)
+  ve makas dışı dock caret'i sahneleri eklendi; `bytes_of` kapalı bir
+  `unsafe trait GpuBytes` ile sınırlı; vertex ofsetleri `frame.rs`'in
+  `offset_of!`'inden (`INSTANCE_OFFSETS`, `cfg(test)`); makas aritmetiği tek
+  kopya (`renderer::scissor_rect_below`); wgpu caret'ine tek-dörtlü bekçisi;
+  `wgsl_pipelines_build` paylaşılan device'ı kullanıyor. İki yarının tampon
+  stratejisi farkı kod değil ölçüm kapsamı olarak yazıldı (OLCUMLER → wgpu
+  denemesi); ölçülen tasarım durak kararından sonra değiştirilmedi.

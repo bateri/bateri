@@ -13,6 +13,8 @@ commit'le iniyor (`proje.md` → Doğrulama).
 
 _Requirements: R5_
 
+_Kısıt: yazılan/taşınan kodun yorumları, doc-comment'leri ve tanı metinleri İngilizce (plan.md → Yaklaşım, dil kısıtı)._
+
 ## Değişiklikler
 
 - **Gözlem** (kod değil). `docs/OLCUMLER.md` → `## Yöntem` → Boşta kare'nin
@@ -39,6 +41,7 @@ _Requirements: R5_
 
 ## Checklist
 
+- [ ] Yazılan/taşınan kodun yorumları ve tanı metinleri İngilizce
 - [ ] Sağlıklı dağılım (debug + release)
 - [ ] Bozuk dağılım
 - [ ] `docs/OLCUMLER.md` bloğu; gerekiyorsa sabit/doc ve `HEALTHY_QUIET`

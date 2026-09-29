@@ -41,6 +41,10 @@ mod motion;
 mod renderer;
 mod stats;
 mod surface;
+// wgpu trial (040 phase-2): wgpu is a dev-dependency, the renderer sits behind
+// `cfg(test)` and outside the product graph.
+#[cfg(test)]
+mod wgpu_renderer;
 
 pub use error::GpuError;
 pub use frame::{DOCK_ROWS, context_cols, context_row_offset, dock_px};
