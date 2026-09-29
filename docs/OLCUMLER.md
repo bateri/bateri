@@ -860,6 +860,120 @@ içerik bu sayıyı ödemiyor.
 
 ## Kare süresi
 
+### 2026-09-30 — 0,24 → 0,41 sıçraması: sessiz makinede iki commit ve bisect
+
+2026-09-28 bloğunun ayıramadığı soru: artış koddan mı, makinenin yükünden
+mi? Cevap **ikisi de, ama çoğu koddan**. Reçete 2026-09-28'inkinin aynısı:
+release, binary doğrudan, `BT_FRAME_STATS=1 BT_SCROLL_TEST=1`, 10 saniye, 10
+koşu. MacBook Pro M1 Pro, macOS 26.4.1 (25E253), rustc 1.88.0, **prizde**
+(%100, dolu, düşük güç kipi kapalı), `kare / süre ≈ 119`. **Makine sessiz:**
+tarayıcı ve ağır uygulamalar kapalı, yük ortalaması 1,54 (5 dk'lık 2,23),
+`top`'ta %6'yı geçen süreç yok (kernel_task 7,3, WindowServer 5,6). Açık
+kalan tek bateri kullanıcının kendi `/Applications/bateri.app`'i (%3,1).
+Eski commit `git worktree` ile ayrı dizinde derlendi; ana ağaca dokunulmadı.
+
+**HEAD `651c0a8`** (Metal yolu; wgpu yalnız dev-dependency)
+
+| # | cpu_kare p95 / max | cpu_encode p95 / max | gpu p95 / max | acilis | kare | istek | kapanis |
+|---|---|---|---|---|---|---|---|
+| 1 | 0,13 / 0,32 | 0,37 / 2,00 | 0,43 / 0,72 | 288,26 | 1190 | 351243 | abandoned |
+| 2 | 0,13 / **10,13** | 0,39 / 1,47 | 0,49 / 0,90 | 251,51 | 1190 | 328978 | abandoned |
+| 3 | 0,14 / 0,21 | 0,36 / 1,53 | 0,49 / 0,91 | 225,13 | 1194 | 358515 | clean |
+| 4 | 0,14 / 0,23 | 0,37 / 1,48 | 0,43 / 0,70 | 213,20 | 1194 | 351352 | clean |
+| 5 | 0,14 / 0,20 | 0,37 / 1,54 | 0,43 / 0,58 | 212,44 | 1194 | 361343 | abandoned |
+| 6 | 0,14 / 0,21 | 0,38 / 1,58 | 0,49 / 0,95 | 230,52 | 1193 | 354634 | abandoned |
+| 7 | 0,14 / 0,21 | 0,37 / 1,41 | 0,49 / 0,58 | 222,76 | 1193 | 360815 | clean |
+| 8 | 0,14 / 0,20 | 0,37 / 1,44 | 0,49 / 0,71 | 215,64 | 1194 | 357369 | abandoned |
+| 9 | 0,14 / 0,19 | 0,39 / 1,41 | 0,49 / 0,58 | 218,41 | 1181 | 339439 | clean |
+| 10 | 0,14 / 0,50 | 0,37 / 1,36 | 0,49 / 1,04 | 235,59 | 1193 | 362224 | abandoned |
+
+**`5f74180`** (2026-09-21 tabanının commit'i, bugün aynı makinede)
+
+| # | cpu_kare p95 / max | cpu_encode p95 / max | gpu p95 / max | acilis | kare | istek | kapanis |
+|---|---|---|---|---|---|---|---|
+| 1 | 0,06 / 0,15 | 0,23 / 1,69 | 0,25 / 0,56 | 217,50 | 1192 | 345133 | abandoned |
+| 2 | 0,06 / 0,16 | 0,23 / 1,42 | 0,25 / 0,61 | 210,02 | 1191 | 341934 | abandoned |
+| 3 | 0,07 / 0,31 | 0,23 / 1,52 | 0,25 / 0,58 | 220,65 | 1193 | 342609 | abandoned |
+| 4 | 0,06 / 1,50 | 0,23 / 1,62 | 0,25 / 0,72 | 212,49 | 1193 | 341226 | clean |
+| 5 | 0,06 / 0,15 | 0,23 / 1,56 | 0,25 / 0,58 | 217,98 | 1193 | 348629 | abandoned |
+| 6 | 0,07 / 0,14 | 0,23 / 1,48 | 0,25 / 0,58 | 211,79 | 1192 | 344137 | abandoned |
+| 7 | 0,06 / 0,16 | 0,23 / 1,42 | 0,25 / 0,58 | 225,26 | **1110** | **157789** | clean |
+| 8 | 0,06 / 0,15 | 0,23 / 1,47 | 0,25 / 0,58 | 218,39 | 1191 | 349847 | clean |
+| 9 | 0,06 / 0,18 | 0,23 / 1,48 | 0,25 / 1,07 | 219,16 | 1192 | 351566 | abandoned |
+| 10 | 0,07 / **10,07** | 0,22 / 1,45 | 0,25 / 0,84 | 217,22 | 1192 | 348612 | clean |
+
+Sabit jetonlar bir kez (iki commit'te de): `hucre=0 glif=1785 kural=0
+yuva=37/1984 yuk=load sessiz=0.00ms profil=release dusen=0 gpu_elenen=0
+taban=20 pipeline=ok`; HEAD'de ayrıca `yuva2=0/1984` (5f74180 o jetonu
+henüz basmıyordu). `icerik`/`ornek`/`gpu_ornek` = `kare`; HEAD 2. koşuda
+`hareket=2 kayma=2`, 10. koşuda `kayma=1`, 5f74180 3. ve 10. koşuda
+`hareket=1` — o koşularda `ornek` bir ya da iki eksik (`## Yöntem`,
+üçüncü kalem). Hiçbir koşuda `insufficient` yok. Tam satırlar
+`target/olcum-kare/sicrama-{head,5f74180}/run-*.out`.
+
+**Sapmalar ayıklanmadı:** 5f74180 7. koşu `kare=1110`, `istek` diğerlerinin
+yarısı — rejim oranı 111, geri kalanların 119'u; sebebi aranmadı.
+`cpu_kare_max` ~10 ms iki commit'te de bir kez (HEAD 2., 5f74180 10.) —
+2026-09-21'in pildeki 10,08'i ile aynı imza, yani yeni değil.
+
+**Ayrışma.** `cpu_encode_p95`: 5f74180 **0,22–0,23**, HEAD **0,36–0,39**
+(2026-09-28, yüklü makine: 0,40–0,42). `cpu_kare_p95`: 0,06–0,07 → 0,13–0,14
+(yüklü: 0,14–0,15). Dağılımlar örtüşmüyor. Yani 0,24 → 0,41'in ~0,14 ms'i
+**kod**, kalan ~0,03 ms 2026-09-28'deki tarayıcı yükü. 5f74180 bugün
+2026-09-21'in kendi sayısını (0,23–0,24) verdi, yani makine aynı yerde.
+**040 phase-5'in karşılaştırma tabanı olarak bu HEAD tablosu 2026-09-28'inkinden
+temiz** (aynı kod yolu, sessiz makine).
+
+**Bisect** (aynı reçete, adım başına 3 koşu; kararın ölçütü üç `cpu_encode_p95`'in
+medyanı). Birinci tur `5f74180..651c0a8`, eşik 0,30; ikinci tur ikinci bir
+basamak için `82d07bc..88140d0`, eşik 0,345. Adım satırları taban değil:
+
+| commit | cpu_encode_p95 (3 koşu) | cpu_kare_p95 | gpu_p95 | karar |
+|---|---|---|---|---|
+| `04d5ce4` | 0,23 0,23 0,24 | 0,07 0,07 0,07 | 0,25 | iyi (son iyi) |
+| `0777e13` | 0,32 0,33 0,33 | 0,12 0,12 0,12 | 0,45 | **birinci basamak** |
+| `3573c98` | 0,23 0,23 0,24 | 0,07 | 0,25 | iyi |
+| `3cdc11a` | 0,23 0,23 0,23 | 0,06–0,07 | 0,25 | iyi |
+| `e479537` | 0,32 0,33 0,32 | 0,12 | 0,27 0,45 0,44 | kötü |
+| `82d07bc` | 0,32 0,33 0,32 | 0,12 | 0,45 0,45 0,27 | kötü |
+| `9607214` | 0,32 0,33 0,32 | 0,12 | 0,45 | ikinci turda iyi |
+| `07a1579` | 0,32 0,33 0,33 | 0,12 | 0,45–0,51 | ikinci turda iyi (son iyi) |
+| `c0b9571` | 0,37 0,36 0,36 | 0,11–0,12 | 0,45–0,46 | **ikinci basamak** |
+| `9b2318b` | 0,36 0,36 0,36 | 0,11–0,12 | 0,46–0,47 | kötü |
+| `88140d0` | 0,38 0,37 0,36 | 0,12 | 0,45–0,46 | kötü |
+
+Adım çıktıları commit'lenmedi (oturumun geçici dizininde kaldı).
+
+**Birinci basamak — `0777e13` "Dolu ızgarada taşan çıktıyı da süzdür"**,
++0,10 ms encode. Ayırıcı: **üç sütun birlikte** sıçradı (`cpu_kare` 0,07 →
+0,12, `gpu_p95` 0,25 → 0,45), yani `frame()` daha fazla hücre üretiyor ve
+GPU daha fazla çiziyor — encode'un kendisi pahalılaşmadı. Mekanizma **kod
+okumasından, ölçümle ayrılmadı** (kod değiştirmek bu ölçümün kapsamı
+dışındaydı): `Motion::scroll_in`'in yeni patlama kolu durgun ızgarada
+ötelemeyi `target + rows`'a koyuyor, sonraki içerik karesinde çizen taraf bu
+ötelemeyi `set_grid_top`'la bildiriyor ve `Session::slide_fill_rows`
+doldurma bandını bir ekran boyu uzatıyor — patlama karesi iki ekran çiziyor.
+`BT_SCROLL_TEST` her karede ekrandan fazla satır kaydırıyor (45–467) ve
+"akış" ayrımının hafızası yok: N'de patlama başlıyor, N+1'de kayma uçuşta
+olduğu için bitiriliyor, N+2'de ızgara yine durgun ve patlama yeniden —
+**karelerin yaklaşık yarısı** çift ekran çiziyor ve p95 o yarıya düşüyor.
+Doldurma bandının listeleri sayaçlardan muaf olduğu için `glif=` bunu
+göstermiyor, `kayma=` da göstermiyor (yalnız hasarsız hareket karesini
+sayıyor). Doğrulamanın yolu: yalnız worktree'de patlama kolunu kapatıp aynı
+reçeteyle ölçmek; 0,23'e dönüş mekanizmayı kanıtlar.
+
+**İkinci basamak — `c0b9571` "Dock'ta yazılan harfi belirt… glyph_fx
+pipeline'ı"** (030 phase-2), +0,04 ms encode. Ayırıcı: `cpu_kare` **oynamadı**
+(0,12 → 0,11–0,12), `gpu_p95` de, yani ek maliyet encode + commit'in
+içinde, `renderer.rs`'te. Ölçüm yükünde dock yok, yani efektlerin kendisi
+koşmuyor; aday glyph başına `prepare` yolunun `fan` yardımcısına taşınması
+(dizi dönen, her glyph'te çağrılan). Commit büyük (13 dosya) ve sebep
+**ayrılmadı**.
+
+**Üçüncü, küçük ve bisect'lenmemiş bir kayma:** `88140d0..651c0a8` (73
+commit) arasında `cpu_kare_p95` 0,12 → 0,13–0,14; encode 0,36–0,38 →
+0,36–0,39 (ayırt edilemez).
+
 ### 2026-09-28 — Metal pencere yolu tabanı, wgpu geçişinden önce (040 phase-2)
 
 wgpu geçişinin (040 phase-5) karşılaştıracağı taban; Metal sökülünce bir
@@ -913,7 +1027,8 @@ karesi CPU örneği yazmıyor, `## Yöntem` üçüncü kalem). Tam satırlar
 **debug:** 3,04–3,17 ve 2,35–2,39 ms. GPU sütunu raporlanıyor, taban değil
 (0,37–0,57 ms; gezintisi aşağıda).
 
-**2026-09-21 tabanından yüksek ve sebebi aranmadı:** o gün `cpu_kare_p95`
+**2026-09-21 tabanından yüksek** (sebebi 2026-09-30'da bulundu, yukarıdaki
+blok: çoğu kod, ~0,03 ms makinenin yükü)**:** o gün `cpu_kare_p95`
 0,07–0,08, `cpu_encode_p95` 0,23–0,24 ms'ydi; iki dağılım örtüşmüyor. Arada
 iki şey değişti ve ayrılmadı — kod (o günden bu yana gelen setler, kare yolu
 dahil) ve makinenin yükü (yukarıda). Bu tablo 040'ın **karşılaştırma**
@@ -1218,13 +1333,6 @@ yüzeyin de ön koşulu.
 - 019 B.1 — yedek glyph'in etkisi. **İkinci bir sebebi var:** ölçüm yükü
   (`load_shell`) düz ASCII basıyor, yani yedek yoluna hiç girmiyor — bugünkü
   kancayla bu iddianın tanığı yok, ölçüm yolunun kendisi genişlemeli.
-
-### Sebebi aranmamış gerileme
-
-- 040 phase-2 — Metal pencere yolunun release `cpu_encode_p95`'i 2026-09-21'de
-  0,23–0,24 ms, 2026-09-28'de 0,40–0,42 ms (`cpu_kare_p95` 0,07–0,08 →
-  0,14–0,15). Arada kod da makinenin yükü de değişti ve ayrılmadı
-  (`## Kare süresi` → 2026-09-28). Sessiz makinede, iki commit'te koşulmalı.
 
 ### Kancası ya da yükü olmayanlar
 
