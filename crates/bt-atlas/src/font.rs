@@ -638,9 +638,22 @@ pub(crate) fn centre_shift(box_advance: CGFloat, advance: CGFloat) -> CGFloat {
 /// Sınır adıyla yazılı: dikeyde taşan bir aday bugün kutuya değil **kırpmaya**
 /// düşer.
 fn ink_fits_box(font: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> bool {
-    let shift = centre_shift(box_advance, glyph_advance(font, glyph));
-    let ink = glyph_ink(font, glyph);
-    let left = ink.origin.x + shift;
+    ink_fits_placed(
+        box_advance,
+        glyph_advance(font, glyph),
+        glyph_ink(font, glyph),
+    )
+}
+
+/// [`ink_fits_box`]'in fontsuz gövdesi: ilerlemesi `advance`, mürekkebi
+/// `ink` olan bir glyph [`centre_shift`]'in koyduğu yerde kutuya sığıyor mu.
+///
+/// Ayrı olmasının sebebi tarama (`census`): bir adayın **ne kadar
+/// küçültülürse** sığacağını soruyor ve ölçeklenmiş ölçüleri fontsuz
+/// veriyor. Kural tek yerde kalıyor, yani taramanın "sığar" dediği ile
+/// kapının kabul ettiği ayrışamaz.
+pub(crate) fn ink_fits_placed(box_advance: CGFloat, advance: CGFloat, ink: CGRect) -> bool {
+    let left = ink.origin.x + centre_shift(box_advance, advance);
     // Sol kenar da sınanıyor: negatif `origin.x` taşıyan bir aday hücreye
     // soldan taşar ve CG onu **soldan** keser. Latin yazıda harf soldan
     // tanınıyor, yani o kırpma sessiz bir bozulma olurdu — kutu dürüsttür.
@@ -698,6 +711,21 @@ pub(crate) fn fallback_font(
     cell_advance: CGFloat,
     cols: u8,
 ) -> Option<Accepted> {
+    let candidate = cascade_candidate(base, ch);
+    let glyph = glyph_index(&candidate, ch)?;
+    accept(candidate, glyph, cell_advance, cols)
+}
+
+/// [`fallback_font`]'un 1. adımı: cascade'in `ch` için önerdiği font.
+///
+/// Ayrı olmasının sebebi tarama (`census`): karakteri kapının **aynı**
+/// adımlarından geçirip her adımın cevabını ayrı raporluyor. Adım
+/// kopyalansaydı tarama bir gün kapının sormadığı bir soruyu sorardı.
+///
+/// Dönüş hiç boş değil: kimsenin çizemediği karakterde CoreText
+/// `.LastResort`'u veriyor ve o da bir glyph döndürüyor, yani "aday yok"
+/// cevabı buradan değil sonraki adımdan ([`glyph_index`]) doğuyor.
+pub(crate) fn cascade_candidate(base: &CTFont, ch: char) -> CFRetained<CTFont> {
     let mut utf8 = [0u8; 4];
     let text = CFString::from_str(ch.encode_utf8(&mut utf8));
     let range = CFRange {
@@ -707,9 +735,7 @@ pub(crate) fn fallback_font(
         length: ch.len_utf16() as CFIndex,
     };
     // SAFETY: `base` ve `text` bu kapsamda canlı; `range` string'in tamamı.
-    let candidate = unsafe { base.for_string(&text, range) };
-    let glyph = glyph_index(&candidate, ch)?;
-    accept(candidate, glyph, cell_advance, cols)
+    unsafe { base.for_string(&text, range) }
 }
 
 /// Mürekkep kapısı: adayın glyph'i önce tek hücreye, sonra (iki sütun ilan
@@ -718,8 +744,9 @@ pub(crate) fn fallback_font(
 /// Tek glyph'lik yedek ([`fallback_font`]) ile grapheme dizisinin
 /// ([`shape_cluster`]) **ortak** kapısı — "kutu ya da tam glyph" sözleşmesi
 /// ikisinde de aynı sıradan geçiyor, yani dizinin glyph'i tek kod noktalı
-/// emojiden farklı bir ölçütle kabul edilemez.
-fn accept(
+/// emojiden farklı bir ölçütle kabul edilemez. Taramanın (`census`) da
+/// kapısı bu, yani `pub(crate)`.
+pub(crate) fn accept(
     candidate: CFRetained<CTFont>,
     glyph: CGGlyph,
     cell_advance: CGFloat,

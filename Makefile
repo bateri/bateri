@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite sırası yalnız seri make'te garantidir; -j altında "en ucuz kapı
 # önce" ve "sürüm başta" sözü bozulur.
 .NOTPARALLEL:
-.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris kur paket yukle linux
+.PHONY: hepsi fmt denetim clippy test shader duman terminfo test-yaris tarama kur paket yukle linux
 
 # Definition of done. Homebrew rustc pin'li değil (rust-toolchain.toml bilinçli
 # olarak yok): bir `brew upgrade` sonrası gelen clippy kırmızısını kod
@@ -122,6 +122,16 @@ shader:
 test-yaris:
 	$(CARGO) test --workspace -- --ignored race_
 	$(CARGO) test --workspace -- --include-ignored --test-threads=1
+
+# Yedek glyph kapısının envanteri (041): sembol ve emoji bloklarındaki her
+# karakteri atlasın kendi kapısından geçirir ve 13/16pt × @1x/@2x için blok
+# başına grupları (tabanda / yedekten sığdı / hiçbir fontta yok / kapıdan
+# döndü), dönenlerin oran histogramını ve font başına dökümü basar. Oranların
+# tanımı `crates/bt-atlas/src/census.rs` → `classify`. `make hepsi`'de YOK:
+# sonucu makinede kurulu fontlara bağlı, kapı olamaz. `BT_SCAN_FONT=Aile`
+# taban aileyi değiştirir. Release, çünkü on bine yakın karakter ölçülüyor.
+tarama:
+	$(CARGO) test -p bt-atlas --release -- --ignored census --nocapture
 
 # Release derler ve `bateri.app`'i target/ altında kurar (/Applications'a
 # DEĞİL). Developer ID imzası, notarization ve Sparkle yok (006 Karar 6).
