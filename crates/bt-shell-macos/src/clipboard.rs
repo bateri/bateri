@@ -1,22 +1,24 @@
-//! Pano köprüsü: `bt-core`'un bildiği metni AppKit panosuna taşır.
+//! Clipboard bridge: carries the text `bt-core` knows to the AppKit pasteboard.
 //!
-//! Panoya dokunan yalnız `bt-shell-macos` (AppKit); `bt-core` bayt görür, pano
-//! görmez (`CLAUDE.md` → katman düzeni). Kopyanın metni phase-1'in tek metin
-//! yolundan gelir (`Session::selection_text`); ikinci bir metin yolu, ikinci
-//! bir sarma hatası demek olurdu.
+//! Only `bt-shell-macos` (AppKit) touches the pasteboard; `bt-core` sees bytes, not
+//! the pasteboard (`CLAUDE.md` → layer layout). The copied text comes from
+//! phase-1's single text path (`Session::selection_text`); a second text path
+//! would mean a second wrapping bug.
 //!
-//! İki yön de `NSPasteboard` üstünden; pano her çağrıya **parametre** olarak
-//! gelir. Üretimde ikisi de genel panodur (`copy` kullanıcının Cmd-C'si,
-//! `read` Cmd-V'si), sınamada ise yön başına ayrı bir benzersiz pano verilir:
-//! başsız ortamda genel panoya dokunulamaz ve iki sınama birbirinin içeriğini
-//! görmemeli. Panoyu parametre yapmak, canlılık çapasını da sınanabilir
-//! kılıyor (`board()`).
+//! Both directions go through `NSPasteboard`; the board comes in as a **parameter**
+//! on every call. In production both are the general pasteboard (`copy` is the
+//! user's Cmd-C, `read` their Cmd-V); in tests each direction gets its own unique
+//! board: the general pasteboard cannot be touched in a headless environment and
+//! two tests must not see each other's content. Making the board a parameter also
+//! makes the liveness anchor testable (`board()`).
 //!
-//! `copy`/`read` adları AppKit'in de değil `NSPasteboard`'un da değil, bu
-//! köprünün kendi sözlüğüdür: `copy` yazma yönü, `read` okuma yönüdür.
+//! The names `copy`/`read` are neither AppKit's nor `NSPasteboard`'s, they are this
+//! bridge's own vocabulary: `copy` is the write direction, `read` the read
+//! direction.
 //!
-//! Üçüncü yol uzaktan kopya (OSC 52): metin okuyucu thread'de doğar ve ana
-//! kuyruğa [`PendingCopy`] yuvasından geçer; panoya yine `copy` yazar.
+//! The third path is remote copy (OSC 52): the text is born on the reader thread
+//! and reaches the main queue through the [`PendingCopy`] slot; it is still `copy`
+//! that writes to the pasteboard.
 
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -24,114 +26,116 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 use objc2_foundation::NSString;
 
-/// Seçili metni panoya yazar. Yazılacak metin yoksa pano **el değmeden**
-/// kalır ve `false` döner.
+/// Writes the selected text to the pasteboard. If there is no text to write the
+/// pasteboard is left **untouched** and `false` is returned.
 ///
-/// Boş yazma genel panoyu temizler ve kullanıcının başka uygulamadan
-/// kopyaladığını silerdi. Kapı bu yüzden iki hâli birden eler:
+/// An empty write clears the general pasteboard and would erase what the user
+/// copied from another app. The gate therefore rejects both cases:
 ///
-/// - `None` → seçim yok.
-/// - `Some("")` → seçim **var** ama boş metin veriyor: boşluklardan oluşan
-///   bir satırın üstünde sürükleme. O satırda alacritty'nin `line_length()`'i
-///   sıfır, yani `selection_to_string()` `Some("")` döner. Bu hâl kapıdan
-///   geçseydi prompt altındaki boş bir satırı seçip Cmd-C demek kullanıcının
-///   panosunu boşaltırdı — `None` kapısının engellediği kaybın ta kendisi.
-///   (Sürüklemesiz tık buraya düşmez: iki ucu eşit seçim boştur ve `None`
-///   verir.)
+/// - `None` → no selection.
+/// - `Some("")` → a selection **exists** but yields empty text: dragging over a
+///   line made of blanks. On that line alacritty's `line_length()` is zero, so
+///   `selection_to_string()` returns `Some("")`. Had this case passed the gate,
+///   selecting an empty line under the prompt and hitting Cmd-C would empty the
+///   user's pasteboard — the very loss the `None` gate prevents.
+///   (A click without a drag does not land here: a selection with equal ends is
+///   empty and gives `None`.)
 ///
-/// **Yalnız boşluk** (`Some("   ")`) elenmez: satırın içindeki boşlukları
-/// seçip kopyalamak meşru ve o metin boş değil.
+/// **Whitespace only** (`Some("   ")`) is not rejected: selecting and copying the
+/// spaces inside a line is legitimate and that text is not empty.
 pub(crate) fn copy(board: &NSPasteboard, text: Option<String>) -> bool {
     let Some(text) = text.filter(|t| !t.is_empty()) else {
         return false;
     };
-    // `clearContents` + `setString`: `setString` tek başına da yazar ama o
-    // zaman eski tipler (RTF, TIFF) panoda kalır ve yapıştıran taraf metin
-    // yerine onları alabilir.
+    // `clearContents` + `setString`: `setString` alone also writes, but then the old
+    // types (RTF, TIFF) stay on the pasteboard and the pasting side may pick them up
+    // instead of the text.
     board.clearContents();
     let string = NSString::from_str(&text);
-    // SAFETY: `unsafe` blok `NSPasteboardTypeString` **statik** erişimi için;
-    // `setString:forType:`'ın kendisi `unsafe` değil (`objc2` onu güvenli
-    // sarmalıyor). Statik gerçek bir `NSPasteboardType` kaydı ve `None`'a
-    // çözümlenmiyor.
+    // SAFETY: the `unsafe` block is for the **static** access to
+    // `NSPasteboardTypeString`; `setString:forType:` itself is not `unsafe` (`objc2`
+    // wraps it safely). The static is a real `NSPasteboardType` record and does not
+    // resolve to `None`.
     //
-    // Bağlam `MainThreadMarker` değil: `NSPasteboard` `objc2`'de `AnyThread`,
-    // yani tip ana thread'i zorlamıyor. Ama `NSPasteboard` **eşzamanlı**
-    // kullanıma dayanıklı değil — ayrı benzersiz panolar bile süreç çapında
-    // bir tip önbelleğini paylaşıyor (`+[NSPasteboard(NSTypeConversion) …]`)
-    // ve iki thread aynı anda dokununca `_updateTypeCacheIfNeeded`'de
-    // SIGSEGV ya da bir panonun ötekinin metnini okuması doğuyor. Üretimde
-    // bütün çağıranlar ana thread'de, yani sıralı; sınamalar aynı sırayı
-    // [`tests::pasteboard_lock`] ile kuruyor.
+    // The context is not `MainThreadMarker`: `NSPasteboard` is `AnyThread` in `objc2`,
+    // so the type does not force the main thread. But `NSPasteboard` is **not**
+    // resilient to concurrent use — even separate unique boards share a process-wide
+    // type cache (`+[NSPasteboard(NSTypeConversion) …]`) and two threads touching it
+    // at once produce a SIGSEGV in `_updateTypeCacheIfNeeded` or one board reading
+    // another's text. In production all callers are on the main thread, i.e.
+    // sequential; the tests set up the same order with
+    // [`tests::pasteboard_lock`].
     unsafe { board.setString_forType(&string, NSPasteboardTypeString) }
 }
 
-/// Panodaki metni okur. Metin yoksa (`None`) yapıştırma sessizdir.
+/// Reads the text on the pasteboard. If there is none (`None`) pasting is silent.
 pub(crate) fn read(board: &NSPasteboard) -> Option<String> {
-    // SAFETY: yukarıdakiyle aynı statik erişimi.
+    // SAFETY: the same static access as above.
     unsafe { board.stringForType(NSPasteboardTypeString) }.map(|s| s.to_string())
 }
 
-/// OSC 52'nin panoya gidecek metni: okuyucu thread koyar, ana kuyruk alır.
+/// The text OSC 52 sends to the pasteboard: the reader thread puts it, the main
+/// queue takes it.
 ///
-/// **Tek yuva, son yazma kazanır.** Durmadan OSC 52 basan bir uygulama
-/// (döngüdeki `printf`) her dizi için ana kuyruğa bir iş atsaydı kuyruk
-/// sınırsız büyür ve pano aynı saniyede yüz kez yazılırdı; kullanıcının
-/// göreceği tek şey zaten sonuncusu. Yuva boşken dolduran çağrı **tek** iş
-/// ister ([`PendingCopy::put`] `true`), iş yuvayı boşaltıp yazar
-/// ([`PendingCopy::take`]). Değişmez: yuva doluysa onu alacak bir iş
-/// kuyrukta ve henüz almamış — boş→dolu geçişi her zaman iş istiyor, işin
-/// kendi takası yuvayı boşaltıyor. Yani kuyrukta en çok bir bekleyen, bir de
-/// koşan iş olur ve son metin kaybolmaz.
+/// **One slot, last write wins.** If an app that prints OSC 52 nonstop (a `printf`
+/// in a loop) caused a job on the main queue for every sequence, the queue would
+/// grow unbounded and the pasteboard would be written a hundred times in the same
+/// second; the only one the user will see is the last anyway. The call that fills
+/// an empty slot asks for **one** job ([`PendingCopy::put`] `true`), the job empties
+/// the slot and writes ([`PendingCopy::take`]). Invariant: if the slot is full
+/// there is a job in the queue that will take it and has not yet; the empty→full
+/// transition always asks for a job, the job's own swap empties the slot. So the
+/// queue holds at most one waiting and one running job and the last text is never
+/// lost.
 ///
-/// **Kilitsiz**, çünkü `put` `Term` kilidi tutulurken okuyucu thread'de
-/// çağrılıyor ve `Wake` uygulayanı kilit almaz (`bt-core`'un `wake.rs`'i;
-/// `discussion.md` → Karar 5). `AtomicPtr` + `Box`: std'de sahip olunan bir
-/// değeri atomik takaslayan başka tip yok.
+/// **Lock-free**, because `put` is called on the reader thread while the `Term` lock
+/// is held and whoever implements `Wake` does not take a lock (`bt-core`'s
+/// `wake.rs`; `discussion.md` → Karar 5). `AtomicPtr` + `Box`: std has no other
+/// type that atomically swaps an owned value.
 ///
-/// AppKit'ten ayrık: yuva mantığı panosuz sınanıyor, panoyu alan taraf
-/// seçiyor.
+/// Separate from AppKit: the slot logic is tested without a pasteboard, the side
+/// that receives the board chooses it.
 #[derive(Default)]
 pub(crate) struct PendingCopy(AtomicPtr<String>);
 
 impl PendingCopy {
-    /// Metni yuvaya koyar; önceki metin henüz alınmadıysa düşer.
+    /// Puts the text in the slot; if the previous text has not been taken yet it is
+    /// dropped.
     ///
-    /// `true` → yuva boştu, çağıran ana kuyruğa **bir** iş atmalı. `false` →
-    /// yuvayı alacak iş zaten kuyrukta, yenisi gerekmiyor. Bloklamaz; düşen
-    /// metnin serbest bırakılması bir kilit değil.
+    /// `true` → the slot was empty, the caller must post **one** job to the main queue.
+    /// `false` → the job that will take the slot is already queued, no new one is
+    /// needed. Does not block; releasing the dropped text is not a lock.
     pub(crate) fn put(&self, text: String) -> bool {
         let new = Box::into_raw(Box::new(text));
         let old = self.0.swap(new, Ordering::AcqRel);
         if old.is_null() {
             return true;
         }
-        // SAFETY: yuvadaki her boş olmayan işaretçi yukarıdaki
-        // `Box::into_raw`'dan geliyor ve takas onu yuvadan **atomik** olarak
-        // çıkardı: başka hiçbir taraf (`take`, `Drop`, ikinci bir `put`) aynı
-        // işaretçiyi göremez, yani sahiplik tek ve bir kez geri alınıyor.
+        // SAFETY: every non-null pointer in the slot comes from the `Box::into_raw`
+        // above and the swap removed it from the slot **atomically**: no other party
+        // (`take`, `Drop`, a second `put`) can see the same pointer, so ownership is
+        // single and reclaimed exactly once.
         drop(unsafe { Box::from_raw(old) });
         false
     }
 
-    /// Ana kuyruğun işi: yuvadaki metni alır ve yuvayı boşaltır; boşsa
-    /// `None` (yarışta başka bir iş almış olabilir). Metni panoya pane'in
-    /// sahibi yazıyor (`pane::PaneHost::copy_to_clipboard`; varsayılan kol
-    /// genel panoya [`copy`] ile).
+    /// The main queue's job: takes the text in the slot and empties the slot; `None` if
+    /// empty (another job may have taken it in a race). The pane's owner writes the
+    /// text to the pasteboard (`pane::PaneHost::copy_to_clipboard`; the default arm to
+    /// the general pasteboard via [`copy`]).
     pub(crate) fn take(&self) -> Option<String> {
         let old = self.0.swap(ptr::null_mut(), Ordering::AcqRel);
-        // SAFETY: `put`'taki gerekçe — işaretçi `Box::into_raw`'dan ve takas
-        // onu yuvadan tek başına çıkardı.
+        // SAFETY: the reasoning in `put` — the pointer comes from `Box::into_raw` and the
+        // swap removed it from the slot alone.
         (!old.is_null()).then(|| *unsafe { Box::from_raw(old) })
     }
 }
 
 impl Drop for PendingCopy {
-    /// Alınmamış metni serbest bırakır — iş koşmadan uygulama kapanırsa.
+    /// Releases an untaken text — if the app closes before the job runs.
     ///
-    /// `bt-core`'un `Wake` sözleşmesine göre bu `Drop` `"PTY teardown"`
-    /// thread'inde koşabilir; bir bellek serbest bırakmasından fazlası
-    /// değil, bloklamaz.
+    /// Per `bt-core`'s `Wake` contract this `Drop` may run on the `"PTY teardown"`
+    /// thread; it is nothing more than freeing memory, it does not block.
     fn drop(&mut self) {
         let _ = self.take();
     }
@@ -142,30 +146,30 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
-    /// Panoya dokunan her sınamanın **ilk** satırı: `NSPasteboard`'a aynı
-    /// anda tek thread girer (gerekçe [`copy`]'nin içinde).
+    /// The **first** line of every test that touches the pasteboard: only one thread
+    /// enters `NSPasteboard` at a time (reasoning inside [`copy`]).
     ///
-    /// Gereken ana thread değil **sıra**: `--test-threads=1` her sınamayı
-    /// yine bir işçi thread'de koşturuyor ve pano sınamaları orada 300/300
-    /// geçti, paralel koşuda 5/300 düştü (2026-09-27). Kilit yalnız pano
-    /// sınamalarını sıralıyor, kalan sınamalar paralel koşmaya devam ediyor.
-    /// Zehirlenme yutuluyor: bir sınamanın iddiası öteki sınamaları
-    /// düşürmemeli.
+    /// What is needed is not the main thread but **ordering**: `--test-threads=1` still
+    /// runs each test on a worker thread and the pasteboard tests passed 300/300 there,
+    /// while in a parallel run 5/300 failed (2026-09-27). The lock only orders the
+    /// pasteboard tests, the remaining tests keep running in parallel. Poisoning is
+    /// swallowed: one test's assertion must not fail the other tests.
     pub(crate) fn pasteboard_lock() -> MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Canlı bir pano; başsız ortamda (CI, `cargo test` ssh üstünde) `None`.
+    /// A live pasteboard; `None` in a headless environment (CI, `cargo test` over ssh).
     ///
-    /// Benzersiz pano başsızda da **doğar**, ama yazma tutmaz. Çapa bu yüzden
-    /// varlığa değil **yazıp okuyabilmeye** bağlı: tutan bir yazma gerçek bir
-    /// pano sunucusu demek. Bunu `copy`/`read` üzerinden kurmak, canlılık
-    /// ölçüsünü de köprünün kendi gövdesinden almak demek — ayrı bir yazma
-    /// yolu kurup iğneyi iki yerde tutmaktan iyidir.
+    /// A unique board is **born** in a headless setting too, but writes do not stick.
+    /// The anchor therefore depends not on existence but on **being able to write and
+    /// read back**: a write that sticks means a real pasteboard server. Building this
+    /// through `copy`/`read` also takes the liveness measure from the bridge's own
+    /// body — better than building a separate write path and keeping the needle in two
+    /// places.
     fn board() -> Option<objc2::rc::Retained<NSPasteboard>> {
-        // `pasteboardWithUniqueName` her çağrıda taze bir pano verir —
-        // sınamalar birbirinin içeriğini görmez.
+        // `pasteboardWithUniqueName` gives a fresh board on every call — tests do not see
+        // each other's content.
         let board = NSPasteboard::pasteboardWithUniqueName();
         const SENTINEL: &str = "bateri pano çapası";
         let alive =
@@ -173,11 +177,11 @@ pub(crate) mod tests {
         alive.then_some(board)
     }
 
-    /// Başsız dala ortak gerekçe. Her iki sınama da aynı yolu tutar: pano
-    /// yoksa **sessizce atlanır**. Boş bir panoya iddia kurmak kapının sahte
-    /// yeşil verdiği yol olurdu — taze pano zaten boştur, `read` köprü
-    /// çalışmasa da `None` döner.
-    const HEADLESS: &str = "başsız ortamda pano yok, sınama atlandı";
+    /// Shared reasoning for the headless branch. Both tests take the same path: if
+    /// there is no pasteboard they are **skipped silently**. Asserting against an empty
+    /// pasteboard would be a path where the gate gives a false green — a fresh board is
+    /// empty anyway, `read` returns `None` even if the bridge does not work.
+    const HEADLESS: &str = "no pasteboard in a headless environment, test skipped";
 
     #[test]
     fn copy_writes_selection_text_to_clipboard() {
@@ -198,7 +202,7 @@ pub(crate) mod tests {
             return;
         };
         assert!(copy(&board, Some("önce".to_owned())));
-        // Seçimsiz kopya `false` döner ve panodaki duranı silmez.
+        // A copy without a selection returns `false` and does not erase what is on the pasteboard.
         assert!(!copy(&board, None));
         assert_eq!(read(&board).as_deref(), Some("önce"));
     }
@@ -206,10 +210,10 @@ pub(crate) mod tests {
     #[test]
     fn copy_of_empty_text_leaves_board_untouched() {
         let _pasteboard = pasteboard_lock();
-        // `Some("")` = seçim var ama metin boş: boş bir satırın üstünde
-        // sürükleme. Kapı bunu da eler, yoksa Cmd-C kullanıcının panosunu
-        // boşaltırdı. Pano gerektirmeyen kısım her ortamda ölçülür
-        // (`Some("")` hiç yazmaz), gerisi canlı pano ister.
+        // `Some("")` = a selection exists but the text is empty: dragging over an empty
+        // line. The gate rejects this too, otherwise Cmd-C would empty the user's
+        // pasteboard. The part that needs no pasteboard is measured in every environment
+        // (`Some("")` never writes), the rest needs a live pasteboard.
         let fresh = NSPasteboard::pasteboardWithUniqueName();
         assert!(!copy(&fresh, Some(String::new())));
 
@@ -224,18 +228,18 @@ pub(crate) mod tests {
 
     #[test]
     fn pending_copy_asks_for_one_job_and_keeps_the_last_text() {
-        // Durmadan OSC 52 basan uygulama: yüz metin, tek iş, son metin.
+        // An app printing OSC 52 nonstop: a hundred texts, one job, the last text.
         let slot = PendingCopy::default();
         let jobs = (0..100).filter(|i| slot.put(format!("metin {i}"))).count();
-        assert_eq!(jobs, 1, "art arda gelen metinler tek iş istemeli");
+        assert_eq!(jobs, 1, "consecutive texts must ask for a single job");
         assert_eq!(slot.take().as_deref(), Some("metin 99"));
         assert_eq!(slot.take(), None);
-        // İş yuvayı boşalttıktan sonraki metin yeniden iş ister: aksi hâlde
-        // ikinci kopya hiç panoya ulaşmazdı.
+        // A text after the job has emptied the slot asks for a job again: otherwise the
+        // second copy would never reach the pasteboard.
         assert!(slot.put("sonra".to_owned()));
         assert_eq!(slot.take().as_deref(), Some("sonra"));
-        // Alınmamış metinle düşen yuva onu serbest bırakıyor (sızıntıyı
-        // `Drop` kapatıyor; burada yalnız paniksiz düştüğü görülüyor).
+        // A slot dropped with an untaken text releases it (`Drop` closes the leak; here we
+        // only see that it drops without panicking).
         assert!(slot.put("alınmadı".to_owned()));
         drop(slot);
     }
@@ -243,13 +247,13 @@ pub(crate) mod tests {
     #[test]
     fn pending_copy_delivers_to_the_given_board() {
         let _pasteboard = pasteboard_lock();
-        // Dışarıdan verilen pano, genel pano değil: sınama kullanıcının
-        // panosuna dokunmaz.
+        // The board is passed from outside, not the general pasteboard: the test does not
+        // touch the user's pasteboard.
         let slot = PendingCopy::default();
         let fresh = NSPasteboard::pasteboardWithUniqueName();
-        // Boş yuva panoya yazmaz — pano gerektirmeyen yarı. İşin iki adımı
-        // üretimdeki gibi: yuvadan al (`take`), panoya yaz (`copy`, sahibin
-        // varsayılan kolu).
+        // An empty slot does not write to the pasteboard — the half that needs no
+        // pasteboard. The job's two steps as in production: take from the slot (`take`),
+        // write to the pasteboard (`copy`, the owner's default arm).
         let deliver = |board: &NSPasteboard| copy(board, slot.take());
         assert!(!deliver(&fresh));
 
@@ -261,22 +265,22 @@ pub(crate) mod tests {
         assert!(!slot.put("son".to_owned()));
         assert!(deliver(&board));
         assert_eq!(read(&board).as_deref(), Some("son"));
-        // Yuva boşaldı: ikinci iş panoyu el değmeden bırakır.
+        // The slot emptied: the second job leaves the pasteboard untouched.
         assert!(!deliver(&board));
         assert_eq!(read(&board).as_deref(), Some("son"));
     }
 
     #[test]
-    #[ignore = "make test-yaris ile koşar"]
+    #[ignore = "runs with make test-race"]
     fn race_pending_copy_put_and_take() {
-        // Üretimin şekli: tek okuyucu thread koyar, "ana kuyruk" thread'i
-        // `put`'un istediği her iş için bir kez alır. İki değişmez:
-        // - **Kuyrukta en çok bir bekleyen iş.** `waiting` işin gönderilişiyle
-        //   ana thread'in onu alışı arasını sayıyor; `put` iş istediğinde
-        //   sıfır olmalı. Her çağrıda iş isteyen bir `put` kuyruğu sınırsız
-        //   büyütürdü ve burada düşer.
-        // - **Son metin kaybolmaz:** dolu yuva hep bekleyen bir işe sahip;
-        //   bozulursa son metin işsiz yuvada kalır.
+        // The production shape: a single reader thread puts, the "main queue" thread takes
+        // once for every job `put` asks for. Two invariants:
+        // - **At most one waiting job in the queue.** `waiting` counts the span between a
+        //   job's dispatch and the main thread taking it; it must be zero when `put` asks
+        //   for a job. A `put` that asked for a job on every call would grow the queue
+        //   unbounded and this would fail here.
+        // - **The last text is not lost:** a full slot always has a waiting job; if this
+        //   breaks the last text is left in a slot without a job.
         use std::sync::atomic::AtomicUsize;
         use std::sync::{Arc, mpsc};
 
@@ -290,7 +294,7 @@ pub(crate) mod tests {
             std::thread::spawn(move || {
                 let mut last = None;
                 for () in queue {
-                    // Sıra üretimdeki gibi: iş önce başlar, sonra yuvayı alır.
+                    // The order as in production: the job starts first, then it takes the slot.
                     waiting.fetch_sub(1, Ordering::SeqCst);
                     if let Some(text) = slot.take() {
                         last = Some(text);
@@ -303,15 +307,19 @@ pub(crate) mod tests {
         for i in 0..TEXTS {
             if slot.put(i.to_string()) {
                 let before = waiting.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(before, 0, "{i}. metin ikinci bir bekleyen iş istedi");
-                jobs.send(()).expect("ana thread yaşıyor");
+                assert_eq!(before, 0, "text {i} asked for a second waiting job");
+                jobs.send(()).expect("main thread is alive");
                 sent += 1;
             }
         }
         drop(jobs);
         let last = main.join().expect("ana thread paniklemedi");
         assert_eq!(last.as_deref(), Some((TEXTS - 1).to_string().as_str()));
-        assert_eq!(slot.take(), None, "son metin işsiz yuvada kaldı");
+        assert_eq!(
+            slot.take(),
+            None,
+            "the last text was left in a slot without a job"
+        );
         assert!(sent > 0);
     }
 }

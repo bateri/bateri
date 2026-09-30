@@ -66,32 +66,32 @@ use bt_core::SHUTDOWN_GRACE;
 
 pub use bt_gpu::GpuError;
 
-/// Duman ve ölçüm koşularının shell'i. Kullanıcının `$SHELL`'i **değil**:
-/// sonuç rc dosyasına bağlı olmasın.
+/// The shell of the smoke and measurement runs. **Not** the user's `$SHELL`:
+/// the result must not depend on the rc files.
 ///
-/// Ayrı bir tip olmasının sebebi `run_seconds.is_some()`'ın taşıdığı üç ayrı
-/// anlam: sabit shell seç, deadline kur, bekçiyi kur. Yük seçimi yalnız
-/// birincisini ilgilendiriyor; ayrılmazsa ölçüm koşusu ya deadline'ı ya
-/// bekçiyi kaybeder.
+/// It is a separate type because `run_seconds.is_some()` carried three
+/// distinct meanings: pick the fixed shell, set the deadline, set the
+/// watchdog. The workload choice concerns only the first; if not split, a
+/// measurement run would lose either the deadline or the watchdog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Workload {
-    /// `make duman`: tek atış, sonra boşta. `hucre`/`glif`/`kural`
-    /// sayılarının kaynağı ve boşta sıfır karenin bekçisi — içerik karesi
-    /// burada **üst sınırlı** (`app::IDLE_FRAME_LIMIT`), koşunun sonundaki
-    /// sessizlik ise **alt sınırlı** (`app::QUIET_FLOOR`).
+    /// `make smoke`: one shot, then idle. The source of the `cells`/`glyphs`/
+    /// `rules` counts and the guard of zero frames at idle — content frames
+    /// are **upper-bounded** here (`app::IDLE_FRAME_LIMIT`), while the quiet
+    /// at the end of the run is **lower-bounded** (`app::QUIET_FLOOR`).
     Smoke,
-    /// `BT_SCROLL_TEST`: koşu boyunca akan çıktı. Kare akışı işin kendisi,
-    /// üst sınır yok.
+    /// `BT_SCROLL_TEST`: output streaming for the whole run. The frame flow
+    /// is the point of the work, there is no upper bound.
     Load,
 }
 
 impl Workload {
-    /// `yuk=` jetonunun değeri.
+    /// The value of the `load=` token.
     ///
-    /// Dizgi tipin **yanında**, çağrı yerinde değil: jeton bir makine
-    /// sözleşmesi ve sözleşmenin metni tanımın yanında yaşar. Çağrı yerinde
-    /// dursaydı üçüncü bir yük eklendiğinde eşlemeyi derleyici değil okuyan
-    /// hatırlamak zorunda kalırdı.
+    /// The string lives **next to** the type, not at the call site: the token
+    /// is a machine contract and the contract's text lives beside the
+    /// definition. At the call site, when a third workload is added the reader
+    /// rather than the compiler would have to remember the mapping.
     pub(crate) fn token(self) -> &'static str {
         match self {
             Self::Load => "load",
@@ -100,28 +100,31 @@ impl Workload {
     }
 }
 
-/// Süreli koşu: `make duman` ve ölçüm. `None` → kullanıcının kendi oturumu.
+/// Timed run: `make smoke` and measurement. `None` → the user's own session.
 ///
-/// Üç alan **birlikte** doğuyor ve tek bir `Option`'ın altında duruyor, çünkü
-/// üçü de süreye bağlı: süresiz bir yük hiç bitmez, süresiz bir ölçüm de hiç
-/// raporlanmaz (rapor `report_and_exit`'te ve oraya yalnız deadline varır).
-/// Ayrı `Option`'lar olsaydı tip bu imkânsız durumlara izin verir ve bedeli
-/// `unwrap_or(0)` ile "ulaşılmaz dal" yorumlarına çıkardı.
+/// The three fields are born **together** and sit under a single `Option`,
+/// because all three depend on the duration: an unbounded load never ends, an
+/// unbounded measurement is never reported (the report is in
+/// `report_and_exit` and only the deadline reaches it). With separate
+/// `Option`s the type would allow these impossible states and the cost would
+/// surface as `unwrap_or(0)` and "unreachable branch" comments.
 #[derive(Clone, Copy, Debug)]
 pub struct Run {
-    /// `BT_RUN_SECONDS`: dolunca kare sayısına bakıp çıkılır (`make duman`).
+    /// `BT_RUN_SECONDS`: when it expires, the frame count is checked and the
+    /// process exits (`make smoke`).
     pub seconds: u64,
-    /// Hangi sabit shell.
+    /// Which fixed shell.
     pub workload: Workload,
-    /// `BT_FRAME_STATS`: `Some` ise ölçüm açık **ve** damga `main()`'in ilk
-    /// satırında alınmış (süreç başlangıcı **değil**; damganın iki ucu da
-    /// [`bt_gpu::Stats::startup`]'ta). `bool` olsaydı damgayı bayrağın
-    /// okunduğu bir yerde almak gerekirdi — [`run`]'da ya da daha geç, yani
-    /// en geç ilk pencerenin `Renderer::system_default()`'undan hemen önce ve
-    /// sıranın doğruluğu bir yoruma kalırdı. İlk renderer artık ana döngü
-    /// başladıktan sonra, ilk pencereyle doğuyor; damga yine de ondan
-    /// **önce**, açılışın en pahalı parçası (GPU device'ı ve pipeline'ların
-    /// kurulumu) ölçünün içinde.
+    /// `BT_FRAME_STATS`: if `Some`, measurement is on **and** the stamp was
+    /// taken on the first line of `main()` (**not** at process start; both
+    /// ends of the stamp are in [`bt_gpu::Stats::startup`]). With a `bool`,
+    /// the stamp would have to be taken wherever the flag is read — in
+    /// [`run`] or later, at the latest right before the first window's
+    /// `Renderer::system_default()` — and the ordering's correctness would
+    /// rest on a comment. The first renderer is now born with the first
+    /// window, after the main loop has started; the stamp is still **before**
+    /// it, so the most expensive part of startup (creating the GPU device and
+    /// the pipelines) is inside the measurement.
     pub stats_since: Option<Instant>,
 }
 
@@ -129,118 +132,132 @@ pub struct Options {
     pub run: Option<Run>,
 }
 
-/// Uygulamayı kurar ve `NSApplication::run` ile ana döngüye girer. **Dönmez:**
-/// etkileşimli oturum yalnız Quit (Cmd-Q, `terminate:`) ile çıkar — son
-/// pencere kapanınca da, kabuk çıkınca da (o pencere kapanır) uygulama açık
-/// kalır. `BT_RUN_SECONDS` yolu `process::exit` ile çıkar; orada kabuğun
-/// çıkışı (`child_exit` → `terminate:`) ve son pencerenin kapanması da süreci
-/// bitiriyor. `Ok(())` yalnız AppKit'in `run`'ı bir gün dönerse görülür.
+/// Sets up the application and enters the main loop with
+/// `NSApplication::run`. **It does not return:** the interactive session exits
+/// only with Quit (Cmd-Q, `terminate:`) — the app stays open both when the
+/// last window closes and when the shell exits (that window closes). The
+/// `BT_RUN_SECONDS` path exits with `process::exit`; there, the shell's exit
+/// (`child_exit` → `terminate:`) and the last window's closing also end the
+/// process. `Ok(())` is seen only if AppKit's `run` ever returns.
 ///
-/// **`Err` bugün dönmüyor.** Renderer'ı artık ilk pencere kuruyor (pencere
-/// başına renderer, `.tasks/026-sekmeler/discussion.md` → Karar 2a) ve o an
-/// ana döngünün içindeyiz: kurulum hatası `applicationDidFinishLaunching:`'te
-/// aynı satırla (`bateri: {hata}`) ve aynı çıkış koduyla (1) basılıyor. İmza
-/// bin crate'inin çağrı yerini değiştirmemek için duruyor.
+/// **`Err` is not returned today.** The first window now sets up the renderer
+/// (one renderer per window, `.tasks/026-sekmeler/discussion.md` → Karar 2a)
+/// and by then we are inside the main loop: a setup error is printed in
+/// `applicationDidFinishLaunching:` with the same line (`bateri: {error}`)
+/// and the same exit code (1). The signature stays so as not to change the
+/// call site of the bin crate.
 ///
-/// Kapanış işi (PTY, ayar yazımı) buradan sonraya değil, **her iki çıkış
-/// yolunun da geçtiği** `app::AppDelegate::shutdown`'a konur —
-/// `applicationWillTerminate:`'a değil: duman deadline'ı ona bilerek uğramıyor
-/// ve oraya konan bir adım o yolda sessizce atlanır.
+/// Teardown work (PTY, settings write) goes not after this but into
+/// `app::AppDelegate::shutdown`, **which both exit paths pass through** —
+/// not into `applicationWillTerminate:`: the smoke deadline deliberately
+/// does not go through it, and a step put there would be silently skipped on
+/// that path.
 pub fn run(opts: Options) -> Result<(), GpuError> {
-    // audit: giriş noktası; ana thread dışından çağrılması programlama hatasıdır.
-    let mtm = MainThreadMarker::new().expect("bt_shell_macos::run ana thread'de çağrılır");
-    // Açılış damgası ilk renderer'dan (ilk pencere) **önce** alınmış olmalı ve
-    // tipi bunu zorluyor: `Options` bir `Instant` taşıyor, bir bayrak değil.
+    // audit: entry point; being called from outside the main thread is a programming error.
+    let mtm = MainThreadMarker::new().expect("bt_shell_macos::run runs on the main thread");
+    // The startup stamp must be taken **before** the first renderer (first
+    // window), and the type enforces it: `Options` carries an `Instant`, not
+    // a flag.
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    // `delegate` bu kapsamda `app.run()`'ı aşar: AppKit'in ve pencerenin
-    // delegate özellikleri zayıftır, sahip bu Retained'dır.
+    // `delegate` outlives `app.run()` in this scope: AppKit's and the
+    // window's delegate properties are weak, this Retained is the owner.
     let delegate = app::AppDelegate::new(mtm, opts);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.run();
     Ok(())
 }
 
-/// Bekçinin bütçesi: `bt-core`'un kapanış sınırı artı sabit bir pay.
+/// The watchdog's budget: `bt-core`'s teardown bound plus a fixed margin.
 ///
-/// **Koşu süresinden türemiyor artık ve sebebi kapsamın daralması.** Eski
-/// ölçü `run_seconds × 3`'tü; o, bekçi kapanışın *tamamının* tek keseni iken
-/// doğruydu. Kapanış [`bt_core::SHUTDOWN_GRACE`] ile sınırlandıktan sonra
-/// bekçinin kapsamı "kapanış yolunun **başka** asılmaları"na daraldı ve
-/// bunların hiçbiri koşu süresiyle ölçeklenmiyor: eski ölçü üç saniyelik
-/// dumana 9 saniye, altmış saniyelik bir ölçüm koşusuna **3 dakika**
-/// veriyordu.
+/// **It no longer derives from the run duration, and the reason is the
+/// narrowing of scope.** The old measure was `run_seconds × 3`; that was
+/// right when the watchdog was the only bound on *all* of teardown. Once
+/// teardown was bounded by [`bt_core::SHUTDOWN_GRACE`], the watchdog's scope
+/// narrowed to "**other** hangs on the teardown path" and none of those scale
+/// with the run duration: the old measure gave a three-second smoke 9
+/// seconds and a sixty-second measurement run **3 minutes**.
 ///
-/// Sayı **ölçüldü** (2026-09-12, debug, bu makine, altı koşu): kapanışın
-/// **beşi** temiz bitti ve `SHUTDOWN_GRACE`'in çok altında kaldı (toplam süre
-/// koşu süresini ~0,18 sn aşıyor ve o payın içinde açılış da var); **biri**
-/// sınırı doldurdu (`kapanis=abandoned`) ve tam **+0,49 sn** sürdü. Yani ölçülen
-/// tavan `SHUTDOWN_GRACE`'in kendisi. İki saniyelik pay bunun **beş katı**.
+/// The number was **measured** (2026-09-12, debug, this machine, six runs):
+/// **five** of the teardowns finished cleanly and stayed well under
+/// `SHUTDOWN_GRACE` (the total exceeds the run duration by ~0.18 s and
+/// startup is included in that margin); **one** hit the bound
+/// (`teardown=abandoned`) and took exactly **+0.49 s**. So the measured
+/// ceiling is `SHUTDOWN_GRACE` itself. The two-second margin is **five
+/// times** that.
 ///
-/// Yeni bütçeyle on ölçüm koşusu koşuldu ve **hiçbiri** bekçiye düşmedi
-/// (`exit 70` yok) — eski bütçenin bu koşularda verdiği 6 saniyeye karşılık.
+/// Ten measurement runs were made with the new budget and **none** fell to
+/// the watchdog (no `exit 70`) — against the 6 seconds the old budget gave in
+/// those runs.
 ///
-/// Kısa olsa ne kaybolur: sağlıklı ama yavaş bir kapanış `_exit(70)` ile
-/// kesilir ve `make duman` yanlış arızayı gösterir. Uzun olsa ne kaybolur:
-/// gerçekten asılan bir koşu o kadar bekletir — ve bu bir insanın önünde
-/// değil, bir kapının içinde geçiyor.
+/// What is lost if it is short: a healthy but slow teardown is cut with
+/// `_exit(70)` and `make smoke` points at the wrong fault. What is lost if it
+/// is long: a run that truly hangs waits that long — and this happens not in
+/// front of a person but inside a gate.
 const WATCHDOG_BUDGET: Duration = SHUTDOWN_GRACE.saturating_add(Duration::from_secs(2));
 
-/// Kapanışın asılmasını kesen son çare — **yalnız `BT_RUN_SECONDS`
-/// yolunda** ve kapanış başlarken kurulur (`AppDelegate::shutdown`).
+/// The last resort that cuts a hung teardown — **only on the
+/// `BT_RUN_SECONDS` path** and set up when teardown begins
+/// (`AppDelegate::shutdown`).
 ///
-/// Kapanış ana thread'de koşuyor ve oradan `Session::shutdown()`'a giriyor.
-/// O çağrı artık **sınırlı bekliyor** (`bt-core`'un `SHUTDOWN_GRACE`'i), yani
-/// bekçinin doğduğu asılma — ölmeyen ya da çıkışın içinde takılan bir çocuk —
-/// ana thread'i artık tutamıyor ve bekçinin kapsamı **daraldı**: kapanış
-/// yolundaki *başka* bir asılma (ana kuyruğa senkron iş atan bir `Drop`, kilit
-/// sırasını bozan bir değişiklik) duman koşusunu süresiz bekletmesin diye
-/// duruyor. Bu yüzden hâlâ ayrı bir thread: kesmesi gereken şey ana thread'in
-/// kendisi.
+/// Teardown runs on the main thread and enters `Session::shutdown()` from
+/// there. That call now **waits with a bound** (`bt-core`'s
+/// `SHUTDOWN_GRACE`), so the hang the watchdog was born for — a child that
+/// does not die or is stuck inside its exit — can no longer hold the main
+/// thread, and the watchdog's scope has **narrowed**: it stays so that
+/// *another* hang on the teardown path (a `Drop` that synchronously posts
+/// work to the main queue, a change that breaks the lock order) does not make
+/// the smoke run wait forever. That is why it is still a separate thread: the
+/// thing it must cut is the main thread itself.
 ///
-/// Sınırın tek istisnası kapanış thread'inin kurulamaması (OS thread
-/// sınırı). O dalda **kesen de kalmayabilir** ve bu vaat edilmiyor: thread
-/// kurulamayan bir makinede bu bekçinin kendi thread'i de kurulamaz, yani
-/// `Teardown::Unbounded` ile bekçisizlik aynı koşulda buluşur. İkisi de
-/// stderr'e bir satır bırakıyor; sessiz kalan bir yol yok.
+/// The bound's only exception is the teardown thread failing to be created
+/// (OS thread limit). On that branch **there may be nothing to cut it
+/// either** and this is not promised: on a machine where a thread cannot be
+/// created, this watchdog's own thread cannot be created either, so
+/// `Teardown::Unbounded` and having no watchdog meet in the same condition.
+/// Both leave a line on stderr; no path stays silent.
 ///
-/// Bütçesi artık koşu süresinden değil [`WATCHDOG_BUDGET`]'ten geliyor, yani
-/// argümansız: kestiği şeylerin hiçbiri koşu süresiyle ölçeklenmiyor.
+/// Its budget now comes not from the run duration but from
+/// [`WATCHDOG_BUDGET`], so it takes no argument: none of the things it cuts
+/// scale with the run duration.
 ///
-/// Etkileşimli kullanımda bekçi **yoktur**; oradaki güvence `bt-core`'un
-/// sınırı ve `Session::shutdown`'ın doc'u onun ne kapattığını, çocuğun
-/// arkada kalmasının neden sürdüğünü anlatıyor.
+/// In interactive use there is **no** watchdog; the guarantee there is
+/// `bt-core`'s bound, and the doc of `Session::shutdown` explains what it
+/// closes and why the child being left behind persists.
 pub(crate) fn watchdog() {
-    // `thread::spawn` **değil**: o, thread kurulamayınca panikler ve buranın
-    // çağrı yeri bir ObjC callback'i (`applicationWillTerminate:` /
-    // `runDeadline:`). Panik `extern "C"` sınırından geçemez, yani süreç
-    // **abort** eder: ne jeton satırı basılır ne `_exit(70)`. Üstelik bu tam
-    // olarak `bt-core`'un `Teardown::Unbounded` ile hayatta kalmayı seçtiği
-    // senaryo (OS thread sınırı) — ve o koşulda bu thread de kurulamaz, yani
-    // bekçi **kesemez**. Hata yutulmuyor, söyleniyor: bekçisiz kalan bir
-    // kapanış sessiz kalmamalı.
+    // **Not** `thread::spawn`: it panics when a thread cannot be created, and
+    // this function's call site is an ObjC callback
+    // (`applicationWillTerminate:` / `runDeadline:`). A panic cannot cross the
+    // `extern "C"` boundary, so the process **aborts**: neither the token line
+    // is printed nor `_exit(70)` runs. Moreover this is exactly the scenario
+    // (OS thread limit) in which `bt-core` chose to survive with
+    // `Teardown::Unbounded` — and in that condition this thread cannot be
+    // created either, so the watchdog **cannot cut**. The error is not
+    // swallowed, it is reported: a teardown left without a watchdog must not
+    // be silent.
     let spawned = std::thread::Builder::new()
         .name("watchdog".to_owned())
         .spawn(|| {
             std::thread::sleep(WATCHDOG_BUDGET);
-            // `eprintln!` DEĞİL: Rust'ın stderr'i kilitli ve ana thread o kilidi
-            // tutarken asılmış olabilir (`shutdown`'ın kendi `eprintln!`'i,
-            // `Retry::draw_failed`, ileride logger). Bekçi tam da onu kesmek için
-            // var; aynı kilide girip beklemesi kendini iptal etmek olurdu. Sabit
-            // metin, `format!` bile yok — `malloc` da bir kilit.
+            // NOT `eprintln!`: Rust's stderr is locked and the main thread may
+            // be hung while holding that lock (`shutdown`'s own `eprintln!`,
+            // `Retry::draw_failed`, a future logger). The watchdog exists
+            // precisely to cut that; entering the same lock and waiting would
+            // cancel itself. A fixed text, not even `format!` — `malloc` is a
+            // lock too.
             //
-            // `process::exit` de değil: o atexit zincirini ve stdio flush'ını
-            // koşturur. 70 = EX_SOFTWARE; `make` bunu "Error 70" diye gösterir.
+            // Not `process::exit` either: it runs the atexit chain and the
+            // stdio flush. 70 = EX_SOFTWARE; `make` shows this as "Error 70".
             //
-            // SAFETY: `write` ve `_exit` async-signal-safe; ikisi de kilit almaz
-            // ve süreci hiçbir şey koşturmadan bitirir.
-            const MESSAGE: &str = "bateri: kapanış bekçinin bütçesinde bitmedi, süreç kesiliyor\n";
+            // SAFETY: `write` and `_exit` are async-signal-safe; neither takes
+            // a lock and they end the process without running anything.
+            const MESSAGE: &str = "bateri: teardown overran the watchdog budget, cutting\n";
             unsafe {
                 libc::write(2, MESSAGE.as_ptr().cast(), MESSAGE.len());
                 libc::_exit(70)
             };
         });
     if let Err(err) = spawned {
-        eprintln!("bateri: bekçi thread'i kurulamadı ({err}), kapanışı kesen yok");
+        eprintln!("bateri: watchdog thread not created ({err}), nothing cuts a hung teardown");
     }
 }

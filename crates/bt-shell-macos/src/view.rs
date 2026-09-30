@@ -1,31 +1,34 @@
-//! Pencerenin içeriği: `CAMetalLayer`'ı taşıyan ve klavyeyi PTY'ye akıtan view.
+//! The window's content: the view that carries the `CAMetalLayer` and streams the keyboard to the PTY.
 //!
-//! Çizim burada **yok** — layer'ın içeriğini `bt-gpu` doldurur. Bu sınıfın işi
-//! first responder olmak, tuş vuruşunu doğru kola vermek, fareyi (basış,
-//! sürükleme, bırakış ve tekerlek) hücreye çevirip oturuma iletmek, Finder'dan
-//! bırakılan dosyanın yolunu giriş satırına düşürmek ve Edit
-//! menüsünün Copy/Paste eylemlerini karşılamak. Terminal kararları (seçim
-//! aralığı, sayfanın boyu, tekerleğin kipe göre yolu, okun baytı) `bt-core`'da;
-//! burada AppKit'e bakan taraf yaşar — piksel → hücre aritmetiği, tekerleğin
-//! satır artığı, sürüklemenin sürüp sürmediği.
+//! There is **no drawing** here - `bt-gpu` fills the layer's content. This
+//! class's job is to be first responder, hand a keystroke to the right arm,
+//! turn the mouse (press, drag, release and wheel) into a cell and pass it to
+//! the session, drop the path of a file dropped from Finder onto the input
+//! line, and answer the Edit menu's Copy/Paste actions. The terminal
+//! decisions (the selection range, the page length, the wheel's path by
+//! mode, the arrow's bytes) are in `bt-core`; what lives here is the side
+//! facing AppKit - the pixel → cell arithmetic, the wheel's line remainder,
+//! whether a drag is in progress.
 //!
-//! **Klavyenin metin yolu artık AppKit'in yığınından geçiyor** ve `keyDown:`
-//! tek kapı değil bir **arbitraj**: Cmd'li olay kapalı bir izin listesinin
-//! tek tuşu (⌘⌫) dışında yutulur, Shift+PgUp/PgDn
-//! terminalin kaydırmasıdır, Control'lü olay doğrudan
-//! [`crate::keys::encode_key`]'e gider ve **kalanı** `interpretKeyEvents:` ile
-//! metin yığınına verilir. Yığın ölü tuş durumunu kendi tutar ve bileşim
-//! tamamlanınca metni `insertText:` ile geri verir — düzen verisini biz
-//! okumuyoruz. Yığın olayı almadıysa ([`ViewIvars::consumed`]) olay yine
-//! `encode_key`'e düşer: fonksiyon tuşları, Enter/Tab/Esc/Backspace ve
-//! tanınmayan her şey oradan geçer.
+//! **The keyboard's text path now goes through AppKit's stack** and
+//! `keyDown:` is not a single gate but an **arbitration**: a Cmd event is
+//! swallowed except for one key of a closed allow list (⌘⌫), Shift+PgUp/PgDn
+//! is the terminal's scrolling, a Control event goes straight to
+//! [`crate::keys::encode_key`] and **the rest** is handed to the text stack
+//! with `interpretKeyEvents:`. The stack keeps the dead-key state itself and
+//! when the composition completes it hands the text back with `insertText:` -
+//! we do not read the layout data. If the stack did not take the event
+//! ([`ViewIvars::consumed`]) the event falls to `encode_key` anyway:
+//! function keys, Enter/Tab/Esc/Backspace and everything unrecognised go
+//! through it.
 //!
-//! **View aynı zamanda bir sürükleme hedefi** (`NSDraggingDestination`):
-//! Finder'dan bırakılan dosyanın yolu kaçırılıp
-//! ([`crate::quote::shell_quote`]) `Session::paste`'ten giriş satırına düşer.
-//! Kayıt `NSPasteboardTypeFileURL` ile ve **yalnız** onunla — düz metin
-//! damlası kaçış kuralını tipe koşullu yapardı ve Finder tek damlada iki tip
-//! koyduğu için kolların sırası da bir karara dönerdi (018 Karar 4).
+//! **The view is also a drag destination** (`NSDraggingDestination`): the
+//! path of a file dropped from Finder is escaped
+//! ([`crate::quote::shell_quote`]) and lands on the input line through
+//! `Session::paste`. Registration is with `NSPasteboardTypeFileURL` and
+//! **only** it - a plain-text drop would make the escape rule conditional on
+//! the type, and since Finder puts two types in a single drop the order of
+//! the arms would become a decision too (018 Karar 4).
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
@@ -59,81 +62,88 @@ use crate::keys::{
 use crate::pane::TerminalPane;
 use crate::quote::{paste_quote, shell_quote};
 
-/// Izgaranın dışına düşen noktaya ne olacağı — [`point_to_cell`]'in tek
-/// karar ekseni.
+/// What happens to a point that falls outside the grid - [`point_to_cell`]'s
+/// single decision axis.
 ///
-/// Kural tek cümle: **jest başlatan olay reddedilir, süren jestin devamı
-/// kırpılır.** Basış ve düğmesiz hareket bir yer *söylüyor*, yani pencerenin
-/// başlık çubuğundan, sol payından ya da dock bandından gelen bir koordinat
-/// uygulamaya **yanlış** bir hücre bildirirdi; sürüklemenin ve bırakmanın
-/// koordinatı ise zaten başlamış bir jestin devamı ve orada kenara yapışmak
-/// hem xterm'in davranışı hem R6'nın şartı (düşen bırakma uygulamada takılı
-/// kalmış bir düğme bırakır).
+/// The rule is one sentence: **an event that starts a gesture is rejected,
+/// the continuation of a running gesture is clamped.** A press and a
+/// buttonless motion *state* a place, so a coordinate coming from the
+/// window's title bar, left padding or the dock band would report a **wrong**
+/// cell to the application; the coordinate of a drag and of a release is the
+/// continuation of an already started gesture and there sticking to the edge
+/// is both xterm's behaviour and R6's requirement (a dropped release leaves a
+/// button stuck in the application).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OutOfGrid {
-    /// En yakın hücreye yapıştır. `fill_rows` doldurma bandının boyu:
-    /// orijinin üstü **doluysa** yine `None`, çünkü orada çizili metin var.
+    /// Snap to the nearest cell. `fill_rows` is the fill band's length: above
+    /// the origin, if it is **full**, still `None`, because there is drawn text there.
     Clamp { fill_rows: u16 },
-    /// Nokta `[0, cols) × [0, rows)` dışındaysa `None`.
+    /// `None` if the point is outside `[0, cols) × [0, rows)`.
     Reject,
 }
 
-/// Fare noktası → seçim ucu. **Saf ve AppKit'siz**, bu yüzden sınanabilir.
+/// Mouse point → selection end. **Pure and AppKit-free**, so testable.
 ///
-/// `view_px` view koordinatında (nokta), `metrics` ve `origin_px` fiziksel
-/// piksel, `scale` backing ölçeği: ölçü `bt-gpu`'dan fiziksel geldiği için
-/// fare de önce fiziksel piksele çıkar, **sol payı ve dikey orijini düşer**,
-/// sonra bölünür. Pay `cols` hesabıyla (`split_into_grid`) ve çizim
-/// orijiniyle (`Frame::pos_at`) aynı `CellMetrics`'ten geliyor; üçü
-/// ayrışsaydı belirti "fare bir sütun kayıyor" olurdu (010 Karar 3).
+/// `view_px` is in view coordinates (points), `metrics` and `origin_px` are
+/// physical pixels, `scale` is the backing scale: since the measure came
+/// from `bt-gpu` in physical terms the mouse first goes up to physical
+/// pixels, **subtracts the left padding and the vertical origin**, and then
+/// divides. The padding comes from the same `CellMetrics` as the `cols`
+/// computation (`split_into_grid`) and the drawing origin
+/// (`Frame::pos_at`); had the three diverged the symptom would be "the mouse
+/// is a column off" (010 Karar 3).
 ///
-/// `origin_px` aynı cümlenin dikey yarısı ve kaynağı da tek
-/// ([`bt_gpu::Origin`]): **çizilen** karenin orijini, kare yolunun yazdığı
-/// değer. İkinci bir hesap olsaydı belirti "fare bir satır kayıyor" olurdu ve
-/// kayma animasyonu boyunca (phase-2) her karede başka bir satır kayardı.
-/// Parametre, alan değil: fonksiyon saf kalıyor ve orijini konu etmeyen
-/// sınamalar `0.0` geçiyor.
+/// `origin_px` is the vertical half of the same sentence and its source is
+/// also single ([`bt_gpu::Origin`]): the **drawn** frame's origin, the value
+/// the frame path wrote. Were there a second computation the symptom would
+/// be "the mouse is a row off" and during the slide animation (phase-2) it
+/// would be off by a different row every frame. A parameter, not a field: the
+/// function stays pure and tests that do not care about the origin pass `0.0`.
 ///
-/// `fill_rows` aynı gövdeden geliyor ([`bt_gpu::Origin`]) ve aynı sebeple:
-/// "orijinin üstünde ne var" sorusunun iki yarısı — kaç piksel ve orası boş
-/// mu — aynı karenin geometrisi. İkinci bir senkronizasyon kurulmadı; kare
-/// yolu yazıyor, fare yolu okuyor, ikisi de ana thread.
+/// `fill_rows` comes from the same body ([`bt_gpu::Origin`]) and for the same
+/// reason: the two halves of the question "what is above the origin" - how
+/// many pixels and is it blank - are the same frame's geometry. No second
+/// synchronisation was built; the frame path writes, the mouse path reads,
+/// both on the main thread.
 ///
-/// Payın **içine** düşen tıklama ilk sütuna kırpılır, yani seçim payda
-/// başlamaz: çıkarmadan sonra x negatif kalır ve aşağıdaki iki dil kuralı onu
-/// 0. hücrenin sol yarısına yapıştırır — grid'in solundaki noktayla aynı yol,
-/// ayrı bir kırpma dalı yok.
+/// A click that falls **inside** the padding is clamped to the first column,
+/// so a selection does not start in the padding: after the subtraction x stays
+/// negative and the two language rules below stick it to the left half of
+/// cell 0 - the same path as a point left of the grid, there is no separate clamping arm.
 ///
-/// **Adı "hücre" kaldı, dönen şey hücre + yarısı**: yarı hücrenin içindeki
-/// yerin ikinci yarısı, ayrı bir soru değil — `col` ile aynı bölmeden çıkar.
-/// Çağıranı (`window_point_cell`: fare olayı ve kaydırmada fare konumu) zaten
-/// "farenin altındaki hücre" diyor; ikinci bir ad (`point_to_selection_point`) yalnız churn
-/// olurdu.
+/// **The name stayed "cell", what comes back is cell + half**: the half is
+/// the second half of the place inside the cell, not a separate question - it
+/// comes out of the same division as `col`. Its caller (`window_point_cell`:
+/// mouse events and the mouse position during scroll) already says "the cell
+/// under the mouse"; a second name (`point_to_selection_point`) would only be churn.
 ///
-/// Kenar dışı her nokta **en yakın hücreye yapışır**: sürükleme grid'in hangi
-/// yanından çıkarsa çıksın o kenara tutunur. Sağa taşan nokta son sütunun
-/// **sağ** yarısıdır — satır sonuna sürükleyen fare grid'in sağındaki
-/// kullanılmayan şeride (`split_into_grid` sütunu aşağı yuvarlıyor) geçince
-/// son harf seçimde kalmalı.
+/// Every point outside the edge **sticks to the nearest cell**: whichever
+/// side of the grid a drag leaves, it holds on to that edge. A point
+/// overflowing to the right is the **right** half of the last column: when
+/// the mouse dragged to the end of the line passes onto the unused strip at
+/// the grid's right (`split_into_grid` rounds the column count down), the
+/// last letter must stay in the selection.
 ///
-/// `None`'ın **iki** sebebi var: sıfır sütunlu/satırlı grid (simge
-/// durumundaki pencere — yapışacak hücre yok) ve `fill_rows > 0` iken
-/// orijinin **üstüne** düşen nokta. İkincisi bu fonksiyondaki tek **ret**:
-/// doldurma bandı çizilince (017) orası boş değil, geçmişin satırları orada
-/// duruyor ve o satırlar sınırın satır numaralarıyla temsil edilemiyor. Ret
-/// kırpmanın yerine geçmiyor, **yanına** geçiyor — `fill_rows == 0` iken
-/// yukarı taşan nokta bugünkü gibi 0. satıra yapışır ve yapışmalı: orası
-/// gerçekten boş, üstelik `u16` taşmasının asıl koruması o kırpmada
-/// (`the_origin_shifts_the_grid_down_and_the_blank_area_clamps`).
+/// There are **two** reasons for `None`: a grid with zero columns/rows (a
+/// minimised window - there is no cell to stick to) and a point falling
+/// **above** the origin while `fill_rows > 0`. The second is this function's
+/// only **rejection**: when the fill band is drawn (017) that area is not
+/// blank, the scrollback's rows stand there and those rows cannot be
+/// represented by the boundary's row numbers. The rejection does not replace
+/// the clamping, it goes **beside** it - with `fill_rows == 0` a point
+/// overflowing upward sticks to row 0 as today and must: that area really is
+/// blank, and besides the real protection against `u16` overflow is in that
+/// clamping (`the_origin_shifts_the_grid_down_and_the_blank_area_clamps`).
 ///
-/// Taban yuvarlama (`as u16` kesmesi): farenin **hangi** hücrede olduğu
-/// soruluyor ve `split_into_grid` ile aynı aritmetik. Sol/üst yapışması ayrı
-/// bir kırpma değil, dilin iki kuralı: `f64 as u16` negatifi 0'a **doyurur**
-/// (sarmaz), ve `f64`'ün `%`'i bölünenin işaretini korur — negatif x'in artığı
-/// negatiftir, yani her zaman yarı hücreden küçük ve **sol** yarı. Grid'in
-/// solundan başlayan sürükleme bu yüzden 0. hücreyi seçime katar;
-/// `rem_euclid`'e geçen bir "düzeltme" artığı pozitife çevirip onu dışarıda
-/// bırakırdı (`dragging_left_of_the_grid_clamps_to_the_left_half` bekçisi).
+/// Floor rounding (the `as u16` truncation): the question is **which** cell
+/// the mouse is in and the arithmetic is the same as `split_into_grid`. The
+/// left/top sticking is not a separate clamp, it is two rules of the
+/// language: `f64 as u16` **saturates** a negative to 0 (does not wrap), and
+/// `f64`'s `%` keeps the dividend's sign - the remainder of a negative x is
+/// negative, so always less than half a cell and in the **left** half. A drag
+/// starting at the grid's left thus includes cell 0 in the selection; a
+/// "fix" moving to `rem_euclid` would turn the remainder positive and leave
+/// it out (the `dragging_left_of_the_grid_clamps_to_the_left_half` guard).
 pub(crate) fn point_to_cell(
     view_px: (f64, f64),
     metrics: CellMetrics,
@@ -148,24 +158,25 @@ pub(crate) fn point_to_cell(
     }
     let (cell_px_w, cell_px_h) = metrics.cell_px();
     let (cell_w, cell_h) = (f64::from(cell_px_w), f64::from(cell_px_h));
-    // View `isFlipped`, yani y grid yönünde (üstten) geliyor: tersine çevirme
-    // yok. Grid'in boyunu view değil `cols`/`rows` söylüyor — pencere kenar
-    // boşluğundaki nokta son hücreye yapışsın.
+    // The view is `isFlipped`, so y arrives in the grid's direction (from the
+    // top): no flipping back. The grid's size is told by `cols`/`rows`, not
+    // the view - a point in the window margin sticks to the last cell.
     let x = view_px.0 * scale - f64::from(metrics.gutter_px());
-    // Dikey orijin de payla aynı şekilde düşülüyor ve **`f64`'te**: tabana
-    // yapışmada boş alan **üstte** ve oraya yapılan tıklamada fark negatife
-    // iner. `u16`'da yapılsaydı taşar ve pencerenin üst yarısına yapılan
-    // tıklama son satırı seçerdi; `f64`'te negatif kalıyor ve `as u16` onu
-    // sıfıra **doyuruyor** — payın yatayda kullandığı yolun aynısı, ayrı bir
-    // kırpma dalı yok.
+    // The vertical origin is subtracted the same way as the padding and **in
+    // `f64`**: with bottom-sticking the blank area is **at the top** and on a
+    // click there the difference goes negative. Done in `u16` it would
+    // overflow and a click on the window's upper half would select the last
+    // row; in `f64` it stays negative and `as u16` **saturates** it to zero -
+    // the same path the padding uses horizontally, no separate clamping arm.
     let y = view_px.1 * scale - origin_px;
     match outside {
-        // **Orijinin üstü doluysa ret, kırpma değil.** Kırpma yalnız orası
-        // *boşken* doğru: doldurma bandı çizilince kullanıcı orada metin
-        // görüyor ve 0. satıra yapışan bir çapa vurguyu gözün gördüğü yerden
-        // başka bir yere koyardı. Doldurulan satırlar sınırın satır
-        // numaralarıyla temsil edilemiyor (hepsi geçmişte, yani negatif) —
-        // "yanlış seçilir" ile "seçilemez" arasında ikincisi dürüst olan.
+        // **Above the origin, if full, rejection, not clamping.** Clamping is
+        // right only when that area is *blank*: when the fill band is drawn the
+        // user sees text there and an anchor sticking to row 0 would put the
+        // highlight somewhere other than where the eye sees it. The filled rows
+        // cannot be represented by the boundary's row numbers (all in the
+        // scrollback, so negative) - between "selected wrongly" and "cannot be
+        // selected" the second is the honest one.
         OutOfGrid::Clamp { fill_rows } if fill_rows > 0 && y < 0.0 => return None,
         OutOfGrid::Clamp { .. } => {}
         OutOfGrid::Reject
@@ -188,15 +199,15 @@ pub(crate) fn point_to_cell(
     Some(SelectionPoint { col, row, half })
 }
 
-/// Arama panelinin örttüğü hücreler — **saf**, [`point_to_cell`]'in
-/// aritmetiğiyle: panelin alt kenarı ve sol kenarı fiziksel pikselde (view'ın
-/// üstünden ve solundan), `origin_px` çizilen karenin dikey orijini
+/// The cells the search panel covers - **pure**, with [`point_to_cell`]'s
+/// arithmetic: the panel's bottom edge and left edge in physical pixels (from
+/// the view's top and left), `origin_px` the drawn frame's vertical origin
 /// ([`bt_gpu::Origin`]).
 ///
-/// İlk tam görünür satır panelin altına **tavan** yuvarlanıyor: yarısı
-/// panelin altında kalan satır örtülü sayılır. Negatif olabilir — orijinin
-/// üstündeki doldurma bandının satırları. Sütun ise **taban**: panelin sol
-/// kenarının düştüğü hücre örtülü.
+/// The first fully visible row is rounded **up** (ceiling) below the panel: a
+/// row whose half stays under the panel counts as covered. It can be
+/// negative - the fill band's rows above the origin. The column is **floor**:
+/// the cell in which the panel's left edge falls is covered.
 pub(crate) fn cover_of(
     bottom_px: f64,
     left_px: f64,
@@ -208,38 +219,41 @@ pub(crate) fn cover_of(
     let first_row = ((bottom_px - origin_px) / cell_h).ceil();
     let from_col = ((left_px - f64::from(metrics.gutter_px())) / cell_w).floor();
     SearchCover {
-        // `as` doyuruyor: dev bir pencerede de taşma yok.
+        // `as` saturates: no overflow in a giant window either.
         first_row: first_row as i32,
         from_col: from_col.max(0.0) as u16,
     }
 }
 
-/// Dock'un giriş satırının tepesi, view'ın fiziksel pikselinde (üstten).
+/// The top of the dock's input line, in the view's physical pixels (from the top).
 ///
-/// Dock bandı pencerenin dibinde ve boyu `bt-gpu`'nun formülü
-/// ([`bt_gpu::dock_px`]; `split_into_grid`'in ve ikinci viewport'un
-/// kullandığı **tek** kopya), giriş satırı bandın nefes payının altında —
-/// payın kaynağı sol pay ([`CellMetrics::gutter_px`], `Frame::dock_pos`).
-/// Satır bu değerle [`point_to_cell`]'e **tek satırlık bir ızgara** olarak
-/// veriliyor: sütun ve yarı aritmetiği ızgarayla aynı gövdeden, basışın reddi
-/// ("bağlam satırı ve bandın payı hiçbir şey yapmaz") ve sürüklemenin kırpması
-/// ("satırın içine") da. Saf, sınanabilir.
+/// The dock band is at the window's bottom and its size is `bt-gpu`'s formula
+/// ([`bt_gpu::dock_px`]; the **single** copy `split_into_grid` and the second
+/// viewport use), the input line is below the band's breathing padding - the
+/// padding's source is the left padding ([`CellMetrics::gutter_px`],
+/// `Frame::dock_pos`). The line is given to [`point_to_cell`] with this value
+/// as **a one-row grid**: the column and half arithmetic comes from the same
+/// body as the grid's, and so does the press's rejection ("the context line
+/// and the band's padding do nothing") and the drag's clamping ("into the line").
+/// Pure, testable.
 pub(crate) fn dock_input_top_px(height_px: f64, metrics: CellMetrics, dock_rows: u16) -> f64 {
     height_px - f64::from(bt_gpu::dock_px(dock_rows, metrics)) + f64::from(metrics.gutter_px())
 }
 
-/// Hücre içi x'in yarısı — seçim sınırını çizen tek girdi.
+/// The half of x within a cell - the single input that draws the selection boundary.
 ///
-/// Yarı `col`'dan **türetilemez**: `col` tam sayıya kesiyor ve kesme artığı
-/// atıyor, yani hücrenin neresinde olduğumuz bilgisi orada yok. Kaynak
-/// bölmeden önceki **artıktır** (x, `cell_w`'ye göre). Negatif x'te artık da
-/// negatiftir ve sol yarıya düşer — sol kenar kuralı [`point_to_cell`]'de.
+/// The half **cannot be derived from `col`**: `col` truncates to an integer
+/// and discards the truncation remainder, so the information about where in
+/// the cell we are is not there. The source is the **remainder** before the
+/// division (x relative to `cell_w`). For a negative x the remainder is also
+/// negative and falls to the left half - the left edge rule is in [`point_to_cell`].
 ///
-/// **Orta nokta sağ yarıya yazıldı** (`>=`): iki yarı `[0, w/2)` ve
-/// `[w/2, w)` diye tam bölüşür — hiçbir x yarısız kalmaz, hiçbiri iki yarıya
-/// birden düşmez ve kural tek karşılaştırma olur. Tam ortaya basmak (fare
-/// pikseli tam sınıra düşerse) hücreyi başlangıç ucunda **dışarıda**, bitiş
-/// ucunda **içeride** bırakır — sağ yarının iki uçtaki anlamı bu
+/// **The midpoint is written to the right half** (`>=`): the two halves
+/// partition exactly as `[0, w/2)` and `[w/2, w)` - no x is left without a
+/// half, none falls into both halves and the rule becomes a single
+/// comparison. Pressing exactly on the middle (when the mouse pixel falls
+/// exactly on the boundary) leaves the cell **outside** at the start end and
+/// **inside** at the end end - that is the meaning of the right half at the two ends
 /// ([`CellHalf`]).
 fn cell_half(x_px: f64, cell_w: f64) -> CellHalf {
     if x_px % cell_w >= cell_w / 2.0 {
@@ -249,23 +263,26 @@ fn cell_half(x_px: f64, cell_w: f64) -> CellHalf {
     }
 }
 
-/// Tekerlek deltası → tam satır ve **taşınan artık**. Saf, sınanabilir.
+/// Wheel delta → whole lines and the **carried remainder**. Pure, testable.
 ///
-/// `unit` bir satırın delta cinsinden boyu: trackpad'de (`hasPreciseScrollingDeltas`)
-/// delta nokta cinsinden gelir ve birim hücre boyudur (nokta); klasik
-/// tekerlekte delta zaten satırdır ve birim 1. İşaret korunur — AppKit'in
-/// `scrollingDeltaY`'si "doğal kaydırma" tercihi uygulanmış hâldedir ve artısı
-/// belgenin başına doğrudur, yani `Session::scroll_wheel`'in "artı geriye"
-/// yönüyle aynı.
+/// `unit` is the size of one line in delta terms: on a trackpad
+/// (`hasPreciseScrollingDeltas`) the delta arrives in points and the unit is
+/// the cell height (points); on a classic wheel the delta is already lines
+/// and the unit is 1. The sign is kept - AppKit's `scrollingDeltaY` has the
+/// "natural scrolling" preference applied and its positive is toward the
+/// start of the document, i.e. the same as `Session::scroll_wheel`'s
+/// "positive is backward" direction.
 ///
-/// **Artık neden taşınıyor:** trackpad hücre boyundan küçük deltalar yağdırır;
-/// her olay tek başına sıfıra kesilseydi yavaş bir kaydırma hiç satır
-/// üretmezdi. Kesme sıfıra doğru (`trunc`), artık işaretini korur: yön dönünce
-/// önce birikmiş artık erir.
+/// **Why the remainder is carried:** a trackpad showers deltas smaller than a
+/// cell height; had each event been truncated to zero alone, a slow scroll
+/// would never produce a line. The truncation is toward zero (`trunc`), the
+/// remainder keeps its sign: when the direction reverses the accumulated
+/// remainder melts first.
 ///
-/// Sonlu olmayan toplam (sıfır birim, NaN delta) `(0, 0.0)` verir — NaN artığa
-/// girseydi sonraki her toplam NaN olur ve tekerlek sessizce ölürdü. Dev delta
-/// `as i32` ile doyar; geçmişin boyuna kırpma `bt-core`'da.
+/// A non-finite total (zero unit, NaN delta) gives `(0, 0.0)` - had NaN
+/// entered the remainder every later total would be NaN and the wheel would
+/// silently die. A giant delta saturates with `as i32`; clamping to the
+/// scrollback's length is in `bt-core`.
 pub(crate) fn wheel_lines(delta: f64, unit: f64, carry: f64) -> (i32, f64) {
     let total = carry + delta / unit;
     if !total.is_finite() {
@@ -275,43 +292,45 @@ pub(crate) fn wheel_lines(delta: f64, unit: f64, carry: f64) -> (i32, f64) {
     (whole as i32, total - whole)
 }
 
-/// Pürüzsüz yolda bir tekerlek olayının `Session::scroll_wheel`'e ne
-/// götüreceği: kesirli miktar, aynı olayın tam satırı ve niyet.
+/// What a wheel event on the smooth path carries to `Session::scroll_wheel`:
+/// the fractional amount, the same event's whole lines and the intent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SmoothWheel {
-    /// Kaydırma kolunun miktarı, satır cinsinden (artı geriye).
+    /// The scroll arm's amount, in lines (positive is backward).
     pub(crate) rows: f64,
-    /// Ok ve rapor kollarının miktarı ([`wheel_lines`]'ın tam satırı).
+    /// The arrow and report arms' amount ([`wheel_lines`]'s whole lines).
     pub(crate) lines: i32,
     pub(crate) intent: ScrollIntent,
 }
 
-/// Tekerlek olayının **niyeti** — saf, `NSEvent`'siz, sınanabilir
-/// (`smooth_scroll = "on"`'un kolu; `"off"` bu fonksiyona hiç uğramıyor).
+/// A wheel event's **intent** - pure, `NSEvent`-free, testable (the arm of
+/// `smooth_scroll = "on"`; `"off"` never visits this function).
 ///
-/// Ayraç **jest fazı**, deltanın hassasiyeti değil: fazı olan olay (trackpad,
-/// Magic Mouse) parmağı izliyor, fazsız olay (klasik tekerlek) bir çentik.
-/// Fazsız ama hassas olay da (dış kaydırıcıların sentetik olayları) çentik
-/// sayılıyor: bitişini söyleyen bir faz taşımadığı için doğrudan izlenseydi
-/// pencere yarım satırda dinlenirdi (`.tasks/027-yumusak-kaydirma/discussion.md`
+/// The separator is the **gesture phase**, not the delta's precision: an
+/// event with a phase (trackpad, Magic Mouse) tracks the finger, an event
+/// without one (classic wheel) is a notch. A phaseless but precise event
+/// (synthetic events of external scrollers) also counts as a notch: since it
+/// carries no phase that says when it ends, had it been tracked directly the
+/// window would rest at half a line (`.tasks/027-yumusak-kaydirma/discussion.md`
 /// → Karar 3).
 ///
-/// - **Jest başı** (`phase` `Began`/`MayBegin`, `momentum` `Began`):
-///   [`ScrollIntent::GestureBegan`] — parmak yeniden değdi ya da momentum
-///   başladı, uçuştaki yerleşme bitmeli.
-/// - **Jest sonu** (`Ended`/`Cancelled`, iki fazda da):
-///   [`ScrollIntent::Settle`] — en yakın satıra oturma. Momentum gelecekse
-///   `Began`'ı yerleşmeyi bitiriyor; göreli model olduğu için sıçrama yok ve
-///   zamanlayıcı ya da eşik gerekmiyor.
-/// - **Arası** (`Changed`/`Stationary`): [`ScrollIntent::Direct`].
-/// - **Çentik**: [`ScrollIntent::Glide`] ve miktarı **tam satır** — kesirli
-///   bir çentik hedefi pencereyi yarım satırda bırakırdı ve onu yerleştirecek
-///   bir jest sonu gelmiyor. Mesafe böylece `"off"` kolununkiyle aynı; ayrışan
-///   yalnız süzülme.
+/// - **Gesture start** (`phase` `Began`/`MayBegin`, `momentum` `Began`):
+///   [`ScrollIntent::GestureBegan`] - the finger touched again or momentum
+///   began, an in-flight settling must end.
+/// - **Gesture end** (`Ended`/`Cancelled`, in either phase):
+///   [`ScrollIntent::Settle`] - settling to the nearest line. If momentum is
+///   coming, its `Began` ends the settling; since the model is relative there
+///   is no jump and no timer or threshold is needed.
+/// - **In between** (`Changed`/`Stationary`): [`ScrollIntent::Direct`].
+/// - **Notch**: [`ScrollIntent::Glide`] and its amount is **whole lines** - a
+///   fractional notch target would leave the window at half a line and no
+///   gesture end comes to settle it. The distance is thus the same as the
+///   `"off"` arm's; only the gliding differs.
 ///
-/// `lines` her kolda [`wheel_lines`]'tan, çünkü rota `bt-core`'da seçiliyor
-/// ve ok/rapor kolu onu okuyor. Dönüş `(adım, yeni artık)`; adım `None` ise
-/// gönderilecek bir şey yok (tam satırı olmayan çentik, hareketsiz ara olay).
+/// `lines` is from [`wheel_lines`] in every arm, because the route is chosen
+/// in `bt-core` and the arrow/report arm reads it. The return is `(step, new
+/// remainder)`; if the step is `None` there is nothing to send (a notch with
+/// no whole line, a motionless in-between event).
 pub(crate) fn smooth_wheel(
     delta: f64,
     unit: f64,
@@ -341,8 +360,8 @@ pub(crate) fn smooth_wheel(
     } else {
         ScrollIntent::Direct
     };
-    // Hareketsiz ara olay (`Stationary`, sıfır delta) hiçbir şey
-    // değiştirmiyor; `Term` kilidine gitmesin.
+    // A motionless in-between event (`Stationary`, zero delta) changes
+    // nothing; it must not go to the `Term` lock.
     if intent == ScrollIntent::Direct && rows == 0.0 && lines == 0 {
         return (None, rest);
     }
@@ -356,53 +375,55 @@ pub(crate) fn smooth_wheel(
     )
 }
 
-/// Fare olayının değiştiricileri. Shift rapora girmez, arbitrajı yapar —
-/// gerekçesi [`MouseModifiers`]'ın doc'unda.
+/// A mouse event's modifiers. Shift does not enter the report, it does the
+/// arbitration - the rationale is in [`MouseModifiers`]'s doc.
 fn modifiers(event: &NSEvent) -> MouseModifiers {
     let flags = event.modifierFlags();
     MouseModifiers {
         shift: flags.contains(NSEventModifierFlags::Shift),
-        // macOS'un Option'ı xterm'in Meta'sı — klavyedeki Meta kodlamasıyla
-        // (`Option+←` → `\eb`) aynı tuş.
+        // macOS's Option is xterm's Meta - the same key as the keyboard's
+        // Meta encoding (`Option+←` → `\eb`).
         meta: flags.contains(NSEventModifierFlags::Option),
         control: flags.contains(NSEventModifierFlags::Control),
     }
 }
 
-/// Tuş vuruşu terminale gider mi — **saf karar**, sınanıyor: Command'lı tuş,
-/// **tek istisna dışında**, gitmez.
+/// Whether a keystroke goes to the terminal - a **pure decision**, tested: a
+/// Command key, **except for one exception**, does not go.
 ///
-/// Menünün kısayolları (Cmd-C, Cmd-V, Cmd-Q, Cmd-,, Cmd +/−/0) bu soruya hiç
-/// varmıyor: AppKit Command'lı tuşu `keyDown:`'dan **önce** `performKeyEquivalent:` ile
-/// ana menüye veriyor (`menu`). Buraya varan Command'lı tuşun menüde
-/// karşılığı yok (Cmd-T) ya da öğesi o an devre dışı; terminale düşseydi
-/// kabuğa düz harf yazardı. Değiştiricinin geri kalanı sorulmuyor: Cmd-Shift-T
-/// de bir kısayol denemesi, girdi değil.
+/// The menu's shortcuts (Cmd-C, Cmd-V, Cmd-Q, Cmd-,, Cmd +/−/0) never reach
+/// this question: AppKit gives a Command key to the main menu with
+/// `performKeyEquivalent:` **before** `keyDown:` (`menu`). A Command key that
+/// reaches here has no counterpart in the menu (Cmd-T) or its item is
+/// disabled at that moment; had it fallen to the terminal it would type a
+/// plain letter into the shell. The rest of the modifiers are not asked:
+/// Cmd-Shift-T is also a shortcut attempt, not input.
 ///
-/// **İstisnalar üç tuş ve liste kapalı:** ⌘⌫ ([`BACKSPACE`]), ⌘←
-/// ([`ARROW_LEFT`]) ve ⌘→ ([`ARROW_RIGHT`]) geçer; baytları [`encode_key`]'de
-/// (`\x15` = `^U` `kill-whole-line`, `\x01` = `^A` `beginning-of-line`,
-/// `\x05` = `^E` `end-of-line`). Üçü de macOS'un satır jestleri ve üçünün de
-/// baytı zsh'te gerçekten bağlı. Listenin **kapalı** kalması bir tasarım
-/// kararı, uzunluğu değil: geçen tuş adıyla yazılır, yoksa açık bir kural bir
-/// gün Cmd-T'yi de geçirir ve kabuğa `t` yazar (018 Karar 3; ⌘←/⌘→'nin girişi
-/// `encode_key`'in kolunda gerekçeli).
+/// **The exceptions are three keys and the list is closed:** ⌘⌫
+/// ([`BACKSPACE`]), ⌘← ([`ARROW_LEFT`]) and ⌘→ ([`ARROW_RIGHT`]) pass; their
+/// bytes are in [`encode_key`] (`\x15` = `^U` `kill-whole-line`, `\x01` =
+/// `^A` `beginning-of-line`, `\x05` = `^E` `end-of-line`). All three are
+/// macOS's line gestures and all three bytes are really bound in zsh. The
+/// list staying **closed** is a design decision, not its length: a passing
+/// key is written by name, otherwise an open rule would one day pass Cmd-T
+/// too and type `t` into the shell (018 Karar 3; the entry of ⌘←/⌘→ is
+/// justified in `encode_key`'s arm).
 ///
-/// İstisna **yalnız karakteri** soruyor, yanındaki değiştiricileri değil:
-/// CapsLock açıkken de ⌘⌫ satırı silmeli ve Shift ya da Control ⌫'e ikinci
-/// bir anlam vermiyor. `page_scroll`'un "Shift dışındaki değiştiriciler
-/// sorulmuyor" kuralının aynısı; ters karar, bayrağı tesadüfen açık olan bir
-/// kullanıcıda tuşu sessizce yutardı.
+/// The exception asks **only the character**, not the modifiers beside it:
+/// with CapsLock on ⌘⌫ must still delete the line and Shift or Control give
+/// ⌫ no second meaning. The same as `page_scroll`'s rule "modifiers other
+/// than Shift are not asked"; the opposite decision would silently swallow
+/// the key for a user whose flag happens to be on.
 ///
-/// `chars` yoksa (saf modifier tuşu) Command'lı olay yutulur: izin listesinin
-/// ölçütü bir karakter ve ortada karakter yok.
+/// If `chars` is missing (a pure modifier key) a Command event is swallowed:
+/// the allow list's criterion is a character and there is no character.
 fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
     if !flags.contains(NSEventModifierFlags::Command) {
         return true;
     }
-    // Tek karakterlik eşleşme, `page_scroll` emsali ve **aynı sahipten**
-    // ([`only_char`]): listedeki bir tuşla **başlayan** çok karakterli bir
-    // `characters` izin listesine girmez.
+    // A single-character match, the precedent of `page_scroll` and **from the
+    // same owner** ([`only_char`]): a multi-character `characters` that
+    // **starts** with a key in the list does not enter the allow list.
     matches!(
         only_char(chars.unwrap_or_default()),
         Some(BACKSPACE | ARROW_LEFT | ARROW_RIGHT)
@@ -410,113 +431,116 @@ fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
 }
 
 pub(crate) struct ViewIvars {
-    /// View, oturumdan **önce** doğmak zorunda: grid ölçüsü contentView'ın
-    /// bounds'undan türüyor ve `Session::spawn` o ölçüyü istiyor. Bir tuş
-    /// vuruşu arada geçemez ama sebebi pencerenin henüz key olmaması değil
-    /// (`makeKeyAndOrderFront` daha önce koşuyor): boşluk
-    /// `applicationDidFinishLaunching`'in içinde, **run loop dönmeden**
-    /// kapanıyor, yani araya hiçbir olay düşemiyor.
+    /// The view must be born **before** the session: the grid size is derived
+    /// from the contentView's bounds and `Session::spawn` asks for that size.
+    /// A keystroke cannot pass in between, but the reason is not that the
+    /// window is not yet key (`makeKeyAndOrderFront` runs earlier): the gap
+    /// closes inside `applicationDidFinishLaunching`, **before the run loop
+    /// turns**, so no event can fall in between.
     session: OnceCell<Arc<Session>>,
-    /// Farenin jest defteri: seçim sürüklemesi, uygulamaya raporlanan
-    /// basışlar ve hareket raporunun çentiği — kuralları ve gerekçeleri
-    /// [`Gesture`]'da, sınanan bir struct'ta. `Cell` + `Copy`: her olay
-    /// al-değiştir-koy, `Session` çağrısının ortasında ödünç yok.
+    /// The mouse's gesture ledger: the selection drag, the presses reported to
+    /// the application and the motion report's notch - the rules and
+    /// rationales are in [`Gesture`], a tested struct. `Cell` + `Copy`: every
+    /// event is take-modify-put, no borrow in the middle of a `Session` call.
     gesture: Cell<Gesture>,
-    /// **Metin yığını bu olayı aldı mı** — `keyDown:`'ın yeniden giriş
-    /// bayrağı. `interpretKeyEvents:` çağrılmadan önce `false`'a çekilir;
-    /// `insertText:` **ve** `setMarkedText:` onu `true` yapar, `keyDown:`
-    /// dönüşte okur ve `false` ise olayı [`crate::keys::encode_key`]'e düşürür.
+    /// **Whether the text stack took this event** - `keyDown:`'s re-entry
+    /// flag. It is pulled to `false` before `interpretKeyEvents:` is called;
+    /// `insertText:` **and** `setMarkedText:` make it `true`, `keyDown:` reads
+    /// it on return and if `false` drops the event to [`crate::keys::encode_key`].
     ///
-    /// Değişmez **"yığın olayı aldı"**, "metin geldi" değil — adı bu yüzden
-    /// `consumed`. Ölü tuşun ilk vuruşunda (`Option+ü`) `characters` boş
-    /// olduğu için fallback bugün tesadüfen zararsız; bayrağı yalnız
-    /// `insertText:` set etseydi değişmez o tesadüfe yazılır ve boş olmayan
-    /// bir bileşim başlangıcı tuşu iki kez gönderirdi.
+    /// The invariant is **"the stack took the event"**, not "text arrived" -
+    /// hence the name `consumed`. On a dead key's first stroke (`Option+ü`)
+    /// `characters` is empty, so the fallback is accidentally harmless today;
+    /// had only `insertText:` set the flag the invariant would be written on
+    /// that accident and a non-empty composition start would send the key twice.
     ///
-    /// `Cell`, ivar: `interpretKeyEvents:` bizi **yeniden çağırıyor**, yani
-    /// değer `keyDown:`'ın yığın çerçevesinde taşınamaz. Tek thread (ana
-    /// thread) olduğu için paylaşılan durum değil — emsal yanındaki
-    /// [`ViewIvars::gesture`].
+    /// `Cell`, an ivar: `interpretKeyEvents:` **calls us again**, so the value
+    /// cannot be carried in `keyDown:`'s stack frame. Since there is a single
+    /// thread (the main thread) it is not shared state - the precedent beside
+    /// it is [`ViewIvars::gesture`].
     ///
-    /// **Göremediği bir hâl var ve ölçülmedi:** bekleyen bir bileşimi
-    /// yalnız `unmarkText` ile iptal eden tuş (ölü tuştan sonra Backspace ya
-    /// da Esc) bayrağı kurmuyor, yani olay `encode_key`'e düşüyor ve PTY'ye
-    /// `0x7f` gidiyor — kullanıcının **gerçekten** yazdığı bir harf silinir.
-    /// Karşı hâl de ölçülmedi: `unmarkText`'i tüketme saymak, bileşimden
-    /// sonraki ilk oku da yutardı (yığın onu `unmarkText` + `moveLeft:`
-    /// olarak veriyor). İki yön de bir tuş turuyla ayrışıyor ve savunma o
-    /// ölçümden **sonra** kurulur — bugün yazılacak kol, hangisinin gerçek
-    /// olduğunu bilmeden yanlış yarıyı seçebilir.
+    /// **There is a state it cannot see and it was not measured:** a key that
+    /// cancels a pending composition only with `unmarkText` (Backspace or Esc
+    /// after a dead key) does not set the flag, so the event falls to
+    /// `encode_key` and `0x7f` goes to the PTY - a letter the user **really**
+    /// typed is deleted. The opposite state was not measured either: counting
+    /// `unmarkText` as consumption would also swallow the first arrow after a
+    /// composition (the stack gives it as `unmarkText` + `moveLeft:`). The two
+    /// directions separate with one key round and the defence is built
+    /// **after** that measurement - an arm written today could pick the wrong
+    /// half without knowing which is real.
     consumed: Cell<bool>,
-    /// Bileşimin (marked text) **asgari** durumu: yığının henüz
-    /// tamamlanmamış girdisi. Çizim **yok** — `bt-gpu`'nun altı çizili
-    /// preedit yüzeyi bu sette doğmuyor; burada yalnız
-    /// `hasMarkedText`/`markedRange`/`selectedRange`'in cevap verebileceği
-    /// **durum** var.
+    /// The **minimal** state of the composition (marked text): the stack's
+    /// not-yet-completed input. There is **no drawing** - `bt-gpu`'s
+    /// underlined preedit surface is not born in this set; here there is only
+    /// the **state** that `hasMarkedText`/`markedRange`/`selectedRange` can answer with.
     ///
-    /// Boş dizge "bileşim yok" demek: `unmarkText` ve `insertText:` onu
-    /// boşaltır. Stub bırakmak (her şeye "bileşim yok" demek) **ölçülmemiş**
-    /// bir iddiaydı; alacritty ve ghostty ikisi de bir marked-text alanı
-    /// tutuyor.
+    /// An empty string means "no composition": `unmarkText` and `insertText:`
+    /// empty it. Leaving a stub (saying "no composition" to everything) was an
+    /// **unmeasured** claim; alacritty and ghostty both keep a marked-text field.
     marked_text: RefCell<String>,
-    /// Tekerleğin satıra dönmemiş artığı ([`wheel_lines`]). Üç yerde sıfırlanır,
-    /// üçünde de kalan artık bir sonraki kaydırmaya ait değil: yeni jestin
-    /// başında (önceki jestin kırıntısı yeni jesti erken ya da geç tetiklemesin),
-    /// tekerlek yoksayılınca (`Wheel::Ignored`: bir kipin artığı sonraki kipe
-    /// taşınmasın) ve geçmişin ucuna dayanınca (uca doğru biriken momentum
-    /// ters yöndeki ilk satırı geciktirmesin). Tekerlek uygulamaya gidince
-    /// (`Wheel::Sent`) **korunur**: trackpad'le yavaş kaydırmada her olayın
-    /// küsuratı düşseydi `less` sarsak kayardı. Pürüzsüz kolun iki istisnası
-    /// [`BateriView::smooth_scroll_wheel`]'de.
+    /// The wheel's remainder not yet turned into lines ([`wheel_lines`]). It
+    /// is reset in three places, and in all three the remaining remainder does
+    /// not belong to the next scroll: at the start of a new gesture (the
+    /// previous gesture's crumb must not trigger the new one early or late),
+    /// when the wheel is ignored (`Wheel::Ignored`: one mode's remainder must
+    /// not carry to the next mode) and when it hits the end of the scrollback
+    /// (momentum accumulated toward the end must not delay the first row in
+    /// the opposite direction). When the wheel goes to the application
+    /// (`Wheel::Sent`) it is **kept**: in a slow trackpad scroll, had each
+    /// event's fraction been dropped, `less` would scroll jerkily. The smooth
+    /// arm's two exceptions are in [`BateriView::smooth_scroll_wheel`].
     scroll_carry: Cell<f64>,
-    /// Kaydırma pürüzsüz mü ([`smooth_wheel`]) yoksa satır adımıyla mı:
-    /// `[motion] smooth_scroll`, Hareketi Azalt ve `cursor_motion = "snap"`'in
-    /// **çözülmüş** hâli (`app::resolve_smooth_scroll`). `true` doğuyor,
-    /// çünkü ayarın varsayılanı `"on"` ve hermetik süreli koşu ayar okumuyor;
-    /// pencerenin `start`'ı yine de ayarın değerini yazıyor.
+    /// Whether scrolling is smooth ([`smooth_wheel`]) or by line steps: the
+    /// **resolved** state of `[motion] smooth_scroll`, Reduce Motion and
+    /// `cursor_motion = "snap"` (`app::resolve_smooth_scroll`). It is born
+    /// `true` because the setting's default is `"on"` and the hermetic timed
+    /// run reads no settings; the window's `start` still writes the setting's value.
     smooth_scroll: Cell<bool>,
-    /// Fare çevirisinin canlı girdileri: ölçü `bt-gpu`'dan, grid `bt-core`'un
-    /// bildiği sayı. `OnceCell` değil `Cell<Option<…>>`, çünkü pencere boyu
-    /// değişince tazeleniyor (`set_metrics`). Ayrı bir kopya gibi görünüyor
-    /// ama değil: `start_session`'a ve `DisplayLink::resize`'a giden değerlerin
-    /// aynısı, aynı çağrı yerinde yazılıyor.
+    /// The live inputs of the mouse translation: the metrics from `bt-gpu`,
+    /// the grid the number `bt-core` knows. `Cell<Option<…>>` not `OnceCell`,
+    /// because it is refreshed when the window size changes (`set_metrics`).
+    /// It looks like a separate copy but is not: the very values that go to
+    /// `start_session` and `DisplayLink::resize`, written at the same call site.
     ///
-    /// **Dikeyde `origin` ile aynı kareden gelmiyor** ve bu bilinen bir
-    /// geçiş: bu üçlü pencere olayında (`set_metrics`), öteleme ise sıradaki
-    /// **kare** yolunda tazeleniyor. Aradaki tek karede `rows` yeni, öteleme
-    /// eski olur — ama ekranda duran kare de eski, yani `origin`'in eskiliği
-    /// doğru olanı; ayrışan tek şey alt kenara yapılan tıklamanın kırpılma
-    /// sınırı. Geometri ötelemeyi zaten snap'lediği için pencere bir karede
-    /// kapanıyor. Dejenere boyut bu geçişi hiç doğurmuyor: oturum onu
-    /// reddediyor (`Session::resize`) ve `point_to_cell` sıfır satır/sütunda
-    /// `None` dönüyor, yani iki taraf da aynı yerde susuyor.
+    /// **Vertically it does not come from the same frame as `origin`** and
+    /// this is a known transition: this triple is refreshed on the window
+    /// event (`set_metrics`), the offset on the next **frame** path. In the
+    /// single frame in between `rows` is new and the offset old - but the frame
+    /// standing on screen is also old, so `origin`'s staleness is the right
+    /// one; the only thing that diverges is the clamp limit of a click on the
+    /// bottom edge. Since geometry snaps the offset anyway the window closes
+    /// in one frame. A degenerate size never causes this transition: the
+    /// session rejects it (`Session::resize`) and `point_to_cell` returns
+    /// `None` at zero rows/columns, so both sides go silent at the same place.
     metrics: Cell<Option<(CellMetrics, (u16, u16))>>,
-    /// Dock'un satır sayısı; `0` → pencerede dock yok (entegrasyonsuz kabuk,
-    /// alternatif ekran). `metrics` ile **aynı** çağrıda yazılıyor
-    /// (`set_metrics`): dock alternatif ekranda kalkınca ızgara da yeniden
-    /// boyutlanıyor, yani ikisi aynı geometrinin iki yarısı.
+    /// The dock's row count; `0` → the window has no dock (an integration-less
+    /// shell, the alternate screen). Written in the **same** call as `metrics`
+    /// (`set_metrics`): when the dock goes away on the alternate screen the
+    /// grid is resized too, so the two are two halves of the same geometry.
     dock_rows: Cell<u16>,
-    /// Son `resetCursorRects`'in kurduğu el imleci dikdörtgenleri
-    /// ([`BateriView::sync_cursor_rects`]'in karşılaştırdığı).
+    /// The hand-cursor rectangles the last `resetCursorRects` set up (what
+    /// [`BateriView::sync_cursor_rects`] compares).
     cursor_rects: RefCell<Vec<NSRect>>,
-    /// Çizilen karenin dikey orijini — kare yolunun yazdığı gövdenin okuma
-    /// ucu ([`bt_gpu::Origin`]).
+    /// The drawn frame's vertical origin - the read end of the body the frame
+    /// path writes ([`bt_gpu::Origin`]).
     ///
-    /// `metrics`'in yanında ama onun **içinde değil**: o üçlü pencere
-    /// olaylarında tazeleniyor (`set_metrics`), orijin ise kare başına
-    /// değişiyor. İçine konsaydı fare, tabana yapışmayı bir sonraki yeniden
-    /// boyutlandırmaya kadar görmezdi.
+    /// Beside `metrics` but **not inside it**: that triple is refreshed on
+    /// window events (`set_metrics`), while the origin changes per frame. Had
+    /// it been put inside, the mouse would not have seen the bottom-sticking
+    /// until the next resize.
     ///
-    /// `OnceCell`: link oturumla birlikte bir kez doğuyor ve gövdesi ondan
-    /// sonra hiç değişmiyor — değişen şey gövdenin **içeriği** ve onu kare
-    /// yolu yazıyor. Yokken (link kurulmadan önceki tek pencere) orijin
-    /// sıfırdır ve çizim de tavana yapışıktır, yani ikisi tutarlı.
+    /// `OnceCell`: the link is born once with the session and its body never
+    /// changes after that - what changes is the body's **content** and the
+    /// frame path writes it. While absent (the single window before the link
+    /// is set up) the origin is zero and the drawing is stuck to the ceiling,
+    /// so the two are consistent.
     origin: OnceCell<Origin>,
 }
 
 define_class!(
-    // SAFETY: NSView alt sınıflama için tasarlanmıştır; BateriView `Drop`
-    // uygulamaz ve `initWithFrame:` dışında bir kurucu sunmaz.
+    // SAFETY: NSView is designed for subclassing; BateriView does not
+    // implement `Drop` and offers no initializer other than `initWithFrame:`.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "BateriView"]
@@ -526,20 +550,21 @@ define_class!(
     unsafe impl NSObjectProtocol for BateriView {}
 
     impl BateriView {
-        /// Tuş vuruşlarının buraya gelmesinin şartı. `NSView`'un varsayılanı
-        /// `false`; `makeFirstResponder` bu olmadan sessizce reddedilir.
+        /// The condition for keystrokes to arrive here. `NSView`'s default is
+        /// `false`; `makeFirstResponder` is silently refused without this.
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
         }
 
-        /// Klavye terminale geldi (033 R7): arama panelinin alanından
-        /// dönüş — Esc, kapatma ya da terminale tık. Caret'in odağı "pencere
-        /// key **ve** klavye terminalde" ve ikinci bit tek kaynaktan, buradan
+        /// The keyboard came to the terminal (033 R7): the return from the
+        /// search panel's field - Esc, close or a click on the terminal. The
+        /// caret's focus is "window key **and** keyboard in the terminal" and
+        /// the second bit comes from a single source, from here
         /// (`TerminalPane::keyboard_moved`).
         #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
-            // SAFETY: `NSResponder`'ın argümansız, `BOOL` dönen yöntemi.
+            // SAFETY: `NSResponder`'s argumentless method returning `BOOL`.
             let accepted: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
             if accepted {
                 self.keyboard_moved(true);
@@ -547,10 +572,10 @@ define_class!(
             accepted
         }
 
-        /// Klavye terminalden gitti (arama alanı first responder oldu).
+        /// The keyboard left the terminal (the search field became first responder).
         #[unsafe(method(resignFirstResponder))]
         fn resign_first_responder(&self) -> bool {
-            // SAFETY: `NSResponder`'ın argümansız, `BOOL` dönen yöntemi.
+            // SAFETY: `NSResponder`'s argumentless method returning `BOOL`.
             let resigned: bool = unsafe { msg_send![super(self), resignFirstResponder] };
             if resigned {
                 self.keyboard_moved(false);
@@ -558,14 +583,15 @@ define_class!(
             resigned
         }
 
-        /// Edit ▸ Copy (Cmd-C): seçili metni genel panoya yazar. Seçim yoksa
-        /// ya da boşsa pano el değmeden kalır (`clipboard::copy`). Pencerede
-        /// tek seçim var — ızgara ya da dock — ve metni sahibinden
-        /// `Session::selection_text` veriyor (031 Karar 7).
+        /// Edit ▸ Copy (Cmd-C): writes the selected text to the general
+        /// pasteboard. If there is no selection or it is empty the pasteboard
+        /// is left untouched (`clipboard::copy`). The window has a single
+        /// selection - the grid's or the dock's - and its text is given by its
+        /// owner through `Session::selection_text` (031 Karar 7).
         ///
-        /// Menü öğesinin hedefi yok: eylem responder zincirinden first
-        /// responder'a, yani buraya varıyor (`menu`). Metin `selection_text()`'ten
-        /// — seçimin tek metin yolu.
+        /// The menu item has no target: the action reaches the first
+        /// responder through the responder chain, i.e. here (`menu`). The text
+        /// is from `selection_text()` - the selection's single text path.
         #[unsafe(method(copy:))]
         fn copy_selection(&self, _sender: Option<&AnyObject>) {
             if let Some(session) = self.ivars().session.get() {
@@ -573,11 +599,12 @@ define_class!(
             }
         }
 
-        /// Edit ▸ Cut (⌘X): dock seçiminin metnini panoya yazar ve seçimi
-        /// siler (031 Karar 7). Yalnız düzenleme kapısı açıkken bir şey
-        /// yapıyor (`Session::dock_cut`); menü öğesi o zaman etkin
-        /// ([`BateriView::validate_menu_item`]), yani kısayol da kapı
-        /// kapalıyken buraya varmıyor. Izgarada kesilecek bir şey yok.
+        /// Edit ▸ Cut (⌘X): writes the dock selection's text to the
+        /// pasteboard and deletes the selection (031 Karar 7). It does
+        /// something only while the editing gate is open (`Session::dock_cut`);
+        /// the menu item is enabled then ([`BateriView::validate_menu_item`]),
+        /// so the shortcut does not reach here with the gate closed either.
+        /// There is nothing to cut in the grid.
         #[unsafe(method(cut:))]
         fn cut_selection(&self, _sender: Option<&AnyObject>) {
             if let Some(session) = self.ivars().session.get()
@@ -587,16 +614,17 @@ define_class!(
             }
         }
 
-        /// Menü öğesinin etkinliği: `validateMenuItem:` tanımlanınca AppKit
-        /// **her** öğeyi sorar, yani varsayılan cevap `true` — Copy, Paste ve
-        /// Select All bugünkü gibi hep etkin. İki istisna: Cut dock'ta seçim
-        /// yoksa ya da düzenleme kapısı kapalıysa (`vicmd`, bayat ayna, komut
-        /// koşuyor) gri; Paste Escaped Text panoda metin yoksa gri (034) —
-        /// Paste'in kendisi bugünkü gibi hep etkin ve boş panoda sessiz.
+        /// A menu item's enablement: once `validateMenuItem:` is defined
+        /// AppKit asks about **every** item, so the default answer is `true` -
+        /// Copy, Paste and Select All are always enabled as today. Two
+        /// exceptions: Cut is grey if the dock has no selection or the editing
+        /// gate is closed (`vicmd`, stale mirror, a command running); Paste
+        /// Escaped Text is grey if there is no text on the pasteboard (034) -
+        /// Paste itself is always enabled as today and silent on an empty pasteboard.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
-            // `return` yok: `define_class!` `bool`'u gövdenin **sonunda**
-            // `Bool`'a çeviriyor, erken dönüş derlenmiyor.
+            // No `return`: `define_class!` converts the `bool` to `Bool` at the
+            // **end** of the body, an early return does not compile.
             let action = item.action();
             if action == Some(sel!(cut:)) {
                 self.ivars()
@@ -610,12 +638,13 @@ define_class!(
             }
         }
 
-        /// Edit ▸ Paste (Cmd-V): panodaki metni oturuma yapıştırır.
+        /// Edit ▸ Paste (Cmd-V): pastes the pasteboard's text into the session.
         ///
-        /// `paste()` yolundan girer: 2004 setse bracketed sarılır, değilse ham
-        /// yazılır. Ham bayt `session.write`'a değmez. Panoda metin yoksa
-        /// sessiz. Dock'ta seçim varsa yük onun yerine geçer — silme de
-        /// `paste()`'in içinde (031 Karar 8).
+        /// It enters through the `paste()` path: if mode 2004 is set it is
+        /// wrapped in bracketed paste, otherwise written raw. Raw bytes do not
+        /// touch `session.write`. Silent if there is no text on the
+        /// pasteboard. If there is a selection in the dock the payload
+        /// replaces it - the deletion is inside `paste()` too (031 Karar 8).
         #[unsafe(method(paste:))]
         fn paste_clipboard(&self, _sender: Option<&AnyObject>) {
             let Some(session) = self.ivars().session.get() else {
@@ -626,16 +655,17 @@ define_class!(
             }
         }
 
-        /// Edit ▸ Paste Escaped Text (⌃⌘V; 034 Karar 3): panodaki metni
-        /// kabuğa **tek argüman** olarak yazılabilir hâle getirip
-        /// yapıştırır — satır sonu yoksa Finder damlasının ters bölüsüyle,
-        /// varsa bütünüyle tek tırnakla ([`crate::quote::paste_quote`]).
-        /// Sonrası Paste'in yolu (`Session::paste`: bracketed sarma, dock
-        /// seçiminin yerine geçme).
+        /// Edit ▸ Paste Escaped Text (⌃⌘V; 034 Karar 3): makes the
+        /// pasteboard's text writable to the shell **as a single argument** and
+        /// pastes it - with the Finder drop's backslash if there is no line
+        /// break, wholly in single quotes if there is
+        /// ([`crate::quote::paste_quote`]). What follows is Paste's path
+        /// (`Session::paste`: bracketed wrapping, replacing the dock selection).
         ///
-        /// Burada, `TerminalPane`'de değil (`paste:` emsali, 034 Karar 4):
-        /// arama alanı odaktayken responder zinciri bu view'dan geçmiyor ve
-        /// öğe gri — alana kaçırılmış metin yapıştırmanın anlamı yok.
+        /// Here, not in `TerminalPane` (the `paste:` precedent, 034 Karar 4):
+        /// while the search field is focused the responder chain does not pass
+        /// through this view and the item is grey - pasting escaped text into
+        /// the field has no meaning.
         #[unsafe(method(pasteEscaped:))]
         fn paste_escaped(&self, _sender: Option<&AnyObject>) {
             let Some(session) = self.ivars().session.get() else {
@@ -646,13 +676,13 @@ define_class!(
             }
         }
 
-        /// Edit ▸ Select All (⌘A): dock caret'in sahibiyken ve satırda metin
-        /// varken dock'un bütün `BUFFER`'ını, değilse ızgaranın bütün
-        /// geçmişini seçer (`Session::select_all`; Terminal.app'in normu).
+        /// Edit ▸ Select All (⌘A): while the dock owns the caret and the line
+        /// has text it selects the dock's whole `BUFFER`, otherwise the grid's
+        /// whole scrollback (`Session::select_all`; Terminal.app's norm).
         ///
-        /// Menü öğesi `performKeyEquivalent:`'la `keyDown:`'dan **önce**
-        /// yakalanıyor, yani ⌘A kabuğa hiç varmıyor ve `keyDown:`'ın Cmd izin
-        /// listesi değişmiyor (sekme kısayollarının yolu).
+        /// The menu item is caught **before** `keyDown:` by
+        /// `performKeyEquivalent:`, so ⌘A never reaches the shell and
+        /// `keyDown:`'s Cmd allow list does not change (the tab shortcuts' path).
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&AnyObject>) {
             if let Some(session) = self.ivars().session.get() {
@@ -660,23 +690,24 @@ define_class!(
             }
         }
 
-        /// View'ın y ekseni üstten: fare noktası grid yönünde gelir.
+        /// The view's y axis is from the top: the mouse point arrives in the grid's direction.
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
-            // Fare y'si grid yönünde (üstten) gelsin: çeviride tersine çevirme
-            // yok, `bounds.height` kesiği yok — pencere boyu değişince
-            // kayan bir sabit değil tipin sözü.
+            // Let the mouse's y arrive in the grid's direction (from the top):
+            // no flipping back in the translation, no `bounds.height` cut-off -
+            // not a constant that drifts when the window size changes but the type's promise.
             true
         }
 
-        /// Sol tuş basıldı: jest uygulamanın mı terminalin mi, kararı
-        /// `bt-core` veriyor ([`BateriView::button_event`]).
+        /// Left button pressed: whether the gesture is the application's or
+        /// the terminal's, the decision is given by `bt-core`
+        /// ([`BateriView::button_event`]).
         ///
-        /// `buttonNumber()` kapısı duruyor: AppKit bu selector'ı sol tuşa
-        /// ayırıyor ve buraya düşen başka bir düğme **yanlış** düğmeyle
-        /// raporlanırdı — sağ ve ortanın kendi selector'ı var. `super`'e
-        /// geçilmiyor: varsayılan `NSView` davranışı seçimi bilmez ve olayı
-        /// yutardı.
+        /// The `buttonNumber()` gate stays: AppKit reserves this selector for
+        /// the left button and another button falling here would be reported
+        /// with the **wrong** button - right and middle have their own
+        /// selectors. It does not pass to `super`: the default `NSView`
+        /// behaviour knows nothing of selection and would swallow the event.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             if event.buttonNumber() != 0 {
@@ -685,17 +716,17 @@ define_class!(
             self.button_event(event, MouseButton::Left, true);
         }
 
-        /// Sol tuş basılı sürükleme — **iki jestin tek selector'ı**. Basış
-        /// raporlandıysa ([`Gesture::dragged`]) hareket de rapor
-        /// olarak gidiyor; yoksa aktif uç farenin şimdiki yerine taşınıyor,
-        /// çapa `bt-core`'da (`Session::update_selection` yalnız bitişi
-        /// taşır). Çizilen aralığı değiştirmeyen olaylar (aynı yarıda
-        /// kalmak, hücre sınırını geçmek) oturumun aralık kapısında eleniyor
-        /// — kare istenmez.
+        /// A drag with the left button held - **the single selector of two
+        /// gestures**. If the press was reported ([`Gesture::dragged`]) the
+        /// motion goes as a report too; otherwise the active end is moved to
+        /// the mouse's current place, the anchor is in `bt-core`
+        /// (`Session::update_selection` only moves the end). Events that do not
+        /// change the drawn range (staying in the same half, crossing a cell
+        /// boundary) are filtered out at the session's range gate - no frame is requested.
         ///
-        /// Basışsız sürükleme yutulur: `mouseDown:`'sız `mouseDragged:` olmaz
-        /// ama AppKit'in sözüne güvenilmez — olsaydı önceki seçimin ucunu
-        /// taşırdı.
+        /// A drag without a press is swallowed: there is no `mouseDragged:`
+        /// without `mouseDown:` but AppKit's word is not trusted - were there
+        /// one it would move the previous selection's end.
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
             self.drag_event(event, MouseButton::Left);
@@ -714,47 +745,48 @@ define_class!(
             self.drag_event(event, MouseButton::Middle);
         }
 
-        /// AppKit'in cursor rect'leri yeniden kurma çağrısı: çerçeve
-        /// değişince kendiliğinden, düğmelerin yeri değişince
-        /// `invalidateCursorRectsForView:` ile ([`BateriView::sync_cursor_rects`]).
+        /// AppKit's call to rebuild the cursor rects: automatically when the
+        /// frame changes, with `invalidateCursorRectsForView:` when the
+        /// buttons' place changes ([`BateriView::sync_cursor_rects`]).
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {
             self.upload_cursor_rects();
         }
 
-        /// Düğmesiz hareket. Pencere `setAcceptsMouseMovedEvents:` ile
-        /// açıldığı için **her pencerede** geliyor, kip açık olmasa da:
-        /// olayın bedeli bir koordinat aritmetiği ve hücre değişmediyse
-        /// `bt-core` hiç çağrılmıyor ([`BateriView::motion_event`]). Kipe
-        /// göre açmak kipi `bt-shell-macos`'a yayınlamayı, yani yeni bir paylaşılan
-        /// durumu isterdi (`.tasks/020-fare-raporlama/discussion.md` →
-        /// Karar 4); belirti görülürse o kola dönülür.
+        /// A buttonless motion. Since the window is opened with
+        /// `setAcceptsMouseMovedEvents:` it arrives in **every window**, even
+        /// if the mode is not on: the event's cost is a coordinate arithmetic
+        /// and if the cell did not change `bt-core` is not called at all
+        /// ([`BateriView::motion_event`]). Turning it on by mode would need
+        /// publishing the mode to `bt-shell-macos`, i.e. a new piece of shared
+        /// state (`.tasks/020-fare-raporlama/discussion.md` →
+        /// Karar 4); if a symptom is seen we return to that arm.
         ///
-        /// Yükleme satırının düğmesi ([`BateriView::upload_hover`]) hareket
-        /// raporundan **önce** ve ondan bağımsız soruluyor: bağlam satırı
-        /// ızgaranın dışında ve rapor yolu orayı reddediyor.
+        /// The upload line's button ([`BateriView::upload_hover`]) is asked
+        /// **before** the motion report and independently of it: the context
+        /// line is outside the grid and the report path rejects that area.
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             self.upload_hover(event);
             self.motion_event(event, None);
         }
 
-        /// Sol tuş bırakıldı: basış raporlandıysa bırakma da raporlanır
-        /// (R6), yoksa sürükleme biter ve seçim ekranda kalır (Cmd-C onu
-        /// kopyalar).
+        /// Left button released: if the press was reported the release is
+        /// reported too (R6), otherwise the drag ends and the selection stays
+        /// on screen (Cmd-C copies it).
         ///
-        /// `buttonNumber()` kapısı burada **yok** ve asimetri bilerek: kapı
-        /// olsaydı beklenmedik bir düğme numarası `dragging`'i bayat `true`
-        /// bırakır, sonraki her kaydırma eski seçimi sessizce uzatırdı
-        /// ([`BateriView::follow_pointer`]'ın kapattığı hâlin aynısı).
+        /// There is **no** `buttonNumber()` gate here and the asymmetry is
+        /// deliberate: with a gate, an unexpected button number would leave
+        /// `dragging` stale `true` and every later scroll would silently
+        /// extend the old selection (the very state [`BateriView::follow_pointer`] closes).
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             self.button_event(event, MouseButton::Left, false);
         }
 
-        /// Sağ tuş — bugün yalnız rapor yolu var: fare kipi kapalıyken sağ
-        /// tık hiçbir şey yapmıyor (bağlam menüsü yok, seçim de başlatmıyor:
-        /// beklenmedik bir vurgu üretirdi).
+        /// Right button - today only the report path: with mouse mode off a
+        /// right click does nothing (there is no context menu and it does not
+        /// start a selection either: it would produce an unexpected highlight).
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
             self.button_event(event, MouseButton::Right, true);
@@ -765,10 +797,11 @@ define_class!(
             self.button_event(event, MouseButton::Right, false);
         }
 
-        /// Orta tuş ve **ötesi**: AppKit dördüncü düğmeden sonrasını da bu
-        /// selector'a yolluyor, X10'un iki biti ise yalnız üç düğme taşıyor
-        /// ve `3` bırakmaya ayrılmış. Numara 2 değilse olay düşüyor — orta
-        /// tuş diye raporlamak uygulamaya **yanlış** bir düğme söylerdi.
+        /// Middle button and **beyond**: AppKit sends everything past the
+        /// fourth button to this selector too, while X10's two bits carry only
+        /// three buttons and `3` is reserved for release. If the number is not
+        /// 2 the event is dropped - reporting it as the middle button would
+        /// tell the application a **wrong** button.
         #[unsafe(method(otherMouseDown:))]
         fn other_mouse_down(&self, event: &NSEvent) {
             if event.buttonNumber() != 2 {
@@ -785,27 +818,29 @@ define_class!(
             self.button_event(event, MouseButton::Middle, false);
         }
 
-        /// Tekerlek ve trackpad: uygulama fare raporu istediyse — ekran fark
-        /// etmez — tekerlek raporu olarak uygulamaya gider; istemediyse
-        /// alternate screen'de ok olarak gider, birincil ekranda görünen
-        /// pencereyi geçmişe kaydırır. Kaydırma çubuğu **yok** — AppKit kroniği
-        /// (thumb, orantı, sürükleme), eşik için gerekli değil.
+        /// Wheel and trackpad: if the application asked for mouse reports -
+        /// whichever screen - the wheel goes to the application as a wheel
+        /// report; if not, on the alternate screen it goes as arrows, on the
+        /// primary screen it scrolls the visible window into the scrollback.
+        /// There is **no** scrollbar - AppKit's chronic (thumb, proportion,
+        /// drag), not needed for the threshold.
         ///
-        /// Kipe göre karar `bt-core`'da (`Session::scroll_wheel`); burası
-        /// satırı, işaretçinin hücresini ve Shift'i verir. Yatay delta
-        /// yoksayılıyor — yatay kaydırılacak bir şey yok (yatay tekerlek
-        /// raporu, 66/67, kapsam dışı). macOS klasik farede Shift+tekerleği
-        /// yatay deltaya çeviriyor, yani Shift'in kolu bu yolda çoğunlukla
-        /// trackpad'den gelir.
+        /// The decision by mode is in `bt-core` (`Session::scroll_wheel`); this
+        /// supplies the line, the pointer's cell and Shift. The horizontal
+        /// delta is ignored - there is nothing to scroll horizontally
+        /// (the horizontal wheel report, 66/67, is out of scope). macOS turns
+        /// Shift+wheel on a classic mouse into a horizontal delta, so Shift's
+        /// arm on this path mostly comes from the trackpad.
         ///
-        /// Basılı sürüklemenin ortasında kaydırma olursa seçimin ucu farenin
-        /// **yeni** altındaki hücreye taşınır ([`BateriView::follow_pointer`]).
+        /// If scrolling happens in the middle of a held drag the selection's
+        /// end moves to the cell **now** under the mouse
+        /// ([`BateriView::follow_pointer`]).
         ///
-        /// **İki kol var** ve seçen `ViewIvars::smooth_scroll`: pürüzsüz kol
-        /// ([`BateriView::smooth_scroll_wheel`]) kesirli miktarı ve niyeti
-        /// gönderiyor, satır kolu (aşağıdaki gövde) `"on"`'dan önceki yolun
-        /// bayt bayt kendisi — `smooth_scroll = "off"`, Hareketi Azalt ve
-        /// `cursor_motion = "snap"`'in geri alma yolu.
+        /// **There are two arms** and the chooser is `ViewIvars::smooth_scroll`:
+        /// the smooth arm ([`BateriView::smooth_scroll_wheel`]) sends the
+        /// fractional amount and the intent, the line arm (the body below) is
+        /// the very path from before `"on"`, byte for byte - the fallback of
+        /// `smooth_scroll = "off"`, Reduce Motion and `cursor_motion = "snap"`.
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             let Some(session) = self.ivars().session.get() else {
@@ -817,9 +852,9 @@ define_class!(
             let Some(window) = self.window() else {
                 return;
             };
-            // Trackpad nokta cinsinden: birim hücre boyu, fiziksel pikselden
-            // noktaya indirilmiş (ölçü `bt-gpu`'dan fiziksel geliyor). Klasik
-            // tekerlek zaten satır verir.
+            // A trackpad is in points: the unit is the cell height, lowered
+            // from physical pixels to points (the measure comes physical from
+            // `bt-gpu`). A classic wheel already gives lines.
             let unit = if event.hasPreciseScrollingDeltas() {
                 f64::from(metrics.cell_px().1) / window.backingScaleFactor()
             } else {
@@ -841,94 +876,100 @@ define_class!(
             if self.dock_wheel(event, session, lines) {
                 return;
             }
-            // İşaretçinin hücresi fare kipinde rapora giriyor; yarısı girmiyor
-            // (`bt-core` okumuyor). Kenar dışı nokta yapışır, `None` yalnız
-            // sıfır boyutlu grid'de.
+            // The pointer's cell enters the report in mouse mode; its half does
+            // not (`bt-core` does not read it). A point beyond the edge sticks,
+            // `None` only on a zero-size grid.
             //
-            // **Doldurma reddi burada geçerli değil** ve sıfır bilerek
-            // geçiliyor: buradaki nokta bir seçim ucu değil rapora giden
-            // koordinat ve reddedilseydi bu `else` kaydırmanın **tamamını**
-            // düşürürdü — band ekrandayken işaretçiyi oraya götüren kullanıcı
-            // hiç kaydıramazdı. Bandın üstündeki nokta rapora bugünkü gibi 0.
-            // satır olarak giriyor: uygulama doldurmayı zaten bilmiyor, o bir
-            // terminal çizimi.
+            // **The fill rejection does not apply here** and zero is passed
+            // deliberately: the point here is not a selection end but a
+            // coordinate going to the report, and had it been rejected this
+            // `else` would have dropped **all** of the scrolling - a user who
+            // took the pointer onto the band while it is on screen could not
+            // scroll at all. A point above the band enters the report as row 0
+            // as today: the application does not know about the fill anyway, it
+            // is a terminal drawing.
             let Some(pointer) =
                 self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp { fill_rows: 0 })
             else {
                 return;
             };
             let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
-            // Satır yolu: kesirli miktar satırın kendisi ve niyet tam satır —
-            // kaydırma kolu da bugünkü `scroll_locked`'tan geçiyor.
+            // Line path: the fractional amount is the line itself and the intent
+            // is whole lines - the scroll arm goes through today's `scroll_locked` too.
             match session.scroll_wheel(f64::from(lines), lines, ScrollIntent::Lines, pointer, shift) {
                 Wheel::Scrolled(0) | Wheel::Ignored => carry.set(0.0),
                 Wheel::Scrolled(_) => self.follow_pointer(session),
-                // Pencere kaymadı, uygulama kendi ekranını çiziyor: seçim ucu
-                // taşınmaz, artık korunur (`ViewIvars::scroll_carry`).
+                // The window did not scroll, the application draws its own
+                // screen: the selection end does not move, the remainder is kept
+                // (`ViewIvars::scroll_carry`).
                 Wheel::Sent => {}
             }
         }
 
-        /// Tuş vuruşunun **arbitrajı** — dört kol, ve sırası sözleşme.
+        /// The **arbitration** of a keystroke - four arms, and the order is the contract.
         ///
-        /// İlk üç kol AppKit'in metin yığınına (`interpretKeyEvents:`)
-        /// **girmez** ve girmemeleri ayrı ayrı gerekçeli:
+        /// The first three arms do **not enter** AppKit's text stack
+        /// (`interpretKeyEvents:`) and each has its own rationale for not entering:
         ///
-        /// 1. **Cmd'li olay** yutulur (`reaches_terminal`); **istisnalar**
-        ///    kapalı izin listesinde (⌘⌫ → `\x15`, ⌘← → `\x01`, ⌘→ →
-        ///    `\x05`) ve onlar da yığına **girmiyor**, doğrudan
-        ///    [`encode_key`]'e gidiyor. Yığına girseydi ⌘⌫ orada
-        ///    `deleteToBeginningOfLine:`, ⌘←/⌘→ de
-        ///    `moveToBeginningOfLine:`/`moveToEndOfLine:` olur,
-        ///    `doCommandBySelector:` üçünü de sessizce yutardı; ⌘T ise
-        ///    `insertText:`'e varıp kabuğa `t` yazardı.
-        /// 2. **Shift+PgUp/PgDn** terminalin kaydırmasıdır
-        ///    ([`page_scroll`]). Kol Control'ünkinden **önce**, çünkü
-        ///    `page_scroll` Shift dışındaki değiştiricileri sormuyor —
-        ///    Ctrl'lü Shift+PgUp da bugün kaydırıyor ve sıra ters olsaydı
-        ///    o tuş `\e[5~`'e düşerdi.
-        /// 3. **Control'lü olay** doğrudan [`encode_key`]'e gider. AppKit'in
-        ///    kolunu seçmesine bırakılamaz: numpad Enter'ın `characters`'ı
-        ///    U+0003 (Ctrl-C'nin baytı) ve Ctrl-Y'ninki U+0019'u Shift+Tab ile
-        ///    paylaşıyor — yığın yanlış kolu seçerse her komut kesilir.
-        ///    Yan kazanç: Ctrl+Shift+Tab ve Ctrl+numpad Enter borçları bugünkü
-        ///    hâllerinde kalıyor. **Bedeli adıyla:** bekleyen bir bileşim bu
-        ///    koldan yıkılmıyor — Option+ü'den sonra `^C`, ardından `a`
-        ///    yazmak `ã` üretebilir, çünkü yığın hâlâ ölü tuşu bekliyor.
-        ///    Ölçülmedi ve savunma kurulmadı: kolu yığına sokmak numpad
-        ///    Enter'ın U+0003'ünü AppKit'in seçimine bırakırdı, yani takas
-        ///    "her komut kesilebilir"e karşı "seyrek bir aksan".
-        /// 4. **Kalanı** yığına verilir; yığın olayı almadıysa
-        ///    ([`ViewIvars::consumed`]) yine `encode_key`'e düşer.
+        /// 1. **A Cmd event** is swallowed (`reaches_terminal`); **the
+        ///    exceptions** are in the closed allow list (⌘⌫ → `\x15`, ⌘← →
+        ///    `\x01`, ⌘→ → `\x05`) and they also do **not enter** the stack,
+        ///    going straight to [`encode_key`]. Had they entered the stack,
+        ///    ⌘⌫ would become `deleteToBeginningOfLine:` there and ⌘←/⌘→
+        ///    `moveToBeginningOfLine:`/`moveToEndOfLine:`, and
+        ///    `doCommandBySelector:` would silently swallow all three; ⌘T
+        ///    would reach `insertText:` and type `t` into the shell.
+        /// 2. **Shift+PgUp/PgDn** is the terminal's scrolling
+        ///    ([`page_scroll`]). The arm is **before** Control's, because
+        ///    `page_scroll` does not ask about modifiers other than Shift -
+        ///    Ctrl+Shift+PgUp scrolls today too and had the order been
+        ///    reversed that key would have fallen to `\e[5~`.
+        /// 3. **A Control event** goes straight to [`encode_key`]. It cannot
+        ///    be left to AppKit to choose its arm: numpad Enter's `characters`
+        ///    is U+0003 (Ctrl-C's byte) and Ctrl-Y's shares U+0019 with
+        ///    Shift+Tab - if the stack chose the wrong arm every command would
+        ///    be interrupted. A side gain: the Ctrl+Shift+Tab and Ctrl+numpad
+        ///    Enter debts stay in their present state. **The cost, by name:** a
+        ///    pending composition is not torn down by this arm - typing `^C`
+        ///    after Option+ü and then `a` may produce `ã`, because the stack is
+        ///    still waiting for the dead key. It was not measured and no
+        ///    defence was built: putting the arm into the stack would leave
+        ///    numpad Enter's U+0003 to AppKit's choice, so the trade is "every
+        ///    command may be interrupted" against "a rare accent".
+        /// 4. **The rest** is given to the stack; if the stack did not take the
+        ///    event ([`ViewIvars::consumed`]) it falls to `encode_key` anyway.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let flags = event.modifierFlags();
             let Some(session) = self.ivars().session.get() else {
                 return;
             };
-            // `characters` modifier'lar uygulanmış hâli verir (Option-basılı
-            // "ø", Ctrl-C → U+0003); ham tuş kodu `charactersIgnoringModifiers`
-            // olurdu ve klavye düzenini bizim yeniden uygulamamızı isterdi.
-            // Yokluğu (saf modifier tuşu) aşağıdaki iki kolu da susturuyor ama
-            // **yığını susturmuyor**: bileşimin ilk vuruşunda `characters` boş
-            // gelir ve ölü tuş tam oradan başlar.
+            // `characters` gives the state with modifiers applied (Option-held
+            // "ø", Ctrl-C → U+0003); the raw key code would be
+            // `charactersIgnoringModifiers` and would require us to reimplement
+            // the keyboard layout. Its absence (a pure modifier key) silences
+            // the two arms below but **does not silence the stack**: on a
+            // composition's first stroke `characters` is empty and a dead key
+            // starts exactly there.
             //
-            // Cmd kolundan **önce** okunuyor: izin listesinin ölçütü artık
-            // tuşun kimliği, bayrakları değil.
+            // It is read **before** the Cmd arm: the allow list's criterion is
+            // now the key's identity, not its flags.
             let chars = event.characters().map(|c| c.to_string());
-            // Command basılıyken tuş bir kısayoldur, girdi değil. Menü onu
-            // `performKeyEquivalent:` ile önce yakalıyor (Cmd-C/V/Q/,, Cmd +/−/0);
-            // yakalamadığı buraya varır ve **yutulur** (`reaches_terminal`) —
-            // izin listesindeki üç tuş (⌘⌫, ⌘←, ⌘→) dışında.
+            // While Command is held a key is a shortcut, not input. The menu
+            // catches it first with `performKeyEquivalent:` (Cmd-C/V/Q/,,
+            // Cmd +/−/0); what it does not catch arrives here and is
+            // **swallowed** (`reaches_terminal`) - except the three keys in the
+            // allow list (⌘⌫, ⌘←, ⌘→).
             if !reaches_terminal(flags, chars.as_deref()) {
                 return;
             }
             let command = flags.contains(NSEventModifierFlags::Command);
-            // Shift+PgUp/PgDn terminalin kaydırmasıdır, uygulamanın tuşu değil —
-            // ama yalnız oturum kabul ederse. Alternate screen'de kaydırma
-            // reddedilir (`None`) ve tuş aşağıdaki yoldan uygulamaya düz PgUp
-            // olarak gider: less/vim'de Shift+PgUp da sayfa çevirir, yutulmaz.
-            // Sayfanın kaç satır olduğu `bt-core`'un kararı (`scroll_page`).
+            // Shift+PgUp/PgDn is the terminal's scrolling, not the
+            // application's key - but only if the session accepts. On the
+            // alternate screen scrolling is refused (`None`) and the key goes
+            // to the application by the path below as a plain PgUp: in less/vim
+            // Shift+PgUp turns the page too, it is not swallowed. How many
+            // lines a page is is `bt-core`'s decision (`scroll_page`).
             let shift = flags.contains(NSEventModifierFlags::Shift);
             if let Some(chars) = chars.as_deref()
                 && let Some(pages) = page_scroll(chars, shift)
@@ -941,14 +982,15 @@ define_class!(
             }
             let ctrl = flags.contains(NSEventModifierFlags::Control);
             let option = flags.contains(NSEventModifierFlags::Option);
-            // **Dock seçiminin tuşları** (031 Karar 8), yığından ÖNCE: ⌫ ve
-            // oklar yığında `doCommandBySelector:`'a düşüp baytlarını
-            // `encode_key`'den alırdı, yani seçimi silmek yerine bir karakter
-            // silerlerdi. Tüketilmeyen tuş (kapı kapalı, seçim yok, başka tuş)
-            // aşağıdan bugünkü yolunu izler ve girdi seçimi kaldırır.
-            // **Bekleyen bileşim varken sorulmuyor**: ⌫ onu iptal etmeli
-            // (Option+e'den sonraki ⌫ yığına gitmezse bir sonraki harf
-            // aksanlı çıkardı; `/code-review`, 031 kapı).
+            // **The dock selection's keys** (031 Karar 8), BEFORE the stack: ⌫
+            // and the arrows would fall to `doCommandBySelector:` in the stack
+            // and take their bytes from `encode_key`, i.e. instead of deleting
+            // the selection they would delete one character. A key that is not
+            // consumed (gate closed, no selection, another key) follows its
+            // present path below and input removes the selection.
+            // **Not asked while a composition is pending**: ⌫ must cancel it
+            // (had the ⌫ after Option+e not gone to the stack the next letter
+            // would come out accented; `/code-review`, 031 gate).
             if self.ivars().marked_text.borrow().is_empty()
                 && let Some(chars) = chars.as_deref()
                 && let Some(key) = dock_key(
@@ -964,31 +1006,33 @@ define_class!(
             {
                 return;
             }
-            // `!command` R4.2'nin **uygulandığı** yer: izin listesinden geçen
-            // üç tuş da yığına girmiyor. Girseydi yığın onları
-            // `deleteToBeginningOfLine:`/`moveToBeginningOfLine:`/`moveToEndOfLine:`e
-            // çevirir, `doCommandBySelector:` sessizce yutar ve aşağıdaki
-            // kollar baytlarını hiç göremezdi.
+            // `!command` is where R4.2 is **applied**: the three keys that pass
+            // the allow list do not enter the stack either. Had they, the stack
+            // would turn them into
+            // `deleteToBeginningOfLine:`/`moveToBeginningOfLine:`/`moveToEndOfLine:`,
+            // `doCommandBySelector:` would silently swallow them and the arms
+            // below would never see their bytes.
             if !ctrl && !command {
-                // Metin yığını: ölü tuş durumunu o tutuyor ve bileşim
-                // tamamlanınca metni `insertText:` ile geri veriyor. Bayrak
-                // çağrıdan **önce** iniyor; yığın bizi yeniden çağırdığı için
-                // cevabı ivar taşıyor, `keyDown:`'ın yığın çerçevesi değil.
+                // The text stack: it holds the dead-key state and when the
+                // composition completes it gives the text back with
+                // `insertText:`. The flag is lowered **before** the call; since
+                // the stack calls us again, the ivar carries the answer, not
+                // `keyDown:`'s stack frame.
                 self.ivars().consumed.set(false);
-                // Tek olaylık dizi: yığın onu senkron tüketiyor ve
-                // aşağıdaki okuma dönüşten sonra geçerli.
+                // A one-event array: the stack consumes it synchronously and
+                // the read below is valid after the return.
                 self.interpretKeyEvents(&NSArray::from_slice(&[event]));
                 if self.ivars().consumed.get() {
                     return;
                 }
             }
-            // Yığının almadığı (ya da hiç uğramadığı) olay: fonksiyon tuşları,
-            // Enter/Tab/Esc/Backspace, Control'lü harfler, Option'lı
-            // gezinme/silme (yığın onları `doCommandBySelector:`'a veriyor ve
-            // o metot sessiz no-op) ve izin listesinden geçen ⌘⌫/⌘←/⌘→.
+            // An event the stack did not take (or never visited): function
+            // keys, Enter/Tab/Esc/Backspace, Control letters, Option
+            // navigation/deletion (the stack gives them to `doCommandBySelector:`
+            // and that method is a silent no-op) and ⌘⌫/⌘←/⌘→ that passed the allow list.
             //
-            // `super`'e geçmiyoruz: `NSResponder::keyDown:` tanımadığı tuşta
-            // beep çalar ve terminalde her ok tuşu bip sesi olurdu.
+            // We do not pass to `super`: `NSResponder::keyDown:` beeps on a key
+            // it does not recognise and every arrow key in the terminal would beep.
             let Some(chars) = chars else {
                 return;
             };
@@ -1000,79 +1044,82 @@ define_class!(
             };
             match encode_key(key) {
                 Some(KeyInput::Bytes(bytes)) => session.write(&bytes),
-                // Okun baytı DECCKM'e bağlı, kip `bt-core`'da.
+                // The arrow's bytes depend on DECCKM, the mode is in `bt-core`.
                 Some(KeyInput::Arrow(arrow)) => session.write_arrow(arrow),
                 None => {}
             }
         }
     }
 
-    /// AppKit'in metin yığınının bu view'a bakan yüzü. Protokolün **11
-    /// zorunlu** metodu da burada: `objc2-app-kit` hiçbirini `#[optional]`
-    /// işaretlemiyor ve eksik kalanı `define_class!`'ın debug assertion'ında
-    /// panikliyor — kısmi uyum bir seçenek değil.
+    /// The side of AppKit's text stack facing this view. All **11 required**
+    /// methods of the protocol are here: `objc2-app-kit` marks none of them
+    /// `#[optional]` and `define_class!` panics in a debug assertion on any
+    /// that is missing - partial conformance is not an option.
     ///
-    /// Üçü bileşim durumunu **yazıyor** (`insertText:`, `setMarkedText:`,
-    /// `unmarkText`), üçü onu **okuyor** (`selectedRange`, `markedRange`,
-    /// `hasMarkedText`); `doCommandBySelector:` bilerek boş ve kalan dördü
-    /// sabit cevap veriyor — her biri kendi "neden"iyle.
+    /// Three **write** the composition state (`insertText:`,
+    /// `setMarkedText:`, `unmarkText`), three **read** it (`selectedRange`,
+    /// `markedRange`, `hasMarkedText`); `doCommandBySelector:` is deliberately
+    /// empty and the remaining four give fixed answers - each with its own "why".
     unsafe impl NSTextInputClient for BateriView {
-        /// Bileşim tamamlandı (ya da düz bir harf geldi): metin PTY'ye gider.
+        /// The composition completed (or a plain letter arrived): the text goes to the PTY.
         ///
-        /// Argüman `&AnyObject` — yığın `NSString` **ya da**
-        /// `NSAttributedString` gönderebiliyor. **Tek** çözme kuralı:
-        /// `NSString`'e downcast, olmazsa `NSAttributedString::string()`;
-        /// ikisi de değilse olay **tüketilmiş sayılmıyor** ve `keyDown:`
-        /// onu `encode_key`'e düşürüyor — tanımadığımız bir tipi sessizce
-        /// yutmak tuşu büsbütün kaybettirirdi.
+        /// The argument is `&AnyObject` - the stack can send an `NSString`
+        /// **or** an `NSAttributedString`. The **single** decoding rule:
+        /// downcast to `NSString`, failing that
+        /// `NSAttributedString::string()`; if it is neither, the event is
+        /// **not counted as consumed** and `keyDown:` drops it to
+        /// `encode_key` - silently swallowing a type we do not recognise would
+        /// lose the key altogether.
         ///
-        /// `replacement_range` yoksayılıyor: yığının düzenleyebileceği bir
-        /// belgemiz yok, yazılan şey doğrudan PTY'ye akıyor ve satırın
-        /// sahibi kabuk. **Bilinen sonucu var**: aksan popover'ı bir harf
-        /// seçtirdiğinde çağrı `insertText:"é" replacementRange:{n-1,1}`
-        /// oluyor, yani "son harfi bununla değiştir"; biz aralığı
-        /// atladığımız için kabuğa `eé` gider. Popover kapalı
-        /// (`app::disable_press_and_hold`) ve bu yüzden yol bugün ölü; o
-        /// bastırma tutmazsa belirtinin **sessiz yarısı** budur (gürültülü
-        /// yarısı basılı tuşun yinelememesi).
+        /// `replacement_range` is ignored: we have no document the stack could
+        /// edit, what is typed flows straight to the PTY and the owner of the
+        /// line is the shell. **It has a known consequence**: when the accent
+        /// popover has a letter chosen the call becomes
+        /// `insertText:"é" replacementRange:{n-1,1}`, i.e. "replace the last
+        /// letter with this"; since we skip the range, `eé` goes to the shell.
+        /// The popover is off (`app::disable_press_and_hold`) and so the path is
+        /// dead today; if that suppression does not hold this is the **silent
+        /// half** of the symptom (the noisy half being that a held key does
+        /// not repeat).
         #[unsafe(method(insertText:replacementRange:))]
         fn insert_text(&self, string: &AnyObject, _replacement_range: NSRange) {
-            // Bileşim **çözme kuralından önce** siliniyor: tanımadığımız bir
-            // tip gelse bile yığın o bileşimi bitirmiş oluyor ve durum
-            // orada kalsaydı `hasMarkedText` sonsuza kadar `true` derdi.
+            // The composition is cleared **before the decoding rule**: even if
+            // a type we do not recognise arrives the stack has finished that
+            // composition, and had the state stayed there `hasMarkedText` would
+            // say `true` forever.
             self.ivars().marked_text.borrow_mut().clear();
             let Some(text) = resolve_text(string) else {
                 return;
             };
-            // Bayrak **oturumdan önce**: değişmez "yığın bu olayı aldı", "bayt
-            // yazıldı" değil. Oturum henüz bağlanmadıysa tuş kaybolur ama
-            // `encode_key` onu ikinci kez göndermez.
+            // The flag **before the session**: the invariant is "the stack took
+            // this event", not "bytes were written". If the session is not yet
+            // attached the key is lost but `encode_key` does not send it a second time.
             self.ivars().consumed.set(true);
-            // `type_text`, `write` değil: dock'ta seçim varsa harf onun
-            // yerine yazılıyor (031 Karar 8).
+            // `type_text`, not `write`: if there is a selection in the dock the
+            // letter is typed in its place (031 Karar 8).
             if let Some(session) = self.ivars().session.get() {
                 session.type_text(&text);
             }
         }
 
-        /// Yığının tanıdığı bir düzenleme komutu (Enter → `insertNewline:`,
+        /// An editing command the stack recognises (Enter → `insertNewline:`,
         /// Tab → `insertTab:`, Esc → `cancelOperation:`, `^A` →
-        /// `moveToBeginningOfParagraph:`…): **sessiz no-op**.
+        /// `moveToBeginningOfParagraph:`…): a **silent no-op**.
         ///
-        /// Metot gövdesiz kalamaz, boş da olsa: yoksa `NSResponder`'ın
-        /// varsayılanı koşar ve tanımadığı seçicide **bip çalar** —
-        /// `keyDown:`'da `super`'e geçmeme gerekçesinin aynısı, yeni kapıdan.
-        /// Bayrak set edilmiyor, yani olay `encode_key`'e düşüyor ve baytı
-        /// bugünkü yerden geliyor.
+        /// The method cannot be left without a body, even an empty one:
+        /// otherwise `NSResponder`'s default runs and **beeps** on a selector it
+        /// does not recognise - the very rationale for not passing to `super`
+        /// in `keyDown:`, through a new door. The flag is not set, so the event
+        /// falls to `encode_key` and its bytes come from where they do today.
         #[unsafe(method(doCommandBySelector:))]
         fn do_command_by_selector(&self, _selector: Sel) {}
 
-        /// Bileşim sürüyor (ölü tuş basıldı, henüz tamamlanmadı): durum
-        /// güncellenir. **Çizim yok** — altı çizili preedit yüzeyi bu sette
-        /// doğmuyor.
+        /// The composition continues (a dead key was pressed, not yet
+        /// completed): the state is updated. **No drawing** - the underlined
+        /// preedit surface is not born in this set.
         ///
-        /// Bayrağı bu metot da set ediyor ([`ViewIvars::consumed`]): değişmez
-        /// "yığın olayı aldı", "metin geldi" değil.
+        /// This method sets the flag too ([`ViewIvars::consumed`]): the
+        /// invariant is "the stack took the event", not "text arrived".
         #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
         fn set_marked_text(
             &self,
@@ -1087,34 +1134,34 @@ define_class!(
             *self.ivars().marked_text.borrow_mut() = text;
         }
 
-        /// Bileşim iptal edildi ya da tamamlandı. Bayrak **set edilmiyor**:
-        /// yığın bunu `keyDown:` dışından da (odak kaybı, fare) çağırıyor ve
-        /// o çağrı bir tuş olayını tüketmiş sayılmaz.
+        /// The composition was cancelled or completed. The flag is **not
+        /// set**: the stack also calls this from outside `keyDown:` (focus
+        /// loss, mouse) and such a call does not count as consuming a key event.
         ///
-        /// **Sözleşmeden bilinçli sapma:** Apple "işaretli metni normal
-        /// yazılmış gibi kabul et" diyor, biz **atıyoruz**. Sebebi bizde
-        /// geri alınacak bir belge olmaması: `insertText:` baytı doğrudan
-        /// PTY'ye akıtıyor ve kabuk onu satırına almış oluyor, yani
-        /// "kabul etmek" bekleyen aksanı kullanıcının hiç istemediği bir yere
-        /// yazmak demek. Bedeli adıyla duruyor — bileşim ortasında pencereye
-        /// tıklamak bekleyen `~`'yi sessizce düşürür; alacritty ve ghostty de
-        /// aynı yerde aynı şeyi yapıyor.
+        /// **A deliberate deviation from the contract:** Apple says "accept the
+        /// marked text as if it were typed normally", we **discard** it. The
+        /// reason is that we have no document to undo: `insertText:` flows the
+        /// bytes straight to the PTY and the shell takes them into its line, so
+        /// "accepting" would mean writing the pending accent somewhere the user
+        /// never wanted. The cost stays, by name - clicking the window in the
+        /// middle of a composition silently drops the pending `~`; alacritty and
+        /// ghostty do the same thing in the same place.
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
             self.ivars().marked_text.borrow_mut().clear();
         }
 
-        /// Seçim aralığı. Modelimiz tek cümle: **belge = bileşim metni,
-        /// imleç sonunda**. Terminalin ızgarasındaki seçim (fareyle yapılan)
-        /// bu soruya girmiyor — o `bt-core`'un seçimi ve yığının
-        /// düzenleyebileceği bir metin değil.
+        /// The selection range. Our model is one sentence: **document =
+        /// composition text, caret at its end**. The selection in the
+        /// terminal's grid (made with the mouse) does not enter this question -
+        /// it is `bt-core`'s selection and not a text the stack could edit.
         #[unsafe(method(selectedRange))]
         fn selected_range(&self) -> NSRange {
             NSRange::new(self.marked_utf16_len(), 0)
         }
 
-        /// İşaretli aralık; bileşim yoksa `NSNotFound` — "işaretli bir şey
-        /// yok"un sözleşmedeki karşılığı, sıfır uzunluklu bir aralık değil.
+        /// The marked range; `NSNotFound` if there is no composition - the
+        /// contract's counterpart of "nothing is marked", not a zero-length range.
         #[unsafe(method(markedRange))]
         fn marked_range(&self) -> NSRange {
             match self.marked_utf16_len() {
@@ -1128,12 +1175,12 @@ define_class!(
             !self.ivars().marked_text.borrow().is_empty()
         }
 
-        /// Yığının geri okuyabileceği bir belge **yok**: yazılan her şey
-        /// PTY'ye akıyor ve ızgaranın içeriği `bt-core`'un, metin
-        /// yığınının değil. `None` = "bu aralıkta metnim yok".
+        /// There is **no** document the stack could read back: everything
+        /// typed flows to the PTY and the grid's content is `bt-core`'s, not
+        /// the text stack's. `None` = "I have no text in this range".
         ///
-        /// `actual_range` yazılmıyor: hiçbir aralık döndürmediğimiz için
-        /// doldurulacak bir gerçek aralık da yok (Apple'ın sözleşmesi).
+        /// `actual_range` is not written: since we return no range there is no
+        /// real range to fill in (Apple's contract).
         #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
         fn attributed_substring(
             &self,
@@ -1143,39 +1190,42 @@ define_class!(
             None
         }
 
-        /// İşaretli metnin taşıyabileceği öznitelikler: **hiçbiri**. Boş
-        /// dizi "altını çizme, renklendirme, ruby — hiçbirini uygulayamam"
-        /// demek ve preedit'i çizmediğimiz için doğrusu bu.
+        /// The attributes marked text can carry: **none**. The empty array
+        /// says "I cannot apply underline, colouring, ruby - none of them" and
+        /// since we do not draw the preedit this is the right answer.
         #[unsafe(method_id(validAttributesForMarkedText))]
         fn valid_attributes_for_marked_text(&self) -> Retained<NSArray<NSAttributedStringKey>> {
             NSArray::new()
         }
 
-        /// Bileşim yüzeyinin (aksan popover'ı, aday penceresi) ekranda
-        /// konumlanacağı dikdörtgen — **ekran koordinatında**.
+        /// The rectangle where the composition surface (the accent popover,
+        /// the candidate window) will be positioned on screen - **in screen
+        /// coordinates**.
         ///
-        /// Cevap view'ın kendi dikdörtgeni, hücre hassasiyetinde değil ve
-        /// bu **bilinçli**: kapsam içinde tüketicisi yok (ölü tuş önizlemesi
-        /// popover değil marked text, aday penceresi de CJK'nın, yani tam
-        /// IME borcunun). İmleç hücresini crate sınırı ötesinden taşımak
-        /// (`bt_gpu::Origin` emsali) o iş geldiğinde ilk adım olur.
-        /// Yaklaşımın yönü yine de doğru: içerik pencerenin **tabanına**
-        /// yaslanıyor, yani imleç view dikdörtgeninin sol alt köşesinin
-        /// yakınında ve yüzey oradan açılıyor.
+        /// The answer is the view's own rectangle, not cell-precise, and this is
+        /// **deliberate**: there is no consumer within scope (the dead-key
+        /// preview is marked text, not a popover, and the candidate window
+        /// belongs to CJK, i.e. the full IME debt). Carrying the caret cell
+        /// across the crate boundary (the `bt_gpu::Origin` precedent) would be
+        /// the first step when that work comes. The approach's direction is
+        /// right anyway: the content is stuck to the window's **bottom**, so
+        /// the caret is near the view rectangle's bottom left corner and the
+        /// surface opens from there.
         ///
-        /// Sıfır dikdörtgen dönmemenin sebebi duruyor: yüzey o zaman ekranın
-        /// köşesinde belirirdi. Penceresi olmayan view'da (henüz takılmamış)
-        /// çevirecek bir uzay yok, cevap sıfır.
+        /// The reason for not returning a zero rectangle stands: the surface
+        /// would then appear at the screen's corner. For a view without a
+        /// window (not yet attached) there is no space to convert to, the
+        /// answer is zero.
         #[unsafe(method(firstRectForCharacterRange:actualRange:))]
         fn first_rect_for_character_range(
             &self,
             range: NSRange,
             actual_range: NSRangePointer,
         ) -> NSRect {
-            // Sorulan aralığın tamamını karşıladığımızı söylüyoruz: tek bir
-            // dikdörtgen dönüyoruz ve o dikdörtgen aralığın tamamına ait.
-            // SAFETY: işaretçi ya null ya da çağıranın yığınındaki geçerli
-            // bir `NSRange`; AppKit'in sözleşmesi bu.
+            // We say we satisfy the whole asked range: we return a single
+            // rectangle and that rectangle belongs to the whole range.
+            // SAFETY: the pointer is either null or a valid `NSRange` on the
+            // caller's stack; that is AppKit's contract.
             unsafe {
                 if let Some(actual) = actual_range.as_mut() {
                     *actual = range;
@@ -1187,49 +1237,53 @@ define_class!(
             window.convertRectToScreen(self.convertRect_toView(self.bounds(), None))
         }
 
-        /// Ekrandaki bir noktanın hangi karaktere denk geldiği: **cevabımız
-        /// yok**. Yığın bunu sürükleyerek metin seçmek için soruyor ve
-        /// ızgaranın seçimi bizim kendi yolumuz (`mouseDragged:`), yığının
-        /// değil. `NSNotFound` sözleşmedeki "bu noktada karakterim yok".
+        /// Which character a point on screen corresponds to: **we have no
+        /// answer**. The stack asks this to select text by dragging, and the
+        /// grid's selection is our own path (`mouseDragged:`), not the
+        /// stack's. `NSNotFound` is the contract's "I have no character at this point".
         #[unsafe(method(characterIndexForPoint:))]
         fn character_index_for_point(&self, _point: NSPoint) -> NSUInteger {
             NOT_FOUND
         }
     }
 
-    /// Finder'dan gelen damlanın bu view'a bakan yüzü. Protokolün **bütün**
-    /// metotları `#[optional]` — `NSTextInputClient`'ın tam tersi — yani iki
-    /// tanesi yetiyor: damlanın kabul edildiğini söyleyen ve onu yazan.
+    /// The side of the drop from Finder facing this view. **All** of the
+    /// protocol's methods are `#[optional]` - the very opposite of
+    /// `NSTextInputClient` - so two suffice: the one that says the drop is
+    /// accepted and the one that writes it.
     ///
-    /// `prepareForDragOperation:` bilerek yok: uygulanmayan metotta AppKit
-    /// "evet" varsayıp doğrudan `performDragOperation:`e geçiyor, yani
-    /// yazılacak gövde sabit bir `true` olurdu.
+    /// `prepareForDragOperation:` is deliberately absent: on an unimplemented
+    /// method AppKit assumes "yes" and moves straight to
+    /// `performDragOperation:`, so the body to write would be a constant `true`.
     unsafe impl NSDraggingDestination for BateriView {
-        /// İşaretçi damlayla pencereye girdi: cevap **kopya** — bu sekmede
-        /// bir yükleme sayfası (yoklama dahil) sürmüyorsa.
+        /// The pointer entered the window with the drop: the answer is **copy**
+        /// - unless an upload sheet (probe included) is in progress in this tab.
         ///
-        /// Tip elemesi kayıtta yapıldı ([`BateriView::new`]'daki
-        /// `registerForDraggedTypes`): bu metot ancak panoda bir dosya
-        /// URL'si varsa çağrılıyor. Sorulan tek şey uzak dizine yüklemenin
-        /// (037 Karar 7) sayfası: iki sayfa üst üste açılamaz ve sürerken
-        /// gelen damla `performDragOperation:`'da reddedilecekti — "+"
-        /// göstermek yalan olurdu. Yükleme **akarken** damla kabul: kuyruğa
-        /// giriyor.
+        /// The type filtering was done at registration
+        /// (`registerForDraggedTypes` in [`BateriView::new`]): this method is
+        /// called only if there is a file URL on the pasteboard. The only thing
+        /// asked is the sheet of the upload to the remote directory (037 Karar
+        /// 7): two sheets cannot open on top of each other and a drop arriving
+        /// meanwhile would be rejected in `performDragOperation:` - showing "+"
+        /// would be a lie. While an upload is **flowing** the drop is accepted:
+        /// it enters the queue.
         ///
-        /// **Kopya**, taşıma değil: Finder'daki dosya yerinde kalmalı, biz
-        /// yalnız yolunu yazıyoruz. `draggingUpdated:` de uygulanmıyor —
-        /// AppKit onu uygulamayan hedefte buradaki cevabı sürdürüyor, yani
-        /// ikinci metot aynı sabiti tekrarlardı.
+        /// **Copy**, not move: the file in Finder must stay in place, we only
+        /// write its path. `draggingUpdated:` is not implemented either -
+        /// on a target that does not implement it AppKit keeps the answer here,
+        /// so the second method would repeat the same constant.
         ///
-        /// **Oturum sorulmuyor ve asimetri bilerek duruyor:** aşağıdaki
-        /// `performDragOperation:` oturum bağlı değilken `false` dönüyor, yani
-        /// imleç "+" gösterip damla "poof" ile geri dönebilir. Burada da
-        /// sormak iki cevabı eşitlerdi ama ölçüt yanlış olurdu — bu metot
-        /// sürüklemenin **başında** koşuyor ve oturum o an yoksa damla
-        /// bırakılana kadar doğmuş olabilir. Pencerede oturumun yokluğu zaten
-        /// erişilemez ([`ViewIvars::session`]: view ile oturum arasına run
-        /// loop dönmediği için hiçbir olay düşemiyor), yani asimetrinin
-        /// görülebileceği bir kare yok; adı yine de burada dursun.
+        /// **The session is not asked and the asymmetry stands deliberately:**
+        /// `performDragOperation:` below returns `false` while no session is
+        /// attached, so the cursor may show "+" and the drop go back with a
+        /// "poof". Asking here too would equalise the two answers but the
+        /// criterion would be wrong - this method runs at the **start** of the
+        /// drag and if there is no session at that moment it may have been born
+        /// by the time of release. The absence of a session in the window is
+        /// already unreachable ([`ViewIvars::session`]: since the run loop does
+        /// not turn between the view and the session no event can fall in
+        /// between), so there is no frame in which the asymmetry could be seen;
+        /// let its name stay here anyway.
         #[unsafe(method(draggingEntered:))]
         fn dragging_entered(
             &self,
@@ -1242,29 +1296,30 @@ define_class!(
             }
         }
 
-        /// Damla bırakıldı: yerel oturumda yollar kaçırılıp giriş satırına
-        /// yazılır; **uzak oturumda** yerel yol uzak kabuğa yazılmıyor —
-        /// damla uzak dizine yükleniyor (037 Karar 7; onay sayfası ve kuyruk
-        /// `crate::uploader`'da) ve hiçbir yol kendiliğinden yapıştırılmıyor
-        /// (phase-7).
+        /// The drop was released: in a local session the paths are escaped and
+        /// written to the input line; **in a remote session** a local path is
+        /// not written to the remote shell - the drop is uploaded to the remote
+        /// directory (037 Karar 7; the confirmation sheet and the queue are in
+        /// `crate::uploader`) and no path is pasted on its own (phase-7).
         ///
-        /// Çıkış [`Session::paste`] — `session.write` **değil**: bracketed
-        /// paste sarması ve dock istisnası oradan bedavaya geliyor
-        /// (018 Karar 4). Dock satırın sahibiyken tek dosyalık damla dock'a
-        /// "yazılmış gibi" giriyor (`Session::can_be_typed`; ters bölü bir
-        /// kontrol karakteri değil, ham daldan sorunsuz geçiyor) ve bu
-        /// **doğru** davranış: kullanıcı damlayı yazdığı satırın devamı
-        /// olarak görüyor.
+        /// The output is [`Session::paste`] - **not** `session.write`: the
+        /// bracketed paste wrapping and the dock exception come free from there
+        /// (018 Karar 4). While the dock owns the line a single-file drop enters
+        /// the dock "as if typed" (`Session::can_be_typed`; a backslash is not a
+        /// control character, it passes the raw branch without trouble) and this
+        /// is the **right** behaviour: the user sees the drop as the
+        /// continuation of the line being typed.
         ///
-        /// `false`'ın iki sebebi var ve ikisi de "yazacak bir şey yok":
-        /// oturum henüz bağlanmamış, ya da damlada okunabilen yol çıkmamış.
-        /// AppKit bunu damlanın reddi olarak gösteriyor — sessizce `true`
-        /// demek kullanıcıya hiçbir şey olmamışken olmuş gibi gösterirdi.
+        /// There are two reasons for `false` and both are "there is nothing to
+        /// write": the session is not yet attached, or no readable path came out
+        /// of the drop. AppKit shows this as the drop's rejection - silently
+        /// saying `true` would show the user that something happened when
+        /// nothing did.
         ///
-        /// Gövdede erken `return` **yok** ve olamaz: `define_class!` cevabı
-        /// ObjC'nin `BOOL`'una çeviriyor ve çeviri yalnız **kuyruk
-        /// ifadesine** uygulanıyor, yani bir `return false` dış imzayla
-        /// çelişip derlemeyi kırardı.
+        /// There is **no** early `return` in the body and there cannot be:
+        /// `define_class!` converts the answer to ObjC's `BOOL` and the
+        /// conversion is applied only to the **tail expression**, so a `return
+        /// false` would conflict with the outer signature and break the compilation.
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
             let paths = dropped_paths(&sender.draggingPasteboard());
@@ -1282,29 +1337,31 @@ define_class!(
     }
 );
 
-/// Panodaki dosya URL'lerinin dosya sistemi yolları.
+/// The file-system paths of the file URLs on the pasteboard.
 ///
-/// Okuma API'si **seçili**: `readObjectsForClasses:options:` + `NSURL`
-/// sınıfı. `pasteboardItems()` aynı işi görürdü ama `NSPasteboardItem`
-/// feature'ını isterdi ve bize kalan iş yine öğeyi URL'ye çözmek olurdu.
+/// The reading API is **chosen**: `readObjectsForClasses:options:` + the
+/// `NSURL` class. `pasteboardItems()` would do the same job but would need
+/// the `NSPasteboardItem` feature and the work left to us would still be
+/// decoding the item into a URL.
 ///
-/// Yol `NSURL.path`'ten alınıyor: **yüzde çözme ikinci kez yazılmıyor.**
-/// `bt-core`'un kendi çözücüsü OSC 7 için var ve orada kalıyor (katman
-/// düzeni); burada Foundation'ın kendi cevabı okunuyor.
+/// The path is taken from `NSURL.path`: **percent-decoding is not written a
+/// second time.** `bt-core`'s own decoder exists for OSC 7 and stays there
+/// (the layering); here Foundation's own answer is read.
 ///
-/// Çözülemeyen öğe **sessizce düşüyor**: damlanın bir parçasını anlamamak
-/// tamamını düşürmek için sebep değil. Eleme üç kademeli ve ortadaki şart —
-/// `NSURL`'e çözülemeyen, **`isFileURL` demeyeni** ve yol vermeyen.
+/// An item that cannot be decoded is **silently dropped**: not understanding
+/// one part of a drop is no reason to drop all of it. The filtering has three
+/// steps and the middle condition - the one that cannot be decoded into an
+/// `NSURL`, the one that **does not say `isFileURL`** and the one that gives no path.
 ///
-/// Ortadaki kademe set kapısında eklendi (018): `NSURL` sınıfı `http://`'yi
-/// de okur ve `NSURL.path` ona `/foo` cevabını verir, yani web adresi
-/// damlatan kullanıcı giriş satırında kökten bir yol bulurdu. Karar 4 "yalnız
-/// dosya URL'si" diyor ve `plan.md` metin/URL damlasını kapsam dışında
-/// tutuyor; kayıt doğruydu, kod eksikti.
+/// The middle step was added at the set's gate (018): the `NSURL` class reads
+/// `http://` too and `NSURL.path` answers it with `/foo`, so a user dropping a
+/// web address would find a root-anchored path on the input line. Karar 4
+/// says "only file URLs" and `plan.md` keeps a text/URL drop out of scope; the
+/// registration was right, the code was missing.
 fn dropped_paths(board: &NSPasteboard) -> Vec<String> {
     let classes: Retained<NSArray<AnyClass>> = NSArray::from_slice(&[NSURL::class()]);
-    // SAFETY: imzanın iki koşulu da sağlanıyor — sınıf dizisi gerçek bir
-    // sınıf (`NSURL`) taşıyor ve seçenek sözlüğü verilmiyor (`None`).
+    // SAFETY: both conditions of the signature are met - the class array
+    // carries a real class (`NSURL`) and no options dictionary is given (`None`).
     let Some(objects) = (unsafe { board.readObjectsForClasses_options(&classes, None) }) else {
         return Vec::new();
     };
@@ -1320,21 +1377,21 @@ fn dropped_paths(board: &NSPasteboard) -> Vec<String> {
         .collect()
 }
 
-/// `NSNotFound`'un `NSRange` alanlarındaki tipi. Sabit `NSInteger` olarak
-/// geliyor, aralıkların iki alanı ise `NSUInteger`; dönüşüm tek yerde dursun.
+/// `NSNotFound`'s type in `NSRange` fields. The constant comes as `NSInteger`
+/// while the ranges' two fields are `NSUInteger`; let the conversion be in one place.
 const NOT_FOUND: NSUInteger = NSNotFound as NSUInteger;
 
-/// "İşaretli bir şey yok" — `markedRange`'in bileşimsiz cevabı.
+/// "Nothing is marked" - `markedRange`'s answer with no composition.
 const EMPTY_RANGE: NSRange = NSRange::new(NOT_FOUND, 0);
 
-/// Yığının verdiği metin nesnesini dizgeye indirger — **tek** çözme kuralı
-/// ([`NSTextInputClient::insertText_replacementRange`] ve
-/// `setMarkedText:` aynı soruyu soruyor).
+/// Reduces the text object the stack gave to a string - the **single**
+/// decoding rule ([`NSTextInputClient::insertText_replacementRange`] and
+/// `setMarkedText:` ask the same question).
 ///
-/// Argümanın tipi belgede "doğru tipte olmalı" diye geçiyor ve pratikte iki
-/// tip geliyor: düz `NSString` (çoğu yol) ve `NSAttributedString` (işaretli
-/// metin, aday penceresi). `None` = ikisi de değil; çağıran o olayı
-/// tüketilmiş saymıyor ve `encode_key`'e düşürüyor.
+/// The argument's type is documented as "must be of the right type" and in
+/// practice two types come: a plain `NSString` (most paths) and an
+/// `NSAttributedString` (marked text, the candidate window). `None` = neither;
+/// the caller does not count that event as consumed and drops it to `encode_key`.
 fn resolve_text(string: &AnyObject) -> Option<String> {
     if let Some(text) = string.downcast_ref::<NSString>() {
         return Some(text.to_string());
@@ -1358,43 +1415,45 @@ impl BateriView {
             cursor_rects: RefCell::new(Vec::new()),
             origin: OnceCell::new(),
         });
-        // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
-        // set edildi.
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
+        // ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
-        // Sürükleme hedefi olmanın tek şartı: view hangi tipleri kabul
-        // ettiğini **önceden** söylemeli, yoksa `draggingEntered:` hiç
-        // çağrılmaz. Liste tek tipli — düz metin damlası kapsam dışı ve
-        // kaçış kuralı bu yüzden tipe koşullu değil (018 Karar 4).
+        // The single condition for being a drag destination: the view must say
+        // **in advance** which types it accepts, otherwise `draggingEntered:` is
+        // never called. The list has a single type - a plain-text drop is out of
+        // scope and the escape rule is thus not conditional on the type (018 Karar 4).
         //
-        // SAFETY: `unsafe` blok yalnız `NSPasteboardTypeFileURL` **statik**
-        // erişimi için (`clipboard` emsali); gerçek bir pasteboard tipi
-        // kaydı ve `None`'a çözümlenmiyor.
+        // SAFETY: the `unsafe` block is only for the **static** access of
+        // `NSPasteboardTypeFileURL` (the `clipboard` precedent); it is a real
+        // pasteboard type registration and does not resolve to `None`.
         this.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
         this
     }
 
-    /// Bileşim metninin **UTF-16 kod birimi** sayısı — `NSRange`'in birimi o.
+    /// The number of **UTF-16 code units** of the composition text - that is `NSRange`'s unit.
     ///
-    /// Bayt değil: `ü` bir kod birimi ama iki bayt, ve ölü tuş bileşimi tam
-    /// olarak o harflerde yaşıyor. `String::len()` yazılsaydı yığın bileşimin
-    /// boyunu olduğundan uzun görürdü.
+    /// Not bytes: `ü` is one code unit but two bytes, and a dead-key
+    /// composition lives exactly on those letters. Had `String::len()` been
+    /// written the stack would see the composition's length as longer than it is.
     fn marked_utf16_len(&self) -> usize {
         self.ivars().marked_text.borrow().encode_utf16().count()
     }
 
-    /// Oturumu bağlar; bu andan sonra tuşlar PTY'ye gider.
+    /// Attaches the session; from this moment the keys go to the PTY.
     pub(crate) fn attach(&self, session: Arc<Session>) {
-        // İkinci çağrı sessizce düşseydi tuşlar eski oturuma giderdi ve
-        // pencere yazmıyor gibi görünürdü — tek satır iz bile bırakmadan.
+        // Had a second call been silently dropped the keys would go to the old
+        // session and the window would look like it does not type - without
+        // leaving even a line of trace.
         assert!(
             self.ivars().session.set(session).is_ok(),
-            "oturum ikinci kez bağlandı"
+            "session bound a second time"
         );
     }
 
-    /// Fare çevirisinin girdilerini tazeler: `start_session` ve `resize`
-    /// yolundan, oturuma ve link'e giden grid'in aynısıyla. Üçü aynı çağrı
-    /// yerinde yazılıyor; biri değişip öteki eski kalamıyor.
+    /// Refreshes the mouse translation's inputs: from the `start_session` and
+    /// `resize` path, with the very grid that goes to the session and the
+    /// link. The three are written at the same call site; one cannot change
+    /// while another stays stale.
     pub(crate) fn set_metrics(&self, grid: crate::app::Grid, dock_rows: u16) {
         self.ivars()
             .metrics
@@ -1402,33 +1461,36 @@ impl BateriView {
         self.ivars().dock_rows.set(dock_rows);
     }
 
-    /// Kaydırmanın pürüzsüz mü satır adımıyla mı gideceği — pencere
-    /// çözülmüş `bool`'u açılışta ve her kayıtta/sistem bildiriminde veriyor
+    /// Whether scrolling goes smooth or by line steps - the window gives the
+    /// resolved `bool` at launch and on every save/system notification
     /// (`TerminalPane::set_smooth_scroll`).
     ///
-    /// `false`'a geçiş uçuştaki süzülmeye dokunmuyor: Hareketi Azalt ve
-    /// `snap` onu link'te zaten bitiriyor, `"off"`'un kendisinde ise sıradaki
-    /// satır adımı kalan kesri düşürüp nesli artırıyor (`ScrollIntent::Lines`)
-    /// ve uçuştaki süzülme kendi süresinde oturuyor.
+    /// The switch to `false` does not touch a gliding in flight: Reduce Motion
+    /// and `snap` already end it in the link, and in `"off"` itself the next
+    /// line step drops the remaining fraction and increments the generation
+    /// (`ScrollIntent::Lines`) and the gliding in flight settles in its own time.
     pub(crate) fn set_smooth_scroll(&self, smooth: bool) {
         self.ivars().smooth_scroll.set(smooth);
     }
 
-    /// `scrollWheel:`'in pürüzsüz kolu ([`smooth_wheel`]). Satır kolundan
-    /// tek farkı miktar ve niyet; işaretçi, Shift ve rota aynı.
+    /// `scrollWheel:`'s smooth arm ([`smooth_wheel`]). Its only difference
+    /// from the line arm is the amount and the intent; the pointer, Shift and
+    /// the route are the same.
     ///
-    /// **Artığın kuralı** satır kolununkiyle aynı cümle, iki istisnayla:
-    /// kaydırma kolunda (`Wheel::Scrolled`) artık **sıfırlanıyor** — kesirli
-    /// konumun sahibi orada `Session`, artığın tüketicisi yok ve kalsa sonraki
-    /// bir kipe (ok, rapor) sızardı — ama **çentikte korunuyor**, çünkü
-    /// çentiğin tam satırı artıktan doğuyor ve `Scrolled(0)` orada "uç" değil
-    /// "süzülme isteği" demek. Tam satırı olmayan olayın `Ignored`'u da artığı
-    /// silmiyor: ok ve rapor kolu sıfır satırı reddediyor ve trackpad'le yavaş
-    /// kaydırmada her küçük olay artığı sıfırlasaydı `less` hiç kaymazdı.
+    /// **The remainder's rule** is the same sentence as the line arm's, with
+    /// two exceptions: in the scroll arm (`Wheel::Scrolled`) the remainder is
+    /// **reset** - the owner of the fractional position there is `Session`,
+    /// the remainder has no consumer and if it stayed it would leak into a
+    /// later mode (arrow, report) - but it is **kept on a notch**, because the
+    /// notch's whole line is born of the remainder and `Scrolled(0)` there
+    /// means not "the end" but "a gliding request". The `Ignored` of an event
+    /// with no whole line does not erase the remainder either: the arrow and
+    /// report arms reject zero lines and in a slow trackpad scroll had every
+    /// small event reset the remainder `less` would never move.
     ///
-    /// Trackpad jestinin **yerleşmesi** sürüklemede de süzülüyor ve uç onu
-    /// bir sonraki `mouseDragged:`'e kadar izlemiyor: pay yarım satırın
-    /// altında ve plan bu sınırı adıyla yazıyor (→ Kapsam Dışı).
+    /// The **settling** of a trackpad gesture glides during a drag too and the
+    /// end does not follow it until the next `mouseDragged:`: the amount is
+    /// under half a line and the plan writes this limit by name (→ Kapsam Dışı).
     fn smooth_scroll_wheel(&self, event: &NSEvent, session: &Session, unit: f64) {
         let carry = &self.ivars().scroll_carry;
         let (step, rest) = smooth_wheel(
@@ -1442,11 +1504,11 @@ impl BateriView {
         let Some(mut step) = step else {
             return;
         };
-        // Dock'un üstündeki tekerlek dock'un (tam satırla; yarım satırda
-        // dinlenen bir dock penceresi olmadığı için süzülme yok). **Jestin
-        // başı ve sonu ızgaranın kalıyor** (`/code-review`): ızgarada başlayıp
-        // momentumu dock'un üstünde biten bir kaydırmanın `Settle`'ı
-        // yutulsaydı ızgara yarım satırda asılı kalırdı.
+        // The wheel above the dock is the dock's (with whole lines; there is no
+        // gliding since there is no dock window resting at half a line). **The
+        // gesture's start and end stay the grid's** (`/code-review`): had the
+        // `Settle` of a scroll that began in the grid and ended with momentum
+        // above the dock been swallowed, the grid would hang at half a line.
         if !matches!(
             step.intent,
             ScrollIntent::GestureBegan | ScrollIntent::Settle
@@ -1454,17 +1516,17 @@ impl BateriView {
         {
             return;
         }
-        // **Basılı sürüklemede çentik süzülmüyor**, satır adımıyla gidiyor:
-        // süzülmenin payı pencereyi kare yolunda kaydırıyor ve orada seçimin
-        // ucunu fareye taşıyan kimse yok — fare kıpırdamazken uç eski satırda
-        // kalırdı (`/code-review`). Satır adımı `Scrolled(n)` döndürüyor ve
-        // `follow_pointer` bugünkü gibi koşuyor; seçerken kaydırmada hassasiyet
-        // süsten önce geliyor.
+        // **A notch does not glide during a held drag**, it goes by line
+        // steps: the gliding's amount scrolls the window in the frame path and
+        // there nobody moves the selection's end to the mouse - while the mouse
+        // is still the end would stay on the old row (`/code-review`). The line
+        // step returns `Scrolled(n)` and `follow_pointer` runs as today; when
+        // selecting, precision in scrolling comes before ornament.
         if step.intent == ScrollIntent::Glide && self.ivars().gesture.get().dragging() {
             step.intent = ScrollIntent::Lines;
         }
-        // İşaretçinin hücresi ve doldurma reddinin sıfırı satır kolundaki
-        // gerekçeyle (`scrollWheel:`).
+        // The pointer's cell and the fill rejection's zero, with the
+        // rationale in the line arm (`scrollWheel:`).
         let Some(pointer) =
             self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp { fill_rows: 0 })
         else {
@@ -1476,8 +1538,8 @@ impl BateriView {
             Wheel::Scrolled(0) if step.intent == ScrollIntent::Glide => {}
             Wheel::Scrolled(0) | Wheel::Ignored => carry.set(0.0),
             Wheel::Scrolled(_) => {
-                // Tam satırlı kollarda (çentik, sürüklemedeki satır adımı)
-                // artık çentiğin kaynağı, satır kolundaki gibi korunuyor.
+                // In the whole-line arms (notch, the line step in a drag) the
+                // remainder's source is the notch, kept as in the line arm.
                 if !matches!(step.intent, ScrollIntent::Glide | ScrollIntent::Lines) {
                     carry.set(0.0);
                 }
@@ -1487,25 +1549,25 @@ impl BateriView {
         }
     }
 
-    /// Klavyenin yerini sahibi pane'e bildirir; view henüz bir pane'e
-    /// takılı değilse sessiz. Sahip `superview()`'dan (039 Karar 2): pane
-    /// bu view'ın doğrudan üstü.
+    /// Reports the keyboard's place to the owner pane; silent if the view is
+    /// not yet attached to a pane. The owner is from `superview()` (039 Karar
+    /// 2): the pane is this view's direct parent.
     fn keyboard_moved(&self, here: bool) {
         if let Some(pane) = self.pane() {
             pane.keyboard_moved(here);
         }
     }
 
-    /// Arama panelinin örttüğü hücreler ([`SearchCover`]) — `panel` view'ın
-    /// kendi koordinatında (nokta). Ölçü ya da ölçek yoksa hiçbir şey
-    /// örtülmüyor.
+    /// The cells the search panel covers ([`SearchCover`]) - `panel` is in the
+    /// view's own coordinates (points). If there is no metrics or scale
+    /// nothing is covered.
     pub(crate) fn search_cover(&self, panel: NSRect) -> SearchCover {
         let (Some((metrics, _)), Some(window)) = (self.ivars().metrics.get(), self.window()) else {
             return SearchCover::default();
         };
         let scale = window.backingScaleFactor();
         let origin = self.ivars().origin.get().map_or(0.0, Origin::px);
-        // View çevrilmiş: panelin alt kenarı `maxY`.
+        // The view is flipped: the panel's bottom edge is `maxY`.
         cover_of(
             (panel.origin.y + panel.size.height) * scale,
             panel.origin.x * scale,
@@ -1514,37 +1576,39 @@ impl BateriView {
         )
     }
 
-    /// Fare çevirisinin dikey orijinini bağlar; link doğduktan hemen sonra,
-    /// bir kez.
+    /// Binds the mouse translation's vertical origin; once, right after the
+    /// link is born.
     ///
-    /// `set_metrics`'ten ayrı çağrı, çünkü kaynağı ayrı: o üçlü pencere
-    /// geometrisinden, bu link'ten geliyor ve link `set_metrics`'ten sonra
-    /// kuruluyor (`pane::TerminalPane::start_session`). İkinci çağrı sessizce düşseydi fare
-    /// eski gövdeyi, yani sonsuza kadar sıfır bir orijin okurdu.
+    /// A separate call from `set_metrics`, because its source is separate: that
+    /// triple comes from the window geometry, this one from the link, and the
+    /// link is set up after `set_metrics`
+    /// (`pane::TerminalPane::start_session`). Had a second call been silently
+    /// dropped the mouse would read the old body, i.e. an origin that is zero forever.
     pub(crate) fn attach_origin(&self, origin: Origin) {
         assert!(
             self.ivars().origin.set(origin).is_ok(),
-            "orijin ikinci kez bağlandı"
+            "origin bound a second time"
         );
     }
 
-    /// Fare düğmesinin **altı** selector'ının ortak gövdesi: basış ya da
-    /// bırakma, üç düğme.
+    /// The common body of the mouse button's **six** selectors: press or
+    /// release, three buttons.
     ///
-    /// Kararı `bt-core` veriyor ([`Session::mouse_button`]) — kip burada
-    /// tutulmuyor ve sorulmuyor. Burası yalnız AppKit çevirisi: hücre,
-    /// değiştiriciler ve cevabın üç kolu.
+    /// The decision is given by `bt-core` ([`Session::mouse_button`]) - the
+    /// mode is neither kept nor asked here. This is only the AppKit
+    /// translation: the cell, the modifiers and the answer's three arms.
     ///
-    /// **Basış ile bırakma farklı hücre kapısından geçiyor** ve bu bir
-    /// tutarsızlık değil, [`OutOfGrid`]'in tek kuralının iki yüzü. Basış bir
-    /// jest *başlatıyor*: ızgaranın dışına düşen nokta reddediliyor, yani
-    /// başlık çubuğu, sol pay, dock bandı ve doldurma bandı üstündeki basış
-    /// ne rapor ne seçim üretiyor (R8 bunun özel hâli). Bırakma başlamış bir
-    /// jesti *bitiriyor*: nokta kırpılıyor, çünkü düşürülen bırakma
-    /// uygulamada **takılı kalmış bir düğme** bırakırdı (R6).
+    /// **A press and a release go through different cell gates** and this is
+    /// not an inconsistency, it is the two faces of [`OutOfGrid`]'s single
+    /// rule. A press *starts* a gesture: a point falling outside the grid is
+    /// rejected, so a press on the title bar, the left padding, the dock band
+    /// and the fill band produces neither a report nor a selection (R8 is a
+    /// special case of this). A release *ends* a started gesture: the point is
+    /// clamped, because a dropped release would leave a **button stuck** in
+    /// the application (R6).
     ///
-    /// Bırakmada `Clamp`'in `fill_rows`'u sıfır geçiyor: bandın üstü de bir
-    /// hücre vermeli, kırpmayı `bt-core` yapıyor.
+    /// On release `Clamp`'s `fill_rows` is passed as zero: the area above the
+    /// band must give a cell too, `bt-core` does the clamping.
     fn button_event(&self, event: &NSEvent, button: MouseButton, pressed: bool) {
         let Some(session) = self.ivars().session.get() else {
             return;
@@ -1557,22 +1621,22 @@ impl BateriView {
                         self.report_button(session, button, false, cell, event);
                     }
                 }
-                // Dock'taki jest bitti: sürüklemesiz tıksa caret oraya.
+                // The gesture in the dock ended: if it was a click without a drag the caret goes there.
                 Release::Dock => session.dock_click(),
                 Release::Done => {}
             }
             return;
         }
-        // Yükleme satırının düğmeleri (037 Karar 7): bağlam satırında, jest
-        // defterine girmeden — tık bir düğme, sürükleme başlatmıyor.
+        // The upload line's buttons (037 Karar 7): on the context line, without
+        // entering the gesture ledger - a click is a button, it starts no drag.
         if button == MouseButton::Left && self.upload_control(event) {
             return;
         }
         self.with_gesture(|g| g.begin_press(button));
-        // **Dock'un giriş satırı ızgaradan önce** ve fare kipine hiç
-        // sorulmadan: bant uygulamanın ekranı değil, terminalin kendi yüzeyi
-        // (031 phase-4). Yalnız sol tuş; bağlam satırı ve bandın payı
-        // reddediliyor, yani orada basış hiçbir şey yapmıyor.
+        // **The dock's input line before the grid** and without asking the
+        // mouse mode at all: the band is not the application's screen but the
+        // terminal's own surface (031 phase-4). Only the left button; the
+        // context line and the band's padding are rejected, so a press there does nothing.
         if button == MouseButton::Left
             && let Some(point) = self.window_point_dock(event.locationInWindow(), OutOfGrid::Reject)
         {
@@ -1591,20 +1655,22 @@ impl BateriView {
         let shift = modifiers(event).shift;
         let clicks = event.clickCount();
         match self.with_gesture(|g| g.pressed(button, answer, clicks, shift)) {
-            // Çapa **yarısıyla** gidiyor: basış hücrenin hangi yarısındaysa
-            // sınır oradan geçer ve sürükleme boyunca orada kalır. Tek tıkta
-            // iki uç aynı ve seçim boş — sürüklemesiz tık hiçbir şey seçmez,
-            // Cmd-C panoya dokunmaz; ters yöne ilk hareket seçimi boşaltmaz,
-            // fare ucundan büyür. Çift/üçlü tıkta aynı nokta altındaki
-            // kelimeyi/satırı bütün alır.
+            // The anchor goes **with its half**: whichever half of the cell the
+            // press is in, the boundary passes there and stays there throughout
+            // the drag. On a single click the two ends are the same and the
+            // selection is empty - a click without a drag selects nothing, Cmd-C
+            // does not touch the pasteboard; the first motion in the opposite
+            // direction does not empty the selection, it grows from the mouse's
+            // end. On a double/triple click it takes the whole word/line under
+            // the same point.
             Some(Press::Select(kind)) => session.set_selection(kind, cell, cell),
             Some(Press::Extend) => session.extend_selection(cell),
             None => {}
         }
     }
 
-    /// Jest defterinde al-değiştir-koy ([`ViewIvars::gesture`]). Kapanışın
-    /// içinde `Session` çağrılmıyor: defter saf kalsın.
+    /// Take-modify-put on the gesture ledger ([`ViewIvars::gesture`]). No
+    /// `Session` call inside the closure: the ledger stays pure.
     fn with_gesture<R>(&self, change: impl FnOnce(&mut Gesture) -> R) -> R {
         let cell = &self.ivars().gesture;
         let mut gesture = cell.get();
@@ -1613,10 +1679,11 @@ impl BateriView {
         answer
     }
 
-    /// Basılı sürüklemenin ortak gövdesi: jest uygulamanınsa hareket raporu,
-    /// terminalinse seçimin ucu. Rota basışta kilitlendi (R6) ve burada
-    /// yeniden sorulmuyor ([`Gesture::dragged`]): aynı jestin ortasında
-    /// Shift'i bırakmak ya da uygulamanın kipi kapatması yolu değiştirmemeli.
+    /// The common body of a held drag: if the gesture is the application's a
+    /// motion report, if the terminal's the selection's end. The route was
+    /// locked at the press (R6) and is not asked again here
+    /// ([`Gesture::dragged`]): releasing Shift or the application turning the
+    /// mode off in the middle of the same gesture must not change the path.
     fn drag_event(&self, event: &NSEvent, button: MouseButton) {
         match self.ivars().gesture.get().dragged(button) {
             Drag::Report => self.motion_event(event, Some(button)),
@@ -1625,12 +1692,12 @@ impl BateriView {
                     session.update_selection(cell);
                 }
             }
-            // Dock'ta başlamış sürükleme dock'ta kalıyor: nokta giriş
-            // bloğunun içine kırpılıyor, ızgaraya taşmıyor. **Bloğun
-            // kenarını aşan sürükleme dikey pencereyi kaydırıyor** (032
-            // phase-4): tavanı aşan girişte görünmeyen satırlara seçim
-            // uzayabilsin. Olay başına bir satır, yani fare kenarın ötesinde
-            // kıpırdadıkça — periyodik bir zamanlayıcı yok.
+            // A drag that began in the dock stays in the dock: the point is
+            // clamped into the input block, it does not overflow onto the grid.
+            // **A drag past the block's edge scrolls the vertical window** (032
+            // phase-4): so the selection can extend to invisible rows in an
+            // input past the ceiling. One row per event, i.e. as the mouse moves
+            // beyond the edge - there is no periodic timer.
             Drag::SelectDock => {
                 let at = event.locationInWindow();
                 let clamp = OutOfGrid::Clamp { fill_rows: 0 };
@@ -1648,10 +1715,11 @@ impl BateriView {
         }
     }
 
-    /// Düğme raporunu gönderir ve **raporlandıysa** kısmanın çentiğini o
-    /// hücreye damgalar ([`Gesture::stamp`]). Ölçüt cevabın kendisi, çünkü
-    /// `Select` ve `Ignored` kollarında uygulamaya hiçbir şey gitmedi ve
-    /// damgalamak oradaki ilk hover raporunu sessizce yutardı.
+    /// Sends the button report and, **if it was reported**, stamps the
+    /// throttling's notch to that cell ([`Gesture::stamp`]). The criterion is
+    /// the answer itself, because in the `Select` and `Ignored` arms nothing
+    /// went to the application and stamping would silently swallow the first
+    /// hover report there.
     fn report_button(
         &self,
         session: &Session,
@@ -1667,21 +1735,20 @@ impl BateriView {
         answer
     }
 
-    /// Kayıp bir `mouseUp:`'ın uygulamada basılı bıraktığı düğmeleri serbest
-    /// bırakır ([`Gesture::take_lost_releases`]). Biti sessizce düşürmek
-    /// yetmez: uygulama düğmeyi **hâlâ basılı** sanır ve her hareket
-    /// raporunda kendi seçimini büyütür, yani bırakmanın kendisi gönderilmek
-    /// zorunda.
+    /// Releases the buttons a lost `mouseUp:` left pressed in the application
+    /// ([`Gesture::take_lost_releases`]). Silently dropping the bit is not
+    /// enough: the application still thinks the button is **held** and grows its
+    /// own selection on every motion report, so the release itself must be sent.
     ///
-    /// Basıştaki bayat-bit temizliği ([`Gesture::begin_press`]) bunun yerine
-    /// geçmiyor: o terminalin kendi defterini düzeltiyor ve ancak kullanıcı
-    /// **aynı düğmeye yeniden bastığında** koşuyor.
+    /// The stale-bit cleanup at a press ([`Gesture::begin_press`]) does not
+    /// replace this: that fixes the terminal's own ledger and runs only when the
+    /// user **presses the same button again**.
     fn flush_lost_releases(&self, session: &Session, event: &NSEvent) {
         let lost: Vec<MouseButton> = self.with_gesture(|g| g.take_lost_releases().collect());
         if lost.is_empty() {
             return;
         }
-        // Jestin devamı, başlangıcı değil: koordinat kırpılıyor (R6).
+        // The continuation of a gesture, not its start: the coordinate is clamped (R6).
         let clamp = OutOfGrid::Clamp { fill_rows: 0 };
         let Some(cell) = self.window_point_cell(event.locationInWindow(), clamp) else {
             return;
@@ -1691,18 +1758,18 @@ impl BateriView {
         }
     }
 
-    /// Hareket raporunun tek yolu: düğmesiz (`mouseMoved:`) ve basılı
-    /// (`*MouseDragged:`).
+    /// The single path of the motion report: buttonless (`mouseMoved:`) and
+    /// held (`*MouseDragged:`).
     ///
-    /// **Kısma `bt-core` çağrısından önce** ([`Gesture::moved_to`]): hücre
-    /// değişmediyse `Term` kilidi hiç alınmıyor. Çentik rapor gitmese de
-    /// yazılıyor — kip kapalıyken de hücre değişimi başına tek bir sonuçsuz
-    /// çağrı kalsın, piksel başına değil.
+    /// **The throttling is before the `bt-core` call** ([`Gesture::moved_to`]):
+    /// if the cell did not change the `Term` lock is never taken. The notch is
+    /// written even if no report goes - so that with the mode off too there
+    /// remains a single resultless call per cell change, not per pixel.
     ///
-    /// Hücrenin kapısı düğmeye bağlı ([`OutOfGrid`]): basılı sürükleme
-    /// başlamış bir jestin devamı ve kırpılıyor, düğmesiz hareket ise bir
-    /// yer *söylüyor* ve ızgaranın dışında reddediliyor — başlık çubuğunda
-    /// gezinen işaretçi uygulamaya 0. satırı bildirmemeli.
+    /// The cell's gate depends on the button ([`OutOfGrid`]): a held drag is
+    /// the continuation of a started gesture and is clamped, while a buttonless
+    /// motion *states* a place and is rejected outside the grid - a pointer
+    /// roaming over the title bar must not report row 0 to the application.
     fn motion_event(&self, event: &NSEvent, button: Option<MouseButton>) {
         let Some(session) = self.ivars().session.get() else {
             return;
@@ -1722,40 +1789,41 @@ impl BateriView {
         session.mouse_motion(button, cell, modifiers(event));
     }
 
-    /// Oturum + olayın altındaki uç (hücre ve yarısı). Üçü (`session`, ölçü,
-    /// grid) birlikte yoksa `None`: yarım bilgiyle seçimin ucu taşınamaz.
-    /// Doldurma bandının üstüne düşen nokta da `None`
-    /// ([`point_to_cell`]).
+    /// The session + the end under the event (cell and its half). `None` if
+    /// the three (`session`, metrics, grid) are not all present: the
+    /// selection's end cannot be moved with half the information. A point
+    /// falling above the fill band is also `None` ([`point_to_cell`]).
     ///
-    /// Bugün tek tüketicisi sürükleme; düğme olayları oturumu ve hücreyi
-    /// ayrı ayrı istiyor ([`BateriView::button_event`]), çünkü bırakma
-    /// hücreyi başka bir kapıdan (`fill_rows = 0`) alıyor.
+    /// Today its only consumer is the drag; the button events want the session
+    /// and the cell separately ([`BateriView::button_event`]), because the
+    /// release takes the cell through another gate (`fill_rows = 0`).
     fn session_cell(&self, event: &NSEvent) -> Option<(Arc<Session>, SelectionPoint)> {
         let session = Arc::clone(self.ivars().session.get()?);
         let cell = self.event_cell(event)?;
         Some((session, cell))
     }
 
-    /// Olay noktasını seçim ucuna indirir. `None` ölçü ya da pencere henüz
-    /// yokken, grid sıfır boyutluyken ve doldurma bandının üstünde — kenar
-    /// dışı nokta yapışır.
+    /// Lowers the event point to a selection end. `None` while the metrics or
+    /// the window do not exist yet, while the grid is zero-sized and above the
+    /// fill band - a point beyond the edge sticks.
     fn event_cell(&self, event: &NSEvent) -> Option<SelectionPoint> {
         let fill_rows = self.fill_rows();
         self.window_point_cell(event.locationInWindow(), OutOfGrid::Clamp { fill_rows })
     }
 
-    /// Pencere koordinatındaki noktayı seçim ucuna indirir — [`Self::event_cell`]'in
-    /// olaysız hâli: tuşla kaydırmada farenin yerini taşıyan bir fare olayı yok.
+    /// Lowers a point in window coordinates to a selection end - [`Self::event_cell`]'s
+    /// eventless form: in key-driven scrolling there is no mouse event carrying the mouse's place.
     ///
-    /// `outside` **argüman**, alan değil: aynı nokta çağıranına göre bir
-    /// seçim ucu ya da rapora giden koordinat oluyor ve ızgaranın dışına
-    /// düşünce ikisi ayrı şey istiyor ([`OutOfGrid`]).
+    /// `outside` is a **parameter**, not a field: the same point becomes a
+    /// selection end or a coordinate going to a report depending on its caller,
+    /// and when it falls outside the grid the two want different things
+    /// ([`OutOfGrid`]).
     fn window_point_cell(&self, in_window: NSPoint, outside: OutOfGrid) -> Option<SelectionPoint> {
         let (metrics, (cols, rows)) = self.ivars().metrics.get()?;
         let point = self.convertPoint_fromView(in_window, None);
         let scale = self.window()?.backingScaleFactor();
-        // Orijin **çizilen** karenin değeri: link yoksa (ilk pencere) sıfır ve
-        // çizim de tavana yapışık, yani ikisi tutarlı.
+        // The origin is the **drawn** frame's value: without a link (the first
+        // window) it is zero and the drawing is stuck to the ceiling, so the two are consistent.
         let origin_px = self.ivars().origin.get().map_or(0.0, Origin::px);
         point_to_cell(
             (point.x, point.y),
@@ -1768,16 +1836,16 @@ impl BateriView {
         )
     }
 
-    /// Pencere noktası → dock'un giriş bloğunda satır + sütun + yarı. Dock
-    /// yoksa ya da nokta (`Reject`'te) giriş bloğunun dışındaysa `None`.
+    /// Window point → row + column + half in the dock's input block. `None`
+    /// if there is no dock or the point is outside the input block (under `Reject`).
     ///
-    /// Geometri **çizilen kareden** ([`bt_gpu::Origin::dock`], 032): bloğun
-    /// tepesi ve satır sayısı ızgaranın orijiniyle aynı yazımda yayınlanıyor,
-    /// yani bant büyürken fare ne ızgarayı ne bloğu bir kare geriden okuyor.
-    /// Henüz hiç kare çizilmediyse PTY payının tek satırlık bloğu
-    /// ([`dock_input_top_px`]); yükseklik o kolda view'ın bounds'undan —
-    /// drawable'ın boyu onunla aynı çağrıda kuruluyor
-    /// (`TerminalPane::sync_geometry`).
+    /// The geometry is from the **drawn frame** ([`bt_gpu::Origin::dock`],
+    /// 032): the block's top and its row count are published in the same write
+    /// as the grid's origin, so while the band grows the mouse reads neither the
+    /// grid nor the block a frame behind. If no frame has been drawn yet, the
+    /// PTY pad's single-row block ([`dock_input_top_px`]); the height in that
+    /// arm is from the view's bounds - the drawable's size is set in the same
+    /// call as that (`TerminalPane::sync_geometry`).
     fn window_point_dock(&self, in_window: NSPoint, outside: OutOfGrid) -> Option<SelectionPoint> {
         let (metrics, (cols, _)) = self.ivars().metrics.get()?;
         let dock_rows = self.ivars().dock_rows.get();
@@ -1796,24 +1864,25 @@ impl BateriView {
         point_to_cell((point.x, point.y), metrics, top, outside, scale, cols, rows)
     }
 
-    /// Bu view'ın sahibi pane — doğrudan üst view'ı (039 Karar 2); view
-    /// henüz bir pane'e takılı değilse `None`. Pencere listesinde doğrusal
-    /// arama ya da uygulama delegate'ine uzanma yok: sahip görünüm ağacında.
+    /// The owner pane of this view - its direct superview (039 Karar 2);
+    /// `None` if the view is not yet attached to a pane. There is no linear
+    /// search in a window list or reaching for the application delegate: the
+    /// owner is in the view tree.
     fn pane(&self) -> Option<Retained<TerminalPane>> {
-        // SAFETY: üst view'ı okumak; dönen `Retained` onu çağıran boyunca
-        // yaşatıyor ve ana thread'deyiz (`MainThreadOnly`).
+        // SAFETY: reading the superview; the returned `Retained` keeps it alive
+        // for the caller and we are on the main thread (`MainThreadOnly`).
         let parent = unsafe { self.superview() }?;
         parent.downcast::<TerminalPane>().ok()
     }
 
-    /// Pencere noktası → bağlam satırında dock-yerel sütun ve bağlam
-    /// satırının bütçesi (037 Karar 7, phase-6): satır giriş bloğunun
-    /// **altında**, sütun adımı küçük sınıfın ilerlemesi. Dock yoksa, kare
-    /// henüz yoksa ya da nokta bağlam satırında değilse `None`.
+    /// Window point → dock-local column on the context line and the context
+    /// line's budget (037 Karar 7, phase-6): the line is **below** the input
+    /// block, the column pitch is the small class's advance. `None` if there is
+    /// no dock, no frame yet or the point is not on the context line.
     ///
-    /// Tık ve hover'ın **tek** geometrisi; düğmenin sütun aralığı çizimle aynı
-    /// yerleşimden (`bt_core::transfer_button_at`), yani ikisinin göreceği
-    /// sütun ile çizilen dolgu ayrışamıyor.
+    /// The **single** geometry of click and hover; the button's column range
+    /// comes from the same layout as the drawing (`bt_core::transfer_button_at`),
+    /// so the column the two see and the drawn fill cannot diverge.
     fn context_column(&self, in_window: NSPoint) -> Option<(u16, u16)> {
         let (metrics, (cols, _)) = self.ivars().metrics.get()?;
         let (top, rows) = self.ivars().origin.get().and_then(Origin::dock)?;
@@ -1823,10 +1892,11 @@ impl BateriView {
         Some((col, bt_gpu::context_cols(cols, metrics)))
     }
 
-    /// Bağlam satırında dock-yerel `[start, end)` sütun aralığının view
-    /// noktasındaki dikdörtgeni — [`Self::context_column`]'un tersi, aynı
-    /// geometriden ([`context_span_px`]): "Show files (N)" popover'ının
-    /// çıpası (037 phase-7) ve düğmelerin el imleci ([`Self::upload_cursor_rects`]).
+    /// The rectangle, at view points, of the dock-local `[start, end)` column
+    /// range on the context line - the inverse of [`Self::context_column`],
+    /// from the same geometry ([`context_span_px`]): the anchor of the "Show
+    /// files (N)" popover (037 phase-7) and the buttons' hand cursor
+    /// ([`Self::upload_cursor_rects`]).
     pub(crate) fn context_span_rect(&self, start: u16, end: u16) -> Option<NSRect> {
         let (metrics, _) = self.ivars().metrics.get()?;
         let (top, rows) = self.ivars().origin.get().and_then(Origin::dock)?;
@@ -1838,20 +1908,20 @@ impl BateriView {
         ))
     }
 
-    /// Bağlam satırının bütçesi ([`bt_gpu::context_cols`]); ölçü yoksa `None`.
+    /// The context line's budget ([`bt_gpu::context_cols`]); `None` if there is no metrics.
     pub(crate) fn context_budget(&self) -> Option<u16> {
         let (metrics, (cols, _)) = self.ivars().metrics.get()?;
         Some(bt_gpu::context_cols(cols, metrics))
     }
 
-    /// Yükleme düğmelerinin el imleci (037 phase-6 sonrası): AppKit'in
-    /// **cursor rect**'i, düğmenin dolgusunun tamamı. `set()` değil, çünkü
-    /// pencerenin imleci yeniden değerlendirmesi (başlığın her `↑ N%`
-    /// yazımı, key olma, çerçeve) view'a `cursorUpdate:` yolluyor ve
-    /// `NSView`'ın varsayılanı oku kuruyor — ölçüldü; elle kurulan el her
-    /// yüzde değişiminde oka dönüp bir sonraki tazelemede geri geliyordu.
-    /// Cursor rect o değerlendirmenin **girdisi**: dikdörtgenin içinde AppKit
-    /// kendisi el kuruyor, dışında ok, key olmayan pencerede hiç.
+    /// The upload buttons' hand cursor (after 037 phase-6): AppKit's **cursor
+    /// rect**, the button's whole fill. Not `set()`, because the window's
+    /// re-evaluation of the cursor (every `↑ N%` write of the title, becoming
+    /// key, the frame) sends the view `cursorUpdate:` and `NSView`'s default
+    /// sets the arrow - measured; a hand set by hand turned back into an arrow
+    /// at every percentage change and came back at the next refresh. The cursor
+    /// rect is that evaluation's **input**: inside the rectangle AppKit sets the
+    /// hand itself, outside the arrow, in a non-key window none at all.
     fn upload_cursor_rects(&self) {
         let rects = self.upload_button_rects();
         let hand = NSCursor::pointingHandCursor();
@@ -1861,8 +1931,8 @@ impl BateriView {
         self.ivars().cursor_rects.replace(rects);
     }
 
-    /// Düğmelerin şimdiki dikdörtgenleri, view noktasında — tık ve hover'ın
-    /// geometrisinden ([`Self::context_span_rect`]); yükleme yoksa boş.
+    /// The buttons' current rectangles, in view points - from click and hover's
+    /// geometry ([`Self::context_span_rect`]); empty if there is no upload.
     fn upload_button_rects(&self) -> Vec<NSRect> {
         let (Some(pane), Some(context)) = (self.pane(), self.context_budget()) else {
             return Vec::new();
@@ -1873,14 +1943,14 @@ impl BateriView {
             .collect()
     }
 
-    /// Kurulu cursor rect'ler bayatsa yeniletir: düğmeler belirdi ya da
-    /// kalktı (el asılı kalmasın), ya da dock'un **çizilen** yeri oynadı —
-    /// punto, pencere boyu, bandın süzülmesi, alternatif ekran. Dikdörtgen
-    /// son çizilen kareden okunuyor ve AppKit'in kendi tetikleri (çerçeve)
-    /// o kareden önce koşabiliyor, yani ölçüt geometrinin kendisi.
-    /// Çağıranlar her hareket ve her tazeleme (`TerminalPane::upload_hover`,
-    /// `show_transfer`); aynı dikdörtgende no-op, yani imleç yeniden
-    /// değerlendirilmiyor.
+    /// Makes the installed cursor rects refresh if they are stale: buttons
+    /// appeared or went away (so the hand does not hang), or the dock's
+    /// **drawn** place moved - point size, window size, the band's gliding, the
+    /// alternate screen. The rectangle is read from the last drawn frame and
+    /// AppKit's own triggers (the frame) can run before that frame, so the
+    /// criterion is the geometry itself. The callers are every motion and every
+    /// refresh (`TerminalPane::upload_hover`, `show_transfer`); on the same
+    /// rectangle it is a no-op, i.e. the cursor is not re-evaluated.
     pub(crate) fn sync_cursor_rects(&self) {
         let fresh = self.upload_button_rects();
         if *self.ivars().cursor_rects.borrow() == fresh {
@@ -1891,23 +1961,23 @@ impl BateriView {
         }
     }
 
-    /// Tık yükleme satırının bir düğmesine mi düştü (037 Karar 7); `true` →
-    /// tık tüketildi. Geometri [`Self::context_column`]'unki.
+    /// Whether the click landed on one of the upload line's buttons (037 Karar
+    /// 7); `true` → the click was consumed. The geometry is [`Self::context_column`]'s.
     fn upload_control(&self, event: &NSEvent) -> bool {
         self.context_column(event.locationInWindow())
             .zip(self.pane())
             .is_some_and(|((col, context), pane)| pane.upload_click(col, context))
     }
 
-    /// Farenin **şimdiki** yeri bağlam satırında ([`Self::context_column`]):
-    /// olaysız soru — satır farenin altında değiştiğinde (tazeleme, liste
-    /// kapandı, pencere key oldu) hover yeniden hesaplansın.
+    /// The mouse's **current** place on the context line ([`Self::context_column`]):
+    /// an eventless question - so the hover is recomputed when the line changes
+    /// under the mouse (refresh, the list closed, the window became key).
     pub(crate) fn pointer_context_column(&self) -> Option<(u16, u16)> {
         self.context_column(self.window()?.mouseLocationOutsideOfEventStream())
     }
 
-    /// Farenin altındaki yükleme düğmesi (037 phase-6): pencere değişimi
-    /// yalnız düğme değişince kare istiyor ve imleci çeviriyor
+    /// The upload button under the mouse (037 phase-6): a window change asks
+    /// for a frame only when the button changes and turns the cursor
     /// (`TerminalPane::upload_hover`).
     fn upload_hover(&self, event: &NSEvent) {
         if let Some(pane) = self.pane() {
@@ -1915,18 +1985,20 @@ impl BateriView {
         }
     }
 
-    /// Tekerlek dock'un giriş bloğunun üstündeyse onu dock'un dikey
-    /// penceresine verir (032 phase-4); `true` → olay tüketildi. Dock taşmıyorsa
-    /// (`Session::dock_scroll` `false`) olay ızgaranın, bugünkü gibi.
+    /// If the wheel is above the dock's input block it gives it to the dock's
+    /// vertical window (032 phase-4); `true` → the event was consumed. If the
+    /// dock does not overflow (`Session::dock_scroll` `false`) the event is the
+    /// grid's, as today.
     fn dock_wheel(&self, event: &NSEvent, session: &Session, lines: i32) -> bool {
         self.window_point_dock(event.locationInWindow(), OutOfGrid::Reject)
             .is_some()
             && session.dock_scroll(lines)
     }
 
-    /// Nokta dock'un giriş bloğunun neresinde: üstündeyse `1` (pencere geriye
-    /// kaysın), altındaysa `-1`, içindeyse ya da dock yoksa `0` —
-    /// `Session::dock_scroll`'un yönü. Geometri [`Self::window_point_dock`]'unki.
+    /// Where the point is relative to the dock's input block: `1` if above (the
+    /// window should scroll backward), `-1` if below, `0` if inside or there is
+    /// no dock - `Session::dock_scroll`'s direction. The geometry is
+    /// [`Self::window_point_dock`]'s.
     fn dock_edge(&self, in_window: NSPoint) -> i32 {
         let Some((metrics, _)) = self.ivars().metrics.get() else {
             return 0;
@@ -1949,27 +2021,29 @@ impl BateriView {
         }
     }
 
-    /// Çizilen karenin doldurma bandının boyu — orijinle **aynı gövdeden**
-    /// ([`bt_gpu::Origin`]), yani ikisi aynı kareye ait. Link yoksa sıfır:
-    /// band da çizim de yok.
+    /// The drawn frame's fill band length - from the **same body** as the
+    /// origin ([`bt_gpu::Origin`]), so the two belong to the same frame. Zero if
+    /// there is no link: no band and no drawing.
     fn fill_rows(&self) -> u16 {
         self.ivars().origin.get().map_or(0, Origin::fill_rows)
     }
 
-    /// Pencere kaydı; basılı bir sürükleme varsa seçimin ucunu farenin **yeni**
-    /// altındaki hücreye taşır — fare kıpırdamadı ama altındaki içerik değişti.
-    /// Tuşu basılı tutup geçmişe inmek (tekerlek ya da Shift+PgUp) seçimi oraya
-    /// uzatır; çapa `bt-core`'da grid mutlağında, kaymaz. İki tetikleyici **tek**
-    /// yoldan geçiyor ki aynı jest iki ayrı davranış göstermesin.
+    /// A window scroll; if there is a held drag it moves the selection's end to
+    /// the cell **now** under the mouse - the mouse did not move but the content
+    /// under it changed. Going down into the scrollback with the button held
+    /// (wheel or Shift+PgUp) extends the selection there; the anchor is in
+    /// `bt-core` at the grid's absolute position, it does not slide. The two
+    /// triggers pass through a **single** path so that the same gesture does not
+    /// show two different behaviours.
     ///
-    /// Fare konumu olaydan değil pencereden okunuyor
-    /// (`mouseLocationOutsideOfEventStream`): tuş olayının konumu yok.
+    /// The mouse position is read from the window, not the event
+    /// (`mouseLocationOutsideOfEventStream`): a key event has no position.
     ///
-    /// `dragging` tek başına yetmez: `mouseUp:` bu view'a hiç varmazsa
-    /// (sürükleme ortasında bir modal, sistem jesti) bayrak bayat `true` kalır
-    /// ve tuşsuz her kaydırma eski seçimi sessizce uzatırdı — sonraki Cmd-C onu
-    /// kopyalar. Tuşun **gerçekten** basılı olduğu sistemden soruluyor; değilse
-    /// bayat bayrak burada iner.
+    /// `dragging` alone is not enough: if `mouseUp:` never reaches this view (a
+    /// modal in the middle of a drag, a system gesture) the flag stays stale
+    /// `true` and every buttonless scroll would silently extend the old
+    /// selection - the next Cmd-C copies it. Whether the button is **really**
+    /// held is asked of the system; if not, the stale flag is lowered here.
     fn follow_pointer(&self, session: &Session) {
         if !self.ivars().gesture.get().dragging() {
             return;
@@ -1981,8 +2055,8 @@ impl BateriView {
         let Some(window) = self.window() else {
             return;
         };
-        // `None` gelirse uç **taşınmıyor**: fare doldurma bandının üstüne
-        // çıktıysa seçim son geçerli hücresinde kalır, 0. satıra fırlamaz.
+        // If `None` comes the end is **not moved**: if the mouse went above the
+        // fill band the selection stays at its last valid cell, it does not jump to row 0.
         let fill_rows = self.fill_rows();
         if let Some(cell) = self.window_point_cell(
             window.mouseLocationOutsideOfEventStream(),
@@ -1993,10 +2067,10 @@ impl BateriView {
     }
 }
 
-/// Bağlam satırının hücre bandı, fiziksel piksel ve view'ın (çevrilmiş)
-/// uzayında: `[üst, alt)`. `top`/`rows` çizilen karenin dock'u
-/// (`Origin::dock`). Bant dolgunun ta kendisi (`Frame::dock_button_draws`);
-/// üstündeki boşluk ve altındaki nefes payı dolgunun dışında.
+/// The context line's cell band, in physical pixels and in the view's
+/// (flipped) space: `[top, bottom)`. `top`/`rows` are the drawn frame's dock
+/// (`Origin::dock`). The band is the fill itself (`Frame::dock_button_draws`);
+/// the gap above it and the breathing padding below it are outside the fill.
 fn context_band_px(metrics: CellMetrics, top: f32, rows: u16) -> (f64, f64) {
     let band_top = f64::from(top)
         + f64::from(metrics.cell_px().1) * f64::from(rows)
@@ -2004,23 +2078,23 @@ fn context_band_px(metrics: CellMetrics, top: f32, rows: u16) -> (f64, f64) {
     (band_top, band_top + f64::from(metrics.cell_px().1))
 }
 
-/// Fiziksel piksel noktası → bağlam satırında dock-yerel sütun; bandın ya da
-/// sol payın dışındaysa `None`. Sütun adımı küçük sınıfın ilerlemesi.
-/// [`context_span_px`]'in tersi: tık, hover ve el imleci bu ikisini okuyor,
-/// yani sütun ile dikdörtgen ayrışamıyor.
+/// Physical-pixel point → dock-local column on the context line; `None` if
+/// outside the band or the left padding. The column pitch is the small
+/// class's advance. The inverse of [`context_span_px`]: click, hover and the
+/// hand cursor read these two, so the column and the rectangle cannot diverge.
 fn context_col_at(metrics: CellMetrics, top: f32, rows: u16, (x, y): (f64, f64)) -> Option<u16> {
     let (band_top, band_bottom) = context_band_px(metrics, top, rows);
     let x = x - f64::from(metrics.gutter_px());
     if y < band_top || y >= band_bottom || x < 0.0 {
         return None;
     }
-    // audit: `x ≥ 0` ve pencere genişliği `u16` sütuna sığıyor; taşan
-    // değer yalnız hiçbir düğmeye düşmeyen bir sütun olur.
+    // audit: `x ≥ 0` and the window width fits a `u16` column; an overflowing
+    // value only becomes a column that falls on no button.
     Some((x / f64::from(metrics.context_cell_px())).floor() as u16)
 }
 
-/// Dock-yerel `[start, end)` sütun aralığının dikdörtgeni, fiziksel piksel:
-/// `(x, y, en, boy)` — [`context_col_at`]'in tersi.
+/// The rectangle of the dock-local `[start, end)` column range, physical
+/// pixels: `(x, y, width, height)` - the inverse of [`context_col_at`].
 fn context_span_px(
     metrics: CellMetrics,
     top: f32,
@@ -2040,47 +2114,55 @@ mod tests {
     use super::*;
     use objc2_foundation::ns_string;
 
-    /// Sahnelerin ızgara ölçüsü; pay **argüman**, çünkü sorulan iki ayrı şey
-    /// var: hücre aritmetiği (pay sıfır) ve payın kendisi.
+    /// The scenes' grid measure; the padding is an **argument**, because two
+    /// separate things are asked: the cell arithmetic (padding zero) and the padding itself.
     fn grid(gutter: u16) -> CellMetrics {
-        CellMetrics::new(9, 18, 9, gutter, 1).expect("sıfır olmayan hücre")
+        CellMetrics::new(9, 18, 9, gutter, 1).expect("non-zero cell")
     }
 
     #[test]
     fn the_button_rect_and_the_pointer_column_read_one_geometry() {
-        // Düğmenin el imleci (cursor rect) ile tık/hover'ın sütunu aynı
-        // bandı ve aynı adımı okumalı: ayrışsalar el düğmenin yanında çıkar.
-        // İki dock biçimi: giriş satırlı (satır arası boşluk) ve uzak oturum
-        // (giriş satırı sıfır, 036).
-        let metrics = CellMetrics::new(16, 33, 13, 8, 2).expect("hücre");
+        // The button's hand cursor (cursor rect) and the click/hover's column
+        // must read the same band and the same pitch: were they to diverge the
+        // hand would appear beside the button. Two dock shapes: with an input
+        // line (a gap between lines) and a remote session (input line zero, 036).
+        let metrics = CellMetrics::new(16, 33, 13, 8, 2).expect("cell");
         for (top, rows) in [(500.0_f32, 2_u16), (620.0, 0)] {
             let (start, end) = (40_u16, 52_u16);
             let (x, y, width, height) = context_span_px(metrics, top, rows, start, end);
             assert_eq!(height, f64::from(metrics.cell_px().1));
             let at = |px: f64, py: f64| context_col_at(metrics, top, rows, (px, py));
             let mid = y + height / 2.0;
-            assert_eq!(at(x + 0.01, mid), Some(start), "sol kenar ilk sütun");
+            assert_eq!(
+                at(x + 0.01, mid),
+                Some(start),
+                "left edge is the first column"
+            );
             assert_eq!(
                 at(x + width - 0.01, mid),
                 Some(end - 1),
-                "sağ kenarın içi son sütun"
+                "inside the right edge is the last column"
             );
-            assert_eq!(at(x + width, mid), Some(end), "sağ kenar aralığın dışı");
-            assert_eq!(at(x + 0.01, y), Some(start), "bandın tepesi içeride");
-            assert_eq!(at(x + 0.01, y - 0.01), None, "bandın üstü dışarıda");
-            assert_eq!(at(x + 0.01, y + height), None, "bandın altı dışarıda");
+            assert_eq!(
+                at(x + width, mid),
+                Some(end),
+                "right edge is outside the range"
+            );
+            assert_eq!(at(x + 0.01, y), Some(start), "the band's top is inside");
+            assert_eq!(at(x + 0.01, y - 0.01), None, "above the band is outside");
+            assert_eq!(at(x + 0.01, y + height), None, "below the band is outside");
             assert_eq!(
                 at(f64::from(metrics.gutter_px()) - 0.01, mid),
                 None,
-                "sol pay dışarıda"
+                "left padding is outside"
             );
         }
     }
 
     #[test]
     fn the_search_panel_covers_whole_rows_and_the_columns_under_it() {
-        // 9×18 hücre, 4 px pay. Panelin altı 40 px: 0. ve 1. satır (0…36)
-        // ve 2. satırın yarısı örtülü, ilk tam görünür satır 3.
+        // 9×18 cell, 4 px padding. The panel's bottom is 40 px: rows 0 and 1
+        // (0…36) and half of row 2 are covered, the first fully visible row is 3.
         let cover = cover_of(40.0, 4.0 + 9.0 * 30.5, 0.0, grid(4));
         assert_eq!(
             cover,
@@ -2089,22 +2171,22 @@ mod tests {
                 from_col: 30
             }
         );
-        // Satır sınırında biten panel o satırı örtmüyor.
+        // A panel ending at a row boundary does not cover that row.
         assert_eq!(cover_of(36.0, 4.0, 0.0, grid(4)).first_row, 2);
-        // Orijin aşağıda (tabana yaslı içerik): panel ızgaraya hiç değmiyor,
-        // bandın satırları açıkta — negatif.
+        // The origin is below (bottom-stuck content): the panel does not touch
+        // the grid at all, the band's rows are in the open - negative.
         assert_eq!(cover_of(40.0, 4.0, 76.0, grid(4)).first_row, -2);
-        // Payın içindeki sol kenar 0. sütuna kırpılıyor.
+        // The left edge inside the padding is clamped to column 0.
         assert_eq!(cover_of(40.0, 0.0, 0.0, grid(4)).from_col, 0);
     }
 
-    /// Testlerin ortak sahnesi: 100×33 grid, 9×18 hücre, @2x.
-    /// View 450×297 nokta eder.
+    /// The tests' common scene: 100×33 grid, 9×18 cell, @2x.
+    /// The view is 450×297 points.
     ///
-    /// **Sol pay bu sahnede sıfır** ve bu bilinçli: aşağıdaki sınamaların
-    /// sorduğu şey hücre ile yarısının aritmetiği, ve beklenen x değerlerini
-    /// pay kadar kaydırmak o gerekçeleri okunmaz hâle getirirdi. Payın kendi
-    /// sınaması `the_gutter_shifts_the_grid_origin`.
+    /// **The left padding is zero in this scene** and that is deliberate: what
+    /// the tests below ask is the arithmetic of the cell and its half, and
+    /// shifting the expected x values by the padding would make their
+    /// rationales unreadable. The padding's own test is `the_gutter_shifts_the_grid_origin`.
     fn scene_point(view_px: (f64, f64)) -> Option<SelectionPoint> {
         point_to_cell(
             view_px,
@@ -2117,8 +2199,8 @@ mod tests {
         )
     }
 
-    /// Sahnenin hücresi ve yarısı ayrı okunuyor: hücre testleri hücreye, yarı
-    /// testleri yarıya baksın.
+    /// The scene's cell and half are read separately: let the cell tests look
+    /// at the cell, the half tests at the half.
     fn scene(view_px: (f64, f64)) -> Option<(u16, u16)> {
         scene_point(view_px).map(|point| (point.col, point.row))
     }
@@ -2129,18 +2211,18 @@ mod tests {
 
     #[test]
     fn view_origin_maps_to_top_left_cell() {
-        // View `isFlipped`: sol üst köşe (0,0) hücresi. Y alttan gelseydi
-        // satır 32'ye inerdi.
+        // The view is `isFlipped`: the top-left corner is cell (0,0). Had y come
+        // from the bottom it would have landed on row 32.
         assert_eq!(scene((0.0, 0.0)), Some((0, 0)));
     }
 
     #[test]
     fn cell_middle_stays_in_same_cell() {
-        // Hücrenin ortası aynı hücreyi verir — kenar değil taban yuvarlama.
-        // Hücre view'da 4.5×9 nokta eder; (2,1) hücresinin ortası x = 2.5,
-        // y = 1.5 hücre.
+        // The middle of a cell gives the same cell - floor rounding, not edge
+        // rounding. The cell is 4.5×9 points in the view; the middle of cell
+        // (2,1) is x = 2.5, y = 1.5 cells.
         assert_eq!(scene((2.5 * 4.5, 1.5 * 9.0)), Some((2, 1)));
-        // Hücre ile yarı **aynı** çeviriden çıkıyor, ayrı sorulmuyor.
+        // The cell and the half come out of the **same** translation, they are not asked separately.
         assert_eq!(
             scene_point((11.0, 13.5)),
             Some(SelectionPoint {
@@ -2153,14 +2235,14 @@ mod tests {
 
     #[test]
     fn halves_split_the_cell_at_its_middle() {
-        // (2,1) hücresi view'da x ∈ [9.0, 13.5), y ∈ [9.0, 18.0) nokta; yarısı
-        // fiziksel x'te cell_w/2 = 4.5 piksel, yani view'da 2.25 nokta. Sol
-        // yarı 9.0–11.25, sağ yarı 11.25–13.5.
+        // Cell (2,1) is x ∈ [9.0, 13.5), y ∈ [9.0, 18.0) points in the view;
+        // its half is cell_w/2 = 4.5 pixels in physical x, i.e. 2.25 points in
+        // the view. Left half 9.0-11.25, right half 11.25-13.5.
         assert_eq!(scene_half((9.0, 9.0)), Some(CellHalf::Left));
         assert_eq!(scene_half((11.0, 9.0)), Some(CellHalf::Left));
         assert_eq!(scene_half((11.5, 9.0)), Some(CellHalf::Right));
         assert_eq!(scene_half((13.4, 9.0)), Some(CellHalf::Right));
-        // Yarı hücreyi kaydırmıyor: dördü de (2,1) hücresinde.
+        // The half does not shift the cell: all four are in cell (2,1).
         for x in [9.0, 11.0, 11.5, 13.4] {
             assert_eq!(scene((x, 9.0)), Some((2, 1)), "x = {x}");
         }
@@ -2168,33 +2250,35 @@ mod tests {
 
     #[test]
     fn the_exact_middle_belongs_to_the_right_half() {
-        // Orta nokta **yazılı** bir karar: yarılar `[0, w/2)` ve `[w/2, w)`
-        // diye bölüşüyor, yani tam sınır sağ yarıya düşer (view'da
-        // 9.0 + 2.25 = 11.25 nokta); bir tık solu hâlâ sol yarıdır. Sağ yarı
-        // başlangıç ucunda hücreyi dışarıda, bitiş ucunda içeride bırakır.
+        // The midpoint is a **written** decision: the halves partition as
+        // `[0, w/2)` and `[w/2, w)`, so the exact boundary falls in the right
+        // half (9.0 + 2.25 = 11.25 points in the view); a tick to its left is
+        // still the left half. The right half leaves the cell outside at the
+        // start end and inside at the end end.
         assert_eq!(scene_half((11.25, 9.0)), Some(CellHalf::Right));
         assert_eq!(scene_half((11.25 - 0.25, 9.0)), Some(CellHalf::Left));
     }
 
     #[test]
     fn reject_keeps_the_report_inside_the_grid() {
-        // Sahne 100×33 hücre, 9×18 piksel @2x → view 450×297 nokta.
-        // `Clamp` kenar dışını yapıştırıyor (seçimin kuralı), `Reject`
-        // reddediyor (rapor **başlatan** olayın kuralı): başlık çubuğundan,
-        // sol paydan ya da dock bandından gelen bir koordinat uygulamaya
-        // ızgaranın kenar hücresini bildirirdi ve işaretçi orada değil.
+        // The scene is 100×33 cells, 9×18 pixels @2x → the view is 450×297 points.
+        // `Clamp` sticks what is beyond the edge (the selection's rule),
+        // `Reject` rejects it (the rule of the event that **starts** a report):
+        // a coordinate coming from the title bar, the left padding or the dock
+        // band would report the grid's edge cell to the application and the
+        // pointer is not there.
         let reject =
             |view_px| point_to_cell(view_px, grid(0), 0.0, OutOfGrid::Reject, 2.0, 100, 33);
-        // İçeride: iki kapı da aynı hücreyi veriyor.
+        // Inside: both gates give the same cell.
         assert_eq!(reject((5.0, 9.0)), scene_point((5.0, 9.0)));
-        // Son hücrenin içi hâlâ geçerli (449.5 nokta < 450).
+        // The last cell's interior is still valid (449.5 points < 450).
         assert!(reject((449.0, 296.0)).is_some());
-        // Üstte (başlık çubuğu tarafı) ve solda (pay) ret; `Clamp` yapıştırır.
+        // On the top (the title bar side) and left (padding) rejection; `Clamp` sticks.
         assert_eq!(reject((5.0, -1.0)), None);
         assert_eq!(reject((-1.0, 9.0)), None);
         assert_eq!(scene((5.0, -1.0)), Some((1, 0)));
         assert_eq!(scene((-1.0, 9.0)), Some((0, 1)));
-        // Altta (dock bandı) ve sağda ret; `Clamp` son satıra/sütuna yapıştırır.
+        // At the bottom (the dock band) and right rejection; `Clamp` sticks to the last row/column.
         assert_eq!(reject((5.0, 297.0)), None);
         assert_eq!(reject((450.0, 9.0)), None);
         assert_eq!(scene((5.0, 297.0)), Some((1, 32)));
@@ -2203,51 +2287,54 @@ mod tests {
 
     #[test]
     fn reject_measures_from_the_origin_like_clamp_does() {
-        // Öteleme ızgarayı aşağı itiyor: üstte kalan boşluk ızgaranın
-        // **dışı**, yani rapor başlatan olay orada da reddediliyor. Kapı
-        // ötelemeyi `Clamp` ile aynı yerden okuyor (`origin_px`), yoksa
-        // tabana yaslı pencerede bütün üst yarı geçerli sayılırdı.
+        // The offset pushes the grid down: the blank left above is **outside**
+        // the grid, so the event that starts a report is rejected there too. The
+        // gate reads the offset from the same place as `Clamp` (`origin_px`),
+        // otherwise in a bottom-stuck window the whole upper half would count as valid.
         let origin_px = 100.0;
         let at =
             |view_px, outside| point_to_cell(view_px, grid(0), origin_px, outside, 2.0, 100, 33);
-        // 49 nokta × 2 = 98 piksel < 100: orijinin üstü.
+        // 49 points × 2 = 98 pixels < 100: above the origin.
         assert_eq!(at((5.0, 49.0), OutOfGrid::Reject), None);
-        // Doldurma yokken `Clamp` orayı 0. satıra yapıştırmayı sürdürüyor.
+        // Without fill `Clamp` keeps sticking that area to row 0.
         assert_eq!(
             at((5.0, 49.0), OutOfGrid::Clamp { fill_rows: 0 }).map(|p| p.row),
             Some(0)
         );
-        // Orijinin hemen altı geçerli.
+        // Right below the origin is valid.
         assert_eq!(at((51.0, 51.0), OutOfGrid::Reject).map(|p| p.row), Some(0));
     }
 
     #[test]
     fn dragging_left_of_the_grid_clamps_to_the_left_half() {
-        // Grid'in solundaki x 0. hücrenin **sol** yarısına yapışır: `as u16`
-        // doyuruyor, `%` bölünenin işaretini koruyor (negatif artık < w/2).
-        // Artık pozitife çevrilseydi (`rem_euclid`) sağ yarıya düşer ve sol
-        // kenardan başlayan sürükleme 0. hücreyi dışarıda bırakırdı —
-        // kullanıcı satır başından seçmek isterken ilk harf eksik gelirdi.
+        // An x left of the grid sticks to the **left** half of cell 0: `as u16`
+        // saturates, `%` keeps the dividend's sign (negative remainder < w/2).
+        // Had the remainder been turned positive (`rem_euclid`) it would land in
+        // the right half and a drag starting at the left edge would leave cell 0
+        // outside - the first letter would come out missing when the user
+        // wanted to select from the line start.
         //
-        // Nokta **seçilmiş**: view'da -1 nokta, @2x'te -2 piksel; `-2 % 9 = -2`
-        // (sol), `(-2).rem_euclid(9) = 7` (sağ). İki kural her
-        // `[-(k+½)w, -kw)` aralığında ayrışıyor, geri kalanında aynı yarıyı
-        // veriyor — -3 nokta (-6 piksel, artık 3) ikisinde de sol yarıya düşer
-        // ve bu sınamayı bekçi olmaktan çıkarırdı.
+        // The point is **chosen**: -1 point in the view, -2 pixels @2x; `-2 % 9
+        // = -2` (left), `(-2).rem_euclid(9) = 7` (right). The two rules diverge
+        // on every `[-(k+½)w, -kw)` interval and give the same half in the
+        // rest - -3 points (-6 pixels, remainder 3) falls to the left half in
+        // both and would stop this test being a guard.
         assert_eq!(scene((-1.0, 9.0)), Some((0, 1)));
         assert_eq!(scene_half((-1.0, 9.0)), Some(CellHalf::Left));
     }
 
     #[test]
     fn points_past_the_grid_stick_to_its_edge() {
-        // Sağ ve alt kenar dışı **yutulmaz**, son sütuna/satıra yapışır. Yarı
-        // artık seçimi belirlediği için yutmak bir kayıp üretiyordu: pencere
-        // genişliği hücrenin tam katı değilse grid'in sağında kullanılmayan bir
-        // şerit kalıyor (`split_into_grid` sütunu aşağı yuvarlıyor) ve satır
-        // sonuna doğru sürükleyen fare
-        // oraya geçince olay düşer, seçim grid'deki son olayda kalırdı. O olay
-        // son sütunun sol yarısındaysa son harf kopyadan eksik çıkardı.
-        // Sağa taşan nokta son sütunun **sağ** yarısıdır: hücreyi katar.
+        // The right and bottom beyond-the-edge is **not swallowed**, it sticks
+        // to the last column/row. Since the half now decides the selection,
+        // swallowing produced a loss: if the window width is not an exact
+        // multiple of the cell an unused strip remains at the grid's right
+        // (`split_into_grid` rounds the column count down) and when the mouse
+        // dragged toward the line end passed onto it the event would drop and the
+        // selection would stay at the last event in the grid. If that event was
+        // in the left half of the last column the last letter would be missing
+        // from the copy. A point overflowing to the right is the **right** half
+        // of the last column: it includes the cell.
         let last = |col, row| {
             Some(SelectionPoint {
                 col,
@@ -2256,18 +2343,18 @@ mod tests {
             })
         };
         assert_eq!(scene_point((900.0, 100.0)), last(99, 11));
-        // Pencere grid'den büyük olabilir (kenar boşluğu): view 500×400 ama
-        // grid 450×297.
+        // The window can be larger than the grid (margin): the view is 500×400
+        // but the grid 450×297.
         assert_eq!(scene_point((470.0, 100.0)), last(99, 11));
-        // Alt taşma yalnız satırı kırpar; sütun ve yarı x'ten gelir.
+        // A bottom overflow only clips the row; the column and half come from x.
         assert_eq!(scene((100.0, 600.0)), Some((22, 32)));
         assert_eq!(scene((100.0, 350.0)), Some((22, 32)));
     }
 
     #[test]
     fn the_gutter_shifts_the_grid_origin() {
-        // Sahne: 9×18 hücre, @2x, **8 fiziksel piksel** pay. View'da pay
-        // 4 nokta, hücre 4.5 nokta eder.
+        // The scene: 9×18 cell, @2x, **8 physical pixels** of padding. In the
+        // view the padding is 4 points, the cell 4.5 points.
         let at = |x: f64| {
             point_to_cell(
                 (x, 9.0),
@@ -2281,28 +2368,38 @@ mod tests {
         };
         let cell = |point: Option<SelectionPoint>| point.map(|p| (p.col, p.half));
 
-        // Payın **içi** ilk sütuna kırpılır ve sol yarıda kalır: seçim payda
-        // başlamaz. Ayrı bir kırpma dalı yok — çıkarmadan sonra x negatif
-        // ve `as u16` onu sıfıra doyuruyor, `%` de negatif artığı sol yarıya
-        // yazıyor (grid'in solundaki noktayla aynı yol).
-        assert_eq!(cell(at(0.0)), Some((0, CellHalf::Left)), "payın sol ucu");
-        assert_eq!(cell(at(2.0)), Some((0, CellHalf::Left)), "payın ortası");
+        // The **inside** of the padding is clamped to the first column and
+        // stays in the left half: the selection does not start in the padding.
+        // There is no separate clamping arm - after the subtraction x is
+        // negative and `as u16` saturates it to zero, and `%` writes the
+        // negative remainder to the left half (the same path as a point left of the grid).
+        assert_eq!(
+            cell(at(0.0)),
+            Some((0, CellHalf::Left)),
+            "padding's left end"
+        );
+        assert_eq!(cell(at(2.0)), Some((0, CellHalf::Left)), "padding's middle");
 
-        // Payın solundaki nokta da aynı yere yapışır: grid'in solundan
-        // başlayan sürükleme ilk harfi seçime katmalı.
-        assert_eq!(cell(at(-1.0)), Some((0, CellHalf::Left)), "payın solu");
+        // A point left of the padding sticks to the same place: a drag starting
+        // at the grid's left must include the first letter in the selection.
+        assert_eq!(
+            cell(at(-1.0)),
+            Some((0, CellHalf::Left)),
+            "left of the padding"
+        );
 
-        // Payın bittiği yer 0. sütunun **başı**: metnin ilk karakterine
-        // tıklamak ilk sütunu verir.
-        assert_eq!(cell(at(4.0)), Some((0, CellHalf::Left)), "payın bitişi");
-        assert_eq!(cell(at(8.5)), Some((1, CellHalf::Left)), "bir hücre sonra");
+        // Where the padding ends is the **start** of column 0: clicking the
+        // text's first character gives the first column.
+        assert_eq!(cell(at(4.0)), Some((0, CellHalf::Left)), "padding's end");
+        assert_eq!(cell(at(8.5)), Some((1, CellHalf::Left)), "one cell later");
 
-        // **Kaymayı gören iki nokta.** Pay hücre genişliğinden dar olduğu
-        // için çoğu x paylı da paysız da aynı sütuna düşüyor ve yalnız yarısı
-        // değişiyor; sütunun gerçekten oynadığı yerler bunlar. Paysız sahne
-        // aynı soruyu sorup farklı cevap veriyor — sınamayı ayıran şey bu,
-        // yoksa pay hiç uygulanmasa da geçerdi.
-        assert_eq!(cell(at(5.0)), Some((0, CellHalf::Left)), "paylı");
+        // **Two points that see the shift.** Since the padding is narrower than
+        // a cell width most x values fall in the same column with or without
+        // the padding and only the half changes; these are the places where the
+        // column really moves. The paddingless scene asks the same question and
+        // gives a different answer - that is what makes the test discriminating,
+        // otherwise it would pass even if the padding were never applied.
+        assert_eq!(cell(at(5.0)), Some((0, CellHalf::Left)), "with padding");
         assert_eq!(
             point_to_cell(
                 (5.0, 9.0),
@@ -2315,15 +2412,21 @@ mod tests {
             )
             .map(|p| (p.col, p.half)),
             Some((1, CellHalf::Left)),
-            "paysız aynı nokta bir sonraki sütun"
+            "without padding the same point is the next column"
         );
 
-        // Sağ kenar: pay sütunları sağa ittiği için grid'in sağ ucu da pay
-        // kadar geç bitiyor. Paysız sahnede aynı nokta grid'i **taşar** ve
-        // son sütunun sağ yarısına kırpılır; paylı sahnede hâlâ 99. sütunun
-        // içinde. Payın `cols` hesabıyla aynı kaynaktan geldiğinin kanıtı da
-        // bu: ikisi ayrışsaydı son sütun ya erken biterdi ya taşardı.
-        assert_eq!(cell(at(451.5)), Some((99, CellHalf::Left)), "paylı sağ uç");
+        // Right edge: since the padding pushes the columns right, the grid's
+        // right end finishes later by the padding too. In the paddingless scene
+        // the same point **overflows** the grid and is clamped to the last
+        // column's right half; in the padded scene it is still inside column 99.
+        // This is also the proof that the padding comes from the same source as
+        // the `cols` computation: had they diverged the last column would
+        // either end early or overflow.
+        assert_eq!(
+            cell(at(451.5)),
+            Some((99, CellHalf::Left)),
+            "padded right end"
+        );
         assert_eq!(
             point_to_cell(
                 (451.5, 9.0),
@@ -2336,26 +2439,27 @@ mod tests {
             )
             .map(|p| (p.col, p.half)),
             Some((99, CellHalf::Right)),
-            "paysız aynı nokta grid'i taşar"
+            "without padding the same point overflows the grid"
         );
     }
 
-    /// Orijinin üstündeki sahnenin ölçüsü: 9×18 hücre, @2x, **180 fiziksel
-    /// piksel** orijin — yani on satırlık bir alan, ardından içerik. View'da
-    /// orijin 90 nokta eder, hücre 9 nokta.
+    /// The scene's measure above the origin: 9×18 cell, @2x, **180 physical
+    /// pixels** of origin - i.e. a ten-row area, then the content. In the view
+    /// the origin is 90 points, the cell 9 points.
     ///
-    /// İki sınama aynı sahneyi iki `fill` ile soruyor: sıfırda alan **boş**
-    /// ve tıklama kırpılır, sıfırdan büyükte alanda **geçmiş** var ve tıklama
-    /// reddedilir.
+    /// Two tests ask the same scene with two `fill`s: at zero the area is
+    /// **blank** and the click is clamped, above zero the area has
+    /// **scrollback** and the click is rejected.
     const ORIGIN_PX: f64 = 180.0;
 
     #[test]
     fn the_origin_shifts_the_grid_down_and_the_blank_area_clamps() {
-        // Payın dikey ikizi ve **`u16` tuzağının asıl yeri**: tabana
-        // yapışmada boş alan üstte, yani pencerenin üst yarısına yapılan
-        // tıklamada fark negatife iniyor. `u16`'da yapılsaydı taşar ve o
-        // tıklama son satırı seçerdi — sürüklemenin başı ekranın dibine
-        // fırlardı. `f64`'te negatif kalıyor ve `as u16` sıfıra doyuruyor.
+        // The padding's vertical twin and **the real home of the `u16` trap**:
+        // with bottom-sticking the blank area is at the top, so on a click on
+        // the window's upper half the difference goes negative. Done in `u16` it
+        // would overflow and that click would select the last row - the drag's
+        // start would leap to the screen's bottom. In `f64` it stays negative
+        // and `as u16` saturates it to zero.
         let at = |y: f64| {
             point_to_cell(
                 (0.0, y),
@@ -2369,22 +2473,23 @@ mod tests {
         };
         let row = |point: Option<SelectionPoint>| point.map(|p| p.row);
 
-        // Boş alanın tamamı 0. satıra yapışır: üst kenar, ortası ve orijinin
-        // bittiği yerin bir öncesi. Ayrı bir kırpma dalı yok — ve kırpma
-        // **kaldırılamaz**: doldurma yokken orası gerçekten boş ve yukarıdan
-        // başlayan sürükleme ilk satırı seçime katmalı.
-        assert_eq!(row(at(0.0)), Some(0), "üst kenar");
-        assert_eq!(row(at(45.0)), Some(0), "boş alanın ortası");
-        assert_eq!(row(at(89.0)), Some(0), "içeriğin bir öncesi");
+        // The whole blank area sticks to row 0: the top edge, its middle and one
+        // before where the origin ends. There is no separate clamping arm - and
+        // the clamping **cannot be removed**: without fill that area is really
+        // blank and a drag starting from above must include the first row in the selection.
+        assert_eq!(row(at(0.0)), Some(0), "top edge");
+        assert_eq!(row(at(45.0)), Some(0), "middle of the blank area");
+        assert_eq!(row(at(89.0)), Some(0), "one before the content");
 
-        // Orijinin bittiği yer 0. satırın **başı**: içeriğin ilk satırına
-        // tıklamak ilk satırı verir, bir sonraki hücre bir sonraki satırı.
-        assert_eq!(row(at(90.0)), Some(0), "içeriğin başı");
-        assert_eq!(row(at(99.0)), Some(1), "bir satır sonra");
+        // Where the origin ends is the **start** of row 0: clicking the
+        // content's first row gives the first row, the next cell the next row.
+        assert_eq!(row(at(90.0)), Some(0), "start of the content");
+        assert_eq!(row(at(99.0)), Some(1), "one row later");
 
-        // **Kaymayı gören nokta:** orijinsiz sahne aynı soruyu sorup farklı
-        // cevap veriyor. Bu satır olmasa orijin hiç uygulanmasa da sınama
-        // geçerdi — payın kendi sınamasındaki ayrımın aynısı.
+        // **The point that sees the shift:** the origin-less scene asks the same
+        // question and gives a different answer. Without this line the test
+        // would pass even if the origin were never applied - the very
+        // distinction of the padding's own test.
         assert_eq!(
             row(point_to_cell(
                 (0.0, 99.0),
@@ -2396,19 +2501,19 @@ mod tests {
                 33
             )),
             Some(11),
-            "orijinsiz aynı nokta on bir satır aşağıda"
+            "without the origin the same point is eleven rows lower"
         );
 
-        // Alt taşma hâlâ son satıra kırpılıyor: orijin alt kenarın kuralını
-        // değiştirmiyor, yalnız başlangıcı iteliyor.
-        assert_eq!(row(at(600.0)), Some(32), "alt taşma");
+        // A bottom overflow is still clamped to the last row: the origin does
+        // not change the bottom edge's rule, it only pushes the start.
+        assert_eq!(row(at(600.0)), Some(32), "bottom overflow");
 
-        // **Kaymanın ortası da meşru bir orijin** (R2.7): fare çizilen değeri
-        // okuyor ve o değer kayma boyunca satır sınırında durmuyor. Burada
-        // yarım hücre (9 fiziksel piksel) eklenmiş: içeriğin ilk satırı artık
-        // yarım hücre aşağıda ve eski sınır bir satır yukarıya düşüyor.
-        // Fonksiyonun tam satır varsayımı yok — olsaydı belirti "kayarken
-        // tıklama bir satır şaşıyor" olurdu.
+        // **The middle of a slide is a legitimate origin too** (R2.7): the mouse
+        // reads the drawn value and that value does not stop at a row boundary
+        // during the slide. Here half a cell (9 physical pixels) is added: the
+        // content's first row is now half a cell lower and the old boundary
+        // falls one row up. The function has no whole-row assumption - had it
+        // had one the symptom would be "a click is a row off while sliding".
         let mid = |y: f64| {
             point_to_cell(
                 (0.0, y),
@@ -2423,24 +2528,21 @@ mod tests {
         assert_eq!(
             row(mid(99.0)),
             Some(0),
-            "kayma ortasında içeriğin ilk satırı"
+            "the content's first row in the middle of a slide"
         );
-        assert_eq!(
-            row(mid(103.5)),
-            Some(1),
-            "yarım hücre sonra bir satır aşağı"
-        );
+        assert_eq!(row(mid(103.5)), Some(1), "half a cell later, one row down");
     }
 
     #[test]
     fn a_click_over_the_filled_area_is_rejected_instead_of_clamped() {
-        // Doldurma gelince orijinin üstü **boş değil**: kullanıcı orada metin
-        // görüyor. Kırpma sürseydi çapa gözün gördüğü satıra değil içeriğin
-        // tepesine düşer, vurgu bambaşka bir yerde belirirdi — seçim
-        // sözleşmesinin ("gözün gördüğü ile panonun verdiği ayrışmıyor")
-        // adıyla yasakladığı şey. Doldurulan satırlar **seçilemez** olduğu
-        // için (satır numaraları negatife açılmadan temsil edilemezler) tek
-        // doğru cevap reddetmek.
+        // When the fill arrives the area above the origin is **not blank**: the
+        // user sees text there. Had the clamping continued the anchor would
+        // land not on the row the eye sees but on the content's top and the
+        // highlight would appear somewhere else entirely - what the selection
+        // contract ("what the eye sees and what the pasteboard gives do not
+        // diverge") forbids by name. Since the filled rows are **not
+        // selectable** (they cannot be represented without opening the row
+        // numbers to negative) the only right answer is to reject.
         let at = |y: f64| {
             point_to_cell(
                 (0.0, y),
@@ -2454,25 +2556,30 @@ mod tests {
         };
         let row = |point: Option<SelectionPoint>| point.map(|p| p.row);
 
-        // Boş alanın kırpıldığı **üç noktanın aynısı**, bu kez `None`: iki
-        // sınamayı ayıran tek girdi `fill`.
-        assert_eq!(at(0.0), None, "üst kenar");
-        assert_eq!(at(45.0), None, "bandın ortası");
-        assert_eq!(at(89.0), None, "içeriğin bir öncesi");
+        // The **same three points** at which the blank area was clamped, this
+        // time `None`: the only input separating the two tests is `fill`.
+        assert_eq!(at(0.0), None, "top edge");
+        assert_eq!(at(45.0), None, "middle of the band");
+        assert_eq!(at(89.0), None, "one before the content");
 
-        // Sürükleme tam burada duruyor: iki çağrı yeri de (`mouseDragged:` ve
-        // `follow_pointer`) `if let Some` ile giriyor, yani `None` gelen
-        // olayda seçimin ucu **son geçerli hücresinde** kalıyor.
+        // The drag stops exactly here: both call sites (`mouseDragged:` and
+        // `follow_pointer`) enter with `if let Some`, so on an event that comes
+        // as `None` the selection's end stays at its **last valid cell**.
 
-        // İçeriğin kendisi el değmeden geçiyor — ret yalnız orijinin üstüne.
-        assert_eq!(row(at(90.0)), Some(0), "içeriğin başı");
-        assert_eq!(row(at(99.0)), Some(1), "bir satır sonra");
-        assert_eq!(row(at(600.0)), Some(32), "alt taşma hâlâ son satır");
+        // The content itself passes untouched - the rejection only for above the origin.
+        assert_eq!(row(at(90.0)), Some(0), "start of the content");
+        assert_eq!(row(at(99.0)), Some(1), "one row later");
+        assert_eq!(
+            row(at(600.0)),
+            Some(32),
+            "bottom overflow is still the last row"
+        );
 
-        // **Band boşluğun tamamını kaplamasa da** ret orijinin üstünün
-        // tamamına: `fill = min(gap, taze satır)` ve üstte hâlâ boşluk
-        // kalabilir. İki bölgeyi ayırmak farenin `fill`'i bir de piksele
-        // çevirmesini isterdi; reddin yönü güvenli, kırpmanınki değil.
+        // **Even if the band does not cover the whole gap** the rejection is for
+        // all of above the origin: `fill = min(gap, fresh rows)` and a gap may
+        // still remain above. Separating the two regions would need the mouse to
+        // turn `fill` into pixels too; the rejection's direction is safe, the
+        // clamping's is not.
         let thin = |y: f64| {
             point_to_cell(
                 (0.0, y),
@@ -2484,15 +2591,15 @@ mod tests {
                 33,
             )
         };
-        assert_eq!(thin(0.0), None, "bandın üstünde kalan boşluk");
-        assert_eq!(thin(89.0), None, "bandın içi");
+        assert_eq!(thin(0.0), None, "the gap left above the band");
+        assert_eq!(thin(89.0), None, "inside the band");
     }
 
-    /// **Dolu ızgara bant kadar yukarıda** (032): dock üç giriş satırına
-    /// büyüyünce çizilen orijin negatife iniyor (iki satır, `-36` px) ve
-    /// ızgaranın tepesi pencerenin dışında. Görünen ilk piksel 2. satır ve
-    /// tıklama orayı seçmeli — orijini yok sayan bir eşleme 0. satırı, yani
-    /// ekranda olmayan bir satırı seçerdi. @1x, paysız.
+    /// **The full grid is a band higher up** (032): when the dock grows to
+    /// three input rows the drawn origin goes negative (two rows, `-36` px) and
+    /// the grid's top is outside the window. The first visible pixel is row 2
+    /// and a click must select that - a mapping that ignored the origin would
+    /// select row 0, i.e. a row that is not on screen. @1x, paddingless.
     #[test]
     fn a_negative_origin_maps_the_clipped_grid_to_the_visible_row() {
         let press = |y: f64| {
@@ -2502,16 +2609,15 @@ mod tests {
         assert_eq!(press(0.0), Some(2));
         assert_eq!(press(17.0), Some(2));
         assert_eq!(press(18.0), Some(3));
-        // Izgaranın son satırı da iki satır yukarıda: 28. satır 468..486.
+        // The grid's last row is also two rows up: row 28 is 468..486.
         assert_eq!(press(470.0), Some(28));
     }
 
-    /// Dock'un giriş satırı `bt-gpu`'nun çizdiği yerde: bandın dibe yaslı
-    /// tepesinin nefes payı kadar altı. Basış yalnız o satırda bir nokta
-    /// veriyor — saç çizgisi, pay ve bağlam satırı reddediliyor — sürükleme
-    /// ise satırın içine kırpılıyor. @1x, 9×18 hücre, pay 7: band
-    /// `2·18 + 2·7 + 14 = 64` px, yani 400 px'lik view'da giriş satırı
-    /// 343..361.
+    /// The dock's input line is where `bt-gpu` draws it: below the bottom-stuck
+    /// band's top by the breathing padding. A press yields a point only in that
+    /// row - the hairline, the padding and the context line are rejected - while
+    /// a drag is clamped into the row. @1x, 9×18 cell, padding 7: the band is
+    /// `2·18 + 2·7 + 14 = 64` px, so in a 400 px view the input line is 343..361.
     #[test]
     fn the_dock_input_row_is_where_the_dock_draws_it() {
         let metrics = grid(7);
@@ -2519,14 +2625,14 @@ mod tests {
         assert_eq!(top, 343.0);
         let press =
             |x: f64, y: f64| point_to_cell((x, y), metrics, top, OutOfGrid::Reject, 1.0, 40, 1);
-        // Satırın içi: sütun ızgaranın aritmetiğiyle (sol pay düşülüyor).
-        let point = press(7.0 + 3.0 * 9.0 + 6.0, 350.0).expect("satırda nokta yok");
+        // Inside the row: the column by the grid's arithmetic (the left padding is subtracted).
+        let point = press(7.0 + 3.0 * 9.0 + 6.0, 350.0).expect("no point on the line");
         assert_eq!((point.col, point.row, point.half), (3, 0, CellHalf::Right));
-        // Bandın payı, bağlam satırı ve ızgaranın alanı hiçbir şey.
+        // The band's padding, the context line and the grid's area are nothing.
         for y in [337.0, 342.0, 362.0, 390.0, 100.0] {
             assert_eq!(press(20.0, y), None, "y = {y}");
         }
-        // Sürükleme satırın içine kırpılıyor.
+        // The drag is clamped into the row.
         let drag = point_to_cell(
             (1000.0, 390.0),
             metrics,
@@ -2536,14 +2642,13 @@ mod tests {
             40,
             1,
         )
-        .expect("kırpma yok");
+        .expect("no clamp");
         assert_eq!((drag.col, drag.row, drag.half), (39, 0, CellHalf::Right));
     }
 
     #[test]
     fn empty_grid_has_no_cell() {
-        // Simge durumundaki pencere sıfır sütun/satır verebilir: yapışacak bir
-        // son hücre yok.
+        // A minimised window can give zero columns/rows: there is no last cell to stick to.
         assert_eq!(
             point_to_cell(
                 (1.0, 1.0),
@@ -2580,22 +2685,22 @@ mod tests {
             NSEventModifierFlags::Function,
             NSEventModifierFlags::CapsLock,
         ];
-        // Menüde karşılığı olmayan Command'lı harf (Cmd-T) kabuğa "t" yazmaz;
-        // yanındaki değiştirici ne olursa olsun. Liste **kapalı**: ölçüt
-        // "Command'lı mı" değil "izin listesinde mi" oldu ve açık bir kural
-        // bir gün bu tuşu da geçirirdi.
+        // A Command letter with no counterpart in the menu (Cmd-T) does not
+        // type "t" into the shell; whatever modifier is beside it. The list is
+        // **closed**: the criterion became "is it in the allow list", not "is it
+        // Command", and an open rule would one day let this key through too.
         for extra in extras {
             assert!(
                 !reaches_terminal(NSEventModifierFlags::Command | extra, Some("t")),
                 "Command + {extra:?}"
             );
         }
-        // Saf modifier tuşu: `characters` yok, ortada kimliği sorulacak bir
-        // tuş da yok — yutulur.
+        // A pure modifier key: there is no `characters` and no key whose
+        // identity could be asked - swallowed.
         assert!(!reaches_terminal(NSEventModifierFlags::Command, None));
-        // **İstisnalar**: ⌘⌫ (`\x15`), ⌘← (`\x01`) ve ⌘→ (`\x05`); baytları
-        // `encode_key`'de. Yanındaki değiştirici sorulmuyor — CapsLock
-        // açıkken de satırı silmeli, ⌘⇧← de satır başına gitmeli.
+        // **The exceptions**: ⌘⌫ (`\x15`), ⌘← (`\x01`) and ⌘→ (`\x05`); their
+        // bytes are in `encode_key`. The modifier beside them is not asked -
+        // with CapsLock on it must still delete the line, and ⌘⇧← must go to the line start too.
         for allowed in [BACKSPACE, ARROW_LEFT, ARROW_RIGHT] {
             for extra in extras {
                 assert!(
@@ -2606,28 +2711,28 @@ mod tests {
                     "Command + {allowed:?} + {extra:?}"
                 );
             }
-            // Tek karakterlik eşleşme: listedeki tuşla başlayan çok
-            // karakterli bir `characters` listeye girmez.
+            // A single-character match: a multi-character `characters` that
+            // starts with a key in the list does not enter the list.
             assert!(
                 !reaches_terminal(NSEventModifierFlags::Command, Some(&format!("{allowed}x"))),
                 "{allowed:?} + x"
             );
         }
-        // Liste **kapalı**: yönü aynı olan ⌘↑/⌘↓ listede değil, yutulur.
+        // The list is **closed**: ⌘↑/⌘↓, whose direction is the same, are not in the list, swallowed.
         for swallowed in ['\u{f700}', '\u{f701}'] {
             assert!(
                 !reaches_terminal(NSEventModifierFlags::Command, Some(&swallowed.to_string())),
                 "{swallowed:?}"
             );
         }
-        // Command'sız tuş terminalin: Control'lü harf bir bayt, Option'lı
-        // gezinme tuşu bir Meta dizisi, Option'lı harf bir karakter.
+        // A key without Command is the terminal's: a Control letter is a byte,
+        // an Option navigation key a Meta sequence, an Option letter a character.
         for flags in extras {
             assert!(reaches_terminal(flags, Some("t")), "{flags:?}");
         }
     }
 
-    /// Pürüzsüz kolun adımı; birim 9 nokta (trackpad), artık sıfır.
+    /// The smooth arm's step; the unit is 9 points (trackpad), remainder zero.
     fn smooth(delta: f64, phase: NSEventPhase, momentum: NSEventPhase) -> Option<SmoothWheel> {
         smooth_wheel(delta, 9.0, 0.0, phase, momentum).0
     }
@@ -2640,7 +2745,7 @@ mod tests {
         assert_eq!(
             intent(0.0, NSEventPhase::MayBegin, none),
             Some(ScrollIntent::GestureBegan),
-            "parmak değince uçuştaki yerleşme bitmeli"
+            "a settling in flight must end when the finger touches"
         );
         assert_eq!(
             intent(2.0, NSEventPhase::Began, none),
@@ -2657,7 +2762,7 @@ mod tests {
         assert_eq!(
             intent(8.0, none, NSEventPhase::Began),
             Some(ScrollIntent::GestureBegan),
-            "momentum başı yerleşmeyi bitirmeli"
+            "the momentum start must end the settling"
         );
         assert_eq!(
             intent(5.0, none, NSEventPhase::Changed),
@@ -2667,38 +2772,38 @@ mod tests {
             intent(0.0, none, NSEventPhase::Ended),
             Some(ScrollIntent::Settle)
         );
-        // İptal edilen jest de yerleşiyor: pencere yarım satırda dinlenmemeli.
+        // A cancelled gesture settles too: the window must not rest at half a line.
         assert_eq!(
             intent(0.0, NSEventPhase::Cancelled, none),
             Some(ScrollIntent::Settle)
         );
-        // Hareketsiz ara olay gönderilmiyor.
+        // A motionless in-between event is not sent.
         assert_eq!(intent(0.0, NSEventPhase::Stationary, none), None);
         assert_eq!(intent(0.0, NSEventPhase::Changed, none), None);
     }
 
     #[test]
     fn a_trackpad_delta_is_sent_as_a_fraction_of_a_row() {
-        // Parmağı piksel piksel izlemenin kaynağı: miktar hücre boyuna
-        // bölünmüş delta, kesilmemiş. Tam satır ok/rapor kolu için ayrıca.
-        let step = smooth(4.5, NSEventPhase::Changed, NSEventPhase::None).expect("adım");
+        // The source of tracking the finger pixel by pixel: the amount is the
+        // delta divided by the cell height, not truncated. The whole line is separate, for the arrow/report arm.
+        let step = smooth(4.5, NSEventPhase::Changed, NSEventPhase::None).expect("step");
         assert_eq!(step.rows, 0.5);
         assert_eq!(step.lines, 0);
         let (step, rest) = smooth_wheel(-12.0, 9.0, 0.0, NSEventPhase::Changed, NSEventPhase::None);
-        let step = step.expect("adım");
+        let step = step.expect("step");
         assert_eq!((step.rows, step.lines), (-12.0 / 9.0, -1));
         assert_eq!(rest, -12.0 / 9.0 + 1.0);
-        // Sonlu olmayan miktar kaydırma koluna sızmıyor.
+        // A non-finite amount does not leak into the scroll arm.
         let step = smooth_wheel(9.0, 0.0, 0.0, NSEventPhase::Ended, NSEventPhase::None)
             .0
-            .expect("adım");
+            .expect("step");
         assert_eq!((step.rows, step.lines), (0.0, 0));
     }
 
     #[test]
     fn a_notch_glides_in_whole_rows() {
-        // Fazsız olay çentik: miktar **tam satır**, yani "off"'un mesafesi,
-        // ve kesirli kısım artıkta kalıyor.
+        // A phaseless event is a notch: the amount is **whole lines**, i.e.
+        // "off"'s distance, and the fractional part stays in the remainder.
         let none = NSEventPhase::None;
         let (step, rest) = smooth_wheel(2.5, 1.0, 0.0, none, none);
         assert_eq!(
@@ -2710,11 +2815,11 @@ mod tests {
             })
         );
         assert_eq!(rest, 0.5);
-        // Satıra varmayan çentik hiçbir şey göndermiyor, artık birikiyor.
+        // A notch that does not reach a line sends nothing, the remainder accumulates.
         let (step, rest) = smooth_wheel(0.3, 1.0, 0.5, none, none);
         assert_eq!(step, None);
         assert_eq!(rest, 0.8);
-        // Hassas ama fazsız olay da çentik: bitişini söyleyecek faz yok.
+        // A precise but phaseless event is a notch too: there is no phase to say its end.
         let (step, _) = smooth_wheel(18.0, 9.0, 0.0, none, none);
         assert_eq!(
             step.map(|s| (s.rows, s.intent)),
@@ -2724,9 +2829,10 @@ mod tests {
 
     #[test]
     fn the_line_amount_is_the_off_arms_amount() {
-        // `"off"` kolu `wheel_lines`'ın kendisi ve pürüzsüz kolun `lines`'ı
-        // (ok ve rapor kollarının miktarı) aynı fonksiyondan, aynı artıkla —
-        // vim/less ve fare kipinde tekerlek iki kipte de aynı satırı gönderir.
+        // The `"off"` arm is `wheel_lines` itself and the smooth arm's `lines`
+        // (the arrow and report arms' amount) is from the same function, with
+        // the same remainder - vim/less and the wheel in mouse mode send the
+        // same line in both modes.
         let phases = [
             (NSEventPhase::None, NSEventPhase::None),
             (NSEventPhase::Began, NSEventPhase::None),
@@ -2748,19 +2854,19 @@ mod tests {
 
     #[test]
     fn wheel_whole_lines_pass_through() {
-        // Trackpad: birim hücre boyu (nokta). Tam bir hücre = bir satır, işaret
-        // korunur — artı geriye, `Session::scroll_wheel` ile aynı yön.
+        // Trackpad: the unit is the cell height (points). One whole cell = one
+        // line, the sign is kept - positive is backward, the same direction as `Session::scroll_wheel`.
         assert_eq!(wheel_lines(9.0, 9.0, 0.0), (1, 0.0));
         assert_eq!(wheel_lines(-27.0, 9.0, 0.0), (-3, 0.0));
-        // Klasik tekerlek: `scrollingDeltaY` zaten satır, birim 1.
+        // Classic wheel: `scrollingDeltaY` is already lines, the unit is 1.
         assert_eq!(wheel_lines(2.0, 1.0, 0.0), (2, 0.0));
     }
 
     #[test]
     fn wheel_sub_line_deltas_accumulate() {
-        // Trackpad hücre boyundan küçük deltalar yağdırır. Artık taşınmasaydı
-        // yavaş bir kaydırma **hiç** satır üretmezdi: her olay tek başına
-        // sıfıra kesilir.
+        // A trackpad showers deltas smaller than a cell height. Had the
+        // remainder not been carried a slow scroll would produce **no** line at
+        // all: each event is truncated to zero by itself.
         let (lines, carry) = wheel_lines(4.0, 9.0, 0.0);
         assert_eq!(lines, 0);
         let (lines, carry) = wheel_lines(4.0, 9.0, carry);
@@ -2768,8 +2874,9 @@ mod tests {
         let (lines, carry) = wheel_lines(4.0, 9.0, carry);
         assert_eq!(lines, 1);
         assert!((carry - 3.0 / 9.0).abs() < 1e-9, "{carry}");
-        // Yön dönünce artık önce eriyor: geriye birikmiş üçte bir, ileriye
-        // üçte iki hücre → toplam üçte bir ileri, satır yok.
+        // When the direction reverses the remainder melts first: a third
+        // accumulated backward, two thirds of a cell forward → a total of a
+        // third forward, no line.
         let (lines, carry) = wheel_lines(-6.0, 9.0, carry);
         assert_eq!(lines, 0);
         assert!((carry + 3.0 / 9.0).abs() < 1e-9, "{carry}");
@@ -2777,20 +2884,20 @@ mod tests {
 
     #[test]
     fn wheel_degenerate_inputs_do_not_poison_the_carry() {
-        // Sıfır birim (ölçüsüz hücre) sonsuz, 0/0 NaN üretir; NaN artığa
-        // girerse sonraki her toplam NaN olur ve tekerlek sessizce ölürdü.
+        // A zero unit (an unmeasured cell) produces infinity, 0/0 NaN; if NaN
+        // entered the remainder every later total would be NaN and the wheel would silently die.
         assert_eq!(wheel_lines(9.0, 0.0, 0.0), (0, 0.0));
         assert_eq!(wheel_lines(0.0, 0.0, 0.0), (0, 0.0));
         assert_eq!(wheel_lines(f64::NAN, 9.0, 0.5), (0, 0.0));
-        // Dev delta doyar; kırpma `bt-core`'da (geçmişin boyuna).
+        // A giant delta saturates; the clamping is in `bt-core` (to the scrollback's length).
         assert_eq!(wheel_lines(1e300, 1.0, 0.0).0, i32::MAX);
     }
 
     #[test]
     fn scale_changes_the_cell() {
-        // Aynı view noktası iki ölçekte iki ayrı hücre: ölçü fiziksel
-        // pikselden geliyor ve ölçek çarpanı atlanırsa retina makinede seçim
-        // yarı kayar.
+        // The same view point is two different cells at two scales: the measure
+        // comes from physical pixels and if the scale factor is skipped the
+        // selection is off by half on a retina machine.
         let at1x = point_to_cell(
             (90.0, 150.0),
             grid(0),
@@ -2815,40 +2922,40 @@ mod tests {
         );
     }
 
-    /// Damlanın elemesi: **yalnız dosya URL'si** yol veriyor.
+    /// The drop's filtering: **only a file URL** yields a path.
     ///
-    /// Bekçi set kapısından **sonra** eklendi, çünkü kapının bulduğu
-    /// doc↔kod çelişkisinin düzeltmesi (`isFileURL` kademesi) kapıyı
-    /// görmemişti. Çivilediği şey `NSURL`'ün cömertliği: sınıf `http://`'yi
-    /// de okuyor ve `NSURL.path` ona `/foo` cevabını veriyor, yani kademe
-    /// olmadan tarayıcıdan sürüklenen bir bağlantı giriş satırına kökten bir
-    /// yol yazardı (`discussion.md` → Karar 4: yalnız dosya URL'si).
+    /// The guard was added **after** the set's gate, because the fix of the
+    /// doc↔code contradiction the gate found (the `isFileURL` step) had not
+    /// been seen by the gate. What it pins is `NSURL`'s generosity: the class
+    /// reads `http://` too and `NSURL.path` answers it with `/foo`, so without
+    /// the step a link dragged from a browser would write a root-anchored path
+    /// to the input line (`discussion.md` → Karar 4: only a file URL).
     ///
-    /// Pano **benzersiz ve yerel**: `generalPasteboard` kullanılsaydı sınama
-    /// kullanıcının kopyaladığı şeyi silerdi.
+    /// The pasteboard is **unique and local**: had `generalPasteboard` been
+    /// used the test would have erased what the user copied.
     #[test]
     fn only_file_urls_become_dropped_paths() {
         let _pasteboard = crate::clipboard::tests::pasteboard_lock();
         let board = NSPasteboard::pasteboardWithUniqueName();
         let file = NSURL::fileURLWithPath(ns_string!("/tmp/bir dosya.txt"));
-        let web = NSURL::URLWithString(ns_string!("http://example.com/foo")).expect("geçerli URL");
+        let web = NSURL::URLWithString(ns_string!("http://example.com/foo")).expect("valid URL");
         board.clearContents();
         let written = board.writeObjects(&NSArray::from_retained_slice(&[
             ProtocolObject::from_retained(file),
             ProtocolObject::from_retained(web),
         ]));
-        assert!(written, "pano iki URL'yi de aldı");
+        assert!(written, "the pasteboard accepted both URLs");
 
-        // Web adresi düşüyor, dosya yolu **yüzde çözülmüş** geliyor: yüzde
-        // çözmeyi ikinci kez yazmama kararının (Foundation'ın kendi cevabı)
-        // gözlemlenebilir yarısı.
+        // The web address is dropped, the file path arrives **percent-decoded**:
+        // the observable half of the decision not to write percent-decoding a
+        // second time (Foundation's own answer).
         assert_eq!(
             dropped_paths(&board),
             vec!["/tmp/bir dosya.txt".to_string()]
         );
 
-        // Pano benzersiz ve süreç-yerel: sınama süreci bitince gidiyor,
-        // elle bırakma (`releaseGlobally`) bu bağlamada yok.
+        // The pasteboard is unique and process-local: it goes when the test
+        // process ends, a manual release (`releaseGlobally`) does not exist in this binding.
         board.clearContents();
     }
 }

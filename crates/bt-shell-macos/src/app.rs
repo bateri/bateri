@@ -1,9 +1,9 @@
-//! Uygulama delegate'i: **uygulama geneli** — ayarları okur ve izler, temayı
-//! ve görünümü çözer, alt başlığın yuvalarını tutar, pencereleri açar ve
-//! listeler, kayıt anı yollarını her pencereye dağıtır ve kapanış sırasını
-//! yürütür. Pencere başına olan her şey (yüzey, renderer, oturum, display
-//! link, dock payı, geçici punto) `window`'da. Çizim çağrısı burada **yok**,
-//! bu dosyanın işi bağlamak.
+//! The application delegate: everything **app-wide** — reads and watches the
+//! settings, resolves the theme and appearance, owns the subtitle slots, opens
+//! and lists windows, distributes the on-save paths to every window and runs
+//! the shutdown sequence. Everything per-window (surface, renderer, session,
+//! display link, dock share, temporary point size) lives in `window`. There is
+//! **no** drawing call here; this file's job is wiring.
 
 use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::ffi::{OsString, c_void};
@@ -45,224 +45,224 @@ use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
 use crate::{child, settings};
 
-/// Boşta sıfır karenin bekçisi: [`Workload::Smoke`] yükünde pencere ilk
-/// çizimden sonra ~`run_seconds` saniye boşta duruyor.
+/// Guard for zero idle frames: in the [`Workload::Smoke`] workload the window
+/// sits idle for ~`run_seconds` seconds after the first draw.
 ///
-/// **Sınırın operandı `kare` değil [`Counters::content`]** (`icerik=`
-/// jetonu): GPU'nun bitirdiği kare değil, çizilmeye **karar verilen** içerik
-/// karesi. Sebep bu sınırın kendi doc'unda yıllanmış borç — "durma koşulu
-/// unutulmuş bir animasyon bugünkü kapıdan yeşil geçer". Çare sınırı
-/// oynatmak değil, hareket karelerini kapının dışında tutmak oldu: bir imleç
-/// kayması `kare`'yi meşru olarak ~24'e çıkarır, `icerik`'i hiç artırmaz
-/// (`.tasks/008-hareket-ve-imlec/discussion.md` → Karar 2).
+/// **The operand of the limit is not `frames` but [`Counters::content`]**
+/// (the `content=` token): not the frame the GPU finished but the content
+/// frame **decided to be drawn**. The reason is an aged debt in this limit's
+/// own doc: "an animation with a forgotten stop condition passes today's gate
+/// green". The remedy was not to move the limit but to keep motion frames out
+/// of the gate: a cursor slide legitimately raises `frames` to ~24 and never
+/// raises `content` (`.tasks/008-hareket-ve-imlec/discussion.md` → Karar 2).
 ///
-/// **İki sayacın ilişkisi hareketle birlikte koptu** (`/code-review`
-/// bulgusu): operand değiştiğinde "hatasız biten her kare bir içerik
-/// karesiydi" diye yazılmıştı ve o cümle phase-1'de doğruydu, phase-3'ten
-/// sonra **değil** — hareket karesi de bir komut tamponu commit ediyor, yani
-/// `kare`'yi artırıp `icerik`'i artırmıyor. Yön bugün tersine bile dönmüş
-/// durumda: ölçülen sağlıklı duman koşusu `kare` 27–30 iken `icerik` 2–3
-/// (aşağıdaki 008 satırı). Yani sınır **daha gevşek** bir sayacın üstünde
-/// duruyor, daha sıkı değil — ve bu yüzden taşınan değil **yeniden ölçülen**
-/// bir sayı gerekiyordu; phase-6 onu ölçtü.
+/// **The relation between the two counters broke with motion** (a
+/// `/code-review` finding): when the operand changed it was written that
+/// "every frame that ends without error was a content frame", and that
+/// sentence was true in phase-1, **not** after phase-3 — a motion frame also
+/// commits a command buffer, so it raises `frames` without raising `content`.
+/// The direction has even reversed today: the measured healthy smoke run has
+/// `frames` 27–30 while `content` is 2–3 (the 008 row below). So the limit
+/// sits on a **looser** counter, not a tighter one — and that is why a
+/// number that was **re-measured**, not carried over, was needed; phase-6 measured it.
 ///
-/// **Sayı iki kez ölçüldü; ikincisi görünür pencerede ve onu değiştirmedi.**
-/// Koşu tabloları, ortam ve yöntem `docs/OLCUMLER.md` → `## Boşta kare`'de;
-/// burada yalnız sınırı doğuran kutuplar ve türetme duruyor.
+/// **The number was measured twice; the second time in a visible window, and
+/// it did not change it.** Run tables, environment and method are in
+/// `docs/OLCUMLER.md` → `## Boşta kare`; here only the poles that gave rise
+/// to the limit and the derivation are kept.
 ///
-/// - **005 phase-3 (2026-09-12, debug, bundle'sız süreç):** `2` → `8`. Eski
-///   `2`'nin dayanağı ("sistem display link'i askıya alıyor, tavan ~3 kare")
-///   005 phase-2b'de çürüdü: [`Workload::Load`] aynı pencere durumunda beş
-///   saniyede `kare=594` üretti, yani ölçülen şey tavan değil kapanış
-///   kilitlenmesiyle bozulmuş bir koşuydu. Üstelik `2` **doğru bir build'de
-///   kırmızı düştü** (beş saniyelik sağlıklı koşu `kare=4`). Kutuplar:
-///   sağlıklı en çok `4`, bozuk en az `49`.
-/// - **006 phase-5 (2026-09-15, debug + release paket; yoklanan iki koşuda
-///   pencere ekranda ve önde):** sağlıklı elli bir koşunun en yükseği `2`, bozuk altı koşunun en
-///   düşüğü `353`. Görünür pencere meşru kare sayısını **artırmadı**; bozuk
-///   koşuyu ise tam tazeleme hızına taşıdı.
+/// - **005 phase-3 (2026-09-12, debug, unbundled process):** `2` → `8`. The
+///   basis of the old `2` ("the system suspends the display link, ceiling ~3
+///   frames") was refuted in 005 phase-2b: [`Workload::Load`] produced
+///   `frames=594` in five seconds in the same window state, so what was
+///   measured was not a ceiling but a run corrupted by shutdown locking.
+///   Moreover `2` **fell red on a correct build** (a healthy five-second run
+///   was `frames=4`). Poles: healthy at most `4`, broken at least `49`.
+/// - **006 phase-5 (2026-09-15, debug + release bundle; in the two probed
+///   runs the window was on screen and in front):** the highest of fifty
+///   healthy runs is `2`, the lowest of six broken runs is `353`. The visible
+///   window did **not** raise the legitimate frame count; it did take the broken run to the full refresh rate.
 ///
-/// `8` iki ölçümün kutuplarının arasında: en yüksek sağlıklı gözlemin (`4`)
-/// iki katı, en düşük bozuk gözlemin (`49`) altıda biri. 006 boşluğu yalnız
-/// genişletti; sınırı oynatacak bir gözlem yok — düşürmek 005'in sağlıklı
-/// `4`'ünü yeniden ölçmeden geçersiz saymak olurdu.
+/// `8` lies between the poles of the two measurements: twice the highest
+/// healthy observation (`4`), a sixth of the lowest broken observation
+/// (`49`). 006 only widened the gap; there is no observation that would move
+/// the limit — lowering it would mean declaring 005's healthy `4` invalid without re-measuring it.
 ///
-/// - **008 phase-6 (2026-09-16, debug + release paket):** operand `kare`'den
-///   `icerik`'e geçtikten sonraki **ilk** ölçüm, yani üstteki iki satırın
-///   sayıları artık başka bir sayacın. Otuz sağlıklı koşuda `icerik` en çok
-///   `3`, bozuk kolda (koşulsuz `wake()`) en az `357`. Kural iki uçta da
-///   sağlanıyor ve sınırı **oynatan bir gözlem yok**: `8`, `3`'ün iki
-///   katından (`6`) büyük ve `357`'nin çok altında.
+/// - **008 phase-6 (2026-09-16, debug + release bundle):** the **first**
+///   measurement after the operand moved from `frames` to `content`, so the
+///   numbers in the two rows above now belong to another counter. In thirty
+///   healthy runs `content` is at most `3`, in the broken arm (an
+///   unconditional `wake()`) at least `357`. The rule holds at both ends and
+///   there is **no observation that moves the limit**: `8` is larger than
+///   twice `3` (`6`) and far below `357`.
 ///
-/// **Kapıya bağlanan profil debug**, çünkü gözetimsiz koşan tek bağlam
-/// `make duman` ve o debug derliyor. Release paketi de aynı sınıra tabi (kapı
-/// profilden bağımsız) ve dağılımı ayrı ölçüldü; aynı sayı ikisini de taşıyor.
+/// **The profile tied to the gate is debug**, because the only unattended
+/// context is `make smoke` and it builds debug. The release bundle is subject
+/// to the same limit (the gate is profile-independent) and its distribution
+/// was measured separately; the same number carries both.
 ///
-/// Sınır, bu makinenin iki rejiminde de güvenli ama pay rejime bağlı.
-/// Kısılmış rejimde (005: ölçüm yükü 5 sn'de `kare=21`, yani ~4 Hz) bozuk bir
-/// üç saniyelik duman ~12 kare eder, `8`'in **1,5 katı** — sınırı buradan
-/// yükseltmemenin sebebi bu. 006'nın görünür penceresinde kısılma görülmedi.
-/// Aynı binary'nin ölçüm yükünde iki rejim vermesinin (bir koşuda `kare=21`,
-/// bir koşuda `kare=597`) en olası değişkeni pencere görünürlüğü ama bu
-/// **doğrulanmadı**: 006 duman yükünde pencereyi ekranda gördü, ölçüm yükünü
-/// koşmadı.
+/// The limit is safe in both regimes of this machine, but the margin depends
+/// on the regime. In the throttled regime (005: the measurement load gave
+/// `frames=21` in 5 s, i.e. ~4 Hz) a broken three-second smoke makes ~12
+/// frames, **1.5 times** `8` — this is the reason not to raise the limit from
+/// here. No throttling was seen in 006's visible window. The likeliest
+/// variable for the same binary giving two regimes under the measurement load
+/// (`frames=21` in one run, `frames=597` in another) is window visibility, but
+/// this is **unverified**: 006 saw the window on screen under the smoke load
+/// and did not run the measurement load.
 ///
-/// **Sınır büyürken kapının algılama tabanı da yükseldi** ve bunun bedeli
-/// bugün değil sonra ödenecek. Kapı `n > limit`'te ateşliyor, yani yakalamak
-/// için `limit + 1` kare gerekiyor: üç saniyelik bir koşuda eski `2` **1
-/// Hz**'lik bir sızıntıyı yakalardı, bugünkü `8` ancak **3 Hz**'i yakalıyor.
-/// (İkisi de `make duman`'ın 3 saniyesinden türüyor; süre değişirse eşik de
-/// değişir.) Durma koşulu unutulmuş 2 Hz'lik bir blink üç saniyede ~6 kare
-/// eder — sınırın altında, yani bu sayı onu tek başına **göremez**.
+/// **As the limit grew, the gate's detection floor rose too** and its cost
+/// will be paid later, not today. The gate fires at `n > limit`, so catching
+/// needs `limit + 1` frames: in a three-second run the old `2` would catch a
+/// **1 Hz** leak, today's `8` catches only **3 Hz**. (Both derive from `make
+/// smoke`'s 3 seconds; if the duration changes, so does the threshold.) A
+/// 2 Hz blink with a forgotten stop condition makes ~6 frames in three
+/// seconds — below the limit, so this number alone **cannot see** it.
 ///
-/// **Bu yüzden sınır kapının tamamı değil, bir katı.** 008 kapıyı iki katlı
-/// kuruyor ve ikisi de buradan bağımsız: (a) deadline'da **yerleşmemiş**
-/// animasyon varsa koşu kırmızı — hızdan bağımsız, ölçüm istemez, ama yalnız
-/// hareket altyapısından geçen animasyonları görür; (b) son kareyle deadline
-/// arasındaki sessizlik ([`QUIET_FLOOR`]) — altyapıyı atlayan sızıntıyı da
-/// görür ve **ölçüldü** (phase-6): kapının en duyarlı katı artık o, çünkü
-/// periyodu 868 ms'den kısa her sızıntıyı yakalıyor, bu sayı ise ancak
-/// 3 Hz'in üstünü.
+/// **So the limit is not the whole gate, only one tier.** 008 builds the gate
+/// in two tiers and both are independent of this one: (a) if an **unsettled**
+/// animation remains at the deadline the run is red — independent of speed,
+/// needs no measurement, but only sees animations that go through the motion
+/// infrastructure; (b) the quiet between the last frame and the deadline
+/// ([`QUIET_FLOOR`]) — sees leaks that bypass the infrastructure too and was
+/// **measured** (phase-6): it is now the gate's most sensitive tier, because
+/// it catches every leak with a period shorter than 868 ms, while this number catches only those above 3 Hz.
 ///
-/// **Sağlıklı koşudaki oynamanın mekanizması ölçülmedi.** Kare talebi
-/// (`istek=`) üç ölçümde de **sabit** kaldı (006'da 2–3, 008'de 4), yani
-/// fazladan kare fazladan **talepten** gelmiyor — geometri/örtülme kancaları
-/// olsaydı `istek` de artardı. Oynama üç ölçümde de profile göre ayrıştı ama
-/// yönü 008'de **döndü**: 006'da `kare` debug'da çoğunlukla `1`, release
-/// pakette `2` idi; 008'de `icerik` debug'da çoğunlukla `3`, release pakette
-/// `2`. Talep yine ayrışmadı. Geriye
-/// taleplerin birleşip birleşmemesi kalıyor (açılış karesi shell'in ilk
-/// baytlarından önce çizildiyse ikinci bir kare gerekir; profil farkı onu
-/// `acilis=` ile sınayabilir, sınanmadı) ama bu bir **hipotez**, ölçüm değil.
+/// **The mechanism of the variation in healthy runs was not measured.** The
+/// frame request (`requests=`) stayed **constant** in all three measurements
+/// (2–3 in 006, 4 in 008), so the extra frames do not come from extra
+/// **requests** — had it been the geometry/occlusion hooks, `requests` would
+/// have risen too. The variation split by profile in all three measurements
+/// but its direction **turned** in 008: in 006 `frames` was mostly `1` in
+/// debug and `2` in the release bundle; in 008 `content` is mostly `3` in
+/// debug and `2` in the release bundle. The request again did not split. What
+/// remains is whether requests merge or not (if the startup frame was drawn
+/// before the shell's first bytes a second frame is needed; the profile
+/// difference could test this with `startup=`, it was not tested) but this is
+/// a **hypothesis**, not a measurement.
 ///
-/// **Kapı yalnız `BT_RUN_SECONDS` yolunda değerlendiriliyor**
-/// ([`AppDelegate::report_and_exit`]). Gözetimsiz koşan tek bağlamı
-/// `make duman`; paketten aynı ortamla açılan koşu da aynı sınıra tabi (006'nın
-/// bozuk paket koşuları onu ateşledi). Etkileşimli koşu bu sınırı hiç
-/// değerlendirmiyor.
+/// **The gate is evaluated only on the `BT_RUN_SECONDS` path**
+/// ([`AppDelegate::report_and_exit`]). The only unattended context is `make
+/// smoke`; a run opened from the bundle with the same environment is subject
+/// to the same limit (006's broken bundle runs fired it). An interactive run never evaluates this limit.
 ///
-/// **Ne zaman yeniden ölçülür:** kare yolunu ya da pencerenin görünürlüğünü
-/// değiştiren bir set geldiğinde (hareket/motion, sekme). Tarif
-/// `docs/OLCUMLER.md` → `## Nasıl yeniden ölçülür`.
+/// **When to re-measure:** when a set arrives that changes the frame path or
+/// the window's visibility (motion, tabs). The recipe is in `docs/OLCUMLER.md` → `## Nasıl yeniden ölçülür`.
 ///
-/// **Bilinen yanlış pozitif (duruyor):** `DisplayLink::resize` koşulsuz kare
-/// istiyor, yani koşu sırasında pencereyi sürüklemek meşru kareler üretir ve
-/// sekiz kareyi de aşabilir. `make duman` gözetimsiz koşuyor, bedel kabul
-/// edildi; kalıcı çözüm geometri yolundan gelen kareleri sayaç dışında
-/// tutmak.
+/// **Known false positive (stays):** `DisplayLink::resize` requests a frame
+/// unconditionally, so dragging the window during the run produces legitimate
+/// frames and can exceed eight. `make smoke` runs unattended, the cost was
+/// accepted; the lasting fix is to keep frames coming from the geometry path out of the counter.
 ///
-/// Sınırın **çizilen** kare üstünde durmasının sebebi adı: "boşta sıfır kare"
-/// çizim hakkında bir söz. `istek=` daha erken bir yerde sayıyor ama kapı
-/// değil — eşiği ölçülmedi.
+/// The limit stands on the **drawn** frame because of its name: "zero frames
+/// when idle" is a claim about drawing. `requests=` counts earlier but is not
+/// a gate — its threshold was not measured.
 ///
-/// **Ölçülen `istek ≈ kare + 2` ilişkisi 008'de geçersizleşti** ve cümlenin
-/// düzelttiği şey bir sayı değil bir mekanizma: hareket kareleri `Waker`'a
-/// hiç dokunmuyor (`bt_gpu::link` modül başlığı), yani `kare`'yi şişirirken
-/// `istek`'i şişirmiyorlar. İlişkinin yeni hâli **ölçüldü** (phase-6, otuz
-/// sağlıklı koşu): `istek` otuz koşunun hepsinde `4`, `icerik` `2`–`3`, yani
-/// `istek ≈ icerik + 1..2` — `kare` ise 27–30, ondan tamamen kopmuş durumda.
-/// (Sonraki bir koşuda `istek=3` görüldü ve nedeni ölçülmedi; kayıt
-/// `docs/OLCUMLER.md`'de.)
-/// Ölçüm yükünde `istek` ile `kare` üç mertebe ayrışıyor (bkz. `bt_gpu`'nun
-/// `requests` sayacı); oran olarak bir kapı kurulabilir ama o ölçülmedi.
-///
-/// [`Workload::Load`] yükünde üst sınır **yok** — orada kare akışı işin
-/// kendisi.
-///
+/// **The measured `requests ≈ frames + 2` relation became invalid in 008**
+/// and what the sentence corrects is not a number but a mechanism: motion
+/// frames never touch the `Waker` (the `bt_gpu::link` module header), so they
+/// inflate `frames` without inflating `requests`. The new form of the
+/// relation was **measured** (phase-6, thirty healthy runs): `requests` is
+/// `4` in all thirty runs, `content` `2`–`3`, i.e. `requests ≈ content +
+/// 1..2` — while `frames` is 27–30, completely detached from it.
+/// (In a later run `requests=3` was seen and its cause was not measured; the record is in `docs/OLCUMLER.md`.)
+/// Under the measurement load `requests` and `frames` differ by three orders
+/// of magnitude (see `bt_gpu`'s `requests` counter); a gate could be built on
+/// the ratio but that was not measured.
 /// Re-observed after the 040 move to the wgpu window path (2026-09-30,
 /// healthy and broken distributions in `docs/OLCUMLER.md`): unchanged.
 const IDLE_FRAME_LIMIT: u64 = 8;
 
-/// Duman koşusunun sonunda beklenen **en az** sessizlik: son çizilen kareyle
-/// deadline arası (`sessiz=` jetonu). Altı kırmızı, `sessiz=none` de kırmızı.
+/// The **minimum** quiet expected at the end of a smoke run: between the last
+/// drawn frame and the deadline (the `quiet=` token). Below it is red, `quiet=none` is red too.
 ///
-/// [`IDLE_FRAME_LIMIT`]'in **tamamlayıcısı, kopyası değil.** O, üç saniyede
-/// sekizden fazla içerik karesi çizen bir sızıntıyı görüyor, yani ancak ~3
-/// Hz'in üstünü; bu ise **periyodu** bu değerden kısa olan her sızıntıyı
-/// görüyor (~1,15 Hz'in üstü). Ölçülen boşluk tam da buydu: yarım saniyelik
-/// bir sızıntı `icerik=8` ile sınırı **aşmadan** geçiyor ve o koşu bugün
-/// yeşil düşüyordu (`docs/OLCUMLER.md` → `## Boşta kare`, "yavaş sızıntı").
+/// The **complement of [`IDLE_FRAME_LIMIT`], not a copy.** That one sees a
+/// leak drawing more than eight content frames in three seconds, i.e. only
+/// above ~3 Hz; this one sees every leak whose **period** is shorter than
+/// this value (above ~1.15 Hz). The measured gap was exactly this: a
+/// half-second leak passes with `content=8` **without exceeding** the limit
+/// and that run fell green today (`docs/OLCUMLER.md` → `## Boşta kare`, "yavaş sızıntı").
 ///
-/// **Kuralın yönü bu jetonda ters:** sağlıklı koşuda `sessiz` büyük, bozuk
-/// koşuda küçük. Taban bu yüzden "en düşük sağlıklı gözlemin en çok yarısı
-/// **ve** en yüksek bozuk gözlemin üstünde" ve aralığın **en büyük** ucundan
-/// seçiliyor — ortadan seçilen bir sayı kapıyı yavaş sızıntıya körleştirirdi.
-/// Türetme (2026-09-17, yirmi sağlıklı koşu): en düşük sağlıklı
-/// `1737,12 ms` → tavan `868,56 ms`; en yüksek bozuk `129,25 ms` (2026-09-16).
-/// `868` o aralığın en büyük tam milisaniyesi.
+/// **The rule's direction is reversed in this token:** `quiet` is large in a
+/// healthy run, small in a broken one. So the floor is "at most half the
+/// lowest healthy observation **and** above the highest broken observation"
+/// and is chosen from the **largest** end of the interval — a number chosen
+/// from the middle would blind the gate to a slow leak. Derivation
+/// (2026-09-17, twenty healthy runs): lowest healthy `1737.12 ms` → ceiling
+/// `868.56 ms`; highest broken `129.25 ms` (2026-09-16). `868` is the largest whole millisecond of that interval.
 ///
-/// **Bir kez zaten tetiklendi ve bu sabitin asıl dersi o.** 2026-09-16'nın
-/// türetmesi `1742,29 ms`'lik bir uçtan `870`'i vermişti; 011'in duman
-/// reçetesini değiştirmesinden sonra yirmi koşuluk yeniden gözlem bandın
-/// alt ucunu `1737,12`'ye indirdi ve `870` kuralın tavanını **1,44 ms**
-/// aştı. Kapı o koşularda yeşildi — aşım payda saklanıyordu, sayıda değil.
-/// Ders: bu sabitin tetiği dar ve **sessiz**; üç saniyelik sağlıklı bir koşu
-/// `1737 ms`'nin altına inerse bozulan şey kapı değil **kuralın kendisi**
-/// olur ve sayı `/measure` ile yeniden türetilmelidir.
+/// **It has already fired once, and that is this constant's real lesson.**
+/// The 2026-09-16 derivation had given `870` from an end of `1742.29 ms`;
+/// after 011 changed the smoke recipe, a twenty-run re-observation lowered
+/// the band's lower end to `1737.12` and `870` exceeded the rule's ceiling by
+/// **1.44 ms**. The gate was green in those runs — the excess hid in the
+/// denominator, not in the number. Lesson: this constant's trigger is narrow
+/// and **silent**; if a healthy three-second run drops below `1737 ms` what
+/// breaks is not the gate but **the rule itself**, and the number must be re-derived with `/measure`.
 ///
-/// **Dört sayı birbirine bağlı ve gerekçeleri aynı blokta**
-/// (`docs/OLCUMLER.md` → `## Boşta kare`): `BT_RUN_SECONDS`'ın 3'ü,
-/// [`bt_core::smoke_shell`]'in 1 saniyelik uykusu, aynı reçetenin imleç
-/// sıçrama **mesafesi** (011) ve bu taban. Sessizlik
-/// `koşu süresi − (uyku + yerleşme)` kadar, yani **ikisinden biri oynarsa bu
-/// sayı da oynamak zorunda**: `BT_RUN_SECONDS=2` ile kuyruk ~0,75 saniyeye
-/// iner ve kapı kod doğruyken düşer. Üçü üç dosyaya dağılırsa biri
-/// oynadığında kapı sessizce kırılganlaşır.
+/// **Four numbers are tied together and their rationales are in the same
+/// block** (`docs/OLCUMLER.md` → `## Boşta kare`): `BT_RUN_SECONDS`'s 3,
+/// [`bt_core::smoke_shell`]'s 1-second sleep, the same recipe's cursor jump
+/// **distance** (011) and this floor. The quiet is `run duration − (sleep +
+/// settling)`, so **if either of the two moves this number must move too**:
+/// with `BT_RUN_SECONDS=2` the tail shrinks to ~0.75 seconds and the gate
+/// falls while the code is right. If the three are spread over three files,
+/// when one moves the gate silently becomes fragile.
 ///
-/// **Bilinen yanlış pozitif** ([`IDLE_FRAME_LIMIT`]'inkiyle aynı kök):
-/// koşunun son `QUIET_FLOOR`'unda pencereyi sürüklemek, örtüp açmak ya da
-/// ekranı uyandırmak meşru bir kare doğurur ve kuyruğu sıfırlar. Kalıcı çare
-/// aynı: geometri kaynaklı kareleri sayaç dışında tutmak (kayıtlı borç,
-/// `docs/YOL-HARITASI.md`).
+/// **Known false positive** (same root as [`IDLE_FRAME_LIMIT`]'s): dragging
+/// the window, covering and uncovering it or waking the screen during the
+/// last `QUIET_FLOOR` of the run gives birth to a legitimate frame and resets
+/// the tail. The lasting remedy is the same: keep geometry-caused frames out
+/// of the counter (a recorded debt, `docs/YOL-HARITASI.md`).
 ///
-/// Yalnız [`Workload::Smoke`]'ta soruluyor: ölçüm yükü deadline'a kadar çıktı
-/// akıtıyor, yani orada sessizlik sıfıra yakın olmak **zorunda**
-/// ([`Verdict::MotionUnsettled`]'ın aynı kolda muaf olmasının gerekçesiyle).
+/// Asked only in [`Workload::Smoke`]: the measurement load streams output
+/// until the deadline, so there the quiet **must** be near zero (with the
+/// same rationale as [`Verdict::MotionUnsettled`] being exempt in the same arm).
 ///
 /// Re-observed after the 040 move to the wgpu window path (2026-09-30): the
 /// lowest healthy run was `1746.88 ms` (half: `873.44`), the highest broken
 /// one `155.21 ms` — `868` is still inside the rule, unchanged.
 const QUIET_FLOOR: Duration = Duration::from_millis(868);
 
-/// Kullanıcının dünyasına açılan girişlerin **tek** dalı.
+/// The **single** branch of the entries that open onto the user's world.
 ///
-/// Süreli koşu (`make duman`, ölçüm) ayar dosyasını, dosya izlemeyi, sistemin
-/// açık/koyu görünümünü, Hareketi Azalt ayarını ve Tema menüsünün
-/// `themes/`'ten dolmasını görmez:
-/// kapının sonucu o makinenin `~/.config/bateri/`'sine bağlı olmasın: dosyayı
-/// okuyup izlemeyi kuran [`AppDelegate::load_settings`] ve
-/// [`AppDelegate::reload_settings`], görünümü okuyan
-/// [`AppDelegate::apply_appearance`] ve Theme ▸'yi dolduran
-/// `menuNeedsUpdate:`. Dosyayı yaratan "Settings…"
-/// ([`AppDelegate::edit_settings`]) ve yazan tema seçimi
-/// ([`AppDelegate::save_theme`]) de bu değere bakar, kendi `run.is_some()`
-/// koşulunu yazmaz — beş ayrı koşuldan birinin unutulduğu gün kapı sessizce
-/// kullanıcının dosyasına bağlanırdı
-/// (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1).
+/// A timed run (`make smoke`, measurement) does not see the settings file,
+/// file watching, the system's light/dark appearance, the Reduce Motion
+/// setting and the Theme menu filling from `themes/`:
+/// the gate's result must not depend on that machine's `~/.config/bateri/`:
+/// [`AppDelegate::load_settings`], which reads the file and sets up the
+/// watch, and [`AppDelegate::reload_settings`], [`AppDelegate::apply_appearance`],
+/// which reads the appearance, and `menuNeedsUpdate:`, which fills Theme ▸.
+/// "Settings…", which creates the file ([`AppDelegate::edit_settings`]), and
+/// the theme choice that writes ([`AppDelegate::save_theme`]) look at this
+/// value too and do not write their own `run.is_some()` condition — the day
+/// one of five separate conditions is forgotten the gate would silently be
+/// tied to the user's file (`.tasks/007-ayarlar-ve-tema/discussion.md` → Karar 1).
 ///
-/// **Beşincisi Hareketi Azalt** ([`resolve_reduce_motion`], 008 phase-5) ve
-/// dalı ayar dosyasında değil sistemde: `NSWorkspace`'in erişilebilirlik
-/// ayarı okunsaydı `make duman`'ın `hareket=` jetonu ölçen makinenin
-/// erişilebilirlik tercihine bağlanır, yani kapı bir makinede yeşil bir
-/// makinede kırmızı düşerdi. Gözlemciyi kuran
-/// [`AppDelegate::observe_reduce_motion`] de aynı değere bakıyor.
+/// **The fifth is Reduce Motion** ([`resolve_reduce_motion`], 008 phase-5) and
+/// its branch is not in the settings file but in the system: if
+/// `NSWorkspace`'s accessibility setting were read, `make smoke`'s `motion=`
+/// token would be tied to the measuring machine's accessibility preference,
+/// i.e. the gate would fall green on one machine and red on another. The
+/// [`AppDelegate::observe_reduce_motion`] that sets up the observer looks at
+/// the same value too.
 ///
-/// Bedeli: dosyadan ekrana giden kabloyu hiçbir kapı görmüyor; onu geçici
-/// dizindeki sınamalar (`settings`) ve göz kontrolü taşıyor.
+/// The cost: no gate sees the wire from file to screen; temporary-directory
+/// tests (`settings`) and visual inspection carry it.
 ///
-/// **Saklanmıyor**, her soruşta [`AppDelegate::inputs`] ile `Ivars.run`'dan
-/// türüyor: ayrı bir ivar aynı kararın ikinci kopyası olurdu ve ikisinin
-/// ayrıştığı gün süreli bir koşu kullanıcının dosyasını okurdu.
+/// **Not stored**, derived every time it is asked from [`AppDelegate::inputs`]
+/// and `Ivars.run`: a separate ivar would be a second copy of the same
+/// decision and the day the two diverge a timed run would read the user's file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Inputs {
-    /// Süreli koşu: gömülü varsayılanlar, dışarıdan hiçbir şey.
+    /// Timed run: embedded defaults, nothing from outside.
     Hermetic,
-    /// Kullanıcının oturumu. `config_root` `None` → ev dizini çözülemedi ve
-    /// ayar dosyası aranmıyor.
+    /// The user's session. `config_root` `None` → the home directory could not
+    /// be resolved and the settings file is not searched for.
     User { config_root: Option<PathBuf> },
 }
 
-/// [`Inputs`]'un kararı — saf, sınanıyor.
+/// [`Inputs`]'s decision — pure, tested.
 fn decide_inputs(run: Option<Run>, home: Option<PathBuf>) -> Inputs {
     match run {
         Some(_) => Inputs::Hermetic,
@@ -272,19 +272,19 @@ fn decide_inputs(run: Option<Run>, home: Option<PathBuf>) -> Inputs {
     }
 }
 
-/// Üç değerli `[motion] reduce_motion` + sistemin cevabı → tek `bool`.
+/// Three-valued `[motion] reduce_motion` + the system's answer → a single `bool`.
 ///
-/// **Birleştirme burada, çünkü sistemi gören katman burası:** `bt-gpu` AppKit
-/// görmüyor (`CLAUDE.md` → katman tablosu) ve `bt-core`'un ayar modeli zaten
-/// bir dosyanın karşılığı, bir erişilebilirlik ayarının değil. Aşağıya
-/// **çözülmüş** bir `bool` iniyor (`Renderer::set_font` emsali).
+/// **The combination is here because this is the layer that sees the system:**
+/// `bt-gpu` does not see AppKit (`CLAUDE.md` → layer table) and `bt-core`'s
+/// settings model is already the counterpart of a file, not of an
+/// accessibility setting. A **resolved** `bool` descends below (the `Renderer::set_font` precedent).
 ///
-/// `system` bir **closure**, `bool` değil: `"on"`/`"off"` diyen kullanıcının
-/// oturumunda `NSWorkspace`'e hiç gidilmiyor. Süreli koşu da hiç gitmiyor ve
-/// bu bir tembellik değil kapı — [`Inputs::Hermetic`]'te `make duman`'ın
-/// satırı ölçen makinenin erişilebilirlik ayarına bağlanırdı.
-///
-/// Saf ve bu yüzden sınanabilir: gerçek bir `AppDelegate` gerekmiyor
+/// `system` is a **closure**, not a `bool`: in the session of a user who says
+/// `"on"`/`"off"` `NSWorkspace` is never consulted. A timed run never
+/// consults it either and this is not laziness but a gate — in
+/// [`Inputs::Hermetic`] `make smoke`'s line would be tied to the measuring
+/// machine's accessibility setting.
+/// Pure and therefore testable: no real `AppDelegate` is needed
 /// (`hermetic_run_does_not_read_reduce_motion`).
 fn resolve_reduce_motion(
     inputs: &Inputs,
@@ -301,43 +301,43 @@ fn resolve_reduce_motion(
     }
 }
 
-/// `[motion] smooth_scroll` + Hareketi Azalt + `cursor_motion` → tek `bool`:
-/// tekerlek pürüzsüz mü gidiyor.
+/// `[motion] smooth_scroll` + Reduce Motion + `cursor_motion` → a single
+/// `bool`: does the wheel go smooth.
 ///
-/// Üçünden biri hareketi kapatıyorsa satır adımı — hareketi kapatmış olana
-/// kaydırma animasyon *eklemez* (`cursor_motion = "snap"`'in Hareketi
-/// Azalt'la ilişkisinin aynısı). Nicemleme **kaynakta**, `bt-gpu`'nun
-/// `Motion`'ında değil: `false` kolu bugünkü satır yolu olarak kalıyor
-/// (`.tasks/027-yumusak-kaydirma/discussion.md` → Karar 5).
+/// If any of the three turns motion off, line stepping — scrolling does not
+/// *add* animation for one who turned motion off (the same as
+/// `cursor_motion = "snap"`'s relation to Reduce Motion). Quantization is
+/// **at the source**, not in `bt-gpu`'s `Motion`: the `false` arm stays as
+/// today's line path (`.tasks/027-yumusak-kaydirma/discussion.md` → Karar 5).
 ///
-/// `reduce` [`resolve_reduce_motion`]'ın çözülmüş cevabı, yani süreli koşu
-/// burada da sistemi okumuyor. Saf, sınanıyor.
+/// `reduce` is [`resolve_reduce_motion`]'s resolved answer, i.e. a timed run
+/// does not read the system here either. Pure, tested.
 fn resolve_smooth_scroll(settings: &Settings, reduce: bool) -> bool {
     settings.smooth_scroll == SmoothScroll::On
         && !reduce
         && settings.cursor_motion != CursorMotion::Snap
 }
 
-/// Yeni pencerenin nasıl açıldığı — [`AppDelegate::open_window`]'un iki
-/// kararı buradan: sekme mi pencere mi, ve kabuk ilk girdi alıyor mu.
+/// How a new window is opened — [`AppDelegate::open_window`]'s two decisions
+/// come from here: tab or window, and whether the shell gets a first input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Opening {
-    /// ⌘N, Dock ikonu, açılışın ilk penceresi: ayrı pencere, yerel kabuk.
+    /// ⌘N, Dock icon, the startup's first window: a separate window, local shell.
     Window,
-    /// ⌘T ve sekme çubuğunun `+`'sı: `from`'un grubunda sekme; `from`
-    /// uzaktaysa aynı host'a (037 Karar 6).
+    /// ⌘T and the tab bar's `+`: a tab in `from`'s group; to the same host if
+    /// `from` is remote (037 Karar 6).
     Tab,
-    /// Shell ▸ New Local Tab (⌥⌘T): sekme, her zaman yerel kabuk.
+    /// Shell ▸ New Local Tab (⌥⌘T): a tab, always a local shell.
     LocalTab,
-    /// Shell ▸ Split Right / Split Down (⌘D / ⇧⌘D): odaktaki pane'in
-    /// yanında bölme; ⌘T'nin kuralıyla, uzak pane'den aynı host'a (039
-    /// Karar 9). Ekseni [`AppDelegate::open_split`] taşıyor.
+    /// Shell ▸ Split Right / Split Down (⌘D / ⇧⌘D): a split next to the focused
+    /// pane; by ⌘T's rule, to the same host from a remote pane (039 Karar 9).
+    /// The axis is carried by [`AppDelegate::open_split`].
     Split,
 }
 
-/// Yeni kabuğun ilk girdisi: yalnız ⌘T ile bölme ve yalnız uzak bir `from`'dan —
-/// satır `from`'un uzak hedefinin kaçırılmış satırı ([`bt_core::Session::remote_line`]).
-/// ⌘N yeni bir çalışma alanı, ⌥⌘T kaçış yolu; ikisi de yerel (037 Karar 6).
+/// The new shell's first input: only with ⌘T and splits and only from a remote
+/// `from` — the line is `from`'s remote target's escaped line ([`bt_core::Session::remote_line`]).
+/// ⌘N is a new workspace, ⌥⌘T the escape route; both are local (037 Karar 6).
 fn initial_line(opening: Opening, remote_line: Option<String>) -> Option<String> {
     match opening {
         Opening::Tab | Opening::Split => remote_line,
@@ -345,25 +345,25 @@ fn initial_line(opening: Opening, remote_line: Option<String>) -> Option<String>
     }
 }
 
-/// Shell entegrasyonunun çocuğa eklediği ortam — kurulmuyorsa boş.
+/// The environment shell integration adds to the child — empty if not set up.
 ///
-/// **Kararın tamamı burada ve saf**: hangi kabuk, hangi ayar, betik nerede.
-/// Yeri `child` değil `app`, çünkü kapının ilk katı [`Inputs`] ve o bu modüle
-/// özel ([`resolve_reduce_motion`] emsali; orada da sistemi okuyan taraf
-/// `bt-shell-macos` ama kararı `Inputs` kapılıyor).
+/// **The whole decision is here and pure**: which shell, which setting, where
+/// the script is. Its place is `app` not `child`, because the gate's first tier is [`Inputs`] and it is private to this module
+/// ([`resolve_reduce_motion`] precedent; there too the side that reads the
+/// system is `bt-shell-macos` but the decision is gated by `Inputs`).
 ///
-/// `shell` ve `script_dir` birer **closure**: süreli koşuda ve `"off"` diyen
-/// kullanıcının oturumunda ikisine de hiç gidilmiyor. Süreli koşununki bir
-/// tembellik değil **kapı** — `make duman`'ın sonucu ölçen makinenin kabuk
-/// yapılandırmasına bağlanırdı ve kapıyı closure'ı panikleyen bir sınama
-/// tutuyor (`hermetic_run_does_not_set_up_shell_integration`).
+/// `shell` and `script_dir` are **closures**: in a timed run and in the
+/// session of a user who says `"off"` neither is ever consulted. The timed
+/// run's is not laziness but a **gate** — `make smoke`'s result would be tied
+/// to the measuring machine's shell configuration and a test whose closure
+/// panics holds the gate (`hermetic_run_does_not_set_up_shell_integration`).
 ///
-/// `zdotdir` **eager**: kendi sürecimizin ortamı, kullanıcının dünyasına
-/// açılan bir giriş değil ve hermetik kolda değeri çocuğa zaten hiç ulaşmıyor.
+/// `zdotdir` is **eager**: it is our own process's environment, not an entry
+/// open to the user's world, and in the hermetic arm its value never reaches the child anyway.
 ///
-/// Dönüş `Vec`, `Option` değil: kurulan ortam bir çift değil **iki** çift
-/// olabiliyor (kullanıcının özgün `ZDOTDIR`'ı varsa ikincisi de gider) ve
-/// çağıran onu `locale_env()`'in yanına zincirliyor.
+/// The return is a `Vec`, not an `Option`: the environment set up can be not
+/// one pair but **two** (if the user has an original `ZDOTDIR` the second goes
+/// too) and the caller chains it next to `locale_env()`.
 fn shell_integration_env(
     inputs: &Inputs,
     setting: ShellIntegration,
@@ -374,43 +374,43 @@ fn shell_integration_env(
     if matches!(inputs, Inputs::Hermetic) || !setting.installs_wrapper() {
         return Vec::new();
     }
-    // Tanımadığımız kabuk sessizce geri düşüyor: terminal bugünkü gibi
-    // çalışıyor, yalnız işaret gelmiyor.
+    // A shell we do not recognize silently falls back: the terminal works as
+    // today, only the marks do not arrive.
     if !shell().is_some_and(|shell| child::is_zsh(&shell)) {
         return Vec::new();
     }
-    // UTF-8 olmayan yol da aynı sessiz geri düşüş: `SessionOptions.env`
-    // `String` istiyor ve entegrasyonsuz bir oturum, yarım kurulmuş bir
-    // `ZDOTDIR`'dan iyi.
+    // A non-UTF-8 path is the same silent fallback: `SessionOptions.env`
+    // wants a `String` and a session without integration is better than a
+    // half-set-up `ZDOTDIR`.
     let Some(dir) = script_dir().and_then(|dir| dir.into_os_string().into_string().ok()) else {
         return Vec::new();
     };
-    // Kullanıcının özgün `ZDOTDIR`'ı: betik onu geri koyacak. Üç kol da
-    // "ikinci çift gitmesin" diyor ama gerekçeleri ayrı:
+    // The user's original `ZDOTDIR`: the script will put it back. All three
+    // arms say "the second pair should not go" but their reasons differ:
     let original = match zdotdir {
-        // Boş değer tanımsız sayılıyor (`decide_locale`'in kuralı) — boş bir
-        // `ZDOTDIR`'ı "geri koymak" `$HOME`'u işaret eden bir değişken
-        // yaratmak olurdu.
+        // An empty value counts as undefined (`decide_locale`'s rule) —
+        // "putting back" an empty `ZDOTDIR` would create a variable pointing
+        // at `$HOME`.
         None => None,
         Some(value) if value.is_empty() => None,
         Some(value) => match value.into_string() {
-            // **Kendine dönük değer** (`/code-review`, 009 kapısı): ortamdaki
-            // `ZDOTDIR` zaten betiğin dizinini gösteriyorsa (elle kurulmuş ya
-            // da sızmış) onu "kullanıcının özgün değeri" diye geri vermek,
-            // betiğe kendi `.zshenv`'ini yeniden yükletir ve zsh'in `FUNCNEST`
-            // sınırına kadar özyineler; oturum `ZDOTDIR`'sız kalır. Betikte de
-            // bir kat var, bu ilk kat.
+            // **A self-pointing value** (`/code-review`, 009 gate): if the
+            // `ZDOTDIR` in the environment already points at the script's
+            // directory (set by hand or leaked), handing it back as "the
+            // user's original value" makes the script reload its own
+            // `.zshenv` and recurse to zsh's `FUNCNEST` limit; the session is
+            // left without `ZDOTDIR`. The script has a layer for this too, this is the first layer.
             Ok(value) if value == dir => None,
             Ok(value) => Some(value),
-            // **UTF-8 olmayan değer entegrasyonu tümden reddediyor** ve bu
-            // kol `var` yerine `var_os` istemesinin sebebi (`/code-review`,
-            // 009 kapısı): `var().ok()` onu `None`'a düşürüyordu, yani
-            // "kullanıcının `ZDOTDIR`'ı yoktu" sayılıyor ve betik oturumun
-            // sonunda değişkeni **siliyordu** — kullanıcının bütün
-            // yapılandırması tanısız kaybolurdu. Komşu her kenar (UTF-8
-            // olmayan betik yolu, tanınmayan `$SHELL`) entegrasyonu
-            // reddederek geri düşüyor; `decide_locale` de "yok" ile
-            // "kullanılamaz"ı bilerek ayırıyor.
+            // **A non-UTF-8 value rejects the integration entirely** and this
+            // arm is the reason it wants `var_os` instead of `var`
+            // (`/code-review`, 009 gate): `var().ok()` dropped it to `None`,
+            // i.e. it counted as "the user had no `ZDOTDIR`" and the script
+            // **deleted** the variable at the end of the session — the user's
+            // entire configuration would be lost without a diagnostic. Every
+            // neighboring edge (a non-UTF-8 script path, an unrecognized
+            // `$SHELL`) falls back by rejecting the integration; `decide_locale`
+            // also deliberately separates "absent" from "unusable".
             Err(_) => return Vec::new(),
         },
     };
@@ -418,72 +418,72 @@ fn shell_integration_env(
     if let Some(original) = original {
         env.push(("BATERI_ZDOTDIR".to_owned(), original));
     }
-    // **Yalnız `blocks` kademesinde gönderiliyor** (`BATERI_ZDOTDIR`'ın
-    // koşullu olmasıyla aynı biçim): varsayılan kolda ortama tek bayt
-    // eklemiyoruz ve betiğin "değişken yok → prompt terminalin" kuralı
-    // varsayılanın **tek** kaydı oluyor. İki yerde yazılsaydı biri
-    // değiştiğinde öteki sessizce eskirdi.
+    // **Sent only at the `blocks` tier** (the same shape as `BATERI_ZDOTDIR`
+    // being conditional): in the default arm we add not a single byte to the
+    // environment and the script's "no variable → the prompt is the terminal's" rule becomes the default's **only** record. If it were
+    // written in two places, when one changed the other would silently age.
     //
-    // Değişkenin adı kararı söylüyor, sonucunu değil: betik ondan **üç** şey
-    // türetiyor (prompt sıfırlansın mı, ayna kurulsun mu, dal basılsın mı) ve
-    // üçü de "bu oturumda dock var mı"nın cevabı. Kararı terminal veriyor,
-    // kabuğa sorulmuyor (`ShellIntegration::wants_dock`).
+    // The variable's name states the decision, not its result: the script
+    // derives **three** things from it (should the prompt be reset, should the
+    // mirror be set up, should the branch be printed) and all three are the
+    // answer to "is there a dock in this session". The terminal gives the
+    // decision, the shell is not asked (`ShellIntegration::wants_dock`).
     if !setting.wants_dock() {
         env.push(("BATERI_DOCK".to_owned(), "off".to_owned()));
     }
     env
 }
 
-/// Pencere geometrisi + hücre ölçüsünden türeyen grid.
+/// The grid derived from the window geometry + the cell size.
 ///
-/// Adı `Metrics` değil: hücre metriğinin sahibi artık `bt-gpu`
-/// ([`CellMetrics`]) ve iki tip bu dosyada yan yana okunuyor. Buradaki
-/// "kaç sütun kaç satır **ve** hangi hücreyle", oradaki yalnız hücre.
+/// Its name is not `Metrics`: the owner of the cell metrics is now `bt-gpu`
+/// ([`CellMetrics`]) and the two types are read side by side in this file.
+/// Here "how many columns how many rows **and** with which cell", there only the cell.
 ///
-/// `view` modülüne de açık: fare çevirisi aynı üçlüyü ister ve ayrıştırma
-/// iki çağrı yerinde tekrarlanacağına burada bir kez durur.
+/// Open to the `view` module too: mouse translation wants the same triple and
+/// the derivation stays here once instead of being repeated at two call sites.
 #[derive(Clone, Copy)]
 pub(crate) struct Grid {
     pub(crate) cols: u16,
     pub(crate) rows: u16,
-    /// Demet değil `CellMetrics`: ölçü buradan `DisplayLink::resize`'a
-    /// olduğu gibi geçiyor. `Grid`'de saklanan bu değer yalnız
-    /// `SessionOptions`'a girerken demete iniyor — `split_into_grid`'un
-    /// bölmeye soktuğu demet başka bir değer: oraya **gelen** ölçü girer,
-    /// `Grid` ondan sonra doğar.
+    /// Not a tuple but `CellMetrics`: the metrics pass from here to
+    /// `DisplayLink::resize` as they are. The value stored in `Grid` alone
+    /// descends to a tuple when it enters `SessionOptions` — the tuple that
+    /// `split_into_grid` splits is another value: the **incoming** metrics
+    /// enter it, `Grid` is born after it.
     pub(crate) cell: CellMetrics,
 }
 
-/// Piksel geometrisi + ızgara ölçüsü → grid.
+/// Pixel geometry + grid metrics → grid.
 ///
-/// `TerminalPane::sync_geometry`'den ayrı duruyor çünkü saf olan tek parça
-/// bu; geri kalanı pencere ve layer, yani sınanamaz. Ölçü **argüman**: bu gövdeye
-/// gizlenmiş bir sabit `cell_metrics_come_from_outside`'i düşürür.
+/// It stands apart from `TerminalPane::sync_geometry` because this is the
+/// only pure piece; the rest is window and layer, i.e. untestable. The
+/// metrics are an **argument**: a constant hidden in this body would make `cell_metrics_come_from_outside` fail.
 ///
-/// Kapsamı bu kadar, daha fazlası değil: `CELL_PX`'in asıl durduğu satır
-/// `sync_geometry`'deki `cell_metrics(scale)` çağrısıydı ve orası bir
-/// pencere ile Metal device istediği için sınanmıyor. `CellMetrics::new`
-/// bilerek `pub`, yani oraya yazılacak bir `CellMetrics::new(9, 18, 7, 8, 1)` yer
-/// tutucuyu diriltir ve buradaki iki sınama yeşil kalır.
+/// The scope is this much, no more: the line where `CELL_PX` really stood was
+/// the `cell_metrics(scale)` call in `sync_geometry` and it is not tested
+/// because it wants a window and a Metal device. `CellMetrics::new` is
+/// deliberately `pub`, so a placeholder like `CellMetrics::new(9, 18, 7, 8,
+/// 1)` written there would revive and the two tests here would stay green.
 ///
-/// **Sol pay sütunlardan düşülür** (010 Karar 3): şerit metnin üstüne
-/// binmesin. Pay her zaman ayrılıyor — entegrasyonsuz oturumda (bash/fish,
-/// `shell.integration = false`, SSH) boş kalması kabul edilen bedel;
-/// alternatifi ilk prompt'ta bir SIGWINCH ve üç tüketicinin aynı anda
-/// güncellenmesiydi.
+/// **The left gutter is subtracted from the columns** (010 Karar 3): so the
+/// stripe does not overlap the text. The gutter is always reserved — the
+/// accepted cost is that it stays empty in a session without integration
+/// (bash/fish, `shell.integration = false`, SSH); the alternative was a
+/// SIGWINCH at the first prompt and three consumers being updated at once.
 ///
-/// **Dock payı satırlardan düşülür** (012) ve sol payın tersine **koşullu**:
-/// dock yalnız entegrasyonlu zsh oturumunda var ve karar oturum doğarken
-/// veriliyor (`TerminalPane::start`). Payı koşulsuz ayırmak dock'u
-/// olmayan pencereden sebepsiz iki satır götürürdü — sol payın sekiz
-/// noktasıyla kıyaslanmayacak bir bedel.
+/// **The dock share is subtracted from the rows** (012) and, unlike the left
+/// gutter, is **conditional**: the dock exists only in an integrated zsh
+/// session and the decision is made while the session is born
+/// (`TerminalPane::start`). Reserving the share unconditionally would take
+/// two rows for no reason from a window without a dock — a cost not
+/// comparable with the left gutter's eight points.
 ///
-/// **Pay koşu boyunca oynuyor** (R5.2): alternatif ekranda sıfıra iniyor,
-/// çıkışta doğum değerine dönüyor (`dock_rows_for`,
-/// `TerminalPane::alt_screen_did_change`).
-/// Oynamanın bedeli bir `TIOCSWINSZ` ve o bedel **komut başına değil geçiş
-/// başına** ödeniyor — `git log` gibi alternatif ekrana girmeyen komutlar
-/// bayrağı hiç oynatmıyor, yani bu fonksiyon da yeniden çağrılmıyor.
+/// **The share varies during the run** (R5.2): it drops to zero on the
+/// alternate screen and returns to its birth value on exit (`dock_rows_for`,
+/// `TerminalPane::alt_screen_did_change`). The cost of varying is one `TIOCSWINSZ` and that cost is paid **per
+/// transition, not per command** — commands like `git log` that do not enter
+/// the alternate screen never move the flag, so this function is not called again either.
 pub(crate) fn split_into_grid(
     width_px: f64,
     height_px: f64,
@@ -491,29 +491,29 @@ pub(crate) fn split_into_grid(
     dock_rows: u16,
 ) -> Grid {
     let (cell_w, cell_h) = cell.cell_px();
-    // `as u16` f64'te doygundur (NaN ve negatif → 0, büyük → 65535) ve kesme
-    // tam olarak istediğimiz taban yuvarlama; sıfır sütun/satırı
-    // `Session::resize` zaten yoksayar (simge durumundaki pencere). Bölen
-    // sıfır olamaz ve bunu tip taşıyor: `CellMetrics`'in alanı private ve
-    // kurucusu (`CellMetrics::new`) sıfırı eliyor; üretimdeki kaynağı
-    // `Renderer::cell_metrics`, oranın garantisi de `bt-atlas`'ın ≥ 1
-    // kırpması.
+    // `as u16` saturates in f64 (NaN and negative → 0, large → 65535) and the
+    // truncation is exactly the floor rounding we want; `Session::resize`
+    // already ignores zero columns/rows (a minimized window). The divisor
+    // cannot be zero and the type carries this: `CellMetrics`'s field is
+    // private and its constructor (`CellMetrics::new`) rejects zero; its
+    // source in production is `Renderer::cell_metrics`, and the guarantee of the ratio is `bt-atlas`'s ≥ 1 clamp.
     //
-    // Çıkarma **`f64`'te** ve bu bir tercih değil şart: paydan dar bir
-    // pencerede fark negatife iner, bölme negatif kalır ve `as u16` onu
-    // sıfıra doyurur — yani mevcut davranış (sıfır sütun, `Session::resize`
-    // yoksayar) korunur. Aynı çıkarma `u16`'da yapılsaydı **taşar** ve
-    // 65535'e yakın bir sütun sayısı, o boyda bir `TIOCSWINSZ` üretirdi.
-    // Yeni bir alt sınır bilerek getirilmiyor: zincirin sonu zaten doğru.
+    // The subtraction is **in `f64`** and this is not a preference but a
+    // requirement: in a window narrower than the gutter the difference goes
+    // negative, the division stays negative and `as u16` saturates it to zero
+    // — i.e. the existing behavior (zero columns, `Session::resize` ignores
+    // it) is preserved. Had the same subtraction been done in `u16` it would
+    // **overflow** and produce a column count near 65535, a `TIOCSWINSZ` of
+    // that size. No new lower bound is deliberately introduced: the end of the chain is already right.
     let usable_width = width_px - f64::from(cell.gutter_px());
-    // Dock payı da **`f64`'te** ve aynı gerekçeyle: dock'tan alçak bir
-    // pencerede fark negatife iner, bölme negatif kalır ve `as u16` onu sıfıra
-    // doyurur — `Session::resize` o boyutu zaten yoksayıyor. `u16`'da
-    // yapılsaydı taşar ve 65535 satırlık bir `TIOCSWINSZ` üretirdi.
-    // Formül **bt-gpu'nun** ([`bt_gpu::dock_px`]): dock'un payı satırların
-    // yanında iki nefes payı da taşıyor ve burada yeniden yazılsaydı yeniden
-    // boyutlandırmada bir kare boyunca ayrışırdı — `DOCK_ROWS`'u tüketmekle
-    // aynı disiplin, ikinci bir kopya tutulmuyor.
+    // The dock share is also **in `f64`** and for the same reason: in a window
+    // shorter than the dock the difference goes negative, the division stays
+    // negative and `as u16` saturates it to zero — `Session::resize` already
+    // ignores that size. Done in `u16` it would overflow and produce a
+    // 65535-row `TIOCSWINSZ`. The formula is **bt-gpu's** ([`bt_gpu::dock_px`]):
+    // the dock's share carries two breathing margins next to the rows and were
+    // it rewritten here it would diverge for one frame on resize — the same
+    // discipline as consuming `DOCK_ROWS`, no second copy is kept.
     let usable_height = height_px - f64::from(bt_gpu::dock_px(dock_rows, cell));
     Grid {
         cols: (usable_width / f64::from(cell_w)) as u16,
@@ -522,30 +522,30 @@ pub(crate) fn split_into_grid(
     }
 }
 
-/// Uygulamanın delegate'i — pencereden uygulama geneline dönen yol.
+/// The application's delegate — the way back from a window to the app level.
 ///
-/// Pencere uygulama delegate'ine referans **tutmuyor**: delegate süreç boyunca
-/// yaşıyor ve `NSApp`'in `delegate` özelliğinden her seferinde bulunabiliyor,
-/// yani saklanan bir referans yalnız bir çember ya da bir sarkma ihtimali
-/// eklerdi. Çağıranları: ana kuyruk işleri (alternatif ekran habercisi, başlık
-/// haberi, kabuğun çıkışı, kapanan pencerenin listeden çıkışı — kimlikten
-/// pencereye), punto eylemleri (ayarın fontu) ve geometri (font tanısının alt
-/// başlığı). `None` → delegate henüz bağlanmadı; çağıran sessizce düşüyor.
+/// A window does **not** hold a reference to the app delegate: the delegate
+/// lives for the whole process and can be found each time from `NSApp`'s
+/// `delegate` property, so a stored reference would only add a cycle or a
+/// dangling possibility. Its callers: main-queue jobs (the alternate-screen
+/// messenger, the title news, the shell's exit, a closing window's removal
+/// from the list — from id to window), point-size actions (the setting's
+/// font) and geometry (the font diagnostic's subtitle). `None` → the delegate is not bound yet; the caller silently drops.
 pub(crate) fn delegate(mtm: MainThreadMarker) -> Option<Retained<AppDelegate>> {
     let delegate = NSApplication::sharedApplication(mtm).delegate()?;
     let object: &AnyObject = (*delegate).as_ref();
     object.downcast_ref::<AppDelegate>().map(Message::retain)
 }
 
-/// Kimliği `id` olan açık pane — pane'in doğum paketindeki arama yolu
-/// (`pane::PaneLookup`): okuyucu thread'den ve arka plan işlerinden ana
-/// kuyruğa dönen işler pane'i bununla buluyor (039 Karar 3). Düz bir `fn`,
-/// yani `Send` ve pane'in modülü `AppDelegate`'i görmüyor.
+/// The open pane whose id is `id` — the lookup path in the pane's birth
+/// package (`pane::PaneLookup`): jobs returning to the main queue from the
+/// reader thread and from background jobs find the pane with it (039 Karar
+/// 3). A plain `fn`, i.e. `Send`, and the pane's module does not see `AppDelegate`.
 pub(crate) fn pane_by_id(mtm: MainThreadMarker, id: u64) -> Option<Retained<TerminalPane>> {
     delegate(mtm)?.pane(id)
 }
 
-/// İzleme kaynaklarının bildirimi ([`notify_settings_changed`]).
+/// The notification of the watch sources ([`notify_settings_changed`]).
 ///
 /// The watch notifies on its own background queue (`watch`'s contract); the
 /// applier needs the main thread, so the event hops there.
@@ -572,38 +572,38 @@ fn watch_notify() -> Notify {
 /// ([`watch_notify`]).
 static WATCH_PENDING: AtomicBool = AtomicBool::new(false);
 
-/// Bir izleme olayını uygulayıcıya taşır: **hedefsiz eylemle**
-/// `settingsDidChange:`'e, görünüm değişiminin (`view.rs`) yolundan.
+/// Carries a watch event to the applier: **with a targetless action** to
+/// `settingsDidChange:`, through the path of the appearance change (`view.rs`).
 ///
-/// Hiçbir şey yakalamıyor: kaynağın context'inde bir delegate referansı
-/// olsaydı iptal işleyicisi onu düşürür ve ömrünü libdispatch'in iptal
-/// zamanlamasına bağlardı. Responder zinciri pencere key olmasa da (kullanıcı
-/// editörde) `NSApp`'e ve onun delegate'ine varıyor.
+/// It captures nothing: had the source's context held a delegate reference
+/// the cancel handler would drop it and tie its lifetime to libdispatch's
+/// cancel timing. The responder chain reaches `NSApp` and its delegate even
+/// when no window is key (the user is in the editor).
 fn notify_settings_changed() {
     // audit: the only caller is `watch_notify`, which runs this through
     // `DispatchQueue::main().exec_async`, and work on the main queue is on the
     // main thread by definition.
-    let mtm = MainThreadMarker::new().expect("izleme bildirimi ana kuyruğa taşınıyor");
+    let mtm = MainThreadMarker::new().expect("the watch notification is hopped to the main queue");
     let app = NSApplication::sharedApplication(mtm);
-    // SAFETY: seçici geçerli; hedef `None` → responder zinciri. Alıcısı
-    // `AppDelegate::settings_did_change`, tek `Option<&AnyObject>` argüman
-    // alıyor ve gönderene bakmıyor. Alıcı yoksa (delegate henüz bağlanmadı)
-    // `false` döner ve olay düşer; sonraki kayıt yine gelir.
+    // SAFETY: the selector is valid; the target `None` → the responder chain.
+    // Its receiver is `AppDelegate::settings_did_change`, which takes a single
+    // `Option<&AnyObject>` argument and does not look at the sender. If there
+    // is no receiver (the delegate is not bound yet) it returns `false` and the event drops; the next save arrives again.
     let _ = unsafe { app.sendAction_to_from(sel!(settingsDidChange:), None, None) };
 }
 
-/// Oturum doğarken ayrılacak dock payı (R5.1).
+/// The dock share to reserve while the session is born (R5.1).
 ///
-/// **İki koşul da gerekli ve ayrı sorular.** `integration` boşsa sarmalayıcı
-/// hiç kurulmadı — hermetik koşu, `"off"`, tanımadığımız kabuk, UTF-8 olmayan
-/// betik yolu — yani dock'u dolduracak ayna yok. `wants_dock` ise
-/// **kullanıcının seçimi**: `"blocks"` kademesinde sarmalayıcı kuruluyor
-/// (bloklar ve işaretler onun bütün gerekçesi) ama giriş satırı ızgarada
-/// kalıyor, yani pay ayrılmıyor.
+/// **Both conditions are necessary and separate questions.** If `integration`
+/// is empty the wrapper was never set up — hermetic run, `"off"`, an
+/// unrecognized shell, a non-UTF-8 script path — i.e. there is no mirror to
+/// fill the dock. `wants_dock` is **the user's choice**: at the `"blocks"`
+/// tier the wrapper is set up (blocks and marks are its whole reason) but the
+/// input line stays in the grid, i.e. no share is reserved.
 ///
-/// Birini ötekinden türetmek 012 phase-10'un kapattığı kusuru geri getirirdi:
-/// ekranda **iki prompt** (kullanıcınınki ızgarada, dock'unki altta) ve
-/// ikisi arasında sıçrayan bir caret.
+/// Deriving one from the other would bring back the defect 012 phase-10
+/// closed: **two prompts** on screen (the user's in the grid, the dock's
+/// below) and a caret jumping between them.
 fn dock_rows_at_birth(integration: &[(String, String)], setting: ShellIntegration) -> u16 {
     if integration.is_empty() || !setting.wants_dock() {
         0
@@ -612,26 +612,26 @@ fn dock_rows_at_birth(integration: &[(String, String)], setting: ShellIntegratio
     }
 }
 
-/// Bu anın dock payı: alternatif ekranda **sıfır**, değilse doğum değeri.
+/// This moment's dock share: **zero** on the alternate screen, otherwise the birth value.
 ///
-/// Doğum değeri ayrı bir girdi ve bu zorunlu: entegrasyonsuz bir oturumda
-/// (`birth == 0`) alternatif ekrandan çıkmak dock **doğurmamalı**. Tek bir
-/// `dock_rows` alanı üstüne yazılsaydı `DOCK_ROWS` sabitinden geri kurmak
-/// gerekirdi ve o, olmayan bir dock'u var etmenin tam yolu.
+/// The birth value is a separate input and this is mandatory: in a session
+/// without integration (`birth == 0`) leaving the alternate screen must not
+/// **give birth** to a dock. Had a single `dock_rows` field been written over,
+/// one would have to rebuild from the `DOCK_ROWS` constant, and that is exactly the way to conjure a dock that does not exist.
 ///
-/// Saf: `bt-shell-macos`'un AppKit'siz sınanabilen tek yarısı burası.
+/// Pure: this is `bt-shell-macos`'s only half testable without AppKit.
 pub(crate) fn dock_rows_for(alt_screen: bool, birth: u16) -> u16 {
     if alt_screen { 0 } else { birth }
 }
 
-/// Anahtarı tutan ve **kapanmamış** ilk öğe — kimlikle aramaların
-/// (`AppDelegate::pane`, `window_by_tab`) tek kuralı.
-/// `key` öğe başına `(eşleşiyor mu, kapandı mı)` verir.
+/// The first item that holds the key and is **not closed** — the single rule
+/// for lookups by id (`AppDelegate::pane`, `window_by_tab`).
+/// `key` gives, per item, `(matches, closed)`.
 ///
-/// Kapanmış öğe eşleşse de `None`: pane'in penceresi listeden bir tur sonra
-/// çıkıyor (`forget_window`) ve o arada okuyucu thread'in bayat bir haberi
-/// ya da bir `bateri://tab/` açılışı kapanmış oturumu bulmamalı. Saf,
-/// sınanıyor.
+/// A closed item is `None` even if it matches: the pane's window leaves the
+/// list one turn later (`forget_window`) and in the meantime a stale message
+/// from the reader thread or a `bateri://tab/` open must not find a closed
+/// session. Pure, tested.
 fn find_open<T>(items: impl IntoIterator<Item = T>, key: impl Fn(&T) -> (bool, bool)) -> Option<T> {
     items.into_iter().find(|item| {
         let (matches, closed) = key(item);
@@ -639,19 +639,19 @@ fn find_open<T>(items: impl IntoIterator<Item = T>, key: impl Fn(&T) -> (bool, b
     })
 }
 
-/// Dosyayı kullanıcının editöründe açar; hiçbir yol açamadıysa `false`.
+/// Opens the file in the user's editor; `false` if no way could open it.
 ///
-/// Önce dosya türünün varsayılan uygulaması (`NSWorkspace`, Finder'da çift
-/// tıklamanın yolu). `.toml`'u sahiplenen uygulama her makinede yok — sistem
-/// türü tanımasa da o türü kimse açmayabilir; o zaman varsayılan **metin**
-/// editörü (`open -t`, çoğu makinede TextEdit). İkincisi bir alt süreç ve
-/// dönüşü bekleniyor: `open` işi LaunchServices'e verip hemen çıkıyor.
+/// First the file type's default application (`NSWorkspace`, the path of a
+/// double-click in Finder). The application that claims `.toml` does not
+/// exist on every machine — even if the system does not recognize the type
+/// nobody may open it; then the default **text** editor (`open -t`, TextEdit
+/// on most machines). The second is a child process and its return is awaited: `open` hands the job to LaunchServices and exits at once.
 ///
-/// **Bilinen sınır — ana thread bekler.** `open` editörü soğuk açarken
-/// dönmüyor ve display link ana thread'de: o arada pencere kare çizmez, tuş
-/// işlenmez (`/code-review` bulgusu, 007 kapıda waive). Yalnız `.toml`'u
-/// sahiplenen uygulama yokken ve kullanıcının kendi tıklamasında; odak zaten
-/// editöre geçiyor. Beklememek hatanın alt başlığa yolunu keserdi.
+/// **Known limit — the main thread waits.** `open` does not return while the
+/// editor starts cold and the display link is on the main thread: meanwhile
+/// the window draws no frames and no keys are processed (a `/code-review`
+/// finding, waived at the 007 gate). Only when no application claims `.toml`
+/// and on the user's own click; focus is moving to the editor anyway. Not waiting would cut the error's path to the subtitle.
 fn open_in_editor(path: &Path) -> bool {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
     if NSWorkspace::sharedWorkspace().openURL(&url) {
@@ -664,124 +664,124 @@ fn open_in_editor(path: &Path) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Basılı tutulan harfin **aksan popover'ını** kapatır: terminalde basılı
-/// tuş **yineleme** demektir (vim'de `j`, kabukta `u`), popover onu çalar.
+/// Turns off the **accent popover** of a held-down letter: in a terminal a
+/// held key means **repeat** (`j` in vim, `u` in the shell), the popover would swallow it.
 ///
-/// Yan etki `NSTextInputClient`'ın kendisiyle geliyor (018 phase-1): protokolü
-/// uygulamayan bir view'da popover zaten çıkmıyordu.
+/// The side effect comes with `NSTextInputClient` itself (018 phase-1): in a
+/// view that does not implement the protocol the popover did not appear anyway.
 ///
-/// Yazılan yer uygulamanın **kendi `registerDefaults`'ı**, yani bellekteki
-/// registration domain: kullanıcının plist'i el değmeden kalıyor ve ayar
-/// koşudan koşuya taşınmıyor. Gerekçe kabuğun rc dosyasına dokunmama
-/// kuralının aynısı — kullanıcının dosyasına biz yazmayız. Kurulu bir ürünün
-/// kanıtı aynı anahtarı gösteriyor: iTerm2 kendi domain'inde
-/// `ApplePressAndHoldEnabled = 0` tutuyor.
+/// The place written is the app's **own `registerDefaults`**, i.e. the
+/// in-memory registration domain: the user's plist is left untouched and the
+/// setting does not carry from run to run. The rationale is the same as the
+/// rule of not touching the shell's rc file — we do not write to the user's
+/// file. The evidence of an installed product shows the same key: iTerm2 keeps
+/// `ApplePressAndHoldEnabled = 0` in its own domain.
 ///
-/// **Yarısı ölçüldü** (2026-09-20): bu makinenin `NSGlobalDomain`'inde
-/// `ApplePressAndHoldEnabled` **yok** (`defaults read -g`), yani arama
-/// sırasında registration domain'in üstünde onu ezecek bir halka bulunmuyor
-/// — set kapısının "NSGlobalDomain ya da MDM eziyor olabilir" itirazı bu
-/// kurulumda konusuz.
+/// **Half was measured** (2026-09-20): in this machine's `NSGlobalDomain`
+/// `ApplePressAndHoldEnabled` **does not exist** (`defaults read -g`), i.e.
+/// in the lookup order there is no link above the registration domain to
+/// override it — the set gate's objection "NSGlobalDomain or MDM may be overriding" is moot in this setup.
 ///
-/// **İkinci yarı da ölçüldü** (2026-09-20, kullanıcı gerçek pencerede):
-/// harf basılı tutulunca popover **çıkmıyor**, yani AppKit kararı
-/// `NSUserDefaults` üzerinden okuyor ve registration domain'i görüyor.
-/// Kuşkunun kaynağı `CFPreferences`'a doğrudan bakma ihtimaliydi (iTerm2'nin
-/// *kalıcı* domain değeri tutması o ihtimalin ipucuydu; ghostty aynı
-/// `registerDefaults` yolunu kullanıyor) ve düştü. Hermetik sınama makineye
-/// bağlı olurdu; kapatan şey `e`'yi basılı tutmaktı.
+/// **The second half was measured too** (2026-09-20, the user in a real
+/// window): when a letter is held the popover **does not appear**, i.e.
+/// AppKit reads the decision through `NSUserDefaults` and sees the
+/// registration domain. The source of the suspicion was the possibility of
+/// looking at `CFPreferences` directly (iTerm2 keeping the value in the
+/// *persistent* domain was a hint of that possibility; ghostty uses the same
+/// `registerDefaults` path) and it fell. A hermetic test would depend on the machine; what closed it was holding `e` down.
 ///
-/// **Tutmasaydı belirti iki yarılı olurdu** ve ikincisi sessiz: gürültülü yarısı
-/// basılı tuşun yinelememesi, sessiz yarısı popover'dan seçilen harfin
-/// kabuğa **çift** gitmesi — o çağrı `insertText:"é" replacementRange:{n-1,1}`
-/// oluyor ve `view::BateriView` aralığı atladığı için `eé` yazılıyor.
-/// Popover'ı açan şey `NSTextInputClient`'ın kendisi, yani bu iki belirtiyi
-/// de doğuran ve tek çaresi burada olan aynı değişiklik (018 phase-1).
+/// **Had it not held, the symptom would have had two halves** and the second
+/// silent: the noisy half is the held key not repeating, the silent half is
+/// the letter chosen from the popover going to the shell **twice** — that call
+/// is `insertText:"é" replacementRange:{n-1,1}` and since
+/// `view::BateriView` skips the range, `eé` is typed. What opens the popover
+/// is `NSTextInputClient` itself, i.e. the same change that causes both
+/// symptoms and whose only remedy is here (018 phase-1).
 fn disable_press_and_hold() {
     let key = ns_string!("ApplePressAndHoldEnabled");
     let off = NSNumber::numberWithBool(false);
     let defaults = NSDictionary::from_slices::<NSString>(&[key], &[off.as_ref()]);
-    // SAFETY: sözlüğün anahtarı `NSString`, değeri property-list'e girebilen
-    // bir `NSNumber` — `registerDefaults`'ın istediği tipler.
+    // SAFETY: the dictionary's key is an `NSString`, its value an `NSNumber`
+    // that can enter a property list — the types `registerDefaults` wants.
     unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
 }
 
-/// Delegate'in durumu — **uygulama geneli**. Pencere başına olan her şey
-/// (pencere, view, yüzey, renderer, oturum, link, dock payı, geçici punto)
-/// [`TerminalWindow`]'da; burada ayarlar, izleme kaynakları, alt başlık
-/// yuvaları, ölçüm defteri, süreli koşunun tarifi ve pencere listesi.
+/// The delegate's state — **app-wide**. Everything per-window (window, view,
+/// surface, renderer, session, link, dock share, temporary point size) is in
+/// [`TerminalWindow`]; here are the settings, watch sources, subtitle slots,
+/// the measurement ledger, the timed run's recipe and the window list.
 pub(crate) struct Ivars {
-    /// Süreli koşunun tarifi; `None` → kullanıcının kendi oturumu. Deadline,
-    /// bekçi, sabit shell ve rapor **hep birlikte** buna bağlı.
+    /// The timed run's recipe; `None` → the user's own session. The deadline,
+    /// the guard, the fixed shell and the report **all** depend on this together.
     run: Option<Run>,
-    /// Alt başlığın yuvaları; yazanı yalnız [`AppDelegate::post_notices`].
-    /// Uygulama genelinde, çünkü kaynakları (ayar, tema, font, yazma) da öyle:
-    /// her pencerenin alt başlığı aynı metni gösteriyor.
+    /// The subtitle's slots; written only by [`AppDelegate::post_notices`].
+    /// App-wide, because their sources (settings, theme, font, write) are too:
+    /// every window's subtitle shows the same text.
     notices: RefCell<Notices>,
-    /// Geçerli ayarlar: açılışta [`AppDelegate::load_settings`], kayıtta
-    /// [`AppDelegate::reload_settings`] yazar; görünüm uygulayıcısı
-    /// `theme_for` için, Theme ▸ işaretli öğe için okur. Süreli koşuda varsayılanlar ve görünüm
-    /// uygulayıcısı onları hiç okumaz (`Inputs::Hermetic`).
+    /// The current settings: [`AppDelegate::load_settings`] writes at startup,
+    /// [`AppDelegate::reload_settings`] on save; the appearance applier reads
+    /// for `theme_for`, Theme ▸ for the checked item. In a timed run the
+    /// defaults, and the appearance applier never reads them (`Inputs::Hermetic`).
     ///
-    /// Saklanıyor, çünkü görünüm değişimi dosyayı yeniden okumadan hangi
-    /// temanın seçileceğini bilmeli ve canlı yenileme farkı buna karşı alıyor.
-    /// Kullanılamayan bir kayıt onu **değiştirmez**: sonraki görünüm değişimi
-    /// son iyi ayarlarla seçer.
+    /// Stored because the appearance change must know which theme to choose
+    /// without rereading the file, and the live refresh takes its diff against
+    /// this. An unusable save does **not change** it: the next appearance
+    /// change chooses with the last good settings.
     settings: RefCell<Settings>,
-    /// Ayar dizininin kaynakları: kök, `themes/`, `settings.toml`
-    /// ([`settings::watched_paths`]). Süreli koşuda ve ev dizini
-    /// çözülemeyince hiç kurulmuyor.
+    /// The settings directory's sources: the root, `themes/`, `settings.toml`
+    /// ([`settings::watched_paths`]). Never set up in a timed run nor when the
+    /// home directory cannot be resolved.
     config_watch: RefCell<Option<Watch>>,
-    /// Etkin kullanıcı temasının dosyası. Ayrı yuva, çünkü adı görünümle de
-    /// değişiyor ve görünüm değişimi ayar dosyasını yeniden okumuyor; gömülü
-    /// tema seçiliyse dosya yok ve yuva kaynaksız.
+    /// The active user theme's file. A separate slot, because its name also
+    /// changes with the appearance and an appearance change does not reread
+    /// the settings file; if the embedded theme is chosen there is no file and the slot has no source.
     theme_watch: RefCell<Option<Watch>>,
-    /// Ölçüm defteri — kapı kapalıyken `None` ve hiç ayrılmamış.
+    /// The measurement ledger — `None` and never allocated when the gate is off.
     ///
-    /// `bt-gpu`'nun tipi ama sahibi burası: `DisplayLink` ile tamamlanma bloğu
-    /// birer kopyasını yazıyor, kapanışta okuyan (rapor) bu kopya.
+    /// `bt-gpu`'s type but its owner is here: `DisplayLink` and the completion
+    /// block each write a copy, and the one read at shutdown (the report) is this copy.
     stats: Option<Arc<Stats>>,
-    /// Açık pencereler (her sekme bir pencere). **Sahibi burası**: pencerenin
-    /// delegate özelliği zayıf ve `TerminalWindow` başka hiçbir yerde
-    /// tutulmuyor. Doğuran tek yol [`AppDelegate::open_window`]; kapanan
-    /// pencere bir tur sonra çıkıyor ([`AppDelegate::forget_window`]).
+    /// The open windows (each tab is a window). **Owned here**: the window's
+    /// delegate property is weak and `TerminalWindow` is held nowhere else.
+    /// The only path that creates is [`AppDelegate::open_window`]; a closing
+    /// window leaves one turn later ([`AppDelegate::forget_window`]).
     ///
-    /// Kayıt anı yolları bu listeyi dolaşıyor ve dolaşırken **kopyasını**
-    /// ([`AppDelegate::windows`]) alıyor: pencereye giden çağrı geri dönüp
-    /// buraya uzanabiliyor (`sync_geometry` → [`AppDelegate::post_notices`]).
+    /// The on-save paths walk this list and, while walking, take a **copy** of
+    /// it ([`AppDelegate::windows`]): a call going to a window can come back
+    /// and reach here (`sync_geometry` → [`AppDelegate::post_notices`]).
     windows: RefCell<Vec<Retained<TerminalWindow>>>,
-    /// Pencere kimliklerinin sayacı ([`TerminalWindow::id`]); kimlik yeniden
-    /// kullanılmıyor, yani kapanmış bir pencereye giden bayat bir haber başka
-    /// bir pencereyi bulamaz.
+    /// The window-id counter ([`TerminalWindow::id`]);
+    /// ids are not reused, so
+    /// a stale message going to a closed window cannot find another window.
     next_window_id: Cell<u64>,
-    /// Son görülen sistem görünümü koyu muydu — [`AppDelegate::apply_appearance`]'ın
-    /// kapısı. `None`: henüz hiç değişim gelmedi (ilk haber her zaman geçer).
+    /// Was the last-seen system appearance dark — the gate of
+    /// [`AppDelegate::apply_appearance`]. `None`: no change has arrived yet (the first news always passes).
     ///
-    /// Kapı bir **tasarruf**, doğruluk şartı değil: KVO haberi görünümün adı
-    /// değişince de geliyor (vurgu rengi, yüksek kontrast) ve tema yalnız
-    /// açık/koyu bitine bağlı; bit aynıysa tema dosyasını yeniden okumanın ve
-    /// bütün pencereleri yeniden boyamanın sebebi yok.
+    /// The gate is a **saving**, not a correctness requirement: the KVO news
+    /// also arrives when the appearance's name changes (accent color, high
+    /// contrast) and the theme depends only on the light/dark bit; if the bit
+    /// is the same there is no reason to reread the theme file and repaint all windows.
     appearance_dark: Cell<Option<bool>>,
-    /// Ayar penceresi (bateri ▸ Settings…): ilk açılışta doğuyor, kapatınca
-    /// gizleniyor ve süreç boyunca yaşıyor (029 Karar 4). Terminal penceresi
-    /// **değil** — [`Ivars::windows`]'a girmiyor, yani ⌘Q'nun onayı, ayar
-    /// yayılımı ve sekme işleri onu görmüyor. Süreli koşuda hiç doğmuyor.
+    /// The settings window (bateri ▸ Settings…): born on first open, hidden
+    /// when closed and lives for the whole process (029 Karar 4). **Not** a
+    /// terminal window — it does not enter [`Ivars::windows`], i.e. ⌘Q's
+    /// confirmation, settings propagation and tab jobs do not see it. Never born in a timed run.
     settings_window: RefCell<Option<Retained<SettingsWindow>>>,
-    /// Ayar dosyasının son okunuşundaki hâli (029 Karar 7): ayar penceresinin
-    /// kilidi ve satır tanıları buradan. Açılışta ve her canlı okumada
-    /// yazılıyor, yani pencere sonradan açılsa da dosyanın hâlini görüyor.
+    /// The settings file's state at its last read (029 Karar 7): the settings
+    /// window's lock and line diagnostics come from here. Written at startup
+    /// and at every live read, so even if the window opens later it sees the file's state.
     settings_state: RefCell<settings::FileState>,
-    /// Shell menüsünün delegate'i ([`crate::menu::install`]): menü onu zayıf
-    /// tutuyor, yaşatan burası.
+    /// The Shell menu's delegate ([`crate::menu::install`]): the menu holds it
+    /// weakly, this is what keeps it alive.
     shell_menu: OnceCell<Retained<ShellMenuDelegate>>,
-    /// Sparkle'ın güncelleyicisi ([`crate::updater`]): "Check for
-    /// Updates…" onu zayıf tutuyor, yaşatan burası. Paketsiz ve süreli
-    /// koşuda boş.
+    /// Sparkle's updater ([`crate::updater`]): "Check for Updates…" holds it
+    /// weakly, this is what keeps it alive.
+    /// Empty in an unbundled and timed run.
     updater: OnceCell<Retained<AnyObject>>,
 }
 
 define_class!(
-    // SAFETY: NSObject alt sınıflama şartı taşımaz; AppDelegate Drop uygulamaz.
+    // SAFETY: NSObject subclassing carries no requirement; AppDelegate does not implement Drop.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "BateriAppDelegate"]
@@ -795,11 +795,11 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
             disable_press_and_hold();
-            // Native sekmeler açık (026 → Karar 1): `setAllowsAutomaticWindowTabbing`
-            // varsayılanında, pencereler ortak `tabbingIdentifier` taşıyor
+            // Native tabs are on (026 → Karar 1): `setAllowsAutomaticWindowTabbing`
+            // at its default, the windows carry a common `tabbingIdentifier`
             // (`TerminalWindow::new`).
-            // Güncelleyici menüden **önce**: öğesinin hedefi o. Süreli koşu
-            // ağa çıkmıyor ve bir güncelleme sorusu pencereyi örtmemeli.
+            // The updater comes **before** the menu: it is its item's target. A
+            // timed run does not go out to the network and an update question must not cover the window.
             if self.ivars().run.is_none()
                 && let Some(updater) = crate::updater::start()
             {
@@ -811,40 +811,40 @@ define_class!(
                 self.ivars().updater.get().map(|u| &**u),
             );
             let _ = self.ivars().shell_menu.set(shell_menu);
-            // Ayarlar ilk pencereden **önce** okunuyor: `scrollback` ve tema
-            // `SessionOptions`'a giriyor, font ayarı da hücre ölçüsünü, yani
-            // ilk grid'i ve kabuğun gördüğü ilk `TIOCSWINSZ`'yi belirliyor.
-            // Tanıların alt başlığa ulaşması için pencerenin önce doğması
-            // artık gerekmiyor: yeni pencere alt başlığını yuvalardan
-            // devralıyor (`open_window`).
+            // The settings are read **before** the first window: `scrollback` and
+            // the theme enter `SessionOptions`, and the font setting also
+            // determines the cell size, i.e. the first grid and the first
+            // `TIOCSWINSZ` the shell sees. The window no longer needs to be born
+            // first for the diagnostics to reach the subtitle: the new window takes
+            // its subtitle over from the slots (`open_window`).
             self.load_settings();
             NSApplication::sharedApplication(mtm).activate();
-            // Renderer pencereyle birlikte doğuyor (026 → Karar 2a) ve hatası
-            // buraya düşüyor. `didFinishLaunching` hata döndüremez; Metal'siz
-            // ya da kabuksuz bir terminal penceresi boş bir kutudur ve eskiden
-            // `run`'ın döndürdüğü hata `main`'de aynı satırla ve aynı çıkış
-            // koduyla basılıyordu. **Yalnız ilk pencerede**: ⌘T/⌘N'nin hatası
-            // süreci bitirmiyor ([`AppDelegate::open_window_or_report`]).
+            // The renderer is born with the window (026 → Karar 2a) and its error
+            // lands here. `didFinishLaunching` cannot return an error; a terminal
+            // window without Metal or without a shell is an empty box, and formerly
+            // the error `run` returned was printed in `main` with the same line and
+            // the same exit code. **Only for the first window**: the error of
+            // ⌘T/⌘N does not end the process ([`AppDelegate::open_window_or_report`]).
             if let Err(e) = self.open_window(None, Opening::Window) {
                 eprintln!("bateri: {e}");
                 std::process::exit(1);
             }
-            // Sistemin Hareketi Azalt bildirimi uygulama genelinde ve bir kez;
-            // pencerenin ilk değeri `start`'ta kendi link'ine indi.
+            // The system's Reduce Motion notification is app-wide and once; the
+            // window's first value descended to its own link in `start`.
             self.observe_reduce_motion();
-            // Açık/koyu görünüm de uygulama genelinde ve bir kez; ilk pencerenin
-            // teması zaten görünümden seçildi (`open_window` → `resolve_theme`).
+            // The light/dark appearance is also app-wide and once; the first
+            // window's theme was already chosen from the appearance (`open_window` → `resolve_theme`).
             self.observe_appearance();
 
             if let Some(run) = self.ivars().run {
-                // Zamanlayıcı bir blok değil `performSelector`: seçici bu
-                // sınıfta ve iptal edilmesi gerekmiyor.
-                // SAFETY: `runDeadline:` bu sınıfta tanımlı ve tek
-                // Option<&AnyObject> argüman alıyor. Delegate özellikleri zayıf
-                // referanstır; self'i yaşatan `run()`'daki `Retained`, o da
-                // `app.run()`'ı aşar. Zamanlayıcı ayrıca hedefini kendi tutar.
-                // Common modes: canlı boyutlandırma run loop'u tracking moduna
-                // sokar, varsayılan modda kurulan zamanlayıcı orada ertelenirdi.
+                // The timer is not a block but `performSelector`: the selector is
+                // in this class and needs no cancelling.
+                // SAFETY: `runDeadline:` is defined in this class and takes a single
+                // Option<&AnyObject> argument. Delegate properties are weak
+                // references; what keeps self alive is the `Retained` in `run()`,
+                // which outlives `app.run()`. The timer also holds its target itself.
+                // Common modes: live resizing puts the run loop in tracking mode,
+                // a timer set up in the default mode would be postponed there.
                 unsafe {
                     self.performSelector_withObject_afterDelay_inModes(
                         sel!(runDeadline:),
@@ -856,32 +856,32 @@ define_class!(
             }
         }
 
-        /// Son pencere kapanınca uygulama **açık kalır** (026 → Karar 5):
-        /// macOS'un çok pencereli uygulama geleneği; Dock ikonu ve ⌘N yeni
-        /// pencere açıyor.
+        /// After the last window closes the app **stays open** (026 → Karar 5):
+        /// macOS's multi-window app convention; the Dock icon and ⌘N open a new
+        /// window.
         ///
-        /// **Süreli koşuda** `true` ve bu bir sözleşme: duman reçetesi
-        /// deadline'dan kısa biterse rapor `child_exit` → `terminate:` yolundan
-        /// basılıyor (`ShellWake::child_exit`) ve pencere o yolda listeden hiç
-        /// düşmüyor; kapanan tek pencerede uygulama yine bitmeli.
+        /// **In a timed run** `true` and this is a contract: if the smoke recipe
+        /// ends before the deadline the report is printed from the `child_exit`
+        /// → `terminate:` path (`ShellWake::child_exit`) and the window never
+        /// leaves the list on that path; the app must still end with the single closed window.
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window(&self, _app: &NSApplication) -> bool {
             self.ivars().run.is_some()
         }
 
-        /// Dock ikonuna tıklandı. **Hiç pencere yoksa** yeni pencere açılır ve
-        /// AppKit'in varsayılanı atlanır; pencere varsa (simge durumunda da)
-        /// varsayılan kalır — AppKit simge durumundakini geri getiriyor, ve
-        /// yenisini açmak kullanıcının küçülttüğü oturumu gizlemek olurdu.
+        /// The Dock icon was clicked. **If there is no window at all** a new
+        /// window opens and AppKit's default is skipped; if there is a window
+        /// (even minimized) the default stays — AppKit restores the minimized
+        /// one, and opening a new one would hide the session the user minimized.
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
         fn should_handle_reopen(&self, _app: &NSApplication, _has_visible_windows: bool) -> bool {
-            // `return` yok: `define_class!` gövdenin son ifadesini `Bool`'a
-            // çeviriyor, erken `return`'ün `bool`'unu çevirmiyor.
+            // No `return`: `define_class!` converts the body's last expression
+            // to `Bool`, it does not convert an early `return`'s `bool`.
             //
-            // Ölçüt yalnız terminal penceresi listesi: `has_visible_windows`
-            // About paneli gibi terminal olmayan pencereyi de sayıyor ve açık
-            // bir panel yeni pencereyi engellerdi (`/code-review`); liste simge
-            // durumundakileri zaten kapsıyor.
+            // The criterion is only the terminal window list: `has_visible_windows`
+            // also counts a non-terminal window like the About panel and an open
+            // panel would block the new window (`/code-review`); the list already
+            // covers the minimized ones.
             let default = !self.ivars().windows.borrow().is_empty();
             if !default {
                 self.open_window_or_report(None, Opening::Window);
@@ -889,19 +889,19 @@ define_class!(
             default
         }
 
-        /// `bateri://…` açıldı (`open`, tarayıcı, başka bir uygulama; 038
-        /// Karar 4–6). URL'ler sırayla işleniyor, sonuncusu öne gelir.
+        /// `bateri://…` was opened (`open`, the browser, another app; 038
+        /// Karar 4–6). URLs are processed in order, the last one comes to the front.
         ///
-        /// **Güvenlik değişmezi: bu yol yalnız odaklar.** Şemayı her uygulama
-        /// açabilir; burada kabuğa tek bayt gitmez, komut koşmaz, pencere
-        /// açılmaz. Kollar: `bateri://tab/<id>` ve yaşayan pane → sekmesi öne
-        /// ve klavye o pane'e ([`TerminalWindow::bring_to_front`], 039 Karar
-        /// 10); tanınan ama ölü kimlik →
-        /// yalnız uygulama öne; başka her biçim (`block/` dahil) → hiçbir şey.
+        /// **Security invariant: this path only focuses.** Any app can open the
+        /// scheme; here not a single byte goes to the shell, no command runs, no
+        /// window opens. Arms: `bateri://tab/<id>` and a live pane → its tab to
+        /// the front and the keyboard to that pane ([`TerminalWindow::bring_to_front`],
+        /// 039 Karar 10); a recognized but dead id →
+        /// only the app to the front; every other form (`block/` included) → nothing.
         ///
-        /// Soğuk başlatmada liste boş (URL `applicationDidFinishLaunching:`'ten
-        /// önce gelebiliyor) ve kol "ölü kimlik"; ilk pencere olağan yolundan
-        /// bir kez açılıyor.
+        /// On a cold start the list is empty (the URL can arrive before
+        /// `applicationDidFinishLaunching:`) and the arm is "dead id"; the first
+        /// window opens once by its usual path.
         #[unsafe(method(application:openURLs:))]
         fn open_urls(&self, _app: &NSApplication, urls: &NSArray<NSURL>) {
             for url in urls {
@@ -918,40 +918,40 @@ define_class!(
             }
         }
 
-        /// ⌘Q, Dock ▸ Quit, oturum kapatma ve yeniden başlatma: çıkmadan önce
-        /// sorulsun mu (028 → Karar 3, 5). Soru bütün pencereler için **tek**
-        /// uyarı; `runModal` eşzamanlı, yani cevap doğrudan dönüyor ve
-        /// `NSTerminateLater` gerekmiyor.
+        /// ⌘Q, Dock ▸ Quit, logout and restart: should it ask before quitting
+        /// (028 → Karar 3, 5). The question is **one** alert for all windows;
+        /// `runModal` is synchronous, i.e. the answer returns directly and
+        /// `NSTerminateLater` is not needed.
         ///
-        /// Süreli koşu **ilk satırda** ve süreç tablosuna dokunmadan geçiyor:
-        /// kabuğun `exit`'i orada `child_exit` → `terminate:` ile buraya varıyor
-        /// ve başsız bir `runModal` bekçi kurulmadan asılırdı.
+        /// A timed run passes **on the first line** without touching the process
+        /// table: the shell's `exit` arrives here through `child_exit` →
+        /// `terminate:` and a headless `runModal` would hang before the guard is set up.
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
             self.terminate_reply()
         }
 
-        /// AppKit'in kapanış yolu: bateri ▸ Quit (Cmd-Q, menüden `terminate:`)
-        /// ve süreli koşuda `exit` yazan shell (`child_exit` → `terminate:`)
-        /// buraya varır; etkileşimli oturumda kırmızı düğme ve `exit` yalnız o
-        /// pencereyi kapatıyor (`TerminalWindow`'un `windowWillClose:`'u).
-        /// Koşan iş varken Cmd-Q önce sorar (`applicationShouldTerminate:`);
-        /// buraya varıldıysa karar verilmiştir.
-        /// Duman deadline'ı buraya uğramaz, `terminate:` her zaman 0 ile
-        /// çıkar ve `runDeadline:` kırmızı düşebilmek zorunda. Ortak olan
-        /// bildirim değil sıra: iki yol da [`AppDelegate::shutdown`] çağırır ve
-        /// kapanışa eklenecek her adım oraya eklenir.
+        /// AppKit's shutdown path: bateri ▸ Quit (Cmd-Q, `terminate:` from the
+        /// menu) and in a timed run the shell that writes `exit` (`child_exit` →
+        /// `terminate:`) arrive here; in an interactive session the red button
+        /// and `exit` close only that window (`TerminalWindow`'s `windowWillClose:`).
+        /// With a running job Cmd-Q asks first (`applicationShouldTerminate:`);
+        /// if we arrived here the decision has been made.
+        /// The smoke deadline does not come by here, `terminate:` always exits
+        /// with 0 and `runDeadline:` must be able to fall red. What is shared is
+        /// not the notification but the order: both paths call [`AppDelegate::shutdown`]
+        /// and every step to be added to shutdown is added there.
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
-            // Damga kapanıştan **önce**, `runDeadline:`'daki gerekçeyle:
-            // `shutdown()` yarım saniyeye kadar bekleyebiliyor ve o bekleme
-            // sessizliğe yazılırsa jeton ölçtüğünü sandığı şeyi ölçmez.
+            // The stamp **before** shutdown, for the reason in `runDeadline:`:
+            // `shutdown()` can wait up to half a second and if that wait is
+            // written into the quiet, the token does not measure what it thinks it measures.
             //
-            // Kapı **okumadan önce** soruluyor: `quiet_since` bir saat okuması
-            // (`CACurrentMediaTime`) ve süresiz koşuda bu değer atılacak.
-            // "Kapı kapalıyken tek bir saat okuması bile yok" (`CLAUDE.md`)
-            // Cmd-Q yolunda da geçerli; aşağıdaki `if let` tek başına değeri
-            // atıyordu ama okumayı engellemiyordu.
+            // The gate is asked **before reading**: `quiet_since` is a clock read
+            // (`CACurrentMediaTime`) and in an untimed run this value will be
+            // discarded. "Not even a single clock read when the gate is off"
+            // (`CLAUDE.md`) holds on the Cmd-Q path too; the `if let` below alone
+            // discarded the value but did not prevent the read.
             let quiet = self
                 .ivars()
                 .run
@@ -959,12 +959,12 @@ define_class!(
                 .then(|| self.quiet_since())
                 .flatten();
             let teardown = self.shutdown();
-            // Duman koşusu deadline'a varmadan da bitebilir: shell kendi
-            // çıkarsa (`BT_RUN_SECONDS` betiğin uykusundan uzunsa, ya da
-            // gerçek bir shell hemen ölürse) `ChildExit` buraya getirir.
-            // Rapor basılmadan çıkmak `make duman`'a hiçbir şey ölçmemiş bir
-            // koşuyu exit 0 ile yeşil gösterirdi — kapının sahte yeşil verdiği
-            // tek yol buydu.
+            // A smoke run can also end before reaching the deadline: if the shell
+            // exits by itself (`BT_RUN_SECONDS` longer than the script's sleep, or
+            // a real shell dying at once) `ChildExit` brings it here. Exiting
+            // without printing the report would show a run that measured nothing
+            // as green with exit 0 to `make smoke` — this was the only way the
+            // gate gave a false green.
             if let Some(run) = self.ivars().run {
                 self.report_and_exit(run, teardown, quiet);
             }
@@ -972,13 +972,13 @@ define_class!(
     }
 
     unsafe impl NSMenuDelegate for AppDelegate {
-        /// Theme ▸ açılıyor — delegate yalnız ona bağlı (`menu::install`).
-        /// Liste o anda kuruluyor: `themes/`'e konan dosya bir sonraki
-        /// açılışta görünür, dizin liste için izlenmiyor. İşaretli öğe
-        /// geçerli ayardaki `theme`.
+        /// Theme ▸ is opening — the delegate is tied only to it (`menu::install`).
+        /// The list is built at that moment: a file dropped into `themes/` shows
+        /// at the next opening, the directory is not watched for the list. The
+        /// checked item is the current setting's `theme`.
         ///
-        /// Süreli koşuda ve ev dizini çözülemeyince doldurulmaz
-        /// ([`Inputs`]): seçimin yazacağı bir dosya yok.
+        /// In a timed run and when the home directory cannot be resolved it is
+        /// not filled ([`Inputs`]): there is no file for the choice to write.
         #[unsafe(method(menuNeedsUpdate:))]
         fn menu_needs_update(&self, menu: &NSMenu) {
             let Inputs::User {
@@ -993,16 +993,16 @@ define_class!(
             crate::menu::fill_themes(self.mtm(), menu, &settings.theme, &embedded, &user);
         }
 
-        /// "Bu menüde şu tuşun karşılığı var mı": hayır, tema öğelerinin
-        /// kısayolu yok.
+        /// "Does this menu have a counterpart for this key": no, the theme items
+        /// have no shortcut.
         ///
-        /// Tanımlanmasının tek sebebi maliyet: delegate bunu tanımlamazsa
-        /// AppKit her Command'lı tuşta (Cmd-C dahil) karşılığı aramak için
-        /// menüyü `menuNeedsUpdate:` ile doldurur — her tuşta `themes/`
-        /// okunurdu. `objc2-app-kit` bu yöntemi üretmiyor (dönüş işaretçili
-        /// argümanlar); imza elle. İki çıkış argümanı (`id *`, `SEL *`) opak
-        /// işaretçi: `Sel` işaretçi kodlaması taşımıyor ve `false` dönen yöntem
-        /// onlara hiç yazmıyor.
+        /// The only reason to define it is cost: if the delegate does not define
+        /// it, AppKit fills the menu with `menuNeedsUpdate:` at every Command key
+        /// (Cmd-C included) to look for a counterpart — `themes/` would be read
+        /// on every key. `objc2-app-kit` does not generate this method (arguments
+        /// with pointer returns); the signature is by hand. The two out arguments
+        /// (`id *`, `SEL *`) are opaque pointers: `Sel` carries no pointer
+        /// encoding and a method that returns `false` never writes to them.
         #[unsafe(method(menuHasKeyEquivalent:forEvent:target:action:))]
         fn menu_has_key_equivalent(
             &self,
@@ -1016,9 +1016,9 @@ define_class!(
     }
 
     impl AppDelegate {
-        /// KVO: `NSApp.effectiveAppearance` değişti — sistemin açık/koyu
-        /// görünümü ([`AppDelegate::observe_appearance`]). Bu sınıfın izlediği
-        /// tek anahtar yolu bu, yani yol ve nesne sorulmuyor.
+        /// KVO: `NSApp.effectiveAppearance` changed — the system's light/dark
+        /// appearance ([`AppDelegate::observe_appearance`]). This is the only key
+        /// path this class observes, so the path and object are not asked.
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         fn observe_value(
             &self,
@@ -1030,53 +1030,53 @@ define_class!(
             self.apply_appearance();
         }
 
-        /// Bir izleme kaynağı haber verdi (`notify_settings_changed`,
-        /// hedefsiz eylem): ayar ya da tema dosyası kaydedildi.
+        /// A watch source gave notice (`notify_settings_changed`, targetless
+        /// action): the settings or theme file was saved.
         #[unsafe(method(settingsDidChange:))]
         fn settings_did_change(&self, _sender: Option<&AnyObject>) {
             self.reload_settings();
         }
 
-        /// macOS'un erişilebilirlik görüntü ayarları değişti; gönderen
-        /// `NSWorkspace`'in **kendi** bildirim merkezi
-        /// ([`AppDelegate::observe_reduce_motion`]).
+        /// macOS's accessibility display settings changed; the sender is
+        /// `NSWorkspace`'s **own** notification center ([`AppDelegate::observe_reduce_motion`]).
         ///
-        /// Bildirim Hareketi Azalt'a özel değil — kontrast, saydamlık ve renk
-        /// ayrımı da buradan geliyor. Ayırt etmeye gerek yok: aşağıdaki yol
-        /// değeri yeniden okuyor ve değişmediyse link'e giden çağrı zaten
-        /// no-op (`Motion::set_reduce`).
+        /// The notification is not specific to Reduce Motion — contrast,
+        /// transparency and color differentiation come from here too. There is
+        /// no need to tell them apart: the path below rereads the value and if
+        /// it did not change the call going to the link is a no-op anyway
+        /// (`Motion::set_reduce`).
         #[unsafe(method(accessibilityDisplayDidChange:))]
         fn accessibility_display_did_change(&self, _note: Option<&AnyObject>) {
-            // audit: bu yol ana thread'i **yapısal olarak** garanti etmiyor —
-            // `NSNotificationCenter` gözlemcisi yayınlayan thread'de senkron
-            // ateşliyor ve `NSWorkspace`'in merkezi bunu sözleşmeye bağlamıyor
-            // (`/audit` bulgusu). Altındaki iş ise ana thread varsayıyor:
-            // `settings`'in `RefCell`'i ve link'in `Cell<Motion>`'ı. İddia bu
-            // yüzden kodda duruyor — yanlışsa belirti sessiz bir veri yarışı
-            // değil, burada patlayan bir panik olur.
+            // audit: this path does not **structurally** guarantee the main
+            // thread — the `NSNotificationCenter` observer fires synchronously on
+            // the posting thread and `NSWorkspace`'s center does not make this a
+            // contract (an `/audit` finding). The work underneath assumes the main
+            // thread: `settings`'s `RefCell` and the link's `Cell<Motion>`. So
+            // the claim stands in the code — if wrong, the symptom is a panic that
+            // blows up here, not a silent data race.
             let _mtm = MainThreadMarker::new()
-                .expect("erişilebilirlik bildirimi ana thread'de bekleniyor");
+                .expect("accessibility notification expected on the main thread");
             self.apply_reduce_motion();
-            // Ayar penceresinin hareket satırları sistemin cevabına bakıyor
-            // (`settings_window::motion_override`): açıksa o da tazelenmeli,
-            // yoksa sistemden açılan Hareketi Azalt satırları ezmiş görünmezdi.
+            // The settings window's motion rows look at the system's answer
+            // (`settings_window::motion_override`): if open it must refresh too,
+            // otherwise Reduce Motion turned on from the system would not look like it overrides the rows.
             self.refresh_settings_window();
         }
 
-        /// Shell ▸ New Window (⌘N): etkin pencerenin dizininde ve punto
-        /// farkıyla yeni bir pencere (026 → Karar 3, 4). Burada, pencerede
-        /// değil: pencere yokken de çalışmalı.
+        /// Shell ▸ New Window (⌘N): a new window in the active window's
+        /// directory and with its point-size delta (026 → Karar 3, 4). Here, not
+        /// in the window: it must work when there is no window too.
         #[unsafe(method(newWindow:))]
         fn new_window(&self, _sender: Option<&AnyObject>) {
             self.open_from_key_window(Opening::Window);
         }
 
-        /// Shell ▸ Close Tab (⌘W) terminal olmayan bir pencere key iken (About
-        /// paneli): responder zinciri onu buraya getiriyor ve o pencere
-        /// AppKit'in kendi yolundan kapanıyor. Terminal penceresinde eylemi
-        /// pencerenin delegate'i önce karşılıyor (`TerminalWindow`'un
-        /// `closeTab:`'ı) — menü `performClose:`'dan ayrılınca ⌘W panellerde
-        /// sessizce ölmesin diye (`/code-review`).
+        /// Shell ▸ Close Tab (⌘W) while a non-terminal window is key (the About
+        /// panel): the responder chain brings it here and that window closes by
+        /// AppKit's own path. In a terminal window the window's delegate
+        /// answers the action first (`TerminalWindow`'s `closeTab:`) — so that
+        /// once the menu is separated from `performClose:` ⌘W does not silently
+        /// die in panels (`/code-review`).
         #[unsafe(method(closeTab:))]
         fn close_tab(&self, _sender: Option<&AnyObject>) {
             if let Some(key) = NSApplication::sharedApplication(self.mtm()).keyWindow() {
@@ -1084,10 +1084,10 @@ define_class!(
             }
         }
 
-        /// ⌘W'nin başlığı terminal olmayan pencere key iken: bölmeli bir
-        /// sekmenin bıraktığı "Close" (`TerminalWindow`'un
-        /// `validateMenuItem:`'ı, 039 Karar 8) panelde kalmasın. **Bilinmeyen
-        /// öğe `true`** — tanımlanmadan önceki davranış.
+        /// The title of ⌘W while a non-terminal window is key: so the "Close"
+        /// that a split tab left behind (`TerminalWindow`'s
+        /// `validateMenuItem:`, 039 Karar 8) does not stay in the panel. **An
+        /// unknown item is `true`** — the behavior before it was defined.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             if item.action() == Some(sel!(closeTab:)) {
@@ -1096,38 +1096,38 @@ define_class!(
             true
         }
 
-        /// Shell ▸ New Tab (⌘T): etkin pencerenin grubuna yeni sekme; pencere
-        /// yoksa yeni pencere. Etkin sekme uzaktaysa yeni sekme aynı ssh/mosh
-        /// komutuyla doğuyor (037 Karar 6, [`initial_line`]).
+        /// Shell ▸ New Tab (⌘T): a new tab in the active window's group; a new
+        /// window if there is no window. If the active tab is remote the new tab
+        /// is born with the same ssh/mosh command (037 Karar 6, [`initial_line`]).
         #[unsafe(method(newTab:))]
         fn new_tab(&self, _sender: Option<&AnyObject>) {
             self.open_from_key_window(Opening::Tab);
         }
 
-        /// Shell ▸ New Local Tab (⌥⌘T): uzak sekmeden de **her zaman** yerel
-        /// bir sekme (037 Karar 6) — ⌘T'nin kaçış yolu; yerel sekmede ⌘T ile
-        /// aynı şey.
+        /// Shell ▸ New Local Tab (⌥⌘T): **always** a local tab, even from a
+        /// remote tab (037 Karar 6) — ⌘T's escape route; in a local tab the same
+        /// as ⌘T.
         #[unsafe(method(newLocalTab:))]
         fn new_local_tab(&self, _sender: Option<&AnyObject>) {
             self.open_from_key_window(Opening::LocalTab);
         }
 
-        /// Sekme çubuğunun `+` düğmesi. AppKit düğmeyi yalnız responder
-        /// zincirinde bu seçiciyi tanıyan biri varsa gösteriyor; iş ⌘T'ninki,
-        /// uzak sekmede aynı host dahil.
+        /// The tab bar's `+` button. AppKit shows the button only if someone in
+        /// the responder chain recognizes this selector; the job is ⌘T's, the
+        /// same host included in a remote tab.
         #[unsafe(method(newWindowForTab:))]
         fn new_window_for_tab(&self, _sender: Option<&AnyObject>) {
             self.open_from_key_window(Opening::Tab);
         }
 
-        /// bateri ▸ Settings… (Cmd-,), hedefsiz menü öğesinden (`menu`):
-        /// ayar penceresini açar ya da öne getirir.
+        /// bateri ▸ Settings… (Cmd-,), from the targetless menu item (`menu`):
+        /// opens the settings window or brings it to the front.
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
             self.show_settings_window();
         }
 
-        /// View ▸ Theme ▸ {ad}: öğenin başlığı temanın adı
+        /// View ▸ Theme ▸ {name}: the item's title is the theme's name
         /// (`menu::fill_themes`).
         #[unsafe(method(selectTheme:))]
         fn select_theme(&self, sender: Option<&AnyObject>) {
@@ -1137,12 +1137,12 @@ define_class!(
             self.save_theme(&item.title().to_string());
         }
 
-        /// Shell ▸ Mark “{host}” as ▸ {işaret} (037 Karar 5): öğenin `tag`'i
-        /// işaret ([`crate::menu::mark_of_tag`]), host etkin sekmenin uzak
-        /// host'u. Menü yalnız **yazar** — dosyayı okuyan yol uygular
-        /// ([`AppDelegate::save_edit`], Theme ▸ emsali); ayrıştırılamayan
-        /// dosyaya yazılmıyor, tanı yazma yuvasına. Sekme bu arada yerelleştiyse
-        /// no-op.
+        /// Shell ▸ Mark “{host}” as ▸ {mark} (037 Karar 5): the item's `tag` is
+        /// the mark ([`crate::menu::mark_of_tag`]), the host is the active tab's
+        /// remote host. The menu only **writes** — the path that reads the file
+        /// applies ([`AppDelegate::save_edit`], the Theme ▸ precedent); nothing
+        /// is written to an unparseable file, the diagnostic goes to the write
+        /// slot. A no-op if the tab became local in the meantime.
         #[unsafe(method(markHost:))]
         fn mark_host(&self, sender: Option<&AnyObject>) {
             let Some(mark) = sender
@@ -1164,19 +1164,19 @@ define_class!(
 
         #[unsafe(method(runDeadline:))]
         fn run_deadline(&self, _arg: Option<&AnyObject>) {
-            // Sessizlik damgası kapanıştan **önce** okunuyor ve sıra
-            // bilinçli: `shutdown()` en çok `SHUTDOWN_GRACE` (yarım saniye)
-            // bekliyor ve ölçüm koşularının dörtte birinde gerçekten
-            // bekliyor (`kapanis=abandoned`). Sonra okunsaydı `sessiz=`
-            // "son kare → deadline" değil "son kare → kapanışın sonu" olurdu
-            // ve kapının tabanına kapanış değişkenliği karışırdı
-            // ([`QUIET_FLOOR`] ölçülen dağılımın yarısında duruyor; yarım
-            // saniyelik bir kapanış beklemesi o payı tek başına yerdi).
+            // The quiet stamp is read **before** shutdown and the order is
+            // deliberate: `shutdown()` waits at most `SHUTDOWN_GRACE` (half a
+            // second) and in a quarter of the measurement runs it really
+            // waits (`teardown=abandoned`). Had it been read after, `quiet=`
+            // would be "last frame → end of shutdown" instead of "last frame →
+            // deadline" and the shutdown's variability would mix into the gate's
+            // floor ([`QUIET_FLOOR`] stands at half of the measured distribution;
+            // a half-second shutdown wait alone would eat that margin).
             let quiet = self.quiet_since();
             let teardown = self.shutdown();
-            // Zamanlayıcı yalnız `run` doluyken kuruldu; `if let` burada bir
-            // dal değil o değişmezin okunması. `expect` olmadı, çünkü burası
-            // rapor yolu ve kapanışta bir panik raporun kendisini yutardı.
+            // The timer was set up only while `run` is filled; the `if let` here
+            // is not a branch but the reading of that invariant. It is not an
+            // `expect`, because this is the report path and a panic at shutdown would swallow the report itself.
             if let Some(run) = self.ivars().run {
                 self.report_and_exit(run, teardown, quiet);
             }
@@ -1184,113 +1184,113 @@ define_class!(
     }
 );
 
-/// Duman **kapısının** sayaçları — satırın hepsi değil, [`verdict`]'in gördüğü
-/// kadarı.
+/// Counters of the smoke **gate** — not the whole line, only as much as
+/// [`verdict`] sees.
 ///
-/// Yapı, çünkü hepsi sayı: konumsal geçirilseler `hucre` ile `glif` yer
-/// değiştirdiğinde **derleme geçerdi** ve sınama da aynı sırayı kullandığı
-/// için ikisi birlikte yanılırdı (`/code-review` bulgusu).
+/// A struct, because they are all numbers: if passed positionally, when
+/// `cells` and `glyphs` swapped places **it would compile** and since the test
+/// uses the same order the two would be wrong together (a `/code-review` finding).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counters {
-    /// GPU'nun hatasız bitirdiği kare.
+    /// Frames the GPU finished without error.
     frames: u64,
-    /// Çizilmeye **karar verilen** içerik karesi: boşta sıfır kare kapısının
-    /// operandı ([`IDLE_FRAME_LIMIT`]). `frames`'in yerine geçmiyor, yanına
-    /// geliyor — ikisi ayrı soru yanıtlıyor ve jeton ikisini de basıyor.
+    /// Content frames **decided to be drawn**: the operand of the zero-idle-frame
+    /// gate ([`IDLE_FRAME_LIMIT`]). It does not replace `frames`, it comes beside
+    /// it — the two answer separate questions and the token prints both.
     content: u64,
-    /// Son karede sink'in ürettiği arka plan hücresi (imleç hariç).
+    /// Background cells the sink produced in the last frame (cursor excluded).
     cells: usize,
-    /// Son karede çizilen glyph.
+    /// Glyphs drawn in the last frame.
     glyphs: usize,
-    /// Son karede çizilen alt çizgi / üstü çizili.
+    /// Underlines / strikeouts drawn in the last frame.
     rules: usize,
-    /// Yerleşmemiş **imleç** animasyonu yüzünden çizilen kare — `slide`'ın
-    /// ikizi değil tamamlayıcısı: ötekini yalnız öteleme, bunu yalnız imleç
-    /// artırıyor ve bir karede ikisi birden artabilir.
+    /// Frames drawn because of an unsettled **cursor** animation — not the twin
+    /// of `slide` but its complement: only the offset raises the other, only
+    /// the cursor raises this and both can rise in one frame.
     ///
-    /// `content`'in kardeşi ve kapıda **ters yönde**: `content`'in bir üst
-    /// sınırı var, bunun bir **alt** sınırı (`> 0`). Duman reçetesi bir imleç
-    /// hareketi içeriyor (`bt_core::smoke_shell`), yani sıfır "animasyon hiç
-    /// koşmadı" demek — tıpkı `hucre=0`'ın "shell çıktısı yok" demesi gibi.
+    /// `content`'s sibling and in the **opposite direction** at the gate:
+    /// `content` has an upper bound, this has a **lower** bound (`> 0`). The
+    /// smoke recipe contains a cursor movement (`bt_core::smoke_shell`), so zero
+    /// means "the animation never ran" — just as `cells=0` means "no shell output".
     ///
-    /// **Gizli bağ, artık adıyla:** bu gereklilik hermetik koşunun imleç
-    /// stilinin **animasyonlu** olmasına dayanıyor ve o stil
-    /// `bt_core::Settings::default().cursor_motion`, yani varsayılanların tek
-    /// sahibinden geliyor (süreli koşu ayar dosyasını okumuyor,
-    /// [`Inputs::Hermetic`]). Varsayılan bir gün `CursorMotion::Snap` olursa
-    /// bu kapı sessizce düşer — o değişiklik ya hermetik koşunun stilini
-    /// koşuda açıkça sabitlemek zorunda ya bu cümleyi karşısında bulacak.
+    /// **The hidden tie, now by name:** this requirement depends on the
+    /// hermetic run's cursor style being **animated** and that style comes from
+    /// `bt_core::Settings::default().cursor_motion`, i.e. from the defaults'
+    /// single owner (a timed run does not read the settings file,
+    /// [`Inputs::Hermetic`]). If the default one day becomes `CursorMotion::Snap`
+    /// this gate silently falls — that change must either pin the hermetic
+    /// run's style explicitly in the run or will find this sentence facing it.
     ///
-    /// **Blink'i saymıyor** (014 phase-2): imlecin yanıp sönmesi
-    /// `bt_gpu::motion`'ın dışında yaşıyor, yani `cursor_settled()` onu hiç
-    /// görmüyor ve bu sayaç artmıyor. Blink karesinin **hiçbir CPU tanığı
-    /// yok** — `istek=` de artmıyor (`Waker::resume` sayaca dokunmuyor),
-    /// `icerik=` de (tasarımın amacı bu). Jeton **bilerek eklenmedi**
-    /// (`cpu_elenen=` emsali, aşağıda): varsayılan kapalı olduğu için
-    /// gözlenebilir her koşuda sıfır basardı ve jeton silinmiyor, ekleniyor.
-    /// Bozuk bir blink'i kapının hiçbir katı görmez; **koruma bir jeton değil
-    /// varsayılanın kendisi** ve bu, setin `teslim.md`'sinde yazılı.
+    /// **It does not count blink** (014 phase-2): the cursor's blinking lives
+    /// outside `bt_gpu::motion`, i.e. `cursor_settled()` never sees it and this
+    /// counter does not rise. A blink frame has **no CPU witness at all** —
+    /// `requests=` does not rise (`Waker::resume` does not touch the counter),
+    /// nor `content=` (that is the design's purpose). The token was
+    /// **deliberately not added** (the `cpu_elenen=` precedent, below): since
+    /// the default is off it would print zero in every observable run and a
+    /// token is not deleted, it is added. No tier of the gate sees a broken
+    /// blink; **the protection is not a token but the default itself** and this is written in the set's `teslim.md`.
     motion: u64,
-    /// Yerleşmemiş **kayma** (içeriğin ötelemesi) yüzünden çizilen kare.
+    /// Frames drawn because of an unsettled **slide** (the content's offset).
     ///
-    /// `motion`'ın kardeşi ve **kapıda yok**: reçetenin imleç hareketi
-    /// garantili (`bt_core::smoke_shell`) ama kaymanın orada doğup doğmayacağı
-    /// ölçülmedi ve ölçülmemiş sayı kapıya yazılmaz. Satırda olmasının sebebi
-    /// tanı: kırmızı bir koşuda `hareket` ile birlikte okunduğunda hangi
-    /// animatörün yerleşmediği ayırt edilebiliyor.
+    /// `motion`'s sibling and **not in the gate**: the recipe's cursor movement
+    /// is guaranteed (`bt_core::smoke_shell`) but whether the slide will be
+    /// born there was not measured and an unmeasured number is not written into
+    /// the gate. It is in the line for diagnosis: in a red run, read together
+    /// with `motion`, it tells which animator did not settle.
     ///
-    /// İkisi toplanıp çizilen kareyi **vermiyor**: aynı karede ikisi birden
-    /// artabilir.
+    /// The two are not added up to **give** the drawn frame: both can rise in
+    /// the same frame.
     slide: u64,
 }
 
-/// Deadline'da animasyonun hâli — kapının **ölçüm istemeyen** yarısı.
+/// The animation's state at the deadline — the gate's half that **needs no measurement**.
 ///
-/// `bool` değil ve sebebi çağrı yeri: [`verdict`] zaten beş sayı alıyor ve
-/// çıplak bir `true` orada hangi soruyu yanıtladığını söylemezdi. [`Counters`]
-/// da değil, çünkü bu bir sayı değil bir **durum**: yerleşmemiş animasyon
-/// koşuyu kırmızı düşürüyor, sayısı değil varlığı önemli.
+/// Not a `bool` and the reason is the call site: [`verdict`] already takes
+/// five numbers and a bare `true` would not say which question it answered.
+/// Not [`Counters`] either, because this is not a number but a **state**: an
+/// unsettled animation turns the run red, its existence matters, not its count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MotionState {
     Settled,
     Unsettled,
 }
 
-/// Ölçüm defterinin kapanıştaki özeti: halkadan okunmuş, henüz biçimlenmemiş.
+/// The measurement ledger's summary at shutdown: read from the ring, not yet formatted.
 ///
-/// Sayaç yarısı (`ornek`, `dusen`, `elenen`) p95'ten **önce** okunuyor, çünkü
-/// [`bt_gpu::Samples::p95_and_worst`] kendini tüketiyor — sıra tipin
-/// zorladığı bir şey, yorumun değil.
+/// The counter half (`samples`, `dropped`, `discarded`) is read **before** p95, because
+/// [`bt_gpu::Samples::p95_and_worst`] consumes itself — the order is forced by
+/// the type, not by the comment.
 ///
-/// # Ölçümün dürüst sınırları
+/// # The honest limits of the measurement
 ///
-/// **Liste buradan taşındı.** Sahibi 2026-09-21'den beri
-/// `docs/OLCUMLER.md` → `## Yöntem` → "Kare süresi ve açılış"; o türün ilk
-/// `/measure`'ı taşımayı yaptı ve aynı koşu yedinci bir kalem ekledi (GPU
-/// sütununun taban olacak kadar kararlı olmaması). Burada **kopyası tutulmuyor**: iki yerde
-/// duran bir liste sessizce ayrışır, ki bu maddenin kendi uyarısıydı.
+/// **The list moved from here.** Its owner since 2026-09-21 is
+/// `docs/OLCUMLER.md` → `## Yöntem` → "Kare süresi ve açılış"; that kind's
+/// first `/measure` did the move and the same run added a seventh item (the
+/// GPU column not being stable enough to be a floor). **No copy is kept**
+/// here: a list standing in two places silently diverges, which was this item's own warning.
 ///
-/// Aşağıdaki alan doc'ları o listenin **kapsam** kalemlerinden yalnız kendi
-/// alanına düşeni tekrar ediyor; tamamı ve **açık kalemler** o dosyada.
+/// The field docs below repeat from that list's **scope** items only the one
+/// that falls to their own field; the whole and the **open items** are in that file.
 ///
 struct Measured {
-    /// `main()`'in ilk satırından ilk **tamamlanan** kareye. `None` → hiç kare
-    /// bitmedi; iki ucun sınırı [`bt_gpu::Stats::startup`]'ta.
+    /// From `main()`'s first line to the first **completed** frame. `None` → no
+    /// frame finished; the limit of the two ends is in [`bt_gpu::Stats::startup`].
     startup: Option<Duration>,
-    /// CPU sütunlarının uzunluğu. Tek sayı, çünkü iki CPU sütunu birlikte
-    /// yazılıyor (`Stats::record_cpu`) ve hizaları tipte bağlı.
+    /// The length of the CPU columns. A single number, because the two CPU
+    /// columns are written together (`Stats::record_cpu`) and their alignment is bound in the type.
     cpu_samples: usize,
-    /// Halkaya sığmayıp düşen örnek — üç sütunun en yükseği.
+    /// Samples that did not fit the ring and dropped — the highest of the three columns.
     ///
-    /// Kuralı ve gerekçesi halkanın yanında ([`bt_gpu::Samples::dropped`]);
-    /// burada yalnız uygulanıyor ve **elde duran anlık görüntülerden**:
-    /// taze bir okuma, `ornek=` ile `dusen=`'i aynı andan almazdı.
+    /// Its rule and rationale are beside the ring ([`bt_gpu::Samples::dropped`]);
+    /// here it is only applied, and from the **snapshots in hand**: a fresh
+    /// read would not take `samples=` and `dropped=` from the same instant.
     dropped: u64,
-    /// GPU sütununun uzunluğu — CPU'dan **kısa olabilir**.
+    /// The GPU column's length — **can be shorter** than the CPU's.
     gpu_samples: usize,
-    /// Metal'in sıfır/NaN damgası yüzünden hiç yazılamayan kare. Bu sayı
-    /// olmadan boş bir GPU sütunu "donanım damga vermiyor" ile "hiç kare
-    /// çizilmedi"den ayırt edilemezdi.
+    /// Frames that could not be written at all because of Metal's zero/NaN
+    /// stamp. Without this number an empty GPU column could not be told apart
+    /// from "the hardware gives no stamp" and "no frame was drawn".
     gpu_rejected: u64,
     cpu_frame: Option<(Duration, Duration)>,
     cpu_encode: Option<(Duration, Duration)>,
@@ -1302,15 +1302,15 @@ struct Measured {
 }
 
 impl Measured {
-    /// Defteri okur. Kapanışta bir kez koşuyor.
+    /// Reads the ledger. Runs once, at teardown.
     ///
-    /// `link.stop()` çoktan çağrıldı, ama **halkaların hepsi durağan değil**:
-    /// iki CPU sütununu bu thread yazıyor (yani onlar durağan), GPU sütununu
-    /// Metal'in tamamlanma thread'i yazıyor ve uçuşta kalan bir kare rapor
-    /// okunurken hâlâ düşebilir. Sonucu bir örneklik kayma: `kare` ile
-    /// `gpu_ornek + gpu_elenen` bu yüzden bire kadar ayrışabilir. `ornek=`
-    /// jetonu bunu görünür kılıyor; sayıyı yorumlayan taraf eşitlik
-    /// beklememeli.
+    /// `link.stop()` has already been called, but **not every ring is quiescent**:
+    /// this thread writes the two CPU columns (so those are quiescent), while
+    /// Metal's completion thread writes the GPU column and a frame still in
+    /// flight can land while the report is being read. The result is a one-sample
+    /// drift: `frames` and `gpu_samples + gpu_discarded` can therefore differ by
+    /// up to one. The `samples=` token makes this visible; whoever interprets the
+    /// number must not expect equality.
     fn read(stats: &Stats, gpu_supported: bool) -> Self {
         let cpu_frame = stats.cpu_frame();
         let cpu_encode = stats.cpu_encode();
@@ -1329,51 +1329,51 @@ impl Measured {
     }
 }
 
-/// Başarı satırının **bütün** girdisi.
+/// The **whole** input of the success line.
 ///
-/// Satırı kuran fonksiyonun saf olması gerekiyordu: gerçek bir pencere ve
-/// display link olmadan sınanabilsin diye. Altı ayrı argüman olarak
-/// geçirilseydi `Counters`'ın kaçtığı hatayı bir üst katmanda tekrarlardı.
+/// The function that builds the line had to be pure: so it can be tested
+/// without a real window and display link. Had it been passed as six separate
+/// arguments, it would repeat, one layer up, the mistake `Counters` avoided.
 struct Report {
     counters: Counters,
-    /// Atlasın **maske** düzleminin dolu/toplam yuvası. Bir kapı **değil**,
-    /// sayaç.
+    /// Used/total slots of the atlas's **mask** plane. A counter, **not** a
+    /// gate.
     atlas: (usize, usize),
-    /// Atlasın **renk** düzleminin dolu/toplam yuvası; ikinci bir jeton
-    /// (`yuva2=`) olmasının gerekçesi `Atlas::color_occupancy`'nin doc'unda.
-    /// Jeton **eklendi, silinmedi**: `yuva=` yerinde ve anlamı değişmedi.
+    /// Used/total slots of the atlas's **colour** plane; the reason for having a
+    /// second token (`slots2=`) is in the doc of `Atlas::color_occupancy`.
+    /// The token was **added, not deleted**: `slots=` stays and its meaning is unchanged.
     color_atlas: (usize, usize),
     workload: Workload,
-    /// Koşu boyunca istenen kare — çizilen değil.
+    /// Frames requested over the run — not drawn ones.
     requests: u64,
-    /// Son çizilen kareyle deadline arasındaki süre; `None` → hiç kare
-    /// çizilmedi (`sessiz=none`). **Kapı** ([`QUIET_FLOOR`]): duman yükünde
-    /// tabanın altı da `None` de kırmızı.
+    /// Time between the last drawn frame and the deadline; `None` → no frame
+    /// was drawn (`quiet=none`). **Gate** ([`QUIET_FLOOR`]): in the smoke load,
+    /// both a value below the floor and `None` are red.
     quiet: Option<Duration>,
-    /// Kapanışın sonucu; `None` → oturum hiç doğmamıştı.
+    /// Outcome of the teardown; `None` → the session was never born.
     teardown: Option<Teardown>,
-    /// Ölçüm defteri; `None` → kapı kapalıydı (`BT_FRAME_STATS` verilmedi).
+    /// Measurement ledger; `None` → the gate was closed (`BT_FRAME_STATS` not given).
     measured: Option<Measured>,
 }
 
 impl Report {
-    /// Başarı satırı — **saf**, yani gerçek bir pencere olmadan sınanabilir.
+    /// The success line — **pure**, i.e. testable without a real window.
     ///
-    /// Jeton sözleşmesi: **silinmez, eklenir.** Eski beşli (`kare`, `hucre`,
-    /// `glif`, `kural`, `yuva`) ve `yuk` ile `pipeline=ok` yerinde; yenisi
-    /// aralarına giriyor.
+    /// Token contract: **never deleted, only added.** The old five (`frames`,
+    /// `cells`, `glyphs`, `rules`, `slots`) plus `load` and `pipeline=ok` stay in
+    /// place; the new ones go in between.
     ///
-    /// **Dil kuralı, tek yerde:** *anahtarlar* Türkçe ve **donmuş** — sözleşme
-    /// "silinmez" diyor, yani bugün `kare=`'yi İngilizceleştirmek onu okuyan
-    /// her tarafı kırar. *Değerler* İngilizce, çünkü onları okuyan şey bir tanı
-    /// metni değil bir `match` kolu ya da CI grep'i (`yuk=smoke|load` ve
-    /// `pipeline=ok` bu deseni bu satır doğmadan önce kurmuştu). Türkçe kalan
-    /// tek yer **tanı metni**: stderr satırları ve `assert!` gerekçeleri.
+    /// **Language rule, in one place:** the *keys* are English; the contract is
+    /// still "never delete a token, only add". The keys were renamed once, from
+    /// Turkish to English (2026-10-01). The *values* are English too, because what
+    /// reads them is not a diagnostic text but a `match` arm or a CI grep
+    /// (`load=smoke|load` and `pipeline=ok` had set this pattern before this line
+    /// existed). The only place still in Turkish is **diagnostic text**: stderr lines and `assert!` messages.
     ///
-    /// Satır **açıkça** basılıyor (`report_and_exit`'te bir
-    /// `println!`); `Drop`'ta boşalan bir tampona bırakılan hiçbir yol yok —
-    /// `process::exit` `Drop` koşturmuyor, bekçinin `_exit(70)`'i atexit'i
-    /// bile atlıyor (R5.5).
+    /// The line is printed **explicitly** (a `println!` in `report_and_exit`);
+    /// no path is left to a buffer that would be flushed in `Drop` —
+    /// `process::exit` runs no `Drop`, and the guard's `_exit(70)` skips even
+    /// atexit (R5.5).
     fn token_line(&self) -> String {
         let Counters {
             frames,
@@ -1386,61 +1386,61 @@ impl Report {
         } = self.counters;
         let (used, total) = self.atlas;
         let (color_used, color_total) = self.color_atlas;
-        // `profil=` kapı kapalıyken de basılıyor: `make duman` **debug**
-        // koşuyor, `/measure` **release** şart koşuyor ve bir debug sayısını
-        // taban sanmak ancak satırın kendisi profilini söylerse imkânsız olur
+        // `profile=` is printed even with the gate closed: `make smoke` runs
+        // **debug**, `/measure` demands **release**, and mistaking a debug number
+        // for a floor becomes impossible only if the line itself states its profile
         // (R5.3).
         let profile = if cfg!(debug_assertions) {
             "debug"
         } else {
             "release"
         };
-        // `icerik`/`hareket`/`kayma`/`sessiz` dörtlüsü `istek=`'in yanına
-        // giriyor: hepsi kare **muhasebesi** ve satırı okuyan taraf onları bir
-        // arada istiyor. `kayma` `hareket`'in yanında, çünkü ikisi aynı soruyu
-        // iki animatör için yanıtlıyor. Baştaki dört sayaç yerinde kalmak
-        // **zorunda** (`smoke_counts_unchanged`).
+        // The `content`/`motion`/`slide`/`quiet` quartet sits next to `requests=`:
+        // all of them are frame **accounting** and whoever reads the line wants
+        // them together. `slide` sits next to `motion`, because both answer the
+        // same question for two animators. The first four counters must stay in
+        // place (`smoke_counts_unchanged`).
         let mut line = format!(
-            "kare={frames} hucre={cells} glif={glyphs} kural={rules} \
-yuva={used}/{total} yuva2={color_used}/{color_total} yuk={workload} \
-istek={requests} icerik={content} \
-hareket={motion} kayma={slide} sessiz={quiet} kapanis={teardown} \
-profil={profile}",
+            "frames={frames} cells={cells} glyphs={glyphs} rules={rules} \
+slots={used}/{total} slots2={color_used}/{color_total} load={workload} \
+requests={requests} content={content} \
+motion={motion} slide={slide} quiet={quiet} teardown={teardown} \
+profile={profile}",
             workload = self.workload.token(),
             requests = self.requests,
-            // **`sessiz=0` değil:** sıfır, "deadline anında kare akıyordu"
-            // demek ve hiç kare çizilmemiş bir koşuyla karışırdı — `ornek=off`
-            // ile aynı kural, uydurulmuş bir sayı yerine yokluğun kendi
-            // kelimesi.
+            // **Not `quiet=0`:** zero would mean "frames were flowing at the
+            // deadline" and would be confused with a run where no frame was drawn
+            // — the same rule as `samples=off`: the absence's own word instead of
+            // an invented number.
             quiet = self.quiet.map_or_else(|| "none".to_owned(), ms),
             teardown = teardown_token(self.teardown),
         );
         match &self.measured {
-            // Kapı kapalıydı. **`ornek=0` değil:** sıfır, "kapı açıktı ama hiç
-            // örnek toplanmadı" ile aynı görünürdü ve R5.2'nin kapatmak
-            // istediği körlük tam olarak o. Ölçüm jetonları da hiç basılmıyor;
-            // sözleşme jetonun yokluğunu okumaya izin veriyor, yalan bir
-            // değeri değil.
-            None => line.push_str(" ornek=off"),
+            // The gate was closed. **Not `samples=0`:** zero would look the same as
+            // "the gate was open but no samples were collected", and that is exactly
+            // the blindness R5.2 wants to close. The measurement tokens are not
+            // printed at all either; the contract allows reading a token's absence,
+            // not a false value.
+            None => line.push_str(" samples=off"),
             Some(m) => {
-                // `write!` bir `String`'e hata döndüremez; `let _` onu
-                // görünür kılıyor ve rapor yolunda `unwrap` bırakmıyor.
+                // `write!` cannot return an error on a `String`; `let _` makes that
+                // visible and leaves no `unwrap` in the report path.
                 let _ = write!(
                     line,
-                    " ornek={} dusen={} gpu_ornek={} gpu_elenen={} taban={MIN_SAMPLES}",
+                    " samples={} dropped={} gpu_samples={} gpu_discarded={} floor={MIN_SAMPLES}",
                     m.cpu_samples, m.dropped, m.gpu_samples, m.gpu_rejected
                 );
-                push_span(&mut line, "cpu_kare", m.cpu_frame);
+                push_span(&mut line, "cpu_frame", m.cpu_frame);
                 push_span(&mut line, "cpu_encode", m.cpu_encode);
                 if m.gpu_supported {
                     push_span(&mut line, "gpu", m.gpu);
                 } else {
                     line.push_str(" gpu_p95=unsupported gpu_max=unsupported");
                 }
-                // Açılış tek sayı, dağılım değil: koşu başına bir kez olur.
+                // Startup is a single number, not a distribution: it happens once per run.
                 let _ = match m.startup {
-                    Some(startup) => write!(line, " acilis={}", ms(startup)),
-                    None => write!(line, " acilis=none"),
+                    Some(startup) => write!(line, " startup={}", ms(startup)),
+                    None => write!(line, " startup=none"),
                 };
             }
         }
@@ -1449,13 +1449,13 @@ profil={profile}",
     }
 }
 
-/// Bir sütunun iki jetonu.
+/// The two tokens of one column.
 ///
-/// Taban altında sayı **yok** (R5.6): `insufficient` basılır ve sebebi aynı
-/// satırdaki `ornek=`/`gpu_ornek=` ile `taban=` çiftinde okunur. İkisi
-/// **birlikte** susuyor, çünkü ikisi de aynı `Option`'dan geliyor: taban
-/// altında p95 zaten en kötünün kopyasıdır, yani basılacak iki sayı değil bir
-/// sayı ve iki ad olurdu.
+/// Below the floor there is **no** number (R5.6): `insufficient` is printed and
+/// the reason can be read from the `samples=`/`gpu_samples=` and `floor=` pair on
+/// the same line. The two fall silent **together**, because both come from the
+/// same `Option`: below the floor the p95 is just a copy of the worst anyway, so
+/// what would be printed is not two numbers but one number and two names.
 fn push_span(line: &mut String, name: &str, span: Option<(Duration, Duration)>) {
     let _ = match span {
         Some((p95, worst)) => write!(line, " {name}_p95={} {name}_max={}", ms(p95), ms(worst)),
@@ -1463,44 +1463,44 @@ fn push_span(line: &mut String, name: &str, span: Option<(Duration, Duration)>) 
     };
 }
 
-/// Süreyi jeton değerine çevirir: iki ondalıklı milisaniye.
+/// Turns a duration into a token value: milliseconds with two decimals.
 ///
-/// Tek biçim, `acilis=` dâhil. İki ayrı hassasiyet okuyanı jeton başına kural
-/// ezberlemeye zorlardı; makine sözleşmesinin istediği tam tersi.
+/// One format, `startup=` included. Two separate precisions would force the
+/// reader to memorise a rule per token; the exact opposite of what a machine contract wants.
 fn ms(value: Duration) -> String {
     format!("{:.2}ms", value.as_secs_f64() * 1e3)
 }
 
-/// Sessizliğin **tanı** hâli: jeton değil, cümlenin içinde okunan bir öbek.
+/// The **diagnostic** form of the quiet time: not a token, a phrase read inside a sentence.
 ///
-/// Jeton satırı yalnız yeşil koşuda basılıyor ([`Report::token_line`]), yani
-/// düşen bir koşunun `sessiz`i hiçbir yerde görünmüyordu. `sessiz ≥ T` kapısı
-/// ise **iki** dağılımdan türüyor ve ikincisi tam olarak düşen koşuların:
-/// kasıtlı bozulmuş bir kol `sessiz`ini basmasaydı `T` tek yandan türetilir,
-/// yani alt sınırı ölçülmemiş bir sayı olurdu (008 phase-6).
+/// The token line is printed only on a green run ([`Report::token_line`]), so
+/// the `quiet` of a failing run was visible nowhere. The `quiet ≥ T` gate, on
+/// the other hand, derives from **two** distributions and the second is
+/// exactly the failing runs: had a deliberately broken arm not printed its
+/// `quiet`, `T` would be derived from one side only, i.e. its lower bound would be an unmeasured number (008 phase-6).
 ///
-/// Ayrı fonksiyon olmasının sebebi jeton sözleşmesi: satırın `sessiz=`'i
-/// makine tarafından okunuyor ve bu öbek ona **benzememeli** — `sessiz=`
-/// arayan bir CI adımı düşen koşudan sayı okumasın.
+/// The reason this is a separate function is the token contract: the line's
+/// `quiet=` is read by machines and this phrase must **not resemble** it — a
+/// CI step grepping for `quiet=` must not read a number from a failing run.
 fn quiet_phrase(quiet: Option<Duration>) -> String {
     quiet.map_or_else(
-        || "hiç çizilen kare yok".to_owned(),
-        |q| format!("son kareden sonra {} sessizlik", ms(q)),
+        || "no frames drawn".to_owned(),
+        |q| format!("{} of quiet after the last frame", ms(q)),
     )
 }
 
-/// `kapanis=` jetonunun değeri.
+/// Value of the `teardown=` token.
 ///
-/// Sınır dolan koşu ve panikle biten okuyucu bugüne kadar **yeşil bir
-/// satırla** geçiyordu: stderr'de bir satır vardı, jetonda iz yoktu. Her
-/// sonuç ayrı bir kelime, çünkü ayrı arıza — `bool` olsaydı okuyan taraf
-/// hangisi olduğunu satırın dışında aramak zorunda kalırdı.
+/// A run that hit the bound and a reader that ended in a panic used to pass with
+/// a **green line**: there was a line on stderr, but no trace in the token.
+/// Each outcome is a separate word, because each is a separate fault — with a
+/// `bool`, the reader would have to look outside the line to find out which one.
 ///
-/// Değerler İngilizce ve varyant adının `kebab-case` hâli; kuralın gerekçesi
-/// tek yerde, [`Report::token_line`]'ın doc'unda.
+/// The values are English and the `kebab-case` form of the variant name; the
+/// rule's rationale is in one place, in the doc of [`Report::token_line`].
 fn teardown_token(teardown: Option<Teardown>) -> &'static str {
     match teardown {
-        // Oturum hiç doğmadı: kapanacak bir şey de yoktu.
+        // The session was never born: there was nothing to tear down either.
         None => "none",
         Some(Teardown::Clean) => "clean",
         Some(Teardown::ReaderPanicked) => "reader-panicked",
@@ -1511,74 +1511,74 @@ fn teardown_token(teardown: Option<Teardown>) -> &'static str {
     }
 }
 
-/// Duman kapısının kararı.
+/// The smoke gate's verdict.
 ///
-/// `bool` **değil**: hata yolunun iki ayrı iletisi var ve `bool` onları
-/// kapının dışında yeniden türetmeye zorlardı. Politika o zaman üç yere
-/// dağılırdı (başarı satırı, "sıfır" iletisi, "fazla" iletisi) ve yalnız biri
-/// sınanmış olurdu — kapı düşerken yanlış arızayı tarif eden bir koşu tam da
-/// böyle doğar.
+/// **Not** a `bool`: the failure path has two separate messages and a `bool`
+/// would force re-deriving them outside the gate. The policy would then be
+/// scattered over three places (success line, "zero" message, "excess" message)
+/// and only one of them would be tested — a run that describes the wrong
+/// fault as the gate fails is born exactly like that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Verdict {
     Pass,
-    /// Sayaçlardan biri sıfır: pipeline'ın bir halkası hiç çalışmamış.
-    /// `required` iletinin gereklilik yarısı ve yüke göre değişiyor — `Load`
-    /// düz metin akıtıyor, orada `hucre` ile `kural` yapısal olarak sıfır.
+    /// One of the counters is zero: a link of the pipeline never ran.
+    /// `required` is the requirement half of the message and varies with the load — `Load`
+    /// streams plain text, where `cells` and `rules` are structurally zero.
     MissingCounter {
         required: &'static str,
     },
-    /// Kare sayısı üst sınırı aştı: boşta sıfır kare bozulmuş.
+    /// The frame count exceeded the upper bound: zero-frames-at-idle is broken.
     ExcessFrames {
         limit: u64,
     },
-    /// Deadline'da yerleşmemiş bir animasyon vardı: durma koşulu bozulmuş.
+    /// At the deadline there was an animation that had not settled: its stop condition is broken.
     ///
-    /// [`ExcessFrames`](Verdict::ExcessFrames)'in **tamamlayıcısı**, kopyası
-    /// değil: o, sınırı aşacak kadar hızlı akan kareyi görüyor ve üç saniyelik
-    /// bir koşuda ancak ~3 Hz'in üstünü yakalıyor; bu ise hızdan **bağımsız**.
-    /// Durma koşulu unutulmuş 0,2 Hz'lik bir animasyon hiçbir kare sınırını
-    /// aşmaz ama deadline'da hâlâ yerleşmemiş olur ve pil sözleşmesini tam da
-    /// o ihlal eder.
+    /// The **complement** of [`ExcessFrames`](Verdict::ExcessFrames), not a copy:
+    /// that one sees frames flowing fast enough to exceed the bound and in a
+    /// three-second run catches only what is above ~3 Hz; this one is
+    /// **independent** of rate. A 0.2 Hz animation whose stop condition was
+    /// forgotten never exceeds any frame bound but is still unsettled at the
+    /// deadline, and that is exactly what violates the battery contract.
     ///
-    /// Yalnız [`Workload::Smoke`]'ta soruluyor: ölçüm yükü deadline'a kadar
-    /// çıktı akıtıyor, yani son satırla birlikte imleç hedef değiştiriyor ve
-    /// deadline yayın ortasına düşüyor. O kola bağlansaydı her ölçüm koşusu
-    /// kod doğruyken kırmızı düşerdi — `ExcessFrames`'in aynı kolda muaf
-    /// olmasının gerekçesiyle aynı.
+    /// Asked only in [`Workload::Smoke`]: the measurement load streams output
+    /// until the deadline, so with the last line the cursor changes target and
+    /// the deadline lands mid-stream. Tied to that arm, every measurement run
+    /// would fall red while the code is right — the same reason
+    /// `ExcessFrames` is exempt in the same arm.
     MotionUnsettled,
-    /// Son kareyle deadline arasındaki sessizlik ölçülmüş tabanın altında —
-    /// ya da hiç kare çizilmedi ([`QUIET_FLOOR`]).
+    /// The quiet between the last frame and the deadline is below the measured floor —
+    /// or no frame was drawn at all ([`QUIET_FLOOR`]).
     ///
-    /// Sızıntı kollarının **sonuncusu** (arkasında yalnız
-    /// [`ShutdownPanicked`](Verdict::ShutdownPanicked) var, o da koşunun
-    /// ölçtüğü şeyi değil kapanış yolunu anlatıyor): yukarıdaki iki kol
-    /// sızıntıyı ya hızından (`ExcessFrames`) ya da hareket altyapısından
-    /// (`MotionUnsettled`) tanıyor; bu ise ikisini de atlayan bir yolu —
-    /// altyapıya uğramadan, sınırı aşmayacak kadar seyrek kare isteyen kodu —
-    /// yalnız bıraktığı izden tanıyor. Sıranın gerekçesi `verdict`'in
-    /// gövdesinde, kolları `a_short_tail_fails_the_gate` çiviliyor.
+    /// The **last** of the leak arms (only
+    /// [`ShutdownPanicked`](Verdict::ShutdownPanicked) comes after it, and that
+    /// one describes the teardown path, not what the run measured): the two
+    /// arms above recognise a leak either by its rate (`ExcessFrames`) or by the
+    /// motion infrastructure (`MotionUnsettled`); this one recognises a path that
+    /// skips both — code that asks for frames too rarely to exceed the bound,
+    /// without going through the infrastructure — only by the trace it leaves.
+    /// The rationale for the order is in the body of `verdict`, the arms are pinned by `a_short_tail_fails_the_gate`.
     QuietTooShort {
         floor: Duration,
     },
-    /// Kapanış yolunda **panik** oldu. Sayaçlar yerinde olabilir ama koşu
-    /// yeşil geçemez: projenin "PTY ve ayrıştırma yolunda panik yok" kuralı
-    /// ihlal edilmiş demektir ve `kapanis=` jetonunu **hiç kimse okumasa**
-    /// bile kapı bunu görmek zorunda.
+    /// A **panic** happened on the teardown path. The counters may be in place but
+    /// the run cannot pass green: the project's "no panics on the PTY and parsing
+    /// path" rule is violated, and even if **nobody reads** the `teardown=`
+    /// token the gate must see it.
     ///
-    /// [`Teardown::Abandoned`] ve [`Teardown::Unbounded`] buraya **girmez**:
-    /// ikisi de kayıtlı borç (çocuk çıkışın içinde takılıyor; OS thread
-    /// sınırı) ve ilki ölçüm yükünün dört koşusundan birinde oluyor — kapıya
-    /// bağlansaydı `make duman` bilinen bir borç yüzünden kırmızı düşerdi.
+    /// [`Teardown::Abandoned`] and [`Teardown::Unbounded`] do **not** belong here:
+    /// both are recorded debts (the child stuck inside exit; the OS thread
+    /// limit) and the first happens in one of the four runs of the measurement
+    /// load — tied to the gate, `make smoke` would fall red over a known debt.
     ShutdownPanicked {
         which: &'static str,
     },
 }
 
-/// Kapının saf hâli — gerçek bir display link ve pencere istemeden sınanır.
+/// The pure form of the gate — testable without a real display link and window.
 ///
-/// Karar [`AppDelegate::report_and_exit`]'in gövdesinde kalsaydı sınırın
-/// yönünü (8 mi 180 mi, `Load` muaf mı) yalnız `make duman` bilirdi ve hiçbir
-/// sınamada yazılı olmazdı.
+/// Had the decision stayed in the body of [`AppDelegate::report_and_exit`], the
+/// direction of the bound (8 or 180, is `Load` exempt) would be known only to
+/// `make smoke` and written down in no test.
 fn verdict(
     counters: Counters,
     workload: Workload,
@@ -1593,37 +1593,37 @@ fn verdict(
         glyphs: g,
         rules: r,
         motion: m,
-        // Kapıda **yok** ve bu bilinçli: reçetenin kayma üretip üretmediği
-        // ölçülmedi ([`Counters::slide`]). Jeton yine de basılıyor — tanı için.
+        // **Not** in the gate, and this is deliberate: whether the recipe
+        // produces a slide has not been measured ([`Counters::slide`]). The token is still printed — for diagnosis.
         slide: _,
     } = counters;
-    // Panik **en sonda** soruluyor ve bu kolların sırası bir tanı tercihi,
-    // kapı kararı değil: hangi kol seçilirse seçilsin koşu kırmızı ve çıkış 1.
-    // Sıra "daha temel arıza önce" diye kuruldu — eksik sayaç (bir halka hiç
-    // çalışmadı) > akan kare > yerleşmeyen animasyon > kısa kuyruk > kapanış
-    // paniği. Sızıntının üç kolu kendi aralarında **tanıma gücüne** göre
-    // sıralı: `icerik` onu sayısından, yerleşme sorusu altyapısından tanıyor;
-    // kuyruk ise yalnız bıraktığı izden, yani en az şey söyleyen o. Panik
-    // en sonda, çünkü ötekiler koşunun **ölçtüğü** şeyin bozulduğunu söylüyor;
-    // panik koşu bittikten sonraki yolu. İkisi birden olduğunda satır yalnız
-    // ilkini yazıyor, ama `kapanis=` jetonu zaten ikincisini taşıyor —
-    // `motion_and_panic_report_the_more_fundamental_fault` ve
-    // `a_short_tail_fails_the_gate` bu sırayı çiviliyor.
-    // Ters çevirmek `ExcessFrames`'in bugünkü sırasını da bozardı.
+    // Panic is asked **last** and the order of these arms is a diagnostic
+    // preference, not a gate decision: whichever arm is chosen, the run is red and the exit is 1.
+    // The order was set as "the more fundamental fault first" — missing counter
+    // (a link never ran) > flowing frames > unsettled animation > short tail >
+    // teardown panic. The three leak arms are ordered among themselves by
+    // **recognising power**: `content` recognises it by its count, the settling
+    // question by its infrastructure; the tail only by the trace it leaves, i.e. it says the least.
+    // Panic goes last, because the others say that what the run **measured** is
+    // broken; panic is about the path after the run ended. When both happen the
+    // line writes only the first, but the `teardown=` token already carries the second —
+    // `motion_and_panic_report_the_more_fundamental_fault` and
+    // `a_short_tail_fails_the_gate` pin this order.
+    // Reversing it would also break today's order of `ExcessFrames`.
     let panicked = match teardown {
-        Some(Teardown::ReaderPanicked) => Some("okuyucu thread"),
-        Some(Teardown::Panicked) => Some("kapanış thread'i"),
+        Some(Teardown::ReaderPanicked) => Some("reader thread"),
+        Some(Teardown::Panicked) => Some("teardown thread"),
         _ => None,
     };
     match workload {
-        // Ölçüm yükü düz metin akıtıyor: arka plan da kural da **yok** ve
-        // olmayacak. İkisini sormak, duman reçetesini hiç koşmayan bir koşuya
-        // o reçetenin sayılarını sormak olurdu — kapı her ölçüm koşusunda
-        // düşerdi. Kare akışı burada işin kendisi: üst sınır da yok.
+        // The measurement load streams plain text: there is **no** background or
+        // rule and there will not be. Asking for them would be asking a run that
+        // never ran the smoke recipe for that recipe's numbers — the gate would
+        // fall on every measurement run. Frame flow is the job itself here: no upper bound either.
         Workload::Load => {
             if n == 0 || g == 0 {
                 Verdict::MissingCounter {
-                    required: "kare ve glif >0 olmalı",
+                    required: "frames and glyphs must be >0",
                 }
             } else if let Some(which) = panicked {
                 Verdict::ShutdownPanicked { which }
@@ -1631,21 +1631,21 @@ fn verdict(
                 Verdict::Pass
             }
         }
-        // Duman reçetesi: dördü de > 0 **ve** içerik karesi üst sınırlı.
+        // Smoke recipe: all four > 0 **and** the content frames are bounded above.
         //
-        // Alt sınır `kare`'de, üst sınır `icerik`'te ve bu bilinçli: "pipeline
-        // çalıştı mı" sorusunu GPU'nun bitirdiği kare yanıtlıyor, "boşta kare
-        // akıyor mu" sorusunu ise çizilmeye karar verilen kare — sonraki
-        // phase'in hareket kareleri `kare`'yi meşru olarak şişirecek.
+        // The lower bound is on `frames`, the upper bound on `content`, and this is
+        // deliberate: the question "did the pipeline run" is answered by the frame the
+        // GPU finished, the question "are frames flowing at idle" by the frame decided
+        // to be drawn — the next phase's motion frames will legitimately inflate `frames`.
         Workload::Smoke => {
-            // `hareket` beşinci gereklilik ve ötekilerle aynı sınıfta: duman
-            // reçetesinde bir imleç hareketi var (`bt_core::smoke_shell`),
-            // yani sıfır "animasyon yolu hiç koşmadı" demek. Yerleşme sorusu
-            // ondan **sonra**: hiç koşmamış bir animasyon zaten yerleşiktir
-            // ve okuyanı yanlış arızaya göndermemek gerek.
+            // `motion` is the fifth requirement and in the same class as the
+            // others: the smoke recipe has a cursor motion (`bt_core::smoke_shell`),
+            // so zero means "the animation path never ran". The settling question comes
+            // **after** it: an animation that never ran is settled anyway and the
+            // reader must not be sent to the wrong fault.
             if n == 0 || k == 0 || g == 0 || r == 0 || m == 0 {
                 Verdict::MissingCounter {
-                    required: "beşi de >0 olmalı",
+                    required: "all five must be >0",
                 }
             } else if c > IDLE_FRAME_LIMIT {
                 Verdict::ExcessFrames {
@@ -1654,10 +1654,10 @@ fn verdict(
             } else if motion == MotionState::Unsettled {
                 Verdict::MotionUnsettled
             } else if quiet.is_none_or(|q| q < QUIET_FLOOR) {
-                // `None` de buraya düşüyor ve ayrı bir kol **değil**: ikisi de
-                // "koşunun sonunda sessizlik yoktu" diyor ve ileti hangisi
-                // olduğunu `quiet_phrase` ile zaten söylüyor. Ayrı bir varyant
-                // kapıya ikinci bir karar eklemeden yalnız ikinci bir ad
+                // `None` falls here too and is **not** a separate arm: both say
+                // "there was no quiet at the end of the run" and the message already
+                // says which one it is via `quiet_phrase`. A separate variant would add
+                // only a second name to the gate, without adding a second decision.
                 // eklerdi.
                 Verdict::QuietTooShort { floor: QUIET_FLOOR }
             } else if let Some(which) = panicked {
@@ -1671,9 +1671,9 @@ fn verdict(
 
 impl AppDelegate {
     pub(crate) fn new(mtm: MainThreadMarker, opts: Options) -> Retained<Self> {
-        // Halka **yalnız** kapı açıkken ayrılıyor: kapalı kapının bedeli bir
-        // `Option` dallanması olmalı, bir ayırma değil (R4.1). Kapasitenin
-        // koşu süresinden türemesi de `bt-gpu`'nun işi — tazeleme hızını bilen
+        // The ring is allocated **only** when the gate is open: a closed gate must
+        // cost an `Option` branch, not an allocation (R4.1). Deriving the capacity
+        // from the run duration is `bt-gpu`'s job too — it is the side that knows the refresh rate.
         // taraf o.
         let stats = opts
             .run
@@ -1694,29 +1694,29 @@ impl AppDelegate {
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
         });
-        // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
+        // SAFETY: NSObject's init takes no arguments and the ivars have been set.
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Yeni pencerenin kimliği; sayaç yalnız artıyor.
+    /// Identity of the new window; the counter only goes up.
     fn next_window_id(&self) -> u64 {
         let id = self.ivars().next_window_id.get();
         self.ivars().next_window_id.set(id + 1);
         id
     }
 
-    /// Pencere listesinin **kopyası** — dolaşan her yol bunu kullanıyor.
+    /// A **copy** of the window list — every walking path uses this.
     ///
-    /// Kopya, çünkü pencereye giden çağrı geri dönüp buraya uzanabiliyor
-    /// (`sync_geometry` → [`AppDelegate::post_notices`]) ve listeyi ödünç
-    /// tutarak dolaşmak ileride listeyi değiştiren bir yolda (`borrow_mut`)
-    /// panikle biterdi. Bedeli birkaç `Retained` kopyası.
+    /// A copy, because a call into a window can come back and reach here
+    /// (`sync_geometry` → [`AppDelegate::post_notices`]) and walking the list
+    /// while holding a borrow would end in a panic (`borrow_mut`) on a path
+    /// that later mutates the list. The cost is a few `Retained` clones.
     pub(crate) fn windows(&self) -> Vec<Retained<TerminalWindow>> {
         self.ivars().windows.borrow().clone()
     }
 
-    /// Kimliği `id` olan pencere; listeden çıktıysa `None` — pane'in sahip
-    /// tutamağı (`window::WindowHost`), kapatma sorusu ve arama yolları.
+    /// The window with identity `id`; `None` if it has left the list — the pane's owner
+    /// handle (`window::WindowHost`), the close question and the search paths.
     pub(crate) fn window(&self, id: u64) -> Option<Retained<TerminalWindow>> {
         self.ivars()
             .windows
@@ -1726,21 +1726,21 @@ impl AppDelegate {
             .cloned()
     }
 
-    /// Kimliği `id` olan pane; kapanmışsa `None` — okuyucu thread'den ana
-    /// kuyruğa dönen işlerin (`ShellWake`, alternatif ekran habercisi,
-    /// yükleme) yolu ([`pane_by_id`]). Pencereye ait işi pane sahibinden
-    /// istiyor (`window::WindowHost`).
+    /// The pane with identity `id`; `None` if it is closed — the path of the jobs
+    /// that return from the reader thread to the main queue (`ShellWake`, the
+    /// alternate-screen notifier, uploads) ([`pane_by_id`]). It asks the pane's
+    /// owner for window-level work (`window::WindowHost`).
     ///
-    /// [`AppDelegate::window`]'ın aksine kapanışı başlamış pane'i **bulmuyor**
-    /// ([`find_open`]): pencere listeden bir tur sonra çıkıyor ve o arada
-    /// gelen bayat bir haber kapanmış oturuma iş yapmamalı. Arama bütün
-    /// pencerelerin bütün pane'lerinde (bölmeler).
+    /// Unlike [`AppDelegate::window`], it does **not** find a pane whose
+    /// teardown has started ([`find_open`]): the window leaves the list a turn
+    /// later and a stale notification arriving in between must not do work on a
+    /// closed session. The search covers all panes of all windows (splits).
     pub(crate) fn pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
         find_open(self.all_panes(), |pane| (pane.id() == id, pane.is_closed()))
     }
 
-    /// Bütün pencerelerin bütün pane'leri — dolaşan yolların (ayar dağıtımı,
-    /// Dock simgesi, kimlikle arama) listesi; pencere listesi gibi bir kopya.
+    /// All panes of all windows — the list for the walking paths (settings
+    /// distribution, Dock icon, lookup by identity); a copy, like the window list.
     fn all_panes(&self) -> Vec<Retained<TerminalPane>> {
         self.windows()
             .iter()
@@ -1748,19 +1748,19 @@ impl AppDelegate {
             .collect()
     }
 
-    /// Uygulamanın Dock simgesindeki yükleme çubuğu — bütün pane'lerin
-    /// toplamı (`uploader::refresh_dock_tile`); pane'in
-    /// `PaneHost::uploads_changed` olayı buraya iniyor.
+    /// The upload bar on the app's Dock icon — the total of all panes
+    /// (`uploader::refresh_dock_tile`); the pane's
+    /// `PaneHost::uploads_changed` event lands here.
     pub(crate) fn refresh_dock_tile(&self) {
         let panes = self.all_panes();
         let panes: Vec<&TerminalPane> = panes.iter().map(|pane| &**pane).collect();
         crate::uploader::refresh_dock_tile(self.mtm(), &panes);
     }
 
-    /// Sekme kimliği `id` olan pane ve penceresi; kapanmışsa `None`
-    /// (`bateri://tab/`, `application:openURLs:`): kapanışı başlamış ama
-    /// listeden henüz çıkmamış pane öne getirilse oturumsuz bir pencere
-    /// ekrana dönerdi ([`find_open`]). Kimlik pane başına (039 Karar 10).
+    /// The pane with tab identity `id` and its window; `None` if closed
+    /// (`bateri://tab/`, `application:openURLs:`): bringing to the front a pane
+    /// whose teardown has started but which has not yet left the list would put
+    /// a sessionless window on screen ([`find_open`]). The identity is per pane (039 Karar 10).
     fn pane_by_tab(
         &self,
         id: &TabId,
@@ -1773,23 +1773,23 @@ impl AppDelegate {
         })
     }
 
-    /// Etkin pencere: `NSApp.keyWindow` listede aranıyor. Ayar penceresi ya
-    /// da bir panel key ise `None` ve yeni pencere evde doğuyor. Mirasın
-    /// kaynağı onun **odaktaki pane'i** (`TerminalWindow::focused_pane`).
+    /// The active window: `NSApp.keyWindow` is looked up in the list. `None` if the
+    /// settings window or a panel is key, and the new window is born at home. The
+    /// source of inheritance is its **focused pane** (`TerminalWindow::focused_pane`).
     fn key_window(&self) -> Option<Retained<TerminalWindow>> {
         let key = NSApplication::sharedApplication(self.mtm()).keyWindow()?;
         self.window_owning(&key)
     }
 
-    /// Etkin sekmenin uzak host'u ve çözülmüş işareti; yerel sekmede ya da
-    /// terminal penceresi key değilken `None` — Shell ▸ Mark … as ▸'nin
+    /// The active tab's remote host and its resolved mark; `None` in a local tab or
+    /// when no terminal window is key — the input of Shell ▸ Mark … as ▸ (037 Karar 5).
     /// girdisi (037 Karar 5).
     pub(crate) fn key_remote_mark(&self) -> Option<(String, HostMark)> {
         self.key_window()?.remote_mark()
     }
 
-    /// `NSWindow`'u `window` olan terminal penceresi; listede yoksa `None`
-    /// (panel, ayar penceresi, kapanmış pencere).
+    /// The terminal window whose `NSWindow` is `window`; `None` if not in the list
+    /// (panel, settings window, closed window).
     pub(crate) fn window_owning(&self, window: &NSWindow) -> Option<Retained<TerminalWindow>> {
         self.ivars()
             .windows
@@ -1799,12 +1799,12 @@ impl AppDelegate {
             .cloned()
     }
 
-    /// `applicationShouldTerminate:`'in gövdesi.
+    /// Body of `applicationShouldTerminate:`.
     ///
-    /// Ayar ödüncü `runModal`'dan **önce** bırakılıyor: modal döngü run
-    /// loop'u döndürüyor ve o arada gelen bir kayıt (`reload_settings`)
-    /// açık bir ödünçle `replace` edemezdi. Uygulama önce öne alınıyor: arka
-    /// plandaki uygulamanın modali pencerelerin arkasında kalabilir ve Dock ▸
+    /// The settings borrow is released **before** `runModal`: the modal loop spins
+    /// the run loop and a save arriving in the meantime (`reload_settings`) could
+    /// not `replace` with an open borrow. The app is brought to the front first: the
+    /// modal of a background app can stay behind the windows and Dock ▸ Quit is exactly that path.
     /// Quit tam o yol.
     fn terminate_reply(&self) -> NSApplicationTerminateReply {
         let timed = self.ivars().run.is_some();
@@ -1816,7 +1816,7 @@ impl AppDelegate {
             return NSApplicationTerminateReply::TerminateNow;
         }
         let confirm = self.settings().confirm_close;
-        // Soru koşan işi pane'lerden topluyor (039 Karar 11).
+        // The question collects the running job from the panes (039 Karar 11).
         let panes = self.all_panes();
         let unit = window::unit_for(panes.len(), windows.len());
         let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &panes) else {
@@ -1832,10 +1832,10 @@ impl AppDelegate {
         }
     }
 
-    /// Kapanan pencereyi listeden çıkarır — `windowWillClose:`'un bir tur
-    /// sonraki işi. Nesne burada, ana thread'de ve ödünç bırakıldıktan sonra
-    /// düşüyor: düşen pencerenin `Drop`'u geri dönüp listeye uzanırsa
-    /// `borrow_mut` açık kalmasın.
+    /// Removes the closing window from the list — the job one turn after
+    /// `windowWillClose:`. The object is dropped here, on the main thread and after
+    /// the borrow is released: lest the `Drop` of the dropped window come back and
+    /// reach the list and leave `borrow_mut` open.
     pub(crate) fn forget_window(&self, id: u64) {
         let removed = {
             let mut windows = self.ivars().windows.borrow_mut();
@@ -1847,24 +1847,24 @@ impl AppDelegate {
         drop(removed);
     }
 
-    /// Yeni pencere (ya da `from`'un grubunda yeni sekme) açar — pencere
-    /// doğuran **tek** yol: açılışın ilk penceresi (`from = None`), ⌘N, ⌘T,
-    /// sekme çubuğunun `+`'sı ve Dock ikonu.
+    /// Opens a new window (or a new tab in `from`'s group) — the **only** path that
+    /// spawns windows: the launch's first window (`from = None`), ⌘N, ⌘T, the tab
+    /// bar's `+` and the Dock icon.
     ///
-    /// `from` etkin pencere; yeni kabuk onun OSC 7 dizininde (yoksa evde,
-    /// 026 → Karar 4), geçici punto farkı ondan (Karar 3) ve tema onun
-    /// oturumundan — bütün pencereler aynı temada; `from` yoksa tema
-    /// ayarlardan çözülüyor. Sekme isteği ama `from` yoksa ayrı pencere.
-    /// Kabuğun ilk girdisi `opening` ile `from`'un uzak hedefinden
-    /// ([`initial_line`]); dizin mirası üç açılışta da aynı — uzak sekmede
-    /// `working_directory()` yerel dizini veriyor (036 Karar 4).
+    /// `from` is the active window; the new shell starts in its OSC 7 directory (home
+    /// if none, 026 → Karar 4), the temporary point-size delta comes from it (Karar 3) and the theme from its
+    /// session — all windows share the same theme; without `from` the theme is
+    /// resolved from settings. A tab request without `from` is a separate window.
+    /// The shell's first input comes from `opening` and `from`'s remote target
+    /// ([`initial_line`]); directory inheritance is the same in all three openings — in a remote tab
+    /// `working_directory()` returns the local directory (036 Karar 4).
     ///
-    /// Sıra: punto, alt başlık ve krom pencere görünmeden, liste yerleşimden önce
-    /// (geometri olayları pencereyi listede bulsun), oturum yerleşimden
-    /// **sonra** — sekmeye eklenen pencere grubun boyutunu alıyor ve kabuk ilk
-    /// `TIOCSWINSZ`'yi o boyutla görmeli.
+    /// Order: point size, subtitle and chrome before the window is visible, the list before placement
+    /// (so geometry events find the window in the list), the session **after**
+    /// placement — a window added to a tab takes the group's size and the shell must see the first
+    /// `TIOCSWINSZ` with that size.
     ///
-    /// Hata çağırana dönüyor; oturum doğamadıysa pencere kapatılmış olarak.
+    /// The error returns to the caller; if the session could not be born, the window is closed.
     fn open_window(
         &self,
         from: Option<&TerminalWindow>,
@@ -1872,7 +1872,7 @@ impl AppDelegate {
     ) -> Result<Retained<TerminalWindow>, String> {
         let mtm = self.mtm();
         let id = self.next_window_id();
-        // Miras etkin pencerenin **odaktaki pane'inden** (039 Karar 9).
+        // Inheritance comes from the active window's **focused pane** (039 Karar 9).
         let source = from.map(TerminalWindow::focused_pane);
         let (launch, theme) = self.pane_launch(id, source.as_deref(), opening);
         let window = TerminalWindow::new(mtm, id, launch).map_err(|e| e.to_string())?;
@@ -1880,9 +1880,9 @@ impl AppDelegate {
             &self.ivars().notices.borrow().subtitle(),
         ));
         self.ivars().windows.borrow_mut().push(window.clone());
-        // Krom pencere **görünmeden**: sonra boyansaydı her ⌘T bir kare
-        // sistemin gri başlık çubuğunu gösterirdi. Ayırıcının rengi de aynı
-        // temadan (`TerminalWindow::set_theme`'in ilk hâli).
+        // Chrome **before** the window is visible: if painted afterwards, every ⌘T
+        // would show the system's grey title bar for a frame. The separator's colour
+        // comes from the same theme too (the first form of `TerminalWindow::set_theme`).
         window.set_theme(theme);
         match from {
             Some(from) if opening != Opening::Window => window.show_as_tab_of(from),
@@ -1895,20 +1895,20 @@ impl AppDelegate {
         }
         if let Err(e) = window.start(mtm) {
             window.close();
-            return Err(format!("shell başlatılamadı: {e}"));
+            return Err(format!("failed to start the shell: {e}"));
         }
         Ok(window)
     }
 
-    /// Yeni pane'in doğum paketi (039 Karar 3) ve teması — pencere doğuran
-    /// yolun da bölmenin de tek kaynağı. Girdilerin hepsi burada, pane
-    /// `AppDelegate`'e uzanmıyor. Pane kimliği pencerelerinkiyle aynı
-    /// sayaçtan (tek ad alanı); sahibi `window`'un [`WindowHost`]'u.
+    /// The new pane's birth package (039 Karar 3) and its theme — the single source
+    /// for both the window-spawning path and splitting. All inputs are here, the pane
+    /// does not reach into `AppDelegate`. The pane identity comes from the same counter as
+    /// windows' (one namespace); its owner is `window`'s [`WindowHost`].
     ///
-    /// `from` mirasın kaynağı (odaktaki pane): OSC 7 dizini (yoksa ev, 026
-    /// → Karar 4), punto farkı (Karar 3), tema ve uzak satır ([`initial_line`]);
-    /// `from` yoksa tema ayarlardan çözülüyor. Entegrasyon **bir kez**
-    /// soruluyor ve iki cevabı birden veriyor (ortam + dock payı).
+    /// `from` is the source of inheritance (the focused pane): the OSC 7 directory (home
+    /// if none, 026 → Karar 4), the point-size delta (Karar 3), the theme and the remote line ([`initial_line`]);
+    /// without `from` the theme is resolved from settings. The integration is asked **once**
+    /// and gives both answers at once (environment + dock share).
     fn pane_launch(
         &self,
         window: u64,
@@ -1941,10 +1941,10 @@ impl AppDelegate {
         (launch, theme)
     }
 
-    /// ⌘D / ⇧⌘D (`TerminalWindow`'un `splitRight:`/`splitDown:`'ı): `from`'un
-    /// yanında yeni bir pane, `from`'un mirasıyla ([`Opening::Split`]). Hata
-    /// stderr'e; sekme açık kalıyor — öteki pane'lerin kabukları bir yenisinin
-    /// doğamamasıyla ölmemeli.
+    /// ⌘D / ⇧⌘D (`TerminalWindow`'s `splitRight:`/`splitDown:`): a new pane next
+    /// to `from`, with `from`'s inheritance ([`Opening::Split`]). The error goes to
+    /// stderr; the tab stays open — the other panes' shells must not die because a new one
+    /// could not be born.
     pub(crate) fn open_split(&self, window: &TerminalWindow, from: &TerminalPane, axis: Axis) {
         let (launch, _) = self.pane_launch(window.id(), Some(from), Opening::Split);
         if let Err(e) = window.add_pane(self.mtm(), launch, from.id(), axis) {
@@ -1952,46 +1952,46 @@ impl AppDelegate {
         }
     }
 
-    /// Etkin pencereden türeyen yeni pencere ya da sekme (⌘N, ⌘T, ⌥⌘T, `+`).
+    /// A new window or tab derived from the active window (⌘N, ⌘T, ⌥⌘T, `+`).
     fn open_from_key_window(&self, opening: Opening) {
         let from = self.key_window();
         self.open_window_or_report(from.as_deref(), opening);
     }
 
-    /// [`AppDelegate::open_window`], hatası stderr'e — ⌘N/⌘T/`+`/Dock'un
-    /// yolu. Süreç **çıkmıyor**: öteki pencerelerin kabukları bir yenisinin
-    /// doğamamasıyla ölmemeli (yalnız ilk pencere çıkar, `didFinishLaunching`).
+    /// [`AppDelegate::open_window`], with the error to stderr — the path of ⌘N/⌘T/`+`/Dock.
+    /// The process does **not** exit: the other windows' shells must not die because a new one
+    /// could not be born (only the first window exits, `didFinishLaunching`).
     fn open_window_or_report(&self, from: Option<&TerminalWindow>, opening: Opening) {
         if let Err(e) = self.open_window(from, opening) {
             eprintln!("bateri: {e}");
         }
     }
 
-    /// Süreli koşunun tek penceresinin sessizlik damgası (`sessiz=`).
+    /// The quiet stamp of the timed run's single window (`quiet=`).
     ///
-    /// Süreli koşuda tek pencere ve tek pane var (039 Karar 12) ve rapor
-    /// onu okuyor; listenin ilki o.
+    /// A timed run has a single window and a single pane (039 Karar 12) and the report
+    /// reads it; it is the first in the list.
     fn quiet_since(&self) -> Option<Duration> {
         let pane = self.windows().first().map(|window| window.focused_pane());
         pane.and_then(|pane| pane.link().and_then(DisplayLink::quiet_since))
     }
 
-    /// Geçerli ayarlar — pencerelerin okuduğu yol. Ödünç kısa tutulmalı:
-    /// kayıt anı yolu yazarken (`replace`) açık bir ödünç panikle biter.
+    /// The current settings — the path windows read. The borrow must be kept short:
+    /// while the save-time path writes (`replace`), an open borrow ends in a panic.
     pub(crate) fn settings(&self) -> Ref<'_, Settings> {
         self.ivars().settings.borrow()
     }
 
-    /// Ölçüm defterinin pencereye (link'e) giden kopyası.
+    /// The copy of the measurement ledger that goes to the window (the link).
     pub(crate) fn stats(&self) -> Option<Arc<Stats>> {
         self.ivars().stats.clone()
     }
 
-    /// Yeni oturumun shell entegrasyonu: çocuğa eklenecek ortam **ve** dock
-    /// payı, tek sorudan ([`shell_integration_env`], [`dock_rows_at_birth`]).
+    /// The new session's shell integration: the environment to add to the child **and** the dock
+    /// share, from a single question ([`shell_integration_env`], [`dock_rows_at_birth`]).
     ///
-    /// İki anahtar **tek ödünçten**: ayrı `borrow()`'lar arasına düşen bir
-    /// yeniden yükleme ikisini farklı dosyadan okuyabilirdi.
+    /// Both keys from **one borrow**: a reload falling between separate `borrow()`s
+    /// could read the two from different files.
     pub(crate) fn shell_integration(&self) -> (Vec<(String, String)>, u16) {
         let setting = self.ivars().settings.borrow().shell_integration;
         let integration = shell_integration_env(
@@ -2005,34 +2005,34 @@ impl AppDelegate {
         (integration, birth)
     }
 
-    /// Açılışta ayarları okur, [`Ivars::settings`]'e yazar ve tanıları alt
-    /// başlığa kaynak kaynak verir. Temayı ilk pencere çözüyor
+    /// Reads the settings at launch, writes them to [`Ivars::settings`] and hands the diagnostics
+    /// to the subtitle source by source. The first window resolves the theme
     /// ([`AppDelegate::resolve_theme`]).
     ///
-    /// Süreli koşuda yükleyici **hiç çağrılmaz** ([`Inputs::Hermetic`]) ve
-    /// tema gömülü `bateri`, görünüm okunmadan: `Settings::default()` artık
-    /// `"system"` ve ona çözülseydi duman makinenin açık modundan etkilenirdi.
-    /// Font da renderer'ın açılış değerinde, yani `FontOptions::default()`'ta
-    /// kalır — `hucre=8 glif=6` makinenin ayar dosyasına bağlanmaz.
-    /// Bozuk dosya pencereyi açık bırakır, varsayılanlarla
+    /// In a timed run the loader is **never called** ([`Inputs::Hermetic`]) and the
+    /// theme is the embedded `bateri`, without reading the appearance: `Settings::default()` is now
+    /// `"system"` and had it been resolved to that, smoke would be affected by the machine's light mode.
+    /// The font also stays at the renderer's launch value, i.e. `FontOptions::default()`
+    /// — `cells=8 glyphs=6` is not tied to the machine's settings file.
+    /// A broken file leaves the window open, with defaults
     /// ([`settings::Loaded::at_launch`], [`AppDelegate::choose_theme`]).
     ///
-    /// Font pencerenin renderer'ına pencere doğarken **yalnız istek** olarak
-    /// gidiyor ([`AppDelegate::open_window`] → [`TerminalPane::request_font`]):
-    /// atlas hemen ardından gelen `sync_geometry`'de açılıyor ve font yuvasını
-    /// da o yazıyor.
+    /// The font goes to the window's renderer **only as a request** while the window is born
+    /// ([`AppDelegate::open_window`] → [`TerminalPane::request_font`]):
+    /// the atlas is opened in the `sync_geometry` that follows immediately and
+    /// that also writes the font slot.
     ///
-    /// İzleme de burada kuruluyor, okumadan **önce** (`watch` → kurulum tek
-    /// atımlık): açılışla ilk olay arasına düşen bir kayıt kaybolmasın.
+    /// The watching is set up here too, **before** reading (`watch` → setup is a
+    /// one-shot): a save falling between launch and the first event must not be lost.
     fn load_settings(&self) {
         let Inputs::User { config_root } = self.inputs() else {
             return;
         };
-        // Ev dizini çözülemedi: dosya aranamıyor ve bu da görünür olmalı —
-        // Dock'tan açılışta stderr'i kimse görmez, kullanıcının ayarları
-        // sessizce yok sayılmış olurdu. Okunamayan dosyanın kuralı
-        // (`Loaded::at_launch`): dosyada `osc52 = "off"` olabilir, pano
-        // kapalıya düşer.
+        // The home directory could not be resolved: the file cannot be looked up and this must be
+        // visible too — nobody sees stderr on a Dock launch, and the user's settings
+        // would be silently ignored. The rule for an unreadable file
+        // (`Loaded::at_launch`): the file may contain `osc52 = "off"`, the
+        // clipboard falls to off.
         let (settings, messages) = match &config_root {
             Some(root) => {
                 self.watch_config(root);
@@ -2052,9 +2052,9 @@ impl AppDelegate {
         self.ivars().settings.replace(settings);
     }
 
-    /// Pencere yokken doğan pencerenin teması: ayarların seçtiği, görünüme
-    /// göre çözülmüş tema ([`AppDelegate::choose_theme`]). Süreli koşuda
-    /// gömülü `bateri` ([`Inputs::Hermetic`]).
+    /// The theme of a window born while no window exists: the theme the settings select,
+    /// resolved for the appearance ([`AppDelegate::choose_theme`]). In a timed run
+    /// the embedded `bateri` ([`Inputs::Hermetic`]).
     fn resolve_theme(&self) -> Theme {
         let Inputs::User { config_root } = self.inputs() else {
             return Theme::BATERI;
@@ -2063,15 +2063,15 @@ impl AppDelegate {
         self.choose_theme(config_root.as_deref(), &settings)
     }
 
-    /// Ayarların o anki görünüm için seçtiği temayı çözer ve tema yuvasını
-    /// yeniler — açılışın ve görünüm değişiminin **ortak** yolu. Kullanılamayan
-    /// temanın yerine görünüme uyan gömülü tema gelir
-    /// ([`settings::ThemeLoaded::or_embedded`]); ekrandaki temayı tutmak
-    /// görünüm değişiminde öteki görünümün temasını bırakırdı.
+    /// Resolves the theme the settings select for the current appearance and refreshes the theme slot
+    /// — the **shared** path of launch and appearance change. An unusable
+    /// theme is replaced by the embedded theme matching the appearance
+    /// ([`settings::ThemeLoaded::or_embedded`]); keeping the on-screen theme
+    /// would leave the other appearance's theme in place on an appearance change.
     ///
-    /// Etkin tema dosyasının kaynağı da burada, okumadan önce yenileniyor:
-    /// görünüm değişince ad değişiyor ve eski adın kaynağı yeni dosyadaki
-    /// yerinde yazmayı görmezdi.
+    /// The active theme file's source is also refreshed here, before reading:
+    /// the name changes when the appearance changes and the old name's source
+    /// would not see a write to its place in the new file.
     fn choose_theme(&self, config_root: Option<&Path>, settings: &Settings) -> Theme {
         let dark = self.dark_appearance();
         let name = settings.theme_for(dark);
@@ -2081,34 +2081,34 @@ impl AppDelegate {
         theme
     }
 
-    /// Canlı yenileme: bir izleme kaynağı haber verdi. "Settings…" da dizini
-    /// yarattıktan sonra buraya geliyor ([`AppDelegate::edit_settings`]) —
-    /// sonradan yaratılan dizini hiçbir kaynak görmüyor (`watch`).
+    /// Live reload: a watch source has reported. "Settings…" also comes here after
+    /// creating the directory ([`AppDelegate::edit_settings`]) —
+    /// no source sees a directory created later (`watch`).
     ///
-    /// Sıra, üç kural:
-    /// - **Önce kur, sonra oku** ([`AppDelegate::watch_config`],
-    ///   [`AppDelegate::watch_theme`]); her olayda hepsi yeniden kuruluyor,
-    ///   üstüne taşınmış dosyanın ya da silinmiş dizinin bayat tanıtıcısı
-    ///   böyle düşüyor.
-    /// - **Ayar dosyası** ([`settings::Loaded::live`]): kullanılamayan ya da
-    ///   bir an yok olan dosyadan hiçbir şey uygulanmaz ve [`Ivars::settings`]
-    ///   değişmez; yuva kendi kaynağına göre dolar ya da boşalır. Değilse
-    ///   kabul edilmeyen anahtar geçerli değerini tutar
-    ///   ([`settings::load_keeping`]) ve fark alınır: terminal seçenekleri
-    ///   **tamamıyla** oturuma gider; font pencerenin geçici punto farkıyla
-    ///   renderer'a gider ([`TerminalPane::apply_font`]) — `size`
-    ///   değiştiyse fark sıfırlanarak ([`Zoom::after_reload`]); imleç stili link'e gider
-    ///   ([`bt_gpu::DisplayLink::set_cursor_motion`]). Dosya okunup uygulanınca yazma
-    ///   yuvası da boşalır: Theme ▸'nin reddettiği dosya düzeltildiyse ret
-    ///   artık doğru değil.
-    /// - **Tema her olayda yeniden çözülüyor**, ayar dosyası bozuk olsa da
-    ///   (son iyi ayarların adıyla): etkin tema dosyası ayrı bir kaynak ve
-    ///   hangi dosyanın haber verdiği bilinmiyor. Kullanılamayan tema takas
-    ///   edilmez, ekrandaki kalır ([`settings::ThemeLoaded::or_current`]);
-    ///   aynı tema takası no-op, kare istenmez.
+    /// Order, three rules:
+    /// - **Set up first, then read** ([`AppDelegate::watch_config`],
+    ///   [`AppDelegate::watch_theme`]); all are rebuilt on every event, and this is
+    ///   how the stale handle of a moved file or a deleted directory is dropped.
+    /// - **The settings file** ([`settings::Loaded::live`]): from an unusable or momentarily
+    ///   missing file nothing is applied and [`Ivars::settings`]
+    ///   does not change; the slot fills or empties according to its own source. Otherwise
+    ///   a key that is not accepted keeps its current value
+    ///   ([`settings::load_keeping`]) and the diff is taken: terminal options go
+    ///   **entirely** to the session; the font goes to the renderer with the window's temporary point-size delta
+    ///   ([`TerminalPane::apply_font`]) — with the delta reset if `size`
+    ///   changed ([`Zoom::after_reload`]); the cursor style goes to the link
+    ///   ([`bt_gpu::DisplayLink::set_cursor_motion`]). Once the file is read and applied the write
+    ///   slot is emptied too: if the file Theme ▸ rejected was fixed, the rejection
+    ///   slot is emptied too: if the file Theme ▸ rejected was fixed, the
+    ///   rejection is no longer true.
+    /// - **The theme is re-resolved on every event**, even if the settings file is broken
+    ///   (with the name from the last good settings): the active theme file is a separate source and
+    ///   which file reported is unknown. An unusable theme is not swapped in,
+    ///   the on-screen one stays ([`settings::ThemeLoaded::or_current`]);
+    ///   swapping in the same theme is a no-op, no frame is requested.
     ///
-    /// Birleştirme yok: bir kayıt birden çok olay doğurur (dizin + dosya) ve
-    /// sonrakiler boş fark verir.
+    /// No coalescing: one save yields several events (directory + file) and the
+    /// later ones give an empty diff.
     fn reload_settings(&self) {
         let Inputs::User {
             config_root: Some(root),
@@ -2116,16 +2116,16 @@ impl AppDelegate {
         else {
             return;
         };
-        // Her uygulama **her pencereye**: ayar dosyası tek, pencereler onu
-        // birlikte izliyor. Pencere henüz oturumsuzsa (kaynaklar
-        // `didFinishLaunching` içinde kuruluyor, olay ana kuyruğa ancak o
-        // dönünce düşebiliyor) yöntemleri kendi yuvalarına bakıp sessizce
-        // dönüyor; bu bir sıra değişikliğine karşı.
+        // Every application goes to **every window**: the settings file is one and the windows
+        // watch it together. If a window has no session yet (the sources
+        // are set up inside `didFinishLaunching`, the event can land on the main queue only when that
+        // returns), the methods look at their own slots and silently
+        // return; this guards against a change of order.
         let windows = self.windows();
         let panes = self.all_panes();
         self.watch_config(&root);
-        // Kabul edilmeyen değer geçerli ayardan (`load_keeping`): yanlış
-        // türde kaydedilen `scrollback` geçmişi kırpmasın.
+        // A value that is not accepted comes from the current settings (`load_keeping`): a `scrollback`
+        // saved with the wrong type must not truncate the history.
         let loaded = settings::load_keeping(&root, &self.ivars().settings.borrow());
         self.ivars().settings_state.replace(loaded.state());
         let (loaded, messages) = loaded.live();
@@ -2133,8 +2133,8 @@ impl AppDelegate {
         if let Some(new) = loaded {
             let changes = {
                 let old = self.ivars().settings.borrow();
-                // Punto farkı **pane başına** (026 → Karar 3, 039 Karar 5)
-                // ve her pane'de aynı kuralla sıfırlanıyor.
+                // The point-size delta is **per pane** (026 → Karar 3, 039 Karar 5)
+                // and is reset in every pane with the same rule.
                 for pane in &panes {
                     pane.zoom_after_reload(&old.font, &new.font);
                 }
@@ -2150,37 +2150,37 @@ impl AppDelegate {
                     window.set_host_marks(&new);
                 }
             }
-            // Stil ve dock'un yazım efektleri link'e gidiyor, oturuma değil:
-            // hangi kareyi çizeceğimizi değil **nasıl** çizeceğimizi
-            // değiştiriyorlar. Link `start_session` içinde doğuyor ve bu yol
-            // ondan sonra koşuyor, ama sıra bir sözleşme değil: yuva boşsa
-            // açılış çağrısı zaten aynı değeri verecek.
+            // The style and the dock's typing effects go to the link, not the session:
+            // they change not which frame we draw but **how** we draw it.
+            // The link is born inside `start_session` and this path runs after
+            // it, but the order is not a contract: if the slot is empty the
+            // launch call will give the same value anyway.
             let motion_changed = changes.motion;
             if motion_changed {
                 for pane in &panes {
                     pane.set_cursor_motion(&new);
                 }
             }
-            // İmlecin çizim sayıları da link'e, aynı gerekçeyle: **nasıl**
-            // çizdiğimizi değiştiriyorlar, hangi kareyi çizdiğimizi değil.
-            // `Changes::caret` ayrı bir alan, çünkü bunlar `TerminalOptions`'a
-            // girmiyor ve `changes.terminal`'a binselerdi bir yarıçap
-            // değişimi oturumu baştan kurdururdu.
+            // The cursor's drawing numbers go to the link too, for the same reason: they change
+            // **how** we draw, not which frame we draw.
+            // `Changes::caret` is a separate field, because these do not go into
+            // `TerminalOptions` and had they piggybacked on `changes.terminal`, a radius
+            // change would have rebuilt the session from scratch.
             if changes.caret {
                 for pane in &panes {
                     pane.apply_caret(&new);
                 }
             }
             self.ivars().settings.replace(new);
-            // Ayarlar yazıldıktan **sonra**: `apply_reduce_motion` üç
-            // çağıranın ortak yolu ve değeri yuvadan okuyor, elindeki `new`'den
-            // değil. Stilin yolu ayrı kaldı çünkü o link'i doğrudan alıyor;
-            // ikisini birleştirmek bu yolu `new`'e bağlar ve sistem
-            // bildiriminden çağrılamaz hâle getirirdi.
+            // **After** the settings are written: `apply_reduce_motion` is the shared path of
+            // three callers and reads the value from the slot, not from the `new` in hand.
+            // The style's path stayed separate because it takes the link directly;
+            // merging the two would tie this path to `new` and make it
+            // uncallable from the system notification.
             if motion_changed {
                 self.apply_reduce_motion();
             }
-            // Fark yazıldıktan **sonra**: pane fontu yeni farkla uyguluyor.
+            // **After** the delta is written: the pane applies the font with the new delta.
             if changes.font {
                 let font = self.settings().font.clone();
                 for pane in &panes {
@@ -2189,8 +2189,8 @@ impl AppDelegate {
             }
             self.post_notices(Source::Write, Vec::new());
         }
-        // Ödünç `set_theme`'den önce düşüyor; içerideki çağrılar `settings`'e
-        // dokunmuyor (`apply_appearance`'ın deseni).
+        // The borrow is dropped before `set_theme`; the calls inside do not touch
+        // `settings` (the pattern of `apply_appearance`).
         let theme = {
             let settings = self.ivars().settings.borrow();
             let name = settings.theme_for(self.dark_appearance());
@@ -2204,26 +2204,26 @@ impl AppDelegate {
                 window.set_theme(theme);
             }
         }
-        // Dosya dışarıdan da değişmiş olabilir (vnode): açık ayar penceresi
-        // her koşuda dosyanın hâlini gösterir.
+        // The file may have changed from outside too (vnode): an open settings window
+        // shows the file's state on every run.
         self.refresh_settings_window();
     }
 
-    /// Ayar penceresinin "Open settings.toml" düğmesi (029 Karar 8; 029'a
-    /// kadar bateri ▸ Settings…'ın kendisiydi): dosya yoksa şablonla yaratır
-    /// ([`settings::create_if_missing`]), izlemeyi yeniden kurup okur ve
-    /// dosyayı editörde açar ([`open_in_editor`]).
+    /// The settings window's "Open settings.toml" button (029 Karar 8; until 029
+    /// it was bateri ▸ Settings… itself): creates the file from the template if missing
+    /// ([`settings::create_if_missing`]), re-sets up the watching and reads, and
+    /// opens the file in the editor ([`open_in_editor`]).
     ///
-    /// - **Süreli koşu** dosya yaratmaz ([`Inputs::Hermetic`]); ev dizini
-    ///   çözülemediyse ayar yuvası bunu açılıştan beri söylüyor.
-    /// - **Yeniden okuma yaratmadan sonra** ([`AppDelegate::reload_settings`]):
-    ///   dizin yeni doğduysa onu hiçbir kaynak görmüyordu. Şablon
-    ///   varsayılanları söylüyor; dosyasız kullanıcıda fark boş, ekran
-    ///   değişmez.
-    /// - **Hata yazma yuvasına, okumadan sonra**: okuma o yuvayı dosya
-    ///   uygulanınca boşaltıyor, önce yazılsaydı hemen silinirdi. Yuva ayar
-    ///   penceresinin şeridinde de görünüyor (düğme orada); sonraki başarılı
-    ///   okuma ya da yazma onu boşaltır.
+    /// - A **timed run** creates no file ([`Inputs::Hermetic`]); if the home directory
+    ///   could not be resolved, the settings slot has said so since launch.
+    /// - **Re-reading after creating** ([`AppDelegate::reload_settings`]):
+    ///   if the directory was just born, no source saw it. The template
+    ///   states the defaults; for a user without a file the diff is empty and the screen
+    ///   does not change.
+    /// - **The error goes to the write slot, after reading**: reading empties that slot once the file is
+    ///   applied, so if written first it would be erased at once. The slot
+    ///   is also shown in the settings window's strip (the button is there); the next successful
+    ///   read or write empties it.
     pub(crate) fn edit_settings(&self) {
         let Inputs::User {
             config_root: Some(root),
@@ -2245,35 +2245,35 @@ impl AppDelegate {
             )),
             Ok(_) => None,
         };
-        // Yazma yuvasına: düğmeye basılan ayar penceresi o yuvayı şeridinde
-        // gösteriyor — terminal penceresi hiç yokken alt başlık da yok.
-        // Okuma yuvayı boşalttıktan sonra yazılıyor, yani görünür kalıyor.
+        // To the write slot: the settings window whose button was pressed shows that slot in its strip
+        // — with no terminal window at all there is no subtitle either.
+        // It is written after the read has emptied the slot, so it stays visible.
         if let Some(problem) = problem {
             self.post_notices(Source::Write, vec![problem]);
             self.refresh_settings_window();
         }
     }
 
-    /// View ▸ Theme ▸'nin seçimi: `theme`'i dosyaya yazar
-    /// ([`settings::write_edit`]) ve **dosyayı okuyan yoldan** uygular
-    /// ([`AppDelegate::reload_settings`]) — menünün kendi uygulama yolu yok,
-    /// ekrana giden tek zincir dosyadan geçiyor.
+    /// The View ▸ Theme ▸ choice: writes `theme` to the file
+    /// ([`settings::write_edit`]) and applies it through **the path that reads the file**
+    /// ([`AppDelegate::reload_settings`]) — the menu has no application path of its own,
+    /// the only chain to the screen goes through the file.
     ///
-    /// Okuma yazmadan hemen sonra, izleyicinin olayını beklemeden: dizin az
-    /// önce yaratıldıysa onu gören bir kaynak yok ("Settings…"ın gerekçesi).
-    /// Ardından gelen olay boş fark ve aynı temanın takası, yani no-op.
+    /// The read comes right after the write, without waiting for the watcher's event: if the
+    /// directory was created a moment ago no source sees it (the rationale of "Settings…").
+    /// The event that follows is an empty diff and a swap to the same theme, i.e. a no-op.
     ///
-    /// Hata **yazma yuvasına**; başarılı yazma yuvayı boşaltır. Süreli koşu
-    /// yazmaz ([`Inputs::Hermetic`]); menü o dalda zaten dolmuyor.
+    /// The error goes to the **write slot**; a successful write empties the slot. A timed run
+    /// does not write ([`Inputs::Hermetic`]); the menu is not populated in that branch anyway.
     fn save_theme(&self, name: &str) {
         self.save_edit(&SettingsEdit::Theme(name.to_owned()));
     }
 
-    /// Tek anahtarın yeni değerini dosyaya yazar ve dosyayı okuyan yoldan
-    /// uygular — View ▸ Theme ▸'nin ve ayar penceresinin **ortak** yolu
-    /// ([`AppDelegate::save_theme`]'in gerekçeleri aynen). Yazma hatasında
-    /// pencere dosyanın değerine döner: kontrolün gösterdiği yazılamayan bir
-    /// değer olmasın.
+    /// Writes a single key's new value to the file and applies it through the path that reads
+    /// the file — the **shared** path of View ▸ Theme ▸ and the settings window
+    /// (the rationale of [`AppDelegate::save_theme`] applies as is). On a write error the
+    /// window returns to the file's value: the control must not show a value that could
+    /// not be written.
     pub(crate) fn save_edit(&self, edit: &SettingsEdit) {
         let Inputs::User {
             config_root: Some(root),
@@ -2293,10 +2293,10 @@ impl AppDelegate {
         }
     }
 
-    /// bateri ▸ Settings…: ayar penceresini doğurur (ilk seferde), etkin
-    /// ayarla doldurur ve öne getirir. Süreli koşuda ve ev dizini
-    /// çözülemeyince **hiçbir şey** yapmaz ([`Inputs::Hermetic`]): yazacağı
-    /// bir dosya yok, `make duman` pencereyi hiç görmüyor.
+    /// bateri ▸ Settings…: spawns the settings window (the first time), fills it with the
+    /// active settings and brings it to the front. In a timed run and when the home directory
+    /// cannot be resolved it does **nothing** ([`Inputs::Hermetic`]): there is no file to
+    /// write, and `make smoke` never sees the window.
     fn show_settings_window(&self) {
         let Inputs::User {
             config_root: Some(_),
@@ -2310,25 +2310,25 @@ impl AppDelegate {
             .borrow_mut()
             .get_or_insert_with(|| SettingsWindow::new(self.mtm()))
             .clone();
-        // Önce göster: tazeleme kapalı pencereyi atlıyor. İkisi aynı ana
-        // kuyruk turunda, arada bir kare çizilmiyor.
+        // Show first: refreshing skips a hidden window. Both are in the same main
+        // queue turn, no frame is drawn in between.
         window.show();
         self.refresh_settings_window();
     }
 
-    /// Açık (ya da gizli) ayar penceresini etkin ayarla doldurur; pencere
-    /// hiç doğmadıysa no-op. Ayar ödüncü pencereye girmeden **kopyalanıyor**:
-    /// bu yol bir kontrolün eyleminden (yaz → `reload_settings` → buraya)
-    /// koşuyor ve pencere geri dönüp delegate'e uzanabiliyor.
+    /// Fills the open (or hidden) settings window with the active settings; a no-op if the window
+    /// was never born. The settings borrow is **copied** before entering the window:
+    /// this path runs from a control's action (write → `reload_settings` → here)
+    /// and the window can come back and reach the delegate.
     ///
-    /// Dosyanın hâli [`Ivars::settings_state`]'ten, yazma hatası alt başlığın
-    /// yazma yuvasından (029 Karar 7): ikisi de tek kaynak, pencere kendi
-    /// kopyasını tutmuyor. Yazma yuvası başarılı yazmada ve dosya okunup
-    /// uygulanınca boşalıyor, yani şerit de o an kalkıyor.
+    /// The file's state comes from [`Ivars::settings_state`], the write error from the subtitle's
+    /// write slot (029 Karar 7): both are a single source, the window keeps no copy of its own.
+    /// The write slot is emptied on a successful write and once the file is read and
+    /// applied, i.e. the strip goes away at that moment too.
     ///
-    /// Kapalı pencere tazelenmez: her kayıtta tema dizinini okumak, dört
-    /// popup'ı yeniden kurmak ve eksik font için CoreText açmak kimsenin
-    /// görmediği bir iş olurdu; yeniden açılış tazeliyor
+    /// A closed window is not refreshed: reading the theme directory on every save,
+    /// rebuilding four popups and opening CoreText for a missing font would be work
+    /// nobody sees; reopening refreshes
     /// ([`AppDelegate::show_settings_window`]).
     pub(crate) fn refresh_settings_window(&self) {
         let Some(window) = self.ivars().settings_window.borrow().clone() else {
@@ -2352,41 +2352,41 @@ impl AppDelegate {
         window.refresh(&settings, reduce, &state, &write, &embedded, &user);
     }
 
-    /// Ayar dizininin kaynaklarını yeniden kurar. Yenisi eskisi düşmeden
-    /// kuruluyor (`replace`): iki kurulum arasında boşluk yok.
+    /// Re-sets up the settings directory's sources. The new one is set up before the old one is dropped
+    /// (`replace`): there is no gap between the two setups.
     fn watch_config(&self, root: &Path) {
         let watch = Watch::install(&settings::watched_paths(root), &watch_notify());
         self.ivars().config_watch.replace(Some(watch));
     }
 
-    /// Etkin tema dosyasının kaynağını yeniden kurar; ev dizini yoksa yuva
-    /// boşalır.
+    /// Re-sets up the active theme file's source; if there is no home directory the slot
+    /// is emptied.
     fn watch_theme(&self, config_root: Option<&Path>, name: &str) {
         let watch = config_root
             .map(|root| Watch::install(&[settings::theme_path(root, name)], &watch_notify()));
         self.ivars().theme_watch.replace(watch);
     }
 
-    /// Sistemin açık/koyu görünümünü izlemeye başlar — **yalnız kullanıcının
-    /// oturumunda** ([`Inputs`]).
+    /// Starts watching the system's light/dark appearance — **only in a user
+    /// session** ([`Inputs`]).
     ///
-    /// Kaynak `NSApp.effectiveAppearance`'ın KVO'su, view'ın
-    /// `viewDidChangeEffectiveAppearance`'ı **değil**: pencerenin kromu temanın
-    /// görünümünü taşıyor ([`TerminalWindow::apply_chrome`]) ve görünümü
-    /// kurulmuş pencere sistemden miras almayı bırakıyor — view o andan sonra
-    /// sistemin değişimini hiç görmüyor (ölçüldü, 026 phase-4 Uygulama
-    /// Notları), yalnız bizim kendi kurduğumuzu görüyordu.
+    /// The source is the KVO of `NSApp.effectiveAppearance`, **not** the view's
+    /// `viewDidChangeEffectiveAppearance`: the window's chrome carries the theme's
+    /// appearance ([`TerminalWindow::apply_chrome`]) and a window with its appearance set
+    /// stops inheriting from the system — from then on the view never sees the
+    /// system's change (measured, 026 phase-4 Uygulama Notları), it saw only
+    /// the one we set ourselves.
     ///
-    /// Gözlemci **sökülmüyor**: `AppDelegate` de `NSApp` de sürecin ömrü
-    /// boyunca yaşıyor ([`AppDelegate::observe_reduce_motion`]'ın emsali).
+    /// The observer is **not removed**: both `AppDelegate` and `NSApp` live for the
+    /// lifetime of the process (the precedent of [`AppDelegate::observe_reduce_motion`]).
     fn observe_appearance(&self) {
         let Inputs::User { .. } = self.inputs() else {
             return;
         };
         let app = NSApplication::sharedApplication(self.mtm());
-        // SAFETY: gözlemci bu sınıf ve `observeValueForKeyPath:…`'u
-        // uyguluyor; bağlam boş, çünkü izlenen tek yol bu. İki nesne de süreç
-        // boyunca yaşıyor, yani kayıt sarkan bir gözlemci bırakmıyor.
+        // SAFETY: the observer is this class and it implements `observeValueForKeyPath:…`;
+        // the context is null, because this is the only path watched. Both objects live
+        // for the process's lifetime, so the registration leaves no dangling observer.
         unsafe {
             app.addObserver_forKeyPath_options_context(
                 self,
@@ -2397,23 +2397,23 @@ impl AppDelegate {
         }
     }
 
-    /// Görünüm değişiminin uygulayıcısı: tema sistemi izliyorsa görünüme uyan
-    /// temayı açılışla aynı yoldan ([`AppDelegate::choose_theme`]) seçer ve
-    /// oturuma ve kroma takas eder ([`TerminalWindow::set_theme`]).
+    /// The applier of an appearance change: if the theme follows the system, selects the theme
+    /// matching the appearance through the same path as launch ([`AppDelegate::choose_theme`])
+    /// and swaps it into the session and the chrome ([`TerminalWindow::set_theme`]).
     ///
-    /// Dört kapı, sırayla:
-    /// - **Süreli koşu** ([`Inputs::Hermetic`]): görünüm yok sayılır, tema
-    ///   `bateri` kalır — `make duman` makinenin açık modundan etkilenmez.
-    /// - **Açık/koyu biti değişmedi** ([`Ivars::appearance_dark`]).
-    /// - **Hiçbir pencerede oturum yok:** son pencere kapanmış (uygulama açık
-    ///   kalıyor) ya da tek pencerenin oturumu henüz doğmamış; doğan pencere
-    ///   temayı görünümden kendisi seçiyor ([`AppDelegate::open_window`]).
-    /// - **Sabit tema** (`theme = "{ad}"`): görünüm temaya dokunmaz.
+    /// Four gates, in order:
+    /// - **Timed run** ([`Inputs::Hermetic`]): the appearance is ignored, the theme
+    ///   stays `bateri` — `make smoke` is not affected by the machine's light mode.
+    /// - **The light/dark bit did not change** ([`Ivars::appearance_dark`]).
+    /// - **No window has a session:** the last window closed (the app stays
+    ///   open) or the only window's session is not yet born; a window being born
+    ///   selects the theme from the appearance itself ([`AppDelegate::open_window`]).
+    /// - **Fixed theme** (`theme = "{name}"`): the appearance does not touch the theme.
     ///
-    /// Tema aynı çıkarsa (`light_theme` ile `dark_theme` aynı ad) takas no-op
-    /// ve kare istenmez
-    /// (`Session::set_theme`). Tema yuvası yine yeniden yazılır: bu okuma o
-    /// kaynağın güncel hâli.
+    /// If the theme comes out the same (`light_theme` and `dark_theme` the same name) the swap is a no-op
+    /// and no frame is requested
+    /// (`Session::set_theme`). The theme slot is still rewritten: this read is that
+    /// source's current state.
     fn apply_appearance(&self) {
         let Inputs::User { config_root } = self.inputs() else {
             return;
@@ -2422,15 +2422,15 @@ impl AppDelegate {
         if self.ivars().appearance_dark.replace(Some(dark)) == Some(dark) {
             return;
         }
-        // Bit kapıdan **önce** yazıldı: pencere yokken gelen değişim de
-        // görülmüş sayılıyor, sonra doğan pencere temayı zaten görünümden
-        // seçiyor.
+        // The bit is written **before** the gate: a change arriving while there is no window
+        // counts as seen too, and a window born later selects the theme from the
+        // appearance anyway.
         let windows = self.windows();
         if self.all_panes().iter().all(|pane| pane.session().is_none()) {
             return;
         }
-        // Ödünç `choose_theme`'in sonunda düşüyor; oradaki `post_notices`
-        // yalnız `notices`'i ödünç alıyor, `settings`'e dokunmuyor.
+        // The borrow is dropped at the end of `choose_theme`; the `post_notices` there
+        // borrows only `notices`, it does not touch `settings`.
         let theme = {
             let settings = self.ivars().settings.borrow();
             if !settings.follows_system() {
@@ -2443,27 +2443,27 @@ impl AppDelegate {
         }
     }
 
-    /// Sistemin Hareketi Azalt ayarını izlemeye başlar — **yalnız kullanıcının
-    /// oturumunda** ([`Inputs`]).
+    /// Starts watching the system's Reduce Motion setting — **only in a user
+    /// session** ([`Inputs`]).
     ///
-    /// Bildirim `NSWorkspace`'in **kendi** merkezinden geliyor, varsayılan
-    /// `NSNotificationCenter`'dan değil; Apple bunu böyle yayınlıyor ve yanlış
-    /// merkeze abone olmak sessizce hiç haber almamak olurdu.
+    /// The notification comes from `NSWorkspace`'s **own** centre, not the default
+    /// `NSNotificationCenter`; Apple publishes it that way and subscribing to the wrong
+    /// centre would mean silently never hearing anything.
     ///
-    /// Gözlemci **sökülmüyor**: `AppDelegate` sürecin ömrü boyunca yaşıyor
-    /// (`run()`'daki `Retained`) ve merkez onu zaten sahiplenmeden tutuyor.
-    /// Açık/koyu görünümün KVO'su ([`AppDelegate::observe_appearance`]) de
-    /// aynı biçimde sökülmüyor.
+    /// The observer is **not removed**: `AppDelegate` lives for the process's lifetime
+    /// (the `Retained` in `run()`) and the centre holds it without owning it anyway.
+    /// The light/dark appearance's KVO ([`AppDelegate::observe_appearance`]) is
+    /// likewise not removed.
     fn observe_reduce_motion(&self) {
         let Inputs::User { .. } = self.inputs() else {
             return;
         };
         let center = NSWorkspace::sharedWorkspace().notificationCenter();
-        // SAFETY: `accessibilityDisplayDidChange:` bu sınıfta tanımlı ve tek
-        // `Option<&AnyObject>` argüman alıyor; `self` sürecin ömrü boyunca
-        // yaşıyor, yani merkezin sahiplenmeyen referansı asarak kalmıyor.
-        // Sabit `NSString` AppKit'in dışa açtığı ad (`NSRunLoopCommonModes`
-        // emsali).
+        // SAFETY: `accessibilityDisplayDidChange:` is defined on this class and takes a single
+        // `Option<&AnyObject>` argument; `self` lives for the process's
+        // lifetime, so the centre's non-owning reference does not dangle.
+        // The constant `NSString` is a name AppKit exposes (the precedent of
+        // `NSRunLoopCommonModes`).
         unsafe {
             center.addObserver_selector_name_object(
                 self,
@@ -2475,20 +2475,20 @@ impl AppDelegate {
         self.apply_reduce_motion();
     }
 
-    /// Hareketi Azalt'ın **çözülmüş** değerini bütün pencerelerin link'ine
-    /// verir ([`AppDelegate::reduce_motion`]).
+    /// Gives the **resolved** value of Reduce Motion to all windows'
+    /// links ([`AppDelegate::reduce_motion`]).
     ///
-    /// Üç çağıranı var ve üçü de aynı soruyu yeniden soruyor: açılış
-    /// ([`AppDelegate::observe_reduce_motion`]), sistem bildirimi ve ayar
-    /// dosyasının kaydı ([`AppDelegate::reload_settings`]). Değer
-    /// değişmediyse çağrı no-op (`bt_gpu::DisplayLink::set_reduce_motion`),
-    /// yani üç yolu birleştirmeye gerek yok. Pencerenin ilk değeri kendi
-    /// `start`'ında iniyor; link'i olmayan pencere sessizce atlanıyor.
+    /// It has three callers and all three re-ask the same question: launch
+    /// ([`AppDelegate::observe_reduce_motion`]), the system notification and the settings
+    /// file's save ([`AppDelegate::reload_settings`]). If the value
+    /// did not change the call is a no-op (`bt_gpu::DisplayLink::set_reduce_motion`),
+    /// so there is no need to merge the three paths. A window's first value
+    /// lands in its own `start`; a window without a link is silently skipped.
     ///
-    /// Tekerleğin kipi de burada iniyor ([`AppDelegate::smooth_scroll`]):
-    /// Hareketi Azalt onun girdisi, yani üç tetikleyicinin üçü de onu da
-    /// değiştirebiliyor — ikinci bir yol yazılsaydı sistem bildirimi onu
-    /// atlardı.
+    /// The wheel's mode also lands here ([`AppDelegate::smooth_scroll`]):
+    /// Reduce Motion is its input, so all three triggers can change it too —
+    /// had a second path been written, the system notification would
+    /// skip it.
     fn apply_reduce_motion(&self) {
         let reduce = self.reduce_motion();
         let smooth = resolve_smooth_scroll(&self.ivars().settings.borrow(), reduce);
@@ -2498,14 +2498,14 @@ impl AppDelegate {
         }
     }
 
-    /// Tekerlek pürüzsüz mü ([`resolve_smooth_scroll`]).
+    /// Is the wheel smooth ([`resolve_smooth_scroll`]).
     pub(crate) fn smooth_scroll(&self) -> bool {
         let reduce = self.reduce_motion();
         resolve_smooth_scroll(&self.ivars().settings.borrow(), reduce)
     }
 
-    /// Ayarın üç değeri ile sistemin cevabı, [`resolve_reduce_motion`]'da
-    /// birleşmiş hâliyle.
+    /// The setting's three values and the system's answer, in the form merged in
+    /// [`resolve_reduce_motion`].
     pub(crate) fn reduce_motion(&self) -> bool {
         let setting = self.ivars().settings.borrow().reduce_motion;
         resolve_reduce_motion(&self.inputs(), setting, || {
@@ -2513,43 +2513,43 @@ impl AppDelegate {
         })
     }
 
-    /// Uygulamanın etkin görünümü, yani sistemin açık/koyu ayarı koyu mu.
+    /// The app's effective appearance, i.e. whether the system's light/dark setting is dark.
     ///
-    /// `NSApp`'ten okunması **zorunlu**: pencere ve view'ın görünümü artık
-    /// temayı yansıtıyor, sistemi değil ([`TerminalWindow::apply_chrome`]) —
-    /// view'dan okumak sabit açık temalı bir kullanıcıda sistem koyuyken
-    /// "açık" derdi ve temayı seçen soru kendi cevabını okurdu.
-    /// `bestMatchFromAppearancesWithNames` "koyu mu" sorusunun
-    /// AppKit'teki yolu — ad karşılaştırması yüksek kontrastlı koyu
-    /// görünümü (`NSAppearanceNameAccessibilityHighContrastDarkAqua`) açık
-    /// sayardı.
+    /// Reading from `NSApp` is **mandatory**: the window's and view's appearance now
+    /// reflect the theme, not the system ([`TerminalWindow::apply_chrome`]) —
+    /// reading from the view would say "light" for a user with a fixed light theme while the system is dark
+    /// and the question that selects the theme would read its own answer.
+    /// `bestMatchFromAppearancesWithNames` is AppKit's way of asking
+    /// "is it dark" — comparing names would count the high-contrast dark
+    /// appearance (`NSAppearanceNameAccessibilityHighContrastDarkAqua`) as
+    /// light.
     fn dark_appearance(&self) -> bool {
         let appearance = NSApplication::sharedApplication(self.mtm()).effectiveAppearance();
-        // SAFETY: AppKit'in dışa açtığı iki sabit `NSString`; süreç boyunca
-        // yaşıyorlar ve yalnız okunuyorlar (`NSRunLoopCommonModes` emsali).
+        // SAFETY: two constant `NSString`s AppKit exposes; they live for the process
+        // and are only read (the precedent of `NSRunLoopCommonModes`).
         let (aqua, dark_aqua) = unsafe { (NSAppearanceNameAqua, NSAppearanceNameDarkAqua) };
         appearance
             .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&[aqua, dark_aqua]))
             .is_some_and(|best| &*best == dark_aqua)
     }
 
-    /// Kullanıcının dünyasına açılan girişlerin kararı ([`Inputs`]).
+    /// The decision on the entry points that open onto the user's world ([`Inputs`]).
     fn inputs(&self) -> Inputs {
         decide_inputs(self.ivars().run, child::home())
     }
 
-    /// Pencere alt başlığının **tek** yazanı: kaynağın yuvasını yeniler,
-    /// tanıları `bateri:` önekiyle stderr'e basar ve alt başlığı kurar.
+    /// The **only** writer of the window subtitle: refreshes the source's slot,
+    /// prints the diagnostics to stderr with the `bateri:` prefix and builds the subtitle.
     ///
-    /// Alt başlığa yazan ikinci bir yol olursa yuvalar anlamını yitirir: biri
-    /// ötekinin tanısını sessizce ezer.
+    /// If a second path wrote to the subtitle the slots would lose their meaning: one would
+    /// silently overwrite the other's diagnostic.
     ///
-    /// **Yuva aynı kalıyorsa hiçbir şey yapmaz** — ne stderr ne alt başlık.
-    /// Font yuvası `sync_geometry`'nin sonunda yazılıyor ve o yol canlı
-    /// boyutlandırmada her olayda koşuyor: bulunamayan bir aile stderr'e olay
-    /// başına bir satır basar, alt başlık da boşuna yeniden kurulurdu. Aynı
-    /// hatalı ayar dosyasını ikinci kez kaydetmek de artık satırı tekrar
-    /// basmıyor; alt başlıkta zaten duruyor.
+    /// **If the slot stays the same it does nothing** — neither stderr nor subtitle.
+    /// The font slot is written at the end of `sync_geometry` and that path runs on every event during live
+    /// resizing: a family that cannot be found would print one stderr line per event
+    /// and the subtitle would be rebuilt needlessly. Saving the same
+    /// faulty settings file a second time also no longer reprints the line;
+    /// it is already in the subtitle.
     pub(crate) fn post_notices(&self, source: Source, messages: Vec<String>) {
         let subtitle = {
             let mut notices = self.ivars().notices.borrow_mut();
@@ -2568,55 +2568,55 @@ impl AppDelegate {
         }
     }
 
-    /// Uygulamanın kapanış sırasının **tek** yeri; her çıkış yolu buradan
-    /// geçer (`applicationWillTerminate:` ve `runDeadline:`). Tek bir
-    /// pencerenin kapanışı buraya uğramıyor, beklemiyor da (`TerminalWindow`'un
-    /// `windowWillClose:`'u).
+    /// The **single** place of the app's teardown order; every exit path goes through here
+    /// (`applicationWillTerminate:` and `runDeadline:`). A single
+    /// window's close does not come here, nor does it wait (`TerminalWindow`'s
+    /// `windowWillClose:`).
     ///
-    /// Bugün çağrı tek: süreli koşu `process::exit`'e, etkileşimli ⌘Q
-    /// AppKit'in çıkışına varıyor ve ana thread beklerken zamanlayıcı
-    /// ateşleyemiyor. Adımlar idempotent
-    /// ([`TerminalWindow::begin_close`]); bekçi değil — ikinci bir çağrı
-    /// ikinci bir bekleme doğurmaz ama sonuç `AlreadyDone` olur.
+    /// Today there is a single call: the timed run reaches `process::exit`, the interactive ⌘Q
+    /// AppKit's exit, and while the main thread waits the timer cannot
+    /// fire. The steps are idempotent
+    /// ([`TerminalWindow::begin_close`]); not a guard — a second call
+    /// does not cause a second wait but the result becomes `AlreadyDone`.
     ///
-    /// **Paralel, tek son tarih** (026 → Karar 5): önce her pencerenin
-    /// kapanışı başlıyor (ritim durur, `Waker` sökülür, `SIGHUP` gider), sonra
-    /// hepsi **aynı** `now + SHUTDOWN_GRACE`'e kadar bekleniyor — N sekmenin
-    /// toplam beklemesi N × `SHUTDOWN_GRACE` değil bir `SHUTDOWN_GRACE`.
-    /// Ölmeyen çocuk arkada bırakılıyor. Tek istisna kapanış thread'inin
-    /// kurulamaması (OS thread sınırı): o dalda sınır yok ve kesecek olan
-    /// süreli koşuda bekçi.
+    /// **Parallel, a single deadline** (026 → Karar 5): first every window's
+    /// teardown starts (the pacing stops, the `Waker` is removed, `SIGHUP` goes out), then
+    /// all are waited for until the **same** `now + SHUTDOWN_GRACE` — the
+    /// total wait of N tabs is one `SHUTDOWN_GRACE`, not N × `SHUTDOWN_GRACE`.
+    /// A child that does not die is left behind. The only exception is the teardown thread
+    /// failing to be created (OS thread limit): that branch has no bound and what will cut it
+    /// in a timed run is the guard.
     ///
-    /// **Pencereler bekleme bitene kadar listede** (ve buradaki kopyada)
-    /// kalıyor: `DisplayLink`'ler ana thread'de yaşıyor, yani Metal'in
-    /// tamamlanma bloğunun tuttuğu `Waker` kopyası o arada son referans olup
-    /// ana kuyruğa senkron iş atamaz — ana thread beklemedeyken ikisi
-    /// birbirini kilitlerdi. `ShellWake`'lerin `Waker`'ı zaten sökülmüş,
-    /// yani sınır dolduğunda `"PTY teardown"` thread'inde kalan kopyalar
-    /// `Waker` taşımıyor (`wake.rs` → Sahiplik).
+    /// **Windows stay in the list** (and in the copy here) until the wait ends:
+    /// `DisplayLink`s live on the main thread, so the `Waker` copy held by Metal's
+    /// completion block could be the last reference in the meantime and cannot hand
+    /// synchronous work to the main queue — with the main thread waiting, the two would
+    /// deadlock each other. The `ShellWake`s' `Waker` is already removed,
+    /// so the copies left on the `"PTY teardown"` thread when the bound expires
+    /// carry no `Waker` (`wake.rs` → Sahiplik).
     ///
-    /// Dönen sonuç **ilk** pencerenin ilk pane'inin: raporu isteyen tek yol
-    /// süreli koşu ve orada tek pencere, tek pane var (026 → Karar 9, 039
-    /// Karar 12). Etkileşimli kapanışta sonuç
-    /// atılıyor — toplanmıyor, çünkü okuyan yok.
+    /// The returned result is the **first** window's first pane's: the only path asking for a report is
+    /// the timed run and there is a single window and a single pane there (026 → Karar 9, 039
+    /// Karar 12). On an interactive close the result
+    /// is dropped — not collected, since nobody reads it.
     fn shutdown(&self) -> Option<Teardown> {
-        // Bekçinin bütçesi **kapanıştan** başlıyor, süreç başından değil:
-        // açılış (GPU device'ı, pipeline kurulumu, ilk pencere) soğuk bir
-        // makinede saniyeler sürebilir ve o süre bütçeden düşseydi sağlıklı
-        // bir koşu `_exit(70)` ile kırmızı düşerdi.
+        // The watchdog's budget starts at **shutdown**, not at process start:
+        // startup (GPU device, pipeline setup, first window) can take seconds
+        // on a cold machine, and if that were deducted from the budget a
+        // healthy run would go red with `_exit(70)`.
         if self.ivars().run.is_some() {
             crate::watchdog();
         }
         let windows = self.windows();
-        // Pane başına bir kapanış, bütün pencerelerin pane'leri (039): hepsi
-        // başlıyor, sonra tek son tarihe kadar paralel bekleniyor.
+        // One teardown per pane, across all windows' panes (039): all of them
+        // start, then they are awaited in parallel up to a single deadline.
         let closing: Vec<_> = windows
             .iter()
             .flat_map(|window| window.begin_close())
             .collect();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
-        // Sonuç raporu besliyor (`kapanis=`): oturum hiç doğmadıysa `None` ve
-        // o da bir cevap — kapanacak bir şey yoktu.
+        // The result feeds the report (`teardown=`): if the session was never
+        // born it is `None`, and that is an answer too — nothing to close.
         let mut first = None;
         for (index, closing) in closing.into_iter().enumerate() {
             let teardown = closing.map(|closing| closing.wait_until(deadline));
@@ -2627,70 +2627,70 @@ impl AppDelegate {
         first
     }
 
-    /// Duman koşusunun raporu ve çıkışı — **kapanıştan sonra** çağrılır.
+    /// The smoke run's report and exit — called **after shutdown**.
     ///
-    /// Sıra bilinçli: `shutdown()` sınırlı da olsa bekler ve o sınırı da aşan
-    /// bir kapanışta bekçi süreci 70 ile keser, yani öyle bir kapanışta
-    /// `kare=` satırı hiç çıkmaz. Ters sırada `make duman` yeşil bir satırla
-    /// kırmızı bir çıkış kodunu birlikte verirdi.
+    /// The order is deliberate: `shutdown()` waits, bounded though it is, and
+    /// on a shutdown that exceeds even that bound the watchdog cuts the process
+    /// with 70, so on such a shutdown the `frames=` line never appears. In the
+    /// reverse order `make smoke` would give a green line and a red exit code.
     ///
-    /// Satır burada **açıkça** yazılıyor; `Drop`'a güvenen hiçbir yol yok.
-    /// `process::exit` `Drop` koşturmaz ve bekçinin `_exit(70)`'i atexit'i
-    /// bile atlar.
+    /// The line is written **explicitly** here; no path relies on `Drop`.
+    /// `process::exit` does not run `Drop`, and the watchdog's `_exit(70)`
+    /// skips even atexit.
     ///
-    /// `teardown` argüman, ivar değil: kapanışın sonucunu **çağıran** biliyor
-    /// ve bir ivar'a saklamak onu ikinci bir kez okunabilir kılardı. `quiet`
-    /// de argüman ama başka bir sebeple: değeri kapanıştan **önce** okunmak
-    /// zorunda (iki çağıranın da doc'unda) ve burada okunsaydı `shutdown()`'ın
-    /// beklemesi sessizliğe yazılırdı.
+    /// `teardown` is an argument, not an ivar: the **caller** knows the
+    /// shutdown's result and storing it in an ivar would make it readable a
+    /// second time. `quiet` is an argument too but for another reason: its
+    /// value must be read **before** shutdown (in both callers' docs) and if
+    /// read here `shutdown()`'s wait would be written into the quiet time.
     ///
-    /// Sayaçlar süreli koşunun **tek** penceresinden okunuyor (listenin ilki).
-    /// Pencere yoksa (açılış hiç pencere kuramadıysa süreç zaten çıkmıştı)
-    /// sayaçlar sıfır ve kapı `MissingCounter` diyor.
+    /// The counters are read from the smoke run's **only** window (the first
+    /// in the list). With no window (if startup never built one the process
+    /// had already exited) the counters are zero and the gate says `MissingCounter`.
     fn report_and_exit(&self, run: Run, teardown: Option<Teardown>, quiet: Option<Duration>) -> ! {
         let windows = self.windows();
-        // Süreli koşunun tek penceresinin tek pane'i (039 Karar 12).
+        // The smoke run's only window's only pane (039 Karar 12).
         let pane = windows.first().map(|window| window.focused_pane());
-        // The frames still in flight are counted **before** `kare=` is read
+        // The frames still in flight are counted **before** `frames=` is read
         // (040 Karar 6): completion is polled by the ticks, and the link is
         // stopped, so nothing else would count them.
         if let Some(link) = pane.as_deref().and_then(TerminalPane::link) {
             link.drain();
         }
         let renderer = pane.as_deref().map(TerminalPane::renderer);
-        // Dört sayaç dört ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
-        // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi, `glif`
-        // çizilen glyph, `kural` çizilen alt çizgi/üstü çizili. Biri sıfırken
-        // diğerleri yeşil geçemez — kare>0 & hucre=0 "pencere var, shell
-        // çıktısı yok" demek; hucre>0 & glif=0 ise "hücreler boyanıyor ama
-        // harf yok", yani 002'nin körlemesine yazma dönemine sessizce geri
-        // düşmek: `glif` kapısı olmasaydı `frame()` sınırı karakteri hiç
-        // geçirmese bile `kare=1 hucre=8 pipeline=ok` basılırdı. `kural`ın
-        // kapattığı yarı da aynı biçimde ayrı: sınır beş alt çizgi çeşidini,
-        // üstü çiziliyi ve SGR 58'i taşıyor ve o yolun tamamı `glif`'ten
-        // bağımsız — duman reçetesinin yedi kural hücresi mürekkepsiz.
+        // Four counters say four different things: `frames` is the number of
+        // frames the GPU finished without error, `cells` the background cells
+        // the sink produced, `glyphs` the glyphs drawn, `rules` the underlines
+        // and strikeouts drawn. While one is zero the others cannot pass
+        // green — frames>0 & cells=0 means "a window exists, no shell
+        // output"; cells>0 & glyphs=0 means "cells are painted but there are
+        // no letters", i.e. silently falling back to 002's blind-writing era:
+        // without the `glyphs` gate `frames=1 cells=8 pipeline=ok` would be
+        // printed even if the `frame()` boundary passed no characters. The
+        // half `rules` closes is separate the same way: the boundary carries
+        // five underline kinds and SGR 58, independent of `glyphs` — the smoke recipe's seven rule cells are inkless.
         //
-        // Kapsamadığı — dördü de birer **CPU** sayacı ve `kural` bunun üstüne
-        // stil ayrımını da göremez; sınırın tamamı `Frame::rule_count`'ta
-        // yazılı ve tek yerde duruyor. Buraya yalnız duman kapısına özgü olan
-        // yarı düşüyor: jeton setin **yüz yarısını hiç sormuyor** — `Face`
-        // çevirisini hep `Regular` döndüren bir yapı da aynı dört sayıyı
-        // basar, çünkü kalın bir glyph de bir glyph'tir. O yarının kapısı
-        // `bt-gpu`'nun `sgr_flags_translate_to_four_faces` ve
-        // `bold_and_regular_draw_differently` sınamaları.
+        // What it does not cover — all four are **CPU** counters and `rules`
+        // cannot see the style distinction on top of that; the whole boundary
+        // is written down in `Frame::rule_count`, in one place. Only the half
+        // specific to the smoke gate falls here: the token **never asks about
+        // the face half** of the set — a build whose `Face` translation always
+        // returns `Regular` prints the same four numbers, since a bold glyph is a glyph too. The gate for that half is
+        // `bt-gpu`'s `sgr_flags_translate_to_four_faces` and
+        // `bold_and_regular_draw_differently` tests.
         //
-        // Dördü bir **yapıda** taşınıyor, konumsal argüman olarak değil: üçü
-        // aynı tip ve yer değiştirseler derleme geçerdi.
+        // The four are carried in a **struct**, not as positional arguments:
+        // three share a type and would compile if swapped.
         let (n, k, g, r) = (
             renderer.map_or(0, Renderer::frames),
             renderer.map_or(0, Renderer::last_bg_count),
             renderer.map_or(0, Renderer::last_glyph_count),
             renderer.map_or(0, Renderer::last_rule_count),
         );
-        // Beşinci sayaç `icerik` aynı yapıda ama başka bir yerden: `kare` GPU
-        // tarafında (tamamlanma bloğu), `icerik` ana thread'de
-        // (`needs_update`). Kapının üst sınırı buna bağlı ve alt sınır hâlâ
-        // `kare`'de — hangi sorunun hangi sayacı sorduğu [`verdict`]'te.
+        // The fifth counter `content` is in the same struct but from elsewhere: `frames` is GPU-side
+        // (completion block), `content` on the main thread (`needs_update`).
+        // The gate's upper bound depends on it and the lower bound is still on
+        // `frames` — which question asks which counter is in [`verdict`].
         let link = pane.as_deref().and_then(TerminalPane::link);
         let counters = Counters {
             frames: n,
@@ -2701,22 +2701,22 @@ impl AppDelegate {
             motion: link.map_or(0, DisplayLink::motion_frames),
             slide: link.map_or(0, DisplayLink::slide_frames),
         };
-        // Yerleşme bir **sayı değil durum**, o yüzden `Counters`'ın dışında.
-        // Link yoksa (oturum hiç doğmadı) bekleyen animasyon da yok: sayaç
-        // yarısı (`hareket=0`) zaten `MissingCounter` veriyor ve okuyanı
-        // "animasyon durmadı" diye yanlış arızaya göndermemek gerek.
+        // Settling is a **state, not a number**, hence outside `Counters`.
+        // With no link (session never born) there is no pending animation
+        // either: the counter half (`motion=0`) already yields `MissingCounter`
+        // and the reader must not be sent after a false "animation did not stop" fault.
         let motion = if link.is_none_or(DisplayLink::motion_settled) {
             MotionState::Settled
         } else {
             MotionState::Unsettled
         };
-        // Beşinci jeton `yuva=U/T` bir kapı değil, bir **sayaç**: atlasın kaç
-        // yuvasının dolduğunu söylüyor ve `/measure` doluluk oranını ondan
-        // okuyacak. Kapıya girmemesinin sebebi anlamı: boş bir atlas da
-        // meşrudur (glyph'siz bir kare) ve dolu bir atlas da — arıza eşiği
-        // ölçülmeden bilinmiyor, ölçülmemiş sayı da kapıya yazılmaz. `istek=`
-        // de öyle: kare **talebi** `kare`'nin göremediği yeri görüyor ama
-        // eşiği ölçülmedi.
+        // The fifth token `slots=U/T` is a **counter**, not a gate: it says how many of the atlas's
+        // slots are filled and `/measure` will read the occupancy ratio from it. It stays out of the
+        // gate because of its meaning: an empty atlas is legitimate (a frame with no glyphs) and so
+        // is a full one — the failure threshold is unknown until measured, and an unmeasured number
+        // is not written into the gate. Same for `requests=`: the frame **request** sees
+        // what `frames` cannot
+        // but its threshold was not measured.
         let report = Report {
             counters,
             atlas: renderer.map_or((0, 0), Renderer::atlas_occupancy),
@@ -2725,66 +2725,66 @@ impl AppDelegate {
             requests: link.map_or(0, DisplayLink::requests),
             quiet,
             teardown,
-            // Kapı kapalıysa defter hiç doğmadı; `Option` bunu taşıyor ve
-            // rapor `ornek=off` diyor — uydurulmuş bir sıfır değil.
+            // If the gate was closed the ledger was never born; `Option` carries that and the
+            // report says `samples=off` — not an invented zero.
             measured: self.ivars().stats.as_deref().map(|stats| {
                 Measured::read(stats, renderer.is_some_and(Renderer::gpu_timing_supported))
             }),
         };
-        // Jetonlar **yalnız** başarı satırında ve yalnız stdout'ta: makine
-        // sözleşmesi o. Hata satırları aynı sayıları taşıyor ama jeton
-        // biçiminde değil, yoksa `kare=` arayan bir CI adımı düşen koşudan
-        // kare sayısı okurdu.
+        // Tokens appear **only** on the success line and only on stdout: that is
+        // the machine contract. Error lines carry the same numbers but not in
+        // token form, or a CI step looking for `frames=` would read a frame
+        // count from a failed run.
         let secs = run.seconds;
         match verdict(counters, run.workload, teardown, motion, quiet) {
             Verdict::Pass => {
                 println!("{}", report.token_line());
                 std::process::exit(0);
             }
-            // Ayrı ileti, çünkü ayrı arıza: burada beş sayacın beşi de
-            // yerinde ve okuyanı sıfır aramaya göndermek zaman kaybettirirdi.
-            // Sınırı aşan sayı `icerik`, ama satır `kare` ile `istek`'i de
-            // söylüyor: üçü birlikte okunduğunda arıza "hasar akıyor" mu
-            // (üçü de yüksek) yoksa "hareket yerleşmiyor" mu (`kare` yüksek,
-            // `icerik` değil) ayırt edilebiliyor.
+            // Separate message because separate fault: here all five counters
+            // are in place and sending the reader looking for a zero would waste
+            // time. The number over the limit is `content`, but the line also
+            // states `frames` and `requests`: read together, the fault can be told
+            // apart as "damage is streaming" (all three high) or "motion is not
+            // settling" (`frames` high, `content` not).
             Verdict::ExcessFrames { limit } => eprintln!(
-                "bateri: boşta sıfır kare bozuldu — {secs} saniyelik koşuda {c} içerik karesi çizildi (toplam kare {n}, kare talebi {}, {}), üst sınır {limit}",
+                "bateri: idle-zero-frames broke — {c} content frames drawn in the {secs}-second run (total frames {n}, frame requests {}, {}), upper limit {limit}",
                 report.requests,
                 quiet_phrase(report.quiet),
                 c = counters.content,
             ),
             Verdict::MissingCounter { required } => eprintln!(
-                "bateri: {secs} saniyelik koşuda çizilen kare {n}, içerik karesi {c}, üretilen hücre {k}, çizilen glif {g}, çizilen kural {r}, hareket karesi {m}, {} ({required})",
+                "bateri: in the {secs}-second run frames drawn {n}, content frames {c}, cells produced {k}, glyphs drawn {g}, rules drawn {r}, motion frames {m}, {} ({required})",
                 quiet_phrase(report.quiet),
                 c = counters.content,
                 m = counters.motion,
             ),
-            // Durma koşulu bozuldu. Sayaçlar yerinde ve kare sınırı aşılmamış
-            // olabilir — yavaş bir animasyon ikisini de geçer; kırmızıyı
-            // düşüren şey deadline'da hâlâ uçuşta olması.
+            // The stop condition broke. Counters are in place and the frame limit
+            // may not be exceeded — a slow animation passes both; what turns it red
+            // is that it is still in flight at the deadline.
             Verdict::MotionUnsettled => eprintln!(
-                "bateri: {secs} saniyelik koşunun sonunda animasyon hâlâ yerleşmemişti — bir durma koşulu bozuk (çizilen hareket karesi {m}, {})",
+                "bateri: at the end of the {secs}-second run the animation had still not settled — a stop condition is broken (motion frames drawn {m}, {})",
                 quiet_phrase(report.quiet),
                 m = counters.motion,
             ),
-            // Sızıntı ne sınırı aştı ne de hareket altyapısından geçti: geriye
-            // bıraktığı iz kaldı. İleti tabanı **ve** ölçüleni birlikte
-            // söylüyor, çünkü ikisi arasındaki fark sızıntının periyodunu
-            // veriyor — okuyan taraf "ne kadar sık kare istiyor" sorusunu
-            // satırdan yanıtlayabilsin.
+            // The leak neither exceeded the limit nor passed through the motion
+            // infrastructure: only the trace it left remains. The message states
+            // the floor **and** the measured value together, since the gap
+            // between them gives the leak's period — so the reader can answer
+            // "how often does it ask for frames" from the line.
             Verdict::QuietTooShort { floor } => eprintln!(
-                "bateri: {secs} saniyelik koşunun sonunda kare akıyordu — {} (en az {} beklenir; içerik karesi {c}, hareket karesi {m}, kare talebi {})",
+                "bateri: at the end of the {secs}-second run frames were still flowing — {} (at least {} expected; content frames {c}, motion frames {m}, frame requests {})",
                 quiet_phrase(report.quiet),
                 ms(floor),
                 report.requests,
                 c = counters.content,
                 m = counters.motion,
             ),
-            // Sayaçlar yerinde ama kapanış yolunda panik var: jeton satırı
-            // basılmıyor ki `kare=` arayan bir CI adımı bu koşuyu ölçüm
-            // sanmasın.
+            // Counters are in place but there was a panic on the shutdown path: the token line
+            // is not printed so a CI step looking for `frames=` does not
+            // mistake this run for a measurement.
             Verdict::ShutdownPanicked { which } => eprintln!(
-                "bateri: kapanış yolunda panik ({which}) — sayaçlar yerinde ama koşu geçerli değil"
+                "bateri: panic on the shutdown path ({which}) — counters are in place but the run is not valid"
             ),
         }
         std::process::exit(1);
@@ -2795,31 +2795,31 @@ impl AppDelegate {
 mod tests {
     use super::*;
 
-    /// Sağlıklı bir duman koşusunun **ölçülen** kuyruğu (2026-09-16, otuz
-    /// yedi koşunun en düşüğü: `1742,29 ms`; sahibi `docs/OLCUMLER.md`).
-    /// Kapıyı sormayan sınamalar bunu veriyor ki `sessiz` kolu onların
-    /// sorduğu şeyi gölgelemesin; kolun kendi sınamaları aşağıda ve tabanı
-    /// adıyla anıyor.
+    /// The **measured** tail of a healthy smoke run (2026-09-16, the lowest of
+    /// thirty-seven runs: `1742,29 ms`; owner `docs/OLCUMLER.md`).
+    /// Tests that do not ask about the gate get this so the `quiet` arm does not
+    /// shadow what they do ask; the arm's own tests are below and name the
+    /// floor explicitly.
     const HEALTHY_QUIET: Option<Duration> = Some(Duration::from_millis(1742));
 
-    /// Izgara ölçüsü; pay **argüman**, çünkü `split_into_grid`'un sorduğu iki
-    /// ayrı şey var: hücre bölmesi (pay sıfır) ve payın sütunlardan düşülmesi.
+    /// Grid metrics; the gutter is an **argument**, because `split_into_grid` is asked two
+    /// separate things: the cell split (gutter zero) and the gutter's deduction from columns.
     fn metrics(w: u16, h: u16, gutter: u16) -> CellMetrics {
-        CellMetrics::new(w, h, w, gutter, 1).expect("sıfır olmayan hücre")
+        CellMetrics::new(w, h, w, gutter, 1).expect("non-zero cell")
     }
 
-    /// Dock'suz pencere: entegrasyonsuz oturumun (ve duman reçetesinin) hâli.
-    /// Sütun ve satır aritmetiğini sorgulayan sınamalar bunu veriyor ki dock
-    /// payı onların beklediği sayılara karışmasın; payın kendi sınaması
-    /// aşağıda ve `DOCK_ROWS`'u adıyla anıyor.
+    /// A window without a dock: the state of an unintegrated session (and of the smoke recipe).
+    /// Tests that query column and row arithmetic get this so the dock
+    /// gutter does not mix into the numbers they expect; the gutter's own test
+    /// is below and names `DOCK_ROWS` explicitly.
     const NO_DOCK: u16 = 0;
 
     fn report(counters: Counters, workload: Workload) -> Report {
         Report {
             counters,
             atlas: (13, 2048),
-            // Renk düzlemi **boş**: duman reçetesi `/bin/sh` koşuyor ve
-            // emoji basmıyor, yani sağlıklı koşunun beklediği sayı bu.
+            // The color plane is **empty**: the smoke recipe runs `/bin/sh` and
+            // prints no emoji, so this is the number a healthy run expects.
             color_atlas: (0, 2048),
             workload,
             requests: 4,
@@ -2836,79 +2836,79 @@ mod tests {
             cells: 8,
             glyphs: 6,
             rules: 15,
-            // Reçetedeki imleç hareketinin izi; sıfır olsaydı kapı
-            // `MissingCounter` derdi (bkz. `Counters::motion`).
+            // The trace of the recipe's cursor motion; if it were zero the gate
+            // would say `MissingCounter` (see `Counters::motion`).
             motion: 3,
-            // Kaymanın izi. `motion`'dan farklı bir sayı **bilerek**: ikisi
-            // aynı karelerin sayısı değil, iki ayrı animatörün tanığı.
+            // The trace of the slide. A different number from `motion` **on purpose**: the two are
+            // not counts of the same frames, they are witnesses of two separate animators.
             slide: 2,
         }
     }
 
     #[test]
     fn smoke_counts_unchanged() {
-        // Duman sözleşmesinin **bit bit** aynı kalması gereken yarısı. Jeton
-        // eklemek serbest; bu dördü bu sırayla, bu değerlerle ve satırın
-        // **başında** durur — `make duman`'ı okuyan taraf (ve `proje.md`'nin
-        // doğrulama tablosu) onları metin olarak arıyor.
+        // The half of the smoke contract that must stay **bit for bit** the same. Adding a token
+        // is free; these four stand in this order, with these values and at the
+        // **start** of the line — whoever reads `make smoke` (and `proje.md`'s
+        // verification table) searches for them as text.
         let line = report(smoke_counters(), Workload::Smoke).token_line();
         assert!(
-            line.starts_with("kare=1 hucre=8 glif=6 kural=15 "),
-            "duman sayaçları oynadı: {line}"
+            line.starts_with("frames=1 cells=8 glyphs=6 rules=15 "),
+            "smoke counters moved: {line}"
         );
     }
 
     #[test]
     fn token_line_preserves_old_tokens() {
-        // Sözleşme: **silinmez, eklenir.** Rapor genişlerken düşen bir jeton
-        // sessizdir — okuyan taraf tanımadığını atlayabilir, kaybolanı
-        // arayamaz.
+        // The contract: **never deleted, only added.** A token that drops while the report
+        // grows is silent — the reader can skip one it does not know, but
+        // cannot look for one that vanished.
         let line = report(smoke_counters(), Workload::Smoke).token_line();
         for token in [
-            "kare=1",
-            "hucre=8",
-            "glif=6",
-            "kural=15",
-            "yuva=13/2048",
-            "yuk=smoke",
-            "istek=4",
-            "kapanis=clean",
+            "frames=1",
+            "cells=8",
+            "glyphs=6",
+            "rules=15",
+            "slots=13/2048",
+            "load=smoke",
+            "requests=4",
+            "teardown=clean",
         ] {
-            assert!(line.contains(token), "{token} düştü: {line}");
+            assert!(line.contains(token), "{token} dropped: {line}");
         }
         assert!(line.ends_with(" pipeline=ok"), "{line}");
 
-        // Dört yeni anahtar da **kalıcı**: sözleşme bugünden sonra onları da
-        // "silinmez" tarafına alıyor. `kayma=` 011 ile geldi ve `hareket=`'in
-        // yanına girdi — jeton **silinmez, eklenir**.
+        // The four new keys are **permanent** too: from today the contract puts them on the
+        // "never deleted" side as well. `slide=` arrived with 011 and sat next to `motion=` —
+        // the token is **never deleted, only added**.
         for token in [
-            "icerik=1",
-            "hareket=3",
-            "kayma=2",
-            "sessiz=2950.00ms",
-            // 023 ile geldi ve `yuva=`'nin **hemen yanına** girdi: ikisi
-            // atlasın iki düzlemi ve yan yana okunuyorlar. Listeye aynı gün
-            // yazıldı, çünkü "silinmez" sözü ancak bir bekçisi varsa söz —
-            // yukarıdaki liste yalnız **eski** jetonları koruyor.
-            "yuva2=0/2048",
+            "content=1",
+            "motion=3",
+            "slide=2",
+            "quiet=2950.00ms",
+            // Arrived with 023 and sits **right next to** `slots=`: the two are
+            // the atlas's two planes and are read side by side. It was put in the list the same
+            // day, because the "never deleted" promise is a promise only if
+            // a guard exists — the list above protects only the **old** tokens.
+            "slots2=0/2048",
         ] {
             assert!(line.contains(token), "{token} yok: {line}");
         }
-        // Yeri de sözleşme: `yuva=` ile `yuva2=` yan yana. Ayrılsalardı satırı
-        // gözle okuyan taraf iki düzlemi birbirine bağlayamazdı.
+        // Its position is part of the contract too: `slots=` and `slots2=` side by side. Were they apart,
+        // someone reading the line by eye could not connect the two planes.
         assert!(
-            line.contains("yuva=13/2048 yuva2=0/2048 "),
-            "iki düzlemin jetonu yan yana durmalı: {line}"
+            line.contains("slots=13/2048 slots2=0/2048 "),
+            "the two planes' tokens must stand side by side: {line}"
         );
 
-        // Kapı kapalıyken ölçüm jetonları **yok** ve `ornek=0` da yok: sıfır,
-        // "kapı açıktı ama hiç örnek toplanmadı" ile karışırdı ve R5.2'nin
-        // kapatmak istediği körlük tam olarak o.
-        assert!(line.contains(" ornek=off"), "{line}");
-        assert!(!line.contains("cpu_kare_p95"), "{line}");
-        assert!(!line.contains("acilis="), "{line}");
+        // With the gate closed the measurement tokens are **absent**, and `samples=0` is absent too: zero
+        // would be confused with "the gate was open but no samples were collected", and
+        // the blindness R5.2 wants to close is exactly that.
+        assert!(line.contains(" samples=off"), "{line}");
+        assert!(!line.contains("cpu_frame_p95"), "{line}");
+        assert!(!line.contains("startup="), "{line}");
 
-        // `yuk=` yükle değişiyor ve dizgi tipin yanında duruyor.
+        // `load=` changes with the workload and the string sits next to the type.
         let load = report(
             Counters {
                 frames: 9,
@@ -2922,44 +2922,44 @@ mod tests {
             Workload::Load,
         )
         .token_line();
-        assert!(load.contains("yuk=load"), "{load}");
+        assert!(load.contains("load=load"), "{load}");
     }
 
     #[test]
     fn quiet_token_says_none_when_nothing_was_drawn() {
-        // `sessiz=` uydurulmuş bir sıfır basmıyor: sıfır, "deadline anında
-        // kare akıyordu" demek ve hiç kare çizilmemiş bir koşuyla karışırdı
-        // (`ornek=off` ile aynı kural).
+        // `quiet=` prints no invented zero: zero would mean "frames were flowing at
+        // the deadline" and be confused with a run where no frame was ever drawn
+        // (the same rule as `samples=off`).
         //
-        // Bu kol jeton satırında **erişilemez** — kare çizilmemişse `kare=0`
-        // ve kapı `MissingCounter` diyor, yani satır hiç basılmıyor. Yine de
-        // sınanıyor: `Report` onu temsil edebiliyor ve kapının `sessiz` kolu
-        // `None`'ı tabanın altıyla aynı sepete koyuyor
+        // This arm is **unreachable** on the token line — if no frame was drawn `frames=0`
+        // and the gate says `MissingCounter`, so the line is never printed. It is tested
+        // anyway: `Report` can represent it, and the gate's `quiet` arm
+        // puts `None` in the same bucket as a tail below the floor
         // (`a_short_tail_fails_the_gate`).
         let mut r = report(smoke_counters(), Workload::Smoke);
         r.quiet = None;
         let line = r.token_line();
-        assert!(line.contains(" sessiz=none "), "{line}");
-        assert!(!line.contains("sessiz=0"), "{line}");
+        assert!(line.contains(" quiet=none "), "{line}");
+        assert!(!line.contains("quiet=0"), "{line}");
     }
 
     #[test]
     fn quiet_phrase_stays_out_of_the_token_contract() {
-        // Tanı öbeği düşen koşunun **tek** `sessiz` kaydı (jeton satırı yalnız
-        // yeşilde basılıyor), ama jeton gibi görünmemeli: `sessiz=` arayan bir
-        // okuyucu düşen koşudan sayı okumamalı.
+        // The diagnostic phrase is the failed run's **only** `quiet` record (the token line is printed only
+        // on green), but it must not look like a token: a reader searching for `quiet=`
+        // must not read a number from a failed run.
         let phrase = quiet_phrase(Some(Duration::from_millis(1745)));
         assert!(phrase.contains("1745.00ms"), "{phrase}");
-        assert!(!phrase.contains("sessiz="), "{phrase}");
-        assert_eq!(quiet_phrase(None), "hiç çizilen kare yok");
+        assert!(!phrase.contains("quiet="), "{phrase}");
+        assert_eq!(quiet_phrase(None), "no frames drawn");
     }
 
     #[test]
     fn measured_tokens_report_every_column() {
-        // Kapı açıkken üç sütunun **her biri** kendi jetonunu alıyor ve GPU'nun
-        // kısa kalması görünür oluyor: `ornek=` ile `gpu_ornek=` ayrı sayılar,
-        // çünkü Metal'in sıfır damgası bir kareyi CPU'ya yazdırıp GPU'ya
-        // yazdırmayabiliyor.
+        // With the gate open **each** of the three columns gets its own token and the GPU
+        // falling short becomes visible: `samples=` and `gpu_samples=` are separate numbers,
+        // because Metal's zero timestamp can let a frame be written for the CPU but not
+        // for the GPU.
         let mut r = report(smoke_counters(), Workload::Load);
         r.measured = Some(Measured {
             startup: Some(Duration::from_millis(284)),
@@ -2974,22 +2974,22 @@ mod tests {
         });
         let line = r.token_line();
         for token in [
-            "ornek=594",
-            "dusen=2",
-            "gpu_ornek=591",
-            "gpu_elenen=3",
-            &format!("taban={MIN_SAMPLES}"),
-            "cpu_kare_p95=1.80ms",
-            "cpu_kare_max=4.10ms",
+            "samples=594",
+            "dropped=2",
+            "gpu_samples=591",
+            "gpu_discarded=3",
+            &format!("floor={MIN_SAMPLES}"),
+            "cpu_frame_p95=1.80ms",
+            "cpu_frame_max=4.10ms",
             "gpu_p95=2.20ms",
             "gpu_max=5.00ms",
-            "acilis=284.00ms",
+            "startup=284.00ms",
         ] {
             assert!(line.contains(token), "{token} yok: {line}");
         }
-        // Taban altındaki sütun sayı **basmıyor** (R5.6) ve sebebi aynı
-        // satırdaki `ornek=`/`taban=` çiftinde okunuyor. p95 ile en kötü
-        // birlikte susuyor: az örnekte ikisi zaten aynı elemandır.
+        // A column below the floor **prints no number** (R5.6) and the reason can be read in the same
+        // line's `samples=`/`floor=` pair. p95 and worst are silent
+        // together: with few samples they are the same element anyway.
         assert!(line.contains("cpu_encode_p95=insufficient"), "{line}");
         assert!(line.contains("cpu_encode_max=insufficient"), "{line}");
         // Without timestamp support the GPU keys stay and say why there is
@@ -3004,11 +3004,11 @@ mod tests {
 
     #[test]
     fn cell_metrics_come_from_outside() {
-        // Yer tutucunun ölmüş olmasının sınanabilir hâli: aynı pencere, iki
-        // farklı hücre ölçüsü, iki farklı grid. Gövdeye geri sızan bir sabit
-        // ikisini eşitler ve bu sınama düşer.
-        // Pay sıfır: sorulan şey hücre ölçüsünün grid'i belirlediği, payın
-        // etkisi değil. Payın kendi sınaması `the_gutter_costs_columns`.
+        // The testable form of the placeholder being dead: same window, two
+        // different cell sizes, two different grids. A constant leaking back into the body
+        // would make the two equal and this test would fail.
+        // Gutter zero: what is asked is that the cell size determines the grid, not the gutter's
+        // effect. The gutter's own test is `the_gutter_costs_columns`.
         let narrow = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK);
         let wide = split_into_grid(900.0, 600.0, metrics(18, 36, 0), NO_DOCK);
         assert_eq!((narrow.cols, narrow.rows), (100, 33));
@@ -3017,56 +3017,56 @@ mod tests {
 
     #[test]
     fn the_gutter_costs_columns() {
-        // Sol pay sütunlardan düşülür (010 Karar 3): şerit metnin üstüne
-        // binmesin. 900 piksel, 9 piksel hücre → paysız 100 sütun; 8 piksel
-        // pay bir sütun götürür, 9 piksel (tam bir hücre) de bir.
+        // The left gutter is deducted from columns (010 Karar 3): so the stripe does not
+        // sit on top of the text. 900 pixels, 9-pixel cells → 100 columns with no gutter; an 8-pixel
+        // gutter takes one column, and so does 9 pixels (a full cell).
         let plain = split_into_grid(900.0, 600.0, metrics(9, 18, 0), NO_DOCK);
         let gutter = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK);
         assert_eq!(plain.cols, 100);
-        assert_eq!(gutter.cols, 99, "pay bir sütun götürür");
-        // Satırlar payı **görmez**: pay yalnız solda ve dikey geometriye
-        // dokunmuyor.
+        assert_eq!(gutter.cols, 99, "the gutter takes one column");
+        // Rows **do not see** the gutter: the gutter is only on the left and does not
+        // touch the vertical geometry.
         assert_eq!(gutter.rows, plain.rows);
-        // Pay ölçüyle birlikte taşınıyor: grid'i kuran değer onu geri veriyor
-        // ve çizim orijini ile fare eşlemesi aynı değeri okuyor.
+        // The gutter travels with the metrics: the value that built the grid gives it back
+        // and the draw origin and mouse mapping read the same value.
         assert_eq!(gutter.cell.gutter_px(), 8);
     }
 
     #[test]
     fn the_dock_costs_rows_and_only_when_there_is_one() {
-        // Dock payı **satırlardan** düşülür ve sol payın tersine koşullu:
-        // dock'u olmayan pencereden (entegrasyonsuz kabuk, duman reçetesi)
-        // tek satır bile gitmemeli — `smoke_shell`'in `hucre=8 glif=6`
-        // sözleşmesi o pencerede ölçülüyor.
+        // The dock gutter is deducted from **rows** and, unlike the left gutter, conditional:
+        // not a single row should go from a window without a dock (an unintegrated shell, the smoke recipe) —
+        // `smoke_shell`'s `cells=8 glyphs=6`
+        // contract is measured in that window.
         let without = split_into_grid(900.0, 600.0, metrics(9, 18, 8), NO_DOCK);
         let with = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS);
         // 600 / 18 = 33.3 → 33.
         assert_eq!(without.rows, 33);
-        // Dock **iki satır, iki nefes payı ve bir satır arası** götürüyor:
-        // 2×18 + 2×8 + 16 = 68 px, yani 532 / 18 = 29.5 → 29. Satır arası
-        // (`dock_row_gap`) dış payın **iki katı**, çünkü ortasından bir çizgi
-        // geçiyor ve çizginin iki yanına birer pay düşüyor; hesaba girmezse
-        // 52 px çıkar, o da 30 satır verir ve fark **görünür** olur.
-        // Sayının kaynağı `DOCK_ROWS` değil `bt_gpu::dock_px`; ikisi
-        // ayrışırsa burası kızarır.
-        assert_eq!(with.rows, 29, "dock payı satırlardan düşmedi");
-        // Sütunlar dock'u **görmez**: dock ızgarayla aynı sütunları kullanıyor
-        // ve payı yalnız dikeyde.
+        // The dock takes **two rows, two breathing gutters and one row gap**:
+        // 2×18 + 2×8 + 16 = 68 px, i.e. 532 / 18 = 29.5 → 29. The row gap
+        // (`dock_row_gap`) is **twice** the outer gutter, because a line
+        // passes through its middle and one gutter falls on each side of the line; if left out of the sum
+        // it would come to 52 px, which gives 30 rows and the difference becomes **visible**.
+        // The number's source is `bt_gpu::dock_px`, not `DOCK_ROWS`; if the two
+        // drift apart this goes red.
+        assert_eq!(with.rows, 29, "dock gutter was not deducted from rows");
+        // Columns **do not see** the dock: the dock uses the same columns as the grid
+        // and its gutter is vertical only.
         assert_eq!(with.cols, without.cols);
     }
 
     #[test]
     fn the_dock_breathing_room_scales_with_the_gutter() {
-        // Nefes payı **türetilmiş**, seçilmiş değil: kaynağı sol payın ta
-        // kendisi. Sabit bir piksel sayısı olsaydı Cmd +/− ile punto büyürken
-        // pay aynı kalır ve oran bozulurdu; bu sınama tam da o bağı tutuyor.
+        // The breathing gutter is **derived**, not chosen: its source is the left
+        // gutter itself. With a fixed pixel count the gutter would stay the same while the font
+        // grows with Cmd +/− and the ratio would break; this test holds exactly that link.
         let tight = split_into_grid(900.0, 600.0, metrics(9, 18, 0), DOCK_ROWS);
         let loose = split_into_grid(900.0, 600.0, metrics(9, 18, 8), DOCK_ROWS);
-        // Paysız dock yalnız satırlarını götürür: 600 − 36 = 564 → 31.
+        // A dock without gutters takes only its rows: 600 − 36 = 564 → 31.
         assert_eq!(tight.rows, 31);
         assert!(
             loose.rows < tight.rows,
-            "pay büyüdü ama dock aynı yeri kapladı: {} / {}",
+            "the gutter grew but the dock covered the same space: {} / {}",
             loose.rows,
             tight.rows
         );
@@ -3074,70 +3074,70 @@ mod tests {
 
     #[test]
     fn lookup_skips_closed_panes() {
-        // (kimlik, kapandı mı): kapanışı başlamış pane listede dursa da
-        // bulunmuyor; açık olan bulunuyor; olmayan kimlik hiçbir şey.
+        // (id, closed?): a pane whose close has begun is not found even if it is
+        // still in the list; an open one is found; an unknown id finds nothing.
         let panes = [(1_u64, false), (2, true), (3, false)];
         let find = |id| find_open(panes, |&(pane, closed)| (pane == id, closed));
         assert_eq!(find(1), Some((1, false)));
-        assert_eq!(find(2), None, "kapanmış pane bulunmamalı");
+        assert_eq!(find(2), None, "a closed pane must not be found");
         assert_eq!(find(3), Some((3, false)));
         assert_eq!(find(4), None);
     }
 
     #[test]
     fn the_alternate_screen_takes_the_dock_and_gives_it_back() {
-        // Alternatif ekranda pay sıfır, çıkışta **doğum değeri** geri geliyor.
+        // On the alternate screen the gutter is zero, on exit the **birth value** comes back.
         assert_eq!(dock_rows_for(true, DOCK_ROWS), 0);
         assert_eq!(dock_rows_for(false, DOCK_ROWS), DOCK_ROWS);
-        // **Doğum değeri ayrı bir girdi olmasının sebebi bu satır:**
-        // dock'u hiç olmayan bir pencerede (entegrasyonsuz kabuk, duman
-        // reçetesi) alternatif ekrandan çıkmak dock **doğurmamalı**. Tek bir
-        // alanın üstüne yazılsaydı geri getirilecek değer `DOCK_ROWS`
-        // sabitinden kurulur ve tam da bu pencere dock kazanırdı.
+        // **This line is why the birth value is a separate input:**
+        // leaving the alternate screen in a window that never had a dock (an unintegrated shell, the smoke
+        // recipe) must **not** give birth to a dock. Were it written over a single
+        // field, the value to restore would be built from the `DOCK_ROWS`
+        // constant and exactly this window would gain a dock.
         assert_eq!(dock_rows_for(true, NO_DOCK), 0);
         assert_eq!(dock_rows_for(false, NO_DOCK), 0);
     }
 
     #[test]
     fn a_window_shorter_than_the_dock_yields_no_rows() {
-        // `a_window_narrower_than_the_gutter_yields_no_columns`'ın dikey
-        // ikizi ve aynı kırılmaya bekçi: çıkarma `f64`'te negatife iniyor ve
-        // `as u16` sıfıra doyuruyor. `u16`'da yapılsaydı taşar ve 65535
-        // satırlık bir `TIOCSWINSZ` üretirdi. Sıfır satırı `Session::resize`
-        // zaten yoksayıyor.
+        // The vertical twin of `a_window_narrower_than_the_gutter_yields_no_columns`
+        // and a guard for the same breakage: the subtraction goes negative in `f64` and
+        // `as u16` saturates to zero. Done in `u16` it would overflow and
+        // produce a 65535-row `TIOCSWINSZ`. `Session::resize` already
+        // ignores a zero-row size.
         let g = split_into_grid(900.0, 20.0, metrics(9, 18, 8), DOCK_ROWS);
         assert_eq!(g.rows, 0);
-        // Sütunlar ayakta: alçak pencere yalnız satırları eliyor.
+        // Columns stand: a short window eliminates only rows.
         assert_eq!(g.cols, 99);
     }
 
     #[test]
     fn a_window_narrower_than_the_gutter_yields_no_columns() {
-        // Kabul: yeni bir alt sınır **getirilmiyor**, mevcut zincir doğru
-        // cevabı veriyor. Çıkarma `f64`'te negatife iniyor, bölme negatif
-        // kalıyor ve `as u16` sıfıra doyuruyor; sıfır sütunu `Session::resize`
-        // zaten yoksayıyor. Aynı çıkarma `u16`'da yapılsaydı **taşar** ve
-        // 65535'e yakın bir sütunla o boyda bir `TIOCSWINSZ` üretirdi — bu
-        // sınamanın bekçilik ettiği kırılma o.
+        // Accepted: no new lower bound is **introduced**, the existing chain gives the
+        // right answer. The subtraction goes negative in `f64`, the division stays
+        // negative and `as u16` saturates to zero; `Session::resize` already
+        // ignores a zero-column size. Done in `u16` the same subtraction would
+        // **overflow** and produce a `TIOCSWINSZ` with a column count near
+        // 65535 — that is the breakage this test guards.
         let g = split_into_grid(4.0, 600.0, metrics(9, 18, 8), NO_DOCK);
         assert_eq!(g.cols, 0);
-        // Satırlar ayakta: dar pencere yalnız sütunları eliyor.
+        // Rows stand: a narrow window eliminates only columns.
         assert_eq!(g.rows, 33);
     }
 
     #[test]
     fn idle_limit_catches_excess_frames() {
-        // Üst sınırın operandı `icerik`, alt sınırınki `kare`. Sağlıklı bir
-        // koşuda ikisi eşit olduğu için yardımcılar `kare = icerik` kuruyor;
-        // ikisinin ayrıştığı durumun kendi sınaması aşağıda.
+        // The upper bound's operand is `content`, the lower bound's is `frames`. In a healthy
+        // run the two are equal, so the helpers set `frames = content`;
+        // the case where they diverge has its own test below.
         let counters = |content, cells, glyphs, rules| Counters {
             frames: content,
             content,
             cells,
             glyphs,
             rules,
-            // Sağlıklı bir duman koşusunun izi; bu sınamanın sorduğu şey
-            // `icerik` sınırı, hareketin kendi kapısı aşağıda.
+            // The trace of a healthy smoke run; what this test asks about is the
+            // `content` limit, the motion gate has its own below.
             motion: 3,
             slide: 2,
         };
@@ -3165,10 +3165,10 @@ mod tests {
             limit: IDLE_FRAME_LIMIT,
         };
 
-        // **Bu değişikliğin tamamı bu iki satırda.** Kapı `kare`'ye bakmayı
-        // bıraktı: hareket kareleri `kare`'yi meşru olarak şişirecek ve sınır
-        // onları görmemeli. Ters yön de bağlı — `icerik` taşarsa `kare`'nin
-        // düşük olması kurtarmıyor.
+        // **The whole of this change is in these two lines.** The gate stopped looking at `frames`:
+        // motion frames legitimately inflate `frames` and the limit must
+        // not see them. The reverse direction is bound too — if `content` overflows, a
+        // low `frames` does not save it.
         let mixed = |frames, content| {
             verdict(
                 Counters {
@@ -3186,58 +3186,66 @@ mod tests {
                 HEALTHY_QUIET,
             )
         };
-        assert_eq!(mixed(200, 1), Verdict::Pass, "hareket karesi kapıya girmez");
-        assert_eq!(mixed(1, 200), excess, "içerik karesi kapıdan kaçamaz");
+        assert_eq!(
+            mixed(200, 1),
+            Verdict::Pass,
+            "motion frames do not enter the gate"
+        );
+        assert_eq!(
+            mixed(1, 200),
+            excess,
+            "content frames cannot escape the gate"
+        );
 
-        // Bugünkü duman koşusunun ta kendisi: bir kare, sekiz hücre, altı
-        // glyph, on beş kural.
+        // Today's smoke run itself: one frame, eight cells, six
+        // glyphs, fifteen rules.
         assert_eq!(smoke(1, 8, 6, 15), Verdict::Pass);
-        // Sınırın kendisi geçer, bir fazlası düşer. Eski kapı (`n > 0`) sıfırı
-        // görüyordu ama fazlayı görmüyordu ve boşta sıfır kareyi bozan bir
-        // değişikliğin belirtisi tam olarak fazla kare.
+        // The limit itself passes, one over fails. The old gate (`n > 0`) saw zero
+        // but not excess, and the symptom of a change that breaks idle-zero-frames is
+        // exactly excess frames.
         assert_eq!(smoke(IDLE_FRAME_LIMIT, 8, 6, 15), Verdict::Pass);
         assert_eq!(smoke(IDLE_FRAME_LIMIT + 1, 8, 6, 15), excess);
-        // Sağlıklı koşunun **ölçülen** tavanı (2026-09-12, otuz bir koşuda
-        // bir kez): dört kare meşru ve geçmeli. Eski sınır (`2`) tam burada
-        // doğru bir build'i kırmızıya düşürüyordu.
+        // The **measured** ceiling of a healthy run (2026-09-12, once in thirty-one
+        // runs): four frames are legitimate and must pass. The old limit (`2`) turned
+        // a correct build red exactly here.
         assert_eq!(smoke(4, 8, 6, 15), Verdict::Pass);
-        // Bozuk koşunun **ölçülen** alt ucu: boşta sıfır kare bilerek
-        // bozulduğunda dokuz koşuda en düşük sayı 49'du. Sınır bunu yakalamak
-        // zorunda.
+        // The **measured** low end of a broken run: when idle-zero-frames was broken
+        // on purpose the lowest count over nine runs was 49. The limit has to
+        // catch that.
         assert_eq!(smoke(49, 8, 6, 15), excess);
         assert_eq!(smoke(354, 8, 6, 15), excess);
-        // `Load` yükünde akış işin kendisi: aynı sayı geçmeli. Sınırın yüke
-        // bağlı olduğu tek yerde yazılı ve burada sınanıyor.
+        // Under the `Load` workload the flow is the work itself: the same number must pass. The limit's
+        // dependence on the workload is written in one place and tested here.
         assert_eq!(load(354, 8, 6, 15), Verdict::Pass);
-        // Ölçüm yükünün **gerçek** sayıları: düz metin akıyor, arka plan ve
-        // kural yapısal olarak sıfır. Dört sayaç da sorulsaydı her ölçüm
-        // koşusu kırmızı düşerdi. `glif=1836` üç ölçümde de aynı çıktı
-        // (2026-09-12); `kare` ise ortama bağlı ve tam bu yüzden `Load`
-        // yükünde **kapı yok**: aynı makinede aynı komut bir rejimde 9 (2 sn)
-        // ile 21 (5 sn), ötekinde 49–234 (2 sn) ile 597 (5 sn) verdi.
+        // The **real** numbers of the measurement workload: plain text flows, background and
+        // rules are structurally zero. If all four counters were asked every measurement
+        // run would go red. `glyphs=1836` was the same output in all three measurements
+        // (2026-09-12); `frames` depends on the environment and that is exactly why
+        // there is **no gate** under `Load`: on the same machine the same command gave 9 (2 s)
+        // and 21 (5 s) in one regime, 49–234 (2 s) and 597 (5 s) in the other.
         assert_eq!(load(21, 0, 1836, 0), Verdict::Pass);
         assert_eq!(load(594, 0, 1836, 0), Verdict::Pass);
 
-        // Sıfır, fazladan **önce** gelir: ikisi birden bozuksa okuyan taraf
-        // önce eksik halkayı arasın. Kolların sırasını ters çeviren bir
-        // değişiklik burada kırmızı düşer.
+        // Zero comes **before** excess: if both are broken the reader should
+        // look for the missing link first. A change that reverses the order of the arms
+        // goes red here.
         assert_eq!(
             smoke(200, 0, 6, 15),
             Verdict::MissingCounter {
-                required: "beşi de >0 olmalı"
+                required: "all five must be >0"
             }
         );
 
-        // Alt sınır iki yükte de duruyor ve her sayaç ayrı bir kapı. Karar
-        // `MissingCounter` olmalı, `ExcessFrames` değil: düşen koşu okuyanı
-        // doğru arızaya göndermeli.
+        // The lower bound holds under both workloads and each counter is a separate gate. The verdict
+        // must be `MissingCounter`, not `ExcessFrames`: a failed run must send
+        // the reader to the right fault.
         for (got, required) in [
-            (smoke(0, 8, 6, 15), "beşi de >0 olmalı"),
-            (smoke(1, 0, 6, 15), "beşi de >0 olmalı"),
-            (smoke(1, 8, 0, 15), "beşi de >0 olmalı"),
-            (smoke(1, 8, 6, 0), "beşi de >0 olmalı"),
-            (load(0, 0, 1836, 0), "kare ve glif >0 olmalı"),
-            (load(3, 0, 0, 0), "kare ve glif >0 olmalı"),
+            (smoke(0, 8, 6, 15), "all five must be >0"),
+            (smoke(1, 0, 6, 15), "all five must be >0"),
+            (smoke(1, 8, 0, 15), "all five must be >0"),
+            (smoke(1, 8, 6, 0), "all five must be >0"),
+            (load(0, 0, 1836, 0), "frames and glyphs must be >0"),
+            (load(3, 0, 0, 0), "frames and glyphs must be >0"),
         ] {
             assert_eq!(got, Verdict::MissingCounter { required });
         }
@@ -3245,11 +3253,11 @@ mod tests {
 
     #[test]
     fn an_unsettled_animation_fails_the_gate() {
-        // Kapının **ölçüm istemeyen** yarısı ve `IDLE_FRAME_LIMIT`'in
-        // göremediği sızıntı sınıfı: sayaçların hepsi yerinde, kare sınırı
-        // aşılmamış — yavaş bir animasyon ikisini de geçer — ama deadline'da
-        // hâlâ uçuşta. Phase-3'ün kabulündeki "geçici mutasyon: `settled` hep
-        // `false`" senaryosunun saf hâli.
+        // The gate's half that **asks for no measurement** and the leak class `IDLE_FRAME_LIMIT`
+        // cannot see: all counters in place, the frame limit
+        // not exceeded — a slow animation passes both — but still in flight at
+        // the deadline. The pure form of phase-3's acceptance scenario "temporary mutation:
+        // `settled` always `false`".
         let good = Counters {
             frames: 1,
             content: 1,
@@ -3281,10 +3289,10 @@ mod tests {
             Verdict::Pass
         );
 
-        // **Ölçüm yükü muaf**: `Load` deadline'a kadar çıktı akıtıyor, yani
-        // son satırla birlikte imleç hedef değiştiriyor ve deadline yayın
-        // ortasına düşüyor. Bağlansaydı her ölçüm koşusu kod doğruyken
-        // kırmızı düşerdi.
+        // **The measurement workload is exempt**: `Load` streams output until the deadline, so
+        // with the last line the cursor changes target and the deadline lands in
+        // mid-flight. If bound, every measurement run would go red
+        // while the code was right.
         assert_eq!(
             verdict(
                 Counters {
@@ -3302,9 +3310,9 @@ mod tests {
             Verdict::Pass
         );
 
-        // Hiç hareket karesi çizilmemişse arıza **yerleşmeme değil eksik
-        // sayaç**: duman reçetesinde bir imleç hareketi var, yani sıfır
-        // "animasyon yolu hiç koşmadı" demek ve okuyanı oraya göndermeli.
+        // If no motion frame was drawn the fault is **a missing counter, not failure
+        // to settle**: the smoke recipe has a cursor motion, so zero means
+        // "the animation path never ran" and should send the reader there.
         assert_eq!(
             verdict(
                 Counters { motion: 0, ..good },
@@ -3314,12 +3322,12 @@ mod tests {
                 HEALTHY_QUIET,
             ),
             Verdict::MissingCounter {
-                required: "beşi de >0 olmalı"
+                required: "all five must be >0"
             }
         );
 
-        // Kare sınırı yerleşmeden **önce** geliyor: ikisi birden bozuksa
-        // okuyan taraf önce akan kareyi görsün.
+        // The frame limit comes **before** settling: if both are broken
+        // the reader should see the flowing frames first.
         assert_eq!(
             verdict(
                 Counters {
@@ -3339,11 +3347,11 @@ mod tests {
 
     #[test]
     fn a_short_tail_fails_the_gate() {
-        // Kapının üçüncü katı ve tek ölçülmüş eşiği: sayaçlar yerinde, içerik
-        // karesi sınırın **altında**, animasyon yerleşmiş — ama son kareyle
-        // deadline arası kısa, yani koşunun sonunda hâlâ kare akıyordu.
-        // Ölçülen senaryosu yarım saniyelik sızıntı: `icerik=8` ile sınırı
-        // aşmıyor ve bu kol olmadan **yeşil** düşüyordu
+        // The gate's third tier and its only measured threshold: counters in place, content
+        // frames **below** the limit, animation settled — but the gap between the last frame and
+        // the deadline is short, i.e. frames were still flowing at the end of the run.
+        // Its measured scenario is a half-second leak: with `content=8` it does
+        // not exceed the limit and without this arm it was **green**
         // (`docs/OLCUMLER.md` → `## Boşta kare`).
         let good = Counters {
             frames: 30,
@@ -3359,21 +3367,21 @@ mod tests {
         let smoke = |quiet| verdict(good, Workload::Smoke, clean, settled, quiet);
         let short = Verdict::QuietTooShort { floor: QUIET_FLOOR };
 
-        // Ölçülen yavaş sızıntının kuyruğu (en yükseği `129,25 ms`) ve
-        // ölçülen sağlıklı kuyruğun en düşüğü (`1742,29 ms`): kapı ikisinin
-        // arasından geçiyor ve iki dağılım da kendi tarafında kalıyor.
+        // The tail of the measured slow leak (highest `129,25 ms`) and the lowest
+        // of the measured healthy tail (`1742,29 ms`): the gate passes between
+        // the two and both distributions stay on their own side.
         assert_eq!(smoke(Some(Duration::from_millis(130))), short);
         assert_eq!(smoke(HEALTHY_QUIET), Verdict::Pass);
-        // Tabanın kendisi geçer, bir milisaniye altı düşer.
+        // The floor itself passes, one millisecond below fails.
         assert_eq!(smoke(Some(QUIET_FLOOR)), Verdict::Pass);
         assert_eq!(smoke(Some(QUIET_FLOOR - Duration::from_millis(1))), short);
-        // `sessiz=none` uydurulmuş bir sıfır değil ama kapı için aynı yanıt:
-        // hiç kare çizilmemiş bir koşunun sessizliği de ölçülemez.
+        // `quiet=none` is not an invented zero but the same answer for the gate:
+        // the quiet of a run in which no frame was ever drawn cannot be measured either.
         assert_eq!(smoke(None), short);
 
-        // **Ölçüm yükü muaf** ve gerekçesi `MotionUnsettled`'ınkiyle aynı:
-        // `Load` deadline'a kadar çıktı akıtıyor, yani orada sessizlik sıfıra
-        // yakın olmak zorunda. Bağlansaydı her ölçüm koşusu kırmızı düşerdi.
+        // **The measurement workload is exempt** and the reason is the same as `MotionUnsettled`'s:
+        // `Load` streams output until the deadline, so quiet there
+        // must be near zero. If bound, every measurement run would go red.
         assert_eq!(
             verdict(
                 Counters {
@@ -3391,8 +3399,8 @@ mod tests {
             Verdict::Pass
         );
 
-        // Sıra: üçü de bozuksa satır en temel arızayı yazar. Sessizlik en
-        // sonda, çünkü ötekiler sızıntıyı **adıyla** tanıyor.
+        // Order: if all three are broken the line writes the most basic fault. Quiet is
+        // last, because the others recognize the leak **by name**.
         assert_eq!(
             verdict(
                 Counters {
@@ -3418,10 +3426,10 @@ mod tests {
             ),
             Verdict::MotionUnsettled
         );
-        // Panik **kuyruktan da sonra**: ötekiler koşunun ölçtüğü şeyin
-        // bozulduğunu söylüyor, panik koşu bittikten sonraki yolu ve
-        // `kapanis=` jetonu onu zaten taşıyor. Kombinasyonun kendi sınaması
-        // olmadan "en sonda" iddiası yalnız bir yorum cümlesi olurdu.
+        // Panic comes **even after the tail**: the others say what the run
+        // measures broke, panic is the path after the run ended and
+        // the `teardown=` token already carries it. Without a test for the combination
+        // the "last" claim would be only a comment sentence.
         assert_eq!(
             verdict(
                 good,
@@ -3436,14 +3444,14 @@ mod tests {
 
     #[test]
     fn motion_and_panic_report_the_more_fundamental_fault() {
-        // Kolların sırası bir **tanı** tercihi: iki arıza birdenken koşu her
-        // hâlükârda kırmızı, ama satır hangisini yazacak? `/code-review`
-        // bulgusu bu kombinasyonun hiç sınanmamış olmasıydı.
+        // The order of the arms is a **diagnostic** preference: when two faults coincide the run is red
+        // either way, but which does the line write? The `/code-review`
+        // finding was that this combination was never tested.
         //
-        // Yerleşmeme koşunun **ölçtüğü** şeyin bozulduğunu söylüyor, panik
-        // koşu bittikten sonraki yolu; okuyanı önce ilkine göndermek doğru ve
-        // `kapanis=` jetonu ikincisini zaten taşıyor. Ters çevirmek
-        // `ExcessFrames`'in bugünkü sırasını da bozardı.
+        // Failure to settle says what the run **measures** broke, panic is
+        // the path after the run ended; sending the reader to the first is right and
+        // the `teardown=` token already carries the second. Reversing it
+        // would also break `ExcessFrames`'s current order.
         let good = Counters {
             frames: 1,
             content: 1,
@@ -3463,7 +3471,7 @@ mod tests {
             ),
             Verdict::MotionUnsettled
         );
-        // Panik tek başınayken yine görülüyor: sıra onu **yutmuyor**.
+        // Panic alone is still seen: the order does **not swallow** it.
         assert!(matches!(
             verdict(
                 good,
@@ -3478,10 +3486,10 @@ mod tests {
 
     #[test]
     fn shutdown_panic_cannot_pass_the_gate() {
-        // `/code-review` bulgusu: `kapanis=` jetonu görünür oldu ama kapı onu
-        // okumuyordu, yani kapanış yolunda panikleyen bir koşu hâlâ
-        // `pipeline=ok` basıp 0 ile çıkıyordu — jetonun eklenme gerekçesinin
-        // tam tersi.
+        // `/code-review` finding: the `teardown=` token became visible but the gate did not
+        // read it, so a run that panicked on the shutdown path still
+        // printed `pipeline=ok` and exited 0 — the exact opposite of the
+        // token's reason for being added.
         let good = Counters {
             frames: 1,
             content: 1,
@@ -3504,20 +3512,20 @@ mod tests {
                     ),
                     Verdict::ShutdownPanicked { .. }
                 ),
-                "{teardown:?} yeşil geçemez"
+                "{teardown:?} cannot pass green"
             );
             assert!(
                 matches!(
                     verdict(good, Workload::Load, Some(teardown), settled, HEALTHY_QUIET),
                     Verdict::ShutdownPanicked { .. }
                 ),
-                "{teardown:?} ölçüm yükünde de yeşil geçemez"
+                "{teardown:?} cannot pass green under the measurement workload either"
             );
         }
 
-        // Kayıtlı borçlar kapıya **bağlanmadı**: `Abandoned` ölçüm yükünün
-        // dört koşusundan birinde oluyor (ölçüldü) ve `make duman`'ı bilinen
-        // bir borç yüzünden kırmızıya düşürmek kapıyı işe yaramaz kılardı.
+        // Recorded debts are **not wired** to the gate: `Abandoned` happens in one of the
+        // measurement workload's four runs (measured) and turning `make smoke` red
+        // over a known debt would make the gate useless.
         for teardown in [
             Some(Teardown::Clean),
             Some(Teardown::Abandoned),
@@ -3531,8 +3539,8 @@ mod tests {
             );
         }
 
-        // Eksik sayaç panikten **önce** geliyor: okuyanı önce daha temel
-        // arızaya göndermek doğru.
+        // A missing counter comes **before** panic: sending the reader to the more basic
+        // fault first is right.
         assert_eq!(
             verdict(
                 Counters { frames: 0, ..good },
@@ -3542,19 +3550,19 @@ mod tests {
                 HEALTHY_QUIET,
             ),
             Verdict::MissingCounter {
-                required: "beşi de >0 olmalı"
+                required: "all five must be >0"
             }
         );
     }
 
     #[test]
     fn timed_run_does_not_see_the_user() {
-        // Süreli koşu yükleyiciyi çağırmaz: ev dizini çözülse bile karar
-        // `Hermetic`. `make duman` jetonları bu satıra yaslanıyor — `hucre=`
-        // ve `glif=` makinenin fontuna, `hareket=` de makinenin
-        // `[motion] cursor_motion`'ına bağlanmıyor. Hermetik koşuda stil
-        // `Settings::default()`'tan geliyor (`start_session`), yani
-        // varsayılanların tek sahibinden.
+        // A timed run does not call the loader: even if the home directory resolves the decision
+        // is `Hermetic`. `make smoke` tokens lean on this line — `cells=`
+        // and `glyphs=` are not tied to the machine's font, nor `motion=` to the machine's
+        // `[motion] cursor_motion`. In a hermetic run the style
+        // comes from `Settings::default()` (`start_session`), i.e. from the
+        // single owner of the defaults.
         let home = Some(PathBuf::from("/Users/someone"));
         for workload in [Workload::Smoke, Workload::Load] {
             let run = Run {
@@ -3578,15 +3586,12 @@ mod tests {
 
     #[test]
     fn smooth_scroll_is_off_when_any_input_turns_motion_off() {
-        // Üç girdiden biri hareketi kapatıyorsa satır adımı (027 Karar 5).
+        // If any of the three inputs turns motion off, the line step applies (027 Karar 5).
         let on = Settings::default();
-        assert!(
-            resolve_smooth_scroll(&on, false),
-            "varsayılan pürüzsüz değil"
-        );
+        assert!(resolve_smooth_scroll(&on, false), "default is not smooth");
         assert!(
             !resolve_smooth_scroll(&on, true),
-            "Hareketi Azalt'ta süzüldü"
+            "glided under Reduce Motion"
         );
         let off = Settings {
             smooth_scroll: SmoothScroll::Off,
@@ -3597,8 +3602,8 @@ mod tests {
             cursor_motion: CursorMotion::Snap,
             ..Settings::default()
         };
-        assert!(!resolve_smooth_scroll(&snap, false), "snap'te süzüldü");
-        // Öteki iki stil kaymayı açık bırakıyor.
+        assert!(!resolve_smooth_scroll(&snap, false), "glided under snap");
+        // The other two styles leave the glide on.
         for style in [CursorMotion::Ease, CursorMotion::Spring] {
             let settings = Settings {
                 cursor_motion: style,
@@ -3606,47 +3611,47 @@ mod tests {
             };
             assert!(resolve_smooth_scroll(&settings, false), "{style:?}");
         }
-        // Süreli koşu: ayar okunmuyor, Hareketi Azalt `false` çözülüyor, yani
-        // pürüzsüz — sistem ayarına bağlanmadan.
+        // Timed run: settings are not read, Reduce Motion resolves to `false`, i.e.
+        // smooth — without depending on the system setting.
         let reduce = resolve_reduce_motion(&Inputs::Hermetic, ReduceMotion::System, || {
-            panic!("süreli koşu sistem ayarını okudu")
+            panic!("timed run read the system setting")
         });
         assert!(resolve_smooth_scroll(&Settings::default(), reduce));
     }
 
     #[test]
     fn hermetic_run_does_not_read_reduce_motion() {
-        // `Inputs`'un beşinci koşulu (008 phase-5): süreli koşu sistemin
-        // Hareketi Azalt ayarını **okumaz**. Okusaydı `make duman`'ın
-        // `hareket=` jetonu ölçen makinenin erişilebilirlik tercihine
-        // bağlanırdı — bir makinede yeşil, bir makinede kırmızı düşen bir kapı.
-        // Closure'ın paniği bunu "okumadı" iddiasından daha keskin sınıyor:
-        // dönüşü `false` sabitlemek, okuyup yok sayan bir kodu da geçirirdi.
+        // `Inputs`'s fifth condition (008 phase-5): a timed run does **not** read the
+        // system's Reduce Motion setting. If it did, `make smoke`'s
+        // `motion=` token would depend on the measuring machine's accessibility preference —
+        // a gate green on one machine and red on another.
+        // The closure's panic tests this more sharply than a "did not read" claim:
+        // pinning the return to `false` would also pass code that reads and ignores it.
         for setting in [ReduceMotion::System, ReduceMotion::On, ReduceMotion::Off] {
             assert!(
                 !resolve_reduce_motion(&Inputs::Hermetic, setting, || panic!(
-                    "süreli koşu sistem ayarını okudu"
+                    "timed run read the system setting"
                 )),
-                "{setting:?} hermetik koşuda hareketi kıstı"
+                "{setting:?} throttled motion in a hermetic run"
             );
         }
 
         let user = Inputs::User { config_root: None };
-        // `"on"` ve `"off"` kendileri karar veriyor: sisteme hiç gidilmiyor.
+        // `"on"` and `"off"` decide for themselves: the system is never consulted.
         assert!(resolve_reduce_motion(&user, ReduceMotion::On, || panic!(
-            "\"on\" sistem ayarını okudu"
+            "\"on\" read the system setting"
         )));
         assert!(!resolve_reduce_motion(&user, ReduceMotion::Off, || panic!(
-            "\"off\" sistem ayarını okudu"
+            "\"off\" read the system setting"
         )));
-        // `"system"` yalnız sistemin dediğini yapar.
+        // `"system"` only does what the system says.
         assert!(resolve_reduce_motion(&user, ReduceMotion::System, || true));
         assert!(!resolve_reduce_motion(&user, ReduceMotion::System, || {
             false
         }));
     }
 
-    /// Entegrasyonun kurulduğu kolun sabit girdisi: zsh + gövdeli bir dizin.
+    /// The fixed input of the arm where integration is installed: zsh + a directory with a body.
     fn zsh_and_dir() -> (
         impl FnOnce() -> Option<PathBuf>,
         impl FnOnce() -> Option<PathBuf>,
@@ -3659,31 +3664,31 @@ mod tests {
 
     #[test]
     fn blocks_keeps_the_wrapper_and_drops_the_dock() {
-        // **012 phase-10'un kabul kriteri.** `"blocks"` kademesinde sarmalayıcı
-        // kuruluyor — `ZDOTDIR` gidiyor, yani bloklar ve işaretler çalışıyor —
-        // ama pencere **dock'suz** doğuyor: giriş satırı da prompt da
-        // ızgarada kalıyor.
+        // **012 phase-10's acceptance criterion.** At the `"blocks"` tier the wrapper
+        // is installed — `ZDOTDIR` goes, so blocks and marks work —
+        // but the window is born **without a dock**: the input line and the prompt both
+        // stay in the grid.
         let user = Inputs::User { config_root: None };
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(&user, ShellIntegration::Blocks, shell, dir, None);
         assert!(
             env.iter().any(|(key, _)| key == "ZDOTDIR"),
-            "blocks sarmalayıcıyı kurmadı: bloklar da ölürdü"
+            "blocks did not install the wrapper: blocks would die too"
         );
         assert_eq!(
             dock_rows_at_birth(&env, ShellIntegration::Blocks),
             0,
-            "blocks kademesinde dock payı ayrıldı: ekranda iki prompt olurdu"
+            "dock gutter was reserved at the blocks tier: there would be two prompts on screen"
         );
 
-        // `"auto"` aynı ortamı kuruyor ve payı **ayırıyor**: iki kademeyi
-        // ayıran şey ortam değil, bu karar.
+        // `"auto"` sets up the same environment and **reserves** the gutter: what
+        // separates the two tiers is not the environment but this decision.
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(&user, ShellIntegration::Auto, shell, dir, None);
         assert_eq!(dock_rows_at_birth(&env, ShellIntegration::Auto), DOCK_ROWS);
 
-        // Sarmalayıcı hiç kurulmadıysa kademe ne olursa olsun pay yok:
-        // dolduracak ayna yok.
+        // If the wrapper was never installed there is no gutter whatever the tier:
+        // there is no mirror to fill it.
         for setting in [
             ShellIntegration::Auto,
             ShellIntegration::Blocks,
@@ -3695,28 +3700,31 @@ mod tests {
 
     #[test]
     fn hermetic_run_does_not_set_up_shell_integration() {
-        // `Inputs`'un altıncı koşulu (009 phase-3): süreli koşu entegrasyonu
-        // **hiç kurmaz**. Kursaydı `make duman`'ın sonucu ölçen makinenin
-        // kabuk yapılandırmasına bağlanırdı — kullanıcının `.zshrc`'si
-        // pencereye tek bir bayt bassa `hucre=8` düşerdi. Closure'ın paniği
-        // "kurmadı" iddiasından keskin: boş dönüşü sabitlemek, kabuğu çözüp
-        // sonucu atan bir kodu da geçirirdi.
+        // `Inputs`'s sixth condition (009 phase-3): a timed run **never** installs
+        // integration. If it did, `make smoke`'s result would depend on the measuring
+        // machine's shell configuration — were the user's `.zshrc` to write a single byte to
+        // the window `cells=8` would fail. The closure's panic is sharper than a
+        // "did not install" claim: pinning an empty return would also pass code that resolves
+        // the shell and throws the result away.
         for setting in [ShellIntegration::Auto, ShellIntegration::Off] {
             let env = shell_integration_env(
                 &Inputs::Hermetic,
                 setting,
-                || panic!("süreli koşu kabuğu çözdü"),
-                || panic!("süreli koşu betiği aradı"),
+                || panic!("timed run resolved the shell"),
+                || panic!("timed run looked for the script"),
                 Some("/home/someone/zsh".into()),
             );
-            assert!(env.is_empty(), "{setting:?} hermetik koşuda ortam ekledi");
+            assert!(
+                env.is_empty(),
+                "{setting:?} added environment in a hermetic run"
+            );
         }
     }
 
     #[test]
     fn only_a_new_tab_follows_a_remote_tab() {
-        // 037 Karar 6'nın üç kolu: uzak sekmede ⌘T (ve `+`) aynı komutu
-        // taşıyor; ⌥⌘T ve ⌘N uzak sekmeden de yerel; yerel sekmede ⌘T yerel.
+        // The three arms of 037 Karar 6: on a remote tab ⌘T (and `+`) carries the same
+        // command; ⌥⌘T and ⌘N are local even from a remote tab; on a local tab ⌘T is local.
         let remote = || Some("ssh -p 2222 prod".to_owned());
         assert_eq!(
             initial_line(Opening::Tab, remote()).as_deref(),
@@ -3725,7 +3733,7 @@ mod tests {
         assert_eq!(
             initial_line(Opening::Split, remote()).as_deref(),
             Some("ssh -p 2222 prod"),
-            "bölme de ⌘T gibi aynı host'a (039 Karar 9)"
+            "a split goes to the same host like ⌘T (039 Karar 9)"
         );
         assert_eq!(initial_line(Opening::LocalTab, remote()), None);
         assert_eq!(initial_line(Opening::Window, remote()), None);
@@ -3741,15 +3749,15 @@ mod tests {
 
     #[test]
     fn shell_integration_off_asks_nothing() {
-        // `"off"` kendi başına karar veriyor: ne kabuk çözülüyor ne betik
-        // aranıyor. Anahtarın anlamı "sarmalayıcıyı kurma" ve o iş burada
-        // bitiyor — işaretleri ayrıştıran yol (`bt-core`) bu koldan geçmiyor,
-        // yani başka bir aracın bastığı gerçek OSC 133 yine okunuyor.
+        // `"off"` decides on its own: neither is a shell resolved nor a script
+        // looked up. The key's meaning is "do not install the wrapper" and that job ends
+        // here — the path that parses the marks (`bt-core`) does not go through this arm,
+        // so a real OSC 133 printed by another tool is still read.
         let env = shell_integration_env(
             &Inputs::User { config_root: None },
             ShellIntegration::Off,
-            || panic!("\"off\" kabuğu çözdü"),
-            || panic!("\"off\" betiği aradı"),
+            || panic!("\"off\" resolved the shell"),
+            || panic!("\"off\" looked for the script"),
             None,
         );
         assert!(env.is_empty());
@@ -3758,22 +3766,22 @@ mod tests {
     #[test]
     fn shell_integration_needs_zsh_and_a_script() {
         let user = Inputs::User { config_root: None };
-        // Tanımadığımız kabuk: betik bile aranmıyor, çünkü kuracak bir şey yok.
+        // A shell we do not recognize: not even a script is looked up, there is nothing to install.
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
             || Some(PathBuf::from("/bin/bash")),
-            || panic!("zsh olmayan kabukta betik arandı"),
+            || panic!("script looked up for a non-zsh shell"),
             None,
         );
-        assert!(env.is_empty(), "bash'e sarmalayıcı kuruldu");
-        // Kabuk hiç çözülemedi (passwd okunamadı, `$SHELL` yok): aynı sessiz
-        // geri düşüş.
+        assert!(env.is_empty(), "wrapper installed for bash");
+        // The shell could not be resolved at all (passwd unreadable, no `$SHELL`): the same silent
+        // fallback.
         let env = shell_integration_env(&user, ShellIntegration::Auto, || None, || None, None);
-        assert!(env.is_empty(), "kabuksuz oturuma sarmalayıcı kuruldu");
-        // Kabuk zsh ama betik yok (eksik paket): entegrasyonsuz bir oturum,
-        // yarım kurulmuş bir `ZDOTDIR`'dan iyi — kullanıcının yapılandırması
-        // hiç yüklenmemiş olurdu.
+        assert!(env.is_empty(), "wrapper installed for a shell-less session");
+        // The shell is zsh but there is no script (missing package): a session without integration
+        // is better than a half-installed `ZDOTDIR` — the user's configuration
+        // would never have loaded.
         let env = shell_integration_env(
             &user,
             ShellIntegration::Auto,
@@ -3787,16 +3795,16 @@ mod tests {
     #[test]
     fn shell_integration_hands_the_original_zdotdir_to_the_script() {
         let user = Inputs::User { config_root: None };
-        // Kullanıcının `ZDOTDIR`'ı yok: betiğe yalnız kendi dizinimiz gidiyor
-        // ve `BATERI_ZDOTDIR`'ın **yokluğu** "kullanıcının da yoktu" demek.
+        // The user has no `ZDOTDIR`: only our own directory goes to the script
+        // and `BATERI_ZDOTDIR`'s **absence** means "the user had none either".
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(&user, ShellIntegration::Auto, shell, dir, None);
         assert_eq!(
             env,
             vec![("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned())]
         );
-        // Boş değer tanımsız sayılıyor (`decide_locale`'in kuralı): "geri
-        // koymak" `$HOME`'u gösteren bir değişken yaratmak olurdu.
+        // An empty value counts as unset (`decide_locale`'s rule): "putting it
+        // back" would create a variable pointing at `$HOME`.
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(
             &user,
@@ -3805,9 +3813,13 @@ mod tests {
             dir,
             Some(OsString::new()),
         );
-        assert_eq!(env.len(), 1, "boş ZDOTDIR geri konacak değer sayıldı");
-        // Kullanıcının `ZDOTDIR`'ı var: betik onu geri koyabilsin diye ikinci
-        // çift de gidiyor.
+        assert_eq!(
+            env.len(),
+            1,
+            "an empty ZDOTDIR was counted as a value to restore"
+        );
+        // The user has a `ZDOTDIR`: the second pair goes too so the script
+        // can put it back.
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(
             &user,
@@ -3827,22 +3839,22 @@ mod tests {
 
     #[test]
     fn only_a_shell_prompt_is_announced_to_the_script() {
-        // **Varsayılanın tek kaydı betikte.** `"terminal"` kolunda ortama tek
-        // bayt eklenmiyor: betiğin "değişken yok → prompt terminalin" kuralı
-        // varsayılanı tek başına taşıyor. Burada da bir değer gönderilseydi
-        // varsayılan iki yerde yazılı olur ve biri değişince öteki sessizce
-        // eskirdi.
+        // **The default's only record is in the script.** On the `"terminal"` arm not a single
+        // byte is added to the environment: the script's "no variable → the prompt is the terminal's" rule
+        // carries the default alone. Had a value been sent here too
+        // the default would be written in two places and when one changed the other
+        // would silently go stale.
         let user = Inputs::User { config_root: None };
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(&user, ShellIntegration::Auto, shell, dir, None);
         assert!(
             !env.iter().any(|(key, _)| key == "BATERI_DOCK"),
-            "varsayılan kademe ortama bir şey yazdı"
+            "the default tier wrote something to the environment"
         );
 
-        // `"blocks"`: sarmalayıcı **kuruluyor** (bloklar ve işaretler için) ama
-        // giriş satırı ile prompt kabuğun kalıyor. Betiğe giden tek fark bu
-        // değişken; dock payının ayrılmaması ayrı bir karar ve bu tarafta
+        // `"blocks"`: the wrapper **is installed** (for blocks and marks) but the
+        // input line and the prompt stay the shell's. This variable is the only difference
+        // that goes to the script; not reserving the dock gutter is a separate decision and is on this side
         // (`ShellIntegration::wants_dock`, `birth`).
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(&user, ShellIntegration::Blocks, shell, dir, None);
@@ -3854,13 +3866,13 @@ mod tests {
             ]
         );
 
-        // `"off"` üç kademenin dışında: sarmalayıcı kurulmadan prompt'u kim
-        // çizdiğinin bir anlamı yok ve "hiçbir şey kurulmaz" sözü mutlak.
+        // `"off"` is outside the three tiers: with no wrapper installed it does not matter who
+        // draws the prompt, and the "nothing is installed" promise is absolute.
         let env = shell_integration_env(
             &user,
             ShellIntegration::Off,
-            || panic!("\"off\" kabuğu çözdü"),
-            || panic!("\"off\" betiği aradı"),
+            || panic!("\"off\" resolved the shell"),
+            || panic!("\"off\" looked for the script"),
             None,
         );
         assert!(env.is_empty());
@@ -3868,11 +3880,11 @@ mod tests {
 
     #[test]
     fn a_self_referential_zdotdir_is_not_handed_back() {
-        // Ortamdaki `ZDOTDIR` zaten **betiğin kendi dizini**: geri konacak bir
-        // "kullanıcı değeri" yok. Verilseydi betik kendi `.zshenv`'ini yeniden
-        // yükler ve zsh'in `FUNCNEST` sınırına kadar özyinelerdi; ölçülen
-        // sonuç 336 satır hata ve `ZDOTDIR`'sız kalan bir oturumdu
-        // (`/code-review`, 009 kapısı).
+        // The `ZDOTDIR` in the environment is already **the script's own directory**: there is no
+        // "user value" to put back. If it were given the script would reload its own `.zshenv`
+        // and recurse up to zsh's `FUNCNEST` limit; the measured
+        // result was 336 lines of errors and a session left without `ZDOTDIR`
+        // (`/code-review`, 009 gate).
         let user = Inputs::User { config_root: None };
         let (shell, dir) = zsh_and_dir();
         let env = shell_integration_env(
@@ -3885,18 +3897,18 @@ mod tests {
         assert_eq!(
             env,
             vec![("ZDOTDIR".to_owned(), "/opt/bateri/shell/zsh".to_owned())],
-            "kendine dönük ZDOTDIR betiğe geri verildi"
+            "a self-referential ZDOTDIR was handed back to the script"
         );
     }
 
     #[test]
     fn a_non_utf8_zdotdir_refuses_the_integration() {
-        // "Yok" ile "kullanılamaz" ayrı: `var().ok()` ikisini birleştiriyordu
-        // ve sonuç sessiz bir veri kaybıydı — betik "kullanıcının yoktu"
-        // sanıp oturum sonunda `ZDOTDIR`'ı **siler**, yani kullanıcının bütün
-        // yapılandırması tanısız kaybolurdu. Entegrasyonu hiç kurmamak,
-        // komşu kenarların (UTF-8 olmayan betik yolu, tanınmayan `$SHELL`)
-        // zaten seçtiği geri düşüş.
+        // "Absent" and "unusable" are separate: `var().ok()` merged the two
+        // and the result was silent data loss — the script, thinking "the user had none",
+        // would **delete** `ZDOTDIR` at session end, i.e. the user's whole
+        // configuration would vanish undiagnosed. Not installing integration at all
+        // is the fallback the neighboring edges (non-UTF-8 script path, unrecognized `$SHELL`)
+        // already chose.
         use std::os::unix::ffi::OsStringExt as _;
         let user = Inputs::User { config_root: None };
         let (shell, dir) = zsh_and_dir();
@@ -3907,17 +3919,14 @@ mod tests {
             dir,
             Some(OsString::from_vec(vec![0x2f, 0xff, 0xfe])),
         );
-        assert!(
-            env.is_empty(),
-            "UTF-8 olmayan ZDOTDIR ile sarmalayıcı kuruldu"
-        );
+        assert!(env.is_empty(), "wrapper installed with a non-UTF-8 ZDOTDIR");
     }
 
     #[test]
     fn zero_window_does_not_panic() {
-        // Simge durumuna alınan pencere 0×0 bounds verir; `Session::resize`
-        // sıfır grid'i yoksayıyor ama buraya gelen yolun panik etmemesi
-        // gerekiyor — bölme değil, `as u16` doygunluğu taşıyor.
+        // A minimized window gives 0×0 bounds; `Session::resize` ignores a
+        // zero grid but the path leading here must not panic —
+        // not the split, the `as u16` saturation carries it.
         let g = split_into_grid(0.0, 0.0, metrics(9, 18, 8), NO_DOCK);
         assert_eq!((g.cols, g.rows), (0, 0));
     }

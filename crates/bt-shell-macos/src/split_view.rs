@@ -1,39 +1,43 @@
-//! Bölmelerin kapsayıcısı: pencerenin `contentView`'ı olan düz bir `NSView`
-//! (039 Karar 6). Sekmenin pane'lerini ve bölme ağacını ([`crate::split`])
-//! tutuyor, ağacın çerçevelerini pane'lere uyguluyor ve ayırıcıları
-//! gösteriyor. Kare yoluna girmiyor: çizdiği bir şey yok.
+//! Container for the splits: a plain `NSView` that is the window's
+//! `contentView` (039 Karar 6). It holds the tab's panes and the split tree
+//! ([`crate::split`]), applies the tree's frames to the panes and shows the
+//! dividers. It is not on the frame path: it draws nothing.
 //!
-//! **Ağaç burada, pencerede değil**: kapsayıcının kendi boyu pencereden
-//! bağımsız değişiyor (sekme çubuğu içeriği kısaltıyor; 026 phase-4) ve o
-//! bildirimi alan AppKit'in bu view'a çağırdığı `resizeSubviewsWithOldSize:`.
-//! Ağaç pencerede dursaydı view her boy değişiminde pencereye geri uzanmak
-//! zorunda kalırdı.
+//! **The tree lives here, not in the window**: the container's own size
+//! changes independently of the window (the tab bar shortens the content;
+//! 026 phase-4) and the notification about it is AppKit's
+//! `resizeSubviewsWithOldSize:` call on this view. Were the tree in the
+//! window, the view would have to reach back to the window on every size
+//! change.
 //!
-//! **Ayırıcı bir boşluk**: pane'ler opak ve çerçeveleri arasında bir aygıt
-//! pikseli açık kalıyor; oradan görünen şey pane'lerin arkasında duran ve
-//! kapsayıcıyı dolduran tek bir `NSBox`'ın temanın `separator` tonundaki
-//! dolgusu (039 Karar 7, R3.5). `drawRect:` yok, `CGColor` isteyen katman
-//! yolu da yok (sekme noktasının emsali). Tek pane'de kutu gizli ve pane
-//! kapsayıcıyı **oturtulmadan** dolduruyor — bölmeden önceki düzenin aynısı.
+//! **The divider is a gap**: the panes are opaque and one device pixel is
+//! left open between their frames; what shows through is the fill, in the
+//! theme's `separator` tone, of a single `NSBox` that sits behind the panes
+//! and fills the container (039 Karar 7, R3.5). There is no `drawRect:` and
+//! no layer path that would need a `CGColor` (same precedent as the tab
+//! dot). With a single pane the box is hidden and the pane fills the
+//! container **unadjusted**, exactly the layout from before splitting.
 //!
-//! Pane'in çerçevesi değişince geometrisini pane kendisi tazeliyor
-//! (`TerminalPane::observe_frame`); burada yalnız `setFrame` var — ayırıcı
-//! sürüklenirken de, yani PTY sürükleme boyunca pencere boyutlandırmasının
-//! yolundan boyutlanıyor.
+//! When a pane's frame changes the pane refreshes its own geometry
+//! (`TerminalPane::observe_frame`); only `setFrame` happens here, so while a
+//! divider is being dragged the PTY resizes by the same path as window
+//! resizing.
 //!
-//! **Sürükleme tutamakları** (039 phase-4): çizilen çizgi bir piksel, isabet
-//! alanı ise her yana [`HANDLE_PT`] geniş ve pane'lerin **üstünde** duran
-//! saydam bir view ([`DividerHandle`]) — pane'ler opak ve çizginin dışındaki
-//! her noktayı kaplıyor, yani alan arkadaki dolguda olamazdı. İmleci
-//! `resizeLeftRight`/`resizeUpDown`. Tutamaklar yalnız ayırıcı **sayısı**
-//! değişince yeniden kuruluyor (yeni pane onların üstüne eklendiği için o an
-//! en üste geri alınmaları gerekiyor); sürükleme boyunca aynı view kalıyor,
-//! çünkü AppKit `mouseDragged:`'ı basışı alan view'a veriyor.
+//! **Drag handles** (039 phase-4): the drawn line is one pixel, but the hit
+//! area is a transparent view ([`DividerHandle`]) [`HANDLE_PT`] wide on
+//! every side that sits **above** the panes: the panes are opaque and cover
+//! every point outside the line, so the area could not live in the fill
+//! behind them. The cursor is `resizeLeftRight`/`resizeUpDown`. Handles are
+//! rebuilt only when the **number** of dividers changes (a new pane is added
+//! on top of them, so at that moment they must be brought back to the top);
+//! the same view stays throughout a drag, because AppKit delivers
+//! `mouseDragged:` to the view that received the press.
 //!
-//! **Büyütme** (⇧⌘↩): büyütülmüş pane bütün alanı alıyor
-//! ([`Tree::layout_zoomed`]), öteki pane'ler **gizli** ve çerçeveleri (yani
-//! ızgaraları) olduğu gibi kalıyor; ayırıcı ve tutamak yok. Gizli pane'in
-//! link'i örtülmüş pencereninki gibi uyuyor ([`SplitView::apply_visibility`]).
+//! **Zoom** (⇧⌘↩): the zoomed pane takes the whole area
+//! ([`Tree::layout_zoomed`]), the other panes are **hidden** and their
+//! frames (and so their grids) stay as they were; there are no dividers or
+//! handles. A hidden pane's link sleeps like that of an occluded window
+//! ([`SplitView::apply_visibility`]).
 
 use std::cell::{Cell, RefCell};
 
@@ -46,28 +50,30 @@ use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 use crate::pane::TerminalPane;
 use crate::split::{self, Axis, Direction, Divider, Rect, Removal, Size, Tree};
 
-/// Ayırıcının isabet alanının çizginin her yanına taşan payı, nokta. Ölçülmüş
-/// değil, bir tasarım sabiti: bir piksellik çizgi fareyle tutulamıyor, altı
-/// noktalık bant tutuluyor ve pane'in kenarındaki metinden çok az şey
-/// yiyor (bandın içindeki tık pane'e değil ayırıcıya gidiyor).
+/// How far the divider's hit area extends past each side of the line, in
+/// points. A design constant, not a measured one: a one-pixel line cannot be
+/// grabbed with a mouse, a six-point band can, and it eats very little of the
+/// text at the pane's edge (a click inside the band goes to the divider, not
+/// the pane).
 const HANDLE_PT: f64 = 3.0;
 
 pub(crate) struct HandleIvars {
-    /// [`split::Layout::dividers`]'taki sırası — [`Tree::drag`]'in indeksi.
+    /// Its index in [`split::Layout::dividers`] - [`Tree::drag`]'s index.
     index: Cell<usize>,
-    /// Ayırdığı bölmenin ekseni: yan yana bölmenin tutamağı yatay
-    /// sürükleniyor.
+    /// The axis of the split it separates: the handle of a side-by-side split
+    /// is dragged horizontally.
     axis: Cell<Axis>,
-    /// Çizginin eksendeki konumu, kapsayıcının koordinatında (nokta).
+    /// The line's position along the axis, in the container's coordinates
+    /// (points).
     line: Cell<f64>,
-    /// Basışta işaretçi ile çizgi arasındaki fark: çizgi işaretçinin altında
-    /// sıçramasın, tutulduğu yerden kaysın.
+    /// The offset between the pointer and the line at press: the line must not
+    /// jump under the pointer, it moves from where it was grabbed.
     grab: Cell<f64>,
 }
 
 define_class!(
-    // SAFETY: NSView alt sınıflama için tasarlanmıştır; DividerHandle `Drop`
-    // uygulamaz ve `initWithFrame:` dışında bir kurucu sunmaz.
+    // SAFETY: NSView is designed for subclassing; DividerHandle does not
+    // implement `Drop` and offers no initializer other than `initWithFrame:`.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "BateriDividerHandle"]
@@ -77,9 +83,9 @@ define_class!(
     unsafe impl NSObjectProtocol for DividerHandle {}
 
     impl DividerHandle {
-        /// `resizeLeftRightCursor`/`resizeUpDownCursor` kullanımdan kalkmış
-        /// ama yerini alan `columnResizeCursorInDirections:` macOS 15'te
-        /// geliyor; taban macOS 14 (`CLAUDE.md` → Taban).
+        /// `resizeLeftRightCursor`/`resizeUpDownCursor` are deprecated but
+        /// their replacement `columnResizeCursorInDirections:` arrives in
+        /// macOS 15; the floor is macOS 14 (`CLAUDE.md` → Taban).
         #[unsafe(method(resetCursorRects))]
         #[allow(deprecated)]
         fn reset_cursor_rects(&self) {
@@ -90,8 +96,8 @@ define_class!(
             self.addCursorRect_cursor(self.bounds(), &cursor);
         }
 
-        /// Basış yutuluyor (responder zincirine, pencereye çıkmasın) ve
-        /// tutulan yer kaydediliyor.
+        /// The press is swallowed (it must not climb the responder chain to
+        /// the window) and the grabbed position is recorded.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             if let Some(along) = self.along(event) {
@@ -122,18 +128,19 @@ impl DividerHandle {
             line: Cell::new(0.0),
             grab: Cell::new(0.0),
         });
-        // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
-        // set edildi.
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
+        // ivars are set.
         unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
     }
 
     fn container(&self) -> Option<Retained<SplitView>> {
-        // SAFETY: üst view'ı okumak; ana thread'deyiz (`MainThreadOnly`).
+        // SAFETY: reading the superview; we are on the main thread
+        // (`MainThreadOnly`).
         unsafe { self.superview() }?.downcast::<SplitView>().ok()
     }
 
-    /// Olayın konumu kapsayıcının (üstten aşağı) koordinatında, tutamağın
-    /// ekseni boyunca.
+    /// The event's position in the container's (top-down) coordinates, along
+    /// the handle's axis.
     fn along(&self, event: &NSEvent) -> Option<f64> {
         let container = self.container()?;
         let point = container.convertPoint_fromView(event.locationInWindow(), None);
@@ -143,8 +150,8 @@ impl DividerHandle {
         })
     }
 
-    /// Ayırıcıya oturur: sırası, ekseni, çizgisi ve çizgiden [`HANDLE_PT`]
-    /// taşan çerçevesi (kapsayıcının sınırına kırpılmış).
+    /// Sits on the divider: its index, axis, line and its frame extending
+    /// [`HANDLE_PT`] past the line (clipped to the container's bounds).
     fn place(&self, index: usize, divider: Divider, bounds: NSSize) {
         let iv = self.ivars();
         iv.index.set(index);
@@ -172,24 +179,24 @@ impl DividerHandle {
 }
 
 pub(crate) struct SplitIvars {
-    /// Bölme ağacı; yaprakları [`SplitIvars::panes`]'in kimlikleri.
+    /// The split tree; its leaves are the ids of [`SplitIvars::panes`].
     tree: RefCell<Tree>,
-    /// Sekmenin pane'leri. Kapsayıcı onları alt view olarak da tutuyor; bu
-    /// liste tipli erişim için. **Hiç boşalmıyor**: son pane'i kaldırmak
-    /// pencereyi kapatmak demek ([`Removal::Last`]).
+    /// The tab's panes. The container also holds them as subviews; this list
+    /// is for typed access. **Never becomes empty**: removing the last pane
+    /// means closing the window ([`Removal::Last`]).
     panes: RefCell<Vec<Retained<TerminalPane>>>,
-    /// Ayırıcıların rengi: pane'lerin arkasındaki dolgu.
+    /// The dividers' colour: the fill behind the panes.
     backdrop: Retained<NSBox>,
-    /// Büyütülmüş pane (⇧⌘↩); `None` → bölmeler görünüyor.
+    /// The zoomed pane (⇧⌘↩); `None` → the splits are visible.
     zoomed: Cell<Option<u64>>,
-    /// Ayırıcıların sürükleme tutamakları, [`split::Layout::dividers`]'ın
-    /// sırasıyla.
+    /// The dividers' drag handles, in the order of
+    /// [`split::Layout::dividers`].
     handles: RefCell<Vec<Retained<DividerHandle>>>,
 }
 
 define_class!(
-    // SAFETY: NSView alt sınıflama için tasarlanmıştır; SplitView `Drop`
-    // uygulamaz ve `initWithFrame:` dışında bir kurucu sunmaz.
+    // SAFETY: NSView is designed for subclassing; SplitView does not
+    // implement `Drop` and offers no initializer other than `initWithFrame:`.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "BateriSplitView"]
@@ -199,16 +206,16 @@ define_class!(
     unsafe impl NSObjectProtocol for SplitView {}
 
     impl SplitView {
-        /// Üstten aşağı koordinat: ağacın "ikinci yaprak altta"sı işaret
-        /// çevirmeden. Yalnız pane'lerin **çerçevelerini** etkiliyor; her
-        /// pane'in kendi içi kendi koordinatında.
+        /// Top-down coordinates: the tree's "second leaf is below" without
+        /// flipping signs. It only affects the panes' **frames**; each pane's
+        /// interior is in its own coordinates.
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
         }
 
-        /// Kapsayıcının boyu değişti (pencere, sekme çubuğu): pane'ler
-        /// oranlarını koruyarak yeniden oturuyor (039 Karar 14).
+        /// The container's size changed (window, tab bar): the panes are laid
+        /// out again, keeping their proportions (039 Karar 14).
         #[unsafe(method(resizeSubviewsWithOldSize:))]
         fn resize_subviews(&self, _old: NSSize) {
             self.layout_panes();
@@ -217,7 +224,7 @@ define_class!(
 );
 
 impl SplitView {
-    /// Tek pane'li kapsayıcı; pane onu dolduruyor.
+    /// A single-pane container; the pane fills it.
     pub(crate) fn new(
         mtm: MainThreadMarker,
         frame: NSRect,
@@ -235,11 +242,11 @@ impl SplitView {
             zoomed: Cell::new(None),
             handles: RefCell::new(Vec::new()),
         });
-        // SAFETY: `initWithFrame:` NSView'un tasarlanmış kurucusu ve ivar'lar
-        // set edildi.
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the
+        // ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
-        // Önceki `contentView` (pane) layer-backed'di; Metal katmanının
-        // bileşim biçimi değişmesin.
+        // The previous `contentView` (the pane) was layer-backed; the Metal
+        // layer's compositing mode must not change.
         this.setWantsLayer(true);
         this.addSubview(&backdrop);
         this.addSubview(first);
@@ -247,7 +254,7 @@ impl SplitView {
         this
     }
 
-    /// Pane'ler, ağaç sırasıyla (soldan sağa, yukarıdan aşağı).
+    /// The panes, in tree order (left to right, top to bottom).
     pub(crate) fn panes(&self) -> Vec<Retained<TerminalPane>> {
         let panes = self.ivars().panes.borrow();
         self.ivars()
@@ -259,7 +266,7 @@ impl SplitView {
             .collect()
     }
 
-    /// Kimliği `id` olan pane.
+    /// The pane whose id is `id`.
     pub(crate) fn pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
         self.ivars()
             .panes
@@ -269,11 +276,11 @@ impl SplitView {
             .cloned()
     }
 
-    /// Pencerenin ölçeği: sınırlar aygıt pikseline oturuyor. Kapsayıcı henüz
-    /// bir pencereye takılı değilse (kurucunun ilk yerleşimi) `1` — pencere
-    /// takılınca AppKit boyu yeniden bildiriyor ve yerleşim tekrarlanıyor,
-    /// ölçek değişiminde de pencere yeniden yerleştiriyor
-    /// (`TerminalWindow`'un `windowDidChangeBackingProperties:`'i).
+    /// The window's scale: bounds snap to the device pixel. If the container
+    /// is not yet attached to a window (the constructor's first layout) it is
+    /// `1` - once the window is attached AppKit reports the size again and the
+    /// layout repeats, and on a scale change the window lays out again too
+    /// (`TerminalWindow`'s `windowDidChangeBackingProperties:`).
     fn scale(&self) -> f64 {
         self.window()
             .map_or(1.0, |window| window.backingScaleFactor())
@@ -284,9 +291,9 @@ impl SplitView {
         Rect::new(0.0, 0.0, size.width, size.height)
     }
 
-    /// `id`'nin çerçevesi, bölünse iki yarısıyla (nokta cinsinden, çerçeve
-    /// hesabının aynı aritmetiği — [`split::split_halves`]). Pane yoksa
-    /// `None`.
+    /// `id`'s frame, with its two halves were it split (in points, the same
+    /// arithmetic as the frame computation - [`split::split_halves`]).
+    /// `None` if there is no such pane.
     pub(crate) fn halves(&self, id: u64, axis: Axis) -> Option<(NSSize, NSSize)> {
         let scale = self.scale();
         let layout = self.ivars().tree.borrow().layout(self.bounds_rect(), scale);
@@ -298,8 +305,8 @@ impl SplitView {
         ))
     }
 
-    /// `target`'ı `axis`'te böler ve `pane`'i ikinci yarıya koyar (sağa ya
-    /// da alta). Hedef ağaçta yoksa `false` ve hiçbir şey değişmez.
+    /// Splits `target` along `axis` and puts `pane` in the second half (right
+    /// or below). If the target is not in the tree, `false` and nothing changes.
     pub(crate) fn insert(&self, target: u64, axis: Axis, pane: &TerminalPane) -> bool {
         if !self
             .ivars()
@@ -315,16 +322,16 @@ impl SplitView {
         true
     }
 
-    /// `id`'yi ağaçtan kaldırır ([`Tree::remove`]); pane view'da ve listede
-    /// kalıyor — çağıran önce odağı taşıyor, sonra [`SplitView::detach`]
-    /// ediyor (first responder'ı taşıyan view'ı söken pencere responder'sız
-    /// kalırdı).
+    /// Removes `id` from the tree ([`Tree::remove`]); the pane stays in the
+    /// view and the list - the caller first moves focus, then calls
+    /// [`SplitView::detach`] (a window whose view carrying the first
+    /// responder is removed would be left without a responder).
     pub(crate) fn remove_leaf(&self, id: u64) -> Removal {
         self.ivars().tree.borrow_mut().remove(id)
     }
 
-    /// Ağaçtan çıkmış pane'i view'dan ve listeden söker, kalanları yeniden
-    /// oturtur. Pane'in son güçlü referansı çağıranda düşüyor.
+    /// Removes a pane that left the tree from the view and the list, and lays
+    /// out the rest again. The pane's last strong reference drops at the caller.
     pub(crate) fn detach(&self, id: u64) -> Option<Retained<TerminalPane>> {
         let removed = {
             let mut panes = self.ivars().panes.borrow_mut();
@@ -336,22 +343,23 @@ impl SplitView {
         Some(removed)
     }
 
-    /// Büyütülmüş pane; `None` → bölmeler görünüyor.
+    /// The zoomed pane; `None` → the splits are visible.
     pub(crate) fn zoomed(&self) -> Option<u64> {
         self.ivars().zoomed.get()
     }
 
-    /// Büyütmeyi kurar ya da bırakır ve pane'leri yeniden oturtur. Link'lerin
-    /// görünürlüğü çağıranın ([`SplitView::apply_visibility`]): pencerenin
-    /// örtülme durumunu o biliyor.
+    /// Sets or releases the zoom and lays the panes out again. The links'
+    /// visibility is the caller's ([`SplitView::apply_visibility`]): it knows
+    /// the window's occlusion state.
     pub(crate) fn set_zoomed(&self, zoomed: Option<u64>) {
         self.ivars().zoomed.set(zoomed);
         self.layout_panes();
     }
 
-    /// Link'lerin görünürlüğü: pencere görünür **ve** pane gizli değil.
-    /// Gizli pane (büyütmenin arkasında kalan) örtülmüş pencere gibi sıfır
-    /// kare çiziyor; geri gelince bir kare istiyor (`DisplayLink::set_visible`).
+    /// The links' visibility: the window is visible **and** the pane is not
+    /// hidden. A hidden pane (left behind the zoom) draws zero frames like an
+    /// occluded window; when it returns it asks for a frame
+    /// (`DisplayLink::set_visible`).
     pub(crate) fn apply_visibility(&self, window_visible: bool) {
         for pane in self.ivars().panes.borrow().iter() {
             if let Some(link) = pane.link() {
@@ -360,7 +368,7 @@ impl SplitView {
         }
     }
 
-    /// Ağacın sıradan (büyütmesiz) düzeni: gezinme onu soruyor.
+    /// The tree's plain (unzoomed) layout: navigation asks for it.
     fn plain_layout(&self) -> split::Layout {
         self.ivars()
             .tree
@@ -368,18 +376,18 @@ impl SplitView {
             .layout(self.bounds_rect(), self.scale())
     }
 
-    /// `from`'un yöndeki komşusu (⌥⌘ + ok; [`split::Layout::neighbour`]).
+    /// `from`'s neighbour in the direction (⌥⌘ + arrow; [`split::Layout::neighbour`]).
     pub(crate) fn neighbour(&self, from: u64, direction: Direction) -> Option<u64> {
         self.plain_layout().neighbour(from, direction)
     }
 
-    /// Sıradaki ya da önceki pane (⌘] / ⌘[; [`Tree::cycle`]).
+    /// The next or previous pane (⌘] / ⌘[; [`Tree::cycle`]).
     pub(crate) fn cycle(&self, from: u64, forward: bool) -> Option<u64> {
         self.ivars().tree.borrow().cycle(from, forward)
     }
 
-    /// En küçük pane sınırı, yaprak başına (039 Karar 14): pane'in kendi
-    /// hücresinden (`TerminalPane::min_size`). Ölçemeyen pane sınırsız.
+    /// The smallest-pane limit, per leaf (039 Karar 14): from the pane's own
+    /// cell (`TerminalPane::min_size`). A pane that cannot measure is unlimited.
     fn limits(&self) -> impl Fn(u64) -> Size + use<> {
         let panes = self.ivars().panes.borrow().clone();
         move |id| {
@@ -391,8 +399,8 @@ impl SplitView {
         }
     }
 
-    /// ⌃⌘ + ok: `target`'ın o eksendeki en yakın ayırıcısını `step` nokta
-    /// taşır ([`Tree::resize`]), sınırda kırparak. Oynadıysa `true`.
+    /// ⌃⌘ + arrow: moves `target`'s nearest divider on that axis by `step`
+    /// points ([`Tree::resize`]), clamping at the limit. `true` if it moved.
     pub(crate) fn resize(&self, target: u64, direction: Direction, step: f64) -> bool {
         let limits = self.limits();
         let moved = self.ivars().tree.borrow_mut().resize(
@@ -409,13 +417,13 @@ impl SplitView {
         moved
     }
 
-    /// ⌃⌘=: aynı eksendeki pane'ler eşit ([`Tree::equalize`]).
+    /// ⌃⌘=: the panes on the same axis become equal ([`Tree::equalize`]).
     pub(crate) fn equalize(&self) {
         self.ivars().tree.borrow_mut().equalize();
         self.layout_panes();
     }
 
-    /// Tutamağın sürüklemesi: `index`'inci ayırıcı `position`'a
+    /// The handle's drag: the `index`th divider to `position`
     /// ([`Tree::drag`]).
     fn drag_divider(&self, index: usize, position: f64) {
         let limits = self.limits();
@@ -431,8 +439,8 @@ impl SplitView {
         }
     }
 
-    /// Tutamakları ayırıcılara oturtur; sayı değiştiyse hepsini yeniden
-    /// kurup en üste ekler (modül başlığı).
+    /// Fits the handles to the dividers; if the count changed, rebuilds them
+    /// all and adds them on top (the module header).
     fn sync_handles(&self, dividers: &[Divider]) {
         let mut handles = self.ivars().handles.borrow_mut();
         if handles.len() != dividers.len() {
@@ -451,9 +459,9 @@ impl SplitView {
         }
     }
 
-    /// Ayırıcının rengi temadan (039 Karar 7): `Theme::separator_srgb` —
-    /// dock'un saç çizgileriyle aynı kademe. `NSColor` sRGB alıyor, lineer
-    /// değer GPU'nun (`CLAUDE.md` → Renk uzayı).
+    /// The divider's colour comes from the theme (039 Karar 7):
+    /// `Theme::separator_srgb` - the same tier as the dock's hairlines.
+    /// `NSColor` takes sRGB; the linear value is the GPU's (`CLAUDE.md` → Renk uzayı).
     pub(crate) fn set_theme(&self, theme: &Theme) {
         let [r, g, b] = theme.separator_srgb().map(|byte| f64::from(byte) / 255.0);
         self.ivars()
@@ -461,14 +469,15 @@ impl SplitView {
             .setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0));
     }
 
-    /// Ağacın çerçevelerini pane'lere uygular. Tek pane'de oturtma yok: pane
-    /// kapsayıcının sınırının ta kendisi, bölmeden önceki gibi. Büyütülmüşken
-    /// yalnız büyütülen pane görünüyor, ötekiler gizli ve çerçeveleri yerinde.
+    /// Applies the tree's frames to the panes. No fitting with a single pane:
+    /// the pane is the container's bounds themselves, as before splitting.
+    /// While zoomed only the zoomed pane is visible, the others are hidden
+    /// with their frames in place.
     pub(crate) fn layout_panes(&self) {
         let panes = self.ivars().panes.borrow().clone();
         let zoomed = self.ivars().zoomed.get();
-        // `resizeSubviewsWithOldSize:`'ı biz karşılıyoruz, yani AppKit'in
-        // autoresizing'i bu view'ın çocuklarına uygulanmıyor: dolgu da elle.
+        // We answer `resizeSubviewsWithOldSize:` ourselves, so AppKit's
+        // autoresizing is not applied to this view's children: the fill too by hand.
         let backdrop = &self.ivars().backdrop;
         backdrop.setFrame(self.bounds());
         backdrop.setHidden(panes.len() <= 1 || zoomed.is_some());
