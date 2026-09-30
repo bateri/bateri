@@ -29,6 +29,8 @@ pub mod quote;
 pub mod settings;
 pub mod split;
 pub mod upload;
-#[cfg(target_os = "macos")]
+// Bodies exist for macOS and Linux only; elsewhere the module is absent
+// rather than half-present (a `Notify` without a `Watch`).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod watch;
 pub mod zoom;

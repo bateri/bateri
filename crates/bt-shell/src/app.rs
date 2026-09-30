@@ -11,6 +11,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_core::{
@@ -545,9 +546,31 @@ pub(crate) fn pane_by_id(mtm: MainThreadMarker, id: u64) -> Option<Retained<Term
 }
 
 /// İzleme kaynaklarının bildirimi ([`notify_settings_changed`]).
+///
+/// The watch notifies on its own background queue (`watch`'s contract); the
+/// applier needs the main thread, so the event hops there.
+///
+/// **At most one hop in flight** ([`WATCH_PENDING`]): before 043 the sources
+/// ran on the main queue and libdispatch merged the events that arrived while
+/// main was busy into one handler call. Without the flag a burst (a chunked
+/// write, a rename-over's directory + file events) would reload the settings
+/// once per event on the main thread.
 fn watch_notify() -> Notify {
-    Arc::new(notify_settings_changed)
+    Arc::new(|| {
+        if !WATCH_PENDING.swap(true, Ordering::AcqRel) {
+            DispatchQueue::main().exec_async(|| {
+                // Cleared **before** the reload reinstalls and rereads: an
+                // event after this point posts a new hop, so no save is lost.
+                WATCH_PENDING.store(false, Ordering::Release);
+                notify_settings_changed();
+            });
+        }
+    })
 }
+
+/// Whether a watch event's hop to the main queue is already queued
+/// ([`watch_notify`]).
+static WATCH_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Bir izleme olayını uygulayıcıya taşır: **hedefsiz eylemle**
 /// `settingsDidChange:`'e, görünüm değişiminin (`view.rs`) yolundan.
@@ -557,10 +580,10 @@ fn watch_notify() -> Notify {
 /// zamanlamasına bağlardı. Responder zinciri pencere key olmasa da (kullanıcı
 /// editörde) `NSApp`'e ve onun delegate'ine varıyor.
 fn notify_settings_changed() {
-    // audit: kaynaklar yalnız `DispatchQueue::main()`'e kuruluyor
-    // (`AppDelegate::watch_config`, `watch_theme`) ve ana kuyrukta koşan iş
-    // tanımı gereği ana thread'dedir.
-    let mtm = MainThreadMarker::new().expect("izleme kaynakları ana kuyrukta");
+    // audit: the only caller is `watch_notify`, which runs this through
+    // `DispatchQueue::main().exec_async`, and work on the main queue is on the
+    // main thread by definition.
+    let mtm = MainThreadMarker::new().expect("izleme bildirimi ana kuyruğa taşınıyor");
     let app = NSApplication::sharedApplication(mtm);
     // SAFETY: seçici geçerli; hedef `None` → responder zinciri. Alıcısı
     // `AppDelegate::settings_did_change`, tek `Option<&AnyObject>` argüman
@@ -2332,24 +2355,15 @@ impl AppDelegate {
     /// Ayar dizininin kaynaklarını yeniden kurar. Yenisi eskisi düşmeden
     /// kuruluyor (`replace`): iki kurulum arasında boşluk yok.
     fn watch_config(&self, root: &Path) {
-        let watch = Watch::install(
-            &settings::watched_paths(root),
-            DispatchQueue::main(),
-            &watch_notify(),
-        );
+        let watch = Watch::install(&settings::watched_paths(root), &watch_notify());
         self.ivars().config_watch.replace(Some(watch));
     }
 
     /// Etkin tema dosyasının kaynağını yeniden kurar; ev dizini yoksa yuva
     /// boşalır.
     fn watch_theme(&self, config_root: Option<&Path>, name: &str) {
-        let watch = config_root.map(|root| {
-            Watch::install(
-                &[settings::theme_path(root, name)],
-                DispatchQueue::main(),
-                &watch_notify(),
-            )
-        });
+        let watch = config_root
+            .map(|root| Watch::install(&[settings::theme_path(root, name)], &watch_notify()));
         self.ivars().theme_watch.replace(watch);
     }
 
