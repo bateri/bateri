@@ -35,9 +35,9 @@ use bt_core::{
 };
 
 use crate::glyph_fx::{Fx, GlyphFx, Kind};
-use crate::renderer::CellMetrics;
+use crate::metrics::CellMetrics;
 
-/// `shaders/cell_bg.metal` → `Instance` ile alan alan aynı.
+/// `shaders/cell_bg.wgsl` → `Instance` ile alan alan aynı.
 ///
 /// Crate dışına açılmaz: bu bir GPU bayt düzeni, `bt-core`'un `Cell`'i ise
 /// anlam taşıyan grid koordinatı. İkisini aynı tip yapmak hücre modelini
@@ -63,7 +63,7 @@ const _: () = assert!(offset_of!(Instance, size) == 8);
 const _: () = assert!(offset_of!(Instance, rgba) == 16);
 
 /// `Instance`'s field offsets, for the wgpu vertex layout
-/// (`crate::wgpu_renderer`): the fields are private and `offset_of!` only sees
+/// (`crate::renderer`): the fields are private and `offset_of!` only sees
 /// them here. The layout's second consumer is fed from next to the asserts,
 /// not from three hand-written numbers (040 phase-2 `/code-review`).
 pub(crate) const INSTANCE_OFFSETS: [u64; 3] = [
@@ -72,7 +72,7 @@ pub(crate) const INSTANCE_OFFSETS: [u64; 3] = [
     offset_of!(Instance, rgba) as u64,
 ];
 
-/// `shaders/cell.metal` → `GlyphInstance` ile alan alan aynı.
+/// `shaders/cell.wgsl` → `GlyphInstance` ile alan alan aynı.
 ///
 /// **`size` yok, uv boyutu yok**: bu sette her glyph tam bir hücre boyunda
 /// (`plan.md` → R1.4, sabit yuva ızgarası) ve ikisi de kare boyunca sabit,
@@ -98,7 +98,7 @@ const _: () = assert!(offset_of!(GlyphInstance, uv0) == 8);
 const _: () = assert!(offset_of!(GlyphInstance, rgba) == 16);
 
 /// `GlyphInstance`'s field offsets, for the wgpu vertex layout
-/// (`crate::wgpu_renderer`): fed from next to the asserts, like
+/// (`crate::renderer`): fed from next to the asserts, like
 /// [`INSTANCE_OFFSETS`] (040 phase-3).
 pub(crate) const GLYPH_INSTANCE_OFFSETS: [u64; 3] = [
     offset_of!(GlyphInstance, pos) as u64,
@@ -106,7 +106,7 @@ pub(crate) const GLYPH_INSTANCE_OFFSETS: [u64; 3] = [
     offset_of!(GlyphInstance, rgba) as u64,
 ];
 
-/// `shaders/glyph_fx.metal` → `FxInstance` ile alan alan aynı: dock'un yazım
+/// `shaders/glyph_fx.wgsl` → `FxInstance` ile alan alan aynı: dock'un yazım
 /// efektlerinin instance'ı (030).
 ///
 /// **[`GlyphInstance`]'ın genişletilmişi değil kardeşi**: bütün glyph
@@ -138,7 +138,7 @@ const _: () = assert!(offset_of!(FxInstance, rgba) == 16);
 const _: () = assert!(offset_of!(FxInstance, fx) == 32);
 
 /// `FxInstance`'s field offsets, for the wgpu vertex layout
-/// (`crate::wgpu_renderer`): fed from next to the asserts, like
+/// (`crate::renderer`): fed from next to the asserts, like
 /// [`INSTANCE_OFFSETS`] (040 phase-4).
 pub(crate) const FX_INSTANCE_OFFSETS: [u64; 4] = [
     offset_of!(FxInstance, pos) as u64,
@@ -147,8 +147,8 @@ pub(crate) const FX_INSTANCE_OFFSETS: [u64; 4] = [
     offset_of!(FxInstance, fx) as u64,
 ];
 
-/// `shaders/cell.metal` → `CursorBlock` ile alan alan aynı: imlecin **piksel**
-/// dikdörtgeni ve bloğun altında kalan metnin rengi.
+/// `shaders/cell.wgsl` → `Immediates`'ın `cursor_rect`/`cursor_rgba` alanlarıyla alan
+/// alan aynı: imlecin **piksel** dikdörtgeni ve bloğun altında kalan metnin rengi.
 ///
 /// Instance değil **uniform**: kare boyunca tek imleç var ve `cell`
 /// pipeline'ından geçen her fragment ona bakıyor. İki değer tek `#[repr(C)]`
@@ -1036,7 +1036,7 @@ pub(crate) struct Frame {
     dock_arrivals: Vec<FxCell>,
     /// `heat`'in kızgın rengi: temanın `cursor` rolü, lineer. Efekt başına
     /// değil kare başına tek değer ve fragment'e uniform olarak gidiyor
-    /// (`glyph_fx.metal` → `heat`); instance'ta yeri yok (`FxInstance`'ın
+    /// (`glyph_fx.wgsl` → `Immediates::heat`); instance'ta yeri yok (`FxInstance`'ın
     /// `fx`'inde tek bir yedek `f32` var). Yazarı listelerle aynı
     /// ([`Frame::set_dock_fx`]), yani ikisi ayrışamıyor.
     dock_fx_heat: [f32; 4],

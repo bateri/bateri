@@ -8,18 +8,8 @@ license.workspace = true
 [dependencies]
 bt-core = { workspace = true }
 bt-atlas = { workspace = true }
-# The renderer (040 phase-5): wgpu is a product dependency now. Rationale
-# and feature set in the workspace `Cargo.toml`; no platform library remains
-# in this crate's direct dependencies (the layer and the vsync rhythm come
-# from `bt-shell`: `Surface::from_layer`, `Pacer`).
+# The renderer. Rationale and feature set in the workspace `Cargo.toml`; no
+# platform library is a direct dependency of this crate (`make denetim`): the
+# layer and the vsync rhythm come from `bt-shell` (`Surface::from_layer`,
+# `Pacer`).
 wgpu = { workspace = true }
-
-# The Metal oracle (040 Karar 4) is test-only until phase-7 removes it:
-# `renderer.rs`'s `MetalRenderer` and its metallib (`build.rs`).
-[dev-dependencies]
-objc2 = { workspace = true }
-objc2-foundation = { workspace = true }
-objc2-metal = { workspace = true }
-objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMetalLayer", "objc2-metal", "objc2-core-foundation"] }
-dispatch2 = { workspace = true }
-block2 = { workspace = true }

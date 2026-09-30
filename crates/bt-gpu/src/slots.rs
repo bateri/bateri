@@ -1,17 +1,16 @@
 //! Slot resolution and fan-out: `GlyphCell`/`RuleCell` lists → atlas slots →
-//! `GlyphInstance` lists, **shared by both renderers** (040 phase-3).
+//! `GlyphInstance` lists.
 //!
-//! The Metal renderer and the wgpu renderer read the same output of this
-//! module; neither has a copy. What differs between them is only where a
-//! freshly allocated slot's bytes go, and that is the one method of
-//! [`SlotUpload`]: Metal writes with `replaceRegion`, wgpu with
-//! `Queue::write_texture`. Everything else — which slot a glyph takes, whether
-//! a wide glyph becomes one quad or two, which plane's list it lands in, the
-//! baked uv — is decided here, once.
+//! The renderer reads this module's output and keeps no copy of its rules.
+//! The one step that touches the GPU — where a freshly allocated slot's bytes
+//! go — is the single method of [`SlotUpload`] (`Queue::write_texture` in the
+//! renderer). Everything else — which slot a glyph takes, whether a wide glyph
+//! becomes one quad or two, which plane's list it lands in, the baked uv — is
+//! decided here, once.
 //!
 //! The colour plane's monotonic counter keeps its meaning (`CLAUDE.md` → "Renk
 //! ikinci bir düzlem"): uvs are baked at list-building time from the atlas's
-//! own slot origins, and both backends ask the same atlas.
+//! own slot origins.
 
 use bt_atlas::{Atlas, Face, Half, Metrics, Placed, Plane, SizeClass, Sprite};
 use bt_core::Clusters;
@@ -37,9 +36,8 @@ pub(crate) trait SlotUpload {
 /// A slot's byte length and row pitch for `plane`: mask `w*h` / `w`, colour
 /// `4*w*h` / `4*w`.
 ///
-/// One copy for both backends: Metal's `bytesPerRow` and wgpu's
-/// `bytes_per_row` come from here, and if they drifted from the buffer the
-/// GPU would read past a short buffer — silently. The lengths come from
+/// One copy: wgpu's `bytes_per_row` comes from here, and if it drifted from
+/// the buffer the GPU would read past a short buffer — silently. The lengths come from
 /// `bt-atlas` (`slot_bytes`/`slot_bytes_rgba`), the slot geometry's single
 /// owner.
 pub(crate) fn slot_layout(metrics: Metrics, plane: Plane) -> (usize, usize) {

@@ -18,7 +18,6 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-objc2-metal = "0.3"
 # Framework crate'leri varsayılanda her başlığı açar; kullanılanlar sayılır.
 # Üye başına `default-features = false` mirası ezemediği için kırpma burada.
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std"] }
@@ -73,12 +72,11 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "std", "block2", "UNUserNotificationCenter", "UNNotificationContent",
     "UNNotificationRequest", "UNNotificationTrigger",
 ] }
-# DispatchData kurucuları `block2` feature'ının arkasında; objc2-metal bunu
-# açmaz. Kullanıcı onaylı bağımlılık kararı: .tasks/001 discussion.md → Karar.
+# The main queue and vnode sources (`bt-shell`). User-approved dependency
+# decision: .tasks/001 discussion.md → Karar.
 dispatch2 = { version = "0.3", features = ["block2"] }
-# `addCompletedHandler:` bir ObjC bloğu ister; `RcBlock` onu yığında tutar.
-# Grafta zaten vardı (objc2-metal'in varsayılan `block2` feature'ı çekiyor),
-# bu satır yalnız adını kullanılabilir kılar — Cargo.lock oynamaz.
+# Objective-C blocks (`RcBlock`) for `bt-shell`'s completion handlers; already
+# in the graph through wgpu's Metal backend and `dispatch2`.
 block2 = "0.6"
 # VT ayrıştırma, grid, scrollback, hasar, PTY ve okuyucu thread. bt-core onu
 # KAPSÜLLER: pub API'de alacritty tipi görünmez. Kullanıcı onaylı bağımlılık
@@ -138,16 +136,15 @@ unicode-width = "0.2"
 
 # The renderer's measured move from Metal to wgpu (040). User-approved
 # dependency decision (2026-09-28): .tasks/040-linux-kapisi-ve-wgpu/discussion.md
-# → Karar 3 and 10. Today ONLY a dev-dependency of `bt-gpu` (the trial, behind
-# `cfg(test)`); it enters the product path in phase-5. The feature set is kept
-# narrow: `metal` is today's backend, `vulkan` Linux's, `wgsl` the shader
+# → Karar 3 and 10. `bt-gpu`'s only GPU dependency. The feature set is kept
+# narrow: `metal` is macOS's backend, `vulkan` Linux's, `wgsl` the shader
 # language, `std` the native target. `dx12` (Windows is not a target), `gles`
 # (on Linux we want Vulkan; a GL fallback would mean testing a second driver
 # path) and `webgpu` (the web is not a target) are off; `parking_lot` would
 # also come with the defaults, std's locks are enough. The Metal backend uses
-# `objc2` 0.6 / `objc2-metal` 0.3 / `block2` 0.6 — the generation the
-# workspace already pins, so no second Metal binding stack enters the graph
-# (context.md → Kanıt).
+# `objc2` 0.6 / `objc2-metal` 0.3 / `block2` 0.6 — the generation `bt-shell`
+# already pins, so no second binding stack enters the graph (context.md →
+# Kanıt).
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "metal", "vulkan"] }
 
 bt-core = { path = "crates/bt-core" }

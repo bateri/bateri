@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Proje
 
-`bateri`, macOS için GPU'nun (Metal 3) çizdiği bir terminal emülatörüdür. Rust
-ile yazılır; AppKit ve Metal'e `objc2` ailesi üzerinden **doğrudan** bağlanır,
-Swift katmanı yoktur. Referans ürün Metalterm'dir (metalterm.dev, kapalı
+`bateri`, macOS için GPU'nun çizdiği bir terminal emülatörüdür. Rust ile
+yazılır; AppKit'e `objc2` ailesi üzerinden **doğrudan** bağlanır, GPU'ya
+`wgpu` üzerinden (macOS'ta Metal arka ucu) ulaşır, Swift katmanı yoktur. Referans ürün Metalterm'dir (metalterm.dev, kapalı
 kaynak): komut blokları, dokuz rollü tema modeli, grain/sheen ile materyal
 yüzeyler, fizik tabanlı imleç hareketi ve boşta sıfır kare. Referansın binary
 incelemesinden çıkan mimari, özellik ve ayar envanteri `docs/ARASTIRMA.md`'dedir;
@@ -325,7 +325,7 @@ ZLE'nin görüntüsünü (`PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlig
 edilmiş satırları `PREBUFFER`, bugün çözülüyor ama çizilmiyor) OSC 8133 ile
 aynalıyor; `Session::dock()` onu **çözülmüş** dock
 hücrelerine çevirip sınırdan veriyor ve `bt-gpu` pencerenin altındaki **ikinci
-bir `setViewport`**'la çiziyor — kendi listeleri, kendi caret'i, opak zemini ve
+bir `set_viewport`**'la çiziyor — kendi listeleri, kendi caret'i, opak zemini ve
 ızgaradan ayıran saç çizgisiyle. Aynı çağrı **ikinci bir sink**'ten, son
 çizilen aynaya karşı bulduğu en çok bir `DockEdit`'i (`Arrive`/`Erase`/
 `Shift`/`Reset`, **(satır, sütun)** konumuyla) veriyor: yalnız girdi sayısını
@@ -356,7 +356,7 @@ ters dönüşümle (kutunun merkezi ya da sol kenarı, yarının değil) ve her
 örnekleme yuvanın içinde: ölçekleyen dallar **doğrusal** örnekliyor ama
 nokta texel merkezine kırpılıyor, yani süzgeç komşu yuvaya değmiyor
 (bekçisi genlikten bağımsız: dolu ve boş komşulu iki atlas aynı kareyi
-vermeli). Genlik, süre ve eğri tasarım sabiti (`shaders/glyph_fx.metal`,
+vermeli). Genlik, süre ve eğri tasarım sabiti (`shaders/glyph_fx.wgsl`,
 `glyph_fx.rs`). **Efekt caret'in üstünde, kendi renginde ve dock bandıyla
 kırpılmadan** çiziliyor, çünkü Backspace'ten sonra caret tam hayaletin
 üstüne geliyor (`Renderer::encode_fx`; `phase-5.md` → Uygulama Notları).
@@ -376,7 +376,7 @@ geliyor (`Cursor::shape`): DECSCUSR'ın üç biçimi — blok, alt çizgi, dikey
 **sonra**, yoksa alt çizgi caret'i dock bandına değmez ve zeminin altında
 kalırdı. **Yüzeyi kendi fragment'inin**: köşesi yuvarlak ve çevresinde hafif
 bir hale var, ikisi de yuvarlak dikdörtgenin imzalı mesafesinden
-(`shaders/cell_bg.metal` → `caret_fragment`). Sayılar uydurulmuyor —
+(`shaders/cell_bg.wgsl` → `caret_fragment`). Sayılar uydurulmuyor —
 yarıçap hücre **yüksekliğinin** oranı (üç şeklin ortak tek boyutu o), hale
 payı sol paydan türüyor (`CellMetrics::gutter_px`'in beşte ikisi, aynı içi
 girintinin üçüncü kullanımı; oran iki tur gözle indi) ve kenar kalınlığı yine `rule_px`; punto büyüyünce üçü
@@ -790,7 +790,7 @@ Ctrl-L prompt'u aynı kimlikle yeniden basıyor ve o kalıntı komutun başı de
 **İçerik pencerenin tabanına yaslanır**: `frame()` kaç satırın dolu olduğunu
 sınırdan verir (`Cursor::content_rows`; alternatif ekranda ızgaranın tamamı),
 `DisplayLink` onu `rows - content_rows` ile ötelemeye çevirir ve `encode_pass`
-tek bir `setViewport` ile ızgaranın bütün pipeline'larını birden kaydırır —
+tek bir `set_viewport` ile ızgaranın bütün pipeline'larını birden kaydırır —
 dört liste ve imleç aynı yerden. **Kaydırılmış pencerede de aynı kural**:
 doluluk görünür satırlardan doğuyor, yani geçmişe bakarken de içerik tabana
 yaslı kalıyor. 017 bir dönem burada `display_offset != 0 => rows` denedi ve
@@ -883,12 +883,12 @@ doldurma kaydırılmış pencerede de koşunca `fill = rows - content_rows` her
 ölü görünüyordu. Kapı `fill`'i sıfırlayınca doluluk yine görünür satırlardan
 doğuyor ve tepeden yeni satır giriyor. Sıfır dönerse
 ikinci sink hiç çağrılmıyor ve kare doldurmasız hâliyle bit bit aynı. Çizen
-taraf **üçüncü bir `setViewport`**: bandın orijini `origin_px - fill_px`
+taraf **üçüncü bir `set_viewport`**: bandın orijini `origin_px - fill_px`
 (`Frame::fill_origin_px`; `fill_px` kanalın boyu, kesrin tepe satırı dahil) ve o sayı **encode anında** türüyor, yani bant
 ızgarayla **birlikte** kayıyor — push anında pişmiş bir konum hareket
 karesinde (listeler korunur, yalnız öteleme değişir) bandı yerinde
 dondururdu. Orijin kaymanın ortasında **negatife** iniyor ve bırakılıyor:
-bandın pencereye sığmayan en eski satırlarını Metal tepeden kırpıyor
+bandın pencereye sığmayan en eski satırlarını GPU tepeden kırpıyor
 (ölçüldü, 017 phase-0). Listeleri dock örüntüsünde **ayrı** ve sayaçlardan
 muaf (`hucre=`/`glif=`/`kural=` oynamıyor); **blok işareti de o listelerden**
 (`Blocks::fill_slice`, `Frame::push_fill_block` → `fill_rules`): bant ikinci
@@ -898,7 +898,7 @@ listesi komut satırını geçmişe itiyor, bant satırı geri getiriyor ama
 **işaretsiz**, kaydırınca aynı satır ızgaradan geçtiği için işaret geri
 geliyor). Çıpa yeni bir kaynak değil, hücrenin kendi OSC 8 bağlantısı;
 eksik olan **okuyan** döngüydü. Satırlar fill-yerel, yani işaret bandın kendi
-`setViewport`'unda. **Süre sayacı hâlâ bantta yok** ve bu bilinçli daraltma:
+`set_viewport`'unda. **Süre sayacı hâlâ bantta yok** ve bu bilinçli daraltma:
 sayaç hücre üretiyor (`Counter`) ve çakışma ölçütünü (`last_col`) ikinci kez
 kurmayı isterdi; işaret ise bir `RuleCell`. Encode sırası **ızgara →
 doldurma → dock**, çünkü ızgaranın listeleri bandın içine hiç girmiyor ama
@@ -1195,11 +1195,12 @@ make fmt          # cargo fmt --all -- --check
 make denetim      # kuralların mekanik yarısı: katman yönü, bt-core'da gerekçesiz panik, rc dosyasına yazma; Cargo.lock değiştiyse uyarır
 make clippy       # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
-make shader       # kanarya: touch shaders/*.metal + cargo build -p bt-gpu (derleme reçetesi yalnız build.rs'te) + .wgsl kolu: cargo test -p bt-gpu wgsl_pipelines_build
+make shader       # WGSL kanaryası: cargo test -p bt-gpu wgsl_pipelines_build (naga doğrulaması + bütün pipeline'ların kurulumu)
 make duman        # uygulamayı BT_RUN_SECONDS=3 ile açar ve jeton satırı basar:
                   # kare=N hucre=K glif=G kural=R yuva=U/T yuva2=U/T yuk=smoke istek=I icerik=C hareket=M kayma=S sessiz=Sms kapanis=clean profil=debug ornek=off pipeline=ok
                   # ilk dördünden ya da hareket'ten biri 0 ise, icerik > IDLE_FRAME_LIMIT ise, sessiz < QUIET_FLOOR ya da sessiz=none ise
                   # ya da deadline'da animasyon yerleşmemişse kırmızı. iki sınır da ölçülmüş; değerleri ve türetmeleri sabitlerin doc'unda.
+                  # süreli koşuda pencere kayan seviyede açılır: wgpu örtülü pencereye drawable vermez, kapı öndeki uygulamaya bağlı kalmasın (`TerminalWindow::float_for_timed_run`).
                   # üst sınır kare'de değil icerik'te: icerik çizilmeye karar verilen kare, kare GPU'nun bitirdiği — animasyon ikincisini meşru olarak şişirir.
                   # sessiz'in kuralı ters (sağlıklıda büyük) ve kapının en duyarlı katı: icerik sınırının göremediği yavaş sızıntıyı o görüyor.
                   # yuva/yuva2/yuk/istek/kayma/profil sayaç ve etiket; kapanis kısmen kapı (değerler teardown_token'da); ornek=off'ta ölçüm jetonu basılmaz.
@@ -1239,7 +1240,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 |---|---|---|
 | `bt-core` | VT durum makinesi, grid ve scrollback, PTY ve **okuyucu döngünün sahibi** (alacritty 0.26.0 döngüsünün kopyası, `reader`; `Term` `Handler`'ı aktaran sarmalayıcının arkasında, `handler` — emoji dizisini ızgarada orada kümeliyor, 035), PTY okuma yolu **taranıyor** (araya giren sarmalayıcı baytları aynen geçirir, geçerken **üç** OSC numarasını ve **bir** CSI dizisini çeker), OSC (0/2/7/8/9/52; 0/2 uygulamanın başlığını `Term` kilidi altındaki olaydan yaprak bir yuvaya indirir ve pencere başlığı ondan kurulur — öncelik OSC 0/2 → dizinin son bileşeni (ev `~`) → `bateri`, `Session::title`; uzak oturumda (036) `⇄ {OSC başlığı}`, yoksa `⇄ {host}`; başlık ya da **değişen** OSC 7 dizini `Wake::title_changed` ile yüksüz haber verir, 7 çalışma dizinini **yetkisiyle** verir (yerel yetki dock'un bağlam satırına, uzak oturumda ya da yabancı yetkide uzak yuvaya) (`Session::working_directory` onu okur), 52'nin yazma yönü `Wake` ile kabuğa çıkar, panoyu görmez), komut blokları, seçim, geçmişte arama (sorgunun derlenmesi, görünür satırların eşleşmeleri, bütün defterin parça parça sayımı; `search`), girdi kodlaması (DECCKM'e uyan oklar, farenin düğme/hareket/tekerlek raporu; kipten karar veren tablolar `input::button_route`/`motion_route`/`wheel_route`), ayar modeli, shell bağlamı. Tarayıcının üç kolu var ve üçü de alacritty'de **yok** (`vte` üçünü de `unhandled`'a düşürüyor): OSC 133 oturumun safhasını ve blok kimliklerini `ShellState`'e yazar (`Session::shell_state()`) ve `Running`'e her **geçişte** bir komut nesli artırıp `Wake::command_started` ile yüksüz haber verir (036, uzak oturum yoklamasının tetiği); kimliğimizi (`bt_block=`) bir kez görmüş bir oturumda **uzak oturumu yalnız bizim işaretimiz bitiriyor** — uzak oturum etkinken kimliksiz `A`/`B`/`C`/`D` yok sayılıyor, çünkü ssh'ın öbür ucundaki fish 4 ya da kitty/iTerm2 entegrasyonu aynı PTY'ye 133 basıyor ve uzak `A` göstergeyi silip uzak `C` yeni bir nesil açardı; yoklamadan önce gelen uzak `A` için komut bizim `D`'mize kadar açık sayılıyor (`ShellLog::command_open`). Kapı `Running`'e değil uzak oturuma bağlı, yoksa `exec fish` `Running`'i hiç bitirmez ve saat boşta kare isterdi (`.tasks/036-ssh-uzak-oturum/phase-3.md` → Uygulama Notları), OSC 8133 ZLE'nin görüntü aynasını — `PREDISPLAY`, `BUFFER`, `POSTDISPLAY`, `region_highlight`, `CURSOR`, base64 gövdelerle; `KEYMAP` ve `PREBUFFER` sondaki isteğe bağlı gövdeler, eski betik onlarsız da çözülüyor — çözüp `DockState`'e (`Session::dock_state()`), dalı `DockContext`'e ve düzenleme widget'ının yeteneğini (`8133;w`) `ShellLog::dock_editable`'a, OSC 7 de çalışma dizinini yine `DockContext`'e (yüzde çözme ve yabancı host elenmesi orada; bozuk URI panik değil yoksayma). Aynanın kendi yük sınırı var ve aşımı **görünür** (`DockStatus::Unavailable`), sessizce düşmez; dock'un çizmediği kontrol karakteri de görünür bir durum (`DockStatus::Control`) ve satırı ızgaraya bırakıyor. **Dördüncü kol OSC değil CSI** ve yükü yok: `CSI 2 J`'yi tanıyıp "ekran kasten temizlendi" bayrağını kurar (`Session::observe_screen_clear`; `3J` ve RIS için kol **yok**, ikisi de geçmişi siliyor — geçmişi silen tek yol terminal tarafı temizlik, ⌘K/⌥⌘K). **Sayacın iki yazarı var** (`screen_clears`): tarayıcı `2J`'yi baytlar uygulanmadan **önce** sayıyor, terminal tarafı temizlik (034) `Term` kilidi altında ve uygulandıktan **sonra** adlı tek yöntemden (`Session::note_screen_clear`) — ikisi de yalnız artırıyor ve tüketici tek. **Alternatif ekranda kurmaz** — orada `ClearMode::All` `reset_region(..)` çağırıyor, geçmiş büyümüyor ve birincil ekranın durumuna dokunulmuyor, yani geri getirilmeyecek bir şey yok; nesil yine de **tüketilir**, yoksa `vim`'den çıkışta birikmiş sayaç bayrağı kurar ve doldurma ilk `vim`'den sonra kalıcı olarak kapanırdı. Bayrak **defter temizlemeden sonra büyüyünce** düşer: geçmişe temizlemeden sonra satır düşmüş demektir ve doldurma o kadarını güvenle geri verebilir. Ölçüt bir damga ve tek karşılaştırma (`Session::screen_clear_history`); damga bayrak kurulduktan **sonraki** ilk karede alınıyor, çünkü kuran kare ızgarayı henüz temizlenmemiş görebiliyor ve temizlemenin kendisi satırları geçmişe itiyor — bayat damga anında aşılırdı. Üstünde iki koşul var — alternatif ekranda değil ve `display_offset == 0`; ikincisi olmasa geçmişe kaydırılan pencere dolu **görünür** ve tek bir tekerlek jesti Ctrl-L'i geri alırdı. (Bu koşul **bayrağın ömrüne** ait; doldurmanın kendi `display_offset` kapısı ayrı bir şey ve ayrı gerekçeli.) **Bayrak bir kapı, damga bir ölçü:** kapı "hiç" der, aynı damga doldurmada ikinci kez okunup `fill`'i temizlemeden beri gelen satır sayısına **kırpar** — yoksa tek satırlık bir büyüme bayrağı düşürür ve doldurma boşluğun tamamını, yani kullanıcının sildiği ekranı geri getirirdi (ölçüldü). `content_rows == rows` kolu yok: dock'lu pencerede doluluk giriş satırını saymadığı için erişilemez. **Bilinen sınır**, defter `scrollback`'te doyunca damganın üstüne çıkacak sayı kalmıyor ve o oturumda bir Ctrl-L'den sonra doldurma koşmuyor; yönü güvenli. Yarışı kapatan şey bir **nesil sayacı**: tarayıcı baytları uygulamadan **önce** sayıyor, kare yolu sayacı `Term` kilidinin **altında** doluluk sayısıyla aynı okumada tüketiyor, ve henüz hesaba katılmamış bir nesil aynı karede doldurma kuralını ezer. Bayrağın tek tüketicisi doldurmanın kapısı (`Session::fill_rows`) ve sıra zorunlu: ömür **önce** işliyor. Komut blokları `frame()` sınırından **çözülmüş** geçer (komutun satırı + renk, çıkış kodu değil; bölge değil işaret): kimlik prompt'un OSC 8 çıpasından `Term` kilidi altında toplanır, renk kilit bırakıldıktan sonra kabuk defterinden çözülür. Giriş satırının **bastırılması** da burada: safha ile aynanın durumu tek yüklemde birleşiyor (`ShellLog::suppressed_input`) ve kopya `Term` kilidinden **önce** alınıyor — yaprak kilit `Term`'ün altına girmez | macOS'a özgü **hiçbiri** — `objc2*`, `core-text`, `metal` yok. Unix PTY (`libc`, `rustix`, `polling`) serbest; kapı Linux hedefiyle derlemedir — `make linux` (Docker, `tools/linux/Dockerfile`), çünkü platformsuzluğu yalnız Linux'ta gerçekten derlemek kanıtlar |
 | `bt-atlas` | glyph rasterizasyonu, atlas paketleme, **emoji dizisinin şekillendirilmesi** (`Sprite::Cluster`, `CTLine` ile tek glyph; atlasın interner'ı, şekillenmeyen dizi taban karakteriyle), **iki düzlem** (maske `R8`, renk `RGBA8`; ayrı sayaç, ortak yuva ızgarası), **geniş glyph'in iki yarısı** (`Half`; kutu iki hücre, yuva yine bir hücre), **sistemin cascade'inden yedek glyph** (kapı geometrik ve **sıralı**: önce tek hücre, sonra iki; ikisine de sığmayan aday kutu kalır), **yordamsal karakterler** (blok elemanları, Braille ve çizgi çizim — köşegenler hariç; fonta sorulmadan, yüzden bağımsız, yalnız büyük sınıfta), font seti. **Doku kenarı sabit değil**: hedeflenen **yuva sayısından** türüyor (`SLOT_TARGET` = 1024 yuva; kenarın kendisi `MIN_EDGE` = 1024 px ile `MAX_EDGE` = 4096 px arasında, iki 1024 tesadüfen aynı sayı), çünkü hücre büyüdükçe kapasite düşüyor ve bir yerde yordamsal ailenin altına iniyordu — ölçülen kırılma Retina'da 29pt'ti (406 yuva, ailenin istediği 429: 421 karakter + tofu + kural payı). Varsayılan punto tabanda kalıyor, yani ızgara ve raster bit bit aynı. Tahliye **yok**: dolan atlas hâlâ tofu'ya düşüyor ve kalan senaryo (tek karede hedeften fazla farklı glyph) ölçülmedi | `objc2-core-text`, `objc2-core-graphics` ve ortak tabanları `objc2-core-foundation`. `objc2` çekirdeğini bile **görmez**: kullanılan her şey C API'si, ObjC runtime'ı değil |
-| `bt-gpu` | wgpu renderer (040 phase-5'ten beri; Metal renderer yalnız `cfg(test)` kâhini, phase-7'de gidiyor), shader'lar (`.wgsl`; `.metal` ikizleri kâhinin), **geniş glyph'in yelpazelenmesi** (`prepare`; karar `Atlas::slot`'ta doğduğu için sink'te değil), kare döngüsü ve `Waker` (`DisplayLink`: platformsuz `tick`; ritim dışarıdan, dört görevli `Pacer` dikişiyle — vsync tik'i, her thread'den `set_running`, tek gecikmeli uyandırma, zaman tabanı), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `setViewport`, kendi listeleri ve caret'i; PTY payı `DOCK_ROWS`, çizilen bant `Cursor::input_rows` giriş satırı + bağlam satırı), **doldurma bandı** (üçüncü `setViewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet), durum çubuğu | `wgpu` (doğrudan bağımlılığında ve kaynağında platform kütüphanesi yok: pencerenin katmanı tek `unsafe` girişle — `Surface::from_layer` — ve ritim `Pacer` olarak `bt-shell`'den geliyor); `objc2*`/`dispatch2`/`block2` yalnız dev-dependency (Metal kâhini, phase-7'ye kadar) |
+| `bt-gpu` | wgpu renderer, shader'lar (`.wgsl`), **geniş glyph'in yelpazelenmesi** (`prepare`; karar `Atlas::slot`'ta doğduğu için sink'te değil), kare döngüsü ve `Waker` (`DisplayLink`: platformsuz `tick`; ritim dışarıdan, dört görevli `Pacer` dikişiyle — vsync tik'i, her thread'den `set_running`, tek gecikmeli uyandırma, zaman tabanı), kare yolunun **ölçüm defteri** (`Stats`: iki CPU aralığı, GPU deltası, açılış damgası, p95'in tabanı — biriktirir, **basmaz**), hareket (motion), **dock yüzeyi** (ikinci `set_viewport`, kendi listeleri ve caret'i; PTY payı `DOCK_ROWS`, çizilen bant `Cursor::input_rows` giriş satırı + bağlam satırı), **doldurma bandı** (üçüncü `set_viewport`, kendi listeleri; orijini ötelemeden türüyor, kaç satır olduğu `Cursor::fill`), overlay'ler (palet), durum çubuğu | `wgpu` (doğrudan bağımlılığında ve kaynağında platform kütüphanesi yok: pencerenin katmanı tek `unsafe` girişle — `Surface::from_layer` — ve ritim `Pacer` olarak `bt-shell`'den geliyor; `make denetim` doğrudan bağımlılıkta ve kaynakta `objc2`/`dispatch2`/`block2`/`metal` arar, wgpu'nun dolaylı çektikleri konusu değil) |
 | `bt-shell` | AppKit kabuğu: pencere, sekme, bölme, menü, klavye (metin yolu AppKit'in yığınından: `BateriView` `NSTextInputClient`, ölü tuş bileşimi orada tamamlanır), **Finder damlası** (`NSDraggingDestination`, yalnız dosya URL'si; yol `quote::shell_quote`'tan geçip `Session::paste`'e gider), servisler, ayar penceresi, **terminal pane'i** (`pane::TerminalPane`, `NSView` alt sınıfı: oturumun çekirdeği, pane düzeyindeki menü seçicileri; sahiple sınırı `PaneLaunch` + `PaneHost`, 039), **bölmeler** (saf ağaç `split`, kapsayıcı `split_view`; 039), **arama paneli** ve sayım dizininin ana kuyruk sürücüsü (`search_bar`, `TerminalPane::kick_search`), **uzak oturumun algılanması** (036: `C` kenarında ön plan grubunun en üstteki ssh/mosh süreci ve argv'sinden hedefi, `jobs::remote`; kararsızsa sonraki çıktıda yeniden, ana kuyrukta en çok bir iş — `pane::RemoteProbe`; host yazıldığı gibi, etkileşimsiz ssh uzak sayılmıyor), **uzak dizine yükleme** (037: kural ve metin saf `upload`'da, `ssh`/`tar` süreçleri `std::process` ile arka plan thread'inde; sayfa, kuyruk sürücüsü, popover, durdurma sorusu, başlık öneki, bildirim ve Dock simgesi `uploader`'da; kuyruk pane'in, Dock simgesi pane'lerin toplamı); kapanış sırasının ve duman bekçisinin sahibi; kabuğun başlangıç dizini, yereli, hangi kabuğun koşacağı ve sarmalayıcı betiğinin yeri (`child`), entegrasyonun kurulup kurulmayacağı ve `ZDOTDIR`/`BATERI_ZDOTDIR` çifti (`app::shell_integration_env`), **güncelleme** (`updater`: paketteki `Sparkle.framework`'ü çalışma zamanında `NSBundle`'dan yükler ve "Check for Updates…"ın hedefi olur; framework link'lenmiyor, yani paketsiz ve süreli koşu Sparkle'sız) | `objc2`, `objc2-foundation` (`NSLocale` dahil: kabuğun yereli; `NSUUID`: sekme kimliği), `objc2-app-kit`, `objc2-quartz-core` (pane'in `CAMetalLayer`'ı — wgpu yüzeyi ondan açılıyor, ölçeği pane'in — ve macOS `Pacer`'ı: `NSView.displayLink` yalnız zamanlayıcı olarak ve `CACurrentMediaTime`; `pacer`), `objc2-user-notifications` (yüklemenin bildirimi, `UNUserNotificationCenter`; paketsiz süreçte çağrılmıyor), `block2` (kapatma sorusu sayfasının tamamlanma bloğu), `dispatch2` (ana kuyruk: `Pacer`'ın `set_running`'i ve gecikmeli uyandırması; `child_exit` → o pane'in kapanışı, süreli koşuda `terminate:`; OSC 52'nin pano işi; arama sayımının parçaları; uzak oturum yoklaması; vnode kaynakları: ayar izleme), `libc` (bekçinin `write` + `_exit`'i, izlemenin `O_EVTONLY`'si, kabuğun passwd kaydı için `getpwuid_r`, kapanışta ön plandaki işi soran `proc_*`, uzak oturum yoklamasının argv'si için `sysctl(KERN_PROCARGS2)` — `jobs` — ve yükleme iptalinin `kill`'i — `upload`) |
 | `bateri` | `main`, app bundle | — |
 
@@ -1249,10 +1250,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
 ## Bilinmesi gerekenler
 
 - **Taban macOS 14, tek kaynağı `.cargo/config.toml`'daki
-  `MACOSX_DEPLOYMENT_TARGET`.** rustc binary'nin minos'unu, `bt-gpu/build.rs`
-  shader'ların `-mmacos-version-min`'ini oradan alır; `make kur`
+  `MACOSX_DEPLOYMENT_TARGET`.** rustc binary'nin minos'unu oradan alır; `make kur`
   `LSMinimumSystemVersion`'ı binary'nin `minos`'undan, yani dolaylı olarak yine
-  oradan doldurur. Metalterm'in tabanıyla aynı.
+  oradan doldurur. Metalterm'in tabanıyla aynı. Xcode'un `metal` derleyicisi
+  derleme şartı değil: shader'lar WGSL ve `include_str!` ile gömülü.
 - **Bağımlılık mimari karardır**, kendiliğinden eklenmez. Taban:
   `alacritty_terminal` (VT ayrıştırma, grid ve PTY; okuyucu döngü 035'ten
   beri onun 0.26.0 döngüsünün `bt-core`'daki kopyası, `reader.rs` — sürüm
@@ -1280,8 +1281,7 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   aktarımın `missing_trait_methods` bekçisi metodu atlamaya izin vermiyor
   (`.tasks/035-grapheme-dizileri/discussion.md` → Karar).
   `wgpu` (30, `std`/`wgsl`/`metal`/`vulkan`; renderer'ın Metal'den ölçümlü
-  geçişi) 040 phase-5'ten beri **`bt-gpu`'nun ürün bağımlılığı**; Metal
-  renderer `cfg(test)` kâhini olarak phase-7'ye kadar kalıyor
+  geçişi) **`bt-gpu`'nun tek GPU bağımlılığı**
   (`.tasks/040-linux-kapisi-ve-wgpu/discussion.md` → Karar 3, 7, 10).
   **Sparkle 2** bir crate değil, pakete gömülen bir framework (`make kur`
   sürümü ve sha256'sı `Makefile`'da sabit indirir, depoya girmez) ve
@@ -1326,10 +1326,10 @@ bateri (bin) → bt-shell → bt-gpu → {bt-atlas, bt-core}
   scrollback'te sekme başına megabaytlarca yaşar, sınır hücresi yalnız çizilen
   hücreler için kare başına doğar. Sınır hücresine alan eklerken ölçüt kare
   başına maliyettir.
-- **Renk uzayı sınırı geçer.** Çizim hedefi `BGRA8Unorm_sRGB`: donanım
+- **Renk uzayı sınırı geçer.** Çizim hedefi `Bgra8UnormSrgb` (`renderer::FORMAT`): donanım
   fragment çıktısını **lineer** sayar ve yazarken sRGB'ye kodlar. Bu yüzden
-  `bt-core` sınırdan lineer float verir (`color::linear_rgba`) ve `MTLClearColor`
-  da aynı temadan (`Theme::background_linear`) beslenir. İkisi **birlikte** değişir; biri lineerleşmeden
+  `bt-core` sınırdan lineer float verir (`color::linear_rgba`) ve pass'in clear rengi
+  de aynı temadan (`Theme::background_linear`) beslenir. İkisi **birlikte** değişir; biri lineerleşmeden
   ötekine geçilirse palet açılır (`0x1a1c21` ara tonu `0x5a5d65` griye) ve belirti
   sessizdir. Gören tek bekçi `cell_bg_paints_pixels_on_the_gpu` ve ancak **ara
   ton** bir renkle görür: `0.0` ve `1.0` sRGB transfer fonksiyonunun sabit

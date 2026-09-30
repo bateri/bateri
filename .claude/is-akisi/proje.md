@@ -39,13 +39,13 @@ ajan onu zaten yükler, iki kopya hem bağlam hem drift demektir.
 |---|---|
 | **kapı komutu** — her phase | `make hepsi` — sürüm + `fmt` + `denetim` + `clippy -D warnings` + `test` |
 | hızlı iç döngü | `cargo test -p {crate}` |
-| mekanik denetim (kapının içinde) | `make denetim` — katman yönü, `bt-core`'da gerekçesiz panik, rc dosyasına yazma, bağımlılık uyarısı, genel iş akışı dosyalarının projeden bağımsızlığı |
-| `.metal`, `.wgsl` ya da `build.rs` değiştiyse | `make shader` — iki kolu var: `.metal` için cargo'nun bayatlık takibini atlayan kanarya (derleme reçetesi yalnız `build.rs`'te), `.wgsl` için pipeline'ları kuran sınama (`wgsl_pipelines_build`: naga doğrulaması + Vulkan'ın immediate tabanıyla istenmiş device'ta pipeline kurulumu). `.metal` kolu Metal sökülene kadar (040 phase-7) kalıyor |
+| mekanik denetim (kapının içinde) | `make denetim` — katman yönü, `bt-core`'da gerekçesiz panik, rc dosyasına yazma, `bt-gpu`'nun platformsuzluğu (doğrudan bağımlılıkta ve kaynakta `objc2`/`dispatch2`/`block2`/`metal` yok), bağımlılık uyarısı, genel iş akışı dosyalarının projeden bağımsızlığı |
+| `.wgsl` değiştiyse | `make shader` — pipeline'ları kuran sınama (`wgsl_pipelines_build`: naga doğrulaması + Vulkan'ın immediate tabanıyla istenmiş device'ta pipeline kurulumu) |
 | `assets/terminfo/*` değiştiyse | `make terminfo` — *henüz girdisi yok*: koşunca "henüz yok" deyip kırmızı düşer; tetiklenirse doğrulama "yeşil" değil "koşamadı"dır, `[~]` işaretlenir |
 | `assets/bundle/*`, `assets/shell/*`, `crates/bateri` ya da `kur` hedefi değiştiyse | `make kur` — **ürünü** denetler, düşerse çıkış 2; neyi denetlediği `Makefile`'ın `kur` yorumunda. Developer ID varsa imza zaman damgalı, yani ağ ister; notarization yalnız `make paket`'te. `assets/shell/*` aynı satırda, çünkü betik de pakete kopyalanıp `cmp` ile denetleniyor ve `make hepsi` yalnız **girdiyi** görüyor |
 | PTY okuyucu, render thread ya da paylaşılan duruma dokunulduysa | `make test-yaris` — iki zamanlama profili, ikisi de geçmeli. TSan nightly ister ve araç zinciri pin'li değil: "TSan koşmadı" waive değil, bilinen sınırdır |
 | Linux'ta derlenen bir crate (bugün `bt-core`) değiştiyse | `make linux` — Docker'da `clippy -D warnings` + `test`, `--locked`; ne sınadığı `Makefile`'ın `linux` yorumunda. Docker yoksa ya da daemon cevap vermiyorsa "ATLANDI" → `[~]`, **yalnız** o kolda; yerel rustc ile imaj etiketinin uyuşmazlığı "koşamadı" değil kırmızıdır (çaresi `tools/linux/Dockerfile`'ın `FROM` satırı) |
-| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — geçme ölçütü `CLAUDE.md` → Komutlar'da, jetonların anlamı `Makefile`'ın `duman` yorumunda ve `Report::token_line`'da. Sayaçlar CPU'nundur: GPU'nun boyadığını `make hepsi`'deki offscreen sınamalar, pencerenin görünürlüğünü hiçbiri kanıtlamaz. Başsız ortamda "ATLANDI" → `[~]`. `IDLE_FRAME_LIMIT` ölçülmüş bir sözleşmedir: değişikliği kod phase'lerinden **ayrı** commit'le iner |
+| pencereyi açan davranış değiştiyse (giriş, çizim, sekme) | `make duman` — geçme ölçütü `CLAUDE.md` → Komutlar'da, jetonların anlamı `Makefile`'ın `duman` yorumunda ve `Report::token_line`'da. Sayaçlar CPU'nundur: GPU'nun boyadığını `make hepsi`'deki offscreen sınamalar, pencerenin görünürlüğünü hiçbiri kanıtlamaz. Başsız ortamda "ATLANDI" → `[~]`. Süreli koşuda pencere kayan seviyede açılıyor, yani öndeki uygulama kapıyı düşürmüyor; ekran uykudaysa pencere yine örtülü sayılır ve `kare=0` ortamdır, kod değil. `IDLE_FRAME_LIMIT` ölçülmüş bir sözleşmedir: değişikliği kod phase'lerinden **ayrı** commit'le iner |
 
 **Araç zinciri pin'li değil** (Homebrew rustc; `rustup` ve
 `rust-toolchain.toml` bilinçli olarak yok): `brew upgrade` sonrası yeni bir
@@ -59,7 +59,7 @@ başta basar; kırmızıda önce sürüme bak.
 - **Kilit dosyası** — `Cargo.lock` (bağımlılık bildirimi `Cargo.toml`'lar).
   Değiştiyse ya kayıtlı bir bağımlılık kararıdır ya da kusurdur; `make
   denetim` uyarır. Depoya **girer**, kirlilik değildir.
-- **Türetilmiş dosya yoktur** (`default.metallib` `target/` altında kalır).
+- **Türetilmiş dosya yoktur** (shader'lar WGSL kaynağı olarak gömülü).
 - **Depoya girmeyenler** — `target/`, `*.metallib`, `*.dSYM`, `*.dmg`,
   `*.app`, `*.icns`, `*.iconset/`, `*.trace`, `.DS_Store`; kişisel/geçici
   örnekleri `~/.config/bateri` kopyası ve ekran kaydı. İkonun kaynağı
@@ -68,10 +68,9 @@ başta basar; kırmızıda önce sürüme bak.
 ## Riskli phase tetikleyicileri
 
 Doğrulama tablosundan türer, ayrı tutulmaz: phase `make test-yaris`
-(paylaşılan durum) ya da `make shader` (`#[repr(C)]` ↔ `.metal` düzeni)
-gerektirdiyse, ya da kilit dosyası değiştiyse. `#[repr(C)]` ↔ `.wgsl`
-düzeni (`var<immediate>` blokları ve instance'ın vertex düzeni) `.metal`'le
-aynı sınıftır: yapı ya da alan değiştiyse phase risklidir.
+(paylaşılan durum) ya da `make shader` (`#[repr(C)]` ↔ `.wgsl` düzeni:
+`var<immediate>` blokları ve instance'ın vertex düzeni) gerektirdiyse, ya da
+kilit dosyası değiştiyse.
 
 ## Set kapısı ekleri
 
@@ -167,10 +166,9 @@ onların **kontrol edilebilir hâlleridir**. Mekanik yarı `make denetim`'de.
    zamanlayıcının **durma koşulu** nerede? Kirli satır olmadan kare talebi var
    mı? Belirti sessizdir: uygulama çalışır, pil gider.
 6. **Hücre boyutu ve shader/Rust düzen uyumu.** `Cell` değiştiyse `const`
-   assert güncel ve gerekçeli mi, alan yan tabloya mı gitmeliydi? `.metal`
-   struct'ı değiştiyse Rust `#[repr(C)]` karşılığı alan sırası, tip ve
-   hizalama ile aynı mı (`float3`'ün 16 bayt hizası)? Attribute indeksleri
-   eşleşiyor mu? `.wgsl` tarafında aynı soru WGSL'in kurallarıyla:
+   assert güncel ve gerekçeli mi, alan yan tabloya mı gitmeliydi? `.wgsl`
+   yapısı değiştiyse Rust `#[repr(C)]` karşılığı alan sırası, tip ve hizalama
+   ile aynı mı, WGSL'in kurallarıyla:
    `vec3`/`vec4` 16, `vec2` 8 hizalı ve yapının boyu en büyük hizaya
    yuvarlanıyor, yani Rust ikizinde görünmez dolgu **açık alan** olarak
    yazılı mı; `var<immediate>` bloğu bütçenin (`IMMEDIATE_BUDGET`, Vulkan'ın

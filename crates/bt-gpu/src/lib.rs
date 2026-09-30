@@ -31,8 +31,8 @@
 //! because its quad grows by the effect's margin and its instance carries the
 //! effect's parameters. The effects' **timing** is here too (the `glyph_fx`
 //! module, pure): `bt-core` says which glyph arrived, this crate how long it
-//! lasts. The shaders are WGSL (`shaders/*.wgsl`); the `.metal` twins and the
-//! Metal renderer remain only as the test oracle until 040 phase-7.
+//! lasts. The shaders are WGSL (`shaders/*.wgsl`), embedded with
+//! `include_str!`; there is no shader build step.
 //!
 //! The frame path's **measurement book** is here too ([`Stats`]): whoever
 //! produces the time collects the sample — the CPU spans from the tick, the
@@ -47,25 +47,22 @@ mod error;
 mod frame;
 mod glyph_fx;
 mod link;
+mod metrics;
 mod motion;
 mod renderer;
-// Slot resolution and fan-out shared by the Metal and wgpu renderers (040 phase-3).
 mod slots;
 mod stats;
 mod surface;
-// The product renderer (wgpu) since 040 phase-5; `renderer` keeps the Metal
-// oracle behind `cfg(test)` until phase-7.
-mod wgpu_renderer;
 
 pub use error::GpuError;
 pub use frame::{DOCK_ROWS, context_cols, context_row_offset, dock_px};
 pub use link::{DisplayLink, Layout, Origin, Pacer, TickTarget, Ticker, Waker};
-pub use renderer::{CellMetrics, FontNotice, family_notice};
+pub use metrics::{CellMetrics, FontNotice, family_notice};
+pub use renderer::Renderer;
 pub use stats::{MIN_SAMPLES, Samples, Stats};
 pub use surface::Surface;
-pub use wgpu_renderer::Renderer;
 
-/// Ayar penceresinin Font listesi: eşaralıklı aileler, `bt-atlas`'ın
-/// zincirinin uyarısız açtıkları. Yeniden ihraç, çünkü `bt-shell`
-/// `bt-atlas`'ı görmüyor ([`FontNotice`] emsali).
+/// The settings window's Font list: the monospaced families that `bt-atlas`'s
+/// chain opens without a notice. Re-exported because `bt-shell` does not see
+/// `bt-atlas` (the precedent is [`FontNotice`]).
 pub use bt_atlas::monospaced_families;

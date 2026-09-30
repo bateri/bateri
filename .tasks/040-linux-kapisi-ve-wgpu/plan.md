@@ -119,5 +119,5 @@ phase-7  Metal söküm + denetim + belgeler + set kapısı
 | phase-4 | ✅ |
 | phase-5 | ✅ |
 | phase-6 | ✅ |
-| phase-7 | |
-| kapı | |
+| phase-7 | ✅ |
+| kapı | ✅ |

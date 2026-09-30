@@ -30,6 +30,12 @@ fmt:
 #   dosyalar tam olarak onlar ve kapı, adı listede olmayan dosya için soruyu
 #   hiç sormuyor. `.zlogout` bizde bir dosya olmasa da listede — kapı bizim
 #   dizinimizi değil kullanıcının dosyalarını koruyor.
+# - bt-gpu platform kütüphanesi görmez (040): doğrudan bağımlılığında (dev
+#   dahil, `--depth 1`) ve kaynağında objc2/dispatch2/block2/metal yok. GPU'ya
+#   wgpu üzerinden ulaşılıyor; wgpu'nun Metal arka ucunun **dolaylı** çektikleri
+#   bu kontrolün konusu değil — sözleşme crate'in kendi kodu ve bildirimi,
+#   arka ucun iç bağımlılıkları wgpu'nun işi. Katman ve vsync ritmi bt-shell'den
+#   geliyor (`Surface::from_layer`, `Pacer`).
 # - Bağımlılık DÜŞÜRMEZ, uyarır: bilinçli bir bağımlılık kararı da Cargo.lock'u
 #   değiştirir; kararın kaydını `/audit` arar.
 denetim:
@@ -38,6 +44,8 @@ denetim:
 	if $(CARGO) tree -p bt-atlas -e normal | grep -E "(^|[ ─])objc2 v"; then echo "denetim: bt-atlas objc2 çekirdeğine bağlanıyor"; fail=1; fi; \
 	if $(CARGO) tree -p bt-gpu -e normal | grep -E "bt-shell"; then echo "denetim: bt-gpu yukarı, bt-shell'e bağlanıyor"; fail=1; fi; \
 	if grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"; then echo "denetim: bt-core kaynağında platform çağrısı var"; fail=1; fi; \
+	if $(CARGO) tree -p bt-gpu -e normal,dev --depth 1 | grep -E "objc2|dispatch2|block2|metal"; then echo "denetim: bt-gpu platform kütüphanesine doğrudan bağlanıyor"; fail=1; fi; \
+	if grep -rnE "objc2|dispatch2|block2|metal" crates/bt-gpu/src | grep -v ":[[:space:]]*//"; then echo "denetim: bt-gpu kaynağında platform çağrısı var"; fail=1; fi; \
 	for f in crates/bt-core/src/*.rs; do \
 		awk -v file="$$f" '/^[[:space:]]*#\[cfg\(test\)\]/{exit} /\.unwrap\(\)|\.expect\(|panic!|unreachable!/ && !/\/\/ audit: / && !/^[[:space:]]*\/\//{print file":"NR": "$$0; hit=1} END{exit hit}' "$$f" \
 			|| { echo "denetim: bt-core'da gerekçesiz panik yolu ($$f)"; fail=1; }; \
@@ -103,18 +111,22 @@ test:
 # bakıyor, yani `BT_SCROLL_TEST=` bile yükü seçer. O koşu `yuk=load` basıp
 # exit 0 verir, `hucre`/`kural` yarısı ise hiç sınanmaz: kapı yeşil kalır ama
 # iddia ettiğinden başka bir şeyi sınar. Kapı hermetik olmalı.
+# Süreli koşuda pencere kayan seviyede açılıyor (`float_for_timed_run`): wgpu
+# örtülü pencereye drawable vermiyor ve kapı başka bir uygulama öndeyken
+# `kare=0` ile düşüyordu (040 phase-7).
 duman:
 	env -u BT_SCROLL_TEST -u BT_FRAME_STATS BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
 
-# Two branches. `.metal`: runs what build.rs does, bypassing cargo's
-# staleness tracking; the build recipe is NOT repeated here. `.wgsl`: the
-# shader is embedded with `include_str!` and has no build step, so the canary
-# is the test that builds its pipelines (naga + pipeline creation, 040 Karar 9).
-# The `.metal` branch stays until Metal is removed (040 phase-7).
+# WGSL kanaryası: shader'lar `include_str!` ile gömülü ve derleme adımları yok,
+# yani kanarya pipeline'ları kuran sınama — naga doğrulaması + Vulkan'ın
+# immediate tabanıyla istenmiş device'ta pipeline kurulumu (040 Karar 9).
+# Tek kanarya olduğu için "1 passed" aranıyor: sınamanın adı değişir ya da
+# `cfg` arkasına düşerse cargo sıfır sınamayla 0 döner ve kapı sessizce
+# yeşil kalırdı.
 shader:
-	touch $(wildcard crates/bt-gpu/shaders/*.metal)
-	$(CARGO) build -p bt-gpu
-	$(CARGO) test -p bt-gpu wgsl_pipelines_build
+	@out=$$($(CARGO) test -p bt-gpu --lib -- --exact renderer::wgpu_tests::wgsl_pipelines_build 2>&1); st=$$?; \
+	echo "$$out" | tail -3; \
+	test $$st -eq 0 && echo "$$out" | grep -q "test result: ok. 1 passed" || { echo "shader: kanarya koşmadı ya da düştü"; exit 1; }
 
 # Paylaşılan duruma (PTY okuyucu thread'i ↔ kare üreten taraf) dokunan
 # değişikliklerde koşar. ThreadSanitizer nightly ister; araç zinciri pin'li

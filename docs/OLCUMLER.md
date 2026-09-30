@@ -204,7 +204,9 @@ başına en az on).
 040'ın durak kuralının ölçümü (`.tasks/040-linux-kapisi-ve-wgpu/discussion.md`
 → Karar 3): aynı `Frame`, aynı sayıda, bugünkü Metal renderer'ı ve `cfg(test)`
 wgpu renderer'ı ile offscreen çiziliyor. Kanca `#[ignore]`'lu bir sınama
-(`bt-gpu` → `wgpu_renderer::tests::offscreen_frame_loop_on_both_backends`);
+(`bt-gpu` → `renderer::wgpu_tests::offscreen_frame_loop`; 040 phase-7'de Metal
+renderer'ı söküldü, kanca bugün yalnız `arka_uc=wgpu` satırını basıyor ve
+aşağıdaki Metal satırları tarihli kayıttır);
 arka uç başına **bir satır** basıyor (`arka_uc=… profil=… kare=… ornek=…
 cpu_kare_p95/max cpu_encode_p95/max gpu_p95/max`, değerler mikrosaniye).
 
@@ -343,8 +345,9 @@ rejim tanığı (`## Yöntem`, altıncı kalem).
 
 ### wgpu denemesi
 
-Ölçüm pencere açmıyor; sınama binary'si koşuyor. Satır başına bir arka uç,
-koşu başına iki satır:
+Ölçüm pencere açmıyor; sınama binary'si koşuyor. Koşu başına bir satır
+(`arka_uc=wgpu`; Metal yarısı 040 phase-7'de söküldü, iki arka uçlu yoklamalar
+yalnız tarihli kayıtlar için):
 
 ```sh
 mkdir -p target/olcum-wgpu

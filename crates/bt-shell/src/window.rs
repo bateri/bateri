@@ -43,9 +43,10 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSBox,
-    NSBoxType, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSMenuItem, NSModalResponse,
-    NSModalResponseCancel, NSTitlePosition, NSTitlebarSeparatorStyle, NSView, NSWindow,
-    NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
+    NSBoxType, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSFloatingWindowLevel,
+    NSMenuItem, NSModalResponse, NSModalResponseCancel, NSTitlePosition, NSTitlebarSeparatorStyle,
+    NSView, NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSKeyValueObservingOptions, NSNotification, NSObject, NSObjectNSKeyValueObserverRegistration,
@@ -819,8 +820,8 @@ impl TerminalWindow {
     /// gördüğü ilk `TIOCSWINSZ`'yi belirliyor. Tek kurucu o sırayı ya bozar ya
     /// da ayar okumayı pencerenin içine taşırdı.
     ///
-    /// Renderer pane'le doğuyor ve hatası çağırana dönüyor: Metal device ya
-    /// da metallib yoksa pencerenin çizebileceği bir şey de yok. `launch`
+    /// Renderer pane'le doğuyor ve hatası çağırana dönüyor: GPU device'ı ya
+    /// da pipeline'lar kurulamıyorsa pencerenin çizebileceği bir şey de yok. `launch`
     /// ilk pane'in doğum paketi (kimliği pencerenin kimliğiyle aynı sayaçtan,
     /// sahibi bu pencerenin [`WindowHost`]'u); pencere onu kapsayıcının tek
     /// pane'i olarak doğuruyor, bölmeler sonradan ([`TerminalWindow::add_pane`]).
@@ -1489,6 +1490,23 @@ impl TerminalWindow {
             None => window.center(),
         }
         window.makeKeyAndOrderFront(None);
+    }
+
+    /// Timed run only (`make duman`): keeps the window above every other
+    /// app's windows, so it is never occluded.
+    ///
+    /// wgpu hands out no drawable for an occluded window (its Metal backend's
+    /// fix for occluded-surface hangs) and the pane's gate stops drawing on the
+    /// occlusion notification, so a smoke run started behind another app drew
+    /// `kare=0`. Activating the app would not be enough — `activate()` is
+    /// cooperative since macOS 14 and the frontmost app may keep the focus —
+    /// and forcing it would steal the user's keyboard. A floating level
+    /// changes only the stacking order, for the three seconds of the run;
+    /// normal use never calls this.
+    pub(crate) fn float_for_timed_run(&self) {
+        let window = &self.ivars().window;
+        window.setLevel(NSFloatingWindowLevel);
+        window.orderFrontRegardless();
     }
 
     /// Pencerenin sekme grubundaki pencereler, sırasıyla; grup yoksa yalnız
