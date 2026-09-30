@@ -410,31 +410,43 @@ for i in $(seq 1 $N); do  # release paket — LaunchServices yolu
 done
 ```
 
+**040'tan beri debug kolunun şartı: pencere ön planda olmalı.** wgpu
+örtülü pencereye drawable vermiyor (040 phase-5 → Uygulama Notları), yani
+`cargo run`'ın açtığı pencere başka bir uygulamanın penceresinin arkasında
+kalırsa koşu `kare=0` ile kırmızı düşer — kod doğruyken. `cargo run`
+etkinleşme almıyor (çağıran kabuk ön planda değilse macOS etkinleşmeyi
+vermiyor); `open` veriyor. Ön plandaki uygulama bir başkasıysa debug kolu
+aynı `open` döngüsüyle, debug binary'si taşıyan geçici bir paketten koşar
+(kimliği `dev.bateri.duman`, URL şeması **silinmiş** — kullanıcının
+`bateri://`'si ona gitmesin; binary kopyalandıktan sonra `codesign -f -s -`).
+Yoklamanın `front` sütunu hangisinin gerektiğini söylüyor.
+
 Bozuk kolun **üç** mutasyonu var; üçü de `git checkout` ile geri alınır ve
 `git diff` boş kalır. Hangisinin hangi kapıyı ateşlediği ölçümün kendi
 kaydında, gövdeleri burada:
 
-1. **Hızlı sızıntı** — `crates/bt-gpu/src/link.rs`'te `needs_update`'in
-   sonuna, `match drawn { … }`'den sonra koşulsuz `iv.waker.wake();`. Her
-   çizilen kare hasar diker, yani sıradaki callback'te de hasar bulunur:
-   tazeleme hızında **içerik** karesi. **Uyarı — 008'de düşürdüğü kol
-   değişti:** kalıcı hasar "hasar yok" dalını hiç çalıştırmıyor, yani
-   `hareket=0` ve kapı `ExcessFrames`'ten **önce** `MissingCounter` diyor.
-   Satırdaki `içerik karesi` sayısı yine de okunuyor (tanı onu basıyor).
-2. **Yavaş sızıntı** — aynı dosyada, "hasar yok + yerleşti" dalında
-   `link.setPaused(true)`'dan **önce**:
+1. **Hızlı sızıntı** — `crates/bt-gpu/src/link.rs`'te `Core::tick`'in
+   içerik kolunun sonuna, `self.notice_alt_screen();`'dan sonra koşulsuz
+   `self.waker.wake();` (040'tan önce: `needs_update`'in sonu, `match drawn
+   { … }`'den sonra). Her çizilen kare hasar diker, yani sıradaki tik'te de
+   hasar bulunur: tazeleme hızında **içerik** karesi. **Uyarı — 008'de
+   düşürdüğü kol değişti:** kalıcı hasar "hasar yok" dalını hiç
+   çalıştırmıyor, yani `hareket=0` ve kapı `ExcessFrames`'ten **önce**
+   `MissingCounter` diyor. Satırdaki `içerik karesi` sayısı yine de okunuyor
+   (tanı onu basıyor).
+2. **Yavaş sızıntı** — aynı dosyada, `motion_tick`'in `at_rest` dalında
+   `self.waker.pacer().set_running(false)`'dan **önce** (040'tan önce: "hasar
+   yok + yerleşti" dalında `link.setPaused(true)`'dan önce,
+   `DispatchQueue::main().after` ile):
 
    ```rust
-   let w = iv.waker.clone();
-   let _ = DispatchQueue::main().after(
-       DispatchTime::try_from(Duration::from_millis(500)).unwrap(),
-       move || w.wake(),
-   );
+   let w = self.waker.clone();
+   self.waker.pacer().after(std::time::Duration::from_millis(500), Box::new(move || w.wake()));
    ```
 
-   (`use dispatch2::DispatchTime` gerekir.) Yarım saniyede bir içerik karesi:
-   üç saniyede `icerik=8`, yani **üst sınırı aşmıyor** — bu kolu yalnız
-   `sessiz` görüyor ve `QUIET_FLOOR` inmeden önce yeşil geçiyordu.
+   Yarım saniyede bir içerik karesi: üç saniyede `icerik=7`–`8`, yani **üst
+   sınırı aşmıyor** — bu kolu yalnız `sessiz` görüyor ve `QUIET_FLOOR`
+   inmeden önce yeşil geçiyordu.
 3. **Durma koşulu** — `crates/bt-gpu/src/motion.rs`'te `Motion::settled`'ın
    gövdesine `&& false`. Animasyon hiç yerleşmez: `Verdict::MotionUnsettled`.
 
@@ -483,6 +495,78 @@ doğrulanmadı), boyutundan tanınır.
 **Üst sınır: `icerik ≤ 8`** (`crates/bt-shell/src/app.rs` → `IDLE_FRAME_LIMIT`).
 **Alt sınır: `sessiz ≥ 868 ms`** (aynı dosya → `QUIET_FLOOR`; 2026-09-17'de
 870'ten indirildi, gerekçe aşağıda).
+
+### 2026-09-30 — wgpu pencere yolu, iki sınır yeniden gözlendi (040 phase-6)
+
+Neden: 040 phase-5 kare yolunu değiştirdi — sessizliğin saati artık
+`Pacer`'ın damgası, kare sayımı gönderim indeksi + `poll`, drawable yalnız
+çizen tik'te. İki sınırın doc'u "kare yolunu değiştiren set gelince yeniden
+ölç" diyor. **İki sınır da değişmedi**: sağlıklı dağılım ikisinin de doğru
+tarafında, üç bozuk kolun üçü de kırmızı.
+
+**Ortam**
+
+| | |
+|---|---|
+| commit | `b234946` (çalışma ağacı temiz; mutasyonlar yalnız bozuk kolda, her birinden sonra `git diff` boş) |
+| makine | Apple M1 Pro, macOS 26.4.1 (25E253); rustc 1.88.0 |
+| ekran | 120 Hz (`maximumFramesPerSecond`); pencere 900×632 pt, `kCGWindowIsOnscreen = 1`, ön planda koşunun kendisi |
+| kullanıcı | makine kullanımdaydı (Safari ön plandaydı, `/Applications/bateri.app` açık) |
+
+**Yol sapması — debug kolu `make duman` değil, `open` ile bir paket.** İlk
+`make duman` iki kez `kare=0` verdi: `cargo run`'ın penceresi ekrandaydı
+(`onscreen=1`) ama ön planda Safari vardı ve pencerenin tamamını örtüyordu;
+wgpu örtülü pencereye drawable vermiyor. Ortamın kusuru, kodun değil — aynı
+debug binary'si `open` ile açılınca ön plana geçti ve yeşil düştü. Debug kolu
+bu yüzden debug binary'si taşıyan geçici bir paketten (`dev.bateri.duman`)
+release koluyla aynı döngüde koştu (`## Nasıl yeniden ölçülür` → Boşta kare).
+Paketsiz süreçle farkı: süreli koşu ayar okumuyor ve `/bin/sh` koşuyor, yani
+ölçülen yol aynı.
+
+**Sağlıklı koşular** (hepsi yeşil):
+
+| profil · yol · süre | n | `icerik` | `kare` | `hareket` | `sessiz` (ms) |
+|---|---|---|---|---|---|
+| debug · paket (`open`) · 3 sn | 10 | `2` ×10 | `29` ×10 | `27` ×10 | 1746,88 – 1759,09 (ort. 1752,42) |
+| release · paket (`open`) · 3 sn | 10 | `2` ×10 | `29` ×8, `28`, `27` | `27` ×8, `26`, `25` | 1749,16 – 1758,93 (ort. 1753,80) |
+| debug · paket · 5 sn | 3 | `2` ×3 | `29` ×2, `27` | `27` ×2, `25` | 3741,21 – 3750,72 |
+| release · paket · 5 sn | 3 | `2` ×3 | `29` ×3 | `27` ×3 | 3748,44 – 3753,41 |
+
+Sabit jetonlar, yirmi altı koşunun hepsinde: `hucre=8 glif=6 kural=15
+yuva=13/1984 yuva2=0/1984 yuk=smoke istek=4 kayma=0 kapanis=clean ornek=off
+pipeline=ok`.
+
+**Bozuk koşular** (hepsi kırmızı, n = 3 × profil):
+
+| mutasyon | profil | düşen kapı | `icerik` | `sessiz` (ms) |
+|---|---|---|---|---|
+| hızlı sızıntı | debug | `MissingCounter` (`hareket=0`) | 349 · 354 · 356 | 0,00 ×3 |
+| hızlı sızıntı | release | `MissingCounter` (`hareket=0`) | 342 · 355 · 347 | 0,00 ×3 |
+| yavaş sızıntı | debug | `QuietTooShort` | 7 ×3 | 150,01 · 142,08 · 124,61 |
+| yavaş sızıntı | release | `QuietTooShort` | 7 ×3 | 155,21 · 141,24 · 130,75 |
+| durma koşulu | debug | `MotionUnsettled` | — | 0,00 · 0,00 · 2,30 |
+| durma koşulu | release | `MotionUnsettled` | — | 0,00 · 4,32 · 0,00 |
+
+**Kuralların sınaması**
+
+- **`IDLE_FRAME_LIMIT = 8`:** en yüksek sağlıklı `icerik` 2, iki katı 4 ≤ 8;
+  en düşük bozuk (hızlı sızıntı) 342 > 8. Yavaş sızıntı `icerik=7` ile
+  sınırın altında — bilinen boşluk, onu `sessiz` görüyor (aşağıda).
+- **`QUIET_FLOOR = 868 ms`:** en düşük sağlıklı gözlem 1746,88, yarısı
+  **873,44** ≥ 868; en yüksek bozuk gözlem 155,21 < 868. Taban kuralın
+  içinde; bu turun bandı 2026-09-17'ninkinden (alt uç 1737,12) ~10 ms yukarıda,
+  yani 868'in payı genişledi. Sayı "aralığın en büyük ucu" kuralıyla 873'e
+  **çıkarılmadı**: kural tabanın tavanını bağlıyor, her turda yeniden
+  seçilmesini değil — tavanın içinde kalan bir sayıyı oynatmak bir sonraki
+  turun dar bandında (09-17 gibi) yeniden indirmeyi doğururdu.
+
+**Sayaç kayıtları, sınırların çok altında:** release `icerik` 2026-09-17'nin
+`3` ×10'undan **`2` ×10**'a indi (debug zaten 2'ydi) — wgpu yolunda iki profil
+aynı. `kare` release'te iki koşuda 28 ve 27, `hareket` 26 ve 25; nedeni
+ölçülmedi, yön kısalma, yani sızıntı imzası değil. Yavaş
+sızıntının bozuk `sessiz`'i 2026-09-16'nın 129,25'inden 155,21'e çıktı — hâlâ
+tabanın beşte birinin altında. Durma koşulu kolunda `hareket` yine 25–27; kapı yerleşme
+sorusundan düşüyor, kare sayısından değil.
 
 ### 2026-09-17 — duman reçetesi değişti, band yeniden gözlendi (011)
 
