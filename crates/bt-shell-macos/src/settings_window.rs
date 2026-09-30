@@ -1,19 +1,22 @@
-//! bateri ▸ Settings… (Cmd-,): ayar penceresi — solda dört kategorili kenar
-//! çubuğu, sağda etiket–kontrol ızgarası. İskeletin ve davranışın kararları
-//! `.tasks/029-ayarlar-penceresi/discussion.md` → Karar 2–6, 9'da; burada
-//! tekrarlanmıyor.
+//! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar with four
+//! categories on the left, a label–control grid on the right. The decisions
+//! on the skeleton and behaviour are in
+//! `.tasks/029-ayarlar-penceresi/discussion.md` → Karar 2–6, 9; they are not
+//! repeated here.
 //!
-//! Pencere **kendi durumunu tutmaz**: gösterdiği her değer `AppDelegate`'in
-//! etkin ayarından ([`SettingsWindow::refresh`]) ve her kontrolün eylemi bir
-//! [`SettingsEdit`] kurup `AppDelegate::save_edit`'e verir — dosyaya yazan
-//! o, uygulayan da dosyayı okuyan bugünkü yol (`reload_settings`), yani
-//! kontrolün değeri ekrana ancak dosyadan dönerek gider.
+//! The window **holds no state of its own**: every value it shows comes from
+//! `AppDelegate`'s active settings ([`SettingsWindow::refresh`]) and every
+//! control's action builds a [`SettingsEdit`] and hands it to
+//! `AppDelegate::save_edit` — that one writes the file, and the one that
+//! applies is today's file-reading path (`reload_settings`), so a control's
+//! value reaches the screen only by coming back from the file.
 //!
-//! Kontrolün hangi satır olduğu `tag`'inde ([`Key`]); eylem seçicisi kontrolün
-//! **türüne** göre (popup, switch, slider, alan, stepper), satıra göre değil.
-//! Popup başlığı ↔ enum varyantı eşlemesi kapsamlı `match`'lerde ([`Choice`]),
-//! öğelerin sırası `bt-core`'un `NAMES` tablosunun sırası: yeni bir varyant
-//! derleme hatası verir, popup'ta sessizce eksik kalmaz.
+//! Which row a control is lives in its `tag` ([`Key`]); the action selector
+//! is by the control's **kind** (popup, switch, slider, field, stepper), not
+//! by row. The popup title ↔ enum variant mapping is in exhaustive `match`es
+//! ([`Choice`]), the order of the items is the order of `bt-core`'s `NAMES`
+//! table: a new variant is a compile error, it does not silently go missing
+//! from the popup.
 
 use std::cell::{Cell, OnceCell, RefCell};
 
@@ -48,35 +51,35 @@ use crate::app;
 use crate::settings::{self, FileState};
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
 
-/// Pencerenin içerik boyu, punto. Sabit — pencere yeniden
-/// boyutlandırılamıyor. En uzun bölme (Cursor: altı satır, dört açıklama)
-/// üstünde iki satırlık şerit ve bir satır tanısıyla da düğmeye değmiyor;
-/// 500'de şeritli Cursor bölmesi düğmeye yapışıyordu (phase-3 gözle
-/// kontrolü). Tasarım sabiti, ölçülmüş bir sayı değil.
+/// The window's content size, in points. Fixed — the window cannot be
+/// resized. The longest pane (Cursor: six rows, four notes) does not touch
+/// the button even with a two-line banner above and one line of diagnostics;
+/// at 500 the Cursor pane with a banner stuck to the button (phase-3 eyeball
+/// check). A design constant, not a measured number.
 const WINDOW_SIZE: NSSize = NSSize::new(680.0, 560.0);
-/// Kenar çubuğunun genişliği: System Settings'inkine yakın, dört kısa başlık
-/// için bol. Tasarım sabiti.
+/// The sidebar's width: close to System Settings', roomy for four short
+/// titles. A design constant.
 const SIDEBAR_WIDTH: f64 = 180.0;
-/// Sağ bölmenin iç kenar payı. macOS formlarının 20 puntoluk kenar payı.
+/// The right pane's inner margin. The 20-point margin of macOS forms.
 const MARGIN: f64 = 20.0;
-/// Etiket sütununun genişliği: dört bölmede de aynı, yoksa kategori
-/// değişince kontroller yana kayardı. En uzun etiketin ("Confirm before
-/// closing:") sığdığı genişlik.
+/// The label column's width: the same in all four panes, otherwise the
+/// controls would shift sideways when the category changes. The width the
+/// longest label ("Confirm before closing:") fits.
 const LABEL_WIDTH: f64 = 170.0;
-/// Popup'ların ortak genişliği: aynı sütunda farklı boylarda popup
-/// dağınık görünüyor. En uzun öğe ("Only when a program is running") sığıyor.
+/// The popups' common width: popups of different sizes in the same column
+/// look scattered. The longest item ("Only when a program is running") fits.
 const POPUP_WIDTH: f64 = 230.0;
-/// Slider'ların genişliği; yanında değer etiketi duruyor.
+/// The sliders' width; the value label sits next to it.
 const SLIDER_WIDTH: f64 = 170.0;
-/// Şeridin metninin kırılma genişliği: sağ bölmenin genişliğinden iki kenar
-/// payı, kutunun iki iç payı, sembol ve aralığı düşülmüş hâli.
+/// The banner text's wrap width: the right pane's width minus two margins,
+/// the box's two inner paddings, the symbol and its spacing.
 const BANNER_TEXT_WIDTH: f64 =
     WINDOW_SIZE.width - SIDEBAR_WIDTH - 2.0 * MARGIN - 2.0 * 10.0 - 16.0 - 8.0;
-/// Açıklama metninin kırılma genişliği: popup'ın genişliği — açıklama
-/// üstündeki kontrolün sağ kenarını aşmasın (ilk ekran görüntüsünde aşıyordu).
+/// The note text's wrap width: the popup's width — the note must not exceed
+/// the right edge of the control above it (it did in the first screenshot).
 const NOTE_WIDTH: f64 = POPUP_WIDTH;
 
-/// Kenar çubuğunun satırları.
+/// The sidebar's rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Category {
     General,
@@ -102,7 +105,7 @@ impl Category {
         }
     }
 
-    /// SF Symbol adı; sembol bulunamazsa ikon boş kalır, satır kalır.
+    /// SF Symbol name; if the symbol is not found the icon stays empty, the row stays.
     fn symbol(self) -> &'static str {
         match self {
             Category::General => "gearshape",
@@ -113,7 +116,7 @@ impl Category {
     }
 }
 
-/// Bir kontrolün hangi ayar satırı olduğu — kontrolün `tag`'i.
+/// Which settings row a control is — the control's `tag`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Key {
     ConfirmClose,
@@ -140,7 +143,7 @@ enum Key {
 }
 
 impl Key {
-    /// Sıra `tag`'in ta kendisi: `ALL[tag]`.
+    /// The order is the `tag` itself: `ALL[tag]`.
     const ALL: [Key; 21] = [
         Key::ConfirmClose,
         Key::Clipboard,
@@ -173,8 +176,8 @@ impl Key {
         Self::ALL.get(usize::try_from(tag).ok()?).copied()
     }
 
-    /// Dosyadaki noktalı yolu — `Diagnostic::key`'in dili; satırın tanısı bu
-    /// eşleşmeyle bulunuyor. Ayrıştırıcıyla bağı bir sınama tutuyor
+    /// The dotted path in the file — `Diagnostic::key`'s language; the row's
+    /// diagnostic is found by this mapping. A test holds its tie to the parser
     /// (`every_row_receives_its_own_diagnostic`).
     fn path(self) -> &'static str {
         match self {
@@ -203,37 +206,38 @@ impl Key {
     }
 }
 
-/// Kilitli pencerenin şeridinde sebebin altındaki cümle (029 phase-3).
+/// The sentence under the reason in a locked window's banner (029 phase-3).
 const LOCK_HINT: &str = "Fix the file and save it; this window follows.";
 
-/// Sağ bölmenin üstündeki şerit; satırı yoksa görünmez.
+/// The banner above the right pane; invisible if it has no lines.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Banner {
-    /// Alt başlığın metinleri, aynen: yazma hatası, kilidin sebebi, hiçbir
-    /// satıra düşmeyen tanı.
+    /// The subtitle's texts, verbatim: a write error, the lock's reason, a
+    /// diagnostic that lands on no row.
     lines: Vec<String>,
-    /// Altında, ikincil renkte: ne yapılacağı.
+    /// Below it, in the secondary colour: what to do.
     hint: Option<&'static str>,
 }
 
-/// Pencerenin dosyanın hâlinden gördüğü (029 Karar 7) — saf, yani üç hâli
-/// sınama pencere kurmadan görüyor.
+/// What the window sees from the file's state (029 Karar 7) — pure, so the
+/// three states are tested without building a window.
 #[derive(Debug, PartialEq, Eq)]
 struct Status {
-    /// Bütün kontroller devre dışı; "Open settings.toml" varsayılan düğme.
+    /// All controls disabled; "Open settings.toml" is the default button.
     locked: bool,
     banner: Banner,
-    /// Kabul edilmeyen değerler: satır → tanının iletisi (açıklamanın
-    /// yerine). Satır numarası ve dosya adı yok — satırın kendisi bağlam.
+    /// Values that were not accepted: row → the diagnostic's message (in place
+    /// of the note). No line number or file name — the row itself is the context.
     rows: Vec<(Key, String)>,
 }
 
-/// Dosyanın hâli + yazma yuvası → pencerenin göreceği.
+/// File state + write slot → what the window will see.
 ///
-/// Bir satıra düşmeyen tanı (bölüm olmayan bölüm, emekli anahtar) şeride
-/// gidiyor: alt başlıkta görünüp pencerede görünmeyen bir tanı kullanıcıyı
-/// iki yere bakmaya zorlardı. Yazma hatası şeridin başında, çünkü
-/// kullanıcının az önce yaptığı şeyin cevabı (alt başlığın sırası).
+/// A diagnostic that lands on no row (a nonexistent section, a retired key)
+/// goes to the banner: a diagnostic visible in the subtitle but not in the
+/// window would force the user to look in two places. A write error is at the
+/// head of the banner, because it is the answer to what the user just did
+/// (the subtitle's order).
 fn status(state: &FileState, write: &[String]) -> Status {
     let mut banner = Banner {
         lines: write.to_vec(),
@@ -267,9 +271,9 @@ fn status(state: &FileState, write: &[String]) -> Status {
     }
 }
 
-/// Popup'la seçilen bir dizge enum'u: öğeler `bt-core`'un yazılış
-/// tablosundan (`NAMES`, sırası dahil), başlıklar buradaki kapsamlı
-/// `match`'ten. Başlık bir UI dizgisi, yazılış dosyanın sözlüğü — ikisi ayrı.
+/// A string enum chosen with a popup: the items from `bt-core`'s spelling
+/// table (`NAMES`, order included), the titles from the exhaustive `match`
+/// here. The title is a UI string, the spelling is the file's vocabulary — the two are separate.
 trait Choice: Copy + PartialEq + 'static {
     fn names() -> &'static [(&'static str, Self)];
     fn title(self) -> &'static str;
@@ -404,26 +408,26 @@ impl Choice for Erase {
     }
 }
 
-/// Hareketi kapatan bir girdinin ezdiği satır: açık mı ve açıklamasının
-/// yerine ne söylüyor.
+/// A row overridden by an input that turns motion off: whether it is enabled
+/// and what it says in place of its note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Override {
     enabled: bool,
     note: &'static str,
 }
 
-/// `cursor_motion = "snap"` ya da **etkin** Hareketi Azalt (`reduce`,
-/// ayarla sistemin birleşmiş cevabı) bu satırın değerini eziyor mu — saf,
-/// yani kural pencere kurmadan sınanıyor.
+/// Whether `cursor_motion = "snap"` or an **active** Reduce Motion (`reduce`,
+/// the setting and the system's merged answer) overrides this row's value —
+/// pure, so the rule is tested without building a window.
 ///
-/// Ezilen satır gizlenmiyor, **devre dışı** kalıyor ve nedenini söylüyor
-/// (029 Karar 6): değer görünür kalır, ezen girdi kalkınca geri gelir.
-/// Kural indirgemenin sahiplerininki (`bt_gpu`'nun `Motion::glyph_fx`'i,
-/// `app::resolve_smooth_scroll`): `snap` ikisinin de üstünde; Hareketi
-/// Azalt hayaleti ve pürüzsüz kaydırmayı kapatıyor, yazmayı ise belirmeye
-/// **indiriyor** — o satır açık kalıyor, çünkü `off` ile efekt arasındaki
-/// seçim orada da bir fark, ve kapalı yazma kapalı kaldığı için orada
-/// söylenecek bir şey yok (030 Karar 7).
+/// An overridden row is not hidden, it is left **disabled** and says why
+/// (029 Karar 6): the value stays visible and comes back when the overriding
+/// input goes away. The rule is that of the reduction's owners (`bt_gpu`'s
+/// `Motion::glyph_fx`, `app::resolve_smooth_scroll`): `snap` is above both;
+/// Reduce Motion turns off the ghost and smooth scrolling, while it
+/// **reduces** typing to a fade-in — that row stays enabled, because the
+/// choice between `off` and an effect is a difference there too, and since
+/// the disabled typing stays disabled there is nothing to say there (030 Karar 7).
 fn motion_override(key: Key, settings: &Settings, reduce: bool) -> Option<Override> {
     let disabled = |note| {
         Some(Override {
@@ -445,25 +449,25 @@ fn motion_override(key: Key, settings: &Settings, reduce: bool) -> Option<Overri
     }
 }
 
-/// Popup'ın öğe başlıkları, `NAMES` sırasıyla.
+/// The popup's item titles, in `NAMES` order.
 fn choice_titles<T: Choice>() -> Vec<&'static str> {
     T::names().iter().map(|&(_, value)| value.title()).collect()
 }
 
-/// Seçili öğenin varyantı; `-1` (seçim yok) ya da taşan indeks `None`.
+/// The selected item's variant; `-1` (no selection) or an overflowing index is `None`.
 fn choice_at<T: Choice>(index: NSInteger) -> Option<T> {
     let index = usize::try_from(index).ok()?;
     T::names().get(index).map(|&(_, value)| value)
 }
 
-/// Varyantın öğe indeksi.
+/// The variant's item index.
 fn choice_index<T: Choice>(value: T) -> Option<usize> {
     T::names()
         .iter()
         .position(|&(_, candidate)| candidate == value)
 }
 
-/// İki değerli ayarlar switch: açık ↔ `copy`.
+/// A switch for two-valued settings: on ↔ `copy`.
 fn osc52_on(mode: Osc52) -> bool {
     match mode {
         Osc52::Copy => true,
@@ -478,11 +482,13 @@ fn smooth_on(smooth: SmoothScroll) -> bool {
     }
 }
 
-/// Blink hızı slider'ının konumu (`0..=1`, sağ **hızlı**, yani kısa yarım
-/// periyot) ↔ yarım periyot, saniye. Ölçek **logaritmik**: aralık yüz kat
-/// (`CURSOR_BLINK_RANGE`) ve doğrusal ölçekte kullanışlı değerlerin hepsi
-/// solun ilk yüzdesine sıkışırdı (029 Karar 5). Uçlar açıkça dönüyor, çünkü
-/// `exp(ln(x))` bit bit `x` değil ve uçların aralığın uçları olması sözleşme.
+/// The blink-speed slider's position (`0..=1`, right is **fast**, i.e. a
+/// short half period) ↔ half period, in seconds. The scale is
+/// **logarithmic**: the range is a hundredfold (`CURSOR_BLINK_RANGE`) and on
+/// a linear scale all the useful values would be squeezed into the left's
+/// first percent (029 Karar 5). The ends return explicitly, because
+/// `exp(ln(x))` is not bit for bit `x` and the ends being the range's ends
+/// is the contract.
 fn blink_from_position(position: f64) -> f64 {
     let (min, max) = (*CURSOR_BLINK_RANGE.start(), *CURSOR_BLINK_RANGE.end());
     let t = position.clamp(0.0, 1.0);
@@ -501,15 +507,15 @@ fn blink_to_position(seconds: f64) -> f64 {
     ((max.ln() - seconds.ln()) / (max.ln() - min.ln())).clamp(0.0, 1.0)
 }
 
-/// Ondalığı iki basamakta, sondaki sıfırlar olmadan (`0.5`, `1.25`, `13`) —
-/// dosyaya yazılanla aynı hassasiyet (`SettingsEdit`'in iki basamağı).
+/// A decimal to two places, without trailing zeros (`0.5`, `1.25`, `13`) —
+/// the same precision as what is written to the file (`SettingsEdit`'s two places).
 fn decimal_label(value: f64) -> String {
     let text = format!("{value:.2}");
     let text = text.trim_end_matches('0').trim_end_matches('.');
     text.to_owned()
 }
 
-/// Alanın kabul ettiği `scrollback`: tamsayı, `0..=SCROLLBACK_MAX`.
+/// The `scrollback` the field accepts: an integer, `0..=SCROLLBACK_MAX`.
 fn parse_scrollback(text: &str) -> Option<usize> {
     text.trim()
         .parse::<usize>()
@@ -517,7 +523,7 @@ fn parse_scrollback(text: &str) -> Option<usize> {
         .filter(|&lines| lines <= SCROLLBACK_MAX)
 }
 
-/// Alanın kabul ettiği ondalık: sonlu ve aralığın içinde.
+/// The decimal the field accepts: finite and inside the range.
 fn parse_decimal(text: &str, range: std::ops::RangeInclusive<f64>) -> Option<f64> {
     text.trim()
         .parse::<f64>()
@@ -525,19 +531,20 @@ fn parse_decimal(text: &str, range: std::ops::RangeInclusive<f64>) -> Option<f64
         .filter(|value| value.is_finite() && range.contains(value))
 }
 
-/// Tema popup'ının bir öğesi.
+/// An item of the theme popup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ThemeItem {
-    /// "Match System" — `SYSTEM_THEME`'i yazar.
+    /// "Match System" — writes `SYSTEM_THEME`.
     System,
     Separator,
     Named(String),
 }
 
-/// Tema popup'ının öğeleri ve seçili olanın indeksi — Theme ▸ menüsünün
-/// sırası (`menu::fill_themes`): Match System, gömülüler, kullanıcınınkiler.
-/// Dosyadaki ad listede yoksa (silinmiş tema) sona o eklenir: popup
-/// kullanıcının yazdığını gizlemez (Karar 3'ün Font kuralı).
+/// The theme popup's items and the selected one's index — the order of the
+/// Theme ▸ menu (`menu::fill_themes`): Match System, embedded ones, the
+/// user's. If the name in the file is not in the list (a deleted theme) it is
+/// appended at the end: the popup does not hide what the user wrote (Karar
+/// 3's Font rule).
 fn theme_items(
     selected: &str,
     with_system: bool,
@@ -574,20 +581,20 @@ fn theme_items(
     (items, index)
 }
 
-/// Font popup'ının bir öğesi.
+/// An item of the font popup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FontItem {
-    /// Zincir: `family = ""`.
+    /// The chain: `family = ""`.
     Default,
     Separator,
     Family(String),
-    /// Dosyadaki ama listede olmayan aile; seçmek bir şey yazmaz (zaten o).
+    /// A family that is in the file but not in the list; choosing it writes nothing (it already is).
     Missing(String),
 }
 
-/// Font popup'ının öğeleri ve seçili olanın indeksi. Eşleşme harf duyarsız:
-/// zincir de adı öyle buluyor (`bt-atlas`'ın `same_family`'si), yani
-/// `family = "menlo"` listedeki `Menlo`'dur.
+/// The font popup's items and the selected one's index. Matching is case
+/// insensitive: the chain finds the name that way too (`bt-atlas`'s
+/// `same_family`), so `family = "menlo"` is the listed `Menlo`.
 fn font_items(current: Option<&str>, families: &[String]) -> (Vec<FontItem>, usize) {
     let mut items = vec![FontItem::Default];
     if !families.is_empty() {
@@ -610,7 +617,7 @@ fn font_items(current: Option<&str>, families: &[String]) -> (Vec<FontItem>, usi
     (items, index)
 }
 
-/// Listede olmayan ailenin başlığı: ad ve zincirin onun için söyleyeceği.
+/// The title of a family not in the list: the name and what the chain will say for it.
 fn missing_font_title(name: &str, notice: Option<FontNotice>) -> String {
     match notice {
         Some(FontNotice::FamilyNotFound { .. }) => format!("{name} — not found"),
@@ -619,22 +626,22 @@ fn missing_font_title(name: &str, notice: Option<FontNotice>) -> String {
     }
 }
 
-/// Bir sayı alanı ve onun stepper'ı.
+/// A number field and its stepper.
 struct Number {
     field: Retained<NSTextField>,
     stepper: Retained<NSStepper>,
-    /// Stepper'ın kendi aralığı; dosyadaki değer dışındaysa o değeri de
-    /// kapsayacak kadar genişletiliyor ([`set_number`]).
+    /// The stepper's own range; if the file's value is outside it, it is
+    /// widened to include that value too ([`set_number`]).
     range: (f64, f64),
-    /// Dosyanın değeri ve alanda gösterilen yazılışı — son tazelemeden.
-    /// Değişmemiş bir alandan geçip çıkmak (Tab) yazmasın diye eylem buna
-    /// bakıyor.
+    /// The file's value and the spelling shown in the field — from the last
+    /// refresh. The action looks at this so that passing through an unchanged
+    /// field (Tab) does not write.
     shown: RefCell<(f64, String)>,
 }
 
 impl Number {
-    /// Alanın metni dosyadakinin aynısı mı: yazılışı aynı ya da değeri
-    /// yazılacak hassasiyette (iki basamak) aynı.
+    /// Whether the field's text is the same as the file's: the same spelling
+    /// or a value that is the same at the precision it will be written (two places).
     fn unchanged(&self, text: &str, value: Option<f64>) -> bool {
         let shown = self.shown.borrow();
         let round = |value: f64| (value * 100.0).round();
@@ -642,13 +649,13 @@ impl Number {
     }
 }
 
-/// Bir slider ve değer etiketi.
+/// A slider and its value label.
 struct Slide {
     slider: Retained<NSSlider>,
     value: Retained<NSTextField>,
 }
 
-/// Pencerenin kontrolleri — `refresh`'in yazdığı, eylemlerin okuduğu.
+/// The window's controls — what `refresh` writes and the actions read.
 struct Controls {
     confirm_close: Retained<NSPopUpButton>,
     clipboard: Retained<NSSwitch>,
@@ -671,26 +678,26 @@ struct Controls {
     reduce_motion: Retained<NSPopUpButton>,
     keypress: Retained<NSPopUpButton>,
     erase: Retained<NSPopUpButton>,
-    /// Dört bölmenin satırları: kilit, bağımlı satır ve satır tanısı
-    /// buradan.
+    /// The four panes' rows: the lock, the dependent row and the row's
+    /// diagnostic come from here.
     rows: Vec<Row>,
 }
 
-/// Izgaranın bir satırı: etiket, kontrolleri ve altındaki not satırı.
+/// A row of the grid: the label, its controls and the note row below it.
 struct Row {
     key: Key,
     label: Retained<NSTextField>,
     controls: Vec<Retained<NSControl>>,
-    /// Açıklama ya da tanı; ikisi de yoksa not satırı gizli (boşluk
-    /// bırakmıyor).
+    /// Description or diagnostic; if there is neither the note row is hidden
+    /// (it leaves no gap).
     note: Retained<NSTextField>,
     note_row: Retained<NSGridRow>,
     description: Option<&'static str>,
 }
 
 impl Row {
-    /// Satırın kontrolleri açık mı, etiketi soluk mu (Karar 6'nın bağımlı
-    /// satırı ve Karar 7'nin kilidi aynı kapıdan).
+    /// Whether the row's controls are enabled, whether its label is dimmed
+    /// (Karar 6's dependent row and Karar 7's lock go through the same gate).
     fn set_enabled(&self, enabled: bool) {
         for control in &self.controls {
             control.setEnabled(enabled);
@@ -703,10 +710,11 @@ impl Row {
         self.label.setTextColor(Some(&color));
     }
 
-    /// Notu tanıya, ezen girdinin nedenine ([`motion_override`]) ya da
-    /// açıklamaya kurar — bu sırayla; hiçbiri yoksa satırı gizler. Kapalı
-    /// satırın açıklaması etiketiyle birlikte soluyor, neden soluklaşmıyor:
-    /// satırın neden kapalı olduğunu söyleyen tek metin o.
+    /// Sets the note to the diagnostic, the reason the overriding input gives
+    /// ([`motion_override`]) or the description — in that order; if there is
+    /// none it hides the row. A disabled row's description dims together with
+    /// its label, the reason does not dim: it is the only text that says why
+    /// the row is disabled.
     fn set_note(&self, diagnostic: Option<&str>, reason: Option<&str>, enabled: bool) {
         let (text, color) = match (diagnostic, reason, self.description) {
             (Some(diagnostic), _, _) => (diagnostic, NSColor::systemOrangeColor()),
@@ -731,27 +739,27 @@ pub(crate) struct Ivars {
     sidebar: OnceCell<Retained<NSTableView>>,
     header: OnceCell<Retained<NSTextField>>,
     banner: OnceCell<BannerView>,
-    /// Pencere bir kez gösterildi mi (ortalamanın kapısı).
+    /// Whether the window has been shown once (the gate of centring).
     shown_once: Cell<bool>,
     pane_tops: OnceCell<PaneTops>,
-    /// "Open settings.toml": kilitliyken varsayılan düğme (Enter).
+    /// "Open settings.toml": the default button (Enter) while locked.
     open: OnceCell<Retained<NSButton>>,
-    /// Kategori başına bir ızgara; yalnız seçili olan görünür.
+    /// One grid per category; only the selected one is visible.
     panes: OnceCell<Vec<Retained<NSGridView>>>,
     controls: OnceCell<Controls>,
-    /// Popup'ların öğe listeleri — seçilen indeksin anlamı. Her `refresh`
-    /// yeniden kuruyor (tema dizinine yeni dosya).
+    /// The popups' item lists — the meaning of the selected index. Rebuilt on
+    /// every `refresh` (a new file in the theme directory).
     themes: RefCell<Vec<ThemeItem>>,
     light_themes: RefCell<Vec<ThemeItem>>,
     dark_themes: RefCell<Vec<ThemeItem>>,
     fonts: RefCell<Vec<FontItem>>,
-    /// Makinedeki eşaralıklı aileler — pencere doğarken **bir kez**: liste
-    /// her adayı CoreText'le açıyor ve her kayıtta yeniden kurulmaya değmez.
+    /// The monospaced families on the machine — **once** when the window is
+    /// born: the list opens every candidate with CoreText and is not worth rebuilding on every save.
     families: Vec<String>,
 }
 
 define_class!(
-    // SAFETY: NSObject alt sınıflama şartı taşımaz; Drop uygulanmıyor.
+    // SAFETY: NSObject has no subclassing requirement; Drop is not implemented.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "BateriSettingsWindow"]
@@ -844,11 +852,12 @@ define_class!(
             self.save(edit);
         }
 
-        /// Slider sürüklenirken yalnız değer etiketi değişir; dosyaya
-        /// **bırakınca** yazılır (Karar 5). `continuous` açık, yoksa etiket
-        /// sürükleme boyunca donardı: yazıp yazmama kararı olayın türünden —
-        /// fare basılı ve sürükleniyorsa ara değer. Klavyeyle (ok tuşu)
-        /// değişen slider'ın olayı bir tuş olayı ve yazar.
+        /// While a slider is dragged only the value label changes; it is
+        /// written to the file **on release** (Karar 5). `continuous` is on,
+        /// otherwise the label would freeze during the drag: the decision to
+        /// write or not is from the event's type — if the mouse is down and
+        /// dragging it is an intermediate value. The event of a slider changed
+        /// with the keyboard (arrow key) is a key event and it writes.
         #[unsafe(method(sliderChanged:))]
         fn slider_changed(&self, sender: Option<&AnyObject>) {
             let Some(slider) = sender.and_then(|s| s.downcast_ref::<NSSlider>()) else {
@@ -873,8 +882,8 @@ define_class!(
                     field.setStringValue(&NSString::from_str(&text));
                 }
             }
-            // İzleme döngüsü sürükleme dışında olay da taşıyabiliyor (Force
-            // Touch basıncı, periyodik olay): onlar da jestin ortası.
+            // Besides dragging, the tracking loop can carry other events
+            // (Force Touch pressure, a periodic event): those are mid-gesture too.
             let dragging = NSApplication::sharedApplication(self.mtm())
                 .currentEvent()
                 .is_some_and(|event| {
@@ -898,8 +907,8 @@ define_class!(
             self.save(edit);
         }
 
-        /// Sayı alanı: Enter'da ya da odaktan çıkınca (Karar 5). Kabul
-        /// edilmeyen girdi yazılmaz, alan etkin değere döner.
+        /// Number field: on Enter or on leaving focus (Karar 5). An input that
+        /// is not accepted is not written, the field returns to the active value.
         #[unsafe(method(fieldChanged:))]
         fn field_changed(&self, sender: Option<&AnyObject>) {
             let Some(field) = sender.and_then(|s| s.downcast_ref::<NSTextField>()) else {
@@ -921,8 +930,8 @@ define_class!(
                 ),
                 _ => return,
             };
-            // Değişmeyen alandan geçmek yazmaz: yuvarlanmış yazılış
-            // (`1.125` → "1.13") dosyadaki değeri sessizce değiştirirdi.
+            // Passing through an unchanged field does not write: the rounded
+            // spelling (`1.125` → "1.13") would silently change the file's value.
             if number.unchanged(&text, value) {
                 return;
             }
@@ -933,9 +942,9 @@ define_class!(
             });
             match edit {
                 Some(edit) => self.save(Some(edit)),
-                // Kabul edilmeyen girdi: alan dosyadaki yazılışa döner.
-                // Doğrudan, tazelemeden değil — tazeleme düzenlenmekte olan
-                // alana dokunmuyor ([`set_number`]).
+                // An input that is not accepted: the field returns to the
+                // spelling in the file. Directly, not through refresh — a
+                // refresh does not touch the field being edited ([`set_number`]).
                 None => {
                     let shown = number.shown.borrow().1.clone();
                     field.setStringValue(&NSString::from_str(&shown));
@@ -950,8 +959,8 @@ define_class!(
             };
             let value = stepper.doubleValue();
             let edit = match Key::from_tag(stepper.tag()) {
-                // Stepper'ın sınırları `0..=SCROLLBACK_MAX` ve adımı tam
-                // sayı: değer negatif ya da kesirli olamıyor.
+                // The stepper's bounds are `0..=SCROLLBACK_MAX` and its step is
+                // a whole number: the value cannot be negative or fractional.
                 Some(Key::Scrollback) => Some(SettingsEdit::Scrollback(value.round() as usize)),
                 Some(Key::Size) => Some(SettingsEdit::FontSize(value)),
                 Some(Key::LineHeight) => Some(SettingsEdit::LineHeight(value)),
@@ -960,7 +969,7 @@ define_class!(
             self.save(edit);
         }
 
-        /// "Open settings.toml": bugünkü "Settings…" yolu (Karar 8).
+        /// "Open settings.toml": today's "Settings…" path (Karar 8).
         #[unsafe(method(openFile:))]
         fn open_file(&self, _sender: Option<&AnyObject>) {
             if let Some(delegate) = app::delegate(self.mtm()) {
@@ -970,7 +979,7 @@ define_class!(
     }
 );
 
-/// Eylemin tema öğesi → yazılacak ad.
+/// The action's theme item → the name to write.
 fn theme_edit(items: &[ThemeItem], index: NSInteger) -> Option<String> {
     match items.get(usize::try_from(index).ok()?)? {
         ThemeItem::System => Some(SYSTEM_THEME.to_owned()),
@@ -979,8 +988,8 @@ fn theme_edit(items: &[ThemeItem], index: NSInteger) -> Option<String> {
     }
 }
 
-/// Eylemin font öğesi → yazılacak aile; listede olmayan dosya değeri
-/// yeniden seçilince yazılacak bir şey yok.
+/// The action's font item → the family to write; there is nothing to write
+/// when the file's value that is not in the list is selected again.
 fn font_edit(items: &[FontItem], index: NSInteger) -> Option<String> {
     match items.get(usize::try_from(index).ok()?)? {
         FontItem::Default => Some(String::new()),
@@ -989,13 +998,13 @@ fn font_edit(items: &[FontItem], index: NSInteger) -> Option<String> {
     }
 }
 
-/// Blink hızı etiketi: saniye (`0.5 s`).
+/// The blink-speed label: seconds (`0.5 s`).
 fn seconds_label(seconds: f64) -> String {
     format!("{} s", decimal_label(seconds))
 }
 
 impl SettingsWindow {
-    /// Pencereyi ve bütün kontrolleri kurar; görünür yapmaz.
+    /// Builds the window and all the controls; does not make it visible.
     pub(crate) fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(Ivars {
             window: OnceCell::new(),
@@ -1013,14 +1022,14 @@ impl SettingsWindow {
             fonts: RefCell::new(Vec::new()),
             families: bt_gpu::monospaced_families(),
         });
-        // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
+        // SAFETY: NSObject's init takes no arguments and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build();
         this
     }
 
-    /// Pencere açık mı (simge durumunda da) — kapalıyken tazelemenin
-    /// anlamı yok, yeniden açılış tazeliyor.
+    /// Whether the window is open (miniaturized too) — refreshing while closed
+    /// is pointless, reopening refreshes.
     pub(crate) fn is_open(&self) -> bool {
         self.ivars()
             .window
@@ -1028,13 +1037,13 @@ impl SettingsWindow {
             .is_some_and(|window| window.isVisible() || window.isMiniaturized())
     }
 
-    /// Pencereyi öne getirir (ilk açılışta ortalar); kategori son seçilen.
+    /// Brings the window to the front (centres it on first open); the category is the last selected.
     pub(crate) fn show(&self) {
         let Some(window) = self.ivars().window.get() else {
             return;
         };
-        // Yalnız ilk açılışta: kapatmak ve simge durumu da `isVisible`'ı
-        // düşürüyor ve kullanıcının taşıdığı yer her açılışta kaybolurdu.
+        // Only on the first open: closing and miniaturizing also drop
+        // `isVisible`, and the place the user moved it to would be lost on every open.
         if !self.ivars().shown_once.replace(true) {
             window.center();
         }
@@ -1042,16 +1051,17 @@ impl SettingsWindow {
         window.makeKeyAndOrderFront(None);
     }
 
-    /// Kontrolleri etkin ayarla doldurur — pencerenin gösterdiği değerin tek
-    /// kaynağı. Programla kurulan değer eylem tetiklemiyor, yani bir kontrolün
-    /// eyleminin içinden (yaz → `reload_settings` → buraya) çağrılması döngü
-    /// doğurmaz.
+    /// Fills the controls with the active settings — the single source of the
+    /// value the window shows. A value set programmatically triggers no
+    /// action, so calling it from inside a control's action (write →
+    /// `reload_settings` → here) does not create a loop.
     ///
-    /// Dosyanın hâli (`state`) ve yazma yuvası (`write`) kilidi, şeridi ve
-    /// satır tanılarını kuruyor ([`status`]); her tazeleme hepsini baştan
-    /// kurduğu için düzelen hâlin izi kalmıyor. `reduce` Hareketi Azalt'ın
-    /// **çözülmüş** cevabı (ayar + sistem): hareket satırlarının ezilip
-    /// ezilmediği ondan ([`motion_override`]), ayarın kendisinden değil.
+    /// The file's state (`state`) and the write slot (`write`) build the lock,
+    /// the banner and the row diagnostics ([`status`]); since every refresh
+    /// rebuilds all of them from scratch no trace of a healed state is left.
+    /// `reduce` is Reduce Motion's **resolved** answer (setting + system):
+    /// whether the motion rows are overridden comes from it
+    /// ([`motion_override`]), not from the setting itself.
     pub(crate) fn refresh(
         &self,
         settings: &Settings,
@@ -1141,7 +1151,7 @@ impl SettingsWindow {
                 .map(|(_, message)| message.as_str());
             row.set_note(diagnostic, forced.map(|forced| forced.note), enabled);
         }
-        // Değer etiketi bir etiket, kontrol değil: soluklaşması elle.
+        // The value label is a label, not a control: dimming it is by hand.
         let value_color = if !status.locked && blinks {
             NSColor::secondaryLabelColor()
         } else {
@@ -1161,7 +1171,7 @@ impl SettingsWindow {
         }
         self.layout_panes(!status.banner.lines.is_empty());
         if let Some(open) = self.ivars().open.get() {
-            // Kilitte dosyayı onarmak bir tık — Enter — uzakta.
+            // On a lock, repairing the file is one click — Enter — away.
             open.setKeyEquivalent(if status.locked {
                 ns_string!("\r")
             } else {
@@ -1176,14 +1186,14 @@ impl SettingsWindow {
         };
         match edit {
             Some(edit) => delegate.save_edit(&edit),
-            // Ayraç ya da tanınmayan kontrol: ekrandaki seçim dosyayla
-            // ayrışmasın.
+            // A separator or an unrecognised control: the on-screen selection
+            // must not diverge from the file.
             None => delegate.refresh_settings_window(),
         }
     }
 
-    /// Izgaraları şeridin altına ya da başlığın altına bağlar. Önce eski
-    /// takım bırakılıyor: ikisi bir an birlikte etkin olsa çelişirlerdi.
+    /// Ties the grids under the banner or under the header. The old set is
+    /// released first: if both were active for a moment they would conflict.
     fn layout_panes(&self, banner_shown: bool) {
         let Some(tops) = self.ivars().pane_tops.get() else {
             return;
@@ -1199,7 +1209,7 @@ impl SettingsWindow {
         activate(on);
     }
 
-    /// Kenar çubuğunun seçimine göre başlığı ve ızgarayı değiştirir.
+    /// Changes the header and the grid according to the sidebar's selection.
     fn show_selected(&self) {
         let (Some(sidebar), Some(header), Some(panes)) = (
             self.ivars().sidebar.get(),
@@ -1224,11 +1234,11 @@ impl SettingsWindow {
         self.as_ref()
     }
 
-    /// Bir kontrolü bu nesnenin eylemine bağlar.
+    /// Wires a control to this object's action.
     fn wire(&self, control: &NSControl, key: Key, action: Sel) {
         control.setTag(key.tag());
-        // SAFETY: hedef zayıf referans; bu nesne `AppDelegate`'in ivar'ında
-        // süreç boyunca yaşıyor.
+        // SAFETY: the target is a weak reference; this object lives for the
+        // whole process in `AppDelegate`'s ivar.
         unsafe {
             control.setTarget(Some(self.target()));
             control.setAction(Some(action));
@@ -1263,8 +1273,8 @@ impl SettingsWindow {
         width_constraint(&field, width);
         self.wire(&field, key, sel!(fieldChanged:));
         if let Some(cell) = field.cell() {
-            // Odaktan çıkınca da eylem: Karar 5'in "Enter'da ya da odaktan
-            // çıkınca"sı.
+            // An action on leaving focus too: Karar 5's "on Enter or on
+            // leaving focus".
             cell.setSendsActionOnEndEditing(true);
         }
         let stepper = NSStepper::new(mtm);
@@ -1298,7 +1308,7 @@ impl SettingsWindow {
         Slide { slider, value }
     }
 
-    /// Pencerenin iskeleti ve bütün kontroller.
+    /// The window's skeleton and all the controls.
     fn build(&self) {
         let mtm = self.mtm();
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), WINDOW_SIZE);
@@ -1306,8 +1316,8 @@ impl SettingsWindow {
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
             | NSWindowStyleMask::FullSizeContentView;
-        // SAFETY: defer=false ile pencere hemen yaratılır; `releasedWhenClosed`
-        // hemen altında kapatılıyor (terminal penceresinin gerekçesi).
+        // SAFETY: with defer=false the window is created immediately;
+        // `releasedWhenClosed` is turned off right below (the terminal window's reason).
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -1317,14 +1327,14 @@ impl SettingsWindow {
                 false,
             )
         };
-        // SAFETY: yalnız sahiplik semantiğini değiştirir; Retained sahibi biziz.
-        // Kapatmak gizler, yeniden açınca aynı kategoride döner (Karar 4).
+        // SAFETY: only changes the ownership semantics; we are the Retained's owner.
+        // Closing hides, reopening returns on the same category (Karar 4).
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(ns_string!("Settings"));
-        // Başlık bölmenin başlığında; pencere başlığı Window menüsü için.
+        // The title is in the pane's header; the window title is for the Window menu.
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setTitlebarAppearsTransparent(true);
-        // ⌘T ayar penceresine sekme eklemesin.
+        // ⌘T must not add a tab to the settings window.
         window.setTabbingMode(NSWindowTabbingMode::Disallowed);
 
         let sidebar = self.build_sidebar();
@@ -1363,8 +1373,8 @@ impl SettingsWindow {
         table.setAllowsEmptySelection(false);
         let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), ns_string!("c"));
         table.addTableColumn(&column);
-        // SAFETY: kaynak ve delegate zayıf referans; bu nesne süreç boyunca
-        // yaşıyor (`AppDelegate`'in ivar'ı).
+        // SAFETY: the source and delegate are weak references; this object
+        // lives for the whole process (`AppDelegate`'s ivar).
         unsafe {
             table.setDataSource(Some(ProtocolObject::from_ref(self)));
             table.setDelegate(Some(ProtocolObject::from_ref(self)));
@@ -1411,9 +1421,9 @@ impl SettingsWindow {
                 .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -MARGIN),
         ]);
 
-        // Izgaranın tepesi iki yerden birine bağlı: şerit yokken başlığa,
-        // varken şeride ([`SettingsWindow::layout_panes`]). Şerit gizlenince
-        // yer kaplamıyor, yani ızgara başlığın altına geri çıkıyor.
+        // The grid's top is tied to one of two places: to the header when there
+        // is no banner, to the banner when there is ([`SettingsWindow::layout_panes`]).
+        // A hidden banner takes no room, so the grid moves back up under the header.
         let (panes, controls) = self.build_panes();
         let mut under_header = Vec::new();
         let mut under_banner = Vec::new();
@@ -1434,8 +1444,8 @@ impl SettingsWindow {
         activate(&under_header);
         banner.frame.setHidden(true);
 
-        // SAFETY: hedef zayıf referans ve süreç boyunca yaşıyor; seçici bu
-        // sınıfın `openFile:`'ı.
+        // SAFETY: the target is a weak reference and lives for the whole
+        // process; the selector is this class's `openFile:`.
         let open = unsafe {
             NSButton::buttonWithTitle_target_action(
                 ns_string!("Open settings.toml"),
@@ -1682,15 +1692,16 @@ impl SettingsWindow {
     }
 }
 
-/// Izgaraların tepesini bağlayan iki kısıt takımı; biri etkin.
+/// The two constraint sets that tie the grids' top; one is active.
 struct PaneTops {
     under_header: Vec<Retained<NSLayoutConstraint>>,
     under_banner: Vec<Retained<NSLayoutConstraint>>,
 }
 
-/// Şeridin görünümü: hafif turuncu zeminli yuvarlak bir kutu, solda uyarı
-/// sembolü, sağda metin ve altında ikincil renkte ne yapılacağı. Renkler
-/// sistemin anlamsal renkleri — açık ve koyu görünümde ayrı ayrı doğru.
+/// The banner's view: a rounded box with a light orange fill, a warning
+/// symbol on the left, the text on the right and what to do below it in the
+/// secondary colour. The colours are the system's semantic colours — each
+/// correct in the light and dark appearance.
 struct BannerView {
     frame: Retained<NSBox>,
     lines: Retained<NSTextField>,
@@ -1755,7 +1766,7 @@ impl BannerView {
         BannerView { frame, lines, hint }
     }
 
-    /// Şeridi kurar; satırı yoksa gizler.
+    /// Sets the banner; hides it if there are no lines.
     fn show(&self, banner: &Banner) {
         if banner.lines.is_empty() {
             self.frame.setHidden(true);
@@ -1774,8 +1785,8 @@ impl BannerView {
     }
 }
 
-/// Bir bölmenin ızgarası: sol sütun sağa yaslı etiket, sağ sütun kontrol;
-/// açıklama kontrolün altında kendi satırında, küçük ve ikincil renkte.
+/// A pane's grid: the left column a right-aligned label, the right column
+/// the control; the note below the control on its own row, small and in the secondary colour.
 struct Form {
     mtm: MainThreadMarker,
     grid: Retained<NSGridView>,
@@ -1795,9 +1806,9 @@ impl Form {
         }
     }
 
-    /// Satırı ve altındaki not satırını ekler. Not satırı açıklaması olmayan
-    /// satırda da var — gizli; kabul edilmeyen değerin tanısı oraya çıkıyor
-    /// (Karar 7).
+    /// Adds the row and the note row below it. The note row exists even in a
+    /// row with no description — hidden; the diagnostic of a value that was
+    /// not accepted appears there (Karar 7).
     fn row(
         &mut self,
         key: Key,
@@ -1813,7 +1824,7 @@ impl Form {
             .grid
             .addRowWithViews(&NSArray::from_slice(&[text.as_super().as_super(), control]));
         if !first {
-            // Satır grupları arasında açıklamanın payından geniş bir boşluk.
+            // A gap between row groups wider than the note's padding.
             row.setTopPadding(10.0);
         }
         if self.grid.numberOfRows() == 1 {
@@ -1844,7 +1855,7 @@ impl Form {
     }
 }
 
-/// Alan + stepper yan yana.
+/// Field + stepper side by side.
 fn number_view(mtm: MainThreadMarker, number: &Number) -> Retained<NSView> {
     hstack(
         mtm,
@@ -1856,13 +1867,13 @@ fn number_view(mtm: MainThreadMarker, number: &Number) -> Retained<NSView> {
     )
 }
 
-/// Alanın ve stepper'ın ikisi de satırın kontrolü (kilit ikisini birden
-/// kapatıyor).
+/// The field and the stepper are both the row's control (the lock disables
+/// both at once).
 fn number_controls(number: &Number) -> [&NSControl; 2] {
     [&number.field, &number.stepper]
 }
 
-/// Slider + değer etiketi yan yana.
+/// Slider + value label side by side.
 fn slide_view(mtm: MainThreadMarker, slide: &Slide) -> Retained<NSView> {
     hstack(
         mtm,
@@ -1905,7 +1916,7 @@ fn activate(constraints: &[Retained<NSLayoutConstraint>]) {
     }
 }
 
-/// Kenar çubuğunun bir satırı: SF Symbol + başlık.
+/// A row of the sidebar: SF Symbol + title.
 fn sidebar_cell(mtm: MainThreadMarker, category: Category) -> Retained<NSTableCellView> {
     let cell = NSTableCellView::new(mtm);
     let label = NSTextField::labelWithString(&NSString::from_str(category.title()), mtm);
@@ -1932,8 +1943,8 @@ fn sidebar_cell(mtm: MainThreadMarker, category: Category) -> Retained<NSTableCe
             .centerYAnchor()
             .constraintEqualToAnchor(&cell.centerYAnchor()),
     ]);
-    // SAFETY: iki alan da zayıf; görünümler hücrenin alt görünümü olarak
-    // hücreyle yaşıyor.
+    // SAFETY: both fields are weak; the views live with the cell as the
+    // cell's subviews.
     unsafe {
         cell.setImageView(Some(&icon));
         cell.setTextField(Some(&label));
@@ -1955,14 +1966,15 @@ fn set_switch(switch: &NSSwitch, on: bool) {
     });
 }
 
-/// Alanı ve stepper'ı dosyanın değerine kurar.
+/// Sets the field and the stepper to the file's value.
 ///
-/// - **Düzenlenmekte olan alana dokunulmaz**: tazeleme her kayıtta geliyor
-///   (dışarıdan kayıt, başka bir kontrolün yazması, izleyicinin ardından
-///   gelen olayı) ve değer atamak düzenlemeyi iptal edip yazılanı silerdi.
-///   Gösterilen değer yine güncellenir; alanın eylemi ona bakıyor.
-/// - **Stepper'ın aralığı dosyadaki değeri kapsar**: `size = 100` ayrıştırıcı
-///   için geçerli ve stepper onu 72'ye kırpsaydı "yukarı" tıkı küçültürdü.
+/// - **The field being edited is not touched**: a refresh comes on every
+///   save (a save from outside, another control's write, the event after the
+///   watcher) and assigning a value would cancel the edit and erase what was
+///   typed. The shown value is still updated; the field's action looks at it.
+/// - **The stepper's range includes the file's value**: `size = 100` is valid
+///   for the parser and if the stepper clamped it to 72 the "up" click would
+///   make it smaller.
 fn set_number(number: &Number, value: f64, text: &str) {
     *number.shown.borrow_mut() = (value, text.to_owned());
     if number.field.currentEditor().is_none() {
@@ -1998,8 +2010,8 @@ fn fill_fonts(popup: &NSPopUpButton, items: &[FontItem], selected: usize) {
     fill_popup(popup, titles, selected);
 }
 
-/// Popup'ı baştan kurar. `addItemWithTitle:` **değil** menüye doğrudan
-/// ekleme: o yöntem aynı başlıklı öğeyi tekilleştiriyor ve ayraç ekleyemiyor.
+/// Rebuilds the popup from scratch. Adding directly to the menu, **not**
+/// `addItemWithTitle:`: that method dedupes items with the same title and cannot add a separator.
 fn fill_popup(
     popup: &NSPopUpButton,
     titles: impl Iterator<Item = Option<String>>,
@@ -2013,7 +2025,7 @@ fn fill_popup(
     for title in titles {
         let item = match title {
             Some(title) => {
-                // SAFETY: eylemsiz öğe; popup'ın kendi eylemi seçimi taşıyor.
+                // SAFETY: an action-less item; the popup's own action carries the selection.
                 unsafe {
                     NSMenuItem::initWithTitle_action_keyEquivalent(
                         NSMenuItem::alloc(mtm),
@@ -2036,28 +2048,29 @@ mod tests {
 
     use super::*;
 
-    /// Her popup'ın başlıkları `NAMES`'in her varyantını kapsıyor, boş ve
-    /// yinelenen başlık yok, indeks ↔ varyant iki yönde tutarlı.
+    /// Every popup's titles cover every variant of `NAMES`, there is no empty
+    /// or duplicate title, and index ↔ variant is consistent in both directions.
     fn check<T: Choice + std::fmt::Debug>() {
         let titles = choice_titles::<T>();
         assert_eq!(titles.len(), T::names().len());
         for (i, title) in titles.iter().enumerate() {
-            assert!(!title.is_empty(), "boş başlık: {i}");
+            assert!(!title.is_empty(), "empty title: {i}");
             assert_eq!(
                 titles.iter().filter(|other| *other == title).count(),
                 1,
-                "yinelenen başlık: {title}"
+                "duplicate title: {title}"
             );
-            let value = choice_at::<T>(i as NSInteger).expect("indeks bir varyant");
+            let value = choice_at::<T>(i as NSInteger).expect("the index is a variant");
             assert_eq!(choice_index(value), Some(i), "{value:?}");
         }
         assert_eq!(choice_at::<T>(-1), None);
         assert_eq!(choice_at::<T>(titles.len() as NSInteger), None);
     }
 
-    /// Her satırın anahtarı ayrıştırıcının tanısında geçen anahtarın ta
-    /// kendisi: bütün anahtarları yanlış türde yazan bir dosyanın tanıları
-    /// satırlara bire bir düşüyor, eşleşmeyen ne tanı ne satır kalıyor.
+    /// Every row's key is the very key that appears in the parser's
+    /// diagnostic: the diagnostics of a file that writes all keys with the
+    /// wrong type land one to one on the rows, and neither an unmatched
+    /// diagnostic nor an unmatched row remains.
     #[test]
     fn every_row_receives_its_own_diagnostic() {
         let text = "[terminal]\nscrollback = []\ncursor = []\ncursor_blink = []\n\
@@ -2069,14 +2082,14 @@ mod tests {
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
                     keypress = []\nerase = []\n\
                     [shell]\nintegration = []\n";
-        let parsed = Settings::parse_keeping(text, &Settings::default()).expect("ayrıştırılır");
+        let parsed = Settings::parse_keeping(text, &Settings::default()).expect("it parses");
         let seen = status(&FileState::Usable(parsed.diagnostics), &[]);
-        assert_eq!(seen.banner, Banner::default(), "eşleşmeyen tanı yok");
+        assert_eq!(seen.banner, Banner::default(), "no unmatched diagnostic");
         let mut keys: Vec<Key> = seen.rows.iter().map(|(key, _)| *key).collect();
         keys.sort_by_key(|key| key.tag());
         assert_eq!(keys, Key::ALL);
-        // Yazma tarafı da aynı yolu söylüyor: satırın düzenlemesi, satırın
-        // anahtarı (yazma reddinin tanısı da o satıra düşsün).
+        // The write side names the same path too: the row's edit is the row's
+        // key (so the diagnostic of a write refusal lands on that row too).
         for key in Key::ALL {
             let edit = match key {
                 Key::ConfirmClose => SettingsEdit::ConfirmClose(ConfirmClose::Never),
@@ -2107,7 +2120,7 @@ mod tests {
 
     #[test]
     fn file_state_decides_lock_banner_and_rows() {
-        // Dosya yok: açık, şeritsiz, satırlar açıklamalarıyla.
+        // No file: enabled, no banner, rows with their descriptions.
         assert_eq!(
             status(&FileState::Missing, &[]),
             Status {
@@ -2117,7 +2130,7 @@ mod tests {
             }
         );
 
-        // Kilit: sebep alt başlıktakinin aynısı, altında ne yapılacağı.
+        // Lock: the reason is the same as the subtitle's, below it what to do.
         let reason = "settings.toml: line 1: invalid TOML".to_owned();
         let seen = status(&FileState::Locked(reason.clone()), &[]);
         assert!(seen.locked);
@@ -2125,8 +2138,8 @@ mod tests {
         assert_eq!(seen.banner.hint, Some(LOCK_HINT));
         assert!(seen.rows.is_empty());
 
-        // Kabul edilmeyen değer kendi satırında, yalnız iletisiyle; satıra
-        // düşmeyen tanı (emekli anahtar) şeritte, alt başlıktaki biçimiyle.
+        // A rejected value on its own row, with only its message; a diagnostic
+        // that lands on no row (a retired key) in the banner, in the subtitle's form.
         let rejected = Diagnostic {
             key: Some("terminal.cursor"),
             line: Some(2),
@@ -2149,7 +2162,7 @@ mod tests {
         );
         assert_eq!(seen.banner.hint, None);
 
-        // Yazma hatası şeridin başında, kilitsiz.
+        // A write error at the head of the banner, unlocked.
         let write = ["settings.toml could not be written: denied".to_owned()];
         let seen = status(&FileState::Usable(Vec::new()), &write);
         assert!(!seen.locked);
@@ -2169,9 +2182,10 @@ mod tests {
         check::<Erase>();
     }
 
-    /// Hareketi kapatan iki girdi (030 Karar 7): ezilen satır devre dışı ve
-    /// nedenini söylüyor; Hareketi Azalt'ta yazma satırı açık kalıyor, çünkü
-    /// `off` ile efekt arasındaki seçim orada da bir fark.
+    /// The two inputs that turn motion off (030 Karar 7): the overridden row
+    /// is disabled and says why; under Reduce Motion the typing row stays
+    /// enabled, because the choice between `off` and an effect is a
+    /// difference there too.
     #[test]
     fn motion_rows_say_what_turns_them_off() {
         let plain = Settings::default();
@@ -2183,27 +2197,27 @@ mod tests {
             ..Settings::default()
         };
         for key in [Key::Keypress, Key::Erase, Key::SmoothScroll] {
-            let forced = motion_override(key, &snap, false).expect("snap ezer");
+            let forced = motion_override(key, &snap, false).expect("snap overrides");
             assert!(!forced.enabled, "{key:?}");
-            // `snap` Hareketi Azalt'ın üstünde: iki girdi birden açıkken
-            // söylenen neden `snap`.
+            // `snap` is above Reduce Motion: with both inputs on, the reason
+            // given is `snap`.
             assert_eq!(motion_override(key, &snap, true), Some(forced), "{key:?}");
         }
         for key in [Key::Erase, Key::SmoothScroll] {
-            let forced = motion_override(key, &plain, true).expect("Hareketi Azalt ezer");
+            let forced = motion_override(key, &plain, true).expect("Reduce Motion overrides");
             assert!(!forced.enabled, "{key:?}");
         }
-        let fades = motion_override(Key::Keypress, &plain, true).expect("belirmeye iner");
+        let fades = motion_override(Key::Keypress, &plain, true).expect("fades in");
         assert!(fades.enabled);
         assert!(fades.note.contains("fade"), "{}", fades.note);
-        // Kapalı yazma kapalı kalıyor: Hareketi Azalt animasyon eklemez,
-        // söylenecek bir şey yok.
+        // Disabled typing stays disabled: Reduce Motion adds no animation,
+        // there is nothing to say.
         let off = Settings {
             keypress: Keypress::Off,
             ..Settings::default()
         };
         assert_eq!(motion_override(Key::Keypress, &off, true), None);
-        // Öteki satırlara dokunmuyor.
+        // It does not touch the other rows.
         for key in [Key::CursorMotion, Key::ReduceMotion, Key::Shape] {
             assert_eq!(motion_override(key, &snap, true), None, "{key:?}");
         }
@@ -2232,14 +2246,14 @@ mod tests {
     #[test]
     fn blink_slider_ends_are_the_range_ends() {
         let (min, max) = (*CURSOR_BLINK_RANGE.start(), *CURSOR_BLINK_RANGE.end());
-        // Sol yavaş (uzun yarım periyot), sağ hızlı.
+        // Left is slow (a long half period), right is fast.
         assert_eq!(blink_from_position(0.0), max);
         assert_eq!(blink_from_position(1.0), min);
         assert_eq!(blink_from_position(-3.0), max);
         assert_eq!(blink_from_position(7.0), min);
         assert_eq!(blink_to_position(max), 0.0);
         assert_eq!(blink_to_position(min), 1.0);
-        // Logaritmik: orta nokta geometrik ortalama.
+        // Logarithmic: the midpoint is the geometric mean.
         let middle = blink_from_position(0.5);
         assert!((middle - (min * max).sqrt()).abs() < 1e-9, "{middle}");
         for seconds in [0.1, 0.5, 1.0, 2.5] {
@@ -2284,12 +2298,12 @@ mod tests {
             theme_edit(&items, index as NSInteger).as_deref(),
             Some("paper")
         );
-        // Silinmiş tema: sona eklenip seçili.
+        // A deleted theme: appended at the end and selected.
         let (items, index) = theme_items("gone", false, &["bateri"], &[]);
         assert_eq!(index, items.len() - 1);
         assert_eq!(items[index], ThemeItem::Named("gone".to_owned()));
         assert!(!items.contains(&ThemeItem::System));
-        // Ayraç yazmaz.
+        // A separator writes nothing.
         let (items, _) = theme_items("bateri", true, &["bateri"], &[]);
         assert_eq!(items[1], ThemeItem::Separator);
         assert_eq!(theme_edit(&items, 1), None);

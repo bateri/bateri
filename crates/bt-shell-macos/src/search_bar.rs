@@ -1,24 +1,25 @@
-//! Geçmişte aramanın paneli (⌘F, 033): pencerenin sağ üstünde, terminalin
-//! **üstünde yüzen** bir AppKit yüzeyi — `NSSearchField`, `Aa` ve `.*`
-//! anahtarları, sayım etiketi, iki ok ve kapatma.
+//! The history search panel (⌘F, 033): an AppKit surface **floating above**
+//! the terminal at the window's top right - an `NSSearchField`, the `Aa` and
+//! `.*` toggles, the count label, two arrows and a close button.
 //!
-//! **Neden AppKit** (`.tasks/033-gecmiste-arama/discussion.md` → Karar 1):
-//! metin girişinin bütün doğruluğu (ölü tuş, IME, pano, geri alma, VoiceOver)
-//! alanla bedava geliyor; Metal'de çizilen bir alan onların her birini
-//! yeniden yazardı. Panel içeriği **itmiyor**, üstüne biniyor — PTY boyutu
-//! ⌘F'de değişmiyor (032'nin "PTY sabit" kuralı).
+//! **Why AppKit** (`.tasks/033-gecmiste-arama/discussion.md` → Karar 1): all
+//! the correctness of text entry (dead keys, IME, pasteboard, undo,
+//! VoiceOver) comes free with the field; a field drawn in Metal would have to
+//! rewrite each of them. The panel does **not push** the content, it rides
+//! on top - the PTY size does not change on ⌘F (032's "PTY stays fixed" rule).
 //!
-//! **Bu dosyada karar yok, görünüş var.** Sorgunun derlenmesi, geçerli
-//! eşleşme ve pencerenin eşleşmeye gidişi `bt-core`'da
-//! (`Session::set_search`, `search_next`, `search_reveal`); olayların
-//! sahibi pane (`pane::TerminalPane` alanın delegesi ve düğmelerin
-//! hedefi — ikisi de zayıf referans, paneli pane tutuyor). Burada kalan:
-//! görünümlerin kurulması, temaya boyanması, yeri ve açılış/kapanış
-//! animasyonu, anahtarların ve etiketin okunup yazılması.
+//! **This file holds looks, not decisions.** Compiling the query, the
+//! current match and the window's move to a match live in `bt-core`
+//! (`Session::set_search`, `search_next`, `search_reveal`); the owner of the
+//! events is the pane (`pane::TerminalPane` is the field's delegate and the
+//! buttons' target - both weak references, the pane holds the panel). What
+//! remains here: building the views, painting them to the theme, the
+//! placement and the open/close animation, reading and writing the toggles
+//! and the label.
 //!
-//! Durum **sekme başına** (Karar 6): panel kapanınca gizleniyor, sorgu ve iki
-//! anahtar alanda kalıyor ve yeniden ⌘F'de seçili geliyor. Ayar dosyasına
-//! yazılmıyor.
+//! State is **per tab** (Karar 6): when the panel closes it is hidden, the
+//! query and the two toggles stay in the field and come back selected on the
+//! next ⌘F. It is not written to the settings file.
 
 use std::cell::Cell;
 use std::ptr::NonNull;
@@ -41,68 +42,71 @@ use objc2_quartz_core::{
     CAMediaTimingFunction, kCAMediaTimingFunctionEaseIn, kCAMediaTimingFunctionEaseOut,
 };
 
-/// Panelin pencerenin iç kenarlarına uzaklığı, nokta. Tasarım sabiti:
-/// başlık çubuğunun altında nefes alacak, sağ kenara yapışmayacak kadar.
+/// The panel's distance from the window's inner edges, in points. A design
+/// constant: enough to breathe under the title bar and not stick to the right edge.
 const INSET: f64 = 10.0;
 
-/// Yüzeyin içindeki pay (yatay, dikey), nokta — alanın yuvarlak köşesi
-/// yüzeyin köşesiyle eş merkezli dursun diye dikey pay yatayınkinden dar.
+/// The padding inside the surface (horizontal, vertical), in points - the
+/// vertical padding is narrower than the horizontal so the field's rounded
+/// corner stays concentric with the surface's corner.
 const PADDING: (f64, f64) = (7.0, 6.0);
 
-/// Yüzeyin köşe yarıçapı: alanın (≈ 6 pt) ve payın (≈ 6 pt) toplamına yakın,
-/// iç ve dış köşe eş merkezli okunsun.
+/// The surface's corner radius: close to the sum of the field's (≈ 6 pt) and
+/// the padding's (≈ 6 pt), so the inner and outer corners read as concentric.
 const RADIUS: f64 = 11.0;
 
-/// Arama alanının genişliği, nokta. Uzun bir yolu ya da deseni sığdıracak,
-/// terminalin sağ üst köşesini gereğinden fazla örtmeyecek kadar.
+/// The search field's width, in points. Enough to fit a long path or pattern
+/// without covering the terminal's top right corner more than necessary.
 const FIELD_WIDTH: f64 = 190.0;
 
-/// Sayım etiketinin **sabit** genişliği: "Invalid pattern" ve "999 of 9999…"
-/// sığıyor, yani sayım ilerlerken panel eni zıplamıyor. Daha uzun bir sayım
-/// (beş haneli) kuyruğundan kırpılıyor.
+/// The count label's **fixed** width: "Invalid pattern" and "999 of 9999…" fit,
+/// so the panel width does not jump while the count progresses. A longer
+/// count (five digits) is clipped from its tail.
 const COUNT_WIDTH: f64 = 96.0;
 
-/// Anahtarların ve simgeli düğmelerin sabit genişliği, nokta: çerçevenin
-/// varsayılan iç payı bir-iki harflik başlığı gereğinden geniş gösteriyordu.
+/// The fixed width of the toggles and icon buttons, in points: the bezel's
+/// default inner padding made a one- or two-letter title look wider than needed.
 const BUTTON_WIDTH: f64 = 24.0;
 
-/// Açılış ve kapanışın süresi, saniye. 030'un gözle bulunan 240 ms
-/// tabanından başladı ve gerçek pencerede kısaldı (phase-4 Uygulama
-/// Notları): panel küçük ve hareketi kısa, 240 ms'de yazmaya başlayan göz
-/// alanı hâlâ yerine oturuyor görüyordu.
+/// The duration of the open and close, in seconds. It started from the
+/// 240 ms floor found by eye in 030 and was shortened in the real window
+/// (phase-4 Uygulama Notları): the panel is small and its motion short, and
+/// at 240 ms the eye that had already started typing still saw the area
+/// settling into place.
 const APPEAR_SECS: f64 = 0.18;
 
-/// Belirirken panelin yukarıdan indiği mesafe, nokta — "yerine oturuyor"
-/// hissi için yeter, bir hareket olarak okunmayacak kadar kısa.
+/// The distance the panel descends from above while appearing, in points -
+/// enough for a "settling into place" feel, short enough not to read as a motion.
 const SLIDE: f64 = 6.0;
 
-/// Panelin görünümleri ve animasyonun nesli.
+/// The panel's views and the animation's generation.
 pub(crate) struct SearchBar {
     surface: Retained<NSBox>,
     field: Retained<NSSearchField>,
     case: Retained<NSButton>,
     regex: Retained<NSButton>,
     count: Retained<NSTextField>,
-    /// Panel **açık** mı (kapanış animasyonu sürerken de `false`).
+    /// Whether the panel is **open** (`false` while the close animation runs too).
     shown: Cell<bool>,
-    /// Her açılış ve kapanışta artar: kapanış animasyonunun tamamlanma bloğu
-    /// paneli yalnız kendi nesli hâlâ geçerliyse gizliyor — araya giren bir
-    /// ⌘F onu gizlememeli.
+    /// Increases on every open and close: the close animation's completion
+    /// block hides the panel only if its own generation is still current - an
+    /// intervening ⌘F must not hide it.
     generation: Rc<Cell<u64>>,
-    /// Oturuma en son verilen sorgu — aynı sorgu ikinci kez `set_search`
-    /// doğurmasın (alanın eylemi ve anahtarlar aynı sorguyu tekrar
-    /// gönderebiliyor, ve her `set_search` bir kare).
+    /// The query last given to the session - so the same query does not cause
+    /// a second `set_search` (the field's action and the toggles can send the
+    /// same query again, and every `set_search` is a frame).
     applied: std::cell::RefCell<Option<SearchQuery>>,
 }
 
 impl SearchBar {
-    /// Paneli kurar ve `parent`'a, `below`'un **üstüne** ekler; gizli doğar.
+    /// Builds the panel and adds it to `parent`, **above** `below`; it is born hidden.
     ///
-    /// `target` düğmelerin ve alanın eylem hedefi, `delegate` alanın delegesi
-    /// — ikisi de pane ve ikisi de zayıf tutuluyor. Kapsayıcı da
-    /// **tutulmuyor**: kapsayıcı pane ve paneli o tutuyor — geri referans
-    /// bir çember olur, pane (ve renderer'ı, link'i) hiç düşmezdi. Yerleşimin
-    /// ölçüsü yüzeyin kendi `superview`'ından.
+    /// `target` is the action target of the buttons and the field, `delegate`
+    /// the field's delegate - both are the pane and both are held weakly. The
+    /// container is **not held** either: the container is the pane and the pane
+    /// holds the panel - a back reference would be a cycle, and the pane (with
+    /// its renderer and link) would never drop. The placement's measure comes
+    /// from the surface's own `superview`.
     pub(crate) fn new(
         mtm: MainThreadMarker,
         parent: &NSView,
@@ -112,13 +116,14 @@ impl SearchBar {
     ) -> Self {
         let field = NSSearchField::new(mtm);
         field.setPlaceholderString(Some(ns_string!("Find")));
-        // Her değişim eylemi hemen gönderiyor: vurgu yazdıkça (Karar 7) ve
-        // alanın ⊗ düğmesi de aynı yoldan (metni silmek `controlTextDidChange:`
-        // doğurmuyor).
+        // Every change sends the action immediately: the highlight follows
+        // typing (Karar 7) and the field's ⊗ button goes the same way (clearing
+        // the text does not cause `controlTextDidChange:`).
         field.setSendsSearchStringImmediately(true);
         field.setSendsWholeSearchString(false);
-        // SAFETY: hedef zayıf ve pane paneli yaşattığı sürece yaşıyor;
-        // seçici pane'de tek `Option<&AnyObject>` argümanlı bir eylem.
+        // SAFETY: the target is weak and lives as long as the pane keeps the
+        // panel alive; the selector is an action on the pane with a single
+        // `Option<&AnyObject>` argument.
         unsafe {
             field.setTarget(Some(target));
             field.setAction(Some(sel!(searchFieldChanged:)));
@@ -132,14 +137,14 @@ impl SearchBar {
         let count = NSTextField::labelWithString(ns_string!(""), mtm);
         count.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
             NSFont::smallSystemFontSize(),
-            // SAFETY: AppKit'in dışa açtığı sabit, süreç boyunca yaşıyor.
+            // SAFETY: a constant AppKit exposes, it lives for the whole process.
             unsafe { NSFontWeightRegular },
         )));
         count.setTextColor(Some(&NSColor::secondaryLabelColor()));
         width(&count, COUNT_WIDTH);
 
-        // ⏎ = yukarı, daha eski (Karar 3): yukarı ok ⌘G'nin, aşağı ok ⇧⌘G'nin
-        // eylemi — menüyle aynı seçiciler.
+        // ⏎ = up, older (Karar 3): the up arrow is ⌘G's action, the down arrow
+        // ⇧⌘G's - the same selectors as the menu.
         let older = symbol(
             mtm,
             "chevron.up",
@@ -160,20 +165,20 @@ impl SearchBar {
         let stack = NSStackView::stackViewWithViews(&NSArray::from_slice(&views), mtm);
         stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         stack.setSpacing(2.0);
-        // Alan ile anahtarlar bir grup, sayım ve oklar ikinci, kapatma
-        // üçüncü: gruplar arası boşluk içtekinden geniş.
+        // The field and the toggles are one group, the count and arrows a
+        // second, the close button a third: the gap between groups is wider than within.
         stack.setCustomSpacing_afterView(6.0, &field);
         stack.setCustomSpacing_afterView(8.0, &regex);
         stack.setCustomSpacing_afterView(4.0, &count);
         stack.setCustomSpacing_afterView(6.0, &newer);
 
         let surface = NSBox::new(mtm);
-        // **Kendi katmanı şart**: kapsayıcının bir kardeşi Metal'in katmanını
-        // taşıyan (layer-hosting) terminal view'ı ve katmansız bir `NSBox`'ın
-        // dolgusu, kenarı ve gölgesi o hiyerarşide hiç çizilmiyordu — alanla
-        // düğmeler görünüyor, yüzey görünmüyordu ve kontroller terminal
-        // metninin üstüne biniyordu (kullanıcı gördü, gerçek pencerede
-        // ölçüldü).
+        // **Its own layer is required**: a sibling of the container is the
+        // terminal view hosting Metal's layer (layer-hosting), and a layerless
+        // `NSBox`'s fill, border and shadow were never drawn in that hierarchy -
+        // the field and buttons showed, the surface did not, and the controls
+        // rode over the terminal text (the user saw it, measured in the real
+        // window).
         surface.setWantsLayer(true);
         surface.setBoxType(NSBoxType::Custom);
         surface.setTitlePosition(NSTitlePosition::NoTitle);
@@ -193,8 +198,8 @@ impl SearchBar {
             fit.width + 2.0 * PADDING.0 + 2.0,
             fit.height + 2.0 * PADDING.1 + 2.0,
         ));
-        // Kapsayıcı çevrilmemiş (y yukarı): sağ üst köşeye yapışmak = sol ve
-        // alt kenar esnek.
+        // The container is not flipped (y up): sticking to the top right
+        // corner = the left and bottom margins are flexible.
         surface.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMinYMargin,
         );
@@ -213,23 +218,25 @@ impl SearchBar {
         }
     }
 
-    /// Panel açık mı.
+    /// Whether the panel is open.
     pub(crate) fn is_shown(&self) -> bool {
         self.shown.get()
     }
 
-    /// Arama alanı — first responder yapılacak görünüm.
+    /// The search field - the view to make first responder.
     pub(crate) fn field(&self) -> &NSSearchField {
         &self.field
     }
 
-    /// Panelin **durduğu** çerçeve, kapsayıcının koordinatında: sağ üst
-    /// köşe, iç payla. Animasyon sürerken görünümün kendi çerçevesi yolda;
-    /// örtülen hücreler varılacak yerden sorulmalı.
+    /// The frame where the panel **rests**, in the container's coordinates:
+    /// the top right corner, with the inset. While the animation runs the
+    /// view's own frame is on its way; the covered cells must be asked from
+    /// the destination.
     pub(crate) fn resting_frame(&self) -> NSRect {
-        // SAFETY: üst view'ı okumak; dönen `Retained` onu bu çağrı boyunca
-        // yaşatıyor ve ana thread'deyiz. Yüzey kurucuda kapsayıcıya
-        // takılıyor ve hiç sökülmüyor; `None` kolu yalnız savunma.
+        // SAFETY: reading the superview; the returned `Retained` keeps it
+        // alive for this call and we are on the main thread. The surface is
+        // attached to the container in the constructor and never removed; the
+        // `None` arm is only defensive.
         let bounds =
             unsafe { self.surface.superview() }.map_or(NSRect::ZERO, |parent| parent.bounds());
         let size = self.surface.frame().size;
@@ -240,8 +247,8 @@ impl SearchBar {
         NSRect::new(origin, size)
     }
 
-    /// Paneli açar: sağ üste yerleştirir ve (Hareketi Azalt değilse) kısa
-    /// bir belirme + inişle gösterir. Zaten açıksa no-op.
+    /// Opens the panel: places it at the top right and shows it (unless
+    /// Reduce Motion) with a short fade + descent. No-op if already open.
     pub(crate) fn show(&self, animate: bool) {
         if self.shown.replace(true) {
             return;
@@ -258,10 +265,10 @@ impl SearchBar {
         surface.setAlphaValue(0.0);
         surface.setFrameOrigin(NSPoint::new(place.x, place.y + SLIDE));
         let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
-            // SAFETY: AppKit bloğa canlı bir bağlam veriyor, blok süresince.
+            // SAFETY: AppKit gives the block a live context, for the block's duration.
             let context = unsafe { context.as_ref() };
             context.setDuration(APPEAR_SECS);
-            // SAFETY: QuartzCore'un dışa açtığı sabit ad, süreç boyunca yaşıyor.
+            // SAFETY: a constant name QuartzCore exposes, it lives for the whole process.
             let curve = unsafe { kCAMediaTimingFunctionEaseOut };
             context.setTimingFunction(Some(&CAMediaTimingFunction::functionWithName(curve)));
             let animator = surface.animator();
@@ -271,8 +278,8 @@ impl SearchBar {
         NSAnimationContext::runAnimationGroup(&changes);
     }
 
-    /// Paneli kapatır: kısa bir sönme + yükselmeyle (Hareketi Azalt'ta
-    /// anında) gizler. Kapalıysa no-op.
+    /// Closes the panel: hides it with a short fade + rise (instantly under
+    /// Reduce Motion). No-op if closed.
     pub(crate) fn hide(&self, animate: bool) {
         if !self.shown.replace(false) {
             return;
@@ -287,10 +294,10 @@ impl SearchBar {
         let origin = surface.frame().origin;
         let moving = surface.clone();
         let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
-            // SAFETY: AppKit bloğa canlı bir bağlam veriyor, blok süresince.
+            // SAFETY: AppKit gives the block a live context, for the block's duration.
             let context = unsafe { context.as_ref() };
             context.setDuration(APPEAR_SECS);
-            // SAFETY: QuartzCore'un dışa açtığı sabit ad, süreç boyunca yaşıyor.
+            // SAFETY: a constant name QuartzCore exposes, it lives for the whole process.
             let curve = unsafe { kCAMediaTimingFunctionEaseIn };
             context.setTimingFunction(Some(&CAMediaTimingFunction::functionWithName(curve)));
             let animator = moving.animator();
@@ -299,7 +306,7 @@ impl SearchBar {
         });
         let current = Rc::clone(&self.generation);
         let done = RcBlock::new(move || {
-            // Araya bir açılış girdiyse panel onundur.
+            // If an open came in between, the panel belongs to it.
             if current.get() == generation {
                 surface.setHidden(true);
                 surface.setFrameOrigin(origin);
@@ -308,7 +315,7 @@ impl SearchBar {
         NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&done));
     }
 
-    /// Alanın ve iki anahtarın hâli — oturuma gidecek sorgu.
+    /// The state of the field and the two toggles - the query to go to the session.
     pub(crate) fn query(&self) -> SearchQuery {
         SearchQuery {
             text: self.field.stringValue().to_string(),
@@ -317,18 +324,18 @@ impl SearchBar {
         }
     }
 
-    /// Alanın metnini yazar (⌘E, find panosu).
+    /// Writes the field's text (⌘E, the find pasteboard).
     pub(crate) fn set_text(&self, text: &str) {
         self.field.setStringValue(&NSString::from_str(text));
     }
 
-    /// Regex anahtarı açık mı — ⌘E'nin kaçırma kararı.
+    /// Whether the regex toggle is on - ⌘E's escaping decision.
     pub(crate) fn regex(&self) -> bool {
         self.regex.state() == NSControlStateValueOn
     }
 
-    /// `query` oturuma en son verilen sorgudan farklıysa onu kaydeder ve
-    /// `true` döner — çağıran ancak o zaman `set_search` çağırır.
+    /// If `query` differs from the query last given to the session, records it
+    /// and returns `true` - only then does the caller call `set_search`.
     pub(crate) fn take_change(&self, query: &SearchQuery) -> bool {
         let mut applied = self.applied.borrow_mut();
         if applied.as_ref() == Some(query) {
@@ -338,21 +345,22 @@ impl SearchBar {
         true
     }
 
-    /// Oturuma verilen sorguyu unutur: panel kapanınca arama da kapanıyor ve
-    /// yeniden açılış aynı sorguyu bir daha uygulamalı.
+    /// Forgets the query given to the session: when the panel closes the
+    /// search closes too, and reopening must apply the same query again.
     pub(crate) fn forget_applied(&self) {
         self.applied.borrow_mut().take();
     }
 
-    /// Sayım etiketini yazar (Karar 3).
+    /// Writes the count label (Karar 3).
     pub(crate) fn set_count(&self, status: SearchStatus, report: SearchReport) {
         self.count
             .setStringValue(&NSString::from_str(&count_label(status, report)));
     }
 
-    /// Yüzeyi temaya boyar: zemin temanın zemininden bir adım öne çıkmış,
-    /// kenar ön planın ince bir izi. Alanın kendisi sistem kontrolü ve
-    /// görünümü pencereden (`apply_chrome`'un Aqua/DarkAqua'sı).
+    /// Paints the surface to the theme: the fill is a step raised from the
+    /// theme's background, the border a faint trace of the foreground. The
+    /// field itself is a system control and its appearance comes from the
+    /// window (`apply_chrome`'s Aqua/DarkAqua).
     pub(crate) fn paint(&self, theme: &Theme, dark: bool) {
         let (fill, border) = surface_colors(theme.background, theme.foreground, dark);
         self.surface.setFillColor(&srgb(fill, 1.0));
@@ -360,11 +368,12 @@ impl SearchBar {
     }
 }
 
-/// Etiketin metni (Karar 3). Boş sorguda boş; geçersiz desende "Invalid
-/// pattern"; eşleşme yoksa "No matches"; varsa bütün defterin sayımı —
-/// "3 of 17", geçerli eşleşmenin sırası henüz bilinmiyorsa "17 matches".
-/// Sayım sürerken (dizin parça parça ilerliyor ya da defter değişti) sonda
-/// "…": sayı o ana kadar sayılanlar.
+/// The label's text (Karar 3). Empty for an empty query; "Invalid
+/// pattern" for an invalid pattern; "No matches" if there is no match;
+/// otherwise the count over the whole scrollback - "3 of 17", or "17
+/// matches" if the current match's ordinal is not yet known. While the count
+/// is in progress (the index advances chunk by chunk or the scrollback
+/// changed) a trailing "…": the number is what has been counted so far.
 pub(crate) fn count_label(status: SearchStatus, report: SearchReport) -> String {
     let more = if report.complete { "" } else { "…" };
     match status {
@@ -382,14 +391,15 @@ pub(crate) fn count_label(status: SearchStatus, report: SearchReport) -> String 
     }
 }
 
-/// ⌘E'nin sorgusu (Karar 6): seçimin **ilk satırı** — arama sert satır
-/// sonunu aşmıyor, yani sonraki satırlar hiçbir şeyle eşleşemezdi — ve regex
-/// kipindeyse kaçırılmış hâli, ki seçilen metin kendisini düz eşleştirsin.
-/// Boş ya da **yalnız boşluktan** oluşan ilk satırda `None`: mürekkepsiz
-/// eşleşme vurgulanmıyor ve sayılmıyor (`search::has_ink`), yani böyle bir
-/// sorgu alanı görünmez bir metinle doldurup "no matches" gösterirdi. Find
-/// panosunun metni de ([`crate::window`]) aynı süzgeçten geçiyor — başka bir
-/// uygulamanın ⌘E'si oraya boşluk bırakabiliyor (kullanıcı gördü).
+/// ⌘E's query (Karar 6): the selection's **first line** - search does not
+/// cross a hard line break, so later lines could never match anything - and,
+/// in regex mode, its escaped form, so the selected text matches itself
+/// literally. `None` for a first line that is empty or **only whitespace**:
+/// an inkless match is neither highlighted nor counted (`search::has_ink`),
+/// so such a query would fill the field with invisible text and show "no
+/// matches". The find pasteboard's text ([`crate::window`]) passes through the
+/// same filter - another application's ⌘E can leave whitespace there (the
+/// user saw it).
 pub(crate) fn selection_query(selection: &str, regex: bool) -> Option<String> {
     let line = selection.lines().next().unwrap_or_default();
     if line.trim().is_empty() {
@@ -402,20 +412,21 @@ pub(crate) fn selection_query(selection: &str, regex: bool) -> Option<String> {
     })
 }
 
-/// Yüzeyin iki rengi, sRGB: zemin ve (kenar, alfa).
+/// The surface's two colours, sRGB: the fill and (border, alpha).
 ///
-/// Zemin temanın zemininin ön plana doğru bir karışımı — koyu temada açık,
-/// açık temada koyu; ayrı bir tema rolü değil (`Theme`'in "çizilmeyen rol
-/// eklenmiyor" kuralı). Oranlar tasarım sabiti ve **terminalden ayrı bir
-/// yüzey** okunacak kadar: ilk değerler (0.11 / 0.045) saf siyah zeminde
-/// panelin zeminini görünmez kılıyordu ve kontroller terminal metni gibi
-/// okunuyordu (kullanıcı gördü). Alt sınırı sınama tutuyor.
+/// The fill is a blend of the theme's background toward the foreground -
+/// light in a dark theme, dark in a light theme; not a separate theme role
+/// (`Theme`'s "no undrawn roles are added" rule). The ratios are a design
+/// constant and **enough to read as a surface apart from the terminal**: the
+/// first values (0.11 / 0.045) made the panel's fill invisible on a pure
+/// black background and the controls read like terminal text (the user saw
+/// it). A test holds the lower bound.
 fn surface_colors(background: u32, foreground: u32, dark: bool) -> (u32, (u32, f64)) {
     let (lift, edge) = if dark { (0.20, 0.30) } else { (0.08, 0.24) };
     (mix(background, foreground, lift), (foreground, edge))
 }
 
-/// `a`'dan `b`'ye `t` kadar, sRGB baytlarında.
+/// `t` of the way from `a` to `b`, in sRGB bytes.
 fn mix(a: u32, b: u32, t: f64) -> u32 {
     let channel = |shift: u32| {
         let (x, y) = (
@@ -438,13 +449,14 @@ fn width(view: &NSView, points: f64) {
         .setActive(true);
 }
 
-/// Açık/kapalı iki konumlu küçük bir anahtar (`Aa`, `.*`): çerçevesi **hep**
-/// görünür, açıkken dolu. Yalnız fare üstündeyken çerçevelenen hâli bir
-/// düğme değil terminal metni gibi okunuyordu (kullanıcı gördü) — anahtarın
-/// iki konumu olduğu ancak görünür bir yüzeyle anlaşılıyor.
+/// A small two-state toggle (`Aa`, `.*`): its bezel is **always** visible,
+/// filled when on. The version that was only framed under the mouse read
+/// like terminal text, not a button (the user saw it) - that the toggle has
+/// two states is only understood from a visible surface.
 fn toggle(mtm: MainThreadMarker, title: &str, tip: &str, target: &AnyObject) -> Retained<NSButton> {
-    // SAFETY: hedef zayıf ve pencere paneli yaşattığı sürece yaşıyor; seçici
-    // pencerede tek `Option<&AnyObject>` argümanlı bir eylem.
+    // SAFETY: the target is weak and lives as long as the window keeps the
+    // panel alive; the selector is an action on the window with a single
+    // `Option<&AnyObject>` argument.
     let button = unsafe {
         NSButton::buttonWithTitle_target_action(
             &NSString::from_str(title),
@@ -460,7 +472,7 @@ fn toggle(mtm: MainThreadMarker, title: &str, tip: &str, target: &AnyObject) -> 
     button.setControlSize(NSControlSize::Small);
     button.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(
         NSFont::smallSystemFontSize(),
-        // SAFETY: AppKit'in dışa açtığı sabit, süreç boyunca yaşıyor.
+        // SAFETY: a constant AppKit exposes, it lives for the whole process.
         unsafe { NSFontWeightRegular },
     )));
     button.setState(NSControlStateValueOff);
@@ -468,7 +480,7 @@ fn toggle(mtm: MainThreadMarker, title: &str, tip: &str, target: &AnyObject) -> 
     button
 }
 
-/// SF Symbol'lü çerçevesiz düğme (oklar, kapatma): üstüne gelince çerçeve.
+/// A frameless button with an SF Symbol (arrows, close): a frame on hover.
 fn symbol(
     mtm: MainThreadMarker,
     name: &str,
@@ -482,8 +494,9 @@ fn symbol(
         Some(&tip),
     )
     .unwrap_or_default();
-    // SAFETY: hedef zayıf ve pencere paneli yaşattığı sürece yaşıyor; seçici
-    // pencerede tek `Option<&AnyObject>` argümanlı bir eylem.
+    // SAFETY: the target is weak and lives as long as the window keeps the
+    // panel alive; the selector is an action on the window with a single
+    // `Option<&AnyObject>` argument.
     let button =
         unsafe { NSButton::buttonWithImage_target_action(&image, Some(target), Some(action), mtm) };
     button.setBezelStyle(NSBezelStyle::AccessoryBar);
@@ -531,7 +544,7 @@ mod tests {
         assert_eq!(
             selection_query("a.b(c)", true).as_deref(),
             Some("a\\.b\\(c\\)"),
-            "regex kipinde seçilen metin kendisini düz eşleştirmeli"
+            "in regex mode the selected text must match itself literally"
         );
         assert_eq!(
             selection_query("first\nsecond", false).as_deref(),
@@ -539,11 +552,11 @@ mod tests {
         );
         assert_eq!(selection_query("", true), None);
         assert_eq!(selection_query("\nx", false), None);
-        // Yalnız boşluk: find panosunda `"     \n"` bulundu ve alan onunla
-        // açılıyordu.
+        // Whitespace only: `"     \n"` turned up in the find pasteboard and the
+        // field opened with it.
         assert_eq!(selection_query("     \n", false), None);
         assert_eq!(selection_query(" \t ", true), None);
-        // İçinde boşluk olan sorgu olduğu gibi kalıyor.
+        // A query with whitespace inside stays as it is.
         assert_eq!(selection_query(" a b ", false).as_deref(), Some(" a b "));
     }
 
@@ -559,11 +572,11 @@ mod tests {
 
     #[test]
     fn the_surface_stands_apart_from_the_terminal() {
-        // Panel terminalin üstünde yüzüyor; zemini terminalinkinden
-        // ayrılmazsa kontroller terminal metni gibi okunuyor (kullanıcı
-        // gördü: 0.11'lik adım saf siyahta ≈ #191919'du). Alt sınırlar
-        // tasarım sabiti, WCAG oranıyla: koyu temada belirgin bir adım,
-        // açık temada Safari'nin bul çubuğu kadar.
+        // The panel floats above the terminal; if its fill does not stand
+        // apart from the terminal's, the controls read like terminal text
+        // (the user saw it: the 0.11 step was ≈ #191919 on pure black). The
+        // lower bounds are a design constant, by WCAG ratio: a clear step in
+        // the dark theme, as much as Safari's find bar in the light theme.
         for (theme, dark, floor) in [
             (Theme::BATERI, true, 1.4),
             (Theme::BATERI_LIGHT, false, 1.12),
@@ -578,8 +591,8 @@ mod tests {
         }
     }
 
-    /// WCAG kontrast oranı, iki `0xRRGGBB` arasında (`bt_core::color`'ın
-    /// sınamasındakiyle aynı ölçü).
+    /// The WCAG contrast ratio, between two `0xRRGGBB` values (the same measure
+    /// as in `bt_core::color`'s test).
     fn contrast(a: u32, b: u32) -> f64 {
         let luminance = |hex: u32| {
             let channel = |shift: u32| {

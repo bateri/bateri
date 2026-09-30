@@ -1,32 +1,33 @@
-//! Terminal penceresi: bir `NSWindow`, bölmelerinin kapsayıcısı
-//! (`split_view::SplitView`, `contentView`) ve onun pane'leri
-//! (`pane::TerminalPane` — oturum, link, renderer, yüzey, `BateriView`,
-//! arama paneli, yükleme kuyruğu), ve **sekmeye** ait olan her şey: krom,
-//! başlık, sekme noktası, kapatma sorusu, sekme ve bölme eylemleri
+//! Terminal window: an `NSWindow`, its splits container
+//! (`split_view::SplitView`, the `contentView`) and its panes
+//! (`pane::TerminalPane` — session, link, renderer, surface, `BateriView`,
+//! search panel, upload queue), and everything that belongs to the **tab**:
+//! chrome, title, tab dot, the close question, tab and split actions
 //! (`closeTab:`, `closeWindow:`, `selectTab:`, `splitRight:`, `splitDown:`,
 //! `selectPreviousSplit:`/`selectNextSplit:`, `selectSplit:`, `resizeSplit:`,
-//! `equalizeSplits:`, `toggleSplitZoom:`); pencerenin `NSWindowDelegate`'i de
-//! burada.
+//! `equalizeSplits:`, `toggleSplitZoom:`); the window's `NSWindowDelegate` is
+//! here too.
 //!
-//! **Odaktaki pane** pencerenin first responder'ının pane'i
-//! ([`TerminalWindow::focused_pane`]; 039 Karar 11): başlık, `⇄`, yükleme
-//! yüzdesi, sekme noktası ve yeni sekmenin/bölmenin mirası ondan. ⌘W onu
-//! kapatır, son pane'de sekmeyi (Karar 8). Öteki pane'ler soluk örtünün
-//! altında ([`TerminalWindow::refresh_dim`], Karar 7). Bölme, gezinme,
-//! boyutlama, eşitleme ve pane kapanışı büyütmeyi (⇧⌘↩) bırakıyor (Karar 8;
-//! boyutlama ve eşitleme kullanıcı bir düzen değişikliği istediği için —
-//! gizli düzeni sessizce değiştirmek görünmez bir etki olurdu).
+//! **The focused pane** is the pane of the window's first responder
+//! ([`TerminalWindow::focused_pane`]; 039 Karar 11): the title, `⇄`, upload
+//! percentage, tab dot and the inheritance of a new tab/split come from it.
+//! ⌘W closes it, and in the last pane the tab (Karar 8). The other panes are
+//! under the dim veil ([`TerminalWindow::refresh_dim`], Karar 7). Split,
+//! navigation, resizing, equalizing and pane closing drop the zoom (⇧⌘↩)
+//! (Karar 8; resizing and equalizing because the user asked for a layout
+//! change — silently changing a hidden layout would be an invisible effect).
 //!
-//! Pane'in sahibi burası (039 Karar 3): pane'in olayları [`WindowHost`]'tan
-//! (`PaneHost`) gelip pencereye ya da uygulamaya varıyor, girdileri
-//! `AppDelegate::open_window`'un kurduğu `PaneLaunch`'tan. Uygulama geneli
-//! (ayarlar, izleme, alt başlık yuvaları, ölçüm defteri, süreli koşu tarifi,
-//! pencere listesi) `app`'te; oradan gelen kayıt anı yolları **her pane'e**
-//! varır (`TerminalWindow::panes`). Pencerenin geometri, örtülme ve odak
-//! bildirimleri de **bütün** pane'lere dağıtılıyor. Çizim çağrısı burada da yok, bu
-//! dosyanın işi bağlamak.
+//! This is the pane's owner (039 Karar 3): the pane's events come through
+//! [`WindowHost`] (`PaneHost`) and reach the window or the application, its
+//! inputs from the `PaneLaunch` that `AppDelegate::open_window` builds. The
+//! application-wide parts (settings, watching, subtitle slots, measurement
+//! ledger, timed-run recipe, window list) are in `app`; the save-time paths
+//! coming from there reach **every pane** (`TerminalWindow::panes`). The
+//! window's geometry, occlusion and focus notifications are distributed to
+//! **all** panes too. There is no drawing call here either; this file's job
+//! is wiring.
 //!
-//! Renderer pane başına (`pane`'in başlığı; 039 Karar 5).
+//! Renderer per pane (`pane`'s header; 039 Karar 5).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -63,33 +64,35 @@ use crate::split_view::SplitView;
 use crate::upload;
 use crate::uploader;
 
-/// Temanın zemini koyu mu — pencere kromunun görünümü (Aqua / DarkAqua)
-/// buradan ([`TerminalWindow::apply_chrome`]).
+/// Whether the theme's background is dark — the window chrome's appearance
+/// (Aqua / DarkAqua) comes from this ([`TerminalWindow::apply_chrome`]).
 ///
-/// Soru "bu zeminde hangi metin daha okunur: beyaz mı siyah mı" ve cevabı
-/// WCAG'ın kontrast oranından: zeminin bağıl parlaklığı (Rec. 709
-/// katsayıları, **lineer** bileşenlerden) beyazla daha yüksek kontrast
-/// veriyorsa zemin koyudur. Eşik uydurulmuyor, iki oranın eşitliğinden
-/// doğuyor; sistemin koyu görünümü de tam olarak "açık metin" demek.
+/// The question is "which text reads better on this background: white or
+/// black" and the answer is from WCAG's contrast ratio: if the background's
+/// relative luminance (Rec. 709 coefficients, from the **linear** components)
+/// gives a higher contrast with white, the background is dark. The threshold
+/// is not invented, it arises from the equality of the two ratios; the
+/// system's dark appearance means exactly "light text".
 ///
-/// `bt-core`'un `Theme`'inde değil burada: açıklık bir tema rolü değil,
-/// AppKit'in görünüm sözlüğüne bir çeviri.
+/// Not in `bt-core`'s `Theme` but here: lightness is not a theme role, it is
+/// a translation into AppKit's appearance vocabulary.
 pub(crate) fn is_dark_background(theme: &Theme) -> bool {
     let [r, g, b, _] = theme.background_linear().to_array();
     let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    // WCAG: oran = (açık + 0.05) / (koyu + 0.05); beyazın parlaklığı 1.
+    // WCAG: ratio = (light + 0.05) / (dark + 0.05); white's luminance is 1.
     let against_white = 1.05 / (luminance + 0.05);
     let against_black = (luminance + 0.05) / 0.05;
     against_white > against_black
 }
 
-/// Pencerenin pane'e verdiği sahip tutamağı ([`PaneHost`], 039 Karar 3).
+/// The owner handle the window gives the pane ([`PaneHost`], 039 Karar 3).
 ///
-/// **Pencereyi kimlikle buluyor**, referansla tutmuyor: pencere pane'i
-/// (`contentView` ve ivar) güçlü tutuyor, geri referans bir çember olurdu.
-/// Kimlik pencere doğmadan belli (`AppDelegate::open_window` sayacı önce
-/// çekiyor), yani tutamak doğum paketine girebiliyor — sonradan kurulan bir
-/// yuva yok. Pencere listeden çıktıysa olay düşüyor.
+/// **It finds the window by id**, does not hold it by reference: the window
+/// holds the pane strongly (`contentView` and ivar), a back reference would
+/// be a cycle. The id is known before the window is born
+/// (`AppDelegate::open_window`'s counter draws first), so the handle can go
+/// into the birth package — there is no slot set up afterwards. If the window
+/// left the list the event is dropped.
 pub(crate) struct WindowHost {
     window: u64,
 }
@@ -99,11 +102,11 @@ impl WindowHost {
         Self { window }
     }
 
-    /// Ana thread'deyiz: `PaneHost`'un bütün çağrıları pane'den, ana
-    /// thread'de geliyor.
+    /// We are on the main thread: all of `PaneHost`'s calls come from the
+    /// pane, on the main thread.
     fn mtm() -> MainThreadMarker {
-        // audit: `PaneHost` yalnız ana thread'de çağrılıyor (trait'in doc'u).
-        MainThreadMarker::new().expect("PaneHost ana thread'de çağrılır")
+        // audit: `PaneHost` is called only on the main thread (the trait's doc).
+        MainThreadMarker::new().expect("PaneHost is called on the main thread")
     }
 
     fn window(&self) -> Option<Retained<TerminalWindow>> {
@@ -113,15 +116,15 @@ impl WindowHost {
 
 impl PaneHost for WindowHost {
     fn title_changed(&self, _pane: u64) {
-        // Başlık odaktaki pane'den; arka pane'in haberi aynı okumayı yapıyor
-        // ve değişmemiş başlığı yeniden yazıyor — ucuz ve dallanmasız.
+        // The title is from the focused pane; a background pane's news does
+        // the same read and rewrites the unchanged title — cheap and branchless.
         if let Some(window) = self.window() {
             window.refresh_title();
         }
     }
 
     fn shell_exited(&self, pane: u64) {
-        // Yalnız o pane (039 Karar 8); son pane sekmeyi kapatıyor.
+        // Only that pane (039 Karar 8); the last pane closes the tab.
         if let Some(window) = self.window() {
             window.close_pane(pane);
         }
@@ -150,17 +153,17 @@ impl PaneHost for WindowHost {
     }
 }
 
-/// Başlamış bir pencere kapanışı ([`TerminalWindow::begin_close`]).
+/// A window closing that has begun ([`TerminalWindow::begin_close`]).
 pub(crate) enum Closing {
-    /// Bu çağrı başlattı; sonucu tutamak biliyor.
+    /// This call started it; the handle knows the result.
     Started(ShutdownHandle),
-    /// Kapanış daha önce başlamıştı (pencere kapanırken ⌘Q gibi): beklenecek
-    /// bir şey yok, gerçek sonucu ilk çağrı biliyordu.
+    /// The closing had begun before (like ⌘Q while the window is closing):
+    /// nothing to wait for, the first call knew the real result.
     AlreadyDone,
 }
 
 impl Closing {
-    /// En geç `deadline`'a kadar bekler ([`ShutdownHandle::wait_until`]).
+    /// Waits until `deadline` at the latest ([`ShutdownHandle::wait_until`]).
     pub(crate) fn wait_until(self, deadline: Instant) -> Teardown {
         match self {
             Self::Started(handle) => handle.wait_until(deadline),
@@ -169,11 +172,11 @@ impl Closing {
     }
 }
 
-/// Select Tab ▸ öğesinin `tag`'i + sekme sayısı → seçilecek sekmenin sırası.
+/// The Select Tab ▸ item's `tag` + tab count → index of the tab to select.
 ///
-/// ⌘1…⌘8 n. sekme, yoksa `None` (no-op); ⌘9 **son** sekme — Safari,
-/// Terminal.app ve tarayıcıların ortak kuralı: dokuzdan fazla sekmede de
-/// sonuncuya tek tuşla gidiliyor. Saf, sınanıyor.
+/// ⌘1…⌘8 is the nth tab, `None` if absent (no-op); ⌘9 is the **last** tab —
+/// the shared rule of Safari, Terminal.app and browsers: with more than nine
+/// tabs too the last one is reached with a single key. Pure, tested.
 pub(crate) fn tab_index(tag: u8, count: usize) -> Option<usize> {
     match tag {
         1..=8 => Some(usize::from(tag) - 1).filter(|&index| index < count),
@@ -182,42 +185,45 @@ pub(crate) fn tab_index(tag: u8, count: usize) -> Option<usize> {
     }
 }
 
-/// Onaylanan sorunun kapatacağı şey ([`TerminalWindow::ask`]): kimlikler,
-/// cevap anında yeniden aranıyor.
+/// What the confirmed question will close ([`TerminalWindow::ask`]): ids,
+/// looked up again at answer time.
 #[derive(Clone, Debug)]
 enum CloseTarget {
-    /// Sekmeler (pencere kimlikleri), bütün pane'leriyle.
+    /// Tabs (window ids), with all their panes.
     Tabs(Vec<u64>),
-    /// Tek pane (pane kimliği); sekme açık kalıyor.
+    /// A single pane (pane id); the tab stays open.
     Pane(u64),
 }
 
-/// Shell ▸ Close Tab öğesinin başlığı (039 Karar 8): çok pane'de ⌘W odaktaki
-/// pane'i kapatıyor ve öğe "Close", tek pane'de sekmeyi ve "Close Tab".
+/// Title of the Shell ▸ Close Tab item (039 Karar 8): with several panes ⌘W
+/// closes the focused pane and the item is "Close", with one pane it closes
+/// the tab and is "Close Tab".
 pub(crate) fn close_title(panes: usize) -> &'static str {
     if panes > 1 { "Close" } else { "Close Tab" }
 }
 
-/// Kapatılan şey — sorunun başlığını ve onay düğmesini seçiyor
+/// What is being closed — chooses the question's title and confirm button
 /// (`.tasks/028-kapatma-onayi/discussion.md` → Karar 4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseScope {
-    /// Sekmesinde başka pane olan bir pane (⌘W; 039 Karar 8).
+    /// A pane whose tab has other panes (⌘W; 039 Karar 8).
     Pane,
-    /// Grubunda başka sekme olan bir sekme (⌘W).
+    /// A tab whose group has other tabs (⌘W).
     Tab,
-    /// Grubun bir kısmı, birden çok sekme ("Close Other Tabs").
+    /// Part of the group, several tabs ("Close Other Tabs").
     Tabs(usize),
-    /// Pencerenin tamamı: tek sekmeli pencerede ⌘W, ya da ⇧⌘W.
+    /// The whole window: ⌘W in a single-tab window, or ⇧⌘W.
     Window,
-    /// Uygulama (⌘Q, Dock ▸ Quit, oturum kapatma).
+    /// The application (⌘Q, Dock ▸ Quit, logout).
     Quit,
 }
 
-/// Bir jestin istediği sekme sayısı ve grubun boyu → sorunun kapsamı.
+/// The number of tabs a gesture asks for and the group's size → the
+/// question's scope.
 ///
-/// Grubun tamamı pencere (kırmızı düğme, tek sekmeli pencerede ⌘W), tek sekme
-/// sekme (⌘W), aradaki her şey sayılı sekmeler ("Close Other Tabs").
+/// The whole group is the window (red button, ⌘W in a single-tab window), a
+/// single tab is the tab (⌘W), everything in between is counted tabs
+/// ("Close Other Tabs").
 pub(crate) fn close_scope(requested: usize, group: usize) -> CloseScope {
     if requested >= group {
         CloseScope::Window
@@ -228,12 +234,14 @@ pub(crate) fn close_scope(requested: usize, group: usize) -> CloseScope {
     }
 }
 
-/// Kapanış sorulsun mu — üç kapanış yolunun **tek** kararı (R2.1).
+/// Whether to ask on close — the **single** decision of the three closing
+/// paths (R2.1).
 ///
-/// Süreli koşu **ilk** soru ve cevabı her ayarda hayır: süreli koşu ayar
-/// okumuyor, yani `confirm` orada varsayılan `running`, ve bekçisi
-/// kurulmamış başsız bir soru `make duman`'ı asardı. Süreç tablosu
-/// (`running`) yalnız cevap ona bağlıysa, yani yalnız `running`'de okunuyor.
+/// The timed run is the **first** question and its answer is no under every
+/// setting: a timed run reads no settings, so `confirm` there is the default
+/// `running`, and a headless question with no guard set up would hang `make
+/// smoke`. The process table (`running`) is read only if the answer depends
+/// on it, i.e. only under `running`.
 pub(crate) fn should_ask(
     timed: bool,
     confirm: ConfirmClose,
@@ -249,13 +257,14 @@ pub(crate) fn should_ask(
     }
 }
 
-/// Sorulacaksa kapanan her pane'in ön planı, sorulmayacaksa `None` —
-/// [`should_ask`]'ın pane'ler üstündeki hâli (039 Karar 11: soru koşan işi
-/// sekmelerden değil **pane'lerden** topluyor).
+/// The foreground of every closing pane if it will ask, `None` if it will
+/// not — [`should_ask`] over panes (039 Karar 11: the question gathers the
+/// running job from the **panes**, not the tabs).
 ///
-/// Tablo `running`'de karar için bir kez okunuyor ve metin aynı okumayı
-/// kullanıyor; `always`'de karar tabloya bakmıyor ama metin koşan işin adını
-/// yine söylemek istiyor, o yüzden soru kesinleşince okunuyor.
+/// Under `running` the table is read once for the decision and the text uses
+/// the same read; under `always` the decision does not look at the table but
+/// the text still wants to name the running job, so it is read once the
+/// question is settled.
 pub(crate) fn foregrounds_to_ask(
     timed: bool,
     confirm: ConfirmClose,
@@ -279,7 +288,7 @@ pub(crate) fn foregrounds_to_ask(
     ask.then(|| seen.unwrap_or_else(read))
 }
 
-/// Sorunun saydığı birim: sekme mi pane mi (039 Karar 11).
+/// The unit the question counts: tab or pane (039 Karar 11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Unit {
     Tab,
@@ -295,14 +304,14 @@ impl Unit {
     }
 }
 
-/// Kapanan pane ve sekme sayısından birim: bir sekmede birden çok pane
-/// varsa sayılan şey pane, yoksa sekme — tek pane'li sekmelerde metin
-/// bölmelerden önceki metnin bayt bayt aynısı. Saf, sınanıyor.
+/// The unit from the count of closing panes and tabs: if a tab has several
+/// panes what is counted is panes, otherwise tabs — for single-pane tabs the
+/// text is byte for byte the same as the text before splits. Pure, tested.
 pub(crate) fn unit_for(panes: usize, tabs: usize) -> Unit {
     if panes > tabs { Unit::Pane } else { Unit::Tab }
 }
 
-/// Sorunun metni: başlık, açıklama ve onay düğmesi.
+/// The question's text: title, explanation and confirm button.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Prompt {
     pub(crate) title: String,
@@ -310,13 +319,15 @@ pub(crate) struct Prompt {
     pub(crate) confirm: &'static str,
 }
 
-/// Kapanan pane'lerin ön planlarından sorunun metni (Karar 4). Saf; soruyu
-/// kuran üç yolun da tek metin kaynağı ([`alert`]).
+/// The question's text from the closing panes' foregrounds (Karar 4). Pure;
+/// the single text source of the three paths that build the question
+/// ([`alert`]).
 ///
-/// Açıklama koşan işleri **adıyla** sayıyor: tek pane'de adlar
-/// ("“claude” is still running."), birden çoğunda `unit` sayısı (sekme ya da
-/// pane, [`unit_for`]) ve tekrarsız adlar. Adı okunamayan iş adsız
-/// söyleniyor ("A process"), koşan iş hiç yoksa (`always`) kapanacak şey.
+/// The explanation counts the running jobs **by name**: with a single pane
+/// the names ("“claude” is still running."), with several the `unit` count
+/// (tab or pane, [`unit_for`]) and deduplicated names. A job whose name could
+/// not be read is stated nameless ("A process"), and if there is no running
+/// job at all (`always`) what will be closed.
 pub(crate) fn prompt(scope: CloseScope, unit: Unit, tabs: &[Foreground]) -> Prompt {
     let (title, confirm, verb) = match scope {
         CloseScope::Pane => ("Close this pane?".to_owned(), "Close", "Closing"),
@@ -369,7 +380,7 @@ pub(crate) fn prompt(scope: CloseScope, unit: Unit, tabs: &[Foreground]) -> Prom
     }
 }
 
-/// `always`'in koşan işsiz metni: kapanacak şeyi söylüyor.
+/// `always`'s text without a running job: states what will be closed.
 fn idle_message(scope: CloseScope, unit: Unit, tabs: usize) -> String {
     match (scope, tabs) {
         (CloseScope::Pane, _) => "Closing this pane ends its shell session.".to_owned(),
@@ -387,7 +398,7 @@ fn idle_message(scope: CloseScope, unit: Unit, tabs: usize) -> String {
     }
 }
 
-/// macOS'un tipografik tırnağıyla ad.
+/// A name in macOS's typographic quotes.
 fn quoted(name: &str) -> String {
     format!("\u{201c}{name}\u{201d}")
 }
@@ -404,11 +415,12 @@ fn listed(names: &[String]) -> String {
     }
 }
 
-/// [`Prompt`]'tan `NSAlert`: onay ilk düğme (Return), "Cancel" ikinci (Esc).
+/// `NSAlert` from a [`Prompt`]: confirm is the first button (Return),
+/// "Cancel" the second (Esc).
 ///
-/// Esc **elle** bağlanıyor: belge "Cancel" başlıklı düğmeye Esc'i kendisinin
-/// bağladığını söylüyor, ama gerçek pencerede Esc sayfayı kapatmadı
-/// (ölçüldü, phase-2 Uygulama Notları); Return ilk düğmede çalışıyordu.
+/// Esc is bound **by hand**: the documentation says it binds Esc to a button
+/// titled "Cancel" itself, but in a real window Esc did not close the sheet
+/// (measured, phase-2 Uygulama Notları); Return worked on the first button.
 pub(crate) fn alert(mtm: MainThreadMarker, prompt: &Prompt) -> Retained<NSAlert> {
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(&prompt.title));
@@ -419,28 +431,28 @@ pub(crate) fn alert(mtm: MainThreadMarker, prompt: &Prompt) -> Retained<NSAlert>
     alert
 }
 
-/// `view`'ın ya da atalarından birinin pane'i — first responder'dan odaktaki
-/// pane'e (`BateriView`, arama alanının alan düzenleyicisi).
+/// The pane of `view` or one of its ancestors — from the first responder to
+/// the focused pane (`BateriView`, the search field's field editor).
 fn pane_containing(view: Retained<NSView>) -> Option<Retained<TerminalPane>> {
     let mut current = Some(view);
     while let Some(view) = current {
         match view.downcast::<TerminalPane>() {
             Ok(pane) => return Some(pane),
-            // SAFETY: üst view'ı okumak; ana thread'deyiz (`MainThreadOnly`).
+            // SAFETY: reading the parent view; we are on the main thread (`MainThreadOnly`).
             Err(view) => current = unsafe { view.superview() },
         }
     }
     None
 }
 
-/// Select/Resize Split ▸ öğesinin yönü: gönderenin `tag`'i.
+/// The direction of a Select/Resize Split ▸ item: the sender's `tag`.
 fn direction_of(sender: Option<&AnyObject>) -> Option<Direction> {
     let item = sender?.downcast_ref::<NSMenuItem>()?;
     Direction::from_tag(item.tag())
 }
 
-/// Turun sonunda `windowShouldClose:` isteklerini toplar: bayrağı dikili her
-/// grup için tek karar ([`TerminalWindow::should_close_now`]).
+/// Collects the `windowShouldClose:` requests at the end of the turn: a
+/// single decision per group with the flag set ([`TerminalWindow::should_close_now`]).
 fn close_requested_tabs(app: &AppDelegate) {
     while let Some(anchor) = app
         .windows()
@@ -448,61 +460,63 @@ fn close_requested_tabs(app: &AppDelegate) {
         .find(|window| window.ivars().close_requested.get())
     {
         anchor.close_requested_group(app);
-        // Grubun dışına düşmüş (listede olup grubu çözülemeyen) bir bayrak
-        // döngüyü kilitlemesin.
+        // A flag that fell outside a group (in the list but whose group
+        // cannot be resolved) must not lock the loop.
         anchor.ivars().close_requested.set(false);
     }
 }
 
-/// Pencerenin durumu — **sekmeye** ait olan: krom, sekme noktası, kapatma
-/// sorusu ve odak. Oturumun çekirdeği (oturum, link, renderer, yüzey, view,
-/// dock payı, punto, kimlik, arama, yükleme) pane'lerde ([`TerminalPane`],
-/// 039 Karar 1–3), pane'ler ve bölme ağacı kapsayıcıda ([`SplitView`]).
+/// The window's state — what belongs to the **tab**: chrome, tab dot, the
+/// close question and focus. The session's core (session, link, renderer,
+/// surface, view, dock reserve, point size, identity, search, upload) is in
+/// the panes ([`TerminalPane`], 039 Karar 1–3), the panes and the split tree
+/// in the container ([`SplitView`]).
 pub(crate) struct WindowIvars {
-    /// Kendi sayacımız ([`AppDelegate`] dağıtıyor): kapatma sorusunun ve
-    /// listeden çıkışın pencereyi bulduğu anahtar. Pane'in kimliği ayrı
-    /// ([`TerminalPane::id`]) ve aynı sayaçtan.
+    /// Our own counter ([`AppDelegate`] hands it out): the key by which the
+    /// close question and removal from the list find the window. The pane's
+    /// id is separate ([`TerminalPane::id`]) and from the same counter.
     id: u64,
-    /// Süreli koşunun tarifi, `AppDelegate`'inkinin kopyası (`Copy`):
-    /// kapatma sorusu süreli koşuda hiç sorulmuyor ve uygulama delegate'ine
-    /// uzanmadan cevaplayabilmeli ([`TerminalWindow::should_close_now`]).
+    /// The timed run's recipe, a copy of `AppDelegate`'s (`Copy`): the close
+    /// question is never asked in a timed run and must be answerable without
+    /// reaching the application delegate ([`TerminalWindow::should_close_now`]).
     run: Option<Run>,
     window: Retained<NSWindow>,
-    /// Bölmelerin kapsayıcısı ve `contentView`: `NSWindow` onu zaten güçlü
-    /// tutuyor, bu kopya tipli erişim için ([`TerminalWindow::panes`]).
+    /// The splits container and the `contentView`: `NSWindow` already holds it
+    /// strongly, this copy is for typed access ([`TerminalWindow::panes`]).
     container: Retained<SplitView>,
-    /// Son odaklanan pane'in kimliği — first responder bir pane'in içinde
-    /// değilken (pencerenin kendisi) odağın cevabı
-    /// ([`TerminalWindow::focused_pane`]). `BateriView` first responder
-    /// olunca pane'in `PaneHost::focused` olayı yazıyor.
+    /// The id of the last focused pane — the answer of focus when the first
+    /// responder is not inside a pane (the window itself)
+    /// ([`TerminalWindow::focused_pane`]). Written by the pane's
+    /// `PaneHost::focused` event when `BateriView` becomes first responder.
     focused: Cell<u64>,
-    /// Kromun son boyandığı zemin ([`TerminalWindow::apply_chrome`]'un
-    /// kapısı); `None`: henüz boyanmadı.
+    /// The background the chrome was last painted with (the gate of
+    /// [`TerminalWindow::apply_chrome`]); `None`: not painted yet.
     chrome: Cell<Option<u32>>,
-    /// Sekmenin noktasının son kurulan rengi, sRGB
-    /// ([`TerminalWindow::refresh_tab_mark`]'ın kapısı); `None`: nokta yok.
+    /// The last colour set for the tab's dot, sRGB (the gate of
+    /// [`TerminalWindow::refresh_tab_mark`]); `None`: no dot.
     tab_mark: Cell<Option<u32>>,
-    /// Bu pencerede açık kapatma sorusu (028 → R2.8): `NSAlert`'i sayfa
-    /// süresince yaşatıyor ve "sayfa açıkken ikinci soru yok" kapısı o
-    /// ([`TerminalWindow::asking`]). Tamamlanma bloğu her yanıtta boşaltıyor.
+    /// The open close question in this window (028 → R2.8): keeps the `NSAlert`
+    /// alive for the sheet's duration and is the "no second question while the
+    /// sheet is open" gate ([`TerminalWindow::asking`]). The completion block
+    /// empties it on every answer.
     alert: RefCell<Option<Retained<NSAlert>>>,
-    /// Bu turda `windowShouldClose:` bu sekmeyi istedi — jestin kapsamı
-    /// turun sonunda bu bayraklardan toplanıyor
+    /// In this turn `windowShouldClose:` asked for this tab — the gesture's
+    /// scope is gathered from these flags at the end of the turn
     /// ([`TerminalWindow::close_requested_tabs`]).
     close_requested: Cell<bool>,
 }
 
-/// Yeni kabuğun doğum bilgisi — doğum paketinin (`PaneLaunch::launch`)
-/// çağırandan aldığı iki karar (`AppDelegate::open_window`).
+/// The new shell's birth information — the two decisions the birth package
+/// (`PaneLaunch::launch`) takes from the caller (`AppDelegate::open_window`).
 pub(crate) struct Launch {
-    /// Başlangıç dizini (026 → Karar 4: etkin sekmenin dizini, yoksa ev).
+    /// Start directory (026 → Karar 4: the active tab's directory, else home).
     pub(crate) working_directory: Option<PathBuf>,
-    /// Kabuğun ilk girdisi (037 Karar 6); `None` → sıradan yerel kabuk.
+    /// The shell's first input (037 Karar 6); `None` → an ordinary local shell.
     pub(crate) initial_input: Option<String>,
 }
 
 define_class!(
-    // SAFETY: NSObject alt sınıflama şartı taşımaz; TerminalWindow Drop uygulamaz.
+    // SAFETY: NSObject has no subclassing requirement; TerminalWindow implements no Drop.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "BateriTerminalWindow"]
@@ -513,12 +527,12 @@ define_class!(
 
     unsafe impl NSWindowDelegate for TerminalWindow {
 
-        // Ekranlar arası taşımada boyut (nokta) değişmez ama ölçek değişir;
-        // layer-hosting view'da bunu bizden başka kimse yazmaz.
+        // On a move between screens the size (points) does not change but the
+        // scale does; nobody but us writes that in a layer-hosting view.
         //
-        // Bölmelerin sınırları aygıt pikseline oturuyor, yani ölçek değişince
-        // önce yeniden yerleşim, sonra **her** pane'in geometrisi: çerçevesi
-        // değişmeyen pane'in bildirimi gelmiyor.
+        // The split boundaries sit on the device pixel, so on a scale change
+        // first the re-layout, then **every** pane's geometry: the notification
+        // of a pane whose frame did not change does not arrive.
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, _n: &NSNotification) {
             self.ivars().container.layout_panes();
@@ -527,44 +541,46 @@ define_class!(
             }
         }
 
-        // Görünürlük yolu: compositor, örtülü ya da simge durumundaki bir
-        // pencerenin layer içeriğini atabilir. Grid değişmediği için hiçbir
-        // hasar bayrağı dikilmez ve link uyumaya devam eder — geri dönen
-        // pencere boş kalır.
+        // Visibility path: the compositor can discard the layer contents of an
+        // occluded or miniaturized window. Since the grid did not change no
+        // damage flag is set and the link keeps sleeping — the returning
+        // window stays blank.
         //
-        // Tek kanca yetiyor: simge durumu da örtülme de `occlusionState`'i
-        // düşürür, yani `windowDidDeminiaturize:` bunun altkümesi olurdu.
-        // **Seçili olmayan sekme de bu yoldan gidiyor** (026 R3.7, ölçüldü):
-        // sekme arkaya düşünce `visible=false`, öne gelince `true` geliyor,
-        // yani arka sekme sıfır kare çiziyor ve sekmeye özel bir kanca yok.
-        // Genel sinyalin üstüne özel durum dizmek, listenin hiç kapanmaması
-        // demek (tam ekran, Space, `unhide`, ekran uyanması...).
+        // A single hook suffices: both miniaturizing and occlusion drop
+        // `occlusionState`, so `windowDidDeminiaturize:` would be a subset of
+        // it. **The non-selected tab goes through this path too** (026 R3.7,
+        // measured): when a tab goes to the back `visible=false` arrives, when
+        // it comes to the front `true`, so a background tab draws zero frames
+        // and there is no tab-specific hook. Stacking special cases on top of
+        // the general signal would mean the list never closes (full screen,
+        // Space, `unhide`, screen wake...).
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn window_did_change_occlusion(&self, _n: &NSNotification) {
-            // Bildirim iki yönde de gelir; örtülmeye GİDERKEN kare istemek
-            // kimsenin görmeyeceği bir kare çizmek olurdu.
+            // The notification comes in both directions; asking for a frame
+            // while GOING occluded would mean drawing a frame nobody will see.
             let visible = self
                 .ivars()
                 .window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::Visible);
-            // Büyütmenin arkasındaki gizli pane örtülü sayılıyor
+            // A hidden pane behind the zoom is counted as occluded
             // (`SplitView::apply_visibility`).
             self.ivars().container.apply_visibility(visible);
         }
 
-        // **Odak yolu.** Odakta olmayan pencerede caret'in içi boşalıyor ve
-        // blink duruyor; ikisi de `bt-gpu`'nun kararı, `bt-core` odağı hiç
-        // görmüyor (015 R7).
+        // **Focus path.** In an unfocused window the caret's inside empties and
+        // the blink stops; both are `bt-gpu`'s decision, `bt-core` never sees
+        // focus (015 R7).
         //
-        // Yukarıdaki "tek kanca yetiyor" gerekçesi **buraya geçmiyor**: orada
-        // örtülme ile simge durumu aynı genel sinyalin (`occlusionState`) iki
-        // hâli, burada iki ayrı olgu var ve AppKit ikisini ayrı bildirimlerle
-        // veriyor — birleştirecek genel bir sinyal yok.
+        // The "a single hook suffices" reasoning above **does not carry over
+        // here**: there occlusion and miniaturizing are two states of the same
+        // general signal (`occlusionState`), here there are two separate facts
+        // and AppKit gives them with separate notifications — there is no
+        // general signal to merge them.
         //
-        // Pencerenin key biti **bütün** pane'lere (039 Karar 7); odakta
-        // olmayan pane'in içi boş caret'i ikinci bitten, kendi `BateriView`'ının
-        // first responder kancalarından geliyor.
+        // The window's key bit goes to **all** panes (039 Karar 7); an
+        // unfocused pane's hollow caret comes from the second bit, from its
+        // own `BateriView`'s first-responder hooks.
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
             for pane in self.panes() {
@@ -581,49 +597,50 @@ define_class!(
             }
         }
 
-        /// Kırmızı düğme ve sekme çubuğunun menüsü (Close Tab, Close Other
-        /// Tabs): kapanmadan önce sorulsun mu (028 → Karar 3). `false`
-        /// kapanışı durduruyor; soru sorulduysa kapanış onun cevabında
-        /// ([`TerminalWindow::ask`]). Ana menünün ⌘W'si buraya uğramıyor
-        /// (`closeTab:`).
+        /// The red button and the tab bar's menu (Close Tab, Close Other
+        /// Tabs): whether to ask before closing (028 → Karar 3). `false` stops
+        /// the closing; if a question was asked the closing is in its answer
+        /// ([`TerminalWindow::ask`]). The main menu's ⌘W does not go through
+        /// here (`closeTab:`).
         ///
-        /// Kabuğun çıkışı buraya **uğramıyor**: `close` delegate'e sormaz
-        /// (R2.6).
+        /// The shell's exit does **not** go through here: `close` does not ask
+        /// the delegate (R2.6).
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
             self.should_close_now()
         }
 
-        /// Pencere (ya da sekme) kapanıyor: kırmızı düğme, ⌘W, ⇧⌘W ve
-        /// kabuğun çıkışı (`ShellWake::child_exit` → `close`) buraya varır.
+        /// The window (or tab) is closing: the red button, ⌘W, ⇧⌘W and the
+        /// shell's exit (`ShellWake::child_exit` → `close`) arrive here.
         ///
-        /// Kapanış **beklenmiyor** (026 → Karar 5): başlatılıyor ve tutamak
-        /// düşüyor, `"PTY teardown"` thread'i işini arkada bitiriyor — tek
-        /// sekmeyi kapatmak ana thread'i yarım saniyeye kadar durdurmamalı.
-        /// Sıra [`TerminalWindow::begin_close`]'ta.
+        /// Closing is **not waited on** (026 → Karar 5): it is started and the
+        /// handle drops, the `"PTY teardown"` thread finishes its work in the
+        /// background — closing a single tab must not stall the main thread for
+        /// up to half a second. The order is in [`TerminalWindow::begin_close`].
         ///
-        /// Süreli koşuda bu yol koşmuyor: kabuğun çıkışı `terminate:`'e gidiyor
-        /// ve rapor pencereyi listede bulmak zorunda.
+        /// In a timed run this path does not run: the shell's exit goes to
+        /// `terminate:` and the report must find the window in the list.
         ///
-        /// **Listeden çıkış bir tur ertelenir.** Listenin tuttuğu `Retained`
-        /// bu nesnenin tek güçlü referansı (pencerenin delegate özelliği zayıf)
-        /// ve burada düşseydi nesne kendi metodunun içinde, AppKit `-close`'un
-        /// ortasındayken serbest kalırdı — `NSWindow`'un `Retained`'ı da
-        /// onunla. Ertelenen iş kimliği taşıyor (alternatif ekran habercisinin
-        /// örüntüsü); nesne yine ana thread'de düşüyor.
+        /// **Removal from the list is deferred by one turn.** The `Retained`
+        /// the list holds is this object's only strong reference (the window's
+        /// delegate property is weak) and if it dropped here the object would
+        /// be freed inside its own method, in the middle of AppKit's `-close` —
+        /// and the `NSWindow`'s `Retained` with it. The deferred job carries the
+        /// id (the alternate-screen notifier's pattern); the object still drops
+        /// on the main thread.
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _n: &NSNotification) {
-            // Pane'lerin kapanışı çerçeve gözlemcilerini de söküyor ve
-            // pane'leri `AppDelegate::pane`'in aramasından düşürüyor
+            // Closing the panes also removes the frame observers and drops the
+            // panes from `AppDelegate::pane`'s lookup
             // (`TerminalPane::begin_close`).
             drop(self.begin_close());
-            // Delegate'i şimdi bırak: AppKit kapanmakta olan pencereye bundan
-            // sonra bildirim göndermesin (odak, örtülme), nesne düşene kadar
-            // bile.
+            // Let go of the delegate now: AppKit must not send the closing
+            // window notifications from here on (focus, occlusion), not even
+            // until the object drops.
             self.ivars().window.setDelegate(None);
-            // SAFETY: kayıt `observe_focus`'ta bu gözlemci ve bu yol için
-            // yapıldı; pencere bu nesneyle düşüyor ve gözlemcisi kayıtlıyken
-            // düşmemeli.
+            // SAFETY: the registration was made in `observe_focus` for this
+            // observer and this path; the window drops with this object and must
+            // not drop while its observer is registered.
             unsafe {
                 self.ivars()
                     .window
@@ -631,8 +648,8 @@ define_class!(
             }
             let id = self.ivars().id;
             DispatchQueue::main().exec_async(move || {
-                // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-                let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                 if let Some(app) = app::delegate(mtm) {
                     app.forget_window(id);
                 }
@@ -640,22 +657,23 @@ define_class!(
         }
     }
 
-    // **Sekmeye ait eylemler** burada (kapatma, sekme seçimi, bölme);
-    // pane düzeyindekiler (punto, bul, temizle, kaydır, yükleme iptali)
-    // pane'de (039 Karar 2), uygulama geneline yayılanlar
-    // (`settingsDidChange:`, tema, `openSettings:`) `AppDelegate`'te.
-    // Hedefsiz eylemin responder zinciri view → pane → kapsayıcı → pencere →
-    // **pencere delegate'i** → `NSApp` → app delegate; yani bu nesne yayılan
-    // bir seçiciyi uygulasaydı key pencere onu yutar ve öteki pencereler hiç
-    // duymazdı.
+    // **Actions that belong to the tab** are here (closing, tab selection,
+    // split); the pane-level ones (point size, find, clear, scroll, upload
+    // cancel) are in the pane (039 Karar 2), those that spread application-wide
+    // (`settingsDidChange:`, theme, `openSettings:`) in `AppDelegate`.
+    // The responder chain of a targetless action is view → pane → container →
+    // window → **window delegate** → `NSApp` → app delegate; so if this object
+    // implemented a spreading selector the key window would swallow it and
+    // the other windows would never hear it.
     impl TerminalWindow {
 
-        /// Pencerenin first responder'ı değişti (`observe_focus`): klavye
-        /// başka bir pane'e geçtiyse odak onun. `BateriView`'ın kendi
-        /// kancası (`PaneHost::focused`) arama alanına tıklamayı görmüyordu
-        /// — klavye öteki pane'in alanına geçer, örtü ve başlık eski pane'de
-        /// kalırdı (`/code-review`, set kapısı). Tek kaynak bu: odak
-        /// değişiminin **her** yolu (tık, alan, menü) buradan geçiyor.
+        /// The window's first responder changed (`observe_focus`): if the
+        /// keyboard moved to another pane the focus is that one's.
+        /// `BateriView`'s own hook (`PaneHost::focused`) did not see a click on
+        /// the search field — the keyboard goes to the other pane's field, and
+        /// the veil and title would stay on the old pane (`/code-review`, set
+        /// gate). This is the single source: **every** path of a focus change
+        /// (click, field, menu) goes through here.
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         fn observe_value(
             &self,
@@ -669,14 +687,14 @@ define_class!(
             }
         }
 
-        /// ⌘W'nin başlığı ve bölmenin etkinliği; **bilinmeyen öğe `true`**.
-        /// Çok pane'de ⌘W "Close" (odaktaki pane), tek pane'de "Close Tab"
-        /// (039 Karar 8). Bölme, yarılardan biri en küçük pane sınırının
-        /// altına düşecekse gri (Karar 14).
+        /// ⌘W's title and the split's enabled state; **an unknown item is
+        /// `true`**. With several panes ⌘W is "Close" (the focused pane), with
+        /// one pane "Close Tab" (039 Karar 8). A split is grey if one of the
+        /// halves would drop below the smallest pane limit (Karar 14).
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             let action = item.action();
-            // `return` yok: `define_class!` `bool`'u gövdenin sonunda çeviriyor.
+            // No `return`: `define_class!` converts the `bool` at the end of the body.
             if action == Some(sel!(closeTab:)) {
                 item.setTitle(&NSString::from_str(close_title(self.panes().len())));
                 true
@@ -702,15 +720,15 @@ define_class!(
             .into_iter()
             .any(|split| action == Some(split))
             {
-                // Tek pane'de gezinecek, boyutlanacak bir şey yok.
+                // With a single pane there is nothing to navigate or resize.
                 self.panes().len() > 1
             } else {
                 true
             }
         }
 
-        /// Window ▸ Select Previous Split (⌘[): ağaç sırasında önceki pane,
-        /// döngüsel.
+        /// Window ▸ Select Previous Split (⌘[): the previous pane in tree
+        /// order, cyclic.
         #[unsafe(method(selectPreviousSplit:))]
         fn select_previous_split(&self, _sender: Option<&AnyObject>) {
             self.select_split(false);
@@ -722,8 +740,8 @@ define_class!(
             self.select_split(true);
         }
 
-        /// Window ▸ Select Split ▸ (⌥⌘ + ok): öğenin `tag`'i yön
-        /// ([`Direction::from_tag`]).
+        /// Window ▸ Select Split ▸ (⌥⌘ + arrow): the item's `tag` is the
+        /// direction ([`Direction::from_tag`]).
         #[unsafe(method(selectSplit:))]
         fn select_split_action(&self, sender: Option<&AnyObject>) {
             if let Some(direction) = direction_of(sender) {
@@ -731,7 +749,7 @@ define_class!(
             }
         }
 
-        /// Window ▸ Resize Split ▸ (⌃⌘ + ok).
+        /// Window ▸ Resize Split ▸ (⌃⌘ + arrow).
         #[unsafe(method(resizeSplit:))]
         fn resize_split_action(&self, sender: Option<&AnyObject>) {
             if let Some(direction) = direction_of(sender) {
@@ -751,49 +769,51 @@ define_class!(
             self.toggle_split_zoom();
         }
 
-        /// Shell ▸ Split Right (⌘D): odaktaki pane'i ikiye böler, yenisi
-        /// sağda (039 Karar 8, 9).
+        /// Shell ▸ Split Right (⌘D): splits the focused pane in two, the new
+        /// one on the right (039 Karar 8, 9).
         #[unsafe(method(splitRight:))]
         fn split_right(&self, _sender: Option<&AnyObject>) {
             self.split(Axis::Horizontal);
         }
 
-        /// Shell ▸ Split Down (⇧⌘D): odaktaki pane'i ikiye böler, yenisi
-        /// altta.
+        /// Shell ▸ Split Down (⇧⌘D): splits the focused pane in two, the new
+        /// one below.
         #[unsafe(method(splitDown:))]
         fn split_down(&self, _sender: Option<&AnyObject>) {
             self.split(Axis::Vertical);
         }
 
-        /// Shell ▸ Close Tab (⌘W): çok pane'de **odaktaki pane**, tek pane'de
-        /// **yalnız bu sekme** (039 Karar 8); gerekirse sorarak.
+        /// Shell ▸ Close Tab (⌘W): with several panes the **focused pane**,
+        /// with one pane **only this tab** (039 Karar 8); asking if needed.
         ///
-        /// `performClose:` değil, çünkü AppKit'in onu yorumlaması durumlu
-        /// (ölçüldü, phase-2 Uygulama Notları): kırmızı düğmenin grup kapanışı
-        /// bir `windowShouldClose:` `false`'uyla durdurulunca sonraki
-        /// `performClose:` da grubun her sekmesine `windowShouldClose:`
-        /// gönderiyor ve ⌘W pencereyi sorar oluyordu. Kendi eylemimiz
-        /// kapsamı kendisi biliyor; soru ve kapanış ⇧⌘W'ninkiyle aynı yol.
+        /// Not `performClose:`, because AppKit's interpretation of it is
+        /// stateful (measured, phase-2 Uygulama Notları): when the red
+        /// button's group close was stopped by a `windowShouldClose:` `false`,
+        /// the next `performClose:` also sent `windowShouldClose:` to every
+        /// tab of the group and ⌘W ended up asking about the window. Our own
+        /// action knows the scope itself; the question and the closing take the
+        /// same path as ⇧⌘W's.
         #[unsafe(method(closeTab:))]
         fn close_tab(&self, _sender: Option<&AnyObject>) {
             self.close_tab_asking();
         }
 
-        /// Shell ▸ Close Window (⇧⌘W): pencereyi **bütün sekmeleri ve
-        /// pane'leriyle**.
+        /// Shell ▸ Close Window (⇧⌘W): the window **with all its tabs and
+        /// panes**.
         ///
-        /// Grubun tamamı için **tek** soru (R2.3) ve onayda her sekme
-        /// `close` ile kapanıyor — `performClose:` değil, çünkü o her sekmenin
-        /// `windowShouldClose:`'undan geçer ve sekme başına ikinci bir soru
-        /// doğururdu. Kapanışın kendisi yine her sekmenin `windowWillClose:`'u.
+        /// A **single** question for the whole group (R2.3) and on confirm
+        /// every tab closes with `close` — not `performClose:`, because that
+        /// goes through each tab's `windowShouldClose:` and would produce a
+        /// second question per tab. The closing itself is still every tab's
+        /// `windowWillClose:`.
         #[unsafe(method(closeWindow:))]
         fn close_window(&self, _sender: Option<&AnyObject>) {
             self.close_group_asking();
         }
 
-        /// Window ▸ Select Tab ▸ Tab n (⌘1…⌘8) ve Last Tab (⌘9): öğenin `tag`'i
-        /// ([`crate::menu`]) sekme grubunda bir sıraya iner ([`tab_index`]).
-        /// Olmayan sekme no-op.
+        /// Window ▸ Select Tab ▸ Tab n (⌘1…⌘8) and Last Tab (⌘9): the item's
+        /// `tag` ([`crate::menu`]) lands on an index in the tab group
+        /// ([`tab_index`]). A nonexistent tab is a no-op.
         #[unsafe(method(selectTab:))]
         fn select_tab(&self, sender: Option<&AnyObject>) {
             let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>()) else {
@@ -811,20 +831,22 @@ define_class!(
 );
 
 impl TerminalWindow {
-    /// Pencereyi ve tek pane'ini (view, yüzey, renderer) kurar; oturum ve
-    /// link **henüz yok** ([`TerminalWindow::start`]).
+    /// Builds the window and its single pane (view, surface, renderer); the
+    /// session and link are **not there yet** ([`TerminalWindow::start`]).
     ///
-    /// İki adım olmasının sebebi aradaki iş: ayarlar pencere doğduktan
-    /// **sonra** (tanı alt başlığa yazılabilsin) ve geometriden **önce**
-    /// okunmak zorunda — font ayarı hücre ölçüsünü, yani ilk grid'i ve kabuğun
-    /// gördüğü ilk `TIOCSWINSZ`'yi belirliyor. Tek kurucu o sırayı ya bozar ya
-    /// da ayar okumayı pencerenin içine taşırdı.
+    /// The reason for two steps is the work in between: the settings must be
+    /// read **after** the window is born (so a notice can be written to the
+    /// subtitle) and **before** the geometry — the font setting determines the
+    /// cell size, i.e. the first grid and the first `TIOCSWINSZ` the shell
+    /// sees. A single constructor would either break that order or move the
+    /// settings read inside the window.
     ///
-    /// Renderer pane'le doğuyor ve hatası çağırana dönüyor: GPU device'ı ya
-    /// da pipeline'lar kurulamıyorsa pencerenin çizebileceği bir şey de yok. `launch`
-    /// ilk pane'in doğum paketi (kimliği pencerenin kimliğiyle aynı sayaçtan,
-    /// sahibi bu pencerenin [`WindowHost`]'u); pencere onu kapsayıcının tek
-    /// pane'i olarak doğuruyor, bölmeler sonradan ([`TerminalWindow::add_pane`]).
+    /// The renderer is born with the pane and its error returns to the
+    /// caller: if the GPU device or the pipelines cannot be built the window
+    /// has nothing to draw. `launch` is the first pane's birth package (its id
+    /// from the same counter as the window's id, its owner this window's
+    /// [`WindowHost`]); the window bears it as the container's single pane,
+    /// splits come afterwards ([`TerminalWindow::add_pane`]).
     pub(crate) fn new(
         mtm: MainThreadMarker,
         id: u64,
@@ -838,10 +860,10 @@ impl TerminalWindow {
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
             | NSWindowStyleMask::Resizable;
-        // SAFETY: defer=false ile pencere hemen yaratılır. Kurucunun unsafe
-        // olma sebebi `releasedWhenClosed`: pencere kontrolcüsü olmadan
-        // AppKit kapanışta pencereyi serbest bırakır ve `WindowIvars.window`'daki
-        // Retained sarkar; hemen altında kapatıyoruz.
+        // SAFETY: with defer=false the window is created immediately. The
+        // constructor is unsafe because of `releasedWhenClosed`: without a
+        // window controller AppKit releases the window on close and the
+        // Retained in `WindowIvars.window` would dangle; we turn it off right below.
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -851,34 +873,36 @@ impl TerminalWindow {
                 false,
             )
         };
-        // SAFETY: yalnız sahiplik semantiğini değiştirir; Retained sahibi biziz.
+        // SAFETY: only changes the ownership semantics; we are the Retained's owner.
         unsafe { window.setReleasedWhenClosed(false) };
-        // İçerik view'ı bölmelerin kapsayıcısı; çerçevesini pencere kuruyor,
-        // pane'leri kapsayıcı oturtuyor (`SplitView::layout_panes`; tek
-        // pane'de sınırın tamamı).
+        // The content view is the splits container; the window sets its frame,
+        // the container lays the panes out (`SplitView::layout_panes`; with a
+        // single pane the whole boundary).
         window.setContentView(Some(&container));
         window.setTitle(ns_string!("bateri"));
-        // **Native sekmeler** (026 → Karar 1): aynı kimliği taşıyan pencereleri
-        // AppKit tek pencerede sekme olarak topluyor. `tabbingMode` bilerek
-        // varsayılanda — sistemin "Prefer tabs" ayarına saygı. Kimliğin tek
-        // yazıldığı yer burası, yani bütün pencereler ortak kimlikte.
+        // **Native tabs** (026 → Karar 1): AppKit gathers windows carrying the
+        // same identifier into a single window as tabs. `tabbingMode` is
+        // deliberately left at the default — respecting the system's "Prefer
+        // tabs" setting. This is the only place the identifier is written, so
+        // all windows share one identifier.
         window.setTabbingIdentifier(ns_string!("bateri.terminal"));
-        // Düğmesiz hareket olayları varsayılan **kapalı**; fare raporu
-        // isteyen uygulama (1003) onlarsız işaretçiyi hiç göremez.
-        // `NSTrackingArea` gerekmiyor: `mouseEntered:`/`mouseExited:`
-        // istenmiyor, yükleme düğmelerinin el imleci `NSView`'ın kendi
-        // cursor rect'inden (`BateriView::upload_cursor_rects`), ve view
-        // zaten first responder — pencere seviyesindeki `mouseMoved:` ona
-        // geliyor. Kipe göre açıp kapamak kipi
-        // `bt-shell-macos`'a yayınlamayı isterdi
+        // Mouse-moved events without a button are **off** by default; an
+        // application asking for mouse reporting (1003) could never see the
+        // pointer without them. No `NSTrackingArea` is needed:
+        // `mouseEntered:`/`mouseExited:` are not wanted, the upload buttons'
+        // hand cursor comes from `NSView`'s own cursor rect
+        // (`BateriView::upload_cursor_rects`), and the view is already first
+        // responder — the window-level `mouseMoved:` reaches it. Turning them
+        // on and off by mode would want broadcasting the mode to
+        // `bt-shell-macos`
         // (`.tasks/020-fare-raporlama/discussion.md` → Karar 4).
         window.setAcceptsMouseMovedEvents(true);
-        // Klavyenin PTY'ye varan yolu buradan başlıyor. View (pane'in
-        // çocuğu da olsa) otomatik first responder DEĞİLDİR; bu satır olmadan pencere
-        // key olur, tuşlar view'a hiç uğramaz ve terminal sessizce
-        // yazmaz. `acceptsFirstResponder` da şart, ikisi bir arada.
+        // The keyboard's path to the PTY starts here. The view (even as the
+        // pane's child) is NOT an automatic first responder; without this line
+        // the window becomes key, keys never reach the view and the terminal
+        // silently does not type. `acceptsFirstResponder` is also required, both together.
         let accepted = window.makeFirstResponder(Some(pane.view()));
-        debug_assert!(accepted, "BateriView first responder olmalı");
+        debug_assert!(accepted, "BateriView must be first responder");
         let this = Self::alloc(mtm).set_ivars(WindowIvars {
             id,
             run,
@@ -890,16 +914,18 @@ impl TerminalWindow {
             alert: RefCell::new(None),
             close_requested: Cell::new(false),
         });
-        // SAFETY: NSObject'in init'i argümansızdır ve ivar'lar set edildi.
+        // SAFETY: NSObject's init takes no arguments and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
-        // Delegate bağlanmadan önce ivar'lar dolu: arada düşen bir pencere
-        // bildirimi geometriyi boş bulup bayat boyutla çizmesin. Delegate
-        // özelliği zayıf; sahibi `AppDelegate`'in pencere listesi.
+        // The ivars are filled before the delegate is attached: a window
+        // notification falling in between must not find the geometry empty and
+        // draw with a stale size. The delegate property is weak; the owner is
+        // `AppDelegate`'s window list.
         window.setDelegate(Some(ProtocolObject::from_ref(&*this)));
-        // İçeriğin boyu pencereden bağımsız da değişiyor (sekme çubuğu);
-        // geometri bu yüzden view'ın kendi bildiriminden, gözlemcisi pane
-        // (`TerminalPane::observe_frame`). Kurucunun son adımı: önceki
-        // adımların yerleşimi geometriyi pencere hazır olmadan kurdurmasın.
+        // The content's size changes independently of the window too (the tab
+        // bar); so the geometry comes from the view's own notification, its
+        // observer the pane (`TerminalPane::observe_frame`). The constructor's
+        // last step: the earlier steps' layout must not make the geometry be
+        // built before the window is ready.
         pane.observe_frame();
         this.observe_focus();
         Ok(this)
@@ -909,32 +935,32 @@ impl TerminalWindow {
         self.ivars().id
     }
 
-    /// Sekmenin pane'leri, ağaç sırasıyla (soldan sağa, yukarıdan aşağı).
-    /// Hiç boş değil: son pane kapanırken sekme kapanıyor. Süreli koşuda tek
-    /// pane (039 Karar 12).
+    /// The tab's panes, in tree order (left to right, top to bottom). Never
+    /// empty: when the last pane closes the tab closes. A single pane in a
+    /// timed run (039 Karar 12).
     pub(crate) fn panes(&self) -> Vec<Retained<TerminalPane>> {
         self.ivars().container.panes()
     }
 
-    /// Odaktaki pane (039 Karar 11): pencerenin first responder'ının pane'i
-    /// — `BateriView` ya da arama alanının alan düzenleyicisi, ikisi de
-    /// pane'in torunu. First responder bir pane'in içinde değilse (pencere
-    /// kendisi) son odaklanan pane ([`WindowIvars::focused`]), o da yoksa ilk
-    /// pane.
+    /// The focused pane (039 Karar 11): the pane of the window's first
+    /// responder — `BateriView` or the search field's field editor, both
+    /// descendants of the pane. If the first responder is not inside a pane
+    /// (the window itself) the last focused pane ([`WindowIvars::focused`]),
+    /// and if there is none the first pane.
     pub(crate) fn focused_pane(&self) -> Retained<TerminalPane> {
         let panes = self.panes();
         let focused = self.ivars().focused.get();
         self.responder_pane()
             .or_else(|| panes.iter().find(|pane| pane.id() == focused).cloned())
             .or_else(|| panes.first().cloned())
-            // audit: kapsayıcı hiç boşalmıyor (`SplitIvars::panes`): son
-            // pane'i kapatmak sekmeyi kapatıyor ve pencere kurucusu bir
-            // pane'le doğuyor.
-            .expect("sekmenin en az bir pane'i var")
+            // audit: the container never empties (`SplitIvars::panes`): closing
+            // the last pane closes the tab and the window constructor is born
+            // with a pane.
+            .expect("the tab has at least one pane")
     }
 
-    /// First responder'ın pane'i — bu sekmenin pane'lerinden biriyse
-    /// (`BateriView` ya da arama alanının alan düzenleyicisi); değilse `None`.
+    /// The first responder's pane — if it is one of this tab's panes
+    /// (`BateriView` or the search field's field editor); otherwise `None`.
     fn responder_pane(&self) -> Option<Retained<TerminalPane>> {
         let pane = self
             .ivars()
@@ -947,13 +973,13 @@ impl TerminalWindow {
             .find(|candidate| candidate.id() == pane.id())
     }
 
-    /// Pencerenin first responder'ını izler (KVO; macOS 10.14'ten beri
-    /// uyumlu). Kurucunun sonunda, ilk first responder kurulduktan sonra;
-    /// kayıt `windowWillClose:`'da sökülüyor.
+    /// Watches the window's first responder (KVO; compatible since macOS
+    /// 10.14). At the end of the constructor, after the first first responder
+    /// is set; the registration is removed in `windowWillClose:`.
     fn observe_focus(&self) {
-        // SAFETY: gözlemci bu sınıf ve `observeValueForKeyPath:…`'u
-        // uyguluyor; bağlam boş, izlenen tek yol bu. Kayıt pencere
-        // kapanırken sökülüyor.
+        // SAFETY: the observer is this class and it implements
+        // `observeValueForKeyPath:…`; the context is null, this is the only
+        // path watched. The registration is removed when the window closes.
         unsafe {
             self.ivars().window.addObserver_forKeyPath_options_context(
                 self,
@@ -964,22 +990,22 @@ impl TerminalWindow {
         }
     }
 
-    /// Pane'in `BateriView`'ı first responder oldu (`PaneHost::focused`):
-    /// odak ona geçti, başlık ve sekme noktası onun.
+    /// The pane's `BateriView` became first responder (`PaneHost::focused`):
+    /// the focus moved to it, the title and tab dot are its.
     ///
-    /// Başlık **bir ana kuyruk turu sonra** okunuyor: olay
-    /// `becomeFirstResponder`'ın içinden geliyor, pencerenin
-    /// `firstResponder`'ı o an henüz eski view olabilir ve
-    /// [`Self::focused_pane`] onu ivar'dan önce soruyor — başlık eski pane'den
-    /// yazılırdı. İş kimlik yakalıyor (`windowWillClose:`'un örüntüsü).
+    /// The title is read **one main-queue turn later**: the event comes from
+    /// inside `becomeFirstResponder`, the window's `firstResponder` may still
+    /// be the old view at that moment and [`Self::focused_pane`] asks it
+    /// before the ivar — the title would be written from the old pane. The
+    /// job captures the id (the pattern of `windowWillClose:`).
     pub(crate) fn pane_focused(&self, id: u64) {
         if self.ivars().focused.replace(id) == id {
             return;
         }
         let window = self.id();
         DispatchQueue::main().exec_async(move || {
-            // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-            let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(window) = app::delegate(mtm).and_then(|app| app.window(window)) {
                 window.refresh_title();
                 window.refresh_dim();
@@ -987,9 +1013,10 @@ impl TerminalWindow {
         });
     }
 
-    /// Klavyeyi `pane`'e verir (first responder) ve odağı ona taşır.
-    /// Büyütülmüş başka bir pane varsa büyütme önce bırakılıyor: gizli
-    /// pane'e klavye verilmez (gezinme, kapanışın komşusu, `bateri://tab/`).
+    /// Gives the keyboard to `pane` (first responder) and moves the focus to
+    /// it. If another pane is zoomed the zoom is dropped first: the keyboard
+    /// is never given to a hidden pane (navigation, the closing's neighbour,
+    /// `bateri://tab/`).
     fn focus_pane(&self, pane: &TerminalPane) {
         if self
             .ivars()
@@ -1004,9 +1031,9 @@ impl TerminalWindow {
         self.refresh_dim();
     }
 
-    /// Odakta olmayan pane'lerin soluk örtüsü (039 Karar 7, R4.4): pencerede
-    /// birden çok pane varken odaktaki dışındakiler. Tek pane'de örtü yok.
-    /// AppKit'in işi, kare istemiyor.
+    /// The dim veil of unfocused panes (039 Karar 7, R4.4): with several panes
+    /// in the window, those other than the focused one. No veil with a single
+    /// pane. AppKit's work, it asks for no frame.
     pub(crate) fn refresh_dim(&self) {
         let panes = self.panes();
         let focused = self.focused_pane().id();
@@ -1016,8 +1043,8 @@ impl TerminalWindow {
         }
     }
 
-    /// Büyütmeyi kurar ya da bırakır; gizlenen pane'lerin link'i uyuyor,
-    /// geri gelenlerinki bir kare istiyor (pencere görünürse).
+    /// Sets or drops the zoom; the links of hidden panes sleep, those of
+    /// returning ones ask for a frame (if the window is visible).
     fn set_zoom(&self, zoomed: Option<u64>) {
         let container = &self.ivars().container;
         if container.zoomed() == zoomed {
@@ -1033,7 +1060,7 @@ impl TerminalWindow {
         self.refresh_dim();
     }
 
-    /// ⌘] / ⌘[: ağaç sırasında sonraki ya da önceki pane (039 R4.1).
+    /// ⌘] / ⌘[: the next or previous pane in tree order (039 R4.1).
     pub(crate) fn select_split(&self, forward: bool) {
         let from = self.focused_pane();
         if let Some(next) = self
@@ -1046,8 +1073,9 @@ impl TerminalWindow {
         }
     }
 
-    /// ⌥⌘ + ok: yöndeki pane (039 R4.1); kenardaysa no-op. Komşu büyütmesiz
-    /// düzenden — büyütülmüşken de pane'lerin gerçek yerleri.
+    /// ⌥⌘ + arrow: the pane in that direction (039 R4.1); a no-op at the edge.
+    /// The neighbour is from the layout without zoom — the panes' real places
+    /// even while zoomed.
     pub(crate) fn select_split_toward(&self, direction: Direction) {
         let from = self.focused_pane();
         if let Some(next) = self
@@ -1060,10 +1088,10 @@ impl TerminalWindow {
         }
     }
 
-    /// ⌃⌘ + ok: odaktaki pane'in o eksendeki ayırıcısını bir hücre taşır
-    /// (039 R4.2). Adım odaktaki pane'in **bir hücresi** — her basış ızgarayı
-    /// bir sütun ya da satır değiştiriyor; tasarım kararı, sayı fonttan.
-    /// En küçük pane sınırında duruyor.
+    /// ⌃⌘ + arrow: moves the focused pane's divider on that axis by one cell
+    /// (039 R4.2). The step is the focused pane's **one cell** — every press
+    /// changes the grid by one column or row; a design decision, the number
+    /// from the font. Stops at the smallest pane limit.
     pub(crate) fn resize_split(&self, direction: Direction) {
         self.set_zoom(None);
         let pane = self.focused_pane();
@@ -1077,14 +1105,14 @@ impl TerminalWindow {
         self.ivars().container.resize(pane.id(), direction, step);
     }
 
-    /// ⌃⌘=: aynı eksendeki pane'ler eşit (039 R4.3).
+    /// ⌃⌘=: the panes on the same axis are equal (039 R4.3).
     pub(crate) fn equalize_splits(&self) {
         self.set_zoom(None);
         self.ivars().container.equalize();
     }
 
-    /// ⇧⌘↩: odaktaki pane'i büyütür ya da büyütmeyi geri alır (039 R4.3).
-    /// Tek pane'de no-op.
+    /// ⇧⌘↩: zooms the focused pane or undoes the zoom (039 R4.3). A no-op
+    /// with a single pane.
     pub(crate) fn toggle_split_zoom(&self) {
         if self.panes().len() < 2 {
             return;
@@ -1096,10 +1124,10 @@ impl TerminalWindow {
         self.set_zoom(zoomed);
     }
 
-    /// Odaktaki pane `axis`'te bölünebilir mi (039 Karar 14): iki yarının
-    /// ızgarası da en küçük pane sınırını geçmeli
-    /// ([`TerminalPane::grid_fits`]). Yeni pane odaktakinin punto farkını
-    /// devraldığı için ölçü odaktakinin hücresinden.
+    /// Whether the focused pane can be split on `axis` (039 Karar 14): both
+    /// halves' grids must pass the smallest pane limit
+    /// ([`TerminalPane::grid_fits`]). Since the new pane inherits the focused
+    /// one's point-size delta the measure is from the focused one's cell.
     fn can_split(&self, axis: Axis) -> bool {
         let pane = self.focused_pane();
         self.ivars()
@@ -1108,13 +1136,13 @@ impl TerminalWindow {
             .is_some_and(|(first, second)| pane.grid_fits(first) && pane.grid_fits(second))
     }
 
-    /// ⌘D / ⇧⌘D: odaktaki pane'den yeni bir bölme — doğum paketini uygulama
-    /// kuruyor (`AppDelegate::open_split`: dizin, punto farkı, tema ve uzak
-    /// satır odaktakinden, 039 Karar 9). Sınırın altına düşecekse no-op
-    /// (Karar 14).
+    /// ⌘D / ⇧⌘D: a new split from the focused pane — the application builds
+    /// the birth package (`AppDelegate::open_split`: directory, point-size
+    /// delta, theme and remote line from the focused one, 039 Karar 9). A
+    /// no-op if it would drop below the limit (Karar 14).
     fn split(&self, axis: Axis) {
-        // Büyütme önce bırakılıyor (Karar 8): bölmenin sınırı büyütmesiz
-        // düzenden soruluyor (`can_split`) ve yeni pane görünmeli.
+        // The zoom is dropped first (Karar 8): the split's limit is asked from
+        // the layout without zoom (`can_split`) and the new pane must be visible.
         self.set_zoom(None);
         if !self.can_split(axis) {
             return;
@@ -1128,11 +1156,12 @@ impl TerminalWindow {
         }
     }
 
-    /// Yeni pane'i `target`'ın `axis`'teki ikinci yarısına koyar, oturumunu
-    /// açar ve klavyeyi ona verir. Sıra zorunlu: pane'in `start`'ı ölçeği
-    /// pencereden okuyor, yani önce kapsayıcıya takılıyor; çerçeve
-    /// gözlemcisi yerleşimden sonra. Oturum doğamazsa pane geri sökülüyor —
-    /// oturumsuz bir yaprak kalmıyor — ve hata çağırana.
+    /// Puts the new pane in `target`'s second half on `axis`, opens its
+    /// session and gives it the keyboard. The order is required: the pane's
+    /// `start` reads the scale from the window, so it is first attached to
+    /// the container; the frame observer after layout. If the session cannot
+    /// be born the pane is taken apart again — no sessionless leaf remains —
+    /// and the error goes to the caller.
     pub(crate) fn add_pane(
         &self,
         mtm: MainThreadMarker,
@@ -1143,31 +1172,33 @@ impl TerminalWindow {
         let container = &self.ivars().container;
         let (_, half) = container
             .halves(target, axis)
-            .ok_or_else(|| "bölünecek pane yok".to_owned())?;
+            .ok_or_else(|| "no pane to split".to_owned())?;
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), half);
         let pane = TerminalPane::new(mtm, frame, launch).map_err(|e| e.to_string())?;
         if !container.insert(target, axis, &pane) {
-            return Err("bölünecek pane yok".to_owned());
+            return Err("no pane to split".to_owned());
         }
         pane.observe_frame();
         if let Err(e) = pane.start(mtm) {
             drop(pane.begin_close());
             let _ = container.remove_leaf(pane.id());
             drop(container.detach(pane.id()));
-            return Err(format!("shell başlatılamadı: {e}"));
+            return Err(format!("could not start the shell: {e}"));
         }
         self.focus_pane(&pane);
         Ok(())
     }
 
-    /// Yalnız `id` pane'ini kapatır, **sormadan** (kabuğun çıkışı, onaylanmış
-    /// soru). Son pane'se sekmenin kapanışı ([`TerminalWindow::close`]).
+    /// Closes only the pane `id`, **without asking** (the shell's exit, a
+    /// confirmed question). If it is the last pane, the tab's closing
+    /// ([`TerminalWindow::close`]).
     ///
-    /// Odaktaki pane kapanıyorsa odak ağaçtaki komşuya ([`Removal::Removed`])
-    /// ve **sökümden önce**: first responder'ı taşıyan view'ı sökmek pencereyi
-    /// responder'sız bırakırdı. Kapanış pane'in kendi sırası
-    /// ([`TerminalPane::begin_close`], beklenmiyor); Dock simgesinin toplamı
-    /// yeniden, çünkü kapanan pane'in kuyruğu gitti.
+    /// If the focused pane is closing the focus goes to the neighbour in the
+    /// tree ([`Removal::Removed`]) and **before the teardown**: taking apart
+    /// the view that carries the first responder would leave the window
+    /// without a responder. The closing is the pane's own sequence
+    /// ([`TerminalPane::begin_close`], not waited on); the Dock icon's total
+    /// again, because the closed pane's queue is gone.
     pub(crate) fn close_pane(&self, id: u64) {
         let container = &self.ivars().container;
         let Some(pane) = container.pane(id) else {
@@ -1193,13 +1224,14 @@ impl TerminalWindow {
         }
     }
 
-    /// `bateri://tab/<id>`'nin tek etkisi (038 Karar 4, 6; 039 Karar 10):
-    /// küçültülmüşse geri açar, seçili sekme ve key yapar, uygulamayı öne
-    /// alır ve klavyeyi kimliğin pane'ine verir. Kabuğa bayt göndermez.
+    /// `bateri://tab/<id>`'s only effect (038 Karar 4, 6; 039 Karar 10):
+    /// reopens it if miniaturized, makes it the selected tab and key, brings
+    /// the application to the front and gives the keyboard to the id's pane.
+    /// Sends no byte to the shell.
     ///
-    /// `makeKeyAndOrderFront` sekme grubundaki pencereyi seçili sekme
-    /// yapıyor (`selectTab:`'ın emsali); küçültülmüş pencerede ise yalnız
-    /// sırayı değiştirip Dock'ta bırakırdı, `deminiaturize` o yüzden önce.
+    /// `makeKeyAndOrderFront` makes the window in a tab group the selected tab
+    /// (the precedent of `selectTab:`); on a miniaturized window it would only
+    /// change the order and leave it in the Dock, so `deminiaturize` comes first.
     pub(crate) fn bring_to_front(&self, pane: &TerminalPane) {
         let window = &self.ivars().window;
         if window.isMiniaturized() {
@@ -1210,21 +1242,22 @@ impl TerminalWindow {
         NSApplication::sharedApplication(self.mtm()).activate();
     }
 
-    /// Bu nesnenin `NSWindow`'u mu — etkin pencere `NSApp.keyWindow`'dan
-    /// listede böyle aranıyor (`AppDelegate::key_window`).
+    /// Whether this object's `NSWindow` is that one — the active window is
+    /// looked up in the list this way from `NSApp.keyWindow` (`AppDelegate::key_window`).
     pub(crate) fn owns(&self, window: &NSWindow) -> bool {
         std::ptr::eq(&*self.ivars().window, window)
     }
 
-    /// Pencereyi kapatır (`windowWillClose:` yolundan), **sormadan**: kabuğun
-    /// çıkışı ve onaylanmış bir kapatma sorusu.
+    /// Closes the window (via the `windowWillClose:` path), **without
+    /// asking**: the shell's exit and a confirmed close question.
     ///
-    /// Bu pencerede açık bir soru varsa önce o düşüyor, `Cancel` cevabıyla:
-    /// cevabı bekleyen blok "kapat" dışındaki her cevabı iptal sayıyor. Soru
-    /// başka sekmeler içinse ("Close Other Tabs" ve sayfayı taşıyan seçili
-    /// sekmenin kabuğu çıktı) jest düşüyor ve o sekmeler açık kalıyor —
-    /// **bilinen sınır**, yanlışın yönü güvenli: hiçbir şey sorulmadan
-    /// kapanmıyor, jest yinelenebilir.
+    /// If there is an open question in this window it is dropped first, with
+    /// a `Cancel` answer: the block waiting for the answer counts every answer
+    /// other than "close" as a cancel. If the question was for other tabs
+    /// ("Close Other Tabs" and the shell of the selected tab carrying the
+    /// sheet exited) the gesture is dropped and those tabs stay open — a
+    /// **known limit**, the wrong direction is the safe one: nothing closes
+    /// without asking, the gesture can be repeated.
     pub(crate) fn close(&self) {
         let alert = self.ivars().alert.take();
         if let Some(alert) = alert {
@@ -1235,12 +1268,12 @@ impl TerminalWindow {
         self.ivars().window.close();
     }
 
-    /// Bu pencerede kapatma sorusu açık mı.
+    /// Whether a close question is open in this window.
     pub(crate) fn asking(&self) -> bool {
         self.ivars().alert.borrow().is_some()
     }
 
-    /// Sekme grubunun terminal pencereleri, sırasıyla; grup yoksa yalnız bu.
+    /// The tab group's terminal windows, in order; only this one if there is no group.
     fn tab_group(&self, app: &AppDelegate) -> Vec<Retained<TerminalWindow>> {
         self.tab_windows()
             .iter()
@@ -1248,21 +1281,21 @@ impl TerminalWindow {
             .collect()
     }
 
-    /// `windowShouldClose:`'un gövdesi (⌘W, Close Tab, kırmızı düğme, "Close
-    /// Other Tabs"): şimdi kapansın mı.
+    /// `windowShouldClose:`'s body (⌘W, Close Tab, the red button, "Close
+    /// Other Tabs"): whether to close now.
     ///
-    /// **Karar bu çağrıda verilmiyor, bir tur sonra ve jestin tamamı için**
-    /// ([`close_requested`]). Ölçüldü (phase-2 Uygulama Notları): kırmızı düğme
-    /// çok sekmeli pencerede grubun **her** sekmesine, "Close Other Tabs" öteki
-    /// her sekmeye birer `windowShouldClose:` gönderiyor, ikisi de aynı olay
-    /// turunda. Tek sekmeye bakan bir karar kırmızı düğmede sekme sekme soru
-    /// açar ya da ilk sekmeyi "Close this tab?" diye sorup geri kalanını
-    /// bırakırdı; "bir jest, en çok bir soru" ancak jestin kapsamını görerek
-    /// tutuyor.
+    /// **The decision is not made in this call, but one turn later and for
+    /// the whole gesture** ([`close_requested`]). Measured (phase-2 Uygulama
+    /// Notları): in a multi-tab window the red button sends a
+    /// `windowShouldClose:` to **every** tab of the group, "Close Other Tabs"
+    /// to every other tab, both in the same event turn. A decision looking at
+    /// a single tab would open a question tab by tab on the red button or ask
+    /// the first tab "Close this tab?" and leave the rest; "one gesture, at
+    /// most one question" holds only by seeing the gesture's scope.
     ///
-    /// Süreli koşu ve `never` hiç sormuyor: cevap şimdi belli, yani AppKit'in
-    /// kendi kapanışı (`true`) — ertelemenin tek sebebi soru. Grupta soru
-    /// zaten açıksa ikinci bir istek doğmuyor.
+    /// A timed run and `never` never ask: the answer is settled now, i.e.
+    /// AppKit's own closing (`true`) — the only reason for deferring is the
+    /// question. If a question is already open in the group a second request is not born.
     fn should_close_now(&self) -> bool {
         if self.ivars().run.is_some() {
             return true;
@@ -1276,18 +1309,18 @@ impl TerminalWindow {
         let Some(group) = self.group_unless_asking(&app) else {
             return false;
         };
-        // Jestin ilk isteği turun sonuna tek iş kuruyor; sonrakiler yalnız
-        // bayrağını dikiyor ve aynı işin kapsamına giriyor. İş isteyen
-        // pencereyi değil **bayrakları** arıyor: ilk isteyen o arada
-        // kapanmışsa (kabuğu aynı turda çıktı) öteki sekmelerin bayrağı
-        // kalıcı olarak dikili kalır ve kırmızı düğme bir daha iş kurmazdı
-        // (`/code-review`).
+        // The gesture's first request sets up a single job at the end of the
+        // turn; the later ones only set their flag and enter the same job's
+        // scope. The job looks for the **flags**, not the requesting window:
+        // if the first requester closed in the meantime (its shell exited in
+        // the same turn) the other tabs' flags would stay set permanently and
+        // the red button would never set up a job again (`/code-review`).
         let first = !group.iter().any(|tab| tab.ivars().close_requested.get());
         self.ivars().close_requested.set(true);
         if first {
             DispatchQueue::main().exec_async(|| {
-                // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-                let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                 if let Some(app) = app::delegate(mtm) {
                     close_requested_tabs(&app);
                 }
@@ -1296,14 +1329,14 @@ impl TerminalWindow {
         false
     }
 
-    /// Grubun sekmeleri — grupta açık bir soru yoksa. "Bir jest, en çok bir
-    /// soru" kapısının tek kopyası.
+    /// The group's tabs — if there is no open question in the group. The
+    /// single copy of the "one gesture, at most one question" gate.
     fn group_unless_asking(&self, app: &AppDelegate) -> Option<Vec<Retained<TerminalWindow>>> {
         let group = self.tab_group(app);
         (!group.iter().any(|tab| tab.asking())).then_some(group)
     }
 
-    /// Bu turdaki isteklerin grubu için tek karar; bayraklar sıfırlanıyor.
+    /// A single decision for the group of this turn's requests; the flags are reset.
     fn close_requested_group(&self, app: &AppDelegate) {
         let group = self.tab_group(app);
         let mut targets = Vec::new();
@@ -1319,8 +1352,8 @@ impl TerminalWindow {
         self.confirm_close(app, &group, &targets, scope);
     }
 
-    /// ⌘W: çok pane'de odaktaki pane için soru; tek pane'de bu sekme için.
-    /// Sorulmayacaksa hemen kapanış.
+    /// ⌘W: with several panes a question for the focused pane; with one pane
+    /// for this tab. Closes at once if it will not ask.
     fn close_tab_asking(&self) {
         let Some(app) = app::delegate(self.mtm()) else {
             return;
@@ -1339,8 +1372,8 @@ impl TerminalWindow {
         self.confirm_close(&app, &group, &[this], scope);
     }
 
-    /// ⌘W çok pane'li sekmede: yalnız odaktaki pane, koşan iş varsa yalnız
-    /// onu sorarak (039 Karar 8).
+    /// ⌘W in a multi-pane tab: only the focused pane, asking only about the
+    /// running job if there is one (039 Karar 8).
     fn close_pane_asking(&self, app: &AppDelegate) {
         let pane = self.focused_pane();
         let confirm = app.settings().confirm_close;
@@ -1358,7 +1391,7 @@ impl TerminalWindow {
         );
     }
 
-    /// ⇧⌘W: grubun tamamı için tek soru, ya da sorulmayacaksa hemen kapanış.
+    /// ⇧⌘W: a single question for the whole group, or closes at once if it will not ask.
     fn close_group_asking(&self) {
         let Some(app) = app::delegate(self.mtm()) else {
             return;
@@ -1368,14 +1401,15 @@ impl TerminalWindow {
         }
     }
 
-    /// `targets` kapanacak; sorulacaksa soru grubun **seçili** sekmesine sayfa
-    /// olarak açılıyor, değilse hepsi hemen kapanıyor.
+    /// `targets` will close; if it will ask the question opens as a sheet on
+    /// the group's **selected** tab, otherwise they all close at once.
     ///
-    /// Sayfa seçili sekmede, çünkü arka sekmeye takılan sayfa görünmez — ve
-    /// "Close Other Tabs"ta kapanacak sekmelerin hiçbiri seçili değil. **Tek
-    /// hedef arka sekmeyse** (sekme çubuğunda arka sekmenin ×'i) o sekme önce
-    /// seçiliyor ve soru onda: "Close this tab?" gözün baktığı sekmeyi
-    /// sormalı, başka birini değil (`/code-review`).
+    /// The sheet is on the selected tab, because a sheet attached to a
+    /// background tab is invisible — and in "Close Other Tabs" none of the
+    /// tabs to be closed is selected. **If the single target is a background
+    /// tab** (a background tab's × in the tab bar) that tab is selected first
+    /// and the question is on it: "Close this tab?" must ask about the tab the
+    /// eye is on, not another (`/code-review`).
     fn confirm_close(
         &self,
         app: &AppDelegate,
@@ -1415,25 +1449,25 @@ impl TerminalWindow {
         host.ask(&prompt(scope, unit, &foregrounds), CloseTarget::Tabs(ids));
     }
 
-    /// Soruyu bu pencereye sayfa olarak açar; onayda `targets`'taki sekmeleri
-    /// ya da pane'i kapatır.
+    /// Opens the question on this window as a sheet; on confirm closes the
+    /// tabs in `targets` or the pane.
     ///
-    /// **Blok yalnız kimlik yakalıyor** (R2.8, alternatif ekran habercisinin
-    /// örüntüsü): pencereleri cevap anında listeden buluyor, bulamadığını
-    /// atlıyor. Yalnız `NSAlertFirstButtonReturn` kapatıyor — kabuk sayfa
-    /// açıkken çıkarsa [`TerminalWindow::close`] sayfayı `Cancel`'la düşürüyor
-    /// ve `forget_window` bir tur ertelendiği için pencere o arada listede hâlâ
-    /// bulunabiliyor.
+    /// **The block captures only ids** (R2.8, the alternate-screen notifier's
+    /// pattern): it looks the windows up in the list at answer time and skips
+    /// those it cannot find. Only `NSAlertFirstButtonReturn` closes — if the
+    /// shell exits while the sheet is open [`TerminalWindow::close`] drops the
+    /// sheet with `Cancel`, and since `forget_window` is deferred by one turn
+    /// the window can still be found in the list in the meantime.
     ///
-    /// Kapanış **bir ana kuyruk turu ertelenir** (`windowWillClose:`'un
-    /// örüntüsü): cevap AppKit'in sayfa sökümünün içinde geliyor ve pencereyi
-    /// orada kapatmak sökümün altını oyardı.
+    /// The closing is **deferred by one main-queue turn** (`windowWillClose:`'s
+    /// pattern): the answer comes inside AppKit's sheet teardown and closing
+    /// the window there would pull the rug from under the teardown.
     fn ask(&self, prompt: &Prompt, targets: CloseTarget) {
         let alert = alert(self.mtm(), prompt);
         let host = self.id();
         let answered = RcBlock::new(move |response: NSModalResponse| {
-            // audit: sayfanın tamamlanma bloğu AppKit'in ana thread'inde koşar.
-            let mtm = MainThreadMarker::new().expect("sayfa bloğu ana thread'dedir");
+            // audit: the sheet's completion block runs on AppKit's main thread.
+            let mtm = MainThreadMarker::new().expect("the sheet block is on the main thread");
             if let Some(window) = app::delegate(mtm).and_then(|app| app.window(host)) {
                 drop(window.ivars().alert.take());
             }
@@ -1442,8 +1476,8 @@ impl TerminalWindow {
             }
             let targets = targets.clone();
             DispatchQueue::main().exec_async(move || {
-                // audit: ana kuyrukta koşan blok tanımı gereği ana thread'dedir.
-                let mtm = MainThreadMarker::new().expect("ana kuyruk ana thread'dir");
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
                 let Some(app) = app::delegate(mtm) else {
                     return;
                 };
@@ -1453,8 +1487,8 @@ impl TerminalWindow {
                             window.close();
                         }
                     }
-                    // Pane'in sekmesi soruyu taşıyan pencere; pane o arada
-                    // kapandıysa (kabuğu çıktı) no-op.
+                    // The pane's tab is the window carrying the question; if
+                    // the pane closed in the meantime (its shell exited) a no-op.
                     CloseTarget::Pane(pane) => {
                         if let Some(window) = app.window(host) {
                             window.close_pane(*pane);
@@ -1467,8 +1501,8 @@ impl TerminalWindow {
         alert.beginSheetModalForWindow_completionHandler(&self.ivars().window, Some(&answered));
     }
 
-    /// Pencereyi `from`'un sekme grubuna, seçili sekmenin **sağına** ekler ve
-    /// öne alır.
+    /// Adds the window to `from`'s tab group, to the **right** of the selected
+    /// tab, and brings it to the front.
     pub(crate) fn show_as_tab_of(&self, from: &TerminalWindow) {
         from.ivars()
             .window
@@ -1476,13 +1510,14 @@ impl TerminalWindow {
         self.ivars().window.makeKeyAndOrderFront(None);
     }
 
-    /// Ayrı pencere olarak öne alır; `from` varsa ondan kademeli (üst sol köşe
-    /// bir adım sağ-aşağı), yoksa ekranın ortasında.
+    /// Brings it to the front as a separate window; cascaded from `from` if
+    /// there is one (top-left corner one step right-down), otherwise centred
+    /// on the screen.
     pub(crate) fn show_after(&self, from: Option<&TerminalWindow>) {
         let window = &self.ivars().window;
         match from {
-            // `NSZeroPoint`'le çağrı pencereyi oynatmıyor, bir sonraki
-            // pencerenin köşesini veriyor — AppKit'in kademeleme deyimi.
+            // A call with `NSZeroPoint` does not move the window, it gives the
+            // next window's corner — AppKit's cascading idiom.
             Some(from) => {
                 let next = from.ivars().window.cascadeTopLeftFromPoint(NSPoint::ZERO);
                 window.cascadeTopLeftFromPoint(next);
@@ -1492,7 +1527,7 @@ impl TerminalWindow {
         window.makeKeyAndOrderFront(None);
     }
 
-    /// Timed run only (`make duman`): keeps the window above every other
+    /// Timed run only (`make smoke`): keeps the window above every other
     /// app's windows, so it is never occluded.
     ///
     /// wgpu hands out no drawable for an occluded window (its Metal backend's
@@ -1509,11 +1544,11 @@ impl TerminalWindow {
         window.orderFrontRegardless();
     }
 
-    /// Pencerenin sekme grubundaki pencereler, sırasıyla; grup yoksa yalnız
-    /// kendisi.
+    /// The windows in the window's tab group, in order; only itself if there
+    /// is no group.
     ///
-    /// `tabbedWindows` değil `tabGroup`: ilki çubuk görünmüyorken `nil`
-    /// veriyor, yani tek sekmede ⇧⌘W hiçbir şey kapatmazdı.
+    /// `tabGroup`, not `tabbedWindows`: the former gives `nil` while the bar
+    /// is not visible, so with a single tab ⇧⌘W would close nothing.
     fn tab_windows(&self) -> Vec<Retained<NSWindow>> {
         let window = &self.ivars().window;
         match window.tabGroup() {
@@ -1522,25 +1557,26 @@ impl TerminalWindow {
         }
     }
 
-    /// Başlığı **odaktaki** pane'in oturumundan okuyup pencereye yazar —
-    /// pane'in `PaneHost::title_changed` olayı ([`WindowHost`]) ve odak
-    /// değişimi ([`TerminalWindow::pane_focused`]; 039 Karar 11). Kare yolu başlık
-    /// hesaplamıyor; yazım yalnız **değişimde** (026 R2.4). Oturum henüz
-    /// yoksa başlık kurucunun `bateri`'si kalıyor.
+    /// Reads the title from the **focused** pane's session and writes it to
+    /// the window — the pane's `PaneHost::title_changed` event ([`WindowHost`])
+    /// and the focus change ([`TerminalWindow::pane_focused`]; 039 Karar 11).
+    /// The frame path computes no title; writing is only on **change** (026
+    /// R2.4). If there is no session yet the title stays the constructor's
+    /// `bateri`.
     ///
-    /// Sekmenin noktası da buradan tazeleniyor ([`Self::refresh_tab_mark`]):
-    /// uzak durumun iki kenarı (`set_remote`'un dönüşü, `D`/`A`'nın silmesini
-    /// getiren `title_changed`) başlığınkilerle aynı (037 Karar 4). Yükleme
-    /// kuyruğunun bağlantı kenarı pane'in, olaydan **önce**
-    /// (`TerminalPane::remote_or_title_changed`).
+    /// The tab's dot is refreshed from here too ([`Self::refresh_tab_mark`]):
+    /// the remote state's two edges (the return of `set_remote`, the
+    /// `title_changed` that `D`/`A`'s deletion brings) are the same as the
+    /// title's (037 Karar 4). The upload queue's connection edge is the
+    /// pane's, **before** the event (`TerminalPane::remote_or_title_changed`).
     pub(crate) fn refresh_title(&self) {
         self.apply_title();
         self.refresh_tab_mark();
     }
 
-    /// Pencerenin (ve sekmenin) başlığını oturumdan yazar; yükleme akarken
-    /// önünde `↑ N% · ` (037 phase-7, `upload::titled`; yüzde pane'in
-    /// kuyruğundan).
+    /// Writes the window's (and tab's) title from the session; while an upload
+    /// flows `↑ N% · ` in front (037 phase-7, `upload::titled`; the percentage
+    /// from the pane's queue).
     fn apply_title(&self) {
         let pane = self.focused_pane();
         if let Some(session) = pane.session() {
@@ -1554,28 +1590,28 @@ impl TerminalWindow {
         }
     }
 
-    /// Odaktaki pane'in uzak host'u ve çözülmüş işareti; yerelde `None`
+    /// The focused pane's remote host and resolved mark; `None` locally
     /// (`Session::remote_mark`).
     pub(crate) fn remote_mark(&self) -> Option<(String, HostMark)> {
         self.focused_pane().session()?.remote_mark()
     }
 
-    /// Sekmenin noktası (037 Karar 4): işaretli uzak host'ta sekme
-    /// başlığının yanında işaretin renginde küçük, dolu bir daire
-    /// (`NSWindowTab.accessoryView`); işaretsiz uzakta ve yerelde yok —
-    /// işaretsiz uzak sekme başlığında zaten `⇄` taşıyor ve her ssh
-    /// sekmesine bir nokta prod'un kırmızısını sulandırırdı.
+    /// The tab's dot (037 Karar 4): on a marked remote host a small filled
+    /// circle in the mark's colour next to the tab title
+    /// (`NSWindowTab.accessoryView`); none on an unmarked remote or locally —
+    /// an unmarked remote tab already carries `⇄` in its title and a dot on
+    /// every ssh tab would dilute prod's red.
     ///
-    /// Renk oturumun temasından, dock'unkiyle aynı eşlemeden
-    /// (`Theme::mark_rgb`), sRGB — `NSColor` onu kendisi kodluyor. Tetikleri
-    /// uzak durumun kenarları ([`Self::refresh_title`]), ayar
-    /// ([`Self::set_host_marks`]) ve tema ([`Self::set_theme`]); aynı renkte
-    /// no-op, yani AppKit'e her başlık haberinde yeni bir view gitmiyor.
-    ///
-    /// Çizim `NSBox` (033 panelinin emsali): katman yoluyla renk istemek
-    /// `CGColor`'u, yani `objc2-core-graphics` kenarını isterdi. Nokta yalnız
-    /// sekme çubuğu görünürken var; tek sekmeli pencerede gösterge dock'un
-    /// üst çizgisi.
+    /// The colour is from the session's theme, from the same mapping as the
+    /// dock's (`Theme::mark_rgb`), sRGB — `NSColor` encodes it itself. Its
+    /// triggers are the remote state's edges ([`Self::refresh_title`]), the
+    /// settings ([`Self::set_host_marks`]) and the theme ([`Self::set_theme`]);
+    /// a no-op on the same colour, so a new view does not go to AppKit on
+    /// every title news.
+    /// The drawing is an `NSBox` (the precedent of the 033 panel): asking for
+    /// a colour through the layer would want `CGColor`, i.e. the
+    /// `objc2-core-graphics` edge. The dot exists only while the tab bar is
+    /// visible; in a single-tab window the indicator is the dock's top line.
     fn refresh_tab_mark(&self) {
         let pane = self.focused_pane();
         let color = pane.session().and_then(|session| {
@@ -1604,7 +1640,7 @@ impl TerminalWindow {
             byte(0),
             1.0,
         ));
-        // Sekme aksesuarını Auto Layout boyutlandırıyor: ölçü kısıtla.
+        // Auto Layout sizes the tab accessory: constrain the size.
         dot.setTranslatesAutoresizingMaskIntoConstraints(false);
         dot.widthAnchor()
             .constraintEqualToConstant(DIAMETER)
@@ -1615,25 +1651,25 @@ impl TerminalWindow {
         tab.setAccessoryView(Some(&dot));
     }
 
-    /// Alt başlığın yazımı; metni kuran `AppDelegate::post_notices`.
+    /// Writing the subtitle; the text is built by `AppDelegate::post_notices`.
     pub(crate) fn set_subtitle(&self, subtitle: &NSString) {
         self.ivars().window.setSubtitle(subtitle);
     }
 
-    /// İlk pane'in oturumunu açar ([`TerminalPane::start`], doğum paketinden)
-    /// ve başlığı bir kez oturumdan okur: oturum yuvaya girmeden önce gelmiş
-    /// bir başlık haberi boş yuva bulup düşmüş olabilir; bu okuma o pencereyi
-    /// kapatıyor (değişmemişse aynı `bateri`'yi yazar). Hata çağırana
-    /// dönüyor: ilk pencerede süreç çıkıyor, ⌘T/⌘N'de yalnız o pencere
-    /// kapanıyor.
+    /// Opens the first pane's session ([`TerminalPane::start`], from the
+    /// birth package) and reads the title from the session once: a title
+    /// notification that arrived before the session entered the slot may have
+    /// found an empty slot and dropped; this read closes that (writes the same
+    /// `bateri` if unchanged). The error returns to the caller: in the first
+    /// window the process exits, in ⌘T/⌘N only that window closes.
     pub(crate) fn start(&self, mtm: MainThreadMarker) -> std::io::Result<()> {
         self.focused_pane().start(mtm)?;
         self.refresh_title();
         Ok(())
     }
 
-    /// `[remote] hosts` değişti — desen listesi her pane'in oturumuna
-    /// ([`TerminalPane::set_host_marks`]), sekmenin noktası yeni çözümden.
+    /// `[remote] hosts` changed — the pattern list goes to every pane's
+    /// session ([`TerminalPane::set_host_marks`]), the tab's dot from the new resolution.
     pub(crate) fn set_host_marks(&self, settings: &Settings) {
         for pane in self.panes() {
             pane.set_host_marks(settings);
@@ -1641,49 +1677,50 @@ impl TerminalWindow {
         self.refresh_tab_mark();
     }
 
-    /// Temayı pane'lere verir ([`TerminalPane::set_theme`]: oturum ve arama
-    /// paneli), ayırıcıyı ([`SplitView::set_theme`]) ve kromu ona boyar
-    /// ([`TerminalWindow::apply_chrome`]).
+    /// Gives the theme to the panes ([`TerminalPane::set_theme`]: session and
+    /// search panel), the separator ([`SplitView::set_theme`]) and paints the
+    /// chrome with it ([`TerminalWindow::apply_chrome`]).
     ///
-    /// İkisi tek çağrıda, çünkü temayı değiştiren iki yol var
-    /// (`AppDelegate::reload_settings`, `AppDelegate::apply_appearance`) ve
-    /// biri kromu unutsaydı ızgara yeni temada, başlık çubuğu eskisinde
-    /// kalırdı — belirti tam da kullanıcının göreceği dikiş.
+    /// Both in a single call, because there are two paths that change the
+    /// theme (`AppDelegate::reload_settings`, `AppDelegate::apply_appearance`)
+    /// and if one forgot the chrome the grid would be in the new theme and the
+    /// title bar in the old — the symptom is exactly the seam the user would see.
     pub(crate) fn set_theme(&self, theme: Theme) {
         for pane in self.panes() {
             pane.set_theme(theme);
         }
         self.ivars().container.set_theme(&theme);
         self.apply_chrome(&theme);
-        // Sekmenin noktası işaretin rolünden; rol yeni temada başka bir renk.
+        // The tab's dot is from the mark's role; the role is another colour in the new theme.
         self.refresh_tab_mark();
     }
 
-    /// Pencere kromunu temaya boyar (026 → Karar 1, Seçenek C): başlık
-    /// çubuğu saydam ve ayırıcısız, pencerenin zemini temanın `background`'ı,
-    /// görünümü (trafik ışıkları, başlık metni, sekme çubuğu) zeminin
-    /// açıklığından ([`is_dark_background`]).
+    /// Paints the window chrome with the theme (026 → Karar 1, Option C): the
+    /// title bar transparent and separatorless, the window's background the
+    /// theme's `background`, its appearance (traffic lights, title text, tab
+    /// bar) from the background's lightness ([`is_dark_background`]).
     ///
-    /// Saydam başlık çubuğunun altında görünen şey pencerenin zemini, yani
-    /// tek sekmede başlık ile içerik **tek yüzey**: clear rengi aynı temadan
-    /// (`Theme::background_linear`). Renk burada **sRGB** kuruluyor, lineer
-    /// değil — lineer değer `bt-gpu`'nun, çünkü onu sRGB'ye donanım
-    /// kodluyor; `NSColor`'a lineer vermek zemini açardı (`CLAUDE.md` →
-    /// Renk uzayı).
+    /// What shows under the transparent title bar is the window's background,
+    /// so in a single tab the title and content are **a single surface**: the
+    /// clear colour is from the same theme (`Theme::background_linear`). The
+    /// colour is set here in **sRGB**, not linear — the linear value is
+    /// `bt-gpu`'s, because the hardware encodes it to sRGB; giving `NSColor`
+    /// a linear value would lighten the background (`CLAUDE.md` → Renk uzayı).
     ///
-    /// Pencereye görünüm kurmak onu sistemin görünümünden **koparıyor**:
-    /// view artık sistemin açık/koyu değişimini görmüyor ve görünüm değişimi
-    /// uygulamanın kendisinden izleniyor (`AppDelegate::observe_appearance`).
+    /// Setting an appearance on the window **detaches** it from the system's
+    /// appearance: the view no longer sees the system's light/dark change and
+    /// the appearance change is watched from the application itself
+    /// (`AppDelegate::observe_appearance`).
     ///
-    /// Kurucuda değil pencere görünmeden hemen önce ilk kez çağrılıyor
-    /// (`AppDelegate::open_window` → [`TerminalWindow::set_theme`]): tema
-    /// oradan geliyor ve sonra boyamak
-    /// her ⌘T'de bir kare sistemin gri çubuğunu gösterirdi.
+    /// Called for the first time not in the constructor but right before the
+    /// window is shown (`AppDelegate::open_window` → [`TerminalWindow::set_theme`]):
+    /// the theme comes from there and painting afterwards would show the
+    /// system's grey bar for a frame on every ⌘T.
     pub(crate) fn apply_chrome(&self, theme: &Theme) {
-        // Krom yalnız zeminden türüyor; aynı zeminde AppKit'e yeniden renk ve
-        // görünüm vermek her ayar kaydında bütün başlık çubuklarını yeniden
-        // çizdirirdi (`Session::set_theme`'in aynı temada no-op olmasının
-        // ikizi).
+        // The chrome derives only from the background; giving AppKit the colour
+        // and appearance again on the same background would redraw all title
+        // bars on every settings save (the twin of `Session::set_theme` being a
+        // no-op on the same theme).
         if self.ivars().chrome.replace(Some(theme.background)) == Some(theme.background) {
             return;
         }
@@ -1694,8 +1731,8 @@ impl TerminalWindow {
         window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
             r, g, b, 1.0,
         )));
-        // SAFETY: AppKit'in dışa açtığı iki sabit `NSString`; süreç boyunca
-        // yaşıyorlar ve yalnız okunuyorlar (`NSRunLoopCommonModes` emsali).
+        // SAFETY: two constant `NSString`s AppKit exposes; they live for the
+        // whole process and are only read (like `NSRunLoopCommonModes`).
         let name = unsafe {
             if is_dark_background(theme) {
                 NSAppearanceNameDarkAqua
@@ -1706,13 +1743,14 @@ impl TerminalWindow {
         window.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
     }
 
-    /// Kapanış sırasının pencereye düşen adımları — **başlatır, beklemez**.
-    /// İki çağıranı var: pencerenin kapanışı (`windowWillClose:`, tutamaklar
-    /// düşüyor) ve uygulamanın kapanışı (`AppDelegate::shutdown`, bütün
-    /// tutamaklar tek son tarihe kadar bekleniyor). Sıra pane'in
-    /// ([`TerminalPane::begin_close`]: yükleme kuyruğu, ritim, `Waker`,
-    /// `SIGHUP`) ve **her** pane için; dönüş ağaç sırasıyla pane başına bir
-    /// sonuç. İdempotent; oturumu hiç doğmamış pane'in yeri `None`.
+    /// The closing sequence's steps that fall to the window — **starts, does
+    /// not wait**. It has two callers: the window's closing
+    /// (`windowWillClose:`, the handles drop) and the application's closing
+    /// (`AppDelegate::shutdown`, all handles waited on until a single
+    /// deadline). The order is the pane's ([`TerminalPane::begin_close`]: the
+    /// upload queue, rhythm, `Waker`, `SIGHUP`) and is for **every** pane; the
+    /// return is one result per pane in tree order. Idempotent; the place of a
+    /// pane whose session never came to be is `None`.
     pub(crate) fn begin_close(&self) -> Vec<Option<Closing>> {
         self.panes().iter().map(|pane| pane.begin_close()).collect()
     }
@@ -1722,8 +1760,9 @@ impl TerminalWindow {
 mod tests {
     #[test]
     fn term_program_version_is_the_workspace_version() {
-        // Karar 3'ün bekçisi: `bt-core`'un sabiti ile uygulamanın sürümü aynı
-        // alandan (`version.workspace = true`); biri ayrışırsa burada kızarır.
+        // Karar 3's guard: `bt-core`'s constant and the application's version
+        // come from the same field (`version.workspace = true`); if one
+        // diverges it turns red here.
         assert_eq!(bt_core::TERM_PROGRAM_VERSION, env!("CARGO_PKG_VERSION"));
     }
 
@@ -1760,18 +1799,18 @@ mod tests {
 
     #[test]
     fn embedded_themes_get_their_own_appearance() {
-        assert!(is_dark_background(&Theme::BATERI), "bateri koyu");
+        assert!(is_dark_background(&Theme::BATERI), "bateri is dark");
         assert!(
             !is_dark_background(&Theme::BATERI_LIGHT),
-            "bateri-light açık"
+            "bateri-light is light"
         );
     }
 
     #[test]
     fn mid_grey_splits_at_equal_contrast() {
-        // Beyaz ve siyahla kontrastın eşitlendiği parlaklık √(1.05·0.05) −
-        // 0.05, sRGB'de #757575 ile #767676 arasına düşüyor: orta gri açık
-        // (siyah metin daha okunur), birkaç ton koyusu koyu.
+        // The luminance at which contrast with white and black is equal is
+        // √(1.05·0.05) − 0.05, falling between #757575 and #767676 in sRGB:
+        // mid grey is light (black text reads better), a few shades darker is dark.
         assert!(!is_dark_background(&with_background(0x808080)));
         assert!(is_dark_background(&with_background(0x606060)));
     }
@@ -1780,26 +1819,27 @@ mod tests {
     fn numbered_tabs_select_the_nth_or_nothing() {
         assert_eq!(tab_index(1, 3), Some(0));
         assert_eq!(tab_index(3, 3), Some(2));
-        assert_eq!(tab_index(4, 3), None, "olmayan sekme no-op");
+        assert_eq!(tab_index(4, 3), None, "a nonexistent tab is a no-op");
         assert_eq!(tab_index(8, 8), Some(7));
         assert_eq!(
             tab_index(8, 20),
             Some(7),
-            "⌘8 dokuzdan fazla sekmede de sekizinci"
+            "⌘8 is the eighth even with more than nine tabs"
         );
     }
 
     #[test]
     fn nine_selects_the_last_tab() {
-        assert_eq!(tab_index(9, 1), Some(0), "tek sekmede ⌘9 o sekme");
+        assert_eq!(tab_index(9, 1), Some(0), "with a single tab ⌘9 is that tab");
         assert_eq!(tab_index(9, 3), Some(2));
         assert_eq!(tab_index(9, 20), Some(19));
     }
 
     #[test]
     fn a_timed_run_never_asks_and_never_reads_the_table() {
-        // Süreli koşu ayar okumuyor ve başsız bir soru `make duman`'ı asardı:
-        // cevap her ayarda hayır **ve** tablo hiç okunmuyor (R2.1).
+        // A timed run reads no settings and a headless question would hang
+        // `make smoke`: the answer is no under every setting **and** the table
+        // is never read (R2.1).
         for confirm in ALL {
             for busy in [false, true] {
                 let reads = Cell::new(0);
@@ -1808,7 +1848,7 @@ mod tests {
                     busy
                 });
                 assert!(!ask, "{confirm:?}");
-                assert_eq!(reads.get(), 0, "{confirm:?}: tablo okundu");
+                assert_eq!(reads.get(), 0, "{confirm:?}: the table was read");
             }
         }
     }
@@ -1823,7 +1863,7 @@ mod tests {
             };
             assert!(!should_ask(false, ConfirmClose::Never, read));
             assert!(should_ask(false, ConfirmClose::Always, read));
-            assert_eq!(reads.get(), 0, "karar tabloya bağlı değilken okundu");
+            assert_eq!(reads.get(), 0, "read while the decision is table-free");
         }
     }
 
@@ -1868,11 +1908,11 @@ mod tests {
 
     #[test]
     fn the_gesture_scope_comes_from_how_many_tabs_it_asked_for() {
-        // Ölçülen jestler (phase-2 Uygulama Notları): ⌘W tek sekme, kırmızı
-        // düğme grubun tamamı, "Close Other Tabs" seçili olmayanlar.
-        assert_eq!(close_scope(1, 1), CloseScope::Window, "tek sekmeli pencere");
+        // The measured gestures (phase-2 Uygulama Notları): ⌘W a single tab,
+        // the red button the whole group, "Close Other Tabs" the unselected ones.
+        assert_eq!(close_scope(1, 1), CloseScope::Window, "single-tab window");
         assert_eq!(close_scope(1, 3), CloseScope::Tab, "⌘W");
-        assert_eq!(close_scope(3, 3), CloseScope::Window, "kırmızı düğme");
+        assert_eq!(close_scope(3, 3), CloseScope::Window, "red button");
         assert_eq!(close_scope(2, 3), CloseScope::Tabs(2), "Close Other Tabs");
     }
 
@@ -1892,13 +1932,13 @@ mod tests {
             message(&["a", "b", "c"]),
             "“a”, “b” and “c” are still running. Closing ends them."
         );
-        // Tablo okunamadı ama iş koşuyor sayıldı (R1.5): adsız.
+        // The table could not be read but a job was counted as running (R1.5): nameless.
         assert_eq!(message(&[]), "A process is still running. Closing ends it.");
     }
 
     #[test]
     fn only_the_running_tab_counts_in_a_group() {
-        // Üç sekmeli pencerede tek sekmede iş var: sayı değil ad.
+        // In a three-tab window only one tab has a job: a name, not a count.
         let tabs = [Foreground::Idle, running(&["vim"]), Foreground::Idle];
         assert_eq!(
             prompt(CloseScope::Window, Unit::Tab, &tabs).message,
@@ -1922,7 +1962,7 @@ mod tests {
             prompt(CloseScope::Quit, Unit::Tab, &tabs).message,
             "Processes are running in 3 tabs: “claude”, “vim”. Quitting ends them."
         );
-        // Hiçbirinin adı okunamadıysa yalnız sayı.
+        // A count only if none of them has a readable name.
         assert_eq!(
             prompt(CloseScope::Quit, Unit::Tab, &[running(&[]), running(&[])]).message,
             "Processes are running in 2 tabs. Quitting ends them."
@@ -1961,8 +2001,8 @@ mod tests {
 
     #[test]
     fn one_pane_per_tab_keeps_the_tab_wording() {
-        // Tek pane'li sekmelerde birim sekme ve metin bölmelerden öncekinin
-        // aynısı (039 Karar 11); pane sayısı sekmeyi aşınca pane.
+        // With single-pane tabs the unit is the tab and the text is the same as
+        // before splits (039 Karar 11); the pane once the pane count exceeds the tabs.
         assert_eq!(unit_for(1, 1), Unit::Tab);
         assert_eq!(unit_for(3, 3), Unit::Tab);
         assert_eq!(unit_for(2, 1), Unit::Pane);
@@ -1980,7 +2020,7 @@ mod tests {
             prompt(CloseScope::Window, Unit::Pane, &vec![Foreground::Idle; 3]).message,
             "Closing this window ends the shell sessions in its 3 panes."
         );
-        // Tek koşan iş adıyla, birimden bağımsız.
+        // A single running job by name, independent of the unit.
         assert_eq!(
             prompt(
                 CloseScope::Window,
