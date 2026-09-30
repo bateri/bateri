@@ -50,6 +50,7 @@ _Requirements: R6, R8_
 - [ ] Bağımlılıklar hedefe koşullu, kararlı yorumla
 - [ ] FreeType arka ucu (maske yolu) + adlı taslaklar
 - [ ] İmaj ve `LINUX_CRATES`
+- [ ] Linux `fixture` modülü (`system::fixture`'ın `cfg`'i Linux'u da kapsar): `coretext::fixture`'ın adları — `DEFAULT_FAMILY`, `PROPORTIONAL_FAMILY`, `SECOND_FAMILY`, `UNKNOWN_CHAR`, `WIDE_CHAR`, `FALLBACK_CHAR`, `INK_CHAR`, `GATE_PROBES`, `BASE_SYMBOLS`, `CLUSTERS`, `CLUSTER_BASE`, `CLUSTER_SCALE`, `family_name(&Font)` (phase-3'ten devir)
 - [ ] Test: Linux'ta değişmezler; macOS'ta tanık aynı
 - [ ] Doğrulama geçti (`make hepsi` + `make linux`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi

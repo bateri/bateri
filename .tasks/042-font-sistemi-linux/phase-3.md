@@ -42,10 +42,50 @@ _Requirements: R3, R5, R1.1, R1.2_
 
 ## Checklist
 
-- [ ] Trait + takma ad; CoreText arka ucu
-- [ ] Çizim konumu platformsuz tarafta
-- [ ] Sınamalar sınıflandı, fikstür kuruldu
-- [ ] `objc2` bağımlılıkları macOS hedefinde
-- [ ] Denetim grep'i
-- [ ] Test: tanık ebeveynle aynı
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] Trait + takma ad; CoreText arka ucu
+- [x] Çizim konumu platformsuz tarafta
+- [x] Sınamalar sınıflandı, fikstür kuruldu
+- [x] `objc2` bağımlılıkları macOS hedefinde
+- [x] Denetim grep'i
+- [x] Test: tanık ebeveynle aynı
+- [x] Doğrulama geçti (`make hepsi`)
+
+## Uygulama Notları
+
+- Dosya düzeni: trait + `Backend`/`Font` takma adı + fikstürün yeniden
+  ihracı `system.rs`'te; CoreText arka ucu `coretext.rs` (`font.rs`'in
+  gövdeleri ve `raster.rs`'in iki CG bağlamı). `font.rs` kalktı: platformsuz
+  orkestrasyon (`open_chain`, `Faces`, `accept`, `shrink`, `fallback_font`,
+  `shape_cluster`, `metrics`, `space_advance`, `monospaced_families`,
+  `family_issue`) `rules.rs`'e indi ve generic değil, doğrudan `Backend`'i
+  çağırıyor (turbofish'siz çağrı yerleri; phase-2'nin closure'ları ve ince
+  sarmalayıcıları kalktı, çağıranlar `Backend::glyph(..)` diyor).
+- Konum formülü `lib.rs`'te değil `raster::position`'da (platformsuz,
+  `draw_glyph`/`draw_color_glyph`'in tek kaynağı) — `lib.rs`'in çağrı
+  yerleri değişmedi. `unpremultiply` platformsuz tarafta ve yalnız `Drawn`'da.
+- `cascade` `&str` alıyor (küme ile tek karakter aynı çağrı);
+  `census::classify` `None`'u `NoFont`'a çeviriyor. `shape` cascade'i kendi
+  içinde yürüyor (CoreText'te run'ın fontu).
+- Fikstür (`coretext::fixture`): `DEFAULT_FAMILY`, `PROPORTIONAL_FAMILY`,
+  `SECOND_FAMILY`, `UNKNOWN_CHAR`, `WIDE_CHAR`, `FALLBACK_CHAR`, `INK_CHAR`,
+  `GATE_PROBES`, `BASE_SYMBOLS`, `CLUSTERS`, `CLUSTER_BASE`,
+  `CLUSTER_SCALE` ve tanı için `family_name(&Font)` (sınama ve census'ün CT
+  çağrısı böylece arka uçta). Karar 7'nin listesine ek: ikinci ve orantılı
+  aile — aile değişimi ve uyarı bekçileri de platformsuz kalsın diye.
+- Sınıflama — **macOS kalibrasyonu** (`cfg(target_os = "macos")`):
+  `face_fallback_is_cached_under_the_requested_face` (Menlo'nun `╱`'u),
+  `the_default_size_keeps_todays_texture` (1984), `non_bmp_char_path_works`
+  (STIX'in `𝔸`'sı), üç uzak/yükleme satırı sınaması (`Some("Menlo")`,
+  `REMOTE_MARK` sabiti dahil), `missing_face_falls_back_to_regular`
+  (Monaco), `a_wide_char_that_fits_one_cell_keeps_the_single_slot_raster`
+  (`☕`); `census` modülü `cfg(all(test, target_os = "macos"))`.
+  **Platformsuz, fikstürle**: kapı, yedek ve geniş karakter bekçileri
+  (`UNKNOWN_CHAR` → geniş istekte `WIDE_CHAR`; `'𠀀'` → `WIDE_CHAR`), küme
+  sınamaları, aile sınamaları, `every_base_glyph_advance_is_the_cell_advance`
+  (`BASE_SYMBOLS`). Geri kalanı zaten fontsuzdu. Sınama sayısı aynı (86).
+- Denetim grep'i `objc2_core_*` ve `CT…`/`CG…`/`CF…` adlarını yorum dışı
+  satırlarda `coretext.rs` dışında arıyor; tek isabet bir assert metnindeki
+  `CFRange`'di, metin "cascade'in UTF-16 aralığı" oldu.
+- Tanık: ebeveyn (`9cb8e78`) çıktısı düzenlemeden önce aynı oturumda temiz
+  ağaçta alındı (worktree adımının yerine); 38 676 satır, fark boş.
+  `Cargo.lock` değişmedi.
