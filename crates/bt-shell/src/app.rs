@@ -1265,6 +1265,10 @@ struct Measured {
     cpu_frame: Option<(Duration, Duration)>,
     cpu_encode: Option<(Duration, Duration)>,
     gpu: Option<(Duration, Duration)>,
+    /// The adapter gives GPU timestamps (wgpu's `TIMESTAMP_QUERY`, 040
+    /// phase-5); `false` → the GPU column's tokens say `unsupported` — the
+    /// keys stay (a token is never deleted), the value names the absence.
+    gpu_supported: bool,
 }
 
 impl Measured {
@@ -1277,7 +1281,7 @@ impl Measured {
     /// `gpu_ornek + gpu_elenen` bu yüzden bire kadar ayrışabilir. `ornek=`
     /// jetonu bunu görünür kılıyor; sayıyı yorumlayan taraf eşitlik
     /// beklememeli.
-    fn read(stats: &Stats) -> Self {
+    fn read(stats: &Stats, gpu_supported: bool) -> Self {
         let cpu_frame = stats.cpu_frame();
         let cpu_encode = stats.cpu_encode();
         let gpu = stats.gpu();
@@ -1290,6 +1294,7 @@ impl Measured {
             cpu_frame: cpu_frame.p95_and_worst(),
             cpu_encode: cpu_encode.p95_and_worst(),
             gpu: gpu.p95_and_worst(),
+            gpu_supported,
         }
     }
 }
@@ -1397,7 +1402,11 @@ profil={profile}",
                 );
                 push_span(&mut line, "cpu_kare", m.cpu_frame);
                 push_span(&mut line, "cpu_encode", m.cpu_encode);
-                push_span(&mut line, "gpu", m.gpu);
+                if m.gpu_supported {
+                    push_span(&mut line, "gpu", m.gpu);
+                } else {
+                    line.push_str(" gpu_p95=unsupported gpu_max=unsupported");
+                }
                 // Açılış tek sayı, dağılım değil: koşu başına bir kez olur.
                 let _ = match m.startup {
                     Some(startup) => write!(line, " acilis={}", ms(startup)),
@@ -2616,6 +2625,12 @@ impl AppDelegate {
         let windows = self.windows();
         // Süreli koşunun tek penceresinin tek pane'i (039 Karar 12).
         let pane = windows.first().map(|window| window.focused_pane());
+        // The frames still in flight are counted **before** `kare=` is read
+        // (040 Karar 6): completion is polled by the ticks, and the link is
+        // stopped, so nothing else would count them.
+        if let Some(link) = pane.as_deref().and_then(TerminalPane::link) {
+            link.drain();
+        }
         let renderer = pane.as_deref().map(TerminalPane::renderer);
         // Dört sayaç dört ayrı şey söyler: `kare` GPU'nun hatasız bitirdiği
         // kare sayısı, `hucre` sink'in ürettiği arka plan hücresi, `glif`
@@ -2686,7 +2701,9 @@ impl AppDelegate {
             teardown,
             // Kapı kapalıysa defter hiç doğmadı; `Option` bunu taşıyor ve
             // rapor `ornek=off` diyor — uydurulmuş bir sıfır değil.
-            measured: self.ivars().stats.as_deref().map(Measured::read),
+            measured: self.ivars().stats.as_deref().map(|stats| {
+                Measured::read(stats, renderer.is_some_and(Renderer::gpu_timing_supported))
+            }),
         };
         // Jetonlar **yalnız** başarı satırında ve yalnız stdout'ta: makine
         // sözleşmesi o. Hata satırları aynı sayıları taşıyor ama jeton
@@ -2927,6 +2944,7 @@ mod tests {
             cpu_frame: Some((Duration::from_micros(1800), Duration::from_micros(4100))),
             cpu_encode: None,
             gpu: Some((Duration::from_micros(2200), Duration::from_micros(5000))),
+            gpu_supported: true,
         });
         let line = r.token_line();
         for token in [
@@ -2948,6 +2966,14 @@ mod tests {
         // birlikte susuyor: az örnekte ikisi zaten aynı elemandır.
         assert!(line.contains("cpu_encode_p95=insufficient"), "{line}");
         assert!(line.contains("cpu_encode_max=insufficient"), "{line}");
+        // Without timestamp support the GPU keys stay and say why there is
+        // no number (Karar 6: a token is never deleted).
+        if let Some(m) = r.measured.as_mut() {
+            m.gpu_supported = false;
+        }
+        let line = r.token_line();
+        assert!(line.contains("gpu_p95=unsupported"), "{line}");
+        assert!(line.contains("gpu_max=unsupported"), "{line}");
     }
 
     #[test]

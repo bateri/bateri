@@ -46,6 +46,7 @@ mod jobs;
 mod keys;
 mod menu;
 mod notices;
+mod pacer;
 mod pane;
 mod quote;
 mod search_bar;

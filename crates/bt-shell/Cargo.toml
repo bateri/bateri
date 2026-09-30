@@ -121,7 +121,15 @@ objc2-app-kit = { workspace = true, features = [
 # `CAMediaTimingFunction`: arama panelinin belirmesinin eğrisi (033
 # phase-4) — `NSAnimationContext::setTimingFunction`'ın argümanı; yalnız
 # başlık bayrağı.
-objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMediaTimingFunction"] }
+# 040 phase-5: the pane owns the terminal view's `CAMetalLayer` (wgpu draws
+# into it) and the vsync rhythm is `NSView.displayLink` — a `CADisplayLink`
+# used as a timer — with `CACurrentMediaTime` as its time base (`CABase`;
+# `objc2-core-foundation` for the `CFTimeInterval` stamps). Header features
+# of an existing dependency; wgpu already enables the same ones in the graph.
+objc2-quartz-core = { workspace = true, features = [
+    "CABase", "CADisplayLink", "CALayer", "CAMediaTimingFunction", "CAMetalLayer",
+    "objc2-core-foundation",
+] }
 # Yüklemenin bildirimi (037 phase-7): `UNUserNotificationCenter`. Yeni crate,
 # kullanıcı onaylı; bayrakların gerekçesi workspace manifest'inde, karar kaydı
 # .tasks/037-ssh-ikinci-tur/phase-7.md → Uygulama Notları.

@@ -31,6 +31,8 @@
 //! ölçek ve punto içeriyor, punto farkı ise pane'in.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -40,7 +42,7 @@ use bt_core::{
     SessionOptions, Settings, TabId, Theme, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
-use bt_gpu::{DisplayLink, GpuError, Layout, Renderer, Stats, Surface, Waker};
+use bt_gpu::{DisplayLink, GpuError, Layout, Pacer, Renderer, Stats, Surface, Waker};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -54,12 +56,14 @@ use objc2_app_kit::{
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSUUID,
 };
+use objc2_quartz_core::CAMetalLayer;
 
 use crate::app::{self, Grid, split_into_grid};
 use crate::child;
 use crate::clipboard::{self, PendingCopy};
 use crate::jobs::{self, Foreground, Libproc, Probe, ShellParent};
 use crate::notices::{Source, font_messages};
+use crate::pacer::MacPacer;
 use crate::quote;
 use crate::search_bar::{SearchBar, selection_query};
 use crate::upload::Uploads;
@@ -609,7 +613,13 @@ pub(crate) struct PaneIvars {
     /// `Rc`: renderer ana thread'e çivili (bkz. `bt_gpu::DisplayLink`) ve
     /// link de bir kopya tutuyor.
     renderer: Rc<Renderer>,
-    surface: Surface,
+    /// The terminal view's layer — this pane owns it (040 → Karar 8): it is
+    /// hung on the view here and its scale is set from the window
+    /// (`sync_geometry`); `bt-gpu` draws into it through [`Surface`].
+    layer: Retained<CAMetalLayer>,
+    /// The wgpu surface over `layer`; shared with the link, which acquires
+    /// each frame's texture from it.
+    surface: Rc<Surface>,
     /// Fare çevirisinin girdileri pane boyuyla tazeleniyor (`set_metrics`);
     /// geometrinin kaynağı da bu view (`sync_geometry`).
     view: Retained<BateriView>,
@@ -970,11 +980,17 @@ impl TerminalPane {
             zoom,
         } = launch;
         let renderer = Rc::new(Renderer::system_default()?);
-        let surface = renderer.surface();
+        // The layer is ours (040 → Karar 8): wgpu configures its device,
+        // format and drawable size, the scale stays with its owner.
+        let layer = CAMetalLayer::new();
+        // SAFETY: `layer` is a live `CAMetalLayer`; wgpu retains it.
+        let surface = Rc::new(unsafe {
+            Surface::from_layer(&renderer, NonNull::from(&*layer).cast::<c_void>())
+        }?);
         let view = BateriView::new(mtm, frame);
         // Sıra önemli: önce layer, sonra wantsLayer — tersi AppKit'e kendi
         // layer'ını kurdurur ve CAMetalLayer düşer.
-        view.setLayer(Some(surface.ca_layer()));
+        view.setLayer(Some(&layer));
         view.setWantsLayer(true);
         let font = settings.font.clone();
         let dim = DimOverlay::new(mtm);
@@ -995,6 +1011,7 @@ impl TerminalPane {
             reduce_motion: Cell::new(reduce_motion),
             smooth_scroll: Cell::new(smooth_scroll),
             renderer,
+            layer,
             surface,
             view: view.clone(),
             dim: dim.clone(),
@@ -1315,9 +1332,12 @@ impl TerminalPane {
         // `SessionOptions`'a gidenlerin aynısı. `resize` yolunda da aynı üçlü
         // (`refresh_geometry`) birlikte yazılıyor.
         view.set_metrics(grid, self.ivars().dock_rows.get());
+        // The rhythm is the view's display link, as a timer (040 → Karar 7,
+        // path (b)); it gets the frame loop to tick right below.
+        let pacer = MacPacer::new(mtm, view);
         let link = DisplayLink::new(
-            mtm,
-            &self.ivars().surface,
+            Arc::clone(&pacer) as Arc<dyn Pacer>,
+            Rc::clone(&self.ivars().surface),
             Rc::clone(&self.ivars().renderer),
             session,
             Layout {
@@ -1334,6 +1354,7 @@ impl TerminalPane {
             (self.ivars().dock_rows_at_birth.get() > 0)
                 .then(|| alt_screen_notifier(self.ivars().id, self.ivars().lookup)),
         );
+        pacer.attach(mtm, link.ticker());
         // Uyandırma yolu kapanmadan kare istemiyoruz: aradaki bir `Wakeup`
         // sessizce düşerdi.
         //
@@ -1792,7 +1813,10 @@ impl TerminalPane {
         let view = &self.ivars().view;
         let bounds = view.bounds().size;
         let (width_px, height_px) = (bounds.width * scale, bounds.height * scale);
-        self.ivars().surface.set_size(width_px, height_px, scale);
+        // The scale is the layer owner's; the pixel size is the surface's
+        // configuration (040 → Karar 8).
+        self.ivars().layer.setContentsScale(scale);
+        self.ivars().surface.set_size(width_px, height_px);
 
         // Hücre ölçüsü `bt-gpu` üzerinden `bt-atlas`'ın font metriğinden
         // geliyor ve ölçekle çarpma da orada. Burada ikinci bir yuvarlama

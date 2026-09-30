@@ -1,48 +1,39 @@
-//! Renderer: metallib'i yükler, pipeline'ı kurar, verilen drawable'a bir kare
-//! çizer. Drawable'ı kimin sağladığını bilmez. Çizim **asenkrondur**: `commit`
-//! GPU'yu beklemez ve kare sayacını `addCompletedHandler` artırır — yani sayaç
-//! "sunuldu"yu değil "GPU hatasız bitirdi"yi sayar.
+//! Grid geometry ([`CellMetrics`]) and font notices shared with `bt-shell`,
+//! plus — **test-only since 040 phase-5** — the Metal renderer
+//! ([`MetalRenderer`]), kept as the oracle the wgpu renderer
+//! ([`crate::Renderer`], `wgpu_renderer.rs`) is compared against. The file
+//! names stay until Metal is removed (phase-7).
 
-use std::cell::RefCell;
-use std::ffi::c_void;
-use std::ptr::NonNull;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use bt_atlas::{FontIssue, Metrics};
 
-use block2::RcBlock;
-use bt_atlas::{Atlas, FontIssue, Metrics, Plane, TOFU};
-use bt_core::{Clusters, FontOptions, LinearRgba};
-use dispatch2::DispatchData;
-use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::ProtocolObject;
-use objc2_foundation::NSString;
-use objc2_metal::{
-    MTLBlendFactor, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandBufferStatus,
-    MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary,
-    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-    MTLResourceOptions, MTLScissorRect, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage, MTLViewport,
+// The Metal oracle's imports (040 phase-5: test-only).
+#[cfg(test)]
+use {
+    crate::GpuError,
+    crate::frame::{
+        CursorBlock, Frame, FxCell, FxInstance, GlyphCell, GlyphInstance, Instance, RuleCell,
+    },
+    crate::slots::{self, SlotUpload},
+    bt_atlas::{Atlas, Plane, TOFU},
+    bt_core::{Clusters, FontOptions, LinearRgba},
+    dispatch2::DispatchData,
+    objc2::rc::{Retained, autoreleasepool},
+    objc2::runtime::ProtocolObject,
+    objc2_foundation::NSString,
+    objc2_metal::{
+        MTLBlendFactor, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandBufferStatus,
+        MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary,
+        MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion,
+        MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
+        MTLRenderPipelineState, MTLResourceOptions, MTLScissorRect, MTLSize, MTLStorageMode,
+        MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage, MTLViewport,
+    },
+    std::cell::RefCell,
+    std::ffi::c_void,
+    std::ptr::NonNull,
 };
-use objc2_quartz_core::CAMetalDrawable;
 
-use crate::frame::{
-    CursorBlock, Frame, FxCell, FxInstance, GlyphCell, GlyphInstance, Instance, RuleCell,
-};
-use crate::slots::{self, SlotUpload};
-use crate::{GpuError, Surface};
-
-/// `addCompletedHandler:`e verilen blok; [`Renderer::completion`] kurar.
-///
-/// Ayrı bir tip olmasının sebebi ömrü: blok kurulumda bir kez ayrılır ve
-/// karelerin tamamı boyunca yaşar. `link.rs` onu ivar'da tutar.
-pub(crate) struct Completion(CompletionBlock);
-
-/// `objc2-metal`'in `MTLCommandBufferHandler`'ı ham işaretçidir; blok tipinin
-/// kendisi bu. Takma adın işi okunabilirlik: tip tek satıra sığmıyor ve adı
-/// `Completion`'ın neyi sardığını söylüyor.
-type CompletionBlock = RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTLCommandBuffer>>)>;
-
+#[cfg(test)]
 /// build.rs'in ürettiği metallib; derleme zamanında gömülür, dosya yoksa
 /// `rustc` düşer — çalışma zamanına kalan tek şey fonksiyon adlarıdır.
 static METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/default.metallib"));
@@ -79,6 +70,7 @@ pub fn family_notice(family: &str) -> Option<FontNotice> {
     bt_atlas::family_issue(family).map(FontNotice::from)
 }
 
+#[cfg(test)]
 /// Atlas ve onun dokusu — **tek yerde**.
 ///
 /// Ayrı iki alan olsalardı [`Atlas::ensure`]'ün `true`'su ("atlası yeniden
@@ -86,7 +78,7 @@ pub fn family_notice(family: &str) -> Option<FontNotice> {
 /// sessiz olurdu: ızgara geometrisi değişmiş bir atlastan bayat bir yuva
 /// okumak, yuva aralık içinde kaldığı sürece `slot_origin`'in savunmasına
 /// takılmaz ve **başka bir glyph** çizer. Burada sinyal bir hatırlama işi
-/// değil, [`Renderer::sync_atlas`]'nin tek satırı: doku düşer, `draw`
+/// değil, [`MetalRenderer::sync_atlas`]'nin tek satırı: doku düşer, `draw`
 /// yenisini kurar.
 struct AtlasTexture {
     atlas: Atlas,
@@ -104,7 +96,7 @@ struct AtlasTexture {
     ///
     /// Yapının değişmezine (atlas ↔ doku) katılmıyor, yalnız onunla aynı
     /// ödüncün altında yaşıyor. "Tek kuşak" garantisini veren bu alan
-    /// değil, [`Renderer::encode_glyphs`]'in tek `borrow_mut`'u.
+    /// değil, [`MetalRenderer::encode_glyphs`]'in tek `borrow_mut`'u.
     instances: Vec<GlyphInstance>,
     /// Renk düzleminin dokusu; `None` → henüz hiç emoji görülmedi.
     ///
@@ -158,7 +150,7 @@ pub struct CellMetrics {
 
 impl CellMetrics {
     /// Komut bloğu şeridinin oturduğu sol payın **nokta** cinsinden genişliği;
-    /// fiziksel piksele [`Renderer::cell_metrics`] çeviriyor ve **tek** yer
+    /// fiziksel piksele [`crate::Renderer::cell_metrics`] çeviriyor ve **tek** yer
     /// orası.
     ///
     /// Ayar değil sabit (010 Karar 6): `command_gutter` bu sette bilerek yok,
@@ -202,7 +194,7 @@ impl CellMetrics {
 
     /// The grid geometry of an atlas at `scale`: cell size, context-row step,
     /// gutter and rule thickness — one copy for both renderers
-    /// ([`Renderer::cell_metrics`] and the wgpu renderer's twin).
+    /// ([`crate::Renderer::cell_metrics`] and the wgpu renderer's twin).
     pub(crate) fn from_atlas(metrics: Metrics, context_w: u16, scale: f64) -> Self {
         let (w, h) = metrics.cell_px;
         // `as u16` saturates: a NaN or negative scale gives a zero gutter (the
@@ -239,7 +231,7 @@ impl CellMetrics {
     /// Sıfır olabilir ve bu bir hata değil: payı sıfır olan bir geometri
     /// "ızgara kenardan başlıyor" demektir ve çıkarma da bölme de o değerle
     /// doğru çalışır. Üretimde sıfır yalnız dejenere ölçekte çıkar
-    /// ([`Renderer::cell_metrics`]); sınamalar payın konu olmadığı yerde
+    /// ([`crate::Renderer::cell_metrics`]); sınamalar payın konu olmadığı yerde
     /// bilerek sıfır veriyor.
     pub fn gutter_px(self) -> u16 {
         self.gutter_px
@@ -270,7 +262,8 @@ impl CellMetrics {
     }
 }
 
-pub struct Renderer {
+#[cfg(test)]
+pub struct MetalRenderer {
     /// Kurucuda elde olan device; tampon ayırmak için kare başına
     /// `queue.device()` mesajı atmaya gerek yok.
     device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -279,7 +272,7 @@ pub struct Renderer {
     /// pipeline; instanced quad.
     ///
     /// **İmleç artık burada değil** (015 phase-2): caret kendi fragment'ine
-    /// taşındı ([`Renderer::caret`]). Blend bu pipeline'da açık kalıyor ama
+    /// taşındı ([`MetalRenderer::caret`]). Blend bu pipeline'da açık kalıyor ama
     /// **bugün müşterisi yok** — arka planların alfası her zaman `1.0`
     /// ([`bt_core::LinearRgba`]'nın tek kurucusu öyle yazıyor), yani sonuç
     /// opak yazmayla birebir aynı. Açık bırakılmasının sebebi alfayı
@@ -329,27 +322,13 @@ pub struct Renderer {
     /// zorunda olması — caret tek dörtgen olduğu için onu uniform'dan alıyor,
     /// seçimde dörtgen başına bir tane var.
     selection: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    /// Son **gönderilen** karedeki arka plan hücresi sayısı; `make duman`'ın
-    /// `hucre=K` jetonu. `frames`'in yanında duruyor çünkü ikisi de aynı
-    /// soruya bakan tanı sayaçları ve tek yerden okunmaları gerekiyor.
-    /// Dikkat: bu bir **CPU** sayacıdır, GPU'nun o hücreleri boyadığını
-    /// kanıtlamaz — onu `cell_bg_paints_pixels_on_the_gpu` yapar.
-    last_bg_count: AtomicUsize,
-    /// Son **gönderilen** karede çizilen glyph sayısı; `make duman`'ın
-    /// `glif=G` jetonu. `last_bg_count` ile aynı gerekçe ve aynı sınır:
-    /// CPU sayacı, GPU'nun o glyph'leri boyadığını kanıtlamaz.
-    last_glyph_count: AtomicUsize,
-    /// Son **gönderilen** karede çizilen kural çizgisi sayısı; `make duman`'ın
-    /// `kural=R` jetonu. İki kardeşiyle aynı gerekçe; jetonun neyi göremediği
-    /// [`crate::frame::Frame::rule_count`]'ta yazılı ve tek yerde durmalı.
-    last_rule_count: AtomicUsize,
     /// İstenen font; atlasın anahtarının aile ve punto yarısı.
     ///
-    /// Ayar olarak **saklanıyor**, [`Renderer::cell_metrics`]'e parametre
+    /// Ayar olarak **saklanıyor**, [`MetalRenderer::cell_metrics`]'e parametre
     /// olarak gitmiyor: gitseydi ayar değeri her yeniden boyutlandırmada çağrı
     /// yoluna girer ve pencere geometrisi fonta dair bir şey bilmek zorunda
     /// kalırdı. Açılış değeri `bt_core::FontOptions::default()`: süreli koşu
-    /// ([`Renderer::set_font`]'u hiç çağırmıyor) ile dosyasız kullanıcı aynı
+    /// ([`MetalRenderer::set_font`]'u hiç çağırmıyor) ile dosyasız kullanıcı aynı
     /// fontu görür ve varsayılan puntonun ikinci bir sahibi yok.
     ///
     /// `RefCell`: `atlas` ile aynı gerekçe. Ödüncü yalnız `set_font` ve
@@ -364,21 +343,16 @@ pub struct Renderer {
     /// @1x** çizerdi. `None` o yolu sessiz olmaktan çıkarıyor: glyph'i olan
     /// bir kare atlassız gelirse [`GpuError::NoAtlas`] ile düşer, @1x çizmez.
     ///
-    /// `RefCell`, çünkü [`Renderer::cell_metrics`] ve [`Renderer::draw`]
+    /// `RefCell`, çünkü [`MetalRenderer::cell_metrics`] ve [`MetalRenderer::draw`]
     /// `&self` alıyor ([`Atlas::ensure`] ve [`Atlas::slot`] ise `&mut`) ve
     /// `bt-shell` renderer'ı bir `Rc` içinde tutuyor — paylaşılan bir
     /// sahiplikte `&mut` yolu yok. Ödüncü **yalnız** bu iki metot alır ve
     /// hiçbiri onu bir çağrı sınırının ötesine taşımaz.
     atlas: RefCell<Option<AtlasTexture>>,
-    /// **Tamamlanan** kare sayısı; `make duman` bunu okur.
-    ///
-    /// `Arc`: sayacı artıran tamamlanma bloğu `Renderer`'dan bağımsız yaşar
-    /// (Metal onu kendi thread'inde, kendi kopyasıyla çağırır). `Relaxed`
-    /// yeter: `fetch_add` sayım kaybetmez ve okuyan yalnız "> 0" sorar.
-    frames: Arc<AtomicU64>,
 }
 
-impl Renderer {
+#[cfg(test)]
+impl MetalRenderer {
     /// Çizim hedefinin piksel formatı — **tek kaynak**.
     ///
     /// `_sRGB`: fragment çıktısı **lineer** sayılır ve donanım yazarken
@@ -388,7 +362,7 @@ impl Renderer {
     ///
     /// Alan değil `const`: kurucusu tek ve koşulsuz atıyordu, yani örnek
     /// başına saklanan türetilebilir durumdu. `const` olunca değer bir
-    /// `Renderer` olmadan da okunabiliyor ve "lineer palet + sRGB olmayan
+    /// `MetalRenderer` olmadan da okunabiliyor ve "lineer palet + sRGB olmayan
     /// hedef" temsil edilebilir bir durum olmaktan çıkıyor: ikinci bir
     /// renderer'a (offscreen, ekran görüntüsü) düz `BGRA8Unorm` geçen kişi
     /// gürültülü bir Metal istisnası değil **sessizce yanlış renk** alırdı.
@@ -397,7 +371,7 @@ impl Renderer {
     /// Sistem varsayılan device ile; bt-shell yalnız bunu çağırır ve
     /// `objc2-metal`'i hiç görmez.
     ///
-    /// Piksel formatı parametre değil, [`Renderer::PIXEL_FORMAT`].
+    /// Piksel formatı parametre değil, [`MetalRenderer::PIXEL_FORMAT`].
     pub fn system_default() -> Result<Self, GpuError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(GpuError::NoDevice)?;
         // `include_bytes!` 'static verir; kopyasız kurucu doğru olan.
@@ -439,22 +413,14 @@ impl Renderer {
             selection,
             font: RefCell::new(FontOptions::default()),
             atlas: RefCell::new(None),
-            last_bg_count: AtomicUsize::new(0),
-            last_glyph_count: AtomicUsize::new(0),
-            last_rule_count: AtomicUsize::new(0),
-            frames: Arc::new(AtomicU64::new(0)),
         })
-    }
-
-    pub fn surface(&self) -> Surface {
-        Surface::new(&self.device, Self::PIXEL_FORMAT)
     }
 
     /// Verilen backing ölçeğinde ızgara geometrisi: hücre ölçüsü ve sol pay.
     ///
     /// `scale` parametre çünkü ekran ölçeği çalışırken değişebilir
     /// (`windowDidChangeBackingProperties:`, harici ekran) ve atlas ölçeği
-    /// önbellek anahtarının parçası olarak taşır: aynı `Renderer` iki ölçekte
+    /// önbellek anahtarının parçası olarak taşır: aynı `MetalRenderer` iki ölçekte
     /// iki farklı metrik verir. @1x rasterize edilmiş bir glyph @2x'te
     /// hatasız bulanıklaşır ve belirti yalnız iki ekranlı makinede görünür.
     /// Pay da aynı ölçeğe bağlı ve **aynı çağrıdan** çıkıyor: ikisi ayrı
@@ -465,64 +431,6 @@ impl Renderer {
     pub fn cell_metrics(&self, scale: f64) -> CellMetrics {
         let (metrics, context_w) = self.sync_atlas(scale);
         CellMetrics::from_atlas(metrics, context_w, scale)
-    }
-
-    /// Atlasın yuva doluluğu: (kullanılan, toplam).
-    ///
-    /// [`Renderer::cell_metrics`] ile aynı gerekçe: `bt-shell`'in `bt-atlas`
-    /// kenarı yok ve olmamalı. Değer `bt-atlas`'ta doğuyor, `bt-gpu` yeniden
-    /// yayımlıyor.
-    ///
-    /// Metrik hiç sorulmadıysa atlas **yok** (alan `Option`, anahtarı
-    /// pencereden geliyor) ve cevap `(0, 0)`. Bu bir hata değil, doğru cevap:
-    /// açılmamış bir atlasın yuvası da yok. Sıfır uydurulmuş bir değer
-    /// olsaydı `panic!` gerekirdi — burası `report_and_exit` yolunda ve
-    /// kapanışta panik, raporun kendisini yutardı.
-    pub fn atlas_occupancy(&self) -> (usize, usize) {
-        self.atlas
-            .borrow()
-            .as_ref()
-            .map_or((0, 0), |tex| tex.atlas.occupancy())
-    }
-
-    /// Renk düzleminin yuva doluluğu; `yuva2=U/T` jetonunun kaynağı.
-    ///
-    /// [`Renderer::atlas_occupancy`] ile aynı gerekçe ve aynı `(0, 0)` kuralı:
-    /// açılmamış bir atlasın yuvası da yok.
-    pub fn color_atlas_occupancy(&self) -> (usize, usize) {
-        self.atlas
-            .borrow()
-            .as_ref()
-            .map_or((0, 0), |tex| tex.atlas.color_occupancy())
-    }
-
-    /// İstenen fontu değiştirir; önceki istekten farklıysa `true`.
-    ///
-    /// Atlası **kurmuyor**, yalnız isteği saklıyor: anahtarı değiştiren ve
-    /// dokuyu düşüren tek yer [`Renderer::sync_atlas`] kalıyor. Yeni font
-    /// sonraki [`Renderer::cell_metrics`]'te açılır; `true` çağırana "hücre
-    /// ölçüsünü yeniden sor, grid'i yeniden kur" der (`bt-shell`'in
-    /// `refresh_geometry`'si). [`Renderer::font_notice`] de o ana kadar eski
-    /// atlasınkini söyler.
-    pub fn set_font(&self, font: &FontOptions) -> bool {
-        let mut current = self.font.borrow_mut();
-        if *current == *font {
-            return false;
-        }
-        current.clone_from(font);
-        true
-    }
-
-    /// Açık atlasın fontu için kullanıcıya söylenecek şey; atlas henüz yoksa
-    /// ya da söylenecek bir şey yoksa `None`.
-    ///
-    /// Atlas **en son** [`Renderer::cell_metrics`]'te kuruldu: cevap o
-    /// çağrının fontunu söyler. Ölçek değişimi atlası yeniden kursa da aynı
-    /// cevabı verir — aile ve eşaralık ölçekle değişmiyor.
-    pub fn font_notice(&self) -> Option<FontNotice> {
-        let atlas = self.atlas.borrow();
-        let issue = atlas.as_ref()?.atlas.font_issue()?;
-        Some(FontNotice::from(issue.clone()))
     }
 
     /// Atlası istenen fonta ve `scale` ölçeğine getirir ve metriğini verir.
@@ -566,118 +474,12 @@ impl Renderer {
             atlas_tex.color_texture = None;
         }
         // Ödünç değil **metrik** dönüyor: atlas ödüncünün bir çağrı sınırını
-        // aşabildiği tek yer burasıydı ve [`Renderer::encode_glyphs`]'in
+        // aşabildiği tek yer burasıydı ve [`MetalRenderer::encode_glyphs`]'in
         // dayandığı özellik tam olarak bunun olmaması. Bağlam genişliği de
         // aynı ödüncün içinden çıkıyor ve aynı sebeple demetle: ikinci bir
         // çağrıda alınsaydı araya düşen bir `ensure` ikisini ayrı atlaslardan
         // verirdi.
         (atlas_tex.atlas.metrics(), atlas_tex.atlas.context_cell_w())
-    }
-
-    /// GPU'nun hatasız bitirdiği kare sayısı. Anlamın sahibi artık
-    /// `addCompletedHandler`: `commit` etmek bitirmek değildir, bitirmek de
-    /// hatasız bitirmek değildir.
-    pub fn frames(&self) -> u64 {
-        self.frames.load(Ordering::Relaxed)
-    }
-
-    /// Son gönderilen karede çizilen arka plan hücresi sayısı (imleç hariç).
-    pub fn last_bg_count(&self) -> usize {
-        self.last_bg_count.load(Ordering::Relaxed)
-    }
-
-    /// Son gönderilen karede çizilen glyph sayısı.
-    pub fn last_glyph_count(&self) -> usize {
-        self.last_glyph_count.load(Ordering::Relaxed)
-    }
-
-    /// Son gönderilen karede çizilen kural çizgisi sayısı.
-    pub fn last_rule_count(&self) -> usize {
-        self.last_rule_count.load(Ordering::Relaxed)
-    }
-
-    /// Kare tamamlanınca çağrılacak bloğu **bir kez** kurar.
-    ///
-    /// Blok kare başına kurulmuyor: taşıdığı hiçbir şey kareden kareye
-    /// değişmiyor, oysa her kurulum bir heap ayırması ve birkaç `Arc`
-    /// sayaç hareketi demek — hepsi tazeleme hızında. Metal `Block_copy` ile
-    /// kendi referansını aldığı için aynı blok her komut tamponuna eklenebilir.
-    ///
-    /// Başarı kolu **komut tamponunu** geçiriyor, `()` değil: kareyi kim
-    /// istediyse GPU'nun kendi damgalarını (`GPUStartTime`/`GPUEndTime`) ondan
-    /// okuyabilsin diye. Renderer bu damgaları kendisi okumuyor — okusaydı
-    /// ölçüm kapalıyken de kare başına iki ObjC çağrısı öderdi ve ölçüm
-    /// politikası "ne çizeceğini bilen" tarafa sızardı.
-    ///
-    /// Blok tek ve paylaşılmış, yani `on_complete`'in yakalayabileceği tek şey
-    /// bütün karelerin **ortak** durumudur (R3.2); `Send + Sync` sınırı da o
-    /// yüzden var. Kare eşleştirmesi yok — bekleyen iddiaların hiçbiri "şu
-    /// kare" sorusunu sormuyor, hepsi dağılım soruyor.
-    pub(crate) fn completion(
-        &self,
-        on_complete: impl Fn(Result<&ProtocolObject<dyn MTLCommandBuffer>, GpuError>)
-        + Send
-        + Sync
-        + 'static,
-    ) -> Completion {
-        let frames = Arc::clone(&self.frames);
-        Completion(RcBlock::new(
-            move |cmd: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
-                // SAFETY: Metal handler'ı tamamlanmış ve canlı bir komut
-                // tamponuyla, tampon başına bir kez çağırır.
-                let cmd = unsafe { cmd.as_ref() };
-                // Tamamlanmak sunulmak değildir: Error durumunda drawable boş
-                // kalır ve sayaç artarsa `make duman` siyah pencereyi yeşil geçer.
-                if cmd.status() == MTLCommandBufferStatus::Error {
-                    on_complete(Err(GpuError::CommandFailed(cmd.error())));
-                    return;
-                }
-                frames.fetch_add(1, Ordering::Relaxed);
-                on_complete(Ok(cmd));
-            },
-        ))
-    }
-
-    /// Tek kare: arka planı `clear` ile boya, `frame`'in dikdörtgenlerini çiz,
-    /// sun. **Asenkron**: `commit` GPU'yu beklemez, dönen `Ok` yalnız "komut
-    /// tamponu yola çıktı" demektir.
-    ///
-    /// `completion` GPU işi bitirince **Metal'in thread'inde** çağrılır ve
-    /// karenin gerçek akıbetini taşır. Sonucu renderer yorumlamaz: yeniden
-    /// deneme ve durma koşulu kareyi isteyenin işidir (bkz. `link.rs`), bu
-    /// yüzden hata buradan loglanmaz da. Senkron hata `Err` ile döner;
-    /// çağıran ikisini de **aynı** politikadan geçirmeli.
-    pub(crate) fn draw(
-        &self,
-        drawable: &ProtocolObject<dyn CAMetalDrawable>,
-        clear: LinearRgba,
-        frame: &Frame,
-        completion: &Completion,
-    ) -> Result<(), GpuError> {
-        // Metal/CA çağrıları iç geçicileri autorelease havuzuna atar; kare
-        // başına bir havuz, run loop'suz bir thread'den çağrılınca birikimi önler.
-        autoreleasepool(|_| {
-            let cmd = self
-                .queue
-                .commandBuffer()
-                .ok_or(GpuError::NoCommandBuffer)?;
-            self.encode_pass(&cmd, &drawable.texture(), clear, frame)?;
-
-            // SAFETY: blok geçerli bir işaretçi ve `completion` çağrı boyunca
-            // yaşıyor; Metal `Block_copy` ile kendi referansını alır.
-            unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&completion.0)) };
-            // Kare yola çıktı: jeton bu noktada güncellenir, encode edilemeyen
-            // kare `hucre=` sayısını kirletmez.
-            self.last_bg_count
-                .store(frame.bg_count(), Ordering::Relaxed);
-            self.last_glyph_count
-                .store(frame.glyph_count(), Ordering::Relaxed);
-            self.last_rule_count
-                .store(frame.rule_count(), Ordering::Relaxed);
-            cmd.presentDrawable(drawable.as_ref());
-            cmd.commit();
-            Ok(())
-        })
     }
 
     /// Verilen dokuya tek bir render pass encode eder.
@@ -1125,7 +927,7 @@ impl Renderer {
     /// payı kadar (`glyph_fx.metal` → `FX_PAD`) saç çizgisinin üstüne
     /// taşabiliyor; dock'un viewport'u çağrıdan sonra geri kuruluyor.
     ///
-    /// Yuva çözümü [`Renderer::encode_glyphs`]'teki gibi atlas ödüncünün
+    /// Yuva çözümü [`MetalRenderer::encode_glyphs`]'teki gibi atlas ödüncünün
     /// içinde doğup ölüyor. Renk dokusu henüz yoksa (hiç emoji görülmedi) renk
     /// düzlemindeki instance zaten doğamıyor; doğduysa ve doku kurulamadıysa
     /// o instance **çizilmiyor** — maske dokusunu renk diye okumak rastgele
@@ -1228,7 +1030,7 @@ impl Renderer {
     /// dörtgeni — konum, boyut, lineer renk. İkisinin ayrı çağrı olmasının
     /// sebebi listelerinin ayrı olması ([`Frame::stripes`]), düzenlerinin
     /// farklı olması değil; hangi listenin hangi sırada geçtiğini çağrı yeri
-    /// ([`Renderer::encode_pass`]) söylüyor. Liste başına bir sarmalayıcı
+    /// ([`MetalRenderer::encode_pass`]) söylüyor. Liste başına bir sarmalayıcı
     /// metot yazmak yalnız eşlenecek yüzey üretirdi (`/code-review`, 010 kapı).
     fn encode_quads(
         &self,
@@ -1247,10 +1049,10 @@ impl Renderer {
         self.draw_quads(enc, instances, viewport_px)
     }
 
-    /// Seçimin parçalarını encode eder — [`Renderer::encode_caret`]'ın
+    /// Seçimin parçalarını encode eder — [`MetalRenderer::encode_caret`]'ın
     /// kardeşi: altıncı pipeline, iki fragment uniform'u (renk, yarıçap).
     /// Uniform'lar çağrı başına tek: bir pencerede tek seçim ve tek renk var,
-    /// arama ise rol başına bir çağrı yapıyor ([`Renderer::encode_search`]);
+    /// arama ise rol başına bir çağrı yapıyor ([`MetalRenderer::encode_search`]);
     /// köşe kararı instance'ın maskesinde.
     fn encode_selection(
         &self,
@@ -1306,7 +1108,7 @@ impl Renderer {
             })
     }
 
-    /// Caret'i encode eder — [`Renderer::encode_quads`]'ın kardeşi, tek farkı
+    /// Caret'i encode eder — [`MetalRenderer::encode_quads`]'ın kardeşi, tek farkı
     /// üçüncü pipeline ve iki fragment uniform'u.
     ///
     /// Dilim ya boş ya **tek** elemanlı: caret kare başına tek dörtgen ve iki
@@ -1355,7 +1157,7 @@ impl Renderer {
     /// İki çizim yolunun **ortak gövdesi**: tampon + vertex uniform'u + çizim.
     ///
     /// Ayrı fonksiyon, çünkü kare başına tampon ayırma kararı tek yerde
-    /// kalmalı ([`Renderer::instance_buffer`]'ın doc'u bunu söylüyordu ve
+    /// kalmalı ([`MetalRenderer::instance_buffer`]'ın doc'u bunu söylüyordu ve
     /// caret kendi encode'unu kazanınca gövde ikiye kopyalanmıştı). Üçlü
     /// tamponlamaya geçilirse ya da çizim çağrısı değişirse tek yer değişiyor.
     ///
@@ -1511,6 +1313,7 @@ impl Renderer {
     }
 }
 
+#[cfg(test)]
 /// Tek bir uniform'u vertex aşamasının `[[buffer(index)]]`'ine yazar.
 ///
 /// Güvenli ve jenerik: SAFETY yükümlülüğünün tamamı ("işaretçi geçerli,
@@ -1525,6 +1328,7 @@ fn vertex_uniform<T>(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, value: &
     }
 }
 
+#[cfg(test)]
 /// [`vertex_uniform`]'ın fragment aşaması kardeşi; aynı sözleşme, aynı sınır.
 ///
 /// İki aşamanın tampon indeksleri **ayrı alanlardır**: fragment'in `0`'ı
@@ -1539,6 +1343,7 @@ fn fragment_uniform<T>(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, value:
     }
 }
 
+#[cfg(test)]
 /// Bir vertex/fragment çiftinden render pipeline; **ön çarpımsız alfa blend**.
 ///
 /// Adlar **ayrı ayrı** parametre, `{name}_vertex` diye türetilmiyor: hata
@@ -1570,7 +1375,7 @@ fn pipeline(
     desc.setFragmentFunction(Some(&fs));
     // SAFETY: indeks 0 her render pipeline'da vardır.
     let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
-    att.setPixelFormat(Renderer::PIXEL_FORMAT);
+    att.setPixelFormat(MetalRenderer::PIXEL_FORMAT);
     att.setBlendingEnabled(true);
     // **Altı pipeline da ön çarpımsız fragment veriyor**, emoji dahil:
     // CoreGraphics renkli glyph'i ön çarpımlı yazıyor ama `raster::draw_color`
@@ -1595,8 +1400,9 @@ fn pipeline(
         .map_err(GpuError::Pipeline)
 }
 
+#[cfg(test)]
 /// Dokunun boyunda, `origin_y`'den başlayan viewport — dock'un ve (sıfırla)
-/// yazım efektlerinin ([`Renderer::encode_fx`]). Boy dokunun boyu: NDC
+/// yazım efektlerinin ([`MetalRenderer::encode_fx`]). Boy dokunun boyu: NDC
 /// ölçeği `viewport_px` uniform'uyla aynı kalmalı (`encode_dock`'un doc'u).
 /// Dokunun `top_px`'ten dibe kadarki şeridi, makas olarak (032, büyüyen
 /// bant). Makas dokunun içinde kalmak zorunda (Metal'in doğrulaması), yani
@@ -1622,6 +1428,7 @@ pub(crate) fn scissor_rect_below(top_px: f32, viewport_px: [f32; 2]) -> [usize; 
     [0, y, width, height - y]
 }
 
+#[cfg(test)]
 fn viewport_at(origin_y: f32, viewport_px: [f32; 2]) -> MTLViewport {
     MTLViewport {
         originX: 0.0,
@@ -1633,6 +1440,7 @@ fn viewport_at(origin_y: f32, viewport_px: [f32; 2]) -> MTLViewport {
     }
 }
 
+#[cfg(test)]
 impl AtlasTexture {
     /// Dokuyu (gerekirse) kurar, eksik yuvaları yükler ve `instances`'ı bu
     /// karenin glyph'leri **ve kurallarıyla** doldurur — hepsi **tek** ödünç
@@ -1745,6 +1553,7 @@ impl AtlasTexture {
     }
 }
 
+#[cfg(test)]
 /// Renk dokusunun tembel kurucusu — [`MetalUpload`]'ın ikinci alanı.
 ///
 /// Tip, üç şeyi tek alanda taşıyor (doku yuvası, device ve kenar) çünkü
@@ -1755,6 +1564,7 @@ struct ColorPlane<'a> {
     edge: (u16, u16),
 }
 
+#[cfg(test)]
 impl ColorPlane<'_> {
     /// Dokuyu (gerekirse kurup) verir; kurulum başarısızsa `None`.
     ///
@@ -1779,6 +1589,7 @@ impl ColorPlane<'_> {
     }
 }
 
+#[cfg(test)]
 /// Renk düzleminin dokusu: `RGBA8Unorm_sRGB`, aynı yuva ızgarası.
 ///
 /// **Format `_sRGB` olmak zorunda.** Hedef `BGRA8Unorm_sRGB` ve donanım
@@ -1810,6 +1621,7 @@ fn new_color_texture(
         .ok_or(GpuError::NoAtlasTexture)
 }
 
+#[cfg(test)]
 /// Metal's [`SlotUpload`]: `replaceRegion` into the mask texture, or into the
 /// colour texture, which [`ColorPlane`] creates on the first colour slot.
 struct MetalUpload<'a> {
@@ -1817,6 +1629,7 @@ struct MetalUpload<'a> {
     color: ColorPlane<'a>,
 }
 
+#[cfg(test)]
 impl SlotUpload for MetalUpload<'_> {
     fn upload(&mut self, plane: Plane, origin: (u16, u16), metrics: Metrics, bytes: &[u8]) {
         let target = match plane {
@@ -1832,6 +1645,7 @@ impl SlotUpload for MetalUpload<'_> {
     }
 }
 
+#[cfg(test)]
 /// Atlas dokusu: tek kanal kapsama, yalnız shader okur.
 ///
 /// `Shared` depolama, `Private` değil: yükleme yolu `replaceRegion`, yani
@@ -1860,6 +1674,7 @@ fn new_atlas_texture(
         .ok_or(GpuError::NoAtlasTexture)
 }
 
+#[cfg(test)]
 /// Tam bir yuvayı dokuya yazar.
 fn upload_slot(
     texture: &ProtocolObject<dyn MTLTexture>,
@@ -1912,17 +1727,13 @@ fn upload_slot(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::Mutex;
-    use std::time::Instant;
-
     use bt_core::{
         Block, CaretShape, Cell, Cursor, SearchRun, SelectionRun, Theme, UnderlineStyle,
     };
 
     use super::*;
+    use crate::Renderer;
     use crate::glyph_fx::{Effect, Fx, Kind};
-    use crate::stats::Stats;
-    use crate::wgpu_renderer::WgpuRenderer;
     use bt_atlas::{Face, SizeClass};
     use bt_core::CaretStyle;
     use bt_core::{ButtonState, DockButton, Erase, Keypress};
@@ -2113,16 +1924,16 @@ pub(crate) mod tests {
     /// Sınama için küçük bir offscreen render hedefi; `Shared` depolama
     /// `getBytes` ile CPU'dan okumaya izin verir.
     pub(crate) fn target_texture(
-        r: &Renderer,
+        r: &MetalRenderer,
         edge: usize,
     ) -> Retained<ProtocolObject<dyn MTLTexture>> {
         let desc = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                // Formatı `Renderer`'dan: pipeline hangi formata derlendiyse
+                // Formatı `MetalRenderer`'dan: pipeline hangi formata derlendiyse
                 // hedef de o. Elle yazılsaydı sRGB geçişi burada assert'le
                 // değil Metal doğrulama istisnasıyla düşerdi — ve istisna
                 // sınamanın ne aradığını hiç söylemez.
-                Renderer::PIXEL_FORMAT,
+                MetalRenderer::PIXEL_FORMAT,
                 edge,
                 edge,
                 false,
@@ -2175,15 +1986,15 @@ pub(crate) mod tests {
     /// The renderer every guard draws with — wgpu since 040 phase-4
     /// (`crate::wgpu_renderer`). Metal draws only the oracle scenes
     /// ([`metal_offscreen`]) and the measurement hook's half.
-    pub(crate) type TestRenderer = WgpuRenderer;
+    pub(crate) type TestRenderer = Renderer;
 
     pub(crate) fn renderer() -> TestRenderer {
-        WgpuRenderer::new()
+        Renderer::new()
     }
 
     /// Draws the frame into an offscreen texture and reads the pixels back —
     /// the body every offscreen guard shares (setup, encode, submit, wait and
-    /// the error check live in `WgpuRenderer::render_offscreen`; copied, the
+    /// the error check live in `Renderer::render_offscreen`; copied, the
     /// error check would be forgotten in one of them and that guard would read
     /// an empty texture).
     ///
@@ -2205,7 +2016,7 @@ pub(crate) mod tests {
     /// (`wgpu_matches_the_metal_oracle_on_every_scene`) until Metal is removed
     /// (040 phase-7).
     pub(crate) fn metal_offscreen(
-        r: &Renderer,
+        r: &MetalRenderer,
         edge: usize,
         clear: LinearRgba,
         frame: &Frame,
@@ -2227,7 +2038,7 @@ pub(crate) mod tests {
     /// frame, as in `draw`, so temporaries do not pile up over thousands of
     /// frames.
     pub(crate) fn commit_offscreen(
-        r: &Renderer,
+        r: &MetalRenderer,
         texture: &ProtocolObject<dyn MTLTexture>,
         clear: LinearRgba,
         frame: &Frame,
@@ -2353,105 +2164,18 @@ pub(crate) mod tests {
         }
     }
 
-    // **Metal's own guards, kept while Metal is the product renderer**
-    // (040 phase-4 `/code-review`): its completion block (`link.rs` wires it)
-    // and `encode_pass`'s `endEncoding` on the error path. They go with Metal
-    // in phase-7; their wgpu counterparts are in `crate::wgpu_renderer`.
-
-    #[test]
-    fn completion_block_counts_frame_and_reports_result() {
-        // `frames()`'in anlamı bu phase'de değişti: "commit edildi" değil,
-        // "GPU hatasız bitirdi". O anlamı yalnız `make duman` görüyordu ve
-        // orası "> 0" diye soruyor — sayacın hiç artmaması yeşil geçerdi.
-        //
-        // Adının söylemediği: **hatalı** tamponun sayılmadığı. `Error`
-        // durumunu isteyerek üretmenin güvenilir bir yolu yok (cihaz kaybı,
-        // zaman aşımı), o dal burada koşmuyor — sınama adının bunu iddia
-        // etmemesi de bu yüzden.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let completion = {
-            let seen = Arc::clone(&seen);
-            r.completion(move |result| seen.lock().unwrap().push(result.is_ok()))
-        };
-
-        let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        // SAFETY: blok geçerli ve `completion` çağrı boyunca yaşıyor.
-        unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&completion.0)) };
-        cmd.commit();
-        // `waitUntilCompleted` tamamlanma handler'ları dönene kadar bekler.
-        cmd.waitUntilCompleted();
-
-        assert_eq!(r.frames(), 1, "hatasız biten kare sayılmalı");
-        assert_eq!(*seen.lock().unwrap(), vec![true]);
-    }
-
-    #[test]
-    fn completion_hands_over_live_gpu_timestamps() {
-        // Bloğun başarı kolu komut tamponunu geçiriyor ve o tampon **canlı**:
-        // damgalar `Stats`'a varıyor. Sınadığı şey **boru**, donanımın
-        // davranışı değil — Apple `GPUStartTime`/`GPUEndTime`'ı "başlamadı" /
-        // "bildirim gelmedi" hâllerinde sıfır döndürebiliyor ve `record_gpu`
-        // sıfırı **meşru** sayıp eliyor. Eski hâli `nanos.len() == 1` diyordu,
-        // yani donanımın damga verme yeteneğini `make hepsi`'nin kırmızısına
-        // çeviriyordu; kendi doc'uyla çelişiyordu (`/code-review` bulgusu).
-        //
-        // Kaybolan sinyal telafi edildi: "bu makine damga veriyor mu"
-        // sorusunun cevabı artık `BT_FRAME_STATS=1` koşusunun `gpu_elenen=`
-        // jetonunda — sıfır ise damgalar canlı, kare sayısına eşitse değil.
-        //
-        // Kapının kendisi burada değil: ölçümü isteyen taraf `link.rs` ve
-        // kapalı kapıda bu iki çağrı hiç yapılmıyor.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
-        let stats = Arc::new(Stats::new(Instant::now(), 1));
-        let completion = {
-            let stats = Arc::clone(&stats);
-            r.completion(move |result| {
-                if let Ok(cmd) = result {
-                    stats.mark_startup();
-                    stats.record_gpu(cmd.GPUStartTime(), cmd.GPUEndTime());
-                }
-            })
-        };
-
-        const EDGE: usize = 16;
-        let texture = target_texture(&r, EDGE);
-        let mut frame = Frame::default();
-        frame.clear(grid(8, 8), CaretStyle::default());
-        frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
-        let cmd = r.queue.commandBuffer().expect("komut tamponu");
-        r.encode_pass(&cmd, &texture, BACKGROUND, &frame)
-            .expect("pass encode edilemedi");
-        // SAFETY: blok geçerli ve `completion` çağrı boyunca yaşıyor.
-        unsafe { cmd.addCompletedHandler(RcBlock::as_ptr(&completion.0)) };
-        cmd.commit();
-        cmd.waitUntilCompleted();
-
-        assert!(
-            stats.startup().is_some(),
-            "ilk tamamlanan kare açılış süresini kapatır"
-        );
-        // Kare **bir kez** kaydedildi: ya örnek olarak ya elenmiş olarak.
-        // İkisinin toplamı boruyu pinler; hangisi olduğu donanımın işi.
-        let gpu = stats.gpu();
-        assert_eq!(
-            gpu.nanos.len() as u64 + gpu.rejected,
-            1,
-            "tamamlanan kare tam bir kez kaydedilir"
-        );
-        assert!(
-            stats.cpu_frame().nanos.is_empty(),
-            "CPU aralıkları bloktan değil display link'ten yazılır"
-        );
-    }
+    // **Metal's own guard, kept while Metal is the oracle** (040 phase-4
+    // `/code-review`): `encode_pass`'s `endEncoding` on the error path. It
+    // goes with Metal in phase-7; the wgpu counterpart is in
+    // `crate::wgpu_renderer`.
 
     #[test]
     fn metal_renderer_without_atlas_refuses_glyphs_and_still_ends_encoding() {
-        // "Önce metriği sor" sözleşmesinin sınanabilir hâli. `Renderer`
+        // "Önce metriği sor" sözleşmesinin sınanabilir hâli. `MetalRenderer`
         // atlası `None` doğuyor; ölçeği hiç söylemeden glyph çizen bir yol
         // sessizce @1x çizmek yerine kareyi düşürmeli. Sessiz olsaydı belirti
         // "retina makinede harfler yarım boy" olurdu ve hiçbir sınama görmezdi.
-        let r = Renderer::system_default().expect("Metal device ve pipeline");
+        let r = MetalRenderer::system_default().expect("Metal device ve pipeline");
         const EDGE: usize = 32;
         let texture = target_texture(&r, EDGE);
 
@@ -3008,7 +2732,7 @@ pub(crate) mod tests {
     ///
     /// 017'nin doldurma bandı ızgaranın **üstüne** düşecek ve adayı üçüncü bir
     /// `setViewport`: `originY = origin_px − fill_px`. O sayı kaymanın
-    /// ortasında negatife iniyor, oysa [`Renderer::encode_dock`]'un kırpması
+    /// ortasında negatife iniyor, oysa [`MetalRenderer::encode_dock`]'un kırpması
     /// *"negatif bir `originY` Metal'in doğrulamasına düşerdi — süreci öldüren
     /// bir istisna"* diyordu ve o cümle **ölçülmemişti**. Bu sınama onu
     /// ölçüyor; sayıları, makinesi ve doğrulama katmanının cevabı
@@ -3597,7 +3321,7 @@ pub(crate) mod tests {
         // sürümüne rehin olurdu.
         let r = renderer();
         // Ölçek açıkça söyleniyor: atlasın anahtarı pencereden gelir, bu
-        // sınamanın penceresi yok ve `Renderer` atlası `None` doğuyor.
+        // sınamanın penceresi yok ve `MetalRenderer` atlası `None` doğuyor.
         // Söylenmeseydi kare `GpuError::NoAtlas` ile düşerdi — sessizce @1x
         // çizmek yerine. Hücre boyutu da atlasınkiyle aynı olsun ki yuva
         // dörtlüye birebir otursun.
