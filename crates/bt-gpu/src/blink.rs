@@ -1,81 +1,87 @@
-//! İmlecin yanıp sönmesi — **saf**, ObjC'siz, kilitsiz.
+//! Cursor blinking — **pure**, no ObjC, lock-free.
 //!
-//! Emsali [`crate::motion::Motion`] ve `Gate`: politikanın kendisi platformdan
-//! bağımsız olduğu için ayrı bir tipte yaşıyor ve gerçek bir pencere olmadan
-//! sınanıyor.
+//! Its precedent is [`crate::motion::Motion`] and `Gate`: the policy itself is
+//! platform-independent, so it lives in a separate type and is tested without
+//! a real window.
 //!
-//! **Blink bir hareket karesidir, içerik karesi değil.** Izgara değişmiyor,
-//! yalnız caret'in alfası; `link.rs`'in modül başlığındaki üç şarttan
-//! birincisini ("içerik gerçekten değişecek") geçemiyor. Ama ekran hızına da
-//! bağlanamaz: 2 Hz'lik bir değişim için tazeleme hızında kare, setin bütün
-//! gerekçesini çürütürdü. Kalan yol saatin ikinci tadı — hasar dikmeyen bir
-//! uyandırma ([`crate::link::Waker::resume`]).
+//! **Blink is a motion frame, not a content frame.** The grid does not change,
+//! only the caret's alpha; it fails the first of the three conditions in
+//! `link.rs`'s module header ("the content will actually change"). But it
+//! cannot be tied to the display rate either: a frame at refresh rate for a
+//! 2 Hz change would undo the whole rationale of the set. The remaining path
+//! is the second flavour of the clock — a wake-up that raises no damage
+//! ([`crate::link::Waker::resume`]).
 //!
-//! **Faz mutlak son tarih tutuyor, `dt` biriktirmiyor** ve bu şart:
-//! [`crate::motion::DT_MAX`] kırpması yüzünden 500 ms'lik bir uykuyu 100 ms
-//! sayan bir birikim, imleci ~5 uyandırmada bir döndürür ve arada dört
-//! **birebir aynı** kare çizdirirdi. Belirtisi sessiz olurdu: pencere uyanır,
-//! çizer, hiçbir piksel değişmez.
+//! **The phase holds an absolute deadline, it does not accumulate `dt`**, and
+//! this is a requirement: because of the [`crate::motion::DT_MAX`] clamp, an
+//! accumulation that counts a 500 ms sleep as 100 ms would flip the caret
+//! once every ~5 wake-ups and draw four **identical** frames in between. The
+//! symptom would be silent: the window wakes, draws, and no pixel changes.
 //!
-//! **Durma koşulu adlandırılmış** (`CLAUDE.md`): uygulama ya da kullanıcı
-//! kapatır, imleç gizlenir, pencere örtülür (`Gate` zaten `setPaused`'a
-//! düşüyor) ya da son içerik karesinden [`IDLE_STOP`] geçer. Durma **fazı
-//! açığa bırakıyor**: sönük fazda durulsaydı imleç bir sonraki hasara kadar
-//! kaybolurdu ve kullanıcı bunu "imleç kayboldu" diye okurdu.
+//! **The stop condition is named** (`CLAUDE.md`): the app or the user turns it
+//! off, the caret is hidden, the window is occluded (`Gate` already drops to
+//! `setPaused`), or [`IDLE_STOP`] has passed since the last content frame.
+//! Stopping **leaves the phase lit**: stopping in the dark phase would make
+//! the caret vanish until the next damage, and the user would read that as
+//! "the caret disappeared".
 
-/// Blink'in yarım periyodunun **varsayılanı** — değeri ve gerekçesi
-/// `bt_core::CURSOR_BLINK_INTERVAL`'de.
+/// The **default** half period of the blink — its value and rationale live
+/// in `bt_core::CURSOR_BLINK_INTERVAL`.
 ///
-/// Burada yalnız işaret var, kopya yok: seçilmiş bir sayının tek sahibi olur
-/// ve iki yerde yazılı bir gerekçe yeniden ayarlanınca birinde güncellenip
-/// ötekinde sessizce yalan söyler (`/code-review`). Periyot 016'dan beri
-/// kullanıcı ayarı; buradaki sabit yalnız [`Blink::default`]'ın tabanı.
+/// Only a pointer here, no copy: a chosen number gets one owner, and a
+/// rationale written in two places silently lies in one of them when it is
+/// re-tuned and only the other is updated (`/code-review`). The period has
+/// been a user setting since 016; the constant here is only the floor of
+/// [`Blink::default`].
 const HALF_PERIOD: f64 = bt_core::CURSOR_BLINK_INTERVAL;
 
-/// Klavye sessizliğinden sonra blink'in durma süresi, saniye — **seçilmiş,
-/// ölçülmüş değil**; kaynağı kitty'nin `cursor_stop_blinking_after`
-/// varsayılanı (15 sn).
+/// How long after keyboard silence the blink stops, in seconds — **chosen,
+/// not measured**; its source is kitty's `cursor_stop_blinking_after`
+/// default (15 s).
 ///
-/// Bu sabit blink'i bu deponun merkezî vaadiyle barıştıran şey: onsuz, açık
-/// bir blink pencereyi **kalıcı olarak** boşta-değil yapardı. Onunla pencere
-/// yazmayı bıraktıktan 15 saniye sonra gerçekten sıfır kareye dönüyor.
+/// This constant is what reconciles blink with this repo's central promise:
+/// without it, an open blink would make the window **permanently** non-idle.
+/// With it, the window truly returns to zero frames 15 seconds after typing
+/// stops.
 ///
-/// Tabanı **son içerik karesi**, son çizilen kare değil: blink kareleri de
-/// çiziliyor ve onlara bakan bir sayaç hiç dolmazdı (`link.rs`'in
-/// `last_frame_at`'i hareket kolunda da yazılıyor).
+/// Its base is the **last content frame**, not the last drawn frame: blink
+/// frames are drawn too, and a counter watching them would never fill up
+/// (`link.rs`'s `last_frame_at` is written on the motion arm as well).
 const IDLE_STOP: f64 = 15.0;
 
-/// İmlecin yanıp sönmesinin durumu.
+/// State of the cursor blink.
 ///
-/// Zaman tabanı display link'in damgası ([`crate::link`]'in `now`'ı), saat
-/// okuması değil: `sessiz=` ile animasyonun saati zaten oradan okunuyor ve
-/// ikinci bir taban iki ayrı zaman yaratırdı.
+/// The time base is the display link's timestamp (`now` in [`crate::link`]),
+/// not a clock read: the `quiet=` token and the animation's clock are already
+/// read from there, and a second base would create two separate times.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Blink {
-    /// Kullanıcı ve uygulama birlikte "sönsün" diyor mu
-    /// (`bt_core::CursorBlink::resolve`'un cevabı).
+    /// Whether the user and the application together say "blink"
+    /// (the answer of `bt_core::CursorBlink::resolve`).
     enabled: bool,
-    /// Faz şu an **açık** mı. Kapalıyken de `true`: durma fazı açığa bırakıyor.
+    /// Whether the phase is **lit** right now. Also `true` when disabled: stopping
+    /// leaves the phase lit.
     lit: bool,
-    /// Bir sonraki faz değişiminin **mutlak** zamanı; `None` → bekleyen tik yok.
+    /// **Absolute** time of the next phase change; `None` -> no pending tick.
     next_flip: Option<f64>,
-    /// Son **içerik** karesinin damgası; [`IDLE_STOP`]'un tabanı.
+    /// Timestamp of the last **content** frame; the base of [`IDLE_STOP`].
     last_content_at: Option<f64>,
-    /// Yarım periyot, saniye — ayardan geliyor
+    /// Half period, in seconds — comes from the setting
     /// (`[terminal] cursor_blink_interval`).
     ///
-    /// Alan, `const` değil: kullanıcı kayıt anında değiştirebiliyor. Modülün
-    /// saflığı bozulmuyor — `Blink` hâlâ `Copy` ve `Cell` içinde yaşıyor,
-    /// emsal `Motion::set_style`.
+    /// A field, not a `const`: the user can change it at save time. The
+    /// module's purity is not broken — `Blink` is still `Copy` and lives in a
+    /// `Cell`, precedent `Motion::set_style`.
     half_period: f64,
 }
 
 impl Default for Blink {
-    /// **`lit` `true` başlıyor**, `derive`'ın `false`'u değil: alanın
-    /// değişmezi "kapalıyken de açık" ve `derive` onu doğduğu anda çiğnerdi.
-    /// Bugün [`Blink::alpha`] `enabled`'a kısa devre yaptığı için belirti
-    /// görünmüyor; değişmezin lisans verdiği bir sadeleştirme (`alpha`'yı
-    /// yalnız `lit`'e bağlamak) pencereyi **görünmez bir caret'le** doğururdu.
+    /// **`lit` starts as `true`**, not `derive`'s `false`: the field's
+    /// invariant is "lit even when disabled" and `derive` would violate it the
+    /// moment it is born. Today [`Blink::alpha`] short-circuits on `enabled`,
+    /// so no symptom shows; a simplification the invariant licenses (tying
+    /// `alpha` to `lit` alone) would spawn the window with an **invisible
+    /// caret**.
     fn default() -> Self {
         Self {
             enabled: false,
@@ -88,41 +94,44 @@ impl Default for Blink {
 }
 
 impl Blink {
-    /// İçerik karesi: ayarı tazeler ve hareketsizlik sayacını sıfırlar.
+    /// Content frame: refreshes the setting and resets the inactivity
+    /// counter.
     ///
-    /// **Fazı sıfırlamıyor** ve bu bilerek: 013'ün canlı sayacı koşan komut
-    /// boyunca saniyede bir içerik karesi üretiyor, yani faz her içerik
-    /// karesinde açığa çekilseydi blink'in ritmi komut koşarken bozulurdu.
-    /// Bedeli adlandırılmış: karanlık fazda basılan tuş imleci en çok yarım
-    /// periyot bekletir.
+    /// **It does not reset the phase**, deliberately: 013's live counter
+    /// produces a content frame every second while a command runs, so if the
+    /// phase were pulled to lit on every content frame the blink's rhythm
+    /// would break while a command runs. The cost is named: a key pressed in
+    /// the dark phase keeps the caret waiting for at most half a period.
     pub(crate) fn content_frame(&mut self, now: f64, enabled: bool) {
         self.last_content_at = Some(now);
         if self.enabled != enabled {
             self.enabled = enabled;
-            // Kapanış fazı **açığa** bırakıyor (R9.1); açılış bir sonraki
-            // yarım periyottan başlıyor.
+            // Turning off leaves the phase **lit** (R9.1); turning on starts
+            // from the next half period.
             self.lit = true;
             self.next_flip = enabled.then_some(now + self.half_period);
         } else if enabled && self.next_flip.is_none() {
-            // Hareketsizlikten dönüş: sayaç yukarıda tazelendi, tik yeniden
-            // kuruluyor.
+            // Return from inactivity: the counter was refreshed above, the
+            // tick is being re-armed.
             self.next_flip = Some(now + self.half_period);
         }
     }
 
-    /// Caret kıpırdadı: fazı **açığa** çekip sayacı baştan başlatır.
+    /// The caret moved: pulls the phase to **lit** and restarts the counter.
     ///
-    /// **Yazarken imleç sönmez** ve bu kullanıcı bildirimiyle geldi
-    /// (2026-09-19): tuşa basarken imlecin bir yandan sönüp yanması "yazma ile
-    /// blink'in aynı anda olması" diye okundu ve haklı — her editör ve terminal
-    /// yazarken caret'i sabit tutar, duraksayınca sönmeye döner.
+    /// **The caret does not blink while typing**, and this came from a user
+    /// report (2026-09-19): the caret blinking off and on while pressing keys
+    /// was read as "typing and blinking at the same time", and rightly so —
+    /// every editor and terminal keeps the caret steady while typing and goes
+    /// back to blinking on a pause.
     ///
-    /// **Tetik caret'in hareketi**, tuş vuruşunun kendisi değil ve bu bilerek:
-    /// tuş `bt-shell`'den `bt-gpu`'ya ayrı bir sinyal isterdi, oysa hareket
-    /// zaten bu modülün elinde. Ayrım da doğru yerde duruyor — koşan bir
-    /// komutun süre sayacı caret'i **kıpırdatmıyor**, yani `sleep 5` boyunca
-    /// blink bozulmadan sürüyor; akan çıktı ise kıpırdatıyor ve orada caret'in
-    /// sabit kalması zaten istenen.
+    /// **The trigger is the caret's movement**, not the keystroke itself, and
+    /// this is deliberate: a key would need a separate signal from `bt-shell`
+    /// to `bt-gpu`, whereas the movement is already in this module's hands.
+    /// The distinction also stands in the right place — a running command's
+    /// duration counter does **not** move the caret, so the blink carries on
+    /// undisturbed throughout `sleep 5`; streaming output does move it, and
+    /// keeping the caret steady there is what is wanted anyway.
     pub(crate) fn wake(&mut self, now: f64) {
         if !self.enabled {
             return;
@@ -131,20 +140,22 @@ impl Blink {
         self.next_flip = Some(now + self.half_period);
     }
 
-    /// Zamanı ilerletir; dönen değer **bu karede faz değişti mi**.
+    /// Advances time; the return value is **whether the phase flipped in this
+    /// frame**.
     ///
-    /// Tek atımlık ve `link.rs`'in uyku testinde `motion.settled()`'ın erken
-    /// dönüşünden **önce** tüketiliyor: sorulmasaydı hasar dikmeyen uyandırma
-    /// kare üretmeyen bir uyan/uyu fırdöndüsü yaratırdı.
+    /// One-shot, and consumed in `link.rs`'s sleep test **before**
+    /// `motion.settled()`'s early return: if it were not asked, a wake-up that
+    /// raises no damage would create a wake/sleep spin that produces no frames.
     ///
-    /// Uzun uykudan dönüşte faz **tek adımda** doğru yere oturuyor: aradaki
-    /// geçmiş tikler atlanıyor, biriktirilmiyor.
+    /// On return from a long sleep the phase lands in the right place **in a
+    /// single step**: the past ticks in between are skipped, not accumulated.
     pub(crate) fn advance(&mut self, now: f64) -> bool {
         if !self.enabled {
             return false;
         }
-        // Hareketsizlik: durma koşulu. Faz açığa çekiliyor ve tik sönüyor;
-        // `content_frame` ilk hasarda ikisini de geri kuruyor.
+        // Inactivity: the stop condition. The phase is pulled to lit and the
+        // tick is extinguished; `content_frame` re-arms both on the first
+        // damage.
         if self.last_content_at.is_some_and(|at| now - at >= IDLE_STOP) {
             let was_dark = !self.lit;
             self.lit = true;
@@ -158,20 +169,20 @@ impl Blink {
             return false;
         }
         self.lit = !self.lit;
-        // **Mutlak**, `due + HALF_PERIOD` değil `now + HALF_PERIOD`: uzun bir
-        // uykudan sonra geçmişte kalmış bir tabandan saymak, arka arkaya
-        // birkaç tiki hemen ateşlerdi.
+        // **Absolute**, `now + HALF_PERIOD` and not `due + HALF_PERIOD`:
+        // counting from a base left in the past after a long sleep would fire
+        // several ticks back to back immediately.
         self.next_flip = Some(now + self.half_period);
         true
     }
 
-    /// Periyodu değiştirir ve bekleyen tiki **yeniden kurar**.
+    /// Changes the period and **re-arms** the pending tick.
     ///
-    /// Yeniden kurmak şart, çünkü [`Blink::next_flip`] **mutlak** bir son
-    /// tarih: yalnız alanı yazmak, kaydedilen yeni ritmin bir flip **gecikmesi**
-    /// demek olurdu — kullanıcı kaydeder, hiçbir şey olmaz, sonraki sönmede
-    /// birden değişir. Aynı değerde hiçbir şey yapılmıyor, yoksa her ayar
-    /// kaydı fazı sıfırlardı.
+    /// Re-arming is required because [`Blink::next_flip`] is an **absolute**
+    /// deadline: merely writing the field would make the saved new rhythm a
+    /// flip **late** — the user saves, nothing happens, and it suddenly
+    /// changes at the next blink-off. With the same value nothing is done,
+    /// otherwise every settings save would reset the phase.
     pub(crate) fn set_half_period(&mut self, now: f64, half_period: f64) {
         if self.half_period == half_period {
             return;
@@ -182,12 +193,12 @@ impl Blink {
         }
     }
 
-    /// Caret'in bu karedeki opaklığı; blink kapalıyken **her zaman `1.0`**.
+    /// The caret's opacity in this frame; **always `1.0`** while blink is off.
     pub(crate) fn alpha(self) -> f32 {
         if self.lit || !self.enabled { 1.0 } else { 0.0 }
     }
 
-    /// Bir sonraki faz değişiminin mutlak zamanı — saatin blink yarısı.
+    /// Absolute time of the next phase change — the blink half of the clock.
     pub(crate) fn next_flip(self) -> Option<f64> {
         self.enabled.then_some(self.next_flip).flatten()
     }
@@ -201,25 +212,26 @@ mod tests {
     fn a_disabled_blink_never_flips() {
         let mut blink = Blink::default();
         blink.content_frame(0.0, false);
-        assert!(!blink.advance(10.0), "kapalı blink faz değiştirdi");
+        assert!(!blink.advance(10.0), "disabled blink changed phase");
         assert_eq!(blink.alpha(), 1.0);
-        assert_eq!(blink.next_flip(), None, "kapalı blink saat kuruyor");
+        assert_eq!(blink.next_flip(), None, "disabled blink is arming a clock");
     }
 
     #[test]
     fn the_phase_is_an_absolute_deadline() {
-        // **`dt` biriktiren bir uygulama burada düşerdi.** Uzun bir uykudan
-        // dönüşte faz tek adımda dönüyor ve bir sonraki tik `now`'dan
-        // sayılıyor — geçmiş bir tabandan değil, yoksa arka arkaya birkaç tik
-        // hemen ateşlerdi.
+        // **An implementation that accumulates `dt` would fail here.** On
+        // return from a long sleep the phase flips in a single step and the
+        // next tick is counted from `now` — not from a past base, otherwise
+        // several ticks would fire back to back immediately.
         let mut blink = Blink::default();
         blink.content_frame(0.0, true);
         assert_eq!(blink.next_flip(), Some(HALF_PERIOD));
-        assert!(blink.advance(5.0), "uzun uykudan sonra faz dönmedi");
+        assert!(blink.advance(5.0), "phase did not flip after a long sleep");
         assert_eq!(blink.alpha(), 0.0);
         assert_eq!(blink.next_flip(), Some(5.0 + HALF_PERIOD));
-        // Aynı anda ikinci kez sorulunca dönmüyor: tik tek atımlık.
-        assert!(!blink.advance(5.0), "faz aynı karede iki kez döndü");
+        // Asked a second time at the same instant it does not flip: the tick
+        // is one-shot.
+        assert!(!blink.advance(5.0), "phase flipped twice in the same frame");
     }
 
     #[test]
@@ -235,68 +247,70 @@ mod tests {
 
     #[test]
     fn a_new_interval_rebuilds_the_pending_tick() {
-        // **Yeniden kurmak şart**: `next_flip` mutlak bir son tarih, yani
-        // yalnız alanı yazmak kaydedilen ritmi bir flip **geciktirirdi** —
-        // kullanıcı kaydeder, hiçbir şey olmaz, sonraki sönmede birden
-        // değişir.
+        // **Re-arming is required**: `next_flip` is an absolute deadline, so
+        // merely writing the field would make the saved rhythm a flip **late**
+        // — the user saves, nothing happens, and it suddenly changes at the
+        // next blink-off.
         let mut blink = Blink::default();
         blink.content_frame(0.0, true);
-        assert_eq!(blink.next_flip(), Some(0.5), "varsayılan yarım periyot");
+        assert_eq!(blink.next_flip(), Some(0.5), "default half period");
 
-        // 2.0'da periyot kısalıyor: tik **o andan** itibaren yeniden kuruluyor.
+        // At 2.0 the period shortens: the tick is re-armed **from that
+        // moment**.
         blink.set_half_period(2.0, 0.1);
         assert_eq!(blink.next_flip(), Some(2.1));
-        assert!(blink.advance(2.1), "yeni ritimde dönmedi");
-        assert_eq!(blink.next_flip(), Some(2.2), "yeni periyot sürmüyor");
+        assert!(blink.advance(2.1), "did not flip at the new rhythm");
+        assert_eq!(blink.next_flip(), Some(2.2), "new period is not sustained");
 
-        // Aynı değer **hiçbir şey yapmıyor**: her ayar kaydı fazı
-        // sıfırlasaydı kaydeden kullanıcı imleci sürekli açığa çekerdi.
+        // The same value **does nothing**: if every settings save reset the
+        // phase, a saving user would keep pulling the caret to lit.
         let before = blink;
         blink.set_half_period(5.0, 0.1);
-        assert_eq!(blink, before, "aynı periyot fazı kıpırdattı");
+        assert_eq!(blink, before, "same period disturbed the phase");
     }
 
     #[test]
     fn an_interval_change_while_stopped_arms_nothing() {
-        // Bekleyen tik yokken (blink kapalı ya da hareketsizlikte durmuş)
-        // periyot değişimi **tik doğurmamalı**: doğursaydı kapalı bir blink
-        // saat kurar ve boşta sıfır kare sözleşmesi kırılırdı.
+        // With no pending tick (blink off, or stopped by inactivity) a period
+        // change **must not spawn a tick**: if it did, a disabled blink would
+        // arm a clock and the zero-frames-when-idle contract would break.
         let mut blink = Blink::default();
         blink.set_half_period(1.0, 0.2);
-        assert_eq!(blink.next_flip(), None, "kapalı blink tik kurdu");
+        assert_eq!(blink.next_flip(), None, "disabled blink armed a tick");
     }
 
     #[test]
     fn the_stop_condition_leaves_the_caret_lit() {
-        // **R9.1.** Sönük fazda durulsaydı imleç bir sonraki hasara kadar
-        // kaybolurdu; durma fazı açığa çekiyor ve son bir kare istiyor
-        // (dönen `true`).
+        // **R9.1.** Stopping in the dark phase would make the caret vanish
+        // until the next damage; the stop pulls the phase to lit and asks for
+        // one last frame (the returned `true`).
         let mut blink = Blink::default();
         blink.content_frame(0.0, true);
-        assert!(blink.advance(HALF_PERIOD), "faz sönmedi");
+        assert!(blink.advance(HALF_PERIOD), "phase did not go dark");
         assert_eq!(blink.alpha(), 0.0);
-        assert!(blink.advance(IDLE_STOP), "durma koşulu son kareyi istemedi");
-        assert_eq!(blink.alpha(), 1.0, "imleç sönük kaldı");
-        assert_eq!(blink.next_flip(), None, "durduktan sonra saat kuruldu");
-        // Bir daha kare istemiyor: durma tek atımlık.
+        assert!(blink.advance(IDLE_STOP), "stop asked for no last frame");
+        assert_eq!(blink.alpha(), 1.0, "caret stayed dark");
+        assert_eq!(blink.next_flip(), None, "clock armed after stopping");
+        // It asks for no more frames: the stop is one-shot.
         assert!(!blink.advance(IDLE_STOP + 10.0));
     }
 
     #[test]
     fn typing_keeps_the_caret_lit() {
-        // Caret kıpırdayınca faz açığa dönüyor ve sayaç baştan başlıyor, yani
-        // yazmaya devam eden kullanıcı imleci **hiç** sönük görmüyor.
+        // When the caret moves the phase returns to lit and the counter
+        // restarts, so a user who keeps typing sees the caret dark **never**.
         let mut blink = Blink::default();
         blink.content_frame(0.0, true);
-        assert!(blink.advance(HALF_PERIOD), "faz sönmedi");
+        assert!(blink.advance(HALF_PERIOD), "phase did not go dark");
         assert_eq!(blink.alpha(), 0.0);
 
         blink.wake(HALF_PERIOD);
-        assert_eq!(blink.alpha(), 1.0, "yazarken imleç sönük kaldı");
+        assert_eq!(blink.alpha(), 1.0, "caret stayed dark while typing");
         assert_eq!(blink.next_flip(), Some(2.0 * HALF_PERIOD));
-        // Yarım periyot dolmadan tekrar yazmak sayacı yine öteliyor.
+        // Typing again before the half period elapses pushes the counter
+        // back once more.
         blink.wake(1.5 * HALF_PERIOD);
-        assert!(!blink.advance(2.0 * HALF_PERIOD), "sayaç ötelenmedi");
+        assert!(!blink.advance(2.0 * HALF_PERIOD), "counter not pushed back");
         assert_eq!(blink.alpha(), 1.0);
     }
 
@@ -305,7 +319,7 @@ mod tests {
         let mut blink = Blink::default();
         blink.content_frame(0.0, false);
         blink.wake(1.0);
-        assert_eq!(blink.next_flip(), None, "kapalı blink saat kurdu");
+        assert_eq!(blink.next_flip(), None, "disabled blink armed a clock");
     }
 
     #[test]
@@ -318,7 +332,7 @@ mod tests {
         assert_eq!(
             blink.next_flip(),
             Some(IDLE_STOP + HALF_PERIOD),
-            "hasar blink'i geri getirmedi"
+            "damage did not bring the blink back"
         );
     }
 
@@ -329,7 +343,7 @@ mod tests {
         blink.advance(HALF_PERIOD);
         assert_eq!(blink.alpha(), 0.0);
         blink.content_frame(0.6, false);
-        assert_eq!(blink.alpha(), 1.0, "kapatılan blink imleci sönük bıraktı");
+        assert_eq!(blink.alpha(), 1.0, "turned-off blink left the caret dark");
         assert_eq!(blink.next_flip(), None);
     }
 }

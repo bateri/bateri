@@ -26,14 +26,14 @@
 //!   its drawing is on the other branch** (027): its request is motion's (no
 //!   wakeup, no damage), but its share scrolls the window inside
 //!   `Session::frame`, so a frame in flight is drawn as a **content** frame
-//!   and counted in `icerik=` — for the reason the clock's content flavour
+//!   and counted in `content=` — for the reason the clock's content flavour
 //!   has: what the grid draws really changes. Its stop condition is the
 //!   glide's own settling.
 //! - **The clock** (`Core::arm_clock`) — a single delayed wakeup armed as
 //!   the pacer goes to sleep. **It has two flavours**, chosen by the kind of
 //!   work that waits: the *content flavour* plants damage through
 //!   [`Waker::wake`] (a running command's duration counter; the grid really
-//!   changes, so counting it in `icerik=` is right), the *motion flavour*
+//!   changes, so counting it in `content=` is right), the *motion flavour*
 //!   does not, through [`Waker::resume`] (the cursor's blink; only the
 //!   caret's alpha changes — and the completion poll of a frame still in
 //!   flight, Karar 6). The armed wakeup is still **one**: the nearest
@@ -43,7 +43,7 @@
 //! **Motion must not touch the `Waker`:** [`Waker::wake`] plants the damage
 //! flag unconditionally, so a motion frame requested there would count
 //! itself as "content", rescan the grid for nothing and inflate the operand
-//! of the zero-frames-at-idle gate (`icerik=`). Hence: **an animation's
+//! of the zero-frames-at-idle gate (`content=`). Hence: **an animation's
 //! time-driven frame request goes through the motion clock.** A new
 //! animation (blink, smooth scrolling) enters there, not [`Waker::wake`].
 //!
@@ -51,7 +51,7 @@
 //! something else.** An animation draws the same content differently; the
 //! clock changes **the content itself** (the running command's counter: what
 //! the grid draws really differs). So going through `Waker::wake` and
-//! counting in `icerik=` is **right** — the ban protected the opposite. The
+//! counting in `content=` is **right** — the ban protected the opposite. The
 //! test has three conditions: the content really changes, its period is
 //! **much** longer than the refresh, and it carries a **named stop
 //! condition**. A time-driven request that fails any of them cannot go there.
@@ -73,8 +73,8 @@
 //! [`crate::glyph_fx`]): they live outside `Motion` (blink's precedent) and
 //! enter the sleep test under their own named term — while an arrival or a
 //! ghost is in flight the pacer does not sleep, when the list empties it
-//! does. They plant no damage: a frame an effect keeps alive raises `kare`,
-//! not `icerik`.
+//! does. They plant no damage: a frame an effect keeps alive raises `frames`,
+//! not `content`.
 //!
 //! The contract's consequence in one sentence: a window with a running
 //! command **or a blinking cursor** is **not idle**; every other window is
@@ -126,7 +126,7 @@ use crate::{GpuError, Renderer, Surface};
 /// 4. **[`Pacer::now`] — the time base.** Seconds on **the same base as the
 ///    tick's stamp**. The stamp is the target presentation time when the
 ///    provider knows it (macOS's `targetTimestamp`), otherwise `now()`.
-///    `dt`, the content deadline, blink, the clock's delay and `sessiz=` all
+///    `dt`, the content deadline, blink, the clock's delay and `quiet=` all
 ///    read this one base; a second clock would create two times (the ban is
 ///    `Core::last_update_at`'s).
 pub trait Pacer: Send + Sync {
@@ -168,13 +168,13 @@ pub enum TickTarget {
 ///
 /// **An animation does not ask [`Waker::wake`] for frames** (module header):
 /// motion is the running tick's own decision. An animation wired to this
-/// door would plant damage on every frame and fill the `icerik=` counter —
+/// door would plant damage on every frame and fill the `content=` counter —
 /// the zero-frames-at-idle gate — with its own frames. The ban's subject is
 /// **this function**, not the type.
 ///
 /// **The clock does go through here** (`Core::arm_clock`) and it is not a
 /// contradiction: the counter's tick really changes the content, so counting
-/// it in `icerik=` is right. The three conditions are in the module header.
+/// it in `content=` is right. The three conditions are in the module header.
 #[derive(Clone)]
 pub struct Waker {
     inner: Arc<WakerInner>,
@@ -205,9 +205,9 @@ struct WakerInner {
     /// Whether frames are drawn and the rhythm turns.
     gate: Gate,
     /// The frame **request** counter — a deeper measure of zero frames at
-    /// idle than `kare`.
+    /// idle than `frames`.
     ///
-    /// `kare` counts what the GPU finished without error: requests born and
+    /// `frames` counts what the GPU finished without error: requests born and
     /// dying in the [`Gate`] or merged on our side are invisible to it. This
     /// counter rises **before** the gate, so it counts the request itself —
     /// on an occluded window the gate swallows the frame but the request
@@ -219,31 +219,31 @@ struct WakerInner {
     /// `stopped` latch dropped are written here too. The number is "frames
     /// asked for", not "requests that can produce a frame"; a permanent draw
     /// error inflates it and the reader tells them apart by comparing with
-    /// `kare`.
+    /// `frames`.
     ///
     /// **What it does not count: motion frames** — neither those the running
     /// tick draws on its own decision nor those the clock's motion flavour
     /// ([`Waker::resume`]) wakes; `resume` does not touch this counter on
     /// purpose. An animation never touches [`Waker::wake`] (module header), so
-    /// this counter stays close to `icerik` while `kare` drifts away from it
-    /// during an animation. The `istek ≈ kare + 2` relation of the "smoke
+    /// this counter stays close to `content` while `frames` drifts away from it
+    /// during an animation. The `requests ≈ frames + 2` relation of the "smoke
     /// load" measurement below **stopped holding in 008** for exactly that
     /// reason; the numbers themselves (that day's observations) stay, the new
-    /// form was **measured** through `icerik` (008 phase-6, thirty healthy
-    /// runs): `istek` was `4` in all thirty while `icerik` was `2`–`3` and
-    /// `kare` 27–30. The counter is still **not constant** — a later run gave
+    /// form was **measured** through `content` (008 phase-6, thirty healthy
+    /// runs): `requests` was `4` in all thirty while `content` was `2`–`3` and
+    /// `frames` 27–30. The counter is still **not constant** — a later run gave
     /// `3`, probably because of the coalescing; not measured.
     ///
     /// A **counter, not a gate**: its threshold was not measured and an
-    /// unmeasured number is not written into a gate (the rule of `yuva=`).
+    /// unmeasured number is not written into a gate (the rule of `slots=`).
     /// What was measured (2026-09-12, debug, this machine) shows two separate
     /// regimes, and both say why the counter is a separate number:
     ///
-    /// - **Smoke load** — in a healthy run `kare=1–2` while `istek=2–3`; with
-    ///   zero frames at idle broken on purpose `kare=82–354`, `istek=84–357`.
-    ///   They move together, so here it is no more telling than `kare`.
-    /// - **Measurement load** — `kare=9` (2 s) / `21` (5 s) while `istek` is
-    ///   **25 000–72 000**. Frames do not flow but requests do: `kare` cannot
+    /// - **Smoke load** — in a healthy run `frames=1–2` while `requests=2–3`; with
+    ///   zero frames at idle broken on purpose `frames=82–354`, `requests=84–357`.
+    ///   They move together, so here it is no more telling than `frames`.
+    /// - **Measurement load** — `frames=9` (2 s) / `21` (5 s) while `requests` is
+    ///   **25 000–72 000**. Frames do not flow but requests do: `frames` cannot
     ///   see the three orders of magnitude in between.
     ///
     /// I **did not measure the mechanism** of the second regime (the gate
@@ -290,7 +290,7 @@ impl Waker {
     /// [`Waker::wake`] with its middle job removed: the same gate, the same
     /// start; no `dirty.mark()`. The woken tick therefore lands on the "no
     /// damage" branch and draws a **motion** frame there — the grid is not
-    /// rescanned, the `Term` lock is not taken, `icerik=` does not rise.
+    /// rescanned, the `Term` lock is not taken, `content=` does not rise.
     ///
     /// `requests` does not rise either: that counter's contract is "content
     /// frames asked for" and it leaves motion frames out on purpose (its
@@ -557,7 +557,7 @@ impl FailureStreak {
 const POLL_DELAY: f64 = 1.0 / 120.0;
 
 /// How long [`DisplayLink::drain`] waits for the frames still in flight at
-/// shutdown before the report reads `kare=`.
+/// shutdown before the report reads `frames=`.
 ///
 /// A ceiling, not an expectation: the link is already stopped, so at most a
 /// frame or two are in flight and they finish within a refresh; the ceiling
@@ -698,15 +698,15 @@ struct Core {
     /// **Content** frame: `session.frame()` found damage and the frame was
     /// decided to be drawn. This is the zero-frames-at-idle gate's operand.
     ///
-    /// A number separate from `kare` (frames the GPU finished without error):
+    /// A number separate from `frames` (frames the GPU finished without error):
     /// **motion** and **slide** frames are drawn frames too, so they raise
-    /// `kare`, but the grid is not dirty — a 200 ms cursor glide is ~24 frames
-    /// at 120 Hz and a `kare ≤ IDLE_FRAME_LIMIT` gate would go red while the
+    /// `frames`, but the grid is not dirty — a 200 ms cursor glide is ~24 frames
+    /// at 120 Hz and a `frames ≤ IDLE_FRAME_LIMIT` gate would go red while the
     /// code is right. So the gate is tied to "**content** frames at idle";
     /// what changed is not the limit's number but its **operand**.
     ///
-    /// No subtraction (`kare − motion`) on purpose: the two counters rise at
-    /// different moments (`kare` when the completion poll sees the frame
+    /// No subtraction (`frames − motion`) on purpose: the two counters rise at
+    /// different moments (`frames` when the completion poll sees the frame
     /// finished, this one when the frame is decided), so a deadline in the
     /// middle of an animation would leave the difference open to `u64`
     /// wrap-around. The gate looks at one of them only
@@ -720,7 +720,7 @@ struct Core {
     ///
     /// `content_frames`' sibling and separate from it on purpose: both count
     /// drawn frames but only one is the zero-frames-at-idle gate's operand.
-    /// The timed run prints this as `hareket=` and it is the smoke gate's
+    /// The timed run prints this as `motion=` and it is the smoke gate's
     /// **required** counter (the recipe has a cursor move, see
     /// `bt_core::smoke_shell`).
     motion_frames: Cell<u64>,
@@ -767,7 +767,7 @@ struct Core {
     /// The previous tick's stamp; the base of `dt`.
     ///
     /// Its source is the **same** as `last_frame_at` (the tick's stamp) and
-    /// that is required: two bases create two times, and `sessiz=` and the
+    /// that is required: two bases create two times, and `quiet=` and the
     /// animation's clock would not agree. No clock read, a field copy.
     ///
     /// A field separate from `last_frame_at`, because that one is only
@@ -789,7 +789,7 @@ struct Core {
     /// It has two sources and `bt-core` gives the nearer
     /// (`bt_core::shell::sooner`): the running command's duration counter,
     /// and in a docked window the caret handover's **hold**. `bt-gpu` does not
-    /// tell them apart — both change the content, so counting `icerik=` is
+    /// tell them apart — both change the content, so counting `content=` is
     /// right.
     ///
     /// `None` → nothing is expected: the command ended, the running block's
@@ -819,7 +819,7 @@ struct Core {
     /// blink's gate and the caret's hollowing.
     ///
     /// Default `true` and **never written in a hermetic run**: the timed run
-    /// (`BT_RUN_SECONDS`) does not read focus, so `make duman` does not go
+    /// (`BT_RUN_SECONDS`) does not read focus, so `make smoke` does not go
     /// green on one machine and red on another. The gate is at the call site
     /// (`bt-shell`'s delegate), not in the default — a default alone would
     /// not do, because a Spotlight opened during the run would produce
@@ -885,7 +885,7 @@ struct Core {
     /// itself sits here and the comparison only makes sense against it.
     last_caret_at: Cell<Option<[f32; 2]>>,
     /// The stamp of the last **drawn** frame (the tick's target presentation
-    /// time), the base of the `sessiz=` token.
+    /// time), the base of the `quiet=` token.
     ///
     /// The tick's stamp is a **field copy**, not a clock read: reading the
     /// clock every frame would read it even with the measurement gate closed
@@ -896,7 +896,7 @@ struct Core {
     /// Written in the `Ok` arm: a frame that could not be encoded does not
     /// break the silence, because nothing happened on screen.
     ///
-    /// `None` → no frame drawn yet; the token is then `sessiz=none`.
+    /// `None` → no frame drawn yet; the token is then `quiet=none`.
     last_frame_at: Cell<Option<f64>>,
 }
 
@@ -911,9 +911,9 @@ impl Core {
 
     /// Hands every frame the GPU has finished to the four jobs of Karar 6:
     /// a frame finished without error gives the failure budget back, closes
-    /// `acilis=` (the first one) and records the GPU delta when measured; a
+    /// `startup=` (the first one) and records the GPU delta when measured; a
     /// frame that failed on the GPU goes to the same policy as a synchronous
-    /// error. `kare=` itself is counted by the renderer ([`Renderer::poll`]).
+    /// error. `frames=` itself is counted by the renderer ([`Renderer::poll`]).
     ///
     /// Returns whether a frame is still in flight.
     fn complete(&self) -> bool {
@@ -922,7 +922,7 @@ impl Core {
             Ok(span) => {
                 self.retry.streak.succeeded();
                 // The measurement gate is **here**: closed, not a single
-                // extra call is made (R4.1). `acilis=` closes here, not in
+                // extra call is made (R4.1). `startup=` closes here, not in
                 // `draw` — what is measured is "main to the first **finished**
                 // frame" and submitting is not finishing.
                 if let Some(stats) = &self.stats {
@@ -1192,7 +1192,7 @@ impl Core {
         frame.push_fill_search(search.fill_slice());
         drop(search);
         // The gate's operand rises here: damage was found, the frame will be
-        // drawn. Before `kare` and independent of it — it does not wait for
+        // drawn. Before `frames` and independent of it — it does not wait for
         // the GPU to finish (see `Core::content_frames`).
         self.content_frames.set(self.content_frames.get() + 1);
         // Clear and cursor colour from the session's theme: the same source as
@@ -1464,7 +1464,7 @@ impl Core {
                 // The silence's base is refreshed only on a frame that
                 // **leaves**, for the same reason: a frame that could not be
                 // encoded changed nothing on screen. The stamp is the tick's
-                // `now`; reading it twice would tie `dt`'s base and `sessiz=`'s
+                // `now`; reading it twice would tie `dt`'s base and `quiet=`'s
                 // base to two reads — what `last_update_at`'s doc bans by name
                 // (`/code-review` finding).
                 self.last_frame_at.set(Some(now));
@@ -1551,8 +1551,8 @@ impl Core {
             return;
         };
         self.motion.set(motion);
-        // Two counters, two animators: `hareket=` witnesses only the cursor,
-        // `kayma=` only the offset. Both can rise in the same frame; their sum
+        // Two counters, two animators: `motion=` witnesses only the cursor,
+        // `slide=` only the offset. Both can rise in the same frame; their sum
         // is **not** the number of drawn frames.
         if !motion.cursor_settled() {
             self.motion_frames.set(self.motion_frames.get() + 1);
@@ -1589,7 +1589,7 @@ impl Core {
         if !fx_idle {
             frame.set_dock_fx(glyph_fx.iter(), glyph_fx.clusters(), theme.cursor_linear());
         }
-        // No CPU sample is **written**, and that is not a gap: `cpu_kare`
+        // No CPU sample is **written**, and that is not a gap: `cpu_frame`
         // measures `session.frame`'s lock wait and that work does not exist in
         // this frame. The microseconds of a `truncate` + `push_caret` in the
         // same column would pull the p95 down — the same ban as the "fake
@@ -1600,13 +1600,13 @@ impl Core {
         // too, so `record_gpu` **sees** these frames. The poll also feeds
         // `FailureStreak`; exempting motion frames from it would hide draw
         // errors, so the split is not deliberate but **structural**. Its
-        // consequence is a measurement scope item: `ornek=` and `gpu_ornek=`
+        // consequence is a measurement scope item: `samples=` and `gpu_samples=`
         // count different frame populations (the GPU's includes motion
         // frames) and the two columns' p95 cannot be compared directly in a
         // run where the cursor glides. The item is written in
         // `docs/OLCUMLER.md` → `## Yöntem`.
         match self.draw(texture, theme.background_linear(), frame) {
-            // A motion frame is a frame that **leaves** too: `sessiz=` should
+            // A motion frame is a frame that **leaves** too: `quiet=` should
             // measure the tail after settling, not the moment the animation
             // started. The offset is published here too — this arm is the
             // only place refreshing the mouse mapping during slide frames.
@@ -1755,7 +1755,7 @@ impl Core {
     /// - **Content flavour** — if there is a duration counter to advance
     ///   (`Cursor::next_tick`) it is asked through [`Waker::wake`], and
     ///   planting the damage flag is **right**: what the grid draws really
-    ///   changes, so counting `icerik=` is in place.
+    ///   changes, so counting `content=` is in place.
     /// - **Motion flavour** — blink's phase change through [`Waker::resume`],
     ///   **without** planting damage: the grid does not change, only the
     ///   caret's alpha. The ban on motion protected the opposite (a motion
@@ -1786,7 +1786,7 @@ impl Core {
         let poll = self.renderer.in_flight().then_some(now + POLL_DELAY);
         // **Three deadlines, one wakeup.** Whichever is due first is armed and
         // decides the flavour: the content tick plants damage (counting
-        // `icerik=` is right, the grid really changes), blink and the poll do
+        // `content=` is right, the grid really changes), blink and the poll do
         // not (only the caret's alpha changes / nothing is drawn). Armed
         // separately, since `after` cannot be cancelled, one would void the
         // other's generation.
@@ -2098,41 +2098,41 @@ impl DisplayLink {
 
     /// The number of frames asked for during the run — asked for, not drawn.
     ///
-    /// The report prints this as the `istek=` token; its difference from
-    /// `kare` is the requests merged and dying at the gate (see
+    /// The report prints this as the `requests=` token; its difference from
+    /// `frames` is the requests merged and dying at the gate (see
     /// `WakerInner::requests`).
     pub fn requests(&self) -> u64 {
         self.waker.requests()
     }
 
     /// The zero-frames-at-idle gate's operand: content frames **decided** to
-    /// be drawn. The report prints this as the `icerik=` token.
+    /// be drawn. The report prints this as the `content=` token.
     ///
-    /// **No order relation** to `kare`, and mixing them up means misreading
+    /// **No order relation** to `frames`, and mixing them up means misreading
     /// the gate: a motion frame submits a frame too, so it is written to
-    /// `kare` and not here ([`Self::motion_frames`]). The measured healthy
-    /// smoke run had `kare` 27–30 while `icerik` was 2–3 (`docs/OLCUMLER.md` →
+    /// `frames` and not here ([`Self::motion_frames`]). The measured healthy
+    /// smoke run had `frames` 27–30 while `content` was 2–3 (`docs/OLCUMLER.md` →
     /// `## Boşta kare`); most of the difference is the cursor glide, the rest
     /// frames that could not be encoded and frames left in flight. The reader
     /// of a red run uses this too: all three high means damage flowing, only
-    /// `kare` high means an animation not settling.
+    /// `frames` high means an animation not settling.
     pub fn content_frames(&self) -> u64 {
         self.core.content_frames.get()
     }
 
     /// Frames drawn because the **cursor** animation had not settled — the
-    /// `hareket=` token. A pure cursor witness since 011: frames drawn only
-    /// for the slide are counted by `kayma=` and this counter does not see
+    /// `motion=` token. A pure cursor witness since 011: frames drawn only
+    /// for the slide are counted by `slide=` and this counter does not see
     /// them.
     ///
     /// The smoke gate's **required** counter: the recipe has a cursor move
     /// (`bt_core::smoke_shell`), so zero means "the animation never ran". It
-    /// does not enter `icerik=`, and that is the gate itself (008 Karar 2).
+    /// does not enter `content=`, and that is the gate itself (008 Karar 2).
     pub fn motion_frames(&self) -> u64 {
         self.core.motion_frames.get()
     }
 
-    /// Frames drawn because the **slide** had not settled — the `kayma=`
+    /// Frames drawn because the **slide** had not settled — the `slide=`
     /// token.
     ///
     /// [`Self::motion_frames`]' sibling, not its summand: both can rise in
@@ -2160,7 +2160,7 @@ impl DisplayLink {
         self.core.motion.get().settled() && self.core.glyph_fx.borrow().is_empty()
     }
 
-    /// Time since the last drawn frame — the `sessiz=` token. `None` → no
+    /// Time since the last drawn frame — the `quiet=` token. `None` → no
     /// frame drawn.
     ///
     /// **The run's one clock read.** On the frame path the stamp is a field
@@ -2171,7 +2171,7 @@ impl DisplayLink {
     /// **What it measures between:** the stamp is the frame's *target
     /// presentation* time, i.e. a point in the future. If the deadline falls
     /// within one refresh of the last frame the difference is negative; the
-    /// value saturates to zero. The reader should read `sessiz=0.00ms` as
+    /// value saturates to zero. The reader should read `quiet=0.00ms` as
     /// "frames were flowing at the deadline", not "drawn exactly then".
     ///
     /// **The gate's most sensitive layer** and evaluated outside `bt-gpu`: the
@@ -2192,7 +2192,7 @@ impl DisplayLink {
 
     /// Waits (bounded) for the frames still in flight and counts them — the
     /// pending poll at shutdown, which comes **before** the report reads
-    /// `kare=` (Karar 6). The link is already stopped: no tick would count
+    /// `frames=` (Karar 6). The link is already stopped: no tick would count
     /// them otherwise.
     pub fn drain(&self) {
         self.core.renderer.wait_in_flight(DRAIN_TIMEOUT);

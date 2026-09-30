@@ -449,7 +449,7 @@ fn a_selection_run_paints_between_the_ground_and_the_glyph() {
     assert_eq!(
         frame.bg_count(),
         1,
-        "the run must not enter the `hucre=` counter"
+        "the run must not enter the `cells=` counter"
     );
 
     let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
@@ -854,7 +854,7 @@ fn content_sticks_to_the_bottom_for_glyphs() {
     // The twin of its sibling for the `cell` pipeline and **this set's real risk**: the two
     // pipelines are separate `setRenderPipelineState` calls and separate shader pairs, so one
     // being offset while the other is not is a representable state — and moreover a state that
-    // leaves `make hepsi` green. A single-line `setViewport` shifts both; this test binds that
+    // leaves `make check` green. A single-line `setViewport` shifts both; this test binds that
     // to the code, not to a comment sentence.
     //
     // The glyph size is **not** tied to the atlas's cell: what is asked is the quad's
@@ -1396,7 +1396,7 @@ fn the_dock_draws_glyphs_and_its_own_caret() {
     // the fragment's `[[position]]`, and that coordinate is **after** the viewport transform,
     // while the dock lists are dock-local — `Frame::dock_caret(origin_y)` joins the two. Had
     // the shift been forgotten, the letter under the caret would be painted in the ground color
-    // **in the grid**, on a row above the dock: a defect that leaves `make hepsi` green and is
+    // **in the grid**, on a row above the dock: a defect that leaves `make check` green and is
     // noticed by eye as "a cell became invisible".
     let r = renderer();
     const EDGE: usize = 64;
@@ -1519,7 +1519,7 @@ fn an_upload_button_paints_a_fill_and_a_brighter_edge_in_the_dock() {
 
 #[test]
 fn glyph_differs_from_cell_background() {
-    // `make duman`'s `glif=G` token is a CPU counter: it would print G > 0 even if the atlas
+    // `make smoke`'s `glyphs=G` token is a CPU counter: it would print G > 0 even if the atlas
     // were empty and the glyph pipeline never drew. This is the place that proves the GPU side
     // — and **no exact byte is looked for**: the inside of the cell is NOT uniform with its
     // background, that is all. Had bytes been looked for, the gate would be held hostage to the
@@ -1722,7 +1722,7 @@ fn sgr58_color_differs_from_foreground() {
     //
     // The comparison is in `u16`: with `u8`, a light clear color (or a green/blue rule) would
     // overflow at `+ 64` and the test would die with "attempt to add with overflow" instead of
-    // an assert pointing at the wrong pixel — `make hepsi` runs the tests in debug.
+    // an assert pointing at the wrong pixel — `make check` runs the tests in debug.
     assert!(
         colored
             .iter()
@@ -1734,7 +1734,7 @@ fn sgr58_color_differs_from_foreground() {
 #[test]
 fn bold_and_regular_draw_differently() {
     // The `(bold, italic)` → `Face` translation is `bt-gpu`'s single place and no counter can
-    // see a state that silently returns `Face::Regular`: `glif=G` is the same, `bt-core`'s flag
+    // see a state that silently returns `Face::Regular`: `glyphs=G` is the same, `bt-core`'s flag
     // is the same, the atlas still hands out the slot. The same character yielding two
     // different pixel sets in two faces is the only proof.
     //
