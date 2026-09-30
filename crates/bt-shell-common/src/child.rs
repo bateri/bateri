@@ -22,6 +22,8 @@
 use std::ffi::{CStr, OsString};
 use std::path::{Path, PathBuf};
 
+pub use crate::jobs::ShellParent;
+
 /// The shell's starting directory: the user's home directory — on **every** launch, `cargo
 /// run` included (same as alacritty and Terminal.app). "Home directory only if `/` comes in"
 /// was rejected: the rule would have two branches (`discussion.md` → Karar 6 eki).
@@ -90,11 +92,14 @@ pub fn locale_env(system: Option<(String, String)>) -> Option<(String, String)> 
 /// would also lock the character class of a user who changes only `LANG` in their rc. User
 /// decision (`discussion.md` → Karar 6 eki, son madde).
 ///
-/// Whether `en_US.UTF-8` is installed is **not asked**: `bt-shell` builds only on macOS and
-/// that locale ships with the system (`/usr/share/locale` is on the read-only system volume).
-/// A last resort of "if that is missing too, `LC_CTYPE=UTF-8`" would be a branch that never
-/// runs. The two share the same character class file anyway: `en_US.UTF-8/LC_CTYPE` →
-/// `../C.UTF-8/LC_CTYPE`, which is the same inode as `UTF-8/LC_CTYPE`.
+/// Whether `en_US.UTF-8` is installed is **not asked**: on macOS that locale ships with the
+/// system (`/usr/share/locale` is on the read-only system volume). A last resort of "if that
+/// is missing too, `LC_CTYPE=UTF-8`" would be a branch that never runs. The two share the
+/// same character class file anyway: `en_US.UTF-8/LC_CTYPE` → `../C.UTF-8/LC_CTYPE`, which is
+/// the same inode as `UTF-8/LC_CTYPE`.
+///
+/// **On Linux** there is no system pair (`system` is `None`): the session's environment
+/// normally carries `LANG`, and without it the same `en_US.UTF-8` fallback applies.
 fn decide_locale(
     env: impl Fn(&str) -> Option<OsString>,
     system: Option<(String, String)>,
@@ -114,6 +119,10 @@ fn decide_locale(
 }
 
 /// Whether the locale is installed: does the `/usr/share/locale/{name}` directory exist.
+///
+/// macOS's layout. On Linux `/usr/share/locale` holds message catalogues, not locales
+/// (those are compiled into `locale-archive`), so the answer would be wrong there — but the
+/// branch does not run on Linux: without a system pair [`decide_locale`] never asks.
 ///
 /// **Not tested** with `setlocale`: that changes our own process's global locale. A name
 /// carrying `/` is rejected, so it cannot escape the directory.
@@ -201,6 +210,40 @@ fn passwd_field(pick: impl Fn(&libc::passwd) -> *mut std::ffi::c_char) -> Option
     value.to_str().ok().map(str::to_owned)
 }
 
+/// The command that spawns an untimed session's shell and the shell's position
+/// relative to the PTY child — **from one call**, because the process table
+/// (`jobs::foreground`) reads the command's shape through the parent: a Linux
+/// shell recorded as `Login` would make the shell's first child count as the
+/// shell.
+///
+/// - **macOS:** [`login_command`] + [`ShellParent::Login`]; an unresolvable
+///   user or shell gives `None`, and alacritty's own macOS path is `login(1)`
+///   too, so the parent stays `Login`.
+/// - **Linux:** `$SHELL -l` (passwd if `$SHELL` is missing) +
+///   [`ShellParent::Direct`]. **Not** alacritty parity — 0.26.0 spawns the
+///   shell without arguments outside macOS — but the same startup-file chain as
+///   the login session on macOS (043 Karar 1). An unresolvable shell gives
+///   `None`, and alacritty's own Linux path spawns the shell directly, so the
+///   parent stays `Direct`.
+pub fn shell_command() -> (Option<(String, Vec<String>)>, ShellParent) {
+    #[cfg(target_os = "macos")]
+    {
+        (login_command(), ShellParent::Login)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (login_shell_command(shell()), ShellParent::Direct)
+    }
+}
+
+/// The **pure** half of [`shell_command`]'s Linux branch: the resolved shell
+/// with `-l`; `None` if there is no shell or its path is not UTF-8 (the other
+/// side of the boundary wants a `String`).
+#[cfg(not(target_os = "macos"))]
+fn login_shell_command(shell: Option<PathBuf>) -> Option<(String, Vec<String>)> {
+    Some((shell?.to_str()?.to_owned(), vec!["-l".to_owned()]))
+}
+
 /// The command that spawns the shell on macOS — the **`-q`** counterpart of alacritty's
 /// `default_shell_command`; `None` → alacritty's own path.
 ///
@@ -225,7 +268,7 @@ fn passwd_field(pick: impl Fn(&libc::passwd) -> *mut std::ffi::c_char) -> Option
 /// building the command halfway and handing it over anyway — meant a terminal that does not
 /// open.
 #[cfg(target_os = "macos")]
-pub fn login_command() -> Option<(String, Vec<String>)> {
+fn login_command() -> Option<(String, Vec<String>)> {
     login_command_from(shell(), std::env::var("USER").ok().or_else(passwd_name))
 }
 
@@ -284,6 +327,10 @@ pub fn is_zsh(shell: &Path) -> bool {
 /// the path we run most (009 Karar 4). In release that branch is not compiled at all — the
 /// shipped binary falling back to a path on a development machine would tie the product to
 /// that machine.
+///
+/// **Known limit (Linux):** there is no bundle, so a Linux release build finds no script and
+/// the integration is not installed; where a Linux package puts the script is the packaging
+/// set's question (043 plan → Kapsam Dışı). The repo branch works on both platforms.
 pub fn zsh_wrapper_dir() -> Option<PathBuf> {
     bundle_shell_dir()
         .and_then(wrapper_dir)
@@ -450,6 +497,42 @@ mod tests {
         // `String`, and guessing would mean spawning the wrong shell.
         let raw = PathBuf::from(OsString::from_vec(vec![0x2f, 0x62, 0xff]));
         assert!(login_command_from(Some(raw), Some("someone".into())).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_shell_command_on_macos_is_login_with_a_login_parent() {
+        // The pin on the macOS branch: the test process has `$USER` and `$SHELL` (or a
+        // passwd entry), so the command resolves, goes through `login(1)`, and comes with
+        // the parent the process table needs for it.
+        let (command, parent) = shell_command();
+        assert_eq!(parent, ShellParent::Login);
+        let (program, args) = command.expect("login command did not resolve");
+        assert_eq!(program, "/usr/bin/login");
+        assert_eq!(args[0], "-qflp");
+        // Tests run in a debug build: the repo branch of the wrapper resolves.
+        assert!(zsh_wrapper_dir().is_some(), "wrapper not found in debug");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_shell_command_on_linux_is_a_direct_login_shell() {
+        let (command, parent) = shell_command();
+        assert_eq!(parent, ShellParent::Direct);
+        let (program, args) = command.expect("shell did not resolve");
+        assert!(
+            program.starts_with('/'),
+            "shell path is not absolute: {program}"
+        );
+        assert_eq!(args, vec!["-l".to_owned()]);
+        // The pure half: an unresolved or non-UTF-8 shell falls back to alacritty's path.
+        assert_eq!(
+            login_shell_command(Some("/bin/zsh".into())),
+            Some(("/bin/zsh".to_owned(), vec!["-l".to_owned()]))
+        );
+        assert_eq!(login_shell_command(None), None);
+        let raw = PathBuf::from(OsString::from_vec(vec![0x2f, 0x62, 0xff]));
+        assert_eq!(login_shell_command(Some(raw)), None);
     }
 
     #[test]
@@ -777,7 +860,8 @@ mod tests {
                         ("HOME".to_owned(), home.display().to_string()),
                         ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
                         // zsh counts a multibyte character as a single
-                        // character only in a UTF-8 locale.
+                        // character only in a UTF-8 locale (installed in
+                        // `make linux`'s image too: `tools/linux/Dockerfile`).
                         ("LANG".to_owned(), "en_US.UTF-8".to_owned()),
                     ]),
                     cols,
@@ -945,7 +1029,8 @@ mod tests {
         //    fixed, the user's history is written into the app's bundle, their own file
         //    freezes and no warning appears anywhere. This is the only place the test sees it
         //    — the defect really happened in the first draft and left its trace as
-        //    `assets/shell/zsh/.zsh_history`.
+        //    `assets/shell/zsh/.zsh_history`. Debian's system zshrc sets no history,
+        //    so `make linux`'s image appends macOS's lines (`tools/linux/Dockerfile`).
         let root = TempRoot::new("shell-wrapper");
         let home = root.0.join("home");
         let cfg = home.join("cfg");

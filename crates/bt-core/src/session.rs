@@ -656,7 +656,7 @@ pub struct SessionOptions {
     /// gerekçeleri ayrı: süreli koşu sonucun kullanıcının rc dosyasına bağlı
     /// olmasını istemiyor (`smoke_shell`/`load_shell`), sınamalar aynı sebeple,
     /// normal oturum ise `login`'e `-q` geçirebilmek için komutu **kendi**
-    /// kuruyor (`bt_shell::child::login_command`; `Last login:` banner'ı
+    /// kuruyor (`bt_shell_common::child::shell_command`; `Last login:` banner'ı
     /// ızgaraya düşmesin diye). `None` o üçüncünün kullanıcı ya da kabuk
     /// çözülemediğinde düştüğü geri yol — banner döner, oturum çalışır.
     pub command: Option<(String, Vec<String>)>,

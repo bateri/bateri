@@ -60,7 +60,7 @@ use objc2_quartz_core::CAMetalLayer;
 
 use crate::app::{self, Grid, split_into_grid};
 use crate::clipboard::{self, PendingCopy};
-use crate::jobs::{self, Foreground, Libproc, Probe, ShellParent};
+use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::quote;
@@ -1237,18 +1237,15 @@ impl TerminalPane {
         // Dallanma **yükü** soruyor, süreyi değil: aynı `Run` hem
         // deadline'ı hem bekçiyi kuruyor ve yük onlardan bağımsız.
         //
-        // Süresiz oturumda komut artık **`None` değil**: kabuğu
-        // alacritty'nin yolundan birebir ama `-q` ile doğuruyoruz,
-        // yani `login(1)`'in `Last login:` banner'ı ızgaraya hiç
-        // düşmüyor ([`child::login_command`]). Kullanıcı ya da kabuk
-        // çözülemezse `None`'a düşüyor ve eski yol geri geliyor.
-        //
-        // Kabuğun yeri komutla **aynı** dalda kararlaşıyor, ayrı bir
-        // sorudan türetilmiyor: `login` yolu (`login_command` ya da `None`,
-        // alacritty'nin macOS yolu da `login`) ile süreli koşunun doğrudan
-        // betikleri ancak böyle ayrışamaz.
+        // An untimed session's command and the shell's parent come from
+        // one call ([`child::shell_command`]): on macOS `login(1)` with
+        // `-q`, so its `Last login:` banner never lands on the grid (an
+        // unresolved user or shell falls back to `None`, alacritty's own
+        // `login` path). The timed run's scripts are the shell itself, so
+        // they are `Direct`; deciding the parent in the same branch as the
+        // command is what keeps the two from disagreeing.
         let (command, shell_parent) = match self.ivars().run {
-            None => (child::login_command(), ShellParent::Login),
+            None => child::shell_command(),
             Some(run) => (
                 Some(match run.workload {
                     Workload::Smoke => smoke_shell(),
@@ -1640,7 +1637,7 @@ impl TerminalPane {
         if !session.reader_alive() {
             return Foreground::Idle;
         }
-        jobs::foreground(parent, session.child_pid(), &Libproc)
+        jobs::foreground(parent, session.child_pid(), &SystemTable)
     }
 
     /// Uzak oturum yoklaması (036 Karar 2): koşan komutun neslini alır, ön
@@ -1665,7 +1662,7 @@ impl TerminalPane {
         let Some(command) = session.running_command() else {
             return settled;
         };
-        match jobs::remote(parent, session.child_pid(), &Libproc) {
+        match jobs::remote(parent, session.child_pid(), &SystemTable) {
             Probe::Undecided => RemoteProbeOutcome {
                 undecided: true,
                 changed: false,

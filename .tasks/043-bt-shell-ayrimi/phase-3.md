@@ -59,9 +59,36 @@ Notları'na ve gerekçesiyle koda, sınamayı `cfg(macos)`'a çekmek değil.
 
 ## Checklist
 
-- [ ] `Procfs` ve takma ad
-- [ ] `shell_command` ve `pane.rs`'in ebeveyni
-- [ ] Test: `cfg(macos)` sabitleyici sınama
-- [ ] Test: Linux'ta `Procfs` gerçek PTY ve `-l` argv
-- [ ] `make linux` += `bt-shell-common`, `proje.md` satırı
-- [ ] Doğrulama geçti (`make hepsi` + `make linux`)
+- [x] `Procfs` ve takma ad
+- [x] `shell_command` ve `pane.rs`'in ebeveyni
+- [x] Test: `cfg(macos)` sabitleyici sınama
+- [x] Test: Linux'ta `Procfs` gerçek PTY ve `-l` argv
+- [x] `make linux` += `bt-shell-common`, `proje.md` satırı
+- [x] Doğrulama geçti (`make hepsi` + `make linux`; `make duman` de yeşil)
+
+## Uygulama Notları
+
+- **`upload.rs` değişti (phase metni "beklenmiyor" diyordu):** `make linux`
+  yerel `tar c`'nin bayraklarının bsdtar'a özgü olduğunu gösterdi — GNU tar
+  `--no-mac-metadata`'yı tanımıyor, iki sınama düştü. Bayraklar ürün çağrısı
+  ile sınamanın `tar_of`'unun paylaştığı tek `cfg`'li sabite çıktı
+  (`LOCAL_TAR_FLAGS`): macOS'ta bayt bayt aynı, Linux'ta `--no-mac-metadata`
+  yerine `--format=pax` (GNU'nun varsayılan `gnu` biçimi `@LongLink` yazar,
+  `TarWatcher` pax ailesini okuyor). Linux'ta uçtan uca ssh yolu winit MVP'nin.
+- **İmaja iki ortam parçası (riskin çaresi, phase'in öngördüğü "imajda
+  ortam"):** `locales` + `en_US.UTF-8` (emoji sarma sınaması `LANG`'ı o adla
+  sabitliyor; imajda yalnız `C.UTF-8` vardı, zsh `👍🏽`'yi 8 bayt sayıyordu) ve
+  sistem `zshrc`'sine macOS `/etc/zshrc`'sinin üç geçmiş satırı (`HISTFILE`,
+  `HISTSIZE`, `SAVEHIST`; Debian hiçbirini kurmuyor, sarmalayıcı sınamasının
+  beşinci iddiası tetiksiz kalıyordu). Gerekçe Dockerfile'da ve sınamanın
+  yorumunda. Debian'ın kendi `zle-line-init`'i sınamaları düşürmedi.
+- **`SystemTable` bir `type` değil yeniden adlandıran `pub use`:** gövdeler
+  birim struct ve çağıran değeri kullanıyor (`&SystemTable`); `type` takma
+  adı değer isim alanına girmiyor.
+- `login_command` artık `child`'ın içinde özel (tek çağıranı `shell_command`);
+  `ShellParent` `child`'dan da yeniden ihraç ediliyor.
+- `parse_stat` saf ve sınaması iki platformda koşuyor; iki gerçek süreç tablosu
+  sınamasının (`the_process_table_reads_a_real_argv`,
+  `…_sees_a_real_foreground_job`) `cfg(macos)`'u kalktı, adları aynı.
+- Dockerfile başlığı ve dokunulan yorumları İngilizceye çevrildi.
+

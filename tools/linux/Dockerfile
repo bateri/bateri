@@ -1,17 +1,18 @@
-# `make linux`'un imajı: bt-core'u, bt-atlas'ı ve bt-gpu'yu Linux'ta derleyip
-# sınamak için tek tarif.
+# The image of `make linux`: the single recipe for building and testing
+# bt-core, bt-atlas, bt-gpu and bt-shell-common on Linux.
 #
-# Taban etiketinin major.minor'ü yerel rustc'yle AYNI olmak zorunda — `make
-# linux` önce bunu karşılaştırıyor ve uyuşmazlıkta kırmızı düşüyor: iki farklı
-# derleyicinin clippy'si iki farklı kapı demek (Homebrew rustc pin'li değil,
-# `brew upgrade` sonrası bu satır da güncellenir). Etiketi Makefile buradan
-# okuyor; sürüm yalnız bu satırda yaşıyor.
+# The base tag's major.minor MUST match the local rustc — `make linux`
+# compares the two first and fails red on a mismatch: two compilers' clippy
+# are two different gates (Homebrew's rustc is not pinned; after `brew
+# upgrade` this line is updated too). The Makefile reads the tag from here;
+# the version lives only on this line.
 FROM rust:1.88-bookworm
 
-# zsh: bt-core'un ayna sınamaları gerçek bir zsh koşturuyor. LANG: imajın
-# varsayılanı C yereli ve zsh orada çok baytlı karakteri tanımıyor — ASCII
-# olmayan harf aynada `??` çıkıyor ve üç ayna sınaması ortam yüzünden düşüyor
-# (ölçüm `.tasks/040-linux-kapisi-ve-wgpu/context.md` → Kanıt).
+# zsh: bt-core's mirror tests and bt-shell-common's `child`/`jobs` tests run a
+# real zsh. LANG: the image defaults to the C locale, where zsh does not
+# recognise multibyte characters — a non-ASCII letter comes out as `??` in the
+# mirror and three mirror tests fail because of the environment (measured,
+# `.tasks/040-linux-kapisi-ve-wgpu/context.md` → Kanıt).
 #
 # The font stack of bt-atlas's Linux backend (042 Karar 5, 8; user-approved
 # packages, record in `.tasks/042-font-sistemi-linux/phase-4.md`):
@@ -37,7 +38,27 @@ RUN apt-get update \
     && dpkg --compare-versions "$(pkg-config --modversion freetype2)" ge 24.3.18
 ENV LANG=C.UTF-8
 
-# clippy derleyicinin kendi sürümünden gelsin; imajda zaten varsa no-op.
+# bt-shell-common's real-zsh tests (043 phase-3) need two pieces of macOS's
+# environment that Debian lacks:
+# - locales + en_US.UTF-8: the emoji wrap test pins `LANG=en_US.UTF-8` (the
+#   name `child::decide_locale` writes); the image only has C.UTF-8, and zsh in
+#   an unknown locale counts `👍🏽` as 8 bytes, so the mirror never matches.
+# - History in the system zshrc: macOS's `/etc/zshrc` sets
+#   `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` (with `HISTSIZE`/`SAVEHIST`)
+#   before the user's files, and the wrapper test's fifth claim is that the
+#   wrapper moves it out of its own directory and history is written to the
+#   user's. Debian sets none of the three (and zsh saves nothing with
+#   `SAVEHIST=0`), so without macOS's three lines the claim has no trigger.
+#   They reproduce the test's precondition, not a product setting.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends locales \
+    && rm -rf /var/lib/apt/lists/* \
+    && sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
+    && locale-gen \
+    && printf '%s\n' 'HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history' 'HISTSIZE=2000' \
+        'SAVEHIST=1000' >> /etc/zsh/zshrc
+
+# clippy from the compiler's own release; a no-op if the image already has it.
 RUN rustup component add clippy
 
 WORKDIR /w
