@@ -31,9 +31,21 @@ _Requirements: R1.1_
 
 ## Checklist
 
-- [ ] Envanter: ASCII × dört yüz, küçük sınıf, yedek, küçültülen yedek (`⧉`),
+- [x] Envanter: ASCII × dört yüz, küçük sınıf, yedek, küçültülen yedek (`⧉`),
       geniş karakter, emoji, küme, yordamsal aile, kurallar, tofu, olmayan ve
       orantılı aile; 13/16 pt × @1x/@2x × iki satır aralığı
-- [ ] Özet kod içinde, sürümden bağımsız
-- [ ] Test: iki ardışık koşunun çıktısı aynı
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] Özet kod içinde, sürümden bağımsız
+- [x] Test: iki ardışık koşunun çıktısı aynı
+- [x] Doğrulama geçti (`make hepsi`)
+
+## Uygulama Notları
+
+- Determinizm sınamanın içinde de bekçili: aynı süreçte iki taze geçiş
+  eşit olmalı (`assert!`); iki ayrı süreç koşusunun `diff`'i de boş
+  (38 676 satır).
+- Her envanter grubu **taze bir atlasta**: bir gruptaki kapasite etkisi
+  başka grubun yuva numaralarını kaydırmasın, fark kendi grubunda kalsın.
+- Karşılaştırma yöntemine dosyayı ebeveyn worktree'ye **kopyalama** adımı
+  eklendi — ebeveyn tanıktan eski olabilir. Envantere `family_issue`,
+  `monospaced_families`, `slot_origin`, doluluk sayaçları ve tofu bitmap'i de
+  girdi (hepsi public API). Tanı metni İngilizce (042 dil kısıtı).

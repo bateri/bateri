@@ -83,7 +83,7 @@ yalnız macOS'ta ve yeni bağımlılık getirmiyor.
 
 | Phase | Durum |
 |-------|-------|
-| phase-0 | |
+| phase-0 | ✅ |
 | phase-1 | |
 | phase-2 | |
 | phase-3 | |
