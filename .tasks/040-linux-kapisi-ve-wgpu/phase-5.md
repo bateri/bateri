@@ -123,5 +123,6 @@ dosyadan çıkıyor.
 - [ ] Jeton değerleri (`unsupported`), `CLAUDE.md` satırları
 - [ ] Test: `make duman` yeşil, jetonlar aynı; gözle üç yüzey
 - [ ] `/measure` pencere yolu → `docs/OLCUMLER.md`; durak kuralı uygulandı
+- [ ] Metal pencere yolu tabanı `3c7a46e`'deki OLCUMLER bloğu (`cpu_encode_p95` 0,26–0,29 / `cpu_kare` 0,07–0,08 / gpu 0,25) — 28 Eylül tablosu değil (gürültülüydü, arada `123ae5d` ve `3c7a46e` regresyon düzeltmeleri girdi; kullanıcı notu, phase-3)
 - [ ] Doğrulama geçti (`make hepsi` + `make test-yaris` + `make shader` + `make duman`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi

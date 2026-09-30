@@ -39,6 +39,8 @@ mod glyph_fx;
 mod link;
 mod motion;
 mod renderer;
+// Slot resolution and fan-out shared by the Metal and wgpu renderers (040 phase-3).
+mod slots;
 mod stats;
 mod surface;
 // wgpu trial (040 phase-2): wgpu is a dev-dependency, the renderer sits behind

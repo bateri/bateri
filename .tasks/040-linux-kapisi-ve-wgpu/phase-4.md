@@ -89,5 +89,7 @@ tam bir kare.
 - [ ] GPU damgası `TIMESTAMP_QUERY` / `unsupported`
 - [ ] `render_offscreen` wgpu'ya; ikizler birleşti; Metal'e doğrudan inen sınamaların karşılığı
 - [ ] Kâhin sahne listesi tamam
+- [ ] `WgpuRenderer`'ın Metal `Renderer`'dan eksikleri (phase-3'ten devir): `set_font`/`font_notice`, `atlas_occupancy`/`color_atlas_occupancy`, `last_*_count` sayaçları — bugün yalnız varsayılan font; `atlas_occupancy_is_republished` ve `rebuilding_the_atlas_drops_both_textures` wgpu'da koşunca gerekiyor
+- [ ] `AtlasTexture`'ı elle kuran sınamalar (`a_wide_cell_becomes_two_quads`, `a_color_glyph_goes_to_the_color_list`, küme sınaması) `slots::glyph_lists`'e bir sınama `SlotUpload`'ıyla inmeli — Metal sökülünce onları taşıyan doku kalmıyor (phase-3'ten devir)
 - [ ] Doğrulama geçti (`make hepsi` + `make shader`)
 - [ ] Riskli phase: `/code-review` koştu, bulgular giderildi

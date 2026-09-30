@@ -1,0 +1,266 @@
+//! Slot resolution and fan-out: `GlyphCell`/`RuleCell` lists → atlas slots →
+//! `GlyphInstance` lists, **shared by both renderers** (040 phase-3).
+//!
+//! The Metal renderer and the wgpu renderer read the same output of this
+//! module; neither has a copy. What differs between them is only where a
+//! freshly allocated slot's bytes go, and that is the one method of
+//! [`SlotUpload`]: Metal writes with `replaceRegion`, wgpu with
+//! `Queue::write_texture`. Everything else — which slot a glyph takes, whether
+//! a wide glyph becomes one quad or two, which plane's list it lands in, the
+//! baked uv — is decided here, once.
+//!
+//! The colour plane's monotonic counter keeps its meaning (`CLAUDE.md` → "Renk
+//! ikinci bir düzlem"): uvs are baked at list-building time from the atlas's
+//! own slot origins, and both backends ask the same atlas.
+
+use bt_atlas::{Atlas, Face, Half, Metrics, Placed, Plane, SizeClass, Sprite};
+use bt_core::Clusters;
+
+use crate::frame::{GlyphCell, GlyphInstance, RuleCell};
+
+/// Where a freshly allocated slot's bytes are written: the backend's two
+/// plane textures.
+///
+/// Called **at allocation time**, inside [`Atlas::slot`]'s answer, and that is
+/// load-bearing for the colour plane: its texture is lazy and is created by
+/// the implementation on the first colour upload. Created a frame earlier,
+/// the question "which character is colour" would need a second cascade walk;
+/// a frame later, this slot would enter the atlas's cache unwritten and the
+/// emoji would stay invisible **for good**.
+pub(crate) trait SlotUpload {
+    /// Writes one full slot at `origin` into `plane`'s texture. `bytes` is
+    /// exactly [`slot_layout`]'s length. An implementation that cannot get the
+    /// colour texture skips the write (the emoji is not drawn; no panic).
+    fn upload(&mut self, plane: Plane, origin: (u16, u16), metrics: Metrics, bytes: &[u8]);
+}
+
+/// A slot's byte length and row pitch for `plane`: mask `w*h` / `w`, colour
+/// `4*w*h` / `4*w`.
+///
+/// One copy for both backends: Metal's `bytesPerRow` and wgpu's
+/// `bytes_per_row` come from here, and if they drifted from the buffer the
+/// GPU would read past a short buffer — silently. The lengths come from
+/// `bt-atlas` (`slot_bytes`/`slot_bytes_rgba`), the slot geometry's single
+/// owner.
+pub(crate) fn slot_layout(metrics: Metrics, plane: Plane) -> (usize, usize) {
+    let w = usize::from(metrics.cell_px.0);
+    match plane {
+        Plane::Mask => (metrics.slot_bytes(), w),
+        Plane::Color => (metrics.slot_bytes_rgba(), w * 4),
+    }
+}
+
+/// Fills the frame's glyph lists: glyphs **and** rules into `mask` (one list,
+/// one draw call: glyphs first, rules after — a strikeout must cross **over**
+/// its letter), colour glyphs into `color`. Both lists are cleared first.
+///
+/// The caller owns the lists so that their capacity survives from frame to
+/// frame: no allocation in the steady state.
+#[allow(clippy::too_many_arguments)] // two out-lists + the upload sink; a struct would only rename them
+pub(crate) fn glyph_lists(
+    atlas: &mut Atlas,
+    upload: &mut impl SlotUpload,
+    glyphs: &[GlyphCell],
+    clusters: &Clusters,
+    rules: &[RuleCell],
+    mask: &mut Vec<GlyphInstance>,
+    color: &mut Vec<GlyphInstance>,
+) {
+    let metrics = atlas.metrics();
+    let (tw, th) = atlas.texture_px();
+    mask.clear();
+    color.clear();
+    // `clear` keeps the capacity, so the steady state does not allocate;
+    // `reserve` only flattens the frame where capacity is exceeded **for the
+    // first time** (underlining a block of text makes glyph + rule jump) —
+    // one growth instead of several copies mid-loop.
+    mask.reserve(glyphs.len() + rules.len());
+    // The texture size is loop-invariant: invert once and multiply, instead
+    // of two f32 divisions per sprite.
+    let inv = (1.0 / f32::from(tw), 1.0 / f32::from(th));
+    for glyph in glyphs {
+        // **The list is chosen by plane.** Emoji needs another pipeline,
+        // another texture and another fragment; mixed into one list, one draw
+        // call could not ask for two fragments.
+        for part in fan(atlas, upload, metrics, inv, glyph, clusters)
+            .into_iter()
+            .flatten()
+        {
+            let list = match part.plane {
+                Plane::Mask => &mut *mask,
+                Plane::Color => &mut *color,
+            };
+            list.push(GlyphInstance {
+                pos: part.pos,
+                uv0: part.uv0,
+                rgba: glyph.rgba,
+            });
+        }
+    }
+    for rule in rules {
+        let (uv0, _) = slot_uv(
+            atlas,
+            upload,
+            metrics,
+            inv,
+            SlotAsk {
+                sprite: Sprite::Rule(rule.kind),
+                // Rules are **always** `Face::Regular`: the line under bold
+                // text is not bold. `Atlas::slot` normalises this too; asking
+                // for the right face here keeps that normalisation a second
+                // line of defence, not the only one.
+                face: Face::Regular,
+                // Rules are always at display size: the context row has none,
+                // and `Atlas::slot` normalises this as well.
+                size: SizeClass::Normal,
+                // A rule is one cell by definition; same normalisation.
+                want: Half::Whole,
+            },
+        );
+        mask.push(GlyphInstance {
+            pos: rule.pos,
+            uv0,
+            rgba: rule.rgba,
+        });
+    }
+}
+
+/// Where a glyph lives in the texture: the quad's position, the slot's uv, its
+/// plane and which half of a wide glyph it is.
+pub(crate) struct Part {
+    pub(crate) pos: [f32; 2],
+    pub(crate) uv0: [f32; 2],
+    pub(crate) plane: Plane,
+    pub(crate) half: Half,
+}
+
+/// A glyph's slot — or a wide glyph's two halves: **the single body of the
+/// fan-out**.
+///
+/// **Here, not in `Frame::push`.** The reason is the borrow: whether a glyph
+/// takes one slot or two is decided by the ink gate, i.e. `Atlas::slot`, and
+/// `push` cannot borrow the atlas (why `GlyphCell` carries no uv: resolving in
+/// the sink would keep the borrow alive across `draw` and the first frame with
+/// a glyph would hit `BorrowMutError`). Here the atlas is already borrowed.
+///
+/// Every surface gets it for free: [`glyph_lists`] runs per list (stripes,
+/// grid, fill band, dock) and the typing effects fan out through here too.
+/// 017's lesson — a surface must earn everything derived from the grid on its
+/// own — is paid in one place.
+pub(crate) fn fan(
+    atlas: &mut Atlas,
+    upload: &mut impl SlotUpload,
+    metrics: Metrics,
+    inv: (f32, f32),
+    glyph: &GlyphCell,
+    clusters: &Clusters,
+) -> [Option<Part>; 2] {
+    let want = if glyph.wide { Half::Left } else { Half::Whole };
+    // **The cluster reaches the atlas here** (035 Karar 4B): interning needs
+    // the atlas's borrow and the sink cannot take it (023). Both halves come
+    // from the same sprite. Falling back to the base character is not written
+    // twice: an id missing from the table is `Char`, and a cluster that does
+    // not shape or fails the gate is `Atlas::slot`'s own answer.
+    let sprite = glyph
+        .cluster
+        .and_then(|id| clusters.get(id))
+        .map_or(Sprite::Char(glyph.ch), |text| atlas.intern(text));
+    let (uv0, placed) = slot_uv(
+        atlas,
+        upload,
+        metrics,
+        inv,
+        SlotAsk {
+            sprite,
+            face: glyph.face,
+            size: glyph.size,
+            want,
+        },
+    );
+    let first = Part {
+        pos: glyph.pos,
+        uv0,
+        plane: placed.plane,
+        half: placed.half,
+    };
+    // The second quad **only if the gate said two cells**. A character
+    // declared wide whose ink fits one cell (`☕`, fullwidth `！`) returns
+    // `Whole` and this never runs — otherwise an empty quad would land to its
+    // right. The grid already reserved two columns for it, so the neighbour is
+    // a spacer and yields no glyph.
+    if placed.half != Half::Left {
+        return [Some(first), None];
+    }
+    let (uv1, right) = slot_uv(
+        atlas,
+        upload,
+        metrics,
+        inv,
+        SlotAsk {
+            sprite,
+            face: glyph.face,
+            size: glyph.size,
+            want: Half::Right,
+        },
+    );
+    [
+        Some(first),
+        Some(Part {
+            pos: [glyph.pos[0] + f32::from(metrics.cell_px.0), glyph.pos[1]],
+            uv0: uv1,
+            plane: right.plane,
+            half: right.half,
+        }),
+    ]
+}
+
+/// The identity of the slot asked of the atlas — [`Atlas::slot`]'s four
+/// arguments, named as one thing: the atlas key in its request form.
+struct SlotAsk {
+    sprite: Sprite,
+    face: Face,
+    size: SizeClass,
+    /// The half the caller **wants**; the answer's half may differ (see
+    /// [`Half::Whole`]).
+    want: Half,
+}
+
+/// Resolves a sprite's slot, uploads it if it was just allocated and returns
+/// its uv0.
+///
+/// The **common body** of the glyph and rule loops; the two differ only in
+/// the sprite and face they ask for. Copied, the upload branch would live in
+/// two places, and an upload forgotten in one would mean "the slot exists but
+/// the texture is empty" — an invisible glyph no counter notices.
+///
+/// `Upload` already carries the origin — `bt-atlas` returns both in the same
+/// answer on purpose. Using it for a new slot drops a `%` + `/` pair per sprite
+/// and avoids stating the same fact twice; `slot_origin` is left to the cached
+/// and tofu paths. (`upload` borrows the atlas; consuming it in the `if let`
+/// ends the borrow so the atlas can be asked again.)
+fn slot_uv(
+    atlas: &mut Atlas,
+    upload: &mut impl SlotUpload,
+    metrics: Metrics,
+    inv: (f32, f32),
+    ask: SlotAsk,
+) -> ([f32; 2], Placed) {
+    let (placed, fresh) = atlas.slot(ask.sprite, ask.face, ask.size, ask.want);
+    let (x, y) = if let Some(fresh) = fresh {
+        // **The texture is chosen by plane, not by the caller**, and so is the
+        // row pitch ([`slot_layout`]).
+        upload.upload(fresh.plane, fresh.origin, metrics, fresh.bytes);
+        // **The pair's right half is uploaded in the same answer.** `bt-atlas`
+        // allocates both slots atomically and hands both byte runs together;
+        // skipped here, the right slot would stay unwritten and the
+        // character's right half would be drawn with a neighbour's bitmap — a
+        // silent corruption.
+        if let Some(right) = fresh.right {
+            upload.upload(fresh.plane, right, metrics, fresh.right_bytes);
+        }
+        fresh.origin
+    } else {
+        atlas.slot_origin(placed.slot)
+    };
+    ([f32::from(x) * inv.0, f32::from(y) * inv.1], placed)
+}

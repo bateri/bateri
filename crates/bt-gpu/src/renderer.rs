@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use block2::RcBlock;
-use bt_atlas::{Atlas, Face, FontIssue, Half, Metrics, Placed, Plane, SizeClass, Sprite, TOFU};
+use bt_atlas::{Atlas, FontIssue, Half, Metrics, Plane, TOFU};
 use bt_core::{Clusters, FontOptions, LinearRgba};
 use dispatch2::DispatchData;
 use objc2::rc::{Retained, autoreleasepool};
@@ -29,6 +29,7 @@ use objc2_quartz_core::CAMetalDrawable;
 use crate::frame::{
     CursorBlock, Frame, FxCell, FxInstance, GlyphCell, GlyphInstance, Instance, RuleCell,
 };
+use crate::slots::{self, SlotUpload};
 use crate::{GpuError, Surface};
 
 /// `addCompletedHandler:`e verilen blok; [`Renderer::completion`] kurar.
@@ -197,6 +198,27 @@ impl CellMetrics {
             gutter_px: gutter,
             rule_px: rule,
         })
+    }
+
+    /// The grid geometry of an atlas at `scale`: cell size, context-row step,
+    /// gutter and rule thickness — one copy for both renderers
+    /// ([`Renderer::cell_metrics`] and the wgpu renderer's twin).
+    pub(crate) fn from_atlas(metrics: Metrics, context_w: u16, scale: f64) -> Self {
+        let (w, h) = metrics.cell_px;
+        // `as u16` saturates: a NaN or negative scale gives a zero gutter (the
+        // grid starts at the edge; `split_into_grid` and mouse mapping both
+        // stay correct), a huge scale stops at 65535. Rounding need not match
+        // the cell's direction: the gutter is subtracted, not divided by, so a
+        // one-pixel wobble moves the gutter, not the grid.
+        let gutter = (Self::GUTTER_PT * scale).round() as u16;
+        // audit: `bt_atlas::Metrics.cell_px` is a bare `pub` field, so the
+        // ≥ 1 guarantee lives one crate away (`font::round_up` clamps to 1)
+        // and the type does not carry it. Building with a struct literal
+        // would leave that gap silent; `expect` turns it into a programming
+        // error. Not a panic path: PTY reading and parsing never pass here,
+        // this is the window-geometry path.
+        Self::new(w, h, context_w, gutter, metrics.underline_px.1)
+            .expect("bt-atlas clamps the cell size to 1")
     }
 
     /// (genişlik, yükseklik).
@@ -442,22 +464,7 @@ impl Renderer {
     /// tablosu (`CLAUDE.md`) değişmeden `CELL_PX` yer tutucusu ölebildi.
     pub fn cell_metrics(&self, scale: f64) -> CellMetrics {
         let (metrics, context_w) = self.sync_atlas(scale);
-        let (w, h) = metrics.cell_px;
-        // `as u16` doygun: NaN ve negatif ölçek sıfır pay verir (ızgara
-        // kenardan başlar, `split_into_grid` ile fare eşlemesi ikisi de doğru
-        // çalışır), dev ölçek 65535'te durur. Yuvarlama hücreninkiyle aynı
-        // yönde değil ama olması da gerekmiyor: pay bölen değil çıkan, bir
-        // piksel oynaması ızgarayı kaydırmaz, yalnız payı bir piksel
-        // değiştirir.
-        let gutter = (CellMetrics::GUTTER_PT * scale).round() as u16;
-        // audit: `bt_atlas::Metrics.cell_px` çıplak bir `pub` alan, yani ≥ 1
-        // garantisi bir crate ötede (`font::round_up` 1'e kırpar) ve tipin
-        // kendisi taşımıyor. Yapı gövdesiyle kurmak bu boşluğu sessiz
-        // bırakırdı; `expect` onu programlama hatasına çevirir. Panik yolu
-        // değil: PTY okuma ve ayrıştırma bu satırdan geçmez, burası
-        // pencere geometrisi yolu.
-        CellMetrics::new(w, h, context_w, gutter, metrics.underline_px.1)
-            .expect("bt-atlas hücre ölçüsünü 1'e kırpar")
+        CellMetrics::from_atlas(metrics, context_w, scale)
     }
 
     /// Atlasın yuva doluluğu: (kullanılan, toplam).
@@ -1653,91 +1660,26 @@ impl AtlasTexture {
         self.ensure_texture(device)?;
         // audit: `ensure_texture` `Ok` döndüyse dokuyu kurmuştur.
         let texture = self.texture.as_ref().expect("doku hemen üstte kuruldu");
-        let metrics = self.atlas.metrics();
-        let (tw, th) = self.atlas.texture_px();
-
-        self.instances.clear();
-        self.color_instances.clear();
-        // `clear` kapasiteyi koruyor, yani durağan hâlde ayırma yok; `reserve`
-        // yalnız kapasitenin **ilk kez** aşıldığı kareyi düzleştiriyor (bir
-        // blok metnin altı çizilince glyph + kural toplamı sıçrar) — iki
-        // döngünün ortasında birden çok kez büyüyüp kopyalamak yerine bir kez.
-        self.instances.reserve(glyphs.len() + rules.len());
-        // Doku boyutu döngü değişmezi: tersi bir kez alınıp çarpılıyor, yoksa
-        // sprite başına iki f32 bölmesi ödenirdi.
-        let inv = (1.0 / f32::from(tw), 1.0 / f32::from(th));
-        // **Tek liste, tek draw call: önce glyph'ler, sonra kurallar.** Sıra
-        // bilerek — üstü çizili harfin ÜSTÜNDEN geçmeli. İmleç sırası bedava
-        // geliyor: glyph geçişi zaten arka planlardan ve imleçten sonra
-        // kodlanıyor (`encode_pass`), yani kural da imlecin üstüne düşüyor.
-        for glyph in glyphs {
-            // **Yelpazeleme [`fan`]'da**, burada ve yazım efektlerinde
-            // ([`AtlasTexture::prepare_fx`]) aynı gövde.
-            //
-            // **Liste düzlemden seçiliyor.** Emoji başka bir pipeline, başka
-            // bir doku ve başka bir blend istiyor; aynı listeye karışsalardı
-            // tek draw call iki fragment'i birden isteyemezdi.
-            for part in fan(
-                &mut self.atlas,
-                texture,
-                &mut ColorPlane {
-                    slot: &mut self.color_texture,
-                    device,
-                    edge: (tw, th),
-                },
-                metrics,
-                inv,
-                glyph,
-                clusters,
-            )
-            .into_iter()
-            .flatten()
-            {
-                let list = match part.plane {
-                    Plane::Mask => &mut self.instances,
-                    Plane::Color => &mut self.color_instances,
-                };
-                list.push(GlyphInstance {
-                    pos: part.pos,
-                    uv0: part.uv0,
-                    rgba: glyph.rgba,
-                });
-            }
-        }
-        for rule in rules {
-            // Kurallar **her zaman** `Face::Regular`: kalın metnin altındaki
-            // çizgi kalın değildir. `Atlas::slot` bunu ayrıca normalize ediyor;
-            // burada da doğru yüzü sormak o normalizasyonu bir savunma
-            // katmanı olarak bırakıyor, tek dayanak yapmıyor.
-            let (uv0, _) = slot_uv(
-                &mut self.atlas,
-                texture,
-                &mut ColorPlane {
-                    slot: &mut self.color_texture,
-                    device,
-                    edge: (tw, th),
-                },
-                metrics,
-                inv,
-                SlotAsk {
-                    sprite: Sprite::Rule(rule.kind),
-                    face: Face::Regular,
-                    // Kurallar **her zaman** gösterim ölçüsünde: bağlam
-                    // satırında kural yok ve `Atlas::slot` bunu ayrıca
-                    // normalize ediyor.
-                    size: SizeClass::Normal,
-                    // Kural çizgisi tanımı gereği tek hücre; `Atlas::slot`
-                    // bunu da normalize ediyor ve burada doğru yarıyı sormak
-                    // o normalizasyonu savunma katmanı olarak bırakıyor.
-                    want: Half::Whole,
-                },
-            );
-            self.instances.push(GlyphInstance {
-                pos: rule.pos,
-                uv0,
-                rgba: rule.rgba,
-            });
-        }
+        let edge = self.atlas.texture_px();
+        // The fan-out and uv baking are shared with the wgpu renderer
+        // (`crate::slots`); only the upload target is Metal's.
+        let mut upload = MetalUpload {
+            mask: texture,
+            color: ColorPlane {
+                slot: &mut self.color_texture,
+                device,
+                edge,
+            },
+        };
+        slots::glyph_lists(
+            &mut self.atlas,
+            &mut upload,
+            glyphs,
+            clusters,
+            rules,
+            &mut self.instances,
+            &mut self.color_instances,
+        );
         Ok(())
     }
 
@@ -1766,7 +1708,7 @@ impl AtlasTexture {
 
     /// Yazım efektlerinin instance'larını kurar (030): yuva çözümü ve
     /// yelpazeleme [`AtlasTexture::prepare`]'inkiyle **aynı** gövdeden
-    /// ([`fan`]), ikinci bir kopya yok.
+    /// ([`slots::fan`]), ikinci bir kopya yok.
     ///
     /// Geniş glyph iki instance veriyor ve her biri **hangi yarı** olduğunu
     /// taşıyor: shader dönüşümün merkezini iki hücrelik kutudan alıyor, yoksa
@@ -1785,15 +1727,18 @@ impl AtlasTexture {
         let (tw, th) = self.atlas.texture_px();
         let inv = (1.0 / f32::from(tw), 1.0 / f32::from(th));
         self.fx_instances.clear();
+        let mut upload = MetalUpload {
+            mask: texture,
+            color: ColorPlane {
+                slot: &mut self.color_texture,
+                device,
+                edge: (tw, th),
+            },
+        };
         for cell in cells {
-            for part in fan(
+            for part in slots::fan(
                 &mut self.atlas,
-                texture,
-                &mut ColorPlane {
-                    slot: &mut self.color_texture,
-                    device,
-                    edge: (tw, th),
-                },
+                &mut upload,
                 metrics,
                 inv,
                 &cell.glyph,
@@ -1831,105 +1776,10 @@ impl AtlasTexture {
     }
 }
 
-/// Bir glyph'in dokudaki yeri: dörtlünün konumu, yuvanın uv'si, düzlemi ve
-/// geniş glyph'in hangi yarısı olduğu.
-struct Part {
-    pos: [f32; 2],
-    uv0: [f32; 2],
-    plane: Plane,
-    half: Half,
-}
-
-/// Bir glyph'in yuvası — ya da geniş glyph'in iki yarısı: **yelpazelemenin tek
-/// gövdesi**.
+/// Renk dokusunun tembel kurucusu — [`MetalUpload`]'ın ikinci alanı.
 ///
-/// **Burada, `Frame::push`'ta değil.** Gerekçe ödünç: "bir yuva mı iki mi"
-/// kararını mürekkep kapısı veriyor, yani `Atlas::slot` — ve `push` atlası
-/// ödünç alamıyor (`GlyphCell`'in uv'siz olmasının yazılı sebebi: sink'te
-/// çözüm ödüncü `draw` boyunca canlı tutar ve ilk glyph'li karede
-/// `BorrowMutError` verir). Burada atlas **zaten** ödünç alınmış ve `metrics`
-/// elde.
-///
-/// Dört yüzey bedavaya geliyor: [`AtlasTexture::prepare`] kare başına dört kez
-/// koşuyor (şeritler, ızgara, doldurma bandı, dock) ve yazım efektleri
-/// ([`AtlasTexture::prepare_fx`]) de buradan geçiyor. 017'nin dersi — bir
-/// yüzey ızgaradan türeyen her şeyi ayrıca kazanmak zorunda — tek yerde
-/// ödeniyor.
-fn fan(
-    atlas: &mut Atlas,
-    texture: &ProtocolObject<dyn MTLTexture>,
-    color: &mut ColorPlane<'_>,
-    metrics: Metrics,
-    inv: (f32, f32),
-    glyph: &GlyphCell,
-    clusters: &Clusters,
-) -> [Option<Part>; 2] {
-    let want = if glyph.wide { Half::Left } else { Half::Whole };
-    // **Küme burada atlasa iniyor** (035 Karar 4B): interning atlasın ödüncü
-    // gerektiriyor ve sink onu alamıyor (023). İki yarı aynı sprite'tan.
-    // Taban karaktere düşüş ikinci kez yazılmıyor: tabloda bulunamayan
-    // kimlik `Char`, şekillenmeyen ya da kapıdan dönen küme ise
-    // `Atlas::slot`'un kendi cevabı (taban karakter, R1.1).
-    let sprite = glyph
-        .cluster
-        .and_then(|id| clusters.get(id))
-        .map_or(Sprite::Char(glyph.ch), |text| atlas.intern(text));
-    let (uv0, placed) = slot_uv(
-        atlas,
-        texture,
-        color,
-        metrics,
-        inv,
-        SlotAsk {
-            sprite,
-            face: glyph.face,
-            size: glyph.size,
-            want,
-        },
-    );
-    let first = Part {
-        pos: glyph.pos,
-        uv0,
-        plane: placed.plane,
-        half: placed.half,
-    };
-    // İkinci dörtlü **yalnız kapı iki hücre dediyse**. Geniş ilan edilmiş ama
-    // mürekkebi bir hücreye sığan karakter (`☕`, fullwidth `！`) `Whole`
-    // dönüyor ve burası hiç koşmuyor — yoksa sağına boş bir dörtlü düşerdi.
-    // Izgara ona zaten iki sütun ayırdığı için komşu hücre spacer ve glyph
-    // vermiyor.
-    if placed.half != Half::Left {
-        return [Some(first), None];
-    }
-    let (uv1, right) = slot_uv(
-        atlas,
-        texture,
-        color,
-        metrics,
-        inv,
-        SlotAsk {
-            sprite,
-            face: glyph.face,
-            size: glyph.size,
-            want: Half::Right,
-        },
-    );
-    [
-        Some(first),
-        Some(Part {
-            pos: [glyph.pos[0] + f32::from(metrics.cell_px.0), glyph.pos[1]],
-            uv0: uv1,
-            plane: right.plane,
-            half: right.half,
-        }),
-    ]
-}
-
-/// Renk dokusunun tembel kurucusu — [`slot_uv`]'nin dördüncü argümanı.
-///
-/// Tip, üç şeyi tek argümanda taşıyor (doku yuvası, device ve kenar) çünkü
+/// Tip, üç şeyi tek alanda taşıyor (doku yuvası, device ve kenar) çünkü
 /// üçü tek bir işi yapıyor: "gerektiğinde renk dokusunu kur ve ver".
-/// Ayrı argümanlar olsaydı `slot_uv` yine `clippy`'nin sınırını aşardı.
 struct ColorPlane<'a> {
     slot: &'a mut Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     device: &'a ProtocolObject<dyn MTLDevice>,
@@ -1939,8 +1789,8 @@ struct ColorPlane<'a> {
 impl ColorPlane<'_> {
     /// Dokuyu (gerekirse kurup) verir; kurulum başarısızsa `None`.
     ///
-    /// Hata **yutuluyor** ve gerekçesi çağrı yeri: `slot_uv` kare yolunda ve
-    /// `Result` döndürmüyor. 4 MiB ayıramayan bir makinede zaten daha büyük
+    /// Hata **yutuluyor** ve gerekçesi çağrı yeri: `SlotUpload::upload` kare
+    /// yolunda ve `Result` döndürmüyor. 4 MiB ayıramayan bir makinede zaten daha büyük
     /// bir sorun var.
     ///
     /// **Bilinen sınır ve tam şekli** (set kapısı, `/code-review`): yuva
@@ -1991,81 +1841,26 @@ fn new_color_texture(
         .ok_or(GpuError::NoAtlasTexture)
 }
 
-/// Atlasa sorulan yuvanın kimliği — [`Atlas::slot`]'un dört argümanı.
-///
-/// Dördü tek tipte, çünkü [`slot_uv`]'nin argüman sayısı `clippy`'nin
-/// sınırını aşıyordu ve lint'i susturmak yanlış çare olurdu: bu dördü
-/// gerçekten **tek bir şeyi** adlandırıyor — atlas anahtarının istek hâli.
-struct SlotAsk {
-    sprite: Sprite,
-    face: Face,
-    size: SizeClass,
-    /// Çağıranın **istediği** yarı; cevabın yarısı bundan farklı olabilir
-    /// (bkz. [`Half::Whole`]).
-    want: Half,
+/// Metal's [`SlotUpload`]: `replaceRegion` into the mask texture, or into the
+/// colour texture, which [`ColorPlane`] creates on the first colour slot.
+struct MetalUpload<'a> {
+    mask: &'a ProtocolObject<dyn MTLTexture>,
+    color: ColorPlane<'a>,
 }
 
-/// Sprite'ın yuvasını çözer, yuva yeni açıldıysa dokuya yükler ve uv0'ını
-/// verir.
-///
-/// Glyph ve kural döngülerinin **ortak gövdesi**; ikisinin ayrıldığı tek yer
-/// sordukları sprite ve yüz. Kopyalansaydı `upload` dalı iki yerde yaşardı ve
-/// birinde unutulan bir `upload_slot` "yuva var ama doku boş" demek olurdu —
-/// ekranda görünmeyen bir glyph, hiçbir sayacın düşmediği.
-///
-/// `Upload` köşeyi zaten taşıyor — `bt-atlas` ikisini bilerek aynı dönüşte
-/// veriyor. Yeni yuvada onu kullanmak hem sprite başına bir `%` + `/` çiftini
-/// düşürüyor hem de aynı olguyu iki ayrı ifadeyle yazmayı önlüyor;
-/// `slot_origin` yalnız önbellekli ve tofu yoluna kalıyor. (`upload` atlası
-/// ödünç alıyor; `if let` onu tüketince ödünç bitiyor ve atlas yeniden
-/// sorulabiliyor.)
-fn slot_uv(
-    atlas: &mut Atlas,
-    texture: &ProtocolObject<dyn MTLTexture>,
-    color: &mut ColorPlane<'_>,
-    metrics: Metrics,
-    inv: (f32, f32),
-    ask: SlotAsk,
-) -> ([f32; 2], Placed) {
-    let (placed, upload) = atlas.slot(ask.sprite, ask.face, ask.size, ask.want);
-    let (x, y) = if let Some(upload) = upload {
-        // **Doku düzlemden seçiliyor, çağırandan değil.** `bytesPerRow` de
-        // oradan: `upload_slot` satır adımını `Plane`'e göre türetiyor ve
-        // ayrışırsa Metal kısa tamponun ötesini okur — belirti sessiz.
-        let target = match upload.plane {
-            Plane::Mask => Some(texture),
-            // **Renk dokusu tam burada, ilk renkli yuvayla doğuyor.** Tembel
-            // olmasının bedeli yok ama kazancı var: emoji görmeyen bir oturum
-            // 4 MiB'ı hiç ödemiyor (kenar maskeninkiyle aynı, piksel başına
-            // dört bayt). Kurulumun **yükleme anında** olması zorunlu: bir
-            // kare önce kurulsaydı "hangi karakter renkli" sorusunu cascade'i
-            // ikinci kez yürüyerek sormak gerekirdi, bir kare sonra
-            // kurulsaydı bu yuva yazılmadan önbelleğe girer ve emoji
-            // **kalıcı olarak** görünmez kalırdı.
-            Plane::Color => color.get(),
+impl SlotUpload for MetalUpload<'_> {
+    fn upload(&mut self, plane: Plane, origin: (u16, u16), metrics: Metrics, bytes: &[u8]) {
+        let target = match plane {
+            Plane::Mask => Some(self.mask),
+            // The colour texture is lazy and may fail to allocate: then the
+            // emoji is not drawn (the slot stays unwritten; known limit,
+            // `ColorPlane::get`'s doc).
+            Plane::Color => self.color.get(),
         };
-        // Renk dokusu **tembel** ve `prepare` onu emoji görünce kuruyor; yine
-        // de `Option`: doku ayırması başarısız olabiliyor ve o hâlde emoji
-        // **çizilmiyor**, panik yok. Yükleme atlanınca yuva dokuda yazılmamış
-        // kalır ve o karede bir şey görünmez — bir sonraki karede doku kurulup
-        // yuva yeniden yüklenmiyor (anahtar önbellekte), yani bu bilinen bir
-        // sınır ve doku ayırmasının başarısız olduğu makinede zaten daha
-        // büyük bir sorun var.
         if let Some(target) = target {
-            upload_slot(target, upload.origin, metrics, upload.bytes, upload.plane);
-            // **Çiftin sağ yarısı aynı dönüşte yükleniyor.** `bt-atlas` iki yuvayı
-            // atomik ayırıyor ve ikisinin baytlarını birlikte veriyor; burada
-            // atlanırsa sağ yuva dokuda **yazılmamış** kalır ve o karakterin sağ
-            // yarısı komşu yuvanın bitmap'iyle çizilir — sessiz bir bozulma.
-            if let Some(right) = upload.right {
-                upload_slot(target, right, metrics, upload.right_bytes, upload.plane);
-            }
+            upload_slot(target, origin, metrics, bytes, plane);
         }
-        upload.origin
-    } else {
-        atlas.slot_origin(placed.slot)
-    };
-    ([f32::from(x) * inv.0, f32::from(y) * inv.1], placed)
+    }
 }
 
 /// Atlas dokusu: tek kanal kapsama, yalnız shader okur.
@@ -2117,10 +1912,8 @@ fn upload_slot(
     // eski kalırdı.
     // Beklenen uzunluk **düzlemden**: maske `w*h`, renk `4*w*h`. İkisini tek
     // sayıya bağlamak yanlış düzlemin tamponunu sessizce geçirirdi.
-    let (expected, row_bytes) = match plane {
-        Plane::Mask => (metrics.slot_bytes(), w),
-        Plane::Color => (metrics.slot_bytes_rgba(), w * 4),
-    };
+    // (The layout is shared with the wgpu upload: `slots::slot_layout`.)
+    let (expected, row_bytes) = slots::slot_layout(metrics, plane);
     assert_eq!(bytes.len(), expected, "tam bir yuva olmalı ({plane:?})");
     let region = MTLRegion {
         origin: MTLOrigin {
@@ -2160,6 +1953,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::glyph_fx::{Effect, Fx, Kind};
     use crate::stats::Stats;
+    use bt_atlas::{Face, SizeClass};
     use bt_core::CaretStyle;
     use bt_core::{ButtonState, DockButton, Erase, Keypress};
 

@@ -98,6 +98,16 @@ const _: () = assert!(size_of::<GlyphInstance>() == 32);
 const _: () = assert!(offset_of!(GlyphInstance, uv0) == 8);
 const _: () = assert!(offset_of!(GlyphInstance, rgba) == 16);
 
+/// `GlyphInstance`'s field offsets, for the wgpu vertex layout
+/// (`crate::wgpu_renderer`): fed from next to the asserts, like
+/// [`INSTANCE_OFFSETS`] (040 phase-3).
+#[cfg(test)]
+pub(crate) const GLYPH_INSTANCE_OFFSETS: [u64; 3] = [
+    offset_of!(GlyphInstance, pos) as u64,
+    offset_of!(GlyphInstance, uv0) as u64,
+    offset_of!(GlyphInstance, rgba) as u64,
+];
+
 /// `shaders/glyph_fx.metal` → `FxInstance` ile alan alan aynı: dock'un yazım
 /// efektlerinin instance'ı (030).
 ///
