@@ -138,9 +138,9 @@ objc2-quartz-core = { workspace = true, features = [
 # .tasks/037-ssh-ikinci-tur/phase-7.md → Uygulama Notları.
 objc2-user-notifications = { workspace = true }
 # The main queue: `Wake::child_exit` arrives on the reader thread and
-# `terminate:` is the main thread's job. The settings watch (`bt_shell_common::watch`, 007 phase-4)
-# is installed on the main queue from here; the vnode sources themselves live
-# in the shared crate since 043.
+# `terminate:` is the main thread's job. The settings watch
+# (`bt_shell_common::watch`, 007 phase-4) notifies on the shared crate's own
+# serial queue; `app::watch_notify` carries the event to the main queue.
 dispatch2 = { workspace = true }
 # Kapatma onayı sayfasının tamamlanma bloğu (`RcBlock`, 028 phase-2). Karar kaydı .tasks/028-kapatma-onayi/discussion.md → Karar 2.
 block2 = { workspace = true }

@@ -19,7 +19,8 @@ bt-core = { workspace = true }
 bt-gpu = { workspace = true }
 # The passwd entry (`child`, `getpwuid_r`), the process table (`jobs`: the
 # `libproc` half and `sysctl(KERN_PROCARGS2)` on macOS), `upload`'s
-# `kill`/`waitid` and `watch`'s `O_EVTONLY`. Already in the graph; the
+# `kill`/`waitid` and `watch` (`O_EVTONLY` on macOS; inotify, `eventfd`
+# and `poll` on Linux). Already in the graph; the
 # rationale is in the workspace manifest.
 libc = { workspace = true }
 
