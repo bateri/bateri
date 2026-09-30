@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Test support: exports the backend's sample characters (`bt_atlas::fixture`)
+# to other crates' tests; `bt-gpu` enables it as a dev-dependency.
+fixture = []
+
 # CoreText is the macOS backend's font system (`src/coretext.rs`); no other
 # platform sees it (042 Karar 1).
 [target.'cfg(target_os = "macos")'.dependencies]

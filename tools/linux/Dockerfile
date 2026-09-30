@@ -1,5 +1,5 @@
-# `make linux`'un imajı: bt-core'u ve bt-atlas'ı Linux'ta derleyip sınamak
-# için tek tarif.
+# `make linux`'un imajı: bt-core'u, bt-atlas'ı ve bt-gpu'yu Linux'ta derleyip
+# sınamak için tek tarif.
 #
 # Taban etiketinin major.minor'ü yerel rustc'yle AYNI olmak zorunda — `make
 # linux` önce bunu karşılaştırıyor ve uyuşmazlıkta kırmızı düşüyor: iki farklı
@@ -22,13 +22,16 @@ FROM rust:1.88-bookworm
 # Linux fixture (`bt-atlas/src/freetype.rs`) is measured against it.
 # fonts-noto-color-emoji is the colour font (CBDT bitmaps): the colour plane,
 # the two halves of an emoji and the grapheme-cluster tests draw from it.
+# mesa-vulkan-drivers + libvulkan1 are lavapipe, Mesa's CPU Vulkan driver, and
+# its loader: bt-gpu's device (Vulkan on Linux), `wgsl_pipelines_build` and the
+# offscreen pixel tests run on it (042 Karar 8).
 # The version check stops the build if FreeType is older than 2.12.1
 # (libtool 24.3.18 — 2.12.0 is 24.1.18), the release the backend was
 # written against.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends zsh \
         pkg-config libfreetype-dev libfontconfig-dev zlib1g-dev fonts-dejavu-core \
-        fonts-noto-color-emoji \
+        fonts-noto-color-emoji mesa-vulkan-drivers libvulkan1 \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -f \
     && dpkg --compare-versions "$(pkg-config --modversion freetype2)" ge 24.3.18

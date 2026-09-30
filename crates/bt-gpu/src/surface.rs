@@ -8,11 +8,15 @@
 //! winit's `raw-window-handle` (the winit set).
 
 use std::cell::Cell;
+#[cfg(target_os = "macos")]
 use std::ffi::c_void;
+#[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 
+use crate::GpuError;
+#[cfg(target_os = "macos")]
+use crate::Renderer;
 use crate::renderer::{FORMAT, Gpu, Target};
-use crate::{GpuError, Renderer};
 
 /// A window's surface: the swap chain the frame path draws into.
 ///
@@ -53,6 +57,10 @@ impl Surface {
     /// `layer` must point to a live `CAMetalLayer`. wgpu retains it, so the
     /// caller need not keep it alive beyond this call — but the layer is the
     /// view's, and drawing into a layer no view shows is harmless, not unsafe.
+    ///
+    /// macOS only: wgpu's `CoreAnimationLayer` target exists with its Metal
+    /// backend. Linux's entry comes with the window (the winit set).
+    #[cfg(target_os = "macos")]
     pub unsafe fn from_layer(
         renderer: &Renderer,
         layer: NonNull<c_void>,

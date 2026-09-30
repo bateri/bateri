@@ -11,6 +11,7 @@ use crate::renderer::tests::{
     ACCENT, BACKGROUND, MIDTONE, WHITE, bg_cell, cell_rows, grid, grid_with_gutter, pixel_at,
 };
 use crate::stats::{Samples, Stats};
+use bt_atlas::fixture::{CLUSTER_SCALE, ONE_CELL_WIDE_CHAR, PAIR_CHAR, STROKE_PAIR_CHAR};
 
 /// Fixed cell for the synthetic scenes: 8×16, eight columns and four rows
 /// on a 64 texture.
@@ -30,10 +31,12 @@ fn wgsl_pipelines_build() {
 // guards that only need a frame live in `tests`. Glyph tests draw at
 // `SCALE`.
 
-/// Retina: at 13pt@1x a flag cluster's ink exceeds two cells and falls back
-/// to its base character (`a_cluster_is_one_color_glyph_on_every_surface`),
-/// so the scene list could not show a cluster at 1x.
-const SCALE: f64 = 2.0;
+/// The atlas fixture's cluster scale (Retina): at 13pt@1x a flag cluster's
+/// ink exceeds two cells and falls back to its base character
+/// (`a_cluster_is_one_color_glyph_on_every_surface`), so the scene list could
+/// not show a cluster at 1x. The measurement is the backend's, in
+/// `bt_atlas::fixture`.
+const SCALE: f64 = CLUSTER_SCALE;
 
 /// An inked cell with a white foreground (`tests`'s `glyph_cell`, with a
 /// row).
@@ -169,8 +172,9 @@ fn wide_glyph_halves_meet_without_a_seam() {
     // A wide glyph is two quads from two slots (`slots::fan`); the right
     // half is rasterised a whole number of pixels to the left, so its AA
     // phase is the left half's and a stroke crossing the boundary must
-    // continue there pixel for pixel. `一` is one horizontal stroke across
-    // nearly the full em: ink that crosses the boundary in any CJK font.
+    // continue there pixel for pixel. The fixture's `STROKE_PAIR_CHAR` has
+    // ink crossing the boundary (`一`, one horizontal stroke across nearly
+    // the full em, where a CJK font is installed).
     // (The instance count is shared CPU code now and has its guard in
     // `a_wide_cell_becomes_two_quads`.)
     const EDGE: u32 = 64;
@@ -186,7 +190,7 @@ fn wide_glyph_halves_meet_without_a_seam() {
     frame.clear(m, CaretStyle::default());
     frame.push(Cell {
         wide: true,
-        ..glyph_cell(0, 0, '一')
+        ..glyph_cell(0, 0, STROKE_PAIR_CHAR)
     });
     let pixels = w.render_offscreen(EDGE, BACKGROUND, &frame);
     let edge = EDGE as usize;
@@ -196,7 +200,7 @@ fn wide_glyph_halves_meet_without_a_seam() {
     let inked = |x| (0..ch).any(|y| px(x, y) != clear);
     assert!(
         inked(cw / 2) && inked(cw + cw / 2),
-        "`一` did not draw across two cells"
+        "`{STROKE_PAIR_CHAR}` did not draw across two cells"
     );
     let crossing: Vec<usize> = (0..ch).filter(|&y| px(cw - 1, y) != clear).collect();
     assert!(!crossing.is_empty(), "no ink at the boundary");
@@ -606,17 +610,22 @@ fn scene_procedural(m: CellMetrics) -> Scene {
     ("procedural block and line characters", 128, frame)
 }
 
-/// Wide glyphs: two CJK characters drawn as two halves, and one declared
+/// Wide glyphs: two characters drawn as two halves (CJK where a CJK font is
+/// installed; the fixture's pair characters), and one declared
 /// wide whose ink fits one cell (one quad).
 fn scene_wide(m: CellMetrics) -> Scene {
     let mut frame = glyph_frame(m);
-    for (col, ch) in [(0, '漢'), (2, '一'), (4, '☕')] {
+    for (col, ch) in [
+        (0, PAIR_CHAR),
+        (2, STROKE_PAIR_CHAR),
+        (4, ONE_CELL_WIDE_CHAR),
+    ] {
         frame.push(Cell {
             wide: true,
             ..glyph_cell(col, 0, ch)
         });
     }
-    ("wide CJK glyph halves", 128, frame)
+    ("wide glyph halves", 128, frame)
 }
 
 /// Colour emoji: a single one and two clusters (a flag and a ZWJ family),
@@ -871,7 +880,7 @@ fn scenes_fx(m: CellMetrics) -> Vec<Scene> {
     let letter = glyph_cell(2, 0, 'M');
     let wide = Cell {
         wide: true,
-        ..glyph_cell(5, 0, '漢')
+        ..glyph_cell(5, 0, PAIR_CHAR)
     };
     let ruled = Cell {
         underline: UnderlineStyle::Single,

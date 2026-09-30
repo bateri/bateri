@@ -3,6 +3,7 @@ use bt_core::{Block, CaretShape, Cell, Cursor, SearchRun, SelectionRun, Theme, U
 use super::*;
 use crate::Renderer;
 use crate::glyph_fx::{Effect, Fx, Kind};
+use bt_atlas::fixture::{CHAIN_FAMILIES, ONE_CELL_WIDE_CHAR, PAIR_CHAR, PROPORTIONAL_FAMILY};
 use bt_atlas::{Face, SizeClass};
 use bt_core::CaretStyle;
 use bt_core::{ButtonState, DockButton, Erase, Keypress};
@@ -126,16 +127,16 @@ fn missing_family_becomes_a_notice_after_the_atlas_opens() {
     };
     assert_eq!(requested, "No Such Family 12345");
     assert!(
-        ["SF Mono", "Menlo"].contains(&using.as_str()),
+        CHAIN_FAMILIES.contains(&using.as_str()),
         "the chain's family: {using}"
     );
     assert!(r.set_font(&FontOptions {
-        family: Some("Helvetica".to_owned()),
+        family: Some(PROPORTIONAL_FAMILY.to_owned()),
         ..FontOptions::default()
     }));
     r.cell_metrics(2.0);
     let proportional = Some(FontNotice::NotMonospaced {
-        family: "Helvetica".to_owned(),
+        family: PROPORTIONAL_FAMILY.to_owned(),
     });
     assert_eq!(r.font_notice(), proportional);
     // A display change rebuilds the atlas but the notice stays the same: the font slot must
@@ -2494,11 +2495,11 @@ impl Lists {
 fn a_wide_cell_becomes_two_quads() {
     let mut tex = Lists::new(1.0);
     let cell_w = tex.atlas.metrics().cell_px.0;
-    // `漢`'s ink yields a candidate that wants two cells (cascade: PingFang SC); it is rejected by
+    // The fixture's pair character: its ink yields a candidate that wants two cells; it is rejected by
     // the one-cell gate and passes the two-cell gate.
     let glyphs = [GlyphCell {
         pos: [0.0, 0.0],
-        ch: '漢',
+        ch: PAIR_CHAR,
         face: Face::Regular,
         size: SizeClass::Normal,
         rgba: [1.0, 1.0, 1.0, 1.0],
@@ -2532,11 +2533,11 @@ fn a_wide_cell_becomes_two_quads() {
 #[test]
 fn a_wide_cell_that_fits_one_cell_stays_one_quad() {
     let mut tex = Lists::new(1.0);
-    // Menlo's own glyph, two columns according to Unicode: in the base font the advance is the
-    // cell's advance itself, that is one cell.
+    // The base font's own glyph, two columns according to Unicode: in the base font the advance is
+    // the cell's advance itself, that is one cell (the fixture's `ONE_CELL_WIDE_CHAR`).
     let glyphs = [GlyphCell {
         pos: [0.0, 0.0],
-        ch: '☕',
+        ch: ONE_CELL_WIDE_CHAR,
         face: Face::Regular,
         size: SizeClass::Normal,
         rgba: [1.0, 1.0, 1.0, 1.0],
@@ -2820,7 +2821,7 @@ fn an_arrival_at_its_end_is_the_static_glyph_pixel_for_pixel() {
         let id = keypress.id().expect("a drawing effect");
         for cell in [
             glyph_cell(2, 'M', None),
-            wide_cell(2, '漢'),
+            wide_cell(2, PAIR_CHAR),
             wide_cell(2, '🎉'),
         ] {
             let still = dock_fx_frame(cell_px, &[cell], &[]);
@@ -2863,7 +2864,7 @@ fn a_ghost_starts_as_the_glyph_and_ends_as_bare_ground() {
     let bare = render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[], &[]));
     for &erase in &Erase::effects() {
         let id = erase.id().expect("a drawing effect");
-        for cell in [glyph_cell(2, 'M', None), wide_cell(2, '漢')] {
+        for cell in [glyph_cell(2, 'M', None), wide_cell(2, PAIR_CHAR)] {
             let glyph =
                 render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[cell], &[]));
             assert_ne!(glyph, bare, "the glyph was not drawn ({:?})", cell.ch);
@@ -3020,7 +3021,7 @@ fn a_wide_glyph_transforms_as_one_box() {
     const EDGE: usize = 64;
     let cell_px = fitting_cell_px(&r, EDGE, 4);
     let (cw, ch) = (usize::from(cell_px.0), usize::from(cell_px.1));
-    let han = wide_cell(1, '漢');
+    let han = wide_cell(1, PAIR_CHAR);
     let seam = 2 * cw;
     let top = dock_row_top(EDGE, cell_px.1);
     let inked = |pixels: &[u8]| {
@@ -3031,7 +3032,7 @@ fn a_wide_glyph_transforms_as_one_box() {
     let still = render_offscreen(&r, EDGE, BACKGROUND, &dock_fx_frame(cell_px, &[han], &[]));
     assert!(
         inked(&still),
-        "precondition: static `漢` has no ink at the seam"
+        "precondition: static `{PAIR_CHAR}` has no ink at the seam"
     );
     let kinds = Keypress::effects()
         .into_iter()

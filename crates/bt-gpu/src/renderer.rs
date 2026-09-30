@@ -65,6 +65,12 @@ pub(crate) const IMMEDIATE_BUDGET: u32 = 128;
 /// "linear palette + non-sRGB target" must not be representable.
 pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
+/// The one wgpu backend of the target (see [`Gpu::new`]).
+#[cfg(target_os = "macos")]
+const BACKENDS: wgpu::Backends = wgpu::Backends::METAL;
+#[cfg(not(target_os = "macos"))]
+const BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN;
+
 /// The atlas's mask plane: one channel of coverage, sampled by shaders only.
 pub(crate) const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
@@ -710,6 +716,13 @@ impl Gpu {
         Self::get().expect("wgpu device and pipelines")
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            dead_code,
+            reason = "the only surface entry, `Surface::from_layer`, is macOS-only until the winit set"
+        )
+    )]
     pub(crate) fn instance(&self) -> &wgpu::Instance {
         &self.instance
     }
@@ -718,14 +731,15 @@ impl Gpu {
         &self.device
     }
 
-    /// A device on the Metal backend and six pipelines.
+    /// A device on the platform's backend and six pipelines.
     ///
-    /// The backend is **pinned to Metal**: macOS is the only product target
-    /// today; the Vulkan branch is opened and tested on Linux in the font set
-    /// (`docs/YOL-HARITASI.md`).
+    /// The backend is **pinned per target**, not wgpu's `PRIMARY`: Metal on
+    /// macOS (the product target; a wider mask would change which adapters
+    /// are enumerated there), Vulkan on Linux — where `make linux` runs
+    /// the pixel tests on lavapipe (042 Karar 8).
     pub(crate) fn new() -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
+            backends: BACKENDS,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
@@ -1317,6 +1331,13 @@ impl Renderer {
     }
 
     /// The shared device; the window surface is created and configured on it.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            dead_code,
+            reason = "the only surface entry, `Surface::from_layer`, is macOS-only until the winit set"
+        )
+    )]
     pub(crate) fn gpu(&self) -> &'static Gpu {
         self.gpu
     }
