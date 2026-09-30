@@ -1,57 +1,63 @@
-//! Yedek kapısının **taraması** ve gerçek araçların karakterleri için
-//! **bekçi** (041 phase-1).
+//! The fallback gate's **census** and a **guard** for the characters of real
+//! tools (041 phase-1).
 //!
-//! Kapının kalibrasyonu iki kez bir örnek kümesine bakılarak yapıldı ve iki
-//! kez de sınırın dışındaki karakteri kullanıcı buldu (`⏺`, `⎿`, sonra `⧉`).
-//! Tarama bu yüzden örnek değil **envanter**: sembol ve emoji bloklarındaki
-//! her kod noktasını kapının kendi adımlarından geçirip dört gruptan birine
-//! koyuyor. Sonucu makinede kurulu fontlara bağlı, yani kapıya girmiyor —
-//! `make tarama` ile elle koşuyor.
+//! The gate was calibrated twice by looking at a sample set, and both times
+//! the user found the character outside the limit (`⏺`, `⎿`, then `⧉`). The
+//! census is therefore an **inventory**, not a sample: it passes every code
+//! point of the symbol and emoji blocks through the gate's own steps and puts
+//! it in one of four groups. Its result depends on the fonts installed on the
+//! machine, so it is not part of the gate — it is run by hand with
+//! `make tarama`.
 //!
-//! Modül yalnız sınamada derleniyor: sınıflamanın üretimde tüketicisi yok.
-//! Kapıyı kopyalamıyor, adımlarını çağırıyor; phase-2'den beri küçültme
-//! kolunu da (`font::accept`) aynı yoldan görüyor.
+//! The module is compiled only for tests: the classification has no
+//! consumer in production. It does not copy the gate, it calls its steps;
+//! since phase-2 it also sees the shrink branch (`font::accept`) the same
+//! way.
 
 use objc2_core_foundation::CGFloat;
 use objc2_core_text::CTFont;
 
 use crate::{Atlas, Face, font, raster};
 
-/// Bir karakterin yedek kapısındaki yeri.
+/// Where a character lands in the fallback gate.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Class {
-    /// Taban font çiziyor; yedek yolu hiç koşmuyor.
+    /// The base font draws it; the fallback path never runs.
     InBase,
-    /// Cascade'in adayı kapıdan geçti.
+    /// The cascade's candidate passed the gate.
     Fallback { font: String, ratio: f64 },
-    /// Cascade'in adayı da `.notdef` verdi.
+    /// The cascade's candidate gave `.notdef` too.
     NoFont,
-    /// Aday iki kapıdan döndü ama küçük puntolu kopyası kabul edildi (041).
+    /// The candidate was turned back by both gates but its smaller-size copy
+    /// was accepted (041).
     Shrunk { font: String, ratio: f64, fit: f64 },
-    /// Aday var ama kapıdan döndü: ekranda kutu. `fit` sınırın üstünde,
-    /// aday `.LastResort` ya da küçük kopya yeniden sınamadan döndü.
+    /// There is a candidate but the gate turned it back: a box on screen.
+    /// `fit` is above the limit, the candidate is `.LastResort`, or the small
+    /// copy failed the re-test.
     Rejected { font: String, ratio: f64, fit: f64 },
 }
 
-/// `ch`'i kapının adımlarından **aynen** geçirir: [`font::glyph_index`]
-/// (taban) → [`font::cascade_candidate`] → [`font::glyph_index`] (aday) →
-/// [`font::accept`]. İkinci bir kapı yok; sınıflama yalnız adımların
-/// cevaplarını ayrı ayrı adlandırıyor.
+/// Passes `ch` through the gate's steps **verbatim**: [`font::glyph_index`]
+/// (base) → [`font::cascade_candidate`] → [`font::glyph_index`] (candidate) →
+/// [`font::accept`]. There is no second gate; the classification only names
+/// the steps' answers separately.
 ///
-/// İki oran, ikisi de **kutuya** (`cell_advance × cols`) bölünmüş:
+/// Two ratios, both divided by the **box** (`cell_advance × cols`):
 ///
-/// - `ratio` — mürekkep genişliği / kutu. "Mürekkep hücreden ne kadar
-///   geniş": `⧉` Menlo 16pt'de ~1.11. Yerleşimden bağımsız, yani adayın
-///   mürekkebi kutuda ortalansaydı gereken küçültme bu.
-/// - `fit` — bugünkü yerleşimle ([`font::centre_shift`], sola yapışma
-///   kuralı dahil) kapının geçmesi için adayın **kaç kat** küçültülmesi
-///   gerektiği; sol ve sağ taşmanın büyüğünü taşıyor. Küçültme ilerlemeyi de
-///   küçülttüğü ve ilerlemesi kutuyu hâlâ aşan glyph sola yapıştığı için
-///   `ratio`'dan büyük olabilir: sağ boşluğu olmayan bir aday küçülünce
-///   ortaya gelmiyor. Hesabı [`font::fit_ratio`], küçültme kolunun
-///   katsayısıyla aynı fonksiyon.
+/// - `ratio` — ink width / box. "How much wider the ink is than the cell":
+///   `⧉` is ~1.11 in Menlo 16pt. Independent of placement, i.e. the shrink
+///   that would be needed if the candidate's ink were centred in the box.
+/// - `fit` — **by how much** the candidate must be shrunk for the gate to
+///   pass with today's placement ([`font::centre_shift`], including the
+///   stick-to-the-left rule); it carries the larger of the left and right
+///   overflow. It can be larger than `ratio` because shrinking also shrinks
+///   the advance and a glyph whose advance still exceeds the box sticks to
+///   the left: a candidate with no right bearing does not move to the centre
+///   when shrunk. It is computed by [`font::fit_ratio`], the same function as
+///   the shrink branch's factor.
 ///
-/// `Fallback`'te `fit` taşınmıyor: geçen adayda küçültme sorusu yok.
+/// `Fallback` does not carry `fit`: a passing candidate raises no shrink
+/// question.
 pub(crate) fn classify(base: &CTFont, ch: char, cell_advance: CGFloat, cols: u8) -> Class {
     if font::glyph_index(base, ch).is_some() {
         return Class::InBase;
@@ -60,12 +66,13 @@ pub(crate) fn classify(base: &CTFont, ch: char, cell_advance: CGFloat, cols: u8)
     let Some(glyph) = font::glyph_index(&candidate, ch) else {
         return Class::NoFont;
     };
-    // `.LastResort` raporda kapının kendi ölçütüyle adlanıyor
-    // ([`font::is_last_resort`]), yani rapor ile kapı aynı fontu ayırıyor.
+    // `.LastResort` is named in the report by the gate's own criterion
+    // ([`font::is_last_resort`]), so the report and the gate single out the
+    // same font.
     let family = if font::is_last_resort(&candidate) {
         font::LAST_RESORT.to_string()
     } else {
-        // SAFETY: `candidate` bu kapsamda canlı; saf okuma.
+        // SAFETY: `candidate` is alive in this scope; a pure read.
         unsafe { candidate.family_name() }.to_string()
     };
     let advance = font::glyph_advance(&candidate, glyph);
@@ -91,50 +98,51 @@ pub(crate) fn classify(base: &CTFont, ch: char, cell_advance: CGFloat, cols: u8)
     }
 }
 
-/// Gerçek araçların ekrana bastığı karakterler. Kutu çıkan her biri
-/// kullanıcının göreceği bir kusur; kullanıcı yenisini bulunca buraya eklenir,
-/// yani aynı kusur ikinci kez sessizce geri gelmez.
+/// Characters real tools print to the screen. Each one that comes out as a
+/// box is a defect the user will see; when the user finds a new one it is
+/// added here, so the same defect does not silently come back a second time.
 const TOOL_CHARS: [char; 26] = [
-    // Claude Code: araç işareti, sonuç ağacı, artifact bağlantısı, spinner
-    // yıldızları, ayraç, kip göstergesi, duraklatma, kesinti.
+    // Claude Code: tool marker, result tree, artifact link, spinner stars,
+    // separator, mode indicator, pause, interrupt.
     '⏺', '⎿', '⧉', '✻', '✢', '✳', '✶', '·', '⏵', '⏸', '↯',
-    // Spinner'lar: Braille (yordamsal) ve çeyrek daireler.
+    // Spinners: Braille (procedural) and quarter circles.
     '⠋', '⠙', '◐', '◓', '⣾', '⣽',
-    // git / starship / p10k: Nerd Font'un dal ve powerline işaretleri (PUA),
-    // durum işaretleri, ileri/geri, prompt karakterleri, nokta.
+    // git / starship / p10k: Nerd Font's branch and powerline glyphs (PUA),
+    // status marks, ahead/behind, prompt characters, dot.
     '\u{E0A0}', '\u{E0B0}', '✔', '✘', '⇡', '⇣', '❯', '❮', '●',
 ];
 
-/// [`TOOL_CHARS`]'tan bugün **kutu** çıkanlar (Menlo 16pt @2x, bu makine).
+/// The ones from [`TOOL_CHARS`] that come out as a **box** today (Menlo 16pt
+/// @2x, this machine).
 ///
-/// Liste yalnız küçülür: bir karakter artık çiziliyorsa bekçi kırmızı düşer
-/// ve onu buradan çıkarmayı ister ([`tofu_drift`]). Böylece düzelen bir
-/// karakter sessizce "beklenen kutu" olarak kalmıyor, ve düzeltme geri
-/// alınırsa bekçi onu yeniden görüyor.
+/// The list only shrinks: if a character is now drawn, the guard goes red
+/// and asks for it to be removed from here ([`tofu_drift`]). That way a fixed
+/// character does not silently stay an "expected box", and if the fix is
+/// reverted the guard sees it again.
 ///
-/// `U+E0A0`/`U+E0B0` hiçbir kurulu fontta yok, cascade `.LastResort`'u
-/// veriyor. R3.2 onun küçültülmesini yasaklıyor ([`font::is_last_resort`]),
-/// yani küçültme bunları boşaltmıyor; boşaltan şey Nerd Font kurulu bir
-/// makine. `⧉` 041 phase-2'de listeden çıktı: küçültülerek çiziliyor.
+/// `U+E0A0`/`U+E0B0` are in no installed font, the cascade gives
+/// `.LastResort`. R3.2 forbids shrinking it ([`font::is_last_resort`]), so
+/// shrinking does not empty this list; what empties it is a machine with a
+/// Nerd Font installed. `⧉` left the list in 041 phase-2: it is drawn shrunk.
 const EXPECTED_TOFU: [char; 2] = ['\u{E0A0}', '\u{E0B0}'];
 
-/// Gözlemi (karakter, kutu mu) beklenen kutu listesiyle karşılaştırır ve
-/// her sapmayı bir satır olarak verir; boş dönüş yeşil.
+/// Compares the observation (character, is it a box) with the expected box
+/// list and returns every drift as one line; an empty return is green.
 ///
-/// İki yönlü: listede olmayan kutu kusurdur, listede olup artık çizilen
-/// karakter de listenin güncellenmesi gerektiğini söyler. Listede olup
-/// gözlenmeyen karakter de sapma: liste bekçinin karakterleri dışında
-/// bir şey iddia edemez.
+/// Both ways: a box not on the list is a defect, and a character on the list
+/// that is now drawn says the list must be updated. A character on the list
+/// that is not observed is drift too: the list cannot claim anything outside
+/// the guard's characters.
 fn tofu_drift(observed: &[(char, bool)], expected: &[char]) -> Vec<String> {
     let mut drift = Vec::new();
     for &(ch, tofu) in observed {
         let listed = expected.contains(&ch);
         if tofu && !listed {
-            drift.push(format!("'{ch}' (U+{:04X}) kutu çıkıyor", u32::from(ch)));
+            drift.push(format!("'{ch}' (U+{:04X}) renders tofu", u32::from(ch)));
         }
         if !tofu && listed {
             drift.push(format!(
-                "'{ch}' (U+{:04X}) artık çiziliyor — EXPECTED_TOFU'dan çıkar",
+                "'{ch}' (U+{:04X}) is drawn now — drop from EXPECTED_TOFU",
                 u32::from(ch)
             ));
         }
@@ -142,7 +150,7 @@ fn tofu_drift(observed: &[(char, bool)], expected: &[char]) -> Vec<String> {
     for &ch in expected {
         if !observed.iter().any(|&(c, _)| c == ch) {
             drift.push(format!(
-                "'{ch}' (U+{:04X}) EXPECTED_TOFU'da ama bekçinin listesinde yok",
+                "'{ch}' (U+{:04X}) is in EXPECTED_TOFU but not in the guard's list",
                 u32::from(ch)
             ));
         }
@@ -150,8 +158,9 @@ fn tofu_drift(observed: &[(char, bool)], expected: &[char]) -> Vec<String> {
     drift
 }
 
-/// Tek karakterin bugün kutu çıkıp çıkmadığı — atlasın düz yüzdeki sırasıyla:
-/// yordamsal aile fonttan önce çiziliyor, kalanı kapının sınıflaması.
+/// Whether a single character comes out as a box today — in the atlas's
+/// order for the regular face: the procedural family is drawn before the
+/// font, the rest is the gate's classification.
 fn is_tofu(a: &Atlas, ch: char) -> bool {
     if raster::is_procedural(ch) {
         return false;
@@ -169,49 +178,52 @@ mod tests {
 
     use super::*;
 
-    /// Gerçek araçların karakterleri kutu çıkmıyor — ya da çıktıkları
-    /// [`EXPECTED_TOFU`]'da adıyla yazılı.
+    /// The characters of real tools do not come out as boxes — or the ones
+    /// that do are named in [`EXPECTED_TOFU`].
     ///
-    /// **Bilinen sınır:** beklenti makinede kurulu fontlara bağlı. Nerd Font
-    /// kurulu bir makinede `U+E0A0` gerçek bir glyph'e düşer ve bekçi "listeden
-    /// çıkar" diye kırmızı düşer — kod doğruyken. `the_gate_decides_by_ink_alone`
-    /// bu yüzden beklentiyi adaydan türetiyor; bu sınama ise bilerek **olguyu**
-    /// sabitliyor, çünkü sorusu "kural doğru mu" değil "kullanıcı kutu görüyor
-    /// mu". Taban aile ayardan bağımsız, zincirin varsayılanı.
+    /// **Known limit:** the expectation depends on the fonts installed on the
+    /// machine. On a machine with a Nerd Font installed `U+E0A0` lands on a
+    /// real glyph and the guard goes red with "remove it from the list" —
+    /// while the code is right. `the_gate_decides_by_ink_alone` therefore
+    /// derives its expectation from the candidate; this test deliberately
+    /// pins the **fact**, because its question is not "is the rule right" but
+    /// "does the user see a box". The base family is independent of settings,
+    /// the chain's default.
     #[test]
     fn tool_chars_are_not_tofu() {
         let a = Atlas::new(None, 16.0, 2.0, 1.0);
         let observed: Vec<(char, bool)> =
             TOOL_CHARS.iter().map(|&ch| (ch, is_tofu(&a, ch))).collect();
         let drift = tofu_drift(&observed, &EXPECTED_TOFU);
-        assert!(drift.is_empty(), "bekçi sapması:\n{}", drift.join("\n"));
+        assert!(drift.is_empty(), "guard drift:\n{}", drift.join("\n"));
     }
 
-    /// Bekçinin karşılaştırması iki yönde de kırmızı: listede olmayan kutu
-    /// ve listede olup artık çizilen karakter. Gerçek fontla kurulamayan
-    /// yönler sentetik gözlemle sınanıyor.
+    /// The guard's comparison goes red in both directions: a box not on the
+    /// list and a character on the list that is now drawn. The directions
+    /// that cannot be set up with a real font are tested with a synthetic
+    /// observation.
     #[test]
     fn tofu_drift_flags_both_directions() {
         assert!(tofu_drift(&[('a', false), ('⧉', true)], &['⧉']).is_empty());
         let fixed = tofu_drift(&[('⧉', false)], &['⧉']);
-        assert_eq!(fixed.len(), 1, "düzelen karakter görülmedi: {fixed:?}");
-        assert!(fixed[0].contains("EXPECTED_TOFU'dan çıkar"), "{fixed:?}");
+        assert_eq!(fixed.len(), 1, "fixed character not seen: {fixed:?}");
+        assert!(fixed[0].contains("drop from EXPECTED_TOFU"), "{fixed:?}");
         let broken = tofu_drift(&[('a', true)], &[]);
-        assert_eq!(broken.len(), 1, "yeni kutu görülmedi: {broken:?}");
+        assert_eq!(broken.len(), 1, "new box not seen: {broken:?}");
         let stray = tofu_drift(&[], &['⧉']);
-        assert_eq!(stray.len(), 1, "listede kalan yabancı görülmedi: {stray:?}");
+        assert_eq!(stray.len(), 1, "stray list entry not seen: {stray:?}");
     }
 
-    /// Kabul edilen adayı, hücrenin **dört yanında birer hücre boşluk**
-    /// bırakan 3×3 hücrelik bir tuvale çizer ve kapsama (alfa) haritasını
-    /// verir; hücre tuvalin ortasında.
+    /// Draws the accepted candidate onto a 3×3-cell canvas that leaves **one
+    /// cell of space on all four sides** of the cell and returns the coverage
+    /// (alpha) map; the cell is in the middle of the canvas.
     ///
-    /// Yuvanın kendi tamponu taşmayı göremez — CG yuvanın kenarında
-    /// kırpıyor — yani "hücrenin içinde mi" sorusu ancak yuvadan geniş bir
-    /// bağlamda sorulabiliyor. Glyph `x_offset = -w` ile ortadaki sütuna,
-    /// taban çizgisi bir hücre boyu aşağı alınarak ortadaki satıra kayıyor;
-    /// kutu, ortalama ve `rise` atlasın çiziminin aynısı (`rise` asıl
-    /// hücrenin ölçüsünden).
+    /// The slot's own buffer cannot see an overflow — CG clips at the slot's
+    /// edge — so the "is it inside the cell" question can only be asked in a
+    /// context wider than the slot. The glyph moves to the middle column with
+    /// `x_offset = -w` and to the middle row by moving the baseline down one
+    /// cell height; the box, centring and `rise` are the same as the atlas's
+    /// drawing (`rise` from the real cell's metrics).
     fn draw_wide(alt: &font::Accepted, m: crate::Metrics, cell: CGFloat) -> Vec<u8> {
         let wide = crate::Metrics {
             cell_px: (m.cell_px.0 * 3, m.cell_px.1 * 3),
@@ -248,13 +260,13 @@ mod tests {
         }
     }
 
-    /// Küçültülen glyph hücrenin içinde: `⧉` (Apple Symbols, maske) ve tek
-    /// sütunlu emoji `🌡` (Apple Color Emoji, renk düzlemi) iki ölçekte
-    /// kabul ediliyor, küçültme kolundan geliyor ve ortadaki hücrenin
-    /// dışında tek bir kapsama pikseli yok — ne solda ne sağda, ne üstte ne
-    /// altta (dikey ortalama, `font::Accepted::rise`, emojiyi de hücrenin
-    /// içine alıyor). Renkli kopyanın trait'i korunuyor, yani düzlem ve
-    /// çizim reçetesi aynı.
+    /// A shrunk glyph stays inside the cell: `⧉` (Apple Symbols, mask) and
+    /// the single-column emoji `🌡` (Apple Color Emoji, colour plane) are
+    /// accepted at two scales, come from the shrink branch and have not a
+    /// single coverage pixel outside the middle cell — not left, right, above
+    /// or below (vertical centring, `font::Accepted::rise`, brings the emoji
+    /// inside the cell too). The colour copy keeps its trait, so the plane and
+    /// the drawing recipe are the same.
     #[test]
     fn shrunk_glyph_stays_inside_the_cell() {
         for (pt, scale) in [(16.0, 2.0), (13.0, 1.0)] {
@@ -263,13 +275,13 @@ mod tests {
             let m = a.metrics;
             for (ch, color) in [('⧉', false), ('🌡', true)] {
                 let alt = font::fallback_font(base, ch, a.cell_advance, 1)
-                    .unwrap_or_else(|| panic!("{ch} {pt}pt@{scale}x: kutu çıktı"));
+                    .unwrap_or_else(|| panic!("{ch} {pt}pt@{scale}x: came out as a box"));
                 assert!(
                     alt.shrunk,
-                    "{ch} {pt}pt@{scale}x küçültülmeden kabul edildi"
+                    "{ch} {pt}pt@{scale}x was accepted without shrinking"
                 );
                 assert_eq!(alt.cols, 1);
-                assert_eq!(font::has_color_glyphs(&alt.font), color, "{ch}: düzlem");
+                assert_eq!(font::has_color_glyphs(&alt.font), color, "{ch}: plane");
                 let cov = draw_wide(&alt, m, a.cell_advance);
                 let (w, h) = m.cell_wh();
                 let mut ink = 0usize;
@@ -281,23 +293,24 @@ mod tests {
                     let (x, y) = (i % (3 * w), i / (3 * w));
                     assert!(
                         (w..2 * w).contains(&x) && (h..2 * h).contains(&y),
-                        "{ch} {pt}pt@{scale}x: ({x}, {y}) hücrenin \
-                         ({w}..{}, {h}..{}) dışında",
+                        "{ch} {pt}pt@{scale}x: ({x}, {y}) outside the \
+                         cell ({w}..{}, {h}..{})",
                         2 * w,
                         2 * h
                     );
                 }
-                assert!(ink > 0, "{ch} {pt}pt@{scale}x: hiç mürekkep yok");
+                assert!(ink > 0, "{ch} {pt}pt@{scale}x: no ink at all");
             }
         }
     }
 
-    /// **Küçültülmüş tek hücrelik kabul, iki hücrelik isteğin cevabı değil**
-    /// (041): `漢` tek hücreye küçülüyor ve sonra ızgaranın `Left` isteğinde
-    /// tam boyuyla **çift** olarak geliyor — kısayol küçük kopyayı geniş
-    /// hücrenin soluna koysaydı sağ yarı boş kalırdı ve sonuç isteklerin
-    /// sırasına bağlı olurdu. Yüz merdiveninin takma adı da (kalın yüz düz
-    /// yüze iniyor) biti taşıyor.
+    /// **A shrunk single-cell acceptance is not the answer to a two-cell
+    /// request** (041): `漢` shrinks into a single cell and then, on the grid's
+    /// `Left` request, comes at full size as a **pair** — had a shortcut put
+    /// the small copy on the left of the wide cell, the right half would stay
+    /// empty and the result would depend on the order of requests. The face
+    /// ladder's alias (the bold face falls back to regular) carries the bit
+    /// too.
     #[test]
     fn a_shrunk_single_cell_does_not_answer_the_wide_request() {
         let mut a = Atlas::new(None, 13.0, 1.0, 1.0);
@@ -315,38 +328,40 @@ mod tests {
             assert_ne!(
                 whole.slot,
                 crate::TOFU,
-                "{face:?}: '漢' tek hücreye küçülmeliydi"
+                "{face:?}: '漢' should have shrunk to one cell"
             );
             assert_eq!(whole.half, crate::Half::Whole);
             let (left, _) = ask(&mut a, crate::Half::Left);
             assert_eq!(
                 left.half,
                 crate::Half::Left,
-                "{face:?}: küçük kopya çifte cevap oldu"
+                "{face:?}: the small copy answered the pair"
             );
             assert_ne!(
                 left.slot, whole.slot,
-                "{face:?}: çift tek hücrenin yuvasında"
+                "{face:?}: pair in the single cell's slot"
             );
         }
     }
 
-    /// İki sütunlu emoji @1x'te iki hücreye de sığmıyor (`fit` iki hücrelik
-    /// kutuda 1.062) ve aynı kol onu **iki hücrelik** kutuya küçültüyor: tek
-    /// hücreye inmiyor, yani ızgaranın ayırdığı iki sütunu dolduruyor.
+    /// A two-column emoji does not fit two cells either at @1x (`fit` 1.062
+    /// in the two-cell box) and the same branch shrinks it into the
+    /// **two-cell** box: it does not go down to one cell, so it fills the two
+    /// columns the grid set aside.
     #[test]
     fn wide_emoji_shrinks_into_two_cells_at_1x() {
         let a = Atlas::new(None, 13.0, 1.0, 1.0);
         let base = a.faces.get(Face::Regular);
-        let alt = font::fallback_font(base, '😀', a.cell_advance, 2).expect("😀 @1x kutu çıktı");
-        assert!(alt.shrunk, "@1x'te iki hücreye sığmıyordu; küçültülmeliydi");
-        assert_eq!(alt.cols, 2, "küçültme iki hücrelik kutuya olmalı");
+        let alt = font::fallback_font(base, '😀', a.cell_advance, 2).expect("😀 @1x: tofu");
+        assert!(alt.shrunk, "did not fit two cells at @1x; should be shrunk");
+        assert_eq!(alt.cols, 2, "the shrink must target the two-cell box");
     }
 
-    /// Sınırın **hemen üstündeki** aday kutu kalıyor: `🝇` (Apple Symbols,
-    /// taramada `.LastResort` dışında sınırın üstündeki en küçük `fit`,
-    /// 2.250). Sınıflama beklentiyi adayın kendi `fit`'inden sınıyor, yani
-    /// sınır oynarsa sınama hangi tarafa düştüğünü söylüyor.
+    /// A candidate **just above** the limit stays a box: `🝇` (Apple Symbols,
+    /// the smallest `fit` above the limit in the census apart from
+    /// `.LastResort`, 2.250). The classification tests the expectation
+    /// against the candidate's own `fit`, so if the limit moves the test says
+    /// which side it fell on.
     #[test]
     fn just_above_the_limit_stays_tofu() {
         let a = Atlas::new(None, 16.0, 2.0, 1.0);
@@ -354,14 +369,15 @@ mod tests {
         match classify(base, '🝇', a.cell_advance, 1) {
             Class::Rejected { fit, .. } => assert!(
                 fit > font::SHRINK_LIMIT && fit < font::SHRINK_LIMIT * 1.05,
-                "🝇 fit {fit:.3}: sınırın hemen üstünde olmalıydı"
+                "🝇 fit {fit:.3}: should be just above the limit"
             ),
-            other => panic!("🝇 kutu kalmalıydı: {other:?}"),
+            other => panic!("🝇 should stay a box: {other:?}"),
         }
     }
 
-    /// `.LastResort` sınırın içinde (`fit` 1.660) ama küçültülmüyor (R3.2):
-    /// aday küçültme kolunun geometrik koşulunu karşılıyor ve yine kutu.
+    /// `.LastResort` is within the limit (`fit` 1.660) but is not shrunk
+    /// (R3.2): the candidate meets the shrink branch's geometric condition and
+    /// is still a box.
     #[test]
     fn last_resort_is_not_shrunk() {
         let a = Atlas::new(None, 16.0, 2.0, 1.0);
@@ -370,9 +386,9 @@ mod tests {
         let candidate = font::cascade_candidate(base, ch);
         assert!(
             font::is_last_resort(&candidate),
-            "U+E0A0 başka bir fonttan geldi"
+            "U+E0A0 came from another font"
         );
-        let glyph = font::glyph_index(&candidate, ch).expect(".LastResort glyph vermedi");
+        let glyph = font::glyph_index(&candidate, ch).expect(".LastResort gave no glyph");
         let fit = font::fit_ratio(
             a.cell_advance,
             font::glyph_advance(&candidate, glyph),
@@ -380,16 +396,17 @@ mod tests {
         );
         assert!(
             fit <= font::SHRINK_LIMIT,
-            "fit {fit:.3} sınırın içinde olmalı"
+            "fit {fit:.3} must be within the limit"
         );
         assert!(font::accept(candidate, glyph, a.cell_advance, 1).is_none());
     }
 
-    /// Bugün kapıyı geçen her aday **bit bit aynı** çiziliyor (R3.3): küçültme
-    /// en son kol, yani iki kapıdan birini geçen aday aynı fontla (aynı
-    /// nesne, aynı punto), `shrunk = false` ve sıfır `rise` ile dönüyor.
-    /// Taranan blokların tamamı, 16pt @2x; `⏺` için raster ayrıca 041 öncesi
-    /// yolla (`raster::draw`, `rise`'sız sarmalayıcı) bayt bayt karşılaştırılıyor.
+    /// Every candidate that passes the gate today is drawn **bit-for-bit the
+    /// same** (R3.3): shrinking is the last branch, so a candidate passing
+    /// either gate comes back with the same font (same object, same size),
+    /// `shrunk = false` and zero `rise`. All scanned blocks, 16pt @2x; for `⏺`
+    /// the raster is additionally compared byte for byte with the pre-041
+    /// path (`raster::draw`, the wrapper without `rise`).
     #[test]
     fn gate_accepted_candidates_are_unchanged() {
         let a = Atlas::new(None, 16.0, 2.0, 1.0);
@@ -411,24 +428,24 @@ mod tests {
                     continue;
                 }
                 let ptr = std::ptr::from_ref::<CTFont>(&candidate);
-                let alt = font::accept(candidate, glyph, cell, 1).expect("kapıyı geçen döndü");
-                assert!(!alt.shrunk, "{ch}: kapıyı geçen aday küçültüldü");
-                assert!(std::ptr::eq(ptr, &*alt.font), "{ch}: font değişti");
-                assert_eq!(alt.rise(m), 0.0, "{ch}: dikey kayma");
+                let alt = font::accept(candidate, glyph, cell, 1).expect("gate-passing rejected");
+                assert!(!alt.shrunk, "{ch}: a gate-passing candidate was shrunk");
+                assert!(std::ptr::eq(ptr, &*alt.font), "{ch}: font changed");
+                assert_eq!(alt.rise(m), 0.0, "{ch}: vertical shift");
                 passed += 1;
             }
         }
-        assert!(passed > 300, "kapıyı geçen aday az: {passed}");
+        assert!(passed > 300, "too few gate-passing candidates: {passed}");
 
-        let alt = font::fallback_font(base, '⏺', cell, 1).expect("⏺ kutu çıktı");
+        let alt = font::fallback_font(base, '⏺', cell, 1).expect("⏺ came out as a box");
         let mut before = vec![0u8; m.slot_bytes()];
         let mut after = vec![0u8; m.slot_bytes()];
         raster::draw(&alt.font, '⏺', m, cell, 0.0, &mut before);
         raster::draw_glyph(&alt.font, alt.glyph, m, cell, 0.0, alt.rise(m), &mut after);
-        assert_eq!(before, after, "⏺ rasteri değişti");
+        assert_eq!(before, after, "⏺ raster changed");
     }
 
-    /// Taranan bloklar: (ad, ilk, son).
+    /// Scanned blocks: (name, first, last).
     const BLOCKS: [(&str, u32, u32); 13] = [
         ("Arrows", 0x2190, 0x21FF),
         ("Mathematical Operators", 0x2200, 0x22FF),
@@ -444,14 +461,15 @@ mod tests {
         ("Emoji (1F300–1FAFF)", 0x1F300, 0x1FAFF),
         ("Private Use Area", 0xE000, 0xF8FF),
     ];
-    /// (punto, ölçek) — R1.1'in dört birleşimi.
+    /// (size, scale) — the four combinations of R1.1.
     const COMBOS: [(f64, f64); 4] = [(13.0, 1.0), (13.0, 2.0), (16.0, 1.0), (16.0, 2.0)];
-    /// Histogramın kova sınırları: <1.2 / 1.2–1.5 / 1.5–1.7 / 1.7+. İlk kova
-    /// 1.0'ın altını da taşıyor: sola taşan ya da sola yapışıp sağdan taşan
-    /// aday mürekkebi hücreden dar olsa da dönüyor.
+    /// The histogram's bucket edges: <1.2 / 1.2–1.5 / 1.5–1.7 / 1.7+. The
+    /// first bucket also holds values below 1.0: a candidate that overflows
+    /// on the left, or sticks to the left and overflows on the right, is
+    /// turned back even if its ink is narrower than the cell.
     const EDGES: [f64; 3] = [1.2, 1.5, 1.7];
-    /// Cascade'in "kimse çizemiyor" cevabı; [`classify`] onu kapının
-    /// ölçütüyle bu adla etiketliyor.
+    /// The cascade's "nobody can draw it" answer; [`classify`] labels it with
+    /// this name by the gate's criterion.
     const LAST_RESORT: &str = font::LAST_RESORT;
 
     fn bucket(v: f64) -> usize {
@@ -469,7 +487,7 @@ mod tests {
         )
     }
 
-    /// Karakter ekranda görünmüyorsa (PUA) kod noktasıyla.
+    /// By code point if the character is not visible on screen (PUA).
     fn show(ch: char) -> String {
         if ('\u{E000}'..='\u{F8FF}').contains(&ch) {
             format!("U+{:04X}", u32::from(ch))
@@ -478,7 +496,7 @@ mod tests {
         }
     }
 
-    /// Ardışık kod noktalarını `ilk..son` aralıklarına toplar.
+    /// Collects consecutive code points into `first..last` ranges.
     fn spans(cps: &[u32]) -> String {
         let mut out: Vec<String> = Vec::new();
         let mut i = 0;
@@ -503,7 +521,7 @@ mod tests {
         format!("{min:.3}..{max:.3}")
     }
 
-    /// Bir adayın özeti: font başına dökümde tutulan.
+    /// A candidate summary: what the per-font breakdown keeps.
     #[derive(Default)]
     struct FontRow {
         accepted: usize,
@@ -513,24 +531,28 @@ mod tests {
         wide: usize,
     }
 
-    /// Sembol ve emoji bloklarını kapıdan geçirip grup sayılarını, reddedilen
-    /// adayların oran histogramını ve font başına dökümü basar.
+    /// Passes the symbol and emoji blocks through the gate and prints the
+    /// group counts, the ratio histogram of rejected candidates and the
+    /// per-font breakdown.
     ///
-    /// Her karakter **tek sütunlu** sorulur (`cols = 1`): `bt-atlas`
-    /// `unicode-width`'i görmüyor ve genişliğin tek yetkilisi `bt-core`'un
-    /// tablosu. Reddedilenin ve küçültülenin iki sütunlu sorulduğunda ne
-    /// olduğu ayrıca soruluyor (`2h`, "2 hücrelik kutuda fit"): geniş ilan
-    /// edilen karakter orada çizilir, tek sütunlu ilan edilen kutu kalır ya da
-    /// tek hücreye küçülür. Hangisinin hangisi olduğu ızgaranın sorusu.
+    /// Every character is asked as **single-column** (`cols = 1`): `bt-atlas`
+    /// does not see `unicode-width` and the sole authority on width is
+    /// `bt-core`'s table. What happens to the rejected and shrunk ones when
+    /// asked as two columns is asked separately (`2h`, "fit in a 2-cell
+    /// box"): a character declared wide is drawn there, one declared
+    /// single-column stays a box or shrinks into one cell. Which is which is
+    /// the grid's question.
     ///
-    /// Küçültme için iki tanık basılıyor: küçültülenlerin `fit` dağılımı ve
-    /// sınırın içinde olup küçük kopyası yeniden sınamadan dönenler (sıfır
-    /// olmalı; olmazsa [`font::SHRINK_LIMIT`]'in türetmesi eskidi).
+    /// Two witnesses are printed for shrinking: the `fit` distribution of the
+    /// shrunk ones, and those within the limit whose small copy failed the
+    /// re-test (must be zero; otherwise [`font::SHRINK_LIMIT`]'s derivation is
+    /// stale).
     ///
-    /// Yordamsal aralıklar atlanıyor: font sorulmadan çiziliyorlar. Taban
-    /// aile `BT_SCAN_FONT`'tan (yoksa zincirin varsayılanı).
+    /// The procedural ranges are skipped: they are drawn without asking a
+    /// font. The base family comes from `BT_SCAN_FONT` (else the chain's
+    /// default).
     #[test]
-    #[ignore = "makinedeki fontlara bağlı bir envanter; `make tarama`"]
+    #[ignore = "an inventory that depends on the machine's fonts; `make tarama`"]
     fn census() {
         let family = std::env::var("BT_SCAN_FONT").ok();
         let mut out = String::new();
@@ -538,23 +560,24 @@ mod tests {
             let a = Atlas::new(family.as_deref(), pt, scale, 1.0);
             let base = a.faces.get(Face::Regular);
             let cell = a.cell_advance;
-            // SAFETY: `base` atlasın elinde canlı.
+            // SAFETY: `base` is kept alive by the atlas.
             let base_name = unsafe { base.family_name() }.to_string();
             let _ = writeln!(
                 out,
-                "\n=== {pt}pt @{scale}x — taban {base_name}, hücre {cell:.3} px ==="
+                "\n=== {pt}pt @{scale}x — base {base_name}, cell {cell:.3} px ==="
             );
             let _ = writeln!(
                 out,
                 "{:<26} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
-                "blok", "taban", "yedek", "küçük", "yok", "ret", "(2h)", "(LR)"
+                "block", "base", "fallb", "shrunk", "none", "reject", "(2h)", "(LR)"
             );
             let mut fonts: BTreeMap<String, FontRow> = BTreeMap::new();
             let mut totals = [0usize; 7];
             let mut shrunk_fits: Vec<f64> = Vec::new();
             let mut shrink_failed: Vec<String> = Vec::new();
-            // `.LastResort`'a düşen kod noktaları, PUA hariç (orada neredeyse
-            // hepsi): hangi karakterde döndüğü phase-2'nin R3.2 sorusu.
+            // Code points that land on `.LastResort`, excluding PUA (almost
+            // all of it lands there): which characters it answers is
+            // phase-2's R3.2 question.
             let mut last_resort: Vec<u32> = Vec::new();
             for (name, first, last) in BLOCKS {
                 let mut row = [0usize; 7];
@@ -623,7 +646,7 @@ mod tests {
             let _ = writeln!(
                 out,
                 "{:<26} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
-                "TOPLAM",
+                "TOTAL",
                 totals[0],
                 totals[1],
                 totals[2],
@@ -634,14 +657,14 @@ mod tests {
             );
             let _ = writeln!(
                 out,
-                "küçültülen: fit {} ({}) · sınırın içinde yeniden sınamadan dönen: {} {}",
+                "shrunk: fit {} ({}) · within the limit but failed the re-test: {} {}",
                 range(&shrunk_fits),
                 histogram(&shrunk_fits),
                 shrink_failed.len(),
                 shrink_failed.join(" ")
             );
 
-            let _ = writeln!(out, ".LastResort (PUA dışı): {}", spans(&last_resort));
+            let _ = writeln!(out, ".LastResort (excluding PUA): {}", spans(&last_resort));
             let real: Vec<&(char, f64, f64)> = fonts
                 .iter()
                 .filter(|(f, _)| f.as_str() != LAST_RESORT)
@@ -655,20 +678,20 @@ mod tests {
                 .collect();
             let _ = writeln!(
                 out,
-                "ret (.LastResort hariç, {} aday): {listed}",
+                "rejected (excluding .LastResort, {} candidates): {listed}",
                 real.len()
             );
             let _ = writeln!(out, "  ratio {}", histogram(&ratios));
             let _ = writeln!(out, "  fit   {}", histogram(&fits));
             let _ = writeln!(
                 out,
-                "font başına (kabul / küçük / ret, 2h = iki sütunluda çizilen ret):"
+                "per font (accepted / shrunk / rejected, 2h = rejected drawn as two columns):"
             );
             for (font, row) in &fonts {
                 if row.rejected.is_empty() {
                     let _ = writeln!(
                         out,
-                        "  {font}: {} kabul / {} küçük — 2 hücrelik kutuda fit {}",
+                        "  {font}: {} accepted / {} shrunk — fit in a 2-cell box {}",
                         row.accepted,
                         row.shrunk,
                         range(&row.fit2)
@@ -679,8 +702,8 @@ mod tests {
                 let f: Vec<f64> = row.rejected.iter().map(|x| x.2).collect();
                 let _ = writeln!(
                     out,
-                    "  {font}: {} kabul / {} küçük / {} ret (2h {}) — ratio {} · fit {} · \
-                     2 hücrelik kutuda fit {}",
+                    "  {font}: {} accepted / {} shrunk / {} rejected (2h {}) — ratio {} · fit {} · \
+                     fit in a 2-cell box {}",
                     row.accepted,
                     row.shrunk,
                     row.rejected.len(),
@@ -689,7 +712,7 @@ mod tests {
                     range(&f),
                     range(&row.fit2)
                 );
-                // Sınırın bulunacağı bölge: fit < 1.5'in karakterleri.
+                // The region where the limit is found: the characters with fit < 1.5.
                 let near: String = row
                     .rejected
                     .iter()

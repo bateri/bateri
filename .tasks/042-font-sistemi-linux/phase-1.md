@@ -30,9 +30,18 @@ _Requirements: R4, R1.1_
 
 ## Checklist
 
-- [ ] `font.rs` çevrildi
-- [ ] `raster.rs`'in platforma bağlı yarısı çevrildi
-- [ ] `census.rs` çevrildi
-- [ ] Test: yorumsuz fark yalnız dizgi değişimi
-- [ ] Test: tanık ebeveynle aynı
-- [ ] Doğrulama geçti (`make hepsi`)
+- [x] `font.rs` çevrildi
+- [x] `raster.rs`'in platforma bağlı yarısı çevrildi
+- [x] `census.rs` çevrildi
+- [x] Test: yorumsuz fark yalnız dizgi değişimi
+- [x] Test: tanık ebeveynle aynı
+- [x] Doğrulama geçti (`make hepsi`)
+
+## Uygulama Notları
+
+- `census.rs`'in rapor başlıkları ve sütun adları da çevrildi (`TOPLAM` →
+  `TOTAL`): çıktıyı ayrıştıran yok, `make tarama` yalnız `cargo test` koşuyor.
+- `unreachable!` metni satırı 100 sütunda tutacak kadar kısaltıldı; aksi
+  hâlde rustfmt kolu bloğa açıp yorumsuz farkı dizgi dışına taşırdı.
+- `raster.rs`'te bir doc satırı `CLAUDE.md` başlığını ("Renk uzayı sınırı
+  geçer") Türkçe alıntılıyor — işaretçi, çeviri değil.

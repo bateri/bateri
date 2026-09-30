@@ -1,9 +1,10 @@
-//! Font zinciri ve hücre metriği.
+//! Font chain and cell metrics.
 //!
-//! Zincirin can alıcı noktası şu: `CTFontCreateWithName` **hata vermez**.
-//! İstenen aile yoksa CoreText elindeki en yakın fontu döndürür ve çağıran
-//! hiçbir şey fark etmez. Bu yüzden "font açıldı" bir kanıt değildir; açılan
-//! fontun kendi bildirdiği aile adı istenenle karşılaştırılır.
+//! The crux of the chain: `CTFontCreateWithName` **does not fail**. If the
+//! requested family is missing, CoreText returns the closest font it has and
+//! the caller notices nothing. So "the font opened" is not evidence; the
+//! family name the opened font reports about itself is compared with the one
+//! requested.
 
 use std::ptr::{self, NonNull};
 
@@ -17,25 +18,26 @@ use objc2_core_text::{
     kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontSymbolicTrait, kCTFontTraitsAttribute,
 };
 
-/// Tercih sırası. Bulunamayan ad **sessizce** atlanır: SF Mono Xcode ile
-/// gelir, her makinede yoktur ve yokluğu bir kusur değil tasarlanmış bir geri
-/// düşüştür. Uyarı yalnız tabanın da ikame edilmesi hâlinde anlamlı.
+/// Order of preference. A name that cannot be found is skipped **silently**:
+/// SF Mono ships with Xcode, it is not on every machine, and its absence is
+/// not a defect but a designed fallback. A warning only makes sense when the
+/// base is substituted too.
 const PREFERRED: [&str; 1] = ["SF Mono"];
 
-/// Garanti taban: macOS'un her sürümünde kurulu. Ayrı bir sabit olmasının
-/// sebebi tip düzeyinde bir güvence — zincir boş dönemez, dolayısıyla
-/// `Option`/`expect` yolu hiç doğmaz.
+/// The guaranteed base: installed on every macOS release. It is a separate
+/// constant for a type-level guarantee — the chain cannot come back empty, so
+/// an `Option`/`expect` path never arises.
 const FALLBACK: &str = "Menlo";
 
-/// Font yüzü — **tipografi kavramı**, SGR bayrağı değil.
+/// Font face — a **typographic concept**, not an SGR flag.
 ///
-/// `bt-core`'un `bold`/`italic` bayraklarıyla dört varyantı aynı, **sebepleri
-/// ayrı**: oradaki terminal semantiği (SGR 1 / SGR 3), buradaki CoreText
-/// trait'i. İkisini "aynı görünüyorlar" diye tek tipte birleştirmek
-/// `bt-atlas`'a bir `bt-core` kenarı eklemek demek olurdu ve o kenar
-/// `alacritty_terminal`'i saf-CoreText crate'ine çeker. Çeviri `bt-gpu`'da,
-/// ikisini birden gören tek katmanda.
-// `repr(u8)`: bkz. `RuleKind` — anahtar `slot()`'un sıcak yolunda.
+/// Its four variants match `bt-core`'s `bold`/`italic` flags, but **for
+/// different reasons**: there it is terminal semantics (SGR 1 / SGR 3), here
+/// it is a CoreText trait. Merging the two into one type because "they look
+/// the same" would add a `bt-core` edge to `bt-atlas`, and that edge would
+/// pull `alacritty_terminal` into a pure-CoreText crate. The translation
+/// lives in `bt-gpu`, the one layer that sees both.
+// `repr(u8)`: see `RuleKind` — the key is on `slot()`'s hot path.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Face {
@@ -46,17 +48,18 @@ pub enum Face {
     BoldItalic = 3,
 }
 
-/// Bir sprite'ın hangi **punto sınıfında** rasterize edileceği.
+/// Which **point-size class** a sprite is rasterized in.
 ///
-/// [`Face`] ile **dik** bir eksen ve bilerek ayrı: yüz metnin biçimi (SGR 1 /
-/// SGR 3'ün karşılığı), bu onun ölçüsü. `Face`'e beşinci bir varyant olarak
-/// eklenseydi "kalın küçük" temsil edilemez olur ve [`Faces::effective`]'in
-/// merdiveni iki ayrı soruyu tek sıraya dizerdi.
+/// An axis **orthogonal** to [`Face`] and deliberately separate: the face is
+/// the text's style (the counterpart of SGR 1 / SGR 3), this is its size. Had
+/// it been added to `Face` as a fifth variant, "bold small" would be
+/// unrepresentable and [`Faces::effective`]'s ladder would line two separate
+/// questions up in a single order.
 ///
-/// Küçük sınıfın **tek** tüketicisi dock'un bağlam satırı; o satır terminalin
-/// kendi altbilgisi ve kabuğun biçimlendirmesi oraya hiç girmiyor, bu yüzden
-/// küçük tarafta yalnız düz yüz rasterize ediliyor (`Atlas::slot`).
-// `repr(u8)`: bkz. `RuleKind` — anahtar `slot()`'un sıcak yolunda.
+/// The small class has **one** consumer, the dock's context line; that line
+/// is the terminal's own footer and the shell's styling never reaches it, so
+/// only the regular face is rasterized on the small side (`Atlas::slot`).
+// `repr(u8)`: see `RuleKind` — the key is on `slot()`'s hot path.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum SizeClass {
@@ -66,7 +69,7 @@ pub enum SizeClass {
 }
 
 impl Face {
-    /// Uyarı metninde geçen ad.
+    /// The name used in the warning text.
     fn name(self) -> &'static str {
         match self {
             Face::Regular => "Regular",
@@ -76,20 +79,22 @@ impl Face {
         }
     }
 
-    /// Yüzün CoreText trait maskesi.
+    /// The face's CoreText trait mask.
     ///
-    /// `Regular` **çağrılmaz**: düz yüz türetilmiyor, zincirden geliyor.
-    /// Boş maske dönseydi `derive_face` onu "gerçek yüz değil" sentineli olarak
-    /// okumak zorunda kalır ve `None` iki anlam taşırdı.
+    /// `Regular` is **never called**: the regular face is not derived, it
+    /// comes from the chain. Had it returned an empty mask, `derive_face`
+    /// would have to read that as a "not a real face" sentinel and `None`
+    /// would carry two meanings.
     fn traits(self) -> CTFontSymbolicTraits {
         match self {
-            // audit: ulaşılamaz ve bunu **modül sınırı** koruyor, çağıran
-            // disiplini değil: `derive_face` font.rs'e özel ve tek çağıranı
-            // `[Bold, Italic, BoldItalic]` üzerinde dönüyor. `pub(crate)`
-            // olsaydı crate içinden `Face::Regular` ile çağıran biri
-            // derleyiciden uyarı almadan buraya düşer, panik de `slot()`
-            // üzerinden ana thread'de kareyi düşürürdü.
-            Face::Regular => unreachable!("düz yüz türetilmiyor, zincirden geliyor"),
+            // audit: unreachable, and what guards it is the **module
+            // boundary**, not caller discipline: `derive_face` is private to
+            // font.rs and its only caller iterates over
+            // `[Bold, Italic, BoldItalic]`. Were it `pub(crate)`, someone in
+            // the crate calling it with `Face::Regular` would land here
+            // without a compiler warning, and the panic would take the frame
+            // down on the main thread via `slot()`.
+            Face::Regular => unreachable!("regular face is not derived, it comes from the chain"),
             Face::Bold => CTFontSymbolicTraits::TraitBold,
             Face::Italic => CTFontSymbolicTraits::TraitItalic,
             Face::BoldItalic => CTFontSymbolicTraits::TraitBold | CTFontSymbolicTraits::TraitItalic,
@@ -97,37 +102,42 @@ impl Face {
     }
 }
 
-/// Dört yüz, `Face` sırasında. Düz yüz zincirden, ötekiler ondan türer.
+/// Four faces, in `Face` order. The regular face comes from the chain, the
+/// others are derived from it.
 pub(crate) struct Faces {
     fonts: [CFRetained<CTFont>; 4],
-    /// Gerçekten **edinilen** yüzler; edinilemeyen düz yüze çökmüş demektir.
+    /// The faces actually **acquired**; one that could not be acquired has
+    /// collapsed onto the regular face.
     ///
-    /// Bu bilgi saklanmasaydı çağıran hangi yüzü aldığını bilemezdi ve
-    /// [`Faces::effective`]'in kapattığı yuva israfı sessizce açık kalırdı.
+    /// Without keeping this, the caller could not know which face it got and
+    /// the slot waste that [`Faces::effective`] closes would silently stay
+    /// open.
     acquired: [bool; 4],
 }
 
-/// İstenen ailenin kullanıcıya söylenmesi gereken sonucu.
+/// The outcome of the requested family that has to be told to the user.
 ///
-/// **İkisi birden olamaz:** bulunamayan ailenin yerine zincir açılıyor ve
-/// zincirin iki fontu da eşaralıklı. Tip bu yüzden liste değil.
+/// **Both cannot happen at once:** a family that is not found is replaced by
+/// the chain, and both fonts of the chain are monospaced. That is why the
+/// type is not a list.
 ///
-/// Metin yok: bu crate UI dizgisi kurmuyor, yalnız olguyu veriyor. Tip
-/// `bt-atlas`'ın dışına çıkmaz — `bt-gpu` kendi bildirim tipine çevirir
-/// (`bt-shell` bu crate'i görmüyor, 003 R5).
+/// No text: this crate builds no UI strings, it only reports the fact. The
+/// type does not leave `bt-atlas` — `bt-gpu` translates it into its own
+/// notice type (`bt-shell` does not see this crate, 003 R5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FontIssue {
-    /// Aile makinede yok; `using` zincirin gerçekten açtığı ailenin adı.
+    /// The family is not on this machine; `using` is the name of the family
+    /// the chain actually opened.
     FamilyNotFound { requested: String, using: String },
-    /// Aile açıldı ama CoreText onu eşaralıklı saymıyor. **Reddedilmiyor**:
-    /// hücre boşluğun genişliğinden türüyor ve harfler hücreye kırpılarak
-    /// çiziliyor, yani bozuk ama çalışan bir ekran. `family` CoreText'in
-    /// bildirdiği ad.
+    /// The family opened but CoreText does not consider it monospaced. **Not
+    /// rejected**: the cell derives from the space's width and letters are
+    /// drawn clipped to the cell, i.e. a broken but working screen. `family`
+    /// is the name CoreText reports.
     NotMonospaced { family: String },
 }
 
 impl Faces {
-    /// Zincirden açar ([`open_chain`]) ve üç yüzü türetir.
+    /// Opens from the chain ([`open_chain`]) and derives the three faces.
     pub(crate) fn from_chain(
         family: Option<&str>,
         point_size: CGFloat,
@@ -136,11 +146,11 @@ impl Faces {
         (Self::derive(regular), issue)
     }
 
-    /// Verilen düz yüzden türetir.
+    /// Derives from the given regular face.
     ///
-    /// Ayrı bir kurucu, sınama için: zincirin tabanı (Menlo) dört yüzü de
-    /// taşıyor, yani geri düşüş dalı gerçek bir fontla ancak **tek yüzlü** bir
-    /// aile verilerek ateşlenebiliyor.
+    /// A separate constructor, for testing: the base of the chain (Menlo)
+    /// carries all four faces, so the fallback branch can only be fired with
+    /// a real font by passing a **single-face** family.
     pub(crate) fn derive(regular: CFRetained<CTFont>) -> Self {
         let mut fonts = [regular.clone(), regular.clone(), regular.clone(), regular];
         let mut acquired = [true, false, false, false];
@@ -155,15 +165,16 @@ impl Faces {
             }
         }
         if !missing.is_empty() {
-            // Atlas kurulumunda bir kez — `slot()` çizim yolunda ve orada
-            // basılan bir satır kare başına tekrarlanırdı. **"Ömürde bir kez"
-            // değil:** `Atlas::ensure` aile/punto/ölçek değişince atlası (ve bunu)
-            // yeniden kuruyor, yani pencere Retina ile harici ekran arasında
-            // taşınırsa satır tekrar düşer. Kabul edilen bedel; susturmak
-            // `Faces`'in dışında kalıcı bir durum ister. Önek
-            // `open_chain`'ınkiyle aynı (`bateri:`), aynı gerekçeyle.
+            // Once per atlas construction — `slot()` is on the drawing path
+            // and a line printed there would repeat every frame. **Not "once
+            // per lifetime":** `Atlas::ensure` rebuilds the atlas (and this)
+            // when the family/size/scale changes, so the line shows up again
+            // if the window moves between a Retina and an external display.
+            // An accepted cost; silencing it would need persistent state
+            // outside `Faces`. The prefix is the same as `open_chain`'s
+            // (`bateri:`), for the same reason.
             eprintln!(
-                "bateri: font ailesinde {} yüzü yok, düz yüz kullanılıyor",
+                "bateri: the font family has no {} face, using the regular face",
                 missing.join(", ")
             );
         }
@@ -174,19 +185,21 @@ impl Faces {
         &self.fonts[face as usize]
     }
 
-    /// Yuva anahtarına girecek yüz: **edinilemeyen yüz `Regular`'a çöker**.
+    /// The face that goes into the slot key: **a face that could not be
+    /// acquired collapses to `Regular`**.
     ///
-    /// Anahtarın istenen yüzü değil **çizilen** yüzü taşıması şart. Tek yüzlü
-    /// bir ailede (`Monaco`) `(Char, Bold)` ile `(Char, Regular)` bayt bayt
-    /// aynı bitmap'i iki ayrı yuvada tutardı; dört yüzle atlas dört kat hızlı
-    /// dolar, fazlalık glyph'ler tofu'ya düşer ve belirti sessizdir.
-    /// `Sprite::Rule`'un `Regular`'a indirilmesiyle aynı olgunun ikinci yüzü:
-    /// istenen yüz ile çizilen yüz aynı olmak zorunda değil.
+    /// The key must carry the **drawn** face, not the requested one. In a
+    /// single-face family (`Monaco`), `(Char, Bold)` and `(Char, Regular)`
+    /// would hold byte-for-byte the same bitmap in two separate slots; with
+    /// four faces the atlas fills four times as fast, surplus glyphs fall to
+    /// tofu and the symptom is silent. The second face of the same fact as
+    /// `Sprite::Rule` being lowered to `Regular`: the requested face and the
+    /// drawn face need not be the same.
     pub(crate) fn effective(&self, face: Face) -> Face {
-        // Merdiven, düz düşüş değil: `BoldItalic`'i doğrudan `Regular`'a
-        // indirmek **kalınlığı da** düşürürdü. Gerçek bir `Bold Italic` yüzü
-        // olmayan ama `Bold` taşıyan aile yaygın; orada SGR 1;3 metni düz
-        // çıkardı, oysa kalın yüz elde mevcut.
+        // A ladder, not a straight drop: lowering `BoldItalic` directly to
+        // `Regular` would drop the **weight** too. Families with no real
+        // `Bold Italic` face but with a `Bold` one are common; there SGR 1;3
+        // text would come out regular although the bold face is at hand.
         let ladder: &[Face] = match face {
             Face::BoldItalic => &[Face::BoldItalic, Face::Bold, Face::Italic],
             Face::Bold => &[Face::Bold],
@@ -201,107 +214,115 @@ impl Faces {
     }
 }
 
-/// `regular`den `face`in yüzünü türetir; edinemezse `None`.
+/// Derives `face` from `regular`; `None` if it cannot be acquired.
 ///
-/// Denetim **iki kapılı ve aile adı karşılaştırması yapmıyor**. Aile
-/// karşılaştırması burada totoloji olurdu: API'nin sözleşmesi zaten "aynı
-/// ailede yeni bir font, yoksa NULL" ve `Menlo-Bold`'un ailesi `Menlo`.
+/// The check has **two gates and does no family-name comparison**. A family
+/// comparison here would be a tautology: the API's contract already is "a new
+/// font in the same family, or NULL", and the family of `Menlo-Bold` is
+/// `Menlo`.
 ///
-/// 1. **`nil` mi** — tipte, `Option` olarak geliyor.
-/// 2. **İstenen trait'i gerçekten edindi mi** — CoreText istenen yüzü
-///    bulamazsa **düz yüzü geri verebiliyor** ve o sessiz ikame,
-///    `open_chain`'ın `CTFontCreateWithName` için yaşadığı hatanın ta
-///    kendisi. Tek fark: orada aile adına, burada trait maskesine bakılıyor.
+/// 1. **Is it `nil`** — in the type, it comes as an `Option`.
+/// 2. **Did it really acquire the requested trait** — when CoreText cannot
+///    find the requested face it **may hand back the regular face**, and
+///    that silent substitution is exactly the failure `open_chain` lives
+///    through with `CTFontCreateWithName`. The only difference: there the
+///    family name is checked, here the trait mask.
 fn derive_face(regular: &CTFont, face: Face) -> Option<CFRetained<CTFont>> {
     let wanted = face.traits();
-    // SAFETY: `regular` canlı; `matrix` null geçerli. **Dikkat:** copy ailesinde
-    // null "birim matris" değil, **kaynak fontun matrisi korunur** demek —
-    // `open()`'taki `CTFontCreateWithName` gerekçesiyle karıştırılmamalı, orada
-    // null gerçekten birim matristir. İstenen de bu: türetilen yüz kaynağın
-    // dönüşümünü aynen taşısın, yoksa bir gün matrisli bir font zincire
-    // girdiğinde eğim iki kez uygulanır. `size` 0.0 → kaynağın puntosu korunur.
+    // SAFETY: `regular` is alive; a null `matrix` is valid. **Careful:** in
+    // the copy family null does not mean "identity matrix", it means **the
+    // source font's matrix is kept** — not to be confused with the
+    // `CTFontCreateWithName` rationale in `open()`, where null really is the
+    // identity matrix. This is what we want: the derived face should carry
+    // the source's transform as is, otherwise the day a font with a matrix
+    // joins the chain the slant is applied twice. `size` 0.0 → the source's
+    // point size is kept.
     let font = unsafe { regular.copy_with_symbolic_traits(0.0, ptr::null(), wanted, wanted) }?;
-    // SAFETY: `font` az önce yaratıldı ve bu kapsamda canlı.
+    // SAFETY: `font` was just created and is alive in this scope.
     let returned = unsafe { font.symbolic_traits() };
     returned.contains(wanted).then_some(font)
 }
 
-/// Hücre ölçüsü, **fiziksel piksel**.
+/// Cell measurements, in **physical pixels**.
 ///
-/// `Atlas::new`'in `scale` parametresi punto ile çarpılıp fonta girer, yani
-/// ekran ölçeği buradaki sayıların içindedir. Ölçeğin anahtarın parçası
-/// olması şart: @1x'te rasterize edilmiş glyph @2x'te **hatasız** bulanıklaşır
-/// ve belirti yalnız iki ekranlı makinede görünür (discussion.md → Muhakeme).
+/// `Atlas::new`'s `scale` parameter is multiplied with the point size and
+/// goes into the font, so the display scale is inside these numbers. The
+/// scale must be part of the key: a glyph rasterized at @1x blurs **without
+/// error** at @2x and the symptom shows only on a two-display machine
+/// (discussion.md → Muhakeme).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Metrics {
-    /// (genişlik, yükseklik).
+    /// (width, height).
     pub cell_px: (u16, u16),
-    /// Hücrenin **üstünden** taban çizgisine piksel; glyph oradan oturur.
-    /// [`Metrics::cell_px`]'in yüksekliğini aşmaz — `metrics()` sınırlıyor.
+    /// Pixels from the **top** of the cell to the baseline; the glyph sits
+    /// there. Does not exceed the height of [`Metrics::cell_px`] —
+    /// `metrics()` bounds it.
     pub baseline_px: u16,
-    /// Alt çizgi: (hücrenin üstünden konum, kalınlık).
+    /// Underline: (position from the top of the cell, thickness).
     ///
-    /// `konum + kalınlık` **asla** `cell_px.1`'i aşmaz — [`rule_envelope`]
-    /// sınırlıyor. Aşsaydı çizgi komşu satırın tepesinde belirirdi ve belirti
-    /// sessiz olurdu.
+    /// `position + thickness` **never** exceeds `cell_px.1` — [`rule_envelope`]
+    /// bounds it. If it did, the line would appear at the top of the next row
+    /// and the symptom would be silent.
     pub underline_px: (u16, u16),
-    /// Üstü çizili: (konum, kalınlık). Aynı güvence.
+    /// Strikeout: (position, thickness). The same guarantee.
     pub strikeout_px: (u16, u16),
 }
 
 impl Metrics {
-    /// Tek yuvanın bayt sayısı (`R8`: piksel başına bir bayt).
+    /// Byte count of a single slot (`R8`: one byte per pixel).
     ///
-    /// Yuva geometrisinin **tek sahibi** burası: atlasın tamponu, tofu çizimi
-    /// ve raster hedefi üçü de bunu okuyor. Geometri değişirse (kenar payı,
-    /// hizalama dolgusu) düzeltilecek tek aritmetik nokta var; üçe dağılmış
-    /// olsaydı biri unutulduğunda tamponlar sessizce ayrışırdı.
+    /// This is the **single owner** of slot geometry: the atlas's buffer, the
+    /// tofu drawing and the raster target all three read it. If the geometry
+    /// changes (edge padding, alignment filler) there is one arithmetic point
+    /// to fix; spread over three, forgetting one would make the buffers
+    /// silently diverge.
     pub fn slot_bytes(self) -> usize {
         let (w, h) = self.cell_wh();
         w * h
     }
 
-    /// Renk düzleminin tek yuvası (`RGBA8`: piksel başına **dört** bayt).
+    /// A single slot of the colour plane (`RGBA8`: **four** bytes per pixel).
     ///
-    /// Aynı yuva geometrisi, başka format — ve tek sahip kuralı bozulmuyor:
-    /// ikisi de [`Metrics::cell_wh`]'den türüyor, yani kenar payı ya da
-    /// hizalama dolgusu bir gün girerse düzeltilecek yer hâlâ tek. Sayıyı
-    /// `slot_bytes() * 4` diye yazmak da olurdu; ayrı bir isim, tamponu
-    /// kuranın hangi düzlemde olduğunu **söylemesini** zorunlu kılıyor ve
-    /// `raster::draw`'un assert'i yanlış düzlemi yakalıyor.
+    /// Same slot geometry, different format — and the single-owner rule is
+    /// not broken: both derive from [`Metrics::cell_wh`], so if edge padding
+    /// or alignment filler ever comes in there is still one place to fix.
+    /// The number could have been written as `slot_bytes() * 4`; a separate
+    /// name forces whoever builds the buffer to **state** which plane it is
+    /// for, and `raster::draw`'s assert catches the wrong plane.
     pub fn slot_bytes_rgba(self) -> usize {
         self.slot_bytes() * 4
     }
 
-    /// Hücre ölçüsü `usize` olarak — indeksleme ve döngü sınırı için.
+    /// Cell size as `usize` — for indexing and loop bounds.
     ///
-    /// [`Metrics::slot_bytes`] ile aynı gerekçe: açımı dörde dağıtmak yerine
-    /// tek sahipte tutuyor.
+    /// The same rationale as [`Metrics::slot_bytes`]: it keeps the widening
+    /// with a single owner instead of spreading it over four places.
     pub(crate) fn cell_wh(self) -> (usize, usize) {
         (usize::from(self.cell_px.0), usize::from(self.cell_px.1))
     }
 }
 
-/// Adı verilen aileyi açar ve CoreText'in gerçekten verdiği aile adını
-/// **birlikte** döndürür. İkisi ayrışıyorsa istenen font makinede yok.
+/// Opens the named family and returns it **together** with the family name
+/// CoreText actually gave. If the two differ, the requested font is not on
+/// this machine.
 pub(crate) fn open(name: &str, point_size: CGFloat) -> (CFRetained<CTFont>, String) {
     let wanted = CFString::from_str(name);
-    // SAFETY: `matrix` null → birim matris; `CTFontCreateWithName` bunu
-    // açıkça destekliyor ve dönüş non-null.
+    // SAFETY: null `matrix` → identity matrix; `CTFontCreateWithName`
+    // explicitly supports it and the return is non-null.
     let font = unsafe { CTFont::with_name(&wanted, point_size, ptr::null()) };
-    // SAFETY: `font` az önce yaratıldı ve bu kapsamda canlı.
+    // SAFETY: `font` was just created and is alive in this scope.
     let returned = unsafe { font.family_name() };
     (font, returned.to_string())
 }
 
-/// Zinciri yürür: istenen aile (varsa), sonra [`PREFERRED`], sonra
-/// [`FALLBACK`]. Kullanıcıya söylenecek bir şey varsa ikinci değerde.
+/// Walks the chain: the requested family (if any), then [`PREFERRED`], then
+/// [`FALLBACK`]. Anything to tell the user is in the second value.
 ///
-/// İstenen aile de öteki halkalar gibi **dönen adla** sınanıyor
-/// ([`same_family`]): olmayan ad için CoreText bu makinede Helvetica
-/// veriyor, yani sınanmasaydı yanlış yazılmış her ad orantılı bir fontla
-/// açılırdı ve belirti "eşaralıklı değil" uyarısı olurdu — asıl hatayı değil
-/// bir yan etkisini söyleyen.
+/// The requested family is checked **by the returned name** like the other
+/// links ([`same_family`]): for a name that does not exist CoreText gives
+/// Helvetica on this machine, so unchecked, every misspelled name would open
+/// with a proportional font and the symptom would be a "not monospaced"
+/// warning — one that names a side effect, not the actual error.
 pub(crate) fn open_chain(
     family: Option<&str>,
     point_size: CGFloat,
@@ -322,51 +343,53 @@ pub(crate) fn open_chain(
     (font, issue)
 }
 
-/// CoreText fontu eşaralıklı sayıyor mu — "eşaralıklı" ölçütünün **tek
-/// yeri**: zincirin uyarısı ([`open_chain`]) da ayar penceresinin listesi
-/// ([`monospaced_families`]) de bunu soruyor, yani listeden seçilen aile
-/// uyarı almaz.
+/// Does CoreText consider the font monospaced — the **single place** of the
+/// "monospaced" criterion: both the chain's warning ([`open_chain`]) and the
+/// settings window's list ([`monospaced_families`]) ask this, so a family
+/// picked from the list gets no warning.
 fn is_monospaced(font: &CTFont) -> bool {
-    // SAFETY: `font` çağıranın elinde canlı.
+    // SAFETY: `font` is alive in the caller's hands.
     let traits = unsafe { font.symbolic_traits() };
     traits.contains(CTFontSymbolicTraits::TraitMonoSpace)
 }
 
-/// Makinedeki eşaralıklı ailelerin adları, harf duyarsız sırayla — ayar
-/// penceresinin Font listesi.
+/// Names of the monospaced families on this machine, in case-insensitive
+/// order — the settings window's Font list.
 ///
-/// Bir aile listeye ancak zincirin onu **uyarısız** açacağı hâlde giriyor:
-/// CoreText adı kendi ailesine çözüyor ([`same_family`]) ve açtığı font
-/// eşaralıklı ([`is_monospaced`]). Nokta ile başlayan sistem aileleri
-/// (`.AppleSystemUIFont`) kullanıcıya gösterilmiyor.
+/// A family enters the list only if the chain would open it **without a
+/// warning**: CoreText resolves the name to its own family ([`same_family`])
+/// and the font it opens is monospaced ([`is_monospaced`]). System families
+/// starting with a dot (`.AppleSystemUIFont`) are not shown to the user.
 ///
-/// Adaylar CoreText'in eşaralıklı bitine göre eşleştirdiği tanımlayıcılardan
-/// geliyor, makinedeki bütün ailelerden değil: her aileyi açıp sormak
-/// yüzlerce font açmak demek ve pencere açılırken beklenirdi. Eşleştirme
-/// yalnız bir ön süzgeç — son söz yine yukarıdaki iki ölçütün, yani listeye
-/// ölçütün kabul etmediği bir aile giremez.
+/// Candidates come from the descriptors CoreText matches on its monospace
+/// bit, not from every family on the machine: opening and asking every family
+/// means opening hundreds of fonts, and the window would wait for it while
+/// opening. The match is only a pre-filter — the last word still belongs to
+/// the two criteria above, so no family the criterion rejects can get into
+/// the list.
 pub fn monospaced_families() -> Vec<String> {
-    // `TraitMonoSpace` biti `1 << 10`; `i32`'ye kayıpsız sığıyor.
+    // The `TraitMonoSpace` bit is `1 << 10`; it fits in an `i32` losslessly.
     let mono = CFNumber::new_i32(CTFontSymbolicTraits::TraitMonoSpace.bits() as i32);
-    // SAFETY: iki anahtar da CoreText'in dışa açtığı sabit, program boyunca
-    // canlı.
+    // SAFETY: both keys are constants CoreText exports, alive for the whole
+    // program.
     let (traits_key, symbolic_key) = unsafe { (kCTFontTraitsAttribute, kCTFontSymbolicTrait) };
     let traits = CFDictionary::from_slices(&[symbolic_key], &[&*mono]);
     let attributes = CFDictionary::from_slices(&[traits_key], &[&*traits]);
-    // SAFETY: sözlük CoreText'in beklediği biçimde — `kCTFontTraitsAttribute`
-    // altında `kCTFontSymbolicTrait` → `CFNumber`.
+    // SAFETY: the dictionary has the shape CoreText expects —
+    // `kCTFontSymbolicTrait` → `CFNumber` under `kCTFontTraitsAttribute`.
     let wanted = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
-    // SAFETY: `wanted` canlı; zorunlu anahtar kümesi yok.
+    // SAFETY: `wanted` is alive; there is no mandatory key set.
     let Some(matches) = (unsafe { wanted.matching_font_descriptors(None) }) else {
         return Vec::new();
     };
-    // SAFETY: işlevin belgesine göre dizinin öğeleri font tanımlayıcısı.
+    // SAFETY: per the function's documentation, the array's elements are
+    // font descriptors.
     let matches = unsafe { matches.cast_unchecked::<CTFontDescriptor>() };
-    // SAFETY: anahtar CoreText'in sabiti.
+    // SAFETY: the key is a CoreText constant.
     let family_key = unsafe { kCTFontFamilyNameAttribute };
     let mut names: Vec<String> = matches
         .iter()
-        // SAFETY: tanımlayıcı dizinin elinde canlı.
+        // SAFETY: the descriptor is alive in the array's hands.
         .filter_map(|descriptor| unsafe { descriptor.attribute(family_key) })
         .filter_map(|name| name.downcast::<CFString>().ok())
         .map(|name| name.to_string())
@@ -374,7 +397,8 @@ pub fn monospaced_families() -> Vec<String> {
         .collect();
     names.sort_by_cached_key(|name| name.to_lowercase());
     names.dedup();
-    // Punto önemsiz: aile ve eşaralıklılık puntodan bağımsız.
+    // The point size does not matter: family and monospacing are independent
+    // of it.
     const PROBE_SIZE: CGFloat = 12.0;
     names.retain(|name| {
         let (font, returned) = open(name, PROBE_SIZE);
@@ -383,28 +407,32 @@ pub fn monospaced_families() -> Vec<String> {
     names
 }
 
-/// Zincirin `family`'yi açarken söyleyeceği şey — ayar penceresinin Font
-/// listesinde **olmayan** bir ailenin durumu (`— not found` / `— not
-/// monospaced`, 029 Karar 3). Soru [`open_chain`]'in ta kendisi, yani
-/// pencerenin dediği ile alt başlığın dediği ayrışamaz.
+/// What the chain would say while opening `family` — the state of a family
+/// **not** in the settings window's Font list (`— not found` / `— not
+/// monospaced`, 029 Karar 3). The question is [`open_chain`] itself, so what
+/// the window says and what the subtitle says cannot diverge.
 pub fn family_issue(family: &str) -> Option<FontIssue> {
-    // Punto önemsiz: aile ve eşaralıklılık puntodan bağımsız.
+    // The point size does not matter: family and monospacing are independent
+    // of it.
     const PROBE_SIZE: CGFloat = 12.0;
     open_chain(Some(family), PROBE_SIZE).1
 }
 
-/// CoreText'in bildirdiği aile adı istenen ad mı — **harf duyarsız**.
+/// Is the family name CoreText reports the requested name —
+/// **case-insensitively**.
 ///
-/// CoreText adı harf duyarsız buluyor (`"menlo"` → `Menlo`, ölçüldü) ama
-/// adı kendi yazımıyla bildiriyor; birebir karşılaştırma bulunan fontu yok
-/// sayardı. PostScript adı (`Menlo-Regular`) **eşleşmez**: CoreText onu da
-/// açıyor ama aile adı başka, ve o ad ailenin tek bir yüzünü söylüyor —
-/// ayarın istediği aile (`docs/AYARLAR.md`).
+/// CoreText finds the name case-insensitively (`"menlo"` → `Menlo`,
+/// measured) but reports it in its own spelling; an exact comparison would
+/// ignore the font it found. A PostScript name (`Menlo-Regular`) **does not
+/// match**: CoreText opens that too, but the family name differs, and that
+/// name names a single face of the family — the setting asks for a family
+/// (`docs/AYARLAR.md`).
 fn same_family(returned: &str, requested: &str) -> bool {
     returned.to_lowercase() == requested.to_lowercase()
 }
 
-/// Ayar aile istemediğinde açılan font ve CoreText'in bildirdiği adı.
+/// The font opened when the setting asks for no family, and the name CoreText
+/// reports for it.
 pub(crate) fn open_default(point_size: CGFloat) -> (CFRetained<CTFont>, String) {
     for name in PREFERRED {
         let (font, returned) = open(name, point_size);
@@ -414,29 +442,31 @@ pub(crate) fn open_default(point_size: CGFloat) -> (CFRetained<CTFont>, String) 
     }
     let (font, returned) = open(FALLBACK, point_size);
     if returned != FALLBACK {
-        // Buraya düşülmesi beklenmez. Düşülürse metrik ve glyph'ler bilinmeyen
-        // bir fonttan gelir; sessiz kalırsa yanlış hücre boyutu "her şey
-        // normal" gibi görünür. Süreç çıktısı, UI dizgisi değil: Türkçe, ve
-        // öneki depodaki öteki stderr satırlarıyla aynı (`bateri:`) — ayrı bir
-        // önek, `bateri` diye süzen okuyucunun tam da bu satırı kaçırması
-        // demek olurdu.
-        eprintln!("bateri: '{FALLBACK}' bulunamadı, CoreText '{returned}' ikame etti");
+        // Not expected to land here. If it does, the metrics and glyphs come
+        // from an unknown font; kept silent, a wrong cell size would look
+        // like "everything is fine". Process output, not a UI string, and its
+        // prefix is the same as the repository's other stderr lines
+        // (`bateri:`) — a separate prefix would mean a reader filtering on
+        // `bateri` misses exactly this line.
+        eprintln!("bateri: '{FALLBACK}' not found, CoreText substituted '{returned}'");
     }
     (font, returned)
 }
 
-/// Karakterin glyph numarası; font karakteri tanımıyorsa `None`.
+/// The character's glyph number; `None` if the font does not know the
+/// character.
 pub(crate) fn glyph_index(font: &CTFont, ch: char) -> Option<CGGlyph> {
     let mut utf16 = [0u16; 2];
     let unit_count = ch.encode_utf16(&mut utf16).len();
     let mut glyphs = [0 as CGGlyph; 2];
-    // İşaretçiler **dilimden** türetiliyor, `&dizi[0]`'dan değil: BMP dışı bir
-    // karakterde `unit_count` 2 ve CoreText ikinci elemana da dokunuyor
-    // (düşük vekili okur, karşılığına 0 yazar). Tek elemanlık bir referanstan
-    // türetilen işaretçinin provenance'ı o ikinci erişimi kapsamaz — bugün
-    // çalışır, aliasing modeline göre tanımsızdır.
-    // SAFETY: iki dilim de iki eleman taşıyor ve bu kapsamda canlı;
-    // `unit_count` ≤ 2, yani sayı ikisiyle de tutarlı.
+    // The pointers are derived from the **slice**, not from `&array[0]`: for
+    // a character outside the BMP `unit_count` is 2 and CoreText touches the
+    // second element too (it reads the low surrogate, writes 0 for it). The
+    // provenance of a pointer derived from a one-element reference does not
+    // cover that second access — it works today, and is undefined under the
+    // aliasing model.
+    // SAFETY: both slices hold two elements and are alive in this scope;
+    // `unit_count` ≤ 2, so the count is consistent with both.
     let _ = unsafe {
         font.glyphs_for_characters(
             NonNull::from(&mut utf16[..]).cast::<u16>(),
@@ -444,47 +474,51 @@ pub(crate) fn glyph_index(font: &CTFont, ch: char) -> Option<CGGlyph> {
             unit_count as isize,
         )
     };
-    // Dönüş değeri **ölçüt değil**: surrogate çiftinde ikinci UTF-16 birimi
-    // için glyph üretilmez ve fonksiyon `false` döner, oysa glyph birinci
-    // birimdedir ve geçerlidir. Tek ölçüt `.notdef` (0) mü sorusu.
+    // The return value is **not the criterion**: for a surrogate pair no
+    // glyph is produced for the second UTF-16 unit and the function returns
+    // `false`, although the glyph is in the first unit and valid. The only
+    // criterion is whether it is `.notdef` (0).
     (glyphs[0] != 0).then_some(glyphs[0])
 }
 
-/// Hücre ölçüsünü fontun kendi metriğinden türetir.
+/// Derives the cell size from the font's own metrics.
 ///
-/// `line_height` kullanıcının satır aralığı çarpanı (`[font] line_height`,
-/// taban `1.0`). Fazlalık glyph'in **altına ve üstüne eşit** dağılıyor: yarısı
-/// taban çizgisini aşağı itiyor, kalanı altta kalıyor. Tek yana eklenseydi
-/// metin hücresinin içinde yukarı ya da aşağı kayar ve satır aralığı açıldıkça
-/// bu kayma büyürdü.
+/// `line_height` is the user's line-spacing multiplier (`[font]
+/// line_height`, base `1.0`). The surplus is distributed **equally below and
+/// above** the glyph: half pushes the baseline down, the rest stays at the
+/// bottom. Added to one side only, the text would shift up or down inside its
+/// cell, and the shift would grow as the line spacing opens up.
 ///
-/// Alt çizgi ve üstü çizili **kendiliğinden** takip ediyor: ikisi de tabandan
-/// ölçülüyor ve taban zaten kaymış oluyor. Ayrı bir düzeltme eklenseydi
-/// çarpan büyüdükçe çizgiler harften kopardı.
+/// Underline and strikeout follow **by themselves**: both are measured from
+/// the baseline and the baseline has already moved. A separate correction
+/// would tear the lines away from the letters as the multiplier grows.
 pub(crate) fn metrics(font: &CTFont, line_height: f64) -> Metrics {
-    // SAFETY: `font` canlı; üçü de saf okuma.
+    // SAFETY: `font` is alive; all three are pure reads.
     let (ascent, descent, leading) = unsafe { (font.ascent(), font.descent(), font.leading()) };
-    // Yükseklik iki parçanın **ayrı ayrı** yuvarlanıp toplanmasıyla bulunuyor,
-    // `round_up(ascent + descent + leading)` ile değil. Fark ölçülebilir bir
-    // kırpmaydı: bu makinede Menlo 13pt ascent 12.067, descent 3.066 veriyor
-    // ve toplamı yukarı yuvarlamak 16 ediyor — taban 13'e oturunca alta 3
-    // piksel kalıyor, oysa font 3.066 istiyor. Kaybedilen şey `g j p q y ,`
-    // altındaki son kapsama satırı; belirti "yazı biraz garip" olurdu. Sayılar
-    // font sürümüne bağlı ve eskiyebilir, **iddia eskimez**: bekçisi
-    // `descender_fits_in_the_cell` ve o metriği fontun kendisinden okuyor.
+    // The height is found by rounding the two parts **separately** and adding
+    // them, not by `round_up(ascent + descent + leading)`. The difference was
+    // a measurable clip: on this machine Menlo 13pt gives ascent 12.067,
+    // descent 3.066, and rounding the sum up gives 16 — with the baseline at
+    // 13 that leaves 3 pixels below, while the font asks for 3.066. What is
+    // lost is the last coverage row under `g j p q y ,`; the symptom would be
+    // "the text looks a bit off". The numbers depend on the font version and
+    // may go stale, **the claim does not**: its guard is
+    // `descender_fits_in_the_cell`, which reads that metric from the font
+    // itself.
     let natural = round_up(ascent).saturating_add(round_up(descent + leading));
-    // Çarpan **hücreye** uygulanıyor, ascent'e değil: ölçüt satırlar arası
-    // mesafe ve o mesafenin fontça tanımı `ascent + descent + leading`.
-    // `1.0`'da fazlalık sıfır, yani bu yol varsayılanda bir no-op.
+    // The multiplier is applied to the **cell**, not to the ascent: the
+    // criterion is the distance between lines, and the font's definition of
+    // that distance is `ascent + descent + leading`. At `1.0` the surplus is
+    // zero, so by default this path is a no-op.
     let extra = round_up(f64::from(natural) * (line_height - 1.0));
     let above = extra / 2;
     let baseline = round_up(ascent).saturating_add(above);
     let cell_px = (
         round_up(space_advance(font)),
-        // `saturating_add`: iki parça da `u16::MAX`'e kadar çıkabiliyor.
+        // `saturating_add`: both parts can go up to `u16::MAX`.
         natural.saturating_add(extra),
     );
-    // SAFETY: `font` canlı; üçü de saf okuma.
+    // SAFETY: `font` is alive; all three are pure reads.
     let (u_pos, u_thick, x_h) = unsafe {
         (
             font.underline_position(),
@@ -492,17 +526,18 @@ pub(crate) fn metrics(font: &CTFont, line_height: f64) -> Metrics {
             font.x_height(),
         )
     };
-    // CoreText'in `underline_position`'ı **negatif**: taban çizgisinin altını
-    // gösteriyor. Hücrenin üstünden ölçülen konuma çevirirken işaret çevriliyor.
+    // CoreText's `underline_position` is **negative**: it points below the
+    // baseline. The sign is flipped when converting to a position measured
+    // from the top of the cell.
     let thickness = round_up(u_thick);
     let underline_px = rule_envelope(
         baseline.saturating_add(round_up(-u_pos)),
         thickness,
         cell_px.1,
     );
-    // Üstü çizilinin CoreText karşılığı **yok**; x-yüksekliğinin yarısı kadar
-    // taban çizgisinin üstü, tipografide olağan yer. `saturating_sub`: küçük
-    // puntoda x-yüksekliği tabanı aşabilir.
+    // Strikeout has **no** CoreText counterpart; half the x-height above the
+    // baseline, the usual place in typography. `saturating_sub`: at small
+    // point sizes the x-height can exceed the baseline.
     let strikeout_px = rule_envelope(
         baseline.saturating_sub(round_up(x_h / 2.0)),
         thickness,
@@ -510,51 +545,57 @@ pub(crate) fn metrics(font: &CTFont, line_height: f64) -> Metrics {
     );
     Metrics {
         cell_px,
-        // Taban hücrenin içinde kalıyor ve bu artık bir dilek değil sonuç:
-        // alt parça `round_up` yüzünden en az 1, yani `baseline_px < cell_px.1`.
-        // `raster`'ın `cell_h - baseline` çıkarması bu yüzden taşmıyor.
+        // The baseline stays inside the cell, and that is now a consequence,
+        // not a wish: the bottom part is at least 1 because of `round_up`, so
+        // `baseline_px < cell_px.1`. That is why `raster`'s
+        // `cell_h - baseline` subtraction does not overflow.
         baseline_px: baseline,
         underline_px,
         strikeout_px,
     }
 }
 
-/// Kural çizgisini hücrenin **içine** oturtur: (üstten konum, kalınlık).
+/// Fits a rule line **inside** the cell: (position from the top, thickness).
 ///
-/// Dönüşün değişmezi `konum + kalınlık <= cell_h`. Bu depoda bugünkü fontla
-/// (Menlo) sınır hiç zorlanmıyor — 13pt'de alt çizgi 14+1, hücre 18 — ama
-/// kırpma bir dilek değil sözleşme: `underline_position` fontun kendi
-/// verisidir ve descent'i dar bir font çizgiyi hücrenin dışına atabilir.
-/// Belirti sessizdir: bir satırın alt çizgisi bir alttaki satırın tepesinde
-/// belirir. Bekçisi `envelope_stays_inside_cell` ve o **sentetik** girdiyle
-/// sınıyor, çünkü gerçek font bu dalı hiç ateşlemiyor.
+/// The return's invariant is `position + thickness <= cell_h`. In this
+/// repository the bound is never stressed with today's font (Menlo) — at
+/// 13pt the underline is 14+1, the cell 18 — but the clamp is a contract, not
+/// a wish: `underline_position` is the font's own data and a font with a
+/// narrow descent can push the line out of the cell. The symptom is silent:
+/// one row's underline appears at the top of the row below. Its guard is
+/// `envelope_stays_inside_cell`, and it tests with **synthetic** input,
+/// because a real font never fires this branch.
 pub(crate) fn rule_envelope(top: u16, thickness: u16, cell_h: u16) -> (u16, u16) {
-    // Sıfır yüksekliğe sığan kural yok. `metrics()` üzerinden buraya
-    // düşülemiyor (`round_up` her ölçüyü >= 1'e sabitliyor) ama fonksiyonun tek
-    // varlık sebebi değişmezi taşımak: onu hem yazıp hem delmemeli.
+    // No rule fits in zero height. It cannot be reached through `metrics()`
+    // (`round_up` pins every measurement to >= 1), but the function's only
+    // reason to exist is carrying the invariant: it should not both state it
+    // and break it.
     if cell_h == 0 {
         return (0, 0);
     }
-    // Kalınlık hücreyi aşamaz; en az 1 — çizilmeyen çizgi kural değildir.
+    // The thickness cannot exceed the cell; at least 1 — a line that is not
+    // drawn is not a rule.
     let thickness = thickness.clamp(1, cell_h);
     (top.min(cell_h - thickness), thickness)
 }
 
-/// Boşluğun yatay advance'i — hücre genişliği, **kesirli**.
+/// The space's horizontal advance — the cell width, **fractional**.
 ///
-/// Monospace varsayımı zincirin kendisinde (SF Mono / Menlo); ayarın ailesi
-/// eşaralıklı değilse hücre yine boşluktan türer, geniş harfler kırpılır ve
-/// bunu [`FontIssue::NotMonospaced`] söyler. Ölçülen karakter
-/// boşluk çünkü her fontta var; seçim gövdede sabit, çünkü başka bir karakterle
-/// çağrılması hücre genişliğini fontun o harfine bağlamak olurdu.
+/// The monospace assumption is in the chain itself (SF Mono / Menlo); if the
+/// setting's family is not monospaced the cell still derives from the space,
+/// wide letters get clipped and [`FontIssue::NotMonospaced`] says so. The
+/// measured character is the space because every font has one; the choice is
+/// fixed in the body, because calling it with another character would tie
+/// the cell width to that letter of the font.
 ///
-/// Dönüş **yuvarlanmamış** ve `pub(crate)` olmasının sebebi bu: ızgaranın
-/// adımı yuvarlanmış hâli ([`Metrics::cell_px`]) ama iki tüketici kesirli
-/// hâli istiyor — [`fallback_font`]'un mürekkep kapısı ile
-/// [`crate::raster::draw`]'in ortalaması. İkisi de yuvarlanmışla çalışsaydı
-/// taban fontun **kendi** glyph'i hücreden dar görünür (7.827 < 8) ve
-/// ortalama her glyph'i yarım pikselin altında kaydırırdı: çıktı bit bit aynı
-/// kalmazdı. Bekçisi `the_cell_is_the_rounded_advance`.
+/// The return is **unrounded**, and that is why it is `pub(crate)`: the
+/// grid's pitch is the rounded one ([`Metrics::cell_px`]) but two consumers
+/// want the fractional one — [`fallback_font`]'s ink gate and
+/// [`crate::raster::draw`]'s centring. Had both worked with the rounded
+/// value, the base font's **own** glyph would look narrower than the cell
+/// (7.827 < 8) and the centring would shift every glyph by under half a
+/// pixel: the output would no longer be bit-for-bit the same. Its guard is
+/// `the_cell_is_the_rounded_advance`.
 pub(crate) fn space_advance(font: &CTFont) -> CGFloat {
     let Some(glyph) = glyph_index(font, ' ') else {
         return 0.0;
@@ -562,14 +603,15 @@ pub(crate) fn space_advance(font: &CTFont) -> CGFloat {
     glyph_advance(font, glyph)
 }
 
-/// Bir glyph'in yatay ilerlemesi, **kesirli**.
+/// A glyph's horizontal advance, **fractional**.
 ///
-/// [`space_advance`]'ten ayrılmasının sebebi ikinci çağıran: yedek adayın
-/// mürekkep kapısı ile `raster::draw`'in ortalaması karakterin **kendi**
-/// glyph'ini ölçüyor, boşluğu değil.
+/// It is separate from [`space_advance`] because of the second caller: the
+/// fallback candidate's ink gate and `raster::draw`'s centring measure the
+/// character's **own** glyph, not the space.
 pub(crate) fn glyph_advance(font: &CTFont, glyph: CGGlyph) -> CGFloat {
     let mut advance = [CGSize::ZERO; 1];
-    // SAFETY: tek glyph, tek ölçü hücresi; sayı ikisiyle de tutarlı.
+    // SAFETY: one glyph, one measurement cell; the count is consistent with
+    // both.
     unsafe {
         font.advances_for_glyphs(
             CTFontOrientation::Horizontal,
@@ -581,17 +623,18 @@ pub(crate) fn glyph_advance(font: &CTFont, glyph: CGGlyph) -> CGFloat {
     advance[0].width
 }
 
-/// Bir glyph'in **mürekkep** kutusu: gerçekten boyanacak piksellerin sınırı,
-/// taban çizgisinin soluna/üstüne göre ve **kesirli**.
+/// A glyph's **ink** box: the bounds of the pixels that will actually be
+/// painted, relative to the left of/above the baseline, and **fractional**.
 ///
-/// [`glyph_advance`]'ten ayrı bir ölçü ve ikisinin ayrışması kapının varlık
-/// sebebi: bir sembol fontunun glyph'i ilerlemesinden dar boyayabiliyor
-/// (`⏺` U+23FA, STIX Two Math'te ilerleme hücrenin 1.046 katı ama mürekkep
-/// 0.914'ü — ölçüldü, bu makine, Menlo 16pt). İlerlemeyi ölçen bir kapı onu
-/// eler ve kullanıcı yerinde bir kutu görür.
+/// A measurement separate from [`glyph_advance`], and the two diverging is
+/// the gate's reason to exist: a symbol font's glyph can paint narrower than
+/// its advance (`⏺` U+23FA, in STIX Two Math the advance is 1.046 times the
+/// cell but the ink 0.914 — measured, this machine, Menlo 16pt). A gate
+/// measuring the advance rejects it and the user sees a box in its place.
 pub(crate) fn glyph_ink(font: &CTFont, glyph: CGGlyph) -> CGRect {
     let mut rect = [CGRect::ZERO; 1];
-    // SAFETY: tek glyph, tek ölçü hücresi; sayı ikisiyle de tutarlı.
+    // SAFETY: one glyph, one measurement cell; the count is consistent with
+    // both.
     unsafe {
         font.bounding_rects_for_glyphs(
             CTFontOrientation::Horizontal,
@@ -603,42 +646,46 @@ pub(crate) fn glyph_ink(font: &CTFont, glyph: CGGlyph) -> CGRect {
     rect[0]
 }
 
-/// Glyph'in hücre içindeki yatay kaydırması — **tek formül, iki tüketici**.
+/// The glyph's horizontal shift inside the cell — **one formula, two
+/// consumers**.
 ///
-/// Çizim ([`crate::raster::draw`]) glyph'i buraya koyuyor, kapı
-/// ([`fallback_font`]) mürekkebi buradan ölçüyor. Ayrı yazılsalardı kapı
-/// çizilmeyecek bir yerleşimi sınar ve ikisi sessizce ayrışırdı: kabul edilen
-/// bir aday hücrenin dışına boyayabilir ya da sığan bir aday elenirdi.
+/// Drawing ([`crate::raster::draw`]) puts the glyph here, the gate
+/// ([`fallback_font`]) measures the ink from here. Written separately, the
+/// gate would test a placement that will not be drawn and the two would
+/// silently diverge: an accepted candidate could paint outside the cell, or a
+/// fitting candidate would be rejected.
 ///
-/// Argüman **kutunun** ilerlemesi, hücrenin değil: tek hücrelik bir glyph'te
-/// ikisi aynı sayı, iki sütunluk bir karakterde kutu iki hücre
-/// ([`crate::Half`]). Adı 023'te `cell_advance`'ten `box_advance`'e çevrildi
-/// ve tek satırlık bir yeniden adlandırma değildi: aynı sayı hem kapıya hem
-/// çizime gidiyor, yani yalnız birinde sütunla çarpılsa kapı çizilmeyecek bir
-/// yerleşimi sınardı.
+/// The argument is the **box's** advance, not the cell's: for a single-cell
+/// glyph the two are the same number, for a two-column character the box is
+/// two cells ([`crate::Half`]). The rename from `cell_advance` to
+/// `box_advance` in 023 was not a one-line rename: the same number goes to
+/// both the gate and the drawing, so were it multiplied by the columns in
+/// only one of them, the gate would test a placement that will not be drawn.
 ///
-/// `max(0.0)` çizimin kendi kuralı: ilerlemesi kutuyu aşan bir glyph sola
-/// yapışıyor, çünkü kırpma sağdan olmalı — gerekçe [`crate::raster::draw`]'in
-/// gövdesinde. Kapının bunu **aynen** paylaşması şart, yoksa negatif bir
-/// kaydırma varsayıp adayın solunu hücrenin içinde sanırdı.
+/// `max(0.0)` is the drawing's own rule: a glyph whose advance exceeds the
+/// box sticks to the left, because clipping should happen on the right — the
+/// rationale is in the body of [`crate::raster::draw`]. The gate must share
+/// it **exactly**, otherwise it would assume a negative shift and believe the
+/// candidate's left side to be inside the cell.
 pub(crate) fn centre_shift(box_advance: CGFloat, advance: CGFloat) -> CGFloat {
     ((box_advance - advance) / 2.0).max(0.0)
 }
 
-/// Adayın boyayacağı piksel **kutunun** içinde mi kalıyor.
+/// Do the pixels the candidate paints stay inside the **box**.
 ///
-/// Kutu tek hücre ya da iki hücre (`box_advance`): geniş ilan edilmiş bir
-/// karakter iki sütun işgal ediyor, yani mürekkebi iki hücreye sığıyorsa
-/// kabul edilmeli. Sıranın kendisi [`fallback_font`]'ta.
+/// The box is one cell or two cells (`box_advance`): a character declared
+/// wide occupies two columns, so if its ink fits in two cells it should be
+/// accepted. The order itself is in [`fallback_font`].
 ///
-/// Ölçüt yatay ve yalnız yatay. Dikeyi de sınamak bugün **hiçbir adayı
-/// elemiyor** (ölçüldü: yatay kapıyı geçen her aday hücrenin taban çizgisi
-/// penceresine de sığıyor; dikeyde taşan tek küme emoji, tam boyuyla tek
-/// hücrede yatayda dönüyor ve küçültülen kopyası hücrede dikey ortalanıp
-/// içine giriyor — [`Accepted::rise`]), yani ikinci ölçüt yazılmış ama tanığı
-/// olmayan bir kural olurdu.
-/// Sınır adıyla yazılı: dikeyde taşan bir aday bugün kutuya değil **kırpmaya**
-/// düşer.
+/// The criterion is horizontal and only horizontal. Testing the vertical too
+/// **rejects no candidate** today (measured: every candidate that passes the
+/// horizontal gate also fits the cell's baseline window; the only set that
+/// overflows vertically is emoji, which at full size is rejected
+/// horizontally in a single cell and whose shrunk copy is vertically centred
+/// in the cell and fits inside — [`Accepted::rise`]), so a second criterion
+/// would be a rule written down without a witness.
+/// The limit is written by name: a candidate that overflows vertically today
+/// falls to **clipping**, not to the box.
 fn ink_fits_box(font: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> bool {
     ink_fits_placed(
         box_advance,
@@ -647,68 +694,74 @@ fn ink_fits_box(font: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> bool {
     )
 }
 
-/// [`ink_fits_box`]'in fontsuz gövdesi: ilerlemesi `advance`, mürekkebi
-/// `ink` olan bir glyph [`centre_shift`]'in koyduğu yerde kutuya sığıyor mu.
+/// The font-free body of [`ink_fits_box`]: does a glyph with advance
+/// `advance` and ink `ink` fit in the box at the place [`centre_shift`] puts
+/// it.
 ///
-/// Ayrı olmasının sebebi tarama (`census`): bir adayın **ne kadar
-/// küçültülürse** sığacağını soruyor ve ölçeklenmiş ölçüleri fontsuz
-/// veriyor. Kural tek yerde kalıyor, yani taramanın "sığar" dediği ile
-/// kapının kabul ettiği ayrışamaz.
+/// It is separate because of the census (`census`): it asks **how much** a
+/// candidate would have to shrink to fit, and gives the scaled measurements
+/// without a font. The rule stays in one place, so what the census says
+/// "fits" and what the gate accepts cannot diverge.
 pub(crate) fn ink_fits_placed(box_advance: CGFloat, advance: CGFloat, ink: CGRect) -> bool {
     let left = ink.origin.x + centre_shift(box_advance, advance);
-    // Sol kenar da sınanıyor: negatif `origin.x` taşıyan bir aday hücreye
-    // soldan taşar ve CG onu **soldan** keser. Latin yazıda harf soldan
-    // tanınıyor, yani o kırpma sessiz bir bozulma olurdu — kutu dürüsttür.
+    // The left edge is tested too: a candidate carrying a negative `origin.x`
+    // overflows the cell on the left and CG clips it **from the left**. In
+    // Latin script a letter is recognised from its left side, so that clip
+    // would be a silent corruption — the box is honest.
     left >= 0.0 && left + ink.size.width <= box_advance
 }
 
-/// `ch`'i çizebilen bir sistem fontu — **hücreye sığıyorsa**.
+/// A system font that can draw `ch` — **if it fits the cell**.
 ///
-/// Üç adım tek fonksiyonda, çünkü üçü tek soruyu yanıtlıyor: "bu karakteri
-/// kabul edilebilir bir fontla çizebilir miyiz". `None` "aday bulunamadı"
-/// değil **"kabul edilmedi"** demek ve çağıran ikisini ayırt etmek zorunda
-/// değil — ikisinin de cevabı [`crate::TOFU`].
+/// Three steps in one function, because all three answer one question: "can
+/// we draw this character with an acceptable font". `None` does not mean "no
+/// candidate found" but **"not accepted"**, and the caller does not have to
+/// tell them apart — the answer to both is [`crate::TOFU`].
 ///
-/// 1. **Aday.** `CTFontCreateForString` cascade'i bizim için yürüyor ve
-///    [`glyph_index`]'in sarıldığı `CTFontGetGlyphsForCharacters`'ın
-///    **yapmadığı** tam olarak bu: o yalnız verilen fonta bakıyor, cascade'e
-///    düşmüyor. Setin varlık sebebi bu fark (`⏵` U+23F5 Menlo'da yok).
-/// 2. **Glyph.** Aday gerçekten çizebiliyor mu. Aday `base`'in kendisi
-///    dönebilir ve o hâlde bu adım `None` verir — buraya ancak `base`
-///    `.notdef` verdikten sonra düşülüyor, yani ayrı bir "aynı font mu"
-///    karşılaştırması gerekmiyor.
-/// 3. **Mürekkep kapısı** ([`accept`]). Aday, çizileceği yerde hücrenin
-///    dışına boyuyor mu — sığmayan aday sınırın içindeyse küçültülüyor
-///    ([`SHRINK_LIMIT`]), değilse kutu. Ölçüt geometrik: aile adı ve trait
-///    biti yok, tek istisna küçültme kolunun `.LastResort`'u
-///    ([`is_last_resort`]; geometri onu emojiden ayıramıyor). Ölçülen
-///    sayılar `.tasks/019-glyph-yedegi/phase-1.md` ve
-///    `.tasks/041-yedek-glyph-kucultme/`'de. Sınır **kesirli** hücre
-///    ilerlemesi ([`space_advance`]), yuvarlanmış hücre genişliği değil: aynı
-///    sayı `raster::draw`'in ortalamasını da besliyor ve iki iş için iki sayı
-///    tutmak ikisini ayrıştırırdı.
+/// 1. **Candidate.** `CTFontCreateForString` walks the cascade for us, and
+///    that is exactly what `CTFontGetGlyphsForCharacters`, which
+///    [`glyph_index`] wraps, **does not do**: it only looks at the given font
+///    and does not fall to the cascade. This difference is the set's reason
+///    to exist (`⏵` U+23F5 is not in Menlo).
+/// 2. **Glyph.** Can the candidate really draw it. The candidate may be
+///    `base` itself, and then this step gives `None` — we only land here
+///    after `base` gave `.notdef`, so no separate "is it the same font"
+///    comparison is needed.
+/// 3. **Ink gate** ([`accept`]). Does the candidate paint outside the cell at
+///    the place it will be drawn — a candidate that does not fit is shrunk
+///    if within the limit ([`SHRINK_LIMIT`]), otherwise box. The criterion
+///    is geometric: no family name and no trait bit, the only exception is
+///    the shrink arm's `.LastResort` ([`is_last_resort`]; geometry cannot
+///    tell it apart from emoji). The measured numbers are in
+///    `.tasks/019-glyph-yedegi/phase-1.md` and
+///    `.tasks/041-yedek-glyph-kucultme/`. The bound is the **fractional**
+///    cell advance ([`space_advance`]), not the rounded cell width: the same
+///    number also feeds `raster::draw`'s centring, and keeping two numbers
+///    for two jobs would make them diverge.
 ///
-/// Ölçüt bir dönem **ilerlemeydi** (`advance <= cell_advance`) ve belirtisi
-/// kullanıcıda görüldü: Claude Code'un araç işareti `⏺` (U+23FA) kutu
-/// çıkıyordu. Sebep ölçüldü — STIX Two Math'ten gelen aday hücreden %4.6
-/// geniş **ilerliyor** ama %8.6 dar **boyuyor**, yani ilerlemeyi ölçen kapı
-/// hücreye rahat sığan bir glyph'i eliyordu. 019'un kalibrasyon örneklerinde
-/// (2.17× / 1.83× / 1.66×) 1.0'ın yakınında hiçbir aday yoktu ve kapı sembol
-/// fontlarına karşı hiç sınanmamıştı.
+/// The criterion was once the **advance** (`advance <= cell_advance`) and
+/// its symptom was seen by the user: Claude Code's tool marker `⏺` (U+23FA)
+/// came out as a box. The cause was measured — the candidate from STIX Two
+/// Math **advances** 4.6% wider than the cell but **paints** 8.6% narrower,
+/// so the gate measuring the advance rejected a glyph that fit comfortably
+/// in the cell. 019's calibration samples (2.17× / 1.83× / 1.66×) had no
+/// candidate near 1.0, and the gate had never been tested against symbol
+/// fonts.
 ///
-/// Ölçütün değişmesi ters yöndeki boşluğu da kapatıyor: dar ilerleyip geniş
-/// boyayan bir aday artık **kutu**, eskiden sessizce sağdan kırpılıyordu.
-/// "Kutu ya da tam glyph" ilk kez bir dilek değil sözleşme; 041'den beri
-/// "kutu, tam glyph ya da sığacak kadar küçültülmüş glyph".
+/// Changing the criterion also closes the gap in the other direction: a
+/// candidate advancing narrow but painting wide is now a **box**, where it
+/// used to be silently clipped from the right. "Box or full glyph" is for the
+/// first time a contract, not a wish; since 041 "box, full glyph or a glyph
+/// shrunk just enough to fit".
 ///
-/// Mürekkebi olmayan aday kapıdan **geçer** (sıfır genişlik her hücreye
-/// sığar); çizilecek şey görünmez bir glyph olur, kutu değil. Bugün bu yol
-/// doğmuyor çünkü birleştirici işaretler grid hücresine ayrı bir sprite
-/// olarak hiç gelmiyor.
+/// A candidate with no ink **passes** the gate (zero width fits any cell);
+/// what gets drawn is an invisible glyph, not a box. Today this path does not
+/// arise because combining marks never reach a grid cell as a separate
+/// sprite.
 ///
-/// **Log yok:** fonksiyon [`crate::Atlas::slot`]'un çizim yolunda ve glyph
-/// başına basılan bir satır kare bütçesinin ortasına düşerdi
-/// ([`Faces::derive`]'ın yazılı kuralı).
+/// **No log:** the function is on [`crate::Atlas::slot`]'s drawing path and a
+/// line printed per glyph would land in the middle of the frame budget
+/// ([`Faces::derive`]'s written rule).
 pub(crate) fn fallback_font(
     base: &CTFont,
     ch: char,
@@ -720,50 +773,54 @@ pub(crate) fn fallback_font(
     accept(candidate, glyph, cell_advance, cols)
 }
 
-/// [`fallback_font`]'un 1. adımı: cascade'in `ch` için önerdiği font.
+/// Step 1 of [`fallback_font`]: the font the cascade suggests for `ch`.
 ///
-/// Ayrı olmasının sebebi tarama (`census`): karakteri kapının **aynı**
-/// adımlarından geçirip her adımın cevabını ayrı raporluyor. Adım
-/// kopyalansaydı tarama bir gün kapının sormadığı bir soruyu sorardı.
+/// It is separate because of the census (`census`): it passes the character
+/// through the **same** steps as the gate and reports each step's answer
+/// separately. Were the step copied, the census would one day ask a question
+/// the gate does not.
 ///
-/// Dönüş hiç boş değil: kimsenin çizemediği karakterde CoreText
-/// `.LastResort`'u veriyor ve o da bir glyph döndürüyor, yani "aday yok"
-/// cevabı buradan değil sonraki adımdan ([`glyph_index`]) doğuyor.
+/// The return is never empty: for a character nobody can draw CoreText gives
+/// `.LastResort`, and that returns a glyph too, so the "no candidate" answer
+/// arises not here but in the next step ([`glyph_index`]).
 pub(crate) fn cascade_candidate(base: &CTFont, ch: char) -> CFRetained<CTFont> {
     let mut utf8 = [0u8; 4];
     let text = CFString::from_str(ch.encode_utf8(&mut utf8));
     let range = CFRange {
         location: 0,
-        // `CFString` UTF-16 birimi sayıyor, bayt değil: BMP dışı karakterde
-        // aralık iki birim ve `1` verilseydi vekil çiftinin yarısı istenirdi.
+        // `CFString` counts UTF-16 units, not bytes: for a character outside
+        // the BMP the range is two units, and passing `1` would ask for half
+        // of the surrogate pair.
         length: ch.len_utf16() as CFIndex,
     };
-    // SAFETY: `base` ve `text` bu kapsamda canlı; `range` string'in tamamı.
+    // SAFETY: `base` and `text` are alive in this scope; `range` is the whole
+    // string.
     unsafe { base.for_string(&text, range) }
 }
 
-/// Mürekkep kapısı: adayın glyph'i önce tek hücreye, sonra (iki sütun ilan
-/// edilmişse) iki hücreye sığıyor mu — sığmıyorsa **küçültülerek** sığıyor mu.
+/// The ink gate: does the candidate's glyph fit first in one cell, then (if
+/// declared two columns) in two cells — and if not, does it fit **shrunk**.
 ///
-/// Tek glyph'lik yedek ([`fallback_font`]) ile grapheme dizisinin
-/// ([`shape_cluster`]) **ortak** kapısı — "kutu, tam glyph ya da sığacak kadar
-/// küçültülmüş glyph" sözleşmesi ikisinde de aynı sıradan geçiyor, yani
-/// dizinin glyph'i tek kod noktalı emojiden farklı bir ölçütle kabul
-/// edilemez. Taramanın (`census`) da kapısı bu, yani `pub(crate)`.
+/// The **shared** gate of the single-glyph fallback ([`fallback_font`]) and
+/// the grapheme cluster ([`shape_cluster`]) — the "box, full glyph or a glyph
+/// shrunk just enough to fit" contract goes through the same order in both,
+/// so a cluster's glyph cannot be accepted by a criterion different from a
+/// single-code-point emoji's. It is also the census's (`census`) gate, hence
+/// `pub(crate)`.
 pub(crate) fn accept(
     candidate: CFRetained<CTFont>,
     glyph: CGGlyph,
     cell_advance: CGFloat,
     cols: u8,
 ) -> Option<Accepted> {
-    // **Sıra zorunlu: önce tek hücre.** Tek hücreye sığan bir aday bugün de
-    // sığıyor ve tek yuvadan çiziliyor; doğrudan iki hücrelik kutuyla
-    // sorulsaydı `centre_shift` onu iki hücrenin ortasına kaydırır ve
-    // *bugün çalışan* bir çizim yerinden oynardı. Ölçüldü (023 `context.md`):
-    // 65 karakter geniş ilan edilmiş ama mürekkebi tek hücreye sığıyor —
-    // 21'i Menlo'nun kendi glyph'i, 44'ü cascade'den narin mürekkeple gelen
-    // CJK noktalaması ve fullwidth formlar (`、 。 》 ！`). Yan kazanç
-    // kapasite: o 65 ikinci bir yuva da harcamıyor.
+    // **The order is mandatory: one cell first.** A candidate that fits in
+    // one cell fits today too and is drawn from a single slot; asked directly
+    // with the two-cell box, `centre_shift` would move it to the middle of
+    // two cells and a drawing *that works today* would move. Measured (023
+    // `context.md`): 65 characters are declared wide but their ink fits in
+    // one cell — 21 are Menlo's own glyphs, 44 are CJK punctuation and
+    // fullwidth forms with slender ink from the cascade (`、 。 》 ！`). A side
+    // benefit is capacity: those 65 do not spend a second slot.
     if ink_fits_box(&candidate, glyph, cell_advance) {
         return Some(Accepted {
             font: candidate,
@@ -772,10 +829,10 @@ pub(crate) fn accept(
             shrunk: false,
         });
     }
-    // İkinci kapı yalnız **iki sütun ilan edilmiş** karakterde açılıyor. Tek
-    // sütunlu bir karaktere iki hücre vermek komşusunun üstüne boyamak olurdu:
-    // ızgara ona spacer ayırmıyor ve o hücrenin kendi mürekkebi var. Ölçüt bu
-    // yüzden `min(sütun, mürekkep)`.
+    // The second gate opens only for a character **declared two columns**.
+    // Giving two cells to a single-column character would paint over its
+    // neighbour: the grid reserves no spacer for it and that cell has its own
+    // ink. That is why the criterion is `min(columns, ink)`.
     let box_advance = cell_advance * CGFloat::from(cols.max(1));
     if cols >= 2 && ink_fits_box(&candidate, glyph, box_advance) {
         return Some(Accepted {
@@ -785,8 +842,9 @@ pub(crate) fn accept(
             shrunk: false,
         });
     }
-    // **Üçüncü kol: küçültme** (041). En son kol, yani iki kapıdan birini
-    // geçen aday buraya hiç gelmiyor ve rasteri bit bit bugünkü (R3.3).
+    // **Third arm: shrinking** (041). The last arm, so a candidate that
+    // passes either gate never gets here and its raster is bit-for-bit
+    // today's (R3.3).
     shrink(&candidate, glyph, box_advance).map(|font| Accepted {
         font,
         glyph,
@@ -795,28 +853,32 @@ pub(crate) fn accept(
     })
 }
 
-/// Kapıdan dönmüş adayın, kutuya sığacak puntodaki kopyası — sınırın
-/// içindeyse.
+/// A copy of a candidate rejected by the gate, at the point size that fits
+/// the box — if within the limit.
 ///
-/// Kutu ızgaranın o karaktere ayırdığı alan: tek sütunluda bir hücre, iki
-/// sütunluda iki hücre. İki sütunluda tek hücrelik kutu ayrıca denenmiyor:
-/// daha dar kutu daha çok küçültme ister, yani iki hücreye sınırın içinde
-/// sığmayan aday tek hücreye hiç sığmaz.
+/// The box is the area the grid reserves for the character: one cell for a
+/// single-column one, two cells for a two-column one. For a two-column
+/// character the one-cell box is not tried separately: a narrower box needs
+/// more shrinking, so a candidate that does not fit two cells within the
+/// limit never fits one.
 ///
-/// Katsayı [`fit_ratio`]'dan, mürekkep/kutu oranından değil: küçültme
-/// ilerlemeyi de küçültüyor ve ilerlemesi kutuyu hâlâ aşan glyph
-/// [`centre_shift`]'in kuralıyla sola yapışıyor. `⧉` bunun örneği — oranla
-/// (1.11) küçültülen kopya yeniden sınamada yine dönüyor, gereken 1.22
-/// (`.tasks/041-yedek-glyph-kucultme/phase-1.md` → Uygulama Notları).
+/// The factor comes from [`fit_ratio`], not from the ink/box ratio:
+/// shrinking shrinks the advance too, and a glyph whose advance still
+/// exceeds the box sticks to the left by [`centre_shift`]'s rule. `⧉` is the
+/// example — the copy shrunk by the ratio (1.11) is rejected again on
+/// re-test, 1.22 is needed (`.tasks/041-yedek-glyph-kucultme/phase-1.md` →
+/// Uygulama Notları).
 ///
-/// Kopya **aynı fontun** başka puntodaki hâli (`CTFontCreateCopyWithAttributes`):
-/// glyph numarası, renk trait'i ve dolayısıyla düzlem değişmiyor, çizim
-/// (`raster::draw_glyph` / `draw_color_glyph`) ve ortalama ([`centre_shift`])
-/// dokunulmadan kalıyor. Kopya [`ink_fits_box`] ile **yeniden** sınanıyor —
-/// kapı adayın çizileceği yerdeki mürekkebi ölçer kuralı küçük kopyada da
-/// geçerli; geçmezse kutu.
+/// The copy is **the same font** at another point size
+/// (`CTFontCreateCopyWithAttributes`): the glyph number, the colour trait
+/// and hence the plane do not change, the drawing (`raster::draw_glyph` /
+/// `draw_color_glyph`) and the centring ([`centre_shift`]) stay untouched.
+/// The copy is tested **again** with [`ink_fits_box`] — the rule that the
+/// gate measures the ink where the candidate will be drawn holds for the
+/// small copy too; if it fails, box.
 ///
-/// `.LastResort` bu kolda kabul edilmiyor (R3.2): gerekçe [`is_last_resort`].
+/// `.LastResort` is not accepted in this arm (R3.2): rationale in
+/// [`is_last_resort`].
 fn shrink(candidate: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> Option<CFRetained<CTFont>> {
     let fit = fit_ratio(
         box_advance,
@@ -826,21 +888,23 @@ fn shrink(candidate: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> Option<CF
     if !(fit.is_finite() && fit <= SHRINK_LIMIT) || is_last_resort(candidate) {
         return None;
     }
-    // SAFETY: `candidate` canlı; saf okuma.
+    // SAFETY: `candidate` is alive; a pure read.
     let size = unsafe { candidate.size() };
-    // SAFETY: `candidate` canlı; matris `NULL` (fontun kendi matrisi) ve
-    // öznitelik yok, yani tek değişen punto.
+    // SAFETY: `candidate` is alive; the matrix is `NULL` (the font's own
+    // matrix) and there are no attributes, so the only thing that changes is
+    // the point size.
     let at = |s: CGFloat| unsafe { candidate.copy_with_attributes(s, ptr::null(), None) };
     let fits = |f: &CTFont| ink_fits_box(f, glyph, box_advance);
     let first = at(size / fit);
     if fits(&first) {
         return Some(first);
     }
-    // Katsayı puntoyla doğrusal ölçeklenmeyen fontta ıskalıyor: Apple Color
-    // Emoji'nin ilerlemesi tam sayıya yuvarlı ve küçük puntoda orantısından
-    // geniş (16pt @2x'te 1.661 ile küçültülen kopya 23 px ilerliyor, hücre
-    // 19.27). Kalan payı kopyanın **kendi** ölçüsü buluyor: sığan en büyük
-    // punto, `size / fit` ile onun yarısı arasında ikiye bölmeyle.
+    // The factor misses on a font that does not scale linearly with the point
+    // size: Apple Color Emoji's advance is rounded to an integer and at small
+    // sizes wider than its proportion (at 16pt @2x the copy shrunk by 1.661
+    // advances 23 px, the cell is 19.27). The copy's **own** measurement
+    // finds the remaining margin: the largest point size that fits, by
+    // bisection between `size / fit` and half of it.
     let (mut hi, mut lo) = (size / fit, size / fit / 2.0);
     let mut best = at(lo);
     if !fits(&best) {
@@ -859,68 +923,75 @@ fn shrink(candidate: &CTFont, glyph: CGGlyph, box_advance: CGFloat) -> Option<CF
     Some(best)
 }
 
-/// [`shrink`]'in ikinci turundaki ikiye bölme adımı: aralık `size / fit` ile
-/// onun yarısı, on adımda puntonun binde birinin altına iniyor (32 pt'de
-/// 0.016 pt). Yetiyor: taramada (`make tarama`, dört birleşim) sınırın içinde
-/// olup yeniden sınamadan dönen aday **sıfır**.
+/// The bisection steps of [`shrink`]'s second round: the interval is
+/// `size / fit` and half of it, and ten steps bring it under a thousandth of
+/// the point size (0.016 pt at 32 pt). Enough: in the census (`make tarama`,
+/// four combinations) the number of candidates within the limit that are
+/// rejected on re-test is **zero**.
 const SHRINK_STEPS: usize = 10;
 
-/// Küçültmenin üst sınırı: [`fit_ratio`]'su bundan büyük aday kutu kalır.
+/// The upper bound of shrinking: a candidate whose [`fit_ratio`] is larger
+/// than this stays a box.
 ///
-/// Tasarım sabiti (`GUTTER_PT` emsali), değeri taramanın dağılımından
-/// (`make tarama`, Menlo 13/16 pt × @1x/@2x, `.tasks/041-yedek-glyph-kucultme/`
-/// → phase-2 Uygulama Notları):
+/// A design constant (after `GUTTER_PT`), its value from the census
+/// distribution (`make tarama`, Menlo 13/16 pt × @1x/@2x,
+/// `.tasks/041-yedek-glyph-kucultme/` → phase-2 Uygulama Notları):
 ///
-/// - **İçeride kalması gereken en büyük** Apple Color Emoji'nin tek sütunlu
-///   `fit`'i: @2x'te 1.661–1.681, @1x'te **2.124** (Karar 2, kullanıcı
-///   küçük emojiyi kutuya tercih etti; Retina olmayan ekran da kullanıcı).
-///   İki sütunlu emoji @1x'te iki hücreye de sığmıyor ve iki hücrelik
-///   kutuda `fit`'i 1.062 — aynı kol onu da kapsıyor.
-/// - **Dışında kalan en küçük** 2.250 (Apple Symbols'un tek glyph'i); sonra
-///   STIX Two Math 2.307 / 2.583, Symbol 2.803, kullanıcı fontu Inter
-///   Display 4.2. Bunlar yarıdan fazla küçülürdü ve hücrede bir nokta olurdu.
+/// - **The largest that must stay inside** is Apple Color Emoji's
+///   single-column `fit`: 1.661–1.681 at @2x, **2.124** at @1x (Karar 2, the
+///   user preferred a small emoji to a box; a non-Retina display is a user
+///   too). A two-column emoji fits in neither one nor two cells at @1x, and
+///   its `fit` in the two-cell box is 1.062 — the same arm covers it too.
+/// - **The smallest that stays outside** is 2.250 (a single glyph of Apple
+///   Symbols); then STIX Two Math 2.307 / 2.583, Symbol 2.803, the user font
+///   Inter Display 4.2. These would shrink by more than half and become a dot
+///   in the cell.
 ///
-/// 2.2 ikisinin arasında: emojinin %3.6 üstünde, dışarıdakinin %2.2 altında.
-/// `.LastResort` (1.660) sınırın **altında** ve geometriyle ayrılamıyor —
-/// onu dışarıda tutan [`is_last_resort`].
+/// 2.2 lies between the two: 3.6% above emoji, 2.2% below the outside one.
+/// `.LastResort` (1.660) is **below** the limit and cannot be told apart by
+/// geometry — what keeps it outside is [`is_last_resort`].
 pub(crate) const SHRINK_LIMIT: f64 = 2.2;
 
-/// CoreText'in cascade'inin son halkası `.LastResort`'un PostScript adı.
+/// The PostScript name of `.LastResort`, the last link of CoreText's cascade.
 pub(crate) const LAST_RESORT: &str = "LastResort";
 
-/// Aday cascade'in son çaresi mi — küçültme kolunun **tek** ad ölçütü (R3.2).
+/// Is the candidate the cascade's last resort — the shrink arm's **only**
+/// name criterion (R3.2).
 ///
-/// `.LastResort` "hiçbir kurulu font bu karakteri çizemiyor" cevabı ve
-/// glyph'i karakterin kendisi değil, bloğunun **temsilî kutusu**:
-/// küçültülse de kullanıcı yine bir kutu görür, üstelik bizim
-/// [`crate::TOFU`]'muzdan farklı bir kutu. Mürekkep kapısı onu bugüne kadar
-/// geometriyle eliyordu, ama küçültme kolunda geometri **ayıramıyor**: `fit`'i
-/// her glyph'te 1.660, tek sütunlu emojinin (1.661–2.124) altında, yani
-/// emojiyi kapsayan her sınır onu da kapsar.
+/// `.LastResort` is the answer "no installed font can draw this character",
+/// and its glyph is not the character itself but its block's **representative
+/// box**: even shrunk, the user still sees a box, and on top of that a box
+/// different from our [`crate::TOFU`]. The ink gate used to reject it by
+/// geometry, but in the shrink arm geometry **cannot tell it apart**: its
+/// `fit` is 1.660 for every glyph, below the single-column emoji's
+/// (1.661–2.124), so any limit that covers emoji covers it too.
 ///
-/// Yapısal bir sinyal bulunmadı: cascade her zaman bir font veriyor ve
-/// `.LastResort`'un cmap'i karakteri **kapsıyor** (taramada "hiçbir fontta
-/// yok" grubu sıfır, 7189 kod noktası `.LastResort`'un gerçek glyph'iyle
-/// dönüyor), yani "aday yok" sorusu onu göremiyor. Karşılaştırma bu yüzden
-/// adla, ve PostScript adıyla, çünkü o fontun tekil kimliği. Kapsamı yalnız bu kol:
-/// iki kapı onu bugünkü gibi geometriyle eliyor (ya da geniş karakterde iki
-/// hücreye sığdırıyor), yani ad bugün kabul edilen hiçbir çizimi değiştirmiyor.
+/// No structural signal was found: the cascade always gives a font and
+/// `.LastResort`'s cmap **covers** the character (in the census the "in no
+/// font" group is zero, 7189 code points come back with `.LastResort`'s real
+/// glyph), so the "no candidate" question cannot see it. The comparison is
+/// therefore by name, and by PostScript name, because that is the font's
+/// unique identity. Its scope is this arm only: the two gates reject it by
+/// geometry as today (or fit it in two cells for a wide character), so the
+/// name changes no drawing accepted today.
 pub(crate) fn is_last_resort(font: &CTFont) -> bool {
-    // SAFETY: `font` canlı; saf okuma.
+    // SAFETY: `font` is alive; a pure read.
     unsafe { font.post_script_name() }.to_string() == LAST_RESORT
 }
 
-/// Glyph'i `1 / fit` ölçeğiyle küçültünce kapının geçtiği en küçük `fit`.
+/// The smallest `fit` the gate passes when the glyph is shrunk by a `1 / fit`
+/// scale.
 ///
-/// İkiye bölme, kapalı form değil: kural [`ink_fits_placed`]'in kendisi ve
-/// kapalı form onu (sola yapışma kolu dahil) ikinci kez yazmak olurdu. Ölçek
-/// sıfıra giderken her glyph kutunun ortasına küçülüp sığıyor, yani alt uç
-/// her zaman geçer; kapıdan geçen adayda `1`. İki tüketici: küçültmenin
-/// katsayısı ([`shrink`]) ve tarama (`census`) — ayrı yazılsalardı taramanın
-/// "sınırın içinde" dediği ile kapının küçülttüğü ayrışabilirdi.
+/// Bisection, not a closed form: the rule is [`ink_fits_placed`] itself and a
+/// closed form would write it (including the stick-to-the-left arm) a second
+/// time. As the scale goes to zero every glyph shrinks to the middle of the
+/// box and fits, so the lower end always passes; `1` for a candidate that
+/// passes the gate. Two consumers: the shrink factor ([`shrink`]) and the
+/// census (`census`) — written separately, what the census calls "within the
+/// limit" and what the gate shrinks could diverge.
 ///
-/// Mürekkep ve ilerleme puntoyla **doğrusal** ölçekleniyor varsayımı
-/// kopyanın yeniden sınamasıyla örtülüyor ([`shrink`]).
+/// The assumption that ink and advance scale **linearly** with the point
+/// size is covered by the copy's re-test ([`shrink`]).
 pub(crate) fn fit_ratio(box_advance: CGFloat, advance: CGFloat, ink: CGRect) -> f64 {
     let fits = |s: CGFloat| {
         let mut scaled = ink;
@@ -943,26 +1014,29 @@ pub(crate) fn fit_ratio(box_advance: CGFloat, advance: CGFloat, ink: CGRect) -> 
     1.0 / lo
 }
 
-/// Grapheme dizisini (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) **tek glyph**'e şekillendirir
-/// ve [`fallback_font`]'un kapısından geçirir; `None` "tek glyph değil ya da
-/// kapıdan döndü" demek ve çağıran taban karaktere düşüyor (035 R1.1).
+/// Shapes a grapheme cluster (`🇹🇷`, `👨‍👩‍👧`, `👍🏽`, `❤️`) into a **single
+/// glyph** and passes it through [`fallback_font`]'s gate; `None` means "not
+/// a single glyph, or rejected by the gate" and the caller falls back to the
+/// base character (035 R1.1).
 ///
-/// Şekillendirme `CTLine`'dan, çünkü dizinin glyph'i hiçbir kod noktasının
-/// glyph'i değil: bayrağın iki RI'si, ZWJ ailesi ve ten rengi fontun
-/// ligatür/`morx` tablosunda **tek** glyph'e birleşiyor ve bunu soran tek
-/// API satır düzeni. [`glyph_index`]'in sarıldığı
-/// `CTFontGetGlyphsForCharacters` kod noktası başına bakıyor ve `🇹🇷`'yi iki
-/// ayrı harf olarak verirdi.
+/// Shaping comes from `CTLine`, because the cluster's glyph is not any code
+/// point's glyph: the flag's two RIs, the ZWJ family and the skin tone merge
+/// into a **single** glyph in the font's ligature/`morx` table, and the only
+/// API that asks for that is line layout. `CTFontGetGlyphsForCharacters`,
+/// which [`glyph_index`] wraps, looks per code point and would give `🇹🇷` as
+/// two separate letters.
 ///
-/// Font **iki kez** soruluyor ve ikisi ayrı sorular: aday dizginin tamamı
-/// için cascade'den (`CTFontCreateForString`, [`fallback_font`]'un 1. adımı)
-/// ve satıra o veriliyor; ölçülen ve çizilen font ise **run'ın kendi**
-/// fontu. Aday dizinin bir parçasını çizemezse `CTLine` şekillendirme
-/// sırasında yeniden ikame edebiliyor ve ilerleme, mürekkep ve düzlem
-/// glyph'i gerçekten üreten fontun ölçüsü olmak zorunda — başka bir fontun
-/// glyph numarasını adayla çizmek bambaşka bir harf çizerdi.
+/// The font is asked **twice**, and the two are separate questions: the
+/// candidate comes from the cascade for the whole string
+/// (`CTFontCreateForString`, step 1 of [`fallback_font`]) and is given to
+/// the line; the font measured and drawn, however, is **the run's own** font.
+/// If the candidate cannot draw part of the cluster, `CTLine` may substitute
+/// again during shaping, and the advance, ink and plane have to be the
+/// measurements of the font that actually produces the glyph — drawing
+/// another font's glyph number with the candidate would draw an entirely
+/// different letter.
 ///
-/// **Log yok**, [`fallback_font`] ile aynı gerekçe: çizim yolunda.
+/// **No log**, same rationale as [`fallback_font`]: on the drawing path.
 pub(crate) fn shape_cluster(
     base: &CTFont,
     text: &str,
@@ -972,34 +1046,38 @@ pub(crate) fn shape_cluster(
     let string = CFString::from_str(text);
     let range = CFRange {
         location: 0,
-        // UTF-16 birimi, bayt değil ([`fallback_font`]'un aynı tuzağı): ZWJ
-        // ailesi beş kod noktası ama sekiz birim.
+        // UTF-16 units, not bytes ([`fallback_font`]'s same trap): the ZWJ
+        // family is five code points but eight units.
         length: text.encode_utf16().count() as CFIndex,
     };
-    // SAFETY: `base` ve `string` bu kapsamda canlı; `range` dizginin tamamı.
+    // SAFETY: `base` and `string` are alive in this scope; `range` is the
+    // whole string.
     let candidate = unsafe { base.for_string(&string, range) };
-    // SAFETY: anahtar CoreText'in dışa açtığı sabit, program boyunca canlı.
+    // SAFETY: the key is a constant CoreText exports, alive for the whole
+    // program.
     let font_key = unsafe { kCTFontAttributeName };
     let attributes = CFDictionary::from_slices(&[font_key], &[&*candidate]);
-    // SAFETY: ayırıcı varsayılan (`None`), dizgi ve sözlük canlı; sözlük
-    // CoreText'in beklediği biçimde — `kCTFontAttributeName` → `CTFont`.
+    // SAFETY: the allocator is the default (`None`), the string and the
+    // dictionary are alive; the dictionary has the shape CoreText expects —
+    // `kCTFontAttributeName` → `CTFont`.
     let attributed =
         unsafe { CFAttributedString::new(None, Some(&string), Some(attributes.as_opaque())) }?;
-    // SAFETY: `attributed` canlı; satır onu kopyalıyor.
+    // SAFETY: `attributed` is alive; the line copies it.
     let line = unsafe { CTLine::with_attributed_string(&attributed) };
-    // SAFETY: `line` canlı; saf okuma.
+    // SAFETY: `line` is alive; a pure read.
     if unsafe { line.glyph_count() } != 1 {
         return None;
     }
-    // SAFETY: `line` canlı; belgeye göre dizinin öğeleri `CTRun`.
+    // SAFETY: `line` is alive; per the documentation the array's elements are
+    // `CTRun`.
     let runs = unsafe { line.glyph_runs() };
-    // SAFETY: işlevin belgesi öğe tipini `CTRun` diye veriyor.
+    // SAFETY: the function's documentation gives the element type as `CTRun`.
     let runs = unsafe { runs.cast_unchecked::<CTRun>() };
-    // Tek glyph tek run demek; ikinci bir run'ın glyph'i olamaz.
+    // One glyph means one run; a second run cannot have a glyph.
     let run = runs.get(0)?;
     let mut glyph: CGGlyph = 0;
-    // SAFETY: run tek glyph taşıyor (satırın sayısı 1), aralık `0..1` ve
-    // tampon tek eleman.
+    // SAFETY: the run carries a single glyph (the line's count is 1), the
+    // range is `0..1` and the buffer is one element.
     unsafe {
         run.glyphs(
             CFRange {
@@ -1009,15 +1087,15 @@ pub(crate) fn shape_cluster(
             NonNull::from(&mut glyph),
         )
     };
-    // `.notdef` bir glyph değil: fontun "bunu çizemem" cevabı.
+    // `.notdef` is not a glyph: it is the font's "I cannot draw this" answer.
     if glyph == 0 {
         return None;
     }
-    // SAFETY: `run` canlı; öznitelik sözlüğü satırınkinin run'a düşen hâli,
-    // anahtarları `CFString`.
+    // SAFETY: `run` is alive; the attribute dictionary is the line's as it
+    // falls to the run, its keys are `CFString`.
     let attributes = unsafe { run.attributes() };
-    // SAFETY: CoreText'in öznitelik sözlüğünün anahtarları `CFString`;
-    // değerin tipi aşağıda `downcast` ile sınanıyor.
+    // SAFETY: the keys of CoreText's attribute dictionary are `CFString`; the
+    // value's type is checked below with `downcast`.
     let attributes = unsafe { attributes.cast_unchecked::<CFString, CFType>() };
     let font = attributes
         .get(font_key)
@@ -1026,55 +1104,61 @@ pub(crate) fn shape_cluster(
     accept(font, glyph, cell_advance, cols)
 }
 
-/// Fontun glyph'leri **renkli** mi.
+/// Are the font's glyphs **coloured**.
 ///
-/// Ölçüt fontun kendi trait biti (`kCTFontTraitColorGlyphs`), aile adı
-/// **değil**: `CLAUDE.md`'nin mürekkep kapısı için yazdığı kural ("aile adı
-/// karşılaştırması, trait biti ve sihirli dizge yok") o kapının ölçütü
-/// hakkında ve burada konu başka — "bu glyph hangi düzleme rasterize
-/// edilecek" sorusunun cevabı fontun gerçek bir özelliği. Apple Color
-/// Emoji'yi adıyla aramak, aynı işi yapan başka bir renkli fontu (kullanıcının
-/// kurduğu bir Nerd Font emoji seti) sessizce maske düzlemine düşürürdü.
+/// The criterion is the font's own trait bit (`kCTFontTraitColorGlyphs`),
+/// **not** the family name: the rule `CLAUDE.md` writes for the ink gate
+/// ("no family-name comparison, trait bit or magic string") is about that
+/// gate's criterion, and the subject here is a different one — the answer to
+/// "which plane is this glyph rasterized into" is a real property of the
+/// font. Looking up Apple Color Emoji by name would silently drop another
+/// colour font doing the same job (a Nerd Font emoji set the user installed)
+/// to the mask plane.
 pub(crate) fn has_color_glyphs(font: &CTFont) -> bool {
-    // SAFETY: `font` çağrı boyunca canlı; dönüş bir bit kümesi.
+    // SAFETY: `font` is alive for the call; the return is a bit set.
     let traits = unsafe { font.symbolic_traits() };
     traits.contains(CTFontSymbolicTraits::TraitColorGlyphs)
 }
 
-/// Kabul edilen aday ve **kaç hücreye** sığdığı.
+/// The accepted candidate and **how many cells** it fits in.
 ///
-/// `cols` ızgaranın ayırdığı sütun sayısı değil, kapının kabul ettiği kutu:
-/// iki sütun ilan edilmiş bir karakter tek hücreye sığıyorsa burada `1`
-/// dönüyor ve tek yuvadan çiziliyor.
+/// `cols` is not the number of columns the grid reserves but the box the gate
+/// accepted: if a character declared two columns fits in one cell, this is
+/// `1` and it is drawn from a single slot.
 pub(crate) struct Accepted {
     pub(crate) font: CFRetained<CTFont>,
-    /// Kapının ölçtüğü glyph — çizilecek olan da o. Tek kod noktasında
-    /// [`glyph_index`]'in cevabı, dizide `CTLine`'ın şekillendirdiği.
+    /// The glyph the gate measured — also the one drawn. For a single code
+    /// point it is [`glyph_index`]'s answer, for a cluster the one `CTLine`
+    /// shaped.
     pub(crate) glyph: CGGlyph,
     pub(crate) cols: u8,
-    /// Aday küçültme kolundan mı geldi ([`shrink`]). İki kapıdan geçen adayda
-    /// `false` ve o hâlde çizim bugünküyle bit bit aynı (R3.3).
+    /// Did the candidate come from the shrink arm ([`shrink`]). `false` for a
+    /// candidate that passed either gate, and then the drawing is
+    /// bit-for-bit today's (R3.3).
     pub(crate) shrunk: bool,
 }
 
 impl Accepted {
-    /// Glyph'in taban çizgisinden dikey kaydırması (px, yukarı pozitif) —
-    /// **tek formül**, çizimin iki reçetesi (`raster::draw_glyph`,
-    /// `raster::draw_color_glyph`) buradan okuyor.
+    /// The glyph's vertical shift from the baseline (px, up is positive) —
+    /// **one formula**, both drawing recipes (`raster::draw_glyph`,
+    /// `raster::draw_color_glyph`) read it from here.
     ///
-    /// Küçültülmemiş adayda sıfır: bugün kabul edilen her glyph tabanında
-    /// kalıyor. Küçültülende mürekkebin dikey ortası **hücrenin** ortasına
-    /// geliyor, çünkü punto taban çizgisinin üstündeki orijine göre
-    /// küçülüyor ve glyph tabana doğru çöküyor — yarısına inen emoji
-    /// harflerin yanında alçakta, alt ucu `y`'nin kuyruğunun hizasında
-    /// duruyordu. Seçim gözle yapıldı: taban, hücre ortası ve x-yüksekliğinin
-    /// ortası yan yana çizildi ve emoji ile `⧉` ikincisinde metinle birlikte
-    /// okunuyor (`.tasks/041-yedek-glyph-kucultme/phase-2.md` → Uygulama
-    /// Notları). Tam sayı piksele yuvarlanıyor: taban çizgisi zaten tam sayı
-    /// ve kesirli kaydırma AA fazını değiştirip kenarı bulanıklaştırırdı.
+    /// Zero for an unshrunk candidate: every glyph accepted today stays on
+    /// its baseline. For a shrunk one the vertical middle of the ink comes to
+    /// the middle of the **cell**, because the point size shrinks relative to
+    /// the origin above the baseline and the glyph collapses towards the
+    /// baseline — an emoji shrunk to half sat low next to the letters, its
+    /// bottom at the level of `y`'s tail. The choice was made by eye: the
+    /// baseline, the cell's middle and the middle of the x-height were drawn
+    /// side by side, and emoji and `⧉` read together with the text in the
+    /// second (`.tasks/041-yedek-glyph-kucultme/phase-2.md` → Uygulama
+    /// Notları). It is rounded to an integer pixel: the baseline is already an
+    /// integer and a fractional shift would change the AA phase and blur the
+    /// edge.
     ///
-    /// Yatay kapı bundan etkilenmiyor (ölçütü yalnız yatay,
-    /// [`ink_fits_box`]); hücrenin ortası dikeyde taşmayı da azaltıyor.
+    /// The horizontal gate is unaffected by this (its criterion is horizontal
+    /// only, [`ink_fits_box`]); the cell's middle also reduces vertical
+    /// overflow.
     pub(crate) fn rise(&self, m: Metrics) -> CGFloat {
         if !self.shrunk {
             return 0.0;
@@ -1086,13 +1170,15 @@ impl Accepted {
     }
 }
 
-/// Yukarı yuvarlar ve `u16`'ya sıkıştırır.
+/// Rounds up and squeezes into a `u16`.
 ///
-/// Alt sınır 1: bozuk ya da bulunamayan bir fontta metrik sıfır dönebilir ve
-/// sıfır genişlikli hücre ızgarayı sıfıra böler. Üst sınır tipin kendisi.
+/// Lower bound 1: for a broken or missing font a metric can come back zero,
+/// and a zero-width cell divides the grid by zero. The upper bound is the
+/// type itself.
 ///
-/// NaN ayrıca ele alınıyor çünkü `clamp` onu **geçirir** ve `NaN as u16` 0
-/// eder: alt sınır sessizce delinir ve hata bölmede patlar, kaynağında değil.
+/// NaN is handled separately because `clamp` **lets it through** and
+/// `NaN as u16` is 0: the lower bound is silently breached and the error
+/// blows up at the division, not at its source.
 pub(crate) fn round_up(v: CGFloat) -> u16 {
     if !v.is_finite() {
         return 1;

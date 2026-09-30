@@ -1,4 +1,4 @@
-//! Tek glyph'i alfa baytlarına çizer.
+//! Draws a single glyph into alpha bytes.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -11,34 +11,33 @@ use objc2_core_text::CTFont;
 
 use crate::font::{self, Metrics};
 
-/// [`draw`]'in sonucu.
+/// The result of [`draw`].
 ///
-/// İki başarısızlık ayrı varyant çünkü **teşhisleri** ayrı, davranışları değil:
-/// ikisi de tofu'ya düşer ve ikisi de önbelleğe girer. `NoContext`'un
-/// önbelleğe girmesi ilk bakışta yanlış görünür ("geçici hata") ama
-/// `CGBitmapContextCreate`'in karakterle ilgili tek bir argümanı yok — hepsi
-/// atlasın ömrü boyunca sabit, yani bir kez başarısızsa hep başarısız.
-/// Önbelleğe **girmeseydi** her hücre her karede başarısız bir bağlam kurulumu
-/// öderdi ve tek bir glyph bile çizilmezdi.
+/// The two failures are separate variants because their **diagnoses** differ,
+/// not their behaviour: both fall back to tofu and both are cached. Caching
+/// `NoContext` looks wrong at first sight ("a transient error"), but
+/// `CGBitmapContextCreate` has no argument that depends on the character —
+/// all of them are fixed for the atlas's lifetime, so if it fails once it
+/// always fails. If it were **not** cached, every cell would pay for a failed
+/// context setup on every frame and not a single glyph would be drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DrawResult {
     Drawn,
-    /// Fontun bu karakter için glyph'i yok (`.notdef`).
+    /// The font has no glyph for this character (`.notdef`).
     NoGlyph,
-    /// `CGBitmapContext` kurulamadı.
+    /// The `CGBitmapContext` could not be created.
     NoContext,
 }
 
-/// `target`e `ch`'in kapsama (alfa) baytlarını çizer.
+/// Draws the coverage (alpha) bytes of `ch` into `target`.
 ///
-/// `box_advance` glyph'in ortalanacağı **kutunun** kesirli ilerlemesi
-/// ([`font::space_advance`], geniş karakterde onun iki katı); `m.cell_px.0`
-/// onun yukarı yuvarlanmışıdır ve buraya girmez (gerekçe
-/// [`font::space_advance`]'in doc'unda). `x_offset` çizildikten sonra
-/// uygulanan **tam sayı** piksel kaydırması — yalnız geniş glyph'in sağ
-/// yarısında sıfırdan farklı.
+/// `box_advance` is the fractional advance of the **box** the glyph is
+/// centred in ([`font::space_advance`], twice that for a wide character);
+/// `m.cell_px.0` is it rounded up and does not enter here (the reason is in
+/// the doc of [`font::space_advance`]). `x_offset` is a **whole** pixel shift
+/// applied after drawing — non-zero only for the right half of a wide glyph.
 ///
-/// Tampon yalnız gerçekten çizim yapılacaksa sıfırlanır.
+/// The buffer is cleared only if drawing actually happens.
 pub(crate) fn draw(
     font: &CTFont,
     ch: char,
@@ -53,16 +52,16 @@ pub(crate) fn draw(
     draw_glyph(font, glyph, m, box_advance, x_offset, 0.0, target)
 }
 
-/// [`draw`]'in glyph numarasıyla çağrılan gövdesi.
+/// The body of [`draw`], called with a glyph number.
 ///
-/// Ayrı olmasının sebebi grapheme dizisi (035): dizinin glyph'i bir kod
-/// noktasından değil `CTLine`'ın şekillendirmesinden geliyor
-/// ([`font::shape_cluster`]), yani `glyph_index(ch)` sorusu orada sorulamıyor.
-/// Yerleşim, ortalama ve bağlam **tek yerde** kalıyor; [`draw`] yalnız
-/// numarayı buluyor, yani bugünkü raster bit bit aynı.
+/// It is separate because of grapheme sequences (035): a sequence's glyph
+/// comes not from a code point but from `CTLine`'s shaping
+/// ([`font::shape_cluster`]), so the `glyph_index(ch)` question cannot be
+/// asked there. Placement, centring and the context stay **in one place**;
+/// [`draw`] only finds the number, so today's raster is bit-for-bit the same.
 ///
-/// `rise` taban çizgisinden dikey kaydırma (px, yukarı pozitif); yalnız
-/// küçültülmüş yedekte sıfırdan farklı ve formülü tek yerde
+/// `rise` is the vertical shift from the baseline (px, positive is up); it is
+/// non-zero only for a shrunk fallback and its formula lives in one place
 /// ([`font::Accepted::rise`]).
 pub(crate) fn draw_glyph(
     font: &CTFont,
@@ -73,20 +72,21 @@ pub(crate) fn draw_glyph(
     rise: CGFloat,
     target: &mut [u8],
 ) -> DrawResult {
-    // `debug_assert` değil: bu satır aşağıdaki `unsafe` bloğun ön koşulu.
-    // CG'ye `width`/`height` `m`'den, işaretçi `target`ten gidiyor; ikisi
-    // ayrışırsa CG kısa tamponun ötesine yazar ve release derlemede hiçbir şey
-    // fark etmez — `make hepsi` sınamaları debug koşuyor.
-    assert_eq!(target.len(), m.slot_bytes(), "tampon tam bir yuva olmalı");
+    // Not `debug_assert`: this line is the precondition of the `unsafe` block
+    // below. CG gets `width`/`height` from `m` and the pointer from `target`;
+    // if the two diverge, CG writes past the short buffer and nothing notices
+    // in a release build — the `make hepsi` tests run in debug.
+    assert_eq!(target.len(), m.slot_bytes(), "buffer must be a full slot");
 
     let (w, h) = m.cell_wh();
-    // Alfa-only bağlam: renk uzayı **yok** (`space: None`), bileşen başına
-    // 8 bit, satır adımı tam hücre genişliği. Beyaz çizilen glyph'in kapsama
-    // değeri doğrudan alfa baytı olur; ayrı bir kanal ayıklama adımı doğmaz
-    // ve tampon zaten atlasın `R8Unorm` düzeninde.
-    // SAFETY: `target` w*h bayt ve bağlam yaşadığı sürece (bu fonksiyonun
-    // sonuna kadar) canlı; ölçüler tamponla tutarlı. Bağlam düştükten sonra
-    // `target`e yalnız Rust tarafından erişilir.
+    // Alpha-only context: **no** colour space (`space: None`), 8 bits per
+    // component, row stride the full cell width. The coverage of a glyph
+    // drawn in white becomes the alpha byte directly; no separate channel
+    // extraction step arises and the buffer is already in the atlas's
+    // `R8Unorm` layout.
+    // SAFETY: `target` is w*h bytes and alive while the context lives (until
+    // the end of this function); the dimensions match the buffer. After the
+    // context is dropped `target` is accessed only from Rust.
     let ctx = unsafe {
         CGBitmapContextCreate(
             target.as_mut_ptr().cast::<c_void>(),
@@ -101,85 +101,90 @@ pub(crate) fn draw_glyph(
     let Some(ctx) = ctx else {
         return DrawResult::NoContext;
     };
-    // Sıfırlama bağlam kurulduktan **sonra**: başarısız iki dalda çağıran
-    // tampona hiç bakmıyor (tofu rezident ve dokuda), yani oradaki memset
-    // tamamen boşa giderdi.
+    // Clearing comes **after** the context is created: on both failing
+    // branches the caller never looks at the buffer (tofu is resident and in
+    // the texture), so a memset there would be pure waste.
     target.fill(0);
 
     CGContext::set_should_antialias(Some(&ctx), true);
-    // Subpixel AA kapalı: atlas tek kanal ve macOS 10.14'ten beri sistemin
-    // kendisi de subpixel'i bıraktı (discussion.md → karar 3a). İki çağrı
-    // ayrı ayrı gerekli: `allows_font_smoothing` bağlamın iznini, `should`
-    // o çizimdeki tercihi kapatıyor.
+    // Subpixel AA is off: the atlas is single-channel and the system itself
+    // dropped subpixel AA in macOS 10.14 (discussion.md → karar 3a). Both
+    // calls are needed separately: `allows_font_smoothing` turns off the
+    // context's permission, `should` the preference for this drawing.
     CGContext::set_allows_font_smoothing(Some(&ctx), false);
     CGContext::set_should_smooth_fonts(Some(&ctx), false);
-    // Alfa-only bağlamda gri bileşen yok sayılır; anlamı olan alfa.
+    // In an alpha-only context the grey component is ignored; alpha is what
+    // matters.
     CGContext::set_gray_fill_color(Some(&ctx), 1.0, 1.0);
 
-    // CG'nin başlangıcı sol **alt**, bizim ızgaramız sol üst: taban çizgisi
-    // hücrenin altından `cell_h - baseline_px` kadar yukarıda. Çıkarma taşmaz:
-    // `font::metrics` yüksekliği taban + (descent+leading) olarak kuruyor ve
-    // ikinci parça en az 1.
+    // CG's origin is bottom **left**, our grid's is top left: the baseline
+    // sits `cell_h - baseline_px` above the bottom of the cell. The
+    // subtraction cannot overflow: `font::metrics` builds the height as
+    // baseline + (descent+leading) and the second part is at least 1.
     let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px) + rise;
-    // Glyph hücrede **yatay olarak ortalanıyor**: yedek fontun ilerlemesi
-    // hücrenin ilerlemesinden dar olabiliyor ve sola yapışmış bir işaret
-    // komşularının arasında hizasız görünür. Kural **evrensel**, yedeğe
-    // koşullu değil — eşaralıklı taban fontta her glyph'in ilerlemesi
-    // hücrenin ilerlemesinin ta kendisi, yani çıkarma tam olarak sıfır ve
-    // taban fontun rasteri bit bit aynı kalıyor (bekçisi
-    // `every_base_glyph_advance_is_the_cell_advance`). Koşullu yazılsaydı
-    // "yedek mi" sorusu çizim yoluna ikinci bir dal, sınamaya da ikinci bir
-    // kod yolu eklerdi.
+    // The glyph is **centred horizontally** in the cell: a fallback font's
+    // advance can be narrower than the cell's and a mark stuck to the left
+    // looks misaligned between its neighbours. The rule is **universal**, not
+    // conditional on the fallback — in a monospaced base font every glyph's
+    // advance is exactly the cell's advance, so the subtraction is exactly
+    // zero and the base font's raster stays bit-for-bit the same (guarded by
+    // `every_base_glyph_advance_is_the_cell_advance`). Written conditionally,
+    // the "is it a fallback" question would add a second branch to the
+    // drawing path and a second code path to the tests.
     //
-    // Kaydırmanın formülü [`font::centre_shift`]'te, çünkü ikinci tüketicisi
-    // yedeğin mürekkep kapısı: kapı adayın **burada** duracağı yeri ölçmek
-    // zorunda. İçindeki `max(0.0)` bu çizimin kuralı — genişlik kapısı yalnız
-    // **yedekte** koşuyor, taban font eşaralıklı olmayabilir
-    // ([`font::FontIssue::NotMonospaced`]) ve geniş bir glyph'i hücreyi
-    // aşabilir. Komşu hücreye taşma **mümkün değil** — bağlam tam bir yuva
-    // genişliğinde ve CG oraya kırpıyor — yani mesele taşma değil kırpmanın
-    // **yönü**: negatif kaydırma glyph'in solunu keser, kırpma ise sağdan
-    // olmalı. Latin yazıda harf soldan tanınıyor; sol kenarı kesilmiş bir 'W'
-    // ile 'V' ayırt edilemez.
-    // `x_offset` geniş glyph'in **sağ yarısı** için: aynı glyph aynı iki
-    // hücrelik kutuya göre ortalanıyor, sonra bir hücre sola kaydırılıyor ve
-    // CG taşan sol yarıyı kırpıyor. Ofset **tam sayı** piksel
-    // (`m.cell_px.0`), yani iki çağrının AA fazı birebir aynı ve iki yarı
-    // 2w'lik tek bir rasterin bölünmüşüyle bit bit aynı çıkıyor — bölünmüş
-    // bir tampon, ikinci bir `slot_bytes` ve yarım pikselde dikiş riski
-    // doğmuyor. Tek hücrelik çizimde sıfır ve o hâlde bu satır 022'deki
-    // hâliyle aynı.
+    // The shift's formula lives in [`font::centre_shift`] because its second
+    // consumer is the fallback's ink gate: the gate must measure where the
+    // candidate will stand **here**. The `max(0.0)` inside is this drawing's
+    // rule — the width gate runs only for the **fallback**, the base font may
+    // not be monospaced ([`font::FontIssue::NotMonospaced`]) and a wide glyph
+    // may exceed the cell. Spilling into the neighbouring cell is **not
+    // possible** — the context is exactly one slot wide and CG clips there —
+    // so the issue is not spilling but the **direction** of clipping: a
+    // negative shift cuts off the glyph's left side, whereas clipping must
+    // happen on the right. Latin script is recognised from the left; a 'W'
+    // with its left edge cut off cannot be told from a 'V'.
+    // `x_offset` is for the **right half** of a wide glyph: the same glyph is
+    // centred in the same two-cell box, then shifted one cell to the left and
+    // CG clips the overflowing left half. The offset is a **whole** pixel
+    // count (`m.cell_px.0`), so the AA phase of the two calls is identical and
+    // the two halves come out bit-for-bit the same as a single 2w-wide raster
+    // split in two — no split buffer, no second `slot_bytes` and no risk of a
+    // seam at half a pixel. In a single-cell drawing it is zero, and then
+    // this line is the same as it was in 022.
     let x = font::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
     let position = CGPoint::new(x, baseline);
-    // SAFETY: tek glyph, tek konum, sayı ikisiyle tutarlı; bağlam canlı.
+    // SAFETY: one glyph, one position, the count matches both; context alive.
     unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
     DrawResult::Drawn
 }
 
-/// `target`e `ch`'in **renkli** piksellerini çizer (`RGBA8`, ön çarpımlı).
+/// Draws the **colour** pixels of `ch` into `target` (`RGBA8`, premultiplied).
 ///
-/// [`draw_glyph`]'in kardeşi ve ondan **ayrı** bir fonksiyon, parametreli bir dalı
-/// değil: iki reçetenin ortak yanı yalnız konum aritmetiği, ayrıştıkları şey
-/// bağlamın kendisi — bu bağlamın bir renk uzayı var (`sRGB`), piksel başına
-/// dört bileşeni ve ön çarpımlı alfası; [`draw`]'inki alfa-only ve renk
-/// **üretemiyor** (`space: None`, [`CGImageAlphaInfo::Only`]).
+/// A sibling of [`draw_glyph`] and a **separate** function, not a
+/// parameterised branch of it: the only thing the two recipes share is the
+/// position arithmetic, and what differs is the context itself — this one has
+/// a colour space (`sRGB`), four components per pixel and premultiplied
+/// alpha; [`draw`]'s is alpha-only and **cannot produce** colour
+/// (`space: None`, [`CGImageAlphaInfo::Only`]).
 ///
-/// **Renk uzayı sRGB olmak zorunda** ve doku tarafı da öyle
-/// (`RGBA8Unorm_sRGB`): hedef `BGRA8Unorm_sRGB`, donanım fragment çıktısını
-/// lineer sayıyor ve sRGB olmayan bir dokudan örneklenen emoji paleti
-/// **açar**. Belirti `CLAUDE.md` → "Renk uzayı sınırı geçer" maddesindeki
-/// sessiz kusurun aynısı, o yüzden tanığı da aynı cinsten: ara tonlu bir
-/// piksel (`0.0` ve `1.0` transfer fonksiyonunun sabit noktaları).
+/// **The colour space must be sRGB** and so must the texture side
+/// (`RGBA8Unorm_sRGB`): the target is `BGRA8Unorm_sRGB`, the hardware treats
+/// fragment output as linear, and an emoji sampled from a non-sRGB texture
+/// **washes out** the palette. The symptom is the same silent defect as in
+/// `CLAUDE.md` → "Renk uzayı sınırı geçer", so its witness is of the same
+/// kind: a mid-tone pixel (`0.0` and `1.0` are fixed points of the transfer
+/// function).
 ///
-/// **Ön çarpım CG'nin kararı**, bizim değil: `PremultipliedLast` istiyoruz
-/// çünkü CoreGraphics renkli glyph'i öyle veriyor ve geri almak düşük alfada
-/// hassasiyet kaybı + yuva başına bir CPU turu demek. Bedeli blend tarafında
-/// ödeniyor: o pipeline'ın RGB kaynak çarpanı `One`.
+/// **Premultiplication is CG's decision**, not ours: we ask for
+/// `PremultipliedLast` because CoreGraphics delivers colour glyphs that way,
+/// and undoing it means a loss of precision at low alpha plus one CPU pass
+/// per slot. The price is paid on the blend side: that pipeline's RGB source
+/// factor is `One`.
 ///
-/// Glyph **numarasıyla** çağrılıyor, karakterle değil: renkli glyph'in iki
-/// kaynağı da (yedek adayı ve grapheme dizisi) numarayı kapıdan geçerken
-/// zaten bulmuş oluyor ([`font::Accepted`]), yani karakterli bir sarmalayıcının
-/// çağıranı yok.
+/// It is called with a glyph **number**, not a character: both sources of a
+/// colour glyph (a fallback candidate and a grapheme sequence) have already
+/// found the number while passing the gate ([`font::Accepted`]), so a
+/// character-taking wrapper would have no caller.
 pub(crate) fn draw_color_glyph(
     font: &CTFont,
     glyph: CGGlyph,
@@ -189,24 +194,25 @@ pub(crate) fn draw_color_glyph(
     rise: CGFloat,
     target: &mut [u8],
 ) -> DrawResult {
-    // `debug_assert` değil: aşağıdaki `unsafe` bloğun ön koşulu ve **maske
-    // tamponunu yakalayan** şey. Yanlış düzlemin tamponu verilirse CG kısa
-    // tamponun ötesine yazar ve belirti sessizdir.
+    // Not `debug_assert`: it is the precondition of the `unsafe` block below
+    // and the thing that **catches a mask buffer**. If the wrong plane's
+    // buffer is passed, CG writes past the short buffer and the symptom is
+    // silent.
     assert_eq!(
         target.len(),
         m.slot_bytes_rgba(),
-        "tampon tam bir RGBA yuva olmalı"
+        "buffer must be a full RGBA slot"
     );
 
     let (w, h) = m.cell_wh();
-    // SAFETY: adlandırılmış sistem sabiti; dönüş non-null.
+    // SAFETY: a named system constant; the return is non-null.
     let space = unsafe { CGColorSpace::with_name(Some(kCGColorSpaceSRGB)) };
     let Some(space) = space else {
         return DrawResult::NoContext;
     };
-    // SAFETY: `target` 4*w*h bayt ve bağlam yaşadığı sürece canlı; ölçüler
-    // tamponla tutarlı. Bağlam düştükten sonra `target`e yalnız Rust
-    // tarafından erişilir.
+    // SAFETY: `target` is 4*w*h bytes and alive while the context lives; the
+    // dimensions match the buffer. After the context is dropped `target` is
+    // accessed only from Rust.
     let ctx = unsafe {
         CGBitmapContextCreate(
             target.as_mut_ptr().cast::<c_void>(),
@@ -223,64 +229,70 @@ pub(crate) fn draw_color_glyph(
     };
     target.fill(0);
     CGContext::set_should_antialias(Some(&ctx), true);
-    // Subpixel yine kapalı: [`draw`] ile aynı gerekçe (sistem de bıraktı) ve
-    // renkli glyph'te zaten konusuz.
+    // Subpixel still off: the same reason as in [`draw`] (the system dropped
+    // it too), and it is moot for a colour glyph anyway.
     CGContext::set_allows_font_smoothing(Some(&ctx), false);
     CGContext::set_should_smooth_fonts(Some(&ctx), false);
 
-    // Konum aritmetiği [`draw_glyph`] ile **birebir aynı** ve olmak zorunda:
-    // geniş emoji de `Half` mekanizmasından geçiyor, yani sağ yarısı aynı tam
-    // sayı ofsetle elde ediliyor; `rise` de aynı ([`font::Accepted::rise`]).
+    // The position arithmetic is **identical** to [`draw_glyph`]'s and has to
+    // be: wide emoji also goes through the `Half` mechanism, so its right half
+    // is obtained with the same whole-pixel offset; `rise` is the same too
+    // ([`font::Accepted::rise`]).
     let baseline = CGFloat::from(m.cell_px.1 - m.baseline_px) + rise;
     let x = font::centre_shift(box_advance, font::glyph_advance(font, glyph)) - x_offset;
     let position = CGPoint::new(x, baseline);
-    // SAFETY: tek glyph, tek konum, sayı ikisiyle tutarlı; bağlam canlı.
-    // `draw_glyphs` renkli fontta `sbix`/`CBDT` tablosunu kendisi çiziyor;
-    // ayrı bir "renkli mi" dalı CoreText'in içinde.
+    // SAFETY: one glyph, one position, the count matches both; context alive.
+    // For a colour font `draw_glyphs` draws the `sbix`/`CBDT` table itself;
+    // the separate "is it colour" branch is inside CoreText.
     unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
-    // Bağlam düşüyor ki `target`e Rust tarafından erişmek güvenli olsun:
-    // aşağıdaki geçiş CG'nin hâlâ yazabileceği bir tampona dokunmamalı.
+    // The context is dropped so that accessing `target` from Rust is safe:
+    // the pass below must not touch a buffer CG could still write to.
     drop(ctx);
     unpremultiply(target);
     DrawResult::Drawn
 }
 
-/// Ön çarpımı geri alır: `encode(c)·a` → `encode(c)`.
+/// Undoes premultiplication: `encode(c)·a` → `encode(c)`.
 ///
-/// **Zorunlu, çünkü ön çarpım yanlış uzayda yapılıyor.** CG bağlamı sRGB ve
-/// `PremultipliedLast`, yani sakladığı değer `encode(c)·a` — *kodlanmış*
-/// bileşenin alfayla çarpımı. Metal'in `RGBA8Unorm_sRGB` dokusu ise her RGB
-/// kanalını **alfadan bağımsız** çözüyor ve sRGB çözümü konveks:
-/// `decode(encode(c)·a) < decode(encode(c))·a`. Sonuç her kenar pikselinde
-/// koyuya kayıyor — yarı saydam beyaz siyah zeminde `0xBC` yerine `0x80`
-/// çıkıyor, yani **her antialias kenarında görünür bir koyu halka**.
+/// **Required, because the premultiplication happens in the wrong space.**
+/// The CG context is sRGB and `PremultipliedLast`, so the value it stores is
+/// `encode(c)·a` — the *encoded* component multiplied by alpha. Metal's
+/// `RGBA8Unorm_sRGB` texture, however, decodes each RGB channel
+/// **independently of alpha**, and the sRGB decode is convex:
+/// `decode(encode(c)·a) < decode(encode(c))·a`. The result drifts dark at
+/// every edge pixel — half-transparent white on a black background comes out
+/// `0x80` instead of `0xBC`, i.e. **a visible dark ring on every antialiased
+/// edge**.
 ///
-/// Doğru yer bir lineer bağlam olurdu ama CG bunu 8 bitte vermiyor:
-/// `CGBitmapContext`'in desteklediği alfa biçimleri arasında **düz alfa
-/// yok** (`NoneSkip*` ya da `Premultiplied*`). Kalan iki yol ön çarpımı geri
-/// almak ya 16 bitlik lineer bir doku; ikincisi renk düzlemini iki katına
-/// çıkarır ve `slot_bytes_rgba`'yı format başına üçe böler.
+/// The right place would be a linear context, but CG does not offer one at 8
+/// bits: among the alpha formats `CGBitmapContext` supports there is **no
+/// straight alpha** (`NoneSkip*` or `Premultiplied*`). The two remaining
+/// ways are undoing the premultiplication or a 16-bit linear texture; the
+/// latter doubles the colour plane and splits `slot_bytes_rgba` three ways
+/// per format.
 ///
-/// **Bedeli düşük alfada hassasiyet:** `a = 1` iken bölme niceleme hatasını
-/// 255 katına çıkarıyor. Görünür değil — o pikselin ekrana katkısı da
-/// `a/255` kadar, yani hatanın ağırlığı kendisiyle birlikte sönüyor. Bedel
-/// yuva başına **bir kez** ödeniyor (raster önbellekli), kare başına değil.
+/// **The price is precision at low alpha:** at `a = 1` the division
+/// multiplies the quantisation error by 255. It is not visible — that pixel's
+/// contribution to the screen is also only `a/255`, so the error's weight
+/// fades with it. The price is paid **once** per slot (the raster is cached),
+/// not per frame.
 ///
-/// Çıktı **düz alfa**, yani emoji pipeline'ının blend'i maske yolununkiyle
-/// **aynı** kalıyor: RGB kaynak çarpanı `SourceAlpha`. 008 phase-5'in
-/// "blend parametre değil" kararı bu yüzden geri alınmadı.
+/// The output is **straight alpha**, so the emoji pipeline's blend stays the
+/// **same** as the mask path's: RGB source factor `SourceAlpha`. That is why
+/// 008 phase-5's "blend is not a parameter" decision was not reverted.
 fn unpremultiply(target: &mut [u8]) {
     for px in target.chunks_exact_mut(4) {
         let a = u32::from(px[3]);
         if a == 0 {
-            // Tümden saydam pikselin rengi **yok**; bölme de tanımsız.
-            // Sıfırda bırakmak `nearest` örneklemede de doğru: o piksel
-            // hiçbir zaman ağırlık taşımıyor.
+            // A fully transparent pixel has **no** colour; the division is
+            // undefined as well. Leaving it at zero is right under `nearest`
+            // sampling too: that pixel never carries weight.
             continue;
         }
         for c in &mut px[..3] {
-            // `min(255)`: `a` ile çarpım yuvarlanmış olduğu için bölme
-            // 255'i bir birim aşabiliyor (yarı saydam beyaz tam bu köşe).
+            // `min(255)`: since the product with `a` was rounded, the
+            // division can exceed 255 by one unit (half-transparent white is
+            // exactly this corner).
             *c = u8::try_from((u32::from(*c) * 255 / a).min(255)).unwrap_or(u8::MAX);
         }
     }
@@ -1493,62 +1505,65 @@ fn technical(ch: char, m: Metrics, target: &mut [u8]) {
 mod tests {
     use super::*;
 
-    /// Ön çarpımın geri alınması: `encode(c)·a` → `encode(c)`.
+    /// Undoing premultiplication: `encode(c)·a` → `encode(c)`.
     ///
-    /// Sayılar CG'nin gerçekten yazdığı hâl: yarı saydam beyaz
-    /// (`a = 0x80`) ön çarpımlı olarak `0x80` saklanıyor ve düz alfaya
-    /// dönünce `0xff` olmak zorunda. Dönüşüm olmazsa dokudan `0x80`
-    /// okunuyor, kanal çözümü alfadan bağımsız olduğu için sonuç lineer
-    /// uzayda dörtte bire iniyor ve her antialias kenarı koyu bir halka
-    /// alıyor — GPU tarafındaki tanığı
+    /// The numbers are what CG actually writes: half-transparent white
+    /// (`a = 0x80`) is stored premultiplied as `0x80` and must become `0xff`
+    /// when turned back into straight alpha. Without the conversion `0x80` is
+    /// read from the texture, and because the channel decode is independent
+    /// of alpha the result drops to a quarter in linear space and every
+    /// antialiased edge gets a dark ring — its witness on the GPU side is
     /// `bt_gpu::renderer::tests::a_translucent_edge_composites_in_linear_space`.
     #[test]
     fn unpremultiply_recovers_straight_alpha() {
-        // Sıra: yarı saydam beyaz, tümden saydam (rengi yok), opak kırmızı,
-        // ve **en zor köşe** olan en küçük alfa.
+        // Order: half-transparent white, fully transparent (no colour),
+        // opaque red, and the smallest alpha, which is **the hardest corner**.
         let mut px = vec![
-            0x80, 0x80, 0x80, 0x80, // ön çarpımlı beyaz, a = 0.5
-            0x00, 0x00, 0x00, 0x00, // tümden saydam
-            0xff, 0x00, 0x00, 0xff, // opak kırmızı: dokunulmamalı
-            0x01, 0x00, 0x00, 0x01, // a = 1/255: bölme 0xff vermeli
+            0x80, 0x80, 0x80, 0x80, // premultiplied white, a = 0.5
+            0x00, 0x00, 0x00, 0x00, // fully transparent
+            0xff, 0x00, 0x00, 0xff, // opaque red: must be left untouched
+            0x01, 0x00, 0x00, 0x01, // a = 1/255: the division must give 0xff
         ];
         unpremultiply(&mut px);
-        assert_eq!(&px[0..4], &[0xff, 0xff, 0xff, 0x80], "yarı saydam beyaz");
+        assert_eq!(&px[0..4], &[0xff, 0xff, 0xff, 0x80], "translucent white");
         assert_eq!(
             &px[4..8],
             &[0x00, 0x00, 0x00, 0x00],
-            "tümden saydam pikselin rengi yok: bölme tanımsız, sıfırda kalmalı"
+            "a fully transparent pixel has no colour: the division is undefined, it must stay zero"
         );
         assert_eq!(
             &px[8..12],
             &[0xff, 0x00, 0x00, 0xff],
-            "opak piksel değişmez"
+            "an opaque pixel does not change"
         );
         assert_eq!(
             &px[12..16],
             &[0xff, 0x00, 0x00, 0x01],
-            "en küçük alfa: 255'e kırpılmalı, taşmamalı"
+            "smallest alpha: must clamp to 255, not overflow"
         );
     }
 
-    /// Dönüşüm **tersine çevrilebilir**: geri çarpım özgün baytı veriyor.
+    /// The conversion is **invertible**: multiplying back gives the original
+    /// byte.
     ///
-    /// Aranan şey formülün kopyası değil bir **değişmez**, yani "ne yazdıysak
-    /// GPU onu alfayla çarpınca elimizdeki ön çarpımlı bayta dönmeli". Tarama
-    /// bütün (bileşen, alfa) çiftlerini dolaşıyor — köşe elle seçilmiş bir
-    /// örnek değil — ve `min(255)`'in gerekçesini de o gösteriyor: yarı
-    /// saydam beyazda bölme 255'i bir birim aşıyor.
+    /// What is sought is not a copy of the formula but an **invariant**, i.e.
+    /// "whatever we wrote, the GPU multiplying it by alpha must return the
+    /// premultiplied byte we had". The sweep walks every (component, alpha)
+    /// pair — not a hand-picked corner — and it is also what shows the reason
+    /// for `min(255)`: for half-transparent white the division exceeds 255 by
+    /// one unit.
     ///
-    /// Pay **±1** ve iki yuvarlamadan geliyor: biri CG'nin ön çarpımında,
-    /// biri bizim bölmemizde. Düşük alfada daha büyük bir sapma meşru ve
-    /// ölçütü o taşıyor (`a` küçükken bir bayt, lineer katkının çok üstünde
-    /// bir orana karşılık geliyor) — o yüzden pay alfaya göre ölçekli.
+    /// The slack is **±1** and comes from two roundings: one in CG's
+    /// premultiplication, one in our division. A larger deviation at low alpha
+    /// is legitimate and the criterion carries it (when `a` is small one byte
+    /// corresponds to a ratio far above its linear contribution) — hence the
+    /// slack scales with alpha.
     #[test]
     fn unpremultiply_round_trips_through_the_gpu_multiply() {
         for a in 1u32..=255 {
             for c in 0u32..=a {
-                // Ön çarpımlı bir bileşen alfayı **aşamaz**; aşan bir girdi
-                // CG'den gelmiyor ve taramaya da girmiyor.
+                // A premultiplied component **cannot exceed** alpha; an input
+                // that does never comes from CG and is not in the sweep.
                 let mut px = [
                     u8::try_from(c).expect("c ≤ 255"),
                     0,
@@ -1556,14 +1571,14 @@ mod tests {
                     u8::try_from(a).expect("a ≤ 255"),
                 ];
                 unpremultiply(&mut px);
-                // GPU'nun yaptığı: düz bileşeni alfayla çarpmak.
+                // What the GPU does: multiply the straight component by alpha.
                 let back = u32::from(px[0]) * a / 255;
-                // Bölmenin niceleme payı: bir baytlık düz hata `a/255`
-                // kadar ön çarpımlı hataya iniyor, artı iki yuvarlama.
+                // The division's quantisation slack: a one-byte straight error
+                // shrinks to `a/255` of premultiplied error, plus two roundings.
                 let slack = a.div_ceil(255) + 1;
                 assert!(
                     back.abs_diff(c) <= slack,
-                    "geri çarpım özgün baytı vermedi: c={c} a={a} → {} → {back}",
+                    "multiplying back did not give the original byte: c={c} a={a} → {} → {back}",
                     px[0]
                 );
             }
