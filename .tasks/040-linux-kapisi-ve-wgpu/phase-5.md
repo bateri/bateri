@@ -118,6 +118,7 @@ dosyadan çıkıyor.
 - [ ] Yazılan/taşınan kodun yorumları ve tanı metinleri İngilizce
 - [ ] `Pacer` (dört görev, zaman tabanı sözleşmesi) + platformsuz `tick(damga, hedef)`
 - [ ] `Waker`, `arm_clock`, uykudan önceki kare poll'u `Pacer`'a bağlı
+- [ ] phase-4'ten devir: `WgpuRenderer::poll` tik başında (`on_complete` → `retry.streak.succeeded` / `draw_failed`, `mark_startup`, `GpuSpan` → `record_gpu`), `in_flight()` uykudan önce tek gecikmeli poll'u kuruyor; `draw` bugün `&Target` alıyor → yüzey dokusu; ölçüm kapısı açıkken `set_gpu_timing(true)`, `gpu_timing_supported() == false` → jeton değeri `unsupported`
 - [ ] wgpu `Surface` + `Renderer` ürün yolunda, Metal `cfg(test)` kâhini
 - [ ] `bt-shell`: `CAMetalLayer` + macOS `Pacer` ((b))
 - [ ] Jeton değerleri (`unsupported`), `CLAUDE.md` satırları

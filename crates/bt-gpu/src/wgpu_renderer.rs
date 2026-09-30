@@ -1,45 +1,52 @@
 //! The wgpu renderer — 040's parallel renderer, today **test-only**.
 //!
-//! The Metal renderer ([`crate::Renderer`]) stays in place as the oracle and
-//! this module grows next to it one pipeline group at a time
-//! (`.tasks/040-linux-kapisi-ve-wgpu/discussion.md` → Karar 3 and 4). Phase-2
-//! brought `cell_bg` + caret (background quads, the caret's SDF and the dock
-//! buttons); phase-3 brings `cell` + `emoji`: glyphs and rules from the
-//! atlas's two planes, on all three surfaces (grid, fill band, dock), plus
-//! the command marks drawn as sprites. Selection, search and effect lists do
-//! not exist yet and [`WgpuRenderer::plan`] requires them to be **empty** — a
-//! half-drawn scene must not silently diverge from the oracle.
+//! The Metal renderer ([`crate::Renderer`]) stays in place as the oracle
+//! (`.tasks/040-linux-kapisi-ve-wgpu/discussion.md` → Karar 3 and 4). Since
+//! phase-4 every pipeline group is here: `cell_bg` + caret (background quads,
+//! the caret's SDF, the dock buttons), `cell` + `emoji` (glyphs and rules from
+//! the atlas's two planes), `selection` (the mouse selection and the search
+//! highlights) and `glyph_fx` (the dock's typing effects), on all three
+//! surfaces (grid, fill band, dock). `renderer.rs`'s guards draw with this
+//! renderer; Metal only draws the oracle scenes.
 //!
 //! The module sits behind `cfg(test)` (wgpu is a dev-dependency): the product
 //! binary's graph does not change and backing out is a single `git revert`.
 //! Pipeline order, the viewport/scissor sequence and blending are **the same**
 //! as `renderer.rs`'s `encode_pass` / `encode_fill` / `encode_dock` /
-//! `encode_glyphs` / `pipeline`; the reasons live there and are not repeated
-//! here. Slot resolution, the wide glyph's fan-out and uv baking are not
-//! repeated either: both renderers call [`crate::slots`], and only the upload
-//! target differs ([`WgpuUpload`]). The one difference is how commands are
-//! recorded: Metal builds a buffer per list per frame, here every quad of the
-//! frame goes into **one** instance buffer (and every glyph into one glyph
-//! buffer) and draws read ranges of them ([`Plan`]). Those buffers are not
-//! rebuilt per frame either: they live as long as the renderer, grow on demand
-//! and are filled with `write_buffer` — creating a buffer in wgpu is a
-//! validation and tracking round trip, and it was measured (phase-2 →
-//! Uygulama Notları): a per-frame buffer visibly inflated `cpu_encode`.
+//! `encode_fx` / `encode_glyphs` / `pipeline`; the reasons live there and are
+//! not repeated here. Slot resolution, the wide glyph's fan-out, uv baking and
+//! the effects' instance packing are not repeated either: both renderers call
+//! [`crate::slots`], and only the upload target differs ([`WgpuUpload`]). The
+//! one difference is how commands are recorded: Metal builds a buffer per list
+//! per frame, here every quad of the frame goes into **one** instance buffer
+//! (every glyph into one glyph buffer, every effect into one effect buffer)
+//! and draws read ranges of them ([`Plan`]). Those buffers are not rebuilt per
+//! frame either: they live as long as the renderer, grow on demand and are
+//! filled with `write_buffer` — creating a buffer in wgpu is a validation and
+//! tracking round trip, and it was measured (phase-2 → Uygulama Notları): a
+//! per-frame buffer visibly inflated `cpu_encode`.
+//!
+//! **Completion** (Karar 6) is a submission index per frame and a
+//! non-blocking [`WgpuRenderer::poll`] at the start of a tick — no closure per
+//! frame. The four jobs of Metal's completion block are carried by name there.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use bt_atlas::{Atlas, Metrics, Plane, TOFU};
 use bt_core::{Clusters, FontOptions, LinearRgba};
 
 use crate::GpuError;
 use crate::frame::{
-    CursorBlock, Frame, GLYPH_INSTANCE_OFFSETS, GlyphCell, GlyphInstance, INSTANCE_OFFSETS,
-    Instance, RuleCell,
+    CursorBlock, FX_INSTANCE_OFFSETS, Frame, FxCell, FxInstance, GLYPH_INSTANCE_OFFSETS, GlyphCell,
+    GlyphInstance, INSTANCE_OFFSETS, Instance, RuleCell,
 };
-use crate::renderer::{CellMetrics, scissor_rect_below};
+use crate::renderer::{CellMetrics, FontNotice, scissor_rect_below};
 use crate::slots::{self, SlotUpload};
 
 /// Immediate data budget in bytes: the smallest `maxPushConstantsSize` Vulkan
@@ -54,11 +61,11 @@ pub(crate) const IMMEDIATE_BUDGET: u32 = 128;
 pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
 /// The atlas's mask plane: one channel of coverage (Metal's `R8Unorm`).
-const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+pub(crate) const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
 /// The atlas's colour plane: **sRGB**, so sampling decodes to linear (Metal's
 /// `RGBA8Unorm_sRGB`; why it must be sRGB is `new_color_texture`'s doc).
-const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Field-for-field twin of `cell_bg.wgsl` → `Immediates`.
 ///
@@ -67,7 +74,8 @@ const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 /// trailing pad is WGSL's invisible 8 bytes — without it Rust would send 40
 /// bytes and the layout would silently come up short. Putting the `vec4`s
 /// first is deliberate: with `viewport_px` first the padding would land in
-/// the middle.
+/// the middle. The `selection` pipeline reads the same block with another
+/// meaning: `core` is the highlight's colour, `shape[0]` its radius.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Immediates {
@@ -110,6 +118,27 @@ const _: () = assert!(std::mem::offset_of!(GlyphImmediates, uv_size) == 48);
 // 64 ≤ 128: this block stays in immediates too (Karar 5).
 const _: () = assert!(size_of::<GlyphImmediates>() as u32 <= IMMEDIATE_BUDGET);
 
+/// Field-for-field twin of `glyph_fx.wgsl` → `Immediates`: `heat` (the
+/// `heat` effect's glowing colour, one per frame) and the three sizes.
+/// heat@0, viewport_px@16, cell_px@24, uv_size@32; WGSL rounds 40 up to 48 and
+/// the trailing 8 bytes are the explicit `pad`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct FxImmediates {
+    heat: [f32; 4],
+    viewport_px: [f32; 2],
+    cell_px: [f32; 2],
+    uv_size: [f32; 2],
+    pad: [f32; 2],
+}
+
+const _: () = assert!(size_of::<FxImmediates>() == 48);
+const _: () = assert!(std::mem::offset_of!(FxImmediates, viewport_px) == 16);
+const _: () = assert!(std::mem::offset_of!(FxImmediates, cell_px) == 24);
+const _: () = assert!(std::mem::offset_of!(FxImmediates, uv_size) == 32);
+// 48 ≤ 128: immediates (Karar 5).
+const _: () = assert!(size_of::<FxImmediates>() as u32 <= IMMEDIATE_BUDGET);
+
 /// `Instance`'s vertex buffer layout: the three `@location`s of
 /// `cell_bg.wgsl` → `Instance`; offsets come from `frame.rs`'s `offset_of!`
 /// (`INSTANCE_OFFSETS`), not from hand-written numbers.
@@ -151,6 +180,31 @@ const GLYPH_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
     },
 ];
 
+/// `FxInstance`'s vertex buffer layout: `glyph_fx.wgsl` → `FxInstance`,
+/// offsets from `frame.rs` (`FX_INSTANCE_OFFSETS`).
+const FX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: FX_INSTANCE_OFFSETS[0],
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: FX_INSTANCE_OFFSETS[1],
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: FX_INSTANCE_OFFSETS[2],
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: FX_INSTANCE_OFFSETS[3],
+        shader_location: 3,
+    },
+];
+
 /// Drives a future to completion on this thread.
 ///
 /// No `pollster` (Karar 10): on native backends wgpu's futures are ready on
@@ -184,6 +238,9 @@ unsafe impl GpuBytes for Instance {}
 // SAFETY: `repr(C)`, `f32` fields only; its size is the sum of its fields
 // (the `size_of`/`offset_of` asserts in `frame.rs`).
 unsafe impl GpuBytes for GlyphInstance {}
+// SAFETY: `repr(C)`, `f32` fields only; its size is the sum of its fields
+// (the `size_of`/`offset_of` asserts in `frame.rs`: 48, no gaps).
+unsafe impl GpuBytes for FxInstance {}
 // SAFETY: `repr(C)`, `f32` fields only; WGSL's trailing padding is an
 // explicit field (`pad`), size 48 is asserted.
 unsafe impl GpuBytes for Immediates {}
@@ -191,6 +248,9 @@ unsafe impl GpuBytes for Immediates {}
 // asserted in `frame.rs`) followed by `f32` pairs; WGSL's trailing padding is
 // the explicit `pad`, size 64 is asserted.
 unsafe impl GpuBytes for GlyphImmediates {}
+// SAFETY: `repr(C)`, `f32` fields only; WGSL's trailing padding is the
+// explicit `pad`, size 48 is asserted.
+unsafe impl GpuBytes for FxImmediates {}
 
 /// The bytes of a slice; the element type is bounded by [`GpuBytes`].
 fn bytes_of<T: GpuBytes>(values: &[T]) -> &[u8] {
@@ -214,6 +274,13 @@ enum Op {
         core: [f32; 4],
         shape: [f32; 4],
     },
+    /// The `selection` pipeline over a range of the instance buffer: the
+    /// selection, or one search role (`encode_selection`/`encode_search`).
+    Selection {
+        range: Range<u32>,
+        color: [f32; 4],
+        radius: f32,
+    },
     /// The `cell` (mask) or `emoji` (colour) pipeline over a range of the
     /// glyph buffer, with that plane's texture bound. `cursor` is the text
     /// inversion rectangle for this list (degenerate for stripes and the fill
@@ -224,20 +291,32 @@ enum Op {
         cursor: CursorBlock,
         uv_size: [f32; 2],
     },
+    /// The `glyph_fx` pipeline over a range of the effect buffer: drawn in
+    /// its own full-texture viewport (instances already carry `origin_y`),
+    /// after which the dock's viewport at `origin_y` is restored
+    /// (`encode_fx`).
+    Fx {
+        range: Range<u32>,
+        heat: [f32; 4],
+        uv_size: [f32; 2],
+        origin_y: f32,
+    },
 }
 
-/// The frame's draw plan: two instance buffers and the steps reading ranges
+/// The frame's draw plan: three instance buffers and the steps reading ranges
 /// of them. [`WgpuRenderer::plan`] builds it from a `Frame`,
 /// [`WgpuRenderer::submit`] replays it into a pass.
 #[derive(Default)]
 struct Plan {
     instances: Vec<Instance>,
     glyphs: Vec<GlyphInstance>,
+    fx: Vec<FxInstance>,
     ops: Vec<Op>,
-    /// Scratch lists for [`slots::glyph_lists`]; each call's output is
-    /// appended to `glyphs` as ranges.
+    /// Scratch lists for [`slots::glyph_lists`] / [`slots::fx_list`]; each
+    /// call's output is appended to `glyphs` / `fx` as ranges.
     mask: Vec<GlyphInstance>,
     color: Vec<GlyphInstance>,
+    fx_scratch: Vec<FxInstance>,
 }
 
 impl Plan {
@@ -260,6 +339,37 @@ impl Plan {
         self.ops.push(Op::Rounded { range, core, shape });
     }
 
+    fn selection(&mut self, instances: &[Instance], color: [f32; 4], radius: f32) {
+        if instances.is_empty() {
+            return;
+        }
+        let range = self.push(instances);
+        self.ops.push(Op::Selection {
+            range,
+            color,
+            radius,
+        });
+    }
+
+    /// Search highlights, `encode_search`'s order: every match, then the
+    /// current match over them. `fill` picks the fill band's lists.
+    fn search(&mut self, frame: &Frame, fill: bool) {
+        let (matched, current) = if fill {
+            (
+                frame.fill_search_match_instances(),
+                frame.fill_search_current_instances(),
+            )
+        } else {
+            (
+                frame.search_match_instances(),
+                frame.search_current_instances(),
+            )
+        };
+        let radius = frame.selection_radius();
+        self.selection(matched, frame.search_match_rgba(), radius);
+        self.selection(current, frame.search_current_rgba(), radius);
+    }
+
     fn push(&mut self, instances: &[Instance]) -> Range<u32> {
         let start = self.instances.len() as u32;
         self.instances.extend_from_slice(instances);
@@ -270,6 +380,7 @@ impl Plan {
     fn clear(&mut self) {
         self.instances.clear();
         self.glyphs.clear();
+        self.fx.clear();
         self.ops.clear();
     }
 
@@ -307,10 +418,12 @@ pub(crate) struct Target {
     view: wgpu::TextureView,
 }
 
-/// One atlas plane on the GPU: its texture and the bind group that samples it.
-/// Created together, so a texture is never drawn without its bind group.
+/// One atlas plane on the GPU: its texture, its view and the bind group that
+/// samples it with the `cell` layout. Created together, so a texture is never
+/// drawn without its bind group.
 struct PlaneTexture {
     texture: wgpu::Texture,
+    view: wgpu::TextureView,
     bind: wgpu::BindGroup,
 }
 
@@ -325,6 +438,30 @@ struct WgpuAtlas {
     /// `None` → no emoji seen yet. **Lazy**, created by the first colour
     /// upload ([`WgpuUpload`]); a session without emoji never pays for it.
     color: Option<PlaneTexture>,
+    /// The effects' bind group (both planes and both samplers), keyed by
+    /// whether the colour texture existed when it was made: while it does
+    /// not, the mask is bound to the colour slot too (`encode_fx`'s reason).
+    /// A key mismatch rebuilds it ([`WgpuAtlas::fx_bind`]); `ensure` drops it
+    /// with the textures.
+    fx_bind: Option<(bool, wgpu::BindGroup)>,
+}
+
+impl WgpuAtlas {
+    /// The effects' bind group for today's textures; rebuilt when the colour
+    /// texture appeared since. `None` → no mask texture yet (no glyph drawn).
+    fn fx_bind(&mut self, gpu: &Gpu) -> Option<&wgpu::BindGroup> {
+        let mask = self.mask.as_ref()?;
+        let has_color = self.color.is_some();
+        if self
+            .fx_bind
+            .as_ref()
+            .is_none_or(|(key, _)| *key != has_color)
+        {
+            let color = self.color.as_ref().map_or(&mask.view, |plane| &plane.view);
+            self.fx_bind = Some((has_color, gpu.fx_bind_group(&mask.view, color)));
+        }
+        self.fx_bind.as_ref().map(|(_, bind)| bind)
+    }
 }
 
 /// wgpu's [`SlotUpload`]: `Queue::write_texture` into the mask texture, or
@@ -358,7 +495,7 @@ impl SlotUpload for WgpuUpload<'_> {
     }
 }
 
-/// A renderer's own state: its two instance buffers and its atlas.
+/// A renderer's own state: its three instance buffers and its atlas.
 ///
 /// Per renderer, not per device: the queue is shared, and any `submit` on it
 /// flushes every pending `write_buffer`/`write_texture` — which can only land
@@ -370,20 +507,61 @@ struct State {
     quads: Option<wgpu::Buffer>,
     /// The frame's glyph and rule instances; grows, never shrinks.
     glyphs: Option<wgpu::Buffer>,
+    /// The frame's effect instances; grows, never shrinks.
+    fx: Option<wgpu::Buffer>,
     /// `None` until [`WgpuRenderer::cell_metrics`] is asked, like Metal's
     /// `Renderer::atlas`: the atlas key's scale comes from the window, and a
     /// frame with glyphs but no atlas fails with [`GpuError::NoAtlas`] rather
     /// than drawing @1x.
     atlas: Option<WgpuAtlas>,
     /// The frame's plan, kept between frames: `clear` keeps the capacity of
-    /// its lists (and of `slots::glyph_lists`' scratch lists), so the steady
-    /// state does not allocate — Metal's `AtlasTexture` keeps its lists the
-    /// same way.
+    /// its lists (and of the `slots` scratch lists), so the steady state does
+    /// not allocate — Metal's `AtlasTexture` keeps its lists the same way.
     plan: Plan,
 }
 
-/// What every renderer shares: the wgpu device, its queue, the four pipelines
-/// of phases 2–3, the atlas planes' bind group layout and the sampler.
+/// A device fault reported **outside** a frame's error scope: wgpu's
+/// uncaptured-error handler or the device-lost callback (both run on
+/// whichever thread wgpu calls them from).
+///
+/// A generation, not a flag: each renderer records the generation when it
+/// submits a frame and [`WgpuRenderer::poll`] fails every frame submitted
+/// before a newer fault — without consuming it, so one renderer's poll does
+/// not hide the fault from another sharing the device.
+#[derive(Default)]
+pub(crate) struct Fault {
+    generation: AtomicU64,
+    message: Mutex<String>,
+}
+
+impl Fault {
+    /// Records a fault; the callbacks' single body.
+    pub(crate) fn report(&self, message: String) {
+        if let Ok(mut slot) = self.message.lock() {
+            *slot = message;
+        }
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// The latest fault's text if one was reported after `seen`.
+    fn since(&self, seen: u64) -> Option<String> {
+        if self.generation() == seen {
+            return None;
+        }
+        Some(
+            self.message
+                .lock()
+                .map_or_else(|_| "device fault".to_owned(), |m| m.clone()),
+        )
+    }
+}
+
+/// What every renderer shares: the wgpu device, its queue, the six pipelines,
+/// the bind group layouts and the samplers.
 ///
 /// Split from [`WgpuRenderer`] because the atlas cannot be shared: `bt-atlas`
 /// holds CoreText fonts, which are neither `Send` nor `Sync`, while a device
@@ -395,12 +573,24 @@ pub(crate) struct Gpu {
     queue: wgpu::Queue,
     cell_bg: wgpu::RenderPipeline,
     caret: wgpu::RenderPipeline,
+    selection: wgpu::RenderPipeline,
     cell: wgpu::RenderPipeline,
     emoji: wgpu::RenderPipeline,
+    glyph_fx: wgpu::RenderPipeline,
     /// The atlas planes' bind group layout: texture @0, sampler @1.
     plane_layout: wgpu::BindGroupLayout,
+    /// The effects' layout: mask @0, colour @1, nearest @2, linear @3.
+    fx_layout: wgpu::BindGroupLayout,
     /// Nearest, clamp-to-edge: `cell.metal`'s `constexpr sampler`.
     sampler: wgpu::Sampler,
+    /// Linear, clamp-to-edge: `glyph_fx.metal`'s `lin`, for the scaling
+    /// branches (texel-centre clamping keeps it inside the slot).
+    linear: wgpu::Sampler,
+    /// `TIMESTAMP_QUERY` was granted: the GPU delta can be measured
+    /// ([`WgpuRenderer::set_gpu_timing`]); otherwise its token is
+    /// `unsupported` (Karar 6).
+    timestamps: bool,
+    fault: Arc<Fault>,
 }
 
 impl Gpu {
@@ -412,7 +602,7 @@ impl Gpu {
         SHARED.get_or_init(|| Self::new().expect("wgpu device and pipelines"))
     }
 
-    /// A device on the Metal backend and four pipelines.
+    /// A device on the Metal backend and six pipelines.
     ///
     /// The backend is **pinned to Metal**: the same hardware path as the
     /// oracle is compared; the Vulkan branch is tested on Linux in the font
@@ -424,9 +614,16 @@ impl Gpu {
         });
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .map_err(|e| format!("no adapter: {e}"))?;
+        // The timestamp feature only if the adapter has it: its absence is a
+        // measured `unsupported`, not a failed device.
+        let timestamps = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let mut required_features = wgpu::Features::IMMEDIATES;
+        if timestamps {
+            required_features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("bateri"),
-            required_features: wgpu::Features::IMMEDIATES,
+            required_features,
             required_limits: wgpu::Limits {
                 max_immediate_size: IMMEDIATE_BUDGET,
                 ..wgpu::Limits::default()
@@ -434,10 +631,25 @@ impl Gpu {
             ..wgpu::DeviceDescriptor::default()
         }))
         .map_err(|e| format!("device request failed: {e}"))?;
+        // Faults outside a frame's error scope become the next poll's error
+        // (Karar 6, the asynchronous leg), not a panic in wgpu's default
+        // handler.
+        let fault = Arc::new(Fault::default());
+        {
+            let fault = Arc::clone(&fault);
+            device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+                fault.report(error.to_string());
+            }));
+        }
+        {
+            let fault = Arc::clone(&fault);
+            device.set_device_lost_callback(move |reason, message| {
+                fault.report(format!("device lost ({reason:?}): {message}"));
+            });
+        }
 
-        // Make a validation error a **value**, not a panic: an uncaptured
-        // error kills the process in wgpu's default handler and the test's
-        // message would not say which pipeline failed.
+        // Make a validation error a **value**, not a panic: the message must
+        // say which pipeline failed.
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let quad_buffer = wgpu::VertexBufferLayout {
             array_stride: size_of::<Instance>() as u64,
@@ -448,6 +660,11 @@ impl Gpu {
             array_stride: size_of::<GlyphInstance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &GLYPH_ATTRIBUTES,
+        };
+        let fx_buffer = wgpu::VertexBufferLayout {
+            array_stride: size_of::<FxInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &FX_ATTRIBUTES,
         };
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -462,27 +679,29 @@ impl Gpu {
         let quads = (&layout, &module, &quad_buffer);
         let cell_bg = pipeline(&device, quads, "cell_bg_vertex", "cell_bg_fragment");
         let caret = pipeline(&device, quads, "cell_bg_vertex", "caret_fragment");
+        // Selection: its own vertex (the quad reaches the fragment), the same
+        // module, layout and instance buffer.
+        let selection = pipeline(&device, quads, "selection_vertex", "selection_fragment");
 
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let sampler_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
         let plane_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("atlas plane"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
+            entries: &[texture_entry(0), sampler_entry(1)],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cell.wgsl"),
@@ -498,6 +717,31 @@ impl Gpu {
         // Emoji: `cell_vertex` shared verbatim, its own fragment; the blend is
         // the same (straight alpha, `raster::unpremultiply`).
         let emoji = pipeline(&device, glyphs, "cell_vertex", "emoji_fragment");
+
+        let fx_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("typing effects"),
+            entries: &[
+                texture_entry(0),
+                texture_entry(1),
+                sampler_entry(2),
+                sampler_entry(3),
+            ],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("glyph_fx.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/glyph_fx.wgsl").into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("glyph_fx"),
+            bind_group_layouts: &[Some(&fx_layout)],
+            immediate_size: size_of::<FxImmediates>() as u32,
+        });
+        let glyph_fx = pipeline(
+            &device,
+            (&layout, &module, &fx_buffer),
+            "glyph_fx_vertex",
+            "glyph_fx_fragment",
+        );
         // `nearest`, not `linear`: slots have no padding between them and
         // `linear`'s last column would blend the neighbour slot (`cell.metal`).
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -508,6 +752,14 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Nearest,
             ..wgpu::SamplerDescriptor::default()
         });
+        let linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("atlas, linear"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..wgpu::SamplerDescriptor::default()
+        });
         if let Some(error) = block_on(scope.pop()) {
             return Err(format!("pipeline creation failed: {error}"));
         }
@@ -516,15 +768,21 @@ impl Gpu {
             queue,
             cell_bg,
             caret,
+            selection,
             cell,
             emoji,
+            glyph_fx,
             plane_layout,
+            fx_layout,
             sampler,
+            linear,
+            timestamps,
+            fault,
         })
     }
 
     /// An atlas plane's texture (edge × edge, sampled and written by the
-    /// queue) and its bind group.
+    /// queue), its view and its bind group.
     fn plane_texture(&self, format: wgpu::TextureFormat, edge: (u16, u16)) -> PlaneTexture {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(match format {
@@ -558,7 +816,41 @@ impl Gpu {
                 },
             ],
         });
-        PlaneTexture { texture, bind }
+        PlaneTexture {
+            texture,
+            view,
+            bind,
+        }
+    }
+
+    /// The effects' bind group: both plane views and both samplers.
+    fn fx_bind_group(
+        &self,
+        mask: &wgpu::TextureView,
+        color: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("typing effects"),
+            layout: &self.fx_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(mask),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(color),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.linear),
+                },
+            ],
+        })
     }
 
     /// Writes one full slot — twin of `renderer.rs` → `upload_slot`, with the
@@ -703,22 +995,173 @@ impl Gpu {
     }
 }
 
-/// A wgpu renderer: the shared [`Gpu`] plus this renderer's atlas and
-/// instance buffers — the twin of Metal's `Renderer`, which also owns its atlas
-/// (and is built per test). `RefCell`: Metal's reason — `&self` methods that
-/// mutate the atlas, and a renderer that never leaves its thread.
+/// A frame's GPU span, in seconds on the GPU's own clock — the arguments of
+/// `Stats::record_gpu` (Metal's `GPUStartTime`/`GPUEndTime`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GpuSpan {
+    pub(crate) start: f64,
+    pub(crate) end: f64,
+}
+
+/// One frame's timestamp queries and their readback: the pass writes its
+/// start and end, the frame's command buffer resolves and copies them, and
+/// [`WgpuRenderer::poll`] maps the copy once the frame is done.
+///
+/// Pooled, not built per frame; the mapping needs a closure per timed frame
+/// (wgpu reports a map only through its callback), which is why the whole
+/// path exists only while measuring ([`WgpuRenderer::set_gpu_timing`]).
+struct Timing {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    readback: wgpu::Buffer,
+    /// `MAP_*` state of `readback`: written by the map callback.
+    mapped: Arc<AtomicU8>,
+    requested: bool,
+}
+
+const MAP_PENDING: u8 = 0;
+const MAP_OK: u8 = 1;
+const MAP_FAILED: u8 = 2;
+
+/// The two timestamps' bytes.
+const TIMESTAMP_BYTES: u64 = 2 * size_of::<u64>() as u64;
+
+impl Timing {
+    fn new(gpu: &Gpu) -> Self {
+        let buffer = |label, usage| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: TIMESTAMP_BYTES,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        Self {
+            queries: gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("frame timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2,
+            }),
+            resolve: buffer(
+                "timestamp resolve",
+                wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            ),
+            readback: buffer(
+                "timestamp readback",
+                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            ),
+            mapped: Arc::new(AtomicU8::new(MAP_PENDING)),
+            requested: false,
+        }
+    }
+
+    /// Reads the span once the frame is done. `None` → the mapping has not
+    /// completed yet (poll again next tick); `Some(None)` → no usable span
+    /// (the mapping failed or the GPU gave no start), the frame still counts.
+    fn read(&mut self, gpu: &Gpu) -> Option<Option<GpuSpan>> {
+        if !self.requested {
+            self.requested = true;
+            let mapped = Arc::clone(&self.mapped);
+            self.readback
+                .map_async(wgpu::MapMode::Read, .., move |result| {
+                    let state = if result.is_ok() { MAP_OK } else { MAP_FAILED };
+                    mapped.store(state, Ordering::Release);
+                });
+            // The frame is done, so the copy is too: one non-blocking poll
+            // resolves the mapping.
+            let _ = gpu.device.poll(wgpu::PollType::Poll);
+        }
+        match self.mapped.load(Ordering::Acquire) {
+            MAP_PENDING => None,
+            MAP_OK => {
+                let span = self.readback.get_mapped_range(..).ok().map(|bytes| {
+                    let tick = |i: usize| {
+                        let mut raw = [0u8; 8];
+                        raw.copy_from_slice(&bytes[i * 8..i * 8 + 8]);
+                        u64::from_le_bytes(raw)
+                    };
+                    let period = f64::from(gpu.queue.get_timestamp_period());
+                    let seconds = |ticks: u64| ticks as f64 * period / 1e9;
+                    GpuSpan {
+                        start: seconds(tick(0)),
+                        end: seconds(tick(1)),
+                    }
+                });
+                self.readback.unmap();
+                self.reset();
+                Some(span)
+            }
+            _ => {
+                self.reset();
+                Some(None)
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.requested = false;
+        self.mapped.store(MAP_PENDING, Ordering::Release);
+    }
+}
+
+/// A submitted frame waiting for [`WgpuRenderer::poll`].
+struct Pending {
+    index: wgpu::SubmissionIndex,
+    /// [`Fault`]'s generation at submit: a newer one fails this frame.
+    fault: u64,
+    timing: Option<Timing>,
+}
+
+/// A wgpu renderer: the shared [`Gpu`] plus this renderer's atlas, instance
+/// buffers and in-flight frames — the twin of Metal's `Renderer`, which also
+/// owns its atlas. `RefCell`/`Cell`: Metal's reason — `&self` methods that
+/// mutate the atlas, and a renderer that never leaves its thread (its frames
+/// are counted by [`WgpuRenderer::poll`] on that thread, not on a driver
+/// thread as Metal's completion block does).
 pub(crate) struct WgpuRenderer {
     gpu: &'static Gpu,
     state: RefCell<State>,
+    /// The requested font: the family and size half of the atlas's key
+    /// (`Renderer::font`'s reason).
+    font: RefCell<FontOptions>,
+    /// Frames the GPU finished **without error**; `make duman`'s `kare=`.
+    frames: Cell<u64>,
+    /// The last **submitted** frame's background, glyph and rule counts
+    /// (`hucre=`, `glif=`, `kural=`); CPU counters, like Metal's.
+    last_counts: Cell<[usize; 3]>,
+    /// Submitted frames, oldest first.
+    in_flight: RefCell<VecDeque<Pending>>,
+    /// The GPU delta is measured (the measurement gate is open).
+    timing: Cell<bool>,
+    /// Idle [`Timing`]s, reused.
+    spare: RefCell<Vec<Timing>>,
+    /// Test hook: the next frame carries an invalid scissor, so its submit
+    /// fails validation (the synchronous error leg).
+    #[cfg(test)]
+    poison: Cell<bool>,
 }
 
 impl WgpuRenderer {
     /// A renderer on the shared device, with no atlas yet
     /// ([`WgpuRenderer::cell_metrics`] opens it).
     pub(crate) fn new() -> Self {
+        Self::on(Gpu::shared())
+    }
+
+    /// A renderer on `gpu` — a test with a device of its own (a fault must
+    /// not leak into other tests' frames).
+    pub(crate) fn on(gpu: &'static Gpu) -> Self {
         Self {
-            gpu: Gpu::shared(),
+            gpu,
             state: RefCell::new(State::default()),
+            font: RefCell::new(FontOptions::default()),
+            frames: Cell::new(0),
+            last_counts: Cell::new([0; 3]),
+            in_flight: RefCell::new(VecDeque::new()),
+            timing: Cell::new(false),
+            spare: RefCell::new(Vec::new()),
+            #[cfg(test)]
+            poison: Cell::new(false),
         }
     }
 
@@ -730,19 +1173,20 @@ impl WgpuRenderer {
         self.gpu.target(edge)
     }
 
-    /// Brings the atlas to the default font at `scale` and returns the grid
+    /// Brings the atlas to the requested font at `scale` and returns the grid
     /// geometry — twin of `Renderer::cell_metrics` (same arithmetic,
     /// `CellMetrics::from_atlas`). When the key changes, both textures are
     /// dropped in the same line (`Renderer::sync_atlas`'s reason: a texture
     /// of the old size written with the new metrics would silently corrupt).
     pub(crate) fn cell_metrics(&self, scale: f64) -> CellMetrics {
-        let font = FontOptions::default();
+        let font = self.font.borrow();
         let family = font.family.as_deref();
         let mut state = self.state.borrow_mut();
         let entry = state.atlas.get_or_insert_with(|| WgpuAtlas {
             atlas: Atlas::new(family, font.size, scale, font.line_height),
             mask: None,
             color: None,
+            fx_bind: None,
         });
         if entry
             .atlas
@@ -750,14 +1194,107 @@ impl WgpuRenderer {
         {
             entry.mask = None;
             entry.color = None;
+            entry.fx_bind = None;
         }
         CellMetrics::from_atlas(entry.atlas.metrics(), entry.atlas.context_cell_w(), scale)
+    }
+
+    /// Changes the requested font; `true` when it differs — twin of
+    /// `Renderer::set_font`: the atlas opens with it on the next
+    /// [`WgpuRenderer::cell_metrics`].
+    pub(crate) fn set_font(&self, font: &FontOptions) -> bool {
+        let mut current = self.font.borrow_mut();
+        if *current == *font {
+            return false;
+        }
+        current.clone_from(font);
+        true
+    }
+
+    /// What to tell the user about the open atlas's font — twin of
+    /// `Renderer::font_notice`.
+    pub(crate) fn font_notice(&self) -> Option<FontNotice> {
+        let state = self.state.borrow();
+        let issue = state.atlas.as_ref()?.atlas.font_issue()?;
+        Some(FontNotice::from(issue.clone()))
+    }
+
+    /// The mask plane's slot occupancy (used, total); `(0, 0)` without an
+    /// atlas — twin of `Renderer::atlas_occupancy`.
+    pub(crate) fn atlas_occupancy(&self) -> (usize, usize) {
+        self.state
+            .borrow()
+            .atlas
+            .as_ref()
+            .map_or((0, 0), |a| a.atlas.occupancy())
+    }
+
+    /// The colour plane's slot occupancy; `yuva2=`'s source.
+    pub(crate) fn color_atlas_occupancy(&self) -> (usize, usize) {
+        self.state
+            .borrow()
+            .atlas
+            .as_ref()
+            .map_or((0, 0), |a| a.atlas.color_occupancy())
+    }
+
+    /// Frames the GPU finished without error, as counted by
+    /// [`WgpuRenderer::poll`].
+    pub(crate) fn frames(&self) -> u64 {
+        self.frames.get()
+    }
+
+    pub(crate) fn last_bg_count(&self) -> usize {
+        self.last_counts.get()[0]
+    }
+
+    pub(crate) fn last_glyph_count(&self) -> usize {
+        self.last_counts.get()[1]
+    }
+
+    pub(crate) fn last_rule_count(&self) -> usize {
+        self.last_counts.get()[2]
+    }
+
+    /// Whether this renderer's atlas has its (mask, colour) textures — the
+    /// "rebuilding drops both" guard's window.
+    #[cfg(test)]
+    pub(crate) fn plane_textures(&self) -> (bool, bool) {
+        self.state
+            .borrow()
+            .atlas
+            .as_ref()
+            .map_or((false, false), |a| (a.mask.is_some(), a.color.is_some()))
+    }
+
+    /// Makes the next frame fail validation (test hook).
+    #[cfg(test)]
+    pub(crate) fn poison_next_frame(&self) {
+        self.poison.set(true);
+    }
+
+    /// Opens or closes the GPU-delta measurement. Without `TIMESTAMP_QUERY`
+    /// it stays closed and [`WgpuRenderer::gpu_timing_supported`] says so.
+    pub(crate) fn set_gpu_timing(&self, on: bool) {
+        self.timing.set(on && self.gpu.timestamps);
+    }
+
+    /// `false` → the GPU delta's token value is `unsupported` (Karar 6).
+    pub(crate) fn gpu_timing_supported(&self) -> bool {
+        self.gpu.timestamps
+    }
+
+    /// Whether a submitted frame is still waiting for [`WgpuRenderer::poll`]:
+    /// a link going to sleep with one arms a single delayed poll (Karar 6,
+    /// "the last frame before sleep is not lost"); an empty queue arms
+    /// nothing — the stop condition.
+    pub(crate) fn in_flight(&self) -> bool {
+        !self.in_flight.borrow().is_empty()
     }
 
     /// The glyph and rule draws of one list — `encode_glyphs`' twin: emoji
     /// **before** the mask list (the order's reason is there), glyphs and
     /// rules in one mask list, rules last ([`slots::glyph_lists`]).
-    #[allow(clippy::too_many_arguments)] // `encode_glyphs`' reason: the table is half of `glyphs`
     fn glyph_draws(
         &self,
         plan: &mut Plan,
@@ -771,25 +1308,14 @@ impl WgpuRenderer {
             return Ok(());
         }
         let entry = atlas.as_mut().ok_or(GpuError::NoAtlas)?;
-        let WgpuAtlas { atlas, mask, color } = entry;
+        let WgpuAtlas {
+            atlas, mask, color, ..
+        } = entry;
+        let mask = mask_texture(self.gpu, atlas, mask);
         let edge = atlas.texture_px();
-        let metrics = atlas.metrics();
-        let mask = mask.get_or_insert_with(|| {
-            // The resident tofu is written once and never again:
-            // `Atlas::slot` hands no bitmap when it falls back to tofu.
-            let plane = self.gpu.plane_texture(MASK_FORMAT, edge);
-            self.gpu.write_slot(
-                &plane.texture,
-                atlas.slot_origin(TOFU),
-                metrics,
-                atlas.tofu_bitmap(),
-                Plane::Mask,
-            );
-            plane
-        });
         let mut upload = WgpuUpload {
             gpu: self.gpu,
-            mask: &mask.texture,
+            mask,
             color: &mut *color,
             edge,
         };
@@ -802,11 +1328,7 @@ impl WgpuRenderer {
             &mut plan.mask,
             &mut plan.color,
         );
-        let (cw, ch) = metrics.cell_px;
-        let uv_size = [
-            f32::from(cw) / f32::from(edge.0),
-            f32::from(ch) / f32::from(edge.1),
-        ];
+        let uv_size = uv_size(atlas);
         // The colour list can only be non-empty once its texture exists (the
         // upload created it); the check keeps a missing texture a skipped
         // draw, as on Metal.
@@ -817,13 +1339,60 @@ impl WgpuRenderer {
         Ok(())
     }
 
-    /// The draw plan for a `Frame` — `encode_pass`'s order, restricted to the
-    /// groups ported so far (`cell_bg`, caret, `cell`, `emoji`).
-    ///
-    /// Lists not yet ported **must be empty**, and that is an `assert`: if a
-    /// frame with a selection entered the scene list, wgpu would draw it
-    /// without it and the comparison must fail with "this frame cannot be
-    /// drawn yet", not "diverged from the oracle".
+    /// The typing effects' draw — `encode_fx`'s twin: slot resolution through
+    /// [`slots::fx_list`], colour-plane instances dropped while no colour
+    /// texture exists, positions moved down by `origin_y` (the effect is
+    /// drawn in window space, so it may spill over the hairline by its pad).
+    #[allow(clippy::too_many_arguments)] // `encode_fx`'s reason: the table is half of `cells`
+    fn fx_draw(
+        &self,
+        plan: &mut Plan,
+        atlas: &mut Option<WgpuAtlas>,
+        cells: &[FxCell],
+        clusters: &Clusters,
+        heat: [f32; 4],
+        origin_y: f32,
+    ) -> Result<(), GpuError> {
+        if cells.is_empty() {
+            return Ok(());
+        }
+        let entry = atlas.as_mut().ok_or(GpuError::NoAtlas)?;
+        let WgpuAtlas {
+            atlas, mask, color, ..
+        } = entry;
+        let mask = mask_texture(self.gpu, atlas, mask);
+        let edge = atlas.texture_px();
+        let mut upload = WgpuUpload {
+            gpu: self.gpu,
+            mask,
+            color: &mut *color,
+            edge,
+        };
+        slots::fx_list(atlas, &mut upload, cells, clusters, &mut plan.fx_scratch);
+        if color.is_none() {
+            plan.fx_scratch
+                .retain(|instance| !slots::fx_is_color(instance));
+        }
+        if plan.fx_scratch.is_empty() {
+            return Ok(());
+        }
+        let start = plan.fx.len() as u32;
+        plan.fx
+            .extend(plan.fx_scratch.iter().map(|&instance| FxInstance {
+                pos: [instance.pos[0], instance.pos[1] + origin_y],
+                ..instance
+            }));
+        let range = start..plan.fx.len() as u32;
+        plan.ops.push(Op::Fx {
+            range,
+            heat,
+            uv_size: uv_size(atlas),
+            origin_y,
+        });
+        Ok(())
+    }
+
+    /// The draw plan for a `Frame` — `encode_pass`'s order, every group.
     fn plan(
         &self,
         frame: &Frame,
@@ -831,21 +1400,10 @@ impl WgpuRenderer {
         atlas: &mut Option<WgpuAtlas>,
         plan: &mut Plan,
     ) -> Result<(), GpuError> {
-        assert!(
-            frame.selection_instances().is_empty()
-                && frame.search_match_instances().is_empty()
-                && frame.search_current_instances().is_empty()
-                && frame.fill_search_match_instances().is_empty()
-                && frame.fill_search_current_instances().is_empty()
-                && frame.dock_selection_instances().is_empty()
-                && frame.dock_ghosts().is_empty()
-                && frame.dock_arrivals().is_empty(),
-            "the wgpu renderer draws cell_bg, caret, cell and emoji today (040 phase-3); \
-             a frame carrying selection/search/effect lists cannot be drawn yet"
-        );
         plan.clear();
         // Grid: the offset lives in one viewport. Command marks first (sprites,
-        // degenerate inversion rectangle), then ground → caret → glyphs.
+        // degenerate inversion rectangle), then ground → search → selection →
+        // caret → glyphs (`encode_pass`).
         plan.ops.push(Op::Viewport(frame.origin_px()));
         self.glyph_draws(
             plan,
@@ -856,6 +1414,12 @@ impl WgpuRenderer {
             CursorBlock::default(),
         )?;
         plan.quads(frame.bg_instances());
+        plan.search(frame, false);
+        plan.selection(
+            frame.selection_instances(),
+            frame.selection_rgba(),
+            frame.selection_radius(),
+        );
         plan.rounded(
             frame.grid_caret().as_slice(),
             frame.caret_core(),
@@ -869,11 +1433,13 @@ impl WgpuRenderer {
             frame.rules(),
             *frame.cursor_block(),
         )?;
-        // Fill band: the third coordinate space, above the grid; no caret
-        // slot, so the inversion rectangle is degenerate (`encode_fill`).
+        // Fill band: the third coordinate space, above the grid; search but no
+        // selection, no caret slot, so the inversion rectangle is degenerate
+        // (`encode_fill`).
         if frame.fill_rows() != 0 {
             plan.ops.push(Op::Viewport(frame.fill_origin_px()));
             plan.quads(frame.fill_bg());
+            plan.search(frame, true);
             self.glyph_draws(
                 plan,
                 atlas,
@@ -897,11 +1463,16 @@ impl WgpuRenderer {
                 plan.ops.push(band.clone());
             }
             plan.quads(frame.dock_bg());
+            plan.selection(
+                frame.dock_selection_instances(),
+                frame.selection_rgba(),
+                frame.selection_radius(),
+            );
             for draw in frame.dock_button_draws(origin_y) {
                 plan.rounded(std::slice::from_ref(&draw.instance), draw.core, draw.shape);
             }
             // The caret is drawn outside the scissor (`encode_dock`'s reason)
-            // and the band scissor comes back for the glyphs.
+            // and the band scissor comes back after it.
             if clipped {
                 plan.ops.push(open.clone());
             }
@@ -913,14 +1484,39 @@ impl WgpuRenderer {
             if clipped {
                 plan.ops.push(band);
             }
-            // No arrivals in flight (asserted above), so dock rules go with
-            // the glyphs in one list, as in `encode_dock`'s no-arrival branch.
+            let heat = *frame.dock_fx_heat();
+            // Ghosts before the dock's glyphs; arrivals between the glyphs and
+            // the rules, so the call splits while one is in flight
+            // (`encode_dock`).
+            self.fx_draw(
+                plan,
+                atlas,
+                frame.dock_ghosts(),
+                frame.fx_clusters(),
+                heat,
+                origin_y,
+            )?;
+            let arrivals = frame.dock_arrivals();
+            let (glyph_rules, late_rules) = if arrivals.is_empty() {
+                (frame.dock_rules(), &[][..])
+            } else {
+                (&[][..], frame.dock_rules())
+            };
             self.glyph_draws(
                 plan,
                 atlas,
                 frame.dock_glyphs(),
                 frame.dock_clusters(),
-                frame.dock_rules(),
+                glyph_rules,
+                *frame.cursor_block(),
+            )?;
+            self.fx_draw(plan, atlas, arrivals, frame.dock_clusters(), heat, origin_y)?;
+            self.glyph_draws(
+                plan,
+                atlas,
+                &[],
+                frame.dock_clusters(),
+                late_rules,
                 *frame.cursor_block(),
             )?;
             if clipped {
@@ -934,15 +1530,27 @@ impl WgpuRenderer {
     /// ground loaded with `clear` (Metal's `MTLLoadAction::Clear`), the plan on
     /// top.
     ///
-    /// Does not wait. The measurement hook times this whole call as
-    /// `cpu_encode` — on the Metal side the span runs from creating the command
-    /// buffer to `commit`, here from planning (slot resolution and uploads
-    /// included, as in Metal's `encode_glyphs`) to `submit`.
+    /// Does not wait and does not track completion (the offscreen tests and
+    /// the measurement hook read or wait themselves); the frame path is
+    /// [`WgpuRenderer::draw`]. The measurement hook times this whole call as
+    /// `cpu_encode` — on the Metal side the span runs from creating the
+    /// command buffer to `commit`, here from planning (slot resolution and
+    /// uploads included, as in Metal's `encode_glyphs`) to `submit`.
     pub(crate) fn submit(
         &self,
         target: &Target,
         clear: LinearRgba,
         frame: &Frame,
+    ) -> Result<wgpu::SubmissionIndex, GpuError> {
+        self.encode(target, clear, frame, None)
+    }
+
+    fn encode(
+        &self,
+        target: &Target,
+        clear: LinearRgba,
+        frame: &Frame,
+        timing: Option<&Timing>,
     ) -> Result<wgpu::SubmissionIndex, GpuError> {
         let viewport_px = [
             target.texture.width() as f32,
@@ -952,10 +1560,29 @@ impl WgpuRenderer {
         let state = &mut *state;
         let plan = &mut state.plan;
         self.plan(frame, viewport_px, &mut state.atlas, plan)?;
+        #[cfg(test)]
+        if self.poison.take() {
+            // Outside the target: validation rejects the pass.
+            plan.ops
+                .push(Op::Scissor([0, 0, u32::MAX / 2, u32::MAX / 2]));
+        }
         self.gpu
             .fill_buffer(&mut state.quads, "instances", bytes_of(&plan.instances));
         self.gpu
             .fill_buffer(&mut state.glyphs, "glyphs", bytes_of(&plan.glyphs));
+        self.gpu
+            .fill_buffer(&mut state.fx, "effects", bytes_of(&plan.fx));
+        // The effects' bind group is resolved **after** planning: a later list
+        // of the same frame may have created the colour texture.
+        let fx_bind = if plan.fx.is_empty() {
+            None
+        } else {
+            state
+                .atlas
+                .as_mut()
+                .and_then(|a| a.fx_bind(self.gpu))
+                .cloned()
+        };
         let mut encoder = self
             .gpu
             .device
@@ -980,6 +1607,11 @@ impl WgpuRenderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
+                timestamp_writes: timing.map(|t| wgpu::RenderPassTimestampWrites {
+                    query_set: &t.queries,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: Some(1),
+                }),
                 ..wgpu::RenderPassDescriptor::default()
             });
             let mut imm = Immediates {
@@ -1013,6 +1645,25 @@ impl WgpuRenderer {
                         pass.set_immediates(0, bytes_of(std::slice::from_ref(&imm)));
                         pass.draw(0..4, range.clone());
                     }
+                    Op::Selection {
+                        range,
+                        color,
+                        radius,
+                    } => {
+                        let Some(buffer) = state.quads.as_ref() else {
+                            continue;
+                        };
+                        let selection = Immediates {
+                            core: *color,
+                            shape: [*radius, 0.0, 0.0, 0.0],
+                            viewport_px,
+                            pad: [0.0; 2],
+                        };
+                        pass.set_pipeline(&self.gpu.selection);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.set_immediates(0, bytes_of(std::slice::from_ref(&selection)));
+                        pass.draw(0..4, range.clone());
+                    }
                     Op::Glyphs {
                         plane,
                         range,
@@ -1040,14 +1691,154 @@ impl WgpuRenderer {
                         pass.set_immediates(0, bytes_of(std::slice::from_ref(&glyph_imm)));
                         pass.draw(0..4, range.clone());
                     }
+                    Op::Fx {
+                        range,
+                        heat,
+                        uv_size,
+                        origin_y,
+                    } => {
+                        let (Some(bind), Some(buffer)) = (fx_bind.as_ref(), state.fx.as_ref())
+                        else {
+                            continue;
+                        };
+                        let fx_imm = FxImmediates {
+                            heat: *heat,
+                            viewport_px,
+                            cell_px,
+                            uv_size: *uv_size,
+                            pad: [0.0; 2],
+                        };
+                        pass.set_viewport(0.0, 0.0, viewport_px[0], viewport_px[1], 0.0, 1.0);
+                        pass.set_pipeline(&self.gpu.glyph_fx);
+                        pass.set_bind_group(0, bind, &[]);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.set_immediates(0, bytes_of(std::slice::from_ref(&fx_imm)));
+                        pass.draw(0..4, range.clone());
+                        pass.set_viewport(0.0, *origin_y, viewport_px[0], viewport_px[1], 0.0, 1.0);
+                    }
                 }
             }
+        }
+        if let Some(t) = timing {
+            encoder.resolve_query_set(&t.queries, 0..2, &t.resolve, 0);
+            encoder.copy_buffer_to_buffer(&t.resolve, 0, &t.readback, 0, TIMESTAMP_BYTES);
         }
         Ok(self.gpu.queue.submit([encoder.finish()]))
     }
 
-    /// Draws the frame offscreen and reads the pixels back — twin of Metal's
-    /// `render_offscreen`, same byte order (B, G, R, A).
+    /// The frame path (Karar 6): encode and submit inside an error scope,
+    /// then track the submission for [`WgpuRenderer::poll`].
+    ///
+    /// **Asynchronous**, like Metal's `draw`: `Ok` only says "submitted". A
+    /// synchronous error (planning, validation, out of memory) returns `Err`
+    /// and the frame is **not** tracked, so it is never counted; the caller
+    /// sends it to the same policy as the asynchronous error from `poll`
+    /// (`Retry::draw_failed`). The scope stack is thread-local
+    /// (`Device::push_error_scope`'s doc), so a parallel renderer's error
+    /// cannot land in this frame's scope.
+    pub(crate) fn draw(
+        &self,
+        target: &Target,
+        clear: LinearRgba,
+        frame: &Frame,
+    ) -> Result<(), GpuError> {
+        let timing = self.timing.get().then(|| {
+            self.spare
+                .borrow_mut()
+                .pop()
+                .unwrap_or_else(|| Timing::new(self.gpu))
+        });
+        let fault = self.gpu.fault.generation();
+        let memory = self
+            .gpu
+            .device
+            .push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = self
+            .gpu
+            .device
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let submitted = self.encode(target, clear, frame, timing.as_ref());
+        // Popped in reverse order; on native both futures are ready at once.
+        let errors = [block_on(validation.pop()), block_on(memory.pop())];
+        let index = submitted?;
+        if let Some(error) = errors.into_iter().flatten().next() {
+            if let Some(timing) = timing {
+                self.spare.borrow_mut().push(timing);
+            }
+            return Err(GpuError::Wgpu(error.to_string()));
+        }
+        // The frame is on its way: the counters change here, so a frame that
+        // could not be submitted does not pollute `hucre=` (Metal's rule).
+        self.last_counts
+            .set([frame.bg_count(), frame.glyph_count(), frame.rule_count()]);
+        self.in_flight.borrow_mut().push_back(Pending {
+            index,
+            fault,
+            timing,
+        });
+        Ok(())
+    }
+
+    /// The non-blocking poll at the start of a tick (Karar 6): hands every
+    /// submitted frame the GPU has finished, oldest first, to `on_complete` —
+    /// `Ok(span)` for a frame finished without error (counted in
+    /// [`WgpuRenderer::frames`]; `span` is the GPU delta when measured),
+    /// `Err` for one that failed on the GPU (not counted). Returns whether a
+    /// frame is still in flight.
+    ///
+    /// Each check is a zero-timeout wait on that frame's index: wgpu's plain
+    /// `Poll` only says "queue empty or not", and the device may be shared.
+    /// `on_complete` must not call back into this renderer.
+    ///
+    /// **`acilis=`** is closed by the caller at the first `Ok` — the moment
+    /// this poll **observes** the finish, which trails the finish itself by at
+    /// most one tick (or one delayed poll); native wgpu has no earlier
+    /// observable moment without a thread of its own.
+    pub(crate) fn poll(
+        &self,
+        mut on_complete: impl FnMut(Result<Option<GpuSpan>, GpuError>),
+    ) -> bool {
+        let mut in_flight = self.in_flight.borrow_mut();
+        while let Some(front) = in_flight.front_mut() {
+            let done = self.gpu.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(front.index.clone()),
+                timeout: Some(Duration::ZERO),
+            });
+            let failed = match done {
+                Ok(_) => self.gpu.fault.since(front.fault),
+                Err(wgpu::PollError::Timeout) => break,
+                Err(e) => Some(e.to_string()),
+            };
+            let result = match failed {
+                Some(message) => Err(GpuError::Wgpu(message)),
+                None => match front.timing.as_mut() {
+                    None => Ok(None),
+                    Some(timing) => match timing.read(self.gpu) {
+                        // The readback is not mapped yet: next tick.
+                        None => break,
+                        Some(span) => Ok(span),
+                    },
+                },
+            };
+            // A failed frame's `Timing` is dropped, not pooled: its readback
+            // may still be mid-`map_async`, and a mapped buffer reused as a
+            // copy target would fail every later timed frame's validation.
+            if let Some(pending) = in_flight.pop_front()
+                && let Some(timing) = pending.timing
+                && result.is_ok()
+            {
+                self.spare.borrow_mut().push(timing);
+            }
+            if result.is_ok() {
+                self.frames.set(self.frames.get() + 1);
+            }
+            on_complete(result);
+        }
+        !in_flight.is_empty()
+    }
+
+    /// Draws the frame offscreen and reads the pixels back — the body every
+    /// offscreen guard shares, same byte order as Metal's (B, G, R, A).
     ///
     /// A validation error is caught by an error scope and becomes a **panic**:
     /// a test must never read an empty texture (the counterpart of the Metal
@@ -1069,6 +1860,57 @@ impl WgpuRenderer {
         }
         pixels
     }
+
+    /// The same, returning the planning error instead of panicking — the
+    /// "no atlas refuses glyphs" guard.
+    pub(crate) fn try_submit_offscreen(
+        &self,
+        edge: u32,
+        clear: LinearRgba,
+        frame: &Frame,
+    ) -> Result<(), GpuError> {
+        self.submit(&self.target(edge), clear, frame).map(|_| ())
+    }
+}
+
+/// The mask texture, created on first use with the resident tofu written
+/// once — `AtlasTexture::ensure_texture`'s twin, shared by glyphs and effects.
+fn mask_texture<'a>(
+    gpu: &Gpu,
+    atlas: &Atlas,
+    mask: &'a mut Option<PlaneTexture>,
+) -> &'a wgpu::Texture {
+    let plane = mask.get_or_insert_with(|| {
+        // `Atlas::slot` hands no bitmap when it falls back to tofu.
+        let plane = gpu.plane_texture(MASK_FORMAT, atlas.texture_px());
+        gpu.write_slot(
+            &plane.texture,
+            atlas.slot_origin(TOFU),
+            atlas.metrics(),
+            atlas.tofu_bitmap(),
+            Plane::Mask,
+        );
+        plane
+    });
+    &plane.texture
+}
+
+/// The format of the texture this renderer creates for `plane` — the colour
+/// plane's sRGB contract, asked directly (`the_color_plane_is_an_srgb_texture`).
+#[cfg(test)]
+pub(crate) fn plane_format(plane: Plane) -> wgpu::TextureFormat {
+    let format = match plane {
+        Plane::Mask => MASK_FORMAT,
+        Plane::Color => COLOR_FORMAT,
+    };
+    Gpu::shared().plane_texture(format, (8, 8)).texture.format()
+}
+
+/// The atlas's uv size of one slot.
+fn uv_size(atlas: &Atlas) -> [f32; 2] {
+    let (cw, ch) = atlas.metrics().cell_px;
+    let (tw, th) = atlas.texture_px();
+    [f32::from(cw) / f32::from(tw), f32::from(ch) / f32::from(th)]
 }
 
 /// Twin of `renderer.rs` → `pipeline`: same blending (straight alpha, the alpha
@@ -1132,32 +1974,23 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bt_core::{
-        Block, ButtonState, CaretShape, CaretStyle, Cell, DockButton, Theme, UnderlineStyle,
+        Block, ButtonState, CaretShape, CaretStyle, Cell, DockButton, Erase, Keypress, SearchRun,
+        SelectionRun, Theme, UnderlineStyle,
     };
     use objc2_metal::MTLCommandBuffer;
 
     use super::*;
     use crate::Renderer;
+    use crate::glyph_fx::{Effect, Fx, Kind};
     use crate::renderer::tests::{
-        ACCENT, BACKGROUND, MIDTONE, MIDTONE_SRGB, WHITE, bg_cell, brightness, cell_rows,
-        commit_offscreen, cursor_at, grid, grid_with_gutter, pixel_at, push_settled,
-        render_offscreen as metal_offscreen, target_texture,
+        ACCENT, BACKGROUND, MIDTONE, WHITE, bg_cell, cell_rows, commit_offscreen, grid,
+        grid_with_gutter, metal_offscreen, pixel_at, target_texture,
     };
     use crate::stats::{Samples, Stats};
 
-    // **Guard twins.** The six tests below are wgpu twins of the Metal guards
-    // in `renderer.rs` and assert the same things; the reasons are there. The
-    // cell size is fixed rather than taken from the atlas: these tests are not
-    // about glyphs, and `fitting_cell_px`'s only job was a cell that fits the
-    // texture. In phase-4 `render_offscreen` moves to wgpu, these merge into
-    // the real guards and the twins go away (discussion.md → Karar 4).
-
-    /// Fixed cell: 8×16, eight columns and four rows on a 64 texture.
+    /// Fixed cell for the synthetic scenes: 8×16, eight columns and four rows
+    /// on a 64 texture.
     const CELL: (u16, u16) = (8, 16);
-
-    fn render(edge: u32, clear: LinearRgba, frame: &Frame) -> Vec<u8> {
-        WgpuRenderer::new().render_offscreen(edge, clear, frame)
-    }
 
     #[test]
     fn wgsl_pipelines_build() {
@@ -1169,183 +2002,10 @@ mod tests {
         let _ = Gpu::shared();
     }
 
-    #[test]
-    fn wgpu_cell_bg_paints_pixels_on_the_gpu() {
-        // Twin of `cell_bg_paints_pixels_on_the_gpu`: two instances (stride),
-        // the y flip and the sRGB round trip through `MIDTONE`.
-        const EDGE: u32 = 16;
-        let mut frame = Frame::default();
-        frame.clear(grid(8, 8), CaretStyle::default());
-        frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
-        frame.push(bg_cell(1, 1, LinearRgba::from_srgb(0x00, 0xff, 0x00)));
-        frame.push(bg_cell(0, 1, MIDTONE));
-        let pixels = render(EDGE, ACCENT, &frame);
-        let pixel = |x: usize, y: usize| pixel_at(&pixels, EDGE as usize, x, y);
-        assert_eq!(pixel(2, 2), (255, 0, 0), "first cell red at top left");
-        assert_eq!(
-            pixel(12, 12),
-            (0, 255, 0),
-            "second cell green at bottom right"
-        );
-        let srgb = |hex: u32| ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
-        let close_to = |seen: (u8, u8, u8), expected: (u8, u8, u8), what: &str| {
-            assert!(
-                seen.0.abs_diff(expected.0) <= 1
-                    && seen.1.abs_diff(expected.1) <= 1
-                    && seen.2.abs_diff(expected.2) <= 1,
-                "{what}: {seen:02x?} ≠ {expected:02x?}"
-            );
-        };
-        close_to(pixel(2, 12), srgb(MIDTONE_SRGB), "cell midtone");
-        close_to(
-            pixel(12, 2),
-            srgb(Theme::BATERI.accent),
-            "empty quadrant has the clear colour",
-        );
-    }
-
-    #[test]
-    fn wgpu_degenerate_caret_is_the_old_rectangle_bit_for_bit() {
-        // Twin of `a_degenerate_caret_shape_paints_the_old_rectangle`.
-        // Equality is exact **within** the backend (Karar 3): the degenerate
-        // branch uses `step`, not `smoothstep` — a leak shows at the edges.
-        const EDGE: u32 = 64;
-        let mut frame = Frame::default();
-        frame.clear(
-            grid(CELL.0, CELL.1),
-            CaretStyle {
-                radius_ratio: 0.0,
-                glow: 0.0,
-                ..CaretStyle::default()
-            },
-        );
-        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
-        frame.push(bg_cell(1, 0, ACCENT));
-        let pixels = render(EDGE, BACKGROUND, &frame);
-        let cell = |col| cell_rows(&pixels, EDGE as usize, CELL, col).concat();
-        assert_eq!(
-            cell(0),
-            cell(1),
-            "degenerate caret differs from the plain quad: the fallback path is broken"
-        );
-    }
-
-    #[test]
-    fn wgpu_caret_corner_is_rounded() {
-        // Twin of `the_caret_corner_is_rounded`: the reference is outside the
-        // caret.
-        const EDGE: u32 = 64;
-        let mut frame = Frame::default();
-        frame.clear(
-            grid(CELL.0, CELL.1),
-            CaretStyle {
-                radius_ratio: 0.5,
-                glow: 0.0,
-                ..CaretStyle::default()
-            },
-        );
-        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
-        let pixels = render(EDGE, BACKGROUND, &frame);
-        let edge = EDGE as usize;
-        let sum = |x, y| brightness(&pixels, edge, x, y);
-        let clear = sum(edge - 1, edge - 1);
-        let middle = sum(usize::from(CELL.0) / 2, usize::from(CELL.1) / 2);
-        assert!(middle > clear, "caret centre is not painted");
-        assert_eq!(
-            sum(0, 0),
-            clear,
-            "corner is painted: the shader does not round"
-        );
-    }
-
-    #[test]
-    fn wgpu_hollow_caret_paints_only_its_edge() {
-        // Twin of `a_hollow_caret_paints_only_its_edge`: the stroke branch.
-        const EDGE: u32 = 64;
-        let mut frame = Frame::default();
-        frame.clear(grid(CELL.0, CELL.1), CaretStyle::default());
-        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
-        let stroke = (f32::from(CELL.0) / 4.0).max(1.0);
-        frame.force_caret_sdf([0.0, stroke, 0.0, 0.0]);
-        let pixels = render(EDGE, BACKGROUND, &frame);
-        let edge = EDGE as usize;
-        let sum = |x, y| brightness(&pixels, edge, x, y);
-        let clear = sum(edge - 1, edge - 1);
-        let rim = sum(0, usize::from(CELL.1) / 2);
-        let middle = sum(usize::from(CELL.0) / 2, usize::from(CELL.1) / 2);
-        assert!(rim > clear, "hollow caret edge was not drawn");
-        assert_eq!(middle, clear, "hollow caret centre is painted");
-    }
-
-    #[test]
-    fn wgpu_caret_glow_spills_but_stops() {
-        // Twin of `the_caret_glow_spills_but_stops`: the glow is outside and
-        // within its margin.
-        const EDGE: u32 = 64;
-        const GUTTER: u16 = 16;
-        let mut frame = Frame::default();
-        frame.clear(
-            grid_with_gutter(CELL.0, CELL.1, GUTTER),
-            CaretStyle::default(),
-        );
-        push_settled(&mut frame, cursor_at(0, BACKGROUND), ACCENT);
-        let pixels = render(EDGE, BACKGROUND, &frame);
-        let edge = EDGE as usize;
-        let right = usize::from(GUTTER) + usize::from(CELL.0);
-        let pad = (f32::from(GUTTER) * crate::frame::CARET_GLOW_RATIO) as usize;
-        let y = usize::from(CELL.1) / 2;
-        assert!(
-            right + pad + 2 < edge,
-            "sample points do not fit the texture"
-        );
-        let clear = pixel_at(&pixels, edge, edge - 1, edge - 1);
-        assert_ne!(
-            pixel_at(&pixels, edge, right + pad / 2, y),
-            clear,
-            "no glow outside the rectangle"
-        );
-        assert_eq!(
-            pixel_at(&pixels, edge, right + pad + 2, y),
-            clear,
-            "glow paints beyond its margin: unbounded"
-        );
-    }
-
-    #[test]
-    fn wgpu_caret_glow_fades_with_the_caret() {
-        // Twin of `the_caret_glow_fades_with_the_caret`: glow × caret alpha.
-        const EDGE: u32 = 64;
-        const GUTTER: u16 = 16;
-        let edge = EDGE as usize;
-        let y = usize::from(CELL.1) / 2;
-        let pad = (f32::from(GUTTER) * crate::frame::CARET_GLOW_RATIO) as usize;
-        let at = usize::from(GUTTER) + usize::from(CELL.0) + pad / 2;
-        assert!(at < edge, "sample point does not fit the texture");
-        let sample = |alpha: f32| {
-            let mut frame = Frame::default();
-            frame.clear(
-                grid_with_gutter(CELL.0, CELL.1, GUTTER),
-                CaretStyle::default(),
-            );
-            frame.push_caret(
-                [0.0, 0.0],
-                BACKGROUND,
-                ACCENT,
-                alpha,
-                CaretShape::Block,
-                true,
-            );
-            brightness(&render(EDGE, BACKGROUND, &frame), edge, at, y)
-        };
-        let (dark, half, full) = (sample(0.0), sample(0.5), sample(1.0));
-        assert!(
-            dark < half && half < full,
-            "glow does not follow the caret's alpha: {dark} / {half} / {full}"
-        );
-    }
-
-    // **Guard twins of the `cell` + `emoji` group** (phase-3). Glyph tests draw
-    // at `SCALE`; the reasons are the Metal guards' named in each test.
+    // **Guards that need the wgpu internals** (a hand-built pass, the colour
+    // plane's texture) or have no Metal original. Since phase-4 the other
+    // guards live in `renderer.rs` and draw with this renderer; the phase-2/3
+    // twins of those were merged into them. Glyph tests draw at `SCALE`.
 
     /// Retina: at 13pt@1x a flag cluster's ink exceeds two cells and falls back
     /// to its base character (`a_cluster_is_one_color_glyph_on_every_surface`),
@@ -1377,7 +2037,7 @@ mod tests {
     /// Synthetic on purpose (a real emoji's bitmap is not bit-stable across
     /// macOS releases), and the instance's colour is **red**: whatever comes
     /// out must come from the texture.
-    fn wgpu_emoji_round_trip(rgb: (u8, u8, u8), alpha: u8) -> (u8, u8, u8) {
+    fn emoji_round_trip(rgb: (u8, u8, u8), alpha: u8) -> (u8, u8, u8) {
         const EDGE: u32 = 16;
         const SLOT: u16 = 8;
         let gpu = Gpu::shared();
@@ -1452,12 +2112,15 @@ mod tests {
     }
 
     #[test]
-    fn wgpu_a_color_glyph_takes_its_color_from_the_texture() {
-        // Twin of `a_midtone_color_slot_survives_the_round_trip`: a midtone
-        // (not a fixed point of the sRGB transfer) comes back as the same byte
-        // through the sRGB colour plane — and not as the instance's red.
+    fn a_midtone_color_slot_survives_the_round_trip() {
+        // A midtone (not a fixed point of the sRGB transfer, so a wrong
+        // texture format could not pass) comes back as the same byte through
+        // the sRGB colour plane — and not as the instance's red. Synthetic on
+        // purpose: a real emoji's bitmap is not bit-stable across macOS
+        // releases. Opaque, so straight and premultiplied blending agree here;
+        // they part at the translucent edge below.
         const MID: (u8, u8, u8) = (0x80, 0x40, 0xc0);
-        let seen = wgpu_emoji_round_trip(MID, 0xff);
+        let seen = emoji_round_trip(MID, 0xff);
         assert!(
             seen.0.abs_diff(MID.0) <= 1
                 && seen.1.abs_diff(MID.1) <= 1
@@ -1468,11 +2131,12 @@ mod tests {
     }
 
     #[test]
-    fn wgpu_a_translucent_color_edge_composites_in_linear_space() {
-        // Twin of `a_translucent_edge_composites_in_linear_space`: half-alpha
-        // white over black is exactly half in linear space, 0xBC once encoded;
-        // 0x80 would mean straight alpha was blended in encoded space.
-        let seen = wgpu_emoji_round_trip((0xff, 0xff, 0xff), 0x80);
+    fn a_translucent_edge_composites_in_linear_space() {
+        // Half-alpha white over black is exactly half in linear space, 0xBC
+        // once encoded; 0x80 — the signature of premultiplication left in
+        // encoded space (`raster::unpremultiply`'s doc) — must not pass, so
+        // the tolerance is ±2, far from 0x80.
+        let seen = emoji_round_trip((0xff, 0xff, 0xff), 0x80);
         assert!(
             seen.0.abs_diff(0xbc) <= 2,
             "translucent edge did not composite linearly: {seen:02x?} ≠ ~0xbc"
@@ -1480,7 +2144,7 @@ mod tests {
     }
 
     #[test]
-    fn wgpu_wide_glyph_halves_meet_without_a_seam() {
+    fn wide_glyph_halves_meet_without_a_seam() {
         // A wide glyph is two quads from two slots (`slots::fan`); the right
         // half is rasterised a whole number of pixels to the left, so its AA
         // phase is the left half's and a stroke crossing the boundary must
@@ -1527,7 +2191,7 @@ mod tests {
     }
 
     #[test]
-    fn wgpu_a_rule_is_drawn_over_its_glyph() {
+    fn a_rule_is_drawn_over_its_glyph() {
         // Rules come after glyphs in the one mask list (`slots::glyph_lists`).
         // `█` is procedural and fills the whole cell (no font involved), so
         // the underline lies on it: drawn after the glyph it reads red, drawn
@@ -1552,6 +2216,153 @@ mod tests {
             cell.contains(&(0xff, 0x00, 0x00)),
             "the underline is not on top of its glyph"
         );
+    }
+
+    // **Completion model** (Karar 6): the four jobs of Metal's completion
+    // block, carried by the submission index and `poll`.
+
+    /// A small frame with one coloured cell.
+    fn one_cell_frame() -> Frame {
+        let mut frame = Frame::default();
+        frame.clear(grid(8, 8), CaretStyle::default());
+        frame.push(bg_cell(0, 0, LinearRgba::from_srgb(0xff, 0x00, 0x00)));
+        frame
+    }
+
+    /// Blocks until the device is idle **without** touching the renderer's
+    /// bookkeeping: only `poll` may count a frame.
+    fn wait_for_gpu(r: &WgpuRenderer) {
+        r.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("waiting for the GPU failed");
+    }
+
+    #[test]
+    fn a_finished_frame_is_counted_by_one_poll() {
+        // `kare=` counts frames the GPU finished without error — not
+        // submitted ones — and the last frame before the link sleeps is not
+        // lost: while it is in flight `in_flight` asks for one delayed poll,
+        // that single poll counts it, and an empty queue arms nothing (the
+        // stop condition). `acilis=` closes at the first `Ok` the poll hands
+        // over, not at submit.
+        let r = WgpuRenderer::new();
+        assert_eq!(r.frames(), 0);
+        let target = r.target(16);
+        let stats = Stats::new(Instant::now(), 1);
+        r.draw(&target, BACKGROUND, &one_cell_frame())
+            .expect("the frame was submitted");
+        assert_eq!(r.frames(), 0, "a submitted frame is not a finished one");
+        assert!(r.in_flight(), "the submitted frame is not tracked");
+        assert_eq!(stats.startup(), None);
+        assert_eq!(r.last_bg_count(), 1, "`hucre=` of the submitted frame");
+        assert_eq!((r.last_glyph_count(), r.last_rule_count()), (0, 0));
+        // No atlas was asked for: an unopened atlas has no slots (Metal's
+        // `(0, 0)` rule).
+        assert_eq!(
+            (r.atlas_occupancy(), r.color_atlas_occupancy()),
+            ((0, 0), (0, 0))
+        );
+        wait_for_gpu(&r);
+        assert_eq!(r.frames(), 0, "only `poll` counts");
+        let mut seen = Vec::new();
+        let still = r.poll(|result| {
+            if result.is_ok() {
+                stats.mark_startup();
+            }
+            seen.push(result.is_ok());
+        });
+        assert_eq!(seen, vec![true], "the finished frame was reported once");
+        assert_eq!(r.frames(), 1, "a clean frame is counted");
+        assert!(!still, "an empty queue must not ask for another poll");
+        assert!(!r.in_flight());
+        assert!(
+            stats.startup().is_some(),
+            "the first finished frame closes the startup time"
+        );
+        let mut again = 0;
+        assert!(!r.poll(|_| again += 1));
+        assert_eq!(again, 0, "a frame is reported once");
+    }
+
+    #[test]
+    fn a_frame_failing_validation_is_not_counted() {
+        // The synchronous leg: an error caught around the submit returns
+        // `Err` (the caller sends it to `Retry::draw_failed`) and the frame is
+        // never tracked, so it can never be counted — otherwise `make duman`
+        // would pass a black window.
+        let r = WgpuRenderer::new();
+        let target = r.target(16);
+        r.poison_next_frame();
+        let result = r.draw(&target, BACKGROUND, &one_cell_frame());
+        assert!(
+            matches!(result, Err(GpuError::Wgpu(_))),
+            "an invalid frame was submitted silently: {result:?}"
+        );
+        assert!(!r.in_flight(), "a failed frame is tracked");
+        assert_eq!(r.last_bg_count(), 0, "a failed frame pollutes `hucre=`");
+        wait_for_gpu(&r);
+        assert!(!r.poll(|_| panic!("nothing to report")));
+        assert_eq!(r.frames(), 0);
+        // The next frame is clean again: the hook is one-shot.
+        r.draw(&target, BACKGROUND, &one_cell_frame())
+            .expect("a clean frame after a failed one");
+    }
+
+    #[test]
+    fn a_device_fault_fails_the_frame_in_flight() {
+        // The asynchronous leg: a fault reported outside the frame's scope
+        // (uncaptured error, device lost) fails every frame submitted before
+        // it, through the same callback as a success — one policy for both.
+        // A device of its own, so the fault cannot leak into other tests.
+        let gpu: &'static Gpu = Box::leak(Box::new(Gpu::new().expect("a second device")));
+        let r = WgpuRenderer::on(gpu);
+        let target = r.target(16);
+        r.draw(&target, BACKGROUND, &one_cell_frame())
+            .expect("the frame was submitted");
+        gpu.fault.report("injected fault".to_owned());
+        wait_for_gpu(&r);
+        let mut seen = Vec::new();
+        assert!(!r.poll(|result| seen.push(result.map(|_| ()).map_err(|e| e.to_string()))));
+        assert_eq!(seen.len(), 1);
+        assert!(
+            matches!(&seen[0], Err(message) if message.contains("injected fault")),
+            "the fault did not reach the frame: {seen:?}"
+        );
+        assert_eq!(r.frames(), 0, "a faulted frame is counted");
+    }
+
+    #[test]
+    fn gpu_timestamps_reach_the_ledger_or_say_unsupported() {
+        // `TIMESTAMP_QUERY` present: the frame's pass writes two timestamps
+        // and the poll hands them over as a span, recorded **once** (as a
+        // sample or rejected — what the hardware gives is its business, the
+        // test pins the pipe, like the Metal guard it replaces). Absent: the
+        // gate stays closed and the token's value is `unsupported`.
+        let r = WgpuRenderer::new();
+        r.set_gpu_timing(true);
+        let target = r.target(16);
+        let stats = Stats::new(Instant::now(), 1);
+        r.draw(&target, BACKGROUND, &one_cell_frame())
+            .expect("the frame was submitted");
+        let mut spans = Vec::new();
+        // The readback's mapping may need a second look after the frame is
+        // done; each round waits for the GPU, it does not sleep.
+        for _ in 0..8 {
+            wait_for_gpu(&r);
+            if !r.poll(|result| spans.push(result.expect("a clean frame"))) {
+                break;
+            }
+        }
+        assert_eq!(spans.len(), 1, "the frame was reported once");
+        if !r.gpu_timing_supported() {
+            assert_eq!(spans[0], None, "no timestamp feature, yet a span");
+            return;
+        }
+        let span = spans[0].expect("timestamps are supported, yet no span");
+        stats.record_gpu(span.start, span.end);
+        let gpu = stats.gpu();
+        assert_eq!(gpu.nanos.len() as u64 + gpu.rejected, 1);
+        assert!(!r.in_flight());
     }
 
     // **Oracle scene list** (Karar 4). Each scene is a `Frame` drawn on both
@@ -1935,8 +2746,204 @@ mod tests {
         ("growing band with glyphs (scissor restored)", EDGE, frame)
     }
 
+    // **Phase-4 scenes**: selection and search (no atlas; a large synthetic
+    // cell so the corner radius is several pixels) and the typing effects
+    // (the atlas's own metrics).
+
+    fn selection_run(row: u16, first: u16, last: u16) -> SelectionRun {
+        SelectionRun { row, first, last }
+    }
+
+    fn search_run(row: u16, first: u16, last: u16, current: bool, continues: bool) -> SearchRun {
+        SearchRun {
+            row,
+            first,
+            last,
+            current,
+            continues,
+        }
+    }
+
+    /// Selection corners: a lone run (convex), a step (concave fill) and a
+    /// wider row below (aligned edge) — every branch of `selection_fragment`.
+    fn scene_selection_corners() -> Scene {
+        let mut frame = Frame::default();
+        frame.clear(grid(40, 80), CaretStyle::default());
+        frame.push(bg_cell(3, 2, ACCENT));
+        frame.push_selection(
+            &[
+                selection_run(0, 2, 3),
+                selection_run(1, 0, 3),
+                selection_run(2, 1, 1),
+            ],
+            MIDTONE,
+        );
+        ("selection corners: convex, concave, step", 256, frame)
+    }
+
+    /// The unfocused window's selection: the dimmed colour of the same shape
+    /// (`SelectionRuns::color(false)`).
+    fn scene_unfocused_selection() -> Scene {
+        let mut frame = Frame::default();
+        frame.clear(grid(40, 80), CaretStyle::default());
+        frame.push_selection(
+            &[selection_run(0, 1, 3), selection_run(1, 0, 2)],
+            Theme::BATERI.selection_unfocused_linear(),
+        );
+        ("unfocused (dimmed) selection", 256, frame)
+    }
+
+    /// Search: matches, the current match, a wrapped match (one shape), the
+    /// selection over a match, and a match in the fill band.
+    fn scene_search() -> Scene {
+        let mut frame = Frame::default();
+        frame.clear(grid(40, 80), CaretStyle::default());
+        frame.set_fill_rows(1);
+        frame.push_search(
+            &[
+                search_run(0, 0, 2, false, false),
+                search_run(1, 3, 5, true, false),
+                search_run(2, 0, 1, false, true),
+            ],
+            Theme::BATERI.search_match_linear(),
+            Theme::BATERI.search_current_linear(),
+        );
+        frame.push_fill_search(&[search_run(0, 1, 2, false, false)]);
+        frame.push_selection(&[selection_run(0, 2, 3)], MIDTONE);
+        frame.set_origin_rows(1.0);
+        ("search matches, current match, fill band", 256, frame)
+    }
+
+    /// A dock frame carrying effects: `statics` are the dock's static cells,
+    /// `fx` the effects over them.
+    fn fx_frame(m: CellMetrics, statics: &[Cell], fx: &[Fx]) -> Frame {
+        let mut frame = glyph_frame(m);
+        for &cell in statics {
+            frame.push_dock(cell);
+        }
+        frame.set_dock_fx(
+            fx.iter().copied(),
+            &Clusters::default(),
+            LinearRgba::from_srgb(0xff, 0x80, 0x20),
+        );
+        frame.set_dock_rows(1);
+        frame.open_dock(BACKGROUND, BACKGROUND, BACKGROUND);
+        frame
+    }
+
+    fn fx(cell: Cell, kind: Kind, effect: u32, t: f32) -> Fx {
+        Fx {
+            cell,
+            kind,
+            effect,
+            t,
+            seed: 3.0,
+        }
+    }
+
+    /// Every arrival and every ghost at mid-flight — each branch of
+    /// `glyph_fx_fragment` once — plus one of each at `t = 1`. A single-cell
+    /// glyph, a wide glyph's two halves and an underlined glyph (the rule
+    /// splits around arrivals).
+    fn scenes_fx(m: CellMetrics) -> Vec<Scene> {
+        let letter = glyph_cell(2, 0, 'M');
+        let wide = Cell {
+            wide: true,
+            ..glyph_cell(5, 0, '漢')
+        };
+        let ruled = Cell {
+            underline: UnderlineStyle::Single,
+            ..glyph_cell(8, 0, 'g')
+        };
+        let mut out = Vec::new();
+        let arrivals = Keypress::effects()
+            .into_iter()
+            .map(|e| (Kind::Arrival, e.id().expect("drawing effect"), "arrival"));
+        let ghosts = Erase::effects()
+            .into_iter()
+            .map(|e| (Kind::Ghost, e.id().expect("drawing effect"), "ghost"));
+        for (kind, id, what) in arrivals.chain(ghosts) {
+            for t in [0.5, 1.0] {
+                // `t = 1` once per kind is enough: the equality to the static
+                // glyph is `renderer.rs`'s own guard.
+                if t == 1.0 && id != 1 && id != 16 {
+                    continue;
+                }
+                let effects: Vec<Fx> = [letter, wide, ruled]
+                    .into_iter()
+                    .map(|cell| fx(cell, kind, id, t))
+                    .collect();
+                let statics: &[Cell] = if kind == Kind::Arrival {
+                    &[letter, wide, ruled]
+                } else {
+                    &[]
+                };
+                let name: &'static str =
+                    Box::leak(format!("{what} {id} at t = {t}").into_boxed_str());
+                out.push((name, 192, fx_frame(m, statics, &effects)));
+            }
+        }
+        out
+    }
+
+    /// Three viewports in one frame: grid glyphs, search and selection over
+    /// an offset grid, the fill band with its match, and a dock with its
+    /// selection, caret and an arrival in flight.
+    fn scene_three_viewports(m: CellMetrics) -> Scene {
+        const EDGE: u32 = 256;
+        let mut frame = glyph_frame(m);
+        for (col, ch) in (0u16..).zip("echo".chars()) {
+            frame.push(glyph_cell(col, 0, ch));
+        }
+        frame.push(Cell {
+            bg: Some(MIDTONE),
+            ..glyph_cell(1, 1, 'x')
+        });
+        frame.set_fill_rows(1);
+        frame.push_fill(glyph_cell(0, 0, 'f'));
+        frame.push_search(
+            &[search_run(0, 0, 1, true, false)],
+            Theme::BATERI.search_match_linear(),
+            Theme::BATERI.search_current_linear(),
+        );
+        frame.push_fill_search(&[search_run(0, 0, 0, false, false)]);
+        frame.push_selection(&[selection_run(1, 0, 2)], Theme::BATERI.selection_linear());
+        frame.set_dock_input_rows(1);
+        frame.set_dock_band(EDGE as f32, 0.0);
+        frame.push_dock_sigil(Theme::BATERI.success_linear());
+        let typed = glyph_cell(3, 0, 'k');
+        for (col, ch) in (2u16..).zip("ls".chars()) {
+            frame.push_dock(glyph_cell(col, 0, ch));
+        }
+        frame.push_dock(typed);
+        frame.push_dock_selection(&[selection_run(0, 2, 3)]);
+        frame.set_dock_fx(
+            [fx(
+                typed,
+                Kind::Arrival,
+                Keypress::Pop.id().expect("drawing effect"),
+                0.4,
+            )],
+            &Clusters::default(),
+            LinearRgba::from_srgb(0xff, 0x80, 0x20),
+        );
+        frame.open_dock(
+            LinearRgba::from_srgb(0x20, 0x22, 0x28),
+            WHITE,
+            LinearRgba::from_srgb(0x60, 0x60, 0x60),
+        );
+        let row = (EDGE as f32 - frame.dock_layout_px()) / frame.cell_px()[1];
+        frame.push_caret([4.0, row], BACKGROUND, ACCENT, 1.0, CaretShape::Beam, true);
+        frame.set_origin_rows(1.5);
+        (
+            "three viewports: grid, fill band, dock with effects",
+            EDGE,
+            frame,
+        )
+    }
+
     fn scenes(m: CellMetrics) -> Vec<Scene> {
-        vec![
+        let mut scenes = vec![
             scene_midtone(),
             scene_dock_ground(),
             scene_growing_band(),
@@ -1958,7 +2965,13 @@ mod tests {
             scene_fill_glyphs(m),
             scene_dock_glyphs(m),
             scene_growing_band_glyphs(m),
-        ]
+            scene_selection_corners(),
+            scene_unfocused_selection(),
+            scene_search(),
+            scene_three_viewports(m),
+        ];
+        scenes.extend(scenes_fx(m));
+        scenes
     }
 
     /// The worst pixel where wgpu diverges from the oracle: the failure
@@ -2078,7 +3091,7 @@ mod tests {
         }
     }
 
-    fn report(backend: &str, frames: usize, stats: &Stats) -> String {
+    fn report(backend: &str, frames: usize, stats: &Stats, supported: bool) -> String {
         let profile = if cfg!(debug_assertions) {
             "debug"
         } else {
@@ -2086,8 +3099,8 @@ mod tests {
         };
         let cpu = stats.cpu_frame();
         let gpu = stats.gpu();
-        let gpu_line = if backend == "wgpu" {
-            // wgpu's GPU timestamp needs `TIMESTAMP_QUERY`; that is phase-4.
+        let gpu_line = if backend == "wgpu" && !supported {
+            // No `TIMESTAMP_QUERY`: the key stays, the value says so (Karar 6).
             " gpu_p95=unsupported gpu_max=unsupported".to_owned()
         } else {
             span("gpu", gpu)
@@ -2123,6 +3136,7 @@ mod tests {
         let metal = Renderer::system_default().expect("Metal device and pipelines");
         let texture = target_texture(&metal, usize::from(EDGE));
         let w = WgpuRenderer::new();
+        w.set_gpu_timing(true);
         let target = w.target(u32::from(EDGE));
         let metal_stats = Stats::new(Instant::now(), 10);
         let wgpu_stats = Stats::new(Instant::now(), 10);
@@ -2141,17 +3155,31 @@ mod tests {
             let t0 = Instant::now();
             loaded_frame(&mut frame, EDGE);
             let t1 = Instant::now();
-            w.submit(&target, clear, &frame)
+            // The product path: error scope, submit, tracking (`draw`).
+            w.draw(&target, clear, &frame)
                 .expect("the hook frame draws no glyphs");
             let t2 = Instant::now();
             w.device()
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("waiting for the GPU failed");
-            if i >= WARMUP {
+            let record = i >= WARMUP;
+            while w.poll(|result| {
+                if let (true, Ok(Some(span))) = (record, result) {
+                    wgpu_stats.record_gpu(span.start, span.end);
+                }
+            }) {
+                w.device()
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .expect("waiting for the GPU failed");
+            }
+            if record {
                 wgpu_stats.record_cpu(t1 - t0, t2 - t1);
             }
         }
-        println!("{}", report("metal", FRAMES, &metal_stats));
-        println!("{}", report("wgpu", FRAMES, &wgpu_stats));
+        println!("{}", report("metal", FRAMES, &metal_stats, true));
+        println!(
+            "{}",
+            report("wgpu", FRAMES, &wgpu_stats, w.gpu_timing_supported())
+        );
     }
 }
