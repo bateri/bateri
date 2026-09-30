@@ -12,6 +12,23 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-30
+
+### Changed
+
+- Rendering now goes through wgpu (still Metal underneath on macOS). Nothing
+  should look different; this is groundwork for a Linux version.
+
+### Fixed
+
+- Fast, continuous output (large logs, `seq 1 50000`) no longer makes the
+  screen jump back a screenful every other frame, and costs roughly half the
+  GPU work it did.
+- Short bursts of output that overflow a full screen (`seq 1 200`, `ls -la`)
+  now slide in every time, not only when they happened to arrive in one piece.
+- The About panel shows the copyright line correctly (`©` and `Ö` were
+  garbled).
+
 ## [0.1.0] - 2026-09-30
 
 First public release. bateri is free software under the GNU General Public
