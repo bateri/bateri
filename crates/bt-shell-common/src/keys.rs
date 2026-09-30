@@ -31,7 +31,7 @@ const PAGE_DOWN: char = '\u{f72d}';
 /// this key go to the terminal") and that list's byte ([`encode_key`] — "which byte"). Having the
 /// decision and the encoding in separate places is the same split as `page_scroll`; writing the
 /// literal in two places would leave the door open for it to drift in one of them.
-pub(crate) const BACKSPACE: char = '\u{7f}';
+pub const BACKSPACE: char = '\u{7f}';
 
 /// `NSLeftArrowFunctionKey` and `NSRightArrowFunctionKey`.
 ///
@@ -39,8 +39,8 @@ pub(crate) const BACKSPACE: char = '\u{7f}';
 /// Cmd's closed allow-list (`view::reaches_terminal`) and that list's byte ([`encode_key`]) — and a
 /// literal written separately in two places would drift in one of them. The up/down arrows stay
 /// literals: only one place reads them.
-pub(crate) const ARROW_LEFT: char = '\u{f702}';
-pub(crate) const ARROW_RIGHT: char = '\u{f703}';
+pub const ARROW_LEFT: char = '\u{f702}';
+pub const ARROW_RIGHT: char = '\u{f703}';
 
 /// `NSDeleteFunctionKey` — forward delete (⌦, fn-⌫). Read in two places: its byte
 /// ([`encode_key`]) and the dock selection's key ([`dock_key`]).
@@ -58,7 +58,7 @@ const FORWARD_DELETE: char = '\u{f728}';
 /// `chars().next()` is **not enough**: if a multi-character `characters` (the output of a dead-key
 /// composition, marked text) is read from its first character, the rest is dropped without a
 /// trace.
-pub(crate) fn only_char(chars: &str) -> Option<char> {
+pub fn only_char(chars: &str) -> Option<char> {
     let mut it = chars.chars();
     match (it.next(), it.next()) {
         (Some(c), None) => Some(c),
@@ -68,7 +68,7 @@ pub(crate) fn only_char(chars: &str) -> Option<char> {
 
 /// [`encode_key`]'s answer: a key with known bytes, or an arrow.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum KeyInput {
+pub enum KeyInput {
     /// Bytes independent of the mode: a letter, Enter, PgUp…
     Bytes(Cow<'static, [u8]>),
     /// Goes to `Session::write_arrow`.
@@ -85,19 +85,19 @@ pub(crate) enum KeyInput {
 /// anything is the scroll decision ([`page_scroll`]), which cannot be thought of without Shift; an
 /// unused flag here would loosen the record's contract ("these flags are read").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct KeyPress<'a> {
+pub struct KeyPress<'a> {
     /// `NSEvent.characters` — the form with modifiers **applied** (Option-held `ø`, Ctrl-C →
     /// U+0003).
-    pub(crate) chars: &'a str,
+    pub chars: &'a str,
     /// Control is held.
-    pub(crate) ctrl: bool,
+    pub ctrl: bool,
     /// Option (⌥) is held. It only enables the navigation/deletion class; it does not touch
     /// printable letters (below, R3.2).
-    pub(crate) option: bool,
+    pub option: bool,
     /// Command (⌘) is held. **Only** a key that passed the allow-list arrives here
     /// (`view::reaches_terminal`), so the flag's only job is to tell the list's three keys (⌘⌫,
     /// ⌘←, ⌘→) apart from their Option forms.
-    pub(crate) command: bool,
+    pub command: bool,
 }
 
 /// Keystroke ([`KeyPress`]) → PTY bytes or an arrow.
@@ -131,7 +131,7 @@ pub(crate) struct KeyPress<'a> {
 /// with Control** and **forward delete with Option/Control** (⌦, U+F728); Home/End (their
 /// sequences are not written yet — a debt; swallowed below). **Dead keys stay out of scope and are
 /// no longer a debt**: AppKit's stack completes the composition, it never passes through here.
-pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
+pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
     let c = key.chars.chars().next()?;
     // Whether `characters` is a single character — the shared guard of the arms that come out of
     // a single `c` (below: backspace, arrows, PgUp/PgDn, forward delete and Control):
@@ -244,7 +244,7 @@ pub(crate) fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
 /// The match is on the **whole string** ([`only_char`]): a multi-character `characters`
 /// (a composition) is not read as a scroll from its first character — the same as
 /// [`encode_key`]'s `single` discipline, now from the same place.
-pub(crate) fn page_scroll(chars: &str, shift: bool) -> Option<i32> {
+pub fn page_scroll(chars: &str, shift: bool) -> Option<i32> {
     if !shift {
         return None;
     }
@@ -262,7 +262,7 @@ pub(crate) fn page_scroll(chars: &str, shift: bool) -> Option<i32> {
 /// Command is never a dock key: ⌥⌫ is `backward-kill-word`, ⌘⌫ is `kill-whole-line`, and both go
 /// their current way and remove the selection — the "any other key" arm. Shift+⌫ counts as a
 /// plain ⌫: it is the same key on macOS too.
-pub(crate) fn dock_key(key: KeyPress<'_>, shift: bool) -> Option<DockKey> {
+pub fn dock_key(key: KeyPress<'_>, shift: bool) -> Option<DockKey> {
     if key.ctrl || key.option || key.command {
         return None;
     }

@@ -14,7 +14,7 @@
 
 /// The split's axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Axis {
+pub enum Axis {
     /// Side by side — Split Right (⌘D): the second leaf is on the right.
     Horizontal,
     /// Stacked — Split Down (⇧⌘D): the second leaf is below.
@@ -23,7 +23,7 @@ pub(crate) enum Axis {
 
 /// The direction of navigation and resizing (⌥⌘ / ⌃⌘ + arrow).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Direction {
+pub enum Direction {
     Left,
     Right,
     Up,
@@ -33,7 +33,7 @@ pub(crate) enum Direction {
 impl Direction {
     /// The direction from a menu item's `tag` (`menu`'s Select/Resize Split ▸ items); an unknown
     /// `tag` is `None`.
-    pub(crate) fn from_tag(tag: isize) -> Option<Self> {
+    pub fn from_tag(tag: isize) -> Option<Self> {
         match tag {
             0 => Some(Self::Left),
             1 => Some(Self::Right),
@@ -60,13 +60,13 @@ impl Direction {
 
 /// A size, in points — the minimum pane's measure.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Size {
+pub struct Size {
     pub(crate) width: f64,
     pub(crate) height: f64,
 }
 
 impl Size {
-    pub(crate) const fn new(width: f64, height: f64) -> Self {
+    pub const fn new(width: f64, height: f64) -> Self {
         Self { width, height }
     }
 
@@ -80,15 +80,15 @@ impl Size {
 
 /// A rectangle, in points, top-down.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Rect {
-    pub(crate) x: f64,
-    pub(crate) y: f64,
-    pub(crate) width: f64,
-    pub(crate) height: f64,
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 impl Rect {
-    pub(crate) const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+    pub const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
         Self {
             x,
             y,
@@ -152,7 +152,7 @@ fn halves_px(rect: Rect, axis: Axis, ratio: f64) -> (Rect, Rect, Rect) {
 /// The sizes of a pane's two halves if it were split, in points — the question of the split limit
 /// (039 Karar 14): the **same** arithmetic as the frame computation, so the half the check approves
 /// is exactly the half that will be drawn.
-pub(crate) fn split_halves(frame: Rect, axis: Axis, scale: f64) -> (Rect, Rect) {
+pub fn split_halves(frame: Rect, axis: Axis, scale: f64) -> (Rect, Rect) {
     let (first, _, second) = halves_px(snap(frame, scale), axis, 0.5);
     (first.scaled(1.0 / scale), second.scaled(1.0 / scale))
 }
@@ -170,7 +170,7 @@ fn snap(rect: Rect, scale: f64) -> Rect {
 
 /// The split tree.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Tree {
+pub enum Tree {
     /// A pane's identity.
     Leaf(u64),
     /// Two subtrees, side by side or stacked along `axis`; `ratio` is the first one's share (after
@@ -185,7 +185,7 @@ pub(crate) enum Tree {
 
 /// The result of removing a leaf ([`Tree::remove`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Removal {
+pub enum Removal {
     /// The leaf is gone, its sibling was pulled up; focus should move to `focus`.
     Removed { focus: u64 },
     /// The tree's only leaf: not removed — closing the last pane means closing the tab, and that
@@ -197,20 +197,20 @@ pub(crate) enum Removal {
 
 /// The tree turned into frames ([`Tree::layout`]), in points.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Layout {
+pub struct Layout {
     /// Pane identity and its frame, in tree order.
-    pub(crate) panes: Vec<(u64, Rect)>,
+    pub panes: Vec<(u64, Rect)>,
     /// Dividers, in the tree's **in-order** arrangement (the first subtree's, the node's, the
     /// second's): [`Tree::drag`]'s index is this order.
-    pub(crate) dividers: Vec<Divider>,
+    pub dividers: Vec<Divider>,
 }
 
 /// A divider: its line and the axis of the split it divides (a side-by-side split's divider is a
 /// vertical line, dragged horizontally).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Divider {
-    pub(crate) rect: Rect,
-    pub(crate) axis: Axis,
+pub struct Divider {
+    pub rect: Rect,
+    pub axis: Axis,
 }
 
 /// The floating-point comparison's tolerance: frames are points snapped to device pixels, so any
@@ -226,7 +226,7 @@ impl Layout {
     /// `from`'s neighbour in `direction` (⌥⌘ + arrow): the pane beyond that edge, closest to the
     /// edge and overlapping most on the perpendicular axis; on a tie, the one earlier in tree
     /// order. `None` at the edge (no pane beyond it) or if `from` is not in the layout.
-    pub(crate) fn neighbour(&self, from: u64, direction: Direction) -> Option<u64> {
+    pub fn neighbour(&self, from: u64, direction: Direction) -> Option<u64> {
         let (_, f) = self.panes.iter().find(|(id, _)| *id == from)?;
         let mut best: Option<(u64, f64, f64)> = None;
         for (id, r) in &self.panes {
@@ -257,7 +257,7 @@ impl Layout {
 impl Tree {
     /// The order of pane identities — depth first, first subtree first
     /// (left to right, top to bottom).
-    pub(crate) fn leaves(&self) -> Vec<u64> {
+    pub fn leaves(&self) -> Vec<u64> {
         let mut out = Vec::new();
         self.collect(&mut out);
         out
@@ -289,7 +289,7 @@ impl Tree {
 
     /// The pane after (`forward`) or before `from`, in tree order and cyclic (⌘] / ⌘[). `None`
     /// with a single pane or if `from` is not in the tree.
-    pub(crate) fn cycle(&self, from: u64, forward: bool) -> Option<u64> {
+    pub fn cycle(&self, from: u64, forward: bool) -> Option<u64> {
         let leaves = self.leaves();
         if leaves.len() < 2 {
             return None;
@@ -306,7 +306,7 @@ impl Tree {
     /// Splits the `target` leaf in two along `axis`: the old pane in the first half (left or top),
     /// `new` in the second, equal area (039 Karar 9).
     /// If the leaf is missing, `false` and the tree does not change.
-    pub(crate) fn split(&mut self, target: u64, axis: Axis, new: u64) -> bool {
+    pub fn split(&mut self, target: u64, axis: Axis, new: u64) -> bool {
         match self {
             Tree::Leaf(id) if *id == target => {
                 *self = Tree::Split {
@@ -329,7 +329,7 @@ impl Tree {
     /// The neighbour that receives focus is the sibling's **adjacent** leaf: if the removed one
     /// was in the first half, the sibling's first leaf; if in the second, the sibling's last leaf
     /// — in both cases the pane touching the closed pane's divider.
-    pub(crate) fn remove(&mut self, target: u64) -> Removal {
+    pub fn remove(&mut self, target: u64) -> Removal {
         match self {
             Tree::Leaf(id) if *id == target => Removal::Last,
             Tree::Leaf(_) => Removal::Missing,
@@ -343,7 +343,7 @@ impl Tree {
     /// Lays the tree out in `bounds`: every pane's frame and the dividers.
     /// `scale` is the window's scale; boundaries snap to device pixels ([`halves_px`]), so the
     /// frames together with the dividers tile `bounds` with no gap and no overlap.
-    pub(crate) fn layout(&self, bounds: Rect, scale: f64) -> Layout {
+    pub fn layout(&self, bounds: Rect, scale: f64) -> Layout {
         let mut out = Layout::default();
         self.place(snap(bounds, scale), &mut out);
         let points = 1.0 / scale;
@@ -360,7 +360,7 @@ impl Tree {
     /// the whole area and without dividers; the other panes are absent from the layout (the
     /// container hides them). `None` or a leaf not in the tree gives the ordinary layout — since
     /// undoing does not change the tree, the old frames come back bit for bit.
-    pub(crate) fn layout_zoomed(&self, bounds: Rect, scale: f64, zoomed: Option<u64>) -> Layout {
+    pub fn layout_zoomed(&self, bounds: Rect, scale: f64, zoomed: Option<u64>) -> Layout {
         match zoomed {
             Some(id) if self.leaves().contains(&id) => Layout {
                 panes: vec![(id, snap(bounds, scale).scaled(1.0 / scale))],
@@ -375,7 +375,7 @@ impl Tree {
     /// divider goes, not the growing pane's). Both sides are clamped at the minimum pane limit
     /// ([`place_divider`]). `false` if there is no ancestor on that axis, the divider is already
     /// at the limit, or the leaf is not in the tree.
-    pub(crate) fn resize(
+    pub fn resize(
         &mut self,
         target: u64,
         direction: Direction,
@@ -407,7 +407,7 @@ impl Tree {
     /// Divider drag: moves the `index`th divider of [`Layout::dividers`] to `position` (in the
     /// container's coordinates, in points, along the divider's axis), clamping at the limit.
     /// `true` if the position changed.
-    pub(crate) fn drag(
+    pub fn drag(
         &mut self,
         index: usize,
         position: f64,
@@ -430,7 +430,7 @@ impl Tree {
     /// chained on the same axis count their children, a subtree on the other axis is a single
     /// column (or row). Result: all panes on the same axis are equal (in an L layout the left pane
     /// is half width, not a third).
-    pub(crate) fn equalize(&mut self) {
+    pub fn equalize(&mut self) {
         if let Tree::Split {
             axis,
             ratio,

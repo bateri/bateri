@@ -22,8 +22,6 @@
 use std::ffi::{CStr, OsString};
 use std::path::{Path, PathBuf};
 
-use objc2_foundation::NSLocale;
-
 /// The shell's starting directory: the user's home directory — on **every** launch, `cargo
 /// run` included (same as alacritty and Terminal.app). "Home directory only if `/` comes in"
 /// was rejected: the rule would have two branches (`discussion.md` → Karar 6 eki).
@@ -33,14 +31,14 @@ use objc2_foundation::NSLocale;
 /// (`ShellUser::from_env`), so in the ordinary case the shell's `pwd` and its `$HOME` are the
 /// same directory. It needs no new dependency. The only edge where the two can diverge is a
 /// non-UTF-8 `HOME`: `std` takes it as is, alacritty (`env::var`) falls back to passwd.
-pub(crate) fn working_directory() -> Option<PathBuf> {
+pub fn working_directory() -> Option<PathBuf> {
     home()
 }
 
 /// The user's home directory, with **the same resolution** as [`working_directory`]: the
 /// settings directory (`~/.config/bateri/`) is derived from here too, so the shell's `$HOME`
 /// and the home the settings are read from do not diverge through two separate rules.
-pub(crate) fn home() -> Option<PathBuf> {
+pub fn home() -> Option<PathBuf> {
     home_directory(std::env::home_dir())
 }
 
@@ -55,30 +53,14 @@ fn home_directory(home: Option<PathBuf>) -> Option<PathBuf> {
     home.filter(|home| home.is_absolute())
 }
 
-/// The locale variable to add to the shell, if needed: from macOS's language/region setting
-/// when the environment has no locale.
+/// The locale variable to add to the shell, if needed: from the system's language/region
+/// setting when the environment has no locale.
 ///
-/// **The language comes from the first of `preferredLanguages`**, not from
-/// `currentLocale().languageCode`: inside the bundle that one gives not the **user's**
-/// language but the language chosen from the bundle's localizations — `bateri.app` carries no
-/// `.lproj` and `CFBundleDevelopmentRegion` is `en`, so `en` on every Dock launch. Probed with
-/// the bundle (`-AppleLanguages (tr-TR) -AppleLocale tr_TR`): a Turkish user got the fallback
-/// locale instead of `tr_TR.UTF-8`, a `fr-CA` user got `en_CA.UTF-8` instead of `fr_CA.UTF-8`.
-/// Since `cargo run` (unbundled) gives the right language, the bug did not show there.
-/// alacritty uses `currentLocale`; not followed.
-///
-/// **The region comes from `currentLocale().regionCode`** (the bundle does not affect it),
-/// not from `countryCode`: the SDK marks the latter as going away in favour of `regionCode`
-/// (`#[deprecated]` in objc2, an error under `-D warnings`). `regionCode` arrived in macOS 14;
-/// the baseline is 14 anyway. The difference is the `@rg=` subtag: if the user separately
-/// chose a region format (`en_US@rg=gbzzzz`), it gives that region.
-pub(crate) fn locale_env() -> Option<(String, String)> {
-    let language = NSLocale::preferredLanguages().firstObject();
-    let region = NSLocale::currentLocale().regionCode();
-    let system = language.zip(region).and_then(|(tag, region)| {
-        let language = primary_language(&tag.to_string())?.to_owned();
-        Some((language, region.to_string()))
-    });
+/// `system` is the system's `(language, region)` pair, read by the platform shell — on macOS
+/// from `NSLocale` (`bt-shell`'s `locale::system_locale`, where the rationale for which
+/// `NSLocale` answer is read lives); this crate sees no Foundation (043 Karar 2). The
+/// decision itself is [`decide_locale`].
+pub fn locale_env(system: Option<(String, String)>) -> Option<(String, String)> {
     decide_locale(|name| std::env::var_os(name), system, locale_installed)
 }
 
@@ -161,7 +143,7 @@ fn locale_installed(name: &str) -> bool {
 /// no `SHELL` (`launchctl getenv SHELL` is empty), so a resolution that only looked at
 /// `$SHELL` would disable the integration precisely in the shipped bundle. The `LANG` form of
 /// the same trap is in [`decide_locale`]'s doc.
-pub(crate) fn shell() -> Option<PathBuf> {
+pub fn shell() -> Option<PathBuf> {
     std::env::var("SHELL")
         .ok()
         .or_else(passwd_shell)
@@ -174,6 +156,7 @@ fn passwd_shell() -> Option<String> {
 }
 
 /// The name in the user's passwd entry (`pw_name`); `None` if it cannot be read.
+#[cfg(target_os = "macos")]
 fn passwd_name() -> Option<String> {
     passwd_field(|entry| entry.pw_name)
 }
@@ -241,7 +224,8 @@ fn passwd_field(pick: impl Fn(&libc::passwd) -> *mut std::ffi::c_char) -> Option
 /// alacritty's own path: the banner comes back, the window works. The opposite direction —
 /// building the command halfway and handing it over anyway — meant a terminal that does not
 /// open.
-pub(crate) fn login_command() -> Option<(String, Vec<String>)> {
+#[cfg(target_os = "macos")]
+pub fn login_command() -> Option<(String, Vec<String>)> {
     login_command_from(shell(), std::env::var("USER").ok().or_else(passwd_name))
 }
 
@@ -251,6 +235,7 @@ pub(crate) fn login_command() -> Option<(String, Vec<String>)> {
 /// the test process's `$USER` and `$SHELL`, and those two cannot be injected. The fallback
 /// has **two** branches (user and shell) and both are tested here: the `?` chain gets them
 /// right, but untested correctness could silently get lost in the next edit.
+#[cfg(target_os = "macos")]
 fn login_command_from(
     shell: Option<PathBuf>,
     user: Option<String>,
@@ -260,6 +245,7 @@ fn login_command_from(
 }
 
 /// argv from the resolved user and shell.
+#[cfg(target_os = "macos")]
 fn login_argv(shell: &str, user: &str) -> (String, Vec<String>) {
     // `rsplit` always yields at least one piece; with an empty `$SHELL` that piece is empty
     // too, and a session opened with `exec -a -` was broken in alacritty as well.
@@ -282,7 +268,7 @@ fn login_argv(shell: &str, user: &str) -> (String, Vec<String>) {
 /// `/bin/zsh` are the same shell. A name like `zsh-5.9` is not recognized — zsh is not
 /// installed under that name, and installing the wrapper for a shell we do not recognize
 /// would mean a session that opens with files it cannot load.
-pub(crate) fn is_zsh(shell: &Path) -> bool {
+pub fn is_zsh(shell: &Path) -> bool {
     shell.file_name().is_some_and(|name| name == "zsh")
 }
 
@@ -298,7 +284,7 @@ pub(crate) fn is_zsh(shell: &Path) -> bool {
 /// the path we run most (009 Karar 4). In release that branch is not compiled at all — the
 /// shipped binary falling back to a path on a development machine would tie the product to
 /// that machine.
-pub(crate) fn zsh_wrapper_dir() -> Option<PathBuf> {
+pub fn zsh_wrapper_dir() -> Option<PathBuf> {
     bundle_shell_dir()
         .and_then(wrapper_dir)
         .or_else(repo_wrapper_dir)
@@ -333,15 +319,23 @@ fn wrapper_dir(shell: PathBuf) -> Option<PathBuf> {
 ///
 /// Whether it is a bundle is **not asked**; the caller's body check already gives the answer,
 /// and there is no such file two levels above `target/debug/bateri`.
+#[cfg(target_os = "macos")]
 fn bundle_shell_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let contents = exe.parent()?.parent()?;
     Some(contents.join("Resources/shell"))
 }
 
+/// No bundle outside macOS; where a Linux release finds the script is the
+/// packaging set's question (043 plan → Kapsam Dışı).
+#[cfg(not(target_os = "macos"))]
+fn bundle_shell_dir() -> Option<PathBuf> {
+    None
+}
+
 /// The language subtag of a BCP 47 language tag: `tr-TR` → `tr`, `zh-Hans-CN` → `zh`.
 /// `preferredLanguages` uses `-`; `_` is for old locale names.
-fn primary_language(tag: &str) -> Option<&str> {
+pub fn primary_language(tag: &str) -> Option<&str> {
     tag.split(['-', '_'])
         .next()
         .filter(|language| !language.is_empty())
@@ -353,11 +347,11 @@ fn primary_language(tag: &str) -> Option<&str> {
 /// separate query that does not touch the `Term` lock (`Session::shell_state`'s doc). At
 /// module level, because the process table's real PTY test (`jobs`) also spawns sessions
 /// (precedent: [`crate::settings::TempRoot`]).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default)]
-pub(crate) struct SilentWake;
+pub struct SilentWake;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl bt_core::Wake for SilentWake {
     fn wake(&self) {}
     fn child_exit(&self, _code: Option<i32>) {}
@@ -370,8 +364,8 @@ impl bt_core::Wake for SilentWake {
 }
 
 /// Waits until `ready` says true; if time runs out, fails with `message`.
-#[cfg(test)]
-pub(crate) fn wait_until(message: &str, ready: impl Fn() -> bool) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn wait_until(message: &str, ready: impl Fn() -> bool) {
     use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -416,6 +410,7 @@ mod tests {
         Some((key.to_owned(), value.to_owned()))
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_login_command_always_silences_the_banner() {
         // The whole change is in this single letter: without `-q`, `login(1)` prints `Last
@@ -442,6 +437,7 @@ mod tests {
         assert_eq!(args[4], "exec -a -zsh /opt/homebrew/bin/zsh");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_unresolved_user_or_shell_falls_back_to_the_default_command() {
         // **The direction of the fallback:** building the command halfway and handing it over

@@ -4,18 +4,20 @@ bateri'nin kullanıcı ayarları tek bir TOML dosyasında, renk temaları ayrı
 dosyalarda durur. Bu belge anahtarların, tema biçiminin, varsayılanların ve
 dosya bozukken ne olacağının **tek sahibidir**; kod tarafındaki karşılığı
 `crates/bt-core/src/settings.rs` ve `theme.rs` (ayrıştırma),
-`crates/bt-shell/src/settings.rs` (okuma ve tema adının çözümü),
-`watch.rs` (dosyaların izlenmesi), `menu.rs` ve `zoom.rs` (View menüsü:
-tema seçimi ve geçici punto), `clipboard.rs` ve `app.rs`'in `ShellWake`'i
+`crates/bt-shell-common/src/settings.rs` (okuma ve tema adının çözümü),
+`watch.rs` (dosyaların izlenmesi), `zoom.rs` (geçici punto),
+`crates/bt-shell/src/menu.rs` (View menüsü: tema seçimi ve geçici punto),
+`clipboard.rs` ve `app.rs`'in `ShellWake`'i
 (OSC 52'nin yuvası, ana kuyruğa geçişi ve panoya yazması),
 `crates/bt-atlas/src/font.rs` (font ailesinin bulunması),
 `crates/bt-gpu/src/motion.rs` ve `link.rs` (imleç hareketinin ve Hareketi
 Azalt'ın uygulanması; üç değerli ayarın tek `bool`'a indiği yer
-`app.rs`'in `resolve_reduce_motion`'ı), `crates/bt-shell/src/child.rs`
-(hangi kabuk koşuyor, sarmalayıcı betiği nerede), `app.rs`'in
-`shell_integration_env`'i (shell entegrasyonu kurulacak mı ve hangi ortamla),
-`jobs.rs` ile `window.rs` (kapatma onayı: ön planda ne koşuyor, ne zaman
-sorulur);
+`crates/bt-shell/src/app.rs`'in `resolve_reduce_motion`'ı),
+`crates/bt-shell-common/src/child.rs` (hangi kabuk koşuyor, sarmalayıcı
+betiği nerede), `crates/bt-shell/src/app.rs`'in `shell_integration_env`'i
+(shell entegrasyonu kurulacak mı ve hangi ortamla),
+`crates/bt-shell-common/src/jobs.rs` ile `crates/bt-shell/src/window.rs`
+(kapatma onayı: ön planda ne koşuyor, ne zaman sorulur);
 betiğin kendisi `assets/shell/zsh/`.
 
 ## Dosyanın yeri

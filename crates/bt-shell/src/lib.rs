@@ -39,28 +39,24 @@
 //! setlerde.
 
 pub(crate) mod app;
-mod child;
 mod clipboard;
-mod gesture;
-mod jobs;
-mod keys;
+mod locale;
 mod menu;
-mod notices;
 mod pacer;
 mod pane;
-mod quote;
 mod search_bar;
-mod settings;
 mod settings_window;
-mod split;
 mod split_view;
 mod updater;
-mod upload;
 mod uploader;
 mod view;
-mod watch;
 mod window;
-mod zoom;
+
+// The platform-independent half lives in `bt-shell-common` (043); imported
+// at the crate root so `crate::settings` and friends keep resolving.
+use bt_shell_common::{
+    child, gesture, jobs, keys, notices, quote, settings, split, upload, watch, zoom,
+};
 
 use std::time::{Duration, Instant};
 

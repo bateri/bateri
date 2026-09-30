@@ -1,0 +1,30 @@
+[package]
+name = "bt-shell-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Test support: exports the test helpers (`settings::TempRoot`,
+# `child::SilentWake`, `child::wait_until`) to other crates' tests; the
+# platform shells enable it as a dev-dependency (`bt-atlas`'s `fixture`
+# precedent — a `cfg(test)` item is invisible to another crate's tests).
+test-support = []
+
+[dependencies]
+bt-core = { workspace = true }
+# `notices` turns the renderer's font notices (`bt_gpu::FontNotice`) into
+# window-subtitle text.
+bt-gpu = { workspace = true }
+# The passwd entry (`child`, `getpwuid_r`), the process table (`jobs`: the
+# `libproc` half and `sysctl(KERN_PROCARGS2)` on macOS), `upload`'s
+# `kill`/`waitid` and `watch`'s `O_EVTONLY`. Already in the graph; the
+# rationale is in the workspace manifest.
+libc = { workspace = true }
+
+# `watch`'s macOS body: vnode sources on a dispatch queue. The crate's only
+# macOS-specific dependency (043 Karar 2) — no AppKit, Foundation, Quartz or
+# notification centre here.
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = { workspace = true }

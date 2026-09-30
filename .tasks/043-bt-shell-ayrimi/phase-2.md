@@ -55,11 +55,42 @@ _Requirements: R2.1, R2.2, R2.3, R2.4_
 
 ## Checklist
 
-- [ ] `bt-shell-common` üyesi ve on bir modül taşındı
-- [ ] macOS gövdeleri `cfg(macos)`; `NSLocale` okuması `bt-shell`'de
-- [ ] `test-support` özelliği ve dev-dependency
-- [ ] Belge işaretçileri güncel
-- [ ] Test: sınama adları kümesi phase-1'le aynı
-- [ ] Test: `Cargo.lock`'ta dış crate yok
-- [ ] Doğrulama geçti (`make hepsi`)
-- [ ] Riskli phase: `/code-review` koştu, bulgular giderildi (kilit dosyası değişti)
+- [x] `bt-shell-common` üyesi ve on bir modül taşındı
+- [x] macOS gövdeleri `cfg(macos)`; `NSLocale` okuması `bt-shell`'de
+- [x] `test-support` özelliği ve dev-dependency
+- [x] Belge işaretçileri güncel
+- [x] Test: sınama adları kümesi phase-1'le aynı
+- [x] Test: `Cargo.lock`'ta dış crate yok
+- [x] Doğrulama geçti (`make hepsi`)
+- [x] Riskli phase: `/code-review` koştu, bulgular giderildi (kilit dosyası değişti)
+
+## Uygulama Notları
+
+- **Doc yolları yeniden yazılmadı:** `bt-shell`'in kökünde
+  `use bt_shell_common::{child, …, zoom};` var, yani `crate::settings::…`
+  yolları (kod ve doc) olduğu gibi çözülüyor; taşınan modüllerin kendi
+  `crate::` yolları ortak crate'in içinde zaten doğru.
+- **`pub`'a açılan kümenin ölçüsü:** önce derleyicinin "hiç kullanılmıyor" ve
+  "özel" tanıları, sonra `bt-shell`'de adı geçmeyen on üç öğe tek tek geri
+  `pub(crate)`'e indirilip `clippy -D warnings` ile sınandı; sekizi indi
+  (`click_kind`, `feed`, `format_bytes`, `parse_probe`, `probe_failure`,
+  `probe_script`, `progress`, `SSH_VALUED`), beşi imzada göründüğü için `pub`
+  (`Groups`, `ProcessTable`, `ListRow`, `Sheet`, `Target`).
+- **`cfg(macos)` phase metninden geniş:** `login_argv` ve `bundle_shell_dir`'in
+  yanında giriş zincirinin tamamı (`login_command`, `login_command_from`,
+  `passwd_name`) ve `jobs`'ta `parse_procargs` ile üç sınama
+  (`procargs_layout_…`, iki gerçek süreç tablosu sınaması) — hepsi macOS
+  gövdesinin parçası; macOS'ta sınama adları aynı. Linux kolları phase-3'ün.
+- **`NSLocale` okuması** `bt-shell`'in yeni `locale` modülünde
+  (`system_locale`); ortak `locale_env(system)` çifti argüman alıyor,
+  `primary_language` ortakta `pub` ve sınaması yerinde.
+- **`test-support` dev-dependency'si bugün tüketicisiz:** `bt-shell`'in
+  sınamaları bu yardımcılara uzanmıyor; bağ planın istediği gibi kurulu.
+- **Bilerek bırakılanlar:** `child.rs`'te `locale_installed` doc'undaki
+  "`bt-shell` builds only on macOS" cümlesi phase-3'ün (kolun Linux doc'u),
+  `bt-shell/src/lib.rs` başlığının taşınan modülleri sayması phase-5'in
+  (yeniden yazılan başlık).
+- **`/code-review` bulgusu:** `bundle_shell_dir`'in `cfg(macos)`'u
+  `zsh_wrapper_dir`'i Linux'ta çözümsüz bırakıyordu; `cfg(not(macos))` kolu
+  `None` veriyor (`repo_wrapper_dir` emsali) — phase-3'ün planladığı şekil.
+- `make duman` tetiklenmiyordu (davranış değişmedi); yine koşuldu, yeşil.

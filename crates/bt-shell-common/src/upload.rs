@@ -39,7 +39,7 @@ use crate::jobs::SSH_VALUED;
 /// report is a content frame (the line and the bar changed); reporting at display
 /// rate would burn frames on a counter the eye cannot read. A fifth of a second
 /// keeps the bar fluid and the numbers readable.
-pub(crate) const TICK: Duration = Duration::from_millis(200);
+pub const TICK: Duration = Duration::from_millis(200);
 
 /// The window over which speed is measured — a **design constant**: instantaneous
 /// speed jumps packet by packet, while a long average reports a slowdown late.
@@ -48,7 +48,7 @@ const SPEED_WINDOW: Duration = Duration::from_secs(3);
 /// How long the result line (`✓ 3 files uploaded`, `Cancelled — …`) stays in the
 /// dock — a **design constant**. This is the stop condition: when it expires the
 /// line goes away and no further frame is requested.
-pub(crate) const LINGER: Duration = Duration::from_secs(4);
+pub const LINGER: Duration = Duration::from_secs(4);
 
 // ─── ssh and remote scripts ──────────────────────────────────────────────
 
@@ -75,7 +75,7 @@ const KEPT_VALUED: &str = "BbcFIiJlmoPpS";
 /// [`KEPT_VALUED`]); options after the destination are read too (OpenSSH parses
 /// them again) and the remote command (`-t prod tmux`) is dropped. With mosh
 /// there is no ssh argv: only the host, with default ssh settings.
-pub(crate) fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
+pub fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
     let mut argv = vec![
         "-T".to_owned(),
         "-o".to_owned(),
@@ -210,9 +210,9 @@ pub(crate) fn probe_script(dir: Option<&str>, names: &[String]) -> String {
 
 /// The probe's reply.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ProbeReply {
+pub struct ProbeReply {
     /// The target directory's full remote path (`pwd`).
-    pub(crate) dir: String,
+    pub dir: String,
     /// Free space, bytes; `None` if `df` could not be read (no check can be made,
     /// and nothing is blocked either).
     pub(crate) free: Option<u64>,
@@ -322,11 +322,11 @@ pub(crate) struct TarWatcher {
     /// The next record's path, as pax said.
     next_path: Option<String>,
     /// A file whose header has passed but whose data has not finished.
-    pub(crate) current: Option<String>,
+    pub current: Option<String>,
     /// The number of files whose data has passed completely.
-    pub(crate) files: u64,
+    pub files: u64,
     /// Content bytes passed (file data only).
-    pub(crate) bytes: u64,
+    pub bytes: u64,
 }
 
 impl Default for TarWatcher {
@@ -552,7 +552,7 @@ fn format_of(done: u64, total: u64) -> String {
 
 /// How the queue ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum End {
+pub enum End {
     /// Everything uploaded.
     Done,
     /// ⌘., the line's `Cancel` or the popover's cancel.
@@ -688,7 +688,7 @@ fn end_notice(end: &End, host: &str, tally: &Tally<'_>) -> Option<(String, Strin
 /// many bytes — both **locally, before the upload starts** (the sheet states them,
 /// and progress is measured against them).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Local {
+pub struct Local {
     pub(crate) path: PathBuf,
     pub(crate) name: String,
     pub(crate) dir: bool,
@@ -699,7 +699,7 @@ pub(crate) struct Local {
 /// Measures a path. Symbolic links are **not followed** (tar does not follow them
 /// either, it carries the link as a link); an unreadable subfolder is skipped — tar
 /// will fail on it anyway and the line will say so.
-pub(crate) fn measure(path: &Path) -> std::io::Result<Local> {
+pub fn measure(path: &Path) -> std::io::Result<Local> {
     let meta = std::fs::symlink_metadata(path)?;
     let name = path
         .file_name()
@@ -735,15 +735,15 @@ fn walk(path: &Path, meta: &std::fs::Metadata, into: &mut Local) {
 
 /// The confirmation sheet's text and button.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Sheet {
-    pub(crate) message: String,
-    pub(crate) informative: String,
+pub struct Sheet {
+    pub message: String,
+    pub informative: String,
     /// The confirm button's title: `Upload`, `Replace` if a same-named file exists,
     /// `Merge` if a same-named folder exists.
-    pub(crate) button: &'static str,
+    pub button: &'static str,
     /// Whether the confirm button is enabled: disabled if there is not enough space,
     /// if there is no remote tar, or if a name cannot be sent safely.
-    pub(crate) enabled: bool,
+    pub enabled: bool,
 }
 
 /// The confirmation sheet (Kullanıcı kararı 1; its text 037 phase-7): the title says
@@ -757,13 +757,7 @@ pub(crate) struct Sheet {
 /// **Free space is compared only with this drop**: the not-yet-sent bytes of items
 /// waiting in the queue are not subtracted (known limit) — a "not enough" summing
 /// the two could not say which item does not fit.
-pub(crate) fn sheet(
-    host: &str,
-    reported: bool,
-    items: &[Local],
-    reply: &ProbeReply,
-    busy: bool,
-) -> Sheet {
+pub fn sheet(host: &str, reported: bool, items: &[Local], reply: &ProbeReply, busy: bool) -> Sheet {
     let one = items.len() == 1;
     let quoted = |name: &str| format!("“{name}”");
     let bytes: u64 = items.iter().map(|item| item.bytes).sum();
@@ -915,7 +909,7 @@ fn run_ssh(ssh: &[String], script: &str) -> std::io::Result<(Option<i32>, String
 
 /// The work before the sheet, on a background thread: local measurement and the
 /// remote probe. `Err` → the error sheet's text.
-pub(crate) fn probe(
+pub fn probe(
     ssh: &[String],
     host: &str,
     dir: Option<&str>,
@@ -946,7 +940,7 @@ pub(crate) fn probe(
 /// The shared state of one item's stream: the main thread cancels and reads the
 /// progress, the stream thread writes it.
 #[derive(Debug, Default)]
-pub(crate) struct Shared {
+pub struct Shared {
     cancel: AtomicBool,
     disk_full: AtomicBool,
     bytes: AtomicU64,
@@ -957,7 +951,7 @@ pub(crate) struct Shared {
     /// returns with `EPIPE`.
     pids: Mutex<Vec<u32>>,
     /// Whether a progress report is waiting on the main queue (at most one).
-    pub(crate) tick_pending: AtomicBool,
+    pub tick_pending: AtomicBool,
 }
 
 impl Shared {
@@ -981,7 +975,7 @@ impl Shared {
     }
 
     /// Requests cancellation and kills the processes.
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
         self.kill();
     }
@@ -1044,7 +1038,7 @@ fn wait_untracked(child: &mut Child, shared: &Shared) -> std::io::Result<std::pr
 
 /// The result of one item's stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     Done,
     Cancelled,
     DiskFull,
@@ -1062,7 +1056,7 @@ const DISK_FULL: &str = "No space left on device";
 /// Cancel or disk full: both processes are killed and the file **being written** is
 /// deleted remotely — for a single file the file itself, for a folder only the one
 /// being written at that moment; finished ones stay (Kullanıcı kararı 5, 6).
-pub(crate) fn transfer(
+pub fn transfer(
     ssh: &[String],
     local: &Local,
     dir: &str,
@@ -1206,7 +1200,7 @@ fn collect_stderr(
 /// The window and tab title (037 phase-7): while an upload streams, `↑ N% · ` in
 /// front of the current title — on the alternate screen (vim) there is no dock and
 /// this is the only place showing progress; otherwise the title as is.
-pub(crate) fn titled(percent: Option<u8>, title: &str) -> String {
+pub fn titled(percent: Option<u8>, title: &str) -> String {
     match percent {
         Some(percent) => format!("↑ {percent}% · {title}"),
         None => title.to_owned(),
@@ -1219,13 +1213,13 @@ pub(crate) fn titled(percent: Option<u8>, title: &str) -> String {
 /// (037 phase-7) — a **design constant, not a measurement**. Stopping a short upload
 /// is cheap (dropping again takes seconds); losing an upload past half a minute must
 /// not happen with a single wrong click.
-pub(crate) const STOP_ASK_AFTER: Duration = Duration::from_secs(30);
+pub const STOP_ASK_AFTER: Duration = Duration::from_secs(30);
 
 /// An item in the queue: the local item and the remote destination directory.
 #[derive(Clone, Debug)]
-pub(crate) struct Job {
-    pub(crate) local: Local,
-    pub(crate) dir: String,
+pub struct Job {
+    pub local: Local,
+    pub dir: String,
 }
 
 /// An item's state in the queue.
@@ -1310,7 +1304,7 @@ impl Queue {
 /// A tab's upload state (main thread): whether a sheet is in progress, the queue and
 /// the result line's generation.
 #[derive(Debug, Default)]
-pub(crate) struct Uploads {
+pub struct Uploads {
     /// A probe or confirmation sheet is in progress: a new drop is rejected (two
     /// sheets cannot be stacked).
     asking: bool,
@@ -1334,15 +1328,15 @@ pub(crate) struct Uploads {
 /// The queue ended: the result line, its generation and the notification (title,
 /// body) to show if bateri is in the background.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Ended {
-    pub(crate) line: Transfer,
-    pub(crate) serial: u64,
-    pub(crate) notice: Option<(String, String)>,
+pub struct Ended {
+    pub line: Transfer,
+    pub serial: u64,
+    pub notice: Option<(String, String)>,
 }
 
 /// The answer to a stop request ([`Uploads::stop_request`]).
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Stop {
+pub enum Stop {
     /// Stop without asking.
     Now { id: Option<u64>, all: bool },
     /// Ask first: the item with `id` has been streaming for over thirty seconds.
@@ -1353,16 +1347,16 @@ pub(crate) enum Stop {
 /// asked for (if it finishes meanwhile the sheet closes on its own) and whether it is
 /// the whole queue.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct StopQuestion {
-    pub(crate) id: u64,
-    pub(crate) all: bool,
-    pub(crate) title: String,
-    pub(crate) text: String,
+pub struct StopQuestion {
+    pub id: u64,
+    pub all: bool,
+    pub title: String,
+    pub text: String,
 }
 
 /// The state of a popover row and the left column's second line.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum RowStatus {
+pub enum RowStatus {
     /// Streaming: the bar's fraction (`0..=1`) and `18.2 / 96.0 MB · 1.2 MB/s`.
     Running { fraction: f64, detail: String },
     /// Queued: `Waiting · 48.5 MB`.
@@ -1373,7 +1367,7 @@ pub(crate) enum RowStatus {
 
 /// The button on the right of a popover row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RowAction {
+pub enum RowAction {
     /// Stop the streaming item (asks first if past 30 s).
     Cancel,
     /// Remove the waiting item from the queue (does not ask).
@@ -1382,7 +1376,7 @@ pub(crate) enum RowAction {
 
 impl RowStatus {
     /// The row's button: `Cancel` when streaming, `Remove` when waiting, none when done.
-    pub(crate) fn action(&self) -> Option<RowAction> {
+    pub fn action(&self) -> Option<RowAction> {
         match self {
             Self::Running { .. } => Some(RowAction::Cancel),
             Self::Waiting(_) => Some(RowAction::Remove),
@@ -1394,18 +1388,18 @@ impl RowStatus {
 /// A popover row: the name (`static/ · 124 files` for a folder), the state and the
 /// dim destination line (`→ /var/www/app`).
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ListRow {
-    pub(crate) id: u64,
-    pub(crate) name: String,
-    pub(crate) status: RowStatus,
-    pub(crate) dest: String,
+pub struct ListRow {
+    pub id: u64,
+    pub name: String,
+    pub status: RowStatus,
+    pub dest: String,
 }
 
 /// The "Show files (N)" popover (037 phase-7): title and rows.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct UploadList {
-    pub(crate) title: String,
-    pub(crate) rows: Vec<ListRow>,
+pub struct UploadList {
+    pub title: String,
+    pub rows: Vec<ListRow>,
 }
 
 impl Uploads {
@@ -1414,7 +1408,7 @@ impl Uploads {
     /// Not for a queue that was cancelled but whose streaming item has not finished
     /// yet (its half-written file is being deleted) either: a confirmed drop could not
     /// be added to it and would be silently dropped.
-    pub(crate) fn can_accept(&self) -> bool {
+    pub fn can_accept(&self) -> bool {
         !self.asking
             && self
                 .queue
@@ -1423,30 +1417,30 @@ impl Uploads {
     }
 
     /// The probe or the sheet started / ended.
-    pub(crate) fn set_asking(&mut self, asking: bool) {
+    pub fn set_asking(&mut self, asking: bool) {
         self.asking = asking;
     }
 
     /// Whether a drop's probe or confirmation sheet is in progress: the stop question
     /// does not open meanwhile (two sheets cannot be stacked).
-    pub(crate) fn asking(&self) -> bool {
+    pub fn asking(&self) -> bool {
         self.asking
     }
 
     /// Whether a queue is running (⌘.'s gate).
-    pub(crate) fn active(&self) -> bool {
+    pub fn active(&self) -> bool {
         self.queue.is_some()
     }
 
     /// Whether the queue is streaming: the gate of the sheet's "added to the queue" line.
-    pub(crate) fn busy(&self) -> bool {
+    pub fn busy(&self) -> bool {
         self.queue
             .as_ref()
             .is_some_and(|queue| queue.ending.is_none())
     }
 
     /// The remote session's generation (to tell that ssh closed).
-    pub(crate) fn command(&self) -> Option<u64> {
+    pub fn command(&self) -> Option<u64> {
         self.queue.as_ref().map(|queue| queue.command)
     }
 
@@ -1454,7 +1448,7 @@ impl Uploads {
     /// is none. If the queue belongs to **another** remote session (reconnected, the
     /// old one still finishing) the old queue counts as closed and the new one cannot
     /// be set up behind it or in its place — then `false` and the drop is dropped.
-    pub(crate) fn enqueue(
+    pub fn enqueue(
         &mut self,
         command: u64,
         ssh: Vec<String>,
@@ -1493,7 +1487,7 @@ impl Uploads {
 
     /// Starts the next item at `now`: the stream thread's inputs. `None` if an item is
     /// already streaming or the queue is ending.
-    pub(crate) fn start_next(&mut self, now: Instant) -> Option<(Vec<String>, Job, Arc<Shared>)> {
+    pub fn start_next(&mut self, now: Instant) -> Option<(Vec<String>, Job, Arc<Shared>)> {
         let queue = self.queue.as_mut()?;
         if queue.current.is_some() || queue.ending.is_some() {
             return None;
@@ -1513,7 +1507,7 @@ impl Uploads {
     }
 
     /// The streaming item's id (the stop sheet's closing question).
-    pub(crate) fn running_id(&self) -> Option<u64> {
+    pub fn running_id(&self) -> Option<u64> {
         self.queue
             .as_ref()?
             .current
@@ -1526,7 +1520,7 @@ impl Uploads {
     /// (the popover row's `Cancel`). In a single-item queue the two are the same. A
     /// question if the streaming item has been running longer than
     /// [`STOP_ASK_AFTER`], otherwise at once; `None` if there is no queue.
-    pub(crate) fn stop_request(&self, all: bool, now: Instant) -> Option<Stop> {
+    pub fn stop_request(&self, all: bool, now: Instant) -> Option<Stop> {
         let queue = self.queue.as_ref()?;
         let all = all || queue.entries.len() <= 1;
         let Some(current) = &queue.current else {
@@ -1585,7 +1579,7 @@ impl Uploads {
     /// finished meanwhile and another is streaming, nothing is done — the question
     /// spoke of losing that item. Without `all` only that item stops and the queue
     /// goes on; its result comes when the item finishes ([`Self::finish`]).
-    pub(crate) fn stop(&mut self, id: Option<u64>, all: bool) -> Option<Ended> {
+    pub fn stop(&mut self, id: Option<u64>, all: bool) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
         let running = queue.current.as_ref().map(|current| current.id);
         if id.is_some() && id != running {
@@ -1625,7 +1619,7 @@ impl Uploads {
     /// Cancels and abandons the queue (the tab is closing): the streaming item is
     /// killed and its half-written file deleted on the stream thread; the result is
     /// shown to no one.
-    pub(crate) fn abandon(&mut self) {
+    pub fn abandon(&mut self) {
         if let Some(queue) = self.queue.take()
             && let Some(current) = &queue.current
         {
@@ -1635,7 +1629,7 @@ impl Uploads {
 
     /// The remote session closed: waiting items are cancelled; the streaming item
     /// finishes over its own connection. With no streaming item the result is immediate.
-    pub(crate) fn close(&mut self) -> Option<Ended> {
+    pub fn close(&mut self) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
         if queue.ending.is_none() {
             queue.ending = Some(End::Closed);
@@ -1650,7 +1644,7 @@ impl Uploads {
     /// pasted on its own (037 phase-7): an upload can take minutes and the path would be
     /// typed into whatever vim or mysql is open at that moment — the result line says
     /// where it went.
-    pub(crate) fn finish(&mut self, outcome: Outcome) -> Option<Ended> {
+    pub fn finish(&mut self, outcome: Outcome) -> Option<Ended> {
         let queue = self.queue.as_mut()?;
         let current = queue.current.take()?;
         let (bytes, _) = current.shared.progress();
@@ -1733,13 +1727,13 @@ impl Uploads {
 
     /// The status line last written to the dock — the input of the mouse's button
     /// question (`bt_core::transfer_button_at` reads the same layout as drawing).
-    pub(crate) fn shown(&self) -> Option<&Transfer> {
+    pub fn shown(&self) -> Option<&Transfer> {
         self.shown.as_ref()
     }
 
     /// Writes [`Self::shown`]. A line without buttons (a result, or none) drops the
     /// mouse state too: there is no button left under it.
-    pub(crate) fn set_shown(&mut self, transfer: Option<Transfer>) {
+    pub fn set_shown(&mut self, transfer: Option<Transfer>) {
         if transfer.as_ref().is_none_or(|t| t.controls.items == 0) {
             self.hover = None;
             self.list_open = false;
@@ -1750,7 +1744,7 @@ impl Uploads {
     /// Whether the button under the mouse changed; if so, the stamped line — the one to
     /// write (the caller hands it to the session). Movement staying on the same button
     /// is `None`: no frame is requested.
-    pub(crate) fn set_hover(&mut self, hover: Option<TransferAction>) -> Option<Transfer> {
+    pub fn set_hover(&mut self, hover: Option<TransferAction>) -> Option<Transfer> {
         // On a line without buttons the mouse is over no button.
         let buttons = self.shown.as_ref().is_some_and(|t| t.controls.items > 0);
         let hover = hover.filter(|_| buttons);
@@ -1769,7 +1763,7 @@ impl Uploads {
     }
 
     /// The list opened/closed; if it changed, the stamped line.
-    pub(crate) fn set_list_open(&mut self, open: bool) -> Option<Transfer> {
+    pub fn set_list_open(&mut self, open: bool) -> Option<Transfer> {
         if self.list_open == open {
             return None;
         }
@@ -1790,7 +1784,7 @@ impl Uploads {
 
     /// The queue's passed and total bytes (the Dock icon's bar); `None` if there is no
     /// queue.
-    pub(crate) fn totals(&self) -> Option<(u64, u64)> {
+    pub fn totals(&self) -> Option<(u64, u64)> {
         let queue = self.queue.as_ref()?;
         let running = queue
             .current
@@ -1803,7 +1797,7 @@ impl Uploads {
     /// on the whole queue's bytes, rounded down; `None` if nothing streams or it is
     /// being cancelled. If ssh closed, the streaming item finishes over its own
     /// connection and the prefix stays with it.
-    pub(crate) fn percent(&self) -> Option<u8> {
+    pub fn percent(&self) -> Option<u8> {
         let queue = self.queue.as_ref()?;
         if queue.ending == Some(End::Cancelled) || queue.current.is_none() {
             return None;
@@ -1818,7 +1812,7 @@ impl Uploads {
 
     /// Whether the title's percentage differs from the last one written; if so, stores
     /// the new one — the title is written at most once per percent.
-    pub(crate) fn title_percent_changed(&mut self) -> bool {
+    pub fn title_percent_changed(&mut self) -> bool {
         let percent = self.percent();
         if self.titled == percent {
             return false;
@@ -1828,20 +1822,20 @@ impl Uploads {
     }
 
     /// The percentage last written to the title ([`titled`]'s input).
-    pub(crate) fn title_percent(&self) -> Option<u8> {
+    pub fn title_percent(&self) -> Option<u8> {
         self.titled
     }
 
     /// The wait is over: the line goes away if the result line is still this generation
     /// and no new queue has started.
-    pub(crate) fn linger_over(&self, serial: u64) -> bool {
+    pub fn linger_over(&self, serial: u64) -> bool {
         self.queue.is_none() && self.serial == serial
     }
 
     /// The popover's content (037 phase-7): all items — finished, streaming and
     /// waiting — in order. `None` if there is no queue or it is ending: the popover
     /// must close.
-    pub(crate) fn list(&self) -> Option<UploadList> {
+    pub fn list(&self) -> Option<UploadList> {
         let queue = self.queue.as_ref()?;
         if queue.ending.is_some() {
             return None;
@@ -1903,7 +1897,7 @@ impl Uploads {
 
     /// Removes the waiting item with `id` from the queue (the popover's `Remove`); a
     /// no-op for a streaming or finished item.
-    pub(crate) fn remove(&mut self, id: u64) {
+    pub fn remove(&mut self, id: u64) {
         let Some(queue) = &mut self.queue else {
             return;
         };
@@ -1918,7 +1912,7 @@ impl Uploads {
     }
 
     /// The dock's status line at `now`; `None` if there is no queue.
-    pub(crate) fn status(&mut self, now: Instant) -> Option<Transfer> {
+    pub fn status(&mut self, now: Instant) -> Option<Transfer> {
         let queue = self.queue.as_mut()?;
         let current = queue.current.as_ref()?;
         let (bytes, files) = current.shared.progress();

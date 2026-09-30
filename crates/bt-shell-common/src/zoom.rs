@@ -24,19 +24,19 @@ const STEP: f64 = 1.0;
 /// The second consumer is the Size row of the settings window (`settings_window`): the range
 /// the stepper and the field accept is this one, no second number was invented (029 Karar 2).
 /// If the file holds a value outside the range, the field shows it as is.
-pub(crate) const MIN_SIZE: f64 = 4.0;
-pub(crate) const MAX_SIZE: f64 = 72.0;
+pub const MIN_SIZE: f64 = 4.0;
+pub const MAX_SIZE: f64 = 72.0;
 
 /// How many steps above the settings' point size we went (negative: below). A step count, not
 /// a point size: so that repeated addition does not leave decimal accumulation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Zoom {
+pub struct Zoom {
     steps: i32,
 }
 
 impl Zoom {
     /// The font to hand to the renderer: the settings' one, its point size offset.
-    pub(crate) fn apply(self, font: &FontOptions) -> FontOptions {
+    pub fn apply(self, font: &FontOptions) -> FontOptions {
         FontOptions {
             family: font.family.clone(),
             size: self.size(font),
@@ -48,7 +48,7 @@ impl Zoom {
     }
 
     /// Bigger: one step larger, if it does not exceed the ceiling.
-    pub(crate) fn bigger(self, font: &FontOptions) -> Zoom {
+    pub fn bigger(self, font: &FontOptions) -> Zoom {
         let next = Zoom {
             steps: self.steps.saturating_add(1),
         };
@@ -61,7 +61,7 @@ impl Zoom {
 
     /// Smaller: one step smaller, if it does not go below the floor. The floor is above zero,
     /// so [`FontOptions::size`]'s "greater than zero" rule is also protected from here.
-    pub(crate) fn smaller(self, font: &FontOptions) -> Zoom {
+    pub fn smaller(self, font: &FontOptions) -> Zoom {
         let next = Zoom {
             steps: self.steps.saturating_sub(1),
         };
@@ -74,7 +74,7 @@ impl Zoom {
 
     /// The settings file was reread: if `size` changed the offset is reset, otherwise it stays —
     /// a user who changes the family does not lose the point size they enlarged.
-    pub(crate) fn after_reload(self, old: &FontOptions, new: &FontOptions) -> Zoom {
+    pub fn after_reload(self, old: &FontOptions, new: &FontOptions) -> Zoom {
         if old.size == new.size {
             self
         } else {

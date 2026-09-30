@@ -11,10 +11,13 @@ bt-gpu = { workspace = true }
 # rengi `bt-core`'un paletinde tek sahiplidir. 002 phase-3 Session için zaten
 # ekliyordu; renk iki yerde durmasın diye phase-1'de eklendi.
 bt-core = { workspace = true }
+# The platform-independent half of the shell layer (043): settings, split
+# tree, zoom, notices, gesture, quote, keys, upload, jobs, child, watch.
+bt-shell-common = { workspace = true }
 objc2 = { workspace = true }
 # performSelector:withObject:afterDelay: NSRunLoop + NSDate ister; varsayılan
 # set bugün açık, kırpılırsa bu satır onu korur. NSLocale: kabuğun yereli
-# (`child::locale_env`, 006 phase-4b) — yeni crate değil, var olan
+# (`locale::system_locale`, 006 phase-4b) — yeni crate değil, var olan
 # bağımlılığın bayrağı; karar kaydı .tasks/006-gunluk-kullanim-esigi/
 # discussion.md → Karar 6 eki. Koruma **eksik**: kullanılan yöntemler
 # (`regionCode`, `preferredLanguages`) ayrıca NSString ve
@@ -134,18 +137,19 @@ objc2-quartz-core = { workspace = true, features = [
 # kullanıcı onaylı; bayrakların gerekçesi workspace manifest'inde, karar kaydı
 # .tasks/037-ssh-ikinci-tur/phase-7.md → Uygulama Notları.
 objc2-user-notifications = { workspace = true }
-# Ana kuyruk: `Wake::child_exit` okuyucu thread'de gelir ve `terminate:` ana
-# thread'in işidir. Vnode kaynakları da buradan
-# (ayar ve tema dosyasının izlenmesi, `watch`, 007 phase-4): fonksiyon
-# işaretçili işleyiciyle, blok değil.
+# The main queue: `Wake::child_exit` arrives on the reader thread and
+# `terminate:` is the main thread's job. The settings watch (`bt_shell_common::watch`, 007 phase-4)
+# is installed on the main queue from here; the vnode sources themselves live
+# in the shared crate since 043.
 dispatch2 = { workspace = true }
 # Kapatma onayı sayfasının tamamlanma bloğu (`RcBlock`, 028 phase-2). Karar kaydı .tasks/028-kapatma-onayi/discussion.md → Karar 2.
 block2 = { workspace = true }
-# Bekçi thread'in `write` + `_exit`'i, izleme kaynaklarının `O_EVTONLY`'si
-# (`watch`, 007 kapı) ve kabuğun passwd kaydı (`child::passwd_shell`,
-# `getpwuid_r`, 009 phase-3: Dock'tan açılışta `$SHELL` yok ve alacritty de
-# aynı sıraya düşüyor) ve kabuğun ön planında koşan işin tespiti (`jobs`,
-# `proc_pidinfo`/`proc_listchildpids`/`proc_listpgrppids`/`proc_name`, 028
-# phase-1: Apple'ın `libproc` yarısı, yeni bayrak ya da crate değil).
-# Gerekçesi workspace manifest'inde.
+# The watchdog thread's `write` + `_exit`. The process table (`jobs`), the
+# passwd entry (`child`) and the watch's `O_EVTONLY` moved to `bt-shell-common`
+# (043). The rationale is in the workspace manifest.
 libc = { workspace = true }
+
+[dev-dependencies]
+# The shared crate's test helpers (`TempRoot`, `SilentWake`, `wait_until`)
+# for this crate's tests (`bt-atlas`'s `fixture` precedent).
+bt-shell-common = { workspace = true, features = ["test-support"] }

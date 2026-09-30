@@ -59,7 +59,6 @@ use objc2_foundation::{
 use objc2_quartz_core::CAMetalLayer;
 
 use crate::app::{self, Grid, split_into_grid};
-use crate::child;
 use crate::clipboard::{self, PendingCopy};
 use crate::jobs::{self, Foreground, Libproc, Probe, ShellParent};
 use crate::notices::{Source, font_messages};
@@ -72,6 +71,7 @@ use crate::view::BateriView;
 use crate::window::{Closing, Launch, is_dark_background};
 use crate::zoom::Zoom;
 use crate::{Run, Workload};
+use crate::{child, locale};
 
 /// Pane'in sahibine verdiği olaylar (039 Karar 3) — bugün
 /// `window::WindowHost`, yarın bir gömme uygulaması.
@@ -1288,7 +1288,10 @@ impl TerminalPane {
                 // Entegrasyonun ortamı **çağırandan** geliyor: aynı cevap
                 // dock'un varlığını da belirliyor (`start`) ve burada ikinci
                 // kez sorulsaydı iki karar ayrışabilirdi.
-                env: child::locale_env().into_iter().chain(integration).collect(),
+                env: child::locale_env(locale::system_locale())
+                    .into_iter()
+                    .chain(integration)
+                    .collect(),
                 cols: grid.cols,
                 rows: grid.rows,
                 cell_px: grid.cell.cell_px(),
