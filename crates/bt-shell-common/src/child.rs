@@ -253,7 +253,7 @@ fn login_shell_command(shell: Option<PathBuf>) -> Option<(String, Vec<String>)> 
 /// launch is a block nobody wrote.
 ///
 /// **Why we do not write `~/.hushlogin`:** writing to files in the user's home directory is
-/// forbidden in this repo (`make denetim`), and leaving a permanent trace on the user's
+/// forbidden in this repo (`make audit`), and leaving a permanent trace on the user's
 /// machine to silence a banner goes far beyond what a terminal may ask for its own window.
 /// alacritty's reason for adding `-q` conditionally is precisely to **look for** that file;
 /// we remove the condition, not the mechanism.
@@ -710,7 +710,7 @@ mod tests {
         // writes no cell, so had the anchor's close stayed at the end of `PS1`, the cell
         // carrying the anchor would **never be born** — both the block stripe and the
         // suppression of the input line derive from that cell, and both would silently die
-        // together. On top of that `make hepsi`, `make duman` and `make kur` would all three
+        // together. On top of that `make check`, `make smoke` and `make bundle` would all three
         // stay green: the smoke run runs `/bin/sh`, the other tests print the anchor by hand.
         // It has no witness other than real zsh.
         //
